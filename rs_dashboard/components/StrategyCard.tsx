@@ -126,6 +126,12 @@ interface StrategyState {
   allow_reverse?: boolean;
   exit_on_close?: boolean;
   position_pnl?: number;
+  // CrudeOil Mini EMA + Supertrend (also reuses entry_price/st_level/ltp/daily_pnl/
+  // signal_close/contract_size/exposure_units/allow_reverse/exit_on_close/lots/qty/
+  // stop_level/stop_source/trades_today/target_profit/stop_loss/expiry above)
+  ema?: number;
+  atr?: number;
+  ema_length?: number;
   // Anti-chop regime gate + per-trade stop
   regime?: string;
   regime_reason?: string;
@@ -315,6 +321,24 @@ function StrategyCard({ meta, state, onRefresh, selectedBroker }: StrategyCardPr
   const [cvsAllowReverse, setCvsAllowReverse] = useState<boolean>(true);
   const [cvsExitOnClose, setCvsExitOnClose] = useState<boolean>(false);
 
+  // CrudeOil Mini EMA + Supertrend (shares crudeoilInterval/StartTime/EodTime above).
+  // A deliberately simplified sibling of VWAP + Supertrend above — no regime/ADX/
+  // Choppiness/HTF/OI gates and no churn brakes, so nothing beyond this list to expose.
+  const [cesLots, setCesLots] = useState<number>(5);
+  const [cesContractSize, setCesContractSize] = useState<number>(10);
+  const [cesStPeriod, setCesStPeriod] = useState<number>(7);
+  const [cesStMultiplier, setCesStMultiplier] = useState<number>(2.0);
+  const [cesEmaLength, setCesEmaLength] = useState<number>(20);
+  const [cesTargetInr, setCesTargetInr] = useState<number>(5000);
+  const [cesStopInr, setCesStopInr] = useState<number>(5000);
+  const [cesPollSeconds, setCesPollSeconds] = useState<number>(15);
+  const [cesDays, setCesDays] = useState<number>(3);
+  const [cesFlipCooldown, setCesFlipCooldown] = useState<number>(60);
+  const [cesAllowReverse, setCesAllowReverse] = useState<boolean>(true);
+  const [cesExitOnClose, setCesExitOnClose] = useState<boolean>(false);
+  const [cesAtrStopMult, setCesAtrStopMult] = useState<number>(1.5);
+  const [cesTrailTriggerAtr, setCesTrailTriggerAtr] = useState<number>(1.0);
+
   // ST+OI Bear Call Spread
   const [indexInterval, setIndexInterval] = useState<string>('3');
   const [indexStPeriod, setIndexStPeriod] = useState<number>(10);
@@ -439,6 +463,11 @@ function StrategyCard({ meta, state, onRefresh, selectedBroker }: StrategyCardPr
         args.push('--contract-size', String(cvsContractSize));
         args.push('--target-profit', String(cvsTargetInr));
         args.push('--stop-loss', String(cvsStopInr));
+      } else if (meta.key === 'crudeoilm_ema_supertrend') {
+        args.push('--lots', String(cesLots));
+        args.push('--contract-size', String(cesContractSize));
+        args.push('--target-profit', String(cesTargetInr));
+        args.push('--stop-loss', String(cesStopInr));
       } else if (meta.key === 'nifty_delta_strangle') {
         // Weekly delta-managed carry: no daily Target/Stop-Loss or Start Time at all — sizing
         // is either an explicit lot count (--lots overrides) or margin-based auto-sizing
@@ -553,6 +582,20 @@ function StrategyCard({ meta, state, onRefresh, selectedBroker }: StrategyCardPr
         args.push('--flip-cooldown', String(cvsFlipCooldown));
         if (!cvsAllowReverse) args.push('--no-reverse');
         if (cvsExitOnClose) args.push('--exit-on-close');
+      } else if (meta.key === 'crudeoilm_ema_supertrend') {
+        args.push('--interval', crudeoilInterval);
+        args.push('--supertrend-period', String(cesStPeriod));
+        args.push('--supertrend-multiplier', String(cesStMultiplier));
+        args.push('--ema-length', String(cesEmaLength));
+        args.push('--start-time', crudeoilStartTime);
+        args.push('--eod-time', crudeoilEodTime);
+        args.push('--poll-seconds', String(cesPollSeconds));
+        args.push('--days', String(cesDays));
+        args.push('--flip-cooldown', String(cesFlipCooldown));
+        args.push('--atr-stop-mult', String(cesAtrStopMult));
+        args.push('--trail-trigger-atr', String(cesTrailTriggerAtr));
+        if (!cesAllowReverse) args.push('--no-reverse');
+        if (cesExitOnClose) args.push('--exit-on-close');
       } else if (meta.key === 'nifty_st_oi_bearcall') {
         args.push('--index-interval', indexInterval);
         args.push('--index-st-period', String(indexStPeriod));
@@ -801,6 +844,18 @@ function StrategyCard({ meta, state, onRefresh, selectedBroker }: StrategyCardPr
               <span className="text-[9px] text-zinc-600">exposure: {cvsLots * cvsContractSize} barrels</span>
             </div>
           </>
+        ) : meta.key === 'crudeoilm_ema_supertrend' ? (
+          <>
+            <div className={fieldCls}>
+              <FieldLabel text="Lots" tip="Order quantity sent to the broker as-is — Dhan takes MCX quantity in lots, so 5 here is 5 lots." />
+              <Input type="number" value={cesLots} onChange={(e) => setCesLots(parseInt(e.target.value) || 1)} min={1} max={50} className={inputCls} />
+            </div>
+            <div className={fieldCls}>
+              <FieldLabel text="Barrels/Lot" tip="Contract size used for P&L only (CRUDEOILM = 10, CRUDEOIL = 100). It does not change the order quantity, but it does scale the Target/Stop below." />
+              <Input type="number" value={cesContractSize} onChange={(e) => setCesContractSize(parseInt(e.target.value) || 10)} min={1} className={inputCls} />
+              <span className="text-[9px] text-zinc-600">exposure: {cesLots * cesContractSize} barrels</span>
+            </div>
+          </>
         ) : meta.key === 'nifty_delta_strangle' ? (
           <div className={fieldCls}>
             <FieldLabel text="Sizing" tip="Auto: margin-based sizing against Target Capital (the script's own default). Manual: an explicit lot count via --lots, bypassing auto-sizing entirely." />
@@ -906,7 +961,7 @@ function StrategyCard({ meta, state, onRefresh, selectedBroker }: StrategyCardPr
           </>
         )}
 
-        {meta.key !== 'nifty_spread_trend' && meta.key !== 'crudeoilm_supertrend' && meta.key !== 'crudeoilm_renko_sar' && meta.key !== 'crudeoilm_vwap_supertrend' && meta.key !== 'crudeoilm_orb' && meta.key !== 'nifty_st_oi_bearcall' && meta.key !== 'nifty500_momentum' && meta.key !== 'nifty_delta_strangle' && (
+        {meta.key !== 'nifty_spread_trend' && meta.key !== 'crudeoilm_supertrend' && meta.key !== 'crudeoilm_renko_sar' && meta.key !== 'crudeoilm_vwap_supertrend' && meta.key !== 'crudeoilm_ema_supertrend' && meta.key !== 'crudeoilm_orb' && meta.key !== 'nifty_st_oi_bearcall' && meta.key !== 'nifty500_momentum' && meta.key !== 'nifty_delta_strangle' && (
           <div className={fieldCls}>
             <FieldLabel text="Start Time" tip="Time (HH:MM IST) the strategy begins monitoring for entries." />
             <Input type="text" value={startTime} onChange={(e) => setStartTime(e.target.value)} placeholder="09:20" className={inputCls} />
@@ -937,6 +992,20 @@ function StrategyCard({ meta, state, onRefresh, selectedBroker }: StrategyCardPr
             <div className={fieldCls}>
               <FieldLabel text="Stop Loss ₹" tip="Daily cumulative stop loss in INR (positive number). Flattens the position and stops the strategy for the day." />
               <Input type="number" value={cvsStopInr} onChange={(e) => setCvsStopInr(parseInt(e.target.value) || 5000)} className={inputCls} />
+            </div>
+          </>
+        )}
+
+        {meta.key === 'crudeoilm_ema_supertrend' && (
+          <>
+            <div className={fieldCls}>
+              <FieldLabel text="Target ₹" tip="Daily cumulative profit target in INR. This is the only thing besides EOD that stops the always-on cycle — the position is flattened and the strategy exits." />
+              <Input type="number" value={cesTargetInr} onChange={(e) => setCesTargetInr(parseInt(e.target.value) || 5000)} className={inputCls} />
+            </div>
+
+            <div className={fieldCls}>
+              <FieldLabel text="Stop Loss ₹" tip="Daily cumulative stop loss in INR (positive number). Flattens the position and stops the strategy for the day." />
+              <Input type="number" value={cesStopInr} onChange={(e) => setCesStopInr(parseInt(e.target.value) || 5000)} className={inputCls} />
             </div>
           </>
         )}
@@ -1017,7 +1086,7 @@ function StrategyCard({ meta, state, onRefresh, selectedBroker }: StrategyCardPr
           </>
         )}
 
-        {meta.key !== 'crudeoilm_renko_sar' && meta.key !== 'crudeoilm_supertrend' && meta.key !== 'crudeoilm_vwap_supertrend' && meta.key !== 'crudeoilm_orb' && meta.key !== 'nifty500_momentum' && meta.key !== 'nifty_delta_strangle' && (
+        {meta.key !== 'crudeoilm_renko_sar' && meta.key !== 'crudeoilm_supertrend' && meta.key !== 'crudeoilm_vwap_supertrend' && meta.key !== 'crudeoilm_ema_supertrend' && meta.key !== 'crudeoilm_orb' && meta.key !== 'nifty500_momentum' && meta.key !== 'nifty_delta_strangle' && (
           <>
             <div className={fieldCls}>
               <FieldLabel text="Target ₹" tip="Daily cumulative profit target in INR, or a percentage of entry premium collected e.g. '25%'; strategy squares off and stops once reached." />
@@ -1598,6 +1667,94 @@ function StrategyCard({ meta, state, onRefresh, selectedBroker }: StrategyCardPr
           </>
         )}
 
+        {/* CrudeOil Mini EMA + Supertrend-specific */}
+        {meta.key === 'crudeoilm_ema_supertrend' && (
+          <>
+            <div className={fieldCls}>
+              <FieldLabel text="Timeframe" tip="Candle interval in minutes used for both the Supertrend and the EMA." />
+              <Select value={crudeoilInterval} onValueChange={(v) => v && setCrudeoilInterval(v)}>
+                <SelectTrigger className={inputCls}><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="1">1 Min</SelectItem>
+                  <SelectItem value="3">3 Min</SelectItem>
+                  <SelectItem value="5">5 Min</SelectItem>
+                  <SelectItem value="15">15 Min</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+            <div className={fieldCls}>
+              <FieldLabel text="ST Period" tip="ATR lookback length for the Supertrend (7 by default)." />
+              <Input type="number" value={cesStPeriod} onChange={(e) => setCesStPeriod(parseInt(e.target.value) || 7)} min={2} className={inputCls} />
+            </div>
+            <div className={fieldCls}>
+              <FieldLabel text="ST Multiplier" tip="ATR multiplier for the Supertrend band width (2 by default)." />
+              <Input type="number" step="0.5" value={cesStMultiplier} onChange={(e) => setCesStMultiplier(parseFloat(e.target.value) || 2.0)} min={0.5} className={inputCls} />
+            </div>
+            <div className={fieldCls}>
+              <FieldLabel text="EMA Length" tip="Length of the EMA used as the second confirmation band alongside the Supertrend (20 by default)." />
+              <Input type="number" value={cesEmaLength} onChange={(e) => setCesEmaLength(parseInt(e.target.value) || 20)} min={2} className={inputCls} />
+            </div>
+            <div className={fieldCls}>
+              <FieldLabel text="Start Time" tip="Time (HH:MM IST) the strategy begins trading." />
+              <Input type="text" value={crudeoilStartTime} onChange={(e) => setCrudeoilStartTime(e.target.value)} placeholder="09:00" className={inputCls} />
+            </div>
+            <div className={fieldCls}>
+              <FieldLabel text="EOD Time" tip="Time (HH:MM IST) the position is flattened for the day (otherwise always-in)." />
+              <Input type="text" value={crudeoilEodTime} onChange={(e) => setCrudeoilEodTime(e.target.value)} placeholder="23:30" className={inputCls} />
+            </div>
+            <div className={fieldCls}>
+              <FieldLabel text="Poll (s)" tip="Seconds between Supertrend/EMA refreshes. Exits still react to live ticks every second." />
+              <Input type="number" value={cesPollSeconds} onChange={(e) => setCesPollSeconds(parseInt(e.target.value) || 15)} min={5} className={inputCls} />
+            </div>
+            <div className={fieldCls}>
+              <FieldLabel text="Candle Lookback (days)" tip="Days of candle history fetched for the indicator calculation." />
+              <Input type="number" value={cesDays} onChange={(e) => setCesDays(parseInt(e.target.value) || 3)} min={1} className={inputCls} />
+            </div>
+            <div className={fieldCls}>
+              <FieldLabel text="Flip Cooldown (s)" tip="Minimum seconds between position flips. The Supertrend and EMA cross each other regularly, and when they nearly coincide the hold-zone collapses to a point — without this a price ticking across it would flip the position every second." />
+              <Input type="number" value={cesFlipCooldown} onChange={(e) => setCesFlipCooldown(parseInt(e.target.value) || 60)} min={0} className={inputCls} />
+            </div>
+            <div className={fieldCls}>
+              <FieldLabel text="ATR Stop ×" tip="Initial per-trade stop, in ATRs from the entry fill. 0 disables the stop and the trailing band entirely." />
+              <Input type="number" step="0.1" value={cesAtrStopMult} onChange={(e) => setCesAtrStopMult(parseFloat(e.target.value) || 0)} min={0} className={inputCls} />
+            </div>
+            <div className={fieldCls}>
+              <FieldLabel text="Trail Trigger ×ATR" tip="ATRs of open profit required before the stop hands over to the Supertrend band and starts ratcheting." />
+              <Input type="number" step="0.1" value={cesTrailTriggerAtr} onChange={(e) => setCesTrailTriggerAtr(parseFloat(e.target.value) || 1.0)} min={0} className={inputCls} />
+            </div>
+            <div className={fieldCls}>
+              <FieldLabel text="Always-On" tip="ON: a signal flip exits and immediately opens the opposite position (stop-and-reverse), so the strategy is always in the market. OFF: it exits to flat and waits for the next candle before re-entering." />
+              <div className="flex items-center gap-2 h-7">
+                <input
+                  type="checkbox"
+                  id={`ces-reverse-${meta.key}`}
+                  checked={cesAllowReverse}
+                  onChange={(e) => setCesAllowReverse(e.target.checked)}
+                  className="h-3.5 w-3.5 rounded border-zinc-800 bg-zinc-900 accent-emerald-500"
+                />
+                <label htmlFor={`ces-reverse-${meta.key}`} className="text-zinc-300 text-xs">
+                  Reverse straight into the opposite side
+                </label>
+              </div>
+            </div>
+            <div className={fieldCls}>
+              <FieldLabel text="Exit Trigger" tip="Unchecked (default): exits fire on the live LTP as soon as it clears both bands. Checked: exits wait for a confirmed candle close, which is slower but ignores intra-candle spikes." />
+              <div className="flex items-center gap-2 h-7">
+                <input
+                  type="checkbox"
+                  id={`ces-close-${meta.key}`}
+                  checked={cesExitOnClose}
+                  onChange={(e) => setCesExitOnClose(e.target.checked)}
+                  className="h-3.5 w-3.5 rounded border-zinc-800 bg-zinc-900 accent-emerald-500"
+                />
+                <label htmlFor={`ces-close-${meta.key}`} className="text-zinc-300 text-xs">
+                  Exit on confirmed candle close
+                </label>
+              </div>
+            </div>
+          </>
+        )}
+
         {/* Straddle-specific */}
         {meta.key === 'nifty_value_imbalance_straddle' && (
           <div className={fieldCls}>
@@ -2166,6 +2323,85 @@ function StrategyCard({ meta, state, onRefresh, selectedBroker }: StrategyCardPr
                         </span>
                       </>
                     )}
+                  </div>
+                  <div className="px-3 py-2 flex flex-col gap-1 shrink-0">
+                    <span className={lbl}>Day P&amp;L</span>
+                    <span className={`font-mono font-bold text-sm ${(state.daily_pnl ?? 0) >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
+                      {(state.daily_pnl ?? 0) >= 0 ? '+' : ''}₹{(state.daily_pnl ?? 0).toFixed(0)}
+                    </span>
+                    <span className="text-[10px] text-zinc-500 font-mono whitespace-nowrap">
+                      tgt ₹{state.target_profit?.toFixed(0) ?? '—'} · sl ₹{state.stop_loss?.toFixed(0) ?? '—'}
+                    </span>
+                  </div>
+                </>
+              ) : meta.key === 'crudeoilm_ema_supertrend' ? (
+                <>
+                  <div className="px-3 py-2 flex flex-col gap-1 shrink-0">
+                    <span className={lbl}>Direction</span>
+                    <span className={`font-mono font-bold ${
+                      state.direction === 'LONG' ? 'text-emerald-400' :
+                      state.direction === 'SHORT' ? 'text-rose-400' : 'text-zinc-500'
+                    }`}>
+                      {state.direction || 'FLAT'}
+                    </span>
+                    <span className="text-[10px] font-mono whitespace-nowrap">
+                      <span className="text-zinc-500">{state.allow_reverse === false ? 'no-reverse' : 'always-on'} · </span>
+                      <span className={state.exit_on_close ? 'text-amber-400' : 'text-zinc-500'}>
+                        {state.exit_on_close ? 'close-exit' : 'ltp-exit'}
+                      </span>
+                      <span className="text-zinc-500">{state.expiry ? ` · ${state.expiry}` : ''}</span>
+                    </span>
+                  </div>
+                  <div className="px-3 py-2 flex flex-col gap-1 flex-1 min-w-[110px]">
+                    <span className={lbl}>Entry / LTP</span>
+                    {state.direction && state.direction !== 'NONE' ? (
+                      <>
+                        <span className="font-mono font-bold text-zinc-200">
+                          {state.ltp != null ? state.ltp.toFixed(2) : '—'}
+                        </span>
+                        <span className="text-[10px] text-zinc-400 font-mono whitespace-nowrap">
+                          avg ₹{state.entry_price?.toFixed(2) ?? '—'} · {state.lots ?? '—'} lot · {state.exposure_units ?? '—'} bbl
+                        </span>
+                      </>
+                    ) : (
+                      <>
+                        <span className="font-mono text-zinc-600">—</span>
+                        <span className="text-[10px] text-zinc-500 font-mono whitespace-nowrap">
+                          {state.lots ?? '—'} lot · {state.exposure_units ?? '—'} bbl
+                        </span>
+                      </>
+                    )}
+                  </div>
+                  <div className="px-3 py-2 flex flex-col gap-1 shrink-0">
+                    <span className={lbl}>ST / EMA</span>
+                    <span className="font-mono font-bold whitespace-nowrap">
+                      {/* green when the reference price is above the band, red when below */}
+                      <span className={
+                        (state.ltp || state.signal_close || 0) > (state.st_level ?? 0) && (state.st_level ?? 0) > 0
+                          ? 'text-emerald-400' : 'text-rose-400'
+                      }>
+                        {state.st_level != null && state.st_level > 0 ? state.st_level.toFixed(2) : '—'}
+                      </span>
+                      <span className="text-zinc-500"> / </span>
+                      <span className={
+                        (state.ltp || state.signal_close || 0) > (state.ema ?? 0) && (state.ema ?? 0) > 0
+                          ? 'text-emerald-400' : 'text-rose-400'
+                      }>
+                        {state.ema != null && state.ema > 0 ? state.ema.toFixed(2) : '—'}
+                      </span>
+                    </span>
+                    <span className="text-[10px] text-zinc-500 font-mono whitespace-nowrap">
+                      {state.interval ?? 5}m ST({state.supertrend_period ?? 7},{state.supertrend_multiplier ?? 2}) + EMA{state.ema_length ?? 20}
+                    </span>
+                  </div>
+                  <div className="px-3 py-2 flex flex-col gap-1 shrink-0 min-w-[120px]">
+                    <span className={lbl}>Stop</span>
+                    <span className="font-mono font-bold text-zinc-200">
+                      {state.stop_level != null && state.stop_level > 0 ? state.stop_level.toFixed(2) : '—'}
+                    </span>
+                    <span className="text-[10px] text-zinc-500 font-mono whitespace-nowrap">
+                      {state.stop_source || 'no stop'} · {state.trades_today ?? 0} trades
+                    </span>
                   </div>
                   <div className="px-3 py-2 flex flex-col gap-1 shrink-0">
                     <span className={lbl}>Day P&amp;L</span>

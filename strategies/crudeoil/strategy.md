@@ -411,6 +411,114 @@ python strategies/crudeoil/crudeoilm_vwap_supertrend.py --no-regime-filter --no-
 
 ---
 
+# CrudeOil Mini EMA + Supertrend Always-On Strategy
+
+`crudeoilm_ema_supertrend.py` — a deliberately simplified sibling of the VWAP +
+Supertrend strategy above: same dual-confirmation, always-on, stop-and-reverse
+skeleton, but with the regime gate (ADX/Choppiness), higher-timeframe filter, OI
+confirmation gate, and churn brakes all removed. There is no chop/regime filtering
+of any kind — it is exactly as always-on as the raw price rule makes it.
+
+## Signal Rule
+
+| State | Price vs bands | Action |
+|---|---|---|
+| Flat | above **both** Supertrend and EMA20 | enter LONG |
+| Flat | below **both** | enter SHORT |
+| Flat | in between | stay flat |
+| LONG | below **both** | exit and immediately enter SHORT |
+| LONG | anything else | HOLD |
+| SHORT | above **both** | exit and immediately enter LONG |
+| SHORT | anything else | HOLD |
+
+The "in between" zone (price above one band but below the other) is the only
+hysteresis this strategy has: losing a single indicator is not a signal, which is
+what keeps it from churning while the two bands are crossed over each other.
+
+`--no-reverse` turns the flip into a plain exit-to-flat instead of a stop-and-reverse.
+`--flip-cooldown` (default 60s) is the minimum gap between flips/entries — the only
+guard against tick-level thrash when the Supertrend and EMA nearly coincide. Unlike
+the VWAP + Supertrend strategy there is no ATR-scaled minimum clearance on top of
+this — clearing both bands by any amount, once the cooldown has elapsed, is enough.
+
+## Per-Trade Stop and Trail
+
+Same mechanism as the VWAP + Supertrend strategy (`lib/trade_stops.py`, shared): on
+entry the stop is placed at `--atr-stop-mult` (1.5) ATRs from the fill. Once the trade
+is `--trail-trigger-atr` (1.0) ATRs in profit the stop hands over to the Supertrend
+band and **ratchets only**, so a mid-trend pullback cannot hand back locked-in profit.
+`--atr-stop-mult 0` disables the stop and the trail entirely.
+
+## Decision Telemetry
+
+Every confirmed candle appends one JSON line to
+`debug/crudeoilm_ema_supertrend[_<instance>]_signals.jsonl`: close, Supertrend, EMA,
+ATR, the raw signal, and the direction actually held. There is no gate to log here —
+this file exists so the raw signal's flip frequency can be reviewed after a session.
+
+## Hybrid Signal Price
+- **Entries** use the last CONFIRMED closed candle (`df.iloc[-2]`) — no intra-candle churn.
+- **Exits/flips** use the live 1-second LTP against the latest bands, so a breach is acted
+  on immediately rather than waiting out the candle. `--exit-on-close` switches exits back
+  to the confirmed close.
+
+Both bands come from a background poller thread (`--poll-seconds`, default 15) so the
+1-second main loop never blocks on the candle fetch.
+
+## Quantity vs Exposure
+
+Same convention as the VWAP + Supertrend strategy: `--lots` is the order quantity sent
+to the broker verbatim (Dhan takes MCX quantity in lots); `--contract-size` (default 10
+barrels/lot for CRUDEOILM) is used for P&L only.
+
+## Exit Conditions (priority order)
+1. UI shutdown trigger file
+2. EOD time reached (flatten and stop)
+3. Daily profit target hit (cumulative, INR) — flatten and stop for the day
+4. Daily stop loss hit (cumulative, INR) — flatten and stop for the day
+5. **Per-trade stop / Supertrend trail hit** → flat (does not end the day)
+6. Signal flip → stop-and-reverse
+
+Only 1–4 end the day.
+
+## Restart Behavior
+The day's realized P&L and trade count are restored from the state file on restart.
+Positions are NOT recovered — on a live restart while holding a position, flatten
+manually first.
+
+## Key CLI Flags
+```
+--live                    Real orders (default: dry run)
+--lots INT                Order quantity in lots (default: 5)
+--contract-size INT       Barrels per lot, P&L only (default: 10)
+--interval STR            Signal candle minutes (default: 5)
+--supertrend-period INT   Supertrend ATR length (default: 7)
+--supertrend-multiplier F Supertrend ATR multiplier (default: 2.0)
+--ema-length INT          EMA length (default: 20)
+--target-profit FLOAT     Daily profit cap, INR (default: 5000)
+--stop-loss FLOAT         Daily loss cap, INR (default: 5000)
+--atr-stop-mult FLOAT     Per-trade stop, ATRs from entry (default: 1.5; 0 disables)
+--trail-trigger-atr FLOAT ATRs of profit before the stop trails the Supertrend band (default: 1.0)
+--flip-cooldown INT       Minimum seconds between flips (default: 60)
+--no-reverse              Exit to flat on a flip instead of reversing
+--exit-on-close           Use confirmed closes for exits instead of live LTP
+--start-time / --eod-time Session window HH:MM IST (default: 09:00 / 23:30)
+```
+
+## Examples
+```powershell
+# Dry run (default), 5 lots, Supertrend(7,2) + EMA20 on 5-min candles
+python strategies/crudeoil/crudeoilm_ema_supertrend.py
+
+# Live trading, 5 lots, +/- 10000 INR daily caps
+python strategies/crudeoil/crudeoilm_ema_supertrend.py --live --lots 5 --target-profit 10000 --stop-loss 10000
+
+# Exit to flat on a flip instead of reversing, using confirmed closes only
+python strategies/crudeoil/crudeoilm_ema_supertrend.py --no-reverse --exit-on-close
+```
+
+---
+
 # CrudeOil Mini Opening Range Breakout + Pivot Structure Stop
 
 `crudeoilm_orb.py` — the first consumer of [lib/pivots.py](../../lib/pivots.py).

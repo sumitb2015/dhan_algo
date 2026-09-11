@@ -31,6 +31,7 @@ const STRATEGY_LOG_DIRS: Record<string, string> = {
   crudeoilm_renko_sar:           'crudeoil_renko',
   crudeoilm_vwap_supertrend:     'crudeoil_vwap',
   crudeoilm_orb:                 'crudeoil_orb',
+  crudeoilm_ema_supertrend:      'crudeoil_ema',
   nifty500_momentum:             'momentum_investing',
 };
 

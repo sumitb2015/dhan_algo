@@ -174,7 +174,7 @@ Full CLI references, parameter explanations, and examples live in each strategy 
 | `strategies/spread_trend/` | [`strategy.md`](strategies/spread_trend/strategy.md) — Trend-following vertical spread |
 | `strategies/st_oi_bearcall/` | [`strategy.md`](strategies/st_oi_bearcall/strategy.md) — Dual Supertrend (index + option) + OI short-buildup bear call spread |
 | `strategies/oi_directional/` | [`strategy.md`](strategies/oi_directional/strategy.md) — OI-diff/PCR naked option sell |
-| `strategies/crudeoil/` | [`strategy.md`](strategies/crudeoil/strategy.md) — CRUDEOILM Supertrend, Renko stop-and-reverse, VWAP+Supertrend, and pivot-gated ORB futures |
+| `strategies/crudeoil/` | [`strategy.md`](strategies/crudeoil/strategy.md) — CRUDEOILM Supertrend, Renko stop-and-reverse, VWAP+Supertrend, EMA+Supertrend, and pivot-gated ORB futures |
 | `strategies/intraday_equity/` | [`strategy.md`](strategies/intraday_equity/strategy.md) — Nifty-50 cash VWAP+RS auto-trader (NOT VALIDATED, dry-run only) |
 | `strategies/momentum_investing/` | [`strategy.md`](strategies/momentum_investing/strategy.md) — Nifty-500 positional (CNC) relative-strength momentum portfolio |
 

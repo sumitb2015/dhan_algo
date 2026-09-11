@@ -184,6 +184,13 @@ export const STRATEGIES_METADATA: Record<string, {
     timeframe: 'intraday',
     path: path.join(PROJECT_ROOT, 'strategies', 'crudeoil', 'crudeoilm_orb.py')
   },
+  crudeoilm_ema_supertrend: {
+    name: 'CrudeOil Mini EMA + Supertrend',
+    underlying: 'CRUDEOILM',
+    logicGroup: 'futures_trend',
+    timeframe: 'intraday',
+    path: path.join(PROJECT_ROOT, 'strategies', 'crudeoil', 'crudeoilm_ema_supertrend.py')
+  },
   // The only MULTI-SYMBOL strategy here: it tracks all 50 Nifty names and may hold several
   // at once, so its state file carries `positions` and `candidates` arrays rather than the
   // single-instrument fields every entry above uses.
