@@ -21,6 +21,7 @@ import CyberPositionsPanel, { PositionItem, PositionGuard, ScalpLogItem } from '
 import CyberBloombergRibbon from './CyberBloombergRibbon';
 import CyberStrategyIntelligence, { StrategyData } from './CyberStrategyIntelligence';
 import { matchTradesFifo, type ExitedPositionItem } from '@/lib/fifoPositions';
+import { saveTerminalOrder } from '@/lib/terminalTradeStore';
 import { cyberAudio } from '@/lib/cyberAudio';
 import { contractMultiplier, scaleBrokerPnl } from '@/lib/positionPnl';
 import { useBrokerSelector, scalperRoute, BROKER_LABELS, type Broker } from '@/hooks/useBrokerSelector';
@@ -419,6 +420,16 @@ export default function CyberScalperTerminal() {
           `ORDER FILLED! Order ID: ${json.order_id || 'OK'}`,
           `${params.qty} Qty of ${brokerTradingSymbol || params.strike}`
         );
+        saveTerminalOrder({
+          orderId: json.order_id ? String(json.order_id) : undefined,
+          tradingSymbol: String(brokerTradingSymbol || params.strike || ''),
+          securityId: params.securityId ? String(params.securityId) : undefined,
+          side: params.direction,
+          qty: params.qty,
+          price: params.price,
+          broker,
+          symbol,
+        });
         await fetchPositions();
       } else {
         cyberAudio.error();
@@ -478,6 +489,16 @@ export default function CyberScalperTerminal() {
       if (json.success) {
         cyberAudio.exit();
         addLog('EXIT', `Position Closed: ${pos.tradingSymbol}`);
+        saveTerminalOrder({
+          orderId: json.order_id ? String(json.order_id) : undefined,
+          tradingSymbol: pos.tradingSymbol,
+          securityId: pos.securityId ? String(pos.securityId) : undefined,
+          side: closeSide,
+          qty: Math.abs(pos.netQty),
+          price: pos.ltp,
+          broker,
+          symbol,
+        });
         await fetchPositions();
       } else {
         cyberAudio.error();
@@ -949,6 +970,7 @@ export default function CyberScalperTerminal() {
 
         {/* 4. POSITIONS TABLE WITH TARGET, SL, TRAILING & LIVE TELEMETRY LOG */}
         <CyberPositionsPanel
+          symbol={symbol}
           positions={positions}
           exitedPositions={exitedPositions}
           logs={logs}

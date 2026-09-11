@@ -141,8 +141,35 @@ export function matchTradesFifo(
     }
   }
 
-  // Sort exited list latest first
-  exitedList.reverse();
+  // Consolidate partial fills: merge slices with identical symbol, side, and exitTime
+  const consolidatedExited: ExitedPositionItem[] = [];
+  for (const ex of exitedList) {
+    const last = consolidatedExited[consolidatedExited.length - 1];
+    if (
+      last &&
+      last.tradingSymbol === ex.tradingSymbol &&
+      last.side === ex.side &&
+      last.exitTime === ex.exitTime
+    ) {
+      const newQty = last.qty + ex.qty;
+      const newEntryPrice = (last.entryPrice * last.qty + ex.entryPrice * ex.qty) / newQty;
+      const newExitPrice = (last.exitPrice * last.qty + ex.exitPrice * ex.qty) / newQty;
+      const newPoints = last.side === 'BUY' ? newExitPrice - newEntryPrice : newEntryPrice - newExitPrice;
+      const newPnl = last.pnl + ex.pnl;
 
-  return { openMap, exitedList };
+      last.qty = newQty;
+      last.entryPrice = Number(newEntryPrice.toFixed(2));
+      last.exitPrice = Number(newExitPrice.toFixed(2));
+      last.points = Number(newPoints.toFixed(2));
+      last.pnl = Number(newPnl.toFixed(2));
+    } else {
+      consolidatedExited.push({ ...ex });
+    }
+  }
+
+  // Sort exited list latest first
+  consolidatedExited.reverse();
+
+  return { openMap, exitedList: consolidatedExited };
 }
+

@@ -17,6 +17,7 @@ import { cn } from '@/lib/utils';
 import { cyberAudio } from '@/lib/cyberAudio';
 
 import { ExitedPositionItem } from '@/lib/fifoPositions';
+import { getTerminalTradingSymbols, isSymbolMatch } from '@/lib/terminalTradeStore';
 
 export interface PositionItem {
   id: string;
@@ -121,6 +122,7 @@ function CyberGuardInput({
 }
 
 interface PositionsPanelProps {
+  symbol: string;
   positions: PositionItem[];
   exitedPositions?: ExitedPositionItem[];
   logs: ScalpLogItem[];
@@ -135,6 +137,7 @@ interface PositionsPanelProps {
 }
 
 export default function CyberPositionsPanel({
+  symbol,
   positions,
   exitedPositions = [],
   logs,
@@ -148,14 +151,30 @@ export default function CyberPositionsPanel({
   isExecuting,
 }: PositionsPanelProps) {
   const [activeTab, setActiveTab] = useState<'active' | 'exited'>('active');
+  const [scope, setScope] = useState<'terminal' | 'symbol' | 'all'>('terminal');
 
   // Pin each position to the order it was first seen in, so rows never jump or
   // reshuffle across ticks as broker payloads arrive.
   const rowOrderRef = useRef<Map<string, number>>(new Map());
   const nextOrderRef = useRef(0);
 
+  // Terminal trading symbols from local store (auto-refreshed when logs change)
+  const terminalSymbols = useMemo(() => getTerminalTradingSymbols(), [logs]);
+
+  // Filter positions by scope (Terminal Only / Current Symbol / All Broker)
   const activePositions = useMemo(() => {
-    const active = positions.filter((p) => p.netQty !== 0);
+    const active = positions.filter((p) => {
+      if (p.netQty === 0 || (p as any).positionType === 'CLOSED') return false;
+      const ts = (p.tradingSymbol || p.id || '').toUpperCase().trim();
+      if (scope === 'terminal') {
+        return terminalSymbols.has(ts);
+      }
+      if (scope === 'symbol') {
+        return isSymbolMatch(ts, symbol);
+      }
+      return true;
+    });
+
     const order = rowOrderRef.current;
     for (const p of active) {
       const key = `${p.tradingSymbol || p.id}_${p.productType}`;
@@ -168,12 +187,27 @@ export default function CyberPositionsPanel({
       const keyB = `${b.tradingSymbol || b.id}_${b.productType}`;
       return (order.get(keyA) ?? 0) - (order.get(keyB) ?? 0);
     });
-  }, [positions]);
+  }, [positions, scope, symbol, terminalSymbols]);
+
+  // Filter exited positions by scope
+  const filteredExitedPositions = useMemo(() => {
+    return exitedPositions.filter((ex) => {
+      const ts = (ex.tradingSymbol || '').toUpperCase().trim();
+      if (scope === 'terminal') {
+        return terminalSymbols.has(ts);
+      }
+      if (scope === 'symbol') {
+        return isSymbolMatch(ts, symbol);
+      }
+      return true;
+    });
+  }, [exitedPositions, scope, symbol, terminalSymbols]);
 
   const openCount = activePositions.length;
-  const exitedCount = exitedPositions.length;
+  const exitedCount = filteredExitedPositions.length;
   const totalOpenPnl = activePositions.reduce((sum, p) => sum + (p.pnl || 0), 0);
-  const totalRealizedPnl = exitedPositions.reduce((sum, p) => sum + (p.pnl || 0), 0);
+  const totalRealizedPnl = filteredExitedPositions.reduce((sum, p) => sum + (p.pnl || 0), 0);
+
 
   const allTrailingActive =
     openCount > 0 && activePositions.every((p) => guards[p.id]?.trailEnabled);
@@ -229,6 +263,46 @@ export default function CyberPositionsPanel({
                   )}>
                     {exitedCount}
                   </span>
+                </button>
+              </div>
+
+              {/* Scope Selector: Terminal vs Symbol vs All */}
+              <div className="flex items-center p-0.5 rounded-lg bg-zinc-950 border border-zinc-800 text-[11px] font-mono font-bold">
+                <button
+                  onClick={() => setScope('terminal')}
+                  className={cn(
+                    'px-2.5 py-0.5 rounded transition-all',
+                    scope === 'terminal'
+                      ? 'bg-amber-500/20 text-amber-300 border border-amber-500/40 shadow-sm'
+                      : 'text-zinc-400 hover:text-white'
+                  )}
+                  title="Only show trades and positions placed directly from this Cyber Scalper terminal session"
+                >
+                  THIS TERMINAL
+                </button>
+                <button
+                  onClick={() => setScope('symbol')}
+                  className={cn(
+                    'px-2.5 py-0.5 rounded transition-all',
+                    scope === 'symbol'
+                      ? 'bg-cyan-500/20 text-cyan-300 border border-cyan-500/40 shadow-sm'
+                      : 'text-zinc-400 hover:text-white'
+                  )}
+                  title={`Show all broker positions & trades matching ${symbol}`}
+                >
+                  {symbol} ONLY
+                </button>
+                <button
+                  onClick={() => setScope('all')}
+                  className={cn(
+                    'px-2.5 py-0.5 rounded transition-all',
+                    scope === 'all'
+                      ? 'bg-zinc-800 text-white border border-zinc-700 shadow-sm'
+                      : 'text-zinc-400 hover:text-white'
+                  )}
+                  title="Show all positions and trades across the entire broker account"
+                >
+                  ALL BROKER
                 </button>
               </div>
             </div>
@@ -289,10 +363,33 @@ export default function CyberPositionsPanel({
             openCount === 0 ? (
               <div className="py-12 text-center text-zinc-500 font-mono text-xs flex flex-col items-center justify-center gap-2">
                 <Zap className="w-6 h-6 text-zinc-700 animate-pulse" />
-                <span className="font-bold text-zinc-400">NO ACTIVE SCALPING POSITIONS</span>
-                <span className="text-[11px] text-zinc-600">
-                  Place an instant trade above or hit hotkey [B] (ATM Call) or [S] (ATM Put)
+                <span className="font-bold text-zinc-300">
+                  {scope === 'terminal'
+                    ? '0 ACTIVE TERMINAL POSITIONS'
+                    : scope === 'symbol'
+                    ? `0 ACTIVE ${symbol} POSITIONS`
+                    : '0 ACTIVE BROKER POSITIONS'}
                 </span>
+                <div className="text-[11px] text-zinc-500 max-w-md">
+                  {scope === 'terminal' ? (
+                    <>
+                      <span>No trades have been placed from this Cyber Scalper terminal session yet.</span>
+                      {positions.filter((p) => p.netQty !== 0).length > 0 && (
+                        <div className="mt-1.5 text-zinc-400">
+                          Broker has {positions.filter((p) => p.netQty !== 0).length} open position(s) from other strategies.{' '}
+                          <button
+                            onClick={() => setScope('all')}
+                            className="text-cyan-400 underline hover:text-cyan-300 font-bold"
+                          >
+                            Switch to ALL BROKER
+                          </button>
+                        </div>
+                      )}
+                    </>
+                  ) : (
+                    'Place an instant trade above or hit hotkey [B] (ATM Call) or [S] (ATM Put)'
+                  )}
+                </div>
               </div>
             ) : (
               <div className="overflow-x-auto">
@@ -537,10 +634,33 @@ export default function CyberPositionsPanel({
             exitedCount === 0 ? (
               <div className="py-12 text-center text-zinc-500 font-mono text-xs flex flex-col items-center justify-center gap-2">
                 <Clock className="w-6 h-6 text-zinc-700" />
-                <span className="font-bold text-zinc-400">NO EXITED POSITIONS TODAY</span>
-                <span className="text-[11px] text-zinc-600">
-                  Closed scalp trades taken in this session will appear here with entry, exit, and realized P&L.
+                <span className="font-bold text-zinc-300">
+                  {scope === 'terminal'
+                    ? '0 EXITED TERMINAL TRADES'
+                    : scope === 'symbol'
+                    ? `0 EXITED ${symbol} TRADES TODAY`
+                    : '0 EXITED BROKER TRADES TODAY'}
                 </span>
+                <div className="text-[11px] text-zinc-500 max-w-md">
+                  {scope === 'terminal' ? (
+                    <>
+                      <span>No closed scalp trades executed from this terminal session today.</span>
+                      {exitedPositions.length > 0 && (
+                        <div className="mt-1.5 text-zinc-400">
+                          Broker account has {exitedPositions.length} closed trade(s) from other strategies.{' '}
+                          <button
+                            onClick={() => setScope('all')}
+                            className="text-purple-400 underline hover:text-purple-300 font-bold"
+                          >
+                            Switch to ALL BROKER
+                          </button>
+                        </div>
+                      )}
+                    </>
+                  ) : (
+                    'Closed trades for today will appear here with execution window and realized P&L.'
+                  )}
+                </div>
               </div>
             ) : (
               <div className="overflow-x-auto">
@@ -559,7 +679,7 @@ export default function CyberPositionsPanel({
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-zinc-800/60 text-xs">
-                    {exitedPositions.map((ex) => {
+                    {filteredExitedPositions.map((ex) => {
                       const isProfit = ex.pnl >= 0;
                       return (
                         <tr key={ex.id} className="hover:bg-zinc-800/30 transition-colors">
