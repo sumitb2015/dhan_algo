@@ -3497,7 +3497,7 @@ export default function FocusTool() {
     }
     rowLivePrevRef.current = out;
     return out;
-  }, [config.rows, config.groups, spots, futQuotes, chains, focusWsQuotes, lookups, lotSizes, positions, broker, expiries, rowVwap, workerStatus.rows]);
+  }, [config.rows, config.groups, spots, effectiveFutQuotes, chains, focusWsQuotes, lookups, lotSizes, positions, broker, expiries, rowVwap, workerStatus.rows]);
 
   /**
    * P&L across THIS TOOL'S OWN rows — the book the account budget is measured

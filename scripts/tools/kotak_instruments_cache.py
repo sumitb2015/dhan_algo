@@ -51,6 +51,15 @@ SEGMENT_OPTION_TYPES = {
 }
 DEFAULT_OPTION_TYPES = ('OPTIDX', 'OPTSTK')
 
+# The underlying's OWN future contract (not an option on it) — only meaningful
+# for mcx_fo, where CRUDEOIL/CRUDEOILM's near-month future is itself directly
+# tradeable and the Cyber Scalper's Futures mode needs its trading symbol.
+# pOptionType is the literal string "XX" on these rows (not CE/PE), which is
+# why the options loop below skips them entirely on its own.
+SEGMENT_FUTURE_TYPES = {
+    'mcx_fo': ('FUTCOM',),
+}
+
 MASTER_DIR = os.path.join(ROOT, 'debug', 'kotak_master')
 
 
@@ -192,6 +201,7 @@ def _num(value, default=0.0) -> float:
 
 def build_rows(master_rows, underlying: str, segment: str = 'nse_fo'):
     option_types = SEGMENT_OPTION_TYPES.get(segment, DEFAULT_OPTION_TYPES)
+    future_types = SEGMENT_FUTURE_TYPES.get(segment, ())
     # bse_fo (SENSEX) shares mcx_fo's real, unshifted epoch — see
     # map_mcx_expiry_date's docstring.
     expiry_mapper = map_mcx_expiry_date if segment in ('mcx_fo', 'bse_fo') else map_expiry_date
@@ -200,10 +210,12 @@ def build_rows(master_rows, underlying: str, segment: str = 'nse_fo'):
     for row in master_rows:
         if str(_column(row, 'pSymbolName') or '').strip().upper() != underlying:
             continue
-        if str(_column(row, 'pInstType') or '').strip().upper() not in option_types:
+        inst_type = str(_column(row, 'pInstType') or '').strip().upper()
+        is_future = inst_type in future_types
+        if not is_future and inst_type not in option_types:
             continue
         opt_type = str(_column(row, 'pOptionType') or '').strip().upper()
-        if opt_type not in ('CE', 'PE'):
+        if not is_future and opt_type not in ('CE', 'PE'):
             continue
         trading_symbol = str(_column(row, 'pTrdSymbol') or '').strip()
         if not trading_symbol:
@@ -214,10 +226,12 @@ def build_rows(master_rows, underlying: str, segment: str = 'nse_fo'):
             # formats, and a hand-built symbol silently resolves to nothing.
             'tradingsymbol': trading_symbol,
             'instrument_token': str(_column(row, 'pSymbol') or '').strip(),
-            # Strikes and base prices are scaled x100 in the master.
+            # Strikes and base prices are scaled x100 in the master. The future
+            # row itself carries no strike (dStrikePrice is 0) -- 'FUT' below is
+            # what the lookup route keys off of, not this field.
             'strike': _num(_column(row, 'dStrikePrice;', 'dStrikePrice')) / 100.0,
             'expiry': expiry_mapper(_column(row, 'pExpiryDate')),
-            'instrument_type': opt_type,
+            'instrument_type': 'FUT' if is_future else opt_type,
             'lot_size': int(_num(_column(row, 'iLotSize', 'lLotSize'), 0)),
             'exchange_segment': str(_column(row, 'pExchSeg') or '').strip(),
             # Market orders above the freeze quantity are rejected outright, so
