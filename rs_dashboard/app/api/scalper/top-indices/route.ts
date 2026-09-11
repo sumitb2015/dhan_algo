@@ -1,29 +1,40 @@
 import { NextResponse } from 'next/server';
 import { getDhanCredentials } from '@/lib/dhanToken';
 import path from 'path';
+import fs from 'fs';
 import { dedupe, runPythonJson, PROJECT_ROOT } from '@/lib/pyExec';
 
 // Absolute: runPythonJson execs without a cwd, so a relative path would resolve
 // against rs_dashboard/ rather than the project root and silently never run.
 const OPTIONS_FETCH = path.join(PROJECT_ROOT, 'scripts', 'tools', 'options_data_fetch.py');
+const HUB_QUOTES_FILE = path.join(PROJECT_ROOT, 'debug', 'live_indices_quotes.json');
 
 // Live LTP + % change vs yesterday's close for the headline indices, for the
 // Advanced Scalper's Top Indices panel.
 //
-// Deliberately NOT sourced from scripts/tools/live_indices_ws.py: that bridge
-// writes only `opens` and `ltps` (see its atomic_write payload) with no
-// prev_close, and its `opens` is "the first tick the bridge happened to see"
-// rather than the true session open — so it cannot answer "% vs yesterday's
-// close" at all, and its default write cadence is 20s. Dhan's OHLC endpoint
-// returns last_price and ohlc.close together for a whole batch in one call,
-// which is exactly what's needed.
+// The 9 NSE indices (everything except CRUDEOIL) are sourced from the shared
+// market_data_hub.py WebSocket via scripts/tools/live_indices_ws.py, which
+// now also writes debug/live_indices_quotes.json every 2s — see `fromHub`
+// below. This used to be a REST call to Dhan's batched OHLC endpoint for
+// every row on every poll; that endpoint is rate-limited to ~1 req/s and
+// shared across every open tab/panel, and a rejected call blanked the whole
+// panel for a cycle (see git history on this file, and lastGood below, which
+// still guards whatever remains on the REST path). Moving the 9 real indices
+// to the hub removes that rate-limit exposure almost entirely.
+//
+// CRUDEOIL stays on the REST path below: it's an MCX rolling future, not an
+// NSE index (see futUnderlying/getFutSid) — live_indices_ws.py's catalogue is
+// NSE indices only, and duplicating monthly-contract-roll resolution into the
+// Python bridge isn't worth it for one row. `fromDhan` is still exactly what
+// CRUDEOIL needs.
 //
 // Dhan is the ONLY source — Zerodha/Kite must never be used for market-data
 // ingestion here (Dhan is the account of record for every calculation in this
 // dashboard; Kite was previously used as a primary source for this panel, but
 // that made every number on it depend on a second broker's session being
-// alive). The two Dhan quirks that previously motivated a Kite fallback are
-// handled directly instead:
+// alive). The two Dhan quirks that motivated that are handled directly
+// instead — both still apply to CRUDEOIL's REST path (the hub path has its
+// own, separate handling of quirk 1, in live_indices_ws.py):
 //
 //  1. Dhan's `ohlc.close` flips from yesterday's close to TODAY's close the
 //     moment the 15:30 bell rings (measured 2026-07-30: at 14:5x NIFTY read
@@ -80,13 +91,89 @@ const INDICES: IndexDef[] = [
     segment: 'MCX_COMM', futUnderlying: 'CRUDEOIL' },
 ];
 
+// Split by data source. Keep in sync with live_indices_ws.py's ROUTE_KEY_MAP.
+const WS_INDICES = INDICES.filter(i => i.key !== 'CRUDEOIL');
+const REST_INDICES = INDICES.filter(i => i.key === 'CRUDEOIL');
+
 interface Quote { ltp: number; prev_close: number; change_pct: number | null; source: string }
+
+interface HubQuotesFile {
+  updated_at?: string;
+  quotes?: Record<string, { ltp?: number; prev_close?: number; change_pct?: number }>;
+}
+
+// A snapshot older than this is not "quiet", it's a dead/not-yet-started
+// bridge — matches the STALE_MS the client already applies to the whole
+// panel (lib/useLiveTickerPoll.ts), so a stale hub file degrades the same
+// way a stale overall response would, rather than serving frozen numbers
+// indefinitely under a fresh-looking response envelope.
+const HUB_STALE_MS = 15_000;
+
+/**
+ * Reads live_indices_quotes.json (written every 2s by live_indices_ws.py off
+ * the shared market_data_hub.py WebSocket) — no REST call, no rate limit.
+ * Missing file (bridge never started) or stale file (bridge dead) both yield
+ * {} for `wanted`, which GET() reports as `missing` rows rather than masking
+ * it — that in turn is what triggers AdvancedScalper to start the bridge.
+ */
+function fromHub(wanted: IndexDef[]): Record<string, Quote> {
+  const out: Record<string, Quote> = {};
+  if (wanted.length === 0) return out;
+
+  let parsed: HubQuotesFile | null;
+  try {
+    parsed = JSON.parse(fs.readFileSync(HUB_QUOTES_FILE, 'utf8')) as HubQuotesFile;
+  } catch {
+    return out; // file missing or unreadable — bridge not running yet
+  }
+
+  const updatedMs = parsed.updated_at ? new Date(parsed.updated_at).getTime() : NaN;
+  if (!Number.isFinite(updatedMs) || Date.now() - updatedMs > HUB_STALE_MS) return out;
+
+  for (const { key } of wanted) {
+    const q = parsed.quotes?.[key];
+    if (!q || !(Number(q.ltp) > 0)) continue;
+    const prevClose = Number(q.prev_close) || 0;
+    out[key] = {
+      ltp: Number(q.ltp),
+      prev_close: prevClose,
+      change_pct: prevClose > 0 ? (Number(q.change_pct) ?? null) : null,
+      source: 'hub',
+    };
+  }
+  return out;
+}
 
 // Short TTL so several open tabs (or a re-render storm) collapse onto one
 // upstream call. Kept well under the client's poll interval so it never
 // degrades perceived freshness — it only removes duplicate work.
 const CACHE_TTL_MS = 2000;
-let cache: { ts: number; body: unknown } | null = null;
+
+interface ResponseBody {
+  success: true;
+  updated_at: string;
+  order: { key: string; label: string }[];
+  quotes: Record<string, Quote>;
+  count: number;
+  errors: string[];
+}
+
+let cache: { ts: number; body: ResponseBody } | null = null;
+
+// Last response that actually carried data (count > 0), kept separately from
+// `cache` above. Dhan's OHLC call is shared across every open tab/panel
+// against a ~1 req/s budget, so single-poll rejections are routine, not rare
+// — without this, a rejected call fell through to an empty `quotes: {}`
+// which the client renders as ten blank rows before the next poll (~3s
+// later) repopulates them. That's a highly visible flash for a ~3-6s-old
+// value that was still perfectly usable a moment ago.
+//
+// `updated_at` on the served fallback is deliberately left untouched (the
+// original successful poll's timestamp, not "now") so useLiveTickerPoll's
+// own staleness clock (STALE_MS = 15000) still correctly ages this into
+// STALE if Dhan stays down for real, rather than this route perpetually
+// claiming fresh data off a recycled snapshot.
+let lastGood: ResponseBody | null = null;
 
 // Yesterday's close, keyed "<IST date>:<index key>". Populated by whichever
 // source proved trustworthy today and reused for the rest of the session.
@@ -466,23 +553,56 @@ export async function GET() {
   let quotes: Record<string, Quote> = {};
   const preMarket = istMinutesOfDay() < MARKET_OPEN_IST_MIN;
 
-  try {
-    quotes = preMarket ? await fromDhanPrevSessionChange(INDICES) : await fromDhan(INDICES);
-  } catch (e) {
-    errors.push(`dhan: ${String(e).slice(0, 120)}`);
+  if (preMarket) {
+    // Pre-market "yesterday vs the day before" comparison needs Dhan's daily
+    // candles regardless of row — the hub's live ticks haven't moved from
+    // yesterday's close yet, so they can't answer this question either.
+    try {
+      quotes = await fromDhanPrevSessionChange(INDICES);
+    } catch (e) {
+      errors.push(`dhan: ${String(e).slice(0, 120)}`);
+    }
+  } else {
+    // Two independent sources, each fails without taking the other down —
+    // a CRUDEOIL REST rejection must never blank the 9 hub-sourced rows,
+    // and vice versa.
+    try {
+      quotes = { ...quotes, ...fromHub(WS_INDICES) };
+    } catch (e) {
+      errors.push(`hub: ${String(e).slice(0, 120)}`);
+    }
+    try {
+      quotes = { ...quotes, ...(await fromDhan(REST_INDICES)) };
+    } catch (e) {
+      errors.push(`dhan: ${String(e).slice(0, 120)}`);
+    }
   }
 
-  const body = {
+  const count = Object.keys(quotes).length;
+
+  // A transient rejection (count === 0 after a throw, or Dhan answering
+  // "success" with nothing usable) is not the same claim as "the market has
+  // no data" — serve the last good snapshot instead of blanking every row.
+  // A genuine, sustained outage still surfaces correctly: `lastGood`'s
+  // original `updated_at` keeps aging until STALE_MS trips client-side.
+  if (count === 0 && lastGood) {
+    const body: ResponseBody = { ...lastGood, errors: [...errors, ...lastGood.errors] };
+    cache = { ts: Date.now(), body };
+    return NextResponse.json(body);
+  }
+
+  const body: ResponseBody = {
     success: true,
     updated_at: new Date().toISOString(),
     // Definition order is returned so the client controls sorting and labels
     // without duplicating this list.
     order: INDICES.map(i => ({ key: i.key, label: i.label })),
     quotes,
-    count: Object.keys(quotes).length,
+    count,
     errors,
   };
 
   cache = { ts: Date.now(), body };
+  if (count > 0) lastGood = body;
   return NextResponse.json(body);
 }

@@ -1,9 +1,17 @@
 """
-Live indices WebSocket bridge for the RS dashboard Normalized Charts tab.
+Live indices WebSocket bridge for the RS dashboard Normalized Charts tab and
+the Advanced Scalper's Top 10 Markets panel.
 
-Subscribes to NSE index instruments via Dhan WebSocket and writes
-debug/live_indices_history.json every 2 seconds — full intraday tick history
-from session open, used by the Next.js /live Normalized tab.
+Subscribes to NSE index instruments via Dhan WebSocket and writes:
+  - debug/live_indices_history.json every `interval` seconds (default 20,
+    configurable) — full intraday tick history from session open, used by the
+    Next.js /live Normalized tab.
+  - debug/live_indices_quotes.json every 2 seconds regardless of `interval` —
+    a compact {route_key: {ltp, prev_close, change, change_pct}} snapshot for
+    the headline indices, consumed by /api/scalper/top-indices so that panel
+    no longer needs to REST-poll Dhan's rate-limited OHLC endpoint for these
+    rows. Decoupled from `interval` so a user who widens the chart tick
+    interval doesn't also slow down the scalper panel.
 
 Usage:
     venv\\Scripts\\python.exe scripts/tools/live_indices_ws.py
@@ -18,6 +26,9 @@ import json
 import time
 import argparse
 from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
+
+IST = ZoneInfo('Asia/Kolkata')
 
 # Force UTF-8 stdout/stderr on Windows so Unicode print statements don't fail
 if hasattr(sys.stdout, 'reconfigure'):
@@ -34,10 +45,34 @@ from lib import market_hub_client as hub_client
 
 DEBUG_DIR        = os.path.join(ROOT, 'debug')
 HISTORY_FILE     = os.path.join(DEBUG_DIR, 'live_indices_history.json')
+QUOTES_FILE      = os.path.join(DEBUG_DIR, 'live_indices_quotes.json')
 STATUS_FILE      = os.path.join(DEBUG_DIR, 'live_indices_status.json')
 STOP_TRIGGER     = os.path.join(DEBUG_DIR, 'live_indices_stop.trigger')
 SELECTION_FILE   = os.path.join(DEBUG_DIR, 'live_indices_selection.json')
 SETTINGS_FILE    = os.path.join(DEBUG_DIR, 'live_indices_settings.json')
+
+# Fixed write cadence for QUOTES_FILE — independent of the user-configurable
+# `interval` that paces HISTORY_FILE (that one trades off chart granularity
+# vs. disk/CPU and can be widened to minutes; the scalper panel always wants
+# a fast refresh).
+QUOTES_WRITE_SEC = 2.0
+
+# Subset of INDEX_CATALOGUE (below) surfaced to the Top 10 Markets panel,
+# mapped to the row keys rs_dashboard/app/api/scalper/top-indices/route.ts
+# uses (must stay in sync with that route's INDICES list). CRUDEOIL is
+# intentionally absent — it's an MCX rolling future, not an NSE index, and
+# stays on that route's REST path.
+ROUTE_KEY_MAP = {
+    'NIFTY':         'NIFTY',
+    'BANKNIFTY':     'BANKNIFTY',
+    'FINNIFTY':      'FINNIFTY',
+    'NIFTYIT':       'IT',
+    'NIFTY AUTO':    'AUTO',
+    'NIFTY PHARMA':  'PHARMA',
+    'NIFTY METAL':   'METAL',
+    'NIFTY REALTY':  'REALTY',
+    'INDIA VIX':     'VIX',
+}
 
 # MarketFeed segment/type constants (from dhanhq SDK)
 IDX        = 0   # Index segment
@@ -126,6 +161,67 @@ def ist_time() -> str:
     """Return current IST wall-clock time as HH:MM:SS string."""
     # IST = UTC+5:30; use local time since the machine is in IST.
     return datetime.now().strftime('%H:%M:%S')
+
+
+def ist_today() -> str:
+    return datetime.now(IST).strftime('%Y-%m-%d')
+
+
+def write_quotes_snapshot(sid_to_symbol: dict, prev_close_cache: dict) -> None:
+    """
+    Write QUOTES_FILE from the hub's current merged ticks.
+
+    `prev_close_cache` is keyed "<IST date>:<route key>" and mutated in place
+    by the caller's persistent dict, so a genuine close captured earlier today
+    survives Dhan's post-15:30 flip of the quote packet's own `close` field —
+    same flip and same fix as live_equity_ws.py's prev_close_cache; see that
+    file for the full story. Cheap to call every 2s: no REST call, just a read
+    of the hub's already-in-memory tick file.
+    """
+    live_ticks = hub_client.read_live_data()
+    day = ist_today()
+    for key in [k for k in prev_close_cache if not k.startswith(f'{day}:')]:
+        del prev_close_cache[key]
+
+    quotes: dict[str, dict] = {}
+    for sid, sym in sid_to_symbol.items():
+        route_key = ROUTE_KEY_MAP.get(sym)
+        if route_key is None:
+            continue
+        tick = live_ticks.get(hub_client.tick_key(IDX, sid))
+        if not tick:
+            continue
+
+        ltp = float(tick.get('LTP') or tick.get('last_price') or 0)
+        if ltp <= 0:
+            continue
+
+        cache_key = f'{day}:{route_key}'
+        cached = prev_close_cache.get(cache_key)
+        if cached is not None:
+            prev_close = cached
+        else:
+            raw_close = float(tick.get('prev_close') or tick.get('close') or 0)
+            # A raw close equal to LTP is Dhan's post-close flip, not a
+            # genuine 0% day — treat it as unknown rather than cache it.
+            prev_close = raw_close if raw_close > 0 and raw_close != ltp else 0.0
+            if prev_close:
+                prev_close_cache[cache_key] = prev_close
+
+        change     = ltp - prev_close if prev_close else 0.0
+        change_pct = (change / prev_close * 100) if prev_close else 0.0
+
+        quotes[route_key] = {
+            'ltp':        round(ltp, 2),
+            'prev_close': round(prev_close, 2),
+            'change':     round(change, 2),
+            'change_pct': round(change_pct, 4),
+        }
+
+    atomic_write(QUOTES_FILE, {
+        'updated_at': datetime.now(IST).isoformat(),
+        'quotes':     quotes,
+    })
 
 
 def main():
@@ -232,6 +328,12 @@ def main():
     HUB_CHECK_INTERVAL_SEC = 5
     last_hub_check = time.monotonic()
 
+    # Persistent across the whole run (pruned to today inside the function) —
+    # must NOT be recreated each call, or every 2s write would forget the
+    # genuine pre-flip close it cached.
+    quotes_prev_close_cache: dict[str, float] = {}
+    write_quotes_snapshot(sid_to_symbol, quotes_prev_close_cache)
+
     try:
         while True:
             # ── Graceful stop ─────────────────────────────────────────────────
@@ -309,7 +411,21 @@ def main():
 
             # Re-read interval each cycle so UI changes take effect without restart
             interval = read_interval(default=args.interval)
-            time.sleep(interval)
+
+            # Pace HISTORY_FILE at `interval` (user-configurable, can be
+            # minutes wide) while still refreshing QUOTES_FILE every
+            # QUOTES_WRITE_SEC — a plain time.sleep(interval) here would tie
+            # the scalper panel's refresh rate to the chart's tick interval.
+            # Chunked so STOP_TRIGGER is also noticed within ~2s instead of
+            # only at the end of a possibly long `interval` sleep.
+            slept = 0.0
+            while slept < interval:
+                if os.path.exists(STOP_TRIGGER):
+                    break
+                chunk = min(QUOTES_WRITE_SEC, interval - slept)
+                time.sleep(chunk)
+                slept += chunk
+                write_quotes_snapshot(sid_to_symbol, quotes_prev_close_cache)
 
     except KeyboardInterrupt:
         print('[live_indices_ws] KeyboardInterrupt - shutting down.', flush=True)

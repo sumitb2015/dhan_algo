@@ -1,14 +1,16 @@
 'use client';
 
-// Compact live table of the 10 headline indices (Nifty, Bank Nifty, Sensex, the
-// main sectorals and India VIX) with % change vs yesterday's close, for the
-// Advanced Scalper page. Sits beside the Top 10 Weight panel: that one shows
-// which heavyweight stocks are moving, this one shows which sectors are.
+// Compact live table of the 10 headline rows (Nifty, Bank Nifty, the main
+// sectorals, India VIX, and MCX crude oil) with % change vs yesterday's
+// close, for the Advanced Scalper page. Sits beside the Top 10 Weight panel:
+// that one shows which heavyweight stocks are moving, this one shows which
+// sectors/markets are.
 //
-// Data comes from /api/scalper/top-indices, which pulls last_price + ohlc.close
-// in one batched Dhan call (plus Kite for Sensex, which Dhan does not serve).
-// See that route for why the live_indices_ws.py bridge is deliberately not used
-// here — it has no prev_close, so it cannot express "% vs yesterday's close".
+// Data comes from /api/scalper/top-indices. The 9 NSE indices are sourced
+// from the shared market_data_hub.py WebSocket (via live_indices_ws.py's
+// live_indices_quotes.json snapshot) — no REST polling, no Dhan rate-limit
+// exposure. Only CRUDEOIL (an MCX rolling future, not an NSE index) still
+// goes over Dhan's REST OHLC endpoint. See that route for the full story.
 
 import React, { useMemo, useState } from 'react';
 import { cn } from '@/lib/utils';

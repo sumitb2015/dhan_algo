@@ -877,6 +877,19 @@ export default function AdvancedScalper() {
     }).catch(() => {});
   }, [showTop10]);
 
+  // Same idempotent start for the indices bridge that now feeds Top 10
+  // Markets' 9 NSE-index rows (see /api/scalper/top-indices' `fromHub`).
+  // Also shared with the Normalized Charts tab — same "never stop from here"
+  // rationale as the equity bridge above.
+  useEffect(() => {
+    if (!showTop10) return;
+    fetch('/api/live-indices', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action: 'start' }),
+    }).catch(() => {});
+  }, [showTop10]);
+
   // Re-resolves strikeMap (Dhan securityId / Zerodha tradingsymbol per strike)
   // whenever the expiry OR the selected broker changes. Order routing is
   // still broker-specific — only the live-quotes WS bridges (started above)
