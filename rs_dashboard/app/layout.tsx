@@ -3,7 +3,6 @@ import { Inter, Geist_Mono } from "next/font/google";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import ThemeInit from "@/components/ThemeInit";
 import Sidebar from "@/components/Sidebar";
-import PnlAlertModal from "@/components/PnlAlertModal";
 import Script from "next/script";
 import "./globals.css";
 
@@ -66,9 +65,6 @@ export default function RootLayout({
             unmounts/remounts — and its open-section state never resets —
             on navigation between pages that don't share a layout. */}
         <Sidebar />
-        {/* Mounted once here (not per-page) so the ₹1000 P&L-move poll runs
-            continuously across navigation, same rationale as <Sidebar /> above. */}
-        <PnlAlertModal />
         <TooltipProvider>{children}</TooltipProvider>
       </body>
     </html>
