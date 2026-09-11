@@ -208,13 +208,15 @@ export default function CyberScalperTerminal() {
             pnl = points * Math.abs(qty) * (mult > 0 ? mult : 1);
           }
 
-          const posId = String(p.securityId || p.tradingSymbol || Math.random());
+          const sym = String(p.tradingSymbol || p.securityId || 'POSITION');
+          const prd = String(p.productType || p.prod || 'INTRADAY');
+          const posId = `${sym}_${prd}`;
 
           return {
             id: posId,
-            tradingSymbol: String(p.tradingSymbol || p.securityId || 'POSITION'),
+            tradingSymbol: sym,
             securityId: p.securityId ? String(p.securityId) : undefined,
-            productType: String(p.productType || p.prod || 'INTRADAY'),
+            productType: prd,
             exchangeSegment: String(p.exchangeSegment ?? p.exchange ?? 'NSE_FNO'),
             netQty: qty,
             buyAvg,

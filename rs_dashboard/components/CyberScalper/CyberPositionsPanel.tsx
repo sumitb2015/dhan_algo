@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState, useRef } from 'react';
+import React, { useState, useRef, useMemo } from 'react';
 import {
   Wallet,
   Clock,
@@ -143,7 +143,27 @@ export default function CyberPositionsPanel({
   onFlattenAll,
   isExecuting,
 }: PositionsPanelProps) {
-  const activePositions = positions.filter((p) => p.netQty !== 0);
+  // Pin each position to the order it was first seen in, so rows never jump or
+  // reshuffle across ticks as broker payloads arrive.
+  const rowOrderRef = useRef<Map<string, number>>(new Map());
+  const nextOrderRef = useRef(0);
+
+  const activePositions = useMemo(() => {
+    const active = positions.filter((p) => p.netQty !== 0);
+    const order = rowOrderRef.current;
+    for (const p of active) {
+      const key = `${p.tradingSymbol || p.id}_${p.productType}`;
+      if (!order.has(key)) {
+        order.set(key, nextOrderRef.current++);
+      }
+    }
+    return [...active].sort((a, b) => {
+      const keyA = `${a.tradingSymbol || a.id}_${a.productType}`;
+      const keyB = `${b.tradingSymbol || b.id}_${b.productType}`;
+      return (order.get(keyA) ?? 0) - (order.get(keyB) ?? 0);
+    });
+  }, [positions]);
+
   const openCount = activePositions.length;
   const totalPnl = activePositions.reduce((sum, p) => sum + (p.pnl || 0), 0);
 
