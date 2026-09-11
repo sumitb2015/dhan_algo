@@ -1,8 +1,22 @@
 import { NextResponse } from 'next/server';
-import { kiteGet } from '@/lib/zerodhaToken';
+import { kiteGet, isZerodhaTokenValid } from '@/lib/zerodhaToken';
 import { shapeZerodhaPosition, shapeZerodhaOrder, shapeZerodhaTrade } from '@/lib/zerodhaShape';
 
 export async function GET(): Promise<NextResponse> {
+  // See the matching guard in scalper/zerodha/poll/route.ts — this route is
+  // polled unconditionally regardless of whether Zerodha is actually linked.
+  if (!isZerodhaTokenValid()) {
+    return NextResponse.json({
+      success: true,
+      positions: [],
+      positionsError: 'Zerodha not connected — run scripts/tools/zerodha_autologin.py',
+      orders: [],
+      trades: [],
+      funds: { availabelBalance: 0 },
+      pnl_guard: null,
+    });
+  }
+
   try {
     let positionsError: string | null = null;
     const [positions, orders, trades, margins] = await Promise.all([

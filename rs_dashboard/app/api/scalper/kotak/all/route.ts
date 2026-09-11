@@ -1,8 +1,22 @@
 import { NextResponse } from 'next/server';
-import { kotakGet, kotakLimits, kotakRows, KOTAK_PATHS } from '@/lib/kotakToken';
+import { kotakGet, kotakLimits, kotakRows, KOTAK_PATHS, isKotakTokenValid } from '@/lib/kotakToken';
 import { shapeKotakPosition, shapeKotakOrder, shapeKotakTrade, shapeKotakFunds } from '@/lib/kotakShape';
 
 export async function GET(): Promise<NextResponse> {
+  // See the matching guard in scalper/kotak/poll/route.ts — this route is
+  // polled unconditionally regardless of whether Kotak is actually linked.
+  if (!isKotakTokenValid()) {
+    return NextResponse.json({
+      success: true,
+      positions: [],
+      positionsError: 'Kotak not connected — run kotak_autologin.py',
+      orders: [],
+      trades: [],
+      funds: { availabelBalance: 0 },
+      pnl_guard: null,
+    });
+  }
+
   try {
     let positionsError: string | null = null;
     const [positions, orders, trades, limits] = await Promise.all([
