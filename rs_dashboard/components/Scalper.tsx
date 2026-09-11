@@ -2807,7 +2807,7 @@ export const PositionsTable = React.memo(function PositionsTable({ data, broker,
             </th>
           )}
           <SortableTH sortKey="tradingSymbol" currentSort={sort} onSort={onSort}>Symbol</SortableTH>
-          <th className="px-3 py-2.5 text-xs font-bold text-white text-left whitespace-nowrap">Expiry</th>
+          <SortableTH sortKey="drvExpiryDate" currentSort={sort} onSort={onSort}>Expiry</SortableTH>
           <SortableTH sortKey="netQty" currentSort={sort} onSort={onSort} align="right">Qty</SortableTH>
           <SortableTH sortKey="buyAvg" currentSort={sort} onSort={onSort} align="right">Buy Avg</SortableTH>
           <SortableTH sortKey="sellAvg" currentSort={sort} onSort={onSort} align="right">Sell Avg</SortableTH>
