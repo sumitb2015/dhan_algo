@@ -337,7 +337,8 @@ function StrategyCard({ meta, state, onRefresh, selectedBroker }: StrategyCardPr
   const [cesAllowReverse, setCesAllowReverse] = useState<boolean>(true);
   const [cesExitOnClose, setCesExitOnClose] = useState<boolean>(false);
   const [cesAtrStopMult, setCesAtrStopMult] = useState<number>(1.5);
-  const [cesTrailTriggerAtr, setCesTrailTriggerAtr] = useState<number>(1.0);
+  const [cesTrailSlTrigger, setCesTrailSlTrigger] = useState<number>(10);
+  const [cesTrailSlOffset, setCesTrailSlOffset] = useState<number>(1.0);
 
   // ST+OI Bear Call Spread
   const [indexInterval, setIndexInterval] = useState<string>('3');
@@ -593,7 +594,8 @@ function StrategyCard({ meta, state, onRefresh, selectedBroker }: StrategyCardPr
         args.push('--days', String(cesDays));
         args.push('--flip-cooldown', String(cesFlipCooldown));
         args.push('--atr-stop-mult', String(cesAtrStopMult));
-        args.push('--trail-trigger-atr', String(cesTrailTriggerAtr));
+        args.push('--trail-sl-trigger', String(cesTrailSlTrigger));
+        args.push('--trail-sl-offset', String(cesTrailSlOffset));
         if (!cesAllowReverse) args.push('--no-reverse');
         if (cesExitOnClose) args.push('--exit-on-close');
       } else if (meta.key === 'nifty_st_oi_bearcall') {
@@ -1715,12 +1717,16 @@ function StrategyCard({ meta, state, onRefresh, selectedBroker }: StrategyCardPr
               <Input type="number" value={cesFlipCooldown} onChange={(e) => setCesFlipCooldown(parseInt(e.target.value) || 60)} min={0} className={inputCls} />
             </div>
             <div className={fieldCls}>
-              <FieldLabel text="ATR Stop ×" tip="Initial per-trade stop, in ATRs from the entry fill. 0 disables the stop and the trailing band entirely." />
+              <FieldLabel text="ATR Stop ×" tip="Initial per-trade stop, in ATRs from the entry fill. 0 disables just this initial stop — the trailing SL below is independent and keeps working." />
               <Input type="number" step="0.1" value={cesAtrStopMult} onChange={(e) => setCesAtrStopMult(parseFloat(e.target.value) || 0)} min={0} className={inputCls} />
             </div>
             <div className={fieldCls}>
-              <FieldLabel text="Trail Trigger ×ATR" tip="ATRs of open profit required before the stop hands over to the Supertrend band and starts ratcheting." />
-              <Input type="number" step="0.1" value={cesTrailTriggerAtr} onChange={(e) => setCesTrailTriggerAtr(parseFloat(e.target.value) || 1.0)} min={0} className={inputCls} />
+              <FieldLabel text="Trail SL Trigger (pts)" tip="Price points the position must move in profit, from entry, before the trailing SL arms." />
+              <Input type="number" step="1" value={cesTrailSlTrigger} onChange={(e) => setCesTrailSlTrigger(parseFloat(e.target.value) || 0)} min={0} className={inputCls} />
+            </div>
+            <div className={fieldCls}>
+              <FieldLabel text="Trail SL Offset ₹" tip="Once armed, the trailing SL sits this many rupees behind the best price reached and ratchets with it point-for-point — moves ₹1 for every ₹1 of extra profit, never loosening. 0 disables the trailing SL (only the initial ATR stop then applies)." />
+              <Input type="number" step="0.5" value={cesTrailSlOffset} onChange={(e) => setCesTrailSlOffset(parseFloat(e.target.value) || 0)} min={0} className={inputCls} />
             </div>
             <div className={fieldCls}>
               <FieldLabel text="Always-On" tip="ON: a signal flip exits and immediately opens the opposite position (stop-and-reverse), so the strategy is always in the market. OFF: it exits to flat and waits for the next candle before re-entering." />

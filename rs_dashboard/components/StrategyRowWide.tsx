@@ -224,7 +224,8 @@ function StrategyRowWide({ meta, state, onRefresh, instanceId, onAddInstance, on
   const [cesAllowReverse, setCesAllowReverse] = useState(true);
   const [cesExitOnClose, setCesExitOnClose] = useState(false);
   const [cesAtrStopMult, setCesAtrStopMult] = useState(1.5);
-  const [cesTrailTriggerAtr, setCesTrailTriggerAtr] = useState(1.0);
+  const [cesTrailSlTrigger, setCesTrailSlTrigger] = useState(10);
+  const [cesTrailSlOffset, setCesTrailSlOffset] = useState(1.0);
   // ST+OI Bear Call Spread
   const [indexInterval, setIndexInterval] = useState('3');
   const [indexStPeriod, setIndexStPeriod] = useState(10);
@@ -454,7 +455,8 @@ function StrategyRowWide({ meta, state, onRefresh, instanceId, onAddInstance, on
         args.push('--days', String(cesDays));
         args.push('--flip-cooldown', String(cesFlipCooldown));
         args.push('--atr-stop-mult', String(cesAtrStopMult));
-        args.push('--trail-trigger-atr', String(cesTrailTriggerAtr));
+        args.push('--trail-sl-trigger', String(cesTrailSlTrigger));
+        args.push('--trail-sl-offset', String(cesTrailSlOffset));
         if (!cesAllowReverse) args.push('--no-reverse');
         if (cesExitOnClose) args.push('--exit-on-close');
       } else if (meta.key === 'nifty_spread_trend') {
@@ -1795,8 +1797,9 @@ function StrategyRowWide({ meta, state, onRefresh, instanceId, onAddInstance, on
             <div className={fieldCls}><FieldLabel text="Poll (s)" tip="Seconds between Supertrend/EMA refreshes. Exits still react to live ticks every second." /><Input type="number" value={cesPollSeconds} onChange={e => setCesPollSeconds(parseInt(e.target.value) || 15)} min={5} className={inputCls} style={{ width: 64 }} /></div>
             <div className={fieldCls}><FieldLabel text="Lookback (days)" tip="Days of candle history fetched for the indicator calculation." /><Input type="number" value={cesDays} onChange={e => setCesDays(parseInt(e.target.value) || 3)} min={1} className={inputCls} style={{ width: 64 }} /></div>
             <div className={fieldCls}><FieldLabel text="Flip Cooldown (s)" tip="Minimum seconds between position flips. The Supertrend and EMA cross each other regularly, and when they nearly coincide the hold-zone collapses to a point — without this a price ticking across it would flip the position every second." /><Input type="number" value={cesFlipCooldown} onChange={e => setCesFlipCooldown(parseInt(e.target.value) || 60)} min={0} className={inputCls} style={{ width: 72 }} /></div>
-            <div className={fieldCls}><FieldLabel text="ATR Stop ×" tip="Initial per-trade stop, in ATRs from the entry fill. 0 disables the stop and the trailing band entirely." /><Input type="number" step="0.1" value={cesAtrStopMult} onChange={e => setCesAtrStopMult(parseFloat(e.target.value) || 0)} min={0} className={inputCls} style={{ width: 64 }} /></div>
-            <div className={fieldCls}><FieldLabel text="Trail Trigger ×ATR" tip="ATRs of open profit required before the stop hands over to the Supertrend band and starts ratcheting." /><Input type="number" step="0.1" value={cesTrailTriggerAtr} onChange={e => setCesTrailTriggerAtr(parseFloat(e.target.value) || 1.0)} min={0} className={inputCls} style={{ width: 64 }} /></div>
+            <div className={fieldCls}><FieldLabel text="ATR Stop ×" tip="Initial per-trade stop, in ATRs from the entry fill. 0 disables just this initial stop — the trailing SL is independent and keeps working." /><Input type="number" step="0.1" value={cesAtrStopMult} onChange={e => setCesAtrStopMult(parseFloat(e.target.value) || 0)} min={0} className={inputCls} style={{ width: 64 }} /></div>
+            <div className={fieldCls}><FieldLabel text="Trail SL Trigger (pts)" tip="Price points the position must move in profit, from entry, before the trailing SL arms." /><Input type="number" step="1" value={cesTrailSlTrigger} onChange={e => setCesTrailSlTrigger(parseFloat(e.target.value) || 0)} min={0} className={inputCls} style={{ width: 64 }} /></div>
+            <div className={fieldCls}><FieldLabel text="Trail SL Offset ₹" tip="Once armed, the trailing SL sits this many rupees behind the best price reached and ratchets with it point-for-point — moves ₹1 for every ₹1 of extra profit, never loosening. 0 disables the trailing SL." /><Input type="number" step="0.5" value={cesTrailSlOffset} onChange={e => setCesTrailSlOffset(parseFloat(e.target.value) || 0)} min={0} className={inputCls} style={{ width: 64 }} /></div>
             <div className={fieldCls}>
               <FieldLabel text="Always-On" tip="ON: a signal flip exits and immediately opens the opposite position (stop-and-reverse), so the strategy is always in the market. OFF: it exits to flat and waits for the next candle before re-entering." />
               <div className="flex items-center gap-2 h-7">

@@ -110,7 +110,8 @@ class CrudeOilMEmaSupertrendStrategy:
         exit_on_close: bool = False,
         flip_cooldown: int = 60,
         atr_stop_mult: float = 1.5,
-        trail_trigger_atr: float = 1.0,
+        trail_sl_trigger: float = 10.0,
+        trail_sl_offset: float = 1.0,
     ):
         self.dry_run = dry_run
         self.lots = lots
@@ -129,7 +130,8 @@ class CrudeOilMEmaSupertrendStrategy:
         self.exit_on_close = exit_on_close
         self.flip_cooldown = flip_cooldown
         self.atr_stop_mult = atr_stop_mult
-        self.trail_trigger_atr = trail_trigger_atr
+        self.trail_sl_trigger = trail_sl_trigger
+        self.trail_sl_offset = trail_sl_offset
         # Backoff after a rejected entry, so a persistently failing order does not
         # get resubmitted once per second.
         self.entry_retry_seconds = max(5, poll_seconds)
@@ -160,7 +162,10 @@ class CrudeOilMEmaSupertrendStrategy:
 
         # Per-trade stop
         self.stop_level: float = 0.0
-        self.stop_source: str = ""          # "ATR" | "SUPERTREND"
+        self.stop_source: str = ""          # "ATR" | "TRAIL"
+        # Best (most favorable) price seen since entry — the reference the point-trail
+        # ratchets against. Reset on every new entry (see enter_position).
+        self.best_price: float = 0.0
 
         self.trades_today: int = 0
 
@@ -526,6 +531,7 @@ class CrudeOilMEmaSupertrendStrategy:
         self.direction = direction
         self.entry_time = datetime.now()
         self.position_pnl = 0.0
+        self.best_price = self.entry_price
         self.trades_today += 1
         snap = self._read_snapshot()
         self._arm_initial_stop(snap)
@@ -540,7 +546,7 @@ class CrudeOilMEmaSupertrendStrategy:
         return True
 
     # ------------------------------------------------------------------
-    # Per-trade stop: ATR at entry, then ratcheted onto the Supertrend band
+    # Per-trade stop: ATR at entry, then a point-for-point trailing SL
     # ------------------------------------------------------------------
 
     def _arm_initial_stop(self, snap: Optional[Snapshot]) -> None:
@@ -555,35 +561,40 @@ class CrudeOilMEmaSupertrendStrategy:
         self.stop_source = "ATR"
 
     def _update_trailing_stop(self) -> None:
-        """Once the trade is far enough in profit, hand the stop to the Supertrend band.
+        """Point-for-point trailing SL: once the position is --trail-sl-trigger points
+        in favor of entry, arm a stop --trail-sl-offset points behind the best price
+        seen so far. From then on the stop moves up (long) / down (short) rupee for
+        rupee with every new high/low the position makes -- a fixed gap that only ever
+        tightens (ratchet_stop), never loosens, so a pullback cannot hand back profit
+        already locked in.
 
-        The band only ever tightens the stop (ratchet_stop), so a mid-trend pullback
-        cannot hand back locked-in profit. Without this the signal flip is the only
-        exit and a winner round-trips through the mixed zone before it fires.
+        This is deliberately independent of the Supertrend/EMA bands: it is a plain
+        price-distance trail, not an indicator-driven one, so it keeps working exactly
+        the same way regardless of how the bands are behaving.
         """
-        if self.direction == "NONE" or self.atr_stop_mult <= 0:
+        if self.direction == "NONE" or self.trail_sl_offset <= 0 or self.ltp <= 0:
             return
-        snap = self._read_snapshot()
-        if snap is None or snap.atr <= 0 or snap.st <= 0 or self.ltp <= 0:
+
+        if self.direction == "LONG":
+            self.best_price = max(self.best_price, self.ltp) if self.best_price > 0 else self.ltp
+            move = self.best_price - self.entry_price
+        else:
+            self.best_price = min(self.best_price, self.ltp) if self.best_price > 0 else self.ltp
+            move = self.entry_price - self.best_price
+
+        if move < self.trail_sl_trigger:
             return
-        move = (self.ltp - self.entry_price) if self.direction == "LONG" \
-            else (self.entry_price - self.ltp)
-        if move < snap.atr * self.trail_trigger_atr:
-            return
-        # Never adopt a band that is already on the wrong side of price -- that would
-        # be an immediate stop-out on the very tick that armed the trail.
-        if self.direction == "LONG" and snap.st >= self.ltp:
-            return
-        if self.direction == "SHORT" and snap.st <= self.ltp:
-            return
-        new_stop = ratchet_stop(self.direction, self.stop_level, snap.st)
+
+        candidate = (self.best_price - self.trail_sl_offset) if self.direction == "LONG" \
+            else (self.best_price + self.trail_sl_offset)
+        new_stop = ratchet_stop(self.direction, self.stop_level, candidate)
         if new_stop != self.stop_level:
             logger.info(
-                "Trailing stop %.2f -> %.2f (Supertrend band, %s @ %.2f)",
-                self.stop_level, new_stop, self.direction, self.ltp
+                "Trailing stop %.2f -> %.2f (%.2f pts behind best %.2f, %s)",
+                self.stop_level, new_stop, self.trail_sl_offset, self.best_price, self.direction
             )
             self.stop_level = new_stop
-            self.stop_source = "SUPERTREND"
+            self.stop_source = "TRAIL"
 
     # ------------------------------------------------------------------
     # Exit
@@ -646,6 +657,7 @@ class CrudeOilMEmaSupertrendStrategy:
         self.position_pnl = 0.0
         self.stop_level = 0.0
         self.stop_source = ""
+        self.best_price = 0.0
         return realized_pnl
 
     def _flatten(self, reason: str) -> None:
@@ -701,7 +713,9 @@ class CrudeOilMEmaSupertrendStrategy:
             "stop_level": round(self.stop_level, 2),
             "stop_source": self.stop_source,
             "atr_stop_mult": self.atr_stop_mult,
-            "trail_trigger_atr": self.trail_trigger_atr,
+            "trail_sl_trigger": self.trail_sl_trigger,
+            "trail_sl_offset": self.trail_sl_offset,
+            "best_price": round(self.best_price, 2),
             "trades_today": self.trades_today,
             "qty": self.qty,
             "lots": self.lots,
@@ -760,9 +774,10 @@ class CrudeOilMEmaSupertrendStrategy:
             f"  On flip     : {'stop-and-reverse' if self.allow_reverse else 'exit to flat (--no-reverse)'}"
             f" (min {self.flip_cooldown}s between flips)\n"
             f"  Exit price  : {'confirmed close' if self.exit_on_close else 'live LTP'}\n"
-            f"  Trade stop  : "
-            + (f"{self.atr_stop_mult}x ATR, trails the Supertrend band after "
-               f"{self.trail_trigger_atr}x ATR of profit" if self.atr_stop_mult > 0 else "none")
+            f"  Initial stop: {f'{self.atr_stop_mult}x ATR from entry' if self.atr_stop_mult > 0 else 'none'}\n"
+            f"  Trailing SL : "
+            + (f"arms after {self.trail_sl_trigger} pts in profit, then follows the best "
+               f"price by {self.trail_sl_offset} pts (ratchets only)" if self.trail_sl_offset > 0 else "none")
             + f"\n"
             f"  Quantity    : {self.lots} lot(s) -> broker qty {self.qty}, exposure {self.exposure} barrels\n"
             f"  Day target  : +{self.target_profit:.0f} INR | Day stop: -{self.stop_loss:.0f} INR\n"
@@ -966,10 +981,16 @@ Examples:
                              "tick-level thrash when the Supertrend and EMA nearly coincide")
     parser.add_argument("--atr-stop-mult", type=float, default=1.5,
                         help="Initial per-trade stop, in ATRs from the entry (default: 1.5; "
-                             "0 disables the stop and the trail)")
-    parser.add_argument("--trail-trigger-atr", type=float, default=1.0,
-                        help="ATRs of open profit before the stop hands over to the Supertrend "
-                             "band and starts ratcheting (default: 1.0)")
+                             "0 disables just this initial stop -- the trailing SL below is "
+                             "independent and keeps working)")
+    parser.add_argument("--trail-sl-trigger", type=float, default=10.0,
+                        help="Price points the position must move in profit, from entry, "
+                             "before the trailing SL arms (default: 10)")
+    parser.add_argument("--trail-sl-offset", type=float, default=1.0,
+                        help="Once armed, the trailing SL sits this many rupees behind the "
+                             "best price reached and ratchets up (long) / down (short) with "
+                             "it point-for-point, never loosening (default: 1; 0 disables the "
+                             "trailing SL entirely -- only the initial ATR stop then applies)")
     parser.add_argument("--instance-id", type=str, default="", metavar="ID",
                         help="Suffix for debug/state files to run a second concurrent copy of this strategy")
     args = parser.parse_args()
@@ -1002,8 +1023,10 @@ Examples:
         problems.append("--flip-cooldown cannot be negative")
     if args.atr_stop_mult < 0:
         problems.append("--atr-stop-mult cannot be negative")
-    if args.trail_trigger_atr < 0:
-        problems.append("--trail-trigger-atr cannot be negative")
+    if args.trail_sl_trigger < 0:
+        problems.append("--trail-sl-trigger cannot be negative")
+    if args.trail_sl_offset < 0:
+        problems.append("--trail-sl-offset cannot be negative")
     if not str(args.interval).isdigit() or int(args.interval) < 1:
         problems.append("--interval must be a positive whole number of minutes")
     # Which intervals Dhan actually serves is NOT a fixed list and is not worth
@@ -1042,7 +1065,8 @@ Examples:
         exit_on_close=args.exit_on_close,
         flip_cooldown=args.flip_cooldown,
         atr_stop_mult=args.atr_stop_mult,
-        trail_trigger_atr=args.trail_trigger_atr,
+        trail_sl_trigger=args.trail_sl_trigger,
+        trail_sl_offset=args.trail_sl_offset,
     )
 
     try:

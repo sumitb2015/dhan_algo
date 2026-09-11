@@ -441,13 +441,27 @@ guard against tick-level thrash when the Supertrend and EMA nearly coincide. Unl
 the VWAP + Supertrend strategy there is no ATR-scaled minimum clearance on top of
 this — clearing both bands by any amount, once the cooldown has elapsed, is enough.
 
-## Per-Trade Stop and Trail
+## Per-Trade Stop and Trailing SL
 
-Same mechanism as the VWAP + Supertrend strategy (`lib/trade_stops.py`, shared): on
-entry the stop is placed at `--atr-stop-mult` (1.5) ATRs from the fill. Once the trade
-is `--trail-trigger-atr` (1.0) ATRs in profit the stop hands over to the Supertrend
-band and **ratchets only**, so a mid-trend pullback cannot hand back locked-in profit.
-`--atr-stop-mult 0` disables the stop and the trail entirely.
+Two independent layers, both using `lib/trade_stops.py`'s `ratchet_stop()` /
+`stop_hit()` (shared with the other crudeoil strategies):
+
+- **Initial stop** — placed at `--atr-stop-mult` (1.5) ATRs from the entry fill.
+  `--atr-stop-mult 0` disables just this initial stop.
+- **Trailing SL** — a plain point-distance trail, deliberately independent of the
+  Supertrend/EMA bands (unlike the VWAP + Supertrend strategy, which hands the stop
+  over to the Supertrend band once triggered). Once the position has moved
+  `--trail-sl-trigger` (10) price points in its favor from entry, the trail arms at
+  `--trail-sl-offset` (1) rupees behind the best price reached so far. From then on
+  the stop follows every new high (long) / low (short) point-for-point — every ₹1
+  the position makes, the stop moves up ₹1 too — and **ratchets only**, so a
+  pullback can never hand back profit already locked in. `--trail-sl-offset 0`
+  disables the trailing SL entirely; the initial ATR stop still applies.
+
+The two layers compose naturally: before the trigger, the initial ATR stop is what's
+live; once the trail arms it takes over (`stop_source` flips from `ATR` to `TRAIL` in
+the state file), and being a ratchet, it can only ever be tighter than where it
+started.
 
 ## Decision Telemetry
 
@@ -476,7 +490,7 @@ barrels/lot for CRUDEOILM) is used for P&L only.
 2. EOD time reached (flatten and stop)
 3. Daily profit target hit (cumulative, INR) — flatten and stop for the day
 4. Daily stop loss hit (cumulative, INR) — flatten and stop for the day
-5. **Per-trade stop / Supertrend trail hit** → flat (does not end the day)
+5. **Per-trade stop / trailing SL hit** → flat (does not end the day)
 6. Signal flip → stop-and-reverse
 
 Only 1–4 end the day.
@@ -497,8 +511,11 @@ manually first.
 --ema-length INT          EMA length (default: 20)
 --target-profit FLOAT     Daily profit cap, INR (default: 5000)
 --stop-loss FLOAT         Daily loss cap, INR (default: 5000)
---atr-stop-mult FLOAT     Per-trade stop, ATRs from entry (default: 1.5; 0 disables)
---trail-trigger-atr FLOAT ATRs of profit before the stop trails the Supertrend band (default: 1.0)
+--atr-stop-mult FLOAT     Initial per-trade stop, ATRs from entry (default: 1.5; 0 disables)
+--trail-sl-trigger FLOAT  Points in profit before the trailing SL arms (default: 10)
+--trail-sl-offset FLOAT   Rupees the trailing SL sits behind the best price once armed;
+                           this is the "moves ₹1 for every ₹1 of profit" distance
+                           (default: 1; 0 disables the trailing SL)
 --flip-cooldown INT       Minimum seconds between flips (default: 60)
 --no-reverse              Exit to flat on a flip instead of reversing
 --exit-on-close           Use confirmed closes for exits instead of live LTP
