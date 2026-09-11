@@ -1,6 +1,6 @@
 'use client';
 
-import React from 'react';
+import React, { useRef, useMemo } from 'react';
 import { Layers, X } from 'lucide-react';
 
 import { Badge } from '@/components/ui/badge';
@@ -201,6 +201,19 @@ export default function ActivityPanel({
   const totalRealized = positions.reduce((s, p) => s + (p.realizedProfit || 0), 0);
   const totalMtm = totalUnrealized + totalRealized;
 
+  // Pin each symbol to the order it was first seen so the table doesn't
+  // reshuffle on every broker-API poll (the API doesn't guarantee stable
+  // row ordering). Same pattern as PositionsTable in Scalper.tsx.
+  const rowOrderRef = useRef<Map<string, number>>(new Map());
+  const nextOrderRef = useRef(0);
+  const stablePositions = useMemo(() => {
+    const order = rowOrderRef.current;
+    for (const p of positions) {
+      if (!order.has(p.symbol)) order.set(p.symbol, nextOrderRef.current++);
+    }
+    return [...positions].sort((a, b) => (order.get(a.symbol) ?? 0) - (order.get(b.symbol) ?? 0));
+  }, [positions]);
+
   const tabButtons = (
     <div className="flex items-center rounded-lg border border-zinc-800 bg-zinc-950 p-0.5 font-mono">
       {(['positions', 'orders', 'trades'] as const).map((t) => {
@@ -288,14 +301,14 @@ export default function ActivityPanel({
                   </TableCell>
                 </TableRow>
               ) : (
-                positions.map((p, i) => {
+                stablePositions.map((p) => {
                   const config  = riskConfigs[p.symbol] ?? { sl: null, target: null };
                   const editing = editingConfigs[p.symbol] ?? {};
                   const isShort = p.netQty < 0;
                   const flat    = p.netQty === 0;
 
                   return (
-                    <TableRow key={`${p.symbol}-${i}`} className="border-b border-zinc-800/80 hover:bg-zinc-800/40 transition-colors">
+                    <TableRow key={p.symbol} className="border-b border-zinc-800/80 hover:bg-zinc-800/40 transition-colors">
                       <TableCell className="font-mono font-bold text-zinc-100">{p.symbol}</TableCell>
                       <TableCell>
                         <Badge
