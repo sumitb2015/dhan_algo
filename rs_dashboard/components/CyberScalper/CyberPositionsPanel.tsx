@@ -298,7 +298,7 @@ export default function CyberPositionsPanel({
               <div className="overflow-x-auto">
                 <table className="w-full text-left font-mono text-xs">
                   <thead>
-                    <tr className="border-b border-zinc-800 bg-zinc-800/90 text-[11px] font-bold text-white uppercase tracking-wider">
+                    <tr className="border-b border-zinc-700 bg-zinc-800 text-xs font-bold text-white uppercase tracking-wider">
                       <th className="py-2.5 px-3">Contract</th>
                       <th className="py-2.5 px-2">Side</th>
                       <th className="py-2.5 px-2 text-right">Qty</th>
@@ -546,7 +546,7 @@ export default function CyberPositionsPanel({
               <div className="overflow-x-auto">
                 <table className="w-full text-left font-mono text-xs">
                   <thead>
-                    <tr className="border-b border-zinc-800 bg-zinc-800/90 text-[11px] font-bold text-white uppercase tracking-wider">
+                    <tr className="border-b border-zinc-700 bg-zinc-800 text-xs font-bold text-white uppercase tracking-wider">
                       <th className="py-2.5 px-3">Contract</th>
                       <th className="py-2.5 px-2">Side</th>
                       <th className="py-2.5 px-2 text-right">Qty</th>

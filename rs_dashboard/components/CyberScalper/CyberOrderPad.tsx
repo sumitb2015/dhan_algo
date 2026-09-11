@@ -76,6 +76,8 @@ interface OrderPadProps {
   }) => Promise<void>;
   onFlattenAll: () => Promise<void>;
   openPositionsCount: number;
+  suggestedTargetPts?: number | null;
+  suggestedSlPts?: number | null;
 }
 
 export default function CyberOrderPad({
@@ -88,6 +90,8 @@ export default function CyberOrderPad({
   onExecuteTrade,
   onFlattenAll,
   openPositionsCount,
+  suggestedTargetPts,
+  suggestedSlPts,
 }: OrderPadProps) {
   // Settings
   const [tradeMode, setTradeMode] = useState<'OPTIONS' | 'FUTURES'>('OPTIONS');
@@ -594,7 +598,21 @@ export default function CyberOrderPad({
         <div className="bg-zinc-950/70 border border-zinc-800/80 rounded-xl p-3 flex flex-col justify-between">
           <div className="flex items-center justify-between text-[11px] font-mono text-zinc-400 mb-2">
             <span>TARGET PRESET (PTS)</span>
-            <span className="text-emerald-400 font-bold">{targetPts ? `+${targetPts} PTS` : 'OFF'}</span>
+            <div className="flex items-center gap-1.5">
+              {suggestedTargetPts && (
+                <button
+                  onClick={() => {
+                    cyberAudio.click();
+                    setTargetPts(Math.round(suggestedTargetPts));
+                  }}
+                  className="px-1.5 py-0.2 rounded text-[9px] font-mono font-bold bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 hover:bg-emerald-500/30 transition-all"
+                  title="Apply 9/20 Strategy Target"
+                >
+                  ATR TP: +{Math.round(suggestedTargetPts)}
+                </button>
+              )}
+              <span className="text-emerald-400 font-bold">{targetPts ? `+${targetPts} PTS` : 'OFF'}</span>
+            </div>
           </div>
           <div className="flex items-center gap-1.5">
             {[null, 5, 10, 20, 30].map((t, idx) => (
@@ -621,7 +639,21 @@ export default function CyberOrderPad({
         <div className="bg-zinc-950/70 border border-zinc-800/80 rounded-xl p-3 flex flex-col justify-between">
           <div className="flex items-center justify-between text-[11px] font-mono text-zinc-400 mb-2">
             <span>STOP LOSS PRESET (PTS)</span>
-            <span className="text-rose-400 font-bold">{slPts ? `-${slPts} PTS` : 'OFF'}</span>
+            <div className="flex items-center gap-1.5">
+              {suggestedSlPts && (
+                <button
+                  onClick={() => {
+                    cyberAudio.click();
+                    setSlPts(Math.round(suggestedSlPts));
+                  }}
+                  className="px-1.5 py-0.2 rounded text-[9px] font-mono font-bold bg-rose-500/20 text-rose-300 border border-rose-500/40 hover:bg-rose-500/30 transition-all"
+                  title="Apply 9/20 Strategy Stop Loss"
+                >
+                  ATR SL: -{Math.round(suggestedSlPts)}
+                </button>
+              )}
+              <span className="text-rose-400 font-bold">{slPts ? `-${slPts} PTS` : 'OFF'}</span>
+            </div>
           </div>
           <div className="flex items-center gap-1.5">
             {[null, 5, 10, 15, 25].map((s, idx) => (

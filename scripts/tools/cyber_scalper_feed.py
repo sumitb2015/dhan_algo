@@ -98,6 +98,212 @@ def compute_vwap(df: pd.DataFrame) -> pd.Series:
     return tp.expanding().mean()
 
 
+def compute_atr(df: pd.DataFrame, period: int = 14) -> float:
+    """Computes ATR over given period on the bar series."""
+    if len(df) < 2:
+        return 5.0
+    high_low = df["high"] - df["low"]
+    high_close = (df["high"] - df["close"].shift(1)).abs()
+    low_close = (df["low"] - df["close"].shift(1)).abs()
+    tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
+    atr = tr.ewm(span=period, adjust=False).mean().iloc[-1]
+    return clean_float(atr, default=5.0)
+
+
+def detect_crossover(df: pd.DataFrame) -> dict:
+    """Detects most recent 9/20 EMA crossover in the last 40 bars."""
+    spreads = df["spread"].values
+    times = df["time"].values
+    closes = df["close"].values
+    n = len(spreads)
+    bars_since_cross = 999
+    cross_type = "NONE"
+    cross_price = 0.0
+    cross_time = ""
+
+    for i in range(n - 1, max(0, n - 40), -1):
+        curr_s = spreads[i]
+        prev_s = spreads[i - 1] if i > 0 else 0
+        if prev_s <= 0 and curr_s > 0:
+            bars_since_cross = (n - 1) - i
+            cross_type = "GOLDEN_CROSS"
+            cross_price = clean_float(closes[i])
+            cross_time = pd.to_datetime(times[i]).strftime("%H:%M")
+            break
+        elif prev_s >= 0 and curr_s < 0:
+            bars_since_cross = (n - 1) - i
+            cross_type = "DEATH_CROSS"
+            cross_price = clean_float(closes[i])
+            cross_time = pd.to_datetime(times[i]).strftime("%H:%M")
+            break
+
+    return {
+        "bars_since_cross": bars_since_cross,
+        "cross_type": cross_type,
+        "cross_price": cross_price,
+        "cross_time": cross_time,
+    }
+
+
+def evaluate_ema_scalp_strategy(
+    close: float,
+    ema9: float,
+    ema20: float,
+    vwap: float,
+    spread_curr: float,
+    spread_prev: float,
+    atr14: float,
+    cross_info: dict,
+) -> dict:
+    """
+    Evaluates actionable 9 & 20 EMA + VWAP Scalp Strategy setups,
+    including Value Zone pullbacks, breakouts, overextension risk,
+    and quant SL/Target anchor levels.
+    """
+    spread_diff = spread_curr - spread_prev
+    dist_ema9 = clean_float(close - ema9)
+    dist_ema20 = clean_float(close - ema20)
+    dist_ema20_pct = clean_float((dist_ema20 / ema20 * 100) if ema20 > 0 else 0.0)
+
+    # Value Zone (Pocket between EMA 9 and EMA 20 ± 0.25 ATR buffer)
+    val_low = min(ema9, ema20) - (0.25 * atr14)
+    val_high = max(ema9, ema20) + (0.25 * atr14)
+    in_value_zone = bool(val_low <= close <= val_high)
+
+    # Overextension ratio relative to ATR (distance from 20 EMA / ATR)
+    extension_ratio = clean_float(abs(close - ema20) / max(atr14, 0.5))
+    is_overextended = extension_ratio >= 2.0
+
+    is_bull_trend = spread_curr > 0 and close > vwap
+    is_bear_trend = spread_curr < 0 and close < vwap
+
+    # Quant Stop Loss & Target calculations
+    if spread_curr >= 0:
+        sl_anchor = clean_float(ema20 - (0.5 * atr14))
+        target_1 = clean_float(close + (1.2 * atr14))
+        target_2 = clean_float(close + (2.2 * atr14))
+        sl_pts = clean_float(max(2.0, close - sl_anchor))
+        target_pts = clean_float(max(3.0, target_1 - close))
+    else:
+        sl_anchor = clean_float(ema20 + (0.5 * atr14))
+        target_1 = clean_float(close - (1.2 * atr14))
+        target_2 = clean_float(close - (2.2 * atr14))
+        sl_pts = clean_float(max(2.0, sl_anchor - close))
+        target_pts = clean_float(max(3.0, close - target_1))
+
+    bars_ago = cross_info.get("bars_since_cross", 999)
+    c_type = cross_info.get("cross_type", "NONE")
+
+    # Canonical Setup Determination
+    if bars_ago <= 3 and c_type == "GOLDEN_CROSS" and close > vwap:
+        setup_key = "GOLDEN_CROSSOVER"
+        setup_name = "Golden Crossover Breakout"
+        badge_text = f"Golden Cross ({bars_ago}m ago)"
+        action_headline = "MOMENTUM CALL SCALP"
+        action_detail = f"EMA 9 freshly crossed above EMA 20 with price above VWAP at {cross_info.get('cross_time')}. Favor aggressive momentum longs."
+        setup_quality = "HIGH"
+    elif bars_ago <= 3 and c_type == "DEATH_CROSS" and close < vwap:
+        setup_key = "DEATH_CROSSOVER"
+        setup_name = "Death Crossover Breakdown"
+        badge_text = f"Death Cross ({bars_ago}m ago)"
+        action_headline = "MOMENTUM PUT SCALP"
+        action_detail = f"EMA 9 freshly crossed below EMA 20 with price below VWAP at {cross_info.get('cross_time')}. Favor aggressive momentum shorts."
+        setup_quality = "HIGH"
+    elif is_overextended:
+        if spread_curr > 0:
+            setup_key = "BULLISH_OVEREXTENDED"
+            setup_name = "Bullish Overextended (Snapback Risk)"
+            badge_text = f"Overextended ({extension_ratio:.1f}x ATR)"
+            action_headline = "CAUTION: DO NOT CHASE LATE CALLS"
+            action_detail = f"Price is {dist_ema20} pts ({extension_ratio:.1f}x ATR) away from 20 EMA. High probability of pullback. Wait for dip to EMA 20."
+            setup_quality = "CAUTION"
+        else:
+            setup_key = "BEARISH_OVEREXTENDED"
+            setup_name = "Bearish Overextended (Bounce Risk)"
+            badge_text = f"Overextended ({extension_ratio:.1f}x ATR)"
+            action_headline = "CAUTION: DO NOT CHASE LATE PUTS"
+            action_detail = f"Price is {abs(dist_ema20)} pts ({extension_ratio:.1f}x ATR) below 20 EMA. High probability of bounce. Wait for rip to EMA 20."
+            setup_quality = "CAUTION"
+    elif in_value_zone and is_bull_trend:
+        setup_key = "BULLISH_PULLBACK"
+        setup_name = "Bullish Pullback to 9/20 EMA Zone"
+        badge_text = "Value Zone Dip Buy"
+        action_headline = "BUY DIP AT 20 EMA SUPPORT"
+        action_detail = f"High R:R trend continuation scalp. Price entered EMA 9/20 reload zone ({val_low:.1f} - {val_high:.1f}). SL tight below 20 EMA."
+        setup_quality = "A+"
+    elif in_value_zone and is_bear_trend:
+        setup_key = "BEARISH_PULLBACK"
+        setup_name = "Bearish Rip to 9/20 EMA Zone"
+        badge_text = "Value Zone Rip Sell"
+        action_headline = "SELL RIP AT 20 EMA RESISTANCE"
+        action_detail = f"High R:R trend continuation scalp. Price retraced into EMA 9/20 reload zone ({val_low:.1f} - {val_high:.1f}). SL tight above 20 EMA."
+        setup_quality = "A+"
+    elif is_bull_trend and spread_diff >= -0.05:
+        setup_key = "BULLISH_EXPANSION"
+        setup_name = "Bullish Trend Expansion"
+        badge_text = "Trend Expansion"
+        action_headline = "RIDE CALL MOMENTUM / TRAIL STOP"
+        action_detail = "EMA spread is expanding with price riding above EMA 9. Hold or scalp with dynamic trailing stop."
+        setup_quality = "GOOD"
+    elif is_bear_trend and spread_diff <= 0.05:
+        setup_key = "BEARISH_EXPANSION"
+        setup_name = "Bearish Trend Expansion"
+        badge_text = "Trend Expansion"
+        action_headline = "RIDE PUT MOMENTUM / TRAIL STOP"
+        action_detail = "EMA spread is expanding downward with price sliding below EMA 9. Hold or scalp with dynamic trailing stop."
+        setup_quality = "GOOD"
+    else:
+        setup_key = "CONTRADICTION_CHOP"
+        setup_name = "Mixed Bias / Chop Zone"
+        badge_text = "Conflict / Range"
+        action_headline = "STAND ASIDE / WAIT FOR CLEAR BREAKOUT"
+        action_detail = "Price and EMA configuration are in conflict (e.g. above VWAP with negative EMA spread). Avoid scalp whipsaws."
+        setup_quality = "LOW"
+
+    # Confluence Checklist
+    chk_vwap = (close > vwap) if spread_curr >= 0 else (close < vwap)
+    chk_stack = (spread_curr > 0) if spread_curr >= 0 else (spread_curr < 0)
+    chk_velocity = (spread_diff > 0) if spread_curr >= 0 else (spread_diff < 0)
+    chk_sweet_spot = in_value_zone
+    chk_risk = not is_overextended
+
+    score = sum([1 if x else 0 for x in [chk_vwap, chk_stack, chk_velocity, chk_sweet_spot, chk_risk]])
+
+    return {
+        "setup_key": setup_key,
+        "setup_name": setup_name,
+        "setup_quality": setup_quality,
+        "badge_text": badge_text,
+        "action_headline": action_headline,
+        "action_detail": action_detail,
+        "atr14": atr14,
+        "dist_ema9": dist_ema9,
+        "dist_ema20": dist_ema20,
+        "dist_ema20_pct": dist_ema20_pct,
+        "in_value_zone": in_value_zone,
+        "value_zone_low": clean_float(val_low),
+        "value_zone_high": clean_float(val_high),
+        "extension_ratio": extension_ratio,
+        "is_overextended": is_overextended,
+        "sl_anchor": sl_anchor,
+        "target_1": target_1,
+        "target_2": target_2,
+        "sl_pts": sl_pts,
+        "target_pts": target_pts,
+        "rr_ratio": clean_float(target_pts / max(sl_pts, 0.5)),
+        "crossover": cross_info,
+        "checklist": {
+            "vwap_aligned": chk_vwap,
+            "ema_stacked": chk_stack,
+            "spread_velocity": chk_velocity,
+            "in_sweet_spot": chk_sweet_spot,
+            "controlled_risk": chk_risk,
+            "score": score,
+            "max_score": 5,
+        },
+    }
+
+
 def evaluate_bias(
     close: float,
     ema9: float,
@@ -121,13 +327,6 @@ def evaluate_bias(
         spread_status = "EXPANDING_BEARISH" if spread_diff < 0 else "CONTRACTING_BEARISH"
     else:
         spread_status = "NEUTRAL"
-
-    # Core logic
-    # 1. Strong Bullish: Price > VWAP and EMA9 > EMA20
-    # 2. Bullish Pullback: Price > VWAP but EMA9 is cooling towards EMA20
-    # 3. Strong Bearish: Price < VWAP and EMA9 < EMA20
-    # 4. Bearish Pullback: Price < VWAP but EMA9 is bouncing towards EMA20
-    # 5. Neutral / Conflicted: EMA trend contradicts VWAP
 
     is_above_vwap = price_vs_vwap > 0
     is_ema_bullish = spread_curr > 0
@@ -453,6 +652,10 @@ def main():
     change = clean_float(latest_close - first_bar_open)
     change_pct = clean_float((change / first_bar_open * 100) if first_bar_open > 0 else 0.0)
 
+    # Compute ATR(14) and recent 9/20 EMA crossover info
+    atr14 = compute_atr(df_bars, period=14)
+    cross_info = detect_crossover(df_bars)
+
     # Bias analysis
     bias_data = evaluate_bias(
         close=latest_close,
@@ -461,6 +664,18 @@ def main():
         vwap=latest_vwap,
         spread_curr=latest_spread,
         spread_prev=prev_spread,
+    )
+
+    # Comprehensive 9 & 20 EMA + VWAP Scalp Strategy analysis
+    strategy_data = evaluate_ema_scalp_strategy(
+        close=latest_close,
+        ema9=latest_ema9,
+        ema20=latest_ema20,
+        vwap=latest_vwap,
+        spread_curr=latest_spread,
+        spread_prev=prev_spread,
+        atr14=atr14,
+        cross_info=cross_info,
     )
 
     # Resolve ATM options
@@ -504,8 +719,10 @@ def main():
             "spread": latest_spread,
             "spread_pct": latest_spread_pct,
             "prev_spread": prev_spread,
+            "atr14": atr14,
             **bias_data,
         },
+        "strategy": strategy_data,
         "candles": candles,
         "series": {
             "ema9": ema9_series,

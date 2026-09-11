@@ -18,6 +18,8 @@ import { cn } from '@/lib/utils';
 import CyberBiasRadar from './CyberBiasRadar';
 import CyberOrderPad from './CyberOrderPad';
 import CyberPositionsPanel, { PositionItem, PositionGuard, ScalpLogItem } from './CyberPositionsPanel';
+import CyberBloombergRibbon from './CyberBloombergRibbon';
+import CyberStrategyIntelligence, { StrategyData } from './CyberStrategyIntelligence';
 import { matchTradesFifo, type ExitedPositionItem } from '@/lib/fifoPositions';
 import { cyberAudio } from '@/lib/cyberAudio';
 import { contractMultiplier, scaleBrokerPnl } from '@/lib/positionPnl';
@@ -95,6 +97,16 @@ export default function CyberScalperTerminal() {
       detail,
     };
     setLogs((prev) => [newLog, ...prev.slice(0, 49)]);
+  };
+
+  // Strategy suggested levels overrides for the order pad
+  const [padTargetPts, setPadTargetPts] = useState<number | null>(null);
+  const [padSlPts, setPadSlPts] = useState<number | null>(null);
+
+  const handleApplyStrategyLevels = (tPts: number, sPts: number) => {
+    setPadTargetPts(tPts);
+    setPadSlPts(sPts);
+    addLog('BUY', `Loaded 9/20 Strategy Quant Levels: TP +${tPts} pts | SL -${sPts} pts`);
   };
 
   // Poll feed data
@@ -749,32 +761,32 @@ export default function CyberScalperTerminal() {
 
   return (
     <div className="flex flex-col min-h-screen bg-zinc-950 text-white selection:bg-cyan-500 selection:text-black">
-      {/* FUTURISTIC STICKY TELEMETRY HEADER */}
-      <div className="sticky top-0 z-30 flex items-center justify-between gap-3 flex-wrap px-4 lg:px-6 py-3 border-b border-zinc-800 bg-zinc-950/90 backdrop-blur-lg">
+      {/* BLOOMBERG QUANT STICKY HEADER */}
+      <div className="sticky top-0 z-30 flex items-center justify-between gap-3 flex-wrap px-4 lg:px-6 py-2.5 border-b border-zinc-800 bg-zinc-950/95 backdrop-blur-md">
         {/* Left: Branding & Underlying */}
         <div className="flex items-center gap-3">
-          <div className="flex items-center justify-center w-9 h-9 rounded-xl bg-gradient-to-br from-cyan-500/20 via-emerald-500/10 to-violet-500/20 border border-cyan-500/30 text-cyan-400 shadow-lg shadow-cyan-500/10 shrink-0">
-            <Zap className="w-5 h-5 animate-pulse" />
+          <div className="flex items-center justify-center w-8 h-8 rounded-lg bg-emerald-500/10 border border-emerald-500/25 shrink-0">
+            <Zap className="w-4 h-4 text-emerald-400" />
           </div>
           <div>
             <div className="flex items-center gap-2">
-              <span className="text-[9px] font-mono font-bold tracking-[0.2em] text-cyan-400 uppercase">
-                FUTURISTIC SCALPER
+              <span className="text-[9px] font-bold text-emerald-500 uppercase tracking-[0.18em]">
+                QUANT TERMINAL · 9/20 EMA & VWAP SCALPER
               </span>
               {/* Mandatory DATA date chip per AGENTS.md */}
-              <span className="text-[9px] font-mono px-1.5 py-0.2 rounded bg-zinc-800 border border-zinc-700 text-zinc-300">
+              <span className="text-[9px] font-mono px-1.5 py-0.2 rounded bg-zinc-800 border border-zinc-700 text-zinc-300 font-bold">
                 DATA: {feedData?.dataDate || 'LIVE'}
               </span>
               <span className="flex items-center gap-1 text-[9px] font-mono text-emerald-400">
                 <span className="h-1.5 w-1.5 rounded-full bg-emerald-400 animate-ping" />
-                <span>{lastTickTime || 'POLLING'}</span>
+                <span>{lastTickTime || 'LIVE'}</span>
               </span>
             </div>
-            <h1 className="text-base lg:text-lg font-black tracking-tight text-white flex items-center gap-2">
-              <span>CYBER SCALP</span>
-              <span className="text-zinc-500 font-normal">|</span>
-              <span className="text-cyan-400 font-mono">{symbol}</span>
-              <span className="text-xs font-mono font-bold text-zinc-300">
+            <h1 className="text-sm font-bold text-white tracking-tight flex items-center gap-2 mt-0.5">
+              <span>CYBER SCALPER</span>
+              <span className="text-zinc-600 font-normal">|</span>
+              <span className="text-white font-mono font-bold">{symbol}</span>
+              <span className="text-xs font-mono font-bold text-zinc-200">
                 ₹{spot.toFixed(2)}
               </span>
               <span
@@ -791,9 +803,7 @@ export default function CyberScalperTerminal() {
 
         {/* Right: Controls & Selectors */}
         <div className="flex items-center gap-2 flex-wrap">
-          {/* Broker selector — market data (candles/EMA/VWAP/premiums) always
-              comes from Dhan regardless of this; only order placement and the
-              positions book follow the selected broker. */}
+          {/* Broker selector */}
           <div className="flex items-center bg-zinc-900 border border-zinc-800 rounded-lg p-0.5">
             {authenticatedBrokers.map((b) => (
               <button
@@ -882,6 +892,20 @@ export default function CyberScalperTerminal() {
         </div>
       </div>
 
+      {/* BLOOMBERG HIGH-DENSITY MARKET RIBBON */}
+      <CyberBloombergRibbon
+        symbol={symbol}
+        spot={spot}
+        change={change}
+        changePct={changePct}
+        dataDate={feedData?.dataDate}
+        live={feedData?.live || null}
+        strategy={feedData?.strategy || null}
+        lastTickTime={lastTickTime}
+        broker={broker}
+        openMtm={positions.reduce((sum, p) => sum + (p.netQty !== 0 ? p.pnl : 0), 0)}
+      />
+
       {/* ERROR BANNER */}
       {feedError && (
         <div className="mx-4 lg:mx-6 mt-4 p-3 rounded-xl bg-red-900/20 border border-red-700/40 text-red-400 text-xs font-mono flex items-center gap-2">
@@ -892,12 +916,17 @@ export default function CyberScalperTerminal() {
 
       {/* MAIN TERMINAL BODY */}
       <div className="flex-1 flex flex-col gap-4 p-4 lg:p-6 max-w-[1700px] mx-auto w-full">
-        {/* 1. TELEMETRY HUD: 9/20 EMA DIFFERENCE + VWAP BIAS RADAR */}
+        {/* 1. EMA 9 & 20 SCALP STRATEGY CONFLUENCE & RISK MATRIX */}
+        <CyberStrategyIntelligence
+          spot={spot}
+          strategy={feedData?.strategy || null}
+          onApplyLevels={handleApplyStrategyLevels}
+        />
+
+        {/* 2. TELEMETRY HUD: 9/20 EMA DIFFERENCE + VWAP BIAS RADAR */}
         <CyberBiasRadar spot={spot} live={feedData?.live || null} />
 
-        {/* 2. THE BIG SCALPING TERMINAL: MASSIVE BUY & SELL BUTTONS.
-            Futures mode is supported on Dhan and Kotak (CRUDEOILM/CRUDEOIL);
-            Zerodha has no MCX commodity support so the toggle stays hidden there. */}
+        {/* 3. THE BIG SCALPING TERMINAL: MASSIVE BUY & SELL BUTTONS */}
         <CyberOrderPad
           symbol={symbol}
           spot={spot}
@@ -914,8 +943,11 @@ export default function CyberScalperTerminal() {
           onExecuteTrade={handleExecuteTrade}
           onFlattenAll={handleFlattenAll}
           openPositionsCount={positions.filter((p) => p.netQty !== 0).length}
+          suggestedTargetPts={padTargetPts ?? (feedData?.strategy?.target_pts ? Math.round(feedData.strategy.target_pts) : null)}
+          suggestedSlPts={padSlPts ?? (feedData?.strategy?.sl_pts ? Math.round(feedData.strategy.sl_pts) : null)}
         />
-        {/* 3. POSITIONS TABLE WITH TARGET, SL, TRAILING & LIVE TELEMETRY LOG */}
+
+        {/* 4. POSITIONS TABLE WITH TARGET, SL, TRAILING & LIVE TELEMETRY LOG */}
         <CyberPositionsPanel
           positions={positions}
           exitedPositions={exitedPositions}
