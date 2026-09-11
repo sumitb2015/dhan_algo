@@ -17,7 +17,7 @@ interface CachedInstrument {
   instrument_token: string;
   strike: number;
   expiry: string;
-  instrument_type: 'CE' | 'PE';
+  instrument_type: 'CE' | 'PE' | 'FUT';
   lot_size: number;
   exchange_segment: string;
   freeze_qty: number;
@@ -55,15 +55,30 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
     let lotSize = 75;
     let exchangeSegment = 'nse_fo';
     for (const r of rows) {
+      if (r.instrument_type === 'FUT') continue; // handled separately below
       lotSize = r.lot_size || lotSize;
       exchangeSegment = r.exchange_segment || exchangeSegment;
       const key = String(Math.round(r.strike));
       if (!strikes[key]) strikes[key] = {};
       if (r.instrument_type === 'CE') strikes[key].ceSymbol = r.tradingsymbol;
-      else strikes[key].peSymbol = r.tradingsymbol;
+      else if (r.instrument_type === 'PE') strikes[key].peSymbol = r.tradingsymbol;
     }
 
-    return NextResponse.json({ success: true, data: { lotSize, strikes, exchangeSegment } });
+    // Nearest-expiry future contract (MCX CRUDEOILM/CRUDEOIL have FUT rows; index underlyings don't)
+    const futureRows = all
+      .filter(r => r.instrument_type === 'FUT')
+      .sort((a, b) => a.expiry.localeCompare(b.expiry));
+    const nearestFut = futureRows[0] ?? null;
+    const future = nearestFut
+      ? {
+          trading_symbol: nearestFut.tradingsymbol,
+          expiry: nearestFut.expiry,
+          lot_size: nearestFut.lot_size,
+          exchange_segment: nearestFut.exchange_segment,
+        }
+      : null;
+
+    return NextResponse.json({ success: true, data: { lotSize, strikes, exchangeSegment, future } });
   } catch (err) {
     console.error('[scalper/kotak/lookup] error:', err);
     return NextResponse.json({ success: false, error: String((err as Error).message ?? err) }, { status: 500 });

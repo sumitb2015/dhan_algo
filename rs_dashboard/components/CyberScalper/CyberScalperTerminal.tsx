@@ -45,6 +45,8 @@ export default function CyberScalperTerminal() {
   // orders by trading symbol (see submitLegOrder in AdvancedScalper.tsx, same
   // pattern). Unused while broker === 'dhan'.
   const [brokerStrikeMap, setBrokerStrikeMap] = useState<Record<string, { ceSymbol?: string; peSymbol?: string }>>({});
+  // Kotak near-month FUT contract for MCX underlyings (CRUDEOILM/CRUDEOIL); null for all others.
+  const [brokerFuture, setBrokerFuture] = useState<{ trading_symbol: string; expiry?: string; lot_size?: number; exchange_segment?: string } | null>(null);
 
   // Live Data Feed
   const [feedData, setFeedData] = useState<any>(null);
@@ -199,13 +201,17 @@ export default function CyberScalperTerminal() {
     const expiryVal = feedData?.options?.expiry;
     if (broker === 'dhan' || !expiryVal) {
       setBrokerStrikeMap({});
+      setBrokerFuture(null);
       return;
     }
     let cancelled = false;
     fetch(`${scalperRoute(broker, 'lookup')}?underlying=${symbol}&expiry=${expiryVal}`)
       .then(r => r.json())
-      .then((j: { success: boolean; data?: { strikes: Record<string, { ceSymbol?: string; peSymbol?: string }> } }) => {
-        if (!cancelled && j.success && j.data) setBrokerStrikeMap(j.data.strikes);
+      .then((j: { success: boolean; data?: { strikes: Record<string, { ceSymbol?: string; peSymbol?: string }>; future?: { trading_symbol: string; expiry?: string; lot_size?: number; exchange_segment?: string } | null } }) => {
+        if (!cancelled && j.success && j.data) {
+          setBrokerStrikeMap(j.data.strikes);
+          setBrokerFuture(j.data.future || null);
+        }
       })
       .catch(() => {});
     return () => { cancelled = true; };
@@ -241,14 +247,12 @@ export default function CyberScalperTerminal() {
     targetPts?: number;
     slPts?: number;
   }) => {
-    // Futures mode has no non-Dhan trading-symbol source yet (no kotak/zerodha
-    // instruments-cache equivalent for MCX futures, only options) — the order pad
-    // already only offers Futures mode when broker === 'dhan' (see the `future`
-    // prop below), so this is a defensive backstop, not the expected path.
-    if (broker !== 'dhan' && params.contractType === 'DIRECT') {
+    // Zerodha doesn't support MCX commodity — block futures mode for it.
+    // Kotak is now supported via brokerFuture resolved from the instruments cache.
+    if (broker === 'zerodha' && params.contractType === 'DIRECT') {
       cyberAudio.error();
-      addLog('ERROR', `Futures trading is Dhan-only for now`, `${BROKER_LABELS[broker]} has no future contract lookup wired up`);
-      alert(`Futures trading is not yet supported on ${BROKER_LABELS[broker]}`);
+      addLog('ERROR', `Futures trading not supported on Zerodha`, `Zerodha has no MCX commodity support`);
+      alert(`Futures trading is not supported on Zerodha`);
       return;
     }
 
@@ -259,17 +263,29 @@ export default function CyberScalperTerminal() {
     let brokerTradingSymbol: string | undefined = params.tradingSymbol;
     let brokerExchange = symbol === 'SENSEX' ? 'BSE_FNO' : symbol.includes('CRUDE') ? 'MCX_COMM' : 'NSE_FNO';
     if (broker !== 'dhan') {
-      const entry = params.strike != null ? brokerStrikeMap[String(params.strike)] : undefined;
-      brokerTradingSymbol = entry?.[params.contractType === 'CE' ? 'ceSymbol' : 'peSymbol'];
-      if (!brokerTradingSymbol) {
-        cyberAudio.error();
-        addLog('ERROR', `${BROKER_LABELS[broker]} strike data still loading`, `Strike ${params.strike} not resolved yet`);
-        alert(`Cannot place order: ${BROKER_LABELS[broker]} contract not resolved yet — try again in a moment`);
-        return;
+      if (params.contractType === 'DIRECT') {
+        // Kotak futures: use the resolved near-month FUT trading symbol
+        brokerTradingSymbol = brokerFuture?.trading_symbol;
+        brokerExchange = brokerFuture?.exchange_segment ?? 'mcx_fo';
+        if (!brokerTradingSymbol) {
+          cyberAudio.error();
+          addLog('ERROR', `Kotak future contract still loading`, `CRUDEOILM FUT not resolved yet`);
+          alert(`Cannot place order: Kotak future contract not resolved yet — try again in a moment`);
+          return;
+        }
+      } else {
+        const entry = params.strike != null ? brokerStrikeMap[String(params.strike)] : undefined;
+        brokerTradingSymbol = entry?.[params.contractType === 'CE' ? 'ceSymbol' : 'peSymbol'];
+        if (!brokerTradingSymbol) {
+          cyberAudio.error();
+          addLog('ERROR', `${BROKER_LABELS[broker]} strike data still loading`, `Strike ${params.strike} not resolved yet`);
+          alert(`Cannot place order: ${BROKER_LABELS[broker]} contract not resolved yet — try again in a moment`);
+          return;
+        }
+        brokerExchange = broker === 'kotak'
+          ? (symbol === 'SENSEX' ? 'bse_fo' : symbol.includes('CRUDE') ? 'mcx_fo' : 'nse_fo')
+          : (symbol === 'SENSEX' ? 'BFO' : symbol.includes('CRUDE') ? 'MCX' : 'NFO');
       }
-      brokerExchange = broker === 'kotak'
-        ? (symbol === 'SENSEX' ? 'bse_fo' : symbol.includes('CRUDE') ? 'mcx_fo' : 'nse_fo')
-        : (symbol === 'SENSEX' ? 'BFO' : symbol.includes('CRUDE') ? 'MCX' : 'NFO');
     } else if (!params.securityId) {
       cyberAudio.error();
       addLog('ERROR', 'No security ID resolved for this contract', 'Master list match missing');
@@ -638,14 +654,19 @@ export default function CyberScalperTerminal() {
         <CyberBiasRadar spot={spot} live={feedData?.live || null} />
 
         {/* 2. THE BIG SCALPING TERMINAL: MASSIVE BUY & SELL BUTTONS.
-            Futures mode has no non-Dhan trading-symbol lookup yet (see
-            handleExecuteTrade's DIRECT guard) — hide the toggle entirely for
-            other brokers rather than let it fail at order time. */}
+            Futures mode is supported on Dhan and Kotak (CRUDEOILM/CRUDEOIL);
+            Zerodha has no MCX commodity support so the toggle stays hidden there. */}
         <CyberOrderPad
           symbol={symbol}
           spot={spot}
           options={feedData?.options || null}
-          future={broker === 'dhan' ? feedData?.future || null : null}
+          future={
+            broker === 'dhan'
+              ? feedData?.future || null
+              : broker === 'kotak' && brokerFuture && feedData?.future
+              ? { ...feedData.future, trading_symbol: brokerFuture.trading_symbol }
+              : null
+          }
           bias={feedData?.live?.bias || 'NEUTRAL'}
           isExecuting={isExecuting}
           onExecuteTrade={handleExecuteTrade}
