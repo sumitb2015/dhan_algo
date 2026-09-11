@@ -5,7 +5,7 @@ import { Plus, RefreshCw, Layers, ClipboardList, ListTree } from 'lucide-react';
 import NavBar from './NavBar';
 import { type Toast, FOCUS_RING } from './Scalper';
 import { useLiveOptionsWS } from '@/lib/useLiveOptionsWS';
-import { useBrokerSelector, scalperRoute, BROKER_LABELS, type Broker } from '@/hooks/useBrokerSelector';
+import { useBrokerSelector, scalperRoute, BROKER_LABELS, BROKERS, type Broker } from '@/hooks/useBrokerSelector';
 import {
   STRATEGY_CATEGORIES, type StrategyCategory, type StrategyTemplate, type OptionType, nearestStrike, strikeStep,
 } from '@/lib/basketStrategies';
@@ -67,6 +67,15 @@ export default function MultiLegFocus() {
   const [baskets, setBaskets] = useState<MultiLegBasket[]>([]);
   const basketsRef = useRef<MultiLegBasket[]>([]);
   useEffect(() => { basketsRef.current = baskets; }, [baskets]);
+  // Set once the "restore saved baskets" fetch below has settled (mount, and
+  // again on every broker switch, since that effect re-fires on [broker]).
+  // The poll effect's untracked-position scan runs immediately on mount too
+  // and reads basketsRef.current — which starts at [] and only reflects the
+  // real stored baskets after that fetch resolves. Scanning against an empty
+  // list makes every already-tracked open position look "unclaimed" and
+  // re-adopts it as a brand-new duplicate basket. Gate the scan on this so
+  // it never runs before the real baskets are known.
+  const basketsLoadedRef = useRef(false);
 
   const [toasts, setToasts] = useState<Toast[]>([]);
   const addToast = useCallback((type: 'success' | 'error', message: string, detail?: string) => {
@@ -443,6 +452,7 @@ export default function MultiLegFocus() {
 
   // ── Restore saved baskets on mount ─────────────────────────────────
   useEffect(() => {
+    basketsLoadedRef.current = false;
     fetch('/api/multi-leg-focus/baskets')
       .then(r => r.json())
       .then((j: { success: boolean; data?: MultiLegBasket[] }) => {
@@ -473,8 +483,9 @@ export default function MultiLegFocus() {
           };
           setBaskets([initialBasket]);
         }
+        basketsLoadedRef.current = true;
       })
-      .catch(() => {});
+      .catch(() => { basketsLoadedRef.current = true; });
   }, [broker]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // ── Register all off-selected-expiry basket legs with watchExtra ────
@@ -1319,9 +1330,12 @@ export default function MultiLegFocus() {
         // is selected — every basket is shown regardless of the selector).
         // Reconciling every basket against only the selected broker's rows
         // means an exit made on a non-selected broker's leg is never
-        // observed, so it stays stuck OPEN forever. Poll every broker any
-        // tracked basket actually uses, not just the selected one.
-        const pollBrokers = new Set<Broker>([broker, ...basketsRef.current.map(b => b.broker as Broker)]);
+        // observed, so it stays stuck OPEN forever. And the untracked-position
+        // scan below needs every broker's rows too — a position opened outside
+        // this tool, on a broker with zero baskets tracked yet, would never be
+        // discovered if we only polled brokers a basket already uses. So poll
+        // every broker unconditionally, not just the selected one / ones in use.
+        const pollBrokers = new Set<Broker>(BROKERS);
         const results = await Promise.all(
           Array.from(pollBrokers).map(async (b) => {
             try {
@@ -1348,80 +1362,90 @@ export default function MultiLegFocus() {
           if (Array.isArray(selectedResult.j.trades)) setTradesData(selectedResult.j.trades);
         }
 
-        const rows = rowsByBroker[broker] ?? [];
-
         // ── Auto-adopt broker positions no basket already claims ──────
         // Runs every tick regardless of `anyPlaced` — a position opened
         // outside this tool has no orderRef in any basket to begin with.
         // MCX underlyings are excluded (AUTO_ADOPT_UNDERLYINGS) — see its
         // definition for why.
-        const untrackedGroups = findUntrackedGroups(rows, basketsRef.current, broker, AUTO_ADOPT_UNDERLYINGS);
-        for (const group of untrackedGroups) {
-          const sig = untrackedGroupSignature(group);
-          if (adoptedGroupsRef.current.has(sig)) continue;
-          adoptedGroupsRef.current.add(sig);
-          const pair = `${group.underlying}:${group.expiry}`;
-          const lotSize = lookupCacheRef.current[pair]?.lotSize ?? fallbackLotSize(group.underlying as Underlying, broker);
+        //
+        // Scanned per-broker, sequentially (not Promise.all), across every
+        // polled broker — not just the one currently selected in the
+        // toolbar. A position sitting on a broker that isn't selected (and
+        // has no basket tracked on it yet) would otherwise never be found.
+        // Sequential order keeps basketsRef.current consistent between
+        // brokers within the same tick, so a merge target discovered while
+        // scanning one broker is visible when scanning the next.
+        //
+        // Gated on basketsLoadedRef: this poll effect starts immediately on
+        // mount and on every broker switch, racing the separate "restore
+        // saved baskets" fetch. Scanning before that fetch settles sees
+        // basketsRef.current still at its stale/empty value, so every
+        // already-tracked open position looks unclaimed and gets re-adopted
+        // as a brand-new duplicate basket (this is how the same open strike
+        // ended up split across two "Short Strangle" baskets in practice).
+        for (const adoptBroker of basketsLoadedRef.current ? pollBrokers : []) {
+          const rows = rowsByBroker[adoptBroker] ?? [];
+          const untrackedGroups = findUntrackedGroups(rows, basketsRef.current, adoptBroker, AUTO_ADOPT_UNDERLYINGS);
+          for (const group of untrackedGroups) {
+            const sig = `${adoptBroker}:${untrackedGroupSignature(group)}`;
+            if (adoptedGroupsRef.current.has(sig)) continue;
+            adoptedGroupsRef.current.add(sig);
+            const pair = `${group.underlying}:${group.expiry}`;
+            const lotSize = lookupCacheRef.current[pair]?.lotSize ?? fallbackLotSize(group.underlying as Underlying, adoptBroker);
 
-          // A leg discovered on a later poll tick than its sibling (e.g. the
-          // CE and PE of one strangle landing in two different ticks) must
-          // join the strategy that sibling already started, not spawn a
-          // second one for the same underlying+expiry — that's the whole
-          // point of "club them together". Only a basket with a genuinely
-          // ACTIVE leg (isLegActive: OPEN/PLACING/CLOSING) is a merge
-          // target — a DRAFT-only basket is a strategy the user is still
-          // configuring, not a home for a real broker position, and a fully
-          // CLOSED one is a finished strategy, not a home for a brand-new
-          // position that happens to share its expiry. If more than one
-          // active basket matches, which one this leg actually belongs to
-          // is genuinely ambiguous — fall back to a new basket rather than
-          // guessing and corrupting an unrelated strategy's P&L/risk config.
-          const mergeCandidates = basketsRef.current.filter(b =>
-            b.broker === broker && b.underlying === group.underlying && b.expiry === group.expiry &&
-            b.legs.some(isLegActive),
-          );
-          const mergeTarget = mergeCandidates.length === 1 ? mergeCandidates[0] : null;
-          if (mergeCandidates.length > 1) {
-            addToast(
-              'error',
-              `${group.underlying} ${group.expiry}: found an untracked position, but ${mergeCandidates.length} strategies already share this expiry`,
-              'Could not tell which one it belongs to — tracked it as a new strategy instead. Check and merge manually if needed.',
-            );
-          }
+            // A leg discovered on a later poll tick than its sibling (e.g. the
+            // CE and PE of one strangle landing in two different ticks) must
+            // join the strategy that sibling already started, not spawn a
+            // second one for the same underlying+expiry — the user wants
+            // every strike for one broker+underlying+expiry shown together
+            // as a single strategy, not split across several. Only a basket
+            // with a genuinely ACTIVE leg (isLegActive: OPEN/PLACING/CLOSING)
+            // is a merge target — a DRAFT-only basket is a strategy the user
+            // is still configuring, not a home for a real broker position,
+            // and a fully CLOSED one is finished history, not a home for a
+            // brand-new position that happens to share its expiry. When more
+            // than one active basket already matches (e.g. left over from a
+            // past duplicate), merge into the oldest rather than spawning yet
+            // another — consolidating is always safer than multiplying.
+            const mergeCandidates = basketsRef.current
+              .filter(b => b.broker === adoptBroker && b.underlying === group.underlying && b.expiry === group.expiry && b.legs.some(isLegActive))
+              .sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+            const mergeTarget = mergeCandidates[0] ?? null;
 
-          if (mergeTarget) {
-            const newLegs = legsFromUntrackedGroup(group, broker, lotSize);
-            const mergedLegs = [...mergeTarget.legs, ...newLegs];
-            const updated: MultiLegBasket = {
-              ...mergeTarget,
-              legs: mergedLegs,
-              name: structureNameForBasket({ ...mergeTarget, legs: mergedLegs }),
-              updatedAt: new Date().toISOString(),
-            };
-            setBaskets(prev => {
-              const next = prev.map(b => (b.id === mergeTarget.id ? updated : b));
-              basketsRef.current = next;
-              return next;
-            });
-            persistBasket(updated);
-            addToast(
-              'success',
-              `Added ${newLegs.length} leg${newLegs.length > 1 ? 's' : ''} to ${updated.name}`,
-              `${group.underlying} ${group.expiry} — found on your ${BROKER_LABELS[broker as Broker] ?? broker} account, merged into the existing strategy.`,
-            );
-          } else {
-            const newBasket = basketFromUntrackedGroup(group, broker, lotSize);
-            setBaskets(prev => {
-              const next = [...prev, newBasket];
-              basketsRef.current = next;
-              return next;
-            });
-            persistBasket(newBasket);
-            addToast(
-              'success',
-              `Tracking existing ${group.structure}`,
-              `${group.underlying} ${group.expiry} — found on your ${BROKER_LABELS[broker as Broker] ?? broker} account, now tracked here.`,
-            );
+            if (mergeTarget) {
+              const newLegs = legsFromUntrackedGroup(group, adoptBroker, lotSize);
+              const mergedLegs = [...mergeTarget.legs, ...newLegs];
+              const updated: MultiLegBasket = {
+                ...mergeTarget,
+                legs: mergedLegs,
+                name: structureNameForBasket({ ...mergeTarget, legs: mergedLegs }),
+                updatedAt: new Date().toISOString(),
+              };
+              setBaskets(prev => {
+                const next = prev.map(b => (b.id === mergeTarget.id ? updated : b));
+                basketsRef.current = next;
+                return next;
+              });
+              persistBasket(updated);
+              addToast(
+                'success',
+                `Added ${newLegs.length} leg${newLegs.length > 1 ? 's' : ''} to ${updated.name}`,
+                `${group.underlying} ${group.expiry} — found on your ${BROKER_LABELS[adoptBroker as Broker] ?? adoptBroker} account, merged into the existing strategy.`,
+              );
+            } else {
+              const newBasket = basketFromUntrackedGroup(group, adoptBroker, lotSize);
+              setBaskets(prev => {
+                const next = [...prev, newBasket];
+                basketsRef.current = next;
+                return next;
+              });
+              persistBasket(newBasket);
+              addToast(
+                'success',
+                `Tracking existing ${group.structure}`,
+                `${group.underlying} ${group.expiry} — found on your ${BROKER_LABELS[adoptBroker as Broker] ?? adoptBroker} account, now tracked here.`,
+              );
+            }
           }
         }
 
