@@ -63,7 +63,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   const tickPrice = isLimitOrder ? (Math.round(Number(price) / 0.05) * 0.05).toFixed(2) : '0';
 
   try {
-    const json = await kotakPost(KOTAK_PATHS.placeOrder, {
+    const orderPayload = {
       es: String(exchange).toLowerCase(),          // exchange segment
       pc: product,                                  // product code
       pr: tickPrice,                                // price
@@ -78,7 +78,10 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       pf: 'N',
       tp: '0',
       os: 'NEOTRADEAPI',
-    });
+    };
+    console.log('[scalper/kotak/order] payload →', JSON.stringify(orderPayload));
+    const json = await kotakPost(KOTAK_PATHS.placeOrder, orderPayload);
+    console.log('[scalper/kotak/order] response ←', JSON.stringify(json));
 
     const data = (typeof json.data === 'object' && json.data !== null ? json.data : {}) as Record<string, unknown>;
     const orderId = json.nOrdNo ?? data.nOrdNo;

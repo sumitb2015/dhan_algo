@@ -669,7 +669,7 @@ export default function CyberScalperTerminal() {
             broker === 'dhan'
               ? feedData?.future || null
               : broker === 'kotak' && brokerFuture && feedData?.future
-              ? { ...feedData.future, trading_symbol: brokerFuture.trading_symbol }
+              ? { ...feedData.future, trading_symbol: brokerFuture.trading_symbol, lot_size: brokerFuture.lot_size ?? 10 }
               : null
           }
           bias={feedData?.live?.bias || 'NEUTRAL'}
