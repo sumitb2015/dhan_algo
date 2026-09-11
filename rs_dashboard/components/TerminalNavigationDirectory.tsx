@@ -70,6 +70,13 @@ export const TERMINAL_PILLARS: TerminalPillarGroup[] = [
     tone: 'emerald',
     items: [
       {
+        name: 'Cyber Scalper (9/20 EMA)',
+        href: '/cyber-scalper',
+        badge: 'NEW',
+        desc: 'Futuristic 9/20 EMA & VWAP momentum scalping terminal with live difference bias & big buy/sell order pad',
+        hot: true,
+      },
+      {
         name: 'Pro Scalper Terminal',
         href: '/scalper',
         badge: 'PRIMARY',

@@ -1729,6 +1729,7 @@ function SeparatedPositionsSection({
       <SectionQuickLinks
         categoryLabel="FAST EXECUTION DESKS"
         links={[
+          { label: 'Cyber Scalper (9/20 EMA)', href: '/cyber-scalper', badge: 'NEW' },
           { label: 'Pro Scalper Terminal', href: '/scalper', badge: '1-CLICK' },
           { label: 'Advanced Scalper', href: '/advanced-scalper', badge: 'LADDER' },
           { label: 'Options QuikTrade', href: '/options/quiktrade', badge: 'FAST' },
