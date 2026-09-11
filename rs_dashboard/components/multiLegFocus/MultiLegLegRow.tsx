@@ -91,6 +91,11 @@ export default function MultiLegLegRow({
       </td>
       <td className="px-2 py-1.5 text-right font-mono text-xs text-zinc-300 tabular-nums">
         {ltp > 0 ? ltp.toFixed(2) : '—'}
+        {leg.fill?.avgPrice != null && leg.fill.avgPrice > 0 && (
+          <span className="block text-[10px] text-zinc-500 mt-0.5" title="Average fill price for this leg">
+            Entry: {leg.fill.avgPrice.toFixed(2)}
+          </span>
+        )}
       </td>
       {/* SL Column */}
       <td className="px-2 py-1.5">
