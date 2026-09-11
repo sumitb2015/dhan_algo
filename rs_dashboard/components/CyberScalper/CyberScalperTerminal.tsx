@@ -22,7 +22,7 @@ import CyberPositionsPanel, { PositionItem, ScalpLogItem } from './CyberPosition
 import { cyberAudio } from '@/lib/cyberAudio';
 import { contractMultiplier, scaleBrokerPnl } from '@/lib/positionPnl';
 
-const POPULAR_SYMBOLS = ['NIFTY', 'BANKNIFTY', 'FINNIFTY', 'SENSEX', 'CRUDEOIL', 'RELIANCE', 'HDFCBANK'];
+const POPULAR_SYMBOLS = ['NIFTY', 'BANKNIFTY', 'FINNIFTY', 'SENSEX', 'CRUDEOILM', 'CRUDEOIL', 'RELIANCE', 'HDFCBANK'];
 const INTERVALS = [
   { value: '1', label: '1m Scalp' },
   { value: '3', label: '3m Momentum' },
@@ -423,8 +423,8 @@ export default function CyberScalperTerminal() {
         {/* Right: Controls & Selectors */}
         <div className="flex items-center gap-2 flex-wrap">
           {/* Symbol selector */}
-          <div className="flex items-center bg-zinc-900 border border-zinc-800 rounded-lg p-0.5">
-            {POPULAR_SYMBOLS.slice(0, 4).map((s) => (
+          <div className="flex items-center flex-wrap bg-zinc-900 border border-zinc-800 rounded-lg p-0.5 gap-0.5">
+            {POPULAR_SYMBOLS.map((s) => (
               <button
                 key={s}
                 onClick={() => {

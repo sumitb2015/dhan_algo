@@ -20,6 +20,7 @@ import {
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { cyberAudio } from '@/lib/cyberAudio';
+import { MCX_LOT_MULTIPLIER } from '@/lib/positionPnl';
 
 interface OptionContract {
   strike: number;
@@ -83,6 +84,14 @@ export default function CyberOrderPad({
 
   const lotSize = options?.lot_size || 65;
   const totalQty = lots * lotSize;
+
+  // Dhan's MCX order quantity is itself denominated in lots (get_lot_size returns 1 for
+  // CRUDEOIL/CRUDEOILM, not the barrels-per-lot count), so totalQty above is already the
+  // correct order qty to send — but using it for the premium/notional text below would
+  // understate a CRUDEOILM lot's true outlay by 10x (100x for CRUDEOIL). Use the real
+  // contract size for that display only; every non-MCX symbol's lotSize IS its true
+  // per-lot multiplier already, so this is a no-op for them.
+  const contractSize = MCX_LOT_MULTIPLIER[symbol] ?? lotSize;
 
   const atmStrike = options?.atm_strike || Math.round(spot / 50) * 50;
   const ceContract = options?.ce;
@@ -274,7 +283,7 @@ export default function CyberOrderPad({
               Target: <b className="text-white">{ceContract?.display_name || `${symbol} ${atmStrike} CE`}</b>
             </div>
             <div className="text-emerald-300 font-bold">
-              {lots} Lot{lots > 1 ? 's' : ''} ({totalQty} Qty) · ₹{(lots * lotSize * (ceContract?.ltp || 0)).toLocaleString('en-IN', { maximumFractionDigits: 0 })}
+              {lots} Lot{lots > 1 ? 's' : ''} ({totalQty} Qty) · ₹{(lots * contractSize * (ceContract?.ltp || 0)).toLocaleString('en-IN', { maximumFractionDigits: 0 })}
             </div>
           </div>
         </button>
@@ -325,7 +334,7 @@ export default function CyberOrderPad({
               Target: <b className="text-white">{peContract?.display_name || `${symbol} ${atmStrike} PE`}</b>
             </div>
             <div className="text-rose-300 font-bold">
-              {lots} Lot{lots > 1 ? 's' : ''} ({totalQty} Qty) · ₹{(lots * lotSize * (peContract?.ltp || 0)).toLocaleString('en-IN', { maximumFractionDigits: 0 })}
+              {lots} Lot{lots > 1 ? 's' : ''} ({totalQty} Qty) · ₹{(lots * contractSize * (peContract?.ltp || 0)).toLocaleString('en-IN', { maximumFractionDigits: 0 })}
             </div>
           </div>
         </button>
