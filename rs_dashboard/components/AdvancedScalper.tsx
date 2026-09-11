@@ -17,12 +17,14 @@ import { useBrokerSelector, scalperRoute, BROKER_LABELS, type Broker } from '@/h
 import { contractMultiplier, scaleBrokerPnl } from '@/lib/positionPnl';
 import { openLots, fractionUnits } from '@/lib/partialQty';
 import { positionKey, positionProduct, findLivePosition, closeOrderProduct } from '@/lib/positionProduct';
+import { parseTradingSymbol } from '@/lib/positionLegs';
 import { cn } from '@/lib/utils';
 import TopWeightStocks from './TopWeightStocks';
 import TopIndices from './TopIndices';
 import MtmChart, { useMtmHistory } from './MtmChart';
 import ScalperGreeksModal from './analytics/ScalperGreeksModal';
 import AdvancedScalperOptionChainModal from './AdvancedScalperOptionChainModal';
+import AdvancedScalperAddLotsModal, { type SubmitLegOrderParams } from './AdvancedScalperAddLotsModal';
 
 // ─── Types ────────────────────────────────────────────────────────
 
@@ -46,14 +48,6 @@ interface HalfLeg {
   /** Absolute units to close — already rounded down to whole lots. */
   units: number;
   lots: number;
-}
-
-/** An Add-leg click armed against an expiry the terminal just switched to —
- *  see handleAddLeg and the effect that drains this. */
-interface PendingAddLeg {
-  expiry: string;
-  joinKey: string;
-  sym: string;
 }
 
 const UNDERLYINGS = ['NIFTY', 'BANKNIFTY', 'SENSEX'] as const;
@@ -148,13 +142,6 @@ export default function AdvancedScalper() {
   // positions poll, so without this the second click would fire a different
   // set of orders than the first click previewed.
   const armedHalfPlanRef = useRef<{ legs: HalfLeg[]; skipped: string[] } | null>(null);
-
-  // Add-leg on a position whose expiry isn't the one currently selected: the
-  // terminal must switch expiry first (placeOrder resolves contracts off the
-  // CURRENTLY selected expiry's strikeMap, so a box can't trade an off-expiry
-  // strike without the switch), then wait for that expiry's strikeMap to load
-  // before populating the box. See handleAddLeg + the effect that drains this.
-  const pendingAddLegRef = useRef<PendingAddLeg | null>(null);
 
   // Row checkboxes + "Exit Selected". Keyed by lib/positionProduct's
   // `positionKey`, same as posGuards/closingPositions.
@@ -1078,89 +1065,135 @@ export default function AdvancedScalper() {
     setBoxes(prev => (prev.length > MIN_BOXES ? prev.filter(b => b.id !== id) : prev));
   }, [boxes, boxSecId, positionsBySecId, addToast]);
 
-  // Fill an existing empty box (or add a new one) with a resolved strike/side
-  // so the user can scale in (same strike) or add a hedge (new strike) via
-  // the order panel. Shared by handleAddLeg's fast path and its deferred
-  // off-expiry path below.
-  const placeLegInBox = useCallback((side: 'CE' | 'PE', strike: number) => {
-    const emptyBox = boxes.find(b => b.side === side && b.strike == null);
-    if (emptyBox) {
-      updateBox(emptyBox.id, { strike });
-      addToast('success', `${side} panel set to ${strike}`, 'Pick Buy/Sell and lots to add this leg');
-      return;
-    }
-    if (boxes.length >= MAX_BOXES) {
-      addToast('error', 'Cannot add leg', `Max ${MAX_BOXES} boxes reached — remove one first`);
-      return;
-    }
-    boxCounterRef.current += 1;
-    setBoxes(prev => [...prev, { id: `box-${boxCounterRef.current}`, side, strike, lots: 1, limitPrice: '' }]);
-    addToast('success', `${side} panel set to ${strike}`, 'Pick Buy/Sell and lots to add this leg');
-  }, [boxes, updateBox, addToast]);
+  // Resolved target for the Add Lots modal — see openAddLotsModal below.
+  // null when the modal is closed.
+  const [addLotsTarget, setAddLotsTarget] = useState<{
+    pos: Record<string, unknown>;
+    posExpiry: string;
+    strike: number;
+    option: 'CE' | 'PE';
+  } | null>(null);
 
-  // Pre-fill a box from an open position's strike. `secIdToStrikeSide` only
-  // covers whichever expiry is currently selected (strikeMap is fetched and
-  // reset per-expiry — see the strikeMap-loading effect below), so a position
-  // held on a DIFFERENT expiry than what's on screen always misses here on
-  // the first try — regardless of broker, strike, or symbol format. When that
-  // happens, resolve the position's own expiry (Dhan/Kotak only — Zerodha's
-  // symbol format can't be resolved this way, see resolveRowExpiry), switch
-  // the terminal to it, and defer placing the leg until that expiry's
-  // strikeMap has loaded and re-confirms the match via the same join
-  // placeOrder itself relies on (see the pendingAddLegRef-draining effect).
-  const handleAddLeg = useCallback((pos: Record<string, unknown>) => {
+  // Resolve an open position's own (expiry, strike, option) without touching
+  // the terminal's globally-selected `expiry`/`strikeMap` — those are scoped
+  // to whatever expiry is on screen, so a position on a DIFFERENT expiry
+  // always misses `secIdToStrikeSide`. Previously this meant Add-leg had to
+  // switch the whole terminal's expiry (and reset the order boxes) just to
+  // resolve the contract; the Add Lots modal below instead fetches its own
+  // per-expiry strike/security-id data (see its own lookup effect), so this
+  // only needs to name WHICH (expiry, strike, option) to ask for.
+  //
+  // Fast path: `secIdToStrikeSide` already has it when the position's expiry
+  // happens to match the one currently selected — no parsing needed. Slow
+  // path: resolve from the row itself (Dhan/Kotak's native `drvExpiryDate`
+  // field, or Kotak's trading-symbol format) — Zerodha has neither a native
+  // expiry field nor a symbol format `parseTradingSymbol` can read a day out
+  // of (see resolveRowExpiry's own comment), so an off-expiry Zerodha
+  // position simply can't be resolved this way and reports that plainly
+  // rather than guessing.
+  const openAddLotsModal = useCallback((pos: Record<string, unknown>) => {
     const sym = String(pos.tradingSymbol ?? '');
     const joinKey = positionJoinKey(pos);
 
     const mapping = secIdToStrikeSide[joinKey];
     if (mapping) {
-      placeLegInBox(mapping.side === 'ce' ? 'CE' : 'PE', mapping.strike);
+      setAddLotsTarget({ pos, posExpiry: expiry, strike: mapping.strike, option: mapping.side === 'ce' ? 'CE' : 'PE' });
       return;
     }
 
     const posExpiry = resolveRowExpiry(pos, sym, broker);
-    if (!posExpiry || posExpiry === expiry) {
-      addToast('error', 'Could not match position to a strike', sym);
+    const parsed = parseTradingSymbol(sym);
+    if (!posExpiry || !parsed) {
+      addToast('error', 'Could not resolve this position’s contract', sym);
       return;
     }
-    if (!expiries.includes(posExpiry)) {
-      addToast('error', `${sym} is on ${posExpiry}`, 'That expiry is not currently listed (expired/rolled?) — refresh Positions');
-      return;
-    }
-
-    pendingAddLegRef.current = { expiry: posExpiry, joinKey, sym };
-    addToast('success', `Switching terminal to ${posExpiry} for ${sym}`, 'This changes the expiry (and option chain) for the whole terminal, and resets other order boxes');
-    setExpiry(posExpiry);
-  }, [secIdToStrikeSide, positionJoinKey, broker, expiries, expiry, placeLegInBox, addToast, setExpiry]);
-
-  // Drains a pending off-expiry Add-leg (armed by handleAddLeg above) once the
-  // expiry it switched to has actually loaded a strikeMap — never populates a
-  // box from the expiry-switch guess itself, only from a fresh, re-confirmed
-  // join, so a stale/failed lookup fails loudly instead of risking a
-  // wrong-contract order.
-  useEffect(() => {
-    const pending = pendingAddLegRef.current;
-    if (!pending) return;
-    if (pending.expiry !== expiry) {
-      // The dropdown moved off the target expiry before this fired (a manual
-      // change, or a second Add-leg click targeting a different expiry) —
-      // drop it rather than populate a box against an expiry the user didn't
-      // ask for anymore.
-      pendingAddLegRef.current = null;
-      return;
-    }
-    if (Object.keys(strikeMap).length === 0) return; // still loading this expiry's map
-
-    pendingAddLegRef.current = null;
-    const mapping = secIdToStrikeSide[pending.joinKey];
-    if (!mapping) {
-      addToast('error', 'Could not match position to a strike after switching expiry', pending.sym);
-      return;
-    }
-    placeLegInBox(mapping.side === 'ce' ? 'CE' : 'PE', mapping.strike);
-  }, [expiry, strikeMap, secIdToStrikeSide, placeLegInBox, addToast]);
+    setAddLotsTarget({ pos, posExpiry, strike: parsed.strike, option: parsed.type });
+  }, [secIdToStrikeSide, positionJoinKey, broker, expiry, addToast]);
 
   // ─── placeOrder ───────────────────────────────────────────────────
+
+  type LegOrderResult = { success: boolean; order_id?: string; error?: string };
+
+  // The actual network call for one option leg order, factored out of
+  // placeOrder so the Add Lots modal (which targets a position directly,
+  // not a box — and may be on a DIFFERENT expiry than the one currently
+  // selected) can place an order the exact same way boxes do, instead of
+  // duplicating this broker branching a second time.
+  const submitLegOrder = useCallback(async (params: {
+    optionSide: 'CE' | 'PE';
+    legExpiry: string;
+    strike: number;
+    side: 'BUY' | 'SELL';
+    lots: number;
+    mode: 'MARKET' | 'LIMIT';
+    limitPrice?: number;
+    entry?: { ceId?: string; peId?: string; ceSymbol?: string; peSymbol?: string };
+    legLotSize: number;
+    legProductType: 'INTRADAY' | 'MARGIN';
+  }): Promise<LegOrderResult> => {
+    const { optionSide, legExpiry, strike, side, lots, mode, limitPrice, entry, legLotSize, legProductType } = params;
+    try {
+      let res: Response;
+      if (broker !== 'dhan') {
+        // Every non-Dhan broker orders by trading symbol (Dhan is the only one
+        // with a numeric securityId), so they share one request shape and only
+        // the exchange spelling differs.
+        const symbol = entry?.[optionSide === 'CE' ? 'ceSymbol' : 'peSymbol'];
+        if (!symbol) return { success: false, error: `${BROKER_LABELS[broker]} strike data still loading` };
+        const exchange = broker === 'kotak'
+          ? (underlying === 'SENSEX' ? 'bse_fo' : 'nse_fo')
+          : (underlying === 'SENSEX' ? 'BFO' : 'NFO');
+        res = await fetch(scalperRoute(broker, 'order'), {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            tradingsymbol: symbol,
+            quantity: lots * legLotSize,
+            side,
+            orderType: mode,
+            exchange,
+            product: legProductType === 'MARGIN' ? 'NRML' : 'MIS',
+            ...(mode === 'LIMIT' ? { price: limitPrice } : {}),
+          }),
+        });
+      } else {
+        const secId = entry?.[optionSide === 'CE' ? 'ceId' : 'peId'];
+        if (secId) {
+          res = await fetch('/api/scalper/fast-order', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              securityId: secId,
+              quantity: lots * legLotSize,
+              side,
+              orderType: mode,
+              exchangeSegment: underlying === 'SENSEX' ? 'BSE_FNO' : 'NSE_FNO',
+              productType: legProductType,
+              ...(mode === 'LIMIT' ? { price: limitPrice } : {}),
+            }),
+          });
+        } else {
+          // Falls back to resolving the contract server-side off
+          // (underlying, legExpiry, strike, option) — this is the path that
+          // makes the Add Lots modal work on an expiry other than the one
+          // currently selected in the terminal, since it never touches the
+          // client-side strikeMap at all.
+          const body: Record<string, unknown> = {
+            underlying, expiry: legExpiry, strike, option: optionSide, side, lots, type: mode,
+          };
+          if (mode === 'LIMIT') body.price = limitPrice;
+          res = await fetch('/api/scalper/order', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(body),
+          });
+        }
+      }
+      return await res.json() as LegOrderResult;
+    } catch (e) {
+      return { success: false, error: String(e) };
+    }
+  }, [broker, underlying]);
 
   const placeOrder = useCallback(async (boxId: string, side: 'BUY' | 'SELL', opts?: { forceMarket?: boolean }) => {
     const box = boxes.find(b => b.id === boxId);
@@ -1192,76 +1225,42 @@ export default function AdvancedScalper() {
     setOrderPendingBoxes(prev => new Set([...prev, boxId]));
 
     try {
-      const entry = strikeMap[String(box.strike)];
-      let res: Response;
-      if (broker !== 'dhan') {
-        // Every non-Dhan broker orders by trading symbol (Dhan is the only one
-        // with a numeric securityId), so they share one request shape and only
-        // the exchange spelling differs.
-        const symbol = entry?.[box.side === 'CE' ? 'ceSymbol' : 'peSymbol'];
-        if (!symbol) {
-          addToast('error', `${side} ${box.side} failed`, `${BROKER_LABELS[broker]} strike data still loading`);
-          return;
-        }
-        const exchange = broker === 'kotak'
-          ? (underlying === 'SENSEX' ? 'bse_fo' : 'nse_fo')
-          : (underlying === 'SENSEX' ? 'BFO' : 'NFO');
-        res = await fetch(scalperRoute(broker, 'order'), {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            tradingsymbol: symbol,
-            quantity: box.lots * lotSize,
-            side,
-            orderType: mode,
-            exchange,
-            product: productType === 'MARGIN' ? 'NRML' : 'MIS',
-            ...(mode === 'LIMIT' ? { price: Number(box.limitPrice) } : {}),
-          }),
-        });
-      } else {
-        const secId = entry?.[box.side === 'CE' ? 'ceId' : 'peId'];
-        if (secId) {
-          res = await fetch('/api/scalper/fast-order', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              securityId: secId,
-              quantity: box.lots * lotSize,
-              side,
-              orderType: mode,
-              exchangeSegment: underlying === 'SENSEX' ? 'BSE_FNO' : 'NSE_FNO',
-              productType,
-              ...(mode === 'LIMIT' ? { price: Number(box.limitPrice) } : {}),
-            }),
-          });
-        } else {
-          const body: Record<string, unknown> = {
-            underlying, expiry, strike: box.strike, option: box.side, side, lots: box.lots, type: mode,
-          };
-          if (mode === 'LIMIT') body.price = Number(box.limitPrice);
-          res = await fetch('/api/scalper/order', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(body),
-          });
-        }
-      }
-
-      const j = await res.json() as { success: boolean; order_id?: string; error?: string };
+      const j = await submitLegOrder({
+        optionSide: box.side,
+        legExpiry: expiry,
+        strike: box.strike,
+        side,
+        lots: box.lots,
+        mode,
+        limitPrice: mode === 'LIMIT' ? Number(box.limitPrice) : undefined,
+        entry: strikeMap[String(box.strike)],
+        legLotSize: lotSize,
+        legProductType: productType,
+      });
       if (j.success) {
         addToast('success', `${side} ${box.side} placed`, opts?.forceMarket ? `Hotkey market order · ID: ${j.order_id}` : `ID: ${j.order_id}`);
         setTimeout(fetchTabData, 1000);
       } else {
         addToast('error', `${side} ${box.side} failed`, j.error ?? 'Unknown error');
       }
-    } catch (e) {
-      addToast('error', 'Network error', String(e));
     } finally {
       orderInFlightRef.current.delete(boxId);
       setOrderPendingBoxes(prev => { const s = new Set(prev); s.delete(boxId); return s; });
     }
-  }, [boxes, expiry, underlying, lotSize, strikeMap, orderMode, productType, broker, addToast, fetchTabData]);
+  }, [boxes, expiry, underlying, lotSize, strikeMap, orderMode, productType, submitLegOrder, addToast, fetchTabData]);
+
+  // Confirm handler for the Add Lots modal (see openAddLotsModal/addLotsTarget
+  // above) — places the order via the same submitLegOrder the order boxes use,
+  // just targeting the resolved leg directly instead of a box.
+  const handleConfirmAddLots = useCallback(async (params: SubmitLegOrderParams) => {
+    const j = await submitLegOrder(params);
+    if (j.success) {
+      addToast('success', `${params.side} ${params.optionSide} added`, `ID: ${j.order_id}`);
+      setTimeout(fetchTabData, 1000);
+    } else {
+      addToast('error', `Add ${params.optionSide} lots failed`, j.error ?? 'Unknown error');
+    }
+  }, [submitLegOrder, addToast, fetchTabData]);
 
   // ─── Hotkey trading (one-click MARKET orders) ──────────────────────
   // ArrowUp/ArrowLeft act on the first CE box, ArrowDown/ArrowRight on the
@@ -2947,7 +2946,7 @@ export default function AdvancedScalper() {
               onGuardChange={handleGuardChange}
               onTrailToggle={handleTrailToggle}
               onClose={pos => closePosition(pos, 'Manual')}
-              onAddLeg={handleAddLeg}
+              onAddLeg={openAddLotsModal}
               lotSizeFor={lotSizeForRow}
               onClosePartial={handleClosePartial}
               sort={tableSort}
@@ -2980,6 +2979,16 @@ export default function AdvancedScalper() {
         onClose={() => setShowChain(false)}
         underlying={underlying}
         broker={broker}
+      />
+
+      <AdvancedScalperAddLotsModal
+        isOpen={!!addLotsTarget}
+        onClose={() => setAddLotsTarget(null)}
+        target={addLotsTarget}
+        underlying={underlying}
+        broker={broker}
+        defaultProductType={productType}
+        onConfirm={handleConfirmAddLots}
       />
     </div>
   );
