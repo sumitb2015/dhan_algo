@@ -21,6 +21,7 @@ import CyberChart, { Candle, SeriesPoint, SpreadPoint } from './CyberChart';
 import CyberPositionsPanel, { PositionItem, ScalpLogItem } from './CyberPositionsPanel';
 import { cyberAudio } from '@/lib/cyberAudio';
 import { contractMultiplier, scaleBrokerPnl } from '@/lib/positionPnl';
+import { useBrokerSelector, scalperRoute, BROKER_LABELS, type Broker } from '@/hooks/useBrokerSelector';
 
 const POPULAR_SYMBOLS = ['NIFTY', 'BANKNIFTY', 'FINNIFTY', 'SENSEX', 'CRUDEOILM', 'CRUDEOIL', 'RELIANCE', 'HDFCBANK'];
 const INTERVALS = [
@@ -34,6 +35,16 @@ export default function CyberScalperTerminal() {
   const [timeframe, setTimeframe] = useState('1');
   const [expiry, setExpiry] = useState<string | null>(null);
   const [isMuted, setIsMuted] = useState(false);
+
+  // Market data (candles, EMA/VWAP bias, option/future LTPs) always comes from Dhan
+  // regardless of the broker selected here — same convention as AdvancedScalper.tsx.
+  // Only order placement and the positions book are broker-specific.
+  const { broker, setBroker, authenticatedBrokers } = useBrokerSelector();
+  // Non-Dhan CE/PE trading symbols for the currently selected expiry, keyed by
+  // strike — Dhan is the only broker with a numeric securityId, everyone else
+  // orders by trading symbol (see submitLegOrder in AdvancedScalper.tsx, same
+  // pattern). Unused while broker === 'dhan'.
+  const [brokerStrikeMap, setBrokerStrikeMap] = useState<Record<string, { ceSymbol?: string; peSymbol?: string }>>({});
 
   // Live Data Feed
   const [feedData, setFeedData] = useState<any>(null);
@@ -52,6 +63,11 @@ export default function CyberScalperTerminal() {
   // multiple concurrent GETs to the same endpoint instead of the tick just being skipped.
   const feedInFlight = useRef(false);
   const positionsInFlight = useRef(false);
+  // Latest-broker guard: fetchPositions captures `broker` in its own closure, but a
+  // request issued just before a broker switch can still resolve after it — same
+  // race fixed in AdvancedScalper.tsx's positions poller.
+  const brokerRef = useRef(broker);
+  useEffect(() => { brokerRef.current = broker; }, [broker]);
 
   // Audio mute sync
   useEffect(() => {
@@ -108,9 +124,13 @@ export default function CyberScalperTerminal() {
   const fetchPositions = useCallback(async () => {
     if (positionsInFlight.current) return;
     positionsInFlight.current = true;
+    const requestedBroker = broker;
     try {
-      const res = await fetch('/api/scalper/poll');
+      const res = await fetch(scalperRoute(broker, 'poll'));
       const json = await res.json();
+      // Broker was switched while this request was in flight — drop it rather than
+      // repopulate the (already-cleared) positions list with the previous broker's rows.
+      if (requestedBroker !== brokerRef.current) return;
       if (json.success && Array.isArray(json.positions)) {
         const rawPositions = json.positions;
         const mapped: PositionItem[] = rawPositions.map((p: any) => {
@@ -129,7 +149,7 @@ export default function CyberScalperTerminal() {
           const unrealized = Number(scaled.unrealizedProfit) || 0;
           const realized = Number(scaled.realizedProfit) || 0;
 
-          let ltp = Number(p.ltp || p.lastPrice || 0);
+          let ltp = Number(p.ltp || p.lastPrice || p.lastTradedPrice || 0);
           if (!ltp && qty !== 0 && unrealized !== 0 && mult > 0) {
             const derived = qty > 0
               ? buyAvg + unrealized / (qty * mult)
@@ -145,7 +165,10 @@ export default function CyberScalperTerminal() {
             tradingSymbol: String(p.tradingSymbol || p.securityId || 'POSITION'),
             securityId: p.securityId ? String(p.securityId) : undefined,
             productType: String(p.productType || 'INTRADAY'),
-            exchangeSegment: String(p.exchangeSegment || 'NSE_FNO'),
+            // Dhan's shape names this field exchangeSegment; Kotak/Zerodha's
+            // shapers (lib/kotakShape.ts, lib/zerodhaShape.ts) name it exchange —
+            // check both, same as AdvancedScalper.tsx / Scalper.tsx.
+            exchangeSegment: String(p.exchangeSegment ?? p.exchange ?? 'NSE_FNO'),
             netQty: qty,
             buyAvg,
             ltp,
@@ -161,7 +184,32 @@ export default function CyberScalperTerminal() {
     } finally {
       positionsInFlight.current = false;
     }
-  }, []);
+  }, [broker]);
+
+  // Clear stale positions immediately on broker switch so a Dhan position is never
+  // displayed or acted on as if it belonged to Zerodha/Kotak (or vice versa).
+  useEffect(() => {
+    setPositions([]);
+  }, [broker]);
+
+  // Non-Dhan CE/PE trading-symbol lookup for the currently selected underlying +
+  // expiry. Dhan's own ce/pe security IDs come from feedData.options directly (see
+  // cyber_scalper_feed.py) and need no separate lookup.
+  useEffect(() => {
+    const expiryVal = feedData?.options?.expiry;
+    if (broker === 'dhan' || !expiryVal) {
+      setBrokerStrikeMap({});
+      return;
+    }
+    let cancelled = false;
+    fetch(`${scalperRoute(broker, 'lookup')}?underlying=${symbol}&expiry=${expiryVal}`)
+      .then(r => r.json())
+      .then((j: { success: boolean; data?: { strikes: Record<string, { ceSymbol?: string; peSymbol?: string }> } }) => {
+        if (!cancelled && j.success && j.data) setBrokerStrikeMap(j.data.strikes);
+      })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, [broker, symbol, feedData?.options?.expiry]);
 
   // Main polling loop (every 2.5 seconds for fresh candles and bias calculations)
   useEffect(() => {
@@ -176,7 +224,8 @@ export default function CyberScalperTerminal() {
     return () => clearInterval(timer);
   }, [fetchFeed, fetchPositions]);
 
-  // Execute Trade action (Instant via /api/scalper/fast-order)
+  // Execute Trade action (Instant via /api/scalper/fast-order for Dhan, broker-specific
+  // trading-symbol order routes for everyone else)
   const handleExecuteTrade = async (params: {
     direction: 'BUY' | 'SELL';
     contractType: 'CE' | 'PE' | 'DIRECT';
@@ -192,7 +241,36 @@ export default function CyberScalperTerminal() {
     targetPts?: number;
     slPts?: number;
   }) => {
-    if (!params.securityId) {
+    // Futures mode has no non-Dhan trading-symbol source yet (no kotak/zerodha
+    // instruments-cache equivalent for MCX futures, only options) — the order pad
+    // already only offers Futures mode when broker === 'dhan' (see the `future`
+    // prop below), so this is a defensive backstop, not the expected path.
+    if (broker !== 'dhan' && params.contractType === 'DIRECT') {
+      cyberAudio.error();
+      addLog('ERROR', `Futures trading is Dhan-only for now`, `${BROKER_LABELS[broker]} has no future contract lookup wired up`);
+      alert(`Futures trading is not yet supported on ${BROKER_LABELS[broker]}`);
+      return;
+    }
+
+    // Every non-Dhan broker orders by trading symbol (Dhan is the only one with a
+    // numeric securityId) — resolve it from the broker's own strike lookup rather
+    // than the Dhan-sourced tradingSymbol the order pad passed in, which is in
+    // Dhan's own symbol format and meaningless to another broker's order API.
+    let brokerTradingSymbol: string | undefined = params.tradingSymbol;
+    let brokerExchange = symbol === 'SENSEX' ? 'BSE_FNO' : symbol.includes('CRUDE') ? 'MCX_COMM' : 'NSE_FNO';
+    if (broker !== 'dhan') {
+      const entry = params.strike != null ? brokerStrikeMap[String(params.strike)] : undefined;
+      brokerTradingSymbol = entry?.[params.contractType === 'CE' ? 'ceSymbol' : 'peSymbol'];
+      if (!brokerTradingSymbol) {
+        cyberAudio.error();
+        addLog('ERROR', `${BROKER_LABELS[broker]} strike data still loading`, `Strike ${params.strike} not resolved yet`);
+        alert(`Cannot place order: ${BROKER_LABELS[broker]} contract not resolved yet — try again in a moment`);
+        return;
+      }
+      brokerExchange = broker === 'kotak'
+        ? (symbol === 'SENSEX' ? 'bse_fo' : symbol.includes('CRUDE') ? 'mcx_fo' : 'nse_fo')
+        : (symbol === 'SENSEX' ? 'BFO' : symbol.includes('CRUDE') ? 'MCX' : 'NFO');
+    } else if (!params.securityId) {
       cyberAudio.error();
       addLog('ERROR', 'No security ID resolved for this contract', 'Master list match missing');
       alert('Cannot place order: Contract security ID not resolved');
@@ -202,23 +280,36 @@ export default function CyberScalperTerminal() {
     setIsExecuting(true);
     addLog(
       params.direction,
-      `Placing ${params.direction} order for ${params.tradingSymbol || params.strike || ''}`,
-      `${params.lots} Lot(s) · ${params.qty} Qty @ ${params.orderType}`
+      `Placing ${params.direction} order for ${brokerTradingSymbol || params.strike || ''}`,
+      `${params.lots} Lot(s) · ${params.qty} Qty @ ${params.orderType} (${BROKER_LABELS[broker]})`
     );
 
     try {
-      const res = await fetch('/api/scalper/fast-order', {
+      const orderUrl = broker === 'dhan' ? '/api/scalper/fast-order' : scalperRoute(broker, 'order');
+      const res = await fetch(orderUrl, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          securityId: params.securityId,
-          quantity: params.qty,
-          side: params.direction,
-          orderType: params.orderType,
-          price: params.orderType === 'LIMIT' ? params.price : 0,
-          exchangeSegment: symbol === 'SENSEX' ? 'BSE_FNO' : symbol.includes('CRUDE') ? 'MCX_COMM' : 'NSE_FNO',
-          productType: params.productType,
-        }),
+        body: JSON.stringify(
+          broker === 'dhan'
+            ? {
+                securityId: params.securityId,
+                quantity: params.qty,
+                side: params.direction,
+                orderType: params.orderType,
+                price: params.orderType === 'LIMIT' ? params.price : 0,
+                exchangeSegment: brokerExchange,
+                productType: params.productType,
+              }
+            : {
+                tradingsymbol: brokerTradingSymbol,
+                quantity: params.qty,
+                side: params.direction,
+                orderType: params.orderType,
+                price: params.orderType === 'LIMIT' ? params.price : 0,
+                exchange: brokerExchange,
+                product: params.productType === 'MARGIN' ? 'NRML' : 'MIS',
+              },
+        ),
       });
 
       const json = await res.json();
@@ -227,7 +318,7 @@ export default function CyberScalperTerminal() {
         addLog(
           params.direction,
           `ORDER FILLED! Order ID: ${json.order_id || 'OK'}`,
-          `${params.qty} Qty of ${params.tradingSymbol || params.strike}`
+          `${params.qty} Qty of ${brokerTradingSymbol || params.strike}`
         );
         await fetchPositions();
       } else {
@@ -245,23 +336,43 @@ export default function CyberScalperTerminal() {
 
   // Close single position leg
   const handleClosePosition = async (pos: PositionItem) => {
-    if (!pos.securityId || pos.netQty === 0) return;
+    if (pos.netQty === 0) return;
+    if (broker === 'dhan' && !pos.securityId) return;
+    if (broker !== 'dhan' && !pos.tradingSymbol) return;
     setIsExecuting(true);
     const closeSide = pos.netQty > 0 ? 'SELL' : 'BUY';
-    addLog('EXIT', `Closing ${pos.tradingSymbol}`, `${Math.abs(pos.netQty)} Qty`);
+    addLog('EXIT', `Closing ${pos.tradingSymbol}`, `${Math.abs(pos.netQty)} Qty (${BROKER_LABELS[broker]})`);
 
     try {
-      const res = await fetch('/api/scalper/fast-order', {
+      const orderUrl = broker === 'dhan' ? '/api/scalper/fast-order' : scalperRoute(broker, 'order');
+      const res = await fetch(orderUrl, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          securityId: pos.securityId,
-          quantity: Math.abs(pos.netQty),
-          side: closeSide,
-          orderType: 'MARKET',
-          exchangeSegment: pos.exchangeSegment,
-          productType: pos.productType,
-        }),
+        body: JSON.stringify(
+          broker === 'dhan'
+            ? {
+                securityId: pos.securityId,
+                quantity: Math.abs(pos.netQty),
+                side: closeSide,
+                orderType: 'MARKET',
+                exchangeSegment: pos.exchangeSegment,
+                productType: pos.productType,
+              }
+            : {
+                // Dhan is the only broker that closes by numeric securityId; the rest
+                // close by trading symbol. pos.exchangeSegment and pos.productType
+                // already carry that broker's own native spelling (e.g. Kotak's
+                // 'nse_fo'/'mcx_fo' and 'NRML'/'MIS') straight off its positions
+                // payload (see lib/kotakShape.ts / lib/zerodhaShape.ts) — not the
+                // dashboard's INTRADAY/MARGIN convention, so pass them through as-is.
+                tradingsymbol: pos.tradingSymbol,
+                quantity: Math.abs(pos.netQty),
+                side: closeSide,
+                orderType: 'MARKET',
+                exchange: pos.exchangeSegment,
+                product: pos.productType,
+              },
+        ),
       });
 
       const json = await res.json();
@@ -422,6 +533,30 @@ export default function CyberScalperTerminal() {
 
         {/* Right: Controls & Selectors */}
         <div className="flex items-center gap-2 flex-wrap">
+          {/* Broker selector — market data (candles/EMA/VWAP/premiums) always
+              comes from Dhan regardless of this; only order placement and the
+              positions book follow the selected broker. */}
+          <div className="flex items-center bg-zinc-900 border border-zinc-800 rounded-lg p-0.5">
+            {authenticatedBrokers.map((b) => (
+              <button
+                key={b}
+                onClick={() => {
+                  cyberAudio.click();
+                  setBroker(b);
+                }}
+                className={cn(
+                  'px-2 py-1 rounded text-xs font-mono font-bold transition-all',
+                  broker === b
+                    ? 'bg-purple-500/20 text-purple-300 border border-purple-500/40 shadow-sm'
+                    : 'text-zinc-400 hover:text-white'
+                )}
+                title={`Trade via ${BROKER_LABELS[b]}`}
+              >
+                {BROKER_LABELS[b]}
+              </button>
+            ))}
+          </div>
+
           {/* Symbol selector */}
           <div className="flex items-center flex-wrap bg-zinc-900 border border-zinc-800 rounded-lg p-0.5 gap-0.5">
             {POPULAR_SYMBOLS.map((s) => (
@@ -502,12 +637,15 @@ export default function CyberScalperTerminal() {
         {/* 1. TELEMETRY HUD: 9/20 EMA DIFFERENCE + VWAP BIAS RADAR */}
         <CyberBiasRadar spot={spot} live={feedData?.live || null} />
 
-        {/* 2. THE BIG SCALPING TERMINAL: MASSIVE BUY & SELL BUTTONS */}
+        {/* 2. THE BIG SCALPING TERMINAL: MASSIVE BUY & SELL BUTTONS.
+            Futures mode has no non-Dhan trading-symbol lookup yet (see
+            handleExecuteTrade's DIRECT guard) — hide the toggle entirely for
+            other brokers rather than let it fail at order time. */}
         <CyberOrderPad
           symbol={symbol}
           spot={spot}
           options={feedData?.options || null}
-          future={feedData?.future || null}
+          future={broker === 'dhan' ? feedData?.future || null : null}
           bias={feedData?.live?.bias || 'NEUTRAL'}
           isExecuting={isExecuting}
           onExecuteTrade={handleExecuteTrade}
