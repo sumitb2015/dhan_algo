@@ -159,19 +159,26 @@ export function generatePayoffCurve(
   }
 
   const strikes = legs.map((l) => l.strike);
-  const minStrike = Math.min(...strikes, spot);
-  const maxStrike = Math.max(...strikes, spot);
-  const span = Math.max(strikeStep * 10, spot * 0.035, (maxStrike - minStrike) * 0.8);
+  const minStrike = strikes.length > 0 ? Math.min(...strikes, spot) : spot;
+  const maxStrike = strikes.length > 0 ? Math.max(...strikes, spot) : spot;
 
-  const startSpot = Math.round((spot - span) / strikeStep) * strikeStep;
-  const endSpot = Math.round((spot + span) / strikeStep) * strikeStep;
-  const stepCount = 80;
-  const stepSize = (endSpot - startSpot) / stepCount;
+  // Pad wings symmetrically so strikes, breakevens and tails are cleanly visible
+  const wingPad = strikeStep * 6;
+  const pctSpan = spot * 0.04;
+  const lo = Math.min(spot - pctSpan, minStrike - wingPad);
+  const hi = Math.max(spot + pctSpan, maxStrike + wingPad);
+
+  // Symmetrize bounds around current spot so spot sits in the center
+  const maxDiff = Math.max(spot - lo, hi - spot);
+  const symLo = Math.round((spot - maxDiff) / strikeStep) * strikeStep;
+  const symHi = Math.round((spot + maxDiff) / strikeStep) * strikeStep;
 
   const sampleSpots = new Set<number>();
+  const stepCount = 120;
   for (let i = 0; i <= stepCount; i++) {
-    sampleSpots.add(Math.round(startSpot + i * stepSize));
+    sampleSpots.add(Math.round(symLo + ((symHi - symLo) * i) / stepCount));
   }
+  // Guarantee exact evaluation at current spot and every strike kink
   sampleSpots.add(Math.round(spot));
   for (const s of strikes) sampleSpots.add(s);
 
@@ -189,12 +196,12 @@ export function generatePayoffCurve(
       const qty = leg.qty || leg.lots * lotSize;
       const isSell = leg.side === 'SELL';
 
-      // Payoff at Expiry
+      // Payoff at Expiry (strict piecewise linear intrinsic value)
       const intrinsicAtExp = leg.type === 'CE' ? Math.max(0, s - leg.strike) : Math.max(0, leg.strike - s);
       const legPnlExp = isSell ? (leg.entryPrice - intrinsicAtExp) * qty : (intrinsicAtExp - leg.entryPrice) * qty;
       pnlExp += legPnlExp;
 
-      // Payoff Today (T+0 via Black-Scholes)
+      // Payoff Today (T+0 via Black-Scholes theoretical price)
       const g = computeBsGreeks(leg.type, s, leg.strike, timeRemainingYears, leg.iv || baseIv, lotSize);
       const legPnlNow = isSell ? (leg.entryPrice - g.price) * qty : (g.price - leg.entryPrice) * qty;
       pnlNow += legPnlNow;
@@ -213,18 +220,22 @@ export function generatePayoffCurve(
     });
   }
 
-  // Find Breakevens on Expiry curve
-  const breakevens: number[] = [];
+  // Find Breakevens on Expiry curve via linear interpolation of zero crossings
+  const rawBreakevens: number[] = [];
   for (let i = 1; i < points.length; i++) {
     const p0 = points[i - 1];
     const p1 = points[i];
-    if ((p0.pnlExpiry <= 0 && p1.pnlExpiry >= 0) || (p0.pnlExpiry >= 0 && p1.pnlExpiry <= 0)) {
-      if (p1.pnlExpiry !== p0.pnlExpiry) {
-        const be = p0.spot + ((0 - p0.pnlExpiry) * (p1.spot - p0.spot)) / (p1.pnlExpiry - p0.pnlExpiry);
-        breakevens.push(Math.round(be));
-      }
+    if (p0.pnlExpiry === 0) {
+      rawBreakevens.push(p0.spot);
+      continue;
+    }
+    if ((p0.pnlExpiry < 0 && p1.pnlExpiry > 0) || (p0.pnlExpiry > 0 && p1.pnlExpiry < 0)) {
+      const be = p0.spot + ((0 - p0.pnlExpiry) * (p1.spot - p0.spot)) / (p1.pnlExpiry - p0.pnlExpiry);
+      rawBreakevens.push(Math.round(be));
     }
   }
+
+  const breakevens = Array.from(new Set(rawBreakevens)).sort((a, b) => a - b);
 
   return { points, minPnl, maxPnl, breakevens };
 }
@@ -308,6 +319,12 @@ export function computePortfolioMetrics(
     if (leg.side === 'SELL') shortCount += effectiveLots;
   }
 
+  // Net quantity per side: >0 means net short -> unbounded risk on that tail
+  const netCallQty = legs.filter(l => l.type === 'CE').reduce((s, l) => s + (l.side === 'SELL' ? (l.qty || l.lots * lotSize) : -(l.qty || l.lots * lotSize)), 0);
+  const netPutQty  = legs.filter(l => l.type === 'PE').reduce((s, l) => s + (l.side === 'SELL' ? (l.qty || l.lots * lotSize) : -(l.qty || l.lots * lotSize)), 0);
+  const hasUnlimitedLoss = netCallQty > 0 || netPutQty > 0;
+  const hasUnlimitedProfit = netCallQty < 0;
+
   // Rupee Delta = Total share delta * 1% of spot price
   const rupeeDelta = Math.round(totalDelta * (spot * 0.01));
 
@@ -332,8 +349,8 @@ export function computePortfolioMetrics(
     totalMtm: Math.round(totalMtm),
     mtmPct: Math.round(mtmPct * 100) / 100,
     estimatedMargin,
-    maxProfit: Math.max(0, Math.round(totalEntryValue)),
-    maxLoss: 'Unlimited',
+    maxProfit: hasUnlimitedProfit ? 'Unlimited' : Math.max(0, Math.round(totalEntryValue)),
+    maxLoss: hasUnlimitedLoss ? 'Unlimited' : Math.round(totalEntryValue * -1.5),
     popPct: 68,
   };
 }

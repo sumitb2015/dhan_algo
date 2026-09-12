@@ -45,6 +45,59 @@ interface PositionsStrategyMonitorProps {
   onSelectStrategyPreset: (presetId: string) => void;
 }
 
+function PayoffTooltip({ active, payload, label }: any) {
+  if (!active || !payload || !payload.length) return null;
+  const spotPrice = Number(label);
+  const expItem = payload.find((p: any) => p.dataKey === 'pnlExpiry');
+  const todayItem = payload.find((p: any) => p.dataKey === 'pnlToday');
+  const expVal = expItem?.value;
+  const todayVal = todayItem?.value;
+
+  return (
+    <div className="bg-zinc-950/98 border border-zinc-700/80 rounded-xl px-3.5 py-2.5 text-xs shadow-2xl backdrop-blur min-w-[210px] font-mono select-none">
+      <div className="flex items-center justify-between border-b border-zinc-800 pb-1.5 mb-2">
+        <span className="text-[11px] text-zinc-400 font-semibold uppercase tracking-wider">Spot Price</span>
+        <span className="font-black text-white text-sm">₹{spotPrice.toLocaleString('en-IN')}</span>
+      </div>
+
+      <div className="space-y-1.5 text-xs">
+        {todayVal != null && (
+          <div className="flex items-center justify-between">
+            <span className="flex items-center gap-1.5 text-amber-400 font-semibold">
+              <span className="w-2.5 h-0.5 bg-amber-400 inline-block border-t border-dashed" />
+              Today (T+0):
+            </span>
+            <span className={`font-bold ${todayVal >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
+              {todayVal >= 0 ? '+' : ''}₹{Math.round(todayVal).toLocaleString('en-IN')}
+            </span>
+          </div>
+        )}
+
+        {expVal != null && (
+          <div className="flex items-center justify-between">
+            <span className="flex items-center gap-1.5 text-sky-400 font-semibold">
+              <span className="w-2.5 h-0.5 bg-sky-400 inline-block" />
+              At Expiry:
+            </span>
+            <span className={`font-black ${expVal >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
+              {expVal >= 0 ? '+' : ''}₹{Math.round(expVal).toLocaleString('en-IN')}
+            </span>
+          </div>
+        )}
+      </div>
+
+      {todayVal != null && expVal != null && (
+        <div className="pt-2 mt-2 border-t border-zinc-800/80 flex items-center justify-between text-[11px]">
+          <span className="text-zinc-400 font-medium">Theta Left:</span>
+          <span className="text-zinc-200 font-bold">
+            ₹{Math.max(0, Math.round(expVal - todayVal)).toLocaleString('en-IN')}
+          </span>
+        </div>
+      )}
+    </div>
+  );
+}
+
 export default function PositionsStrategyMonitor({
   strategyName,
   totalLots,
@@ -64,9 +117,18 @@ export default function PositionsStrategyMonitor({
   onQuickShiftStrike,
   onSelectStrategyPreset,
 }: PositionsStrategyMonitorProps) {
-  // Identify key strikes for clearance calculation
-  const shortCeLeg = legs.find((l) => l.type === 'CE' && l.side === 'SELL');
-  const shortPeLeg = legs.find((l) => l.type === 'PE' && l.side === 'SELL');
+  // Identify key nearest short strikes for accurate clearance calculation
+  const shortCeLeg = useMemo(() => {
+    return legs
+      .filter((l) => l.type === 'CE' && l.side === 'SELL')
+      .sort((a, b) => a.strike - b.strike)[0];
+  }, [legs]);
+
+  const shortPeLeg = useMemo(() => {
+    return legs
+      .filter((l) => l.type === 'PE' && l.side === 'SELL')
+      .sort((a, b) => b.strike - a.strike)[0];
+  }, [legs]);
 
   const ceClearancePts = shortCeLeg ? Math.round(shortCeLeg.strike - spot) : null;
   const peClearancePts = shortPeLeg ? Math.round(spot - shortPeLeg.strike) : null;
@@ -329,9 +391,9 @@ export default function PositionsStrategyMonitor({
         </div>
 
         {/* 2D Recharts Payoff Chart */}
-        <div className="h-60 w-full">
+        <div className="h-72 w-full">
           <ResponsiveContainer width="100%" height="100%">
-            <LineChart data={payoffPoints} margin={{ top: 10, right: 20, left: 0, bottom: 0 }}>
+            <LineChart data={payoffPoints} margin={{ top: 16, right: 24, left: 6, bottom: 16 }}>
               <CartesianGrid strokeDasharray="3 6" stroke="#27272a" vertical={false} />
               <XAxis
                 dataKey="spot"
@@ -347,21 +409,13 @@ export default function PositionsStrategyMonitor({
                 tickFormatter={(v) => `₹${Math.round(v / 1000)}k`}
               />
               <Tooltip
-                contentStyle={{
-                  backgroundColor: 'rgba(9, 9, 11, 0.95)',
-                  borderColor: '#3f3f46',
-                  borderRadius: '0.75rem',
-                  fontSize: '11px',
-                  fontFamily: 'monospace',
-                  color: '#f4f4f5',
-                }}
-                formatter={(val: any) => [`₹${Number(val).toLocaleString('en-IN')}`, '']}
-                labelFormatter={(label) => `Spot Price: ${label}`}
+                content={<PayoffTooltip />}
+                cursor={{ stroke: '#52525b', strokeWidth: 1, strokeDasharray: '3 3' }}
               />
               {/* Zero P&L Line */}
               <ReferenceLine y={0} stroke="#52525b" strokeWidth={1} />
 
-              {/* NIFTY Spot Marker Line */}
+              {/* Underlying Spot Marker Line */}
               <ReferenceLine
                 x={Math.round(spot)}
                 stroke="#facc15"
@@ -416,25 +470,27 @@ export default function PositionsStrategyMonitor({
                     value: `BE ${be}`,
                     fill: '#34d399',
                     fontSize: 9,
-                    position: 'bottom',
+                    position: 'insideBottom',
                   }}
                 />
               ))}
 
+              {/* Today (T+0): Smooth Gaussian BS curve */}
               <Line
                 type="monotone"
                 dataKey="pnlToday"
                 stroke="#fbbf24"
-                strokeWidth={1.5}
+                strokeWidth={1.8}
                 dot={false}
                 strokeDasharray="3 3"
                 name="Today (T+0)"
               />
+              {/* At Expiry: Exact piecewise-linear intrinsic payoff with crisp strike corners */}
               <Line
-                type="monotone"
+                type="linear"
                 dataKey="pnlExpiry"
                 stroke="#38bdf8"
-                strokeWidth={2}
+                strokeWidth={2.2}
                 dot={false}
                 name="At Expiry"
               />
