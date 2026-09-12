@@ -46,6 +46,7 @@ export default function AddLegModal({
   const [side, setSide] = useState<Side>('SELL');
   const [strike, setStrike] = useState<number>(atmStrike);
   const [lots, setLots] = useState<number>(defaultLots || 2);
+  const [lotsDraft, setLotsDraft] = useState<string>(String(defaultLots || 2));
 
   const resolvePrice = React.useCallback(
     (targetStrike: number, optType: OptType): number => {
@@ -64,26 +65,49 @@ export default function AddLegModal({
   );
 
   const [entryPrice, setEntryPrice] = useState<number>(() => resolvePrice(atmStrike, 'CE'));
+  const [entryPriceDraft, setEntryPriceDraft] = useState<string>(() => String(resolvePrice(atmStrike, 'CE')));
+
+  const commitLots = (raw: string) => {
+    const val = Math.min(50, Math.max(1, parseInt(raw, 10) || 1));
+    setLots(val);
+    setLotsDraft(String(val));
+  };
+
+  const commitEntryPrice = (raw: string) => {
+    const val = Math.max(0.05, Math.round((parseFloat(raw) || 0.05) * 100) / 100);
+    setEntryPrice(val);
+    setEntryPriceDraft(String(val));
+  };
 
   // Update entry price when modal opens or ATM/chain updates
   React.useEffect(() => {
     if (isOpen) {
       setStrike(atmStrike);
-      setEntryPrice(resolvePrice(atmStrike, type));
+      const initP = resolvePrice(atmStrike, type);
+      setEntryPrice(initP);
+      setEntryPriceDraft(String(initP));
+      setLots(defaultLots || 2);
+      setLotsDraft(String(defaultLots || 2));
     }
-  }, [isOpen, atmStrike, resolvePrice, type]);
+  }, [isOpen, atmStrike, resolvePrice, type, defaultLots]);
 
   // Update entry price when strike or type changes
   const handleStrikeChange = (newStrike: number) => {
     setStrike(newStrike);
     const p = resolvePrice(newStrike, type);
-    if (p > 0) setEntryPrice(p);
+    if (p > 0) {
+      setEntryPrice(p);
+      setEntryPriceDraft(String(p));
+    }
   };
 
   const handleTypeChange = (newType: OptType) => {
     setType(newType);
     const p = resolvePrice(strike, newType);
-    if (p > 0) setEntryPrice(p);
+    if (p > 0) {
+      setEntryPrice(p);
+      setEntryPriceDraft(String(p));
+    }
   };
 
   if (!isOpen) return null;
@@ -95,12 +119,14 @@ export default function AddLegModal({
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
+    const finalLots = Math.min(50, Math.max(1, parseInt(lotsDraft, 10) || lots));
+    const finalPrice = Math.max(0.05, Math.round((parseFloat(entryPriceDraft) || entryPrice) * 100) / 100);
     onAddLeg({
       type,
       side,
       strike,
-      lots: Math.max(1, lots),
-      entryPrice: Math.max(0.05, entryPrice),
+      lots: finalLots,
+      entryPrice: finalPrice,
     });
     onClose();
   };
@@ -224,9 +250,18 @@ export default function AddLegModal({
               <input
                 type="number"
                 min={1}
-                max={20}
-                value={lots}
-                onChange={(e) => setLots(Number(e.target.value))}
+                max={50}
+                value={lotsDraft}
+                onChange={(e) => setLotsDraft(e.target.value)}
+                onBlur={(e) => commitLots(e.currentTarget.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') {
+                    commitLots((e.target as HTMLInputElement).value);
+                  }
+                  if (e.key === 'Escape') {
+                    setLotsDraft(String(lots));
+                  }
+                }}
                 className="w-full bg-zinc-900 text-white font-bold px-3 py-2 rounded-xl border border-zinc-700 focus:outline-none focus:border-indigo-500 text-xs"
               />
             </div>
@@ -237,10 +272,19 @@ export default function AddLegModal({
               </label>
               <input
                 type="number"
-                step="0.1"
-                min={0.1}
-                value={entryPrice}
-                onChange={(e) => setEntryPrice(Number(e.target.value))}
+                step="0.05"
+                min={0.05}
+                value={entryPriceDraft}
+                onChange={(e) => setEntryPriceDraft(e.target.value)}
+                onBlur={(e) => commitEntryPrice(e.currentTarget.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') {
+                    commitEntryPrice((e.target as HTMLInputElement).value);
+                  }
+                  if (e.key === 'Escape') {
+                    setEntryPriceDraft(String(entryPrice));
+                  }
+                }}
                 className="w-full bg-zinc-900 text-white font-bold px-3 py-2 rounded-xl border border-zinc-700 focus:outline-none focus:border-indigo-500 text-xs"
               />
             </div>
@@ -261,12 +305,14 @@ export default function AddLegModal({
                   type="button"
                   onClick={() => {
                     onClose();
+                    const finalLots = Math.min(50, Math.max(1, parseInt(lotsDraft, 10) || lots));
+                    const finalPrice = Math.max(0.05, Math.round((parseFloat(entryPriceDraft) || entryPrice) * 100) / 100);
                     onExecuteLeg({
                       type,
                       side,
                       strike,
-                      lots: Math.max(1, lots),
-                      entryPrice: Math.max(0.05, entryPrice),
+                      lots: finalLots,
+                      entryPrice: finalPrice,
                     });
                   }}
                   className="flex items-center gap-1.5 px-3.5 py-1.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-bold shadow transition-colors cursor-pointer"

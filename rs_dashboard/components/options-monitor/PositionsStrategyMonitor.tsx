@@ -588,26 +588,26 @@ export default function PositionsStrategyMonitor({
           <div className="h-72 w-full">
             <ResponsiveContainer width="100%" height="100%">
               <LineChart data={payoffPoints} margin={{ top: 16, right: 24, left: 6, bottom: 16 }}>
-                <CartesianGrid strokeDasharray="3 6" stroke="#27272a" vertical={false} />
+                <CartesianGrid strokeDasharray="3 6" stroke="var(--chart-grid)" vertical={false} />
                 <XAxis
                   dataKey="spot"
-                  stroke="#71717a"
+                  stroke="var(--chart-axis)"
                   fontSize={10}
                   tickLine={false}
                   tickFormatter={(v) => `${v}`}
                 />
                 <YAxis
-                  stroke="#71717a"
+                  stroke="var(--chart-axis)"
                   fontSize={10}
                   tickLine={false}
                   tickFormatter={(v) => `₹${Math.round(v / 1000)}k`}
                 />
                 <Tooltip
                   content={<PayoffTooltip />}
-                  cursor={{ stroke: '#52525b', strokeWidth: 1, strokeDasharray: '3 3' }}
+                  cursor={{ stroke: 'var(--chart-axis)', strokeWidth: 1, strokeDasharray: '3 3' }}
                 />
                 {/* Zero P&L Line */}
-                <ReferenceLine y={0} stroke="#52525b" strokeWidth={1} />
+                <ReferenceLine y={0} stroke="var(--chart-grid)" strokeWidth={1} />
 
                 {/* Underlying Spot Marker Line */}
                 <ReferenceLine
