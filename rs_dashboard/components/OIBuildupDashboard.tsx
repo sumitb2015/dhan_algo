@@ -4,6 +4,7 @@ import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import Link from 'next/link';
 import { Loader2, AlertCircle, Search, Flame, ExternalLink, SlidersHorizontal, ArrowUpDown } from 'lucide-react';
 import type { OIRow, OIBuildupResponse } from '@/app/api/futures-oi/route';
+import type { FuturesOrderInitialState } from '@/components/FuturesOrderModal';
 
 // ─── Formatters ───────────────────────────────────────────────────────────────
 
@@ -59,12 +60,14 @@ function QuadrantTable({
   sortKey,
   sortDir,
   onSort,
+  onTradeFuture,
 }: {
   title: string;
   rows: OIRow[];
   sortKey: SortKey;
   sortDir: 'asc' | 'desc';
   onSort: (key: SortKey) => void;
+  onTradeFuture?: (initial: FuturesOrderInitialState) => void;
 }) {
   const sorted = useMemo(() => {
     return [...rows].sort((a, b) => {
@@ -156,14 +159,21 @@ function QuadrantTable({
                     {fmtPct(r.oiChgPct)}
                   </td>
                   <td className="px-3 py-2 text-center">
-                    <Link
-                      href={`/scalper?symbol=${r.symbol}`}
-                      className={`inline-flex items-center gap-1 px-2.5 py-1 text-[10px] font-bold rounded-lg transition-colors shadow-sm ${meta.actionCls}`}
-                      title={`Execute ${r.symbol} on Scalper`}
+                    <button
+                      type="button"
+                      onClick={() => onTradeFuture?.({
+                        symbol: r.symbol,
+                        side: (baseName === 'Long Buildup' || baseName === 'Short Covering') ? 'BUY' : 'SELL',
+                        price: r.price,
+                        expiry: r.expiry,
+                        productType: 'INTRADAY',
+                      })}
+                      className={`inline-flex items-center gap-1 px-2.5 py-1 text-[10px] font-bold rounded-lg transition-colors shadow-sm cursor-pointer ${meta.actionCls}`}
+                      title={`Open Futures Order Window for ${r.symbol}`}
                     >
                       Trade
                       <ExternalLink className="h-2.5 w-2.5" />
-                    </Link>
+                    </button>
                   </td>
                 </tr>
               );
@@ -180,9 +190,11 @@ function QuadrantTable({
 export default function OIBuildupDashboard({
   refreshKey,
   initialData,
+  onTradeFuture,
 }: {
   refreshKey?: number;
   initialData?: OIBuildupResponse | null;
+  onTradeFuture?: (initial: FuturesOrderInitialState) => void;
 }) {
   const [data, setData]             = useState<OIBuildupResponse | null>(initialData ?? null);
   const [loading, setLoading]       = useState(!initialData);
@@ -327,7 +339,7 @@ export default function OIBuildupDashboard({
       {data.dataDate && (
         <div className="flex items-center justify-between text-[10px] text-zinc-500 px-1">
           <span>DATA: {data.dataDate}</span>
-          <span>Click any <strong>Trade</strong> button to load the contract in Scalper</span>
+          <span>Click any <strong>Trade</strong> button to open the Futures Order Window</span>
         </div>
       )}
 
@@ -341,6 +353,7 @@ export default function OIBuildupDashboard({
             sortKey={sortKey}
             sortDir={sortDir}
             onSort={handleSort}
+            onTradeFuture={onTradeFuture}
           />
         ))}
       </div>

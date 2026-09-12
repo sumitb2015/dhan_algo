@@ -22,6 +22,7 @@ import {
 } from 'lucide-react';
 import type { ContractStats } from '@/app/api/futures/route';
 import type { OIRow } from '@/app/api/futures-oi/route';
+import type { FuturesOrderInitialState } from '@/components/FuturesOrderModal';
 
 interface FuturesActionDeskProps {
   niftyNear?: ContractStats;
@@ -31,6 +32,7 @@ interface FuturesActionDeskProps {
   shortCovering: OIRow[];
   longUnwinding: OIRow[];
   onOpenPlaybook: () => void;
+  onTradeFuture: (initial: FuturesOrderInitialState) => void;
 }
 
 interface ActionableSetup {
@@ -78,9 +80,11 @@ function fmtPct(v: number): string {
 function IndexCommandCard({
   name,
   contract,
+  onTradeFuture,
 }: {
   name: 'NIFTY' | 'BANKNIFTY';
   contract?: ContractStats;
+  onTradeFuture: (initial: FuturesOrderInitialState) => void;
 }) {
   if (!contract) {
     return (
@@ -237,20 +241,34 @@ function IndexCommandCard({
 
       {/* 1-Click Execution Action Buttons */}
       <div className="flex items-center gap-2 pt-3 border-t border-zinc-800/80">
-        <Link
-          href={`/scalper?symbol=${name}`}
+        <button
+          type="button"
+          onClick={() => onTradeFuture({
+            symbol: name,
+            side: 'BUY',
+            price: price,
+            expiry: contract.expiry,
+            productType: 'INTRADAY',
+          })}
           className="flex-1 flex items-center justify-center gap-1.5 px-3 py-2 text-xs font-bold rounded-lg bg-emerald-600 hover:bg-emerald-500 text-oncolor transition-colors shadow-sm cursor-pointer"
         >
           <TrendingUp className="h-3.5 w-3.5" />
-          Trade Long (Scalper)
-        </Link>
-        <Link
-          href={`/scalper?symbol=${name}`}
+          Trade Long (Futures)
+        </button>
+        <button
+          type="button"
+          onClick={() => onTradeFuture({
+            symbol: name,
+            side: 'SELL',
+            price: price,
+            expiry: contract.expiry,
+            productType: 'INTRADAY',
+          })}
           className="flex-1 flex items-center justify-center gap-1.5 px-3 py-2 text-xs font-bold rounded-lg bg-rose-600 hover:bg-rose-500 text-oncolor transition-colors shadow-sm cursor-pointer"
         >
           <TrendingDown className="h-3.5 w-3.5" />
-          Trade Short (Scalper)
-        </Link>
+          Trade Short (Futures)
+        </button>
         <Link
           href={`/synthetic-futures?underlying=${name}`}
           className="flex items-center justify-center gap-1 px-3 py-2 text-xs font-semibold rounded-lg border border-sky-500/30 bg-sky-500/10 text-sky-400 hover:bg-sky-500/20 transition-colors"
@@ -266,7 +284,13 @@ function IndexCommandCard({
 
 // ─── Setup Card Component ─────────────────────────────────────────────────────
 
-function SetupCard({ setup }: { setup: ActionableSetup }) {
+function SetupCard({
+  setup,
+  onTradeFuture,
+}: {
+  setup: ActionableSetup;
+  onTradeFuture: (initial: FuturesOrderInitialState) => void;
+}) {
   const [copied, setCopied] = useState(false);
 
   const copyDetails = () => {
@@ -342,8 +366,16 @@ function SetupCard({ setup }: { setup: ActionableSetup }) {
 
       {/* Action Footer */}
       <div className="flex items-center gap-2 pt-2 border-t border-zinc-800/80">
-        <Link
-          href={`/scalper?symbol=${setup.symbol}`}
+        <button
+          type="button"
+          onClick={() => onTradeFuture({
+            symbol: setup.symbol,
+            side: setup.direction === 'BULLISH' ? 'BUY' : 'SELL',
+            price: setup.price,
+            stopLoss: setup.stopLoss,
+            target: setup.target1,
+            productType: 'INTRADAY',
+          })}
           className={`flex-1 flex items-center justify-center gap-1.5 px-3 py-2 text-xs font-bold rounded-lg transition-colors cursor-pointer ${
             isBullish
               ? 'bg-emerald-600 hover:bg-emerald-500 text-oncolor'
@@ -351,11 +383,11 @@ function SetupCard({ setup }: { setup: ActionableSetup }) {
           }`}
         >
           {isBullish ? <TrendingUp className="h-3.5 w-3.5" /> : <TrendingDown className="h-3.5 w-3.5" />}
-          Trade on Scalper
-        </Link>
+          Trade Future
+        </button>
         <button
           onClick={copyDetails}
-          className="p-2 rounded-lg border border-zinc-800 bg-zinc-900 text-zinc-400 hover:text-white transition-colors"
+          className="p-2 rounded-lg border border-zinc-800 bg-zinc-900 text-zinc-400 hover:text-white transition-colors cursor-pointer"
           title="Copy trade plan to clipboard"
         >
           {copied ? <Check className="h-4 w-4 text-emerald-400" /> : <Copy className="h-4 w-4" />}
@@ -375,6 +407,7 @@ export default function FuturesActionDesk({
   shortCovering,
   longUnwinding,
   onOpenPlaybook,
+  onTradeFuture,
 }: FuturesActionDeskProps) {
   const [filterMode, setFilterMode] = useState<'ALL' | 'BULLISH' | 'BEARISH'>('ALL');
 
@@ -571,8 +604,8 @@ export default function FuturesActionDesk({
         </div>
 
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-          <IndexCommandCard name="NIFTY" contract={niftyNear} />
-          <IndexCommandCard name="BANKNIFTY" contract={bankniftyNear} />
+          <IndexCommandCard name="NIFTY" contract={niftyNear} onTradeFuture={onTradeFuture} />
+          <IndexCommandCard name="BANKNIFTY" contract={bankniftyNear} onTradeFuture={onTradeFuture} />
         </div>
       </section>
 
@@ -636,7 +669,7 @@ export default function FuturesActionDesk({
         ) : (
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
             {filteredSetups.map(setup => (
-              <SetupCard key={setup.id} setup={setup} />
+              <SetupCard key={setup.id} setup={setup} onTradeFuture={onTradeFuture} />
             ))}
           </div>
         )}

@@ -16,6 +16,7 @@ import FuturesBasketCards from '@/components/FuturesBasketCards';
 import FuturesCandleChart from '@/components/FuturesCandleChart';
 import FuturesActionDesk from '@/components/FuturesActionDesk';
 import FuturesPlaybookModal from '@/components/FuturesPlaybookModal';
+import FuturesOrderModal, { type FuturesOrderInitialState } from '@/components/FuturesOrderModal';
 
 // ─── Formatters ───────────────────────────────────────────────────────────────
 
@@ -677,7 +678,14 @@ export default function FuturesDashboard() {
   const [dlStatus, setDlStatus]         = useState<FuturesRefreshStatus | null>(null);
   const [refreshKey, setRefreshKey]     = useState(0);
   const [showPlaybook, setShowPlaybook] = useState(false);
+  const [orderModalOpen, setOrderModalOpen] = useState(false);
+  const [activeOrderInitial, setActiveOrderInitial] = useState<FuturesOrderInitialState | null>(null);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  const handleOpenOrder = useCallback((initial: FuturesOrderInitialState) => {
+    setActiveOrderInitial(initial);
+    setOrderModalOpen(true);
+  }, []);
 
   const fetchData = useCallback(async () => {
     setLoading(true);
@@ -803,6 +811,7 @@ export default function FuturesDashboard() {
               shortCovering={oiData?.shortCovering ?? []}
               longUnwinding={oiData?.longUnwinding ?? []}
               onOpenPlaybook={() => setShowPlaybook(true)}
+              onTradeFuture={handleOpenOrder}
             />
 
             {/* NIFTY instrument section */}
@@ -827,7 +836,11 @@ export default function FuturesDashboard() {
                 <div className="h-5 border-l-2 border-sky-500" />
                 <h2 className="text-sm font-bold text-zinc-100">Stock Futures — OI Buildup</h2>
               </div>
-              <OIBuildupDashboard refreshKey={refreshKey} initialData={oiData} />
+              <OIBuildupDashboard
+                refreshKey={refreshKey}
+                initialData={oiData}
+                onTradeFuture={handleOpenOrder}
+              />
             </section>
 
           </div>
@@ -838,6 +851,13 @@ export default function FuturesDashboard() {
       <FuturesPlaybookModal
         isOpen={showPlaybook}
         onClose={() => setShowPlaybook(false)}
+      />
+
+      {/* Futures Order Modal Window */}
+      <FuturesOrderModal
+        isOpen={orderModalOpen}
+        onClose={() => setOrderModalOpen(false)}
+        initialOrder={activeOrderInitial}
       />
     </div>
   );
