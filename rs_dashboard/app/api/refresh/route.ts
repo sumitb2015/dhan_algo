@@ -119,7 +119,7 @@ export async function POST(req: NextRequest) {
 
   // Read optional target and source from body
   let target = 'all';
-  let source = 'dhan';
+  let source = 'yahoo';
   try {
     const body = await req.json().catch(() => ({}));
     if (body?.target) target = body.target;

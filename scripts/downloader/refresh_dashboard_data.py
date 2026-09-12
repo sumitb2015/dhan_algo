@@ -1055,10 +1055,10 @@ def main():
     parser = argparse.ArgumentParser(description="Refresh RS dashboard data (incremental)")
     parser.add_argument("--target", default="all",
                         choices=["all", "nifty50", "nifty500-index", "indices", "stocks", "quotes"])
-    parser.add_argument("--source", default="dhan", choices=["dhan", "yahoo"],
-                        help="Data source: dhan (default) or yahoo (backup)")
-    parser.add_argument("--fallback-yahoo", action="store_true", default=True,
-                        help="Automatically fall back to Yahoo Finance if Dhan fails (default: True)")
+    parser.add_argument("--source", default="yahoo", choices=["yahoo", "dhan"],
+                        help="Data source: yahoo (default, fast/resilient) or dhan (primary broker)")
+    parser.add_argument("--fallback-dhan", action="store_true", default=False,
+                        help="Fall back to Dhan if Yahoo fails")
     args = parser.parse_args()
 
     # Remove any stale stop trigger

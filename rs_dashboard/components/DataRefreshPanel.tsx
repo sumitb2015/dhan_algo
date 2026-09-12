@@ -174,7 +174,7 @@ export default function DataRefreshPanel({ open, onClose, onRefreshComplete }: D
     }
   }, [status?.log]);
 
-  const [dataSource, setDataSource] = useState<'dhan' | 'yahoo'>('dhan');
+  const [dataSource, setDataSource] = useState<'dhan' | 'yahoo'>('yahoo');
 
   const startRefresh = async (target: TargetId) => {
     setStarting(true);
@@ -217,7 +217,7 @@ export default function DataRefreshPanel({ open, onClose, onRefreshComplete }: D
             </div>
             <div>
               <SheetTitle className="text-sm font-bold text-white">Sync Market Data</SheetTitle>
-              <SheetDescription className="text-[10px] text-zinc-500">Incremental update from Dhan API</SheetDescription>
+              <SheetDescription className="text-[10px] text-zinc-500">Fast EOD updates via Yahoo Finance / Dhan</SheetDescription>
             </div>
           </div>
           <Button
@@ -233,8 +233,19 @@ export default function DataRefreshPanel({ open, onClose, onRefreshComplete }: D
         {/* Source Selector & Dataset buttons */}
         <div className="flex-none px-5 pt-3 pb-3 space-y-2.5">
           <div className="flex items-center justify-between pb-1">
-            <span className="text-[10px] font-bold uppercase tracking-wider text-zinc-400">Data Source</span>
+            <span className="text-[10px] font-bold uppercase tracking-wider text-zinc-400">EOD Source</span>
             <div className="flex bg-zinc-900 border border-zinc-800 rounded-lg p-0.5 text-xs font-semibold">
+              <button
+                type="button"
+                onClick={() => setDataSource('yahoo')}
+                className={`px-2.5 py-1 rounded-md transition-colors ${
+                  dataSource === 'yahoo'
+                    ? 'bg-sky-500/20 text-sky-400 border border-sky-500/30'
+                    : 'text-zinc-400 hover:text-zinc-200'
+                }`}
+              >
+                Yahoo (Default)
+              </button>
               <button
                 type="button"
                 onClick={() => setDataSource('dhan')}
@@ -245,17 +256,6 @@ export default function DataRefreshPanel({ open, onClose, onRefreshComplete }: D
                 }`}
               >
                 Dhan API
-              </button>
-              <button
-                type="button"
-                onClick={() => setDataSource('yahoo')}
-                className={`px-2.5 py-1 rounded-md transition-colors ${
-                  dataSource === 'yahoo'
-                    ? 'bg-sky-500/20 text-sky-400 border border-sky-500/30'
-                    : 'text-zinc-400 hover:text-zinc-200'
-                }`}
-              >
-                Yahoo (Backup)
               </button>
             </div>
           </div>
@@ -272,7 +272,7 @@ export default function DataRefreshPanel({ open, onClose, onRefreshComplete }: D
           >
             <div className="flex items-center gap-2 font-semibold text-sm">
               {starting ? <RefreshCw className="h-4 w-4 animate-spin" /> : <Download className="h-4 w-4" />}
-              Refresh All Data ({dataSource === 'yahoo' ? 'Yahoo Backup' : 'Dhan'})
+              Refresh All Data ({dataSource === 'yahoo' ? 'Yahoo Finance' : 'Dhan'})
             </div>
           </Button>
 
