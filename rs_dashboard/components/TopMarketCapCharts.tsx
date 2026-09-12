@@ -11,7 +11,7 @@
 // LightweightCandlestickChart — no new data plumbing.
 
 import React, { useState, useEffect, useCallback, useMemo } from 'react';
-import { RefreshCw, LayoutGrid, Maximize2, X } from 'lucide-react';
+import { RefreshCw, LayoutGrid, Maximize2, X, Columns2 } from 'lucide-react';
 import type { EquityCandlesResponse, CandleRow } from '@/app/api/equity-candles/route';
 import { NIFTY_TOP10_BY_WEIGHT } from '@/lib/nifty50';
 import { cn } from '@/lib/utils';
@@ -132,9 +132,20 @@ export default function TopMarketCapCharts() {
   const [liveLtp, setLiveLtp] = useState<Record<string, number>>({});
   const [loading, setLoading] = useState(false);
   const [lastFetched, setLastFetched] = useState<Date | null>(null);
-  // Symbol of the tile shown fullscreen, or null when the grid is showing.
-  // Looked up by symbol rather than index so it survives a tab switch.
   const [maximized, setMaximized] = useState<string | null>(null);
+  const [gridSize, setGridSize] = useState<'large' | 'compact'>('large');
+
+  useEffect(() => {
+    try {
+      const saved = localStorage.getItem('top-mcap-grid-size');
+      if (saved === 'compact' || saved === 'large') setGridSize(saved);
+    } catch { /* ignore */ }
+  }, []);
+
+  const handleGridSizeChange = (size: 'large' | 'compact') => {
+    setGridSize(size);
+    try { localStorage.setItem('top-mcap-grid-size', size); } catch { /* ignore */ }
+  };
 
   // Both tabs' symbols are fetched together up front — 16 local CSV reads,
   // cached server-side by dataLoader, so there is no cost to having the other
@@ -235,8 +246,40 @@ export default function TopMarketCapCharts() {
           ))}
         </div>
 
-        {/* Period selector */}
+        {/* Layout Size selector */}
         <div className="flex items-center bg-zinc-900 border border-zinc-800 p-0.5 rounded-lg text-[11px] gap-0.5 ml-auto">
+          <button
+            onClick={() => handleGridSizeChange('large')}
+            title="Large (2 Columns, 480px height)"
+            className={cn(
+              'px-2 py-1 font-semibold rounded flex items-center gap-1 transition-all cursor-pointer',
+              gridSize === 'large'
+                ? 'bg-emerald-500/15 text-emerald-300'
+                : 'text-zinc-300 hover:text-white',
+              FOCUS_RING
+            )}
+          >
+            <Columns2 className="h-3 w-3" />
+            <span>Large</span>
+          </button>
+          <button
+            onClick={() => handleGridSizeChange('compact')}
+            title="Compact (4 Columns, 320px height)"
+            className={cn(
+              'px-2 py-1 font-semibold rounded flex items-center gap-1 transition-all cursor-pointer',
+              gridSize === 'compact'
+                ? 'bg-emerald-500/15 text-emerald-300'
+                : 'text-zinc-300 hover:text-white',
+              FOCUS_RING
+            )}
+          >
+            <LayoutGrid className="h-3 w-3" />
+            <span>Compact</span>
+          </button>
+        </div>
+
+        {/* Period selector */}
+        <div className="flex items-center bg-zinc-900 border border-zinc-800 p-0.5 rounded-lg text-[11px] gap-0.5">
           {PERIODS.map((p) => (
             <button
               key={p}
@@ -280,16 +323,26 @@ export default function TopMarketCapCharts() {
         </button>
       </header>
 
-      {/* Body: 8-tile grid — 1 col on mobile, 2 on tablet, 4 on desktop (2 rows) */}
+      {/* Body: 8-tile grid — Large defaults to 2 columns on desktop with 480px height */}
       <div className="flex-1 min-h-0 p-4">
-        <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-3">
+        <div
+          className={cn(
+            'grid',
+            gridSize === 'large'
+              ? 'grid-cols-1 lg:grid-cols-2 gap-4'
+              : 'grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-3'
+          )}
+        >
           {tiles.map((s, i) => {
             const resp = data[s.symbol];
             const q = quoteFor(resp, liveLtp[s.symbol]);
             return (
               <div
                 key={s.symbol}
-                className="group relative flex flex-col h-[320px] bg-zinc-950/60 border border-zinc-900 rounded-xl p-2"
+                className={cn(
+                  'group relative flex flex-col bg-zinc-950/60 border border-zinc-900 rounded-xl p-2 transition-all',
+                  gridSize === 'large' ? 'h-[480px]' : 'h-[320px]'
+                )}
               >
                 <div className="flex items-center justify-between px-1 pb-1 shrink-0">
                   <div className="flex items-baseline gap-1.5 min-w-0">
