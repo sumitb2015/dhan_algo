@@ -18,6 +18,8 @@ export interface OIRow {
   dataDate?: string;
   /** True when `price`/`priceChgPct` were overlaid with a live LTP rather than the EOD snapshot value. */
   isLivePrice?: boolean;
+  volume?: number;
+  turnover?: number;
 }
 
 export interface OIBuildupResponse {
@@ -65,6 +67,8 @@ function parseSnapshotContent(content: string): (OIRow & { category: string; dat
       oiChgPct:    parseFloat(get('OIChgPct')) || 0,
       category:    get('Category'),
       dataDate:    get('DataDate'),
+      volume:      parseFloat(get('Volume')) || 0,
+      turnover:    parseFloat(get('Turnover')) || 0,
     }];
   });
 }

@@ -2,17 +2,20 @@
 
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import NavBar from '@/components/NavBar';
-import { Activity, RefreshCw, AlertCircle, Loader2, Download, ChevronDown, ChevronUp, CandlestickChart } from 'lucide-react';
+import { Activity, RefreshCw, AlertCircle, Loader2, Download, ChevronDown, ChevronUp, CandlestickChart, BookOpen } from 'lucide-react';
 import {
   ComposedChart, Area, Line, XAxis, YAxis, CartesianGrid,
   Tooltip, Legend, ResponsiveContainer,
 } from 'recharts';
 import type { ContractStats, ChartPoint, RolloverPoint, FuturesResponse } from '@/app/api/futures/route';
+import type { OIBuildupResponse } from '@/app/api/futures-oi/route';
 import type { FuturesRefreshStatus } from '@/app/api/futures-refresh/route';
 import type { CandleData } from '@/app/api/nifty-oi-profile/route';
 import OIBuildupDashboard from '@/components/OIBuildupDashboard';
 import FuturesBasketCards from '@/components/FuturesBasketCards';
 import FuturesCandleChart from '@/components/FuturesCandleChart';
+import FuturesActionDesk from '@/components/FuturesActionDesk';
+import FuturesPlaybookModal from '@/components/FuturesPlaybookModal';
 
 // ─── Formatters ───────────────────────────────────────────────────────────────
 
@@ -152,13 +155,14 @@ function InstrumentPulseBlock({ name, near }: { name: string; near: ContractStat
 }
 
 function MarketPulseRibbon({
-  data, dlStatus, loading, onDownload, onReload,
+  data, dlStatus, loading, onDownload, onReload, onOpenPlaybook,
 }: {
   data: FuturesResponse;
   dlStatus: FuturesRefreshStatus | null;
   loading: boolean;
   onDownload: () => void;
   onReload: () => void;
+  onOpenPlaybook?: () => void;
 }) {
   return (
     <div className="relative overflow-hidden rounded-2xl border border-zinc-800 bg-zinc-900/60">
@@ -181,6 +185,16 @@ function MarketPulseRibbon({
         </div>
 
         <div className="flex items-center gap-2">
+          {onOpenPlaybook && (
+            <button
+              onClick={onOpenPlaybook}
+              className="flex items-center gap-1.5 px-3 py-1.5 text-[11px] font-semibold rounded-lg border border-sky-500/30 bg-sky-500/10 text-sky-300 hover:bg-sky-500/20 hover:border-sky-500/40 transition-all cursor-pointer"
+              title="Futures & Open Interest Trading Playbook"
+            >
+              <BookOpen className="h-3 w-3" />
+              Trading Playbook
+            </button>
+          )}
           {dlStatus?.running ? (
             <div className="flex items-center gap-1.5 text-[11px] text-sky-400">
               <Loader2 className="h-3.5 w-3.5 animate-spin" />
@@ -656,21 +670,32 @@ function InstrumentSection({
 // ─── Main dashboard ───────────────────────────────────────────────────────────
 
 export default function FuturesDashboard() {
-  const [data, setData]         = useState<FuturesResponse | null>(null);
-  const [loading, setLoading]   = useState(true);
-  const [error, setError]       = useState<string | null>(null);
-  const [dlStatus, setDlStatus] = useState<FuturesRefreshStatus | null>(null);
-  const [refreshKey, setRefreshKey] = useState(0);
+  const [data, setData]                 = useState<FuturesResponse | null>(null);
+  const [oiData, setOiData]             = useState<OIBuildupResponse | null>(null);
+  const [loading, setLoading]           = useState(true);
+  const [error, setError]               = useState<string | null>(null);
+  const [dlStatus, setDlStatus]         = useState<FuturesRefreshStatus | null>(null);
+  const [refreshKey, setRefreshKey]     = useState(0);
+  const [showPlaybook, setShowPlaybook] = useState(false);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const fetchData = useCallback(async () => {
     setLoading(true);
     setError(null);
     try {
-      const res  = await fetch('/api/futures');
-      const json: FuturesResponse = await res.json();
-      if (!json.success) throw new Error(json.error ?? 'API error');
-      setData(json);
+      const [fRes, oiRes] = await Promise.all([
+        fetch('/api/futures'),
+        fetch('/api/futures-oi'),
+      ]);
+      const [fJson, oiJson] = await Promise.all([
+        fRes.json() as Promise<FuturesResponse>,
+        oiRes.json() as Promise<OIBuildupResponse>,
+      ]);
+      if (!fJson.success) throw new Error(fJson.error ?? 'API error');
+      setData(fJson);
+      if (oiJson.success) {
+        setOiData(oiJson);
+      }
     } catch (e: unknown) {
       setError(e instanceof Error ? e.message : 'Failed to load data');
     } finally {
@@ -712,7 +737,7 @@ export default function FuturesDashboard() {
     <div className="flex flex-col min-h-screen bg-black text-zinc-100">
 
       {/* Sticky header */}
-      <header className="sticky top-0 w-full border-b border-zinc-900 bg-zinc-950/60 backdrop-blur-md px-5 py-3 flex items-center gap-4 z-20 flex-wrap">
+      <header className="sticky top-0 w-full border-b border-zinc-900 bg-zinc-950/60 backdrop-blur-md px-5 py-3 flex items-center justify-between gap-4 z-20 flex-wrap">
         <div className="flex items-center gap-3 shrink-0">
           <div className="h-9 w-9 rounded-xl bg-gradient-to-tr from-sky-600 to-cyan-400 flex items-center justify-center shadow-lg shadow-sky-500/10">
             <Activity className="h-4 w-4 text-white" />
@@ -729,7 +754,16 @@ export default function FuturesDashboard() {
           </div>
         </div>
 
-        <NavBar />
+        <div className="flex items-center gap-3">
+          <button
+            onClick={() => setShowPlaybook(true)}
+            className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold rounded-xl border border-sky-500/30 bg-sky-500/10 text-sky-300 hover:bg-sky-500/20 transition-all shadow-sm cursor-pointer"
+          >
+            <BookOpen className="h-3.5 w-3.5" />
+            Trading Playbook
+          </button>
+          <NavBar />
+        </div>
       </header>
 
       {/* Body */}
@@ -757,6 +791,18 @@ export default function FuturesDashboard() {
               loading={loading}
               onDownload={startDownload}
               onReload={fetchData}
+              onOpenPlaybook={() => setShowPlaybook(true)}
+            />
+
+            {/* Actionable Trading Desk */}
+            <FuturesActionDesk
+              niftyNear={data.instruments.NIFTY[0]}
+              bankniftyNear={data.instruments.BANKNIFTY[0]}
+              longBuildup={oiData?.longBuildup ?? []}
+              shortBuildup={oiData?.shortBuildup ?? []}
+              shortCovering={oiData?.shortCovering ?? []}
+              longUnwinding={oiData?.longUnwinding ?? []}
+              onOpenPlaybook={() => setShowPlaybook(true)}
             />
 
             {/* NIFTY instrument section */}
@@ -775,18 +821,24 @@ export default function FuturesDashboard() {
               rolloverPoints={data.rollover?.BANKNIFTY ?? []}
             />
 
-            {/* OI Buildup */}
+            {/* Stock Futures OI Buildup */}
             <section className="border-t border-zinc-800 pt-6 mt-0">
               <div className="flex items-center gap-3 mb-4">
                 <div className="h-5 border-l-2 border-sky-500" />
                 <h2 className="text-sm font-bold text-zinc-100">Stock Futures — OI Buildup</h2>
               </div>
-              <OIBuildupDashboard refreshKey={refreshKey} />
+              <OIBuildupDashboard refreshKey={refreshKey} initialData={oiData} />
             </section>
 
           </div>
         ) : null}
       </main>
+
+      {/* Futures Trading Playbook Modal */}
+      <FuturesPlaybookModal
+        isOpen={showPlaybook}
+        onClose={() => setShowPlaybook(false)}
+      />
     </div>
   );
 }
