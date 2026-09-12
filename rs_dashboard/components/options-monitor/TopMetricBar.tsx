@@ -23,6 +23,7 @@ interface TopMetricBarProps {
   isLiveLoading: boolean;
   wsTransport?: 'ws' | 'poll';
   wsStatus?: 'RUNNING' | 'STOPPED' | 'STARTING' | 'ERROR';
+  lastUpdated?: string;
   onRefreshQuotes: () => void;
   onToggleHotkeysModal: () => void;
   viewMode: 'broker' | 'custom';
@@ -48,6 +49,7 @@ export default function TopMetricBar({
   isLiveLoading,
   wsTransport = 'poll',
   wsStatus = 'STOPPED',
+  lastUpdated,
   onRefreshQuotes,
   onToggleHotkeysModal,
   viewMode,
@@ -149,6 +151,9 @@ export default function TopMetricBar({
             }`}
           />
           <span>{isWsLive ? 'WS LIVE' : isPollLive ? '100ms POLL' : wsStatus}</span>
+          {lastUpdated && isWsLive && (
+            <span className="text-[9px] text-emerald-400/80 font-normal">[{lastUpdated}]</span>
+          )}
         </div>
 
         {/* DATA Currency Chip */}

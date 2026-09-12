@@ -64,7 +64,7 @@ export default function OptionsMonitorPage() {
   };
 
   // ── 1. REALTIME WEBSOCKET FEED ─────────────────────────────────────────────
-  const { liveQuotes, bridgeStatus, transport } = useLiveOptionsWS(
+  const { liveQuotes, bridgeStatus, transport, lastUpdated } = useLiveOptionsWS(
     selectedExpiry,
     'dhan',
     ['dhan'],
@@ -1153,6 +1153,7 @@ export default function OptionsMonitorPage() {
           isLiveLoading={isChainLoading || isBrokerLoading}
           wsTransport={transport}
           wsStatus={bridgeStatus.status}
+          lastUpdated={lastUpdated}
           onRefreshQuotes={() => {
             fetchOptionChain(selectedUnderlying, selectedExpiry);
             fetchBrokerPositions();
