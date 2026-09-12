@@ -70,6 +70,13 @@ export const TERMINAL_PILLARS: TerminalPillarGroup[] = [
     tone: 'emerald',
     items: [
       {
+        name: 'Options Monitor',
+        href: '/options-monitor',
+        badge: 'NEW',
+        desc: 'Positions & strategy monitor with live 2D payoff graph, strike clearance & hotkey execution [C, P, H, W, X, ESC]',
+        hot: true,
+      },
+      {
         name: 'Cyber Scalper (9/20 EMA)',
         href: '/cyber-scalper',
         badge: 'NEW',

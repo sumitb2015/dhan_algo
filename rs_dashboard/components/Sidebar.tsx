@@ -95,6 +95,7 @@ const NAV_GROUPS = [
     label: 'Trading',
     icon: Zap,
     links: [
+      { href: '/options-monitor', label: 'Options Monitor', desc: 'Real-time positions & Greeks risk monitor with live 2D payoff curve, strike clearance & hotkey execution [C, P, H, W, X, ESC]' },
       { href: '/cyber-scalper', label: 'Cyber Scalper (9/20 EMA)', desc: 'Futuristic 9/20 EMA & VWAP scalping terminal with live difference bias & big buy/sell order execution' },
       { href: '/ultimate-scanner', label: 'Ultimate Scanner', desc: 'Process-driven Nifty & Sensex option chain scanner, watchlist & multi-leg execution' },
       { href: '/straddle-matrix', label: 'ATM Straddle Matrix', desc: 'Live ATM short straddle entry stats across timestamps & leg-wise SL%' },
