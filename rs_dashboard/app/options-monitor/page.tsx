@@ -1,6 +1,9 @@
 'use client';
 
 import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
+import Link from 'next/link';
+import { ShieldAlert } from 'lucide-react';
+import NavBar from '@/components/NavBar';
 import TopMetricBar from '@/components/options-monitor/TopMetricBar';
 import PositionsStrategyMonitor from '@/components/options-monitor/PositionsStrategyMonitor';
 import RiskGreeksMatrix from '@/components/options-monitor/RiskGreeksMatrix';
@@ -942,42 +945,92 @@ export default function OptionsMonitorPage() {
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [handleRollCe, handleRollPe, handleDeltaHedge, handleAddWings, handleTrim50, handleFlatten]);
 
+  const todayStr = new Date().toISOString().split('T')[0];
+
   return (
     <div className="min-h-screen bg-zinc-950 text-white flex flex-col font-sans">
-      {/* ── TOP METRIC BAR (Matches prompt diagram with real WebSocket & live quotes) ── */}
-      <TopMetricBar
-        selectedUnderlying={selectedUnderlying}
-        onSelectUnderlying={handleSelectUnderlying}
-        expiries={expiries}
-        selectedExpiry={selectedExpiry}
-        onSelectExpiry={(exp) => setSelectedExpiry(exp)}
-        spot={spot}
-        prevClose={prevClose}
-        change={change}
-        changePct={changePct}
-        ivPct={ivPct}
-        vix={vix}
-        totalMtm={portfolioGreeks.totalMtm}
-        mtmPct={portfolioGreeks.mtmPct}
-        netTheta={portfolioGreeks.netTheta}
-        estimatedMargin={portfolioGreeks.estimatedMargin}
-        isLiveLoading={isChainLoading || isBrokerLoading}
-        wsTransport={transport}
-        wsStatus={bridgeStatus.status}
-        onRefreshQuotes={() => {
-          fetchOptionChain(selectedUnderlying, selectedExpiry);
-          fetchBrokerPositions();
-          notifyAction('Refreshed live market quotes.');
-        }}
-        onToggleHotkeysModal={() => setIsHotkeysOpen(true)}
-        viewMode={viewMode}
-        onToggleViewMode={(m) => {
-          setViewMode(m);
-          setStrategyName(m === 'broker' ? 'Dhan Live Positions' : 'Custom Strikes');
-          notifyAction(`Switched view to ${m === 'broker' ? 'Dhan Live Broker Positions' : 'What-If Desk Simulator'}`);
-        }}
-        brokerLegsCount={brokerLegs.length}
-      />
+      {/* ── STICKY TOP HEADER STACK (Canonical App Header + Live Strategy Metrics Strip) ── */}
+      <div className="sticky top-0 z-30 w-full flex flex-col bg-zinc-950/95 backdrop-blur shadow-md">
+        {/* ROW 1: Canonical App Header with Icon, Title, Eyebrow, Quick Navigation & NavBar */}
+        <header className="w-full border-b border-zinc-800/80 px-4 md:px-6 py-2 flex items-center justify-between gap-3 flex-wrap">
+          <div className="flex items-center gap-3 shrink-0">
+            <div className="flex items-center justify-center w-8 h-8 rounded-lg bg-indigo-500/10 border border-indigo-500/25 shrink-0 shadow-sm shadow-indigo-500/10">
+              <ShieldAlert className="w-4 h-4 text-indigo-400" />
+            </div>
+            <div>
+              <div className="flex items-center gap-2">
+                <p className="text-[9px] font-bold text-indigo-400 uppercase tracking-[0.18em]">
+                  OPTIONS RISK DESK · {selectedUnderlying}
+                </p>
+                <span className="text-[9px] font-bold font-mono px-1.5 py-0.2 rounded bg-zinc-900 border border-zinc-800 text-zinc-400">
+                  DATA: {todayStr}
+                </span>
+              </div>
+              <h1 className="text-sm font-bold text-white tracking-tight leading-none mt-0.5">
+                Options Risk &amp; Strategy Monitor
+              </h1>
+              <p className="text-[10px] text-zinc-400 font-medium mt-0.5">
+                Real-time Greeks matrix, sub-second tick streaming, strike clearances &amp; 2D payoff matrix
+              </p>
+            </div>
+          </div>
+
+          {/* Right: Quick Links + Separator + <NavBar /> */}
+          <div className="flex items-center gap-2.5 flex-wrap ml-auto">
+            <Link
+              href="/scalper"
+              className="hidden sm:inline-flex items-center gap-1 text-[11px] font-bold px-2.5 py-1 rounded-lg bg-zinc-900 border border-zinc-800 hover:bg-zinc-800 text-zinc-300 hover:text-white transition-colors"
+            >
+              Scalper →
+            </Link>
+            <Link
+              href="/options"
+              className="hidden sm:inline-flex items-center gap-1 text-[11px] font-bold px-2.5 py-1 rounded-lg bg-zinc-900 border border-zinc-800 hover:bg-zinc-800 text-zinc-300 hover:text-white transition-colors"
+            >
+              Options Charts →
+            </Link>
+
+            <span className="w-px h-5 bg-zinc-800 shrink-0 hidden sm:inline-block" />
+
+            <NavBar />
+          </div>
+        </header>
+
+        {/* ROW 2: Live Metrics Bar (Matches the user's diagram with sub-second WebSocket quotes) */}
+        <TopMetricBar
+          selectedUnderlying={selectedUnderlying}
+          onSelectUnderlying={handleSelectUnderlying}
+          expiries={expiries}
+          selectedExpiry={selectedExpiry}
+          onSelectExpiry={(exp) => setSelectedExpiry(exp)}
+          spot={spot}
+          prevClose={prevClose}
+          change={change}
+          changePct={changePct}
+          ivPct={ivPct}
+          vix={vix}
+          totalMtm={portfolioGreeks.totalMtm}
+          mtmPct={portfolioGreeks.mtmPct}
+          netTheta={portfolioGreeks.netTheta}
+          estimatedMargin={portfolioGreeks.estimatedMargin}
+          isLiveLoading={isChainLoading || isBrokerLoading}
+          wsTransport={transport}
+          wsStatus={bridgeStatus.status}
+          onRefreshQuotes={() => {
+            fetchOptionChain(selectedUnderlying, selectedExpiry);
+            fetchBrokerPositions();
+            notifyAction('Refreshed live market quotes.');
+          }}
+          onToggleHotkeysModal={() => setIsHotkeysOpen(true)}
+          viewMode={viewMode}
+          onToggleViewMode={(m) => {
+            setViewMode(m);
+            setStrategyName(m === 'broker' ? 'Dhan Live Positions' : 'Custom Strikes');
+            notifyAction(`Switched view to ${m === 'broker' ? 'Dhan Live Broker Positions' : 'What-If Desk Simulator'}`);
+          }}
+          brokerLegsCount={brokerLegs.length}
+        />
+      </div>
 
       {/* ── MAIN WORKSPACE (60% / 40% Two-Column Layout) ───────────────────── */}
       <main className="flex-1 w-full max-w-[1700px] mx-auto p-3 md:p-4">
