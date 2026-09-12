@@ -12,11 +12,13 @@ export function StraddleChart({
   chart,
   chartType,
   showSpot = false,
+  showVolume = true,
   underlying = 'NIFTY',
 }: {
   chart: StraddleChartResponse;
   chartType: StraddleChartType;
   showSpot?: boolean;
+  showVolume?: boolean;
   underlying?: string;
 }) {
   const leftAxisLine = useMemo(
@@ -48,6 +50,7 @@ export function StraddleChart({
       colorScheme={GROWW_COLORS}
       leftAxisLine={leftAxisLine}
       extraTooltipRows={extraTooltipRows}
+      showVolume={showVolume}
     />
   );
 }

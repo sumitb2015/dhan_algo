@@ -371,7 +371,8 @@ def _vwap(df: pd.DataFrame) -> pd.Series:
     session = df["time"].dt.date
     cum_pv = (typical * df["volume"]).groupby(session).cumsum()
     cum_vol = df["volume"].groupby(session).cumsum()
-    return cum_pv / cum_vol.replace(0, pd.NA)
+    valid_vol = cum_vol.where(cum_vol > 0, float("nan"))
+    return cum_pv / valid_vol
 
 
 def _supertrend(high: pd.Series, low: pd.Series, close: pd.Series, period: int, multiplier: float) -> pd.Series:
@@ -414,9 +415,33 @@ def _compute_indicators(df: pd.DataFrame, requests: list[dict]) -> list[dict]:
             series = _vwap(df)
             out.append({"id": "vwap", "group": "vwap", "type": "vwap", "label": "VWAP", "series": series})
 
+        elif itype == "vwap_bands":
+            try:
+                std_dev = max(0.1, float(params.get("std_dev", 2.0) or 2.0))
+            except (TypeError, ValueError):
+                std_dev = 2.0
+            vwap = _vwap(df)
+            typical = (high + low + close) / 3
+            session = df["time"].dt.date
+            cum_vol = df["volume"].groupby(session).cumsum()
+            valid_vol = cum_vol.where(cum_vol > 0, float("nan"))
+            cum_pv2 = (df["volume"] * (typical ** 2)).groupby(session).cumsum()
+            mean_pv2 = cum_pv2 / valid_vol
+            variance = (mean_pv2 - (vwap ** 2)).clip(lower=0.0)
+            std = variance ** 0.5
+            upper = vwap + std_dev * std
+            lower = vwap - std_dev * std
+            group = f"vwap_bands_{std_dev:g}"
+            out.append({"id": f"{group}_upper", "group": group, "type": "vwap_bands", "label": f"VWAP +{std_dev:g}σ", "series": upper})
+            out.append({"id": f"{group}_mid", "group": group, "type": "vwap_bands", "label": "VWAP", "series": vwap})
+            out.append({"id": f"{group}_lower", "group": group, "type": "vwap_bands", "label": f"VWAP -{std_dev:g}σ", "series": lower})
+
         elif itype == "bbands":
             period = _period(params, 20)
-            std_dev = float(params.get("std_dev", 2.0) or 2.0)
+            try:
+                std_dev = max(0.1, float(params.get("std_dev", 2.0) or 2.0))
+            except (TypeError, ValueError):
+                std_dev = 2.0
             mid = close.rolling(period).mean()
             std = close.rolling(period).std(ddof=0)
             upper, lower = mid + std_dev * std, mid - std_dev * std
@@ -427,10 +452,20 @@ def _compute_indicators(df: pd.DataFrame, requests: list[dict]) -> list[dict]:
 
         elif itype == "supertrend":
             period = _period(params, 10)
-            multiplier = float(params.get("multiplier", 3.0) or 3.0)
+            try:
+                multiplier = max(0.1, float(params.get("multiplier", 3.0) or 3.0))
+            except (TypeError, ValueError):
+                multiplier = 3.0
             series = _supertrend(high, low, close, period, multiplier)
             group = f"supertrend_{period}_{multiplier}"
             out.append({"id": group, "group": group, "type": "supertrend", "label": f"Supertrend ({period},{multiplier:g})", "series": series})
+
+        elif itype == "pdc":
+            if "pdc" in df.columns and df["pdc"].notna().any():
+                series = df["pdc"]
+            else:
+                series = pd.Series(index=df.index, dtype=float)
+            out.append({"id": "pdc", "group": "pdc", "type": "pdc", "label": "PDC", "series": series})
 
         else:
             raise ValueError(f"Unknown indicator type: {itype}")
@@ -475,12 +510,19 @@ def get_straddle_chart(helper: DhanHelper, underlying: str, expiry: str, strike:
 
     trading_dates = sorted(set(ce_df["time"].dt.date.unique()) & set(pe_df["time"].dt.date.unique()))
     keep_dates = set(trading_dates[-days:])
-    ce_df = ce_df[ce_df["time"].dt.date.isin(keep_dates)]
-    pe_df = pe_df[pe_df["time"].dt.date.isin(keep_dates)]
+    keep_with_prev = set(trading_dates[-(days + 1):])
+    ce_df_comb = ce_df[ce_df["time"].dt.date.isin(keep_with_prev)]
+    pe_df_comb = pe_df[pe_df["time"].dt.date.isin(keep_with_prev)]
 
-    df = combine_legs_ohlc([(ce_df, 1.0, "CE"), (pe_df, 1.0, "PE")])
-    legs = pd.merge(ce_df[["time", "close"]], pe_df[["time", "close"]], on="time", suffixes=("_ce", "_pe"))
+    df = combine_legs_ohlc([(ce_df_comb, 1.0, "CE"), (pe_df_comb, 1.0, "PE")])
+    legs = pd.merge(ce_df_comb[["time", "close"]], pe_df_comb[["time", "close"]], on="time", suffixes=("_ce", "_pe"))
     df = df.merge(legs.rename(columns={"close_ce": "ce", "close_pe": "pe"}), on="time", how="left")
+    if df.empty:
+        raise ValueError(f"No intraday data available yet for {underlying} {strike} straddle ({expiry}).")
+
+    daily_closes = df.groupby(df["time"].dt.date)["close"].last()
+    df["pdc"] = df["time"].dt.date.map(daily_closes.shift(1))
+    df = df[df["time"].dt.date.isin(keep_dates)].reset_index(drop=True)
     if df.empty:
         raise ValueError(f"No intraday data available yet for {underlying} {strike} straddle ({expiry}).")
 
@@ -491,7 +533,7 @@ def get_straddle_chart(helper: DhanHelper, underlying: str, expiry: str, strike:
 
     if interval != "1":
         resampled = _resample_ohlcv(df, int(interval))
-        legs_r = _resample_last(df, int(interval), ["ce", "pe"])
+        legs_r = _resample_last(df, int(interval), ["ce", "pe", "pdc"])
         df = resampled.merge(legs_r, on="time", how="left")
 
     computed = _compute_indicators(df, indicators or DEFAULT_INDICATORS)
@@ -501,6 +543,7 @@ def get_straddle_chart(helper: DhanHelper, underlying: str, expiry: str, strike:
         "strike": strike,
         "spot": strikes_info["spot"],
         "interval": str(interval),
+        "pdc": float(df["pdc"].dropna().iloc[-1]) if ("pdc" in df.columns and df["pdc"].notna().any()) else None,
         "spot_series": spot_series,
         "candles": [
             {
@@ -570,6 +613,7 @@ def get_rolling_straddle_chart(helper: DhanHelper, underlying: str, expiry: str,
         raise ValueError(f"No intraday data available yet for {underlying} ({expiry}).")
     trading_dates = sorted(spot_df["time"].dt.date.unique())
     keep_dates = set(trading_dates[-days:])
+    keep_with_prev = set(trading_dates[-(days + 1):])
 
     segments = _strike_segments(spot_df, keep_dates, strikes)
     if not segments:
@@ -628,6 +672,30 @@ def get_rolling_straddle_chart(helper: DhanHelper, underlying: str, expiry: str,
     df = df.merge(spot_df[["time", "close"]].rename(columns={"close": "spot"}), on="time", how="left")
     df["spot"] = df["spot"].ffill().bfill()
 
+    # Calculate PDC benchmark for rolling straddle
+    daily_closes = df.groupby(df["time"].dt.date)["close"].last()
+    pdc_series = df["time"].dt.date.map(daily_closes.shift(1))
+
+    # For the first visible day, look up the ATM straddle at previous trading day close
+    first_date = min(keep_dates)
+    if len(trading_dates) > len(keep_dates):
+        prev_date = trading_dates[trading_dates.index(first_date) - 1]
+        prev_spot_df = spot_df[spot_df["time"].dt.date == prev_date]
+        if not prev_spot_df.empty:
+            prev_spot_close = float(prev_spot_df["close"].iloc[-1])
+            prev_atm_strike = _nearest_strike(prev_spot_close, strikes)
+            ce_id, pe_id = strike_by_value[prev_atm_strike]
+            ce_prev = _fetch_leg_intraday(helper, underlying, ce_id, to_dt, calendar_days)
+            pe_prev = _fetch_leg_intraday(helper, underlying, pe_id, to_dt, calendar_days)
+            if not ce_prev.empty and not pe_prev.empty:
+                ce_slice = ce_prev[ce_prev["time"].dt.date == prev_date]
+                pe_slice = pe_prev[pe_prev["time"].dt.date == prev_date]
+                if not ce_slice.empty and not pe_slice.empty:
+                    prev_close_val = float(ce_slice["close"].iloc[-1] + pe_slice["close"].iloc[-1])
+                    pdc_series = pdc_series.fillna(pd.Series(prev_close_val, index=df.index))
+
+    df["pdc"] = pdc_series
+
     if interval != "1":
         step = timedelta(minutes=int(interval))
         # Both the candles and the switch markers must land on the SAME bucket grid that
@@ -636,7 +704,7 @@ def get_rolling_straddle_chart(helper: DhanHelper, underlying: str, expiry: str,
         # starts at the same clock time; one day whose first candle is 09:16 instead of 09:15
         # shifts the whole grid by a minute, and the left-merge below then leaves NaN in every
         # extras column for that day (which used to reach json.dumps as a bare NaN token).
-        extra_cols = ["strike", "close_ce", "close_pe", "synthetic_fut", "spot"]
+        extra_cols = ["strike", "close_ce", "close_pe", "synthetic_fut", "spot", "pdc"]
         base = _resample_ohlcv(df[["time", "open", "high", "low", "close", "volume"]], int(interval))
         extras = _resample_last(df, int(interval), extra_cols)
 
@@ -657,6 +725,7 @@ def get_rolling_straddle_chart(helper: DhanHelper, underlying: str, expiry: str,
         "expiry": expiry,
         "spot": spot,
         "interval": str(interval),
+        "pdc": float(df["pdc"].dropna().iloc[-1]) if ("pdc" in df.columns and df["pdc"].notna().any()) else None,
         "candles": [
             {
                 "time": t.isoformat(), "open": float(o), "high": float(h), "low": float(l), "close": float(c), "volume": float(v),
@@ -705,22 +774,33 @@ def get_strangle_chart(helper: DhanHelper, underlying: str, expiry: str, ce_stri
 
     trading_dates = sorted(set(ce_df["time"].dt.date.unique()) & set(pe_df["time"].dt.date.unique()))
     keep_dates = set(trading_dates[-days:])
-    ce_df = ce_df[ce_df["time"].dt.date.isin(keep_dates)]
-    pe_df = pe_df[pe_df["time"].dt.date.isin(keep_dates)]
-    df = combine_legs_ohlc([(ce_df, float(ce_lots), "CE"), (pe_df, float(pe_lots), "PE")])
+    keep_with_prev = set(trading_dates[-(days + 1):])
+    ce_df_comb = ce_df[ce_df["time"].dt.date.isin(keep_with_prev)]
+    pe_df_comb = pe_df[pe_df["time"].dt.date.isin(keep_with_prev)]
+    df = combine_legs_ohlc([(ce_df_comb, float(ce_lots), "CE"), (pe_df_comb, float(pe_lots), "PE")])
+    if df.empty:
+        raise ValueError(f"No intraday data available yet for {underlying} {ce_strike}CE x{ce_lots} + {pe_strike}PE x{pe_lots} strangle ({expiry}).")
+
+    daily_closes = df.groupby(df["time"].dt.date)["close"].last()
+    df["pdc"] = df["time"].dt.date.map(daily_closes.shift(1))
+    df = df[df["time"].dt.date.isin(keep_dates)].reset_index(drop=True)
     if df.empty:
         raise ValueError(f"No intraday data available yet for {underlying} {ce_strike}CE x{ce_lots} + {pe_strike}PE x{pe_lots} strangle ({expiry}).")
 
     spot_series = _spot_series(helper, underlying, to_dt, str(interval), days) if include_spot else []
 
     if interval != "1":
-        df = _resample_ohlcv(df, int(interval))
+        resampled = _resample_ohlcv(df, int(interval))
+        pdc_r = _resample_last(df, int(interval), ["pdc"])
+        df = resampled.merge(pdc_r, on="time", how="left")
 
     computed = _compute_indicators(df, indicators or DEFAULT_INDICATORS)
 
     return {
         "expiry": expiry, "ce_strike": ce_strike, "pe_strike": pe_strike, "ce_lots": ce_lots, "pe_lots": pe_lots,
-        "spot": strikes_info["spot"], "interval": str(interval), "spot_series": spot_series,
+        "spot": strikes_info["spot"], "interval": str(interval),
+        "pdc": float(df["pdc"].dropna().iloc[-1]) if ("pdc" in df.columns and df["pdc"].notna().any()) else None,
+        "spot_series": spot_series,
         "candles": [
             {"time": t.isoformat(), "open": float(o), "high": float(h), "low": float(l), "close": float(c), "volume": float(v)}
             for t, o, h, l, c, v in zip(df["time"], df["open"], df["high"], df["low"], df["close"], df["volume"])
@@ -774,13 +854,12 @@ def get_strategy_chart(helper: DhanHelper, underlying: str, expiry: str, legs: l
         common_dates &= set(df["time"].dt.date.unique())
     trading_dates = sorted(common_dates)
     keep_dates = set(trading_dates[-days:])
+    keep_with_prev = set(trading_dates[-(days + 1):])
 
-    leg_dfs = [(df[df["time"].dt.date.isin(keep_dates)], weight, option_type) for df, weight, option_type in leg_frames]
+    leg_dfs = [(df[df["time"].dt.date.isin(keep_with_prev)], weight, option_type) for df, weight, option_type in leg_frames]
     df = combine_legs_ohlc(leg_dfs)
     if df.empty:
         raise ValueError(f"No intraday data available yet for this {underlying} strategy ({expiry}).")
-
-    spot_series = _spot_series(helper, underlying, to_dt, str(interval), days) if include_spot else []
 
     # A strategy netting to a credit at open reads as a negative combined premium under the raw
     # +1 BUY / -1 SELL weighting - flip the whole day's sign once (anchored to the first bar) so
@@ -791,13 +870,24 @@ def get_strategy_chart(helper: DhanHelper, underlying: str, expiry: str, legs: l
         df["open"], df["close"] = -df["open"], -df["close"]
         df["high"], df["low"] = -df["low"], -df["high"]
 
+    daily_closes = df.groupby(df["time"].dt.date)["close"].last()
+    df["pdc"] = df["time"].dt.date.map(daily_closes.shift(1))
+    df = df[df["time"].dt.date.isin(keep_dates)].reset_index(drop=True)
+    if df.empty:
+        raise ValueError(f"No intraday data available yet for this {underlying} strategy ({expiry}).")
+
+    spot_series = _spot_series(helper, underlying, to_dt, str(interval), days) if include_spot else []
+
     if interval != "1":
-        df = _resample_ohlcv(df, int(interval))
+        resampled = _resample_ohlcv(df, int(interval))
+        pdc_r = _resample_last(df, int(interval), ["pdc"])
+        df = resampled.merge(pdc_r, on="time", how="left")
 
     computed = _compute_indicators(df, indicators or DEFAULT_INDICATORS)
 
     return {
         "expiry": expiry, "legs": legs, "spot": strikes_info["spot"], "interval": str(interval), "net_credit": net_credit,
+        "pdc": float(df["pdc"].dropna().iloc[-1]) if ("pdc" in df.columns and df["pdc"].notna().any()) else None,
         "spot_series": spot_series,
         "candles": [
             {"time": t.isoformat(), "open": float(o), "high": float(h), "low": float(l), "close": float(c), "volume": float(v)}

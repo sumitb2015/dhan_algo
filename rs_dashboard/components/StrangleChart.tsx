@@ -12,11 +12,13 @@ export function StrangleChart({
   chart,
   chartType,
   showSpot = false,
+  showVolume = true,
   underlying = 'NIFTY',
 }: {
   chart: StrangleChartResponse;
   chartType: StrangleChartType;
   showSpot?: boolean;
+  showVolume?: boolean;
   underlying?: string;
 }) {
   const leftAxisLine = useMemo(
@@ -33,6 +35,7 @@ export function StrangleChart({
       chartType={chartType}
       colorScheme={GROWW_COLORS}
       leftAxisLine={leftAxisLine}
+      showVolume={showVolume}
     />
   );
 }

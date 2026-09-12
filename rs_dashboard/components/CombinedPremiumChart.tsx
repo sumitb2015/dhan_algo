@@ -7,6 +7,7 @@ import {
   createSeriesMarkers,
   CandlestickSeries,
   LineSeries,
+  HistogramSeries,
   ColorType,
   LineStyle,
   CrosshairMode,
@@ -33,10 +34,11 @@ const CATEGORICAL = ['#38bdf8', '#fbbf24', '#a78bfa', '#f472b6', '#4ade80', '#fb
 export type CombinedChartType = 'candlestick' | 'line';
 
 const MAIN_KEY = '__main';
+const VOLUME_KEY = '__volume';
 const LEFT_AXIS_KEY = '__left';
 
 type CrosshairState = {
-  x: number; y: number; time: string; isLine: boolean; open: number; high: number; low: number; close: number;
+  x: number; y: number; time: string; isLine: boolean; open: number; high: number; low: number; close: number; volume?: number;
   indicators: { label: string; color: string; value: number }[];
   extraRows: { label: string; value: string }[];
 };
@@ -122,6 +124,8 @@ function formatIstTick(time: Time, tickMarkType: TickMarkType): string {
 function lineStyleFor(type: string, id: string): LineStyle {
   if (type === 'bbands') return id.endsWith('_mid') ? LineStyle.Solid : LineStyle.Dashed;
   if (type === 'vwap') return LineStyle.Dotted;
+  if (type === 'vwap_bands') return id.endsWith('_mid') ? LineStyle.Dotted : LineStyle.Dashed;
+  if (type === 'pdc') return LineStyle.Dashed;
   return LineStyle.Solid;
 }
 
@@ -141,6 +145,7 @@ export function CombinedPremiumChart({
   valueLabel = 'Value',
   colorScheme,
   leftAxisLine,
+  showVolume = true,
 }: {
   candles: ChartCandle[];
   indicators: ChartIndicatorSeries[];
@@ -162,10 +167,12 @@ export function CombinedPremiumChart({
     color: string;
     values: { time: string; value: number }[];
   };
+  showVolume?: boolean;
 }) {
   const containerRef = useRef<HTMLDivElement>(null);
   const chartApiRef = useRef<IChartApi | null>(null);
   const mainSeriesRef = useRef<ISeriesApi<'Candlestick'> | ISeriesApi<'Line'> | null>(null);
+  const volumeSeriesRef = useRef<ISeriesApi<'Histogram'> | null>(null);
   const mainSeriesTypeRef = useRef<CombinedChartType | null>(null);
   const lineSeriesRef = useRef<Map<string, ISeriesApi<'Line'>>>(new Map());
   const leftAxisSeriesRef = useRef<ISeriesApi<'Line'> | null>(null);
@@ -174,6 +181,8 @@ export function CombinedPremiumChart({
   const groupOrderRef = useRef<string[]>([]);
   const chartTypeRef = useRef(chartType);
   chartTypeRef.current = chartType;
+  const showVolumeRef = useRef(showVolume);
+  showVolumeRef.current = showVolume;
   const markersRef = useRef(markers);
   markersRef.current = markers;
   const extraTooltipRowsRef = useRef(extraTooltipRows);
@@ -241,7 +250,10 @@ export function CombinedPremiumChart({
         vertLines: { color: chrome.gridline, style: LineStyle.Dotted },
         horzLines: { color: chrome.gridline, style: LineStyle.Dotted },
       },
-      rightPriceScale: { borderColor: chrome.baseline },
+      rightPriceScale: {
+        borderColor: chrome.baseline,
+        scaleMargins: { top: 0.08, bottom: showVolume ? 0.20 : 0.08 },
+      },
       leftPriceScale: { visible: !!leftAxisLine, borderColor: chrome.baseline },
       timeScale: {
         borderColor: chrome.baseline,
@@ -294,6 +306,8 @@ export function CombinedPremiumChart({
         ? { open: (point as { value: number }).value, high: (point as { value: number }).value, low: (point as { value: number }).value, close: (point as { value: number }).value }
         : (point as { open: number; high: number; low: number; close: number });
 
+      const volPoint = volumeSeriesRef.current ? (param.seriesData.get(volumeSeriesRef.current) as { value: number } | undefined) : undefined;
+
       const indicatorValues: { label: string; color: string; value: number }[] = [];
       for (const [id, series] of lineSeriesRef.current) {
         const p = param.seriesData.get(series) as { value: number } | undefined;
@@ -311,6 +325,7 @@ export function CombinedPremiumChart({
         }),
         isLine,
         open: ohlc.open, high: ohlc.high, low: ohlc.low, close: ohlc.close,
+        volume: volPoint?.value,
         indicators: indicatorValues,
         extraRows,
       });
@@ -335,6 +350,7 @@ export function CombinedPremiumChart({
       chartInstance.remove();
       chartApiRef.current = null;
       mainSeriesRef.current = null;
+      volumeSeriesRef.current = null;
       mainSeriesTypeRef.current = null;
       lineSeriesRef.current = new Map();
       leftAxisSeriesRef.current = null;
@@ -415,6 +431,40 @@ export function CombinedPremiumChart({
       isoTimeByUnixRef.current.set(toUnixSeconds(candles[i].time), candles[i].time);
     }
 
+    // Volume Histogram series rendering (sub-pane at bottom of chart)
+    const hasVolume = candles.some((c) => c.volume > 0);
+    if (showVolumeRef.current && hasVolume) {
+      chartApi.priceScale('right').applyOptions({
+        scaleMargins: { top: 0.08, bottom: 0.20 },
+      });
+      if (!volumeSeriesRef.current) {
+        const volSeries = chartApi.addSeries(HistogramSeries, {
+          priceFormat: { type: 'volume' },
+          priceScaleId: '', // overlay on main timescale
+        });
+        volSeries.priceScale().applyOptions({
+          scaleMargins: { top: 0.82, bottom: 0 },
+        });
+        volumeSeriesRef.current = volSeries;
+      }
+      const volData = candles.map((c) => {
+        const isUp = c.close >= c.open;
+        return {
+          time: toUnixSeconds(c.time),
+          value: c.volume,
+          color: isUp ? 'rgba(52, 211, 153, 0.4)' : 'rgba(248, 113, 113, 0.4)',
+        };
+      });
+      applySeriesData(volumeSeriesRef.current as ISeriesApi<never>, VOLUME_KEY, volData);
+    } else if (volumeSeriesRef.current) {
+      chartApi.priceScale('right').applyOptions({
+        scaleMargins: { top: 0.08, bottom: 0.08 },
+      });
+      chartApi.removeSeries(volumeSeriesRef.current);
+      volumeSeriesRef.current = null;
+      drawnRef.current.delete(VOLUME_KEY);
+    }
+
     if (!markersApiRef.current) {
       markersApiRef.current = createSeriesMarkers(mainSeries, []);
     }
@@ -456,6 +506,7 @@ export function CombinedPremiumChart({
     const colorFor = (group: string) => {
       const override = colorSchemeRef.current?.indicatorColors?.[group];
       if (override) return override;
+      if (group === 'pdc') return '#a1a1aa';
       if (!groupOrderRef.current.includes(group)) groupOrderRef.current.push(group);
       return CATEGORICAL[groupOrderRef.current.indexOf(group) % CATEGORICAL.length];
     };
@@ -559,6 +610,12 @@ export function CombinedPremiumChart({
                   <span>{crosshair.low.toFixed(2)}</span>
                   <span className="text-zinc-500">C</span>
                   <span>{crosshair.close.toFixed(2)}</span>
+                </>
+              )}
+              {crosshair.volume !== undefined && crosshair.volume > 0 && (
+                <>
+                  <span className="text-zinc-500">Vol</span>
+                  <span>{crosshair.volume.toLocaleString('en-IN')}</span>
                 </>
               )}
               {crosshair.extraRows.map((row, i) => (

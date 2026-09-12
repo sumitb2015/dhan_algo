@@ -18,6 +18,7 @@ import {
   type StraddleChartResponse,
   type StraddleStrikesResponse,
 } from '@/lib/optionsChartTypes';
+import type { OptionOrderInitialState } from '@/components/OptionOrderModal';
 
 const CHART_TYPES: { id: StraddleChartType; label: string }[] = [
   { id: 'candlestick', label: 'Candles' },
@@ -27,9 +28,11 @@ const CHART_TYPES: { id: StraddleChartType; label: string }[] = [
 export function StraddlePanel({
   underlying,
   onUnderlyingChange,
+  onTradeOptions,
 }: {
   underlying: ChartUnderlying;
   onUnderlyingChange: (u: ChartUnderlying) => void;
+  onTradeOptions?: (order: OptionOrderInitialState) => void;
 }) {
   const [interval_, setInterval_] = useState('1');
   const [expiry, setExpiry] = useState('');
@@ -250,12 +253,44 @@ export function StraddlePanel({
             >
               {spotLabel(underlying)}
             </button>
+            {onTradeOptions && effectiveStrike !== null && effectiveExpiry && (
+              <button
+                type="button"
+                onClick={() =>
+                  onTradeOptions({
+                    title: `${underlying} ${effectiveStrike} Straddle`,
+                    underlying,
+                    expiry: effectiveExpiry,
+                    defaultLots: 1,
+                    legs: [
+                      { strike: effectiveStrike, optionType: 'CE', action: 'SELL', lots: 1 },
+                      { strike: effectiveStrike, optionType: 'PE', action: 'SELL', lots: 1 },
+                    ],
+                  })
+                }
+                title={`Open Trade Order Ticket for ${underlying} ${effectiveStrike} Straddle`}
+                className="lc-view-btn"
+                style={{
+                  background: 'rgba(2, 132, 199, 0.2)',
+                  borderColor: 'rgba(2, 132, 199, 0.4)',
+                  color: '#38bdf8',
+                  fontWeight: 700,
+                }}
+              >
+                ⚡ Trade
+              </button>
+            )}
           </div>
         </div>
 
-        {/* Stats pushed right */}
         <div className="lc-toolbar-stats">
           {todaysCandles.length > 0 && <DayChangeChip candles={todaysCandles} />}
+          {chart?.pdc !== undefined && chart.pdc !== null && (
+            <div className="lc-spot-card" title="Previous Day Straddle Close">
+              <span className="lc-stat-label">PDC</span>
+              <span className="lc-spot-value font-mono">{chart.pdc.toFixed(2)}</span>
+            </div>
+          )}
           <div className="lc-spot-card">
             <span className="lc-stat-label">SPOT</span>
             <span className="lc-spot-value">{spotVal}</span>

@@ -15,6 +15,7 @@ import {
   type ChartIndicatorRequest,
   type RollingStraddleChartResponse,
 } from '@/lib/optionsChartTypes';
+import type { OptionOrderInitialState } from '@/components/OptionOrderModal';
 
 const CHART_TYPES: { id: RollingStraddleChartType; label: string }[] = [
   { id: 'candlestick', label: 'Candles' },
@@ -24,9 +25,11 @@ const CHART_TYPES: { id: RollingStraddleChartType; label: string }[] = [
 export function RollingStraddlePanel({
   underlying,
   onUnderlyingChange,
+  onTradeOptions,
 }: {
   underlying: ChartUnderlying;
   onUnderlyingChange: (u: ChartUnderlying) => void;
+  onTradeOptions?: (order: OptionOrderInitialState) => void;
 }) {
   const [interval_, setInterval_] = useState('1');
   const [expiry, setExpiry] = useState('');
@@ -178,11 +181,47 @@ export function RollingStraddlePanel({
             >
               {spotLabel(underlying)}
             </button>
+            {onTradeOptions && effectiveExpiry && chart?.candles.length && (
+              <button
+                type="button"
+                onClick={() => {
+                  const latestCandle = chart.candles[chart.candles.length - 1];
+                  const currentAtmStrike = latestCandle?.strike;
+                  if (!currentAtmStrike) return;
+                  onTradeOptions({
+                    title: `${underlying} ATM ${currentAtmStrike} Straddle`,
+                    underlying,
+                    expiry: effectiveExpiry,
+                    defaultLots: 1,
+                    legs: [
+                      { strike: currentAtmStrike, optionType: 'CE', action: 'SELL', lots: 1 },
+                      { strike: currentAtmStrike, optionType: 'PE', action: 'SELL', lots: 1 },
+                    ],
+                  });
+                }}
+                title={`Open Trade Order Ticket for ${underlying} ATM Straddle`}
+                className="lc-view-btn"
+                style={{
+                  background: 'rgba(2, 132, 199, 0.2)',
+                  borderColor: 'rgba(2, 132, 199, 0.4)',
+                  color: '#38bdf8',
+                  fontWeight: 700,
+                }}
+              >
+                ⚡ Trade ATM
+              </button>
+            )}
           </div>
         </div>
 
         {/* Status pushed right */}
         <div className="lc-toolbar-stats">
+          {chart?.pdc !== undefined && chart.pdc !== null && (
+            <div className="lc-spot-card" title="Previous Day Rolling Straddle Close">
+              <span className="lc-stat-label">PDC</span>
+              <span className="lc-spot-value font-mono">{chart.pdc.toFixed(2)}</span>
+            </div>
+          )}
           <div className="lc-status-pill">
             {loading ? (
               <Spinner size={10} />

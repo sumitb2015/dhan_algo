@@ -16,7 +16,7 @@ export interface ChartSeriesPoint {
   value: number;
 }
 
-export type ChartIndicatorType = 'ema' | 'sma' | 'vwap' | 'bbands' | 'supertrend';
+export type ChartIndicatorType = 'ema' | 'sma' | 'vwap' | 'bbands' | 'supertrend' | 'vwap_bands' | 'pdc';
 
 export interface ChartIndicatorRequest {
   type: ChartIndicatorType;
@@ -56,6 +56,7 @@ export interface StraddleChartResponse {
   strike: number;
   spot: number;
   interval: string;
+  pdc?: number | null;
   spot_series: ChartSeriesPoint[];
   candles: StraddleCandle[];
   indicators: ChartIndicatorSeries[];
@@ -85,6 +86,7 @@ export interface RollingStraddleChartResponse {
   expiry: string;
   spot: number;
   interval: string;
+  pdc?: number | null;
   candles: RollingStraddleCandle[];
   switches: RollingStraddleSwitch[];
   indicators: ChartIndicatorSeries[];
@@ -99,6 +101,7 @@ export interface StrangleChartResponse {
   pe_lots: number;
   spot: number;
   interval: string;
+  pdc?: number | null;
   spot_series: ChartSeriesPoint[];
   candles: ChartCandle[];
   indicators: ChartIndicatorSeries[];
@@ -121,6 +124,7 @@ export interface CustomStrategyChartResponse {
   spot: number;
   interval: string;
   net_credit: boolean;
+  pdc?: number | null;
   spot_series: ChartSeriesPoint[];
   candles: ChartCandle[];
   indicators: ChartIndicatorSeries[];
@@ -164,6 +168,8 @@ export const CHART_INDICATOR_CATALOG: {
   { id: 'ema', label: 'EMA', defaultParams: { period: 20 }, paramLabels: { period: 'Period' } },
   { id: 'sma', label: 'SMA', defaultParams: { period: 20 }, paramLabels: { period: 'Period' } },
   { id: 'vwap', label: 'VWAP', defaultParams: {}, paramLabels: {} },
+  { id: 'vwap_bands', label: 'VWAP Bands', defaultParams: { std_dev: 2 }, paramLabels: { std_dev: 'Std Dev' } },
   { id: 'bbands', label: 'Bollinger Bands', defaultParams: { period: 20, std_dev: 2 }, paramLabels: { period: 'Period', std_dev: 'Std Dev' } },
   { id: 'supertrend', label: 'Supertrend', defaultParams: { period: 10, multiplier: 3 }, paramLabels: { period: 'Period', multiplier: 'Multiplier' } },
+  { id: 'pdc', label: 'PDC', defaultParams: {}, paramLabels: {} },
 ];

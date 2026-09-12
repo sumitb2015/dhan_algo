@@ -36,11 +36,13 @@ export function RollingStraddleChart({
   chart,
   chartType,
   showSpot = false,
+  showVolume = true,
   underlying = 'NIFTY',
 }: {
   chart: RollingStraddleChartResponse;
   chartType: RollingStraddleChartType;
   showSpot?: boolean;
+  showVolume?: boolean;
   underlying?: string;
 }) {
   const leftAxisLine = useMemo(
@@ -100,6 +102,7 @@ export function RollingStraddleChart({
           valueLabel="Straddle Price"
           colorScheme={GROWW_COLORS}
           leftAxisLine={leftAxisLine}
+          showVolume={showVolume}
         />
       </div>
       {latest && (

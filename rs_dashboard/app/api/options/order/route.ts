@@ -60,6 +60,10 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
 
   const { legs, mode = 'intraday' } = body;
 
+  // Maximum quantity ceiling per leg (e.g. 5,000 units = ~76 lots of Nifty)
+  // Enforces Invariant #1 of dhan-order-tickets skill against uncapped API calls
+  const MAX_QTY_PER_LEG = 5000;
+
   // Validate every leg before touching the broker — fail fast with a clear message
   const invalidLegs: string[] = [];
   for (const leg of legs) {
@@ -68,6 +72,9 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     }
     if (!Number.isFinite(leg.quantity) || leg.quantity <= 0) {
       invalidLegs.push(`leg ${leg.securityId}: invalid quantity=${leg.quantity}`);
+    }
+    if (leg.quantity > MAX_QTY_PER_LEG) {
+      invalidLegs.push(`leg ${leg.securityId}: quantity ${leg.quantity} exceeds safety limit (${MAX_QTY_PER_LEG})`);
     }
     const ot = leg.orderType ?? 'MARKET';
     if ((ot === 'STOP_LOSS_MARKET' || ot === 'STOP_LOSS') && (!leg.triggerPrice || leg.triggerPrice <= 0)) {

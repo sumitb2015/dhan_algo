@@ -46,12 +46,16 @@ function nearestStrike(strike: number, available: number[]): number {
   );
 }
 
+import type { OptionOrderInitialState } from '@/components/OptionOrderModal';
+
 export function StrategyPanel({
   underlying,
   onUnderlyingChange,
+  onTradeOptions,
 }: {
   underlying: ChartUnderlying;
   onUnderlyingChange: (u: ChartUnderlying) => void;
+  onTradeOptions?: (order: OptionOrderInitialState) => void;
 }) {
   const [interval_, setInterval_] = useState('1');
   const [expiry, setExpiry] = useState('');
@@ -354,6 +358,35 @@ export function StrategyPanel({
             >
               {spotLabel(underlying)}
             </button>
+            {onTradeOptions && effectiveExpiry && legs.length > 0 && (
+              <button
+                type="button"
+                onClick={() =>
+                  onTradeOptions({
+                    title: `${underlying} ${categoryPresets.find((p) => p.id === presetId)?.label || 'Custom'} Strategy`,
+                    underlying,
+                    expiry: effectiveExpiry,
+                    defaultLots: 1,
+                    legs: legs.map((l) => ({
+                      strike: l.strike,
+                      optionType: l.option_type,
+                      action: l.action,
+                      lots: l.lots,
+                    })),
+                  })
+                }
+                title={`Open Trade Order Ticket for ${underlying} Strategy`}
+                className="lc-view-btn"
+                style={{
+                  background: 'rgba(2, 132, 199, 0.2)',
+                  borderColor: 'rgba(2, 132, 199, 0.4)',
+                  color: '#38bdf8',
+                  fontWeight: 700,
+                }}
+              >
+                ⚡ Trade
+              </button>
+            )}
           </div>
         </div>
 
@@ -361,6 +394,12 @@ export function StrategyPanel({
         <div className="lc-toolbar-stats">
           {todaysCandles.length > 0 && (
             <DayChangeChip candles={todaysCandles} sellerConvention={chart?.net_credit ?? true} />
+          )}
+          {chart?.pdc !== undefined && chart.pdc !== null && (
+            <div className="lc-spot-card" title="Previous Day Strategy Close">
+              <span className="lc-stat-label">PDC</span>
+              <span className="lc-spot-value font-mono">{chart.pdc.toFixed(2)}</span>
+            </div>
           )}
           <div className="lc-spot-card">
             <span className="lc-stat-label">SPOT</span>

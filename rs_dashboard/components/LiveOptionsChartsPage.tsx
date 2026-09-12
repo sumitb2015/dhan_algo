@@ -7,6 +7,7 @@ import { StranglePanel } from '@/components/StranglePanel';
 import { StrategyPanel } from '@/components/StrategyPanel';
 import { PanelStyles } from '@/components/PanelStyles';
 import { type ChartUnderlying } from '@/lib/underlyings';
+import OptionOrderModal, { type OptionOrderInitialState } from '@/components/OptionOrderModal';
 import NavBar from './NavBar';
 
 const LAYOUTS = [1, 2] as const;
@@ -37,9 +38,17 @@ const SPREAD_ICONS: Record<SpreadType, string> = {
 export default function LiveOptionsChartsPage() {
   const [spreadType, setSpreadType] = useState<SpreadType>('straddle');
   const [layoutCount, setLayoutCount] = useState<LayoutCount>(1);
+  const [tradeModalOpen, setTradeModalOpen] = useState(false);
+  const [activeTradeOrder, setActiveTradeOrder] = useState<OptionOrderInitialState | null>(null);
+
   // Per-panel underlying, owned here rather than inside the panels so the selection survives a
   // spread-type switch (which unmounts and remounts every panel).
   const [underlyings, setUnderlyings] = useState<ChartUnderlying[]>(['NIFTY', 'BANKNIFTY']);
+
+  function handleOpenTrade(order: OptionOrderInitialState) {
+    setActiveTradeOrder(order);
+    setTradeModalOpen(true);
+  }
 
   function setUnderlyingAt(index: number, next: ChartUnderlying) {
     setUnderlyings((prev) => prev.map((u, i) => (i === index ? next : u)));
@@ -156,6 +165,7 @@ export default function LiveOptionsChartsPage() {
             const panelProps = {
               underlying: underlyings[i],
               onUnderlyingChange: (u: ChartUnderlying) => setUnderlyingAt(i, u),
+              onTradeOptions: handleOpenTrade,
             };
             return (
               <div key={i} className="min-h-0 min-w-0">
@@ -173,6 +183,13 @@ export default function LiveOptionsChartsPage() {
           })}
         </div>
       </main>
+
+      {/* Options Spread Order Execution Modal */}
+      <OptionOrderModal
+        isOpen={tradeModalOpen}
+        onClose={() => setTradeModalOpen(false)}
+        initialOrder={activeTradeOrder}
+      />
 
       <style>{`
         /* ── Page shell ─────────────────────────────────────────────── */

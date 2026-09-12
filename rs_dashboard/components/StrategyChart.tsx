@@ -17,11 +17,13 @@ export function StrategyChart({
   chart,
   chartType,
   showSpot = false,
+  showVolume = true,
   underlying = 'NIFTY',
 }: {
   chart: CustomStrategyChartResponse;
   chartType: StrategyChartType;
   showSpot?: boolean;
+  showVolume?: boolean;
   underlying?: string;
 }) {
   const leftAxisLine = useMemo(
@@ -39,6 +41,7 @@ export function StrategyChart({
       colorScheme={GROWW_COLORS}
       valueLabel={chart.net_credit ? 'Credit Received' : 'Debit Paid'}
       leftAxisLine={leftAxisLine}
+      showVolume={showVolume}
     />
   );
 }
