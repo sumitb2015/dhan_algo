@@ -1,4 +1,4 @@
-﻿'use client';
+'use client';
 
 import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { RefreshCw, TrendingUp, TrendingDown, Download, BarChart2 } from 'lucide-react';
@@ -21,7 +21,7 @@ type FilterMode = 'all' | 'positive' | 'negative';
 
 // SVG viewport
 const SVG_W = 1200;
-const SVG_H = 800;
+const SVG_H = 500;
 const M = { top: 24, right: 24, bottom: 44, left: 66 };
 const CW = SVG_W - M.left - M.right;  // chart width
 const CH = SVG_H - M.top  - M.bottom; // chart height
@@ -552,10 +552,10 @@ export default function NormalizedChart() {
 
         {/* ── Chart + leaderboard ── */}
         {!loading && data && filtered.length > 0 && (
-          <div className="flex flex-col xl:flex-row gap-3 items-stretch">
+          <div className="flex flex-col xl:flex-row gap-3 items-stretch xl:h-[calc(100vh-190px)] xl:min-h-[440px]">
 
             {/* Chart */}
-            <div className="flex-1 min-w-0 rounded-xl border border-zinc-800 bg-zinc-950 p-4 flex flex-col">
+            <div className="flex-1 min-w-0 rounded-xl border border-zinc-800 bg-zinc-950 p-4 flex flex-col h-[420px] sm:h-[480px] xl:h-full">
               <div className="flex items-center justify-between mb-3 px-1 shrink-0">
                 <span className="text-[13px] font-semibold text-zinc-300">
                   {universe === 'nifty50' ? 'NIFTY 50' : universe === 'nifty500' ? 'NIFTY 500' : 'NSE Indices'} — {period} Normalised Performance
@@ -566,7 +566,7 @@ export default function NormalizedChart() {
                   <span className="hidden sm:inline text-zinc-700">Hover chart or leaderboard to highlight</span>
                 </div>
               </div>
-              <div className="flex-1 min-h-0">
+              <div className="flex-1 min-h-0 w-full">
                 <FanChart
                   dates={data.dates}
                   stocks={filtered}
@@ -577,8 +577,8 @@ export default function NormalizedChart() {
             </div>
 
             {/* Leaderboard */}
-            <div className="flex flex-col gap-2 xl:w-[370px] shrink-0 h-full">
-              <div className="flex-1 rounded-xl border border-zinc-800 bg-zinc-950 overflow-hidden flex flex-col">
+            <div className="flex flex-col gap-2 xl:w-[370px] shrink-0 h-[420px] sm:h-[460px] xl:h-full">
+              <div className="flex-1 rounded-xl border border-zinc-800 bg-zinc-950 overflow-hidden flex flex-col min-h-0">
                 <div className="flex items-center gap-2 px-3 py-2.5 border-b border-zinc-800/70 shrink-0">
                   <TrendingUp className="h-3.5 w-3.5 text-emerald-400 shrink-0" />
                   <span className="text-[12px] font-semibold text-zinc-300 flex-1">Top Gainers</span>
@@ -593,7 +593,7 @@ export default function NormalizedChart() {
                     ))}
                 </div>
               </div>
-              <div className="flex-1 rounded-xl border border-zinc-800 bg-zinc-950 overflow-hidden flex flex-col">
+              <div className="flex-1 rounded-xl border border-zinc-800 bg-zinc-950 overflow-hidden flex flex-col min-h-0">
                 <div className="flex items-center gap-2 px-3 py-2.5 border-b border-zinc-800/70 shrink-0">
                   <TrendingDown className="h-3.5 w-3.5 text-red-400 shrink-0" />
                   <span className="text-[12px] font-semibold text-zinc-300 flex-1">Top Losers</span>
