@@ -15,8 +15,12 @@ import {
 interface RiskGreeksMatrixProps {
   greeks: PortfolioGreeks;
   lastActionMessage: string | null;
-  onRollCe: () => void;
-  onRollPe: () => void;
+  onRollCe?: () => void;
+  onRollPe?: () => void;
+  onRollCeUp?: () => void;
+  onRollCeDown?: () => void;
+  onRollPeUp?: () => void;
+  onRollPeDown?: () => void;
   onDeltaHedge: () => void;
   onAddWings: () => void;
   onTrim50: () => void;
@@ -57,6 +61,10 @@ export default function RiskGreeksMatrix({
   lastActionMessage,
   onRollCe,
   onRollPe,
+  onRollCeUp,
+  onRollCeDown,
+  onRollPeUp,
+  onRollPeDown,
   onDeltaHedge,
   onAddWings,
   onTrim50,
@@ -189,35 +197,61 @@ export default function RiskGreeksMatrix({
         <div className="p-3.5 flex flex-col gap-3">
           {/* Action Grid matching the diagram */}
           <div className="grid grid-cols-2 gap-2">
-            {/* Roll CE (C) */}
-            <button
-              onClick={onRollCe}
-              className="flex items-center justify-between px-3 py-2.5 rounded-xl bg-zinc-950 border border-zinc-800 hover:bg-zinc-800 hover:border-zinc-700 text-zinc-100 font-bold text-xs transition-all cursor-pointer shadow-sm group"
-              title="Roll Short Call Strike further OTM [Hotkey: C]"
-            >
+            {/* Roll CE: Dual Up / Down */}
+            <div className="flex items-center justify-between px-3 py-2 rounded-xl bg-zinc-950 border border-zinc-800 text-zinc-100 font-bold text-xs shadow-sm">
               <div className="flex items-center gap-1.5">
-                <RotateCw className="w-3.5 h-3.5 text-sky-400 group-hover:rotate-45 transition-transform" />
+                <RotateCw className="w-3.5 h-3.5 text-sky-400" />
                 <span>Roll CE</span>
               </div>
-              <span className="text-[10px] bg-zinc-900 group-hover:bg-zinc-700 px-1.5 py-0.5 rounded border border-zinc-700 text-zinc-300 font-bold">
-                C
-              </span>
-            </button>
+              <div className="flex items-center gap-1">
+                <button
+                  type="button"
+                  onClick={onRollCeUp || onRollCe}
+                  className="flex items-center gap-0.5 px-2 py-0.5 rounded bg-zinc-900 hover:bg-zinc-800 text-emerald-400 border border-zinc-700 text-[10px] font-bold cursor-pointer transition-colors"
+                  title="Roll Call UP further OTM [Hotkey: C]"
+                >
+                  <span>▲</span>
+                  <span className="text-zinc-400 text-[9px]">[C]</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={onRollCeDown || onRollCe}
+                  className="flex items-center gap-0.5 px-2 py-0.5 rounded bg-zinc-900 hover:bg-zinc-800 text-red-400 border border-zinc-700 text-[10px] font-bold cursor-pointer transition-colors"
+                  title="Roll Call DOWN [Hotkey: Shift+C]"
+                >
+                  <span>▼</span>
+                  <span className="text-zinc-400 text-[9px]">[⇧C]</span>
+                </button>
+              </div>
+            </div>
 
-            {/* Roll PE (P) */}
-            <button
-              onClick={onRollPe}
-              className="flex items-center justify-between px-3 py-2.5 rounded-xl bg-zinc-950 border border-zinc-800 hover:bg-zinc-800 hover:border-zinc-700 text-zinc-100 font-bold text-xs transition-all cursor-pointer shadow-sm group"
-              title="Roll Short Put Strike further OTM [Hotkey: P]"
-            >
+            {/* Roll PE: Dual Up / Down */}
+            <div className="flex items-center justify-between px-3 py-2 rounded-xl bg-zinc-950 border border-zinc-800 text-zinc-100 font-bold text-xs shadow-sm">
               <div className="flex items-center gap-1.5">
-                <RotateCw className="w-3.5 h-3.5 text-amber-400 group-hover:-rotate-45 transition-transform" />
+                <RotateCw className="w-3.5 h-3.5 text-amber-400" />
                 <span>Roll PE</span>
               </div>
-              <span className="text-[10px] bg-zinc-900 group-hover:bg-zinc-700 px-1.5 py-0.5 rounded border border-zinc-700 text-zinc-300 font-bold">
-                P
-              </span>
-            </button>
+              <div className="flex items-center gap-1">
+                <button
+                  type="button"
+                  onClick={onRollPeUp || onRollPe}
+                  className="flex items-center gap-0.5 px-2 py-0.5 rounded bg-zinc-900 hover:bg-zinc-800 text-emerald-400 border border-zinc-700 text-[10px] font-bold cursor-pointer transition-colors"
+                  title="Roll Put UP [Hotkey: Shift+P]"
+                >
+                  <span>▲</span>
+                  <span className="text-zinc-400 text-[9px]">[⇧P]</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={onRollPeDown || onRollPe}
+                  className="flex items-center gap-0.5 px-2 py-0.5 rounded bg-zinc-900 hover:bg-zinc-800 text-red-400 border border-zinc-700 text-[10px] font-bold cursor-pointer transition-colors"
+                  title="Roll Put DOWN further OTM [Hotkey: P]"
+                >
+                  <span>▼</span>
+                  <span className="text-zinc-400 text-[9px]">[P]</span>
+                </button>
+              </div>
+            </div>
 
             {/* Delta Hedge (H) */}
             <button

@@ -12,8 +12,12 @@ export default function HotkeysModal({ isOpen, onClose }: HotkeysModalProps) {
   if (!isOpen) return null;
 
   const hotkeys = [
-    { key: 'C', label: 'Roll Call Strike', desc: 'Shifts active short Call strike 1 step further OTM' },
-    { key: 'P', label: 'Roll Put Strike', desc: 'Shifts active short Put strike 1 step further OTM' },
+    { key: 'C', label: 'Roll CE Strike Up', desc: 'Shifts active Call strike +1 step further OTM (▲)' },
+    { key: 'Shift+C', label: 'Roll CE Strike Down', desc: 'Shifts active Call strike -1 step down (▼)' },
+    { key: 'P', label: 'Roll PE Strike Down', desc: 'Shifts active Put strike -1 step further OTM (▼)' },
+    { key: 'Shift+P', label: 'Roll PE Strike Up', desc: 'Shifts active Put strike +1 step up (▲)' },
+    { key: '+ / =', label: 'Increase Lots', desc: 'Adds +1 lot across all active legs' },
+    { key: '- / _', label: 'Decrease Lots', desc: 'Removes -1 lot across all active legs (min 1)' },
     { key: 'H', label: '1-Click Delta Hedge', desc: 'Neutralizes net delta skew by adjusting or hedging' },
     { key: 'W', label: 'Add Protective Wings', desc: 'Buys OTM wings to cap tail risk (converts to Iron Condor)' },
     { key: 'X', label: 'Trim Position 50%', desc: 'De-risks 50% of the active lots' },

@@ -40,6 +40,8 @@ interface PositionsStrategyMonitorProps {
   onUpdateLegStrike: (id: string, newStrike: number) => void;
   onQuickShiftStrike: (id: string, steps: number) => void;
   onSelectStrategyPreset: (presetId: string) => void;
+  onUpdateLegLots?: (id: string, deltaLots: number) => void;
+  onUpdateAllLots?: (deltaLots: number) => void;
 }
 
 function TerminalPanel({
@@ -146,6 +148,8 @@ export default function PositionsStrategyMonitor({
   onUpdateLegStrike,
   onQuickShiftStrike,
   onSelectStrategyPreset,
+  onUpdateLegLots,
+  onUpdateAllLots,
 }: PositionsStrategyMonitorProps) {
   // Identify key nearest short strikes for accurate clearance calculation
   const shortCeLeg = useMemo(() => {
@@ -200,11 +204,34 @@ export default function PositionsStrategyMonitor({
         }
         meta={
           <div className="flex items-center gap-2">
-            <span className="text-zinc-400">
-              {legs.length === 2 && legs[0].lots === legs[1].lots
-                ? `${legs[0].lots} Lots / ${legs[0].qty} Qty`
-                : `${totalLots} Lots / ${totalQty} Qty`}
-            </span>
+            {/* Global +/- Lots Stepper */}
+            <div className="flex items-center gap-1.5 bg-zinc-950 px-2 py-1 rounded-lg border border-zinc-800">
+              <span className="text-[10px] font-bold uppercase text-zinc-400">LOTS:</span>
+              <button
+                type="button"
+                onClick={() => onUpdateAllLots && onUpdateAllLots(-1)}
+                disabled={viewMode === 'broker' || totalLots <= legs.length || legs.length === 0}
+                className="w-5 h-5 flex items-center justify-center rounded bg-zinc-800 hover:bg-zinc-700 text-zinc-200 hover:text-white border border-zinc-700 text-xs font-bold cursor-pointer disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
+                title="Decrease all legs by 1 lot"
+              >
+                -
+              </button>
+              <span className="font-mono text-xs font-bold text-amber-400 min-w-[28px] text-center tabular-nums">
+                {legs.length === 2 && legs[0].lots === legs[1].lots
+                  ? `${legs[0].lots}L`
+                  : `${totalLots}L`}
+              </span>
+              <button
+                type="button"
+                onClick={() => onUpdateAllLots && onUpdateAllLots(1)}
+                disabled={viewMode === 'broker' || legs.length === 0}
+                className="w-5 h-5 flex items-center justify-center rounded bg-zinc-800 hover:bg-zinc-700 text-zinc-200 hover:text-white border border-zinc-700 text-xs font-bold cursor-pointer disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
+                title="Increase all legs by 1 lot"
+              >
+                +
+              </button>
+              <span className="text-zinc-500 text-[10px] ml-0.5">({totalQty} Qty)</span>
+            </div>
           </div>
         }
       >
@@ -266,13 +293,14 @@ export default function PositionsStrategyMonitor({
             </div>
           </div>
 
-          {/* ── 2. ACTIVE LEGS TABLE WITH SHORT-FORM EXPIRY ────────────────── */}
+          {/* ── 2. ACTIVE LEGS TABLE WITH SHORT-FORM EXPIRY, LOT ADJUSTER & DUAL ROLLS ── */}
           <div className="overflow-x-auto">
             <table className="w-full text-left text-xs border-collapse">
               <thead>
                 <tr className="bg-zinc-800 text-white font-bold text-xs">
                   <th className="py-2.5 px-3 rounded-l">LEG</th>
                   <th className="py-2.5 px-2">EXPIRY</th>
+                  <th className="py-2.5 px-2">LOTS</th>
                   <th className="py-2.5 px-2">STRIKE (SELECT ANY)</th>
                   <th className="py-2.5 px-2 text-right">LTP</th>
                   <th className="py-2.5 px-2 text-right">ENTRY</th>
@@ -285,7 +313,7 @@ export default function PositionsStrategyMonitor({
               <tbody className="divide-y divide-zinc-800/80">
                 {legs.length === 0 ? (
                   <tr>
-                    <td colSpan={9} className="py-8 text-center text-zinc-500 italic">
+                    <td colSpan={10} className="py-8 text-center text-zinc-500 italic">
                       No active option legs. Click &quot;ADD LEG&quot; or select a preset template above.
                     </td>
                   </tr>
@@ -321,9 +349,6 @@ export default function PositionsStrategyMonitor({
                           >
                             {leg.type}
                           </span>
-                          <span className="text-[10px] text-zinc-400 ml-1.5 font-mono">
-                            ({leg.lots}L)
-                          </span>
                         </td>
 
                         {/* Short-form Expiry */}
@@ -333,13 +358,44 @@ export default function PositionsStrategyMonitor({
                           </span>
                         </td>
 
+                        {/* Dedicated Lots +/- Stepper */}
+                        <td className="py-2.5 px-2 whitespace-nowrap">
+                          <div className="flex items-center gap-1">
+                            <button
+                              type="button"
+                              onClick={() => onUpdateLegLots && onUpdateLegLots(leg.id, -1)}
+                              disabled={viewMode === 'broker' || leg.lots <= 1}
+                              className="w-4 h-4 flex items-center justify-center rounded bg-zinc-800 hover:bg-zinc-700 text-zinc-200 border border-zinc-700 text-[10px] font-bold cursor-pointer disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
+                              title="Decrease 1 lot"
+                            >
+                              -
+                            </button>
+                            <span className="font-mono text-xs font-bold text-white min-w-[22px] text-center tabular-nums">
+                              {leg.lots}L
+                            </span>
+                            <button
+                              type="button"
+                              onClick={() => onUpdateLegLots && onUpdateLegLots(leg.id, 1)}
+                              disabled={viewMode === 'broker'}
+                              className="w-4 h-4 flex items-center justify-center rounded bg-zinc-800 hover:bg-zinc-700 text-zinc-200 border border-zinc-700 text-[10px] font-bold cursor-pointer disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
+                              title="Increase 1 lot"
+                            >
+                              +
+                            </button>
+                            <span className="text-[10px] text-zinc-500 font-mono ml-0.5">
+                              ({leg.qty}Q)
+                            </span>
+                          </div>
+                        </td>
+
                         {/* Interactive Strike Picker & Quick Shift Buttons */}
                         <td className="py-2.5 px-2 whitespace-nowrap">
                           <div className="flex items-center gap-1">
                             <select
                               value={leg.strike}
                               onChange={(e) => onUpdateLegStrike(leg.id, Number(e.target.value))}
-                              className="bg-zinc-950 text-white font-bold px-2 py-1 rounded border border-zinc-700 text-xs cursor-pointer focus:outline-none focus:border-amber-500/60"
+                              disabled={viewMode === 'broker'}
+                              className="bg-zinc-950 text-white font-bold px-2 py-1 rounded border border-zinc-700 text-xs cursor-pointer focus:outline-none focus:border-amber-500/60 disabled:opacity-50"
                             >
                               {strikeOptions.map((s) => (
                                 <option key={s} value={s}>
@@ -352,14 +408,16 @@ export default function PositionsStrategyMonitor({
                             <div className="flex items-center gap-0.5">
                               <button
                                 onClick={() => onQuickShiftStrike(leg.id, -1)}
-                                className="p-1 rounded bg-zinc-800 hover:bg-zinc-700 text-zinc-300 hover:text-white transition-colors cursor-pointer text-[10px]"
+                                disabled={viewMode === 'broker'}
+                                className="p-1 rounded bg-zinc-800 hover:bg-zinc-700 text-zinc-300 hover:text-white transition-colors cursor-pointer text-[10px] disabled:opacity-40"
                                 title={`Shift down by ${strikeStep} pts`}
                               >
                                 -{strikeStep}
                               </button>
                               <button
                                 onClick={() => onQuickShiftStrike(leg.id, 1)}
-                                className="p-1 rounded bg-zinc-800 hover:bg-zinc-700 text-zinc-300 hover:text-white transition-colors cursor-pointer text-[10px]"
+                                disabled={viewMode === 'broker'}
+                                className="p-1 rounded bg-zinc-800 hover:bg-zinc-700 text-zinc-300 hover:text-white transition-colors cursor-pointer text-[10px] disabled:opacity-40"
                                 title={`Shift up by ${strikeStep} pts`}
                               >
                                 +{strikeStep}
@@ -398,19 +456,39 @@ export default function PositionsStrategyMonitor({
                           {(leg.iv * 100).toFixed(1)}%
                         </td>
 
-                        {/* Actions (Roll / Remove) */}
+                        {/* Actions (Dual Roll Up / Roll Down + Remove) */}
                         <td className="py-2.5 px-3 text-center whitespace-nowrap">
-                          <div className="flex items-center justify-center gap-1.5">
+                          <div className="flex items-center justify-center gap-1">
+                            {/* Roll UP Button */}
                             <button
-                              onClick={() => onQuickShiftStrike(leg.id, isCall ? 1 : -1)}
-                              className="px-2 py-0.5 rounded bg-zinc-800 hover:bg-zinc-700 text-zinc-200 border border-zinc-700 text-[10px] font-bold transition-colors cursor-pointer"
-                              title={isCall ? 'Roll CE up (further OTM)' : 'Roll PE down (further OTM)'}
+                              type="button"
+                              onClick={() => onQuickShiftStrike(leg.id, 1)}
+                              disabled={viewMode === 'broker'}
+                              className="flex items-center gap-0.5 px-1.5 py-0.5 rounded bg-zinc-800 hover:bg-zinc-700 text-zinc-200 border border-zinc-700 text-[10px] font-bold transition-colors cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
+                              title={`Roll ${leg.type} UP (+${strikeStep} pts)`}
                             >
-                              Roll {isCall ? '▲' : '▼'}
+                              <span>Roll</span>
+                              <span className="text-emerald-400">▲</span>
                             </button>
+
+                            {/* Roll DOWN Button */}
                             <button
+                              type="button"
+                              onClick={() => onQuickShiftStrike(leg.id, -1)}
+                              disabled={viewMode === 'broker'}
+                              className="flex items-center gap-0.5 px-1.5 py-0.5 rounded bg-zinc-800 hover:bg-zinc-700 text-zinc-200 border border-zinc-700 text-[10px] font-bold transition-colors cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
+                              title={`Roll ${leg.type} DOWN (-${strikeStep} pts)`}
+                            >
+                              <span>Roll</span>
+                              <span className="text-red-400">▼</span>
+                            </button>
+
+                            {/* Remove Leg Button */}
+                            <button
+                              type="button"
                               onClick={() => onRemoveLeg(leg.id)}
-                              className="p-1 rounded text-zinc-400 hover:text-red-400 hover:bg-red-500/10 transition-colors cursor-pointer"
+                              disabled={viewMode === 'broker'}
+                              className="p-1 rounded text-zinc-400 hover:text-red-400 hover:bg-red-500/10 transition-colors cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed ml-0.5"
                               title="Remove Leg"
                             >
                               <Trash2 className="w-3.5 h-3.5" />

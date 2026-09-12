@@ -887,8 +887,8 @@ export default function OptionsMonitorPage() {
     }
   };
 
-  // Hotkey [C]: Roll Short CE
-  const handleRollCe = useCallback(() => {
+  // Roll Short CE UP (+1 strikeStep)
+  const handleRollCeUp = useCallback(() => {
     if (viewMode === 'broker') {
       notifyAction('Switch to Desk mode to perform what-if rolls.');
       return;
@@ -900,11 +900,43 @@ export default function OptionsMonitorPage() {
     }
     const newStrike = ceLeg.strike + uConfig.strikeStep;
     handleUpdateLegStrike(ceLeg.id, newStrike);
-    notifyAction(`[HOTKEY C] Rolled Short CE from ${ceLeg.strike} to ${newStrike} (+${uConfig.strikeStep} pts OTM)`);
+    notifyAction(`Rolled Short CE UP from ${ceLeg.strike} to ${newStrike} (+${uConfig.strikeStep} pts OTM)`);
   }, [customLegs, uConfig.strikeStep, viewMode]);
 
-  // Hotkey [P]: Roll Short PE
-  const handleRollPe = useCallback(() => {
+  // Roll Short CE DOWN (-1 strikeStep)
+  const handleRollCeDown = useCallback(() => {
+    if (viewMode === 'broker') {
+      notifyAction('Switch to Desk mode to perform what-if rolls.');
+      return;
+    }
+    const ceLeg = customLegs.find((l) => l.type === 'CE' && l.side === 'SELL');
+    if (!ceLeg) {
+      notifyAction('No active short CE leg found to roll.');
+      return;
+    }
+    const newStrike = ceLeg.strike - uConfig.strikeStep;
+    handleUpdateLegStrike(ceLeg.id, newStrike);
+    notifyAction(`Rolled Short CE DOWN from ${ceLeg.strike} to ${newStrike} (-${uConfig.strikeStep} pts)`);
+  }, [customLegs, uConfig.strikeStep, viewMode]);
+
+  // Roll Short PE UP (+1 strikeStep)
+  const handleRollPeUp = useCallback(() => {
+    if (viewMode === 'broker') {
+      notifyAction('Switch to Desk mode to perform what-if rolls.');
+      return;
+    }
+    const peLeg = customLegs.find((l) => l.type === 'PE' && l.side === 'SELL');
+    if (!peLeg) {
+      notifyAction('No active short PE leg found to roll.');
+      return;
+    }
+    const newStrike = peLeg.strike + uConfig.strikeStep;
+    handleUpdateLegStrike(peLeg.id, newStrike);
+    notifyAction(`Rolled Short PE UP from ${peLeg.strike} to ${newStrike} (+${uConfig.strikeStep} pts)`);
+  }, [customLegs, uConfig.strikeStep, viewMode]);
+
+  // Roll Short PE DOWN (-1 strikeStep)
+  const handleRollPeDown = useCallback(() => {
     if (viewMode === 'broker') {
       notifyAction('Switch to Desk mode to perform what-if rolls.');
       return;
@@ -916,8 +948,50 @@ export default function OptionsMonitorPage() {
     }
     const newStrike = peLeg.strike - uConfig.strikeStep;
     handleUpdateLegStrike(peLeg.id, newStrike);
-    notifyAction(`[HOTKEY P] Rolled Short PE from ${peLeg.strike} to ${newStrike} (-${uConfig.strikeStep} pts OTM)`);
+    notifyAction(`Rolled Short PE DOWN from ${peLeg.strike} to ${newStrike} (-${uConfig.strikeStep} pts OTM)`);
   }, [customLegs, uConfig.strikeStep, viewMode]);
+
+  const handleRollCe = handleRollCeUp;
+  const handleRollPe = handleRollPeDown;
+
+  // Adjust lots for a specific leg (+1 or -1)
+  const handleUpdateLegLots = useCallback((id: string, deltaLots: number) => {
+    if (viewMode === 'broker') {
+      notifyAction('Broker position sizing is synced from Dhan. Switch to Desk mode to edit.');
+      return;
+    }
+    setCustomLegs((prev) =>
+      prev.map((l) => {
+        if (l.id !== id) return l;
+        const nextLots = Math.max(1, l.lots + deltaLots);
+        return {
+          ...l,
+          lots: nextLots,
+          qty: nextLots * uConfig.lotSize,
+        };
+      })
+    );
+    notifyAction(`Adjusted position lot sizing (${deltaLots > 0 ? '+1' : '-1'} Lot)`);
+  }, [viewMode, uConfig.lotSize]);
+
+  // Adjust lots for all legs simultaneously (+1 or -1)
+  const handleUpdateAllLots = useCallback((deltaLots: number) => {
+    if (viewMode === 'broker') {
+      notifyAction('Broker position sizing is synced from Dhan. Switch to Desk mode to edit.');
+      return;
+    }
+    setCustomLegs((prev) =>
+      prev.map((l) => {
+        const nextLots = Math.max(1, l.lots + deltaLots);
+        return {
+          ...l,
+          lots: nextLots,
+          qty: nextLots * uConfig.lotSize,
+        };
+      })
+    );
+    notifyAction(`Adjusted all legs by ${deltaLots > 0 ? '+1' : '-1'} Lot`);
+  }, [viewMode, uConfig.lotSize]);
 
   // Hotkey [H]: 1-Click Delta Hedge
   const handleDeltaHedge = useCallback(() => {
@@ -1072,12 +1146,26 @@ export default function OptionsMonitorPage() {
 
       const key = e.key.toUpperCase();
 
-      if (key === 'C') {
+      if (e.key === 'c' || e.key === 'C') {
         e.preventDefault();
-        handleRollCe();
-      } else if (key === 'P') {
+        if (e.shiftKey) {
+          handleRollCeDown();
+        } else {
+          handleRollCeUp();
+        }
+      } else if (e.key === 'p' || e.key === 'P') {
         e.preventDefault();
-        handleRollPe();
+        if (e.shiftKey) {
+          handleRollPeUp();
+        } else {
+          handleRollPeDown();
+        }
+      } else if (e.key === '+' || e.key === '=') {
+        e.preventDefault();
+        handleUpdateAllLots(1);
+      } else if (e.key === '-' || e.key === '_') {
+        e.preventDefault();
+        handleUpdateAllLots(-1);
       } else if (key === 'H') {
         e.preventDefault();
         handleDeltaHedge();
@@ -1098,7 +1186,17 @@ export default function OptionsMonitorPage() {
 
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [handleRollCe, handleRollPe, handleDeltaHedge, handleAddWings, handleTrim50, handleFlatten]);
+  }, [
+    handleRollCeUp,
+    handleRollCeDown,
+    handleRollPeUp,
+    handleRollPeDown,
+    handleUpdateAllLots,
+    handleDeltaHedge,
+    handleAddWings,
+    handleTrim50,
+    handleFlatten,
+  ]);
 
   const todayStr = new Date().toISOString().split('T')[0];
 
@@ -1118,35 +1216,47 @@ export default function OptionsMonitorPage() {
                   OPTIONS RISK DESK · {selectedUnderlying}
                 </p>
                 <span className="text-[9px] font-bold font-mono px-1.5 py-0.2 rounded bg-zinc-900 border border-zinc-800 text-zinc-400">
-                  DATA: {todayStr}
+                  REALTIME DERIVATIVES
                 </span>
               </div>
-              <h1 className="text-sm font-bold text-white tracking-tight leading-none mt-0.5">
-                Options Risk &amp; Strategy Monitor
+              <h1 className="text-sm font-bold text-white tracking-wide">
+                Options Risk & Strategy Monitor
               </h1>
-              <p className="text-[10px] text-zinc-400 font-medium mt-0.5">
-                Real-time Greeks matrix, sub-second tick streaming, strike clearances &amp; 2D payoff matrix
-              </p>
             </div>
           </div>
 
-          {/* Right: Quick Links + Separator + <NavBar /> */}
-          <div className="flex items-center gap-2.5 flex-wrap ml-auto">
+          {/* Center Navigation Shortcuts */}
+          <div className="hidden lg:flex items-center gap-1 bg-zinc-900 p-1 rounded-xl border border-zinc-800 text-xs font-medium">
             <Link
-              href="/scalper"
-              className="hidden sm:inline-flex items-center gap-1 text-[11px] font-bold px-2.5 py-1 rounded-lg bg-zinc-900 border border-zinc-800 hover:bg-zinc-800 text-zinc-300 hover:text-white transition-colors"
+              href="/options-analytics"
+              className="px-2.5 py-1 rounded-lg text-zinc-400 hover:text-white hover:bg-zinc-800 transition-colors"
             >
-              Scalper →
+              Option Chain
             </Link>
             <Link
-              href="/options"
-              className="hidden sm:inline-flex items-center gap-1 text-[11px] font-bold px-2.5 py-1 rounded-lg bg-zinc-900 border border-zinc-800 hover:bg-zinc-800 text-zinc-300 hover:text-white transition-colors"
+              href="/options/live-charts"
+              className="px-2.5 py-1 rounded-lg text-zinc-400 hover:text-white hover:bg-zinc-800 transition-colors"
             >
-              Options Charts →
+              IV Charts
             </Link>
+            <Link
+              href="/options/advanced-scalper"
+              className="px-2.5 py-1 rounded-lg text-zinc-400 hover:text-white hover:bg-zinc-800 transition-colors"
+            >
+              Scalper
+            </Link>
+            <Link
+              href="/strategy-builder"
+              className="px-2.5 py-1 rounded-lg text-zinc-400 hover:text-white hover:bg-zinc-800 transition-colors"
+            >
+              Builder
+            </Link>
+            <span className="px-2.5 py-1 rounded-lg bg-indigo-600 text-white font-bold shadow-sm">
+              Risk Monitor
+            </span>
+          </div>
 
-            <span className="w-px h-5 bg-zinc-800 shrink-0 hidden sm:inline-block" />
-
+          <div className="flex items-center gap-3">
             <NavBar />
           </div>
         </header>
@@ -1154,7 +1264,13 @@ export default function OptionsMonitorPage() {
         {/* ROW 2: Live Metrics Bar (Matches the user's diagram with sub-second WebSocket quotes) */}
         <TopMetricBar
           selectedUnderlying={selectedUnderlying}
-          onSelectUnderlying={handleSelectUnderlying}
+          onSelectUnderlying={(sym) => {
+            setSelectedUnderlying(sym);
+            hasInitializedPresetRef.current = false;
+            fetchExpiries(sym).then((exp) => {
+              if (exp) fetchOptionChain(sym, exp);
+            });
+          }}
           expiries={expiries}
           selectedExpiry={selectedExpiry}
           onSelectExpiry={(exp) => setSelectedExpiry(exp)}
@@ -1212,6 +1328,8 @@ export default function OptionsMonitorPage() {
               onUpdateLegStrike={handleUpdateLegStrike}
               onQuickShiftStrike={handleQuickShiftStrike}
               onSelectStrategyPreset={handleSelectStrategyPreset}
+              onUpdateLegLots={handleUpdateLegLots}
+              onUpdateAllLots={handleUpdateAllLots}
             />
           </div>
 
@@ -1222,6 +1340,10 @@ export default function OptionsMonitorPage() {
               lastActionMessage={lastActionMessage}
               onRollCe={handleRollCe}
               onRollPe={handleRollPe}
+              onRollCeUp={handleRollCeUp}
+              onRollCeDown={handleRollCeDown}
+              onRollPeUp={handleRollPeUp}
+              onRollPeDown={handleRollPeDown}
               onDeltaHedge={handleDeltaHedge}
               onAddWings={handleAddWings}
               onTrim50={handleTrim50}
