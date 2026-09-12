@@ -71,7 +71,36 @@ export default function OptionsMonitorPage() {
     selectedUnderlying
   );
 
-  // Synchronize incoming ticks from WebSocket to spot & VIX
+  // Start and maintain options WebSocket bridge for live quotes
+  useEffect(() => {
+    if (!selectedExpiry) return;
+
+    fetch('/api/options/live', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        action: 'start',
+        underlying: selectedUnderlying,
+        expiry: selectedExpiry,
+        numStrikes: 30,
+        broker: 'dhan',
+      }),
+    }).catch(() => {});
+
+    return () => {
+      fetch('/api/options/live', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          action: 'stop',
+          brokers: ['dhan'],
+          underlying: selectedUnderlying,
+        }),
+      }).catch(() => {});
+    };
+  }, [selectedExpiry, selectedUnderlying]);
+
+  // Synchronize incoming ticks from WebSocket to spot, VIX, and normalized chain
   useEffect(() => {
     if (!liveQuotes) return;
 
@@ -90,6 +119,45 @@ export default function OptionsMonitorPage() {
         setIvPct(liveQuotes.vix.ltp);
       }
     }
+
+    // Merge strikes from live WebSocket quotes into normalizedChain and chainStrikes
+    if (liveQuotes.strikes && Object.keys(liveQuotes.strikes).length > 0) {
+      setNormalizedChain((prev) => {
+        const next = { ...prev };
+        for (const [k, v] of Object.entries(liveQuotes.strikes!)) {
+          const s = Math.round(Number(k));
+          if (isNaN(s) || s <= 0) continue;
+          const existing = next[s] || {};
+          const quoteCe = (v as any).ce;
+          const quotePe = (v as any).pe;
+          next[s] = {
+            ce: {
+              ...existing.ce,
+              last_price: quoteCe?.ltp ?? existing.ce?.last_price,
+              previous_close_price: quoteCe?.prev_close ?? existing.ce?.previous_close_price,
+              oi: quoteCe?.oi ?? existing.ce?.oi,
+              volume: quoteCe?.volume ?? existing.ce?.volume,
+            },
+            pe: {
+              ...existing.pe,
+              last_price: quotePe?.ltp ?? existing.pe?.last_price,
+              previous_close_price: quotePe?.prev_close ?? existing.pe?.previous_close_price,
+              oi: quotePe?.oi ?? existing.pe?.oi,
+              volume: quotePe?.volume ?? existing.pe?.volume,
+            },
+          };
+        }
+        return next;
+      });
+
+      setChainStrikes((prev) => {
+        if (prev.length > 0) return prev;
+        return Object.keys(liveQuotes.strikes!)
+          .map(Number)
+          .filter((n) => !isNaN(n) && n > 0)
+          .sort((a, b) => a - b);
+      });
+    }
   }, [liveQuotes]);
 
   // ── 2. FETCH REAL EXPIRIES ────────────────────────────────────────────────
@@ -97,10 +165,13 @@ export default function OptionsMonitorPage() {
     try {
       const res = await fetch(`/api/options/expiries?underlying=${sym}&broker=dhan`, { cache: 'no-store' });
       const data = await res.json();
-      if (data && data.success && Array.isArray(data.expiries) && data.expiries.length > 0) {
-        setExpiries(data.expiries);
-        setSelectedExpiry(data.expiries[0]);
-        return data.expiries[0];
+      const expList: string[] = (data && data.success && (
+        Array.isArray(data.data) ? data.data : (Array.isArray(data.expiries) ? data.expiries : [])
+      )) || [];
+      if (expList.length > 0) {
+        setExpiries(expList);
+        setSelectedExpiry(expList[0]);
+        return expList[0];
       }
     } catch (err) {
       console.error('[OptionsMonitor] Failed to fetch expiries:', err);
@@ -132,13 +203,15 @@ export default function OptionsMonitorPage() {
           setChangePct(chainData.change_pct);
         }
 
-        const rawOc = chainData.chain?.oc || {};
+        const rawOc = chainData.chain?.oc || chainData.chain || {};
         const { strikes, normalized } = extractChainStrikes(rawOc);
-        setChainStrikes(strikes);
-        setNormalizedChain(normalized);
+        if (strikes.length > 0) {
+          setChainStrikes(strikes);
+          setNormalizedChain((prev) => ({ ...prev, ...normalized }));
+        }
 
         // Compute average ATM IV from the real chain
-        const currentSpot = chainData.spot || spot;
+        const currentSpot = chainData.spot || 23400;
         const atm = Math.round(currentSpot / (UNDERLYINGS[sym]?.strikeStep || 50)) * (UNDERLYINGS[sym]?.strikeStep || 50);
         const atmData = normalized[atm];
         const atmCeIv = atmData?.ce?.implied_volatility;
@@ -154,7 +227,7 @@ export default function OptionsMonitorPage() {
     } finally {
       setIsChainLoading(false);
     }
-  }, [spot]);
+  }, []);
 
   // ── 4. FETCH LIVE BROKER POSITIONS ────────────────────────────────────────
   const fetchBrokerPositions = useCallback(async () => {
@@ -247,27 +320,36 @@ export default function OptionsMonitorPage() {
 
   // Initialize realistic Desk preset once chain data arrives (if not in broker mode)
   useEffect(() => {
-    if (hasInitializedPresetRef.current || chainStrikes.length === 0 || Object.keys(normalizedChain).length === 0) {
+    if (hasInitializedPresetRef.current || (chainStrikes.length === 0 && Object.keys(normalizedChain).length === 0)) {
       return;
     }
     hasInitializedPresetRef.current = true;
 
-    // Build real Short Strangle from the actual option chain
+    // Build real Short Strangle from the actual option chain or live WebSocket quotes
     const atm = Math.round(spot / uConfig.strikeStep) * uConfig.strikeStep;
     const ceStrike = atm + 2 * uConfig.strikeStep;
     const peStrike = atm - 2 * uConfig.strikeStep;
 
+    const ceTick = liveQuotes?.strikes?.[ceStrike] ?? liveQuotes?.strikes?.[String(ceStrike)];
+    const peTick = liveQuotes?.strikes?.[peStrike] ?? liveQuotes?.strikes?.[String(peStrike)];
+
     const ceChain = normalizedChain[ceStrike]?.ce;
     const peChain = normalizedChain[peStrike]?.pe;
 
-    const cePrice = ceChain?.last_price || ceChain?.previous_close_price || 35.0;
-    const pePrice = peChain?.last_price || peChain?.previous_close_price || 30.0;
+    const t = calculateTimeToExpiryYears(selectedExpiry);
     const ceIv = (ceChain?.implied_volatility ? ceChain.implied_volatility / 100 : ivPct / 100);
     const peIv = (peChain?.implied_volatility ? peChain.implied_volatility / 100 : ivPct / 100);
 
-    const t = calculateTimeToExpiryYears(selectedExpiry);
     const gCe = computeBsGreeks('CE', spot, ceStrike, t, ceIv, uConfig.lotSize);
     const gPe = computeBsGreeks('PE', spot, peStrike, t, peIv, uConfig.lotSize);
+
+    const cePrice = (typeof ceTick?.ce?.ltp === 'number' && ceTick.ce.ltp > 0)
+      ? ceTick.ce.ltp
+      : (ceChain?.last_price || ceChain?.previous_close_price || gCe.price);
+
+    const pePrice = (typeof peTick?.pe?.ltp === 'number' && peTick.pe.ltp > 0)
+      ? peTick.pe.ltp
+      : (peChain?.last_price || peChain?.previous_close_price || gPe.price);
 
     setCustomLegs([
       {
@@ -301,7 +383,7 @@ export default function OptionsMonitorPage() {
         iv: peIv,
       },
     ]);
-  }, [chainStrikes, normalizedChain, spot, uConfig.strikeStep, uConfig.lotSize, ivPct, selectedExpiry]);
+  }, [chainStrikes, normalizedChain, spot, uConfig.strikeStep, uConfig.lotSize, ivPct, selectedExpiry, liveQuotes]);
 
   // ── 5. REALTIME MERGED LEGS WITH SUB-SECOND WS TICKS ────────────────────────
   // Dynamically recompute each active leg's LTP, Greeks, and MTM as market ticks stream in!
@@ -384,7 +466,29 @@ export default function OptionsMonitorPage() {
     entryPrice: number;
   }) => {
     const timeYears = calculateTimeToExpiryYears(selectedExpiry);
-    const g = computeBsGreeks(newLegData.type, spot, newLegData.strike, timeYears, ivPct / 100, uConfig.lotSize);
+
+    const tickData = liveQuotes?.strikes?.[newLegData.strike] ?? liveQuotes?.strikes?.[String(newLegData.strike)];
+    const wsPrice = newLegData.type === 'CE' ? tickData?.ce?.ltp : tickData?.pe?.ltp;
+
+    const chainEntry = normalizedChain[newLegData.strike];
+    const chainPrice = newLegData.type === 'CE'
+      ? chainEntry?.ce?.last_price || chainEntry?.ce?.previous_close_price
+      : chainEntry?.pe?.last_price || chainEntry?.pe?.previous_close_price;
+
+    const chainIv = newLegData.type === 'CE'
+      ? chainEntry?.ce?.implied_volatility
+      : chainEntry?.pe?.implied_volatility;
+    const legIv = (typeof chainIv === 'number' && chainIv > 0)
+      ? chainIv / 100
+      : ivPct / 100;
+
+    const g = computeBsGreeks(newLegData.type, spot, newLegData.strike, timeYears, legIv, uConfig.lotSize);
+
+    const legLtp = (typeof wsPrice === 'number' && wsPrice > 0)
+      ? wsPrice
+      : (typeof chainPrice === 'number' && chainPrice > 0)
+      ? chainPrice
+      : newLegData.entryPrice;
 
     const newLeg: OptionLegModel = {
       id: `desk_leg_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
@@ -394,12 +498,12 @@ export default function OptionsMonitorPage() {
       lots: newLegData.lots,
       qty: newLegData.lots * uConfig.lotSize,
       entryPrice: newLegData.entryPrice,
-      ltp: newLegData.entryPrice,
+      ltp: legLtp,
       delta: g.delta,
       gamma: g.gamma,
       theta: g.theta,
       vega: g.vega,
-      iv: ivPct / 100,
+      iv: legIv,
     };
 
     setViewMode('custom');
@@ -430,21 +534,40 @@ export default function OptionsMonitorPage() {
     setCustomLegs((prev) =>
       prev.map((l) => {
         if (l.id !== id) return l;
+
+        const tickData = liveQuotes?.strikes?.[newStrike] ?? liveQuotes?.strikes?.[String(newStrike)];
+        const wsPrice = l.type === 'CE' ? tickData?.ce?.ltp : tickData?.pe?.ltp;
+
         const chainEntry = normalizedChain[newStrike];
-        const newPrice = l.type === 'CE'
+        const chainPrice = l.type === 'CE'
           ? chainEntry?.ce?.last_price || chainEntry?.ce?.previous_close_price
           : chainEntry?.pe?.last_price || chainEntry?.pe?.previous_close_price;
 
-        const g = computeBsGreeks(l.type, spot, newStrike, timeYears, l.iv, uConfig.lotSize);
+        const chainIv = l.type === 'CE'
+          ? chainEntry?.ce?.implied_volatility
+          : chainEntry?.pe?.implied_volatility;
+        const effectiveIv = (typeof chainIv === 'number' && chainIv > 0)
+          ? chainIv / 100
+          : l.iv || ivPct / 100;
+
+        const g = computeBsGreeks(l.type, spot, newStrike, timeYears, effectiveIv, uConfig.lotSize);
+
+        const currentPrice = (typeof wsPrice === 'number' && wsPrice > 0)
+          ? wsPrice
+          : (typeof chainPrice === 'number' && chainPrice > 0)
+          ? chainPrice
+          : g.price;
+
         return {
           ...l,
           strike: newStrike,
-          entryPrice: typeof newPrice === 'number' && newPrice > 0 ? newPrice : g.price,
-          ltp: typeof newPrice === 'number' && newPrice > 0 ? newPrice : g.price,
+          entryPrice: currentPrice,
+          ltp: currentPrice,
           delta: g.delta,
           gamma: g.gamma,
           theta: g.theta,
           vega: g.vega,
+          iv: effectiveIv,
         };
       })
     );
@@ -477,10 +600,24 @@ export default function OptionsMonitorPage() {
     }
 
     const getRealQuote = (strike: number, type: 'ce' | 'pe') => {
+      // 1. Check live WebSocket quotes
+      const tickData = liveQuotes?.strikes?.[strike] ?? liveQuotes?.strikes?.[String(strike)];
+      const wsPrice = type === 'ce' ? tickData?.ce?.ltp : tickData?.pe?.ltp;
+
+      // 2. Check normalized option chain
       const entry = normalizedChain[strike];
-      const p = entry?.[type]?.last_price || entry?.[type]?.previous_close_price;
+      const chainP = entry?.[type]?.last_price || entry?.[type]?.previous_close_price;
       const iv = entry?.[type]?.implied_volatility ? entry[type].implied_volatility / 100 : ivPct / 100;
-      return { price: typeof p === 'number' && p > 0 ? p : 35.0, iv };
+
+      // 3. Fallback to Black-Scholes theoretical price for this specific strike & type
+      const fallbackGreeks = computeBsGreeks(type.toUpperCase() as OptType, spot, strike, t, iv, uConfig.lotSize);
+      const price = (typeof wsPrice === 'number' && wsPrice > 0)
+        ? wsPrice
+        : (typeof chainP === 'number' && chainP > 0)
+        ? chainP
+        : fallbackGreeks.price;
+
+      return { price, iv };
     };
 
     if (presetId === 'short_strangle') {
@@ -1083,6 +1220,7 @@ export default function OptionsMonitorPage() {
         defaultLots={2}
         chainStrikes={chainStrikes}
         chain={normalizedChain}
+        liveQuotes={liveQuotes}
         onAddLeg={handleAddLeg}
       />
 

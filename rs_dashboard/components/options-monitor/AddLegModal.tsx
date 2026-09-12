@@ -12,6 +12,7 @@ interface AddLegModalProps {
   defaultLots: number;
   chainStrikes?: number[];
   chain?: Record<number, { ce?: any; pe?: any }>;
+  liveQuotes?: any;
   onAddLeg: (leg: {
     type: OptType;
     side: Side;
@@ -29,6 +30,7 @@ export default function AddLegModal({
   defaultLots,
   chainStrikes,
   chain,
+  liveQuotes,
   onAddLeg,
 }: AddLegModalProps) {
   const atmStrike = Math.round(spot / strikeStep) * strikeStep;
@@ -36,28 +38,44 @@ export default function AddLegModal({
   const [side, setSide] = useState<Side>('SELL');
   const [strike, setStrike] = useState<number>(atmStrike);
   const [lots, setLots] = useState<number>(defaultLots || 2);
-  const [entryPrice, setEntryPrice] = useState<number>(() => {
-    const p = chain?.[atmStrike]?.ce?.last_price ?? chain?.[atmStrike]?.ce?.previous_close_price;
-    return typeof p === 'number' && p > 0 ? p : 35.0;
-  });
+
+  const resolvePrice = React.useCallback(
+    (targetStrike: number, optType: OptType): number => {
+      const legKey = optType.toLowerCase() as 'ce' | 'pe';
+      const wsTick = liveQuotes?.strikes?.[targetStrike] ?? liveQuotes?.strikes?.[String(targetStrike)];
+      const wsPrice = optType === 'CE' ? wsTick?.ce?.ltp : wsTick?.pe?.ltp;
+      if (typeof wsPrice === 'number' && wsPrice > 0) return wsPrice;
+
+      const chainEntry = chain?.[targetStrike];
+      const chainP = chainEntry?.[legKey]?.last_price ?? chainEntry?.[legKey]?.previous_close_price;
+      if (typeof chainP === 'number' && chainP > 0) return chainP;
+
+      return 35.0;
+    },
+    [chain, liveQuotes]
+  );
+
+  const [entryPrice, setEntryPrice] = useState<number>(() => resolvePrice(atmStrike, 'CE'));
+
+  // Update entry price when modal opens or ATM/chain updates
+  React.useEffect(() => {
+    if (isOpen) {
+      setStrike(atmStrike);
+      setEntryPrice(resolvePrice(atmStrike, type));
+    }
+  }, [isOpen, atmStrike, resolvePrice, type]);
 
   // Update entry price when strike or type changes
   const handleStrikeChange = (newStrike: number) => {
     setStrike(newStrike);
-    const legKey = type.toLowerCase() as 'ce' | 'pe';
-    const realPrice = chain?.[newStrike]?.[legKey]?.last_price ?? chain?.[newStrike]?.[legKey]?.previous_close_price;
-    if (typeof realPrice === 'number' && realPrice > 0) {
-      setEntryPrice(realPrice);
-    }
+    const p = resolvePrice(newStrike, type);
+    if (p > 0) setEntryPrice(p);
   };
 
   const handleTypeChange = (newType: OptType) => {
     setType(newType);
-    const legKey = newType.toLowerCase() as 'ce' | 'pe';
-    const realPrice = chain?.[strike]?.[legKey]?.last_price ?? chain?.[strike]?.[legKey]?.previous_close_price;
-    if (typeof realPrice === 'number' && realPrice > 0) {
-      setEntryPrice(realPrice);
-    }
+    const p = resolvePrice(strike, newType);
+    if (p > 0) setEntryPrice(p);
   };
 
   if (!isOpen) return null;
