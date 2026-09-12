@@ -6,11 +6,16 @@ import {
   AlertTriangle,
   ArrowDownRight,
   ArrowUpRight,
+  BookOpen,
   CheckCircle2,
+  ChevronDown,
+  ChevronUp,
   Filter,
   Flame,
   Layers,
   RefreshCw,
+  ShieldAlert,
+  Target,
   TrendingDown,
   TrendingUp,
   Zap,
@@ -112,6 +117,8 @@ export default function UnusualActivity() {
   const [filterTab, setFilterTab] = useState<'all' | 'high_ratio' | 'oi_spike' | 'blocks' | 'bullish' | 'bearish'>('all');
   const [searchStrike, setSearchStrike] = useState('');
   const [autoRefresh, setAutoRefresh] = useState(false);
+  const [showPlaybook, setShowPlaybook] = useState(false);
+  const [playbookTab, setPlaybookTab] = useState<'setups' | 'matrix' | 'metrics' | 'checklist'>('setups');
 
   const fetchData = useCallback(async (und = underlying, exp = expiry) => {
     setLoading(true);
@@ -238,6 +245,20 @@ export default function UnusualActivity() {
             Refresh
           </button>
 
+          {/* Playbook / Guide Button */}
+          <button
+            onClick={() => setShowPlaybook(v => !v)}
+            className={`flex items-center gap-1.5 px-2.5 py-1 text-xs font-bold rounded-lg border transition-colors ${
+              showPlaybook
+                ? 'bg-amber-500/20 text-amber-300 border-amber-500/40'
+                : 'bg-zinc-900 hover:bg-zinc-800 text-zinc-300 border-zinc-700 hover:border-zinc-500'
+            }`}
+          >
+            <BookOpen className="w-3.5 h-3.5 text-amber-400" />
+            <span>Playbook &amp; Guide</span>
+            {showPlaybook ? <ChevronUp className="w-3 h-3" /> : <ChevronDown className="w-3 h-3" />}
+          </button>
+
           <span className="w-px h-5 bg-zinc-800 shrink-0" />
           <NavBar />
         </div>
@@ -316,6 +337,292 @@ export default function UnusualActivity() {
               <div className="text-sm font-mono font-bold text-zinc-200">Lot: {data?.lot_size}</div>
               <span className="text-[10px] text-zinc-500 mt-1 block">Expiry: {data?.expiry}</span>
             </div>
+          </div>
+        )}
+
+        {/* ── Actionable Playbook & README Drawer ── */}
+        {showPlaybook && (
+          <div className="rounded-2xl border border-amber-500/30 bg-zinc-900/90 p-5 backdrop-blur shadow-2xl transition-all animate-in fade-in duration-200">
+            <div className="flex items-center justify-between gap-3 border-b border-zinc-800 pb-3 mb-4 flex-wrap">
+              <div className="flex items-center gap-2">
+                <div className="flex items-center justify-center w-7 h-7 rounded-lg bg-amber-500/15 border border-amber-500/30">
+                  <BookOpen className="w-4 h-4 text-amber-400" />
+                </div>
+                <div>
+                  <h2 className="text-xs font-bold text-white uppercase tracking-wider">
+                    Institutional Flow Playbook &amp; Action Guide
+                  </h2>
+                  <p className="text-[10px] text-zinc-400">
+                    How to interpret volume/OI surges, big blocks, and market microstructure into high-probability trades
+                  </p>
+                </div>
+              </div>
+
+              <div className="flex items-center gap-2 flex-wrap">
+                {(
+                  [
+                    { id: 'setups', label: '1. Trading Setups' },
+                    { id: 'matrix', label: '2. Sentiment Matrix' },
+                    { id: 'metrics', label: '3. Metric Reference' },
+                    { id: 'checklist', label: '4. Execution Checklist' },
+                  ] as const
+                ).map(tab => (
+                  <button
+                    key={tab.id}
+                    onClick={() => setPlaybookTab(tab.id)}
+                    className={`text-xs font-bold px-2.5 py-1 rounded-md transition-colors ${
+                      playbookTab === tab.id
+                        ? 'bg-amber-500/20 text-amber-300 border border-amber-500/40'
+                        : 'text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800'
+                    }`}
+                  >
+                    {tab.label}
+                  </button>
+                ))}
+                <button
+                  onClick={() => setShowPlaybook(false)}
+                  className="text-xs font-bold text-zinc-400 hover:text-white px-2 py-1 rounded hover:bg-zinc-800"
+                >
+                  ✕ Close
+                </button>
+              </div>
+            </div>
+
+            {/* Tab 1: Trading Setups */}
+            {playbookTab === 'setups' && (
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-4 text-xs font-mono">
+                {/* Setup A: Institutional Breakout */}
+                <div className="rounded-xl border border-zinc-800 bg-zinc-950/70 p-3.5 flex flex-col justify-between">
+                  <div>
+                    <div className="flex items-center gap-1.5 text-emerald-400 font-bold mb-1">
+                      <Target className="w-3.5 h-3.5" />
+                      <span>SETUP A: MOMENTUM BREAKOUT</span>
+                    </div>
+                    <span className="text-[10px] text-zinc-500 block mb-2">Directional trend continuation</span>
+                    <ul className="text-zinc-300 font-sans text-[11px] space-y-1.5 leading-relaxed">
+                      <li>
+                        <strong className="text-zinc-100">Trigger:</strong> OTM Call (100–200 pts above spot) exhibits <span className="text-amber-400 font-mono font-bold">Vol/OI &ge; 2.0x</span> and turnover &gt; ₹100 Cr with <span className="text-emerald-400 font-mono font-bold">LONG_BUILDUP</span>.
+                      </li>
+                      <li>
+                        <strong className="text-zinc-100">Confirmation:</strong> Simultaneous <span className="text-emerald-400 font-mono">SHORT_BUILDUP</span> on Puts below spot (put writers creating support floor).
+                      </li>
+                      <li>
+                        <strong className="text-zinc-100">Action:</strong> Buy ATM Bull Call Spread or Long Future.
+                      </li>
+                      <li>
+                        <strong className="text-zinc-100">Stop Loss:</strong> Exit if index breaks below the highest Put OI strike.
+                      </li>
+                    </ul>
+                  </div>
+                  <div className="mt-3 pt-2 border-t border-zinc-800/80 text-[10px] text-emerald-400 font-bold">
+                    Target: Next major Call open interest wall
+                  </div>
+                </div>
+
+                {/* Setup B: Iron Put Support Floor */}
+                <div className="rounded-xl border border-zinc-800 bg-zinc-950/70 p-3.5 flex flex-col justify-between">
+                  <div>
+                    <div className="flex items-center gap-1.5 text-sky-400 font-bold mb-1">
+                      <ShieldAlert className="w-3.5 h-3.5" />
+                      <span>SETUP B: IRON PUT FLOOR</span>
+                    </div>
+                    <span className="text-[10px] text-zinc-500 block mb-2">Credit selling &amp; dip buying</span>
+                    <ul className="text-zinc-300 font-sans text-[11px] space-y-1.5 leading-relaxed">
+                      <li>
+                        <strong className="text-zinc-100">Trigger:</strong> Heavy Put <span className="text-sky-400 font-mono font-bold">SHORT_BUILDUP</span> at a round strike (e.g. 23300 PE) with multiple multi-crore turnover blocks.
+                      </li>
+                      <li>
+                        <strong className="text-zinc-100">Confirmation:</strong> Net Flow Bias is Bullish, and <span className="text-zinc-200 font-mono font-bold">PCR (OI) &ge; 1.15</span>.
+                      </li>
+                      <li>
+                        <strong className="text-zinc-100">Action:</strong> Sell Put Credit Spread (Bull Put Spread) with the short strike at the buildup level.
+                      </li>
+                      <li>
+                        <strong className="text-zinc-100">Rule:</strong> Avoid buying naked puts when institutional put writing is dominant.
+                      </li>
+                    </ul>
+                  </div>
+                  <div className="mt-3 pt-2 border-t border-zinc-800/80 text-[10px] text-sky-400 font-bold">
+                    Target: 70–80% premium decay into expiry
+                  </div>
+                </div>
+
+                {/* Setup C: Short Squeeze Panic */}
+                <div className="rounded-xl border border-zinc-800 bg-zinc-950/70 p-3.5 flex flex-col justify-between">
+                  <div>
+                    <div className="flex items-center gap-1.5 text-amber-400 font-bold mb-1">
+                      <Zap className="w-3.5 h-3.5" />
+                      <span>SETUP C: SHORT SQUEEZE PANIC</span>
+                    </div>
+                    <span className="text-[10px] text-zinc-500 block mb-2">Fast explosive momentum bursts</span>
+                    <ul className="text-zinc-300 font-sans text-[11px] space-y-1.5 leading-relaxed">
+                      <li>
+                        <strong className="text-zinc-100">Trigger:</strong> A heavy Call OI resistance strike shows negative OI change (<span className="text-red-400 font-mono font-bold">&Delta;OI &lt; 0</span>) and <span className="text-sky-400 font-mono font-bold">SHORT_COVERING</span>.
+                      </li>
+                      <li>
+                        <strong className="text-zinc-100">Market Context:</strong> Spot price pushes through the strike while Call writers are forced to buy back shorts to stop runaway losses.
+                      </li>
+                      <li>
+                        <strong className="text-zinc-100">Action:</strong> Fast scalp long on the breakout candle.
+                      </li>
+                      <li>
+                        <strong className="text-zinc-100">Discipline:</strong> Trail tight stop; exit quickly once covering exhaustion volume tapers.
+                      </li>
+                    </ul>
+                  </div>
+                  <div className="mt-3 pt-2 border-t border-zinc-800/80 text-[10px] text-amber-400 font-bold">
+                    Target: Rapid 50–100 pt index squeeze burst
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* Tab 2: Sentiment Matrix */}
+            {playbookTab === 'matrix' && (
+              <div className="space-y-3 text-xs">
+                <p className="text-zinc-300 font-sans text-[11px]">
+                  Institutional positioning is decoded via the 4-quadrant relationship between <strong>Price Change (&Delta;P)</strong> and <strong>Open Interest Change (&Delta;OI)</strong>:
+                </p>
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                  {/* Call Matrix */}
+                  <div className="rounded-xl border border-sky-500/25 bg-zinc-950/70 p-3">
+                    <span className="text-sky-400 font-bold font-mono text-[11px] block mb-2">CALL (CE) DYNAMICS</span>
+                    <div className="space-y-2">
+                      <div className="p-2 rounded bg-zinc-900 border border-zinc-800">
+                        <div className="flex justify-between items-center mb-0.5">
+                          <span className="font-bold text-emerald-400">Long Buildup (&Delta;P &gt; 0, &Delta;OI &gt; 0)</span>
+                          <span className="text-[10px] font-bold text-emerald-400 uppercase">Bullish</span>
+                        </div>
+                        <p className="text-[11px] text-zinc-400 font-sans">Aggressive buyers entering fresh long calls. Expects upward rally.</p>
+                      </div>
+                      <div className="p-2 rounded bg-zinc-900 border border-zinc-800">
+                        <div className="flex justify-between items-center mb-0.5">
+                          <span className="font-bold text-red-400">Short Buildup (&Delta;P &lt; 0, &Delta;OI &gt; 0)</span>
+                          <span className="text-[10px] font-bold text-red-400 uppercase">Bearish</span>
+                        </div>
+                        <p className="text-[11px] text-zinc-400 font-sans">Call writers shorting contracts. Creates an institutional resistance ceiling.</p>
+                      </div>
+                      <div className="p-2 rounded bg-zinc-900 border border-zinc-800">
+                        <div className="flex justify-between items-center mb-0.5">
+                          <span className="font-bold text-sky-400">Short Covering (&Delta;P &gt; 0, &Delta;OI &lt; 0)</span>
+                          <span className="text-[10px] font-bold text-emerald-400 uppercase">Bullish Squeeze</span>
+                        </div>
+                        <p className="text-[11px] text-zinc-400 font-sans">Trapped call sellers covering shorts, amplifying upward momentum.</p>
+                      </div>
+                      <div className="p-2 rounded bg-zinc-900 border border-zinc-800">
+                        <div className="flex justify-between items-center mb-0.5">
+                          <span className="font-bold text-amber-400">Long Unwinding (&Delta;P &lt; 0, &Delta;OI &lt; 0)</span>
+                          <span className="text-[10px] font-bold text-red-400 uppercase">Bearish Fade</span>
+                        </div>
+                        <p className="text-[11px] text-zinc-400 font-sans">Call buyers liquidating losing positions. Upward momentum is dying.</p>
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Put Matrix */}
+                  <div className="rounded-xl border border-amber-500/25 bg-zinc-950/70 p-3">
+                    <span className="text-amber-400 font-bold font-mono text-[11px] block mb-2">PUT (PE) DYNAMICS</span>
+                    <div className="space-y-2">
+                      <div className="p-2 rounded bg-zinc-900 border border-zinc-800">
+                        <div className="flex justify-between items-center mb-0.5">
+                          <span className="font-bold text-red-400">Long Buildup (&Delta;P &gt; 0, &Delta;OI &gt; 0)</span>
+                          <span className="text-[10px] font-bold text-red-400 uppercase">Bearish</span>
+                        </div>
+                        <p className="text-[11px] text-zinc-400 font-sans">Aggressive put buying for market downside or portfolio crash hedging.</p>
+                      </div>
+                      <div className="p-2 rounded bg-zinc-900 border border-zinc-800">
+                        <div className="flex justify-between items-center mb-0.5">
+                          <span className="font-bold text-emerald-400">Short Buildup (&Delta;P &lt; 0, &Delta;OI &gt; 0)</span>
+                          <span className="text-[10px] font-bold text-emerald-400 uppercase">Bullish Support</span>
+                        </div>
+                        <p className="text-[11px] text-zinc-400 font-sans">Institutions writing puts. Absorbing downside risk and creating strong support floors.</p>
+                      </div>
+                      <div className="p-2 rounded bg-zinc-900 border border-zinc-800">
+                        <div className="flex justify-between items-center mb-0.5">
+                          <span className="font-bold text-red-400">Short Covering (&Delta;P &gt; 0, &Delta;OI &lt; 0)</span>
+                          <span className="text-[10px] font-bold text-red-400 uppercase">Bearish Drop</span>
+                        </div>
+                        <p className="text-[11px] text-zinc-400 font-sans">Put sellers in panic, closing short puts as market breaches support.</p>
+                      </div>
+                      <div className="p-2 rounded bg-zinc-900 border border-zinc-800">
+                        <div className="flex justify-between items-center mb-0.5">
+                          <span className="font-bold text-emerald-400">Long Unwinding (&Delta;P &lt; 0, &Delta;OI &lt; 0)</span>
+                          <span className="text-[10px] font-bold text-emerald-400 uppercase">Bullish Rally</span>
+                        </div>
+                        <p className="text-[11px] text-zinc-400 font-sans">Put buyers taking profit or cutting losses as market rebounds higher.</p>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* Tab 3: Metric Cheat Sheet */}
+            {playbookTab === 'metrics' && (
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-3 text-xs">
+                <div className="p-3 rounded-xl bg-zinc-950/70 border border-zinc-800">
+                  <span className="text-amber-400 font-mono font-bold block mb-1">1. VOL / OI RATIO</span>
+                  <p className="text-zinc-300 font-sans text-[11px] leading-relaxed mb-2">
+                    Measures the velocity of contract trading relative to resting open interest.
+                  </p>
+                  <ul className="text-zinc-400 font-sans text-[10px] space-y-1">
+                    <li><strong className="text-zinc-200">&lt; 0.8x:</strong> Passive trading; normal retail liquidity.</li>
+                    <li><strong className="text-emerald-300">1.2x – 2.5x:</strong> Significant fresh institutional activity.</li>
+                    <li><strong className="text-amber-300">&gt; 3.0x:</strong> Extreme unusual flow; explosive directional bias.</li>
+                  </ul>
+                </div>
+
+                <div className="p-3 rounded-xl bg-zinc-950/70 border border-zinc-800">
+                  <span className="text-sky-400 font-mono font-bold block mb-1">2. PREMIUM TURNOVER (₹ CR)</span>
+                  <p className="text-zinc-300 font-sans text-[11px] leading-relaxed mb-2">
+                    Calculated as <code className="text-zinc-200">(Volume &times; LTP) / 10,000,000</code>. Reflects real monetary commitment.
+                  </p>
+                  <ul className="text-zinc-400 font-sans text-[10px] space-y-1">
+                    <li>Filters out misleading volume spikes on deep OTM ₹0.50 lottery options.</li>
+                    <li>Turnover &ge; ₹5 Cr (Index) or &ge; ₹1 Cr (Stock) highlights high-conviction institutional blocks.</li>
+                  </ul>
+                </div>
+
+                <div className="p-3 rounded-xl bg-zinc-950/70 border border-zinc-800">
+                  <span className="text-purple-400 font-mono font-bold block mb-1">3. PUT-CALL RATIO (PCR)</span>
+                  <p className="text-zinc-300 font-sans text-[11px] leading-relaxed mb-2">
+                    Compares total PE vs CE exposure across Open Interest and Volume.
+                  </p>
+                  <ul className="text-zinc-400 font-sans text-[10px] space-y-1">
+                    <li><strong className="text-emerald-300">PCR(OI) &ge; 1.20:</strong> Heavy put writing; bullish support floor.</li>
+                    <li><strong className="text-red-300">PCR(OI) &le; 0.80:</strong> Heavy call writing; bearish resistance ceiling.</li>
+                    <li><strong className="text-amber-300">Divergence:</strong> PCR(Vol) surging while PCR(OI) is low signals smart money front-running an OI flip.</li>
+                  </ul>
+                </div>
+              </div>
+            )}
+
+            {/* Tab 4: Execution Checklist */}
+            {playbookTab === 'checklist' && (
+              <div className="p-4 rounded-xl bg-zinc-950/70 border border-zinc-800 text-xs font-sans">
+                <span className="text-amber-400 font-mono font-bold block mb-2">
+                  THE 4-STEP PRE-ORDER EXECUTION CHECKLIST
+                </span>
+                <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-3 text-[11px]">
+                  <div className="p-2.5 rounded-lg bg-zinc-900 border border-zinc-800">
+                    <span className="font-bold text-zinc-100 font-mono block mb-1">STEP 1: ALIGN BIAS</span>
+                    <p className="text-zinc-400">Ensure the alert matches the aggregate Net Flow Bias (Bullish vs Bearish) and PCR structure.</p>
+                  </div>
+                  <div className="p-2.5 rounded-lg bg-zinc-900 border border-zinc-800">
+                    <span className="font-bold text-zinc-100 font-mono block mb-1">STEP 2: VERIFY REAL TURNOVER</span>
+                    <p className="text-zinc-400">Verify Turnover &gt; ₹5 Cr. Never risk capital on low-turnover illiquid OTM penny spikes.</p>
+                  </div>
+                  <div className="p-2.5 rounded-lg bg-zinc-900 border border-zinc-800">
+                    <span className="font-bold text-zinc-100 font-mono block mb-1">STEP 3: CHECK SPOT DISTANCE</span>
+                    <p className="text-zinc-400">Focus on strikes within 0.5%–1.5% of Spot price. Far OTM strikes suffer from heavy theta decay.</p>
+                  </div>
+                  <div className="p-2.5 rounded-lg bg-zinc-900 border border-zinc-800">
+                    <span className="font-bold text-zinc-100 font-mono block mb-1">STEP 4: DEFINE INVALIDATION</span>
+                    <p className="text-zinc-400">Anchor your stop loss at the nearest heavy Put/Call OI wall before entering the order.</p>
+                  </div>
+                </div>
+              </div>
+            )}
           </div>
         )}
 
