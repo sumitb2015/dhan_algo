@@ -2,7 +2,7 @@
 
 import React from 'react';
 import { UNDERLYINGS } from '@/lib/optionsMonitorMath';
-import { ChevronDown, RefreshCw, Keyboard, Briefcase, SlidersHorizontal, Activity } from 'lucide-react';
+import { ChevronDown, RefreshCw, Keyboard, Briefcase, SlidersHorizontal, Activity, Zap } from 'lucide-react';
 
 interface TopMetricBarProps {
   selectedUnderlying: string;
@@ -29,6 +29,7 @@ interface TopMetricBarProps {
   viewMode: 'broker' | 'custom';
   onToggleViewMode: (mode: 'broker' | 'custom') => void;
   brokerLegsCount: number;
+  onOpenTrade?: () => void;
 }
 
 export default function TopMetricBar({
@@ -55,6 +56,7 @@ export default function TopMetricBar({
   viewMode,
   onToggleViewMode,
   brokerLegsCount,
+  onOpenTrade,
 }: TopMetricBarProps) {
   const isPositivePnl = totalMtm >= 0;
   const isSpotUp = change >= 0;
@@ -134,6 +136,17 @@ export default function TopMetricBar({
               <span className="text-amber-400 font-bold">[F4]</span>
               <span>REFRESH</span>
             </button>
+            {onOpenTrade && (
+              <button
+                type="button"
+                onClick={onOpenTrade}
+                className="inline-flex items-center gap-1 rounded border border-emerald-500/40 bg-emerald-500/10 px-2 py-0.5 text-emerald-400 hover:border-emerald-500/60 hover:bg-emerald-500/20 cursor-pointer font-bold transition-colors"
+              >
+                <span className="text-emerald-400 font-bold">[F5]</span>
+                <Zap className="w-3 h-3 fill-current" />
+                <span>PLACE TRADE</span>
+              </button>
+            )}
           </div>
 
           <div className="flex items-center gap-2.5 text-zinc-400">
@@ -301,6 +314,20 @@ export default function TopMetricBar({
               <span>DESK</span>
             </button>
           </div>
+
+          {/* Place Trade Button */}
+          {onOpenTrade && (
+            <button
+              type="button"
+              onClick={onOpenTrade}
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs shadow transition-all cursor-pointer"
+              title="Open Order Ticket / Place Trades [F5]"
+            >
+              <Zap className="w-3.5 h-3.5 fill-current" />
+              <span>PLACE TRADE</span>
+              <span className="text-[9px] bg-emerald-700/60 px-1 py-0.2 rounded font-mono">[F5]</span>
+            </button>
+          )}
 
           {/* Refresh Quotes */}
           <button

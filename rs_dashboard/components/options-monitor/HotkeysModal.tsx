@@ -23,6 +23,7 @@ export default function HotkeysModal({ isOpen, onClose }: HotkeysModalProps) {
     { key: 'X', label: 'Trim Position 50%', desc: 'De-risks 50% of the active lots' },
     { key: 'Escape', label: 'FLATTEN / Square Off', desc: 'Emergency square off / flattens all active legs' },
     { key: 'A', label: 'Add Custom Leg', desc: 'Opens the strike selector to add any strike across the chain' },
+    { key: 'F5 / T', label: 'Place Trade / Execute', desc: 'Opens broker order ticket to execute active legs or place orders' },
   ];
 
   return (

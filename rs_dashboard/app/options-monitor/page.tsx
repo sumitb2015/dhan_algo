@@ -9,6 +9,7 @@ import PositionsStrategyMonitor from '@/components/options-monitor/PositionsStra
 import RiskGreeksMatrix from '@/components/options-monitor/RiskGreeksMatrix';
 import AddLegModal from '@/components/options-monitor/AddLegModal';
 import HotkeysModal from '@/components/options-monitor/HotkeysModal';
+import OptionOrderModal, { type OptionOrderInitialState, type OptionTradeLeg } from '@/components/OptionOrderModal';
 import { useLiveOptionsWS } from '@/lib/useLiveOptionsWS';
 import {
   UNDERLYINGS,
@@ -1130,7 +1131,108 @@ export default function OptionsMonitorPage() {
     notifyAction('[HOTKEY ESC] Desk positions cleared.');
   }, [customLegs, viewMode]);
 
-  // ── 7. GLOBAL KEYBOARD SHORTCUTS ──────────────────────────────────────────
+  // ── 7. ORDER EXECUTION STATE & HANDLERS ──────────────────────────────────
+  const [orderModalOpen, setOrderModalOpen] = useState(false);
+  const [activeTradeOrder, setActiveTradeOrder] = useState<OptionOrderInitialState | null>(null);
+
+  const handleOpenTradeBasket = useCallback(() => {
+    if (customLegs.length === 0) {
+      setIsAddLegOpen(true);
+      notifyAction('Add legs or load a template preset before executing a basket order.');
+      return;
+    }
+
+    const orderLegs: OptionTradeLeg[] = customLegs.map((leg) => {
+      const legKey = leg.type.toLowerCase() as 'ce' | 'pe';
+      const secId = normalizedChain[leg.strike]?.[legKey]?.security_id;
+      return {
+        strike: leg.strike,
+        optionType: leg.type,
+        action: leg.side,
+        lots: leg.lots,
+        securityId: secId ? String(secId) : undefined,
+      };
+    });
+
+    setActiveTradeOrder({
+      title: `${selectedUnderlying} ${strategyName} (${customLegs.length} Legs)`,
+      underlying: selectedUnderlying,
+      expiry: selectedExpiry,
+      lotSize: uConfig.lotSize,
+      defaultLots: 1,
+      legs: orderLegs,
+      productType: 'INTRADAY',
+    });
+    setOrderModalOpen(true);
+  }, [customLegs, selectedUnderlying, strategyName, selectedExpiry, uConfig.lotSize, normalizedChain, notifyAction]);
+
+  const handleOpenSingleLegTrade = useCallback((leg: OptionLegModel) => {
+    const legKey = leg.type.toLowerCase() as 'ce' | 'pe';
+    const secId = normalizedChain[leg.strike]?.[legKey]?.security_id;
+    setActiveTradeOrder({
+      title: `${selectedUnderlying} ${leg.strike} ${leg.type} (${leg.side})`,
+      underlying: selectedUnderlying,
+      expiry: selectedExpiry,
+      lotSize: uConfig.lotSize,
+      defaultLots: 1,
+      legs: [
+        {
+          strike: leg.strike,
+          optionType: leg.type,
+          action: leg.side,
+          lots: leg.lots,
+          securityId: secId ? String(secId) : undefined,
+        },
+      ],
+      productType: 'INTRADAY',
+    });
+    setOrderModalOpen(true);
+  }, [selectedUnderlying, selectedExpiry, uConfig.lotSize, normalizedChain]);
+
+  const handleOpenNewTrade = useCallback(() => {
+    if (customLegs.length > 0) {
+      handleOpenTradeBasket();
+    } else {
+      setIsAddLegOpen(true);
+    }
+  }, [customLegs.length, handleOpenTradeBasket]);
+
+  const handleExecuteLegFromModal = useCallback((leg: {
+    type: OptType;
+    side: Side;
+    strike: number;
+    lots: number;
+    entryPrice: number;
+  }) => {
+    const legKey = leg.type.toLowerCase() as 'ce' | 'pe';
+    const secId = normalizedChain[leg.strike]?.[legKey]?.security_id;
+    setActiveTradeOrder({
+      title: `${selectedUnderlying} ${leg.strike} ${leg.type} (${leg.side})`,
+      underlying: selectedUnderlying,
+      expiry: selectedExpiry,
+      lotSize: uConfig.lotSize,
+      defaultLots: 1,
+      legs: [
+        {
+          strike: leg.strike,
+          optionType: leg.type,
+          action: leg.side,
+          lots: leg.lots,
+          securityId: secId ? String(secId) : undefined,
+        },
+      ],
+      productType: 'INTRADAY',
+    });
+    setOrderModalOpen(true);
+  }, [selectedUnderlying, selectedExpiry, uConfig.lotSize, normalizedChain]);
+
+  const handleOrderSuccess = useCallback((orderIds: string[], summary: string) => {
+    notifyAction(`Orders placed successfully! IDs: ${orderIds.join(', ')}`);
+    fetchBrokerPositions();
+    setViewMode('broker');
+  }, [notifyAction, fetchBrokerPositions]);
+
+  // ── 8. GLOBAL KEYBOARD SHORTCUTS ──────────────────────────────────────────
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       const target = e.target as HTMLElement;
@@ -1181,6 +1283,9 @@ export default function OptionsMonitorPage() {
       } else if (key === 'A') {
         e.preventDefault();
         setIsAddLegOpen(true);
+      } else if (e.key === 'F5' || key === 'T') {
+        e.preventDefault();
+        handleOpenNewTrade();
       }
     };
 
@@ -1196,6 +1301,7 @@ export default function OptionsMonitorPage() {
     handleAddWings,
     handleTrim50,
     handleFlatten,
+    handleOpenNewTrade,
   ]);
 
   const todayStr = new Date().toISOString().split('T')[0];
@@ -1228,40 +1334,38 @@ export default function OptionsMonitorPage() {
           {/* Center Navigation Shortcuts */}
           <div className="hidden lg:flex items-center gap-1 bg-zinc-900 p-1 rounded-xl border border-zinc-800 text-xs font-medium">
             <Link
-              href="/options-analytics"
-              className="px-2.5 py-1 rounded-lg text-zinc-400 hover:text-white hover:bg-zinc-800 transition-colors"
-            >
-              Option Chain
-            </Link>
-            <Link
               href="/options/live-charts"
               className="px-2.5 py-1 rounded-lg text-zinc-400 hover:text-white hover:bg-zinc-800 transition-colors"
             >
               IV Charts
             </Link>
             <Link
-              href="/options/advanced-scalper"
+              href="/options/straddle-strangle"
               className="px-2.5 py-1 rounded-lg text-zinc-400 hover:text-white hover:bg-zinc-800 transition-colors"
             >
-              Scalper
+              Straddle / Strangle
+            </Link>
+            <Link
+              href="/scalper"
+              className="px-2.5 py-1 rounded-lg text-zinc-400 hover:text-white hover:bg-zinc-800 transition-colors"
+            >
+              Scalper Terminal
             </Link>
             <Link
               href="/strategy-builder"
               className="px-2.5 py-1 rounded-lg text-zinc-400 hover:text-white hover:bg-zinc-800 transition-colors"
             >
-              Builder
+              Strategy Builder
             </Link>
-            <span className="px-2.5 py-1 rounded-lg bg-indigo-600 text-white font-bold shadow-sm">
-              Risk Monitor
-            </span>
           </div>
 
-          <div className="flex items-center gap-3">
+          {/* Right Controls: Global Navbar */}
+          <div className="flex items-center gap-2">
             <NavBar />
           </div>
         </header>
 
-        {/* ROW 2: Live Metrics Bar (Matches the user's diagram with sub-second WebSocket quotes) */}
+        {/* ROW 2: Bloomberg Top Metric Bar (Data currency chip, Spot, Greeks, Transport status) */}
         <TopMetricBar
           selectedUnderlying={selectedUnderlying}
           onSelectUnderlying={(sym) => {
@@ -1301,6 +1405,7 @@ export default function OptionsMonitorPage() {
             notifyAction(`Switched view to ${m === 'broker' ? 'Dhan Live Broker Positions' : 'What-If Desk Simulator'}`);
           }}
           brokerLegsCount={brokerLegs.length}
+          onOpenTrade={handleOpenNewTrade}
         />
       </div>
 
@@ -1330,6 +1435,9 @@ export default function OptionsMonitorPage() {
               onSelectStrategyPreset={handleSelectStrategyPreset}
               onUpdateLegLots={handleUpdateLegLots}
               onUpdateAllLots={handleUpdateAllLots}
+              onOpenTradeBasket={handleOpenTradeBasket}
+              onOpenSingleLegTrade={handleOpenSingleLegTrade}
+              onOpenNewTrade={handleOpenNewTrade}
             />
           </div>
 
@@ -1348,6 +1456,7 @@ export default function OptionsMonitorPage() {
               onAddWings={handleAddWings}
               onTrim50={handleTrim50}
               onFlatten={handleFlatten}
+              onOpenTradeBasket={handleOpenTradeBasket}
             />
           </div>
         </div>
@@ -1364,11 +1473,20 @@ export default function OptionsMonitorPage() {
         chain={normalizedChain}
         liveQuotes={liveQuotes}
         onAddLeg={handleAddLeg}
+        onExecuteLeg={handleExecuteLegFromModal}
       />
 
       <HotkeysModal
         isOpen={isHotkeysOpen}
         onClose={() => setIsHotkeysOpen(false)}
+      />
+
+      {/* ── BROKER ORDER EXECUTION MODAL ─────────────────────────────────── */}
+      <OptionOrderModal
+        isOpen={orderModalOpen}
+        onClose={() => setOrderModalOpen(false)}
+        initialOrder={activeTradeOrder}
+        onOrderSuccess={handleOrderSuccess}
       />
     </div>
   );

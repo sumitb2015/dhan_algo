@@ -25,6 +25,7 @@ interface RiskGreeksMatrixProps {
   onAddWings: () => void;
   onTrim50: () => void;
   onFlatten: () => void;
+  onOpenTradeBasket?: () => void;
 }
 
 function TerminalPanel({
@@ -69,6 +70,7 @@ export default function RiskGreeksMatrix({
   onAddWings,
   onTrim50,
   onFlatten,
+  onOpenTradeBasket,
 }: RiskGreeksMatrixProps) {
   const isRupeeDeltaPositive = greeks.rupeeDelta >= 0;
 
@@ -195,6 +197,24 @@ export default function RiskGreeksMatrix({
         meta={<span className="text-[10px] font-bold text-amber-400">KEYBOARD ACTIVE</span>}
       >
         <div className="p-3.5 flex flex-col gap-3">
+          {/* Primary Basket Execution Button */}
+          {onOpenTradeBasket && (
+            <button
+              type="button"
+              onClick={onOpenTradeBasket}
+              className="w-full flex items-center justify-between px-3.5 py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs shadow-md transition-all cursor-pointer group"
+              title="Execute active strategy basket on Dhan broker [F5]"
+            >
+              <div className="flex items-center gap-2">
+                <Zap className="w-4 h-4 fill-current group-hover:scale-110 transition-transform" />
+                <span className="tracking-wide">EXECUTE BASKET ON BROKER</span>
+              </div>
+              <span className="text-[10px] bg-emerald-700/80 px-2 py-0.5 rounded font-mono font-bold">
+                [F5]
+              </span>
+            </button>
+          )}
+
           {/* Action Grid matching the diagram */}
           <div className="grid grid-cols-2 gap-2">
             {/* Roll CE: Dual Up / Down */}

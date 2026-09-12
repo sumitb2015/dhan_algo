@@ -19,6 +19,8 @@ import {
   Layers,
   Activity,
   SlidersHorizontal,
+  Zap,
+  Send,
 } from 'lucide-react';
 
 interface PositionsStrategyMonitorProps {
@@ -42,6 +44,9 @@ interface PositionsStrategyMonitorProps {
   onSelectStrategyPreset: (presetId: string) => void;
   onUpdateLegLots?: (id: string, deltaLots: number) => void;
   onUpdateAllLots?: (deltaLots: number) => void;
+  onOpenTradeBasket?: () => void;
+  onOpenSingleLegTrade?: (leg: OptionLegModel) => void;
+  onOpenNewTrade?: () => void;
 }
 
 function TerminalPanel({
@@ -150,6 +155,9 @@ export default function PositionsStrategyMonitor({
   onSelectStrategyPreset,
   onUpdateLegLots,
   onUpdateAllLots,
+  onOpenTradeBasket,
+  onOpenSingleLegTrade,
+  onOpenNewTrade,
 }: PositionsStrategyMonitorProps) {
   // Identify key nearest short strikes for accurate clearance calculation
   const shortCeLeg = useMemo(() => {
@@ -247,18 +255,31 @@ export default function PositionsStrategyMonitor({
               </h2>
             </div>
 
-            {/* Quick Presets & Add Leg / Sync Broker */}
+            {/* Quick Presets & Add Leg / Sync Broker / Place Trades */}
             <div className="flex items-center gap-2 flex-wrap">
               {viewMode === 'broker' ? (
-                <button
-                  onClick={onSyncBroker}
-                  disabled={isBrokerLoading}
-                  className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs shadow transition-colors cursor-pointer"
-                  title="Sync Live Positions from Dhan"
-                >
-                  <Layers className={`w-3.5 h-3.5 ${isBrokerLoading ? 'animate-spin' : ''}`} />
-                  <span>SYNC BROKER</span>
-                </button>
+                <>
+                  <button
+                    type="button"
+                    onClick={onSyncBroker}
+                    disabled={isBrokerLoading}
+                    className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-zinc-850 hover:bg-zinc-800 text-zinc-200 border border-zinc-700 font-bold text-xs shadow-sm transition-colors cursor-pointer"
+                    title="Sync Live Positions from Dhan"
+                  >
+                    <Layers className={`w-3.5 h-3.5 ${isBrokerLoading ? 'animate-spin' : ''}`} />
+                    <span>SYNC BROKER</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={onOpenNewTrade}
+                    className="flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs shadow transition-colors cursor-pointer"
+                    title="Place New Option Order on Dhan [F5]"
+                  >
+                    <Zap className="w-3.5 h-3.5 fill-current" />
+                    <span>PLACE NEW TRADE</span>
+                    <span className="text-[9px] bg-emerald-700/60 px-1 py-0.2 rounded font-mono">[F5]</span>
+                  </button>
+                </>
               ) : (
                 <>
                   <select
@@ -280,6 +301,7 @@ export default function PositionsStrategyMonitor({
                   </select>
 
                   <button
+                    type="button"
                     onClick={onAddLegClick}
                     className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-amber-500/40 bg-amber-500/10 text-amber-400 hover:bg-amber-500/20 font-bold text-xs transition-colors cursor-pointer"
                     title="Add Custom Strike Leg [A]"
@@ -287,6 +309,32 @@ export default function PositionsStrategyMonitor({
                     <Plus className="w-3.5 h-3.5 text-amber-400" />
                     <span>ADD LEG</span>
                     <span className="text-[9px] bg-amber-500/20 px-1 rounded text-amber-300">[A]</span>
+                  </button>
+
+                  {/* EXECUTE BASKET BUTTON */}
+                  <button
+                    type="button"
+                    onClick={onOpenTradeBasket}
+                    disabled={legs.length === 0}
+                    className="flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs shadow transition-colors cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
+                    title="Place Live Multi-Leg Order on Dhan [F5]"
+                  >
+                    <Zap className="w-3.5 h-3.5 fill-current" />
+                    <span>EXECUTE BASKET</span>
+                    <span className="text-[9px] bg-emerald-700/60 px-1.5 py-0.2 rounded font-mono">
+                      {legs.length} {legs.length === 1 ? 'LEG' : 'LEGS'}
+                    </span>
+                    <span className="text-[9px] bg-emerald-700/60 px-1 py-0.2 rounded font-mono">[F5]</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={onOpenNewTrade || onAddLegClick}
+                    className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-zinc-900 hover:bg-zinc-800 text-zinc-200 border border-zinc-700 font-bold text-xs transition-colors cursor-pointer"
+                    title="Place or Configure a New Trade"
+                  >
+                    <Send className="w-3 h-3 text-sky-400" />
+                    <span>NEW TRADE</span>
                   </button>
                 </>
               )}
@@ -459,6 +507,19 @@ export default function PositionsStrategyMonitor({
                         {/* Actions (Dual Roll Up / Roll Down + Remove) */}
                         <td className="py-2.5 px-3 text-center whitespace-nowrap">
                           <div className="flex items-center justify-center gap-1">
+                            {/* Single Leg Trade Button */}
+                            {onOpenSingleLegTrade && (
+                              <button
+                                type="button"
+                                onClick={() => onOpenSingleLegTrade(leg)}
+                                className="flex items-center gap-0.5 px-1.5 py-0.5 rounded bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 text-[10px] font-bold transition-colors cursor-pointer"
+                                title={`Place Order for ${leg.side} ${leg.strike} ${leg.type} on Dhan`}
+                              >
+                                <Zap className="w-2.5 h-2.5 fill-current" />
+                                <span>Trade</span>
+                              </button>
+                            )}
+
                             {/* Roll UP Button */}
                             <button
                               type="button"

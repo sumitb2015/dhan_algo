@@ -2,7 +2,7 @@
 
 import React, { useState } from 'react';
 import { OptType, Side } from '@/lib/optionsMonitorMath';
-import { X, Plus, Check } from 'lucide-react';
+import { X, Plus, Check, Zap } from 'lucide-react';
 
 interface AddLegModalProps {
   isOpen: boolean;
@@ -14,6 +14,13 @@ interface AddLegModalProps {
   chain?: Record<number, { ce?: any; pe?: any }>;
   liveQuotes?: any;
   onAddLeg: (leg: {
+    type: OptType;
+    side: Side;
+    strike: number;
+    lots: number;
+    entryPrice: number;
+  }) => void;
+  onExecuteLeg?: (leg: {
     type: OptType;
     side: Side;
     strike: number;
@@ -32,6 +39,7 @@ export default function AddLegModal({
   chain,
   liveQuotes,
   onAddLeg,
+  onExecuteLeg,
 }: AddLegModalProps) {
   const atmStrike = Math.round(spot / strikeStep) * strikeStep;
   const [type, setType] = useState<OptType>('CE');
@@ -239,7 +247,7 @@ export default function AddLegModal({
           </div>
 
           {/* Footer buttons */}
-          <div className="mt-5 flex items-center justify-end gap-2.5 pt-3 border-t border-zinc-800">
+          <div className="mt-5 flex items-center justify-between gap-2.5 pt-3 border-t border-zinc-800">
             <button
               type="button"
               onClick={onClose}
@@ -247,13 +255,35 @@ export default function AddLegModal({
             >
               CANCEL
             </button>
-            <button
-              type="submit"
-              className="flex items-center gap-1.5 px-4 py-1.5 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white font-bold shadow transition-colors cursor-pointer"
-            >
-              <Plus className="w-4 h-4" />
-              <span>ADD TO MONITOR</span>
-            </button>
+            <div className="flex items-center gap-2">
+              {onExecuteLeg && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    onClose();
+                    onExecuteLeg({
+                      type,
+                      side,
+                      strike,
+                      lots: Math.max(1, lots),
+                      entryPrice: Math.max(0.05, entryPrice),
+                    });
+                  }}
+                  className="flex items-center gap-1.5 px-3.5 py-1.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-bold shadow transition-colors cursor-pointer"
+                  title="Open Broker Order Ticket to execute this trade on Dhan"
+                >
+                  <Zap className="w-3.5 h-3.5 fill-current" />
+                  <span>PLACE ORDER NOW</span>
+                </button>
+              )}
+              <button
+                type="submit"
+                className="flex items-center gap-1.5 px-4 py-1.5 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white font-bold shadow transition-colors cursor-pointer"
+              >
+                <Plus className="w-4 h-4" />
+                <span>ADD TO MONITOR</span>
+              </button>
+            </div>
           </div>
         </form>
       </div>

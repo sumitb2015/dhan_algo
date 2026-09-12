@@ -106,7 +106,7 @@ export default function OptionOrderModal({
       const strikesMap = json.data.strikes || {};
       const updated = baseLegs.map((leg) => {
         const strikeEntry = strikesMap[String(leg.strike)];
-        const secId = leg.optionType === 'CE' ? strikeEntry?.ceId : strikeEntry?.peId;
+        const secId = (leg.optionType === 'CE' ? strikeEntry?.ceId : strikeEntry?.peId) || leg.securityId;
         return {
           ...leg,
           securityId: secId,
