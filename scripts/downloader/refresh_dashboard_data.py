@@ -1030,8 +1030,8 @@ def refresh_indices(helper):
 
 
 def run_yahoo_backup(target: str):
-    """Run Yahoo Finance backup refresh and sync to fresh data."""
-    write_status("yahoo", f"▶ Switching to Yahoo Finance backup engine (target={target})...")
+    """Run Yahoo Finance refresh for stocks & benchmark indices, and Dhan for sector indices."""
+    write_status("yahoo", f"▶ Running data refresh (stocks/benchmark: Yahoo Finance, sector indices: Dhan API, target={target})...")
     try:
         from scripts.downloader.download_yahoo_daily import (
             download_yahoo_stocks, download_yahoo_index, get_nifty500_symbols
@@ -1043,10 +1043,27 @@ def run_yahoo_backup(target: str):
         if target in ("all", "stocks"):
             symbols = get_nifty500_symbols()
             download_yahoo_stocks(symbols, period="1y", sync_to_fresh=True)
-        write_status("done", "✅ Yahoo Finance backup refresh complete.", done=True)
+
+        # Sector indices: Yahoo Finance does not reliably maintain narrow sector indices,
+        # so automatically use Dhan API for the 27 sector indices.
+        if target in ("all", "indices"):
+            write_status("indices", "▶ Refreshing 27 sector indices via Dhan API...")
+            try:
+                from login import get_dhan_client
+                from lib.dhan_helper import DhanHelper
+                dhan = get_dhan_client()
+                if dhan:
+                    helper = DhanHelper(dhan)
+                    refresh_indices(helper)
+                else:
+                    write_status("indices", "  ℹ Sector indices require active Dhan token. Run login.py to refresh sector indices.")
+            except Exception as e:
+                write_status("indices", f"  ⚠ Could not refresh sector indices via Dhan: {e}")
+
+        write_status("done", "✅ Data refresh complete (Stocks: Yahoo Finance, Indices: Yahoo & Dhan).", done=True)
         return True
     except Exception as e:
-        mark_error(f"Yahoo Finance backup refresh failed: {e}")
+        mark_error(f"Refresh failed: {e}")
         return False
 
 

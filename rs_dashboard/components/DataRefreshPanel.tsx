@@ -47,7 +47,7 @@ const TARGETS = [
   {
     id: 'indices',
     label: 'Sector Indices',
-    desc: 'Historical Data/Indices — BankNifty, IT, FMCG, Auto, Pharma and 13 more',
+    desc: 'Historical Data/Indices — 27 sector indices (BankNifty, IT, Auto, FMCG, etc.) via Dhan API',
     icon: <Layers className="h-4 w-4" />,
   },
   {
@@ -179,11 +179,13 @@ export default function DataRefreshPanel({ open, onClose, onRefreshComplete }: D
   const startRefresh = async (target: TargetId) => {
     setStarting(true);
     didCompleteRef.current = false;
+    // Sector indices require Dhan API since Yahoo does not maintain narrow sector indices
+    const effectiveSource = target === 'indices' ? 'dhan' : dataSource;
     try {
       await fetch('/api/refresh', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ target, source: dataSource }),
+        body: JSON.stringify({ target, source: effectiveSource }),
       });
       setRunning(true);
       await fetchStatus();
