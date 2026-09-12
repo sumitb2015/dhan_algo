@@ -248,6 +248,35 @@ def quantitative_risk_engine(snapshot: Dict[str, Any]) -> Dict[str, Any]:
                 "rationale": rationale
             })
 
+    # 3. CE:PE Value Imbalance check for short straddles/strangles
+    if not suggestions:
+        short_ce_val = sum(
+            float(l.get("ltp") or l.get("price") or 0.0) * float(l.get("qtyLots") or l.get("qtyContracts") or 1.0)
+            for l in legs if str(l.get("side")).upper() == "SELL" and str(l.get("type")).upper() == "CE"
+        )
+        short_pe_val = sum(
+            float(l.get("ltp") or l.get("price") or 0.0) * float(l.get("qtyLots") or l.get("qtyContracts") or 1.0)
+            for l in legs if str(l.get("side")).upper() == "SELL" and str(l.get("type")).upper() == "PE"
+        )
+        if short_ce_val > 0 and short_pe_val > 0:
+            ratio = max(short_ce_val, short_pe_val) / min(short_ce_val, short_pe_val)
+            if ratio > 2.2:
+                loser_side = "CE" if short_ce_val > short_pe_val else "PE"
+                winner_side = "PE" if short_ce_val > short_pe_val else "CE"
+                risks_found.append(f"Severe CE:PE imbalance ({ratio:.1f}x) — {loser_side} leg has expanded while {winner_side} has decayed")
+                loser_legs = [l for l in legs if str(l.get("side")).upper() == "SELL" and str(l.get("type")).upper() == loser_side]
+                if loser_legs:
+                    target_loser = max(loser_legs, key=lambda l: float(l.get("ltp") or 0.0))
+                    suggestions.append({
+                        "strike": float(target_loser.get("strike") or 0.0),
+                        "type": loser_side,
+                        "expiry": str(target_loser.get("expiry") or ""),
+                        "side": "SELL",
+                        "action": "TRIM",
+                        "pct": 50,
+                        "rationale": f"CE:PE value imbalance has reached {ratio:.1f}x. Trimming 50% of the expanding {loser_side} leg de-risks runaway gamma skew."
+                    })
+
     suggestions = suggestions[:3]
 
     if suggestions:

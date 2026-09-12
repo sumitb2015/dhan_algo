@@ -48,6 +48,7 @@ import AddStrikePicker from '@/components/analytics/AddStrikePicker';
 import DraftStrikeBuilder, { type DraftLegSpec } from '@/components/analytics/DraftStrikeBuilder';
 import GreeksTab from '@/components/analytics/GreeksTab';
 import PnlTableTab from '@/components/analytics/PnlTableTab';
+import IntradayEdgeTab, { type RegimeApiData } from '@/components/analytics/IntradayEdgeTab';
 
 interface Toast { id: number; type: 'success' | 'error'; message: string; detail?: string }
 
@@ -134,6 +135,7 @@ export default function PositionsAnalysis({ underlying }: { underlying: Analytic
   const [showOi, setShowOi] = useState(true);
   const [targetSpot, setTargetSpot] = useState<number | null>(null);
   const [targetDaysRaw, setTargetDays] = useState<number>(0);
+  const [regime, setRegime] = useState<RegimeApiData | null>(null);
 
   const brokerRef = useRef(broker);
   useEffect(() => { brokerRef.current = broker; }, [broker]);
@@ -463,6 +465,22 @@ export default function PositionsAnalysis({ underlying }: { underlying: Analytic
     };
     load();
     const id = setInterval(load, FUNDS_POLL_MS);
+    return () => { cancelled = true; clearInterval(id); };
+  }, [underlying]);
+
+  // ── institutional regime (WPI & OI slope from optionsRegime.ts) ───────────
+  useEffect(() => {
+    let cancelled = false;
+    const loadRegime = async () => {
+      try {
+        const res = await fetch(`/api/options/iv-history?mode=cumulative&underlying=${underlying}&fallback=1`);
+        const json = await res.json();
+        if (cancelled || !json?.success || !json?.regime) return;
+        setRegime(json.regime as RegimeApiData);
+      } catch { /* advisory */ }
+    };
+    loadRegime();
+    const id = setInterval(loadRegime, 20_000);
     return () => { cancelled = true; clearInterval(id); };
   }, [underlying]);
 
@@ -867,6 +885,22 @@ export default function PositionsAnalysis({ underlying }: { underlying: Analytic
           <span className="inline-flex items-center gap-1 rounded-md border border-zinc-800 bg-zinc-900/90 px-2 py-1 font-mono text-[10px] text-zinc-400">
             Lot {lotSize ?? '—'}
           </span>
+          {regime && (
+            <span
+              className={cn(
+                'inline-flex items-center gap-1.5 rounded-md border px-2.5 py-1 font-mono text-[10px] font-bold shadow-sm',
+                regime.label.includes('Bullish')
+                  ? 'border-emerald-500/30 bg-emerald-500/10 text-emerald-400'
+                  : regime.label.includes('Bearish')
+                  ? 'border-red-500/30 bg-red-500/10 text-red-400'
+                  : 'border-sky-500/30 bg-sky-500/10 text-sky-300',
+              )}
+              title={regime.reason}
+            >
+              <span className={cn('h-1.5 w-1.5 rounded-full', regime.confirmed ? 'bg-current shadow-[0_0_6px_currentColor]' : 'border border-current')} />
+              WPI: {regime.label} {regime.wpiZ !== 0 ? `(${regime.wpiZ > 0 ? '+' : ''}${regime.wpiZ.toFixed(1)}z)` : ''}
+            </span>
+          )}
 
           {availableBrokers.length > 1 && (
             <select
@@ -1103,7 +1137,7 @@ export default function PositionsAnalysis({ underlying }: { underlying: Analytic
           {/* ── Right: analytics ────────────────────────────────────────── */}
           <section className="space-y-4">
             <div className="flex items-center gap-1 rounded-xl border border-zinc-800/80 bg-zinc-900/60 p-1 backdrop-blur-sm">
-              {([['payoff', 'Payoff Graph'], ['greeks', 'Greeks'], ['pnl', 'P&L Table'], ['intraday', 'Intraday (MIS)']] as const).map(([id, label]) => (
+              {([['payoff', 'Payoff Graph'], ['greeks', 'Greeks'], ['pnl', 'P&L Table'], ['intraday', 'Intraday Edge (MIS)']] as const).map(([id, label]) => (
                 <button key={id} type="button" onClick={() => setTab(id)}
                   className={cn(
                     'rounded-lg px-3.5 py-1.5 text-xs font-bold transition-all',
@@ -1228,54 +1262,36 @@ export default function PositionsAnalysis({ underlying }: { underlying: Analytic
             )}
 
             {tab === 'intraday' && (
-              <div className="space-y-4">
-                <div className="space-y-3.5 rounded-2xl border border-zinc-800/80 bg-zinc-900/50 p-4 backdrop-blur-md shadow-sm">
-                  <AddStrikePicker
-                    broker={broker} underlying={underlying} strikeStep={strikeStep} spot={spot} lotSize={lotSize}
-                    onPlaced={(label, orderId) => {
-                      addToast('success', `${label} placed`, orderId ? `ID: ${orderId}` : undefined);
-                      setTimeout(loadPositions, 1000);
-                    }}
-                    onError={(label, error) => addToast('error', `${label} failed`, error)}
-                  />
-                  <PositionsLegTable
-                    legs={intradayLegs} unparseable={[]} lotSize={lotSize ?? 0}
-                    onClose={handleCloseLeg} closingKeys={closingKeys}
-                    onAdd={handleAddToLeg} addingKeys={addingKeys}
-                  />
-                </div>
-
-                {intradayStats && <PayoffMetricStrip
-                  stats={intradayStats} lotSize={lotSize ?? 0}
-                  standaloneMargin={null} standaloneMarginReason="Margin sizing shown only on the combined view"
-                  marginAvailable={funds} livePnl={intradayRollup.total} usedMargin={usedMargin} spot={spot} />}
-
-                <div className="rounded-2xl border border-zinc-800/80 bg-zinc-900/50 p-4 backdrop-blur-md shadow-sm">
-                  <PositionsPayoffChart
-                    height={440}
-                    expiryCurve={intradayCurve}
-                    targetCurve={null}
-                    breakevens={intradayStats?.breakevensExpiry ?? []}
-                    spot={spot}
-                    targetSpot={spot}
-                    expiryLabel={intradayFinalExpiry ? fmtExpiryShort(intradayFinalExpiry) : '—'}
-                    targetLabel="Today"
-                    oiBars={oiBars}
-                    showOi={showOi}
-                    onToggleOi={() => setShowOi((v) => !v)}
-                    onZoomIn={() => setSpanIndex((i) => Math.max(0, i - 1))}
-                    onZoomOut={() => setSpanIndex((i) => Math.min(SPAN_STEPS.length - 1, i + 1))}
-                    canZoomIn={spanIndex > 0}
-                    canZoomOut={spanIndex < SPAN_STEPS.length - 1}
-                    emptyReason={
-                      !loadedOnce ? 'Loading positions…'
-                      : !intradayLegs.length ? 'No intraday (MIS) positions open'
-                      : !spot ? 'Waiting for spot price from the option chain…'
-                      : undefined
-                    }
-                  />
-                </div>
-              </div>
+              <IntradayEdgeTab
+                legs={intradayLegs}
+                allPricedLegs={pricedLegs}
+                lotSize={lotSize ?? 0}
+                spot={spot}
+                strikeStep={strikeStep}
+                underlying={underlying}
+                broker={broker}
+                chains={chains}
+                finalExpiry={intradayFinalExpiry ?? finalExpiry}
+                intradayCurve={intradayCurve}
+                intradayStats={intradayStats}
+                oiBars={oiBars}
+                showOi={showOi}
+                onToggleOi={() => setShowOi((v) => !v)}
+                onCloseLeg={handleCloseLeg}
+                closingKeys={closingKeys}
+                onAddToLeg={handleAddToLeg}
+                addingKeys={addingKeys}
+                onPlacedOrder={(label, orderId) => {
+                  addToast('success', `${label} placed`, orderId ? `ID: ${orderId}` : undefined);
+                  setTimeout(loadPositions, 1000);
+                }}
+                onErrorOrder={(label, error) => addToast('error', `${label} failed`, error)}
+                onZoomIn={() => setSpanIndex((i) => Math.max(0, i - 1))}
+                onZoomOut={() => setSpanIndex((i) => Math.min(SPAN_STEPS.length - 1, i + 1))}
+                canZoomIn={spanIndex > 0}
+                canZoomOut={spanIndex < SPAN_STEPS.length - 1}
+                regime={regime}
+              />
             )}
           </section>
         </div>
