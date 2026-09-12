@@ -15,6 +15,7 @@ import { ANALYTICS_UNDERLYINGS, underlyingOfSymbol, type AnalyticsUnderlying } f
 import { todayIso } from '@/components/crudeoil/format';
 import type { ScalperPosition } from '@/lib/zerodhaShape';
 import NavBar from './NavBar';
+import PortfolioGreeksDesk from '@/components/analytics/PortfolioGreeksDesk';
 
 const BROKERS: Broker[] = ['dhan', 'kotak'];
 const POLL_MS = 5_000;
@@ -146,6 +147,8 @@ export default function PositionsAnalyticsHome() {
             <AlertTriangle className="h-4 w-4" /> {error}
           </div>
         )}
+
+        <PortfolioGreeksDesk positions={positions} broker={broker} />
 
         <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
           {groups.map((g) => (

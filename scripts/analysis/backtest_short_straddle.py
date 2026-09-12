@@ -449,9 +449,20 @@ def _simulate_one_day(
     overall_sl_pct: float,
     days_to_expiry: float = 0.0,
     strike_lookup: Optional[Dict] = None,
+    adjustment_mode: str = "none",
+    roll_buffer: float = 35.0,
+    roll_type: str = "points",
+    max_rolls: int = 5,
+    scalp_floor_pct: float = 0.0,
+    trail_sl_pct: float = 0.0,
 ) -> dict:
     """Simulate one intraday trade over day_bars. Returns state dict."""
     leg_states: List[LegState] = [LegState() for _ in leg_configs]
+    closed_legs: List[dict] = []
+    rolls_count = 0
+    ref_spot = 0.0
+    current_atm = 0.0
+    peak_profit_pct = 0.0
     entered = False
     entry_dt = None
     exit_dt = None
@@ -561,6 +572,8 @@ def _simulate_one_day(
             entered = True
             entry_dt = bar.dt
             entry_spot = bar.spot
+            ref_spot = bar.spot
+            current_atm = atm_strike
             continue
 
         if not entered:
@@ -603,6 +616,50 @@ def _simulate_one_day(
                     state.exit_reason = "LEG_TARGET"
                     state.struck_target = True
 
+        # --- Dynamic Rolling Check (ATM Buffer Roll) ---
+        if adjustment_mode == "rolling_straddle" and rolls_count < max_rolls and all(s.is_open for s in leg_states):
+            if roll_type == "percentage":
+                upper_bound = ref_spot * (1.0 + roll_buffer / 100.0)
+                lower_bound = ref_spot * (1.0 - roll_buffer / 100.0)
+            else:
+                upper_bound = ref_spot + roll_buffer
+                lower_bound = ref_spot - roll_buffer
+
+            if bar.spot >= upper_bound or bar.spot <= lower_bound:
+                # 1. Close active legs
+                for i, (leg, state) in enumerate(zip(leg_configs, leg_states)):
+                    slip = slip_sell_exit if leg.position == "sell" else slip_buy_exit
+                    state.exit_price = leg_prices[i][3] * slip
+                    state.exit_reason = "ROLL_ATM"
+                    state.struck_target = True
+                    closed_legs.append({
+                        "option_type": leg.option_type,
+                        "position": leg.position,
+                        "strike": state.strike,
+                        "lots": leg.lots,
+                        "entry_price": state.entry_price,
+                        "exit_price": state.exit_price,
+                        "exit_reason": "ROLL_ATM",
+                    })
+
+                # 2. Re-enter fresh ATM legs at new spot
+                new_atm = round(bar.spot / STRIKE_STEP) * STRIKE_STEP
+                current_atm = new_atm
+                ref_spot = bar.spot
+                rolls_count += 1
+                peak_profit_pct = 0.0
+
+                leg_states = [LegState() for _ in leg_configs]
+                for i, (leg, state) in enumerate(zip(leg_configs, leg_states)):
+                    slip = slip_sell_entry if leg.position == "sell" else slip_buy_entry
+                    state.strike = new_atm
+                    _, _, _, leg_c = _get_leg_prices(
+                        bar.dt, leg.option_type, state.strike, bar.legs[i],
+                        bar.spot, days_to_expiry, strike_lookup
+                    )
+                    state.entry_price = leg_c * slip
+                continue
+
         if all(not s.is_open for s in leg_states):
             exit_reason = "ALL_LEGS_DONE"
             exit_dt = bar.dt
@@ -619,6 +676,36 @@ def _simulate_one_day(
             s.entry_price * (1 if leg.position == "sell" else -1) * leg.lots
             for leg, s in zip(leg_configs, leg_states)
         )
+
+        # --- Scalp Floor Exit ---
+        if scalp_floor_pct > 0 and abs(net_credit_now) > 0:
+            cur_net = _current_net()
+            decay_pct = (net_credit_now - cur_net) / abs(net_credit_now) * 100
+            if decay_pct >= scalp_floor_pct:
+                for i, (leg, state) in enumerate(zip(leg_configs, leg_states)):
+                    if state.is_open:
+                        slip = slip_sell_exit if leg.position == "sell" else slip_buy_exit
+                        state.exit_price = leg_prices[i][3] * slip
+                        state.exit_reason = "SCALP_FLOOR"
+                exit_reason = "SCALP_FLOOR"
+                exit_dt = bar.dt
+                break
+
+        # --- Trailing SL ---
+        if trail_sl_pct > 0 and abs(net_credit_now) > 0:
+            cur_net = _current_net()
+            profit_pct = (net_credit_now - cur_net) / abs(net_credit_now) * 100
+            if profit_pct > peak_profit_pct:
+                peak_profit_pct = profit_pct
+            if peak_profit_pct >= 15.0 and (peak_profit_pct - profit_pct) >= trail_sl_pct:
+                for i, (leg, state) in enumerate(zip(leg_configs, leg_states)):
+                    if state.is_open:
+                        slip = slip_sell_exit if leg.position == "sell" else slip_buy_exit
+                        state.exit_price = leg_prices[i][3] * slip
+                        state.exit_reason = "TRAIL_SL"
+                exit_reason = "TRAIL_SL"
+                exit_dt = bar.dt
+                break
 
         # --- Overall SL ---
         if overall_sl_pct > 0 and abs(net_credit_now) > 0:
@@ -691,6 +778,8 @@ def _simulate_one_day(
         "entry_spot": entry_spot,
         "exit_reason": exit_reason,
         "leg_states": leg_states,
+        "closed_legs": closed_legs,
+        "rolls_count": rolls_count,
     }
 
 
@@ -701,7 +790,14 @@ def run_backtest(leg_configs: List[LegConfig], cycles: List[ExpiryCycle],
                  vix_map: Dict[str, float],
                  strategy_type: str = "intraday",
                  start_date: str = "2021-01-01",
-                 end_date: str = "2026-06-30"):
+                 end_date: str = "2026-06-30",
+                 adjustment_mode: str = "none",
+                 roll_buffer: float = 35.0,
+                 roll_type: str = "points",
+                 max_rolls: int = 5,
+                 scalp_floor_pct: float = 0.0,
+                 trail_sl_pct: float = 0.0,
+                 status_file: Optional[str] = None):
     """
     strategy_type:
       "intraday"   — one trade per trading day (AlgoTest Intraday mode)
@@ -728,6 +824,12 @@ def run_backtest(leg_configs: List[LegConfig], cycles: List[ExpiryCycle],
         slip_buy_exit=slip_buy_exit,
         profit_target_pct=profit_target_pct,
         overall_sl_pct=overall_sl_pct,
+        adjustment_mode=adjustment_mode,
+        roll_buffer=roll_buffer,
+        roll_type=roll_type,
+        max_rolls=max_rolls,
+        scalp_floor_pct=scalp_floor_pct,
+        trail_sl_pct=trail_sl_pct,
     )
 
     trade_results = []
@@ -744,14 +846,58 @@ def run_backtest(leg_configs: List[LegConfig], cycles: List[ExpiryCycle],
     # Prevent trading the same calendar date twice (expiry day appears in two cycle files)
     seen_dates: set = set()
 
+    stop_trigger_file = os.path.join(PROJECT_ROOT, "debug", "backtest_stop.trigger")
+    if os.path.exists(stop_trigger_file):
+        try:
+            os.remove(stop_trigger_file)
+        except Exception:
+            pass
+
+    # Count all unique trading dates up front for accurate progress %
+    all_trade_candidates = []
+    for cycle in cycles:
+        exp_dt = _parse_date(cycle.expiry_date)
+        if len(cycle.bars) < 5:
+            continue
+        dg = {}
+        for b in cycle.bars:
+            dg.setdefault(b.dt.date(), []).append(b)
+        s_dates = sorted(dg.keys())
+        if strategy_type == "expiry_day":
+            tds = [exp_dt] if exp_dt in dg else []
+        elif strategy_type == "first_day":
+            tds = [s_dates[0]] if s_dates else []
+        else:
+            tds = s_dates
+        for d in tds:
+            if start <= d <= end and d not in seen_dates:
+                all_trade_candidates.append(d)
+                seen_dates.add(d)
+
+    total_trade_dates = len(all_trade_candidates)
+    seen_dates.clear()
+    processed_count = 0
+
+    if status_file:
+        try:
+            with open(status_file, "w") as f:
+                json.dump({
+                    "running": True,
+                    "done": False,
+                    "current": 0,
+                    "total": total_trade_dates,
+                    "percent": 0.0,
+                    "date": start_date,
+                    "pnl": 0.0,
+                    "trades": 0,
+                }, f)
+        except Exception:
+            pass
+
     for cycle in cycles:
         expiry_dt = _parse_date(cycle.expiry_date)
 
         if len(cycle.bars) < 5:
-            # Cycles are loaded up to end+40d so that contracts expiring just past the
-            # window still cover its final days. One with no usable bars may therefore
-            # lie wholly outside [start, end] — reporting it there would inflate the
-            # evaluated count and hang a flat point off the end of the equity curve.
             bar_dates = {b.dt.date() for b in cycle.bars}
             in_window = (any(start <= d <= end for d in bar_dates) if bar_dates
                          else start <= expiry_dt <= end)
@@ -779,20 +925,27 @@ def run_backtest(leg_configs: List[LegConfig], cycles: List[ExpiryCycle],
         # Filter trade_dates to only include trading dates within start and end limits
         trade_dates = [d for d in trade_dates if start <= d <= end]
         if not trade_dates:
-            continue  # cycle lies wholly outside the requested window
+            continue
 
+        stop_requested = False
         for trade_date in trade_dates:
             if trade_date in seen_dates:
                 continue
             seen_dates.add(trade_date)
+            processed_count += 1
+
+            if os.path.exists(stop_trigger_file):
+                try:
+                    os.remove(stop_trigger_file)
+                except Exception:
+                    pass
+                stop_requested = True
+                break
+
             day_bars = day_groups.get(trade_date, [])
             if len(day_bars) < 3:
                 continue
 
-            # Time to expiry measured from the entry moment, in fractional days.
-            # Whole calendar days would make this 0 for every expiry-day trade, which
-            # collapses Black-Scholes to intrinsic and gives every OTM strike an
-            # identical delta of 0 — breaking delta-based strike selection outright.
             entry_moment  = datetime.combine(trade_date, entry_time)
             expiry_moment = datetime.combine(expiry_dt, EXPIRY_TIME)
             dte = max((expiry_moment - entry_moment).total_seconds() / 86400.0, 0.0)
@@ -812,38 +965,62 @@ def run_backtest(leg_configs: List[LegConfig], cycles: List[ExpiryCycle],
                                                   day_spot, peak_equity))
                 continue
 
-            entry_dt  = sim["entry_dt"]
-            exit_dt   = sim["exit_dt"]
-            leg_states = sim["leg_states"]
+            entry_dt    = sim["entry_dt"]
+            exit_dt     = sim["exit_dt"]
+            leg_states  = sim["leg_states"]
+            closed_legs = sim.get("closed_legs", [])
+            rolls_count = sim.get("rolls_count", 0)
             exit_reason = sim["exit_reason"]
-
-            total_lots = sum(leg.lots for leg in leg_configs)
-            commission = commission_per_lot * total_lots * 2  # entry + exit
-            total_commission += commission
 
             net_pnl = 0.0
             leg_results = []
-            for leg, state in zip(leg_configs, leg_states):
-                if leg.position == "sell":
-                    leg_pnl = (state.entry_price - state.exit_price) * leg.lots * lot_size
+
+            # 1. Add any rolled/closed legs first
+            for cleg in closed_legs:
+                if cleg["position"] == "sell":
+                    lpnl = (cleg["entry_price"] - cleg["exit_price"]) * cleg["lots"] * lot_size
                 else:
-                    leg_pnl = (state.exit_price - state.entry_price) * leg.lots * lot_size
-                net_pnl += leg_pnl
+                    lpnl = (cleg["exit_price"] - cleg["entry_price"]) * cleg["lots"] * lot_size
+                net_pnl += lpnl
                 leg_results.append({
-                    "option_type": leg.option_type,
-                    "position": leg.position,
-                    "strike": state.strike,
-                    "lots": leg.lots,
-                    "entry_price": round(state.entry_price, 2),
-                    "exit_price": round(state.exit_price, 2),
-                    "pnl": round(leg_pnl, 2),
-                    "exit_reason": state.exit_reason,
+                    "option_type": cleg["option_type"],
+                    "position": cleg["position"],
+                    "strike": cleg["strike"],
+                    "lots": cleg["lots"],
+                    "entry_price": round(cleg["entry_price"], 2),
+                    "exit_price": round(cleg["exit_price"], 2),
+                    "pnl": round(lpnl, 2),
+                    "exit_reason": cleg["exit_reason"],
                 })
+
+            # 2. Add active legs at day's exit
+            for leg, state in zip(leg_configs, leg_states):
+                if state.entry_price > 0:
+                    if leg.position == "sell":
+                        leg_pnl = (state.entry_price - state.exit_price) * leg.lots * lot_size
+                    else:
+                        leg_pnl = (state.exit_price - state.entry_price) * leg.lots * lot_size
+                    net_pnl += leg_pnl
+                    leg_results.append({
+                        "option_type": leg.option_type,
+                        "position": leg.position,
+                        "strike": state.strike,
+                        "lots": leg.lots,
+                        "entry_price": round(state.entry_price, 2),
+                        "exit_price": round(state.exit_price, 2),
+                        "pnl": round(leg_pnl, 2),
+                        "exit_reason": state.exit_reason,
+                    })
+
+            # Calculate commission including all rolls
+            total_legs_traded = len(leg_results)
+            commission = commission_per_lot * total_legs_traded
+            total_commission += commission
 
             net_pnl -= commission
             cumulative_pnl += net_pnl
             if not peak_date:
-                peak_date = entry_date_str  # equity was flat at 0 until the first trade
+                peak_date = entry_date_str
             if cumulative_pnl > peak_equity:
                 peak_equity = cumulative_pnl
                 peak_date = entry_date_str
@@ -879,10 +1056,32 @@ def run_backtest(leg_configs: List[LegConfig], cycles: List[ExpiryCycle],
                 "pnl":           round(net_pnl, 2),
                 "exit_reason":   exit_reason,
                 "is_complete":   cycle.is_complete,
+                "rolls":         rolls_count,
                 "legs":          leg_results,
             })
             equity_curve.append(_equity_point(entry_date_str, cumulative_pnl,
                                               sim["entry_spot"], peak_equity))
+
+            # Update progress status periodically
+            if status_file and (processed_count % 3 == 0 or processed_count == total_trade_dates):
+                try:
+                    pct = round((processed_count / max(1, total_trade_dates)) * 100, 1)
+                    with open(status_file, "w") as f:
+                        json.dump({
+                            "running": True,
+                            "done": False,
+                            "current": processed_count,
+                            "total": total_trade_dates,
+                            "percent": pct,
+                            "date": entry_date_str,
+                            "pnl": round(cumulative_pnl, 2),
+                            "trades": len(trade_results),
+                        }, f)
+                except Exception:
+                    pass
+
+        if stop_requested:
+            break
 
     # --- Summary stats ---
     traded = [c for c in trade_results if c["exit_reason"] != "NO_ENTRY"]
@@ -909,7 +1108,7 @@ def run_backtest(leg_configs: List[LegConfig], cycles: List[ExpiryCycle],
 
     monthly_pnl = _compute_monthly_pnl(trade_results)
 
-    return {
+    final_result = {
         "summary": {
             "total_cycles":           len(trade_results),
             "traded_cycles":          len(traded),
@@ -939,6 +1138,23 @@ def run_backtest(leg_configs: List[LegConfig], cycles: List[ExpiryCycle],
         "equity_curve": equity_curve,
         "monthly_pnl":  monthly_pnl,
     }
+
+    if status_file:
+        try:
+            with open(status_file, "w") as f:
+                json.dump({
+                    "running": False,
+                    "done": True,
+                    "percent": 100.0,
+                    "total": total_trade_dates,
+                    "current": processed_count,
+                    "trades": len(traded),
+                    "pnl": round(cumulative_pnl, 2),
+                }, f)
+        except Exception:
+            pass
+
+    return final_result
 
 
 def _no_entry_result(expiry_date: str) -> dict:
@@ -1019,6 +1235,14 @@ def main():
                         choices=["intraday", "expiry_day", "first_day"])
     parser.add_argument("--legs",               default=json.dumps(DEFAULT_LEGS))
     parser.add_argument("--use-db",             action="store_true", help="Use SQLite database for option price lookups")
+    parser.add_argument("--adjustment-mode",    default="none", choices=["none", "rolling_straddle"])
+    parser.add_argument("--roll-buffer",        type=float, default=35.0)
+    parser.add_argument("--roll-type",          default="points", choices=["points", "percentage"])
+    parser.add_argument("--max-rolls",          type=int,   default=5)
+    parser.add_argument("--scalp-floor-pct",    type=float, default=0.0)
+    parser.add_argument("--trail-sl-pct",       type=float, default=0.0)
+    parser.add_argument("--status-file",        default=None)
+    parser.add_argument("--output-file",        default=None)
     args = parser.parse_args()
 
     try:
@@ -1053,6 +1277,13 @@ def main():
         strategy_type=args.strategy_type,
         start_date=args.start_date,
         end_date=args.end_date,
+        adjustment_mode=args.adjustment_mode,
+        roll_buffer=args.roll_buffer,
+        roll_type=args.roll_type,
+        max_rolls=args.max_rolls,
+        scalp_floor_pct=args.scalp_floor_pct,
+        trail_sl_pct=args.trail_sl_pct,
+        status_file=args.status_file,
     )
     result["params"] = {
         "start_date":         args.start_date,
@@ -1066,10 +1297,25 @@ def main():
         "slippage_pct":       args.slippage_pct,
         "strategy_type":      args.strategy_type,
         "legs":               legs_raw,
+        "adjustment_mode":    args.adjustment_mode,
+        "roll_buffer":        args.roll_buffer,
+        "roll_type":          args.roll_type,
+        "max_rolls":          args.max_rolls,
+        "scalp_floor_pct":    args.scalp_floor_pct,
+        "trail_sl_pct":       args.trail_sl_pct,
     }
     if db_conn:
         db_conn.close()
-    sys.stdout.write(json.dumps(result))
+
+    result_json = json.dumps(result)
+    if args.output_file:
+        try:
+            with open(args.output_file, "w") as f:
+                f.write(result_json)
+        except Exception as e:
+            sys.stderr.write(f"Failed to write output file: {e}\n")
+
+    sys.stdout.write("\n" + result_json + "\n")
     sys.stdout.flush()
 
 

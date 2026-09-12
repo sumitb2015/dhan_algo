@@ -45,6 +45,7 @@ interface CycleResult {
   pnl: number;
   exit_reason: string;
   is_complete: boolean;
+  rolls?: number;
   legs: LegResult[];
 }
 
@@ -96,12 +97,15 @@ const MONTHS = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov
 
 const EXIT_REASON_CLS: Record<string, string> = {
   TARGET:        'bg-emerald-500/10 text-emerald-300',
+  SCALP_FLOOR:   'bg-emerald-500/10 text-emerald-300 border border-emerald-500/30',
   LEG_TARGET:    'bg-emerald-500/10 text-emerald-400',
   EOD:           'bg-sky-500/10 text-sky-300',
   LEG_SL:        'bg-red-500/10 text-red-300',
+  TRAIL_SL:      'bg-amber-500/10 text-amber-300 border border-amber-500/30',
   ALL_LEGS_DONE: 'bg-red-500/10 text-red-300',
   OVERALL_SL:    'bg-red-700/10 text-red-400',
   INCOMPLETE:    'bg-amber-500/10 text-amber-300',
+  ROLL_ATM:      'bg-purple-500/10 text-purple-300 border border-purple-500/30',
   NO_ENTRY:      'bg-zinc-800 text-zinc-500',
 };
 
@@ -511,10 +515,15 @@ function FullReportTable({ cycles, lotSize }: { cycles: CycleResult[]; lotSize: 
                     <td className={`px-3 py-1.5 text-right font-mono font-bold border-l border-zinc-800 ${c.pnl >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
                       {fmtPnl(c.pnl)}
                     </td>
-                    <td className="px-2 py-1.5 text-center">
+                    <td className="px-2 py-1.5 text-center flex items-center justify-center gap-1">
                       <span className={`inline-block px-1.5 py-0.5 rounded text-[10px] font-bold ${EXIT_REASON_CLS[c.exit_reason] ?? 'bg-zinc-800 text-zinc-400'}`}>
                         {c.exit_reason}
                       </span>
+                      {c.rolls != null && c.rolls > 0 && (
+                        <span className="text-[9px] font-mono font-bold px-1 py-0.5 rounded bg-purple-500/15 text-purple-300 border border-purple-500/30">
+                          {c.rolls} roll{c.rolls > 1 ? 's' : ''}
+                        </span>
+                      )}
                     </td>
                   </tr>,
                   // Sub-rows per leg
@@ -608,12 +617,37 @@ export default function BacktestPage() {
   const [commissionPerLot, setCommissionPerLot] = useState(40);
   const [slippagePct, setSlippagePct] = useState(0);
   const [strategyType, setStrategyType] = useState<'intraday' | 'expiry_day' | 'first_day'>('intraday');
-  const [startDate, setStartDate] = useState('2021-01-01');
+  const [startDate, setStartDate] = useState('2024-01-01');
   const [endDate, setEndDate] = useState('2026-06-30');
+
+  // Dynamic adjustments & advanced risk
+  const [adjustmentMode, setAdjustmentMode] = useState<'none' | 'rolling_straddle'>('none');
+  const [rollBuffer, setRollBuffer] = useState(35);
+  const [rollType, setRollType] = useState<'points' | 'percentage'>('points');
+  const [maxRolls, setMaxRolls] = useState(5);
+  const [scalpFloorPct, setScalpFloorPct] = useState(0);
+  const [trailSlPct, setTrailSlPct] = useState(0);
 
   const [result, setResult] = useState<BacktestResult | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [statusData, setStatusData] = useState<{
+    percent?: number;
+    current?: number;
+    total?: number;
+    date?: string;
+    pnl?: number;
+    trades?: number;
+  } | null>(null);
+
+  const pollRef = React.useRef<NodeJS.Timeout | null>(null);
+
+  // Clear polling on unmount
+  useEffect(() => {
+    return () => {
+      if (pollRef.current) clearInterval(pollRef.current);
+    };
+  }, []);
 
   // Fetch current NIFTY lot size on mount
   useEffect(() => {
@@ -622,6 +656,90 @@ export default function BacktestPage() {
       .then(d => { if (d.lot_size) setLotSize(d.lot_size); })
       .catch(() => {/* keep default */});
   }, []);
+
+  function applyPreset(name: string) {
+    if (name === 'straddle_35sl') {
+      setStrategyType('intraday');
+      setEntryTime('09:20');
+      setEodTime('15:15');
+      setProfitTargetPct(50);
+      setOverallSlPct(0);
+      setAdjustmentMode('none');
+      setScalpFloorPct(0);
+      setTrailSlPct(0);
+      setLegs([
+        { option_type: 'CE', position: 'sell', lots: 1, strike: 'ATM', leg_sl_pct: 35, leg_target_pct: 0 },
+        { option_type: 'PE', position: 'sell', lots: 1, strike: 'ATM', leg_sl_pct: 35, leg_target_pct: 0 },
+      ]);
+    } else if (name === 'rolling_straddle') {
+      setStrategyType('intraday');
+      setEntryTime('09:20');
+      setEodTime('15:15');
+      setProfitTargetPct(60);
+      setOverallSlPct(0);
+      setAdjustmentMode('rolling_straddle');
+      setRollBuffer(35);
+      setRollType('points');
+      setMaxRolls(5);
+      setScalpFloorPct(0);
+      setTrailSlPct(0);
+      setLegs([
+        { option_type: 'CE', position: 'sell', lots: 1, strike: 'ATM', leg_sl_pct: 0, leg_target_pct: 0 },
+        { option_type: 'PE', position: 'sell', lots: 1, strike: 'ATM', leg_sl_pct: 0, leg_target_pct: 0 },
+      ]);
+    } else if (name === 'strangle_20delta') {
+      setStrategyType('expiry_day');
+      setEntryTime('09:25');
+      setEodTime('15:15');
+      setProfitTargetPct(70);
+      setOverallSlPct(0);
+      setAdjustmentMode('none');
+      setScalpFloorPct(0);
+      setTrailSlPct(0);
+      setLegs([
+        { option_type: 'CE', position: 'sell', lots: 1, strike: '20', strike_type: 'closest_delta', leg_sl_pct: 40, leg_target_pct: 0 },
+        { option_type: 'PE', position: 'sell', lots: 1, strike: '20', strike_type: 'closest_delta', leg_sl_pct: 40, leg_target_pct: 0 },
+      ]);
+    } else if (name === 'iron_condor') {
+      setStrategyType('first_day');
+      setEntryTime('09:30');
+      setEodTime('15:15');
+      setProfitTargetPct(50);
+      setOverallSlPct(0);
+      setAdjustmentMode('none');
+      setScalpFloorPct(0);
+      setTrailSlPct(0);
+      setLegs([
+        { option_type: 'CE', position: 'sell', lots: 1, strike: '25', strike_type: 'closest_delta', leg_sl_pct: 0, leg_target_pct: 0 },
+        { option_type: 'PE', position: 'sell', lots: 1, strike: '25', strike_type: 'closest_delta', leg_sl_pct: 0, leg_target_pct: 0 },
+        { option_type: 'CE', position: 'buy',  lots: 1, strike: '10', strike_type: 'closest_delta', leg_sl_pct: 0, leg_target_pct: 0 },
+        { option_type: 'PE', position: 'buy',  lots: 1, strike: '10', strike_type: 'closest_delta', leg_sl_pct: 0, leg_target_pct: 0 },
+      ]);
+    } else if (name === 'scalp_floor') {
+      setStrategyType('intraday');
+      setEntryTime('09:20');
+      setEodTime('15:15');
+      setProfitTargetPct(0);
+      setOverallSlPct(35);
+      setAdjustmentMode('none');
+      setScalpFloorPct(30);
+      setTrailSlPct(15);
+      setLegs([
+        { option_type: 'CE', position: 'sell', lots: 1, strike: 'ATM', leg_sl_pct: 0, leg_target_pct: 0 },
+        { option_type: 'PE', position: 'sell', lots: 1, strike: 'ATM', leg_sl_pct: 0, leg_target_pct: 0 },
+      ]);
+    }
+  }
+
+  function setDatePreset(preset: '3m' | '6m' | '1y' | '3y' | 'all') {
+    const end = '2026-06-30';
+    setEndDate(end);
+    if (preset === '3m')  setStartDate('2026-03-31');
+    if (preset === '6m')  setStartDate('2025-12-31');
+    if (preset === '1y')  setStartDate('2025-06-30');
+    if (preset === '3y')  setStartDate('2023-06-30');
+    if (preset === 'all') setStartDate('2021-01-01');
+  }
 
   function addLeg() {
     setLegs(l => [...l, { option_type: 'CE', position: 'sell', lots: 1, strike: 'ATM', leg_sl_pct: 40, leg_target_pct: 0 }]);
@@ -633,15 +751,33 @@ export default function BacktestPage() {
     setLegs(l => l.filter((_, j) => j !== i));
   }
 
+  async function stopBacktest() {
+    try {
+      await fetch('/api/backtest', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'stop' }),
+      });
+    } catch { /* ignore */ }
+    if (pollRef.current) clearInterval(pollRef.current);
+    setLoading(false);
+    setStatusData(null);
+  }
+
   async function runBacktest() {
     setLoading(true);
     setError(null);
     setResult(null);
+    setStatusData({ percent: 0, current: 0, total: 0 });
+
+    if (pollRef.current) clearInterval(pollRef.current);
+
     try {
       const res = await fetch('/api/backtest', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
+          action: 'start',
           legs,
           lot_size: lotSize,
           profit_target_pct: profitTargetPct,
@@ -653,15 +789,53 @@ export default function BacktestPage() {
           strategy_type: strategyType,
           start_date: startDate,
           end_date: endDate,
+          adjustment_mode: adjustmentMode,
+          roll_buffer: rollBuffer,
+          roll_type: rollType,
+          max_rolls: maxRolls,
+          scalp_floor_pct: scalpFloorPct,
+          trail_sl_pct: trailSlPct,
         }),
       });
       const data = await res.json();
-      if (!res.ok) throw new Error(data.error || 'Backtest failed');
-      setResult(data);
+      if (!res.ok || data.error) throw new Error(data.error || 'Failed to start backtest');
+
+      // Start polling for status
+      pollRef.current = setInterval(async () => {
+        try {
+          const sRes = await fetch('/api/backtest');
+          const sData = await sRes.json();
+          if (sData.running) {
+            setStatusData({
+              percent: sData.percent ?? 0,
+              current: sData.current ?? 0,
+              total: sData.total ?? 0,
+              date: sData.date,
+              pnl: sData.pnl,
+              trades: sData.trades,
+            });
+          } else if (sData.done) {
+            if (pollRef.current) clearInterval(pollRef.current);
+            setLoading(false);
+            if (sData.stopped) {
+              setError('Backtest stopped by user');
+            } else if (sData.result) {
+              setResult(sData.result);
+              setStatusData(null);
+            } else if (sData.error) {
+              setError(sData.error);
+            } else {
+              setError('Backtest completed or process exited unexpectedly without results');
+            }
+          }
+        } catch {
+          // ignore transient poll error
+        }
+      }, 1000);
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
-    } finally {
+      if (pollRef.current) clearInterval(pollRef.current);
       setLoading(false);
+      setError(e instanceof Error ? e.message : String(e));
     }
   }
 
@@ -706,6 +880,23 @@ export default function BacktestPage() {
         <div className="w-72 shrink-0 border-r border-zinc-800 bg-zinc-950 flex flex-col min-h-0">
           <div className="flex-1 overflow-y-auto p-3 flex flex-col gap-3">
 
+            {/* Presets */}
+            <div className="bg-zinc-900/40 border border-zinc-800/60 rounded-xl p-3">
+              <div className="text-[9px] font-bold text-zinc-500 uppercase tracking-[0.16em] mb-1.5">Strategy Preset</div>
+              <select
+                onChange={e => applyPreset(e.target.value)}
+                defaultValue=""
+                className={inputCls}
+              >
+                <option value="" disabled>Choose a Preset Strategy...</option>
+                <option value="straddle_35sl">9:20 Short Straddle (35% Leg SL)</option>
+                <option value="rolling_straddle">Intraday Rolling Straddle (35 pt Buffer Roll)</option>
+                <option value="strangle_20delta">0DTE 20-Delta Strangle (40% SL)</option>
+                <option value="iron_condor">Weekly Iron Condor (Sell 25D, Buy 10D)</option>
+                <option value="scalp_floor">Scalp-Lock Straddle (30% Premium Floor)</option>
+              </select>
+            </div>
+
             {/* Leg Builder */}
             <div className="bg-zinc-900/40 border border-zinc-800/60 rounded-xl p-3">
               <div className="flex items-center justify-between mb-2">
@@ -731,9 +922,114 @@ export default function BacktestPage() {
               </div>
             </div>
 
+            {/* Adjustments / Rolling */}
+            <div className="bg-zinc-900/40 border border-zinc-800/60 rounded-xl p-3 flex flex-col gap-3">
+              <div className="text-[9px] font-bold text-zinc-500 uppercase tracking-[0.16em]">Adjustments & Rolling</div>
+              <FormField label="Adjustment Mode">
+                <Toggle
+                  value={adjustmentMode}
+                  onChange={v => setAdjustmentMode(v as typeof adjustmentMode)}
+                  options={[
+                    { label: 'Static Hold', value: 'none', activeClass: 'bg-zinc-700 text-oncolor' },
+                    { label: 'ATM Roll', value: 'rolling_straddle', activeClass: 'bg-emerald-600 text-oncolor' },
+                  ]}
+                />
+              </FormField>
+              {adjustmentMode === 'rolling_straddle' && (
+                <div className="flex flex-col gap-2">
+                  <div className="text-[9px] text-emerald-400/90 bg-emerald-500/10 border border-emerald-500/20 rounded px-2 py-1">
+                    When spot moves beyond buffer, active legs exit and roll to the fresh ATM strike.
+                  </div>
+                  <div className="grid grid-cols-2 gap-2">
+                    <FormField label="Buffer">
+                      <input
+                        type="number"
+                        min={5}
+                        step={5}
+                        className={inputCls}
+                        value={rollBuffer}
+                        onChange={e => setRollBuffer(Number(e.target.value))}
+                      />
+                    </FormField>
+                    <FormField label="Type">
+                      <select
+                        value={rollType}
+                        onChange={e => setRollType(e.target.value as 'points' | 'percentage')}
+                        className={inputCls}
+                      >
+                        <option value="points">Points</option>
+                        <option value="percentage">% of Spot</option>
+                      </select>
+                    </FormField>
+                  </div>
+                  <FormField label="Max Rolls Per Day">
+                    <input
+                      type="number"
+                      min={1}
+                      max={15}
+                      className={inputCls}
+                      value={maxRolls}
+                      onChange={e => setMaxRolls(Number(e.target.value))}
+                    />
+                  </FormField>
+                </div>
+              )}
+            </div>
+
+            {/* Advanced Exits */}
+            <div className="bg-zinc-900/40 border border-zinc-800/60 rounded-xl p-3 flex flex-col gap-3">
+              <div className="text-[9px] font-bold text-zinc-500 uppercase tracking-[0.16em]">Advanced Exits</div>
+              {/* Scalp Floor */}
+              <div>
+                <label className="flex items-center gap-2 cursor-pointer select-none mb-1">
+                  <input
+                    type="checkbox"
+                    checked={scalpFloorPct > 0}
+                    onChange={e => setScalpFloorPct(e.target.checked ? 30 : 0)}
+                    className="w-3 h-3 accent-emerald-500"
+                  />
+                  <span className="text-[10px] font-bold text-zinc-400 uppercase tracking-wider">Scalp Floor (Decay %)</span>
+                </label>
+                {scalpFloorPct > 0 && (
+                  <input
+                    type="number"
+                    min={5}
+                    step={5}
+                    className={inputCls}
+                    value={scalpFloorPct}
+                    onChange={e => setScalpFloorPct(Number(e.target.value))}
+                    placeholder="e.g. 30"
+                  />
+                )}
+              </div>
+              {/* Trailing SL */}
+              <div>
+                <label className="flex items-center gap-2 cursor-pointer select-none mb-1">
+                  <input
+                    type="checkbox"
+                    checked={trailSlPct > 0}
+                    onChange={e => setTrailSlPct(e.target.checked ? 15 : 0)}
+                    className="w-3 h-3 accent-red-500"
+                  />
+                  <span className="text-[10px] font-bold text-zinc-400 uppercase tracking-wider">Trailing SL %</span>
+                </label>
+                {trailSlPct > 0 && (
+                  <input
+                    type="number"
+                    min={5}
+                    step={5}
+                    className={inputCls}
+                    value={trailSlPct}
+                    onChange={e => setTrailSlPct(Number(e.target.value))}
+                    placeholder="e.g. 15"
+                  />
+                )}
+              </div>
+            </div>
+
             {/* Strategy-level controls */}
             <div className="bg-zinc-900/40 border border-zinc-800/60 rounded-xl p-3 flex flex-col gap-3">
-              <div className="text-[9px] font-bold text-zinc-500 uppercase tracking-[0.16em]">Strategy</div>
+              <div className="text-[9px] font-bold text-zinc-500 uppercase tracking-[0.16em]">Risk & Sizing</div>
               <FormField label="Lot Size">
                 <input type="number" min={1} className={inputCls} value={lotSize}
                   onChange={e => setLotSize(Number(e.target.value))} />
@@ -833,7 +1129,20 @@ export default function BacktestPage() {
 
             {/* Date range */}
             <div className="bg-zinc-900/40 border border-zinc-800/60 rounded-xl p-3 flex flex-col gap-3">
-              <div className="text-[9px] font-bold text-zinc-500 uppercase tracking-[0.16em]">Period</div>
+              <div className="flex items-center justify-between">
+                <div className="text-[9px] font-bold text-zinc-500 uppercase tracking-[0.16em]">Period</div>
+                <div className="flex gap-1">
+                  {(['3m', '6m', '1y', '3y', 'all'] as const).map(p => (
+                    <button
+                      key={p}
+                      onClick={() => setDatePreset(p)}
+                      className="text-[9px] font-bold px-1.5 py-0.5 rounded bg-zinc-800 text-zinc-400 hover:text-zinc-200 border border-zinc-700 transition-colors uppercase"
+                    >
+                      {p}
+                    </button>
+                  ))}
+                </div>
+              </div>
               <FormField label="Start Date">
                 <input type="date" className={inputCls} value={startDate}
                   onChange={e => setStartDate(e.target.value)} />
@@ -851,13 +1160,23 @@ export default function BacktestPage() {
                 {error}
               </div>
             )}
-            <button
-              onClick={runBacktest}
-              disabled={loading || legs.length === 0}
-              className="w-full py-2.5 rounded-lg text-xs font-bold bg-emerald-600 hover:bg-emerald-500 disabled:opacity-40 disabled:cursor-not-allowed text-oncolor transition-colors shadow-lg shadow-emerald-500/10"
-            >
-              {loading ? 'Running...' : 'Run Backtest'}
-            </button>
+            {loading ? (
+              <button
+                onClick={stopBacktest}
+                className="w-full py-2.5 rounded-lg text-xs font-bold bg-red-700 hover:bg-red-600 text-oncolor transition-colors shadow-lg shadow-red-500/10 flex items-center justify-center gap-2"
+              >
+                <span className="w-2 h-2 rounded-full bg-oncolor animate-ping" />
+                Stop Backtest
+              </button>
+            ) : (
+              <button
+                onClick={runBacktest}
+                disabled={legs.length === 0}
+                className="w-full py-2.5 rounded-lg text-xs font-bold bg-emerald-600 hover:bg-emerald-500 disabled:opacity-40 disabled:cursor-not-allowed text-oncolor transition-colors shadow-lg shadow-emerald-500/10"
+              >
+                Run Backtest
+              </button>
+            )}
           </div>
         </div>
 
@@ -868,19 +1187,52 @@ export default function BacktestPage() {
               <div className="flex items-center justify-center w-14 h-14 rounded-2xl bg-emerald-500/10 border border-emerald-500/20 mb-4">
                 <svg width="26" height="26" viewBox="0 0 24 24" fill="none" className="text-emerald-500/60">
                   <path d="M3 3v18h18" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
-                  <path d="M7 15l4-5 3 3 6-8" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+                  <path d="M7 15l4-5 3 3 6-8" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" />
                 </svg>
               </div>
-              <div className="text-sm font-bold text-zinc-400">Configure legs and run a backtest</div>
+              <div className="text-sm font-bold text-zinc-400">Configure legs or pick a preset, then run a backtest</div>
               <div className="text-xs mt-1 text-zinc-600">Year-wise returns, stats, equity curve, and full report appear here</div>
             </div>
           )}
 
           {loading && (
-            <div className="flex flex-col items-center justify-center h-full text-zinc-500">
-              <div className="w-6 h-6 border-2 border-zinc-700 border-t-emerald-400 rounded-full animate-spin mb-4" />
-              <div className="text-sm font-bold text-zinc-300">Running backtest…</div>
-              <div className="text-xs mt-2">Simulating {legs.length} leg{legs.length > 1 ? 's' : ''} across expiry cycles…</div>
+            <div className="flex flex-col items-center justify-center h-full p-8 max-w-md mx-auto text-center">
+              <div className="w-12 h-12 rounded-2xl bg-emerald-500/10 border border-emerald-500/30 flex items-center justify-center mb-5 animate-pulse">
+                <svg width="24" height="24" viewBox="0 0 24 24" fill="none" className="text-emerald-400">
+                  <path d="M12 2v4m0 12v4M4.93 4.93l2.83 2.83m8.48 8.48l2.83 2.83M2 12h4m12 0h4M4.93 19.07l2.83-2.83m8.48-8.48l2.83-2.83" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+                </svg>
+              </div>
+              <div className="text-base font-bold text-white mb-1">Simulating Historical Option Trades</div>
+              <p className="text-xs text-zinc-400 mb-6">
+                Querying 1-min OHLC, spot & strikes from 5.5-year SQLite database…
+              </p>
+
+              {/* Progress bar */}
+              <div className="w-full bg-zinc-900 border border-zinc-800 rounded-full h-3 overflow-hidden p-0.5 mb-3">
+                <div
+                  className="bg-gradient-to-r from-emerald-500 to-teal-400 h-full rounded-full transition-all duration-300"
+                  style={{ width: `${Math.max(2, statusData?.percent ?? 0)}%` }}
+                />
+              </div>
+
+              <div className="w-full flex justify-between text-xs font-mono text-zinc-400 mb-5">
+                <span>{statusData?.percent?.toFixed(1) ?? '0.0'}% completed</span>
+                <span>{statusData?.current ?? 0} / {statusData?.total || '—'} days</span>
+              </div>
+
+              {statusData?.date && (
+                <div className="bg-zinc-900/80 border border-zinc-800 rounded-xl px-4 py-2.5 w-full text-xs font-mono mb-5 flex justify-between">
+                  <span className="text-zinc-500">Processing Date:</span>
+                  <span className="text-zinc-200 font-bold">{statusData.date}</span>
+                </div>
+              )}
+
+              <button
+                onClick={stopBacktest}
+                className="px-4 py-1.5 rounded-lg text-xs font-bold bg-zinc-900 hover:bg-zinc-800 text-red-400 border border-zinc-700 hover:border-red-500/40 transition-colors"
+              >
+                Cancel Simulation
+              </button>
             </div>
           )}
 
