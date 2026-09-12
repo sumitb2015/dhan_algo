@@ -10,6 +10,8 @@ interface AddLegModalProps {
   spot: number;
   strikeStep: number;
   defaultLots: number;
+  chainStrikes?: number[];
+  chain?: Record<number, { ce?: any; pe?: any }>;
   onAddLeg: (leg: {
     type: OptType;
     side: Side;
@@ -25,6 +27,8 @@ export default function AddLegModal({
   spot,
   strikeStep,
   defaultLots,
+  chainStrikes,
+  chain,
   onAddLeg,
 }: AddLegModalProps) {
   const atmStrike = Math.round(spot / strikeStep) * strikeStep;
@@ -32,15 +36,36 @@ export default function AddLegModal({
   const [side, setSide] = useState<Side>('SELL');
   const [strike, setStrike] = useState<number>(atmStrike);
   const [lots, setLots] = useState<number>(defaultLots || 2);
-  const [entryPrice, setEntryPrice] = useState<number>(35.0);
+  const [entryPrice, setEntryPrice] = useState<number>(() => {
+    const p = chain?.[atmStrike]?.ce?.last_price ?? chain?.[atmStrike]?.ce?.previous_close_price;
+    return typeof p === 'number' && p > 0 ? p : 35.0;
+  });
+
+  // Update entry price when strike or type changes
+  const handleStrikeChange = (newStrike: number) => {
+    setStrike(newStrike);
+    const legKey = type.toLowerCase() as 'ce' | 'pe';
+    const realPrice = chain?.[newStrike]?.[legKey]?.last_price ?? chain?.[newStrike]?.[legKey]?.previous_close_price;
+    if (typeof realPrice === 'number' && realPrice > 0) {
+      setEntryPrice(realPrice);
+    }
+  };
+
+  const handleTypeChange = (newType: OptType) => {
+    setType(newType);
+    const legKey = newType.toLowerCase() as 'ce' | 'pe';
+    const realPrice = chain?.[strike]?.[legKey]?.last_price ?? chain?.[strike]?.[legKey]?.previous_close_price;
+    if (typeof realPrice === 'number' && realPrice > 0) {
+      setEntryPrice(realPrice);
+    }
+  };
 
   if (!isOpen) return null;
 
-  // Generate strike range around ATM (-20 to +20 strikes)
-  const strikeOptions: number[] = [];
-  for (let i = -20; i <= 20; i++) {
-    strikeOptions.push(atmStrike + i * strikeStep);
-  }
+  // Use real chain strikes if available, otherwise generate range around ATM
+  const strikeOptions: number[] = chainStrikes && chainStrikes.length > 0
+    ? chainStrikes
+    : Array.from({ length: 41 }, (_, i) => atmStrike + (i - 20) * strikeStep);
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
@@ -118,7 +143,7 @@ export default function AddLegModal({
               <div className="grid grid-cols-2 gap-1.5 bg-zinc-900 p-1 rounded-xl border border-zinc-800">
                 <button
                   type="button"
-                  onClick={() => setType('CE')}
+                  onClick={() => handleTypeChange('CE')}
                   className={`py-1.5 rounded-lg font-bold text-center transition-colors cursor-pointer ${
                     type === 'CE'
                       ? 'bg-sky-600 text-white shadow'
@@ -129,7 +154,7 @@ export default function AddLegModal({
                 </button>
                 <button
                   type="button"
-                  onClick={() => setType('PE')}
+                  onClick={() => handleTypeChange('PE')}
                   className={`py-1.5 rounded-lg font-bold text-center transition-colors cursor-pointer ${
                     type === 'PE'
                       ? 'bg-amber-600 text-white shadow'
@@ -149,7 +174,7 @@ export default function AddLegModal({
             </label>
             <select
               value={strike}
-              onChange={(e) => setStrike(Number(e.target.value))}
+              onChange={(e) => handleStrikeChange(Number(e.target.value))}
               className="w-full bg-zinc-900 text-white font-bold px-3 py-2 rounded-xl border border-zinc-700 cursor-pointer focus:outline-none focus:border-indigo-500 text-xs"
             >
               {strikeOptions.map((s) => {

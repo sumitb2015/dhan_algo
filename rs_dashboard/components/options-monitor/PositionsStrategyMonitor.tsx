@@ -34,6 +34,10 @@ interface PositionsStrategyMonitorProps {
   strikeStep: number;
   payoffPoints: PayoffPoint[];
   breakevens: number[];
+  chainStrikes?: number[];
+  viewMode?: 'broker' | 'custom';
+  onSyncBroker?: () => void;
+  isBrokerLoading?: boolean;
   onAddLegClick: () => void;
   onRemoveLeg: (id: string) => void;
   onUpdateLegStrike: (id: string, newStrike: number) => void;
@@ -50,6 +54,10 @@ export default function PositionsStrategyMonitor({
   strikeStep,
   payoffPoints,
   breakevens,
+  chainStrikes,
+  viewMode = 'custom',
+  onSyncBroker,
+  isBrokerLoading = false,
   onAddLegClick,
   onRemoveLeg,
   onUpdateLegStrike,
@@ -63,15 +71,18 @@ export default function PositionsStrategyMonitor({
   const ceClearancePts = shortCeLeg ? Math.round(shortCeLeg.strike - spot) : null;
   const peClearancePts = shortPeLeg ? Math.round(spot - shortPeLeg.strike) : null;
 
-  // Available strikes for dropdown (from spot - 15 steps to spot + 15 steps)
+  // Available strikes for dropdown (use real chain strikes if available, otherwise generate range around spot)
   const strikeOptions = useMemo(() => {
+    if (chainStrikes && chainStrikes.length > 0) {
+      return chainStrikes;
+    }
     const base = Math.round(spot / strikeStep) * strikeStep;
     const opts: number[] = [];
     for (let i = -16; i <= 16; i++) {
       opts.push(base + i * strikeStep);
     }
     return opts;
-  }, [spot, strikeStep]);
+  }, [spot, strikeStep, chainStrikes]);
 
   return (
     <div className="flex flex-col gap-4 font-mono select-none">
@@ -83,8 +94,15 @@ export default function PositionsStrategyMonitor({
               <span className="text-[10px] font-bold uppercase text-indigo-400 tracking-wider">
                 POSITIONS & STRATEGY MONITOR
               </span>
+              <span className={`text-[10px] px-2 py-0.5 rounded border font-bold ${
+                viewMode === 'broker'
+                  ? 'bg-emerald-950/60 text-emerald-300 border-emerald-600/40'
+                  : 'bg-zinc-800 text-zinc-400 border-zinc-700'
+              }`}>
+                {viewMode === 'broker' ? 'LIVE BROKER' : 'DESK WHAT-IF'}
+              </span>
               <span className="text-[10px] bg-zinc-800 text-zinc-400 px-2 py-0.5 rounded border border-zinc-700">
-                {legs.length} ACTIVE {legs.length === 1 ? 'LEG' : 'LEGS'}
+                {legs.length} {legs.length === 1 ? 'LEG' : 'LEGS'}
               </span>
             </div>
             <h2 className="text-base font-black text-white mt-0.5">
@@ -96,35 +114,49 @@ export default function PositionsStrategyMonitor({
             </h2>
           </div>
 
-          {/* Quick Presets & Add Leg */}
+          {/* Quick Presets & Add Leg / Sync Broker */}
           <div className="flex items-center gap-2 flex-wrap">
-            <select
-              onChange={(e) => {
-                if (e.target.value) onSelectStrategyPreset(e.target.value);
-              }}
-              defaultValue=""
-              className="bg-zinc-800 hover:bg-zinc-750 text-zinc-200 text-xs font-bold px-2.5 py-1.5 rounded-lg border border-zinc-700 cursor-pointer focus:outline-none"
-            >
-              <option value="" disabled>
-                Load Preset Template...
-              </option>
-              <option value="short_strangle">Short Strangle (OTM CE + PE)</option>
-              <option value="short_straddle">Short Straddle (ATM CE + PE)</option>
-              <option value="iron_condor">Iron Condor (4 Legs Defined)</option>
-              <option value="bull_put_spread">Bull Put Spread (Sell PE + Buy PE)</option>
-              <option value="bear_call_spread">Bear Call Spread (Sell CE + Buy CE)</option>
-              <option value="clear">Clear All Legs</option>
-            </select>
+            {viewMode === 'broker' ? (
+              <button
+                onClick={onSyncBroker}
+                disabled={isBrokerLoading}
+                className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-emerald-700 hover:bg-emerald-600 text-white font-bold text-xs shadow transition-colors cursor-pointer"
+                title="Sync Live Positions from Dhan"
+              >
+                <Layers className={`w-3.5 h-3.5 ${isBrokerLoading ? 'animate-spin' : ''}`} />
+                <span>SYNC BROKER</span>
+              </button>
+            ) : (
+              <>
+                <select
+                  onChange={(e) => {
+                    if (e.target.value) onSelectStrategyPreset(e.target.value);
+                  }}
+                  defaultValue=""
+                  className="bg-zinc-800 hover:bg-zinc-750 text-zinc-200 text-xs font-bold px-2.5 py-1.5 rounded-lg border border-zinc-700 cursor-pointer focus:outline-none"
+                >
+                  <option value="" disabled>
+                    Load Preset Template...
+                  </option>
+                  <option value="short_strangle">Short Strangle (OTM CE + PE)</option>
+                  <option value="short_straddle">Short Straddle (ATM CE + PE)</option>
+                  <option value="iron_condor">Iron Condor (4 Legs Defined)</option>
+                  <option value="bull_put_spread">Bull Put Spread (Sell PE + Buy PE)</option>
+                  <option value="bear_call_spread">Bear Call Spread (Sell CE + Buy CE)</option>
+                  <option value="clear">Clear All Legs</option>
+                </select>
 
-            <button
-              onClick={onAddLegClick}
-              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white font-bold text-xs shadow transition-colors cursor-pointer"
-              title="Add Custom Strike Leg [A]"
-            >
-              <Plus className="w-3.5 h-3.5" />
-              <span>ADD LEG</span>
-              <span className="text-[9px] bg-indigo-700 px-1 rounded text-indigo-200">[A]</span>
-            </button>
+                <button
+                  onClick={onAddLegClick}
+                  className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white font-bold text-xs shadow transition-colors cursor-pointer"
+                  title="Add Custom Strike Leg [A]"
+                >
+                  <Plus className="w-3.5 h-3.5" />
+                  <span>ADD LEG</span>
+                  <span className="text-[9px] bg-indigo-700 px-1 rounded text-indigo-200">[A]</span>
+                </button>
+              </>
+            )}
           </div>
         </div>
 

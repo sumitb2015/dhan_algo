@@ -21,9 +21,9 @@ export const UNDERLYINGS: Record<string, UnderlyingConfig> = {
   NIFTY: {
     symbol: 'NIFTY',
     name: 'NIFTY 50',
-    defaultSpot: 24812.30,
+    defaultSpot: 23400.00,
     strikeStep: 50,
-    lotSize: 75,
+    lotSize: 65,
     exchange: 'NSE',
   },
   BANKNIFTY: {
@@ -186,7 +186,7 @@ export function generatePayoffCurve(
     let pnlNow = 0;
 
     for (const leg of legs) {
-      const qty = leg.lots * lotSize;
+      const qty = leg.qty || leg.lots * lotSize;
       const isSell = leg.side === 'SELL';
 
       // Payoff at Expiry
@@ -279,8 +279,9 @@ export function computePortfolioMetrics(
   let shortCount = 0;
 
   for (const leg of legs) {
-    const qty = leg.lots * lotSize;
+    const qty = leg.qty || leg.lots * lotSize;
     const sign = leg.side === 'SELL' ? -1 : 1;
+    const effectiveLots = leg.lots || Math.max(1, Math.round(qty / (lotSize || 1)));
 
     // Delta of the position in share equivalents
     const legDelta = sign * leg.delta * qty;
@@ -290,11 +291,11 @@ export function computePortfolioMetrics(
     totalGamma += sign * leg.gamma * qty;
 
     // Theta (Selling options yields positive theta, buying yields negative)
-    const legTheta = -sign * leg.theta * leg.lots;
+    const legTheta = -sign * leg.theta * effectiveLots;
     totalTheta += legTheta;
 
     // Vega (Selling options yields negative vega, buying yields positive)
-    const legVega = sign * leg.vega * leg.lots;
+    const legVega = sign * leg.vega * effectiveLots;
     totalVega += legVega;
 
     // MTM
@@ -304,7 +305,7 @@ export function computePortfolioMetrics(
     totalMtm += pnl;
 
     totalEntryValue += leg.entryPrice * qty;
-    if (leg.side === 'SELL') shortCount += leg.lots;
+    if (leg.side === 'SELL') shortCount += effectiveLots;
   }
 
   // Rupee Delta = Total share delta * 1% of spot price
@@ -336,3 +337,46 @@ export function computePortfolioMetrics(
     popPct: 68,
   };
 }
+
+/**
+ * Calculates remaining time to expiry in years.
+ * Adds market close 15:30 IST to expiry date.
+ */
+export function calculateTimeToExpiryYears(expiryDateStr: string): number {
+  if (!expiryDateStr) return 2 / 365;
+  try {
+    const [y, m, d] = expiryDateStr.split('-').map(Number);
+    // 15:30 IST is 10:00 UTC
+    const expiryTime = new Date(Date.UTC(y, m - 1, d, 10, 0, 0)).getTime();
+    const now = Date.now();
+    const diffMs = expiryTime - now;
+    if (diffMs <= 0) return 0.25 / 365; // At least a few hours on expiry day
+    return Math.max(0.25 / 365, diffMs / (365.25 * 24 * 3600 * 1000));
+  } catch {
+    return 2 / 365;
+  }
+}
+
+/**
+ * Normalizes raw option chain output into sorted numerical strikes and indexed lookup.
+ */
+export function extractChainStrikes(oc: Record<string, any> | undefined): {
+  strikes: number[];
+  normalized: Record<number, { ce?: any; pe?: any }>;
+} {
+  if (!oc || typeof oc !== 'object') return { strikes: [], normalized: {} };
+  const normalized: Record<number, { ce?: any; pe?: any }> = {};
+  const strikeSet = new Set<number>();
+
+  for (const [k, v] of Object.entries(oc)) {
+    const s = Math.round(parseFloat(k));
+    if (!isNaN(s) && s > 0) {
+      strikeSet.add(s);
+      normalized[s] = v;
+    }
+  }
+
+  const strikes = Array.from(strikeSet).sort((a, b) => a - b);
+  return { strikes, normalized };
+}
+
