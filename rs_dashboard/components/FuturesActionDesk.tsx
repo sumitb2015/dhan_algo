@@ -416,8 +416,9 @@ export default function FuturesActionDesk({
     const list: ActionableSetup[] = [];
 
     // 1. Top Long Buildup plays:
-    const topLongs = [...longBuildup]
-      .filter(r => r.priceChgPct > 0.8 && r.oiChgPct > 2.5)
+    let candidateLongs = longBuildup.filter(r => r.priceChgPct > 0.6 && r.oiChgPct > 2.0);
+    if (candidateLongs.length === 0) candidateLongs = longBuildup.filter(r => r.priceChgPct > 0);
+    const topLongs = [...candidateLongs]
       .sort((a, b) => (b.oiChgPct * b.priceChgPct) - (a.oiChgPct * a.priceChgPct))
       .slice(0, 3);
 
@@ -454,8 +455,9 @@ export default function FuturesActionDesk({
     }
 
     // 2. Top Short Buildup plays:
-    const topShorts = [...shortBuildup]
-      .filter(r => r.priceChgPct < -0.8 && r.oiChgPct > 2.5)
+    let candidateShorts = shortBuildup.filter(r => r.priceChgPct < -0.6 && r.oiChgPct > 2.0);
+    if (candidateShorts.length === 0) candidateShorts = shortBuildup.filter(r => r.priceChgPct < 0);
+    const topShorts = [...candidateShorts]
       .sort((a, b) => (b.oiChgPct * Math.abs(b.priceChgPct)) - (a.oiChgPct * Math.abs(a.priceChgPct)))
       .slice(0, 3);
 
@@ -492,8 +494,9 @@ export default function FuturesActionDesk({
     }
 
     // 3. Top Short Covering squeeze:
-    const topCovering = [...shortCovering]
-      .filter(r => r.priceChgPct > 1.0 && r.oiChgPct < -2.0)
+    let candidateCovering = shortCovering.filter(r => r.priceChgPct > 0.8 && r.oiChgPct < -1.5);
+    if (candidateCovering.length === 0) candidateCovering = shortCovering.filter(r => r.priceChgPct > 0);
+    const topCovering = [...candidateCovering]
       .sort((a, b) => (Math.abs(b.oiChgPct) * b.priceChgPct) - (Math.abs(a.oiChgPct) * a.priceChgPct))
       .slice(0, 2);
 
@@ -529,8 +532,9 @@ export default function FuturesActionDesk({
     }
 
     // 4. Top Long Unwinding:
-    const topUnwinding = [...longUnwinding]
-      .filter(r => r.priceChgPct < -1.0 && r.oiChgPct < -2.0)
+    let candidateUnwinding = longUnwinding.filter(r => r.priceChgPct < -0.8 && r.oiChgPct < -1.5);
+    if (candidateUnwinding.length === 0) candidateUnwinding = longUnwinding.filter(r => r.priceChgPct < 0);
+    const topUnwinding = [...candidateUnwinding]
       .sort((a, b) => (Math.abs(b.oiChgPct) * Math.abs(b.priceChgPct)) - (Math.abs(a.oiChgPct) * Math.abs(a.priceChgPct)))
       .slice(0, 2);
 

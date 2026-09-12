@@ -124,36 +124,48 @@ def main():
             print(json.dumps({'success': False, 'error': f'Invalid order side: {side}'}))
             sys.exit(0)
 
-        order_id = helper.place_order(
-            security_id=str(sec_id),
-            exchange_segment=seg,
-            transaction_type=side,
-            quantity=qty,
-            order_type=order_type,
-            product_type=product,
-            price=args.price if order_type == 'LIMIT' else 0.0
-        )
-
-        if order_id:
-            print(json.dumps({
-                'success': True,
-                'orderId': str(order_id),
-                'securityId': str(sec_id),
-                'displayName': str(sec.get('DISPLAY_NAME', sec.get('TRADING_SYMBOL', f'{under} FUT'))),
-                'symbol': under,
-                'side': side,
-                'lots': lots,
-                'lotSize': lot_size,
-                'quantity': qty,
-                'orderType': order_type,
-                'productType': product,
-                'price': args.price if order_type == 'LIMIT' else 0.0
-            }))
-        else:
-            print(json.dumps({
-                'success': False,
-                'error': 'Order placement failed at broker — check terminal logs'
-            }))
+        try:
+            res = helper.dhan.place_order(
+                security_id=str(sec_id),
+                exchange_segment=seg,
+                transaction_type=side,
+                quantity=qty,
+                order_type=order_type,
+                product_type=product,
+                price=args.price if order_type == 'LIMIT' else 0.0,
+                trigger_price=0.0
+            )
+            if isinstance(res, dict) and res.get('status') == 'success':
+                order_id = res.get('data', {}).get('orderId')
+                print(json.dumps({
+                    'success': True,
+                    'orderId': str(order_id),
+                    'securityId': str(sec_id),
+                    'displayName': str(sec.get('DISPLAY_NAME', sec.get('TRADING_SYMBOL', f'{under} FUT'))),
+                    'symbol': under,
+                    'side': side,
+                    'lots': lots,
+                    'lotSize': lot_size,
+                    'quantity': qty,
+                    'orderType': order_type,
+                    'productType': product,
+                    'price': args.price if order_type == 'LIMIT' else 0.0
+                }))
+            else:
+                remarks = res.get('remarks') if isinstance(res, dict) else str(res)
+                error_detail = ''
+                if isinstance(remarks, dict):
+                    error_detail = remarks.get('error_message') or remarks.get('message') or str(remarks)
+                elif remarks:
+                    error_detail = str(remarks)
+                else:
+                    error_detail = 'Order rejected by broker'
+                print(json.dumps({
+                    'success': False,
+                    'error': f'Broker: {error_detail}'
+                }))
+        except Exception as exc:
+            print(json.dumps({'success': False, 'error': f'Exception placing order: {exc}'}))
 
 
 if __name__ == '__main__':

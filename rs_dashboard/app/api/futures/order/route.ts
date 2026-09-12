@@ -113,12 +113,14 @@ export async function POST(req: NextRequest) {
 
     const result = await runPythonJson<OrderResponse>(FUTURES_API_SCRIPT, args, 25_000);
 
-    if (result.success) {
-      // Invalidate position caches so subsequent scalp/position polling sees the new contract
-      try {
-        invalidateBrokerCache('dhan');
-      } catch {}
+    if (!result.success) {
+      return NextResponse.json(result, { status: 400 });
     }
+
+    // Invalidate position caches so subsequent scalp/position polling sees the new contract
+    try {
+      invalidateBrokerCache('dhan');
+    } catch {}
 
     return NextResponse.json(result);
   } catch (err: unknown) {

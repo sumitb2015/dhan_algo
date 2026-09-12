@@ -133,12 +133,36 @@ export default function FuturesOrderModal({
   const marginPct = productType === 'INTRADAY' ? (isStock ? 0.12 : 0.10) : (isStock ? 0.23 : 0.19);
   const estimatedMargin = contractTurnover * marginPct;
 
+  // Keyboard Escape listener to close modal
+  useEffect(() => {
+    if (!isOpen) return;
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') onClose();
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [isOpen, onClose]);
+
   // Handle Order Placement
   const handlePlaceOrder = async () => {
     if (!initialOrder?.symbol) return;
-    setPlacingOrder(true);
     setErrorMsg(null);
     setSuccessResult(null);
+
+    if (orderType === 'LIMIT') {
+      const p = parseFloat(limitPrice);
+      if (isNaN(p) || p <= 0) {
+        setErrorMsg('Please enter a valid limit price greater than 0');
+        return;
+      }
+    }
+
+    if (!Number.isInteger(lots) || lots <= 0) {
+      setErrorMsg('Please enter a valid positive number of lots');
+      return;
+    }
+
+    setPlacingOrder(true);
 
     try {
       const payload = {
