@@ -65,21 +65,20 @@ def scan_unusual_options(underlying: str = 'NIFTY', expiry: str = None, min_rati
 
     if meta:
         chain_id = meta['chain_id']
+        chain_seg = meta['chain_seg']
         lot_size = helper.get_lot_size(under_upper) or 65
-        spot = _clean_num(helper.get_ltp(meta['spot_id'], exchange='NSE', instrument='INDEX'))
+        spot = _clean_num(helper.get_ltp(meta['spot_id'], exchange=meta['spot_seg'], instrument='INDEX'))
+        expiries = helper.get_expiry_list(chain_id, chain_seg)
     else:
         # Equity stock
         sec = helper.find_equity(under_upper)
         if not sec:
             return {"success": False, "error": f"Underlying {under_upper} not found in master list"}
         chain_id = int(sec.get('SECURITY_ID'))
+        chain_seg = 'NSE_FNO'
         lot_size = helper.get_lot_size(under_upper) or 500
         spot = _clean_num(helper.get_ltp(under_upper, exchange='NSE', instrument='EQUITY'))
-
-    try:
-        expiries = helper.get_expiries(chain_id)
-    except Exception as e:
-        return {"success": False, "error": f"Failed to fetch expiries for {under_upper}: {e}"}
+        expiries = helper.get_expiry_list(chain_id, 'NSE_EQ')
 
     if not expiries:
         return {"success": False, "error": f"No expiries available for {under_upper}"}
@@ -87,7 +86,7 @@ def scan_unusual_options(underlying: str = 'NIFTY', expiry: str = None, min_rati
     target_expiry = expiry if expiry and expiry in expiries else expiries[0]
 
     try:
-        df = helper.get_option_chain_df(chain_id, target_expiry)
+        df = helper.get_option_chain_df(chain_id, target_expiry, exchange_segment=chain_seg)
     except Exception as e:
         return {"success": False, "error": f"Failed to fetch option chain: {e}"}
 
@@ -131,7 +130,8 @@ def scan_unusual_options(underlying: str = 'NIFTY', expiry: str = None, min_rati
         ce_oi_chg = ce_oi - ce_prev_oi
         ce_oi_chg_pct = round((ce_oi_chg / max(1, ce_prev_oi)) * 100, 2)
         ce_vol_oi = round(ce_vol / max(1, ce_oi), 2)
-        ce_turnover_cr = round((ce_vol * ce_ltp * lot_size) / 10_000_000.0, 2)
+        # Volume is in quantity (shares) -> turnover in Cr = (volume * price) / 10,000,000
+        ce_turnover_cr = round((ce_vol * ce_ltp) / 10_000_000.0, 2)
 
         total_ce_turnover += ce_turnover_cr
         total_ce_oi += ce_oi
@@ -156,7 +156,8 @@ def scan_unusual_options(underlying: str = 'NIFTY', expiry: str = None, min_rati
         pe_oi_chg = pe_oi - pe_prev_oi
         pe_oi_chg_pct = round((pe_oi_chg / max(1, pe_prev_oi)) * 100, 2)
         pe_vol_oi = round(pe_vol / max(1, pe_oi), 2)
-        pe_turnover_cr = round((pe_vol * pe_ltp * lot_size) / 10_000_000.0, 2)
+        # Volume is in quantity (shares) -> turnover in Cr = (volume * price) / 10,000,000
+        pe_turnover_cr = round((pe_vol * pe_ltp) / 10_000_000.0, 2)
 
         total_pe_turnover += pe_turnover_cr
         total_pe_oi += pe_oi
@@ -244,23 +245,25 @@ def scan_unusual_options(underlying: str = 'NIFTY', expiry: str = None, min_rati
             score = 0
 
             # 1. Unusual Volume vs OI
-            if item["vol_oi_ratio"] >= 1.2 and item["volume"] >= 10_000:
+            if item["vol_oi_ratio"] >= min_ratio and item["volume"] >= 50_000:
                 reasons.append(f"Vol/OI {item['vol_oi_ratio']}x")
                 score += 30
 
-            # 2. Large OI Spike (> 150k contracts)
-            if abs(item["oi_change"]) >= 150_000:
+            # 2. Large OI Spike
+            if abs(item["oi_change"]) >= 100_000:
                 reasons.append(f"OI Δ {item['oi_change']:+d}")
                 score += 25
 
-            # 3. High Turnover Block (> ₹15 Cr)
-            if item["turnover_cr"] >= 15.0:
+            # 3. High Turnover Block (Index >= ₹5 Cr, Stock >= ₹1 Cr)
+            block_threshold = 5.0 if meta else 1.0
+            if item["turnover_cr"] >= block_threshold:
                 reasons.append(f"₹{item['turnover_cr']} Cr Turnover")
                 score += 25
 
             # 4. Aggressive OTM move
             dist_pts = abs(strike - spot)
-            if dist_pts >= 150 and item["volume"] >= 30_000 and item["turnover_cr"] >= 5.0:
+            otm_dist = 150 if under_upper == 'NIFTY' else 400 if under_upper in ('BANKNIFTY', 'SENSEX') else (spot * 0.03)
+            if dist_pts >= otm_dist and item["volume"] >= 50_000 and item["turnover_cr"] >= 0.5:
                 reasons.append("Aggressive OTM Flow")
                 score += 20
 

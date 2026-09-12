@@ -151,8 +151,8 @@ export default function UnusualActivity() {
     return data.alerts.filter(item => {
       if (searchStrike && !item.strike.toString().includes(searchStrike)) return false;
       if (filterTab === 'high_ratio') return item.vol_oi_ratio >= 1.2;
-      if (filterTab === 'oi_spike') return Math.abs(item.oi_change) >= 150_000;
-      if (filterTab === 'blocks') return item.turnover_cr >= 15;
+      if (filterTab === 'oi_spike') return Math.abs(item.oi_change) >= 100_000;
+      if (filterTab === 'blocks') return item.turnover_cr >= 5;
       if (filterTab === 'bullish') return item.bias === 'BULLISH';
       if (filterTab === 'bearish') return item.bias === 'BEARISH';
       return true;
@@ -329,8 +329,8 @@ export default function UnusualActivity() {
               [
                 { id: 'all', label: 'All Alerts' },
                 { id: 'high_ratio', label: 'High Vol/OI (≥1.2x)' },
-                { id: 'oi_spike', label: 'OI Spikes (≥150k)' },
-                { id: 'blocks', label: 'Large Blocks (≥₹15 Cr)' },
+                { id: 'oi_spike', label: 'OI Spikes (≥100k)' },
+                { id: 'blocks', label: 'Large Blocks (≥₹5 Cr)' },
                 { id: 'bullish', label: 'Bullish Flow' },
                 { id: 'bearish', label: 'Bearish Flow' },
               ] as const
