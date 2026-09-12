@@ -241,6 +241,7 @@ inside the token system.
 
 **Skills for recurring work** — read the matching skill before starting, each is
 distilled from 7-10 repeat bug-fix commits:
+`dhan-order-tickets` (order tickets/modals, API trade bridges, server-side lot caps, multi-exchange contract resolution, commit-on-blur draft inputs, out-of-order fetch guards),
 `dhan-broker-positions` (scalper terminals, broker payloads, P&L, close/exit orders),
 `dhan-live-chart` (lightweight-charts canvas charts and polled series),
 `dhan-polling-guards` (poll loops, caches, JSON read-modify-write, process spawns),
