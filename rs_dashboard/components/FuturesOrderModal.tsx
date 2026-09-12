@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState, useEffect, useMemo, useCallback } from 'react';
+import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import {
   X,
   TrendingUp,
@@ -17,6 +17,7 @@ import {
   Sliders,
 } from 'lucide-react';
 import type { FuturesLookupData } from '@/app/api/futures/order/route';
+import { fmtPrice, fmtLakhRs } from '@/lib/futuresFormatters';
 
 export interface FuturesOrderInitialState {
   symbol: string;
@@ -37,67 +38,101 @@ interface FuturesOrderModalProps {
   onOrderSuccess?: (orderId: string, details: string) => void;
 }
 
-function fmtPrice(v: number): string {
-  return v.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-}
-
-function fmtLakh(v: number): string {
-  if (v >= 10000000) return '₹' + (v / 10000000).toFixed(2) + ' Cr';
-  if (v >= 100000) return '₹' + (v / 100000).toFixed(2) + ' L';
-  if (v >= 1000) return '₹' + (v / 1000).toFixed(1) + ' K';
-  return '₹' + v.toFixed(0);
-}
-
 export default function FuturesOrderModal({
   isOpen,
   onClose,
   initialOrder,
   onOrderSuccess,
 }: FuturesOrderModalProps) {
+  // ─── Committed order state ──────────────────────────────────────────────────
   const [side, setSide] = useState<'BUY' | 'SELL'>('BUY');
   const [orderType, setOrderType] = useState<'MARKET' | 'LIMIT'>('MARKET');
   const [productType, setProductType] = useState<'INTRADAY' | 'MARGIN'>('INTRADAY');
   const [lots, setLots] = useState<number>(1);
+  // Committed limit price string — the value used for computations and submission
   const [limitPrice, setLimitPrice] = useState<string>('');
-  const [stopLoss, setStopLoss] = useState<string>('');
-  const [targetPrice, setTargetPrice] = useState<string>('');
 
+  // ─── Draft inputs (commit-on-blur) ─────────────────────────────────────────
+  // Per dhan-commit-on-blur skill: free-typed inputs that feed order parameters
+  // must NOT update the committed state on every keystroke. Partial values like
+  // clearing "1" to type "15" would briefly read as "1" and snap back.
+  const [lotsDraft, setLotsDraft] = useState<string>('1');
+  const [limitPriceDraft, setLimitPriceDraft] = useState<string>('');
+
+  // ─── Reference-only fields from the trade plan (not sent to broker) ─────────
+  const [stopLossRef, setStopLossRef] = useState<number | null>(null);
+  const [targetRef, setTargetRef] = useState<number | null>(null);
+
+  // ─── Async / UI state ────────────────────────────────────────────────────────
   const [contractData, setContractData] = useState<FuturesLookupData | null>(null);
   const [loadingContract, setLoadingContract] = useState<boolean>(false);
   const [placingOrder, setPlacingOrder] = useState<boolean>(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [successResult, setSuccessResult] = useState<{ orderId: string; summary: string } | null>(null);
 
-  // Sync initial state when modal opens
+  // ─── Out-of-order guard for fetchContract ────────────────────────────────────
+  // Per dhan-polling-guards skill: a stale in-flight fetch resolving after a
+  // newer one would overwrite a fresh LTP with outdated data.
+  const fetchSeqRef = useRef(0);
+
+  // ─── Commit helpers ──────────────────────────────────────────────────────────
+
+  /** Called on blur or Enter from the lots text field. */
+  const commitLots = useCallback((raw: string) => {
+    const n = Math.max(1, parseInt(raw, 10) || 1);
+    setLots(n);
+    setLotsDraft(String(n));
+  }, []);
+
+  /** Called on blur or Enter from the limit price field. */
+  const commitLimitPrice = useCallback((raw: string) => {
+    setLimitPrice(raw);
+    setLimitPriceDraft(raw);
+  }, []);
+
+  /** Helper to set both committed and draft lots atomically (used by steppers and presets). */
+  const setLotsImmediate = useCallback((n: number) => {
+    setLots(n);
+    setLotsDraft(String(n));
+  }, []);
+
+  /** Helper to set both committed and draft limit price atomically (used by fetchContract). */
+  const setLimitPriceImmediate = useCallback((s: string) => {
+    setLimitPrice(s);
+    setLimitPriceDraft(s);
+  }, []);
+
+  // ─── Sync initial state when modal opens ────────────────────────────────────
   useEffect(() => {
     if (isOpen && initialOrder) {
       setSide(initialOrder.side || 'BUY');
       setProductType(initialOrder.productType || 'INTRADAY');
-      setLots(initialOrder.initialLots || 1);
+      const initLots = initialOrder.initialLots || 1;
+      setLots(initLots);
+      setLotsDraft(String(initLots));
       setOrderType('MARKET');
       setErrorMsg(null);
       setSuccessResult(null);
+      setContractData(null);
 
       if (initialOrder.price) {
-        setLimitPrice(initialOrder.price.toFixed(2));
-      }
-      if (initialOrder.stopLoss) {
-        setStopLoss(initialOrder.stopLoss.toFixed(2));
+        setLimitPriceImmediate(initialOrder.price.toFixed(2));
       } else {
-        setStopLoss('');
+        setLimitPriceImmediate('');
       }
-      if (initialOrder.target) {
-        setTargetPrice(initialOrder.target.toFixed(2));
-      } else {
-        setTargetPrice('');
-      }
+
+      setStopLossRef(initialOrder.stopLoss ?? null);
+      setTargetRef(initialOrder.target ?? null);
 
       // Fetch verified contract details (lot size, security ID, live LTP)
       fetchContract(initialOrder.symbol, initialOrder.expiry);
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isOpen, initialOrder]);
 
+  // ─── Contract lookup with staleness guard ────────────────────────────────────
   const fetchContract = useCallback(async (symbol: string, expiry?: string) => {
+    const seq = ++fetchSeqRef.current;
     setLoadingContract(true);
     setErrorMsg(null);
     try {
@@ -105,35 +140,23 @@ export default function FuturesOrderModal({
       if (expiry) url += `&expiry=${encodeURIComponent(expiry)}`;
       const res = await fetch(url);
       const json = await res.json();
+      if (seq !== fetchSeqRef.current) return; // stale — a newer fetch is in flight
       if (!json.success || !json.data) {
         throw new Error(json.error ?? 'Contract details could not be resolved');
       }
       setContractData(json.data);
       if (json.data.ltp && json.data.ltp > 0) {
-        setLimitPrice(json.data.ltp.toFixed(2));
+        setLimitPriceImmediate(json.data.ltp.toFixed(2));
       }
     } catch (err: unknown) {
+      if (seq !== fetchSeqRef.current) return;
       setErrorMsg(err instanceof Error ? err.message : 'Failed to lookup contract');
     } finally {
-      setLoadingContract(false);
+      if (seq === fetchSeqRef.current) setLoadingContract(false);
     }
-  }, []);
+  }, [setLimitPriceImmediate]);
 
-  // Compute total quantity and economics
-  const lotSize = contractData?.lotSize ?? initialOrder?.lotSize ?? 1;
-  const totalQty = lots * lotSize;
-  const currentLtp = contractData?.ltp ?? initialOrder?.price ?? 0;
-  const execPrice = orderType === 'LIMIT' ? parseFloat(limitPrice) || currentLtp : currentLtp;
-  const contractTurnover = execPrice * totalQty;
-
-  // Approximate Margin requirement in India:
-  // INTRADAY (MIS): ~10% for indices, ~12% for stock futures
-  // MARGIN (NRML): ~18-20% for indices, ~22-25% for stock futures
-  const isStock = contractData?.instrument === 'FUTSTK';
-  const marginPct = productType === 'INTRADAY' ? (isStock ? 0.12 : 0.10) : (isStock ? 0.23 : 0.19);
-  const estimatedMargin = contractTurnover * marginPct;
-
-  // Keyboard Escape listener to close modal
+  // ─── Keyboard: Escape closes modal ──────────────────────────────────────────
   useEffect(() => {
     if (!isOpen) return;
     const handleKeyDown = (e: KeyboardEvent) => {
@@ -143,7 +166,28 @@ export default function FuturesOrderModal({
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [isOpen, onClose]);
 
-  // Handle Order Placement
+  // ─── Derived economics ───────────────────────────────────────────────────────
+  const lotSize = contractData?.lotSize ?? initialOrder?.lotSize ?? 1;
+  const totalQty = lots * lotSize;
+  const currentLtp = contractData?.ltp ?? initialOrder?.price ?? 0;
+  const execPrice = orderType === 'LIMIT' ? parseFloat(limitPrice) || currentLtp : currentLtp;
+  const contractTurnover = execPrice * totalQty;
+
+  // ─── Margin estimates ────────────────────────────────────────────────────────
+  // MCX margin requirements differ substantially from NSE F&O:
+  //   MCX: ~2.5% MIS, ~4% NRML (SPAN-based, much lower than equity F&O)
+  //   NSE Index: ~10% MIS, ~19% NRML
+  //   NSE Stocks: ~12% MIS, ~23% NRML
+  const isMcx = contractData?.exchangeSegment === 'MCX_COMM';
+  const isStock = contractData?.instrument === 'FUTSTK';
+  const marginPct = isMcx
+    ? (productType === 'INTRADAY' ? 0.025 : 0.04)
+    : productType === 'INTRADAY'
+      ? (isStock ? 0.12 : 0.10)
+      : (isStock ? 0.23 : 0.19);
+  const estimatedMargin = contractTurnover * marginPct;
+
+  // ─── Order placement ─────────────────────────────────────────────────────────
   const handlePlaceOrder = async () => {
     if (!initialOrder?.symbol) return;
     setErrorMsg(null);
@@ -186,7 +230,10 @@ export default function FuturesOrderModal({
         throw new Error(json.error || 'Broker rejected futures order');
       }
 
-      const summary = `${side} ${lots} lot (${totalQty} qty) ${contractData?.displayName || initialOrder.symbol} @ ${orderType}`;
+      // Include product type in summary — per dhan-broker-positions skill,
+      // position identity is (symbol, product). The user needs to know which
+      // product was booked in order to correctly close the position later.
+      const summary = `${side} ${lots}L (${totalQty} qty) ${contractData?.displayName || initialOrder.symbol} @ ${orderType} · ${productType}`;
       setSuccessResult({
         orderId: json.orderId,
         summary,
@@ -368,7 +415,7 @@ export default function FuturesOrderModal({
               </div>
             </div>
 
-            {/* Limit Price input (if LIMIT selected) */}
+            {/* Limit Price input — commit-on-blur/Enter; Escape reverts draft */}
             <div>
               <label className="text-[10px] font-bold text-zinc-400 uppercase tracking-wider block mb-1.5">
                 Limit Price (₹)
@@ -377,8 +424,16 @@ export default function FuturesOrderModal({
                 type="number"
                 step="0.05"
                 disabled={orderType !== 'LIMIT'}
-                value={limitPrice}
-                onChange={e => setLimitPrice(e.target.value)}
+                value={limitPriceDraft}
+                onChange={e => setLimitPriceDraft(e.target.value)}
+                onBlur={e => { if (orderType === 'LIMIT') commitLimitPrice(e.currentTarget.value); }}
+                onKeyDown={e => {
+                  if (e.key === 'Enter' && orderType === 'LIMIT') {
+                    commitLimitPrice((e.target as HTMLInputElement).value);
+                    (e.target as HTMLInputElement).blur();
+                  }
+                  if (e.key === 'Escape') setLimitPriceDraft(limitPrice); // revert
+                }}
                 placeholder="0.00"
                 className={`w-full px-3 py-1.5 rounded-xl border bg-zinc-900 font-mono text-white text-xs focus:outline-none transition-colors ${
                   orderType === 'LIMIT'
@@ -389,50 +444,61 @@ export default function FuturesOrderModal({
             </div>
           </div>
 
-          {/* 4. Quantity / Lots with steppers and quick presets */}
+          {/* 4. Quantity / Lots — commit-on-blur/Enter; steppers and presets are immediate */}
           <div>
             <div className="flex items-center justify-between mb-1.5">
               <label className="text-[10px] font-bold text-zinc-400 uppercase tracking-wider">
                 Quantity (Lots)
               </label>
               <span className="text-[10px] font-mono text-zinc-300">
-                Total: <strong className="text-white">{totalQty}</strong> shares ({lots} lot{lots > 1 ? 's' : ''} × {lotSize})
+                Total: <strong className="text-white">{totalQty}</strong> units ({lots} lot{lots > 1 ? 's' : ''} × {lotSize})
               </span>
             </div>
 
             <div className="flex items-center gap-2">
               <div className="flex items-center rounded-xl bg-zinc-900 border border-zinc-800 flex-1 overflow-hidden">
+                {/* − stepper: immediate (discrete button click) */}
                 <button
                   type="button"
-                  onClick={() => setLots(l => Math.max(1, l - 1))}
+                  onClick={() => setLotsImmediate(Math.max(1, lots - 1))}
                   className="px-3 py-1.5 text-sm font-bold text-zinc-400 hover:text-white hover:bg-zinc-800 transition-colors cursor-pointer"
                 >
                   −
                 </button>
+                {/* Typed lots: commit on blur / Enter; Escape reverts draft */}
                 <input
                   type="number"
                   min="1"
-                  max="100"
-                  value={lots}
-                  onChange={e => setLots(Math.max(1, parseInt(e.target.value, 10) || 1))}
+                  max="50"
+                  value={lotsDraft}
+                  onChange={e => setLotsDraft(e.target.value)}
+                  onBlur={e => commitLots(e.currentTarget.value)}
+                  onKeyDown={e => {
+                    if (e.key === 'Enter') {
+                      commitLots((e.target as HTMLInputElement).value);
+                      (e.target as HTMLInputElement).blur();
+                    }
+                    if (e.key === 'Escape') setLotsDraft(String(lots)); // revert
+                  }}
                   className="w-full text-center bg-transparent font-mono font-bold text-white text-sm focus:outline-none"
                 />
+                {/* + stepper: immediate */}
                 <button
                   type="button"
-                  onClick={() => setLots(l => l + 1)}
+                  onClick={() => setLotsImmediate(lots + 1)}
                   className="px-3 py-1.5 text-sm font-bold text-zinc-400 hover:text-white hover:bg-zinc-800 transition-colors cursor-pointer"
                 >
                   +
                 </button>
               </div>
 
-              {/* Quick Lot Presets */}
+              {/* Quick Lot Presets — discrete choice, immediate */}
               <div className="flex items-center gap-1">
                 {[1, 2, 3, 5].map(preset => (
                   <button
                     key={preset}
                     type="button"
-                    onClick={() => setLots(preset)}
+                    onClick={() => setLotsImmediate(preset)}
                     className={`px-2.5 py-1.5 rounded-lg font-mono text-xs font-semibold transition-colors cursor-pointer ${
                       lots === preset
                         ? 'bg-sky-500/20 text-sky-300 border border-sky-500/40'
@@ -450,7 +516,7 @@ export default function FuturesOrderModal({
           <div className="p-3 rounded-xl bg-zinc-900/60 border border-zinc-800 space-y-1.5 font-mono text-[11px]">
             <div className="flex items-center justify-between text-zinc-400">
               <span>Contract Turnover:</span>
-              <span className="text-zinc-200 font-semibold">{fmtLakh(contractTurnover)}</span>
+              <span className="text-zinc-200 font-semibold">{fmtLakhRs(contractTurnover)}</span>
             </div>
             <div className="flex items-center justify-between text-zinc-400">
               <span className="flex items-center gap-1">
@@ -458,10 +524,31 @@ export default function FuturesOrderModal({
                 Est. Margin Required:
               </span>
               <span className="text-sky-300 font-bold">
-                {fmtLakh(estimatedMargin)} <span className="text-[9px] text-zinc-500">({(marginPct * 100).toFixed(0)}%)</span>
+                {fmtLakhRs(estimatedMargin)} <span className="text-[9px] text-zinc-500">({(marginPct * 100).toFixed(1)}% {isMcx ? 'MCX' : isStock ? 'STK' : 'IDX'})</span>
               </span>
             </div>
           </div>
+
+          {/* 6. Trade Plan Reference (SL / Target from SetupCard — NOT placed as broker orders) */}
+          {(stopLossRef !== null || targetRef !== null) && (
+            <div className="p-3 rounded-xl bg-zinc-950/60 border border-zinc-800/50 space-y-1.5 font-mono text-[11px]">
+              <p className="text-[9px] font-bold text-zinc-500 uppercase tracking-widest mb-1">
+                Trade Plan · Reference Only · Not placed as orders
+              </p>
+              {stopLossRef !== null && (
+                <div className="flex items-center justify-between text-zinc-400">
+                  <span>Stop Loss Ref:</span>
+                  <span className="text-red-400 font-semibold">₹{fmtPrice(stopLossRef)}</span>
+                </div>
+              )}
+              {targetRef !== null && (
+                <div className="flex items-center justify-between text-zinc-400">
+                  <span>Target Ref:</span>
+                  <span className="text-emerald-400 font-semibold">₹{fmtPrice(targetRef)}</span>
+                </div>
+              )}
+            </div>
+          )}
 
           {/* Feedback Banners */}
           {errorMsg && (

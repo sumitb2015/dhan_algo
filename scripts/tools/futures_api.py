@@ -21,17 +21,33 @@ sys.path.insert(0, ROOT)
 from login import get_dhan_client
 from lib.dhan_helper import DhanHelper
 
-INDEX_SYMBOLS = {'NIFTY', 'BANKNIFTY', 'FINNIFTY', 'MIDCPNIFTY', 'SENSEX', 'BANKEX'}
+# NSE index futures (FUTIDX on NSE_FNO)
+NSE_INDEX_SYMBOLS = {'NIFTY', 'BANKNIFTY', 'FINNIFTY', 'MIDCPNIFTY', 'NIFTYNXT50'}
+
+# BSE index futures (FUTIDX on BSE_FNO)
+BSE_INDEX_SYMBOLS = {'SENSEX', 'BANKEX'}
+
+# MCX commodity futures (FUTCOM on MCX_COMM).
+# Always expand this set when adding a new MCX contract rather than letting it
+# fall through to the NSE FUTSTK branch, which will produce a lookup failure.
+MCX_SYMBOLS = {
+    'CRUDEOIL', 'CRUDEOILM',
+    'NATURALGAS', 'NATGASMINI',
+    'GOLD', 'GOLDMINI', 'GOLDGUINEA', 'GOLDPETAL',
+    'SILVER', 'SILVERMINI', 'SILVERMICRO',
+    'COPPER', 'ALUMINIUM', 'ZINC', 'LEAD', 'NICKEL',
+}
 
 
 def resolve_instrument_and_exchange(underlying: str):
     under = underlying.upper()
-    if under in ('CRUDEOIL', 'CRUDEOILM'):
+    if under in MCX_SYMBOLS:
         return 'MCX', 'FUTCOM', 'MCX_COMM'
-    if under in ('SENSEX', 'BANKEX'):
+    if under in BSE_INDEX_SYMBOLS:
         return 'BSE', 'FUTIDX', 'BSE_FNO'
-    if under in INDEX_SYMBOLS:
+    if under in NSE_INDEX_SYMBOLS:
         return 'NSE', 'FUTIDX', 'NSE_FNO'
+    # Default: NSE stock futures
     return 'NSE', 'FUTSTK', 'NSE_FNO'
 
 
@@ -107,7 +123,13 @@ def main():
         if lot_size <= 0:
             lot_size = helper.get_lot_size(under) or 1
 
-        lots = max(1, args.lots)
+        # Reject non-positive lots explicitly rather than silently clamping.
+        # Note: _auto_detect_segment is a private DhanHelper method — it is used here
+        # intentionally; if it is ever renamed, update this script accordingly.
+        lots = args.lots
+        if lots <= 0:
+            print(json.dumps({'success': False, 'error': f'Invalid lots value: {lots}. Must be >= 1.'}))
+            sys.exit(0)
         qty = lots * lot_size
         seg = helper._auto_detect_segment(sec) or default_seg
 

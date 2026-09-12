@@ -23,6 +23,7 @@ import {
 import type { ContractStats } from '@/app/api/futures/route';
 import type { OIRow } from '@/app/api/futures-oi/route';
 import type { FuturesOrderInitialState } from '@/components/FuturesOrderModal';
+import { fmtPrice, fmtLakh, fmtPct } from '@/lib/futuresFormatters';
 
 interface FuturesActionDeskProps {
   niftyNear?: ContractStats;
@@ -56,23 +57,6 @@ interface ActionableSetup {
   optionsPlay: string;
   accent: string;
   badgeCls: string;
-}
-
-// ─── Formatters ───────────────────────────────────────────────────────────────
-
-function fmtPrice(v: number): string {
-  return v.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-}
-
-function fmtLakh(v: number): string {
-  if (v >= 10000000) return (v / 10000000).toFixed(2) + 'Cr';
-  if (v >= 100000) return (v / 100000).toFixed(1) + 'L';
-  if (v >= 1000) return (v / 1000).toFixed(1) + 'K';
-  return v.toFixed(0);
-}
-
-function fmtPct(v: number): string {
-  return (v >= 0 ? '+' : '') + v.toFixed(2) + '%';
 }
 
 // ─── Index Intraday Command Card ──────────────────────────────────────────────

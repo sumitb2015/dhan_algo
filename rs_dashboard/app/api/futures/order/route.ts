@@ -68,6 +68,10 @@ export async function GET(req: NextRequest) {
 
 // ─── POST: Place Futures Order ────────────────────────────────────────────────
 
+// Hard cap per order — protects against direct API abuse bypassing the UI's max="100".
+// Adjust if your risk policy allows larger block trades, but never remove entirely.
+const MAX_LOTS_PER_ORDER = 50;
+
 export async function POST(req: NextRequest) {
   try {
     const body = await req.json();
@@ -91,7 +95,18 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ success: false, error: 'Invalid side. Must be BUY or SELL.' }, { status: 400 });
     }
 
-    const lotsNum = Math.max(1, parseInt(String(lots), 10) || 1);
+    const lotsRaw = parseInt(String(lots), 10) || 0;
+    if (lotsRaw <= 0) {
+      return NextResponse.json({ success: false, error: 'Lots must be a positive integer' }, { status: 400 });
+    }
+    if (lotsRaw > MAX_LOTS_PER_ORDER) {
+      return NextResponse.json(
+        { success: false, error: `Order exceeds maximum allowed lots (${MAX_LOTS_PER_ORDER}). Please split the order.` },
+        { status: 400 }
+      );
+    }
+    const lotsNum = lotsRaw;
+
     const cleanType = String(orderType).toUpperCase() === 'LIMIT' ? 'LIMIT' : 'MARKET';
     const cleanProduct = String(productType).toUpperCase() === 'MARGIN' ? 'MARGIN' : 'INTRADAY';
     const priceNum = cleanType === 'LIMIT' ? parseFloat(String(price)) || 0 : 0;

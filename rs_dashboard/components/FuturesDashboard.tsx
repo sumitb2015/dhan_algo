@@ -17,19 +17,9 @@ import FuturesCandleChart from '@/components/FuturesCandleChart';
 import FuturesActionDesk from '@/components/FuturesActionDesk';
 import FuturesPlaybookModal from '@/components/FuturesPlaybookModal';
 import FuturesOrderModal, { type FuturesOrderInitialState } from '@/components/FuturesOrderModal';
+import { fmtPrice, fmtLakh } from '@/lib/futuresFormatters';
 
 // ─── Formatters ───────────────────────────────────────────────────────────────
-
-function fmtPrice(v: number): string {
-  return v.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-}
-
-function fmtLakh(v: number): string {
-  if (v >= 10000000) return (v / 10000000).toFixed(2) + 'Cr';
-  if (v >= 100000)   return (v / 100000).toFixed(1) + 'L';
-  if (v >= 1000)     return (v / 1000).toFixed(1) + 'K';
-  return v.toFixed(0);
-}
 
 function fmtChange(v: number): string {
   return (v >= 0 ? '+' : '-') + fmtLakh(Math.abs(v));
@@ -716,8 +706,10 @@ export default function FuturesDashboard() {
       const res  = await fetch('/api/futures-refresh');
       const json: FuturesRefreshStatus = await res.json();
       setDlStatus(json);
-      if (!json.running && json.done) {
-        if (pollRef.current) { clearInterval(pollRef.current); pollRef.current = null; }
+      // Only trigger an automatic refresh if we were actively polling a running download:
+      if (!json.running && json.done && pollRef.current) {
+        clearInterval(pollRef.current);
+        pollRef.current = null;
         fetchData();
         setRefreshKey(k => k + 1);
       }
