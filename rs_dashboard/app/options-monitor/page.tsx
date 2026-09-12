@@ -271,6 +271,8 @@ export default function OptionsMonitorPage() {
               theta: g.theta,
               vega: g.vega,
               iv: legIv,
+              expiry: l.expiry || selectedExpiry,
+              symbol: l.symbol,
             };
           });
 
@@ -366,6 +368,7 @@ export default function OptionsMonitorPage() {
         theta: gCe.theta,
         vega: gCe.vega,
         iv: ceIv,
+        expiry: selectedExpiry,
       },
       {
         id: `desk_pe_init_${Date.now()}`,
@@ -381,6 +384,7 @@ export default function OptionsMonitorPage() {
         theta: gPe.theta,
         vega: gPe.vega,
         iv: peIv,
+        expiry: selectedExpiry,
       },
     ]);
   }, [chainStrikes, normalizedChain, spot, uConfig.strikeStep, uConfig.lotSize, ivPct, selectedExpiry, liveQuotes]);
@@ -423,6 +427,7 @@ export default function OptionsMonitorPage() {
 
       return {
         ...leg,
+        expiry: leg.expiry || selectedExpiry,
         ltp: currentLtp,
         delta: g.delta,
         gamma: g.gamma,
@@ -504,6 +509,7 @@ export default function OptionsMonitorPage() {
       theta: g.theta,
       vega: g.vega,
       iv: legIv,
+      expiry: selectedExpiry,
     };
 
     setViewMode('custom');
@@ -644,6 +650,7 @@ export default function OptionsMonitorPage() {
           theta: gCe.theta,
           vega: gCe.vega,
           iv: ceQ.iv,
+          expiry: selectedExpiry,
         },
         {
           id: `pe_${Date.now()}`,
@@ -659,6 +666,7 @@ export default function OptionsMonitorPage() {
           theta: gPe.theta,
           vega: gPe.vega,
           iv: peQ.iv,
+          expiry: selectedExpiry,
         },
       ]);
       notifyAction(`Loaded Short Strangle at ${peS} PE / ${ceS} CE using live chain prices`);
@@ -684,6 +692,7 @@ export default function OptionsMonitorPage() {
           theta: gCe.theta,
           vega: gCe.vega,
           iv: ceQ.iv,
+          expiry: selectedExpiry,
         },
         {
           id: `pe_${Date.now()}`,
@@ -699,6 +708,7 @@ export default function OptionsMonitorPage() {
           theta: gPe.theta,
           vega: gPe.vega,
           iv: peQ.iv,
+          expiry: selectedExpiry,
         },
       ]);
       notifyAction(`Loaded Short Straddle at ATM ${atm} using live chain prices`);
@@ -734,6 +744,7 @@ export default function OptionsMonitorPage() {
           theta: gCeS.theta,
           vega: gCeS.vega,
           iv: ceSq.iv,
+          expiry: selectedExpiry,
         },
         {
           id: `pe_short_${Date.now()}`,
@@ -749,6 +760,7 @@ export default function OptionsMonitorPage() {
           theta: gPeS.theta,
           vega: gPeS.vega,
           iv: peSq.iv,
+          expiry: selectedExpiry,
         },
         {
           id: `ce_long_${Date.now()}`,
@@ -764,6 +776,7 @@ export default function OptionsMonitorPage() {
           theta: gCeL.theta,
           vega: gCeL.vega,
           iv: ceLq.iv,
+          expiry: selectedExpiry,
         },
         {
           id: `pe_long_${Date.now()}`,
@@ -779,6 +792,7 @@ export default function OptionsMonitorPage() {
           theta: gPeL.theta,
           vega: gPeL.vega,
           iv: peLq.iv,
+          expiry: selectedExpiry,
         },
       ]);
       notifyAction(`Loaded Iron Condor with defined risk wings`);
@@ -806,6 +820,7 @@ export default function OptionsMonitorPage() {
           theta: gPeS.theta,
           vega: gPeS.vega,
           iv: peSq.iv,
+          expiry: selectedExpiry,
         },
         {
           id: `pe_long_${Date.now()}`,
@@ -821,6 +836,7 @@ export default function OptionsMonitorPage() {
           theta: gPeL.theta,
           vega: gPeL.vega,
           iv: peLq.iv,
+          expiry: selectedExpiry,
         },
       ]);
       notifyAction(`Loaded Bull Put Credit Spread`);
@@ -848,6 +864,7 @@ export default function OptionsMonitorPage() {
           theta: gCeS.theta,
           vega: gCeS.vega,
           iv: ceSq.iv,
+          expiry: selectedExpiry,
         },
         {
           id: `ce_long_${Date.now()}`,
@@ -863,6 +880,7 @@ export default function OptionsMonitorPage() {
           theta: gCeL.theta,
           vega: gCeL.vega,
           iv: ceLq.iv,
+          expiry: selectedExpiry,
         },
       ]);
       notifyAction(`Loaded Bear Call Credit Spread`);
@@ -1186,6 +1204,7 @@ export default function OptionsMonitorPage() {
               breakevens={breakevens}
               chainStrikes={chainStrikes}
               viewMode={viewMode}
+              currentExpiry={selectedExpiry}
               onSyncBroker={fetchBrokerPositions}
               isBrokerLoading={isBrokerLoading}
               onAddLegClick={() => setIsAddLegOpen(true)}

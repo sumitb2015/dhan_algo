@@ -66,6 +66,34 @@ export interface OptionLegModel {
   theta: number; // ₹ / day
   vega: number;  // ₹ / 1% IV
   iv: number;    // fraction e.g. 0.145
+  expiry?: string; // e.g. '2026-09-15'
+  symbol?: string; // contract symbol
+}
+
+/**
+ * Formats full expiry date (e.g. "2026-09-15") into compact short-form (e.g. "15-Sep").
+ */
+export function formatShortExpiry(expiryStr?: string): string {
+  if (!expiryStr) return '—';
+  try {
+    const s = expiryStr.trim();
+    if (/^\d{4}-\d{2}-\d{2}$/.test(s)) {
+      const parts = s.split('-').map(Number);
+      const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+      const d = parts[2];
+      const m = parts[1];
+      return `${d < 10 ? '0' + d : d}-${months[m - 1]}`;
+    }
+    const dt = new Date(s);
+    if (!isNaN(dt.getTime())) {
+      const day = dt.getDate();
+      const mon = dt.toLocaleString('en-US', { month: 'short' });
+      return `${day < 10 ? '0' + day : day}-${mon}`;
+    }
+    return s;
+  } catch {
+    return expiryStr;
+  }
 }
 
 // ── Black-Scholes Core ───────────────────────────────────────────────────────

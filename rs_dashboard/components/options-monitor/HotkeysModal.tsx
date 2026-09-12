@@ -26,14 +26,14 @@ export default function HotkeysModal({ isOpen, onClose }: HotkeysModalProps) {
       <div className="w-full max-w-md rounded-2xl border border-zinc-700 bg-zinc-950 p-5 shadow-2xl text-zinc-100 animate-in fade-in zoom-in-95 duration-150">
         <div className="flex items-center justify-between border-b border-zinc-800 pb-3">
           <div className="flex items-center gap-2">
-            <Keyboard className="w-4 h-4 text-indigo-400" />
+            <Keyboard className="w-4 h-4 text-amber-400" />
             <h3 className="text-sm font-bold text-white uppercase tracking-wider">
               KEYBOARD SHORTCUT BINDINGS
             </h3>
           </div>
           <button
             onClick={onClose}
-            className="p-1 rounded-lg text-zinc-400 hover:text-white hover:bg-zinc-800 transition-colors"
+            className="p-1 rounded-lg text-zinc-400 hover:text-white hover:bg-zinc-800 transition-colors cursor-pointer"
           >
             <X className="w-4 h-4" />
           </button>
@@ -49,7 +49,7 @@ export default function HotkeysModal({ isOpen, onClose }: HotkeysModalProps) {
                 <span className="font-bold text-white block">{hk.label}</span>
                 <span className="text-[11px] text-zinc-400 font-sans">{hk.desc}</span>
               </div>
-              <span className="px-2.5 py-1 rounded bg-zinc-800 border border-zinc-700 text-indigo-300 font-bold text-xs shadow-sm">
+              <span className="px-2.5 py-1 rounded bg-amber-500/10 border border-amber-500/30 text-amber-400 font-bold text-xs shadow-sm">
                 {hk.key}
               </span>
             </div>
