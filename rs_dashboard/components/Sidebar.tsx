@@ -77,6 +77,8 @@ const NAV_GROUPS = [
     icon: LineChart,
     links: [
       { href: '/options-analytics', label: 'Positions Analytics', desc: 'Combined payoff, Greeks, P&L and Kelly sizing for your open NIFTY / SENSEX positions' },
+      { href: '/options/unusual-activity', label: 'Unusual Flow', desc: 'Real-time unusual options volume/OI spikes & institutional turnover flow' },
+      { href: '/backtest', label: 'Options Backtester', desc: 'Historical simulation with dynamic ATM rolling, scalp floors & trailing SL' },
       { href: '/options/analyzer', label: 'Option Analyzer', desc: 'Rank strikes based on technical indicators & OI change' },
       { href: '/options/premium-bar', label: 'Premium Bar Chart', desc: 'CE vs PE premium bar charts & straddle curve across strikes' },
       { href: '/options/live-charts', label: 'Live Options Charts', desc: 'Live straddle, rolling straddle, strangle & custom strategy premium charts' },

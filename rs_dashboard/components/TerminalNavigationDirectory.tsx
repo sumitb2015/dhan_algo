@@ -142,6 +142,20 @@ export const TERMINAL_PILLARS: TerminalPillarGroup[] = [
         hot: true,
       },
       {
+        name: 'Unusual Options Flow Scanner',
+        href: '/options/unusual-activity',
+        badge: 'FLOW',
+        desc: 'Real-time unusual options volume/OI ratio surges, institutional block turnover & sentiment flow',
+        hot: true,
+      },
+      {
+        name: 'Options Strategy Backtester',
+        href: '/backtest',
+        badge: 'BACKTEST',
+        desc: 'Historical walk-forward simulation with dynamic ATM rolling, scalp floors & trailing stop loss',
+        hot: true,
+      },
+      {
         name: 'Combined Premium Bar',
         href: '/options/premium-bar',
         badge: 'VOL',
