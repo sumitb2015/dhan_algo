@@ -257,7 +257,7 @@ def update_stock_csvs(all_quotes: dict[str, dict], today: str) -> tuple[int, int
         if sym.startswith("_"):
             continue  # skip pseudo-symbols like _NIFTY50_INDEX
         csv_path = os.path.join(STOCKS_DIR, f"{sym}_Daily_2Y.csv")
-        result = upsert_today_row(csv_path, today, ohlcv, has_timestamp_col=True)
+        result = upsert_today_row(csv_path, today, ohlcv, has_timestamp_col=False)
         if result == "appended":
             appended += 1
         elif result == "updated":

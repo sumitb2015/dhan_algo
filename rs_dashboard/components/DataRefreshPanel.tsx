@@ -174,6 +174,8 @@ export default function DataRefreshPanel({ open, onClose, onRefreshComplete }: D
     }
   }, [status?.log]);
 
+  const [dataSource, setDataSource] = useState<'dhan' | 'yahoo'>('dhan');
+
   const startRefresh = async (target: TargetId) => {
     setStarting(true);
     didCompleteRef.current = false;
@@ -181,7 +183,7 @@ export default function DataRefreshPanel({ open, onClose, onRefreshComplete }: D
       await fetch('/api/refresh', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ target }),
+        body: JSON.stringify({ target, source: dataSource }),
       });
       setRunning(true);
       await fetchStatus();
@@ -228,17 +230,49 @@ export default function DataRefreshPanel({ open, onClose, onRefreshComplete }: D
           </Button>
         </SheetHeader>
 
-        {/* Dataset buttons */}
-        <div className="flex-none px-5 pt-4 pb-3 space-y-2">
+        {/* Source Selector & Dataset buttons */}
+        <div className="flex-none px-5 pt-3 pb-3 space-y-2.5">
+          <div className="flex items-center justify-between pb-1">
+            <span className="text-[10px] font-bold uppercase tracking-wider text-zinc-400">Data Source</span>
+            <div className="flex bg-zinc-900 border border-zinc-800 rounded-lg p-0.5 text-xs font-semibold">
+              <button
+                type="button"
+                onClick={() => setDataSource('dhan')}
+                className={`px-2.5 py-1 rounded-md transition-colors ${
+                  dataSource === 'dhan'
+                    ? 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/30'
+                    : 'text-zinc-400 hover:text-zinc-200'
+                }`}
+              >
+                Dhan API
+              </button>
+              <button
+                type="button"
+                onClick={() => setDataSource('yahoo')}
+                className={`px-2.5 py-1 rounded-md transition-colors ${
+                  dataSource === 'yahoo'
+                    ? 'bg-sky-500/20 text-sky-400 border border-sky-500/30'
+                    : 'text-zinc-400 hover:text-zinc-200'
+                }`}
+              >
+                Yahoo (Backup)
+              </button>
+            </div>
+          </div>
+
           <Button
             onClick={() => startRefresh('all')}
             disabled={running || starting}
-            className="w-full flex items-center justify-between bg-emerald-500/10 hover:bg-emerald-500/15 text-emerald-400 border border-emerald-500/30 rounded-xl h-11 px-4"
+            className={`w-full flex items-center justify-between rounded-xl h-11 px-4 border ${
+              dataSource === 'yahoo'
+                ? 'bg-sky-500/10 hover:bg-sky-500/15 text-sky-400 border-sky-500/30'
+                : 'bg-emerald-500/10 hover:bg-emerald-500/15 text-emerald-400 border-emerald-500/30'
+            }`}
             variant="ghost"
           >
             <div className="flex items-center gap-2 font-semibold text-sm">
               {starting ? <RefreshCw className="h-4 w-4 animate-spin" /> : <Download className="h-4 w-4" />}
-              Refresh All Data
+              Refresh All Data ({dataSource === 'yahoo' ? 'Yahoo Backup' : 'Dhan'})
             </div>
           </Button>
 

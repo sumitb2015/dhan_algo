@@ -117,23 +117,30 @@ export async function POST(req: NextRequest) {
   if (fs.existsSync(STOP_FILE)) fs.unlinkSync(STOP_FILE);
   if (!fs.existsSync(DEBUG_DIR)) fs.mkdirSync(DEBUG_DIR, { recursive: true });
 
-  // Read optional target from body
+  // Read optional target and source from body
   let target = 'all';
+  let source = 'dhan';
   try {
     const body = await req.json().catch(() => ({}));
     if (body?.target) target = body.target;
+    if (body?.source) source = body.source;
   } catch { /* no body */ }
 
   // Reset status file so the poll doesn't see the previous run's done=true
   try {
     fs.writeFileSync(STATUS_FILE, JSON.stringify({
-      pid: null, phase: target, message: 'Startingâ€¦',
+      pid: null, phase: target, message: `Starting (${source})...`,
       current: 0, total: 0, done: false, error: null,
       log: [], updated_at: new Date().toISOString(),
     }));
   } catch { /* non-fatal */ }
 
-  const child = spawn(PYTHON_EXE, [SCRIPT_PATH, '--target', target], {
+  const scriptArgs = [SCRIPT_PATH, '--target', target];
+  if (source === 'yahoo') {
+    scriptArgs.push('--source', 'yahoo');
+  }
+
+  const child = spawn(PYTHON_EXE, scriptArgs, {
     cwd: PROJECT_ROOT,
     detached: true,
     stdio: 'ignore',
@@ -142,7 +149,7 @@ export async function POST(req: NextRequest) {
   });
   child.unref();
 
-  return NextResponse.json({ started: true, pid: child.pid, target });
+  return NextResponse.json({ started: true, pid: child.pid, target, source });
 }
 
 /** DELETE â€” stop the running refresh */

@@ -1029,19 +1029,49 @@ def refresh_indices(helper):
     return failed == 0
 
 
+def run_yahoo_backup(target: str):
+    """Run Yahoo Finance backup refresh and sync to fresh data."""
+    write_status("yahoo", f"▶ Switching to Yahoo Finance backup engine (target={target})...")
+    try:
+        from scripts.downloader.download_yahoo_daily import (
+            download_yahoo_stocks, download_yahoo_index, get_nifty500_symbols
+        )
+        if target in ("all", "nifty50"):
+            download_yahoo_index("nifty50", period="1y")
+        if target in ("all", "nifty500-index"):
+            download_yahoo_index("nifty500-index", period="1y")
+        if target in ("all", "stocks"):
+            symbols = get_nifty500_symbols()
+            download_yahoo_stocks(symbols, period="1y", sync_to_fresh=True)
+        write_status("done", "✅ Yahoo Finance backup refresh complete.", done=True)
+        return True
+    except Exception as e:
+        mark_error(f"Yahoo Finance backup refresh failed: {e}")
+        return False
+
+
 # ── Main ──────────────────────────────────────────────────────────────────────
 def main():
     parser = argparse.ArgumentParser(description="Refresh RS dashboard data (incremental)")
     parser.add_argument("--target", default="all",
                         choices=["all", "nifty50", "nifty500-index", "indices", "stocks", "quotes"])
+    parser.add_argument("--source", default="dhan", choices=["dhan", "yahoo"],
+                        help="Data source: dhan (default) or yahoo (backup)")
+    parser.add_argument("--fallback-yahoo", action="store_true", default=True,
+                        help="Automatically fall back to Yahoo Finance if Dhan fails (default: True)")
     args = parser.parse_args()
 
     # Remove any stale stop trigger
     if os.path.exists(STOP_FILE):
         os.remove(STOP_FILE)
 
-    write_status("init", f"▶ Starting data refresh (target={args.target})...")
+    if args.source == "yahoo":
+        run_yahoo_backup(args.target)
+        return
 
+    write_status("init", f"▶ Starting data refresh (source=dhan, target={args.target})...")
+
+    helper = None
     try:
         from login import get_dhan_client
         from lib.dhan_helper import DhanHelper
@@ -1049,6 +1079,10 @@ def main():
         write_status("init", "  Initializing Dhan client...")
         dhan = get_dhan_client()
         if not dhan:
+            if args.fallback_yahoo:
+                write_status("init", "  ⚠ Dhan login failed. Falling back to Yahoo Finance backup engine...")
+                run_yahoo_backup(args.target)
+                return
             mark_error("Failed to authenticate with Dhan — run login.py first")
             return
 
@@ -1056,6 +1090,10 @@ def main():
         write_status("init", "  Dhan client ready.")
 
     except Exception as e:
+        if args.fallback_yahoo:
+            write_status("init", f"  ⚠ Dhan client error ({e}). Falling back to Yahoo Finance backup engine...")
+            run_yahoo_backup(args.target)
+            return
         mark_error(f"Initialization error: {e}\n{traceback.format_exc()}")
         return
 
@@ -1092,6 +1130,10 @@ def main():
                 failures.append("stocks")
 
     except FatalAPIError as e:
+        if args.fallback_yahoo:
+            write_status("stocks", f"  ⚠ Dhan fatal error ({e}). Automatically switching to Yahoo Finance backup...")
+            run_yahoo_backup(args.target)
+            return
         mark_error(str(e))
         return
 
