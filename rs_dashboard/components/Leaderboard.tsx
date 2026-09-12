@@ -171,7 +171,7 @@ export default function Leaderboard({
       setSortOrder(sortOrder === 'asc' ? 'desc' : 'asc');
     } else {
       setSortField(field);
-      setSortOrder('desc');
+      setSortOrder(field === 'rsRank' ? 'asc' : 'desc');
     }
     setPage(1);
   };
@@ -198,7 +198,7 @@ export default function Leaderboard({
     } else if (activePreset === 'stage2') {
       filtered = filtered.filter((s) => s.isStage2 || (s.isAboveSma50 && s.isAboveSma200 && s.rsScore >= 60));
     } else if (activePreset === 'volsurge') {
-      filtered = filtered.filter((s) => (s.volSurge ?? 1) >= 1.5 && s.priceChange1D > 0);
+      filtered = filtered.filter((s) => (s.volume ?? 0) > 0 && (s.volSurge ?? 1) >= 1.5 && s.priceChange1D > 0);
     } else if (activePreset === 'leaders') {
       filtered = filtered.filter((s) => s.rsRating === 'A');
     } else if (activePreset === 'momentum') {
@@ -516,23 +516,31 @@ export default function Leaderboard({
                     {/* Trend (Stage 2 / MA) */}
                     <td className="py-2.5 px-2 text-center">
                       {item.isStage2 ? (
-                        <span className="inline-flex items-center text-[10px] font-bold px-1.5 py-0.5 rounded bg-emerald-500/15 text-emerald-400 border border-emerald-500/30 whitespace-nowrap" title="Stage 2: Price > SMA50 > SMA200">
+                        <span className="inline-flex items-center text-[10px] font-bold px-1.5 py-0.5 rounded bg-emerald-500/15 text-emerald-400 border border-emerald-500/30 whitespace-nowrap" title={`Stage 2: Price ₹${item.latestClose} > 50 DMA (₹${item.sma50}) > 200 DMA (₹${item.sma200})`}>
                           STAGE 2
                         </span>
-                      ) : item.isAboveSma200 ? (
-                        <span className="inline-flex items-center text-[10px] font-medium px-1.5 py-0.5 rounded bg-sky-500/15 text-sky-400 border border-sky-500/30 whitespace-nowrap" title="Above 200 DMA">
-                          &gt; 200D
+                      ) : item.sma200 !== undefined ? (
+                        item.isAboveSma200 ? (
+                          <span className="inline-flex items-center text-[10px] font-medium px-1.5 py-0.5 rounded bg-sky-500/15 text-sky-400 border border-sky-500/30 whitespace-nowrap" title={`Above 200 DMA (₹${item.sma200})`}>
+                            &gt; 200D
+                          </span>
+                        ) : (
+                          <span className="inline-flex items-center text-[10px] font-medium px-1.5 py-0.5 rounded bg-rose-500/15 text-rose-400 border border-rose-500/30 whitespace-nowrap" title={`Below 200 DMA (₹${item.sma200})`}>
+                            &lt; 200D
+                          </span>
+                        )
+                      ) : item.isAboveSma50 ? (
+                        <span className="inline-flex items-center text-[10px] font-medium px-1.5 py-0.5 rounded bg-sky-500/15 text-sky-400 border border-sky-500/30 whitespace-nowrap" title={`Above 50 DMA (₹${item.sma50})`}>
+                          &gt; 50D
                         </span>
                       ) : (
-                        <span className="inline-flex items-center text-[10px] font-medium px-1.5 py-0.5 rounded bg-rose-500/15 text-rose-400 border border-rose-500/30 whitespace-nowrap" title="Below 200 DMA (Lagging)">
-                          &lt; 200D
-                        </span>
+                        <span className="text-zinc-600 text-xs">-</span>
                       )}
                     </td>
 
                     {/* Vol Surge */}
                     <td className="py-2.5 px-2 text-right font-mono text-xs">
-                      {item.volSurge !== undefined ? (
+                      {item.volSurge !== undefined && (item.volume ?? 0) > 0 ? (
                         <span className={`font-semibold ${
                           item.volSurge >= 2.0
                             ? 'text-amber-400'

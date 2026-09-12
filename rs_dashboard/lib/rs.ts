@@ -278,7 +278,7 @@ export function buildRSResult(
     const closes = rawStockRows.map((r) => r.close);
     const n = closes.length;
     const lastRow = rawStockRows[n - 1];
-    volume = lastRow.volume;
+    volume = Number.isFinite(lastRow.volume) ? lastRow.volume : 0;
 
     if (n >= 50) {
       const sum50 = closes.slice(-50).reduce((a, b) => a + b, 0);
@@ -292,7 +292,7 @@ export function buildRSResult(
     }
     isStage2 = isAboveSma50 && isAboveSma200 && (sma50 !== undefined && sma200 !== undefined && sma50 > sma200) && pctFrom52WHigh >= -25;
 
-    const vols20 = rawStockRows.slice(-20).map((r) => r.volume);
+    const vols20 = rawStockRows.slice(-20).map((r) => (Number.isFinite(r.volume) ? r.volume : 0));
     vol20Avg = Math.round(vols20.reduce((a, b) => a + b, 0) / 20);
     volSurge = vol20Avg > 0 ? Math.round((volume / vol20Avg) * 10) / 10 : 1.0;
   }
