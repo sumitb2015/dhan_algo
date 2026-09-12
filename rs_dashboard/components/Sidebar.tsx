@@ -42,6 +42,7 @@ const NAV_GROUPS = [
       { href: '/market-regime', label: 'Market Regime', desc: "CANSLIM Institutional Distribution Days & market timing" },
       { href: '/stage-screener', label: 'Stage Screener', desc: 'Minervini 8-point Trend Template & Stage 2 breakout screener' },
       { href: '/highs-lows', label: '52W Highs/Lows', desc: '52-week high/low proximity tiers, base patterns & Net New Highs expansion' },
+      { href: '/sector-breadth', label: 'Sector Breadth Depth', desc: 'Sector participation (% > 20/50/200 DMA), up-volume ratio & thrust' },
       { href: '/trend-confluence', label: 'Trend Confluence', desc: 'Multi-timeframe Weekly/Daily EMA alignment, ADX & RS blotter' },
       { href: '/rs-scanner', label: 'RS Scanner', desc: 'Relative strength scanner vs Nifty index' },
       { href: '/scanner', label: 'Scanner', desc: 'Custom criteria and queries scanner' },

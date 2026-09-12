@@ -2319,9 +2319,13 @@ export default function MarketDashboard() {
 
             <div className="overflow-hidden rounded-xl border border-zinc-800 bg-zinc-950">
               <SectionQuickLinks
-                categoryLabel="SCREENING & ORDER FLOW"
+                categoryLabel="SCREENING &amp; ORDER FLOW"
                 links={[
                   { label: 'Market Movers Terminal', href: '/movers', badge: 'SURGE' },
+                  { label: 'Minervini Stage 2', href: '/stage-screener', badge: 'STAGE 2' },
+                  { label: '52W Highs/Lows', href: '/highs-lows', badge: 'HIGHS/LOWS' },
+                  { label: 'Trend Confluence', href: '/trend-confluence', badge: 'ALIGN' },
+                  { label: 'Sector Depth Heatmap', href: '/sector-breadth', badge: 'SECTORS' },
                   { label: 'RS Movers Plus', href: '/movers-plus' },
                   { label: 'Mansfield RS Scanner', href: '/scanner', badge: 'ALPHA' },
                   { label: 'Ultimate Multi-Factor', href: '/ultimate-scanner' },
