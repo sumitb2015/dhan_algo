@@ -238,7 +238,7 @@ export default function PositionsStrategyMonitor({
               >
                 +
               </button>
-              <span className="text-zinc-500 text-[10px] ml-0.5">({totalQty} Qty)</span>
+              <span className="text-zinc-500 text-[10px] ml-0.5">({totalQty})</span>
             </div>
           </div>
         }
@@ -431,47 +431,25 @@ export default function PositionsStrategyMonitor({
                               +
                             </button>
                             <span className="text-[10px] text-zinc-500 font-mono ml-0.5">
-                              ({leg.qty}Q)
+                              ({leg.qty})
                             </span>
                           </div>
                         </td>
 
-                        {/* Interactive Strike Picker & Quick Shift Buttons */}
+                        {/* Interactive Strike Picker */}
                         <td className="py-2.5 px-2 whitespace-nowrap">
-                          <div className="flex items-center gap-1">
-                            <select
-                              value={leg.strike}
-                              onChange={(e) => onUpdateLegStrike(leg.id, Number(e.target.value))}
-                              disabled={viewMode === 'broker'}
-                              className="bg-zinc-950 text-white font-bold px-2 py-1 rounded border border-zinc-700 text-xs cursor-pointer focus:outline-none focus:border-amber-500/60 disabled:opacity-50"
-                            >
-                              {strikeOptions.map((s) => (
-                                <option key={s} value={s}>
-                                  {s} {s === Math.round(spot / strikeStep) * strikeStep ? '(ATM)' : ''}
-                                </option>
-                              ))}
-                            </select>
-
-                            {/* Quick Shift Strike Buttons */}
-                            <div className="flex items-center gap-0.5">
-                              <button
-                                onClick={() => onQuickShiftStrike(leg.id, -1)}
-                                disabled={viewMode === 'broker'}
-                                className="p-1 rounded bg-zinc-800 hover:bg-zinc-700 text-zinc-300 hover:text-white transition-colors cursor-pointer text-[10px] disabled:opacity-40"
-                                title={`Shift down by ${strikeStep} pts`}
-                              >
-                                -{strikeStep}
-                              </button>
-                              <button
-                                onClick={() => onQuickShiftStrike(leg.id, 1)}
-                                disabled={viewMode === 'broker'}
-                                className="p-1 rounded bg-zinc-800 hover:bg-zinc-700 text-zinc-300 hover:text-white transition-colors cursor-pointer text-[10px] disabled:opacity-40"
-                                title={`Shift up by ${strikeStep} pts`}
-                              >
-                                +{strikeStep}
-                              </button>
-                            </div>
-                          </div>
+                          <select
+                            value={leg.strike}
+                            onChange={(e) => onUpdateLegStrike(leg.id, Number(e.target.value))}
+                            disabled={viewMode === 'broker'}
+                            className="bg-zinc-950 text-white font-bold px-2.5 py-1 rounded border border-zinc-700 text-xs cursor-pointer focus:outline-none focus:border-amber-500/60 disabled:opacity-50"
+                          >
+                            {strikeOptions.map((s) => (
+                              <option key={s} value={s}>
+                                {s} {s === Math.round(spot / strikeStep) * strikeStep ? '(ATM)' : ''}
+                              </option>
+                            ))}
+                          </select>
                         </td>
 
                         {/* LTP */}
