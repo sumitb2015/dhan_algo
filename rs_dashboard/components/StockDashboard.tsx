@@ -1,7 +1,7 @@
 'use client';
 
 import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react';
-import { LayoutGrid, List, RefreshCw, Layers, Clock, ChevronDown, Wifi, WifiOff } from 'lucide-react';
+import { LayoutGrid, List, RefreshCw, Layers, Clock, ChevronDown, Wifi, WifiOff, ShieldAlert } from 'lucide-react';
 import { RSResult } from '@/lib/rs';
 import IndexSummary from './IndexSummary';
 import Leaderboard from './Leaderboard';
@@ -237,6 +237,23 @@ export default function StockDashboard() {
 
         {/* Controls */}
         <div className="flex items-center gap-2 flex-wrap ml-auto">
+          {/* Data Date */}
+          {stocks.length > 0 && stocks[0]?.latestDate && (
+            <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg border border-zinc-800 bg-zinc-900 font-mono text-[11px] font-bold text-zinc-300 select-none">
+              <span className="text-zinc-500 font-medium">DATA:</span>
+              <span>{stocks[0].latestDate}</span>
+            </div>
+          )}
+
+          {/* Institutional Regime Link */}
+          <Link
+            href="/market-regime"
+            className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg border border-amber-500/20 bg-amber-500/10 text-amber-400 hover:bg-amber-500/20 text-xs font-semibold transition-colors select-none"
+            title="Institutional Market Regime & Distribution Days"
+          >
+            <ShieldAlert className="h-3.5 w-3.5" />
+            <span className="hidden sm:inline">REGIME</span>
+          </Link>
 
           {/* Lookback */}
           <div className="flex items-center bg-zinc-900 border border-zinc-800 p-0.5 rounded-lg">

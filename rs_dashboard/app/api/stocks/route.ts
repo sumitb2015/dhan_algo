@@ -43,7 +43,7 @@ async function getLeaderboard(indexType: 'nifty50' | 'nifty500', lookback: numbe
       const aligned = alignByDate(stockRows, benchmarkRows);
       if (aligned.length < 20) return;
 
-      const partial = buildRSResult(symbol, aligned, lookback);
+      const partial = buildRSResult(symbol, aligned, lookback, stockRows);
       partials.push(partial);
       ratios.push({ symbol, rsRatio: partial.rsRatio });
     })

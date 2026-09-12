@@ -29,6 +29,17 @@ export interface RSResult {
   high52W: number;          // 52-week high price
   pctFrom52WHigh: number;   // % from 52W high (0 = at high, -5 = 5% below)
   isRSNewHigh: boolean;     // RS ratio at its 20-day high
+
+  // Institutional Decision & Trend Gates
+  sma50?: number;
+  sma200?: number;
+  isAboveSma50?: boolean;
+  isAboveSma200?: boolean;
+  isStage2?: boolean;
+  volume?: number;
+  vol20Avg?: number;
+  volSurge?: number;
+  mansfieldRS?: number;
 }
 
 export interface ChartPoint {
@@ -209,7 +220,8 @@ export function assignRSScores(
 export function buildRSResult(
   symbol: string,
   aligned: Array<{ date: string; stockClose: number; indexClose: number }>,
-  lookback: number = 252
+  lookback: number = 252,
+  rawStockRows?: OHLCVRow[]
 ): Omit<RSResult, 'rsScore' | 'rsRating' | 'rsRank' | 'rsMomentum'> {
   const rsRatio = computeCurrentRS(aligned, lookback);
   const latest = aligned[aligned.length - 1];
@@ -252,6 +264,56 @@ export function buildRSResult(
 
   const latestDate = latest?.date ?? '';
 
+  // Trend, moving averages, and volume quality gates
+  let sma50: number | undefined;
+  let sma200: number | undefined;
+  let isAboveSma50 = false;
+  let isAboveSma200 = false;
+  let isStage2 = false;
+  let volume = 0;
+  let vol20Avg = 0;
+  let volSurge = 1.0;
+
+  if (rawStockRows && rawStockRows.length >= 20) {
+    const closes = rawStockRows.map((r) => r.close);
+    const n = closes.length;
+    const lastRow = rawStockRows[n - 1];
+    volume = lastRow.volume;
+
+    if (n >= 50) {
+      const sum50 = closes.slice(-50).reduce((a, b) => a + b, 0);
+      sma50 = Math.round((sum50 / 50) * 100) / 100;
+      isAboveSma50 = latestClose > sma50;
+    }
+    if (n >= 200) {
+      const sum200 = closes.slice(-200).reduce((a, b) => a + b, 0);
+      sma200 = Math.round((sum200 / 200) * 100) / 100;
+      isAboveSma200 = latestClose > sma200;
+    }
+    isStage2 = isAboveSma50 && isAboveSma200 && (sma50 !== undefined && sma200 !== undefined && sma50 > sma200) && pctFrom52WHigh >= -25;
+
+    const vols20 = rawStockRows.slice(-20).map((r) => r.volume);
+    vol20Avg = Math.round(vols20.reduce((a, b) => a + b, 0) / 20);
+    volSurge = vol20Avg > 0 ? Math.round((volume / vol20Avg) * 10) / 10 : 1.0;
+  }
+
+  // Smooth Mansfield RS: relative performance vs 52-week moving average of RS ratio
+  let mansfieldRS: number | undefined;
+  if (aligned.length >= 20) {
+    const rsRatios: number[] = [];
+    const startIdx = Math.max(0, aligned.length - 252);
+    for (let i = startIdx; i < aligned.length; i++) {
+      if (aligned[i].indexClose > 0) {
+        rsRatios.push((aligned[i].stockClose / aligned[i].indexClose) * 1000);
+      }
+    }
+    if (rsRatios.length >= 20) {
+      const currRatio = rsRatios[rsRatios.length - 1];
+      const avgRatio = rsRatios.reduce((a, b) => a + b, 0) / rsRatios.length;
+      mansfieldRS = avgRatio > 0 ? Math.round(((currRatio - avgRatio) / avgRatio) * 1000) / 10 : 0;
+    }
+  }
+
   return {
     symbol,
     rsRatio,
@@ -267,5 +329,14 @@ export function buildRSResult(
     high52W,
     pctFrom52WHigh,
     isRSNewHigh,
+    sma50,
+    sma200,
+    isAboveSma50,
+    isAboveSma200,
+    isStage2,
+    volume,
+    vol20Avg,
+    volSurge,
+    mansfieldRS,
   };
 }

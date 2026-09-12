@@ -25,18 +25,20 @@ interface LeaderboardProps {
 type SortField =
   | 'symbol' | 'rsScore' | 'rsRatio' | 'rsRank' | 'rsChange1W'
   | 'priceChange1D' | 'priceChange1W' | 'priceChange1M' | 'priceChange3M' | 'priceChange1Y'
-  | 'latestClose' | 'pctFrom52WHigh';
+  | 'latestClose' | 'pctFrom52WHigh' | 'volSurge' | 'mansfieldRS';
 type SortOrder = 'asc' | 'desc';
 type MomentumFilter = 'all' | 'rising' | 'falling';
 
-type QuickPreset = 'none' | 'top20' | 'leaders' | 'momentum' | 'near52wh' | 'rsnewhi';
+type QuickPreset = 'none' | 'top20' | 'stage2' | 'volsurge' | 'leaders' | 'momentum' | 'near52wh' | 'rsnewhi';
 
 const QUICK_PRESETS: { id: QuickPreset; label: string; icon: React.ReactNode; description: string }[] = [
   { id: 'top20',    label: 'Top 20',       icon: <Trophy className="h-3 w-3" />,   description: 'Top 20 by RS Score' },
+  { id: 'stage2',   label: 'Stage 2 (MA)', icon: <Zap className="h-3 w-3 text-emerald-400" />, description: 'Grade A/B + Price > 50 DMA > 200 DMA' },
+  { id: 'volsurge', label: 'Vol Surge',    icon: <Flame className="h-3 w-3 text-amber-400" />, description: 'Volume >= 1.5x of 20-day average' },
   { id: 'leaders',  label: 'Grade A',      icon: <Zap className="h-3 w-3" />,      description: 'Grade A leaders only' },
-  { id: 'momentum', label: 'Rising RS',    icon: <Flame className="h-3 w-3" />,    description: 'Rising RS momentum' },
+  { id: 'momentum', label: 'Rising RS',    icon: <TrendingUp className="h-3 w-3" />, description: 'Rising RS momentum' },
   { id: 'near52wh', label: 'Near 52W Hi',  icon: <ArrowUpRight className="h-3 w-3" />, description: 'Within 5% of 52-week high' },
-  { id: 'rsnewhi',  label: 'RS New Hi',    icon: <TrendingUp className="h-3 w-3" />,   description: 'RS at 20-day high' },
+  { id: 'rsnewhi',  label: 'RS New Hi',    icon: <TrendingUp className="h-3 w-3 text-purple-400" />, description: 'RS at 20-day high' },
 ];
 
 function Sparkline({ data }: { data: number[] }) {
@@ -193,6 +195,10 @@ export default function Leaderboard({
     // Apply quick preset
     if (activePreset === 'top20') {
       filtered = filtered.sort((a, b) => b.rsScore - a.rsScore).slice(0, 20);
+    } else if (activePreset === 'stage2') {
+      filtered = filtered.filter((s) => s.isStage2 || (s.isAboveSma50 && s.isAboveSma200 && s.rsScore >= 60));
+    } else if (activePreset === 'volsurge') {
+      filtered = filtered.filter((s) => (s.volSurge ?? 1) >= 1.5 && s.priceChange1D > 0);
     } else if (activePreset === 'leaders') {
       filtered = filtered.filter((s) => s.rsRating === 'A');
     } else if (activePreset === 'momentum') {
@@ -393,7 +399,7 @@ export default function Leaderboard({
 
       {/* ── Table ── */}
       <div className="flex-1 min-h-0 overflow-auto">
-        <table className="w-full text-left border-collapse" style={{ minWidth: 720 }}>
+        <table className="w-full text-left border-collapse" style={{ minWidth: 900 }}>
           <thead className="sticky top-0 z-10">
             {/* text-xs font-bold text-white on solid bg-zinc-800 — CLAUDE.md's
                 dashboard table-header rule, not specific to this page. */}
@@ -412,6 +418,12 @@ export default function Leaderboard({
               <th className="py-2.5 px-2 text-center cursor-pointer hover:text-amber-300 transition-colors" onClick={() => handleSort('rsChange1W')} title="RS momentum: 5-day RS change">
                 RS Mom <SortIcon field="rsChange1W" />
               </th>
+              <th className="py-2.5 px-2 text-center" title="Stage 2 Trend (Price > SMA50 > SMA200)">
+                Trend
+              </th>
+              <th className="py-2.5 px-2 text-right cursor-pointer hover:text-amber-300 transition-colors" onClick={() => handleSort('volSurge')} title="Volume vs 20-day Average">
+                Surge <SortIcon field="volSurge" />
+              </th>
               <th className="py-2.5 px-2 text-right cursor-pointer hover:text-amber-300 transition-colors" onClick={() => handleSort('latestClose')}>
                 Close <SortIcon field="latestClose" />
               </th>
@@ -428,13 +440,13 @@ export default function Leaderboard({
               >
                 52WH% <SortIcon field="pctFrom52WHigh" />
               </th>
-              <th className="py-2.5 px-3 text-center">Trend</th>
+              <th className="py-2.5 px-3 text-center">RS Line</th>
             </tr>
           </thead>
           <tbody className="divide-y divide-zinc-900/50 text-sm">
             {paginatedData.length === 0 ? (
               <tr>
-                <td colSpan={11} className="py-10 text-center text-zinc-500 text-sm">
+                <td colSpan={13} className="py-10 text-center text-zinc-500 text-sm">
                   No matching stocks found.
                 </td>
               </tr>
@@ -499,6 +511,42 @@ export default function Leaderboard({
                     {/* RS Momentum */}
                     <td className="py-2.5 px-2 text-center">
                       <MomentumBadge momentum={item.rsMomentum} change={item.rsChange1W} />
+                    </td>
+
+                    {/* Trend (Stage 2 / MA) */}
+                    <td className="py-2.5 px-2 text-center">
+                      {item.isStage2 ? (
+                        <span className="inline-flex items-center text-[10px] font-bold px-1.5 py-0.5 rounded bg-emerald-500/15 text-emerald-400 border border-emerald-500/30 whitespace-nowrap" title="Stage 2: Price > SMA50 > SMA200">
+                          STAGE 2
+                        </span>
+                      ) : item.isAboveSma200 ? (
+                        <span className="inline-flex items-center text-[10px] font-medium px-1.5 py-0.5 rounded bg-sky-500/15 text-sky-400 border border-sky-500/30 whitespace-nowrap" title="Above 200 DMA">
+                          &gt; 200D
+                        </span>
+                      ) : (
+                        <span className="inline-flex items-center text-[10px] font-medium px-1.5 py-0.5 rounded bg-rose-500/15 text-rose-400 border border-rose-500/30 whitespace-nowrap" title="Below 200 DMA (Lagging)">
+                          &lt; 200D
+                        </span>
+                      )}
+                    </td>
+
+                    {/* Vol Surge */}
+                    <td className="py-2.5 px-2 text-right font-mono text-xs">
+                      {item.volSurge !== undefined ? (
+                        <span className={`font-semibold ${
+                          item.volSurge >= 2.0
+                            ? 'text-amber-400'
+                            : item.volSurge >= 1.3
+                            ? 'text-emerald-400'
+                            : item.volSurge < 0.7
+                            ? 'text-zinc-500'
+                            : 'text-zinc-300'
+                        }`} title={`Volume: ${(item.volume ?? 0).toLocaleString()} vs 20D Avg: ${(item.vol20Avg ?? 0).toLocaleString()}`}>
+                          {item.volSurge >= 2.0 && '🔥'}{item.volSurge.toFixed(1)}x
+                        </span>
+                      ) : (
+                        <span className="text-zinc-600">-</span>
+                      )}
                     </td>
 
                     {/* Close Price */}
