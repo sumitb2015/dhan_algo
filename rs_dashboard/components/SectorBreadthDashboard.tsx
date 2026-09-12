@@ -154,7 +154,7 @@ export default function SectorBreadthDashboard() {
               {data?.sectors[0]?.sector ?? '—'}
             </div>
             <span className="text-[10px] text-emerald-400 mt-1 font-bold">
-              RS Score: {data?.sectors[0]?.sectorRS ? `+${data.sectors[0].sectorRS}%` : '—'}
+              RS Score: {data?.sectors[0]?.sectorRS !== undefined ? `${data.sectors[0].sectorRS > 0 ? '+' : ''}${data.sectors[0].sectorRS.toFixed(1)}%` : '—'}
             </span>
           </div>
 

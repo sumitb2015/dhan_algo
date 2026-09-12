@@ -8,6 +8,7 @@ export interface SectorConstituent {
   change1D: number;
   change1W: number;
   change1M: number;
+  change3M: number;
   above20: boolean;
   above50: boolean;
   above200: boolean;
@@ -79,10 +80,12 @@ export async function runSectorBreadthAnalysis(force = false): Promise<SectorBre
         const prevPrice = closes[n - 2] ?? price;
         const price1W = closes[Math.max(0, n - 6)] ?? price;
         const price1M = closes[Math.max(0, n - 23)] ?? price;
+        const price3M = closes[Math.max(0, n - 66)] ?? price;
 
         const change1D = prevPrice > 0 ? ((price - prevPrice) / prevPrice) * 100 : 0;
         const change1W = price1W > 0 ? ((price - price1W) / price1W) * 100 : 0;
         const change1M = price1M > 0 ? ((price - price1M) / price1M) * 100 : 0;
+        const change3M = price3M > 0 ? ((price - price3M) / price3M) * 100 : 0;
 
         const sma20 = computeSMA(closes, 20);
         const sma50 = computeSMA(closes, 50);
@@ -108,7 +111,9 @@ export async function runSectorBreadthAnalysis(force = false): Promise<SectorBre
           mansfieldRS = avgRS > 0 ? ((currRS - avgRS) / avgRS) * 100 : 0;
         }
 
-        const vol20 = rows.slice(-20).reduce((acc, r) => acc + r.volume, 0) / 20;
+        const rawVol = Number.isFinite(lastRow.volume) ? lastRow.volume : 0;
+        const vols20 = rows.slice(-20).map((r) => (Number.isFinite(r.volume) ? r.volume : 0));
+        const vol20 = vols20.reduce((acc, v) => acc + v, 0) / 20;
         const sec = getSector(sym) || 'Other';
 
         const constituent: SectorConstituent = {
@@ -117,11 +122,12 @@ export async function runSectorBreadthAnalysis(force = false): Promise<SectorBre
           change1D: Math.round(change1D * 100) / 100,
           change1W: Math.round(change1W * 100) / 100,
           change1M: Math.round(change1M * 100) / 100,
+          change3M: Math.round(change3M * 100) / 100,
           above20,
           above50,
           above200,
           mansfieldRS: Math.round(mansfieldRS * 10) / 10,
-          volume: lastRow.volume,
+          volume: rawVol,
           vol20Avg: Math.round(vol20),
         };
 
@@ -161,10 +167,12 @@ export async function runSectorBreadthAnalysis(force = false): Promise<SectorBre
     const sortedRS = [...members.map((m) => m.mansfieldRS)].sort((a, b) => a - b);
     const sorted1W = [...members.map((m) => m.change1W)].sort((a, b) => a - b);
     const sorted1M = [...members.map((m) => m.change1M)].sort((a, b) => a - b);
+    const sorted3M = [...members.map((m) => m.change3M)].sort((a, b) => a - b);
 
     const medianRS = sortedRS[Math.floor(count / 2)] || 0;
     const median1W = sorted1W[Math.floor(count / 2)] || 0;
     const median1M = sorted1M[Math.floor(count / 2)] || 0;
+    const median3M = sorted3M[Math.floor(count / 2)] || 0;
 
     // Internal Thrust: Sector breadth is exceptionally strong (>70% above 20 DMA & >60% above 50 DMA)
     const hasInternalThrust = pctAbove20 >= 70 && pctAbove50 >= 55;
@@ -193,7 +201,7 @@ export async function runSectorBreadthAnalysis(force = false): Promise<SectorBre
       sectorRS: Math.round(medianRS * 10) / 10,
       median1W: Math.round(median1W * 10) / 10,
       median1M: Math.round(median1M * 10) / 10,
-      median3M: 0,
+      median3M: Math.round(median3M * 10) / 10,
       hasInternalThrust,
       thrustLabel,
       topLeaders,
