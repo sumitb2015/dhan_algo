@@ -187,11 +187,11 @@ function FanChart({ dates, stocks, leaderHovered, onHoverChange }: FanChartProps
   }
 
   // Tooltip position: left or right of crosshair depending on available space
-  const tooltipW = 195;
-  const tooltipH = 86;
-  const ttLeft   = crosshair ? (crosshair.svgX + 14 + tooltipW < SVG_W - M.right
-    ? crosshair.svgX + 14
-    : crosshair.svgX - tooltipW - 14) : 0;
+  const tooltipW = 150;
+  const tooltipH = 50;
+  const ttLeft   = crosshair ? (crosshair.svgX + 10 + tooltipW < SVG_W - M.right
+    ? crosshair.svgX + 10
+    : crosshair.svgX - tooltipW - 10) : 0;
   const ttTop    = crosshair ? Math.max(M.top + 4, Math.min(M.top + CH - tooltipH - 4,
     yS(crosshair.valueAtDate) - tooltipH / 2)) : 0;
 
@@ -290,38 +290,51 @@ function FanChart({ dates, stocks, leaderHovered, onHoverChange }: FanChartProps
 
       {/* ── Tooltip box ── */}
       {crosshair && (
-        <g>
-          <rect x={ttLeft} y={ttTop} width={tooltipW} height={tooltipH}
-            rx={5} fill="#18181b" stroke="#3f3f46" strokeWidth={1}
+        <g pointerEvents="none">
+          <rect
+            x={ttLeft} y={ttTop} width={tooltipW} height={tooltipH}
+            rx={5} fill="#18181b" stroke="#3f3f46" strokeWidth={0.8}
           />
-          {/* Symbol + return pill */}
-          <text x={ttLeft + 11} y={ttTop + 20} fontSize={13} fontWeight="700" fill="rgba(255,255,255,0.75)"
-            fontFamily="ui-monospace,monospace">
+          {/* Symbol */}
+          <text
+            x={ttLeft + 8} y={ttTop + 14}
+            fontSize={11} fontWeight="700" fill="rgba(255,255,255,0.85)"
+            fontFamily="ui-monospace,monospace"
+          >
             {crosshair.symbol}
           </text>
+          {/* Return pill (value at hovered date) */}
           <rect
-            x={ttLeft + tooltipW - 68} y={ttTop + 8} width={58} height={18}
+            x={ttLeft + tooltipW - 54} y={ttTop + 4} width={48} height={14}
             rx={3}
-            fill={crosshair.finalReturn >= 0 ? 'rgba(52,211,153,0.15)' : 'rgba(248,113,113,0.15)'}
+            fill={crosshair.valueAtDate >= 0 ? 'rgba(52,211,153,0.15)' : 'rgba(248,113,113,0.15)'}
           />
           <text
-            x={ttLeft + tooltipW - 39} y={ttTop + 20}
-            textAnchor="middle" fontSize={11} fontWeight="700"
-            fill={crosshair.finalReturn >= 0 ? '#34d399' : '#f87171'}>
-            {crosshair.finalReturn >= 0 ? '+' : ''}{crosshair.finalReturn.toFixed(1)}%
+            x={ttLeft + tooltipW - 30} y={ttTop + 14.5}
+            textAnchor="middle" fontSize={9.5} fontWeight="700"
+            fill={crosshair.valueAtDate >= 0 ? '#34d399' : '#f87171'}
+          >
+            {crosshair.valueAtDate >= 0 ? '+' : ''}{crosshair.valueAtDate.toFixed(2)}%
           </text>
-          {/* Sector */}
-          <text x={ttLeft + 11} y={ttTop + 36} fontSize={10} fill="rgba(255,255,255,0.40)">{crosshair.sector}</text>
-          {/* Divider */}
-          <line x1={ttLeft + 8} x2={ttLeft + tooltipW - 8} y1={ttTop + 44} y2={ttTop + 44}
-            stroke="#27272a" strokeWidth={0.8} />
-          {/* Date + value at date */}
-          <text x={ttLeft + 11} y={ttTop + 58} fontSize={10} fill="rgba(255,255,255,0.55)">
-            {fmtFullDate(dates[crosshair.dateIdx])}
+          {/* Date · Sector */}
+          <text
+            x={ttLeft + 8} y={ttTop + 28}
+            fontSize={8.5} fill="rgba(255,255,255,0.45)"
+          >
+            {fmtFullDate(dates[crosshair.dateIdx])} · {crosshair.sector}
           </text>
-          <text x={ttLeft + 11} y={ttTop + 74} fontSize={11} fontWeight="600"
-            fill={crosshair.valueAtDate >= 0 ? '#4ade80' : '#f87171'}>
-            {crosshair.valueAtDate >= 0 ? '+' : ''}{crosshair.valueAtDate.toFixed(2)}% from start
+          {/* Total return */}
+          <text
+            x={ttLeft + 8} y={ttTop + 41}
+            fontSize={8.5} fill="rgba(255,255,255,0.40)"
+          >
+            Total:{' '}
+            <tspan
+              fontWeight="600"
+              fill={crosshair.finalReturn >= 0 ? '#34d399' : '#f87171'}
+            >
+              {crosshair.finalReturn >= 0 ? '+' : ''}{crosshair.finalReturn.toFixed(1)}%
+            </tspan>
           </text>
         </g>
       )}
