@@ -871,13 +871,36 @@ function BreadthPanel({ data, loading }: { data: DashboardBreadthResponse | null
         </div>
       )}
 
+      <div className="mx-3.5 mb-3 p-2.5 rounded-xl border border-zinc-800 bg-zinc-950 flex items-center justify-between gap-3 font-mono text-xs">
+        <div className="flex items-center gap-2">
+          <span className="text-[10px] font-bold uppercase tracking-wider text-zinc-500">INSTITUTIONAL REGIME:</span>
+          <Link
+            href="/market-regime"
+            className="flex items-center gap-1.5 px-2 py-0.5 rounded text-[11px] font-bold bg-red-500/10 text-red-400 border border-red-500/30 hover:bg-red-500/20 transition-colors"
+          >
+            <span>Distribution Tracker (7 Days) →</span>
+          </Link>
+        </div>
+        <Link
+          href="/stage-screener"
+          className="text-[11px] font-bold text-emerald-400 hover:text-emerald-300 flex items-center gap-1 transition-colors"
+        >
+          <span>STAGE 2 SCREENER →</span>
+        </Link>
+      </div>
+
       <SectionQuickLinks
         categoryLabel="BREADTH &amp; REGIME DESKS"
         links={[
+          { label: 'Market Regime (CANSLIM)', href: '/market-regime', badge: 'REGIME' },
+          { label: 'Minervini Stage 2 / VCP', href: '/stage-screener', badge: 'STAGE 2' },
+          { label: '52W High/Low Proximity', href: '/highs-lows', badge: 'HIGHS/LOWS' },
+          { label: 'Sector Depth Heatmap', href: '/sector-breadth', badge: 'SECTOR' },
+          { label: 'Trend Confluence Blotter', href: '/trend-confluence', badge: 'ALIGN' },
           { label: 'Comprehensive Breadth', href: '/breadth', badge: 'MACRO' },
           { label: 'Intraday Tick Breadth', href: '/breadth-intraday' },
           { label: 'Sector Diffusion Index', href: '/diffusion' },
-          { label: 'Distribution Days', href: '/distribution' },
+          { label: 'Distribution Histogram', href: '/distribution' },
           { label: 'RRG Quadrant Rotation', href: '/rrg' },
           { label: 'Seasonality Edge Analytics', href: '/seasonality' },
           { label: 'Pre-Market Setup & Cues', href: '/premarket' },
