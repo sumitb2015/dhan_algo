@@ -234,9 +234,15 @@ def download_yahoo_stocks(symbols: list[str], period: str = "1y", batch_size: in
                             with open(fresh_csv, "r") as f:
                                 lines = [ln.strip() for ln in f if ln.strip()]
                             if lines:
-                                header = lines[0].split(",")[:6]
-                                rows = [ln.split(",")[:6] for ln in lines[1:] if len(ln.split(",")) >= 5]
-                                old_df = pd.DataFrame(rows, columns=header[:len(rows[0])]) if rows else pd.DataFrame()
+                                header = ["Datetime", "Open", "High", "Low", "Close", "Volume"]
+                                rows = []
+                                for ln in lines[1:]:
+                                    parts = ln.split(",")[:6]
+                                    if len(parts) == 5:
+                                        parts.append("0.0")
+                                    if len(parts) == 6:
+                                        rows.append(parts)
+                                old_df = pd.DataFrame(rows, columns=header) if rows else pd.DataFrame()
                                 if not old_df.empty:
                                     old_df["Datetime"] = old_df["Datetime"].astype(str)
                                     combined = pd.concat([old_df, df_sym]).drop_duplicates(subset=["Datetime"], keep="last")
