@@ -23,6 +23,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import Link from 'next/link';
+import AnimatedNumber from './AnimatedNumber';
 import {
   Activity,
   AlertTriangle,
@@ -336,18 +337,40 @@ function TerminalPanel({
   );
 }
 
+function DeltaBadge({ percent }: { percent: number }) {
+  const up = percent > 0;
+  const down = percent < 0;
+  const toneClass = up
+    ? 'border-emerald-500/30 bg-emerald-500/10 text-emerald-400'
+    : down
+      ? 'border-red-500/30 bg-red-500/10 text-red-400'
+      : 'border-zinc-700 bg-zinc-800 text-zinc-500';
+  return (
+    <span className={`flex items-center gap-0.5 rounded border px-1.5 py-0.5 font-mono text-[10px] font-bold tabular-nums ${toneClass}`}>
+      {up && <ArrowUpRight className="h-2.5 w-2.5" />}
+      {down && <ArrowDownRight className="h-2.5 w-2.5" />}
+      {up ? '+' : ''}
+      {percent.toFixed(2)}%
+    </span>
+  );
+}
+
 function StatTile({
   label,
   value,
+  animate: animateValue,
   sub,
   progress,
   tone = 'neutral',
+  delta,
 }: {
   label: string;
   value: string;
+  animate?: { raw: number; format: (v: number) => string };
   sub?: string;
   progress?: { percent: number; colorClass?: string };
   tone?: 'neutral' | 'up' | 'down' | 'accent';
+  delta?: number;
 }) {
   const valueClass =
     tone === 'up' ? 'text-emerald-400'
@@ -366,8 +389,11 @@ function StatTile({
         )}
       </div>
 
-      <div className={`font-mono text-lg font-bold leading-none tabular-nums ${valueClass}`}>
-        {value}
+      <div className="flex items-center gap-2">
+        <span className={`font-mono text-lg font-bold leading-none tabular-nums ${valueClass}`}>
+          {animateValue ? <AnimatedNumber value={animateValue.raw} format={animateValue.format} /> : value}
+        </span>
+        {delta !== undefined && delta !== null && !Number.isNaN(delta) && <DeltaBadge percent={delta} />}
       </div>
 
       {progress && (
@@ -447,7 +473,7 @@ function IndexStrip({ data }: { data: TopIndicesResponse | null }) {
               </div>
 
               <span className="font-mono text-base font-bold leading-none tabular-nums text-zinc-100">
-                {fmtNum(q.ltp, 2)}
+                <AnimatedNumber value={q.ltp} format={v => fmtNum(v, 2)} />
               </span>
 
               {pct === null || abs === null ? (
@@ -1054,7 +1080,7 @@ function BrokerAccountCard({
       <div className="flex flex-col gap-2 border-b border-zinc-800 pb-3">
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-2">
-            <CircleDot className={`h-3 w-3 ${isConnected ? 'text-emerald-500' : 'text-zinc-600'}`} />
+            <CircleDot className={`h-3 w-3 ${isConnected ? 'text-emerald-400' : 'text-zinc-600'}`} />
             <span className="text-[11px] font-bold uppercase tracking-[0.15em] text-amber-400">
               {BROKER_LABELS[b.broker]}
             </span>
@@ -1979,7 +2005,7 @@ export default function MarketDashboard() {
       <div className="hidden border-b border-zinc-800 bg-zinc-950 px-6 py-1.5 md:block">
         <div className="flex items-center justify-between gap-2 overflow-x-auto text-[10px] font-mono">
           <div className="flex items-center gap-2">
-            <span className="text-amber-500 font-bold uppercase tracking-wider">TERMINAL COMMANDS:</span>
+            <span className="text-amber-400 font-bold uppercase tracking-wider">TERMINAL COMMANDS:</span>
             {FUNCTION_KEYS.map(fk => (
               fk.isModal ? (
                 <button
@@ -2122,17 +2148,30 @@ export default function MarketDashboard() {
                 <StatTile
                   label="Total Portfolio Value"
                   value={fmtINRCompact(portfolioValue)}
+                  animate={
+                    portfolioValue !== null ? { raw: portfolioValue, format: fmtINRCompact } : undefined
+                  }
                   sub={holdingsValue !== null ? `incl. ${fmtINRCompact(holdingsValue)} delivery` : 'margin base'}
                   tone="accent"
                 />
                 <StatTile
                   label="Available Capital"
                   value={fmtINRCompact(totals?.availableBalance)}
+                  animate={
+                    totals?.availableBalance !== undefined
+                      ? { raw: totals.availableBalance, format: fmtINRCompact }
+                      : undefined
+                  }
                   sub="free spendable buffer"
                 />
                 <StatTile
                   label="Margin Utilized"
                   value={fmtINRCompact(totals?.utilizedMargin)}
+                  animate={
+                    totals?.utilizedMargin !== undefined
+                      ? { raw: totals.utilizedMargin, format: fmtINRCompact }
+                      : undefined
+                  }
                   sub={`${totalMarginUtilPercent.toFixed(1)}% util · ${fmtINRCompact(totalCollateral)} pledged`}
                   progress={{
                     percent: totalMarginUtilPercent,
@@ -2142,12 +2181,22 @@ export default function MarketDashboard() {
                 <StatTile
                   label="Booked Realized P&L"
                   value={fmtSignedINR(totals?.realizedPnl)}
+                  animate={
+                    totals?.realizedPnl !== undefined
+                      ? { raw: totals.realizedPnl, format: fmtSignedINR }
+                      : undefined
+                  }
                   sub={`${totals?.closedPositions ?? 0} closed positions today`}
                   tone={(totals?.realizedPnl ?? 0) >= 0 ? 'up' : 'down'}
                 />
                 <StatTile
                   label="Open Unrealized P&L"
                   value={fmtSignedINR(totals?.unrealizedPnl)}
+                  animate={
+                    totals?.unrealizedPnl !== undefined
+                      ? { raw: totals.unrealizedPnl, format: fmtSignedINR }
+                      : undefined
+                  }
                   sub={
                     totals && totals.unpricedPositions > 0
                       ? `${totals.openPositions} active legs · ${totals.unpricedPositions} unpriced`
@@ -2158,6 +2207,10 @@ export default function MarketDashboard() {
                 <StatTile
                   label="Net Day P&L (Total)"
                   value={fmtSignedINR(totals?.totalPnl)}
+                  animate={
+                    totals?.totalPnl !== undefined ? { raw: totals.totalPnl, format: fmtSignedINR } : undefined
+                  }
+                  delta={portfolioValue && portfolioValue > 0 && totals ? (totals.totalPnl / portfolioValue) * 100 : undefined}
                   sub={`realized (${fmtSignedINR(totals?.realizedPnl)}) + open (${fmtSignedINR(totals?.unrealizedPnl)})`}
                   tone={(totals?.totalPnl ?? 0) >= 0 ? 'up' : 'down'}
                 />

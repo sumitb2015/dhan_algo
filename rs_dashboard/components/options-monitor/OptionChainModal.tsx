@@ -58,6 +58,10 @@ export interface OptionChainModalProps {
     strikes?: Record<string, any>;
   } | null;
   onSelectExpiry?: (expiry: string) => void;
+  // Chain data the parent page already holds for `currentExpiry` — when present, the modal
+  // seeds its rows from this instead of re-fetching /api/options/chain on every open.
+  initialChain?: Record<number, { ce?: ChainSideData; pe?: ChainSideData }> | null;
+  initialChainStrikes?: number[];
   onAddLeg?: (leg: {
     type: 'CE' | 'PE';
     side: 'BUY' | 'SELL';
@@ -105,6 +109,8 @@ export default function OptionChainModal({
   broker = 'dhan',
   liveQuotes,
   onSelectExpiry,
+  initialChain,
+  initialChainStrikes,
   onAddLeg,
 }: OptionChainModalProps) {
   const [selectedUnderlying, setSelectedUnderlying] = useState(initialUnderlying);
@@ -163,55 +169,19 @@ export default function OptionChainModal({
     };
   }, [isOpen, selectedUnderlying, broker, selectedExpiry, onSelectExpiry]);
 
-  // Fetch Option Chain data with decimal-key normalization and out-of-order protection
-  const fetchOptionChain = useCallback(async () => {
-    if (!selectedExpiry) return;
-    const seq = ++requestSeq.current;
-    const isStale = () => seq !== requestSeq.current;
-
-    setIsLoading(true);
-    setErrorMsg(null);
-
-    try {
-      const res = await fetch(
-        `/api/options/chain?underlying=${selectedUnderlying}&expiry=${selectedExpiry}&broker=${broker}`
-      );
-      const json = await res.json();
-
-      if (isStale()) return;
-
-      if (!json.success || !json.data?.chain?.oc) {
-        setErrorMsg(json.error || 'Failed to fetch option chain');
-        return;
-      }
-
-      const spotPrice = Number(json.data.spot) || liveSpot;
-      if (spotPrice > 0) setLiveSpot(spotPrice);
-      if (json.data.prev_close) setPrevClose(Number(json.data.prev_close));
-
-      const uConfig = UNDERLYINGS[selectedUnderlying] || { strikeStep: 50 };
-      const strikeStep = uConfig.strikeStep || 50;
+  // Slices a full strike map down to the visible window and computes derived columns.
+  // Shared by the parent-seeded path (no network call) and the direct-fetch path below.
+  const buildRows = useCallback(
+    (
+      normalizedMap: Map<number, { ce?: ChainSideData; pe?: ChainSideData }>,
+      spotPrice: number,
+      strikeStep: number,
+      mergeLive: boolean
+    ): ChainRowData[] => {
       const atmStrike = Math.round(spotPrice / strikeStep) * strikeStep;
-
-      // Normalize raw OC keys: Dhan/Python returns float string keys e.g. "23400.000000"
-      const rawOc = (json.data.chain.oc || {}) as Record<string, { ce?: ChainSideData; pe?: ChainSideData }>;
-      const normalizedMap = new Map<number, { ce?: ChainSideData; pe?: ChainSideData }>();
-
-      for (const [key, val] of Object.entries(rawOc)) {
-        const strikeNum = Math.round(Number(key));
-        if (!isNaN(strikeNum) && strikeNum > 0) {
-          normalizedMap.set(strikeNum, val);
-        }
-      }
-
       const allStrikes = Array.from(normalizedMap.keys()).sort((a, b) => a - b);
+      if (allStrikes.length === 0) return [];
 
-      if (allStrikes.length === 0) {
-        setErrorMsg('Option chain is empty for this expiry');
-        return;
-      }
-
-      // Find closest strike index to ATM
       const atmIdx = allStrikes.reduce(
         (best, s, i) =>
           Math.abs(s - atmStrike) < Math.abs(allStrikes[best] - atmStrike) ? i : best,
@@ -222,7 +192,6 @@ export default function OptionChainModal({
       const hi = Math.min(allStrikes.length - 1, atmIdx + wings);
       const visibleStrikes = allStrikes.slice(lo, hi + 1);
 
-      // Compute max OI for bars
       let maxCEOI = 0;
       let maxPEOI = 0;
       let maxCEStrike = 0;
@@ -242,13 +211,13 @@ export default function OptionChainModal({
         }
       }
 
-      const processed: ChainRowData[] = visibleStrikes.map((s) => {
+      return visibleStrikes.map((s) => {
         const item = normalizedMap.get(s) || {};
         let ce = item.ce || null;
         let pe = item.pe || null;
 
         // If live quotes from WebSocket are active for this expiry, merge them
-        if (selectedExpiry === currentExpiry && liveQuotes?.strikes) {
+        if (mergeLive && liveQuotes?.strikes) {
           const wsStrike =
             liveQuotes.strikes[s] ||
             liveQuotes.strikes[String(s)] ||
@@ -288,11 +257,11 @@ export default function OptionChainModal({
             : null;
 
         const ceOIChgPct =
-          ce?.oi && ce?.previous_oi
+          ce?.oi != null && ce?.previous_oi
             ? ((ce.oi - ce.previous_oi) / ce.previous_oi) * 100
             : null;
         const peOIChgPct =
-          pe?.oi && pe?.previous_oi
+          pe?.oi != null && pe?.previous_oi
             ? ((pe.oi - pe.previous_oi) / pe.previous_oi) * 100
             : null;
 
@@ -311,6 +280,56 @@ export default function OptionChainModal({
           isMaxPEOI: s === maxPEStrike && maxPEOI > 0,
         };
       });
+    },
+    [wings, liveQuotes]
+  );
+
+  // Fetch Option Chain data with decimal-key normalization and out-of-order protection
+  const fetchOptionChain = useCallback(async () => {
+    if (!selectedExpiry) return;
+    const seq = ++requestSeq.current;
+    const isStale = () => seq !== requestSeq.current;
+
+    setIsLoading(true);
+    setErrorMsg(null);
+
+    try {
+      const res = await fetch(
+        `/api/options/chain?underlying=${selectedUnderlying}&expiry=${selectedExpiry}&broker=${broker}`
+      );
+      const json = await res.json();
+
+      if (isStale()) return;
+
+      if (!json.success || !json.data?.chain?.oc) {
+        setErrorMsg(json.error || 'Failed to fetch option chain');
+        return;
+      }
+
+      const spotPrice = Number(json.data.spot) || liveSpot;
+      if (spotPrice > 0) setLiveSpot(spotPrice);
+      if (json.data.prev_close) setPrevClose(Number(json.data.prev_close));
+
+      const uConfig = UNDERLYINGS[selectedUnderlying] || { strikeStep: 50 };
+      const strikeStep = uConfig.strikeStep || 50;
+
+      // Normalize raw OC keys: Dhan/Python returns float string keys e.g. "23400.000000"
+      const rawOc = (json.data.chain.oc || {}) as Record<string, { ce?: ChainSideData; pe?: ChainSideData }>;
+      const normalizedMap = new Map<number, { ce?: ChainSideData; pe?: ChainSideData }>();
+
+      for (const [key, val] of Object.entries(rawOc)) {
+        const strikeNum = Math.round(Number(key));
+        if (!isNaN(strikeNum) && strikeNum > 0) {
+          normalizedMap.set(strikeNum, val);
+        }
+      }
+
+      if (normalizedMap.size === 0) {
+        setErrorMsg('Option chain is empty for this expiry');
+        return;
+      }
+
+      const processed = buildRows(normalizedMap, spotPrice, strikeStep, selectedExpiry === currentExpiry);
 
       if (isStale()) return;
 
@@ -331,14 +350,44 @@ export default function OptionChainModal({
         setIsLoading(false);
       }
     }
-  }, [selectedUnderlying, selectedExpiry, liveSpot, wings, currentExpiry, liveQuotes, broker]);
+  }, [selectedUnderlying, selectedExpiry, liveSpot, currentExpiry, broker, buildRows]);
 
-  // Load option chain on expiry change or modal open
+  // Seed rows from the parent page's already-fetched chain when opening on the currently
+  // selected expiry, instead of re-fetching /api/options/chain on every "Open Option Chain"
+  // click. Any other expiry (or missing parent data) still goes through a real fetch.
   useEffect(() => {
-    if (isOpen && selectedExpiry) {
-      fetchOptionChain();
+    if (!isOpen || !selectedExpiry) return;
+
+    if (selectedExpiry === currentExpiry && initialChain && initialChainStrikes && initialChainStrikes.length > 0) {
+      const uConfig = UNDERLYINGS[selectedUnderlying] || { strikeStep: 50 };
+      const strikeStep = uConfig.strikeStep || 50;
+      const normalizedMap = new Map<number, { ce?: ChainSideData; pe?: ChainSideData }>();
+      for (const s of initialChainStrikes) {
+        const entry = initialChain[s];
+        if (entry) normalizedMap.set(s, entry);
+      }
+      if (normalizedMap.size > 0) {
+        setRows(buildRows(normalizedMap, liveSpot || initialSpot, strikeStep, true));
+        setLastUpdated(
+          new Date().toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', second: '2-digit' })
+        );
+        return;
+      }
     }
-  }, [isOpen, selectedExpiry, fetchOptionChain]);
+
+    fetchOptionChain();
+  }, [
+    isOpen,
+    selectedExpiry,
+    currentExpiry,
+    initialChain,
+    initialChainStrikes,
+    selectedUnderlying,
+    liveSpot,
+    initialSpot,
+    buildRows,
+    fetchOptionChain,
+  ]);
 
   // Handle adding a leg directly to the strategy
   const handleQuickAdd = (type: 'CE' | 'PE', side: 'BUY' | 'SELL', row: ChainRowData) => {

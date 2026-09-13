@@ -294,14 +294,14 @@ export default function IntradayTerminal() {
               health={feedHealth}
               stats={intel.stats}
               dayPnl={dayPnl}
-              htfMin={state.session.htf_min}
+              htfMin={state.session?.htf_min}
             />
           </div>
 
           {/* ── Signal blotter ───────────────────────────────────────── */}
           <Panel
             title="Signal Blotter"
-            subtitle={`${state.candidates.filter((c) => c.gated).length} tradeable · ${intel.near.length} one gate away · ${state.candidates.length} scanned`}
+            subtitle={`${(state.candidates ?? []).filter((c) => c.gated).length} tradeable · ${intel.near.length} one gate away · ${(state.candidates ?? []).length} scanned`}
             className="col-span-12 xl:col-span-7 max-h-[46vh]"
             right={
               <BlotterControls
@@ -309,7 +309,7 @@ export default function IntradayTerminal() {
                 onSort={setSortKey}
                 showAll={showAll}
                 onToggleAll={() => setShowAll((v) => !v)}
-                total={state.candidates.length}
+                total={(state.candidates ?? []).length}
               />
             }
           >
@@ -319,17 +319,17 @@ export default function IntradayTerminal() {
               onSelect={setSelected}
               flash={flash}
               nearMiss={intel.nearSet}
-              minScore={state.risk.min_score}
+              minScore={state.risk?.min_score}
             />
           </Panel>
 
           {/* ── Positions ────────────────────────────────────────────── */}
           <Panel
             title="Open Positions"
-            subtitle={`${state.positions.length} of ${state.risk.max_positions} · max ${state.risk.max_per_sector} per sector`}
+            subtitle={`${(state.positions ?? []).length} of ${state.risk?.max_positions ?? 0} · max ${state.risk?.max_per_sector ?? 0} per sector`}
             className="col-span-12 xl:col-span-5 max-h-[46vh]"
           >
-            <PositionsTable positions={state.positions} />
+            <PositionsTable positions={state.positions ?? []} />
           </Panel>
 
           {/* ── Gate blockers ────────────────────────────────────────── */}
@@ -338,7 +338,7 @@ export default function IntradayTerminal() {
             subtitle="Why the book is not firing"
             className="col-span-12 md:col-span-6 xl:col-span-4 max-h-[38vh]"
           >
-            <GateBlockerPanel blockers={intel.blockers} universe={state.candidates.length} />
+            <GateBlockerPanel blockers={intel.blockers} universe={(state.candidates ?? []).length} />
           </Panel>
 
           {/* ── Chart ────────────────────────────────────────────────── */}
@@ -363,7 +363,7 @@ export default function IntradayTerminal() {
             subtitle="Mean score · tradeable · open vs cap"
             className="col-span-12 md:col-span-6 xl:col-span-4 max-h-[38vh]"
           >
-            <SectorHeatPanel rows={intel.sectors} cap={state.risk.max_per_sector} />
+            <SectorHeatPanel rows={intel.sectors} cap={state.risk?.max_per_sector ?? 0} />
           </Panel>
 
           {/* ── One gate away ────────────────────────────────────────── */}

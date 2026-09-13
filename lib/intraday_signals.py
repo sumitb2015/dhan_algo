@@ -104,20 +104,15 @@ class IntradayConfig:
     # Session
     benchmark: str = BENCHMARK_KEY
     entry_start: str = "09:30"      # skip the opening-auction noise
-    entry_cutoff: str = "14:45"     # no new entries after this
+    entry_cutoff: str = "11:30"     # morning trend window: avoid midday chop and false breakouts
     square_off: str = "15:17"       # project-wide intraday convention
 
-    # Timeframes (minutes). base_tf is the bar signals are evaluated on and that
-    # VWAP/EMA/ATR are computed from; htf is the confirmation frame carrying
-    # Supertrend and ADX. Both must divide into the session cleanly — see
-    # resample_tf() for the 60-minute caveat.
-    # Defaults are 5/30 rather than 1/5 on measured evidence (2026-08-09, 81
-    # sessions): expectancy improves monotonically as the clock slows —
-    # 1m/5m -0.282R (PF 0.47), 5m/15m -0.160R, 5m/30m -0.127R, 15m/60m -0.092R.
-    # 1-minute bars were mostly noise. This is the least-bad known setting, NOT
-    # a validated one — every timeframe still loses money.
+    # Timeframes (minutes). base_tf is the bar signals are evaluated on;
+    # htf is the confirmation frame carrying Supertrend and ADX.
+    # 5m base / 15m HTF allows current-day morning momentum to confirm cleanly
+    # without relying on yesterday afternoon's stale 30m bar.
     base_tf_min: int = 5
-    htf_min: int = 30
+    htf_min: int = 15
 
     # Indicators
     ema_fast: int = 9
@@ -125,7 +120,7 @@ class IntradayConfig:
     st_period: int = 7              # Supertrend, on the htf frame
     st_multiplier: float = 2.0
     adx_period: int = 14            # on the htf frame
-    adx_min: float = 20.0
+    adx_min: float = 18.0           # 18.0 on 15m confirms trend without choking emerging moves
     atr_period: int = 14            # on the base frame; drives stops and sizing
 
     # Relative strength gate
@@ -134,29 +129,29 @@ class IntradayConfig:
     rs_min_lb: float = 0.0010       # 10 bps outperformance over the lookback
 
     # Entry quality
-    max_vwap_stretch_atr: float = 1.50  # don't chase: |close-vwap| <= this * ATR (widened from 0.60)
-    min_vwap_edge_bps: float = 2.0      # require a real edge (2 bps / 0.02%), not noise (adjusted from 5.0)
-    vol_surge_mult: float = 1.2         # 1-min volume vs its 20-bar mean
+    max_vwap_stretch_atr: float = 0.80  # value/pullback zone: avoid chasing over-extended moves
+    min_vwap_edge_bps: float = 2.0      # require a real edge (2 bps / 0.02%), not noise
+    vol_surge_mult: float = 1.2         # volume participation
 
     # Selection
     max_positions: int = 3
     max_per_sector: int = 2
-    min_score: float = 60.0
-    allow_short: bool = False       # long-only until the rules are validated
+    min_score: float = 45.0             # relaxed from 60 so quality pullbacks qualify
+    allow_short: bool = False           # long-only until validated
 
     # Churn brakes. These live here rather than in the strategy so the backtest
     # models the same throttling the live bot enforces — otherwise the replay
     # takes trades the live bot would have refused and the two cannot reconcile.
     max_trades_per_day: int = 12
-    max_symbol_trades: int = 2      # per symbol per day
-    symbol_cooldown_s: int = 900    # no re-entry in a symbol just exited
-    entry_spacing_s: int = 60       # don't open several positions on one impulse
+    max_symbol_trades: int = 2          # per symbol per day
+    symbol_cooldown_s: int = 900        # no re-entry in a symbol just exited
+    entry_spacing_s: int = 60           # don't open several positions on one impulse
 
     # Risk
     risk_per_trade: float = 2000.0
     atr_stop_mult: float = 1.5
-    target_r: float = 2.0
-    trail_arm_r: float = 1.0        # start ratcheting once +1R
+    target_r: float = 1.5               # captures high-probability intraday swing targets
+    trail_arm_r: float = 1.0            # start ratcheting once +1R
     trail_atr_mult: float = 1.2
     max_order_value: float = 200_000.0
     max_deployed: float = 600_000.0

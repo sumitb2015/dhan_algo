@@ -287,7 +287,7 @@ export function IntelRibbon({ regime, clock, health, stats, dayPnl, htfMin }: {
           <RibbonBlock>
             <div className="flex gap-4 flex-wrap">
               <BreadthBar label="Above VWAP" pct={regime.aboveVwapPct} />
-              <BreadthBar label={`ST bull ${htfMin ?? 30}m`} pct={regime.stBullPct} />
+              <BreadthBar label={`ST bull ${htfMin ?? 15}m`} pct={regime.stBullPct} />
               <BreadthBar label="RS+ vs NIFTY" pct={regime.rsDayPct} />
             </div>
           </RibbonBlock>
@@ -622,8 +622,8 @@ function RiskRail({ p }: { p: TerminalPosition }) {
   );
 }
 
-export function PositionsTable({ positions }: { positions: TerminalPosition[] }) {
-  if (!positions.length) {
+export function PositionsTable({ positions }: { positions?: TerminalPosition[] }) {
+  if (!positions?.length) {
     return <div className="p-6 text-center text-zinc-500 text-[11px]">No open positions</div>;
   }
   return (
@@ -847,14 +847,16 @@ export function MiniChart({ payload, position, breakdown }: {
 // ── Log ──────────────────────────────────────────────────────────────────────
 
 export function LogFeed({ orders, events }: {
-  orders: TerminalOrder[]; events: TerminalEvent[];
+  orders?: TerminalOrder[]; events?: TerminalEvent[];
 }) {
-  if (!orders.length && !events.length) {
+  const oList = orders ?? [];
+  const eList = events ?? [];
+  if (!oList.length && !eList.length) {
     return <div className="p-6 text-center text-zinc-500 text-[11px]">No activity yet</div>;
   }
   return (
     <div className="font-mono text-[11px]">
-      {orders.map((o, i) => (
+      {oList.map((o, i) => (
         <div
           key={`o${i}`}
           className={cn('flex gap-3 px-3 py-0.5 border-b border-zinc-800/30 border-l-2',
@@ -870,7 +872,7 @@ export function LogFeed({ orders, events }: {
           </span>
         </div>
       ))}
-      {events.map((e, i) => (
+      {eList.map((e, i) => (
         <div
           key={`e${i}`}
           className={cn('flex gap-3 px-3 py-0.5 border-b border-zinc-800/30 border-l-2',
@@ -890,12 +892,13 @@ export function LogFeed({ orders, events }: {
 }
 
 /** Re-exported so the shell can render risk gauges without importing state types twice. */
-export function RiskGauges({ risk }: { risk: TerminalState['risk'] }) {
+export function RiskGauges({ risk }: { risk?: Partial<NonNullable<TerminalState['risk']>> | null }) {
+  if (!risk) return null;
   return (
     <div className="flex flex-col gap-2">
-      <Gauge label="Daily loss used" value={risk.daily_loss_used} max={risk.max_daily_loss} tone="red" />
-      <Gauge label="Capital deployed" value={risk.deployed} max={risk.max_deployed} tone="blue" />
-      <Gauge label="Trades used" value={risk.trades_today} max={risk.max_trades} tone="emerald" />
+      <Gauge label="Daily loss used" value={risk.daily_loss_used ?? 0} max={risk.max_daily_loss ?? 0} tone="red" />
+      <Gauge label="Capital deployed" value={risk.deployed ?? 0} max={risk.max_deployed ?? 0} tone="blue" />
+      <Gauge label="Trades used" value={risk.trades_today ?? 0} max={risk.max_trades ?? 0} tone="emerald" />
     </div>
   );
 }

@@ -154,12 +154,10 @@ export async function runTrendConfluenceAnalysis(force = false): Promise<TrendCo
         const price = closes[n - 1];
         const price1W = closes[Math.max(0, n - 6)] ?? price;
 
-        // 1-day % change robust to EOD settlement quirk where close carries settlement
-        let currPrice = lastRow.close;
-        if (prevRow && currPrice === prevRow.close && lastRow.open && lastRow.open > 0) {
-          currPrice = lastRow.open;
-        }
-        const change1D = prevRow && prevRow.close > 0 ? ((currPrice - prevRow.close) / prevRow.close) * 100 : 0;
+        // Stale-close settlement quirk is already patched upstream in readStockCSVAsync
+        // (lib/dataLoader.ts's parseAndPatchStockRows) — don't re-guess here, a genuine
+        // flat 0% day also has currPrice === prevRow.close.
+        const change1D = prevRow && prevRow.close > 0 ? ((lastRow.close - prevRow.close) / prevRow.close) * 100 : 0;
         const change1W = price1W > 0 ? ((price - price1W) / price1W) * 100 : 0;
 
         // Daily EMAs

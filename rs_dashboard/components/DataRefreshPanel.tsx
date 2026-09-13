@@ -8,10 +8,14 @@ import {
 import {
   Sheet, SheetContent, SheetHeader, SheetTitle, SheetDescription
 } from '@/components/ui/sheet';
+import {
+  Drawer, DrawerContent, DrawerHeader, DrawerTitle, DrawerDescription
+} from '@/components/ui/drawer';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { Progress } from '@/components/ui/progress';
 import { Separator } from '@/components/ui/separator';
+import { useIsMobile } from '@/hooks/use-mobile';
 
 interface RefreshStatus {
   pid: number;
@@ -88,6 +92,7 @@ function logLineColor(line: string): string {
 }
 
 export default function DataRefreshPanel({ open, onClose, onRefreshComplete }: DataRefreshPanelProps) {
+  const isMobile = useIsMobile();
   const [status, setStatus] = useState<RefreshStatus | null>(null);
   const [running, setRunning] = useState(false);
   const [starting, setStarting] = useState(false);
@@ -204,34 +209,8 @@ export default function DataRefreshPanel({ open, onClose, onRefreshComplete }: D
     ? Math.round(((status?.current ?? 0) / (status?.total ?? 1)) * 100)
     : 0;
 
-  return (
-    <Sheet open={open} onOpenChange={(v) => { if (!v) onClose(); }}>
-      <SheetContent
-        side="right"
-        showCloseButton={false}
-        className="w-[480px] max-w-[100vw] p-0 flex flex-col bg-zinc-950 border-l border-zinc-800 gap-0"
-      >
-        {/* Header */}
-        <SheetHeader className="flex-none px-5 py-4 border-b border-zinc-800 flex-row items-center justify-between gap-3">
-          <div className="flex items-center gap-3">
-            <div className="p-2 rounded-xl bg-emerald-500/10 border border-emerald-500/20">
-              <Layers className="h-4 w-4 text-emerald-400" />
-            </div>
-            <div>
-              <SheetTitle className="text-sm font-bold text-white">Sync Market Data</SheetTitle>
-              <SheetDescription className="text-[10px] text-zinc-500">Fast EOD updates via Yahoo Finance / Dhan</SheetDescription>
-            </div>
-          </div>
-          <Button
-            variant="ghost"
-            size="icon-sm"
-            onClick={onClose}
-            className="shrink-0 text-zinc-500 hover:text-white"
-          >
-            ×
-          </Button>
-        </SheetHeader>
-
+  const body = (
+    <>
         {/* Source Selector & Dataset buttons */}
         <div className="flex-none px-5 pt-3 pb-3 space-y-2.5">
           <div className="flex items-center justify-between pb-1">
@@ -428,6 +407,68 @@ export default function DataRefreshPanel({ open, onClose, onRefreshComplete }: D
           Requires a valid Dhan access token (<code className="text-zinc-500">access_token.json</code>).
           Run <code className="text-zinc-500">login.py</code> if auth fails.
         </div>
+    </>
+  );
+
+  const iconBadge = (
+    <div className="p-2 rounded-xl bg-emerald-500/10 border border-emerald-500/20">
+      <Layers className="h-4 w-4 text-emerald-400" />
+    </div>
+  );
+
+  if (isMobile) {
+    return (
+      <Drawer open={open} onOpenChange={(v) => { if (!v) onClose(); }}>
+        <DrawerContent className="flex flex-col gap-0 p-0 max-h-[88vh]">
+          <DrawerHeader className="flex-none px-5 pt-2 pb-4 border-b border-zinc-800 flex-row items-center justify-between gap-3">
+            <div className="flex items-center gap-3">
+              {iconBadge}
+              <div>
+                <DrawerTitle>Sync Market Data</DrawerTitle>
+                <DrawerDescription>Fast EOD updates via Yahoo Finance / Dhan</DrawerDescription>
+              </div>
+            </div>
+            <Button
+              variant="ghost"
+              size="icon-sm"
+              onClick={onClose}
+              className="shrink-0 text-zinc-500 hover:text-white"
+            >
+              ×
+            </Button>
+          </DrawerHeader>
+          <div className="flex-1 flex flex-col min-h-0">{body}</div>
+        </DrawerContent>
+      </Drawer>
+    );
+  }
+
+  return (
+    <Sheet open={open} onOpenChange={(v) => { if (!v) onClose(); }}>
+      <SheetContent
+        side="right"
+        showCloseButton={false}
+        className="w-[480px] max-w-[100vw] p-0 flex flex-col bg-zinc-950 border-l border-zinc-800 gap-0"
+      >
+        {/* Header */}
+        <SheetHeader className="flex-none px-5 py-4 border-b border-zinc-800 flex-row items-center justify-between gap-3">
+          <div className="flex items-center gap-3">
+            {iconBadge}
+            <div>
+              <SheetTitle className="text-sm font-bold text-white">Sync Market Data</SheetTitle>
+              <SheetDescription className="text-[10px] text-zinc-500">Fast EOD updates via Yahoo Finance / Dhan</SheetDescription>
+            </div>
+          </div>
+          <Button
+            variant="ghost"
+            size="icon-sm"
+            onClick={onClose}
+            className="shrink-0 text-zinc-500 hover:text-white"
+          >
+            ×
+          </Button>
+        </SheetHeader>
+        {body}
       </SheetContent>
     </Sheet>
   );

@@ -489,11 +489,11 @@ def test_position_size_returns_zero_not_one_when_unsizable(cfg):
 def test_initial_stop_and_target_geometry(cfg):
     stop = initial_stop(100.0, 2.0, "LONG", cfg)
     assert stop == pytest.approx(97.0)
-    assert target_price(100.0, stop, "LONG", cfg) == pytest.approx(106.0)
+    assert target_price(100.0, stop, "LONG", cfg) == pytest.approx(100.0 + cfg.target_r * 3.0)
 
     sstop = initial_stop(100.0, 2.0, "SHORT", cfg)
     assert sstop == pytest.approx(103.0)
-    assert target_price(100.0, sstop, "SHORT", cfg) == pytest.approx(94.0)
+    assert target_price(100.0, sstop, "SHORT", cfg) == pytest.approx(100.0 - cfg.target_r * 3.0)
 
 
 def test_trail_stop_never_loosens(cfg):

@@ -47,7 +47,7 @@ export const CONDITION_LABELS: Record<ConditionName, string> = {
 export const CONDITION_TOOLTIPS: Record<ConditionName, string> = {
   above_vwap: 'Price has a real edge over session VWAP (hard gate)',
   ema_stacked: 'EMA9 above EMA20 (soft — scores only)',
-  st_bull_htf: 'HTF Supertrend is bullish (hard gate; default 30m)',
+  st_bull_htf: 'HTF Supertrend is bullish (hard gate; default 15m)',
   adx_ok: 'HTF ADX above the trend threshold (hard gate)',
   rs_day_ok: 'Outperforming NIFTY since the open (hard gate)',
   rs_lb_ok: 'Outperforming NIFTY over the lookback (soft — scores only)',
@@ -144,22 +144,22 @@ export interface TerminalOrder {
 export interface TerminalState {
   strategy: string;
   status: StrategyStatus;
-  dry_run: boolean;
-  mode: string;
+  dry_run?: boolean;
+  mode?: string;
   /** False until the backtest clears its expectancy gate. Surfaced in the header. */
-  backtest_validated: boolean;
-  as_of: string;
+  backtest_validated?: boolean;
+  as_of?: string;
   pid?: number;
   last_update?: string;
-  session: {
+  session?: {
     entry_start: string;
     entry_cutoff: string;
     square_off: string;
     base_tf_min?: number;
     htf_min?: number;
   };
-  benchmark: { symbol: string; ltp: number; day_pct: number };
-  risk: {
+  benchmark?: { symbol: string; ltp: number; day_pct: number };
+  risk?: {
     max_positions: number;
     open: number;
     max_per_sector: number;
@@ -175,18 +175,18 @@ export interface TerminalState {
   };
   /** `priced` is false when an open position has no LTP — the daily risk check is
    *  skipped in that state, so the UI must say so rather than imply a live mark. */
-  pnl: { realized: number; unrealized: number; day: number; priced: boolean };
-  positions: TerminalPosition[];
-  candidates: TerminalCandidate[];
-  watchlist: string[];
-  cooldowns: Record<string, string>;
-  blacklist: Record<string, string>;
-  events: TerminalEvent[];
-  equity_curve: { ts: string; day_pnl: number }[];
-  halt_reason: string | null;
-  last_poll: string | null;
-  poll_lag_s: number | null;
-  ws_healthy: boolean;
+  pnl?: { realized: number; unrealized: number; day: number; priced: boolean };
+  positions?: TerminalPosition[];
+  candidates?: TerminalCandidate[];
+  watchlist?: string[];
+  cooldowns?: Record<string, string>;
+  blacklist?: Record<string, string>;
+  events?: TerminalEvent[];
+  equity_curve?: { ts: string; day_pnl: number }[];
+  halt_reason?: string | null;
+  last_poll?: string | null;
+  poll_lag_s?: number | null;
+  ws_healthy?: boolean;
 }
 
 export interface TerminalPayload {

@@ -15,12 +15,16 @@ export interface DistributionDay {
   volumeChangePct: number;
   volumeVs50Avg: number;
   daysAgo: number;
+  sessionNumber: number;
   sessionIndex: number;
   expirySessionsLeft: number;
   distanceTo5Pct: number;
+  targetPrice: number;
   maxGainSince: number;
+  gainNeededFromCurrent: number;
   status: 'ACTIVE' | 'EXPIRED_TIME' | 'EXPIRED_GAIN';
   isStalling: boolean;
+  dayType: 'DISTRIBUTION' | 'STALLING';
 }
 
 export interface FollowThroughDay {
@@ -49,6 +53,8 @@ export interface MarketRegimeAnalysis {
   activeStallingCount: number;
   totalActivePressure: number;
   activeDistributionDays: DistributionDay[];
+  activeStallingDays: DistributionDay[];
+  allActivePressureDays: DistributionDay[];
   recentExpiredDays: DistributionDay[];
   lastFTD: FollowThroughDay | null;
   daysSinceLastDistribution: number;
@@ -116,6 +122,8 @@ export function calculateMarketRegime(
       activeStallingCount: 0,
       totalActivePressure: 0,
       activeDistributionDays: [],
+      activeStallingDays: [],
+      allActivePressureDays: [],
       recentExpiredDays: [],
       lastFTD: null,
       daysSinceLastDistribution: 999,
@@ -255,7 +263,9 @@ export function calculateMarketRegime(
 
     for (const d of distDaysInWindow) {
       const daysAgo = currBarIdx - d.index;
-      const expirySessionsLeft = Math.max(0, 25 - daysAgo);
+      const sessionNumber = daysAgo + 1; // 1 on day of event, up to 25
+      const expirySessionsLeft = Math.max(0, 25 - sessionNumber);
+      const targetPrice = Math.round(d.close * 1.05 * 100) / 100;
 
       // Check the 5% rally rule:
       // If any subsequent close up to currBarIdx was >= 5% above the distribution close
@@ -265,8 +275,9 @@ export function calculateMarketRegime(
         if (gain > maxGainSince) maxGainSince = gain;
       }
 
-      const currentGain = ((rows[currBarIdx].close - d.close) / d.close) * 100;
-      const distanceTo5Pct = Math.max(0, 5.0 - currentGain);
+      const currClose = rows[currBarIdx].close;
+      const gainNeededFromCurrent = Math.max(0, ((targetPrice - currClose) / currClose) * 100);
+      const distanceTo5Pct = Math.max(0, 5.0 - maxGainSince);
 
       let status: 'ACTIVE' | 'EXPIRED_TIME' | 'EXPIRED_GAIN' = 'ACTIVE';
       if (maxGainSince >= 5.0) {
@@ -278,18 +289,22 @@ export function calculateMarketRegime(
       const item: DistributionDay = {
         date: d.date,
         close: d.close,
-        changePct: d.changePct,
+        changePct: Math.round(d.changePct * 100) / 100,
         volume: d.volume,
         prevVolume: d.prevVolume,
-        volumeChangePct: d.prevVolume > 0 ? ((d.volume - d.prevVolume) / d.prevVolume) * 100 : 0,
-        volumeVs50Avg: vol50Series[d.index] > 0 ? d.volume / vol50Series[d.index] : 1,
+        volumeChangePct: d.prevVolume > 0 ? Math.round(((d.volume - d.prevVolume) / d.prevVolume) * 1000) / 10 : 0,
+        volumeVs50Avg: vol50Series[d.index] > 0 ? Math.round((d.volume / vol50Series[d.index]) * 100) / 100 : 1,
         daysAgo,
+        sessionNumber,
         sessionIndex: d.index,
         expirySessionsLeft,
-        distanceTo5Pct,
-        maxGainSince,
+        distanceTo5Pct: Math.round(distanceTo5Pct * 10) / 10,
+        targetPrice,
+        maxGainSince: Math.round(maxGainSince * 10) / 10,
+        gainNeededFromCurrent: Math.round(gainNeededFromCurrent * 10) / 10,
         status,
         isStalling: d.isStalling,
+        dayType: d.isStalling ? 'STALLING' : 'DISTRIBUTION',
       };
 
       if (status === 'ACTIVE') {
@@ -349,8 +364,12 @@ export function calculateMarketRegime(
   // Compute final current metrics as of the latest completed bar
   const latestIdx = n - 1;
   const { activeList, expiredList } = getActiveDistributionDaysAt(latestIdx);
-  const activeStrictCount = activeList.filter((d) => !d.isStalling).length;
-  const activeStallCount = activeList.filter((d) => d.isStalling).length;
+  const activeStrictDays = activeList.filter((d) => !d.isStalling).sort((a, b) => b.daysAgo - a.daysAgo);
+  const activeStallingDays = activeList.filter((d) => d.isStalling).sort((a, b) => b.daysAgo - a.daysAgo);
+  const allActivePressureDays = [...activeList].sort((a, b) => b.daysAgo - a.daysAgo);
+
+  const activeStrictCount = activeStrictDays.length;
+  const activeStallCount = activeStallingDays.length;
   const totalPressure = activeStrictCount + activeStallCount * 0.5;
 
   const currentPrice = rows[latestIdx].close;
@@ -453,7 +472,9 @@ export function calculateMarketRegime(
     activeDistributionCount: activeStrictCount,
     activeStallingCount: activeStallCount,
     totalActivePressure: Math.round(totalPressure * 10) / 10,
-    activeDistributionDays: activeList.sort((a, b) => b.daysAgo - a.daysAgo),
+    activeDistributionDays: activeStrictDays,
+    activeStallingDays,
+    allActivePressureDays,
     recentExpiredDays: expiredList.slice(-10),
     lastFTD,
     daysSinceLastDistribution,

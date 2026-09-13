@@ -79,9 +79,12 @@ export default function AddLegModal({
     setEntryPriceDraft(String(val));
   };
 
-  // Update entry price when modal opens or ATM/chain updates
+  // Snapshot strike/lots/entry-price defaults only on the closed->open transition — using
+  // atmStrike/resolvePrice directly as effect deps would re-fire on every live spot tick or
+  // chain refresh while the modal is open, silently overwriting a user's in-progress selection.
+  const wasOpenRef = React.useRef(false);
   React.useEffect(() => {
-    if (isOpen) {
+    if (isOpen && !wasOpenRef.current) {
       setStrike(atmStrike);
       const initP = resolvePrice(atmStrike, type);
       setEntryPrice(initP);
@@ -89,6 +92,7 @@ export default function AddLegModal({
       setLots(defaultLots || 2);
       setLotsDraft(String(defaultLots || 2));
     }
+    wasOpenRef.current = isOpen;
   }, [isOpen, atmStrike, resolvePrice, type, defaultLots]);
 
   // Update entry price when strike or type changes

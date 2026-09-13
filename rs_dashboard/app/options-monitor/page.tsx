@@ -223,7 +223,7 @@ export default function OptionsMonitorPage() {
         }
 
         // Compute average ATM IV from the real chain
-        const currentSpot = chainData.spot || 23400;
+        const currentSpot = chainData.spot || UNDERLYINGS[sym]?.defaultSpot || UNDERLYINGS.NIFTY.defaultSpot;
         const atm = Math.round(currentSpot / (UNDERLYINGS[sym]?.strikeStep || 50)) * (UNDERLYINGS[sym]?.strikeStep || 50);
         const atmData = normalized[atm];
         const atmCeIv = atmData?.ce?.implied_volatility;
@@ -294,7 +294,7 @@ export default function OptionsMonitorPage() {
 
   // Initialize realistic strategy preset once chain data arrives (if no broker positions loaded)
   useEffect(() => {
-    if (hasInitializedPresetRef.current || (chainStrikes.length === 0 && Object.keys(normalizedChain).length === 0)) {
+    if (hasInitializedPresetRef.current || chainStrikes.length === 0 || Object.keys(normalizedChain).length === 0) {
       return;
     }
     if (activeLegs.length > 0) {
@@ -322,10 +322,10 @@ export default function OptionsMonitorPage() {
     const gPe = computeBsGreeks('PE', spot, peStrike, t, peIv, uConfig.lotSize);
 
     const ceDhanGreeks = ceChain?.greeks;
-    const hasCeDhan = ceDhanGreeks && (ceDhanGreeks.delta !== 0 || ceDhanGreeks.gamma !== 0);
+    const hasCeDhan = ceDhanGreeks && ceDhanGreeks.delta != null && ceDhanGreeks.gamma != null;
 
     const peDhanGreeks = peChain?.greeks;
-    const hasPeDhan = peDhanGreeks && (peDhanGreeks.delta !== 0 || peDhanGreeks.gamma !== 0);
+    const hasPeDhan = peDhanGreeks && peDhanGreeks.delta != null && peDhanGreeks.gamma != null;
 
     const cePrice = (typeof ceTick?.ce?.ltp === 'number' && ceTick.ce.ltp > 0)
       ? ceTick.ce.ltp
@@ -405,7 +405,7 @@ export default function OptionsMonitorPage() {
 
       // Prioritize Dhan API Greeks from option chain
       const dhanGreeks = chainSide?.greeks;
-      const hasDhanGreeks = dhanGreeks && (dhanGreeks.delta !== 0 || dhanGreeks.gamma !== 0);
+      const hasDhanGreeks = dhanGreeks && dhanGreeks.delta != null && dhanGreeks.gamma != null;
 
       // Recompute Greeks via Black-Scholes as fallback if Dhan Greeks unavailable
       const g = computeBsGreeks(leg.type, spot, leg.strike, timeYears, effectiveIv, uConfig.lotSize);
@@ -585,17 +585,26 @@ export default function OptionsMonitorPage() {
   const handleSelectUnderlying = (sym: string) => {
     setSelectedUnderlying(sym);
     hasInitializedPresetRef.current = false;
+    // Reset spot and chain state to the new underlying's scale — otherwise the old
+    // underlying's spot/strikes linger (wrong price scale) until the async fetch resolves,
+    // or indefinitely if it fails, and overlapping strike keys can serve stale cross-
+    // underlying quotes since the chain is merged rather than replaced on fetch.
+    setSpot(UNDERLYINGS[sym]?.defaultSpot ?? UNDERLYINGS.NIFTY.defaultSpot);
+    setChainStrikes([]);
+    setNormalizedChain({});
+    setExpiries([]);
+    setSelectedExpiry('');
     notifyAction(`Switched underlying to ${sym}. Loading option chain & live quotes...`);
   };
 
-  // Add custom leg (open for all strikes across the chain)
-  const handleAddLeg = (newLegData: {
+  // Shared leg-construction logic for both "Add to Monitor" and "Place Order Now" flows.
+  const buildNewLeg = useCallback((newLegData: {
     type: OptType;
     side: Side;
     strike: number;
     lots: number;
     entryPrice: number;
-  }) => {
+  }): OptionLegModel => {
     const timeYears = calculateTimeToExpiryYears(selectedExpiry);
 
     const tickData = liveQuotes?.strikes?.[newLegData.strike] ?? liveQuotes?.strikes?.[String(newLegData.strike)];
@@ -611,7 +620,7 @@ export default function OptionsMonitorPage() {
       : ivPct / 100;
 
     const dhanGreeks = chainSide?.greeks;
-    const hasDhanGreeks = dhanGreeks && (dhanGreeks.delta !== 0 || dhanGreeks.gamma !== 0);
+    const hasDhanGreeks = dhanGreeks && dhanGreeks.delta != null && dhanGreeks.gamma != null;
     const g = computeBsGreeks(newLegData.type, spot, newLegData.strike, timeYears, legIv, uConfig.lotSize);
 
     const legLtp = (typeof wsPrice === 'number' && wsPrice > 0)
@@ -620,7 +629,7 @@ export default function OptionsMonitorPage() {
       ? chainPrice
       : newLegData.entryPrice;
 
-    const newLeg: OptionLegModel = {
+    return {
       id: `leg_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
       type: newLegData.type,
       side: newLegData.side,
@@ -636,7 +645,17 @@ export default function OptionsMonitorPage() {
       iv: legIv,
       expiry: selectedExpiry,
     };
+  }, [selectedExpiry, liveQuotes, normalizedChain, ivPct, spot, uConfig.lotSize]);
 
+  // Add custom leg (open for all strikes across the chain)
+  const handleAddLeg = (newLegData: {
+    type: OptType;
+    side: Side;
+    strike: number;
+    lots: number;
+    entryPrice: number;
+  }) => {
+    const newLeg = buildNewLeg(newLegData);
     setActiveLegs((prev) => [...prev, newLeg]);
     setStrategyName('Custom Strategy');
     notifyAction(`Added ${newLegData.side} ${newLegData.strike} ${newLegData.type} (${newLegData.lots} Lots)`);
@@ -675,7 +694,7 @@ export default function OptionsMonitorPage() {
           : l.iv || ivPct / 100;
 
         const dhanGreeks = chainSide?.greeks;
-        const hasDhanGreeks = dhanGreeks && (dhanGreeks.delta !== 0 || dhanGreeks.gamma !== 0);
+        const hasDhanGreeks = dhanGreeks && dhanGreeks.delta != null && dhanGreeks.gamma != null;
         const g = computeBsGreeks(l.type, spot, newStrike, timeYears, effectiveIv, uConfig.lotSize);
 
         const currentPrice = (typeof wsPrice === 'number' && wsPrice > 0)
@@ -739,7 +758,7 @@ export default function OptionsMonitorPage() {
       const chainP = chainSide?.last_price || chainSide?.previous_close_price;
       const iv = chainSide?.implied_volatility ? chainSide.implied_volatility / 100 : ivPct / 100;
       const dhanGreeks = chainSide?.greeks;
-      const hasDhanGreeks = dhanGreeks && (dhanGreeks.delta !== 0 || dhanGreeks.gamma !== 0);
+      const hasDhanGreeks = dhanGreeks && dhanGreeks.delta != null && dhanGreeks.gamma != null;
 
       // 3. Fallback to Black-Scholes theoretical price for this specific strike & type
       const fallbackGreeks = computeBsGreeks(type.toUpperCase() as OptType, spot, strike, t, iv, uConfig.lotSize);
@@ -1157,8 +1176,8 @@ export default function OptionsMonitorPage() {
 
     const ceDhanGreeks = ceChainEntry?.greeks;
     const peDhanGreeks = peChainEntry?.greeks;
-    const hasCeDhan = ceDhanGreeks && (ceDhanGreeks.delta !== 0 || ceDhanGreeks.gamma !== 0);
-    const hasPeDhan = peDhanGreeks && (peDhanGreeks.delta !== 0 || peDhanGreeks.gamma !== 0);
+    const hasCeDhan = ceDhanGreeks && ceDhanGreeks.delta != null && ceDhanGreeks.gamma != null;
+    const hasPeDhan = peDhanGreeks && peDhanGreeks.delta != null && peDhanGreeks.gamma != null;
 
     const gCe = computeBsGreeks('CE', spot, wingCeStrike, t, ivPct / 100, uConfig.lotSize);
     const gPe = computeBsGreeks('PE', spot, wingPeStrike, t, ivPct / 100, uConfig.lotSize);
@@ -1380,7 +1399,7 @@ export default function OptionsMonitorPage() {
 
     const chainSide = leg.type === 'CE' ? normalizedChain[leg.strike]?.ce : normalizedChain[leg.strike]?.pe;
     const dhanGreeks = chainSide?.greeks;
-    const hasDhanGreeks = dhanGreeks && (dhanGreeks.delta !== 0 || dhanGreeks.gamma !== 0);
+    const hasDhanGreeks = dhanGreeks && dhanGreeks.delta != null && dhanGreeks.gamma != null;
 
     const newLeg: OptionLegModel = {
       id: `leg_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
@@ -1682,6 +1701,8 @@ export default function OptionsMonitorPage() {
         spot={spot}
         broker="dhan"
         liveQuotes={liveQuotes}
+        initialChain={normalizedChain}
+        initialChainStrikes={chainStrikes}
         onSelectExpiry={(exp) => {
           setSelectedExpiry(exp);
           fetchOptionChain(selectedUnderlying, exp);

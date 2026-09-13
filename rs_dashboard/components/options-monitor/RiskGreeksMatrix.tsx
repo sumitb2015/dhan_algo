@@ -2,6 +2,7 @@
 
 import React from 'react';
 import { PortfolioGreeks } from '@/lib/optionsMonitorMath';
+import TerminalPanel from './TerminalPanel';
 import {
   Zap,
   RotateCw,
@@ -46,35 +47,6 @@ function formatRupeeCompact(amount: number): string {
   return `${isNeg ? '-' : ''}₹${Math.round(absVal)}`;
 }
 
-function TerminalPanel({
-  title,
-  icon: Icon,
-  meta,
-  children,
-  className = '',
-}: {
-  title: string;
-  icon: React.ComponentType<{ className?: string }>;
-  meta?: React.ReactNode;
-  children: React.ReactNode;
-  className?: string;
-}) {
-  return (
-    <section className={`flex flex-col rounded-xl border border-zinc-800 bg-zinc-900/80 shadow-sm overflow-hidden ${className}`}>
-      <header className="flex items-center justify-between gap-2 border-b border-zinc-800/80 bg-zinc-950/70 px-3 py-2">
-        <div className="flex items-center gap-1.5 min-w-0">
-          <Icon className="h-3.5 w-3.5 text-amber-400 shrink-0" />
-          <span className="text-[10px] font-bold uppercase tracking-wider text-zinc-300 truncate">
-            {title}
-          </span>
-        </div>
-        {meta ? <div className="font-mono text-[10px] shrink-0">{meta}</div> : null}
-      </header>
-      <div className="flex-1 min-h-0">{children}</div>
-    </section>
-  );
-}
-
 export default function RiskGreeksMatrix({
   greeks,
   lastActionMessage,
@@ -106,7 +78,7 @@ export default function RiskGreeksMatrix({
           <div className="w-full">
             <table className="w-full text-left text-xs border-collapse">
               <thead>
-                <tr className="bg-zinc-800 text-white font-bold text-[10px]">
+                <tr className="bg-zinc-800 text-white font-bold text-xs">
                   <th className="py-1.5 px-2 rounded-l">GREEK</th>
                   <th className="py-1.5 px-1.5 text-center">VALUE</th>
                   <th className="py-1.5 px-2 text-right rounded-r">RISK / IMPACT</th>

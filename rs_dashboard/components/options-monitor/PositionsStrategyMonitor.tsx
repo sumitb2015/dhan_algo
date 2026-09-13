@@ -2,6 +2,7 @@
 
 import React, { useMemo, useState, useRef } from 'react';
 import { OptionLegModel, PayoffPoint, PositionGuard, formatShortExpiry } from '@/lib/optionsMonitorMath';
+import TerminalPanel from './TerminalPanel';
 import {
   ResponsiveContainer,
   LineChart,
@@ -163,38 +164,6 @@ interface PositionsStrategyMonitorProps {
   onCloseSingleLeg?: (leg: OptionLegModel) => void;
   onToggleLegEntered?: (id: string) => void;
   onOpenOptionChain?: () => void;
-}
-
-function TerminalPanel({
-  title,
-  icon: Icon,
-  meta,
-  badge,
-  children,
-  className = '',
-}: {
-  title: string;
-  icon: React.ComponentType<{ className?: string }>;
-  meta?: React.ReactNode;
-  badge?: React.ReactNode;
-  children: React.ReactNode;
-  className?: string;
-}) {
-  return (
-    <section className={`flex flex-col rounded-xl border border-zinc-800 bg-zinc-900/70 shadow-sm ${className}`}>
-      <header className="flex items-center justify-between gap-3 border-b border-amber-500/25 bg-zinc-950/60 px-3.5 py-2.5">
-        <div className="flex items-center gap-2">
-          <span className="flex items-center gap-1.5 text-[11px] font-bold uppercase tracking-[0.16em] text-amber-400">
-            <Icon className="h-3.5 w-3.5 text-amber-400" />
-            {title}
-          </span>
-          {badge}
-        </div>
-        {meta ? <div className="font-mono text-[11px] text-zinc-400">{meta}</div> : null}
-      </header>
-      <div className="flex-1 min-h-0">{children}</div>
-    </section>
-  );
 }
 
 function PayoffTooltip({ active, payload, label }: any) {

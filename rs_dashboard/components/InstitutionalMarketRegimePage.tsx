@@ -69,12 +69,13 @@ const LOOKBACK_OPTIONS = [
 ];
 
 export default function InstitutionalMarketRegimePage() {
-  const [selectedIndex, setSelectedIndex] = useState<'NIFTY50' | 'NIFTY500'>('NIFTY500');
+  const [selectedIndex, setSelectedIndex] = useState<'NIFTY50' | 'NIFTY500'>('NIFTY50');
   const [lookback, setLookback] = useState<number>(250);
   const [data, setData] = useState<ApiResponse | null>(null);
   const [loading, setLoading] = useState<boolean>(true);
   const [error, setError] = useState<string | null>(null);
   const [selectedDistDay, setSelectedDistDay] = useState<DistributionDay | null>(null);
+  const [tableFilter, setTableFilter] = useState<'distribution' | 'all' | 'stalling'>('distribution');
 
   const fetchData = useCallback(
     async (force = false) => {
@@ -100,6 +101,17 @@ export default function InstitutionalMarketRegimePage() {
   }, [fetchData]);
 
   const reg = data?.selected;
+
+  const displayedDays = React.useMemo(() => {
+    if (!reg) return [];
+    if (tableFilter === 'stalling') {
+      return reg.activeStallingDays || [];
+    }
+    if (tableFilter === 'all') {
+      return reg.allActivePressureDays || reg.activeDistributionDays || [];
+    }
+    return reg.activeDistributionDays || [];
+  }, [reg, tableFilter]);
 
   // Visual tones
   const isCorrection = reg?.status === 'IN_CORRECTION';
@@ -619,18 +631,54 @@ export default function InstitutionalMarketRegimePage() {
 
         {/* ─── Active Distribution Days Table ───────────────────────────────── */}
         <section className="bg-zinc-900/60 border border-zinc-800 rounded-2xl p-5 flex flex-col gap-4">
-          <div className="flex items-center justify-between">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
             <div>
-              <h3 className="text-sm font-bold text-white">
-                Active Distribution Days in Current 25-Session Window
+              <h3 className="text-sm font-bold text-white flex items-center gap-2">
+                <span>Active Distribution Days in Current 25-Session Window</span>
+                <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-zinc-800 text-zinc-300 font-medium border border-zinc-700">
+                  {reg?.indexLabel}
+                </span>
               </h3>
-              <p className="text-[11px] text-zinc-500">
-                A distribution day drops off after 25 sessions, or earlier if the index gains ≥ 5.0% from its close.
+              <p className="text-[11px] text-zinc-500 mt-0.5">
+                A distribution day drops off after 25 trading sessions, or earlier if the index closes ≥ 5.0% above that day&apos;s close.
               </p>
             </div>
-            <span className="text-xs font-mono font-bold text-amber-400">
-              {reg?.activeDistributionDays.length || 0} Active Sessions
-            </span>
+
+            {/* View Filter Tabs */}
+            <div className="flex items-center gap-1 bg-zinc-900 border border-zinc-800 p-1 rounded-lg self-start sm:self-auto font-mono text-xs">
+              <button
+                onClick={() => setTableFilter('distribution')}
+                className={`px-2.5 py-1 text-xs font-semibold rounded-md transition-all ${
+                  tableFilter === 'distribution'
+                    ? 'bg-zinc-800 text-white shadow-sm border border-zinc-700'
+                    : 'text-zinc-400 hover:text-zinc-200'
+                }`}
+              >
+                Distribution Days ({reg?.activeDistributionCount ?? 0})
+              </button>
+              <button
+                onClick={() => setTableFilter('all')}
+                className={`px-2.5 py-1 text-xs font-semibold rounded-md transition-all ${
+                  tableFilter === 'all'
+                    ? 'bg-zinc-800 text-white shadow-sm border border-zinc-700'
+                    : 'text-zinc-400 hover:text-zinc-200'
+                }`}
+              >
+                All Pressure ({(reg?.activeDistributionCount ?? 0) + (reg?.activeStallingCount ?? 0)})
+              </button>
+              {(reg?.activeStallingCount ?? 0) > 0 && (
+                <button
+                  onClick={() => setTableFilter('stalling')}
+                  className={`px-2.5 py-1 text-xs font-semibold rounded-md transition-all ${
+                    tableFilter === 'stalling'
+                      ? 'bg-zinc-800 text-amber-400 shadow-sm border border-zinc-700'
+                      : 'text-zinc-400 hover:text-zinc-200'
+                  }`}
+                >
+                  Stalling ({reg?.activeStallingCount ?? 0})
+                </button>
+              )}
+            </div>
           </div>
 
           <div className="overflow-x-auto rounded-xl border border-zinc-800">
@@ -638,65 +686,117 @@ export default function InstitutionalMarketRegimePage() {
               <thead className="bg-zinc-800 text-xs font-bold text-white">
                 <tr>
                   <th className="px-4 py-2.5">Date</th>
+                  <th className="px-4 py-2.5">Type</th>
                   <th className="px-4 py-2.5">Index Close</th>
                   <th className="px-4 py-2.5">1D Change %</th>
-                  <th className="px-4 py-2.5">Volume Surge</th>
+                  <th className="px-4 py-2.5">Volume vs Prior Day</th>
                   <th className="px-4 py-2.5">Sessions Active</th>
                   <th className="px-4 py-2.5">5% Rally Rule Progress</th>
                   <th className="px-4 py-2.5">Status</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-zinc-800/80 bg-zinc-950/60">
-                {reg?.activeDistributionDays.length === 0 ? (
+                {displayedDays.length === 0 ? (
                   <tr>
-                    <td colSpan={7} className="px-4 py-8 text-center text-zinc-500">
-                      No active distribution days in the current 25-session window. Market trend is clean!
+                    <td colSpan={8} className="px-4 py-8 text-center text-zinc-500">
+                      No active {tableFilter === 'stalling' ? 'stalling' : 'distribution'} days in the current 25-session window. Market trend is clean!
                     </td>
                   </tr>
                 ) : (
-                  reg?.activeDistributionDays.map((d) => {
-                    const pctNeeded = d.distanceTo5Pct;
+                  displayedDays.map((d) => {
+                    const isStall = d.isStalling;
+                    const progressPct = Math.min(100, Math.max(0, (d.maxGainSince / 5.0) * 100));
                     return (
                       <tr
                         key={d.date}
                         className="hover:bg-zinc-900/50 transition-colors"
                       >
                         <td className="px-4 py-2.5 font-bold text-white flex items-center gap-1.5">
-                          <span className="w-2 h-2 rounded-full bg-red-500" />
+                          <span
+                            className={`w-2 h-2 rounded-full ${
+                              isStall ? 'bg-amber-400' : 'bg-red-500'
+                            }`}
+                          />
                           {d.date}
+                        </td>
+                        <td className="px-4 py-2.5">
+                          <span
+                            className={`px-2 py-0.5 rounded text-[10px] font-bold border ${
+                              isStall
+                                ? 'bg-amber-500/15 text-amber-400 border-amber-500/30'
+                                : 'bg-red-500/15 text-red-400 border-red-500/30'
+                            }`}
+                          >
+                            {isStall ? 'STALLING' : 'DISTRIBUTION'}
+                          </span>
                         </td>
                         <td className="px-4 py-2.5 text-zinc-200">
                           ₹{d.close.toFixed(2)}
                         </td>
-                        <td className="px-4 py-2.5 font-bold text-red-400">
+                        <td
+                          className={`px-4 py-2.5 font-bold ${
+                            isStall
+                              ? d.changePct < 0
+                                ? 'text-amber-400'
+                                : 'text-zinc-300'
+                              : 'text-red-400'
+                          }`}
+                        >
+                          {d.changePct >= 0 ? '+' : ''}
                           {d.changePct.toFixed(2)}%
                         </td>
                         <td className="px-4 py-2.5 text-zinc-300">
-                          {d.volumeVs50Avg.toFixed(2)}x 50D avg
+                          <div className="flex flex-col">
+                            <span
+                              className={`font-semibold ${
+                                d.volumeChangePct > 0 ? 'text-emerald-400' : 'text-zinc-400'
+                              }`}
+                            >
+                              {d.volumeChangePct >= 0 ? '+' : ''}
+                              {d.volumeChangePct.toFixed(1)}% vs prev
+                            </span>
+                            <span className="text-[10px] text-zinc-500">
+                              {d.volumeVs50Avg.toFixed(2)}x 50D avg
+                            </span>
+                          </div>
                         </td>
                         <td className="px-4 py-2.5 text-zinc-400">
-                          Day {d.daysAgo} of 25{' '}
+                          Session {d.sessionNumber ?? d.daysAgo + 1} of 25{' '}
                           <span className="text-[10px] text-zinc-500">
                             ({d.expirySessionsLeft} left)
                           </span>
                         </td>
                         <td className="px-4 py-2.5">
-                          <div className="flex items-center gap-2">
-                            <div className="w-24 h-1.5 rounded-full bg-zinc-800 overflow-hidden">
-                              <div
-                                className="h-full bg-emerald-500"
-                                style={{
-                                  width: `${Math.min(100, Math.max(0, (d.maxGainSince / 5.0) * 100))}%`,
-                                }}
-                              />
+                          <div className="flex flex-col gap-1">
+                            <div className="flex items-center gap-2">
+                              <div className="w-24 h-1.5 rounded-full bg-zinc-800 overflow-hidden">
+                                <div
+                                  className="h-full bg-emerald-500"
+                                  style={{ width: `${progressPct}%` }}
+                                />
+                              </div>
+                              <span className="text-[10px] font-mono text-zinc-300">
+                                Max +{d.maxGainSince.toFixed(1)}% / 5.0%
+                              </span>
                             </div>
-                            <span className="text-[10px] text-zinc-400">
-                              Max +{d.maxGainSince.toFixed(1)}% (Needs +{pctNeeded.toFixed(1)}%)
-                            </span>
+                            <div className="text-[10px] text-zinc-500 font-mono">
+                              Target: ₹{d.targetPrice?.toFixed(1) ?? (d.close * 1.05).toFixed(1)}
+                              {d.gainNeededFromCurrent !== undefined && d.gainNeededFromCurrent > 0 && (
+                                <span className="text-zinc-400 ml-1.5">
+                                  (+{d.gainNeededFromCurrent.toFixed(1)}% from now)
+                                </span>
+                              )}
+                            </div>
                           </div>
                         </td>
                         <td className="px-4 py-2.5">
-                          <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-red-500/20 text-red-400 border border-red-500/30">
+                          <span
+                            className={`px-2 py-0.5 rounded text-[10px] font-bold border ${
+                              isStall
+                                ? 'bg-amber-500/20 text-amber-400 border-amber-500/30'
+                                : 'bg-red-500/20 text-red-400 border-red-500/30'
+                            }`}
+                          >
                             ACTIVE
                           </span>
                         </td>

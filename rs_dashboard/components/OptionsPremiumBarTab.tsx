@@ -5,6 +5,7 @@ import {
   ComposedChart, Bar, Line, Area, XAxis, YAxis, CartesianGrid,
   Tooltip, Legend, ResponsiveContainer, ReferenceLine, ReferenceDot, Cell,
 } from 'recharts';
+import AnimatedNumber from './AnimatedNumber';
 
 // ─── Types ────────────────────────────────────────────────────────
 
@@ -129,12 +130,21 @@ const SmileTooltip = ({ active, payload, label }: Record<string, unknown>) => {
 // ─── Sub-components ───────────────────────────────────────────────
 
 function PulseStat({
-  label, value, sub, color = 'text-white', size = 'text-lg',
-}: { label: string; value: string; sub?: string; color?: string; size?: string }) {
+  label, value, animate, sub, color = 'text-white', size = 'text-lg',
+}: {
+  label: string;
+  value: string;
+  animate?: { raw: number; format: (v: number) => string };
+  sub?: string;
+  color?: string;
+  size?: string;
+}) {
   return (
     <div className="flex flex-col min-w-0">
       <span className="text-[9px] font-bold text-zinc-500 uppercase tracking-[0.14em] mb-0.5">{label}</span>
-      <span className={`${size} font-mono font-bold tabular-nums leading-none ${color}`}>{value}</span>
+      <span className={`${size} font-mono font-bold tabular-nums leading-none ${color}`}>
+        {animate ? <AnimatedNumber value={animate.raw} format={animate.format} /> : value}
+      </span>
       {sub && <span className="text-[10px] text-zinc-500 mt-1 font-medium">{sub}</span>}
     </div>
   );
@@ -306,19 +316,23 @@ export default function OptionsPremiumBarTab({ expiry }: { expiry: string }) {
           <PulseStat
             label={`${UNDERLYING} Spot`}
             value={spot > 0 ? spot.toLocaleString('en-IN', { minimumFractionDigits: 2 }) : '—'}
+            animate={spot > 0 ? { raw: spot, format: v => v.toLocaleString('en-IN', { minimumFractionDigits: 2 }) } : undefined}
             size="text-2xl"
           />
           <div className="w-px bg-zinc-800 self-stretch" />
           <PulseStat
             label="ATM Strike"
             value={atm > 0 ? atm.toLocaleString('en-IN') : '—'}
+            animate={atm > 0 ? { raw: atm, format: v => Math.round(v).toLocaleString('en-IN') } : undefined}
             size="text-2xl"
             color="text-zinc-200"
           />
           <div className="w-px bg-zinc-800 self-stretch" />
           <PulseStat
+            key={`straddle-${atm}`}
             label="ATM Straddle"
             value={atmStraddle > 0 ? fmtPrice(atmStraddle) : '—'}
+            animate={atmStraddle > 0 ? { raw: atmStraddle, format: fmtPrice } : undefined}
             sub={atmStraddle > 0 ? `${atmStraddlePct.toFixed(2)}% of spot · implied move` : undefined}
             color="text-emerald-400"
             size="text-2xl"
@@ -326,20 +340,25 @@ export default function OptionsPremiumBarTab({ expiry }: { expiry: string }) {
 
           <div className="ml-auto flex items-center gap-5 flex-wrap">
             <PulseStat
+              key={`ce-${atm}`}
               label="ATM CE"
               value={atmRow && atmRow.cePremium > 0 ? fmtPrice(atmRow.cePremium) : '—'}
+              animate={atmRow && atmRow.cePremium > 0 ? { raw: atmRow.cePremium, format: fmtPrice } : undefined}
               color="text-blue-400"
               size="text-sm"
             />
             <PulseStat
+              key={`pe-${atm}`}
               label="ATM PE"
               value={atmRow && atmRow.pePremium > 0 ? fmtPrice(atmRow.pePremium) : '—'}
+              animate={atmRow && atmRow.pePremium > 0 ? { raw: atmRow.pePremium, format: fmtPrice } : undefined}
               color="text-red-400"
               size="text-sm"
             />
             <PulseStat
               label="Wing Total"
               value={totalChainPremium > 0 ? fmtPrice(totalChainPremium) : '—'}
+              animate={totalChainPremium > 0 ? { raw: totalChainPremium, format: fmtPrice } : undefined}
               sub={`±${WING_COUNT} strikes`}
               color="text-zinc-200"
               size="text-sm"

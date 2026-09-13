@@ -152,7 +152,7 @@ export function sectorHeat(state: TerminalState | null): SectorRow[] {
   const list = state?.candidates ?? [];
   if (!list.length) return [];
 
-  const cap = state?.risk.max_per_sector ?? 0;
+  const cap = state?.risk?.max_per_sector ?? 0;
   const openBySector = new Map<string, number>();
   for (const p of state?.positions ?? []) {
     openBySector.set(p.sector, (openBySector.get(p.sector) ?? 0) + 1);

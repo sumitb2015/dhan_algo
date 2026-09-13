@@ -279,6 +279,42 @@ export function generatePayoffCurve(
   return { points, minPnl, maxPnl, breakevens };
 }
 
+/**
+ * Expiry P&L of the whole leg set at a single terminal spot price (pure intrinsic value).
+ */
+function computeExpiryPnlAtSpot(legs: OptionLegModel[], spot: number, lotSize: number): number {
+  let pnl = 0;
+  for (const leg of legs) {
+    const qty = leg.qty || leg.lots * lotSize;
+    const isSell = leg.side === 'SELL';
+    const intrinsic = leg.type === 'CE' ? Math.max(0, spot - leg.strike) : Math.max(0, leg.strike - spot);
+    pnl += isSell ? (leg.entryPrice - intrinsic) * qty : (intrinsic - leg.entryPrice) * qty;
+  }
+  return pnl;
+}
+
+/**
+ * Exact max profit / max loss for a bounded-risk leg combination, found by evaluating the
+ * piecewise-linear expiry payoff at its only possible extrema: spot=0, every strike (kink), and
+ * a point far beyond the widest strike (surrogate for the flat asymptote as spot -> infinity).
+ * Caller must already know the structure is bounded in both directions (see hasUnlimitedLoss /
+ * hasUnlimitedProfit in computePortfolioMetrics) — this does not itself detect unbounded risk.
+ */
+function computeBoundedPnlExtremes(legs: OptionLegModel[], lotSize: number): { maxProfit: number; maxLoss: number } {
+  const strikes = legs.map((l) => l.strike);
+  const maxStrike = strikes.length > 0 ? Math.max(...strikes) : 0;
+  const evalPoints = [0, maxStrike * 3 + 10000, ...strikes];
+
+  let min = Infinity;
+  let max = -Infinity;
+  for (const s of evalPoints) {
+    const pnl = computeExpiryPnlAtSpot(legs, s, lotSize);
+    if (pnl < min) min = pnl;
+    if (pnl > max) max = pnl;
+  }
+  return { maxProfit: Math.round(max), maxLoss: Math.round(min) };
+}
+
 // ── Portfolio Greeks Aggregation ─────────────────────────────────────────────
 
 export interface PortfolioGreeks {
@@ -325,7 +361,6 @@ export function computePortfolioMetrics(
   let totalTheta = 0;
   let totalVega = 0;
   let totalMtm = 0;
-  let totalEntryValue = 0;
   let shortCount = 0;
 
   for (const leg of legs) {
@@ -355,7 +390,6 @@ export function computePortfolioMetrics(
       : (leg.ltp - leg.entryPrice) * qty;
     totalMtm += pnl;
 
-    totalEntryValue += leg.entryPrice * qty;
     if (leg.side === 'SELL') shortCount += effectiveLots;
   }
 
@@ -378,6 +412,10 @@ export function computePortfolioMetrics(
   const mtmPct = estimatedMargin > 0 ? (totalMtm / estimatedMargin) * 100 : 0;
   const thetaPerHour = Math.round(totalTheta / 6.25);
 
+  const boundedExtremes = (!hasUnlimitedProfit || !hasUnlimitedLoss)
+    ? computeBoundedPnlExtremes(legs, lotSize)
+    : { maxProfit: 0, maxLoss: 0 };
+
   return {
     netDelta: Math.round(totalLotDelta * 100) / 100,
     rupeeDelta,
@@ -389,8 +427,8 @@ export function computePortfolioMetrics(
     totalMtm: Math.round(totalMtm),
     mtmPct: Math.round(mtmPct * 100) / 100,
     estimatedMargin,
-    maxProfit: hasUnlimitedProfit ? 'Unlimited' : Math.max(0, Math.round(totalEntryValue)),
-    maxLoss: hasUnlimitedLoss ? 'Unlimited' : Math.round(totalEntryValue * -1.5),
+    maxProfit: hasUnlimitedProfit ? 'Unlimited' : boundedExtremes.maxProfit,
+    maxLoss: hasUnlimitedLoss ? 'Unlimited' : boundedExtremes.maxLoss,
     popPct: 68,
   };
 }

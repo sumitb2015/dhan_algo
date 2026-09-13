@@ -3,6 +3,7 @@ import { Inter, Geist_Mono } from "next/font/google";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import ThemeInit from "@/components/ThemeInit";
 import Sidebar from "@/components/Sidebar";
+import { Toaster } from "sonner";
 import Script from "next/script";
 import "./globals.css";
 
@@ -65,6 +66,22 @@ export default function RootLayout({
             unmounts/remounts — and its open-section state never resets —
             on navigation between pages that don't share a layout. */}
         <Sidebar />
+        <Toaster
+          position="top-center"
+          theme="dark"
+          toastOptions={{
+            unstyled: true,
+            classNames: {
+              toast:
+                'flex items-center gap-2.5 rounded-lg border border-zinc-800 bg-zinc-900 px-3.5 py-3 shadow-2xl font-mono text-xs text-zinc-100 w-full',
+              title: 'font-bold text-zinc-100',
+              description: 'text-zinc-400 text-[11px]',
+              success: '!border-emerald-500/30',
+              error: '!border-red-500/30',
+              icon: 'text-amber-400',
+            },
+          }}
+        />
         <TooltipProvider>{children}</TooltipProvider>
       </body>
     </html>

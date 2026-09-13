@@ -2,6 +2,7 @@
 import { useRouter } from 'next/navigation';
 import { useState } from 'react';
 import { DatabaseZap, GitPullRequest, RefreshCw } from 'lucide-react';
+import { toast } from 'sonner';
 import { useRefreshStatus } from '@/lib/useRefreshStatus';
 import { Tooltip, TooltipContent, TooltipTrigger } from './ui/tooltip';
 import DataRefreshPanel from './DataRefreshPanel';
@@ -15,7 +16,13 @@ export default function NavBar() {
   const sync = useRefreshStatus();
 
   async function handleDisconnect() {
-    await fetch('/api/auth/logout', { method: 'POST' });
+    try {
+      await fetch('/api/auth/logout', { method: 'POST' });
+      toast.success('Session ended');
+    } catch {
+      toast.error('Failed to end session — try again');
+      return;
+    }
     router.push('/login');
   }
 

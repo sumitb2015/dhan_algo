@@ -69,7 +69,7 @@ export async function runSectorBreadthAnalysis(force = false): Promise<SectorBre
     symbols.map(async (sym) => {
       try {
         const rows = await readStockCSVAsync(sym);
-        if (!rows || rows.length < 200) return;
+        if (!rows || rows.length < 20) return;
 
         const n = rows.length;
         const lastRow = rows[n - 1];
@@ -88,12 +88,12 @@ export async function runSectorBreadthAnalysis(force = false): Promise<SectorBre
         const change3M = price3M > 0 ? ((price - price3M) / price3M) * 100 : 0;
 
         const sma20 = computeSMA(closes, 20);
-        const sma50 = computeSMA(closes, 50);
-        const sma200 = computeSMA(closes, 200);
+        const sma50 = n >= 50 ? computeSMA(closes, 50) : null;
+        const sma200 = n >= 200 ? computeSMA(closes, 200) : null;
 
         const above20 = price > sma20;
-        const above50 = price > sma50;
-        const above200 = price > sma200;
+        const above50 = sma50 !== null ? price > sma50 : false;
+        const above200 = sma200 !== null ? price > sma200 : false;
 
         // Mansfield RS vs Nifty 50
         let mansfieldRS = 0;
@@ -154,12 +154,13 @@ export async function runSectorBreadthAnalysis(force = false): Promise<SectorBre
     const pctAbove50 = (above50Count / count) * 100;
     const pctAbove200 = (above200Count / count) * 100;
 
-    // Accumulation / Distribution Score: Up-volume / Total Volume
+    // Accumulation / Distribution Score: Up-turnover / Total Turnover (monetary capital inflow)
     let upVol = 0;
     let totalVol = 0;
     for (const m of members) {
-      totalVol += m.volume;
-      if (m.change1D > 0) upVol += m.volume;
+      const turnover = m.volume * m.price;
+      totalVol += turnover;
+      if (m.change1D > 0) upVol += turnover;
     }
     const accDistScore = totalVol > 0 ? (upVol / totalVol) * 100 : 50;
 
@@ -174,13 +175,13 @@ export async function runSectorBreadthAnalysis(force = false): Promise<SectorBre
     const median1M = sorted1M[Math.floor(count / 2)] || 0;
     const median3M = sorted3M[Math.floor(count / 2)] || 0;
 
-    // Internal Thrust: Sector breadth is exceptionally strong (>70% above 20 DMA & >60% above 50 DMA)
-    const hasInternalThrust = pctAbove20 >= 70 && pctAbove50 >= 55;
+    // Internal Thrust: Sector breadth is exceptionally strong (>=70% above 20 DMA)
+    const hasInternalThrust = pctAbove20 >= 70;
     const thrustLabel = hasInternalThrust
-      ? 'THRUST ACTIVE (>70% > 20 DMA)'
+      ? (pctAbove50 >= 55 ? 'THRUST EXPANDING (≥70% > 20D, ≥55% > 50D)' : 'THRUST ACTIVE (≥70% > 20 DMA)')
       : pctAbove20 <= 25
         ? 'OVERSOLD (<25% > 20 DMA)'
-        : 'NORMAL';
+        : (pctAbove50 >= 60 ? 'BULLISH (≥60% > 50 DMA)' : pctAbove200 <= 35 ? 'BEARISH (<35% > 200 DMA)' : 'NORMAL');
 
     // Top 3 Leaders in Sector by Mansfield RS
     const topLeaders = [...members]
