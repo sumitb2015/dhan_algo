@@ -119,7 +119,7 @@ interface ScatterPoint {
   startDate: string;
   endDate: string;
   returnPct: number;
-  status: 'within' | 'upside' | 'downside';
+  status: 'within' | 'upside' | 'downside' | 'current';
 }
 
 // ─── Pure helpers ─────────────────────────────────────────────────────────────
@@ -202,20 +202,21 @@ function InfoButton({ title, children }: { title: string; children: React.ReactN
 function CustomTooltip({ active, payload }: { active?: boolean; payload?: { payload: ScatterPoint }[] }) {
   if (!active || !payload?.[0]) return null;
   const d = payload[0].payload;
+  const isCurrent = d.status === 'current';
   const color =
-    d.status === 'upside' ? '#34d399' : d.status === 'downside' ? '#f87171' : '#a1a1aa';
+    isCurrent ? '#3b82f6' : d.status === 'upside' ? '#34d399' : d.status === 'downside' ? '#f87171' : '#a1a1aa';
   const signChar = d.returnPct >= 0 ? '+' : '';
   const label =
-    d.status === 'within' ? 'Within boundary' : d.status + ' outlier';
+    isCurrent ? 'Current Expiry (In-progress)' : d.status === 'within' ? 'Within boundary' : d.status + ' outlier';
   return (
     <div className="bg-zinc-900 border border-zinc-700 rounded-lg px-3 py-2 text-xs shadow-xl">
       <div className="text-zinc-400 mb-1">
-        {fmtDate(d.startDate)} → {fmtDate(d.endDate)}
+        {fmtDate(d.startDate)} → {fmtDate(d.endDate)} {isCurrent ? '(Current Week)' : ''}
       </div>
       <div style={{ color }} className="font-mono font-bold text-sm">
         {signChar}{d.returnPct.toFixed(2)}%
       </div>
-      <div className="text-zinc-500 capitalize mt-0.5">{label}</div>
+      <div className={`mt-0.5 capitalize ${isCurrent ? 'text-blue-400 font-semibold' : 'text-zinc-500'}`}>{label}</div>
     </div>
   );
 }
@@ -231,11 +232,28 @@ function GreenDot(props: { cx?: number; cy?: number }) {
 function RedDot(props: { cx?: number; cy?: number }) {
   return <circle cx={props.cx} cy={props.cy} r={6} fill="#ff4444" filter="url(#glow-red)" />;
 }
+function BlueDot(props: { cx?: number; cy?: number }) {
+  if (props.cx === undefined || props.cy === undefined || isNaN(props.cx) || isNaN(props.cy)) {
+    return null;
+  }
+  return (
+    <circle
+      cx={props.cx}
+      cy={props.cy}
+      r={7}
+      fill="#3b82f6"
+      stroke="#93c5fd"
+      strokeWidth={2}
+      filter="url(#glow-blue)"
+    />
+  );
+}
 
 // ─── Main component ───────────────────────────────────────────────────────────
 
 export default function ExpiryAnalysis() {
   const [weeks, setWeeks] = useState<WeeklyBucket[]>([]);
+  const [currentWeek, setCurrentWeek] = useState<WeeklyBucket | null>(null);
   const [dailyStats, setDailyStats] = useState<DailyStats | null>(null);
   const [dailyRows, setDailyRows] = useState<DailyRow[]>([]);
   const [loading, setLoading] = useState(true);
@@ -265,6 +283,7 @@ export default function ExpiryAnalysis() {
         if (cancelled) return;
         if (data.error) throw new Error(data.error);
         setWeeks(data.weeks ?? []);
+        setCurrentWeek(data.currentWeek ?? null);
         setDailyStats(data.dailyStats ?? null);
         setDailyRows(data.dailyRows ?? []);
         setDataStart(data.dataStart ?? '');
@@ -279,7 +298,7 @@ export default function ExpiryAnalysis() {
     return () => { cancelled = true; };
   }, [symbol, startDate, endDate]);
 
-  const { lower, upper, withinData, upsideData, downsideData, outliers } = useMemo(() => {
+  const { lower, upper, withinData, upsideData, downsideData, outliers, currentData } = useMemo(() => {
     const { lower, upper } = computeBoundaries(
       weeks.map((w) => w.returnPct),
       probability / 100,
@@ -308,8 +327,21 @@ export default function ExpiryAnalysis() {
       .filter((c) => c.status !== 'within')
       .sort((a, b) => Math.abs(b.returnPct) - Math.abs(a.returnPct));
 
-    return { lower, upper, withinData, upsideData, downsideData, outliers };
-  }, [weeks, probability]);
+    const currentData: ScatterPoint[] = currentWeek
+      ? [
+          {
+            x: new Date(currentWeek.endDate + 'T00:00:00Z').getTime(),
+            y: currentWeek.returnPct,
+            startDate: currentWeek.startDate,
+            endDate: currentWeek.endDate,
+            returnPct: currentWeek.returnPct,
+            status: 'current',
+          },
+        ]
+      : [];
+
+    return { lower, upper, withinData, upsideData, downsideData, outliers, currentData };
+  }, [weeks, currentWeek, probability]);
 
   // ─── Distribution buckets (empirical) ─────────────────────────────────────
   const distributionBuckets = useMemo(() => {
@@ -406,7 +438,14 @@ export default function ExpiryAnalysis() {
     const sumNeg = Math.abs(negReturns.reduce((a, b) => a + b, 0));
 
     // Chart data with rolling MA
-    const chartData = weeks.map((w, i) => {
+    const chartData: {
+      index: number;
+      endDate: string;
+      returnPct: number;
+      ma: number | null;
+      positive: boolean;
+      isCurrent?: boolean;
+    }[] = weeks.map((w, i) => {
       let ma: number | null = null;
       if (i >= maWindow - 1) {
         const slice = returns.slice(i - maWindow + 1, i + 1);
@@ -418,8 +457,20 @@ export default function ExpiryAnalysis() {
         returnPct: Math.round(w.returnPct * 100) / 100,
         ma: ma !== null ? Math.round(ma * 10000) / 10000 : null,
         positive: w.returnPct >= 0,
+        isCurrent: false,
       };
     });
+
+    if (currentWeek) {
+      chartData.push({
+        index: weeks.length,
+        endDate: currentWeek.endDate,
+        returnPct: Math.round(currentWeek.returnPct * 100) / 100,
+        ma: null,
+        positive: currentWeek.returnPct >= 0,
+        isCurrent: true,
+      });
+    }
 
     return {
       avgReturn:     Math.round(avg * 10000) / 10000,
@@ -434,7 +485,7 @@ export default function ExpiryAnalysis() {
       total:         n,
       chartData,
     };
-  }, [weeks, maWindow]);
+  }, [weeks, currentWeek, maWindow]);
 
   // ─── Streak analysis ──────────────────────────────────────────────────────
   const streakAnalysis = useMemo(() => {
@@ -702,6 +753,42 @@ export default function ExpiryAnalysis() {
           </p>
         </div>
 
+        {/* ── Current In-Progress Expiry Card ── */}
+        {!loading && currentWeek && (
+          <div className="bg-zinc-900 border border-blue-500/40 rounded-xl p-4 flex flex-wrap items-center justify-between gap-4">
+            <div className="flex items-center gap-3">
+              <span className="w-3.5 h-3.5 rounded-full bg-blue-500 shadow-[0_0_10px_#3b82f6] shrink-0 inline-block" />
+              <div>
+                <div className="text-xs font-bold text-blue-400 uppercase tracking-wider flex items-center gap-2">
+                  Current Expiry (In-Progress)
+                  <span className="text-[10px] bg-blue-500/20 text-blue-300 border border-blue-500/30 rounded px-1.5 py-0.5 lowercase font-mono">
+                    live
+                  </span>
+                </div>
+                <div className="text-xs text-zinc-400 mt-0.5 font-mono">
+                  Cycle: {fmtDate(currentWeek.startDate)} (Open) → {fmtDate(currentWeek.endDate)} (Current LTP)
+                </div>
+              </div>
+            </div>
+            <div className="flex flex-wrap items-center gap-6 text-xs font-mono">
+              <div>
+                <span className="text-zinc-500 text-[11px] block">Start Open</span>
+                <span className="font-semibold text-zinc-200">{fmtINR(currentWeek.startOpen)}</span>
+              </div>
+              <div>
+                <span className="text-zinc-500 text-[11px] block">Current Close / LTP</span>
+                <span className="font-semibold text-zinc-200">{fmtINR(currentWeek.endClose)}</span>
+              </div>
+              <div>
+                <span className="text-zinc-500 text-[11px] block">Current Expiry Return</span>
+                <span className="font-bold text-base text-blue-400">
+                  {sign(currentWeek.returnPct)}{currentWeek.returnPct.toFixed(2)}%
+                </span>
+              </div>
+            </div>
+          </div>
+        )}
+
         {/* ── Scatter chart ── */}
         <div className="bg-zinc-900 border border-zinc-800 rounded-xl p-4">
           <div className="mb-4">
@@ -739,6 +826,13 @@ export default function ExpiryAnalysis() {
                     </feMerge>
                   </filter>
                   <filter id="glow-red" x="-50%" y="-50%" width="200%" height="200%">
+                    <feGaussianBlur stdDeviation="3" result="blur" />
+                    <feMerge>
+                      <feMergeNode in="blur" />
+                      <feMergeNode in="SourceGraphic" />
+                    </feMerge>
+                  </filter>
+                  <filter id="glow-blue" x="-50%" y="-50%" width="200%" height="200%">
                     <feGaussianBlur stdDeviation="3" result="blur" />
                     <feMerge>
                       <feMergeNode in="blur" />
@@ -817,19 +911,31 @@ export default function ExpiryAnalysis() {
                   data={withinData}
                   isAnimationActive={false}
                   shape={<SmallDot />}
+                  fill="#a1a1aa"
                 />
                 <Scatter
                   name="Upside Outlier"
                   data={upsideData}
                   isAnimationActive={false}
                   shape={<GreenDot />}
+                  fill="#00ffaa"
                 />
                 <Scatter
                   name="Downside Outlier"
                   data={downsideData}
                   isAnimationActive={false}
                   shape={<RedDot />}
+                  fill="#ff4444"
                 />
+                {currentData.length > 0 && (
+                  <Scatter
+                    name="Current Expiry (In-progress)"
+                    data={currentData}
+                    isAnimationActive={false}
+                    shape={<BlueDot />}
+                    fill="#3b82f6"
+                  />
+                )}
               </ScatterChart>
             </ResponsiveContainer>
           )}
@@ -1003,6 +1109,10 @@ export default function ExpiryAnalysis() {
                     <feGaussianBlur stdDeviation="2" result="blur" />
                     <feMerge><feMergeNode in="blur" /><feMergeNode in="SourceGraphic" /></feMerge>
                   </filter>
+                  <filter id="glow-bubble-b" x="-50%" y="-50%" width="200%" height="200%">
+                    <feGaussianBlur stdDeviation="2" result="blur" />
+                    <feMerge><feMergeNode in="blur" /><feMergeNode in="SourceGraphic" /></feMerge>
+                  </filter>
                 </defs>
                 <CartesianGrid stroke="#27272a" strokeDasharray="3 3" vertical={false} />
                 <XAxis
@@ -1034,8 +1144,10 @@ export default function ExpiryAnalysis() {
                     const d = payload[0].payload as typeof weeklyAnalysis.chartData[0];
                     return (
                       <div className="bg-zinc-900 border border-zinc-700 rounded-lg px-3 py-2 text-xs shadow-xl">
-                        <div className="text-zinc-400 mb-0.5">{fmtDate(d.endDate)}</div>
-                        <div className={`font-mono font-bold text-sm ${d.positive ? 'text-emerald-400' : 'text-red-400'}`}>
+                        <div className="text-zinc-400 mb-0.5">
+                          {fmtDate(d.endDate)} {d.isCurrent ? '(Current Expiry · In-Progress)' : ''}
+                        </div>
+                        <div className={`font-mono font-bold text-sm ${d.isCurrent ? 'text-blue-400' : d.positive ? 'text-emerald-400' : 'text-red-400'}`}>
                           {sign(d.returnPct)}{d.returnPct.toFixed(2)}%
                         </div>
                         {d.ma !== null && <div className="text-amber-400 font-mono text-xs mt-0.5">MA{maWindow}: {sign(d.ma)}{d.ma.toFixed(2)}%</div>}
@@ -1047,7 +1159,11 @@ export default function ExpiryAnalysis() {
                 {/* Bars */}
                 <Bar dataKey="returnPct" isAnimationActive={false} maxBarSize={6} name="Weekly Returns (Bars)">
                   {weeklyAnalysis.chartData.map((entry, i) => (
-                    <Cell key={i} fill={entry.positive ? '#34d399' : '#f87171'} fillOpacity={0.7} />
+                    <Cell
+                      key={i}
+                      fill={entry.isCurrent ? '#3b82f6' : entry.positive ? '#34d399' : '#f87171'}
+                      fillOpacity={entry.isCurrent ? 0.9 : 0.7}
+                    />
                   ))}
                 </Bar>
                 {/* Bubble overlay — Line with no stroke, sized custom dots */}
@@ -1057,8 +1173,11 @@ export default function ExpiryAnalysis() {
                   dot={(props: { cx?: number; cy?: number; payload?: typeof weeklyAnalysis.chartData[0]; index?: number }) => {
                     const { cx, cy, payload } = props;
                     if (cx === undefined || cy === undefined || !payload) return <g key={props.index} />;
-                    const r = Math.min(Math.max(Math.abs(payload.returnPct) * 2.2, 3), 18);
-                    const fill = payload.positive ? '#34d399' : '#f87171';
+                    const r = payload.isCurrent
+                      ? Math.min(Math.max(Math.abs(payload.returnPct) * 2.2, 5), 18)
+                      : Math.min(Math.max(Math.abs(payload.returnPct) * 2.2, 3), 18);
+                    const fill = payload.isCurrent ? '#3b82f6' : payload.positive ? '#34d399' : '#f87171';
+                    const stroke = payload.isCurrent ? '#93c5fd' : fill;
                     return (
                       <circle
                         key={props.index}
@@ -1066,10 +1185,11 @@ export default function ExpiryAnalysis() {
                         cy={cy}
                         r={r}
                         fill={fill}
-                        fillOpacity={0.55}
-                        stroke={fill}
-                        strokeWidth={0.5}
-                        strokeOpacity={0.8}
+                        fillOpacity={payload.isCurrent ? 0.85 : 0.55}
+                        stroke={stroke}
+                        strokeWidth={payload.isCurrent ? 1.5 : 0.5}
+                        strokeOpacity={0.9}
+                        filter={payload.isCurrent ? 'url(#glow-bubble-b)' : undefined}
                       />
                     );
                   }}
@@ -1666,6 +1786,23 @@ export default function ExpiryAnalysis() {
                     </tr>
                   </thead>
                   <tbody>
+                    {currentWeek && (
+                      <tr className="bg-blue-950/30 border-l-4 border-blue-500 hover:bg-blue-900/30 transition-colors">
+                        <td className="px-3 py-2 text-right font-mono text-blue-400 font-bold">Live</td>
+                        <td className="px-4 py-2 font-mono text-blue-200">{fmtDate(currentWeek.startDate)}</td>
+                        <td className="px-4 py-2 font-mono text-blue-200">
+                          {fmtDate(currentWeek.endDate)}
+                          <span className="text-[10px] bg-blue-500/20 text-blue-300 border border-blue-500/30 rounded px-1.5 py-0.5 ml-2 font-sans font-semibold">
+                            In-Progress
+                          </span>
+                        </td>
+                        <td className="px-4 py-2 text-right font-mono text-zinc-300">{fmtINR(currentWeek.startOpen)}</td>
+                        <td className="px-4 py-2 text-right font-mono text-zinc-300">{fmtINR(currentWeek.endClose)}</td>
+                        <td className="px-4 py-2 text-right font-mono font-bold text-blue-400 text-sm">
+                          {sign(currentWeek.returnPct)}{currentWeek.returnPct.toFixed(2)}%
+                        </td>
+                      </tr>
+                    )}
                     {weeks.map((w, i) => {
                       const isUp = w.returnPct >= 0;
                       return (

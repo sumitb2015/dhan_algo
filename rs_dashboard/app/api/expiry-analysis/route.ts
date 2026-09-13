@@ -112,6 +112,39 @@ export async function GET(req: NextRequest) {
       lastRow = row;
     }
 
+    // ── Current in-progress weekly expiry bucket (if not completed yet) ──────
+    // Only compute currentWeek if the filtered slice reaches the latest available trading day
+    const isLatestData = rows.length > 0 && lastRow !== null && lastRow.date === rows[rows.length - 1].date;
+    let currentWeek: WeeklyBucket | null = null;
+    if (isLatestData) {
+      if (openBucket && lastRow && openBucket.startOpen > 0) {
+        const raw = ((lastRow.close - openBucket.startOpen) / openBucket.startOpen) * 100;
+        currentWeek = {
+          startDate: openBucket.startDate,
+          endDate: lastRow.date,
+          startOpen: openBucket.startOpen,
+          endClose: lastRow.close,
+          returnPct: Math.round(raw * 100) / 100,
+        };
+      } else if (!openBucket && lastRow && weeks.length > 0) {
+        const lastCompletedEnd = weeks[weeks.length - 1].endDate;
+        const lastCompletedIdx = filtered.findIndex((r) => r.date === lastCompletedEnd);
+        if (lastCompletedIdx >= 0 && lastCompletedIdx < filtered.length - 1) {
+          const startRow = filtered[lastCompletedIdx + 1];
+          if (startRow.open > 0) {
+            const raw = ((lastRow.close - startRow.open) / startRow.open) * 100;
+            currentWeek = {
+              startDate: startRow.date,
+              endDate: lastRow.date,
+              startOpen: startRow.open,
+              endClose: lastRow.close,
+              returnPct: Math.round(raw * 100) / 100,
+            };
+          }
+        }
+      }
+    }
+
     // ── Daily stats + rows ───────────────────────────────────────────────────
     let periodHigh = -Infinity;
     let periodLow  =  Infinity;
@@ -162,7 +195,7 @@ export async function GET(req: NextRequest) {
     const dataStart = rows.length > 0 ? rows[0].date : '';
     const dataEnd   = rows.length > 0 ? rows[rows.length - 1].date : '';
 
-    const payload = { weeks, dailyStats, dailyRows, dataStart, dataEnd };
+    const payload = { weeks, currentWeek, dailyStats, dailyRows, dataStart, dataEnd };
     cache.set(cacheKey, { data: payload, ts: Date.now() });
     return NextResponse.json(payload);
   } catch (err) {
