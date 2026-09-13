@@ -2,13 +2,14 @@
 
 import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import Link from 'next/link';
-import { ShieldAlert } from 'lucide-react';
+import { ShieldAlert, Table2 } from 'lucide-react';
 import NavBar from '@/components/NavBar';
 import TopMetricBar from '@/components/options-monitor/TopMetricBar';
 import PositionsStrategyMonitor from '@/components/options-monitor/PositionsStrategyMonitor';
 import RiskGreeksMatrix from '@/components/options-monitor/RiskGreeksMatrix';
 import AddLegModal from '@/components/options-monitor/AddLegModal';
 import HotkeysModal from '@/components/options-monitor/HotkeysModal';
+import OptionChainModal from '@/components/options-monitor/OptionChainModal';
 import OptionOrderModal, { type OptionOrderInitialState, type OptionTradeLeg } from '@/components/OptionOrderModal';
 import { useLiveOptionsWS } from '@/lib/useLiveOptionsWS';
 import {
@@ -16,6 +17,7 @@ import {
   OptionLegModel,
   OptType,
   Side,
+  PositionGuard,
   computeBsGreeks,
   generatePayoffCurve,
   computePortfolioMetrics,
@@ -27,6 +29,10 @@ export default function OptionsMonitorPage() {
   // Underlying configuration
   const [selectedUnderlying, setSelectedUnderlying] = useState<string>('NIFTY');
   const uConfig = UNDERLYINGS[selectedUnderlying] || UNDERLYINGS.NIFTY;
+
+  // Real-time Dhan margin & funds state
+  const [availableMargin, setAvailableMargin] = useState<number | null>(null);
+  const [isFundsLoading, setIsFundsLoading] = useState<boolean>(false);
 
   // Expiries & Option Chain state
   const [expiries, setExpiries] = useState<string[]>([]);
@@ -43,26 +49,31 @@ export default function OptionsMonitorPage() {
   const [ivPct, setIvPct] = useState<number>(14.5);
   const [vix, setVix] = useState<{ ltp: number; change?: number; change_pct?: number } | null>(null);
 
-  // View Mode: 'broker' (Live Dhan positions) vs 'custom' (What-if Desk Simulator)
-  const [viewMode, setViewMode] = useState<'broker' | 'custom'>('custom');
+  // Active Option Positions / Strategy Legs
   const [strategyName, setStrategyName] = useState<string>('Short Strangle');
-  const [brokerLegs, setBrokerLegs] = useState<OptionLegModel[]>([]);
-  const [customLegs, setCustomLegs] = useState<OptionLegModel[]>([]);
-  const [isBrokerLoading, setIsBrokerLoading] = useState<boolean>(false);
+  const [activeLegs, setActiveLegs] = useState<OptionLegModel[]>([]);
   const hasInitializedPresetRef = useRef<boolean>(false);
+
+  // Position Guards (Target, Stop Loss, Trailing SL) per leg
+  const [posGuards, setPosGuards] = useState<Record<string, PositionGuard>>({});
+  const posGuardsRef = useRef<Record<string, PositionGuard>>({});
+  useEffect(() => {
+    posGuardsRef.current = posGuards;
+  }, [posGuards]);
 
   // Modals state
   const [isAddLegOpen, setIsAddLegOpen] = useState<boolean>(false);
   const [isHotkeysOpen, setIsHotkeysOpen] = useState<boolean>(false);
+  const [isOptionChainOpen, setIsOptionChainOpen] = useState<boolean>(false);
 
   // Last action notification message
   const [lastActionMessage, setLastActionMessage] = useState<string | null>(
     'Session initialized. Real-time option chain & WebSocket stream connecting...'
   );
 
-  const notifyAction = (msg: string) => {
+  const notifyAction = useCallback((msg: string) => {
     setLastActionMessage(msg);
-  };
+  }, []);
 
   // ── 1. REALTIME WEBSOCKET FEED ─────────────────────────────────────────────
   const { liveQuotes, bridgeStatus, transport, lastUpdated } = useLiveOptionsWS(
@@ -230,89 +241,49 @@ export default function OptionsMonitorPage() {
     }
   }, []);
 
-  // ── 4. FETCH LIVE BROKER POSITIONS ────────────────────────────────────────
-  const fetchBrokerPositions = useCallback(async () => {
-    setIsBrokerLoading(true);
+  // ── 4. FETCH CURRENT AVAILABLE MARGIN (DHAN API ONLY) ────────────────────
+  const fetchAvailableMargin = useCallback(async () => {
+    setIsFundsLoading(true);
     try {
-      const res = await fetch('/api/options/positions-live', { cache: 'no-store' });
-      const data = await res.json();
-      if (data && data.has_positions && Array.isArray(data.legs) && data.legs.length > 0) {
-        const timeRemaining = calculateTimeToExpiryYears(selectedExpiry);
-        const currentSpot = spot;
-
-        // Filter legs for the currently selected underlying (e.g. NIFTY)
-        const matched = data.legs.filter((l: any) =>
-          String(l.symbol).toUpperCase().startsWith(selectedUnderlying)
-        );
-
-        if (matched.length > 0) {
-          const mapped: OptionLegModel[] = matched.map((l: any, idx: number) => {
-            const strike = Math.round(Number(l.strike));
-            const type: OptType = String(l.type).toUpperCase() === 'PE' ? 'PE' : 'CE';
-            const side: Side = String(l.side).toUpperCase() === 'BUY' ? 'BUY' : 'SELL';
-            const qty = Math.abs(Number(l.netQty));
-            const lots = Math.max(1, Math.round(qty / uConfig.lotSize));
-            const entryPrice = Number(l.entryPrice) || 0;
-            const ltp = Number(l.ltp) || entryPrice;
-            const legIv = ivPct / 100;
-
-            const g = computeBsGreeks(type, currentSpot, strike, timeRemaining, legIv, uConfig.lotSize);
-
-            return {
-              id: `broker_${idx}_${l.symbol}`,
-              type,
-              side,
-              strike,
-              lots,
-              qty,
-              entryPrice,
-              ltp,
-              delta: g.delta,
-              gamma: g.gamma,
-              theta: g.theta,
-              vega: g.vega,
-              iv: legIv,
-              expiry: l.expiry || selectedExpiry,
-              symbol: l.symbol,
-            };
-          });
-
-          setBrokerLegs(mapped);
-
-          // If this is the initial mount and we found real broker positions, default to 'broker' mode
-          if (!hasInitializedPresetRef.current) {
-            setViewMode('broker');
-            setStrategyName('Dhan Live Positions');
-            notifyAction(`Loaded ${mapped.length} live broker positions from Dhan HQ.`);
-          }
+      const res = await fetch('/api/scalper/funds', { cache: 'no-store' });
+      const json = await res.json();
+      if (json && json.success && json.data) {
+        const bal =
+          json.data.availabelBalance ??
+          json.data.availableBalance ??
+          json.data.cashLimit ??
+          json.data.cashBalance;
+        if (typeof bal === 'number' && Number.isFinite(bal)) {
+          setAvailableMargin(bal);
           return;
         }
       }
-      setBrokerLegs([]);
+      setAvailableMargin(null);
     } catch (err) {
-      console.error('[OptionsMonitor] Error fetching broker positions:', err);
+      console.error('[OptionsMonitor] Failed to fetch available margin from Dhan API:', err);
+      setAvailableMargin(null);
     } finally {
-      setIsBrokerLoading(false);
+      setIsFundsLoading(false);
     }
-  }, [selectedExpiry, spot, selectedUnderlying, uConfig.lotSize, ivPct]);
+  }, []);
 
-  // Initial mount: load expiries, chain, and broker positions
+  // Initial mount: load expiries, chain, and Dhan funds
   useEffect(() => {
     document.title = 'Options Risk & Strategy Monitor | Dhan Algo';
 
     let isSubscribed = true;
     (async () => {
+      fetchAvailableMargin();
       const exp = await fetchExpiries(selectedUnderlying);
       if (isSubscribed && exp) {
         await fetchOptionChain(selectedUnderlying, exp);
-        await fetchBrokerPositions();
       }
     })();
 
     return () => {
       isSubscribed = false;
     };
-  }, [selectedUnderlying, fetchExpiries, fetchOptionChain, fetchBrokerPositions]);
+  }, [selectedUnderlying, fetchExpiries, fetchOptionChain, fetchAvailableMargin]);
 
   // When selectedExpiry changes, re-fetch chain
   useEffect(() => {
@@ -321,9 +292,13 @@ export default function OptionsMonitorPage() {
     }
   }, [selectedExpiry, selectedUnderlying, fetchOptionChain]);
 
-  // Initialize realistic Desk preset once chain data arrives (if not in broker mode)
+  // Initialize realistic strategy preset once chain data arrives (if no broker positions loaded)
   useEffect(() => {
     if (hasInitializedPresetRef.current || (chainStrikes.length === 0 && Object.keys(normalizedChain).length === 0)) {
+      return;
+    }
+    if (activeLegs.length > 0) {
+      hasInitializedPresetRef.current = true;
       return;
     }
     hasInitializedPresetRef.current = true;
@@ -346,6 +321,12 @@ export default function OptionsMonitorPage() {
     const gCe = computeBsGreeks('CE', spot, ceStrike, t, ceIv, uConfig.lotSize);
     const gPe = computeBsGreeks('PE', spot, peStrike, t, peIv, uConfig.lotSize);
 
+    const ceDhanGreeks = ceChain?.greeks;
+    const hasCeDhan = ceDhanGreeks && (ceDhanGreeks.delta !== 0 || ceDhanGreeks.gamma !== 0);
+
+    const peDhanGreeks = peChain?.greeks;
+    const hasPeDhan = peDhanGreeks && (peDhanGreeks.delta !== 0 || peDhanGreeks.gamma !== 0);
+
     const cePrice = (typeof ceTick?.ce?.ltp === 'number' && ceTick.ce.ltp > 0)
       ? ceTick.ce.ltp
       : (ceChain?.last_price || ceChain?.previous_close_price || gCe.price);
@@ -354,45 +335,45 @@ export default function OptionsMonitorPage() {
       ? peTick.pe.ltp
       : (peChain?.last_price || peChain?.previous_close_price || gPe.price);
 
-    setCustomLegs([
+    setActiveLegs([
       {
-        id: `desk_ce_init_${Date.now()}`,
+        id: `leg_ce_init_${Date.now()}`,
         type: 'CE',
         side: 'SELL',
         strike: ceStrike,
-        lots: 2,
-        qty: 2 * uConfig.lotSize,
+        lots: 1,
+        qty: 1 * uConfig.lotSize,
         entryPrice: cePrice,
         ltp: cePrice,
-        delta: gCe.delta,
-        gamma: gCe.gamma,
-        theta: gCe.theta,
-        vega: gCe.vega,
+        delta: hasCeDhan ? ceDhanGreeks.delta : gCe.delta,
+        gamma: hasCeDhan ? ceDhanGreeks.gamma : gCe.gamma,
+        theta: hasCeDhan ? ceDhanGreeks.theta : gCe.theta,
+        vega: hasCeDhan ? ceDhanGreeks.vega : gCe.vega,
         iv: ceIv,
         expiry: selectedExpiry,
       },
       {
-        id: `desk_pe_init_${Date.now()}`,
+        id: `leg_pe_init_${Date.now()}`,
         type: 'PE',
         side: 'SELL',
         strike: peStrike,
-        lots: 2,
-        qty: 2 * uConfig.lotSize,
+        lots: 1,
+        qty: 1 * uConfig.lotSize,
         entryPrice: pePrice,
         ltp: pePrice,
-        delta: gPe.delta,
-        gamma: gPe.gamma,
-        theta: gPe.theta,
-        vega: gPe.vega,
+        delta: hasPeDhan ? peDhanGreeks.delta : gPe.delta,
+        gamma: hasPeDhan ? peDhanGreeks.gamma : gPe.gamma,
+        theta: hasPeDhan ? peDhanGreeks.theta : gPe.theta,
+        vega: hasPeDhan ? peDhanGreeks.vega : gPe.vega,
         iv: peIv,
         expiry: selectedExpiry,
       },
     ]);
-  }, [chainStrikes, normalizedChain, spot, uConfig.strikeStep, uConfig.lotSize, ivPct, selectedExpiry, liveQuotes]);
+  }, [chainStrikes, normalizedChain, spot, uConfig.strikeStep, uConfig.lotSize, ivPct, selectedExpiry, liveQuotes, activeLegs.length]);
 
   // ── 5. REALTIME MERGED LEGS WITH SUB-SECOND WS TICKS ────────────────────────
   // Dynamically recompute each active leg's LTP, Greeks, and MTM as market ticks stream in!
-  const activeLegsBase = viewMode === 'broker' ? brokerLegs : customLegs;
+  const activeLegsBase = activeLegs;
 
   const legs: OptionLegModel[] = useMemo(() => {
     const timeYears = calculateTimeToExpiryYears(selectedExpiry);
@@ -404,8 +385,9 @@ export default function OptionsMonitorPage() {
 
       // 2. Fallback to Option Chain last_price / previous_close_price
       const chainEntry = normalizedChain[leg.strike];
-      const chainLtp = leg.type === 'CE' ? chainEntry?.ce?.last_price : chainEntry?.pe?.last_price;
-      const chainPrev = leg.type === 'CE' ? chainEntry?.ce?.previous_close_price : chainEntry?.pe?.previous_close_price;
+      const chainSide = leg.type === 'CE' ? chainEntry?.ce : chainEntry?.pe;
+      const chainLtp = chainSide?.last_price;
+      const chainPrev = chainSide?.previous_close_price;
 
       const currentLtp = (typeof wsLtp === 'number' && wsLtp > 0)
         ? wsLtp
@@ -416,24 +398,26 @@ export default function OptionsMonitorPage() {
         : leg.ltp;
 
       // Implied Volatility
-      const chainIv = leg.type === 'CE'
-        ? chainEntry?.ce?.implied_volatility
-        : chainEntry?.pe?.implied_volatility;
+      const chainIv = chainSide?.implied_volatility;
       const effectiveIv = (typeof chainIv === 'number' && chainIv > 0)
         ? chainIv / 100
         : leg.iv || ivPct / 100;
 
-      // Recompute real Greeks via Black-Scholes using actual spot, strike, T, and IV
+      // Prioritize Dhan API Greeks from option chain
+      const dhanGreeks = chainSide?.greeks;
+      const hasDhanGreeks = dhanGreeks && (dhanGreeks.delta !== 0 || dhanGreeks.gamma !== 0);
+
+      // Recompute Greeks via Black-Scholes as fallback if Dhan Greeks unavailable
       const g = computeBsGreeks(leg.type, spot, leg.strike, timeYears, effectiveIv, uConfig.lotSize);
 
       return {
         ...leg,
         expiry: leg.expiry || selectedExpiry,
         ltp: currentLtp,
-        delta: g.delta,
-        gamma: g.gamma,
-        theta: g.theta,
-        vega: g.vega,
+        delta: hasDhanGreeks ? dhanGreeks.delta : g.delta,
+        gamma: hasDhanGreeks ? dhanGreeks.gamma : g.gamma,
+        theta: hasDhanGreeks ? dhanGreeks.theta : g.theta,
+        vega: hasDhanGreeks ? dhanGreeks.vega : g.vega,
         iv: effectiveIv,
       };
     });
@@ -453,6 +437,147 @@ export default function OptionsMonitorPage() {
   // Total lots & total quantity
   const totalLots = useMemo(() => legs.reduce((sum, l) => sum + l.lots, 0), [legs]);
   const totalQty = useMemo(() => legs.reduce((sum, l) => sum + l.qty, 0), [legs]);
+
+  // Keep live legs reference for interval guards evaluation
+  const legsRef = useRef<OptionLegModel[]>([]);
+  useEffect(() => {
+    legsRef.current = legs;
+  }, [legs]);
+
+  const handleGuardChange = useCallback((legId: string, field: 'target' | 'sl', value: string) => {
+    setPosGuards((prev) => {
+      const existing: PositionGuard = prev[legId] ?? {
+        target: '',
+        sl: '',
+        trailEnabled: false,
+        bestPrice: 0,
+        triggered: false,
+      };
+      return {
+        ...prev,
+        [legId]: { ...existing, [field]: value, triggered: false, triggerReason: undefined },
+      };
+    });
+  }, []);
+
+  const handleTrailToggle = useCallback((legId: string) => {
+    setPosGuards((prev) => {
+      const existing: PositionGuard = prev[legId] ?? {
+        target: '',
+        sl: '',
+        trailEnabled: false,
+        bestPrice: 0,
+        triggered: false,
+      };
+      return {
+        ...prev,
+        [legId]: {
+          ...existing,
+          trailEnabled: !existing.trailEnabled,
+          bestPrice: 0,
+          triggered: false,
+          triggerReason: undefined,
+        },
+      };
+    });
+  }, []);
+
+  // 1s monitoring loop to evaluate active legs against Target, Stop Loss, and Trailing SL
+  useEffect(() => {
+    const id = setInterval(() => {
+      const guards = posGuardsRef.current;
+      const currentLegs = legsRef.current;
+      if (!currentLegs || currentLegs.length === 0) return;
+
+      const peakUpdates: Record<string, number> = {};
+      const triggeredUpdates: Record<string, string> = {};
+
+      for (const leg of currentLegs) {
+        const guard = guards[leg.id];
+        if (!guard || guard.triggered) continue;
+
+        const ltp = leg.ltp;
+        const entryPrice = leg.entryPrice;
+        if (ltp <= 0 || entryPrice <= 0) continue;
+
+        const isLong = leg.side === 'BUY';
+
+        // 1. Target (take profit)
+        const targetNum = parseFloat(guard.target);
+        if (!isNaN(targetNum) && targetNum > 0) {
+          if ((isLong && ltp >= targetNum) || (!isLong && ltp <= targetNum)) {
+            triggeredUpdates[leg.id] = 'Target hit';
+            continue;
+          }
+        }
+
+        // 2. Trailing SL & Stop Loss
+        const slNum = parseFloat(guard.sl);
+        if (guard.trailEnabled && !isNaN(slNum) && slNum > 0) {
+          const initialRisk = Math.abs(slNum - entryPrice);
+          const currentBest = guard.bestPrice;
+          const newBest = currentBest === 0
+            ? ltp
+            : (isLong ? Math.max(currentBest, ltp) : Math.min(currentBest, ltp));
+          if (newBest !== currentBest) {
+            peakUpdates[leg.id] = newBest;
+          }
+
+          const effectiveBest = peakUpdates[leg.id] ?? currentBest;
+          if (effectiveBest > 0 && initialRisk > 0) {
+            const trailSLPrice = isLong
+              ? effectiveBest - initialRisk
+              : effectiveBest + initialRisk;
+
+            const trailActive = isLong ? trailSLPrice > slNum : trailSLPrice < slNum;
+            if (trailActive) {
+              if ((isLong && ltp <= trailSLPrice) || (!isLong && ltp >= trailSLPrice)) {
+                triggeredUpdates[leg.id] = 'Trail SL hit';
+                continue;
+              }
+            } else if ((isLong && ltp <= slNum) || (!isLong && ltp >= slNum)) {
+              triggeredUpdates[leg.id] = 'SL hit';
+              continue;
+            }
+          }
+        } else if (!isNaN(slNum) && slNum > 0) {
+          // Standard Stop Loss
+          if ((isLong && ltp <= slNum) || (!isLong && ltp >= slNum)) {
+            triggeredUpdates[leg.id] = 'SL hit';
+            continue;
+          }
+        }
+      }
+
+      if (Object.keys(peakUpdates).length > 0 || Object.keys(triggeredUpdates).length > 0) {
+        setPosGuards((prev) => {
+          const next = { ...prev };
+          for (const [sId, best] of Object.entries(peakUpdates)) {
+            if (next[sId]) {
+              next[sId] = { ...next[sId], bestPrice: best };
+            }
+          }
+          for (const [sId, reason] of Object.entries(triggeredUpdates)) {
+            if (next[sId]) {
+              next[sId] = { ...next[sId], triggered: true, triggerReason: reason };
+            }
+          }
+          return next;
+        });
+
+        for (const [sId, reason] of Object.entries(triggeredUpdates)) {
+          const matchedLeg = currentLegs.find((l) => l.id === sId);
+          if (matchedLeg) {
+            notifyAction(
+              `⚠️ ALERT: ${matchedLeg.side} ${matchedLeg.strike} ${matchedLeg.type} ${reason}! LTP: ₹${matchedLeg.ltp.toFixed(1)}`
+            );
+          }
+        }
+      }
+    }, 1000);
+
+    return () => clearInterval(id);
+  }, [notifyAction]);
 
   // ── 6. INTERACTIVE ACTIONS (LEGS, PRESETS, HOTKEYS) ────────────────────────
 
@@ -477,17 +602,16 @@ export default function OptionsMonitorPage() {
     const wsPrice = newLegData.type === 'CE' ? tickData?.ce?.ltp : tickData?.pe?.ltp;
 
     const chainEntry = normalizedChain[newLegData.strike];
-    const chainPrice = newLegData.type === 'CE'
-      ? chainEntry?.ce?.last_price || chainEntry?.ce?.previous_close_price
-      : chainEntry?.pe?.last_price || chainEntry?.pe?.previous_close_price;
+    const chainSide = newLegData.type === 'CE' ? chainEntry?.ce : chainEntry?.pe;
+    const chainPrice = chainSide?.last_price || chainSide?.previous_close_price;
 
-    const chainIv = newLegData.type === 'CE'
-      ? chainEntry?.ce?.implied_volatility
-      : chainEntry?.pe?.implied_volatility;
+    const chainIv = chainSide?.implied_volatility;
     const legIv = (typeof chainIv === 'number' && chainIv > 0)
       ? chainIv / 100
       : ivPct / 100;
 
+    const dhanGreeks = chainSide?.greeks;
+    const hasDhanGreeks = dhanGreeks && (dhanGreeks.delta !== 0 || dhanGreeks.gamma !== 0);
     const g = computeBsGreeks(newLegData.type, spot, newLegData.strike, timeYears, legIv, uConfig.lotSize);
 
     const legLtp = (typeof wsPrice === 'number' && wsPrice > 0)
@@ -497,7 +621,7 @@ export default function OptionsMonitorPage() {
       : newLegData.entryPrice;
 
     const newLeg: OptionLegModel = {
-      id: `desk_leg_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
+      id: `leg_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
       type: newLegData.type,
       side: newLegData.side,
       strike: newLegData.strike,
@@ -505,40 +629,36 @@ export default function OptionsMonitorPage() {
       qty: newLegData.lots * uConfig.lotSize,
       entryPrice: newLegData.entryPrice,
       ltp: legLtp,
-      delta: g.delta,
-      gamma: g.gamma,
-      theta: g.theta,
-      vega: g.vega,
+      delta: hasDhanGreeks ? dhanGreeks.delta : g.delta,
+      gamma: hasDhanGreeks ? dhanGreeks.gamma : g.gamma,
+      theta: hasDhanGreeks ? dhanGreeks.theta : g.theta,
+      vega: hasDhanGreeks ? dhanGreeks.vega : g.vega,
       iv: legIv,
       expiry: selectedExpiry,
     };
 
-    setViewMode('custom');
-    setCustomLegs((prev) => [...prev, newLeg]);
-    setStrategyName('Custom Strikes');
+    setActiveLegs((prev) => [...prev, newLeg]);
+    setStrategyName('Custom Strategy');
     notifyAction(`Added ${newLegData.side} ${newLegData.strike} ${newLegData.type} (${newLegData.lots} Lots)`);
   };
 
   // Remove leg
   const handleRemoveLeg = (id: string) => {
-    if (viewMode === 'broker') {
-      notifyAction('Broker position views are read-only from the broker account. Switch to Desk mode to edit.');
-      return;
-    }
-    const leg = customLegs.find((l) => l.id === id);
-    setCustomLegs((prev) => prev.filter((l) => l.id !== id));
+    const leg = activeLegs.find((l) => l.id === id);
+    setActiveLegs((prev) => prev.filter((l) => l.id !== id));
+    setPosGuards((prev) => {
+      const next = { ...prev };
+      delete next[id];
+      return next;
+    });
     if (leg) notifyAction(`Closed ${leg.side} ${leg.strike} ${leg.type}`);
   };
 
   // Update strike from dropdown
   const handleUpdateLegStrike = (id: string, newStrike: number) => {
-    if (viewMode === 'broker') {
-      notifyAction('Switch to Desk mode to modify strikes.');
-      return;
-    }
     const timeYears = calculateTimeToExpiryYears(selectedExpiry);
 
-    setCustomLegs((prev) =>
+    setActiveLegs((prev) =>
       prev.map((l) => {
         if (l.id !== id) return l;
 
@@ -546,17 +666,16 @@ export default function OptionsMonitorPage() {
         const wsPrice = l.type === 'CE' ? tickData?.ce?.ltp : tickData?.pe?.ltp;
 
         const chainEntry = normalizedChain[newStrike];
-        const chainPrice = l.type === 'CE'
-          ? chainEntry?.ce?.last_price || chainEntry?.ce?.previous_close_price
-          : chainEntry?.pe?.last_price || chainEntry?.pe?.previous_close_price;
+        const chainSide = l.type === 'CE' ? chainEntry?.ce : chainEntry?.pe;
+        const chainPrice = chainSide?.last_price || chainSide?.previous_close_price;
 
-        const chainIv = l.type === 'CE'
-          ? chainEntry?.ce?.implied_volatility
-          : chainEntry?.pe?.implied_volatility;
+        const chainIv = chainSide?.implied_volatility;
         const effectiveIv = (typeof chainIv === 'number' && chainIv > 0)
           ? chainIv / 100
           : l.iv || ivPct / 100;
 
+        const dhanGreeks = chainSide?.greeks;
+        const hasDhanGreeks = dhanGreeks && (dhanGreeks.delta !== 0 || dhanGreeks.gamma !== 0);
         const g = computeBsGreeks(l.type, spot, newStrike, timeYears, effectiveIv, uConfig.lotSize);
 
         const currentPrice = (typeof wsPrice === 'number' && wsPrice > 0)
@@ -570,24 +689,26 @@ export default function OptionsMonitorPage() {
           strike: newStrike,
           entryPrice: currentPrice,
           ltp: currentPrice,
-          delta: g.delta,
-          gamma: g.gamma,
-          theta: g.theta,
-          vega: g.vega,
+          delta: hasDhanGreeks ? dhanGreeks.delta : g.delta,
+          gamma: hasDhanGreeks ? dhanGreeks.gamma : g.gamma,
+          theta: hasDhanGreeks ? dhanGreeks.theta : g.theta,
+          vega: hasDhanGreeks ? dhanGreeks.vega : g.vega,
           iv: effectiveIv,
         };
       })
     );
+    setPosGuards((prev) => {
+      if (!prev[id]) return prev;
+      const next = { ...prev };
+      delete next[id];
+      return next;
+    });
     notifyAction(`Updated strike to ${newStrike}`);
   };
 
   // Quick Shift strike by steps (+1 or -1 strikeStep)
   const handleQuickShiftStrike = (id: string, steps: number) => {
-    if (viewMode === 'broker') {
-      notifyAction('Switch to Desk mode to shift strikes.');
-      return;
-    }
-    const leg = customLegs.find((l) => l.id === id);
+    const leg = activeLegs.find((l) => l.id === id);
     if (!leg) return;
     const newStrike = leg.strike + steps * uConfig.strikeStep;
     handleUpdateLegStrike(id, newStrike);
@@ -595,16 +716,17 @@ export default function OptionsMonitorPage() {
 
   // Load Strategy Preset Templates using real option chain market prices!
   const handleSelectStrategyPreset = (presetId: string) => {
-    setViewMode('custom');
     const atm = Math.round(spot / uConfig.strikeStep) * uConfig.strikeStep;
     const t = calculateTimeToExpiryYears(selectedExpiry);
 
     if (presetId === 'clear') {
-      setCustomLegs([]);
+      setActiveLegs([]);
+      setPosGuards({});
       setStrategyName('No Active Legs');
       notifyAction('Cleared all positions.');
       return;
     }
+    setPosGuards({});
 
     const getRealQuote = (strike: number, type: 'ce' | 'pe') => {
       // 1. Check live WebSocket quotes
@@ -613,8 +735,11 @@ export default function OptionsMonitorPage() {
 
       // 2. Check normalized option chain
       const entry = normalizedChain[strike];
-      const chainP = entry?.[type]?.last_price || entry?.[type]?.previous_close_price;
-      const iv = entry?.[type]?.implied_volatility ? entry[type].implied_volatility / 100 : ivPct / 100;
+      const chainSide = entry?.[type];
+      const chainP = chainSide?.last_price || chainSide?.previous_close_price;
+      const iv = chainSide?.implied_volatility ? chainSide.implied_volatility / 100 : ivPct / 100;
+      const dhanGreeks = chainSide?.greeks;
+      const hasDhanGreeks = dhanGreeks && (dhanGreeks.delta !== 0 || dhanGreeks.gamma !== 0);
 
       // 3. Fallback to Black-Scholes theoretical price for this specific strike & type
       const fallbackGreeks = computeBsGreeks(type.toUpperCase() as OptType, spot, strike, t, iv, uConfig.lotSize);
@@ -624,7 +749,14 @@ export default function OptionsMonitorPage() {
         ? chainP
         : fallbackGreeks.price;
 
-      return { price, iv };
+      return {
+        price,
+        iv,
+        delta: hasDhanGreeks ? dhanGreeks.delta : fallbackGreeks.delta,
+        gamma: hasDhanGreeks ? dhanGreeks.gamma : fallbackGreeks.gamma,
+        theta: hasDhanGreeks ? dhanGreeks.theta : fallbackGreeks.theta,
+        vega: hasDhanGreeks ? dhanGreeks.vega : fallbackGreeks.vega,
+      };
     };
 
     if (presetId === 'short_strangle') {
@@ -636,14 +768,14 @@ export default function OptionsMonitorPage() {
       const gCe = computeBsGreeks('CE', spot, ceS, t, ceQ.iv, uConfig.lotSize);
       const gPe = computeBsGreeks('PE', spot, peS, t, peQ.iv, uConfig.lotSize);
 
-      setCustomLegs([
+      setActiveLegs([
         {
           id: `ce_${Date.now()}`,
           type: 'CE',
           side: 'SELL',
           strike: ceS,
-          lots: 2,
-          qty: 2 * uConfig.lotSize,
+          lots: 1,
+          qty: 1 * uConfig.lotSize,
           entryPrice: ceQ.price,
           ltp: ceQ.price,
           delta: gCe.delta,
@@ -658,8 +790,8 @@ export default function OptionsMonitorPage() {
           type: 'PE',
           side: 'SELL',
           strike: peS,
-          lots: 2,
-          qty: 2 * uConfig.lotSize,
+          lots: 1,
+          qty: 1 * uConfig.lotSize,
           entryPrice: peQ.price,
           ltp: peQ.price,
           delta: gPe.delta,
@@ -678,14 +810,14 @@ export default function OptionsMonitorPage() {
       const gCe = computeBsGreeks('CE', spot, atm, t, ceQ.iv, uConfig.lotSize);
       const gPe = computeBsGreeks('PE', spot, atm, t, peQ.iv, uConfig.lotSize);
 
-      setCustomLegs([
+      setActiveLegs([
         {
           id: `ce_${Date.now()}`,
           type: 'CE',
           side: 'SELL',
           strike: atm,
-          lots: 2,
-          qty: 2 * uConfig.lotSize,
+          lots: 1,
+          qty: 1 * uConfig.lotSize,
           entryPrice: ceQ.price,
           ltp: ceQ.price,
           delta: gCe.delta,
@@ -700,8 +832,8 @@ export default function OptionsMonitorPage() {
           type: 'PE',
           side: 'SELL',
           strike: atm,
-          lots: 2,
-          qty: 2 * uConfig.lotSize,
+          lots: 1,
+          qty: 1 * uConfig.lotSize,
           entryPrice: peQ.price,
           ltp: peQ.price,
           delta: gPe.delta,
@@ -730,14 +862,14 @@ export default function OptionsMonitorPage() {
       const gCeL = computeBsGreeks('CE', spot, ceLong, t, ceLq.iv, uConfig.lotSize);
       const gPeL = computeBsGreeks('PE', spot, peLong, t, peLq.iv, uConfig.lotSize);
 
-      setCustomLegs([
+      setActiveLegs([
         {
           id: `ce_short_${Date.now()}`,
           type: 'CE',
           side: 'SELL',
           strike: ceShort,
-          lots: 2,
-          qty: 2 * uConfig.lotSize,
+          lots: 1,
+          qty: 1 * uConfig.lotSize,
           entryPrice: ceSq.price,
           ltp: ceSq.price,
           delta: gCeS.delta,
@@ -752,8 +884,8 @@ export default function OptionsMonitorPage() {
           type: 'PE',
           side: 'SELL',
           strike: peShort,
-          lots: 2,
-          qty: 2 * uConfig.lotSize,
+          lots: 1,
+          qty: 1 * uConfig.lotSize,
           entryPrice: peSq.price,
           ltp: peSq.price,
           delta: gPeS.delta,
@@ -768,8 +900,8 @@ export default function OptionsMonitorPage() {
           type: 'CE',
           side: 'BUY',
           strike: ceLong,
-          lots: 2,
-          qty: 2 * uConfig.lotSize,
+          lots: 1,
+          qty: 1 * uConfig.lotSize,
           entryPrice: ceLq.price,
           ltp: ceLq.price,
           delta: gCeL.delta,
@@ -784,8 +916,8 @@ export default function OptionsMonitorPage() {
           type: 'PE',
           side: 'BUY',
           strike: peLong,
-          lots: 2,
-          qty: 2 * uConfig.lotSize,
+          lots: 1,
+          qty: 1 * uConfig.lotSize,
           entryPrice: peLq.price,
           ltp: peLq.price,
           delta: gPeL.delta,
@@ -806,14 +938,14 @@ export default function OptionsMonitorPage() {
       const gPeS = computeBsGreeks('PE', spot, peShort, t, peSq.iv, uConfig.lotSize);
       const gPeL = computeBsGreeks('PE', spot, peLong, t, peLq.iv, uConfig.lotSize);
 
-      setCustomLegs([
+      setActiveLegs([
         {
           id: `pe_short_${Date.now()}`,
           type: 'PE',
           side: 'SELL',
           strike: peShort,
-          lots: 2,
-          qty: 2 * uConfig.lotSize,
+          lots: 1,
+          qty: 1 * uConfig.lotSize,
           entryPrice: peSq.price,
           ltp: peSq.price,
           delta: gPeS.delta,
@@ -828,8 +960,8 @@ export default function OptionsMonitorPage() {
           type: 'PE',
           side: 'BUY',
           strike: peLong,
-          lots: 2,
-          qty: 2 * uConfig.lotSize,
+          lots: 1,
+          qty: 1 * uConfig.lotSize,
           entryPrice: peLq.price,
           ltp: peLq.price,
           delta: gPeL.delta,
@@ -850,14 +982,14 @@ export default function OptionsMonitorPage() {
       const gCeS = computeBsGreeks('CE', spot, ceShort, t, ceSq.iv, uConfig.lotSize);
       const gCeL = computeBsGreeks('CE', spot, ceLong, t, ceLq.iv, uConfig.lotSize);
 
-      setCustomLegs([
+      setActiveLegs([
         {
           id: `ce_short_${Date.now()}`,
           type: 'CE',
           side: 'SELL',
           strike: ceShort,
-          lots: 2,
-          qty: 2 * uConfig.lotSize,
+          lots: 1,
+          qty: 1 * uConfig.lotSize,
           entryPrice: ceSq.price,
           ltp: ceSq.price,
           delta: gCeS.delta,
@@ -872,8 +1004,8 @@ export default function OptionsMonitorPage() {
           type: 'CE',
           side: 'BUY',
           strike: ceLong,
-          lots: 2,
-          qty: 2 * uConfig.lotSize,
+          lots: 1,
+          qty: 1 * uConfig.lotSize,
           entryPrice: ceLq.price,
           ltp: ceLq.price,
           delta: gCeL.delta,
@@ -890,11 +1022,7 @@ export default function OptionsMonitorPage() {
 
   // Roll Short CE UP (+1 strikeStep)
   const handleRollCeUp = useCallback(() => {
-    if (viewMode === 'broker') {
-      notifyAction('Switch to Desk mode to perform what-if rolls.');
-      return;
-    }
-    const ceLeg = customLegs.find((l) => l.type === 'CE' && l.side === 'SELL');
+    const ceLeg = activeLegs.find((l) => l.type === 'CE' && l.side === 'SELL');
     if (!ceLeg) {
       notifyAction('No active short CE leg found to roll.');
       return;
@@ -902,15 +1030,11 @@ export default function OptionsMonitorPage() {
     const newStrike = ceLeg.strike + uConfig.strikeStep;
     handleUpdateLegStrike(ceLeg.id, newStrike);
     notifyAction(`Rolled Short CE UP from ${ceLeg.strike} to ${newStrike} (+${uConfig.strikeStep} pts OTM)`);
-  }, [customLegs, uConfig.strikeStep, viewMode]);
+  }, [activeLegs, uConfig.strikeStep, handleUpdateLegStrike]);
 
   // Roll Short CE DOWN (-1 strikeStep)
   const handleRollCeDown = useCallback(() => {
-    if (viewMode === 'broker') {
-      notifyAction('Switch to Desk mode to perform what-if rolls.');
-      return;
-    }
-    const ceLeg = customLegs.find((l) => l.type === 'CE' && l.side === 'SELL');
+    const ceLeg = activeLegs.find((l) => l.type === 'CE' && l.side === 'SELL');
     if (!ceLeg) {
       notifyAction('No active short CE leg found to roll.');
       return;
@@ -918,15 +1042,11 @@ export default function OptionsMonitorPage() {
     const newStrike = ceLeg.strike - uConfig.strikeStep;
     handleUpdateLegStrike(ceLeg.id, newStrike);
     notifyAction(`Rolled Short CE DOWN from ${ceLeg.strike} to ${newStrike} (-${uConfig.strikeStep} pts)`);
-  }, [customLegs, uConfig.strikeStep, viewMode]);
+  }, [activeLegs, uConfig.strikeStep, handleUpdateLegStrike]);
 
   // Roll Short PE UP (+1 strikeStep)
   const handleRollPeUp = useCallback(() => {
-    if (viewMode === 'broker') {
-      notifyAction('Switch to Desk mode to perform what-if rolls.');
-      return;
-    }
-    const peLeg = customLegs.find((l) => l.type === 'PE' && l.side === 'SELL');
+    const peLeg = activeLegs.find((l) => l.type === 'PE' && l.side === 'SELL');
     if (!peLeg) {
       notifyAction('No active short PE leg found to roll.');
       return;
@@ -934,15 +1054,11 @@ export default function OptionsMonitorPage() {
     const newStrike = peLeg.strike + uConfig.strikeStep;
     handleUpdateLegStrike(peLeg.id, newStrike);
     notifyAction(`Rolled Short PE UP from ${peLeg.strike} to ${newStrike} (+${uConfig.strikeStep} pts)`);
-  }, [customLegs, uConfig.strikeStep, viewMode]);
+  }, [activeLegs, uConfig.strikeStep, handleUpdateLegStrike]);
 
   // Roll Short PE DOWN (-1 strikeStep)
   const handleRollPeDown = useCallback(() => {
-    if (viewMode === 'broker') {
-      notifyAction('Switch to Desk mode to perform what-if rolls.');
-      return;
-    }
-    const peLeg = customLegs.find((l) => l.type === 'PE' && l.side === 'SELL');
+    const peLeg = activeLegs.find((l) => l.type === 'PE' && l.side === 'SELL');
     if (!peLeg) {
       notifyAction('No active short PE leg found to roll.');
       return;
@@ -950,18 +1066,14 @@ export default function OptionsMonitorPage() {
     const newStrike = peLeg.strike - uConfig.strikeStep;
     handleUpdateLegStrike(peLeg.id, newStrike);
     notifyAction(`Rolled Short PE DOWN from ${peLeg.strike} to ${newStrike} (-${uConfig.strikeStep} pts OTM)`);
-  }, [customLegs, uConfig.strikeStep, viewMode]);
+  }, [activeLegs, uConfig.strikeStep, handleUpdateLegStrike]);
 
   const handleRollCe = handleRollCeUp;
   const handleRollPe = handleRollPeDown;
 
   // Adjust lots for a specific leg (+1 or -1)
   const handleUpdateLegLots = useCallback((id: string, deltaLots: number) => {
-    if (viewMode === 'broker') {
-      notifyAction('Broker position sizing is synced from Dhan. Switch to Desk mode to edit.');
-      return;
-    }
-    setCustomLegs((prev) =>
+    setActiveLegs((prev) =>
       prev.map((l) => {
         if (l.id !== id) return l;
         const nextLots = Math.max(1, l.lots + deltaLots);
@@ -973,15 +1085,11 @@ export default function OptionsMonitorPage() {
       })
     );
     notifyAction(`Adjusted position lot sizing (${deltaLots > 0 ? '+1' : '-1'} Lot)`);
-  }, [viewMode, uConfig.lotSize]);
+  }, [uConfig.lotSize]);
 
   // Adjust lots for all legs simultaneously (+1 or -1)
   const handleUpdateAllLots = useCallback((deltaLots: number) => {
-    if (viewMode === 'broker') {
-      notifyAction('Broker position sizing is synced from Dhan. Switch to Desk mode to edit.');
-      return;
-    }
-    setCustomLegs((prev) =>
+    setActiveLegs((prev) =>
       prev.map((l) => {
         const nextLots = Math.max(1, l.lots + deltaLots);
         return {
@@ -992,16 +1100,12 @@ export default function OptionsMonitorPage() {
       })
     );
     notifyAction(`Adjusted all legs by ${deltaLots > 0 ? '+1' : '-1'} Lot`);
-  }, [viewMode, uConfig.lotSize]);
+  }, [uConfig.lotSize]);
 
   // Hotkey [H]: 1-Click Delta Hedge
   const handleDeltaHedge = useCallback(() => {
-    if (viewMode === 'broker') {
-      notifyAction('Switch to Desk mode to test Delta hedges.');
-      return;
-    }
     const currentDelta = portfolioGreeks.netDelta;
-    if (Math.abs(currentDelta) < 1.0) {
+    if (Math.abs(currentDelta) < 0.25) {
       notifyAction(`Delta is already balanced (${currentDelta > 0 ? '+' : ''}${currentDelta.toFixed(2)} Δ). No hedge required.`);
       return;
     }
@@ -1030,16 +1134,12 @@ export default function OptionsMonitorPage() {
       });
       notifyAction(`[HOTKEY H] Delta Hedge: Bought 1 Lot ${hedgeStrike} CE to neutralize ${currentDelta.toFixed(2)} Δ`);
     }
-  }, [portfolioGreeks.netDelta, spot, uConfig.strikeStep, normalizedChain, viewMode]);
+  }, [portfolioGreeks.netDelta, spot, uConfig.strikeStep, normalizedChain]);
 
   // Hotkey [W]: Add Wings
   const handleAddWings = useCallback(() => {
-    if (viewMode === 'broker') {
-      notifyAction('Switch to Desk mode to simulate wing additions.');
-      return;
-    }
-    const ceLeg = customLegs.find((l) => l.type === 'CE' && l.side === 'SELL');
-    const peLeg = customLegs.find((l) => l.type === 'PE' && l.side === 'SELL');
+    const ceLeg = activeLegs.find((l) => l.type === 'CE' && l.side === 'SELL');
+    const peLeg = activeLegs.find((l) => l.type === 'PE' && l.side === 'SELL');
 
     if (!ceLeg || !peLeg) {
       notifyAction('Add Wings requires active Short CE and Short PE legs.');
@@ -1050,8 +1150,15 @@ export default function OptionsMonitorPage() {
     const wingPeStrike = peLeg.strike - uConfig.strikeStep * 3;
     const t = calculateTimeToExpiryYears(selectedExpiry);
 
-    const ceChainP = normalizedChain[wingCeStrike]?.ce?.last_price || normalizedChain[wingCeStrike]?.ce?.previous_close_price;
-    const peChainP = normalizedChain[wingPeStrike]?.pe?.last_price || normalizedChain[wingPeStrike]?.pe?.previous_close_price;
+    const ceChainEntry = normalizedChain[wingCeStrike]?.ce;
+    const peChainEntry = normalizedChain[wingPeStrike]?.pe;
+    const ceChainP = ceChainEntry?.last_price || ceChainEntry?.previous_close_price;
+    const peChainP = peChainEntry?.last_price || peChainEntry?.previous_close_price;
+
+    const ceDhanGreeks = ceChainEntry?.greeks;
+    const peDhanGreeks = peChainEntry?.greeks;
+    const hasCeDhan = ceDhanGreeks && (ceDhanGreeks.delta !== 0 || ceDhanGreeks.gamma !== 0);
+    const hasPeDhan = peDhanGreeks && (peDhanGreeks.delta !== 0 || peDhanGreeks.gamma !== 0);
 
     const gCe = computeBsGreeks('CE', spot, wingCeStrike, t, ivPct / 100, uConfig.lotSize);
     const gPe = computeBsGreeks('PE', spot, wingPeStrike, t, ivPct / 100, uConfig.lotSize);
@@ -1065,10 +1172,10 @@ export default function OptionsMonitorPage() {
       qty: ceLeg.lots * uConfig.lotSize,
       entryPrice: typeof ceChainP === 'number' && ceChainP > 0 ? ceChainP : gCe.price,
       ltp: typeof ceChainP === 'number' && ceChainP > 0 ? ceChainP : gCe.price,
-      delta: gCe.delta,
-      gamma: gCe.gamma,
-      theta: gCe.theta,
-      vega: gCe.vega,
+      delta: hasCeDhan ? ceDhanGreeks.delta : gCe.delta,
+      gamma: hasCeDhan ? ceDhanGreeks.gamma : gCe.gamma,
+      theta: hasCeDhan ? ceDhanGreeks.theta : gCe.theta,
+      vega: hasCeDhan ? ceDhanGreeks.vega : gCe.vega,
       iv: ivPct / 100,
     };
 
@@ -1081,29 +1188,25 @@ export default function OptionsMonitorPage() {
       qty: peLeg.lots * uConfig.lotSize,
       entryPrice: typeof peChainP === 'number' && peChainP > 0 ? peChainP : gPe.price,
       ltp: typeof peChainP === 'number' && peChainP > 0 ? peChainP : gPe.price,
-      delta: gPe.delta,
-      gamma: gPe.gamma,
-      theta: gPe.theta,
-      vega: gPe.vega,
+      delta: hasPeDhan ? peDhanGreeks.delta : gPe.delta,
+      gamma: hasPeDhan ? peDhanGreeks.gamma : gPe.gamma,
+      theta: hasPeDhan ? peDhanGreeks.theta : gPe.theta,
+      vega: hasPeDhan ? peDhanGreeks.vega : gPe.vega,
       iv: ivPct / 100,
     };
 
-    setCustomLegs((prev) => [...prev, ceWing, peWing]);
+    setActiveLegs((prev) => [...prev, ceWing, peWing]);
     setStrategyName('Iron Condor (Wings Added)');
     notifyAction(`[HOTKEY W] Wings Added: Bought ${wingPeStrike} PE & ${wingCeStrike} CE`);
-  }, [customLegs, spot, ivPct, uConfig.strikeStep, uConfig.lotSize, normalizedChain, selectedExpiry, viewMode]);
+  }, [activeLegs, spot, ivPct, uConfig.strikeStep, uConfig.lotSize, normalizedChain, selectedExpiry]);
 
   // Hotkey [X]: Trim 50%
   const handleTrim50 = useCallback(() => {
-    if (viewMode === 'broker') {
-      notifyAction('Direct trims on live broker positions disabled here. Use Scalper terminal or order ticket to square off.');
-      return;
-    }
-    if (customLegs.length === 0) {
+    if (activeLegs.length === 0) {
       notifyAction('No active legs to trim.');
       return;
     }
-    setCustomLegs((prev) =>
+    setActiveLegs((prev) =>
       prev.map((l) => {
         const newLots = Math.max(1, Math.round(l.lots / 2));
         return {
@@ -1113,58 +1216,58 @@ export default function OptionsMonitorPage() {
         };
       })
     );
-    notifyAction('[HOTKEY X] Trimmed 50% lots across desk legs.');
-  }, [customLegs, uConfig.lotSize, viewMode]);
+    notifyAction('[HOTKEY X] Trimmed 50% lots across positions.');
+  }, [activeLegs, uConfig.lotSize]);
 
-  // Hotkey [ESC]: Flatten Desk
+  // Hotkey [ESC]: Flatten
   const handleFlatten = useCallback(() => {
-    if (viewMode === 'broker') {
-      notifyAction('To square off real broker positions, use the Emergency Exit button in the Scalper.');
-      return;
-    }
-    if (customLegs.length === 0) {
+    if (activeLegs.length === 0) {
       notifyAction('Position already flat.');
       return;
     }
-    setCustomLegs([]);
+    setActiveLegs([]);
     setStrategyName('Flat / No Position');
-    notifyAction('[HOTKEY ESC] Desk positions cleared.');
-  }, [customLegs, viewMode]);
+    notifyAction('[HOTKEY ESC] Positions cleared.');
+  }, [activeLegs]);
 
   // ── 7. ORDER EXECUTION STATE & HANDLERS ──────────────────────────────────
   const [orderModalOpen, setOrderModalOpen] = useState(false);
   const [activeTradeOrder, setActiveTradeOrder] = useState<OptionOrderInitialState | null>(null);
 
   const handleOpenTradeBasket = useCallback(() => {
-    if (customLegs.length === 0) {
+    if (activeLegs.length === 0) {
       setIsAddLegOpen(true);
       notifyAction('Add legs or load a template preset before executing a basket order.');
       return;
     }
 
-    const orderLegs: OptionTradeLeg[] = customLegs.map((leg) => {
+    const firstLots = activeLegs[0]?.lots || 1;
+    const allSame = activeLegs.every((l) => l.lots === firstLots);
+    const baseMultiplier = allSame ? firstLots : 1;
+
+    const orderLegs: OptionTradeLeg[] = activeLegs.map((leg) => {
       const legKey = leg.type.toLowerCase() as 'ce' | 'pe';
       const secId = normalizedChain[leg.strike]?.[legKey]?.security_id;
       return {
         strike: leg.strike,
         optionType: leg.type,
         action: leg.side,
-        lots: leg.lots,
+        lots: allSame ? 1 : leg.lots,
         securityId: secId ? String(secId) : undefined,
       };
     });
 
     setActiveTradeOrder({
-      title: `${selectedUnderlying} ${strategyName} (${customLegs.length} Legs)`,
+      title: `${selectedUnderlying} ${strategyName} (${activeLegs.length} Legs)`,
       underlying: selectedUnderlying,
       expiry: selectedExpiry,
       lotSize: uConfig.lotSize,
-      defaultLots: 1,
+      defaultLots: baseMultiplier,
       legs: orderLegs,
       productType: 'INTRADAY',
     });
     setOrderModalOpen(true);
-  }, [customLegs, selectedUnderlying, strategyName, selectedExpiry, uConfig.lotSize, normalizedChain, notifyAction]);
+  }, [activeLegs, selectedUnderlying, strategyName, selectedExpiry, uConfig.lotSize, normalizedChain, notifyAction]);
 
   const handleOpenSingleLegTrade = useCallback((leg: OptionLegModel) => {
     const legKey = leg.type.toLowerCase() as 'ce' | 'pe';
@@ -1189,13 +1292,37 @@ export default function OptionsMonitorPage() {
     setOrderModalOpen(true);
   }, [selectedUnderlying, selectedExpiry, uConfig.lotSize, normalizedChain]);
 
+  const handleOpenSingleLegClose = useCallback((leg: OptionLegModel) => {
+    const legKey = leg.type.toLowerCase() as 'ce' | 'pe';
+    const secId = normalizedChain[leg.strike]?.[legKey]?.security_id;
+    const oppositeAction = leg.side === 'BUY' ? 'SELL' : 'BUY';
+    setActiveTradeOrder({
+      title: `Square Off: ${selectedUnderlying} ${leg.strike} ${leg.type} (${oppositeAction})`,
+      underlying: selectedUnderlying,
+      expiry: selectedExpiry,
+      lotSize: uConfig.lotSize,
+      defaultLots: 1,
+      legs: [
+        {
+          strike: leg.strike,
+          optionType: leg.type,
+          action: oppositeAction,
+          lots: leg.lots,
+          securityId: secId ? String(secId) : undefined,
+        },
+      ],
+      productType: 'INTRADAY',
+    });
+    setOrderModalOpen(true);
+  }, [selectedUnderlying, selectedExpiry, uConfig.lotSize, normalizedChain]);
+
   const handleOpenNewTrade = useCallback(() => {
-    if (customLegs.length > 0) {
+    if (activeLegs.length > 0) {
       handleOpenTradeBasket();
     } else {
       setIsAddLegOpen(true);
     }
-  }, [customLegs.length, handleOpenTradeBasket]);
+  }, [activeLegs.length, handleOpenTradeBasket]);
 
   const handleExecuteLegFromModal = useCallback((leg: {
     type: OptType;
@@ -1227,10 +1354,54 @@ export default function OptionsMonitorPage() {
   }, [selectedUnderlying, selectedExpiry, uConfig.lotSize, normalizedChain]);
 
   const handleOrderSuccess = useCallback((orderIds: string[], summary: string) => {
-    notifyAction(`Orders placed successfully! IDs: ${orderIds.join(', ')}`);
-    fetchBrokerPositions();
-    setViewMode('broker');
-  }, [notifyAction, fetchBrokerPositions]);
+    notifyAction(`Intraday orders placed successfully [INTRADAY]! IDs: ${orderIds.join(', ')}`);
+    setActiveLegs((prev) => prev.map((l) => ({ ...l, isEntered: true })));
+    fetchAvailableMargin();
+  }, [notifyAction, fetchAvailableMargin]);
+
+  const handleToggleLegEntered = useCallback((id: string) => {
+    setActiveLegs((prev) =>
+      prev.map((l) => (l.id === id ? { ...l, isEntered: !l.isEntered } : l))
+    );
+  }, []);
+
+  const handleAddLegFromChain = useCallback((leg: {
+    type: 'CE' | 'PE';
+    side: 'BUY' | 'SELL';
+    strike: number;
+    ltp: number;
+    expiry: string;
+    iv?: number;
+    delta?: number;
+  }) => {
+    const timeRemaining = calculateTimeToExpiryYears(leg.expiry || selectedExpiry);
+    const legIv = leg.iv ?? ivPct / 100;
+    const g = computeBsGreeks(leg.type, spot, leg.strike, timeRemaining, legIv, uConfig.lotSize);
+
+    const chainSide = leg.type === 'CE' ? normalizedChain[leg.strike]?.ce : normalizedChain[leg.strike]?.pe;
+    const dhanGreeks = chainSide?.greeks;
+    const hasDhanGreeks = dhanGreeks && (dhanGreeks.delta !== 0 || dhanGreeks.gamma !== 0);
+
+    const newLeg: OptionLegModel = {
+      id: `leg_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+      type: leg.type,
+      side: leg.side,
+      strike: leg.strike,
+      lots: 1,
+      qty: uConfig.lotSize,
+      entryPrice: leg.ltp,
+      ltp: leg.ltp,
+      delta: leg.delta ?? (hasDhanGreeks ? dhanGreeks.delta : g.delta),
+      gamma: hasDhanGreeks ? dhanGreeks.gamma : g.gamma,
+      theta: hasDhanGreeks ? dhanGreeks.theta : g.theta,
+      vega: hasDhanGreeks ? dhanGreeks.vega : g.vega,
+      iv: legIv,
+      expiry: leg.expiry || selectedExpiry,
+    };
+
+    setActiveLegs((prev) => [...prev, newLeg]);
+    notifyAction(`Added ${leg.side} ${leg.strike} ${leg.type} to strategy from Option Chain.`);
+  }, [selectedExpiry, ivPct, spot, uConfig.lotSize, normalizedChain, notifyAction]);
 
   // ── 8. GLOBAL KEYBOARD SHORTCUTS ──────────────────────────────────────────
   useEffect(() => {
@@ -1333,6 +1504,15 @@ export default function OptionsMonitorPage() {
 
           {/* Center Navigation Shortcuts */}
           <div className="hidden lg:flex items-center gap-1 bg-zinc-900 p-1 rounded-xl border border-zinc-800 text-xs font-medium">
+            <button
+              type="button"
+              onClick={() => setIsOptionChainOpen(true)}
+              className="flex items-center gap-1.5 px-3 py-1 rounded-lg text-amber-400 bg-amber-500/10 hover:bg-amber-500/20 border border-amber-500/30 font-bold transition-colors cursor-pointer"
+              title="Open Interactive Option Chain Window"
+            >
+              <Table2 className="w-3.5 h-3.5" />
+              <span>Option Chain</span>
+            </button>
             <Link
               href="/options/live-charts"
               className="px-2.5 py-1 rounded-lg text-zinc-400 hover:text-white hover:bg-zinc-800 transition-colors"
@@ -1340,10 +1520,10 @@ export default function OptionsMonitorPage() {
               IV Charts
             </Link>
             <Link
-              href="/options/straddle-strangle"
+              href="/advanced-scalper"
               className="px-2.5 py-1 rounded-lg text-zinc-400 hover:text-white hover:bg-zinc-800 transition-colors"
             >
-              Straddle / Strangle
+              Advanced Scalper
             </Link>
             <Link
               href="/scalper"
@@ -1352,10 +1532,10 @@ export default function OptionsMonitorPage() {
               Scalper Terminal
             </Link>
             <Link
-              href="/strategy-builder"
+              href="/multi-leg-focus"
               className="px-2.5 py-1 rounded-lg text-zinc-400 hover:text-white hover:bg-zinc-800 transition-colors"
             >
-              Strategy Builder
+              Multi-Leg Focus
             </Link>
           </div>
 
@@ -1377,7 +1557,11 @@ export default function OptionsMonitorPage() {
           }}
           expiries={expiries}
           selectedExpiry={selectedExpiry}
-          onSelectExpiry={(exp) => setSelectedExpiry(exp)}
+          onSelectExpiry={(exp) => {
+            setSelectedExpiry(exp);
+            fetchOptionChain(selectedUnderlying, exp);
+            notifyAction(`Switched active expiry to ${exp}`);
+          }}
           spot={spot}
           prevClose={prevClose}
           change={change}
@@ -1388,32 +1572,28 @@ export default function OptionsMonitorPage() {
           mtmPct={portfolioGreeks.mtmPct}
           netTheta={portfolioGreeks.netTheta}
           estimatedMargin={portfolioGreeks.estimatedMargin}
-          isLiveLoading={isChainLoading || isBrokerLoading}
+          availableMargin={availableMargin}
+          isFundsLoading={isFundsLoading}
+          isLiveLoading={isChainLoading}
           wsTransport={transport}
           wsStatus={bridgeStatus.status}
           lastUpdated={lastUpdated}
           onRefreshQuotes={() => {
             fetchOptionChain(selectedUnderlying, selectedExpiry);
-            fetchBrokerPositions();
-            notifyAction('Refreshed live market quotes.');
+            fetchAvailableMargin();
+            notifyAction('Refreshed live market quotes & Dhan funds.');
           }}
           onToggleHotkeysModal={() => setIsHotkeysOpen(true)}
-          viewMode={viewMode}
-          onToggleViewMode={(m) => {
-            setViewMode(m);
-            setStrategyName(m === 'broker' ? 'Dhan Live Positions' : 'Custom Strikes');
-            notifyAction(`Switched view to ${m === 'broker' ? 'Dhan Live Broker Positions' : 'What-If Desk Simulator'}`);
-          }}
-          brokerLegsCount={brokerLegs.length}
           onOpenTrade={handleOpenNewTrade}
+          onOpenOptionChain={() => setIsOptionChainOpen(true)}
         />
       </div>
 
-      {/* ── MAIN WORKSPACE (60% / 40% Two-Column Layout) ───────────────────── */}
+      {/* ── MAIN WORKSPACE (Expanded Left Strategy / Narrow Right Rail) ── */}
       <main className="flex-1 w-full max-w-[1700px] mx-auto p-3 md:p-4">
-        <div className="flex flex-col lg:flex-row gap-4">
-          {/* LEFT COLUMN: 60% Width */}
-          <div className="w-full lg:w-[60%] flex-1">
+        <div className="flex flex-col lg:flex-row gap-3 md:gap-4">
+          {/* LEFT COLUMN: Expansive Strategy, Positions Table & Payoff Curve */}
+          <div className="flex-1 min-w-0 w-full">
             <PositionsStrategyMonitor
               strategyName={strategyName}
               totalLots={totalLots}
@@ -1424,10 +1604,10 @@ export default function OptionsMonitorPage() {
               payoffPoints={payoffPoints}
               breakevens={breakevens}
               chainStrikes={chainStrikes}
-              viewMode={viewMode}
               currentExpiry={selectedExpiry}
-              onSyncBroker={fetchBrokerPositions}
-              isBrokerLoading={isBrokerLoading}
+              guards={posGuards}
+              onGuardChange={handleGuardChange}
+              onTrailToggle={handleTrailToggle}
               onAddLegClick={() => setIsAddLegOpen(true)}
               onRemoveLeg={handleRemoveLeg}
               onUpdateLegStrike={handleUpdateLegStrike}
@@ -1437,15 +1617,18 @@ export default function OptionsMonitorPage() {
               onUpdateAllLots={handleUpdateAllLots}
               onOpenTradeBasket={handleOpenTradeBasket}
               onOpenSingleLegTrade={handleOpenSingleLegTrade}
-              onOpenNewTrade={handleOpenNewTrade}
+              onCloseSingleLeg={handleOpenSingleLegClose}
+              onToggleLegEntered={handleToggleLegEntered}
+              onOpenOptionChain={() => setIsOptionChainOpen(true)}
             />
           </div>
 
-          {/* RIGHT COLUMN: 40% Width */}
-          <div className="w-full lg:w-[40%] shrink-0">
+          {/* RIGHT COLUMN: Professional Narrow Greeks & Quick Execution Rail */}
+          <div className="w-full lg:w-[320px] xl:w-[340px] shrink-0">
             <RiskGreeksMatrix
               greeks={portfolioGreeks}
               lastActionMessage={lastActionMessage}
+              availableMargin={availableMargin}
               onRollCe={handleRollCe}
               onRollPe={handleRollPe}
               onRollCeUp={handleRollCeUp}
@@ -1487,6 +1670,24 @@ export default function OptionsMonitorPage() {
         onClose={() => setOrderModalOpen(false)}
         initialOrder={activeTradeOrder}
         onOrderSuccess={handleOrderSuccess}
+      />
+
+      {/* ── OPTION CHAIN MODAL WINDOW ─────────────────────────────────────── */}
+      <OptionChainModal
+        isOpen={isOptionChainOpen}
+        onClose={() => setIsOptionChainOpen(false)}
+        underlying={selectedUnderlying}
+        expiries={expiries}
+        currentExpiry={selectedExpiry}
+        spot={spot}
+        broker="dhan"
+        liveQuotes={liveQuotes}
+        onSelectExpiry={(exp) => {
+          setSelectedExpiry(exp);
+          fetchOptionChain(selectedUnderlying, exp);
+          notifyAction(`Switched active expiry to ${exp}`);
+        }}
+        onAddLeg={handleAddLegFromChain}
       />
     </div>
   );

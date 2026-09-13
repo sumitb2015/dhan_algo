@@ -52,6 +52,15 @@ export const UNDERLYINGS: Record<string, UnderlyingConfig> = {
   },
 };
 
+export interface PositionGuard {
+  target: string;        // take-profit price (₹)
+  sl: string;            // stop-loss price (₹); also the anchor for trailing SL
+  trailEnabled: boolean; // checkbox: trail SL 1:1 with profit from the configured SL level
+  bestPrice: number;     // best price achieved (max LTP for long, min LTP for short); 0 = not yet set
+  triggered: boolean;    // prevents double-fire while order is in flight
+  triggerReason?: string;// 'Target hit' | 'SL hit' | 'Trail SL hit'
+}
+
 export interface OptionLegModel {
   id: string;
   type: OptType;
@@ -68,6 +77,8 @@ export interface OptionLegModel {
   iv: number;    // fraction e.g. 0.145
   expiry?: string; // e.g. '2026-09-15'
   symbol?: string; // contract symbol
+  isEntered?: boolean; // true if position has been entered/executed
+  guard?: PositionGuard;
 }
 
 /**
@@ -141,11 +152,11 @@ export function computeBsGreeks(
   // Gamma (same for Call & Put)
   const gamma = normPdf(d1) / (spot * v * sqrtT);
 
-  // Vega (derivative with respect to IV fraction; rupees per 1% change)
+  // Vega (derivative with respect to IV fraction; rupees per share per 1% IV change)
   const rawVega = spot * sqrtT * normPdf(d1);
-  const vegaPerPercent = (rawVega * 0.01) * lotSize;
+  const vegaPerPercent = rawVega * 0.01;
 
-  // Theta (decay per day in rupees)
+  // Theta (decay per day in rupees per share, negative)
   let rawTheta = 0;
   const term1 = -(spot * normPdf(d1) * v) / (2 * sqrtT);
   if (type === 'CE') {
@@ -155,14 +166,14 @@ export function computeBsGreeks(
     const term2 = r * strike * Math.exp(-r * t) * normCdf(-d2);
     rawTheta = (term1 + term2) / 365;
   }
-  const thetaPerDay = rawTheta * lotSize;
+  const thetaPerDay = rawTheta;
 
   return {
     price: Math.max(0.05, Math.round(price * 20) / 20),
     delta: Math.round(delta * 100) / 100,
     gamma: Math.round(gamma * 10000) / 10000,
-    theta: Math.round(thetaPerDay),
-    vega: Math.round(vegaPerPercent),
+    theta: Math.round(thetaPerDay * 100) / 100,
+    vega: Math.round(vegaPerPercent * 100) / 100,
   };
 }
 
@@ -309,7 +320,7 @@ export function computePortfolioMetrics(
     };
   }
 
-  let totalDelta = 0;
+  let totalLotDelta = 0;
   let totalGamma = 0;
   let totalTheta = 0;
   let totalVega = 0;
@@ -322,20 +333,21 @@ export function computePortfolioMetrics(
     const sign = leg.side === 'SELL' ? -1 : 1;
     const effectiveLots = leg.lots || Math.max(1, Math.round(qty / (lotSize || 1)));
 
-    // Delta of the position in share equivalents
-    const legDelta = sign * leg.delta * qty;
-    totalDelta += legDelta;
+    // Net Delta in lot delta units
+    const legDeltaLots = sign * effectiveLots * leg.delta;
+    totalLotDelta += legDeltaLots;
 
-    // Gamma
-    totalGamma += sign * leg.gamma * qty;
+    // Gamma in lot units
+    const legGammaLots = sign * effectiveLots * leg.gamma;
+    totalGamma += legGammaLots;
 
-    // Theta (Selling options yields positive theta, buying yields negative)
-    const legTheta = -sign * leg.theta * effectiveLots;
-    totalTheta += legTheta;
+    // Theta (₹ / day): Selling options collects decay (+), buying pays decay (-)
+    const legThetaRupees = (leg.side === 'SELL' ? 1 : -1) * qty * Math.abs(leg.theta);
+    totalTheta += legThetaRupees;
 
-    // Vega (Selling options yields negative vega, buying yields positive)
-    const legVega = sign * leg.vega * effectiveLots;
-    totalVega += legVega;
+    // Vega (₹ / 1% IV move): Selling options is short vega (-), buying is long vega (+)
+    const legVegaRupees = (leg.side === 'SELL' ? -1 : 1) * qty * Math.abs(leg.vega);
+    totalVega += legVegaRupees;
 
     // MTM
     const pnl = leg.side === 'SELL'
@@ -353,12 +365,12 @@ export function computePortfolioMetrics(
   const hasUnlimitedLoss = netCallQty > 0 || netPutQty > 0;
   const hasUnlimitedProfit = netCallQty < 0;
 
-  // Rupee Delta = Total share delta * 1% of spot price
-  const rupeeDelta = Math.round(totalDelta * (spot * 0.01));
+  // Rupee Delta = Net lot delta * lotSize * 1% of spot price
+  const rupeeDelta = Math.round(totalLotDelta * lotSize * (spot * 0.01));
 
-  // Gamma acceleration classification
+  // Gamma acceleration classification based on lot gamma
   const absGamma = Math.abs(totalGamma);
-  const gammaRiskLabel = absGamma > 0.35 ? 'High Acceleration' : absGamma > 0.15 ? 'Moderate' : 'Low';
+  const gammaRiskLabel = absGamma > 0.01 ? 'High Acceleration' : absGamma > 0.003 ? 'Moderate' : 'Low';
 
   // Margin estimation (~₹1.84L per short index lot baseline in India)
   const estimatedMargin = Math.max(50000, shortCount * 184000);
@@ -367,7 +379,7 @@ export function computePortfolioMetrics(
   const thetaPerHour = Math.round(totalTheta / 6.25);
 
   return {
-    netDelta: Math.round(totalDelta * 100) / 100,
+    netDelta: Math.round(totalLotDelta * 100) / 100,
     rupeeDelta,
     netGamma: Math.round(totalGamma * 10000) / 10000,
     gammaRiskLabel,

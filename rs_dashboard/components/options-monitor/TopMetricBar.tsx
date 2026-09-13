@@ -2,7 +2,7 @@
 
 import React from 'react';
 import { UNDERLYINGS } from '@/lib/optionsMonitorMath';
-import { ChevronDown, RefreshCw, Keyboard, Briefcase, SlidersHorizontal, Activity, Zap } from 'lucide-react';
+import { ChevronDown, RefreshCw, Keyboard, Briefcase, SlidersHorizontal, Activity, Zap, Table2 } from 'lucide-react';
 
 interface TopMetricBarProps {
   selectedUnderlying: string;
@@ -20,16 +20,16 @@ interface TopMetricBarProps {
   mtmPct: number;
   netTheta: number;
   estimatedMargin: number;
+  availableMargin?: number | null;
+  isFundsLoading?: boolean;
   isLiveLoading: boolean;
   wsTransport?: 'ws' | 'poll';
   wsStatus?: 'RUNNING' | 'STOPPED' | 'STARTING' | 'ERROR';
   lastUpdated?: string;
   onRefreshQuotes: () => void;
   onToggleHotkeysModal: () => void;
-  viewMode: 'broker' | 'custom';
-  onToggleViewMode: (mode: 'broker' | 'custom') => void;
-  brokerLegsCount: number;
   onOpenTrade?: () => void;
+  onOpenOptionChain?: () => void;
 }
 
 export default function TopMetricBar({
@@ -47,22 +47,30 @@ export default function TopMetricBar({
   mtmPct,
   netTheta,
   estimatedMargin,
+  availableMargin = null,
+  isFundsLoading = false,
   isLiveLoading,
   wsTransport = 'poll',
   wsStatus = 'STOPPED',
   lastUpdated,
   onRefreshQuotes,
   onToggleHotkeysModal,
-  viewMode,
-  onToggleViewMode,
-  brokerLegsCount,
   onOpenTrade,
+  onOpenOptionChain,
 }: TopMetricBarProps) {
   const isPositivePnl = totalMtm >= 0;
   const isSpotUp = change >= 0;
 
-  // Format Margin (e.g. 368000 -> ₹3.68L)
+  // Format Estimated Margin (e.g. 368000 -> ₹3.68L)
   const marginStr = (estimatedMargin / 100000).toFixed(2);
+
+  // Format Available Margin
+  const availMarginStr =
+    availableMargin !== null && availableMargin !== undefined
+      ? availableMargin >= 100000
+        ? `₹${(availableMargin / 100000).toFixed(2)}L`
+        : `₹${availableMargin.toLocaleString('en-IN')}`
+      : '--';
 
   // Format Expiry display label e.g. 2026-09-15 -> 15-Sep
   const formatExpiryLabel = (exp: string) => {
@@ -90,35 +98,6 @@ export default function TopMetricBar({
         <div className="flex items-center justify-between gap-2 overflow-x-auto text-[10px]">
           <div className="flex items-center gap-2">
             <span className="text-amber-400 font-bold uppercase tracking-wider">COMMANDS:</span>
-            <button
-              type="button"
-              onClick={() => onToggleViewMode('custom')}
-              className={`inline-flex items-center gap-1 rounded border px-2 py-0.5 font-bold cursor-pointer transition-colors ${
-                viewMode === 'custom'
-                  ? 'border-amber-500/50 bg-amber-500/10 text-amber-300'
-                  : 'border-zinc-800 bg-zinc-900/80 text-zinc-300 hover:text-amber-400'
-              }`}
-            >
-              <span className="text-amber-400 font-bold">[F1]</span>
-              <span>DESK</span>
-            </button>
-            <button
-              type="button"
-              onClick={() => onToggleViewMode('broker')}
-              className={`inline-flex items-center gap-1 rounded border px-2 py-0.5 font-bold cursor-pointer transition-colors ${
-                viewMode === 'broker'
-                  ? 'border-amber-500/50 bg-amber-500/10 text-amber-300'
-                  : 'border-zinc-800 bg-zinc-900/80 text-zinc-300 hover:text-amber-400'
-              }`}
-            >
-              <span className="text-amber-400 font-bold">[F2]</span>
-              <span>BROKER</span>
-              {brokerLegsCount > 0 && (
-                <span className="px-1 py-0.2 rounded text-[9px] bg-indigo-500/20 text-indigo-300 font-bold">
-                  {brokerLegsCount}
-                </span>
-              )}
-            </button>
             <button
               type="button"
               onClick={onToggleHotkeysModal}
@@ -252,7 +231,7 @@ export default function TopMetricBar({
 
           {/* MTM P&L */}
           <div className="flex flex-col justify-between gap-0.5 rounded-lg border border-zinc-800 bg-zinc-950 px-3 py-1 min-w-[110px]">
-            <span className="text-[9px] font-bold uppercase tracking-[0.14em] text-zinc-400">PORTFOLIO MTM</span>
+            <span className="text-[9px] font-bold uppercase tracking-[0.14em] text-zinc-400">INTRADAY MTM</span>
             <div className="flex items-center gap-1 tabular-nums">
               <span className={`font-bold text-xs ${isPositivePnl ? 'text-emerald-400' : 'text-red-400'}`}>
                 {isPositivePnl ? '+' : ''}₹{totalMtm.toLocaleString('en-IN')}
@@ -271,49 +250,37 @@ export default function TopMetricBar({
             </div>
           </div>
 
-          {/* MARGIN */}
+          {/* EST. MARGIN */}
           <div className="flex flex-col justify-between gap-0.5 rounded-lg border border-zinc-800 bg-zinc-950 px-2.5 py-1 min-w-[85px]">
             <span className="text-[9px] font-bold uppercase tracking-[0.14em] text-zinc-400">EST. MARGIN</span>
             <div className="font-bold text-xs text-zinc-100 tabular-nums">
               ₹{marginStr}L
             </div>
           </div>
+
+          {/* AVAIL. MARGIN */}
+          <div
+            className="flex flex-col justify-between gap-0.5 rounded-lg border border-zinc-800 bg-zinc-950 px-2.5 py-1 min-w-[95px]"
+            title="Current available margin in Dhan HQ account"
+          >
+            <div className="flex items-center justify-between gap-1">
+              <span className="text-[9px] font-bold uppercase tracking-[0.14em] text-zinc-400">AVAIL. MARGIN</span>
+              <span className="text-[8px] font-bold uppercase text-sky-400/90 px-1 py-0.2 rounded bg-sky-500/10">
+                DHAN
+              </span>
+            </div>
+            <div className="font-bold text-xs text-emerald-400 tabular-nums">
+              {isFundsLoading ? (
+                <span className="text-zinc-500 animate-pulse text-[11px]">Loading...</span>
+              ) : (
+                availMarginStr
+              )}
+            </div>
+          </div>
         </div>
 
         {/* Right: View Mode Toggle + Refresh & Hotkeys */}
         <div className="flex items-center gap-2">
-          {/* Broker vs Simulator Toggle */}
-          <div className="flex items-center bg-zinc-900 p-0.5 rounded-lg border border-zinc-800 text-[11px] font-bold">
-            <button
-              onClick={() => onToggleViewMode('broker')}
-              className={`flex items-center gap-1 px-2.5 py-1 rounded-md transition-colors cursor-pointer ${
-                viewMode === 'broker'
-                  ? 'bg-emerald-600 text-white shadow'
-                  : 'text-zinc-400 hover:text-white'
-              }`}
-              title="Live Positions from Dhan Broker Account"
-            >
-              <Briefcase className="w-3 h-3" />
-              <span>BROKER</span>
-              {brokerLegsCount > 0 && (
-                <span className="ml-0.5 px-1 py-0.2 rounded text-[9px] bg-emerald-800 text-emerald-100 font-bold">
-                  {brokerLegsCount}
-                </span>
-              )}
-            </button>
-            <button
-              onClick={() => onToggleViewMode('custom')}
-              className={`flex items-center gap-1 px-2.5 py-1 rounded-md transition-colors cursor-pointer ${
-                viewMode === 'custom'
-                  ? 'bg-zinc-800 text-white shadow'
-                  : 'text-zinc-400 hover:text-white'
-              }`}
-              title="Custom Strike Desk & What-If Simulator"
-            >
-              <SlidersHorizontal className="w-3 h-3" />
-              <span>DESK</span>
-            </button>
-          </div>
 
           {/* Place Trade Button */}
           {onOpenTrade && (
@@ -326,6 +293,19 @@ export default function TopMetricBar({
               <Zap className="w-3.5 h-3.5 fill-current" />
               <span>PLACE TRADE</span>
               <span className="text-[9px] bg-emerald-700/60 px-1 py-0.2 rounded font-mono">[F5]</span>
+            </button>
+          )}
+
+          {/* Option Chain Window Trigger */}
+          {onOpenOptionChain && (
+            <button
+              type="button"
+              onClick={onOpenOptionChain}
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-amber-400 hover:text-amber-300 border border-amber-500/30 font-bold text-xs shadow transition-all cursor-pointer"
+              title="Open Interactive Option Chain Window"
+            >
+              <Table2 className="w-3.5 h-3.5" />
+              <span>OPTION CHAIN</span>
             </button>
           )}
 
