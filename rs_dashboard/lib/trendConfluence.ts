@@ -1,4 +1,4 @@
-import { readStockCSVAsync, readNifty500List, readNifty50Index } from './dataLoader';
+import { readStockCSVAsync, readNifty500List, readNifty500IndexSync } from './dataLoader';
 import { getSector } from './sectors';
 import { OHLCVRow } from './rs';
 
@@ -8,6 +8,8 @@ export interface TimeframeSignals {
   shortTermMomentum: boolean; // Daily Price > EMA 20 & EMA 20 > EMA 50
   adxStrong: boolean;         // ADX 14 >= 25
   rsBullish: boolean;         // Mansfield RS >= 0
+  aboveEma20: boolean;        // Daily Price > EMA 20
+  ema20Above50: boolean;      // EMA 20 > EMA 50
 }
 
 export interface StockConfluenceItem {
@@ -16,7 +18,7 @@ export interface StockConfluenceItem {
   price: number;
   change1D: number;
   change1W: number;
-  stars: number; // 1 to 5
+  stars: number; // 0 to 5
   signals: TimeframeSignals;
   adx: number;
   weeklyEma10: number;
@@ -25,7 +27,7 @@ export interface StockConfluenceItem {
   dailyEma50: number;
   dailyEma200: number;
   mansfieldRS: number;
-  actionSignal: 'STRONG BUY (5★)' | 'BUY (4★)' | 'NEUTRAL (3★)' | 'AVOID (1–2★)';
+  actionSignal: 'STRONG BUY (5★)' | 'BUY (4★)' | 'NEUTRAL (3★)' | 'BEARISH (1–2★)' | 'AVOID (0★)';
   sparkline: number[];
   dataDate: string;
 }
@@ -131,8 +133,8 @@ export async function runTrendConfluenceAnalysis(force = false): Promise<TrendCo
   }
 
   const symbols = readNifty500List();
-  const n50 = readNifty50Index();
-  const n50Map = new Map(n50.map((r) => [r.date, r.close]));
+  const benchmarkRows = readNifty500IndexSync();
+  const benchmarkMap = new Map(benchmarkRows.map((r) => [r.date, r.close]));
 
   let latestDate = '';
   const stockItems: StockConfluenceItem[] = [];
@@ -145,14 +147,19 @@ export async function runTrendConfluenceAnalysis(force = false): Promise<TrendCo
 
         const n = rows.length;
         const lastRow = rows[n - 1];
+        const prevRow = rows[n - 2];
         if (lastRow.date > latestDate) latestDate = lastRow.date;
 
         const closes = rows.map((r) => r.close);
         const price = closes[n - 1];
-        const prevPrice = closes[n - 2] ?? price;
         const price1W = closes[Math.max(0, n - 6)] ?? price;
 
-        const change1D = prevPrice > 0 ? ((price - prevPrice) / prevPrice) * 100 : 0;
+        // 1-day % change robust to EOD settlement quirk where close carries settlement
+        let currPrice = lastRow.close;
+        if (prevRow && currPrice === prevRow.close && lastRow.open && lastRow.open > 0) {
+          currPrice = lastRow.open;
+        }
+        const change1D = prevRow && prevRow.close > 0 ? ((currPrice - prevRow.close) / prevRow.close) * 100 : 0;
         const change1W = price1W > 0 ? ((price - price1W) / price1W) * 100 : 0;
 
         // Daily EMAs
@@ -178,19 +185,19 @@ export async function runTrendConfluenceAnalysis(force = false): Promise<TrendCo
         // ADX(14)
         const adx = computeADX(rows, 14);
 
-        // Mansfield RS vs Nifty 50
+        // Mansfield RS vs Nifty 500 (canonical 52-week lookback aligned with lib/rs.ts)
         let mansfieldRS = 0;
         const rsRatios: number[] = [];
-        for (let i = Math.max(0, n - 50); i < n; i++) {
-          const bClose = n50Map.get(rows[i].date);
+        const startIdx = Math.max(0, n - 252);
+        for (let i = startIdx; i < n; i++) {
+          const bClose = benchmarkMap.get(rows[i].date);
           if (bClose && bClose > 0) {
             rsRatios.push((rows[i].close / bClose) * 1000);
           }
         }
         if (rsRatios.length >= 20) {
           const currRS = rsRatios[rsRatios.length - 1];
-          const prev20 = rsRatios.slice(-20);
-          const avgRS = prev20.reduce((a, b) => a + b, 0) / 20;
+          const avgRS = rsRatios.reduce((a, b) => a + b, 0) / rsRatios.length;
           mansfieldRS = avgRS > 0 ? ((currRS - avgRS) / avgRS) * 100 : 0;
         }
 
@@ -200,7 +207,9 @@ export async function runTrendConfluenceAnalysis(force = false): Promise<TrendCo
         // 2. Daily Uptrend: Daily Price > 50 EMA & 50 EMA > 200 EMA
         const dailyUptrend = price > dEma50 && dEma50 > dEma200;
         // 3. Short-Term Momentum: Price > 20 EMA & 20 EMA > 50 EMA
-        const shortTermMomentum = price > dEma20 && dEma20 > dEma50;
+        const aboveEma20 = price > dEma20;
+        const ema20Above50 = dEma20 > dEma50;
+        const shortTermMomentum = aboveEma20 && ema20Above50;
         // 4. Trend Strength: ADX >= 25 (Wilder strong trend definition)
         const adxStrong = adx >= 25.0;
         // 5. Outperformance: Mansfield RS >= 0
@@ -212,17 +221,20 @@ export async function runTrendConfluenceAnalysis(force = false): Promise<TrendCo
           shortTermMomentum,
           adxStrong,
           rsBullish,
+          aboveEma20,
+          ema20Above50,
         };
 
         const stars = [weeklyUptrend, dailyUptrend, shortTermMomentum, adxStrong, rsBullish].filter(
           Boolean
         ).length;
 
-        let actionSignal: 'STRONG BUY (5★)' | 'BUY (4★)' | 'NEUTRAL (3★)' | 'AVOID (1–2★)' =
-          'AVOID (1–2★)';
+        let actionSignal: 'STRONG BUY (5★)' | 'BUY (4★)' | 'NEUTRAL (3★)' | 'BEARISH (1–2★)' | 'AVOID (0★)' =
+          'AVOID (0★)';
         if (stars === 5) actionSignal = 'STRONG BUY (5★)';
         else if (stars === 4) actionSignal = 'BUY (4★)';
         else if (stars === 3) actionSignal = 'NEUTRAL (3★)';
+        else if (stars >= 1) actionSignal = 'BEARISH (1–2★)';
 
         const sparkline = closes.slice(-20).map((c) => Math.round(c * 100) / 100);
 
