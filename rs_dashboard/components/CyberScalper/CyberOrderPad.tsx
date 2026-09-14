@@ -238,6 +238,60 @@ export default function CyberOrderPad({
     });
   };
 
+  // LIMIT BUY below the current futures price — a dip-buy resting order.
+  const handleBuyBelowFuture = async (pts: number) => {
+    if (isExecuting || !future?.ltp) return;
+    cyberAudio.buy();
+    const limitPrice = Number((future.ltp - pts).toFixed(2));
+
+    if (safetyLock) {
+      const confirmAction = window.confirm(`PLACE LIMIT BUY: ${lots} Lot(s) (${totalQty} Qty) of ${future?.display_name || `${symbol} FUT`} @ ₹${limitPrice.toFixed(2)} (LTP -${pts} pts)?`);
+      if (!confirmAction) return;
+    }
+
+    await onExecuteTrade({
+      direction: 'BUY',
+      contractType: 'DIRECT',
+      securityId: future?.security_id || undefined,
+      tradingSymbol: future?.trading_symbol || undefined,
+      expiry: future?.expiry,
+      lots,
+      qty: totalQty,
+      orderType: 'LIMIT',
+      productType,
+      price: limitPrice,
+      targetPts: targetPts || undefined,
+      slPts: slPts || undefined,
+    });
+  };
+
+  // LIMIT SHORT above the current futures price — a fade-the-spike resting order.
+  const handleShortAboveFuture = async (pts: number) => {
+    if (isExecuting || !future?.ltp) return;
+    cyberAudio.sell();
+    const limitPrice = Number((future.ltp + pts).toFixed(2));
+
+    if (safetyLock) {
+      const confirmAction = window.confirm(`PLACE LIMIT SHORT: ${lots} Lot(s) (${totalQty} Qty) of ${future?.display_name || `${symbol} FUT`} @ ₹${limitPrice.toFixed(2)} (LTP +${pts} pts)?`);
+      if (!confirmAction) return;
+    }
+
+    await onExecuteTrade({
+      direction: 'SELL',
+      contractType: 'DIRECT',
+      securityId: future?.security_id || undefined,
+      tradingSymbol: future?.trading_symbol || undefined,
+      expiry: future?.expiry,
+      lots,
+      qty: totalQty,
+      orderType: 'LIMIT',
+      productType,
+      price: limitPrice,
+      targetPts: targetPts || undefined,
+      slPts: slPts || undefined,
+    });
+  };
+
   // Panic flatten all
   const handlePanicFlatten = async () => {
     cyberAudio.exit();
@@ -463,6 +517,57 @@ export default function CyberOrderPad({
           </div>
         </button>
       </div>
+      )}
+
+      {/* LIMIT OFFSET LADDER — dip-buy below / fade-short above the futures LTP.
+          Futures-only: this terminal never sells/writes options, so "short" has
+          no equivalent instrument in Options mode. */}
+      {effectiveMode === 'FUTURES' && (
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+          <div className="bg-zinc-950/70 border border-zinc-800/80 rounded-lg p-2 flex flex-col justify-between">
+            <div className="flex items-center justify-between text-[11px] font-mono text-zinc-400 mb-2">
+              <span>BUY BELOW (LIMIT)</span>
+              <span className="text-emerald-400 font-bold">
+                {future?.ltp ? `LTP ₹${future.ltp.toFixed(2)}` : '---'}
+              </span>
+            </div>
+            <div className="flex items-center gap-1.5">
+              {[10, 20, 30].map((pts) => (
+                <button
+                  key={`buy-below-${pts}`}
+                  onClick={() => handleBuyBelowFuture(pts)}
+                  disabled={isExecuting || !future?.ltp}
+                  className="flex-1 py-1 rounded-lg font-mono text-xs font-bold border bg-zinc-900 border-emerald-800/60 text-emerald-300 hover:bg-emerald-950/60 hover:border-emerald-500/60 transition-all disabled:opacity-30 active:scale-95"
+                  title={future?.ltp ? `Buy limit @ ₹${(future.ltp - pts).toFixed(2)} (LTP -${pts} pts)` : 'Waiting for LTP'}
+                >
+                  -{pts}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          <div className="bg-zinc-950/70 border border-zinc-800/80 rounded-lg p-2 flex flex-col justify-between">
+            <div className="flex items-center justify-between text-[11px] font-mono text-zinc-400 mb-2">
+              <span>SHORT ABOVE (LIMIT)</span>
+              <span className="text-rose-400 font-bold">
+                {future?.ltp ? `LTP ₹${future.ltp.toFixed(2)}` : '---'}
+              </span>
+            </div>
+            <div className="flex items-center gap-1.5">
+              {[10, 20, 30].map((pts) => (
+                <button
+                  key={`short-above-${pts}`}
+                  onClick={() => handleShortAboveFuture(pts)}
+                  disabled={isExecuting || !future?.ltp}
+                  className="flex-1 py-1 rounded-lg font-mono text-xs font-bold border bg-zinc-900 border-rose-800/60 text-rose-300 hover:bg-rose-950/60 hover:border-rose-500/60 transition-all disabled:opacity-30 active:scale-95"
+                  title={future?.ltp ? `Short limit @ ₹${(future.ltp + pts).toFixed(2)} (LTP +${pts} pts)` : 'Waiting for LTP'}
+                >
+                  +{pts}
+                </button>
+              ))}
+            </div>
+          </div>
+        </div>
       )}
 
       {/* QUICK SCALP CONFIGURATION CONTROLS */}
