@@ -3,6 +3,7 @@ import assert from 'node:assert';
 import {
   legPnlAtExpiry, computePayoff, nearestStrike, strikeStep, daysToExpiry, STRATEGY_CATEGORIES,
 } from './basketStrategies.ts';
+import type { OptionLegModel } from './optionsMonitorMath.ts';
 
 test('legPnlAtExpiry: short call ITM loses intrinsic minus premium collected', () => {
   const leg = { side: 'S' as const, option: 'CE' as const, strike: 100, premium: 5, qty: 1 };
@@ -173,3 +174,71 @@ test('computePayoff: Call Butterfly is defined-risk with a single peak at the bo
   assert.ok(p80 && p100 && p120);
   assert.ok(p100.y > p80.y && p100.y > p120.y, 'Body strike (100) must be the peak');
 });
+
+test('STRATEGY_CATEGORIES: Short Strangle template uses offset 2 to match Options Monitor benchmark', () => {
+  const rangeBound = STRATEGY_CATEGORIES['Range Bound'];
+  const strangle = rangeBound.find((s: any) => s.key === 'short-strangle');
+  assert.ok(strangle, 'short-strangle must exist in Range Bound');
+  const ceLeg = strangle!.legs.find(l => l.option === 'CE');
+  const peLeg = strangle!.legs.find(l => l.option === 'PE');
+  assert.ok(ceLeg && peLeg);
+  assert.strictEqual(ceLeg!.offset, 2, 'CE leg must be offset +2 from ATM (23500 CE at 23400 ATM)');
+  assert.strictEqual(peLeg!.offset, -2, 'PE leg must be offset -2 from ATM (23300 PE at 23400 ATM)');
+});
+
+test('Sensibull & Options Monitor Parity: Baskets Short Strangle generates identical payoff curve', async () => {
+  const { generatePayoffCurve } = await import('./optionsMonitorMath.ts');
+
+  const spot = 23398.10;
+  const futurePrice = 23463.60;
+  const tYears = 4.0 / 365;
+  const baseIv = 0.1313;
+  const lotSize = 65;
+  const strikeStep = 50;
+
+  // Options Monitor reference strangle
+  const omLegs: OptionLegModel[] = [
+    { id: 'leg_ce', type: 'CE', side: 'SELL', strike: 23500, lots: 1, qty: 65, entryPrice: 61.20, ltp: 61.20, delta: -0.19, gamma: -0.0016, theta: 730, vega: -578, iv: 0.095 },
+    { id: 'leg_pe', type: 'PE', side: 'SELL', strike: 23300, lots: 1, qty: 65, entryPrice: 55.65, ltp: 55.65, delta: 0.02, gamma: -0.0013, theta: 737, vega: -579, iv: 0.110 },
+  ];
+
+  // Baskets monitorLegs configured for the strangle
+  const basketLegs: OptionLegModel[] = [
+    { id: 'leg-default-pe', type: 'PE', side: 'SELL', strike: 23300, lots: 1, qty: 65, entryPrice: 55.65, ltp: 55.65, delta: 0.02, gamma: -0.0013, theta: 737, vega: -579, iv: 0.110 },
+    { id: 'leg-default-ce', type: 'CE', side: 'SELL', strike: 23500, lots: 1, qty: 65, entryPrice: 61.20, ltp: 61.20, delta: -0.19, gamma: -0.0016, theta: 730, vega: -578, iv: 0.095 },
+  ];
+
+  const omCurve = generatePayoffCurve(omLegs, spot, lotSize, tYears, baseIv, strikeStep, futurePrice, tYears);
+  const basketCurve = generatePayoffCurve(basketLegs, spot, lotSize, tYears, baseIv, strikeStep, futurePrice, tYears);
+
+  // Exact point count match
+  assert.strictEqual(basketCurve.points.length, omCurve.points.length);
+  assert.strictEqual(omCurve.points.length, 124);
+
+  // Exact Breakevens match
+  assert.deepStrictEqual(basketCurve.breakevens, [23183, 23617]);
+  assert.deepStrictEqual(basketCurve.breakevens, omCurve.breakevens);
+
+  // Exact SD Levels match
+  assert.deepStrictEqual(basketCurve.sdLevels, omCurve.sdLevels);
+  assert.strictEqual(basketCurve.sdLevels?.exactLo1, 23076.5);
+  assert.strictEqual(basketCurve.sdLevels?.exactHi1, 23719.7);
+  assert.strictEqual(basketCurve.sdLevels?.exactLo2, 22754.9);
+  assert.strictEqual(basketCurve.sdLevels?.exactHi2, 24041.3);
+
+  // Exact point-by-point match for both pnlExpiry and pnlToday (the blue line)
+  for (let i = 0; i < omCurve.points.length; i++) {
+    const ptOM = omCurve.points[i];
+    const ptBasket = basketCurve.points[i];
+    assert.strictEqual(ptBasket.spot, ptOM.spot, `Spot mismatch at index ${i}`);
+    assert.strictEqual(ptBasket.pnlExpiry, ptOM.pnlExpiry, `Expiry PnL mismatch at spot ${ptOM.spot}`);
+    assert.strictEqual(ptBasket.pnlToday, ptOM.pnlToday, `T+0 Blue line PnL mismatch at spot ${ptOM.spot}`);
+  }
+
+  // Exact projected PnL at spot: -260 (matches user screenshot)
+  const spotPt = basketCurve.points.find(p => p.spot === Math.round(spot));
+  assert.ok(spotPt);
+  assert.strictEqual(spotPt.pnlToday, -260);
+  assert.strictEqual(spotPt.pnlExpiry, 7595);
+});
+
