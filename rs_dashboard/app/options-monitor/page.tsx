@@ -58,7 +58,6 @@ export default function OptionsMonitorPage() {
   // Target Spot & Date Sliders state (Sensibull Parity)
   const [targetSpot, setTargetSpot] = useState<number>(23398.10);
   const [targetDays, setTargetDays] = useState<number>(4.0);
-  const [initialDays, setInitialDays] = useState<number>(4.0);
 
   // Active Option Positions / Strategy Legs (Sensibull default Short Strangle: 23500 CE @ 61.20 / 23300 PE @ 55.65)
   const [strategyName, setStrategyName] = useState<string>('Short Strangle');
@@ -371,13 +370,14 @@ export default function OptionsMonitorPage() {
     const ceChain = normalizedChain[ceStrike]?.ce;
     const peChain = normalizedChain[peStrike]?.pe;
 
-    const t = calculateTimeToExpiryYears(selectedExpiry);
     const ceIv = (ceChain?.implied_volatility ? ceChain.implied_volatility / 100 : 0.095);
     const peIv = (peChain?.implied_volatility ? peChain.implied_volatility / 100 : 0.11);
 
     const isFut = typeof futurePrice === 'number' && futurePrice > 0;
     const evalUnderlying = isFut ? (futurePrice as number) : spot;
-    const effectiveTime = targetDays / 365;
+    // Real remaining time to expiry, never the user's target-date slider — the initial
+    // auto-populated legs must price off "today", not whatever days-to-target was last set.
+    const effectiveTime = calculateTimeToExpiryYears(selectedExpiry);
 
     const gCe = computeBsGreeks('CE', evalUnderlying, ceStrike, effectiveTime, ceIv, uConfig.lotSize, 0.065, isFut);
     const gPe = computeBsGreeks('PE', evalUnderlying, peStrike, effectiveTime, peIv, uConfig.lotSize, 0.065, isFut);
@@ -424,13 +424,21 @@ export default function OptionsMonitorPage() {
         expiry: selectedExpiry,
       },
     ]);
-  }, [chainStrikes, normalizedChain, spot, futurePrice, targetDays, uConfig.strikeStep, uConfig.lotSize, ivPct, selectedExpiry, liveQuotes, activeLegs.length]);
+  }, [chainStrikes, normalizedChain, spot, futurePrice, uConfig.strikeStep, uConfig.lotSize, ivPct, selectedExpiry, liveQuotes, activeLegs.length]);
 
   // ── 5. REALTIME MERGED LEGS WITH SUB-SECOND WS TICKS ────────────────────────
+  // Real remaining time on the selected expiry — the target-date slider (targetDays) can never
+  // be dragged past this, so a 0/1-DTE contract can't be priced as if 4 days of time value were
+  // still left. Matches BasketPayoffChart/PositionsStrategyMonitor's identical clamp so the two
+  // pages render the same payoff curve for the same legs.
+  const maxTargetDays = useMemo(() => {
+    return Math.max(0.05, calculateTimeToExpiryYears(selectedExpiry) * 365);
+  }, [selectedExpiry]);
+
   // Effective time remaining for Black-76 Greeks & SD bands (annualized over 365 calendar days)
   const effectiveTimeToExpiryYears = useMemo(() => {
-    return Math.max(0.0001, targetDays / 365);
-  }, [targetDays]);
+    return Math.max(0.0001, Math.min(targetDays, maxTargetDays) / 365);
+  }, [targetDays, maxTargetDays]);
 
   const activeLegsBase = activeLegs;
 
@@ -1763,7 +1771,6 @@ export default function OptionsMonitorPage() {
               onTargetSpotChange={setTargetSpot}
               targetDays={targetDays}
               onTargetDaysChange={setTargetDays}
-              initialDays={initialDays}
               guards={posGuards}
               onGuardChange={handleGuardChange}
               onTrailToggle={handleTrailToggle}

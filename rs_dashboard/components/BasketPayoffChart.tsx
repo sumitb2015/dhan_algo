@@ -21,8 +21,8 @@ import {
   generatePayoffCurve,
   computeExpiryPnlAtSpot,
   formatShortExpiry,
+  calculateTimeToExpiryYears,
 } from '@/lib/optionsMonitorMath';
-import { daysToExpiry } from '@/lib/basketStrategies';
 
 export interface BasketPayoffChartProps {
   legs?: OptionLegModel[];
@@ -139,10 +139,12 @@ export default function BasketPayoffChart({
   const [targetSpot, setTargetSpot] = useState<number | null>(null);
   const [targetDays, setTargetDays] = useState<number | null>(null);
 
-  // Real calendar days left on the selected expiry. Never floored to an arbitrary constant —
-  // a same-day/next-day expiry must cap the target-date slider (and thus the T+0 Black-76 eval
-  // time and SD bands) at its own remaining time, not a wider weekly-expiry assumption.
-  const maxDays = Math.max(0.05, (currentExpiry ? daysToExpiry(currentExpiry) ?? 4.0 : 4.0));
+  // Real remaining time on the selected expiry. Never floored to an arbitrary constant — a
+  // same-day/next-day expiry must cap the target-date slider (and thus the T+0 Black-76 eval
+  // time and SD bands) at its own remaining time, not a wider weekly-expiry assumption. Uses
+  // the same calculateTimeToExpiryYears as the Options Monitor page and PositionsStrategyMonitor
+  // so both pages render an identical payoff curve for the same legs.
+  const maxDays = Math.max(0.05, (currentExpiry ? calculateTimeToExpiryYears(currentExpiry) * 365 : 4.0));
 
   const effectiveTargetSpot = targetSpot ?? spot;
   // Default (untouched slider) is "today", i.e. the full remaining time to the real expiry.

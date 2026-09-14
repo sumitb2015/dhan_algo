@@ -219,3 +219,95 @@ Playwright `fullPage: true` captures cause Recharts `ResponsiveContainer` to col
 - **Hardcoding 252 trading days**: Annualization for options in Indian exchanges uses 365 calendar days.
 - **Scaling by lot size per leg**: Double-counts lots in mixed-lot books. Scale once at the aggregate book level.
 - **Inferring unlimited risk from curve tails**: Always inspect net signed call/put quantities.
+
+---
+
+## One Canonical Time-to-Expiry Source (Cross-Page Parity)
+
+`Baskets.tsx`/`BasketPayoffChart.tsx`, `app/options-monitor/page.tsx`/`PositionsStrategyMonitor.tsx`,
+and `PositionsAnalysis`/`StraddleAnalysis`/`StrangleAnalysis` are all separate React trees that must
+render **an identical payoff curve for identical legs** — that's the whole point of "Sensibull parity."
+They can only stay in parity if every one of them computes remaining time the same way.
+
+- **Always compute real time-to-expiry via `calculateTimeToExpiryYears(expiryDateStr)`** from
+  `lib/optionsMonitorMath.ts`. It accounts for the exact 15:30 IST expiry cutoff and the current
+  time of day, and floors at a small positive value (never zero) so Black-76 doesn't divide by
+  zero. Do not reimplement a second "days to expiry" helper (calendar-day granularity, no
+  time-of-day awareness) for anything that feeds a payoff curve, SD band, or Greek — that
+  divergence is exactly what caused Baskets' payoff diagram to stop matching Options Monitor's
+  (2026-09 regression: `BasketPayoffChart` used `lib/basketStrategies.ts`'s `daysToExpiry`,
+  calendar-day granularity with no intraday precision, while `PositionsStrategyMonitor` used a
+  dead `initialDays` prop that was never wired to the real expiry at all — two different wrong
+  answers that happened to look right only in the one reference scenario both were tested
+  against). `daysToExpiry` (calendar-day integer, 0 on expiry day) remains fine for a plain "N
+  DAYS" text stat — just never feed it into pricing math.
+- **The target-date slider's max must be the real remaining time, never a fixed weekly-expiry
+  constant.** All three target-date sliders in this codebase (`BasketPayoffChart`,
+  `PositionsStrategyMonitor`, and `app/options-monitor/page.tsx`'s own `effectiveTimeToExpiryYears`)
+  follow this shape — copy it exactly for a new one:
+  ```ts
+  const maxDays = Math.max(0.05, calculateTimeToExpiryYears(currentExpiry) * 365);
+  const effectiveTargetDays = Math.min(targetDays ?? maxDays, maxDays);
+  ```
+  A same-day or next-day expiry (very common here — NIFTY has frequent short-dated weekly
+  expiries) must cap the slider at its own remaining hours. Flooring `maxDays` at a constant like
+  `4.0` lets the user (or the untouched-slider default) simulate "4 days of time value" on a
+  contract that expires in an hour — badly overstating both the T+0 Black-76 curve and the SD
+  band width, in the wrong direction from what "Sensibull parity" is trying to achieve.
+- When adding a **fourth** payoff surface (e.g. wiring this into `PositionsAnalysis`), reuse this
+  exact `maxDays`/`effectiveTargetDays` pattern and reuse `calculateTimeToExpiryYears` rather than
+  writing a new time helper — that is the only way a fourth page stays in parity with the other
+  three without a dedicated cross-page test.
+
+---
+
+## Never Leak Sensibull Reference-Fixture Values Into Production Fallbacks
+
+The math test suite (`lib/basketStrategies.test.ts`, `lib/optionsMonitorMath.test.ts`) pins exact
+numbers from one reference screenshot to prove parity: spot `23398.10`, futures `23463.60`
+(basis `+65.50`), ATM IV `13.13%`, a 4.0-day-to-expiry Short Strangle (`23500 CE @ 61.20`,
+`23300 PE @ 55.65`, IVs `9.5%`/`11.0%`). These are correct as **test fixtures** and as
+documentation of what parity looks like — see the SD-band example above.
+
+They are a bug the moment they appear as a live-data fallback, an initial `useState`, or a
+strike/IV special-case (`if (leg.strike === 23500) ...`) in a component that real users load:
+- A component that falls back to a fixed spot/futures-basis when a live quote or chain fetch is
+  slow/unavailable must fall back to the underlying's **generic** configured default (e.g.
+  `UNDERLYINGS[underlying].defaultSpot` in `optionsMonitorMath.ts`), never a NIFTY-only magic
+  number lifted from the reference screenshot — every other underlying already falls back
+  generically, so a NIFTY-only special case is also an inconsistency smell on its own.
+  (Fixed 2026-09 in `Baskets.tsx`'s `spot`/`effectiveFutureBasis` fallbacks.)
+- A strike/IV override keyed on the literal reference strikes (`23500`/`23300`) will silently
+  return the wrong premium/IV for every other strike, and will keep returning stale 2026-09
+  numbers for those two strikes forever, even once real chain data is flowing.
+  (Fixed 2026-09 in `Baskets.tsx`'s `autoPremium`/`effectivePremium`/`applyTemplate`/`monitorLegs`.)
+- `app/options-monitor/page.tsx` still initializes `spot`, `prevClose`, `futurePrice`,
+  `futureBasis`, `futureExpiry`, `targetSpot`, `ivPct`, and the default `activeLegs` array to these
+  exact reference values as `useState` defaults. That's lower-risk than a fallback branch that can
+  be *re-entered* after live data loads (these are simply overwritten once the chain/WS fetch
+  resolves), but it's the same anti-pattern and worth cleaning up if you're touching that state
+  block again — don't copy this pattern into a new page.
+- **When copying a working payoff feature from one page to another** (as `Baskets.tsx` did from
+  `PositionsStrategyMonitor.tsx`), do a literal `grep` for the reference numbers
+  (`23500`, `23300`, `23398`, `23463`, `65.50`, `61.20`, `55.65`, `13.13`, `0.095`, `0.110`) in the
+  new file before shipping — anything still hard-coded outside a comment or a `defaultSpot`-style
+  named underlying config is a leftover fixture value, not a real default.
+
+---
+
+## Verify an Edit Actually Replaced the Old Code, Not Just `git diff`
+
+While fixing the fixture-leak issue above, four separate spots in `Baskets.tsx` turned out to have
+the **old** Sensibull-hardcoded body and the **new** generic-replacement body concatenated back to
+back (duplicate `const`/`let` declarations, dead code after an early `return`, a duplicated object
+key) — a bad find-and-replace that appended instead of substituting. `git diff`'s default 3-line
+context rendered this as a clean-looking removal (matching unrelated identical lines above/below as
+the "old" side), so the diff was misleading; `tsc --noEmit` caught it immediately (duplicate
+declaration / unreachable code errors), and reading the full function body end-to-end caught the
+rest (the dead-but-syntactically-valid duplicate `return` and object key, which `tsc` does not
+flag as an error).
+- After any edit that claims to "replace" or "remove" hardcoded logic in this feature, run
+  `npx tsc --noEmit` (from `rs_dashboard/`) before trusting the diff summary.
+- Re-read the whole touched function (not just the diff hunk) when the change was described as a
+  replacement — a duplicate `return`/object key is syntactically valid and silently keeps the old
+  behavior while `git diff` and `tsc` both stay quiet.

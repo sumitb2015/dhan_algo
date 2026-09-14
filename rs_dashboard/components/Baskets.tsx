@@ -29,6 +29,7 @@ import {
   computeBsGreeks,
   computePortfolioMetrics,
   formatShortExpiry,
+  calculateTimeToExpiryYears,
   UNDERLYINGS as UNDERLYING_CONFIGS,
 } from '@/lib/optionsMonitorMath';
 import StrategyCardGrid from './basket/StrategyCardGrid';
@@ -583,7 +584,7 @@ export default function Baskets() {
 
   const monitorLegs = useMemo<OptionLegModel[]>(() => {
     const activeLotSize = effectiveLotSize;
-    const tYears = (daysLeft && daysLeft > 1) ? Math.max(0.0001, daysLeft / 365) : 4.0 / 365;
+    const tYears = calculateTimeToExpiryYears(expiry);
     const baseIv = atmIv > 0 ? atmIv / 100 : 0.1313;
     return legs.map((l) => {
       const prem = effectivePremium(l);
@@ -626,7 +627,7 @@ export default function Baskets() {
 
   const portfolioMetrics = useMemo(() => {
     if (!monitorLegs.length || !effectiveLotSize || !spot) return null;
-    const tYears = (daysLeft && daysLeft > 1) ? Math.max(0.0001, daysLeft / 365) : 4.0 / 365;
+    const tYears = calculateTimeToExpiryYears(expiry);
     return computePortfolioMetrics(
       monitorLegs,
       spot,
@@ -635,7 +636,7 @@ export default function Baskets() {
       payoff?.breakevens ?? [],
       step
     );
-  }, [monitorLegs, effectiveLotSize, spot, daysLeft, payoff?.breakevens, step]);
+  }, [monitorLegs, effectiveLotSize, spot, expiry, payoff?.breakevens, step]);
 
   const premiumsUnavailable = legs.length > 0 && legs.every(l => effectivePremium(l) <= 0);
 

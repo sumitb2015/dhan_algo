@@ -2,7 +2,7 @@
 
 import React, { useMemo, useState, useRef, useEffect } from 'react';
 import { createPortal } from 'react-dom';
-import { OptionLegModel, PayoffPoint, PositionGuard, SdLevels, formatShortExpiry, computeExpiryPnlAtSpot } from '@/lib/optionsMonitorMath';
+import { OptionLegModel, PayoffPoint, PositionGuard, SdLevels, formatShortExpiry, computeExpiryPnlAtSpot, calculateTimeToExpiryYears } from '@/lib/optionsMonitorMath';
 import TerminalPanel from './TerminalPanel';
 import {
   ResponsiveContainer,
@@ -189,7 +189,6 @@ interface PositionsStrategyMonitorProps {
   onTargetSpotChange?: (spot: number) => void;
   targetDays?: number;
   onTargetDaysChange?: (days: number) => void;
-  initialDays?: number;
   guards?: Record<string, PositionGuard>;
   onGuardChange?: (legId: string, field: 'target' | 'sl', value: string) => void;
   onTrailToggle?: (legId: string) => void;
@@ -279,7 +278,6 @@ export default function PositionsStrategyMonitor({
   onTargetSpotChange,
   targetDays,
   onTargetDaysChange,
-  initialDays,
   guards,
   onGuardChange,
   onTrailToggle,
@@ -297,8 +295,11 @@ export default function PositionsStrategyMonitor({
   onOpenOptionChain,
 }: PositionsStrategyMonitorProps) {
   const effectiveTargetSpot = targetSpot ?? spot;
-  const effectiveTargetDays = targetDays ?? 4.0;
-  const maxDays = Math.max(4.0, initialDays ?? 4.0);
+  // Real remaining time on the selected expiry — never floored to a fixed weekly-expiry
+  // assumption, since that overstates time value / SD band width on 0- and 1-DTE contracts.
+  // Matches BasketPayoffChart's identical computation so both pages produce the same curve.
+  const maxDays = Math.max(0.05, (currentExpiry ? calculateTimeToExpiryYears(currentExpiry) * 365 : 4.0));
+  const effectiveTargetDays = Math.min(targetDays ?? maxDays, maxDays);
   const targetSpotChangePct = spot > 0 ? ((effectiveTargetSpot - spot) / spot) * 100 : 0;
 
   const [isPayoffFullscreen, setIsPayoffFullscreen] = useState(false);
@@ -1347,7 +1348,7 @@ export default function PositionsStrategyMonitor({
                   </div>
                   <button
                     type="button"
-                    onClick={() => onTargetDaysChange?.(initialDays ?? 4.0)}
+                    onClick={() => onTargetDaysChange?.(maxDays)}
                     className="text-[11px] text-sky-400 hover:text-sky-300 underline font-medium cursor-pointer ml-1"
                   >
                     Reset
