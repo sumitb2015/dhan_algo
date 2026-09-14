@@ -282,11 +282,27 @@ strike/IV special-case (`if (leg.strike === 23500) ...`) in a component that rea
   numbers for those two strikes forever, even once real chain data is flowing.
   (Fixed 2026-09 in `Baskets.tsx`'s `autoPremium`/`effectivePremium`/`applyTemplate`/`monitorLegs`.)
 - `app/options-monitor/page.tsx` still initializes `spot`, `prevClose`, `futurePrice`,
-  `futureBasis`, `futureExpiry`, `targetSpot`, `ivPct`, and the default `activeLegs` array to these
-  exact reference values as `useState` defaults. That's lower-risk than a fallback branch that can
-  be *re-entered* after live data loads (these are simply overwritten once the chain/WS fetch
-  resolves), but it's the same anti-pattern and worth cleaning up if you're touching that state
-  block again — don't copy this pattern into a new page.
+  `futureBasis`, `futureExpiry`, `targetSpot`, and `ivPct` to these exact reference values as
+  `useState` defaults. That's lower-risk than a fallback branch that can be *re-entered* after
+  live data loads (these are simply overwritten once the chain/WS fetch resolves), but it's the
+  same anti-pattern and worth cleaning up if you're touching that state block again — don't copy
+  this pattern into a new page.
+- **The default `activeLegs` array was the one instance of this that was load-bearing, not just
+  cosmetic** (fixed 2026-09): it seeded the literal reference strangle (`23500 CE @ 61.20` /
+  `23300 PE @ 55.65`) as the page's starting position. A separate effect exists purely to replace
+  that with a real ATM±2-strike strangle built from the live chain (the exact same live
+  WS-tick → chain `last_price` → chain IV → Black-76 Greeks lookup that `handleUpdateLegStrike`
+  already uses for any manual strike change) — but it's guarded by
+  `if (activeLegs.length > 0) return`, so with a non-empty seed it silently no-ops on every fresh
+  load. The page would show the frozen demo position (and its frozen premiums going into the
+  payoff curve, Greeks, and margin estimate) indefinitely, looking perfectly plausible, until a
+  user manually touched a leg's strike and the live lookup ran for the first time — which is also
+  why "the math is right, I can prove it by changing the strike" and "the position on load is
+  hardcoded" were both true at once and looked contradictory. The fix was `useState<OptionLegModel[]>([])`
+  so the guard's "no legs yet" branch is genuinely reachable. If a future page follows this same
+  "seed a demo position, then an effect replaces it once real data arrives" shape, initialize the
+  seeded state to empty/null and let the effect's own now-legitimately-reachable branch build the
+  first real value — never pre-fill it with the reference fixture's answer.
 - **When copying a working payoff feature from one page to another** (as `Baskets.tsx` did from
   `PositionsStrategyMonitor.tsx`), do a literal `grep` for the reference numbers
   (`23500`, `23300`, `23398`, `23463`, `65.50`, `61.20`, `55.65`, `13.13`, `0.095`, `0.110`) in the

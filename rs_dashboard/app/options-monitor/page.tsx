@@ -59,42 +59,17 @@ export default function OptionsMonitorPage() {
   const [targetSpot, setTargetSpot] = useState<number>(23398.10);
   const [targetDays, setTargetDays] = useState<number>(4.0);
 
-  // Active Option Positions / Strategy Legs (Sensibull default Short Strangle: 23500 CE @ 61.20 / 23300 PE @ 55.65)
+  // Active Option Positions / Strategy Legs. Starts empty — the "initialize realistic strategy
+  // preset" effect below builds a real ATM±2-strike short strangle from the live chain once it
+  // arrives (same live WS-tick -> chain last_price -> chain IV -> Black-76 Greeks lookup that
+  // handleUpdateLegStrike already uses for any strike change). A non-empty initial array here
+  // makes that effect's `activeLegs.length > 0` guard bail out immediately on every fresh load,
+  // permanently freezing the page on whatever demo position was seeded here — this happened for
+  // real (2026-09): the page always showed a static 23500 CE @ 61.20 / 23300 PE @ 55.65 strangle
+  // from a reference screenshot, correct math notwithstanding, until a leg's strike was manually
+  // touched and the live lookup ran for the first time.
   const [strategyName, setStrategyName] = useState<string>('Short Strangle');
-  const [activeLegs, setActiveLegs] = useState<OptionLegModel[]>([
-    {
-      id: 'leg_ce_sensibull_ref',
-      type: 'CE',
-      side: 'SELL',
-      strike: 23500,
-      lots: 1,
-      qty: 65,
-      entryPrice: 61.20,
-      ltp: 61.20,
-      delta: -0.19,
-      gamma: -0.0016,
-      theta: 730,
-      vega: -578,
-      iv: 0.095,
-      expiry: '2026-09-15',
-    },
-    {
-      id: 'leg_pe_sensibull_ref',
-      type: 'PE',
-      side: 'SELL',
-      strike: 23300,
-      lots: 1,
-      qty: 65,
-      entryPrice: 55.65,
-      ltp: 55.65,
-      delta: 0.02,
-      gamma: -0.0013,
-      theta: 737,
-      vega: -579,
-      iv: 0.110,
-      expiry: '2026-09-15',
-    },
-  ]);
+  const [activeLegs, setActiveLegs] = useState<OptionLegModel[]>([]);
   const hasInitializedPresetRef = useRef<boolean>(false);
 
   // Position Guards (Target, Stop Loss, Trailing SL) per leg
