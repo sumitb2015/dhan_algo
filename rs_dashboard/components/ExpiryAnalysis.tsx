@@ -268,15 +268,22 @@ export default function ExpiryAnalysis() {
   const [probability, setProbability] = useState(95);
   const [maWindow, setMaWindow] = useState(20);
   const [showMA, setShowMA]     = useState(true);
+  const [weeksToExpiry, setWeeksToExpiry] = useState<1 | 2 | 3>(1);
 
   const selectedOption = SYMBOL_OPTIONS.find((o) => o.value === symbol) ?? SYMBOL_OPTIONS[0];
+
+  const cycleNoun    = weeksToExpiry === 1 ? 'week' : `${weeksToExpiry}-week`;
+  const cycleNounCap = weeksToExpiry === 1 ? 'Weekly' : `${weeksToExpiry}-Week`;
+  const periodsWord  = weeksToExpiry === 1 ? 'weeks' : 'periods';
+  const periodPlural = (n: number) =>
+    weeksToExpiry === 1 ? `week${n !== 1 ? 's' : ''}` : `${weeksToExpiry}-week ${n !== 1 ? 'periods' : 'period'}`;
 
   useEffect(() => {
     let cancelled = false;
     setLoading(true);
     setError(null);
     cachedFetch<Record<string, any>>(
-      `/api/expiry-analysis?symbol=${encodeURIComponent(symbol)}&startDate=${startDate}&endDate=${endDate}`,
+      `/api/expiry-analysis?symbol=${encodeURIComponent(symbol)}&startDate=${startDate}&endDate=${endDate}&weeksToExpiry=${weeksToExpiry}`,
       5 * 60_000,
     )
       .then((data) => {
@@ -296,7 +303,7 @@ export default function ExpiryAnalysis() {
         if (!cancelled) setLoading(false);
       });
     return () => { cancelled = true; };
-  }, [symbol, startDate, endDate]);
+  }, [symbol, startDate, endDate, weeksToExpiry]);
 
   const { lower, upper, withinData, upsideData, downsideData, outliers, currentData } = useMemo(() => {
     const { lower, upper } = computeBoundaries(
@@ -671,7 +678,7 @@ export default function ExpiryAnalysis() {
         <div className="flex-shrink-0">
           <h1 className="text-sm font-bold text-white leading-tight">Expiry Analysis</h1>
           <p className="text-xs text-zinc-500 leading-tight">
-            {selectedOption.label} · Weekly Return Distribution
+            {selectedOption.label} · {cycleNounCap} Return Distribution
           </p>
         </div>
         <div className="flex-1 min-w-0">
@@ -704,6 +711,24 @@ export default function ExpiryAnalysis() {
                   </optgroup>
                 ))}
               </select>
+            </div>
+
+            <div className="flex items-center gap-2">
+              <label className="text-xs text-zinc-400 whitespace-nowrap">Expiry Cycle</label>
+              <div className="flex items-center gap-1 bg-zinc-850 p-0.5 rounded border border-zinc-700/80">
+                {([1, 2, 3] as const).map((n) => (
+                  <button
+                    key={n}
+                    onClick={() => setWeeksToExpiry(n)}
+                    className={`px-2.5 py-0.5 text-xs font-bold rounded transition-all ${
+                      weeksToExpiry === n ? 'bg-emerald-600 text-oncolor shadow font-black' : 'text-zinc-400 hover:text-zinc-100'
+                    }`}
+                    title={`${n} week${n > 1 ? 's' : ''} to expiry`}
+                  >
+                    {n}W
+                  </button>
+                ))}
+              </div>
             </div>
 
             <div className="flex items-center gap-2">
@@ -745,7 +770,7 @@ export default function ExpiryAnalysis() {
             </div>
           </div>
           <p className="text-xs text-zinc-500 mt-2">
-            Current Return Column: <span className="text-zinc-400">Weekly Return %</span>
+            Current Return Column: <span className="text-zinc-400">{cycleNounCap} Return %</span>
             &nbsp;| Total Records: {totalExpiries} expiries.
             Based on the selected {probability}% coverage, the lower boundary is the{' '}
             {(((1 - probability / 100) / 2) * 100).toFixed(1)}th percentile and the upper boundary
@@ -804,7 +829,7 @@ export default function ExpiryAnalysis() {
 
           {loading ? (
             <div className="h-[420px] flex items-center justify-center text-zinc-500 text-sm">
-              Loading weekly data…
+              Loading {cycleNoun} data…
             </div>
           ) : error ? (
             <div className="h-[420px] flex items-center justify-center text-red-400 text-sm">
@@ -970,7 +995,7 @@ export default function ExpiryAnalysis() {
                 </InfoButton>
               </div>
               <p className="text-xs text-zinc-500 mt-0.5">
-                All weekly expiries that fell outside the specified boundaries, sorted by absolute return size.
+                All {cycleNoun} expiries that fell outside the specified boundaries, sorted by absolute return size.
               </p>
             </div>
             <div className="overflow-x-auto">
@@ -984,7 +1009,7 @@ export default function ExpiryAnalysis() {
                       End Date / Expiry (Thu/Tue)
                     </th>
                     <th className="text-xs font-bold text-white bg-zinc-800 px-4 py-2.5 text-right">
-                      Weekly Return %
+                      {cycleNounCap} Return %
                     </th>
                     <th className="text-xs font-bold text-white bg-zinc-800 px-4 py-2.5 text-left">
                       Status
@@ -1032,9 +1057,9 @@ export default function ExpiryAnalysis() {
           <div className="bg-zinc-900 border border-zinc-800 rounded-xl p-4">
             <div className="flex items-center gap-2 mb-1">
               <h2 className="text-sm font-bold text-white">
-                {selectedOption.label} Weekly Expiry Returns Analysis (OC)
+                {selectedOption.label} {cycleNounCap} Expiry Returns Analysis (OC)
               </h2>
-              <InfoButton title="Weekly Returns Analysis (OC)">
+              <InfoButton title={`${cycleNounCap} Returns Analysis (OC)`}>
                 <p><strong className="text-white">OC = Open to Close.</strong> Each weekly return is measured from the opening price on the window-open day (Friday pre-Sep 2025, Wednesday after) to the closing price on the expiry day (Thursday / Tuesday).</p>
                 <p><strong className="text-white">Sharpe Ratio</strong> = avg return ÷ std dev. Higher means better risk-adjusted performance. Assumes risk-free rate = 0.</p>
                 <p><strong className="text-white">Sortino Ratio</strong> = avg return ÷ downside deviation (only negative weeks). Penalises losses more heavily than Sharpe — preferred for options sellers.</p>
@@ -1046,14 +1071,14 @@ export default function ExpiryAnalysis() {
             {/* KPI grid */}
             <div className="grid grid-cols-3 gap-3 mb-4">
               {[
-                { label: 'Average Weekly Return', value: `${sign(weeklyAnalysis.avgReturn)}${weeklyAnalysis.avgReturn.toFixed(2)}%`, color: weeklyAnalysis.avgReturn >= 0 ? 'text-emerald-400' : 'text-red-400' },
-                { label: 'Weekly Return Std',     value: `${weeklyAnalysis.std.toFixed(2)}%`,       color: 'text-amber-400' },
+                { label: `Average ${cycleNounCap} Return`, value: `${sign(weeklyAnalysis.avgReturn)}${weeklyAnalysis.avgReturn.toFixed(2)}%`, color: weeklyAnalysis.avgReturn >= 0 ? 'text-emerald-400' : 'text-red-400' },
+                { label: `${cycleNounCap} Return Std`,     value: `${weeklyAnalysis.std.toFixed(2)}%`,       color: 'text-amber-400' },
                 { label: 'Sharpe Ratio',          value: weeklyAnalysis.sharpe.toFixed(2),           color: 'text-zinc-200' },
-                { label: 'Max Weekly Gain',       value: `+${weeklyAnalysis.maxGain.toFixed(2)}%`,  color: 'text-emerald-400' },
-                { label: `Positive Weeklys`,      value: `${weeklyAnalysis.positiveCount} (${((weeklyAnalysis.positiveCount/weeklyAnalysis.total)*100).toFixed(1)}%)`, color: 'text-emerald-400' },
+                { label: `Max ${cycleNounCap} Gain`,       value: `+${weeklyAnalysis.maxGain.toFixed(2)}%`,  color: 'text-emerald-400' },
+                { label: `Positive ${cycleNounCap}s`,      value: `${weeklyAnalysis.positiveCount} (${((weeklyAnalysis.positiveCount/weeklyAnalysis.total)*100).toFixed(1)}%)`, color: 'text-emerald-400' },
                 { label: 'Sortino Ratio',         value: weeklyAnalysis.sortino.toFixed(2),          color: 'text-zinc-200' },
-                { label: 'Max Weekly Loss',       value: `${weeklyAnalysis.maxLoss.toFixed(2)}%`,   color: 'text-red-400' },
-                { label: `Negative Weeklys`,      value: `${weeklyAnalysis.negativeCount} (${((weeklyAnalysis.negativeCount/weeklyAnalysis.total)*100).toFixed(1)}%)`, color: 'text-red-400' },
+                { label: `Max ${cycleNounCap} Loss`,       value: `${weeklyAnalysis.maxLoss.toFixed(2)}%`,   color: 'text-red-400' },
+                { label: `Negative ${cycleNounCap}s`,      value: `${weeklyAnalysis.negativeCount} (${((weeklyAnalysis.negativeCount/weeklyAnalysis.total)*100).toFixed(1)}%)`, color: 'text-red-400' },
                 { label: 'Profit Factor',         value: weeklyAnalysis.profitFactor === Infinity ? '∞' : weeklyAnalysis.profitFactor.toFixed(2), color: 'text-zinc-200' },
               ].map((k) => (
                 <div key={k.label} className="bg-zinc-800 border border-zinc-700 rounded-lg px-3 py-2">
@@ -1076,7 +1101,7 @@ export default function ExpiryAnalysis() {
               </label>
               {showMA && (
                 <div className="flex items-center gap-2">
-                  <span className="text-xs text-zinc-400 whitespace-nowrap">MA window (weekly periods)</span>
+                  <span className="text-xs text-zinc-400 whitespace-nowrap">MA window ({weeksToExpiry === 1 ? 'weekly' : cycleNoun} periods)</span>
                   <input
                     type="range"
                     min={5}
@@ -1093,8 +1118,8 @@ export default function ExpiryAnalysis() {
 
             {/* Subtitle */}
             <p className="text-xs text-zinc-500 mb-3">
-              {selectedOption.label} Weekly Returns (Fri+Thu before Sep 3 2025, Wed+Tue from Sep 3 2025) —{' '}
-              {weeklyAnalysis.total} Weeks Analyzed{showMA ? ` — ${maWindow}-week MA` : ''}
+              {selectedOption.label} {cycleNounCap} Returns (Fri+Thu before Sep 3 2025, Wed+Tue from Sep 3 2025) —{' '}
+              {weeklyAnalysis.total} {cycleNounCap}s Analyzed{showMA ? ` — ${maWindow}-period MA` : ''}
             </p>
 
             {/* Composite chart: bars + bubble dots + MA line */}
@@ -1157,7 +1182,7 @@ export default function ExpiryAnalysis() {
                 />
                 <ReferenceLine y={0} stroke="#52525b" strokeWidth={1} />
                 {/* Bars */}
-                <Bar dataKey="returnPct" isAnimationActive={false} maxBarSize={6} name="Weekly Returns (Bars)">
+                <Bar dataKey="returnPct" isAnimationActive={false} maxBarSize={6} name={`${cycleNounCap} Returns (Bars)`}>
                   {weeklyAnalysis.chartData.map((entry, i) => (
                     <Cell
                       key={i}
@@ -1196,7 +1221,7 @@ export default function ExpiryAnalysis() {
                   isAnimationActive={false}
                   legendType="none"
                   activeDot={false}
-                  name="Weekly Returns (Bubbles)"
+                  name={`${cycleNounCap} Returns (Bubbles)`}
                 />
                 {/* MA line */}
                 {showMA && (
@@ -1207,7 +1232,7 @@ export default function ExpiryAnalysis() {
                     dot={false}
                     connectNulls
                     isAnimationActive={false}
-                    name={`${maWindow}-week MA`}
+                    name={`${maWindow}-period MA`}
                   />
                 )}
                 <Legend
@@ -1226,8 +1251,8 @@ export default function ExpiryAnalysis() {
           <div className="bg-zinc-900 border border-zinc-800 rounded-xl overflow-hidden">
             <div className="px-4 py-3 border-b border-zinc-800 flex items-center gap-2">
               <span className="text-white text-sm">✦</span>
-              <h2 className="text-sm font-bold text-white">Weekly Streak Analysis</h2>
-              <InfoButton title="Weekly Streak Analysis">
+              <h2 className="text-sm font-bold text-white">{cycleNounCap} Streak Analysis</h2>
+              <InfoButton title={`${cycleNounCap} Streak Analysis`}>
                 <p>A <strong className="text-white">streak</strong> is a run of consecutive weekly expiries all closing in the same direction — all positive or all negative.</p>
                 <p>The <strong className="text-white">Current Streak</strong> shows what&apos;s happening right now: how many weeks in a row the market has moved in the same direction and by how much in total.</p>
                 <p><strong className="text-white">Longest streaks</strong> show the maximum observed consecutive run. <strong className="text-white">Best / Worst return</strong> is the compounded price move during the strongest streak of each type — not the longest, just the most extreme.</p>
@@ -1252,7 +1277,7 @@ export default function ExpiryAnalysis() {
                   <div className={`text-2xl font-bold ${
                     streakAnalysis.currentStreak.type === 'Positive' ? 'text-emerald-300' : 'text-red-300'
                   }`}>
-                    {streakAnalysis.currentStreak.type} — {streakAnalysis.currentStreak.length} week{streakAnalysis.currentStreak.length !== 1 ? 's' : ''}
+                    {streakAnalysis.currentStreak.type} — {streakAnalysis.currentStreak.length} {periodPlural(streakAnalysis.currentStreak.length)}
                   </div>
                   <div className="text-xs text-zinc-400 mt-0.5">
                     {fmtDate(streakAnalysis.currentStreak.startDate)} → {fmtDate(streakAnalysis.currentStreak.endDate)}
@@ -1267,12 +1292,12 @@ export default function ExpiryAnalysis() {
             {/* Stats grid */}
             <div className="grid grid-cols-2 gap-3 p-4">
               {[
-                { label: 'Longest Positive Streak', value: `${streakAnalysis.longestPos} weeks`,              color: 'text-emerald-400' },
+                { label: 'Longest Positive Streak', value: `${streakAnalysis.longestPos} ${periodPlural(streakAnalysis.longestPos)}`,              color: 'text-emerald-400' },
                 { label: 'Best Positive Streak Return',  value: `+${streakAnalysis.bestPosReturn.toFixed(2)}%`,  color: 'text-emerald-400' },
-                { label: 'Longest Negative Streak', value: `${streakAnalysis.longestNeg} weeks`,              color: 'text-red-400' },
+                { label: 'Longest Negative Streak', value: `${streakAnalysis.longestNeg} ${periodPlural(streakAnalysis.longestNeg)}`,              color: 'text-red-400' },
                 { label: 'Worst Negative Streak Return', value: `${streakAnalysis.worstNegReturn.toFixed(2)}%`, color: 'text-red-400' },
-                { label: 'Avg Positive Streak',     value: `${streakAnalysis.avgPosLength.toFixed(1)} weeks`, color: 'text-emerald-300' },
-                { label: 'Avg Negative Streak',     value: `${streakAnalysis.avgNegLength.toFixed(1)} weeks`, color: 'text-red-300' },
+                { label: 'Avg Positive Streak',     value: `${streakAnalysis.avgPosLength.toFixed(1)} ${periodsWord}`, color: 'text-emerald-300' },
+                { label: 'Avg Negative Streak',     value: `${streakAnalysis.avgNegLength.toFixed(1)} ${periodsWord}`, color: 'text-red-300' },
               ].map((s) => (
                 <div key={s.label} className="bg-zinc-800 border border-zinc-700 rounded-lg px-3 py-2">
                   <div className="text-xs text-zinc-500 mb-0.5">{s.label}</div>
@@ -1285,7 +1310,7 @@ export default function ExpiryAnalysis() {
             <div className="px-4 pb-3 text-xs text-zinc-500 flex items-center gap-1.5">
               <span>📋</span>
               <span>
-                Analysis Details: Analyzed {weeks.length} total weeks. Excluded {streakAnalysis.neutralCount} neutral weeks (0% returns) from streak calculation.
+                Analysis Details: Analyzed {weeks.length} total {periodsWord}. Excluded {streakAnalysis.neutralCount} neutral {periodsWord} (0% returns) from streak calculation.
               </span>
             </div>
           </div>
@@ -1297,11 +1322,11 @@ export default function ExpiryAnalysis() {
         {!loading && streakAnalysis && (streakAnalysis.posScatter.length > 0 || streakAnalysis.negScatter.length > 0) && (
           <div className="bg-zinc-900 border border-zinc-800 rounded-xl p-4">
             <div className="flex items-center gap-2 mb-1">
-              <h2 className="text-sm font-bold text-white">Weekly Streak Lengths Over Time (with Total Returns)</h2>
+              <h2 className="text-sm font-bold text-white">{cycleNounCap} Streak Lengths Over Time (with Total Returns)</h2>
               <InfoButton title="Streak Scatter Plot">
                 <p>Each dot represents <strong className="text-white">one historical streak</strong>.</p>
                 <p><strong className="text-white">X-axis</strong> = the date the streak ended (time from left to right).</p>
-                <p><strong className="text-white">Y-axis</strong> = how many consecutive weeks the streak lasted.</p>
+                <p><strong className="text-white">Y-axis</strong> = how many consecutive {periodsWord} the streak lasted.</p>
                 <p><strong className="text-white">Dot size</strong> scales with the total compounded return during the streak — a small dot high up means a long but moderate streak; a large dot low means a short but violent move.</p>
                 <p>Clusters of large dots in time indicate periods of elevated market volatility.</p>
               </InfoButton>
@@ -1339,7 +1364,7 @@ export default function ExpiryAnalysis() {
                   axisLine={false}
                   tickLine={false}
                   width={36}
-                  label={{ value: 'Streak Length (weeks)', angle: -90, position: 'insideLeft', offset: 8, fontSize: 10, fill: '#71717a' }}
+                  label={{ value: `Streak Length (${periodsWord})`, angle: -90, position: 'insideLeft', offset: 8, fontSize: 10, fill: '#71717a' }}
                 />
                 <Tooltip
                   content={({ active, payload }) => {
@@ -1348,12 +1373,12 @@ export default function ExpiryAnalysis() {
                     const isPos = d.type === 'Positive';
                     return (
                       <div className="bg-zinc-900 border border-zinc-700 rounded-lg px-3 py-2 text-xs shadow-xl">
-                        <div className={`font-bold mb-1 ${isPos ? 'text-emerald-400' : 'text-red-400'}`}>{d.type} Streak · {d.length} week{d.length !== 1 ? 's' : ''}</div>
+                        <div className={`font-bold mb-1 ${isPos ? 'text-emerald-400' : 'text-red-400'}`}>{d.type} Streak · {d.length} {periodPlural(d.length)}</div>
                         <div className="text-zinc-400">{fmtDate(d.startDate)} → {fmtDate(d.endDate)}</div>
                         <div className={`font-mono font-bold mt-0.5 ${isPos ? 'text-emerald-300' : 'text-red-300'}`}>
                           Total: {sign(d.totalReturnPct)}{d.totalReturnPct.toFixed(2)}%
                         </div>
-                        <div className="text-zinc-500 mt-0.5">Avg weekly: {sign(d.avgWeeklyReturnPct)}{d.avgWeeklyReturnPct.toFixed(2)}%</div>
+                        <div className="text-zinc-500 mt-0.5">Avg {cycleNoun}: {sign(d.avgWeeklyReturnPct)}{d.avgWeeklyReturnPct.toFixed(2)}%</div>
                       </div>
                     );
                   }}
@@ -1398,7 +1423,7 @@ export default function ExpiryAnalysis() {
                 <InfoButton title="Streak Details Table">
                   <p>All streaks listed in <strong className="text-white">chronological order</strong>. Each row is one unbroken run of same-direction weekly expiries.</p>
                   <p><strong className="text-white">Total Return %</strong> = compounded price move from the streak&apos;s opening price to its closing price — this differs from simply summing individual weekly returns because compounding applies.</p>
-                  <p><strong className="text-white">Avg Weekly Return %</strong> = arithmetic mean of each individual weekly return within the streak.</p>
+                  <p><strong className="text-white">Avg {cycleNounCap} Return %</strong> = arithmetic mean of each individual {cycleNoun} return within the streak.</p>
                   <p>The glowing dot in the last column confirms positive (green) or negative (red) at a glance.</p>
                 </InfoButton>
               </div>
@@ -1410,13 +1435,13 @@ export default function ExpiryAnalysis() {
                   <thead className="sticky top-0 z-10">
                     <tr>
                       <th className="text-xs font-bold text-white bg-zinc-800 px-3 py-2.5 text-left">Streak Type</th>
-                      <th className="text-xs font-bold text-white bg-zinc-800 px-3 py-2.5 text-right">Length (weeks)</th>
+                      <th className="text-xs font-bold text-white bg-zinc-800 px-3 py-2.5 text-right">Length ({periodsWord})</th>
                       <th className="text-xs font-bold text-white bg-zinc-800 px-4 py-2.5 text-left">Start Date</th>
                       <th className="text-xs font-bold text-white bg-zinc-800 px-4 py-2.5 text-left">End Date</th>
                       <th className="text-xs font-bold text-white bg-zinc-800 px-4 py-2.5 text-right">Start Price</th>
                       <th className="text-xs font-bold text-white bg-zinc-800 px-4 py-2.5 text-right">End Price</th>
                       <th className="text-xs font-bold text-white bg-zinc-800 px-4 py-2.5 text-right">Total Return %</th>
-                      <th className="text-xs font-bold text-white bg-zinc-800 px-4 py-2.5 text-right">Avg Weekly Return %</th>
+                      <th className="text-xs font-bold text-white bg-zinc-800 px-4 py-2.5 text-right">Avg {cycleNounCap} Return %</th>
                       <th className="text-xs font-bold text-white bg-zinc-800 px-3 py-2.5 text-center">Type</th>
                     </tr>
                   </thead>
@@ -1602,7 +1627,7 @@ export default function ExpiryAnalysis() {
               </InfoButton>
             </div>
             <p className="text-xs text-zinc-500 mb-4">
-              Count of weekly expiries per 0.25% return bin · green = positive expiry · red = negative expiry
+              Count of {cycleNoun} expiries per 0.25% return bin · green = positive expiry · red = negative expiry
             </p>
             <ResponsiveContainer width="100%" height={300}>
               <BarChart data={histogramData} margin={{ top: 8, right: 16, bottom: 32, left: 8 }} barCategoryGap="2%">
@@ -1662,16 +1687,16 @@ export default function ExpiryAnalysis() {
           <div className="bg-zinc-900 border border-zinc-800 rounded-xl overflow-hidden">
             <div className="px-4 py-3 border-b border-zinc-800">
               <div className="flex items-center gap-2">
-                <h2 className="text-sm font-bold text-white">Weekly Returns Distribution</h2>
-                <InfoButton title="Weekly Returns Distribution">
+                <h2 className="text-sm font-bold text-white">{cycleNounCap} Returns Distribution</h2>
+                <InfoButton title={`${cycleNounCap} Returns Distribution`}>
                   <p>A probability table with <strong className="text-white">fixed-width return buckets</strong> covering the full range from &lt;−5% to &gt;+5%. Similar to an options seller&apos;s probability reference card.</p>
                   <p><strong className="text-white">Percentile Range</strong> = where this bucket sits in the ranked empirical distribution, measured from the relevant extreme end (top for positive, bottom for negative).</p>
-                  <p><strong className="text-white">Probability</strong> = empirical chance that the market does NOT breach the bucket&apos;s boundary — e.g., a 98% probability means only 2% of historical weeks had a return beyond that level.</p>
+                  <p><strong className="text-white">Probability</strong> = empirical chance that the market does NOT breach the bucket&apos;s boundary — e.g., a 98% probability means only 2% of historical {periodsWord} had a return beyond that level.</p>
                   <p><strong className="text-white">Price Range</strong> = the corresponding Nifty 50 price levels at those return boundaries, projected from the latest close.</p>
                 </InfoButton>
               </div>
               <p className="text-xs text-zinc-500 mt-0.5">
-                Analyzed {totalExpiries} weekly periods
+                Analyzed {totalExpiries} {weeksToExpiry === 1 ? 'weekly' : cycleNoun} periods
                 {dataStart ? ` from ${fmtDate(dataStart)}` : ''}
                 {dataEnd ? ` to ${fmtDate(dataEnd)}` : ''}
                 {' '}· Calculation Type: OC (Open to Close)
@@ -1760,16 +1785,16 @@ export default function ExpiryAnalysis() {
           <div className="bg-zinc-900 border border-zinc-800 rounded-xl overflow-hidden">
             <div className="px-4 py-3 border-b border-zinc-800">
               <div className="flex items-center gap-2">
-                <h2 className="text-sm font-bold text-white">Weekly Returns Data</h2>
-                <InfoButton title="Weekly Returns Data">
-                  <p>Raw data behind all the analysis above. Each row is one <strong className="text-white">weekly expiry period</strong>.</p>
+                <h2 className="text-sm font-bold text-white">{cycleNounCap} Returns Data</h2>
+                <InfoButton title={`${cycleNounCap} Returns Data`}>
+                  <p>Raw data behind all the analysis above. Each row is one <strong className="text-white">{cycleNoun} expiry period</strong>.</p>
                   <p><strong className="text-white">Start Price</strong> = opening price on the window-open day (Friday pre-Sep 2025 / Wednesday after).</p>
                   <p><strong className="text-white">End Price</strong> = closing price on the expiry day (Thursday / Tuesday).</p>
-                  <p><strong className="text-white">Weekly Return %</strong> = (End Price − Start Price) / Start Price × 100. This is an open-to-close return, not a close-to-close.</p>
+                  <p><strong className="text-white">{cycleNounCap} Return %</strong> = (End Price − Start Price) / Start Price × 100. This is an open-to-close return, not a close-to-close.</p>
                 </InfoButton>
               </div>
               <p className="text-xs text-zinc-500 mt-0.5">
-                {totalExpiries} weekly expiry periods · Fri/Wed open → Thu/Tue close
+                {totalExpiries} {weeksToExpiry === 1 ? 'weekly' : cycleNoun} expiry periods · Fri/Wed open → Thu/Tue close
               </p>
             </div>
             <div className="overflow-x-auto">
@@ -1782,7 +1807,7 @@ export default function ExpiryAnalysis() {
                       <th className="text-xs font-bold text-white bg-zinc-800 px-4 py-2.5 text-left">End Date</th>
                       <th className="text-xs font-bold text-white bg-zinc-800 px-4 py-2.5 text-right">Start Price</th>
                       <th className="text-xs font-bold text-white bg-zinc-800 px-4 py-2.5 text-right">End Price</th>
-                      <th className="text-xs font-bold text-white bg-zinc-800 px-4 py-2.5 text-right">Weekly Return %</th>
+                      <th className="text-xs font-bold text-white bg-zinc-800 px-4 py-2.5 text-right">{cycleNounCap} Return %</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -1837,7 +1862,7 @@ export default function ExpiryAnalysis() {
                   <p>Daily OHLCV data for every trading day in the selected date range.</p>
                   <p><strong className="text-white">High</strong> (green) = intraday peak. <strong className="text-white">Low</strong> (red) = intraday trough.</p>
                   <p><strong className="text-white">Daily Return %</strong> = (today&apos;s close − yesterday&apos;s close) / yesterday&apos;s close × 100. The first row always shows &quot;—&quot; because there is no prior day in the range.</p>
-                  <p>This is a close-to-close return, unlike the weekly OC returns above.</p>
+                  <p>This is a close-to-close return, unlike the {cycleNoun} OC returns above.</p>
                 </InfoButton>
               </div>
               <p className="text-xs text-zinc-500 mt-0.5">

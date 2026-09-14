@@ -41,7 +41,10 @@ export async function GET(req: NextRequest) {
   const symbol    = (searchParams.get('symbol') ?? 'NIFTY50').trim().toUpperCase();
   const startDate = searchParams.get('startDate') ?? '';
   const endDate   = searchParams.get('endDate')   ?? '';
-  const cacheKey  = `${symbol}|${startDate}|${endDate}`;
+  const weeksToExpiryRaw = Number(searchParams.get('weeksToExpiry') ?? '1');
+  const weeksToExpiry = ([1, 2, 3] as const).includes(weeksToExpiryRaw as 1 | 2 | 3)
+    ? (weeksToExpiryRaw as 1 | 2 | 3) : 1;
+  const cacheKey  = `${symbol}|${startDate}|${endDate}|${weeksToExpiry}`;
 
   const hit = cache.get(cacheKey);
   if (hit && Date.now() - hit.ts < CACHE_TTL) {
@@ -145,6 +148,48 @@ export async function GET(req: NextRequest) {
       }
     }
 
+    // ── Roll up to N-week-to-expiry buckets (sliding window over 1-week buckets) ──
+    const N = weeksToExpiry;
+
+    function rollUp(oneWeek: WeeklyBucket[]): WeeklyBucket[] {
+      if (N === 1) return oneWeek;
+      const out: WeeklyBucket[] = [];
+      for (let i = N - 1; i < oneWeek.length; i++) {
+        const start = oneWeek[i - N + 1];
+        const end = oneWeek[i];
+        if (start.startOpen <= 0) continue;
+        const raw = ((end.endClose - start.startOpen) / start.startOpen) * 100;
+        out.push({
+          startDate: start.startDate,
+          endDate: end.endDate,
+          startOpen: start.startOpen,
+          endClose: end.endClose,
+          returnPct: Math.round(raw * 100) / 100,
+        });
+      }
+      return out;
+    }
+
+    let nWeekCurrent: WeeklyBucket | null = null;
+    if (N === 1) {
+      nWeekCurrent = currentWeek;
+    } else if (currentWeek && weeks.length >= N - 1) {
+      const startBucket = weeks[weeks.length - N + 1];
+      if (startBucket.startOpen > 0) {
+        const raw = ((currentWeek.endClose - startBucket.startOpen) / startBucket.startOpen) * 100;
+        nWeekCurrent = {
+          startDate: startBucket.startDate,
+          endDate: currentWeek.endDate,
+          startOpen: startBucket.startOpen,
+          endClose: currentWeek.endClose,
+          returnPct: Math.round(raw * 100) / 100,
+        };
+      }
+    }
+
+    const outputWeeks = rollUp(weeks);
+    const outputCurrentWeek = nWeekCurrent;
+
     // ── Daily stats + rows ───────────────────────────────────────────────────
     let periodHigh = -Infinity;
     let periodLow  =  Infinity;
@@ -195,7 +240,7 @@ export async function GET(req: NextRequest) {
     const dataStart = rows.length > 0 ? rows[0].date : '';
     const dataEnd   = rows.length > 0 ? rows[rows.length - 1].date : '';
 
-    const payload = { weeks, currentWeek, dailyStats, dailyRows, dataStart, dataEnd };
+    const payload = { weeks: outputWeeks, currentWeek: outputCurrentWeek, weeksToExpiry, dailyStats, dailyRows, dataStart, dataEnd };
     cache.set(cacheKey, { data: payload, ts: Date.now() });
     return NextResponse.json(payload);
   } catch (err) {
