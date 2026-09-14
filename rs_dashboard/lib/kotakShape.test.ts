@@ -4,6 +4,7 @@ import { shapeKotakPosition, shapeKotakOrder, shapeKotakTrade, shapeKotakFunds }
 
 test('shapeKotakOrder maps Kotak Neo fields to the UI order shape with ordEntTm/ordDtTm/exCfmTm timestamps', () => {
   const rawWithOrdEntTm = {
+    nOrdNo: '240821000123456',
     trdSym: 'NIFTY28AUG24250CE',
     ordSt: 'REJECTED',
     trnsTp: 'S',
@@ -13,6 +14,7 @@ test('shapeKotakOrder maps Kotak Neo fields to the UI order shape with ordEntTm/
     ordEntTm: '21-Aug-2026 10:15:22',
   };
   assert.deepStrictEqual(shapeKotakOrder(rawWithOrdEntTm), {
+    orderId: '240821000123456',
     tradingSymbol: 'NIFTY28AUG24250CE',
     orderStatus: 'REJECTED',
     transactionType: 'SELL',
@@ -23,6 +25,7 @@ test('shapeKotakOrder maps Kotak Neo fields to the UI order shape with ordEntTm/
   });
 
   const rawWithOrdDtTm = {
+    nOrdNo: '240821000123457',
     trdSym: 'NIFTY28AUG24250CE',
     ordSt: 'COMPLETE',
     trnsTp: 'B',
@@ -32,6 +35,7 @@ test('shapeKotakOrder maps Kotak Neo fields to the UI order shape with ordEntTm/
     ordDtTm: '2026-08-21 10:16:00',
   };
   assert.deepStrictEqual(shapeKotakOrder(rawWithOrdDtTm), {
+    orderId: '240821000123457',
     tradingSymbol: 'NIFTY28AUG24250CE',
     orderStatus: 'COMPLETE',
     transactionType: 'BUY',

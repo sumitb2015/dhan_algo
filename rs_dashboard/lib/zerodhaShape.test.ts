@@ -58,6 +58,7 @@ test('closed intraday position: full pnl is realized, unrealized is 0 (no double
 
 test('shapeZerodhaOrder maps Kite fields to the UI order shape', () => {
   const raw = {
+    order_id: '250719000123456',
     tradingsymbol: 'NIFTY26JUL23900PE',
     status: 'COMPLETE',
     transaction_type: 'SELL',
@@ -67,6 +68,7 @@ test('shapeZerodhaOrder maps Kite fields to the UI order shape', () => {
     order_timestamp: '2026-07-19 15:30:00',
   };
   assert.deepStrictEqual(shapeZerodhaOrder(raw), {
+    orderId: '250719000123456',
     tradingSymbol: 'NIFTY26JUL23900PE',
     orderStatus: 'COMPLETE',
     transactionType: 'SELL',

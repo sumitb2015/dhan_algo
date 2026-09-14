@@ -7,6 +7,7 @@ import NavBar from '@/components/NavBar';
 import CyberBiasRadar from './CyberBiasRadar';
 import CyberOrderPad from './CyberOrderPad';
 import CyberPositionsPanel, { PositionItem, PositionGuard, ScalpLogItem } from './CyberPositionsPanel';
+import CyberOrderBook, { OrderBookRow } from './CyberOrderBook';
 import CyberStrategyIntelligence, { StrategyData } from './CyberStrategyIntelligence';
 import { matchTradesFifo, type ExitedPositionItem } from '@/lib/fifoPositions';
 import { saveTerminalOrder } from '@/lib/terminalTradeStore';
@@ -56,6 +57,7 @@ export default function CyberScalperTerminal() {
   const positionsRef = useRef<PositionItem[]>([]);
   useEffect(() => { positionsRef.current = positions; }, [positions]);
   const [exitedPositions, setExitedPositions] = useState<ExitedPositionItem[]>([]);
+  const [orders, setOrders] = useState<OrderBookRow[]>([]);
   // Available margin for the selected broker — every broker's `funds` route
   // normalizes to `availabelBalance` (sic, matching Dhan's own field spelling).
   const [fundsData, setFundsData] = useState<Record<string, any> | null>(null);
@@ -309,12 +311,27 @@ export default function CyberScalperTerminal() {
     }
   }, [broker]);
 
-  // Clear stale positions/funds immediately on broker switch so a Dhan position
-  // or margin figure is never displayed or acted on as if it belonged to
-  // Zerodha/Kotak (or vice versa).
+  // Poll the broker's order book — feeds the Order Book panel's Edit/Cancel
+  // controls for the resting LIMIT orders the pad's offset ladder places.
+  const fetchOrders = useCallback(async () => {
+    const requestedBroker = broker;
+    try {
+      const res = await fetch(scalperRoute(broker, 'orders'));
+      const json = await res.json();
+      if (requestedBroker !== brokerRef.current) return;
+      if (json.success && Array.isArray(json.data)) setOrders(json.data);
+    } catch {
+      // quiet fallback — same as fetchPositions/fetchFunds
+    }
+  }, [broker]);
+
+  // Clear stale positions/funds/orders immediately on broker switch so a Dhan
+  // position or margin figure is never displayed or acted on as if it
+  // belonged to Zerodha/Kotak (or vice versa).
   useEffect(() => {
     setPositions([]);
     setFundsData(null);
+    setOrders([]);
   }, [broker]);
 
   useEffect(() => {
@@ -357,14 +374,16 @@ export default function CyberScalperTerminal() {
   useEffect(() => {
     fetchFeed();
     fetchPositions();
+    fetchOrders();
 
     const timer = setInterval(() => {
       fetchFeed();
       fetchPositions();
+      fetchOrders();
     }, 2500);
 
     return () => clearInterval(timer);
-  }, [fetchFeed, fetchPositions]);
+  }, [fetchFeed, fetchPositions, fetchOrders]);
 
   // Execute Trade action (Instant via /api/scalper/fast-order for Dhan, broker-specific
   // trading-symbol order routes for everyone else)
@@ -584,6 +603,61 @@ export default function CyberScalperTerminal() {
     } catch (err: any) {
       cyberAudio.error();
       addLog('ERROR', `Close error: ${err.message || err}`);
+    } finally {
+      setIsExecuting(false);
+    }
+  };
+
+  // Cancel a resting order (e.g. one placed via the Order Pad's Buy Below /
+  // Short Above limit ladder) from the Order Book panel.
+  const handleCancelOrder = async (orderId: string) => {
+    setIsExecuting(true);
+    addLog('EXIT', `Cancelling order ${orderId}`);
+    try {
+      const res = await fetch(scalperRoute(broker, 'orders'), {
+        method: 'DELETE',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ orderId }),
+      });
+      const json = await res.json();
+      if (json.success) {
+        cyberAudio.exit();
+        addLog('EXIT', `Order ${orderId} cancelled`);
+        await fetchOrders();
+      } else {
+        cyberAudio.error();
+        addLog('ERROR', `Cancel failed: ${json.error || 'Unknown broker error'}`);
+      }
+    } catch (err: any) {
+      cyberAudio.error();
+      addLog('ERROR', `Cancel error: ${err.message || err}`);
+    } finally {
+      setIsExecuting(false);
+    }
+  };
+
+  // Modify a resting order's price/quantity from the Order Book panel.
+  const handleModifyOrder = async (orderId: string, price: number, quantity: number) => {
+    setIsExecuting(true);
+    addLog('BUY', `Modifying order ${orderId}`, `New price ₹${price.toFixed(2)} · Qty ${quantity}`);
+    try {
+      const res = await fetch(scalperRoute(broker, 'orders'), {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ orderId, price, quantity, orderType: 'LIMIT' }),
+      });
+      const json = await res.json();
+      if (json.success) {
+        cyberAudio.click();
+        addLog('BUY', `Order ${orderId} modified`, `₹${price.toFixed(2)} · Qty ${quantity}`);
+        await fetchOrders();
+      } else {
+        cyberAudio.error();
+        addLog('ERROR', `Modify failed: ${json.error || 'Unknown broker error'}`);
+      }
+    } catch (err: any) {
+      cyberAudio.error();
+      addLog('ERROR', `Modify error: ${err.message || err}`);
     } finally {
       setIsExecuting(false);
     }
@@ -1051,7 +1125,15 @@ export default function CyberScalperTerminal() {
           suggestedSlPts={padSlPts ?? (feedData?.strategy?.sl_pts ? Math.round(feedData.strategy.sl_pts) : null)}
         />
 
-        {/* 4. POSITIONS TABLE WITH TARGET, SL, TRAILING & LIVE TELEMETRY LOG */}
+        {/* 4. RESTING LIMIT ORDERS — edit or cancel Buy Below / Short Above orders */}
+        <CyberOrderBook
+          orders={orders}
+          isExecuting={isExecuting}
+          onCancelOrder={handleCancelOrder}
+          onModifyOrder={handleModifyOrder}
+        />
+
+        {/* 5. POSITIONS TABLE WITH TARGET, SL, TRAILING & LIVE TELEMETRY LOG */}
         <CyberPositionsPanel
           symbol={symbol}
           positions={positions}

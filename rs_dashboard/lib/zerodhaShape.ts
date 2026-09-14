@@ -23,6 +23,7 @@ export interface ScalperPosition {
 }
 
 export interface ScalperOrder {
+  orderId: string;
   tradingSymbol: string;
   orderStatus: string;
   transactionType: string;
@@ -80,6 +81,7 @@ export function shapeZerodhaPosition(p: Record<string, any>): ScalperPosition {
 
 export function shapeZerodhaOrder(o: Record<string, any>): ScalperOrder {
   return {
+    orderId: String(o.order_id ?? ''),
     tradingSymbol: String(o.tradingsymbol ?? ''),
     orderStatus: String(o.status ?? ''),
     transactionType: String(o.transaction_type ?? ''),

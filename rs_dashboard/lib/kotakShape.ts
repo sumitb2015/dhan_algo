@@ -95,6 +95,7 @@ function txnType(raw: any): string {
 export function shapeKotakOrder(o: Record<string, any>): ScalperOrder {
   const priceType = String(o.prcTp ?? '').toUpperCase();
   return {
+    orderId: String(o.nOrdNo ?? o.orderId ?? ''),
     tradingSymbol: String(o.trdSym ?? o.sym ?? ''),
     orderStatus: String(o.ordSt ?? o.st ?? '').toUpperCase(),
     transactionType: txnType(o.trnsTp),
