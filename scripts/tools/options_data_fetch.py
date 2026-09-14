@@ -200,7 +200,9 @@ def main():
             fut_sec = helper.find_future(under, exchange=fut_exch, instrument=fut_inst)
             if fut_sec:
                 fut_id = int(fut_sec['SECURITY_ID'])
-                future_symbol = str(fut_sec.get('TRADING_SYMBOL', ''))
+                # master_list.csv has no TRADING_SYMBOL column — find_future() returns the raw
+                # row dict, so this always fell back to '' and future_symbol never populated.
+                future_symbol = str(fut_sec.get('SYMBOL_NAME', ''))
                 future_expiry = str(fut_sec.get('SM_EXPIRY_DATE', ''))
                 fut_quote = helper.get_ltp(fut_id, exchange=fut_seg, instrument=fut_inst)
                 if fut_quote and fut_quote > 0:
