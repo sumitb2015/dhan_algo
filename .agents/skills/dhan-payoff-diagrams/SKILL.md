@@ -210,3 +210,4 @@ Playwright `fullPage: true` captures cause Recharts `ResponsiveContainer` to col
 - **Hardcoding 252 trading days**: Annualization for options in Indian exchanges uses 365 calendar days.
 - **Scaling by lot size per leg**: Double-counts lots in mixed-lot books. Scale once at the aggregate book level.
 - **Inferring unlimited risk from curve tails**: Always inspect net signed call/put quantities.
+
