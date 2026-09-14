@@ -142,7 +142,7 @@ export default function BasketPayoffChart({ points, breakevens, spot, rightWing 
       ref={boxRef}
       className={
         full
-          ? 'fixed inset-0 z-50 overflow-auto bg-zinc-950 p-4 md:p-6 flex flex-col'
+          ? 'fixed inset-0 z-50 overflow-auto bg-black p-4 md:p-6 flex flex-col'
           : 'w-full flex flex-col'
       }
     >
@@ -196,13 +196,13 @@ export default function BasketPayoffChart({ points, breakevens, spot, rightWing 
           {model.yTicks.map(t => (
             <g key={`y${t}`}>
               <line x1={PAD.left} x2={W - PAD.right} y1={sy(t)} y2={sy(t)} stroke={chrome.gridline} strokeWidth={1} />
-              <text x={PAD.left - 8} y={sy(t) + 3.5} textAnchor="end" fontSize={11} fill={chrome.textMuted} className="font-mono">
+              <text x={PAD.left - 8} y={sy(t) + 3.5} textAnchor="end" fontSize={11} fontWeight={600} fill={chrome.textSecondary} className="font-mono">
                 {Math.abs(t) >= 1000 ? `${(t / 1000).toFixed(t % 1000 === 0 ? 0 : 1)}k` : t.toFixed(0)}
               </text>
             </g>
           ))}
           {model.xTicks.map(t => (
-            <text key={`x${t}`} x={sx(t)} y={H_ - PAD.bottom + 18} textAnchor="middle" fontSize={11} fill={chrome.textMuted} className="font-mono">
+            <text key={`x${t}`} x={sx(t)} y={H_ - PAD.bottom + 18} textAnchor="middle" fontSize={11} fontWeight={600} fill={chrome.textSecondary} className="font-mono">
               {t.toLocaleString('en-IN')}
             </text>
           ))}

@@ -158,8 +158,8 @@
 
   /* Chart chrome */
   --chart-grid: #e2e8f0;
-  --chart-axis: #cbd5e1;
-  --chart-tick: #475569;
+  --chart-axis: #64748b;
+  --chart-tick: #0f172a;
   --chart-tooltip-bg: #ffffff;
   --chart-tooltip-border: #cbd5e1;
   --chart-tooltip-text: #0f172a;
@@ -284,8 +284,8 @@
 
   /* Chart chrome */
   --chart-grid: #27272a;
-  --chart-axis: #3f3f46;
-  --chart-tick: #a1a1aa;
+  --chart-axis: #52525b;
+  --chart-tick: #e4e4e7;
   --chart-tooltip-bg: #18181b;
   --chart-tooltip-border: #3f3f46;
   --chart-tooltip-text: #f4f4f5;
@@ -400,16 +400,27 @@ body {
 
 /* Recharts chrome */
 .recharts-cartesian-grid line {
-  stroke: var(--chart-grid);
+  stroke: var(--chart-grid) !important;
 }
 .recharts-cartesian-axis-line,
 .recharts-cartesian-axis-tick-line {
-  stroke: var(--chart-axis);
+  stroke: var(--chart-axis) !important;
 }
 .recharts-cartesian-axis-tick text,
+.recharts-cartesian-axis-tick text tspan,
+.recharts-cartesian-axis-tick-value,
+.recharts-cartesian-axis-tick-value tspan,
 .recharts-polar-angle-axis-tick text,
-.recharts-polar-radius-axis-tick text {
-  fill: var(--chart-tick);
+.recharts-polar-angle-axis-tick text tspan,
+.recharts-polar-radius-axis-tick text,
+.recharts-polar-radius-axis-tick text tspan {
+  fill: var(--chart-tick) !important;
+  font-weight: 500;
+}
+.recharts-cartesian-axis .recharts-label,
+.recharts-cartesian-axis-label {
+  fill: var(--chart-tick) !important;
+  font-weight: 600;
 }
 .recharts-legend-item-text {
   color: var(--chart-tick) !important;
@@ -435,10 +446,10 @@ body {
 }
 .chart-light-surface .recharts-cartesian-axis-line,
 .chart-light-surface .recharts-cartesian-axis-tick-line {
-  stroke: #e5e7eb;
+  stroke: #94a3b8;
 }
 .chart-light-surface .recharts-cartesian-axis-tick text {
-  fill: #6b7280;
+  fill: #0f172a;
 }
 
 @layer base {

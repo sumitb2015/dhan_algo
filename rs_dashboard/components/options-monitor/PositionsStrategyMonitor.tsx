@@ -1021,19 +1021,21 @@ export default function PositionsStrategyMonitor({
                   stroke="var(--chart-axis)"
                   fontSize={10}
                   tickLine={false}
+                  tick={{ fill: 'var(--chart-tick)', fontSize: 10, fontWeight: 600 }}
                   tickFormatter={(v) => Number(v).toLocaleString('en-IN')}
                 />
                 <YAxis
                   stroke="var(--chart-axis)"
                   fontSize={10}
                   tickLine={false}
+                  tick={{ fill: 'var(--chart-tick)', fontSize: 10, fontWeight: 600 }}
                   width={62}
                   tickFormatter={(v) => Number(v).toLocaleString('en-IN')}
                   label={{
                     value: 'Profit / loss',
                     angle: -90,
                     position: 'insideLeft',
-                    style: { fill: 'var(--chart-tick)', fontSize: 10, textAnchor: 'middle' },
+                    style: { fill: 'var(--chart-tick)', fontSize: 10, fontWeight: 600, textAnchor: 'middle' },
                   }}
                 />
                 <Tooltip

@@ -233,7 +233,7 @@ export default function PositionsPayoffChart({
   const tooltipLeft = sx(readoutSpot) > W * 0.6;
 
   const chart = (
-    <div ref={boxRef} className={cn('w-full', full && 'fixed inset-0 z-50 overflow-auto bg-zinc-950 p-6')}>
+    <div ref={boxRef} className={cn('w-full', full && 'fixed inset-0 z-50 overflow-auto bg-black p-6')}>
       {/* Legend + controls */}
       <div className="mb-3 flex flex-wrap items-center justify-between gap-3 border-b border-zinc-800/80 pb-2.5">
         <div className="flex flex-wrap items-center gap-3">
@@ -316,8 +316,8 @@ export default function PositionsPayoffChart({
         {model.yTicks.map((t) => (
           <g key={`y${t}`}>
             <line x1={PAD.left} x2={W - PAD.right} y1={sy(t)} y2={sy(t)}
-              stroke="#27272a" strokeWidth={1} strokeDasharray={t === 0 ? undefined : '3 4'} />
-            <text x={PAD.left - 8} y={sy(t) + 3.5} textAnchor="end" fontSize={10.5} fill="#a1a1aa" className="font-mono">
+              stroke="var(--chart-grid)" strokeWidth={1} strokeDasharray={t === 0 ? undefined : '3 4'} />
+            <text x={PAD.left - 8} y={sy(t) + 3.5} textAnchor="end" fontSize={10.5} fontWeight={600} fill="var(--chart-tick)" className="font-mono">
               {fmtInrCompact(t)}
             </text>
           </g>
@@ -336,7 +336,7 @@ export default function PositionsPayoffChart({
             ))}
             {model.oiTicks.map((t) => (
               <text key={`oit${t}`} x={W - PAD.right + 8} y={H_ - PAD.bottom - model.syOi(t) + 3.5}
-                fontSize={9.5} fill="#71717a" className="font-mono">
+                fontSize={9.5} fontWeight={600} fill="var(--chart-tick)" className="font-mono">
                 {fmtOiCompact(t)}
               </text>
             ))}
@@ -346,7 +346,7 @@ export default function PositionsPayoffChart({
         {/* X axis */}
         {model.xTicks.map((t) => (
           <text key={`x${t}`} x={sx(t)} y={H_ - PAD.bottom + 17} textAnchor="middle" fontSize={10.5}
-            fill="#a1a1aa" className="font-mono">
+            fontWeight={600} fill="var(--chart-tick)" className="font-mono">
             {t.toLocaleString('en-IN', { maximumFractionDigits: 0 })}
           </text>
         ))}
@@ -371,7 +371,7 @@ export default function PositionsPayoffChart({
           <path d={model.draftLine} fill="none" stroke="#a78bfa" strokeWidth={1.75} strokeDasharray="5 3" />
         )}
 
-        <line x1={PAD.left} x2={W - PAD.right} y1={zeroY} y2={zeroY} stroke="#52525b" strokeWidth={1.25} />
+        <line x1={PAD.left} x2={W - PAD.right} y1={zeroY} y2={zeroY} stroke="var(--chart-axis)" strokeWidth={1.25} />
 
         {/* Breakevens */}
         {breakevens.filter((b) => b >= xLo && b <= xHi).map((be) => {

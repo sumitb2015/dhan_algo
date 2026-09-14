@@ -27,16 +27,16 @@ export interface ChartChrome {
 const CHROME: Record<ResolvedTheme, ChartChrome> = {
   dark: {
     gridline: '#27272a',
-    baseline: '#3f3f46',
-    textSecondary: '#a1a1aa',
-    textMuted: '#71717a',
+    baseline: '#52525b',
+    textSecondary: '#e4e4e7',
+    textMuted: '#a1a1aa',
     surface: '#18181b',
   },
   light: {
     gridline: '#e2e8f0',
-    baseline: '#cbd5e1',
-    textSecondary: '#475569',
-    textMuted: '#64748b',
+    baseline: '#64748b',
+    textSecondary: '#0f172a',
+    textMuted: '#475569',
     surface: '#ffffff',
   },
 };

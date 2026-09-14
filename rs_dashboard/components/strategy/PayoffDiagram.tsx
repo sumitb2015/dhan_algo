@@ -165,7 +165,7 @@ export default function PayoffDiagram({ curve, currentSpot, breakevens }: Payoff
       ref={boxRef}
       className={
         full
-          ? 'fixed inset-0 z-50 overflow-auto bg-zinc-950 p-4 md:p-6 flex flex-col'
+          ? 'fixed inset-0 z-50 overflow-auto bg-black p-4 md:p-6 flex flex-col'
           : 'w-full flex flex-col'
       }
     >
@@ -220,8 +220,8 @@ export default function PayoffDiagram({ curve, currentSpot, breakevens }: Payoff
           {model.yTicks.map((t) => (
             <g key={`y${t}`}>
               <line x1={PAD.left} x2={W - PAD.right} y1={sy(t)} y2={sy(t)}
-                stroke="#27272a" strokeWidth={1} strokeDasharray={t === 0 ? undefined : '3 4'} />
-              <text x={PAD.left - 8} y={sy(t) + 3.5} textAnchor="end" fontSize={10} fill="#71717a" className="font-mono">
+                stroke="var(--chart-grid)" strokeWidth={1} strokeDasharray={t === 0 ? undefined : '3 4'} />
+              <text x={PAD.left - 8} y={sy(t) + 3.5} textAnchor="end" fontSize={10} fontWeight={600} fill="var(--chart-tick)" className="font-mono">
                 {fmtInr(t)}
               </text>
             </g>
@@ -230,7 +230,7 @@ export default function PayoffDiagram({ curve, currentSpot, breakevens }: Payoff
           {/* X axis */}
           {model.xTicks.map((t) => (
             <text key={`x${t}`} x={sx(t)} y={H_ - PAD.bottom + 17} textAnchor="middle" fontSize={10}
-              fill="#71717a" className="font-mono">
+              fontWeight={600} fill="var(--chart-tick)" className="font-mono">
               {t.toFixed(0)}
             </text>
           ))}
@@ -241,7 +241,7 @@ export default function PayoffDiagram({ curve, currentSpot, breakevens }: Payoff
           <g clipPath="url(#sb-clip-profit)"><path d={model.line} fill="none" stroke="#10b981" strokeWidth={2} /></g>
           <g clipPath="url(#sb-clip-loss)"><path d={model.line} fill="none" stroke="#ef4444" strokeWidth={2} /></g>
 
-          <line x1={PAD.left} x2={W - PAD.right} y1={zeroY} y2={zeroY} stroke="#52525b" strokeWidth={1.25} />
+          <line x1={PAD.left} x2={W - PAD.right} y1={zeroY} y2={zeroY} stroke="var(--chart-axis)" strokeWidth={1.25} />
 
           {/* Breakevens */}
           {breakevens.filter((b) => b >= xLo && b <= xHi).map((be) => {
