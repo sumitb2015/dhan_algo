@@ -1,23 +1,7 @@
 'use client';
 
 import React, { useState, useEffect } from 'react';
-import {
-  Zap,
-  TrendingUp,
-  TrendingDown,
-  Shield,
-  ShieldAlert,
-  Sliders,
-  Flame,
-  ArrowUpRight,
-  ArrowDownRight,
-  Sparkles,
-  Lock,
-  Unlock,
-  AlertOctagon,
-  Layers,
-  ChevronRight,
-} from 'lucide-react';
+import { Zap, ArrowUpRight, ArrowDownRight, Sparkles, Lock, Unlock, AlertOctagon } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { cyberAudio } from '@/lib/cyberAudio';
 import { MCX_LOT_MULTIPLIER } from '@/lib/positionPnl';
@@ -97,10 +81,12 @@ export default function CyberOrderPad({
   const [tradeMode, setTradeMode] = useState<'OPTIONS' | 'FUTURES'>('OPTIONS');
   const [lots, setLots] = useState<number>(1);
   const [tempLots, setTempLots] = useState<string>('1');
-  const [productType, setProductType] = useState<'INTRADAY' | 'MARGIN'>('INTRADAY');
+  // Every order from this terminal is a margin (NRML) trade — no intraday/MIS
+  // mode here, so there is nothing for the user to pick.
+  const productType = 'MARGIN' as const;
   const [orderType, setOrderType] = useState<'MARKET' | 'LIMIT'>('MARKET');
-  const [targetPts, setTargetPts] = useState<number | null>(10);
-  const [slPts, setSlPts] = useState<number | null>(5);
+  const [targetPts, setTargetPts] = useState<number | null>(30);
+  const [slPts, setSlPts] = useState<number | null>(30);
   const [safetyLock, setSafetyLock] = useState<boolean>(false); // false = Instant 1-click execution!
 
   const futuresCapable = FUTURES_CAPABLE_SYMBOLS.has(symbol) && !!future;
@@ -265,29 +251,29 @@ export default function CyberOrderPad({
   const isBearish = bias.includes('BEARISH');
 
   return (
-    <div className="bg-zinc-900/70 border border-zinc-800/80 rounded-2xl p-4 lg:p-5 backdrop-blur-md shadow-2xl flex flex-col gap-4">
+    <div className="bg-zinc-900/70 border border-zinc-800/80 rounded-xl p-3 lg:p-4 backdrop-blur-md shadow-xl flex flex-col gap-3">
       {/* Header & Mode Selector */}
-      <div className="flex flex-wrap items-center justify-between gap-3 pb-3 border-b border-zinc-800">
+      <div className="flex flex-wrap items-center justify-between gap-2 pb-2 border-b border-zinc-800">
         <div className="flex items-center gap-2">
-          <div className="w-7 h-7 rounded-lg bg-cyan-500/10 border border-cyan-500/25 flex items-center justify-center text-cyan-400">
-            <Zap className="w-4 h-4" />
+          <div className="w-6 h-6 rounded-lg bg-cyan-500/10 border border-cyan-500/25 flex items-center justify-center text-cyan-400 shrink-0">
+            <Zap className="w-3.5 h-3.5" />
           </div>
           <div>
-            <h2 className="text-sm font-black tracking-tight text-white flex items-center gap-2">
-              QUANTUM SCALP ORDER PAD
-              <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-zinc-800 text-zinc-300 font-normal">
-                1-CLICK HOT
+            <h2 className="text-xs font-bold tracking-tight text-white flex items-center gap-1.5">
+              ORDER PAD
+              <span className="text-[9px] font-mono px-1 py-0.2 rounded bg-emerald-500/15 text-emerald-300 font-normal border border-emerald-500/30">
+                MARGIN
               </span>
             </h2>
             <p className="text-[10px] text-zinc-400 font-mono">
               {effectiveMode === 'FUTURES' ? (
                 <>
-                  Contract: <b className="text-white">{future?.trading_symbol || symbol}</b> · Expiry:{' '}
+                  <b className="text-white">{future?.trading_symbol || symbol}</b> · Exp{' '}
                   <b className="text-zinc-200">{future?.expiry || 'Active'}</b>
                 </>
               ) : (
                 <>
-                  ATM Strike: <b className="text-white">{atmStrike}</b> · Expiry:{' '}
+                  ATM <b className="text-white">{atmStrike}</b> · Exp{' '}
                   <b className="text-zinc-200">{options?.expiry || 'Active'}</b>
                 </>
               )}
@@ -296,7 +282,7 @@ export default function CyberOrderPad({
         </div>
 
         {/* Safety Lock & Hotkeys indicator */}
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-1.5">
           {/* Futures/Options mode toggle — only for symbols with a tradeable future
               contract of their own (currently CRUDEOILM). */}
           {futuresCapable && (
@@ -309,7 +295,7 @@ export default function CyberOrderPad({
                     setTradeMode(m);
                   }}
                   className={cn(
-                    'px-2 py-1 rounded text-[10px] font-mono font-bold transition-all',
+                    'px-1.5 py-0.5 rounded text-[9px] font-mono font-bold transition-all',
                     effectiveMode === m
                       ? 'bg-cyan-500/20 text-cyan-300 border border-cyan-500/40'
                       : 'text-zinc-400 hover:text-white'
@@ -327,15 +313,15 @@ export default function CyberOrderPad({
               setSafetyLock(!safetyLock);
             }}
             className={cn(
-              'px-2.5 py-1 rounded-lg border text-xs font-mono font-bold flex items-center gap-1.5 transition-all',
+              'px-2 py-0.5 rounded-lg border text-[10px] font-mono font-bold flex items-center gap-1 transition-all',
               safetyLock
                 ? 'bg-amber-500/15 border-amber-500/40 text-amber-300'
                 : 'bg-emerald-500/15 border-emerald-500/40 text-emerald-300'
             )}
             title={safetyLock ? 'Safety confirmation dialog enabled' : 'Instant 1-Click execution armed'}
           >
-            {safetyLock ? <Lock className="w-3.5 h-3.5" /> : <Unlock className="w-3.5 h-3.5" />}
-            <span>{safetyLock ? 'CONFIRM ON' : '1-CLICK ARMED'}</span>
+            {safetyLock ? <Lock className="w-3 h-3" /> : <Unlock className="w-3 h-3" />}
+            <span>{safetyLock ? 'CONFIRM ON' : '1-CLICK'}</span>
           </button>
 
           {/* Panic FLATTEN ALL */}
@@ -343,10 +329,10 @@ export default function CyberOrderPad({
             <button
               onClick={handlePanicFlatten}
               disabled={isExecuting}
-              className="px-3 py-1 rounded-lg bg-rose-600 hover:bg-rose-500 text-white text-xs font-mono font-black tracking-wider flex items-center gap-1.5 shadow-lg shadow-rose-900/30 active:scale-95 transition-all animate-pulse"
+              className="px-2 py-0.5 rounded-lg bg-rose-600 hover:bg-rose-500 text-white text-[10px] font-mono font-black tracking-wide flex items-center gap-1 shadow-md shadow-rose-900/30 active:scale-95 transition-all"
             >
-              <AlertOctagon className="w-3.5 h-3.5" />
-              <span>FLATTEN ALL ({openPositionsCount}) [X]</span>
+              <AlertOctagon className="w-3 h-3" />
+              <span>FLATTEN ({openPositionsCount}) [X]</span>
             </button>
           )}
         </div>
@@ -354,53 +340,34 @@ export default function CyberOrderPad({
 
       {/* BIG BUY & SELL ACTION BUTTONS */}
       {effectiveMode === 'FUTURES' ? (
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
           {/* LONG the future */}
           <button
             onClick={handleBuyFuture}
             disabled={isExecuting}
             className={cn(
-              'group relative overflow-hidden rounded-2xl p-5 border-2 text-left transition-all duration-200 cursor-pointer active:scale-[0.98] select-none',
-              'bg-gradient-to-br from-emerald-950/80 via-zinc-950/90 to-emerald-900/40',
-              'border-emerald-500/60 hover:border-emerald-400 hover:shadow-2xl hover:shadow-emerald-500/20',
-              isBullish && 'ring-2 ring-emerald-400/40'
+              'group relative overflow-hidden rounded-xl px-3 py-2 border text-center transition-all duration-150 cursor-pointer active:scale-[0.98] select-none',
+              'bg-gradient-to-br from-emerald-950/60 via-zinc-950/80 to-emerald-900/30',
+              'border-emerald-500/50 hover:border-emerald-400 hover:shadow-lg hover:shadow-emerald-500/10',
+              isBullish && 'ring-1 ring-emerald-400/40'
             )}
           >
-            <div className="absolute -top-12 -right-12 w-28 h-28 rounded-full bg-emerald-500/20 blur-xl group-hover:bg-emerald-500/30 transition-all pointer-events-none" />
-
-            <div className="flex items-start justify-between mb-3">
-              <div>
-                <div className="flex items-center gap-2 mb-1">
-                  <span className="px-2 py-0.5 rounded bg-emerald-500/20 border border-emerald-500/40 text-emerald-300 font-mono text-[10px] font-black uppercase tracking-wider">
-                    HOTKEY [B]
-                  </span>
-                  {isBullish && (
-                    <span className="text-[10px] font-mono text-emerald-400 font-bold flex items-center gap-1">
-                      <Sparkles className="w-3 h-3" /> STRONGLY RECOMMENDED
-                    </span>
-                  )}
-                </div>
-                <h3 className="text-xl lg:text-2xl font-black text-white tracking-tight flex items-center gap-2">
-                  <span>LONG FUTURE</span>
-                  <ArrowUpRight className="w-6 h-6 text-emerald-400 group-hover:translate-x-1 group-hover:-translate-y-1 transition-transform" />
-                </h3>
-              </div>
-
-              <div className="text-right">
-                <span className="text-[10px] font-mono text-zinc-400 uppercase">FUT LTP</span>
-                <div className="text-2xl lg:text-3xl font-mono font-black text-emerald-400">
-                  ₹{future?.ltp ? future.ltp.toFixed(2) : '---'}
-                </div>
-              </div>
+            <div className="flex items-center justify-center gap-1.5">
+              <span className="px-1.5 py-0.2 rounded bg-emerald-500/20 border border-emerald-500/40 text-emerald-300 font-mono text-[9px] font-bold uppercase tracking-wide">
+                [B]
+              </span>
+              <h3 className="text-base font-black text-white tracking-tight flex items-center gap-1.5">
+                <span>LONG FUTURE</span>
+                <ArrowUpRight className="w-4 h-4 text-emerald-400" />
+              </h3>
+              {isBullish && <Sparkles className="w-3 h-3 text-emerald-400" />}
+              <span className="text-lg font-mono font-black text-emerald-400 ml-1">
+                ₹{future?.ltp ? future.ltp.toFixed(2) : '---'}
+              </span>
             </div>
 
-            <div className="flex items-center justify-between pt-3 border-t border-emerald-900/40 text-xs font-mono">
-              <div className="text-zinc-300 font-medium">
-                Target: <b className="text-white">{future?.display_name || `${symbol} FUT`}</b>
-              </div>
-              <div className="text-emerald-300 font-bold">
-                {lots} Lot{lots > 1 ? 's' : ''} ({totalQty} Qty) · ₹{(lots * contractSize * (future?.ltp || 0)).toLocaleString('en-IN', { maximumFractionDigits: 0 })}
-              </div>
+            <div className="text-[11px] font-mono text-zinc-400 mt-1">
+              {future?.display_name || `${symbol} FUT`} · {lots}L ({totalQty}) · ₹{(lots * contractSize * (future?.ltp || 0)).toLocaleString('en-IN', { maximumFractionDigits: 0 })}
             </div>
           </button>
 
@@ -409,100 +376,60 @@ export default function CyberOrderPad({
             onClick={handleSellFuture}
             disabled={isExecuting}
             className={cn(
-              'group relative overflow-hidden rounded-2xl p-5 border-2 text-left transition-all duration-200 cursor-pointer active:scale-[0.98] select-none',
-              'bg-gradient-to-br from-rose-950/80 via-zinc-950/90 to-rose-900/40',
-              'border-rose-500/60 hover:border-rose-400 hover:shadow-2xl hover:shadow-rose-500/20',
-              isBearish && 'ring-2 ring-rose-400/40'
+              'group relative overflow-hidden rounded-xl px-3 py-2 border text-center transition-all duration-150 cursor-pointer active:scale-[0.98] select-none',
+              'bg-gradient-to-br from-rose-950/60 via-zinc-950/80 to-rose-900/30',
+              'border-rose-500/50 hover:border-rose-400 hover:shadow-lg hover:shadow-rose-500/10',
+              isBearish && 'ring-1 ring-rose-400/40'
             )}
           >
-            <div className="absolute -top-12 -right-12 w-28 h-28 rounded-full bg-rose-500/20 blur-xl group-hover:bg-rose-500/30 transition-all pointer-events-none" />
-
-            <div className="flex items-start justify-between mb-3">
-              <div>
-                <div className="flex items-center gap-2 mb-1">
-                  <span className="px-2 py-0.5 rounded bg-rose-500/20 border border-rose-500/40 text-rose-300 font-mono text-[10px] font-black uppercase tracking-wider">
-                    HOTKEY [S]
-                  </span>
-                  {isBearish && (
-                    <span className="text-[10px] font-mono text-rose-400 font-bold flex items-center gap-1">
-                      <Sparkles className="w-3 h-3" /> STRONGLY RECOMMENDED
-                    </span>
-                  )}
-                </div>
-                <h3 className="text-xl lg:text-2xl font-black text-white tracking-tight flex items-center gap-2">
-                  <span>SHORT FUTURE</span>
-                  <ArrowDownRight className="w-6 h-6 text-rose-400 group-hover:translate-x-1 group-hover:translate-y-1 transition-transform" />
-                </h3>
-              </div>
-
-              <div className="text-right">
-                <span className="text-[10px] font-mono text-zinc-400 uppercase">FUT LTP</span>
-                <div className="text-2xl lg:text-3xl font-mono font-black text-rose-400">
-                  ₹{future?.ltp ? future.ltp.toFixed(2) : '---'}
-                </div>
-              </div>
+            <div className="flex items-center justify-center gap-1.5">
+              <span className="px-1.5 py-0.2 rounded bg-rose-500/20 border border-rose-500/40 text-rose-300 font-mono text-[9px] font-bold uppercase tracking-wide">
+                [S]
+              </span>
+              <h3 className="text-base font-black text-white tracking-tight flex items-center gap-1.5">
+                <span>SHORT FUTURE</span>
+                <ArrowDownRight className="w-4 h-4 text-rose-400" />
+              </h3>
+              {isBearish && <Sparkles className="w-3 h-3 text-rose-400" />}
+              <span className="text-lg font-mono font-black text-rose-400 ml-1">
+                ₹{future?.ltp ? future.ltp.toFixed(2) : '---'}
+              </span>
             </div>
 
-            <div className="flex items-center justify-between pt-3 border-t border-rose-900/40 text-xs font-mono">
-              <div className="text-zinc-300 font-medium">
-                Target: <b className="text-white">{future?.display_name || `${symbol} FUT`}</b>
-              </div>
-              <div className="text-rose-300 font-bold">
-                {lots} Lot{lots > 1 ? 's' : ''} ({totalQty} Qty) · ₹{(lots * contractSize * (future?.ltp || 0)).toLocaleString('en-IN', { maximumFractionDigits: 0 })}
-              </div>
+            <div className="text-[11px] font-mono text-zinc-400 mt-1">
+              {future?.display_name || `${symbol} FUT`} · {lots}L ({totalQty}) · ₹{(lots * contractSize * (future?.ltp || 0)).toLocaleString('en-IN', { maximumFractionDigits: 0 })}
             </div>
           </button>
         </div>
       ) : (
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
         {/* BIG BUY (CALL / LONG) BUTTON */}
         <button
           onClick={handleBuyCall}
           disabled={isExecuting}
           className={cn(
-            'group relative overflow-hidden rounded-2xl p-5 border-2 text-left transition-all duration-200 cursor-pointer active:scale-[0.98] select-none',
-            'bg-gradient-to-br from-emerald-950/80 via-zinc-950/90 to-emerald-900/40',
-            'border-emerald-500/60 hover:border-emerald-400 hover:shadow-2xl hover:shadow-emerald-500/20',
-            isBullish && 'ring-2 ring-emerald-400/40'
+            'group relative overflow-hidden rounded-xl px-3 py-2 border text-center transition-all duration-150 cursor-pointer active:scale-[0.98] select-none',
+            'bg-gradient-to-br from-emerald-950/60 via-zinc-950/80 to-emerald-900/30',
+            'border-emerald-500/50 hover:border-emerald-400 hover:shadow-lg hover:shadow-emerald-500/10',
+            isBullish && 'ring-1 ring-emerald-400/40'
           )}
         >
-          {/* Neon corner pulse */}
-          <div className="absolute -top-12 -right-12 w-28 h-28 rounded-full bg-emerald-500/20 blur-xl group-hover:bg-emerald-500/30 transition-all pointer-events-none" />
-
-          <div className="flex items-start justify-between mb-3">
-            <div>
-              <div className="flex items-center gap-2 mb-1">
-                <span className="px-2 py-0.5 rounded bg-emerald-500/20 border border-emerald-500/40 text-emerald-300 font-mono text-[10px] font-black uppercase tracking-wider">
-                  HOTKEY [B]
-                </span>
-                {isBullish && (
-                  <span className="text-[10px] font-mono text-emerald-400 font-bold flex items-center gap-1">
-                    <Sparkles className="w-3 h-3" /> STRONGLY RECOMMENDED
-                  </span>
-                )}
-              </div>
-              <h3 className="text-xl lg:text-2xl font-black text-white tracking-tight flex items-center gap-2">
-                <span>BUY ATM CALL</span>
-                <ArrowUpRight className="w-6 h-6 text-emerald-400 group-hover:translate-x-1 group-hover:-translate-y-1 transition-transform" />
-              </h3>
-            </div>
-
-            {/* Live Option Price */}
-            <div className="text-right">
-              <span className="text-[10px] font-mono text-zinc-400 uppercase">CE LTP</span>
-              <div className="text-2xl lg:text-3xl font-mono font-black text-emerald-400">
-                ₹{ceContract?.ltp ? ceContract.ltp.toFixed(2) : '---'}
-              </div>
-            </div>
+          <div className="flex items-center justify-center gap-1.5">
+            <span className="px-1.5 py-0.2 rounded bg-emerald-500/20 border border-emerald-500/40 text-emerald-300 font-mono text-[9px] font-bold uppercase tracking-wide">
+              [B]
+            </span>
+            <h3 className="text-base font-black text-white tracking-tight flex items-center gap-1.5">
+              <span>BUY ATM CALL</span>
+              <ArrowUpRight className="w-4 h-4 text-emerald-400" />
+            </h3>
+            {isBullish && <Sparkles className="w-3 h-3 text-emerald-400" />}
+            <span className="text-lg font-mono font-black text-emerald-400 ml-1">
+              ₹{ceContract?.ltp ? ceContract.ltp.toFixed(2) : '---'}
+            </span>
           </div>
 
-          <div className="flex items-center justify-between pt-3 border-t border-emerald-900/40 text-xs font-mono">
-            <div className="text-zinc-300 font-medium">
-              Target: <b className="text-white">{ceContract?.display_name || `${symbol} ${atmStrike} CE`}</b>
-            </div>
-            <div className="text-emerald-300 font-bold">
-              {lots} Lot{lots > 1 ? 's' : ''} ({totalQty} Qty) · ₹{(lots * contractSize * (ceContract?.ltp || 0)).toLocaleString('en-IN', { maximumFractionDigits: 0 })}
-            </div>
+          <div className="text-[11px] font-mono text-zinc-400 mt-1">
+            {ceContract?.display_name || `${symbol} ${atmStrike} CE`} · {lots}L ({totalQty}) · ₹{(lots * contractSize * (ceContract?.ltp || 0)).toLocaleString('en-IN', { maximumFractionDigits: 0 })}
           </div>
         </button>
 
@@ -511,58 +438,37 @@ export default function CyberOrderPad({
           onClick={handleBuyPut}
           disabled={isExecuting}
           className={cn(
-            'group relative overflow-hidden rounded-2xl p-5 border-2 text-left transition-all duration-200 cursor-pointer active:scale-[0.98] select-none',
-            'bg-gradient-to-br from-rose-950/80 via-zinc-950/90 to-rose-900/40',
-            'border-rose-500/60 hover:border-rose-400 hover:shadow-2xl hover:shadow-rose-500/20',
-            isBearish && 'ring-2 ring-rose-400/40'
+            'group relative overflow-hidden rounded-xl px-3 py-2 border text-center transition-all duration-150 cursor-pointer active:scale-[0.98] select-none',
+            'bg-gradient-to-br from-rose-950/60 via-zinc-950/80 to-rose-900/30',
+            'border-rose-500/50 hover:border-rose-400 hover:shadow-lg hover:shadow-rose-500/10',
+            isBearish && 'ring-1 ring-rose-400/40'
           )}
         >
-          {/* Neon corner pulse */}
-          <div className="absolute -top-12 -right-12 w-28 h-28 rounded-full bg-rose-500/20 blur-xl group-hover:bg-rose-500/30 transition-all pointer-events-none" />
-
-          <div className="flex items-start justify-between mb-3">
-            <div>
-              <div className="flex items-center gap-2 mb-1">
-                <span className="px-2 py-0.5 rounded bg-rose-500/20 border border-rose-500/40 text-rose-300 font-mono text-[10px] font-black uppercase tracking-wider">
-                  HOTKEY [S]
-                </span>
-                {isBearish && (
-                  <span className="text-[10px] font-mono text-rose-400 font-bold flex items-center gap-1">
-                    <Sparkles className="w-3 h-3" /> STRONGLY RECOMMENDED
-                  </span>
-                )}
-              </div>
-              <h3 className="text-xl lg:text-2xl font-black text-white tracking-tight flex items-center gap-2">
-                <span>BUY ATM PUT</span>
-                <ArrowDownRight className="w-6 h-6 text-rose-400 group-hover:translate-x-1 group-hover:translate-y-1 transition-transform" />
-              </h3>
-            </div>
-
-            {/* Live Option Price */}
-            <div className="text-right">
-              <span className="text-[10px] font-mono text-zinc-400 uppercase">PE LTP</span>
-              <div className="text-2xl lg:text-3xl font-mono font-black text-rose-400">
-                ₹{peContract?.ltp ? peContract.ltp.toFixed(2) : '---'}
-              </div>
-            </div>
+          <div className="flex items-center justify-center gap-1.5">
+            <span className="px-1.5 py-0.2 rounded bg-rose-500/20 border border-rose-500/40 text-rose-300 font-mono text-[9px] font-bold uppercase tracking-wide">
+              [S]
+            </span>
+            <h3 className="text-base font-black text-white tracking-tight flex items-center gap-1.5">
+              <span>BUY ATM PUT</span>
+              <ArrowDownRight className="w-4 h-4 text-rose-400" />
+            </h3>
+            {isBearish && <Sparkles className="w-3 h-3 text-rose-400" />}
+            <span className="text-lg font-mono font-black text-rose-400 ml-1">
+              ₹{peContract?.ltp ? peContract.ltp.toFixed(2) : '---'}
+            </span>
           </div>
 
-          <div className="flex items-center justify-between pt-3 border-t border-rose-900/40 text-xs font-mono">
-            <div className="text-zinc-300 font-medium">
-              Target: <b className="text-white">{peContract?.display_name || `${symbol} ${atmStrike} PE`}</b>
-            </div>
-            <div className="text-rose-300 font-bold">
-              {lots} Lot{lots > 1 ? 's' : ''} ({totalQty} Qty) · ₹{(lots * contractSize * (peContract?.ltp || 0)).toLocaleString('en-IN', { maximumFractionDigits: 0 })}
-            </div>
+          <div className="text-[11px] font-mono text-zinc-400 mt-1">
+            {peContract?.display_name || `${symbol} ${atmStrike} PE`} · {lots}L ({totalQty}) · ₹{(lots * contractSize * (peContract?.ltp || 0)).toLocaleString('en-IN', { maximumFractionDigits: 0 })}
           </div>
         </button>
       </div>
       )}
 
       {/* QUICK SCALP CONFIGURATION CONTROLS */}
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-3 pt-2">
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-2 pt-1">
         {/* Lots Quick Multiplier */}
-        <div className="bg-zinc-950/70 border border-zinc-800/80 rounded-xl p-3 flex flex-col justify-between">
+        <div className="bg-zinc-950/70 border border-zinc-800/80 rounded-lg p-2 flex flex-col justify-between">
           <div className="flex items-center justify-between text-[11px] font-mono text-zinc-400 mb-2">
             <span>LOT MULTIPLIER</span>
             <span className="text-white font-bold">{totalQty} QTY</span>
@@ -595,7 +501,7 @@ export default function CyberOrderPad({
         </div>
 
         {/* Target Presets */}
-        <div className="bg-zinc-950/70 border border-zinc-800/80 rounded-xl p-3 flex flex-col justify-between">
+        <div className="bg-zinc-950/70 border border-zinc-800/80 rounded-lg p-2 flex flex-col justify-between">
           <div className="flex items-center justify-between text-[11px] font-mono text-zinc-400 mb-2">
             <span>TARGET PRESET (PTS)</span>
             <div className="flex items-center gap-1.5">
@@ -636,7 +542,7 @@ export default function CyberOrderPad({
         </div>
 
         {/* Stop Loss Presets */}
-        <div className="bg-zinc-950/70 border border-zinc-800/80 rounded-xl p-3 flex flex-col justify-between">
+        <div className="bg-zinc-950/70 border border-zinc-800/80 rounded-lg p-2 flex flex-col justify-between">
           <div className="flex items-center justify-between text-[11px] font-mono text-zinc-400 mb-2">
             <span>STOP LOSS PRESET (PTS)</span>
             <div className="flex items-center gap-1.5">
@@ -656,7 +562,7 @@ export default function CyberOrderPad({
             </div>
           </div>
           <div className="flex items-center gap-1.5">
-            {[null, 5, 10, 15, 25].map((s, idx) => (
+            {[null, 10, 15, 20, 30].map((s, idx) => (
               <button
                 key={`sl-${idx}`}
                 onClick={() => {

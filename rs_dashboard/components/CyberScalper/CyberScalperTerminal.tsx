@@ -1,24 +1,12 @@
 'use client';
 
 import React, { useState, useEffect, useRef, useCallback } from 'react';
-import {
-  Zap,
-  RefreshCw,
-  Volume2,
-  VolumeX,
-  Keyboard,
-  Compass,
-  Layers,
-  ChevronDown,
-  Activity,
-  AlertCircle,
-  Radio,
-} from 'lucide-react';
+import { Zap, RefreshCw, Volume2, VolumeX, Keyboard, AlertCircle, Wallet } from 'lucide-react';
 import { cn } from '@/lib/utils';
+import NavBar from '@/components/NavBar';
 import CyberBiasRadar from './CyberBiasRadar';
 import CyberOrderPad from './CyberOrderPad';
 import CyberPositionsPanel, { PositionItem, PositionGuard, ScalpLogItem } from './CyberPositionsPanel';
-import CyberBloombergRibbon from './CyberBloombergRibbon';
 import CyberStrategyIntelligence, { StrategyData } from './CyberStrategyIntelligence';
 import { matchTradesFifo, type ExitedPositionItem } from '@/lib/fifoPositions';
 import { saveTerminalOrder } from '@/lib/terminalTradeStore';
@@ -43,6 +31,9 @@ export default function CyberScalperTerminal() {
   // regardless of the broker selected here — same convention as AdvancedScalper.tsx.
   // Only order placement and the positions book are broker-specific.
   const { broker, setBroker, authenticatedBrokers } = useBrokerSelector();
+  // This terminal only supports Dhan and Kotak (Zerodha has no MCX/futures leg
+  // and isn't offered here) — filter the shared broker list down to those two.
+  const scalperBrokers = authenticatedBrokers.filter((b) => b !== 'zerodha');
   // Non-Dhan CE/PE trading symbols for the currently selected expiry, keyed by
   // strike — Dhan is the only broker with a numeric securityId, everyone else
   // orders by trading symbol (see submitLegOrder in AdvancedScalper.tsx, same
@@ -62,7 +53,12 @@ export default function CyberScalperTerminal() {
 
   // Positions, Guards (TP / SL / Trailing) & Logs
   const [positions, setPositions] = useState<PositionItem[]>([]);
+  const positionsRef = useRef<PositionItem[]>([]);
+  useEffect(() => { positionsRef.current = positions; }, [positions]);
   const [exitedPositions, setExitedPositions] = useState<ExitedPositionItem[]>([]);
+  // Available margin for the selected broker — every broker's `funds` route
+  // normalizes to `availabelBalance` (sic, matching Dhan's own field spelling).
+  const [fundsData, setFundsData] = useState<Record<string, any> | null>(null);
   const [guards, setGuards] = useState<Record<string, PositionGuard>>({});
   const [logs, setLogs] = useState<ScalpLogItem[]>([]);
   const [isExecuting, setIsExecuting] = useState(false);
@@ -99,6 +95,37 @@ export default function CyberScalperTerminal() {
     };
     setLogs((prev) => [newLog, ...prev.slice(0, 49)]);
   };
+
+  // Arms a position's Target/SL guard directly from the Order Pad's preset points
+  // (converted to an absolute price off the position's actual entry) — without this,
+  // the pad's +10/-5 presets were purely cosmetic: they never reached the guard the
+  // automated risk watcher below actually polls.
+  const armPositionGuard = useCallback((pos: PositionItem, targetPts?: number, slPts?: number) => {
+    if (!targetPts && !slPts) return;
+    const isLong = pos.netQty > 0;
+    const entry = pos.avgPrice > 0 ? pos.avgPrice : (isLong ? pos.buyAvg : (pos.sellAvg || pos.ltp));
+    if (entry <= 0) return;
+
+    const targetPrice = targetPts ? (isLong ? entry + targetPts : entry - targetPts).toFixed(2) : '';
+    const slPrice = slPts ? (isLong ? entry - slPts : entry + slPts).toFixed(2) : '';
+
+    setGuards((prev) => ({
+      ...prev,
+      [pos.id]: {
+        target: targetPrice || prev[pos.id]?.target || '',
+        sl: slPrice || prev[pos.id]?.sl || '',
+        trailEnabled: prev[pos.id]?.trailEnabled ?? false,
+        bestPrice: prev[pos.id]?.bestPrice ?? 0,
+        triggered: false,
+      },
+    }));
+
+    const parts = [
+      targetPts ? `TP +${targetPts} pts (₹${targetPrice})` : null,
+      slPts ? `SL -${slPts} pts (₹${slPrice})` : null,
+    ].filter(Boolean).join(' · ');
+    addLog('BUY', `Guard armed for ${pos.tradingSymbol}`, parts);
+  }, []);
 
   // Strategy suggested levels overrides for the order pad
   const [padTargetPts, setPadTargetPts] = useState<number | null>(null);
@@ -267,11 +294,41 @@ export default function CyberScalperTerminal() {
     }
   }, [broker]);
 
-  // Clear stale positions immediately on broker switch so a Dhan position is never
-  // displayed or acted on as if it belonged to Zerodha/Kotak (or vice versa).
+  // Poll available margin for the selected broker (funds route already exists
+  // per-broker for the other scalper terminals — same field, same pattern).
+  const fetchFunds = useCallback(async () => {
+    const requestedBroker = broker;
+    try {
+      const res = await fetch(scalperRoute(broker, 'funds'));
+      const json = await res.json();
+      // Same broker-switch race guard as fetchPositions above.
+      if (requestedBroker !== brokerRef.current) return;
+      if (json.success) setFundsData(json.data ?? null);
+    } catch {
+      // quiet fallback — margin chip just keeps showing its last known value
+    }
+  }, [broker]);
+
+  // Clear stale positions/funds immediately on broker switch so a Dhan position
+  // or margin figure is never displayed or acted on as if it belonged to
+  // Zerodha/Kotak (or vice versa).
   useEffect(() => {
     setPositions([]);
+    setFundsData(null);
   }, [broker]);
+
+  useEffect(() => {
+    fetchFunds();
+    const id = setInterval(fetchFunds, 15000);
+    return () => clearInterval(id);
+  }, [fetchFunds]);
+
+  // This terminal only offers Dhan/Kotak — if the shared broker selector was left
+  // on Zerodha by another page, fall back to Dhan rather than silently trading an
+  // account this terminal doesn't expose a selector for.
+  useEffect(() => {
+    if (broker === 'zerodha') setBroker('dhan');
+  }, [broker, setBroker]);
 
   // Non-Dhan CE/PE trading-symbol lookup for the currently selected underlying +
   // expiry. Dhan's own ce/pe security IDs come from feedData.options directly (see
@@ -431,6 +488,26 @@ export default function CyberScalperTerminal() {
           symbol,
         });
         await fetchPositions();
+
+        // Arm the guard from the pad's Target/SL preset now that the position exists.
+        // The broker's position feed can lag a beat behind the fill, so give it one
+        // more poll before giving up.
+        if (params.targetPts || params.slPts) {
+          const targetSymbol = String(brokerTradingSymbol || '').toUpperCase();
+          const findMatch = () =>
+            positionsRef.current.find((p) => p.tradingSymbol.toUpperCase() === targetSymbol && p.netQty !== 0);
+          let matched = findMatch();
+          if (!matched) {
+            await new Promise((r) => setTimeout(r, 800));
+            await fetchPositions();
+            matched = findMatch();
+          }
+          if (matched) {
+            armPositionGuard(matched, params.targetPts, params.slPts);
+          } else {
+            addLog('ERROR', 'Guard not armed', `${targetSymbol} not visible in the broker position feed yet — set Target/SL manually in the table below.`);
+          }
+        }
       } else {
         cyberAudio.error();
         addLog('ERROR', `Order Rejected: ${json.error || 'Unknown broker error'}`);
@@ -779,20 +856,25 @@ export default function CyberScalperTerminal() {
   const change = feedData?.change || 0;
   const changePct = feedData?.changePct || 0;
   const isPositive = change >= 0;
+  const openMtm = positions.reduce((sum, p) => sum + (p.netQty !== 0 ? p.pnl : 0), 0);
+  const fmtRupees = (v: number) => {
+    const s = Math.abs(v).toLocaleString('en-IN', { maximumFractionDigits: 0 });
+    return v >= 0 ? `+₹${s}` : `-₹${s}`;
+  };
 
   return (
     <div className="flex flex-col min-h-screen bg-zinc-950 text-white selection:bg-cyan-500 selection:text-black">
-      {/* BLOOMBERG QUANT STICKY HEADER */}
-      <div className="sticky top-0 z-30 flex items-center justify-between gap-3 flex-wrap px-4 lg:px-6 py-2.5 border-b border-zinc-800 bg-zinc-950/95 backdrop-blur-md">
+      {/* STICKY HEADER */}
+      <div className="sticky top-0 z-30 flex items-center justify-between gap-3 flex-wrap px-4 lg:px-6 py-2 border-b border-zinc-800 bg-zinc-950/95 backdrop-blur-md">
         {/* Left: Branding & Underlying */}
-        <div className="flex items-center gap-3">
-          <div className="flex items-center justify-center w-8 h-8 rounded-lg bg-emerald-500/10 border border-emerald-500/25 shrink-0">
-            <Zap className="w-4 h-4 text-emerald-400" />
+        <div className="flex items-center gap-2.5">
+          <div className="flex items-center justify-center w-7 h-7 rounded-lg bg-emerald-500/10 border border-emerald-500/25 shrink-0">
+            <Zap className="w-3.5 h-3.5 text-emerald-400" />
           </div>
           <div>
-            <div className="flex items-center gap-2">
+            <div className="flex items-center gap-1.5">
               <span className="text-[9px] font-bold text-emerald-500 uppercase tracking-[0.18em]">
-                QUANT TERMINAL · 9/20 EMA & VWAP SCALPER
+                CYBER SCALPER
               </span>
               {/* Mandatory DATA date chip per AGENTS.md */}
               <span className="text-[9px] font-mono px-1.5 py-0.2 rounded bg-zinc-800 border border-zinc-700 text-zinc-300 font-bold">
@@ -804,8 +886,6 @@ export default function CyberScalperTerminal() {
               </span>
             </div>
             <h1 className="text-sm font-bold text-white tracking-tight flex items-center gap-2 mt-0.5">
-              <span>CYBER SCALPER</span>
-              <span className="text-zinc-600 font-normal">|</span>
               <span className="text-white font-mono font-bold">{symbol}</span>
               <span className="text-xs font-mono font-bold text-zinc-200">
                 ₹{spot.toFixed(2)}
@@ -818,15 +898,20 @@ export default function CyberScalperTerminal() {
               >
                 {isPositive ? '+' : ''}{change.toFixed(2)} ({isPositive ? '+' : ''}{changePct.toFixed(2)}%)
               </span>
+              <span className="text-zinc-600 font-normal">|</span>
+              <span className="text-[10px] font-mono text-zinc-500">MTM</span>
+              <span className={cn('text-xs font-mono font-bold', openMtm >= 0 ? 'text-emerald-400' : 'text-rose-400')}>
+                {fmtRupees(openMtm)}
+              </span>
             </h1>
           </div>
         </div>
 
         {/* Right: Controls & Selectors */}
         <div className="flex items-center gap-2 flex-wrap">
-          {/* Broker selector */}
+          {/* Broker selector (Dhan / Kotak only) */}
           <div className="flex items-center bg-zinc-900 border border-zinc-800 rounded-lg p-0.5">
-            {authenticatedBrokers.map((b) => (
+            {scalperBrokers.map((b) => (
               <button
                 key={b}
                 onClick={() => {
@@ -845,6 +930,17 @@ export default function CyberScalperTerminal() {
               </button>
             ))}
           </div>
+
+          {/* Available margin for the selected broker */}
+          {fundsData && (
+            <div
+              className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-bold font-mono tabular-nums bg-zinc-900 border border-zinc-700 text-zinc-200 whitespace-nowrap"
+              title={`Available margin (${BROKER_LABELS[broker]})`}
+            >
+              <Wallet className="w-3 h-3 text-sky-400" />
+              ₹{Math.round(Number(fundsData.availabelBalance) || 0).toLocaleString('en-IN')}
+            </div>
+          )}
 
           {/* Symbol selector */}
           <div className="flex items-center flex-wrap bg-zinc-900 border border-zinc-800 rounded-lg p-0.5 gap-0.5">
@@ -910,22 +1006,10 @@ export default function CyberScalperTerminal() {
           >
             <RefreshCw className={cn('w-4 h-4', isLoading && 'animate-spin text-cyan-400')} />
           </button>
+
+          <NavBar />
         </div>
       </div>
-
-      {/* BLOOMBERG HIGH-DENSITY MARKET RIBBON */}
-      <CyberBloombergRibbon
-        symbol={symbol}
-        spot={spot}
-        change={change}
-        changePct={changePct}
-        dataDate={feedData?.dataDate}
-        live={feedData?.live || null}
-        strategy={feedData?.strategy || null}
-        lastTickTime={lastTickTime}
-        broker={broker}
-        openMtm={positions.reduce((sum, p) => sum + (p.netQty !== 0 ? p.pnl : 0), 0)}
-      />
 
       {/* ERROR BANNER */}
       {feedError && (
@@ -936,16 +1020,15 @@ export default function CyberScalperTerminal() {
       )}
 
       {/* MAIN TERMINAL BODY */}
-      <div className="flex-1 flex flex-col gap-4 p-4 lg:p-6 max-w-[1700px] mx-auto w-full">
-        {/* 1. EMA 9 & 20 SCALP STRATEGY CONFLUENCE & RISK MATRIX */}
+      <div className="flex-1 flex flex-col gap-3 p-4 lg:p-6 max-w-[1700px] mx-auto w-full">
+        {/* 1. TACTICAL SETUP + SL/TP ANCHORS */}
         <CyberStrategyIntelligence
-          spot={spot}
           strategy={feedData?.strategy || null}
           onApplyLevels={handleApplyStrategyLevels}
         />
 
-        {/* 2. TELEMETRY HUD: 9/20 EMA DIFFERENCE + VWAP BIAS RADAR */}
-        <CyberBiasRadar spot={spot} live={feedData?.live || null} />
+        {/* 2. BIAS + SPREAD + VWAP READOUT */}
+        <CyberBiasRadar live={feedData?.live || null} />
 
         {/* 3. THE BIG SCALPING TERMINAL: MASSIVE BUY & SELL BUTTONS */}
         <CyberOrderPad
