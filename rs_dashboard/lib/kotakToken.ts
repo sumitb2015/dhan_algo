@@ -152,7 +152,12 @@ function reloginKotak(): Promise<boolean> {
 
 /** True for any Kotak response signaling a dead session (expired or malformed token). */
 function isSessionDead(json: Record<string, unknown>): boolean {
-  return json.stCode === KOTAK_UNAUTHORIZED || json.stCode === KOTAK_INVALID_SESSION;
+  // stCode can live at either depth — mirrors lib/kotak/responses.py's
+  // st_code() on the Python side. Checking only the top level would silently
+  // skip the relogin-retry for any response shaped like {"data": {"stCode": ...}}.
+  const data = (typeof json.data === 'object' && json.data !== null ? json.data : {}) as Record<string, unknown>;
+  const code = json.stCode ?? data.stCode;
+  return code === KOTAK_UNAUTHORIZED || code === KOTAK_INVALID_SESSION;
 }
 
 function kotakUrl(apiPath: string): string {
@@ -185,12 +190,23 @@ function raiseIfError(json: Record<string, unknown>): void {
     const message = Array.isArray(errs)
       ? errs.map(e => (e && typeof e === 'object' ? String((e as Record<string, unknown>).message ?? e) : String(e))).join('; ')
       : String(errs);
+    console.error('[kotakToken] request failed, full response:', JSON.stringify(json));
     throw new Error(message);
   }
   const data = (typeof json.data === 'object' && json.data !== null ? json.data : {}) as Record<string, unknown>;
   const msg = json.errMsg ?? json.emsg ?? data.errMsg ?? data.emsg;
-  if (msg) throw new Error(String(msg));
-  if (json.stat === 'Not_Ok') throw new Error(`Kotak rejected the request (stCode ${json.stCode ?? '?'})`);
+  if (msg) {
+    console.error('[kotakToken] request failed, full response:', JSON.stringify(json));
+    // Surface the stCode alongside the message — Kotak reuses the same
+    // errMsg text ("Unauthorized", etc.) across genuinely different stCodes,
+    // and the bare message alone isn't enough to tell them apart later.
+    const code = json.stCode ?? data.stCode;
+    throw new Error(code !== undefined ? `${String(msg)} (stCode ${code})` : String(msg));
+  }
+  if (json.stat === 'Not_Ok') {
+    console.error('[kotakToken] request failed, full response:', JSON.stringify(json));
+    throw new Error(`Kotak rejected the request (stCode ${json.stCode ?? '?'})`);
+  }
 }
 
 /** Authenticated GET against the Kotak Neo REST API. Throws on error, `[]`-safe on an empty book. */
