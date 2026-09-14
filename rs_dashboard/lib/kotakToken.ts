@@ -1,5 +1,6 @@
 import path from 'path';
 import fs from 'fs';
+import { runPythonJson } from './pyExec';
 
 // Direct Kotak Neo REST from Node, mirroring lib/zerodhaToken.ts.
 //
@@ -24,8 +25,11 @@ const TOKEN_FILE = path.join(PROJECT_ROOT, 'kotak_access_token.json');
 
 /** Kotak's "nothing to report" code, returned in place of an empty data list. */
 export const KOTAK_NO_DATA = 5203;
-/** Session expired/invalid — re-login required, retrying is pointless. */
+/** Session expired — retrying the SAME session is pointless; see reloginKotak(). */
 export const KOTAK_UNAUTHORIZED = 100008;
+/** Session token is malformed/invalid — same recovery path as KOTAK_UNAUTHORIZED.
+ *  Confirmed empirically: a corrupted token comes back as this code, not 100008. */
+export const KOTAK_INVALID_SESSION = 100010;
 
 // REST paths, from the SDK's PROD_URL table.
 export const KOTAK_PATHS = {
@@ -109,6 +113,46 @@ export function getKotakSession(): KotakSession {
   return { baseUrl, editToken, editSid, serverId, ucc };
 }
 
+const RELOGIN_COOLDOWN_MS = 20_000;
+let lastReloginAt = 0;
+let reloginInFlight: Promise<boolean> | null = null;
+
+/**
+ * Kotak sessions can die mid-day (stCode 100008 'unauthorized') independent
+ * of our locally tracked expiryTime — a broker-side quirk already documented
+ * and handled on the Python side in scripts/tools/child_brokers.py's
+ * KotakChild (one capped re-login; retrying the same session fixes nothing).
+ * This is the Node-side twin: concurrent callers that hit a dead session in
+ * the same window share one kotak_autologin.py spawn instead of each
+ * starting their own, and a cooldown stops every poll tick from re-attempting
+ * a login that is genuinely broken (revoked API key, TOTP drift) rather than
+ * just stale.
+ */
+function reloginKotak(): Promise<boolean> {
+  if (reloginInFlight) return reloginInFlight;
+  if (Date.now() - lastReloginAt < RELOGIN_COOLDOWN_MS) return Promise.resolve(false);
+  lastReloginAt = Date.now();
+  reloginInFlight = (async () => {
+    try {
+      const scriptPath = path.join(PROJECT_ROOT, 'scripts', 'tools', 'kotak_autologin.py');
+      const result = await runPythonJson<{ success: boolean; error?: string }>(scriptPath, ['--force'], 30_000);
+      if (!result.success) return false;
+      cache = null; // force getKotakSession() to re-read the just-refreshed file
+      return true;
+    } catch {
+      return false;
+    } finally {
+      reloginInFlight = null;
+    }
+  })();
+  return reloginInFlight;
+}
+
+/** True for any Kotak response signaling a dead session (expired or malformed token). */
+function isSessionDead(json: Record<string, unknown>): boolean {
+  return json.stCode === KOTAK_UNAUTHORIZED || json.stCode === KOTAK_INVALID_SESSION;
+}
+
 function kotakUrl(apiPath: string): string {
   const { baseUrl, serverId } = getKotakSession();
   // `sId` is always sent, even when empty — that is what the Kotak SDK does, and
@@ -139,11 +183,18 @@ function raiseIfError(json: Record<string, unknown>): void {
 
 /** Authenticated GET against the Kotak Neo REST API. Throws on error, `[]`-safe on an empty book. */
 export async function kotakGet(apiPath: string, timeoutMs = 10_000): Promise<Record<string, unknown>> {
-  const res = await fetch(kotakUrl(apiPath), {
-    headers: authHeaders(),
-    signal: AbortSignal.timeout(timeoutMs),
-  });
-  const json = await res.json() as Record<string, unknown>;
+  const doRequest = async () => {
+    const res = await fetch(kotakUrl(apiPath), {
+      headers: authHeaders(),
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+    return await res.json() as Record<string, unknown>;
+  };
+
+  let json = await doRequest();
+  if (isSessionDead(json) && await reloginKotak()) {
+    json = await doRequest();
+  }
   raiseIfError(json);
   return json;
 }
@@ -163,14 +214,24 @@ export async function kotakPost(
   params: Record<string, string | number>,
   timeoutMs = 10_000,
 ): Promise<Record<string, unknown>> {
-  const formBody = new URLSearchParams({ jData: JSON.stringify(params) });
-  const res = await fetch(kotakUrl(apiPath), {
-    method: 'POST',
-    headers: { ...authHeaders(), 'Content-Type': 'application/x-www-form-urlencoded' },
-    body: formBody.toString(),
-    signal: AbortSignal.timeout(timeoutMs),
-  });
-  const json = await res.json() as Record<string, unknown>;
+  const doRequest = async () => {
+    const formBody = new URLSearchParams({ jData: JSON.stringify(params) });
+    const res = await fetch(kotakUrl(apiPath), {
+      method: 'POST',
+      headers: { ...authHeaders(), 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: formBody.toString(),
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+    return await res.json() as Record<string, unknown>;
+  };
+
+  // Kotak rejects a request under a dead session outright rather than
+  // silently accepting it (see reloginKotak's doc comment) — a retry after a
+  // fresh login cannot double-place an order the first attempt never placed.
+  let json = await doRequest();
+  if (isSessionDead(json) && await reloginKotak()) {
+    json = await doRequest();
+  }
   raiseIfError(json);
   return json;
 }

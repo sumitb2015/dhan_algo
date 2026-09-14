@@ -22,9 +22,13 @@ from typing import List, Optional, Tuple
 
 # Kotak's "nothing to report" code, returned in place of an empty data list.
 NO_DATA_STCODE = 5203
-# Session died (expired/invalid tokens). Distinct from any ordinary rejection:
-# retrying is pointless until the session is re-established.
+# Session died (expired). Distinct from any ordinary rejection: retrying is
+# pointless until the session is re-established.
 UNAUTHORIZED_STCODE = 100008
+# Session token malformed/invalid — same dead-session recovery path as
+# UNAUTHORIZED_STCODE. Confirmed empirically: a corrupted token comes back as
+# this code, not 100008 (see rs_dashboard/lib/kotakToken.ts's twin constant).
+INVALID_SESSION_STCODE = 100010
 # Illiquid strike rejecting a MARKET order: "Last Traded Price (LTP) not
 # available for this instrument. Please try placing a limit order".
 NO_LTP_STCODE = 1041
@@ -49,8 +53,8 @@ def st_code(res) -> Optional[int]:
 
 
 def is_unauthorized(res) -> bool:
-    """Has the session expired? Callers should re-login rather than retry."""
-    return st_code(res) == UNAUTHORIZED_STCODE
+    """Is the session dead (expired or malformed token)? Callers should re-login rather than retry."""
+    return st_code(res) in (UNAUTHORIZED_STCODE, INVALID_SESSION_STCODE)
 
 
 def error_message(res) -> Optional[str]:
