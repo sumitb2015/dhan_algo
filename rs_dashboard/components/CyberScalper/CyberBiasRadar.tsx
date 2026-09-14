@@ -108,6 +108,18 @@ export default function CyberBiasRadar({ live }: BiasRadarProps) {
 
         <span className="text-zinc-700 hidden sm:inline">|</span>
 
+        {/* Fast EMA 9 */}
+        <div className="flex items-center gap-1.5 text-xs font-mono">
+          <span className="text-cyan-400 font-bold">EMA9:</span>
+          <span className="text-zinc-200 font-bold">{live.ema9.toFixed(2)}</span>
+        </div>
+
+        {/* Base EMA 20 */}
+        <div className="flex items-center gap-1.5 text-xs font-mono">
+          <span className="text-purple-400 font-bold">EMA20:</span>
+          <span className="text-zinc-200 font-bold">{live.ema20.toFixed(2)}</span>
+        </div>
+
         {/* Spread (9 - 20) */}
         <div className="flex items-center gap-1.5 text-xs font-mono">
           <span className="text-zinc-500">SPREAD:</span>
@@ -126,9 +138,10 @@ export default function CyberBiasRadar({ live }: BiasRadarProps) {
           </span>
         </div>
 
-        {/* VWAP distance */}
+        {/* VWAP — absolute level + distance */}
         <div className="flex items-center gap-1.5 text-xs font-mono">
-          <span className="text-zinc-500">VWAP:</span>
+          <span className="text-amber-400 font-bold">VWAP:</span>
+          <span className="text-zinc-200 font-bold">{live.vwap.toFixed(2)}</span>
           <span className={cn('font-bold', live.price_vs_vwap >= 0 ? 'text-emerald-400' : 'text-rose-400')}>
             {live.price_vs_vwap >= 0 ? 'ABOVE' : 'BELOW'} ({fmt(live.price_vs_vwap)} pts)
           </span>
