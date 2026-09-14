@@ -17,7 +17,8 @@ export default function NavBar() {
 
   async function handleDisconnect() {
     try {
-      await fetch('/api/auth/logout', { method: 'POST' });
+      const res = await fetch('/api/auth/logout', { method: 'POST' });
+      if (!res.ok) throw new Error(`logout failed: ${res.status}`);
       toast.success('Session ended');
     } catch {
       toast.error('Failed to end session — try again');

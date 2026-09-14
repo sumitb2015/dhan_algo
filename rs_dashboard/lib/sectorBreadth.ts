@@ -15,6 +15,7 @@ export interface SectorConstituent {
   mansfieldRS: number;
   volume: number;
   vol20Avg: number;
+  histLen: number;
 }
 
 export interface SectorMetrics {
@@ -80,12 +81,13 @@ export async function runSectorBreadthAnalysis(force = false): Promise<SectorBre
         const prevPrice = closes[n - 2] ?? price;
         const price1W = closes[Math.max(0, n - 6)] ?? price;
         const price1M = closes[Math.max(0, n - 23)] ?? price;
-        const price3M = closes[Math.max(0, n - 66)] ?? price;
+        const has3MHistory = n >= 66;
+        const price3M = has3MHistory ? closes[n - 66] : price;
 
         const change1D = prevPrice > 0 ? ((price - prevPrice) / prevPrice) * 100 : 0;
         const change1W = price1W > 0 ? ((price - price1W) / price1W) * 100 : 0;
         const change1M = price1M > 0 ? ((price - price1M) / price1M) * 100 : 0;
-        const change3M = price3M > 0 ? ((price - price3M) / price3M) * 100 : 0;
+        const change3M = has3MHistory && price3M > 0 ? ((price - price3M) / price3M) * 100 : 0;
 
         const sma20 = computeSMA(closes, 20);
         const sma50 = n >= 50 ? computeSMA(closes, 50) : null;
@@ -129,6 +131,7 @@ export async function runSectorBreadthAnalysis(force = false): Promise<SectorBre
           mansfieldRS: Math.round(mansfieldRS * 10) / 10,
           volume: rawVol,
           vol20Avg: Math.round(vol20),
+          histLen: n,
         };
 
         if (!sectorGroups.has(sec)) {
@@ -146,13 +149,16 @@ export async function runSectorBreadthAnalysis(force = false): Promise<SectorBre
     const count = members.length;
     if (count === 0) continue;
 
+    const eligible50 = members.filter((m) => m.histLen >= 50);
+    const eligible200 = members.filter((m) => m.histLen >= 200);
+
     const above20Count = members.filter((m) => m.above20).length;
-    const above50Count = members.filter((m) => m.above50).length;
-    const above200Count = members.filter((m) => m.above200).length;
+    const above50Count = eligible50.filter((m) => m.above50).length;
+    const above200Count = eligible200.filter((m) => m.above200).length;
 
     const pctAbove20 = (above20Count / count) * 100;
-    const pctAbove50 = (above50Count / count) * 100;
-    const pctAbove200 = (above200Count / count) * 100;
+    const pctAbove50 = eligible50.length > 0 ? (above50Count / eligible50.length) * 100 : 0;
+    const pctAbove200 = eligible200.length > 0 ? (above200Count / eligible200.length) * 100 : 0;
 
     // Accumulation / Distribution Score: Up-turnover / Total Turnover (monetary capital inflow)
     let upVol = 0;
@@ -168,12 +174,13 @@ export async function runSectorBreadthAnalysis(force = false): Promise<SectorBre
     const sortedRS = [...members.map((m) => m.mansfieldRS)].sort((a, b) => a - b);
     const sorted1W = [...members.map((m) => m.change1W)].sort((a, b) => a - b);
     const sorted1M = [...members.map((m) => m.change1M)].sort((a, b) => a - b);
-    const sorted3M = [...members.map((m) => m.change3M)].sort((a, b) => a - b);
+    const eligible3M = members.filter((m) => m.histLen >= 66);
+    const sorted3M = [...eligible3M.map((m) => m.change3M)].sort((a, b) => a - b);
 
     const medianRS = sortedRS[Math.floor(count / 2)] || 0;
     const median1W = sorted1W[Math.floor(count / 2)] || 0;
     const median1M = sorted1M[Math.floor(count / 2)] || 0;
-    const median3M = sorted3M[Math.floor(count / 2)] || 0;
+    const median3M = eligible3M.length > 0 ? sorted3M[Math.floor(eligible3M.length / 2)] || 0 : 0;
 
     // Internal Thrust: Sector breadth is exceptionally strong (>=70% above 20 DMA)
     const hasInternalThrust = pctAbove20 >= 70;
