@@ -303,6 +303,20 @@ strike/IV special-case (`if (leg.strike === 23500) ...`) in a component that rea
   "seed a demo position, then an effect replaces it once real data arrives" shape, initialize the
   seeded state to empty/null and let the effect's own now-legitimately-reachable branch build the
   first real value — never pre-fill it with the reference fixture's answer.
+- **`Baskets.tsx` had the quieter version of the same bug shape** (fixed 2026-09, same session):
+  its default `legs` state was a literal 23300 PE / 23500 CE pair — not values keyed to a
+  reference screenshot, just the ATM±2 strikes that happened to be correct for spot ≈ 23400 at
+  the time the file was last edited, with no effect ever refreshing them once the real chain
+  loaded (unlike Options Monitor's frozen demo, Baskets had no equivalent "build a real position
+  on load" effect at all — the strike-template `applyTemplate` only ran on an explicit template
+  click). Correct *today*, but silently stale the moment spot drifts away from that level,
+  exactly like a hardcoded fallback would be. The fix mirrors Options Monitor's: seed `legs` as
+  `[]`, and add a one-shot effect (`hasInitializedLegsRef`, same guard shape as
+  `hasInitializedPresetRef`) that calls `applyTemplate` for the default Short Strangle once
+  `atmStrike` is real. Do not call `applyTemplate` before `atmStrike` is real just to avoid the
+  extra effect — `applyTemplate`'s own `atmStrike ?? 23400` fallback exists only to keep a
+  *manual* button click from erroring before data loads, not to be a legitimate seed for the
+  page's starting position.
 - **When copying a working payoff feature from one page to another** (as `Baskets.tsx` did from
   `PositionsStrategyMonitor.tsx`), do a literal `grep` for the reference numbers
   (`23500`, `23300`, `23398`, `23463`, `65.50`, `61.20`, `55.65`, `13.13`, `0.095`, `0.110`) in the

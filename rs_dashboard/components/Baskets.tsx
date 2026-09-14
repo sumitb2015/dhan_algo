@@ -196,28 +196,12 @@ export default function Baskets() {
 
   const [category, setCategory]   = useState<StrategyCategory>('Range Bound');
   const [strategy, setStrategy]   = useState<string | null>('short-strangle');
-  const [legs, setLegs]           = useState<BasketLeg[]>([
-    {
-      id: 'leg-default-pe',
-      side: 'S',
-      option: 'PE',
-      strike: 23300,
-      lots: 1,
-      type: 'MARKET',
-      price: '',
-      expiry: '2026-09-15',
-    },
-    {
-      id: 'leg-default-ce',
-      side: 'S',
-      option: 'CE',
-      strike: 23500,
-      lots: 1,
-      type: 'MARKET',
-      price: '',
-      expiry: '2026-09-15',
-    },
-  ]);
+  // Starts empty — the auto-init effect below (mirrors Options Monitor's chain-derived preset
+  // fix) builds the real ATM+/-2-strike Short Strangle once live chain data arrives, instead of
+  // seeding a strike pair frozen at whatever spot/expiry happened to be true when this file was
+  // last edited (previously literal 23300/23500 @ expiry '2026-09-15', which drifts away from
+  // the real ATM the moment spot moves and was never refreshed until a user clicked a template).
+  const [legs, setLegs]           = useState<BasketLeg[]>([]);
   const [multiplier, setMultiplier] = useState(1);
 
   const [toasts, setToasts]           = useState<Toast[]>([]);
@@ -498,6 +482,24 @@ export default function Baskets() {
       return { id: newLegId(), side: l.side, option: l.option, strike, lots: l.ratio, type: 'MARKET' as const, price: '', expiry: legExpiry };
     }));
   }, [atmStrike, allStrikes, step, expiry, farExpiry, underlying, addToast]);
+
+  // Auto-build the real ATM+/-2 Short Strangle once live chain data arrives (mirrors the
+  // Options Monitor fix for the same bug shape). Never call this before atmStrike is real —
+  // applyTemplate's own fallback (a hardcoded 23400 "ATM guess") exists only to avoid an error
+  // toast on manual clicks before data loads, not to seed the page's starting position.
+  const hasInitializedLegsRef = useRef(false);
+  useEffect(() => {
+    if (hasInitializedLegsRef.current) return;
+    if (legs.length > 0) {
+      hasInitializedLegsRef.current = true;
+      return;
+    }
+    if (atmStrike == null) return;
+    const tpl = Object.values(STRATEGY_CATEGORIES).flat().find((t) => t.key === 'short-strangle');
+    if (!tpl) return;
+    hasInitializedLegsRef.current = true;
+    applyTemplate(tpl);
+  }, [legs.length, atmStrike, applyTemplate]);
 
   const updateLeg = useCallback((id: string, patch: Partial<BasketLeg>) => {
     setLegs(prev => prev.map(l => (l.id === id ? { ...l, ...patch } : l)));
