@@ -12,6 +12,8 @@
  */
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
+import { Maximize2, Minimize2 } from 'lucide-react';
 
 interface PayoffDiagramProps {
   curve: { spot: number; pnl: number }[];
@@ -63,6 +65,7 @@ export default function PayoffDiagram({ curve, currentSpot, breakevens }: Payoff
   const svgRef = useRef<SVGSVGElement | null>(null);
   const [hoverSpot, setHoverSpot] = useState<number | null>(null);
   const [boxW, setBoxW] = useState(900);
+  const [full, setFull] = useState(false);
   const roRef = useRef<ResizeObserver | null>(null);
 
   const boxRef = useCallback((el: HTMLDivElement | null) => {
@@ -77,7 +80,22 @@ export default function PayoffDiagram({ curve, currentSpot, breakevens }: Payoff
 
   useEffect(() => () => roRef.current?.disconnect(), []);
 
+  useEffect(() => {
+    if (!full) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setFull(false);
+    };
+    window.addEventListener('keydown', onKey);
+    const origOverflow = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+    return () => {
+      window.removeEventListener('keydown', onKey);
+      document.body.style.overflow = origOverflow;
+    };
+  }, [full]);
+
   const W = Math.max(480, Math.round(boxW));
+  const H_ = full ? Math.max(540, typeof window !== 'undefined' ? window.innerHeight - 150 : 540) : H;
 
   const model = useMemo(() => {
     if (curve.length === 0) return null;
@@ -110,7 +128,7 @@ export default function PayoffDiagram({ curve, currentSpot, breakevens }: Payoff
     const yHi = clampedYMax + yPad;
 
     const sx = (x: number) => PAD.left + ((x - xLo) / (xHi - xLo)) * (W - PAD.left - PAD.right);
-    const sy = (y: number) => PAD.top + ((yHi - y) / (yHi - yLo)) * (H - PAD.top - PAD.bottom);
+    const sy = (y: number) => PAD.top + ((yHi - y) / (yHi - yLo)) * (H_ - PAD.top - PAD.bottom);
 
     const line = visible.map((p, i) => `${i ? 'L' : 'M'}${sx(p.spot).toFixed(1)},${sy(p.pnl).toFixed(1)}`).join('');
     const area = `${line}L${sx(xHi).toFixed(1)},${sy(0).toFixed(1)}L${sx(xLo).toFixed(1)},${sy(0).toFixed(1)}Z`;
@@ -122,7 +140,7 @@ export default function PayoffDiagram({ curve, currentSpot, breakevens }: Payoff
       yTicks: niceTicks(yLo, yHi, 6),
       visible,
     };
-  }, [curve, currentSpot, breakevens, W]);
+  }, [curve, currentSpot, breakevens, W, H_]);
 
   if (!model) return null;
 
@@ -142,97 +160,139 @@ export default function PayoffDiagram({ curve, currentSpot, breakevens }: Payoff
 
   const tooltipLeft = sx(readoutSpot) > W * 0.6;
 
-  return (
-    <div ref={boxRef} className="w-full">
-      <svg
-        ref={svgRef}
-        viewBox={`0 0 ${W} ${H}`}
-        width={W}
-        height={H}
-        className="block max-w-full select-none"
-        role="img"
-        aria-label="Strategy payoff at expiry"
-        onMouseMove={onMove}
-        onMouseLeave={() => setHoverSpot(null)}
-      >
-        <defs>
-          <clipPath id="sb-clip-profit"><rect x={0} y={0} width={W} height={zeroY} /></clipPath>
-          <clipPath id="sb-clip-loss"><rect x={0} y={zeroY} width={W} height={H - zeroY} /></clipPath>
-        </defs>
+  const chart = (
+    <div
+      ref={boxRef}
+      className={
+        full
+          ? 'fixed inset-0 z-50 overflow-auto bg-zinc-950 p-4 md:p-6 flex flex-col'
+          : 'w-full flex flex-col'
+      }
+    >
+      {/* Chart Header & Controls */}
+      <div className="flex items-center justify-between pb-1.5 px-0.5 border-b border-zinc-800/80 mb-2 shrink-0">
+        <div className="flex items-center gap-2.5 flex-wrap">
+          <span className="text-xs font-bold uppercase tracking-wider text-zinc-300">
+            Strategy Payoff at Expiry
+          </span>
+          {currentSpot > 0 && (
+            <span className="text-[11px] font-mono px-2 py-0.5 rounded bg-zinc-900 border border-zinc-800 text-sky-400">
+              Spot: {currentSpot.toLocaleString('en-IN')}
+            </span>
+          )}
+          {breakevens.length > 0 && (
+            <span className="text-[11px] font-mono px-2 py-0.5 rounded bg-amber-500/10 border border-amber-500/20 text-amber-400">
+              BE: {breakevens.map((b) => b.toFixed(0)).join(', ')}
+            </span>
+          )}
+        </div>
 
-        {/* Y grid + rupee axis */}
-        {model.yTicks.map((t) => (
-          <g key={`y${t}`}>
-            <line x1={PAD.left} x2={W - PAD.right} y1={sy(t)} y2={sy(t)}
-              stroke="#27272a" strokeWidth={1} strokeDasharray={t === 0 ? undefined : '3 4'} />
-            <text x={PAD.left - 8} y={sy(t) + 3.5} textAnchor="end" fontSize={10} fill="#71717a" className="font-mono">
-              {fmtInr(t)}
-            </text>
-          </g>
-        ))}
+        <button
+          type="button"
+          onClick={() => setFull((f) => !f)}
+          className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg border border-zinc-750 bg-zinc-900 text-xs font-semibold text-zinc-300 hover:bg-zinc-800 hover:text-white transition-colors cursor-pointer"
+          title={full ? 'Exit full screen (Esc)' : 'Full screen'}
+          aria-label={full ? 'Exit full screen' : 'Full screen'}
+        >
+          {full ? <Minimize2 className="h-3.5 w-3.5" /> : <Maximize2 className="h-3.5 w-3.5" />}
+          <span>{full ? 'Exit Full Screen' : 'Full Screen'}</span>
+        </button>
+      </div>
 
-        {/* X axis */}
-        {model.xTicks.map((t) => (
-          <text key={`x${t}`} x={sx(t)} y={H - PAD.bottom + 17} textAnchor="middle" fontSize={10}
-            fill="#71717a" className="font-mono">
-            {t.toFixed(0)}
-          </text>
-        ))}
+      <div className="flex-1 flex items-center justify-center min-h-0">
+        <svg
+          ref={svgRef}
+          viewBox={`0 0 ${W} ${H_}`}
+          width={W}
+          height={H_}
+          className="block max-w-full select-none"
+          role="img"
+          aria-label="Strategy payoff at expiry"
+          onMouseMove={onMove}
+          onMouseLeave={() => setHoverSpot(null)}
+        >
+          <defs>
+            <clipPath id="sb-clip-profit"><rect x={0} y={0} width={W} height={zeroY} /></clipPath>
+            <clipPath id="sb-clip-loss"><rect x={0} y={zeroY} width={W} height={H_ - zeroY} /></clipPath>
+          </defs>
 
-        {/* Payoff curve: green above zero, red below */}
-        <g clipPath="url(#sb-clip-profit)"><path d={model.area} fill="#10b981" fillOpacity={0.18} /></g>
-        <g clipPath="url(#sb-clip-loss)"><path d={model.area} fill="#ef4444" fillOpacity={0.18} /></g>
-        <g clipPath="url(#sb-clip-profit)"><path d={model.line} fill="none" stroke="#10b981" strokeWidth={2} /></g>
-        <g clipPath="url(#sb-clip-loss)"><path d={model.line} fill="none" stroke="#ef4444" strokeWidth={2} /></g>
-
-        <line x1={PAD.left} x2={W - PAD.right} y1={zeroY} y2={zeroY} stroke="#52525b" strokeWidth={1.25} />
-
-        {/* Breakevens */}
-        {breakevens.filter((b) => b >= xLo && b <= xHi).map((be) => {
-          const pct = currentSpot > 0 ? ((be - currentSpot) / currentSpot) * 100 : null;
-          const pctStr = pct !== null ? ` (${pct >= 0 ? '+' : ''}${pct.toFixed(1)}%)` : '';
-          return (
-            <g key={`be${be}`}>
-              <circle cx={sx(be)} cy={zeroY} r={4} fill="#f59e0b" stroke="#09090b" strokeWidth={2} />
-              <text x={sx(be)} y={zeroY - 9} textAnchor="middle" fontSize={9.5} fontWeight={700} fill="#fbbf24" className="font-mono">
-                BE {be.toFixed(0)}{pctStr}
+          {/* Y grid + rupee axis */}
+          {model.yTicks.map((t) => (
+            <g key={`y${t}`}>
+              <line x1={PAD.left} x2={W - PAD.right} y1={sy(t)} y2={sy(t)}
+                stroke="#27272a" strokeWidth={1} strokeDasharray={t === 0 ? undefined : '3 4'} />
+              <text x={PAD.left - 8} y={sy(t) + 3.5} textAnchor="end" fontSize={10} fill="#71717a" className="font-mono">
+                {fmtInr(t)}
               </text>
             </g>
-          );
-        })}
+          ))}
 
-        {/* Current spot marker */}
-        {currentSpot >= xLo && currentSpot <= xHi && (
-          <g>
-            <line x1={sx(currentSpot)} x2={sx(currentSpot)} y1={PAD.top} y2={H - PAD.bottom}
-              stroke="#0ea5e9" strokeWidth={1.25} strokeDasharray="4 3" />
-            <text x={sx(currentSpot)} y={PAD.top - 5} textAnchor="middle" fontSize={10} fontWeight={700}
-              fill="#38bdf8" className="font-mono">
-              {currentSpot.toFixed(0)}
+          {/* X axis */}
+          {model.xTicks.map((t) => (
+            <text key={`x${t}`} x={sx(t)} y={H_ - PAD.bottom + 17} textAnchor="middle" fontSize={10}
+              fill="#71717a" className="font-mono">
+              {t.toFixed(0)}
             </text>
-          </g>
-        )}
+          ))}
 
-        {/* Readout crosshair — follows the cursor, parks on current spot otherwise */}
-        {readoutSpot >= xLo && readoutSpot <= xHi && readoutPnl !== null && (
-          <g pointerEvents="none">
-            <line x1={sx(readoutSpot)} x2={sx(readoutSpot)} y1={PAD.top} y2={H - PAD.bottom}
-              stroke="#a1a1aa" strokeWidth={1} strokeDasharray="2 3" />
-            <circle cx={sx(readoutSpot)} cy={sy(readoutPnl)} r={4.5}
-              fill={readoutPnl >= 0 ? '#10b981' : '#ef4444'} stroke="#09090b" strokeWidth={2} />
-            <g transform={`translate(${tooltipLeft ? sx(readoutSpot) - 118 : sx(readoutSpot) + 10}, ${PAD.top + 4})`}>
-              <rect width={108} height={34} rx={6} fill="#09090b" fillOpacity={0.9} stroke="#3f3f46" />
-              <text x={8} y={13} fontSize={9.5} fill="#a1a1aa" className="font-mono">
-                Spot {readoutSpot.toFixed(0)}
-              </text>
-              <text x={8} y={26} fontSize={11} fontWeight={700} className="font-mono"
-                fill={readoutPnl >= 0 ? '#10b981' : '#ef4444'}>
-                {readoutPnl >= 0 ? '+' : ''}₹{readoutPnl.toLocaleString('en-IN', { maximumFractionDigits: 0 })}
+          {/* Payoff curve: green above zero, red below */}
+          <g clipPath="url(#sb-clip-profit)"><path d={model.area} fill="#10b981" fillOpacity={0.18} /></g>
+          <g clipPath="url(#sb-clip-loss)"><path d={model.area} fill="#ef4444" fillOpacity={0.18} /></g>
+          <g clipPath="url(#sb-clip-profit)"><path d={model.line} fill="none" stroke="#10b981" strokeWidth={2} /></g>
+          <g clipPath="url(#sb-clip-loss)"><path d={model.line} fill="none" stroke="#ef4444" strokeWidth={2} /></g>
+
+          <line x1={PAD.left} x2={W - PAD.right} y1={zeroY} y2={zeroY} stroke="#52525b" strokeWidth={1.25} />
+
+          {/* Breakevens */}
+          {breakevens.filter((b) => b >= xLo && b <= xHi).map((be) => {
+            const pct = currentSpot > 0 ? ((be - currentSpot) / currentSpot) * 100 : null;
+            const pctStr = pct !== null ? ` (${pct >= 0 ? '+' : ''}${pct.toFixed(1)}%)` : '';
+            return (
+              <g key={`be${be}`}>
+                <circle cx={sx(be)} cy={zeroY} r={4} fill="#f59e0b" stroke="#09090b" strokeWidth={2} />
+                <text x={sx(be)} y={zeroY - 9} textAnchor="middle" fontSize={9.5} fontWeight={700} fill="#fbbf24" className="font-mono">
+                  BE {be.toFixed(0)}{pctStr}
+                </text>
+              </g>
+            );
+          })}
+
+          {/* Current spot marker */}
+          {currentSpot >= xLo && currentSpot <= xHi && (
+            <g>
+              <line x1={sx(currentSpot)} x2={sx(currentSpot)} y1={PAD.top} y2={H_ - PAD.bottom}
+                stroke="#0ea5e9" strokeWidth={1.25} strokeDasharray="4 3" />
+              <text x={sx(currentSpot)} y={PAD.top - 5} textAnchor="middle" fontSize={10} fontWeight={700}
+                fill="#38bdf8" className="font-mono">
+                {currentSpot.toFixed(0)}
               </text>
             </g>
-          </g>
-        )}
-      </svg>
+          )}
+
+          {/* Readout crosshair — follows the cursor, parks on current spot otherwise */}
+          {readoutSpot >= xLo && readoutSpot <= xHi && readoutPnl !== null && (
+            <g pointerEvents="none">
+              <line x1={sx(readoutSpot)} x2={sx(readoutSpot)} y1={PAD.top} y2={H_ - PAD.bottom}
+                stroke="#a1a1aa" strokeWidth={1} strokeDasharray="2 3" />
+              <circle cx={sx(readoutSpot)} cy={sy(readoutPnl)} r={4.5}
+                fill={readoutPnl >= 0 ? '#10b981' : '#ef4444'} stroke="#09090b" strokeWidth={2} />
+              <g transform={`translate(${tooltipLeft ? sx(readoutSpot) - 118 : sx(readoutSpot) + 10}, ${PAD.top + 4})`}>
+                <rect width={108} height={34} rx={6} fill="#09090b" fillOpacity={0.9} stroke="#3f3f46" />
+                <text x={8} y={13} fontSize={9.5} fill="#a1a1aa" className="font-mono">
+                  Spot {readoutSpot.toFixed(0)}
+                </text>
+                <text x={8} y={26} fontSize={11} fontWeight={700} className="font-mono"
+                  fill={readoutPnl >= 0 ? '#10b981' : '#ef4444'}>
+                  {readoutPnl >= 0 ? '+' : ''}₹{readoutPnl.toLocaleString('en-IN', { maximumFractionDigits: 0 })}
+                </text>
+              </g>
+            </g>
+          )}
+        </svg>
+      </div>
     </div>
   );
+
+  if (full && typeof document !== 'undefined') return createPortal(chart, document.body);
+  return chart;
 }

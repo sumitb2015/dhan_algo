@@ -129,8 +129,22 @@ export default function PositionsPayoffChart({
 
   useEffect(() => () => roRef.current?.disconnect(), []);
 
+  useEffect(() => {
+    if (!full) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setFull(false);
+    };
+    window.addEventListener('keydown', onKey);
+    const origOverflow = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+    return () => {
+      window.removeEventListener('keydown', onKey);
+      document.body.style.overflow = origOverflow;
+    };
+  }, [full]);
+
   const W = Math.max(W_MIN, Math.round(boxW));
-  const H_ = full ? H_FULL : (height ?? H);
+  const H_ = full ? Math.max(H_FULL, typeof window !== 'undefined' ? window.innerHeight - 150 : H_FULL) : (height ?? H);
 
   const model = useMemo(() => {
     const hasExpiry = expiryCurve.length >= 2;

@@ -170,6 +170,15 @@ Option traders analyze Greeks both per-contract and position-wide:
 - **Two `clipPath`s at `zeroY`**: Carves the plot at $y=0$. The curve path is rendered twice: once inside `profitClip` (green) and once inside `lossClip` (red).
 - **Callback Ref for ResizeObserver**: Do not use `useRef` + `useEffect([])` because early-return loading states cause the mount effect to miss the element.
 - **Chrome Theming**: Always call `useChartChrome()` from `lib/chartTheme.ts` for axis, gridlines, and tooltip chrome. Never hardcode dark hexes.
+- **Full-Screen Viewport Portaling (`createPortal(chart, document.body)`)**:
+  - A card ancestor with `backdrop-blur` (or any `filter`/`backdrop-filter`) creates a CSS containing block for `position: fixed` descendants — without portaling to `<body>`, a "fullscreen" overlay gets trapped inside the card's own box instead of covering the viewport.
+  - Portaling to `document.body` with `fixed inset-0 z-50 overflow-y-auto bg-zinc-950 p-4 md:p-6` escapes all parent stacking contexts and filters.
+  - All dashboard payoff diagrams implement full screen:
+    - **Options Monitor** (`PositionsStrategyMonitor.tsx`): Fullscreen terminal with expanded chart (`h-[52vh] min-h-[380px]`), target spot/date sliders, futures basis card, and SD table.
+    - **Strategy Builder** (`PayoffDiagram.tsx`): Fullscreen overlay with header, spot pill, breakevens, and responsive SVG height.
+    - **Baskets** (`BasketPayoffChart.tsx`): Fullscreen overlay with responsive SVG width and height (`H_ = 540`).
+    - **Positions Analytics** (`PositionsPayoffChart.tsx`): Fullscreen overlay with OI bars and responsive height.
+  - **Escape Key & Body Scroll Lock**: Always attach a `keydown` listener for `'Escape'` and lock `document.body.style.overflow = 'hidden'` while fullscreen is active.
 
 ### Recharts Terminal (`PositionsStrategyMonitor.tsx`)
 - **XAxis Must Be `type="number"`**:
