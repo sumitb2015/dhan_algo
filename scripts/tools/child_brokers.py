@@ -1042,8 +1042,6 @@ class KotakChild(ChildBroker):
                 transaction_type='B' if str(side).upper() == 'BUY' else 'S',
                 amo='NO',
                 disclosed_quantity='0',
-                market_protection='0',
-                pf='N',
                 trigger_price='0',
             )
         except Exception as e:
