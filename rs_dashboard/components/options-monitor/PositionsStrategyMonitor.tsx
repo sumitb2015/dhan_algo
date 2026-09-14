@@ -1,7 +1,7 @@
 'use client';
 
 import React, { useMemo, useState, useRef } from 'react';
-import { OptionLegModel, PayoffPoint, PositionGuard, formatShortExpiry } from '@/lib/optionsMonitorMath';
+import { OptionLegModel, PayoffPoint, PositionGuard, SdLevels, formatShortExpiry, computeExpiryPnlAtSpot } from '@/lib/optionsMonitorMath';
 import TerminalPanel from './TerminalPanel';
 import {
   ResponsiveContainer,
@@ -12,6 +12,7 @@ import {
   Tooltip,
   CartesianGrid,
   ReferenceLine,
+  ReferenceArea,
 } from 'recharts';
 import {
   Plus,
@@ -26,6 +27,16 @@ import {
 } from 'lucide-react';
 
 const GUARD_PRESET_PCTS = [10, 20, 30, 50];
+
+// Payoff-chart data colours. These are the CLAUDE.md "saturated data colour" exception —
+// deliberately fixed hex in both themes so the chart reads the same way as the industry-
+// standard payoff diagram it mirrors: the kinked at-expiry curve is red/vermillion, the
+// smooth pre-expiry (T+0) curve is blue, profit green / loss red for the shaded zones.
+const PAYOFF_EXPIRY = '#e0533d';
+const PAYOFF_TODAY = '#2d7ff9';
+const PAYOFF_PROFIT = '#16a34a';
+const PAYOFF_LOSS = '#e5484d';
+const PAYOFF_SPOT = '#e5484d';
 
 function GuardStepper({
   value,
@@ -138,6 +149,24 @@ function GuardInput({
   );
 }
 
+function formatTargetDateDisplay(daysRemaining: number, expiryDateStr?: string): string {
+  if (!expiryDateStr) return `${daysRemaining.toFixed(1)}d`;
+  try {
+    const [y, m, d] = expiryDateStr.split('-').map(Number);
+    const expTime = new Date(Date.UTC(y, m - 1, d, 10, 0, 0)).getTime();
+    const targetMs = expTime - (daysRemaining * 24 * 3600 * 1000);
+    const dt = new Date(targetMs);
+    const daysOfWeek = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+    const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+    const dow = daysOfWeek[dt.getDay()];
+    const day = dt.getDate();
+    const mon = months[dt.getMonth()];
+    return `${dow}, ${day} ${mon}`;
+  } catch {
+    return `${daysRemaining.toFixed(1)}d`;
+  }
+}
+
 interface PositionsStrategyMonitorProps {
   strategyName: string;
   totalLots: number;
@@ -147,8 +176,17 @@ interface PositionsStrategyMonitorProps {
   strikeStep: number;
   payoffPoints: PayoffPoint[];
   breakevens: number[];
+  sdLevels?: SdLevels | null;
   chainStrikes?: number[];
   currentExpiry?: string;
+  futurePrice?: number | null;
+  futureBasis?: number;
+  futureExpiry?: string;
+  targetSpot?: number;
+  onTargetSpotChange?: (spot: number) => void;
+  targetDays?: number;
+  onTargetDaysChange?: (days: number) => void;
+  initialDays?: number;
   guards?: Record<string, PositionGuard>;
   onGuardChange?: (legId: string, field: 'target' | 'sl', value: string) => void;
   onTrailToggle?: (legId: string) => void;
@@ -184,8 +222,8 @@ function PayoffTooltip({ active, payload, label }: any) {
       <div className="space-y-1.5 text-xs">
         {todayVal != null && (
           <div className="flex items-center justify-between">
-            <span className="flex items-center gap-1.5 text-amber-400 font-semibold">
-              <span className="w-2.5 h-0.5 bg-amber-400 inline-block border-t border-dashed" />
+            <span className="flex items-center gap-1.5 font-semibold" style={{ color: PAYOFF_TODAY }}>
+              <span className="w-2.5 h-0.5 inline-block" style={{ backgroundColor: PAYOFF_TODAY }} />
               Today (T+0):
             </span>
             <span className={`font-bold ${todayVal >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
@@ -196,8 +234,8 @@ function PayoffTooltip({ active, payload, label }: any) {
 
         {expVal != null && (
           <div className="flex items-center justify-between">
-            <span className="flex items-center gap-1.5 text-sky-400 font-semibold">
-              <span className="w-2.5 h-0.5 bg-sky-400 inline-block" />
+            <span className="flex items-center gap-1.5 font-semibold" style={{ color: PAYOFF_EXPIRY }}>
+              <span className="w-2.5 h-0.5 inline-block" style={{ backgroundColor: PAYOFF_EXPIRY }} />
               At Expiry:
             </span>
             <span className={`font-black ${expVal >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
@@ -228,8 +266,17 @@ export default function PositionsStrategyMonitor({
   strikeStep,
   payoffPoints,
   breakevens,
+  sdLevels,
   chainStrikes,
   currentExpiry,
+  futurePrice,
+  futureBasis,
+  futureExpiry,
+  targetSpot,
+  onTargetSpotChange,
+  targetDays,
+  onTargetDaysChange,
+  initialDays,
   guards,
   onGuardChange,
   onTrailToggle,
@@ -246,6 +293,11 @@ export default function PositionsStrategyMonitor({
   onToggleLegEntered,
   onOpenOptionChain,
 }: PositionsStrategyMonitorProps) {
+  const effectiveTargetSpot = targetSpot ?? spot;
+  const effectiveTargetDays = targetDays ?? 4.0;
+  const maxDays = Math.max(4.0, initialDays ?? 4.0);
+  const targetSpotChangePct = spot > 0 ? ((effectiveTargetSpot - spot) / spot) * 100 : 0;
+
   // Identify key nearest short strikes for accurate clearance calculation
   const shortCeLeg = useMemo(() => {
     return legs
@@ -283,6 +335,74 @@ export default function PositionsStrategyMonitor({
     if (allSame) return firstLots;
     return Math.min(...legs.map((l) => l.lots));
   }, [legs]);
+
+  // Profit/loss background zones for the payoff chart — the spot axis carved into
+  // segments by the breakevens, each shaded green (profit) or red (loss) at expiry.
+  // Sign is checked via the exact intrinsic payoff at a point inside the zone, not
+  // just the nearest sampled curve point, so a zone too narrow to catch a sample
+  // still shades correctly.
+  // Plotted spot domain. The x-axis is a NUMERIC axis (type="number"), so every reference
+  // line/area below positions itself off the real scale — values are used exactly as
+  // computed, never snapped to a sample point.
+  const spotDomain = useMemo<[number, number] | null>(() => {
+    if (payoffPoints.length === 0) return null;
+    return [payoffPoints[0].spot, payoffPoints[payoffPoints.length - 1].spot];
+  }, [payoffPoints]);
+
+  // Round-number x ticks (1/2/5 x power of ten), so the axis reads "22,500 / 23,000 / ..."
+  // instead of one label per irregular sample.
+  const spotTicks = useMemo(() => {
+    if (!spotDomain) return [];
+    const [lo, hi] = spotDomain;
+    const span = hi - lo;
+    if (span <= 0) return [];
+    const rawStep = span / 6;
+    const power = Math.pow(10, Math.floor(Math.log10(rawStep)));
+    const frac = rawStep / power;
+    const step = (frac < 1.5 ? 1 : frac < 3.5 ? 2 : frac < 7.5 ? 5 : 10) * power;
+    const first = Math.ceil(lo / step) * step;
+    const ticks: number[] = [];
+    for (let t = first; t <= hi; t += step) ticks.push(t);
+    return ticks;
+  }, [spotDomain]);
+
+  const payoffZones = useMemo(() => {
+    if (!spotDomain || legs.length === 0) return [];
+    const [lo, hi] = spotDomain;
+    const pts = [lo, ...breakevens.filter((b) => b > lo && b < hi), hi].sort((a, b) => a - b);
+    const zones: { x1: number; x2: number; positive: boolean }[] = [];
+    for (let i = 0; i < pts.length - 1; i++) {
+      const mid = (pts[i] + pts[i + 1]) / 2;
+      const pnlAtMid = computeExpiryPnlAtSpot(legs, mid, 1);
+      zones.push({
+        x1: pts[i],
+        x2: pts[i + 1],
+        positive: pnlAtMid >= 0,
+      });
+    }
+    return zones;
+  }, [breakevens, spotDomain, legs]);
+
+  // SD reference line markers on the numeric spot axis (Sensibull parity)
+  const sdMarkers = useMemo(() => {
+    if (!sdLevels || !spotDomain) return [];
+    return [
+      { x: sdLevels.exactLo2, label: '-2SD' },
+      { x: sdLevels.exactLo1, label: '-1SD' },
+      { x: sdLevels.exactHi1, label: '1SD' },
+      { x: sdLevels.exactHi2, label: '2SD' },
+    ];
+  }, [sdLevels, spotDomain]);
+
+  // P&L at target spot on target date, shown as Sensibull's bottom "projected" badge.
+  const projectedPnl = useMemo(() => {
+    if (payoffPoints.length === 0) return null;
+    let best = payoffPoints[0];
+    for (const p of payoffPoints) {
+      if (Math.abs(p.spot - effectiveTargetSpot) < Math.abs(best.spot - effectiveTargetSpot)) best = p;
+    }
+    return best.pnlToday;
+  }, [payoffPoints, effectiveTargetSpot]);
 
   return (
     <div className="flex flex-col gap-4 font-mono select-none">
@@ -818,13 +938,13 @@ export default function PositionsStrategyMonitor({
         icon={TrendingUp}
         meta={
           <div className="flex items-center gap-3 text-[11px]">
-            <span className="flex items-center gap-1.5 text-sky-400 font-semibold">
-              <span className="w-2.5 h-0.5 bg-sky-400 inline-block" />
-              Payoff at Expiry
+            <span className="flex items-center gap-1.5 font-semibold" style={{ color: PAYOFF_EXPIRY }}>
+              <span className="w-3 h-0.5 inline-block" style={{ backgroundColor: PAYOFF_EXPIRY }} />
+              On Expiry
             </span>
-            <span className="flex items-center gap-1.5 text-amber-400 font-semibold">
-              <span className="w-2.5 h-0.5 bg-amber-400 inline-block border-t border-dashed" />
-              Today (T+0)
+            <span className="flex items-center gap-1.5 font-semibold" style={{ color: PAYOFF_TODAY }}>
+              <span className="w-3 h-0.5 inline-block" style={{ backgroundColor: PAYOFF_TODAY }} />
+              On Target Date (T+0)
             </span>
           </div>
         }
@@ -833,170 +953,534 @@ export default function PositionsStrategyMonitor({
           {/* 2D Recharts Payoff Chart */}
           <div className="h-72 w-full">
             <ResponsiveContainer width="100%" height="100%">
-              <LineChart data={payoffPoints} margin={{ top: 16, right: 24, left: 6, bottom: 16 }}>
+              <LineChart data={payoffPoints} margin={{ top: 28, right: 28, left: 14, bottom: 46 }}>
+                {/* Diagonal hatch fills for the profit / loss zones */}
+                <defs>
+                  <pattern
+                    id="payoffHatchProfit"
+                    patternUnits="userSpaceOnUse"
+                    width="7"
+                    height="7"
+                    patternTransform="rotate(45)"
+                  >
+                    <rect width="7" height="7" fill={PAYOFF_PROFIT} fillOpacity={0.05} />
+                    <line x1="0" y1="0" x2="0" y2="7" stroke={PAYOFF_PROFIT} strokeOpacity={0.13} strokeWidth={1} />
+                  </pattern>
+                  <pattern
+                    id="payoffHatchLoss"
+                    patternUnits="userSpaceOnUse"
+                    width="7"
+                    height="7"
+                    patternTransform="rotate(45)"
+                  >
+                    <rect width="7" height="7" fill={PAYOFF_LOSS} fillOpacity={0.045} />
+                    <line x1="0" y1="0" x2="0" y2="7" stroke={PAYOFF_LOSS} strokeOpacity={0.12} strokeWidth={1} />
+                  </pattern>
+                </defs>
+
                 <CartesianGrid strokeDasharray="3 6" stroke="var(--chart-grid)" vertical={false} />
                 <XAxis
                   dataKey="spot"
+                  type="number"
+                  domain={spotDomain ?? ['dataMin', 'dataMax']}
+                  ticks={spotTicks.length > 0 ? spotTicks : undefined}
+                  allowDataOverflow={false}
                   stroke="var(--chart-axis)"
                   fontSize={10}
                   tickLine={false}
-                  tickFormatter={(v) => `${v}`}
+                  tickFormatter={(v) => Number(v).toLocaleString('en-IN')}
                 />
                 <YAxis
                   stroke="var(--chart-axis)"
                   fontSize={10}
                   tickLine={false}
-                  tickFormatter={(v) => `₹${Math.round(v / 1000)}k`}
+                  width={62}
+                  tickFormatter={(v) => Number(v).toLocaleString('en-IN')}
+                  label={{
+                    value: 'Profit / loss',
+                    angle: -90,
+                    position: 'insideLeft',
+                    style: { fill: 'var(--chart-tick)', fontSize: 10, textAnchor: 'middle' },
+                  }}
                 />
                 <Tooltip
                   content={<PayoffTooltip />}
-                  cursor={{ stroke: 'var(--chart-axis)', strokeWidth: 1, strokeDasharray: '3 3' }}
+                  cursor={{ stroke: 'var(--chart-tick)', strokeWidth: 1, strokeDasharray: '3 3' }}
                 />
+                {/* Profit / Loss background zones, carved by the expiry breakevens */}
+                {payoffZones.map((zone) => (
+                  <ReferenceArea
+                    key={`${zone.x1}-${zone.x2}`}
+                    x1={zone.x1}
+                    x2={zone.x2}
+                    fill={zone.positive ? 'url(#payoffHatchProfit)' : 'url(#payoffHatchLoss)'}
+                    fillOpacity={1}
+                  />
+                ))}
+
                 {/* Zero P&L Line */}
                 <ReferenceLine y={0} stroke="var(--chart-grid)" strokeWidth={1} />
 
-                {/* Underlying Spot Marker Line */}
-                <ReferenceLine
-                  x={Math.round(spot)}
-                  stroke="#facc15"
-                  strokeWidth={1.5}
-                  strokeDasharray="2 2"
-                  label={{
-                    value: `Spot: ${Math.round(spot)}`,
-                    fill: '#facc15',
-                    fontSize: 10,
-                    position: 'top',
-                  }}
-                />
-
-                {/* Short Call Strike Line */}
-                {shortCeLeg && (
-                  <ReferenceLine
-                    x={shortCeLeg.strike}
-                    stroke="#38bdf8"
-                    strokeDasharray="3 3"
-                    label={{
-                      value: `CE ${shortCeLeg.strike}`,
-                      fill: '#38bdf8',
-                      fontSize: 10,
-                      position: 'insideTopRight',
-                    }}
+                {/* 1SD Range Shading (Sensibull Parity: 68% probability zone) */}
+                {sdLevels && (
+                  <ReferenceArea
+                    x1={sdLevels.exactLo1}
+                    x2={sdLevels.exactHi1}
+                    fill="var(--chart-tick)"
+                    fillOpacity={0.04}
                   />
                 )}
 
-                {/* Short Put Strike Line */}
-                {shortPeLeg && (
+                {/* 1SD / 2SD expected-move bands, from the same lognormal model as POP */}
+                {sdMarkers.map((m) => (
                   <ReferenceLine
-                    x={shortPeLeg.strike}
-                    stroke="#f87171"
-                    strokeDasharray="3 3"
+                    key={m.label}
+                    x={m.x}
+                    stroke="var(--chart-tick)"
+                    strokeDasharray="5 4"
+                    strokeWidth={1}
+                    strokeOpacity={0.65}
                     label={{
-                      value: `PE ${shortPeLeg.strike}`,
-                      fill: '#f87171',
+                      value: m.label,
+                      fill: 'var(--chart-tick)',
                       fontSize: 10,
-                      position: 'insideTopLeft',
-                    }}
-                  />
-                )}
-
-                {/* Breakeven lines */}
-                {breakevens.map((be) => (
-                  <ReferenceLine
-                    key={be}
-                    x={be}
-                    stroke="#34d399"
-                    strokeDasharray="2 4"
-                    label={{
-                      value: `BE ${be}`,
-                      fill: '#34d399',
-                      fontSize: 9,
-                      position: 'insideBottom',
+                      fontWeight: 600,
+                      position: 'insideTop',
                     }}
                   />
                 ))}
 
-                {/* Today (T+0): Smooth Gaussian BS curve */}
+                {/* Short Put / Short Call strike markers. Deliberately unlabelled — the
+                    strike-clearance banner directly below the chart names both strikes, and
+                    in-chart text collides with the SD labels and the projected-P&L badge. */}
+                {shortPeLeg && (
+                  <ReferenceLine
+                    x={shortPeLeg.strike}
+                    stroke="var(--chart-tick)"
+                    strokeDasharray="3 3"
+                    strokeWidth={1}
+                    strokeOpacity={0.4}
+                  />
+                )}
+                {shortCeLeg && (
+                  <ReferenceLine
+                    x={shortCeLeg.strike}
+                    stroke="var(--chart-tick)"
+                    strokeDasharray="3 3"
+                    strokeWidth={1}
+                    strokeOpacity={0.4}
+                  />
+                )}
+
+                {/* Underlying Spot Marker Line, with a "Current price" pill */}
+                <ReferenceLine
+                  x={spot}
+                  stroke={PAYOFF_SPOT}
+                  strokeWidth={1.5}
+                  label={(props: any) => {
+                    const { viewBox } = props;
+                    const text = `Current price: ${spot.toFixed(2)}`;
+                    const boxWidth = text.length * 5.8 + 16;
+                    const boxHeight = 18;
+                    const cx = viewBox.x;
+                    const y = viewBox.y - boxHeight - 3;
+                    return (
+                      <g>
+                        <rect
+                          x={cx - boxWidth / 2}
+                          y={y}
+                          width={boxWidth}
+                          height={boxHeight}
+                          rx={4}
+                          fill="var(--chart-tooltip-bg)"
+                          stroke="var(--chart-tooltip-border)"
+                          strokeWidth={1}
+                        />
+                        <text
+                          x={cx}
+                          y={y + boxHeight / 2 + 3.5}
+                          textAnchor="middle"
+                          fontSize={10}
+                          fontWeight={600}
+                          fill="var(--chart-tooltip-text)"
+                        >
+                          {text}
+                        </text>
+                      </g>
+                    );
+                  }}
+                />
+
+                {/* Target Spot Marker Line (if shifted from current spot) */}
+                {effectiveTargetSpot !== spot && (
+                  <ReferenceLine
+                    x={effectiveTargetSpot}
+                    stroke="#2d7ff9"
+                    strokeDasharray="3 3"
+                    strokeWidth={1.5}
+                    label={(props: any) => {
+                      const { viewBox } = props;
+                      const text = `Target: ${effectiveTargetSpot.toFixed(2)}`;
+                      const boxWidth = text.length * 5.8 + 16;
+                      const boxHeight = 18;
+                      const cx = viewBox.x;
+                      const y = viewBox.y - boxHeight - 3;
+                      return (
+                        <g>
+                          <rect
+                            x={cx - boxWidth / 2}
+                            y={y}
+                            width={boxWidth}
+                            height={boxHeight}
+                            rx={4}
+                            fill="#1e3a8a"
+                            stroke="#3b82f6"
+                            strokeWidth={1}
+                          />
+                          <text
+                            x={cx}
+                            y={y + boxHeight / 2 + 3.5}
+                            textAnchor="middle"
+                            fontSize={10}
+                            fontWeight={600}
+                            fill="#93c5fd"
+                          >
+                            {text}
+                          </text>
+                        </g>
+                      );
+                    }}
+                  />
+                )}
+
+                {/* Projected P&L at the target spot. Evaluated on Target Date (T+0). */}
+                {projectedPnl != null && (
+                  <ReferenceLine
+                    x={effectiveTargetSpot}
+                    stroke="transparent"
+                    label={(props: any) => {
+                      const { viewBox } = props;
+                      const positive = projectedPnl >= 0;
+                      const text = `${positive ? 'Projected profit' : 'Projected loss'}: ${positive ? '+' : ''}₹${Math.round(projectedPnl).toLocaleString('en-IN')}`;
+                      const boxWidth = text.length * 5.8 + 16;
+                      const boxHeight = 18;
+                      const cx = viewBox.x;
+                      // Clear the x-axis tick labels, which recharts draws just under the plot.
+                      const y = viewBox.y + viewBox.height + 20;
+                      return (
+                        <g>
+                          <rect
+                            x={cx - boxWidth / 2}
+                            y={y}
+                            width={boxWidth}
+                            height={boxHeight}
+                            rx={4}
+                            fill={positive ? PAYOFF_PROFIT : PAYOFF_LOSS}
+                          />
+                          <text
+                            x={cx}
+                            y={y + boxHeight / 2 + 3.5}
+                            textAnchor="middle"
+                            fontSize={10}
+                            fontWeight={700}
+                            fill="#ffffff"
+                          >
+                            {text}
+                          </text>
+                        </g>
+                      );
+                    }}
+                  />
+                )}
+
+                {/* On Target Date (T+0): smooth Black-Scholes theoretical-price curve */}
                 <Line
                   type="monotone"
                   dataKey="pnlToday"
-                  stroke="#fbbf24"
-                  strokeWidth={1.8}
+                  stroke={PAYOFF_TODAY}
+                  strokeWidth={2}
                   dot={false}
-                  strokeDasharray="3 3"
-                  name="Today (T+0)"
+                  activeDot={{ r: 3, strokeWidth: 0 }}
+                  name="On Target Date (T+0)"
                 />
-                {/* At Expiry: Exact piecewise-linear intrinsic payoff with crisp strike corners */}
+                {/* On Expiry: exact piecewise-linear intrinsic payoff with crisp strike corners */}
                 <Line
                   type="linear"
                   dataKey="pnlExpiry"
-                  stroke="#38bdf8"
-                  strokeWidth={2.2}
+                  stroke={PAYOFF_EXPIRY}
+                  strokeWidth={2}
                   dot={false}
-                  name="At Expiry"
+                  activeDot={{ r: 3, strokeWidth: 0 }}
+                  name="On Expiry"
                 />
               </LineChart>
             </ResponsiveContainer>
           </div>
 
-          {/* ── STRIKE CLEARANCE & BREAKEVEN BANNER ────────────────────────── */}
-          <div className="flex flex-wrap items-center justify-between gap-2 p-3 rounded-lg bg-zinc-950 border border-zinc-800 text-xs">
-            <div className="flex items-center gap-4 flex-wrap">
-              {/* PE Clearance */}
-              <div className="flex items-center gap-1.5">
-                <span className="text-zinc-400 font-semibold">PE Strike:</span>
-                <span className="font-bold text-white">
-                  {shortPeLeg ? shortPeLeg.strike : 'None'}
-                </span>
-                {peClearancePts !== null && (
-                  <span
-                    className={`font-bold px-1.5 py-0.5 rounded text-[11px] ${
-                      peClearancePts > 100
-                        ? 'bg-emerald-500/20 text-emerald-400'
-                        : peClearancePts > 50
-                        ? 'bg-amber-500/20 text-amber-400'
-                        : 'bg-red-500/20 text-red-400 animate-pulse'
-                    }`}
-                  >
-                    -{peClearancePts} pts
+          {/* ── INTERACTIVE TARGET SPOT & TARGET DATE CONTROLS (Sensibull Parity) ── */}
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-3 p-3 rounded-lg bg-zinc-950 border border-zinc-800 text-xs">
+            {/* Left: Target Spot Slider */}
+            <div className="flex flex-col gap-2">
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-2">
+                  <span className="font-bold text-zinc-200">NIFTY Target</span>
+                  <span className={`text-[11px] font-bold tabular-nums ${targetSpotChangePct >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
+                    {targetSpotChangePct >= 0 ? '+' : ''}{targetSpotChangePct.toFixed(1)}%
                   </span>
-                )}
+                </div>
+                <div className="flex items-center gap-1.5">
+                  <div className="flex items-center border border-zinc-700 bg-zinc-900 rounded px-1 py-0.5">
+                    <button
+                      type="button"
+                      onClick={() => onTargetSpotChange?.(Math.round((effectiveTargetSpot - strikeStep / 2) * 10) / 10)}
+                      className="px-1.5 py-0.5 text-zinc-400 hover:text-white hover:bg-zinc-800 rounded text-xs font-bold"
+                      title="Decrease target spot"
+                    >
+                      -
+                    </button>
+                    <span className="px-2 font-mono font-bold text-zinc-100 tabular-nums text-xs">
+                      {effectiveTargetSpot.toFixed(1)}
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => onTargetSpotChange?.(Math.round((effectiveTargetSpot + strikeStep / 2) * 10) / 10)}
+                      className="px-1.5 py-0.5 text-zinc-400 hover:text-white hover:bg-zinc-800 rounded text-xs font-bold"
+                      title="Increase target spot"
+                    >
+                      +
+                    </button>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => onTargetSpotChange?.(spot)}
+                    className="text-[11px] text-sky-400 hover:text-sky-300 underline font-medium cursor-pointer ml-1"
+                  >
+                    Reset
+                  </button>
+                </div>
               </div>
 
-              {/* CE Clearance */}
-              <div className="flex items-center gap-1.5">
-                <span className="text-zinc-400 font-semibold">CE Strike:</span>
-                <span className="font-bold text-white">
-                  {shortCeLeg ? shortCeLeg.strike : 'None'}
-                </span>
-                {ceClearancePts !== null && (
-                  <span
-                    className={`font-bold px-1.5 py-0.5 rounded text-[11px] ${
-                      ceClearancePts > 100
-                        ? 'bg-emerald-500/20 text-emerald-400'
-                        : ceClearancePts > 50
-                        ? 'bg-amber-500/20 text-amber-400'
-                        : 'bg-red-500/20 text-red-400 animate-pulse'
-                    }`}
-                  >
-                    +{ceClearancePts} pts
-                  </span>
-                )}
+              {/* Slider for Target Spot */}
+              <div className="flex items-center gap-2">
+                <input
+                  type="range"
+                  min={Math.round(spot * 0.94)}
+                  max={Math.round(spot * 1.06)}
+                  step={strikeStep / 10}
+                  value={effectiveTargetSpot}
+                  onChange={(e) => onTargetSpotChange?.(parseFloat(e.target.value))}
+                  className="w-full accent-sky-500 bg-zinc-800 h-1.5 rounded-lg cursor-pointer"
+                />
+              </div>
+              <div className="flex justify-between text-[10px] text-zinc-500 tabular-nums">
+                <span>-6% ({(spot * 0.94).toFixed(0)})</span>
+                <span className="text-zinc-400 font-medium">Current: {spot.toFixed(1)}</span>
+                <span>+6% ({(spot * 1.06).toFixed(0)})</span>
               </div>
             </div>
 
-            {/* Breakeven Range */}
-            {breakevens.length >= 2 && (
-              <div className="flex items-center gap-1.5 text-zinc-400">
-                <span>BE Corridor:</span>
-                <span className="text-zinc-200 font-bold">
-                  {breakevens[0]} &mdash; {breakevens[1]}
+            {/* Right: Target Date Slider */}
+            <div className="flex flex-col gap-2">
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-2">
+                  <span className="font-bold text-zinc-200">Date:</span>
+                  <span className="text-amber-400 font-bold tabular-nums text-xs">
+                    {effectiveTargetDays.toFixed(1)}D to expiry
+                  </span>
+                </div>
+                <div className="flex items-center gap-1.5">
+                  <div className="flex items-center border border-zinc-700 bg-zinc-900 rounded px-1 py-0.5">
+                    <button
+                      type="button"
+                      onClick={() => onTargetDaysChange?.(Math.min(maxDays, effectiveTargetDays + 0.5))}
+                      className="px-1.5 py-0.5 text-zinc-400 hover:text-white hover:bg-zinc-800 rounded text-xs font-bold"
+                      title="Earlier date (more days to expiry)"
+                    >
+                      &lt;
+                    </button>
+                    <span className="px-2 font-mono font-medium text-zinc-200 tabular-nums text-xs">
+                      {formatTargetDateDisplay(effectiveTargetDays, currentExpiry)}
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => onTargetDaysChange?.(Math.max(0.05, effectiveTargetDays - 0.5))}
+                      className="px-1.5 py-0.5 text-zinc-400 hover:text-white hover:bg-zinc-800 rounded text-xs font-bold"
+                      title="Later date (fewer days to expiry)"
+                    >
+                      &gt;
+                    </button>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => onTargetDaysChange?.(initialDays ?? 4.0)}
+                    className="text-[11px] text-sky-400 hover:text-sky-300 underline font-medium cursor-pointer ml-1"
+                  >
+                    Reset
+                  </button>
+                </div>
+              </div>
+
+              {/* Slider for Target Date */}
+              <div className="flex items-center gap-2">
+                <input
+                  type="range"
+                  min={0.05}
+                  max={maxDays}
+                  step={0.1}
+                  value={effectiveTargetDays}
+                  onChange={(e) => onTargetDaysChange?.(parseFloat(e.target.value))}
+                  className="w-full accent-amber-500 bg-zinc-800 h-1.5 rounded-lg cursor-pointer"
+                />
+              </div>
+              <div className="flex justify-between text-[10px] text-zinc-500 tabular-nums">
+                <span>At Expiry (0D)</span>
+                <span className="text-zinc-400 font-medium">Target: {effectiveTargetDays.toFixed(1)}d</span>
+                <span>Inception ({maxDays.toFixed(1)}D)</span>
+              </div>
+            </div>
+          </div>
+
+          {/* ── SENSIBULL PARITY METRICS: TARGET DAY FUTURES & STANDARD DEVIATION ── */}
+          <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-2.5">
+            {/* Target Day Futures Card */}
+            <div className="p-3 rounded-lg bg-zinc-950 border border-zinc-800 text-xs flex flex-col justify-between">
+              <div className="flex items-center justify-between pb-1 mb-1 border-b border-zinc-800/80">
+                <span className="text-zinc-400 font-bold uppercase tracking-wider text-[11px]">
+                  Target Day Futures Prices
                 </span>
-                <span className="text-[10px] text-amber-400 font-bold">
-                  ({breakevens[1] - breakevens[0]} pts width)
+                <span className="text-[10px] text-zinc-500">Black-76 Base</span>
+              </div>
+              <div className="flex items-center justify-between mt-1">
+                <span className="text-zinc-300 font-semibold">
+                  {formatShortExpiry(currentExpiry)} FUT
+                </span>
+                <span className="font-bold text-white tabular-nums text-sm">
+                  ₹{futurePrice != null && futurePrice > 0
+                    ? futurePrice.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
+                    : (spot + (futureBasis || 0)).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
                 </span>
               </div>
-            )}
+              {futureBasis != null && (
+                <div className="flex items-center justify-between text-[11px] text-zinc-400 mt-1 pt-1 border-t border-zinc-900">
+                  <span>Futures Basis:</span>
+                  <span className={`font-bold tabular-nums ${futureBasis >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
+                    {futureBasis >= 0 ? '+' : ''}{futureBasis.toFixed(2)} pts
+                  </span>
+                </div>
+              )}
+            </div>
+
+            {/* Standard Deviation Table (Sensibull Parity: 1SD and 2SD bands) */}
+            <div className="p-3 rounded-lg bg-zinc-950 border border-zinc-800 text-xs">
+              <div className="flex items-center justify-between pb-1 mb-1 border-b border-zinc-800/80">
+                <span className="text-zinc-400 font-bold uppercase tracking-wider text-[11px]">
+                  Standard Deviation
+                </span>
+                <span className="text-[10px] text-zinc-500 font-mono">
+                  {sdLevels ? `${(sdLevels.vol * 100).toFixed(1)}% IV · ${sdLevels.days.toFixed(1)}d` : ''}
+                </span>
+              </div>
+              {sdLevels ? (
+                <div className="mt-1 font-mono text-[11px]">
+                  <div className="grid grid-cols-3 text-zinc-500 pb-1 border-b border-zinc-900 text-[10px] font-semibold">
+                    <span>SD</span>
+                    <span className="text-center">Points</span>
+                    <span className="text-right">Price</span>
+                  </div>
+                  <div className="grid grid-cols-3 py-1 items-start border-b border-zinc-900/50">
+                    <span className="text-zinc-400 font-medium">1 SD</span>
+                    <span className="text-center text-zinc-400 tabular-nums">
+                      {sdLevels.points1.toFixed(1)} ({((sdLevels.points1 / spot) * 100).toFixed(1)}%)
+                    </span>
+                    <div className="text-right flex flex-col font-bold text-zinc-200 tabular-nums">
+                      <span>{sdLevels.exactLo1.toFixed(1)}</span>
+                      <span>{sdLevels.exactHi1.toFixed(1)}</span>
+                    </div>
+                  </div>
+                  <div className="grid grid-cols-3 py-1 items-start">
+                    <span className="text-zinc-400 font-medium">2 SD</span>
+                    <span className="text-center text-zinc-400 tabular-nums">
+                      {sdLevels.points2.toFixed(1)} ({((sdLevels.points2 / spot) * 100).toFixed(1)}%)
+                    </span>
+                    <div className="text-right flex flex-col font-bold text-zinc-200 tabular-nums">
+                      <span>{sdLevels.exactLo2.toFixed(1)}</span>
+                      <span>{sdLevels.exactHi2.toFixed(1)}</span>
+                    </div>
+                  </div>
+                </div>
+              ) : (
+                <span className="text-zinc-500 text-[11px]">Calculating SD levels...</span>
+              )}
+            </div>
+
+            {/* Breakeven & Clearance Summary */}
+            <div className="p-3 rounded-lg bg-zinc-950 border border-zinc-800 text-xs flex flex-col justify-between">
+              <div className="flex items-center justify-between pb-1 mb-1 border-b border-zinc-800/80">
+                <span className="text-zinc-400 font-bold uppercase tracking-wider text-[11px]">
+                  Clearance & Range
+                </span>
+                <span className="text-[10px] text-zinc-500">Intraday Safety</span>
+              </div>
+              <div className="flex items-center justify-between mt-1 text-[11px]">
+                <span className="text-zinc-400">PE {shortPeLeg ? shortPeLeg.strike : '—'}:</span>
+                <span className={`font-bold tabular-nums ${peClearancePts != null && peClearancePts > 50 ? 'text-emerald-400' : 'text-amber-400'}`}>
+                  {peClearancePts != null ? `-${peClearancePts} pts` : '—'}
+                </span>
+              </div>
+              <div className="flex items-center justify-between text-[11px]">
+                <span className="text-zinc-400">CE {shortCeLeg ? shortCeLeg.strike : '—'}:</span>
+                <span className={`font-bold tabular-nums ${ceClearancePts != null && ceClearancePts > 50 ? 'text-emerald-400' : 'text-amber-400'}`}>
+                  {ceClearancePts != null ? `+${ceClearancePts} pts` : '—'}
+                </span>
+              </div>
+              {breakevens.length >= 2 && (
+                <div className="flex items-center justify-between text-[11px] pt-1 mt-1 border-t border-zinc-900">
+                  <span className="text-zinc-400">BE Width:</span>
+                  <span className="font-bold text-amber-400 tabular-nums">
+                    {breakevens[1] - breakevens[0]} pts
+                  </span>
+                </div>
+              )}
+            </div>
           </div>
+
+          {/* ── EXPECTED MOVE (SD) READOUT ─────────────────────────────────
+              The chart's SD gridlines are just `spot x vol x sqrt(t)`, so they shift with
+              the underlying's vol and the days left. Printing the levels AND the two inputs
+              that produced them is what makes a band that looks off against another tool
+              diagnosable at a glance instead of a mystery. */}
+          {sdLevels && (
+            <div className="flex flex-wrap items-center justify-between gap-2 p-3 rounded-lg bg-zinc-950 border border-zinc-800 text-xs">
+              <div className="flex items-center gap-4 flex-wrap">
+                <span className="text-zinc-400 font-semibold">Expected Move:</span>
+                <div className="flex items-center gap-1.5">
+                  <span className="text-zinc-500">1SD</span>
+                  <span className="text-zinc-200 font-bold tabular-nums">
+                    {sdLevels.lo1.toLocaleString('en-IN')} &mdash; {sdLevels.hi1.toLocaleString('en-IN')}
+                  </span>
+                  <span className="text-[10px] text-zinc-500 font-bold tabular-nums">
+                    (&plusmn;{sdLevels.points1.toLocaleString('en-IN')} pts / {((sdLevels.points1 / spot) * 100).toFixed(1)}%)
+                  </span>
+                </div>
+                <div className="flex items-center gap-1.5">
+                  <span className="text-zinc-500">2SD</span>
+                  <span className="text-zinc-200 font-bold tabular-nums">
+                    {sdLevels.lo2.toLocaleString('en-IN')} &mdash; {sdLevels.hi2.toLocaleString('en-IN')}
+                  </span>
+                  <span className="text-[10px] text-zinc-500 font-bold tabular-nums">
+                    (&plusmn;{sdLevels.points2.toLocaleString('en-IN')} pts / {((sdLevels.points2 / spot) * 100).toFixed(1)}%)
+                  </span>
+                </div>
+              </div>
+              <div className="flex items-center gap-1.5 text-zinc-500 text-[11px]">
+                <span>from</span>
+                <span className="text-zinc-300 font-bold tabular-nums">{(sdLevels.vol * 100).toFixed(1)}% IV</span>
+                <span>over</span>
+                <span className="text-zinc-300 font-bold tabular-nums">{sdLevels.days.toFixed(2)}d</span>
+                <span>to expiry</span>
+              </div>
+            </div>
+          )}
         </div>
       </TerminalPanel>
     </div>

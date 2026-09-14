@@ -510,6 +510,28 @@ def main():
     if not is_crude:
         instruments.append((IDX, VIX_SID, FEED_QUOTE))
 
+    # Resolve nearest future contract for underlying index/commodity to subscribe for live future ticks
+    fut_sid_tracked = None
+    fut_symbol_tracked = ''
+    fut_expiry_tracked = ''
+    if is_crude and fut_sid is not None:
+        fut_sid_tracked = str(fut_sid)
+        fut_symbol_tracked = str(fut.get('TRADING_SYMBOL', ''))
+        fut_expiry_tracked = str(fut.get('SM_EXPIRY_DATE', ''))
+    else:
+        try:
+            fut_exch = 'BSE' if is_sensex else 'NSE'
+            fut_inst = 'FUTIDX'
+            fut_sec = helper.find_future(under, exchange=fut_exch, instrument=fut_inst)
+            if fut_sec:
+                fut_sid_tracked = str(int(fut_sec['SECURITY_ID']))
+                fut_symbol_tracked = str(fut_sec.get('TRADING_SYMBOL', ''))
+                fut_expiry_tracked = str(fut_sec.get('SM_EXPIRY_DATE', ''))
+                instruments.append((option_feed_segment, fut_sid_tracked, FEED_QUOTE))
+                print(f'[live_options_ws] Tracking future: {fut_symbol_tracked} (SID {fut_sid_tracked})', flush=True)
+        except Exception as e:
+            print(f'[live_options_ws] WARN: could not resolve future for {under}: {e}', flush=True)
+
     n = len(sid_map)  # actual option contracts (excludes index canary + VIX)
     print(f'[live_options_ws] Subscribing to {n} option contracts + index canary…', flush=True)
 
@@ -653,6 +675,21 @@ def main():
                         'change_pct': vix_chg_pct,
                     }
 
+            # Read Future quote from WebSocket
+            future_data: dict | None = None
+            if fut_sid_tracked:
+                fut_tick = helper.live_data.get(fut_sid_tracked)
+                if fut_tick:
+                    fut_ltp = _f(fut_tick.get('LTP') or fut_tick.get('last_price'))
+                    if fut_ltp > 0:
+                        fut_basis = round(fut_ltp - spot, 2) if spot > 0 else 0.0
+                        future_data = {
+                            'ltp': round(fut_ltp, 2),
+                            'symbol': fut_symbol_tracked,
+                            'expiry': fut_expiry_tracked,
+                            'basis': fut_basis,
+                        }
+
             # Build per-strike quotes
             strikes_data: dict[str, dict] = {}
             # Off-expiry extra contracts (see EXTRA_FILE), keyed separately by
@@ -742,6 +779,7 @@ def main():
                 'straddle_premium':  straddle,
                 'strikes':           strikes_data,
                 'vix':               vix_data,
+                'future':            future_data,
                 'extra':             extra_data,
             }
 

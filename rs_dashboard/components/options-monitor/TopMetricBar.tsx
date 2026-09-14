@@ -14,6 +14,9 @@ interface TopMetricBarProps {
   prevClose: number;
   change: number;
   changePct: number;
+  futurePrice?: number | null;
+  futureBasis?: number;
+  futureExpiry?: string;
   ivPct: number;
   vix?: { ltp: number; change?: number; change_pct?: number } | null;
   totalMtm: number;
@@ -41,6 +44,9 @@ export default function TopMetricBar({
   spot,
   change,
   changePct,
+  futurePrice,
+  futureBasis,
+  futureExpiry,
   ivPct,
   vix,
   totalMtm,
@@ -188,6 +194,24 @@ export default function TopMetricBar({
               {isSpotUp ? '+' : ''}{change.toFixed(2)} ({isSpotUp ? '+' : ''}{changePct.toFixed(2)}%)
             </span>
           </div>
+
+          {/* Futures Quote Badge (for Black-76 Greeks & Basis) */}
+          {futurePrice != null && futurePrice > 0 && (
+            <div
+              className="flex items-center gap-1.5 bg-zinc-900/90 px-2.5 py-1.5 rounded-lg border border-zinc-800"
+              title={`Underlying Future (${futureExpiry || 'Nearest'}): Basis = ${futureBasis != null && futureBasis >= 0 ? '+' : ''}${futureBasis?.toFixed(2)}`}
+            >
+              <span className="text-zinc-500 font-semibold text-[11px]">FUT</span>
+              <span className="text-xs font-bold text-zinc-100 tabular-nums">
+                ₹{futurePrice.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+              </span>
+              {futureBasis != null && (
+                <span className={`text-[10px] font-bold tabular-nums ${futureBasis >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
+                  ({futureBasis >= 0 ? '+' : ''}{futureBasis.toFixed(2)})
+                </span>
+              )}
+            </div>
+          )}
 
           {/* WebSocket / Feed Connection Pill */}
           <div

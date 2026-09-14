@@ -16,6 +16,10 @@ interface ChainResponse {
   prev_close?: number;
   change?: number;
   change_pct?: number;
+  future_price?: number;
+  future_symbol?: string;
+  future_expiry?: string;
+  future_basis?: number;
 }
 
 const cache = new Map<string, CacheEntry>();
@@ -127,6 +131,10 @@ export async function GET(request: NextRequest) {
       prev_close?: number;
       change?: number;
       change_pct?: number;
+      future_price?: number;
+      future_symbol?: string;
+      future_expiry?: string;
+      future_basis?: number;
       error?: string;
     };
 
@@ -152,6 +160,10 @@ export async function GET(request: NextRequest) {
       prev_close: parsed.prev_close,
       change: parsed.change,
       change_pct: parsed.change_pct,
+      future_price: parsed.future_price,
+      future_symbol: parsed.future_symbol,
+      future_expiry: parsed.future_expiry,
+      future_basis: parsed.future_basis,
     };
     cache.set(cacheKey, { data, ts: Date.now() });
     return NextResponse.json({ success: true, data }, {
@@ -168,6 +180,10 @@ export async function GET(request: NextRequest) {
           prev_close?: number;
           change?: number;
           change_pct?: number;
+          future_price?: number;
+          future_symbol?: string;
+          future_expiry?: string;
+          future_basis?: number;
           error?: string;
         };
         if (!parsed.error && parsed.chain && Object.keys(parsed.chain).length > 0) {
@@ -177,6 +193,10 @@ export async function GET(request: NextRequest) {
             prev_close: parsed.prev_close,
             change: parsed.change,
             change_pct: parsed.change_pct,
+            future_price: parsed.future_price,
+            future_symbol: parsed.future_symbol,
+            future_expiry: parsed.future_expiry,
+            future_basis: parsed.future_basis,
           };
           cache.set(cacheKey, { data, ts: Date.now() });
           return NextResponse.json({ success: true, data });

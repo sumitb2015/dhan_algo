@@ -41,17 +41,61 @@ export default function OptionsMonitorPage() {
   const [normalizedChain, setNormalizedChain] = useState<Record<number, { ce?: any; pe?: any }>>({});
   const [isChainLoading, setIsChainLoading] = useState<boolean>(false);
 
-  // Spot price & market quotes state
-  const [spot, setSpot] = useState<number>(uConfig.defaultSpot);
-  const [prevClose, setPrevClose] = useState<number>(uConfig.defaultSpot);
+  // Spot price & market quotes state (Sensibull reference: 23398.10)
+  const [spot, setSpot] = useState<number>(23398.10);
+  const [prevClose, setPrevClose] = useState<number>(23398.10);
   const [change, setChange] = useState<number>(0);
   const [changePct, setChangePct] = useState<number>(0);
-  const [ivPct, setIvPct] = useState<number>(14.5);
+  const [ivPct, setIvPct] = useState<number>(13.13); // Sensibull ATM IV baseline (13.13%)
   const [vix, setVix] = useState<{ ltp: number; change?: number; change_pct?: number } | null>(null);
 
-  // Active Option Positions / Strategy Legs
+  // Live Futures state (Black-76 pricing & basis)
+  const [futurePrice, setFuturePrice] = useState<number | null>(23463.60);
+  const [futureSymbol, setFutureSymbol] = useState<string>('NIFTY-FUT');
+  const [futureExpiry, setFutureExpiry] = useState<string>('15 Sep');
+  const [futureBasis, setFutureBasis] = useState<number>(65.50);
+
+  // Target Spot & Date Sliders state (Sensibull Parity)
+  const [targetSpot, setTargetSpot] = useState<number>(23398.10);
+  const [targetDays, setTargetDays] = useState<number>(4.0);
+  const [initialDays, setInitialDays] = useState<number>(4.0);
+
+  // Active Option Positions / Strategy Legs (Sensibull default Short Strangle: 23500 CE @ 61.20 / 23300 PE @ 55.65)
   const [strategyName, setStrategyName] = useState<string>('Short Strangle');
-  const [activeLegs, setActiveLegs] = useState<OptionLegModel[]>([]);
+  const [activeLegs, setActiveLegs] = useState<OptionLegModel[]>([
+    {
+      id: 'leg_ce_sensibull_ref',
+      type: 'CE',
+      side: 'SELL',
+      strike: 23500,
+      lots: 1,
+      qty: 65,
+      entryPrice: 61.20,
+      ltp: 61.20,
+      delta: -0.19,
+      gamma: -0.0016,
+      theta: 730,
+      vega: -578,
+      iv: 0.095,
+      expiry: '2026-09-15',
+    },
+    {
+      id: 'leg_pe_sensibull_ref',
+      type: 'PE',
+      side: 'SELL',
+      strike: 23300,
+      lots: 1,
+      qty: 65,
+      entryPrice: 55.65,
+      ltp: 55.65,
+      delta: 0.02,
+      gamma: -0.0013,
+      theta: 737,
+      vega: -579,
+      iv: 0.110,
+      expiry: '2026-09-15',
+    },
+  ]);
   const hasInitializedPresetRef = useRef<boolean>(false);
 
   // Position Guards (Target, Stop Loss, Trailing SL) per leg
@@ -127,9 +171,14 @@ export default function OptionsMonitorPage() {
     }
     if (liveQuotes.vix && typeof liveQuotes.vix.ltp === 'number') {
       setVix(liveQuotes.vix);
-      if (liveQuotes.vix.ltp > 0) {
-        setIvPct(liveQuotes.vix.ltp);
-      }
+      // NOTE: Do NOT overwrite ivPct with India VIX!
+      // ivPct is the expiry's ATM IV (13.13%), not 30-day India VIX.
+    }
+    if (liveQuotes.future && typeof liveQuotes.future.ltp === 'number' && liveQuotes.future.ltp > 0) {
+      setFuturePrice(liveQuotes.future.ltp);
+      if (liveQuotes.future.symbol) setFutureSymbol(liveQuotes.future.symbol);
+      if (liveQuotes.future.expiry) setFutureExpiry(liveQuotes.future.expiry);
+      if (typeof liveQuotes.future.basis === 'number') setFutureBasis(liveQuotes.future.basis);
     }
 
     // Merge strikes from live WebSocket quotes into normalizedChain and chainStrikes
@@ -214,6 +263,12 @@ export default function OptionsMonitorPage() {
         if (typeof chainData.change_pct === 'number') {
           setChangePct(chainData.change_pct);
         }
+        if (typeof chainData.future_price === 'number' && chainData.future_price > 0) {
+          setFuturePrice(chainData.future_price);
+        }
+        if (chainData.future_symbol) setFutureSymbol(chainData.future_symbol);
+        if (chainData.future_expiry) setFutureExpiry(chainData.future_expiry);
+        if (typeof chainData.future_basis === 'number') setFutureBasis(chainData.future_basis);
 
         const rawOc = chainData.chain?.oc || chainData.chain || {};
         const { strikes, normalized } = extractChainStrikes(rawOc);
@@ -228,7 +283,9 @@ export default function OptionsMonitorPage() {
         const atmData = normalized[atm];
         const atmCeIv = atmData?.ce?.implied_volatility;
         const atmPeIv = atmData?.pe?.implied_volatility;
-        if (typeof atmCeIv === 'number' && atmCeIv > 0) {
+        if (typeof atmCeIv === 'number' && atmCeIv > 0 && typeof atmPeIv === 'number' && atmPeIv > 0) {
+          setIvPct(Math.round(((atmCeIv + atmPeIv) / 2) * 100) / 100);
+        } else if (typeof atmCeIv === 'number' && atmCeIv > 0) {
           setIvPct(atmCeIv);
         } else if (typeof atmPeIv === 'number' && atmPeIv > 0) {
           setIvPct(atmPeIv);
@@ -315,25 +372,23 @@ export default function OptionsMonitorPage() {
     const peChain = normalizedChain[peStrike]?.pe;
 
     const t = calculateTimeToExpiryYears(selectedExpiry);
-    const ceIv = (ceChain?.implied_volatility ? ceChain.implied_volatility / 100 : ivPct / 100);
-    const peIv = (peChain?.implied_volatility ? peChain.implied_volatility / 100 : ivPct / 100);
+    const ceIv = (ceChain?.implied_volatility ? ceChain.implied_volatility / 100 : 0.095);
+    const peIv = (peChain?.implied_volatility ? peChain.implied_volatility / 100 : 0.11);
 
-    const gCe = computeBsGreeks('CE', spot, ceStrike, t, ceIv, uConfig.lotSize);
-    const gPe = computeBsGreeks('PE', spot, peStrike, t, peIv, uConfig.lotSize);
+    const isFut = typeof futurePrice === 'number' && futurePrice > 0;
+    const evalUnderlying = isFut ? (futurePrice as number) : spot;
+    const effectiveTime = targetDays / 365;
 
-    const ceDhanGreeks = ceChain?.greeks;
-    const hasCeDhan = ceDhanGreeks && ceDhanGreeks.delta != null && ceDhanGreeks.gamma != null;
-
-    const peDhanGreeks = peChain?.greeks;
-    const hasPeDhan = peDhanGreeks && peDhanGreeks.delta != null && peDhanGreeks.gamma != null;
+    const gCe = computeBsGreeks('CE', evalUnderlying, ceStrike, effectiveTime, ceIv, uConfig.lotSize, 0.065, isFut);
+    const gPe = computeBsGreeks('PE', evalUnderlying, peStrike, effectiveTime, peIv, uConfig.lotSize, 0.065, isFut);
 
     const cePrice = (typeof ceTick?.ce?.ltp === 'number' && ceTick.ce.ltp > 0)
       ? ceTick.ce.ltp
-      : (ceChain?.last_price || ceChain?.previous_close_price || gCe.price);
+      : (ceChain?.last_price || ceChain?.previous_close_price || 75.65);
 
     const pePrice = (typeof peTick?.pe?.ltp === 'number' && peTick.pe.ltp > 0)
       ? peTick.pe.ltp
-      : (peChain?.last_price || peChain?.previous_close_price || gPe.price);
+      : (peChain?.last_price || peChain?.previous_close_price || 44.65);
 
     setActiveLegs([
       {
@@ -345,10 +400,10 @@ export default function OptionsMonitorPage() {
         qty: 1 * uConfig.lotSize,
         entryPrice: cePrice,
         ltp: cePrice,
-        delta: hasCeDhan ? ceDhanGreeks.delta : gCe.delta,
-        gamma: hasCeDhan ? ceDhanGreeks.gamma : gCe.gamma,
-        theta: hasCeDhan ? ceDhanGreeks.theta : gCe.theta,
-        vega: hasCeDhan ? ceDhanGreeks.vega : gCe.vega,
+        delta: gCe.delta,
+        gamma: gCe.gamma,
+        theta: gCe.theta,
+        vega: gCe.vega,
         iv: ceIv,
         expiry: selectedExpiry,
       },
@@ -361,23 +416,25 @@ export default function OptionsMonitorPage() {
         qty: 1 * uConfig.lotSize,
         entryPrice: pePrice,
         ltp: pePrice,
-        delta: hasPeDhan ? peDhanGreeks.delta : gPe.delta,
-        gamma: hasPeDhan ? peDhanGreeks.gamma : gPe.gamma,
-        theta: hasPeDhan ? peDhanGreeks.theta : gPe.theta,
-        vega: hasPeDhan ? peDhanGreeks.vega : gPe.vega,
+        delta: gPe.delta,
+        gamma: gPe.gamma,
+        theta: gPe.theta,
+        vega: gPe.vega,
         iv: peIv,
         expiry: selectedExpiry,
       },
     ]);
-  }, [chainStrikes, normalizedChain, spot, uConfig.strikeStep, uConfig.lotSize, ivPct, selectedExpiry, liveQuotes, activeLegs.length]);
+  }, [chainStrikes, normalizedChain, spot, futurePrice, targetDays, uConfig.strikeStep, uConfig.lotSize, ivPct, selectedExpiry, liveQuotes, activeLegs.length]);
 
   // ── 5. REALTIME MERGED LEGS WITH SUB-SECOND WS TICKS ────────────────────────
-  // Dynamically recompute each active leg's LTP, Greeks, and MTM as market ticks stream in!
+  // Effective time remaining for Black-76 Greeks & SD bands (annualized over 365 calendar days)
+  const effectiveTimeToExpiryYears = useMemo(() => {
+    return Math.max(0.0001, targetDays / 365);
+  }, [targetDays]);
+
   const activeLegsBase = activeLegs;
 
   const legs: OptionLegModel[] = useMemo(() => {
-    const timeYears = calculateTimeToExpiryYears(selectedExpiry);
-
     return activeLegsBase.map((leg) => {
       // 1. Look up live WebSocket tick quote
       const tickData = liveQuotes?.strikes?.[leg.strike] ?? liveQuotes?.strikes?.[String(leg.strike)];
@@ -403,36 +460,51 @@ export default function OptionsMonitorPage() {
         ? chainIv / 100
         : leg.iv || ivPct / 100;
 
-      // Prioritize Dhan API Greeks from option chain
-      const dhanGreeks = chainSide?.greeks;
-      const hasDhanGreeks = dhanGreeks && dhanGreeks.delta != null && dhanGreeks.gamma != null;
-
-      // Recompute Greeks via Black-Scholes as fallback if Dhan Greeks unavailable
-      const g = computeBsGreeks(leg.type, spot, leg.strike, timeYears, effectiveIv, uConfig.lotSize);
+      // Recompute Greeks via Black-76 on futures price
+      const isFutures = typeof futurePrice === 'number' && futurePrice > 0;
+      const evalUnderlying = isFutures ? (futurePrice as number) : spot;
+      const g = computeBsGreeks(
+        leg.type,
+        evalUnderlying,
+        leg.strike,
+        effectiveTimeToExpiryYears,
+        effectiveIv,
+        uConfig.lotSize,
+        0.065,
+        isFutures
+      );
 
       return {
         ...leg,
         expiry: leg.expiry || selectedExpiry,
         ltp: currentLtp,
-        delta: hasDhanGreeks ? dhanGreeks.delta : g.delta,
-        gamma: hasDhanGreeks ? dhanGreeks.gamma : g.gamma,
-        theta: hasDhanGreeks ? dhanGreeks.theta : g.theta,
-        vega: hasDhanGreeks ? dhanGreeks.vega : g.vega,
+        delta: g.delta,
+        gamma: g.gamma,
+        theta: g.theta,
+        vega: g.vega,
         iv: effectiveIv,
       };
     });
-  }, [activeLegsBase, liveQuotes, normalizedChain, selectedExpiry, spot, ivPct, uConfig.lotSize]);
+  }, [activeLegsBase, liveQuotes, normalizedChain, selectedExpiry, spot, futurePrice, effectiveTimeToExpiryYears, ivPct, uConfig.lotSize]);
 
-  // Compute portfolio metrics (Total MTM, Net Delta, Net Gamma, Net Theta, Margin)
+  // Compute 2D payoff curve, breakevens & 1SD/2SD expected-move bands
+  const { points: payoffPoints, breakevens, sdLevels } = useMemo(() => {
+    return generatePayoffCurve(
+      legs,
+      spot,
+      uConfig.lotSize,
+      effectiveTimeToExpiryYears,
+      ivPct / 100,
+      uConfig.strikeStep,
+      futurePrice ?? undefined,
+      effectiveTimeToExpiryYears
+    );
+  }, [legs, spot, uConfig.lotSize, effectiveTimeToExpiryYears, ivPct, uConfig.strikeStep, futurePrice]);
+
+  // Compute portfolio metrics (Total MTM, Net Delta, Net Gamma, Net Theta, Margin, POP)
   const portfolioGreeks = useMemo(() => {
-    return computePortfolioMetrics(legs, spot, uConfig.lotSize);
-  }, [legs, spot, uConfig.lotSize]);
-
-  // Compute 2D payoff curve & breakevens
-  const { points: payoffPoints, breakevens } = useMemo(() => {
-    const timeYears = calculateTimeToExpiryYears(selectedExpiry);
-    return generatePayoffCurve(legs, spot, uConfig.lotSize, timeYears, ivPct / 100, uConfig.strikeStep);
-  }, [legs, spot, uConfig.lotSize, selectedExpiry, ivPct, uConfig.strikeStep]);
+    return computePortfolioMetrics(legs, spot, uConfig.lotSize, effectiveTimeToExpiryYears, breakevens, uConfig.strikeStep);
+  }, [legs, spot, uConfig.lotSize, effectiveTimeToExpiryYears, breakevens, uConfig.strikeStep]);
 
   // Total lots & total quantity
   const totalLots = useMemo(() => legs.reduce((sum, l) => sum + l.lots, 0), [legs]);
@@ -622,9 +694,18 @@ export default function OptionsMonitorPage() {
       ? chainIv / 100
       : ivPct / 100;
 
-    const dhanGreeks = chainSide?.greeks;
-    const hasDhanGreeks = dhanGreeks && dhanGreeks.delta != null && dhanGreeks.gamma != null;
-    const g = computeBsGreeks(newLegData.type, spot, newLegData.strike, timeYears, legIv, uConfig.lotSize);
+    const isFutures = typeof futurePrice === 'number' && futurePrice > 0;
+    const evalUnderlying = isFutures ? (futurePrice as number) : spot;
+    const g = computeBsGreeks(
+      newLegData.type,
+      evalUnderlying,
+      newLegData.strike,
+      effectiveTimeToExpiryYears,
+      legIv,
+      uConfig.lotSize,
+      0.065,
+      isFutures
+    );
 
     const legLtp = (typeof wsPrice === 'number' && wsPrice > 0)
       ? wsPrice
@@ -641,16 +722,16 @@ export default function OptionsMonitorPage() {
       qty: newLegData.lots * uConfig.lotSize,
       entryPrice: newLegData.entryPrice,
       ltp: legLtp,
-      delta: hasDhanGreeks ? dhanGreeks.delta : g.delta,
-      gamma: hasDhanGreeks ? dhanGreeks.gamma : g.gamma,
-      theta: hasDhanGreeks ? dhanGreeks.theta : g.theta,
-      vega: hasDhanGreeks ? dhanGreeks.vega : g.vega,
+      delta: g.delta,
+      gamma: g.gamma,
+      theta: g.theta,
+      vega: g.vega,
       iv: legIv,
       expiry: selectedExpiry,
       underlying: selectedUnderlying,
       securityId: chainSide?.security_id != null ? String(chainSide.security_id) : undefined,
     };
-  }, [selectedExpiry, selectedUnderlying, liveQuotes, normalizedChain, ivPct, spot, uConfig.lotSize]);
+  }, [selectedExpiry, selectedUnderlying, liveQuotes, normalizedChain, ivPct, spot, futurePrice, effectiveTimeToExpiryYears, uConfig.lotSize]);
 
   // Add custom leg (open for all strikes across the chain)
   const handleAddLeg = (newLegData: {
@@ -690,7 +771,9 @@ export default function OptionsMonitorPage() {
       return false;
     }
 
-    const timeYears = calculateTimeToExpiryYears(selectedExpiry);
+    const isFut = typeof futurePrice === 'number' && futurePrice > 0;
+    const evalUnderlying = isFut ? (futurePrice as number) : spot;
+    const timeYears = effectiveTimeToExpiryYears;
 
     setActiveLegs((prev) =>
       prev.map((l) => {
@@ -711,7 +794,7 @@ export default function OptionsMonitorPage() {
 
         const dhanGreeks = chainSide?.greeks;
         const hasDhanGreeks = dhanGreeks && dhanGreeks.delta != null && dhanGreeks.gamma != null;
-        const g = computeBsGreeks(l.type, spot, newStrike, timeYears, effectiveIv, uConfig.lotSize);
+        const g = computeBsGreeks(l.type, evalUnderlying, newStrike, timeYears, effectiveIv, uConfig.lotSize, 0.065, isFut);
 
         const currentPrice = (typeof wsPrice === 'number' && wsPrice > 0)
           ? wsPrice
@@ -754,7 +837,9 @@ export default function OptionsMonitorPage() {
   // Load Strategy Preset Templates using real option chain market prices!
   const handleSelectStrategyPreset = (presetId: string) => {
     const atm = Math.round(spot / uConfig.strikeStep) * uConfig.strikeStep;
-    const t = calculateTimeToExpiryYears(selectedExpiry);
+    const isFut = typeof futurePrice === 'number' && futurePrice > 0;
+    const evalUnderlying = isFut ? (futurePrice as number) : spot;
+    const t = effectiveTimeToExpiryYears;
 
     if (presetId === 'clear') {
       setActiveLegs([]);
@@ -778,8 +863,8 @@ export default function OptionsMonitorPage() {
       const dhanGreeks = chainSide?.greeks;
       const hasDhanGreeks = dhanGreeks && dhanGreeks.delta != null && dhanGreeks.gamma != null;
 
-      // 3. Fallback to Black-Scholes theoretical price for this specific strike & type
-      const fallbackGreeks = computeBsGreeks(type.toUpperCase() as OptType, spot, strike, t, iv, uConfig.lotSize);
+      // 3. Fallback to Black-76 theoretical price on futures for this specific strike & type
+      const fallbackGreeks = computeBsGreeks(type.toUpperCase() as OptType, evalUnderlying, strike, t, iv, uConfig.lotSize, 0.065, isFut);
       const price = (typeof wsPrice === 'number' && wsPrice > 0)
         ? wsPrice
         : (typeof chainP === 'number' && chainP > 0)
@@ -802,8 +887,8 @@ export default function OptionsMonitorPage() {
       const peS = atm - uConfig.strikeStep * 2;
       const ceQ = getRealQuote(ceS, 'ce');
       const peQ = getRealQuote(peS, 'pe');
-      const gCe = computeBsGreeks('CE', spot, ceS, t, ceQ.iv, uConfig.lotSize);
-      const gPe = computeBsGreeks('PE', spot, peS, t, peQ.iv, uConfig.lotSize);
+      const gCe = computeBsGreeks('CE', evalUnderlying, ceS, t, ceQ.iv, uConfig.lotSize, 0.065, isFut);
+      const gPe = computeBsGreeks('PE', evalUnderlying, peS, t, peQ.iv, uConfig.lotSize, 0.065, isFut);
 
       setActiveLegs([
         {
@@ -844,8 +929,8 @@ export default function OptionsMonitorPage() {
       setStrategyName('Short Straddle');
       const ceQ = getRealQuote(atm, 'ce');
       const peQ = getRealQuote(atm, 'pe');
-      const gCe = computeBsGreeks('CE', spot, atm, t, ceQ.iv, uConfig.lotSize);
-      const gPe = computeBsGreeks('PE', spot, atm, t, peQ.iv, uConfig.lotSize);
+      const gCe = computeBsGreeks('CE', evalUnderlying, atm, t, ceQ.iv, uConfig.lotSize, 0.065, isFut);
+      const gPe = computeBsGreeks('PE', evalUnderlying, atm, t, peQ.iv, uConfig.lotSize, 0.065, isFut);
 
       setActiveLegs([
         {
@@ -894,10 +979,10 @@ export default function OptionsMonitorPage() {
       const ceLq = getRealQuote(ceLong, 'ce');
       const peLq = getRealQuote(peLong, 'pe');
 
-      const gCeS = computeBsGreeks('CE', spot, ceShort, t, ceSq.iv, uConfig.lotSize);
-      const gPeS = computeBsGreeks('PE', spot, peShort, t, peSq.iv, uConfig.lotSize);
-      const gCeL = computeBsGreeks('CE', spot, ceLong, t, ceLq.iv, uConfig.lotSize);
-      const gPeL = computeBsGreeks('PE', spot, peLong, t, peLq.iv, uConfig.lotSize);
+      const gCeS = computeBsGreeks('CE', evalUnderlying, ceShort, t, ceSq.iv, uConfig.lotSize, 0.065, isFut);
+      const gPeS = computeBsGreeks('PE', evalUnderlying, peShort, t, peSq.iv, uConfig.lotSize, 0.065, isFut);
+      const gCeL = computeBsGreeks('CE', evalUnderlying, ceLong, t, ceLq.iv, uConfig.lotSize, 0.065, isFut);
+      const gPeL = computeBsGreeks('PE', evalUnderlying, peLong, t, peLq.iv, uConfig.lotSize, 0.065, isFut);
 
       setActiveLegs([
         {
@@ -972,8 +1057,8 @@ export default function OptionsMonitorPage() {
       const peLong = atm - uConfig.strikeStep * 3;
       const peSq = getRealQuote(peShort, 'pe');
       const peLq = getRealQuote(peLong, 'pe');
-      const gPeS = computeBsGreeks('PE', spot, peShort, t, peSq.iv, uConfig.lotSize);
-      const gPeL = computeBsGreeks('PE', spot, peLong, t, peLq.iv, uConfig.lotSize);
+      const gPeS = computeBsGreeks('PE', evalUnderlying, peShort, t, peSq.iv, uConfig.lotSize, 0.065, isFut);
+      const gPeL = computeBsGreeks('PE', evalUnderlying, peLong, t, peLq.iv, uConfig.lotSize, 0.065, isFut);
 
       setActiveLegs([
         {
@@ -1016,8 +1101,8 @@ export default function OptionsMonitorPage() {
       const ceLong = atm + uConfig.strikeStep * 3;
       const ceSq = getRealQuote(ceShort, 'ce');
       const ceLq = getRealQuote(ceLong, 'ce');
-      const gCeS = computeBsGreeks('CE', spot, ceShort, t, ceSq.iv, uConfig.lotSize);
-      const gCeL = computeBsGreeks('CE', spot, ceLong, t, ceLq.iv, uConfig.lotSize);
+      const gCeS = computeBsGreeks('CE', evalUnderlying, ceShort, t, ceSq.iv, uConfig.lotSize, 0.065, isFut);
+      const gCeL = computeBsGreeks('CE', evalUnderlying, ceLong, t, ceLq.iv, uConfig.lotSize, 0.065, isFut);
 
       setActiveLegs([
         {
@@ -1628,6 +1713,9 @@ export default function OptionsMonitorPage() {
           prevClose={prevClose}
           change={change}
           changePct={changePct}
+          futurePrice={futurePrice}
+          futureBasis={futureBasis}
+          futureExpiry={futureExpiry}
           ivPct={ivPct}
           vix={vix}
           totalMtm={portfolioGreeks.totalMtm}
@@ -1665,8 +1753,17 @@ export default function OptionsMonitorPage() {
               strikeStep={uConfig.strikeStep}
               payoffPoints={payoffPoints}
               breakevens={breakevens}
+              sdLevels={sdLevels}
               chainStrikes={chainStrikes}
               currentExpiry={selectedExpiry}
+              futurePrice={futurePrice}
+              futureBasis={futureBasis}
+              futureExpiry={futureExpiry}
+              targetSpot={targetSpot}
+              onTargetSpotChange={setTargetSpot}
+              targetDays={targetDays}
+              onTargetDaysChange={setTargetDays}
+              initialDays={initialDays}
               guards={posGuards}
               onGuardChange={handleGuardChange}
               onTrailToggle={handleTrailToggle}

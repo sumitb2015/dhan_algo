@@ -187,12 +187,39 @@ def main():
             prev_close = levels['close'] if levels else 0.0
         change = round(spot - prev_close, 2) if (spot > 0 and prev_close > 0) else 0.0
         change_pct = round(change / prev_close * 100, 4) if prev_close > 0 else 0.0
+
+        # Resolve nearest unexpired future contract for Black-76 Greeks & futures basis
+        future_price = 0.0
+        future_symbol = ''
+        future_expiry = ''
+        future_basis = 0.0
+        try:
+            fut_exch = 'MCX' if is_crude else ('BSE' if under == 'SENSEX' else 'NSE')
+            fut_inst = 'FUTCOM' if is_crude else 'FUTIDX'
+            fut_seg = 'MCX_COMM' if is_crude else ('BSE_FNO' if under == 'SENSEX' else 'NSE_FNO')
+            fut_sec = helper.find_future(under, exchange=fut_exch, instrument=fut_inst)
+            if fut_sec:
+                fut_id = int(fut_sec['SECURITY_ID'])
+                future_symbol = str(fut_sec.get('TRADING_SYMBOL', ''))
+                future_expiry = str(fut_sec.get('SM_EXPIRY_DATE', ''))
+                fut_quote = helper.get_ltp(fut_id, exchange=fut_seg, instrument=fut_inst)
+                if fut_quote and fut_quote > 0:
+                    future_price = float(fut_quote)
+                    if spot > 0:
+                        future_basis = round(future_price - spot, 2)
+        except Exception as e:
+            sys.stderr.write(f"[options_data_fetch] Warn: could not resolve future for {under}: {e}\n")
+
         print(json.dumps({
             'chain': chain,
             'spot': spot,
             'prev_close': prev_close,
             'change': change,
             'change_pct': change_pct,
+            'future_price': future_price,
+            'future_symbol': future_symbol,
+            'future_expiry': future_expiry,
+            'future_basis': future_basis,
         }))
 
     elif args.cmd == 'ltp':

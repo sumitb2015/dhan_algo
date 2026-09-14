@@ -152,6 +152,7 @@ export interface LiveQuotes {
   straddle_premium: number;
   strikes: Record<string, StrikeData>;
   vix?: { ltp: number; prev_close?: number; change?: number; change_pct?: number } | null;
+  future?: { ltp: number; symbol?: string; expiry?: string; basis?: number } | null;
   /** Off-expiry contracts the bridge was separately asked to track (see
    *  /api/options/live's `watchExtra` action) — {expiry: {strike: {ce/pe: {ltp}}}}.
    *  Namespaced by expiry so a strike number shared with the main tracked

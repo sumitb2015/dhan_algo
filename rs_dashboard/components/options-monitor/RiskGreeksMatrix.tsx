@@ -63,6 +63,7 @@ export default function RiskGreeksMatrix({
   onFlatten,
   onOpenTradeBasket,
 }: RiskGreeksMatrixProps) {
+  const [multiplyByLotSize, setMultiplyByLotSize] = React.useState<boolean>(true);
   const isRupeeDeltaPositive = greeks.rupeeDelta >= 0;
 
   return (
@@ -74,6 +75,22 @@ export default function RiskGreeksMatrix({
         meta={<span className="text-zinc-500 text-[9px] tracking-wider uppercase">INTRADAY METRICS</span>}
       >
         <div className="p-2.5 flex flex-col gap-2.5">
+          {/* Sensibull-style Lot Size Scaling Toggles */}
+          <div className="flex items-center justify-between gap-2 px-2 py-1.5 rounded bg-zinc-900/60 border border-zinc-800/80 text-[11px]">
+            <label className="flex items-center gap-1.5 cursor-pointer text-zinc-300 hover:text-white transition-colors">
+              <input
+                type="checkbox"
+                checked={multiplyByLotSize}
+                onChange={(e) => setMultiplyByLotSize(e.target.checked)}
+                className="rounded border-zinc-700 bg-zinc-800 text-sky-500 focus:ring-0 focus:ring-offset-0 cursor-pointer"
+              />
+              <span>Multiply by Lot Size</span>
+            </label>
+            <span className="text-[10px] text-zinc-500 font-medium">
+              {multiplyByLotSize ? 'Share Units (Sensibull)' : 'Lot Units'}
+            </span>
+          </div>
+
           {/* Greeks Table */}
           <div className="w-full">
             <table className="w-full text-left text-xs border-collapse">
@@ -96,8 +113,17 @@ export default function RiskGreeksMatrix({
                     </div>
                   </td>
                   <td className="py-2 px-1.5 text-center font-bold text-white tabular-nums text-xs whitespace-nowrap">
-                    {greeks.netDelta >= 0 ? '+' : ''}
-                    {greeks.netDelta.toFixed(2)} Δ
+                    {multiplyByLotSize ? (
+                      <>
+                        {greeks.shareDelta >= 0 ? '+' : ''}
+                        {Math.round(greeks.shareDelta)}
+                      </>
+                    ) : (
+                      <>
+                        {greeks.netDelta >= 0 ? '+' : ''}
+                        {greeks.netDelta.toFixed(2)} Δ
+                      </>
+                    )}
                   </td>
                   <td
                     className={`py-2 px-2 text-right font-bold tabular-nums text-xs whitespace-nowrap ${
@@ -105,34 +131,6 @@ export default function RiskGreeksMatrix({
                     }`}
                   >
                     {isRupeeDeltaPositive ? '+' : ''}{formatRupeeCompact(greeks.rupeeDelta)}/1%
-                  </td>
-                </tr>
-
-                {/* Gamma */}
-                <tr className="hover:bg-zinc-800/30 transition-colors">
-                  <td className="py-2 px-2 whitespace-nowrap">
-                    <div className="flex items-center gap-1.5">
-                      <span className="w-4 h-4 rounded flex items-center justify-center bg-purple-500/10 text-purple-400 border border-purple-500/30 text-[10px] font-bold shrink-0">
-                        Γ
-                      </span>
-                      <span className="font-medium text-zinc-300 text-xs">Gamma</span>
-                    </div>
-                  </td>
-                  <td className="py-2 px-1.5 text-center font-bold text-white tabular-nums text-xs whitespace-nowrap">
-                    {greeks.netGamma.toFixed(4)}
-                  </td>
-                  <td className="py-2 px-2 text-right whitespace-nowrap">
-                    <span
-                      className={`inline-block text-[9px] px-1.5 py-0.5 rounded font-bold border ${
-                        greeks.gammaRiskLabel === 'High Acceleration'
-                          ? 'bg-red-500/10 text-red-400 border-red-500/30'
-                          : greeks.gammaRiskLabel === 'Moderate'
-                          ? 'bg-amber-500/10 text-amber-400 border-amber-500/30'
-                          : 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30'
-                      }`}
-                    >
-                      {greeks.gammaRiskLabel}
-                    </span>
                   </td>
                 </tr>
 
@@ -151,6 +149,59 @@ export default function RiskGreeksMatrix({
                   </td>
                   <td className="py-2 px-2 text-right font-bold text-emerald-400 tabular-nums text-xs whitespace-nowrap">
                     {greeks.thetaPerHour >= 0 ? '+' : ''}{formatRupee(Math.round(greeks.thetaPerHour))}/hr
+                  </td>
+                </tr>
+
+                {/* Decay (Sensibull Parity: Extrinsic value remaining to decay) */}
+                <tr className="hover:bg-zinc-800/30 transition-colors">
+                  <td className="py-2 px-2 whitespace-nowrap">
+                    <div className="flex items-center gap-1.5">
+                      <span className="w-4 h-4 rounded flex items-center justify-center bg-teal-500/10 text-teal-400 border border-teal-500/30 text-[10px] font-bold shrink-0">
+                        ⌛
+                      </span>
+                      <span className="font-medium text-zinc-300 text-xs">Decay</span>
+                    </div>
+                  </td>
+                  <td className="py-2 px-1.5 text-center font-bold text-teal-400 tabular-nums text-xs whitespace-nowrap">
+                    {(greeks.totalDecay ?? 0) >= 0 ? '+' : ''}₹{Math.round(greeks.totalDecay ?? 0).toLocaleString('en-IN')}
+                  </td>
+                  <td className="py-2 px-2 text-right text-zinc-400 text-xs tabular-nums whitespace-nowrap">
+                    till expiry
+                  </td>
+                </tr>
+
+                {/* Gamma */}
+                <tr className="hover:bg-zinc-800/30 transition-colors">
+                  <td className="py-2 px-2 whitespace-nowrap">
+                    <div className="flex items-center gap-1.5">
+                      <span className="w-4 h-4 rounded flex items-center justify-center bg-purple-500/10 text-purple-400 border border-purple-500/30 text-[10px] font-bold shrink-0">
+                        Γ
+                      </span>
+                      <span className="font-medium text-zinc-300 text-xs">Gamma</span>
+                    </div>
+                  </td>
+                  <td className="py-2 px-1.5 text-center font-bold text-white tabular-nums text-xs whitespace-nowrap">
+                    {multiplyByLotSize ? (
+                      <>
+                        {greeks.shareGamma >= 0 ? '+' : ''}
+                        {greeks.shareGamma.toFixed(2)}
+                      </>
+                    ) : (
+                      greeks.netGamma.toFixed(4)
+                    )}
+                  </td>
+                  <td className="py-2 px-2 text-right whitespace-nowrap">
+                    <span
+                      className={`inline-block text-[9px] px-1.5 py-0.5 rounded font-bold border ${
+                        greeks.gammaRiskLabel === 'High Acceleration'
+                          ? 'bg-red-500/10 text-red-400 border-red-500/30'
+                          : greeks.gammaRiskLabel === 'Moderate'
+                          ? 'bg-amber-500/10 text-amber-400 border-amber-500/30'
+                          : 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30'
+                      }`}
+                    >
+                      {greeks.gammaRiskLabel}
+                    </span>
                   </td>
                 </tr>
 

@@ -111,6 +111,17 @@ export function formatShortExpiry(expiryStr?: string): string {
 
 // ── Black-Scholes Core ───────────────────────────────────────────────────────
 
+/** Calendar days per year — the annualization base for every `timeYears` in this module.
+ *  Do NOT "correct" this to 252 trading days. That looks defensible in the abstract, but it
+ *  is empirically wrong for this market: reverse-engineering Sensibull's published Greeks
+ *  for a known NIFTY strangle (23500 CE @ 9.5% IV, 23300 PE @ 11% IV, 4 days to expiry)
+ *  reproduces its deltas to four decimals (0.4400 / -0.2698 vs a published 0.44 / -0.27)
+ *  ONLY with 4/365 — 4/252 misses both legs badly (0.4508 / -0.3044). A previous change to
+ *  252 was made here on partial evidence (it appeared to close a gap in the SD bands) and
+ *  had to be reverted; the real cause of that gap was the SD vol source, not the day count.
+ *  See `calculateTimeToExpiryYears()` and the SD block in `generatePayoffCurve()`. */
+const CALENDAR_DAYS_PER_YEAR = 365;
+
 function normCdf(x: number): number {
   const sign = x < 0 ? -1 : 1;
   const ax = Math.abs(x) / Math.SQRT2;
@@ -124,49 +135,84 @@ function normPdf(x: number): number {
   return Math.exp(-0.5 * x * x) / Math.sqrt(2 * Math.PI);
 }
 
+/** Risk-neutral P(S_T > K) under lognormal GBM — the same N(d2) term the BS price uses for a call. */
+function riskNeutralProbAbove(S: number, K: number, t: number, iv: number, r = 0.065): number {
+  if (t <= 0 || iv <= 0) return S > K ? 1 : 0;
+  const d2 = (Math.log(S / K) + (r - (iv * iv) / 2) * t) / (iv * Math.sqrt(t));
+  return normCdf(d2);
+}
+
 export function computeBsGreeks(
   type: OptType,
-  spot: number,
+  spotOrFuture: number,
   strike: number,
   timeYears: number,
   iv: number,
   lotSize: number,
-  r = 0.065
+  r = 0.065,
+  isFutures = false
 ): { price: number; delta: number; gamma: number; theta: number; vega: number } {
   const t = Math.max(timeYears, 0.0001);
   const v = Math.max(iv, 0.01);
   const sqrtT = Math.sqrt(t);
+  const F = spotOrFuture;
 
-  const d1 = (Math.log(spot / strike) + (r + 0.5 * v * v) * t) / (v * sqrtT);
+  // In Black-76 (options on futures / forward price F), cost-of-carry is already embedded in F.
+  // In standard Black-Scholes (options on spot S), cost-of-carry is + r * t.
+  const drift = isFutures ? 0 : r * t;
+  const d1 = (Math.log(F / strike) + drift + 0.5 * v * v * t) / (v * sqrtT);
   const d2 = d1 - v * sqrtT;
+  const discount = Math.exp(-r * t);
 
   let price = 0;
   let delta = 0;
 
-  if (type === 'CE') {
-    price = spot * normCdf(d1) - strike * Math.exp(-r * t) * normCdf(d2);
-    delta = normCdf(d1);
+  if (isFutures) {
+    // Black-76 Model (standard for NSE/BSE options that hedge against futures basis)
+    if (type === 'CE') {
+      price = discount * (F * normCdf(d1) - strike * normCdf(d2));
+      delta = normCdf(d1);
+    } else {
+      price = discount * (strike * normCdf(-d2) - F * normCdf(-d1));
+      delta = normCdf(d1) - 1;
+    }
   } else {
-    price = strike * Math.exp(-r * t) * normCdf(-d2) - spot * normCdf(-d1);
-    delta = normCdf(d1) - 1;
+    // Standard Black-Scholes on spot
+    if (type === 'CE') {
+      price = F * normCdf(d1) - strike * discount * normCdf(d2);
+      delta = normCdf(d1);
+    } else {
+      price = strike * discount * normCdf(-d2) - F * normCdf(-d1);
+      delta = normCdf(d1) - 1;
+    }
   }
 
-  // Gamma (same for Call & Put)
-  const gamma = normPdf(d1) / (spot * v * sqrtT);
+  // Gamma
+  const gamma = (discount * normPdf(d1)) / (F * v * sqrtT);
 
   // Vega (derivative with respect to IV fraction; rupees per share per 1% IV change)
-  const rawVega = spot * sqrtT * normPdf(d1);
+  const rawVega = F * discount * sqrtT * normPdf(d1);
   const vegaPerPercent = rawVega * 0.01;
 
   // Theta (decay per day in rupees per share, negative)
   let rawTheta = 0;
-  const term1 = -(spot * normPdf(d1) * v) / (2 * sqrtT);
-  if (type === 'CE') {
-    const term2 = -r * strike * Math.exp(-r * t) * normCdf(d2);
-    rawTheta = (term1 + term2) / 365;
+  const term1 = -(F * discount * normPdf(d1) * v) / (2 * sqrtT);
+  if (isFutures) {
+    if (type === 'CE') {
+      const term2 = r * discount * (F * normCdf(d1) - strike * normCdf(d2));
+      rawTheta = (term1 - term2) / CALENDAR_DAYS_PER_YEAR;
+    } else {
+      const term2 = r * discount * (strike * normCdf(-d2) - F * normCdf(-d1));
+      rawTheta = (term1 - term2) / CALENDAR_DAYS_PER_YEAR;
+    }
   } else {
-    const term2 = r * strike * Math.exp(-r * t) * normCdf(-d2);
-    rawTheta = (term1 + term2) / 365;
+    if (type === 'CE') {
+      const term2 = -r * strike * discount * normCdf(d2);
+      rawTheta = (term1 + term2) / CALENDAR_DAYS_PER_YEAR;
+    } else {
+      const term2 = r * strike * discount * normCdf(-d2);
+      rawTheta = (term1 + term2) / CALENDAR_DAYS_PER_YEAR;
+    }
   }
   const thetaPerDay = rawTheta;
 
@@ -187,16 +233,43 @@ export interface PayoffPoint {
   pnlToday: number;
 }
 
+/** Mean IV across legs that carry a usable (positive) IV, falling back to `fallback` when none do. */
+function computeAvgIv(legs: OptionLegModel[], fallback: number): number {
+  const ivs = legs.map((l) => l.iv).filter((iv): iv is number => typeof iv === 'number' && iv > 0);
+  return ivs.length > 0 ? ivs.reduce((s, iv) => s + iv, 0) / ivs.length : fallback;
+}
+
+export interface SdLevels {
+  lo2: number;
+  lo1: number;
+  hi1: number;
+  hi2: number;
+  exactLo2: number;
+  exactLo1: number;
+  exactHi1: number;
+  exactHi2: number;
+  /** Provenance of the bands above, so the UI can show *why* they sit where they do rather
+   *  than rendering unexplained gridlines. An SD band is just `spot * vol * sqrt(t)`, so it
+   *  moves whenever the underlying's vol or the days-to-expiry move — without these on
+   *  screen, a band that looks "wrong" against another tool is impossible to diagnose. */
+  points1: number;
+  points2: number;
+  vol: number;   // underlying-level vol used, as a fraction (e.g. 0.1313)
+  days: number;  // calendar days to expiry
+}
+
 export function generatePayoffCurve(
   legs: OptionLegModel[],
   spot: number,
   lotSize: number,
-  timeRemainingYears: number = 2 / 365,
+  timeRemainingYears: number = 2 / CALENDAR_DAYS_PER_YEAR,
   baseIv: number = 0.145,
-  strikeStep: number = 50
-): { points: PayoffPoint[]; minPnl: number; maxPnl: number; breakevens: number[] } {
+  strikeStep: number = 50,
+  futurePrice?: number,
+  targetTimeRemainingYears?: number
+): { points: PayoffPoint[]; minPnl: number; maxPnl: number; breakevens: number[]; sdLevels: SdLevels | null } {
   if (legs.length === 0) {
-    return { points: [], minPnl: 0, maxPnl: 0, breakevens: [] };
+    return { points: [], minPnl: 0, maxPnl: 0, breakevens: [], sdLevels: null };
   }
 
   const strikes = legs.map((l) => l.strike);
@@ -214,12 +287,39 @@ export function generatePayoffCurve(
   const symLo = Math.round((spot - maxDiff) / strikeStep) * strikeStep;
   const symHi = Math.round((spot + maxDiff) / strikeStep) * strikeStep;
 
+  // 1SD / 2SD expected-move levels, centred on spot. The chart's x-axis is numeric, so these
+  // are kept exact — never snapped to a strike or a sample point.
+  //
+  // The vol here is `baseIv` — the ATM IV of the selected expiry (or India VIX as fallback).
+  // Sensibull uses the selected expiry's ATM IV (e.g. 13.13% on 4d out), yielding exactly
+  // ±321.7 pts (1.4%) 1SD and ±643.3 pts (2.7%) 2SD.
+  const t = Math.max(timeRemainingYears, 0.0001);
+  const sd1Move = spot * baseIv * Math.sqrt(t);
+  const sd2Move = 2 * sd1Move;
+  const p1 = Math.round(sd1Move * 10) / 10;
+  const p2 = Math.round(sd2Move * 10) / 10;
+  const sdLevels: SdLevels = {
+    lo2: Math.round(spot - sd2Move),
+    lo1: Math.round(spot - sd1Move),
+    hi1: Math.round(spot + sd1Move),
+    hi2: Math.round(spot + sd2Move),
+    exactLo2: Math.round((spot - sd2Move) * 10) / 10,
+    exactLo1: Math.round((spot - sd1Move) * 10) / 10,
+    exactHi1: Math.round((spot + sd1Move) * 10) / 10,
+    exactHi2: Math.round((spot + sd2Move) * 10) / 10,
+    points1: p1,
+    points2: p2,
+    vol: baseIv,
+    days: Math.round(t * CALENDAR_DAYS_PER_YEAR * 100) / 100,
+  };
+
   const sampleSpots = new Set<number>();
   const stepCount = 120;
   for (let i = 0; i <= stepCount; i++) {
     sampleSpots.add(Math.round(symLo + ((symHi - symLo) * i) / stepCount));
   }
-  // Guarantee exact evaluation at current spot and every strike kink
+  // Guarantee exact evaluation at current spot and every strike kink, so the expiry curve
+  // keeps a crisp vertex at each strike instead of a sampled-over corner.
   sampleSpots.add(Math.round(spot));
   for (const s of strikes) sampleSpots.add(s);
 
@@ -228,6 +328,10 @@ export function generatePayoffCurve(
 
   let minPnl = Infinity;
   let maxPnl = -Infinity;
+
+  const hasFutures = typeof futurePrice === 'number' && futurePrice > 0;
+  const basis = hasFutures ? ((futurePrice as number) - spot) : 0;
+  const evalTime = typeof targetTimeRemainingYears === 'number' ? targetTimeRemainingYears : timeRemainingYears;
 
   for (const s of sortedSpots) {
     let pnlExp = 0;
@@ -242,8 +346,9 @@ export function generatePayoffCurve(
       const legPnlExp = isSell ? (leg.entryPrice - intrinsicAtExp) * qty : (intrinsicAtExp - leg.entryPrice) * qty;
       pnlExp += legPnlExp;
 
-      // Payoff Today (T+0 via Black-Scholes theoretical price)
-      const g = computeBsGreeks(leg.type, s, leg.strike, timeRemainingYears, leg.iv || baseIv, lotSize);
+      // Payoff on Target Date (via Black-76 with simulated futures price if basis exists)
+      const evalUnderlying = s + basis;
+      const g = computeBsGreeks(leg.type, evalUnderlying, leg.strike, evalTime, leg.iv || baseIv, lotSize, 0.065, hasFutures);
       const legPnlNow = isSell ? (leg.entryPrice - g.price) * qty : (g.price - leg.entryPrice) * qty;
       pnlNow += legPnlNow;
     }
@@ -278,13 +383,13 @@ export function generatePayoffCurve(
 
   const breakevens = Array.from(new Set(rawBreakevens)).sort((a, b) => a - b);
 
-  return { points, minPnl, maxPnl, breakevens };
+  return { points, minPnl, maxPnl, breakevens, sdLevels };
 }
 
 /**
  * Expiry P&L of the whole leg set at a single terminal spot price (pure intrinsic value).
  */
-function computeExpiryPnlAtSpot(legs: OptionLegModel[], spot: number, lotSize: number): number {
+export function computeExpiryPnlAtSpot(legs: OptionLegModel[], spot: number, lotSize: number): number {
   let pnl = 0;
   for (const leg of legs) {
     const qty = leg.qty || leg.lots * lotSize;
@@ -320,13 +425,16 @@ function computeBoundedPnlExtremes(legs: OptionLegModel[], lotSize: number): { m
 // ── Portfolio Greeks Aggregation ─────────────────────────────────────────────
 
 export interface PortfolioGreeks {
-  netDelta: number;
-  rupeeDelta: number; // ₹ per 1% underlying move
-  netGamma: number;
+  netDelta: number;     // in lot units (e.g. -0.17)
+  shareDelta: number;   // in share units (multiplied by lot size, e.g. -11)
+  rupeeDelta: number;   // ₹ per 1% underlying move
+  netGamma: number;     // in lot units
+  shareGamma: number;   // in share units (multiplied by lot size, e.g. -0.19)
   gammaRiskLabel: 'Low' | 'Moderate' | 'High Acceleration';
-  netTheta: number;   // ₹ / day
+  netTheta: number;     // ₹ / day
   thetaPerHour: number; // ₹ / trading hour (6.25 hrs)
   netVega: number;    // ₹ / 1% India VIX move
+  totalDecay: number; // ₹ total extrinsic value / decay to expiry
   totalMtm: number;
   mtmPct: number;
   estimatedMargin: number;
@@ -338,17 +446,23 @@ export interface PortfolioGreeks {
 export function computePortfolioMetrics(
   legs: OptionLegModel[],
   spot: number,
-  lotSize: number
+  lotSize: number,
+  timeYears: number = 2 / CALENDAR_DAYS_PER_YEAR,
+  breakevens: number[] = [],
+  strikeStep: number = 50
 ): PortfolioGreeks {
   if (legs.length === 0) {
     return {
       netDelta: 0,
+      shareDelta: 0,
       rupeeDelta: 0,
       netGamma: 0,
+      shareGamma: 0,
       gammaRiskLabel: 'Low',
       netTheta: 0,
       thetaPerHour: 0,
       netVega: 0,
+      totalDecay: 0,
       totalMtm: 0,
       mtmPct: 0,
       estimatedMargin: 0,
@@ -362,6 +476,7 @@ export function computePortfolioMetrics(
   let totalGamma = 0;
   let totalTheta = 0;
   let totalVega = 0;
+  let totalDecay = 0;
   let totalMtm = 0;
   let shortCount = 0;
 
@@ -385,6 +500,11 @@ export function computePortfolioMetrics(
     // Vega (₹ / 1% IV move): Selling options is short vega (-), buying is long vega (+)
     const legVegaRupees = (leg.side === 'SELL' ? -1 : 1) * qty * Math.abs(leg.vega);
     totalVega += legVegaRupees;
+
+    // Extrinsic decay remaining to expiry (₹)
+    const intrinsic = leg.type === 'CE' ? Math.max(0, spot - leg.strike) : Math.max(0, leg.strike - spot);
+    const extrinsicPerShare = Math.max(0, leg.ltp - intrinsic);
+    totalDecay += (leg.side === 'SELL' ? 1 : -1) * extrinsicPerShare * qty;
 
     // MTM
     const pnl = leg.side === 'SELL'
@@ -418,39 +538,82 @@ export function computePortfolioMetrics(
     ? computeBoundedPnlExtremes(legs, lotSize)
     : { maxProfit: 0, maxLoss: 0 };
 
+  // POP: probability the strategy finishes in a profit zone at expiry, computed by
+  // integrating the risk-neutral lognormal distribution (same N(d2) term the BS
+  // pricer uses) over each zone bounded by the actual breakevens — not a delta-sum
+  // heuristic, which collapses to ~0% for ATM straddles even though such positions
+  // plainly have a real chance of profit. Each zone's profit/loss sign is checked
+  // via the exact intrinsic payoff at a point safely inside it.
+  const hasIv = legs.some((l) => typeof l.iv === 'number' && l.iv > 0);
+  let popPct = 50;
+  if (hasIv) {
+    const avgIv = computeAvgIv(legs, 0);
+    const t = Math.max(timeYears, 0.0001);
+    const sorted = [...breakevens].sort((a, b) => a - b);
+    const offset = Math.max(strikeStep, spot * 0.05);
+    let pop = 0;
+    for (let i = 0; i <= sorted.length; i++) {
+      const lo = i === 0 ? -Infinity : sorted[i - 1];
+      const hi = i === sorted.length ? Infinity : sorted[i];
+      const testSpot = lo === -Infinity && hi === Infinity ? spot
+        : lo === -Infinity ? hi - offset
+        : hi === Infinity ? lo + offset
+        : (lo + hi) / 2;
+      if (testSpot <= 0) continue;
+      if (computeExpiryPnlAtSpot(legs, testSpot, lotSize) <= 0) continue;
+      const probAboveLo = lo === -Infinity ? 1 : riskNeutralProbAbove(spot, lo, t, avgIv);
+      const probAboveHi = hi === Infinity ? 0 : riskNeutralProbAbove(spot, hi, t, avgIv);
+      pop += probAboveLo - probAboveHi;
+    }
+    popPct = Math.round(Math.min(1, Math.max(0, pop)) * 100);
+  }
+
+  const netLotDelta = Math.round(totalLotDelta * 100) / 100;
+  const shareDelta = Math.round(totalLotDelta * lotSize * 10) / 10;
+  const netGamma = Math.round(totalGamma * 10000) / 10000;
+  const shareGamma = Math.round(totalGamma * lotSize * 100) / 100;
+
   return {
-    netDelta: Math.round(totalLotDelta * 100) / 100,
+    netDelta: netLotDelta,
+    shareDelta,
     rupeeDelta,
-    netGamma: Math.round(totalGamma * 10000) / 10000,
+    netGamma,
+    shareGamma,
     gammaRiskLabel,
     netTheta: Math.round(totalTheta),
     thetaPerHour,
     netVega: Math.round(totalVega),
+    totalDecay: Math.round(totalDecay),
     totalMtm: Math.round(totalMtm),
     mtmPct: Math.round(mtmPct * 100) / 100,
     estimatedMargin,
     maxProfit: hasUnlimitedProfit ? 'Unlimited' : boundedExtremes.maxProfit,
     maxLoss: hasUnlimitedLoss ? 'Unlimited' : boundedExtremes.maxLoss,
-    popPct: 68,
+    popPct,
   };
 }
 
 /**
- * Calculates remaining time to expiry in years.
+ * Calculates remaining time to expiry, annualized over CALENDAR_DAYS_PER_YEAR for use as the
+ * `t` in a Black-Scholes vol term (iv*sqrt(t)) — every caller in this module (BS pricing,
+ * POP zone-integration, SD expected-move bands) consumes it that way, never as a literal
+ * calendar-day fraction. The risk-free discount term this also feeds (`exp(-r*t)`) is
+ * insensitive to the 252-vs-365 choice at these option tenors (a fraction of a rupee), so
+ * one `t` safely serves both roles rather than threading two through every function.
  * Adds market close 15:30 IST to expiry date.
  */
 export function calculateTimeToExpiryYears(expiryDateStr: string): number {
-  if (!expiryDateStr) return 2 / 365;
+  if (!expiryDateStr) return 2 / CALENDAR_DAYS_PER_YEAR;
   try {
     const [y, m, d] = expiryDateStr.split('-').map(Number);
     // 15:30 IST is 10:00 UTC
     const expiryTime = new Date(Date.UTC(y, m - 1, d, 10, 0, 0)).getTime();
     const now = Date.now();
     const diffMs = expiryTime - now;
-    if (diffMs <= 0) return 0.25 / 365; // At least a few hours on expiry day
-    return Math.max(0.25 / 365, diffMs / (365.25 * 24 * 3600 * 1000));
+    if (diffMs <= 0) return 0.25 / CALENDAR_DAYS_PER_YEAR; // At least a few hours on expiry day
+    return Math.max(0.25 / CALENDAR_DAYS_PER_YEAR, diffMs / (CALENDAR_DAYS_PER_YEAR * 24 * 3600 * 1000));
   } catch {
-    return 2 / 365;
+    return 2 / CALENDAR_DAYS_PER_YEAR;
   }
 }
 

@@ -40,43 +40,47 @@ function isPidRunning(pid: number): boolean {
   }
 }
 
-// Skip if market is already closed for the day (after 15:30 IST)
-const [h, m] = istHourMinute();
-if (h > 15 || (h === 15 && m >= 30)) {
-  console.log('[iv-collector] Market closed — skipping auto-start');
-} else if (fs.existsSync(STOP_TRIGGER)) {
-  // User explicitly stopped it today
-  console.log('[iv-collector] Stop trigger found — skipping auto-start');
-} else {
-  // Guard against double-spawn on hot reloads
-  let alreadyRunning = false;
-  if (fs.existsSync(PID_FILE)) {
-    const pid = parseInt(fs.readFileSync(PID_FILE, 'utf8').trim(), 10);
-    if (!isNaN(pid) && isPidRunning(pid)) {
-      console.log(`[iv-collector] Already running (PID ${pid}) — skipping`);
-      alreadyRunning = true;
-    } else {
-      fs.unlinkSync(PID_FILE);
+try {
+  // Skip if market is already closed for the day (after 15:30 IST)
+  const [h, m] = istHourMinute();
+  if (h > 15 || (h === 15 && m >= 30)) {
+    console.log('[iv-collector] Market closed — skipping auto-start');
+  } else if (fs.existsSync(STOP_TRIGGER)) {
+    // User explicitly stopped it today
+    console.log('[iv-collector] Stop trigger found — skipping auto-start');
+  } else {
+    // Guard against double-spawn on hot reloads
+    let alreadyRunning = false;
+    if (fs.existsSync(PID_FILE)) {
+      const pid = parseInt(fs.readFileSync(PID_FILE, 'utf8').trim(), 10);
+      if (!isNaN(pid) && isPidRunning(pid)) {
+        console.log(`[iv-collector] Already running (PID ${pid}) — skipping`);
+        alreadyRunning = true;
+      } else {
+        try { fs.unlinkSync(PID_FILE); } catch {}
+      }
+    }
+
+    if (!alreadyRunning) {
+      fs.mkdirSync(DEBUG_DIR, { recursive: true });
+
+      const proc = spawn(PYTHON_EXE, [COLLECTOR], {
+        detached: true,
+        stdio:    'ignore',
+      });
+
+      proc.unref();
+
+      if (proc.pid) {
+        fs.writeFileSync(PID_FILE, String(proc.pid), 'utf8');
+        console.log(`[iv-collector] Started (PID ${proc.pid}) — logs at debug/iv_snapshot_collector.log`);
+      } else {
+        console.error('[iv-collector] Failed to spawn — check venv path and run login.py');
+      }
     }
   }
-
-  if (!alreadyRunning) {
-    fs.mkdirSync(DEBUG_DIR, { recursive: true });
-
-    const proc = spawn(PYTHON_EXE, [COLLECTOR], {
-      detached: true,
-      stdio:    'ignore',
-    });
-
-    proc.unref();
-
-    if (proc.pid) {
-      fs.writeFileSync(PID_FILE, String(proc.pid), 'utf8');
-      console.log(`[iv-collector] Started (PID ${proc.pid}) — logs at debug/iv_snapshot_collector.log`);
-    } else {
-      console.error('[iv-collector] Failed to spawn — check venv path and run login.py');
-    }
-  }
+} catch (err) {
+  console.warn('[iv-collector] Could not auto-start iv collector:', err);
 }
 
 // ─── Process Shutdown Handler (Ctrl+C / SIGINT Cleanup) ─────────────
