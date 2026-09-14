@@ -5,6 +5,31 @@
  * and generates detailed exited-position records with true entry, exit, points, and realized P&L.
  */
 
+import { MCX_LOT_MULTIPLIER } from './positionPnl.ts';
+
+/**
+ * Contract multiplier for an exited-position symbol, e.g. CRUDEOILM's 10
+ * barrels/lot — without it, realized P&L for any MCX round trip understates
+ * by that same factor (a real bug found 2026-09: two CRUDEOILM exits showing
+ * +₹199/-₹126 net +₹73 instead of the true +₹1990/-₹1260 net +₹730).
+ *
+ * Matches by symbol prefix rather than an exact key because the two brokers
+ * spell the same contract differently — Dhan: "CRUDEOILM-21Sep2026-FUT",
+ * Kotak: "CRUDEOILM21SEP26FUT" — neither splits cleanly to a bare "CRUDEOILM".
+ * Checked longest-root-first so "CRUDEOILM..." matches its own 10x entry
+ * rather than falling through to "CRUDEOIL"'s 100x (a prefix of the same
+ * string) and multiplying its P&L 10x too high.
+ */
+function resolveMultiplier(sym: string, overrides: Record<string, number>): number {
+  if (overrides[sym] !== undefined) return overrides[sym];
+  const upper = sym.toUpperCase();
+  const roots = Object.keys(MCX_LOT_MULTIPLIER).sort((a, b) => b.length - a.length);
+  for (const root of roots) {
+    if (upper.startsWith(root)) return MCX_LOT_MULTIPLIER[root];
+  }
+  return 1;
+}
+
 export interface RawTrade {
   tradingSymbol?: string;
   symbol?: string;
@@ -79,7 +104,7 @@ export function matchTradesFifo(
     });
 
     const queue: FifoLot[] = [];
-    const mult = multipliers[sym] ?? (sym.includes('CRUDE') ? 1 : 1);
+    const mult = resolveMultiplier(sym, multipliers);
 
     for (let i = 0; i < sorted.length; i++) {
       const t = sorted[i];
