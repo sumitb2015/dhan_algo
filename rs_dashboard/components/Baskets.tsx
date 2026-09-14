@@ -203,7 +203,7 @@ export default function Baskets() {
       strike: 23300,
       lots: 1,
       type: 'MARKET',
-      price: '55.65',
+      price: '',
       expiry: '2026-09-15',
     },
     {
@@ -213,7 +213,7 @@ export default function Baskets() {
       strike: 23500,
       lots: 1,
       type: 'MARKET',
-      price: '61.20',
+      price: '',
       expiry: '2026-09-15',
     },
   ]);
@@ -266,6 +266,15 @@ export default function Baskets() {
   const spotChange = liveQuotes?.spot_change ?? 0;
   const spotChangePct = liveQuotes?.spot_change_pct ?? 0;
 
+  useEffect(() => {
+    if (!liveQuotes) return;
+    if (liveQuotes.future && typeof liveQuotes.future.ltp === 'number' && liveQuotes.future.ltp > 0) {
+      setFuturePrice(liveQuotes.future.ltp);
+      if (liveQuotes.future.expiry) setFutureExpiry(liveQuotes.future.expiry);
+      if (typeof liveQuotes.future.basis === 'number') setFutureBasis(liveQuotes.future.basis);
+    }
+  }, [liveQuotes]);
+
   const legCounterRef  = useRef(0);
   const placingRef     = useRef(false);
   const expiryRef      = useRef('');
@@ -280,13 +289,13 @@ export default function Baskets() {
   const uConfig = UNDERLYING_CONFIGS[underlying] || UNDERLYING_CONFIGS.NIFTY;
   const spot = (liveQuotes?.spot && liveQuotes.spot > 0)
     ? liveQuotes.spot
-    : (chainSpot > 0 ? chainSpot : (underlying === 'NIFTY' ? 23398.10 : uConfig.defaultSpot));
+    : (chainSpot > 0 ? chainSpot : uConfig.defaultSpot);
   const effectiveLotSize = (lotSize != null && lotSize > 0)
     ? lotSize
     : (uConfig.lotSize ?? 65);
   const effectiveFutureBasis = (typeof futureBasis === 'number' && Number.isFinite(futureBasis))
     ? futureBasis
-    : (underlying === 'NIFTY' ? 65.50 : 0);
+    : 0;
   const effectiveFuturePrice = (typeof futurePrice === 'number' && futurePrice > 0)
     ? futurePrice
     : (spot + effectiveFutureBasis);
@@ -437,19 +446,31 @@ export default function Baskets() {
     const key = String(strike);
     const side = option === 'CE' ? 'ce' : 'pe';
     if (legExpiry != null && legExpiry !== expiry) {
-      const extraLtp = liveQuotes?.extra?.[legExpiry]?.[key]?.[side]?.ltp ?? 0;
+      const extraTick = liveQuotes?.extra?.[legExpiry]?.[key]?.[side] ?? liveQuotes?.extra?.[legExpiry]?.[strike]?.[side];
+      const extraLtp = extraTick?.ltp ?? 0;
       return extraLtp > 0 ? extraLtp : 0;
     }
-    const live = liveQuotes?.strikes?.[key]?.[side]?.ltp ?? 0;
-    return live > 0 ? live : (prevClose[key]?.[side] ?? 0);
-  }, [liveQuotes, prevClose, expiry]);
+
+    // 1. Check live WebSocket tick quote (both numeric and string keys)
+    const tickData = liveQuotes?.strikes?.[strike] ?? liveQuotes?.strikes?.[key];
+    const wsPrice = (tickData as any)?.[side]?.ltp;
+    if (typeof wsPrice === 'number' && wsPrice > 0) return wsPrice;
+
+    // 2. Check option chain last_price
+    const chainEntry = chainOc[strike] || chainOc[key];
+    const chainLtp = chainEntry?.[side]?.last_price;
+    if (typeof chainLtp === 'number' && chainLtp > 0) return chainLtp;
+
+    // 3. Fallback to previous_close_price
+    const chainPrev = chainEntry?.[side]?.previous_close_price ?? prevClose[key]?.[side] ?? prevClose[strike]?.[side] ?? 0;
+    if (typeof chainPrev === 'number' && chainPrev > 0) return chainPrev;
+
+    return 0;
+  }, [liveQuotes, chainOc, prevClose, expiry]);
 
   const effectivePremium = useCallback((leg: BasketLeg): number => {
     const manual = Number(leg.price);
     if (leg.price.trim() !== '' && !isNaN(manual) && manual > 0) return manual;
-    // Sensibull baseline benchmark prices for reference strangle
-    if (leg.strike === 23500 && leg.option === 'CE') return 61.20;
-    if (leg.strike === 23300 && leg.option === 'PE') return 55.65;
     const auto = autoPremium(leg.strike, leg.option, leg.expiry);
     if (auto > 0) return auto;
     return 0;
@@ -473,10 +494,7 @@ export default function Baskets() {
       const target = curAtm + l.offset * curStep;
       const strike = (curStrikes.length > 0 ? nearestStrike(curStrikes, target) : target) ?? curAtm;
       const legExpiry = l.expiryRole === 'far' ? farExpiry : (expiry || '2026-09-15');
-      const defaultPrice = (strike === 23500 && l.option === 'CE') ? '61.20'
-        : (strike === 23300 && l.option === 'PE') ? '55.65'
-        : '';
-      return { id: newLegId(), side: l.side, option: l.option, strike, lots: l.ratio, type: 'MARKET' as const, price: defaultPrice, expiry: legExpiry };
+      return { id: newLegId(), side: l.side, option: l.option, strike, lots: l.ratio, type: 'MARKET' as const, price: '', expiry: legExpiry };
     }));
   }, [atmStrike, allStrikes, step, expiry, farExpiry, underlying, addToast]);
 
@@ -576,13 +594,7 @@ export default function Baskets() {
       const qty = l.lots * multiplier * activeLotSize;
       const chainEntry = chainOc[String(l.strike)] || chainOc[l.strike];
       const legIvRaw = isCall ? chainEntry?.ce?.implied_volatility : chainEntry?.pe?.implied_volatility;
-      let legIv = typeof legIvRaw === 'number' && legIvRaw > 0 ? legIvRaw / 100 : baseIv;
-      // Exact Sensibull parity IVs for reference strangle strikes
-      if (l.strike === 23500 && isCall) {
-        legIv = 0.095;
-      } else if (l.strike === 23300 && !isCall) {
-        legIv = 0.110;
-      }
+      const legIv = typeof legIvRaw === 'number' && legIvRaw > 0 ? legIvRaw / 100 : baseIv;
       const g = computeBsGreeks(
         type,
         effectiveFuturePrice,

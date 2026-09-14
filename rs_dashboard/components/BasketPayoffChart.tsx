@@ -137,13 +137,16 @@ export default function BasketPayoffChart({
 }: BasketPayoffChartProps) {
   const [isPayoffFullscreen, setIsPayoffFullscreen] = useState(false);
   const [targetSpot, setTargetSpot] = useState<number | null>(null);
-  const [targetDays, setTargetDays] = useState<number>(4.0);
+  const [targetDays, setTargetDays] = useState<number | null>(null);
 
-  const initialDays = 4.0; // Sensibull baseline parity (4.0 calendar days to weekly expiry)
+  // Real calendar days left on the selected expiry. Never floored to an arbitrary constant —
+  // a same-day/next-day expiry must cap the target-date slider (and thus the T+0 Black-76 eval
+  // time and SD bands) at its own remaining time, not a wider weekly-expiry assumption.
+  const maxDays = Math.max(0.05, (currentExpiry ? daysToExpiry(currentExpiry) ?? 4.0 : 4.0));
 
   const effectiveTargetSpot = targetSpot ?? spot;
-  const effectiveTargetDays = targetDays ?? 4.0;
-  const maxDays = Math.max(4.0, (currentExpiry ? daysToExpiry(currentExpiry) ?? 4.0 : 4.0));
+  // Default (untouched slider) is "today", i.e. the full remaining time to the real expiry.
+  const effectiveTargetDays = Math.min(targetDays ?? maxDays, maxDays);
   const targetSpotChangePct = spot > 0 ? ((effectiveTargetSpot - spot) / spot) * 100 : 0;
 
   // Esc key & body scroll lock in full screen
@@ -695,7 +698,7 @@ export default function BasketPayoffChart({
                   </div>
                   <button
                     type="button"
-                    onClick={() => setTargetDays(4.0)}
+                    onClick={() => setTargetDays(null)}
                     className="text-[11px] text-sky-400 hover:text-sky-300 underline font-medium cursor-pointer ml-1"
                   >
                     Reset
