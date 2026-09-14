@@ -22,6 +22,13 @@ import {
 import { sortLegsForPlacement, resolveOrderRequest, type StrikeIdentifier } from '@/lib/basketOrders';
 import { useCopyTrade, CopyTradeControls } from './CopyTrade';
 import BasketPayoffChart from './BasketPayoffChart';
+import {
+  type OptionLegModel,
+  type Side,
+  type OptType,
+  computeBsGreeks,
+  computePortfolioMetrics,
+} from '@/lib/optionsMonitorMath';
 import StrategyCardGrid from './basket/StrategyCardGrid';
 import LegsTable from './basket/LegsTable';
 import SavedBasketsPanel from './basket/SavedBasketsPanel';
@@ -176,6 +183,9 @@ export default function Baskets() {
   const [strikeMap, setStrikeMap]   = useState<Record<string, StrikeIdentifier>>({});
   const [farStrikeMap, setFarStrikeMap] = useState<Record<string, StrikeIdentifier>>({});
   const [lotSize, setLotSize]       = useState<number | null>(null);
+  const [futurePrice, setFuturePrice]   = useState<number | null>(null);
+  const [futureBasis, setFutureBasis]   = useState<number | null>(null);
+  const [futureExpiry, setFutureExpiry] = useState<string | null>(null);
 
   const { liveQuotes, bridgeStatus, lastUpdated, transport } = useLiveOptionsWS(expiry, broker, authenticatedBrokers, underlying);
 
@@ -297,12 +307,13 @@ export default function Baskets() {
     if (!expiry) return;
     chainReadyForRef.current = null;
     setLegs([]); setStrategy(null); setAllStrikes([]); setPrevClose({}); setStrikeMap({}); setChainSpot(0);
+    setFuturePrice(null); setFutureBasis(null); setFutureExpiry(null);
 
     const requestedUnderlying = underlying;
     const requestedExpiryForChain = expiry;
     fetch(`/api/options/chain?underlying=${underlying}&expiry=${expiry}&broker=${broker}`)
       .then(r => r.json())
-      .then((j: { success: boolean; data?: { chain: { oc?: Record<string, ChainOcEntry> }; spot: number } }) => {
+      .then((j: { success: boolean; data?: { chain: { oc?: Record<string, ChainOcEntry> }; spot: number; future_price?: number; future_basis?: number; future_expiry?: string } }) => {
         if (requestedUnderlying !== underlyingRef.current || requestedExpiryForChain !== expiryRef.current) return;
         if (!j.success || !j.data?.chain?.oc) return;
         const oc = j.data.chain.oc;
@@ -317,6 +328,9 @@ export default function Baskets() {
         }
         setPrevClose(pc);
         if ((j.data.spot ?? 0) > 0) setChainSpot(j.data.spot);
+        if (typeof j.data.future_price === 'number' && j.data.future_price > 0) setFuturePrice(j.data.future_price);
+        if (typeof j.data.future_basis === 'number') setFutureBasis(j.data.future_basis);
+        if (j.data.future_expiry) setFutureExpiry(j.data.future_expiry);
         chainReadyForRef.current = { underlying: requestedUnderlying, expiry: requestedExpiryForChain };
       })
       .catch(() => {});
@@ -478,6 +492,51 @@ export default function Baskets() {
   }, [payoff]);
 
   const daysLeft = useMemo(() => (expiry ? daysToExpiry(expiry) : null), [expiry]);
+
+  const monitorLegs = useMemo<OptionLegModel[]>(() => {
+    if (!lotSize) return [];
+    const tYears = daysLeft ? Math.max(0.0001, daysLeft / 365) : 2 / 365;
+    const baseIv = currentVix > 0 ? currentVix / 100 : 0.145;
+    return legs.map((l) => {
+      const prem = effectivePremium(l);
+      const isCall = l.option === 'CE';
+      const isBuy = l.side === 'B';
+      const side: Side = isBuy ? 'BUY' : 'SELL';
+      const type: OptType = isCall ? 'CE' : 'PE';
+      const qty = l.lots * multiplier * lotSize;
+      const g = computeBsGreeks(type, spot > 0 ? spot : l.strike, l.strike, tYears, baseIv, lotSize);
+      return {
+        id: l.id,
+        type,
+        side,
+        strike: l.strike,
+        lots: l.lots * multiplier,
+        qty,
+        entryPrice: prem,
+        ltp: prem,
+        delta: g.delta,
+        gamma: g.gamma,
+        theta: g.theta,
+        vega: g.vega,
+        iv: baseIv,
+        expiry: l.expiry || expiry,
+      };
+    });
+  }, [legs, lotSize, multiplier, effectivePremium, daysLeft, currentVix, spot, expiry]);
+
+  const portfolioMetrics = useMemo(() => {
+    if (!monitorLegs.length || !lotSize || !spot || daysLeft == null) return null;
+    const tYears = Math.max(0.0001, daysLeft / 365);
+    return computePortfolioMetrics(
+      monitorLegs,
+      spot,
+      lotSize,
+      tYears,
+      payoff?.breakevens ?? [],
+      step
+    );
+  }, [monitorLegs, lotSize, spot, daysLeft, payoff?.breakevens, step]);
+
   const premiumsUnavailable = legs.length > 0 && legs.every(l => effectivePremium(l) <= 0);
 
   type PlacedLeg = { label: string; side: 'B' | 'S'; option: OptionType; strike: number; qty: number; expiry: string };
@@ -960,8 +1019,8 @@ export default function Baskets() {
               meta={payoff ? (payoff.netPremium >= 0 ? 'NET CREDIT' : 'NET DEBIT') : 'EXPIRY MODEL'}
             >
               <div className="flex flex-col">
-                {/* 3x2 StatTile Grid */}
-                <div className="grid grid-cols-2 sm:grid-cols-3 gap-2 p-3.5 border-b border-zinc-800 bg-zinc-950/40">
+                {/* 4x2 StatTile Grid */}
+                <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-2 p-3.5 border-b border-zinc-800 bg-zinc-950/40">
                   <StatTile
                     label="Net Premium"
                     tone={!payoff ? 'neutral' : payoff.netPremium >= 0 ? 'up' : 'down'}
@@ -982,6 +1041,13 @@ export default function Baskets() {
                     value={!payoff ? '—' : payoff.maxLossUnlimited ? 'Unlimited' : fmtMoney(payoff.maxLoss)}
                     sub={payoff?.maxLossUnlimited ? 'Defined-risk hedge advised' : payoff ? 'Defined downside' : undefined}
                     tooltip="Theoretical maximum risk at contract expiry"
+                  />
+                  <StatTile
+                    label="Probability of Profit"
+                    tone={portfolioMetrics && portfolioMetrics.popPct >= 50 ? 'up' : 'accent'}
+                    value={portfolioMetrics ? `${portfolioMetrics.popPct.toFixed(1)}%` : '—'}
+                    sub={portfolioMetrics ? (portfolioMetrics.popPct >= 50 ? 'Favourable probability' : 'Defined debit profile') : undefined}
+                    tooltip="Risk-neutral probability of finishing in profit at expiry (Sensibull model)"
                   />
                   <StatTile
                     label="Breakeven Corridor"
@@ -1010,15 +1076,30 @@ export default function Baskets() {
                     sub={`${expiry || 'Front'} · VIX ${currentVix.toFixed(2)}`}
                     tooltip="Calendar days remaining until contract expiry"
                   />
+                  <StatTile
+                    label="Est. Margin"
+                    tone="neutral"
+                    value={portfolioMetrics && portfolioMetrics.estimatedMargin > 0 ? fmtMoney(portfolioMetrics.estimatedMargin) : '—'}
+                    sub={lotSize ? `${totalQty} lots (${totalQty * lotSize} units)` : undefined}
+                    tooltip="Theoretical margin requirement based on standard exchange span"
+                  />
                 </div>
 
                 {/* Payoff Chart Canvas */}
                 <div className="p-3.5">
                   <div className="rounded-xl border border-zinc-800/80 bg-zinc-950/80 p-2 shadow-inner">
                     <BasketPayoffChart
+                      legs={monitorLegs}
+                      spot={spot}
+                      strikeStep={step}
+                      lotSize={lotSize ?? 75}
+                      currentExpiry={expiry}
+                      futurePrice={futurePrice}
+                      futureBasis={futureBasis}
+                      futureExpiry={futureExpiry}
+                      baseIv={currentVix > 0 ? currentVix / 100 : 0.145}
                       points={payoff?.points ?? []}
                       breakevens={payoff?.breakevens ?? []}
-                      spot={spot}
                       rightWing={payoff?.rightWing ?? null}
                       leftWing={payoff?.leftWing ?? null}
                       emptyReason={
