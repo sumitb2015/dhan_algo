@@ -48,6 +48,7 @@ export interface KotakSession {
   editSid: string;
   serverId: string;
   ucc?: string;
+  consumerKey?: string;
 }
 
 interface KotakTokenCache extends KotakSession { ts: number; fileMtimeMs: number }
@@ -85,8 +86,8 @@ export function getKotakSession(): KotakSession {
   try { fileMtimeMs = fs.statSync(TOKEN_FILE).mtimeMs; } catch { /* fall through to full read */ }
 
   if (cache && cache.fileMtimeMs === fileMtimeMs && Date.now() - cache.ts < TOKEN_TTL) {
-    const { baseUrl, editToken, editSid, serverId, ucc } = cache;
-    return { baseUrl, editToken, editSid, serverId, ucc };
+    const { baseUrl, editToken, editSid, serverId, ucc, consumerKey } = cache;
+    return { baseUrl, editToken, editSid, serverId, ucc, consumerKey };
   }
   // Kotak is an optional broker — the token file legitimately not existing
   // (never run kotak_autologin.py) is routine, not a bug. Without this
@@ -106,11 +107,12 @@ export function getKotakSession(): KotakSession {
     editSid: raw.edit_sid,
     serverId: raw.serverId ?? '',
     ucc: raw.ucc,
+    consumerKey: raw.consumerKey,
     ts: Date.now(),
     fileMtimeMs,
   };
-  const { baseUrl, editToken, editSid, serverId, ucc } = cache;
-  return { baseUrl, editToken, editSid, serverId, ucc };
+  const { baseUrl, editToken, editSid, serverId, ucc, consumerKey } = cache;
+  return { baseUrl, editToken, editSid, serverId, ucc, consumerKey };
 }
 
 const RELOGIN_COOLDOWN_MS = 20_000;
@@ -162,8 +164,18 @@ function kotakUrl(apiPath: string): string {
 }
 
 function authHeaders(): Record<string, string> {
-  const { editToken, editSid } = getKotakSession();
-  return { Sid: editSid, Auth: editToken };
+  const { editToken, editSid, consumerKey } = getKotakSession();
+  const headers: Record<string, string> = { Sid: editSid, Auth: editToken };
+  // The official SDK sends this on order/modify/search calls but omits it on
+  // plain reads (positions/limits/orders/trades) — see services/order.py vs.
+  // services/positions.py in neo_api_client. Sending it unconditionally is
+  // safe (the read endpoints simply ignore it) and avoids maintaining a
+  // per-endpoint header table. Without it, order placement fails with a bare
+  // "unauthorized" even under an otherwise perfectly valid session — this is
+  // NOT the same failure reloginKotak() fixes, so don't remove this header
+  // thinking the session-death handling above makes it redundant.
+  if (consumerKey) headers.Authorization = consumerKey;
+  return headers;
 }
 
 function raiseIfError(json: Record<string, unknown>): void {
