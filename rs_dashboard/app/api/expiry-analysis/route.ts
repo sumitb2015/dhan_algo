@@ -73,73 +73,96 @@ export async function GET(req: NextRequest) {
     });
 
     // ── Weekly buckets ───────────────────────────────────────────────────────
-    // Two regimes (getUTCDay: 0=Sun 1=Mon 2=Tue 3=Wed 4=Thu 5=Fri 6=Sat):
-    //   Old (< 2025-09-01): Fri open (5) → Thu close (4)  [expiry Thursday]
-    //   New (≥ 2025-09-01): Wed open (3) → Tue close (2)  [expiry Tuesday]
+    // NSE's weekly Nifty expiry day: Thursday through 2025-08-28, Tuesday from
+    // 2025-09-02 (SEBI circular, effective 2025-09-01). A Monday-expiry plan
+    // was announced 2025-03-04 for 2025-04-05 but deferred before ever going
+    // live, so there is no third regime to model — just the Thu/Tue split.
+    //
+    // When an expiry's nominal weekday falls on a trading holiday, NSE rolls
+    // it back to the PREVIOUS trading day (not forward). So buckets are built
+    // from nominal calendar dates plus a "closest trading day on/before"
+    // lookup, rather than scanning for an exact weekday match in the data —
+    // the old approach silently merged two calendar weeks into one whenever
+    // the expiry day itself was a holiday (e.g. NIFTY50's back-to-back
+    // 2022-04-14/04-15 holidays used to produce a single 13-day "week"
+    // spanning 2022-04-08 → 2022-04-21 instead of two normal weeks).
     const weeks: WeeklyBucket[] = [];
-    let openBucket: { startDate: string; startOpen: number; regime: 'old' | 'new' } | null = null;
-    let lastRow: (typeof filtered)[0] | null = null;
+    let currentWeek: WeeklyBucket | null = null;
 
-    for (const row of filtered) {
-      const regime: 'old' | 'new' = row.date < REGIME_CHANGE_DATE ? 'old' : 'new';
-      const openDay  = regime === 'old' ? 5 : 3; // Fri or Wed
-      const closeDay = regime === 'old' ? 4 : 2; // Thu or Tue
-      const dayOfWeek = new Date(row.date + 'T00:00:00Z').getUTCDay();
-
-      if (dayOfWeek === openDay) {
-        if (openBucket && lastRow && openBucket.startOpen > 0) {
-          const raw = ((lastRow.close - openBucket.startOpen) / openBucket.startOpen) * 100;
-          weeks.push({
-            startDate: openBucket.startDate,
-            endDate: lastRow.date,
-            startOpen: openBucket.startOpen,
-            endClose: lastRow.close,
-            returnPct: Math.round(raw * 100) / 100,
-          });
-        }
-        openBucket = { startDate: row.date, startOpen: row.open, regime };
-      } else if (dayOfWeek === closeDay && openBucket && openBucket.regime === regime) {
-        if (openBucket.startOpen > 0) {
-          const raw = ((row.close - openBucket.startOpen) / openBucket.startOpen) * 100;
-          weeks.push({
-            startDate: openBucket.startDate,
-            endDate: row.date,
-            startOpen: openBucket.startOpen,
-            endClose: row.close,
-            returnPct: Math.round(raw * 100) / 100,
-          });
-        }
-        openBucket = null;
+    function addDays(iso: string, n: number): string {
+      const d = new Date(iso + 'T00:00:00Z');
+      d.setUTCDate(d.getUTCDate() + n);
+      return d.toISOString().slice(0, 10);
+    }
+    // Index (into `filtered`) of the last trading row with date <= target.
+    function onOrBefore(target: string): number {
+      let lo = 0, hi = filtered.length - 1, ans = -1;
+      while (lo <= hi) {
+        const mid = (lo + hi) >> 1;
+        if (filtered[mid].date <= target) { ans = mid; lo = mid + 1; } else hi = mid - 1;
       }
-
-      lastRow = row;
+      return ans;
     }
 
-    // ── Current in-progress weekly expiry bucket (if not completed yet) ──────
-    // Only compute currentWeek if the filtered slice reaches the latest available trading day
-    const isLatestData = rows.length > 0 && lastRow !== null && lastRow.date === rows[rows.length - 1].date;
-    let currentWeek: WeeklyBucket | null = null;
-    if (isLatestData) {
-      if (openBucket && lastRow && openBucket.startOpen > 0) {
-        const raw = ((lastRow.close - openBucket.startOpen) / openBucket.startOpen) * 100;
-        currentWeek = {
-          startDate: openBucket.startDate,
-          endDate: lastRow.date,
-          startOpen: openBucket.startOpen,
-          endClose: lastRow.close,
-          returnPct: Math.round(raw * 100) / 100,
-        };
-      } else if (!openBucket && lastRow && weeks.length > 0) {
-        const lastCompletedEnd = weeks[weeks.length - 1].endDate;
-        const lastCompletedIdx = filtered.findIndex((r) => r.date === lastCompletedEnd);
-        if (lastCompletedIdx >= 0 && lastCompletedIdx < filtered.length - 1) {
-          const startRow = filtered[lastCompletedIdx + 1];
-          if (startRow.open > 0) {
-            const raw = ((lastRow.close - startRow.open) / startRow.open) * 100;
+    if (filtered.length > 0) {
+      const dataStartD = filtered[0].date;
+      const dataEndD = filtered[filtered.length - 1].date;
+
+      // Nominal expiry (close) dates across the whole filtered span — every
+      // Thursday before the regime change, every Tuesday from it onward.
+      const nominalCloses: string[] = [];
+      const firstOldClose = addDays(dataStartD, (4 - new Date(dataStartD + 'T00:00:00Z').getUTCDay() + 7) % 7);
+      for (let d = firstOldClose; d < REGIME_CHANGE_DATE && d <= dataEndD; d = addDays(d, 7)) {
+        nominalCloses.push(d);
+      }
+      const newRegimeAnchor = dataStartD > REGIME_CHANGE_DATE ? dataStartD : REGIME_CHANGE_DATE;
+      const firstNewClose = addDays(newRegimeAnchor, (2 - new Date(newRegimeAnchor + 'T00:00:00Z').getUTCDay() + 7) % 7);
+      for (let d = firstNewClose; d <= dataEndD; d = addDays(d, 7)) {
+        nominalCloses.push(d);
+      }
+
+      // Walk cycles chronologically: each cycle opens on the trading day right
+      // after the previous cycle's actual close, and closes on the latest
+      // trading day on/before its nominal expiry date (the NSE holiday-shift
+      // rule). A nominal close that can't roll back past the previous cycle's
+      // close (only possible with an implausible run of consecutive holidays
+      // covering a whole week) is skipped — that span folds into the next
+      // successful cycle rather than fabricating a return from stale data.
+      let prevCloseIdx = -1;
+      for (const nominalClose of nominalCloses) {
+        const closeIdx = onOrBefore(nominalClose);
+        if (closeIdx < 0 || closeIdx <= prevCloseIdx) continue;
+        const openIdx = prevCloseIdx + 1;
+        const openRow = filtered[openIdx];
+        const closeRow = filtered[closeIdx];
+        if (openRow.open > 0) {
+          const raw = ((closeRow.close - openRow.open) / openRow.open) * 100;
+          weeks.push({
+            startDate: openRow.date,
+            endDate: closeRow.date,
+            startOpen: openRow.open,
+            endClose: closeRow.close,
+            returnPct: Math.round(raw * 100) / 100,
+          });
+        }
+        prevCloseIdx = closeIdx;
+      }
+
+      // In-progress cycle: only when the filtered slice reaches today's latest
+      // available trading day, and at least one trading day exists after the
+      // last completed cycle's close.
+      const isLatestData = rows.length > 0 && dataEndD === rows[rows.length - 1].date;
+      if (isLatestData) {
+        const openIdx = prevCloseIdx + 1;
+        if (openIdx < filtered.length) {
+          const openRow = filtered[openIdx];
+          const lastRow = filtered[filtered.length - 1];
+          if (openRow.open > 0) {
+            const raw = ((lastRow.close - openRow.open) / openRow.open) * 100;
             currentWeek = {
-              startDate: startRow.date,
+              startDate: openRow.date,
               endDate: lastRow.date,
-              startOpen: startRow.open,
+              startOpen: openRow.open,
               endClose: lastRow.close,
               returnPct: Math.round(raw * 100) / 100,
             };

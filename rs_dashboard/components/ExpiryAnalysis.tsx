@@ -118,6 +118,8 @@ interface ScatterPoint {
   y: number;
   startDate: string;
   endDate: string;
+  startOpen: number;
+  endClose: number;
   returnPct: number;
   status: 'within' | 'upside' | 'downside' | 'current';
 }
@@ -207,16 +209,85 @@ function CustomTooltip({ active, payload }: { active?: boolean; payload?: { payl
     isCurrent ? '#3b82f6' : d.status === 'upside' ? '#34d399' : d.status === 'downside' ? '#f87171' : '#a1a1aa';
   const signChar = d.returnPct >= 0 ? '+' : '';
   const label =
-    isCurrent ? 'Current Expiry (In-progress)' : d.status === 'within' ? 'Within boundary' : d.status + ' outlier';
+    isCurrent ? 'Current Expiry · In-progress' : d.status === 'within' ? 'Within boundary' : d.status + ' outlier';
   return (
-    <div className="bg-zinc-900 border border-zinc-700 rounded-lg px-3 py-2 text-xs shadow-xl">
-      <div className="text-zinc-400 mb-1">
-        {fmtDate(d.startDate)} → {fmtDate(d.endDate)} {isCurrent ? '(Current Week)' : ''}
+    <div className="bg-zinc-950/98 border border-zinc-700/70 rounded-xl px-4 py-3 text-xs shadow-2xl backdrop-blur min-w-[210px] font-mono">
+      <div className="text-zinc-500 mb-1.5 tracking-wide">
+        {fmtDate(d.startDate)} → {fmtDate(d.endDate)}
       </div>
-      <div style={{ color }} className="font-mono font-bold text-sm">
+      <div style={{ color }} className="font-bold text-base leading-tight">
         {signChar}{d.returnPct.toFixed(2)}%
       </div>
-      <div className={`mt-0.5 capitalize ${isCurrent ? 'text-blue-400 font-semibold' : 'text-zinc-500'}`}>{label}</div>
+      <div className="mt-2 pt-2 border-t border-zinc-800 space-y-1">
+        <div className="flex items-center justify-between gap-4">
+          <span className="text-zinc-500">
+            Open <span className="text-zinc-600">· {fmtDate(d.startDate)}</span>
+          </span>
+          <span className="text-zinc-200 font-semibold">{fmtINR(d.startOpen)}</span>
+        </div>
+        <div className="flex items-center justify-between gap-4">
+          <span className="text-zinc-500">
+            Close <span className="text-zinc-600">· {fmtDate(d.endDate)}</span>
+          </span>
+          <span className="text-zinc-200 font-semibold">{fmtINR(d.endClose)}</span>
+        </div>
+      </div>
+      <div className={`mt-2 pt-2 border-t border-zinc-800 text-[10.5px] uppercase tracking-wide font-bold ${isCurrent ? 'text-blue-400' : 'text-zinc-500'}`}>
+        {label}
+      </div>
+    </div>
+  );
+}
+
+// ─── Reference-line boundary label (rendered inside the plot, never clipped) ──
+
+function BoundaryLabel({
+  viewBox,
+  text,
+  color,
+}: {
+  viewBox?: { x: number; y: number; width: number; height: number };
+  text: string;
+  color: string;
+}) {
+  if (!viewBox) return null;
+  const { x, y, width } = viewBox;
+  const labelWidth = text.length * 6.1 + 16;
+  const lx = x + width - labelWidth - 4;
+  const ly = y - 9;
+  return (
+    <g pointerEvents="none">
+      <rect x={lx} y={ly} width={labelWidth} height={18} rx={5} fill="#09090b" stroke={color} strokeOpacity={0.55} />
+      <text
+        x={lx + labelWidth / 2}
+        y={ly + 12.5}
+        textAnchor="middle"
+        fontSize={10}
+        fontFamily="ui-monospace, monospace"
+        fontWeight={700}
+        fill={color}
+      >
+        {text}
+      </text>
+    </g>
+  );
+}
+
+// ─── Custom legend (colored dot chips instead of tiny default squares) ────────
+
+function ScatterLegend({ payload }: { payload?: { value: string; color?: string }[] }) {
+  if (!payload || payload.length === 0) return null;
+  return (
+    <div className="flex flex-wrap items-center justify-center gap-x-5 gap-y-1.5 pt-3 mt-1 border-t border-zinc-800/80">
+      {payload.map((entry) => (
+        <div key={entry.value} className="flex items-center gap-1.5">
+          <span
+            className="w-2.5 h-2.5 rounded-full shrink-0"
+            style={{ backgroundColor: entry.color, boxShadow: entry.color ? `0 0 6px ${entry.color}` : undefined }}
+          />
+          <span className="text-[11px] text-zinc-400 font-medium whitespace-nowrap">{entry.value}</span>
+        </div>
+      ))}
     </div>
   );
 }
@@ -305,7 +376,7 @@ export default function ExpiryAnalysis() {
     return () => { cancelled = true; };
   }, [symbol, startDate, endDate, weeksToExpiry]);
 
-  const { lower, upper, withinData, upsideData, downsideData, outliers, currentData } = useMemo(() => {
+  const { lower, upper, withinData, upsideData, downsideData, outliers, currentData, xAxisTicks, xAxisIsYearly } = useMemo(() => {
     const { lower, upper } = computeBoundaries(
       weeks.map((w) => w.returnPct),
       probability / 100,
@@ -323,6 +394,8 @@ export default function ExpiryAnalysis() {
       y: c.returnPct,
       startDate: c.startDate,
       endDate: c.endDate,
+      startOpen: c.startOpen,
+      endClose: c.endClose,
       returnPct: c.returnPct,
       status: c.status,
     });
@@ -341,13 +414,41 @@ export default function ExpiryAnalysis() {
             y: currentWeek.returnPct,
             startDate: currentWeek.startDate,
             endDate: currentWeek.endDate,
+            startOpen: currentWeek.startOpen,
+            endClose: currentWeek.endClose,
             returnPct: currentWeek.returnPct,
             status: 'current',
           },
         ]
       : [];
 
-    return { lower, upper, withinData, upsideData, downsideData, outliers, currentData };
+    // Explicit, deduplicated X-axis ticks — recharts' auto tick algorithm on a
+    // multi-year numeric/time domain can place several ticks close enough
+    // together that their year-only labels repeat and overlap. Generate one
+    // tick per calendar year across the data span (or quarterly ticks if the
+    // whole span sits inside a single year, e.g. a narrow custom date range).
+    const allX = [...withinData, ...upsideData, ...downsideData, ...currentData].map((p) => p.x);
+    let xAxisTicks: number[] = [];
+    let xAxisIsYearly = true;
+    if (allX.length > 0) {
+      const minX = Math.min(...allX);
+      const maxX = Math.max(...allX);
+      const minYear = new Date(minX).getUTCFullYear();
+      const maxYear = new Date(maxX).getUTCFullYear();
+      xAxisIsYearly = maxYear > minYear;
+      if (xAxisIsYearly) {
+        for (let y = minYear; y <= maxYear; y++) xAxisTicks.push(Date.UTC(y, 0, 1));
+      } else {
+        const DAY = 24 * 60 * 60 * 1000;
+        for (let m = 0; m < 12; m += 3) {
+          const t = Date.UTC(minYear, m, 1);
+          if (t >= minX - 40 * DAY && t <= maxX + 40 * DAY) xAxisTicks.push(t);
+        }
+        if (xAxisTicks.length === 0) xAxisTicks = [minX, maxX];
+      }
+    }
+
+    return { lower, upper, withinData, upsideData, downsideData, outliers, currentData, xAxisTicks, xAxisIsYearly };
   }, [weeks, currentWeek, probability]);
 
   // ─── Distribution buckets (empirical) ─────────────────────────────────────
@@ -666,7 +767,9 @@ export default function ExpiryAnalysis() {
     totalExpiries > 0 ? ((totalOutliers / totalExpiries) * 100).toFixed(1) : '0.0';
 
   const xTickFormatter = (ts: number) =>
-    new Date(ts).getUTCFullYear().toString();
+    xAxisIsYearly
+      ? new Date(ts).getUTCFullYear().toString()
+      : new Date(ts).toLocaleDateString('en-US', { month: 'short', year: '2-digit', timeZone: 'UTC' });
 
   const sign = (n: number) => (n >= 0 ? '+' : '');
 
@@ -815,16 +918,19 @@ export default function ExpiryAnalysis() {
         )}
 
         {/* ── Scatter chart ── */}
-        <div className="bg-zinc-900 border border-zinc-800 rounded-xl p-4">
-          <div className="mb-4">
+        <div className="bg-zinc-900 border border-zinc-800 rounded-xl p-4 sm:p-5">
+          <div className="mb-1 flex items-center justify-between flex-wrap gap-2">
             <h2 className="text-sm font-bold text-white flex items-center gap-2">
-              ✈ Outliers Distribution (Survivability Scatter Plot)
+              <span className="text-base leading-none">✈</span> Outliers Distribution (Survivability Scatter Plot)
               <InfoButton title="Survivability Scatter Plot">
                 <p>Inspired by Abraham Wald&apos;s WWII aircraft survivability research. Each dot is one weekly expiry plotted at its return value over time.</p>
                 <p>The dashed lines mark the selected <strong className="text-white">probability boundary</strong> — e.g. 95% means only 5% of returns fall outside. Glowing dots are statistical outliers (extreme market moves).</p>
                 <p>Use the probability slider above to tighten or widen the boundary and see how many weeks qualify as extreme.</p>
               </InfoButton>
             </h2>
+            <span className="text-[10.5px] font-mono text-zinc-500">
+              {totalExpiries} {periodsWord} · {probability}% boundary
+            </span>
           </div>
 
           {loading ? (
@@ -841,7 +947,7 @@ export default function ExpiryAnalysis() {
             </div>
           ) : (
             <ResponsiveContainer width="100%" height={420}>
-              <ScatterChart margin={{ top: 16, right: 80, bottom: 24, left: 8 }}>
+              <ScatterChart margin={{ top: 24, right: 12, bottom: 24, left: 4 }}>
                 <defs>
                   <filter id="glow-green" x="-50%" y="-50%" width="200%" height="200%">
                     <feGaussianBlur stdDeviation="3" result="blur" />
@@ -865,20 +971,22 @@ export default function ExpiryAnalysis() {
                     </feMerge>
                   </filter>
                 </defs>
-                <CartesianGrid stroke="#27272a" strokeDasharray="3 3" vertical={false} />
+                <CartesianGrid stroke="#26262b" strokeDasharray="3 6" vertical={false} />
                 <XAxis
                   dataKey="x"
                   type="number"
                   domain={['auto', 'auto']}
                   scale="time"
+                  ticks={xAxisTicks.length > 0 ? xAxisTicks : undefined}
                   tickFormatter={xTickFormatter}
-                  tick={{ fontSize: 10, fill: '#71717a' }}
-                  axisLine={false}
+                  tick={{ fontSize: 10.5, fill: '#8a8a92' }}
+                  axisLine={{ stroke: '#3f3f46' }}
                   tickLine={false}
+                  tickMargin={8}
                   label={{
                     value: 'Expiry End Date',
                     position: 'insideBottom',
-                    offset: -12,
+                    offset: -14,
                     fontSize: 10,
                     fill: '#71717a',
                   }}
@@ -886,11 +994,12 @@ export default function ExpiryAnalysis() {
                 <YAxis
                   dataKey="y"
                   type="number"
-                  tick={{ fontSize: 10, fill: '#71717a' }}
+                  domain={[(min: number) => Math.floor(min - 1), (max: number) => Math.ceil(max + 1)]}
+                  tick={{ fontSize: 10.5, fill: '#8a8a92' }}
                   axisLine={false}
                   tickLine={false}
                   tickFormatter={(v: number) => `${v}%`}
-                  width={52}
+                  width={44}
                   label={{
                     value: 'Return (%)',
                     angle: -90,
@@ -900,37 +1009,9 @@ export default function ExpiryAnalysis() {
                     fill: '#71717a',
                   }}
                 />
-                <Tooltip content={<CustomTooltip />} />
-                <Legend
-                  wrapperStyle={{ fontSize: 11, paddingTop: 12 }}
-                  formatter={(value) => (
-                    <span style={{ color: '#a1a1aa' }}>{value}</span>
-                  )}
-                />
-                <ReferenceLine
-                  y={upper}
-                  stroke="#34d399"
-                  strokeDasharray="6 3"
-                  strokeWidth={1.5}
-                  label={{
-                    value: `Upper Boundary (${sign(upper)}${upper.toFixed(2)}%)`,
-                    position: 'right',
-                    fontSize: 9,
-                    fill: '#34d399',
-                  }}
-                />
-                <ReferenceLine
-                  y={lower}
-                  stroke="#f87171"
-                  strokeDasharray="6 3"
-                  strokeWidth={1.5}
-                  label={{
-                    value: `Lower Boundary (${sign(lower)}${lower.toFixed(2)}%)`,
-                    position: 'right',
-                    fontSize: 9,
-                    fill: '#f87171',
-                  }}
-                />
+                <Tooltip content={<CustomTooltip />} cursor={{ stroke: '#3f3f46', strokeWidth: 1, strokeDasharray: '4 4' }} />
+                <Legend content={<ScatterLegend />} verticalAlign="bottom" />
+                <ReferenceLine y={0} stroke="#3f3f46" strokeWidth={1} />
                 <Scatter
                   name="Within Boundary"
                   data={withinData}
@@ -961,6 +1042,31 @@ export default function ExpiryAnalysis() {
                     fill="#3b82f6"
                   />
                 )}
+                {/* Recharts 3 paints by fixed per-type zIndex layers, not JSX order
+                    (Scatter defaults to 600) — bump these above that so the
+                    boundary line + label are never occluded by a data dot. */}
+                <ReferenceLine
+                  y={upper}
+                  zIndex={700}
+                  stroke="#34d399"
+                  strokeOpacity={0.7}
+                  strokeDasharray="6 3"
+                  strokeWidth={1.5}
+                  label={(props) => (
+                    <BoundaryLabel viewBox={(props as { viewBox?: { x: number; y: number; width: number; height: number } }).viewBox} text={`Upper ${sign(upper)}${upper.toFixed(2)}%`} color="#34d399" />
+                  )}
+                />
+                <ReferenceLine
+                  y={lower}
+                  zIndex={700}
+                  stroke="#f87171"
+                  strokeOpacity={0.7}
+                  strokeDasharray="6 3"
+                  strokeWidth={1.5}
+                  label={(props) => (
+                    <BoundaryLabel viewBox={(props as { viewBox?: { x: number; y: number; width: number; height: number } }).viewBox} text={`Lower ${sign(lower)}${lower.toFixed(2)}%`} color="#f87171" />
+                  )}
+                />
               </ScatterChart>
             </ResponsiveContainer>
           )}
