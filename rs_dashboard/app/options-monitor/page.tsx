@@ -494,7 +494,7 @@ export default function OptionsMonitorPage() {
 
       for (const leg of currentLegs) {
         const guard = guards[leg.id];
-        if (!guard || guard.triggered) continue;
+        if (!guard || guard.triggered || !leg.isEntered) continue;
 
         const ltp = leg.ltp;
         const entryPrice = leg.entryPrice;
@@ -595,6 +595,9 @@ export default function OptionsMonitorPage() {
     setExpiries([]);
     setSelectedExpiry('');
     notifyAction(`Switched underlying to ${sym}. Loading option chain & live quotes...`);
+    fetchExpiries(sym).then((exp) => {
+      if (exp) fetchOptionChain(sym, exp);
+    });
   };
 
   // Shared leg-construction logic for both "Add to Monitor" and "Place Order Now" flows.
@@ -644,8 +647,10 @@ export default function OptionsMonitorPage() {
       vega: hasDhanGreeks ? dhanGreeks.vega : g.vega,
       iv: legIv,
       expiry: selectedExpiry,
+      underlying: selectedUnderlying,
+      securityId: chainSide?.security_id != null ? String(chainSide.security_id) : undefined,
     };
-  }, [selectedExpiry, liveQuotes, normalizedChain, ivPct, spot, uConfig.lotSize]);
+  }, [selectedExpiry, selectedUnderlying, liveQuotes, normalizedChain, ivPct, spot, uConfig.lotSize]);
 
   // Add custom leg (open for all strikes across the chain)
   const handleAddLeg = (newLegData: {
@@ -673,13 +678,24 @@ export default function OptionsMonitorPage() {
     if (leg) notifyAction(`Closed ${leg.side} ${leg.strike} ${leg.type}`);
   };
 
-  // Update strike from dropdown
-  const handleUpdateLegStrike = (id: string, newStrike: number) => {
+  // Update strike from dropdown. Returns false (and blocks the mutation) if the leg is
+  // already live — a client-side strike swap on an entered leg would desync the UI from
+  // the real broker position without ever sending a roll order.
+  const handleUpdateLegStrike = (id: string, newStrike: number): boolean => {
+    const target = activeLegs.find((l) => l.id === id);
+    if (target?.isEntered) {
+      notifyAction(
+        `Cannot roll ${target.side} ${target.strike} ${target.type}: position is already live. Close it and open the new strike instead.`
+      );
+      return false;
+    }
+
     const timeYears = calculateTimeToExpiryYears(selectedExpiry);
 
     setActiveLegs((prev) =>
       prev.map((l) => {
         if (l.id !== id) return l;
+        if (l.isEntered) return l;
 
         const tickData = liveQuotes?.strikes?.[newStrike] ?? liveQuotes?.strikes?.[String(newStrike)];
         const wsPrice = l.type === 'CE' ? tickData?.ce?.ltp : tickData?.pe?.ltp;
@@ -713,6 +729,7 @@ export default function OptionsMonitorPage() {
           theta: hasDhanGreeks ? dhanGreeks.theta : g.theta,
           vega: hasDhanGreeks ? dhanGreeks.vega : g.vega,
           iv: effectiveIv,
+          securityId: chainSide?.security_id != null ? String(chainSide.security_id) : undefined,
         };
       })
     );
@@ -723,6 +740,7 @@ export default function OptionsMonitorPage() {
       return next;
     });
     notifyAction(`Updated strike to ${newStrike}`);
+    return true;
   };
 
   // Quick Shift strike by steps (+1 or -1 strikeStep)
@@ -1047,8 +1065,9 @@ export default function OptionsMonitorPage() {
       return;
     }
     const newStrike = ceLeg.strike + uConfig.strikeStep;
-    handleUpdateLegStrike(ceLeg.id, newStrike);
-    notifyAction(`Rolled Short CE UP from ${ceLeg.strike} to ${newStrike} (+${uConfig.strikeStep} pts OTM)`);
+    if (handleUpdateLegStrike(ceLeg.id, newStrike)) {
+      notifyAction(`Rolled Short CE UP from ${ceLeg.strike} to ${newStrike} (+${uConfig.strikeStep} pts OTM)`);
+    }
   }, [activeLegs, uConfig.strikeStep, handleUpdateLegStrike]);
 
   // Roll Short CE DOWN (-1 strikeStep)
@@ -1059,8 +1078,9 @@ export default function OptionsMonitorPage() {
       return;
     }
     const newStrike = ceLeg.strike - uConfig.strikeStep;
-    handleUpdateLegStrike(ceLeg.id, newStrike);
-    notifyAction(`Rolled Short CE DOWN from ${ceLeg.strike} to ${newStrike} (-${uConfig.strikeStep} pts)`);
+    if (handleUpdateLegStrike(ceLeg.id, newStrike)) {
+      notifyAction(`Rolled Short CE DOWN from ${ceLeg.strike} to ${newStrike} (-${uConfig.strikeStep} pts)`);
+    }
   }, [activeLegs, uConfig.strikeStep, handleUpdateLegStrike]);
 
   // Roll Short PE UP (+1 strikeStep)
@@ -1071,8 +1091,9 @@ export default function OptionsMonitorPage() {
       return;
     }
     const newStrike = peLeg.strike + uConfig.strikeStep;
-    handleUpdateLegStrike(peLeg.id, newStrike);
-    notifyAction(`Rolled Short PE UP from ${peLeg.strike} to ${newStrike} (+${uConfig.strikeStep} pts)`);
+    if (handleUpdateLegStrike(peLeg.id, newStrike)) {
+      notifyAction(`Rolled Short PE UP from ${peLeg.strike} to ${newStrike} (+${uConfig.strikeStep} pts)`);
+    }
   }, [activeLegs, uConfig.strikeStep, handleUpdateLegStrike]);
 
   // Roll Short PE DOWN (-1 strikeStep)
@@ -1083,8 +1104,9 @@ export default function OptionsMonitorPage() {
       return;
     }
     const newStrike = peLeg.strike - uConfig.strikeStep;
-    handleUpdateLegStrike(peLeg.id, newStrike);
-    notifyAction(`Rolled Short PE DOWN from ${peLeg.strike} to ${newStrike} (-${uConfig.strikeStep} pts OTM)`);
+    if (handleUpdateLegStrike(peLeg.id, newStrike)) {
+      notifyAction(`Rolled Short PE DOWN from ${peLeg.strike} to ${newStrike} (-${uConfig.strikeStep} pts OTM)`);
+    }
   }, [activeLegs, uConfig.strikeStep, handleUpdateLegStrike]);
 
   const handleRollCe = handleRollCeUp;
@@ -1253,6 +1275,17 @@ export default function OptionsMonitorPage() {
   const [orderModalOpen, setOrderModalOpen] = useState(false);
   const [activeTradeOrder, setActiveTradeOrder] = useState<OptionOrderInitialState | null>(null);
 
+  // Resolves the broker security_id for a leg: prefer the id captured on the leg itself
+  // at creation time (correct even if the shared, cross-expiry/underlying normalizedChain
+  // has since been overwritten by a different underlying/expiry fetch), falling back to a
+  // same-strike chain lookup only when the leg predates that capture.
+  const resolveLegSecurityId = useCallback((leg: OptionLegModel): string | undefined => {
+    if (leg.securityId) return leg.securityId;
+    const legKey = leg.type.toLowerCase() as 'ce' | 'pe';
+    const secId = normalizedChain[leg.strike]?.[legKey]?.security_id;
+    return secId ? String(secId) : undefined;
+  }, [normalizedChain]);
+
   const handleOpenTradeBasket = useCallback(() => {
     if (activeLegs.length === 0) {
       setIsAddLegOpen(true);
@@ -1260,42 +1293,50 @@ export default function OptionsMonitorPage() {
       return;
     }
 
+    const basketUnderlying = activeLegs[0].underlying ?? selectedUnderlying;
+    const basketExpiry = activeLegs[0].expiry ?? selectedExpiry;
+    const mismatched = activeLegs.find(
+      (l) => (l.underlying ?? selectedUnderlying) !== basketUnderlying || (l.expiry ?? selectedExpiry) !== basketExpiry
+    );
+    if (mismatched) {
+      notifyAction(
+        `Cannot execute basket: legs span multiple underlyings/expiries (found ${mismatched.underlying ?? selectedUnderlying} ${mismatched.expiry ?? selectedExpiry} alongside ${basketUnderlying} ${basketExpiry}). Execute those legs individually instead.`
+      );
+      return;
+    }
+
     const firstLots = activeLegs[0]?.lots || 1;
     const allSame = activeLegs.every((l) => l.lots === firstLots);
     const baseMultiplier = allSame ? firstLots : 1;
 
-    const orderLegs: OptionTradeLeg[] = activeLegs.map((leg) => {
-      const legKey = leg.type.toLowerCase() as 'ce' | 'pe';
-      const secId = normalizedChain[leg.strike]?.[legKey]?.security_id;
-      return {
-        strike: leg.strike,
-        optionType: leg.type,
-        action: leg.side,
-        lots: allSame ? 1 : leg.lots,
-        securityId: secId ? String(secId) : undefined,
-      };
-    });
+    const orderLegs: OptionTradeLeg[] = activeLegs.map((leg) => ({
+      strike: leg.strike,
+      optionType: leg.type,
+      action: leg.side,
+      lots: allSame ? 1 : leg.lots,
+      securityId: resolveLegSecurityId(leg),
+    }));
 
     setActiveTradeOrder({
-      title: `${selectedUnderlying} ${strategyName} (${activeLegs.length} Legs)`,
-      underlying: selectedUnderlying,
-      expiry: selectedExpiry,
-      lotSize: uConfig.lotSize,
+      title: `${basketUnderlying} ${strategyName} (${activeLegs.length} Legs)`,
+      underlying: basketUnderlying,
+      expiry: basketExpiry,
+      lotSize: UNDERLYINGS[basketUnderlying]?.lotSize ?? uConfig.lotSize,
       defaultLots: baseMultiplier,
       legs: orderLegs,
       productType: 'INTRADAY',
     });
     setOrderModalOpen(true);
-  }, [activeLegs, selectedUnderlying, strategyName, selectedExpiry, uConfig.lotSize, normalizedChain, notifyAction]);
+  }, [activeLegs, selectedUnderlying, selectedExpiry, strategyName, uConfig.lotSize, resolveLegSecurityId, notifyAction]);
 
   const handleOpenSingleLegTrade = useCallback((leg: OptionLegModel) => {
-    const legKey = leg.type.toLowerCase() as 'ce' | 'pe';
-    const secId = normalizedChain[leg.strike]?.[legKey]?.security_id;
+    const legUnderlying = leg.underlying ?? selectedUnderlying;
+    const legExpiry = leg.expiry ?? selectedExpiry;
     setActiveTradeOrder({
-      title: `${selectedUnderlying} ${leg.strike} ${leg.type} (${leg.side})`,
-      underlying: selectedUnderlying,
-      expiry: selectedExpiry,
-      lotSize: uConfig.lotSize,
+      title: `${legUnderlying} ${leg.strike} ${leg.type} (${leg.side})`,
+      underlying: legUnderlying,
+      expiry: legExpiry,
+      lotSize: UNDERLYINGS[legUnderlying]?.lotSize ?? uConfig.lotSize,
       defaultLots: 1,
       legs: [
         {
@@ -1303,23 +1344,23 @@ export default function OptionsMonitorPage() {
           optionType: leg.type,
           action: leg.side,
           lots: leg.lots,
-          securityId: secId ? String(secId) : undefined,
+          securityId: resolveLegSecurityId(leg),
         },
       ],
       productType: 'INTRADAY',
     });
     setOrderModalOpen(true);
-  }, [selectedUnderlying, selectedExpiry, uConfig.lotSize, normalizedChain]);
+  }, [selectedUnderlying, selectedExpiry, uConfig.lotSize, resolveLegSecurityId]);
 
   const handleOpenSingleLegClose = useCallback((leg: OptionLegModel) => {
-    const legKey = leg.type.toLowerCase() as 'ce' | 'pe';
-    const secId = normalizedChain[leg.strike]?.[legKey]?.security_id;
+    const legUnderlying = leg.underlying ?? selectedUnderlying;
+    const legExpiry = leg.expiry ?? selectedExpiry;
     const oppositeAction = leg.side === 'BUY' ? 'SELL' : 'BUY';
     setActiveTradeOrder({
-      title: `Square Off: ${selectedUnderlying} ${leg.strike} ${leg.type} (${oppositeAction})`,
-      underlying: selectedUnderlying,
-      expiry: selectedExpiry,
-      lotSize: uConfig.lotSize,
+      title: `Square Off: ${legUnderlying} ${leg.strike} ${leg.type} (${oppositeAction})`,
+      underlying: legUnderlying,
+      expiry: legExpiry,
+      lotSize: UNDERLYINGS[legUnderlying]?.lotSize ?? uConfig.lotSize,
       defaultLots: 1,
       legs: [
         {
@@ -1327,13 +1368,13 @@ export default function OptionsMonitorPage() {
           optionType: leg.type,
           action: oppositeAction,
           lots: leg.lots,
-          securityId: secId ? String(secId) : undefined,
+          securityId: resolveLegSecurityId(leg),
         },
       ],
       productType: 'INTRADAY',
     });
     setOrderModalOpen(true);
-  }, [selectedUnderlying, selectedExpiry, uConfig.lotSize, normalizedChain]);
+  }, [selectedUnderlying, selectedExpiry, uConfig.lotSize, resolveLegSecurityId]);
 
   const handleOpenNewTrade = useCallback(() => {
     if (activeLegs.length > 0) {
@@ -1390,16 +1431,22 @@ export default function OptionsMonitorPage() {
     strike: number;
     ltp: number;
     expiry: string;
+    underlying: string;
     iv?: number;
     delta?: number;
+    securityId?: string;
   }) => {
+    const legUnderlying = leg.underlying || selectedUnderlying;
+    const legUConfig = UNDERLYINGS[legUnderlying] || uConfig;
+    // Dhan greeks (leg.delta) cover the common case; the BS fallback below only matters when
+    // those are missing, so an approximate spot for a non-page underlying is an acceptable trade-off.
+    const legSpot = legUnderlying === selectedUnderlying ? spot : (legUConfig.defaultSpot ?? spot);
+
     const timeRemaining = calculateTimeToExpiryYears(leg.expiry || selectedExpiry);
     const legIv = leg.iv ?? ivPct / 100;
-    const g = computeBsGreeks(leg.type, spot, leg.strike, timeRemaining, legIv, uConfig.lotSize);
+    const g = computeBsGreeks(leg.type, legSpot, leg.strike, timeRemaining, legIv, legUConfig.lotSize);
 
-    const chainSide = leg.type === 'CE' ? normalizedChain[leg.strike]?.ce : normalizedChain[leg.strike]?.pe;
-    const dhanGreeks = chainSide?.greeks;
-    const hasDhanGreeks = dhanGreeks && dhanGreeks.delta != null && dhanGreeks.gamma != null;
+    const hasDhanDelta = typeof leg.delta === 'number';
 
     const newLeg: OptionLegModel = {
       id: `leg_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
@@ -1407,20 +1454,22 @@ export default function OptionsMonitorPage() {
       side: leg.side,
       strike: leg.strike,
       lots: 1,
-      qty: uConfig.lotSize,
+      qty: legUConfig.lotSize,
       entryPrice: leg.ltp,
       ltp: leg.ltp,
-      delta: leg.delta ?? (hasDhanGreeks ? dhanGreeks.delta : g.delta),
-      gamma: hasDhanGreeks ? dhanGreeks.gamma : g.gamma,
-      theta: hasDhanGreeks ? dhanGreeks.theta : g.theta,
-      vega: hasDhanGreeks ? dhanGreeks.vega : g.vega,
+      delta: hasDhanDelta ? leg.delta! : g.delta,
+      gamma: g.gamma,
+      theta: g.theta,
+      vega: g.vega,
       iv: legIv,
       expiry: leg.expiry || selectedExpiry,
+      underlying: legUnderlying,
+      securityId: leg.securityId,
     };
 
     setActiveLegs((prev) => [...prev, newLeg]);
-    notifyAction(`Added ${leg.side} ${leg.strike} ${leg.type} to strategy from Option Chain.`);
-  }, [selectedExpiry, ivPct, spot, uConfig.lotSize, normalizedChain, notifyAction]);
+    notifyAction(`Added ${leg.side} ${leg.strike} ${leg.type} (${legUnderlying}) to strategy from Option Chain.`);
+  }, [selectedUnderlying, selectedExpiry, ivPct, spot, uConfig, notifyAction]);
 
   // ── 8. GLOBAL KEYBOARD SHORTCUTS ──────────────────────────────────────────
   useEffect(() => {
@@ -1567,13 +1616,7 @@ export default function OptionsMonitorPage() {
         {/* ROW 2: Bloomberg Top Metric Bar (Data currency chip, Spot, Greeks, Transport status) */}
         <TopMetricBar
           selectedUnderlying={selectedUnderlying}
-          onSelectUnderlying={(sym) => {
-            setSelectedUnderlying(sym);
-            hasInitializedPresetRef.current = false;
-            fetchExpiries(sym).then((exp) => {
-              if (exp) fetchOptionChain(sym, exp);
-            });
-          }}
+          onSelectUnderlying={handleSelectUnderlying}
           expiries={expiries}
           selectedExpiry={selectedExpiry}
           onSelectExpiry={(exp) => {

@@ -77,6 +77,8 @@ export interface OptionLegModel {
   iv: number;    // fraction e.g. 0.145
   expiry?: string; // e.g. '2026-09-15'
   symbol?: string; // contract symbol
+  underlying?: string; // e.g. 'NIFTY' — the underlying this leg's strike/expiry/securityId resolve against
+  securityId?: string; // Dhan security id captured from the chain at leg-creation time
   isEntered?: boolean; // true if position has been entered/executed
   guard?: PositionGuard;
 }

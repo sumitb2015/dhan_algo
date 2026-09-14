@@ -68,15 +68,23 @@ export interface OptionChainModalProps {
     strike: number;
     ltp: number;
     expiry: string;
+    underlying: string;
     iv?: number;
     delta?: number;
+    securityId?: string;
   }) => void;
 }
 
 const WING_OPTIONS = [5, 10, 15, 20] as const;
 
-function fmtOI(n: number): string {
-  if (!n) return '—';
+function hasTradablePrice(data: ChainSideData | null | undefined): boolean {
+  if (!data) return false;
+  if (typeof data.last_price === 'number' && data.last_price > 0) return true;
+  return typeof data.previous_close_price === 'number' && data.previous_close_price > 0;
+}
+
+function fmtOI(n: number | undefined | null): string {
+  if (n === undefined || n === null) return '—';
   const abs = Math.abs(n);
   const sign = n < 0 ? '-' : '';
   if (abs >= 10_000_000) return `${sign}${(abs / 10_000_000).toFixed(2)}Cr`;
@@ -127,6 +135,13 @@ export default function OptionChainModal({
 
   // Monotonic request sequence to guard against out-of-order responses (dhan-polling-guards)
   const requestSeq = useRef<number>(0);
+
+  // Read via ref inside buildRows so a new liveQuotes object each tick doesn't change
+  // buildRows'/fetchOptionChain's identity and re-trigger the network-fetch effect below.
+  const liveQuotesRef = useRef(liveQuotes);
+  useEffect(() => {
+    liveQuotesRef.current = liveQuotes;
+  }, [liveQuotes]);
 
   // Sync state when modal opens
   useEffect(() => {
@@ -217,11 +232,12 @@ export default function OptionChainModal({
         let pe = item.pe || null;
 
         // If live quotes from WebSocket are active for this expiry, merge them
-        if (mergeLive && liveQuotes?.strikes) {
+        const currentLiveQuotes = liveQuotesRef.current;
+        if (mergeLive && currentLiveQuotes?.strikes) {
           const wsStrike =
-            liveQuotes.strikes[s] ||
-            liveQuotes.strikes[String(s)] ||
-            liveQuotes.strikes[`${s}.000000`];
+            currentLiveQuotes.strikes[s] ||
+            currentLiveQuotes.strikes[String(s)] ||
+            currentLiveQuotes.strikes[`${s}.000000`];
           if (wsStrike) {
             if (wsStrike.ce && (wsStrike.ce.ltp || wsStrike.ce.oi)) {
               ce = {
@@ -281,7 +297,7 @@ export default function OptionChainModal({
         };
       });
     },
-    [wings, liveQuotes]
+    [wings]
   );
 
   // Fetch Option Chain data with decimal-key normalization and out-of-order protection
@@ -389,10 +405,42 @@ export default function OptionChainModal({
     fetchOptionChain,
   ]);
 
+  // Re-merge fresh WebSocket ticks into the currently-seeded rows on every tick — local
+  // recompute only, never a network call, so it can't trigger the 429 storm the effect
+  // above guards against.
+  useEffect(() => {
+    if (!isOpen || !selectedExpiry || selectedExpiry !== currentExpiry) return;
+    if (!initialChain || !initialChainStrikes || initialChainStrikes.length === 0) return;
+
+    const uConfig = UNDERLYINGS[selectedUnderlying] || { strikeStep: 50 };
+    const strikeStep = uConfig.strikeStep || 50;
+    const normalizedMap = new Map<number, { ce?: ChainSideData; pe?: ChainSideData }>();
+    for (const s of initialChainStrikes) {
+      const entry = initialChain[s];
+      if (entry) normalizedMap.set(s, entry);
+    }
+    if (normalizedMap.size === 0) return;
+
+    setRows(buildRows(normalizedMap, liveSpot || initialSpot, strikeStep, true));
+  }, [
+    liveQuotes,
+    isOpen,
+    selectedExpiry,
+    currentExpiry,
+    initialChain,
+    initialChainStrikes,
+    selectedUnderlying,
+    liveSpot,
+    initialSpot,
+    buildRows,
+  ]);
+
   // Handle adding a leg directly to the strategy
   const handleQuickAdd = (type: 'CE' | 'PE', side: 'BUY' | 'SELL', row: ChainRowData) => {
     const data = type === 'CE' ? row.ce : row.pe;
-    const ltp = data?.last_price || 0;
+    const ltp = (typeof data?.last_price === 'number' && data.last_price > 0)
+      ? data.last_price
+      : (typeof data?.previous_close_price === 'number' ? data.previous_close_price : 0);
     if (!ltp) return;
 
     if (onAddLeg) {
@@ -402,8 +450,10 @@ export default function OptionChainModal({
         strike: row.strike,
         ltp,
         expiry: selectedExpiry,
+        underlying: selectedUnderlying,
         iv: data?.implied_volatility ? data.implied_volatility / 100 : undefined,
         delta: data?.greeks?.delta,
+        securityId: data?.security_id != null ? String(data.security_id) : undefined,
       });
 
       setAddedLegFeedback(`Added ${side} ${row.strike} ${type} @ ₹${ltp.toFixed(1)}`);
@@ -587,7 +637,7 @@ export default function OptionChainModal({
                   PUTS (PE)
                 </th>
               </tr>
-              <tr className="bg-zinc-800/90 text-zinc-300 text-[10px] uppercase border-t border-zinc-700/60">
+              <tr className="bg-zinc-800 text-xs font-bold text-white uppercase border-t border-zinc-700/60">
                 {/* CE Sub-headers */}
                 <th className="py-1 px-1.5 text-center">ADD</th>
                 <th className="py-1 px-2 text-right">OI</th>
@@ -644,7 +694,7 @@ export default function OptionChainModal({
                     >
                       {/* CE: Quick Add Buttons */}
                       <td className="py-1.5 px-1.5 text-center whitespace-nowrap">
-                        {onAddLeg && row.ce?.last_price ? (
+                        {onAddLeg && hasTradablePrice(row.ce) ? (
                           <div className="flex items-center justify-center gap-0.5">
                             <button
                               type="button"
@@ -675,7 +725,7 @@ export default function OptionChainModal({
                           style={{ width: `${Math.min(row.ceOIPct, 100)}%` }}
                         />
                         <span className="relative z-10 text-zinc-200">
-                          {fmtOI(row.ce?.oi || 0)}
+                          {fmtOI(row.ce?.oi)}
                         </span>
                         {row.isMaxCEOI && (
                           <span className="relative z-10 ml-1 text-[8px] bg-sky-500/30 text-sky-300 px-1 py-0.2 rounded font-bold">
@@ -695,7 +745,7 @@ export default function OptionChainModal({
 
                       {/* CE: Volume */}
                       <td className="py-1.5 px-2 text-right tabular-nums text-zinc-400">
-                        {fmtOI(row.ce?.volume || 0)}
+                        {fmtOI(row.ce?.volume)}
                       </td>
 
                       {/* CE: IV */}
@@ -754,7 +804,7 @@ export default function OptionChainModal({
 
                       {/* PE: Volume */}
                       <td className="py-1.5 px-2 text-left tabular-nums text-zinc-400">
-                        {fmtOI(row.pe?.volume || 0)}
+                        {fmtOI(row.pe?.volume)}
                       </td>
 
                       {/* PE: OI Chg% */}
@@ -773,7 +823,7 @@ export default function OptionChainModal({
                           style={{ width: `${Math.min(row.peOIPct, 100)}%` }}
                         />
                         <span className="relative z-10 text-zinc-200">
-                          {fmtOI(row.pe?.oi || 0)}
+                          {fmtOI(row.pe?.oi)}
                         </span>
                         {row.isMaxPEOI && (
                           <span className="relative z-10 ml-1 text-[8px] bg-rose-500/30 text-rose-300 px-1 py-0.2 rounded font-bold">
@@ -784,7 +834,7 @@ export default function OptionChainModal({
 
                       {/* PE: Quick Add Buttons */}
                       <td className="py-1.5 px-1.5 text-center whitespace-nowrap">
-                        {onAddLeg && row.pe?.last_price ? (
+                        {onAddLeg && hasTradablePrice(row.pe) ? (
                           <div className="flex items-center justify-center gap-0.5">
                             <button
                               type="button"

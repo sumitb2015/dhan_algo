@@ -256,7 +256,7 @@ export default function RiskGreeksMatrix({
       <TerminalPanel
         title="QUICK EXECUTION & ADJUSTMENT"
         icon={Zap}
-        meta={<span className="text-[9px] font-bold text-amber-400/90 tracking-wider">HOTKEYS ACTIVE</span>}
+        meta={<span className="text-[9px] font-bold text-amber-400 tracking-wider">HOTKEYS ACTIVE</span>}
       >
         <div className="p-2.5 flex flex-col gap-2">
           {/* Primary Basket Execution Button */}

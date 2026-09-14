@@ -265,7 +265,7 @@ export default function TopMetricBar({
           >
             <div className="flex items-center justify-between gap-1">
               <span className="text-[9px] font-bold uppercase tracking-[0.14em] text-zinc-400">AVAIL. MARGIN</span>
-              <span className="text-[8px] font-bold uppercase text-sky-400/90 px-1 py-0.2 rounded bg-sky-500/10">
+              <span className="text-[8px] font-bold uppercase text-sky-400 px-1 py-0.2 rounded bg-sky-500/10">
                 DHAN
               </span>
             </div>
