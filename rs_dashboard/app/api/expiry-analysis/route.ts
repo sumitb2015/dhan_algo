@@ -129,8 +129,23 @@ export async function GET(req: NextRequest) {
       } else if (!openBucket && lastRow && weeks.length > 0) {
         const lastCompletedEnd = weeks[weeks.length - 1].endDate;
         const lastCompletedIdx = filtered.findIndex((r) => r.date === lastCompletedEnd);
-        if (lastCompletedIdx >= 0 && lastCompletedIdx < filtered.length - 1) {
-          const startRow = filtered[lastCompletedIdx + 1];
+        // Find the next row that actually matches this regime's open weekday —
+        // the row right after lastCompletedIdx may not be it if that open day
+        // fell on a market holiday (the completed-weeks loop above has the same
+        // strict weekday requirement, so this stays consistent with it).
+        let startRow: (typeof filtered)[0] | null = null;
+        if (lastCompletedIdx >= 0) {
+          for (let i = lastCompletedIdx + 1; i < filtered.length; i++) {
+            const r = filtered[i];
+            const regime: 'old' | 'new' = r.date < REGIME_CHANGE_DATE ? 'old' : 'new';
+            const openDay = regime === 'old' ? 5 : 3;
+            if (new Date(r.date + 'T00:00:00Z').getUTCDay() === openDay) {
+              startRow = r;
+              break;
+            }
+          }
+        }
+        if (startRow) {
           if (startRow.open > 0) {
             const raw = ((lastRow.close - startRow.open) / startRow.open) * 100;
             currentWeek = {
