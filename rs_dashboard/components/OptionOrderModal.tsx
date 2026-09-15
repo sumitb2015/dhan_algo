@@ -33,14 +33,35 @@ export interface OptionOrderInitialState {
   productType?: 'INTRADAY' | 'MARGIN';
 }
 
+/** A leg exactly as it was placed - resolved securityId, product and final quantity - handed
+ *  back to the caller so it can add the basket to its ownership ledger (see
+ *  lib/liveChartsLedger.ts and the dhan-terminal-position-ownership skill). Never derived from
+ *  a later broker read; this is what the modal itself just told the broker to do. */
+export interface PlacedOptionLeg {
+  securityId: string;
+  exchangeSegment: string;
+  strike: number;
+  optionType: 'CE' | 'PE';
+  action: 'BUY' | 'SELL';
+  qty: number;
+  productType: 'INTRADAY' | 'MARGIN';
+}
+
 interface OptionOrderModalProps {
   isOpen: boolean;
   onClose: () => void;
   initialOrder: OptionOrderInitialState | null;
-  onOrderSuccess?: (orderIds: string[], summary: string) => void;
+  onOrderSuccess?: (orderIds: string[], summary: string, legs: PlacedOptionLeg[], underlying: string, expiry: string, title: string) => void;
 }
 
 const MAX_LOTS_PER_ORDER = 50;
+type OrderTypeChoice = 'MARKET' | 'LIMIT' | 'SL' | 'SL-M';
+const ORDER_TYPE_LABELS: Record<OrderTypeChoice, string> = {
+  MARKET: 'Market',
+  LIMIT: 'Limit',
+  SL: 'SL',
+  'SL-M': 'SL-M',
+};
 
 export default function OptionOrderModal({
   isOpen,
@@ -51,6 +72,26 @@ export default function OptionOrderModal({
   const [productType, setProductType] = useState<'INTRADAY' | 'MARGIN'>('INTRADAY');
   const [lotsMultiplier, setLotsMultiplier] = useState<number>(1);
   const [lotsDraft, setLotsDraft] = useState<string>('1');
+
+  // Order type + price/trigger (LIMIT and SL/SL-M only) - commit-on-blur so a mid-type value
+  // (e.g. "5" while typing "500") can never fire against the live basket.
+  const [orderType, setOrderType] = useState<OrderTypeChoice>('MARKET');
+  const [priceDraft, setPriceDraft] = useState<string>('');
+  const [price, setPrice] = useState<number>(0);
+  const [triggerDraft, setTriggerDraft] = useState<string>('');
+  const [triggerPrice, setTriggerPrice] = useState<number>(0);
+
+  const commitPrice = useCallback((raw: string) => {
+    const n = Math.max(0, parseFloat(raw) || 0);
+    setPrice(n);
+    setPriceDraft(n > 0 ? String(n) : '');
+  }, []);
+
+  const commitTrigger = useCallback((raw: string) => {
+    const n = Math.max(0, parseFloat(raw) || 0);
+    setTriggerPrice(n);
+    setTriggerDraft(n > 0 ? String(n) : '');
+  }, []);
 
   // Resolved strikes and contract data
   const [lotSize, setLotSize] = useState<number>(1);
@@ -131,6 +172,11 @@ export default function OptionOrderModal({
       setErrorMsg(null);
       setSuccessResult(null);
       setResolvedLegs(initialOrder.legs);
+      setOrderType('MARKET');
+      setPriceDraft('');
+      setPrice(0);
+      setTriggerDraft('');
+      setTriggerPrice(0);
 
       fetchOptionDetails(initialOrder.underlying, initialOrder.expiry, initialOrder.legs);
     }
@@ -154,24 +200,46 @@ export default function OptionOrderModal({
       return;
     }
 
+    if (orderType === 'LIMIT' && !(price > 0)) {
+      setErrorMsg('Enter a valid limit price');
+      return;
+    }
+    if ((orderType === 'SL' || orderType === 'SL-M') && !(triggerPrice > 0)) {
+      setErrorMsg('Enter a valid trigger price');
+      return;
+    }
+    if (orderType === 'SL' && !(price > 0)) {
+      setErrorMsg('SL orders require both a limit price and a trigger price');
+      return;
+    }
+
     setPlacingOrder(true);
 
     try {
       const underUpper = initialOrder.underlying.toUpperCase();
       const exchangeSegment =
         underUpper === 'SENSEX' ? 'BSE_FNO' : (underUpper === 'CRUDEOIL' || underUpper === 'CRUDEOILM') ? 'MCX_COMM' : 'NSE_FNO';
+      const dhanOrderType = orderType === 'SL-M' ? 'STOP_LOSS_MARKET' : orderType === 'SL' ? 'STOP_LOSS' : orderType;
 
-      const payloadLegs = resolvedLegs.map((leg) => {
-        const totalLegLots = leg.lots * lotsMultiplier;
-        const totalQty = totalLegLots * lotSize;
-        return {
-          securityId: String(leg.securityId),
-          quantity: totalQty,
-          side: leg.action,
-          orderType: 'MARKET',
-          exchangeSegment,
-        };
-      });
+      const placedLegs: PlacedOptionLeg[] = resolvedLegs.map((leg) => ({
+        securityId: String(leg.securityId),
+        exchangeSegment,
+        strike: leg.strike,
+        optionType: leg.optionType,
+        action: leg.action,
+        qty: leg.lots * lotsMultiplier * lotSize,
+        productType,
+      }));
+
+      const payloadLegs = placedLegs.map((leg) => ({
+        securityId: leg.securityId,
+        quantity: leg.qty,
+        side: leg.action,
+        orderType: dhanOrderType,
+        exchangeSegment,
+        ...(orderType === 'LIMIT' || orderType === 'SL' ? { price } : {}),
+        ...(orderType === 'SL' || orderType === 'SL-M' ? { triggerPrice } : {}),
+      }));
 
       const res = await fetch('/api/options/order', {
         method: 'POST',
@@ -188,7 +256,7 @@ export default function OptionOrderModal({
       }
 
       const orderIds: string[] = (json.data || []).map((d: { orderId: string }) => d.orderId).filter(Boolean);
-      const summary = `${initialOrder.title} · ${lotsMultiplier}x (${lotsMultiplier * lotSize} qty) · ${productType}`;
+      const summary = `${initialOrder.title} · ${lotsMultiplier}x (${lotsMultiplier * lotSize} qty) · ${productType} · ${ORDER_TYPE_LABELS[orderType]}`;
 
       setSuccessResult({
         orderIds,
@@ -196,7 +264,7 @@ export default function OptionOrderModal({
       });
 
       if (onOrderSuccess) {
-        onOrderSuccess(orderIds, summary);
+        onOrderSuccess(orderIds, summary, placedLegs, initialOrder.underlying, initialOrder.expiry, initialOrder.title);
       }
     } catch (err: unknown) {
       setErrorMsg(err instanceof Error ? err.message : 'Order submission failed');
@@ -275,6 +343,71 @@ export default function OptionOrderModal({
                 MARGIN (NRML)
               </button>
             </div>
+          </div>
+
+          {/* 1b. Order Type Selector */}
+          <div>
+            <label className="text-[10px] font-bold text-zinc-400 uppercase tracking-wider mb-1.5 block">
+              Order Type
+            </label>
+            <div className="grid grid-cols-4 gap-2 mb-2">
+              {(Object.keys(ORDER_TYPE_LABELS) as OrderTypeChoice[]).map((ot) => (
+                <button
+                  key={ot}
+                  type="button"
+                  onClick={() => setOrderType(ot)}
+                  className={`py-1.5 px-2 rounded-xl font-semibold text-center text-xs transition-all cursor-pointer ${
+                    orderType === ot
+                      ? 'bg-sky-500/20 text-sky-300 border border-sky-500/40'
+                      : 'bg-zinc-900 border border-zinc-800 text-zinc-400 hover:text-zinc-200'
+                  }`}
+                >
+                  {ORDER_TYPE_LABELS[ot]}
+                </button>
+              ))}
+            </div>
+
+            {(orderType === 'LIMIT' || orderType === 'SL') && (
+              <div className="mb-2">
+                <label className="text-[10px] text-zinc-400 mb-1 block">Limit Price</label>
+                <input
+                  type="number"
+                  step="0.05"
+                  placeholder="0.00"
+                  value={priceDraft}
+                  onChange={(e) => setPriceDraft(e.target.value)}
+                  onBlur={(e) => commitPrice(e.currentTarget.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') {
+                      commitPrice((e.target as HTMLInputElement).value);
+                      (e.target as HTMLInputElement).blur();
+                    }
+                  }}
+                  className="w-full py-1.5 px-3 rounded-xl bg-zinc-900 border border-zinc-800 font-mono text-sm text-white focus:outline-none focus:border-sky-500/50"
+                />
+              </div>
+            )}
+
+            {(orderType === 'SL' || orderType === 'SL-M') && (
+              <div>
+                <label className="text-[10px] text-zinc-400 mb-1 block">Trigger Price</label>
+                <input
+                  type="number"
+                  step="0.05"
+                  placeholder="0.00"
+                  value={triggerDraft}
+                  onChange={(e) => setTriggerDraft(e.target.value)}
+                  onBlur={(e) => commitTrigger(e.currentTarget.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') {
+                      commitTrigger((e.target as HTMLInputElement).value);
+                      (e.target as HTMLInputElement).blur();
+                    }
+                  }}
+                  className="w-full py-1.5 px-3 rounded-xl bg-zinc-900 border border-zinc-800 font-mono text-sm text-white focus:outline-none focus:border-sky-500/50"
+                />
+              </div>
+            )}
           </div>
 
           {/* 2. Spread Legs Breakdown */}

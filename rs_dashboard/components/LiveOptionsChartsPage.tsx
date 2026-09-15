@@ -7,7 +7,10 @@ import { StranglePanel } from '@/components/StranglePanel';
 import { StrategyPanel } from '@/components/StrategyPanel';
 import { PanelStyles } from '@/components/PanelStyles';
 import { type ChartUnderlying } from '@/lib/underlyings';
-import OptionOrderModal, { type OptionOrderInitialState } from '@/components/OptionOrderModal';
+import OptionOrderModal, { type OptionOrderInitialState, type PlacedOptionLeg } from '@/components/OptionOrderModal';
+import LiveTradingDesk from '@/components/LiveTradingDesk';
+import { type LedgerBasket } from '@/lib/liveChartsLedger';
+import { LayoutList } from 'lucide-react';
 import NavBar from './NavBar';
 
 const LAYOUTS = [1, 2] as const;
@@ -40,6 +43,43 @@ export default function LiveOptionsChartsPage() {
   const [layoutCount, setLayoutCount] = useState<LayoutCount>(1);
   const [tradeModalOpen, setTradeModalOpen] = useState(false);
   const [activeTradeOrder, setActiveTradeOrder] = useState<OptionOrderInitialState | null>(null);
+
+  // Ownership ledger for baskets traded from this page's execution desk - see
+  // lib/liveChartsLedger.ts and the dhan-terminal-position-ownership skill. Lives at page
+  // level (not inside LiveTradingDesk) so it survives the desk panel being hidden/shown.
+  const [tradedBaskets, setTradedBaskets] = useState<LedgerBasket[]>([]);
+  const [deskOpen, setDeskOpen] = useState(false);
+
+  function handleOrderSuccess(
+    orderIds: string[],
+    _summary: string,
+    legs: PlacedOptionLeg[],
+    underlying: string,
+    expiry: string,
+    title: string,
+  ) {
+    const basket: LedgerBasket = {
+      id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      title,
+      underlying,
+      expiry,
+      createdAt: Date.now(),
+      legs: legs.map((l) => ({
+        securityId: l.securityId,
+        exchangeSegment: l.exchangeSegment,
+        strike: l.strike,
+        optionType: l.optionType,
+        action: l.action,
+        productType: l.productType,
+        qty: l.qty,
+        entryOrderIds: orderIds,
+        exitOrderIds: [],
+        lastOrderAt: Date.now(),
+      })),
+    };
+    setTradedBaskets((prev) => [...prev, basket]);
+    setDeskOpen(true);
+  }
 
   // Per-panel underlying, owned here rather than inside the panels so the selection survives a
   // spread-type switch (which unmounts and remounts every panel).
@@ -143,6 +183,17 @@ export default function LiveOptionsChartsPage() {
             Live <span className="lc-header-accent">{SPREAD_LABELS[spreadType]}</span> Chart
           </h1>
           <div className="lc-header-controls">
+            {tradedBaskets.length > 0 && !deskOpen && (
+              <button
+                type="button"
+                onClick={() => setDeskOpen(true)}
+                className="lc-desk-toggle"
+                title="Show trading desk"
+              >
+                <LayoutList className="h-3.5 w-3.5" />
+                Desk
+              </button>
+            )}
             <span className="lc-header-divider" />
             <NavBar />
           </div>
@@ -189,7 +240,17 @@ export default function LiveOptionsChartsPage() {
         isOpen={tradeModalOpen}
         onClose={() => setTradeModalOpen(false)}
         initialOrder={activeTradeOrder}
+        onOrderSuccess={handleOrderSuccess}
       />
+
+      {/* Positions / Order Book / Exit desk for baskets traded from this page */}
+      {deskOpen && (
+        <LiveTradingDesk
+          baskets={tradedBaskets}
+          onBasketsChange={setTradedBaskets}
+          onClose={() => setDeskOpen(false)}
+        />
+      )}
 
       <style>{`
         /* ── Page shell ─────────────────────────────────────────────── */
@@ -484,6 +545,32 @@ export default function LiveOptionsChartsPage() {
           align-items: center;
           gap: 8px;
           flex-shrink: 0;
+        }
+
+        .lc-desk-toggle {
+          display: flex;
+          align-items: center;
+          gap: 5px;
+          font-size: 10px;
+          font-weight: 700;
+          text-transform: uppercase;
+          letter-spacing: 0.04em;
+          padding: 5px 10px;
+          border-radius: 8px;
+          background: rgba(99, 102, 241, 0.15);
+          color: #a5b4fc;
+          border: 1px solid rgba(99, 102, 241, 0.3);
+          cursor: pointer;
+          position: relative;
+          z-index: 1;
+        }
+        .lc-desk-toggle:hover {
+          background: rgba(99, 102, 241, 0.25);
+        }
+        :root:not(.dark) .lc-desk-toggle {
+          background: #e0e7ff;
+          color: #3730a3;
+          border-color: #a5b4fc;
         }
 
         .lc-header-divider {
