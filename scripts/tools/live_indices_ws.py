@@ -25,6 +25,7 @@ import io
 import json
 import time
 import argparse
+import threading
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 
@@ -167,7 +168,71 @@ def ist_today() -> str:
     return datetime.now(IST).strftime('%Y-%m-%d')
 
 
-def write_quotes_snapshot(sid_to_symbol: dict, prev_close_cache: dict) -> None:
+def ist_minutes_of_day() -> int:
+    now = datetime.now(IST)
+    return now.hour * 60 + now.minute
+
+
+# NSE cash/index session: 09:15-15:30 IST. Dhan's quote packet's own
+# prev_close/close field flips from yesterday's close to TODAY's close at the
+# closing bell, so an `== ltp` check to detect that flip is only meaningful
+# from the bell onward — applied unconditionally (as this used to be) it also
+# rejects the pre-market state, where ltp == close is the expected read
+# because nothing has traded yet, not a flip artifact. See the
+# dhan-prevclose-pct-change skill for the same bug and fix in
+# rs_dashboard/app/api/scalper/top-indices/route.ts's rejectFlippedClose.
+MARKET_OPEN_IST_MIN = 9 * 60 + 15
+MARKET_CLOSE_IST_MIN = 15 * 60 + 30
+
+# Background daily-candle fallback bookkeeping for when the bridge is
+# (re)started after the close bell with an empty prev_close_cache: the flip
+# has already happened, so nothing in the live tick can recover yesterday's
+# close — only a REST daily-candle call can. Keyed like prev_close_cache
+# ("<IST date>:<route key>") and pruned alongside it.
+_prev_close_fetch_inflight: set[str] = set()
+_prev_close_fetch_failed: set[str] = set()
+
+# All symbols needing the fallback tend to become "unknown" at the same
+# moment (the bridge just started, so every row's cache is empty at once),
+# which would otherwise fire up to 9 concurrent get_prev_day_levels() calls —
+# Dhan's historical endpoint is rate-limited to ~1 req/s. This lock plus a
+# minimum gap serializes them, same intent as pyExec.ts's `spaced()` /
+# top-indices/route.ts's HISTORICAL_STAGGER_MS on the Node side.
+_prev_close_fetch_lock = threading.Lock()
+_prev_close_last_fetch_monotonic = 0.0
+PREV_CLOSE_FETCH_MIN_GAP_SEC = 2.0
+
+
+def _fetch_prev_close_background(helper, symbol: str, cache_key: str, cache: dict) -> None:
+    """
+    Runs in a background thread — never called from the main poll loop
+    directly, since DhanHelper.get_prev_day_levels() is a blocking REST call
+    and this bridge has only one thread driving both HISTORY_FILE and
+    QUOTES_FILE writes every ~2s. Mirrors top-indices/route.ts's
+    fetchLatestPrevClose fallback (same "today's row isn't published at
+    close, so the most recent row already IS yesterday's" reasoning is
+    handled inside get_prev_day_levels itself).
+    """
+    global _prev_close_last_fetch_monotonic
+    try:
+        with _prev_close_fetch_lock:
+            wait = PREV_CLOSE_FETCH_MIN_GAP_SEC - (time.monotonic() - _prev_close_last_fetch_monotonic)
+            if wait > 0:
+                time.sleep(wait)
+            levels = helper.get_prev_day_levels(symbol)
+            _prev_close_last_fetch_monotonic = time.monotonic()
+        if levels and float(levels.get('close') or 0) > 0:
+            cache[cache_key] = float(levels['close'])
+        else:
+            _prev_close_fetch_failed.add(cache_key)
+    except Exception as e:
+        print(f'[live_indices_ws] prev-close fallback failed for {symbol}: {e}', flush=True)
+        _prev_close_fetch_failed.add(cache_key)
+    finally:
+        _prev_close_fetch_inflight.discard(cache_key)
+
+
+def write_quotes_snapshot(sid_to_symbol: dict, prev_close_cache: dict, helper=None) -> None:
     """
     Write QUOTES_FILE from the hub's current merged ticks.
 
@@ -182,6 +247,10 @@ def write_quotes_snapshot(sid_to_symbol: dict, prev_close_cache: dict) -> None:
     day = ist_today()
     for key in [k for k in prev_close_cache if not k.startswith(f'{day}:')]:
         del prev_close_cache[key]
+    for key in [k for k in _prev_close_fetch_failed if not k.startswith(f'{day}:')]:
+        _prev_close_fetch_failed.discard(key)
+
+    now_min = ist_minutes_of_day()
 
     quotes: dict[str, dict] = {}
     for sid, sym in sid_to_symbol.items():
@@ -202,9 +271,33 @@ def write_quotes_snapshot(sid_to_symbol: dict, prev_close_cache: dict) -> None:
             prev_close = cached
         else:
             raw_close = float(tick.get('prev_close') or tick.get('close') or 0)
-            # A raw close equal to LTP is Dhan's post-close flip, not a
-            # genuine 0% day — treat it as unknown rather than cache it.
-            prev_close = raw_close if raw_close > 0 and raw_close != ltp else 0.0
+            if now_min < MARKET_CLOSE_IST_MIN:
+                # Before the close bell, `close` cannot have flipped yet —
+                # trust it unconditionally. This also covers pre-market
+                # (before MARKET_OPEN_IST_MIN), where ltp == close is the
+                # expected read, not a flip artifact.
+                prev_close = raw_close if raw_close > 0 else 0.0
+            else:
+                # From the close bell onward, a raw_close equal to LTP is
+                # Dhan's post-close flip, not a genuine 0% day.
+                prev_close = raw_close if raw_close > 0 and raw_close != ltp else 0.0
+                if (
+                    prev_close == 0.0
+                    and helper is not None
+                    and cache_key not in _prev_close_fetch_inflight
+                    and cache_key not in _prev_close_fetch_failed
+                ):
+                    # The flip already happened and nothing was cached from
+                    # earlier today (e.g. the bridge was only started after
+                    # 15:30) — no live tick can recover yesterday's close, so
+                    # fall back to a REST daily-candle lookup, off the main
+                    # loop so it can't stall QUOTES_FILE's 2s cadence.
+                    _prev_close_fetch_inflight.add(cache_key)
+                    threading.Thread(
+                        target=_fetch_prev_close_background,
+                        args=(helper, sym, cache_key, prev_close_cache),
+                        daemon=True,
+                    ).start()
             if prev_close:
                 prev_close_cache[cache_key] = prev_close
 
@@ -332,7 +425,7 @@ def main():
     # must NOT be recreated each call, or every 2s write would forget the
     # genuine pre-flip close it cached.
     quotes_prev_close_cache: dict[str, float] = {}
-    write_quotes_snapshot(sid_to_symbol, quotes_prev_close_cache)
+    write_quotes_snapshot(sid_to_symbol, quotes_prev_close_cache, helper)
 
     try:
         while True:
@@ -425,7 +518,7 @@ def main():
                 chunk = min(QUOTES_WRITE_SEC, interval - slept)
                 time.sleep(chunk)
                 slept += chunk
-                write_quotes_snapshot(sid_to_symbol, quotes_prev_close_cache)
+                write_quotes_snapshot(sid_to_symbol, quotes_prev_close_cache, helper)
 
     except KeyboardInterrupt:
         print('[live_indices_ws] KeyboardInterrupt - shutting down.', flush=True)

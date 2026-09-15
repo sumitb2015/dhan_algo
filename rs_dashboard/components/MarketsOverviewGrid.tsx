@@ -9,7 +9,7 @@
 // 15:30 close-flip trap, pre-market "yesterday vs day before" fallback — so
 // this page just renders it; see dhan-prevclose-pct-change skill for why.
 
-import React, { useMemo } from 'react';
+import React, { useEffect, useMemo } from 'react';
 import Link from 'next/link';
 import { TrendingUp, TrendingDown, Minus, Fuel, LineChart } from 'lucide-react';
 import { cn } from '@/lib/utils';
@@ -17,6 +17,7 @@ import { Card } from '@/components/ui/card';
 import NavBar from './NavBar';
 import { useLiveTickerPoll, isStale, ageOf, ageLabel } from '@/lib/useLiveTickerPoll';
 import { fmtPrice } from './LiveTickerPanel';
+import { startLiveIndicesBridge } from '@/lib/startLiveIndicesBridge';
 
 interface IndexQuote {
   ltp: number;
@@ -45,6 +46,11 @@ function pickLtps(d: IndicesResponse): Record<string, number> {
 const MCX_KEYS = new Set(['CRUDEOIL', 'CRUDEOILM']);
 
 export default function MarketsOverviewGrid() {
+  // The 9 NSE-index rows come from this bridge's hub file (see route comments
+  // on scalper/top-indices' fromHub) — without starting it, only the two
+  // MCX rows (which go over a separate REST path) ever populate.
+  useEffect(() => { startLiveIndicesBridge(); }, []);
+
   const { data, flash, now } = useLiveTickerPoll<IndicesResponse>('/api/scalper/top-indices', pickLtps);
 
   const tickMs = data?.updated_at ? new Date(data.updated_at).getTime() : NaN;
