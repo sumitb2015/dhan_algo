@@ -121,6 +121,7 @@ const NAV_GROUPS = [
     label: 'Market Health',
     icon: Activity,
     links: [
+      { href: '/markets', label: 'Markets Overview', desc: 'Live Nifty, Bank Nifty, sector indices, India VIX & MCX crude oil tiles — click through for a full-page live chart' },
       { href: '/market-regime', label: 'Market Regime', desc: 'CANSLIM Institutional Distribution Days & market timing' },
       { href: '/sector-breadth', label: 'Sector Breadth Depth', desc: 'Sector participation (% > 20/50/200 DMA), up-volume ratio & thrust' },
       { href: '/highs-lows', label: '52W Highs/Lows', desc: '52-week high/low proximity tiers, base patterns & Net New Highs expansion' },
