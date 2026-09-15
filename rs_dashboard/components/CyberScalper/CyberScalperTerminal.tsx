@@ -15,6 +15,12 @@ import { cyberAudio } from '@/lib/cyberAudio';
 import { contractMultiplier, scaleBrokerPnl } from '@/lib/positionPnl';
 import { useBrokerSelector, scalperRoute, BROKER_LABELS, type Broker } from '@/hooks/useBrokerSelector';
 
+// Statuses that mean the order actually traded (as opposed to being cancelled/
+// rejected/expired without a fill) — mirrors the broker vocabulary handled in
+// CyberOrderBook.tsx's TERMINAL_STATUSES.
+const FILLED_STATUSES = new Set(['COMPLETE', 'TRADED']);
+const FILLED_OR_DONE_STATUSES = new Set(['COMPLETE', 'TRADED', 'REJECTED', 'CANCELLED', 'CANCELED', 'EXPIRED']);
+
 const POPULAR_SYMBOLS = ['NIFTY', 'BANKNIFTY', 'FINNIFTY', 'SENSEX', 'CRUDEOILM', 'CRUDEOIL', 'RELIANCE', 'HDFCBANK'];
 const INTERVALS = [
   { value: '1', label: '1m Scalp' },
@@ -317,13 +323,38 @@ export default function CyberScalperTerminal() {
 
   // Poll the broker's order book — feeds the Order Book panel's Edit/Cancel
   // controls for the resting LIMIT orders the pad's offset ladder places.
+  //
+  // Also detects fills: a resting order seen live on a prior poll that has now
+  // moved to a filled status gets a distinct audio cue + log line, since the
+  // BUY/SELL chime on submit (handleExecuteTrade) only means "order accepted",
+  // not "trade taken" — a LIMIT order can sit unfilled for many polls in between.
+  const prevOrderStatusRef = useRef<Map<string, string>>(new Map());
   const fetchOrders = useCallback(async () => {
     const requestedBroker = broker;
     try {
       const res = await fetch(scalperRoute(broker, 'orders'));
       const json = await res.json();
       if (requestedBroker !== brokerRef.current) return;
-      if (json.success && Array.isArray(json.data)) setOrders(json.data);
+      if (json.success && Array.isArray(json.data)) {
+        const nextOrders: OrderBookRow[] = json.data;
+        const prevStatuses = prevOrderStatusRef.current;
+        for (const row of nextOrders) {
+          const prevStatus = prevStatuses.get(row.orderId);
+          const status = row.orderStatus.toUpperCase();
+          const wasLive = prevStatus !== undefined && !FILLED_OR_DONE_STATUSES.has(prevStatus);
+          if (wasLive && FILLED_STATUSES.has(status)) {
+            const isBuy = row.transactionType.toUpperCase() === 'BUY';
+            isBuy ? cyberAudio.buy() : cyberAudio.sell();
+            addLog(
+              isBuy ? 'BUY' : 'SELL',
+              `LIMIT ORDER FILLED: ${row.tradingSymbol}`,
+              `${row.quantity} Qty @ ₹${row.price.toFixed(2)}`
+            );
+          }
+        }
+        prevOrderStatusRef.current = new Map(nextOrders.map((o) => [o.orderId, o.orderStatus.toUpperCase()]));
+        setOrders(nextOrders);
+      }
     } catch {
       // quiet fallback — same as fetchPositions/fetchFunds
     }
@@ -336,6 +367,7 @@ export default function CyberScalperTerminal() {
     setPositions([]);
     setFundsData(null);
     setOrders([]);
+    prevOrderStatusRef.current = new Map();
   }, [broker]);
 
   useEffect(() => {
