@@ -114,6 +114,7 @@ const NAV_GROUPS = [
       { href: '/cash-secured-puts', label: 'Cash Secured Puts', desc: 'Track underlyings, sell PUTs, monitor active orders & trades' },
       { href: '/options/delta', label: 'Net Delta', desc: 'Track live delta risk and net delta exposure of active positions' },
       { href: '/margin-allocator', label: 'Margin Allocator', desc: 'Multi-broker margin, blocked-by-structure breakdown & near-dated deployment plan for idle capital' },
+      { href: '/nifty-covered-call', label: 'Nifty Covered Call', desc: 'Short NIFTY futures + delta-sized short OTM call overwrite desk with roll suggestions & target/SL/trailing-SL' },
     ],
   },
   {
