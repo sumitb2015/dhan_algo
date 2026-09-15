@@ -179,6 +179,19 @@ let cache: { ts: number; body: ResponseBody } | null = null;
 // claiming fresh data off a recycled snapshot.
 let lastGood: ResponseBody | null = null;
 
+// Per-row fallback, finer-grained than `lastGood` above. `lastGood` only
+// covers a total wipeout (count === 0) — but the MCX rows (CRUDEOIL,
+// CRUDEOILM) can legitimately be the ONLY thing missing this cycle, e.g. the
+// shared Dhan OHLC batch call was rejected while the hub's 9 NSE rows kept
+// updating fine from their own file. count is then > 0, so the whole-response
+// guard never engages, and that one row blanked to "—" and back on the
+// client every time the shared REST call had a bad poll — very visible on
+// the Markets Overview detail page (found 2026-09-15). Holding the last real
+// value per row fixes that without masking a genuine outage: `updated_at`
+// still advances every poll regardless of which rows filled from here, so
+// useLiveTickerPoll's staleness clock is unaffected.
+const lastGoodQuotes = new Map<string, Quote>();
+
 // Yesterday's close, keyed "<IST date>:<index key>". Populated by whichever
 // source proved trustworthy today and reused for the rest of the session.
 const prevCloseCache = new Map<string, number>();
@@ -605,6 +618,19 @@ export async function GET() {
       quotes = { ...quotes, ...(await fromDhan(REST_INDICES)) };
     } catch (e) {
       errors.push(`dhan: ${String(e).slice(0, 120)}`);
+    }
+  }
+
+  // Fill any row this cycle didn't produce from its last known-good value —
+  // see lastGoodQuotes above for why this needs to be per-row rather than
+  // relying solely on the whole-response `lastGood` guard below.
+  for (const { key } of INDICES) {
+    const fresh = quotes[key];
+    if (fresh) {
+      lastGoodQuotes.set(key, fresh);
+    } else {
+      const fallback = lastGoodQuotes.get(key);
+      if (fallback) quotes[key] = fallback;
     }
   }
 
