@@ -118,24 +118,24 @@ export default function MarketDetail({ marketKey }: { marketKey: string }) {
         <div className="flex-1 px-6 py-5 md:h-[calc(100vh-73px)]">
           <Card className="bg-zinc-900/60 border-zinc-800/80 rounded-2xl flex flex-col items-center justify-center gap-8 p-10 h-full">
             <div className="flex flex-col items-center text-center">
-              <div className={cn('font-mono font-bold tabular-nums leading-none transition-colors text-7xl md:text-8xl',
+              <div className={cn('font-mono font-bold tabular-nums leading-none transition-colors text-8xl md:text-9xl',
                 f === 'up' ? 'text-emerald-300' : f === 'down' ? 'text-red-300' : 'text-zinc-100')}>
                 {quote && quote.ltp > 0 ? fmtPrice(quote.ltp) : '—'}
               </div>
-              <div className="flex items-center gap-2 mt-5">
-                <DirIcon className={cn('h-6 w-6', toneClass)} />
-                <span className={cn('inline-flex items-center rounded font-bold tabular-nums font-mono border px-3 py-1 text-xl',
+              <div className="flex items-center gap-3 mt-6">
+                <DirIcon className={cn('h-9 w-9', toneClass)} />
+                <span className={cn('inline-flex items-center rounded-lg font-bold tabular-nums font-mono border px-4 py-1.5 text-3xl',
                   pct === null ? 'bg-zinc-800 border-zinc-700 text-zinc-500'
                     : up ? 'bg-emerald-500/10 border-emerald-500/30 text-emerald-400'
                     : down ? 'bg-red-500/10 border-red-500/30 text-red-400'
                     : 'bg-zinc-800 border-zinc-700 text-zinc-500')}>
                   {pct === null ? 'N/A' : `${pct > 0 ? '+' : ''}${pct.toFixed(2)}%`}
                 </span>
-                <span className="text-zinc-500 text-sm">vs yesterday&apos;s close</span>
+                <span className="text-zinc-500 text-lg">vs yesterday&apos;s close</span>
               </div>
             </div>
 
-            <div className="grid grid-cols-2 md:grid-cols-4 gap-3 w-full max-w-3xl">
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-4 w-full max-w-5xl">
               <StatTile label="Prev Close" value={quote && quote.prev_close > 0 ? fmtPrice(quote.prev_close) : '—'} />
               <StatTile label="Change" value={
                 quote && quote.prev_close > 0 && quote.ltp > 0
@@ -154,9 +154,9 @@ export default function MarketDetail({ marketKey }: { marketKey: string }) {
 
 function StatTile({ label, value, tone }: { label: string; value: string; tone?: string }) {
   return (
-    <div className="flex flex-col gap-1.5 rounded-lg border border-zinc-800 bg-zinc-950 px-5 py-4">
-      <span className="font-bold uppercase tracking-[0.15em] text-zinc-500 text-[11px]">{label}</span>
-      <span className={cn('font-mono font-bold leading-none tabular-nums text-2xl', tone ?? 'text-zinc-100')}>{value}</span>
+    <div className="flex flex-col gap-2 rounded-lg border border-zinc-800 bg-zinc-950 px-6 py-5">
+      <span className="font-bold uppercase tracking-[0.15em] text-zinc-500 text-sm">{label}</span>
+      <span className={cn('font-mono font-bold leading-none tabular-nums text-4xl', tone ?? 'text-zinc-100')}>{value}</span>
     </div>
   );
 }
