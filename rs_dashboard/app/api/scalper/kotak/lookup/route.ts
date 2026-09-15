@@ -39,6 +39,7 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
   const { searchParams } = new URL(req.url);
   const underlying = (searchParams.get('underlying') ?? 'NIFTY').toUpperCase();
   const expiry = searchParams.get('expiry') ?? '';
+  const futureExpiry = searchParams.get('futureExpiry') ?? '';
 
   if (!expiry) {
     return NextResponse.json({ success: false, error: 'expiry required' }, { status: 400 });
@@ -64,17 +65,21 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
       else if (r.instrument_type === 'PE') strikes[key].peSymbol = r.tradingsymbol;
     }
 
-    // Nearest-expiry future contract (MCX CRUDEOILM/CRUDEOIL have FUT rows; index underlyings don't)
+    // Future contract (MCX CRUDEOILM/CRUDEOIL and NSE NIFTY have FUT rows; other
+    // index underlyings don't). Defaults to nearest expiry; `futureExpiry` selects
+    // a specific current/next-2-months contract per the Cyber Scalper's switcher.
     const futureRows = all
       .filter(r => r.instrument_type === 'FUT')
       .sort((a, b) => a.expiry.localeCompare(b.expiry));
-    const nearestFut = futureRows[0] ?? null;
-    const future = nearestFut
+    const selectedFut = futureExpiry
+      ? futureRows.find(r => r.expiry === futureExpiry) ?? futureRows[0] ?? null
+      : futureRows[0] ?? null;
+    const future = selectedFut
       ? {
-          trading_symbol: nearestFut.tradingsymbol,
-          expiry: nearestFut.expiry,
-          lot_size: nearestFut.lot_size,
-          exchange_segment: nearestFut.exchange_segment,
+          trading_symbol: selectedFut.tradingsymbol,
+          expiry: selectedFut.expiry,
+          lot_size: selectedFut.lot_size,
+          exchange_segment: selectedFut.exchange_segment,
         }
       : null;
 

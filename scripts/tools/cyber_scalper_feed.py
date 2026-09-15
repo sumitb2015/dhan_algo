@@ -34,12 +34,12 @@ IST = ZoneInfo("Asia/Kolkata")
 
 # Underlyings and default option strike intervals
 UNDERLYINGS_INFO = {
-    "NIFTY": {"strike_step": 50, "default_exchange": "NSE", "fno_exchange": "NSE_FNO", "inst_type": "INDEX", "fno_inst": "OPTIDX"},
+    "NIFTY": {"strike_step": 50, "default_exchange": "NSE", "fno_exchange": "NSE_FNO", "inst_type": "INDEX", "fno_inst": "OPTIDX", "futures_capable": True},
     "BANKNIFTY": {"strike_step": 100, "default_exchange": "NSE", "fno_exchange": "NSE_FNO", "inst_type": "INDEX", "fno_inst": "OPTIDX"},
     "FINNIFTY": {"strike_step": 50, "default_exchange": "NSE", "fno_exchange": "NSE_FNO", "inst_type": "INDEX", "fno_inst": "OPTIDX"},
     "SENSEX": {"strike_step": 100, "default_exchange": "BSE", "fno_exchange": "BSE_FNO", "inst_type": "INDEX", "fno_inst": "OPTIDX"},
-    "CRUDEOIL": {"strike_step": 50, "default_exchange": "MCX", "fno_exchange": "MCX_COMM", "inst_type": "FUTCOM", "fno_inst": "OPTFUT"},
-    "CRUDEOILM": {"strike_step": 50, "default_exchange": "MCX", "fno_exchange": "MCX_COMM", "inst_type": "FUTCOM", "fno_inst": "OPTFUT"},
+    "CRUDEOIL": {"strike_step": 50, "default_exchange": "MCX", "fno_exchange": "MCX_COMM", "inst_type": "FUTCOM", "fno_inst": "OPTFUT", "futures_capable": True},
+    "CRUDEOILM": {"strike_step": 50, "default_exchange": "MCX", "fno_exchange": "MCX_COMM", "inst_type": "FUTCOM", "fno_inst": "OPTFUT", "futures_capable": True},
 }
 
 def clean_float(val: any, default: float = 0.0) -> float:
@@ -481,27 +481,75 @@ def find_atm_options(
     }
 
 
-def find_future_contract(helper: DhanHelper, underlying: str, spot_price: float) -> dict | None:
+def find_future_contract(
+    helper: DhanHelper,
+    underlying: str,
+    spot_price: float,
+    chosen_expiry: str | None = None,
+) -> dict | None:
     """
-    Resolves the nearest-expiry future contract for a commodity underlying (CRUDEOIL /
-    CRUDEOILM). Unlike find_atm_options, there is no strike to pick -- the future IS the
-    tradeable instrument, and its own candle series (already fetched for the chart) is
-    its live price, so no extra get_ltp() call is needed here.
+    Resolves a future contract for a futures_capable underlying (CRUDEOIL / CRUDEOILM /
+    NIFTY), plus the list of currently tradeable expiries (current + next 2 months) so
+    the frontend can offer an expiry switcher. Unlike find_atm_options, there is no
+    strike to pick -- the future IS the tradeable instrument.
     """
     sym = underlying.upper()
-    row = helper.find_future(sym, exchange="MCX", instrument="FUTCOM")
+    is_commodity = sym in ("CRUDEOIL", "CRUDEOILM")
+    exch = "MCX" if is_commodity else "NSE"
+    inst = "FUTCOM" if is_commodity else "FUTIDX"
+    exch_seg = "MCX_COMM" if is_commodity else "NSE_FNO"
+    fno_inst = inst
+
+    # List every unexpired expiry for this underlying's future contracts, nearest
+    # first, capped at 3 (current month + next 2 months -- NSE/MCX only ever list
+    # that many active monthly contracts at once anyway).
+    df_m = helper._load_master_list()
+    mask = (
+        (df_m["EXCH_ID"] == exch)
+        & (df_m["INSTRUMENT"] == inst)
+        & (df_m["UNDERLYING_SYMBOL"] == sym)
+    )
+    today_str = datetime.now(IST).strftime("%Y-%m-%d")
+    all_exp = sorted(
+        e for e in df_m.loc[mask, "SM_EXPIRY_DATE"].dropna().unique().tolist()
+        if str(e) >= today_str
+    )
+    all_expiries = all_exp[:3]
+
+    # Only honor an explicitly chosen expiry if it's actually one of the live
+    # contracts -- otherwise fall back to find_future()'s own nearest-contract pick
+    # (e.g. a weekly options expiry accidentally passed through here for NIFTY).
+    expiry_arg = chosen_expiry if (chosen_expiry and chosen_expiry in all_expiries) else None
+
+    row = helper.find_future(sym, expiry=expiry_arg, exchange=exch, instrument=inst)
     if not row:
         return None
+
+    sec_id = str(row.get("SECURITY_ID", ""))
+    if is_commodity:
+        # The future's own candle series (already fetched for the chart) IS its live
+        # price for commodity underlyings, so no extra get_ltp() call is needed here.
+        ltp = clean_float(spot_price)
+    else:
+        # Index futures trade at a basis to spot (carry/dividend), so the index candle
+        # close is NOT a valid stand-in price -- fetch the future's own LTP.
+        try:
+            ltp = clean_float(helper.get_ltp(sec_id, exchange=exch_seg, instrument=fno_inst))
+        except Exception:
+            ltp = clean_float(spot_price)
+
     return {
-        "security_id": str(row.get("SECURITY_ID", "")),
+        "security_id": sec_id,
         "trading_symbol": str(row.get("SYMBOL_NAME", "")),
         "display_name": str(row.get("DISPLAY_NAME", row.get("SYMBOL_NAME", ""))),
         "expiry": str(row.get("SM_EXPIRY_DATE", "")),
-        # Same convention as find_atm_options' lot_size: Dhan's MCX order quantity is
-        # itself denominated in lots (get_lot_size returns 1), not barrels-per-lot --
-        # the frontend applies MCX_LOT_MULTIPLIER separately for notional display.
+        # Same convention as find_atm_options' lot_size: Dhan's order quantity is
+        # itself denominated in lots (get_lot_size returns 1 for MCX, the real lot
+        # size for index futures) -- the frontend applies MCX_LOT_MULTIPLIER
+        # separately for notional display (a no-op for non-MCX symbols).
         "lot_size": helper.get_lot_size(sym),
-        "ltp": clean_float(spot_price),
+        "ltp": ltp,
+        "all_expiries": all_expiries,
     }
 
 
@@ -510,6 +558,7 @@ def main():
     parser.add_argument("--symbol", default="NIFTY", help="Symbol (NIFTY, BANKNIFTY, SENSEX, CRUDEOIL, etc.)")
     parser.add_argument("--interval", default="1", choices=["1", "3", "5"], help="Candle timeframe in minutes")
     parser.add_argument("--expiry", default=None, help="Target options expiry date YYYY-MM-DD")
+    parser.add_argument("--future-expiry", default=None, help="Target future contract expiry date YYYY-MM-DD")
     args = parser.parse_args()
 
     symbol = args.symbol.upper()
@@ -691,13 +740,13 @@ def main():
         except Exception as e:
             sys.stderr.write(f"Options resolution failed: {e}\n")
 
-    # Resolve the future contract itself -- commodity underlyings only (CRUDEOIL /
-    # CRUDEOILM). Lets the frontend offer a Futures/Options trade-mode toggle instead of
-    # always routing orders through the ATM option leg.
+    # Resolve the future contract itself -- futures_capable underlyings only (CRUDEOIL /
+    # CRUDEOILM / NIFTY). Lets the frontend offer a Futures/Options trade-mode toggle
+    # instead of always routing orders through the ATM option leg.
     future_info = None
-    if sym_type == "commodity":
+    if UNDERLYINGS_INFO.get(symbol, {}).get("futures_capable"):
         try:
-            future_info = find_future_contract(helper, symbol, latest_close)
+            future_info = find_future_contract(helper, symbol, latest_close, chosen_expiry=args.future_expiry)
         except Exception as e:
             sys.stderr.write(f"Future contract resolution failed: {e}\n")
 

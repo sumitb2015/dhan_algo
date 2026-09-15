@@ -51,13 +51,14 @@ SEGMENT_OPTION_TYPES = {
 }
 DEFAULT_OPTION_TYPES = ('OPTIDX', 'OPTSTK')
 
-# The underlying's OWN future contract (not an option on it) — only meaningful
-# for mcx_fo, where CRUDEOIL/CRUDEOILM's near-month future is itself directly
-# tradeable and the Cyber Scalper's Futures mode needs its trading symbol.
+# The underlying's OWN future contract (not an option on it) — meaningful for mcx_fo
+# (CRUDEOIL/CRUDEOILM) and nse_fo (NIFTY), where the near-month future is itself
+# directly tradeable and the Cyber Scalper's Futures mode needs its trading symbol.
 # pOptionType is the literal string "XX" on these rows (not CE/PE), which is
 # why the options loop below skips them entirely on its own.
 SEGMENT_FUTURE_TYPES = {
     'mcx_fo': ('FUTCOM',),
+    'nse_fo': ('FUTIDX',),
 }
 
 MASTER_DIR = os.path.join(ROOT, 'debug', 'kotak_master')

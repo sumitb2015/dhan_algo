@@ -21,13 +21,21 @@ interface FutureContract {
   expiry?: string;
   lot_size?: number;
   ltp: number;
+  all_expiries?: string[];
 }
 
-/** Underlyings whose future contract IS the tradeable instrument (not just an options
- * underlying) — currently only CRUDEOILM, per the feed script's commodity resolution.
+/** Underlyings whose future contract IS a directly tradeable instrument alongside its
+ * options chain, per the feed script's `futures_capable` flag (cyber_scalper_feed.py).
  * Gates the Futures/Options mode toggle so it doesn't appear for symbols with no
  * `future` data behind it. */
-const FUTURES_CAPABLE_SYMBOLS = new Set(['CRUDEOILM']);
+const FUTURES_CAPABLE_SYMBOLS = new Set(['CRUDEOILM', 'NIFTY']);
+
+/** "2026-09-29" -> "SEP" for the compact expiry-switcher buttons. */
+function formatExpiryMonth(dateStr: string): string {
+  const dt = new Date(dateStr);
+  if (Number.isNaN(dt.getTime())) return dateStr;
+  return dt.toLocaleDateString('en-IN', { month: 'short' }).toUpperCase();
+}
 
 interface OrderPadProps {
   symbol: string;
@@ -59,6 +67,7 @@ interface OrderPadProps {
     slPts?: number;
   }) => Promise<void>;
   onFlattenAll: () => Promise<void>;
+  onSelectFutureExpiry?: (expiry: string | null) => void;
   openPositionsCount: number;
   suggestedTargetPts?: number | null;
   suggestedSlPts?: number | null;
@@ -73,6 +82,7 @@ export default function CyberOrderPad({
   isExecuting,
   onExecuteTrade,
   onFlattenAll,
+  onSelectFutureExpiry,
   openPositionsCount,
   suggestedTargetPts,
   suggestedSlPts,
@@ -338,7 +348,7 @@ export default function CyberOrderPad({
         {/* Safety Lock & Hotkeys indicator */}
         <div className="flex items-center gap-1.5">
           {/* Futures/Options mode toggle — only for symbols with a tradeable future
-              contract of their own (currently CRUDEOILM). */}
+              contract of their own (see FUTURES_CAPABLE_SYMBOLS above). */}
           {futuresCapable && (
             <div className="flex items-center bg-zinc-950 border border-zinc-800 rounded-lg p-0.5">
               {(['OPTIONS', 'FUTURES'] as const).map((m) => (
@@ -356,6 +366,31 @@ export default function CyberOrderPad({
                   )}
                 >
                   {m}
+                </button>
+              ))}
+            </div>
+          )}
+
+          {/* Future contract expiry switcher — current month + next 2 months,
+              per cyber_scalper_feed.py's find_future_contract(). */}
+          {effectiveMode === 'FUTURES' && (future?.all_expiries?.length ?? 0) > 1 && (
+            <div className="flex items-center bg-zinc-950 border border-zinc-800 rounded-lg p-0.5">
+              {future!.all_expiries!.map((exp) => (
+                <button
+                  key={exp}
+                  onClick={() => {
+                    cyberAudio.click();
+                    onSelectFutureExpiry?.(exp);
+                  }}
+                  className={cn(
+                    'px-1.5 py-0.5 rounded text-[9px] font-mono font-bold transition-all',
+                    future?.expiry === exp
+                      ? 'bg-purple-500/20 text-purple-300 border border-purple-500/40'
+                      : 'text-zinc-400 hover:text-white'
+                  )}
+                  title={exp}
+                >
+                  {formatExpiryMonth(exp)}
                 </button>
               ))}
             </div>

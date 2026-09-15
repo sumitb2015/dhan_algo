@@ -26,6 +26,9 @@ export default function CyberScalperTerminal() {
   const [symbol, setSymbol] = useState('NIFTY');
   const [timeframe, setTimeframe] = useState('1');
   const [expiry, setExpiry] = useState<string | null>(null);
+  // Selected future contract expiry (Futures mode only) — independent of `expiry`
+  // above, since NIFTY options expire weekly but its futures only expire monthly.
+  const [futureExpiry, setFutureExpiry] = useState<string | null>(null);
   const [isMuted, setIsMuted] = useState(false);
 
   // Market data (candles, EMA/VWAP bias, option/future LTPs) always comes from Dhan
@@ -40,7 +43,7 @@ export default function CyberScalperTerminal() {
   // orders by trading symbol (see submitLegOrder in AdvancedScalper.tsx, same
   // pattern). Unused while broker === 'dhan'.
   const [brokerStrikeMap, setBrokerStrikeMap] = useState<Record<string, { ceSymbol?: string; peSymbol?: string }>>({});
-  // Kotak near-month FUT contract for MCX underlyings (CRUDEOILM/CRUDEOIL); null for all others.
+  // Kotak near-month FUT contract for futures-capable underlyings (CRUDEOILM/CRUDEOIL/NIFTY); null for all others.
   const [brokerFuture, setBrokerFuture] = useState<{ trading_symbol: string; expiry?: string; lot_size?: number; exchange_segment?: string } | null>(null);
 
   // Live Data Feed
@@ -146,6 +149,7 @@ export default function CyberScalperTerminal() {
     try {
       const q = new URLSearchParams({ symbol, interval: timeframe });
       if (expiry) q.set('expiry', expiry);
+      if (futureExpiry) q.set('futureExpiry', futureExpiry);
 
       const res = await fetch(`/api/cyber-scalper/feed?${q.toString()}`);
       const json = await res.json();
@@ -167,7 +171,7 @@ export default function CyberScalperTerminal() {
       setIsLoading(false);
       feedInFlight.current = false;
     }
-  }, [symbol, timeframe, expiry]);
+  }, [symbol, timeframe, expiry, futureExpiry]);
 
   // Poll open positions from broker
   const fetchPositions = useCallback(async () => {
@@ -358,7 +362,9 @@ export default function CyberScalperTerminal() {
       return;
     }
     let cancelled = false;
-    fetch(`${scalperRoute(broker, 'lookup')}?underlying=${symbol}&expiry=${expiryVal}`)
+    const q = new URLSearchParams({ underlying: symbol, expiry: expiryVal });
+    if (futureExpiry) q.set('futureExpiry', futureExpiry);
+    fetch(`${scalperRoute(broker, 'lookup')}?${q.toString()}`)
       .then(r => r.json())
       .then((j: { success: boolean; data?: { strikes: Record<string, { ceSymbol?: string; peSymbol?: string }>; future?: { trading_symbol: string; expiry?: string; lot_size?: number; exchange_segment?: string } | null } }) => {
         if (!cancelled && j.success && j.data) {
@@ -368,7 +374,7 @@ export default function CyberScalperTerminal() {
       })
       .catch(() => {});
     return () => { cancelled = true; };
-  }, [broker, symbol, feedData?.options?.expiry]);
+  }, [broker, symbol, feedData?.options?.expiry, futureExpiry]);
 
   // Main polling loop (every 2.5 seconds for fresh candles and bias calculations)
   useEffect(() => {
@@ -420,19 +426,20 @@ export default function CyberScalperTerminal() {
     if (broker !== 'dhan') {
       if (params.contractType === 'DIRECT') {
         // Kotak futures: use the resolved near-month FUT trading symbol.
-        // Dhan's MCX lot_size is always 1 (it orders by lots, not barrels), so
-        // params.qty = lots × 1. Kotak Neo requires absolute barrels, so we must
-        // multiply: e.g. 2 lots × 10 barrels/lot = 20 for CRUDEOILM.
+        // Dhan's MCX lot_size is always 1 (it orders by lots, not barrels), so for
+        // CRUDEOILM params.qty = lots × 1 but Kotak Neo requires absolute barrels
+        // (2 lots × 10 barrels/lot = 20). Index futures (e.g. NIFTY) already carry
+        // their true per-lot size on both sides, so this multiply is a no-op for them.
         brokerTradingSymbol = brokerFuture?.trading_symbol;
-        brokerExchange = brokerFuture?.exchange_segment ?? 'mcx_fo';
+        brokerExchange = brokerFuture?.exchange_segment ?? (symbol.includes('CRUDE') ? 'mcx_fo' : 'nse_fo');
         if (!brokerTradingSymbol) {
           cyberAudio.error();
-          addLog('ERROR', `Kotak future contract still loading`, `CRUDEOILM FUT not resolved yet`);
+          addLog('ERROR', `Kotak future contract still loading`, `${symbol} FUT not resolved yet`);
           alert(`Cannot place order: Kotak future contract not resolved yet — try again in a moment`);
           return;
         }
-        // Scale lots → absolute barrels for the Kotak Neo order API
-        params = { ...params, qty: params.lots * (brokerFuture?.lot_size ?? 10) };
+        // Scale lots → absolute contract quantity for the Kotak Neo order API
+        params = { ...params, qty: params.lots * (brokerFuture?.lot_size ?? params.qty / params.lots) };
       } else {
         const entry = params.strike != null ? brokerStrikeMap[String(params.strike)] : undefined;
         brokerTradingSymbol = entry?.[params.contractType === 'CE' ? 'ceSymbol' : 'peSymbol'];
@@ -1025,6 +1032,7 @@ export default function CyberScalperTerminal() {
                   cyberAudio.click();
                   setSymbol(s);
                   setExpiry(null);
+                  setFutureExpiry(null);
                 }}
                 className={cn(
                   'px-2 py-1 rounded text-xs font-mono font-bold transition-all',
@@ -1119,6 +1127,7 @@ export default function CyberScalperTerminal() {
           bias={feedData?.live?.bias || 'NEUTRAL'}
           isExecuting={isExecuting}
           onExecuteTrade={handleExecuteTrade}
+          onSelectFutureExpiry={setFutureExpiry}
           onFlattenAll={handleFlattenAll}
           openPositionsCount={positions.filter((p) => p.netQty !== 0).length}
           suggestedTargetPts={padTargetPts ?? (feedData?.strategy?.target_pts ? Math.round(feedData.strategy.target_pts) : null)}
