@@ -321,32 +321,6 @@ function resolveSids(defs: IndexDef[]): { def: IndexDef; sid: number; segment: s
   return resolved;
 }
 
-// Public row catalogue for other panels (e.g. the Markets Overview page) that
-// want the same key/label list without duplicating it.
-export const INDEX_ROWS = INDICES.map(i => ({ key: i.key, label: i.label }));
-
-/**
- * Resolves one row's key to a concrete Dhan security id + segment + Dhan
- * `instrument` string, for a caller (the Markets Overview chart route) that
- * needs to fetch intraday candles for it rather than just a live quote.
- *
- * Rolling-futures rows (CRUDEOIL/CRUDEOILM) share `getFutSid`'s once-per-day
- * cache and its non-blocking resolution: the first call after a restart
- * returns null while resolution runs in the background, same as the quote
- * path above — callers should treat null as "try again shortly", not "error".
- */
-export function resolveChartTarget(
-  key: string,
-): { sid: number; segment: string; instrument: string } | null {
-  const def = INDICES.find(i => i.key === key);
-  if (!def) return null;
-  const sid = def.dhanSid ?? getFutSid(def);
-  if (!sid) return null;
-  const segment = def.segment ?? 'IDX_I';
-  const instrument = segment === 'MCX_COMM' ? 'FUTCOM' : 'INDEX';
-  return { sid, segment, instrument };
-}
-
 function mkQuote(ltp: number, prevClose: number, source: string): Quote | null {
   if (!(ltp > 0)) return null;
   // A missing/zero prev_close makes any percentage meaningless — return null
