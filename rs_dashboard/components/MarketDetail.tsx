@@ -4,7 +4,9 @@
 // Reuses the same live-quote source as the tile grid (/api/scalper/top-indices)
 // — no chart/candle fetch here, deliberately: that meant a per-symbol Python
 // spawn hitting Dhan's rate-limited intraday-candle endpoint just to view one
-// price, which isn't worth the API budget for what this page is for.
+// price, which isn't worth the API budget for what this page is for. Day
+// High/Day Low still show up here because they ride the same quote packet
+// LTP already comes from — no extra request either.
 
 import React, { useEffect } from 'react';
 import Link from 'next/link';
@@ -21,6 +23,8 @@ interface IndexQuote {
   prev_close: number;
   change_pct: number | null;
   source: string;
+  day_high: number | null;
+  day_low: number | null;
 }
 
 interface IndicesResponse {
@@ -131,13 +135,15 @@ export default function MarketDetail({ marketKey }: { marketKey: string }) {
               </div>
             </div>
 
-            <div className="grid grid-cols-2 gap-3 w-full max-w-xl">
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-3 w-full max-w-3xl">
               <StatTile label="Prev Close" value={quote && quote.prev_close > 0 ? fmtPrice(quote.prev_close) : '—'} />
               <StatTile label="Change" value={
                 quote && quote.prev_close > 0 && quote.ltp > 0
                   ? `${quote.ltp - quote.prev_close >= 0 ? '+' : ''}${fmtPrice(quote.ltp - quote.prev_close)}`
                   : '—'
               } tone={toneClass} />
+              <StatTile label="Day High" value={quote?.day_high ? fmtPrice(quote.day_high) : '—'} tone="text-emerald-400" />
+              <StatTile label="Day Low" value={quote?.day_low ? fmtPrice(quote.day_low) : '—'} tone="text-red-400" />
             </div>
           </Card>
         </div>

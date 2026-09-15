@@ -7,7 +7,7 @@ Subscribes to NSE index instruments via Dhan WebSocket and writes:
     configurable) — full intraday tick history from session open, used by the
     Next.js /live Normalized tab.
   - debug/live_indices_quotes.json every 2 seconds regardless of `interval` —
-    a compact {route_key: {ltp, prev_close, change, change_pct}} snapshot for
+    a compact {route_key: {ltp, prev_close, change, change_pct, high, low}} snapshot for
     the headline indices, consumed by /api/scalper/top-indices so that panel
     no longer needs to REST-poll Dhan's rate-limited OHLC endpoint for these
     rows. Decoupled from `interval` so a user who widens the chart tick
@@ -304,11 +304,19 @@ def write_quotes_snapshot(sid_to_symbol: dict, prev_close_cache: dict, helper=No
         change     = ltp - prev_close if prev_close else 0.0
         change_pct = (change / prev_close * 100) if prev_close else 0.0
 
+        # Today's session high/low — already present on the same Quote packet
+        # tick as LTP/close (see dhanhq's marketfeed.process_quote), so this
+        # costs nothing extra: no separate call, no separate rate-limit budget.
+        high = float(tick.get('high') or 0)
+        low  = float(tick.get('low') or 0)
+
         quotes[route_key] = {
             'ltp':        round(ltp, 2),
             'prev_close': round(prev_close, 2),
             'change':     round(change, 2),
             'change_pct': round(change_pct, 4),
+            'high':       round(high, 2) if high > 0 else 0,
+            'low':        round(low, 2) if low > 0 else 0,
         }
 
     atomic_write(QUOTES_FILE, {

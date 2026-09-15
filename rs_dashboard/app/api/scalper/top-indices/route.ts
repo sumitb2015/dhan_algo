@@ -99,11 +99,22 @@ const INDICES: IndexDef[] = [
 const WS_INDICES = INDICES.filter(i => i.segment !== 'MCX_COMM');
 const REST_INDICES = INDICES.filter(i => i.segment === 'MCX_COMM');
 
-interface Quote { ltp: number; prev_close: number; change_pct: number | null; source: string }
+interface Quote {
+  ltp: number;
+  prev_close: number;
+  change_pct: number | null;
+  source: string;
+  // Today's session high/low. Sourced from fields Dhan's Quote packet/OHLC
+  // REST response already carry alongside LTP — no extra API call either
+  // path (see fromHub/fromDhan below). null pre-market, where there is no
+  // "today" session yet to have a high/low.
+  day_high: number | null;
+  day_low: number | null;
+}
 
 interface HubQuotesFile {
   updated_at?: string;
-  quotes?: Record<string, { ltp?: number; prev_close?: number; change_pct?: number }>;
+  quotes?: Record<string, { ltp?: number; prev_close?: number; change_pct?: number; high?: number; low?: number }>;
 }
 
 // A snapshot older than this is not "quiet", it's a dead/not-yet-started
@@ -138,11 +149,15 @@ function fromHub(wanted: IndexDef[]): Record<string, Quote> {
     const q = parsed.quotes?.[key];
     if (!q || !(Number(q.ltp) > 0)) continue;
     const prevClose = Number(q.prev_close) || 0;
+    const high = Number(q.high) || 0;
+    const low = Number(q.low) || 0;
     out[key] = {
       ltp: Number(q.ltp),
       prev_close: prevClose,
       change_pct: prevClose > 0 ? (Number(q.change_pct) ?? null) : null,
       source: 'hub',
+      day_high: high > 0 ? high : null,
+      day_low: low > 0 ? low : null,
     };
   }
   return out;
@@ -321,12 +336,19 @@ function resolveSids(defs: IndexDef[]): { def: IndexDef; sid: number; segment: s
   return resolved;
 }
 
-function mkQuote(ltp: number, prevClose: number, source: string): Quote | null {
+function mkQuote(
+  ltp: number, prevClose: number, source: string,
+  dayHigh: number = 0, dayLow: number = 0,
+): Quote | null {
   if (!(ltp > 0)) return null;
   // A missing/zero prev_close makes any percentage meaningless — return null
   // for change_pct rather than a fabricated 0.00%.
   const pct = prevClose > 0 ? ((ltp - prevClose) / prevClose) * 100 : null;
-  return { ltp, prev_close: prevClose, change_pct: pct, source };
+  return {
+    ltp, prev_close: prevClose, change_pct: pct, source,
+    day_high: dayHigh > 0 ? dayHigh : null,
+    day_low: dayLow > 0 ? dayLow : null,
+  };
 }
 
 /**
@@ -368,7 +390,7 @@ async function fromDhan(wanted: IndexDef[]): Promise<Record<string, Quote>> {
   const json = (await res.json()) as {
     status?: string;
     Data?: unknown;
-    data?: Record<string, Record<string, { last_price?: number; ohlc?: { close?: number } }>>;
+    data?: Record<string, Record<string, { last_price?: number; ohlc?: { close?: number; high?: number; low?: number } }>>;
   };
   // Throw rather than return {}: GET records the reason in `errors`, which the
   // panel surfaces as a tooltip. Returning empty silently made an occasional
@@ -412,7 +434,7 @@ async function fromDhan(wanted: IndexDef[]): Promise<Record<string, Quote>> {
     // Cache a genuine close so a later flip (or an MCX session that runs past
     // the NSE bell) still yields a correct percentage rather than a blank one.
     if (!cached && prev > 0) prevCloseCache.set(`${day}:${def.key}`, prev);
-    const q = mkQuote(ltp, prev, source);
+    const q = mkQuote(ltp, prev, source, Number(row.ohlc?.high ?? 0), Number(row.ohlc?.low ?? 0));
     if (q) out[def.key] = q;
   }
   return out;
