@@ -4,8 +4,11 @@ import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react'
 import { Shield, RefreshCw, TrendingDown } from 'lucide-react';
 import NavBar from '@/components/NavBar';
 import { cn } from '@/lib/utils';
+import { Button } from '@/components/ui/button';
+import { Badge } from '@/components/ui/badge';
 import DeltaPanel from './DeltaPanel';
 import TradeSheet, { type LiveLegRow } from './TradeSheet';
+import { useLiveOptionsWS } from '@/lib/useLiveOptionsWS';
 import {
   suggestShortCallStrike,
   evaluateRollNeed,
@@ -21,6 +24,12 @@ import type { CoveredCallTradeRow } from '@/app/api/nifty-covered-call/state/rou
 // for the futures/options resolution + sticky-header conventions this mirrors, and
 // components/SyntheticFuturesScalper.tsx for the target/SL/trailing-SL watcher this
 // adapts inline (single consumer — no shared hook per the approved plan).
+
+// ── Local type scale (mirrors components/FocusTool.tsx's TXT_* constants) ──
+const TXT_MICRO = 'text-[8px]'; // badge glyphs, column footnotes
+const TXT_LABEL = 'text-[9px]'; // field labels, badges, uppercase tags — default micro size
+const TXT_VALUE = 'text-[10px]'; // secondary readouts: open-lot summaries, timing text
+const TXT_CAPTION = 'text-[11px]'; // primary compact inputs (selects, RuleNumInput)
 
 type SlMode = 'POINTS' | 'RUPEES';
 
@@ -52,6 +61,14 @@ interface OpenLeg {
 
 function todayIST(): string {
   return new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Kolkata' }).format(new Date());
+}
+
+/** "2026-09-29" -> "SEP" for the compact expiry-switcher pills (copied locally
+ *  from components/CyberScalper/CyberOrderPad.tsx, same as that file declares it). */
+function formatExpiryMonth(dateStr: string): string {
+  const dt = new Date(dateStr);
+  if (Number.isNaN(dt.getTime())) return dateStr;
+  return dt.toLocaleDateString('en-IN', { month: 'short' }).toUpperCase();
 }
 
 // ── Commit-on-blur numeric input (dhan-commit-on-blur skill; RuleNumInput
@@ -162,6 +179,8 @@ export default function NiftyCoveredCallTerminal() {
   // ── Contract resolution ─────────────────────────────────────────────────
   const [expiries, setExpiries] = useState<string[]>([]);
   const [optionExpiry, setOptionExpiry] = useState<string | null>(null);
+  const [futureExpiries, setFutureExpiries] = useState<string[]>([]);
+  const [futureExpiry, setFutureExpiry] = useState<string | null>(null);
   const [futuresContract, setFuturesContract] = useState<FuturesContract | null>(null);
   const [optionLotSize, setOptionLotSize] = useState<number>(75);
 
@@ -201,6 +220,17 @@ export default function NiftyCoveredCallTerminal() {
   const flattenInFlightRef = useRef(false);
   const flattenCooldownUntilRef = useRef(0);
 
+  // ── Live tick bridge (dhan-live-chart / lib/useLiveOptionsWS.ts). Carries
+  // spot + call LTPs live, and the *nearest-month* future's LTP only — the
+  // Python bridge never tracks a further-out contract (see caveat below). ──
+  const { liveQuotes, bridgeStatus, transport } = useLiveOptionsWS(
+    optionExpiry ?? '',
+    'dhan',
+    ['dhan'],
+    'NIFTY',
+  );
+  const wsLive = transport === 'ws' && bridgeStatus.status === 'RUNNING';
+
   // ── Load contracts / chain ──────────────────────────────────────────────
   useEffect(() => {
     fetch('/api/options/expiries?underlying=NIFTY')
@@ -216,15 +246,48 @@ export default function NiftyCoveredCallTerminal() {
       .then((r) => r.json())
       .then((j) => { if (j.lot_size) setOptionLotSize(j.lot_size); })
       .catch(() => {});
+    // Futures trade 3 monthly contracts at once (current + next 2), independent
+    // of the options weekly expiry used for the short call leg — see Bug 1.
+    fetch('/api/futures/expiries?symbol=NIFTY')
+      .then((r) => r.json())
+      .then((j) => {
+        if (j.success && Array.isArray(j.data?.expiries) && j.data.expiries.length) {
+          setFutureExpiries(j.data.expiries);
+          setFutureExpiry((prev) => prev ?? j.data.expiries[0]);
+        }
+      })
+      .catch(() => {});
   }, []);
 
+  // Ensure the Options Live Bridge is active for the selected weekly expiry
+  // (copied from components/SyntheticFuturesScalper.tsx's "Ensure Options Live
+  // Bridge is active" effect). Keyed on optionExpiry, not futureExpiry — the
+  // bridge tracks the options chain + nearest future, not a user-picked month.
+  useEffect(() => {
+    if (!optionExpiry) return;
+    fetch('/api/options/live', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action: 'start', underlying: 'NIFTY', expiry: optionExpiry, broker: 'dhan' }),
+    }).catch(() => {});
+
+    return () => {
+      fetch('/api/options/live', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'stop', brokers: ['dhan'], underlying: 'NIFTY' }),
+      }).catch(() => {});
+    };
+  }, [optionExpiry]);
+
   const fetchFutures = useCallback(async () => {
+    if (!futureExpiry) return;
     try {
-      const res = await fetch('/api/futures/order?symbol=NIFTY');
+      const res = await fetch(`/api/futures/order?symbol=NIFTY&expiry=${futureExpiry}`);
       const json = await res.json();
       if (json.success && json.data) setFuturesContract(json.data);
     } catch {}
-  }, []);
+  }, [futureExpiry]);
 
   const chainInFlight = useRef(false);
   const fetchChain = useCallback(async () => {
@@ -261,6 +324,24 @@ export default function NiftyCoveredCallTerminal() {
   useEffect(() => {
     if (!futuresLtp && futuresContract?.ltp) setFuturesLtp(futuresContract.ltp);
   }, [futuresContract, futuresLtp]);
+
+  // ── Live-value overlays: prefer the WS tick, fall back to the REST poll. ──
+  // Spot + call premiums are live regardless of which future month is picked.
+  const effectiveSpot = liveQuotes?.spot && liveQuotes.spot > 0 ? liveQuotes.spot : spot;
+
+  // The bridge only ever tracks the nearest-month future. Only trust its LTP
+  // when the user's selected futureExpiry IS that nearest month.
+  const nearestFutureExpiry = futureExpiries[0] ?? null;
+  const futuresIsNearestMonth = !!futureExpiry && futureExpiry === nearestFutureExpiry;
+  const wsFuturesLtp = futuresIsNearestMonth ? liveQuotes?.future?.ltp : undefined;
+  const futuresLive = wsLive && futuresIsNearestMonth && typeof wsFuturesLtp === 'number' && wsFuturesLtp > 0;
+  // REST fallback must be the SELECTED contract's own LTP (futuresContract.ltp,
+  // fetched per futureExpiry by fetchFutures), never the chain-derived `futuresLtp`
+  // — that's always the nearest month's price regardless of which expiry pill is
+  // active, so it silently mispriced a non-nearest-month position.
+  const effectiveFuturesLtp = futuresLive && typeof wsFuturesLtp === 'number'
+    ? wsFuturesLtp
+    : (futuresContract?.ltp || futuresLtp);
 
   // ── Load / reload the trade log ledger ──────────────────────────────────
   const reloadLedger = useCallback(async () => {
@@ -334,7 +415,7 @@ export default function NiftyCoveredCallTerminal() {
       if (json.success) {
         await logTrade({
           leg: 'FUTURE', action: 'ENTRY', side: 'SELL', quantity: futureLots,
-          price: futuresLtp || futuresContract.ltp, expiry: futuresContract.expiry,
+          price: effectiveFuturesLtp || futuresContract.ltp, expiry: futuresContract.expiry,
           orderId: json.orderId, securityId: futuresContract.securityId,
           tradingSymbol: futuresContract.tradingSymbol,
         });
@@ -346,7 +427,7 @@ export default function NiftyCoveredCallTerminal() {
     } finally {
       setIsBusy(false);
     }
-  }, [futuresContract, futureLots, futuresLtp, isBusy, placeLeg, logTrade, reloadLedger]);
+  }, [futuresContract, futureLots, effectiveFuturesLtp, isBusy, placeLeg, logTrade, reloadLedger]);
 
   const handleExitFuture = useCallback(async (reason: string) => {
     if (!futureLeg || !futuresContract) return false;
@@ -357,7 +438,7 @@ export default function NiftyCoveredCallTerminal() {
       exchangeSegment: futureLeg.exchangeSegment,
     });
     if (json.success) {
-      const exitPrice = futuresLtp || futuresContract.ltp;
+      const exitPrice = effectiveFuturesLtp || futuresContract.ltp;
       const realizedPnl = (futureLeg.entryPrice - exitPrice) * unitQty;
       await logTrade({
         leg: 'FUTURE', action: 'EXIT', side: 'BUY', quantity: futureLeg.quantity,
@@ -369,13 +450,18 @@ export default function NiftyCoveredCallTerminal() {
       return true;
     }
     return false;
-  }, [futureLeg, futuresContract, futuresLtp, placeLeg, logTrade, reloadLedger]);
+  }, [futureLeg, futuresContract, effectiveFuturesLtp, placeLeg, logTrade, reloadLedger]);
 
+  // Effective call premium: prefer the WS tick (no greeks), fall back to the
+  // REST-polled chain's last_price. The same value is used for display and
+  // for the price logged at order-placement time — never two divergent sources.
   const callLtp = useCallback((strike: number): number | null => {
+    const wsLtp = liveQuotes?.strikes?.[String(strike)]?.ce?.ltp;
+    if (typeof wsLtp === 'number' && wsLtp > 0) return wsLtp;
     if (!chainOc) return null;
     const row = chainOc[String(strike)];
     return row?.ce && row.ce.last_price > 0 ? row.ce.last_price : null;
-  }, [chainOc]);
+  }, [liveQuotes, chainOc]);
 
   const handleEnterCall = useCallback(async (strike: number, lots: number) => {
     if (!chainOc || isBusy) return;
@@ -385,6 +471,7 @@ export default function NiftyCoveredCallTerminal() {
     setIsBusy(true);
     try {
       const unitQty = lots * optionLotSize;
+      const effectivePrice = callLtp(strike) ?? ce.last_price;
       const json = await placeLeg({
         role: 'CALL', side: 'SELL', quantity: unitQty,
         securityId: String(ce.security_id), tradingSymbol: `NIFTY-${optionExpiry}-${strike}-CE`,
@@ -393,7 +480,7 @@ export default function NiftyCoveredCallTerminal() {
       if (json.success) {
         await logTrade({
           leg: 'CALL', action: 'ENTRY', side: 'SELL', quantity: lots, strike,
-          price: ce.last_price, expiry: optionExpiry || undefined, orderId: json.orderId,
+          price: effectivePrice, expiry: optionExpiry || undefined, orderId: json.orderId,
           securityId: String(ce.security_id), tradingSymbol: `NIFTY-${optionExpiry}-${strike}-CE`,
         });
         await reloadLedger();
@@ -403,7 +490,7 @@ export default function NiftyCoveredCallTerminal() {
     } finally {
       setIsBusy(false);
     }
-  }, [chainOc, optionExpiry, optionLotSize, isBusy, placeLeg, logTrade, reloadLedger]);
+  }, [chainOc, optionExpiry, optionLotSize, isBusy, placeLeg, logTrade, reloadLedger, callLtp]);
 
   const handleExitCall = useCallback(async (leg: OpenLeg, action: 'EXIT' | 'ROLL_CLOSE', reason?: string) => {
     const ltp = leg.strike != null ? callLtp(leg.strike) : null;
@@ -441,6 +528,7 @@ export default function NiftyCoveredCallTerminal() {
         alert('Roll closed the old call, but the new target needs 0 call lots — the book is now a naked short future. Sell a new call manually to re-hedge.');
         return;
       }
+      const effectivePrice = callLtp(suggestion.strike) ?? ce.last_price;
       const json = await placeLeg({
         role: 'CALL', side: 'SELL', quantity: unitQty,
         securityId: String(ce.security_id), tradingSymbol: `NIFTY-${optionExpiry}-${suggestion.strike}-CE`,
@@ -449,7 +537,7 @@ export default function NiftyCoveredCallTerminal() {
       if (json.success) {
         await logTrade({
           leg: 'CALL', action: 'ROLL_OPEN', side: 'SELL', quantity: suggestion.callLots, strike: suggestion.strike,
-          price: ce.last_price, expiry: optionExpiry || undefined, orderId: json.orderId,
+          price: effectivePrice, expiry: optionExpiry || undefined, orderId: json.orderId,
           securityId: String(ce.security_id), tradingSymbol: `NIFTY-${optionExpiry}-${suggestion.strike}-CE`,
           note: 'Delta-drift roll',
         });
@@ -460,7 +548,7 @@ export default function NiftyCoveredCallTerminal() {
     } finally {
       setIsBusy(false);
     }
-  }, [isBusy, handleExitCall, chainOc, optionExpiry, optionLotSize, placeLeg, logTrade, reloadLedger]);
+  }, [isBusy, handleExitCall, chainOc, optionExpiry, optionLotSize, placeLeg, logTrade, reloadLedger, callLtp]);
 
   const handleFlattenAll = useCallback(async (reason: string) => {
     if (flattenInFlightRef.current) return;
@@ -490,7 +578,7 @@ export default function NiftyCoveredCallTerminal() {
       legs.push(buildFuturesLeg({
         side: futureLeg.side, qtyLots: futureLeg.quantity, price: futureLeg.entryPrice,
         securityId: futureLeg.securityId, expiry: futureLeg.expiry, tradingSymbol: futureLeg.tradingSymbol,
-        ltp: futuresLtp || null,
+        ltp: effectiveFuturesLtp || null,
       }));
     }
     for (const c of callLegs) {
@@ -498,16 +586,16 @@ export default function NiftyCoveredCallTerminal() {
       legs.push(buildCallLeg({
         strike: c.strike ?? 0, side: c.side, qtyLots: c.quantity, price: c.entryPrice,
         chainLeg: row?.ce, securityId: c.securityId, expiry: c.expiry, tradingSymbol: c.tradingSymbol,
-        ltp: c.strike != null ? callLtp(c.strike) : null, spot,
+        ltp: c.strike != null ? callLtp(c.strike) : null, spot: effectiveSpot,
       }));
     }
     return computeCoveredCallGreeks(legs);
-  }, [futureLeg, callLegs, chainOc, futuresLtp, spot, callLtp]);
+  }, [futureLeg, callLegs, chainOc, effectiveFuturesLtp, effectiveSpot, callLtp]);
 
   const suggestion = useMemo(() => {
-    if (!chainOc || !futuresLtp || !futureLeg) return null;
-    return suggestShortCallStrike(chainOc, futuresLtp, futureLeg.quantity, targetDelta, { targetNetDelta });
-  }, [chainOc, futuresLtp, futureLeg, targetDelta, targetNetDelta]);
+    if (!chainOc || !effectiveFuturesLtp || !futureLeg) return null;
+    return suggestShortCallStrike(chainOc, effectiveFuturesLtp, futureLeg.quantity, targetDelta, { targetNetDelta });
+  }, [chainOc, effectiveFuturesLtp, futureLeg, targetDelta, targetNetDelta]);
 
   const engineNetDelta = suggestion?.netDelta ?? targetNetDelta;
   const rollCheck = useMemo(
@@ -517,13 +605,13 @@ export default function NiftyCoveredCallTerminal() {
 
   // ── Target / SL / trailing watcher (adapted from SyntheticFuturesScalper) ─
   const capturedPoints = futureLeg
-    ? (futureLeg.side === 'SELL' ? futureLeg.entryPrice - futuresLtp : futuresLtp - futureLeg.entryPrice)
+    ? (futureLeg.side === 'SELL' ? futureLeg.entryPrice - effectiveFuturesLtp : effectiveFuturesLtp - futureLeg.entryPrice)
     : 0;
   const currentPnl = useMemo(() => {
     let pnl = 0;
     if (futureLeg && futuresContract) {
       const unitQty = futureLeg.quantity * futuresContract.lotSize;
-      pnl += (futureLeg.entryPrice - futuresLtp) * unitQty;
+      pnl += (futureLeg.entryPrice - effectiveFuturesLtp) * unitQty;
     }
     for (const c of callLegs) {
       const ltp = c.strike != null ? callLtp(c.strike) : null;
@@ -531,7 +619,7 @@ export default function NiftyCoveredCallTerminal() {
       pnl += (c.entryPrice - ltp) * c.quantity * optionLotSize;
     }
     return pnl;
-  }, [futureLeg, futuresContract, futuresLtp, callLegs, callLtp, optionLotSize]);
+  }, [futureLeg, futuresContract, effectiveFuturesLtp, callLegs, callLtp, optionLotSize]);
 
   useEffect(() => {
     if (!futureLeg && callLegs.length === 0) {
@@ -591,9 +679,9 @@ export default function NiftyCoveredCallTerminal() {
       const unitQty = futureLeg.quantity * futuresContract.lotSize;
       rows.push({
         id: futureLeg.id, leg: 'FUTURE', side: futureLeg.side, quantity: unitQty,
-        entryPrice: futureLeg.entryPrice, ltp: futuresLtp || null,
+        entryPrice: futureLeg.entryPrice, ltp: effectiveFuturesLtp || null,
         target: null, stopLoss: null, trailingSlFloor: trailingStatus.armed ? peakRef.current.points : null,
-        livePnl: (futureLeg.entryPrice - futuresLtp) * unitQty,
+        livePnl: (futureLeg.entryPrice - effectiveFuturesLtp) * unitQty,
       });
     }
     for (const c of callLegs) {
@@ -606,7 +694,7 @@ export default function NiftyCoveredCallTerminal() {
       });
     }
     return rows;
-  }, [futureLeg, futuresContract, futuresLtp, callLegs, callLtp, optionLotSize, trailingStatus.armed]);
+  }, [futureLeg, futuresContract, effectiveFuturesLtp, callLegs, callLtp, optionLotSize, trailingStatus.armed]);
 
   const openMtm = liveLegRows.reduce((s, r) => s + r.livePnl, 0);
 
@@ -620,24 +708,44 @@ export default function NiftyCoveredCallTerminal() {
           </div>
           <div>
             <div className="flex items-center gap-1.5">
-              <span className="text-[9px] font-bold text-emerald-500 uppercase tracking-[0.18em]">
+              <span className={cn(TXT_LABEL, 'font-bold text-emerald-500 uppercase tracking-[0.18em]')}>
                 NIFTY COVERED CALL
               </span>
-              <span className="text-[9px] font-mono px-1.5 py-0.2 rounded bg-zinc-800 border border-zinc-700 text-zinc-300 font-bold">
+              <span className={cn(TXT_LABEL, 'font-mono px-1.5 py-0.2 rounded bg-zinc-800 border border-zinc-700 text-zinc-300 font-bold')}>
                 DATA: {todayIST()}
               </span>
             </div>
-            <h1 className="text-sm font-bold text-white tracking-tight flex items-center gap-2 mt-0.5">
+            <h1 className="text-sm font-bold text-white tracking-tight flex items-center gap-1.5 mt-0.5 flex-wrap">
               <span className="font-mono font-bold">NIFTY</span>
-              <span className="text-xs font-mono font-bold text-zinc-200">₹{spot.toFixed(2)}</span>
+              <span className={cn(TXT_CAPTION, 'font-mono font-bold text-zinc-200')}>₹{effectiveSpot.toFixed(2)}</span>
+              <LiveBadge live={wsLive} />
               <span className="text-zinc-600 font-normal">|</span>
-              <span className="text-[10px] font-mono text-zinc-500">FUT</span>
-              <span className="text-xs font-mono font-bold text-zinc-200">
-                ₹{futuresLtp ? futuresLtp.toFixed(2) : '—'} ({futuresContract?.expiry || '—'})
+              <span className={cn(TXT_VALUE, 'font-mono text-zinc-500')}>FUT</span>
+              <span className={cn(TXT_CAPTION, 'font-mono font-bold text-zinc-200')}>
+                ₹{effectiveFuturesLtp ? effectiveFuturesLtp.toFixed(2) : '—'} ({futuresContract?.expiry || '—'})
               </span>
+              <LiveBadge live={futuresLive} />
+              {futureExpiries.length > 1 && (
+                <div className="flex items-center bg-zinc-900 border border-zinc-800 rounded p-0.5">
+                  {futureExpiries.map((exp) => (
+                    <button
+                      key={exp}
+                      onClick={() => setFutureExpiry(exp)}
+                      className={cn(
+                        TXT_LABEL,
+                        'px-1.5 py-0.5 rounded font-mono font-bold transition-all',
+                        futureExpiry === exp ? 'bg-purple-500/20 text-purple-300 border border-purple-500/40' : 'text-zinc-400 hover:text-white',
+                      )}
+                      title={exp}
+                    >
+                      {formatExpiryMonth(exp)}
+                    </button>
+                  ))}
+                </div>
+              )}
               <span className="text-zinc-600 font-normal">|</span>
-              <span className="text-[10px] font-mono text-zinc-500">MTM</span>
-              <span className={cn('text-xs font-mono font-bold', openMtm >= 0 ? 'text-emerald-400' : 'text-rose-400')}>
+              <span className={cn(TXT_VALUE, 'font-mono text-zinc-500')}>MTM</span>
+              <span className={cn(TXT_CAPTION, 'font-mono font-bold', openMtm >= 0 ? 'text-emerald-400' : 'text-rose-400')}>
                 {openMtm >= 0 ? '+' : ''}₹{openMtm.toFixed(0)}
               </span>
             </h1>
@@ -685,35 +793,39 @@ export default function NiftyCoveredCallTerminal() {
 
           {/* Futures leg */}
           <div className="bg-zinc-900/60 rounded-lg p-2.5 space-y-2">
-            <div className="text-[10px] text-zinc-500 uppercase font-bold">Futures Leg (Short)</div>
+            <div className={cn(TXT_VALUE, 'text-zinc-500 uppercase font-bold')}>Futures Leg (Short)</div>
             <div className="flex items-center gap-2">
               <select
                 value={futureLots}
                 onChange={(e) => setFutureLots(Number(e.target.value))}
-                className="bg-zinc-800 border border-zinc-700 rounded px-2 py-1 text-xs text-zinc-100"
+                className={cn(TXT_CAPTION, 'bg-zinc-800 border border-zinc-700 rounded px-2 py-1 text-zinc-100')}
               >
                 {[1, 2, 3, 5, 10].map((n) => <option key={n} value={n}>{n} lot{n > 1 ? 's' : ''}</option>)}
               </select>
               {!futureLeg ? (
-                <button
+                <Button
+                  size="sm"
+                  variant="outline"
                   disabled={isBusy || !futuresContract}
                   onClick={handleEnterFuture}
-                  className="flex-1 px-3 py-1.5 rounded-lg bg-rose-500/20 border border-rose-500/40 text-rose-300 text-xs font-bold hover:bg-rose-500/30 disabled:opacity-40"
+                  className="flex-1 bg-rose-500/20 border-rose-500/40 text-rose-300 font-bold hover:bg-rose-500/30 hover:text-rose-200"
                 >
                   SELL FUTURES
-                </button>
+                </Button>
               ) : (
-                <button
+                <Button
+                  size="sm"
+                  variant="outline"
                   disabled={isBusy}
                   onClick={() => handleExitFuture('Manual exit')}
-                  className="flex-1 px-3 py-1.5 rounded-lg bg-emerald-500/20 border border-emerald-500/40 text-emerald-300 text-xs font-bold hover:bg-emerald-500/30 disabled:opacity-40"
+                  className="flex-1 bg-emerald-500/20 border-emerald-500/40 text-emerald-300 font-bold hover:bg-emerald-500/30 hover:text-emerald-200"
                 >
                   BUY TO COVER
-                </button>
+                </Button>
               )}
             </div>
             {futureLeg && (
-              <div className="text-[10px] text-zinc-400">
+              <div className={cn(TXT_VALUE, 'text-zinc-400')}>
                 Open: {futureLeg.quantity} lot(s) @ {futureLeg.entryPrice.toFixed(2)}
               </div>
             )}
@@ -721,51 +833,57 @@ export default function NiftyCoveredCallTerminal() {
 
           {/* Call leg */}
           <div className="bg-zinc-900/60 rounded-lg p-2.5 space-y-2">
-            <div className="text-[10px] text-zinc-500 uppercase font-bold">Short Call Leg</div>
+            <div className={cn(TXT_VALUE, 'text-zinc-500 uppercase font-bold')}>Short Call Leg</div>
             <div className="flex items-center gap-2">
               <RuleNumInput
                 value={manualStrike != null ? String(manualStrike) : ''}
                 onCommit={(v) => setManualStrike(v ? Number(v) : null)}
                 placeholder={suggestion ? String(suggestion.strike) : 'Strike'}
-                className="w-24 bg-zinc-800 border border-zinc-700 rounded px-2 py-1 text-xs text-zinc-100"
+                className={cn(TXT_CAPTION, 'w-24 bg-zinc-800 border border-zinc-700 rounded px-2 py-1 text-zinc-100')}
               />
               <select
                 value={callLots}
                 onChange={(e) => setCallLots(Number(e.target.value))}
-                className="bg-zinc-800 border border-zinc-700 rounded px-2 py-1 text-xs text-zinc-100"
+                className={cn(TXT_CAPTION, 'bg-zinc-800 border border-zinc-700 rounded px-2 py-1 text-zinc-100')}
               >
                 {[1, 2, 3, 5, 10].map((n) => <option key={n} value={n}>{n} lot{n > 1 ? 's' : ''}</option>)}
               </select>
             </div>
-            <button
+            <Button
+              size="sm"
+              variant="outline"
               disabled={isBusy || (!manualStrike && !suggestion)}
               onClick={() => handleEnterCall(manualStrike ?? suggestion!.strike, callLots)}
-              className="w-full px-3 py-1.5 rounded-lg bg-rose-500/20 border border-rose-500/40 text-rose-300 text-xs font-bold hover:bg-rose-500/30 disabled:opacity-40"
+              className="w-full bg-rose-500/20 border-rose-500/40 text-rose-300 font-bold hover:bg-rose-500/30 hover:text-rose-200"
             >
               SELL CALL
-            </button>
+            </Button>
             {callLegs.length > 0 && (
               <div className="space-y-1 pt-1 border-t border-zinc-800/60">
                 {callLegs.map((c) => (
-                  <div key={c.id} className="flex items-center justify-between text-[10px] text-zinc-400">
+                  <div key={c.id} className={cn(TXT_VALUE, 'flex items-center justify-between text-zinc-400')}>
                     <span>{c.strike} CE × {c.quantity} @ {c.entryPrice.toFixed(2)}</span>
                     <div className="flex gap-1">
                       {suggestion && suggestion.strike !== c.strike && (
-                        <button
+                        <Button
+                          size="xs"
+                          variant="outline"
                           disabled={isBusy}
                           onClick={() => handleRollCall(c, suggestion)}
-                          className="px-1.5 py-0.5 rounded bg-amber-500/20 border border-amber-500/40 text-amber-300 font-bold"
+                          className="bg-amber-500/20 border-amber-500/40 text-amber-300 font-bold hover:bg-amber-500/30 hover:text-amber-200"
                         >
                           ROLL → {suggestion.strike}
-                        </button>
+                        </Button>
                       )}
-                      <button
+                      <Button
+                        size="xs"
+                        variant="outline"
                         disabled={isBusy}
                         onClick={() => handleExitCall(c, 'EXIT', 'Manual exit')}
-                        className="px-1.5 py-0.5 rounded bg-emerald-500/20 border border-emerald-500/40 text-emerald-300 font-bold"
+                        className="bg-emerald-500/20 border-emerald-500/40 text-emerald-300 font-bold hover:bg-emerald-500/30 hover:text-emerald-200"
                       >
                         BUY BACK
-                      </button>
+                      </Button>
                     </div>
                   </div>
                 ))}
@@ -775,7 +893,7 @@ export default function NiftyCoveredCallTerminal() {
 
           {/* Hedge engine inputs */}
           <div className="bg-zinc-900/60 rounded-lg p-2.5 space-y-2">
-            <div className="text-[10px] text-zinc-500 uppercase font-bold">Hedge Engine</div>
+            <div className={cn(TXT_VALUE, 'text-zinc-500 uppercase font-bold')}>Hedge Engine</div>
             <div className="grid grid-cols-3 gap-2">
               <LabeledInput label="Strike Δ" value={targetDeltaStr} onCommit={setTargetDeltaStr} />
               <LabeledInput label="Net Δ Target" value={targetNetDeltaStr} onCommit={setTargetNetDeltaStr} />
@@ -786,13 +904,13 @@ export default function NiftyCoveredCallTerminal() {
           {/* Target / SL / Trailing */}
           <div className="bg-zinc-900/60 rounded-lg p-2.5 space-y-2">
             <div className="flex items-center justify-between">
-              <div className="text-[10px] text-zinc-500 uppercase font-bold">Target / SL</div>
+              <div className={cn(TXT_VALUE, 'text-zinc-500 uppercase font-bold')}>Target / SL</div>
               <div className="flex bg-zinc-800 rounded p-0.5">
                 {(['POINTS', 'RUPEES'] as SlMode[]).map((m) => (
                   <button
                     key={m}
                     onClick={() => setSlMode(m)}
-                    className={cn('px-2 py-0.5 rounded text-[10px] font-bold', slMode === m ? 'bg-zinc-700 text-zinc-100' : 'text-zinc-400')}
+                    className={cn(TXT_VALUE, 'px-2 py-0.5 rounded font-bold', slMode === m ? 'bg-zinc-700 text-zinc-100' : 'text-zinc-400')}
                   >
                     {m === 'POINTS' ? 'Pts' : '₹'}
                   </button>
@@ -803,7 +921,7 @@ export default function NiftyCoveredCallTerminal() {
               <LabeledInput label={`Target (${slMode === 'POINTS' ? 'pts' : '₹'})`} value={targetStr} onCommit={setTargetStr} />
               <LabeledInput label={`Stop (${slMode === 'POINTS' ? 'pts' : '₹'})`} value={stopLossStr} onCommit={setStopLossStr} />
             </div>
-            <label className="flex items-center gap-2 text-[10px] text-zinc-400">
+            <label className={cn(TXT_VALUE, 'flex items-center gap-2 text-zinc-400')}>
               <input type="checkbox" checked={trailingEnabled} onChange={(e) => setTrailingEnabled(e.target.checked)} />
               Trailing SL
             </label>
@@ -813,14 +931,16 @@ export default function NiftyCoveredCallTerminal() {
                 <LabeledInput label="Trail Step" value={trailStepStr} onCommit={setTrailStepStr} />
               </div>
             )}
-            <div className="text-[10px] text-zinc-500">{trailingStatus.label}: {trailingStatus.detail}</div>
-            <button
+            <div className={cn(TXT_VALUE, 'text-zinc-500')}>{trailingStatus.label}: {trailingStatus.detail}</div>
+            <Button
+              size="sm"
+              variant="outline"
               disabled={isBusy || (!futureLeg && callLegs.length === 0)}
               onClick={() => handleFlattenAll('Manual flatten')}
-              className="w-full px-3 py-1.5 rounded-lg bg-zinc-800 border border-zinc-700 text-zinc-200 text-xs font-bold hover:bg-zinc-700 disabled:opacity-40"
+              className="w-full bg-zinc-800 border-zinc-700 text-zinc-200 font-bold hover:bg-zinc-700"
             >
               FLATTEN ALL
-            </button>
+            </Button>
           </div>
         </div>
 
@@ -845,14 +965,32 @@ export default function NiftyCoveredCallTerminal() {
   );
 }
 
+// Compact LIVE/POLL status pill (Bug 2) — emerald when the WS bridge is
+// feeding this value, amber "POLL" when falling back to the REST poll.
+function LiveBadge({ live }: { live: boolean }) {
+  return (
+    <Badge
+      className={cn(
+        TXT_MICRO,
+        'h-4 px-1 rounded font-bold border',
+        live
+          ? 'bg-emerald-500/20 text-emerald-300 border-emerald-500/40'
+          : 'bg-amber-500/20 text-amber-300 border-amber-500/40',
+      )}
+    >
+      {live ? 'LIVE' : 'POLL'}
+    </Badge>
+  );
+}
+
 function LabeledInput({ label, value, onCommit }: { label: string; value: string; onCommit: (v: string) => void }) {
   return (
     <label className="block">
-      <span className="text-[9px] text-zinc-500">{label}</span>
+      <span className={cn(TXT_LABEL, 'text-zinc-500')}>{label}</span>
       <RuleNumInput
         value={value}
         onCommit={onCommit}
-        className="w-full mt-0.5 bg-zinc-800 border border-zinc-700 rounded px-2 py-1 text-xs text-zinc-100"
+        className={cn(TXT_CAPTION, 'w-full mt-0.5 bg-zinc-800 border border-zinc-700 rounded px-2 py-1 text-zinc-100')}
       />
     </label>
   );

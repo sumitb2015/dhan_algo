@@ -14,12 +14,15 @@ import os
 import json
 import argparse
 from datetime import datetime
+from zoneinfo import ZoneInfo
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, ROOT)
 
 from login import get_dhan_client
 from lib.dhan_helper import DhanHelper
+
+IST = ZoneInfo("Asia/Kolkata")
 
 # NSE index futures (FUTIDX on NSE_FNO)
 NSE_INDEX_SYMBOLS = {'NIFTY', 'BANKNIFTY', 'FINNIFTY', 'MIDCPNIFTY', 'NIFTYNXT50'}
@@ -59,6 +62,10 @@ def main():
     p_lkp = sub.add_parser('lookup')
     p_lkp.add_argument('--underlying', required=True)
     p_lkp.add_argument('--expiry', default=None)
+
+    # list-expiries subcommand
+    p_le = sub.add_parser('list-expiries')
+    p_le.add_argument('--underlying', required=True)
 
     # order subcommand
     p_ord = sub.add_parser('order')
@@ -109,6 +116,30 @@ def main():
                 'exchangeSegment': seg,
                 'ltp': float(ltp),
                 'tickSize': float(sec.get('TICK_SIZE', 0.05) or 0.05),
+            }
+        }))
+
+    elif args.cmd == 'list-expiries':
+        # Same master-list filter shape as cyber_scalper_feed.py's
+        # find_future_contract() — current + next 2 monthly contracts, nearest first.
+        df_m = helper._load_master_list()
+        mask = (
+            (df_m['EXCH_ID'] == exchange)
+            & (df_m['INSTRUMENT'] == instrument)
+            & (df_m['UNDERLYING_SYMBOL'] == under)
+        )
+        today_str = datetime.now(IST).strftime('%Y-%m-%d')
+        all_exp = sorted(
+            e for e in df_m.loc[mask, 'SM_EXPIRY_DATE'].dropna().unique().tolist()
+            if str(e) >= today_str
+        )
+        expiries = [str(e) for e in all_exp[:3]]
+
+        print(json.dumps({
+            'success': True,
+            'data': {
+                'symbol': under,
+                'expiries': expiries,
             }
         }))
 
