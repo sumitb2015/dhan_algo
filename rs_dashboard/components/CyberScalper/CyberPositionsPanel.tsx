@@ -15,6 +15,7 @@ import {
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { cyberAudio } from '@/lib/cyberAudio';
+import { partialCloseChips } from '@/lib/partialQty';
 
 import { ExitedPositionItem } from '@/lib/fifoPositions';
 import { getTerminalTradingSymbols, isSymbolMatch } from '@/lib/terminalTradeStore';
@@ -131,7 +132,9 @@ interface PositionsPanelProps {
   onToggleTrail: (posKey: string) => void;
   onSetPresetPts: (pos: PositionItem, type: 'TP' | 'SL', pts: number) => void;
   onToggleTrailAll?: () => void;
-  onClosePosition: (pos: PositionItem) => Promise<void>;
+  onClosePosition: (pos: PositionItem, units?: number) => Promise<void>;
+  /** Lot size for a row, for sizing the 25/50/75% partial chips. Null hides them (full-close only). */
+  lotSizeFor?: (pos: PositionItem) => number | null;
   onFlattenAll: () => Promise<void>;
   isExecuting: boolean;
 }
@@ -147,6 +150,7 @@ export default function CyberPositionsPanel({
   onSetPresetPts,
   onToggleTrailAll,
   onClosePosition,
+  lotSizeFor,
   onFlattenAll,
   isExecuting,
 }: PositionsPanelProps) {
@@ -608,19 +612,47 @@ export default function CyberPositionsPanel({
                             </div>
                           </td>
 
-                          {/* Square Off Button */}
+                          {/* Square Off Button + partial (25/50/75%) chips */}
                           <td className="py-3 px-3 text-right whitespace-nowrap">
-                            <button
-                              onClick={() => {
-                                cyberAudio.click();
-                                onClosePosition(pos);
-                              }}
-                              disabled={isExecuting}
-                              className="px-3 py-1.5 rounded-lg bg-zinc-800 hover:bg-rose-500/20 hover:text-rose-400 hover:border-rose-500/50 border border-zinc-700 text-zinc-300 text-[10px] font-bold transition-all active:scale-95 disabled:opacity-50"
-                              title="Square off this leg instantly at market"
-                            >
-                              SQUARE OFF
-                            </button>
+                            <div className="flex flex-col items-end gap-1">
+                              <button
+                                onClick={() => {
+                                  cyberAudio.click();
+                                  onClosePosition(pos);
+                                }}
+                                disabled={isExecuting}
+                                className="px-3 py-1.5 rounded-lg bg-zinc-800 hover:bg-rose-500/20 hover:text-rose-400 hover:border-rose-500/50 border border-zinc-700 text-zinc-300 text-[10px] font-bold transition-all active:scale-95 disabled:opacity-50"
+                                title="Square off this leg instantly at market — 100%"
+                              >
+                                SQUARE OFF
+                              </button>
+                              {/* 100% is the button above, so only the fractions appear
+                                  here. A chip is disabled when it maps to under a lot, or
+                                  to the same lot count as a smaller one — see lib/partialQty. */}
+                              {lotSizeFor && (() => {
+                                const ls = lotSizeFor(pos);
+                                if (!ls || ls <= 0) return null;
+                                return (
+                                  <div className="flex items-center gap-0.5 font-mono">
+                                    {partialCloseChips(pos.netQty, ls, [25, 50, 75]).map((c) => (
+                                      <button
+                                        key={c.pct}
+                                        type="button"
+                                        disabled={isExecuting || !c.enabled}
+                                        onClick={() => {
+                                          cyberAudio.click();
+                                          onClosePosition(pos, c.units);
+                                        }}
+                                        title={c.title}
+                                        className="px-1.5 py-0.5 rounded bg-rose-950/80 border border-rose-800/60 text-rose-400 hover:bg-rose-800 hover:text-white transition-all disabled:opacity-30 disabled:cursor-not-allowed text-[9px] font-bold"
+                                      >
+                                        {c.pct}%
+                                      </button>
+                                    ))}
+                                  </div>
+                                );
+                              })()}
+                            </div>
                           </td>
                         </tr>
                       );

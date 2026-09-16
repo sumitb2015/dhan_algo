@@ -579,14 +579,20 @@ export default function CyberScalperTerminal() {
     }
   };
 
-  // Close single position leg
-  const handleClosePosition = async (pos: PositionItem) => {
+  // Close single position leg. `units` (absolute qty) closes a fraction of the
+  // leg for the 25/50/75% partial square-off chips — omitted (or ≥ netQty)
+  // closes it entirely, same convention as AdvancedScalper.tsx's closePosition.
+  const handleClosePosition = async (pos: PositionItem, units?: number) => {
     if (pos.netQty === 0) return;
     if (broker === 'dhan' && !pos.securityId) return;
     if (broker !== 'dhan' && !pos.tradingSymbol) return;
+    const liveAbs = Math.abs(pos.netQty);
+    const reqUnits = Math.floor(Number(units ?? liveAbs));
+    const qty = Math.max(1, Math.min(liveAbs, reqUnits > 0 ? reqUnits : liveAbs));
+    const isPartial = qty < liveAbs;
     setIsExecuting(true);
     const closeSide = pos.netQty > 0 ? 'SELL' : 'BUY';
-    addLog('EXIT', `Closing ${pos.tradingSymbol}`, `${Math.abs(pos.netQty)} Qty (${BROKER_LABELS[broker]})`);
+    addLog('EXIT', `${isPartial ? 'Partially closing' : 'Closing'} ${pos.tradingSymbol}`, `${qty}${isPartial ? ` of ${liveAbs}` : ''} Qty (${BROKER_LABELS[broker]})`);
 
     try {
       const orderUrl = broker === 'dhan' ? '/api/scalper/fast-order' : scalperRoute(broker, 'order');
@@ -597,7 +603,7 @@ export default function CyberScalperTerminal() {
           broker === 'dhan'
             ? {
                 securityId: pos.securityId,
-                quantity: Math.abs(pos.netQty),
+                quantity: qty,
                 side: closeSide,
                 orderType: 'MARKET',
                 exchangeSegment: pos.exchangeSegment,
@@ -611,7 +617,7 @@ export default function CyberScalperTerminal() {
                 // payload (see lib/kotakShape.ts / lib/zerodhaShape.ts) — not the
                 // dashboard's INTRADAY/MARGIN convention, so pass them through as-is.
                 tradingsymbol: pos.tradingSymbol,
-                quantity: Math.abs(pos.netQty),
+                quantity: qty,
                 side: closeSide,
                 orderType: 'MARKET',
                 exchange: pos.exchangeSegment,
@@ -623,13 +629,13 @@ export default function CyberScalperTerminal() {
       const json = await res.json();
       if (json.success) {
         cyberAudio.exit();
-        addLog('EXIT', `Position Closed: ${pos.tradingSymbol}`);
+        addLog('EXIT', `${isPartial ? 'Partially closed' : 'Position Closed'}: ${pos.tradingSymbol}`, isPartial ? `${qty} of ${liveAbs} qty` : undefined);
         saveTerminalOrder({
           orderId: json.order_id ? String(json.order_id) : undefined,
           tradingSymbol: pos.tradingSymbol,
           securityId: pos.securityId ? String(pos.securityId) : undefined,
           side: closeSide,
-          qty: Math.abs(pos.netQty),
+          qty,
           price: pos.ltp,
           broker,
           symbol,
@@ -646,6 +652,36 @@ export default function CyberScalperTerminal() {
       setIsExecuting(false);
     }
   };
+
+  // Lot size for a positions-table row, for sizing the 25/50/75% partial
+  // square-off chips. Only resolved for rows on the currently selected
+  // underlying (a bare prefix match would wrongly give e.g. NIFTYNXT50 the
+  // NIFTY lot size) — other symbols get null and keep full-close only, same
+  // guard as AdvancedScalper.tsx's lotSizeForRow.
+  const lotSizeForPosition = useCallback((pos: PositionItem): number | null => {
+    const sym = (pos.tradingSymbol || '').toUpperCase();
+    const under = symbol.toUpperCase();
+    if (!sym.startsWith(under)) return null;
+    const next = sym.charAt(under.length);
+    if (next && next >= 'A' && next <= 'Z') return null;
+
+    // Dhan reports MCX_COMM netQty in LOTS already (see lib/positionPnl.ts) —
+    // treat each unit of netQty as one lot rather than re-dividing by the
+    // barrels-per-lot figure, or a real multi-lot CRUDEOIL(M) position floors
+    // to 0 "lots" and every chip shows disabled. Kotak reports MCX quantity in
+    // absolute barrels, so it still needs the real per-lot size below.
+    if (pos.exchangeSegment === 'MCX_COMM') return 1;
+
+    const isFuture = sym.includes('FUT');
+    // brokerFuture is only populated for Kotak (see the lookup effect above) —
+    // Dhan's own future lot size comes from feedData.future instead, same
+    // source the order pad uses for Dhan (see the `future` prop passed to
+    // CyberOrderPad).
+    const ls = isFuture
+      ? (broker === 'dhan' ? feedData?.future?.lot_size : brokerFuture?.lot_size)
+      : feedData?.options?.lot_size;
+    return ls && ls > 0 ? ls : null;
+  }, [symbol, broker, brokerFuture, feedData]);
 
   // Cancel a resting order (e.g. one placed via the Order Pad's Buy Below /
   // Short Above limit ladder) from the Order Book panel.
@@ -1186,6 +1222,7 @@ export default function CyberScalperTerminal() {
           onSetPresetPts={handleSetPresetPts}
           onToggleTrailAll={handleToggleTrailAll}
           onClosePosition={handleClosePosition}
+          lotSizeFor={lotSizeForPosition}
           onFlattenAll={handleFlattenAll}
           isExecuting={isExecuting}
         />
