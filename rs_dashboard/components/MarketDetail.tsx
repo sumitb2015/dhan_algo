@@ -17,6 +17,7 @@ import NavBar from './NavBar';
 import { useLiveTickerPoll, isStale, ageOf, ageLabel } from '@/lib/useLiveTickerPoll';
 import { fmtPrice } from './LiveTickerPanel';
 import { startLiveIndicesBridge } from '@/lib/startLiveIndicesBridge';
+import { geistDisplay } from '@/lib/fonts';
 
 interface IndexQuote {
   ltp: number;
@@ -73,23 +74,32 @@ export default function MarketDetail({ marketKey }: { marketKey: string }) {
   const notFound = data && !row;
 
   return (
-    <div className="flex flex-col min-h-screen bg-zinc-950 text-white">
-      <div className="sticky top-0 z-10 flex items-center justify-between gap-3 flex-wrap
-                      px-6 py-3 border-b border-zinc-800 bg-zinc-950/95 backdrop-blur">
+    <div className="relative isolate flex flex-col min-h-screen bg-zinc-950 text-white overflow-hidden">
+      {/* Same ambient glass backdrop as the Markets Overview grid — see the
+          comment there. Kept in sync deliberately so navigating tile → detail
+          doesn't jump between two different visual languages. */}
+      <div aria-hidden className="pointer-events-none fixed inset-0 z-0">
+        <div className={cn('absolute -top-32 -left-24 w-[36rem] h-[36rem] rounded-full blur-[100px]',
+          up ? 'bg-emerald-500/25' : down ? 'bg-red-500/25' : 'bg-sky-500/25')} />
+        <div className="absolute bottom-0 right-0 w-[32rem] h-[32rem] rounded-full bg-violet-500/20 blur-[100px]" />
+      </div>
+
+      <div className="relative sticky top-0 z-10 flex items-center justify-between gap-3 flex-wrap
+                      px-6 py-3 border-b border-zinc-800/60 bg-zinc-950/60 backdrop-blur-xl">
         <div className="flex items-center gap-3 min-w-0">
           <Link href="/markets" className="flex items-center justify-center w-8 h-8 rounded-lg
-                          bg-zinc-900 border border-zinc-800 shrink-0 hover:border-zinc-700 hover:bg-zinc-800 transition-colors">
+                          bg-zinc-900/60 backdrop-blur-sm border border-white/10 shrink-0 hover:border-white/20 hover:bg-zinc-800/60 transition-colors">
             <ArrowLeft className="h-4 w-4 text-zinc-400" />
           </Link>
           <div className="flex items-center justify-center w-8 h-8 rounded-lg
-                          bg-sky-500/10 border border-sky-500/25 shrink-0">
+                          bg-sky-500/10 border border-sky-500/25 shrink-0 backdrop-blur-sm">
             <Icon className={cn('h-4 w-4', isMcx ? 'text-amber-400' : 'text-sky-400')} />
           </div>
           <div className="min-w-0">
             <p className="text-[9px] font-bold text-sky-400 uppercase tracking-[0.18em] mb-0.5">
               {isMcx ? 'MCX' : 'Index'}
             </p>
-            <h1 className="text-sm font-bold text-white tracking-tight leading-none truncate">
+            <h1 className={cn(geistDisplay.className, 'text-sm font-bold text-white tracking-tight leading-none truncate')}>
               {row?.label ?? marketKey}
             </h1>
           </div>
@@ -111,12 +121,14 @@ export default function MarketDetail({ marketKey }: { marketKey: string }) {
       </div>
 
       {notFound ? (
-        <div className="flex-1 flex items-center justify-center text-sm text-zinc-500">
+        <div className="relative z-10 flex-1 flex items-center justify-center text-sm text-zinc-500">
           Unknown market &ldquo;{marketKey}&rdquo;. <Link href="/markets" className="ml-1 underline hover:text-zinc-300">Back to Markets Overview</Link>
         </div>
       ) : (
-        <div className="flex-1 px-4 sm:px-6 py-5 md:h-[calc(100vh-73px)]">
-          <Card className="bg-zinc-900/60 border-zinc-800/80 rounded-2xl flex flex-col items-center justify-center gap-6 sm:gap-8 md:gap-10 p-5 sm:p-8 md:p-12 h-full">
+        <div className="relative z-10 flex-1 px-4 sm:px-6 py-5 md:h-[calc(100vh-73px)]">
+          <Card className="relative bg-zinc-900/40 border-white/10 backdrop-blur-xl rounded-2xl flex flex-col items-center justify-center gap-6 sm:gap-8 md:gap-10 p-5 sm:p-8 md:p-12 h-full shadow-2xl shadow-black/30
+                          before:absolute before:inset-x-0 before:top-0 before:h-px before:rounded-t-2xl
+                          before:bg-gradient-to-r before:from-transparent before:via-white/20 before:to-transparent">
             <div className="flex flex-col items-center text-center w-full">
               <div className={cn('font-mono font-bold tabular-nums leading-none transition-colors text-5xl sm:text-7xl md:text-9xl lg:text-[11rem]',
                 f === 'up' ? 'text-emerald-300' : f === 'down' ? 'text-red-300' : 'text-zinc-100')}>
@@ -154,7 +166,7 @@ export default function MarketDetail({ marketKey }: { marketKey: string }) {
 
 function StatTile({ label, value, tone }: { label: string; value: string; tone?: string }) {
   return (
-    <div className="flex flex-col gap-1.5 sm:gap-2 md:gap-2.5 rounded-lg border border-zinc-800 bg-zinc-950 px-3 py-3 sm:px-5 sm:py-4 md:px-6 md:py-5 min-w-0">
+    <div className="flex flex-col gap-1.5 sm:gap-2 md:gap-2.5 rounded-lg border border-white/10 bg-zinc-950/50 backdrop-blur-md px-3 py-3 sm:px-5 sm:py-4 md:px-6 md:py-5 min-w-0 transition-colors hover:border-white/20 hover:bg-zinc-950/70">
       <span className="font-bold uppercase tracking-[0.1em] sm:tracking-[0.15em] text-zinc-500 text-[10px] sm:text-sm md:text-base truncate">{label}</span>
       <span className={cn('font-mono font-bold leading-none tabular-nums text-lg sm:text-2xl md:text-4xl truncate', tone ?? 'text-zinc-100')}>{value}</span>
     </div>

@@ -18,6 +18,7 @@ import NavBar from './NavBar';
 import { useLiveTickerPoll, isStale, ageOf, ageLabel } from '@/lib/useLiveTickerPoll';
 import { fmtPrice } from './LiveTickerPanel';
 import { startLiveIndicesBridge } from '@/lib/startLiveIndicesBridge';
+import { geistDisplay } from '@/lib/fonts';
 
 interface IndexQuote {
   ltp: number;
@@ -75,19 +76,32 @@ export default function MarketsOverviewGrid() {
       : new Date(data.updated_at).toLocaleTimeString('en-IN', { hour12: false });
 
   return (
-    <div className="flex flex-col min-h-screen bg-zinc-950 text-white">
-      <div className="sticky top-0 z-10 flex items-center justify-between gap-3 flex-wrap
-                      px-6 py-3 border-b border-zinc-800 bg-zinc-950/95 backdrop-blur">
+    <div className="relative isolate flex flex-col min-h-screen bg-zinc-950 text-white overflow-hidden">
+      {/* Ambient glass backdrop — fixed, blurred colour blobs that sit behind
+          every translucent surface so the blur/border-brightness glass effect
+          below actually has something soft to refract. Pure decoration:
+          pointer-events-none, z-0, and low enough opacity to stay legible and
+          theme-neutral in white mode too. */}
+      <div aria-hidden className="pointer-events-none fixed inset-0 z-0">
+        <div className="absolute -top-32 -left-24 w-[36rem] h-[36rem] rounded-full bg-sky-500/25 blur-[100px]" />
+        <div className="absolute top-1/4 -right-24 w-[32rem] h-[32rem] rounded-full bg-emerald-500/20 blur-[100px]" />
+        <div className="absolute bottom-0 left-1/3 w-[30rem] h-[30rem] rounded-full bg-violet-500/20 blur-[100px]" />
+      </div>
+
+      <div className="relative sticky top-0 z-10 flex items-center justify-between gap-3 flex-wrap
+                      px-6 py-3 border-b border-zinc-800/60 bg-zinc-950/60 backdrop-blur-xl">
         <div className="flex items-center gap-3">
           <div className="flex items-center justify-center w-8 h-8 rounded-lg
-                          bg-sky-500/10 border border-sky-500/25 shrink-0">
+                          bg-sky-500/10 border border-sky-500/25 shrink-0 backdrop-blur-sm">
             <LineChart className="h-4 w-4 text-sky-400" />
           </div>
           <div>
             <p className="text-[9px] font-bold text-sky-400 uppercase tracking-[0.18em] mb-0.5">
               Markets
             </p>
-            <h1 className="text-sm font-bold text-white tracking-tight leading-none">Markets Overview</h1>
+            <h1 className={cn(geistDisplay.className, 'text-base font-bold text-white tracking-tight leading-none')}>
+              Markets Overview
+            </h1>
             <p className="text-[10px] text-zinc-500 font-medium mt-1">
               Nifty, Bank Nifty &amp; sector indices, India VIX, and MCX crude oil — live vs yesterday&apos;s close
             </p>
@@ -111,7 +125,7 @@ export default function MarketsOverviewGrid() {
         </div>
       </div>
 
-      <div className="flex-1 px-6 py-5">
+      <div className="relative z-10 flex-1 px-6 py-5">
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-3.5">
           {rows.map(r => {
             const f = flash[r.key];
@@ -122,12 +136,17 @@ export default function MarketsOverviewGrid() {
             const Icon = isMcx ? Fuel : LineChart;
             const DirIcon = pct === null ? Minus : up ? TrendingUp : down ? TrendingDown : Minus;
             const toneClass = up ? 'text-emerald-400' : down ? 'text-red-400' : 'text-zinc-400';
+            const glowClass = up ? 'group-hover:shadow-emerald-500/10' : down ? 'group-hover:shadow-red-500/10' : 'group-hover:shadow-white/5';
 
             return (
               <Link key={r.key} href={`/markets/${r.key}`} className="block group">
                 <Card className={cn(
-                  'bg-zinc-900/60 border-zinc-800/80 rounded-2xl px-4 py-3.5 h-full transition-colors',
-                  'group-hover:border-zinc-700 group-hover:bg-zinc-900',
+                  'relative bg-zinc-900/40 border-white/10 rounded-2xl px-4 py-3.5 h-full',
+                  'backdrop-blur-xl shadow-lg shadow-black/20 transition-all duration-300',
+                  'before:absolute before:inset-x-0 before:top-0 before:h-px before:rounded-t-2xl',
+                  'before:bg-gradient-to-r before:from-transparent before:via-white/25 before:to-transparent',
+                  'group-hover:border-white/20 group-hover:bg-zinc-900/60 group-hover:-translate-y-0.5',
+                  'group-hover:shadow-xl', glowClass,
                 )}>
                   <div className="flex items-center justify-between mb-2.5">
                     <span className="flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-[0.15em] text-zinc-500">
@@ -137,7 +156,9 @@ export default function MarketsOverviewGrid() {
                     <DirIcon className={cn('h-3.5 w-3.5', toneClass)} />
                   </div>
 
-                  <div className="text-sm font-semibold text-zinc-200 mb-1.5 truncate">{r.label}</div>
+                  <div className={cn(geistDisplay.className, 'text-sm font-semibold text-zinc-200 mb-1.5 truncate')}>
+                    {r.label}
+                  </div>
 
                   <div className="flex items-end justify-between gap-2">
                     <span className={cn('font-mono text-lg font-bold leading-none tabular-nums transition-colors',
@@ -158,7 +179,7 @@ export default function MarketsOverviewGrid() {
           })}
 
           {!data && Array.from({ length: 10 }).map((_, i) => (
-            <div key={i} className="rounded-2xl border border-zinc-800/80 bg-zinc-900/40 h-[104px] animate-pulse" />
+            <div key={i} className="rounded-2xl border border-white/10 bg-zinc-900/30 backdrop-blur-xl h-[104px] animate-pulse" />
           ))}
         </div>
       </div>
