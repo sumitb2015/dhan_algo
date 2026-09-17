@@ -1,14 +1,17 @@
 'use client';
 
-import React, { useState, useEffect, useMemo } from 'react';
-import NavBar from '@/components/NavBar';
+import React, { useState, useEffect, useRef } from 'react';
 import dynamic from 'next/dynamic';
+import {
+  Copy, Trash2, Settings, Share2, Save, Info, Plus, Calendar,
+  Square, RefreshCw
+} from 'lucide-react';
+import { toast } from 'sonner';
 
-// Charts only render after a backtest completes — lazy-load so recharts
-// stays out of the /backtest initial bundle.
+// Lazy-load recharts so initial bundle stays lightweight
 const BacktestCharts = dynamic(() => import('@/components/BacktestCharts'), {
   ssr: false,
-  loading: () => <div className="h-64 bg-zinc-900/60 border border-zinc-800/60 rounded-lg animate-pulse" />,
+  loading: () => <div className="h-64 bg-slate-100 border border-slate-200 rounded-lg animate-pulse" />,
 });
 
 // ─── Types ───────────────────────────────────────────────────────────────────
@@ -22,17 +25,9 @@ interface LegConfig {
   strike: string;          // offset string, or a %/premium/delta value depending on strike_type
   leg_sl_pct: number;      // 0 = disabled
   leg_target_pct: number;  // 0 = disabled
-  leg_trail_sl_pct?: number; // 0 = disabled — arms once this leg is 15%+ favorable, then trails by this %
+  leg_trail_sl_pct?: number; // 0 = disabled
   strike_type?: StrikeMode;
 }
-
-const STRIKE_MODE_LABEL: Record<StrikeMode, string> = {
-  offset: 'ATM Point',
-  atm_percent: 'ATM Percent',
-  closest_premium: 'Closest Premium (CP)',
-  straddle_width: 'Straddle Width',
-  closest_delta: 'Closest Delta',
-};
 
 interface LegResult {
   option_type: string;
@@ -98,6 +93,16 @@ interface BacktestResult {
 
 // ─── Constants ───────────────────────────────────────────────────────────────
 
+const STRIKE_MODES = [
+  'ATM Point',
+  'ATM Percent',
+  'Straddle Width',
+  'Closest Premium (CP)',
+  'CP based on Straddle Premium (SP)',
+] as const;
+
+type StrikeModeLabel = typeof STRIKE_MODES[number];
+
 const STRIKE_OPTIONS = [
   'ATM',
   ...Array.from({ length: 10 }, (_, i) => `ATM+${i + 1}`),
@@ -107,22 +112,19 @@ const STRIKE_OPTIONS = [
 const MONTHS = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
 
 const EXIT_REASON_CLS: Record<string, string> = {
-  TARGET:        'bg-emerald-500/10 text-emerald-300',
-  SCALP_FLOOR:   'bg-emerald-500/10 text-emerald-300 border border-emerald-500/30',
-  LEG_TARGET:    'bg-emerald-500/10 text-emerald-400',
-  EOD:           'bg-sky-500/10 text-sky-300',
-  LEG_SL:        'bg-red-500/10 text-red-300',
-  LEG_TRAIL_SL:  'bg-amber-500/10 text-amber-300 border border-amber-500/30',
-  TRAIL_SL:      'bg-amber-500/10 text-amber-300 border border-amber-500/30',
-  ALL_LEGS_DONE: 'bg-red-500/10 text-red-300',
-  OVERALL_SL:    'bg-red-700/10 text-red-400',
-  INCOMPLETE:    'bg-amber-500/10 text-amber-300',
-  ROLL_ATM:      'bg-purple-500/10 text-purple-300 border border-purple-500/30',
-  NO_ENTRY:      'bg-zinc-800 text-zinc-500',
+  TARGET:        'bg-emerald-50 text-emerald-700 border border-emerald-300',
+  SCALP_FLOOR:   'bg-emerald-50 text-emerald-700 border border-emerald-400',
+  LEG_TARGET:    'bg-emerald-50 text-emerald-700 border border-emerald-300',
+  EOD:           'bg-sky-50 text-sky-700 border border-sky-300',
+  LEG_SL:        'bg-red-50 text-red-700 border border-red-300',
+  LEG_TRAIL_SL:  'bg-amber-50 text-amber-700 border border-amber-300',
+  TRAIL_SL:      'bg-amber-50 text-amber-700 border border-amber-300',
+  ALL_LEGS_DONE: 'bg-red-50 text-red-700 border border-red-300',
+  OVERALL_SL:    'bg-red-100 text-red-800 border border-red-400',
+  INCOMPLETE:    'bg-amber-50 text-amber-700 border border-amber-300',
+  ROLL_ATM:      'bg-purple-50 text-purple-700 border border-purple-300',
+  NO_ENTRY:      'bg-slate-100 text-slate-500 border border-slate-200',
 };
-
-const inputCls = 'w-full bg-zinc-900 border border-zinc-700 rounded-md px-2.5 py-1.5 text-xs text-zinc-100 focus:outline-none focus:border-emerald-500 transition-colors';
-const inputSmCls = 'w-full bg-zinc-800 border border-zinc-700 rounded px-2 py-1 text-xs text-zinc-100 focus:outline-none focus:border-emerald-500 transition-colors';
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -143,7 +145,34 @@ function fmtTime(iso: string | null): string {
   return iso ? iso.slice(11, 16) : '—';
 }
 
-// Compute year-wise MDD from equity curve
+// Short label for a cycle's actual leg composition — the trade log used to hardcode
+// "STRADDLE" for every row, which is wrong for anything but a 2-leg ATM CE+PE sell
+// (e.g. the Iron Condor preset, or a single naked leg). Falls back to that label only
+// when the legs genuinely match a short straddle shape.
+function cycleTypeLabel(legs: LegResult[]): string {
+  if (!legs.length) return '—';
+  const isShortStraddle = legs.length === 2
+    && legs.every(l => l.position === 'sell')
+    && legs.some(l => l.option_type === 'CE') && legs.some(l => l.option_type === 'PE');
+  if (isShortStraddle) return 'STRADDLE';
+  return legs.map(l => `${l.position === 'sell' ? 'S' : 'B'}${l.option_type}`).join('/');
+}
+
+function formatStockMockDate(dateStr: string): string {
+  try {
+    const parts = dateStr.split('-');
+    if (parts.length === 3) {
+      const d = new Date(parseInt(parts[0], 10), parseInt(parts[1], 10) - 1, parseInt(parts[2], 10));
+      const days = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+      const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+      return `${days[d.getDay()]}, ${months[d.getMonth()]} ${String(d.getDate()).padStart(2, '0')}, ${d.getFullYear()}`;
+    }
+    return dateStr;
+  } catch {
+    return dateStr;
+  }
+}
+
 function computeYearMDD(curve: { date: string; cumulative_pnl: number }[], year: string) {
   const pts = curve.filter(p => p.date.startsWith(year));
   if (!pts.length) return { mdd: 0, days: null };
@@ -169,480 +198,113 @@ function computeYearMDD(curve: { date: string; cumulative_pnl: number }[], year:
   return { mdd: Math.round(mdd), days: mddDays };
 }
 
-// ─── Sub-components ───────────────────────────────────────────────────────────
+// ─── Subcomponents ────────────────────────────────────────────────────────────
 
-function StatCard({ label, value, sub, color = '' }: { label: string; value: string; sub?: string; color?: string }) {
-  return (
-    <div className="bg-zinc-900/60 border border-zinc-800 rounded-xl p-3 transition-colors hover:border-zinc-700">
-      <div className="text-[9px] font-bold text-zinc-500 uppercase tracking-[0.14em] mb-1">{label}</div>
-      <div className={`text-base font-mono font-bold tabular-nums leading-tight ${color || 'text-zinc-100'}`}>{value}</div>
-      {sub && <div className="text-[10px] text-zinc-500 mt-0.5 font-medium">{sub}</div>}
-    </div>
-  );
-}
-
-function PulseStat({ label, value, sub, color = 'text-white', size = 'text-2xl' }: {
-  label: string; value: string; sub?: string; color?: string; size?: string;
-}) {
-  return (
-    <div className="flex flex-col min-w-0">
-      <span className="text-[9px] font-bold text-zinc-500 uppercase tracking-[0.14em] mb-0.5">{label}</span>
-      <span className={`${size} font-mono font-bold tabular-nums leading-none ${color}`}>{value}</span>
-      {sub && <span className="text-[10px] text-zinc-500 mt-1 font-medium">{sub}</span>}
-    </div>
-  );
-}
-
-function FormField({ label, children }: { label: string; children: React.ReactNode }) {
-  return (
-    <div>
-      <label className="block text-[10px] font-bold text-zinc-500 uppercase tracking-wider mb-1">{label}</label>
-      {children}
-    </div>
-  );
-}
-
-function Toggle({ value, options, onChange }: {
+function DateInputBox({
+  label,
+  value,
+  onChange,
+}: {
+  label: string;
   value: string;
-  options: { label: string; value: string; activeClass: string }[];
   onChange: (v: string) => void;
 }) {
-  return (
-    <div className="flex rounded overflow-hidden border border-zinc-700">
-      {options.map(opt => (
-        <button
-          key={opt.value}
-          onClick={() => onChange(opt.value)}
-          className={`flex-1 text-[10px] font-bold px-2 py-1 transition-colors ${
-            value === opt.value ? opt.activeClass : 'bg-zinc-900 text-zinc-500 hover:text-zinc-300'
-          }`}
-        >
-          {opt.label}
-        </button>
-      ))}
-    </div>
-  );
-}
-
-// ─── Dynamic Leg Builder ──────────────────────────────────────────────────────
-
-function LegCard({
-  index,
-  leg,
-  onChange,
-  onRemove,
-  canRemove,
-}: {
-  index: number;
-  leg: LegConfig;
-  onChange: (l: LegConfig) => void;
-  onRemove: () => void;
-  canRemove: boolean;
-}) {
-  const isCall = leg.option_type === 'CE';
-  const isSell = leg.position === 'sell';
-  const strikeMode = leg.strike_type || 'offset';
-  const slOn    = leg.leg_sl_pct > 0;
-  const tgtOn   = leg.leg_target_pct > 0;
-  const trailOn = (leg.leg_trail_sl_pct ?? 0) > 0;
-
-  const strikePlaceholder =
-    strikeMode === 'atm_percent'    ? 'e.g. 2 (%)' :
-    strikeMode === 'closest_premium' ? 'e.g. 100 (premium)' :
-    strikeMode === 'straddle_width'  ? 'e.g. 30 (% of straddle)' :
-    strikeMode === 'closest_delta'   ? 'e.g. 30 (delta)' : '';
-
-  const strikeSummary =
-    strikeMode === 'atm_percent'     ? `${leg.strike}% OTM` :
-    strikeMode === 'closest_premium' ? `Prem ${leg.strike}` :
-    strikeMode === 'straddle_width'  ? `SW ${leg.strike}%` :
-    strikeMode === 'closest_delta'   ? `Δ ${leg.strike}` : leg.strike;
+  const inputRef = useRef<HTMLInputElement>(null);
+  const formatted = formatStockMockDate(value);
 
   return (
-    <div className="bg-zinc-900/70 border border-zinc-800 rounded-lg p-2.5 flex flex-col gap-2">
-      {/* Row 1: compact identity strip — L{n} · lots · buy/sell · CE/PE · strike, remove at end */}
-      <div className="flex items-center gap-1.5 flex-wrap">
-        <span className="shrink-0 text-[9px] font-black text-zinc-600 bg-zinc-950 border border-zinc-800 rounded px-1 py-0.5">L{index + 1}</span>
-        <input
-          type="number" min={1} value={leg.lots}
-          onChange={e => onChange({ ...leg, lots: Math.max(1, Number(e.target.value)) })}
-          className="w-11 shrink-0 bg-zinc-950 border border-zinc-700 rounded px-1 py-0.5 text-[11px] text-zinc-100 text-center focus:outline-none focus:border-emerald-500"
-          title="Lots"
-        />
-        <button
-          onClick={() => onChange({ ...leg, position: isSell ? 'buy' : 'sell' })}
-          className={`shrink-0 text-[9px] font-black rounded px-1.5 py-0.5 transition-colors ${
-            isSell ? 'bg-red-700 text-oncolor' : 'bg-emerald-700 text-oncolor'
-          }`}
-        >
-          {isSell ? 'SELL' : 'BUY'}
-        </button>
-        <button
-          onClick={() => onChange({ ...leg, option_type: isCall ? 'PE' : 'CE' })}
-          className={`shrink-0 text-[9px] font-black rounded px-1.5 py-0.5 transition-colors ${
-            isCall ? 'bg-sky-600 text-oncolor' : 'bg-amber-600 text-oncolor'
-          }`}
-        >
-          {leg.option_type}
-        </button>
-        <span className="text-[9px] font-bold text-zinc-400 bg-zinc-950 border border-zinc-800 rounded px-1.5 py-0.5 truncate max-w-[90px]" title={strikeSummary}>
-          {strikeSummary}
-        </span>
-        {canRemove && (
-          <button onClick={onRemove} className="ml-auto shrink-0 text-[11px] text-zinc-600 hover:text-red-400 font-bold transition-colors leading-none">✕</button>
-        )}
-      </div>
-
-      {/* Row 2: strike mode + strike value */}
-      <div className="grid grid-cols-[1fr_auto] gap-1.5">
-        <select
-          value={strikeMode}
-          onChange={e => {
-            const newType = e.target.value as StrikeMode;
-            const defaults: Record<StrikeMode, string> = {
-              offset: 'ATM', atm_percent: '2', closest_premium: '100', straddle_width: '30', closest_delta: '30',
-            };
-            onChange({ ...leg, strike_type: newType, strike: defaults[newType] });
-          }}
-          className={inputSmCls}
-        >
-          {(Object.keys(STRIKE_MODE_LABEL) as StrikeMode[]).map(m => (
-            <option key={m} value={m}>{STRIKE_MODE_LABEL[m]}</option>
-          ))}
-        </select>
-        {strikeMode === 'offset' ? (
-          <select
-            value={leg.strike}
-            onChange={e => onChange({ ...leg, strike: e.target.value })}
-            className={`${inputSmCls} w-24`}
-          >
-            {STRIKE_OPTIONS.map(s => <option key={s} value={s}>{s}</option>)}
-          </select>
-        ) : (
-          <input
-            type="number"
-            min={0}
-            value={leg.strike}
-            onChange={e => onChange({ ...leg, strike: e.target.value })}
-            className={`${inputSmCls} w-24`}
-            placeholder={strikePlaceholder}
-          />
-        )}
-      </div>
-
-      {/* Row 3: inline "+chip" toggles — Target / Stop Loss / Trailing SL, StockMock-style */}
-      <div className="flex items-center gap-1.5 flex-wrap">
-        <LegChip
-          label="Target"
-          active={tgtOn}
-          activeClass="bg-emerald-500/10 text-emerald-400 border-emerald-500/30"
-          value={leg.leg_target_pct}
-          onToggle={() => onChange({ ...leg, leg_target_pct: tgtOn ? 0 : 50 })}
-          onValueChange={v => onChange({ ...leg, leg_target_pct: v })}
-        />
-        <LegChip
-          label="Stop Loss"
-          active={slOn}
-          activeClass="bg-red-500/10 text-red-400 border-red-500/30"
-          value={leg.leg_sl_pct}
-          onToggle={() => onChange({ ...leg, leg_sl_pct: slOn ? 0 : 40 })}
-          onValueChange={v => onChange({ ...leg, leg_sl_pct: v })}
-        />
-        <LegChip
-          label="Trail SL"
-          active={trailOn}
-          activeClass="bg-amber-500/10 text-amber-400 border-amber-500/30"
-          value={leg.leg_trail_sl_pct ?? 0}
-          onToggle={() => onChange({ ...leg, leg_trail_sl_pct: trailOn ? 0 : 10 })}
-          onValueChange={v => onChange({ ...leg, leg_trail_sl_pct: v })}
-        />
-      </div>
-    </div>
-  );
-}
-
-// A "+ Target Profit" style toggle chip: click the "+" label to arm it, which swaps
-// it for a compact % input inline — same interaction StockMock uses per leg row.
-function LegChip({ label, active, activeClass, value, onToggle, onValueChange }: {
-  label: string;
-  active: boolean;
-  activeClass: string;
-  value: number;
-  onToggle: () => void;
-  onValueChange: (v: number) => void;
-}) {
-  if (!active) {
-    return (
-      <button
-        onClick={onToggle}
-        className="text-[9px] font-bold text-zinc-500 hover:text-zinc-300 border border-dashed border-zinc-700 rounded px-1.5 py-0.5 transition-colors"
+    <div className="flex-1 flex flex-col">
+      <span className="text-[11px] text-slate-500 font-medium mb-1">{label}</span>
+      <div
+        onClick={() => inputRef.current?.showPicker ? inputRef.current.showPicker() : inputRef.current?.focus()}
+        className="relative bg-white border border-slate-300 rounded px-3 py-1.5 text-xs text-slate-700 font-medium cursor-pointer flex items-center justify-between hover:border-[#54b4c7] transition-colors shadow-sm"
       >
-        + {label}
-      </button>
-    );
-  }
-  return (
-    <div className={`flex items-center gap-1 border rounded px-1 py-0.5 ${activeClass}`}>
-      <span className="text-[9px] font-bold">{label}</span>
-      <input
-        type="number" min={0} step={1} value={value}
-        onChange={e => onValueChange(Number(e.target.value))}
-        className="w-9 bg-transparent text-[10px] text-inherit text-right focus:outline-none"
-      />
-      <span className="text-[9px]">%</span>
-      <button onClick={onToggle} className="text-[10px] leading-none hover:opacity-70">✕</button>
-    </div>
-  );
-}
-
-// ─── Year-wise Returns Table ─────────────────────────────────────────────────
-
-function YearwiseTable({ monthlyPnl, equityCurve }: {
-  monthlyPnl: MonthlyPnl;
-  equityCurve: { date: string; cumulative_pnl: number }[];
-}) {
-  const years = Object.keys(monthlyPnl).sort();
-  if (!years.length) return null;
-
-  function cellColor(v: number | undefined): string {
-    if (v == null || v === 0) return 'text-zinc-500';
-    return v > 0 ? 'text-emerald-400' : 'text-red-400';
-  }
-
-  return (
-    <div className="bg-zinc-900/60 border border-zinc-800 rounded-2xl overflow-hidden">
-      <div className="overflow-x-auto">
-        <table className="text-xs whitespace-nowrap w-full">
-          <thead>
-            <tr className="bg-zinc-800">
-              <th className="text-xs font-bold text-white text-left px-3 py-2">Year</th>
-              {MONTHS.map(m => (
-                <th key={m} className="text-xs font-bold text-white text-right px-2 py-2">{m}</th>
-              ))}
-              <th className="text-xs font-bold text-white text-right px-3 py-2 border-l border-zinc-700">Total</th>
-              <th className="text-xs font-bold text-white text-right px-3 py-2">Max DD</th>
-              <th className="text-xs font-bold text-white text-right px-3 py-2">Days</th>
-              <th className="text-xs font-bold text-white text-right px-3 py-2">R/MDD</th>
-            </tr>
-          </thead>
-          <tbody>
-            {years.map((yr, i) => {
-              const yData = monthlyPnl[yr] ?? {};
-              const total = yData['Total'] ?? 0;
-              const { mdd, days } = computeYearMDD(equityCurve, yr);
-              const rMdd = mdd > 0 ? (total / mdd).toFixed(2) : '—';
-              return (
-                <tr key={yr} className={`border-t border-zinc-800 ${i % 2 === 0 ? '' : 'bg-zinc-950/40'}`}>
-                  <td className="px-3 py-1.5 font-bold text-zinc-200">{yr}</td>
-                  {MONTHS.map(m => {
-                    const v = yData[m];
-                    return (
-                      <td key={m} className={`px-2 py-1.5 text-right font-mono ${cellColor(v)}`}>
-                        {v != null && v !== 0 ? (v > 0 ? '+' : '') + Math.round(v).toLocaleString('en-IN') : '—'}
-                      </td>
-                    );
-                  })}
-                  <td className={`px-3 py-1.5 text-right font-mono font-bold border-l border-zinc-800 ${cellColor(total)}`}>
-                    {total !== 0 ? (total > 0 ? '+' : '') + Math.round(total).toLocaleString('en-IN') : '—'}
-                  </td>
-                  <td className="px-3 py-1.5 text-right font-mono text-amber-400">
-                    {mdd > 0 ? `₹${mdd.toLocaleString('en-IN')}` : '—'}
-                  </td>
-                  <td className="px-3 py-1.5 text-right font-mono text-zinc-400">
-                    {days != null ? days : '—'}
-                  </td>
-                  <td className={`px-3 py-1.5 text-right font-mono ${
-                    typeof rMdd === 'string' && rMdd !== '—' && Number(rMdd) >= 1
-                      ? 'text-emerald-400' : 'text-zinc-400'
-                  }`}>
-                    {rMdd}
-                  </td>
-                </tr>
-              );
-            })}
-          </tbody>
-        </table>
+        <span>{formatted}</span>
+        <Calendar className="w-3.5 h-3.5 text-slate-400" />
+        <input
+          ref={inputRef}
+          type="date"
+          value={value}
+          onChange={e => e.target.value && onChange(e.target.value)}
+          className="absolute inset-0 opacity-0 cursor-pointer w-full h-full"
+        />
       </div>
     </div>
   );
 }
 
-// ─── Full Report Table ────────────────────────────────────────────────────────
+// ─── Default Initial Legs ────────────────────────────────────────────────────
 
-const PAGE_SIZE = 50;
-
-function FullReportTable({ cycles, lotSize }: { cycles: CycleResult[]; lotSize: number }) {
-  const [page, setPage] = useState(0);
-  const traded = useMemo(() => cycles.filter(c => c.exit_reason !== 'NO_ENTRY'), [cycles]);
-  const totalPages = Math.ceil(traded.length / PAGE_SIZE);
-  const visible = traded.slice(page * PAGE_SIZE, (page + 1) * PAGE_SIZE);
-
-  return (
-    <div>
-      <div className="bg-zinc-900/60 border border-zinc-800 rounded-2xl overflow-hidden">
-        <div className="overflow-x-auto">
-          <table className="text-xs whitespace-nowrap w-full">
-            <thead>
-              <tr className="bg-zinc-800">
-                <th className="text-xs font-bold text-white text-left px-3 py-2">#</th>
-                <th className="text-xs font-bold text-white text-left px-3 py-2">Entry Date</th>
-                <th className="text-xs font-bold text-white text-right px-2 py-2">Time</th>
-                <th className="text-xs font-bold text-white text-left px-3 py-2 border-l border-zinc-700">Exit Date</th>
-                <th className="text-xs font-bold text-white text-right px-2 py-2">Time</th>
-                <th className="text-xs font-bold text-white text-center px-2 py-2 border-l border-zinc-700">Type</th>
-                <th className="text-xs font-bold text-white text-right px-2 py-2">Strike</th>
-                <th className="text-xs font-bold text-white text-center px-2 py-2">B/S</th>
-                <th className="text-xs font-bold text-white text-right px-2 py-2">Qty</th>
-                <th className="text-xs font-bold text-white text-right px-3 py-2 border-l border-zinc-700">Entry ₹</th>
-                <th className="text-xs font-bold text-white text-right px-3 py-2">Exit ₹</th>
-                <th className="text-xs font-bold text-white text-right px-3 py-2">VIX</th>
-                <th className="text-xs font-bold text-white text-right px-3 py-2 border-l border-zinc-700">P/L</th>
-                <th className="text-xs font-bold text-white text-center px-2 py-2">Reason</th>
-              </tr>
-            </thead>
-            <tbody>
-              {visible.map((c, idx) => {
-                const tradeNum = page * PAGE_SIZE + idx + 1;
-                const rowBg = idx % 2 === 0 ? '' : 'bg-zinc-950/40';
-                return [
-                  // Parent row
-                  <tr key={`${c.expiry_date}-p`} className={`border-t border-zinc-800 ${rowBg} font-medium`}>
-                    <td className="px-3 py-1.5 text-zinc-300 font-bold">{tradeNum}</td>
-                    <td className="px-3 py-1.5 text-zinc-300 font-mono">{fmtDate(c.entry_dt)}</td>
-                    <td className="px-2 py-1.5 text-right text-zinc-400 font-mono">{fmtTime(c.entry_dt)}</td>
-                    <td className="px-3 py-1.5 text-zinc-300 font-mono border-l border-zinc-800">{fmtDate(c.exit_dt)}</td>
-                    <td className="px-2 py-1.5 text-right text-zinc-400 font-mono">{fmtTime(c.exit_dt)}</td>
-                    <td className="px-2 py-1.5 text-center border-l border-zinc-800">—</td>
-                    <td className="px-2 py-1.5 text-right text-zinc-500 font-mono">
-                      {c.entry_spot != null ? Math.round(c.entry_spot).toLocaleString('en-IN') : '—'}
-                    </td>
-                    <td className="px-2 py-1.5 text-center">—</td>
-                    <td className="px-2 py-1.5 text-right">—</td>
-                    <td className="px-3 py-1.5 text-right font-mono text-zinc-200 border-l border-zinc-800">
-                      {c.net_credit != null ? c.net_credit.toFixed(2) : '—'}
-                    </td>
-                    <td className="px-3 py-1.5 text-right font-mono text-zinc-200">
-                      {c.exit_combined != null ? Math.abs(c.exit_combined).toFixed(2) : '—'}
-                    </td>
-                    <td className="px-3 py-1.5 text-right font-mono text-zinc-400">
-                      {c.vix != null ? c.vix.toFixed(1) : '—'}
-                    </td>
-                    <td className={`px-3 py-1.5 text-right font-mono font-bold border-l border-zinc-800 ${c.pnl >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
-                      {fmtPnl(c.pnl)}
-                    </td>
-                    <td className="px-2 py-1.5 text-center flex items-center justify-center gap-1">
-                      <span className={`inline-block px-1.5 py-0.5 rounded text-[10px] font-bold ${EXIT_REASON_CLS[c.exit_reason] ?? 'bg-zinc-800 text-zinc-400'}`}>
-                        {c.exit_reason}
-                      </span>
-                      {c.rolls != null && c.rolls > 0 && (
-                        <span className="text-[9px] font-mono font-bold px-1 py-0.5 rounded bg-purple-500/15 text-purple-300 border border-purple-500/30">
-                          {c.rolls} roll{c.rolls > 1 ? 's' : ''}
-                        </span>
-                      )}
-                    </td>
-                  </tr>,
-                  // Sub-rows per leg
-                  ...c.legs.map((leg, li) => {
-                    const isCall = leg.option_type === 'CE';
-                    return (
-                      <tr key={`${c.expiry_date}-l${li}`} className={`border-t border-zinc-800/50 ${rowBg} opacity-80`}>
-                        <td className="px-3 py-1 text-zinc-600 font-mono text-[10px] pl-5">{tradeNum}.{li + 1}</td>
-                        <td className="px-3 py-1 text-zinc-600">—</td>
-                        <td className="px-2 py-1 text-right text-zinc-600">—</td>
-                        <td className="px-3 py-1 text-zinc-600 border-l border-zinc-800">—</td>
-                        <td className="px-2 py-1 text-right text-zinc-600">—</td>
-                        <td className="px-2 py-1 text-center border-l border-zinc-800">
-                          <span className={`text-[10px] font-bold ${isCall ? 'text-sky-400' : 'text-amber-400'}`}>
-                            {leg.option_type}
-                          </span>
-                        </td>
-                        <td className={`px-2 py-1 text-right font-mono ${isCall ? 'text-sky-300' : 'text-amber-300'}`}>
-                          {leg.strike > 0 ? Math.round(leg.strike).toLocaleString('en-IN') : '—'}
-                        </td>
-                        <td className="px-2 py-1 text-center">
-                          <span className={`text-[10px] font-bold ${leg.position === 'sell' ? 'text-red-400' : 'text-emerald-400'}`}>
-                            {leg.position === 'sell' ? 'S' : 'B'}
-                          </span>
-                        </td>
-                        <td className="px-2 py-1 text-right font-mono text-zinc-400">
-                          {(leg.lots ?? 1) * lotSize}
-                        </td>
-                        <td className={`px-3 py-1 text-right font-mono border-l border-zinc-800 ${isCall ? 'text-sky-300' : 'text-amber-300'}`}>
-                          {fmtNum(leg.entry_price)}
-                        </td>
-                        <td className={`px-3 py-1 text-right font-mono ${isCall ? 'text-sky-300' : 'text-amber-300'}`}>
-                          {fmtNum(leg.exit_price)}
-                        </td>
-                        <td className="px-3 py-1 text-right text-zinc-600">—</td>
-                        <td className={`px-3 py-1 text-right font-mono border-l border-zinc-800 ${leg.pnl >= 0 ? 'text-emerald-300' : 'text-red-300'}`}>
-                          {leg.pnl !== 0 ? fmtPnl(leg.pnl) : '—'}
-                        </td>
-                        <td className="px-2 py-1 text-center">
-                          <span className={`text-[10px] font-bold ${EXIT_REASON_CLS[leg.exit_reason] ?? 'bg-zinc-800 text-zinc-400'} rounded px-1 py-0.5`}>
-                            {leg.exit_reason}
-                          </span>
-                        </td>
-                      </tr>
-                    );
-                  }),
-                ];
-              })}
-            </tbody>
-          </table>
-        </div>
-      </div>
-
-      {/* Pagination */}
-      {totalPages > 1 && (
-        <div className="flex items-center justify-between mt-2 text-xs text-zinc-500">
-          <span>{traded.length} trades · page {page + 1} of {totalPages}</span>
-          <div className="flex gap-1">
-            <button
-              onClick={() => setPage(p => Math.max(0, p - 1))}
-              disabled={page === 0}
-              className="px-2 py-0.5 rounded bg-zinc-800 border border-zinc-700 disabled:opacity-30 hover:border-zinc-500"
-            >Prev</button>
-            <button
-              onClick={() => setPage(p => Math.min(totalPages - 1, p + 1))}
-              disabled={page === totalPages - 1}
-              className="px-2 py-0.5 rounded bg-zinc-800 border border-zinc-700 disabled:opacity-30 hover:border-zinc-500"
-            >Next</button>
-          </div>
-        </div>
-      )}
-    </div>
-  );
-}
-
-// ─── Main Page ────────────────────────────────────────────────────────────────
-
-const DEFAULT_LEGS: LegConfig[] = [
-  { option_type: 'CE', position: 'sell', lots: 1, strike: 'ATM', leg_sl_pct: 0, leg_target_pct: 0 },
-  { option_type: 'PE', position: 'sell', lots: 1, strike: 'ATM', leg_sl_pct: 0, leg_target_pct: 0 },
+const DEFAULT_STOCKMOCK_LEGS: LegConfig[] = [
+  { option_type: 'CE', position: 'sell', lots: 1, strike: 'ATM', leg_sl_pct: 0, leg_target_pct: 0, strike_type: 'offset' },
+  { option_type: 'PE', position: 'sell', lots: 1, strike: 'ATM', leg_sl_pct: 0, leg_target_pct: 0, strike_type: 'offset' },
 ];
 
 export default function OptionsBacktester() {
-  const [legs, setLegs] = useState<LegConfig[]>(DEFAULT_LEGS);
+  // ── Strike mode selection (Top radios)
+  const [selectedStrikeMode, setSelectedStrikeMode] = useState<StrikeModeLabel>('ATM Point');
+
+  // ── Form builder row
+  const [builderIndex, setBuilderIndex] = useState('Nifty');
+  const [builderSegment, setBuilderSegment] = useState<'Futures' | 'Options'>('Options');
+  const [builderOptionType, setBuilderOptionType] = useState<'Call' | 'Put'>('Call');
+  const [builderActionType, setBuilderActionType] = useState<'Buy' | 'Sell'>('Sell');
+  const [builderStrike, setBuilderStrike] = useState('ATM');
+  const [builderLots, setBuilderLots] = useState(1);
+  const [builderExpiry, setBuilderExpiry] = useState('Weekly');
+
+  // ── Underlying & execution options
+  const [atmUnderlying, setAtmUnderlying] = useState<'spot' | 'futures'>('spot');
+  const [selectedMainIndex, setSelectedMainIndex] = useState('Nifty');
+  const [squareOffMode, setSquareOffMode] = useState<'one_leg' | 'all_legs'>('one_leg');
+  const [waitAndTrade, setWaitAndTrade] = useState(false);
+  const [moveSlToCost, setMoveSlToCost] = useState(false);
+  const [reEntry, setReEntry] = useState(false);
+  const [associatedHedge, setAssociatedHedge] = useState(false);
+  const [noReEntryAfter, setNoReEntryAfter] = useState(false);
+
+  // ── Active Legs
+  const [legs, setLegs] = useState<LegConfig[]>(DEFAULT_STOCKMOCK_LEGS);
   const [lotSize, setLotSize] = useState(65);
-  const [profitTargetPct, setProfitTargetPct] = useState(50);
+
+  // ── Strategy timing & exits
+  const [rangeBreakout, setRangeBreakout] = useState(false);
+  const [entryH, setEntryH] = useState('9');
+  const [entryM, setEntryM] = useState('22');
+  const [entryS, setEntryS] = useState('00');
+
+  const [exitDayType, setExitDayType] = useState<'same_day' | 'next_day'>('same_day');
+  const [exitH, setExitH] = useState('15');
+  const [exitM, setExitM] = useState('15');
+  const [exitS, setExitS] = useState('00');
+
+  // Strategy target & SL
+  const [strategyTargetActive, setStrategyTargetActive] = useState(false);
+  const [profitTargetPct, setProfitTargetPct] = useState(0);
+
+  const [strategySlActive, setStrategySlActive] = useState(false);
   const [overallSlPct, setOverallSlPct] = useState(0);
-  const [entryTime, setEntryTime] = useState('09:20');
-  const [eodTime, setEodTime] = useState('15:15');
+
+  const [protectProfitsActive, setProtectProfitsActive] = useState(false);
+  const [trailSlPct, setTrailSlPct] = useState(0);
+
+  // Dates & bottom controls
+  const [startDate, setStartDate] = useState('2026-08-17');
+  const [endDate, setEndDate] = useState('2026-09-17');
+  const [executionType, setExecutionType] = useState<'INTRADAY' | 'POSITIONAL'>('INTRADAY');
+
+  // Advanced settings & modal
+  const [settingsModalOpen, setSettingsModalOpen] = useState(false);
   const [includeCosts, setIncludeCosts] = useState(false);
   const [commissionPerLot, setCommissionPerLot] = useState(40);
   const [slippagePct, setSlippagePct] = useState(0);
-  const [strategyType, setStrategyType] = useState<'intraday' | 'expiry_day' | 'first_day'>('intraday');
-  const [startDate, setStartDate] = useState('2024-01-01');
-  const [endDate, setEndDate] = useState('2026-06-30');
-
-  // Dynamic adjustments & advanced risk
   const [adjustmentMode, setAdjustmentMode] = useState<'none' | 'rolling_straddle'>('none');
   const [rollBuffer, setRollBuffer] = useState(35);
   const [rollType, setRollType] = useState<'points' | 'percentage'>('points');
   const [maxRolls, setMaxRolls] = useState(5);
   const [scalpFloorPct, setScalpFloorPct] = useState(0);
-  const [trailSlPct, setTrailSlPct] = useState(0);
 
+  // Results & execution
   const [result, setResult] = useState<BacktestResult | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -655,115 +317,140 @@ export default function OptionsBacktester() {
     trades?: number;
   } | null>(null);
 
-  const pollRef = React.useRef<NodeJS.Timeout | null>(null);
+  const pollRef = useRef<NodeJS.Timeout | null>(null);
+  const resultsRef = useRef<HTMLDivElement>(null);
 
-  // Clear polling on unmount
   useEffect(() => {
     return () => {
       if (pollRef.current) clearInterval(pollRef.current);
     };
   }, []);
 
-  // Fetch current NIFTY lot size on mount
+  // Fetch current NIFTY lot size
   useEffect(() => {
     fetch('/api/lotsize?symbol=NIFTY')
       .then(r => r.json())
       .then(d => { if (d.lot_size) setLotSize(d.lot_size); })
-      .catch(() => {/* keep default */});
+      .catch(() => {});
   }, []);
+
+  // Map strike mode to Leg strike_type. "CP based on Straddle Premium (SP)" and
+  // "Straddle Width" both resolve to the backend's straddle_width mode — both are
+  // "pick the strike whose own premium is closest to X% of the ATM straddle
+  // premium," the only difference is which % StockMock's UI defaults the field to.
+  // There is no separate SP implementation on the backend, so aliasing here (rather
+  // than silently falling through to plain ATM offset) is what actually runs the
+  // calculation the user picked instead of a different one with no indication.
+  function strikeModeToType(m: StrikeModeLabel): StrikeMode {
+    if (m === 'ATM Percent') return 'atm_percent';
+    if (m === 'Closest Premium (CP)') return 'closest_premium';
+    if (m === 'Straddle Width' || m === 'CP based on Straddle Premium (SP)') return 'straddle_width';
+    return 'offset';
+  }
+
+  // Placeholder/default strike value per mode, used both by the top toolbar and
+  // by a leg row's own strike-mode dropdown so a mode switch always leaves a
+  // numerically valid value instead of a stale offset string like "ATM+3".
+  function defaultStrikeValueFor(m: StrikeModeLabel): string {
+    if (m === 'ATM Point') return 'ATM';
+    if (m === 'ATM Percent') return '2';
+    if (m === 'Closest Premium (CP)') return '100';
+    return '30'; // Straddle Width / CP based on Straddle Premium (SP)
+  }
+
+  // ─── Actions ───────────────────────────────────────────────────────────────
+
+  function handleAddPosition() {
+    // The backtest engine only prices CE/PE option legs (Options Data/NIFTY/) — there
+    // is no futures-leg support at all. Silently adding a mislabeled options leg when
+    // "Futures" is selected would be worse than refusing, since nothing on screen
+    // would show the leg doesn't actually match what was picked.
+    if (builderSegment === 'Futures') {
+      toast.error('Futures legs are not supported yet — switch Select Segment to Options');
+      return;
+    }
+    const newLeg: LegConfig = {
+      option_type: builderOptionType === 'Call' ? 'CE' : 'PE',
+      position: builderActionType.toLowerCase() as 'buy' | 'sell',
+      lots: Math.max(1, builderLots),
+      strike: builderStrike || 'ATM',
+      strike_type: strikeModeToType(selectedStrikeMode),
+      leg_sl_pct: 0,
+      leg_target_pct: 0,
+      leg_trail_sl_pct: 0,
+    };
+    setLegs(prev => [...prev, newLeg]);
+    toast.success(`Added ${builderActionType} ${builderOptionType} (${builderStrike})`);
+  }
+
+  function handleCloneLeg(index: number) {
+    const target = legs[index];
+    if (!target) return;
+    setLegs(prev => [...prev, { ...target }]);
+    toast.success(`Cloned Leg ${index + 1}`);
+  }
+
+  function handleRemoveLeg(index: number) {
+    if (legs.length <= 1) {
+      toast.error('Strategy must contain at least one leg');
+      return;
+    }
+    setLegs(prev => prev.filter((_, i) => i !== index));
+  }
+
+  function handleUpdateLeg(index: number, patch: Partial<LegConfig>) {
+    setLegs(prev => prev.map((l, i) => (i === index ? { ...l, ...patch } : l)));
+  }
 
   function applyPreset(name: string) {
     if (name === 'straddle_35sl') {
-      setStrategyType('intraday');
-      setEntryTime('09:20');
-      setEodTime('15:15');
+      setEntryH('9'); setEntryM('20');
+      setExitH('15'); setExitM('15');
       setProfitTargetPct(50);
+      setStrategyTargetActive(true);
       setOverallSlPct(0);
+      setStrategySlActive(false);
       setAdjustmentMode('none');
       setScalpFloorPct(0);
       setTrailSlPct(0);
       setLegs([
-        { option_type: 'CE', position: 'sell', lots: 1, strike: 'ATM', leg_sl_pct: 35, leg_target_pct: 0 },
-        { option_type: 'PE', position: 'sell', lots: 1, strike: 'ATM', leg_sl_pct: 35, leg_target_pct: 0 },
+        { option_type: 'CE', position: 'sell', lots: 1, strike: 'ATM', leg_sl_pct: 35, leg_target_pct: 0, strike_type: 'offset' },
+        { option_type: 'PE', position: 'sell', lots: 1, strike: 'ATM', leg_sl_pct: 35, leg_target_pct: 0, strike_type: 'offset' },
       ]);
+      toast.success('Loaded 9:20 Short Straddle (35% Leg SL)');
     } else if (name === 'rolling_straddle') {
-      setStrategyType('intraday');
-      setEntryTime('09:20');
-      setEodTime('15:15');
+      setEntryH('9'); setEntryM('20');
+      setExitH('15'); setExitM('15');
       setProfitTargetPct(60);
-      setOverallSlPct(0);
+      setStrategyTargetActive(true);
       setAdjustmentMode('rolling_straddle');
       setRollBuffer(35);
       setRollType('points');
       setMaxRolls(5);
-      setScalpFloorPct(0);
-      setTrailSlPct(0);
       setLegs([
-        { option_type: 'CE', position: 'sell', lots: 1, strike: 'ATM', leg_sl_pct: 0, leg_target_pct: 0 },
-        { option_type: 'PE', position: 'sell', lots: 1, strike: 'ATM', leg_sl_pct: 0, leg_target_pct: 0 },
+        { option_type: 'CE', position: 'sell', lots: 1, strike: 'ATM', leg_sl_pct: 0, leg_target_pct: 0, strike_type: 'offset' },
+        { option_type: 'PE', position: 'sell', lots: 1, strike: 'ATM', leg_sl_pct: 0, leg_target_pct: 0, strike_type: 'offset' },
       ]);
+      toast.success('Loaded Intraday Rolling Straddle');
     } else if (name === 'strangle_20delta') {
-      setStrategyType('expiry_day');
-      setEntryTime('09:25');
-      setEodTime('15:15');
-      setProfitTargetPct(70);
-      setOverallSlPct(0);
-      setAdjustmentMode('none');
-      setScalpFloorPct(0);
-      setTrailSlPct(0);
+      setEntryH('9'); setEntryM('25');
+      setExitH('15'); setExitM('15');
       setLegs([
         { option_type: 'CE', position: 'sell', lots: 1, strike: '20', strike_type: 'closest_delta', leg_sl_pct: 40, leg_target_pct: 0 },
         { option_type: 'PE', position: 'sell', lots: 1, strike: '20', strike_type: 'closest_delta', leg_sl_pct: 40, leg_target_pct: 0 },
       ]);
+      toast.success('Loaded 20-Delta Strangle');
     } else if (name === 'iron_condor') {
-      setStrategyType('first_day');
-      setEntryTime('09:30');
-      setEodTime('15:15');
-      setProfitTargetPct(50);
-      setOverallSlPct(0);
-      setAdjustmentMode('none');
-      setScalpFloorPct(0);
-      setTrailSlPct(0);
+      setEntryH('9'); setEntryM('30');
+      setExitH('15'); setExitM('15');
       setLegs([
         { option_type: 'CE', position: 'sell', lots: 1, strike: '25', strike_type: 'closest_delta', leg_sl_pct: 0, leg_target_pct: 0 },
         { option_type: 'PE', position: 'sell', lots: 1, strike: '25', strike_type: 'closest_delta', leg_sl_pct: 0, leg_target_pct: 0 },
         { option_type: 'CE', position: 'buy',  lots: 1, strike: '10', strike_type: 'closest_delta', leg_sl_pct: 0, leg_target_pct: 0 },
         { option_type: 'PE', position: 'buy',  lots: 1, strike: '10', strike_type: 'closest_delta', leg_sl_pct: 0, leg_target_pct: 0 },
       ]);
-    } else if (name === 'scalp_floor') {
-      setStrategyType('intraday');
-      setEntryTime('09:20');
-      setEodTime('15:15');
-      setProfitTargetPct(0);
-      setOverallSlPct(35);
-      setAdjustmentMode('none');
-      setScalpFloorPct(30);
-      setTrailSlPct(15);
-      setLegs([
-        { option_type: 'CE', position: 'sell', lots: 1, strike: 'ATM', leg_sl_pct: 0, leg_target_pct: 0 },
-        { option_type: 'PE', position: 'sell', lots: 1, strike: 'ATM', leg_sl_pct: 0, leg_target_pct: 0 },
-      ]);
+      toast.success('Loaded Iron Condor');
     }
-  }
-
-  function setDatePreset(preset: '3m' | '6m' | '1y' | '3y' | 'all') {
-    const end = '2026-06-30';
-    setEndDate(end);
-    if (preset === '3m')  setStartDate('2026-03-31');
-    if (preset === '6m')  setStartDate('2025-12-31');
-    if (preset === '1y')  setStartDate('2025-06-30');
-    if (preset === '3y')  setStartDate('2023-06-30');
-    if (preset === 'all') setStartDate('2021-01-01');
-  }
-
-  function addLeg() {
-    setLegs(l => [...l, { option_type: 'CE', position: 'sell', lots: 1, strike: 'ATM', leg_sl_pct: 40, leg_target_pct: 0 }]);
-  }
-  function updateLeg(i: number, leg: LegConfig) {
-    setLegs(l => l.map((x, j) => j === i ? leg : x));
-  }
-  function removeLeg(i: number) {
-    setLegs(l => l.filter((_, j) => j !== i));
   }
 
   async function stopBacktest() {
@@ -777,9 +464,18 @@ export default function OptionsBacktester() {
     if (pollRef.current) clearInterval(pollRef.current);
     setLoading(false);
     setStatusData(null);
+    toast.info('Backtest cancelled');
   }
 
   async function runBacktest() {
+    if (legs.length === 0) {
+      toast.error('Add at least one leg before starting backtest');
+      return;
+    }
+
+    const entryTimeFormatted = `${String(entryH).padStart(2, '0')}:${String(entryM).padStart(2, '0')}`;
+    const eodTimeFormatted = `${String(exitH).padStart(2, '0')}:${String(exitM).padStart(2, '0')}`;
+
     setLoading(true);
     setError(null);
     setResult(null);
@@ -795,13 +491,13 @@ export default function OptionsBacktester() {
           action: 'start',
           legs,
           lot_size: lotSize,
-          profit_target_pct: profitTargetPct,
-          overall_sl_pct: overallSlPct,
-          entry_time: entryTime,
-          eod_time: eodTime,
+          profit_target_pct: strategyTargetActive ? profitTargetPct : 0,
+          overall_sl_pct: strategySlActive ? overallSlPct : 0,
+          entry_time: entryTimeFormatted,
+          eod_time: eodTimeFormatted,
           commission_per_lot: includeCosts ? commissionPerLot : 0,
           slippage_pct: includeCosts ? slippagePct : 0,
-          strategy_type: strategyType,
+          strategy_type: executionType === 'POSITIONAL' ? 'first_day' : 'intraday',
           start_date: startDate,
           end_date: endDate,
           adjustment_mode: adjustmentMode,
@@ -809,13 +505,13 @@ export default function OptionsBacktester() {
           roll_type: rollType,
           max_rolls: maxRolls,
           scalp_floor_pct: scalpFloorPct,
-          trail_sl_pct: trailSlPct,
+          trail_sl_pct: protectProfitsActive ? trailSlPct : 0,
         }),
       });
+
       const data = await res.json();
       if (!res.ok || data.error) throw new Error(data.error || 'Failed to start backtest');
 
-      // Start polling for status
       pollRef.current = setInterval(async () => {
         try {
           const sRes = await fetch('/api/backtest');
@@ -837,10 +533,17 @@ export default function OptionsBacktester() {
             } else if (sData.result) {
               setResult(sData.result);
               setStatusData(null);
+              toast.success('Backtest complete!');
+              setTimeout(() => {
+                resultsRef.current?.scrollIntoView({ behavior: 'smooth' });
+              }, 200);
             } else if (sData.error) {
               setError(sData.error);
+              toast.error(sData.error);
             } else {
-              setError('Backtest completed or process exited unexpectedly without results');
+              const msg = 'Backtest completed or exited unexpectedly without results';
+              setError(msg);
+              toast.error(msg);
             }
           }
         } catch {
@@ -850,545 +553,1374 @@ export default function OptionsBacktester() {
     } catch (e) {
       if (pollRef.current) clearInterval(pollRef.current);
       setLoading(false);
-      setError(e instanceof Error ? e.message : String(e));
+      const msg = e instanceof Error ? e.message : String(e);
+      setError(msg);
+      toast.error(msg);
+    }
+  }
+
+  function handleSaveStrategy() {
+    const payload = {
+      legs,
+      entryTime: `${entryH}:${entryM}`,
+      exitTime: `${exitH}:${exitM}`,
+      startDate,
+      endDate,
+      lotSize,
+      target: strategyTargetActive ? profitTargetPct : 0,
+      sl: strategySlActive ? overallSlPct : 0,
+    };
+    try {
+      localStorage.setItem('stockmock_saved_strategy', JSON.stringify(payload));
+      toast.success('Strategy configuration saved to browser cache!');
+    } catch {
+      toast.error('Could not save strategy');
+    }
+  }
+
+  function handleShareStrategy() {
+    try {
+      navigator.clipboard.writeText(window.location.href);
+      toast.success('Strategy link copied to clipboard!');
+    } catch {
+      toast.error('Failed to copy link');
     }
   }
 
   const s = result?.summary;
 
   return (
-    <div className="h-screen flex flex-col bg-zinc-950 text-white">
-      {/* Header */}
-      <div className="shrink-0 z-40 flex items-center justify-between gap-3 flex-wrap
-                      px-6 py-3 border-b border-zinc-800 bg-zinc-950/95 backdrop-blur">
-        <div className="flex items-center gap-3">
-          <div className="flex items-center justify-center w-8 h-8 rounded-lg bg-emerald-500/10 border border-emerald-500/25 shrink-0">
-            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" className="text-emerald-400">
-              <path d="M3 3v18h18" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" opacity="0.4" />
-              <path d="M7 15l4-5 3 3 6-8" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" />
-            </svg>
-          </div>
-          <div>
-            <p className="text-[9px] font-bold text-emerald-500 uppercase tracking-[0.18em] mb-0.5">
-              Backtest · NIFTY
-            </p>
-            <h1 className="text-sm font-bold text-white tracking-tight leading-none">Options Strategy Backtester</h1>
-            <p className="text-[10px] text-zinc-500 font-medium mt-1">
-              Multi-leg CE/PE strategies simulated across historical expiry cycles
-            </p>
-          </div>
-        </div>
-
-        <div className="flex items-center gap-3">
-          {result && s && (
-            <span className="text-[10px] font-bold text-zinc-400 bg-zinc-900 border border-zinc-800 rounded-lg px-2.5 py-1.5 font-mono tabular-nums">
-              {s.traded_cycles} TRADES · {startDate} &rarr; {endDate}
-            </span>
-          )}
-          <span className="w-px h-5 bg-zinc-800 shrink-0" />
-          <NavBar />
-        </div>
+    <div className="min-h-screen bg-[#edf2f6] text-slate-700 font-sans pb-24 select-none">
+      {/* ── Top Header Banner: POSITIONS ── */}
+      <div className="w-full bg-[#54b4c7] py-2 px-4 shadow-sm flex items-center justify-center relative">
+        <h1 className="text-white text-xs md:text-sm font-bold tracking-widest uppercase">
+          POSITIONS
+        </h1>
       </div>
 
-      <div className="flex gap-0 flex-1 min-h-0">
-        {/* ── Left: Config panel ── */}
-        <div className="w-72 shrink-0 border-r border-zinc-800 bg-zinc-950 flex flex-col min-h-0">
-          <div className="flex-1 overflow-y-auto p-3 flex flex-col gap-3">
+      {/* ── Persistent error banner — the toasts above auto-dismiss, so a run that
+           fails or exits without a result needs a non-transient explanation too,
+           otherwise the page just silently drops back to the idle builder view. ── */}
+      {error && !loading && (
+        <div className="w-full max-w-[1550px] mx-auto px-4 pt-3">
+          <div className="flex items-start justify-between gap-3 bg-red-50 border border-red-300 text-red-700 rounded px-3 py-2 text-xs">
+            <span><strong className="font-bold">Backtest did not complete:</strong> {error}</span>
+            <button
+              type="button"
+              onClick={() => setError(null)}
+              className="text-red-500 hover:text-red-700 shrink-0"
+            >
+              ✕
+            </button>
+          </div>
+        </div>
+      )}
 
-            {/* Presets */}
-            <div className="bg-zinc-900/40 border border-zinc-800/60 rounded-xl p-3">
-              <div className="text-[9px] font-bold text-zinc-500 uppercase tracking-[0.16em] mb-1.5">Strategy Preset</div>
-              <select
-                onChange={e => applyPreset(e.target.value)}
-                defaultValue=""
-                className={inputCls}
+      {/* ── Main Container ── */}
+      <div className="w-full max-w-[1550px] mx-auto px-4 py-3">
+
+        {/* ── Strike Selection Mode Radios ── */}
+        <div className="flex items-center justify-center flex-wrap gap-4 md:gap-7 py-2 text-xs text-slate-600 font-medium">
+          {STRIKE_MODES.map(mode => (
+            <label key={mode} className="flex items-center gap-1.5 cursor-pointer hover:text-slate-900 transition-colors">
+              <input
+                type="radio"
+                name="strikeMode"
+                checked={selectedStrikeMode === mode}
+                onChange={() => {
+                  setSelectedStrikeMode(mode);
+                  // Reset the toolbar's Strike Price field too — without this, switching
+                  // to a % / premium mode while an offset like "ATM+3" is still selected
+                  // sends that non-numeric string as the strike value, which the backend
+                  // silently can't parse and falls back to plain ATM with no indication.
+                  setBuilderStrike(defaultStrikeValueFor(mode));
+                }}
+                className="w-3.5 h-3.5 accent-[#54b4c7] cursor-pointer"
+              />
+              <span>{mode}</span>
+              {(mode.includes('(CP)') || mode.includes('(SP)')) && (
+                <Info className="w-3 h-3 text-slate-400 inline" />
+              )}
+            </label>
+          ))}
+        </div>
+
+        {/* Dotted Divider */}
+        <div className="w-full border-b border-dashed border-slate-300 my-2.5" />
+
+        {/* ── Position Builder Controls Row ── */}
+        <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-7 gap-3 items-end pt-1 pb-3">
+          {/* 1. Select Index */}
+          <div>
+            <label className="block text-[11px] text-slate-500 font-medium mb-1">Select Index:</label>
+            <select
+              value={builderIndex}
+              onChange={e => setBuilderIndex(e.target.value)}
+              className="w-full bg-white border border-slate-300 rounded px-2.5 py-1.5 text-xs text-slate-700 font-medium focus:outline-none focus:border-[#54b4c7] shadow-sm"
+            >
+              <option value="Nifty">Nifty</option>
+              <option value="Banknifty">Banknifty</option>
+              <option value="FinNifty">FinNifty</option>
+              <option value="Sensex">Sensex</option>
+            </select>
+          </div>
+
+          {/* 2. Select Segment */}
+          <div>
+            <label className="block text-[11px] text-slate-500 font-medium mb-1">Select Segment:</label>
+            <div className="flex rounded overflow-hidden border border-slate-300 shadow-sm">
+              <button
+                type="button"
+                onClick={() => setBuilderSegment('Futures')}
+                className={`flex-1 py-1.5 text-xs font-medium transition-colors ${
+                  builderSegment === 'Futures'
+                    ? 'bg-[#54b4c7] text-white'
+                    : 'bg-white text-slate-600 hover:bg-slate-50'
+                }`}
               >
-                <option value="" disabled>Choose a Preset Strategy...</option>
-                <option value="straddle_35sl">9:20 Short Straddle (35% Leg SL)</option>
-                <option value="rolling_straddle">Intraday Rolling Straddle (35 pt Buffer Roll)</option>
-                <option value="strangle_20delta">0DTE 20-Delta Strangle (40% SL)</option>
-                <option value="iron_condor">Weekly Iron Condor (Sell 25D, Buy 10D)</option>
-                <option value="scalp_floor">Scalp-Lock Straddle (30% Premium Floor)</option>
+                Futures
+              </button>
+              <button
+                type="button"
+                onClick={() => setBuilderSegment('Options')}
+                className={`flex-1 py-1.5 text-xs font-medium transition-colors ${
+                  builderSegment === 'Options'
+                    ? 'bg-[#54b4c7] text-white'
+                    : 'bg-white text-slate-600 hover:bg-slate-50'
+                }`}
+              >
+                Options
+              </button>
+            </div>
+          </div>
+
+          {/* 3. Option Type */}
+          <div>
+            <label className="block text-[11px] text-slate-500 font-medium mb-1">Option Type:</label>
+            <div className="flex rounded overflow-hidden border border-slate-300 shadow-sm">
+              <button
+                type="button"
+                onClick={() => setBuilderOptionType('Call')}
+                className={`flex-1 py-1.5 text-xs font-medium transition-colors ${
+                  builderOptionType === 'Call'
+                    ? 'bg-[#54b4c7] text-white'
+                    : 'bg-white text-slate-600 hover:bg-slate-50'
+                }`}
+              >
+                Call
+              </button>
+              <button
+                type="button"
+                onClick={() => setBuilderOptionType('Put')}
+                className={`flex-1 py-1.5 text-xs font-medium transition-colors ${
+                  builderOptionType === 'Put'
+                    ? 'bg-[#54b4c7] text-white'
+                    : 'bg-white text-slate-600 hover:bg-slate-50'
+                }`}
+              >
+                Put
+              </button>
+            </div>
+          </div>
+
+          {/* 4. Action Type */}
+          <div>
+            <label className="block text-[11px] text-slate-500 font-medium mb-1">Action Type:</label>
+            <div className="flex rounded overflow-hidden border border-slate-300 shadow-sm">
+              <button
+                type="button"
+                onClick={() => setBuilderActionType('Buy')}
+                className={`flex-1 py-1.5 text-xs font-medium transition-colors ${
+                  builderActionType === 'Buy'
+                    ? 'bg-[#54b4c7] text-white'
+                    : 'bg-white text-slate-600 hover:bg-slate-50'
+                }`}
+              >
+                Buy
+              </button>
+              <button
+                type="button"
+                onClick={() => setBuilderActionType('Sell')}
+                className={`flex-1 py-1.5 text-xs font-medium transition-colors ${
+                  builderActionType === 'Sell'
+                    ? 'bg-[#54b4c7] text-white'
+                    : 'bg-white text-slate-600 hover:bg-slate-50'
+                }`}
+              >
+                Sell
+              </button>
+            </div>
+          </div>
+
+          {/* 5. Strike Price */}
+          <div>
+            <label className="block text-[11px] text-slate-500 font-medium mb-1">Strike Price:</label>
+            {selectedStrikeMode === 'ATM Point' ? (
+              <select
+                value={builderStrike}
+                onChange={e => setBuilderStrike(e.target.value)}
+                className="w-full bg-white border border-slate-300 rounded px-2.5 py-1.5 text-xs text-slate-700 font-medium focus:outline-none focus:border-[#54b4c7] shadow-sm"
+              >
+                {STRIKE_OPTIONS.map(s => (
+                  <option key={s} value={s}>{s}</option>
+                ))}
+              </select>
+            ) : (
+              <input
+                type="number"
+                min={0}
+                value={builderStrike}
+                onChange={e => setBuilderStrike(e.target.value)}
+                placeholder={
+                  selectedStrikeMode === 'ATM Percent' ? 'e.g. 2 (%)' :
+                  selectedStrikeMode === 'Closest Premium (CP)' ? 'e.g. 100 (premium)' :
+                  'e.g. 30 (% of straddle)'
+                }
+                className="w-full bg-white border border-slate-300 rounded px-2.5 py-1.5 text-xs text-slate-700 font-medium focus:outline-none focus:border-[#54b4c7] shadow-sm"
+              />
+            )}
+          </div>
+
+          {/* 6. Total Lot */}
+          <div>
+            <label className="block text-[11px] text-slate-500 font-medium mb-1">Total Lot</label>
+            <input
+              type="number"
+              min={1}
+              value={builderLots}
+              onChange={e => setBuilderLots(Math.max(1, Number(e.target.value)))}
+              className="w-full bg-white border border-slate-300 rounded px-2.5 py-1.5 text-xs text-slate-700 font-medium text-center focus:outline-none focus:border-[#54b4c7] shadow-sm"
+            />
+          </div>
+
+          {/* 7. Expiry Type */}
+          <div>
+            <label className="block text-[11px] text-slate-500 font-medium mb-1">Expiry Type:</label>
+            <select
+              value={builderExpiry}
+              onChange={e => setBuilderExpiry(e.target.value)}
+              className="w-full bg-white border border-slate-300 rounded px-2.5 py-1.5 text-xs text-slate-700 font-medium focus:outline-none focus:border-[#54b4c7] shadow-sm"
+            >
+              <option value="Weekly">Weekly</option>
+              <option value="Next Weekly">Next Weekly</option>
+              <option value="Monthly">Monthly</option>
+            </select>
+          </div>
+        </div>
+
+        {/* Add Position Button */}
+        <div className="flex justify-center my-2">
+          <button
+            type="button"
+            onClick={handleAddPosition}
+            className="bg-[#54b4c7] hover:bg-[#469fb1] text-white font-semibold text-xs px-5 py-1.5 rounded shadow-sm transition-colors cursor-pointer flex items-center gap-1.5"
+          >
+            Add Position
+          </button>
+        </div>
+
+        {/* ── Settings Bar above Leg Rows ── */}
+        <div className="flex items-center justify-between flex-wrap gap-4 pt-3 pb-2 text-xs text-slate-600">
+          {/* Left: Spot / Futures toggle & Index */}
+          <div className="flex items-center gap-4">
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={() => setAtmUnderlying(atmUnderlying === 'spot' ? 'futures' : 'spot')}
+                className="flex items-center gap-1.5 cursor-pointer text-xs"
+              >
+                <span className={atmUnderlying === 'spot' ? 'font-semibold text-slate-800' : 'text-slate-500'}>
+                  Use Spot as ATM
+                </span>
+                <div className="w-7 h-4 bg-slate-300 rounded-full relative p-0.5 transition-colors">
+                  <div className={`w-3 h-3 rounded-full bg-white shadow-sm transition-transform ${
+                    atmUnderlying === 'futures' ? 'translate-x-3 bg-[#54b4c7]' : ''
+                  }`} />
+                </div>
+                <span className={atmUnderlying === 'futures' ? 'font-semibold text-slate-800' : 'text-slate-500'}>
+                  Use Futures as ATM
+                </span>
+              </button>
+            </div>
+
+            <div className="flex items-center gap-1.5">
+              <span className="text-slate-500">Index:</span>
+              <select
+                value={selectedMainIndex}
+                onChange={e => setSelectedMainIndex(e.target.value)}
+                className="bg-white border border-slate-300 rounded px-2 py-0.5 text-xs text-slate-700 font-medium focus:outline-none"
+              >
+                <option value="Nifty">Nifty</option>
+                <option value="Banknifty">Banknifty</option>
+                <option value="Sensex">Sensex</option>
               </select>
             </div>
-
-            {/* Leg Builder */}
-            <div className="bg-zinc-900/40 border border-zinc-800/60 rounded-xl p-3">
-              <div className="flex items-center justify-between mb-2">
-                <div className="text-[9px] font-bold text-zinc-500 uppercase tracking-[0.16em]">Leg Builder</div>
-                <button
-                  onClick={addLeg}
-                  className="text-[10px] font-bold text-emerald-400 hover:text-emerald-300 bg-emerald-500/10 border border-emerald-500/20 rounded px-2 py-0.5 transition-colors"
-                >
-                  + Add Leg
-                </button>
-              </div>
-              <div className="flex flex-col gap-2">
-                {legs.map((leg, i) => (
-                  <LegCard
-                    key={i}
-                    index={i}
-                    leg={leg}
-                    onChange={l => updateLeg(i, l)}
-                    onRemove={() => removeLeg(i)}
-                    canRemove={legs.length > 1}
-                  />
-                ))}
-              </div>
-            </div>
-
-            {/* Adjustments / Rolling */}
-            <div className="bg-zinc-900/40 border border-zinc-800/60 rounded-xl p-3 flex flex-col gap-3">
-              <div className="text-[9px] font-bold text-zinc-500 uppercase tracking-[0.16em]">Adjustments & Rolling</div>
-              <FormField label="Adjustment Mode">
-                <Toggle
-                  value={adjustmentMode}
-                  onChange={v => setAdjustmentMode(v as typeof adjustmentMode)}
-                  options={[
-                    { label: 'Static Hold', value: 'none', activeClass: 'bg-zinc-700 text-oncolor' },
-                    { label: 'ATM Roll', value: 'rolling_straddle', activeClass: 'bg-emerald-600 text-oncolor' },
-                  ]}
-                />
-              </FormField>
-              {adjustmentMode === 'rolling_straddle' && (
-                <div className="flex flex-col gap-2">
-                  <div className="text-[9px] text-emerald-400/90 bg-emerald-500/10 border border-emerald-500/20 rounded px-2 py-1">
-                    When spot moves beyond buffer, active legs exit and roll to the fresh ATM strike.
-                  </div>
-                  <div className="grid grid-cols-2 gap-2">
-                    <FormField label="Buffer">
-                      <input
-                        type="number"
-                        min={5}
-                        step={5}
-                        className={inputCls}
-                        value={rollBuffer}
-                        onChange={e => setRollBuffer(Number(e.target.value))}
-                      />
-                    </FormField>
-                    <FormField label="Type">
-                      <select
-                        value={rollType}
-                        onChange={e => setRollType(e.target.value as 'points' | 'percentage')}
-                        className={inputCls}
-                      >
-                        <option value="points">Points</option>
-                        <option value="percentage">% of Spot</option>
-                      </select>
-                    </FormField>
-                  </div>
-                  <FormField label="Max Rolls Per Day">
-                    <input
-                      type="number"
-                      min={1}
-                      max={15}
-                      className={inputCls}
-                      value={maxRolls}
-                      onChange={e => setMaxRolls(Number(e.target.value))}
-                    />
-                  </FormField>
-                </div>
-              )}
-            </div>
-
-            {/* Advanced Exits */}
-            <div className="bg-zinc-900/40 border border-zinc-800/60 rounded-xl p-3 flex flex-col gap-3">
-              <div className="text-[9px] font-bold text-zinc-500 uppercase tracking-[0.16em]">Advanced Exits</div>
-              {/* Scalp Floor */}
-              <div>
-                <label className="flex items-center gap-2 cursor-pointer select-none mb-1">
-                  <input
-                    type="checkbox"
-                    checked={scalpFloorPct > 0}
-                    onChange={e => setScalpFloorPct(e.target.checked ? 30 : 0)}
-                    className="w-3 h-3 accent-emerald-500"
-                  />
-                  <span className="text-[10px] font-bold text-zinc-400 uppercase tracking-wider">Scalp Floor (Decay %)</span>
-                </label>
-                {scalpFloorPct > 0 && (
-                  <input
-                    type="number"
-                    min={5}
-                    step={5}
-                    className={inputCls}
-                    value={scalpFloorPct}
-                    onChange={e => setScalpFloorPct(Number(e.target.value))}
-                    placeholder="e.g. 30"
-                  />
-                )}
-              </div>
-              {/* Trailing SL */}
-              <div>
-                <label className="flex items-center gap-2 cursor-pointer select-none mb-1">
-                  <input
-                    type="checkbox"
-                    checked={trailSlPct > 0}
-                    onChange={e => setTrailSlPct(e.target.checked ? 15 : 0)}
-                    className="w-3 h-3 accent-red-500"
-                  />
-                  <span className="text-[10px] font-bold text-zinc-400 uppercase tracking-wider">Trailing SL %</span>
-                </label>
-                {trailSlPct > 0 && (
-                  <input
-                    type="number"
-                    min={5}
-                    step={5}
-                    className={inputCls}
-                    value={trailSlPct}
-                    onChange={e => setTrailSlPct(Number(e.target.value))}
-                    placeholder="e.g. 15"
-                  />
-                )}
-              </div>
-            </div>
-
-            {/* Strategy-level controls */}
-            <div className="bg-zinc-900/40 border border-zinc-800/60 rounded-xl p-3 flex flex-col gap-3">
-              <div className="text-[9px] font-bold text-zinc-500 uppercase tracking-[0.16em]">Risk & Sizing</div>
-              <FormField label="Lot Size">
-                <input type="number" min={1} className={inputCls} value={lotSize}
-                  onChange={e => setLotSize(Number(e.target.value))} />
-              </FormField>
-
-              {/* Overall Target — toggleable */}
-              <div>
-                <label className="flex items-center gap-2 cursor-pointer select-none mb-1">
-                  <input
-                    type="checkbox"
-                    checked={profitTargetPct > 0}
-                    onChange={e => setProfitTargetPct(e.target.checked ? 50 : 0)}
-                    className="w-3 h-3 accent-emerald-500"
-                  />
-                  <span className="text-[10px] font-bold text-zinc-400 uppercase tracking-wider">Overall Target %</span>
-                </label>
-                {profitTargetPct > 0 && (
-                  <input type="number" min={1} step={5} className={inputCls} value={profitTargetPct}
-                    onChange={e => setProfitTargetPct(Number(e.target.value))} />
-                )}
-              </div>
-
-              {/* Overall SL — toggleable */}
-              <div>
-                <label className="flex items-center gap-2 cursor-pointer select-none mb-1">
-                  <input
-                    type="checkbox"
-                    checked={overallSlPct > 0}
-                    onChange={e => setOverallSlPct(e.target.checked ? 100 : 0)}
-                    className="w-3 h-3 accent-red-500"
-                  />
-                  <span className="text-[10px] font-bold text-zinc-400 uppercase tracking-wider">Overall SL %</span>
-                </label>
-                {overallSlPct > 0 && (
-                  <input type="number" min={1} step={5} className={inputCls} value={overallSlPct}
-                    onChange={e => setOverallSlPct(Number(e.target.value))} />
-                )}
-              </div>
-            </div>
-
-            {/* Timing */}
-            <div className="bg-zinc-900/40 border border-zinc-800/60 rounded-xl p-3 flex flex-col gap-3">
-              <div className="text-[9px] font-bold text-zinc-500 uppercase tracking-[0.16em]">Timing</div>
-              <FormField label="Strategy Type">
-                <Toggle
-                  value={strategyType}
-                  onChange={v => setStrategyType(v as typeof strategyType)}
-                  options={[
-                    { label: 'Intraday', value: 'intraday',    activeClass: 'bg-emerald-600 text-oncolor' },
-                    { label: 'Expiry Day', value: 'expiry_day', activeClass: 'bg-sky-600 text-oncolor' },
-                    { label: 'First Day', value: 'first_day',   activeClass: 'bg-amber-600 text-oncolor' },
-                  ]}
-                />
-              </FormField>
-              <div className="text-[9px] text-zinc-500 bg-zinc-800/50 rounded px-2 py-1">
-                {strategyType === 'intraday'   && 'Trade every day — enter at entry time, exit same day at EOD. Matches AlgoTest Intraday.'}
-                {strategyType === 'expiry_day' && 'Only enter on the expiry date itself (0DTE). Matches AlgoTest Expiry Day.'}
-                {strategyType === 'first_day'  && 'Enter on the first day of each expiry cycle (multi-DTE, holds until EOD same day).'}
-              </div>
-              <div className="grid grid-cols-2 gap-2">
-                <FormField label="Entry">
-                  <input type="text" className={inputCls} value={entryTime}
-                    onChange={e => setEntryTime(e.target.value)} placeholder="09:20" />
-                </FormField>
-                <FormField label="EOD Exit">
-                  <input type="text" className={inputCls} value={eodTime}
-                    onChange={e => setEodTime(e.target.value)} placeholder="15:15" />
-                </FormField>
-              </div>
-            </div>
-
-            {/* Costs */}
-            <div className="bg-zinc-900/40 border border-zinc-800/60 rounded-xl p-3 flex flex-col gap-3">
-              <label className="flex items-center gap-2 cursor-pointer select-none">
-                <input
-                  type="checkbox"
-                  checked={includeCosts}
-                  onChange={e => setIncludeCosts(e.target.checked)}
-                  className="w-3 h-3 accent-amber-500"
-                />
-                <span className="text-[10px] font-bold text-zinc-400 uppercase tracking-wider">Include Costs</span>
-              </label>
-
-              {includeCosts && (
-                <div className="grid grid-cols-2 gap-2">
-                  <FormField label="Commission / Lot">
-                    <input type="number" min={0} step={5} className={inputCls} value={commissionPerLot}
-                      onChange={e => setCommissionPerLot(Number(e.target.value))} />
-                  </FormField>
-                  <FormField label="Slippage %">
-                    <input type="number" min={0} step={0.05} className={inputCls} value={slippagePct}
-                      onChange={e => setSlippagePct(Number(e.target.value))} />
-                  </FormField>
-                </div>
-              )}
-            </div>
-
-            {/* Date range */}
-            <div className="bg-zinc-900/40 border border-zinc-800/60 rounded-xl p-3 flex flex-col gap-3">
-              <div className="flex items-center justify-between">
-                <div className="text-[9px] font-bold text-zinc-500 uppercase tracking-[0.16em]">Period</div>
-                <div className="flex gap-1">
-                  {(['3m', '6m', '1y', '3y', 'all'] as const).map(p => (
-                    <button
-                      key={p}
-                      onClick={() => setDatePreset(p)}
-                      className="text-[9px] font-bold px-1.5 py-0.5 rounded bg-zinc-800 text-zinc-400 hover:text-zinc-200 border border-zinc-700 transition-colors uppercase"
-                    >
-                      {p}
-                    </button>
-                  ))}
-                </div>
-              </div>
-              <FormField label="Start Date">
-                <input type="date" className={inputCls} value={startDate}
-                  onChange={e => setStartDate(e.target.value)} />
-              </FormField>
-              <FormField label="End Date">
-                <input type="date" className={inputCls} value={endDate}
-                  onChange={e => setEndDate(e.target.value)} />
-              </FormField>
-            </div>
           </div>
 
-          <div className="shrink-0 border-t border-zinc-800 bg-zinc-950/95 backdrop-blur p-3 flex flex-col gap-2">
-            {error && (
-              <div className="text-[11px] text-red-400 bg-red-500/10 border border-red-500/20 rounded-md p-2 break-words">
-                {error}
-              </div>
-            )}
-            {loading ? (
-              <button
-                onClick={stopBacktest}
-                className="w-full py-2.5 rounded-lg text-xs font-bold bg-red-700 hover:bg-red-600 text-oncolor transition-colors shadow-lg shadow-red-500/10 flex items-center justify-center gap-2"
+          {/* Right: Square Off mode & check toggles */}
+          <div className="flex items-center gap-4 flex-wrap">
+            <div className="flex items-center gap-3">
+              <label className="flex items-center gap-1 cursor-pointer">
+                <input
+                  type="radio"
+                  name="squareOffMode"
+                  checked={squareOffMode === 'one_leg'}
+                  onChange={() => setSquareOffMode('one_leg')}
+                  className="w-3.5 h-3.5 accent-[#54b4c7]"
+                />
+                <span>Square Off One Leg</span>
+                <Info className="w-3 h-3 text-slate-400" />
+              </label>
+              <label className="flex items-center gap-1 cursor-pointer">
+                <input
+                  type="radio"
+                  name="squareOffMode"
+                  checked={squareOffMode === 'all_legs'}
+                  onChange={() => setSquareOffMode('all_legs')}
+                  className="w-3.5 h-3.5 accent-[#54b4c7]"
+                />
+                <span>Square Off All Legs</span>
+                <Info className="w-3 h-3 text-slate-400" />
+              </label>
+            </div>
+
+            <div className="flex items-center gap-3">
+              <label className="flex items-center gap-1 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={waitAndTrade}
+                  onChange={e => setWaitAndTrade(e.target.checked)}
+                  className="w-3.5 h-3.5 accent-[#54b4c7] rounded"
+                />
+                <span>Wait &amp; Trade</span>
+                <Info className="w-3 h-3 text-slate-400" />
+              </label>
+              <label className="flex items-center gap-1 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={moveSlToCost}
+                  onChange={e => setMoveSlToCost(e.target.checked)}
+                  className="w-3.5 h-3.5 accent-[#54b4c7] rounded"
+                />
+                <span>Move SL to Cost</span>
+                <Info className="w-3 h-3 text-slate-400" />
+              </label>
+              <label className="flex items-center gap-1 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={reEntry}
+                  onChange={e => setReEntry(e.target.checked)}
+                  className="w-3.5 h-3.5 accent-[#54b4c7] rounded"
+                />
+                <span>Re-Entry / Re-Execute</span>
+                <Info className="w-3 h-3 text-slate-400" />
+              </label>
+              <label className="flex items-center gap-1 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={associatedHedge}
+                  onChange={e => setAssociatedHedge(e.target.checked)}
+                  className="w-3.5 h-3.5 accent-[#54b4c7] rounded"
+                />
+                <span>Associated Hedge</span>
+              </label>
+            </div>
+          </div>
+        </div>
+
+        {/* ── Leg Cards / Rows ── */}
+        <div className="flex flex-col gap-2 my-2">
+          {legs.map((leg, index) => {
+            const isSell = leg.position === 'sell';
+            const isCall = leg.option_type === 'CE';
+            const strikeMode = leg.strike_type || 'offset';
+
+            return (
+              <div
+                key={index}
+                className="bg-[#edf2f6] border border-slate-300/80 rounded px-3 py-2 flex items-center justify-between flex-wrap gap-2.5 shadow-sm"
               >
-                <span className="w-2 h-2 rounded-full bg-oncolor animate-ping" />
-                Stop Backtest
-              </button>
+                {/* Left controls */}
+                <div className="flex items-center gap-2.5 flex-wrap">
+                  <input
+                    type="checkbox"
+                    defaultChecked
+                    className="w-3.5 h-3.5 accent-[#54b4c7] rounded cursor-pointer"
+                  />
+
+                  {/* Leg index badge */}
+                  <div className="flex flex-col">
+                    <span className="text-[9px] font-bold text-slate-400 leading-none">L{index + 1}</span>
+                    <span className="text-[10px] text-slate-500 font-medium">Lots:</span>
+                  </div>
+
+                  {/* Lots input */}
+                  <input
+                    type="number"
+                    min={1}
+                    value={leg.lots}
+                    onChange={e => handleUpdateLeg(index, { lots: Math.max(1, Number(e.target.value)) })}
+                    className="w-11 bg-white border border-slate-300 rounded px-1 py-0.5 text-xs text-slate-800 text-center font-semibold focus:outline-none"
+                  />
+
+                  {/* Sell / Buy action badge */}
+                  <button
+                    type="button"
+                    onClick={() => handleUpdateLeg(index, { position: isSell ? 'buy' : 'sell' })}
+                    className={`text-[11px] font-bold px-2 py-0.5 rounded cursor-pointer transition-colors ${
+                      isSell
+                        ? 'border border-red-400 text-red-500 bg-white hover:bg-red-50'
+                        : 'border border-emerald-500 text-emerald-600 bg-white hover:bg-emerald-50'
+                    }`}
+                  >
+                    {leg.position.toUpperCase()}
+                  </button>
+
+                  {/* Strike Mode selector */}
+                  <div className="flex flex-col">
+                    <select
+                      value={
+                        strikeMode === 'atm_percent' ? 'ATM Percent' :
+                        strikeMode === 'closest_premium' ? 'Closest Premium (CP)' :
+                        strikeMode === 'straddle_width' ? 'Straddle Width' : 'ATM Point'
+                      }
+                      onChange={e => {
+                        const m = e.target.value as StrikeModeLabel;
+                        handleUpdateLeg(index, {
+                          strike_type: strikeModeToType(m),
+                          strike: m === 'ATM Point' ? 'ATM' : '2',
+                        });
+                      }}
+                      className="bg-white border border-slate-300 rounded px-2 py-0.5 text-xs text-slate-700 font-medium focus:outline-none"
+                    >
+                      <option value="ATM Point">ATM Point</option>
+                      <option value="ATM Percent">ATM Percent</option>
+                      <option value="Straddle Width">Straddle Width</option>
+                      <option value="Closest Premium (CP)">Closest Premium (CP)</option>
+                    </select>
+                  </div>
+
+                  {/* Strike Value selector */}
+                  {strikeMode === 'offset' ? (
+                    <select
+                      value={leg.strike}
+                      onChange={e => handleUpdateLeg(index, { strike: e.target.value })}
+                      className="bg-white border border-slate-300 rounded px-2 py-0.5 text-xs text-slate-700 font-medium focus:outline-none"
+                    >
+                      {STRIKE_OPTIONS.map(s => (
+                        <option key={s} value={s}>{s}</option>
+                      ))}
+                    </select>
+                  ) : (
+                    <input
+                      type="number"
+                      value={leg.strike}
+                      onChange={e => handleUpdateLeg(index, { strike: e.target.value })}
+                      placeholder="Value"
+                      className="w-16 bg-white border border-slate-300 rounded px-2 py-0.5 text-xs text-slate-700 font-medium focus:outline-none text-center"
+                    />
+                  )}
+
+                  {/* Call / Put option badge */}
+                  <button
+                    type="button"
+                    onClick={() => handleUpdateLeg(index, { option_type: isCall ? 'PE' : 'CE' })}
+                    className="bg-[#54b4c7] hover:bg-[#459eb0] text-white font-bold text-[11px] px-2.5 py-0.5 rounded cursor-pointer transition-colors shadow-sm"
+                  >
+                    {isCall ? 'CALL' : 'PUT'}
+                  </button>
+                </div>
+
+                {/* Right controls: + Target Profit, + Stop Loss, + Trail Stop Loss, + Journey, Expiry, Copy, Trash */}
+                <div className="flex items-center gap-3.5 flex-wrap">
+                  {/* Target Profit Chip */}
+                  {leg.leg_target_pct > 0 ? (
+                    <div className="flex items-center gap-1 bg-white border border-blue-300 text-[#2596be] px-1.5 py-0.5 rounded text-xs font-semibold shadow-sm">
+                      <span className="text-[10px]">Tgt:</span>
+                      <input
+                        type="number"
+                        value={leg.leg_target_pct}
+                        onChange={e => handleUpdateLeg(index, { leg_target_pct: Number(e.target.value) })}
+                        className="w-10 bg-slate-50 border border-slate-200 rounded px-1 text-center text-xs text-slate-800"
+                      />
+                      <span>%</span>
+                      <button
+                        type="button"
+                        onClick={() => handleUpdateLeg(index, { leg_target_pct: 0 })}
+                        className="text-slate-400 hover:text-red-500 ml-0.5 leading-none"
+                      >
+                        ✕
+                      </button>
+                    </div>
+                  ) : (
+                    <button
+                      type="button"
+                      onClick={() => handleUpdateLeg(index, { leg_target_pct: 50 })}
+                      className="text-xs text-[#2596be] hover:underline font-semibold flex items-center gap-0.5 cursor-pointer"
+                    >
+                      <Plus className="w-3.5 h-3.5 stroke-[2.5]" /> Target Profit
+                    </button>
+                  )}
+
+                  {/* Stop Loss Chip */}
+                  {leg.leg_sl_pct > 0 ? (
+                    <div className="flex items-center gap-1 bg-white border border-red-300 text-red-600 px-1.5 py-0.5 rounded text-xs font-semibold shadow-sm">
+                      <span className="text-[10px]">SL:</span>
+                      <input
+                        type="number"
+                        value={leg.leg_sl_pct}
+                        onChange={e => handleUpdateLeg(index, { leg_sl_pct: Number(e.target.value) })}
+                        className="w-10 bg-slate-50 border border-slate-200 rounded px-1 text-center text-xs text-slate-800"
+                      />
+                      <span>%</span>
+                      <button
+                        type="button"
+                        onClick={() => handleUpdateLeg(index, { leg_sl_pct: 0 })}
+                        className="text-slate-400 hover:text-red-500 ml-0.5 leading-none"
+                      >
+                        ✕
+                      </button>
+                    </div>
+                  ) : (
+                    <button
+                      type="button"
+                      onClick={() => handleUpdateLeg(index, { leg_sl_pct: 35 })}
+                      className="text-xs text-[#2596be] hover:underline font-semibold flex items-center gap-0.5 cursor-pointer"
+                    >
+                      <Plus className="w-3.5 h-3.5 stroke-[2.5]" /> Stop Loss
+                    </button>
+                  )}
+
+                  {/* Trail Stop Loss Chip */}
+                  {(leg.leg_trail_sl_pct ?? 0) > 0 ? (
+                    <div className="flex items-center gap-1 bg-white border border-amber-300 text-amber-700 px-1.5 py-0.5 rounded text-xs font-semibold shadow-sm">
+                      <span className="text-[10px]">Trail:</span>
+                      <input
+                        type="number"
+                        value={leg.leg_trail_sl_pct}
+                        onChange={e => handleUpdateLeg(index, { leg_trail_sl_pct: Number(e.target.value) })}
+                        className="w-10 bg-slate-50 border border-slate-200 rounded px-1 text-center text-xs text-slate-800"
+                      />
+                      <span>%</span>
+                      <button
+                        type="button"
+                        onClick={() => handleUpdateLeg(index, { leg_trail_sl_pct: 0 })}
+                        className="text-slate-400 hover:text-red-500 ml-0.5 leading-none"
+                      >
+                        ✕
+                      </button>
+                    </div>
+                  ) : (
+                    <button
+                      type="button"
+                      onClick={() => handleUpdateLeg(index, { leg_trail_sl_pct: 10 })}
+                      className="text-xs text-[#2596be] hover:underline font-semibold flex items-center gap-0.5 cursor-pointer"
+                    >
+                      <Plus className="w-3.5 h-3.5 stroke-[2.5]" /> Trail Stop Loss
+                    </button>
+                  )}
+
+                  {/* Journey Link */}
+                  <button
+                    type="button"
+                    onClick={() => toast.info('Journey rule toggled')}
+                    className="text-xs text-[#2596be] hover:underline font-semibold flex items-center gap-0.5 cursor-pointer"
+                  >
+                    <Plus className="w-3.5 h-3.5 stroke-[2.5]" /> Journey
+                  </button>
+
+                  {/* Expiry Dropdown */}
+                  <select className="bg-white border border-slate-300 rounded px-2 py-0.5 text-xs text-slate-700 font-medium focus:outline-none">
+                    <option value="Weekly">Weekly</option>
+                    <option value="Next Weekly">Next Weekly</option>
+                    <option value="Monthly">Monthly</option>
+                  </select>
+
+                  {/* Clone Icon */}
+                  <button
+                    type="button"
+                    onClick={() => handleCloneLeg(index)}
+                    title="Clone leg"
+                    className="text-slate-400 hover:text-slate-600 transition-colors p-1"
+                  >
+                    <Copy className="w-3.5 h-3.5" />
+                  </button>
+
+                  {/* Trash Icon */}
+                  <button
+                    type="button"
+                    onClick={() => handleRemoveLeg(index)}
+                    title="Remove leg"
+                    className="text-slate-400 hover:text-red-500 transition-colors p-1"
+                  >
+                    <Trash2 className="w-3.5 h-3.5" />
+                  </button>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+
+        {/* No ReEntry toggle on right */}
+        <div className="flex justify-end items-center gap-2 py-1 text-xs text-slate-600">
+          <label className="flex items-center gap-2 cursor-pointer">
+            <div
+              onClick={() => setNoReEntryAfter(!noReEntryAfter)}
+              className="w-7 h-4 bg-slate-300 rounded-full relative p-0.5 transition-colors cursor-pointer"
+            >
+              <div className={`w-3 h-3 rounded-full bg-white shadow-sm transition-transform ${
+                noReEntryAfter ? 'translate-x-3 bg-[#54b4c7]' : ''
+              }`} />
+            </div>
+            <span>No ReEntry/ReExecute/Journey After</span>
+          </label>
+        </div>
+
+        {/* ── Timing & Strategy Controls Section ── */}
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-8 my-4 pt-2">
+          {/* Left Column: Range Breakout & Entry Time */}
+          <div className="flex flex-col gap-2">
+            <label className="flex items-center gap-1.5 text-xs text-slate-600 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={rangeBreakout}
+                onChange={e => setRangeBreakout(e.target.checked)}
+                className="w-3.5 h-3.5 accent-[#54b4c7] rounded"
+              />
+              <span>Range Breakout</span>
+              <Info className="w-3 h-3 text-slate-400" />
+            </label>
+
+            <div className="flex items-center gap-2 text-xs text-slate-600 mt-1">
+              <span className="w-20 font-medium">Entry Time:</span>
+              <div className="flex items-center gap-1">
+                <select
+                  value={entryH}
+                  onChange={e => setEntryH(e.target.value)}
+                  className="bg-white border border-slate-300 rounded px-2 py-1 text-xs text-slate-700 font-medium focus:outline-none"
+                >
+                  {['9', '10', '11', '12', '13', '14', '15'].map(h => (
+                    <option key={h} value={h}>{h}</option>
+                  ))}
+                </select>
+                <span>:</span>
+                <select
+                  value={entryM}
+                  onChange={e => setEntryM(e.target.value)}
+                  className="bg-white border border-slate-300 rounded px-2 py-1 text-xs text-slate-700 font-medium focus:outline-none"
+                >
+                  {Array.from({ length: 60 }, (_, i) => String(i).padStart(2, '0')).map(m => (
+                    <option key={m} value={m}>{m}</option>
+                  ))}
+                </select>
+                <span>:</span>
+                <select
+                  value={entryS}
+                  onChange={e => setEntryS(e.target.value)}
+                  className="bg-white border border-slate-300 rounded px-2 py-1 text-xs text-slate-700 font-medium focus:outline-none"
+                >
+                  {['00', '15', '30', '45'].map(s => (
+                    <option key={s} value={s}>{s}</option>
+                  ))}
+                </select>
+              </div>
+            </div>
+
+            {/* Strategy Target Profit Link */}
+            {strategyTargetActive ? (
+              <div className="flex items-center gap-2 mt-2 bg-white border border-blue-200 rounded px-2.5 py-1 text-xs text-slate-700 w-fit shadow-sm">
+                <span className="font-semibold text-[#2596be]">Strategy Target:</span>
+                <input
+                  type="number"
+                  min={1}
+                  value={profitTargetPct}
+                  onChange={e => setProfitTargetPct(Number(e.target.value))}
+                  className="w-14 bg-slate-50 border border-slate-300 rounded px-1.5 py-0.5 text-center text-xs text-slate-800 font-semibold"
+                />
+                <span>%</span>
+                <button
+                  type="button"
+                  onClick={() => { setStrategyTargetActive(false); setProfitTargetPct(0); }}
+                  className="text-slate-400 hover:text-red-500 ml-1"
+                >
+                  ✕
+                </button>
+              </div>
             ) : (
               <button
-                onClick={runBacktest}
-                disabled={legs.length === 0}
-                className="w-full py-2.5 rounded-lg text-xs font-bold bg-emerald-600 hover:bg-emerald-500 disabled:opacity-40 disabled:cursor-not-allowed text-oncolor transition-colors shadow-lg shadow-emerald-500/10"
+                type="button"
+                onClick={() => { setStrategyTargetActive(true); setProfitTargetPct(50); }}
+                className="text-xs text-[#2596be] hover:underline font-semibold flex items-center gap-0.5 mt-2 cursor-pointer w-fit"
               >
-                Run Backtest
+                <Plus className="w-3.5 h-3.5 stroke-[2.5]" /> Strategy Target Profit
+              </button>
+            )}
+          </div>
+
+          {/* Right Column: Same Day / Next Day & Exit Time */}
+          <div className="flex flex-col gap-2">
+            <div className="flex items-center gap-4 text-xs text-slate-600">
+              <label className="flex items-center gap-1 cursor-pointer">
+                <input
+                  type="radio"
+                  name="exitDay"
+                  checked={exitDayType === 'same_day'}
+                  onChange={() => setExitDayType('same_day')}
+                  className="w-3.5 h-3.5 accent-[#54b4c7]"
+                />
+                <span>Same Day</span>
+              </label>
+              <label className="flex items-center gap-1 cursor-pointer">
+                <input
+                  type="radio"
+                  name="exitDay"
+                  checked={exitDayType === 'next_day'}
+                  onChange={() => setExitDayType('next_day')}
+                  className="w-3.5 h-3.5 accent-[#54b4c7]"
+                />
+                <span>Next Day (BTST/STBT)</span>
+              </label>
+            </div>
+
+            <div className="flex items-center gap-2 text-xs text-slate-600 mt-1">
+              <span className="w-20 font-medium">Exit Time:</span>
+              <div className="flex items-center gap-1">
+                <select
+                  value={exitH}
+                  onChange={e => setExitH(e.target.value)}
+                  className="bg-white border border-slate-300 rounded px-2 py-1 text-xs text-slate-700 font-medium focus:outline-none"
+                >
+                  {['9', '10', '11', '12', '13', '14', '15'].map(h => (
+                    <option key={h} value={h}>{h}</option>
+                  ))}
+                </select>
+                <span>:</span>
+                <select
+                  value={exitM}
+                  onChange={e => setExitM(e.target.value)}
+                  className="bg-white border border-slate-300 rounded px-2 py-1 text-xs text-slate-700 font-medium focus:outline-none"
+                >
+                  {Array.from({ length: 60 }, (_, i) => String(i).padStart(2, '0')).map(m => (
+                    <option key={m} value={m}>{m}</option>
+                  ))}
+                </select>
+                <span>:</span>
+                <select
+                  value={exitS}
+                  onChange={e => setExitS(e.target.value)}
+                  className="bg-white border border-slate-300 rounded px-2 py-1 text-xs text-slate-700 font-medium focus:outline-none"
+                >
+                  {['00', '15', '30', '45'].map(s => (
+                    <option key={s} value={s}>{s}</option>
+                  ))}
+                </select>
+              </div>
+            </div>
+
+            {/* Strategy Stop Loss Link */}
+            {strategySlActive ? (
+              <div className="flex items-center gap-2 mt-2 bg-white border border-red-200 rounded px-2.5 py-1 text-xs text-slate-700 w-fit shadow-sm">
+                <span className="font-semibold text-red-600">Strategy Stop Loss:</span>
+                <input
+                  type="number"
+                  min={1}
+                  value={overallSlPct}
+                  onChange={e => setOverallSlPct(Number(e.target.value))}
+                  className="w-14 bg-slate-50 border border-slate-300 rounded px-1.5 py-0.5 text-center text-xs text-slate-800 font-semibold"
+                />
+                <span>%</span>
+                <button
+                  type="button"
+                  onClick={() => { setStrategySlActive(false); setOverallSlPct(0); }}
+                  className="text-slate-400 hover:text-red-500 ml-1"
+                >
+                  ✕
+                </button>
+              </div>
+            ) : (
+              <button
+                type="button"
+                onClick={() => { setStrategySlActive(true); setOverallSlPct(35); }}
+                className="text-xs text-[#2596be] hover:underline font-semibold flex items-center gap-0.5 mt-2 cursor-pointer w-fit"
+              >
+                <Plus className="w-3.5 h-3.5 stroke-[2.5]" /> Strategy Stop Loss
               </button>
             )}
           </div>
         </div>
 
-        {/* ── Right: Results ── */}
-        <div className="flex-1 overflow-y-auto">
-          {!result && !loading && (
-            <div className="flex flex-col items-center justify-center h-full text-zinc-600">
-              <div className="flex items-center justify-center w-14 h-14 rounded-2xl bg-emerald-500/10 border border-emerald-500/20 mb-4">
-                <svg width="26" height="26" viewBox="0 0 24 24" fill="none" className="text-emerald-500/60">
-                  <path d="M3 3v18h18" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
-                  <path d="M7 15l4-5 3 3 6-8" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" />
-                </svg>
-              </div>
-              <div className="text-sm font-bold text-zinc-400">Configure legs or pick a preset, then run a backtest</div>
-              <div className="text-xs mt-1 text-zinc-600">Year-wise returns, stats, equity curve, and full report appear here</div>
-            </div>
-          )}
-
-          {loading && (
-            <div className="flex flex-col items-center justify-center h-full p-8 max-w-md mx-auto text-center">
-              <div className="w-12 h-12 rounded-2xl bg-emerald-500/10 border border-emerald-500/30 flex items-center justify-center mb-5 animate-pulse">
-                <svg width="24" height="24" viewBox="0 0 24 24" fill="none" className="text-emerald-400">
-                  <path d="M12 2v4m0 12v4M4.93 4.93l2.83 2.83m8.48 8.48l2.83 2.83M2 12h4m12 0h4M4.93 19.07l2.83-2.83m8.48-8.48l2.83-2.83" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
-                </svg>
-              </div>
-              <div className="text-base font-bold text-white mb-1">Simulating Historical Option Trades</div>
-              <p className="text-xs text-zinc-400 mb-6">
-                Querying 1-min OHLC, spot & strikes from 5.5-year SQLite database…
-              </p>
-
-              {/* Progress bar */}
-              <div className="w-full bg-zinc-900 border border-zinc-800 rounded-full h-3 overflow-hidden p-0.5 mb-3">
-                <div
-                  className="bg-gradient-to-r from-emerald-500 to-teal-400 h-full rounded-full transition-all duration-300"
-                  style={{ width: `${Math.max(2, statusData?.percent ?? 0)}%` }}
-                />
-              </div>
-
-              <div className="w-full flex justify-between text-xs font-mono text-zinc-400 mb-5">
-                <span>{statusData?.percent?.toFixed(1) ?? '0.0'}% completed</span>
-                <span>{statusData?.current ?? 0} / {statusData?.total || '—'} days</span>
-              </div>
-
-              {statusData?.date && (
-                <div className="bg-zinc-900/80 border border-zinc-800 rounded-xl px-4 py-2.5 w-full text-xs font-mono mb-5 flex justify-between">
-                  <span className="text-zinc-500">Processing Date:</span>
-                  <span className="text-zinc-200 font-bold">{statusData.date}</span>
-                </div>
-              )}
-
+        {/* Protect The Profits link centered */}
+        <div className="flex justify-center my-3">
+          {protectProfitsActive ? (
+            <div className="flex items-center gap-2 bg-white border border-amber-300 rounded px-3 py-1.5 text-xs text-slate-700 shadow-sm">
+              <span className="font-semibold text-amber-700">Protect Profits (Trail SL %):</span>
+              <input
+                type="number"
+                min={1}
+                value={trailSlPct}
+                onChange={e => setTrailSlPct(Number(e.target.value))}
+                className="w-14 bg-slate-50 border border-slate-300 rounded px-1.5 py-0.5 text-center text-xs text-slate-800 font-semibold"
+              />
+              <span>%</span>
               <button
-                onClick={stopBacktest}
-                className="px-4 py-1.5 rounded-lg text-xs font-bold bg-zinc-900 hover:bg-zinc-800 text-red-400 border border-zinc-700 hover:border-red-500/40 transition-colors"
+                type="button"
+                onClick={() => { setProtectProfitsActive(false); setTrailSlPct(0); }}
+                className="text-slate-400 hover:text-red-500 ml-1"
               >
-                Cancel Simulation
+                ✕
               </button>
             </div>
+          ) : (
+            <button
+              type="button"
+              onClick={() => { setProtectProfitsActive(true); setTrailSlPct(15); }}
+              className="text-xs text-[#2596be] hover:underline font-semibold flex items-center gap-1 cursor-pointer"
+            >
+              <Plus className="w-3.5 h-3.5 stroke-[2.5]" /> Protect The Profits <Info className="w-3 h-3 text-slate-400" />
+            </button>
           )}
+        </div>
 
-          {result && s && (
-            <div className="p-5 flex flex-col gap-6">
+        {/* ── Data Notice & Change Settings ── */}
+        <div className="text-center text-[11px] text-slate-500 leading-relaxed max-w-4xl mx-auto my-3">
+          <p>
+            Only <strong className="text-slate-700 font-semibold">Nifty</strong> option data is backed by this backtester today — Banknifty/FinNifty/Sensex selections above run against no real data and won&apos;t produce trades. Nifty data is available from <strong className="text-slate-700 font-semibold">Thu Dec 31 2020</strong>.
+          </p>
+          <p>
+            Nifty lot size is fetched live per period from the master contract, not hardcoded (see the Lot Size field under Change Settings).
+          </p>
 
-              {/* ── Pulse ribbon: headline KPIs ── */}
-              <div className="relative overflow-hidden rounded-2xl border border-zinc-800 bg-zinc-900/60">
-                <div className={`pointer-events-none absolute inset-0 bg-gradient-to-r ${
-                  s.total_pnl >= 0 ? 'from-emerald-500/[0.06]' : 'from-red-500/[0.06]'
-                } via-transparent to-blue-500/[0.04]`} />
-                <div className="relative flex items-stretch gap-6 px-5 py-4 flex-wrap">
-                  <PulseStat
-                    label="Overall Profit"
-                    value={fmtPnl(s.total_pnl)}
-                    color={s.total_pnl >= 0 ? 'text-emerald-400' : 'text-red-400'}
-                  />
-                  <div className="w-px bg-zinc-800 self-stretch" />
-                  <PulseStat
-                    label="Win Rate"
-                    value={`${s.win_rate.toFixed(1)}%`}
-                    sub={`${s.wins}W / ${s.losses}L`}
-                    color={s.win_rate >= 50 ? 'text-emerald-400' : 'text-red-400'}
-                  />
-                  <div className="w-px bg-zinc-800 self-stretch" />
-                  <PulseStat
-                    label="Max Drawdown"
-                    value={`₹${fmt(s.max_drawdown)}`}
-                    sub={s.max_drawdown_days != null ? `${s.max_drawdown_days} days` : undefined}
-                    color="text-amber-400"
-                  />
-                  <div className="ml-auto flex items-center gap-5 flex-wrap">
-                    <PulseStat
-                      label="Trades"
-                      value={String(s.traded_cycles)}
-                      sub={`of ${s.total_cycles} evaluated`}
-                      size="text-sm"
-                      color="text-zinc-200"
-                    />
-                    <PulseStat
-                      label="Return / Max DD"
-                      value={s.return_maxdd_ratio != null ? s.return_maxdd_ratio.toFixed(2) : '—'}
-                      size="text-sm"
-                      color={s.return_maxdd_ratio != null && s.return_maxdd_ratio >= 1 ? 'text-emerald-400' : 'text-zinc-300'}
-                    />
-                    <PulseStat
-                      label="Reward : Risk"
-                      value={s.reward_risk_ratio != null ? s.reward_risk_ratio.toFixed(2) : '—'}
-                      size="text-sm"
-                      color={s.reward_risk_ratio != null && s.reward_risk_ratio >= 1 ? 'text-emerald-400' : 'text-zinc-300'}
-                    />
-                  </div>
-                </div>
-              </div>
+          <div className="flex justify-center mt-2.5">
+            <button
+              type="button"
+              onClick={() => setSettingsModalOpen(true)}
+              className="border border-[#54b4c7] text-[#54b4c7] hover:bg-[#54b4c7]/10 px-3 py-1 rounded text-xs font-semibold flex items-center gap-1.5 transition-colors cursor-pointer shadow-sm bg-white"
+            >
+              <Settings className="w-3.5 h-3.5" /> Change Settings
+            </button>
+          </div>
+        </div>
 
-              {/* ── Detailed Stats ── */}
-              <div>
-                <div className="text-[9px] font-bold text-zinc-500 uppercase tracking-[0.16em] mb-3">Detailed Stats</div>
-                <div className="grid grid-cols-3 sm:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-2">
-                  <StatCard
-                    label="Avg Profit / Trade"
-                    value={fmtPnl(s.avg_pnl)}
-                    color={s.avg_pnl >= 0 ? 'text-emerald-400' : 'text-red-400'}
-                  />
-                  <StatCard
-                    label="Loss %"
-                    value={`${(100 - s.win_rate).toFixed(1)}%`}
-                    sub={`${s.losses} losses`}
-                    color="text-red-400"
-                  />
-                  <StatCard
-                    label="Avg Winning Trade"
-                    value={fmtPnl(s.avg_win)}
-                    color="text-emerald-400"
-                  />
-                  <StatCard
-                    label="Avg Losing Trade"
-                    value={`-₹${fmt(s.avg_loss)}`}
-                    color="text-red-400"
-                  />
-                  <StatCard
-                    label="Max Profit (Single)"
-                    value={fmtPnl(s.max_win)}
-                    color="text-emerald-400"
-                  />
-                  <StatCard
-                    label="Max Loss (Single)"
-                    value={fmtPnl(s.max_loss)}
-                    color="text-red-400"
-                  />
-                  <StatCard
-                    label="Expectancy Ratio"
-                    value={s.expectancy_ratio != null ? s.expectancy_ratio.toFixed(2) : '—'}
-                    color={s.expectancy_ratio != null && s.expectancy_ratio >= 0 ? 'text-emerald-400' : 'text-red-400'}
-                  />
-                  <StatCard
-                    label="Max Win Streak"
-                    value={String(s.max_win_streak)}
-                    color="text-emerald-400"
-                  />
-                  <StatCard
-                    label="Max Loss Streak"
-                    value={String(s.max_loss_streak)}
-                    color="text-red-400"
-                  />
-                  <StatCard
-                    label="Max Trades in DD"
-                    value={String(s.max_trades_in_drawdown)}
-                    color="text-amber-400"
-                  />
-                  <StatCard
-                    label="Commission Paid"
-                    value={`₹${fmt(s.commission_paid)}`}
-                    color="text-zinc-400"
-                  />
-                </div>
-              </div>
+        {/* ── Date Range Selectors ── */}
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 max-w-4xl mx-auto my-4">
+          <DateInputBox
+            label="From Date:"
+            value={startDate}
+            onChange={setStartDate}
+          />
+          <DateInputBox
+            label="To Date:"
+            value={endDate}
+            onChange={setEndDate}
+          />
+        </div>
 
-              {/* ── Year-wise Returns ── */}
-              {Object.keys(result.monthly_pnl).length > 0 && (
-                <div>
-                  <div className="text-[9px] font-bold text-zinc-500 uppercase tracking-[0.16em] mb-3">Year-wise Returns</div>
-                  <YearwiseTable monthlyPnl={result.monthly_pnl} equityCurve={result.equity_curve} />
-                </div>
-              )}
+      </div>
 
-              {/* ── Equity Curve, Underlying Value & Drawdown ── */}
-              <BacktestCharts equityCurve={result.equity_curve} />
+      {/* ── Bottom Fixed Action Bar ── */}
+      <div className="fixed bottom-0 left-0 right-0 z-40 bg-[#edf2f6]/95 border-t border-slate-300/80 px-4 py-2.5 backdrop-blur-md shadow-lg flex items-center justify-between">
+        {/* Left: INTRADAY / POSITIONAL */}
+        <div className="flex rounded overflow-hidden border border-slate-300 shadow-sm">
+          <button
+            type="button"
+            onClick={() => setExecutionType('INTRADAY')}
+            className={`px-3 py-1.5 text-xs font-bold transition-colors ${
+              executionType === 'INTRADAY'
+                ? 'bg-[#54b4c7] text-white'
+                : 'bg-white text-slate-600 hover:bg-slate-50'
+            }`}
+          >
+            INTRADAY
+          </button>
+          <button
+            type="button"
+            onClick={() => setExecutionType('POSITIONAL')}
+            className={`px-3 py-1.5 text-xs font-bold transition-colors ${
+              executionType === 'POSITIONAL'
+                ? 'bg-[#54b4c7] text-white'
+                : 'bg-white text-slate-600 hover:bg-slate-50'
+            }`}
+          >
+            POSITIONAL
+          </button>
+        </div>
 
-              {/* ── Full Report ── */}
-              <div>
-                <div className="text-[9px] font-bold text-zinc-500 uppercase tracking-[0.16em] mb-3">
-                  Full Report ({result.cycles.filter(c => c.exit_reason !== 'NO_ENTRY').length} trades)
-                </div>
-                <FullReportTable cycles={result.cycles} lotSize={lotSize} />
-              </div>
+        {/* Center: Save Strategy & Share Strategy */}
+        <div className="flex items-center gap-3">
+          <button
+            type="button"
+            onClick={handleSaveStrategy}
+            className="bg-[#54b4c7] hover:bg-[#469fb1] text-white font-semibold text-xs px-4 py-1.5 rounded shadow-sm flex items-center gap-1.5 transition-colors cursor-pointer"
+          >
+            <Save className="w-3.5 h-3.5" /> Save Strategy
+          </button>
+          <button
+            type="button"
+            onClick={handleShareStrategy}
+            className="bg-[#54b4c7] hover:bg-[#469fb1] text-white font-semibold text-xs px-4 py-1.5 rounded shadow-sm flex items-center gap-1.5 transition-colors cursor-pointer"
+          >
+            <Share2 className="w-3.5 h-3.5" /> Share Strategy
+          </button>
+        </div>
 
-            </div>
+        {/* Right: START BACKTEST */}
+        <div>
+          {loading ? (
+            <button
+              type="button"
+              onClick={stopBacktest}
+              className="bg-red-600 hover:bg-red-700 text-white font-bold text-xs uppercase px-6 py-2 rounded shadow-md flex items-center gap-2 cursor-pointer animate-pulse"
+            >
+              <Square className="w-3.5 h-3.5 fill-current" /> Stop Backtest
+            </button>
+          ) : (
+            <button
+              type="button"
+              onClick={runBacktest}
+              className="bg-[#8ec341] hover:bg-[#7eb034] text-white font-bold text-xs uppercase px-7 py-2 rounded shadow-md tracking-wider cursor-pointer transition-all hover:scale-[1.02] active:scale-[0.98]"
+            >
+              START BACKTEST
+            </button>
           )}
         </div>
       </div>
+
+      {/* ── Settings Modal ── */}
+      {settingsModalOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-xs p-4">
+          <div className="bg-white rounded-xl shadow-2xl border border-slate-200 max-w-lg w-full p-5 text-slate-700 max-h-[90vh] overflow-y-auto">
+            <div className="flex items-center justify-between border-b border-slate-200 pb-3 mb-4">
+              <h2 className="text-sm font-bold text-slate-800 flex items-center gap-2">
+                <Settings className="w-4 h-4 text-[#54b4c7]" /> Strategy &amp; Simulation Settings
+              </h2>
+              <button
+                type="button"
+                onClick={() => setSettingsModalOpen(false)}
+                className="text-slate-400 hover:text-slate-600 p-1"
+              >
+                ✕
+              </button>
+            </div>
+
+            <div className="flex flex-col gap-4 text-xs">
+              {/* Preset Strategies Quick Loader */}
+              <div>
+                <label className="block font-semibold text-slate-600 mb-1">Quick Strategy Presets</label>
+                <select
+                  onChange={e => {
+                    applyPreset(e.target.value);
+                    setSettingsModalOpen(false);
+                  }}
+                  defaultValue=""
+                  className="w-full bg-slate-50 border border-slate-300 rounded p-2 text-xs"
+                >
+                  <option value="" disabled>Load a standard preset...</option>
+                  <option value="straddle_35sl">9:20 Short Straddle (35% Leg SL)</option>
+                  <option value="rolling_straddle">Intraday Rolling Straddle (35 pt Buffer Roll)</option>
+                  <option value="strangle_20delta">0DTE 20-Delta Strangle (40% SL)</option>
+                  <option value="iron_condor">Weekly Iron Condor (Sell 25D, Buy 10D)</option>
+                </select>
+              </div>
+
+              {/* Lot size */}
+              <div>
+                <label className="block font-semibold text-slate-600 mb-1">Lot Size</label>
+                <input
+                  type="number"
+                  min={1}
+                  value={lotSize}
+                  onChange={e => setLotSize(Number(e.target.value))}
+                  className="w-full border border-slate-300 rounded p-1.5 text-xs"
+                />
+              </div>
+
+              {/* Costs & Slippage */}
+              <div className="border border-slate-200 rounded-lg p-3 bg-slate-50/50">
+                <label className="flex items-center gap-2 cursor-pointer mb-2 font-semibold">
+                  <input
+                    type="checkbox"
+                    checked={includeCosts}
+                    onChange={e => setIncludeCosts(e.target.checked)}
+                    className="accent-[#54b4c7] rounded"
+                  />
+                  <span>Include Costs &amp; Slippage</span>
+                </label>
+                {includeCosts && (
+                  <div className="grid grid-cols-2 gap-3 mt-2">
+                    <div>
+                      <span className="block text-[11px] text-slate-500 mb-1">Commission / Lot (₹)</span>
+                      <input
+                        type="number"
+                        min={0}
+                        value={commissionPerLot}
+                        onChange={e => setCommissionPerLot(Number(e.target.value))}
+                        className="w-full bg-white border border-slate-300 rounded p-1.5 text-xs"
+                      />
+                    </div>
+                    <div>
+                      <span className="block text-[11px] text-slate-500 mb-1">Slippage %</span>
+                      <input
+                        type="number"
+                        min={0}
+                        step={0.05}
+                        value={slippagePct}
+                        onChange={e => setSlippagePct(Number(e.target.value))}
+                        className="w-full bg-white border border-slate-300 rounded p-1.5 text-xs"
+                      />
+                    </div>
+                  </div>
+                )}
+              </div>
+
+              {/* Rolling straddle mode */}
+              <div className="border border-slate-200 rounded-lg p-3 bg-slate-50/50">
+                <span className="block font-semibold mb-2">Dynamic Roll Adjustment</span>
+                <div className="flex gap-4 mb-2">
+                  <label className="flex items-center gap-1.5 cursor-pointer">
+                    <input
+                      type="radio"
+                      name="adjMode"
+                      checked={adjustmentMode === 'none'}
+                      onChange={() => setAdjustmentMode('none')}
+                      className="accent-[#54b4c7]"
+                    />
+                    <span>Static Hold</span>
+                  </label>
+                  <label className="flex items-center gap-1.5 cursor-pointer">
+                    <input
+                      type="radio"
+                      name="adjMode"
+                      checked={adjustmentMode === 'rolling_straddle'}
+                      onChange={() => setAdjustmentMode('rolling_straddle')}
+                      className="accent-[#54b4c7]"
+                    />
+                    <span>ATM Roll (Rolling Straddle)</span>
+                  </label>
+                </div>
+                {adjustmentMode === 'rolling_straddle' && (
+                  <div className="grid grid-cols-2 gap-3 mt-2">
+                    <div>
+                      <span className="block text-[11px] text-slate-500 mb-1">Roll Buffer</span>
+                      <input
+                        type="number"
+                        value={rollBuffer}
+                        onChange={e => setRollBuffer(Number(e.target.value))}
+                        className="w-full bg-white border border-slate-300 rounded p-1.5 text-xs"
+                      />
+                    </div>
+                    <div>
+                      <span className="block text-[11px] text-slate-500 mb-1">Max Rolls / Day</span>
+                      <input
+                        type="number"
+                        value={maxRolls}
+                        onChange={e => setMaxRolls(Number(e.target.value))}
+                        className="w-full bg-white border border-slate-300 rounded p-1.5 text-xs"
+                      />
+                    </div>
+                  </div>
+                )}
+              </div>
+            </div>
+
+            <div className="mt-5 pt-3 border-t border-slate-200 flex justify-end">
+              <button
+                type="button"
+                onClick={() => setSettingsModalOpen(false)}
+                className="bg-[#54b4c7] hover:bg-[#459eb0] text-white px-4 py-1.5 rounded text-xs font-semibold"
+              >
+                Apply &amp; Close
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ── Progress Overlay Modal during Backtest ── */}
+      {loading && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-xs p-4">
+          <div className="bg-white rounded-2xl shadow-2xl border border-slate-200 p-6 max-w-md w-full text-center">
+            <div className="w-12 h-12 rounded-full bg-[#54b4c7]/15 flex items-center justify-center mx-auto mb-4 animate-spin text-[#54b4c7]">
+              <RefreshCw className="w-6 h-6" />
+            </div>
+            <h3 className="text-sm font-bold text-slate-800 mb-1">Simulating Historical Option Trades</h3>
+            <p className="text-xs text-slate-500 mb-4">
+              Analyzing 1-min OHLC, underlying spot &amp; strikes across historical cycles…
+            </p>
+
+            {/* Progress bar */}
+            <div className="w-full bg-slate-100 rounded-full h-3.5 overflow-hidden p-0.5 border border-slate-200 mb-2">
+              <div
+                className="bg-[#54b4c7] h-full rounded-full transition-all duration-300"
+                style={{ width: `${Math.max(3, statusData?.percent ?? 0)}%` }}
+              />
+            </div>
+
+            <div className="flex justify-between text-xs font-medium text-slate-500 mb-4">
+              <span>{statusData?.percent?.toFixed(1) ?? '0.0'}% completed</span>
+              <span>{statusData?.current ?? 0} / {statusData?.total || '—'} days</span>
+            </div>
+
+            {statusData?.date && (
+              <div className="bg-slate-50 border border-slate-200 rounded px-3 py-1.5 text-xs text-slate-600 mb-4 flex justify-between font-mono">
+                <span>Processing Date:</span>
+                <span className="font-bold text-slate-800">{statusData.date}</span>
+              </div>
+            )}
+
+            <button
+              type="button"
+              onClick={stopBacktest}
+              className="px-4 py-1.5 rounded text-xs font-semibold text-red-600 bg-red-50 hover:bg-red-100 border border-red-200 transition-colors"
+            >
+              Cancel Simulation
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* ── Backtest Results Section ── */}
+      {result && s && (
+        <div ref={resultsRef} className="w-full max-w-[1550px] mx-auto px-4 mt-8 pt-6 border-t border-slate-300">
+          <div className="flex items-center justify-between mb-4 flex-wrap gap-2">
+            <div>
+              <span className="text-[10px] font-bold text-[#54b4c7] uppercase tracking-wider block">Simulation Complete</span>
+              <h2 className="text-lg font-bold text-slate-800">Backtest Performance Report</h2>
+            </div>
+            <div className="text-xs font-mono text-slate-500 bg-white border border-slate-300 rounded px-3 py-1">
+              {s.traded_cycles} Trades ({startDate} &rarr; {endDate})
+            </div>
+          </div>
+
+          {/* Headline KPIs */}
+          <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3 mb-6">
+            <div className="bg-white border border-slate-200 rounded-xl p-3 shadow-xs">
+              <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider block mb-1">Overall Profit</span>
+              <span className={`text-xl font-bold font-mono ${s.total_pnl >= 0 ? 'text-emerald-600' : 'text-red-600'}`}>
+                {fmtPnl(s.total_pnl)}
+              </span>
+            </div>
+
+            <div className="bg-white border border-slate-200 rounded-xl p-3 shadow-xs">
+              <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider block mb-1">Win Rate</span>
+              <span className={`text-xl font-bold font-mono ${s.win_rate >= 50 ? 'text-emerald-600' : 'text-red-600'}`}>
+                {s.win_rate.toFixed(1)}%
+              </span>
+              <span className="text-[10px] text-slate-500 block mt-0.5">{s.wins}W / {s.losses}L</span>
+            </div>
+
+            <div className="bg-white border border-slate-200 rounded-xl p-3 shadow-xs">
+              <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider block mb-1">Max Drawdown</span>
+              <span className="text-xl font-bold font-mono text-amber-600">
+                ₹{fmt(s.max_drawdown)}
+              </span>
+              {s.max_drawdown_days != null && (
+                <span className="text-[10px] text-slate-500 block mt-0.5">{s.max_drawdown_days} days</span>
+              )}
+            </div>
+
+            <div className="bg-white border border-slate-200 rounded-xl p-3 shadow-xs">
+              <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider block mb-1">Traded Cycles</span>
+              <span className="text-xl font-bold font-mono text-slate-800">
+                {s.traded_cycles}
+              </span>
+              <span className="text-[10px] text-slate-500 block mt-0.5">of {s.total_cycles} evaluated</span>
+            </div>
+
+            <div className="bg-white border border-slate-200 rounded-xl p-3 shadow-xs">
+              <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider block mb-1">Return / Max DD</span>
+              <span className="text-xl font-bold font-mono text-slate-800">
+                {s.return_maxdd_ratio != null ? s.return_maxdd_ratio.toFixed(2) : '—'}
+              </span>
+            </div>
+
+            <div className="bg-white border border-slate-200 rounded-xl p-3 shadow-xs">
+              <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider block mb-1">Reward : Risk</span>
+              <span className="text-xl font-bold font-mono text-slate-800">
+                {s.reward_risk_ratio != null ? s.reward_risk_ratio.toFixed(2) : '—'}
+              </span>
+            </div>
+          </div>
+
+          {/* Detailed Statistics Matrix */}
+          <div className="bg-white border border-slate-200 rounded-xl p-4 shadow-xs mb-6">
+            <h3 className="text-xs font-bold text-slate-700 uppercase tracking-wider mb-3">Detailed Statistics</h3>
+            <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-4 text-xs">
+              <div>
+                <span className="text-slate-400 block mb-0.5">Avg Profit / Trade</span>
+                <span className={`font-mono font-bold ${s.avg_pnl >= 0 ? 'text-emerald-600' : 'text-red-600'}`}>
+                  {fmtPnl(s.avg_pnl)}
+                </span>
+              </div>
+              <div>
+                <span className="text-slate-400 block mb-0.5">Avg Winning Trade</span>
+                <span className="font-mono font-bold text-emerald-600">{fmtPnl(s.avg_win)}</span>
+              </div>
+              <div>
+                <span className="text-slate-400 block mb-0.5">Avg Losing Trade</span>
+                <span className="font-mono font-bold text-red-600">-₹{fmt(s.avg_loss)}</span>
+              </div>
+              <div>
+                <span className="text-slate-400 block mb-0.5">Max Single Profit</span>
+                <span className="font-mono font-bold text-emerald-600">{fmtPnl(s.max_win)}</span>
+              </div>
+              <div>
+                <span className="text-slate-400 block mb-0.5">Max Single Loss</span>
+                <span className="font-mono font-bold text-red-600">{fmtPnl(s.max_loss)}</span>
+              </div>
+              <div>
+                <span className="text-slate-400 block mb-0.5">Commission Paid</span>
+                <span className="font-mono font-bold text-slate-700">₹{fmt(s.commission_paid)}</span>
+              </div>
+              <div>
+                <span className="text-slate-400 block mb-0.5">Max Win Streak</span>
+                <span className="font-mono font-bold text-emerald-600">{s.max_win_streak}</span>
+              </div>
+              <div>
+                <span className="text-slate-400 block mb-0.5">Max Loss Streak</span>
+                <span className="font-mono font-bold text-red-600">{s.max_loss_streak}</span>
+              </div>
+              <div>
+                <span className="text-slate-400 block mb-0.5">Max Trades in DD</span>
+                <span className="font-mono font-bold text-amber-600">{s.max_trades_in_drawdown}</span>
+              </div>
+              <div>
+                <span className="text-slate-400 block mb-0.5">Expectancy Ratio</span>
+                <span className="font-mono font-bold text-slate-700">{s.expectancy_ratio != null ? s.expectancy_ratio.toFixed(2) : '—'}</span>
+              </div>
+            </div>
+          </div>
+
+          {/* Year-wise Returns Matrix */}
+          {Object.keys(result.monthly_pnl).length > 0 && (
+            <div className="bg-white border border-slate-200 rounded-xl overflow-hidden shadow-xs mb-6">
+              <div className="px-4 py-3 border-b border-slate-200 bg-slate-50 flex items-center justify-between">
+                <h3 className="text-xs font-bold text-slate-700 uppercase tracking-wider">Year-wise &amp; Month-wise Returns</h3>
+              </div>
+              <div className="overflow-x-auto">
+                <table className="text-xs whitespace-nowrap w-full">
+                  <thead>
+                    <tr className="bg-slate-100 text-slate-600 border-b border-slate-200">
+                      <th className="font-bold text-left px-3 py-2">Year</th>
+                      {MONTHS.map(m => (
+                        <th key={m} className="font-bold text-right px-2 py-2">{m}</th>
+                      ))}
+                      <th className="font-bold text-right px-3 py-2 border-l border-slate-200">Total</th>
+                      <th className="font-bold text-right px-3 py-2">Max DD</th>
+                      <th className="font-bold text-right px-3 py-2">Days</th>
+                      <th className="font-bold text-right px-3 py-2">R/MDD</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {Object.keys(result.monthly_pnl).sort().map((yr, i) => {
+                      const yData = result.monthly_pnl[yr] ?? {};
+                      const total = yData['Total'] ?? 0;
+                      const { mdd, days } = computeYearMDD(result.equity_curve, yr);
+                      const rMdd = mdd > 0 ? (total / mdd).toFixed(2) : '—';
+                      return (
+                        <tr key={yr} className={`border-t border-slate-200 ${i % 2 === 0 ? 'bg-white' : 'bg-slate-50/50'}`}>
+                          <td className="px-3 py-2 font-bold text-slate-800">{yr}</td>
+                          {MONTHS.map(m => {
+                            const v = yData[m];
+                            const isPositive = v != null && v > 0;
+                            const isNegative = v != null && v < 0;
+                            return (
+                              <td
+                                key={m}
+                                className={`px-2 py-2 text-right font-mono ${
+                                  isPositive ? 'text-emerald-600 font-medium' : isNegative ? 'text-red-600 font-medium' : 'text-slate-400'
+                                }`}
+                              >
+                                {v != null && v !== 0 ? (v > 0 ? '+' : '') + Math.round(v).toLocaleString('en-IN') : '—'}
+                              </td>
+                            );
+                          })}
+                          <td className={`px-3 py-2 text-right font-mono font-bold border-l border-slate-200 ${total >= 0 ? 'text-emerald-600' : 'text-red-600'}`}>
+                            {total !== 0 ? (total > 0 ? '+' : '') + Math.round(total).toLocaleString('en-IN') : '—'}
+                          </td>
+                          <td className="px-3 py-2 text-right font-mono text-amber-600 font-medium">
+                            {mdd > 0 ? `₹${mdd.toLocaleString('en-IN')}` : '—'}
+                          </td>
+                          <td className="px-3 py-2 text-right font-mono text-slate-500">
+                            {days != null ? days : '—'}
+                          </td>
+                          <td className="px-3 py-2 text-right font-mono text-slate-700">
+                            {rMdd}
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
+
+          {/* Equity Curve & Underwater Charts */}
+          <div className="bg-white border border-slate-200 rounded-xl p-4 shadow-xs mb-6">
+            <h3 className="text-xs font-bold text-slate-700 uppercase tracking-wider mb-4">Cumulative Equity &amp; Drawdown Curve</h3>
+            <BacktestCharts equityCurve={result.equity_curve} />
+          </div>
+
+          {/* Full Trade Log Table */}
+          <div className="bg-white border border-slate-200 rounded-xl overflow-hidden shadow-xs mb-8">
+            <div className="px-4 py-3 border-b border-slate-200 bg-slate-50 flex items-center justify-between">
+              <h3 className="text-xs font-bold text-slate-700 uppercase tracking-wider">
+                Full Execution Trade Log ({result.cycles.filter(c => c.exit_reason !== 'NO_ENTRY').length} cycles)
+              </h3>
+            </div>
+            <div className="overflow-x-auto">
+              <table className="text-xs whitespace-nowrap w-full">
+                <thead>
+                  <tr className="bg-slate-100 text-slate-600 border-b border-slate-200">
+                    <th className="font-bold text-left px-3 py-2">#</th>
+                    <th className="font-bold text-left px-3 py-2">Entry Date</th>
+                    <th className="font-bold text-right px-2 py-2">Time</th>
+                    <th className="font-bold text-left px-3 py-2 border-l border-slate-200">Exit Date</th>
+                    <th className="font-bold text-right px-2 py-2">Time</th>
+                    <th className="font-bold text-center px-2 py-2 border-l border-slate-200">Type</th>
+                    <th className="font-bold text-right px-2 py-2">Spot</th>
+                    <th className="font-bold text-right px-3 py-2 border-l border-slate-200">Entry ₹</th>
+                    <th className="font-bold text-right px-3 py-2">Exit ₹</th>
+                    <th className="font-bold text-right px-3 py-2 border-l border-slate-200">P/L</th>
+                    <th className="font-bold text-center px-2 py-2">Reason</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {result.cycles.filter(c => c.exit_reason !== 'NO_ENTRY').slice(0, 100).map((c, idx) => (
+                    <tr key={idx} className={`border-t border-slate-200 ${idx % 2 === 0 ? 'bg-white' : 'bg-slate-50/50'}`}>
+                      <td className="px-3 py-2 text-slate-500 font-bold">{idx + 1}</td>
+                      <td className="px-3 py-2 text-slate-700 font-mono">{fmtDate(c.entry_dt)}</td>
+                      <td className="px-2 py-2 text-right text-slate-500 font-mono">{fmtTime(c.entry_dt)}</td>
+                      <td className="px-3 py-2 text-slate-700 font-mono border-l border-slate-200">{fmtDate(c.exit_dt)}</td>
+                      <td className="px-2 py-2 text-right text-slate-500 font-mono">{fmtTime(c.exit_dt)}</td>
+                      <td className="px-2 py-2 text-center border-l border-slate-200 font-medium">{cycleTypeLabel(c.legs)}</td>
+                      <td className="px-2 py-2 text-right font-mono text-slate-600">
+                        {c.entry_spot != null ? Math.round(c.entry_spot).toLocaleString('en-IN') : '—'}
+                      </td>
+                      <td className="px-3 py-2 text-right font-mono text-slate-700 border-l border-slate-200">
+                        {c.net_credit != null ? c.net_credit.toFixed(2) : '—'}
+                      </td>
+                      <td className="px-3 py-2 text-right font-mono text-slate-700">
+                        {c.exit_combined != null ? Math.abs(c.exit_combined).toFixed(2) : '—'}
+                      </td>
+                      <td className={`px-3 py-2 text-right font-mono font-bold border-l border-slate-200 ${c.pnl >= 0 ? 'text-emerald-600' : 'text-red-600'}`}>
+                        {fmtPnl(c.pnl)}
+                      </td>
+                      <td className="px-2 py-2 text-center">
+                        <span className={`inline-block px-2 py-0.5 rounded text-[10px] font-bold ${EXIT_REASON_CLS[c.exit_reason] ?? 'bg-slate-100 text-slate-600'}`}>
+                          {c.exit_reason}
+                        </span>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+        </div>
+      )}
+
     </div>
   );
 }
