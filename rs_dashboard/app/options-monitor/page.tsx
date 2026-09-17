@@ -1662,12 +1662,6 @@ export default function OptionsMonitorPage() {
               Advanced Scalper
             </Link>
             <Link
-              href="/scalper"
-              className="px-2.5 py-1 rounded-lg text-zinc-400 hover:text-white hover:bg-zinc-800 transition-colors"
-            >
-              Scalper Terminal
-            </Link>
-            <Link
               href="/multi-leg-focus"
               className="px-2.5 py-1 rounded-lg text-zinc-400 hover:text-white hover:bg-zinc-800 transition-colors"
             >

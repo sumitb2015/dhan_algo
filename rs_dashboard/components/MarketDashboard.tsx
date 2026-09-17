@@ -85,7 +85,7 @@ const FEATURED_STRATEGY_KEYS = [
 
 // ─── Bloomberg Function Keys ──────────────────────────────────────────────────
 const FUNCTION_KEYS: { key: string; label: string; href?: string; isModal?: boolean }[] = [
-  { key: 'F1', label: 'SCALPER', href: '/scalper' },
+  { key: 'F1', label: 'SCALPER', href: '/advanced-scalper' },
   { key: 'F2', label: 'STRATEGIES', href: '/strategies' },
   { key: 'F3', label: 'SCANNER', href: '/scanner' },
   { key: 'F4', label: 'PORTFOLIO', href: '/portfolio' },
@@ -1780,8 +1780,7 @@ function SeparatedPositionsSection({
         links={[
           { label: 'Options Monitor', href: '/options-monitor', badge: 'NEW' },
           { label: 'Cyber Scalper (9/20 EMA)', href: '/cyber-scalper', badge: 'NEW' },
-          { label: 'Pro Scalper Terminal', href: '/scalper', badge: '1-CLICK' },
-          { label: 'Advanced Scalper', href: '/advanced-scalper', badge: 'LADDER' },
+          { label: 'Advanced Scalper', href: '/advanced-scalper', badge: '1-CLICK' },
           { label: 'Options QuikTrade', href: '/options/quiktrade', badge: 'FAST' },
           { label: 'Intraday Fast Terminal', href: '/terminal' },
           { label: 'Focus VWAP Desk', href: '/focus-tool' },

@@ -84,17 +84,10 @@ export const TERMINAL_PILLARS: TerminalPillarGroup[] = [
         hot: true,
       },
       {
-        name: 'Pro Scalper Terminal',
-        href: '/scalper',
-        badge: 'PRIMARY',
-        desc: '1-Click fast execution across Dhan, Zerodha and Kotak Neo with hotkeys',
-        hot: true,
-      },
-      {
         name: 'Advanced Scalper',
         href: '/advanced-scalper',
-        badge: 'PRO',
-        desc: 'Market depth ladder, bracket order controls, auto-hedging and trailing',
+        badge: 'PRIMARY',
+        desc: '1-Click fast execution across Dhan, Zerodha and Kotak Neo with hotkeys, configurable 2-5 box CE/PE ladder & trailing',
         hot: true,
       },
       {

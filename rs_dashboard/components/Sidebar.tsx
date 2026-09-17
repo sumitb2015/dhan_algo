@@ -101,7 +101,6 @@ const NAV_GROUPS = [
       { href: '/straddle-matrix', label: 'ATM Straddle Matrix', desc: 'Live ATM short straddle entry stats across timestamps & leg-wise SL%' },
       { href: '/level-chart', label: 'Level Chart', desc: 'Live High/50%/Low interval-level zones for any stock, index or crude oil future' },
       { href: '/options-analytics/live', label: 'Live Payoff', desc: 'Live combined payoff diagram for every underlying with open option positions' },
-      { href: '/scalper', label: 'Scalper', desc: 'Multi-window active trading & scalping order ticket' },
       { href: '/advanced-scalper', label: 'Advanced Scalper', desc: 'Configurable 2-5 box scalper with per-box CE/PE, strike & lot presets' },
       { href: '/synthetic-futures', label: 'Synthetic Futures', desc: 'Futuristic ATM synthetic futures scalper with 1-click execution, hedging wings, trailing SL & WebSocket ticks' },
       { href: '/focus-tool', label: 'Ultimate Scalper Terminal', desc: 'Straddles & strangles terminal — timed entry, level exits, real-money armed orders' },

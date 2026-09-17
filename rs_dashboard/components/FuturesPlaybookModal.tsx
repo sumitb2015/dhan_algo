@@ -381,7 +381,7 @@ export default function FuturesPlaybookModal({ isOpen, onClose }: FuturesPlayboo
                     </p>
                   </div>
                   <Link
-                    href="/scalper"
+                    href="/advanced-scalper"
                     className="mt-4 flex items-center justify-center gap-1 text-[11px] font-semibold text-emerald-400 hover:text-emerald-300"
                   >
                     Trade on Scalper <ArrowRight className="h-3 w-3" />
@@ -398,7 +398,7 @@ export default function FuturesPlaybookModal({ isOpen, onClose }: FuturesPlayboo
                     </p>
                   </div>
                   <Link
-                    href="/scalper"
+                    href="/advanced-scalper"
                     className="mt-4 flex items-center justify-center gap-1 text-[11px] font-semibold text-red-400 hover:text-red-300"
                   >
                     Trade on Scalper <ArrowRight className="h-3 w-3" />
