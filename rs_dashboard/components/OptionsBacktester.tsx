@@ -2,6 +2,7 @@
 
 import React, { useState, useEffect, useRef } from 'react';
 import dynamic from 'next/dynamic';
+import NavBar from './NavBar';
 import {
   Copy, Trash2, Settings, Share2, Save, Info, Plus, Calendar,
   Square, RefreshCw
@@ -589,6 +590,17 @@ export default function OptionsBacktester() {
         <h1 className="text-white text-xs md:text-sm font-bold tracking-widest uppercase">
           POSITIONS
         </h1>
+        {/* Standard global controls (theme toggle, Sync Data, Update, Disconnect) —
+            every other page carries these; this StockMock-styled header dropped them
+            in the rewrite, which also meant losing the way out of the page (Disconnect)
+            and the site-wide data-freshness controls.
+            NavBar's plain-text items (Disconnect, the theme toggle) are styled for a
+            dark zinc-900 backdrop and are nearly invisible directly on this light teal
+            banner — the dark pill below gives them the backdrop they need, same as
+            they'd have on every other page. */}
+        <div className="absolute right-3 top-1/2 -translate-y-1/2 bg-zinc-900 rounded-xl px-1.5 py-1 shadow-sm">
+          <NavBar />
+        </div>
       </div>
 
       {/* ── Persistent error banner — the toasts above auto-dismiss, so a run that
