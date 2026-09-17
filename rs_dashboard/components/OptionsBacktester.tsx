@@ -120,6 +120,7 @@ const EXIT_REASON_CLS: Record<string, string> = {
   LEG_TRAIL_SL:  'bg-amber-50 text-amber-700 border border-amber-300',
   TRAIL_SL:      'bg-amber-50 text-amber-700 border border-amber-300',
   ALL_LEGS_DONE: 'bg-red-50 text-red-700 border border-red-300',
+  SQUARE_OFF_ALL: 'bg-purple-50 text-purple-700 border border-purple-300',
   OVERALL_SL:    'bg-red-100 text-red-800 border border-red-400',
   INCOMPLETE:    'bg-amber-50 text-amber-700 border border-amber-300',
   ROLL_ATM:      'bg-purple-50 text-purple-700 border border-purple-300',
@@ -251,29 +252,20 @@ export default function OptionsBacktester() {
   const [builderActionType, setBuilderActionType] = useState<'Buy' | 'Sell'>('Sell');
   const [builderStrike, setBuilderStrike] = useState('ATM');
   const [builderLots, setBuilderLots] = useState(1);
-  const [builderExpiry, setBuilderExpiry] = useState('Weekly');
 
   // ── Underlying & execution options
-  const [atmUnderlying, setAtmUnderlying] = useState<'spot' | 'futures'>('spot');
   const [selectedMainIndex, setSelectedMainIndex] = useState('Nifty');
   const [squareOffMode, setSquareOffMode] = useState<'one_leg' | 'all_legs'>('one_leg');
-  const [waitAndTrade, setWaitAndTrade] = useState(false);
-  const [moveSlToCost, setMoveSlToCost] = useState(false);
-  const [reEntry, setReEntry] = useState(false);
-  const [associatedHedge, setAssociatedHedge] = useState(false);
-  const [noReEntryAfter, setNoReEntryAfter] = useState(false);
 
   // ── Active Legs
   const [legs, setLegs] = useState<LegConfig[]>(DEFAULT_STOCKMOCK_LEGS);
   const [lotSize, setLotSize] = useState(65);
 
   // ── Strategy timing & exits
-  const [rangeBreakout, setRangeBreakout] = useState(false);
   const [entryH, setEntryH] = useState('9');
   const [entryM, setEntryM] = useState('22');
   const [entryS, setEntryS] = useState('00');
 
-  const [exitDayType, setExitDayType] = useState<'same_day' | 'next_day'>('same_day');
   const [exitH, setExitH] = useState('15');
   const [exitM, setExitM] = useState('15');
   const [exitS, setExitS] = useState('00');
@@ -506,6 +498,7 @@ export default function OptionsBacktester() {
           max_rolls: maxRolls,
           scalp_floor_pct: scalpFloorPct,
           trail_sl_pct: protectProfitsActive ? trailSlPct : 0,
+          square_off_mode: squareOffMode,
         }),
       });
 
@@ -650,7 +643,9 @@ export default function OptionsBacktester() {
 
         {/* ── Position Builder Controls Row ── */}
         <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-7 gap-3 items-end pt-1 pb-3">
-          {/* 1. Select Index */}
+          {/* 1. Select Index — only Nifty has local option data (see the notice below
+               the leg rows); the others are shown per the StockMock layout but disabled
+               rather than silently accepted and ignored. */}
           <div>
             <label className="block text-[11px] text-slate-500 font-medium mb-1">Select Index:</label>
             <select
@@ -659,9 +654,9 @@ export default function OptionsBacktester() {
               className="w-full bg-white border border-slate-300 rounded px-2.5 py-1.5 text-xs text-slate-700 font-medium focus:outline-none focus:border-[#54b4c7] shadow-sm"
             >
               <option value="Nifty">Nifty</option>
-              <option value="Banknifty">Banknifty</option>
-              <option value="FinNifty">FinNifty</option>
-              <option value="Sensex">Sensex</option>
+              <option value="Banknifty" disabled title="No local Banknifty option data">Banknifty (no data)</option>
+              <option value="FinNifty" disabled title="No local FinNifty option data">FinNifty (no data)</option>
+              <option value="Sensex" disabled title="No local Sensex option data">Sensex (no data)</option>
             </select>
           </div>
 
@@ -793,13 +788,15 @@ export default function OptionsBacktester() {
             />
           </div>
 
-          {/* 7. Expiry Type */}
+          {/* 7. Expiry Type — same single-expiry-cycle limitation as the per-leg
+               dropdown below; the engine always trades the nearest weekly cycle. */}
           <div>
             <label className="block text-[11px] text-slate-500 font-medium mb-1">Expiry Type:</label>
             <select
-              value={builderExpiry}
-              onChange={e => setBuilderExpiry(e.target.value)}
-              className="w-full bg-white border border-slate-300 rounded px-2.5 py-1.5 text-xs text-slate-700 font-medium focus:outline-none focus:border-[#54b4c7] shadow-sm"
+              disabled
+              defaultValue="Weekly"
+              title="Not implemented yet — the engine always trades the nearest weekly expiry"
+              className="w-full bg-slate-100 border border-slate-300 rounded px-2.5 py-1.5 text-xs text-slate-400 font-medium cursor-not-allowed"
             >
               <option value="Weekly">Weekly</option>
               <option value="Next Weekly">Next Weekly</option>
@@ -823,24 +820,18 @@ export default function OptionsBacktester() {
         <div className="flex items-center justify-between flex-wrap gap-4 pt-3 pb-2 text-xs text-slate-600">
           {/* Left: Spot / Futures toggle & Index */}
           <div className="flex items-center gap-4">
-            <div className="flex items-center gap-2">
-              <button
-                type="button"
-                onClick={() => setAtmUnderlying(atmUnderlying === 'spot' ? 'futures' : 'spot')}
-                className="flex items-center gap-1.5 cursor-pointer text-xs"
-              >
-                <span className={atmUnderlying === 'spot' ? 'font-semibold text-slate-800' : 'text-slate-500'}>
+            <div className="flex items-center gap-2" title="Futures-as-ATM needs a futures price series; the option data here only carries spot">
+              <span className="flex items-center gap-1.5 text-xs cursor-not-allowed opacity-50">
+                <span className="font-semibold text-slate-800">
                   Use Spot as ATM
                 </span>
-                <div className="w-7 h-4 bg-slate-300 rounded-full relative p-0.5 transition-colors">
-                  <div className={`w-3 h-3 rounded-full bg-white shadow-sm transition-transform ${
-                    atmUnderlying === 'futures' ? 'translate-x-3 bg-[#54b4c7]' : ''
-                  }`} />
+                <div className="w-7 h-4 bg-slate-300 rounded-full relative p-0.5">
+                  <div className="w-3 h-3 rounded-full bg-white shadow-sm" />
                 </div>
-                <span className={atmUnderlying === 'futures' ? 'font-semibold text-slate-800' : 'text-slate-500'}>
+                <span className="text-slate-500">
                   Use Futures as ATM
                 </span>
-              </button>
+              </span>
             </div>
 
             <div className="flex items-center gap-1.5">
@@ -851,8 +842,8 @@ export default function OptionsBacktester() {
                 className="bg-white border border-slate-300 rounded px-2 py-0.5 text-xs text-slate-700 font-medium focus:outline-none"
               >
                 <option value="Nifty">Nifty</option>
-                <option value="Banknifty">Banknifty</option>
-                <option value="Sensex">Sensex</option>
+                <option value="Banknifty" disabled title="No local Banknifty option data">Banknifty (no data)</option>
+                <option value="Sensex" disabled title="No local Sensex option data">Sensex (no data)</option>
               </select>
             </div>
           </div>
@@ -885,43 +876,23 @@ export default function OptionsBacktester() {
             </div>
 
             <div className="flex items-center gap-3">
-              <label className="flex items-center gap-1 cursor-pointer">
-                <input
-                  type="checkbox"
-                  checked={waitAndTrade}
-                  onChange={e => setWaitAndTrade(e.target.checked)}
-                  className="w-3.5 h-3.5 accent-[#54b4c7] rounded"
-                />
+              <label className="flex items-center gap-1 cursor-not-allowed opacity-50" title="Not implemented yet — needs a re-architected entry trigger">
+                <input type="checkbox" disabled className="w-3.5 h-3.5 rounded" />
                 <span>Wait &amp; Trade</span>
                 <Info className="w-3 h-3 text-slate-400" />
               </label>
-              <label className="flex items-center gap-1 cursor-pointer">
-                <input
-                  type="checkbox"
-                  checked={moveSlToCost}
-                  onChange={e => setMoveSlToCost(e.target.checked)}
-                  className="w-3.5 h-3.5 accent-[#54b4c7] rounded"
-                />
+              <label className="flex items-center gap-1 cursor-not-allowed opacity-50" title="Not implemented yet — needs a defined profit threshold that moves the SL">
+                <input type="checkbox" disabled className="w-3.5 h-3.5 rounded" />
                 <span>Move SL to Cost</span>
                 <Info className="w-3 h-3 text-slate-400" />
               </label>
-              <label className="flex items-center gap-1 cursor-pointer">
-                <input
-                  type="checkbox"
-                  checked={reEntry}
-                  onChange={e => setReEntry(e.target.checked)}
-                  className="w-3.5 h-3.5 accent-[#54b4c7] rounded"
-                />
+              <label className="flex items-center gap-1 cursor-not-allowed opacity-50" title="Not implemented yet — needs multi-entry-per-day simulation">
+                <input type="checkbox" disabled className="w-3.5 h-3.5 rounded" />
                 <span>Re-Entry / Re-Execute</span>
                 <Info className="w-3 h-3 text-slate-400" />
               </label>
-              <label className="flex items-center gap-1 cursor-pointer">
-                <input
-                  type="checkbox"
-                  checked={associatedHedge}
-                  onChange={e => setAssociatedHedge(e.target.checked)}
-                  className="w-3.5 h-3.5 accent-[#54b4c7] rounded"
-                />
+              <label className="flex items-center gap-1 cursor-not-allowed opacity-50" title="Not implemented yet — needs auto-generated hedge legs">
+                <input type="checkbox" disabled className="w-3.5 h-3.5 rounded" />
                 <span>Associated Hedge</span>
               </label>
             </div>
@@ -1120,17 +1091,25 @@ export default function OptionsBacktester() {
                     </button>
                   )}
 
-                  {/* Journey Link */}
+                  {/* Journey Link — not implemented; a real multi-stage SL/target ladder */}
                   <button
                     type="button"
-                    onClick={() => toast.info('Journey rule toggled')}
-                    className="text-xs text-[#2596be] hover:underline font-semibold flex items-center gap-0.5 cursor-pointer"
+                    disabled
+                    title="Not implemented yet — a multi-stage SL/target ladder per leg"
+                    className="text-xs text-slate-400 font-semibold flex items-center gap-0.5 cursor-not-allowed opacity-60"
                   >
                     <Plus className="w-3.5 h-3.5 stroke-[2.5]" /> Journey
                   </button>
 
-                  {/* Expiry Dropdown */}
-                  <select className="bg-white border border-slate-300 rounded px-2 py-0.5 text-xs text-slate-700 font-medium focus:outline-none">
+                  {/* Expiry Dropdown — the engine simulates one expiry cycle at a time for
+                      every leg together, so a per-leg expiry can't mean anything until it
+                      supports calendar/diagonal spreads across two different expiries. */}
+                  <select
+                    disabled
+                    defaultValue="Weekly"
+                    title="Not implemented yet — every leg shares the same expiry cycle"
+                    className="bg-slate-100 border border-slate-300 rounded px-2 py-0.5 text-xs text-slate-400 font-medium cursor-not-allowed"
+                  >
                     <option value="Weekly">Weekly</option>
                     <option value="Next Weekly">Next Weekly</option>
                     <option value="Monthly">Monthly</option>
@@ -1161,16 +1140,12 @@ export default function OptionsBacktester() {
           })}
         </div>
 
-        {/* No ReEntry toggle on right */}
+        {/* No ReEntry toggle on right — moot while Re-Entry/Re-Execute and Journey
+             above are themselves disabled */}
         <div className="flex justify-end items-center gap-2 py-1 text-xs text-slate-600">
-          <label className="flex items-center gap-2 cursor-pointer">
-            <div
-              onClick={() => setNoReEntryAfter(!noReEntryAfter)}
-              className="w-7 h-4 bg-slate-300 rounded-full relative p-0.5 transition-colors cursor-pointer"
-            >
-              <div className={`w-3 h-3 rounded-full bg-white shadow-sm transition-transform ${
-                noReEntryAfter ? 'translate-x-3 bg-[#54b4c7]' : ''
-              }`} />
+          <label className="flex items-center gap-2 cursor-not-allowed opacity-50" title="Depends on Re-Entry/Re-Execute and Journey, both not implemented yet">
+            <div className="w-7 h-4 bg-slate-300 rounded-full relative p-0.5">
+              <div className="w-3 h-3 rounded-full bg-white shadow-sm" />
             </div>
             <span>No ReEntry/ReExecute/Journey After</span>
           </label>
@@ -1180,13 +1155,8 @@ export default function OptionsBacktester() {
         <div className="grid grid-cols-1 md:grid-cols-2 gap-8 my-4 pt-2">
           {/* Left Column: Range Breakout & Entry Time */}
           <div className="flex flex-col gap-2">
-            <label className="flex items-center gap-1.5 text-xs text-slate-600 cursor-pointer">
-              <input
-                type="checkbox"
-                checked={rangeBreakout}
-                onChange={e => setRangeBreakout(e.target.checked)}
-                className="w-3.5 h-3.5 accent-[#54b4c7] rounded"
-              />
+            <label className="flex items-center gap-1.5 text-xs text-slate-600 cursor-not-allowed opacity-50" title="Not implemented yet — needs opening-range computation + breakout-triggered entry">
+              <input type="checkbox" disabled className="w-3.5 h-3.5 rounded" />
               <span>Range Breakout</span>
               <Info className="w-3 h-3 text-slate-400" />
             </label>
@@ -1217,7 +1187,9 @@ export default function OptionsBacktester() {
                 <select
                   value={entryS}
                   onChange={e => setEntryS(e.target.value)}
-                  className="bg-white border border-slate-300 rounded px-2 py-1 text-xs text-slate-700 font-medium focus:outline-none"
+                  disabled
+                  title="Option data is 1-minute resolution — seconds aren't meaningful"
+                  className="bg-slate-100 border border-slate-300 rounded px-2 py-1 text-xs text-slate-400 font-medium cursor-not-allowed"
                 >
                   {['00', '15', '30', '45'].map(s => (
                     <option key={s} value={s}>{s}</option>
@@ -1259,25 +1231,13 @@ export default function OptionsBacktester() {
 
           {/* Right Column: Same Day / Next Day & Exit Time */}
           <div className="flex flex-col gap-2">
-            <div className="flex items-center gap-4 text-xs text-slate-600">
-              <label className="flex items-center gap-1 cursor-pointer">
-                <input
-                  type="radio"
-                  name="exitDay"
-                  checked={exitDayType === 'same_day'}
-                  onChange={() => setExitDayType('same_day')}
-                  className="w-3.5 h-3.5 accent-[#54b4c7]"
-                />
+            <div className="flex items-center gap-4 text-xs text-slate-600" title="Use the INTRADAY / POSITIONAL toggle at the bottom of the page for this instead">
+              <label className="flex items-center gap-1 cursor-not-allowed opacity-50">
+                <input type="radio" name="exitDay" checked disabled className="w-3.5 h-3.5" />
                 <span>Same Day</span>
               </label>
-              <label className="flex items-center gap-1 cursor-pointer">
-                <input
-                  type="radio"
-                  name="exitDay"
-                  checked={exitDayType === 'next_day'}
-                  onChange={() => setExitDayType('next_day')}
-                  className="w-3.5 h-3.5 accent-[#54b4c7]"
-                />
+              <label className="flex items-center gap-1 cursor-not-allowed opacity-50">
+                <input type="radio" name="exitDay" disabled className="w-3.5 h-3.5" />
                 <span>Next Day (BTST/STBT)</span>
               </label>
             </div>
@@ -1308,7 +1268,9 @@ export default function OptionsBacktester() {
                 <select
                   value={exitS}
                   onChange={e => setExitS(e.target.value)}
-                  className="bg-white border border-slate-300 rounded px-2 py-1 text-xs text-slate-700 font-medium focus:outline-none"
+                  disabled
+                  title="Option data is 1-minute resolution — seconds aren't meaningful"
+                  className="bg-slate-100 border border-slate-300 rounded px-2 py-1 text-xs text-slate-400 font-medium cursor-not-allowed"
                 >
                   {['00', '15', '30', '45'].map(s => (
                     <option key={s} value={s}>{s}</option>

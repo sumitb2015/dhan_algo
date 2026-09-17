@@ -129,6 +129,7 @@ export async function POST(req: NextRequest) {
     '--max-rolls',          String(body.max_rolls           ?? 5),
     '--scalp-floor-pct',    String(body.scalp_floor_pct     ?? 0),
     '--trail-sl-pct',       String(body.trail_sl_pct        ?? 0),
+    '--square-off-mode',    String(body.square_off_mode     ?? 'one_leg'),
     '--status-file',        STATUS_FILE,
     '--output-file',        RESULT_FILE,
   ];

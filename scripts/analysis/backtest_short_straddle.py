@@ -457,6 +457,7 @@ def _simulate_one_day(
     max_rolls: int = 5,
     scalp_floor_pct: float = 0.0,
     trail_sl_pct: float = 0.0,
+    square_off_mode: str = "one_leg",
 ) -> dict:
     """Simulate one intraday trade over day_bars. Returns state dict."""
     leg_states: List[LegState] = [LegState() for _ in leg_configs]
@@ -668,6 +669,22 @@ def _simulate_one_day(
                     state.exit_reason = "LEG_TRAIL_SL"
                     state.struck_sl = True
 
+        # --- Square Off All Legs ---
+        # StockMock's "Square Off One Leg" (the default above) lets each leg's own
+        # SL/target/trailing-SL close independently. "Square Off All Legs" instead
+        # force-closes every still-open leg the moment any one leg exits, at that
+        # same bar's close — approximating "flatten the whole position together."
+        if square_off_mode == "all_legs":
+            any_leg_closed = any(not state.is_open for state in leg_states)
+            if any_leg_closed:
+                for i, (leg, state) in enumerate(zip(leg_configs, leg_states)):
+                    if not state.is_open:
+                        continue
+                    slip = slip_sell_exit if leg.position == "sell" else slip_buy_exit
+                    state.exit_price = leg_prices[i][3] * slip
+                    state.exit_reason = "SQUARE_OFF_ALL"
+                    state.struck_sl = True
+
         # --- Dynamic Rolling Check (ATM Buffer Roll) ---
         if adjustment_mode == "rolling_straddle" and rolls_count < max_rolls and all(s.is_open for s in leg_states):
             if roll_type == "percentage":
@@ -849,6 +866,7 @@ def run_backtest(leg_configs: List[LegConfig], cycles: List[ExpiryCycle],
                  max_rolls: int = 5,
                  scalp_floor_pct: float = 0.0,
                  trail_sl_pct: float = 0.0,
+                 square_off_mode: str = "one_leg",
                  status_file: Optional[str] = None):
     """
     strategy_type:
@@ -882,6 +900,7 @@ def run_backtest(leg_configs: List[LegConfig], cycles: List[ExpiryCycle],
         max_rolls=max_rolls,
         scalp_floor_pct=scalp_floor_pct,
         trail_sl_pct=trail_sl_pct,
+        square_off_mode=square_off_mode,
     )
 
     trade_results = []
@@ -1293,6 +1312,7 @@ def main():
     parser.add_argument("--max-rolls",          type=int,   default=5)
     parser.add_argument("--scalp-floor-pct",    type=float, default=0.0)
     parser.add_argument("--trail-sl-pct",       type=float, default=0.0)
+    parser.add_argument("--square-off-mode",    default="one_leg", choices=["one_leg", "all_legs"])
     parser.add_argument("--status-file",        default=None)
     parser.add_argument("--output-file",        default=None)
     args = parser.parse_args()
@@ -1335,6 +1355,7 @@ def main():
         max_rolls=args.max_rolls,
         scalp_floor_pct=args.scalp_floor_pct,
         trail_sl_pct=args.trail_sl_pct,
+        square_off_mode=args.square_off_mode,
         status_file=args.status_file,
     )
     result["params"] = {
@@ -1355,6 +1376,7 @@ def main():
         "max_rolls":          args.max_rolls,
         "scalp_floor_pct":    args.scalp_floor_pct,
         "trail_sl_pct":       args.trail_sl_pct,
+        "square_off_mode":    args.square_off_mode,
     }
     if db_conn:
         db_conn.close()
