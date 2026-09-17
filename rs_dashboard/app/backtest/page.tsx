@@ -13,15 +13,26 @@ const BacktestCharts = dynamic(() => import('@/components/BacktestCharts'), {
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
+type StrikeMode = 'offset' | 'atm_percent' | 'closest_premium' | 'straddle_width' | 'closest_delta';
+
 interface LegConfig {
   option_type: 'CE' | 'PE';
   position: 'sell' | 'buy';
   lots: number;
-  strike: string;          // offset string, premium or delta value
+  strike: string;          // offset string, or a %/premium/delta value depending on strike_type
   leg_sl_pct: number;      // 0 = disabled
   leg_target_pct: number;  // 0 = disabled
-  strike_type?: 'offset' | 'closest_premium' | 'closest_delta';
+  leg_trail_sl_pct?: number; // 0 = disabled — arms once this leg is 15%+ favorable, then trails by this %
+  strike_type?: StrikeMode;
 }
+
+const STRIKE_MODE_LABEL: Record<StrikeMode, string> = {
+  offset: 'ATM Point',
+  atm_percent: 'ATM Percent',
+  closest_premium: 'Closest Premium (CP)',
+  straddle_width: 'Straddle Width',
+  closest_delta: 'Closest Delta',
+};
 
 interface LegResult {
   option_type: string;
@@ -101,6 +112,7 @@ const EXIT_REASON_CLS: Record<string, string> = {
   LEG_TARGET:    'bg-emerald-500/10 text-emerald-400',
   EOD:           'bg-sky-500/10 text-sky-300',
   LEG_SL:        'bg-red-500/10 text-red-300',
+  LEG_TRAIL_SL:  'bg-amber-500/10 text-amber-300 border border-amber-500/30',
   TRAIL_SL:      'bg-amber-500/10 text-amber-300 border border-amber-500/30',
   ALL_LEGS_DONE: 'bg-red-500/10 text-red-300',
   OVERALL_SL:    'bg-red-700/10 text-red-400',
@@ -229,153 +241,156 @@ function LegCard({
 }) {
   const isCall = leg.option_type === 'CE';
   const isSell = leg.position === 'sell';
-  const slOn  = leg.leg_sl_pct > 0;
-  const tgtOn = leg.leg_target_pct > 0;
+  const strikeMode = leg.strike_type || 'offset';
+  const slOn    = leg.leg_sl_pct > 0;
+  const tgtOn   = leg.leg_target_pct > 0;
+  const trailOn = (leg.leg_trail_sl_pct ?? 0) > 0;
+
+  const strikePlaceholder =
+    strikeMode === 'atm_percent'    ? 'e.g. 2 (%)' :
+    strikeMode === 'closest_premium' ? 'e.g. 100 (premium)' :
+    strikeMode === 'straddle_width'  ? 'e.g. 30 (% of straddle)' :
+    strikeMode === 'closest_delta'   ? 'e.g. 30 (delta)' : '';
+
+  const strikeSummary =
+    strikeMode === 'atm_percent'     ? `${leg.strike}% OTM` :
+    strikeMode === 'closest_premium' ? `Prem ${leg.strike}` :
+    strikeMode === 'straddle_width'  ? `SW ${leg.strike}%` :
+    strikeMode === 'closest_delta'   ? `Δ ${leg.strike}` : leg.strike;
 
   return (
-    <div className="bg-zinc-900/70 border border-zinc-800 rounded-xl p-3 flex flex-col gap-2">
-      {/* Row 1: label + remove */}
-      <div className="flex items-center justify-between">
-        <span className="text-[10px] font-bold text-zinc-500">LEG {index + 1}</span>
+    <div className="bg-zinc-900/70 border border-zinc-800 rounded-lg p-2.5 flex flex-col gap-2">
+      {/* Row 1: compact identity strip — L{n} · lots · buy/sell · CE/PE · strike, remove at end */}
+      <div className="flex items-center gap-1.5 flex-wrap">
+        <span className="shrink-0 text-[9px] font-black text-zinc-600 bg-zinc-950 border border-zinc-800 rounded px-1 py-0.5">L{index + 1}</span>
+        <input
+          type="number" min={1} value={leg.lots}
+          onChange={e => onChange({ ...leg, lots: Math.max(1, Number(e.target.value)) })}
+          className="w-11 shrink-0 bg-zinc-950 border border-zinc-700 rounded px-1 py-0.5 text-[11px] text-zinc-100 text-center focus:outline-none focus:border-emerald-500"
+          title="Lots"
+        />
+        <button
+          onClick={() => onChange({ ...leg, position: isSell ? 'buy' : 'sell' })}
+          className={`shrink-0 text-[9px] font-black rounded px-1.5 py-0.5 transition-colors ${
+            isSell ? 'bg-red-700 text-oncolor' : 'bg-emerald-700 text-oncolor'
+          }`}
+        >
+          {isSell ? 'SELL' : 'BUY'}
+        </button>
+        <button
+          onClick={() => onChange({ ...leg, option_type: isCall ? 'PE' : 'CE' })}
+          className={`shrink-0 text-[9px] font-black rounded px-1.5 py-0.5 transition-colors ${
+            isCall ? 'bg-sky-600 text-oncolor' : 'bg-amber-600 text-oncolor'
+          }`}
+        >
+          {leg.option_type}
+        </button>
+        <span className="text-[9px] font-bold text-zinc-400 bg-zinc-950 border border-zinc-800 rounded px-1.5 py-0.5 truncate max-w-[90px]" title={strikeSummary}>
+          {strikeSummary}
+        </span>
         {canRemove && (
-          <button onClick={onRemove} className="text-[10px] text-zinc-600 hover:text-red-400 font-bold transition-colors">✕</button>
+          <button onClick={onRemove} className="ml-auto shrink-0 text-[11px] text-zinc-600 hover:text-red-400 font-bold transition-colors leading-none">✕</button>
         )}
       </div>
 
-      {/* Row 2: option type + position toggles */}
-      <div className="grid grid-cols-2 gap-1.5">
-        <Toggle
-          value={leg.option_type}
-          onChange={v => onChange({ ...leg, option_type: v as 'CE' | 'PE' })}
-          options={[
-            { label: 'CE', value: 'CE', activeClass: 'bg-sky-600 text-oncolor' },
-            { label: 'PE', value: 'PE', activeClass: 'bg-amber-600 text-oncolor' },
-          ]}
-        />
-        <Toggle
-          value={leg.position}
-          onChange={v => onChange({ ...leg, position: v as 'sell' | 'buy' })}
-          options={[
-            { label: 'Sell', value: 'sell', activeClass: 'bg-red-700 text-oncolor' },
-            { label: 'Buy',  value: 'buy',  activeClass: 'bg-emerald-700 text-oncolor' },
-          ]}
-        />
-      </div>
-
-      {/* Row 2.5: strike mode */}
-      <div>
-        <div className="text-[9px] font-bold text-zinc-600 uppercase mb-1">Strike Mode</div>
+      {/* Row 2: strike mode + strike value */}
+      <div className="grid grid-cols-[1fr_auto] gap-1.5">
         <select
-          value={leg.strike_type || 'offset'}
+          value={strikeMode}
           onChange={e => {
-            const newType = e.target.value as 'offset' | 'closest_premium' | 'closest_delta';
-            let defaultStrike = leg.strike;
-            if (newType === 'offset') defaultStrike = 'ATM';
-            else if (newType === 'closest_premium') defaultStrike = '100';
-            else if (newType === 'closest_delta') defaultStrike = '30';
-            onChange({ ...leg, strike_type: newType, strike: defaultStrike });
+            const newType = e.target.value as StrikeMode;
+            const defaults: Record<StrikeMode, string> = {
+              offset: 'ATM', atm_percent: '2', closest_premium: '100', straddle_width: '30', closest_delta: '30',
+            };
+            onChange({ ...leg, strike_type: newType, strike: defaults[newType] });
           }}
           className={inputSmCls}
         >
-          <option value="offset">ATM Offset</option>
-          <option value="closest_premium">Closest Premium</option>
-          <option value="closest_delta">Closest Delta</option>
+          {(Object.keys(STRIKE_MODE_LABEL) as StrikeMode[]).map(m => (
+            <option key={m} value={m}>{STRIKE_MODE_LABEL[m]}</option>
+          ))}
         </select>
-      </div>
-
-      {/* Row 3: strike + lots */}
-      <div className="grid grid-cols-2 gap-2">
-        <div>
-          <div className="text-[9px] font-bold text-zinc-600 uppercase mb-1">Strike</div>
-          {(!leg.strike_type || leg.strike_type === 'offset') ? (
-            <select
-              value={leg.strike}
-              onChange={e => onChange({ ...leg, strike: e.target.value })}
-              className={inputSmCls}
-            >
-              {STRIKE_OPTIONS.map(s => <option key={s} value={s}>{s}</option>)}
-            </select>
-          ) : (
-            <input
-              type="number"
-              min={1}
-              value={leg.strike}
-              onChange={e => onChange({ ...leg, strike: e.target.value })}
-              className={inputSmCls}
-              placeholder={leg.strike_type === 'closest_premium' ? 'e.g. 100' : 'e.g. 30'}
-            />
-          )}
-        </div>
-        <div>
-          <div className="text-[9px] font-bold text-zinc-600 uppercase mb-1">Lots</div>
+        {strikeMode === 'offset' ? (
+          <select
+            value={leg.strike}
+            onChange={e => onChange({ ...leg, strike: e.target.value })}
+            className={`${inputSmCls} w-24`}
+          >
+            {STRIKE_OPTIONS.map(s => <option key={s} value={s}>{s}</option>)}
+          </select>
+        ) : (
           <input
-            type="number" min={1} value={leg.lots}
-            onChange={e => onChange({ ...leg, lots: Math.max(1, Number(e.target.value)) })}
-            className={inputSmCls}
+            type="number"
+            min={0}
+            value={leg.strike}
+            onChange={e => onChange({ ...leg, strike: e.target.value })}
+            className={`${inputSmCls} w-24`}
+            placeholder={strikePlaceholder}
           />
-        </div>
-      </div>
-
-      {/* Row 4: toggleable Leg SL */}
-      <div className="flex items-center gap-2">
-        <label className="flex items-center gap-1.5 cursor-pointer select-none">
-          <input
-            type="checkbox"
-            checked={slOn}
-            onChange={e => onChange({ ...leg, leg_sl_pct: e.target.checked ? 40 : 0 })}
-            className="w-3 h-3 accent-red-500"
-          />
-          <span className="text-[10px] font-bold text-zinc-400">Leg SL</span>
-        </label>
-        {slOn && (
-          <div className="flex items-center gap-1 ml-auto">
-            <input
-              type="number" min={1} step={1} value={leg.leg_sl_pct}
-              onChange={e => onChange({ ...leg, leg_sl_pct: Number(e.target.value) })}
-              className="w-16 bg-zinc-800 border border-zinc-700 rounded px-2 py-0.5 text-xs text-zinc-100 focus:outline-none focus:border-red-500"
-            />
-            <span className="text-[10px] text-zinc-500">%</span>
-          </div>
         )}
       </div>
 
-      {/* Row 5: toggleable Leg Target */}
-      <div className="flex items-center gap-2">
-        <label className="flex items-center gap-1.5 cursor-pointer select-none">
-          <input
-            type="checkbox"
-            checked={tgtOn}
-            onChange={e => onChange({ ...leg, leg_target_pct: e.target.checked ? 50 : 0 })}
-            className="w-3 h-3 accent-emerald-500"
-          />
-          <span className="text-[10px] font-bold text-zinc-400">Leg Target</span>
-        </label>
-        {tgtOn && (
-          <div className="flex items-center gap-1 ml-auto">
-            <input
-              type="number" min={1} step={1} value={leg.leg_target_pct}
-              onChange={e => onChange({ ...leg, leg_target_pct: Number(e.target.value) })}
-              className="w-16 bg-zinc-800 border border-zinc-700 rounded px-2 py-0.5 text-xs text-zinc-100 focus:outline-none focus:border-emerald-500"
-            />
-            <span className="text-[10px] text-zinc-500">%</span>
-          </div>
-        )}
+      {/* Row 3: inline "+chip" toggles — Target / Stop Loss / Trailing SL, StockMock-style */}
+      <div className="flex items-center gap-1.5 flex-wrap">
+        <LegChip
+          label="Target"
+          active={tgtOn}
+          activeClass="bg-emerald-500/10 text-emerald-400 border-emerald-500/30"
+          value={leg.leg_target_pct}
+          onToggle={() => onChange({ ...leg, leg_target_pct: tgtOn ? 0 : 50 })}
+          onValueChange={v => onChange({ ...leg, leg_target_pct: v })}
+        />
+        <LegChip
+          label="Stop Loss"
+          active={slOn}
+          activeClass="bg-red-500/10 text-red-400 border-red-500/30"
+          value={leg.leg_sl_pct}
+          onToggle={() => onChange({ ...leg, leg_sl_pct: slOn ? 0 : 40 })}
+          onValueChange={v => onChange({ ...leg, leg_sl_pct: v })}
+        />
+        <LegChip
+          label="Trail SL"
+          active={trailOn}
+          activeClass="bg-amber-500/10 text-amber-400 border-amber-500/30"
+          value={leg.leg_trail_sl_pct ?? 0}
+          onToggle={() => onChange({ ...leg, leg_trail_sl_pct: trailOn ? 0 : 10 })}
+          onValueChange={v => onChange({ ...leg, leg_trail_sl_pct: v })}
+        />
       </div>
+    </div>
+  );
+}
 
-      {/* Row 6: summary tags */}
-      <div className="flex items-center gap-1 flex-wrap">
-        <span className={`text-[9px] font-bold rounded px-1.5 py-0.5 border ${
-          isCall ? 'bg-sky-500/10 text-sky-300 border-sky-500/20' : 'bg-amber-500/10 text-amber-300 border-amber-500/20'
-        }`}>{leg.option_type}</span>
-        <span className={`text-[9px] font-bold rounded px-1.5 py-0.5 border ${
-          isSell ? 'bg-red-500/10 text-red-300 border-red-500/20' : 'bg-emerald-500/10 text-emerald-300 border-emerald-500/20'
-        }`}>{isSell ? 'SELL' : 'BUY'}</span>
-        <span className="text-[9px] font-bold bg-zinc-800 text-zinc-400 rounded px-1.5 py-0.5 border border-zinc-700">
-          {leg.strike_type === 'closest_premium' ? `Prem: ${leg.strike}` : leg.strike_type === 'closest_delta' ? `Delta: ${leg.strike}` : leg.strike}
-        </span>
-        {slOn  && <span className="text-[9px] font-bold bg-red-500/10 text-red-400 rounded px-1.5 py-0.5 border border-red-500/20">SL {leg.leg_sl_pct}%</span>}
-        {tgtOn && <span className="text-[9px] font-bold bg-emerald-500/10 text-emerald-400 rounded px-1.5 py-0.5 border border-emerald-500/20">TGT {leg.leg_target_pct}%</span>}
-      </div>
+// A "+ Target Profit" style toggle chip: click the "+" label to arm it, which swaps
+// it for a compact % input inline — same interaction StockMock uses per leg row.
+function LegChip({ label, active, activeClass, value, onToggle, onValueChange }: {
+  label: string;
+  active: boolean;
+  activeClass: string;
+  value: number;
+  onToggle: () => void;
+  onValueChange: (v: number) => void;
+}) {
+  if (!active) {
+    return (
+      <button
+        onClick={onToggle}
+        className="text-[9px] font-bold text-zinc-500 hover:text-zinc-300 border border-dashed border-zinc-700 rounded px-1.5 py-0.5 transition-colors"
+      >
+        + {label}
+      </button>
+    );
+  }
+  return (
+    <div className={`flex items-center gap-1 border rounded px-1 py-0.5 ${activeClass}`}>
+      <span className="text-[9px] font-bold">{label}</span>
+      <input
+        type="number" min={0} step={1} value={value}
+        onChange={e => onValueChange(Number(e.target.value))}
+        className="w-9 bg-transparent text-[10px] text-inherit text-right focus:outline-none"
+      />
+      <span className="text-[9px]">%</span>
+      <button onClick={onToggle} className="text-[10px] leading-none hover:opacity-70">✕</button>
     </div>
   );
 }

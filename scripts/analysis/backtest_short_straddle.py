@@ -48,7 +48,8 @@ class LegConfig:
     strike: str             # "ATM", "ATM+1", "ATM-2", etc. or target value
     leg_sl_pct: float       # 0 = disabled
     leg_target_pct: float = 0.0  # 0 = disabled
-    strike_type: str = "offset"  # "offset", "closest_premium", or "closest_delta"
+    leg_trail_sl_pct: float = 0.0  # 0 = disabled — see the trailing-SL block below for the activation rule
+    strike_type: str = "offset"  # "offset", "atm_percent", "closest_premium", "straddle_width", or "closest_delta"
 
 
 # ---------------------------------------------------------------------------
@@ -325,6 +326,7 @@ class LegState:
     struck_sl: bool = False
     struck_target: bool = False
     strike: float = 0.0
+    peak_favorable_pct: float = 0.0  # this leg's own best favorable move since entry, for trailing SL
 
     @property
     def is_open(self) -> bool:
@@ -512,7 +514,7 @@ def _simulate_one_day(
                 ]
                 
                 strike_type_val = getattr(leg, "strike_type", "offset")
-                
+
                 # 1. Closest Premium Strike Selection
                 if strike_type_val == "closest_premium":
                     try:
@@ -521,7 +523,39 @@ def _simulate_one_day(
                         state.strike = leg_candidates[0][0] if leg_candidates else atm_strike
                     except Exception:
                         state.strike = atm_strike
-                
+
+                # 1b. ATM Percent Strike Selection — leg.strike is a % distance from
+                # spot (e.g. "2" = 2% OTM in the natural direction for that option
+                # type), snapped to the nearest listed strike rather than the
+                # nearest STRIKE_STEP multiple, since illiquid wings can be missing.
+                elif strike_type_val == "atm_percent":
+                    try:
+                        pct = float(leg.strike) / 100.0
+                        direction = 1 if leg.option_type == "CE" else -1
+                        target_strike = ref_bar.spot * (1 + direction * pct)
+                        candidates_stk = [stk for stk, _ in leg_candidates]
+                        state.strike = min(candidates_stk, key=lambda s: abs(s - target_strike)) \
+                            if candidates_stk else atm_strike
+                    except Exception:
+                        state.strike = atm_strike
+
+                # 1c. Straddle Width Strike Selection — leg.strike is a % of the
+                # ATM straddle premium (CE ATM price + PE ATM price); the strike
+                # whose own premium is closest to that target is picked, same
+                # candidate-matching as Closest Premium but with a computed target.
+                elif strike_type_val == "straddle_width":
+                    try:
+                        width_pct = float(leg.strike) / 100.0
+                        atm_ce = next((p for o, s, p in available_strikes_and_prices
+                                       if o == "CE" and s == atm_strike), 0.0)
+                        atm_pe = next((p for o, s, p in available_strikes_and_prices
+                                       if o == "PE" and s == atm_strike), 0.0)
+                        target_premium = (atm_ce + atm_pe) * width_pct
+                        leg_candidates.sort(key=lambda x: (abs(x[1] - target_premium), x[1]))
+                        state.strike = leg_candidates[0][0] if leg_candidates else atm_strike
+                    except Exception:
+                        state.strike = atm_strike
+
                 # 2. Closest Delta Strike Selection
                 elif strike_type_val == "closest_delta":
                     try:
@@ -615,6 +649,24 @@ def _simulate_one_day(
                     state.exit_price = state.entry_price * (1 + leg.leg_target_pct / 100) * slip
                     state.exit_reason = "LEG_TARGET"
                     state.struck_target = True
+
+            # --- Per-leg Trailing SL ---
+            # Mirrors the strategy-level trail_sl_pct pattern below (15% peak-profit
+            # floor before trailing arms, then exit once the retracement from this
+            # leg's own peak favorable move reaches leg_trail_sl_pct) but tracked
+            # per leg instead of on the combined net credit.
+            if state.is_open and leg.leg_trail_sl_pct > 0 and state.entry_price > 0:
+                if leg.position == "sell":
+                    favorable_pct = (state.entry_price - leg_close) / state.entry_price * 100
+                else:
+                    favorable_pct = (leg_close - state.entry_price) / state.entry_price * 100
+                if favorable_pct > state.peak_favorable_pct:
+                    state.peak_favorable_pct = favorable_pct
+                if (state.peak_favorable_pct >= 15.0
+                        and (state.peak_favorable_pct - favorable_pct) >= leg.leg_trail_sl_pct):
+                    state.exit_price = leg_close * slip
+                    state.exit_reason = "LEG_TRAIL_SL"
+                    state.struck_sl = True
 
         # --- Dynamic Rolling Check (ATM Buffer Roll) ---
         if adjustment_mode == "rolling_straddle" and rolls_count < max_rolls and all(s.is_open for s in leg_states):
