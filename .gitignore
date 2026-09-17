@@ -65,6 +65,10 @@ debug/market_hub/
 # Nested clones under scratch/
 scratch/rrg-lite-clone/
 
+# Generated OpenStatz backtest tearsheets (scripts/analysis/vectorbt_engine/,
+# backtest_momentum_portfolio.py) — regenerated on every run, not source.
+*_tearsheet.html
+
 # Debug Scripts
 debug_*.py
 temp_*.py

@@ -62,10 +62,10 @@ nbformat==5.10.4
 nest-asyncio==1.6.0
 notebook==7.5.2
 notebook_shim==0.2.4
-numpy==2.4.1
+numpy==2.5.3
 openpyxl==3.1.5
 packaging==26.0
-pandas==3.0.0
+pandas==3.0.5
 pandocfilters==1.5.1
 parso==0.8.5
 platformdirs==4.5.1
@@ -175,3 +175,25 @@ seaborn==0.13.2
 #   venv\Scripts\python.exe -m pip install --no-deps openstatz==0.4.1
 #
 # openstatz==0.4.1
+
+# ── VectorBT backtest engine (scripts/analysis/vectorbt_engine/) ──────────────
+#
+# vectorbt 1.1.0 (the actively-maintained rewrite, not the abandoned 2021
+# release under the same PyPI name) requires pandas>=3.0.3 and numpy>=2.4.6,
+# so unlike openstatz/kotakneoapi above it upgrades this venv's pandas/numpy
+# forward rather than needing --no-deps to dodge a downgrade. It installs its
+# own numba/llvmlite (JIT), scikit-learn, dateparser, anywidget etc. normally --
+# no --no-deps needed for vectorbt itself:
+#
+#   venv\Scripts\python.exe -m pip install vectorbt==1.1.0
+#
+# pip flags one conflict after this install: pandas-ta 0.4.71b0 declares
+# numba==0.61.2 exactly, but vectorbt needs numba>=0.66 (resolved: 0.67.0).
+# Verified harmless -- pandas_ta.ema()/rsi() etc. still run clean under
+# numba 0.67.0; the pin in pandas-ta's own metadata is stale packaging, not
+# an enforced or real runtime incompatibility.
+#
+vectorbt==1.1.0
+numba==0.67.0
+llvmlite==0.49.0
+scikit-learn==1.9.1

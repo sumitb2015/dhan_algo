@@ -141,6 +141,7 @@ const NAV_GROUPS = [
       { href: '/strategies', label: 'Strategies', desc: 'Automated execution control panel' },
       { href: '/strategies-plus', label: 'Strategies+', desc: 'Advanced multi-leg algorithm inputs' },
       { href: '/backtest', label: 'Backtest', desc: 'Short straddle historical simulation' },
+      { href: '/backtest-vectorbt', label: 'VectorBT Backtester', desc: 'Vectorized EMA/RSI/Donchian/Supertrend/MACD backtests on Dhan data with Indian cost models & OpenStatz tearsheet' },
       { href: '/momentum', label: 'Momentum Portfolio', desc: 'Nifty 500 momentum investing portfolio — holdings, ranks, stops & signals' },
     ],
   },
