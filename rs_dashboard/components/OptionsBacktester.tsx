@@ -1,0 +1,1394 @@
+'use client';
+
+import React, { useState, useEffect, useMemo } from 'react';
+import NavBar from '@/components/NavBar';
+import dynamic from 'next/dynamic';
+
+// Charts only render after a backtest completes — lazy-load so recharts
+// stays out of the /backtest initial bundle.
+const BacktestCharts = dynamic(() => import('@/components/BacktestCharts'), {
+  ssr: false,
+  loading: () => <div className="h-64 bg-zinc-900/60 border border-zinc-800/60 rounded-lg animate-pulse" />,
+});
+
+// ─── Types ───────────────────────────────────────────────────────────────────
+
+type StrikeMode = 'offset' | 'atm_percent' | 'closest_premium' | 'straddle_width' | 'closest_delta';
+
+interface LegConfig {
+  option_type: 'CE' | 'PE';
+  position: 'sell' | 'buy';
+  lots: number;
+  strike: string;          // offset string, or a %/premium/delta value depending on strike_type
+  leg_sl_pct: number;      // 0 = disabled
+  leg_target_pct: number;  // 0 = disabled
+  leg_trail_sl_pct?: number; // 0 = disabled — arms once this leg is 15%+ favorable, then trails by this %
+  strike_type?: StrikeMode;
+}
+
+const STRIKE_MODE_LABEL: Record<StrikeMode, string> = {
+  offset: 'ATM Point',
+  atm_percent: 'ATM Percent',
+  closest_premium: 'Closest Premium (CP)',
+  straddle_width: 'Straddle Width',
+  closest_delta: 'Closest Delta',
+};
+
+interface LegResult {
+  option_type: string;
+  position: string;
+  strike: number;
+  lots: number;
+  entry_price: number | null;
+  exit_price: number | null;
+  pnl: number;
+  exit_reason: string;
+}
+
+interface CycleResult {
+  expiry_date: string;
+  entry_dt: string | null;
+  exit_dt: string | null;
+  entry_spot: number | null;
+  vix: number | null;
+  net_credit: number | null;
+  exit_combined: number | null;
+  pnl: number;
+  exit_reason: string;
+  is_complete: boolean;
+  rolls?: number;
+  legs: LegResult[];
+}
+
+interface BacktestSummary {
+  total_cycles: number;
+  traded_cycles: number;
+  wins: number;
+  losses: number;
+  win_rate: number;
+  total_pnl: number;
+  avg_pnl: number;
+  max_win: number;
+  max_loss: number;
+  avg_win: number;
+  avg_loss: number;
+  max_drawdown: number;
+  max_drawdown_start: string;
+  max_drawdown_end: string;
+  max_drawdown_days: number | null;
+  max_trades_in_drawdown: number;
+  max_win_streak: number;
+  max_loss_streak: number;
+  return_maxdd_ratio: number | null;
+  reward_risk_ratio: number | null;
+  expectancy: number;
+  expectancy_ratio: number | null;
+  commission_paid: number;
+}
+
+type MonthlyPnl = Record<string, Record<string, number>>;
+
+interface BacktestResult {
+  summary: BacktestSummary;
+  cycles: CycleResult[];
+  equity_curve: { date: string; cumulative_pnl: number }[];
+  monthly_pnl: MonthlyPnl;
+  params: Record<string, unknown>;
+}
+
+// ─── Constants ───────────────────────────────────────────────────────────────
+
+const STRIKE_OPTIONS = [
+  'ATM',
+  ...Array.from({ length: 10 }, (_, i) => `ATM+${i + 1}`),
+  ...Array.from({ length: 10 }, (_, i) => `ATM-${i + 1}`),
+];
+
+const MONTHS = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+
+const EXIT_REASON_CLS: Record<string, string> = {
+  TARGET:        'bg-emerald-500/10 text-emerald-300',
+  SCALP_FLOOR:   'bg-emerald-500/10 text-emerald-300 border border-emerald-500/30',
+  LEG_TARGET:    'bg-emerald-500/10 text-emerald-400',
+  EOD:           'bg-sky-500/10 text-sky-300',
+  LEG_SL:        'bg-red-500/10 text-red-300',
+  LEG_TRAIL_SL:  'bg-amber-500/10 text-amber-300 border border-amber-500/30',
+  TRAIL_SL:      'bg-amber-500/10 text-amber-300 border border-amber-500/30',
+  ALL_LEGS_DONE: 'bg-red-500/10 text-red-300',
+  OVERALL_SL:    'bg-red-700/10 text-red-400',
+  INCOMPLETE:    'bg-amber-500/10 text-amber-300',
+  ROLL_ATM:      'bg-purple-500/10 text-purple-300 border border-purple-500/30',
+  NO_ENTRY:      'bg-zinc-800 text-zinc-500',
+};
+
+const inputCls = 'w-full bg-zinc-900 border border-zinc-700 rounded-md px-2.5 py-1.5 text-xs text-zinc-100 focus:outline-none focus:border-emerald-500 transition-colors';
+const inputSmCls = 'w-full bg-zinc-800 border border-zinc-700 rounded px-2 py-1 text-xs text-zinc-100 focus:outline-none focus:border-emerald-500 transition-colors';
+
+// ─── Helpers ─────────────────────────────────────────────────────────────────
+
+function fmt(n: number) {
+  return Math.abs(n).toLocaleString('en-IN', { maximumFractionDigits: 0 });
+}
+function fmtPnl(n: number) {
+  return `${n >= 0 ? '+' : '-'}₹${fmt(n)}`;
+}
+function fmtNum(n: number | null, decimals = 2): string {
+  if (n == null) return '—';
+  return n.toFixed(decimals);
+}
+function fmtDate(iso: string | null): string {
+  return iso ? iso.slice(0, 10) : '—';
+}
+function fmtTime(iso: string | null): string {
+  return iso ? iso.slice(11, 16) : '—';
+}
+
+// Compute year-wise MDD from equity curve
+function computeYearMDD(curve: { date: string; cumulative_pnl: number }[], year: string) {
+  const pts = curve.filter(p => p.date.startsWith(year));
+  if (!pts.length) return { mdd: 0, days: null };
+  let peak = pts[0].cumulative_pnl;
+  let peakIdx = 0;
+  let mdd = 0;
+  let mddDays: number | null = null;
+  for (let i = 1; i < pts.length; i++) {
+    if (pts[i].cumulative_pnl > peak) {
+      peak = pts[i].cumulative_pnl;
+      peakIdx = i;
+    }
+    const dd = peak - pts[i].cumulative_pnl;
+    if (dd > mdd) {
+      mdd = dd;
+      try {
+        const d1 = new Date(pts[peakIdx].date);
+        const d2 = new Date(pts[i].date);
+        mddDays = Math.round((d2.getTime() - d1.getTime()) / 86400000);
+      } catch { mddDays = null; }
+    }
+  }
+  return { mdd: Math.round(mdd), days: mddDays };
+}
+
+// ─── Sub-components ───────────────────────────────────────────────────────────
+
+function StatCard({ label, value, sub, color = '' }: { label: string; value: string; sub?: string; color?: string }) {
+  return (
+    <div className="bg-zinc-900/60 border border-zinc-800 rounded-xl p-3 transition-colors hover:border-zinc-700">
+      <div className="text-[9px] font-bold text-zinc-500 uppercase tracking-[0.14em] mb-1">{label}</div>
+      <div className={`text-base font-mono font-bold tabular-nums leading-tight ${color || 'text-zinc-100'}`}>{value}</div>
+      {sub && <div className="text-[10px] text-zinc-500 mt-0.5 font-medium">{sub}</div>}
+    </div>
+  );
+}
+
+function PulseStat({ label, value, sub, color = 'text-white', size = 'text-2xl' }: {
+  label: string; value: string; sub?: string; color?: string; size?: string;
+}) {
+  return (
+    <div className="flex flex-col min-w-0">
+      <span className="text-[9px] font-bold text-zinc-500 uppercase tracking-[0.14em] mb-0.5">{label}</span>
+      <span className={`${size} font-mono font-bold tabular-nums leading-none ${color}`}>{value}</span>
+      {sub && <span className="text-[10px] text-zinc-500 mt-1 font-medium">{sub}</span>}
+    </div>
+  );
+}
+
+function FormField({ label, children }: { label: string; children: React.ReactNode }) {
+  return (
+    <div>
+      <label className="block text-[10px] font-bold text-zinc-500 uppercase tracking-wider mb-1">{label}</label>
+      {children}
+    </div>
+  );
+}
+
+function Toggle({ value, options, onChange }: {
+  value: string;
+  options: { label: string; value: string; activeClass: string }[];
+  onChange: (v: string) => void;
+}) {
+  return (
+    <div className="flex rounded overflow-hidden border border-zinc-700">
+      {options.map(opt => (
+        <button
+          key={opt.value}
+          onClick={() => onChange(opt.value)}
+          className={`flex-1 text-[10px] font-bold px-2 py-1 transition-colors ${
+            value === opt.value ? opt.activeClass : 'bg-zinc-900 text-zinc-500 hover:text-zinc-300'
+          }`}
+        >
+          {opt.label}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+// ─── Dynamic Leg Builder ──────────────────────────────────────────────────────
+
+function LegCard({
+  index,
+  leg,
+  onChange,
+  onRemove,
+  canRemove,
+}: {
+  index: number;
+  leg: LegConfig;
+  onChange: (l: LegConfig) => void;
+  onRemove: () => void;
+  canRemove: boolean;
+}) {
+  const isCall = leg.option_type === 'CE';
+  const isSell = leg.position === 'sell';
+  const strikeMode = leg.strike_type || 'offset';
+  const slOn    = leg.leg_sl_pct > 0;
+  const tgtOn   = leg.leg_target_pct > 0;
+  const trailOn = (leg.leg_trail_sl_pct ?? 0) > 0;
+
+  const strikePlaceholder =
+    strikeMode === 'atm_percent'    ? 'e.g. 2 (%)' :
+    strikeMode === 'closest_premium' ? 'e.g. 100 (premium)' :
+    strikeMode === 'straddle_width'  ? 'e.g. 30 (% of straddle)' :
+    strikeMode === 'closest_delta'   ? 'e.g. 30 (delta)' : '';
+
+  const strikeSummary =
+    strikeMode === 'atm_percent'     ? `${leg.strike}% OTM` :
+    strikeMode === 'closest_premium' ? `Prem ${leg.strike}` :
+    strikeMode === 'straddle_width'  ? `SW ${leg.strike}%` :
+    strikeMode === 'closest_delta'   ? `Δ ${leg.strike}` : leg.strike;
+
+  return (
+    <div className="bg-zinc-900/70 border border-zinc-800 rounded-lg p-2.5 flex flex-col gap-2">
+      {/* Row 1: compact identity strip — L{n} · lots · buy/sell · CE/PE · strike, remove at end */}
+      <div className="flex items-center gap-1.5 flex-wrap">
+        <span className="shrink-0 text-[9px] font-black text-zinc-600 bg-zinc-950 border border-zinc-800 rounded px-1 py-0.5">L{index + 1}</span>
+        <input
+          type="number" min={1} value={leg.lots}
+          onChange={e => onChange({ ...leg, lots: Math.max(1, Number(e.target.value)) })}
+          className="w-11 shrink-0 bg-zinc-950 border border-zinc-700 rounded px-1 py-0.5 text-[11px] text-zinc-100 text-center focus:outline-none focus:border-emerald-500"
+          title="Lots"
+        />
+        <button
+          onClick={() => onChange({ ...leg, position: isSell ? 'buy' : 'sell' })}
+          className={`shrink-0 text-[9px] font-black rounded px-1.5 py-0.5 transition-colors ${
+            isSell ? 'bg-red-700 text-oncolor' : 'bg-emerald-700 text-oncolor'
+          }`}
+        >
+          {isSell ? 'SELL' : 'BUY'}
+        </button>
+        <button
+          onClick={() => onChange({ ...leg, option_type: isCall ? 'PE' : 'CE' })}
+          className={`shrink-0 text-[9px] font-black rounded px-1.5 py-0.5 transition-colors ${
+            isCall ? 'bg-sky-600 text-oncolor' : 'bg-amber-600 text-oncolor'
+          }`}
+        >
+          {leg.option_type}
+        </button>
+        <span className="text-[9px] font-bold text-zinc-400 bg-zinc-950 border border-zinc-800 rounded px-1.5 py-0.5 truncate max-w-[90px]" title={strikeSummary}>
+          {strikeSummary}
+        </span>
+        {canRemove && (
+          <button onClick={onRemove} className="ml-auto shrink-0 text-[11px] text-zinc-600 hover:text-red-400 font-bold transition-colors leading-none">✕</button>
+        )}
+      </div>
+
+      {/* Row 2: strike mode + strike value */}
+      <div className="grid grid-cols-[1fr_auto] gap-1.5">
+        <select
+          value={strikeMode}
+          onChange={e => {
+            const newType = e.target.value as StrikeMode;
+            const defaults: Record<StrikeMode, string> = {
+              offset: 'ATM', atm_percent: '2', closest_premium: '100', straddle_width: '30', closest_delta: '30',
+            };
+            onChange({ ...leg, strike_type: newType, strike: defaults[newType] });
+          }}
+          className={inputSmCls}
+        >
+          {(Object.keys(STRIKE_MODE_LABEL) as StrikeMode[]).map(m => (
+            <option key={m} value={m}>{STRIKE_MODE_LABEL[m]}</option>
+          ))}
+        </select>
+        {strikeMode === 'offset' ? (
+          <select
+            value={leg.strike}
+            onChange={e => onChange({ ...leg, strike: e.target.value })}
+            className={`${inputSmCls} w-24`}
+          >
+            {STRIKE_OPTIONS.map(s => <option key={s} value={s}>{s}</option>)}
+          </select>
+        ) : (
+          <input
+            type="number"
+            min={0}
+            value={leg.strike}
+            onChange={e => onChange({ ...leg, strike: e.target.value })}
+            className={`${inputSmCls} w-24`}
+            placeholder={strikePlaceholder}
+          />
+        )}
+      </div>
+
+      {/* Row 3: inline "+chip" toggles — Target / Stop Loss / Trailing SL, StockMock-style */}
+      <div className="flex items-center gap-1.5 flex-wrap">
+        <LegChip
+          label="Target"
+          active={tgtOn}
+          activeClass="bg-emerald-500/10 text-emerald-400 border-emerald-500/30"
+          value={leg.leg_target_pct}
+          onToggle={() => onChange({ ...leg, leg_target_pct: tgtOn ? 0 : 50 })}
+          onValueChange={v => onChange({ ...leg, leg_target_pct: v })}
+        />
+        <LegChip
+          label="Stop Loss"
+          active={slOn}
+          activeClass="bg-red-500/10 text-red-400 border-red-500/30"
+          value={leg.leg_sl_pct}
+          onToggle={() => onChange({ ...leg, leg_sl_pct: slOn ? 0 : 40 })}
+          onValueChange={v => onChange({ ...leg, leg_sl_pct: v })}
+        />
+        <LegChip
+          label="Trail SL"
+          active={trailOn}
+          activeClass="bg-amber-500/10 text-amber-400 border-amber-500/30"
+          value={leg.leg_trail_sl_pct ?? 0}
+          onToggle={() => onChange({ ...leg, leg_trail_sl_pct: trailOn ? 0 : 10 })}
+          onValueChange={v => onChange({ ...leg, leg_trail_sl_pct: v })}
+        />
+      </div>
+    </div>
+  );
+}
+
+// A "+ Target Profit" style toggle chip: click the "+" label to arm it, which swaps
+// it for a compact % input inline — same interaction StockMock uses per leg row.
+function LegChip({ label, active, activeClass, value, onToggle, onValueChange }: {
+  label: string;
+  active: boolean;
+  activeClass: string;
+  value: number;
+  onToggle: () => void;
+  onValueChange: (v: number) => void;
+}) {
+  if (!active) {
+    return (
+      <button
+        onClick={onToggle}
+        className="text-[9px] font-bold text-zinc-500 hover:text-zinc-300 border border-dashed border-zinc-700 rounded px-1.5 py-0.5 transition-colors"
+      >
+        + {label}
+      </button>
+    );
+  }
+  return (
+    <div className={`flex items-center gap-1 border rounded px-1 py-0.5 ${activeClass}`}>
+      <span className="text-[9px] font-bold">{label}</span>
+      <input
+        type="number" min={0} step={1} value={value}
+        onChange={e => onValueChange(Number(e.target.value))}
+        className="w-9 bg-transparent text-[10px] text-inherit text-right focus:outline-none"
+      />
+      <span className="text-[9px]">%</span>
+      <button onClick={onToggle} className="text-[10px] leading-none hover:opacity-70">✕</button>
+    </div>
+  );
+}
+
+// ─── Year-wise Returns Table ─────────────────────────────────────────────────
+
+function YearwiseTable({ monthlyPnl, equityCurve }: {
+  monthlyPnl: MonthlyPnl;
+  equityCurve: { date: string; cumulative_pnl: number }[];
+}) {
+  const years = Object.keys(monthlyPnl).sort();
+  if (!years.length) return null;
+
+  function cellColor(v: number | undefined): string {
+    if (v == null || v === 0) return 'text-zinc-500';
+    return v > 0 ? 'text-emerald-400' : 'text-red-400';
+  }
+
+  return (
+    <div className="bg-zinc-900/60 border border-zinc-800 rounded-2xl overflow-hidden">
+      <div className="overflow-x-auto">
+        <table className="text-xs whitespace-nowrap w-full">
+          <thead>
+            <tr className="bg-zinc-800">
+              <th className="text-xs font-bold text-white text-left px-3 py-2">Year</th>
+              {MONTHS.map(m => (
+                <th key={m} className="text-xs font-bold text-white text-right px-2 py-2">{m}</th>
+              ))}
+              <th className="text-xs font-bold text-white text-right px-3 py-2 border-l border-zinc-700">Total</th>
+              <th className="text-xs font-bold text-white text-right px-3 py-2">Max DD</th>
+              <th className="text-xs font-bold text-white text-right px-3 py-2">Days</th>
+              <th className="text-xs font-bold text-white text-right px-3 py-2">R/MDD</th>
+            </tr>
+          </thead>
+          <tbody>
+            {years.map((yr, i) => {
+              const yData = monthlyPnl[yr] ?? {};
+              const total = yData['Total'] ?? 0;
+              const { mdd, days } = computeYearMDD(equityCurve, yr);
+              const rMdd = mdd > 0 ? (total / mdd).toFixed(2) : '—';
+              return (
+                <tr key={yr} className={`border-t border-zinc-800 ${i % 2 === 0 ? '' : 'bg-zinc-950/40'}`}>
+                  <td className="px-3 py-1.5 font-bold text-zinc-200">{yr}</td>
+                  {MONTHS.map(m => {
+                    const v = yData[m];
+                    return (
+                      <td key={m} className={`px-2 py-1.5 text-right font-mono ${cellColor(v)}`}>
+                        {v != null && v !== 0 ? (v > 0 ? '+' : '') + Math.round(v).toLocaleString('en-IN') : '—'}
+                      </td>
+                    );
+                  })}
+                  <td className={`px-3 py-1.5 text-right font-mono font-bold border-l border-zinc-800 ${cellColor(total)}`}>
+                    {total !== 0 ? (total > 0 ? '+' : '') + Math.round(total).toLocaleString('en-IN') : '—'}
+                  </td>
+                  <td className="px-3 py-1.5 text-right font-mono text-amber-400">
+                    {mdd > 0 ? `₹${mdd.toLocaleString('en-IN')}` : '—'}
+                  </td>
+                  <td className="px-3 py-1.5 text-right font-mono text-zinc-400">
+                    {days != null ? days : '—'}
+                  </td>
+                  <td className={`px-3 py-1.5 text-right font-mono ${
+                    typeof rMdd === 'string' && rMdd !== '—' && Number(rMdd) >= 1
+                      ? 'text-emerald-400' : 'text-zinc-400'
+                  }`}>
+                    {rMdd}
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+// ─── Full Report Table ────────────────────────────────────────────────────────
+
+const PAGE_SIZE = 50;
+
+function FullReportTable({ cycles, lotSize }: { cycles: CycleResult[]; lotSize: number }) {
+  const [page, setPage] = useState(0);
+  const traded = useMemo(() => cycles.filter(c => c.exit_reason !== 'NO_ENTRY'), [cycles]);
+  const totalPages = Math.ceil(traded.length / PAGE_SIZE);
+  const visible = traded.slice(page * PAGE_SIZE, (page + 1) * PAGE_SIZE);
+
+  return (
+    <div>
+      <div className="bg-zinc-900/60 border border-zinc-800 rounded-2xl overflow-hidden">
+        <div className="overflow-x-auto">
+          <table className="text-xs whitespace-nowrap w-full">
+            <thead>
+              <tr className="bg-zinc-800">
+                <th className="text-xs font-bold text-white text-left px-3 py-2">#</th>
+                <th className="text-xs font-bold text-white text-left px-3 py-2">Entry Date</th>
+                <th className="text-xs font-bold text-white text-right px-2 py-2">Time</th>
+                <th className="text-xs font-bold text-white text-left px-3 py-2 border-l border-zinc-700">Exit Date</th>
+                <th className="text-xs font-bold text-white text-right px-2 py-2">Time</th>
+                <th className="text-xs font-bold text-white text-center px-2 py-2 border-l border-zinc-700">Type</th>
+                <th className="text-xs font-bold text-white text-right px-2 py-2">Strike</th>
+                <th className="text-xs font-bold text-white text-center px-2 py-2">B/S</th>
+                <th className="text-xs font-bold text-white text-right px-2 py-2">Qty</th>
+                <th className="text-xs font-bold text-white text-right px-3 py-2 border-l border-zinc-700">Entry ₹</th>
+                <th className="text-xs font-bold text-white text-right px-3 py-2">Exit ₹</th>
+                <th className="text-xs font-bold text-white text-right px-3 py-2">VIX</th>
+                <th className="text-xs font-bold text-white text-right px-3 py-2 border-l border-zinc-700">P/L</th>
+                <th className="text-xs font-bold text-white text-center px-2 py-2">Reason</th>
+              </tr>
+            </thead>
+            <tbody>
+              {visible.map((c, idx) => {
+                const tradeNum = page * PAGE_SIZE + idx + 1;
+                const rowBg = idx % 2 === 0 ? '' : 'bg-zinc-950/40';
+                return [
+                  // Parent row
+                  <tr key={`${c.expiry_date}-p`} className={`border-t border-zinc-800 ${rowBg} font-medium`}>
+                    <td className="px-3 py-1.5 text-zinc-300 font-bold">{tradeNum}</td>
+                    <td className="px-3 py-1.5 text-zinc-300 font-mono">{fmtDate(c.entry_dt)}</td>
+                    <td className="px-2 py-1.5 text-right text-zinc-400 font-mono">{fmtTime(c.entry_dt)}</td>
+                    <td className="px-3 py-1.5 text-zinc-300 font-mono border-l border-zinc-800">{fmtDate(c.exit_dt)}</td>
+                    <td className="px-2 py-1.5 text-right text-zinc-400 font-mono">{fmtTime(c.exit_dt)}</td>
+                    <td className="px-2 py-1.5 text-center border-l border-zinc-800">—</td>
+                    <td className="px-2 py-1.5 text-right text-zinc-500 font-mono">
+                      {c.entry_spot != null ? Math.round(c.entry_spot).toLocaleString('en-IN') : '—'}
+                    </td>
+                    <td className="px-2 py-1.5 text-center">—</td>
+                    <td className="px-2 py-1.5 text-right">—</td>
+                    <td className="px-3 py-1.5 text-right font-mono text-zinc-200 border-l border-zinc-800">
+                      {c.net_credit != null ? c.net_credit.toFixed(2) : '—'}
+                    </td>
+                    <td className="px-3 py-1.5 text-right font-mono text-zinc-200">
+                      {c.exit_combined != null ? Math.abs(c.exit_combined).toFixed(2) : '—'}
+                    </td>
+                    <td className="px-3 py-1.5 text-right font-mono text-zinc-400">
+                      {c.vix != null ? c.vix.toFixed(1) : '—'}
+                    </td>
+                    <td className={`px-3 py-1.5 text-right font-mono font-bold border-l border-zinc-800 ${c.pnl >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
+                      {fmtPnl(c.pnl)}
+                    </td>
+                    <td className="px-2 py-1.5 text-center flex items-center justify-center gap-1">
+                      <span className={`inline-block px-1.5 py-0.5 rounded text-[10px] font-bold ${EXIT_REASON_CLS[c.exit_reason] ?? 'bg-zinc-800 text-zinc-400'}`}>
+                        {c.exit_reason}
+                      </span>
+                      {c.rolls != null && c.rolls > 0 && (
+                        <span className="text-[9px] font-mono font-bold px-1 py-0.5 rounded bg-purple-500/15 text-purple-300 border border-purple-500/30">
+                          {c.rolls} roll{c.rolls > 1 ? 's' : ''}
+                        </span>
+                      )}
+                    </td>
+                  </tr>,
+                  // Sub-rows per leg
+                  ...c.legs.map((leg, li) => {
+                    const isCall = leg.option_type === 'CE';
+                    return (
+                      <tr key={`${c.expiry_date}-l${li}`} className={`border-t border-zinc-800/50 ${rowBg} opacity-80`}>
+                        <td className="px-3 py-1 text-zinc-600 font-mono text-[10px] pl-5">{tradeNum}.{li + 1}</td>
+                        <td className="px-3 py-1 text-zinc-600">—</td>
+                        <td className="px-2 py-1 text-right text-zinc-600">—</td>
+                        <td className="px-3 py-1 text-zinc-600 border-l border-zinc-800">—</td>
+                        <td className="px-2 py-1 text-right text-zinc-600">—</td>
+                        <td className="px-2 py-1 text-center border-l border-zinc-800">
+                          <span className={`text-[10px] font-bold ${isCall ? 'text-sky-400' : 'text-amber-400'}`}>
+                            {leg.option_type}
+                          </span>
+                        </td>
+                        <td className={`px-2 py-1 text-right font-mono ${isCall ? 'text-sky-300' : 'text-amber-300'}`}>
+                          {leg.strike > 0 ? Math.round(leg.strike).toLocaleString('en-IN') : '—'}
+                        </td>
+                        <td className="px-2 py-1 text-center">
+                          <span className={`text-[10px] font-bold ${leg.position === 'sell' ? 'text-red-400' : 'text-emerald-400'}`}>
+                            {leg.position === 'sell' ? 'S' : 'B'}
+                          </span>
+                        </td>
+                        <td className="px-2 py-1 text-right font-mono text-zinc-400">
+                          {(leg.lots ?? 1) * lotSize}
+                        </td>
+                        <td className={`px-3 py-1 text-right font-mono border-l border-zinc-800 ${isCall ? 'text-sky-300' : 'text-amber-300'}`}>
+                          {fmtNum(leg.entry_price)}
+                        </td>
+                        <td className={`px-3 py-1 text-right font-mono ${isCall ? 'text-sky-300' : 'text-amber-300'}`}>
+                          {fmtNum(leg.exit_price)}
+                        </td>
+                        <td className="px-3 py-1 text-right text-zinc-600">—</td>
+                        <td className={`px-3 py-1 text-right font-mono border-l border-zinc-800 ${leg.pnl >= 0 ? 'text-emerald-300' : 'text-red-300'}`}>
+                          {leg.pnl !== 0 ? fmtPnl(leg.pnl) : '—'}
+                        </td>
+                        <td className="px-2 py-1 text-center">
+                          <span className={`text-[10px] font-bold ${EXIT_REASON_CLS[leg.exit_reason] ?? 'bg-zinc-800 text-zinc-400'} rounded px-1 py-0.5`}>
+                            {leg.exit_reason}
+                          </span>
+                        </td>
+                      </tr>
+                    );
+                  }),
+                ];
+              })}
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      {/* Pagination */}
+      {totalPages > 1 && (
+        <div className="flex items-center justify-between mt-2 text-xs text-zinc-500">
+          <span>{traded.length} trades · page {page + 1} of {totalPages}</span>
+          <div className="flex gap-1">
+            <button
+              onClick={() => setPage(p => Math.max(0, p - 1))}
+              disabled={page === 0}
+              className="px-2 py-0.5 rounded bg-zinc-800 border border-zinc-700 disabled:opacity-30 hover:border-zinc-500"
+            >Prev</button>
+            <button
+              onClick={() => setPage(p => Math.min(totalPages - 1, p + 1))}
+              disabled={page === totalPages - 1}
+              className="px-2 py-0.5 rounded bg-zinc-800 border border-zinc-700 disabled:opacity-30 hover:border-zinc-500"
+            >Next</button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ─── Main Page ────────────────────────────────────────────────────────────────
+
+const DEFAULT_LEGS: LegConfig[] = [
+  { option_type: 'CE', position: 'sell', lots: 1, strike: 'ATM', leg_sl_pct: 0, leg_target_pct: 0 },
+  { option_type: 'PE', position: 'sell', lots: 1, strike: 'ATM', leg_sl_pct: 0, leg_target_pct: 0 },
+];
+
+export default function OptionsBacktester() {
+  const [legs, setLegs] = useState<LegConfig[]>(DEFAULT_LEGS);
+  const [lotSize, setLotSize] = useState(65);
+  const [profitTargetPct, setProfitTargetPct] = useState(50);
+  const [overallSlPct, setOverallSlPct] = useState(0);
+  const [entryTime, setEntryTime] = useState('09:20');
+  const [eodTime, setEodTime] = useState('15:15');
+  const [includeCosts, setIncludeCosts] = useState(false);
+  const [commissionPerLot, setCommissionPerLot] = useState(40);
+  const [slippagePct, setSlippagePct] = useState(0);
+  const [strategyType, setStrategyType] = useState<'intraday' | 'expiry_day' | 'first_day'>('intraday');
+  const [startDate, setStartDate] = useState('2024-01-01');
+  const [endDate, setEndDate] = useState('2026-06-30');
+
+  // Dynamic adjustments & advanced risk
+  const [adjustmentMode, setAdjustmentMode] = useState<'none' | 'rolling_straddle'>('none');
+  const [rollBuffer, setRollBuffer] = useState(35);
+  const [rollType, setRollType] = useState<'points' | 'percentage'>('points');
+  const [maxRolls, setMaxRolls] = useState(5);
+  const [scalpFloorPct, setScalpFloorPct] = useState(0);
+  const [trailSlPct, setTrailSlPct] = useState(0);
+
+  const [result, setResult] = useState<BacktestResult | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [statusData, setStatusData] = useState<{
+    percent?: number;
+    current?: number;
+    total?: number;
+    date?: string;
+    pnl?: number;
+    trades?: number;
+  } | null>(null);
+
+  const pollRef = React.useRef<NodeJS.Timeout | null>(null);
+
+  // Clear polling on unmount
+  useEffect(() => {
+    return () => {
+      if (pollRef.current) clearInterval(pollRef.current);
+    };
+  }, []);
+
+  // Fetch current NIFTY lot size on mount
+  useEffect(() => {
+    fetch('/api/lotsize?symbol=NIFTY')
+      .then(r => r.json())
+      .then(d => { if (d.lot_size) setLotSize(d.lot_size); })
+      .catch(() => {/* keep default */});
+  }, []);
+
+  function applyPreset(name: string) {
+    if (name === 'straddle_35sl') {
+      setStrategyType('intraday');
+      setEntryTime('09:20');
+      setEodTime('15:15');
+      setProfitTargetPct(50);
+      setOverallSlPct(0);
+      setAdjustmentMode('none');
+      setScalpFloorPct(0);
+      setTrailSlPct(0);
+      setLegs([
+        { option_type: 'CE', position: 'sell', lots: 1, strike: 'ATM', leg_sl_pct: 35, leg_target_pct: 0 },
+        { option_type: 'PE', position: 'sell', lots: 1, strike: 'ATM', leg_sl_pct: 35, leg_target_pct: 0 },
+      ]);
+    } else if (name === 'rolling_straddle') {
+      setStrategyType('intraday');
+      setEntryTime('09:20');
+      setEodTime('15:15');
+      setProfitTargetPct(60);
+      setOverallSlPct(0);
+      setAdjustmentMode('rolling_straddle');
+      setRollBuffer(35);
+      setRollType('points');
+      setMaxRolls(5);
+      setScalpFloorPct(0);
+      setTrailSlPct(0);
+      setLegs([
+        { option_type: 'CE', position: 'sell', lots: 1, strike: 'ATM', leg_sl_pct: 0, leg_target_pct: 0 },
+        { option_type: 'PE', position: 'sell', lots: 1, strike: 'ATM', leg_sl_pct: 0, leg_target_pct: 0 },
+      ]);
+    } else if (name === 'strangle_20delta') {
+      setStrategyType('expiry_day');
+      setEntryTime('09:25');
+      setEodTime('15:15');
+      setProfitTargetPct(70);
+      setOverallSlPct(0);
+      setAdjustmentMode('none');
+      setScalpFloorPct(0);
+      setTrailSlPct(0);
+      setLegs([
+        { option_type: 'CE', position: 'sell', lots: 1, strike: '20', strike_type: 'closest_delta', leg_sl_pct: 40, leg_target_pct: 0 },
+        { option_type: 'PE', position: 'sell', lots: 1, strike: '20', strike_type: 'closest_delta', leg_sl_pct: 40, leg_target_pct: 0 },
+      ]);
+    } else if (name === 'iron_condor') {
+      setStrategyType('first_day');
+      setEntryTime('09:30');
+      setEodTime('15:15');
+      setProfitTargetPct(50);
+      setOverallSlPct(0);
+      setAdjustmentMode('none');
+      setScalpFloorPct(0);
+      setTrailSlPct(0);
+      setLegs([
+        { option_type: 'CE', position: 'sell', lots: 1, strike: '25', strike_type: 'closest_delta', leg_sl_pct: 0, leg_target_pct: 0 },
+        { option_type: 'PE', position: 'sell', lots: 1, strike: '25', strike_type: 'closest_delta', leg_sl_pct: 0, leg_target_pct: 0 },
+        { option_type: 'CE', position: 'buy',  lots: 1, strike: '10', strike_type: 'closest_delta', leg_sl_pct: 0, leg_target_pct: 0 },
+        { option_type: 'PE', position: 'buy',  lots: 1, strike: '10', strike_type: 'closest_delta', leg_sl_pct: 0, leg_target_pct: 0 },
+      ]);
+    } else if (name === 'scalp_floor') {
+      setStrategyType('intraday');
+      setEntryTime('09:20');
+      setEodTime('15:15');
+      setProfitTargetPct(0);
+      setOverallSlPct(35);
+      setAdjustmentMode('none');
+      setScalpFloorPct(30);
+      setTrailSlPct(15);
+      setLegs([
+        { option_type: 'CE', position: 'sell', lots: 1, strike: 'ATM', leg_sl_pct: 0, leg_target_pct: 0 },
+        { option_type: 'PE', position: 'sell', lots: 1, strike: 'ATM', leg_sl_pct: 0, leg_target_pct: 0 },
+      ]);
+    }
+  }
+
+  function setDatePreset(preset: '3m' | '6m' | '1y' | '3y' | 'all') {
+    const end = '2026-06-30';
+    setEndDate(end);
+    if (preset === '3m')  setStartDate('2026-03-31');
+    if (preset === '6m')  setStartDate('2025-12-31');
+    if (preset === '1y')  setStartDate('2025-06-30');
+    if (preset === '3y')  setStartDate('2023-06-30');
+    if (preset === 'all') setStartDate('2021-01-01');
+  }
+
+  function addLeg() {
+    setLegs(l => [...l, { option_type: 'CE', position: 'sell', lots: 1, strike: 'ATM', leg_sl_pct: 40, leg_target_pct: 0 }]);
+  }
+  function updateLeg(i: number, leg: LegConfig) {
+    setLegs(l => l.map((x, j) => j === i ? leg : x));
+  }
+  function removeLeg(i: number) {
+    setLegs(l => l.filter((_, j) => j !== i));
+  }
+
+  async function stopBacktest() {
+    try {
+      await fetch('/api/backtest', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'stop' }),
+      });
+    } catch { /* ignore */ }
+    if (pollRef.current) clearInterval(pollRef.current);
+    setLoading(false);
+    setStatusData(null);
+  }
+
+  async function runBacktest() {
+    setLoading(true);
+    setError(null);
+    setResult(null);
+    setStatusData({ percent: 0, current: 0, total: 0 });
+
+    if (pollRef.current) clearInterval(pollRef.current);
+
+    try {
+      const res = await fetch('/api/backtest', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          action: 'start',
+          legs,
+          lot_size: lotSize,
+          profit_target_pct: profitTargetPct,
+          overall_sl_pct: overallSlPct,
+          entry_time: entryTime,
+          eod_time: eodTime,
+          commission_per_lot: includeCosts ? commissionPerLot : 0,
+          slippage_pct: includeCosts ? slippagePct : 0,
+          strategy_type: strategyType,
+          start_date: startDate,
+          end_date: endDate,
+          adjustment_mode: adjustmentMode,
+          roll_buffer: rollBuffer,
+          roll_type: rollType,
+          max_rolls: maxRolls,
+          scalp_floor_pct: scalpFloorPct,
+          trail_sl_pct: trailSlPct,
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok || data.error) throw new Error(data.error || 'Failed to start backtest');
+
+      // Start polling for status
+      pollRef.current = setInterval(async () => {
+        try {
+          const sRes = await fetch('/api/backtest');
+          const sData = await sRes.json();
+          if (sData.running) {
+            setStatusData({
+              percent: sData.percent ?? 0,
+              current: sData.current ?? 0,
+              total: sData.total ?? 0,
+              date: sData.date,
+              pnl: sData.pnl,
+              trades: sData.trades,
+            });
+          } else if (sData.done) {
+            if (pollRef.current) clearInterval(pollRef.current);
+            setLoading(false);
+            if (sData.stopped) {
+              setError('Backtest stopped by user');
+            } else if (sData.result) {
+              setResult(sData.result);
+              setStatusData(null);
+            } else if (sData.error) {
+              setError(sData.error);
+            } else {
+              setError('Backtest completed or process exited unexpectedly without results');
+            }
+          }
+        } catch {
+          // ignore transient poll error
+        }
+      }, 1000);
+    } catch (e) {
+      if (pollRef.current) clearInterval(pollRef.current);
+      setLoading(false);
+      setError(e instanceof Error ? e.message : String(e));
+    }
+  }
+
+  const s = result?.summary;
+
+  return (
+    <div className="h-screen flex flex-col bg-zinc-950 text-white">
+      {/* Header */}
+      <div className="shrink-0 z-40 flex items-center justify-between gap-3 flex-wrap
+                      px-6 py-3 border-b border-zinc-800 bg-zinc-950/95 backdrop-blur">
+        <div className="flex items-center gap-3">
+          <div className="flex items-center justify-center w-8 h-8 rounded-lg bg-emerald-500/10 border border-emerald-500/25 shrink-0">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" className="text-emerald-400">
+              <path d="M3 3v18h18" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" opacity="0.4" />
+              <path d="M7 15l4-5 3 3 6-8" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" />
+            </svg>
+          </div>
+          <div>
+            <p className="text-[9px] font-bold text-emerald-500 uppercase tracking-[0.18em] mb-0.5">
+              Backtest · NIFTY
+            </p>
+            <h1 className="text-sm font-bold text-white tracking-tight leading-none">Options Strategy Backtester</h1>
+            <p className="text-[10px] text-zinc-500 font-medium mt-1">
+              Multi-leg CE/PE strategies simulated across historical expiry cycles
+            </p>
+          </div>
+        </div>
+
+        <div className="flex items-center gap-3">
+          {result && s && (
+            <span className="text-[10px] font-bold text-zinc-400 bg-zinc-900 border border-zinc-800 rounded-lg px-2.5 py-1.5 font-mono tabular-nums">
+              {s.traded_cycles} TRADES · {startDate} &rarr; {endDate}
+            </span>
+          )}
+          <span className="w-px h-5 bg-zinc-800 shrink-0" />
+          <NavBar />
+        </div>
+      </div>
+
+      <div className="flex gap-0 flex-1 min-h-0">
+        {/* ── Left: Config panel ── */}
+        <div className="w-72 shrink-0 border-r border-zinc-800 bg-zinc-950 flex flex-col min-h-0">
+          <div className="flex-1 overflow-y-auto p-3 flex flex-col gap-3">
+
+            {/* Presets */}
+            <div className="bg-zinc-900/40 border border-zinc-800/60 rounded-xl p-3">
+              <div className="text-[9px] font-bold text-zinc-500 uppercase tracking-[0.16em] mb-1.5">Strategy Preset</div>
+              <select
+                onChange={e => applyPreset(e.target.value)}
+                defaultValue=""
+                className={inputCls}
+              >
+                <option value="" disabled>Choose a Preset Strategy...</option>
+                <option value="straddle_35sl">9:20 Short Straddle (35% Leg SL)</option>
+                <option value="rolling_straddle">Intraday Rolling Straddle (35 pt Buffer Roll)</option>
+                <option value="strangle_20delta">0DTE 20-Delta Strangle (40% SL)</option>
+                <option value="iron_condor">Weekly Iron Condor (Sell 25D, Buy 10D)</option>
+                <option value="scalp_floor">Scalp-Lock Straddle (30% Premium Floor)</option>
+              </select>
+            </div>
+
+            {/* Leg Builder */}
+            <div className="bg-zinc-900/40 border border-zinc-800/60 rounded-xl p-3">
+              <div className="flex items-center justify-between mb-2">
+                <div className="text-[9px] font-bold text-zinc-500 uppercase tracking-[0.16em]">Leg Builder</div>
+                <button
+                  onClick={addLeg}
+                  className="text-[10px] font-bold text-emerald-400 hover:text-emerald-300 bg-emerald-500/10 border border-emerald-500/20 rounded px-2 py-0.5 transition-colors"
+                >
+                  + Add Leg
+                </button>
+              </div>
+              <div className="flex flex-col gap-2">
+                {legs.map((leg, i) => (
+                  <LegCard
+                    key={i}
+                    index={i}
+                    leg={leg}
+                    onChange={l => updateLeg(i, l)}
+                    onRemove={() => removeLeg(i)}
+                    canRemove={legs.length > 1}
+                  />
+                ))}
+              </div>
+            </div>
+
+            {/* Adjustments / Rolling */}
+            <div className="bg-zinc-900/40 border border-zinc-800/60 rounded-xl p-3 flex flex-col gap-3">
+              <div className="text-[9px] font-bold text-zinc-500 uppercase tracking-[0.16em]">Adjustments & Rolling</div>
+              <FormField label="Adjustment Mode">
+                <Toggle
+                  value={adjustmentMode}
+                  onChange={v => setAdjustmentMode(v as typeof adjustmentMode)}
+                  options={[
+                    { label: 'Static Hold', value: 'none', activeClass: 'bg-zinc-700 text-oncolor' },
+                    { label: 'ATM Roll', value: 'rolling_straddle', activeClass: 'bg-emerald-600 text-oncolor' },
+                  ]}
+                />
+              </FormField>
+              {adjustmentMode === 'rolling_straddle' && (
+                <div className="flex flex-col gap-2">
+                  <div className="text-[9px] text-emerald-400/90 bg-emerald-500/10 border border-emerald-500/20 rounded px-2 py-1">
+                    When spot moves beyond buffer, active legs exit and roll to the fresh ATM strike.
+                  </div>
+                  <div className="grid grid-cols-2 gap-2">
+                    <FormField label="Buffer">
+                      <input
+                        type="number"
+                        min={5}
+                        step={5}
+                        className={inputCls}
+                        value={rollBuffer}
+                        onChange={e => setRollBuffer(Number(e.target.value))}
+                      />
+                    </FormField>
+                    <FormField label="Type">
+                      <select
+                        value={rollType}
+                        onChange={e => setRollType(e.target.value as 'points' | 'percentage')}
+                        className={inputCls}
+                      >
+                        <option value="points">Points</option>
+                        <option value="percentage">% of Spot</option>
+                      </select>
+                    </FormField>
+                  </div>
+                  <FormField label="Max Rolls Per Day">
+                    <input
+                      type="number"
+                      min={1}
+                      max={15}
+                      className={inputCls}
+                      value={maxRolls}
+                      onChange={e => setMaxRolls(Number(e.target.value))}
+                    />
+                  </FormField>
+                </div>
+              )}
+            </div>
+
+            {/* Advanced Exits */}
+            <div className="bg-zinc-900/40 border border-zinc-800/60 rounded-xl p-3 flex flex-col gap-3">
+              <div className="text-[9px] font-bold text-zinc-500 uppercase tracking-[0.16em]">Advanced Exits</div>
+              {/* Scalp Floor */}
+              <div>
+                <label className="flex items-center gap-2 cursor-pointer select-none mb-1">
+                  <input
+                    type="checkbox"
+                    checked={scalpFloorPct > 0}
+                    onChange={e => setScalpFloorPct(e.target.checked ? 30 : 0)}
+                    className="w-3 h-3 accent-emerald-500"
+                  />
+                  <span className="text-[10px] font-bold text-zinc-400 uppercase tracking-wider">Scalp Floor (Decay %)</span>
+                </label>
+                {scalpFloorPct > 0 && (
+                  <input
+                    type="number"
+                    min={5}
+                    step={5}
+                    className={inputCls}
+                    value={scalpFloorPct}
+                    onChange={e => setScalpFloorPct(Number(e.target.value))}
+                    placeholder="e.g. 30"
+                  />
+                )}
+              </div>
+              {/* Trailing SL */}
+              <div>
+                <label className="flex items-center gap-2 cursor-pointer select-none mb-1">
+                  <input
+                    type="checkbox"
+                    checked={trailSlPct > 0}
+                    onChange={e => setTrailSlPct(e.target.checked ? 15 : 0)}
+                    className="w-3 h-3 accent-red-500"
+                  />
+                  <span className="text-[10px] font-bold text-zinc-400 uppercase tracking-wider">Trailing SL %</span>
+                </label>
+                {trailSlPct > 0 && (
+                  <input
+                    type="number"
+                    min={5}
+                    step={5}
+                    className={inputCls}
+                    value={trailSlPct}
+                    onChange={e => setTrailSlPct(Number(e.target.value))}
+                    placeholder="e.g. 15"
+                  />
+                )}
+              </div>
+            </div>
+
+            {/* Strategy-level controls */}
+            <div className="bg-zinc-900/40 border border-zinc-800/60 rounded-xl p-3 flex flex-col gap-3">
+              <div className="text-[9px] font-bold text-zinc-500 uppercase tracking-[0.16em]">Risk & Sizing</div>
+              <FormField label="Lot Size">
+                <input type="number" min={1} className={inputCls} value={lotSize}
+                  onChange={e => setLotSize(Number(e.target.value))} />
+              </FormField>
+
+              {/* Overall Target — toggleable */}
+              <div>
+                <label className="flex items-center gap-2 cursor-pointer select-none mb-1">
+                  <input
+                    type="checkbox"
+                    checked={profitTargetPct > 0}
+                    onChange={e => setProfitTargetPct(e.target.checked ? 50 : 0)}
+                    className="w-3 h-3 accent-emerald-500"
+                  />
+                  <span className="text-[10px] font-bold text-zinc-400 uppercase tracking-wider">Overall Target %</span>
+                </label>
+                {profitTargetPct > 0 && (
+                  <input type="number" min={1} step={5} className={inputCls} value={profitTargetPct}
+                    onChange={e => setProfitTargetPct(Number(e.target.value))} />
+                )}
+              </div>
+
+              {/* Overall SL — toggleable */}
+              <div>
+                <label className="flex items-center gap-2 cursor-pointer select-none mb-1">
+                  <input
+                    type="checkbox"
+                    checked={overallSlPct > 0}
+                    onChange={e => setOverallSlPct(e.target.checked ? 100 : 0)}
+                    className="w-3 h-3 accent-red-500"
+                  />
+                  <span className="text-[10px] font-bold text-zinc-400 uppercase tracking-wider">Overall SL %</span>
+                </label>
+                {overallSlPct > 0 && (
+                  <input type="number" min={1} step={5} className={inputCls} value={overallSlPct}
+                    onChange={e => setOverallSlPct(Number(e.target.value))} />
+                )}
+              </div>
+            </div>
+
+            {/* Timing */}
+            <div className="bg-zinc-900/40 border border-zinc-800/60 rounded-xl p-3 flex flex-col gap-3">
+              <div className="text-[9px] font-bold text-zinc-500 uppercase tracking-[0.16em]">Timing</div>
+              <FormField label="Strategy Type">
+                <Toggle
+                  value={strategyType}
+                  onChange={v => setStrategyType(v as typeof strategyType)}
+                  options={[
+                    { label: 'Intraday', value: 'intraday',    activeClass: 'bg-emerald-600 text-oncolor' },
+                    { label: 'Expiry Day', value: 'expiry_day', activeClass: 'bg-sky-600 text-oncolor' },
+                    { label: 'First Day', value: 'first_day',   activeClass: 'bg-amber-600 text-oncolor' },
+                  ]}
+                />
+              </FormField>
+              <div className="text-[9px] text-zinc-500 bg-zinc-800/50 rounded px-2 py-1">
+                {strategyType === 'intraday'   && 'Trade every day — enter at entry time, exit same day at EOD. Matches AlgoTest Intraday.'}
+                {strategyType === 'expiry_day' && 'Only enter on the expiry date itself (0DTE). Matches AlgoTest Expiry Day.'}
+                {strategyType === 'first_day'  && 'Enter on the first day of each expiry cycle (multi-DTE, holds until EOD same day).'}
+              </div>
+              <div className="grid grid-cols-2 gap-2">
+                <FormField label="Entry">
+                  <input type="text" className={inputCls} value={entryTime}
+                    onChange={e => setEntryTime(e.target.value)} placeholder="09:20" />
+                </FormField>
+                <FormField label="EOD Exit">
+                  <input type="text" className={inputCls} value={eodTime}
+                    onChange={e => setEodTime(e.target.value)} placeholder="15:15" />
+                </FormField>
+              </div>
+            </div>
+
+            {/* Costs */}
+            <div className="bg-zinc-900/40 border border-zinc-800/60 rounded-xl p-3 flex flex-col gap-3">
+              <label className="flex items-center gap-2 cursor-pointer select-none">
+                <input
+                  type="checkbox"
+                  checked={includeCosts}
+                  onChange={e => setIncludeCosts(e.target.checked)}
+                  className="w-3 h-3 accent-amber-500"
+                />
+                <span className="text-[10px] font-bold text-zinc-400 uppercase tracking-wider">Include Costs</span>
+              </label>
+
+              {includeCosts && (
+                <div className="grid grid-cols-2 gap-2">
+                  <FormField label="Commission / Lot">
+                    <input type="number" min={0} step={5} className={inputCls} value={commissionPerLot}
+                      onChange={e => setCommissionPerLot(Number(e.target.value))} />
+                  </FormField>
+                  <FormField label="Slippage %">
+                    <input type="number" min={0} step={0.05} className={inputCls} value={slippagePct}
+                      onChange={e => setSlippagePct(Number(e.target.value))} />
+                  </FormField>
+                </div>
+              )}
+            </div>
+
+            {/* Date range */}
+            <div className="bg-zinc-900/40 border border-zinc-800/60 rounded-xl p-3 flex flex-col gap-3">
+              <div className="flex items-center justify-between">
+                <div className="text-[9px] font-bold text-zinc-500 uppercase tracking-[0.16em]">Period</div>
+                <div className="flex gap-1">
+                  {(['3m', '6m', '1y', '3y', 'all'] as const).map(p => (
+                    <button
+                      key={p}
+                      onClick={() => setDatePreset(p)}
+                      className="text-[9px] font-bold px-1.5 py-0.5 rounded bg-zinc-800 text-zinc-400 hover:text-zinc-200 border border-zinc-700 transition-colors uppercase"
+                    >
+                      {p}
+                    </button>
+                  ))}
+                </div>
+              </div>
+              <FormField label="Start Date">
+                <input type="date" className={inputCls} value={startDate}
+                  onChange={e => setStartDate(e.target.value)} />
+              </FormField>
+              <FormField label="End Date">
+                <input type="date" className={inputCls} value={endDate}
+                  onChange={e => setEndDate(e.target.value)} />
+              </FormField>
+            </div>
+          </div>
+
+          <div className="shrink-0 border-t border-zinc-800 bg-zinc-950/95 backdrop-blur p-3 flex flex-col gap-2">
+            {error && (
+              <div className="text-[11px] text-red-400 bg-red-500/10 border border-red-500/20 rounded-md p-2 break-words">
+                {error}
+              </div>
+            )}
+            {loading ? (
+              <button
+                onClick={stopBacktest}
+                className="w-full py-2.5 rounded-lg text-xs font-bold bg-red-700 hover:bg-red-600 text-oncolor transition-colors shadow-lg shadow-red-500/10 flex items-center justify-center gap-2"
+              >
+                <span className="w-2 h-2 rounded-full bg-oncolor animate-ping" />
+                Stop Backtest
+              </button>
+            ) : (
+              <button
+                onClick={runBacktest}
+                disabled={legs.length === 0}
+                className="w-full py-2.5 rounded-lg text-xs font-bold bg-emerald-600 hover:bg-emerald-500 disabled:opacity-40 disabled:cursor-not-allowed text-oncolor transition-colors shadow-lg shadow-emerald-500/10"
+              >
+                Run Backtest
+              </button>
+            )}
+          </div>
+        </div>
+
+        {/* ── Right: Results ── */}
+        <div className="flex-1 overflow-y-auto">
+          {!result && !loading && (
+            <div className="flex flex-col items-center justify-center h-full text-zinc-600">
+              <div className="flex items-center justify-center w-14 h-14 rounded-2xl bg-emerald-500/10 border border-emerald-500/20 mb-4">
+                <svg width="26" height="26" viewBox="0 0 24 24" fill="none" className="text-emerald-500/60">
+                  <path d="M3 3v18h18" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+                  <path d="M7 15l4-5 3 3 6-8" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" />
+                </svg>
+              </div>
+              <div className="text-sm font-bold text-zinc-400">Configure legs or pick a preset, then run a backtest</div>
+              <div className="text-xs mt-1 text-zinc-600">Year-wise returns, stats, equity curve, and full report appear here</div>
+            </div>
+          )}
+
+          {loading && (
+            <div className="flex flex-col items-center justify-center h-full p-8 max-w-md mx-auto text-center">
+              <div className="w-12 h-12 rounded-2xl bg-emerald-500/10 border border-emerald-500/30 flex items-center justify-center mb-5 animate-pulse">
+                <svg width="24" height="24" viewBox="0 0 24 24" fill="none" className="text-emerald-400">
+                  <path d="M12 2v4m0 12v4M4.93 4.93l2.83 2.83m8.48 8.48l2.83 2.83M2 12h4m12 0h4M4.93 19.07l2.83-2.83m8.48-8.48l2.83-2.83" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+                </svg>
+              </div>
+              <div className="text-base font-bold text-white mb-1">Simulating Historical Option Trades</div>
+              <p className="text-xs text-zinc-400 mb-6">
+                Querying 1-min OHLC, spot & strikes from 5.5-year SQLite database…
+              </p>
+
+              {/* Progress bar */}
+              <div className="w-full bg-zinc-900 border border-zinc-800 rounded-full h-3 overflow-hidden p-0.5 mb-3">
+                <div
+                  className="bg-gradient-to-r from-emerald-500 to-teal-400 h-full rounded-full transition-all duration-300"
+                  style={{ width: `${Math.max(2, statusData?.percent ?? 0)}%` }}
+                />
+              </div>
+
+              <div className="w-full flex justify-between text-xs font-mono text-zinc-400 mb-5">
+                <span>{statusData?.percent?.toFixed(1) ?? '0.0'}% completed</span>
+                <span>{statusData?.current ?? 0} / {statusData?.total || '—'} days</span>
+              </div>
+
+              {statusData?.date && (
+                <div className="bg-zinc-900/80 border border-zinc-800 rounded-xl px-4 py-2.5 w-full text-xs font-mono mb-5 flex justify-between">
+                  <span className="text-zinc-500">Processing Date:</span>
+                  <span className="text-zinc-200 font-bold">{statusData.date}</span>
+                </div>
+              )}
+
+              <button
+                onClick={stopBacktest}
+                className="px-4 py-1.5 rounded-lg text-xs font-bold bg-zinc-900 hover:bg-zinc-800 text-red-400 border border-zinc-700 hover:border-red-500/40 transition-colors"
+              >
+                Cancel Simulation
+              </button>
+            </div>
+          )}
+
+          {result && s && (
+            <div className="p-5 flex flex-col gap-6">
+
+              {/* ── Pulse ribbon: headline KPIs ── */}
+              <div className="relative overflow-hidden rounded-2xl border border-zinc-800 bg-zinc-900/60">
+                <div className={`pointer-events-none absolute inset-0 bg-gradient-to-r ${
+                  s.total_pnl >= 0 ? 'from-emerald-500/[0.06]' : 'from-red-500/[0.06]'
+                } via-transparent to-blue-500/[0.04]`} />
+                <div className="relative flex items-stretch gap-6 px-5 py-4 flex-wrap">
+                  <PulseStat
+                    label="Overall Profit"
+                    value={fmtPnl(s.total_pnl)}
+                    color={s.total_pnl >= 0 ? 'text-emerald-400' : 'text-red-400'}
+                  />
+                  <div className="w-px bg-zinc-800 self-stretch" />
+                  <PulseStat
+                    label="Win Rate"
+                    value={`${s.win_rate.toFixed(1)}%`}
+                    sub={`${s.wins}W / ${s.losses}L`}
+                    color={s.win_rate >= 50 ? 'text-emerald-400' : 'text-red-400'}
+                  />
+                  <div className="w-px bg-zinc-800 self-stretch" />
+                  <PulseStat
+                    label="Max Drawdown"
+                    value={`₹${fmt(s.max_drawdown)}`}
+                    sub={s.max_drawdown_days != null ? `${s.max_drawdown_days} days` : undefined}
+                    color="text-amber-400"
+                  />
+                  <div className="ml-auto flex items-center gap-5 flex-wrap">
+                    <PulseStat
+                      label="Trades"
+                      value={String(s.traded_cycles)}
+                      sub={`of ${s.total_cycles} evaluated`}
+                      size="text-sm"
+                      color="text-zinc-200"
+                    />
+                    <PulseStat
+                      label="Return / Max DD"
+                      value={s.return_maxdd_ratio != null ? s.return_maxdd_ratio.toFixed(2) : '—'}
+                      size="text-sm"
+                      color={s.return_maxdd_ratio != null && s.return_maxdd_ratio >= 1 ? 'text-emerald-400' : 'text-zinc-300'}
+                    />
+                    <PulseStat
+                      label="Reward : Risk"
+                      value={s.reward_risk_ratio != null ? s.reward_risk_ratio.toFixed(2) : '—'}
+                      size="text-sm"
+                      color={s.reward_risk_ratio != null && s.reward_risk_ratio >= 1 ? 'text-emerald-400' : 'text-zinc-300'}
+                    />
+                  </div>
+                </div>
+              </div>
+
+              {/* ── Detailed Stats ── */}
+              <div>
+                <div className="text-[9px] font-bold text-zinc-500 uppercase tracking-[0.16em] mb-3">Detailed Stats</div>
+                <div className="grid grid-cols-3 sm:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-2">
+                  <StatCard
+                    label="Avg Profit / Trade"
+                    value={fmtPnl(s.avg_pnl)}
+                    color={s.avg_pnl >= 0 ? 'text-emerald-400' : 'text-red-400'}
+                  />
+                  <StatCard
+                    label="Loss %"
+                    value={`${(100 - s.win_rate).toFixed(1)}%`}
+                    sub={`${s.losses} losses`}
+                    color="text-red-400"
+                  />
+                  <StatCard
+                    label="Avg Winning Trade"
+                    value={fmtPnl(s.avg_win)}
+                    color="text-emerald-400"
+                  />
+                  <StatCard
+                    label="Avg Losing Trade"
+                    value={`-₹${fmt(s.avg_loss)}`}
+                    color="text-red-400"
+                  />
+                  <StatCard
+                    label="Max Profit (Single)"
+                    value={fmtPnl(s.max_win)}
+                    color="text-emerald-400"
+                  />
+                  <StatCard
+                    label="Max Loss (Single)"
+                    value={fmtPnl(s.max_loss)}
+                    color="text-red-400"
+                  />
+                  <StatCard
+                    label="Expectancy Ratio"
+                    value={s.expectancy_ratio != null ? s.expectancy_ratio.toFixed(2) : '—'}
+                    color={s.expectancy_ratio != null && s.expectancy_ratio >= 0 ? 'text-emerald-400' : 'text-red-400'}
+                  />
+                  <StatCard
+                    label="Max Win Streak"
+                    value={String(s.max_win_streak)}
+                    color="text-emerald-400"
+                  />
+                  <StatCard
+                    label="Max Loss Streak"
+                    value={String(s.max_loss_streak)}
+                    color="text-red-400"
+                  />
+                  <StatCard
+                    label="Max Trades in DD"
+                    value={String(s.max_trades_in_drawdown)}
+                    color="text-amber-400"
+                  />
+                  <StatCard
+                    label="Commission Paid"
+                    value={`₹${fmt(s.commission_paid)}`}
+                    color="text-zinc-400"
+                  />
+                </div>
+              </div>
+
+              {/* ── Year-wise Returns ── */}
+              {Object.keys(result.monthly_pnl).length > 0 && (
+                <div>
+                  <div className="text-[9px] font-bold text-zinc-500 uppercase tracking-[0.16em] mb-3">Year-wise Returns</div>
+                  <YearwiseTable monthlyPnl={result.monthly_pnl} equityCurve={result.equity_curve} />
+                </div>
+              )}
+
+              {/* ── Equity Curve, Underlying Value & Drawdown ── */}
+              <BacktestCharts equityCurve={result.equity_curve} />
+
+              {/* ── Full Report ── */}
+              <div>
+                <div className="text-[9px] font-bold text-zinc-500 uppercase tracking-[0.16em] mb-3">
+                  Full Report ({result.cycles.filter(c => c.exit_reason !== 'NO_ENTRY').length} trades)
+                </div>
+                <FullReportTable cycles={result.cycles} lotSize={lotSize} />
+              </div>
+
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
