@@ -71,9 +71,44 @@ function StrategyGlyph({
 }) {
   const chrome = useChartChrome();
   const path = useMemo(() => {
-    // If live prices are available and not mixed expiry, compute payoff on real strikes
+    // A Calendar/Diagonal template's front and far legs share (or nearly
+    // share) a strike but trade on different expiries — computePayoff's
+    // single-expiry combinatorial math cancels their intrinsic values
+    // exactly at every spot for a same-strike pair, always producing a flat
+    // line regardless of premiums (see computeCalendarPayoffCurve's own doc
+    // comment in lib/multiLegFocus.ts for why that combinatorial model can't
+    // represent a calendar spread at all). This glyph is a schematic
+    // preview, not a priced chart (the real curve renders once the strategy
+    // is added — see MultiLegStrategyRow's calendarCurve), so it draws an
+    // illustrative tent/hump shape instead: peaked between the two legs'
+    // offsets, tapering to bounded losses on both wings, matching the real
+    // shape family a calendar spread's payoff actually has.
     const hasMixed = template.legs.some(l => l.expiryRole === 'far');
-    if (legsInfo && legsInfo.allPriced && !hasMixed) {
+    if (hasMixed) {
+      const frontOffset = template.legs.find(l => l.expiryRole !== 'far')?.offset ?? 0;
+      const farOffset = template.legs.find(l => l.expiryRole === 'far')?.offset ?? 0;
+      const center = 100 + ((frontOffset + farOffset) / 2) * 5;
+      const halfWidth = Math.max(10, Math.abs(farOffset - frontOffset) * 5 / 2 + 10);
+      const floor = -0.55;
+      const samples = 48;
+      const points = Array.from({ length: samples + 1 }, (_, i) => {
+        const x = 60 + (80 * i) / samples;
+        const dist = Math.abs(x - center);
+        const y = Math.max(floor, 1 - dist / halfWidth);
+        return { x, y };
+      });
+      const ys = points.map(p => p.y);
+      const yLo = Math.min(...ys), yHi = Math.max(...ys);
+      const span = yHi - yLo || 1;
+      return points.map((p, i) => {
+        const px = (i / (points.length - 1)) * 72 + 4;
+        const py = 30 - ((p.y - yLo) / span) * 24;
+        return `${i ? 'L' : 'M'}${px.toFixed(1)},${py.toFixed(1)}`;
+      }).join('');
+    }
+
+    // If live prices are available, compute payoff on real strikes
+    if (legsInfo && legsInfo.allPriced) {
       const payoffLegs: PayoffLeg[] = legsInfo.legs.map(l => ({
         side: l.side,
         option: l.option,
