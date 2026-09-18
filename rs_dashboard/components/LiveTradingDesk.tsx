@@ -12,6 +12,7 @@ import {
   findBrokerRow,
   liveLegQty,
   legUnrealizedPnl,
+  legEntryPrice,
   reconcileBasket,
   basketIsFlat,
 } from '@/lib/liveChartsLedger';
@@ -47,6 +48,10 @@ interface TradeRow {
 function fmtRupee(n: number): string {
   const sign = n < 0 ? '-' : '';
   return `${sign}₹${Math.abs(n).toLocaleString('en-IN', { maximumFractionDigits: 0 })}`;
+}
+
+function fmtPrice(n: number): string {
+  return n > 0 ? n.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : '—';
 }
 
 type DeskTab = 'positions' | 'orders' | 'trades';
@@ -561,6 +566,7 @@ export default function LiveTradingDesk({ baskets, onBasketsChange, open, onTogg
                   <tr>
                     <th>Basket</th>
                     <th>Leg</th>
+                    <th className="text-right">Entry</th>
                     <th className="text-right">Qty</th>
                     <th className="text-right">P&amp;L</th>
                     <th className="text-right">Action</th>
@@ -598,6 +604,7 @@ export default function LiveTradingDesk({ baskets, onBasketsChange, open, onTogg
                             </span>{' '}
                             {leg.strike} {leg.optionType}
                           </td>
+                          <td className="text-right tabular-nums">{fmtPrice(legEntryPrice(row, leg))}</td>
                           <td className="text-right tabular-nums">{ownQty}</td>
                           <td className={`text-right tabular-nums font-bold ${pnl >= 0 ? 'ltd-text-pos' : 'ltd-text-neg'}`}>
                             {fmtRupee(pnl)}
@@ -649,6 +656,7 @@ export default function LiveTradingDesk({ baskets, onBasketsChange, open, onTogg
                             </span>{' '}
                             {leg.strike} {leg.type}
                           </td>
+                          <td className="text-right tabular-nums">{fmtPrice(leg.price)}</td>
                           <td className="text-right tabular-nums">{leg.qtyLots}</td>
                           <td className={`text-right tabular-nums font-bold ${pnl >= 0 ? 'ltd-text-pos' : 'ltd-text-neg'}`}>
                             {fmtRupee(pnl)}

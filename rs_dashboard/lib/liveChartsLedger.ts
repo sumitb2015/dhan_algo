@@ -83,6 +83,16 @@ export function liveLegQty(row: BrokerPositionRow | null, leg: LedgerLeg): numbe
   return Math.min(leg.qty, Math.abs(netQty));
 }
 
+/** This leg's entry price - the broker's buyAvg for a BUY-entry leg, sellAvg for a SELL-entry
+ *  leg. Read directly off the row rather than scaled by ownQty (unlike P&L, an average price
+ *  isn't diluted by how much of the broker's net qty this ledger leg still owns). */
+export function legEntryPrice(row: BrokerPositionRow | null, leg: LedgerLeg): number {
+  if (!row) return 0;
+  const isBuy = leg.action === 'BUY';
+  const avg = Number(isBuy ? (row.buyAvg ?? row.buy_avg) : (row.sellAvg ?? row.sell_avg));
+  return Number.isFinite(avg) ? avg : 0;
+}
+
 /** This leg's proportional share of the broker's reported unrealized P&L for that security+
  *  product, scaled by how much of the broker's own net quantity this ledger leg still owns.
  *  Proportional scaling (rather than recomputing from LTP/avg price) keeps sign and MCX
