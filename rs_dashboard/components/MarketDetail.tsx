@@ -8,9 +8,10 @@
 // High/Day Low still show up here because they ride the same quote packet
 // LTP already comes from — no extra request either.
 
-import React, { useEffect } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import Link from 'next/link';
-import { ArrowLeft, TrendingUp, TrendingDown, Minus, Fuel, LineChart } from 'lucide-react';
+import { ArrowLeft, TrendingUp, TrendingDown, Minus, Fuel, LineChart, PictureInPicture2 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { Card } from '@/components/ui/card';
 import NavBar from './NavBar';
@@ -18,6 +19,38 @@ import { useLiveTickerPoll, isStale, ageOf, ageLabel } from '@/lib/useLiveTicker
 import { fmtPrice } from './LiveTickerPanel';
 import { startLiveIndicesBridge } from '@/lib/startLiveIndicesBridge';
 import { geistDisplay } from '@/lib/fonts';
+
+// Chrome/Edge-only API, not yet in lib.dom.d.ts.
+declare global {
+  interface Window {
+    documentPictureInPicture?: {
+      requestWindow(options?: { width?: number; height?: number }): Promise<Window>;
+      window: Window | null;
+    };
+  }
+}
+
+// Copies every stylesheet from the main document into the PiP window's head so
+// Tailwind utility classes used in <PipContent> render correctly there — the
+// PiP window is a genuinely separate document with no CSS of its own.
+function copyStylesInto(pip: Window) {
+  Array.from(document.styleSheets).forEach((styleSheet) => {
+    try {
+      const rules = Array.from(styleSheet.cssRules).map((r) => r.cssText).join('\n');
+      const style = pip.document.createElement('style');
+      style.textContent = rules;
+      pip.document.head.appendChild(style);
+    } catch {
+      // Cross-origin stylesheet — cssRules is inaccessible, so re-link instead.
+      if (styleSheet.href) {
+        const link = pip.document.createElement('link');
+        link.rel = 'stylesheet';
+        link.href = styleSheet.href;
+        pip.document.head.appendChild(link);
+      }
+    }
+  });
+}
 
 interface IndexQuote {
   ltp: number;
@@ -54,6 +87,38 @@ export default function MarketDetail({ marketKey }: { marketKey: string }) {
   useEffect(() => { startLiveIndicesBridge(); }, []);
 
   const { data, flash, now } = useLiveTickerPoll<IndicesResponse>('/api/scalper/top-indices', pickLtps);
+
+  const [pipSupported, setPipSupported] = useState<boolean | null>(null);
+  const [pipWindow, setPipWindow] = useState<Window | null>(null);
+  const pipWindowRef = useRef<Window | null>(null);
+
+  useEffect(() => { setPipSupported(typeof window !== 'undefined' && 'documentPictureInPicture' in window); }, []);
+
+  useEffect(() => {
+    // Close the floating window on unmount (route away) rather than leaving it
+    // orphaned with a portal target that no longer receives updates.
+    return () => { pipWindowRef.current?.close(); };
+  }, []);
+
+  async function openPip() {
+    if (!window.documentPictureInPicture) return;
+    const pip = await window.documentPictureInPicture.requestWindow({ width: 300, height: 190 });
+    copyStylesInto(pip);
+    pip.document.body.style.margin = '0';
+    pip.document.body.style.background = '#09090b';
+    pip.addEventListener('pagehide', () => {
+      pipWindowRef.current = null;
+      setPipWindow(null);
+    });
+    pipWindowRef.current = pip;
+    setPipWindow(pip);
+  }
+
+  function closePip() {
+    pipWindowRef.current?.close();
+    pipWindowRef.current = null;
+    setPipWindow(null);
+  }
 
   const tickMs = data?.updated_at ? new Date(data.updated_at).getTime() : NaN;
   const stale = isStale(tickMs, now);
@@ -116,9 +181,42 @@ export default function MarketDetail({ marketKey }: { marketKey: string }) {
             </span>
           </div>
           <span className="w-px h-5 bg-zinc-800 shrink-0" />
+          <button
+            type="button"
+            onClick={pipWindow ? closePip : openPip}
+            disabled={pipSupported === false}
+            title={
+              pipSupported === false
+                ? 'Floating window needs Chrome or Edge'
+                : pipWindow ? 'Close floating window' : 'Open always-on-top floating window'
+            }
+            aria-label={pipWindow ? 'Close floating window' : 'Open floating window'}
+            className="flex items-center justify-center w-8 h-8 rounded-lg bg-zinc-900/60 backdrop-blur-sm
+                      border border-white/10 shrink-0 hover:border-white/20 hover:bg-zinc-800/60
+                      transition-colors disabled:opacity-30 disabled:cursor-not-allowed disabled:hover:bg-zinc-900/60"
+          >
+            <PictureInPicture2 className={cn('h-4 w-4', pipWindow ? 'text-sky-400' : 'text-zinc-400')} />
+          </button>
+          <span className="w-px h-5 bg-zinc-800 shrink-0" />
           <NavBar />
         </div>
       </div>
+
+      {pipWindow && createPortal(
+        <PipContent
+          label={row?.label ?? marketKey}
+          isMcx={isMcx}
+          quote={quote}
+          pct={pct}
+          up={up}
+          down={down}
+          flash={f}
+          stale={stale}
+          hasData={!!data}
+          ageMs={ageMs}
+        />,
+        pipWindow.document.body,
+      )}
 
       {notFound ? (
         <div className="relative z-10 flex-1 flex items-center justify-center text-sm text-zinc-500">
@@ -160,6 +258,70 @@ export default function MarketDetail({ marketKey }: { marketKey: string }) {
           </Card>
         </div>
       )}
+    </div>
+  );
+}
+
+function PipContent({
+  label, isMcx, quote, pct, up, down, flash, stale, hasData, ageMs,
+}: {
+  label: string;
+  isMcx: boolean;
+  quote: IndexQuote | null;
+  pct: number | null;
+  up: boolean;
+  down: boolean;
+  flash: 'up' | 'down' | undefined;
+  stale: boolean;
+  hasData: boolean;
+  ageMs: number;
+}) {
+  const Icon = isMcx ? Fuel : LineChart;
+  const DirIcon = pct === null ? Minus : up ? TrendingUp : down ? TrendingDown : Minus;
+  const toneClass = up ? 'text-emerald-400' : down ? 'text-red-400' : 'text-zinc-400';
+
+  return (
+    <div className="flex flex-col h-screen w-screen bg-zinc-950 text-white p-4 gap-3 font-sans overflow-hidden">
+      <div className="flex items-center justify-between gap-2">
+        <div className="flex items-center gap-1.5 min-w-0">
+          <Icon className={cn('h-3.5 w-3.5 shrink-0', isMcx ? 'text-amber-400' : 'text-sky-400')} />
+          <span className="text-xs font-bold text-white tracking-tight truncate">{label}</span>
+        </div>
+        <span className={cn('w-1.5 h-1.5 rounded-full shrink-0',
+          !hasData ? 'bg-yellow-400 animate-pulse' : stale ? 'bg-rose-400' : 'bg-emerald-400 animate-pulse')}
+          title={stale ? `Stale ${ageLabel(ageMs)}` : 'Live'} />
+      </div>
+
+      <div className={cn('font-mono font-bold tabular-nums leading-none text-4xl transition-colors',
+        flash === 'up' ? 'text-emerald-300' : flash === 'down' ? 'text-red-300' : 'text-zinc-100')}>
+        {quote && quote.ltp > 0 ? fmtPrice(quote.ltp) : '—'}
+      </div>
+
+      <div className="flex items-center gap-1.5">
+        <DirIcon className={cn('h-4 w-4', toneClass)} />
+        <span className={cn('inline-flex items-center rounded-md font-bold tabular-nums font-mono border px-2 py-0.5 text-sm',
+          pct === null ? 'bg-zinc-800 border-zinc-700 text-zinc-500'
+            : up ? 'bg-emerald-500/10 border-emerald-500/30 text-emerald-400'
+            : down ? 'bg-red-500/10 border-red-500/30 text-red-400'
+            : 'bg-zinc-800 border-zinc-700 text-zinc-500')}>
+          {pct === null ? 'N/A' : `${pct > 0 ? '+' : ''}${pct.toFixed(2)}%`}
+        </span>
+      </div>
+
+      <div className="grid grid-cols-2 gap-2 mt-auto">
+        <div className="flex flex-col gap-0.5 rounded-md border border-white/10 bg-zinc-900/50 px-2 py-1.5 min-w-0">
+          <span className="font-bold uppercase tracking-wider text-zinc-500 text-[9px] truncate">Day High</span>
+          <span className="font-mono font-bold text-emerald-400 text-sm tabular-nums truncate">
+            {quote?.day_high ? fmtPrice(quote.day_high) : '—'}
+          </span>
+        </div>
+        <div className="flex flex-col gap-0.5 rounded-md border border-white/10 bg-zinc-900/50 px-2 py-1.5 min-w-0">
+          <span className="font-bold uppercase tracking-wider text-zinc-500 text-[9px] truncate">Day Low</span>
+          <span className="font-mono font-bold text-red-400 text-sm tabular-nums truncate">
+            {quote?.day_low ? fmtPrice(quote.day_low) : '—'}
+          </span>
+        </div>
+      </div>
     </div>
   );
 }
