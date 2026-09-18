@@ -1,20 +1,28 @@
 """
-CLI entry point for the VectorBT Backtester dashboard terminal
-(rs_dashboard `/backtest-vectorbt`, `app/api/backtest-vectorbt/route.ts`).
+CLI entry point for the VectorBT Options Backtester dashboard terminal
+(rs_dashboard `/backtest-signals`, `app/api/backtest-vectorbt/route.ts`).
 
-Wraps this engine's data/costs/engine/tearsheet modules with a small catalog of
-signal generators (EMA crossover, RSI, Donchian breakout, Supertrend, MACD) —
-all pandas_ta, matching this repo's existing indicator convention (see
-CLAUDE.md's DhanHelper.get_indicators_ta) rather than the OpenAlgo skill's
-`openalgo.ta`. Writes status/result JSON in the same spawn+poll shape every
-other dashboard-triggered Python job uses (see app/api/backtest/route.ts):
-progress to --status-file as it runs, the final stats+comparison to
---output-file, and a fixed-path tearsheet HTML the dashboard serves through
+Runs the exact same multi-leg options simulation as `/backtest`
+(backtest_short_straddle.py — same LegConfig, same bar-by-bar entry/SL/target/
+trailing-SL/roll decisions) and additionally feeds the resulting per-leg
+trades into a grouped, cash-shared vbt.Portfolio (options_engine.py) so
+VectorBT computes its own Sharpe/Sortino/drawdown/tearsheet from those same
+trades — see options_engine.py's module docstring for exactly how leg trades
+map into vbt.Portfolio.from_signals and the two simplifications that implies.
+
+Writes status/result JSON in the same spawn+poll shape every other
+dashboard-triggered Python job uses (see app/api/backtest/route.ts):
+progress to --status-file as it runs, the final result (custom-engine
+cycles/summary/equity_curve plus a "vbt" sub-object) to --output-file, and a
+fixed-path OpenStatz tearsheet HTML served by
 app/api/backtest-vectorbt/report/route.ts.
 
 Usage:
     venv/bin/python scripts/analysis/vectorbt_engine/run_backtest_cli.py \\
-        --strategy ema-crossover --symbol NIFTY --asset-type index \\
+        --start-date 2026-08-17 --end-date 2026-09-15 \\
+        --legs '[{"option_type":"CE","position":"sell","lots":1,"strike":"ATM","leg_sl_pct":0,"leg_target_pct":0},
+                 {"option_type":"PE","position":"sell","lots":1,"strike":"ATM","leg_sl_pct":0,"leg_target_pct":0}]' \\
+        --use-db \\
         --status-file debug/vectorbt_backtest_status.json \\
         --output-file debug/vectorbt_backtest_result.json \\
         --tearsheet-file debug/vectorbt_tearsheet.html
@@ -28,23 +36,18 @@ import os
 import sys
 import traceback
 from datetime import datetime, timezone
-from typing import Tuple
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
 sys.path.insert(0, ROOT)
 
 import pandas as pd  # noqa: E402
-import pandas_ta as pta  # noqa: E402
 
-from scripts.analysis.vectorbt_engine import costs, data, engine, tearsheet  # noqa: E402
+from scripts.analysis import backtest_short_straddle as sb  # noqa: E402
+from scripts.analysis.vectorbt_engine import costs, data, options_engine, tearsheet  # noqa: E402
 
-STRATEGIES = ["ema-crossover", "rsi", "donchian", "supertrend", "macd"]
 COST_PROFILES = list(costs.PROFILES.keys())
+DEFAULT_LEGS = json.dumps(sb.DEFAULT_LEGS)
 
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Status/stop-trigger plumbing (same shape as every other dashboard job)
-# ─────────────────────────────────────────────────────────────────────────────
 
 def write_status(status_file: str, **fields) -> None:
     payload = {"running": True, "done": False, "percent": 0, **fields}
@@ -54,79 +57,7 @@ def write_status(status_file: str, **fields) -> None:
     os.replace(tmp, status_file)
 
 
-def check_stop(stop_file: str) -> bool:
-    return os.path.exists(stop_file)
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Signal generators — each returns (entries, exits) boolean Series aligned to close
-# ─────────────────────────────────────────────────────────────────────────────
-
-def signals_ema_crossover(df: pd.DataFrame, fast: int = 20, slow: int = 50) -> Tuple[pd.Series, pd.Series]:
-    close = df["close"]
-    ema_fast = pta.ema(close, length=fast)
-    ema_slow = pta.ema(close, length=slow)
-    entries = (ema_fast > ema_slow) & (ema_fast.shift(1) <= ema_slow.shift(1))
-    exits = (ema_fast < ema_slow) & (ema_fast.shift(1) >= ema_slow.shift(1))
-    return entries, exits
-
-
-def signals_rsi(df: pd.DataFrame, length: int = 14, buy_below: float = 30, sell_above: float = 70) -> Tuple[pd.Series, pd.Series]:
-    rsi = pta.rsi(df["close"], length=length)
-    entries = (rsi < buy_below) & (rsi.shift(1) >= buy_below)
-    exits = (rsi > sell_above) & (rsi.shift(1) <= sell_above)
-    return entries, exits
-
-
-def signals_donchian(df: pd.DataFrame, length: int = 20) -> Tuple[pd.Series, pd.Series]:
-    dc = pta.donchian(df["high"], df["low"], lower_length=length, upper_length=length)
-    upper, lower = dc[f"DCU_{length}_{length}"], dc[f"DCL_{length}_{length}"]
-    close = df["close"]
-    entries = close >= upper
-    exits = close <= lower
-    return entries.fillna(False), exits.fillna(False)
-
-
-def signals_supertrend(df: pd.DataFrame, length: int = 10, multiplier: float = 3.0) -> Tuple[pd.Series, pd.Series]:
-    st = pta.supertrend(df["high"], df["low"], df["close"], length=length, multiplier=multiplier)
-    direction = st[f"SUPERTd_{length}_{multiplier}"]
-    entries = (direction == 1) & (direction.shift(1) != 1)
-    exits = (direction == -1) & (direction.shift(1) != -1)
-    return entries.fillna(False), exits.fillna(False)
-
-
-def signals_macd(df: pd.DataFrame, fast: int = 12, slow: int = 26, signal: int = 9) -> Tuple[pd.Series, pd.Series]:
-    m = pta.macd(df["close"], fast=fast, slow=slow, signal=signal)
-    macd_line, signal_line = m[f"MACD_{fast}_{slow}_{signal}"], m[f"MACDs_{fast}_{slow}_{signal}"]
-    entries = (macd_line > signal_line) & (macd_line.shift(1) <= signal_line.shift(1))
-    exits = (macd_line < signal_line) & (macd_line.shift(1) >= signal_line.shift(1))
-    return entries.fillna(False), exits.fillna(False)
-
-
-SIGNAL_FUNCS = {
-    "ema-crossover": signals_ema_crossover,
-    "rsi": signals_rsi,
-    "donchian": signals_donchian,
-    "supertrend": signals_supertrend,
-    "macd": signals_macd,
-}
-
-
-def strategy_display_name(strategy: str, params: dict) -> str:
-    if strategy == "ema-crossover":
-        return f"EMA {params['fast']}/{params['slow']} Crossover"
-    if strategy == "rsi":
-        return f"RSI({params['length']}) {params['buy_below']}/{params['sell_above']}"
-    if strategy == "donchian":
-        return f"Donchian({params['length']}) Breakout"
-    if strategy == "supertrend":
-        return f"Supertrend({params['length']}, {params['multiplier']})"
-    if strategy == "macd":
-        return f"MACD {params['fast']}/{params['slow']}/{params['signal']}"
-    return strategy
-
-
-def stats_to_jsonable(stats: pd.Series) -> dict:
+def stats_to_jsonable(stats: "pd.Series") -> dict:
     """pf.stats() mixes floats/ints/Timestamps/Timedeltas — normalize to JSON-safe values."""
     out = {}
     for key, val in stats.items():
@@ -143,110 +74,164 @@ def stats_to_jsonable(stats: pd.Series) -> dict:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--strategy", required=True, choices=STRATEGIES)
-    parser.add_argument("--symbol", default="NIFTY")
-    parser.add_argument("--asset-type", default="index", choices=["index", "equity"])
     parser.add_argument("--start-date", default="2021-01-01")
-    parser.add_argument("--end-date", default=None)
-    parser.add_argument("--cost-profile", default="delivery_equity", choices=COST_PROFILES)
+    parser.add_argument("--end-date", default="2026-06-30")
+    parser.add_argument("--lot-size", type=int, default=65)
+    parser.add_argument("--entry-time", default="09:20")
+    parser.add_argument("--eod-time", default="15:15")
+    parser.add_argument("--profit-target-pct", type=float, default=50.0)
+    parser.add_argument("--overall-sl-pct", type=float, default=0.0)
+    parser.add_argument("--commission-per-lot", type=float, default=40.0)
+    parser.add_argument("--slippage-pct", type=float, default=0.0)
+    parser.add_argument("--strategy-type", default="intraday", choices=["intraday", "expiry_day", "first_day"])
+    parser.add_argument("--legs", default=DEFAULT_LEGS)
+    parser.add_argument("--use-db", action="store_true", help="Use SQLite database for option price lookups")
+    parser.add_argument("--adjustment-mode", default="none", choices=["none", "rolling_straddle"])
+    parser.add_argument("--roll-buffer", type=float, default=35.0)
+    parser.add_argument("--roll-type", default="points", choices=["points", "percentage"])
+    parser.add_argument("--max-rolls", type=int, default=5)
+    parser.add_argument("--scalp-floor-pct", type=float, default=0.0)
+    parser.add_argument("--trail-sl-pct", type=float, default=0.0)
+    parser.add_argument("--square-off-mode", default="one_leg", choices=["one_leg", "all_legs"])
+    parser.add_argument("--cost-profile", default="fno_options", choices=COST_PROFILES)
     parser.add_argument("--benchmark-symbol", default="NIFTY")
-
-    # Strategy params (only the ones relevant to --strategy are read)
-    parser.add_argument("--fast", type=int, default=20)
-    parser.add_argument("--slow", type=int, default=50)
-    parser.add_argument("--rsi-length", type=int, default=14)
-    parser.add_argument("--rsi-buy", type=float, default=30)
-    parser.add_argument("--rsi-sell", type=float, default=70)
-    parser.add_argument("--donchian-length", type=int, default=20)
-    parser.add_argument("--supertrend-length", type=int, default=10)
-    parser.add_argument("--supertrend-multiplier", type=float, default=3.0)
-    parser.add_argument("--macd-fast", type=int, default=12)
-    parser.add_argument("--macd-slow", type=int, default=26)
-    parser.add_argument("--macd-signal", type=int, default=9)
-
     parser.add_argument("--status-file", required=True)
     parser.add_argument("--output-file", required=True)
     parser.add_argument("--tearsheet-file", required=True)
-    parser.add_argument("--stop-file", default=None)
     args = parser.parse_args()
 
     started_at = datetime.now(timezone.utc).isoformat()
-    write_status(args.status_file, percent=5, stage="loading_data", started_at=started_at, pid=os.getpid())
+    write_status(args.status_file, percent=0, current=0, total=0, started_at=started_at, pid=os.getpid())
 
     try:
-        if args.stop_file and check_stop(args.stop_file):
-            write_status(args.status_file, running=False, done=True, stopped=True, percent=0)
-            return
+        legs_raw = json.loads(args.legs)
+        leg_configs = [sb.LegConfig(**l) for l in legs_raw]
 
-        loader = data.load_index_daily if args.asset_type == "index" else data.load_equity_daily
-        df = loader(args.symbol)
-        df = data.clip_date_range(df, start=args.start_date, end=args.end_date)
-        if len(df) < 60:
-            raise ValueError(f"Only {len(df)} bars loaded for {args.symbol} in the given date range — need at least 60.")
+        db_conn = None
+        if args.use_db:
+            import sqlite3
+            db_path = os.path.join(ROOT, "Options Data", "nifty_options.db")
+            if not os.path.exists(db_path):
+                raise FileNotFoundError(
+                    f"Database not found at {db_path}. Please run "
+                    f"scripts/analysis/convert_options_to_sqlite.py first."
+                )
+            db_conn = sqlite3.connect(db_path, check_same_thread=False)
 
-        write_status(args.status_file, percent=25, stage="computing_signals", started_at=started_at, pid=os.getpid())
+        vix_map = sb._load_vix()
+        cycles = sb.fetch_multi_leg_cycles(args.start_date, args.end_date, leg_configs, db_conn=db_conn)
 
-        params = {
-            "ema-crossover": {"fast": args.fast, "slow": args.slow},
-            "rsi": {"length": args.rsi_length, "buy_below": args.rsi_buy, "sell_above": args.rsi_sell},
-            "donchian": {"length": args.donchian_length},
-            "supertrend": {"length": args.supertrend_length, "multiplier": args.supertrend_multiplier},
-            "macd": {"fast": args.macd_fast, "slow": args.macd_slow, "signal": args.macd_signal},
-        }[args.strategy]
+        engine_result = sb.run_backtest(
+            leg_configs=leg_configs,
+            cycles=cycles,
+            lot_size=args.lot_size,
+            commission_per_lot=args.commission_per_lot,
+            slippage_pct=args.slippage_pct,
+            entry_time_str=args.entry_time,
+            eod_time_str=args.eod_time,
+            profit_target_pct=args.profit_target_pct,
+            overall_sl_pct=args.overall_sl_pct,
+            vix_map=vix_map,
+            strategy_type=args.strategy_type,
+            start_date=args.start_date,
+            end_date=args.end_date,
+            adjustment_mode=args.adjustment_mode,
+            roll_buffer=args.roll_buffer,
+            roll_type=args.roll_type,
+            max_rolls=args.max_rolls,
+            scalp_floor_pct=args.scalp_floor_pct,
+            trail_sl_pct=args.trail_sl_pct,
+            square_off_mode=args.square_off_mode,
+            status_file=args.status_file,
+        )
+        if db_conn:
+            db_conn.close()
 
-        entries, exits = SIGNAL_FUNCS[args.strategy](df, **params)
-        strategy_name = strategy_display_name(args.strategy, params)
+        engine_result["params"] = {
+            "start_date": args.start_date, "end_date": args.end_date, "lot_size": args.lot_size,
+            "entry_time": args.entry_time, "eod_time": args.eod_time,
+            "profit_target_pct": args.profit_target_pct, "overall_sl_pct": args.overall_sl_pct,
+            "commission_per_lot": args.commission_per_lot, "slippage_pct": args.slippage_pct,
+            "strategy_type": args.strategy_type, "legs": legs_raw,
+            "adjustment_mode": args.adjustment_mode, "roll_buffer": args.roll_buffer,
+            "roll_type": args.roll_type, "max_rolls": args.max_rolls,
+            "scalp_floor_pct": args.scalp_floor_pct, "trail_sl_pct": args.trail_sl_pct,
+            "square_off_mode": args.square_off_mode,
+        }
 
-        write_status(args.status_file, percent=50, stage="running_backtest", started_at=started_at, pid=os.getpid())
+        write_status(args.status_file, percent=95, stage="vectorbt_stats",
+                     total=engine_result["summary"]["traded_cycles"],
+                     current=engine_result["summary"]["traded_cycles"],
+                     started_at=started_at, pid=os.getpid())
 
         cost_profile = costs.get_profile(args.cost_profile)
-        run = engine.run_backtest(
-            df["close"], entries, exits,
-            cost_profile=cost_profile,
-            symbol=args.symbol,
-            strategy_name=strategy_name,
-        )
+        vbt_block = None
+        try:
+            pf = options_engine.run_vbt_options_portfolio(
+                cycles=engine_result["cycles"],
+                leg_configs=legs_raw,
+                lot_size=args.lot_size,
+                commission_per_lot=args.commission_per_lot,
+                cost_profile=cost_profile,
+            )
+            if pf is not None:
+                strat_daily_returns = options_engine.daily_returns(pf)
 
-        write_status(args.status_file, percent=75, stage="comparing_benchmark", started_at=started_at, pid=os.getpid())
+                bench_df = data.clip_date_range(
+                    data.load_index_daily(args.benchmark_symbol),
+                    start=args.start_date, end=args.end_date,
+                )
+                bench_return = (
+                    bench_df["close"].iloc[-1] / bench_df["close"].iloc[0] - 1
+                    if len(bench_df) > 1 else 0.0
+                )
 
-        benchmark_close = data.load_index_daily(args.benchmark_symbol)["close"]
-        comparison = engine.compare_to_benchmark(run, benchmark_close)
+                comparison = pd.DataFrame([
+                    ("Total Return", f"{pf.total_return():.2%}", f"{bench_return:.2%}"),
+                    ("Sharpe Ratio", f"{pf.sharpe_ratio():.2f}", "-"),
+                    ("Sortino Ratio", f"{pf.sortino_ratio():.2f}", "-"),
+                    ("Max Drawdown", f"{pf.max_drawdown():.2%}", "-"),
+                    ("Win Rate", f"{pf.trades.win_rate():.2%}" if pf.trades.count() else "-", "-"),
+                    ("Trades", f"{pf.trades.count()}", "-"),
+                    ("Profit Factor", f"{pf.trades.profit_factor():.2f}" if pf.trades.count() else "-", "-"),
+                ], columns=["Metric", "VectorBT Engine", "Benchmark (Buy & Hold)"])
 
-        write_status(args.status_file, percent=90, stage="generating_tearsheet", started_at=started_at, pid=os.getpid())
+                bench_daily_returns = bench_df["close"].pct_change().reindex(
+                    strat_daily_returns.index
+                ).fillna(0.0)
+                tearsheet_path = tearsheet.generate_tearsheet(
+                    strat_daily_returns, strategy_name="Multi-Leg Options (VectorBT)",
+                    output_path=args.tearsheet_file,
+                    benchmark_returns=bench_daily_returns,
+                    benchmark_name=args.benchmark_symbol,
+                    open_browser=False,
+                )
+                mc_summary = tearsheet.monte_carlo_summary(strat_daily_returns)
 
-        benchmark_returns = data.load_benchmark_returns(run.portfolio.wrapper.index, symbol=args.benchmark_symbol)
-        tearsheet_path = tearsheet.generate_tearsheet(
-            run.portfolio.returns(),
-            strategy_name=f"{strategy_name} - {args.symbol}",
-            output_path=args.tearsheet_file,
-            benchmark_returns=benchmark_returns,
-            open_browser=False,
-        )
-        mc_summary = tearsheet.monte_carlo_summary(run.portfolio.returns())
+                vbt_block = {
+                    "stats": stats_to_jsonable(pf.stats()),
+                    "comparison": comparison.to_dict(orient="records"),
+                    "tearsheet_available": tearsheet_path is not None,
+                    "monte_carlo_summary": mc_summary,
+                }
+        except Exception as vbt_exc:  # noqa: BLE001 — VectorBT stats are a bonus; never fail the whole run over them
+            print(f"warning: VectorBT stats failed: {vbt_exc}", file=sys.stderr)
+            traceback.print_exc()
+            vbt_block = {"error": str(vbt_exc)}
 
-        result = {
-            "strategy": args.strategy,
-            "strategy_name": strategy_name,
-            "symbol": args.symbol,
-            "asset_type": args.asset_type,
-            "cost_profile": args.cost_profile,
-            "params": params,
-            "start_date": args.start_date,
-            "end_date": args.end_date,
-            "bars": len(df),
-            "stats": stats_to_jsonable(run.portfolio.stats()),
-            "comparison": comparison.to_dict(orient="records"),
-            "tearsheet_available": tearsheet_path is not None,
-            "monte_carlo_summary": mc_summary,
-            "generated_at": datetime.now(timezone.utc).isoformat(),
-        }
+        engine_result["vbt"] = vbt_block
+        engine_result["generated_at"] = datetime.now(timezone.utc).isoformat()
 
         tmp = args.output_file + ".tmp"
         with open(tmp, "w") as f:
-            json.dump(result, f)
+            json.dump(engine_result, f)
         os.replace(tmp, args.output_file)
 
         write_status(args.status_file, running=False, done=True, percent=100,
+                     total=engine_result["summary"]["traded_cycles"],
+                     current=engine_result["summary"]["traded_cycles"],
+                     trades=engine_result["summary"]["traded_cycles"],
+                     pnl=engine_result["summary"]["total_pnl"],
                      started_at=started_at, pid=os.getpid())
 
     except Exception as exc:  # noqa: BLE001 — surface any failure to the dashboard, not just a traceback in a dead process

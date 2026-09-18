@@ -79,6 +79,7 @@ const NAV_GROUPS = [
       { href: '/options-analytics', label: 'Positions Analytics', desc: 'Combined payoff, Greeks, P&L and Kelly sizing for your open NIFTY / SENSEX positions' },
       { href: '/options/unusual-activity', label: 'Unusual Flow', desc: 'Real-time unusual options volume/OI spikes & institutional turnover flow' },
       { href: '/backtest', label: 'Options Backtester', desc: 'Historical simulation with dynamic ATM rolling, scalp floors & trailing SL' },
+      { href: '/backtest-signals', label: 'VectorBT Options Backtester', desc: 'Same multi-leg options backtest run through VectorBT — Sharpe/Sortino/drawdown & OpenStatz tearsheet for comparing against the Options Backtester' },
       { href: '/options/analyzer', label: 'Option Analyzer', desc: 'Rank strikes based on technical indicators & OI change' },
       { href: '/options/premium-bar', label: 'Premium Bar Chart', desc: 'CE vs PE premium bar charts & straddle curve across strikes' },
       { href: '/options/live-charts', label: 'Live Options Charts', desc: 'Live straddle, rolling straddle, strangle & custom strategy premium charts' },
@@ -139,8 +140,6 @@ const NAV_GROUPS = [
       { href: '/terminal', label: 'Intraday Terminal', desc: 'Nifty 50 intraday VWAP + RS signal blotter, positions & auto-trader control' },
       { href: '/strategies', label: 'Strategies', desc: 'Automated execution control panel' },
       { href: '/strategies-plus', label: 'Strategies+', desc: 'Advanced multi-leg algorithm inputs' },
-      { href: '/backtest', label: 'Backtest', desc: 'Short straddle historical simulation' },
-      { href: '/backtest-signals', label: 'VectorBT Signal Backtester', desc: 'Vectorized EMA/RSI/Donchian/Supertrend/MACD backtests on Dhan data with Indian cost models & OpenStatz tearsheet' },
       { href: '/momentum', label: 'Momentum Portfolio', desc: 'Nifty 500 momentum investing portfolio — holdings, ranks, stops & signals' },
     ],
   },
@@ -367,15 +366,18 @@ export default function Sidebar() {
                               href={link.href}
                               className={cn(
                                 "flex items-center gap-2 rounded-lg py-1.25 pr-2 pl-7 text-xs font-medium transition-all duration-150 border",
+                                // Sky, not emerald — the parent group header above already uses emerald for
+                                // "this group contains the active page," so the active sub-link needs its
+                                // own color or the two read as one indistinguishable green block.
                                 isLinkActive
-                                  ? "bg-emerald-500/15 text-emerald-950 dark:text-emerald-300 border-emerald-500/30 font-semibold"
+                                  ? "bg-sky-500/15 text-sky-950 dark:text-sky-300 border-sky-500/30 font-semibold"
                                   : "border-transparent text-zinc-200 dark:text-zinc-400 hover:text-zinc-100 hover:bg-zinc-800/40"
                               )}
                             />
                           }
                         >
                           <span className="truncate">{link.label}</span>
-                          {isLinkActive && <span className="ml-auto h-1.5 w-1.5 rounded-full bg-emerald-600 dark:bg-emerald-500 animate-pulse shrink-0" />}
+                          {isLinkActive && <span className="ml-auto h-1.5 w-1.5 rounded-full bg-sky-600 dark:bg-sky-500 animate-pulse shrink-0" />}
                         </TooltipTrigger>
                         {link.desc && <TooltipContent side="right">{link.desc}</TooltipContent>}
                       </Tooltip>

@@ -84,12 +84,41 @@ interface BacktestSummary {
 
 type MonthlyPnl = Record<string, Record<string, number>>;
 
+interface VbtComparisonRow {
+  Metric: string;
+  [col: string]: string;
+}
+
+interface VbtBlock {
+  stats?: Record<string, unknown>;
+  comparison?: VbtComparisonRow[];
+  tearsheet_available?: boolean;
+  monte_carlo_summary?: string | null;
+  error?: string;
+}
+
 interface BacktestResult {
   summary: BacktestSummary;
   cycles: CycleResult[];
   equity_curve: { date: string; cumulative_pnl: number }[];
   monthly_pnl: MonthlyPnl;
   params: Record<string, unknown>;
+  vbt?: VbtBlock | null;
+}
+
+// pf.stats() ships raw float precision — same 2-decimal-cap convention as the
+// (now-retired) directional-strategy VectorBT page.
+function formatVbtStat(key: string, val: unknown): string {
+  if (val === null || val === undefined) return '—';
+  if (typeof val === 'number') {
+    const isWhole = Number.isInteger(val);
+    const rounded = val.toLocaleString('en-IN', {
+      maximumFractionDigits: 2,
+      minimumFractionDigits: isWhole ? 0 : 2,
+    });
+    return key.includes('[%]') ? `${rounded}%` : rounded;
+  }
+  return String(val);
 }
 
 // ─── Constants ───────────────────────────────────────────────────────────────
@@ -242,7 +271,19 @@ const DEFAULT_STOCKMOCK_LEGS: LegConfig[] = [
   { option_type: 'PE', position: 'sell', lots: 1, strike: 'ATM', leg_sl_pct: 0, leg_target_pct: 0, strike_type: 'offset' },
 ];
 
-export default function OptionsBacktester() {
+interface OptionsBacktesterProps {
+  /** Base API route this page's Start/Stop/poll requests hit — lets
+   * /backtest-signals point the identical leg-builder UI at the VectorBT
+   * CLI (app/api/backtest-vectorbt) instead of the plain Python engine
+   * (app/api/backtest, the default) while running the exact same simulation. */
+  apiBase?: string;
+  pageTitle?: string;
+}
+
+export default function OptionsBacktester({
+  apiBase = '/api/backtest',
+  pageTitle,
+}: OptionsBacktesterProps = {}) {
   // ── Strike mode selection (Top radios)
   const [selectedStrikeMode, setSelectedStrikeMode] = useState<StrikeModeLabel>('ATM Point');
 
@@ -448,7 +489,7 @@ export default function OptionsBacktester() {
 
   async function stopBacktest() {
     try {
-      await fetch('/api/backtest', {
+      await fetch(apiBase, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ action: 'stop' }),
@@ -477,7 +518,7 @@ export default function OptionsBacktester() {
     if (pollRef.current) clearInterval(pollRef.current);
 
     try {
-      const res = await fetch('/api/backtest', {
+      const res = await fetch(apiBase, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -506,11 +547,21 @@ export default function OptionsBacktester() {
       const data = await res.json();
       if (!res.ok || data.error) throw new Error(data.error || 'Failed to start backtest');
 
+      // The VectorBT CLI writes its own "done" status the instant the Python-engine
+      // simulation finishes, then briefly flips it back to "running" while it computes
+      // VectorBT stats before writing the final result — a poll can in principle land
+      // in that sub-millisecond gap and see done=true with no result/error/stopped yet.
+      // Tolerate a few consecutive empty "done" reads before treating it as a real
+      // failure, instead of bailing out (and stopping the poll) on the first one.
+      let emptyDoneStreak = 0;
+      const MAX_EMPTY_DONE_POLLS = 3;
+
       pollRef.current = setInterval(async () => {
         try {
-          const sRes = await fetch('/api/backtest');
+          const sRes = await fetch(apiBase);
           const sData = await sRes.json();
           if (sData.running) {
+            emptyDoneStreak = 0;
             setStatusData({
               percent: sData.percent ?? 0,
               current: sData.current ?? 0,
@@ -520,11 +571,13 @@ export default function OptionsBacktester() {
               trades: sData.trades,
             });
           } else if (sData.done) {
-            if (pollRef.current) clearInterval(pollRef.current);
-            setLoading(false);
             if (sData.stopped) {
+              if (pollRef.current) clearInterval(pollRef.current);
+              setLoading(false);
               setError('Backtest stopped by user');
             } else if (sData.result) {
+              if (pollRef.current) clearInterval(pollRef.current);
+              setLoading(false);
               setResult(sData.result);
               setStatusData(null);
               toast.success('Backtest complete!');
@@ -532,9 +585,15 @@ export default function OptionsBacktester() {
                 resultsRef.current?.scrollIntoView({ behavior: 'smooth' });
               }, 200);
             } else if (sData.error) {
+              if (pollRef.current) clearInterval(pollRef.current);
+              setLoading(false);
               setError(sData.error);
               toast.error(sData.error);
+            } else if (emptyDoneStreak < MAX_EMPTY_DONE_POLLS) {
+              emptyDoneStreak += 1;
             } else {
+              if (pollRef.current) clearInterval(pollRef.current);
+              setLoading(false);
               const msg = 'Backtest completed or exited unexpectedly without results';
               setError(msg);
               toast.error(msg);
@@ -588,7 +647,7 @@ export default function OptionsBacktester() {
       {/* ── Top Header Banner: POSITIONS ── */}
       <div className="w-full bg-[#54b4c7] py-2 px-4 shadow-sm flex items-center justify-center relative">
         <h1 className="text-white text-xs md:text-sm font-bold tracking-widest uppercase">
-          POSITIONS
+          {pageTitle ?? 'POSITIONS'}
         </h1>
         {/* Standard global controls (theme toggle, Sync Data, Update, Disconnect) —
             every other page carries these; this StockMock-styled header dropped them
@@ -1826,6 +1885,71 @@ export default function OptionsBacktester() {
                   </tbody>
                 </table>
               </div>
+            </div>
+          )}
+
+          {/* VectorBT Stats — only present when apiBase points at the VectorBT CLI.
+              Same cycles/legs/trades as the Python-engine numbers above (see
+              scripts/analysis/vectorbt_engine/options_engine.py); this panel is
+              VectorBT's own Sharpe/Sortino/drawdown computed from those trades,
+              so any gap vs. the "Detailed Statistics" box above is a stats-
+              methodology difference, not a different backtest. */}
+          {result.vbt && !result.vbt.error && (
+            <div className="bg-white border border-slate-200 rounded-xl p-4 shadow-xs mb-6">
+              <div className="flex items-center justify-between flex-wrap gap-2 mb-3">
+                <h3 className="text-xs font-bold text-slate-700 uppercase tracking-wider">
+                  VectorBT Stats <span className="text-slate-400 font-normal normal-case">(same trades, computed by vbt.Portfolio)</span>
+                </h3>
+                {result.vbt.tearsheet_available && (
+                  <a href="/api/backtest-vectorbt/report" target="_blank" rel="noopener noreferrer"
+                     className="text-[11px] font-bold text-[#54b4c7] hover:underline">
+                    Open OpenStatz Tearsheet →
+                  </a>
+                )}
+              </div>
+
+              {result.vbt.comparison && result.vbt.comparison.length > 0 && (
+                <div className="overflow-x-auto mb-4">
+                  <table className="w-full text-xs">
+                    <thead>
+                      <tr className="bg-slate-100 text-slate-600 border-b border-slate-200">
+                        {Object.keys(result.vbt.comparison[0]).map(col => (
+                          <th key={col} className="text-left font-bold px-3 py-1.5">{col}</th>
+                        ))}
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {result.vbt.comparison.map((row, i) => (
+                        <tr key={i} className="border-b border-slate-100 last:border-0">
+                          {Object.entries(row).map(([col, val]) => (
+                            <td key={col} className="px-3 py-1.5 font-mono text-slate-700">{String(val)}</td>
+                          ))}
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+
+              {result.vbt.stats && (
+                <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-x-6 gap-y-1.5 text-xs">
+                  {Object.entries(result.vbt.stats).map(([key, val]) => (
+                    <div key={key} className="flex justify-between border-b border-slate-100 py-1">
+                      <span className="text-slate-400">{key.replace(' [%]', '')}</span>
+                      <span className="text-slate-700 font-mono font-medium">{formatVbtStat(key, val)}</span>
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              {result.vbt.monte_carlo_summary && (
+                <p className="text-[11px] text-slate-500 mt-3">{result.vbt.monte_carlo_summary}</p>
+              )}
+            </div>
+          )}
+          {result.vbt?.error && (
+            <div className="bg-amber-50 border border-amber-300 rounded-xl p-3 mb-6 text-[11px] text-amber-700">
+              VectorBT stats could not be computed: {result.vbt.error}
             </div>
           )}
 

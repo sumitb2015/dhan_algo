@@ -156,6 +156,12 @@ export const TERMINAL_PILLARS: TerminalPillarGroup[] = [
         hot: true,
       },
       {
+        name: 'VectorBT Options Backtester',
+        href: '/backtest-signals',
+        badge: 'BACKTEST',
+        desc: 'Same multi-leg options backtest run through VectorBT — Sharpe/Sortino/drawdown & OpenStatz tearsheet',
+      },
+      {
         name: 'Combined Premium Bar',
         href: '/options/premium-bar',
         badge: 'VOL',
@@ -367,11 +373,6 @@ export const TERMINAL_PILLARS: TerminalPillarGroup[] = [
         name: 'Multi-Broker Algo Desk',
         href: '/strategies-plus',
         desc: 'Cross-broker algorithmic strategy orchestrator and execution router',
-      },
-      {
-        name: 'Historical Backtesting Engine',
-        href: '/backtest',
-        desc: 'Walk-forward equity curves, maximum drawdown, Sharpe, and win rates',
       },
       {
         name: 'Nifty 500 Momentum Portfolio',

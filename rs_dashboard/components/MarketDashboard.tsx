@@ -637,6 +637,8 @@ function OptionsVolatilityIntelligence({
         categoryLabel="OPTIONS &amp; VOL DESKS"
         links={[
           { label: 'Options Analytics Hub', href: '/options-analytics', badge: 'CORE' },
+          { label: 'Options Backtester', href: '/backtest' },
+          { label: 'VectorBT Options Backtester', href: '/backtest-signals' },
           { label: 'ATM Straddle Decay', href: '/straddle-analysis' },
           { label: 'OTM Strangle Tracking', href: '/strangle-analysis' },
           { label: 'Combined Premium Bar', href: '/options/premium-bar' },
@@ -752,7 +754,6 @@ function AlgoStrategiesDesk({
         categoryLabel="ALGO ECOSYSTEM"
         links={[
           { label: 'Live Bots Desk', href: '/strategies', badge: 'LIVE' },
-          { label: 'Historical Backtest Engine', href: '/backtest' },
           { label: 'Multi-Broker Algo Desk', href: '/strategies-plus' },
           { label: 'Nifty 500 Momentum Portfolio', href: '/momentum', badge: 'CNC' },
         ]}

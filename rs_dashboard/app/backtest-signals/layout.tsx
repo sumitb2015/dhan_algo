@@ -1,7 +1,7 @@
 import type { Metadata } from 'next';
 
 export const metadata: Metadata = {
-  title: 'VectorBT Signal Backtester',
+  title: 'VectorBT Options Backtester',
 };
 
 export default function BacktestSignalsLayout({ children }: { children: React.ReactNode }) {
