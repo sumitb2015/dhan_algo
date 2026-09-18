@@ -752,7 +752,6 @@ function AlgoStrategiesDesk({
         categoryLabel="ALGO ECOSYSTEM"
         links={[
           { label: 'Live Bots Desk', href: '/strategies', badge: 'LIVE' },
-          { label: 'Quantitative Strategy Builder', href: '/strategy-builder', badge: 'BUILDER' },
           { label: 'Historical Backtest Engine', href: '/backtest' },
           { label: 'Multi-Broker Algo Desk', href: '/strategies-plus' },
           { label: 'Nifty 500 Momentum Portfolio', href: '/momentum', badge: 'CNC' },

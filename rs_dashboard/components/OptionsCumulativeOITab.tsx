@@ -435,10 +435,10 @@ export default function OptionsCumulativeOITab({ expiry: _expiry }: { expiry: st
                       <h3 className="text-xs font-bold uppercase tracking-wider text-sky-300">Actionable Trading Blueprint</h3>
                     </div>
                     <Link
-                      href="/strategy-builder"
+                      href="/multi-leg-focus"
                       className="flex items-center gap-1 text-[11px] font-bold text-sky-400 hover:text-sky-200 transition-colors"
                     >
-                      <span>Model in Strategy Builder</span>
+                      <span>Model in Multi-Leg Focus</span>
                       <ArrowRight className="h-3 w-3" />
                     </Link>
                   </div>

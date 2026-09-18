@@ -369,13 +369,6 @@ export const TERMINAL_PILLARS: TerminalPillarGroup[] = [
         desc: 'Cross-broker algorithmic strategy orchestrator and execution router',
       },
       {
-        name: 'Quantitative Strategy Builder',
-        href: '/strategy-builder',
-        badge: 'BUILDER',
-        desc: 'Visual rules designer, entry/exit criteria, and parameter tuner',
-        hot: true,
-      },
-      {
         name: 'Historical Backtesting Engine',
         href: '/backtest',
         desc: 'Walk-forward equity curves, maximum drawdown, Sharpe, and win rates',
