@@ -51,7 +51,7 @@ export interface MultiLegStrategyRowProps {
   atmStrike: number;
   spot?: number;
   ltpFor: (leg: MultiLegLeg) => number;
-  ltpForStrike?: (strike: number, option: 'CE' | 'PE') => number;
+  ltpForStrike?: (strike: number, option: 'CE' | 'PE', expiry?: string) => number;
   onUpdate: (patch: Partial<MultiLegBasket>) => void;
   onDelete: () => void;
   onPlace: () => Promise<void>;
@@ -69,6 +69,7 @@ export interface MultiLegStrategyRowProps {
     side: 'B' | 'S';
     option: 'CE' | 'PE';
     strike: number;
+    expiry?: string;
     lots: number;
     orderType: 'MARKET' | 'LIMIT';
     limitPrice?: number;
@@ -158,8 +159,23 @@ export default function MultiLegStrategyRow({
     return broker === 'dhan' ? 1 : (basket.underlying === 'CRUDEOIL' ? 100 : 10);
   }, [lotSize, basket.underlying, broker]);
 
+  // Calendar/Diagonal strategies stage legs on two different expiries — a
+  // single "payoff at expiry" curve/BE/max-P&L isn't meaningful across two
+  // different expiration dates, so it's suppressed rather than silently
+  // computed as a degenerate combo of the two legs' premiums (see
+  // dhan-payoff-diagrams skill's "hasMixedExpiry" pattern in Baskets.tsx).
+  // Only counts still-active legs — a CLOSED leg's stale expiry must not
+  // permanently pin this flag once it's exited, or a partial exit (e.g.
+  // closing just the far leg) would suppress a real payoff for the
+  // remaining single-expiry leg forever.
+  const hasMixedExpiry = useMemo(
+    () => basket.legs.some(l => l.status !== 'CLOSED' && l.expiry && l.expiry !== basket.expiry),
+    [basket.legs, basket.expiry],
+  );
+
   // ── Payoff: Breakevens, Max Profit, Max Loss ───────────────────────
   const payoffResult: PayoffResult | null = useMemo(() => {
+    if (hasMixedExpiry) return null;
     if (!basket.legs || basket.legs.length === 0) return null;
     const activeLegs = basket.legs.filter(l => l.status !== 'CLOSED');
     if (activeLegs.length === 0) return null;
@@ -196,7 +212,7 @@ export default function MultiLegStrategyRow({
     } catch {
       return null;
     }
-  }, [basket.legs, basket.underlying, lotSize, ltpFor]);
+  }, [basket.legs, basket.underlying, lotSize, ltpFor, hasMixedExpiry]);
 
   const breakevensDisplay = useMemo(() => {
     if (!payoffResult || payoffResult.breakevens.length === 0) return 'None';
@@ -272,6 +288,7 @@ export default function MultiLegStrategyRow({
       side: 'S',
       option: 'CE',
       strike: atm,
+      expiry: basket.expiry,
       lots: 1,
       type: 'MARKET',
       status: 'DRAFT',
@@ -344,6 +361,9 @@ export default function MultiLegStrategyRow({
           {hasPlacedLeg ? (
             <span className="text-xs font-bold text-zinc-300 whitespace-nowrap">
               {basket.underlying} <span className="text-zinc-600">·</span> {basket.expiry}
+              {hasMixedExpiry && basket.farExpiry && (
+                <span className="text-fuchsia-400"> / {basket.farExpiry}</span>
+              )}
             </span>
           ) : (
             <>
@@ -371,13 +391,50 @@ export default function MultiLegStrategyRow({
                   {expiries.map(exp => <option key={exp} value={exp}>{exp}</option>)}
                 </select>
               </div>
+
+              {/* Far Expiry — only meaningful for a Calendar/Diagonal strategy
+                 (a preset with a 'far' leg, or a leg someone toggled to FAR
+                 in the table below). Legs already on FAR keep their current
+                 expiry until the user re-toggles them onto the new value. */}
+              {(hasMixedExpiry || basket.presetKey?.includes('calendar') || basket.presetKey?.includes('diagonal')) && (
+                <div className="flex items-center gap-1">
+                  <label className="text-[10px] text-fuchsia-400 font-semibold uppercase">Far Expiry:</label>
+                  <select
+                    value={basket.farExpiry ?? ''}
+                    onChange={e => onUpdate({ farExpiry: e.target.value || undefined })}
+                    className="h-7 bg-zinc-950 border border-fuchsia-500/40 text-zinc-200 text-xs font-bold rounded px-2 focus:outline-none focus:border-fuchsia-500"
+                  >
+                    {!expiries.some(e => e !== basket.expiry) && (
+                      <option value="">No 2nd expiry listed</option>
+                    )}
+                    {/* Stray option for a stored farExpiry that has since rolled
+                       off the live expiries list — mirrors the Expiry select
+                       above so the dropdown always reflects what's actually
+                       persisted instead of silently defaulting to another
+                       value. */}
+                    {basket.farExpiry && !expiries.includes(basket.farExpiry) && (
+                      <option value={basket.farExpiry}>{basket.farExpiry}</option>
+                    )}
+                    {expiries.filter(exp => exp !== basket.expiry).map(exp => (
+                      <option key={exp} value={exp}>{exp}</option>
+                    ))}
+                  </select>
+                </div>
+              )}
             </>
           )}
         </div>
 
         {/* Right Side: Breakevens, Max P/L, Total P&L & Strategy Actions */}
         <div className="flex items-center gap-2 flex-nowrap shrink-0">
-          {payoffResult && (
+          {hasMixedExpiry ? (
+            <div
+              className="hidden md:flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-fuchsia-500/5 border border-fuchsia-500/20 text-[11px] font-mono text-fuchsia-300"
+              title="Calendar/Diagonal legs expire on different dates — no single-expiry payoff to compute. Track P&L from the legs table below."
+            >
+              Mixed Expiry — no single-day payoff
+            </div>
+          ) : payoffResult && (
             <div className="hidden md:flex items-center gap-2 px-2.5 py-1 rounded-lg bg-zinc-950 border border-zinc-800 text-xs font-mono" title="Strategy Payoff: Breakevens & Max Profit / Loss">
               <div className="flex items-center gap-1">
                 <span className="text-zinc-500 text-[10px] uppercase font-semibold">BE:</span>
@@ -538,7 +595,14 @@ export default function MultiLegStrategyRow({
                   </span>
                 )}
               </div>
-              {payoffResult && (
+              {hasMixedExpiry ? (
+                <>
+                  <div className="h-4 w-px bg-zinc-800" />
+                  <span className="text-fuchsia-300 text-[11px] font-mono" title="Calendar/Diagonal legs expire on different dates — no single-expiry payoff to compute. Track P&L from the legs table below.">
+                    Mixed Expiry — no single-day payoff, breakevens or max P/L
+                  </span>
+                </>
+              ) : payoffResult && (
                 <>
                   <div className="h-4 w-px bg-zinc-800" />
                   <div className="flex items-center gap-1.5" title="Strategy Breakeven Price Points at Expiry">
@@ -654,15 +718,16 @@ export default function MultiLegStrategyRow({
                   <col className="w-[5%]" />
                   <col className="w-[8%]" />
                   <col className="w-[5%]" />
+                  <col className="w-[6%]" />
+                  <col className="w-[6%]" />
+                  <col className="w-[8%]" />
+                  <col className="w-[8%]" />
+                  <col className="w-[4%]" />
+                  <col className="w-[6%]" />
+                  <col className="w-[9%]" />
                   <col className="w-[7%]" />
                   <col className="w-[6%]" />
-                  <col className="w-[10%]" />
-                  <col className="w-[10%]" />
-                  <col className="w-[4%]" />
-                  <col className="w-[10%]" />
-                  <col className="w-[8%]" />
-                  <col className="w-[6%]" />
-                  <col className="w-[16%]" />
+                  <col className="w-[14%]" />
                 </colgroup>
                 <thead>
                   <tr className="text-xs font-bold text-white border-b border-zinc-800 bg-zinc-800">
@@ -675,6 +740,7 @@ export default function MultiLegStrategyRow({
                     <th className="px-2 py-2 text-left">SL</th>
                     <th className="px-2 py-2 text-left">TP</th>
                     <th className="px-1 py-2 text-center">Trail</th>
+                    <th className="px-1.5 py-2 text-center">Expiry</th>
                     <th className="px-2 py-2 text-right">Margin</th>
                     <th className="px-2 py-2 text-right">P&L</th>
                     <th className="px-1.5 py-2 text-center">Status</th>
@@ -693,6 +759,8 @@ export default function MultiLegStrategyRow({
                       exiting={exitingLegs.has(leg.id)}
                       margin={legMargins?.[leg.id]}
                       multiplier={crudeMult}
+                      frontExpiry={basket.expiry}
+                      farExpiry={basket.farExpiry}
                       onChange={patch => updateLeg(leg.id, patch)}
                       onRemove={() => removeLeg(leg.id)}
                       onExit={() => onExitLeg(leg)}

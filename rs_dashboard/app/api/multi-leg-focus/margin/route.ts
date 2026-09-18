@@ -8,6 +8,10 @@ interface LegInput {
   side: 'B' | 'S';
   option: 'CE' | 'PE';
   strike: number;
+  /** Which expiry this leg actually trades on — a Calendar/Diagonal far leg
+   *  differs from the basket-level `expiry` below. Falls back to the
+   *  basket's `expiry` when omitted (older callers / persisted baskets). */
+  expiry?: string;
   lots: number;
   quantity: number;
   price: number;
@@ -96,7 +100,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     // included because the same crude quantity means lots on Dhan but barrels
     // elsewhere (see crudeMult below).
     const cacheKey = `${underlying}:${broker}:${body.expiry}:${body.legs.map(l =>
-      `${l.id}:${l.side}:${l.strike}:${l.quantity}:${l.securityId || ''}:${l.status || ''}`
+      `${l.id}:${l.side}:${l.strike}@${l.expiry || body.expiry}:${l.quantity}:${l.securityId || ''}:${l.status || ''}`
     ).join('|')}`;
 
     const hit = marginCache.get(cacheKey);
@@ -131,11 +135,24 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       // lookup itself fails (expiry not yet in the master list, etc).
       const hasLiveMarginApi = broker === 'dhan';
       const crossPriceViaDhan = !hasLiveMarginApi && !isCrude;
-      const dhanLookup = crossPriceViaDhan ? await getDhanStrikeLookup(underlying, body.expiry) : null;
-      const canPriceViaDhan = hasLiveMarginApi || dhanLookup !== null;
+      // A Calendar/Diagonal far leg trades a DIFFERENT expiry than the
+      // basket's front-month `body.expiry` — cross-pricing it through a
+      // single lookup for body.expiry would silently price it against the
+      // wrong contract. Resolve one lookup per DISTINCT expiry actually
+      // present among the legs (getDhanStrikeLookup is itself cached, so
+      // this costs nothing extra for the common single-expiry basket).
+      const dhanLookupByExpiry = new Map<string, Awaited<ReturnType<typeof getDhanStrikeLookup>>>();
+      if (crossPriceViaDhan) {
+        const distinctExpiries = new Set(body.legs.map(l => l.expiry || body.expiry));
+        await Promise.all([...distinctExpiries].map(async exp => {
+          dhanLookupByExpiry.set(exp, await getDhanStrikeLookup(underlying, exp));
+        }));
+      }
+      const canPriceViaDhan = hasLiveMarginApi || [...dhanLookupByExpiry.values()].some(v => v !== null);
 
       const dhanSecIdFor = (leg: LegInput): string | undefined => {
         if (hasLiveMarginApi) return leg.securityId;
+        const dhanLookup = dhanLookupByExpiry.get(leg.expiry || body.expiry);
         if (!dhanLookup) return undefined;
         const entry = dhanLookup.strikes[String(leg.strike)];
         const id = leg.option === 'CE' ? entry?.ceId : entry?.peId;

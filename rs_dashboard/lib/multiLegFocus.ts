@@ -15,6 +15,13 @@ export interface MultiLegLeg {
   side: LegSide;
   option: OptionType;
   strike: number;
+  /** Which expiry this leg trades on. Equal to the basket's `expiry` (the
+   *  front/main month) for every ordinary strategy; a Calendar/Diagonal
+   *  template's far leg carries the basket's `farExpiry` instead — see
+   *  resolveTemplateLegs and MultiLegBasket.farExpiry. Optional only for
+   *  backward compatibility with legs persisted before this field existed —
+   *  every caller must read it as `leg.expiry || basket.expiry`, never bare. */
+  expiry?: string;
   lots: number;
   type: 'MARKET' | 'LIMIT';
   price?: number;              // manual override, only used when type === 'LIMIT'
@@ -66,6 +73,9 @@ export interface MultiLegBasket {
   name?: string;
   underlying: string;
   expiry: string;
+  /** Secondary expiry for a Calendar/Diagonal template's far leg(s). Unset
+   *  for every ordinary single-expiry strategy. */
+  farExpiry?: string;
   broker: string;
   presetKey?: string;
   legs: MultiLegLeg[];
@@ -87,12 +97,15 @@ export function resolveTemplateLegs(
   atmStrike: number,
   allStrikes: number[],
   step: number,
+  frontExpiry: string = '',
+  farExpiry?: string,
 ): MultiLegLeg[] {
   return template.legs.map(tl => ({
     id: newLegId(),
     side: tl.side,
     option: tl.option,
     strike: nearestStrike(allStrikes, atmStrike + tl.offset * step) ?? atmStrike,
+    expiry: tl.expiryRole === 'far' ? (farExpiry || frontExpiry) : frontExpiry,
     lots: tl.ratio,
     type: 'MARKET' as const,
     status: 'DRAFT' as const,

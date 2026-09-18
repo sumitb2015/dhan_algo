@@ -169,7 +169,7 @@ export default function MultiLegFocus() {
   // isn't permanently unmatchable/unexitable. Dhan-only: every other broker
   // matches by trading symbol instead (see findLegPosition).
   const resolveDhanSecurityId = useCallback((b: MultiLegBasket, l: MultiLegLeg): string | undefined => {
-    const pair = `${b.underlying}:${b.expiry}`;
+    const pair = `${b.underlying}:${l.expiry || b.expiry}`;
     const strikeEntry = lookupCacheRef.current[pair]?.strikes?.[String(l.strike)];
     return l.option === 'CE' ? strikeEntry?.ceId : strikeEntry?.peId;
   }, []);
@@ -358,6 +358,13 @@ export default function MultiLegFocus() {
       if (b.underlying && b.expiry) {
         pairs.add(`${b.underlying}:${b.expiry}`);
       }
+      // A Calendar/Diagonal leg's far expiry needs its own chain/lookup data
+      // — it's a different contract from the basket's front-month expiry.
+      for (const l of b.legs) {
+        if (b.underlying && l.expiry && l.expiry !== b.expiry) {
+          pairs.add(`${b.underlying}:${l.expiry}`);
+        }
+      }
     }
     // Also include active if not present
     if (activeUnderlying && activeExpiry) {
@@ -461,8 +468,8 @@ export default function MultiLegFocus() {
             broker,
             presetKey: 'short-strangle',
             legs: [
-              { id: '1', side: 'S', option: 'CE', strike: atm + step, lots: 1, type: 'MARKET', status: 'DRAFT' },
-              { id: '2', side: 'S', option: 'PE', strike: atm - step, lots: 1, type: 'MARKET', status: 'DRAFT' },
+              { id: '1', side: 'S', option: 'CE', strike: atm + step, expiry: activeExpiry, lots: 1, type: 'MARKET', status: 'DRAFT' },
+              { id: '2', side: 'S', option: 'PE', strike: atm - step, expiry: activeExpiry, lots: 1, type: 'MARKET', status: 'DRAFT' },
             ],
             createdAt: new Date().toISOString(),
             updatedAt: new Date().toISOString(),
@@ -483,7 +490,7 @@ export default function MultiLegFocus() {
         if (l.strike && (l.option === 'CE' || l.option === 'PE')) {
           extraRequests.push({
             underlying: b.underlying,
-            expiry: b.expiry,
+            expiry: l.expiry || b.expiry,
             strike: l.strike,
             side: l.option,
           });
@@ -500,24 +507,26 @@ export default function MultiLegFocus() {
 
   // ── LTP Resolver per Basket & Leg ─────────────────────────────────
   const ltpFor = useCallback((basket: MultiLegBasket, leg: MultiLegLeg): number => {
+    const legExpiry = leg.expiry || basket.expiry;
+
     // 1. If WebSocket quotes match this basket's underlying & expiry:
     const targetUnderlying = liveQuotes?.underlying ?? activeUnderlying;
     const targetExpiry = liveQuotes?.expiry ?? activeExpiry;
-    if (liveQuotes?.strikes && basket.underlying === targetUnderlying && basket.expiry === targetExpiry) {
+    if (liveQuotes?.strikes && basket.underlying === targetUnderlying && legExpiry === targetExpiry) {
       const liveEntry = liveQuotes.strikes[String(leg.strike)];
       const liveLtp = (leg.option === 'CE' ? liveEntry?.ce?.ltp : liveEntry?.pe?.ltp) ?? 0;
       if (liveLtp > 0) return liveLtp;
     }
 
     // 2. If WebSocket quotes have off-expiry live tick from watchExtra:
-    if (liveQuotes?.extra && liveQuotes.extra[basket.expiry]) {
-      const expEntry = liveQuotes.extra[basket.expiry][String(leg.strike)];
+    if (liveQuotes?.extra && liveQuotes.extra[legExpiry]) {
+      const expEntry = liveQuotes.extra[legExpiry][String(leg.strike)];
       const extraLtp = (leg.option === 'CE' ? expEntry?.ce?.ltp : expEntry?.pe?.ltp) ?? 0;
       if (extraLtp > 0) return extraLtp;
     }
 
     // 3. Chain quotes lookup fallback
-    const pair = `${basket.underlying}:${basket.expiry}`;
+    const pair = `${basket.underlying}:${legExpiry}`;
     const chain = chainData[pair];
     if (chain?.quotes) {
       const q = chain.quotes[String(leg.strike)];
@@ -546,10 +555,13 @@ export default function MultiLegFocus() {
       const pair = `${basket.underlying}:${basket.expiry}`;
       const lookup = lookupCache[pair];
       const lotSize = lookup?.lotSize ?? fallbackLotSize(basket.underlying as Underlying, broker);
-      const strikes = lookup?.strikes ?? {};
 
       const legsPayload = basket.legs.map(leg => {
-        const strikeEntry = strikes[String(leg.strike)];
+        // A Calendar/Diagonal far leg resolves its security id against its
+        // OWN expiry's strike map, never the basket's front-month one.
+        const legPair = `${basket.underlying}:${leg.expiry || basket.expiry}`;
+        const legStrikes = lookupCache[legPair]?.strikes ?? {};
+        const strikeEntry = legStrikes[String(leg.strike)];
         const resolvedSecId = leg.orderRef?.securityId || (leg.option === 'CE' ? strikeEntry?.ceId : strikeEntry?.peId);
         const price = (leg.fill?.avgPrice && leg.fill.avgPrice > 0) ? leg.fill.avgPrice : (leg.price ?? 0);
         const qty = leg.fill?.qty && leg.fill.qty > 0 ? leg.fill.qty : (leg.lots * lotSize);
@@ -559,6 +571,7 @@ export default function MultiLegFocus() {
           side: leg.side,
           option: leg.option,
           strike: leg.strike,
+          expiry: leg.expiry || basket.expiry,
           lots: leg.lots,
           quantity: qty,
           price,
@@ -571,7 +584,7 @@ export default function MultiLegFocus() {
       // so a leg going from unresolved -> resolved as lookupCache populates
       // is treated as a real composition change, not skipped as unchanged.
       const signature = `${broker}:${basket.underlying}:${basket.expiry}:${legsPayload.map(l =>
-        `${l.side}-${l.option}-${l.strike}x${l.lots}-${l.status}-${l.securityId || ''}`
+        `${l.side}-${l.option}-${l.strike}@${l.expiry}x${l.lots}-${l.status}-${l.securityId || ''}`
       ).join('|')}`;
       if (lastFetchedMarginSignatureRef.current[basket.id] === signature) continue;
       lastFetchedMarginSignatureRef.current[basket.id] = signature;
@@ -621,7 +634,7 @@ export default function MultiLegFocus() {
   // on basket composition prevents rapid refiring and Dhan 429 rate limit errors.
   const basketsCompositionSignature = useMemo(() => {
     return baskets.map(b =>
-      `${b.id}:${b.underlying}:${b.expiry}:${b.legs.map(l => `${l.side}-${l.option}-${l.strike}x${l.lots}-${l.status}-${l.orderRef?.securityId || ''}`).join('|')}`
+      `${b.id}:${b.underlying}:${b.expiry}:${b.legs.map(l => `${l.side}-${l.option}-${l.strike}@${l.expiry || b.expiry}x${l.lots}-${l.status}-${l.orderRef?.securityId || ''}`).join('|')}`
     ).join(';');
   }, [baskets]);
 
@@ -646,6 +659,7 @@ export default function MultiLegFocus() {
         if (patch.underlying && patch.underlying !== b.underlying) {
           const newUnderlying = patch.underlying as Underlying;
           const newExp = expiriesMap[newUnderlying]?.[0] ?? '';
+          const newFarExp = expiriesMap[newUnderlying]?.[1] ?? newExp;
           const pair = `${newUnderlying}:${newExp}`;
           const strikes = chainData[pair]?.strikes?.length ? chainData[pair].strikes : [];
           const spot = chainData[pair]?.spot ?? DEFAULT_INDEX_SPOT[newUnderlying] ?? 24000;
@@ -655,8 +669,26 @@ export default function MultiLegFocus() {
           let newLegs = b.legs;
           if (b.legs.every(l => l.status === 'DRAFT')) {
             const tpl = ALL_STRATEGY_TEMPLATES.find(t => t.key === b.presetKey);
+            // A Calendar/Diagonal strategy (by template, or by a leg someone
+            // manually toggled to FAR) needs a real second expiry for the new
+            // underlying — otherwise resolveTemplateLegs/the diff-shift below
+            // would silently collapse the far leg back onto the front expiry,
+            // recreating the same-strike/same-expiry degenerate bug this
+            // feature was built to fix. Abort the underlying switch entirely
+            // (matches addStrategy's guard for the equivalent case at creation).
+            const needsFarExpiry = tpl
+              ? tpl.legs.some(l => l.expiryRole === 'far')
+              : b.legs.some(l => l.expiry && l.expiry !== b.expiry);
+            if (needsFarExpiry && newFarExp === newExp) {
+              addToast(
+                'error',
+                'Secondary expiry required',
+                `${newUnderlying} needs a second listed expiry to keep this Calendar/Diagonal strategy — underlying not changed`,
+              );
+              return b;
+            }
             if (tpl) {
-              newLegs = resolveTemplateLegs(tpl, newAtm, strikes, step);
+              newLegs = resolveTemplateLegs(tpl, newAtm, strikes, step, newExp, newFarExp);
             } else {
               const oldPair = `${b.underlying}:${b.expiry}`;
               const oldStrikes = chainData[oldPair]?.strikes?.length ? chainData[oldPair].strikes : [];
@@ -667,6 +699,7 @@ export default function MultiLegFocus() {
               newLegs = b.legs.map(l => ({
                 ...l,
                 strike: Math.round((l.strike + diff) / step) * step,
+                expiry: l.expiry && l.expiry !== b.expiry ? newFarExp : newExp,
               }));
             }
           }
@@ -676,6 +709,7 @@ export default function MultiLegFocus() {
             ...patch,
             underlying: newUnderlying,
             expiry: newExp,
+            farExpiry: newFarExp !== newExp ? newFarExp : undefined,
             legs: newLegs,
             updatedAt: new Date().toISOString(),
           };
@@ -693,7 +727,7 @@ export default function MultiLegFocus() {
       basketsRef.current = next;
       return next;
     });
-  }, [expiriesMap, chainData, persistBasket]);
+  }, [expiriesMap, chainData, persistBasket, addToast]);
 
   const deleteBasket = useCallback((basketId: string) => {
     const target = basketsRef.current.find(b => b.id === basketId);
@@ -722,6 +756,7 @@ export default function MultiLegFocus() {
   const addStrategy = useCallback((template?: StrategyTemplate, targetUnderlying?: Underlying) => {
     const u: Underlying = targetUnderlying ?? selectedUnderlying ?? 'NIFTY';
     const exp = expiriesMap[u]?.[0] ?? '';
+    const farExp = expiriesMap[u]?.[1] ?? '';
     const pair = `${u}:${exp}`;
     const strikes = chainData[pair]?.strikes?.length ? chainData[pair].strikes : [];
     const spot = chainData[pair]?.spot ?? DEFAULT_INDEX_SPOT[u];
@@ -737,14 +772,20 @@ export default function MultiLegFocus() {
       ],
     };
 
+    if (tpl.legs.some(l => l.expiryRole === 'far') && !farExp) {
+      addToast('error', 'Secondary expiry required', `${u} needs a second listed expiry to build a Calendar/Diagonal strategy`);
+      return;
+    }
+
     const newBasket: MultiLegBasket = {
       id: `mlf_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`,
       name: tpl.name,
       underlying: u,
       expiry: exp,
+      farExpiry: farExp && farExp !== exp ? farExp : undefined,
       broker,
       presetKey: tpl.key,
-      legs: resolveTemplateLegs(tpl, atm, strikes, step),
+      legs: resolveTemplateLegs(tpl, atm, strikes, step, exp, farExp),
       riskConfig: {
         targetValue: undefined,
         targetUnit: 'pts',
@@ -832,7 +873,10 @@ export default function MultiLegFocus() {
     const pair = `${basket.underlying}:${basket.expiry}`;
     const lookup = lookupCache[pair];
     const lotSize = lookup?.lotSize ?? fallbackLotSize(basket.underlying as Underlying, broker);
-    const strikeMap = lookup?.strikes ?? {};
+    // A Calendar/Diagonal far leg trades a different contract than the
+    // basket's front-month expiry — it must resolve its own security id
+    // against ITS OWN expiry's strike map, never the front one.
+    const strikeMapFor = (legExpiry: string) => lookupCache[`${basket.underlying}:${legExpiry}`]?.strikes ?? {};
 
     setPlacingMap(prev => ({ ...prev, [basketId]: true }));
 
@@ -840,7 +884,7 @@ export default function MultiLegFocus() {
     let working: MultiLegLeg[] = basket.legs.map(l => ({ ...l, status: 'PLACING' as MultiLegStatus }));
     updateBasket(basketId, { legs: working });
 
-    type PlacedLeg = { legId: string; label: string; side: 'B' | 'S'; option: OptionType; strike: number; qty: number; type: 'MARKET' | 'LIMIT' };
+    type PlacedLeg = { legId: string; label: string; side: 'B' | 'S'; option: OptionType; strike: number; qty: number; type: 'MARKET' | 'LIMIT'; expiry: string };
     const placedLegs: PlacedLeg[] = [];
 
     // Flattens whatever already filled in this call by firing opposite-side
@@ -879,7 +923,7 @@ export default function MultiLegFocus() {
         const reverseReq = resolveOrderRequest(broker, {
           side: p.side === 'B' ? 'S' : 'B', option: p.option, strike: p.strike, qty: p.qty, type: 'MARKET',
           underlying: basket.underlying as Underlying, productType: 'MARGIN',
-        }, strikeMap);
+        }, strikeMapFor(p.expiry));
         if (!reverseReq) {
           addToast('error', `Could not auto-reverse ${p.label}`, 'No order identifier — close manually from Orders/Positions');
           continue;
@@ -918,7 +962,7 @@ export default function MultiLegFocus() {
           price: leg.type === 'LIMIT' ? leg.price : undefined,
           underlying: basket.underlying as Underlying,
           productType: 'MARGIN',
-        }, strikeMap);
+        }, strikeMapFor(leg.expiry || basket.expiry));
 
         if (!req) {
           addToast('error', `${label} — no order identifier resolved`, 'Strike lookup not ready yet — strategy stopped');
@@ -953,7 +997,7 @@ export default function MultiLegFocus() {
             });
             updateBasket(basketId, { legs: working });
             addToast('success', `Placed ${label}`, `ID: ${j.order_id ?? 'OK'}`);
-            placedLegs.push({ legId: leg.id, label, side: leg.side, option: leg.option, strike: leg.strike, qty, type: leg.type });
+            placedLegs.push({ legId: leg.id, label, side: leg.side, option: leg.option, strike: leg.strike, qty, type: leg.type, expiry: leg.expiry || basket.expiry });
           } else {
             working = working.map(l => (l.id === leg.id ? { ...l, status: 'FAILED' as MultiLegStatus } : l));
             updateBasket(basketId, { legs: working });
@@ -1126,7 +1170,8 @@ export default function MultiLegFocus() {
       return;
     }
 
-    const pair = `${basket.underlying}:${basket.expiry}`;
+    const legExpiry = leg.expiry || basket.expiry;
+    const pair = `${basket.underlying}:${legExpiry}`;
     const lookup = lookupCache[pair];
     const lotSize = lookup?.lotSize ?? fallbackLotSize(basket.underlying as Underlying, broker);
     const strikeMap = lookup?.strikes ?? {};
@@ -1206,6 +1251,7 @@ export default function MultiLegFocus() {
     side: 'B' | 'S';
     option: 'CE' | 'PE';
     strike: number;
+    expiry?: string;
     lots: number;
     orderType: 'MARKET' | 'LIMIT';
     limitPrice?: number;
@@ -1218,7 +1264,8 @@ export default function MultiLegFocus() {
       return;
     }
 
-    const pair = `${basket.underlying}:${basket.expiry}`;
+    const legExpiry = params.expiry || basket.expiry;
+    const pair = `${basket.underlying}:${legExpiry}`;
     const lookup = lookupCache[pair];
     const lotSize = lookup?.lotSize ?? fallbackLotSize(basket.underlying as Underlying, broker);
     const strikeMap = lookup?.strikes ?? {};
@@ -1263,6 +1310,7 @@ export default function MultiLegFocus() {
           side: params.side,
           option: params.option,
           strike: params.strike,
+          expiry: legExpiry,
           lots: params.lots,
           type: params.orderType,
           price: fillPrice,
@@ -1819,18 +1867,19 @@ export default function MultiLegFocus() {
                 atmStrike={atmStrike}
                 spot={rowSpot}
                 ltpFor={leg => ltpFor(basket, leg)}
-                ltpForStrike={(strk, opt) => {
+                ltpForStrike={(strk, opt, legExpiry) => {
                   const key = String(strk);
                   const side = opt === 'CE' ? 'ce' : 'pe';
-                  if (basket.underlying === activeUnderlying && basket.expiry === activeExpiry) {
+                  const targetExpiry = legExpiry || basket.expiry;
+                  if (basket.underlying === activeUnderlying && targetExpiry === activeExpiry) {
                     const liveLtp = liveQuotes?.strikes?.[key]?.[side]?.ltp ?? 0;
                     if (liveLtp > 0) return liveLtp;
                   }
-                  if (liveQuotes?.extra?.[basket.expiry]) {
-                    const extraLtp = liveQuotes.extra[basket.expiry]?.[key]?.[side]?.ltp ?? 0;
+                  if (liveQuotes?.extra?.[targetExpiry]) {
+                    const extraLtp = liveQuotes.extra[targetExpiry]?.[key]?.[side]?.ltp ?? 0;
                     if (extraLtp > 0) return extraLtp;
                   }
-                  const pair = `${basket.underlying}:${basket.expiry}`;
+                  const pair = `${basket.underlying}:${targetExpiry}`;
                   const chain = chainData[pair];
                   const q = chain?.quotes?.[key];
                   return (opt === 'CE' ? q?.ce : q?.pe) ?? 0;

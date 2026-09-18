@@ -12,11 +12,12 @@ interface AddNewLegModalProps {
   allStrikes: number[];
   atmStrike: number;
   lotSize: number;
-  ltpForStrike: (strike: number, option: 'CE' | 'PE') => number;
+  ltpForStrike: (strike: number, option: 'CE' | 'PE', expiry?: string) => number;
   onAddLeg: (params: {
     side: 'B' | 'S';
     option: 'CE' | 'PE';
     strike: number;
+    expiry: string;
     lots: number;
     orderType: 'MARKET' | 'LIMIT';
     limitPrice?: number;
@@ -36,6 +37,9 @@ export default function AddNewLegModal({
   const [side, setSide] = useState<'B' | 'S'>('S');
   const [option, setOption] = useState<'CE' | 'PE'>('CE');
   const [strike, setStrike] = useState<number>(() => (atmStrike > 0 ? atmStrike : (allStrikes[0] ?? 24000)));
+  // Defaults to the basket's front expiry; only togglable to FAR when this
+  // basket actually has a second expiry (a Calendar/Diagonal strategy).
+  const [expiry, setExpiry] = useState<string>(() => basket?.expiry ?? '');
   const [lots, setLots] = useState<number>(1);
   const [orderType, setOrderType] = useState<'MARKET' | 'LIMIT'>('MARKET');
   const [limitPrice, setLimitPrice] = useState<number>(0);
@@ -43,7 +47,9 @@ export default function AddNewLegModal({
 
   if (!isOpen || !basket) return null;
 
-  const currentLtp = ltpForStrike(strike, option);
+  const canPickFar = !!basket.farExpiry && basket.farExpiry !== basket.expiry;
+  const effectiveExpiry = expiry || basket.expiry;
+  const currentLtp = ltpForStrike(strike, option, effectiveExpiry);
   const effectiveLot = lotSize > 0 ? lotSize : fallbackLotSize(basket.underlying, basket.broker);
   const totalQty = lots * effectiveLot;
 
@@ -58,6 +64,7 @@ export default function AddNewLegModal({
         side,
         option,
         strike,
+        expiry: effectiveExpiry,
         lots,
         orderType,
         limitPrice: orderType === 'LIMIT' ? limitPrice : undefined,
@@ -78,7 +85,8 @@ export default function AddNewLegModal({
               Add New Leg to Active Strategy
             </h2>
             <p className="text-xs text-zinc-400 font-mono">
-              {basket.name} · {basket.underlying} · Expiry {basket.expiry}
+              {basket.name} · {basket.underlying} · Expiry {effectiveExpiry}
+              {canPickFar && effectiveExpiry === basket.farExpiry && <span className="text-fuchsia-400"> (FAR)</span>}
             </p>
           </div>
           <button
@@ -172,7 +180,7 @@ export default function AddNewLegModal({
               onChange={e => {
                 const s = Number(e.target.value);
                 setStrike(s);
-                const l = ltpForStrike(s, option);
+                const l = ltpForStrike(s, option, effectiveExpiry);
                 if (l > 0) setLimitPrice(l);
               }}
               className={`w-full h-9 bg-zinc-900 border border-zinc-700 text-zinc-100 font-mono text-sm rounded-lg px-3 focus:outline-none focus:border-emerald-500 ${FOCUS_RING}`}
@@ -185,6 +193,49 @@ export default function AddNewLegModal({
               ))}
             </select>
           </div>
+
+          {/* Expiry — only shown for a strategy that actually has a second
+             (far) expiry available, e.g. a Calendar/Diagonal spread. */}
+          {canPickFar && (
+            <div>
+              <label className="text-[11px] font-bold text-zinc-400 uppercase tracking-wider block mb-1">
+                Expiry
+              </label>
+              <div className="grid grid-cols-2 gap-1.5">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setExpiry(basket.expiry);
+                    const l = ltpForStrike(strike, option, basket.expiry);
+                    if (l > 0) setLimitPrice(l);
+                  }}
+                  className={`py-1.5 rounded-lg text-xs font-bold border transition-all ${
+                    effectiveExpiry === basket.expiry
+                      ? 'bg-zinc-700 border-zinc-500 text-white'
+                      : 'bg-zinc-900 border-zinc-800 text-zinc-400 hover:text-zinc-200'
+                  }`}
+                >
+                  FRONT · {basket.expiry}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (!basket.farExpiry) return;
+                    setExpiry(basket.farExpiry);
+                    const l = ltpForStrike(strike, option, basket.farExpiry);
+                    if (l > 0) setLimitPrice(l);
+                  }}
+                  className={`py-1.5 rounded-lg text-xs font-bold border transition-all ${
+                    effectiveExpiry === basket.farExpiry
+                      ? 'bg-fuchsia-600 border-fuchsia-500 text-white'
+                      : 'bg-zinc-900 border-zinc-800 text-zinc-400 hover:text-zinc-200'
+                  }`}
+                >
+                  FAR · {basket.farExpiry}
+                </button>
+              </div>
+            </div>
+          )}
 
           {/* Lots */}
           <div>

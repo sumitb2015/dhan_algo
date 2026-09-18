@@ -24,6 +24,38 @@ test('resolveTemplateLegs resolves offsets to nearest listed strikes and seeds D
   assert.notStrictEqual(legs[0].id, legs[1].id);
 });
 
+test('resolveTemplateLegs assigns the far expiry only to legs with expiryRole "far", front expiry otherwise', () => {
+  const template: StrategyTemplate = {
+    key: 'calendar-call-spread', name: 'Calendar Call Spread',
+    legs: [
+      { side: 'S', option: 'CE', offset: 0, ratio: 1, expiryRole: 'front' },
+      { side: 'B', option: 'CE', offset: 0, ratio: 1, expiryRole: 'far' },
+    ],
+  };
+  const strikes = [23600, 23800, 24000, 24200, 24400];
+  const legs = resolveTemplateLegs(template, 24000, strikes, 200, '2026-09-25', '2026-10-30');
+  assert.strictEqual(legs[0].expiry, '2026-09-25');
+  assert.strictEqual(legs[1].expiry, '2026-10-30');
+  // The two legs land on the same strike (both ATM) but different expiries —
+  // this is the fix for the bug where both legs collapsed onto the same
+  // expiry and looked like a degenerate net-zero combo.
+  assert.strictEqual(legs[0].strike, legs[1].strike);
+  assert.notStrictEqual(legs[0].expiry, legs[1].expiry);
+});
+
+test('resolveTemplateLegs falls back to front expiry for a far leg when no far expiry is available', () => {
+  const template: StrategyTemplate = {
+    key: 'calendar-call-spread', name: 'Calendar Call Spread',
+    legs: [
+      { side: 'S', option: 'CE', offset: 0, ratio: 1, expiryRole: 'front' },
+      { side: 'B', option: 'CE', offset: 0, ratio: 1, expiryRole: 'far' },
+    ],
+  };
+  const strikes = [23600, 23800, 24000, 24200, 24400];
+  const legs = resolveTemplateLegs(template, 24000, strikes, 200, '2026-09-25');
+  assert.strictEqual(legs[1].expiry, '2026-09-25');
+});
+
 test('reconcileLegFillDown shrinks a leg\'s fill qty to a smaller broker quantity', () => {
   const leg: MultiLegLeg = { id: '1', side: 'S', option: 'CE', strike: 24000, lots: 1, type: 'MARKET', status: 'OPEN', fill: { qty: 75, avgPrice: 120 } };
   const out = reconcileLegFillDown(leg, 50);
