@@ -19,6 +19,7 @@ import {
   type StraddleStrikesResponse,
 } from '@/lib/optionsChartTypes';
 import type { OptionOrderInitialState } from '@/components/OptionOrderModal';
+import type { LedgerBasket } from '@/lib/liveChartsLedger';
 
 const CHART_TYPES: { id: StraddleChartType; label: string }[] = [
   { id: 'candlestick', label: 'Candles' },
@@ -29,10 +30,15 @@ export function StraddlePanel({
   underlying,
   onUnderlyingChange,
   onTradeOptions,
+  openBaskets,
 }: {
   underlying: ChartUnderlying;
   onUnderlyingChange: (u: ChartUnderlying) => void;
   onTradeOptions?: (order: OptionOrderInitialState) => void;
+  /** This page's own traded-basket ledger (see lib/liveChartsLedger.ts), used only to find a
+   *  live quantity at the strike on screen so the Day P&L chip can show real rupees instead of
+   *  raw premium points - never to size or originate an order. */
+  openBaskets?: LedgerBasket[];
 }) {
   const [interval_, setInterval_] = useState('1');
   const [expiry, setExpiry] = useState('');
@@ -163,6 +169,24 @@ export function StraddlePanel({
 
   const spotVal = (chart?.spot ?? chainSpot ?? 0).toFixed(2);
 
+  // Live quantity this page's own ledger has open at the strike on screen (both CE and PE legs
+  // are opened together as one basket, so any live leg at this strike identifies the basket's
+  // quantity) - feeds DayChangeChip's points -> ₹ conversion. Never used to size an order.
+  const positionQty = useMemo(() => {
+    if (effectiveStrike === null) return 0;
+    let total = 0;
+    for (const basket of openBaskets ?? []) {
+      if (basket.underlying.toUpperCase() !== underlying.toUpperCase()) continue;
+      // Max across THIS basket's own legs at the strike (its CE/PE qty should match, but this
+      // guards against a partial exit on one side) - then summed ACROSS baskets, so adding to an
+      // already-open straddle at the same strike (a second basket, not a bigger first one) is
+      // reflected in full rather than only the larger of the two.
+      const legQtys = basket.legs.filter((l) => l.strike === effectiveStrike && l.qty > 0).map((l) => l.qty);
+      if (legQtys.length > 0) total += Math.max(...legQtys);
+    }
+    return total;
+  }, [openBaskets, underlying, effectiveStrike]);
+
   return (
     <div className="lc-panel">
       {/* ── Controls toolbar ────────────────────────────────────────── */}
@@ -284,7 +308,7 @@ export function StraddlePanel({
         </div>
 
         <div className="lc-toolbar-stats">
-          {todaysCandles.length > 0 && <DayChangeChip candles={todaysCandles} />}
+          {todaysCandles.length > 0 && <DayChangeChip candles={todaysCandles} qty={positionQty} />}
           {chart?.pdc !== undefined && chart.pdc !== null && (
             <div className="lc-spot-card" title="Previous Day Straddle Close">
               <span className="lc-stat-label">PDC</span>

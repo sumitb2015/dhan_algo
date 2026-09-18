@@ -561,6 +561,27 @@ export function CombinedPremiumChart({
     chartApiRef.current?.timeScale().fitContent();
   }
 
+  /** Scales the visible logical range around its own center. `factor` < 1 zooms in
+   * (narrower range), > 1 zooms out. No-ops if the chart hasn't laid out a range yet
+   * (e.g. before the first `fitContent()`). */
+  function zoomBy(factor: number) {
+    const timeScale = chartApiRef.current?.timeScale();
+    if (!timeScale) return;
+    const range = timeScale.getVisibleLogicalRange();
+    if (!range) return;
+    const center = (range.from + range.to) / 2;
+    const halfWidth = ((range.to - range.from) * factor) / 2;
+    timeScale.setVisibleLogicalRange({ from: center - halfWidth, to: center + halfWidth });
+  }
+
+  function zoomIn() {
+    zoomBy(0.7);
+  }
+
+  function zoomOut() {
+    zoomBy(1 / 0.7);
+  }
+
   useEffect(() => {
     drawChart();
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -633,14 +654,35 @@ export function CombinedPremiumChart({
             </div>
           </div>
         )}
-        <button
-          type="button"
-          onClick={resetView}
-          title="Reset zoom/pan to the default view"
-          className="absolute bottom-1.5 left-1/2 -translate-x-1/2 flex items-center justify-center w-6 h-6 rounded-full text-xs z-10 bg-zinc-900 border border-zinc-700 text-zinc-100"
-        >
-          ↺
-        </button>
+        <div className="absolute bottom-1.5 left-1/2 -translate-x-1/2 flex items-center gap-1 z-10">
+          <button
+            type="button"
+            onClick={zoomOut}
+            title="Zoom out"
+            aria-label="Zoom out"
+            className="flex items-center justify-center w-6 h-6 rounded-full text-xs bg-zinc-900 border border-zinc-700 text-zinc-100"
+          >
+            −
+          </button>
+          <button
+            type="button"
+            onClick={resetView}
+            title="Reset zoom/pan to the default view"
+            aria-label="Reset zoom"
+            className="flex items-center justify-center w-6 h-6 rounded-full text-xs bg-zinc-900 border border-zinc-700 text-zinc-100"
+          >
+            ↺
+          </button>
+          <button
+            type="button"
+            onClick={zoomIn}
+            title="Zoom in"
+            aria-label="Zoom in"
+            className="flex items-center justify-center w-6 h-6 rounded-full text-xs bg-zinc-900 border border-zinc-700 text-zinc-100"
+          >
+            +
+          </button>
+        </div>
       </div>
     </div>
   );

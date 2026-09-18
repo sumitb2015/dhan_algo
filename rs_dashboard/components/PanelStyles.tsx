@@ -21,20 +21,30 @@ export function PanelStyles() {
       .lc-toolbar {
         flex-shrink: 0;
         display: flex;
-        flex-wrap: wrap;
+        flex-wrap: nowrap;
         align-items: flex-end;
-        gap: 8px 12px;
-        padding: 8px 10px;
+        gap: 6px 8px;
+        padding: 6px 8px;
         background: var(--lc-surface);
         border: 1px solid var(--lc-hairline-soft);
         border-radius: 10px;
         backdrop-filter: blur(10px);
         box-shadow: var(--lc-shadow);
+        /* Every control (selects, indicator picker, stat cards) is already sized to its content
+           rather than stretching, so the row only needs to scroll - never wrap to a second
+           line, which ate chart height and forced a scan across two rows for one glance - on
+           a panel narrow enough that everything genuinely can't fit (a 2-up layout, or the
+           Trading Desk docked open). Scrollbar hidden since this is a glance-at-a-header strip,
+           not a content area the user is expected to scroll through. */
+        overflow-x: auto;
+        scrollbar-width: none;
       }
+      .lc-toolbar::-webkit-scrollbar { display: none; }
       .lc-toolbar-group {
         display: flex;
         flex-direction: column;
-        gap: 4px;
+        gap: 3px;
+        flex-shrink: 0;
       }
       .lc-group-label {
         font-size: 8px;
@@ -54,13 +64,15 @@ export function PanelStyles() {
         background: linear-gradient(180deg, transparent, var(--lc-hairline), transparent);
         align-self: flex-end;
         margin-bottom: 2px;
+        flex-shrink: 0;
       }
       .lc-toolbar-stats {
         display: flex;
         align-items: center;
-        gap: 6px;
+        gap: 4px;
         margin-left: auto;
-        flex-wrap: wrap;
+        flex-wrap: nowrap;
+        flex-shrink: 0;
       }
 
       /* ── Selects ─────────────────────────────────────────────────── */
@@ -116,7 +128,7 @@ export function PanelStyles() {
 
       /* ── View buttons ────────────────────────────────────────────── */
       .lc-view-btn {
-        padding: 5px 10px;
+        padding: 5px 8px;
         font-size: 11px;
         font-weight: 600;
         border-radius: 6px;
@@ -144,10 +156,12 @@ export function PanelStyles() {
         flex-direction: column;
         align-items: center;
         gap: 1px;
-        padding: 3px 8px;
+        padding: 2px 6px;
         background: var(--lc-surface-2);
         border: 1px solid var(--lc-hairline);
         border-radius: 6px;
+        flex-shrink: 0;
+        white-space: nowrap;
       }
       .lc-stat-label {
         font-size: 8px;
@@ -168,13 +182,15 @@ export function PanelStyles() {
         display: flex;
         align-items: center;
         gap: 5px;
-        padding: 4px 8px;
+        padding: 4px 7px;
         border-radius: 20px;
         border: 1px solid var(--lc-hairline-soft);
         background: var(--lc-surface-2);
         font-size: 9px;
         font-weight: 700;
         letter-spacing: 0.08em;
+        flex-shrink: 0;
+        white-space: nowrap;
       }
       .lc-status-dot {
         width: 6px;

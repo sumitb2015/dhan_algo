@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState, useEffect, useCallback, useRef } from 'react';
+import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import {
   X,
   Zap,
@@ -12,8 +12,12 @@ import {
   CheckCircle2,
   Loader2,
   RefreshCw,
+  ChevronUp,
+  ChevronDown,
+  Lock,
 } from 'lucide-react';
 import { fmtPrice, fmtLakhRs } from '@/lib/futuresFormatters';
+import type { LedgerBasket } from '@/lib/liveChartsLedger';
 
 export interface OptionTradeLeg {
   strike: number;
@@ -52,6 +56,11 @@ interface OptionOrderModalProps {
   onClose: () => void;
   initialOrder: OptionOrderInitialState | null;
   onOrderSuccess?: (orderIds: string[], summary: string, legs: PlacedOptionLeg[], underlying: string, expiry: string, title: string) => void;
+  /** This page's own traded baskets (see lib/liveChartsLedger.ts), used only to detect an
+   *  already-open position at the strike being traded so the product type can be matched to
+   *  it - never to size or originate an order (ownership stays the ledger's job, per the
+   *  dhan-terminal-position-ownership skill). Omitted by callers with no such ledger. */
+  existingBaskets?: LedgerBasket[];
 }
 
 const MAX_LOTS_PER_ORDER = 50;
@@ -68,8 +77,10 @@ export default function OptionOrderModal({
   onClose,
   initialOrder,
   onOrderSuccess,
+  existingBaskets,
 }: OptionOrderModalProps) {
   const [productType, setProductType] = useState<'INTRADAY' | 'MARGIN'>('INTRADAY');
+  const [productTypeLock, setProductTypeLock] = useState<'INTRADAY' | 'MARGIN' | null>(null);
   const [lotsMultiplier, setLotsMultiplier] = useState<number>(1);
   const [lotsDraft, setLotsDraft] = useState<string>('1');
 
@@ -96,6 +107,9 @@ export default function OptionOrderModal({
   // Resolved strikes and contract data
   const [lotSize, setLotSize] = useState<number>(1);
   const [resolvedLegs, setResolvedLegs] = useState<(OptionTradeLeg & { ltp?: number; securityId?: string })[]>([]);
+  // Every strike on this expiry's chain -> {ceId, peId}, from the same lookup that resolved the
+  // initial legs. Powers the strike up/down stepper without a second round-trip per click.
+  const [strikesMap, setStrikesMap] = useState<Record<string, { ceId?: string; peId?: string }>>({});
   const [loadingLookup, setLoadingLookup] = useState<boolean>(false);
   const [placingOrder, setPlacingOrder] = useState<boolean>(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
@@ -144,9 +158,10 @@ export default function OptionOrderModal({
       setLotSize(chainLot);
 
       // Match each leg to its securityId
-      const strikesMap = json.data.strikes || {};
+      const chainStrikes = json.data.strikes || {};
+      setStrikesMap(chainStrikes);
       const updated = baseLegs.map((leg) => {
-        const strikeEntry = strikesMap[String(leg.strike)];
+        const strikeEntry = chainStrikes[String(leg.strike)];
         const secId = (leg.optionType === 'CE' ? strikeEntry?.ceId : strikeEntry?.peId) || leg.securityId;
         return {
           ...leg,
@@ -172,6 +187,7 @@ export default function OptionOrderModal({
       setErrorMsg(null);
       setSuccessResult(null);
       setResolvedLegs(initialOrder.legs);
+      setStrikesMap({});
       setOrderType('MARKET');
       setPriceDraft('');
       setPrice(0);
@@ -181,6 +197,127 @@ export default function OptionOrderModal({
       fetchOptionDetails(initialOrder.underlying, initialOrder.expiry, initialOrder.legs);
     }
   }, [isOpen, initialOrder, fetchOptionDetails]);
+
+  // A straddle-shaped basket - every leg at one common strike - is the only shape the strike
+  // stepper (and the product-type match below) apply to; a strangle/multi-strike strategy has
+  // no single "the strike" to shift.
+  const commonStrike = useMemo(() => {
+    const strikes = new Set(resolvedLegs.map((l) => l.strike));
+    return strikes.size === 1 ? resolvedLegs[0]?.strike ?? null : null;
+  }, [resolvedLegs]);
+
+  const sortedChainStrikes = useMemo(
+    () => Object.keys(strikesMap).map(Number).filter((n) => Number.isFinite(n)).sort((a, b) => a - b),
+    [strikesMap],
+  );
+
+  const adjustStrike = useCallback(
+    (direction: 1 | -1) => {
+      if (commonStrike === null || sortedChainStrikes.length === 0) return;
+      const idx = sortedChainStrikes.indexOf(commonStrike);
+      const nextIdx = idx === -1 ? -1 : idx + direction;
+      if (nextIdx < 0 || nextIdx >= sortedChainStrikes.length) return;
+      const nextStrike = sortedChainStrikes[nextIdx];
+      const entry = strikesMap[String(nextStrike)];
+      setResolvedLegs((prev) =>
+        prev.map((leg) => ({
+          ...leg,
+          strike: nextStrike,
+          securityId: (leg.optionType === 'CE' ? entry?.ceId : entry?.peId) ?? undefined,
+        })),
+      );
+    },
+    [commonStrike, sortedChainStrikes, strikesMap],
+  );
+
+  // Product type follows whatever is already open at this strike - Dhan nets by security ID, so
+  // trading the same strike under a different product type here would sit alongside the existing
+  // position as a separate book rather than adding to it (exactly what happened 2026-09:  2 lots
+  // already open at 23350 under MARGIN, a fresh sell at 23350 went out INTRADAY instead).
+  //
+  // Checked two ways, broker first:
+  //  1. The broker's live position book - the source of truth, and the only one that survives a
+  //     page reload or a position opened in an earlier session/tab, which this page's own ledger
+  //     (in-memory React state) does not. Reading it here only decides which dropdown value a new
+  //     order uses - it never sizes an exit or originates ownership of a quantity, so it doesn't
+  //     fall under the ledger-only rule in dhan-terminal-position-ownership (that rule guards
+  //     exit sizing / P&L attribution, not this kind of product-type lookup).
+  //  2. This page's own ledger, as a fallback for an order just placed whose fill the broker's
+  //     position book hasn't caught up to yet (same race the ledger's own reconcile grace window
+  //     exists for).
+  useEffect(() => {
+    if (!isOpen || !initialOrder || commonStrike === null) {
+      setProductTypeLock(null);
+      return;
+    }
+    let cancelled = false;
+
+    const secIds = new Set(resolvedLegs.map((l) => String(l.securityId)).filter(Boolean));
+    if (secIds.size > 0) {
+      fetch('/api/scalper/positions')
+        .then((res) => res.json())
+        .then((json) => {
+          if (cancelled) return;
+          if (json.success && Array.isArray(json.data)) {
+            const rows = json.data as Record<string, unknown>[];
+            const match = rows.find((row) => {
+              const secId = String(row.securityId ?? row.security_id ?? '');
+              if (!secIds.has(secId)) return false;
+              const netQty = Number(row.netQty ?? row.net_qty ?? 0);
+              return Number.isFinite(netQty) && netQty !== 0;
+            });
+            const product = match
+              ? String(match.productType ?? match.product ?? '').trim().toUpperCase()
+              : '';
+            if (product === 'INTRADAY' || product === 'MARGIN') {
+              setProductType(product);
+              setProductTypeLock(product);
+              return;
+            }
+          }
+          applyLedgerFallback();
+        })
+        .catch(() => {
+          if (!cancelled) applyLedgerFallback();
+        });
+    } else {
+      applyLedgerFallback();
+    }
+
+    function applyLedgerFallback() {
+      if (cancelled) return;
+      const match = (existingBaskets ?? [])
+        .filter(
+          (b) =>
+            b.underlying.toUpperCase() === initialOrder!.underlying.toUpperCase() &&
+            b.expiry === initialOrder!.expiry,
+        )
+        .flatMap((b) => b.legs)
+        .find((l) => l.qty > 0 && l.strike === commonStrike);
+      if (match) {
+        setProductType(match.productType);
+        setProductTypeLock(match.productType);
+      } else {
+        setProductTypeLock(null);
+      }
+    }
+
+    return () => {
+      cancelled = true;
+    };
+  }, [isOpen, initialOrder, commonStrike, existingBaskets, resolvedLegs]);
+
+  // The title carries the strike, so a stepper-shifted straddle needs it recomputed rather than
+  // showing the strike it was opened at.
+  const displayTitle = useMemo(() => {
+    if (commonStrike === null || !initialOrder) return initialOrder?.title ?? '';
+    const hasCe = resolvedLegs.some((l) => l.optionType === 'CE');
+    const hasPe = resolvedLegs.some((l) => l.optionType === 'PE');
+    if (resolvedLegs.length === 2 && hasCe && hasPe) {
+      return `${initialOrder.underlying} ${commonStrike} Straddle`;
+    }
+    return initialOrder.title;
+  }, [commonStrike, resolvedLegs, initialOrder]);
 
   // Handle Order Placement
   const handlePlaceOrder = async () => {
@@ -256,7 +393,7 @@ export default function OptionOrderModal({
       }
 
       const orderIds: string[] = (json.data || []).map((d: { orderId: string }) => d.orderId).filter(Boolean);
-      const summary = `${initialOrder.title} · ${lotsMultiplier}x (${lotsMultiplier * lotSize} qty) · ${productType} · ${ORDER_TYPE_LABELS[orderType]}`;
+      const summary = `${displayTitle} · ${lotsMultiplier}x (${lotsMultiplier * lotSize} qty) · ${productType} · ${ORDER_TYPE_LABELS[orderType]}`;
 
       setSuccessResult({
         orderIds,
@@ -264,7 +401,7 @@ export default function OptionOrderModal({
       });
 
       if (onOrderSuccess) {
-        onOrderSuccess(orderIds, summary, placedLegs, initialOrder.underlying, initialOrder.expiry, initialOrder.title);
+        onOrderSuccess(orderIds, summary, placedLegs, initialOrder.underlying, initialOrder.expiry, displayTitle);
       }
     } catch (err: unknown) {
       setErrorMsg(err instanceof Error ? err.message : 'Order submission failed');
@@ -287,7 +424,7 @@ export default function OptionOrderModal({
             <div>
               <div className="flex items-center gap-2">
                 <h2 className="text-sm font-bold text-white tracking-tight">
-                  Trade {initialOrder.title}
+                  Trade {displayTitle}
                 </h2>
                 <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-zinc-800 text-zinc-300">
                   Exp: {initialOrder.expiry}
@@ -309,6 +446,47 @@ export default function OptionOrderModal({
 
         {/* Modal Body */}
         <div className="p-5 space-y-4 text-xs">
+          {/* 0. Strike Stepper - only for a single-strike (straddle-shaped) basket; a strangle
+              or multi-leg strategy has no one "the strike" to shift. */}
+          {commonStrike !== null && (
+            <div>
+              <div className="flex items-center justify-between mb-1.5">
+                <label className="text-[10px] font-bold text-zinc-400 uppercase tracking-wider">
+                  Strike
+                </label>
+                <span className="text-[10px] text-zinc-500">
+                  {sortedChainStrikes.length > 0 ? 'Shift to any strike on this expiry' : 'Resolving chain…'}
+                </span>
+              </div>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => adjustStrike(-1)}
+                  disabled={sortedChainStrikes.indexOf(commonStrike) <= 0}
+                  title="Lower strike"
+                  className="p-2 rounded-xl border border-zinc-800 bg-zinc-900 text-zinc-300 hover:text-white hover:bg-zinc-800 transition-colors cursor-pointer disabled:opacity-30 disabled:cursor-not-allowed"
+                >
+                  <ChevronDown className="h-4 w-4" />
+                </button>
+                <div className="flex-1 text-center font-mono font-bold text-white text-sm py-1.5 rounded-xl bg-zinc-900 border border-zinc-800">
+                  {commonStrike}
+                </div>
+                <button
+                  type="button"
+                  onClick={() => adjustStrike(1)}
+                  disabled={
+                    sortedChainStrikes.length === 0 ||
+                    sortedChainStrikes.indexOf(commonStrike) >= sortedChainStrikes.length - 1
+                  }
+                  title="Higher strike"
+                  className="p-2 rounded-xl border border-zinc-800 bg-zinc-900 text-zinc-300 hover:text-white hover:bg-zinc-800 transition-colors cursor-pointer disabled:opacity-30 disabled:cursor-not-allowed"
+                >
+                  <ChevronUp className="h-4 w-4" />
+                </button>
+              </div>
+            </div>
+          )}
+
           {/* 1. Product Type Selector */}
           <div>
             <div className="flex items-center justify-between mb-1.5">
@@ -316,30 +494,36 @@ export default function OptionOrderModal({
                 Product Type
               </label>
               <span className="text-[10px] text-zinc-400">
-                {productType === 'INTRADAY' ? 'MIS (Auto square-off at 15:15)' : 'NRML (Overnight position)'}
+                {productTypeLock
+                  ? `Locked - matches your open ${productTypeLock === 'INTRADAY' ? 'MIS' : 'NRML'} position at this strike`
+                  : productType === 'INTRADAY' ? 'MIS (Auto square-off at 15:15)' : 'NRML (Overnight position)'}
               </span>
             </div>
             <div className="grid grid-cols-2 gap-2">
               <button
                 type="button"
                 onClick={() => setProductType('INTRADAY')}
-                className={`py-1.5 px-3 rounded-xl font-semibold text-center transition-all cursor-pointer ${
+                disabled={!!productTypeLock}
+                className={`flex items-center justify-center gap-1.5 py-1.5 px-3 rounded-xl font-semibold text-center transition-all cursor-pointer disabled:cursor-not-allowed ${
                   productType === 'INTRADAY'
                     ? 'bg-sky-500/20 text-sky-300 border border-sky-500/40'
                     : 'bg-zinc-900 border border-zinc-800 text-zinc-400 hover:text-zinc-200'
-                }`}
+                } ${productTypeLock && productTypeLock !== 'INTRADAY' ? 'opacity-40' : ''}`}
               >
+                {productTypeLock === 'INTRADAY' && <Lock className="h-3 w-3" />}
                 INTRADAY (MIS)
               </button>
               <button
                 type="button"
                 onClick={() => setProductType('MARGIN')}
-                className={`py-1.5 px-3 rounded-xl font-semibold text-center transition-all cursor-pointer ${
+                disabled={!!productTypeLock}
+                className={`flex items-center justify-center gap-1.5 py-1.5 px-3 rounded-xl font-semibold text-center transition-all cursor-pointer disabled:cursor-not-allowed ${
                   productType === 'MARGIN'
                     ? 'bg-sky-500/20 text-sky-300 border border-sky-500/40'
                     : 'bg-zinc-900 border border-zinc-800 text-zinc-400 hover:text-zinc-200'
-                }`}
+                } ${productTypeLock && productTypeLock !== 'MARGIN' ? 'opacity-40' : ''}`}
               >
+                {productTypeLock === 'MARGIN' && <Lock className="h-3 w-3" />}
                 MARGIN (NRML)
               </button>
             </div>
@@ -418,7 +602,7 @@ export default function OptionOrderModal({
               </label>
               <button
                 type="button"
-                onClick={() => fetchOptionDetails(initialOrder.underlying, initialOrder.expiry, initialOrder.legs)}
+                onClick={() => fetchOptionDetails(initialOrder.underlying, initialOrder.expiry, resolvedLegs)}
                 disabled={loadingLookup}
                 className="flex items-center gap-1 text-[10px] text-zinc-400 hover:text-white cursor-pointer"
               >

@@ -5,6 +5,13 @@ function formatPts(value: number): string {
   return `${sign}${value.toFixed(2)}`;
 }
 
+/** Same sign+₹ convention as LiveTradingDesk's fmtRupee, so the two P&L figures on this page
+ * read identically when compared side by side. */
+function fmtRupee(value: number): string {
+  const sign = value < 0 ? '-' : '';
+  return `${sign}₹${Math.abs(value).toLocaleString('en-IN', { maximumFractionDigits: 0 })}`;
+}
+
 function StatCard({
   label,
   value,
@@ -32,9 +39,16 @@ function StatCard({
 export function DayChangeChip({
   candles,
   sellerConvention = true,
+  qty,
 }: {
   candles: ChartCandle[];
   sellerConvention?: boolean;
+  /** Underlying-unit quantity (lots × lot size) of a live position this page's own ledger has
+   *  open at this exact strike/leg combination. When present, the premium move is converted to
+   *  real rupees for that quantity so this chip and the Trading Desk's P&L agree; when absent
+   *  (no matching open position), the raw premium points are shown instead of a money figure
+   *  that would otherwise misrepresent an untraded contract as your actual P&L. */
+  qty?: number;
 }) {
   if (candles.length === 0) return null;
 
@@ -44,6 +58,9 @@ export function DayChangeChip({
   const low = Math.min(...candles.map((c) => c.low));
   const points = sellerConvention ? open - close : close - open;
   const pnlColor = points >= 0 ? 'lc-stat-profit' : 'lc-stat-loss';
+  const hasQty = typeof qty === 'number' && qty > 0;
+  const pnlLabel = hasQty ? 'Day P&L' : 'Day Δ (pts)';
+  const pnlValue = hasQty ? fmtRupee(points * qty) : formatPts(points);
 
   return (
     <>
@@ -53,12 +70,13 @@ export function DayChangeChip({
           flex-direction: column;
           align-items: center;
           gap: 1px;
-          padding: 3px 7px;
+          padding: 2px 6px;
           background: rgba(15, 20, 40, 0.7);
           border: 1px solid rgba(99, 102, 241, 0.1);
           border-radius: 6px;
           backdrop-filter: blur(8px);
-          min-width: 36px;
+          min-width: 30px;
+          flex-shrink: 0;
         }
         .lc-stat-label {
           font-size: 8px;
@@ -103,12 +121,14 @@ export function DayChangeChip({
       <span
         className="flex items-center gap-1.5"
         title={
-          sellerConvention
-            ? 'Positive = combined premium decayed since 9:15 open (gain for a seller). Negative = premium rose (loss for a seller).'
-            : 'Positive = value rose since 9:15 open (gain for this debit position). Negative = value fell (loss).'
+          hasQty
+            ? `Day P&L for your open ${qty} qty position at this strike (premium move × qty).`
+            : sellerConvention
+            ? 'Positive = combined premium decayed since 9:15 open (gain for a seller). Negative = premium rose (loss for a seller). Shown in points — no open position at this strike to convert to ₹.'
+            : 'Positive = value rose since 9:15 open (gain for this debit position). Negative = value fell (loss). Shown in points — no open position at this strike to convert to ₹.'
         }
       >
-        <StatCard label="Day P&L" value={formatPts(points)} colorClass={pnlColor} />
+        <StatCard label={pnlLabel} value={pnlValue} colorClass={pnlColor} />
         <StatCard label="O" value={open.toFixed(2)} />
         <StatCard label="H" value={high.toFixed(2)} />
         <StatCard label="L" value={low.toFixed(2)} />

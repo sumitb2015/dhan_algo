@@ -10,7 +10,7 @@ import { type ChartUnderlying } from '@/lib/underlyings';
 import OptionOrderModal, { type OptionOrderInitialState, type PlacedOptionLeg } from '@/components/OptionOrderModal';
 import LiveTradingDesk from '@/components/LiveTradingDesk';
 import { type LedgerBasket } from '@/lib/liveChartsLedger';
-import { LayoutList } from 'lucide-react';
+import { LiveChartsIndexTicker } from '@/components/LiveChartsIndexTicker';
 import NavBar from './NavBar';
 
 const LAYOUTS = [1, 2] as const;
@@ -183,18 +183,7 @@ export default function LiveOptionsChartsPage() {
             Live <span className="lc-header-accent">{SPREAD_LABELS[spreadType]}</span> Chart
           </h1>
           <div className="lc-header-controls">
-            {tradedBaskets.length > 0 && !deskOpen && (
-              <button
-                type="button"
-                onClick={() => setDeskOpen(true)}
-                className="lc-desk-toggle"
-                title="Show trading desk"
-              >
-                <LayoutList className="h-3.5 w-3.5" />
-                Desk
-              </button>
-            )}
-            <span className="lc-header-divider" />
+            <LiveChartsIndexTicker />
             <NavBar />
           </div>
           <div className="lc-header-glow" aria-hidden="true" />
@@ -217,6 +206,7 @@ export default function LiveOptionsChartsPage() {
               underlying: underlyings[i],
               onUnderlyingChange: (u: ChartUnderlying) => setUnderlyingAt(i, u),
               onTradeOptions: handleOpenTrade,
+              openBaskets: tradedBaskets,
             };
             return (
               <div key={i} className="min-h-0 min-w-0">
@@ -235,22 +225,24 @@ export default function LiveOptionsChartsPage() {
         </div>
       </main>
 
+      {/* Positions / Order Book / Trade Book desk for baskets traded from this page - docked as
+          a collapsible right-side panel (a slim always-visible rail when collapsed) rather than
+          a floating overlay, so charts resize to make room via their own ResizeObserver. */}
+      <LiveTradingDesk
+        baskets={tradedBaskets}
+        onBasketsChange={setTradedBaskets}
+        open={deskOpen}
+        onToggle={() => setDeskOpen((v) => !v)}
+      />
+
       {/* Options Spread Order Execution Modal */}
       <OptionOrderModal
         isOpen={tradeModalOpen}
         onClose={() => setTradeModalOpen(false)}
         initialOrder={activeTradeOrder}
         onOrderSuccess={handleOrderSuccess}
+        existingBaskets={tradedBaskets}
       />
-
-      {/* Positions / Order Book / Exit desk for baskets traded from this page */}
-      {deskOpen && (
-        <LiveTradingDesk
-          baskets={tradedBaskets}
-          onBasketsChange={setTradedBaskets}
-          onClose={() => setDeskOpen(false)}
-        />
-      )}
 
       <style>{`
         /* ── Page shell ─────────────────────────────────────────────── */
@@ -545,43 +537,6 @@ export default function LiveOptionsChartsPage() {
           align-items: center;
           gap: 8px;
           flex-shrink: 0;
-        }
-
-        .lc-desk-toggle {
-          display: flex;
-          align-items: center;
-          gap: 5px;
-          font-size: 10px;
-          font-weight: 700;
-          text-transform: uppercase;
-          letter-spacing: 0.04em;
-          padding: 5px 10px;
-          border-radius: 8px;
-          background: rgba(99, 102, 241, 0.15);
-          color: #a5b4fc;
-          border: 1px solid rgba(99, 102, 241, 0.3);
-          cursor: pointer;
-          position: relative;
-          z-index: 1;
-        }
-        .lc-desk-toggle:hover {
-          background: rgba(99, 102, 241, 0.25);
-        }
-        :root:not(.dark) .lc-desk-toggle {
-          background: #e0e7ff;
-          color: #3730a3;
-          border-color: #a5b4fc;
-        }
-
-        .lc-header-divider {
-          width: 1px;
-          height: 20px;
-          background: rgba(255, 255, 255, 0.12);
-          flex-shrink: 0;
-        }
-
-        :root:not(.dark) .lc-header-divider {
-          background: #e2e8f0;
         }
 
         .lc-header-glow {
