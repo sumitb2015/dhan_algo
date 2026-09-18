@@ -7,6 +7,7 @@
 
 import { nearestStrike, type LegSide, type OptionType, type StrategyTemplate } from './basketStrategies.ts';
 import { positionProduct, findLivePosition } from './positionProduct.ts';
+import { computeBsGreeks, type OptType } from './optionsMonitorMath.ts';
 
 export type MultiLegStatus = 'DRAFT' | 'PLACING' | 'OPEN' | 'CLOSING' | 'CLOSED' | 'FAILED';
 
@@ -525,4 +526,125 @@ export function computeBasketStatus(legs: MultiLegLeg[]): MultiLegStatus {
 // Re-exported for callers that only need to inspect a matched row's product
 // without importing lib/positionProduct.ts separately.
 export { positionProduct };
+
+// ─── Calendar/Diagonal payoff curve ─────────────────────────────────────
+
+/** Whole calendar days between two 'YYYY-MM-DD' dates, floored at 0 (never negative). */
+function daysBetweenDates(fromISO: string, toISO: string): number {
+  const from = fromISO.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  const to = toISO.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!from || !to) return 0;
+  const fromMs = Date.UTC(Number(from[1]), Number(from[2]) - 1, Number(from[3]));
+  const toMs = Date.UTC(Number(to[1]), Number(to[2]) - 1, Number(to[3]));
+  return Math.max(0, Math.round((toMs - fromMs) / 86_400_000));
+}
+
+export interface CalendarPayoffLeg {
+  side: LegSide;
+  option: OptionType;
+  strike: number;
+  qty: number;          // lot-scaled units
+  entryPrice: number;
+  iv: number;            // fraction, e.g. 0.13 — only used for the far leg
+  expiry: string;
+}
+
+export interface CalendarPayoffResult {
+  points: { x: number; y: number }[];
+  minPnl: number;
+  maxPnl: number;
+  breakevens: number[];
+  /** Calendar days between the two expiries — the far leg's remaining time
+   *  value at the point this curve is drawn (the front leg's expiry date). */
+  daysBetweenExpiries: number;
+}
+
+/**
+ * A Calendar/Diagonal spread's two legs don't share an expiry, so there is
+ * no single "at expiry, both legs at intrinsic value" curve (see
+ * dhan-payoff-diagrams skill / Baskets.tsx's hasMixedExpiry gate). The
+ * economically meaningful curve instead — and what every broker platform
+ * actually draws for a calendar spread — is the strategy's value AS OF THE
+ * NEAR (front) LEG'S EXPIRY: at that date the front leg has genuinely
+ * expired (priced at pure intrinsic value) while the far leg still carries
+ * (farExpiry - frontExpiry) days of time value, priced via Black-76/
+ * Black-Scholes at that residual time using computeBsGreeks — the same
+ * pricing primitive the rest of the dashboard's payoff charts use.
+ */
+export function computeCalendarPayoffCurve(
+  legs: CalendarPayoffLeg[],
+  spot: number,
+  frontExpiry: string,
+  farExpiry: string,
+  strikeStep: number,
+  futurePrice?: number,
+  samples = 121,
+): CalendarPayoffResult {
+  const daysBetweenExpiries = daysBetweenDates(frontExpiry, farExpiry);
+  const tFar = Math.max(daysBetweenExpiries, 0.25) / 365;
+  const hasFutures = typeof futurePrice === 'number' && futurePrice > 0;
+  const basis = hasFutures ? (futurePrice as number) - spot : 0;
+
+  const strikes = legs.map(l => l.strike);
+  const minStrike = strikes.length ? Math.min(...strikes, spot) : spot;
+  const maxStrike = strikes.length ? Math.max(...strikes, spot) : spot;
+  const wingPad = strikeStep * 6;
+  const pctSpan = spot * 0.04;
+  const lo = Math.min(spot - pctSpan, minStrike - wingPad);
+  const hi = Math.max(spot + pctSpan, maxStrike + wingPad);
+  const maxDiff = Math.max(spot - lo, hi - spot, strikeStep);
+  const symLo = Math.round((spot - maxDiff) / strikeStep) * strikeStep;
+  const symHi = Math.round((spot + maxDiff) / strikeStep) * strikeStep;
+
+  const sampleSpots = new Set<number>();
+  for (let i = 0; i < samples; i++) {
+    sampleSpots.add(Math.round(symLo + ((symHi - symLo) * i) / Math.max(1, samples - 1)));
+  }
+  sampleSpots.add(Math.round(spot));
+  for (const s of strikes) sampleSpots.add(s);
+
+  const sortedSpots = Array.from(sampleSpots).sort((a, b) => a - b);
+  const points: { x: number; y: number }[] = [];
+  let minPnl = Infinity;
+  let maxPnl = -Infinity;
+
+  for (const s of sortedSpots) {
+    let pnl = 0;
+    for (const leg of legs) {
+      const isSell = leg.side === 'S';
+      if (leg.expiry === frontExpiry) {
+        const intrinsic = leg.option === 'CE' ? Math.max(0, s - leg.strike) : Math.max(0, leg.strike - s);
+        pnl += (isSell ? leg.entryPrice - intrinsic : intrinsic - leg.entryPrice) * leg.qty;
+      } else {
+        const evalUnderlying = s + basis;
+        const type: OptType = leg.option;
+        const g = computeBsGreeks(type, evalUnderlying, leg.strike, tFar, leg.iv, 1, 0.065, hasFutures);
+        pnl += (isSell ? leg.entryPrice - g.price : g.price - leg.entryPrice) * leg.qty;
+      }
+    }
+    const rounded = Math.round(pnl);
+    if (rounded < minPnl) minPnl = rounded;
+    if (rounded > maxPnl) maxPnl = rounded;
+    points.push({ x: s, y: rounded });
+  }
+
+  const rawBreakevens: number[] = [];
+  for (let i = 1; i < points.length; i++) {
+    const a = points[i - 1];
+    const b = points[i];
+    if (a.y === 0) { rawBreakevens.push(a.x); continue; }
+    if ((a.y < 0 && b.y > 0) || (a.y > 0 && b.y < 0)) {
+      const t = -a.y / (b.y - a.y);
+      rawBreakevens.push(Math.round(a.x + t * (b.x - a.x)));
+    }
+  }
+
+  return {
+    points,
+    minPnl: minPnl === Infinity ? 0 : minPnl,
+    maxPnl: maxPnl === -Infinity ? 0 : maxPnl,
+    breakevens: Array.from(new Set(rawBreakevens)).sort((a, b) => a - b),
+    daysBetweenExpiries,
+  };
+}
 

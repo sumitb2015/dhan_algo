@@ -158,7 +158,7 @@ export default function MultiLegFocus() {
 
   // ── Expiries and Market Data by Underlying ─────────────────────────
   const [expiriesMap, setExpiriesMap] = useState<Record<string, string[]>>({});
-  const [chainData, setChainData] = useState<Record<string, { spot: number; strikes: number[]; quotes: Record<string, { ce: number; pe: number }>; prevClose?: number }>>({});
+  const [chainData, setChainData] = useState<Record<string, { spot: number; strikes: number[]; quotes: Record<string, { ce: number; pe: number; ceIv?: number; peIv?: number }>; prevClose?: number }>>({});
   const [lookupCache, setLookupCache] = useState<Record<string, { lotSize: number; strikes: Record<string, StrikeIdentifier> }>>({});
   const lookupCacheRef = useRef(lookupCache);
   useEffect(() => { lookupCacheRef.current = lookupCache; }, [lookupCache]);
@@ -381,7 +381,7 @@ export default function MultiLegFocus() {
           if (!j.success || !j.data) return;
           const oc = (j.data.chain as { oc?: Record<string, unknown> })?.oc ?? (j.data.chain as Record<string, unknown> | undefined);
           let strikes: number[] = [];
-          const quotes: Record<string, { ce: number; pe: number }> = {};
+          const quotes: Record<string, { ce: number; pe: number; ceIv?: number; peIv?: number }> = {};
           let spot = Number(j.data.spot) || 0;
           const prevClose = Number(j.data.prev_close) || 0;
 
@@ -391,12 +391,14 @@ export default function MultiLegFocus() {
               const strikeNum = Math.round(parseFloat(sk));
               if (isNaN(strikeNum)) continue;
               const entry = entryRaw as {
-                ce?: { last_price?: number; ltp?: number; previous_close_price?: number; previous_close?: number };
-                pe?: { last_price?: number; ltp?: number; previous_close_price?: number; previous_close?: number };
+                ce?: { last_price?: number; ltp?: number; previous_close_price?: number; previous_close?: number; implied_volatility?: number };
+                pe?: { last_price?: number; ltp?: number; previous_close_price?: number; previous_close?: number; implied_volatility?: number };
               };
               const ce = Number(entry?.ce?.last_price || entry?.ce?.ltp || entry?.ce?.previous_close_price || entry?.ce?.previous_close || 0);
               const pe = Number(entry?.pe?.last_price || entry?.pe?.ltp || entry?.pe?.previous_close_price || entry?.pe?.previous_close || 0);
-              quotes[String(strikeNum)] = { ce, pe };
+              const ceIv = Number(entry?.ce?.implied_volatility) || undefined;
+              const peIv = Number(entry?.pe?.implied_volatility) || undefined;
+              quotes[String(strikeNum)] = { ce, pe, ceIv, peIv };
             }
           } else if (Array.isArray(j.data.strikes) && j.data.strikes.length > 0) {
             strikes = j.data.strikes;
@@ -1883,6 +1885,14 @@ export default function MultiLegFocus() {
                   const chain = chainData[pair];
                   const q = chain?.quotes?.[key];
                   return (opt === 'CE' ? q?.ce : q?.pe) ?? 0;
+                }}
+                ivForStrike={(strk, opt, legExpiry) => {
+                  const key = String(strk);
+                  const targetExpiry = legExpiry || basket.expiry;
+                  const pair = `${basket.underlying}:${targetExpiry}`;
+                  const q = chainData[pair]?.quotes?.[key];
+                  const iv = opt === 'CE' ? q?.ceIv : q?.peIv;
+                  return iv && iv > 0 ? iv / 100 : 0;
                 }}
                 onUpdate={patch => updateBasket(basket.id, patch)}
                 onDelete={() => deleteBasket(basket.id)}
