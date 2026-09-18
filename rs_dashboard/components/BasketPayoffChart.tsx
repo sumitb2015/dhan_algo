@@ -581,7 +581,11 @@ export default function BasketPayoffChart({
                   />
                 )}
 
-                {/* On Target Date (T+0): smooth Black-Scholes theoretical-price curve */}
+                {/* On Target Date (T+0): smooth Black-Scholes theoretical-price curve.
+                    Animation is disabled: `payoffPoints` is recomputed on every live quote/WS
+                    tick, so a new `data` array reaches <LineChart> before Recharts' mount/update
+                    clip-path animation can finish — it keeps restarting from width 0 and the
+                    curve never becomes visible. */}
                 <Line
                   type="monotone"
                   dataKey="pnlToday"
@@ -590,6 +594,7 @@ export default function BasketPayoffChart({
                   dot={false}
                   activeDot={{ r: 3, strokeWidth: 0 }}
                   name="On Target Date (T+0)"
+                  isAnimationActive={false}
                 />
                 {/* On Expiry: exact piecewise-linear intrinsic payoff with crisp strike corners */}
                 <Line
@@ -600,6 +605,7 @@ export default function BasketPayoffChart({
                   dot={false}
                   activeDot={{ r: 3, strokeWidth: 0 }}
                   name="On Expiry"
+                  isAnimationActive={false}
                 />
               </LineChart>
             </ResponsiveContainer>
