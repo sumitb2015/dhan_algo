@@ -35,6 +35,7 @@ INDICES = [
     {"id": 18, "name": "NIFTY_200",          "label": "Nifty 200"},
     {"id": 37, "name": "NIFTY_MIDCAP100",    "label": "Nifty Midcap 100"},
     {"id": 5,  "name": "NIFTY_SMALLCAP100",  "label": "Nifty Smallcap 100"},
+    {"id": 3,  "name": "NIFTY_SMALLCAP250",  "label": "Nifty Smallcap 250"},
     {"id": 25, "name": "BANKNIFTY",          "label": "Nifty Bank"},
     {"id": 29, "name": "NIFTYIT",            "label": "Nifty IT"},
     {"id": 28, "name": "NIFTY_FMCG",         "label": "Nifty FMCG"},

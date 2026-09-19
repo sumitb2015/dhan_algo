@@ -521,6 +521,7 @@ export const KNOWN_INDICES: IndexMeta[] = [
   { key: 'NIFTY_NEXT50',      label: 'Nifty Next 50',      file: 'NIFTY_NEXT50.csv' },
   { key: 'NIFTY_MIDCAP100',   label: 'Nifty Midcap 100',   file: 'NIFTY_MIDCAP100.csv' },
   { key: 'NIFTY_SMALLCAP100', label: 'Nifty Smallcap 100', file: 'NIFTY_SMALLCAP100.csv' },
+  { key: 'NIFTY_SMALLCAP250', label: 'Nifty Smallcap 250', file: 'NIFTY_SMALLCAP250.csv' },
   { key: 'BANKNIFTY',         label: 'Bank Nifty',         file: 'BANKNIFTY.csv' },
   { key: 'FINNIFTY',          label: 'Fin Nifty',          file: 'FINNIFTY.csv' },
   { key: 'NIFTYIT',           label: 'Nifty IT',           file: 'NIFTYIT.csv' },

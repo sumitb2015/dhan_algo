@@ -40,6 +40,8 @@ const SECURITY_IDS: Record<string, ['NSE_EQ' | 'IDX_I', number]> = {
   NIFTY_PHARMA: ['IDX_I', 32],
   NIFTY_METAL:  ['IDX_I', 31],
   NIFTY_REALTY: ['IDX_I', 34],
+  NIFTY_500:    ['IDX_I', 19],
+  NIFTY_SMALLCAP250: ['IDX_I', 3],
 };
 
 // Short TTL so a fast double-click (or several tiles' worth of one request)

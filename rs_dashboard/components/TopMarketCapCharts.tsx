@@ -43,6 +43,8 @@ const TOP8_INDICES: Tile[] = [
   { symbol: 'NIFTY_PHARMA', name: 'Nifty Pharma' },
   { symbol: 'NIFTY_METAL', name: 'Nifty Metal' },
   { symbol: 'NIFTY_REALTY', name: 'Nifty Realty' },
+  { symbol: 'NIFTY_500', name: 'Nifty 500' },
+  { symbol: 'NIFTY_SMALLCAP250', name: 'Nifty Smallcap 250' },
 ];
 
 type Tab = 'stocks' | 'indices';
