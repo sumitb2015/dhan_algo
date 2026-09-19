@@ -118,7 +118,16 @@ export function aggregateLegs(bucketLegs: PositionLeg[]): GroupLeg[] {
       existing.signedQty = newSigned;
       existing.qty = Math.abs(newSigned);
       existing.side = newSigned < 0 ? 'SELL' : 'BUY';
-      existing.avgPrice = (existing.avgPrice + leg.price) / 2;
+      // Quantity-weighted, not a straight mean: a 75-lot leg and a 1-lot leg
+      // at different prices must not count equally. When the new fill offsets
+      // the old, the surviving side keeps its own entry price.
+      if (Math.sign(existing.signedQty - signedQty) === Math.sign(signedQty)) {
+        // same direction as before this fill: add to the position
+        const prevQty = Math.abs(existing.signedQty - signedQty);
+        existing.avgPrice = (existing.avgPrice * prevQty + leg.price * Math.abs(signedQty)) / (prevQty + Math.abs(signedQty));
+      } else if (newSigned !== 0 && Math.sign(newSigned) === Math.sign(signedQty)) {
+        existing.avgPrice = leg.price; // flipped through zero: the new fill's side survives
+      } // else: partially closed, the original side survives with its own average
       if (!existing.securityId) existing.securityId = leg.securityId;
       if (!existing.symbol) existing.symbol = leg.display.tradingSymbol || null;
     } else {

@@ -17,29 +17,32 @@
  * rather than importing them (they are private to that file by design).
  */
 
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import Link from 'next/link';
+import { useRouter } from 'next/navigation';
 import {
   Activity,
   AlertTriangle,
-  Banknote,
   CircleDot,
   Clock,
   ExternalLink,
+  Send,
+  Zap,
   Gauge,
   Layers,
   PieChart,
   RefreshCw,
   Shield,
   ShieldAlert,
-  Sparkles,
   Target,
   Wallet,
 } from 'lucide-react';
 import type { BrokerPortfolio, DashboardPortfolioResponse } from '@/app/api/dashboard/portfolio/route';
 import type { MarginAllocatorResponse, PositionGroup } from '@/app/api/margin-allocator/route';
 import type { MarketTrendResponse } from '@/app/api/margin-allocator/trend/route';
-import type { ScanResponse, ScannedStrategy, StrategyType, UnderlyingType } from '@/lib/ultimateScannerTypes';
+import type { ScanResponse, ScannedLeg, ScannedStrategy, StrategyType, UnderlyingType } from '@/lib/ultimateScannerTypes';
+import type { MultiLegBasket } from '@/lib/multiLegFocus';
+import { STRESS_MOVES_PCT, bookExpiryPnl, type StressLeg } from '@/lib/marginStress';
 import { BROKER_LABELS, type Broker } from '@/hooks/useBrokerSelector';
 import NavBar from './NavBar';
 
@@ -185,6 +188,81 @@ function EmptyRow({ children }: { children: React.ReactNode }) {
   );
 }
 
+/** Own component: a 1 Hz tick in the parent re-rendered every table on the page. */
+function IstClock() {
+  const [clock, setClock] = useState('');
+  useEffect(() => {
+    const tick = () => setClock(new Date().toLocaleTimeString('en-IN', { timeZone: 'Asia/Kolkata', hour12: false }));
+    tick();
+    const id = setInterval(tick, 1000);
+    return () => clearInterval(id);
+  }, []);
+  return (
+    <span className="flex items-center gap-1.5 rounded-md border border-amber-500/30 bg-amber-500/10 px-2.5 py-1 font-mono text-[10px] font-bold text-amber-400 shadow-sm">
+      <Clock className="h-3 w-3 text-amber-400" />
+      {clock || '--:--:--'} IST
+    </span>
+  );
+}
+
+/** One coloured slice of the capital map. `weight` is ₹; zero-weight slices are dropped. */
+interface CapitalSegment { key: string; label: string; value: number; bar: string; dot: string; hint: string }
+
+/**
+ * The page's one signature element: every rupee of the Dhan margin base in a
+ * single strip — locked in live positions, proposed by the plan, deployable
+ * but unallocated, held back by the panic throttle, and the preset's untouched
+ * buffer. Answers "where is my capital" before any table has to be read.
+ */
+function CapitalMap({ segments, total }: { segments: CapitalSegment[]; total: number }) {
+  const live = segments.filter((s) => s.value > 0);
+  return (
+    <div className="flex flex-col gap-3 p-3.5">
+      <div
+        className="flex h-7 w-full overflow-hidden rounded-md border border-zinc-800 bg-zinc-950"
+        role="img"
+        aria-label={live.map((s) => `${s.label} ${fmtINRCompact(s.value)}`).join(', ')}
+      >
+        {live.map((s) => (
+          <div
+            key={s.key}
+            className={`${s.bar} h-full border-r border-zinc-950 transition-all duration-500 last:border-r-0`}
+            style={{ width: `${(s.value / total) * 100}%` }}
+            title={`${s.label}: ${fmtINRCompact(s.value)} (${((s.value / total) * 100).toFixed(1)}%)`}
+          />
+        ))}
+      </div>
+      <dl className="grid grid-cols-2 gap-x-4 gap-y-2 sm:grid-cols-3 lg:grid-cols-5">
+        {segments.map((s) => (
+          <div key={s.key} className={`flex flex-col gap-0.5 ${s.value > 0 ? '' : 'opacity-50'}`}>
+            <dt className="flex items-center gap-1.5 text-xs font-semibold text-zinc-300">
+              <span className={`h-2 w-2 rounded-sm ${s.dot}`} />
+              {s.label}
+            </dt>
+            <dd className="font-mono text-sm font-bold tabular-nums text-zinc-100">
+              {fmtINRCompact(s.value)}
+              <span className="ml-1.5 text-[11px] font-normal text-zinc-500">{((s.value / total) * 100).toFixed(0)}%</span>
+            </dd>
+            <dd className="text-[11px] leading-snug text-zinc-500">{s.hint}</dd>
+          </div>
+        ))}
+      </dl>
+    </div>
+  );
+}
+
+/** Long explanatory prose lives behind a disclosure so the numbers stay above the fold. */
+function Notes({ summary, children }: { summary: string; children: React.ReactNode }) {
+  return (
+    <details className="group border-t border-zinc-800 px-3.5 py-2 text-xs text-zinc-400">
+      <summary className="cursor-pointer select-none font-semibold text-zinc-300 hover:text-amber-400 focus-visible:outline focus-visible:outline-2 focus-visible:outline-amber-400">
+        {summary}
+      </summary>
+      <div className="mt-2 max-w-3xl space-y-2 leading-relaxed">{children}</div>
+    </details>
+  );
+}
+
 // ─── CSP scanner row (mirrors components/CspScreener.tsx's ScanRow) ───────────
 interface CspRow {
   symbol: string;
@@ -237,6 +315,11 @@ interface RankedCandidate {
   /** Breakeven spot/strike level(s) in index points — one for a single-sided
    *  structure (naked put/call, CSP), two for a symmetric spread/condor/straddle. */
   breakevens: number[];
+  /** Scan legs + spot, kept so the plan can be stress-tested and handed to
+   *  Multi-Leg Focus. Absent for CSP rows (single-stock puts, not index legs). */
+  legs?: ScannedLeg[];
+  spot?: number;
+  strategyName?: string;
 }
 
 interface AllocatedCandidate extends RankedCandidate {
@@ -348,6 +431,9 @@ function fromScannedStrategy(s: ScannedStrategy, trend: MarketTrend): RankedCand
     deltaNet: s.deltaNet,
     maxLossPerUnit: s.maxLossUnlimited ? null : s.maxLoss,
     breakevens: s.breakevens,
+    legs: s.legs,
+    spot: s.spot,
+    strategyName: s.name,
   };
 }
 
@@ -640,14 +726,11 @@ export default function MarginAllocator() {
   const [cspScanning, setCspScanning] = useState(false);
   const [riskPreset, setRiskPreset] = useState<(typeof RISK_PRESETS)[number]['key']>('balanced');
   const [marketTrend, setMarketTrend] = useState<MarketTrendResponse | null>(null);
-  const [clock, setClock] = useState('');
-
-  useEffect(() => {
-    const tick = () => setClock(new Date().toLocaleTimeString('en-IN', { timeZone: 'Asia/Kolkata', hour12: false }));
-    tick();
-    const id = setInterval(tick, 1000);
-    return () => clearInterval(id);
-  }, []);
+  const router = useRouter();
+  const handoffInFlight = useRef(false);
+  const [handoffKey, setHandoffKey] = useState<string | null>(null);
+  const [handoffError, setHandoffError] = useState<string | null>(null);
+  const [feedTab, setFeedTab] = useState<'defined' | 'undefined' | 'csp'>('defined');
 
   const loadPortfolio = useCallback(async () => {
     try {
@@ -827,17 +910,25 @@ export default function MarginAllocator() {
     ? vixPercentileToNakedTilt(marketTrend.vixPercentile)
     : vixInfo ? (VIX_REGIME_FALLBACK_TILT[vixInfo.regime] ?? 0.85) : 0.85;
 
+  // A leg with no live price (ltp 0 = no quote / no liquidity) makes the
+  // credit, breakevens and stress P&L meaningless, and can't be filled anyway.
+  const pricedCandidates = useMemo(
+    () => allScanCandidates.filter((c) => c.legs.length > 0 && c.legs.every((l) => l.ltp > 0)),
+    [allScanCandidates],
+  );
+  const droppedUnpriced = allScanCandidates.length - pricedCandidates.length;
+
   const definedRiskCandidatesAll = useMemo(
-    () => allScanCandidates
+    () => pricedCandidates
       .filter((c) => !c.maxLossUnlimited && c.dte >= MIN_DTE_FOR_YIELD && c.dte <= MAX_DTE_FOR_YIELD)
       .map((c) => fromScannedStrategy(c, trendForUnderlying(c.underlying))),
-    [allScanCandidates, trendForUnderlying],
+    [pricedCandidates, trendForUnderlying],
   );
   const undefinedRiskCandidatesAll = useMemo(
-    () => allScanCandidates
+    () => pricedCandidates
       .filter((c) => c.maxLossUnlimited && c.dte >= MIN_DTE_FOR_YIELD && c.dte <= MAX_DTE_FOR_YIELD)
       .map((c) => fromScannedStrategy(c, trendForUnderlying(c.underlying))),
-    [allScanCandidates, trendForUnderlying],
+    [pricedCandidates, trendForUnderlying],
   );
   const cspCandidatesAll = useMemo(
     // csp_scanner.py already floors at MIN_DTE=5 server-side; the upper bound still applies here.
@@ -897,7 +988,132 @@ export default function MarginAllocator() {
   // catastrophic-failure risk, not chase raw tail correlation).
   const tailHedgeReserve = usedUndefined * 0.05;
 
-  const dataDate = new Date().toISOString().split('T')[0];
+  /**
+   * Saves one plan row as a DRAFT basket in Multi-Leg Focus and opens it. No
+   * order is placed here — the terminal is where the trader reviews live
+   * margin and confirms. Lots are the scan's lots × the plan's units, so the
+   * basket matches the size the plan budgeted margin for.
+   */
+  const sendToMultiLegFocus = async (p: AllocatedCandidate) => {
+    if (!p.legs || handoffInFlight.current) return;
+    handoffInFlight.current = true;
+    setHandoffKey(p.key);
+    setHandoffError(null);
+    try {
+      const basket: Partial<MultiLegBasket> = {
+        name: `${p.strategyName ?? p.label} ×${p.units}`,
+        underlying: p.underlying,
+        expiry: p.expiry,
+        broker: 'dhan',
+        presetKey: p.strategyType.replace(/_/g, '-'),
+        legs: p.legs.map((leg, i) => ({
+          id: String(i + 1),
+          side: leg.side === 'SELL' ? 'S' : 'B',
+          option: leg.option,
+          strike: leg.strike,
+          lots: (leg.lots || 1) * p.units,
+          type: 'MARKET',
+          status: 'DRAFT',
+        })),
+      };
+      // Reuse an untouched draft of the exact same structure and size instead of
+      // stacking a duplicate every time the button is pressed.
+      const sig = (b: { underlying?: string; expiry?: string; legs?: { side: string; option: string; strike: number; lots: number }[] }) =>
+        `${b.underlying}|${b.expiry}|${(b.legs ?? []).map((l) => `${l.side}${l.option}${l.strike}x${l.lots}`).sort().join(',')}`;
+      try {
+        const existing = await fetch('/api/multi-leg-focus/baskets').then((r) => r.json());
+        const match = (existing?.data as MultiLegBasket[] | undefined)?.find(
+          (b) => b.broker === 'dhan' && b.legs.length > 0 && b.legs.every((l) => l.status === 'DRAFT') && sig(b) === sig(basket as never),
+        );
+        if (match) basket.id = match.id;
+      } catch { /* fall through: worst case is one extra draft */ }
+      const res = await fetch('/api/multi-leg-focus/baskets', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(basket),
+      });
+      if (!res.ok) throw new Error(`the basket service returned ${res.status}`);
+      router.push('/multi-leg-focus');
+    } catch (err) {
+      setHandoffError(`Could not save ${p.label} as a draft basket: ${err instanceof Error ? err.message : String(err)}. Nothing was ordered.`);
+      handoffInFlight.current = false;
+      setHandoffKey(null);
+    }
+  };
+
+  // ── Gap stress test ────────────────────────────────────────────────────
+  // Spot per underlying comes from the scan itself, so the shock is applied
+  // to the same reference price the candidates were priced against.
+  const stress = useMemo(() => {
+    const spotBy: Record<string, number> = {};
+    const spotSource: Record<string, 'live scan' | 'last close'> = {};
+    // Last EOD close as the fallback, so the open book can still be stressed
+    // when the scan is slow, failed, or the market is shut and it returns nothing.
+    if (marketTrend?.lastClose) { spotBy.NIFTY = marketTrend.lastClose; spotSource.NIFTY = 'last close'; }
+    const sx = marketTrend?.sensex?.lastClose;
+    if (sx) { spotBy.SENSEX = sx; spotSource.SENSEX = 'last close'; }
+    for (const c of allScanCandidates) if (c.spot > 0) { spotBy[c.underlying] = c.spot; spotSource[c.underlying] = 'live scan'; }
+
+    const planByUnd: Record<string, StressLeg[]> = {};
+    let planCovered = 0;
+    for (const p of allocationPlan) {
+      if (!p.legs || !spotBy[p.underlying]) continue;
+      planCovered += 1;
+      (planByUnd[p.underlying] ??= []).push(...p.legs.map((l): StressLeg => ({
+        strike: l.strike, option: l.option, side: l.side, price: l.ltp, qty: (l.lots || 1) * l.lotSize * p.units,
+      })));
+    }
+    const bookByUnd: Record<string, StressLeg[]> = {};
+    let bookSkipped = 0;
+    let bookCovered = 0;
+    for (const g of allocator?.groups ?? []) {
+      if (!spotBy[g.underlying]) { bookSkipped += 1; continue; }
+      bookCovered += 1;
+      (bookByUnd[g.underlying] ??= []).push(...g.legs.map((l): StressLeg => ({
+        strike: l.strike, option: l.type, side: l.side, price: l.avgPrice, qty: Math.abs(l.qty),
+      })));
+    }
+    const sum = (byUnd: Record<string, StressLeg[]>, move: number) =>
+      Object.entries(byUnd).reduce((a, [u, legs]) => a + bookExpiryPnl(legs, spotBy[u] * (1 + move / 100)), 0);
+
+    const rows = STRESS_MOVES_PCT.map((move) => {
+      const plan = sum(planByUnd, move);
+      const book = sum(bookByUnd, move);
+      return { move, plan, book, total: plan + book };
+    });
+    return { rows, planCovered, bookCovered, bookSkipped, spots: spotBy, spotSource };
+  }, [allScanCandidates, allocationPlan, allocator, marketTrend]);
+  // The open-positions column covers Dhan AND Kotak, so its % is taken against
+  // the consolidated margin, not Dhan's alone (which would overstate the hit).
+  const stressBase = {
+    total: totals?.totalBalance ?? dhanFunds?.totalBalance ?? 0,
+    available: totals?.availableBalance ?? dhanFunds?.availableBalance ?? 0,
+  };
+  const stressWorst = stress.rows.reduce((w, r) => (r.total < w.total ? r : w), stress.rows[0]);
+  const stressMaxAbs = Math.max(1, ...stress.rows.map((r) => Math.abs(r.total)));
+  const cspInPlanForStress = allocationPlan.some((p) => p.riskType === 'assignment');
+
+  // Currency of the market read that drives the plan (last EOD bar), not the
+  // wall-clock date — toISOString() was also a UTC date, wrong before 05:30 IST.
+  const dataDate = marketTrend?.asOf ?? '—';
+  const scanFailed = !scanLoading && SCAN_UNDERLYINGS.some((u) => scans[u] === null || scans[u]?.success === false);
+  const scanFailedNames = SCAN_UNDERLYINGS.filter((u) => scans[u] === null || scans[u]?.success === false);
+
+  // Capital map — Dhan only, because the plan is sized from Dhan idle margin.
+  const capitalSegments: CapitalSegment[] = dhanFunds ? (() => {
+    const idle = dhanFunds.availableBalance;
+    const presetShare = idle * preset.fraction;
+    const throttled = Math.max(0, presetShare - deployableBudget);
+    const buffer = Math.max(0, idle - presetShare);
+    return [
+      { key: 'blocked', label: 'Blocked in positions', value: dhanFunds.utilizedMargin, bar: 'bg-zinc-500', dot: 'bg-zinc-500', hint: 'Margin held by live Dhan positions' },
+      { key: 'plan', label: 'Proposed by plan', value: allocationUsed, bar: 'bg-emerald-500', dot: 'bg-emerald-500', hint: `${allocationPlan.length} setup${allocationPlan.length === 1 ? '' : 's'} sized to the budget` },
+      { key: 'free', label: 'Deployable, unallocated', value: Math.max(0, deployableBudget - allocationUsed), bar: 'bg-emerald-500/30', dot: 'bg-emerald-500/40', hint: 'Budget the caps left unspent' },
+      { key: 'throttle', label: 'Held by VIX throttle', value: throttled, bar: 'bg-red-500/50', dot: 'bg-red-500/60', hint: 'Cut because VIX is above its 85th percentile' },
+      { key: 'buffer', label: 'Safety buffer', value: buffer, bar: 'bg-amber-500/40', dot: 'bg-amber-500/50', hint: `${(100 - preset.fraction * 100).toFixed(0)}% of idle margin, never deployed` },
+    ];
+  })() : [];
+  const capitalTotal = capitalSegments.reduce((a, s) => a + s.value, 0);
 
   return (
     <div className="flex flex-col min-h-screen bg-zinc-950 text-white">
@@ -911,7 +1127,7 @@ export default function MarginAllocator() {
             <div className="flex items-center gap-2 mb-0.5">
               <span className="text-[10px] font-bold uppercase tracking-[0.2em] text-amber-400">CAPITAL DEPLOYMENT DESK</span>
               <span className="text-[10px] text-zinc-600">/</span>
-              <span className="font-mono text-[9px] text-zinc-400">MULTI-BROKER MARGIN</span>
+              <span className="font-mono text-[10px] text-zinc-400">MULTI-BROKER MARGIN</span>
             </div>
             <h1 className="text-base font-bold leading-none tracking-tight text-white">Margin Allocator</h1>
           </div>
@@ -920,13 +1136,10 @@ export default function MarginAllocator() {
           <span className="rounded-md border border-zinc-800 bg-zinc-900 px-2.5 py-1 font-mono text-[10px] font-semibold text-zinc-400">
             DATA: {dataDate}
           </span>
-          <span className="flex items-center gap-1.5 rounded-md border border-amber-500/30 bg-amber-500/10 px-2.5 py-1 font-mono text-[10px] font-bold text-amber-400 shadow-sm">
-            <Clock className="h-3 w-3 text-amber-400" />
-            {clock || '--:--:--'} IST
-          </span>
+          <IstClock />
           <button
             type="button"
-            onClick={() => { loadPortfolio(); loadAllocator(); runAllScans(); loadCsp(); }}
+            onClick={() => { loadPortfolio(); loadAllocator(); loadTrend(); runAllScans(); loadCsp(); }}
             className="flex items-center gap-1.5 rounded-md border border-zinc-800 bg-zinc-900 px-2.5 py-1 font-mono text-[10px] font-bold text-zinc-300 hover:border-zinc-700"
           >
             <RefreshCw className={`h-3 w-3 ${scanLoading ? 'animate-spin text-amber-400' : ''}`} />
@@ -939,6 +1152,25 @@ export default function MarginAllocator() {
       </div>
 
       <div className="flex flex-1 flex-col gap-4 px-6 py-5">
+        {scanFailed && (
+          <div role="alert" className="flex items-start gap-2 rounded-lg border border-red-500/30 bg-red-500/10 px-3.5 py-2.5 text-xs text-red-400">
+            <AlertTriangle className="h-4 w-4 shrink-0" />
+            <span>
+              The {scanFailedNames.join(' and ')} scan failed, so the plan below is built from the remaining data only.
+              Check that your Dhan session is active, then press Refresh.
+            </span>
+          </div>
+        )}
+        {/* ─── 0. Capital map ─────────────────────────────────────────────── */}
+        <TerminalPanel
+          title="Where your Dhan capital sits"
+          icon={PieChart}
+          meta={dhanFunds ? `Margin base ${fmtINRCompact(capitalTotal)}` : undefined}
+        >
+          {dhanFunds && capitalTotal > 0
+            ? <CapitalMap segments={capitalSegments} total={capitalTotal} />
+            : <EmptyRow>Connect Dhan to see how your margin is split between positions, the plan and the safety buffer.</EmptyRow>}
+        </TerminalPanel>
         {/* ─── 1. Consolidated broker margin ─────────────────────────────── */}
         <TerminalPanel title="Consolidated Broker Margin" icon={Wallet} href="/portfolio" meta={portfolio ? `Updated ${new Date(portfolio.updatedAt).toLocaleTimeString('en-IN', { hour12: false })} IST` : undefined}>
           <div className="flex flex-col gap-3 p-3.5">
@@ -1075,19 +1307,23 @@ export default function MarginAllocator() {
                 </button>
               ))}
             </div>
-            <p className="font-mono text-[10px] text-zinc-500">
-              A buffer is deliberately left un-deployed ({(100 - preset.fraction * 100).toFixed(0)}% of idle margin) and
-              undefined-risk (naked straddle/strangle/lizard) exposure is capped at {(preset.undefinedCap * 100).toFixed(0)}% of the
-              deployable budget as an absolute ceiling — no single-trade or single-risk-class concentration, regardless of how
-              attractive one setup scores. The VIX read below tunes actual usage within that ceiling, never past it.
+            <Notes summary="How the budget is sized">
+              <p>
+                {(100 - preset.fraction * 100).toFixed(0)}% of idle margin is never deployed. Naked (undefined-risk) exposure is
+                capped at {(preset.undefinedCap * 100).toFixed(0)}% of the deployable budget, however good one setup scores.
+                The VIX read tunes usage inside that ceiling, never past it.
+              </p>
               {deployMultiplier < 1 && (
-                <> Above the 85th VIX percentile, TOTAL deployable capital is additionally throttled to {(deployMultiplier * 100).toFixed(0)}%
-                {' '}of the preset&apos;s own share — committing fresh naked/defined-risk capital into a still-repricing panic spike is the
-                {' '}mistake behind short-vol blowups like Feb 2018&apos;s Volmageddon, not a bar to raise premium quality alone.</>
+                <p>
+                  VIX is above its 85th percentile, so total deployable capital is cut to {(deployMultiplier * 100).toFixed(0)}%.
+                  Opening fresh short-vol positions while volatility is still repricing is how blowups like Feb 2018 happen.
+                </p>
               )}
-              {' '}A Tail Hedge Reserve (5% of naked margin used) is suggested alongside the plan below, not spent by it — consider a cheap
-              far-OTM NIFTY/SENSEX put from Baskets sized to that reserve as convex insurance against a gap move on the naked book.
-            </p>
+              <p>
+                The tail hedge reserve is 5% of naked margin used. It is a suggestion, not an order: consider a cheap far-OTM
+                NIFTY or SENSEX put from Baskets sized to that amount.
+              </p>
+            </Notes>
           </div>
         </TerminalPanel>
 
@@ -1193,6 +1429,7 @@ export default function MarginAllocator() {
                     <th className="px-3 py-2 text-xs font-bold text-white text-right">Breakeven</th>
                     <th className="px-3 py-2 text-xs font-bold text-white text-right">PoP</th>
                     <th className="px-3 py-2 text-xs font-bold text-white text-right">Ann. RoM</th>
+                    <th className="px-3 py-2 text-xs font-bold text-white text-right">Trade</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-zinc-800 font-mono text-xs">
@@ -1205,7 +1442,12 @@ export default function MarginAllocator() {
                       <td className="px-3 py-2 text-center">{riskBadge(p.riskType)}</td>
                       <td className="px-3 py-2 text-right tabular-nums font-bold text-zinc-100">×{p.units}</td>
                       <td className="px-3 py-2 text-right tabular-nums text-zinc-300">{p.dte}d</td>
-                      <td className="px-3 py-2 text-right tabular-nums text-amber-400">{fmtINRCompact(p.marginUsed)}</td>
+                      <td className="px-3 py-2 text-right tabular-nums text-amber-400">
+                        {fmtINRCompact(p.marginUsed)}
+                        <div className="ml-auto mt-1 h-1 w-16 overflow-hidden rounded-full bg-zinc-800">
+                          <div className="h-full bg-amber-400" style={{ width: `${allocationUsed > 0 ? (p.marginUsed / allocationUsed) * 100 : 0}%` }} />
+                        </div>
+                      </td>
                       <td className="px-3 py-2 text-right tabular-nums text-emerald-400">{fmtINRCompact(p.creditExpected)}</td>
                       <td className="px-3 py-2 text-right tabular-nums text-red-400">
                         {p.maxLossTotal === null ? 'Unlimited' : fmtINRCompact(p.maxLossTotal)}
@@ -1213,6 +1455,23 @@ export default function MarginAllocator() {
                       <td className="px-3 py-2 text-right tabular-nums text-zinc-300">{fmtBreakevens(p.breakevens)}</td>
                       <td className="px-3 py-2 text-right tabular-nums text-zinc-300">{fmtPct(p.popPct)}</td>
                       <td className="px-3 py-2 text-right tabular-nums text-amber-400">{fmtPct(p.romAnnualizedPct)}</td>
+                      <td className="px-3 py-2 text-right">
+                        {p.legs ? (
+                          <button
+                            type="button"
+                            onClick={() => sendToMultiLegFocus(p)}
+                            disabled={handoffKey !== null}
+                            title="Saves a draft basket and opens Multi-Leg Focus. No order is placed."
+                            aria-label={`Open ${p.label} times ${p.units} in Multi-Leg Focus as a draft`}
+                            className="inline-flex items-center gap-1 rounded border border-amber-500/30 bg-amber-500/10 px-2 py-1 font-sans text-[11px] font-bold text-amber-400 hover:bg-amber-500/20 focus-visible:outline focus-visible:outline-2 focus-visible:outline-amber-400 disabled:opacity-50"
+                          >
+                            <Send className="h-3 w-3" />
+                            {handoffKey === p.key ? 'Saving…' : 'Open draft'}
+                          </button>
+                        ) : (
+                          <span className="font-sans text-[11px] text-zinc-600" title="Single-stock puts are placed from the CSP screener">CSP screener</span>
+                        )}
+                      </td>
                     </tr>
                   ))}
                 </tbody>
@@ -1229,7 +1488,7 @@ export default function MarginAllocator() {
                         ? 'Unlimited'
                         : fmtINRCompact(allocationPlan.reduce((sum, p) => sum + (p.maxLossTotal ?? 0), 0))}
                     </td>
-                    <td colSpan={3} />
+                    <td colSpan={4} />
                   </tr>
                 </tfoot>
               </table>
@@ -1249,70 +1508,182 @@ export default function MarginAllocator() {
               </span>
             </div>
           )}
-          <div className="flex items-start gap-2 border-t border-zinc-800 px-3.5 py-2.5 font-mono text-[10px] text-zinc-500">
-            <ShieldAlert className="h-3.5 w-3.5 shrink-0 text-amber-400" />
-            <span>
-              No option-selling strategy is risk-free. Iron Condor/Butterfly and Bull Put/Bear Call Spread rows are defined-risk
-              (loss capped at the wing width); Short Strangle/Straddle and Jade Lizard rows are undefined-risk (loss theoretically
-              unbounded on a large adverse move) and are exactly what CLAUDE.md&apos;s straddle/strangle inversion guard and the
-              15:17 IST auto-exit exist to contain if run live; CSP rows carry assignment risk (you may be required to buy the
-              stock at the strike). Every structure here is also on the Baskets page (/baskets) — this panel is Baskets&apos;
-              credit-generating templates, ranked by live VIX regime and each underlying&apos;s own trend, not a different strategy
-              universe. PoP and Ann. RoM are model estimates from live IV/OI, not guarantees. Net Portfolio Delta and the Tail
-              Hedge Reserve above are informational gauges, not enforced caps or executed orders. Max Loss totals the allocated
-              units at the structure&apos;s own worst case — for a CSP that&apos;s the textbook assignment-to-₹0 scenario, not a
-              likely outcome. Breakeven is the underlying level(s) where the position turns from profit to loss at expiry.
-            </span>
+          <Notes summary="Risk notes and how to read this table">
+            <p className="flex items-start gap-2">
+              <ShieldAlert className="mt-0.5 h-3.5 w-3.5 shrink-0 text-amber-400" />
+              <span>No option-selling strategy is risk-free. PoP and annualised RoM are model estimates from live IV and OI, not guarantees.</span>
+            </p>
+            <p>Condors, butterflies and credit spreads have defined risk: loss is capped at the wing width. Strangles, straddles and lizards are undefined-risk: loss can grow without limit on a large move. CSP rows carry assignment risk, since you may have to buy the stock at the strike.</p>
+            <p>Max loss totals the allocated units at each structure&apos;s worst case. For a CSP that is the stock going to zero, not a likely outcome. Breakeven is the underlying level where the position turns from profit to loss at expiry.</p>
+            <p>Every structure here is also on the Baskets page. Net portfolio delta and the tail hedge reserve are gauges only; nothing is enforced or placed from this page.</p>
+          </Notes>
+        </TerminalPanel>
+
+        {handoffError && (
+          <div role="alert" className="flex items-start gap-2 rounded-lg border border-red-500/30 bg-red-500/10 px-3.5 py-2.5 text-xs text-red-400">
+            <AlertTriangle className="h-4 w-4 shrink-0" />
+            <span>{handoffError}</span>
           </div>
+        )}
+
+        {/* ─── 4b. Gap stress test ──────────────────────────────────────────── */}
+        <TerminalPanel
+          title="Gap stress test"
+          icon={Zap}
+          meta={Object.entries(stress.spots).map(([u, v]) => `${u} ${Math.round(v).toLocaleString('en-IN')}${stress.spotSource[u] === 'last close' ? ' (last close)' : ''}`).join(' · ') || undefined}
+        >
+          {stress.planCovered === 0 && stress.bookCovered === 0 ? (
+            <EmptyRow>{scanLoading ? 'Waiting for the option scan to price the plan…' : 'Nothing to stress yet. The test needs a plan or open NIFTY/SENSEX option positions.'}</EmptyRow>
+          ) : (
+            <>
+              <div className="overflow-x-auto">
+                <table className="w-full border-collapse text-left">
+                  <thead>
+                    <tr className="bg-zinc-800">
+                      <th className="px-3 py-2 text-xs font-bold text-white">Index gap</th>
+                      <th className="px-3 py-2 text-xs font-bold text-white text-right">Open positions</th>
+                      <th className="px-3 py-2 text-xs font-bold text-white text-right">Proposed plan</th>
+                      <th className="px-3 py-2 text-xs font-bold text-white text-right">Combined</th>
+                      <th className="px-3 py-2 text-xs font-bold text-white text-right">% of margin base</th>
+                      <th className="w-40 px-3 py-2 text-xs font-bold text-white"><span className="sr-only">Combined P&amp;L bar</span></th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-zinc-800 font-mono text-xs">
+                    {stress.rows.map((r) => {
+                      const tone = (v: number) => (v < 0 ? 'text-red-400' : 'text-emerald-400');
+                      const width = (Math.abs(r.total) / stressMaxAbs) * 50;
+                      return (
+                        <tr key={r.move} className={r === stressWorst && r.total < 0 ? 'bg-red-500/5' : 'hover:bg-zinc-800/50'}>
+                          <td className="px-3 py-2 font-bold text-zinc-100">{r.move > 0 ? '+' : ''}{r.move}%</td>
+                          <td className={`px-3 py-2 text-right tabular-nums ${tone(r.book)}`}>{fmtINRCompact(r.book)}</td>
+                          <td className={`px-3 py-2 text-right tabular-nums ${tone(r.plan)}`}>{fmtINRCompact(r.plan)}</td>
+                          <td className={`px-3 py-2 text-right font-bold tabular-nums ${tone(r.total)}`}>{fmtINRCompact(r.total)}</td>
+                          <td className="px-3 py-2 text-right tabular-nums text-zinc-300">
+                            {stressBase.total > 0 ? fmtPct((r.total / stressBase.total) * 100) : '—'}
+                          </td>
+                          <td className="px-3 py-2" aria-hidden="true">
+                            <div className="relative h-2 w-full">
+                              <div className="absolute inset-y-0 left-1/2 w-px bg-zinc-700" />
+                              <div
+                                className={`absolute inset-y-0 rounded-sm ${r.total < 0 ? 'bg-red-500' : 'bg-emerald-500'}`}
+                                style={r.total < 0 ? { right: '50%', width: `${width}%` } : { left: '50%', width: `${width}%` }}
+                              />
+                            </div>
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+              <div className="flex flex-wrap items-center justify-between gap-2 border-t border-zinc-800 px-3.5 py-2.5 text-xs">
+                <span className="text-zinc-400">
+                  {stressWorst.total < 0 ? (
+                    <>
+                      Worst case here: <span className="font-mono font-bold text-red-400">{fmtINRCompact(stressWorst.total)}</span> on a{' '}
+                      {stressWorst.move > 0 ? '+' : ''}{stressWorst.move}% gap
+                      {stressBase.available > 0 && <> — {fmtPct((Math.abs(stressWorst.total) / stressBase.available) * 100, 0)} of idle margin</>}
+                    </>
+                  ) : (
+                    <>No tested gap ends in a loss at expiry.</>
+                  )}
+                </span>
+              </div>
+              <Notes summary="What this test does and doesn&apos;t include">
+                <p>Each row moves NIFTY and SENSEX together by the same percentage, then values every leg at its expiry payoff. Time value is ignored, so a real gap before expiry usually hurts short premium less than shown. Read it as a conservative bound.</p>
+                <p>Open positions use their average entry price and net quantity. The plan uses the scan&apos;s live premiums at the planned size.</p>
+                {stress.bookSkipped > 0 && <p>{stress.bookSkipped} open structure{stress.bookSkipped === 1 ? '' : 's'} on other underlyings {stress.bookSkipped === 1 ? 'is' : 'are'} not included.</p>}
+                {cspInPlanForStress && <p>Cash-secured puts in the plan are not included because they are single-stock positions.</p>}
+              </Notes>
+            </>
+          )}
         </TerminalPanel>
 
-        {/* ─── 5. Opportunity feeds ─────────────────────────────────────────── */}
+        {/* ─── 5. Opportunity feeds (one panel, three tabs) ───────────────── */}
         <TerminalPanel
-          title="Defined-Risk: Spreads, Condors & Butterflies"
+          title="Candidate setups"
           icon={Shield}
-          href="/ultimate-scanner"
           meta={
             <div className="flex items-center gap-2">
-              <UnderlyingFilterToggle value={displayFilter} onChange={setDisplayFilter} />
-              {vixInfo ? <span className="text-zinc-500">VIX {vixInfo.vix.toFixed(2)} · {vixInfo.regime}</span> : null}
+              {feedTab !== 'csp' && <UnderlyingFilterToggle value={displayFilter} onChange={setDisplayFilter} />}
+              {feedTab === 'csp' && (
+                <>
+                  <span>{cspScannedAt ? `Last scan ${new Date(cspScannedAt).toLocaleString('en-IN', { hour12: false })}` : 'No scan yet'}</span>
+                  <button
+                    type="button"
+                    onClick={runCspScan}
+                    disabled={cspScanning}
+                    className="rounded border border-amber-500/30 bg-amber-500/10 px-2 py-0.5 text-[11px] font-bold text-amber-400 hover:bg-amber-500/20 focus-visible:outline focus-visible:outline-2 focus-visible:outline-amber-400 disabled:opacity-50"
+                  >
+                    {cspScanning ? 'Scanning…' : 'Run fresh scan'}
+                  </button>
+                </>
+              )}
             </div>
           }
         >
-          <OpportunityTable
-            rows={definedRiskCandidates.slice(0, 12)}
-            emptyLabel={scanLoading ? 'Scanning chain…' : `No defined-risk setup within ${MIN_DTE_FOR_YIELD}-${MAX_DTE_FOR_YIELD} days met the filters.`}
-          />
-        </TerminalPanel>
-
-        <TerminalPanel title="Undefined-Risk: Strangles, Straddles & Lizards" icon={Sparkles} href="/ultimate-scanner">
-          <OpportunityTable
-            rows={undefinedRiskCandidates.slice(0, 12)}
-            emptyLabel={scanLoading ? 'Scanning chain…' : `No undefined-risk setup within ${MIN_DTE_FOR_YIELD}-${MAX_DTE_FOR_YIELD} days met the filters.`}
-          />
-        </TerminalPanel>
-
-        <TerminalPanel
-          title="Assignment-Risk: Cash-Secured Puts"
-          icon={Banknote}
-          href="/csp-screener"
-          meta={
-            <div className="flex items-center gap-2">
-              {cspScannedAt ? <span>Last scan {new Date(cspScannedAt).toLocaleString('en-IN', { hour12: false })}</span> : <span>No scan yet</span>}
+          <div
+            role="tablist"
+            aria-label="Candidate setup type"
+            className="flex gap-1 border-b border-zinc-800 px-3.5 pt-2"
+            onKeyDown={(e) => {
+              const order = ['defined', 'undefined', 'csp'] as const;
+              const i = order.indexOf(feedTab);
+              const next = e.key === 'ArrowRight' ? order[(i + 1) % 3] : e.key === 'ArrowLeft' ? order[(i + 2) % 3]
+                : e.key === 'Home' ? order[0] : e.key === 'End' ? order[2] : null;
+              if (!next) return;
+              e.preventDefault();
+              setFeedTab(next);
+              document.getElementById(`feed-tab-${next}`)?.focus();
+            }}
+          >
+            {([
+              ['defined', 'Defined risk', definedRiskCandidates.length],
+              ['undefined', 'Undefined risk', undefinedRiskCandidates.length],
+              ['csp', 'Cash-secured puts', cspCandidatesAll.length],
+            ] as const).map(([key, label, count]) => (
               <button
+                key={key}
                 type="button"
-                onClick={runCspScan}
-                disabled={cspScanning}
-                className="rounded border border-amber-500/30 bg-amber-500/10 px-2 py-0.5 font-mono text-[10px] font-bold text-amber-400 hover:bg-amber-500/20 disabled:opacity-50"
+                role="tab"
+                id={`feed-tab-${key}`}
+                aria-controls="feed-tabpanel"
+                tabIndex={feedTab === key ? 0 : -1}
+                aria-selected={feedTab === key}
+                onClick={() => setFeedTab(key)}
+                className={`-mb-px rounded-t-md border-b-2 px-3 py-1.5 text-xs font-semibold focus-visible:outline focus-visible:outline-2 focus-visible:outline-amber-400 ${
+                  feedTab === key ? 'border-amber-400 text-amber-300' : 'border-transparent text-zinc-500 hover:text-zinc-300'
+                }`}
               >
-                {cspScanning ? 'SCANNING…' : 'RUN FRESH SCAN'}
+                {label} <span className="ml-1 font-mono text-[11px] text-zinc-500">{count}</span>
               </button>
-            </div>
-          }
-        >
-          <OpportunityTable
-            rows={cspCandidatesAll.slice(0, 12)}
-            emptyLabel={cspScanning ? 'Scan running (~10 min sweep)…' : `No cached CSP candidate within ${MAX_DTE_FOR_YIELD} days — run a fresh scan.`}
-          />
+            ))}
+          </div>
+          <div role="tabpanel" id="feed-tabpanel" aria-labelledby={`feed-tab-${feedTab}`}>
+          {feedTab === 'defined' && (
+            <OpportunityTable
+              rows={definedRiskCandidates.slice(0, 12)}
+              emptyLabel={scanLoading ? 'Scanning the option chain…' : `No spread, condor or butterfly within ${MIN_DTE_FOR_YIELD}-${MAX_DTE_FOR_YIELD} days met the filters.`}
+            />
+          )}
+          {feedTab === 'undefined' && (
+            <OpportunityTable
+              rows={undefinedRiskCandidates.slice(0, 12)}
+              emptyLabel={scanLoading ? 'Scanning the option chain…' : `No strangle, straddle or lizard within ${MIN_DTE_FOR_YIELD}-${MAX_DTE_FOR_YIELD} days met the filters.`}
+            />
+          )}
+          {feedTab === 'csp' && (
+            <OpportunityTable
+              rows={cspCandidatesAll.slice(0, 12)}
+              emptyLabel={cspScanning ? 'Scan running, this takes about 10 minutes…' : `No cached put candidate within ${MAX_DTE_FOR_YIELD} days. Run a fresh scan.`}
+            />
+          )}
+          </div>
+          {droppedUnpriced > 0 && feedTab !== 'csp' && (
+            <p className="border-t border-zinc-800 px-3.5 py-2 text-xs text-zinc-500">
+              {droppedUnpriced} setup{droppedUnpriced === 1 ? ' was' : 's were'} hidden because a leg had no live price.
+            </p>
+          )}
         </TerminalPanel>
       </div>
     </div>
