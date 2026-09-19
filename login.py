@@ -5,6 +5,7 @@ import requests
 import json
 import pyotp
 import argparse
+import time
 from datetime import datetime, timezone, timedelta
 from typing import Optional, Dict, Any
 from dhanhq import dhanhq, DhanLogin
@@ -212,27 +213,44 @@ def get_new_access_token_via_totp():
         print(f"TOTP autologin skipped: {LAST_TOTP_ERROR}")
         return None
 
-    totp_code = pyotp.TOTP(totp_key).now()
+    totp = pyotp.TOTP(totp_key)
+    dhan_login = DhanLogin(client_id)
+
+    def try_login(totp_code):
+        token_res = dhan_login.generate_token(pin, totp_code)
+        return token_res, token_res.get('accessToken')
 
     try:
-        dhan_login = DhanLogin(client_id)
-        token_res = dhan_login.generate_token(pin, totp_code)
-
-        access_token = token_res.get('accessToken')
-        if access_token:
-            created_at_iso = datetime.now(IST).isoformat()
-            token_res_to_save = {**token_res, "dhanClientId": client_id, "createdAt": created_at_iso}
-            with open(TOKEN_FILE, 'w') as f:
-                json.dump(token_res_to_save, f)
-            print("Successfully obtained and saved Access Token via TOTP autologin!")
-            return access_token
-        else:
-            LAST_TOTP_ERROR = f"Access token not found in response: {token_res}"
-            print(f"TOTP autologin failed: {LAST_TOTP_ERROR}")
-            return None
+        token_res, access_token = try_login(totp.now())
     except Exception as e:
+        token_res, access_token = None, None
         LAST_TOTP_ERROR = str(e)
-        print(f"TOTP autologin failed: {e}")
+
+    if not access_token:
+        # A code captured right at the edge of its 30s window can arrive at
+        # Dhan's server after rollover and get rejected as "Invalid TOTP" even
+        # though nothing is misconfigured. Wait for a fresh window and retry
+        # once before giving up (mirrors lib/kotak/authentication.kotak_login).
+        wait = 30 - (time.time() % 30) + 1
+        print(f"TOTP login rejected ({LAST_TOTP_ERROR or token_res}). Retrying with a fresh code in {wait:.0f}s...")
+        time.sleep(wait)
+        try:
+            token_res, access_token = try_login(totp.now())
+        except Exception as e:
+            token_res, access_token = None, None
+            LAST_TOTP_ERROR = str(e)
+
+    if access_token:
+        created_at_iso = datetime.now(IST).isoformat()
+        token_res_to_save = {**token_res, "dhanClientId": client_id, "createdAt": created_at_iso}
+        with open(TOKEN_FILE, 'w') as f:
+            json.dump(token_res_to_save, f)
+        print("Successfully obtained and saved Access Token via TOTP autologin!")
+        return access_token
+    else:
+        if not LAST_TOTP_ERROR:
+            LAST_TOTP_ERROR = f"Access token not found in response: {token_res}"
+        print(f"TOTP autologin failed: {LAST_TOTP_ERROR}")
         return None
 
 
