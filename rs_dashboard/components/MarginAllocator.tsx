@@ -732,20 +732,31 @@ export default function MarginAllocator() {
   const [handoffError, setHandoffError] = useState<string | null>(null);
   const [feedTab, setFeedTab] = useState<'defined' | 'undefined' | 'csp'>('defined');
 
+  // A poll tick is skipped while the previous one is still running. Without
+  // this a slow route (tens of seconds cold) gets a fresh request stacked on it
+  // every interval, filling the browser's 6-connection limit for the origin and
+  // starving every other request on the page.
+  const portfolioBusy = useRef(false);
+  const allocatorBusy = useRef(false);
+
   const loadPortfolio = useCallback(async () => {
+    if (portfolioBusy.current) return;
+    portfolioBusy.current = true;
     try {
       const res = await fetch('/api/dashboard/portfolio');
       const json = await res.json();
       if (json?.success) setPortfolio(json);
-    } catch { /* transient — next poll retries */ }
+    } catch { /* transient — next poll retries */ } finally { portfolioBusy.current = false; }
   }, []);
 
   const loadAllocator = useCallback(async () => {
+    if (allocatorBusy.current) return;
+    allocatorBusy.current = true;
     try {
       const res = await fetch('/api/margin-allocator');
       const json = await res.json();
       if (json?.success) setAllocator(json);
-    } catch { /* transient — next poll retries */ }
+    } catch { /* transient — next poll retries */ } finally { allocatorBusy.current = false; }
   }, []);
 
   const loadCsp = useCallback(async () => {

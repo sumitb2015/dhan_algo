@@ -67,13 +67,15 @@ const MIN_GAP_MS = 3_500;
 
 export function spaced<T>(key: string, fn: () => Promise<T>): Promise<T> {
   const prior = paceChains.get(key) ?? Promise.resolve();
-  const run = prior.then(async () => {
-    const result = await fn();
-    await new Promise(resolve => setTimeout(resolve, MIN_GAP_MS));
-    return result;
-  });
-  // Swallow errors in the shared chain so one caller's failure doesn't wedge
-  // pacing for the next caller; the real result/error still flows to `run`.
-  paceChains.set(key, run.catch(() => {}));
+  const run = prior.then(() => fn());
+  // The lane stays reserved for MIN_GAP_MS after fn settles, so consecutive
+  // spawns are spaced exactly as before. The gap used to sit inside `run`,
+  // which made every caller wait it out before receiving a result it already
+  // had; now only the NEXT caller in the lane waits. Errors still release the
+  // lane (after the gap) without wedging it, and still flow to `run`.
+  paceChains.set(
+    key,
+    run.then(() => undefined, () => undefined).then(() => new Promise<void>(resolve => setTimeout(resolve, MIN_GAP_MS))),
+  );
   return run;
 }

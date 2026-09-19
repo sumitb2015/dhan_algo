@@ -171,6 +171,14 @@ async function resolveDhanSecurityIds(
   }
 }
 
+/** True when an ISO (YYYY-MM-DD) expiry is before today in IST. calculateDte()
+ *  clamps to a 0.2 floor so it can never say "already expired" — compare dates. */
+function isPastExpiry(expiry: string): boolean {
+  if (!/^\d{4}-\d{2}-\d{2}/.test(expiry)) return false;
+  const todayIst = new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
+  return expiry.slice(0, 10) < todayIst;
+}
+
 /**
  * Build classified structure groups for one broker's raw position rows.
  *
@@ -200,10 +208,12 @@ async function classifyBroker(
     else buckets.set(key, { underlying, expiry: leg.expiry, legs: [leg] });
   }
 
-  const groups: PositionGroup[] = [];
-  for (const { underlying, expiry, legs: bucketLegs } of buckets.values()) {
+  // Groups are independent: run them side by side instead of one after another.
+  // Chain fetches are deduped + paced per underlying and the margin calculator
+  // has its own account-wide pacer, so this cannot outrun either rate limit.
+  const built = await Promise.all([...buckets.values()].map(async ({ underlying, expiry, legs: bucketLegs }): Promise<PositionGroup | null> => {
     const aggLegs = aggregateLegs(bucketLegs);
-    if (!aggLegs.length) continue;
+    if (!aggLegs.length) return null;
 
     const { structure, riskType } = classifyStructure(aggLegs);
 
@@ -230,7 +240,11 @@ async function classifyBroker(
     // cross-broker, never a fabricated "live" figure for Kotak's own account.
     let marginLegs = aggLegs;
     let pricingBroker = broker;
-    if (broker !== 'dhan' && expiry) {
+    // An expiry already in the past has no live chain to look up (and any
+    // such row is suspect anyway — see the expired-expiry note in the API
+    // response), so go straight to the flat estimate instead of spending a
+    // queued Python spawn on a chain that cannot exist.
+    if (broker !== 'dhan' && expiry && !isPastExpiry(expiry)) {
       const resolved = await resolveDhanSecurityIds(underlying, expiry, aggLegs, origin, cookie);
       if (resolved.fullyResolved) {
         marginLegs = resolved.legs;
@@ -270,14 +284,15 @@ async function classifyBroker(
       marginSource = 'estimate';
     }
 
-    groups.push({
+    return {
       broker, underlying, expiry, dte: expiry ? calculateDte(expiry) : null,
       structure, riskType, legs: aggLegs,
       creditCollected: Math.round(creditCollected),
       assignmentExposure: Math.round(assignmentExposure),
       marginBlocked, marginSource,
-    });
-  }
+    };
+  }));
+  const groups = built.filter((g): g is PositionGroup => g !== null);
 
   return {
     groups,
@@ -297,46 +312,35 @@ async function classifyBroker(
 // had. The generation stamp makes an order fill drop this entry too, instead
 // of shadowing the eviction the order route just performed.
 const CACHE_TTL_MS = 3_000;
+// Past the TTL a body this young is still returned at once while one rebuild
+// runs behind it. The full rebuild fans out to Python chain spawns and the
+// paced margin calculator (tens of seconds cold), which a 15s poll must never
+// sit and wait on when it already holds a minute-old answer. An order fill
+// bumps the generation stamp, which disqualifies the stale body entirely.
+const STALE_OK_MS = 60_000;
 let cache: { ts: number; gen: string; body: MarginAllocatorResponse } | null = null;
+let rebuilding: { gen: string; promise: Promise<MarginAllocatorResponse> } | null = null;
 
-export async function GET(req: NextRequest) {
-  // Stamped against MARGIN_BROKERS only: this route never reads Zerodha, so
-  // a Zerodha fill must not throw away a body whose inputs it cannot have
-  // changed. Read at the start of the request, so that if an order does land
-  // while the fan-out below is still running, this entry is born stale and
-  // the next reader rebuilds rather than trusting it.
-  const gen = brokerCacheGeneration(MARGIN_BROKERS);
-  if (cache && Date.now() - cache.ts < CACHE_TTL_MS && cache.gen === gen) {
-    return NextResponse.json(cache.body);
-  }
-
-  const origin = req.nextUrl.origin;
-  const cookie = req.headers.get('cookie') ?? '';
-
-  const brokers: MarginAllocatorBrokerStatus[] = [];
-  const groups: PositionGroup[] = [];
-  const unparseable: MarginAllocatorResponse['unparseable'] = [];
-
-  for (const broker of MARGIN_BROKERS) {
+async function buildBody(origin: string, cookie: string, gen: string): Promise<MarginAllocatorResponse> {
+  // Brokers are independent of each other, so fetch and classify them together.
+  const perBroker = await Promise.all(MARGIN_BROKERS.map(async (broker) => {
     const isValid = broker === 'dhan' ? isDhanTokenValid() : isKotakTokenValid();
     if (!isValid) {
-      brokers.push({ broker, connected: false, funds: null, error: 'No valid session' });
-      continue;
+      return { status: { broker, connected: false, funds: null, error: 'No valid session' } as MarginAllocatorBrokerStatus, groups: [] as PositionGroup[], unparseable: [] as MarginAllocatorResponse['unparseable'] };
     }
-
     const raw = broker === 'dhan' ? await loadDhanRaw() : await loadKotakRaw();
-    brokers.push({ broker, connected: true, funds: raw.funds, error: raw.error });
-
-    if (!raw.rows) continue;
+    const status: MarginAllocatorBrokerStatus = { broker, connected: true, funds: raw.funds, error: raw.error };
+    if (!raw.rows) return { status, groups: [] as PositionGroup[], unparseable: [] as MarginAllocatorResponse['unparseable'] };
     const classified = await classifyBroker(broker, raw.rows, origin, cookie);
-    groups.push(...classified.groups);
-    unparseable.push(...classified.unparseable.map((u) => ({ broker, ...u })));
-  }
+    return { status, groups: classified.groups, unparseable: classified.unparseable.map((u) => ({ broker, ...u })) };
+  }));
 
+  const brokers = perBroker.map((b) => b.status);
+  const groups = perBroker.flatMap((b) => b.groups);
+  const unparseable = perBroker.flatMap((b) => b.unparseable);
   groups.sort((a, b) => b.marginBlocked - a.marginBlocked);
 
   const dhanStatus = brokers.find((b) => b.broker === 'dhan') ?? null;
-
   const body: MarginAllocatorResponse = {
     success: true,
     connected: brokers.some((b) => b.connected),
@@ -346,7 +350,37 @@ export async function GET(req: NextRequest) {
     groups,
     unparseable,
   };
-
   if (brokers.some((b) => b.connected && !b.error)) cache = { ts: Date.now(), gen, body };
-  return NextResponse.json(body);
+  return body;
+}
+
+/** One rebuild at a time per generation; concurrent callers share it. */
+function rebuild(origin: string, cookie: string, gen: string): Promise<MarginAllocatorResponse> {
+  if (rebuilding && rebuilding.gen === gen) return rebuilding.promise;
+  const promise = buildBody(origin, cookie, gen).finally(() => {
+    if (rebuilding?.promise === promise) rebuilding = null;
+  });
+  rebuilding = { gen, promise };
+  return promise;
+}
+
+export async function GET(req: NextRequest) {
+  // Stamped against MARGIN_BROKERS only: this route never reads Zerodha, so
+  // a Zerodha fill must not throw away a body whose inputs it cannot have
+  // changed. Read at the start of the request, so that if an order does land
+  // while the fan-out is still running, this entry is born stale and the next
+  // reader rebuilds rather than trusting it.
+  const gen = brokerCacheGeneration(MARGIN_BROKERS);
+  const origin = req.nextUrl.origin;
+  const cookie = req.headers.get('cookie') ?? '';
+
+  if (cache && cache.gen === gen) {
+    const age = Date.now() - cache.ts;
+    if (age < CACHE_TTL_MS) return NextResponse.json(cache.body);
+    if (age < STALE_OK_MS) {
+      void rebuild(origin, cookie, gen).catch(() => { /* next poll retries; stale body stays valid */ });
+      return NextResponse.json(cache.body);
+    }
+  }
+  return NextResponse.json(await rebuild(origin, cookie, gen));
 }

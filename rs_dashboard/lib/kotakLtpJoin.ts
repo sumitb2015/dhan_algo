@@ -23,8 +23,12 @@ const OPTIONS_FETCH_SCRIPT = path.join(PROJECT_ROOT, 'scripts', 'tools', 'option
 // routes agree on when the on-disk cache is stale, rather than one refreshing
 // a file the other still considers fresh.
 const KOTAK_CACHE_MAX_AGE_MS = 12 * 60 * 60 * 1000;
-// Matches /api/options/chain's in-memory TTL.
+// A chain younger than this is used as-is.
 const CHAIN_CACHE_TTL_MS = 10_000;
+// A chain older than that but younger than this is still returned at once while
+// a refresh runs behind it, so the portfolio poll never waits on a Python spawn
+// it already has a recent answer for. Past this it blocks for a fresh one.
+const CHAIN_STALE_OK_MS = 60_000;
 
 interface KotakSymbolInfo { expiry: string; strike: number; side: 'CE' | 'PE' }
 type ChainSide = { last_price?: number };
@@ -60,19 +64,32 @@ const chainCache = new Map<string, { ts: number; oc: ChainOc }>();
 async function fetchChainOc(underlying: string, expiry: string): Promise<ChainOc> {
   const cacheKey = `${underlying}:${expiry}`;
   const hit = chainCache.get(cacheKey);
-  if (hit && Date.now() - hit.ts < CHAIN_CACHE_TTL_MS) return hit.oc;
+  const age = hit ? Date.now() - hit.ts : Infinity;
+  if (hit && age < CHAIN_CACHE_TTL_MS) return hit.oc;
 
-  const parsed = await dedupe(`options-chain:${cacheKey}`, () =>
+  // Own dedupe key: /api/options/chain dedupes under `options-chain:<key>` but
+  // resolves to a raw {stdout} object, this resolves to parsed JSON — sharing
+  // one key handed whichever caller came second the wrong shape (an empty
+  // chain, i.e. every Kotak leg silently unpriced). The pacing lane is still
+  // shared, so the two still cannot race Dhan's option-chain rate limit.
+  const refresh = () => dedupe(`kotak-ltp-chain:${cacheKey}`, () =>
     spaced(`dhan-spawn:${underlying}`, () =>
       runPythonJson<{ chain?: { oc?: ChainOc }; error?: string }>(
         OPTIONS_FETCH_SCRIPT,
         ['chain', '--underlying', underlying, '--expiry', expiry],
         45_000,
-      )));
+      ))).then(parsed => {
+    const oc = parsed.chain?.oc ?? {};
+    // Never let an empty/failed fetch overwrite a good chain we already hold.
+    if (Object.keys(oc).length > 0 || !hit) chainCache.set(cacheKey, { ts: Date.now(), oc });
+    return chainCache.get(cacheKey)?.oc ?? oc;
+  });
 
-  const oc = parsed.chain?.oc ?? {};
-  chainCache.set(cacheKey, { ts: Date.now(), oc });
-  return oc;
+  if (hit && age < CHAIN_STALE_OK_MS) {
+    void refresh().catch(() => { /* keep serving the stale chain; next poll retries */ });
+    return hit.oc;
+  }
+  return refresh();
 }
 
 function underlyingPrefix(tradingSymbol: string): string {
@@ -118,9 +135,13 @@ export async function joinKotakLtp(positions: JoinablePosition[]): Promise<void>
 
   // One chain fetch per distinct (underlying, expiry) actually held, not one per leg.
   const groups = new Map<string, { underlying: string; expiry: string }>();
+  const todayIst = new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
   for (const p of unpriced) {
     const info = infoFor(p);
     if (!info) continue;
+    // A contract whose expiry is already behind us has no live chain; fetching
+    // one only queues a doomed Python spawn in front of every real lookup.
+    if (/^\d{4}-\d{2}-\d{2}/.test(info.expiry) && info.expiry.slice(0, 10) < todayIst) continue;
     const u = underlyingPrefix(p.tradingSymbol);
     groups.set(`${u}:${info.expiry}`, { underlying: u, expiry: info.expiry });
   }
