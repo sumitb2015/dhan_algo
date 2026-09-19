@@ -583,6 +583,50 @@ async function fromDhanPrevSessionChange(wanted: IndexDef[]): Promise<Record<str
   return out;
 }
 
+// Hub rows repaired from daily candles, keyed "<IST date>:<index key>". The
+// answer cannot change again within the same IST date, so it is fetched once.
+const hubRepairCache = new Map<string, Quote>();
+
+/**
+ * The hub streams Dhan's `close` as `prev_close`, which flips to today's close
+ * at the 15:30 bell (Quirk A) — so after the bell, and all weekend, every hub
+ * row reads `prev_close === ltp` and a false 0.00%. Detect exactly that shape
+ * outside live session hours and rebuild the row from Dhan's daily candles:
+ *  - weekday after the bell: today's candle isn't published yet, so the latest
+ *    completed row IS yesterday's close;
+ *  - weekend: last two completed sessions (Friday vs Thursday), same as the
+ *    pre-market view.
+ */
+async function repairFlippedHubRows(quotes: Record<string, Quote>): Promise<void> {
+  const nowMin = istMinutesOfDay();
+  const day = istToday();
+  const dow = new Date().toLocaleDateString('en-US', { timeZone: 'Asia/Kolkata', weekday: 'short' });
+  const weekend = dow === 'Sat' || dow === 'Sun';
+  if (!weekend && nowMin < MARKET_CLOSE_IST_MIN) return;
+
+  for (const [k] of hubRepairCache) if (!k.startsWith(`${day}:`)) hubRepairCache.delete(k);
+
+  for (const { def, sid, segment } of resolveSids(WS_INDICES)) {
+    const q = quotes[def.key];
+    if (!q || q.source !== 'hub' || q.prev_close !== q.ltp) continue;
+    const cacheKey = `${day}:${def.key}`;
+    const hit = hubRepairCache.get(cacheKey);
+    if (hit) { quotes[def.key] = { ...hit, ltp: q.ltp, day_high: q.day_high, day_low: q.day_low }; continue; }
+    try {
+      let fixed: Quote | null = null;
+      if (weekend) {
+        const c = await fetchPrevSessionChange(sid, segment, 'INDEX', day);
+        if (c) fixed = mkQuote(q.ltp, c.prevClose, 'dhan-prevsession', q.day_high ?? 0, q.day_low ?? 0);
+      } else {
+        const pc = await fetchLatestPrevClose(sid, segment, 'INDEX', day);
+        if (pc) fixed = mkQuote(q.ltp, pc, 'hub+dhan-prevsession', q.day_high ?? 0, q.day_low ?? 0);
+      }
+      if (fixed) { hubRepairCache.set(cacheKey, fixed); quotes[def.key] = fixed; }
+    } catch { /* keep the hub row; change_pct 0 is the pre-existing state */ }
+    await new Promise(r => setTimeout(r, HISTORICAL_STAGGER_MS));
+  }
+}
+
 export async function GET() {
   if (cache && Date.now() - cache.ts < CACHE_TTL_MS) {
     return NextResponse.json(cache.body);
@@ -607,6 +651,7 @@ export async function GET() {
     // and vice versa.
     try {
       quotes = { ...quotes, ...fromHub(WS_INDICES) };
+      await repairFlippedHubRows(quotes);
     } catch (e) {
       errors.push(`hub: ${String(e).slice(0, 120)}`);
     }

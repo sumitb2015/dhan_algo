@@ -74,6 +74,17 @@ SENSEX is simply not in `top-indices/route.ts`'s row list (crude oil takes its s
 `nifty-prev-close/route.ts` handles SENSEX via `IDX_I` + security id 51 instead of
 `BSE_IDX` + 51 — verified 2026-08-16 that only that combination returns data.
 
+**Quirk A also hits the hub path (found 2026-09-19).** `fromHub()` reads
+`debug/live_indices_quotes.json`, whose `prev_close` is Dhan's raw `close` streamed by
+the WebSocket — so after 15:30 IST and all weekend it equals `ltp` and every NSE index
+row shows a false `0.00%`. `rejectFlippedClose` only guarded `fromDhan` (REST/MCX rows).
+`repairFlippedHubRows()` in `top-indices/route.ts` fixes it: outside live hours (weekday
+>= 15:30, or Sat/Sun) any hub row with `prev_close === ltp` is rebuilt from daily candles
+— weekday: `fetchLatestPrevClose` (today's candle isn't published yet, so the latest
+completed row is yesterday); weekend: `fetchPrevSessionChange` (Friday vs Thursday).
+Cached per IST date in `hubRepairCache`. Any new consumer of the hub file's
+`prev_close`/`change_pct` needs the same guard.
+
 ## Rule 3: Before 09:15 IST, there is no "today" — show the last completed session's move instead
 
 A live LTP-vs-close comparison is mathematically correct pre-market (both sides

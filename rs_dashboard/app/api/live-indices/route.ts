@@ -82,12 +82,16 @@ export async function POST(request: NextRequest) {
     }
     if (fs.existsSync(STOP_TRIGGER)) fs.unlinkSync(STOP_TRIGGER);
 
-    const child = spawn(PYTHON_EXE, [BRIDGE_SCRIPT], {
+    // Append to a log instead of discarding output, so a silent death (status
+    // stuck on RUNNING with a dead PID) leaves a traceback to read.
+    const logFd = fs.openSync(path.join(DEBUG_DIR, 'live_indices_ws.log'), 'a');
+    const child = spawn(PYTHON_EXE, ['-u', BRIDGE_SCRIPT], {
       detached: true,
-      stdio: 'ignore',
+      stdio: ['ignore', logFd, logFd],
       windowsHide: true,
     });
     child.unref();
+    fs.closeSync(logFd);
 
     return NextResponse.json({ success: true, message: 'Bridge started', pid: child.pid });
   }

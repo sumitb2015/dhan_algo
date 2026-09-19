@@ -61,6 +61,7 @@ import {
   TerminalSiteDirectory,
 } from './TerminalNavigationDirectory';
 import NavBar from './NavBar';
+import { startLiveIndicesBridge } from '@/lib/startLiveIndicesBridge';
 
 // ─── Poll cadences (dhan-polling-guards skill) ────────────────────────────────
 const INDEX_POLL_MS = 5_000;       // cheap: one batched broker quote call
@@ -1845,6 +1846,9 @@ export default function MarketDashboard() {
 
   // Pollers with standard monotonic guard (dhan-polling-guards skill)
   useEffect(() => {
+    // The 9 NSE index rows come from the shared hub bridge; without starting
+    // it here only the REST-sourced crude rows appear. Idempotent.
+    startLiveIndicesBridge();
     let seq = 0;
     let stopped = false;
     async function load() {
