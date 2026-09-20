@@ -72,7 +72,11 @@ export default function OptionScatter3D({ underlying, expiry, onMeta }: Props) {
   const [hoveredKey, setHoveredKey] = useState<string | null>(null);
   const [isOrbiting, setIsOrbiting] = useState(false);
   const [dragMode, setDragMode] = useState<DragMode>('turntable');
-  const [isFullscreen, setIsFullscreen] = useState(false);
+  // Fullscreen is the graph panel only. `nativeFs` tracks the browser Fullscreen API;
+  // `cssFs` is a fixed-overlay fallback for when the browser refuses (e.g. embedded frames).
+  const [nativeFs, setNativeFs] = useState(false);
+  const [cssFs, setCssFs] = useState(false);
+  const isFullscreen = nativeFs || cssFs;
   const [copiedKey, setCopiedKey] = useState(false);
   const [tableSortCol, setTableSortCol] = useState<string>('score');
   const [tableSortAsc, setTableSortAsc] = useState(false);
@@ -265,14 +269,30 @@ export default function OptionScatter3D({ underlying, expiry, onMeta }: Props) {
   };
 
   // ── Toggle Fullscreen ──
-  const toggleFullscreen = () => setIsFullscreen(prev => !prev);
-
   useEffect(() => {
-    if (!isFullscreen) return;
-    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setIsFullscreen(false); };
+    const onChange = () => setNativeFs(document.fullscreenElement === viewportRef.current);
+    document.addEventListener('fullscreenchange', onChange);
+    return () => document.removeEventListener('fullscreenchange', onChange);
+  }, []);
+
+  const toggleFullscreen = () => {
+    if (isFullscreen) {
+      if (document.fullscreenElement) document.exitFullscreen().catch(() => { /* already leaving */ });
+      setCssFs(false);
+      return;
+    }
+    const el = viewportRef.current;
+    if (el?.requestFullscreen) el.requestFullscreen().catch(() => setCssFs(true));
+    else setCssFs(true);
+  };
+
+  // Native fullscreen handles Esc itself; the overlay fallback needs its own.
+  useEffect(() => {
+    if (!cssFs) return;
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setCssFs(false); };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [isFullscreen]);
+  }, [cssFs]);
 
   // ── Next / Previous Strike Navigation ──
   const navigateStrike = (direction: 'prev' | 'next') => {
@@ -417,7 +437,7 @@ export default function OptionScatter3D({ underlying, expiry, onMeta }: Props) {
   };
 
   return (
-    <div className={`flex flex-col gap-4 w-full min-w-0 ${isFullscreen ? 'fixed inset-0 z-50 bg-zinc-950 p-6 overflow-y-auto' : ''}`}>
+    <div className="flex flex-col gap-4 w-full min-w-0">
       <ControlBar
         goal={goal} setGoal={setGoal} colorMode={colorMode} setColorMode={setColorMode}
         sideFilter={sideFilter} setSideFilter={setSideFilter}
@@ -435,7 +455,11 @@ export default function OptionScatter3D({ underlying, expiry, onMeta }: Props) {
       {/* ── 3D Viewport with Quant Toolbars & HUD ── */}
       <div
         ref={viewportRef}
-        className="relative bg-zinc-900/80 border border-zinc-800 rounded-2xl overflow-hidden shadow-2xl w-full min-w-0"
+        className={`border border-zinc-800 overflow-hidden shadow-2xl w-full min-w-0 ${
+          isFullscreen
+            ? `bg-zinc-950 flex flex-col h-screen ${cssFs ? 'fixed inset-0 z-50' : 'relative'}`
+            : 'relative bg-zinc-900/80 rounded-2xl'
+        }`}
         onMouseMove={e => {
           lastMouse.current = { x: e.clientX, y: e.clientY };
           placeHud();
@@ -452,8 +476,8 @@ export default function OptionScatter3D({ underlying, expiry, onMeta }: Props) {
         {/* ── 3D Canvas ── */}
         <div
           ref={plotEl}
-          className="w-full min-w-0 block"
-          style={{ width: '100%', height: isFullscreen ? 'calc(100vh - 120px)' : 'max(760px, calc(100vh - 200px))' }}
+          className={`w-full min-w-0 ${isFullscreen ? 'flex-1 min-h-0' : 'block'}`}
+          style={isFullscreen ? undefined : { width: '100%', height: 'max(760px, calc(100vh - 200px))' }}
         />
 
         {/* Empty / Loading State */}
