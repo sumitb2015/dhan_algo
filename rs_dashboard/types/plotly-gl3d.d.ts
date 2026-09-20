@@ -7,7 +7,10 @@ declare module 'plotly.js-gl3d-dist-min' {
   }
   /** The graph div, once Plotly has attached its event emitter to it. */
   export type PlotlyRoot = HTMLElement & {
-    on?: (event: string, cb: (d: PlotlyEvent) => void) => void;
+    on?: {
+      (event: 'plotly_relayout', cb: (d: Record<string, unknown>) => void): void;
+      (event: string, cb: (d: PlotlyEvent) => void): void;
+    };
     removeAllListeners?: (event: string) => void;
   };
   const Plotly: {

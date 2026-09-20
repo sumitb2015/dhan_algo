@@ -70,6 +70,7 @@ export type MoneynessFilter = 'ALL' | 'OTM' | 'ATM' | 'ITM';
 export type CameraView = 'iso' | 'top' | 'front' | 'side' | 'reset' | 'atm';
 export interface Vec3 { x: number; y: number; z: number }
 export interface Camera { eye: Vec3; up: Vec3; center: Vec3 }
+export interface SceneCamera extends Camera { projection?: { type: 'perspective' | 'orthographic' } }
 export const Z_UP: Vec3 = { x: 0, y: 0, z: 1 };
 export const ORIGIN: Vec3 = { x: 0, y: 0, z: 0 };
 export const CAMERAS: Record<CameraView, Camera> = {
@@ -80,8 +81,13 @@ export const CAMERAS: Record<CameraView, Camera> = {
   front: { eye: { x: 0, y: -2.6, z: 0.0001 }, up: Z_UP, center: ORIGIN },
   side:  { eye: { x: 2.6, y: 0.0001, z: 0.0001 }, up: Z_UP, center: ORIGIN },
   atm:   { eye: { x: 1.4, y: -1.4, z: 0.8 }, up: Z_UP, center: ORIGIN },
-  reset: { eye: { x: 1.2, y: -2.0, z: 0.9 }, up: Z_UP, center: ORIGIN },
+  // Far enough back that the whole box and its axis titles sit inside the canvas at the default zoom.
+  // center.z < 0 looks slightly below the box's middle, lifting it to the vertical centre of the panel.
+  reset: { eye: { x: 1.55, y: -2.7, z: 1.15 }, up: Z_UP, center: { x: 0, y: 0, z: -0.16 } },
 };
+
+/** Camera the scene opens with and the reset button returns to. */
+export const DEFAULT_CAMERA: SceneCamera = { ...CAMERAS.reset, projection: { type: 'perspective' } };
 
 export function cmp(a: number | string, b: number | string): number {
   return typeof a === 'number' && typeof b === 'number' ? a - b : String(a).localeCompare(String(b));

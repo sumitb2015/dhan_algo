@@ -6,7 +6,7 @@ import {
   buildPoints, clamp, clipRange, topByGoal, computeChainSummary,
   type OcEntry, type ScatterPoint, type Goal, type Signal, type ChainSummary,
 } from '@/lib/optionScatter3d';
-import { CAMERAS, SIGNALS, cmp, type CameraView, type ColorMode, type MoneynessFilter, type SideFilter } from './option-cube/shared';
+import { CAMERAS, DEFAULT_CAMERA, SIGNALS, cmp, type CameraView, type SceneCamera, type Vec3, type ColorMode, type MoneynessFilter, type SideFilter } from './option-cube/shared';
 import { buildScene } from './option-cube/buildScene';
 import { ControlBar, SignalPills } from './option-cube/ControlBar';
 import { ViewportToolbar } from './option-cube/ViewportToolbar';
@@ -15,6 +15,11 @@ import { InspectorCard } from './option-cube/InspectorCard';
 import { CandidatesTable } from './option-cube/CandidatesTable';
 import { Guide } from './option-cube/Guide';
 import type { PlotlyRoot } from 'plotly.js-gl3d-dist-min';
+
+/** Plotly's internal scene handle; used only to read the live camera. Best-effort, guarded. */
+interface LiveSceneHost {
+  _fullLayout?: { scene?: { _scene?: { getCamera?: () => SceneCamera } } };
+}
 
 interface Props {
   underlying: string;
@@ -290,15 +295,28 @@ export default function OptionScatter3D({ underlying, expiry, onMeta }: Props) {
     }).catch(() => { /* clipboard blocked (insecure context / permission) */ });
   };
 
+  // The user's camera. Plotly's own uirevision does not keep a dragged/zoomed camera across
+  // Plotly.react (the 15s data poll, a layer toggle), so we record every camera change and
+  // hand the current one back in with each render.
+  const cameraRef = useRef<SceneCamera | null>(null);
+  const relayoutBound = useRef(false);
+
   // ── Render Plotly 3D Scene ──
   useEffect(() => {
     const Plotly = plotlyRef.current;
     const el = plotEl.current;
     if (!plotlyReady || !Plotly || !el) return;
 
+    // Prefer the scene's live camera (covers a drag still in progress); fall back to the last recorded one.
+    try {
+      const live = (el as unknown as LiveSceneHost)._fullLayout?.scene?._scene?.getCamera?.();
+      if (live) cameraRef.current = live;
+    } catch { /* scene not initialised yet */ }
+
     const { traces, layout } = buildScene({
       points, axes, colorMode, goal, scoreOf, showStems, showZeroPlanes, showFloorShadow,
       selected, chrome, viewKey: `${underlying}|${expiry}`, dragMode,
+      camera: cameraRef.current ?? undefined,
     });
 
     Plotly.react(el, traces, layout, {
@@ -326,6 +344,17 @@ export default function OptionScatter3D({ underlying, expiry, onMeta }: Props) {
       });
 
       g.on?.('plotly_unhover', () => setHoveredKey(null));
+
+      // Record camera changes from drag / wheel / presets / orbit (bound once per graph div).
+      if (!relayoutBound.current) {
+        relayoutBound.current = true;
+        g.on?.('plotly_relayout', e => {
+          const full = e['scene.camera'] as SceneCamera | undefined;
+          const eye = e['scene.camera.eye'] as Vec3 | undefined;
+          if (full) cameraRef.current = full;
+          else if (eye) cameraRef.current = { ...(cameraRef.current ?? DEFAULT_CAMERA), eye };
+        });
+      }
     }).catch(e => setRenderError(`3D view failed to render — is WebGL enabled? (${String(e)})`));
   }, [
     plotlyReady, points, axes, colorMode, goal, scoreOf, selected, chrome, underlying, expiry,

@@ -1,6 +1,6 @@
 import type { ChartChrome } from '@/lib/chartTheme';
 import { bearishIntensity, clamp, type AxisClip, type Goal, type ScatterPoint, type Signal } from '@/lib/optionScatter3d';
-import { BEARISH_SCALE, CE_COLOR, FONT, PE_COLOR, SCORE_SCALE, SIGNALS, SIGNAL_COLOR, rgba, type ColorMode } from './shared';
+import { BEARISH_SCALE, CE_COLOR, DEFAULT_CAMERA, FONT, PE_COLOR, SCORE_SCALE, SIGNALS, SIGNAL_COLOR, rgba, type ColorMode, type SceneCamera } from './shared';
 
 export interface SceneInput {
   points: ScatterPoint[];
@@ -16,13 +16,18 @@ export interface SceneInput {
   /** Plotly `uirevision`: keeps the user's camera while the same underlying+expiry live-updates. */
   viewKey: string;
   dragMode: 'turntable' | 'orbit';
+  /**
+   * The camera to draw with. The caller owns it: Plotly's uirevision does not reliably keep a
+   * dragged/zoomed camera when the layout also names one, so every re-render passes the live one.
+   */
+  camera?: SceneCamera;
 }
 
 /** Pure translation of the filtered points + view options into Plotly traces and layout. */
 export function buildScene(input: SceneInput): { traces: unknown[]; layout: Record<string, unknown> } {
   const {
     points, axes, colorMode, goal, scoreOf, showStems, showZeroPlanes, showFloorShadow,
-    selected, chrome, viewKey, dragMode,
+    selected, chrome, viewKey, dragMode, camera,
   } = input;
 
     const maxOi = Math.max(1, ...points.map(p => p.oi));
@@ -306,10 +311,7 @@ export function buildScene(input: SceneInput): { traces: unknown[]; layout: Reco
       // Stretched along X so the box fills a wide panel instead of sitting as a
       // compact cube with empty bands either side.
       aspectratio: { x: 2.2, y: 1.35, z: 1.25 },
-      camera: {
-        eye: { x: 1.2, y: -2.0, z: 0.9 }, up: { x: 0, y: 0, z: 1 }, center: { x: 0, y: 0, z: 0 },
-        projection: { type: 'perspective' },
-      },
+      camera: camera ?? DEFAULT_CAMERA,
       dragmode: dragMode,
     },
   };
