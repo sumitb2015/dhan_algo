@@ -68,6 +68,38 @@ const LOOKBACK_OPTIONS = [
   { label: '2Y', value: 500 },
 ];
 
+const PRESSURE_WARN = 3.5;
+const PRESSURE_CORRECTION = 5.5;
+
+function pressureTone(score: number) {
+  return score >= PRESSURE_CORRECTION ? 'text-red-400' : score >= PRESSURE_WARN ? 'text-amber-400' : 'text-emerald-400';
+}
+
+function pressureVerdict(score: number) {
+  return score >= PRESSURE_CORRECTION ? 'Correction' : score >= PRESSURE_WARN ? 'Under Pressure' : 'Healthy';
+}
+
+/**
+ * Roll the current window forward assuming NO new selling: each day keeps counting
+ * for `expirySessionsLeft` more sessions, then falls out of the 25-session window.
+ * Returns the next few points where the pressure score changes.
+ */
+function projectDropOffs(days: DistributionDay[]) {
+  const weight = (d: DistributionDay) => (d.isStalling ? 0.5 : 1);
+  const score = (k: number) =>
+    days.filter((d) => d.expirySessionsLeft >= k).reduce((sum, d) => sum + weight(d), 0);
+  const steps: { inSessions: number; dropped: DistributionDay[]; score: number }[] = [];
+  const breakpoints = Array.from(new Set(days.map((d) => d.expirySessionsLeft + 1))).sort((a, b) => a - b);
+  for (const k of breakpoints) {
+    steps.push({
+      inSessions: k,
+      dropped: days.filter((d) => d.expirySessionsLeft + 1 === k),
+      score: score(k),
+    });
+  }
+  return steps;
+}
+
 export default function InstitutionalMarketRegimePage() {
   const [selectedIndex, setSelectedIndex] = useState<'NIFTY50' | 'NIFTY500'>('NIFTY50');
   const [lookback, setLookback] = useState<number>(250);
@@ -287,28 +319,33 @@ export default function InstitutionalMarketRegimePage() {
               </div>
             </div>
 
-            {/* Right: Distribution Days Meter */}
+            {/* Right: Selling Pressure Meter */}
             <div className="flex items-center gap-5 shrink-0 bg-zinc-950/80 border border-zinc-800/80 rounded-xl p-3.5 font-mono">
-              <div className="flex flex-col">
+              <div className="flex flex-col min-w-[210px]">
                 <span className="text-[10px] font-bold uppercase tracking-wider text-zinc-500">
-                  Active Dist. Days (25D)
+                  Selling Pressure Score
                 </span>
                 <div className="flex items-baseline gap-1.5 mt-0.5">
-                  <span
-                    className={`text-3xl font-black tabular-nums ${
-                      (reg?.activeDistributionCount ?? 0) >= 6
-                        ? 'text-red-400'
-                        : (reg?.activeDistributionCount ?? 0) >= 4
-                          ? 'text-amber-400'
-                          : 'text-emerald-400'
-                    }`}
-                  >
-                    {reg?.activeDistributionCount ?? 0}
+                  <span className={`text-3xl font-black tabular-nums ${pressureTone(reg?.totalActivePressure ?? 0)}`}>
+                    {reg?.totalActivePressure ?? 0}
                   </span>
-                  <span className="text-xs text-zinc-500">/ 25 Sessions</span>
+                  <span className="text-xs text-zinc-500">
+                    ({reg?.activeDistributionCount ?? 0} dist
+                    {(reg?.activeStallingCount ?? 0) > 0 ? ` + ${reg?.activeStallingCount} stalling ×½` : ''})
+                  </span>
+                </div>
+                {/* Zone bar: 0–3.5 healthy, 3.5–5.5 pressure, 5.5+ correction (scale 0–8) */}
+                <div className="relative mt-2 h-2 rounded-full overflow-hidden flex">
+                  <div className="bg-emerald-500/40" style={{ width: `${(PRESSURE_WARN / 8) * 100}%` }} />
+                  <div className="bg-amber-500/40" style={{ width: `${((PRESSURE_CORRECTION - PRESSURE_WARN) / 8) * 100}%` }} />
+                  <div className="bg-red-500/40 flex-1" />
+                  <div
+                    className="absolute top-0 h-full w-1 bg-white rounded"
+                    style={{ left: `calc(${Math.min(100, ((reg?.totalActivePressure ?? 0) / 8) * 100)}% - 2px)` }}
+                  />
                 </div>
                 <span className="text-[10px] text-zinc-400 mt-1">
-                  Thresholds: 0–3 Bullish, 4–5 Warning, 6+ Bear
+                  Below 3.5 healthy · 3.5–5.4 pressure · 5.5+ correction
                 </span>
               </div>
 
@@ -596,9 +633,9 @@ export default function InstitutionalMarketRegimePage() {
           {/* Chart 2: Rolling Distribution Days Count (with danger zones) */}
           <div className="pt-2 border-t border-zinc-800 flex flex-col gap-2">
             <div className="flex items-center justify-between text-xs font-mono text-zinc-400">
-              <span>Rolling 25-Session Distribution Count</span>
+              <span>Selling Pressure Score over time (distribution days in the trailing 25 sessions)</span>
               <span className="text-[10px] text-zinc-500">
-                Green: 0–3 (Safe) | Amber: 4–5 (Pressure) | Red: 6+ (Correction)
+                Below 3.5 healthy | 3.5–5.4 pressure | 5.5+ correction
               </span>
             </div>
             <div className="h-[120px] w-full">
@@ -614,11 +651,10 @@ export default function InstitutionalMarketRegimePage() {
                     orientation="right"
                     tickLine={false}
                   />
-                  <ReferenceLine y={3} stroke="#10b981" strokeDasharray="3 3" strokeOpacity={0.6} />
-                  <ReferenceLine y={5} stroke="#f59e0b" strokeDasharray="3 3" strokeOpacity={0.6} />
-                  <ReferenceLine y={6} stroke="#ef4444" strokeDasharray="3 3" strokeOpacity={0.6} />
+                  <ReferenceLine y={PRESSURE_WARN} stroke="#f59e0b" strokeDasharray="3 3" strokeOpacity={0.6} />
+                  <ReferenceLine y={PRESSURE_CORRECTION} stroke="#ef4444" strokeDasharray="3 3" strokeOpacity={0.6} />
                   <Bar
-                    dataKey="rollingDistCount"
+                    dataKey="rollingPressure"
                     fill="#ef4444"
                     radius={[2, 2, 0, 0]}
                     isAnimationActive={false}
@@ -634,13 +670,13 @@ export default function InstitutionalMarketRegimePage() {
           <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
             <div>
               <h3 className="text-sm font-bold text-white flex items-center gap-2">
-                <span>Active Distribution Days in Current 25-Session Window</span>
+                <span>Selling Days Still Counting Against the Market</span>
                 <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-zinc-800 text-zinc-300 font-medium border border-zinc-700">
                   {reg?.indexLabel}
                 </span>
               </h3>
               <p className="text-[11px] text-zinc-500 mt-0.5">
-                A distribution day drops off after 25 trading sessions, or earlier if the index closes ≥ 5.0% above that day&apos;s close.
+                Each heavy-selling day counts for 25 trading sessions, then expires. It is removed early if the index closes ≥ 5% above that day&apos;s close.
               </p>
             </div>
 
@@ -681,6 +717,8 @@ export default function InstitutionalMarketRegimePage() {
             </div>
           </div>
 
+          {reg && <OutlookPanel reg={reg} />}
+
           <div className="overflow-x-auto rounded-xl border border-zinc-800">
             <table className="w-full text-left font-mono text-xs">
               <thead className="bg-zinc-800 text-xs font-bold text-white">
@@ -690,8 +728,8 @@ export default function InstitutionalMarketRegimePage() {
                   <th className="px-4 py-2.5">Index Close</th>
                   <th className="px-4 py-2.5">1D Change %</th>
                   <th className="px-4 py-2.5">Volume vs Prior Day</th>
-                  <th className="px-4 py-2.5">Sessions Active</th>
-                  <th className="px-4 py-2.5">5% Rally Rule Progress</th>
+                  <th className="px-4 py-2.5">Age · Expires</th>
+                  <th className="px-4 py-2.5">Early Removal (5% rally)</th>
                   <th className="px-4 py-2.5">Status</th>
                 </tr>
               </thead>
@@ -761,10 +799,22 @@ export default function InstitutionalMarketRegimePage() {
                           </div>
                         </td>
                         <td className="px-4 py-2.5 text-zinc-400">
-                          Session {d.sessionNumber ?? d.daysAgo + 1} of 25{' '}
-                          <span className="text-[10px] text-zinc-500">
-                            ({d.expirySessionsLeft} left)
-                          </span>
+                          <div className="flex flex-col gap-1">
+                            <span className="text-zinc-200 font-semibold">
+                              {d.daysAgo === 0 ? 'Today' : `${d.daysAgo} session${d.daysAgo === 1 ? '' : 's'} ago`}
+                            </span>
+                            <div className="w-24 h-1.5 rounded-full bg-zinc-800 overflow-hidden" title={`${d.daysAgo} of 25 sessions elapsed`}>
+                              <div
+                                className={`h-full ${d.expirySessionsLeft <= 3 ? 'bg-zinc-500' : isStall ? 'bg-amber-500' : 'bg-red-500'}`}
+                                style={{ width: `${Math.min(100, ((d.daysAgo + 1) / 25) * 100)}%` }}
+                              />
+                            </div>
+                            <span className="text-[10px] text-zinc-500">
+                              {d.expirySessionsLeft === 0
+                                ? 'Last session it counts'
+                                : `Counts for ${d.expirySessionsLeft} more session${d.expirySessionsLeft === 1 ? '' : 's'}`}
+                            </span>
+                          </div>
                         </td>
                         <td className="px-4 py-2.5">
                           <div className="flex flex-col gap-1">
@@ -776,14 +826,14 @@ export default function InstitutionalMarketRegimePage() {
                                 />
                               </div>
                               <span className="text-[10px] font-mono text-zinc-300">
-                                Max +{d.maxGainSince.toFixed(1)}% / 5.0%
+                                Best close since: +{d.maxGainSince.toFixed(1)}% (needs +5.0%)
                               </span>
                             </div>
                             <div className="text-[10px] text-zinc-500 font-mono">
-                              Target: ₹{d.targetPrice?.toFixed(1) ?? (d.close * 1.05).toFixed(1)}
+                              Removed if index closes ≥ ₹{d.targetPrice?.toFixed(1) ?? (d.close * 1.05).toFixed(1)}
                               {d.gainNeededFromCurrent !== undefined && d.gainNeededFromCurrent > 0 && (
                                 <span className="text-zinc-400 ml-1.5">
-                                  (+{d.gainNeededFromCurrent.toFixed(1)}% from now)
+                                  (+{d.gainNeededFromCurrent.toFixed(1)}% away)
                                 </span>
                               )}
                             </div>
@@ -823,9 +873,9 @@ export default function InstitutionalMarketRegimePage() {
               </p>
             </div>
             <div className="bg-zinc-950 p-3.5 rounded-xl border border-zinc-800/80">
-              <h4 className="text-white font-bold mb-1">The 25-Day Rolling Window</h4>
+              <h4 className="text-white font-bold mb-1">The 25-Session Window &amp; Score</h4>
               <p className="text-zinc-400 text-[11px]">
-                Distribution days expire automatically after 25 trading sessions. Furthermore, if the index gains 5% or more above the close of that distribution day at any time, that day drops off early.
+                Each selling day counts for 25 trading sessions, then expires (a day 22 sessions ago still counts for 2 more sessions) — or earlier if the index closes 5% above it. Distribution days score 1, stalling days score ½. The regime turns cautious at 3.5 and defensive at 5.5, or sooner if price is below the 50/200-day averages.
               </p>
             </div>
             <div className="bg-zinc-950 p-3.5 rounded-xl border border-zinc-800/80">
@@ -837,6 +887,73 @@ export default function InstitutionalMarketRegimePage() {
           </div>
         </section>
       </main>
+    </div>
+  );
+}
+
+function OutlookPanel({ reg }: { reg: MarketRegimeAnalysis }) {
+  const days = reg.allActivePressureDays ?? [];
+  const steps = projectDropOffs(days);
+  const score = reg.totalActivePressure;
+  const expired = (reg.recentExpiredDays ?? []).slice().reverse().slice(0, 5);
+  const next = steps[0];
+
+  return (
+    <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
+      <div className="rounded-xl border border-zinc-800 bg-zinc-950/60 p-3.5 flex flex-col gap-2">
+        <div className="text-[10px] font-bold uppercase tracking-wider text-zinc-500">What this means right now</div>
+        <p className="text-xs text-zinc-300 leading-relaxed">
+          {days.length === 0 ? (
+            <>No heavy-selling days in the last 25 sessions. Nothing is weighing on the market.</>
+          ) : (
+            <>
+              <span className="font-bold text-white">{days.length}</span> heavy-selling day{days.length === 1 ? '' : 's'} in
+              the last 25 sessions → score{' '}
+              <span className={`font-bold ${pressureTone(score)}`}>{score}</span> ({pressureVerdict(score)}).
+              {reg.daysSinceLastDistribution < 999 && (
+                <> Last distribution day was {reg.daysSinceLastDistribution === 0 ? 'today' : `${reg.daysSinceLastDistribution} sessions ago`}.</>
+              )}
+            </>
+          )}
+        </p>
+        {expired.length > 0 && (
+          <div className="text-[10px] text-zinc-500">
+            Recently dropped off:{' '}
+            {expired.map((d) => `${d.date} (${d.status === 'EXPIRED_GAIN' ? 'index rallied 5%' : 'aged out'})`).join(' · ')}
+          </div>
+        )}
+      </div>
+
+      <div className="rounded-xl border border-zinc-800 bg-zinc-950/60 p-3.5 flex flex-col gap-2">
+        <div className="text-[10px] font-bold uppercase tracking-wider text-zinc-500">
+          If no new selling appears (score only, ignores price vs moving averages)
+        </div>
+        {steps.length === 0 ? (
+          <div className="text-xs text-zinc-400">Score stays at 0.</div>
+        ) : (
+          <ul className="text-xs font-mono text-zinc-300 flex flex-col gap-1">
+            <li className="flex items-center gap-2">
+              <span className="text-zinc-500 w-28">Now</span>
+              <span className={`font-bold ${pressureTone(score)}`}>{score}</span>
+              <span className="text-zinc-500">{pressureVerdict(score)}</span>
+            </li>
+            {steps.slice(0, 4).map((st) => (
+              <li key={st.inSessions} className="flex items-center gap-2">
+                <span className="text-zinc-500 w-28">In {st.inSessions} session{st.inSessions === 1 ? '' : 's'}</span>
+                <span className={`font-bold ${pressureTone(st.score)}`}>{st.score}</span>
+                <span className="text-zinc-500">
+                  {pressureVerdict(st.score)} · {st.dropped.map((d) => d.date).join(', ')} expires
+                </span>
+              </li>
+            ))}
+          </ul>
+        )}
+        {next && (
+          <div className="text-[10px] text-zinc-500">
+            A new distribution day adds +1 and resets the picture.
+          </div>
+        )}
+      </div>
     </div>
   );
 }

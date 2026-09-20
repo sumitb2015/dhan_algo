@@ -78,6 +78,7 @@ export interface MarketRegimeAnalysis {
     isStalling: boolean;
     isFTD: boolean;
     rollingDistCount: number;
+    rollingPressure: number;
     regime: RegimeStatus;
   }[];
 }
@@ -357,6 +358,7 @@ export function calculateMarketRegime(
       isStalling: event ? event.isStalling : false,
       isFTD: event ? event.isFTD : false,
       rollingDistCount: activeStrict,
+      rollingPressure: totalPressure,
       regime: reg,
     });
   }
@@ -438,7 +440,7 @@ export function calculateMarketRegime(
     tone = 'amber';
     badgeColor = 'bg-amber-500/10 text-amber-400 border-amber-500/25';
     description =
-      'Institutional distribution days have accumulated (4–5 active). Market leadership is thinning. Freeze aggressive buying and protect profits.';
+      'Institutional selling has accumulated (pressure score 3.5–5.4). Market leadership is thinning. Freeze aggressive buying and protect profits.';
     investorPlaybook = {
       posture: 'Cautious / Reduced Exposure',
       positionSizing: 'Cut new entry sizes in half (50% normal size)',
