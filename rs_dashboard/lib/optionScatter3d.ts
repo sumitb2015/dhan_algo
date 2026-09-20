@@ -380,3 +380,43 @@ export function lastSessionDate(now: Date = new Date()): string {
   const d = new Date(Date.UTC(Number(g.year), Number(g.month) - 1, Number(g.day) - back));
   return d.toISOString().slice(0, 10);
 }
+
+// ─── Expiry picker ─────────────────────────────────────────────────────────
+
+export interface ExpiryOption {
+  value: string;                 // YYYY-MM-DD, what the API takes
+  label: string;                 // "22 Sep 2026 · Tue · 2d · Weekly"
+  dte: number;                   // calendar days to expiry (0 = expiry day)
+  kind: 'Weekly' | 'Monthly';
+}
+
+const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+const DAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+
+function utcDay(iso: string): number {
+  const [y, m, d] = iso.split('-').map(Number);
+  return Date.UTC(y, m - 1, d);
+}
+
+/**
+ * Describe each expiry for the picker. `today` is the IST calendar date (YYYY-MM-DD).
+ * An expiry is "Monthly" when it is the last one listed in its calendar month — the
+ * exchange lists weeklies only for the near months, so far-dated ones are all monthly.
+ */
+export function describeExpiries(expiries: string[], today: string): ExpiryOption[] {
+  const lastInMonth = new Map<string, string>();
+  for (const e of expiries) {
+    const ym = e.slice(0, 7);
+    const cur = lastInMonth.get(ym);
+    if (!cur || e > cur) lastInMonth.set(ym, e);
+  }
+  return expiries.map(value => {
+    const t = utcDay(value);
+    const dt = new Date(t);
+    const dte = Math.round((t - utcDay(today)) / 86_400_000);
+    const kind = lastInMonth.get(value.slice(0, 7)) === value ? 'Monthly' : 'Weekly';
+    const when = dte === 0 ? 'expiry day' : `${dte}d`;
+    const label = `${dt.getUTCDate()} ${MONTHS[dt.getUTCMonth()]} ${dt.getUTCFullYear()} · ${DAYS[dt.getUTCDay()]} · ${when} · ${kind}`;
+    return { value, label, dte, kind };
+  });
+}

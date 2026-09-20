@@ -1,11 +1,13 @@
 'use client';
 
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useMemo } from 'react';
+import { ChevronLeft, ChevronRight } from 'lucide-react';
 import OptionScatter3D from './OptionScatter3D';
 import NavBar from './NavBar';
-import { lastSessionDate, type ChainSummary } from '@/lib/optionScatter3d';
+import { describeExpiries, lastSessionDate, type ChainSummary } from '@/lib/optionScatter3d';
 
 const UNDERLYINGS = ['NIFTY', 'BANKNIFTY', 'SENSEX'] as const;
+const NO_EXPIRIES: string[] = []; // stable identity so memos keyed on the list don't re-run while loading
 
 function fmtOiCompact(n: number): string {
   if (n >= 1e7) return `${(n / 1e7).toFixed(2)}Cr`;
@@ -20,7 +22,7 @@ export default function OptionScatter3DPage() {
   // Expiry list is stored with the underlying it was fetched for, so switching
   // underlying is "loading" by derivation — no synchronous reset inside the effect.
   const [expData, setExpData] = useState<{ underlying: string; list: string[]; error: string } | null>(null);
-  const [meta, setMeta] = useState<{ spot: number; updatedAt: number; summary?: ChainSummary | null } | null>(null);
+  const [rawMeta, setMeta] = useState<{ viewKey: string; spot: number; updatedAt: number; summary?: ChainSummary | null } | null>(null);
 
   useEffect(() => {
     let alive = true;
@@ -38,19 +40,28 @@ export default function OptionScatter3DPage() {
 
   const fresh = expData?.underlying === underlying ? expData : null;
   const loadingExp = !fresh;
-  const expiries = fresh?.list ?? [];
+  const expiries = fresh?.list ?? NO_EXPIRIES;
   const error = fresh?.error ?? '';
   const expiry = expiryPick?.underlying === underlying && expiries.includes(expiryPick.expiry)
     ? expiryPick.expiry
     : expiries[0] ?? ''; // nearest = current week
   const setExpiry = (e: string) => setExpiryPick({ underlying, expiry: e });
 
-  const onMeta = useCallback((m: { spot: number; updatedAt: number; count: number; summary?: ChainSummary | null }) => setMeta(m), []);
+  // Stats belong to one underlying|expiry. Anything from another expiry is hidden, so switching
+  // never leaves the previous expiry's PCR / OI under the new one while its chain loads.
+  const viewKey = `${underlying}|${expiry}`;
+  const meta = rawMeta && rawMeta.viewKey === viewKey ? rawMeta : null;
+  const onMeta = useCallback((m: { viewKey: string; spot: number; updatedAt: number; count: number; summary?: ChainSummary | null }) => setMeta(m), []);
+
+  const todayIst = new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
+  const expiryOptions = useMemo(() => describeExpiries(expiries, todayIst), [expiries, todayIst]);
+  const currentExpiry = expiryOptions.find(o => o.value === expiry);
+  const expiryIdx = expiries.indexOf(expiry);
 
   // The chain carries no timestamp, so the chip shows the session it belongs to
   // (weekend / pre-open roll back to the prior weekday) rather than today's date.
   const session = lastSessionDate();
-  const isLive = session === new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
+  const isLive = session === todayIst;
 
   return (
     <div className="flex flex-col min-h-screen bg-zinc-950 text-white w-full min-w-0">
@@ -94,16 +105,38 @@ export default function OptionScatter3DPage() {
           </select>
           <div className="flex items-center gap-1.5">
             <span className="text-[10px] text-zinc-500 font-bold uppercase tracking-widest">Expiry</span>
-            <select
-              value={expiry}
-              onChange={e => setExpiry(e.target.value)}
-              disabled={loadingExp}
-              className="bg-zinc-900 border border-zinc-700 text-zinc-200 text-xs font-mono font-semibold
-                         rounded-lg px-2.5 py-1.5 focus:outline-none focus:border-emerald-500
-                         disabled:opacity-50 tabular-nums"
-            >
-              {expiries.map((e, i) => <option key={e} value={e}>{e}{i === 0 ? ' (current)' : ''}</option>)}
-            </select>
+            <div className="flex items-center rounded-lg border border-emerald-500/40 bg-zinc-900 focus-within:border-emerald-400">
+              <button
+                onClick={() => setExpiry(expiries[expiryIdx - 1])}
+                disabled={loadingExp || expiryIdx <= 0}
+                aria-label="Previous (nearer) expiry"
+                title="Previous (nearer) expiry"
+                className="px-1.5 py-1.5 text-zinc-400 hover:text-white disabled:opacity-30 disabled:hover:text-zinc-400"
+              >
+                <ChevronLeft className="w-3.5 h-3.5" />
+              </button>
+              <select
+                value={expiry}
+                onChange={e => setExpiry(e.target.value)}
+                disabled={loadingExp}
+                aria-label="Select expiry"
+                className="bg-transparent text-zinc-100 text-xs font-mono font-semibold px-1 py-1.5
+                           focus:outline-none disabled:opacity-50 tabular-nums min-w-[15.5rem]"
+              >
+                {expiryOptions.map((o, i) => (
+                  <option key={o.value} value={o.value}>{o.label}{i === 0 ? ' · current' : ''}</option>
+                ))}
+              </select>
+              <button
+                onClick={() => setExpiry(expiries[expiryIdx + 1])}
+                disabled={loadingExp || expiryIdx < 0 || expiryIdx >= expiries.length - 1}
+                aria-label="Next (later) expiry"
+                title="Next (later) expiry"
+                className="px-1.5 py-1.5 text-zinc-400 hover:text-white disabled:opacity-30 disabled:hover:text-zinc-400"
+              >
+                <ChevronRight className="w-3.5 h-3.5" />
+              </button>
+            </div>
           </div>
           <span className="w-px h-5 bg-zinc-800 shrink-0" />
           <NavBar />
@@ -113,6 +146,15 @@ export default function OptionScatter3DPage() {
       {/* Market Metrics Strip */}
       {meta?.summary && (
         <div className="px-4 sm:px-6 py-2 bg-zinc-900/40 border-b border-zinc-800 flex items-center gap-4 text-xs font-mono tabular-nums flex-wrap w-full">
+          {currentExpiry && (
+            <>
+              <div className="flex items-center gap-1.5">
+                <span className="text-[10px] text-zinc-500 font-bold uppercase tracking-wider">Expiry</span>
+                <span className="text-emerald-400 font-bold">{currentExpiry.label}</span>
+              </div>
+              <span className="w-px h-3.5 bg-zinc-800 shrink-0" />
+            </>
+          )}
           <div className="flex items-center gap-1.5">
             <span className="text-[10px] text-zinc-500 font-bold uppercase tracking-wider">ATM Strike</span>
             <span className="text-amber-300 font-bold">{meta.summary.atmStrike}</span>
@@ -152,7 +194,7 @@ export default function OptionScatter3DPage() {
 
       <main className="flex-1 flex flex-col gap-4 px-4 sm:px-6 py-4 w-full min-w-0">
         {expiry ? (
-          <OptionScatter3D key={`${underlying}|${expiry}`} underlying={underlying} expiry={expiry} onMeta={onMeta} />
+          <OptionScatter3D key={underlying} underlying={underlying} expiry={expiry} onMeta={onMeta} />
         ) : (
           !loadingExp && <p className="text-sm text-zinc-500">No expiry available.</p>
         )}

@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert';
 import {
   classify, percentileRanks, quantile, buildPoints, clipRange, topByGoal,
-  getMoneyness, computeChainSummary, directionalBias, bearishIntensity, lastSessionDate,
+  getMoneyness, computeChainSummary, directionalBias, bearishIntensity, lastSessionDate, describeExpiries,
   type OcEntry,
 } from './optionScatter3d.ts';
 
@@ -167,4 +167,24 @@ test('lastSessionDate rolls weekends and pre-open back to the prior weekday (IST
   assert.strictEqual(lastSessionDate(new Date('2026-09-19T09:00:00Z')), '2026-09-18'); // Sat -> Fri
   assert.strictEqual(lastSessionDate(new Date('2026-09-22T03:44:00Z')), '2026-09-21'); // 09:14 IST, still pre-open
   assert.strictEqual(lastSessionDate(new Date('2026-09-22T03:45:00Z')), '2026-09-22'); // 09:15 IST, open
+});
+
+test('describeExpiries: DTE, weekday, and Weekly vs Monthly (last expiry listed in its month)', () => {
+  const opts = describeExpiries(['2026-09-22', '2026-09-29', '2026-10-06', '2026-10-27', '2026-12-29'], '2026-09-20');
+  const by = Object.fromEntries(opts.map(o => [o.value, o]));
+  assert.strictEqual(by['2026-09-22'].dte, 2);
+  assert.strictEqual(by['2026-09-22'].kind, 'Weekly');     // 09-29 is later in September
+  assert.strictEqual(by['2026-09-29'].kind, 'Monthly');
+  assert.strictEqual(by['2026-10-06'].kind, 'Weekly');
+  assert.strictEqual(by['2026-10-27'].kind, 'Monthly');
+  assert.strictEqual(by['2026-12-29'].kind, 'Monthly');    // only one listed that month
+  assert.strictEqual(by['2026-09-22'].label, '22 Sep 2026 · Tue · 2d · Weekly');
+});
+
+test('describeExpiries: expiry day and month/year rollover', () => {
+  const [a] = describeExpiries(['2026-09-22'], '2026-09-22');
+  assert.strictEqual(a.dte, 0);
+  assert.ok(a.label.includes('expiry day'));
+  const [b] = describeExpiries(['2027-01-05'], '2026-12-30');
+  assert.strictEqual(b.dte, 6);
 });

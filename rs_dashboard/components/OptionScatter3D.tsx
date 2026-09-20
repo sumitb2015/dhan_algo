@@ -1,7 +1,9 @@
 'use client';
 
 import React, { useEffect, useMemo, useRef, useState, useCallback } from 'react';
+import { Loader2 } from 'lucide-react';
 import { useChartChrome } from '@/lib/chartTheme';
+import { getCached, setCached } from '@/lib/clientCache';
 import {
   buildPoints, clamp, clipRange, topByGoal, computeChainSummary,
   type OcEntry, type ScatterPoint, type Goal, type Signal, type ChainSummary,
@@ -24,7 +26,7 @@ interface LiveSceneHost {
 interface Props {
   underlying: string;
   expiry: string;
-  onMeta?: (m: { spot: number; updatedAt: number; count: number; summary?: ChainSummary | null }) => void;
+  onMeta?: (m: { viewKey: string; spot: number; updatedAt: number; count: number; summary?: ChainSummary | null }) => void;
 }
 
 interface ChainRes {
@@ -34,6 +36,22 @@ interface ChainRes {
 }
 
 const POLL_MS = 15_000;
+/** A chain seen earlier this session is shown instantly (and refreshed) if it is younger than this. */
+const SEED_MAX_AGE_MS = 10 * 60_000;
+
+/** One expiry's chain as last fetched. `key` is `underlying|expiry`. */
+interface ChainSnapshot {
+  key: string;
+  oc: Record<string, OcEntry>;
+  spot: number;
+  fetchedAt: number;
+}
+
+/** Last chain fetched for this URL this session, if recent enough to be worth painting while we refresh. */
+function seedFor(url: string, key: string): ChainSnapshot | null {
+  const c = getCached<ChainSnapshot>(url);
+  return c && c.key === key && Date.now() - c.fetchedAt < SEED_MAX_AGE_MS ? c : null;
+}
 
 export default function OptionScatter3D({ underlying, expiry, onMeta }: Props) {
   const chrome = useChartChrome();
@@ -43,11 +61,20 @@ export default function OptionScatter3D({ underlying, expiry, onMeta }: Props) {
   const [plotlyReady, setPlotlyReady] = useState(false);
 
   // Data state
-  const [oc, setOc] = useState<Record<string, OcEntry> | null>(null);
-  const [spot, setSpot] = useState(0);
-  const [error, setError] = useState('');
+  // The chain is keyed by underlying|expiry so switching expiry never shows another expiry's data:
+  // `snap` is the latest live fetch, and `active` is whichever snapshot belongs to the current key.
+  const chainKey = `${underlying}|${expiry}`;
+  const chainUrl = `/api/options/chain?underlying=${underlying}&expiry=${expiry}`;
+  const [snap, setSnap] = useState<ChainSnapshot | null>(null);
+  const [errorState, setErrorState] = useState<{ key: string; msg: string } | null>(null);
   const [renderError, setRenderError] = useState('');
-  const [updatedAt, setUpdatedAt] = useState(0);
+  const isLive = snap?.key === chainKey;
+  const active = isLive ? snap : seedFor(chainUrl, chainKey);
+  const oc = active?.oc ?? null;
+  const spot = active?.spot ?? 0;
+  const updatedAt = active?.fetchedAt ?? 0;
+  const error = errorState?.key === chainKey ? errorState.msg : '';
+  const lastSpot = useRef<Record<string, number>>({});
 
   // Primary Controls
   const [goal, setGoal] = useState<Goal>('buy');
@@ -88,35 +115,41 @@ export default function OptionScatter3D({ underlying, expiry, onMeta }: Props) {
       if (!alive) return;
       plotlyRef.current = m.default ?? (m as unknown as typeof m.default);
       setPlotlyReady(true);
-    }).catch(e => setError(`Failed to load 3D engine: ${String(e)}`));
+    }).catch(e => setRenderError(`Failed to load 3D engine: ${String(e)}`));
     return () => { alive = false; };
   }, []);
 
   // ── Poll Option Chain ──
+  // `seq` drops out-of-order results; `inflightKey` lets a newly chosen expiry pre-empt a slow
+  // fetch for the previous one instead of waiting behind it.
   const seq = useRef(0);
-  const inflight = useRef(false);
+  const inflightKey = useRef<string | null>(null);
   const load = useCallback(async () => {
-    if (!expiry || inflight.current) return;
-    inflight.current = true;
+    if (!expiry || inflightKey.current === chainKey) return;
+    inflightKey.current = chainKey;
     const mine = ++seq.current;
     try {
-      const res = await fetch(`/api/options/chain?underlying=${underlying}&expiry=${expiry}`, { cache: 'no-store' });
+      const res = await fetch(chainUrl, { cache: 'no-store' });
       const j = await res.json() as ChainRes;
       if (mine !== seq.current) return;
       if (!j.success || !j.data?.chain?.oc) {
-        setError(j.error ?? 'No chain data available');
+        setErrorState({ key: chainKey, msg: j.error ?? 'No chain data available' });
         return;
       }
-      setError('');
-      setOc(j.data.chain.oc);
-      setUpdatedAt(Date.now());
-      if (j.data.spot > 0) setSpot(j.data.spot);
+      // A transient spot of 0 must not blank the plot: keep the last good one for this expiry.
+      if (j.data.spot > 0) lastSpot.current[chainKey] = j.data.spot;
+      const next: ChainSnapshot = {
+        key: chainKey, oc: j.data.chain.oc, spot: lastSpot.current[chainKey] ?? 0, fetchedAt: Date.now(),
+      };
+      setErrorState(null);
+      setSnap(next);
+      if (next.spot > 0) setCached(chainUrl, next);
     } catch (e) {
-      if (mine === seq.current) setError(String(e));
+      if (mine === seq.current) setErrorState({ key: chainKey, msg: String(e) });
     } finally {
-      inflight.current = false;
+      if (inflightKey.current === chainKey && mine === seq.current) inflightKey.current = null;
     }
-  }, [underlying, expiry]);
+  }, [chainKey, chainUrl, expiry]);
 
   useEffect(() => {
     const first = setTimeout(load, 0);
@@ -137,9 +170,9 @@ export default function OptionScatter3D({ underlying, expiry, onMeta }: Props) {
 
   useEffect(() => {
     if (spot > 0 && oc) {
-      onMeta?.({ spot, updatedAt, count: Object.keys(oc).length, summary: chainSummary });
+      onMeta?.({ viewKey: chainKey, spot, updatedAt, count: Object.keys(oc).length, summary: chainSummary });
     }
-  }, [spot, oc, updatedAt, chainSummary, onMeta]);
+  }, [chainKey, spot, oc, updatedAt, chainSummary, onMeta]);
 
   // Filtered points
   const points = useMemo<ScatterPoint[]>(() => {
@@ -483,7 +516,21 @@ export default function OptionScatter3D({ underlying, expiry, onMeta }: Props) {
         {/* Empty / Loading State */}
         {!points.length && (
           <div className="absolute inset-0 flex items-center justify-center text-sm text-zinc-400 pointer-events-none">
-            {error ? '' : oc ? 'No strikes pass the active filters — adjust Min OI / Min ₹ / Filters' : 'Loading option chain data…'}
+            {error ? '' : oc ? 'No strikes pass the active filters — adjust Min OI / Min ₹ / Filters' : (
+              <div className="flex flex-col items-center gap-2 text-center">
+                <Loader2 className="w-6 h-6 animate-spin text-emerald-400" />
+                <span className="text-zinc-200 font-semibold">Loading {expiry} chain…</span>
+                <span className="text-[11px] text-zinc-500">Fetching the live option chain — the first load of an expiry can take ~10 s</span>
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* Chain painted from this session's cache while the live fetch is still running */}
+        {oc && !isLive && (
+          <div className="absolute bottom-12 left-3 z-10 flex items-center gap-2 px-2.5 py-1 rounded-lg bg-zinc-950/85 border border-zinc-700/60 text-[11px] text-zinc-300 pointer-events-none">
+            <Loader2 className="w-3 h-3 animate-spin text-emerald-400" />
+            Showing chain from {new Date(updatedAt).toLocaleTimeString('en-GB', { timeZone: 'Asia/Kolkata' })} · refreshing…
           </div>
         )}
 
