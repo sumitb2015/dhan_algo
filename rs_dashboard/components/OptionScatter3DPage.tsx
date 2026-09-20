@@ -3,8 +3,16 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import OptionScatter3D from './OptionScatter3D';
 import NavBar from './NavBar';
+import { lastSessionDate, type ChainSummary } from '@/lib/optionScatter3d';
 
 const UNDERLYINGS = ['NIFTY', 'BANKNIFTY', 'SENSEX'] as const;
+
+function fmtOiCompact(n: number): string {
+  if (n >= 1e7) return `${(n / 1e7).toFixed(2)}Cr`;
+  if (n >= 1e5) return `${(n / 1e5).toFixed(2)}L`;
+  if (n >= 1e3) return `${(n / 1e3).toFixed(1)}K`;
+  return String(Math.round(n));
+}
 
 export default function OptionScatter3DPage() {
   const [underlying, setUnderlying] = useState<string>('NIFTY');
@@ -12,7 +20,7 @@ export default function OptionScatter3DPage() {
   // Expiry list is stored with the underlying it was fetched for, so switching
   // underlying is "loading" by derivation — no synchronous reset inside the effect.
   const [expData, setExpData] = useState<{ underlying: string; list: string[]; error: string } | null>(null);
-  const [meta, setMeta] = useState<{ spot: number; updatedAt: number } | null>(null);
+  const [meta, setMeta] = useState<{ spot: number; updatedAt: number; summary?: ChainSummary | null } | null>(null);
 
   useEffect(() => {
     let alive = true;
@@ -37,14 +45,17 @@ export default function OptionScatter3DPage() {
     : expiries[0] ?? ''; // nearest = current week
   const setExpiry = (e: string) => setExpiryPick({ underlying, expiry: e });
 
-  const onMeta = useCallback((m: { spot: number; updatedAt: number }) => setMeta(m), []);
+  const onMeta = useCallback((m: { spot: number; updatedAt: number; count: number; summary?: ChainSummary | null }) => setMeta(m), []);
 
-  const today = new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
+  // The chain carries no timestamp, so the chip shows the session it belongs to
+  // (weekend / pre-open roll back to the prior weekday) rather than today's date.
+  const session = lastSessionDate();
+  const isLive = session === new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
 
   return (
-    <div className="flex flex-col min-h-screen bg-zinc-950 text-white">
+    <div className="flex flex-col min-h-screen bg-zinc-950 text-white w-full min-w-0">
       <div className="sticky top-0 z-10 flex items-center justify-between gap-3 flex-wrap
-                      px-6 py-3 border-b border-zinc-800 bg-zinc-950/95 backdrop-blur">
+                      px-4 sm:px-6 py-3 border-b border-zinc-800 bg-zinc-950/95 backdrop-blur w-full">
         <div className="flex items-center gap-3">
           <div className="flex items-center justify-center w-8 h-8 rounded-lg bg-emerald-500/10 border border-emerald-500/25 shrink-0">
             <svg width="15" height="15" viewBox="0 0 24 24" fill="none" className="text-emerald-400">
@@ -65,7 +76,7 @@ export default function OptionScatter3DPage() {
 
         <div className="flex items-center gap-2 flex-wrap">
           <span className="text-[10px] font-mono tabular-nums text-amber-300 font-bold uppercase tracking-wide">
-            DATA: {today}
+            DATA: {session}{isLive ? '' : ' · last session'}
           </span>
           {meta && meta.spot > 0 && (
             <span className="text-[10px] font-mono tabular-nums text-zinc-400">
@@ -99,17 +110,53 @@ export default function OptionScatter3DPage() {
         </div>
       </div>
 
-      {error && (
-        <div className="mx-6 mt-3 px-3 py-2 bg-red-900/20 border border-red-700/40 rounded-lg text-xs text-red-400">{error}</div>
+      {/* Market Metrics Strip */}
+      {meta?.summary && (
+        <div className="px-4 sm:px-6 py-2 bg-zinc-900/40 border-b border-zinc-800 flex items-center gap-4 text-xs font-mono tabular-nums flex-wrap w-full">
+          <div className="flex items-center gap-1.5">
+            <span className="text-[10px] text-zinc-500 font-bold uppercase tracking-wider">ATM Strike</span>
+            <span className="text-amber-300 font-bold">{meta.summary.atmStrike}</span>
+          </div>
+          <span className="w-px h-3.5 bg-zinc-800 shrink-0" />
+          <div className="flex items-center gap-1.5">
+            <span className="text-[10px] text-zinc-500 font-bold uppercase tracking-wider">PCR</span>
+            <span className={`font-bold ${meta.summary.pcr >= 1 ? 'text-emerald-400' : meta.summary.pcr <= 0.7 ? 'text-red-400' : 'text-zinc-200'}`}>
+              {meta.summary.pcr.toFixed(2)}
+            </span>
+          </div>
+          <span className="w-px h-3.5 bg-zinc-800 shrink-0" />
+          <div className="flex items-center gap-1.5">
+            <span className="text-[10px] text-zinc-500 font-bold uppercase tracking-wider">Total CE OI</span>
+            <span className="text-blue-400 font-bold">{fmtOiCompact(meta.summary.totalCeOi)}</span>
+          </div>
+          <span className="w-px h-3.5 bg-zinc-800 shrink-0" />
+          <div className="flex items-center gap-1.5">
+            <span className="text-[10px] text-zinc-500 font-bold uppercase tracking-wider">Total PE OI</span>
+            <span className="text-amber-400 font-bold">{fmtOiCompact(meta.summary.totalPeOi)}</span>
+          </div>
+          <span className="w-px h-3.5 bg-zinc-800 shrink-0" />
+          <div className="flex items-center gap-1.5">
+            <span className="text-[10px] text-zinc-500 font-bold uppercase tracking-wider">Max OI Strikes</span>
+            <span className="text-zinc-300">
+              <span className="text-blue-400 font-semibold">{meta.summary.maxCeOiStrike} CE</span> / <span className="text-amber-400 font-semibold">{meta.summary.maxPeOiStrike} PE</span>
+            </span>
+          </div>
+        </div>
       )}
 
-      <div className="flex-1 flex flex-col gap-4 px-6 py-5">
+      {error && (
+        <div className="mx-4 sm:mx-6 mt-3 px-3 py-2 bg-red-900/20 border border-red-700/40 rounded-lg text-xs text-red-400 w-auto">
+          {error}
+        </div>
+      )}
+
+      <main className="flex-1 flex flex-col gap-4 px-4 sm:px-6 py-4 w-full min-w-0">
         {expiry ? (
           <OptionScatter3D key={`${underlying}|${expiry}`} underlying={underlying} expiry={expiry} onMeta={onMeta} />
         ) : (
           !loadingExp && <p className="text-sm text-zinc-500">No expiry available.</p>
         )}
-      </div>
+      </main>
     </div>
   );
 }

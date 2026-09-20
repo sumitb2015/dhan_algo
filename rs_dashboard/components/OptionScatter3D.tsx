@@ -3,36 +3,23 @@
 import React, { useEffect, useMemo, useRef, useState, useCallback } from 'react';
 import { useChartChrome } from '@/lib/chartTheme';
 import {
-  buildPoints, clipRange, clamp, topByGoal,
-  type OcEntry, type ScatterPoint, type Goal, type Signal,
+  buildPoints, clamp, clipRange, topByGoal, computeChainSummary,
+  type OcEntry, type ScatterPoint, type Goal, type Signal, type ChainSummary,
 } from '@/lib/optionScatter3d';
-
-// Series colours (data colours are exempt from the chrome-token rule).
-const CE_COLOR = '#3b82f6';
-const PE_COLOR = '#c47f0a';
-const SIGNAL_COLOR: Record<Signal, string> = {
-  'Long buildup':   '#10b981',
-  'Short buildup':  '#ef4444',
-  'Short covering': '#38bdf8',
-  'Long unwinding': '#a78bfa',
-};
-const SIGNALS = Object.keys(SIGNAL_COLOR) as Signal[];
-const SCORE_SCALE: [number, string][] = [[0, '#3f3f46'], [0.5, '#0e9d6a'], [1, '#bbf7d0']];
-
-type ColorMode = 'side' | 'signal' | 'score';
-
-function fmtOi(n: number): string {
-  if (n >= 1e7) return `${(n / 1e7).toFixed(2)}Cr`;
-  if (n >= 1e5) return `${(n / 1e5).toFixed(2)}L`;
-  if (n >= 1e3) return `${(n / 1e3).toFixed(1)}K`;
-  return String(Math.round(n));
-}
-const sgn = (v: number, d = 1) => `${v >= 0 ? '+' : ''}${v.toFixed(d)}`;
+import { CAMERAS, SIGNALS, cmp, type CameraView, type ColorMode, type MoneynessFilter, type SideFilter } from './option-cube/shared';
+import { buildScene } from './option-cube/buildScene';
+import { ControlBar, SignalPills } from './option-cube/ControlBar';
+import { ViewportToolbar } from './option-cube/ViewportToolbar';
+import { HoverCard } from './option-cube/HoverCard';
+import { InspectorCard } from './option-cube/InspectorCard';
+import { CandidatesTable } from './option-cube/CandidatesTable';
+import { Guide } from './option-cube/Guide';
+import type { PlotlyRoot } from 'plotly.js-gl3d-dist-min';
 
 interface Props {
   underlying: string;
   expiry: string;
-  onMeta?: (m: { spot: number; updatedAt: number; count: number }) => void;
+  onMeta?: (m: { spot: number; updatedAt: number; count: number; summary?: ChainSummary | null }) => void;
 }
 
 interface ChainRes {
@@ -43,73 +30,60 @@ interface ChainRes {
 
 const POLL_MS = 15_000;
 
-function Seg<T extends string>({ value, options, onChange }: {
-  value: T; options: { v: T; label: string }[]; onChange: (v: T) => void;
-}) {
-  return (
-    <div className="flex items-center gap-1 bg-zinc-900 border border-zinc-800 p-0.5 rounded-lg">
-      {options.map(o => (
-        <button
-          key={o.v}
-          onClick={() => onChange(o.v)}
-          className={`px-2.5 py-1 rounded-md text-[11px] font-bold transition-colors ${
-            value === o.v ? 'bg-zinc-700 text-white' : 'text-zinc-400 hover:text-zinc-200'
-          }`}
-        >{o.label}</button>
-      ))}
-    </div>
-  );
-}
-
-function Sel({ label, value, onChange, options }: {
-  label: string; value: number; onChange: (v: number) => void; options: { v: number; label: string }[];
-}) {
-  return (
-    <label className="flex items-center gap-1.5">
-      <span className="text-[10px] text-zinc-500 font-bold uppercase tracking-widest">{label}</span>
-      <select
-        value={value}
-        onChange={e => onChange(Number(e.target.value))}
-        className="bg-zinc-900 border border-zinc-700 text-zinc-200 text-xs font-mono font-semibold
-                   rounded-lg px-2 py-1.5 focus:outline-none focus:border-emerald-500 tabular-nums"
-      >
-        {options.map(o => <option key={o.v} value={o.v}>{o.label}</option>)}
-      </select>
-    </label>
-  );
-}
-
 export default function OptionScatter3D({ underlying, expiry, onMeta }: Props) {
   const chrome = useChartChrome();
   const plotEl = useRef<HTMLDivElement>(null);
+  const viewportRef = useRef<HTMLDivElement>(null);
   const plotlyRef = useRef<typeof import('plotly.js-gl3d-dist-min').default | null>(null);
   const [plotlyReady, setPlotlyReady] = useState(false);
 
+  // Data state
   const [oc, setOc] = useState<Record<string, OcEntry> | null>(null);
   const [spot, setSpot] = useState(0);
   const [error, setError] = useState('');
+  const [renderError, setRenderError] = useState('');
+  const [updatedAt, setUpdatedAt] = useState(0);
 
+  // Primary Controls
   const [goal, setGoal] = useState<Goal>('buy');
   const [colorMode, setColorMode] = useState<ColorMode>('signal');
   const [strikeWindow, setStrikeWindow] = useState(15);
   const [minOiPct, setMinOiPct] = useState(2);
   const [minLtp, setMinLtp] = useState(3);
   const [clip, setClip] = useState(true);
-  const [selected, setSelected] = useState<string | null>(null);
 
-  // ── Load Plotly once, client-side only (it touches `window` on import) ──
+  // Granular Filter Controls
+  const [sideFilter, setSideFilter] = useState<SideFilter>('ALL');
+  const [moneynessFilter, setMoneynessFilter] = useState<MoneynessFilter>('ALL');
+  const [selectedSignals, setSelectedSignals] = useState<Set<Signal>>(new Set(SIGNALS));
+
+  // Layer Visibility
+  const [showStems, setShowStems] = useState(true);
+  const [showZeroPlanes, setShowZeroPlanes] = useState(true);
+  const [showFloorShadow, setShowFloorShadow] = useState(true);
+
+  // Interaction & UI State
+  const [selected, setSelected] = useState<string | null>(null);
+  const [hoveredKey, setHoveredKey] = useState<string | null>(null);
+  const [isOrbiting, setIsOrbiting] = useState(false);
+  const [dragMode, setDragMode] = useState<'turntable' | 'orbit'>('turntable');
+  const [isFullscreen, setIsFullscreen] = useState(false);
+  const [copiedKey, setCopiedKey] = useState(false);
+  const [tableSortCol, setTableSortCol] = useState<string>('score');
+  const [tableSortAsc, setTableSortAsc] = useState(false);
+
+  // ── Load Plotly dynamically (client-side only) ──
   useEffect(() => {
     let alive = true;
     import('plotly.js-gl3d-dist-min').then(m => {
       if (!alive) return;
-      plotlyRef.current = m.default;
+      plotlyRef.current = m.default ?? (m as unknown as typeof m.default);
       setPlotlyReady(true);
     }).catch(e => setError(`Failed to load 3D engine: ${String(e)}`));
     return () => { alive = false; };
   }, []);
 
-  // ── Poll the chain. In-flight guard + sequence so a slow older response never
-  //    overwrites a newer one, and a changed expiry drops the old chain. ──
+  // ── Poll Option Chain ──
   const seq = useRef(0);
   const inflight = useRef(false);
   const load = useCallback(async () => {
@@ -120,132 +94,268 @@ export default function OptionScatter3D({ underlying, expiry, onMeta }: Props) {
       const res = await fetch(`/api/options/chain?underlying=${underlying}&expiry=${expiry}`, { cache: 'no-store' });
       const j = await res.json() as ChainRes;
       if (mine !== seq.current) return;
-      if (!j.success || !j.data?.chain?.oc) { setError(j.error ?? 'No chain data'); return; }
+      if (!j.success || !j.data?.chain?.oc) {
+        setError(j.error ?? 'No chain data available');
+        return;
+      }
       setError('');
       setOc(j.data.chain.oc);
-      if (j.data.spot > 0) setSpot(j.data.spot); // a transient 0 must not blank the plot
-      onMeta?.({ spot: j.data.spot, updatedAt: Date.now(), count: Object.keys(j.data.chain.oc).length });
+      setUpdatedAt(Date.now());
+      if (j.data.spot > 0) setSpot(j.data.spot);
     } catch (e) {
       if (mine === seq.current) setError(String(e));
     } finally {
       inflight.current = false;
     }
-  }, [underlying, expiry, onMeta]);
+  }, [underlying, expiry]);
 
   useEffect(() => {
-    // The page remounts this component (key) per underlying+expiry, so state and
-    // refs start clean; nothing to reset here.
     const first = setTimeout(load, 0);
     const id = setInterval(() => { if (!document.hidden) load(); }, POLL_MS);
     return () => { clearTimeout(first); clearInterval(id); };
   }, [load]);
 
-  const points = useMemo<ScatterPoint[]>(
-    () => (oc ? buildPoints(oc, { spot, strikeWindow, minOiPct, minLtp }) : []),
+  // ── Compute Points & Chain Summary ──
+  const rawPoints = useMemo<ScatterPoint[]>(
+    () => (oc && spot > 0 ? buildPoints(oc, { spot, strikeWindow, minOiPct, minLtp }) : []),
     [oc, spot, strikeWindow, minOiPct, minLtp],
   );
 
-  const top = useMemo(() => topByGoal(points, goal, 12), [points, goal]);
+  const chainSummary = useMemo<ChainSummary | null>(
+    () => (oc && spot > 0 ? computeChainSummary(oc, spot) : null),
+    [oc, spot],
+  );
 
+  useEffect(() => {
+    if (spot > 0 && oc) {
+      onMeta?.({ spot, updatedAt, count: Object.keys(oc).length, summary: chainSummary });
+    }
+  }, [spot, oc, updatedAt, chainSummary, onMeta]);
+
+  // Filtered points
+  const points = useMemo<ScatterPoint[]>(() => {
+    return rawPoints.filter(p => {
+      if (sideFilter !== 'ALL' && p.side !== sideFilter) return false;
+      if (selectedSignals.size < SIGNALS.length && !selectedSignals.has(p.signal)) return false;
+      if (moneynessFilter !== 'ALL' && p.moneyness !== moneynessFilter) return false;
+      return true;
+    });
+  }, [rawPoints, sideFilter, selectedSignals, moneynessFilter]);
+
+  const scoreOf = useCallback((p: ScatterPoint) => (goal === 'buy' ? p.buyScore : p.sellScore), [goal]);
+
+  // Sorted candidates for the table
+  const candidates = useMemo(() => {
+    const list = topByGoal(points, goal, 20);
+    const value = (p: ScatterPoint): number | string => {
+      switch (tableSortCol) {
+        case 'strike': return p.strike;
+        case 'side': return p.side;
+        case 'ltp': return p.ltp;
+        case 'priceChg': return p.priceChg;
+        case 'oi': return p.oi;
+        case 'oiChg': return p.oiChg;
+        case 'iv': return p.iv;
+        case 'ivResidual': return p.ivResidual;
+        case 'delta': return p.delta ?? 0;
+        case 'signal': return p.signal;
+        default: return scoreOf(p) ?? -1;
+      }
+    };
+    return [...list].sort((a, b) => (tableSortAsc ? 1 : -1) * cmp(value(a), value(b)));
+  }, [points, goal, tableSortCol, tableSortAsc, scoreOf]);
+
+  // Axes bounds
   const axes = useMemo(() => ({
     x: clipRange(points.map(p => p.priceChg), clip),
     y: clipRange(points.map(p => p.oiChg), clip),
     z: clipRange(points.map(p => p.iv), clip),
   }), [points, clip]);
 
-  // ── Render / update the 3D scene ──
+  // Selected item reference
+  const selectedPoint = useMemo(() => {
+    return selected ? rawPoints.find(p => p.key === selected) ?? null : null;
+  }, [selected, rawPoints]);
+
+  // Hovered item reference
+  const hoveredPoint = useMemo(() => {
+    return hoveredKey ? rawPoints.find(p => p.key === hoveredKey) ?? null : null;
+  }, [hoveredKey, rawPoints]);
+
+  // Tooltip position is applied straight to the element: it follows the cursor
+  // without re-rendering this whole component on every mouse move.
+  const hudRef = useRef<HTMLDivElement | null>(null);
+  const lastMouse = useRef({ x: 0, y: 0 });
+  const placeHud = useCallback(() => {
+    const hud = hudRef.current;
+    const box = viewportRef.current;
+    if (!hud || !box) return;
+    const r = box.getBoundingClientRect();
+    const x = clamp(lastMouse.current.x - r.left + 16, 12, r.width - hud.offsetWidth - 12);
+    const y = clamp(lastMouse.current.y - r.top + 16, 12, r.height - hud.offsetHeight - 12);
+    hud.style.transform = `translate(${x}px, ${y}px)`;
+  }, []);
+
+  // ── Auto-Orbit / Turntable 360° Animation ──
+  const orbitAngleRef = useRef(0);
+  const animFrameRef = useRef<number | null>(null);
+
+  useEffect(() => {
+    const el = plotEl.current;
+    const Plotly = plotlyRef.current;
+    if (!isOrbiting || !plotlyReady || !Plotly || !el) {
+      if (animFrameRef.current) cancelAnimationFrame(animFrameRef.current);
+      return;
+    }
+
+    let lastTime = performance.now();
+    const radius = 2.4;
+    const zHeight = 0.95;
+
+    const step = (now: number) => {
+      if (!isOrbiting) return;
+      const dt = (now - lastTime) / 1000;
+      lastTime = now;
+      orbitAngleRef.current += dt * 0.28; // ~16 deg/sec
+      const x = radius * Math.cos(orbitAngleRef.current);
+      const y = radius * Math.sin(orbitAngleRef.current);
+
+      Plotly.relayout(el, {
+        'scene.camera.eye': { x, y, z: zHeight },
+      }).catch(() => {});
+
+      animFrameRef.current = requestAnimationFrame(step);
+    };
+
+    animFrameRef.current = requestAnimationFrame(step);
+    return () => {
+      if (animFrameRef.current) cancelAnimationFrame(animFrameRef.current);
+    };
+  }, [isOrbiting, plotlyReady]);
+
+  // ── Preset Camera View Transitions ──
+  const setCameraView = (view: CameraView) => {
+    const el = plotEl.current;
+    const Plotly = plotlyRef.current;
+    if (!el || !Plotly) return;
+    setIsOrbiting(false);
+    Plotly.relayout(el, { 'scene.camera': CAMERAS[view] }).catch(() => {});
+  };
+
+  // ── High-Res Snapshot Export ──
+  const handleDownloadSnapshot = async () => {
+    const el = plotEl.current;
+    const Plotly = plotlyRef.current;
+    if (!el || !Plotly) return;
+    try {
+      await Plotly.downloadImage(el, {
+        format: 'png',
+        width: 1920,
+        height: 1080,
+        filename: `${underlying}_${expiry}_OptionCube3D`,
+      });
+    } catch (err) {
+      console.error('Failed to export 3D image', err);
+    }
+  };
+
+  // ── Toggle Fullscreen ──
+  const toggleFullscreen = () => setIsFullscreen(prev => !prev);
+
+  useEffect(() => {
+    if (!isFullscreen) return;
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setIsFullscreen(false); };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [isFullscreen]);
+
+  // ── Next / Previous Strike Navigation ──
+  const navigateStrike = (direction: 'prev' | 'next') => {
+    if (!selectedPoint) return;
+    const sameSide = rawPoints
+      .filter(p => p.side === selectedPoint.side)
+      .sort((a, b) => a.strike - b.strike);
+    const currIdx = sameSide.findIndex(p => p.key === selectedPoint.key);
+    if (currIdx === -1) return;
+    const nextIdx = direction === 'next'
+      ? Math.min(sameSide.length - 1, currIdx + 1)
+      : Math.max(0, currIdx - 1);
+    setSelected(sameSide[nextIdx].key);
+  };
+
+  const copySymbol = (text: string) => {
+    navigator.clipboard.writeText(text).then(() => {
+      setCopiedKey(true);
+      setTimeout(() => setCopiedKey(false), 2000);
+    }).catch(() => { /* clipboard blocked (insecure context / permission) */ });
+  };
+
+  // ── Render Plotly 3D Scene ──
   useEffect(() => {
     const Plotly = plotlyRef.current;
     const el = plotEl.current;
     if (!plotlyReady || !Plotly || !el) return;
 
-    const maxOi = Math.max(1, ...points.map(p => p.oi));
-    const size = (p: ScatterPoint) => 4 + 12 * Math.sqrt(p.oi / maxOi);
-    const X = (p: ScatterPoint) => clamp(p.priceChg, axes.x.lo, axes.x.hi);
-    const Y = (p: ScatterPoint) => clamp(p.oiChg, axes.y.lo, axes.y.hi);
-    const Z = (p: ScatterPoint) => clamp(p.iv, axes.z.lo, axes.z.hi);
-    const score = (p: ScatterPoint) => (goal === 'buy' ? p.buyScore : p.sellScore);
-
-    const hover = (p: ScatterPoint) =>
-      `<b>${p.strike} ${p.side}</b>  ₹${p.ltp.toFixed(2)}<br>` +
-      `Price ${sgn(p.priceChg)}%  ·  OI ${sgn(p.oiChg)}% (${fmtOi(p.oi)})<br>` +
-      `IV ${p.iv.toFixed(1)}% (${sgn(p.ivResidual)} vs nbrs)` +
-      (p.delta !== null ? `  ·  Δ ${p.delta.toFixed(2)}` : '') + `<br>` +
-      `${p.signal}  ·  ${goal === 'buy' ? 'Buy' : 'Sell'} score ${score(p) ?? '—'}`;
-
-    const mk = (list: ScatterPoint[], name: string, marker: Record<string, unknown>) => ({
-      type: 'scatter3d', mode: 'markers', name,
-      x: list.map(X), y: list.map(Y), z: list.map(Z),
-      customdata: list.map(p => p.key),
-      text: list.map(hover), hoverinfo: 'text',
-      marker: { size: list.map(size), opacity: 0.88, line: { width: 0 }, ...marker },
+    const { traces, layout } = buildScene({
+      points, axes, colorMode, goal, scoreOf, showStems, showZeroPlanes, showFloorShadow,
+      selected, chrome, viewKey: `${underlying}|${expiry}`, dragMode,
     });
 
-    let traces: unknown[];
-    if (colorMode === 'side') {
-      traces = [
-        mk(points.filter(p => p.side === 'CE'), 'CE', { color: CE_COLOR }),
-        mk(points.filter(p => p.side === 'PE'), 'PE', { color: PE_COLOR }),
-      ];
-    } else if (colorMode === 'signal') {
-      traces = SIGNALS.map(s => mk(points.filter(p => p.signal === s), s, { color: SIGNAL_COLOR[s] }));
-    } else {
-      traces = [mk(points, `${goal === 'buy' ? 'Buy' : 'Sell'} score`, {
-        color: points.map(p => score(p) ?? 0),
-        cmin: 0, cmax: 100, colorscale: SCORE_SCALE,
-        colorbar: {
-          title: { text: `${goal === 'buy' ? 'Buy' : 'Sell'} score`, font: { color: chrome.textMuted, size: 11 } },
-          tickfont: { color: chrome.textMuted, size: 10 }, len: 0.6, thickness: 10,
-          outlinewidth: 0,
-        },
-      })];
-    }
+    Plotly.react(el, traces, layout, {
+      responsive: true,
+      displaylogo: false,
+      displayModeBar: false, // We supply our own high-polish quant toolbar
+    }).then(() => {
+      setRenderError('');
+      try { Plotly.Plots.resize(el); } catch { /* ignore */ }
+      const g = el as PlotlyRoot;
+      g.removeAllListeners?.('plotly_click');
+      g.removeAllListeners?.('plotly_hover');
+      g.removeAllListeners?.('plotly_unhover');
 
-    const sel = points.find(p => p.key === selected);
-    if (sel) {
-      traces.push({
-        type: 'scatter3d', mode: 'markers', name: 'Selected', showlegend: false, hoverinfo: 'skip',
-        x: [X(sel)], y: [Y(sel)], z: [Z(sel)],
-        marker: { size: size(sel) + 9, color: 'rgba(0,0,0,0)', line: { color: chrome.textSecondary, width: 3 } },
+      g.on?.('plotly_click', d => {
+        const key = d.points?.[0]?.customdata;
+        if (typeof key === 'string') setSelected(prev => (prev === key ? null : key));
       });
-    }
 
-    const axis = (title: string, r: { lo: number; hi: number }) => ({
-      title: { text: title, font: { color: chrome.textSecondary, size: 12 } },
-      range: [r.lo - (r.hi - r.lo) * 0.04, r.hi + (r.hi - r.lo) * 0.04],
-      color: chrome.textMuted,
-      gridcolor: chrome.gridline, zerolinecolor: chrome.baseline, linecolor: chrome.baseline,
-      backgroundcolor: 'rgba(0,0,0,0)', showbackground: false,
-      tickfont: { color: chrome.textMuted, size: 10 },
+      g.on?.('plotly_hover', d => {
+        const key = d.points?.[0]?.customdata;
+        if (typeof key !== 'string') return;
+        if (d.event) lastMouse.current = { x: d.event.clientX, y: d.event.clientY };
+        setHoveredKey(key);
+      });
+
+      g.on?.('plotly_unhover', () => setHoveredKey(null));
+    }).catch(e => setRenderError(`3D view failed to render — is WebGL enabled? (${String(e)})`));
+  }, [
+    plotlyReady, points, axes, colorMode, goal, scoreOf, selected, chrome, underlying, expiry,
+    showStems, showZeroPlanes, showFloorShadow, dragMode,
+  ]);
+
+  // ── Auto-resize Plotly when container width changes (100% responsive) ──
+  useEffect(() => {
+    const el = plotEl.current;
+    const Plotly = plotlyRef.current;
+    if (!el || !Plotly || !plotlyReady) return;
+
+    let rafId: number | null = null;
+    const ro = new ResizeObserver(() => {
+      if (rafId) cancelAnimationFrame(rafId);
+      rafId = requestAnimationFrame(() => {
+        try {
+          Plotly.Plots.resize(el);
+        } catch {
+          // ignore before canvas ready
+        }
+      });
     });
 
-    const layout = {
-      autosize: true,
-      paper_bgcolor: 'rgba(0,0,0,0)',
-      margin: { l: 0, r: 0, t: 0, b: 0 },
-      uirevision: `${underlying}|${expiry}`, // keep the user's camera across live updates
-      showlegend: colorMode !== 'score',
-      legend: { font: { color: chrome.textSecondary, size: 11 }, bgcolor: 'rgba(0,0,0,0)', x: 0.01, y: 0.99 },
-      hoverlabel: { bgcolor: chrome.surface, font: { color: chrome.textSecondary, size: 11 }, bordercolor: chrome.baseline },
-      scene: {
-        xaxis: axis('Price change %', axes.x),
-        yaxis: axis('OI change %', axes.y),
-        zaxis: axis('IV %', axes.z),
-        aspectmode: 'cube',
-        camera: { eye: { x: 1.6, y: -1.6, z: 0.9 } },
-      },
+    ro.observe(el);
+    return () => {
+      if (rafId) cancelAnimationFrame(rafId);
+      ro.disconnect();
     };
-
-    Plotly.react(el, traces, layout, { responsive: true, displaylogo: false, modeBarButtonsToRemove: ['toImage'] })
-      .then(() => {
-        const g = el as unknown as { removeAllListeners?: (e: string) => void; on?: (e: string, cb: (d: { points?: { customdata?: string }[] }) => void) => void };
-        g.removeAllListeners?.('plotly_click');
-        g.on?.('plotly_click', d => {
-          const key = d.points?.[0]?.customdata;
-          if (key) setSelected(prev => (prev === key ? null : key));
-        });
-      });
-  }, [plotlyReady, points, axes, colorMode, goal, selected, chrome, underlying, expiry]);
+  }, [plotlyReady]);
 
   useEffect(() => {
     const el = plotEl.current;
@@ -254,112 +364,123 @@ export default function OptionScatter3D({ underlying, expiry, onMeta }: Props) {
   }, [plotlyReady]);
 
   const clippedTotal = axes.x.clipped + axes.y.clipped + axes.z.clipped;
-  const scoreOf = (p: ScatterPoint) => (goal === 'buy' ? p.buyScore : p.sellScore);
+
+  // Toggle signal filter helper
+  const toggleSignal = (s: Signal) => {
+    setSelectedSignals(prev => {
+      const next = new Set(prev);
+      if (next.has(s)) {
+        if (next.size > 1) next.delete(s); // Keep at least one
+      } else {
+        next.add(s);
+      }
+      return next;
+    });
+  };
+
+  const handleTableSort = (col: string) => {
+    if (tableSortCol === col) {
+      setTableSortAsc(prev => !prev);
+    } else {
+      setTableSortCol(col);
+      setTableSortAsc(false);
+    }
+  };
 
   return (
-    <>
-      {/* Controls */}
-      <div className="flex items-center gap-3 flex-wrap">
-        <Seg value={goal} onChange={setGoal} options={[{ v: 'buy', label: 'Find BUYS' }, { v: 'sell', label: 'Find SELLS' }]} />
-        <Seg value={colorMode} onChange={setColorMode}
-             options={[{ v: 'signal', label: 'Colour: Signal' }, { v: 'side', label: 'CE / PE' }, { v: 'score', label: 'Score' }]} />
-        <Sel label="Strikes ±" value={strikeWindow} onChange={setStrikeWindow}
-             options={[{ v: 8, label: '8' }, { v: 15, label: '15' }, { v: 25, label: '25' }, { v: 0, label: 'All' }]} />
-        <Sel label="Min OI" value={minOiPct} onChange={setMinOiPct}
-             options={[{ v: 0, label: 'any' }, { v: 2, label: '≥2% of max' }, { v: 5, label: '≥5% of max' }, { v: 10, label: '≥10% of max' }]} />
-        <Sel label="Min ₹" value={minLtp} onChange={setMinLtp}
-             options={[{ v: 0, label: 'any' }, { v: 3, label: '3' }, { v: 5, label: '5' }, { v: 10, label: '10' }]} />
-        <label className="flex items-center gap-1.5 text-[11px] text-zinc-400 font-semibold cursor-pointer">
-          <input type="checkbox" checked={clip} onChange={e => setClip(e.target.checked)} className="accent-emerald-500" />
-          Clip outliers
-        </label>
-        <span className="text-[11px] text-zinc-500 font-mono tabular-nums ml-auto">
-          {points.length} points{clip && clippedTotal > 0 ? ` · ${clippedTotal} axis values clipped` : ''}
-        </span>
-      </div>
+    <div className={`flex flex-col gap-4 w-full min-w-0 ${isFullscreen ? 'fixed inset-0 z-50 bg-zinc-950 p-6 overflow-y-auto' : ''}`}>
+      <ControlBar
+        goal={goal} setGoal={setGoal} colorMode={colorMode} setColorMode={setColorMode}
+        sideFilter={sideFilter} setSideFilter={setSideFilter}
+        moneynessFilter={moneynessFilter} setMoneynessFilter={setMoneynessFilter}
+        strikeWindow={strikeWindow} setStrikeWindow={setStrikeWindow}
+        minOiPct={minOiPct} setMinOiPct={setMinOiPct} minLtp={minLtp} setMinLtp={setMinLtp}
+        clip={clip} setClip={setClip}
+      />
 
-      {/* 3D chart */}
-      <div className="bg-zinc-900/60 border border-zinc-800 rounded-2xl p-3 relative overflow-hidden">
-        <div ref={plotEl} className="w-full" style={{ height: 560 }} />
+      <SignalPills
+        selectedSignals={selectedSignals} toggleSignal={toggleSignal}
+        pointCount={points.length} clip={clip} clippedTotal={clippedTotal}
+      />
+
+      {/* ── 3D Viewport with Quant Toolbars & HUD ── */}
+      <div
+        ref={viewportRef}
+        className="relative bg-zinc-900/80 border border-zinc-800 rounded-2xl overflow-hidden shadow-2xl w-full min-w-0"
+        onMouseMove={e => {
+          lastMouse.current = { x: e.clientX, y: e.clientY };
+          placeHud();
+        }}
+        onMouseLeave={() => setHoveredKey(null)}
+      >
+        <ViewportToolbar
+          setCameraView={setCameraView} isOrbiting={isOrbiting} setIsOrbiting={setIsOrbiting}
+          dragMode={dragMode} setDragMode={setDragMode} showStems={showStems} setShowStems={setShowStems}
+          showZeroPlanes={showZeroPlanes} setShowZeroPlanes={setShowZeroPlanes}
+          showFloorShadow={showFloorShadow} setShowFloorShadow={setShowFloorShadow}
+          isFullscreen={isFullscreen} onSnapshot={handleDownloadSnapshot} onToggleFullscreen={toggleFullscreen}
+        />
+        {/* ── 3D Canvas ── */}
+        <div
+          ref={plotEl}
+          className="w-full min-w-0 block"
+          style={{ width: '100%', height: isFullscreen ? 'calc(100vh - 120px)' : 'max(760px, calc(100vh - 200px))' }}
+        />
+
+        {/* Empty / Loading State */}
         {!points.length && (
-          <div className="absolute inset-0 flex items-center justify-center text-sm text-zinc-500 pointer-events-none">
-            {error ? '' : oc ? 'No strikes pass the filters — loosen Min OI / Min ₹' : 'Loading chain…'}
+          <div className="absolute inset-0 flex items-center justify-center text-sm text-zinc-400 pointer-events-none">
+            {error ? '' : oc ? 'No strikes pass the active filters — adjust Min OI / Min ₹ / Filters' : 'Loading option chain data…'}
           </div>
         )}
-        <p className="text-[10px] text-zinc-500 mt-1 px-2">
-          Drag to rotate · scroll to zoom · click a point to pin it · marker size = open interest
-        </p>
-      </div>
 
-      {error && (
-        <div className="px-3 py-2 bg-red-900/20 border border-red-700/40 rounded-lg text-xs text-red-400">{error}</div>
-      )}
+        {/* ── Floating Strike Hover Tooltip HUD (Active on Cursor Hover) ── */}
+        {hoveredPoint && (
+          <div
+            ref={el => { hudRef.current = el; if (el) placeHud(); }}
+            className="absolute left-0 top-0 z-30 pointer-events-none"
+          >
+            <HoverCard point={hoveredPoint} />
+          </div>
+        )}
 
-      {/* Ranked shortlist — the 3D cloud finds the region, the table gives the numbers */}
-      <div className="bg-zinc-900/60 border border-zinc-800 rounded-2xl overflow-hidden">
-        <div className="px-4 py-2.5 border-b border-zinc-800 flex items-baseline gap-2">
-          <h2 className="text-xs font-bold text-white">Top {goal === 'buy' ? 'buy' : 'sell'} candidates</h2>
-          <span className="text-[10px] text-zinc-500">
-            {goal === 'buy'
-              ? 'premium rising + fresh OI + IV cheap vs neighbours · |Δ| 0.20–0.70'
-              : 'premium falling + fresh OI (writers) + IV rich vs neighbours · |Δ| 0.05–0.40'}
+        {selectedPoint && (
+          <InspectorCard
+            point={selectedPoint} goal={goal} score={scoreOf(selectedPoint)} copied={copiedKey}
+            onCopy={() => copySymbol(`${underlying} ${selectedPoint.strike} ${selectedPoint.side}`)}
+            onNavigate={navigateStrike}
+            onClose={() => setSelected(null)}
+          />
+        )}
+
+        {/* Bottom Chart Footer Legend Note */}
+        <div className="px-4 py-2 bg-zinc-950/90 border-t border-zinc-800/80 flex items-center justify-between text-[11px] text-zinc-400 flex-wrap gap-2">
+          <div className="flex items-center gap-3">
+            <span><b>X:</b> Premium Chg (%)</span>
+            <span><b>Y:</b> OI Chg (%)</span>
+            <span><b>Z:</b> Implied Volatility (IV %)</span>
+            <span><b>Size:</b> Open Interest (OI)</span>
+          </div>
+          <span className="text-zinc-500">
+            Drag to orbit · Scroll to zoom · Click point to inspect · Double click to reset
           </span>
         </div>
-        <div className="overflow-x-auto">
-          <table className="w-full text-xs tabular-nums">
-            <thead>
-              <tr className="bg-zinc-800">
-                {['Strike', 'Side', 'LTP', 'Price %', 'OI', 'OI %', 'IV %', 'IV vs nbrs', 'Δ', 'Signal', 'Score'].map(h => (
-                  <th key={h} className="px-3 py-2 text-left text-xs font-bold text-white whitespace-nowrap">{h}</th>
-                ))}
-              </tr>
-            </thead>
-            <tbody>
-              {top.map(p => (
-                <tr
-                  key={p.key}
-                  onClick={() => setSelected(prev => (prev === p.key ? null : p.key))}
-                  className={`border-t border-zinc-800 cursor-pointer hover:bg-zinc-800/60 ${selected === p.key ? 'bg-zinc-800' : ''}`}
-                >
-                  <td className="px-3 py-1.5 font-mono font-semibold text-zinc-100">{p.strike}</td>
-                  <td className="px-3 py-1.5 font-bold" style={{ color: p.side === 'CE' ? CE_COLOR : PE_COLOR }}>{p.side}</td>
-                  <td className="px-3 py-1.5 font-mono text-zinc-200">{p.ltp.toFixed(2)}</td>
-                  <td className={`px-3 py-1.5 font-mono ${p.priceChg >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>{sgn(p.priceChg)}</td>
-                  <td className="px-3 py-1.5 font-mono text-zinc-300">{fmtOi(p.oi)}</td>
-                  <td className={`px-3 py-1.5 font-mono ${p.oiChg >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>{sgn(p.oiChg)}</td>
-                  <td className="px-3 py-1.5 font-mono text-zinc-200">{p.iv.toFixed(1)}</td>
-                  <td className={`px-3 py-1.5 font-mono ${p.ivResidual >= 0 ? 'text-amber-400' : 'text-sky-400'}`}>{sgn(p.ivResidual)}</td>
-                  <td className="px-3 py-1.5 font-mono text-zinc-300">{p.delta !== null ? p.delta.toFixed(2) : '—'}</td>
-                  <td className="px-3 py-1.5 font-semibold" style={{ color: SIGNAL_COLOR[p.signal] }}>{p.signal}</td>
-                  <td className="px-3 py-1.5 font-mono font-bold text-zinc-100">{scoreOf(p)}</td>
-                </tr>
-              ))}
-              {!top.length && (
-                <tr><td colSpan={11} className="px-3 py-6 text-center text-zinc-500">No candidates pass the filters.</td></tr>
-              )}
-            </tbody>
-          </table>
-        </div>
       </div>
 
-      {/* How to read */}
-      <div className="bg-zinc-900/60 border border-zinc-800 rounded-2xl p-5 text-xs text-zinc-300 leading-relaxed grid gap-4 md:grid-cols-3">
-        <div>
-          <h3 className="font-bold text-white mb-1">Reading the cube</h3>
-          <p>X = premium change vs yesterday&apos;s close, Y = OI change vs yesterday, Z = implied vol. Marker size is open interest, so a big dot is a strike that matters. Colour by <b>Signal</b> to see which corner each strike lives in.</p>
+      {(error || renderError) && (
+        <div className="px-4 py-2.5 bg-red-950/40 border border-red-800/60 rounded-xl text-xs text-red-400">
+          {error || renderError}
         </div>
-        <div>
-          <h3 className="font-bold text-white mb-1">Buying</h3>
-          <p>Look for <span style={{ color: SIGNAL_COLOR['Long buildup'] }}>Long buildup</span> (price↑ OI↑) that sits <i>low</i> on Z relative to its neighbours — momentum with fresh longs and no IV premium to pay. Short covering (price↑ OI↓) is a weaker, non-sustainable move.</p>
-        </div>
-        <div>
-          <h3 className="font-bold text-white mb-1">Selling</h3>
-          <p>Look for <span style={{ color: SIGNAL_COLOR['Short buildup'] }}>Short buildup</span> (price↓ OI↑) sitting <i>high</i> on Z — writers piling in while IV is rich. Avoid selling into Long buildup: that is the market buying the option.</p>
-        </div>
-        <p className="md:col-span-3 text-zinc-500">
-          Scores are percentile ranks within the strikes currently shown, not absolute probabilities — they rank ideas, they don&apos;t validate them. Percent changes on tiny bases are noise, hence the Min OI / Min ₹ filters. Confirm against the chain, spread and your own risk before trading.
-        </p>
-      </div>
-    </>
+      )}
+
+      <CandidatesTable
+        candidates={candidates} goal={goal} selected={selected}
+        sortCol={tableSortCol} sortAsc={tableSortAsc} scoreOf={scoreOf}
+        onSelect={key => setSelected(prev => (prev === key ? null : key))}
+        onSort={handleTableSort}
+      />
+
+      <Guide />
+    </div>
   );
 }

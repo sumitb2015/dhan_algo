@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert';
 import {
   classify, percentileRanks, quantile, buildPoints, clipRange, topByGoal,
+  getMoneyness, computeChainSummary, directionalBias, bearishIntensity, lastSessionDate,
   type OcEntry,
 } from './optionScatter3d.ts';
 
@@ -92,4 +93,78 @@ test('topByGoal sorts by the goal score and skips gated points', () => {
   assert.strictEqual(top.length, 3);
   assert.ok((top[0].buyScore as number) >= (top[1].buyScore as number));
   assert.ok(top.every(p => p.buyScore !== null));
+});
+
+test('getMoneyness: ATM band is half a strike step; CE/PE ITM sides are mirrored', () => {
+  assert.strictEqual(getMoneyness(24500, 'CE', 24510, 50), 'ATM');
+  assert.strictEqual(getMoneyness(24400, 'CE', 24510, 50), 'ITM');
+  assert.strictEqual(getMoneyness(24600, 'CE', 24510, 50), 'OTM');
+  assert.strictEqual(getMoneyness(24600, 'PE', 24510, 50), 'ITM');
+  assert.strictEqual(getMoneyness(24400, 'PE', 24510, 50), 'OTM');
+});
+
+test('computeChainSummary uses the whole chain, not the filtered points', () => {
+  const oc = chain();
+  // A strike the point filters would drop (tiny OI) must still count toward totals.
+  oc['25000'].ce = side(1, 1, 500, 400, 15, 0.1);
+  const all = computeChainSummary(oc, 24510)!;
+  const filtered = buildPoints(oc, { spot: 24510, strikeWindow: 1, minOiPct: 10, minLtp: 5 });
+  assert.ok(filtered.length < 22);                      // the point filters really do cut the chain
+  assert.strictEqual(all.atmStrike, 24500);
+  assert.strictEqual(all.ceCount, 11);
+  assert.strictEqual(all.peCount, 11);
+  assert.strictEqual(all.totalPeOi, 11 * 120000);
+  assert.strictEqual(all.totalCeOi, 10 * 100000 + 500);
+  assert.strictEqual(all.pcr, Number(((11 * 120000) / (10 * 100000 + 500)).toFixed(2)));
+  assert.strictEqual(all.maxPeOiStrike, 24000);         // ties resolve to the first strike seen
+});
+
+test('computeChainSummary needs a valid spot', () => {
+  assert.strictEqual(computeChainSummary(chain(), 0), null);
+});
+
+test('buildPoints tags moneyness using the ATM strike step', () => {
+  const pts = buildPoints(chain(), { spot: 24500, strikeWindow: 0, minOiPct: 0, minLtp: 0 });
+  assert.strictEqual(pts.find(p => p.key === '24500CE')!.moneyness, 'ATM');
+  assert.strictEqual(pts.find(p => p.key === '24300CE')!.moneyness, 'ITM');
+  assert.strictEqual(pts.find(p => p.key === '24700CE')!.moneyness, 'OTM');
+});
+
+test('directionalBias: writing calls / buying puts are bearish, writing puts / buying calls bullish', () => {
+  const pt = (side: 'CE' | 'PE', signal: Parameters<typeof directionalBias>[0]['signal']) =>
+    directionalBias({ side, signal, priceChg: -30, oiChg: 60 });
+  assert.strictEqual(pt('CE', 'Short buildup').dir, 'bearish');
+  assert.strictEqual(pt('PE', 'Short buildup').dir, 'bullish');   // put writing is NOT bearish
+  assert.strictEqual(pt('PE', 'Long buildup').dir, 'bearish');
+  assert.strictEqual(pt('CE', 'Long buildup').dir, 'bullish');
+  assert.strictEqual(pt('CE', 'Long unwinding').dir, 'bearish');
+  assert.strictEqual(pt('PE', 'Long unwinding').dir, 'bullish');
+  assert.strictEqual(pt('CE', 'Short covering').dir, 'bullish');
+  assert.strictEqual(pt('PE', 'Short covering').dir, 'bearish');
+});
+
+test('directionalBias: strength grows with the move, weak signals carry half, always 5-100', () => {
+  const small = directionalBias({ side: 'CE', signal: 'Short buildup', priceChg: -6, oiChg: 12 });
+  const big = directionalBias({ side: 'CE', signal: 'Short buildup', priceChg: -60, oiChg: 120 });
+  const weak = directionalBias({ side: 'CE', signal: 'Long unwinding', priceChg: -60, oiChg: -120 });
+  assert.ok(small.strength < big.strength);
+  assert.strictEqual(big.strength, 100);
+  assert.strictEqual(weak.strength, 50);
+  assert.strictEqual(directionalBias({ side: 'CE', signal: 'Short buildup', priceChg: 0, oiChg: 0 }).strength, 5);
+});
+
+test('bearishIntensity is zero for bullish structures', () => {
+  assert.strictEqual(bearishIntensity({ side: 'PE', signal: 'Short buildup', priceChg: -50, oiChg: 100 }), 0);
+  assert.ok(bearishIntensity({ side: 'CE', signal: 'Short buildup', priceChg: -50, oiChg: 100 }) > 50);
+});
+
+test('lastSessionDate rolls weekends and pre-open back to the prior weekday (IST)', () => {
+  // IST = UTC+5:30
+  assert.strictEqual(lastSessionDate(new Date('2026-09-22T04:30:00Z')), '2026-09-22'); // Tue 10:00 IST
+  assert.strictEqual(lastSessionDate(new Date('2026-09-22T02:30:00Z')), '2026-09-21'); // Tue 08:00 IST, pre-open
+  assert.strictEqual(lastSessionDate(new Date('2026-09-21T02:30:00Z')), '2026-09-18'); // Mon 08:00 IST -> Fri
+  assert.strictEqual(lastSessionDate(new Date('2026-09-20T09:00:00Z')), '2026-09-18'); // Sun -> Fri
+  assert.strictEqual(lastSessionDate(new Date('2026-09-19T09:00:00Z')), '2026-09-18'); // Sat -> Fri
+  assert.strictEqual(lastSessionDate(new Date('2026-09-22T03:44:00Z')), '2026-09-21'); // 09:14 IST, still pre-open
+  assert.strictEqual(lastSessionDate(new Date('2026-09-22T03:45:00Z')), '2026-09-22'); // 09:15 IST, open
 });

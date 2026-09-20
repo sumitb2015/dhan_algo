@@ -34,6 +34,8 @@ export type Side = 'CE' | 'PE';
 export type Signal = 'Long buildup' | 'Short buildup' | 'Short covering' | 'Long unwinding';
 export type Goal = 'buy' | 'sell';
 
+export type Moneyness = 'ITM' | 'ATM' | 'OTM';
+
 export interface ScatterPoint {
   key: string;            // "24500CE"
   strike: number;
@@ -47,9 +49,80 @@ export interface ScatterPoint {
   ivResidual: number;     // iv - mean(iv of neighbouring strikes, same side)
   delta: number | null;   // signed, as reported
   distPct: number;        // (strike - spot) / spot * 100
+  moneyness: Moneyness;   // ITM | ATM | OTM
   signal: Signal;
   buyScore: number | null;   // 0-100, null = fails the delta gate for buying
   sellScore: number | null;  // 0-100, null = fails the delta gate for selling
+}
+
+export function getMoneyness(strike: number, side: Side, spot: number, step = 50): Moneyness {
+  if (Math.abs(strike - spot) <= step * 0.5) return 'ATM';
+  if (side === 'CE') return strike < spot ? 'ITM' : 'OTM';
+  return strike > spot ? 'ITM' : 'OTM';
+}
+
+export interface ChainSummary {
+  spot: number;
+  atmStrike: number;
+  totalCeOi: number;
+  totalPeOi: number;
+  pcr: number;
+  maxCeOiStrike: number;
+  maxPeOiStrike: number;
+  ceCount: number;
+  peCount: number;
+}
+
+/**
+ * Chain-wide headline numbers (PCR, total OI, max-OI strikes, ATM).
+ * Computed from the raw chain, NOT from the plotted points: those are cut by
+ * the strike window / Min OI / Min ₹ filters and by rows with no previous-OI
+ * base, so a PCR taken from them describes the filter, not the market.
+ */
+export function computeChainSummary(oc: Record<string, OcEntry>, spot: number): ChainSummary | null {
+  if (!(spot > 0)) return null;
+  let totalCeOi = 0;
+  let totalPeOi = 0;
+  let maxCeOi = 0;
+  let maxPeOi = 0;
+  let maxCeOiStrike = 0;
+  let maxPeOiStrike = 0;
+  let ceCount = 0;
+  let peCount = 0;
+  let atmStrike = 0;
+  let minDiff = Infinity;
+
+  for (const [key, e] of Object.entries(oc)) {
+    const strike = Number(key);
+    if (!Number.isFinite(strike)) continue;
+    const diff = Math.abs(strike - spot);
+    if (diff < minDiff) { minDiff = diff; atmStrike = strike; }
+    const ceOi = e.ce?.oi ?? 0;
+    const peOi = e.pe?.oi ?? 0;
+    if (ceOi > 0) {
+      ceCount++;
+      totalCeOi += ceOi;
+      if (ceOi > maxCeOi) { maxCeOi = ceOi; maxCeOiStrike = strike; }
+    }
+    if (peOi > 0) {
+      peCount++;
+      totalPeOi += peOi;
+      if (peOi > maxPeOi) { maxPeOi = peOi; maxPeOiStrike = strike; }
+    }
+  }
+  if (!atmStrike) return null;
+
+  return {
+    spot,
+    atmStrike,
+    totalCeOi,
+    totalPeOi,
+    pcr: totalCeOi > 0 ? Number((totalPeOi / totalCeOi).toFixed(2)) : 0,
+    maxCeOiStrike,
+    maxPeOiStrike,
+    ceCount,
+    peCount,
+  };
 }
 
 export interface BuildOptions {
@@ -121,6 +194,10 @@ export function buildPoints(oc: Record<string, OcEntry>, opts: BuildOptions): Sc
   for (let i = 1; i < strikes.length; i++) {
     if (Math.abs(strikes[i] - spot) < Math.abs(strikes[atmIdx] - spot)) atmIdx = i;
   }
+  // Grid spacing at ATM (wings can be wider on some underlyings, so strikes[1]-strikes[0] is unsafe).
+  const strikeStep = strikes.length > 1
+    ? Math.abs(strikes[Math.min(atmIdx + 1, strikes.length - 1)] - strikes[Math.min(atmIdx + 1, strikes.length - 1) - 1])
+    : 50;
   const lo = opts.strikeWindow > 0 ? Math.max(0, atmIdx - opts.strikeWindow) : 0;
   const hi = opts.strikeWindow > 0 ? Math.min(strikes.length - 1, atmIdx + opts.strikeWindow) : strikes.length - 1;
 
@@ -181,6 +258,7 @@ export function buildPoints(oc: Record<string, OcEntry>, opts: BuildOptions): Sc
         ivResidual: residual(side, k, iv),
         delta: typeof s.greeks?.delta === 'number' ? s.greeks.delta : null,
         distPct: ((k - spot) / spot) * 100,
+        moneyness: getMoneyness(k, side, spot, strikeStep),
         signal: classify(priceChg, oiChg),
         buyScore: null,
         sellScore: null,
@@ -233,4 +311,72 @@ export function topByGoal(pts: ScatterPoint[], goal: Goal, n: number): ScatterPo
     .filter(p => score(p) !== null)
     .sort((a, b) => (score(b) as number) - (score(a) as number))
     .slice(0, n);
+}
+
+// ─── Directional bias ──────────────────────────────────────────────────────
+//
+// The four buildup signals describe the OPTION's own price/OI. What they imply
+// for the UNDERLYING depends on the side: writing calls is bearish, writing puts
+// is bullish, buying puts is bearish, buying calls is bullish. Strong = fresh
+// positions (OI up); weak = positions being closed (OI down), which carries
+// roughly half the conviction.
+
+export type BiasDir = 'bearish' | 'bullish';
+export interface DirectionalBias { dir: BiasDir; strength: number }
+
+const BIAS: Record<Side, Record<Signal, { dir: BiasDir; weak: boolean }>> = {
+  CE: {
+    'Short buildup':  { dir: 'bearish', weak: false }, // call writing
+    'Long unwinding': { dir: 'bearish', weak: true },  // call longs bailing
+    'Long buildup':   { dir: 'bullish', weak: false }, // call buying
+    'Short covering': { dir: 'bullish', weak: true },  // call writers bailing
+  },
+  PE: {
+    'Long buildup':   { dir: 'bearish', weak: false }, // put buying
+    'Short covering': { dir: 'bearish', weak: true },  // put writers bailing
+    'Short buildup':  { dir: 'bullish', weak: false }, // put writing
+    'Long unwinding': { dir: 'bullish', weak: true },  // put longs bailing
+  },
+};
+
+/** Premium move that counts as a full-strength signal, and the OI surge likewise. */
+const FULL_PRICE_MOVE_PCT = 60;
+const FULL_OI_SURGE_PCT = 120;
+
+export function directionalBias(p: Pick<ScatterPoint, 'side' | 'signal' | 'priceChg' | 'oiChg'>): DirectionalBias {
+  const { dir, weak } = BIAS[p.side][p.signal];
+  const price = Math.min(1, Math.abs(p.priceChg) / FULL_PRICE_MOVE_PCT);
+  const oi = Math.min(1, Math.abs(p.oiChg) / FULL_OI_SURGE_PCT);
+  const raw = (price * 0.5 + oi * 0.5) * 100 * (weak ? 0.5 : 1);
+  return { dir, strength: Math.round(Math.min(100, Math.max(5, raw))) };
+}
+
+/** 0–100 heat for the "Bearish" colour mode: bearish points by strength, everything else 0. */
+export function bearishIntensity(p: Pick<ScatterPoint, 'side' | 'signal' | 'priceChg' | 'oiChg'>): number {
+  const b = directionalBias(p);
+  return b.dir === 'bearish' ? b.strength : 0;
+}
+
+// ─── Data-date chip ────────────────────────────────────────────────────────
+
+const IST_PARTS = new Intl.DateTimeFormat('en-US', {
+  timeZone: 'Asia/Kolkata', year: 'numeric', month: '2-digit', day: '2-digit',
+  hour: '2-digit', minute: '2-digit', hour12: false, weekday: 'short',
+});
+
+/**
+ * Date (YYYY-MM-DD, IST) of the session the live chain belongs to: today once the
+ * market has opened (09:15 IST) on a weekday, otherwise the previous weekday.
+ * There is no holiday calendar, so a weekday holiday still reports that weekday —
+ * the chain has no timestamp of its own to correct it with.
+ */
+export function lastSessionDate(now: Date = new Date()): string {
+  const g = Object.fromEntries(IST_PARTS.formatToParts(now).map(x => [x.type, x.value]));
+  const minutes = (Number(g.hour) % 24) * 60 + Number(g.minute);
+  let back = 0;
+  if (g.weekday === 'Sat') back = 1;
+  else if (g.weekday === 'Sun') back = 2;
+  else if (minutes < 9 * 60 + 15) back = g.weekday === 'Mon' ? 3 : 1;
+  const d = new Date(Date.UTC(Number(g.year), Number(g.month) - 1, Number(g.day) - back));
+  return d.toISOString().slice(0, 10);
 }
