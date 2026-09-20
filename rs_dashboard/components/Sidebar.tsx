@@ -79,6 +79,7 @@ const NAV_GROUPS = [
       { href: '/backtest', label: 'Options Backtester', desc: 'Historical simulation with dynamic ATM rolling, scalp floors & trailing SL' },
       { href: '/backtest-signals', label: 'VectorBT Options Backtester', desc: 'Same multi-leg options backtest run through VectorBT — Sharpe/Sortino/drawdown & OpenStatz tearsheet for comparing against the Options Backtester' },
       { href: '/options/analyzer', label: 'Option Analyzer', desc: 'Rank strikes based on technical indicators & OI change' },
+      { href: '/options/scatter-3d', label: 'Option Cube 3D', desc: '3D scatter of premium change × OI change × IV for the current expiry — find the best strikes to buy or sell' },
       { href: '/options/premium-bar', label: 'Premium Bar Chart', desc: 'CE vs PE premium bar charts & straddle curve across strikes' },
       { href: '/options/live-charts', label: 'Live Options Charts', desc: 'Live straddle, rolling straddle, strangle & custom strategy premium charts' },
       { href: '/straddle-analysis', label: 'Straddle Analysis', desc: 'ATM straddle premium patterns by weekday, DTE & regime' },
