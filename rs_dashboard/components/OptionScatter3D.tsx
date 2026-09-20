@@ -6,7 +6,7 @@ import {
   buildPoints, clamp, clipRange, topByGoal, computeChainSummary,
   type OcEntry, type ScatterPoint, type Goal, type Signal, type ChainSummary,
 } from '@/lib/optionScatter3d';
-import { CAMERAS, DEFAULT_CAMERA, SIGNALS, cmp, type CameraView, type SceneCamera, type Vec3, type ColorMode, type MoneynessFilter, type SideFilter } from './option-cube/shared';
+import { CAMERAS, DEFAULT_CAMERA, SIGNALS, cmp, type CameraView, type DragMode, type SceneCamera, type Vec3, type ColorMode, type MoneynessFilter, type SideFilter } from './option-cube/shared';
 import { buildScene } from './option-cube/buildScene';
 import { ControlBar, SignalPills } from './option-cube/ControlBar';
 import { ViewportToolbar } from './option-cube/ViewportToolbar';
@@ -71,7 +71,7 @@ export default function OptionScatter3D({ underlying, expiry, onMeta }: Props) {
   const [selected, setSelected] = useState<string | null>(null);
   const [hoveredKey, setHoveredKey] = useState<string | null>(null);
   const [isOrbiting, setIsOrbiting] = useState(false);
-  const [dragMode, setDragMode] = useState<'turntable' | 'orbit'>('turntable');
+  const [dragMode, setDragMode] = useState<DragMode>('turntable');
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [copiedKey, setCopiedKey] = useState(false);
   const [tableSortCol, setTableSortCol] = useState<string>('score');
@@ -491,7 +491,7 @@ export default function OptionScatter3D({ underlying, expiry, onMeta }: Props) {
             <span><b>Size:</b> Open Interest (OI)</span>
           </div>
           <span className="text-zinc-500">
-            Drag to orbit · Scroll to zoom · Click point to inspect · Double click to reset
+            Drag to rotate · Move tool (hand) to reposition · Scroll to zoom · Click point to inspect · Double click to reset
           </span>
         </div>
       </div>

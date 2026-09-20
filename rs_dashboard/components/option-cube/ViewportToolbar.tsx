@@ -1,12 +1,18 @@
 'use client';
 
-import { Camera, RotateCcw, Play, Pause, Maximize2, Minimize2, Compass } from 'lucide-react';
-import type { CameraView } from './shared';
+import { Camera, RotateCcw, Play, Pause, Maximize2, Minimize2, Compass, Rotate3d, Move } from 'lucide-react';
+import type { CameraView, DragMode } from './shared';
+
+const TOOLS: { mode: DragMode; Icon: typeof Compass; label: string; hint: string }[] = [
+  { mode: 'turntable', Icon: Compass, label: 'Rotate', hint: 'Rotate around the vertical axis (keeps the graph upright)' },
+  { mode: 'orbit', Icon: Rotate3d, label: 'Free orbit', hint: 'Rotate freely in any direction' },
+  { mode: 'pan', Icon: Move, label: 'Move', hint: 'Drag to move the graph around the panel' },
+];
 
 interface Props {
   setCameraView: (v: CameraView) => void;
   isOrbiting: boolean; setIsOrbiting: (fn: (prev: boolean) => boolean) => void;
-  dragMode: 'turntable' | 'orbit'; setDragMode: (fn: (prev: 'turntable' | 'orbit') => 'turntable' | 'orbit') => void;
+  dragMode: DragMode; setDragMode: (m: DragMode) => void;
   showStems: boolean; setShowStems: (fn: (prev: boolean) => boolean) => void;
   showZeroPlanes: boolean; setShowZeroPlanes: (fn: (prev: boolean) => boolean) => void;
   showFloorShadow: boolean; setShowFloorShadow: (fn: (prev: boolean) => boolean) => void;
@@ -83,17 +89,23 @@ export function ViewportToolbar({
               {isOrbiting ? 'Orbiting' : 'Orbit'}
             </button>
 
-            {/* Drag Mode Toggle */}
-            <button
-              onClick={() => setDragMode(prev => prev === 'turntable' ? 'orbit' : 'turntable')}
-              className={`p-1.5 rounded-lg text-[11px] font-semibold transition-colors ${
-                dragMode === 'turntable' ? 'text-cyan-400 bg-cyan-950/40 border border-cyan-700/50' : 'text-zinc-400 hover:text-zinc-200'
-              }`}
-              title={`Drag Mode: ${dragMode === 'turntable' ? 'Turntable (Z-locked)' : 'Free Orbit'}`}
-              aria-label="Toggle drag mode"
-            >
-              <Compass className="w-3.5 h-3.5" />
-            </button>
+            {/* Drag tool: what a left-drag does */}
+            <div className="flex items-center gap-0.5 rounded-lg border border-zinc-800 p-0.5" role="group" aria-label="Drag tool">
+              {TOOLS.map(({ mode, Icon, label, hint }) => (
+                <button
+                  key={mode}
+                  onClick={() => setDragMode(mode)}
+                  aria-label={label}
+                  aria-pressed={dragMode === mode}
+                  title={`${label} — ${hint}`}
+                  className={`p-1.5 rounded-md transition-colors ${
+                    dragMode === mode ? 'text-cyan-400 bg-cyan-950/40 border border-cyan-700/50' : 'text-zinc-400 hover:text-zinc-200'
+                  }`}
+                >
+                  <Icon className="w-3.5 h-3.5" />
+                </button>
+              ))}
+            </div>
 
             <span className="w-px h-4 bg-zinc-800 shrink-0" />
 

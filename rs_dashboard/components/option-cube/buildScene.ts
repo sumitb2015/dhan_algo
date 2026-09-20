@@ -1,6 +1,6 @@
 import type { ChartChrome } from '@/lib/chartTheme';
 import { bearishIntensity, clamp, type AxisClip, type Goal, type ScatterPoint, type Signal } from '@/lib/optionScatter3d';
-import { BEARISH_SCALE, CE_COLOR, DEFAULT_CAMERA, FONT, PE_COLOR, SCORE_SCALE, SIGNALS, SIGNAL_COLOR, rgba, type ColorMode, type SceneCamera } from './shared';
+import { BEARISH_SCALE, CE_COLOR, DEFAULT_CAMERA, FONT, PE_COLOR, SCORE_SCALE, SIGNALS, SIGNAL_COLOR, rgba, type ColorMode, type DragMode, type SceneCamera } from './shared';
 
 export interface SceneInput {
   points: ScatterPoint[];
@@ -15,7 +15,7 @@ export interface SceneInput {
   chrome: ChartChrome;
   /** Plotly `uirevision`: keeps the user's camera while the same underlying+expiry live-updates. */
   viewKey: string;
-  dragMode: 'turntable' | 'orbit';
+  dragMode: DragMode;
   /**
    * The camera to draw with. The caller owns it: Plotly's uirevision does not reliably keep a
    * dragged/zoomed camera when the layout also names one, so every re-render passes the live one.

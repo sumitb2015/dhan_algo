@@ -67,6 +67,9 @@ export type ColorMode = 'signal' | 'bearish' | 'side' | 'score' | 'iv';
 export type SideFilter = 'ALL' | 'CE' | 'PE';
 export type MoneynessFilter = 'ALL' | 'OTM' | 'ATM' | 'ITM';
 
+/** What a left-drag on the scene does: rotate around Z, rotate freely, or move (pan) the scene. */
+export type DragMode = 'turntable' | 'orbit' | 'pan';
+
 export type CameraView = 'iso' | 'top' | 'front' | 'side' | 'reset' | 'atm';
 export interface Vec3 { x: number; y: number; z: number }
 export interface Camera { eye: Vec3; up: Vec3; center: Vec3 }
@@ -82,8 +85,9 @@ export const CAMERAS: Record<CameraView, Camera> = {
   side:  { eye: { x: 2.6, y: 0.0001, z: 0.0001 }, up: Z_UP, center: ORIGIN },
   atm:   { eye: { x: 1.4, y: -1.4, z: 0.8 }, up: Z_UP, center: ORIGIN },
   // Far enough back that the whole box and its axis titles sit inside the canvas at the default zoom.
-  // center.z < 0 looks slightly below the box's middle, lifting it to the vertical centre of the panel.
-  reset: { eye: { x: 1.55, y: -2.7, z: 1.15 }, up: Z_UP, center: { x: 0, y: 0, z: -0.16 } },
+  // center.z < 0 looks below the box's middle, which lifts the box towards the top of the panel and
+  // leaves the space beneath it free for the near/bottom edge to grow into when the user zooms in.
+  reset: { eye: { x: 1.55, y: -2.7, z: 1.15 }, up: Z_UP, center: { x: 0, y: 0, z: -0.45 } },
 };
 
 /** Camera the scene opens with and the reset button returns to. */
