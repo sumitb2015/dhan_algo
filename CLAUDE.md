@@ -253,6 +253,7 @@ inside the token system.
 **Skills for recurring work** — read the matching skill before starting, each is
 distilled from 7-10 repeat bug-fix commits:
 `dhan-broker-positions` (scalper terminals, broker payloads, P&L, MTM history, close/exit orders),
+`dhan-order-tickets` (order modals and trade routes: server-side lot cap, MCX/BSE contract resolution, margin estimates, draft inputs),
 `dhan-broker-cache` (the shared positions/funds cache in `lib/brokerPositionsCache.ts` — when a route may share it vs. must stay live),
 `dhan-options-analytics-page` (Positions/Straddle/Strangle Analysis: draft legs, margin/ROI, validity modals),
 `dhan-live-chart` (lightweight-charts canvas charts and polled series),

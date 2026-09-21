@@ -85,7 +85,22 @@ If you added a new skill, add a one-clause entry to CLAUDE.md's "Skills for
 recurring work" list so it stays discoverable from the always-loaded doc, matching
 the terse style of the existing entries.
 
-### 7. Report, then ask before pushing
+### 7. Check the two skill directories agree
+Claude Code reads `.claude/skills/`; other agents (Codex and similar) read `.agents/skills/`. `.claude/skills/` is the
+**authoritative** copy for every `dhan-*` skill, and `.agents/skills/dhan-*` must be a **symlink** to it, not a copy (the
+vendor skills installed by `npx skills` go the other way: real files in `.agents/skills/`, symlinks in `.claude/skills/`).
+Separate copies silently rot: an audit found six of ten mirrored skills stale, carrying wrong guidance ("dark-only, no
+theme toggle", a Windows-only `venv/Scripts/pythonw.exe` path), and one skill (`dhan-order-tickets`) that existed only under
+`.agents/` and so was never loaded by Claude Code.
+```bash
+find .agents/skills -maxdepth 1 -name 'dhan-*' ! -type l            # expect no output: a real dir here is a stale copy
+for d in .agents/skills/dhan-*; do [ -e "$d/SKILL.md" ] || echo "broken link: $d"; done
+for d in .agents/skills/*; do n=$(basename "$d"); [ -e ".claude/skills/$n" ] || echo "not visible to Claude Code: $n"; done
+```
+New `dhan-*` skills go in `.claude/skills/` only; add an `.agents` symlink only if another agent should see them
+(`ln -s ../../.claude/skills/<name> .agents/skills/<name>`). Never hand-edit through a copy.
+
+### 8. Report, then ask before pushing
 Summarize what changed (which skills updated/added and why, what moved out of
 CLAUDE.md and where) in a few bullets. This is a repo-wide maintenance change, not a
 feature — confirm with the user before committing/pushing, same as any other change

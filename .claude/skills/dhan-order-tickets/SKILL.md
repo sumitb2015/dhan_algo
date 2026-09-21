@@ -1,11 +1,6 @@
 ---
 name: dhan-order-tickets
-description: >-
-  Use when designing, building, or reviewing order tickets, execution modals,
-  and trade-dispatching API routes or Python bridges (Futures, Options, Equities,
-  Commodities). Covers server-side lot/size caps, multi-segment contract
-  resolution (MCX/BSE/NSE), commit-on-blur input protection, out-of-order fetch
-  guards, margin estimation differences, and position identity preservation.
+description: Use when designing, building, or reviewing order tickets, execution modals, and trade-dispatching API routes or Python bridges (Futures, Options, Equities, Commodities). Covers server-side lot/size caps, multi-segment contract resolution (MCX/BSE/NSE), commit-on-blur input protection, out-of-order fetch guards, margin estimation differences, and position identity preservation.
 ---
 
 # Dhan Order Tickets & Trade Bridges
@@ -22,7 +17,7 @@ This skill establishes the mandatory invariants and patterns discovered during t
 
 - Building or modifying order modals, tickets, or execution desks (`*OrderModal.tsx`, `*ActionDesk.tsx`, quick-trade panels).
 - Creating or editing trade execution API routes (`app/api/*/order/route.ts`, quiktrade endpoints).
-- Working on Python bridge CLI tools (`scripts/tools/*_api.py`, `scripts/tools/quiktrade.py`, etc.).
+- Working on Python bridge CLI tools (`scripts/tools/futures_api.py`, `scripts/tools/scalper_api.py`, etc.).
 - Adding or resolving derivative contracts across multiple exchanges (`NSE`, `BSE`, `MCX`).
 - Reviewing margin calculation or turnover estimation logic.
 
@@ -92,6 +87,10 @@ def resolve_instrument_and_exchange(underlying: str):
 ---
 
 ### 3. Segment-Aware Margin Estimation
+These rates are rough, hard-coded **estimates** (they live in `FuturesOrderModal.tsx`, they are not sourced from Dhan): label them as
+estimates in the UI, and prefer a broker margin call where one exists (`/api/multi-leg-focus/margin`, Dhan's
+`/v2/margincalculator`, which needs `dhanClientId` injected: see `docs/API_GOTCHAS.md`).
+
 Different exchange segments and asset classes have radically different SPAN/exposure margin requirements. Never apply a blanket index/stock margin rate across all instruments:
 
 - **MCX Commodities**: Typically ~2.5% for MIS (Intraday) and ~4.0% for NRML.
