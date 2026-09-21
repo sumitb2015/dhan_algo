@@ -470,7 +470,32 @@ export default function Baskets() {
       addToast('error', 'Option chain still initializing');
       return;
     }
-    if (tpl.legs.some(l => l.expiryRole === 'far') && (!farExpiry || farExpiry === expiry)) {
+    // Templates that carry a DTE window choose their own expiries: front inside the window,
+    // far = the expiry inside its window closest to 2x the front's DTE.
+    let frontExp = expiry, farExp = farExpiry;
+    if (tpl.dte) {
+      const dte = (e: string) => daysToExpiry(e);
+      const [fLo, fHi] = tpl.dte.front;
+      const front = expiries.find(e => { const d = dte(e); return d != null && d >= fLo && d <= fHi; });
+      if (!front) {
+        addToast('error', `No expiry ${fLo}-${fHi} days out`, expiries.join(', '));
+        return;
+      }
+      frontExp = front;
+      if (tpl.dte.far) {
+        const [aLo, aHi] = tpl.dte.far;
+        const fd = dte(front) ?? fLo;
+        const cands = expiries.filter(e => { const d = dte(e); return d != null && d > fd && d >= aLo && d <= aHi; });
+        cands.sort((a, b) => Math.abs((dte(a) ?? 0) - 2 * fd) - Math.abs((dte(b) ?? 0) - 2 * fd));
+        if (!cands.length) {
+          addToast('error', `No expiry ${aLo}-${aHi} days out for the long put`, expiries.join(', '));
+          return;
+        }
+        farExp = cands[0];
+      }
+      if (frontExp !== expiry) setExpiry(frontExp);
+      if (farExp !== farExpiry) setFarExpiry(farExp);
+    } else if (tpl.legs.some(l => l.expiryRole === 'far') && (!farExpiry || farExpiry === expiry)) {
       addToast('error', 'Secondary expiry required');
       return;
     }
@@ -479,10 +504,10 @@ export default function Baskets() {
     setLegs(tpl.legs.map(l => {
       const target = curAtm + l.offset * curStep;
       const strike = (curStrikes.length > 0 ? nearestStrike(curStrikes, target) : target) ?? curAtm;
-      const legExpiry = l.expiryRole === 'far' ? farExpiry : (expiry || '2026-09-15');
+      const legExpiry = l.expiryRole === 'far' ? farExp : (frontExp || '2026-09-15');
       return { id: newLegId(), side: l.side, option: l.option, strike, lots: l.ratio, type: 'MARKET' as const, price: '', expiry: legExpiry };
     }));
-  }, [atmStrike, allStrikes, step, expiry, farExpiry, underlying, addToast]);
+  }, [atmStrike, allStrikes, step, expiry, farExpiry, expiries, underlying, addToast]);
 
   // Auto-build the real ATM+/-2 Short Strangle once live chain data arrives (mirrors the
   // Options Monitor fix for the same bug shape). Never call this before atmStrike is real —

@@ -21,10 +21,20 @@ NIFTY index options (European, cash-settled), lot from `helper.get_lot_size("NIF
 ## 3. Entry
 - Any weekday (or `--entry-weekday`) from `--entry-time` (09:30 **(A)**), market open, no open position.
 - Front expiry F: first listed expiry with `--entry-dte-min..max` (8-10) calendar days out. Back
-  expiry B: first later expiry with at least `--back-dte-min` (15) days **(A)**.
-- Strikes from spot, rounded to `--strike-step` (50): call K1 spot+0.0%, body K2 +0.9%, K3 +1.9% (wings
-  200/250 at 23,346); short put Ps -0.8% (reference chart: 6320P on 6370 spot), long back put Ps - `--diag-offset` (50) **(A)**, so the pair is
-  risk-defined at F's expiry. Shape is validated at startup (ascending calls, broken wing up, `Pl < Ps < K1`).
+  expiry B (long put): the later expiry inside `--back-dte-min..max` (15-20) closest to 2x F's DTE.
+  Both windows are the source's rule (thetaprofits.com "Flyagonal": short leg 8-10 DTE, long put at
+  double the days, typically 16-20). The window starts at 15 **(A)**: Nifty weeklies are 7 days apart,
+  so the only tradable day with a front in 8-10 DTE is 8 (Monday before the following Tuesday expiry), whose
+  next expiry is 15 out; a strict 16 would never enter.
+- Strikes from spot, rounded to `--strike-step` (50). The source puts the shorts of both trades ~3%
+  from spot and the call butterfly above spot: body K2 +3.0%, short put Ps -3.0%. It gives no wing
+  widths, so K1 +2.2% / K3 +4.1% **(A)** keep the earlier 0.9% / 1.0% wing widths (200/250 pts at
+  23,346: 23,850 / 24,050 / 24,300 with Ps 22,650). Long back put Pl = Ps - `--diag-offset` (50)
+  **(A)**, so the pair is risk-defined at F's expiry. Shape is validated at startup (ascending calls,
+  broken wing up, `Pl < Ps < K1`).
+  A reference chart (SPX 6370: 6370C / 2x6420C / 6480C, short 6320P, long 6300P, 8/18 DTE) shows a
+  near-the-money version of the same structure; it may be a mid-trade view after adjustments. The
+  flags reproduce it: `--fly-lower-pct 0 --fly-body-pct 0.8 --fly-upper-pct 1.7 --put-pct 0.8`.
 - Legs: BUY K1 (F), BUY K3 (F), BUY Pl (B), then SELL 2x K2 (F), SELL Ps (F). Longs first so the
   shorts are always covered.
 - Skip the tick (no orders) if any of the five prices is missing or 0, spot is 0, or net debit exceeds
@@ -97,10 +107,10 @@ open legs. `--keep-on-stop` leaves the position and lets a restart reconcile.
 ```
 venv/bin/python strategies/flyagonal/nifty_flyagonal.py [--live]
   --broker {dhan,zerodha,kotak}  --instance-id ID  --lots N (1)  --max-lots N (5)
-  --entry-dte-min N (8)  --entry-dte-max N (10)  --back-dte-min N (15)  --entry-weekday 0-6
+  --entry-dte-min N (8)  --entry-dte-max N (10)  --back-dte-min N (15)  --back-dte-max N (20)  --entry-weekday 0-6
   --entry-time HH:MM (09:30)  --strike-step N (50)
-  --fly-lower-pct P (0.0)  --fly-body-pct P (0.9)  --fly-upper-pct P (1.9)
-  --put-pct P (0.8)  --diag-offset N (50)  --max-net-debit PTS
+  --fly-lower-pct P (2.2)  --fly-body-pct P (3.0)  --fly-upper-pct P (4.1)
+  --put-pct P (3.0)  --diag-offset N (50)  --max-net-debit PTS
   --target-profit INR|NN% (10%)  --adjusted-target INR|NN% (5%)  --stop-loss INR|NN% (none)
   --exit-dte N (4)  --exit-time HH:MM (15:15)
   --max-adjustments N (1)  --adjust-delta D (0.10)  --adjust-step N (50)

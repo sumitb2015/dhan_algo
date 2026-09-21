@@ -13,7 +13,7 @@ import {
 
 export interface FlyConfig {
   maxLots: string;
-  entryDteMin: string; entryDteMax: string; backDteMin: string;
+  entryDteMin: string; entryDteMax: string; backDteMin: string; backDteMax: string;
   entryWeekday: string;              // '' = any day in the DTE window, else 0-6
   entryTime: string; strikeStep: string;
   flyLowerPct: string; flyBodyPct: string; flyUpperPct: string;
@@ -26,11 +26,11 @@ export interface FlyConfig {
 
 export const FLY_DEFAULTS: FlyConfig = {
   maxLots: '5',
-  entryDteMin: '8', entryDteMax: '10', backDteMin: '15',
+  entryDteMin: '8', entryDteMax: '10', backDteMin: '15', backDteMax: '20',
   entryWeekday: '',
   entryTime: '09:30', strikeStep: '50',
-  flyLowerPct: '0', flyBodyPct: '0.9', flyUpperPct: '1.9',
-  putPct: '0.8', diagOffset: '50', maxNetDebit: '',
+  flyLowerPct: '2.2', flyBodyPct: '3', flyUpperPct: '4.1',
+  putPct: '3', diagOffset: '50', maxNetDebit: '',
   targetProfit: '10%', adjustedTarget: '5%', stopLoss: '',
   exitDte: '4', exitTime: '15:15',
   maxAdjustments: '1', adjustDelta: '0.10', adjustStep: '50',
@@ -46,7 +46,7 @@ const roundStep = (x: number, step: number) => Math.round(x / step) * step;
 export function buildFlyagonalArgs(c: FlyConfig, lots: number): { args: string[]; error?: string } {
   const err = (m: string) => ({ args: [] as string[], error: m });
   const n = {
-    maxLots: num(c.maxLots), dteMin: num(c.entryDteMin), dteMax: num(c.entryDteMax), back: num(c.backDteMin),
+    maxLots: num(c.maxLots), dteMin: num(c.entryDteMin), dteMax: num(c.entryDteMax), back: num(c.backDteMin), backMax: num(c.backDteMax),
     step: num(c.strikeStep), lo: num(c.flyLowerPct), body: num(c.flyBodyPct), up: num(c.flyUpperPct),
     put: num(c.putPct), diag: num(c.diagOffset), exitDte: num(c.exitDte), maxAdj: num(c.maxAdjustments),
     adjDelta: num(c.adjustDelta), adjStep: num(c.adjustStep), poll: num(c.pollInterval),
@@ -56,6 +56,7 @@ export function buildFlyagonalArgs(c: FlyConfig, lots: number): { args: string[]
   if (!(n.dteMin > 0 && n.dteMin <= n.dteMax)) return err('Flyagonal: need 0 < Entry DTE min <= Entry DTE max.');
   if (n.dteMin <= n.exitDte) return err('Flyagonal: Entry DTE min must exceed Exit DTE or it exits on entry.');
   if (n.back <= n.dteMax) return err('Flyagonal: Back-expiry min DTE must exceed Entry DTE max.');
+  if (n.backMax < n.back) return err('Flyagonal: Back-expiry max DTE must be at least the min.');
   if (n.step <= 0 || n.adjStep <= 0 || n.diag <= 0) return err('Flyagonal: Strike step, Adjust step and Diagonal offset must be > 0.');
   if (n.poll < 5) return err('Flyagonal: Poll interval must be >= 5 seconds.');
   if (!isHHMM(c.entryTime) || !isHHMM(c.exitTime)) return err('Flyagonal: Entry/Exit time must be HH:MM.');
@@ -74,7 +75,7 @@ export function buildFlyagonalArgs(c: FlyConfig, lots: number): { args: string[]
 
   const a: string[] = [
     '--lots', String(lots), '--max-lots', c.maxLots.trim(),
-    '--entry-dte-min', c.entryDteMin.trim(), '--entry-dte-max', c.entryDteMax.trim(), '--back-dte-min', c.backDteMin.trim(),
+    '--entry-dte-min', c.entryDteMin.trim(), '--entry-dte-max', c.entryDteMax.trim(), '--back-dte-min', c.backDteMin.trim(), '--back-dte-max', c.backDteMax.trim(),
     '--entry-time', c.entryTime.trim(), '--strike-step', c.strikeStep.trim(),
     '--fly-lower-pct', c.flyLowerPct.trim(), '--fly-body-pct', c.flyBodyPct.trim(), '--fly-upper-pct', c.flyUpperPct.trim(),
     '--put-pct', c.putPct.trim(), '--diag-offset', c.diagOffset.trim(),
@@ -120,7 +121,8 @@ export default function FlyagonalFields({ cfg, setCfg, FieldLabel, fieldCls, inp
       {F('Max Lots', 'Hard cap on Lots (--max-lots). Lots above it are refused before launch. The 2-lot short call means margin and freeze quantity scale 2x the lot count.', txt('maxLots'))}
       {F('Entry DTE Min', 'Front expiry must be at least this many calendar days out (--entry-dte-min, default 8).', txt('entryDteMin'))}
       {F('Entry DTE Max', 'Front expiry must be at most this many calendar days out (--entry-dte-max, default 10). Entry fires on the first day an expiry is inside the window.', txt('entryDteMax'))}
-      {F('Back DTE Min', 'Back expiry for the long put: first expiry after the front that is at least this many days out (--back-dte-min, default 15, roughly double the front).', txt('backDteMin'))}
+      {F('Back DTE Min', 'Long-put expiry window, min days out (--back-dte-min, default 15). The expiry closest to double the front DTE inside the window is used.', txt('backDteMin'))}
+      {F('Back DTE Max', 'Long-put expiry window, max days out (--back-dte-max, default 20).', txt('backDteMax'))}
       {F('Entry Weekday', 'Restrict entry to one weekday (--entry-weekday). Any = first day the front expiry is inside the DTE window.', (
         <Select value={cfg.entryWeekday === '' ? 'any' : cfg.entryWeekday}
           onValueChange={(v) => v && setCfg((p) => ({ ...p, entryWeekday: v === 'any' ? '' : v }))}>
@@ -133,10 +135,10 @@ export default function FlyagonalFields({ cfg, setCfg, FieldLabel, fieldCls, inp
       ))}
       {F('Entry Time', 'Earliest entry time HH:MM IST (--entry-time, default 09:30).', txt('entryTime', 64, '09:30'))}
       {F('Strike Step', 'Strike spacing in points that strikes are rounded to (--strike-step, Nifty = 50).', txt('strikeStep'))}
-      {F('Lower Call %', 'Long lower call strike vs spot, percent (--fly-lower-pct). 0 = at the money.', txt('flyLowerPct'))}
-      {F('Body Call %', 'Short 2x call body strike vs spot, percent (--fly-body-pct, default 0.9).', txt('flyBodyPct'))}
-      {F('Upper Call %', 'Long upper call strike vs spot, percent (--fly-upper-pct, default 1.9). Must give a wider upper wing than lower wing (broken wing).', txt('flyUpperPct'))}
-      {F('Short Put %', 'Short front put this far BELOW spot, percent (--put-pct, default 0.8).', txt('putPct'))}
+      {F('Lower Call %', 'Long lower call strike vs spot, percent (--fly-lower-pct, default 2.2). The butterfly sits above spot.', txt('flyLowerPct'))}
+      {F('Body Call %', 'Short 2x call body strike vs spot, percent (--fly-body-pct, default 3.0).', txt('flyBodyPct'))}
+      {F('Upper Call %', 'Long upper call strike vs spot, percent (--fly-upper-pct, default 4.1). Must give a wider upper wing than lower wing (broken wing).', txt('flyUpperPct'))}
+      {F('Short Put %', 'Short front put this far BELOW spot, percent (--put-pct, default 3.0).', txt('putPct'))}
       {F('Diagonal Offset', 'Long back put sits this many points BELOW the short put (--diag-offset, default 50). Keeps the put pair risk-defined at the front expiry.', txt('diagOffset'))}
       {F('Max Net Debit', 'Skip entry if the structure costs more than this many index points per unit (--max-net-debit). Empty = no limit.', txt('maxNetDebit', 72, 'none'))}
       {F('Target', 'Profit target: rupees or % of the entry max loss (--target-profit, default 10%). Exits the whole book when reached.', txt('targetProfit', 72, '10% or 4000'))}

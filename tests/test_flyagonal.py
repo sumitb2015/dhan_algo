@@ -20,7 +20,9 @@ sys.path.insert(0, ROOT)
 
 import pandas as pd  # noqa: E402
 
-FRONT, BACK = "2026-09-29", "2026-10-06"
+from datetime import date as _d, timedelta as _td  # noqa: E402
+_today = _d.today()
+FRONT, BACK = (_today + _td(days=9)).isoformat(), (_today + _td(days=18)).isoformat()   # 9 / 18 DTE: source rule 8-10 and 2x
 STEP_PRICES = {}   # (expiry, type, strike) -> price
 
 
@@ -130,10 +132,25 @@ try:
 except ValueError:
     ok = True
 check("non-broken-wing rejected", ok)
-check("expiry window picks 8-10 DTE front, 15+ back",
-      fly.pick_expiries(["2026-09-22", FRONT, BACK, "2026-10-13"], date(2026, 9, 21), 8, 10, 15) == (FRONT, BACK))
-check("no expiry in window -> None", fly.pick_expiries(["2026-09-22", "2026-10-13"], date(2026, 9, 21), 8, 10, 15) is None)
-check("just-cycled expiry skipped", fly.pick_expiries([FRONT, BACK, "2026-10-13"], date(2026, 9, 21), 8, 10, 15, skip_expiry=FRONT) is None)
+_T = date(2026, 9, 21)
+timedelta = _td
+_D = lambda n: (_T + timedelta(days=n)).isoformat()
+check("expiry window picks 8-10 DTE front, back 16-20",
+      fly.pick_expiries([_D(1), _D(9), _D(16), _D(23)], _T, 8, 10, 16, back_dte_max=20) == (_D(9), _D(16)))
+check("back expiry is the one closest to 2x the front DTE",
+      fly.pick_expiries([_D(9), _D(16), _D(18), _D(20)], _T, 8, 10, 16, back_dte_max=20) == (_D(9), _D(18)))
+check("back expiry outside 16-20 -> None",
+      fly.pick_expiries([_D(9), _D(15), _D(23)], _T, 8, 10, 16, back_dte_max=20) is None)
+check("Nifty weekly cadence: front 8 DTE, back 15 DTE accepted with default window",
+      fly.pick_expiries([_D(1), _D(8), _D(15), _D(22)], _T, 8, 10, 15, back_dte_max=20) == (_D(8), _D(15)))
+check("no expiry in window -> None", fly.pick_expiries([_D(1), _D(23)], _T, 8, 10, 16, back_dte_max=20) is None)
+check("just-cycled expiry skipped",
+      fly.pick_expiries([_D(9), _D(18), _D(25)], _T, 8, 10, 16, skip_expiry=_D(9), back_dte_max=20) is None)
+_d = fly.parse_args([])
+check("defaults follow the source: 3% shorts, butterfly above spot",
+      (_d.put_pct, _d.fly_body_pct) == (3.0, 3.0) and _d.fly_lower_pct > 0 and (_d.back_dte_min, _d.back_dte_max) == (15, 20))
+_st = fly.build_structure(23346.4, 50, _d.fly_lower_pct, _d.fly_body_pct, _d.fly_upper_pct, _d.put_pct, _d.diag_offset)
+check("default strikes: body ~+3%, short put ~-3%", abs(_st["k2"] / 23346.4 - 1.03) < 0.005 and abs(_st["ps"] / 23346.4 - 0.97) < 0.005)
 pr = {"call_lo": 100, "call_hi": 30, "put_long": 40, "call_body": 60, "put_short": 55}
 check("net debit", fly.net_debit_points(pr) == 100 + 30 + 40 - 120 - 55)
 check("max loss = max(wing gap, put gap) + debit", fly.max_loss_points(st, -5.0) == 45.0 and fly.max_loss_points(st, 10.0) == 60.0)
@@ -164,22 +181,22 @@ check("body leg is 2 lots", any(o[2] == 2 * 65 for o in H.orders))
 
 # ── entry: short leg fails -> rollback closes what was placed ────────────────
 reset()
-H.fail_sell.add(sid(23550, "CE"))
+H.fail_sell.add(sid(24050, "CE"))
 s = new_strategy(live=True)
 s.attempt_entry()
 check("failed body sell -> rolled back to IDLE, broker flat", s.status == "IDLE" and all(v == 0 for v in H.net.values()) and not s.legs)
 
 # ── entry: nothing placed -> stays flat, no cycle burn ───────────────────────
 reset()
-H.fail_buy.add(sid(23350, "CE"))
+H.fail_buy.add(sid(23850, "CE"))
 s = new_strategy(live=True)
 s.attempt_entry()
 check("first order fails -> IDLE, expiry not burned", s.status == "IDLE" and s.last_cycle_expiry is None)
 
 # ── entry: rollback close fails -> UNWINDING, legs stay tracked ──────────────
 reset()
-H.fail_sell.add(sid(23150, "PE"))       # last leg fails
-H.fail_buy.add(sid(23550, "CE"))        # ... and the body buy-back fails during rollback
+H.fail_sell.add(sid(22650, "PE"))       # last leg fails
+H.fail_buy.add(sid(24050, "CE"))        # ... and the body buy-back fails during rollback
 s = new_strategy(live=True)
 s.attempt_entry()
 check("failed rollback -> FLATTENING with body leg still tracked", s.status == "FLATTENING" and s.legs.get("call_body"))
@@ -191,10 +208,10 @@ check("retry closes to IDLE and broker flat", s.status == "IDLE" and all(v == 0 
 reset()
 s = new_strategy(live=True)
 s.attempt_entry()
-H.net[sid(23550, "CE")] = -65                   # someone flattened one lot of the 2-lot body
+H.net[sid(24050, "CE")] = -65                   # someone flattened one lot of the 2-lot body
 before = len(H.orders)
 s.exit_all("test")
-body_close = [o for o in H.orders[before:] if o[1] == sid(23550, "CE")]
+body_close = [o for o in H.orders[before:] if o[1] == sid(24050, "CE")]
 check("body buy-back clamped to broker's remaining 65", body_close and body_close[0][2] == 65)
 
 # ── unconfirmed entry fill -> cancel + tracked ───────────────────────────────
@@ -242,14 +259,14 @@ check("corrupt portfolio refuses to start", ok)
 reset()
 s = new_strategy(argv=["--max-adjustments", "0", "--stop-loss", "1%"])
 s.attempt_entry()
-STEP_PRICES[(FRONT, "CE", 23550)] = 500.0       # body reprices far up -> big loss
+STEP_PRICES[(FRONT, "CE", 24050)] = 500.0       # body reprices far up -> big loss
 s.monitor()
 check("stop-loss exit fires and books realized loss", s.status == "IDLE" and s.cumulative_pnl < 0)
 
 reset()
 s = new_strategy(argv=["--max-adjustments", "0"])
 s.attempt_entry()
-STEP_PRICES[(FRONT, "CE", 23550)] = 1.0         # shorts collapse -> profit
+STEP_PRICES[(FRONT, "CE", 24050)] = 1.0         # shorts collapse -> profit
 s.monitor()
 check("target exit fires", s.status == "IDLE" and s.cumulative_pnl > 0)
 
@@ -280,7 +297,7 @@ check("mid-entry crash leaves a persisted UNWINDING book with the placed longs",
 reset()
 s = new_strategy(argv=["--max-adjustments", "0"])
 s.attempt_entry()
-STEP_PRICES[(FRONT, "CE", 23800)] = 0.0
+STEP_PRICES[(FRONT, "CE", 24300)] = 0.0
 s.args.exit_dte = 100
 s.monitor()
 check("stale price does not block the time exit", s.status == "IDLE")

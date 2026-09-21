@@ -17,6 +17,9 @@ export interface StrategyTemplate {
   key: string;
   name: string;
   legs: TemplateLeg[];
+  /** Calendar-day windows the template's expiries should come from. When present, applying the
+   *  template re-picks the front / far expiry itself (far = closest to 2x the front DTE). */
+  dte?: { front: [number, number]; far?: [number, number] };
 }
 
 export type StrategyCategory = 'Bullish' | 'Bearish' | 'Range Bound' | 'Big Move' | 'Ratio Spreads' | 'Lizard' | 'Calendar';
@@ -127,16 +130,16 @@ export const STRATEGY_CATEGORIES: Record<StrategyCategory, StrategyTemplate[]> =
       { side: 'S', option: 'PE', offset: -4, ratio: 1, expiryRole: 'front' },
       { side: 'B', option: 'PE', offset: 0, ratio: 1, expiryRole: 'far' },
     ] },
-    // Flyagonal: call broken-wing butterfly + put diagonal, shaped like the reference chart
-    // (SPX 6370: 6370C / 2x 6420C / 6480C, short 6320P front, long 6300P back). Offsets are strike
-    // steps at step 50: calls 0 / +4 / +9 (wings 200/250), short put -4 (~-0.8%), long back put one
-    // step below it (matches the strategy default --put-pct 0.8).
-    { key: 'flyagonal',            name: 'Flyagonal',            legs: [
-      { side: 'B', option: 'CE', offset: 0, ratio: 1, expiryRole: 'front' },
-      { side: 'S', option: 'CE', offset: 4, ratio: 2, expiryRole: 'front' },
-      { side: 'B', option: 'CE', offset: 9, ratio: 1, expiryRole: 'front' },
-      { side: 'S', option: 'PE', offset: -4, ratio: 1, expiryRole: 'front' },
-      { side: 'B', option: 'PE', offset: -5, ratio: 1, expiryRole: 'far' },
+    // Flyagonal (thetaprofits / Steve): front 8-10 DTE for the call broken-wing butterfly and the
+    // short put, long put at double the days (16-20; 15 accepted since Nifty weeklies are 7 days apart). Shorts ~3% from spot (~14 strike steps at 50
+    // on Nifty 23400), butterfly sits above spot: calls +10 / +14 (x2) / +19 (wings 200/250),
+    // short put -14, long back put one step below it. Matches strategies/flyagonal defaults.
+    { key: 'flyagonal',            name: 'Flyagonal',            dte: { front: [8, 10], far: [15, 20] }, legs: [
+      { side: 'B', option: 'CE', offset: 10, ratio: 1, expiryRole: 'front' },
+      { side: 'S', option: 'CE', offset: 14, ratio: 2, expiryRole: 'front' },
+      { side: 'B', option: 'CE', offset: 19, ratio: 1, expiryRole: 'front' },
+      { side: 'S', option: 'PE', offset: -14, ratio: 1, expiryRole: 'front' },
+      { side: 'B', option: 'PE', offset: -15, ratio: 1, expiryRole: 'far' },
     ] },
   ],
 };

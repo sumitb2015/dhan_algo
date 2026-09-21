@@ -8,7 +8,7 @@ Rules, gaps and the reasoning are in strategies/flyagonal/strategy.md.
 
 Structure, one cycle (all NIFTY index options, per-unit strikes scaled off spot):
   Front expiry F = first listed expiry with --entry-dte-min <= DTE <= --entry-dte-max (default 8-10)
-  Back  expiry B = first listed expiry after F with DTE >= --back-dte-min (default 15)
+  Back  expiry B = listed expiry after F with DTE in --back-dte-min..max (default 15-20), closest to 2x F's DTE
   Call BWB on F : BUY 1 call @K1 (spot + fly-lower-pct), SELL 2 calls @K2 (+ fly-body-pct),
                   BUY 1 call @K3 (+ fly-upper-pct)      wings K2-K1 < K3-K2 (broken wing, up side)
   Put diagonal  : SELL 1 put on F @Ps (spot - put-pct), BUY 1 put on B @Ps - diag-offset
@@ -122,9 +122,11 @@ def build_structure(spot, step, lower_pct, body_pct, upper_pct, put_pct, diag_of
 
 
 def pick_expiries(expiries, today: date, dte_min: int, dte_max: int, back_dte_min: int,
-                  skip_expiry=None):
+                  skip_expiry=None, back_dte_max: int = None):
     """(front, back) expiry strings, or None. Front = first expiry inside the entry DTE window
-    (skipping the one just cycled); back = first later expiry at least back_dte_min days out."""
+    (skipping the one just cycled). Back = the later expiry inside [back_dte_min, back_dte_max]
+    closest to 2x the front's DTE (the source sets the long put at double the short leg's days).
+    back_dte_max None means no upper bound."""
     parsed = []
     for e in expiries or []:
         try:
@@ -135,9 +137,11 @@ def pick_expiries(expiries, today: date, dte_min: int, dte_max: int, back_dte_mi
     front = next(((e, d) for e, d in parsed if dte_min <= d <= dte_max and e != skip_expiry), None)
     if not front:
         return None
-    back = next(((e, d) for e, d in parsed if d > front[1] and d >= back_dte_min), None)
-    if not back:
+    cands = [(e, d) for e, d in parsed
+             if d > front[1] and d >= back_dte_min and (back_dte_max is None or d <= back_dte_max)]
+    if not cands:
         return None
+    back = min(cands, key=lambda t: (abs(t[1] - 2 * front[1]), t[1]))
     return front[0], back[0]
 
 
@@ -483,7 +487,8 @@ class NiftyFlyagonal:
             return
 
         pair = pick_expiries(self.helper.get_expiries("NIFTY"), now.date(), a.entry_dte_min,
-                             a.entry_dte_max, a.back_dte_min, skip_expiry=self.last_cycle_expiry)
+                             a.entry_dte_max, a.back_dte_min, skip_expiry=self.last_cycle_expiry,
+                             back_dte_max=a.back_dte_max)
         if not pair:
             return
         front, back = pair
@@ -796,14 +801,15 @@ Examples:
     p.add_argument("--max-lots", type=int, default=5, help="hard cap on --lots (default 5)")
     p.add_argument("--entry-dte-min", type=int, default=8, help="front expiry min calendar DTE (default 8)")
     p.add_argument("--entry-dte-max", type=int, default=10, help="front expiry max calendar DTE (default 10)")
-    p.add_argument("--back-dte-min", type=int, default=15, help="back expiry min calendar DTE (default 15)")
+    p.add_argument("--back-dte-min", type=int, default=15, help="back expiry min calendar DTE (default 15: weekly expiries are 7 days apart, so front 8 DTE gives back 15)")
+    p.add_argument("--back-dte-max", type=int, default=20, help="back expiry max calendar DTE (default 20)")
     p.add_argument("--entry-weekday", type=int, default=None, help="0=Mon..6=Sun; default any day in the DTE window")
     p.add_argument("--entry-time", type=_hhmm, default="09:30", metavar="HH:MM", help="earliest entry (default 09:30)")
     p.add_argument("--strike-step", type=int, default=50, help="strike spacing in points (default 50)")
-    p.add_argument("--fly-lower-pct", type=float, default=0.0, help="lower call vs spot, %% (default 0.0)")
-    p.add_argument("--fly-body-pct", type=float, default=0.9, help="short-call body vs spot, %% (default 0.9)")
-    p.add_argument("--fly-upper-pct", type=float, default=1.9, help="upper call vs spot, %% (default 1.9)")
-    p.add_argument("--put-pct", type=float, default=0.8, help="short front put below spot, %% (default 0.8)")
+    p.add_argument("--fly-lower-pct", type=float, default=2.2, help="lower call vs spot, %% (default 2.2)")
+    p.add_argument("--fly-body-pct", type=float, default=3.0, help="short-call body vs spot, %% (default 3.0)")
+    p.add_argument("--fly-upper-pct", type=float, default=4.1, help="upper call vs spot, %% (default 4.1)")
+    p.add_argument("--put-pct", type=float, default=3.0, help="short front put below spot, %% (default 3.0)")
     p.add_argument("--diag-offset", type=int, default=50, help="long back put below the short put, points (default 50)")
     p.add_argument("--max-net-debit", type=float, default=None, help="skip entry if net debit exceeds this, points")
     p.add_argument("--target-profit", default="10%", help="INR or NN%% of entry max loss (default 10%%)")
@@ -831,6 +837,8 @@ Examples:
         errors.append("--entry-dte-min must exceed --exit-dte or the position exits on entry")
     if args.back_dte_min <= args.entry_dte_max:
         errors.append("--back-dte-min must exceed --entry-dte-max")
+    if args.back_dte_max < args.back_dte_min:
+        errors.append("--back-dte-max must be >= --back-dte-min")
     if args.entry_weekday is not None and not 0 <= args.entry_weekday <= 6:
         errors.append("--entry-weekday must be 0..6")
     if args.adjust_step <= 0 or args.strike_step <= 0 or args.diag_offset <= 0:
@@ -865,7 +873,7 @@ def main() -> None:
     logger.info("NIFTY FLYAGONAL (call BWB + put diagonal), NOT VALIDATED")
     logger.info(f"  Mode      : {'LIVE (real orders)' if args.live else 'DRY (paper)'}")
     logger.info(f"  State key : {state_key}   Broker: {args.broker}   Lots: {args.lots}")
-    logger.info(f"  Entry     : DTE {args.entry_dte_min}-{args.entry_dte_max}, back >= {args.back_dte_min}, "
+    logger.info(f"  Entry     : DTE {args.entry_dte_min}-{args.entry_dte_max}, back {args.back_dte_min}-{args.back_dte_max}, "
                 f"from {args.entry_time}")
     logger.info(f"  Exit      : target {args.target_profit}, stop {args.stop_loss}, "
                 f"DTE<={args.exit_dte} @ {args.exit_time}")
