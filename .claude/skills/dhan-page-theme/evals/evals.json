@@ -1,0 +1,23 @@
+{
+  "skill_name": "dhan-page-theme",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "add a new page /options/gamma-exposure that shows net gamma by strike for NIFTY with an expiry dropdown and a refresh button. it should look like the rest of the options pages, and tell me which sidebar group it goes in.",
+      "expected_output": "A thin server page.tsx exporting metadata.title plus a 'use client' component. Standard header: sticky top-0 z-30 px-6 py-3 bg-zinc-950/95 border-zinc-800, flat emerald tile with a lucide icon that is not already used by another page and not the Derivatives/Options Analysis group icon, eyebrow 'Options · NIFTY' in text-emerald-400 at 10px/0.16em, title text-sm font-bold, DATA chip in the amber pill from the payload date, selectors and RefreshCw, divider, NavBar last. Body px-6 py-5. Loading/empty/error/stale states with shared markup, accents as literal classes, sidebar link added in one group only, tsc clean.",
+      "files": []
+    },
+    {
+      "id": 2,
+      "prompt": "the Trending OI page has no title and the buttons just float at the top left. also the Highs/Lows page header looks different from Sector Breadth in light mode. make trending-oi match the other pages and tell me what's up with the light mode thing.",
+      "expected_output": "Identifies Trending OI as a fat 'use client' page.tsx with a bare NavBar and no metadata; extracts a client component, adds a thin server page with metadata, and adds the standard header with icon tile, eyebrow, title, DATA chip and NavBar last. Explains the light-mode difference from concrete causes found in the code (e.g. text-white or -500 accents that do not flip, gradient tile glyph, bg opacity) instead of guessing, and does not restyle unrelated parts of Highs/Lows.",
+      "files": []
+    },
+    {
+      "id": 3,
+      "prompt": "audit the dashboard pages for header/icon consistency and give me a prioritized fix list. dont change anything yet.",
+      "expected_output": "Runs scripts/audit_pages.py, reads its flags rather than eyeballing, and reports counts with concrete routes: 3 bare-NavBar pages, 11 without metadata, z-index outliers, TILE_WHITE and TEXT_500 light-mode defects, duplicate icons with suggested replacements, and the Compass home-link tile. Prioritizes by user-visible impact, notes the audit is heuristic, and makes no file edits.",
+      "files": []
+    }
+  ]
+}

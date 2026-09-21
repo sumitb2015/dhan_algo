@@ -1,0 +1,23 @@
+{
+  "skill_name": "dhan-new-strategy",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "I watched a video where the guy sells a Bank Nifty ATM straddle at 9:30, exits one leg when its premium doubles, and re-sells that leg at the new ATM, max twice. Target 25% of collected premium, stop 40%. Build this as a strategy I can start from the dashboard. Dry run by default, but I want to be able to run it live on Zerodha later.",
+      "expected_output": "A new strategies/<family>/ script derived from the skeleton plus strategy.md: --live default off, --broker, --instance-id, %-target via parse_target_spec resolved once, per-leg SL roll capped by --max-rolls, own-quantity exits via resolve_exit_qty_broker, confirmed closes with retry status, save_strategy_state/check_shutdown_trigger, config validation, strategy.md with failure-mode table, plus the strategyRegistry.ts entry, the logs-route entry and StrategyCard/StrategyRowWide branches.",
+      "files": []
+    },
+    {
+      "id": 2,
+      "prompt": "nifty_overnight_fly keeps showing STOPPED on the strategies page the moment I hit Start, but if I run it from the terminal it works fine. Also I want it to refuse to start if the position file is from a dry run. Fix both.",
+      "expected_output": "Diagnoses the missing StrategyCard/StrategyRowWide branch (generic launcher sends --target-profit/--stop-loss that argparse does not define, exit 2) and adds branches in BOTH files, notices the log path/logs-registry gap, and adds dry_run persistence plus a mismatch refusal in load_position with a test.",
+      "files": []
+    },
+    {
+      "id": 3,
+      "prompt": "Add a re-entry to nifty_rolling_straddle: after a leg-SL roll fails to reopen the replacement leg, retry the entry on the next tick instead of staying flat for the rest of the day. Be careful, this thing trades real money.",
+      "expected_output": "Reads the rolling straddle first, keeps the roll transactional (close confirmed before booking, booked once, roll_count charged on close), guards against double-booking on the retry path, sizes exits with resolve_exit_qty_broker, saves state, and adds a test or dry-run failure-injection check for the failed-reopen path.",
+      "files": []
+    }
+  ]
+}
