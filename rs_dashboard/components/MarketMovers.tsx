@@ -1187,7 +1187,7 @@ export default function MarketMovers() {
                           axisLine={false}
                           tickFormatter={v => `${v}%`}
                         />
-                        <Tooltip content={<SectorChartTooltip />} cursor={{ fill: '#27272a', opacity: 0.5 }} />
+                        <Tooltip content={<SectorChartTooltip />} cursor={{ fill: 'var(--chart-cursor-fill)', opacity: 0.5 }} />
                         <ReferenceLine y={0} stroke="#52525b" strokeWidth={1.5} />
                         <Bar
                           dataKey={sectorMetric === '1D' ? 'avg1D' : sectorMetric === '1W' ? 'avg1W' : 'avg1M'}

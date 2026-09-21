@@ -1089,7 +1089,7 @@ export default function StrangleAnalysis() {
                 <CartesianGrid {...gridProps} />
                 <XAxis dataKey="name" tick={monoTick} axisLine={{ stroke: '#27272a' }} tickLine={false} />
                 <YAxis tick={monoTick} axisLine={false} tickLine={false} tickFormatter={(v) => `₹${v}`} width={54} />
-                <Tooltip content={<QuantChartTooltip formatter={(v) => fmtPremium(v)} />} cursor={{ fill: '#27272a', opacity: 0.4 }} />
+                <Tooltip content={<QuantChartTooltip formatter={(v) => fmtPremium(v)} />} cursor={{ fill: 'var(--chart-cursor-fill)', opacity: 0.4 }} />
                 <Bar dataKey="avg" name="Avg Premium" radius={[5, 5, 0, 0]}>
                   {weekdayChartData.map((entry) => (
                     <Cell key={entry.fullName} fill={WEEKDAY_COLORS[entry.fullName] ?? CHART_COLORS.primary} />
@@ -1164,7 +1164,7 @@ export default function StrangleAnalysis() {
                 <YAxis tick={monoTick} axisLine={false} tickLine={false} tickFormatter={(v) => `₹${v}`} width={54} />
                 <Tooltip
                   content={<QuantChartTooltip formatter={(v) => fmtPremium(v)} />}
-                  cursor={{ stroke: '#3f3f46', strokeWidth: 1, strokeDasharray: '4 4' }}
+                  cursor={{ stroke: 'var(--chart-cursor-line)', strokeWidth: 1, strokeDasharray: '4 4' }}
                 />
                 <Area type="monotone" dataKey="p75" name="_band_top" fill="url(#dteBandStrangle)" stroke="none" legendType="none" />
                 <Area type="monotone" dataKey="p25" name="_band_bot" fill="#09090b" stroke="none" legendType="none" />
@@ -1252,7 +1252,7 @@ export default function StrangleAnalysis() {
                       </div>
                     );
                   }}
-                  cursor={{ fill: '#27272a', opacity: 0.4 }}
+                  cursor={{ fill: 'var(--chart-cursor-fill)', opacity: 0.4 }}
                 />
                 <Bar dataKey="count" name="Days" fill={CHART_COLORS.primary} fillOpacity={0.6} radius={[3, 3, 0, 0]} barSize={16} />
                 <Line type="monotone" dataKey="normal" name="Fitted Normal" stroke={CHART_COLORS.amber} strokeWidth={2} dot={false} />
@@ -1316,7 +1316,7 @@ export default function StrangleAnalysis() {
                     <CartesianGrid {...gridProps} />
                     <XAxis dataKey="label" tick={monoTick} axisLine={{ stroke: '#27272a' }} tickLine={false} />
                     <YAxis tick={monoTick} axisLine={false} tickLine={false} tickFormatter={(v) => `₹${v}`} width={52} />
-                    <Tooltip content={<QuantChartTooltip formatter={(v) => fmtPremium(v)} />} cursor={{ stroke: '#3f3f46', strokeWidth: 1, strokeDasharray: '4 4' }} />
+                    <Tooltip content={<QuantChartTooltip formatter={(v) => fmtPremium(v)} />} cursor={{ stroke: 'var(--chart-cursor-line)', strokeWidth: 1, strokeDasharray: '4 4' }} />
                     <Area type="monotone" dataKey="p75" name="_band_top" fill="url(#decayBandStrangle)" stroke="none" legendType="none" />
                     <Area type="monotone" dataKey="p25" name="_band_bot" fill="#09090b" stroke="none" legendType="none" />
                     <Line type="monotone" dataKey="p75" name="P75" stroke="#a78bfa" strokeWidth={1.5} strokeDasharray="5 3" dot={false} />
@@ -1354,7 +1354,7 @@ export default function StrangleAnalysis() {
                       interval={11}
                     />
                     <YAxis tick={monoTick} axisLine={false} tickLine={false} tickFormatter={(v) => `₹${v}`} width={52} />
-                    <Tooltip content={<QuantChartTooltip formatter={(v) => fmtPremium(v)} />} cursor={{ stroke: '#3f3f46', strokeWidth: 1, strokeDasharray: '4 4' }} />
+                    <Tooltip content={<QuantChartTooltip formatter={(v) => fmtPremium(v)} />} cursor={{ stroke: 'var(--chart-cursor-line)', strokeWidth: 1, strokeDasharray: '4 4' }} />
                     <Legend
                       wrapperStyle={{ fontSize: 10, paddingTop: 4 }}
                       formatter={(v: string) => <span style={{ color: '#e4e4e7', fontWeight: 600 }}>{v}</span>}
@@ -1427,7 +1427,7 @@ export default function StrangleAnalysis() {
                       </div>
                     );
                   }}
-                  cursor={{ stroke: '#3f3f46', strokeWidth: 1, strokeDasharray: '4 4' }}
+                  cursor={{ stroke: 'var(--chart-cursor-line)', strokeWidth: 1, strokeDasharray: '4 4' }}
                 />
                 <Area
                   type="monotone"
@@ -1473,7 +1473,7 @@ export default function StrangleAnalysis() {
                     <CartesianGrid {...gridProps} />
                     <XAxis dataKey="name" tick={{ ...monoTick, fontSize: 9 }} axisLine={{ stroke: '#27272a' }} tickLine={false} />
                     <YAxis tick={monoTick} axisLine={false} tickLine={false} tickFormatter={(v) => `₹${v}`} width={50} />
-                    <Tooltip content={<QuantChartTooltip formatter={(v, n) => n === 'Range %' ? fmtPct(v) : fmtPremium(v)} />} cursor={{ fill: '#27272a', opacity: 0.4 }} />
+                    <Tooltip content={<QuantChartTooltip formatter={(v, n) => n === 'Range %' ? fmtPct(v) : fmtPremium(v)} />} cursor={{ fill: 'var(--chart-cursor-fill)', opacity: 0.4 }} />
                     <Bar dataKey="avg_range" name="Avg Range" radius={[4, 4, 0, 0]}>
                       {rangeByDte.map((entry, i) => (
                         <Cell key={entry.label} fill={DTE_COLORS[i]} />
@@ -1494,7 +1494,7 @@ export default function StrangleAnalysis() {
                     <CartesianGrid {...gridProps} />
                     <XAxis dataKey="name" tick={{ ...monoTick, fontSize: 9 }} axisLine={{ stroke: '#27272a' }} tickLine={false} />
                     <YAxis tick={monoTick} axisLine={false} tickLine={false} tickFormatter={(v) => `₹${v}`} width={50} />
-                    <Tooltip content={<QuantChartTooltip formatter={(v) => fmtPremium(v)} />} cursor={{ fill: '#27272a', opacity: 0.4 }} />
+                    <Tooltip content={<QuantChartTooltip formatter={(v) => fmtPremium(v)} />} cursor={{ fill: 'var(--chart-cursor-fill)', opacity: 0.4 }} />
                     <Bar dataKey="avg_range" name="Avg Range" radius={[4, 4, 0, 0]}>
                       {rangeByWd.map((entry) => (
                         <Cell key={entry.fullName} fill={WEEKDAY_COLORS[entry.fullName] ?? CHART_COLORS.primary} />

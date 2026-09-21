@@ -577,7 +577,7 @@ export default function IVChartsPage() {
                             { key: 'ceLTP', label: 'CE Premium', color: NEUTRAL, fmt: v => `₹${v.toFixed(1)}` },
                             { key: 'spot', label: 'Spot', color: AXIS, fmt: v => v.toFixed(1) },
                           ])}
-                          cursor={{ stroke: '#3f3f46', strokeWidth: 1, strokeDasharray: '4 4' }}
+                          cursor={{ stroke: 'var(--chart-cursor-line)', strokeWidth: 1, strokeDasharray: '4 4' }}
                         />
                         <Line yAxisId="iv" type="monotone" dataKey="ceIV" name="CE IV" stroke={CE_COLOR}
                           strokeWidth={2} dot={false} connectNulls
@@ -616,7 +616,7 @@ export default function IVChartsPage() {
                             { key: 'peLTP', label: 'PE Premium', color: NEUTRAL, fmt: v => `₹${v.toFixed(1)}` },
                             { key: 'spot', label: 'Spot', color: AXIS, fmt: v => v.toFixed(1) },
                           ])}
-                          cursor={{ stroke: '#3f3f46', strokeWidth: 1, strokeDasharray: '4 4' }}
+                          cursor={{ stroke: 'var(--chart-cursor-line)', strokeWidth: 1, strokeDasharray: '4 4' }}
                         />
                         <Line yAxisId="iv" type="monotone" dataKey="peIV" name="PE IV" stroke={PE_COLOR}
                           strokeWidth={2} dot={false} connectNulls
@@ -652,7 +652,7 @@ export default function IVChartsPage() {
                           content={chartTooltip([
                             { key: 'ivSpread', label: 'CE−PE', color: CE_COLOR, fmt: v => `${v >= 0 ? '+' : ''}${v.toFixed(2)} pts` },
                           ])}
-                          cursor={{ stroke: '#3f3f46', strokeWidth: 1, strokeDasharray: '4 4' }}
+                          cursor={{ stroke: 'var(--chart-cursor-line)', strokeWidth: 1, strokeDasharray: '4 4' }}
                         />
                         <Area type="monotone" dataKey="ivSpread" stroke={CE_COLOR} strokeWidth={2}
                           fill="url(#skewFill)" dot={false} connectNulls />
@@ -673,7 +673,7 @@ export default function IVChartsPage() {
                             { key: 'ceLTP', label: 'CE', color: CE_COLOR, fmt: v => `₹${v.toFixed(1)}` },
                             { key: 'peLTP', label: 'PE', color: PE_COLOR, fmt: v => `₹${v.toFixed(1)}` },
                           ])}
-                          cursor={{ stroke: '#3f3f46', strokeWidth: 1, strokeDasharray: '4 4' }}
+                          cursor={{ stroke: 'var(--chart-cursor-line)', strokeWidth: 1, strokeDasharray: '4 4' }}
                         />
                         <Line type="monotone" dataKey="straddle" stroke={NEUTRAL} strokeWidth={2} dot={false} />
                       </LineChart>
@@ -725,7 +725,7 @@ export default function IVChartsPage() {
                         { key: 'peIVOpen', label: 'PE open', color: PE_COLOR, fmt: v => `${v.toFixed(2)}%` },
                         { key: 'straddle', label: 'Straddle', color: NEUTRAL, fmt: v => `₹${v.toFixed(1)}` },
                       ], v => `Strike ${fmt(Number(v))}`)}
-                      cursor={{ stroke: '#3f3f46', strokeWidth: 1, strokeDasharray: '4 4' }}
+                      cursor={{ stroke: 'var(--chart-cursor-line)', strokeWidth: 1, strokeDasharray: '4 4' }}
                     />
                     <Line type="monotone" dataKey="ceIVOpen" stroke={CE_COLOR} strokeWidth={1.5}
                       strokeDasharray="4 3" dot={false} connectNulls opacity={0.55} />

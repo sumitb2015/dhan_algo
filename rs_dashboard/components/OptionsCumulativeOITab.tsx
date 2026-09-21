@@ -575,7 +575,7 @@ export default function OptionsCumulativeOITab({ expiry: _expiry }: { expiry: st
                   width={58}
                   tickFormatter={fmtOI}
                 />
-                <Tooltip content={<OITooltip />} cursor={{ stroke: '#3f3f46', strokeWidth: 1 }} />
+                <Tooltip content={<OITooltip />} cursor={{ stroke: 'var(--chart-cursor-line)', strokeWidth: 1 }} />
                 <Legend
                   wrapperStyle={{ fontSize: 11, paddingTop: 12 }}
                   formatter={(v: string) => <span style={{ color: '#d4d4d8', fontWeight: 600 }}>{v}</span>}
@@ -631,7 +631,7 @@ export default function OptionsCumulativeOITab({ expiry: _expiry }: { expiry: st
                   width={58}
                   tickFormatter={v => (v >= 0 ? '+' : '') + fmtOI(v)}
                 />
-                <Tooltip content={<DiffTooltip />} cursor={{ stroke: '#3f3f46', strokeWidth: 1 }} />
+                <Tooltip content={<DiffTooltip />} cursor={{ stroke: 'var(--chart-cursor-line)', strokeWidth: 1 }} />
                 <ReferenceLine y={0} stroke="#52525b" strokeWidth={1.5} />
                 <Area type="monotone" dataKey="diff" name="PE − CE OI"
                   stroke={diff >= 0 ? '#10b981' : '#ef4444'}
@@ -795,7 +795,7 @@ export default function OptionsCumulativeOITab({ expiry: _expiry }: { expiry: st
                 width={40}
                 tickFormatter={v => v.toFixed(1)}
               />
-              <Tooltip content={<ZScoreTooltip />} cursor={{ stroke: '#3f3f46', strokeWidth: 1 }} />
+              <Tooltip content={<ZScoreTooltip />} cursor={{ stroke: 'var(--chart-cursor-line)', strokeWidth: 1 }} />
               
               {/* Shaded Bullish and Bearish Reference Zones */}
               <ReferenceArea y1={0.5} y2={3.0} fill="#10b981" fillOpacity={0.04} />

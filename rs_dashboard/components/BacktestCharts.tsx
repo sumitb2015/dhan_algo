@@ -145,7 +145,7 @@ export default function BacktestCharts({ equityCurve }: { equityCurve: EquityPoi
                 tickLine={false}
                 axisLine={false}
               />
-              <Tooltip content={<EquityTooltip />} cursor={{ stroke: '#3f3f46', strokeWidth: 1, strokeDasharray: '4 4' }} />
+              <Tooltip content={<EquityTooltip />} cursor={{ stroke: 'var(--chart-cursor-line)', strokeWidth: 1, strokeDasharray: '4 4' }} />
               <Legend
                 verticalAlign="top"
                 height={0}
@@ -218,7 +218,7 @@ export default function BacktestCharts({ equityCurve }: { equityCurve: EquityPoi
                 tickLine={false}
                 axisLine={false}
               />
-              <Tooltip content={<DrawdownTooltip />} cursor={{ stroke: '#3f3f46', strokeWidth: 1, strokeDasharray: '4 4' }} />
+              <Tooltip content={<DrawdownTooltip />} cursor={{ stroke: 'var(--chart-cursor-line)', strokeWidth: 1, strokeDasharray: '4 4' }} />
               <Area
                 type="monotone"
                 dataKey="drawdown"

@@ -94,6 +94,10 @@ Deliberately **not** themed: `.recharts-tooltip-item`. Recharts colours each ite
 with its series colour, which is information rather than chrome. A chart that wants a
 flat neutral item row passes `var(--chart-tooltip-text)` inline instead.
 
+**The tooltip cursor is not a class rule.** It is themed by two tokens that call sites pass as values: `--chart-cursor-fill`
+(hover band: `#27272a` dark, `#cbd5e1` light) and `--chart-cursor-line` (crosshair: `#3f3f46` dark, `#94a3b8` light), e.g.
+`cursor={{ fill: 'var(--chart-cursor-fill)', opacity: 0.5 }}`. `.chart-light-surface` re-pins both to their light values.
+
 `.chart-light-surface` is a higher-specificity opt-out for a chart drawn on a
 deliberately always-white card — currently only the Dhan-style volatility-skew panel
 in `components/OptionsSkewTab.tsx`.

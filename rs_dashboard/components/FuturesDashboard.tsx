@@ -414,7 +414,7 @@ function SpotFutureChart({ points, name }: { points: ChartPoint[]; name: string 
             width={60}
             tickFormatter={(v: number) => v.toLocaleString('en-IN', { maximumFractionDigits: 0 })}
           />
-          <Tooltip content={<SpotFutureTooltip />} cursor={{ stroke: '#3f3f46', strokeWidth: 1, strokeDasharray: '4 4' }} />
+          <Tooltip content={<SpotFutureTooltip />} cursor={{ stroke: 'var(--chart-cursor-line)', strokeWidth: 1, strokeDasharray: '4 4' }} />
           <Legend
             wrapperStyle={{ fontSize: 11, paddingTop: 8 }}
             formatter={(v: string) => <span style={{ color: '#d4d4d8', fontWeight: 600 }}>{v}</span>}
@@ -539,7 +539,7 @@ function RolloverPanel({
             width={40}
             tickFormatter={(v: number) => `${v}%`}
           />
-          <Tooltip content={<RolloverTooltip />} cursor={{ stroke: '#3f3f46', strokeWidth: 1, strokeDasharray: '4 4' }} />
+          <Tooltip content={<RolloverTooltip />} cursor={{ stroke: 'var(--chart-cursor-line)', strokeWidth: 1, strokeDasharray: '4 4' }} />
           <Area
             type="monotone"
             dataKey="rolloverPct"

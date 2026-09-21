@@ -267,7 +267,7 @@ export default function OptionsPCDiffTab({
               domain={['auto', 'auto']}
               tickFormatter={v => (Number(v) >= 0 ? '+' : '') + fmtOI(Number(v))}
             />
-            <Tooltip content={<DiffTooltip />} cursor={{ stroke: '#3f3f46', strokeWidth: 1 }} />
+            <Tooltip content={<DiffTooltip />} cursor={{ stroke: 'var(--chart-cursor-line)', strokeWidth: 1 }} />
             <ReferenceLine y={0} stroke="#71717a" strokeWidth={1} strokeDasharray="4 3" />
             <Area
               type="monotone"
@@ -348,7 +348,7 @@ export default function OptionsPCDiffTab({
               domain={['auto', 'auto']}
               tickFormatter={v => (Number(v) >= 0 ? '+' : '') + Number(v).toFixed(1)}
             />
-            <Tooltip content={<PremiumDiffTooltip />} cursor={{ stroke: '#3f3f46', strokeWidth: 1 }} />
+            <Tooltip content={<PremiumDiffTooltip />} cursor={{ stroke: 'var(--chart-cursor-line)', strokeWidth: 1 }} />
             <ReferenceLine y={0} stroke="#71717a" strokeWidth={1} strokeDasharray="4 3" />
             <Area
               type="monotone"
@@ -418,7 +418,7 @@ export default function OptionsPCDiffTab({
               domain={['auto', 'auto']}
               tickFormatter={v => Number(v).toFixed(2)}
             />
-            <Tooltip content={<VixTabTooltip />} cursor={{ stroke: '#3f3f46', strokeWidth: 1 }} />
+            <Tooltip content={<VixTabTooltip />} cursor={{ stroke: 'var(--chart-cursor-line)', strokeWidth: 1 }} />
             <Area
               type="monotone"
               dataKey="close"

@@ -358,7 +358,7 @@ export default function OptionsPCRSpotTab({ expiry: _expiry }: { expiry: string 
                 axisLine={false} width={40} label={{ value: 'PCR', position: 'insideTopLeft', fill: AXIS, fontSize: 10, dy: -4 }}
               />
               <ReferenceLine y={1} stroke="#71717a" strokeDasharray="3 4" strokeWidth={1} />
-              <Tooltip content={<PCRTooltip />} cursor={{ stroke: '#3f3f46', strokeWidth: 1, strokeDasharray: '4 4' }} />
+              <Tooltip content={<PCRTooltip />} cursor={{ stroke: 'var(--chart-cursor-line)', strokeWidth: 1, strokeDasharray: '4 4' }} />
               <Line type="monotone" dataKey="pcr" name="PCR" stroke={PCR_COLOR} strokeWidth={2}
                 dot={false} connectNulls activeDot={{ r: 4, fill: PCR_COLOR, stroke: '#18181b', strokeWidth: 2 }} />
               <Line type="monotone" dataKey="niftyNorm" name="NIFTY50 %" stroke={NIFTY_COLOR} strokeWidth={2}

@@ -1009,7 +1009,7 @@ export default function ExpiryAnalysis() {
                     fill: '#71717a',
                   }}
                 />
-                <Tooltip content={<CustomTooltip />} cursor={{ stroke: '#3f3f46', strokeWidth: 1, strokeDasharray: '4 4' }} />
+                <Tooltip content={<CustomTooltip />} cursor={{ stroke: 'var(--chart-cursor-line)', strokeWidth: 1, strokeDasharray: '4 4' }} />
                 <Legend content={<ScatterLegend />} verticalAlign="bottom" />
                 <ReferenceLine y={0} stroke="#3f3f46" strokeWidth={1} />
                 <Scatter
@@ -1757,7 +1757,7 @@ export default function ExpiryAnalysis() {
                   label={{ value: 'Count', angle: -90, position: 'insideLeft', offset: 8, fontSize: 10, fill: '#71717a' }}
                 />
                 <Tooltip
-                  cursor={{ fill: '#3f3f46', opacity: 0.4 }}
+                  cursor={{ fill: 'var(--chart-cursor-fill)', opacity: 0.4 }}
                   content={({ active, payload }) => {
                     if (!active || !payload?.[0]) return null;
                     const d = payload[0].payload as { bin: string; count: number; positive: boolean; lo: number; hi: number };

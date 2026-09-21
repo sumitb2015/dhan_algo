@@ -110,15 +110,16 @@ Custom tooltip component per chart (not the default recharts one):
 </div>
 ```
 
-The tooltip **cursor is not covered** by the global chrome rules, so take its colour from `useChartChrome()`
-(`lib/chartTheme.ts`) instead of a hex; in dark mode `chrome.gridline` is exactly the old `#27272a`:
+The tooltip **cursor is not covered** by the global `.recharts-*` chrome rules, so pass it as a theme token, never a hex.
+`app/globals.css` defines `--chart-cursor-fill` (hover band) and `--chart-cursor-line` (crosshair) for light, dark and
+`.chart-light-surface`, and Recharts resolves `var()` in `fill`/`stroke` props:
 ```tsx
-const chrome = useChartChrome();
-<Tooltip cursor={{ fill: chrome.gridline, opacity: 0.5 }} content={<ChartTooltip />} />                        {/* bar/area */}
-<Tooltip cursor={{ stroke: chrome.baseline, strokeWidth: 1, strokeDasharray: '4 4' }} content={<ChartTooltip />} /> {/* line */}
+<Tooltip cursor={{ fill: 'var(--chart-cursor-fill)', opacity: 0.5 }} content={<ChartTooltip />} />                       {/* bar/area band */}
+<Tooltip cursor={{ stroke: 'var(--chart-cursor-line)', strokeWidth: 1, strokeDasharray: '4 4' }} content={<ChartTooltip />} /> {/* line crosshair */}
 ```
-About 64 existing chart cursors still pass `#27272a` / `#3f3f46`, which stay dark in white mode. Fix them when you touch the file;
-do not copy the pattern.
+All 64 previously hard-coded cursors were migrated (verified in the browser: dark unchanged, light now `#cbd5e1` band /
+`#94a3b8` line). A `<Tooltip>` with **no** `cursor` prop still draws recharts' default `#ccc`; that is a separate, unmigrated
+default, so pass one of the two forms above on new charts. No hook is needed.
 
 ## Color & Text Rules (inherited from CLAUDE.md — repeated here because it's easy to violate in chart code)
 

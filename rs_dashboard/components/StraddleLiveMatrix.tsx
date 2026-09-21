@@ -1199,7 +1199,7 @@ export default function StraddleLiveMatrix() {
                           tickFormatter={v => `${v} ${unitLabel}`}
                         />
                         <Tooltip
-                          cursor={{ fill: '#27272a', opacity: 0.5 }}
+                          cursor={{ fill: 'var(--chart-cursor-fill)', opacity: 0.5 }}
                           content={({ active, payload, label }) => {
                             if (!active || !payload?.length) return null;
                             const d = payload[0].payload as { time: string; strike: number; bestSl: string; pnl_pts: number; pnl_inr: number; var_pts: number };
@@ -1262,7 +1262,7 @@ export default function StraddleLiveMatrix() {
                           tickFormatter={v => `${v} ${unitLabel}`}
                         />
                         <Tooltip
-                          cursor={{ stroke: '#3f3f46', strokeWidth: 1, strokeDasharray: '4 4' }}
+                          cursor={{ stroke: 'var(--chart-cursor-line)', strokeWidth: 1, strokeDasharray: '4 4' }}
                           content={({ active, payload, label }) => {
                             if (!active || !payload?.length) return null;
                             const d = payload[0].payload as { time: string; cum_pnl_pts: number; cum_pnl_inr: number };
@@ -1325,7 +1325,7 @@ export default function StraddleLiveMatrix() {
                           tickFormatter={v => `${v} ${unitLabel}`}
                         />
                         <Tooltip
-                          cursor={{ fill: '#27272a', opacity: 0.5 }}
+                          cursor={{ fill: 'var(--chart-cursor-fill)', opacity: 0.5 }}
                           content={({ active, payload, label }) => {
                             if (!active || !payload?.length) return null;
                             const d = payload[0].payload as { sl_label: string; row_total_pts: number; row_total_inr: number };

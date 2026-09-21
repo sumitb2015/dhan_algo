@@ -165,6 +165,10 @@
   --chart-tooltip-text: #0f172a;
   --chart-pos: #047857;
   --chart-neg: #b91c1c;
+  /* Tooltip cursor: hover band (bar/area) and crosshair line. recharts does not theme the cursor by class,
+     so call sites pass these as var() values: cursor={{ fill: 'var(--chart-cursor-fill)', opacity: 0.5 }}. */
+  --chart-cursor-fill: #cbd5e1;
+  --chart-cursor-line: #94a3b8;
 
   /* lc-* panel design system (components/PanelStyles.tsx).
      Surfaces stay distinct so the toolbar > control > chart-wrap depth cue
@@ -290,6 +294,8 @@
   --chart-tooltip-border: #3f3f46;
   --chart-tooltip-text: #f4f4f5;
   --chart-pos: #10b981;
+  --chart-cursor-fill: #27272a;
+  --chart-cursor-line: #3f3f46;
   --chart-neg: #ef4444;
 
   /* lc-* panel design system */
@@ -441,6 +447,11 @@ body {
   color: var(--chart-tooltip-text) !important;
 }
 
+/* A fixed light chart inside the dark theme: pin the cursor tokens to their light values too. */
+.chart-light-surface {
+  --chart-cursor-fill: #cbd5e1;
+  --chart-cursor-line: #94a3b8;
+}
 .chart-light-surface .recharts-cartesian-grid line {
   stroke: #f0f0f0;
 }

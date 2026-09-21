@@ -491,7 +491,7 @@ export default function OptionsPremiumBarTab({ expiry }: { expiry: string }) {
                     tickFormatter={fmtOi}
                   />
                 )}
-                <Tooltip content={<PremiumTooltip />} cursor={{ fill: '#27272a', opacity: 0.5 }} />
+                <Tooltip content={<PremiumTooltip />} cursor={{ fill: 'var(--chart-cursor-fill)', opacity: 0.5 }} />
                 <Legend
                   wrapperStyle={{ fontSize: 11, paddingTop: 12 }}
                   formatter={(v: string) => <span style={{ color: '#d4d4d8', fontWeight: 600 }}>{v}</span>}
@@ -596,7 +596,7 @@ export default function OptionsPremiumBarTab({ expiry }: { expiry: string }) {
                   width={54}
                   tickFormatter={v => `₹${v}`}
                 />
-                <Tooltip content={<SmileTooltip />} cursor={{ stroke: '#3f3f46', strokeWidth: 1, strokeDasharray: '4 4' }} />
+                <Tooltip content={<SmileTooltip />} cursor={{ stroke: 'var(--chart-cursor-line)', strokeWidth: 1, strokeDasharray: '4 4' }} />
                 <Legend
                   wrapperStyle={{ fontSize: 11, paddingTop: 12 }}
                   formatter={(v: string) => <span style={{ color: '#d4d4d8', fontWeight: 600 }}>{v}</span>}

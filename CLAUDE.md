@@ -233,7 +233,8 @@ inside the token system.
   stops dimming anything.
 - **Recharts chrome is themed globally** in `app/globals.css` by class name. Don't
   pass `stroke`/`fill`/`contentStyle` hexes for grid, axis, legend or tooltip — they
-  are overridden anyway. Series colours you do pass.
+  are overridden anyway. Series colours you do pass. The tooltip **cursor** is the exception that is *not* class-themed:
+  pass `cursor={{ fill: 'var(--chart-cursor-fill)', opacity: 0.5 }}` (band) or `{ stroke: 'var(--chart-cursor-line)' }` (line).
 - **Table header style**: `text-xs font-bold text-white` on solid `bg-zinc-800` for
   `<thead>` / `TH` in all dashboard tables. At 10px the text anti-aliases to gray;
   12px (`text-xs`) with `font-bold` is the minimum for a header to read as a header.

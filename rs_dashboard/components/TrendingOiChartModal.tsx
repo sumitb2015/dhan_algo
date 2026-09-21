@@ -496,7 +496,7 @@ export function TrendingOiChartModal({
                       domain={['auto', 'auto']}
                       tickFormatter={oiTickFormatter}
                     />
-                    <Tooltip content={<ChartTooltip />} cursor={{ stroke: '#52525b', strokeWidth: 1 }} />
+                    <Tooltip content={<ChartTooltip />} cursor={{ stroke: 'var(--chart-cursor-line)', strokeWidth: 1 }} />
                     <ReferenceLine y={0} stroke="#52525b" strokeWidth={1.5} />
                     {!hidden.has('diff') && (
                       <Bar dataKey="diff" name="Diff. in OI" barSize={barSize} isAnimationActive={false}>
@@ -539,7 +539,7 @@ export function TrendingOiChartModal({
                       tickFormatter={(v: number) => v.toFixed(0)}
                     />
                     <Tooltip
-                      cursor={{ stroke: '#52525b', strokeWidth: 1 }}
+                      cursor={{ stroke: 'var(--chart-cursor-line)', strokeWidth: 1 }}
                       contentStyle={{ background: '#09090b', border: '1px solid #3f3f46', borderRadius: 10, fontSize: 11 }}
                       labelFormatter={(v) => fmtTick(Number(v))}
                       formatter={(v) => [Number(v).toFixed(2), 'Spot']}

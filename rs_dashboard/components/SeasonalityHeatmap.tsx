@@ -705,7 +705,7 @@ export default function SeasonalityHeatmap() {
                             axisLine={false}
                             tickFormatter={v => `${v}%`}
                           />
-                          <Tooltip content={<MonthBarTooltip />} cursor={{ fill: '#27272a', opacity: 0.5 }} />
+                          <Tooltip content={<MonthBarTooltip />} cursor={{ fill: 'var(--chart-cursor-fill)', opacity: 0.5 }} />
                           <ReferenceLine y={0} stroke="#52525b" strokeWidth={1.5} />
                           <Bar dataKey="avgReturn" name="Avg Return" radius={[3, 3, 0, 0]}>
                             {data.monthStats.map(m => (
@@ -748,7 +748,7 @@ export default function SeasonalityHeatmap() {
                             axisLine={false}
                             tickFormatter={v => `${v}%`}
                           />
-                          <Tooltip content={<MonthBarTooltip />} cursor={{ fill: '#27272a', opacity: 0.5 }} />
+                          <Tooltip content={<MonthBarTooltip />} cursor={{ fill: 'var(--chart-cursor-fill)', opacity: 0.5 }} />
                           <ReferenceLine y={50} stroke="#facc15" strokeDasharray="4 4" strokeWidth={1.2} />
                           <Bar dataKey="winRate" name="Win Rate" radius={[3, 3, 0, 0]}>
                             {data.monthStats.map(m => (
@@ -905,7 +905,7 @@ export default function SeasonalityHeatmap() {
                           tickFormatter={v => `${v}%`}
                         />
                         <Tooltip
-                          cursor={{ stroke: '#3f3f46', strokeWidth: 1, strokeDasharray: '4 4' }}
+                          cursor={{ stroke: 'var(--chart-cursor-line)', strokeWidth: 1, strokeDasharray: '4 4' }}
                           content={({ active, payload, label }) => {
                             if (!active || !payload?.length) return null;
                             const d = payload[0].payload as { month: string; cumulativePct: number; avgReturn: number; indexBase: number };

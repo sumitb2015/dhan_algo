@@ -854,7 +854,7 @@ export default function WeeklyTargetDashboard() {
                       width={64}
                       tickFormatter={(v: number) => fmtINR(v, true)}
                     />
-                    <Tooltip content={<ChartTooltip />} cursor={{ stroke: '#3f3f46', strokeWidth: 1, strokeDasharray: '4 4' }} />
+                    <Tooltip content={<ChartTooltip />} cursor={{ stroke: 'var(--chart-cursor-line)', strokeWidth: 1, strokeDasharray: '4 4' }} />
                     <ReferenceLine y={0} stroke="#52525b" strokeDasharray="3 3" />
                     {weeklyTarget > 0 && !targetOffChart && (
                       <ReferenceLine y={weeklyTarget} stroke="#f59e0b" strokeDasharray="6 3" label={{ value: 'Target', position: 'insideTopRight', fill: '#f59e0b', fontSize: 10, fontWeight: 700 }} />
@@ -900,7 +900,7 @@ export default function WeeklyTargetDashboard() {
                       width={64}
                       tickFormatter={(v: number) => fmtINR(v, true)}
                     />
-                    <Tooltip content={<ChartTooltip />} cursor={{ fill: '#27272a', opacity: 0.5 }} />
+                    <Tooltip content={<ChartTooltip />} cursor={{ fill: 'var(--chart-cursor-fill)', opacity: 0.5 }} />
                     <ReferenceLine y={0} stroke="#52525b" strokeDasharray="3 3" />
                     <Bar dataKey="netPnl" name="Net P&L" radius={[4, 4, 4, 4]} isAnimationActive={false}>
                       {chartData.map(p => (

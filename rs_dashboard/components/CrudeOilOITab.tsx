@@ -326,7 +326,7 @@ export default function CrudeOilOITab({ expiry }: { expiry: string }) {
                   tickLine={false}
                   axisLine={false}
                 />
-                <Tooltip content={<OITooltip />} cursor={{ fill: '#ffffff04' }} />
+                <Tooltip content={<OITooltip />} cursor={false} />
                 <Legend iconSize={8} iconType="circle" wrapperStyle={{ fontSize: 10 }} />
                 <ReferenceLine x={atm} stroke="#e4e4e7" strokeDasharray="3 3" label={{ value: 'ATM', fill: '#e4e4e7', fontSize: 10, position: 'top' }} />
                 <Bar dataKey="ceOI" name="Call OI" fill="#3b82f6" maxBarSize={28} radius={[4, 4, 0, 0]} />
@@ -354,7 +354,7 @@ export default function CrudeOilOITab({ expiry }: { expiry: string }) {
                   tickLine={false}
                   axisLine={false}
                 />
-                <Tooltip content={<DeltaTooltip />} cursor={{ fill: '#ffffff04' }} />
+                <Tooltip content={<DeltaTooltip />} cursor={false} />
                 <Legend iconSize={8} iconType="circle" wrapperStyle={{ fontSize: 10 }} />
                 <ReferenceLine y={0} stroke="#3f3f46" />
                 <ReferenceLine x={atm} stroke="#e4e4e7" strokeDasharray="3 3" label={{ value: 'ATM', fill: '#e4e4e7', fontSize: 10, position: 'top' }} />

@@ -277,7 +277,7 @@ export default function RSChart({ symbol, indexType, lookback }: RSChartProps) {
                   tickLine={false}
                   axisLine={false}
                 />
-                <Tooltip content={<CustomTooltip />} cursor={{ stroke: '#3f3f46', strokeWidth: 1.2, strokeDasharray: '3 3' }} />
+                <Tooltip content={<CustomTooltip />} cursor={{ stroke: 'var(--chart-cursor-line)', strokeWidth: 1.2, strokeDasharray: '3 3' }} />
                 <Area
                   type="monotone"
                   dataKey="stockClose"
@@ -315,7 +315,7 @@ export default function RSChart({ symbol, indexType, lookback }: RSChartProps) {
                   tickLine={false}
                   axisLine={false}
                 />
-                <Tooltip content={<CustomTooltip />} cursor={{ stroke: '#3f3f46', strokeWidth: 1.2, strokeDasharray: '3 3' }} />
+                <Tooltip content={<CustomTooltip />} cursor={{ stroke: 'var(--chart-cursor-line)', strokeWidth: 1.2, strokeDasharray: '3 3' }} />
                 {/* 0 baseline reference line */}
                 <ReferenceLine
                   y={0}
@@ -380,7 +380,7 @@ export default function RSChart({ symbol, indexType, lookback }: RSChartProps) {
                 tickLine={false}
                 axisLine={false}
               />
-              <Tooltip content={<CustomTooltip />} cursor={{ stroke: '#3f3f46', strokeWidth: 1.2, strokeDasharray: '3 3' }} />
+              <Tooltip content={<CustomTooltip />} cursor={{ stroke: 'var(--chart-cursor-line)', strokeWidth: 1.2, strokeDasharray: '3 3' }} />
               {/* 0 reference line linked to left axis */}
               <ReferenceLine
                 y={0}
@@ -444,7 +444,7 @@ export default function RSChart({ symbol, indexType, lookback }: RSChartProps) {
                 tickLine={false}
                 axisLine={false}
               />
-              <Tooltip content={<CustomTooltip />} cursor={{ stroke: '#3f3f46', strokeWidth: 1.2, strokeDasharray: '3 3' }} />
+              <Tooltip content={<CustomTooltip />} cursor={{ stroke: 'var(--chart-cursor-line)', strokeWidth: 1.2, strokeDasharray: '3 3' }} />
               <Area
                 type="monotone"
                 dataKey="rawRatio"

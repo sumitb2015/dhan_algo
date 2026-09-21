@@ -950,7 +950,7 @@ export default function PortfolioDiaryDashboard() {
                       />
                       <ReferenceLine y={0} stroke="#52525b" />
                       <Tooltip
-                        cursor={{ fill: '#3f3f46', opacity: 0.35 }}
+                        cursor={{ fill: 'var(--chart-cursor-fill)', opacity: 0.35 }}
                         contentStyle={{ background: '#18181b', border: '1px solid #3f3f46', borderRadius: 8, fontSize: 11 }}
                         labelStyle={{ color: '#a1a1aa' }}
                         itemStyle={{ color: 'var(--chart-tooltip-text)' }}
@@ -1447,7 +1447,7 @@ export default function PortfolioDiaryDashboard() {
                             width={56}
                           />
                           <Tooltip
-                            cursor={{ fill: '#3f3f46', opacity: 0.35 }}
+                            cursor={{ fill: 'var(--chart-cursor-fill)', opacity: 0.35 }}
                             contentStyle={{ background: '#18181b', border: '1px solid #3f3f46', borderRadius: 8, fontSize: 11 }}
                             labelStyle={{ color: '#a1a1aa' }}
                         itemStyle={{ color: 'var(--chart-tooltip-text)' }}

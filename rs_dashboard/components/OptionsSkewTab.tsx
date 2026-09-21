@@ -226,7 +226,7 @@ export default function OptionsSkewTab({ expiry }: { expiry: string }) {
               label={{ value: 'IV', angle: -90, position: 'insideLeft', fill: '#6b7280', fontSize: 11, dy: 10 }}
               domain={['auto', 'auto']}
             />
-            <Tooltip content={<SkewTooltip atm={atm} />} cursor={{ stroke: '#9ca3af', strokeWidth: 1, strokeDasharray: '4 4' }} />
+            <Tooltip content={<SkewTooltip atm={atm} />} cursor={{ stroke: 'var(--chart-cursor-line)', strokeWidth: 1, strokeDasharray: '4 4' }} />
             {atm > 0 && (
               <ReferenceLine
                 x={atm}
@@ -271,7 +271,7 @@ export default function OptionsSkewTab({ expiry }: { expiry: string }) {
               axisLine={false}
               tickFormatter={(v: number) => `${v}%`}
             />
-            <Tooltip content={<DiffTooltip />} cursor={{ fill: '#27272a' }} />
+            <Tooltip content={<DiffTooltip />} cursor={{ fill: 'var(--chart-cursor-fill)' }} />
             <ReferenceLine y={0} stroke="#a1a1aa" strokeWidth={1} />
             {atm > 0 && <ReferenceLine x={atm} stroke="#a1a1aa" strokeDasharray="4 4" />}
             <Bar dataKey="diff" name="CE−PE IV" radius={[2, 2, 0, 0]}>

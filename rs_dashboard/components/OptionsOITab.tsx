@@ -340,7 +340,7 @@ export default function OptionsOITab({ expiry }: { expiry: string }) {
                 width={54}
                 tickFormatter={fmtOI}
               />
-              <Tooltip content={<OITooltip />} cursor={{ fill: '#27272a', opacity: 0.5 }} />
+              <Tooltip content={<OITooltip />} cursor={{ fill: 'var(--chart-cursor-fill)', opacity: 0.5 }} />
               <Legend
                 wrapperStyle={{ fontSize: 11, paddingTop: 12 }}
                 formatter={(v: string) => <span style={{ color: '#d4d4d8', fontWeight: 600 }}>{v}</span>}
@@ -408,7 +408,7 @@ export default function OptionsOITab({ expiry }: { expiry: string }) {
                 width={54}
                 tickFormatter={fmtOI}
               />
-              <Tooltip content={<DeltaTooltip />} cursor={{ fill: '#27272a', opacity: 0.5 }} />
+              <Tooltip content={<DeltaTooltip />} cursor={{ fill: 'var(--chart-cursor-fill)', opacity: 0.5 }} />
               <Legend
                 wrapperStyle={{ fontSize: 11, paddingTop: 12 }}
                 formatter={(v: string) => <span style={{ color: '#d4d4d8', fontWeight: 600 }}>{v}</span>}

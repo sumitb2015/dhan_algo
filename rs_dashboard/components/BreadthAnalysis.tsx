@@ -401,7 +401,7 @@ function MAPenetrationChart({ n50, n500 }: { n50: BreadthStats; n500: BreadthSta
           <CartesianGrid {...gridProps} />
           <XAxis dataKey="name" tick={tickStyle} tickLine={false} axisLine={{ stroke: '#27272a' }} />
           <YAxis domain={[0, 100]} tick={tickStyle} tickLine={false} axisLine={false} width={36} tickFormatter={(v) => `${v}%`} />
-          <Tooltip content={<BarTooltip />} cursor={{ fill: '#27272a', opacity: 0.5 }} />
+          <Tooltip content={<BarTooltip />} cursor={{ fill: 'var(--chart-cursor-fill)', opacity: 0.5 }} />
           <ReferenceLine y={40} stroke="#fb923c" strokeDasharray="4 4" strokeOpacity={0.6} />
           <ReferenceLine y={50} stroke="#facc15" strokeDasharray="4 4" strokeOpacity={0.6} />
           <ReferenceLine y={60} stroke="#34d399" strokeDasharray="4 4" strokeOpacity={0.6} />
@@ -454,7 +454,7 @@ function RSIDistributionChart({ n50, n500 }: { n50: BreadthStats; n500: BreadthS
           <CartesianGrid {...gridProps} horizontal={false} />
           <XAxis type="number" domain={[0, 100]} tick={tickStyle} tickLine={false} axisLine={false} tickFormatter={(v) => `${v}%`} />
           <YAxis type="category" dataKey="name" tick={{ ...tickStyle, fontWeight: 700 }} tickLine={false} axisLine={false} width={70} />
-          <Tooltip content={<BarTooltip />} cursor={{ fill: '#27272a', opacity: 0.4 }} />
+          <Tooltip content={<BarTooltip />} cursor={{ fill: 'var(--chart-cursor-fill)', opacity: 0.4 }} />
           <Bar dataKey="overbought" name=">70 Overbought" stackId="rsi" fill="#f87171" />
           <Bar dataKey="elevated" name="60–70 Elevated" stackId="rsi" fill="#fb923c" />
           <Bar dataKey="neutral" name="40–60 Neutral" stackId="rsi" fill="#71717a" />
@@ -498,7 +498,7 @@ function Extremes52WChart({ n50, n500 }: { n50: BreadthStats; n500: BreadthStats
           <XAxis dataKey="name" tick={{ ...tickStyle, fontWeight: 700 }} tickLine={false} axisLine={{ stroke: '#27272a' }} />
           <YAxis tick={tickStyle} tickLine={false} axisLine={false} width={40} tickFormatter={(v) => `${Math.abs(Number(v))}%`} />
           <Tooltip
-            cursor={{ fill: '#27272a', opacity: 0.5 }}
+            cursor={{ fill: 'var(--chart-cursor-fill)', opacity: 0.5 }}
             content={({ active, payload, label }) => {
               if (!active || !payload?.length) return null;
               const d = payload[0]?.payload as { highCount: number; lowCount: number };
@@ -611,7 +611,7 @@ function PowerAndADChart({ n50, n500 }: { n50: BreadthStats; n500: BreadthStats 
               <CartesianGrid {...gridProps} />
               <XAxis dataKey="name" tick={tickStyle} tickLine={false} axisLine={{ stroke: '#27272a' }} />
               <YAxis tick={tickStyle} tickLine={false} axisLine={false} width={36} tickFormatter={(v) => `${v}%`} />
-              <Tooltip content={<BarTooltip />} cursor={{ fill: '#27272a', opacity: 0.5 }} />
+              <Tooltip content={<BarTooltip />} cursor={{ fill: 'var(--chart-cursor-fill)', opacity: 0.5 }} />
               <Bar dataKey="n50" name="Nifty 50" fill={N50_COLOR} radius={[3, 3, 0, 0]} />
               <Bar dataKey="n500" name="Nifty 500" fill={N500_COLOR} radius={[3, 3, 0, 0]} />
             </BarChart>
@@ -623,7 +623,7 @@ function PowerAndADChart({ n50, n500 }: { n50: BreadthStats; n500: BreadthStats 
               <CartesianGrid {...gridProps} />
               <XAxis dataKey="name" tick={{ ...tickStyle, fontSize: 9 }} tickLine={false} axisLine={{ stroke: '#27272a' }} />
               <YAxis tick={tickStyle} tickLine={false} axisLine={false} width={30} tickFormatter={(v) => `${v}x`} />
-              <Tooltip content={<BarTooltip />} cursor={{ fill: '#27272a', opacity: 0.5 }} />
+              <Tooltip content={<BarTooltip />} cursor={{ fill: 'var(--chart-cursor-fill)', opacity: 0.5 }} />
               <ReferenceLine y={1} stroke="#71717a" strokeDasharray="4 4" />
               <Bar dataKey="ratio" name="A/D Ratio" radius={[3, 3, 0, 0]}>
                 {adData.map((d) => <Cell key={d.name} fill={d.fill} />)}
