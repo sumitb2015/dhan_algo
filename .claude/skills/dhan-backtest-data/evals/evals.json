@@ -1,0 +1,11 @@
+{
+  "skill_name": "dhan-backtest-data",
+  "evals": [
+    {"id": 1, "prompt": "/backtest supertrend NIFTY NSE 15m - I want to see if a 15 minute supertrend on nifty is worth trading",
+     "expected_output": "Reads dhan-backtest-data before the vendor backtest skill. Uses dhan_data.load_ohlcv('NIFTY','15m') (session-filtered, 25 bars/session), pandas_ta or lib.intraday_signals.supertrend instead of openalgo.ta, NIFTY benchmark from the repo CSV, no yfinance/OpenAlgo. Reports describe() window and trade count, gross and net of costs, a one-bar-shifted run, and states the supertrend implementation used."},
+    {"id": 2, "prompt": "backtest an ORB strategy on RELIANCE using 1 minute data for the last year",
+     "expected_output": "Notices stock 1-min data is Nifty-50-only and only ~4 months (manifest.json), says a year is not available from repo data and does not fetch from yfinance or another provider; offers the available window with a robustness caveat or a daily-data alternative."},
+    {"id": 3, "prompt": "run /optimize on ema crossover for TCS, find the best fast/slow periods",
+     "expected_output": "Uses load_ohlcv('TCS','D'), a heatmap over the grid, warns about in-sample curve-fitting and asks for or performs an out-of-sample/walk-forward check, reports net of costs, and saves keepers under scripts/analysis/ rather than an untracked backtesting/ folder."}
+  ]
+}

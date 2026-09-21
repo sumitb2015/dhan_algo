@@ -5,6 +5,8 @@ argument-hint: "[symbol] [exchange] [interval]"
 allowed-tools: Read, Bash, Glob, Grep
 ---
 
+> **Repo override (dhan_algo):** this repo has no OpenAlgo server and its market data is Dhan-only. The data-fetch, indicator-library, benchmark, lot-size and output-location steps below do not apply as written. Read the `dhan-backtest-data` skill first and use its substitutions (`load_ohlcv()` instead of `client.history()`, `pandas_ta`/`lib.intraday_signals` instead of `openalgo.ta`, no yfinance).
+
 Generate a quick inline backtest and print stats. Do NOT create a file - output code directly for the user to run or execute in a notebook.
 
 ## Arguments

@@ -1,0 +1,11 @@
+{
+  "skill_name": "dhan-api-errors",
+  "evals": [
+    {"id": 1, "prompt": "my script says 'no data for RELIANCE' for the last 3 days but the market was open, get_historical_data returns an empty dataframe",
+     "expected_output": "Checks helper.last_api_error before concluding no data, distinguishes fatal auth/subscription codes (DH-901/902/906, 806-809) via is_fatal_error, points to a lapsed Data API subscription or stale token, and makes the script surface the error instead of reporting up to date."},
+    {"id": 2, "prompt": "quotes and positions work fine but every order I place gets DH-905. is the api broken?",
+     "expected_output": "Explains DH-905 Invalid IP is enforced only on transaction endpoints so reads working proves nothing; suggests the zero-risk DELETE-a-cancelled-order probe, IP whitelist fix at web.dhan.co and re-running login.py; does not place a test trade."},
+    {"id": 3, "prompt": "add a retry wrapper around our dhan calls, retry on any error code up to 5 times",
+     "expected_output": "Pushes back on blanket retry: classifies codes (fatal auth/subscription stop; 904/805/429 back off; 905/811-814 are input bugs not retried; 908/909/800 transient with capped backoff), keeps last_api_error in logs, and never retries a failed order blindly."}
+  ]
+}

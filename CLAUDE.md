@@ -257,6 +257,9 @@ distilled from 7-10 repeat bug-fix commits:
 `dhan-options-analytics-page` (Positions/Straddle/Strangle Analysis: draft legs, margin/ROI, validity modals),
 `dhan-live-chart` (lightweight-charts canvas charts and polled series),
 `dhan-plotly-3d-scene` (Option Cube / Plotly gl3d: camera ownership, fullscreen panel, expiry-keyed chain state),
+`dhan-backtest-data` (override for the installed VectorBT skills: Dhan-only data loader, session filter, costs, lot sizes — read before any backtest),
+`dhan-indicators` (indicator sources, the six Supertrend copies, TA-Lib host dependence, closed-candle rules),
+`dhan-api-errors` (DH-9xx / 8xx codes, `last_api_error`, silent-failure symptom table),
 `dhan-polling-guards` (poll loops, caches, JSON read-modify-write, process spawns),
 `dhan-theme-tokens` (the theme system), `dhan-commit-on-blur` (free-typed inputs
 must commit on blur/Enter so mid-edit values cannot fire live rules), plus

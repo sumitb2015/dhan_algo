@@ -1,0 +1,11 @@
+{
+  "skill_name": "dhan-indicators",
+  "evals": [
+    {"id": 1, "prompt": "my supertrend flips in the st_oi_bearcall strategy dont match what my backtest shows for the same day. why?",
+     "expected_output": "Identifies the multiple Supertrend implementations (pandas_ta via calculate_ta_indicators vs lib.intraday_signals vs the ewm(span) variant in backtest_ema_breakout), checks TA-Lib presence on the host, closed-candle iloc[-2] versus forming bar, and resample alignment; recommends using one implementation with a parity test rather than editing one silently."},
+    {"id": 2, "prompt": "add a VWAP-anchored bands indicator we can use in both the live strategy and a backtest",
+     "expected_output": "Puts a pure function in lib/ (no broker/clock/IO), reuses session_vwap/resample_tf conventions, handles warm-up as NaN, adds tests/test_*.py, imports it from both live and backtest, and does not add Numba unless a loop is shown to be a bottleneck."},
+    {"id": 3, "prompt": "our ATR loop is slow, can we speed it up with numba?",
+     "expected_output": "Measures first: notes the loop takes ~0.35s on 464k 1-minute bars and ~2ms on daily, so a single pass does not need it; recommends Numba only for parameter grids or many-symbol sweeps, with njit(cache=True, nogil=True), no fastmath, explicit NaN handling, cache needing a real file, and an equality test against the pandas version."}
+  ]
+}
