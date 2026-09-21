@@ -1347,6 +1347,30 @@ export default function MultiLegFocus() {
         };
 
         const latestLegs = basketsRef.current.find(b => b.id === basket.id)?.legs ?? basket.legs;
+        // Dhan nets by security id, so a leg identical to one already OPEN
+        // (same side/option/strike/expiry) is the SAME position — merge the
+        // lots into that row (weighted avg) instead of listing a duplicate.
+        const existing = latestLegs.find(l =>
+          l.status === 'OPEN' && l.side === params.side && l.option === params.option
+          && l.strike === params.strike && (l.expiry || basket.expiry) === legExpiry);
+        if (existing) {
+          const oldQty = (existing.fill?.qty && existing.fill.qty > 0) ? existing.fill.qty : existing.lots * lotSize;
+          const oldAvg = (existing.fill?.avgPrice && existing.fill.avgPrice > 0) ? existing.fill.avgPrice : (existing.price || fillPrice);
+          const totalQty = oldQty + qty;
+          const avg = (oldAvg * oldQty + fillPrice * qty) / totalQty;
+          updateBasket(basket.id, {
+            legs: latestLegs.map(l => l.id !== existing.id ? l : {
+              ...l,
+              lots: l.lots + params.lots,
+              price: avg,
+              fill: { ...l.fill, qty: totalQty, avgPrice: avg, orderId: j.order_id ?? l.fill?.orderId },
+            }),
+          });
+          addToast('success', `Added ${params.lots} lot(s) to ${label}`, `New Avg: ₹${avg.toFixed(2)} (${existing.lots + params.lots} lots total)`);
+          pollFunds();
+          fetchMarginsForBaskets();
+          return;
+        }
         updateBasket(basket.id, { legs: [...latestLegs, newLeg] });
         addToast('success', `Added new leg ${label}`, `Filled @ ₹${fillPrice.toFixed(2)} (${params.lots} lots)`);
         pollFunds();
