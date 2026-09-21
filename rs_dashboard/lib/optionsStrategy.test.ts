@@ -221,3 +221,50 @@ test('STRATEGY_TEMPLATES: batman template generates 4 legs with 1:2 ratio and un
     { offsetStrikes: -4, type: 'PE', side: 'SELL', qtyRatio: 2 },
   ]);
 });
+
+// ── exact expiry profile: breakevens / bounded extremes independent of the drawn window ──
+// Fixtures are the NISM Series VIII workbook examples (April 2014), one lot, lot size 1.
+
+const nism = (type: 'CE' | 'PE', side: 'BUY' | 'SELL', strike: number, price: number): ResolvedLeg => ({
+  strike, type, side, qtyLots: 1, price, delta: null, iv: null, vega: null, securityId: null,
+});
+
+test('wide long strangle: breakevens outside the default window are still found', () => {
+  const legs = [nism('CE', 'BUY', 6200, 145), nism('PE', 'BUY', 6000, 140)];
+  const stats = computePayoffStats(legs, 6100, 1, EXPIRY, 50);
+  assert.deepStrictEqual(stats.breakevensExpiry, [5715, 6485]);
+  assert.strictEqual(stats.maxLoss, -285);
+  // ...and the drawn range now covers them, so the chart shows what the stats claim.
+  assert.ok(stats.rangeLo < 5715 && stats.rangeHi > 6485, `${stats.rangeLo}-${stats.rangeHi}`);
+});
+
+test('wide long straddle: strike -/+ total premium', () => {
+  const legs = [nism('CE', 'BUY', 6000, 257), nism('PE', 'BUY', 6000, 136)];
+  const stats = computePayoffStats(legs, 6000, 1, EXPIRY, 50);
+  assert.deepStrictEqual(stats.breakevensExpiry, [5607, 6393]);
+  assert.strictEqual(stats.maxLoss, -393);
+  assert.strictEqual(stats.maxProfit, 'Unlimited');
+});
+
+test('a long put reports its true bounded max profit (strike - premium at spot 0), not a window value', () => {
+  const stats = computePayoffStats([nism('PE', 'BUY', 6200, 141.5)], 6143.4, 1, EXPIRY, 50);
+  assert.strictEqual(stats.maxProfit, 6058.5);
+  assert.strictEqual(stats.maxLoss, -141.5);
+  assert.deepStrictEqual(stats.breakevensExpiry, [6058.5]);
+  assert.ok(stats.maxProfitInRange < 6058.5, 'the in-range figure stays a window value');
+});
+
+test('NISM defined-risk structures: exact max profit, max loss and breakevens', () => {
+  const bull = computePayoffStats([nism('CE', 'BUY', 5800, 300), nism('CE', 'SELL', 6200, 145)], 6000, 1, EXPIRY, 50);
+  assert.deepStrictEqual([bull.maxProfit, bull.maxLoss, bull.breakevensExpiry], [245, -155, [5955]]);
+  const fly = computePayoffStats([
+    nism('CE', 'BUY', 6000, 230), nism('CE', 'SELL', 6100, 150), nism('CE', 'BUY', 6200, 100), nism('CE', 'SELL', 6100, 150),
+  ], 6100, 1, EXPIRY, 50);
+  assert.deepStrictEqual([fly.maxProfit, fly.maxLoss, fly.breakevensExpiry], [70, -30, [6030, 6170]]);
+});
+
+test('findBreakevens: a touch or a flat-zero stretch is not a crossing; a crossing through a zero sample counts once', () => {
+  assert.deepStrictEqual(findBreakevens([{ spot: 1, pnl: 5 }, { spot: 2, pnl: 0 }, { spot: 3, pnl: 5 }]), []);
+  assert.deepStrictEqual(findBreakevens([{ spot: 1, pnl: -5 }, { spot: 2, pnl: 0 }, { spot: 3, pnl: 0 }, { spot: 4, pnl: 5 }]), [2]);
+  assert.deepStrictEqual(findBreakevens([{ spot: 1, pnl: -5 }, { spot: 2, pnl: 0 }]), []);
+});

@@ -47,15 +47,14 @@ $$\text{netPnl} = \text{lotSize} \times \sum_{i} \text{legPayoff}_i \times \text
 ### 2. Spot Sampling Must Include All Strikes
 Piecewise-linear payoff curves only kink at strikes:
 - Sampling evenly on a naive grid rounds off sharp corners and skips exact breakevens.
-- Always build evenly spaced samples (e.g. 120–150 points spanning $\pm 10\%$ to $\pm 15\%$ around spot) **and force-add every leg's exact strike and the current spot** into the sample array.
-- Sort and deduplicate the sample points before evaluating payoffs.
+- `buildSpotSamples` (`lib/optionsStrategy.ts`) builds 150 even samples over the larger of ±`spanPct` of spot (default `DEFAULT_SPAN_PCT` = **1.5%**, not 10-15%) and `strikeStep * 4` beyond the outermost strike, **widened to cover every exact breakeven plus the same padding**, floored at spot 0. It then force-adds every leg's exact strike. Sort and deduplicate.
+- The window only decides what is *drawn*. Never derive stats from it (next section).
 
-### 3. Breakevens: Exact Linear Interpolation
-Never pick the "closest sample to zero":
-- Walk adjacent spot samples $(S_1, P_1)$ and $(S_2, P_2)$ where $P_1 \times P_2 < 0$.
-- Linearly interpolate the exact zero-crossing:
-  $$S_{\text{BE}} = S_1 + \frac{0 - P_1}{P_2 - P_1} \times (S_2 - S_1)$$
-- If a sample evaluates to $P = 0$ exactly, record that strike as the breakeven directly.
+### 3. Breakevens and Bounded Extremes: Exact, Not Sampled
+`exactExpiryProfile(legs, lotSize)` evaluates the payoff at every strike, at spot 0, and along the straight tail beyond the highest strike, so results do not depend on the sampled range:
+- **Breakevens** = every sign change of that point list (`zeroCrossings`), linearly interpolated. A run of exact zeros counts once and only if the sign really flips; a curve that only touches zero, or sits flat on it, has no breakeven. `findBreakevens(curve)` uses the same walk for callers that only have a sampled curve.
+- **Bounded max profit / max loss** come from the same kink values (a long put's best point is at spot 0: strike − premium), never from `Math.max/min` of the drawn samples. Those window figures survive only as `maxProfitInRange` / `maxLossInRange`, which must be shown with `rangeLo`/`rangeHi`.
+- Failure this replaced (NISM example, spot 6100): a long strangle 6200 CE + 6000 PE returned no breakevens (real: 5715 and 6485) and a long put showed a window value as "maximum profit". Regression tests: `lib/optionsStrategy.test.ts` ("exact expiry profile" block).
 
 ### 4. True Unlimited Profit/Loss Contract
 Never determine "unlimited" by checking whether the finite sampled array tail is sloping:

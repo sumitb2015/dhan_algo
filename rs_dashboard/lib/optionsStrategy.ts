@@ -323,19 +323,66 @@ export function daysToExpiryFrom(expiryDate: string): number {
   return Math.max(0, Math.round((expiry.getTime() - today.getTime()) / 86_400_000));
 }
 
+/**
+ * Zero crossings of a piecewise-linear point list, by linear interpolation between the
+ * last non-zero point and the next one of opposite sign. A run of exact zeros counts once
+ * (at its first point) and only if the sign really flips across it, so a curve that merely
+ * touches zero, or sits flat on zero, reports no breakeven.
+ */
+function zeroCrossings(pts: { spot: number; pnl: number }[]): number[] {
+  const out: number[] = [];
+  let last: { spot: number; pnl: number } | null = null;
+  let zeroStart: number | null = null;
+  for (const pt of pts) {
+    if (pt.pnl === 0) { if (zeroStart === null) zeroStart = pt.spot; continue; }
+    if (last && Math.sign(last.pnl) !== Math.sign(pt.pnl)) {
+      const be = zeroStart !== null
+        ? zeroStart
+        : last.spot + (0 - last.pnl) * (pt.spot - last.spot) / (pt.pnl - last.pnl);
+      out.push(Math.round(be * 100) / 100);
+    }
+    last = pt;
+    zeroStart = null;
+  }
+  return out;
+}
+
 /** Zero-crossings of a piecewise-linear {spot, pnl} curve, via linear interpolation between adjacent samples. */
 export function findBreakevens(curve: { spot: number; pnl: number }[]): number[] {
-  const breakevens: number[] = [];
-  for (let i = 1; i < curve.length; i++) {
-    const [s0, p0] = [curve[i - 1].spot, curve[i - 1].pnl];
-    const [s1, p1] = [curve[i].spot, curve[i].pnl];
-    if (p0 === 0) { breakevens.push(s0); continue; }
-    if ((p0 < 0 && p1 > 0) || (p0 > 0 && p1 < 0)) {
-      const be = s0 + (0 - p0) * (s1 - s0) / (p1 - p0);
-      breakevens.push(Math.round(be * 100) / 100);
-    }
-  }
-  return breakevens;
+  return zeroCrossings(curve);
+}
+
+export interface ExpiryProfile {
+  /** Every zero crossing of the expiry payoff, ascending. Independent of any sampled window. */
+  breakevens: number[];
+  /** Highest / lowest P&L over the finite part of the curve (kinks incl. spot = 0). Ignores an unbounded right tail. */
+  maxPnl: number;
+  minPnl: number;
+  /** P&L change per +1 of spot beyond the highest strike; > 0 unbounded profit, < 0 unbounded loss. */
+  rightSlope: number;
+}
+
+/**
+ * Exact analysis of the expiry payoff. The curve is piecewise linear and only bends at the
+ * strikes, so evaluating it at every strike, at spot = 0 (price cannot go lower), and along
+ * the straight tail beyond the highest strike finds every breakeven and every bounded
+ * extreme without sampling — so a wide straddle/strangle or a long put is never mis-reported
+ * just because its breakeven or its best point lies outside the drawn window.
+ */
+export function exactExpiryProfile(legs: ResolvedLeg[], lotSize: number = 1): ExpiryProfile {
+  const kinks = [...new Set([0, ...legs.map((l) => l.strike)])].sort((a, b) => a - b);
+  const pts = kinks.map((k) => ({ spot: k, pnl: netPnlAtExpiry(legs, k, lotSize) }));
+  const top = kinks[kinks.length - 1];
+  const rightSlope = netPnlAtExpiry(legs, top + 1, lotSize) - pts[pts.length - 1].pnl;
+  const FAR = 1e6; // the tail is a straight line, so any far point interpolates the crossing exactly
+  const withTail = rightSlope === 0 ? pts : [...pts, { spot: top + FAR, pnl: pts[pts.length - 1].pnl + rightSlope * FAR }];
+  const pnls = pts.map((p) => p.pnl);
+  return {
+    breakevens: zeroCrossings(withTail),
+    maxPnl: Math.max(...pnls),
+    minPnl: Math.min(...pnls),
+    rightSlope,
+  };
 }
 
 /**
@@ -347,9 +394,11 @@ export function findBreakevens(curve: { spot: number; pnl: number }[]): number[]
 export const DEFAULT_SPAN_PCT = 0.015;
 
 /**
- * Sample spot range covering all wings for a NIFTY strategy: +/-15% of spot, with
- * every leg's strike forced in as an exact sample point (piecewise-linear kinks
- * only occur at strikes, so max/min and breakevens must be evaluated exactly there).
+ * Sample spot range for a payoff chart: at least +/- spanPct of spot (default 1.5%) and at
+ * least strikeStep * 4 beyond the outermost strike, then widened, only when needed, to also cover every exact
+ * breakeven (plus one strike step) so a wide straddle/strangle never draws without them.
+ * Every leg's strike is forced in as an exact sample point (piecewise-linear kinks only
+ * occur at strikes).
  */
 function buildSpotSamples(
   legs: ResolvedLeg[], spot: number, strikeStep: number = STRIKE_STEP, spanPct: number = DEFAULT_SPAN_PCT,
@@ -359,13 +408,18 @@ function buildSpotSamples(
   const minStrike = strikes.length > 0 ? Math.min(...strikes) : spot;
   const maxStrike = strikes.length > 0 ? Math.max(...strikes) : spot;
 
-  const pad = strikeStep * 4; // 200 points padding for wings
-  const lo = Math.min(spot - pctSpan, minStrike - pad);
-  const hi = Math.max(spot + pctSpan, maxStrike + pad);
+  const pad = strikeStep * 4; // padding for wings
+  const bes = exactExpiryProfile(legs).breakevens;
+  const minBe = bes.length > 0 ? bes[0] : Infinity;
+  const maxBe = bes.length > 0 ? bes[bes.length - 1] : -Infinity;
+  // Only one strike step of margin past a breakeven: enough that it is never on the edge, small
+  // enough that a book whose breakevens already fit the base window is drawn exactly as before.
+  const lo = Math.min(spot - pctSpan, minStrike - pad, minBe - strikeStep);
+  const hi = Math.max(spot + pctSpan, maxStrike + pad, maxBe + strikeStep);
 
-  // Make bounds symmetric around spot
+  // Make bounds symmetric around spot (a price cannot go below zero)
   const maxDiff = Math.max(spot - lo, hi - spot);
-  const symLo = spot - maxDiff;
+  const symLo = Math.max(0, spot - maxDiff);
   const symHi = spot + maxDiff;
 
   const samples = new Set<number>();
@@ -426,10 +480,14 @@ export function computePayoffStats(
   const upsideUnlimitedProfit = netCallQty < 0;
 
   const pnls = curve.map(c => c.pnl);
-  const boundedMaxProfit = Math.max(...pnls);
+  const boundedMaxProfit = Math.max(...pnls); // best/worst inside the sampled window only (see *InRange)
   const boundedMinLoss = Math.min(...pnls);
-  const maxLoss: number | 'Unlimited' = (upsideUnlimitedLoss || downsideUnlimitedLoss) ? 'Unlimited' : boundedMinLoss;
-  const maxProfit: number | 'Unlimited' = upsideUnlimitedProfit ? 'Unlimited' : boundedMaxProfit;
+  // Bounded extremes and breakevens come from the exact expiry profile, not the window:
+  // a long put's best point is at spot = 0 and a wide straddle's breakevens can sit
+  // outside the drawn range, and neither may be reported as a clamped window value.
+  const exact = exactExpiryProfile(legs, lotSize);
+  const maxLoss: number | 'Unlimited' = (upsideUnlimitedLoss || downsideUnlimitedLoss) ? 'Unlimited' : exact.minPnl;
+  const maxProfit: number | 'Unlimited' = upsideUnlimitedProfit ? 'Unlimited' : exact.maxPnl;
 
   const rewardRisk = (maxLoss === 'Unlimited' || maxProfit === 'Unlimited' || maxLoss === 0) ? null : Math.abs(maxProfit / maxLoss);
 
@@ -444,7 +502,7 @@ export function computePayoffStats(
     timeValue += sideSign * leg.qtyLots * (leg.price - intrinsicNow) * lotSize;
   }
 
-  const breakevensExpiry = findBreakevens(curve);
+  const breakevensExpiry = exact.breakevens;
 
   // POP: probability the strategy finishes in a profit zone at expiry, computed by
   // integrating the risk-neutral lognormal distribution (same N(d2) term used by
