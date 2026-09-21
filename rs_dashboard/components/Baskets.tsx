@@ -31,6 +31,7 @@ import {
   formatShortExpiry,
   calculateTimeToExpiryYears,
   UNDERLYINGS as UNDERLYING_CONFIGS,
+  computeMultiExpiryStats,
 } from '@/lib/optionsMonitorMath';
 import StrategyCardGrid from './basket/StrategyCardGrid';
 import LegsTable from './basket/LegsTable';
@@ -568,20 +569,6 @@ export default function Baskets() {
   })), [legs, multiplier, effectiveLotSize, effectivePremium]);
 
   const hasMixedExpiry = useMemo(() => legs.some(l => l.expiry !== expiry), [legs, expiry]);
-  const payoff = useMemo(() => {
-    if (hasMixedExpiry || !payoffLegs.length || payoffLegs.some(l => l.premium <= 0)) return null;
-    const strikes = payoffLegs.map(l => l.strike);
-    const center = spot > 0 ? spot : (Math.min(...strikes) + Math.max(...strikes)) / 2;
-    const lo = Math.min(Math.min(...strikes) - 6 * step, center * 0.94);
-    const hi = Math.max(Math.max(...strikes) + 6 * step, center * 1.06);
-    return computePayoff(payoffLegs, lo, hi);
-  }, [payoffLegs, spot, step, hasMixedExpiry]);
-
-  const riskReward = useMemo(() => {
-    if (!payoff || payoff.maxProfitUnlimited || payoff.maxLossUnlimited || payoff.maxLoss >= 0) return null;
-    return payoff.maxProfit / Math.abs(payoff.maxLoss);
-  }, [payoff]);
-
   const daysLeft = useMemo(() => (expiry ? daysToExpiry(expiry) : null), [expiry]);
 
   const monitorLegs = useMemo<OptionLegModel[]>(() => {
@@ -626,6 +613,24 @@ export default function Baskets() {
       };
     });
   }, [legs, effectiveLotSize, multiplier, effectivePremium, daysLeft, chainOc, atmIv, effectiveFuturePrice, expiry]);
+
+  const payoff = useMemo(() => {
+    if (!payoffLegs.length || payoffLegs.some(l => l.premium <= 0)) return null;
+    if (hasMixedExpiry) {
+      // Different expiries: no single intrinsic payoff exists, so measure on the front-expiry curve.
+      return monitorLegs.length && spot > 0 ? computeMultiExpiryStats(monitorLegs, spot, effectiveLotSize) : null;
+    }
+    const strikes = payoffLegs.map(l => l.strike);
+    const center = spot > 0 ? spot : (Math.min(...strikes) + Math.max(...strikes)) / 2;
+    const lo = Math.min(Math.min(...strikes) - 6 * step, center * 0.94);
+    const hi = Math.max(Math.max(...strikes) + 6 * step, center * 1.06);
+    return computePayoff(payoffLegs, lo, hi);
+  }, [payoffLegs, spot, step, hasMixedExpiry, monitorLegs, effectiveLotSize]);
+
+  const riskReward = useMemo(() => {
+    if (!payoff || payoff.maxProfitUnlimited || payoff.maxLossUnlimited || payoff.maxLoss >= 0) return null;
+    return payoff.maxProfit / Math.abs(payoff.maxLoss);
+  }, [payoff]);
 
   const portfolioMetrics = useMemo(() => {
     if (!monitorLegs.length || !effectiveLotSize || !spot) return null;
@@ -1205,9 +1210,7 @@ export default function Baskets() {
               rightWing={payoff?.rightWing ?? null}
               leftWing={payoff?.leftWing ?? null}
               emptyReason={
-                hasMixedExpiry
-                  ? 'Calendar/Diagonal legs expire on different dates — no single expiry payoff to chart. Track P&L from the Positions tab instead.'
-                  : premiumsUnavailable
+                premiumsUnavailable
                   ? 'No premium data from broker — market may be closed. Enter prices manually in the Price column to preview payoff.'
                   : undefined
               }

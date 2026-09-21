@@ -127,15 +127,16 @@ export const STRATEGY_CATEGORIES: Record<StrategyCategory, StrategyTemplate[]> =
       { side: 'S', option: 'PE', offset: -4, ratio: 1, expiryRole: 'front' },
       { side: 'B', option: 'PE', offset: 0, ratio: 1, expiryRole: 'far' },
     ] },
-    // Nifty Flyagonal (strategies/flyagonal): call broken-wing butterfly + put diagonal. Offsets are
-    // in strike steps, approximating the strategy's spot% strikes at step 50 (0 / +0.9% / +1.9% /
-    // -3.0%, long back put one step below the short put).
+    // Flyagonal: call broken-wing butterfly + put diagonal, shaped like the reference chart
+    // (SPX 6370: 6370C / 2x 6420C / 6480C, short 6320P front, long 6300P back). Offsets are strike
+    // steps at step 50: calls 0 / +4 / +9 (wings 200/250), short put -4 (~-0.8%), long back put one
+    // step below it (matches the strategy default --put-pct 0.8).
     { key: 'flyagonal',            name: 'Flyagonal',            legs: [
       { side: 'B', option: 'CE', offset: 0, ratio: 1, expiryRole: 'front' },
       { side: 'S', option: 'CE', offset: 4, ratio: 2, expiryRole: 'front' },
       { side: 'B', option: 'CE', offset: 9, ratio: 1, expiryRole: 'front' },
-      { side: 'S', option: 'PE', offset: -14, ratio: 1, expiryRole: 'front' },
-      { side: 'B', option: 'PE', offset: -15, ratio: 1, expiryRole: 'far' },
+      { side: 'S', option: 'PE', offset: -4, ratio: 1, expiryRole: 'front' },
+      { side: 'B', option: 'PE', offset: -5, ratio: 1, expiryRole: 'far' },
     ] },
   ],
 };

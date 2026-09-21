@@ -803,7 +803,7 @@ Examples:
     p.add_argument("--fly-lower-pct", type=float, default=0.0, help="lower call vs spot, %% (default 0.0)")
     p.add_argument("--fly-body-pct", type=float, default=0.9, help="short-call body vs spot, %% (default 0.9)")
     p.add_argument("--fly-upper-pct", type=float, default=1.9, help="upper call vs spot, %% (default 1.9)")
-    p.add_argument("--put-pct", type=float, default=3.0, help="short front put below spot, %% (default 3.0)")
+    p.add_argument("--put-pct", type=float, default=0.8, help="short front put below spot, %% (default 0.8)")
     p.add_argument("--diag-offset", type=int, default=50, help="long back put below the short put, points (default 50)")
     p.add_argument("--max-net-debit", type=float, default=None, help="skip entry if net debit exceeds this, points")
     p.add_argument("--target-profit", default="10%", help="INR or NN%% of entry max loss (default 10%%)")

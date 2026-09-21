@@ -6,6 +6,7 @@ import {
   generatePayoffCurve,
   computePortfolioMetrics,
   calculateTimeToExpiryYears,
+  computeMultiExpiryStats,
 } from './optionsMonitorMath.ts';
 
 describe('optionsMonitorMath', () => {
@@ -286,5 +287,36 @@ describe('optionsMonitorMath', () => {
     // Sensibull: 2 SD: 643.3 (2.7%) Price: 22754.8 - 24041.4
     assert.ok(Math.abs(sd.lo2 - 22755) <= 1, '2SD lower price should match Sensibull 22755');
     assert.ok(Math.abs(sd.hi2 - 24041) <= 1, '2SD upper price should match Sensibull 24041');
+  });
+
+  it('generatePayoffCurve: a later-expiry leg keeps time value on the front-expiry curve', () => {
+    const mk = (id: string, side: 'BUY' | 'SELL', expiry: string) => ({
+      id, type: 'PE' as const, side, strike: 22000, lots: 1, qty: 75,
+      entryPrice: 100, ltp: 100, delta: 0, gamma: 0, theta: 0, vega: 0, iv: 0.15, expiry,
+    });
+    const front = '2098-01-01', far = '2098-02-01';
+    const calendar = generatePayoffCurve([mk('a', 'SELL', front), mk('b', 'BUY', far)], 23000, 75, 0.02, 0.15, 50);
+    const sameExp = generatePayoffCurve([mk('a', 'SELL', front), mk('b', 'BUY', front)], 23000, 75, 0.02, 0.15, 50);
+    // Same strike, same side pair: one expiry nets to exactly zero everywhere, a calendar does not
+    // (the long far put still has value when the front expires).
+    assert.ok(sameExp.points.every((p) => p.pnlExpiry === 0));
+    const atStrike = calendar.points.find((p) => p.spot === 22000)!;
+    assert.ok(atStrike.pnlExpiry !== 0, 'far leg must not be scored at intrinsic on the front-expiry curve');
+  });
+
+  it('computeMultiExpiryStats: flyagonal shape is bounded with a second peak at the short put', () => {
+    const L = (id: string, type: 'CE' | 'PE', side: 'BUY' | 'SELL', strike: number, lots: number, price: number, expiry: string) =>
+      ({ id, type, side, strike, lots, qty: lots * 75, entryPrice: price, ltp: price, delta: 0, gamma: 0, theta: 0, vega: 0, iv: 0.15, expiry });
+    const F = '2098-01-01', B = '2098-01-15';
+    const legs = [
+      L('1', 'CE', 'BUY', 23400, 1, 90, F), L('2', 'CE', 'SELL', 23600, 2, 10, F), L('3', 'CE', 'BUY', 23850, 1, 1, F),
+      L('4', 'PE', 'SELL', 23200, 1, 60, F), L('5', 'PE', 'BUY', 23150, 1, 45, B),
+    ];
+    const st = computeMultiExpiryStats(legs, 23400, 75);
+    assert.equal(st.maxProfitUnlimited, false);
+    assert.equal(st.maxLossUnlimited, false);
+    assert.ok(Number.isFinite(st.maxProfit) && st.maxProfit > 0);
+    assert.ok(st.maxLoss < 0);
+    assert.ok(st.breakevens.length >= 1);
   });
 });

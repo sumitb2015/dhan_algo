@@ -30,7 +30,7 @@ export const FLY_DEFAULTS: FlyConfig = {
   entryWeekday: '',
   entryTime: '09:30', strikeStep: '50',
   flyLowerPct: '0', flyBodyPct: '0.9', flyUpperPct: '1.9',
-  putPct: '3', diagOffset: '50', maxNetDebit: '',
+  putPct: '0.8', diagOffset: '50', maxNetDebit: '',
   targetProfit: '10%', adjustedTarget: '5%', stopLoss: '',
   exitDte: '4', exitTime: '15:15',
   maxAdjustments: '1', adjustDelta: '0.10', adjustStep: '50',
@@ -136,7 +136,7 @@ export default function FlyagonalFields({ cfg, setCfg, FieldLabel, fieldCls, inp
       {F('Lower Call %', 'Long lower call strike vs spot, percent (--fly-lower-pct). 0 = at the money.', txt('flyLowerPct'))}
       {F('Body Call %', 'Short 2x call body strike vs spot, percent (--fly-body-pct, default 0.9).', txt('flyBodyPct'))}
       {F('Upper Call %', 'Long upper call strike vs spot, percent (--fly-upper-pct, default 1.9). Must give a wider upper wing than lower wing (broken wing).', txt('flyUpperPct'))}
-      {F('Short Put %', 'Short front put this far BELOW spot, percent (--put-pct, default 3.0).', txt('putPct'))}
+      {F('Short Put %', 'Short front put this far BELOW spot, percent (--put-pct, default 0.8).', txt('putPct'))}
       {F('Diagonal Offset', 'Long back put sits this many points BELOW the short put (--diag-offset, default 50). Keeps the put pair risk-defined at the front expiry.', txt('diagOffset'))}
       {F('Max Net Debit', 'Skip entry if the structure costs more than this many index points per unit (--max-net-debit). Empty = no limit.', txt('maxNetDebit', 72, 'none'))}
       {F('Target', 'Profit target: rupees or % of the entry max loss (--target-profit, default 10%). Exits the whole book when reached.', txt('targetProfit', 72, '10% or 4000'))}

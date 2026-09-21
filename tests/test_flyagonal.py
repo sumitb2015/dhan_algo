@@ -178,7 +178,7 @@ check("first order fails -> IDLE, expiry not burned", s.status == "IDLE" and s.l
 
 # ── entry: rollback close fails -> UNWINDING, legs stay tracked ──────────────
 reset()
-H.fail_sell.add(sid(22650, "PE"))       # last leg fails
+H.fail_sell.add(sid(23150, "PE"))       # last leg fails
 H.fail_buy.add(sid(23550, "CE"))        # ... and the body buy-back fails during rollback
 s = new_strategy(live=True)
 s.attempt_entry()

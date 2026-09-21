@@ -23,7 +23,7 @@ NIFTY index options (European, cash-settled), lot from `helper.get_lot_size("NIF
 - Front expiry F: first listed expiry with `--entry-dte-min..max` (8-10) calendar days out. Back
   expiry B: first later expiry with at least `--back-dte-min` (15) days **(A)**.
 - Strikes from spot, rounded to `--strike-step` (50): call K1 spot+0.0%, body K2 +0.9%, K3 +1.9% (wings
-  200/250 at 23,346); short put Ps -3.0%, long back put Ps - `--diag-offset` (50) **(A)**, so the pair is
+  200/250 at 23,346); short put Ps -0.8% (reference chart: 6320P on 6370 spot), long back put Ps - `--diag-offset` (50) **(A)**, so the pair is
   risk-defined at F's expiry. Shape is validated at startup (ascending calls, broken wing up, `Pl < Ps < K1`).
 - Legs: BUY K1 (F), BUY K3 (F), BUY Pl (B), then SELL 2x K2 (F), SELL Ps (F). Longs first so the
   shorts are always covered.
@@ -100,7 +100,7 @@ venv/bin/python strategies/flyagonal/nifty_flyagonal.py [--live]
   --entry-dte-min N (8)  --entry-dte-max N (10)  --back-dte-min N (15)  --entry-weekday 0-6
   --entry-time HH:MM (09:30)  --strike-step N (50)
   --fly-lower-pct P (0.0)  --fly-body-pct P (0.9)  --fly-upper-pct P (1.9)
-  --put-pct P (3.0)  --diag-offset N (50)  --max-net-debit PTS
+  --put-pct P (0.8)  --diag-offset N (50)  --max-net-debit PTS
   --target-profit INR|NN% (10%)  --adjusted-target INR|NN% (5%)  --stop-loss INR|NN% (none)
   --exit-dte N (4)  --exit-time HH:MM (15:15)
   --max-adjustments N (1)  --adjust-delta D (0.10)  --adjust-step N (50)

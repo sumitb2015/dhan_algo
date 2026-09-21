@@ -258,6 +258,21 @@ export interface SdLevels {
   days: number;  // calendar days to expiry
 }
 
+/**
+ * Multi-expiry books (calendar / diagonal / flyagonal): "expiry" means the FRONT (earliest) expiry.
+ * A leg that expires later still has time value then, so it is priced with Black-Scholes over its
+ * residual life instead of intrinsic. Returns years of life each leg has left AT the front expiry;
+ * 0 for legs on the front expiry (or with no expiry), which keeps single-expiry books unchanged.
+ */
+function legExtraYears(legs: OptionLegModel[]): number[] {
+  const exps = legs.map((l) => l.expiry).filter((e): e is string => !!e);
+  const front = exps.length ? [...exps].sort()[0] : '';
+  const frontYears = front ? calculateTimeToExpiryYears(front) : 0;
+  return legs.map((l) =>
+    l.expiry && l.expiry !== front ? Math.max(0, calculateTimeToExpiryYears(l.expiry) - frontYears) : 0,
+  );
+}
+
 export function generatePayoffCurve(
   legs: OptionLegModel[],
   spot: number,
@@ -333,22 +348,28 @@ export function generatePayoffCurve(
   const basis = hasFutures ? ((futurePrice as number) - spot) : 0;
   const evalTime = typeof targetTimeRemainingYears === 'number' ? targetTimeRemainingYears : timeRemainingYears;
 
+  const extraYears = legExtraYears(legs);
+
   for (const s of sortedSpots) {
     let pnlExp = 0;
     let pnlNow = 0;
 
-    for (const leg of legs) {
+    for (let li = 0; li < legs.length; li++) {
+      const leg = legs[li];
+      const extra = extraYears[li];
       const qty = leg.qty || leg.lots * lotSize;
       const isSell = leg.side === 'SELL';
 
-      // Payoff at Expiry (strict piecewise linear intrinsic value)
-      const intrinsicAtExp = leg.type === 'CE' ? Math.max(0, s - leg.strike) : Math.max(0, leg.strike - s);
+      // Payoff at (front) expiry: intrinsic, or residual time value for a later-dated leg
+      const intrinsicAtExp = extra > 0
+        ? computeBsGreeks(leg.type, s + basis, leg.strike, extra, leg.iv || baseIv, lotSize, 0.065, hasFutures).price
+        : (leg.type === 'CE' ? Math.max(0, s - leg.strike) : Math.max(0, leg.strike - s));
       const legPnlExp = isSell ? (leg.entryPrice - intrinsicAtExp) * qty : (intrinsicAtExp - leg.entryPrice) * qty;
       pnlExp += legPnlExp;
 
       // Payoff on Target Date (via Black-76 with simulated futures price if basis exists)
       const evalUnderlying = s + basis;
-      const g = computeBsGreeks(leg.type, evalUnderlying, leg.strike, evalTime, leg.iv || baseIv, lotSize, 0.065, hasFutures);
+      const g = computeBsGreeks(leg.type, evalUnderlying, leg.strike, evalTime + extra, leg.iv || baseIv, lotSize, 0.065, hasFutures);
       const legPnlNow = isSell ? (leg.entryPrice - g.price) * qty : (g.price - leg.entryPrice) * qty;
       pnlNow += legPnlNow;
     }
@@ -387,17 +408,63 @@ export function generatePayoffCurve(
 }
 
 /**
- * Expiry P&L of the whole leg set at a single terminal spot price (pure intrinsic value).
+ * P&L of the whole leg set at a single spot on the front expiry: intrinsic value, plus residual
+ * time value for any leg that expires later (see legExtraYears).
  */
 export function computeExpiryPnlAtSpot(legs: OptionLegModel[], spot: number, lotSize: number): number {
+  const extra = legExtraYears(legs);
   let pnl = 0;
-  for (const leg of legs) {
+  legs.forEach((leg, i) => {
     const qty = leg.qty || leg.lots * lotSize;
     const isSell = leg.side === 'SELL';
-    const intrinsic = leg.type === 'CE' ? Math.max(0, spot - leg.strike) : Math.max(0, leg.strike - spot);
-    pnl += isSell ? (leg.entryPrice - intrinsic) * qty : (intrinsic - leg.entryPrice) * qty;
-  }
+    const value = extra[i] > 0
+      ? computeBsGreeks(leg.type, spot, leg.strike, extra[i], leg.iv || 0.15, lotSize, 0.065, false).price
+      : (leg.type === 'CE' ? Math.max(0, spot - leg.strike) : Math.max(0, leg.strike - spot));
+    pnl += isSell ? (leg.entryPrice - value) * qty : (value - leg.entryPrice) * qty;
+  });
   return pnl;
+}
+
+/**
+ * Risk-panel stats for a book on several expiries, measured on the front-expiry curve: net premium,
+ * breakevens, max profit / loss. Same shape as basketStrategies.computePayoff so the Baskets page
+ * can substitute it. The curve is no longer piecewise linear (a later leg is curved), so extremes
+ * come from a dense grid, not just the strikes. "Unlimited" is a position fact (net signed qty).
+ */
+export function computeMultiExpiryStats(legs: OptionLegModel[], spot: number, lotSize: number) {
+  const strikes = legs.map((l) => l.strike);
+  const centre = spot > 0 ? spot : (Math.min(...strikes) + Math.max(...strikes)) / 2;
+  const lo = Math.min(centre * 0.6, Math.min(...strikes) * 0.9);
+  const hi = Math.max(centre * 1.4, Math.max(...strikes) * 1.1);
+  const xs = new Set<number>([1, ...strikes]);
+  const n = 1200;
+  for (let i = 0; i <= n; i++) xs.add(lo + ((hi - lo) * i) / n);
+  const points = [...xs].sort((a, b) => a - b).map((x) => ({ x, y: computeExpiryPnlAtSpot(legs, x, lotSize) }));
+
+  const breakevens: number[] = [];
+  for (let i = 1; i < points.length; i++) {
+    const a = points[i - 1], b = points[i];
+    if ((a.y < 0 && b.y >= 0) || (a.y >= 0 && b.y < 0)) {
+      breakevens.push(a.x + (a.y === b.y ? 0 : -a.y / (b.y - a.y)) * (b.x - a.x));
+    }
+  }
+
+  const q = (l: OptionLegModel) => l.qty || l.lots * lotSize;
+  const netShort = (t: 'CE' | 'PE') => legs.filter((l) => l.type === t)
+    .reduce((s, l) => s + (l.side === 'SELL' ? q(l) : -q(l)), 0);
+  const netCall = netShort('CE'), netPut = netShort('PE');
+  const maxProfitUnlimited = netCall < 0;
+  const maxLossUnlimited = netCall > 0 || netPut > 0;
+  const ys = points.map((p) => p.y);
+  return {
+    points, breakevens,
+    maxProfit: maxProfitUnlimited ? Infinity : Math.max(...ys),
+    maxLoss: maxLossUnlimited ? -Infinity : Math.min(...ys),
+    maxProfitUnlimited, maxLossUnlimited,
+    rightWing: (maxProfitUnlimited ? 'profit' : netCall > 0 ? 'loss' : null) as 'profit' | 'loss' | null,
+    leftWing: (netPut > 0 ? 'loss' : null) as 'loss' | null,
+    netPremium: legs.reduce((s, l) => s + (l.side === 'SELL' ? 1 : -1) * l.entryPrice * q(l), 0),
+  };
 }
 
 /**
@@ -411,6 +478,11 @@ function computeBoundedPnlExtremes(legs: OptionLegModel[], lotSize: number): { m
   const strikes = legs.map((l) => l.strike);
   const maxStrike = strikes.length > 0 ? Math.max(...strikes) : 0;
   const evalPoints = [0, maxStrike * 3 + 10000, ...strikes];
+  // A later-expiry leg curves the payoff, so extrema can sit between strikes: sample densely.
+  if (legExtraYears(legs).some((y) => y > 0)) {
+    const lo = Math.max(1, Math.min(...strikes) * 0.6), hi = maxStrike * 1.4;
+    for (let i = 0; i <= 1200; i++) evalPoints.push(lo + ((hi - lo) * i) / 1200);
+  }
 
   let min = Infinity;
   let max = -Infinity;
