@@ -156,6 +156,14 @@ export const STRATEGIES_METADATA: Record<string, {
     path: path.join(PROJECT_ROOT, 'strategies', 'delta_strangle', 'nifty_delta_strangle.py'),
     execBrokerEligible: true,
   },
+  nifty_flyagonal: {
+    name: 'Nifty Flyagonal (BWB + Put Diagonal)',
+    underlying: 'NIFTY',
+    logicGroup: 'volatility',
+    timeframe: 'positional',
+    path: path.join(PROJECT_ROOT, 'strategies', 'flyagonal', 'nifty_flyagonal.py'),
+    execBrokerEligible: true,
+  },
   crudeoilm_supertrend: {
     name: 'CrudeOil Mini Supertrend',
     underlying: 'CRUDEOILM',

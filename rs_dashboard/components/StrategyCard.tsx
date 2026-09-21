@@ -11,6 +11,8 @@ import {
 } from '@/components/ui/select';
 import { Tooltip, TooltipTrigger, TooltipContent } from '@/components/ui/tooltip';
 import { type Broker } from '@/hooks/useBrokerSelector';
+import FlyagonalPayoff from './FlyagonalPayoff';
+import FlyagonalFields, { FLY_DEFAULTS, buildFlyagonalArgs, type FlyConfig } from './FlyagonalConfig';
 
 interface StrategyMeta {
   key: string;
@@ -205,6 +207,7 @@ function StrategyCard({ meta, state, onRefresh, selectedBroker }: StrategyCardPr
 
   const [isLive, setIsLive] = useState<boolean>(false);
   const [lots, setLots] = useState<number>(1);
+  const [flyCfg, setFlyCfg] = useState<FlyConfig>(FLY_DEFAULTS);
   const [profitTarget, setProfitTarget] = useState<string>('25%');
   const [stopLoss, setStopLoss] = useState<string>('25%');
   const [startTime, setStartTime] = useState<string>('09:20');
@@ -469,6 +472,14 @@ function StrategyCard({ meta, state, onRefresh, selectedBroker }: StrategyCardPr
         args.push('--contract-size', String(cesContractSize));
         args.push('--target-profit', String(cesTargetInr));
         args.push('--stop-loss', String(cesStopInr));
+      } else if (meta.key === 'nifty_flyagonal') {
+        const fly = buildFlyagonalArgs(flyCfg, lots);
+        if (fly.error) {
+          setStartError(fly.error);
+          setSubmitting(false);
+          return;
+        }
+        args.push(...fly.args);
       } else if (meta.key === 'nifty_delta_strangle') {
         // Weekly delta-managed carry: no daily Target/Stop-Loss or Start Time at all — sizing
         // is either an explicit lot count (--lots overrides) or margin-based auto-sizing
@@ -963,7 +974,7 @@ function StrategyCard({ meta, state, onRefresh, selectedBroker }: StrategyCardPr
           </>
         )}
 
-        {meta.key !== 'nifty_spread_trend' && meta.key !== 'crudeoilm_supertrend' && meta.key !== 'crudeoilm_renko_sar' && meta.key !== 'crudeoilm_vwap_supertrend' && meta.key !== 'crudeoilm_ema_supertrend' && meta.key !== 'crudeoilm_orb' && meta.key !== 'nifty_st_oi_bearcall' && meta.key !== 'nifty500_momentum' && meta.key !== 'nifty_delta_strangle' && (
+        {meta.key !== 'nifty_spread_trend' && meta.key !== 'crudeoilm_supertrend' && meta.key !== 'crudeoilm_renko_sar' && meta.key !== 'crudeoilm_vwap_supertrend' && meta.key !== 'crudeoilm_ema_supertrend' && meta.key !== 'crudeoilm_orb' && meta.key !== 'nifty_st_oi_bearcall' && meta.key !== 'nifty500_momentum' && meta.key !== 'nifty_delta_strangle' && meta.key !== 'nifty_flyagonal' && (
           <div className={fieldCls}>
             <FieldLabel text="Start Time" tip="Time (HH:MM IST) the strategy begins monitoring for entries." />
             <Input type="text" value={startTime} onChange={(e) => setStartTime(e.target.value)} placeholder="09:20" className={inputCls} />
@@ -1088,7 +1099,7 @@ function StrategyCard({ meta, state, onRefresh, selectedBroker }: StrategyCardPr
           </>
         )}
 
-        {meta.key !== 'crudeoilm_renko_sar' && meta.key !== 'crudeoilm_supertrend' && meta.key !== 'crudeoilm_vwap_supertrend' && meta.key !== 'crudeoilm_ema_supertrend' && meta.key !== 'crudeoilm_orb' && meta.key !== 'nifty500_momentum' && meta.key !== 'nifty_delta_strangle' && (
+        {meta.key !== 'crudeoilm_renko_sar' && meta.key !== 'crudeoilm_supertrend' && meta.key !== 'crudeoilm_vwap_supertrend' && meta.key !== 'crudeoilm_ema_supertrend' && meta.key !== 'crudeoilm_orb' && meta.key !== 'nifty500_momentum' && meta.key !== 'nifty_delta_strangle' && meta.key !== 'nifty_flyagonal' && (
           <>
             <div className={fieldCls}>
               <FieldLabel text="Target ₹" tip="Daily cumulative profit target in INR, or a percentage of entry premium collected e.g. '25%'; strategy squares off and stops once reached." />
@@ -1172,6 +1183,10 @@ function StrategyCard({ meta, state, onRefresh, selectedBroker }: StrategyCardPr
               </div>
             </div>
           </>
+        )}
+
+        {meta.key === 'nifty_flyagonal' && (
+          <FlyagonalFields cfg={flyCfg} setCfg={setFlyCfg} FieldLabel={FieldLabel} fieldCls={fieldCls} inputCls={inputCls} idPrefix={`card-${meta.key}`} />
         )}
 
         {meta.key === 'nifty500_momentum' && (
@@ -2080,6 +2095,10 @@ function StrategyCard({ meta, state, onRefresh, selectedBroker }: StrategyCardPr
           )}
         </div>
       </div>
+
+      {isRunning && meta.key === 'nifty_flyagonal' && (state as any).legs && (
+        <div className="border-t border-zinc-800/60 p-3"><FlyagonalPayoff state={state as any} /></div>
+      )}
 
       {/* ── Body (running stats OR config panel) ────────────────────── */}
       {(isRunning || showConfig) && (

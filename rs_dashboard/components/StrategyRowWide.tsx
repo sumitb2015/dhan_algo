@@ -11,6 +11,8 @@ import {
 } from '@/components/ui/select';
 import { Tooltip, TooltipTrigger, TooltipContent } from '@/components/ui/tooltip';
 import { type Broker } from '@/hooks/useBrokerSelector';
+import FlyagonalPayoff from './FlyagonalPayoff';
+import FlyagonalFields, { FLY_DEFAULTS, buildFlyagonalArgs, type FlyConfig } from './FlyagonalConfig';
 
 interface StrategyMeta {
   key: string;
@@ -108,6 +110,7 @@ function StrategyRowWide({ meta, state, onRefresh, instanceId, onAddInstance, on
   // --- Config state (mirrors StrategyCard) ---
   const [isLive, setIsLive] = useState(false);
   const [lots, setLots] = useState(1);
+  const [flyCfg, setFlyCfg] = useState<FlyConfig>(FLY_DEFAULTS);
   const [profitTarget, setProfitTarget] = useState('25%');
   const [stopLoss, setStopLoss] = useState('25%');
   const [startTime, setStartTime] = useState('09:20');
@@ -338,6 +341,14 @@ function StrategyRowWide({ meta, state, onRefresh, instanceId, onAddInstance, on
         args.push('--contract-size', String(cesContractSize));
         args.push('--target-profit', String(cesTargetInr));
         args.push('--stop-loss', String(cesStopInr));
+      } else if (meta.key === 'nifty_flyagonal') {
+        const fly = buildFlyagonalArgs(flyCfg, lots);
+        if (fly.error) {
+          setStartError(fly.error);
+          setSubmitting(false);
+          return;
+        }
+        args.push(...fly.args);
       } else if (meta.key === 'nifty_delta_strangle') {
         args.push('--target-capital', String(dsTargetCapital));
         if (!dsAutoLots) args.push('--lots', String(dsLots));
@@ -1262,6 +1273,10 @@ function StrategyRowWide({ meta, state, onRefresh, instanceId, onAddInstance, on
           </div>
         )}
 
+        {meta.key === 'nifty_flyagonal' && (
+          <FlyagonalFields cfg={flyCfg} setCfg={setFlyCfg} FieldLabel={FieldLabel} fieldCls={fieldCls} inputCls={inputCls} idPrefix={`wide-${meta.key}`} />
+        )}
+
         {meta.key === 'nifty_delta_strangle' && (
           <>
             <div className={fieldCls}>
@@ -1406,7 +1421,7 @@ function StrategyRowWide({ meta, state, onRefresh, instanceId, onAddInstance, on
           </>
         )}
 
-        {meta.key !== 'nifty_spread_trend' && meta.key !== 'crudeoilm_supertrend' && meta.key !== 'crudeoilm_renko_sar' && meta.key !== 'crudeoilm_vwap_supertrend' && meta.key !== 'crudeoilm_ema_supertrend' && meta.key !== 'nifty_st_oi_bearcall' && meta.key !== 'nifty500_momentum' && meta.key !== 'nifty_delta_strangle' && (
+        {meta.key !== 'nifty_spread_trend' && meta.key !== 'crudeoilm_supertrend' && meta.key !== 'crudeoilm_renko_sar' && meta.key !== 'crudeoilm_vwap_supertrend' && meta.key !== 'crudeoilm_ema_supertrend' && meta.key !== 'nifty_st_oi_bearcall' && meta.key !== 'nifty500_momentum' && meta.key !== 'nifty_delta_strangle' && meta.key !== 'nifty_flyagonal' && (
           <div className={fieldCls}>
             <FieldLabel text="Start Time" tip="Time (HH:MM IST) the strategy begins monitoring for entries." />
             <Input type="text" value={startTime} onChange={e => setStartTime(e.target.value)} placeholder="09:20" className={inputCls} style={{ width: 72 }} />
@@ -1455,7 +1470,7 @@ function StrategyRowWide({ meta, state, onRefresh, instanceId, onAddInstance, on
           </>
         )}
 
-        {meta.key !== 'crudeoilm_renko_sar' && meta.key !== 'crudeoilm_supertrend' && meta.key !== 'crudeoilm_vwap_supertrend' && meta.key !== 'crudeoilm_ema_supertrend' && meta.key !== 'nifty500_momentum' && meta.key !== 'nifty_delta_strangle' && (
+        {meta.key !== 'crudeoilm_renko_sar' && meta.key !== 'crudeoilm_supertrend' && meta.key !== 'crudeoilm_vwap_supertrend' && meta.key !== 'crudeoilm_ema_supertrend' && meta.key !== 'nifty500_momentum' && meta.key !== 'nifty_delta_strangle' && meta.key !== 'nifty_flyagonal' && (
           <>
             <div className={fieldCls}>
               <FieldLabel text="Target ₹" tip="Daily cumulative profit target in INR, or a percentage of entry premium collected e.g. '25%'; strategy squares off and stops once reached." />
@@ -2148,6 +2163,10 @@ function StrategyRowWide({ meta, state, onRefresh, instanceId, onAddInstance, on
 
       {/* ── Expanded sections ─────────────────────────────────────── */}
       {!isRunning && showConfig && configPanel}
+
+      {isRunning && meta.key === 'nifty_flyagonal' && (state as any).legs && (
+        <div className="border-t border-zinc-800/60 p-3"><FlyagonalPayoff state={state as any} /></div>
+      )}
 
       {isRunning && showLogs && (
         <div className="border-t border-zinc-800/60 px-4 py-3">
