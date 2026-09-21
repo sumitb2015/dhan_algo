@@ -6,8 +6,8 @@ description: Use when adding a new page or API route to rs_dashboard, wiring a N
 # Dhan Dashboard Page & API Route
 
 ## Overview
-`rs_dashboard` (Next.js App Router) has ~27 pages and ~39 API routes that all
-follow the same handful of conventions. Copying an existing route/page and
+`rs_dashboard` (Next.js App Router) has ~43 pages and ~72 API routes (run `ls app` /
+`ls app/api` for the real list) that all follow the same handful of conventions. Copying an existing route/page and
 missing one of these conventions is the most common source of "works but looks
 wrong" or "path resolves to nowhere" bugs.
 
@@ -16,6 +16,8 @@ wrong" or "path resolves to nowhere" bugs.
 - Adding a new `app/api/<name>/route.ts`, especially one that spawns a Python
   script (refresh jobs, live WebSocket bridges, backtests).
 - Building any data table in a dashboard component.
+- A page component is heading past ~600 lines, or a page needs a header control that re-keys its data
+  (expiry / underlying / date pickers).
 
 ## Path Resolution
 Every API route that touches the Python side imports the shared helpers rather
@@ -124,6 +126,43 @@ lands *lighter* than expected. Judge these in the browser, not from memory.
 `lightweight-charts`). Copy the nearest existing component's shell classes
 instead of composing a new card/table look.
 
+## Structuring a Feature Component (the Option Cube pattern)
+
+A page that grows toolbars, inspectors and tables should not stay one file. `OptionScatter3D.tsx` went
+1675 -> 486 lines when split (`b6b9ba3`), and the split is the template:
+
+| Layer | File | Rule |
+|---|---|---|
+| Page shell | `app/(group)/<route>/page.tsx` -> `components/<Name>Page.tsx` | sticky header, `NavBar`, pickers, `DATA:` chip. Owns which key (underlying/expiry) is selected |
+| Orchestrator | `components/<Name>.tsx` | state, polling, effects. No layout-heavy JSX |
+| Pieces | `components/<feature-kebab>/*.tsx` | one presentational component per file (`ControlBar`, `HoverCard`, `CandidatesTable`) |
+| Pure logic | `lib/<feature>.ts` + `lib/<feature>.test.ts` | no React, no DOM, no fetch. Run `npm test` (`node --test lib/*.test.ts`) |
+| Scene/config builders | `components/<feature-kebab>/build*.ts`, `shared.ts` | pure functions returning chart config; colour and preset constants |
+| Untyped 3rd-party libs | `types/<lib>.d.ts` | declare only the calls you use; extend it rather than casting to `any` |
+
+Put bug-prone maths (scoring, aggregation, bias mapping, expiry labelling) in `lib/` with a test *before*
+wiring it to UI - the Option Cube's wrong bias model and the allocator's straight-mean entry price
+(`aggregateLegs`, `e0fd077`) were both logic bugs that a UI check would never have caught.
+
+**Header pickers that re-key data** (expiry stepper, underlying tabs): key all fetched state by the
+selection (`underlying|expiry`), show only data whose key matches, let a new selection pre-empt a stale
+in-flight fetch, and keep the component mounted across changes that should preserve user settings
+(remount with `key=` only for a change that should reset them). Full recipe: `dhan-plotly-3d-scene` #7
+and `dhan-polling-guards` #12.
+
+**Loading and empty states are part of the page**: a first load that can take ~10 s (Python chain spawn)
+needs a spinner *with the expected wait*; a session-cached repaint needs a visible "showing data from
+HH:MM - refreshing" cue; an empty filter result needs a message that names the filter to loosen.
+
+**Nav**: a page has exactly one sidebar home. Adding the link to a second group creates duplicates that
+then get deleted (`d613696`). New route -> one entry in `components/Sidebar.tsx` (see `dhan-sidebar-nav`).
+
+**Adding an index/instrument to a list page** (`e729821`, Nifty Smallcap 250): touching the UI array is
+not enough. It also needs the Dhan id registered in the downloaders (`download_indices.py`,
+`backfill_indices_history.py`), the live-quote patcher (`fetch_today_quotes.py`,
+`refresh_dashboard_data.py`), `lib/dataLoader.ts`'s `KNOWN_INDICES` and the live-quotes route. Grep an
+existing sibling index end-to-end and mirror every hit.
+
 ## Quick Reference
 
 | Task | Where |
@@ -134,6 +173,9 @@ instead of composing a new card/table look.
 | One-click Buy/Sell button | `POST /api/scalper/order` (strike/expiry) or `/api/scalper/fast-order` (security ID) |
 | Read CSV data | `lib/dataLoader.ts` (`readStockCSV`, `readNifty50Index`, `readNifty500Index`) — patches today's row from `debug/today_quotes.json` |
 | Shared TA math | `lib/indicators.ts` |
+| Big feature component | split per "Structuring a Feature Component"; reference: `components/option-cube/` |
+| WebGL / Plotly 3D scene | `dhan-plotly-3d-scene` skill |
+| Session-cached repaint | `getCached` / `setCached` in `lib/clientCache.ts` (never cache an empty or `spot<=0` result) |
 | Sector labels/colors | `lib/sectors.ts` |
 
 ## Common Mistakes
@@ -150,5 +192,11 @@ instead of composing a new card/table look.
   inherited border. Use 800 or 700. (Existing uses are harmless; don't add more.)
 - Hardcoding a relative path like `../../debug/foo.json` instead of building it
   from `PROJECT_ROOT` — breaks as soon as the route file moves.
+- Computing a header summary (PCR, total OI, max-OI strikes) from the *filtered* points, so it moves when
+  the user adjusts a slider. Compute it from the whole dataset.
+- Rendering a table whose `<th>` count differs from its cell count (the Option Cube candidates table
+  shipped with 11 headers and 10 cells). Derive both from one column array.
+- Hand-rolling a CSS overlay for "fullscreen". Use the Fullscreen API on the panel ref, with the overlay
+  only as a rejection fallback (`dhan-plotly-3d-scene` #5).
 - `find rs_dashboard/app -maxdepth 1 -type d` for the current page list rather
   than trusting any doc's page table, since pages get added often.

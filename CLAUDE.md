@@ -256,6 +256,7 @@ distilled from 7-10 repeat bug-fix commits:
 `dhan-broker-cache` (the shared positions/funds cache in `lib/brokerPositionsCache.ts` — when a route may share it vs. must stay live),
 `dhan-options-analytics-page` (Positions/Straddle/Strangle Analysis: draft legs, margin/ROI, validity modals),
 `dhan-live-chart` (lightweight-charts canvas charts and polled series),
+`dhan-plotly-3d-scene` (Option Cube / Plotly gl3d: camera ownership, fullscreen panel, expiry-keyed chain state),
 `dhan-polling-guards` (poll loops, caches, JSON read-modify-write, process spawns),
 `dhan-theme-tokens` (the theme system), `dhan-commit-on-blur` (free-typed inputs
 must commit on blur/Enter so mid-edit values cannot fire live rules), plus

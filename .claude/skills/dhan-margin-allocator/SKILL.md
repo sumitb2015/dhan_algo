@@ -109,3 +109,16 @@ a budget slot.
 - Treating `vixPercentileToNakedTilt` and `vixPercentileToDeployMultiplier` as
   one lever — they answer different questions (mix vs. total size) and both need
   updating if the VIX-response philosophy changes.
+
+## Recent Additions to Preserve (`e0fd077`, `b53664f`)
+- **Capital map strip**: blocked / planned / unallocated / VIX-throttled / buffer. The parts must sum to
+  the total; add any new bucket to that sum.
+- **Gap stress test** (`lib/marginStress.ts`): expiry payoff at +/-2..8 % for open positions and the
+  proposed plan; falls back to last close when the scan has no spot.
+- **Open draft**: saves a DRAFT basket to Multi-Leg Focus (reuses an identical untouched Dhan draft) and
+  places **no orders**.
+- **Setups with unpriced legs are hidden**; scan failures are surfaced, not swallowed.
+- `aggregateLegs` uses a **quantity-weighted** entry price. A straight mean is wrong whenever legs have
+  different quantities; keep the test in `lib/positionStructure.test.ts`.
+- The route serves a <60 s cached body while one rebuild runs and skips expired expiries; the page skips a
+  poll tick while the previous is in flight (`dhan-polling-guards` #13).

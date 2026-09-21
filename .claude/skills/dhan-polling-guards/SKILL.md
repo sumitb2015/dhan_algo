@@ -203,6 +203,25 @@ decoupled from whatever fast poll happens to trigger the page's render — don't
 piggyback an expensive recompute onto a fast poll just because they're in the
 same component. (`ae935c7`)
 
+### 12. Key in-flight state by what was requested, not by a boolean
+`if (inflight.current) return` makes a new selection (another expiry, underlying, date) wait behind a slow
+fetch for the old one. Store `inflightKey` instead and skip only when it equals the *current* key; pair
+with the `seq` guard from #4 so the abandoned response is dropped. Clear it in `finally` only if
+`inflightKey === key && mine === seq.current`. Store fetched data with its key and render only a matching
+snapshot, otherwise the header briefly shows the previous selection's numbers. (`a3f9999`, Option Cube)
+
+### 13. Server-side spacing lanes gap the *next* caller, and dedupe keys must mean one shape
+Two bugs from one perf fix (`b53664f`; portfolio poll 32 s -> 0.3 s, allocator cold 96 s -> 7 s):
+- `pyExec.spaced` serialises Python chain spawns per underlying with a 3.5 s pause. The pause belongs
+  *before the next caller starts*, not before returning the current caller's already-available result.
+  Polls that stack behind a lane multiply the wait.
+- A `dedupe()` key must resolve to one response shape. `kotakLtpJoin` reused `options-chain:<key>` with
+  `/api/options/chain` but returned a different shape, so whichever ran second got an empty chain and
+  unpriced legs. Give each shape its own key prefix.
+- For a slow rebuild behind a poll, serve a body <60 s old while one rebuild runs (an order fill still
+  invalidates it), and have the client skip a tick while the previous one is in flight.
+- Skip chain lookups for expiries already past; `calculateDte` clamps to 0.2 so it cannot detect them.
+
 ## Before You Ship
 - Can two tabs run this at once? What happens if they do?
 - If this spawns something, what stops a second spawn during the startup window?

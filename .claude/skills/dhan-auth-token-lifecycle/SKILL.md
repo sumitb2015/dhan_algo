@@ -91,3 +91,10 @@ easy-to-regress piece of logic — read this before touching it again.
   frontend to proceed — a response can report `success: true` while the field a
   later step actually needs is `null`, silently skipping that step while the
   caller still thinks everything worked.
+
+## TOTP Autologin: Retry Once on Window Rollover
+A TOTP code generated at the edge of its 30 s window can reach Dhan after rollover and be rejected as
+"Invalid TOTP" with correct credentials (`0198afd`). `get_new_access_token_via_totp()` waits out the
+current window and retries once with a fresh code before failing, mirroring `kotak_login()` in
+`lib/kotak/authentication.py`. Do not add a second retry (repeated wrong codes can lock the account), and
+keep any Node-side TOTP path in step with this.
