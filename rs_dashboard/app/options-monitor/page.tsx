@@ -70,6 +70,8 @@ export default function OptionsMonitorPage() {
   // touched and the live lookup ran for the first time.
   const [strategyName, setStrategyName] = useState<string>('Short Strangle');
   const [activeLegs, setActiveLegs] = useState<OptionLegModel[]>([]);
+  // Expiry whose chain was last loaded — lets a chain load know which expiry the legs were on.
+  const loadedExpiryRef = useRef<string>('');
   const hasInitializedPresetRef = useRef<boolean>(false);
 
   // Position Guards (Target, Stop Loss, Trailing SL) per leg
@@ -275,6 +277,30 @@ export default function OptionsMonitorPage() {
         if (strikes.length > 0) {
           setChainStrikes(strikes);
           setNormalizedChain((prev) => ({ ...prev, ...normalized }));
+
+          // Switching the active expiry must carry the not-yet-entered legs with it, otherwise
+          // they stay on the old expiry (a "29-Sep strangle" still listed as 22-Sep). Re-anchor
+          // them to this chain: new expiry, security id, and price. Executed (isEntered) legs are
+          // real positions and legs deliberately built on another expiry stay where they are.
+          const prevExp = loadedExpiryRef.current;
+          loadedExpiryRef.current = exp;
+          if (prevExp && prevExp !== exp) {
+            setActiveLegs((prev) => prev.map((l) => {
+              if (l.isEntered) return l;
+              if (l.underlying && l.underlying !== sym) return l;
+              if ((l.expiry || prevExp) !== prevExp) return l;
+              const cs = normalized[l.strike]?.[l.type === 'CE' ? 'ce' : 'pe'];
+              const px = cs?.last_price || cs?.previous_close_price;
+              const civ = cs?.implied_volatility;
+              return {
+                ...l,
+                expiry: exp,
+                securityId: cs?.security_id != null ? String(cs.security_id) : undefined,
+                ...(typeof px === 'number' && px > 0 ? { entryPrice: px, ltp: px } : {}),
+                ...(typeof civ === 'number' && civ > 0 ? { iv: civ / 100 } : {}),
+              };
+            }));
+          }
         }
 
         // Compute average ATM IV from the real chain
