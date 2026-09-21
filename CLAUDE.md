@@ -370,3 +370,28 @@ the scalper terminals and as copy-trade children that mirror Dhan fills.
   Zerodha and Kotak stop-loss exits are purely software-managed (in-memory polling/WS loops), not resting broker orders.
   Multi-instance exit safety across all brokers is managed via `resolve_exit_qty_broker()`. Pre-flight
   session checks via `scripts/tools/verify_broker_session.py` prevent launch with dead tokens.
+
+## Knowledge Vault (Obsidian)
+
+A personal knowledge vault lives **outside this repo** at `/home/sumit/Brain/dhan_algo_brain`
+(linked via `additionalDirectories` in `.claude/settings.local.json`; if it isn't accessible,
+tell the user rather than skipping silently). It holds only what the repo cannot: history,
+reasoning, research and unconfirmed observations. **Read the vault's own `CLAUDE.md` before
+writing to it** — it defines the scope, templates, frontmatter, `index.md` and `log.md` rules.
+
+**While working, capture to the vault when you hit one of these** (nothing else — code structure,
+API references and how-a-module-works stay in the repo):
+
+1. **Broker/API quirk** seen but not yet confirmed enough for `docs/API_GOTCHAS.md` → `wiki/brokers/`
+2. **Real-money bug or incident** (bad fill, naked leg, wrong-account order, phantom state) → `wiki/incidents/`
+3. **Non-obvious design decision** with rejected alternatives → `wiki/decisions/`
+4. **Strategy research result** (backtest outcome, rejected/failed idea, why) → `wiki/strategies/`
+5. **Idea or follow-up** you noticed but are not doing now → `wiki/roadmap/`
+
+**Rules for autonomous writes:**
+- **Append/create freely; never rewrite or delete existing notes** without asking. Do not promote a note into repo docs (`API_GOTCHAS.md`, skills, `CLAUDE.md`) without asking.
+- **Mark anything unverified as unconfirmed** (`> [!question] unconfirmed`) with the date and how to confirm it. A guess made mid-task must not become an accepted fact.
+- **Never store secrets**, tokens, `.env` contents, client IDs or account numbers.
+- Update the vault's `index.md` and append to its `log.md` for every page you add.
+- **Say what you wrote** in your final reply (page path + one line). If you are unsure a finding qualifies, mention it and ask instead of writing.
+- Don't interrupt a task to write notes; do it at the end.
