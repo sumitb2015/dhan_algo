@@ -717,6 +717,24 @@ export default function MultiLegFocus() {
           };
         }
 
+        // Changing the basket's (front) expiry must carry its DRAFT front-expiry
+        // legs along. Otherwise those legs keep the old expiry, differ from
+        // basket.expiry, and the row misreads a plain short strangle as a
+        // Calendar/Diagonal (FAR legs + Far Expiry selector). Legs already on
+        // a different (far) expiry, and placed legs, are left untouched.
+        if (patch.expiry && patch.expiry !== b.expiry) {
+          const newExp = patch.expiry;
+          return {
+            ...b,
+            ...patch,
+            legs: b.legs.map(l =>
+              l.status === 'DRAFT' && (!l.expiry || l.expiry === b.expiry) ? { ...l, expiry: newExp } : l,
+            ),
+            farExpiry: patch.farExpiry ?? (b.farExpiry === newExp ? undefined : b.farExpiry),
+            updatedAt: new Date().toISOString(),
+          };
+        }
+
         return { ...b, ...patch, updatedAt: new Date().toISOString() };
       });
       const target = next.find(b => b.id === basketId);
