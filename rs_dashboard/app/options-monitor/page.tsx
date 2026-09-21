@@ -130,6 +130,32 @@ export default function OptionsMonitorPage() {
     };
   }, [selectedExpiry, selectedUnderlying]);
 
+  // Legs on another expiry (e.g. a monthly straddle while the page's active expiry is the weekly)
+  // aren't covered by the bridge's main subscription. Ask it to also stream those contracts
+  // (`watchExtra`); their ticks then arrive under liveQuotes.extra[expiry][strike].
+  const offExpiryKey = useMemo(() => {
+    const keys = new Set<string>();
+    for (const l of activeLegs) {
+      if (l.expiry && l.expiry !== selectedExpiry && (!l.underlying || l.underlying === selectedUnderlying)) {
+        keys.add(`${l.expiry}|${l.strike}|${l.type}`);
+      }
+    }
+    return Array.from(keys).sort().join(',');
+  }, [activeLegs, selectedExpiry, selectedUnderlying]);
+
+  useEffect(() => {
+    if (!offExpiryKey) return;
+    const requests = offExpiryKey.split(',').map((k) => {
+      const [expiry, strike, side] = k.split('|');
+      return { underlying: selectedUnderlying, expiry, strike: Number(strike), side };
+    });
+    fetch('/api/options/live', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action: 'watchExtra', underlying: selectedUnderlying, requests }),
+    }).catch(() => {});
+  }, [offExpiryKey, selectedUnderlying]);
+
   // Synchronize incoming ticks from WebSocket to spot, VIX, and normalized chain
   useEffect(() => {
     if (!liveQuotes) return;
@@ -425,6 +451,9 @@ export default function OptionsMonitorPage() {
       if ((leg.expiry && leg.expiry !== selectedExpiry) || (leg.underlying && leg.underlying !== selectedUnderlying)) {
         const legIv = leg.iv || ivPct / 100;
         const isFut = typeof futurePrice === 'number' && futurePrice > 0;
+        const extraTick = leg.expiry ? (liveQuotes as any)?.extra?.[leg.expiry]?.[String(leg.strike)] : undefined;
+        const extraLtp = leg.type === 'CE' ? extraTick?.ce?.ltp : extraTick?.pe?.ltp;
+        const offLtp = (typeof extraLtp === 'number' && extraLtp > 0) ? extraLtp : leg.ltp;
         const gOff = computeBsGreeks(
           leg.type,
           isFut ? (futurePrice as number) : spot,
@@ -435,7 +464,7 @@ export default function OptionsMonitorPage() {
           0.065,
           isFut
         );
-        return { ...leg, delta: gOff.delta, gamma: gOff.gamma, theta: gOff.theta, vega: gOff.vega, iv: legIv };
+        return { ...leg, ltp: offLtp, delta: gOff.delta, gamma: gOff.gamma, theta: gOff.theta, vega: gOff.vega, iv: legIv };
       }
 
       // 1. Look up live WebSocket tick quote
