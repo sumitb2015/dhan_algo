@@ -419,6 +419,25 @@ export default function OptionsMonitorPage() {
 
   const legs: OptionLegModel[] = useMemo(() => {
     return activeLegsBase.map((leg) => {
+      // A leg on another expiry/underlying must not be repriced from the ACTIVE expiry's ticks/chain
+      // (same strike, different contract) nor use the active expiry's time to expiry. Keep its own
+      // captured ltp/iv and recompute greeks over its own remaining time.
+      if ((leg.expiry && leg.expiry !== selectedExpiry) || (leg.underlying && leg.underlying !== selectedUnderlying)) {
+        const legIv = leg.iv || ivPct / 100;
+        const isFut = typeof futurePrice === 'number' && futurePrice > 0;
+        const gOff = computeBsGreeks(
+          leg.type,
+          isFut ? (futurePrice as number) : spot,
+          leg.strike,
+          Math.max(0.0001, calculateTimeToExpiryYears(leg.expiry || selectedExpiry)),
+          legIv,
+          uConfig.lotSize,
+          0.065,
+          isFut
+        );
+        return { ...leg, delta: gOff.delta, gamma: gOff.gamma, theta: gOff.theta, vega: gOff.vega, iv: legIv };
+      }
+
       // 1. Look up live WebSocket tick quote
       const tickData = liveQuotes?.strikes?.[leg.strike] ?? liveQuotes?.strikes?.[String(leg.strike)];
       const wsLtp = leg.type === 'CE' ? tickData?.ce?.ltp : tickData?.pe?.ltp;
@@ -468,7 +487,7 @@ export default function OptionsMonitorPage() {
         iv: effectiveIv,
       };
     });
-  }, [activeLegsBase, liveQuotes, normalizedChain, selectedExpiry, spot, futurePrice, effectiveTimeToExpiryYears, ivPct, uConfig.lotSize]);
+  }, [activeLegsBase, liveQuotes, normalizedChain, selectedExpiry, selectedUnderlying, spot, futurePrice, effectiveTimeToExpiryYears, ivPct, uConfig.lotSize]);
 
   // Compute 2D payoff curve, breakevens & 1SD/2SD expected-move bands
   const { points: payoffPoints, breakevens, sdLevels } = useMemo(() => {
@@ -723,7 +742,27 @@ export default function OptionsMonitorPage() {
     strike: number;
     lots: number;
     entryPrice: number;
+    expiry?: string;
+    securityId?: string;
+    iv?: number;
   }) => {
+    // A leg on a non-active expiry can't be priced from the page's active-expiry chain/ticks,
+    // so it goes through the chain-modal path, which takes its own expiry/securityId/iv.
+    if (newLegData.expiry && newLegData.expiry !== selectedExpiry) {
+      handleAddLegFromChain({
+        type: newLegData.type,
+        side: newLegData.side,
+        strike: newLegData.strike,
+        ltp: newLegData.entryPrice,
+        expiry: newLegData.expiry,
+        underlying: selectedUnderlying,
+        iv: newLegData.iv,
+        securityId: newLegData.securityId,
+        lots: newLegData.lots,
+      });
+      setStrategyName('Custom Strategy');
+      return;
+    }
     const newLeg = buildNewLeg(newLegData);
     setActiveLegs((prev) => [...prev, newLeg]);
     setStrategyName('Custom Strategy');
@@ -1458,13 +1497,18 @@ export default function OptionsMonitorPage() {
     strike: number;
     lots: number;
     entryPrice: number;
+    expiry?: string;
+    securityId?: string;
   }) => {
     const legKey = leg.type.toLowerCase() as 'ce' | 'pe';
-    const secId = normalizedChain[leg.strike]?.[legKey]?.security_id;
+    const isAlt = !!leg.expiry && leg.expiry !== selectedExpiry;
+    // The shared normalizedChain is the active expiry's; for another expiry trust only the
+    // securityId the modal resolved from that expiry's own chain (else the order modal resolves it).
+    const secId = isAlt ? leg.securityId : normalizedChain[leg.strike]?.[legKey]?.security_id;
     setActiveTradeOrder({
       title: `${selectedUnderlying} ${leg.strike} ${leg.type} (${leg.side})`,
       underlying: selectedUnderlying,
-      expiry: selectedExpiry,
+      expiry: isAlt ? leg.expiry! : selectedExpiry,
       lotSize: uConfig.lotSize,
       defaultLots: 1,
       legs: [
@@ -1503,6 +1547,7 @@ export default function OptionsMonitorPage() {
     iv?: number;
     delta?: number;
     securityId?: string;
+    lots?: number;
   }) => {
     const legUnderlying = leg.underlying || selectedUnderlying;
     const legUConfig = UNDERLYINGS[legUnderlying] || uConfig;
@@ -1521,8 +1566,8 @@ export default function OptionsMonitorPage() {
       type: leg.type,
       side: leg.side,
       strike: leg.strike,
-      lots: 1,
-      qty: legUConfig.lotSize,
+      lots: leg.lots ?? 1,
+      qty: (leg.lots ?? 1) * legUConfig.lotSize,
       entryPrice: leg.ltp,
       ltp: leg.ltp,
       delta: hasDhanDelta ? leg.delta! : g.delta,
@@ -1790,6 +1835,9 @@ export default function OptionsMonitorPage() {
         chainStrikes={chainStrikes}
         chain={normalizedChain}
         liveQuotes={liveQuotes}
+        underlying={selectedUnderlying}
+        expiries={expiries}
+        currentExpiry={selectedExpiry}
         onAddLeg={handleAddLeg}
         onExecuteLeg={handleExecuteLegFromModal}
       />

@@ -1,7 +1,7 @@
 'use client';
 
 import React, { useState } from 'react';
-import { OptType, Side } from '@/lib/optionsMonitorMath';
+import { OptType, Side, extractChainStrikes } from '@/lib/optionsMonitorMath';
 import { X, Plus, Check, Zap } from 'lucide-react';
 
 interface AddLegModalProps {
@@ -13,20 +13,26 @@ interface AddLegModalProps {
   chainStrikes?: number[];
   chain?: Record<number, { ce?: any; pe?: any }>;
   liveQuotes?: any;
-  onAddLeg: (leg: {
-    type: OptType;
-    side: Side;
-    strike: number;
-    lots: number;
-    entryPrice: number;
-  }) => void;
-  onExecuteLeg?: (leg: {
-    type: OptType;
-    side: Side;
-    strike: number;
-    lots: number;
-    entryPrice: number;
-  }) => void;
+  /** Underlying + expiry list let the user build a leg on any listed expiry,
+   *  not just the page's active one. Omit to keep the single-expiry behaviour. */
+  underlying?: string;
+  expiries?: string[];
+  currentExpiry?: string;
+  onAddLeg: (leg: NewLegPayload) => void;
+  onExecuteLeg?: (leg: NewLegPayload) => void;
+}
+
+export interface NewLegPayload {
+  type: OptType;
+  side: Side;
+  strike: number;
+  lots: number;
+  entryPrice: number;
+  /** Set only when the chosen expiry differs from the page's active expiry. */
+  expiry?: string;
+  securityId?: string;
+  /** Implied vol as a fraction (0.13 = 13%) when known for that expiry. */
+  iv?: number;
 }
 
 export default function AddLegModal({
@@ -38,6 +44,9 @@ export default function AddLegModal({
   chainStrikes,
   chain,
   liveQuotes,
+  underlying,
+  expiries,
+  currentExpiry,
   onAddLeg,
   onExecuteLeg,
 }: AddLegModalProps) {
@@ -48,20 +57,54 @@ export default function AddLegModal({
   const [lots, setLots] = useState<number>(defaultLots || 2);
   const [lotsDraft, setLotsDraft] = useState<string>(String(defaultLots || 2));
 
+  const [expiry, setExpiry] = useState<string>(currentExpiry ?? '');
+  const isAltExpiry = !!currentExpiry && !!expiry && expiry !== currentExpiry;
+  // Chain for a non-active expiry, fetched here. The page's live ticks and chain only cover the
+  // active expiry, so for an alternate expiry we must use this instead of (never mixed with) them.
+  const [altChain, setAltChain] = useState<Record<number, { ce?: any; pe?: any }> | null>(null);
+  const [altStrikes, setAltStrikes] = useState<number[]>([]);
+  const [altLoading, setAltLoading] = useState(false);
+  const effChain = isAltExpiry ? altChain ?? undefined : chain;
+  const effLive = isAltExpiry ? undefined : liveQuotes;
+  // Alt-expiry chain not loaded (in flight or failed): price/strike/securityId would be guesses.
+  const altNotReady = isAltExpiry && (altLoading || !altChain);
+
+  React.useEffect(() => {
+    if (!isAltExpiry || !underlying) { setAltChain(null); setAltStrikes([]); return; }
+    let cancelled = false;
+    setAltLoading(true);
+    setAltChain(null);
+    setAltStrikes([]);
+    fetch(`/api/options/chain?underlying=${underlying}&expiry=${expiry}&broker=dhan`, { cache: 'no-store' })
+      .then((r) => r.json())
+      .then((data) => {
+        if (cancelled) return;
+        const raw = data?.data?.chain?.oc || data?.data?.chain || {};
+        const { strikes, normalized } = extractChainStrikes(raw);
+        setAltStrikes(strikes);
+        setAltChain(normalized);
+        // Keep the selection valid for this expiry's strike list
+        if (strikes.length > 0) setStrike((cur) => (strikes.includes(cur) ? cur : strikes.reduce((a, b) => Math.abs(b - cur) < Math.abs(a - cur) ? b : a)));
+      })
+      .catch(() => {})
+      .finally(() => { if (!cancelled) setAltLoading(false); });
+    return () => { cancelled = true; };
+  }, [isAltExpiry, expiry, underlying]);
+
   const resolvePrice = React.useCallback(
     (targetStrike: number, optType: OptType): number => {
       const legKey = optType.toLowerCase() as 'ce' | 'pe';
-      const wsTick = liveQuotes?.strikes?.[targetStrike] ?? liveQuotes?.strikes?.[String(targetStrike)];
+      const wsTick = effLive?.strikes?.[targetStrike] ?? effLive?.strikes?.[String(targetStrike)];
       const wsPrice = optType === 'CE' ? wsTick?.ce?.ltp : wsTick?.pe?.ltp;
       if (typeof wsPrice === 'number' && wsPrice > 0) return wsPrice;
 
-      const chainEntry = chain?.[targetStrike];
+      const chainEntry = effChain?.[targetStrike];
       const chainP = chainEntry?.[legKey]?.last_price ?? chainEntry?.[legKey]?.previous_close_price;
       if (typeof chainP === 'number' && chainP > 0) return chainP;
 
       return 35.0;
     },
-    [chain, liveQuotes]
+    [effChain, effLive]
   );
 
   const [entryPrice, setEntryPrice] = useState<number>(() => resolvePrice(atmStrike, 'CE'));
@@ -85,6 +128,7 @@ export default function AddLegModal({
   const wasOpenRef = React.useRef(false);
   React.useEffect(() => {
     if (isOpen && !wasOpenRef.current) {
+      setExpiry(currentExpiry ?? '');
       setStrike(atmStrike);
       const initP = resolvePrice(atmStrike, type);
       setEntryPrice(initP);
@@ -93,7 +137,23 @@ export default function AddLegModal({
       setLotsDraft(String(defaultLots || 2));
     }
     wasOpenRef.current = isOpen;
-  }, [isOpen, atmStrike, resolvePrice, type, defaultLots]);
+  }, [isOpen, atmStrike, resolvePrice, type, defaultLots, currentExpiry]);
+
+  // Re-price the selected strike once an alternate expiry's chain has loaded
+  React.useEffect(() => {
+    if (!isAltExpiry || !altChain) return;
+    const p = resolvePrice(strike, type);
+    if (p > 0) { setEntryPrice(p); setEntryPriceDraft(String(p)); }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [altChain]);
+
+  const handleExpiryChange = (exp: string) => {
+    setExpiry(exp);
+    if (exp === currentExpiry) {
+      const p = resolvePrice(strike, type);
+      if (p > 0) { setEntryPrice(p); setEntryPriceDraft(String(p)); }
+    }
+  };
 
   // Update entry price when strike or type changes
   const handleStrikeChange = (newStrike: number) => {
@@ -117,9 +177,21 @@ export default function AddLegModal({
   if (!isOpen) return null;
 
   // Use real chain strikes if available, otherwise generate range around ATM
-  const strikeOptions: number[] = chainStrikes && chainStrikes.length > 0
-    ? chainStrikes
+  const effStrikes = isAltExpiry ? altStrikes : chainStrikes;
+  const strikeOptions: number[] = effStrikes && effStrikes.length > 0
+    ? effStrikes
     : Array.from({ length: 41 }, (_, i) => atmStrike + (i - 20) * strikeStep);
+
+  const altExtras = (): Pick<NewLegPayload, 'expiry' | 'securityId' | 'iv'> => {
+    if (!isAltExpiry) return {};
+    const side_ = effChain?.[strike]?.[type.toLowerCase() as 'ce' | 'pe'];
+    const iv = side_?.implied_volatility;
+    return {
+      expiry,
+      securityId: side_?.security_id != null ? String(side_.security_id) : undefined,
+      iv: typeof iv === 'number' && iv > 0 ? iv / 100 : undefined,
+    };
+  };
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
@@ -131,6 +203,7 @@ export default function AddLegModal({
       strike,
       lots: finalLots,
       entryPrice: finalPrice,
+      ...altExtras(),
     });
     onClose();
   };
@@ -223,6 +296,24 @@ export default function AddLegModal({
             </div>
           </div>
 
+          {/* Expiry Selector */}
+          {expiries && expiries.length > 0 && (
+            <div>
+              <label className="text-[10px] text-zinc-400 uppercase font-semibold block mb-1.5">
+                EXPIRY {altLoading && <span className="text-zinc-500 normal-case">(loading chain…)</span>}
+              </label>
+              <select
+                value={expiry}
+                onChange={(e) => handleExpiryChange(e.target.value)}
+                className="w-full bg-zinc-900 text-white font-bold px-3 py-2 rounded-xl border border-zinc-700 cursor-pointer focus:outline-none focus:border-indigo-500 text-xs"
+              >
+                {expiries.map((ex) => (
+                  <option key={ex} value={ex}>{ex}{ex === currentExpiry ? ' (active)' : ''}</option>
+                ))}
+              </select>
+            </div>
+          )}
+
           {/* Strike Selector (Open for all strikes) */}
           <div>
             <label className="text-[10px] text-zinc-400 uppercase font-semibold block mb-1.5">
@@ -307,6 +398,7 @@ export default function AddLegModal({
               {onExecuteLeg && (
                 <button
                   type="button"
+                  disabled={altNotReady}
                   onClick={() => {
                     onClose();
                     const finalLots = Math.min(50, Math.max(1, parseInt(lotsDraft, 10) || lots));
@@ -317,9 +409,10 @@ export default function AddLegModal({
                       strike,
                       lots: finalLots,
                       entryPrice: finalPrice,
+                      ...altExtras(),
                     });
                   }}
-                  className="flex items-center gap-1.5 px-3.5 py-1.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-bold shadow transition-colors cursor-pointer"
+                  className="flex items-center gap-1.5 px-3.5 py-1.5 rounded-xl disabled:opacity-50 disabled:cursor-not-allowed bg-emerald-600 hover:bg-emerald-500 text-white font-bold shadow transition-colors cursor-pointer"
                   title="Open Broker Order Ticket to execute this trade on Dhan"
                 >
                   <Zap className="w-3.5 h-3.5 fill-current" />
@@ -328,7 +421,8 @@ export default function AddLegModal({
               )}
               <button
                 type="submit"
-                className="flex items-center gap-1.5 px-4 py-1.5 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white font-bold shadow transition-colors cursor-pointer"
+                disabled={altNotReady}
+                className="disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-1.5 px-4 py-1.5 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white font-bold shadow transition-colors cursor-pointer"
               >
                 <Plus className="w-4 h-4" />
                 <span>ADD TO MONITOR</span>
