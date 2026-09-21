@@ -33,6 +33,9 @@ A quant-terminal page is two components:
 
 ## Sticky Header (page shell) — exactly two levels
 
+> The canonical header spec (tokens, `z-30`, `-400` accent text, DATA chip, variants) is `dhan-page-theme`.
+> This section keeps the quant-terminal layout; if the two ever differ, `dhan-page-theme` wins.
+
 The header is **one row**: page title/eyebrow on the left, all selectors plus
 `<NavBar />` inline on the right, separated by a `w-px h-5 bg-zinc-800`
 divider. It used to be three levels — a shared `app/(options)/layout.tsx`
@@ -55,15 +58,15 @@ header row instead; the layout is intentionally inert.
 
 ```tsx
 <div className="flex flex-col min-h-screen bg-zinc-950 text-white">
-  <div className="sticky top-0 z-10 flex items-center justify-between gap-3 flex-wrap
+  <div className="sticky top-0 z-30 flex items-center justify-between gap-3 flex-wrap
                   px-6 py-3 border-b border-zinc-800 bg-zinc-950/95 backdrop-blur">
     <div className="flex items-center gap-3">
       <div className="flex items-center justify-center w-8 h-8 rounded-lg
                       bg-emerald-500/10 border border-emerald-500/25 shrink-0">
-        {/* 15x15 accent icon, text-emerald-400 (or the page's accent color) */}
+        {/* 16px accent icon (w-4 h-4), text-emerald-400 (or the page's accent color) */}
       </div>
       <div>
-        <p className="text-[9px] font-bold text-emerald-500 uppercase tracking-[0.18em] mb-0.5">
+        <p className="text-[10px] font-bold text-emerald-400 uppercase tracking-[0.16em] mb-0.5">
           {/* eyebrow: domain · underlying, e.g. "Options · NIFTY" */}
         </p>
         <h1 className="text-sm font-bold text-white tracking-tight leading-none">{/* title */}</h1>
@@ -86,11 +89,15 @@ Wrap each chart in a card: `bg-zinc-900/60 border border-zinc-800 rounded-2xl p-
 (`overflow-hidden` if it has a background glow/gradient). Standard `recharts` grid:
 
 ```ts
-const gridProps = { strokeDasharray: '3 6', stroke: '#20202399', vertical: false as const };
+const gridProps = { strokeDasharray: '3 6', vertical: false as const };   // no stroke: colour comes from globals.css
 ```
 
 `<ResponsiveContainer width="100%" height={420}>` is the default chart height across the
 existing pages — match it unless the content needs more.
+
+Grid lines, axes, tick labels, legend text and the default tooltip are themed by `app/globals.css` (`.recharts-*`
+rules, `!important`), so passing `stroke`/`fill`/`contentStyle` hexes for them is dead code and CLAUDE.md forbids it.
+Series colours you do pass.
 
 ## Tooltip
 
@@ -103,8 +110,15 @@ Custom tooltip component per chart (not the default recharts one):
 </div>
 ```
 
-Bar/area cursor: `cursor={{ fill: '#27272a', opacity: 0.5 }}`. Line cursor:
-`cursor={{ stroke: '#3f3f46', strokeWidth: 1, strokeDasharray: '4 4' }}`.
+The tooltip **cursor is not covered** by the global chrome rules, so take its colour from `useChartChrome()`
+(`lib/chartTheme.ts`) instead of a hex; in dark mode `chrome.gridline` is exactly the old `#27272a`:
+```tsx
+const chrome = useChartChrome();
+<Tooltip cursor={{ fill: chrome.gridline, opacity: 0.5 }} content={<ChartTooltip />} />                        {/* bar/area */}
+<Tooltip cursor={{ stroke: chrome.baseline, strokeWidth: 1, strokeDasharray: '4 4' }} content={<ChartTooltip />} /> {/* line */}
+```
+About 64 existing chart cursors still pass `#27272a` / `#3f3f46`, which stay dark in white mode. Fix them when you touch the file;
+do not copy the pattern.
 
 ## Color & Text Rules (inherited from CLAUDE.md — repeated here because it's easy to violate in chart code)
 

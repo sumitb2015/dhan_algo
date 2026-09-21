@@ -7,11 +7,14 @@ This document provides a detailed guide for creating new trading strategies with
 All strategies should follow a consistent structure to ensure reliability and ease of maintenance.
 
 ### Basic Template
-Always start with `templates/strategy_template.py`. It includes:
-- Initialization of `DhanHelper`.
-- Market open/close checks.
-- A main loop with error handling.
-- Position management logic using net quantity.
+Start from the **`dhan-new-strategy` skill** (`.claude/skills/dhan-new-strategy/`): its `assets/strategy_skeleton.py` is a
+runnable, dry-run-first skeleton with the standard feature kit (state bridge, shutdown trigger, own-quantity exits,
+confirmed fills, restart recovery, config validation, `--instance-id`, `--broker`), and `assets/smoke_test_skeleton.py`
+tests its failure paths without a broker.
+
+`templates/strategy_template.py` is only a minimal illustration of `DhanHelper` usage (init, market-hours check, a
+main loop, own-position tracking). It has **no** `--live` flag, `save_strategy_state()`, `check_shutdown_trigger()`
+or restart recovery, so a strategy copied from it is invisible to the dashboard and unstoppable from it.
 
 ## 2. Technical Indicators
 Use `helper.get_indicators()` for all technical analysis. It supports:
@@ -29,7 +32,12 @@ df = helper.get_indicators(SYMBOL, indicators=['EMA20', 'RSI14', 'ATR10'])
 ### Entry & Exit
 - **Entry**: Use `helper.place_entry(symbol, qty, direction)`.
 - **Exit**: Close with an **explicit quantity** you own — `helper.buy(security_id, lots * lot_size)` / `helper.sell(...)`. This is what every strategy in this repo does, and it nets correctly at the broker.
-- **Stop Loss**: Always place an SL-M order immediately after entry using `helper.place_sl_market()`.
+- **Stop Loss**: strategies manage stops **in software** (a polled per-leg or MTM check in the main loop), because the
+  same security id is shared across instances and brokers (a resting SL-M order nets into a sibling's position), and
+  Zerodha/Kotak have no resting stop here at all. `helper.place_sl_market()` is used only as an optional Dhan-only
+  hard-stop backstop (`nifty_delta_strangle`'s `--hard-sl-multiple`, disabled with `--no-hard-sl`). If you add one,
+  size it from your own quantity and cancel it by order id, never with `cancel_all_orders()`. Because the loop *is* the
+  stop, it must stay alive and responsive: see `dhan-new-strategy`, "Orders".
 
 #### Account-wide helpers — handle with care
 Three `DhanHelper` methods act on the **whole account**, not just your strategy. Two strategies

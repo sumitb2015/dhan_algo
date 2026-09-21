@@ -1,6 +1,11 @@
 
 """
 Strategy Template using High-Level DhanHelper Abstractions
+
+MINIMAL ILLUSTRATION ONLY. This file shows DhanHelper calls; it is NOT a complete strategy: it has no --live/dry-run
+split, no save_strategy_state()/check_shutdown_trigger() (so the dashboard cannot see or stop it), no restart
+recovery and no config validation. Start new strategies from the dhan-new-strategy skill instead:
+    .claude/skills/dhan-new-strategy/assets/strategy_skeleton.py
 """
 import argparse
 import time

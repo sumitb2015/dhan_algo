@@ -127,7 +127,7 @@ strategies/
   intraday_equity/          # Nifty-50 cash-equity VWAP+RS auto-trader — NOT VALIDATED, dry-run only
   momentum_investing/       # Nifty-500 positional (CNC, multi-day) relative-strength momentum portfolio
   Archives/                 # Retired/superseded strategies (kept for reference)
-templates/strategy_template.py  # Starting point for new strategies
+templates/strategy_template.py  # Minimal DhanHelper illustration ONLY (no state bridge/--live/recovery) — see dhan-new-strategy
 docs/
   AGENT_FUNCTION_REFERENCE.md  # Full DhanHelper method reference
   STRATEGY_GUIDELINES.md       # How to structure a new strategy
@@ -254,6 +254,8 @@ inside the token system.
 distilled from 7-10 repeat bug-fix commits:
 `dhan-broker-positions` (scalper terminals, broker payloads, P&L, MTM history, close/exit orders),
 `dhan-order-tickets` (order modals and trade routes: server-side lot cap, MCX/BSE contract resolution, margin estimates, draft inputs),
+`dhan-page-theme` (per-page header, icon, accent, DATA chip, z-index scale, shared components and page states; ships an audit script),
+`dhan-terminal-polish` (density/readability of order-placing terminals) and `dhan-a11y-controls` (focus ring, icon-button aria-labels),
 `dhan-broker-cache` (the shared positions/funds cache in `lib/brokerPositionsCache.ts` — when a route may share it vs. must stay live),
 `dhan-options-analytics-page` (Positions/Straddle/Strangle Analysis: draft legs, margin/ROI, validity modals),
 `dhan-live-chart` (lightweight-charts canvas charts and polled series),
@@ -311,7 +313,7 @@ Several more of these have caused real bugs and are non-obvious enough to need t
 - After-hours development: symbol lookups and expiry resolution work via the cached master list; live quotes and order placement are unavailable.
 - Intraday auto-exit is hardcoded at **15:17 IST** across all strategies.
 - Straddle/strangle inversion guard: `CE strike > PE strike` is enforced at entry and after each adjustment; violation triggers an emergency exit + 5-minute pause + fresh cycle. **Exception**: `nifty_delta_neutral.py` deliberately does not enforce this — strikes are chosen purely by delta-proximity, so an inverted strangle (CE strike < PE strike) is a valid, expected outcome, not an error.
-- New strategies must use `templates/strategy_template.py` as the starting point and must call `save_strategy_state()` and `check_shutdown_trigger()` in the main loop to integrate with the dashboard.
+- New strategies start from the **`dhan-new-strategy` skill** (`assets/strategy_skeleton.py` + its standard feature kit), not from `templates/strategy_template.py`, which is a minimal illustration with no dry-run flag, state bridge or restart recovery. Every strategy must call `save_strategy_state()` and `check_shutdown_trigger()` in its main loop to integrate with the dashboard.
 - **Exit sizing must never trust the raw broker net quantity.** Dhan nets every position by security ID, so two strategy instances short of the same strike share ONE broker position — sizing an exit off `helper.get_net_quantity()` lets whichever instance exits first flatten a sibling instance's leg too (this happened for real on 2026-07-30). Use `lib/strategy_risk.py`'s `resolve_exit_qty(helper, security_id, own_qty, side)` instead: it exits what *this* strategy opened, clamped by what the broker still shows in that direction. Already adopted across `value_imbalance/`, `oi_directional/`, and `intraday_equity/` — use it in any new strategy that can share a security ID with another running instance.
 - Per-strategy trading logic lives in each group's `strategy.md` (`strategies/<group>/strategy.md`) — read it before modifying that strategy. One-line map: `value_imbalance/` premium mean-reversion straddles/strangles (VWAP variant, plus a delta-neutral 0.5-delta variant with no inversion guard and no entry-balance gate); `spread_trend/` EMA20+Supertrend credit spreads; `st_oi_bearcall/` bear-call-only entry gated by dual Supertrend (index 3-min + candidate option's own 3-min) plus OI short-buildup confirmation; `oi_directional/` OI-diff/PCR naked option sell; `crudeoil/` MCX futures (Supertrend trailing, always-in Renko SAR, VWAP+Supertrend, EMA20+Supertrend, and pivot-gated ORB); `intraday_equity/` Nifty-50 cash VWAP+RS auto-trader, rule set NOT validated by backtest — dry-run only, `--live` requires `--i-understand-the-backtest-failed`; `momentum_investing/` the repo's only multi-day/CNC-delivery strategy — Nifty-500 composite-RS ranking, trailing-stop ladder + weekly rank rotation, portfolio persisted to `debug/nifty500_momentum_portfolio.json` across restarts.
 
