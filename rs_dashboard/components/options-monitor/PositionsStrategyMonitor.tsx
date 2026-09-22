@@ -1229,7 +1229,11 @@ export default function PositionsStrategyMonitor({
                   />
                 )}
 
-                {/* On Target Date (T+0): smooth Black-Scholes theoretical-price curve */}
+                {/* On Target Date (T+0): smooth Black-Scholes theoretical-price curve.
+                    isAnimationActive={false}: payoffPoints recomputes on every live spot tick
+                    (~1/s from the WS feed), so a play-in animation never finishes — it keeps
+                    restarting and the line renders frozen mid-draw, only a short way from the
+                    left edge. Matches BasketPayoffChart.tsx's identical fix. */}
                 <Line
                   type="monotone"
                   dataKey="pnlToday"
@@ -1237,6 +1241,7 @@ export default function PositionsStrategyMonitor({
                   strokeWidth={2}
                   dot={false}
                   activeDot={{ r: 3, strokeWidth: 0 }}
+                  isAnimationActive={false}
                   name="On Target Date (T+0)"
                 />
                 {/* On Expiry: exact piecewise-linear intrinsic payoff with crisp strike corners */}
@@ -1247,6 +1252,7 @@ export default function PositionsStrategyMonitor({
                   strokeWidth={2}
                   dot={false}
                   activeDot={{ r: 3, strokeWidth: 0 }}
+                  isAnimationActive={false}
                   name="On Expiry"
                 />
               </LineChart>
