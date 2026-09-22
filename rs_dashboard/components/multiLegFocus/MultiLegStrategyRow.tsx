@@ -10,6 +10,7 @@ import AddLotsModal from './AddLotsModal';
 import AddNewLegModal from './AddNewLegModal';
 import {
   computeLegTrailingSL, computeStrategyMetrics, checkStrategyRisk, computeBasketStatus, computeCalendarPayoffCurve,
+  classifyBasketStructure,
   type MultiLegBasket, type MultiLegLeg, type StrategyRiskConfig,
 } from '@/lib/multiLegFocus';
 import { computePayoff, type PayoffLeg, type PayoffResult } from '@/lib/basketStrategies';
@@ -191,6 +192,19 @@ export default function MultiLegStrategyRow({
     () => basket.legs.some(l => l.status !== 'CLOSED' && l.expiry && l.expiry !== basket.expiry),
     [basket.legs, basket.expiry],
   );
+
+  // Re-derived from the live legs rather than trusting the stored preset
+  // label, which is frozen at creation and goes stale the moment a leg is
+  // edited (strike moved, ratio changed) — see classifyBasketStructure's
+  // doc comment. Skipped for Calendar/Diagonal baskets: the classifier is
+  // strike-only and has no notion of `expiry`, so it can't tell a same-strike
+  // calendar from a naked leg.
+  const derivedStructure = useMemo(
+    () => (hasMixedExpiry ? null : classifyBasketStructure(basket.legs)),
+    [basket.legs, hasMixedExpiry],
+  );
+  const strategyLabel = derivedStructure?.structure
+    ?? (basket.presetKey ? basket.presetKey.replace(/-/g, ' ') : (basket.name ?? `Strategy #${index + 1}`));
 
   // The Calendar/Diagonal spread's actual payoff shape: strategy value AS OF
   // THE NEAR (front) LEG'S EXPIRY, where the front leg is pure intrinsic and
@@ -468,7 +482,7 @@ export default function MultiLegStrategyRow({
 
           <div className="flex items-center gap-2">
             <span className="text-xs font-bold text-zinc-100 uppercase tracking-wider">
-              {basket.presetKey ? basket.presetKey.replace(/-/g, ' ') : (basket.name ?? `Strategy #${index + 1}`)}
+              {strategyLabel}
             </span>
             <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded border ${STATUS_STYLE[basketStatus]}`}>
               {basketStatus}
