@@ -138,6 +138,12 @@ export default function MultiLegStrategyRow({
   // the user is actively configuring its legs. Lazy-init only: placing a
   // basket after mount must not yank it closed on the user mid-interaction.
   const [expanded, setExpanded] = useState(() => !basket.legs.some(l => l.status !== 'DRAFT'));
+  // The payoff chart is a big element and every strategy row already opens
+  // expanded by default once it has a placed leg (see `expanded` above) — so
+  // without its own collapse this chart would be the first thing shoved in
+  // front of every row's legs table on load. Collapsed by default; the user
+  // opens it only when they actually want to look at the curve.
+  const [showPayoffChart, setShowPayoffChart] = useState(false);
   const [confirmPlace, setConfirmPlace] = useState(false);
   const [selectedLegForAddLots, setSelectedLegForAddLots] = useState<MultiLegLeg | null>(null);
   const [isAddNewLegModalOpen, setIsAddNewLegModalOpen] = useState<boolean>(false);
@@ -858,27 +864,70 @@ export default function MultiLegStrategyRow({
             </div>
           )}
 
-          {/* Calendar/Diagonal payoff curve — strategy value as of the near
-             leg's expiry, not a same-day-at-intrinsic curve (see
-             calendarCurve's own comment above). Only rendered once every
-             active leg is priced (calendarCurve returns null otherwise). */}
-          {hasMixedExpiry && calendarCurve && (
-            <div className="rounded-lg border border-zinc-800/80 bg-zinc-950/60 p-3">
-              <PayoffDiagram
-                curve={calendarCurve.points.map(p => ({ spot: p.x, pnl: p.y }))}
-                currentSpot={spot ?? 0}
-                breakevens={calendarCurve.breakevens}
-              />
-              <p className="mt-1 text-[10px] text-zinc-500 font-mono">
-                Value as of the near leg&apos;s expiry ({basket.expiry}) — the far leg
-                ({basket.farExpiry}) still carries {calendarCurve.daysBetweenExpiries}d of theoretical time value, priced via Black-76/Black-Scholes.
-              </p>
+          {/* Payoff diagram — collapsed by default (this chart, plus the
+             legs table above it, would otherwise make every already-open
+             strategy row very tall on load). The current-spot marker inside
+             tracks the live spot feed same as the header stats; the curve
+             itself is fixed by each leg's entry price once filled, which is
+             correct for a payoff-AT-EXPIRY chart — see dhan-payoff-diagrams. */}
+          {basket.legs.length > 0 && (
+            <div className="rounded-lg border border-zinc-800/80 bg-zinc-950/40">
+              <button
+                type="button"
+                onClick={() => setShowPayoffChart(v => !v)}
+                className={`w-full flex items-center justify-between gap-2 px-3 py-2 text-xs font-bold text-zinc-300 hover:text-white transition-colors ${FOCUS_RING}`}
+              >
+                <span className="uppercase tracking-wider">Payoff Diagram</span>
+                {showPayoffChart ? <ChevronUp className="w-3.5 h-3.5" /> : <ChevronDown className="w-3.5 h-3.5" />}
+              </button>
+
+              {showPayoffChart && (
+                <div className="px-3 pb-3">
+                  {/* Calendar/Diagonal payoff curve — strategy value as of the
+                     near leg's expiry, not a same-day-at-intrinsic curve (see
+                     calendarCurve's own comment above). Only rendered once
+                     every active leg is priced (calendarCurve returns null
+                     otherwise). */}
+                  {hasMixedExpiry && calendarCurve && (
+                    <>
+                      <PayoffDiagram
+                        curve={calendarCurve.points.map(p => ({ spot: p.x, pnl: p.y }))}
+                        currentSpot={spot ?? 0}
+                        breakevens={calendarCurve.breakevens}
+                      />
+                      <p className="mt-1 text-[10px] text-zinc-500 font-mono">
+                        Value as of the near leg&apos;s expiry ({basket.expiry}) — the far leg
+                        ({basket.farExpiry}) still carries {calendarCurve.daysBetweenExpiries}d of theoretical time value, priced via Black-76/Black-Scholes.
+                      </p>
+                    </>
+                  )}
+                  {hasMixedExpiry && !calendarCurve && (
+                    <p className="text-xs text-zinc-500 text-center py-2">
+                      Waiting for live prices to draw the calendar spread&apos;s payoff curve…
+                    </p>
+                  )}
+
+                  {/* Single-expiry strategy payoff curve — the combined payoff
+                     of every active leg in this basket (Iron Condor, Short
+                     Strangle, etc.) at expiry, using the same computePayoff()
+                     result the BE/Max P&L stats above are already derived
+                     from, so the chart never disagrees with the numbers next
+                     to it. */}
+                  {!hasMixedExpiry && payoffResult && (
+                    <PayoffDiagram
+                      curve={payoffResult.points.map(p => ({ spot: p.x, pnl: p.y }))}
+                      currentSpot={spot ?? 0}
+                      breakevens={payoffResult.breakevens}
+                    />
+                  )}
+                  {!hasMixedExpiry && !payoffResult && (
+                    <p className="text-xs text-zinc-500 text-center py-2">
+                      Waiting for live prices to draw the payoff curve…
+                    </p>
+                  )}
+                </div>
+              )}
             </div>
-          )}
-          {hasMixedExpiry && !calendarCurve && (
-            <p className="text-xs text-zinc-500 text-center py-2">
-              Waiting for live prices to draw the calendar spread&apos;s payoff curve…
-            </p>
           )}
         </div>
       )}
