@@ -39,6 +39,13 @@ const CHROME: Record<ResolvedTheme, ChartChrome> = {
     textMuted: '#475569',
     surface: '#ffffff',
   },
+  beige: {
+    gridline: '#e6ddd0',
+    baseline: '#8a7f6f',
+    textSecondary: '#2c2a29',
+    textMuted: '#5c5349',
+    surface: '#faf6ef',
+  },
 };
 
 /** Re-renders the caller whenever the theme changes. */

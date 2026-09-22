@@ -389,6 +389,144 @@
   --sidebar-ring: oklch(0.696 0.17 162);
 }
 
+/* =====================================================================
+ * BEIGE MODE — :root[data-theme="beige"]
+ * Warm parchment/oat neutrals + espresso-brown accent, in place of the
+ * light theme's cool slate + indigo. Attribute selector outranks the bare
+ * `:root` (light) block on specificity, so this always wins over light
+ * regardless of source order; it does NOT carry `.dark`, so it still picks
+ * up the `:root:not(.dark)` white-mode contrast fixes below (correct — this
+ * is a light-background theme too, just warm-toned).
+ * ===================================================================== */
+:root[data-theme="beige"] {
+  color-scheme: light;
+
+  /* Inverted neutral ramp — warm parchment/oat instead of slate */
+  --z-950: #f8f3ec;   /* warm parchment page ground */
+  --z-900: #fdfcf9;   /* near-white warm card/panel */
+  --z-850: #f5f2eb;   /* light oat/cream sub-panel / nav */
+  --z-800: #efece6;   /* muted sand table header / control bg */
+  --z-750: #e3ded3;   /* dividers */
+  --z-700: #c9c0ae;   /* borders */
+  --z-600: #8a7f6f;   /* muted text */
+  --z-550: #6b6156;
+  --z-500: #4a4038;   /* secondary text */
+  --z-400: #2c2a29;   /* deep charcoal — primary text */
+  --z-300: #221f1d;   /* strong body text */
+  --z-200: #1a1817;   /* headings */
+  --z-150: #1a1817;
+  --z-100: #000000;
+  --z-50:  #000000;
+
+  --c-white: #2c2a29;
+  --c-black: #f8f3ec;
+
+  /* Body background */
+  --body-bg: #f8f3ec;
+  --body-image:
+    radial-gradient(circle at 20% 10%, #f3e6cf 0%, transparent 45%),
+    radial-gradient(circle at 85% 80%, #efe2c8 0%, transparent 45%),
+    linear-gradient(rgba(44, 42, 41, 0.035) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(44, 42, 41, 0.035) 1px, transparent 1px);
+
+  --dash-atmosphere:
+    radial-gradient(ellipse 1100px 520px at 50% -8%, rgba(180, 83, 9, 0.08) 0%, transparent 60%),
+    radial-gradient(ellipse 900px 600px at 100% 100%, rgba(74, 64, 56, 0.06) 0%, transparent 55%),
+    linear-gradient(rgba(44, 42, 41, 0.04) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(44, 42, 41, 0.04) 1px, transparent 1px);
+
+  --scrollbar-track: #f5f2eb;
+  --scrollbar-thumb: #e3ded3;
+  --scrollbar-thumb-hover: #c9c0ae;
+
+  /* Chart chrome */
+  --chart-grid: #e6ddd0;
+  --chart-axis: #8a7f6f;
+  --chart-tick: #2c2a29;
+  --chart-tooltip-bg: #fdfcf9;
+  --chart-tooltip-border: #e3ded3;
+  --chart-tooltip-text: #2c2a29;
+  --chart-pos: #047857;
+  --chart-neg: #b91c1c;
+  --chart-cursor-fill: #e3ded3;
+  --chart-cursor-line: #c9c0ae;
+
+  /* lc-* panel design system — espresso accent instead of indigo, to stay
+     inside the warm palette rather than clashing with it. */
+  --lc-surface:       #fdfcf9;
+  --lc-surface-2:     #f8f3ec;
+  --lc-surface-3:     #fdfcf9;
+  --lc-hairline:      #c9c0ae;
+  --lc-hairline-soft: #e3ded3;
+  --lc-shadow:        0 1px 3px rgba(44, 42, 41, 0.08);
+  --lc-hover-bg:      #fbf1df;
+  --lc-active-bg:     #f5e6c8;
+  --lc-active-border: #c9ad8b;
+  --lc-active-shadow: 0 1px 3px rgba(120, 53, 15, 0.15);
+  --lc-text:          rgba(44, 42, 41, 0.95);
+  --lc-text-muted:    rgba(44, 42, 41, 0.65);
+  --lc-text-dim:      rgba(44, 42, 41, 0.45);
+  --lc-text-faint:    rgba(44, 42, 41, 0.25);
+  --lc-accent:        #92400e;
+  --lc-accent-strong: #78350f;
+  --lc-accent-hover:  #b45309;
+  --lc-live:          #059669;
+  --lc-danger:        #dc2626;
+
+  /* Accent text colors — reused from white mode: beige is close enough in
+     lightness to white that the same darkened steps still pass contrast. */
+  --a-emerald-200: #065f46; --a-emerald-300: #047857; --a-emerald-400: #059669;
+  --a-green-200:   #166534; --a-green-300:   #15803d; --a-green-400:   #16a34a;
+  --a-teal-300:    #0f766e; --a-teal-400:    #0d9488;
+  --a-lime-300:    #4d7c0f; --a-lime-400:    #65a30d;
+  --a-red-200:     #991b1b; --a-red-300:     #b91c1c; --a-red-400:     #dc2626;
+  --a-rose-200:    #9f1239; --a-rose-300:    #be123c; --a-rose-400:    #e11d48;
+  --a-pink-300:    #be185d; --a-pink-400:    #db2777;
+  --a-orange-300:  #c2410c; --a-orange-400:  #ea580c;
+  --a-amber-200:   #92400e; --a-amber-300:   #b45309; --a-amber-400:   #d97706;
+  --a-yellow-200:  #854d0e; --a-yellow-300:  #a16207; --a-yellow-400:  #ca8a04;
+  --a-sky-200:     #075985; --a-sky-300:     #0369a1; --a-sky-400:     #0284c7;
+  --a-blue-200:    #1e40af; --a-blue-300:    #1d4ed8; --a-blue-400:    #2563eb;
+  --a-cyan-300:    #0e7490; --a-cyan-400:    #0891b2;
+  --a-indigo-200:  #3730a3; --a-indigo-300:  #4338ca; --a-indigo-400:  #4f46e5;
+  --a-violet-200:  #5b21b6; --a-violet-300:  #6d28d9; --a-violet-400:  #7c3aed;
+  --a-purple-300:  #7e22ce; --a-purple-400:  #9333ea;
+  --a-fuchsia-300: #a21caf; --a-fuchsia-400: #c026d3;
+
+  /* shadcn semantic tokens — warm-hued approximations of the light block */
+  --background: oklch(0.96 0.015 70);
+  --foreground: oklch(0.24 0.02 55);
+  --card: oklch(0.99 0.006 70);
+  --card-foreground: oklch(0.24 0.02 55);
+  --popover: oklch(0.99 0.006 70);
+  --popover-foreground: oklch(0.24 0.02 55);
+  --primary: oklch(0.42 0.09 55);
+  --primary-foreground: oklch(0.99 0 0);
+  --secondary: oklch(0.93 0.018 70);
+  --secondary-foreground: oklch(0.26 0.02 55);
+  --muted: oklch(0.93 0.018 70);
+  --muted-foreground: oklch(0.50 0.02 55);
+  --accent: oklch(0.93 0.018 70);
+  --accent-foreground: oklch(0.26 0.02 55);
+  --destructive: oklch(0.55 0.22 25);
+  --border: oklch(0.85 0.02 70);
+  --input: oklch(0.90 0.02 70);
+  --ring: oklch(0.42 0.09 55);
+  --chart-1: oklch(0.42 0.09 55);
+  --chart-2: oklch(0.45 0.20 260);
+  --chart-3: oklch(0.28 0.03 55);
+  --chart-4: oklch(0.50 0.05 60);
+  --chart-5: oklch(0.62 0.02 70);
+  --sidebar: oklch(0.93 0.018 70);
+  --sidebar-foreground: oklch(0.24 0.02 55);
+  --sidebar-primary: oklch(0.42 0.09 55);
+  --sidebar-primary-foreground: oklch(0.99 0 0);
+  --sidebar-accent: oklch(0.90 0.02 70);
+  --sidebar-accent-foreground: oklch(0.26 0.02 55);
+  --sidebar-border: oklch(0.85 0.02 70);
+  --sidebar-ring: oklch(0.42 0.09 55);
+}
+
 body {
   background-color: var(--body-bg);
   background-image: var(--body-image);

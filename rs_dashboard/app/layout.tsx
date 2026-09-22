@@ -34,16 +34,17 @@ export const metadata: Metadata = {
 };
 
 /**
- * Applies the stored theme before first paint, so a light-mode user never
- * sees a flash of the dark shell. SSR renders `dark` (the historical
+ * Applies the stored theme before first paint, so a light/beige-mode user
+ * never sees a flash of the dark shell. SSR renders `dark` (the historical
  * default, and what lib/theme.ts uses as its server snapshot); this script
- * strips the class when the stored preference resolves to light.
- * Keep the storage key in sync with THEME_STORAGE_KEY in lib/theme.ts.
+ * strips the class and sets data-theme once the real preference is known.
+ * Keep the storage key and the mode set in sync with lib/theme.ts.
  */
 const THEME_INIT_SCRIPT = `(function(){try{
 var m=localStorage.getItem('dhan-theme')||'dark';
-var d=m!=='light';
-var e=document.documentElement;e.classList.toggle('dark',d);e.style.colorScheme=d?'dark':'light';
+if(m!=='light'&&m!=='dark'&&m!=='beige')m='dark';
+var d=m==='dark';
+var e=document.documentElement;e.classList.toggle('dark',d);e.setAttribute('data-theme',m);e.style.colorScheme=d?'dark':'light';
 }catch(_){}})()`;
 
 export default function RootLayout({
@@ -55,6 +56,7 @@ export default function RootLayout({
     <html
       lang="en"
       className={`${inter.variable} ${geistMono.variable} dark h-full antialiased`}
+      data-theme="dark"
       suppressHydrationWarning
     >
       <head>
