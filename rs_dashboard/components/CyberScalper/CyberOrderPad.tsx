@@ -27,8 +27,18 @@ interface FutureContract {
 /** Underlyings whose future contract IS a directly tradeable instrument alongside its
  * options chain, per the feed script's `futures_capable` flag (cyber_scalper_feed.py).
  * Gates the Futures/Options mode toggle so it doesn't appear for symbols with no
- * `future` data behind it. */
-const FUTURES_CAPABLE_SYMBOLS = new Set(['CRUDEOILM', 'NIFTY']);
+ * `future` data behind it. Must match UNDERLYINGS_INFO's futures_capable entries in
+ * cyber_scalper_feed.py — CRUDEOIL was missing here, which silently disabled the
+ * Futures/Options toggle for it (see COMMODITY_SYMBOLS below for why that mattered). */
+const FUTURES_CAPABLE_SYMBOLS = new Set(['CRUDEOIL', 'CRUDEOILM', 'NIFTY']);
+
+/** MCX commodities have no resolvable options chain — cyber_scalper_feed.py's
+ * find_atm_options() calls helper.get_expiries(), which fails for MCX underlyings
+ * (it resolves the commodity spot/index row, not the FUTCOM row Dhan's expirylist
+ * API needs), so `options.ce`/`options.pe` are always null for these symbols. Default
+ * straight to FUTURES mode for them instead of loading into a permanently empty
+ * OPTIONS view. */
+const COMMODITY_SYMBOLS = new Set(['CRUDEOIL', 'CRUDEOILM']);
 
 /** "2026-09-29" -> "SEP" for the compact expiry-switcher buttons. */
 function formatExpiryMonth(dateStr: string): string {
@@ -107,6 +117,13 @@ export default function CyberOrderPad({
   useEffect(() => {
     if (!futuresCapable && tradeMode === 'FUTURES') setTradeMode('OPTIONS');
   }, [futuresCapable, tradeMode]);
+
+  // MCX commodities never populate options.ce/pe (see COMMODITY_SYMBOLS above), so
+  // landing in the default OPTIONS mode always looks broken (zeroed CE/PE, no order
+  // buttons doing anything). Auto-switch to FUTURES on selecting one of these symbols.
+  useEffect(() => {
+    if (COMMODITY_SYMBOLS.has(symbol) && futuresCapable) setTradeMode('FUTURES');
+  }, [symbol, futuresCapable]);
 
   const effectiveMode = futuresCapable ? tradeMode : 'OPTIONS';
 
