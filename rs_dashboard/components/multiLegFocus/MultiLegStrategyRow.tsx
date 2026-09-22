@@ -844,6 +844,7 @@ export default function MultiLegStrategyRow({
                       exiting={exitingLegs.has(leg.id)}
                       margin={legMargins?.[leg.id]}
                       multiplier={crudeMult}
+                      lotSize={defaultLotSize}
                       frontExpiry={basket.expiry}
                       farExpiry={basket.farExpiry}
                       onChange={patch => updateLeg(leg.id, patch)}
