@@ -654,10 +654,12 @@ export default function OptionsBacktester({
             in the rewrite, which also meant losing the way out of the page (Disconnect)
             and the site-wide data-freshness controls.
             NavBar's plain-text items (Disconnect, the theme toggle) are styled for a
-            dark zinc-900 backdrop and are nearly invisible directly on this light teal
-            banner — the dark pill below gives them the backdrop they need, same as
-            they'd have on every other page. */}
-        <div className="absolute right-3 top-1/2 -translate-y-1/2 bg-zinc-900 rounded-xl px-1.5 py-1 shadow-sm">
+            dark backdrop and are nearly invisible directly on this light teal banner —
+            the dark pill below gives them the backdrop they need, same as they'd have
+            on every other page. Must be bg-oncolor-dark, not bg-zinc-900: zinc-900 is
+            a themed token that inverts to near-white in light mode, which would turn
+            this "dark" pill light and make NavBar's light-mode text disappear on it. */}
+        <div className="absolute right-3 top-1/2 -translate-y-1/2 bg-oncolor-dark rounded-xl px-1.5 py-1 shadow-sm">
           <NavBar />
         </div>
       </div>
