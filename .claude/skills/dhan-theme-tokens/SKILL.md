@@ -1,6 +1,6 @@
 ---
 name: dhan-theme-tokens
-description: Use when changing the dashboard colour palette, adding a themed surface or injected style block, wiring a new chart's colours, or debugging a component that does not flip correctly between dark and white mode. Explains how app/globals.css, lib/theme.ts and lib/chartTheme.ts fit together. The always-on rules for ordinary UI edits are in CLAUDE.md.
+description: Use when changing the dashboard colour palette, adding a themed surface or injected style block, wiring a new chart's colours, or debugging a component that does not flip correctly across dark, white and beige mode. Explains how app/globals.css, lib/theme.ts and lib/chartTheme.ts fit together. The always-on rules for ordinary UI edits are in CLAUDE.md.
 ---
 
 # Dhan Theme Tokens
@@ -40,11 +40,17 @@ runtime; pointing at `--z-400` inlines `var(--z-400)`, which re-resolves per the
 Verify after a build — the emitted rule must be
 `.text-zinc-400{color:var(--z-400)}`, not a hex.
 
-### `:root` is light, `.dark` is dark
+### `:root` is light, `.dark` is dark, `:root[data-theme="beige"]` is the third mode
 `.dark` sits on `<html>`, which is also `:root` — same origin, higher specificity, so
-it wins. **Never define a colour only inside one block**: a token that exists in
-`.dark` but not `:root` falls back to the Tailwind default and looks broken in white
-mode.
+it wins. Beige is a third block, `:root[data-theme="beige"]` (`app/globals.css` line
+~401), selected by `lib/theme.ts` setting `data-theme="beige"` on `<html>` (light needs
+no attribute; dark still uses the `.dark` class, not `data-theme="dark"` — the two
+mechanisms coexist). **Never define a colour only inside one block**: a token that
+exists in `.dark` but not `:root` falls back to the Tailwind default and looks broken
+in white mode — and a token added only to `:root`/`.dark` and not to the beige block
+silently falls back to the *light* value under beige, since beige inherits from `:root`
+except where it overrides. The toggle cycles dark → light → beige → dark
+(`nextThemeMode()` in `lib/theme.ts`); `ThemeMode` is `'light' | 'dark' | 'beige'`.
 
 ### The neutral ramp is inverted, not remapped
 `--z-950` is the page ground (near-black in dark, white in light) and `--z-50` is the

@@ -1,6 +1,6 @@
 ---
 name: dhan-broker-positions
-description: Use when working on the Scalper / Advanced Scalper order tickets, reading a broker positions or trade-book payload, computing position P&L or CE/PE values, sizing an exit, reconstructing an MTM history curve, or placing a close/square-off order. Covers Dhan, Zerodha and Kotak. Read before touching Scalper.tsx, AdvancedScalper.tsx, MtmChart.tsx, positionLegs.ts, scalper_mtm_history.py, or any /api/scalper, /api/exit-all or quiktrade route.
+description: Use when working on the Scalper / Advanced Scalper / Cyber Scalper order tickets, reading a broker positions or trade-book payload, computing position P&L or CE/PE values, sizing an exit, reconstructing an MTM history curve, or placing a close/square-off order. Covers Dhan, Zerodha and Kotak. Read before touching Scalper.tsx, AdvancedScalper.tsx, components/CyberScalper/*.tsx, MtmChart.tsx, positionLegs.ts, scalper_mtm_history.py, or any /api/scalper, /api/cyber-scalper, /api/exit-all or quiktrade route.
 ---
 
 # Dhan Broker Positions & P&L
@@ -16,7 +16,9 @@ the component hand-rolled the math instead of using the shared helper.
 multipliers, or close-order product inline. Every one of them already has a helper.**
 
 ## When to Use
-- Any change to `components/Scalper.tsx`, `components/AdvancedScalper.tsx`, or the
+- Any change to `components/Scalper.tsx`, `components/AdvancedScalper.tsx`,
+  `components/CyberScalper/*.tsx` (the third order-placing terminal — same
+  multi-broker P&L/position-identity/exit invariants apply), or the
   positions/payoff/analytics surfaces built on `lib/positionLegs.ts`.
 - Adding a broker, or extending an existing one to a new segment (MCX, BSE F&O).
 - Any route under `app/api/scalper/`, `app/api/exit-all/`, `app/api/options/quiktrade/`.

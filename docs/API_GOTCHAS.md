@@ -38,6 +38,19 @@ date — picking the earliest-sorted match without an `SM_EXPIRY_DATE >= today` 
 resolve a dead security ID with no live OHLC/quote data. `find_future()` must filter
 expired contracts out before picking nearest.
 
+## `get_expiries()` fails silently for MCX underlyings
+
+`get_expiries()` resolves the symbol via `_resolve_symbol()` then calls
+`get_expiry_list()` on the resolved security ID/segment. For MCX commodities
+(CRUDEOIL/CRUDEOILM) this resolves the commodity spot/index row rather than the
+`FUTCOM` row Dhan's expirylist API actually needs, so it returns nothing usable —
+any caller depending on it (e.g. `cyber_scalper_feed.py`'s `find_atm_options()`) ends
+up with a permanently empty options chain (`options.ce`/`options.pe` always null) with
+no exception to catch. Symptom: an options order pad for an MCX symbol loads with
+zeroed CE/PE and no working order buttons. Don't build an options chain for MCX
+underlyings from `get_expiries()`; treat MCX as futures-only until this is fixed, or
+resolve the `FUTCOM` row explicitly first. (`236ff4c`)
+
 ## Silent Data API failures
 
 Historical/intraday data methods return empty results on API errors (e.g. `DH-902` when

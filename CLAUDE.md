@@ -203,6 +203,7 @@ Non-obvious route behaviors:
 - `csp-scan/` — spawns `scripts/tools/csp_scanner.py` (screening only, no orders); `csp-tracked/sell` and `csp-watchlist/exit` place and exit **real** cash-secured-put orders via `scripts/tools/csp_watchlist.py`, then track fills/strike-rolls in `lib/cspTracked.ts`'s JSON store — reconciled against broker truth by `csp-tracked/reconcile` and `csp-tracked/sync`.
 - `margin-allocator/` — capital-deployment desk (`components/MarginAllocator.tsx`): classifies live Dhan/Kotak option positions into structures (straddle/strangle/spread/condor/naked), reads India VIX percentile + per-underlying trend (`margin-allocator/trend/`), and ranks/sizes Baskets credit-strategy templates against a risk budget. Read-only/planning — it doesn't place orders itself. See `dhan-margin-allocator`.
 - `update-repo/` — the NavBar "Update App" button: fetches origin, auto-stashes dirty local state, fast-forwards or merges, and reports whether the running process needs a rebuild/restart. See `dhan-app-self-update` before changing restart-detection or merge logic.
+- `cyber-scalper/` — third order-placing terminal (`components/CyberScalper/`, ~3.8K lines: `CyberScalperTerminal.tsx`, `CyberOrderPad.tsx`, `CyberPositionsPanel.tsx`, `CyberChart.tsx`, `CyberOrderBook.tsx`, `CyberBiasRadar.tsx`, `CyberStrategyIntelligence.tsx`; feed at `api/cyber-scalper/feed/`), alongside Scalper/AdvancedScalper — multi-broker (Dhan/Zerodha/Kotak), Nifty options + NIFTY/CRUDEOIL/CRUDEOILM futures, EMA9/20+VWAP bias panel. MCX symbols default to Futures mode because their options chain never resolves (`get_expiries()` fails for MCX underlyings — see [docs/API_GOTCHAS.md](docs/API_GOTCHAS.md)). Real-money endpoint; same P&L/position-identity/exit-sizing invariants as the other scalpers apply — see `dhan-broker-positions`.
 
 **lib/ files** (`rs_dashboard/lib/`) — the ones with non-obvious behavior:
 - `pyExec.ts` — `runPythonJson()` (async venv-Python spawn, parses last stdout line as JSON) + `dedupe()` in-flight dedup + `PROJECT_ROOT`/`PYTHON_EXE`. Use this from API routes; don't hand-roll `spawnSync` (blocks the Node event loop)
@@ -214,12 +215,14 @@ Non-obvious route behaviors:
 
 **`PROJECT_ROOT`** in API routes is `path.resolve(process.cwd(), '..')` (one level up from `rs_dashboard/`).
 
-### Theming (dark + white mode) — applies to every UI edit
+### Theming (dark + white + beige) — applies to every UI edit
 
-The dashboard ships a 2-way dark/white theme. It works by re-pointing the palette
-itself: `--color-zinc-N` resolves to a `--z-N` variable that flips per theme, so the
-~4,600 existing `zinc-*` utilities theme themselves. That only holds if new code stays
-inside the token system.
+The dashboard ships a 3-way dark/white/beige theme (`ThemeMode = 'light' | 'dark' |
+'beige'`; toggle cycles dark → light → beige → dark). It works by re-pointing the
+palette itself: `--color-zinc-N` resolves to a `--z-N` variable that flips per theme,
+so the ~4,600 existing `zinc-*` utilities theme themselves. That only holds if new
+code stays inside the token system — a new themed surface must also get a
+`:root[data-theme="beige"]` block, not just dark/light.
 
 - **Never hardcode a colour in a component** — no `#rrggbb`, no `rgb()/rgba()`, no
   `bg-[#0a0a0a]`. Use the zinc ramp or a token. Saturated *data* colours (emerald/red
@@ -306,7 +309,7 @@ These are not obvious and have caused runtime errors in the past (see [GEMINI.md
 - **Previous day levels**: use `helper.get_prev_day_levels("NIFTY")` — do not inline `get_historical_data()` calls for PDH/PDL/PDC.
 - **Data API failures are silent by default** — check `helper.last_api_error` after an empty response before concluding "no data".
 
-Several more of these have caused real bugs and are non-obvious enough to need the full story — **read [docs/API_GOTCHAS.md](docs/API_GOTCHAS.md) before touching SENSEX instrument ids, the option-chain `previous_close_price` field, `find_future()`'s expiry filtering, or diagnosing a `DH-905` order failure.**
+Several more of these have caused real bugs and are non-obvious enough to need the full story — **read [docs/API_GOTCHAS.md](docs/API_GOTCHAS.md) before touching SENSEX instrument ids, the option-chain `previous_close_price` field, `find_future()`'s expiry filtering, `get_expiries()` on an MCX underlying, or diagnosing a `DH-905` order failure.**
 
 ## Strategy Conventions
 
@@ -316,7 +319,7 @@ Several more of these have caused real bugs and are non-obvious enough to need t
 - Straddle/strangle inversion guard: `CE strike > PE strike` is enforced at entry and after each adjustment; violation triggers an emergency exit + 5-minute pause + fresh cycle. **Exception**: `nifty_delta_neutral.py` deliberately does not enforce this — strikes are chosen purely by delta-proximity, so an inverted strangle (CE strike < PE strike) is a valid, expected outcome, not an error.
 - New strategies start from the **`dhan-new-strategy` skill** (`assets/strategy_skeleton.py` + its standard feature kit), not from `templates/strategy_template.py`, which is a minimal illustration with no dry-run flag, state bridge or restart recovery. Every strategy must call `save_strategy_state()` and `check_shutdown_trigger()` in its main loop to integrate with the dashboard.
 - **Exit sizing must never trust the raw broker net quantity.** Dhan nets every position by security ID, so two strategy instances short of the same strike share ONE broker position — sizing an exit off `helper.get_net_quantity()` lets whichever instance exits first flatten a sibling instance's leg too (this happened for real on 2026-07-30). Use `lib/strategy_risk.py`'s `resolve_exit_qty(helper, security_id, own_qty, side)` instead: it exits what *this* strategy opened, clamped by what the broker still shows in that direction. Already adopted across `value_imbalance/`, `oi_directional/`, and `intraday_equity/` — use it in any new strategy that can share a security ID with another running instance.
-- Per-strategy trading logic lives in each group's `strategy.md` (`strategies/<group>/strategy.md`) — read it before modifying that strategy. One-line map: `value_imbalance/` premium mean-reversion straddles/strangles (VWAP variant, plus a delta-neutral 0.5-delta variant with no inversion guard and no entry-balance gate); `spread_trend/` EMA20+Supertrend credit spreads; `st_oi_bearcall/` bear-call-only entry gated by dual Supertrend (index 3-min + candidate option's own 3-min) plus OI short-buildup confirmation; `oi_directional/` OI-diff/PCR naked option sell; `crudeoil/` MCX futures (Supertrend trailing, always-in Renko SAR, VWAP+Supertrend, EMA20+Supertrend, and pivot-gated ORB); `intraday_equity/` Nifty-50 cash VWAP+RS auto-trader, rule set NOT validated by backtest — dry-run only, `--live` requires `--i-understand-the-backtest-failed`; `momentum_investing/` the repo's only multi-day/CNC-delivery strategy — Nifty-500 composite-RS ranking, trailing-stop ladder + weekly rank rotation, portfolio persisted to `debug/nifty500_momentum_portfolio.json` across restarts.
+- Per-strategy trading logic lives in each group's `strategy.md` (`strategies/<group>/strategy.md`) — read it before modifying that strategy. One-line map: `value_imbalance/` premium mean-reversion straddles/strangles (VWAP variant, plus a delta-neutral 0.5-delta variant with no inversion guard and no entry-balance gate); `spread_trend/` EMA20+Supertrend credit spreads; `st_oi_bearcall/` bear-call-only entry gated by dual Supertrend (index 3-min + candidate option's own 3-min) plus OI short-buildup confirmation; `oi_directional/` OI-diff/PCR naked option sell; `crudeoil/` MCX futures (Supertrend trailing, always-in Renko SAR, VWAP+Supertrend, EMA20+Supertrend, and pivot-gated ORB); `intraday_equity/` Nifty-50 cash VWAP+RS auto-trader, rule set NOT validated by backtest — dry-run only, `--live` requires `--i-understand-the-backtest-failed`; `flyagonal/` Nifty call broken-wing butterfly + put diagonal (8-10 DTE front, MARGIN carry, defined risk), NOT validated, dry-run default; `momentum_investing/` the repo's only multi-day/CNC-delivery strategy — Nifty-500 composite-RS ranking, trailing-stop ladder + weekly rank rotation, portfolio persisted to `debug/nifty500_momentum_portfolio.json` across restarts.
 
 ## Environment
 
