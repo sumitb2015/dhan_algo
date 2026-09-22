@@ -19,7 +19,18 @@ interface PayoffDiagramProps {
   curve: { spot: number; pnl: number }[];
   currentSpot: number;
   breakevens: number[];
+  /** Live mark-to-market curve — each leg priced today (Black-76/Black-Scholes
+   *  at current spot, IV and time-to-expiry) rather than at intrinsic value.
+   *  Optional: a caller with no IV/time-to-expiry data yet (or that fails to
+   *  price a leg) simply omits it and only the expiry curve renders — this
+   *  component never blocks on it. dhan-payoff-diagrams mandates plotting
+   *  this whenever a per-leg IV is available, so every payoff diagram in the
+   *  dashboard shows both "at expiry" and "right now" on the same axes,
+   *  matching the Options Monitor's T+0 line. */
+  todayCurve?: { spot: number; pnl: number }[];
 }
+
+const TODAY_COLOR = '#2d7ff9'; // matches Options Monitor's PAYOFF_TODAY
 
 const STEP = 50;
 const H = 320;
@@ -61,7 +72,7 @@ function pnlAt(curve: { spot: number; pnl: number }[], spot: number): number | n
   return a.pnl + ((spot - a.spot) / (b.spot - a.spot)) * (b.pnl - a.pnl);
 }
 
-export default function PayoffDiagram({ curve, currentSpot, breakevens }: PayoffDiagramProps) {
+export default function PayoffDiagram({ curve, currentSpot, breakevens, todayCurve }: PayoffDiagramProps) {
   const svgRef = useRef<SVGSVGElement | null>(null);
   const [hoverSpot, setHoverSpot] = useState<number | null>(null);
   const [boxW, setBoxW] = useState(900);
@@ -115,8 +126,14 @@ export default function PayoffDiagram({ curve, currentSpot, breakevens }: Payoff
     const visible = curve.filter((c) => c.spot >= xLo && c.spot <= xHi);
     if (visible.length < 2) return null;
 
+    const visibleToday = todayCurve ? todayCurve.filter((c) => c.spot >= xLo && c.spot <= xHi) : [];
+
     // --- Smart Y domain: clamp so zero-crossing is prominent ---
-    const visiblePnls = visible.map((c) => c.pnl);
+    // Folds the T+0 curve's values in too (when present) — its swings near
+    // the current spot are usually smaller than the expiry curve's (time
+    // value cushions both wings), but it must never silently clip outside
+    // the plotted area just because only the expiry curve sized the domain.
+    const visiblePnls = [...visible.map((c) => c.pnl), ...visibleToday.map((c) => c.pnl)];
     const rawYMin = Math.min(...visiblePnls);
     const rawYMax = Math.max(...visiblePnls);
     // For unlimited-loss strategies, cap the loss tail at 3x max profit so the
@@ -132,15 +149,19 @@ export default function PayoffDiagram({ curve, currentSpot, breakevens }: Payoff
 
     const line = visible.map((p, i) => `${i ? 'L' : 'M'}${sx(p.spot).toFixed(1)},${sy(p.pnl).toFixed(1)}`).join('');
     const area = `${line}L${sx(xHi).toFixed(1)},${sy(0).toFixed(1)}L${sx(xLo).toFixed(1)},${sy(0).toFixed(1)}Z`;
+    const todayLine = visibleToday.length >= 2
+      ? visibleToday.map((p, i) => `${i ? 'L' : 'M'}${sx(p.spot).toFixed(1)},${sy(p.pnl).toFixed(1)}`).join('')
+      : null;
 
     return {
-      xLo, xHi, yLo, yHi, sx, sy, line, area,
+      xLo, xHi, yLo, yHi, sx, sy, line, area, todayLine,
       zeroY: sy(0),
       xTicks: niceTicks(xLo, xHi, 6),
       yTicks: niceTicks(yLo, yHi, 6),
       visible,
+      visibleToday,
     };
-  }, [curve, currentSpot, breakevens, W, H_]);
+  }, [curve, todayCurve, currentSpot, breakevens, W, H_]);
 
   if (!model) return null;
 
@@ -148,6 +169,7 @@ export default function PayoffDiagram({ curve, currentSpot, breakevens }: Payoff
 
   const readoutSpot = hoverSpot ?? currentSpot;
   const readoutPnl = pnlAt(model.visible, readoutSpot);
+  const readoutPnlToday = model.visibleToday.length >= 2 ? pnlAt(model.visibleToday, readoutSpot) : null;
 
   const onMove = (e: React.MouseEvent<SVGSVGElement>) => {
     const rect = svgRef.current?.getBoundingClientRect();
@@ -183,6 +205,12 @@ export default function PayoffDiagram({ curve, currentSpot, breakevens }: Payoff
           {breakevens.length > 0 && (
             <span className="text-[11px] font-mono px-2 py-0.5 rounded bg-amber-500/10 border border-amber-500/20 text-amber-400">
               BE: {breakevens.map((b) => b.toFixed(0)).join(', ')}
+            </span>
+          )}
+          {model.todayLine && (
+            <span className="flex items-center gap-1.5 text-[11px] font-mono text-zinc-400">
+              <span className="inline-block w-3 h-[2px]" style={{ backgroundColor: '#10b981' }} /> At Expiry
+              <span className="inline-block w-3 h-[2px] ml-1.5" style={{ backgroundColor: TODAY_COLOR }} /> Today (T+0)
             </span>
           )}
         </div>
@@ -241,6 +269,14 @@ export default function PayoffDiagram({ curve, currentSpot, breakevens }: Payoff
           <g clipPath="url(#sb-clip-profit)"><path d={model.line} fill="none" stroke="#10b981" strokeWidth={2} /></g>
           <g clipPath="url(#sb-clip-loss)"><path d={model.line} fill="none" stroke="#ef4444" strokeWidth={2} /></g>
 
+          {/* T+0 curve: today's mark-to-market value (Black-76/Black-Scholes at
+             current spot, IV and time-to-expiry) — a single smooth blue line,
+             not sign-split, since "today" P&L isn't the same all-or-nothing
+             intrinsic-value shape the expiry curve is. */}
+          {model.todayLine && (
+            <path d={model.todayLine} fill="none" stroke={TODAY_COLOR} strokeWidth={2} strokeLinecap="round" />
+          )}
+
           <line x1={PAD.left} x2={W - PAD.right} y1={zeroY} y2={zeroY} stroke="var(--chart-axis)" strokeWidth={1.25} />
 
           {/* Breakevens */}
@@ -276,8 +312,11 @@ export default function PayoffDiagram({ curve, currentSpot, breakevens }: Payoff
                 stroke="#a1a1aa" strokeWidth={1} strokeDasharray="2 3" />
               <circle cx={sx(readoutSpot)} cy={sy(readoutPnl)} r={4.5}
                 fill={readoutPnl >= 0 ? '#10b981' : '#ef4444'} stroke="#09090b" strokeWidth={2} />
+              {readoutPnlToday !== null && (
+                <circle cx={sx(readoutSpot)} cy={sy(readoutPnlToday)} r={4} fill={TODAY_COLOR} stroke="#09090b" strokeWidth={2} />
+              )}
               <g transform={`translate(${tooltipLeft ? sx(readoutSpot) - 118 : sx(readoutSpot) + 10}, ${PAD.top + 4})`}>
-                <rect width={108} height={34} rx={6} fill="#09090b" fillOpacity={0.9} stroke="#3f3f46" />
+                <rect width={108} height={readoutPnlToday !== null ? 47 : 34} rx={6} fill="#09090b" fillOpacity={0.9} stroke="#3f3f46" />
                 <text x={8} y={13} fontSize={9.5} fill="#a1a1aa" className="font-mono">
                   Spot {readoutSpot.toFixed(0)}
                 </text>
@@ -285,6 +324,11 @@ export default function PayoffDiagram({ curve, currentSpot, breakevens }: Payoff
                   fill={readoutPnl >= 0 ? '#10b981' : '#ef4444'}>
                   {readoutPnl >= 0 ? '+' : ''}₹{readoutPnl.toLocaleString('en-IN', { maximumFractionDigits: 0 })}
                 </text>
+                {readoutPnlToday !== null && (
+                  <text x={8} y={39} fontSize={10} fontWeight={700} className="font-mono" fill={TODAY_COLOR}>
+                    T+0 {readoutPnlToday >= 0 ? '+' : ''}₹{readoutPnlToday.toLocaleString('en-IN', { maximumFractionDigits: 0 })}
+                  </text>
+                )}
               </g>
             </g>
           )}

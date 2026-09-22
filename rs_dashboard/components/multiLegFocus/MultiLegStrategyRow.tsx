@@ -13,6 +13,7 @@ import {
   type MultiLegBasket, type MultiLegLeg, type StrategyRiskConfig,
 } from '@/lib/multiLegFocus';
 import { computePayoff, type PayoffLeg, type PayoffResult } from '@/lib/basketStrategies';
+import { computeBsGreeks, calculateTimeToExpiryYears } from '@/lib/optionsMonitorMath';
 import { FOCUS_RING } from '@/components/Scalper';
 import { BROKER_LABELS, type Broker } from '@/hooks/useBrokerSelector';
 import PayoffDiagram from '@/components/strategy/PayoffDiagram';
@@ -261,6 +262,60 @@ export default function MultiLegStrategyRow({
       return null;
     }
   }, [basket.legs, basket.underlying, lotSize, ltpFor, hasMixedExpiry]);
+
+  // ── T+0 live mark-to-market curve (dhan-payoff-diagrams: every payoff
+  // diagram must plot this alongside the at-expiry curve) ────────────────
+  // Reuses whichever expiry-side curve (calendarCurve or payoffResult) is
+  // active purely for its x-axis samples, so both lines share one x grid and
+  // can never visually drift apart — then prices each leg today via
+  // Black-76/Black-Scholes (computeBsGreeks) at that leg's OWN expiry and IV,
+  // not the basket's front expiry, so a calendar spread's far leg still
+  // carries its own residual time value in the T+0 curve too. Missing IV
+  // falls back to FALLBACK_IV same as the calendar curve above; a leg with
+  // no resolvable premium yet (nothing filled, no live LTP) makes the whole
+  // curve return null rather than drawing a partially-wrong line — the
+  // PayoffDiagram component treats a missing todayCurve as "nothing to show
+  // yet", not an error.
+  const todayCurve = useMemo(() => {
+    if (!spot || spot <= 0) return null;
+    const xs = hasMixedExpiry ? calendarCurve?.points.map(p => p.x) : payoffResult?.points.map(p => p.x);
+    if (!xs || xs.length === 0) return null;
+
+    const activeLegs = basket.legs.filter(l => l.status !== 'CLOSED');
+    if (activeLegs.length === 0) return null;
+
+    const payoffMultiplier = (broker === 'dhan' && (basket.underlying === 'CRUDEOIL' || basket.underlying === 'CRUDEOILM')) ? crudeMult : 1;
+
+    const legsForPricing = activeLegs.map(l => {
+      const legExpiry = l.expiry || basket.expiry;
+      const currentLtp = ltpFor(l);
+      const premium = (l.fill?.avgPrice && l.fill.avgPrice > 0)
+        ? l.fill.avgPrice
+        : (currentLtp > 0 ? currentLtp : (l.price || 0));
+      const qty = ((l.fill?.qty && l.fill.qty > 0) ? l.fill.qty : (l.lots * defaultLotSize)) * payoffMultiplier;
+      const iv = ivForStrike?.(l.strike, l.option, legExpiry) || FALLBACK_IV;
+      const timeYears = calculateTimeToExpiryYears(legExpiry);
+      return { side: l.side, option: l.option, strike: l.strike, premium, qty, iv, timeYears };
+    });
+
+    if (legsForPricing.some(l => l.premium <= 0)) return null;
+
+    try {
+      return xs.map(x => {
+        const pnl = legsForPricing.reduce((sum, l) => {
+          // isFutures=false: standard Black-Scholes on spot, which already
+          // embeds cost-of-carry via the r*t drift term — the documented
+          // fallback for when no live futures price is wired to this page.
+          const price = computeBsGreeks(l.option, x, l.strike, l.timeYears, l.iv, 1).price;
+          const perUnit = l.side === 'B' ? (price - l.premium) : (l.premium - price);
+          return sum + perUnit * l.qty;
+        }, 0);
+        return { spot: x, pnl };
+      });
+    } catch {
+      return null;
+    }
+  }, [spot, hasMixedExpiry, calendarCurve, payoffResult, basket.legs, basket.underlying, basket.expiry, broker, crudeMult, defaultLotSize, ltpFor, ivForStrike]);
 
   const breakevensDisplay = useMemo(() => {
     if (!payoffResult || payoffResult.breakevens.length === 0) return 'None';
@@ -894,6 +949,7 @@ export default function MultiLegStrategyRow({
                         curve={calendarCurve.points.map(p => ({ spot: p.x, pnl: p.y }))}
                         currentSpot={spot ?? 0}
                         breakevens={calendarCurve.breakevens}
+                        todayCurve={todayCurve ?? undefined}
                       />
                       <p className="mt-1 text-[10px] text-zinc-500 font-mono">
                         Value as of the near leg&apos;s expiry ({basket.expiry}) — the far leg
@@ -918,6 +974,7 @@ export default function MultiLegStrategyRow({
                       curve={payoffResult.points.map(p => ({ spot: p.x, pnl: p.y }))}
                       currentSpot={spot ?? 0}
                       breakevens={payoffResult.breakevens}
+                      todayCurve={todayCurve ?? undefined}
                     />
                   )}
                   {!hasMixedExpiry && !payoffResult && (
