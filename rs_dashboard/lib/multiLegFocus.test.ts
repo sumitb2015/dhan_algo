@@ -2,8 +2,8 @@ import { test } from 'node:test';
 import assert from 'node:assert';
 import {
   resolveTemplateLegs, reconcileLegFillDown, reconcileLegWithBroker, legPnl, basketTotalPnl, sortLegsForExit, findLegPosition,
-  computeLegTrailingSL, computeStrategyMetrics, checkStrategyRisk, computeCalendarPayoffCurve, type StrategyMetrics,
-  type MultiLegLeg,
+  computeLegTrailingSL, computeStrategyMetrics, checkStrategyRisk, computeCalendarPayoffCurve, classifyBasketStructure,
+  type StrategyMetrics, type MultiLegLeg,
 } from './multiLegFocus.ts';
 import type { StrategyTemplate } from './basketStrategies.ts';
 
@@ -529,6 +529,57 @@ test('computeStrategyMetrics: unpriced open legs (ltp <= 0) freeze at entry and 
   // checkStrategyRisk must refuse to fire Target or SL when hasUnpricedLegs is true
   assert.strictEqual(checkStrategyRisk(metrics, { targetValue: 10, targetUnit: 'pts', armed: true, slUnit: 'pts' }), null);
   assert.strictEqual(checkStrategyRisk(metrics, { slValue: 10, slUnit: 'pts', armed: true, targetUnit: 'pts' }), null);
+});
+
+test('classifyBasketStructure: legs edited from an Iron Condor preset into a Batman shape are relabeled Batman, not the stale preset', () => {
+  // Same shape as the real basket that triggered this fix: created from the
+  // 'iron-condor' preset, then edited so the long strikes sit INSIDE the
+  // short strikes at a 1:2 ratio — a Batman, not a condor — while the
+  // basket's own stored presetKey/name are still frozen at "Iron Condor".
+  const legs: MultiLegLeg[] = [
+    { id: '1', side: 'S', option: 'CE', strike: 23750, lots: 4, type: 'MARKET', status: 'OPEN', fill: { qty: 260, avgPrice: 35.6 } },
+    { id: '2', side: 'B', option: 'CE', strike: 23700, lots: 2, type: 'MARKET', status: 'OPEN', fill: { qty: 130, avgPrice: 45.5 } },
+    { id: '3', side: 'B', option: 'PE', strike: 22950, lots: 2, type: 'MARKET', status: 'OPEN', fill: { qty: 130, avgPrice: 47.65 } },
+    { id: '4', side: 'S', option: 'PE', strike: 22900, lots: 4, type: 'MARKET', status: 'OPEN', fill: { qty: 260, avgPrice: 40.7 } },
+  ];
+  const result = classifyBasketStructure(legs);
+  assert.ok(result, 'should recognize a clean Batman shape');
+  assert.strictEqual(result!.structure, 'Batman');
+  assert.strictEqual(result!.riskType, 'undefined');
+});
+
+test('classifyBasketStructure: an actual Iron Condor (long wings outside) is labeled Iron Condor', () => {
+  const legs: MultiLegLeg[] = [
+    { id: '1', side: 'S', option: 'CE', strike: 23700, lots: 1, type: 'MARKET', status: 'OPEN' },
+    { id: '2', side: 'B', option: 'CE', strike: 23800, lots: 1, type: 'MARKET', status: 'OPEN' },
+    { id: '3', side: 'S', option: 'PE', strike: 22900, lots: 1, type: 'MARKET', status: 'OPEN' },
+    { id: '4', side: 'B', option: 'PE', strike: 22800, lots: 1, type: 'MARKET', status: 'OPEN' },
+  ];
+  const result = classifyBasketStructure(legs);
+  assert.strictEqual(result?.structure, 'Iron Condor');
+  assert.strictEqual(result?.riskType, 'defined');
+});
+
+test('classifyBasketStructure: ignores CLOSED/FAILED legs and ties strikes to (strike,type,side) with summed lots', () => {
+  const legs: MultiLegLeg[] = [
+    { id: '1', side: 'S', option: 'CE', strike: 23700, lots: 1, type: 'MARKET', status: 'OPEN' },
+    { id: '1b', side: 'S', option: 'CE', strike: 23700, lots: 1, type: 'MARKET', status: 'OPEN' }, // added later, same leg
+    { id: '2', side: 'B', option: 'CE', strike: 23800, lots: 2, type: 'MARKET', status: 'OPEN' },
+    { id: '3', side: 'S', option: 'PE', strike: 22900, lots: 1, type: 'MARKET', status: 'OPEN' },
+    { id: '4', side: 'B', option: 'PE', strike: 22800, lots: 1, type: 'MARKET', status: 'OPEN' },
+    { id: '5', side: 'S', option: 'CE', strike: 23600, lots: 5, type: 'MARKET', status: 'CLOSED' }, // stale, must be ignored
+  ];
+  const result = classifyBasketStructure(legs);
+  assert.strictEqual(result?.structure, 'Iron Condor');
+});
+
+test('classifyBasketStructure: returns null for a shape the classifier only recognizes as Custom Combo', () => {
+  const legs: MultiLegLeg[] = [
+    { id: '1', side: 'S', option: 'CE', strike: 23700, lots: 1, type: 'MARKET', status: 'OPEN' },
+    { id: '2', side: 'S', option: 'CE', strike: 23800, lots: 1, type: 'MARKET', status: 'OPEN' },
+    { id: '3', side: 'S', option: 'PE', strike: 22900, lots: 1, type: 'MARKET', status: 'OPEN' },
+  ];
+  assert.strictEqual(classifyBasketStructure(legs), null);
 });
 
 

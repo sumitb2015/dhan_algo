@@ -8,6 +8,7 @@
 import { nearestStrike, type LegSide, type OptionType, type StrategyTemplate } from './basketStrategies.ts';
 import { positionProduct, findLivePosition } from './positionProduct.ts';
 import { computeBsGreeks, type OptType } from './optionsMonitorMath.ts';
+import { classifyStructure, type GroupLeg } from './positionStructure.ts';
 
 export type MultiLegStatus = 'DRAFT' | 'PLACING' | 'OPEN' | 'CLOSING' | 'CLOSED' | 'FAILED';
 
@@ -151,6 +152,45 @@ export function legPnl(leg: MultiLegLeg, ltp: number, multiplier: number = 1): n
 
 export function basketTotalPnl(legs: MultiLegLeg[], ltpFor: (leg: MultiLegLeg) => number, multiplier: number = 1): number {
   return legs.reduce((sum, l) => sum + legPnl(l, ltpFor(l), multiplier), 0);
+}
+
+/**
+ * Re-derives the actual options structure from a basket's live legs, using
+ * the same classifier the Margin Allocator uses on broker positions
+ * (lib/positionStructure.ts). `presetKey`/`name` are captured once at basket
+ * creation and never re-synced — if the legs are later edited (strike moved,
+ * a Batman's 1:2 ratio dialed in over what started as an Iron Condor, an
+ * extra leg added), the stored label goes stale while the legs themselves
+ * are ground truth. Callers should prefer this over `basket.presetKey` for
+ * display, falling back to the stored label only when this returns null
+ * (a shape `classifyStructure` doesn't recognize as one specific thing, or a
+ * Calendar/Diagonal — its strike-only classifier has no notion of `expiry`,
+ * so a same-strike different-expiry calendar can't be told from a naked
+ * position; callers must exclude multi-expiry baskets themselves).
+ */
+export function classifyBasketStructure(legs: MultiLegLeg[]): { structure: string; riskType: 'defined' | 'undefined' } | null {
+  const active = legs.filter(l => l.status !== 'CLOSED' && l.status !== 'FAILED' && l.lots > 0);
+  if (active.length === 0) return null;
+  const merged = new Map<string, GroupLeg>();
+  for (const l of active) {
+    const key = `${l.strike}:${l.option}:${l.side}`;
+    const existing = merged.get(key);
+    if (existing) {
+      existing.qty += l.lots;
+    } else {
+      merged.set(key, {
+        strike: l.strike,
+        type: l.option,
+        side: l.side === 'B' ? 'BUY' : 'SELL',
+        qty: l.lots,
+        avgPrice: l.fill?.avgPrice ?? l.price ?? 0,
+        securityId: l.orderRef?.securityId ?? null,
+        symbol: l.orderRef?.symbol ?? null,
+      });
+    }
+  }
+  const result = classifyStructure([...merged.values()]);
+  return result.structure === 'Custom Combo' ? null : result;
 }
 
 export interface LegTrailingEvaluation {
