@@ -844,7 +844,6 @@ export default function MultiLegStrategyRow({
                       exiting={exitingLegs.has(leg.id)}
                       margin={legMargins?.[leg.id]}
                       multiplier={crudeMult}
-                      lotSize={defaultLotSize}
                       frontExpiry={basket.expiry}
                       farExpiry={basket.farExpiry}
                       onChange={patch => updateLeg(leg.id, patch)}
@@ -880,6 +879,21 @@ export default function MultiLegStrategyRow({
             <p className="text-xs text-zinc-500 text-center py-2">
               Waiting for live prices to draw the calendar spread&apos;s payoff curve…
             </p>
+          )}
+
+          {/* Single-expiry strategy payoff curve — the combined payoff of every
+             active leg in this basket (Iron Condor, Short Strangle, etc.) at
+             expiry, using the same computePayoff() result the BE/Max P&L
+             stats above are already derived from, so the chart never
+             disagrees with the numbers next to it. */}
+          {!hasMixedExpiry && payoffResult && (
+            <div className="rounded-lg border border-zinc-800/80 bg-zinc-950/60 p-3">
+              <PayoffDiagram
+                curve={payoffResult.points.map(p => ({ spot: p.x, pnl: p.y }))}
+                currentSpot={spot ?? 0}
+                breakevens={payoffResult.breakevens}
+              />
+            </div>
           )}
         </div>
       )}
