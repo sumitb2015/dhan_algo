@@ -13,7 +13,7 @@
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
-import { Maximize2, Minimize2 } from 'lucide-react';
+import { Maximize2, Minimize2, ZoomIn, ZoomOut, RotateCcw } from 'lucide-react';
 
 interface PayoffDiagramProps {
   curve: { spot: number; pnl: number }[];
@@ -35,6 +35,14 @@ const TODAY_COLOR = '#2d7ff9'; // matches Options Monitor's PAYOFF_TODAY
 const STEP = 50;
 const H = 320;
 const PAD = { top: 16, right: 20, bottom: 28, left: 68 };
+
+// Zoom multiplies the breakeven-scaled half-width of the X domain. 1 = the
+// default "scaled to breakevens" view; > 1 widens back out (capped at the
+// full all-strikes extent, so Zoom Out never over-shoots into empty axis);
+// < 1 narrows further for a very tight cluster of breakevens.
+const MIN_ZOOM = 0.35;
+const MAX_ZOOM = 3;
+const ZOOM_STEP = 1.35;
 
 function fmtInr(v: number): string {
   if (v === 0) return '0';
@@ -77,6 +85,7 @@ export default function PayoffDiagram({ curve, currentSpot, breakevens, todayCur
   const [hoverSpot, setHoverSpot] = useState<number | null>(null);
   const [boxW, setBoxW] = useState(900);
   const [full, setFull] = useState(false);
+  const [zoom, setZoom] = useState(1);
   const roRef = useRef<ResizeObserver | null>(null);
 
   const boxRef = useCallback((el: HTMLDivElement | null) => {
@@ -111,17 +120,39 @@ export default function PayoffDiagram({ curve, currentSpot, breakevens, todayCur
   const model = useMemo(() => {
     if (curve.length === 0) return null;
 
-    // --- Smart X domain: cover all key points with tight padding ---
+    // --- Smart X domain: scaled to the breakevens, not the full strike range ---
+    // A wide wing/hedge strike far from the breakevens used to dominate the
+    // domain and squeeze the actual profit/loss transition into a sliver in
+    // the middle of the chart. The default (zoom = 1) view instead sizes
+    // itself off the breakeven cluster (falling back to currentSpot alone
+    // when there are none, e.g. a naked single-leg curve with no crossing).
+    // Zoom widens back out toward — and, at the top of the range, slightly
+    // past — the full all-strikes extent so far wings stay reachable.
     const allStrikes = curve
       .filter((_, i) => i === 0 || i === curve.length - 1 ||
         Math.abs(curve[i].pnl - curve[i - 1].pnl) > 0) // strike kinks
       .map((c) => c.spot);
-    const keyX = [...breakevens, currentSpot, ...allStrikes];
-    const rawMin = Math.min(...keyX);
-    const rawMax = Math.max(...keyX);
-    const pad = Math.max(STEP * 4, (rawMax - rawMin) * 0.12);
-    const xLo = rawMin - pad;
-    const xHi = rawMax + pad;
+
+    const coreX = breakevens.length > 0 ? [...breakevens, currentSpot] : [currentSpot];
+    const coreMin = Math.min(...coreX);
+    const coreMax = Math.max(...coreX);
+    const coreSpan = Math.max(coreMax - coreMin, STEP * 2);
+    const corePad = Math.max(STEP * 3, coreSpan * 0.35);
+    const center = (coreMin + coreMax) / 2;
+    const baseHalf = coreSpan / 2 + corePad;
+
+    const fullX = [...coreX, ...allStrikes];
+    const fullMin = Math.min(...fullX);
+    const fullMax = Math.max(...fullX);
+    const fullPad = Math.max(STEP * 4, (fullMax - fullMin) * 0.12);
+    const fullHalf = Math.max(fullMax - center, center - fullMin, baseHalf) + fullPad;
+
+    const clampedZoom = Math.min(Math.max(zoom, MIN_ZOOM), MAX_ZOOM);
+    const half = Math.min(Math.max(baseHalf * clampedZoom, STEP * 2), fullHalf * 1.15);
+    const xLo = center - half;
+    const xHi = center + half;
+    const atMinZoom = half <= STEP * 2 + 1e-6;
+    const atMaxZoom = half >= fullHalf * 1.15 - 1e-6;
 
     const visible = curve.filter((c) => c.spot >= xLo && c.spot <= xHi);
     if (visible.length < 2) return null;
@@ -160,8 +191,10 @@ export default function PayoffDiagram({ curve, currentSpot, breakevens, todayCur
       yTicks: niceTicks(yLo, yHi, 6),
       visible,
       visibleToday,
+      atMinZoom,
+      atMaxZoom,
     };
-  }, [curve, todayCurve, currentSpot, breakevens, W, H_]);
+  }, [curve, todayCurve, currentSpot, breakevens, W, H_, zoom]);
 
   if (!model) return null;
 
@@ -215,16 +248,51 @@ export default function PayoffDiagram({ curve, currentSpot, breakevens, todayCur
           )}
         </div>
 
-        <button
-          type="button"
-          onClick={() => setFull((f) => !f)}
-          className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg border border-zinc-750 bg-zinc-900 text-xs font-semibold text-zinc-300 hover:bg-zinc-800 hover:text-white transition-colors cursor-pointer"
-          title={full ? 'Exit full screen (Esc)' : 'Full screen'}
-          aria-label={full ? 'Exit full screen' : 'Full screen'}
-        >
-          {full ? <Minimize2 className="h-3.5 w-3.5" /> : <Maximize2 className="h-3.5 w-3.5" />}
-          <span>{full ? 'Exit Full Screen' : 'Full Screen'}</span>
-        </button>
+        <div className="flex items-center gap-1.5">
+          <div className="flex items-center rounded-lg border border-zinc-750 bg-zinc-900 overflow-hidden">
+            <button
+              type="button"
+              onClick={() => setZoom((z) => Math.max(MIN_ZOOM, z / ZOOM_STEP))}
+              disabled={model.atMinZoom}
+              className="flex items-center px-2 py-1 text-zinc-300 hover:bg-zinc-800 hover:text-white transition-colors cursor-pointer disabled:opacity-30 disabled:cursor-not-allowed disabled:hover:bg-transparent"
+              title="Zoom in (narrow the price axis)"
+              aria-label="Zoom in"
+            >
+              <ZoomIn className="h-3.5 w-3.5" />
+            </button>
+            <button
+              type="button"
+              onClick={() => setZoom(1)}
+              disabled={zoom === 1}
+              className="flex items-center px-2 py-1 border-x border-zinc-800 text-zinc-300 hover:bg-zinc-800 hover:text-white transition-colors cursor-pointer disabled:opacity-30 disabled:cursor-not-allowed disabled:hover:bg-transparent"
+              title="Reset zoom"
+              aria-label="Reset zoom"
+            >
+              <RotateCcw className="h-3.5 w-3.5" />
+            </button>
+            <button
+              type="button"
+              onClick={() => setZoom((z) => Math.min(MAX_ZOOM, z * ZOOM_STEP))}
+              disabled={model.atMaxZoom}
+              className="flex items-center px-2 py-1 text-zinc-300 hover:bg-zinc-800 hover:text-white transition-colors cursor-pointer disabled:opacity-30 disabled:cursor-not-allowed disabled:hover:bg-transparent"
+              title="Zoom out (widen the price axis toward the farthest strike)"
+              aria-label="Zoom out"
+            >
+              <ZoomOut className="h-3.5 w-3.5" />
+            </button>
+          </div>
+
+          <button
+            type="button"
+            onClick={() => setFull((f) => !f)}
+            className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg border border-zinc-750 bg-zinc-900 text-xs font-semibold text-zinc-300 hover:bg-zinc-800 hover:text-white transition-colors cursor-pointer"
+            title={full ? 'Exit full screen (Esc)' : 'Full screen'}
+            aria-label={full ? 'Exit full screen' : 'Full screen'}
+          >
+            {full ? <Minimize2 className="h-3.5 w-3.5" /> : <Maximize2 className="h-3.5 w-3.5" />}
+            <span>{full ? 'Exit Full Screen' : 'Full Screen'}</span>
+          </button>
+        </div>
       </div>
 
       <div className="flex-1 flex items-center justify-center min-h-0">
