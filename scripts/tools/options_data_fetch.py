@@ -77,6 +77,11 @@ def main():
     p_fut = sub.add_parser('futsid')
     p_fut.add_argument('--underlying', default='CRUDEOIL')
 
+    p_vol = sub.add_parser('volsurface')
+    p_vol.add_argument('--underlying', default='NIFTY')
+    p_vol.add_argument('--count', type=int, default=5)
+    p_vol.add_argument('--window-pct', type=float, default=8.0)
+
     args = parser.parse_args()
 
     dhan = get_dhan_client()
@@ -267,6 +272,266 @@ def main():
             'symbol': str(fut.get("SEM_TRADING_SYMBOL") or fut.get("SYMBOL_NAME") or under),
             'expiry': str(fut.get("SM_EXPIRY_DATE") or fut.get("EXPIRY_DATE") or ''),
             'segment': 'MCX_COMM',
+        }))
+
+    elif args.cmd == 'volsurface':
+        from datetime import datetime, date
+        under = args.underlying.upper()
+        is_index = under in UNDERLYINGS
+        if is_index:
+            uid = UNDERLYINGS[under]['chain_id']
+            seg = UNDERLYINGS[under]['chain_seg']
+            chain_seg = UNDERLYINGS[under]['chain_seg']
+            chain_symbol = str(UNDERLYINGS[under]['chain_id'])
+            spot = _index_spot(helper, under)
+        else:
+            eq = helper.find_equity(under)
+            if not eq:
+                print(json.dumps({'error': f'unknown underlying: {args.underlying}'}))
+                sys.exit(0)
+            uid = int(eq['SECURITY_ID'])
+            seg = 'NSE_EQ'
+            chain_seg = None
+            chain_symbol = under
+            spot = helper.get_ltp(under, exchange='NSE', instrument='EQUITY') or 0.0
+
+        all_expiries = helper.get_expiry_list(
+            under_security_id=uid,
+            under_exchange_segment=seg,
+        )
+        if not all_expiries:
+            print(json.dumps({'error': f'no expiries found for {under}'}))
+            sys.exit(0)
+
+        expiries = all_expiries[:max(1, min(args.count, 8))]
+
+        levels = helper.get_prev_day_levels(under)
+        prev_close = levels['close'] if levels else 0.0
+
+        # Fetch chains for chosen expiries
+        chains_by_exp = {}
+        for exp in expiries:
+            c = helper.get_option_chain(symbol=chain_symbol, expiry=exp, exchange_segment=chain_seg)
+            if c and c.get('oc'):
+                chains_by_exp[exp] = c
+                if (not spot or spot == 0) and c.get('last_price'):
+                    spot = float(c['last_price'])
+
+        if not chains_by_exp:
+            print(json.dumps({'error': 'failed to fetch option chains (rate-limited or token expired)'}))
+            sys.exit(0)
+
+        change = round(spot - prev_close, 2) if (spot > 0 and prev_close > 0) else 0.0
+        change_pct = round(change / prev_close * 100, 4) if prev_close > 0 else 0.0
+
+        window_pct = max(2.0, min(args.window_pct, 25.0))
+        lower_bound = spot * (1.0 - window_pct / 100.0) if spot > 0 else 0
+        upper_bound = spot * (1.0 + window_pct / 100.0) if spot > 0 else 9999999
+
+        # Collect union of valid strikes across chains within window
+        all_strikes_set = set()
+        for exp, c in chains_by_exp.items():
+            for s_str in c.get('oc', {}).keys():
+                try:
+                    s_val = float(s_str)
+                    if lower_bound <= s_val <= upper_bound:
+                        all_strikes_set.add(s_val)
+                except ValueError:
+                    pass
+
+        sorted_strikes = sorted(list(all_strikes_set))
+        if not sorted_strikes:
+            print(json.dumps({'error': 'no strikes found in range'}))
+            sys.exit(0)
+
+        def _get_entry(oc_map, strike_num):
+            for k in (f"{strike_num:.6f}", f"{strike_num:.2f}", f"{strike_num:.1f}", str(int(strike_num)) if strike_num.is_integer() else str(strike_num), str(strike_num)):
+                if k in oc_map:
+                    return oc_map[k]
+            return {}
+
+        today = date.today()
+        expiry_meta = []
+        surface_grid = []
+        ce_iv_grid = []
+        pe_iv_grid = []
+        delta_grid = []
+
+        atm_strike = min(sorted_strikes, key=lambda s: abs(s - spot))
+        strike_index = {s: i for i, s in enumerate(sorted_strikes)}
+        last_known_atm_iv = 0.0  # carried across expiries as a last-resort fallback
+        total_synthetic_points = 0
+        # Only treat a delta match as a genuine 25-delta point within this tolerance;
+        # a thin/narrow strike window can otherwise return e.g. a 0.12-delta strike
+        # mislabeled as "25-delta".
+        DELTA_TOLERANCE = 0.08
+
+        for exp in expiries:
+            if exp not in chains_by_exp:
+                continue
+            c = chains_by_exp[exp]
+            oc = c.get('oc', {})
+
+            try:
+                exp_dt = datetime.strptime(exp, "%Y-%m-%d").date()
+                dte = max(0.5, float((exp_dt - today).days))
+            except Exception:
+                dte = 1.0
+
+            atm_oc = _get_entry(oc, atm_strike)
+            atm_ce_iv = float((atm_oc.get('ce') or {}).get('implied_volatility') or 0.0)
+            atm_pe_iv = float((atm_oc.get('pe') or {}).get('implied_volatility') or 0.0)
+            atm_iv = atm_ce_iv if atm_ce_iv > 0 and atm_pe_iv <= 0 else (
+                atm_pe_iv if atm_pe_iv > 0 and atm_ce_iv <= 0 else (
+                    (atm_ce_iv + atm_pe_iv) / 2.0 if atm_ce_iv > 0 else 0.0
+                )
+            )
+
+            row_iv = []
+            row_ce_iv = []
+            row_pe_iv = []
+            row_delta = []
+            total_oi = 0
+            ce_total_oi = 0
+            pe_total_oi = 0
+
+            for s in sorted_strikes:
+                s_entry = _get_entry(oc, s)
+                ce = s_entry.get('ce') or {}
+                pe = s_entry.get('pe') or {}
+
+                civ = float(ce.get('implied_volatility') or 0.0)
+                piv = float(pe.get('implied_volatility') or 0.0)
+                cdelta = float((ce.get('greeks') or {}).get('delta') or 0.0)
+                pdelta = float((pe.get('greeks') or {}).get('delta') or 0.0)
+                coi = int(ce.get('oi') or ce.get('open_interest') or 0)
+                poi = int(pe.get('oi') or pe.get('open_interest') or 0)
+
+                ce_total_oi += coi
+                pe_total_oi += poi
+                total_oi += (coi + poi)
+
+                # Composite smile: OTM Put for K < spot, OTM Call for K >= spot
+                if s < spot:
+                    comp_iv = piv if piv > 0.1 else civ
+                    eff_delta = pdelta if abs(pdelta) > 0.001 else (cdelta - 1.0)
+                else:
+                    comp_iv = civ if civ > 0.1 else piv
+                    eff_delta = cdelta if abs(cdelta) > 0.001 else (pdelta + 1.0)
+
+                row_ce_iv.append(round(civ, 2))
+                row_pe_iv.append(round(piv, 2))
+                row_iv.append(round(comp_iv, 2))
+                row_delta.append(round(eff_delta, 3))
+
+            # Interpolate zero-holes across adjacent strikes
+            row_synthetic = [False] * len(row_iv)
+            for i in range(len(row_iv)):
+                if row_iv[i] <= 0.1:
+                    prev_val = next((row_iv[j] for j in range(i - 1, -1, -1) if row_iv[j] > 0.1), None)
+                    next_val = next((row_iv[j] for j in range(i + 1, len(row_iv)) if row_iv[j] > 0.1), None)
+                    if prev_val and next_val:
+                        row_iv[i] = round((prev_val + next_val) / 2.0, 2)
+                    elif prev_val:
+                        row_iv[i] = prev_val
+                    elif next_val:
+                        row_iv[i] = next_val
+                    elif atm_iv > 0:
+                        row_iv[i] = round(atm_iv, 2)
+                        row_synthetic[i] = True
+                    else:
+                        # No real IV anywhere in this row and no ATM reading either —
+                        # fall back to the last expiry that did have a real ATM IV
+                        # rather than an arbitrary constant, and flag it as synthetic
+                        # so callers (API/UI) can distinguish it from market data.
+                        row_iv[i] = round(last_known_atm_iv, 2) if last_known_atm_iv > 0 else 15.0
+                        row_synthetic[i] = True
+
+            synthetic_points = sum(1 for flag in row_synthetic if flag)
+            total_synthetic_points += synthetic_points
+
+            surface_grid.append(row_iv)
+            ce_iv_grid.append(row_ce_iv)
+            pe_iv_grid.append(row_pe_iv)
+            delta_grid.append(row_delta)
+
+            if atm_iv <= 0.1:
+                atm_idx = strike_index[atm_strike]
+                atm_iv = row_iv[atm_idx]
+            if atm_iv > 0:
+                last_known_atm_iv = atm_iv
+
+            # 25-Delta Skew calculation (Risk Reversal) — only accept a strike as the
+            # 25-delta point if its delta is actually within tolerance; a narrow strike
+            # window can otherwise mislabel a near-ATM or arbitrary-delta strike as "25d".
+            c25_strike = min(sorted_strikes, key=lambda s: abs(row_delta[strike_index[s]] - 0.25))
+            p25_strike = min(sorted_strikes, key=lambda s: abs(row_delta[strike_index[s]] - (-0.25)))
+            c25_delta_err = abs(row_delta[strike_index[c25_strike]] - 0.25)
+            p25_delta_err = abs(row_delta[strike_index[p25_strike]] - (-0.25))
+            c25_valid = c25_delta_err <= DELTA_TOLERANCE
+            p25_valid = p25_delta_err <= DELTA_TOLERANCE
+            c25_iv = row_iv[strike_index[c25_strike]] if c25_valid else None
+            p25_iv = row_iv[strike_index[p25_strike]] if p25_valid else None
+            rr_25d = round(p25_iv - c25_iv, 2) if (c25_valid and p25_valid) else None
+
+            pcr = round(pe_total_oi / ce_total_oi, 2) if ce_total_oi > 0 else 1.0
+
+            expiry_meta.append({
+                'expiry': exp,
+                'dte': dte,
+                'atm_strike': atm_strike,
+                'atm_iv': round(atm_iv, 2),
+                'rr_25d': rr_25d,
+                'p25_iv': round(p25_iv, 2) if p25_iv is not None else None,
+                'c25_iv': round(c25_iv, 2) if c25_iv is not None else None,
+                'pcr': pcr,
+                'total_oi': total_oi,
+                'synthetic_points': synthetic_points,
+            })
+
+        # Term structure analysis
+        front_iv = expiry_meta[0]['atm_iv'] if expiry_meta else 0.0
+        back_iv = expiry_meta[-1]['atm_iv'] if len(expiry_meta) > 1 else front_iv
+        spread_front_back = round(front_iv - back_iv, 2)
+
+        if spread_front_back >= 1.5:
+            regime = 'BACKWARDATION'
+            regime_label = 'Inverted / Front-Month Vol Spike'
+            regime_desc = 'Front-month implied volatility is elevated relative to back-month tenors. Calendar spreads selling front vol and buying back vol (or long calendar debit spreads) are favored.'
+            calendar_play = 'Sell Front Vol / Buy Back Vol (Calendar Premium Seller)'
+        elif spread_front_back <= -1.5:
+            regime = 'CONTANGO'
+            regime_label = 'Upward Sloping / Normal Contango'
+            regime_desc = 'Longer-dated options trade at higher IV than near-term options. Long calendar spreads (buying long-dated vol, financing with short-dated decay) are favored.'
+            calendar_play = 'Buy Front Vol / Sell Back Vol (Long Calendar Catalyst)'
+        else:
+            regime = 'FLAT'
+            regime_label = 'Flat Term Structure'
+            regime_desc = 'Implied volatility is uniform across tenors. Term structure slope is neutral.'
+            calendar_play = 'Neutral Calendar / Strike Skew Arbitrage'
+
+        print(json.dumps({
+            'underlying': under,
+            'spot': spot,
+            'prev_close': prev_close,
+            'change': change,
+            'change_pct': change_pct,
+            'strikes': sorted_strikes,
+            'expiries': expiry_meta,
+            'surface': surface_grid,
+            'ce_surface': ce_iv_grid,
+            'pe_surface': pe_iv_grid,
+            'delta_surface': delta_grid,
+            'has_synthetic_data': total_synthetic_points > 0,
+            'term_structure': {
+                'front_iv': front_iv,
+                'back_iv': back_iv,
+                'spread': spread_front_back,
+                'regime': regime,
+                'regime_label': regime_label,
+                'regime_desc': regime_desc,
+                'calendar_play': calendar_play,
+            }
         }))
 
     else:
