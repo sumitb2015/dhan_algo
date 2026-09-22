@@ -1,7 +1,7 @@
 'use client';
 import { useRouter } from 'next/navigation';
 import { useState } from 'react';
-import { DatabaseZap, GitPullRequest, RefreshCw } from 'lucide-react';
+import { DatabaseZap, GitPullRequest, LogOut, RefreshCw } from 'lucide-react';
 import { toast } from 'sonner';
 import { useRefreshStatus } from '@/lib/useRefreshStatus';
 import { Tooltip, TooltipContent, TooltipTrigger } from './ui/tooltip';
@@ -74,8 +74,9 @@ export default function NavBar() {
       </Tooltip>
       <button
         onClick={handleDisconnect}
-        className="px-3 py-1.8 text-xs font-semibold rounded-lg text-zinc-100 dark:text-zinc-400 hover:text-red-700 dark:hover:text-red-400 hover:bg-red-500/10 border border-transparent hover:border-red-500/20 active:scale-[0.98] transition-all duration-200 whitespace-nowrap cursor-pointer"
+        className="flex items-center gap-1.5 px-2.5 h-7 border border-zinc-700/60 dark:border-zinc-800 bg-zinc-900 text-zinc-100 dark:text-zinc-300 hover:text-red-400 hover:border-red-500/40 rounded-xl text-xs cursor-pointer font-medium active:scale-[0.98] transition-all whitespace-nowrap"
       >
+        <LogOut className="h-3.5 w-3.5" />
         Disconnect
       </button>
     </div>

@@ -2003,7 +2003,7 @@ export default function MarketDashboard() {
   const niftyLtp = indices?.quotes?.['NIFTY']?.ltp;
 
   return (
-    <div className="flex min-h-screen flex-col bg-zinc-950 text-white">
+    <div className="dashboard-atmosphere flex min-h-screen flex-col bg-zinc-950 text-white">
       {/* ─── Top Bloomberg Function Key Command Ribbon ─────────────────────────── */}
       <div className="hidden border-b border-zinc-800 bg-zinc-950 px-6 py-1.5 md:block">
         <div className="flex items-center justify-between gap-2 overflow-x-auto text-[10px] font-mono">
@@ -2122,10 +2122,12 @@ export default function MarketDashboard() {
       {/* ─── Main Content Canvas ─────────────────────────────────────────────── */}
       <div className="flex flex-1 flex-col gap-4 px-6 py-5">
         {/* 1. Real-time Ticker Ribbon */}
-        <IndexStrip data={indices} />
+        <div className="animate-panel-rise" style={{ animationDelay: '0ms' }}>
+          <IndexStrip data={indices} />
+        </div>
 
         {/* 2. Portfolio Balance Sheet & Institutional Tiles */}
-        <div id="section-portfolio" className="scroll-mt-28">
+        <div id="section-portfolio" className="scroll-mt-28 animate-panel-rise" style={{ animationDelay: '70ms' }}>
           <TerminalPanel
             title="Consolidated Portfolio Balance Sheet"
             icon={Briefcase}
@@ -2261,17 +2263,17 @@ export default function MarketDashboard() {
         </div>
 
         {/* 3. Algorithmic Trading Bots Execution Desk */}
-        <div id="section-algos" className="scroll-mt-28">
+        <div id="section-algos" className="scroll-mt-28 animate-panel-rise" style={{ animationDelay: '140ms' }}>
           <AlgoStrategiesDesk data={strategies} />
         </div>
 
         {/* 4. Options Volatility & Market Regime Intelligence */}
-        <div id="section-options" className="scroll-mt-28">
+        <div id="section-options" className="scroll-mt-28 animate-panel-rise" style={{ animationDelay: '210ms' }}>
           <OptionsVolatilityIntelligence niftyLtp={niftyLtp} vixLtp={vixLtp} />
         </div>
 
         {/* 5 & 6. Market Breadth & Technical Screening */}
-        <div id="section-screening" className="flex flex-col gap-4 scroll-mt-28">
+        <div id="section-screening" className="flex flex-col gap-4 scroll-mt-28 animate-panel-rise" style={{ animationDelay: '280ms' }}>
           <BreadthPanel data={breadth} loading={breadthLoading} />
 
           {/* Market Movers: Top Gainers & Top Losers */}
@@ -2396,7 +2398,7 @@ export default function MarketDashboard() {
         </div>
 
         {/* 7. Separated Open Positions Section (Dedicated Per Broker) */}
-        <div id="section-desks" className="scroll-mt-28">
+        <div id="section-desks" className="scroll-mt-28 animate-panel-rise" style={{ animationDelay: '350ms' }}>
           <SeparatedPositionsSection brokers={brokers} portfolioTotals={totals} />
         </div>
 

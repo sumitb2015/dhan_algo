@@ -152,6 +152,17 @@
     linear-gradient(rgba(15, 23, 42, 0.03) 1px, transparent 1px),
     linear-gradient(90deg, rgba(15, 23, 42, 0.03) 1px, transparent 1px);
 
+  /* Bloomberg-style terminal ground (components/MarketDashboard.tsx only) —
+     amber-tinted glow + fine instrument-panel grid, keyed to the page's own
+     accent so it reads as "this terminal's atmosphere", not a generic wash.
+     Kept separate from --body-image because that one is indigo/violet-keyed
+     for other surfaces (e.g. the login page) and would clash with amber chrome. */
+  --dash-atmosphere:
+    radial-gradient(ellipse 1100px 520px at 50% -8%, rgba(217, 119, 6, 0.08) 0%, transparent 60%),
+    radial-gradient(ellipse 900px 600px at 100% 100%, rgba(51, 65, 85, 0.05) 0%, transparent 55%),
+    linear-gradient(rgba(15, 23, 42, 0.035) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(15, 23, 42, 0.035) 1px, transparent 1px);
+
   --scrollbar-track: #f1f5f9;
   --scrollbar-thumb: #cbd5e1;
   --scrollbar-thumb-hover: #94a3b8;
@@ -286,6 +297,12 @@
   --scrollbar-thumb: #27272a;
   --scrollbar-thumb-hover: #3f3f46;
 
+  --dash-atmosphere:
+    radial-gradient(ellipse 1200px 560px at 50% -10%, rgba(251, 191, 36, 0.05) 0%, transparent 62%),
+    radial-gradient(ellipse 900px 640px at 100% 100%, rgba(56, 189, 248, 0.035) 0%, transparent 55%),
+    linear-gradient(rgba(255, 255, 255, 0.014) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(255, 255, 255, 0.014) 1px, transparent 1px);
+
   /* Chart chrome */
   --chart-grid: #27272a;
   --chart-axis: #52525b;
@@ -383,6 +400,41 @@ body {
      when the sidebar unmounts (e.g. the unauthenticated /login page). */
   padding-left: var(--sidebar-w, 0px);
   transition: padding-left 200ms ease-out;
+}
+
+/* Bloomberg terminal ground — see --dash-atmosphere for why this is a
+   separate layer from body's own --body-image. Grid tiles at the same 32px
+   cadence as the global grid so it stays a "panel", not a competing pattern. */
+.dashboard-atmosphere {
+  background-image: var(--dash-atmosphere);
+  background-size: 100% 100%, 100% 100%, 32px 32px, 32px 32px;
+  background-position: 0 0, 0 0, -0.5px -0.5px, -0.5px -0.5px;
+  background-attachment: fixed;
+}
+
+/* One staggered page-load reveal for the dashboard's top-level panels —
+   deliberately a single orchestrated moment (CLAUDE.md dataviz/aesthetics
+   guidance: one good load-in beats scattered micro-interactions), not used
+   for re-renders since React only mounts these nodes once per page visit. */
+@keyframes panel-rise {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.animate-panel-rise {
+  animation: panel-rise 520ms cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .animate-panel-rise {
+    animation: none;
+  }
 }
 
 /* Custom Sleek Scrollbars */
@@ -490,155 +542,155 @@ body {
   /* 1. Solid Saturated Action Buttons: Keep pure white text            */
   /* (BUY CE, SELL CE, Set Guard, EXIT ALL, etc. - without opacity)     */
   /* ------------------------------------------------------------------ */
-  [class*="bg-emerald-600"]:not([class*="/"]),
-  [class*="bg-emerald-700"]:not([class*="/"]),
-  [class*="bg-green-600"]:not([class*="/"]),
-  [class*="bg-rose-600"]:not([class*="/"]),
-  [class*="bg-rose-700"]:not([class*="/"]),
-  [class*="bg-red-600"]:not([class*="/"]),
-  [class*="bg-red-700"]:not([class*="/"]),
-  [class*="bg-violet-600"]:not([class*="/"]),
-  [class*="bg-violet-700"]:not([class*="/"]),
-  [class*="bg-purple-600"]:not([class*="/"]),
-  [class*="bg-indigo-600"]:not([class*="/"]),
-  [class*="bg-blue-600"]:not([class*="/"]),
-  [class*="bg-amber-600"]:not([class*="/"]) {
+  :is([class^="bg-emerald-600"], [class*=" bg-emerald-600"]):not([class*="/"]),
+  :is([class^="bg-emerald-700"], [class*=" bg-emerald-700"]):not([class*="/"]),
+  :is([class^="bg-green-600"], [class*=" bg-green-600"]):not([class*="/"]),
+  :is([class^="bg-rose-600"], [class*=" bg-rose-600"]):not([class*="/"]),
+  :is([class^="bg-rose-700"], [class*=" bg-rose-700"]):not([class*="/"]),
+  :is([class^="bg-red-600"], [class*=" bg-red-600"]):not([class*="/"]),
+  :is([class^="bg-red-700"], [class*=" bg-red-700"]):not([class*="/"]),
+  :is([class^="bg-violet-600"], [class*=" bg-violet-600"]):not([class*="/"]),
+  :is([class^="bg-violet-700"], [class*=" bg-violet-700"]):not([class*="/"]),
+  :is([class^="bg-purple-600"], [class*=" bg-purple-600"]):not([class*="/"]),
+  :is([class^="bg-indigo-600"], [class*=" bg-indigo-600"]):not([class*="/"]),
+  :is([class^="bg-blue-600"], [class*=" bg-blue-600"]):not([class*="/"]),
+  :is([class^="bg-amber-600"], [class*=" bg-amber-600"]):not([class*="/"]) {
     color: #ffffff !important;
   }
 
-  [class*="bg-emerald-600"]:not([class*="/"]) *,
-  [class*="bg-emerald-700"]:not([class*="/"]) *,
-  [class*="bg-green-600"]:not([class*="/"]) *,
-  [class*="bg-rose-600"]:not([class*="/"]) *,
-  [class*="bg-rose-700"]:not([class*="/"]) *,
-  [class*="bg-red-600"]:not([class*="/"]) *,
-  [class*="bg-red-700"]:not([class*="/"]) *,
-  [class*="bg-violet-600"]:not([class*="/"]) *,
-  [class*="bg-violet-700"]:not([class*="/"]) *,
-  [class*="bg-purple-600"]:not([class*="/"]) *,
-  [class*="bg-indigo-600"]:not([class*="/"]) *,
-  [class*="bg-blue-600"]:not([class*="/"]) *,
-  [class*="bg-amber-600"]:not([class*="/"]) * {
+  :is([class^="bg-emerald-600"], [class*=" bg-emerald-600"]):not([class*="/"]) *,
+  :is([class^="bg-emerald-700"], [class*=" bg-emerald-700"]):not([class*="/"]) *,
+  :is([class^="bg-green-600"], [class*=" bg-green-600"]):not([class*="/"]) *,
+  :is([class^="bg-rose-600"], [class*=" bg-rose-600"]):not([class*="/"]) *,
+  :is([class^="bg-rose-700"], [class*=" bg-rose-700"]):not([class*="/"]) *,
+  :is([class^="bg-red-600"], [class*=" bg-red-600"]):not([class*="/"]) *,
+  :is([class^="bg-red-700"], [class*=" bg-red-700"]):not([class*="/"]) *,
+  :is([class^="bg-violet-600"], [class*=" bg-violet-600"]):not([class*="/"]) *,
+  :is([class^="bg-violet-700"], [class*=" bg-violet-700"]):not([class*="/"]) *,
+  :is([class^="bg-purple-600"], [class*=" bg-purple-600"]):not([class*="/"]) *,
+  :is([class^="bg-indigo-600"], [class*=" bg-indigo-600"]):not([class*="/"]) *,
+  :is([class^="bg-blue-600"], [class*=" bg-blue-600"]):not([class*="/"]) *,
+  :is([class^="bg-amber-600"], [class*=" bg-amber-600"]):not([class*="/"]) * {
     color: #ffffff !important;
   }
 
   /* ------------------------------------------------------------------ */
   /* 2. Translucent pills & badges: Crisp black / dark text in light    */
   /* ------------------------------------------------------------------ */
-  [class*="bg-emerald-500/"],
-  [class*="bg-emerald-400/"] {
+  :is([class^="bg-emerald-500/"], [class*=" bg-emerald-500/"]),
+  :is([class^="bg-emerald-400/"], [class*=" bg-emerald-400/"]) {
     color: #000000 !important;
   }
-  [class*="bg-emerald-500/"] span,
-  [class*="bg-emerald-400/"] span {
+  :is([class^="bg-emerald-500/"], [class*=" bg-emerald-500/"]) span,
+  :is([class^="bg-emerald-400/"], [class*=" bg-emerald-400/"]) span {
     color: #000000 !important;
   }
 
-  [class*="bg-rose-500/"],
-  [class*="bg-rose-400/"],
-  [class*="bg-red-500/"],
-  [class*="bg-red-400/"] {
+  :is([class^="bg-rose-500/"], [class*=" bg-rose-500/"]),
+  :is([class^="bg-rose-400/"], [class*=" bg-rose-400/"]),
+  :is([class^="bg-red-500/"], [class*=" bg-red-500/"]),
+  :is([class^="bg-red-400/"], [class*=" bg-red-400/"]) {
     color: #9f1239 !important;
   }
-  [class*="bg-rose-500/"] *,
-  [class*="bg-rose-400/"] *,
-  [class*="bg-red-500/"] *,
-  [class*="bg-red-400/"] * {
+  :is([class^="bg-rose-500/"], [class*=" bg-rose-500/"]) *,
+  :is([class^="bg-rose-400/"], [class*=" bg-rose-400/"]) *,
+  :is([class^="bg-red-500/"], [class*=" bg-red-500/"]) *,
+  :is([class^="bg-red-400/"], [class*=" bg-red-400/"]) * {
     color: #9f1239 !important;
   }
 
-  [class*="bg-amber-500/"],
-  [class*="bg-amber-400/"] {
+  :is([class^="bg-amber-500/"], [class*=" bg-amber-500/"]),
+  :is([class^="bg-amber-400/"], [class*=" bg-amber-400/"]) {
     color: #92400e !important;
   }
-  [class*="bg-amber-500/"] *,
-  [class*="bg-amber-400/"] * {
+  :is([class^="bg-amber-500/"], [class*=" bg-amber-500/"]) *,
+  :is([class^="bg-amber-400/"], [class*=" bg-amber-400/"]) * {
     color: #92400e !important;
   }
 
-  [class*="bg-blue-500/"],
-  [class*="bg-blue-400/"],
-  [class*="bg-sky-500/"],
-  [class*="bg-sky-400/"] {
+  :is([class^="bg-blue-500/"], [class*=" bg-blue-500/"]),
+  :is([class^="bg-blue-400/"], [class*=" bg-blue-400/"]),
+  :is([class^="bg-sky-500/"], [class*=" bg-sky-500/"]),
+  :is([class^="bg-sky-400/"], [class*=" bg-sky-400/"]) {
     color: #0369a1 !important;
   }
-  [class*="bg-blue-500/"] *,
-  [class*="bg-blue-400/"] *,
-  [class*="bg-sky-500/"] *,
-  [class*="bg-sky-400/"] * {
+  :is([class^="bg-blue-500/"], [class*=" bg-blue-500/"]) *,
+  :is([class^="bg-blue-400/"], [class*=" bg-blue-400/"]) *,
+  :is([class^="bg-sky-500/"], [class*=" bg-sky-500/"]) *,
+  :is([class^="bg-sky-400/"], [class*=" bg-sky-400/"]) * {
     color: #0369a1 !important;
   }
 
   /* ------------------------------------------------------------------ */
   /* 3. Preset chips & badges in light mode: Clean tinted bg + dark text*/
   /* ------------------------------------------------------------------ */
-  [class*="bg-emerald-950"],
-  [class*="bg-emerald-900"] {
+  :is([class^="bg-emerald-950"], [class*=" bg-emerald-950"]),
+  :is([class^="bg-emerald-900"], [class*=" bg-emerald-900"]) {
     background-color: #d1fae5 !important;
     border-color: #a7f3d0 !important;
     color: #065f46 !important;
   }
-  [class*="bg-emerald-950"] *,
-  [class*="bg-emerald-900"] * {
+  :is([class^="bg-emerald-950"], [class*=" bg-emerald-950"]) *,
+  :is([class^="bg-emerald-900"], [class*=" bg-emerald-900"]) * {
     color: #065f46 !important;
   }
 
-  [class*="bg-rose-950"],
-  [class*="bg-rose-900"] {
+  :is([class^="bg-rose-950"], [class*=" bg-rose-950"]),
+  :is([class^="bg-rose-900"], [class*=" bg-rose-900"]) {
     background-color: #ffe4e6 !important;
     border-color: #fecdd3 !important;
     color: #9f1239 !important;
   }
-  [class*="bg-rose-950"] *,
-  [class*="bg-rose-900"] * {
+  :is([class^="bg-rose-950"], [class*=" bg-rose-950"]) *,
+  :is([class^="bg-rose-900"], [class*=" bg-rose-900"]) * {
     color: #9f1239 !important;
   }
 
-  [class*="bg-red-950"],
-  [class*="bg-red-900"] {
+  :is([class^="bg-red-950"], [class*=" bg-red-950"]),
+  :is([class^="bg-red-900"], [class*=" bg-red-900"]) {
     background-color: #fee2e2 !important;
     border-color: #fecaca !important;
     color: #991b1b !important;
   }
-  [class*="bg-red-950"] *,
-  [class*="bg-red-900"] * {
+  :is([class^="bg-red-950"], [class*=" bg-red-950"]) *,
+  :is([class^="bg-red-900"], [class*=" bg-red-900"]) * {
     color: #991b1b !important;
   }
 
-  [class*="bg-amber-950"],
-  [class*="bg-amber-900"] {
+  :is([class^="bg-amber-950"], [class*=" bg-amber-950"]),
+  :is([class^="bg-amber-900"], [class*=" bg-amber-900"]) {
     background-color: #fef3c7 !important;
     border-color: #fde68a !important;
     color: #92400e !important;
   }
-  [class*="bg-amber-950"] *,
-  [class*="bg-amber-900"] * {
+  :is([class^="bg-amber-950"], [class*=" bg-amber-950"]) *,
+  :is([class^="bg-amber-900"], [class*=" bg-amber-900"]) * {
     color: #92400e !important;
   }
 
-  [class*="bg-violet-950"],
-  [class*="bg-violet-900"] {
+  :is([class^="bg-violet-950"], [class*=" bg-violet-950"]),
+  :is([class^="bg-violet-900"], [class*=" bg-violet-900"]) {
     background-color: #ede9fe !important;
     border-color: #ddd6fe !important;
     color: #5b21b6 !important;
   }
-  [class*="bg-violet-950"] *,
-  [class*="bg-violet-900"] * {
+  :is([class^="bg-violet-950"], [class*=" bg-violet-950"]) *,
+  :is([class^="bg-violet-900"], [class*=" bg-violet-900"]) * {
     color: #5b21b6 !important;
   }
 
-  [class*="bg-sky-950"],
-  [class*="bg-sky-900"],
-  [class*="bg-blue-950"],
-  [class*="bg-blue-900"] {
+  :is([class^="bg-sky-950"], [class*=" bg-sky-950"]),
+  :is([class^="bg-sky-900"], [class*=" bg-sky-900"]),
+  :is([class^="bg-blue-950"], [class*=" bg-blue-950"]),
+  :is([class^="bg-blue-900"], [class*=" bg-blue-900"]) {
     background-color: #e0f2fe !important;
     border-color: #bae6fd !important;
     color: #075985 !important;
   }
-  [class*="bg-sky-950"] *,
-  [class*="bg-sky-900"] *,
-  [class*="bg-blue-950"] *,
-  [class*="bg-blue-900"] * {
+  :is([class^="bg-sky-950"], [class*=" bg-sky-950"]) *,
+  :is([class^="bg-sky-900"], [class*=" bg-sky-900"]) *,
+  :is([class^="bg-blue-950"], [class*=" bg-blue-950"]) *,
+  :is([class^="bg-blue-900"], [class*=" bg-blue-900"]) * {
     color: #075985 !important;
   }
 }
