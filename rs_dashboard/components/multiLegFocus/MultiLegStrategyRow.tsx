@@ -276,7 +276,15 @@ export default function MultiLegStrategyRow({
   // curve return null rather than drawing a partially-wrong line — the
   // PayoffDiagram component treats a missing todayCurve as "nothing to show
   // yet", not an error.
+  //
+  // Gated on `showPayoffChart`: unlike payoffResult/calendarCurve (which also
+  // feed the always-visible header stats), this curve is ONLY ever consumed
+  // by the collapsed-by-default chart below. `ltpFor` is a fresh closure every
+  // parent render, so without this gate every collapsed strategy row would
+  // re-run Black-Scholes over ~120-240 samples on every WebSocket tick for a
+  // chart nobody has opened.
   const todayCurve = useMemo(() => {
+    if (!showPayoffChart) return null;
     if (!spot || spot <= 0) return null;
     const xs = hasMixedExpiry ? calendarCurve?.points.map(p => p.x) : payoffResult?.points.map(p => p.x);
     if (!xs || xs.length === 0) return null;
@@ -315,7 +323,7 @@ export default function MultiLegStrategyRow({
     } catch {
       return null;
     }
-  }, [spot, hasMixedExpiry, calendarCurve, payoffResult, basket.legs, basket.underlying, basket.expiry, broker, crudeMult, defaultLotSize, ltpFor, ivForStrike]);
+  }, [showPayoffChart, spot, hasMixedExpiry, calendarCurve, payoffResult, basket.legs, basket.underlying, basket.expiry, broker, crudeMult, defaultLotSize, ltpFor, ivForStrike]);
 
   const breakevensDisplay = useMemo(() => {
     if (!payoffResult || payoffResult.breakevens.length === 0) return 'None';
