@@ -12,6 +12,7 @@ Payoff diagrams in this dashboard split into two distinct rendering architecture
    - Designed for strategy builders and static/draft position books.
    - Pure SVG drawing with two `clipPath`s split at $y=0$ to stroke/fill positive P&L in green and negative P&L in red.
    - `BasketPayoffChart.tsx` is the canonical reference implementation that correctly consumes `useChartChrome()`.
+   - **Every instance in this family must also plot the T+0 curve — see "Every Payoff Diagram Must Plot the T+0 (Today) Curve" below.** `components/strategy/PayoffDiagram.tsx` takes it as an optional `todayCurve` prop (2026-09); a caller that doesn't yet pass one is a gap to close, not an acceptable permanent state.
 
 2. **The Options Monitor Terminal (Recharts)** (`lib/optionsMonitorMath.ts` + `app/options-monitor/page.tsx`, `components/options-monitor/PositionsStrategyMonitor.tsx`):
    - A high-density, interactive options terminal matching Sensibull's analytics, payoff curves, Black-76 Greeks, and what-if target sliders.
@@ -192,6 +193,60 @@ Option traders analyze Greeks both per-contract and position-wide:
 
 ---
 
+## Every Payoff Diagram Must Plot the T+0 (Today) Curve
+
+A payoff diagram that shows only the at-expiry line is answering the wrong question for anyone
+holding a live, unexpired position — it tells you what you'd get if you did nothing until
+expiry, not what your position is worth *right now*. Every payoff diagram in this dashboard —
+hand-rolled SVG or Recharts, strategy-builder or live-position terminal — must draw both:
+
+- **At Expiry** (green/red, sign-split): intrinsic value only, computed as in section 1-4 above.
+- **Today (T+0)** (a single continuous blue line, `#2d7ff9` — `PAYOFF_TODAY` in
+  `lib/optionsMonitorMath.ts`, matched by `TODAY_COLOR` in `PayoffDiagram.tsx`): each leg's
+  live mark-to-market value via `computeBsGreeks(...)` at the current spot, that leg's own IV,
+  and its remaining time-to-expiry (`calculateTimeToExpiryYears`) — **never** sign-split into a
+  green/red clip path, since T+0 P&L doesn't have the expiry curve's all-or-nothing intrinsic
+  shape (it's usually a smooth arch/cushion sitting *above* a net-short position's expiry line,
+  or below a net-long one's, converging onto it far from spot and at $t \to 0$).
+
+**This was missed once already** (2026-09): the Multi-Leg Focus strategy payoff diagram shipped
+with the at-expiry curve only. A screenshot review caught it — "i dont see the blue line (T+0)
+line in the payoff. this should always be plotted in a payoff diagram." The fix
+(`MultiLegStrategyRow.tsx`'s `todayCurve` useMemo) is the reference pattern for wiring T+0 into
+any hand-rolled-SVG payoff surface:
+
+1. Build the T+0 curve on the **same x-samples as the expiry curve** (map over
+   `payoffResult.points.map(p => p.x)`, or the calendar/whatever curve is active) — never let it
+   pick its own domain, or the two lines silently drift onto different x-grids.
+2. Price each leg at every sampled spot with `computeBsGreeks(option, spotOrFuture, strike,
+   timeYears, iv, lotSize, r, isFutures)`. Use each leg's **own** expiry and IV, not the basket's
+   front expiry — a calendar/diagonal far leg still carries its own residual time value in the
+   T+0 curve even though the expiry curve only goes out to the front leg's expiry.
+3. **No live futures price wired to this surface yet?** Pass `isFutures: false` with `F = spot`
+   — `computeBsGreeks`'s non-futures branch already applies the `r·t` drift term, which *is* the
+   documented synthetic-forward fallback ($F = Se^{rt}$) from the Black-76 section above, not a
+   separate approximation to invent. Don't skip the T+0 curve just because a real futures price
+   isn't plumbed to this component — the fallback is still meaningfully more useful than no T+0
+   curve at all.
+4. Missing/zero premium or IV on any leg → return `null`/`undefined` for the whole T+0 curve
+   rather than drawing a partially-wrong line. `PayoffDiagram.tsx` treats an absent `todayCurve`
+   as "nothing to show yet," not an error — it must never be forced to render a curve built from
+   placeholder zeros.
+5. Fold the T+0 curve's own P&L range into the chart's Y-domain calculation (it usually needs
+   less room than the expiry curve, but never assume that — it can exceed it far OTM at high IV).
+6. Show a legend distinguishing the two lines, and — if the chart already has a hover
+   readout/tooltip for the expiry curve — extend it to show both values at once rather than
+   adding a second disconnected tooltip.
+
+**Known gap, not yet retrofitted**: `components/BasketPayoffChart.tsx`,
+`components/analytics/PositionsPayoffChart.tsx`, and the other three callers of
+`components/strategy/PayoffDiagram.tsx` that predate the `todayCurve` prop
+(`OptionStrats.tsx`, `OptionStratsStock.tsx`, `FlyagonalPayoff.tsx`) still show expiry-only
+curves. Wiring T+0 into any of them is a straightforward application of the pattern above — do
+it opportunistically when next touching one of those files, and update this list when you do.
+
+---
+
 ## Verification & Testing
 
 ### 1. Automated Math Test Suite
@@ -218,6 +273,9 @@ Playwright `fullPage: true` captures cause Recharts `ResponsiveContainer` to col
 - **Hardcoding 252 trading days**: Annualization for options in Indian exchanges uses 365 calendar days.
 - **Scaling by lot size per leg**: Double-counts lots in mixed-lot books. Scale once at the aggregate book level.
 - **Inferring unlimited risk from curve tails**: Always inspect net signed call/put quantities.
+- **Shipping a payoff diagram with only the at-expiry line**: every payoff diagram must also plot
+  the T+0 curve — see "Every Payoff Diagram Must Plot the T+0 (Today) Curve" above. This is easy
+  to miss because the expiry curve alone still looks like a complete, correct chart.
 
 ---
 
