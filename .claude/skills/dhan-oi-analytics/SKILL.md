@@ -1,6 +1,6 @@
 ---
 name: dhan-oi-analytics
-description: Use when working on open-interest buildup classification, PCR (put-call ratio), max pain, or resistance/support-from-OI panels — components/OIBuildupDashboard.tsx, OptionsBuildupTab.tsx, OptionsCumulativeOITab.tsx, OptionsOITab.tsx, OptionsPCRSpotTab.tsx, OIChangeProfileChart.tsx, OIProfileChart.tsx, TrendingOiChartModal.tsx/TrendingOiTable.tsx, CrudeOilOITab.tsx/CrudeOilCumulativeOITab.tsx, and scripts/tools/nifty_oi_profile_fetch.py / crudeoil_oi_collector.py. Covers the OI-change-sign guards that make PCR and buildup labels trustworthy on a thin or unwinding day, and the max-pain scan. Not for Greeks (dhan-position-greeks/dhan-payoff-diagrams), not for the draft-leg margin strip (dhan-options-analytics-page), not for CSP-specific screening (dhan-csp-desk).
+description: Use when working on open-interest buildup classification, PCR (put-call ratio), max pain, or resistance/support-from-OI panels — components/OIBuildupDashboard.tsx, OptionsBuildupTab.tsx, OptionsCumulativeOITab.tsx, OptionsOITab.tsx, OptionsPCRSpotTab.tsx, OIChangeProfileChart.tsx, OIProfileChart.tsx, TrendingOiChartModal.tsx/TrendingOiTable.tsx, CrudeOilOITab.tsx/CrudeOilCumulativeOITab.tsx, and scripts/tools/nifty_oi_profile_fetch.py / crudeoil_oi_collector.py / nifty_time_analysis_collector.py. Covers the OI-change-sign guards that make PCR and buildup labels trustworthy on a thin or unwinding day, and the max-pain scan. Not for Greeks (dhan-position-greeks/dhan-payoff-diagrams), not for the draft-leg margin strip (dhan-options-analytics-page), not for CSP-specific screening (dhan-csp-desk).
 ---
 
 # OI Buildup / PCR / Max Pain Analytics
@@ -74,3 +74,23 @@ field; Path 2 requires `previous_oi` truthy or reports `Neutral`, with no fallba
 all). If a new OI panel is built against a data source that doesn't populate one of these
 fields, check which of the two documented behaviors it should replicate rather than inventing
 a third.
+
+## `get_ohlc_data()` never returns OI — use `get_quote_data()`
+
+`DhanHelper.get_ohlc_data()` (`lib/dhan_helper.py:3222-3226`) returns only `last_price` and
+`ohlc: {open, high, low, close}` for any segment, including `NSE_FNO` — there is no `oi` key
+in its response, ever. `get_quote_data()` (`lib/dhan_helper.py:3241-3246`, the `/marketfeed/quote`
+L2 endpoint) is the one that returns `oi` per-instrument. Reading `get_ohlc_data(...).get('oi')`
+doesn't raise — it just returns `None`/`0`, which then reads as "OI is zero" instead of "wrong
+endpoint." `nifty_time_analysis_collector.py` made exactly this mistake fetching NIFTY futures
+OI for its Fut-OI-Change column (caught in code review, 2026-09-23, before it shipped) — check
+which method a new OI read actually calls before trusting its output, not just whether the call
+succeeded.
+
+This compounds with the zero/NaN-baseline guard two sections up: a fetch that silently returns
+0 instead of erroring makes the "is this a real zero or a missing baseline" ambiguity *harder*
+to catch, not easier — the same collector also initially computed its OI-change% as `0.0` for a
+missing baseline instead of excluding the row, reproducing the guard's own anti-pattern in a
+third code path despite this skill already documenting it twice above. If you're adding a fourth
+OI-consuming path, treat "did I get a real OI reading this poll" as its own tracked boolean, not
+something you infer from whether the number is zero.

@@ -79,6 +79,23 @@ account-wide). `scripts/tools/breadth_intraday_snapshot.py` does both; copy its 
 than sending a whole index constituent list in one request. Treat a partial sweep as usable
 data — bail with an error only when *no* chunk returned anything.
 
+## `get_ohlc_data()` never returns open interest — use `get_quote_data()`
+
+`DhanHelper.get_ohlc_data()` (`lib/dhan_helper.py:3222-3226`, `/marketfeed/ohlc`) returns
+only `last_price` and `ohlc: {open, high, low, close}` for every segment, including
+`NSE_FNO` — there is no `oi` key in its response, ever. `get_quote_data()`
+(`lib/dhan_helper.py:3241-3246`, `/marketfeed/quote`, the L2 depth endpoint) is the one that
+returns `oi` per instrument.
+
+Reading `get_ohlc_data(...).get('oi')` doesn't raise or return `None` in an obviously-wrong
+way — it just silently reads as `0`/falsy, which then looks like "OI is zero" rather than
+"wrong endpoint." `scripts/tools/nifty_time_analysis_collector.py` made exactly this mistake
+fetching NIFTY futures OI for a Fut-OI-Change column (caught in code review, 2026-09-23,
+before it shipped — the whole column and a downstream OI-buildup classification silently
+read as a fixed "no change / Neutral" for the entire session). Any new script or route that
+needs open interest — futures or options — must call `get_quote_data()` or
+`get_option_chain_df()`; `get_ohlc_data()` is LTP/OHLC-only.
+
 ## `/v2/margincalculator/multi` needs a manually-injected `dhanClientId`, and returns a flat envelope
 
 Unlike `dhanPost()` in `dhanToken.ts` (which auto-injects `dhanClientId` into
@@ -110,6 +127,20 @@ cancelled" error = IP is fine. Never diagnose this from a read call. There is no
 workaround while blocked: fix the whitelist at web.dhan.co (DhanHQ Trading APIs → IP
 whitelist), then re-run `login.py`; close open positions manually from the Dhan app
 meanwhile.
+
+## Order-update WebSocket sends non-JSON binary heartbeat frames
+
+The order-update socket (`wss://api-order-update.dhan.co`) periodically pushes a binary heartbeat
+frame (observed: `b'2\n\x00(\x03'`) between real `order_alert` messages. The SDK's own
+`connect_order_update()` calls `json.loads()` on every incoming frame with no error handling, so
+the first heartbeat throws, kills the connection, and the SDK reconnect-loops before any real
+order update arrives.
+
+**Never call the SDK's own `connect_order_update()`.** Use
+`DhanHelper._connect_order_update_safe()` (`lib/dhan_helper.py`) instead — it reimplements the
+handshake and skips any frame that isn't valid JSON, so heartbeats are silently ignored and the
+connection stays up for real order alerts. `start_order_update_websocket()` already goes through
+this safe path.
 
 ## Kotak quirks
 

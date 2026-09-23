@@ -222,8 +222,21 @@ Two bugs from one perf fix (`b53664f`; portfolio poll 32 s -> 0.3 s, allocator c
   invalidates it), and have the client skip a tick while the previous one is in flight.
 - Skip chain lookups for expiries already past; `calculateDte` clamps to 0.2 so it cannot detect them.
 
+### 14. A value that reaches a filesystem path needs its own format check, not just JSON safety
+Every guard above protects the *shape* of debug-JSON state (races, staleness, caching) once you're
+already inside `DEBUG_DIR`. None of them stop a raw query/body param from choosing *which* path
+that is. `app/api/nifty-time-analysis/route.ts`'s `GET` interpolated `?date=` straight into
+`path.join(DEBUG_DIR, \`nifty_time_analysis_${dateStr}_${interval}m.json\`)` with no format check —
+bounded by the fixed `_<interval>m.json` suffix so not a fully general arbitrary-file read, but
+still unsanitized input reaching `fs.readFileSync` behind only the session cookie gate (caught in
+code review, 2026-09-23, before it shipped). Any route that builds a `debug/*` filename from a
+user-supplied `date`, `symbol`, `id`, or similar must validate it against an explicit format (e.g.
+`/^\d{4}-\d{2}-\d{2}$/` for a date) before it touches `path.join`, independent of whatever
+locking/caching/staleness guard the route also needs.
+
 ## Before You Ship
 - Can two tabs run this at once? What happens if they do?
 - If this spawns something, what stops a second spawn during the startup window?
 - If this caches, what does it do with a `{success:false}` 200?
 - If this is async and sets state, what happens when the previous request lands last?
+- Does any query/body param reach a filesystem path? Is it format-validated first?
