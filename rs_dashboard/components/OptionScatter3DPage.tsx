@@ -192,6 +192,14 @@ export default function OptionScatter3DPage() {
         </div>
       )}
 
+      {!isLive && (
+        <div className="mx-4 sm:mx-6 mt-3 px-3 py-2 bg-amber-900/20 border border-amber-700/40 rounded-lg text-xs text-amber-300 w-auto">
+          Market hasn&apos;t opened yet — premium and OI are still at {session}&apos;s close, so
+          most strikes will read ~0% change and cluster near the origin. This isn&apos;t stale
+          data; the cloud fans out once trading resumes at 09:15 IST.
+        </div>
+      )}
+
       <main className="flex-1 flex flex-col gap-4 px-4 sm:px-6 py-4 w-full min-w-0">
         {expiry ? (
           <OptionScatter3D key={underlying} underlying={underlying} expiry={expiry} onMeta={onMeta} />

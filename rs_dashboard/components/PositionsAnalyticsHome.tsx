@@ -8,7 +8,7 @@
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import Link from 'next/link';
-import { ArrowRight, RefreshCw, AlertTriangle } from 'lucide-react';
+import { ArrowRight, RefreshCw, AlertTriangle, Sparkles } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { useBrokerSelector, scalperRoute, BROKER_LABELS, type Broker } from '@/hooks/useBrokerSelector';
 import { ANALYTICS_UNDERLYINGS, underlyingOfSymbol, type AnalyticsUnderlying } from '@/lib/analyticsUnderlyings';
@@ -149,6 +149,31 @@ export default function PositionsAnalyticsHome() {
         )}
 
         <PortfolioGreeksDesk positions={positions} broker={broker} />
+
+        {/* Quick Link Banner to 3D Volatility Surface */}
+        <div className="rounded-xl border border-emerald-500/30 bg-gradient-to-r from-emerald-950/40 via-zinc-900/60 to-zinc-950 p-4 flex items-center justify-between gap-3 flex-wrap">
+          <div className="flex items-center gap-3">
+            <div className="flex items-center justify-center w-9 h-9 rounded-lg bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 shrink-0">
+              <Sparkles className="w-5 h-5" />
+            </div>
+            <div>
+              <div className="flex items-center gap-2">
+                <span className="text-xs font-bold text-white uppercase tracking-wider">3D Implied Volatility Surface</span>
+                <span className="text-[9px] font-bold uppercase tracking-wider bg-emerald-500/20 text-emerald-400 px-1.5 py-0.5 rounded border border-emerald-500/30">New</span>
+              </div>
+              <p className="text-[11px] text-zinc-400 mt-0.5">
+                Multi-expiry Nifty options 3D surface: smile, skew, and term structure in interactive WebGL.
+              </p>
+            </div>
+          </div>
+          <Link
+            href="/options/volatility-surface"
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold transition-colors shrink-0 shadow-sm"
+          >
+            <span>Open 3D Surface</span>
+            <ArrowRight className="w-3.5 h-3.5" />
+          </Link>
+        </div>
 
         <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
           {groups.map((g) => (
