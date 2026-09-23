@@ -199,8 +199,14 @@ def reindex_series(leg_df, day, full_range, want_oi):
 def compute_max_pain(strikes, ce_oi_at_t, pe_oi_at_t):
     """Brute-force scan over the tracked band — payout = sum ce_oi*max(0,K-s) +
     pe_oi*max(0,s-K), minimized over K. O(n^2) at n<=21, cheap even across hundreds of
-    buckets."""
+    buckets.
+
+    Returns 0.0 when the whole band's OI is zero at this bucket — same "no data" sentinel
+    highest_oi_strike() already uses — rather than every candidate strike tying at a
+    payout of 0.0 and the scan confidently reporting the lowest strike as a real answer."""
     if not strikes:
+        return 0.0
+    if sum(ce_oi_at_t.values()) + sum(pe_oi_at_t.values()) <= 0:
         return 0.0
     best_strike, best_payout = strikes[0], None
     for k in strikes:
@@ -383,19 +389,25 @@ def main():
 
     # Futures — single leg, own OI series.
     fut_rec = helper.find_future("NIFTY", exchange="NSE", instrument="FUTIDX")
-    fut_oi_series, fut_ltp_series, fut_oi_ok = None, None, False
+    fut_oi_series, fut_ltp_series, fut_oi_ok, fut_ltp_ok = None, None, False, False
     if fut_rec:
         fut_sid = int(fut_rec["SECURITY_ID"])
         fut_leg_df = fetch_leg_series(helper, fut_sid, "NSE_FNO", "FUTIDX", open_dt, end_dt, with_oi=True)
         fut_oi_series, fut_ltp_series = reindex_series(fut_leg_df, day, full_range, want_oi=True)
         fut_oi_ok = fut_oi_series is not None
+        fut_ltp_ok = fut_ltp_series is not None
+    # Falling back to spot keeps Fut/Fut-Spot Diff numeric rather than blank, but that fallback
+    # must never look like a real reading — Fut-Spot Diff would silently read 0.00 all session
+    # with nothing anywhere saying it's fabricated, so the caller is told via fut_ltp_ok and must
+    # surface it in coverage_note.
     if fut_ltp_series is None:
-        fut_ltp_series = spot_series  # last-resort fallback so Fut/Fut-Spot Diff aren't blank
+        fut_ltp_series = spot_series
     if fut_oi_series is None:
         fut_oi_series = pd.Series(0.0, index=full_range)
 
     dropped = legs_failed
     dropped_note = f" {dropped} of {dropped + legs_ok} option legs returned no data." if dropped else ""
+    fut_note = "" if fut_ltp_ok else " Futures data unavailable — Nifty Fut/Fut-Spot Diff fall back to Spot (diff reads as 0.00, not a real reading)."
 
     # ── Bucket into `interval_minutes` and compute derived columns ──────────────────
     rows = []
@@ -495,7 +507,7 @@ def main():
         "coverage_note": (
             f"{'Live' if is_live else 'Historical'} session for {day.isoformat()}, "
             f"{len(band)} strike{'' if len(band) == 1 else 's'} ({band[0]:g}..{band[-1]:g})."
-            + capped_note + dropped_note
+            + capped_note + dropped_note + fut_note
         ),
     }
     print(json.dumps(result))

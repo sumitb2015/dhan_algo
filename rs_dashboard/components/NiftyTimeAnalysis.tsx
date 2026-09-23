@@ -300,7 +300,9 @@ export default function NiftyTimeAnalysis() {
                       <td className="px-3 py-1.5 border border-emerald-500/10 text-center"><DirCell value={r.fut} dir={r.fut_dir} /></td>
                       <td className="px-3 py-1.5 border border-emerald-500/10 text-center"><DirCell value={r.fut_spot_diff} dir={r.fut_spot_diff_dir} /></td>
                       <td className="px-3 py-1.5 border border-emerald-500/10 text-center"><DirCell value={r.avg_price} dir={r.avg_price_dir} /></td>
-                      <td className="px-3 py-1.5 border border-emerald-500/10 text-center"><DirCell value={r.max_pain} dir={r.max_pain_dir} decimals={0} /></td>
+                      <td className="px-3 py-1.5 border border-emerald-500/10 text-center">
+                        {r.max_pain === 0 ? <span className="text-zinc-600">—</span> : <DirCell value={r.max_pain} dir={r.max_pain_dir} decimals={0} />}
+                      </td>
                       <td className="px-3 py-1.5 border border-emerald-500/10 text-center text-zinc-100">{r.pcr.toFixed(3)}</td>
                       <td className="px-3 py-1.5 border border-emerald-500/10 text-center"><DirCell value={r.atm} dir={r.atm_dir} decimals={0} /></td>
                       <td className="px-3 py-1.5 border border-emerald-500/10 text-center"><DirCell value={r.vix} dir={r.vix_dir} /></td>
