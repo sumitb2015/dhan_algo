@@ -43,6 +43,9 @@ LEG_CALL_PACING_SECONDS = 0.3
 VIX_SECURITY_ID = 21   # India VIX, NSE_IDX/IDX_I segment (docs/API_GOTCHAS.md)
 SESSION_OPEN_HOUR, SESSION_OPEN_MINUTE = 9, 15
 SESSION_CLOSE_HOUR, SESSION_CLOSE_MINUTE = 15, 30
+# NSE options' reported OI keeps updating for a few minutes past the 15:30 bell as the
+# exchange finalizes end-of-day settlement — see the fetch_end_dt comment in main().
+SETTLEMENT_BUFFER_MIN = 15
 
 VOL_BIAS_FLAT_POINTS = 3.0
 WEAK_BEARISH_POINTS = 8.0
@@ -193,6 +196,21 @@ def reindex_series(leg_df, day, full_range, want_oi):
     if want_oi and "oi" in indexed.columns:
         oi_s = indexed["oi"].reindex(full_range).ffill().bfill().fillna(0)
     ltp_s = indexed["close"].reindex(full_range).ffill().bfill().fillna(0) if "close" in indexed.columns else None
+
+    # `indexed` may extend past full_range's last slot when the caller fetched a
+    # settlement buffer beyond the nominal session close (see SETTLEMENT_BUFFER_MIN).
+    # Exchange OI keeps updating for a few minutes after 15:30 as the day's trades
+    # settle, so the value literally timestamped 15:30:00 is routinely NOT the day's
+    # final OI — back-fill the last bucket with the true latest available reading
+    # instead, or every "final" row would show a mid-settlement number that silently
+    # disagrees with every other OI source in this dashboard (all of which read the
+    # settled figure).
+    if len(indexed.index) and indexed.index.max() > full_range[-1]:
+        if oi_s is not None:
+            oi_s.iloc[-1] = indexed["oi"].iloc[-1]
+        if ltp_s is not None and "close" in indexed.columns:
+            ltp_s.iloc[-1] = indexed["close"].iloc[-1]
+
     return oi_s, ltp_s
 
 
@@ -288,13 +306,22 @@ def main():
         end_dt = min(now_dt, session_close(day))
         if now_dt < open_dt:
             bail("Market has not opened yet — the table fills in from 09:15.")
+        # NSE OI keeps updating for several minutes after the 15:30 bell as the exchange
+        # finalizes the day's settlement — a contract's OI print at exactly 15:30:00 is
+        # routinely NOT its final value (e.g. one 2026-09-29 NIFTY PE was still ~12% off its
+        # eventual settled OI at 15:30, only stabilizing by ~15:39). Fetch a bit past the
+        # bell once we're clearly past it, so the "15:30" bucket can be back-filled with the
+        # true settled reading instead of a mid-update one — see reindex_series().
+        fetch_end_dt = min(now_dt, session_close(day) + timedelta(minutes=SETTLEMENT_BUFFER_MIN)) if now_dt >= session_close(day) else end_dt
     else:
         open_dt = session_open(day)
         end_dt = session_close(day)
+        fetch_end_dt = session_close(day) + timedelta(minutes=SETTLEMENT_BUFFER_MIN)
 
     full_range = pd.date_range(open_dt, end_dt, freq="1min")
 
-    # Spot + VIX — both plain index series, no OI.
+    # Spot + VIX — both plain index series, no OI, no settlement lag; fetch only through the
+    # real session close so `ref_spot`/ATM-band centring aren't nudged by post-close ticks.
     spot_by_minute, spot_api_error = fetch_index_series(helper, 13, "IDX_I", "INDEX", day, open_dt, end_dt)
     if DhanHelper.is_fatal_error(spot_api_error):
         bail("Could not read NIFTY intraday data." + describe_api_error(spot_api_error))
@@ -368,7 +395,7 @@ def main():
             if not sec_id:
                 legs_failed += 1
                 continue
-            leg_df = fetch_leg_series(helper, sec_id, "NSE_FNO", "OPTIDX", open_dt, end_dt, with_oi=True)
+            leg_df = fetch_leg_series(helper, sec_id, "NSE_FNO", "OPTIDX", open_dt, fetch_end_dt, with_oi=True)
             leg_error = helper.last_api_error
             time.sleep(LEG_CALL_PACING_SECONDS)
             oi_s, ltp_s = reindex_series(leg_df, day, full_range, want_oi=True)
@@ -392,7 +419,7 @@ def main():
     fut_oi_series, fut_ltp_series, fut_oi_ok, fut_ltp_ok = None, None, False, False
     if fut_rec:
         fut_sid = int(fut_rec["SECURITY_ID"])
-        fut_leg_df = fetch_leg_series(helper, fut_sid, "NSE_FNO", "FUTIDX", open_dt, end_dt, with_oi=True)
+        fut_leg_df = fetch_leg_series(helper, fut_sid, "NSE_FNO", "FUTIDX", open_dt, fetch_end_dt, with_oi=True)
         fut_oi_series, fut_ltp_series = reindex_series(fut_leg_df, day, full_range, want_oi=True)
         fut_oi_ok = fut_oi_series is not None
         fut_ltp_ok = fut_ltp_series is not None
