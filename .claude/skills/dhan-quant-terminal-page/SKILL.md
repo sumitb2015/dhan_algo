@@ -22,6 +22,9 @@ redesign was built "to match."
   style" / similar to Options Premium Bar.
 - Not for operational pages (strategies, scalper order tickets, login) — this is for
   read-only analytics/chart surfaces.
+- Not for the recharts component mechanics inside a chart panel (theming, animation,
+  tooltip cursor, axis domains) — that's `dhan-recharts-charting`. This skill owns the
+  page shell those charts sit inside.
 
 ## Structure
 

@@ -28,7 +28,7 @@ Payoff diagrams in this dashboard split into two distinct rendering architecture
 - Pricing options pre-expiry via Black-76 on futures or Black-Scholes on spot.
 - Sizing delta-hedge orders or rendering position Greeks ("Multiply by Lot Size" vs per-share).
 - Diagnosing payoff visual bugs: wobbly curve lines, vanished reference markers, light/dark theme contrast failures, or missing leg IV warnings.
-- **Not for**: Draft-leg staging UI, margin requirements, or historical payoff backtests — see `dhan-options-analytics-page`.
+- **Not for**: Draft-leg staging UI, margin requirements, or historical payoff backtests — see `dhan-options-analytics-page`. For the recharts-specific mechanics of the Options Monitor terminal itself (tooltip theming, animation-on-live-tick, axis domain scaling) see `dhan-recharts-charting` — this skill owns the curve math, that one owns how the chart is wired.
 
 ---
 

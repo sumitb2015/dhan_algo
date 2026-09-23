@@ -21,7 +21,7 @@ guard; copy it rather than writing a new heuristic.
 - Any change to the live-options panels (`StraddlePanel`, `RollingStraddlePanel`,
   `StranglePanel`, `StrategyPanel`) that touches selection state.
 - Adding a new polled chart anywhere in the dashboard.
-- Not for recharts/SVG charts — those are covered by `dhan-quant-terminal-page`.
+- Not for recharts/SVG charts — component mechanics (theming, animation, tooltips) are `dhan-recharts-charting`; page layout is `dhan-quant-terminal-page`.
 
 ## The Invariants
 
