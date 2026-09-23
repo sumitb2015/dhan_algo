@@ -93,7 +93,7 @@ export default function GreeksTab({ legs, lotSize, spot }: { legs: PositionLeg[]
                   <td className={cn(TD, 'font-bold', l.delta === null ? 'text-zinc-500' : (l.delta * k) > 0 ? 'text-emerald-400' : 'text-red-400')}>
                     {l.delta === null ? '—' : (l.delta * k).toFixed(2)}
                   </td>
-                  <td className={TD}>{fmt(l.gamma, 5)}</td>
+                  <td className={TD}>{fmt(l.gamma === null ? null : l.gamma * k, 5)}</td>
                   <td className={TD}>{fmt(l.theta === null ? null : l.theta * k, 1)}</td>
                   <td className={TD}>{fmt(l.vega === null ? null : l.vega * k, 2)}</td>
                 </tr>
