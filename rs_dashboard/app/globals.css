@@ -527,6 +527,37 @@
   --sidebar-ring: oklch(0.42 0.09 55);
 }
 
+/* =====================================================================
+ * HEADING FONT — data-heading-font on <html> (components/SettingsPanel.tsx,
+ * lib/preferences.ts). Deliberately NOT routed through the `font-heading`
+ * Tailwind utility: @theme inline bakes `--font-heading: var(--font-sans)`
+ * straight into that utility at build time (`.font-heading{font-family:
+ * var(--font-sans)}`), so redefining --font-heading anywhere at runtime does
+ * nothing — same trap the dhan-theme-tokens skill documents for colours. This
+ * real, unlayered custom property + rule is what actually flips at runtime.
+ * ===================================================================== */
+:root {
+  --heading-font: var(--font-sans);
+
+  /* Fixed per-option refs so SettingsPanel can preview every choice at once,
+     independent of which one is currently applied via --heading-font above. */
+  --heading-font-preview-inter:      var(--font-sans);
+  --heading-font-preview-poppins:    var(--font-poppins);
+  --heading-font-preview-dmsans:     var(--font-dm-sans);
+  --heading-font-preview-playfair:   var(--font-playfair);
+  --heading-font-preview-lora:       var(--font-lora);
+  --heading-font-preview-montserrat: var(--font-montserrat);
+}
+:root[data-heading-font="poppins"]    { --heading-font: var(--font-poppins); }
+:root[data-heading-font="dmsans"]     { --heading-font: var(--font-dm-sans); }
+:root[data-heading-font="playfair"]   { --heading-font: var(--font-playfair); }
+:root[data-heading-font="lora"]       { --heading-font: var(--font-lora); }
+:root[data-heading-font="montserrat"] { --heading-font: var(--font-montserrat); }
+
+h1, h2, .font-heading {
+  font-family: var(--heading-font), var(--font-sans), Arial, sans-serif;
+}
+
 body {
   background-color: var(--body-bg);
   background-image: var(--body-image);

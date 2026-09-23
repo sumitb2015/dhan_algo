@@ -1,18 +1,20 @@
 'use client';
 import { useRouter } from 'next/navigation';
 import { useState } from 'react';
-import { DatabaseZap, GitPullRequest, LogOut, RefreshCw } from 'lucide-react';
+import { DatabaseZap, GitPullRequest, LogOut, RefreshCw, Settings } from 'lucide-react';
 import { toast } from 'sonner';
 import { useRefreshStatus } from '@/lib/useRefreshStatus';
 import { Tooltip, TooltipContent, TooltipTrigger } from './ui/tooltip';
 import DataRefreshPanel from './DataRefreshPanel';
 import UpdateAppPanel from './UpdateAppPanel';
+import SettingsPanel from './SettingsPanel';
 import ThemeToggle from './ThemeToggle';
 
 export default function NavBar() {
   const router = useRouter();
   const [syncPanelOpen, setSyncPanelOpen] = useState(false);
   const [updatePanelOpen, setUpdatePanelOpen] = useState(false);
+  const [settingsPanelOpen, setSettingsPanelOpen] = useState(false);
   const sync = useRefreshStatus();
 
   async function handleDisconnect() {
@@ -31,6 +33,23 @@ export default function NavBar() {
     <>
     <div className="flex items-center gap-1 shrink-0">
       <ThemeToggle />
+      <Tooltip>
+        <TooltipTrigger
+          onClick={() => setSettingsPanelOpen(true)}
+          render={
+            <button
+              type="button"
+              aria-label="Settings"
+              className="flex items-center justify-center h-7 w-7 rounded-xl border border-zinc-700/60 dark:border-zinc-800 bg-zinc-900/80 text-zinc-300 transition-all duration-200 cursor-pointer hover:text-amber-400 hover:border-amber-500/40 hover:bg-zinc-800 active:scale-[0.94]"
+            />
+          }
+        >
+          <Settings className="h-3.5 w-3.5" />
+        </TooltipTrigger>
+        <TooltipContent>
+          Settings — theme &amp; heading font
+        </TooltipContent>
+      </Tooltip>
       <Tooltip>
         <TooltipTrigger
           onClick={() => setSyncPanelOpen(true)}
@@ -90,6 +109,11 @@ export default function NavBar() {
     <UpdateAppPanel
       open={updatePanelOpen}
       onClose={() => setUpdatePanelOpen(false)}
+    />
+
+    <SettingsPanel
+      open={settingsPanelOpen}
+      onClose={() => setSettingsPanelOpen(false)}
     />
     </>
   );
