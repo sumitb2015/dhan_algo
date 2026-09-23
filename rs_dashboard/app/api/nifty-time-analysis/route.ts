@@ -1,20 +1,11 @@
 import { NextRequest, NextResponse } from 'next/server';
 import path from 'path';
-import fs from 'fs';
-import { spawn } from 'child_process';
-import { isPidRunning } from '@/lib/processCheck';
-import { PYTHON_EXE } from '@/lib/pyExec';
+import { PROJECT_ROOT, runPythonJson, dedupe, spaced } from '@/lib/pyExec';
 
-const PROJECT_ROOT  = path.resolve(process.cwd(), '..');
-const DEBUG_DIR      = path.join(PROJECT_ROOT, 'debug');
-const COLLECTOR       = path.join(PROJECT_ROOT, 'scripts', 'tools', 'nifty_time_analysis_collector.py');
-const STATUS_FILE    = path.join(DEBUG_DIR, 'nifty_time_analysis_status.json');
-const STOP_TRIGGER   = path.join(DEBUG_DIR, 'nifty_time_analysis_stop.trigger');
+const SCRIPT_PATH = path.join(PROJECT_ROOT, 'scripts', 'tools', 'nifty_time_analysis_fetch.py');
 
 const ALLOWED_INTERVALS = [1, 3, 5, 15, 30] as const;
 type Interval = (typeof ALLOWED_INTERVALS)[number];
-
-const LOCK_STALE_MS = 30_000;
 
 export interface NiftyTimeAnalysisRow {
   time: string;
@@ -37,139 +28,91 @@ export interface NiftyTimeAnalysisRow {
 }
 
 export interface NiftyTimeAnalysisResponse {
-  success: boolean;
-  status: { status: string; pid?: number; interval_min?: number; rows?: number; last_update?: string; error?: string; reason?: string };
-  date: string | null;
-  interval_min: number | null;
+  date: string;
+  interval: string;
   nearest_expiry: string | null;
   rows: NiftyTimeAnalysisRow[];
+  /** True while `date`'s session is still today and possibly still running — false once
+   *  the day is over (or a past `date` was requested), meaning the table is complete and
+   *  will not change until the next session, so the client can safely stop polling. */
+  is_live: boolean;
+  legs_ok?: number;
+  legs_failed?: number;
+  backtrace_status: 'ok' | 'unavailable';
+  coverage_note: string;
+  /** Set only when this response is a cached fallback served after a live fetch failed. */
+  stale?: boolean;
   error?: string;
 }
 
-function readJson(file: string): any | null {
-  try {
-    if (!fs.existsSync(file)) return null;
-    return JSON.parse(fs.readFileSync(file, 'utf8'));
-  } catch {
-    return null;
-  }
+interface CacheEntry {
+  data: NiftyTimeAnalysisResponse;
+  ts: number;
+  ttl: number;
 }
 
-function dataPath(dateStr: string, interval: number): string {
-  return path.join(DEBUG_DIR, `nifty_time_analysis_${dateStr}_${interval}m.json`);
-}
-
-function todayStr(): string {
-  // IST date — server may run in any TZ, so build it from an IST-shifted UTC time.
-  const ist = new Date(Date.now() + 5.5 * 60 * 60 * 1000);
-  return ist.toISOString().slice(0, 10);
-}
+const serverCache = new Map<string, CacheEntry>();
+// A live session's newest bucket can still be filling in — short TTL. A closed session
+// (today after 15:30, or any past `date`) is fixed once fetched, same as trending-oi.
+const LIVE_CACHE_TTL_MS = 45_000;
+const HISTORICAL_CACHE_TTL_MS = 24 * 60 * 60_000;
 
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 
-/** Reject anything that isn't a plain YYYY-MM-DD before it reaches a filesystem
- *  path — the raw query param must never flow into `path.join` unchecked. */
-function safeDateParam(raw: string | null): string {
-  return raw && DATE_RE.test(raw) ? raw : todayStr();
-}
-
-function acquireStartLock(lockPath: string): boolean {
-  try {
-    fs.writeFileSync(lockPath, String(Date.now()), { flag: 'wx' });
-    return true;
-  } catch {
-    try {
-      const age = Date.now() - fs.statSync(lockPath).mtimeMs;
-      if (age > LOCK_STALE_MS) {
-        fs.unlinkSync(lockPath);
-        fs.writeFileSync(lockPath, String(Date.now()), { flag: 'wx' });
-        return true;
-      }
-    } catch { /* race lost to another starter */ }
-    return false;
-  }
-}
-
-function releaseStartLock(lockPath: string): void {
-  try { fs.unlinkSync(lockPath); } catch { /* already gone */ }
-}
-
-/** GET — rows for the requested (or today's) date + interval, plus collector status. */
+/** GET — the whole session's table, reconstructed statelessly from Dhan's own retained
+ *  per-minute OI/LTP history (works identically whether the market is open right now or
+ *  has been closed for hours — there is no live-only limitation here, unlike the option
+ *  chain endpoint this replaced a background collector for). */
 export async function GET(request: NextRequest) {
   const { searchParams } = new URL(request.url);
   const intervalParam = Number(searchParams.get('interval') ?? 15);
   const interval: Interval = (ALLOWED_INTERVALS as readonly number[]).includes(intervalParam)
     ? (intervalParam as Interval)
     : 15;
-  const dateStr = safeDateParam(searchParams.get('date'));
+  const dateParam = searchParams.get('date');
+  const date = dateParam && DATE_RE.test(dateParam) ? dateParam : '';
 
-  const status = readJson(STATUS_FILE) ?? { status: 'STOPPED' };
-  if (status.pid && status.status === 'RUNNING' && !isPidRunning(Number(status.pid))) {
-    status.status = 'STOPPED';
+  const cacheKey = `nifty-time-analysis:${interval}:${date}`;
+  const hit = serverCache.get(cacheKey);
+  if (hit && Date.now() - hit.ts < hit.ttl) {
+    return NextResponse.json({ success: true, data: hit.data }, { headers: { 'Cache-Control': 'no-store' } });
   }
 
-  const fileData = readJson(dataPath(dateStr, interval));
+  const args = ['--interval', String(interval)];
+  if (date) args.push('--date', date);
 
-  const body: NiftyTimeAnalysisResponse = {
-    success: true,
-    status,
-    date: fileData?.date ?? null,
-    interval_min: fileData?.interval_min ?? null,
-    nearest_expiry: fileData?.nearest_expiry ?? null,
-    rows: fileData?.rows ?? [],
-  };
-  return NextResponse.json(body);
-}
+  try {
+    const data = await dedupe(cacheKey, () =>
+      // Own pacing lane, not the shared option-chain/spot chain key — this script never
+      // touches the live chain endpoint (strikes come from the security master), so
+      // queuing it behind those routes would only add latency for no rate-limit benefit.
+      spaced('dhan-intraday:NIFTY-time-analysis', () =>
+        // ~43 paced Dhan calls (spot + VIX + futures + 21 strikes x2 legs) — same budget
+        // as trending-oi's fetch, same timeout.
+        runPythonJson<NiftyTimeAnalysisResponse>(SCRIPT_PATH, args, 90_000)
+      )
+    );
 
-/** POST — start or stop the background collector for a given interval. */
-export async function POST(request: NextRequest) {
-  const body = await request.json().catch(() => ({}));
-  const action: string = body.action ?? '';
-  const intervalParam = Number(body.interval_min ?? 15);
-  const interval: Interval = (ALLOWED_INTERVALS as readonly number[]).includes(intervalParam)
-    ? (intervalParam as Interval)
-    : 15;
-
-  if (!fs.existsSync(DEBUG_DIR)) fs.mkdirSync(DEBUG_DIR, { recursive: true });
-
-  if (action === 'stop') {
-    fs.writeFileSync(STOP_TRIGGER, '');
-    return NextResponse.json({ success: true, message: 'Stop trigger written' });
-  }
-
-  if (action === 'start') {
-    const status = readJson(STATUS_FILE);
-    if (status && status.pid && status.status === 'RUNNING' && isPidRunning(Number(status.pid))) {
-      if (Number(status.interval_min) !== interval) {
-        return NextResponse.json({
-          success: false,
-          error: `Collector already running at ${status.interval_min}m — stop it before starting a new interval`,
-        }, { status: 409 });
-      }
-      return NextResponse.json({ success: true, message: 'Collector already running', pid: status.pid });
+    if (data.error) {
+      console.error('[/api/nifty-time-analysis] Python script error:', data.error);
+      return NextResponse.json({ success: false, error: data.error }, { status: 500 });
     }
 
-    const lockPath = path.join(DEBUG_DIR, 'nifty_time_analysis_start.lock');
-    if (!acquireStartLock(lockPath)) {
-      return NextResponse.json({ success: false, error: 'Another start is already in progress' }, { status: 409 });
-    }
+    const ttl = data.is_live === false ? HISTORICAL_CACHE_TTL_MS : LIVE_CACHE_TTL_MS;
+    serverCache.set(cacheKey, { data, ts: Date.now(), ttl });
 
-    try {
-      if (fs.existsSync(STOP_TRIGGER)) fs.unlinkSync(STOP_TRIGGER);
+    return NextResponse.json({ success: true, data }, { headers: { 'Cache-Control': 'no-store' } });
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.error('[/api/nifty-time-analysis] Error executing fetch script:', message);
 
-      const child = spawn(PYTHON_EXE, [COLLECTOR, '--interval-min', String(interval)], {
-        detached: true,
-        stdio: 'ignore',
-        windowsHide: true,
-        cwd: PROJECT_ROOT,
+    if (hit) {
+      console.warn(`[/api/nifty-time-analysis] Serving stale cache entry after fetch failure.`);
+      return NextResponse.json({ success: true, data: { ...hit.data, stale: true } }, {
+        headers: { 'Cache-Control': 'no-store' },
       });
-      child.unref();
-
-      return NextResponse.json({ success: true, message: 'Collector started', pid: child.pid, interval_min: interval });
-    } finally {
-      releaseStartLock(lockPath);
     }
-  }
 
-  return NextResponse.json({ success: false, error: 'Unknown action' }, { status: 400 });
+    return NextResponse.json({ success: false, error: message }, { status: 500 });
+  }
 }

@@ -1,9 +1,25 @@
 ---
 name: dhan-oi-analytics
-description: Use when working on open-interest buildup classification, PCR (put-call ratio), max pain, or resistance/support-from-OI panels — components/OIBuildupDashboard.tsx, OptionsBuildupTab.tsx, OptionsCumulativeOITab.tsx, OptionsOITab.tsx, OptionsPCRSpotTab.tsx, OIChangeProfileChart.tsx, OIProfileChart.tsx, TrendingOiChartModal.tsx/TrendingOiTable.tsx, CrudeOilOITab.tsx/CrudeOilCumulativeOITab.tsx, and scripts/tools/nifty_oi_profile_fetch.py / crudeoil_oi_collector.py / nifty_time_analysis_collector.py. Covers the OI-change-sign guards that make PCR and buildup labels trustworthy on a thin or unwinding day, and the max-pain scan. Not for Greeks (dhan-position-greeks/dhan-payoff-diagrams), not for the draft-leg margin strip (dhan-options-analytics-page), not for CSP-specific screening (dhan-csp-desk).
+description: Use when working on open-interest buildup classification, PCR (put-call ratio), max pain, or resistance/support-from-OI panels — components/OIBuildupDashboard.tsx, OptionsBuildupTab.tsx, OptionsCumulativeOITab.tsx, OptionsOITab.tsx, OptionsPCRSpotTab.tsx, OIChangeProfileChart.tsx, OIProfileChart.tsx, TrendingOiChartModal.tsx/TrendingOiTable.tsx, CrudeOilOITab.tsx/CrudeOilCumulativeOITab.tsx, and scripts/tools/nifty_oi_profile_fetch.py / crudeoil_oi_collector.py / trending_oi_fetch.py / nifty_time_analysis_fetch.py. Covers the OI-change-sign guards that make PCR and buildup labels trustworthy on a thin or unwinding day, and the max-pain scan. Not for Greeks (dhan-position-greeks/dhan-payoff-diagrams), not for the draft-leg margin strip (dhan-options-analytics-page), not for CSP-specific screening (dhan-csp-desk).
 ---
 
 # OI Buildup / PCR / Max Pain Analytics
+
+## Don't assume a background collector is needed for a same-day OI time series
+
+`get_option_chain()`/`get_option_chain_df()` only return the *current* snapshot — true, and
+documented in `dhan-option-chain-analysis`. But that does **not** mean a time-based OI/PCR/
+Max-Pain table needs a live poller writing rows all day. `helper.get_intraday_minute_data(...,
+oi=True)` returns that **contract's own per-minute OI history for the whole trading day**,
+retrievable at any time during or after that session — Dhan retains it, it isn't live-only.
+`trending_oi_fetch.py` and `nifty_time_analysis_fetch.py` are both built this way: stateless,
+reconstructing the entire session (spot + futures + a band of strikes, each fetched with
+`oi=True`, reindexed onto a per-minute grid with `ffill().bfill()`) on every invocation, no
+background process, no state file. This means such a page works identically whether the
+market is open right now or has been closed for hours, and needs no Start/Stop button.
+`nifty_time_analysis_fetch.py` originally shipped as a live-only background collector
+(`nifty_time_analysis_collector.py`) before being rewritten this way — don't repeat that first
+design for a new OI-time-series page; start from the stateless pattern.
 
 Two independent OI-analytics code paths exist in this repo — a Python aggregate-profile
 fetcher and a TypeScript per-strike classifier. They compute different things from the same

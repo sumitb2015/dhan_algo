@@ -3,39 +3,33 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import NavBar from '@/components/NavBar';
 import type { NiftyTimeAnalysisResponse, NiftyTimeAnalysisRow } from '@/app/api/nifty-time-analysis/route';
-import { Clock, Play, Square, RefreshCw, Info } from 'lucide-react';
+import { Clock, RefreshCw, Info, History, Radio } from 'lucide-react';
 
 const INTERVALS = [1, 3, 5, 15, 30] as const;
 type Interval = (typeof INTERVALS)[number];
+type Mode = 'live' | 'historical';
 
-const POLL_MS = 15_000;
+function todayIso(): string {
+  const d = new Date(Date.now() + 5.5 * 60 * 60 * 1000);
+  return d.toISOString().slice(0, 10);
+}
 
-function todayIst(): string {
+/** Yesterday in the *local* calendar — toISOString() would shift the date back an extra
+ *  day during the evening IST hours when UTC is still on the previous date. */
+function yesterdayIso(): string {
   const ist = new Date(Date.now() + 5.5 * 60 * 60 * 1000);
+  ist.setUTCDate(ist.getUTCDate() - 1);
   return ist.toISOString().slice(0, 10);
 }
 
-/** The collector's own market-hours gate (09:00–15:30 IST) exits within the
- *  first loop iteration outside that window, flipping straight back to
- *  STOPPED — so Start must be disabled (with a reason) rather than silently
- *  doing nothing, which is exactly what looked like a dead button. */
-function isMarketHoursIst(): boolean {
-  const ist = new Date(Date.now() + 5.5 * 60 * 60 * 1000);
-  const mins = ist.getUTCHours() * 60 + ist.getUTCMinutes();
-  return mins >= 9 * 60 && mins < 15 * 60 + 30;
-}
-
-function statusReasonText(reason?: string): string | null {
-  switch (reason) {
-    case 'market_closed':
-      return 'Collector exited immediately — it only runs 09:00–15:30 IST.';
-    case 'stop_trigger':
-      return 'Stopped manually.';
-    case 'error':
-      return 'Collector crashed — check debug/nifty_time_analysis_collector.log.';
-    default:
-      return null;
-  }
+/** Simple IST 09:15-15:30 weekday check — no shared market-hours helper exists in this
+ *  project (see trending-oi's page.tsx, which has the same inline check). */
+function isNseLive(now: Date): boolean {
+  const ist = new Date(now.toLocaleString('en-US', { timeZone: 'Asia/Kolkata' }));
+  const day = ist.getDay();
+  if (day === 0 || day === 6) return false;
+  const minutes = ist.getHours() * 60 + ist.getMinutes();
+  return minutes >= 9 * 60 + 15 && minutes <= 15 * 60 + 30;
 }
 
 /** Up/down/flat arrow, colored — the repeated "value + trend" cell used across
@@ -70,82 +64,76 @@ function biasColor(label: string): string {
 
 export default function NiftyTimeAnalysis() {
   const [interval, setIntervalMin] = useState<Interval>(15);
+  const [mode, setMode] = useState<Mode>('live');
+  const [historicalDate, setHistoricalDate] = useState<string>(yesterdayIso);
+  const [marketLive, setMarketLive] = useState(false);
   const [data, setData] = useState<NiftyTimeAnalysisResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [busy, setBusy] = useState(false);
   const [showLegend, setShowLegend] = useState(false);
-  const seq = useRef(0);
+
+  // A backend run reads ~43 paced Dhan calls (~15-30s) and varies with strike count, so two
+  // in-flight fetches (an interval/date switch mid-request) can land out of order — this
+  // stops an abandoned request's response from overwriting what the user is looking at now.
+  const requestSeq = useRef(0);
+
+  useEffect(() => {
+    const update = () => setMarketLive(isNseLive(new Date()));
+    update();
+    const id = setInterval(update, 30_000);
+    return () => clearInterval(id);
+  }, []);
+
+  const requestDate = mode === 'historical' ? historicalDate : '';
 
   const fetchData = useCallback(async () => {
-    const mySeq = ++seq.current;
+    const seq = ++requestSeq.current;
+    const isStale = () => seq !== requestSeq.current;
     try {
-      const res = await fetch(`/api/nifty-time-analysis?interval=${interval}`);
-      const json: NiftyTimeAnalysisResponse = await res.json();
-      if (mySeq !== seq.current) return;
-      if (json.success) {
-        setData(json);
-        setError(null);
+      setError(null);
+      const params = new URLSearchParams({ interval: String(interval) });
+      if (requestDate) params.set('date', requestDate);
+      const res = await fetch(`/api/nifty-time-analysis?${params.toString()}`);
+      const json = await res.json();
+      if (isStale()) return;
+      if (json.success && json.data) {
+        setData(json.data);
       } else {
         setError(json.error ?? 'Failed to load');
       }
     } catch (err: unknown) {
-      if (mySeq !== seq.current) return;
+      if (isStale()) return;
       setError(err instanceof Error ? err.message : String(err));
     } finally {
-      if (mySeq === seq.current) setLoading(false);
+      if (!isStale()) setLoading(false);
     }
-  }, [interval]);
+  }, [interval, requestDate]);
 
   useEffect(() => {
     setLoading(true);
     fetchData();
   }, [fetchData]);
 
+  // Only a live, still-open session's newest bucket can change — a closed session (today
+  // after 15:30, or any past date) is fixed the moment it's fetched, so don't keep polling it.
   useEffect(() => {
-    const timer = setInterval(fetchData, POLL_MS);
+    if (mode === 'historical') return;
+    if (data?.backtrace_status === 'unavailable') return;
+    if (!marketLive) return;
+    if (data?.is_live === false) return;
+    const pollMs = Math.max(15_000, (interval * 60_000) / 3);
+    const timer = setInterval(fetchData, pollMs);
     return () => clearInterval(timer);
-  }, [fetchData]);
-
-  const isRunning = data?.status?.status === 'RUNNING';
-  const runningInterval = data?.status?.interval_min;
-  const marketOpen = isMarketHoursIst();
-  const statusReason = statusReasonText(data?.status?.reason);
-
-  const handleStart = useCallback(async () => {
-    setBusy(true);
-    try {
-      const res = await fetch('/api/nifty-time-analysis', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ action: 'start', interval_min: interval }),
-      });
-      const json = await res.json();
-      if (!json.success) setError(json.error ?? 'Failed to start collector');
-      else setError(null);
-      fetchData();
-    } finally {
-      setBusy(false);
-    }
-  }, [interval, fetchData]);
-
-  const handleStop = useCallback(async () => {
-    setBusy(true);
-    try {
-      await fetch('/api/nifty-time-analysis', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ action: 'stop' }),
-      });
-      fetchData();
-    } finally {
-      setBusy(false);
-    }
-  }, [fetchData]);
+  }, [mode, marketLive, interval, data?.backtrace_status, data?.is_live, fetchData]);
 
   const rows: NiftyTimeAnalysisRow[] = data?.rows ?? [];
   const initialLoading = loading && !data;
-  const dataDate = data?.date ?? todayIst();
+  const refreshing = loading && !!data;
+  const dataDate = data?.date ?? (mode === 'historical' ? historicalDate : todayIso());
+  const backtraceStatus = data?.backtrace_status;
+  const coverageNote = data?.coverage_note;
+  const noData = backtraceStatus === 'unavailable' && rows.length === 0;
+  const isStale = data?.stale === true;
 
   return (
     <div className="flex flex-col min-h-screen bg-zinc-950 text-white">
@@ -163,12 +151,42 @@ export default function NiftyTimeAnalysis() {
               NIFTY Analysis &mdash; Time-Based Comparison
             </h1>
             <p className="text-[10px] text-zinc-500 font-medium mt-1">
-              Spot/Fut, PCR, Max Pain, OI &amp; bias sampled every {interval}m through the session
+              Spot/Fut, PCR, Max Pain, OI &amp; bias reconstructed every {interval}m from Dhan&apos;s own retained intraday history
             </p>
           </div>
         </div>
 
         <div className="flex items-center gap-2 flex-wrap">
+          {/* Live / Historical mode */}
+          <div className="flex items-center gap-1 bg-zinc-900 border border-zinc-800 rounded-lg p-0.5">
+            <button
+              onClick={() => setMode('live')}
+              className={`flex items-center gap-1 px-2 py-1 rounded text-[11px] font-bold transition ${
+                mode === 'live' ? 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/40' : 'text-zinc-400 hover:text-zinc-200 border border-transparent'
+              }`}
+            >
+              <Radio className="w-3 h-3" /> Today
+            </button>
+            <button
+              onClick={() => setMode('historical')}
+              className={`flex items-center gap-1 px-2 py-1 rounded text-[11px] font-bold transition ${
+                mode === 'historical' ? 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/40' : 'text-zinc-400 hover:text-zinc-200 border border-transparent'
+              }`}
+            >
+              <History className="w-3 h-3" /> Past session
+            </button>
+          </div>
+
+          {mode === 'historical' && (
+            <input
+              type="date"
+              value={historicalDate}
+              max={todayIso()}
+              onChange={(e) => setHistoricalDate(e.target.value)}
+              className="bg-zinc-900 border border-zinc-800 rounded-lg px-2 py-1.5 text-[11px] text-zinc-200 font-mono"
+            />
+          )}
+
           {/* Interval selector */}
           <div className="flex items-center gap-1 bg-zinc-900 border border-zinc-800 rounded-lg p-0.5">
             {INTERVALS.map((m) => (
@@ -185,28 +203,6 @@ export default function NiftyTimeAnalysis() {
               </button>
             ))}
           </div>
-
-          {/* Start/Stop collector */}
-          {isRunning ? (
-            <button
-              onClick={handleStop}
-              disabled={busy}
-              className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border text-[11px] font-bold transition bg-rose-950/60 text-rose-400 border-rose-800 hover:bg-rose-900/60 disabled:opacity-50"
-            >
-              <Square className="w-3 h-3" />
-              Stop ({runningInterval}m)
-            </button>
-          ) : (
-            <button
-              onClick={handleStart}
-              disabled={busy || !marketOpen}
-              title={marketOpen ? undefined : 'Market closed — the collector only runs 09:00–15:30 IST and would exit immediately'}
-              className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border text-[11px] font-bold transition bg-emerald-950/60 text-emerald-400 border-emerald-800 hover:bg-emerald-900/60 disabled:opacity-50 disabled:cursor-not-allowed"
-            >
-              <Play className="w-3 h-3" />
-              {marketOpen ? 'Start collector' : 'Market closed'}
-            </button>
-          )}
 
           <button
             onClick={() => setShowLegend((v) => !v)}
@@ -241,28 +237,30 @@ export default function NiftyTimeAnalysis() {
           </div>
         )}
 
-        {!isRunning && rows.length === 0 && !initialLoading && (
-          <div className="bg-zinc-900/60 border border-zinc-800 rounded-xl p-4 text-xs text-zinc-400 flex items-center gap-2">
-            <Info className="w-4 h-4 text-amber-400 shrink-0" />
-            <span>
-              {statusReason ? (
-                <><span className="text-amber-300 font-semibold">{statusReason}</span>{' '}</>
-              ) : null}
-              No rows for {interval}m today yet. Dhan&apos;s option chain API only returns the live snapshot &mdash;
-              start the collector above to begin building this table forward from now (it can&apos;t backfill earlier rows).
-              {!marketOpen && ' The collector only runs 09:00–15:30 IST, so Start is disabled right now.'}
-            </span>
+        {isStale && (
+          <div className="bg-amber-950/60 border border-amber-800 text-amber-200 p-2.5 rounded-xl text-xs">
+            Showing a cached copy — the last live fetch failed. Retrying on the next refresh.
+          </div>
+        )}
+
+        {!initialLoading && coverageNote && (
+          <div className={`rounded-xl border p-3 text-xs flex items-start gap-2 ${
+            noData ? 'bg-amber-950/40 border-amber-800 text-amber-200' : 'bg-zinc-900/60 border-zinc-800 text-zinc-400'
+          }`}>
+            <Info className={`w-4 h-4 shrink-0 mt-0.5 ${noData ? 'text-amber-400' : 'text-zinc-500'}`} />
+            <span>{coverageNote}</span>
           </div>
         )}
 
         {showLegend && (
           <div className="bg-zinc-900/60 border border-zinc-800 rounded-xl p-4 text-[11px] text-zinc-400 leading-relaxed space-y-1">
-            <p><span className="text-zinc-200 font-semibold">Average Price</span> &mdash; running mean of Nifty Spot across all rows collected so far today.</p>
-            <p><span className="text-zinc-200 font-semibold">Fut OI Chg</span> &mdash; % change in NIFTY futures total OI vs the previous row.</p>
+            <p>Reconstructed statelessly from Dhan&apos;s own retained per-minute open-interest history (<code className="text-zinc-500">intraday_minute_data(..., oi=True)</code>) for each tracked contract &mdash; not a live snapshot, so this works identically whether the market is open right now or has been closed for hours. Tracks the 21 strikes nearest ATM (Dhan&apos;s per-call rate limit caps how many contracts one request can pace through).</p>
+            <p><span className="text-zinc-200 font-semibold">Average Price</span> &mdash; running mean of Nifty Spot across all rows up to that point in the session.</p>
+            <p><span className="text-zinc-200 font-semibold">Fut OI Chg</span> &mdash; % change in NIFTY futures OI vs the previous row.</p>
             <p><span className="text-zinc-200 font-semibold">Straddle &Delta;</span> &mdash; change in ATM (CE+PE) premium vs the previous row.</p>
             <p><span className="text-zinc-200 font-semibold">Vol. Bias</span> &mdash; short-term Spot momentum vs the previous row (&plusmn;3 pts flat band &rarr; &ldquo;Follow OI bias&rdquo;).</p>
             <p><span className="text-zinc-200 font-semibold">Bias</span> &mdash; OI-buildup quadrant (Long/Short Build-up, Short Covering, Long Unwinding) from Futures OI-change % &times; Spot price change, same convention as the Positions/Buildup analytics elsewhere in the dashboard.</p>
-            <p className="text-zinc-600 pt-1">Heuristic thresholds &mdash; tune in <code className="text-zinc-500">scripts/tools/nifty_time_analysis_collector.py</code> if they don&apos;t match your read of the session.</p>
+            <p className="text-zinc-600 pt-1">Heuristic thresholds &mdash; tune in <code className="text-zinc-500">scripts/tools/nifty_time_analysis_fetch.py</code> if they don&apos;t match your read of the session.</p>
           </div>
         )}
 
@@ -287,16 +285,16 @@ export default function NiftyTimeAnalysis() {
                   <tr>
                     <td colSpan={15} className="text-center py-10 text-zinc-500">
                       <RefreshCw className="w-5 h-5 animate-spin inline-block mr-2 text-emerald-400" />
-                      Loading&hellip;
+                      Reconstructing session&hellip; (~15-30s, ~43 paced Dhan calls)
                     </td>
                   </tr>
                 ) : rows.length === 0 ? (
                   <tr>
-                    <td colSpan={15} className="text-center py-10 text-zinc-600">No data yet</td>
+                    <td colSpan={15} className="text-center py-10 text-zinc-600">No data</td>
                   </tr>
                 ) : (
-                  rows.map((r) => (
-                    <tr key={r.time} className="bg-zinc-950 even:bg-zinc-900/40 hover:bg-zinc-900/80 transition">
+                  rows.map((r, i) => (
+                    <tr key={`${r.time}-${i}`} className="bg-zinc-950 even:bg-zinc-900/40 hover:bg-zinc-900/80 transition">
                       <td className="px-3 py-1.5 border border-emerald-500/10 text-center text-zinc-300 font-semibold">{r.time}</td>
                       <td className="px-3 py-1.5 border border-emerald-500/10 text-center"><DirCell value={r.spot} dir={r.spot_dir} /></td>
                       <td className="px-3 py-1.5 border border-emerald-500/10 text-center"><DirCell value={r.fut} dir={r.fut_dir} /></td>
@@ -343,10 +341,16 @@ export default function NiftyTimeAnalysis() {
         <div className="flex flex-wrap items-center justify-between text-[11px] text-zinc-500">
           <span>
             {rows.length} row{rows.length === 1 ? '' : 's'} &middot; {data?.nearest_expiry ? `expiry ${data.nearest_expiry}` : ''}
+            {(data?.legs_failed ?? 0) > 0 && (
+              <span className="text-amber-400"> &middot; {data?.legs_failed} leg(s) returned no data</span>
+            )}
           </span>
           <span>
-            Collector: <span className={isRunning ? 'text-emerald-400 font-semibold' : 'text-zinc-500'}>{data?.status?.status ?? 'STOPPED'}</span>
-            {!isRunning && statusReason && <span className="text-zinc-600"> &mdash; {statusReason}</span>}
+            {data?.is_live ? (
+              <span className="text-emerald-400 font-semibold flex items-center gap-1"><Radio className="w-3 h-3" /> Live session{refreshing ? ' — refreshing…' : ''}</span>
+            ) : (
+              <span className="text-zinc-500">Session complete</span>
+            )}
           </span>
         </div>
       </div>
