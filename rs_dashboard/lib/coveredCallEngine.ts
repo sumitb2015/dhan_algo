@@ -177,6 +177,7 @@ export function buildFuturesLeg(params: {
       ltp: params.ltp ?? null,
       realizedProfit: 0,
       unrealizedProfit: 0,
+      trustBrokerUnrealized: false,
       expiry: params.expiry,
     },
   };
@@ -223,6 +224,7 @@ export function buildCallLeg(params: {
       ltp: params.ltp ?? (chainLeg && chainLeg.last_price > 0 ? chainLeg.last_price : null),
       realizedProfit: 0,
       unrealizedProfit: 0,
+      trustBrokerUnrealized: false,
       expiry: params.expiry,
     },
   };

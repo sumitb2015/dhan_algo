@@ -95,11 +95,25 @@ export interface LegPnl {
  * Unbooked is left null (rendered as a dash) rather than 0 when the LTP is
  * unknown — Kotak reports no last-traded price at all, and a 0 there would show
  * a short leg as fully profitable.
+ *
+ * For a genuine Dhan leg (`trustBrokerUnrealized`), unbooked comes straight
+ * from Dhan's own `unrealizedProfit` rather than being recomputed off this
+ * page's separately-polled option-chain LTP — that recompute can drift from
+ * what Dhan's platform itself shows as running P&L (stale chain price, or an
+ * entry-avg basis that doesn't match Dhan's internal cost basis), and Dhan's
+ * number is available even before/without a chain price at all.
  */
 export function legPnl(leg: PositionLeg): LegPnl {
   const booked = leg.display.realizedProfit;
-  if (leg.display.ltp === null) return { booked, unbooked: null, total: null, totalPct: null };
-  const unbooked = leg.display.netQty * (leg.display.ltp - leg.display.entryAvg);
+  let unbooked: number | null;
+  if (leg.display.trustBrokerUnrealized) {
+    unbooked = leg.display.unrealizedProfit;
+  } else if (leg.display.ltp === null) {
+    unbooked = null;
+  } else {
+    unbooked = leg.display.netQty * (leg.display.ltp - leg.display.entryAvg);
+  }
+  if (unbooked === null) return { booked, unbooked: null, total: null, totalPct: null };
   const total = booked + unbooked;
   const premium = Math.abs(leg.display.entryAvg * leg.display.netQty);
   const totalPct = premium > 0 ? (total / premium) * 100 : null;

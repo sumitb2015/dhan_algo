@@ -44,6 +44,18 @@ export interface LegDisplay {
   ltp: number | null;      // null = unknown (Kotak reports no LTP)
   realizedProfit: number;
   unrealizedProfit: number;
+  /** True only for a genuine Dhan row (identified the same way `mult` is, by
+   *  the presence of the raw row — see the mult comment below): Dhan's own
+   *  `unrealizedProfit` is computed server-side off its live tick and is what
+   *  the user sees as "running P&L" on the Dhan platform itself. Trust it over
+   *  this page's own netQty*(ltp-entryAvg) recompute, which prices Dhan legs
+   *  off a separately-polled, several-seconds-stale option chain (Dhan's
+   *  positions payload carries no LTP field at all) and can drift from Dhan's
+   *  number for no reason a user can see. Kotak's/Zerodha's own unrealizedProfit
+   *  is itself a same-shaped client recompute (see kotakShape.ts/zerodhaShape.ts)
+   *  off a possibly-worse LTP source, so it is not preferred there.
+   */
+  trustBrokerUnrealized: boolean;
   expiry: string | null;
 }
 
@@ -364,6 +376,9 @@ export function buildPositionLegs(
           : (chainLeg && chainLeg.last_price > 0 ? chainLeg.last_price : null),
         realizedProfit: pos.realizedProfit,
         unrealizedProfit: pos.unrealizedProfit,
+        // rawByIndex[i] is only ever populated for Dhan (see the mult comment
+        // above) — same signal, reused here for the same reason.
+        trustBrokerUnrealized: !!rawByIndex[i] && Number.isFinite(pos.unrealizedProfit),
         expiry: contract.expiry,
       },
     });
