@@ -1269,7 +1269,6 @@ export default function PositionsStrategyMonitor({
                       fill="var(--color-zinc-900)"
                       stroke={PAYOFF_EXPIRY}
                       strokeWidth={2}
-                      isFront
                     />
                   ))}
               </LineChart>

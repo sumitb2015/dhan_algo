@@ -621,7 +621,6 @@ export default function BasketPayoffChart({
                       fill="var(--color-zinc-900)"
                       stroke={PAYOFF_EXPIRY}
                       strokeWidth={2}
-                      isFront
                     />
                   ))}
               </LineChart>
