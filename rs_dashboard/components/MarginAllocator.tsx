@@ -23,10 +23,13 @@ import { useRouter } from 'next/navigation';
 import {
   Activity,
   AlertTriangle,
+  CheckCircle2,
   CircleDot,
   Clock,
+  Database,
   ExternalLink,
   Send,
+  XCircle,
   Zap,
   Gauge,
   Layers,
@@ -726,6 +729,12 @@ export default function MarginAllocator() {
   const [cspScanning, setCspScanning] = useState(false);
   const [riskPreset, setRiskPreset] = useState<(typeof RISK_PRESETS)[number]['key']>('balanced');
   const [marketTrend, setMarketTrend] = useState<MarketTrendResponse | null>(null);
+  const [dataUpdate, setDataUpdate] = useState<{
+    open: boolean;
+    phase: 'running' | 'done' | 'error' | 'blocked';
+    log: string[];
+    before: MarketTrendResponse | null;
+  } | null>(null);
   const router = useRouter();
   const handoffInFlight = useRef(false);
   const [handoffKey, setHandoffKey] = useState<string | null>(null);
@@ -778,6 +787,72 @@ export default function MarginAllocator() {
       setMarketTrend(json ?? null);
     } catch { /* transient — next poll retries */ }
   }, []);
+
+  /** Poll /api/refresh until the currently-running job finishes, appending
+   * its log to the running modal state as it goes. */
+  const pollRefreshUntilDone = useCallback((target: string): Promise<{ error: string | null; log: string[] }> => {
+    return new Promise((resolve) => {
+      const tick = async () => {
+        try {
+          const res = await fetch('/api/refresh');
+          const json = await res.json();
+          const log: string[] = json.status?.log ?? [];
+          setDataUpdate((prev) => (prev ? { ...prev, log: [`▶ ${target}`, ...log] } : prev));
+          if (!json.running && json.status?.done) {
+            resolve({ error: json.status.error ?? null, log });
+            return;
+          }
+        } catch { /* transient — keep polling */ }
+        setTimeout(tick, 1500);
+      };
+      tick();
+    });
+  }, []);
+
+  /**
+   * "Update Data" button — refreshes the two CSVs this page's Market Read
+   * panel actually reads (NIFTY_50_Daily_5Y.csv via target=nifty50, and
+   * Historical Data/Indices/{SENSEX,INDIA_VIX}.csv via target=indices),
+   * both source=dhan since Yahoo doesn't carry sector/BSE indices. Manual,
+   * on-demand only — see conversation: no OS-level scheduler for this yet.
+   */
+  const runDataUpdate = useCallback(async () => {
+    const statusRes = await fetch('/api/refresh');
+    const statusJson = await statusRes.json();
+    if (statusJson.running) {
+      setDataUpdate({ open: true, phase: 'blocked', log: [], before: marketTrend });
+      return;
+    }
+
+    setDataUpdate({ open: true, phase: 'running', log: [], before: marketTrend });
+    let hadError = false;
+    const combined: string[] = [];
+
+    for (const target of ['nifty50', 'indices'] as const) {
+      try {
+        const startRes = await fetch('/api/refresh', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ target, source: 'dhan' }),
+        });
+        if (!startRes.ok) {
+          hadError = true;
+          combined.push(`✗ [${target}] could not start`);
+          continue;
+        }
+        const { error, log } = await pollRefreshUntilDone(target);
+        combined.push(`▶ ${target}`, ...log);
+        if (error) hadError = true;
+      } catch {
+        hadError = true;
+        combined.push(`✗ [${target}] request failed`);
+      }
+    }
+
+    setDataUpdate((prev) => (prev ? { ...prev, log: combined } : prev));
+    await loadTrend();
+    setDataUpdate((prev) => (prev ? { ...prev, phase: hadError ? 'error' : 'done' } : prev));
+  }, [marketTrend, loadTrend, pollRefreshUntilDone]);
 
   /**
    * The scan route defaults to the underlying's nearest expiry, which can be
@@ -1155,6 +1230,20 @@ export default function MarginAllocator() {
           >
             <RefreshCw className={`h-3 w-3 ${scanLoading ? 'animate-spin text-amber-400' : ''}`} />
             REFRESH
+          </button>
+          <button
+            type="button"
+            onClick={runDataUpdate}
+            disabled={dataUpdate?.phase === 'running'}
+            title="Pull fresh NIFTY/SENSEX/VIX EOD candles from Dhan into the CSVs this panel reads"
+            className={`flex items-center gap-1.5 rounded-md border px-2.5 py-1 font-mono text-[10px] font-bold disabled:opacity-60 ${
+              dataUpdate?.phase === 'running'
+                ? 'border-amber-500/30 bg-amber-500/10 text-amber-400'
+                : 'border-zinc-800 bg-zinc-900 text-zinc-300 hover:border-zinc-700'
+            }`}
+          >
+            <Database className={`h-3 w-3 ${dataUpdate?.phase === 'running' ? 'animate-pulse text-amber-400' : ''}`} />
+            UPDATE DATA
           </button>
           <div className="flex items-center pl-1 border-l border-zinc-800">
             <NavBar />
@@ -1697,6 +1786,107 @@ export default function MarginAllocator() {
           )}
         </TerminalPanel>
       </div>
+      {dataUpdate?.open && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-oncolor-dark/70 backdrop-blur-md">
+          <div className="w-full max-w-md rounded-xl border border-zinc-800 bg-zinc-950 shadow-2xl">
+            <div className="flex items-center justify-between border-b border-zinc-800 px-4 py-3">
+              <div className="flex items-center gap-2">
+                <Database className="h-4 w-4 text-amber-400" />
+                <span className="text-sm font-bold text-white">Update Data</span>
+              </div>
+              {dataUpdate.phase !== 'running' && (
+                <button
+                  type="button"
+                  onClick={() => setDataUpdate(null)}
+                  className="text-zinc-500 hover:text-white"
+                  aria-label="Close"
+                >
+                  ×
+                </button>
+              )}
+            </div>
+
+            <div className="px-4 py-3 space-y-3">
+              {dataUpdate.phase === 'blocked' && (
+                <div className="flex items-start gap-2 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2.5 text-xs text-amber-400">
+                  <AlertTriangle className="h-4 w-4 shrink-0" />
+                  <span>A data refresh is already running elsewhere (e.g. the navbar&apos;s Sync Market Data panel). Wait for it to finish, then try again.</span>
+                </div>
+              )}
+
+              {dataUpdate.phase === 'running' && (
+                <div className="flex items-center gap-2 text-xs text-sky-400">
+                  <RefreshCw className="h-3.5 w-3.5 animate-spin" />
+                  Pulling NIFTY, SENSEX and India VIX EOD candles from Dhan…
+                </div>
+              )}
+
+              {(dataUpdate.phase === 'done' || dataUpdate.phase === 'error') && (
+                <div className={`flex items-start gap-2 rounded-lg border px-3 py-2.5 text-xs ${
+                  dataUpdate.phase === 'done'
+                    ? 'border-emerald-500/30 bg-emerald-500/10 text-emerald-400'
+                    : 'border-red-500/30 bg-red-500/10 text-red-400'
+                }`}>
+                  {dataUpdate.phase === 'done' ? <CheckCircle2 className="h-4 w-4 shrink-0" /> : <XCircle className="h-4 w-4 shrink-0" />}
+                  <span>{dataUpdate.phase === 'done' ? 'Data refresh complete.' : 'Refresh finished with errors — see log below.'}</span>
+                </div>
+              )}
+
+              {(dataUpdate.phase === 'done' || dataUpdate.phase === 'error') && (
+                <div className="grid grid-cols-1 gap-1.5 rounded-lg border border-zinc-800 bg-zinc-900/60 p-3 font-mono text-[11px]">
+                  <div className="flex items-center justify-between">
+                    <span className="text-zinc-500">NIFTY as of</span>
+                    <span className="text-zinc-200">
+                      {marketTrend?.asOf ?? '—'}
+                      {dataUpdate.before?.asOf && dataUpdate.before.asOf !== marketTrend?.asOf && (
+                        <span className="text-zinc-600"> (was {dataUpdate.before.asOf})</span>
+                      )}
+                    </span>
+                  </div>
+                  <div className="flex items-center justify-between">
+                    <span className="text-zinc-500">SENSEX as of</span>
+                    <span className="text-zinc-200">
+                      {marketTrend?.sensex?.asOf ?? '—'}
+                      {dataUpdate.before?.sensex?.asOf && dataUpdate.before.sensex.asOf !== marketTrend?.sensex?.asOf && (
+                        <span className="text-zinc-600"> (was {dataUpdate.before.sensex.asOf})</span>
+                      )}
+                    </span>
+                  </div>
+                  <div className="flex items-center justify-between">
+                    <span className="text-zinc-500">India VIX as of</span>
+                    <span className="text-zinc-200">
+                      {marketTrend?.vixAsOf ?? '—'}
+                      {marketTrend?.vixPercentile != null && (
+                        <span className="text-zinc-500"> · {marketTrend.vixPercentile.toFixed(0)}th pct</span>
+                      )}
+                    </span>
+                  </div>
+                </div>
+              )}
+
+              {dataUpdate.log.length > 0 && (
+                <div className="max-h-40 overflow-y-auto rounded-lg border border-zinc-800/60 bg-zinc-900/40 p-2.5 space-y-0.5 font-mono text-[10px] leading-relaxed text-zinc-500">
+                  {dataUpdate.log.map((line, i) => (
+                    <div key={i} className="whitespace-pre-wrap break-all">{line}</div>
+                  ))}
+                </div>
+              )}
+            </div>
+
+            {dataUpdate.phase !== 'running' && (
+              <div className="flex justify-end border-t border-zinc-800 px-4 py-3">
+                <button
+                  type="button"
+                  onClick={() => setDataUpdate(null)}
+                  className="rounded-md border border-zinc-700 bg-zinc-900 px-3 py-1.5 text-xs font-semibold text-zinc-300 hover:border-zinc-600"
+                >
+                  Close
+                </button>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
     </div>
   );
 }

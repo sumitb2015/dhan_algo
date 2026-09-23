@@ -53,6 +53,13 @@ os.makedirs(STOCKS_DIR, exist_ok=True)
 
 # Sector indices to refresh daily (Nifty 50=13 and Nifty 500=19 have dedicated phases above)
 SECTOR_INDICES = [
+    # BSE index, not NSE — Dhan still serves its daily candles under
+    # IDX_I/INDEX like every NSE index here. Consumed by rs_dashboard's
+    # /api/margin-allocator/trend for SENSEX's own EMA20+Supertrend read.
+    # Must stay in this list (not just download_indices.py's one-off list)
+    # so it gets refreshed by the regular incremental refresh — it was
+    # previously omitted here and went 20 days stale (2026-09-23).
+    {"id": 51, "name": "SENSEX",           "label": "BSE Sensex"},
     {"id": 38, "name": "NIFTY_NEXT50",     "label": "Nifty Next 50"},
     {"id": 17, "name": "NIFTY_100",         "label": "Nifty 100"},
     {"id": 18, "name": "NIFTY_200",         "label": "Nifty 200"},

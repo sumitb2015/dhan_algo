@@ -29,7 +29,12 @@ import { PROJECT_ROOT } from '@/lib/pyExec';
 // sizing (see e.g. tastytrade's IV Rank/Percentile research) — used here to
 // drive a continuous naked-risk budget tilt instead of 4 discrete buckets.
 
-const NIFTY_CSV_PATH = path.join(PROJECT_ROOT, 'Historical Data', 'NIFTY_50_Daily_1Y.csv');
+// NIFTY_50_Daily_5Y.csv, not the _1Y file — the 5Y file is the one
+// refresh_dashboard_data.py's regular incremental refresh keeps current;
+// the 1Y file is a separate copy maintained only by momentum.py's own
+// patching and went 12 days stale (2026-09-23) because nothing in the
+// normal refresh flow touches it.
+const NIFTY_CSV_PATH = path.join(PROJECT_ROOT, 'Historical Data', 'NIFTY_50_Daily_5Y.csv');
 const SENSEX_CSV_PATH = path.join(PROJECT_ROOT, 'Historical Data', 'Indices', 'SENSEX.csv');
 const VIX_CSV_PATH = path.join(PROJECT_ROOT, 'Historical Data', 'Indices', 'INDIA_VIX.csv');
 const VIX_LOOKBACK_DAYS = 252; // ~1 trading year, the standard IV Rank/Percentile window
@@ -196,6 +201,13 @@ function readUnderlyingTrend(csvPath: string): UnderlyingTrend {
 
 const CACHE_TTL_MS = 10 * 60_000; // EOD data — refreshes at most once/day
 let cache: { ts: number; body: MarketTrendResponse } | null = null;
+
+/** Called by /api/refresh once a nifty50/indices refresh completes, so the
+ * Margin Allocator's "Update Data" button reflects newly-written CSVs
+ * immediately instead of waiting out the 10-minute TTL. */
+export function clearTrendCache() {
+  cache = null;
+}
 
 export async function GET() {
   if (cache && Date.now() - cache.ts < CACHE_TTL_MS) {

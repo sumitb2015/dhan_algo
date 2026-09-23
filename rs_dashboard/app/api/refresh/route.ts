@@ -6,6 +6,7 @@ import { clearCache } from '@/lib/dataLoader';
 import { clearIndicesCache } from '@/app/api/indices-performance/route';
 import { clearMoversCache } from '@/app/api/movers/route';
 import { clearBreadthCache } from '@/app/api/breadth/route';
+import { clearTrendCache } from '@/app/api/margin-allocator/trend/route';
 import { isPidRunning } from '@/lib/processCheck';
 import { PYTHON_EXE } from '@/lib/pyExec';
 
@@ -92,6 +93,7 @@ export async function GET() {
     clearIndicesCache();
     clearMoversCache();
     clearBreadthCache();
+    clearTrendCache();
   }
 
   // If it finished cleanly, also clear cache once
@@ -100,6 +102,7 @@ export async function GET() {
     clearIndicesCache();
     clearMoversCache();
     clearBreadthCache();
+    clearTrendCache();
   }
 
   return NextResponse.json({ running, status, stale, lastDate, lastTradingDay });
