@@ -289,7 +289,30 @@ git-pull Update App feature and its rebuild/restart detection),
 `dhan-prevclose-pct-change` (previous-close / % change computation for any
 index, stock or futures panel — Dhan-only sourcing, the 15:30 close-flip trap,
 and showing a meaningful move before the 09:15 open without a hardcoded
-holiday calendar). Run `dhan-context-audit` periodically (not tied to any one
+holiday calendar), `dhan-oi-analytics` (OI buildup classification, PCR, max
+pain — the OI-change-sign guards that keep those numbers honest on a thin or
+unwinding day; distinct from Greeks and from CSP screening), `dhan-csp-desk`
+(cash-secured-put screener/tracker/reconcile: lots-not-shares liquidity
+filter, minimum-DTE gate, the three-way fill desync only `reconcile` fixes),
+`dhan-equity-movers` (Movers/Movers+: the calendar-shift-then-snap-backward
+multi-period % change algorithm, NR4/NR7, volume-ratio spikes, persistence
+streaks), `dhan-market-breadth` (index/universe advance-decline, participation
+score, regime ladder, the two-tier daily+in-memory cache, EOD vs intraday
+pipelines), `dhan-sector-breadth` (sector-level breadth/RS: the hardcoded,
+not-auto-synced sector map, unweighted-median RS aggregation), `dhan-rs-ranking`
+(`lib/rs.ts`'s shared RS primitives and the degraded-lookback fallback for new
+listings — also the map of the repo's four independent RS-ratio formulas, read
+before touching any of them), `dhan-rrg` (Relative Rotation Graph: the three
+selectable JdK RS-Ratio/Momentum methods, quadrant classification),
+`dhan-equity-technical-screener` (Scanner/Stage Screener/Market Regime/Trend
+Confluence: the Minervini 8-criteria trend template, the IBD-style
+distribution/stalling/follow-through-day state machine, multi-timeframe EMA
+star rating — four separate algorithms, not one shared gate),
+`dhan-data-sync-pipeline` (the CSV refresh/backfill pipeline behind
+`refresh_dashboard_data.py`: Yahoo Finance is the DEFAULT source not a
+fallback, the incremental-append-not-redownload logic, the flat-candle/
+data-gap repair scripts, and the full script/API-route spawn map).
+Run `dhan-context-audit` periodically (not tied to any one
 change) to review CLAUDE.md and this skill library itself against recent
 commits.
 
