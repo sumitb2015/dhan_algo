@@ -302,7 +302,7 @@ export default function ScalperGreeksModal({ open, onClose, rawPositions, broker
                             <td className={cn('px-3 py-2 font-mono text-xs tabular-nums whitespace-nowrap text-center font-bold', l.delta === null ? 'text-zinc-500' : (l.delta * k) > 0 ? 'text-emerald-400' : 'text-red-400')}>
                               {l.delta === null ? '—' : (l.delta * k).toFixed(2)}
                             </td>
-                            <td className="px-3 py-2 font-mono text-xs tabular-nums text-zinc-200 whitespace-nowrap text-center">{fmt(l.gamma, 5)}</td>
+                            <td className="px-3 py-2 font-mono text-xs tabular-nums text-zinc-200 whitespace-nowrap text-center">{fmt(l.gamma === null ? null : l.gamma * k, 5)}</td>
                             <td className="px-3 py-2 font-mono text-xs tabular-nums text-zinc-200 whitespace-nowrap text-center">{fmt(l.theta === null ? null : l.theta * k, 1)}</td>
                             <td className="px-3 py-2 font-mono text-xs tabular-nums text-zinc-200 whitespace-nowrap text-center">{fmt(l.vega === null ? null : l.vega * k, 2)}</td>
                           </tr>

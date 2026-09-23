@@ -277,7 +277,11 @@ daily 06:00 IST session cutoff), `dhan-expired-options-data` (expired-options
 downloader/SQLite pipeline and the Strike History page built on it),
 `dhan-cross-platform` (Python spawn paths, process kill, and GPU-composited
 animations that work on Windows but break on Linux), `dhan-payoff-diagrams`
-(payoff-curve math and the hand-rolled SVG chart family), `dhan-margin-allocator`
+(payoff-curve math and the hand-rolled SVG chart family), `dhan-position-greeks`
+(aggregating a live book's Greeks from Dhan's own chain-supplied per-contract
+Delta/Gamma/Theta/Vega — the position-scaling multiplier, chain-join and
+missing-Greeks quirks; distinct from dhan-payoff-diagrams' self-computed
+Black-76 Greeks), `dhan-margin-allocator`
 (capital-deployment desk: position-structure classification, VIX/trend sizing,
 credit-strategy ranking), `dhan-sidebar-nav` (the global collapsible sidebar's
 mount lifecycle and open-group state), `dhan-app-self-update` (the in-dashboard

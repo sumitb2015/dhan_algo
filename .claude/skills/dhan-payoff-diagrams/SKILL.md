@@ -1,6 +1,6 @@
 ---
 name: dhan-payoff-diagrams
-description: Use when building or extending an options payoff/P&L diagram — computing the curve (per-leg payoff, breakevens, max profit/loss, POP, SD expected-move bands, pre-expiry Black-76 on futures / Black-Scholes pricing, target sliders) or rendering it (the hand-rolled SVG chart family in BasketPayoffChart.tsx, PositionsPayoffChart.tsx, PayoffDiagram.tsx, StrategyBuilder, Baskets, PositionsAnalysis; or the recharts-based Options Monitor at app/options-monitor and lib/optionsMonitorMath.ts). Not for the draft-leg staging UI or margin/ROI stats strip around a payoff chart — that's dhan-options-analytics-page.
+description: Use when building or extending an options payoff/P&L diagram — computing the curve (per-leg payoff, breakevens, max profit/loss, POP, SD expected-move bands, pre-expiry Black-76 on futures / Black-Scholes pricing, target sliders) or rendering it (the hand-rolled SVG chart family in BasketPayoffChart.tsx, PositionsPayoffChart.tsx, PayoffDiagram.tsx, StrategyBuilder, Baskets, PositionsAnalysis; or the recharts-based Options Monitor at app/options-monitor and lib/optionsMonitorMath.ts). Not for the draft-leg staging UI or margin/ROI stats strip around a payoff chart — that's dhan-options-analytics-page. Not for aggregating/displaying a live position book's Greeks from Dhan's own chain-supplied per-contract Greeks (Positions Analysis' Greeks tab, ScalperGreeksModal, DeltaPanel) — that's a different pipeline with its own units convention, see dhan-position-greeks.
 ---
 
 # Options Payoff Diagrams
@@ -151,6 +151,13 @@ Interactive target controls allow traders to simulate future payoff outcomes bef
 ---
 
 ## Position Greeks & Multipliers
+
+> This section covers **self-computed Black-76 Greeks** (this skill's pricing engine), used
+> for target-date/what-if simulation where no live chain Greek exists yet for the projected
+> scenario. For aggregating a live position book's **actual current Greeks as Dhan's chain
+> already reports them** (Positions Analysis' Greeks tab and similar), see `dhan-position-greeks`
+> instead — that pipeline's Greeks are already in final per-unit units and must **not** receive
+> the ×100 (Gamma) / ×0.01 (Vega) scaling below a second time.
 
 Option traders analyze Greeks both per-contract and position-wide:
 - **Toggle**: Provide a clear "Multiply by Lot Size" switch.
