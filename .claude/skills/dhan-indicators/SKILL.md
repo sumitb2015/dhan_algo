@@ -31,7 +31,7 @@ Column names in: `Open High Low Close Volume` (the helper lower-cases copies for
 |---|---|---|
 | `lib/intraday_signals.supertrend(df, period, multiplier)` returns `st_line`, `st_dir` | intraday_equity live and its backtest | Wilder RMA, TA-Lib-seeded (`_rma(offset=1)`) |
 | `scripts/tools/level_chart_fetch._supertrend` | Level Chart | Wilder (`_wilder_atr`), deliberately not `pandas_ta` |
-| `pandas_ta.supertrend` via `calculate_ta_indicators` | `st_oi_bearcall`, `nifty_vix_straddle` (`_resample_and_supertrend`), `options_chart_fetch` | RMA by default |
+| `pandas_ta.supertrend` via `calculate_ta_indicators` | `st_oi_bearcall`, `nifty_vix_straddle` (`_resample_and_supertrend`), `options_chart_fetch`, and `crudeoilm_supertrend`/`crudeoilm_ema_supertrend`/`crudeoilm_vwap_supertrend` (all read `SUPERT_`/`SUPERTd_` columns off `helper.get_indicators_ta()`) | RMA by default |
 | `scripts/analysis/backtest_ema_breakout.compute_supertrend` | that backtest only | `ewm(span=period)`, i.e. alpha 2/(n+1), **not Wilder** |
 Measured on this repo's data (period 10, multiplier 3): the `lib` version and `pandas_ta` agree on direction for 99.93 %
 (NIFTY daily), 100 % (RELIANCE daily) and 99.80 % (NIFTY 15 m) of bars, but their band *levels* differ by up to 526 points
