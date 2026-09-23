@@ -65,7 +65,6 @@ const NAV_GROUPS = [
       { href: '/options', label: 'Options', desc: 'Max pain, PCR & live options chain' },
       { href: '/options/unusual-activity', label: 'Unusual Flow', desc: 'Real-time unusual options volume/OI spikes & institutional turnover flow' },
       { href: '/nifty-oi-profile', label: 'Nifty OI Profile', desc: 'Futures 5-min chart with 7-day 3-column OI & OI Change profile' },
-      { href: '/nifty-time-analysis', label: 'Time-Based Comparison', desc: 'Intraday time-based table of Spot/Fut, PCR, Max Pain, ATM, VIX, OI change & bias sampled through the session' },
       { href: '/trending-oi', label: 'Trending OI', desc: 'Chain-wide OI/LTP interval table with call/put diff, direction & sentiment' },
       { href: '/futures', label: 'Futures', desc: 'OI buildup & short/long coverage analysis' },
       { href: '/iv-charts', label: 'IV Charts', desc: 'Implied Volatility history & skew' },
@@ -131,6 +130,7 @@ const NAV_GROUPS = [
       { href: '/live', label: 'Live', desc: 'Live ticking market breadth & indexes' },
       { href: '/expiry-analysis', label: 'Expiry Analysis', desc: 'Weekly OC return distribution & outlier analysis' },
       { href: '/premarket', label: 'Premarket', desc: 'Morning market bias, VIX, OI levels & global snapshot' },
+      { href: '/nifty-time-analysis', label: 'Time-Based Comparison', desc: 'Intraday time-based table of Spot/Fut, PCR, Max Pain, ATM, VIX, OI change & bias sampled through the session' },
     ],
   },
   {
