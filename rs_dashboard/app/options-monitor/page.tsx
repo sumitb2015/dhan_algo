@@ -1486,7 +1486,7 @@ export default function OptionsMonitorPage() {
       lotSize: UNDERLYINGS[basketUnderlying]?.lotSize ?? uConfig.lotSize,
       defaultLots: baseMultiplier,
       legs: orderLegs,
-      productType: 'INTRADAY',
+      productType: 'MARGIN',
     });
     setOrderModalOpen(true);
   }, [activeLegs, selectedUnderlying, selectedExpiry, strategyName, uConfig.lotSize, resolveLegSecurityId, notifyAction]);
@@ -1509,7 +1509,7 @@ export default function OptionsMonitorPage() {
           securityId: resolveLegSecurityId(leg),
         },
       ],
-      productType: 'INTRADAY',
+      productType: 'MARGIN',
     });
     setOrderModalOpen(true);
   }, [selectedUnderlying, selectedExpiry, uConfig.lotSize, resolveLegSecurityId]);
@@ -1533,7 +1533,7 @@ export default function OptionsMonitorPage() {
           securityId: resolveLegSecurityId(leg),
         },
       ],
-      productType: 'INTRADAY',
+      productType: 'MARGIN',
     });
     setOrderModalOpen(true);
   }, [selectedUnderlying, selectedExpiry, uConfig.lotSize, resolveLegSecurityId]);
@@ -1575,7 +1575,7 @@ export default function OptionsMonitorPage() {
           securityId: secId ? String(secId) : undefined,
         },
       ],
-      productType: 'INTRADAY',
+      productType: 'MARGIN',
     });
     setOrderModalOpen(true);
   }, [selectedUnderlying, selectedExpiry, uConfig.lotSize, normalizedChain]);
