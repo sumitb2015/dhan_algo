@@ -56,7 +56,7 @@ function fmtTick(ts: number): string {
 
 function sessionBoundsIST(date: string): { start: number; end: number } {
   const start = new Date(`${date}T09:15:00+05:30`).getTime();
-  const end   = new Date(`${date}T15:30:00+05:30`).getTime();
+  const end   = new Date(`${date}T15:40:00+05:30`).getTime(); // F&O close post-SEBI-CAS (was 15:30)
   return { start, end };
 }
 

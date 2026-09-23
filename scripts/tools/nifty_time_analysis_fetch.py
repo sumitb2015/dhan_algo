@@ -42,10 +42,17 @@ MAX_TRACKED_STRIKES = 21
 LEG_CALL_PACING_SECONDS = 0.3
 VIX_SECURITY_ID = 21   # India VIX, NSE_IDX/IDX_I segment (docs/API_GOTCHAS.md)
 SESSION_OPEN_HOUR, SESSION_OPEN_MINUTE = 9, 15
-SESSION_CLOSE_HOUR, SESSION_CLOSE_MINUTE = 15, 30
-# NSE options' reported OI keeps updating for a few minutes past the 15:30 bell as the
-# exchange finalizes end-of-day settlement — see the fetch_end_dt comment in main().
-SETTLEMENT_BUFFER_MIN = 15
+# F&O closes at 15:40 IST, not 15:30 — SEBI's Close Auction Session (CAS) pushed the
+# derivatives close 10 minutes later; the cash/equity segment's 15:30 close is separate and
+# unaffected. Originally shipped here as 15:30 with a 15-minute post-close "settlement lag"
+# buffer bolted on to paper over it — that buffer was masking this wrong close time, not a
+# real settlement delay: NIFTY option OI observed live on 2026-09-23 kept changing every
+# single minute through ~15:39 and then stopped, i.e. the market was still genuinely trading,
+# not "settling." See the SETTLEMENT_BUFFER_MIN comment below for what buffer remains now.
+SESSION_CLOSE_HOUR, SESSION_CLOSE_MINUTE = 15, 40
+# A small residual buffer for genuine post-close OI finalization (distinct from the trading
+# that was actually still happening under the old, wrong 15:30 close above).
+SETTLEMENT_BUFFER_MIN = 5
 
 VOL_BIAS_FLAT_POINTS = 3.0
 WEAK_BEARISH_POINTS = 8.0
@@ -197,14 +204,13 @@ def reindex_series(leg_df, day, full_range, want_oi):
         oi_s = indexed["oi"].reindex(full_range).ffill().bfill().fillna(0)
     ltp_s = indexed["close"].reindex(full_range).ffill().bfill().fillna(0) if "close" in indexed.columns else None
 
-    # `indexed` may extend past full_range's last slot when the caller fetched a
-    # settlement buffer beyond the nominal session close (see SETTLEMENT_BUFFER_MIN).
-    # Exchange OI keeps updating for a few minutes after 15:30 as the day's trades
-    # settle, so the value literally timestamped 15:30:00 is routinely NOT the day's
-    # final OI — back-fill the last bucket with the true latest available reading
-    # instead, or every "final" row would show a mid-settlement number that silently
-    # disagrees with every other OI source in this dashboard (all of which read the
-    # settled figure).
+    # `indexed` may extend past full_range's last slot when the caller fetched a small
+    # settlement buffer beyond the true F&O close (15:40 IST, see SETTLEMENT_BUFFER_MIN).
+    # Exchange OI can keep updating for a couple of minutes past the close as the day's
+    # trades settle, so the value literally timestamped 15:40:00 could be slightly behind
+    # the day's final OI — back-fill the last bucket with the true latest available
+    # reading instead, or a "final" row could show a not-quite-settled number that
+    # silently disagrees with every other OI source in this dashboard.
     if len(indexed.index) and indexed.index.max() > full_range[-1]:
         if oi_s is not None:
             oi_s.iloc[-1] = indexed["oi"].iloc[-1]
@@ -306,12 +312,9 @@ def main():
         end_dt = min(now_dt, session_close(day))
         if now_dt < open_dt:
             bail("Market has not opened yet — the table fills in from 09:15.")
-        # NSE OI keeps updating for several minutes after the 15:30 bell as the exchange
-        # finalizes the day's settlement — a contract's OI print at exactly 15:30:00 is
-        # routinely NOT its final value (e.g. one 2026-09-29 NIFTY PE was still ~12% off its
-        # eventual settled OI at 15:30, only stabilizing by ~15:39). Fetch a bit past the
-        # bell once we're clearly past it, so the "15:30" bucket can be back-filled with the
-        # true settled reading instead of a mid-update one — see reindex_series().
+        # A small settlement buffer past the true 15:40 F&O close, in case OI takes a couple
+        # of minutes to finalize after the bell — see reindex_series() for how the last
+        # bucket gets back-filled from it.
         fetch_end_dt = min(now_dt, session_close(day) + timedelta(minutes=SETTLEMENT_BUFFER_MIN)) if now_dt >= session_close(day) else end_dt
     else:
         open_dt = session_open(day)

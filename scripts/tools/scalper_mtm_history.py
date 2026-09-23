@@ -58,9 +58,10 @@ from lib.dhan_helper import DhanHelper         # noqa: E402
 IST = ZoneInfo("Asia/Kolkata")
 DEBUG_DIR = os.path.join(ROOT, "debug")
 
-# NSE/BSE F&O settles at 15:30. MCX runs to 23:30, so a book holding any MCX leg must not
-# be truncated at the equity close.
-SESSION_END_FNO = (15, 30)
+# NSE/BSE F&O settles at 15:40 post-SEBI-CAS (was 15:30 — cash/equity is unaffected and
+# still closes 15:30). MCX runs to 23:30, so a book holding any MCX leg must not be
+# truncated at the F&O close.
+SESSION_END_FNO = (15, 40)
 SESSION_END_MCX = (23, 30)
 SESSION_START_FNO = (9, 15)
 SESSION_START_MCX = (9, 0)

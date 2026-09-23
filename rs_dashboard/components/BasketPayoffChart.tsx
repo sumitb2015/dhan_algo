@@ -107,7 +107,10 @@ function formatTargetDateDisplay(daysRemaining: number, expiryDateStr?: string):
   if (!expiryDateStr) return `${daysRemaining.toFixed(1)}d`;
   try {
     const [y, m, d] = expiryDateStr.split('-').map(Number);
-    const expTime = new Date(Date.UTC(y, m - 1, d, 10, 0, 0)).getTime();
+    // Must match calculateTimeToExpiryYears()'s F&O expiry cutoff (15:40 IST = 10:10 UTC,
+    // post-SEBI-CAS) — a second copy of this constant drifting from the canonical one is
+    // exactly the "Baskets stopped matching Options Monitor" bug dhan-payoff-diagrams warns about.
+    const expTime = new Date(Date.UTC(y, m - 1, d, 10, 10, 0)).getTime();
     const targetMs = expTime - (daysRemaining * 24 * 3600 * 1000);
     const dt = new Date(targetMs);
     const daysOfWeek = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];

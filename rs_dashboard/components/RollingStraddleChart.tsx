@@ -25,7 +25,7 @@ function fmt(v: number): string {
 }
 
 function daysToExpiry(expiry: string): number | null {
-  const expiryDate = new Date(`${expiry}T15:30:00+05:30`);
+  const expiryDate = new Date(`${expiry}T15:40:00+05:30`); // F&O expiry post-SEBI-CAS (was 15:30)
   if (Number.isNaN(expiryDate.getTime())) return null;
   const now = new Date();
   const diffMs = expiryDate.getTime() - now.getTime();

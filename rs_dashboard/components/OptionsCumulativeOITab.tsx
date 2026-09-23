@@ -83,7 +83,7 @@ function fmtTick(ts: number): string {
 
 function sessionBoundsIST(date: string): { start: number; end: number } {
   const start = new Date(`${date}T09:15:00+05:30`).getTime();
-  const end   = new Date(`${date}T15:30:00+05:30`).getTime();
+  const end   = new Date(`${date}T15:40:00+05:30`).getTime(); // F&O close post-SEBI-CAS (was 15:30)
   return { start, end };
 }
 
@@ -309,7 +309,7 @@ export default function OptionsCumulativeOITab({ expiry: _expiry }: { expiry: st
       new Date(`${date}T11:45:00+05:30`).getTime(),
       new Date(`${date}T13:00:00+05:30`).getTime(),
       new Date(`${date}T14:15:00+05:30`).getTime(),
-      new Date(`${date}T15:30:00+05:30`).getTime(),
+      new Date(`${date}T15:40:00+05:30`).getTime(),
     ],
     tick: { fontSize: 10, fill: '#a1a1aa', fontWeight: 500 },
     tickLine: false,

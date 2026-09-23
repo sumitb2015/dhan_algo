@@ -138,7 +138,7 @@ For a reference Nifty position at Spot $23,398.10$, $t = 4.0$ days, and ATM IV $
 Interactive target controls allow traders to simulate future payoff outcomes before expiry:
 - **Sliders**:
   - **Target Date**: $0$ (Today) to $D$ (Expiry Date).
-  - **Target Time**: `09:15` to `15:30` IST.
+  - **Target Time**: `09:15` to `15:40` IST (F&O close, post-SEBI-CAS — was `15:30`).
   - **Target Spot**: Interactive slider or quick-select breakevens/SD bands.
   - **Projected IV Offset**: $-50\%$ to $+50\%$ relative adjustment.
 - **Target Time to Expiry ($t_{\text{target}}$)**:
@@ -323,9 +323,11 @@ render **an identical payoff curve for identical legs** — that's the whole poi
 They can only stay in parity if every one of them computes remaining time the same way.
 
 - **Always compute real time-to-expiry via `calculateTimeToExpiryYears(expiryDateStr)`** from
-  `lib/optionsMonitorMath.ts`. It accounts for the exact 15:30 IST expiry cutoff and the current
-  time of day, and floors at a small positive value (never zero) so Black-76 doesn't divide by
-  zero. Do not reimplement a second "days to expiry" helper (calendar-day granularity, no
+  `lib/optionsMonitorMath.ts`. It accounts for the exact 15:40 IST F&O expiry cutoff (SEBI's
+  Close Auction Session moved this from 15:30 — `BasketPayoffChart.tsx`'s `formatTargetDateDisplay`
+  carries the same constant and must be kept in sync by hand if this one ever changes again)
+  and the current time of day, and floors at a small positive value (never zero) so Black-76
+  doesn't divide by zero. Do not reimplement a second "days to expiry" helper (calendar-day granularity, no
   time-of-day awareness) for anything that feeds a payoff curve, SD band, or Greek — that
   divergence is exactly what caused Baskets' payoff diagram to stop matching Options Monitor's
   (2026-09 regression: `BasketPayoffChart` used `lib/basketStrategies.ts`'s `daysToExpiry`,

@@ -1,6 +1,8 @@
 """
-IV Snapshot Collector — runs from 09:15 to 15:30 IST, polling the NIFTY option chain
+IV Snapshot Collector — runs from 09:15 to 15:40 IST, polling the NIFTY option chain
 every 30 seconds and writing a full snapshot of ATM±10 strikes to a daily CSV file.
+(F&O closes at 15:40, not 15:30, since SEBI's Close Auction Session pushed the
+derivatives close 10 minutes later — this collector was stopping 10 minutes early.)
 
 The ATM is locked at market open (first poll after 09:15) so the strike list stays
 constant throughout the day, making the CSV suitable for multi-strike IV charts.
@@ -10,7 +12,7 @@ Usage:
     python scripts/tools/iv_snapshot_collector.py --expiry 2026-07-03
     python scripts/tools/iv_snapshot_collector.py --dry-run   # prints rows, no file write
 
-Stop gracefully by writing debug/iv_snapshots_stop.trigger, or wait until 15:30.
+Stop gracefully by writing debug/iv_snapshots_stop.trigger, or wait until 15:40.
 """
 import sys
 import os
@@ -42,7 +44,7 @@ STRIKE_STEP = 50
 ATM_RANGE   = 10          # ATM ± 10 strikes = 21 total
 POLL_SEC    = 30
 MARKET_OPEN = (9, 15)     # HH, MM
-MARKET_CLOSE = (15, 30)   # HH, MM
+MARKET_CLOSE = (15, 40)   # HH, MM — F&O close post-SEBI-CAS, not the cash segment's 15:30
 
 CSV_COLUMNS = [
     'timestamp', 'spot', 'expiry', 'strike',
@@ -76,7 +78,7 @@ def is_trading_day(d: date) -> bool:
 
     The collector is auto-spawned with the dashboard server every day, including
     weekends and holidays. Without this gate it still polls the option chain and
-    writes a full 09:15-15:30 CSV of the market's last stale quote (confirmed on
+    writes a full 09:15-15:40 CSV of the market's last stale quote (confirmed on
     2026-08-16/22/23) — junk data indistinguishable from a real session until read.
     """
     if d.weekday() >= 5:  # 5=Sat, 6=Sun
@@ -345,7 +347,7 @@ def main():
         now = ist_now()
 
         if not args.ignore_market_hours and is_after_close(now):
-            log.info('Market closed (15:30) — exiting')
+            log.info('Market closed (15:40) — exiting')
             break
 
         if os.path.exists(stop_trigger_path()):

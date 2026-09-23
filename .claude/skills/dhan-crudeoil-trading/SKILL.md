@@ -162,7 +162,8 @@ MCX trades a longer session than NSE equities/F&O — `scripts/tools/crudeoil_oi
 uses `MARKET_OPEN = 09:00`, `MARKET_CLOSE = 23:30` IST (`crudeoil_oi_collector.py:47-48`),
 and `crudeoilm_*.py` strategies wait for this window with a time-only check (no weekday or
 MCX holiday-calendar filter — see the strategy file's `_wait_for_session()`). Don't reuse
-the NSE 09:15-15:30 window or the 15:17 auto-exit hardcoded for equity-F&O strategies
+the NSE 09:15-15:40 F&O window (SEBI's Close Auction Session moved this from 15:30) or the
+15:17 auto-exit hardcoded for equity-F&O strategies
 (CLAUDE.md's "Strategy Conventions") when building a new MCX strategy — check the relevant
 `crudeoilm_*.py` file for its own EOD time flag instead of assuming 15:17 applies.
 

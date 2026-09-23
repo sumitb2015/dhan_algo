@@ -44,7 +44,12 @@ ATM_BAND_WIDTH = 5  # strikes each side of ATM (11 strikes, ~22 legs)
 MAX_TRACKED_STRIKES = 21
 LEG_CALL_PACING_SECONDS = 0.3  # keeps sequential intraday_minute_data calls under Dhan's rate cap
 SESSION_OPEN_HOUR, SESSION_OPEN_MINUTE = 9, 15
-SESSION_CLOSE_HOUR, SESSION_CLOSE_MINUTE = 15, 30
+# F&O closes at 15:40 IST, not 15:30 — SEBI's Close Auction Session (CAS) pushed the
+# derivatives close 10 minutes later; the cash/equity segment's 15:30 close is unaffected.
+# Note: unlike nifty_time_analysis_fetch.py, this script has no settlement-buffer/back-fill
+# for the final bucket, so a row sampled at exactly 15:40:00 could still be a few minutes
+# ahead of the day's fully-settled OI — see dhan-observed-quirks quirk 7 in the vault.
+SESSION_CLOSE_HOUR, SESSION_CLOSE_MINUTE = 15, 40
 
 
 def now_ist() -> datetime:

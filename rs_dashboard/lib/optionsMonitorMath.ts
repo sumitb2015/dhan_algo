@@ -672,14 +672,16 @@ export function computePortfolioMetrics(
  * calendar-day fraction. The risk-free discount term this also feeds (`exp(-r*t)`) is
  * insensitive to the 252-vs-365 choice at these option tenors (a fraction of a rupee), so
  * one `t` safely serves both roles rather than threading two through every function.
- * Adds market close 15:30 IST to expiry date.
+ * Adds F&O market close 15:40 IST to expiry date (SEBI's Close Auction Session pushed the
+ * F&O close from 15:30 to 15:40; the cash/equity segment's 15:30 close is unrelated and
+ * unaffected — don't reuse this constant for anything cash/index-side).
  */
 export function calculateTimeToExpiryYears(expiryDateStr: string): number {
   if (!expiryDateStr) return 2 / CALENDAR_DAYS_PER_YEAR;
   try {
     const [y, m, d] = expiryDateStr.split('-').map(Number);
-    // 15:30 IST is 10:00 UTC
-    const expiryTime = new Date(Date.UTC(y, m - 1, d, 10, 0, 0)).getTime();
+    // 15:40 IST is 10:10 UTC
+    const expiryTime = new Date(Date.UTC(y, m - 1, d, 10, 10, 0)).getTime();
     const now = Date.now();
     const diffMs = expiryTime - now;
     if (diffMs <= 0) return 0.25 / CALENDAR_DAYS_PER_YEAR; // At least a few hours on expiry day

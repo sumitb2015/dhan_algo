@@ -6,6 +6,7 @@ import { TrendingOiTable } from '@/components/TrendingOiTable';
 import { TrendingOiChartModal } from '@/components/TrendingOiChartModal';
 import type { TrendingOiResponse } from '@/app/api/trending-oi/route';
 import { RefreshCw, TrendingUp, Search, ChevronDown, BarChart3 } from 'lucide-react';
+import { isNseLive } from '@/lib/marketHours';
 
 const INTERVALS = ['1', '3', '5', '10', '15'] as const;
 type Mode = 'live' | 'historical';
@@ -17,15 +18,6 @@ function yesterdayIso(): string {
   d.setDate(d.getDate() - 1);
   const pad = (n: number) => String(n).padStart(2, '0');
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
-}
-
-/** Simple IST 09:15-15:30 weekday check — no shared market-hours helper exists in this project. */
-function isNseLive(now: Date): boolean {
-  const ist = new Date(now.toLocaleString('en-US', { timeZone: 'Asia/Kolkata' }));
-  const day = ist.getDay();
-  if (day === 0 || day === 6) return false;
-  const minutes = ist.getHours() * 60 + ist.getMinutes();
-  return minutes >= 9 * 60 + 15 && minutes <= 15 * 60 + 30;
 }
 
 export default function TrendingOiPage() {

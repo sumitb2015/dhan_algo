@@ -4,6 +4,7 @@ import React, { useCallback, useEffect, useRef, useState } from 'react';
 import NavBar from '@/components/NavBar';
 import type { NiftyTimeAnalysisResponse, NiftyTimeAnalysisRow } from '@/app/api/nifty-time-analysis/route';
 import { Clock, RefreshCw, Info, History, Radio } from 'lucide-react';
+import { isNseLive } from '@/lib/marketHours';
 
 const INTERVALS = [1, 3, 5, 15, 30] as const;
 type Interval = (typeof INTERVALS)[number];
@@ -20,16 +21,6 @@ function yesterdayIso(): string {
   const ist = new Date(Date.now() + 5.5 * 60 * 60 * 1000);
   ist.setUTCDate(ist.getUTCDate() - 1);
   return ist.toISOString().slice(0, 10);
-}
-
-/** Simple IST 09:15-15:30 weekday check — no shared market-hours helper exists in this
- *  project (see trending-oi's page.tsx, which has the same inline check). */
-function isNseLive(now: Date): boolean {
-  const ist = new Date(now.toLocaleString('en-US', { timeZone: 'Asia/Kolkata' }));
-  const day = ist.getDay();
-  if (day === 0 || day === 6) return false;
-  const minutes = ist.getHours() * 60 + ist.getMinutes();
-  return minutes >= 9 * 60 + 15 && minutes <= 15 * 60 + 30;
 }
 
 /** Up/down/flat arrow, colored — the repeated "value + trend" cell used across

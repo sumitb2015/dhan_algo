@@ -241,7 +241,7 @@ export default function OptionsAnalyzer() {
   const daysToExpiry = useMemo(() => {
     if (!selectedExpiry) return null;
     const expDate = new Date(selectedExpiry);
-    expDate.setHours(15, 30, 0, 0); // expire at 3:30 PM
+    expDate.setHours(15, 40, 0, 0); // F&O expires at 3:40 PM post-SEBI-CAS (was 3:30 PM)
     const now = new Date();
     const diff = Math.ceil((expDate.getTime() - now.getTime()) / (1000 * 60 * 60 * 24));
     return Math.max(0, diff);

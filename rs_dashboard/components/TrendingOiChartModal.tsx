@@ -344,12 +344,13 @@ export function TrendingOiChartModal({
   const dataDate = rows.length > 0 ? isoDate(rows[0].date) : '';
   const last = points.length > 0 ? points[points.length - 1] : null;
 
-  // Full 09:15–15:30 IST session window so the x-axis doesn't rescale on every poll.
+  // Full 09:15–15:40 IST session window (F&O close post-SEBI-CAS, was 15:30) so the
+  // x-axis doesn't rescale on every poll.
   const [xStart, xEnd] = useMemo(() => {
     if (points.length === 0) return [0, 1];
     const d = dataDate;
     const s = Date.parse(`${d}T09:15:00+05:30`);
-    const e = Date.parse(`${d}T15:30:00+05:30`);
+    const e = Date.parse(`${d}T15:40:00+05:30`);
     return Number.isFinite(s) && Number.isFinite(e) ? [s, e] : [points[0].ts, points[points.length - 1].ts];
   }, [points, dataDate]);
 

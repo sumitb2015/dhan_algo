@@ -1,13 +1,15 @@
 import { isMcxUnderlying } from '@/lib/underlyings';
 
-// NSE cash/F&O session: 09:15-15:30 IST, Mon-Fri. Used only to pick a poll cadence (10s live vs
-// 60s off-hours) for the live options charts - not a trading-hours source of truth elsewhere.
+// NSE F&O session: 09:15-15:40 IST, Mon-Fri (SEBI's Close Auction Session pushed the F&O
+// close from 15:30 to 15:40; cash/equity's 15:30 close is separate and unaffected). Used
+// only to pick a poll cadence (10s live vs 60s off-hours) for the live options charts -
+// not a trading-hours source of truth elsewhere.
 export function isNseLive(now: Date): boolean {
   const ist = new Date(now.toLocaleString('en-US', { timeZone: 'Asia/Kolkata' }));
   const day = ist.getDay();
   if (day === 0 || day === 6) return false;
   const minutes = ist.getHours() * 60 + ist.getMinutes();
-  return minutes >= 9 * 60 + 15 && minutes <= 15 * 60 + 30;
+  return minutes >= 9 * 60 + 15 && minutes <= 15 * 60 + 40;
 }
 
 // MCX commodity session: 09:00-23:30 IST, Mon-Fri. Crude keeps trading for another 8 hours after

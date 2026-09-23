@@ -311,11 +311,11 @@ export default function OptionsIntelligenceTab({ expiry }: { expiry: string }) {
   // Unique prefix for SVG gradient IDs (prevents collisions when multiple instances render)
   const uid = useId();
 
-  // X-axis domain 09:15–15:30 IST
+  // X-axis domain 09:15–15:40 IST (F&O close post-SEBI-CAS, was 15:30)
   const SESSION_START = new Date(`${(intel?.date ?? new Date().toISOString().slice(0, 10))}T09:15:00+05:30`).getTime();
-  const SESSION_END   = new Date(`${(intel?.date ?? new Date().toISOString().slice(0, 10))}T15:30:00+05:30`).getTime();
+  const SESSION_END   = new Date(`${(intel?.date ?? new Date().toISOString().slice(0, 10))}T15:40:00+05:30`).getTime();
 
-  // Hourly ticks 09:15–15:15 plus explicit 15:30 close
+  // Hourly ticks 09:15–15:15 plus explicit 15:40 close
   const SESSION_TICKS = [0, 1, 2, 3, 4, 5, 6].map(i => SESSION_START + i * 60 * 60 * 1000).concat([SESSION_END]);
 
   // Net GEX sign based on the last timeline entry (drives gradient colour)

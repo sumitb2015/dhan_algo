@@ -32,7 +32,7 @@ export interface MtmStats {
 const MAX_TAIL_POINTS = 2000;
 const SAMPLE_MS        = 2000; // cadence of the live tail sampled after the last trade fill
 
-const FNO_CLOSE_MINUTES = 15 * 60 + 30; // 15:30 IST — matches NSE/BSE F&O session end
+const FNO_CLOSE_MINUTES = 15 * 60 + 40; // 15:40 IST — F&O close post-SEBI-CAS (was 15:30)
 const MCX_CLOSE_MINUTES = 23 * 60 + 30; // 23:30 IST — MCX runs an evening session
 
 function istMinutesSinceMidnight(d: Date): number | null {
