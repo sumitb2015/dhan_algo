@@ -11,7 +11,7 @@
  */
 
 import React, { useState } from 'react';
-import { Sparkles, AlertTriangle } from 'lucide-react';
+import { Sparkles, AlertTriangle, PenLine } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import type { PositionLeg } from '@/lib/positionLegs';
 import type { Suggestion } from '@/app/api/options/suggestions/route';
@@ -53,14 +53,22 @@ export default function SuggestedActionsCard({ suggestions, legs, closingKeys, l
             <div className="flex flex-wrap items-start justify-between gap-2">
               <div className="min-w-0 flex-1">
                 <div className="font-mono text-xs font-bold text-zinc-100">
-                  {s.action === 'CLOSE' ? 'Close' : `Trim ${s.pct}%`} {s.strike.toLocaleString('en-IN')} {s.type}
+                  {s.action === 'CLOSE' ? 'Close'
+                    : s.action === 'TRIM' ? `Trim ${s.pct}%`
+                    : s.action === 'ROLL' ? 'Roll'
+                    : 'Convert'} {s.strike.toLocaleString('en-IN')} {s.type}
                   <span className="ml-1.5 text-[10px] font-medium text-zinc-400">{s.expiry}</span>
                 </div>
                 <p className="mt-1 text-[11px] leading-relaxed text-zinc-400">{s.rationale}</p>
               </div>
 
               <div className="flex shrink-0 items-center gap-1.5">
-                {!leg ? (
+                {s.advisoryOnly ? (
+                  <span className="flex items-center gap-1 rounded-lg border border-sky-800/80 bg-sky-950/80 px-2 py-1 text-[10px] font-bold text-sky-300"
+                    title="This adjustment opens a new leg — size and place it via the Draft Leg Builder, this card only proposes it.">
+                    <PenLine className="h-3 w-3 text-sky-400" /> Use Draft Leg Builder
+                  </span>
+                ) : !leg ? (
                   <span className="flex items-center gap-1 rounded-lg border border-amber-800/80 bg-amber-950/80 px-2 py-1 text-[10px] font-bold text-amber-300">
                     <AlertTriangle className="h-3 w-3 text-amber-400" /> Position no longer open
                   </span>

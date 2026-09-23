@@ -26,9 +26,16 @@ export interface Suggestion {
   type: 'CE' | 'PE';
   expiry: string;
   side: 'BUY' | 'SELL';
-  action: 'CLOSE' | 'TRIM';
+  /** CLOSE/TRIM reduce this exact leg and are safe to execute with one click
+   *  (confirm re-uses the existing handleCloseLeg() reduce-only flow). ROLL/CONVERT
+   *  require opening a new leg and are always advisoryOnly — see that field. */
+  action: 'CLOSE' | 'TRIM' | 'ROLL' | 'CONVERT';
   pct: 25 | 50 | 75 | 100;
   rationale: string;
+  /** true for ROLL/CONVERT: display-only, no Confirm-to-execute button — the
+   *  suggestion names a technique and a leg, but sizing/placing the new leg is
+   *  left to the Draft Leg Builder, not this card. */
+  advisoryOnly?: boolean;
 }
 
 export interface SuggestionsFile {

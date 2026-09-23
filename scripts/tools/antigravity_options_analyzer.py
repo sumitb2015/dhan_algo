@@ -30,6 +30,83 @@ STATUS_FILE = os.path.join(DEBUG_DIR, "options_analyzer_status.json")
 STOP_TRIGGER = os.path.join(DEBUG_DIR, "options_analyzer_stop.trigger")
 SUGGESTION_TTL_HOURS = 6
 
+# --- Adjustment decision thresholds (v1 estimates) --------------------------
+# Grounded in the T+0-line / option-adjustment-technique research filed at
+# ~/Brain/dhan_algo_brain/wiki/concepts/option-adjustment-techniques.md and
+# .../wiki/roadmap/option-adjustments-engine.md. Every repo strategy that can
+# produce these positions squares off intraday by 15:17 IST (repo CLAUDE.md),
+# so DTE here is usually 0-7 days, not the 30-45 day US index-condor cycles
+# the source material was calibrated on — thresholds are compressed for that.
+# Options can't be backtested in this repo (see the vault's
+# 2026-09-21-no-options-backtesting decision), so these are NOT backtested —
+# retune them from what the Sentinel actually observes live.
+DTE_TIME_STOP_DAYS = 2.5       # at/below this DTE: close/trim only, never offer a roll (gamma too hot)
+DELTA_ADJUST_TRIGGER = 0.25    # |per-unit option delta| >= this triggers an adjustment review ("25 delta")
+GAMMA_URGENCY_HIGH = 0.0012    # rough ATM-weekly-Nifty gamma magnitude; amplifies urgency wording, not the trigger itself
+MAX_ADJUSTMENTS_PER_CYCLE = 2  # after this many rolls on the same leg, stop rolling — convert or close instead
+ADJUSTMENT_STATE_TTL_HOURS = 18  # stale per-leg adjustment counters (weekend/overnight gaps) are dropped
+
+
+def _adjustment_state_path(underlying: str) -> str:
+    return os.path.join(DEBUG_DIR, f"options_adjustment_state_{underlying}.json")
+
+
+def _leg_key(strike: float, opt_type: str, expiry: str) -> str:
+    return f"{strike:g}_{opt_type}_{expiry}"
+
+
+def load_adjustment_state(underlying: str) -> Dict[str, Any]:
+    """Per-leg count of how many times an adjustment has already been suggested
+    this cycle — the 'stop fighting the trade' throttle. Dropped entirely once a
+    leg is no longer in the live book (closed or rolled away)."""
+    path = _adjustment_state_path(underlying)
+    try:
+        if os.path.exists(path):
+            with open(path, "r", encoding="utf-8") as f:
+                return json.load(f)
+    except Exception:
+        pass
+    return {}
+
+
+def save_adjustment_state(underlying: str, state: Dict[str, Any]) -> None:
+    os.makedirs(DEBUG_DIR, exist_ok=True)
+    try:
+        with open(_adjustment_state_path(underlying), "w", encoding="utf-8") as f:
+            json.dump(state, f, indent=2)
+    except Exception as e:
+        sys.stderr.write(f"[Warning] Failed to write adjustment state: {e}\n")
+
+
+def prune_and_bump_adjustment_state(
+    state: Dict[str, Any], live_leg_keys: set, bumped_keys: List[str]
+) -> Dict[str, Any]:
+    now = datetime.now(timezone.utc)
+    new_state: Dict[str, Any] = {}
+    for k, v in state.items():
+        if k not in live_leg_keys:
+            continue  # leg closed or rolled away — its adjustment history resets
+        try:
+            last_seen = datetime.fromisoformat(str(v.get("lastSeenAt", "")).replace("Z", "+00:00"))
+            if (now - last_seen).total_seconds() > ADJUSTMENT_STATE_TTL_HOURS * 3600:
+                continue
+        except Exception:
+            pass
+        new_state[k] = v
+    for k in bumped_keys:
+        count = int(new_state.get(k, {}).get("count", 0)) + 1
+        new_state[k] = {"count": count, "lastSeenAt": now.isoformat()}
+    return new_state
+
+
+def _find_leg(legs: List[Dict[str, Any]], opt_type: str, side: str, expiry: str) -> Optional[Dict[str, Any]]:
+    for l in legs:
+        if (str(l.get("type") or "").upper() == opt_type
+                and str(l.get("side") or "").upper() == side
+                and str(l.get("expiry") or "") == expiry):
+            return l
+    return None
+
 SYSTEM_INSTRUCTIONS = """You are an institutional risk manager and options desk analyst for open Indian derivative positions (NIFTY/BANKNIFTY/SENSEX/CRUDEOIL).
 You receive a JSON snapshot of live option legs (strike, CE/PE, side, contracts/lots, entry price, LTP, unrealized P&L, greeks), net portfolio greeks, and payoff stats.
 
@@ -43,9 +120,8 @@ Hard Rules & Greeks Mechanics:
   * Short Call (SELL CE) contributes NEGATIVE delta (-Delta, bearish). Excess short CE leaves the book exposed to upside rally risk.
   * To fix a POSITIVE net delta skew (e.g. +120), you MUST propose trimming the leg contributing positive delta (the Short PE or Long CE), NEVER the Short CE!
   * To fix a NEGATIVE net delta skew (e.g. -120), you MUST propose trimming the leg contributing negative delta (the Short CE or Long PE), NEVER the Short PE!
-- You may ONLY propose closing or trimming legs already present in the "legs" array (exact strike, type, expiry).
-- Never propose opening unlisted legs or speculative new positions.
-- Action must be "CLOSE" (100%) or "TRIM" (25%, 50%, or 75%).
+- You may ONLY propose closing, trimming, rolling or converting legs already present in the "legs" array (exact strike, type, expiry) — never propose opening unlisted legs or speculative new positions.
+- Action must be one of: "CLOSE" (100%), "TRIM" (25/50/75%), "ROLL" (roll the named leg's strike toward spot for credit — mark "advisoryOnly": true, no target strike needed, the user picks it in the dashboard), or "CONVERT" (collapse toward a defined-risk straddle/iron-fly — mark "advisoryOnly": true). Prefer ROLL over TRIM when there is an opposite short leg to roll and this leg hasn't already been adjusted twice this cycle; prefer CONVERT or CLOSE once it has (don't keep proposing more rolls on a leg that's already been rolled twice — that's "fighting the trade", not risk management).
 - Ground every rationale in given numbers (delta, distance from spot, P&L, DTE, lots).
 - If the risk profile is balanced and within bounds, return empty suggestions.
 - Provide a concise 2-4 sentence summary.
@@ -98,15 +174,23 @@ def fetch_live_snapshot(underlying: str = "NIFTY", broker: str = "dhan") -> Dict
 def quantitative_risk_engine(snapshot: Dict[str, Any]) -> Dict[str, Any]:
     """
     Deterministic quantitative risk engine for options books.
-    Provides mathematical analysis of Greeks, delta skew, gamma pin risk,
-    and profit-taking thresholds.
+
+    Decision layer follows the adjust-vs-close / adjustment-taxonomy research
+    (see the DTE_TIME_STOP_DAYS / DELTA_ADJUST_TRIGGER block above): near
+    expiry it only ever suggests closing; away from expiry a delta breach
+    triggers a roll-the-untested-side suggestion, but only up to
+    MAX_ADJUSTMENTS_PER_CYCLE times per leg (tracked in
+    debug/options_adjustment_state_<UNDERLYING>.json) — beyond that it
+    suggests converting to a defined-risk structure or closing, instead of
+    proposing another roll ("fighting the trade").
     """
     underlying = snapshot.get("underlying", "NIFTY")
     spot = float(snapshot.get("spot") or 0.0)
     legs = snapshot.get("legs", [])
     net_greeks = snapshot.get("netGreeks", {}) or {}
-    
+
     if not legs:
+        save_adjustment_state(underlying, {})  # flat book — clear any stale per-leg counters
         return {
             "summary": f"No open {underlying} option positions on this broker — nothing to analyze.",
             "suggestions": []
@@ -120,7 +204,14 @@ def quantitative_risk_engine(snapshot: Dict[str, Any]) -> Dict[str, Any]:
     suggestions: List[Dict[str, Any]] = []
     risks_found: List[str] = []
 
-    # 1. Check each leg for urgent individual risk (Gamma pin risk, deep loss, profit lock)
+    live_leg_keys = {
+        _leg_key(float(l.get("strike") or 0.0), str(l.get("type") or "CE").upper(), str(l.get("expiry") or ""))
+        for l in legs
+    }
+    adj_state = load_adjustment_state(underlying)
+    bumped_keys: List[str] = []
+
+    # 1. Check each leg for urgent individual risk (Gamma pin risk, delta-trigger adjustment, deep loss, profit lock)
     for leg in legs:
         strike = float(leg.get("strike") or 0.0)
         opt_type = str(leg.get("type") or "CE").upper()
@@ -130,12 +221,16 @@ def quantitative_risk_engine(snapshot: Dict[str, Any]) -> Dict[str, Any]:
         price = float(leg.get("price") or 0.0)
         ltp = float(leg.get("ltp") or (leg.get("display", {}).get("ltp") if isinstance(leg.get("display"), dict) else 0.0) or price)
         pnl = float(leg.get("unrealizedProfit") or (leg.get("display", {}).get("unrealizedProfit") if isinstance(leg.get("display"), dict) else 0.0) or 0.0)
-        
+        delta = float(leg.get("delta") or 0.0)
+        gamma = float(leg.get("gamma") or 0.0)
+        key = _leg_key(strike, opt_type, expiry)
+        adjust_count = int(adj_state.get(key, {}).get("count", 0))
+
         dist_pct = ((spot - strike) / spot * 100.0) if spot > 0 else 0.0
         is_itm = (opt_type == "CE" and spot > strike) or (opt_type == "PE" and spot < strike)
-        
-        # A. Short leg near-expiry Gamma squeeze / ITM pin risk
-        if side == "SELL" and dte <= 2.5:
+
+        # A. Short leg near-expiry Gamma squeeze / ITM pin risk — close/trim only, never a roll
+        if side == "SELL" and dte <= DTE_TIME_STOP_DAYS:
             if is_itm or abs(dist_pct) < 0.6:
                 risks_found.append(f"Short {int(strike)} {opt_type} ({expiry}) has extreme gamma pin risk ({dte:.1f} DTE, {abs(dist_pct):.2f}% from spot)")
                 suggestions.append({
@@ -145,9 +240,64 @@ def quantitative_risk_engine(snapshot: Dict[str, Any]) -> Dict[str, Any]:
                     "side": side,
                     "action": "CLOSE" if is_itm else "TRIM",
                     "pct": 100 if is_itm else 50,
-                    "rationale": f"Short {int(strike)} {opt_type} is facing severe near-expiry gamma risk with spot at {spot:.1f} ({abs(dist_pct):.2f}% away). {'Closing' if is_itm else 'Trimming 50%'} neutralizes assignment/pin risk."
+                    "rationale": f"Short {int(strike)} {opt_type} is facing severe near-expiry gamma risk with spot at {spot:.1f} ({abs(dist_pct):.2f}% away), {dte:.1f} DTE — inside the {DTE_TIME_STOP_DAYS}-day time-stop where an adjustment no longer pays for itself. {'Closing' if is_itm else 'Trimming 50%'} neutralizes assignment/pin risk."
                 })
                 continue
+
+        # A2. Delta-trigger adjustment review (only away from the time-stop, so it never
+        # competes with check A above): roll the untested side (or trim, if there's no
+        # opposite leg to roll) while adjustments remain; CLOSE — not another adjustment —
+        # once the per-leg cap is hit, matching the vault decision table's
+        # "adjustment_count_this_cycle >= max_adjustments -> close" and its own prose ("a
+        # third [adjustment] should be closed, not patched again"). Both the roll path and
+        # the no-opposite-leg trim path count toward the cap, so a naked leg with no roll
+        # available still escalates to close instead of repeating the same trim forever.
+        if side == "SELL" and dte > DTE_TIME_STOP_DAYS and abs(delta) >= DELTA_ADJUST_TRIGGER:
+            urgency = "high" if abs(gamma) >= GAMMA_URGENCY_HIGH else "moderate"
+            risks_found.append(f"Short {int(strike)} {opt_type} delta has drifted to {delta:+.2f} ({dte:.1f} DTE, {urgency} gamma {gamma:.5f})")
+
+            if adjust_count >= MAX_ADJUSTMENTS_PER_CYCLE:
+                suggestions.append({
+                    "strike": strike, "type": opt_type, "expiry": expiry, "side": side,
+                    "action": "CLOSE", "pct": 100,
+                    "rationale": (
+                        f"Short {int(strike)} {opt_type} has already been adjusted {adjust_count} time(s) this cycle "
+                        f"and delta is still {delta:+.2f}, past the {DELTA_ADJUST_TRIGGER:+.2f} trigger. Rolling or "
+                        f"trimming again risks fighting the trade — close it (or convert the whole structure to a "
+                        f"defined-risk straddle/iron-fly via the Draft Leg Builder) rather than adjusting a third time."
+                    ),
+                })
+                bumped_keys.append(key)
+                continue
+
+            untested_type = "PE" if opt_type == "CE" else "CE"
+            opposite_leg = _find_leg(legs, untested_type, "SELL", expiry)
+            if opposite_leg is not None:
+                o_strike = float(opposite_leg.get("strike") or 0.0)
+                suggestions.append({
+                    "strike": o_strike, "type": untested_type, "expiry": expiry, "side": "SELL",
+                    "action": "ROLL", "pct": 100, "advisoryOnly": True,
+                    "rationale": (
+                        f"Short {int(strike)} {opt_type} delta is {delta:+.2f} ({dte:.1f} DTE, {urgency} gamma), "
+                        f"past the {DELTA_ADJUST_TRIGGER:+.2f} adjustment trigger. Roll the untested "
+                        f"{int(o_strike)} {untested_type} side toward spot to collect credit and rebalance delta — "
+                        f"use the Draft Leg Builder to size the new strike. (Adjustment {adjust_count + 1} of "
+                        f"{MAX_ADJUSTMENTS_PER_CYCLE} allowed this cycle before close is suggested instead.)"
+                    ),
+                })
+            else:
+                suggestions.append({
+                    "strike": strike, "type": opt_type, "expiry": expiry, "side": side,
+                    "action": "TRIM", "pct": 50,
+                    "rationale": (
+                        f"Short {int(strike)} {opt_type} delta is {delta:+.2f}, past the {DELTA_ADJUST_TRIGGER:+.2f} "
+                        f"trigger, but no opposite short leg was found to roll for credit. Trimming 50% de-risks "
+                        f"directly. (Adjustment {adjust_count + 1} of {MAX_ADJUSTMENTS_PER_CYCLE} allowed this cycle "
+                        f"before close is suggested instead.)"
+                    ),
+                })
+            bumped_keys.append(key)
+            continue
 
         # B. High profit capture on short leg (> 80% decay captured)
         if side == "SELL" and price > 0:
@@ -279,15 +429,24 @@ def quantitative_risk_engine(snapshot: Dict[str, Any]) -> Dict[str, Any]:
 
     suggestions = suggestions[:3]
 
+    new_adj_state = prune_and_bump_adjustment_state(adj_state, live_leg_keys, bumped_keys)
+    save_adjustment_state(underlying, new_adj_state)
+
+    # Portfolio-level T+0-line flatness (net delta = slope, net gamma = curvature around
+    # spot — see the vault's option-payoff-t0-line.md). Surfaced for visibility even where
+    # it doesn't yet drive a suggestion of its own — see option-adjustments-engine.md's
+    # "Not done in v1" list for wiring this into an actual portfolio-level decision.
+    flatness_note = f"Net Gamma: {net_gamma:+.5f}, Net Vega: {net_vega:+.1f}"
+
     if suggestions:
         risk_desc = "; ".join(risks_found) if risks_found else "Position skew detected"
         summary = (
-            f"Book Analysis for {underlying} (Spot: {spot:.1f}, Net Delta: {net_delta:+.1f}, Net Theta: {net_theta:+.1f}): "
+            f"Book Analysis for {underlying} (Spot: {spot:.1f}, Net Delta: {net_delta:+.1f}, Net Theta: {net_theta:+.1f}, {flatness_note}): "
             f"{risk_desc}. Proposed {len(suggestions)} adjustment(s) to safeguard capital and optimize Greek exposure."
         )
     else:
         summary = (
-            f"The {underlying} book is currently well-balanced (Spot: {spot:.1f}, Net Delta: {net_delta:+.1f}, Net Theta: {net_theta:+.1f}). "
+            f"The {underlying} book is currently well-balanced (Spot: {spot:.1f}, Net Delta: {net_delta:+.1f}, Net Theta: {net_theta:+.1f}, {flatness_note}). "
             f"All legs are safely positioned with no immediate gamma or assignment threats. No adjustments required at this time."
         )
 
@@ -364,7 +523,8 @@ async def evaluate_and_persist(snapshot: Dict[str, Any], underlying: str) -> Dic
                 "side": str(s.get("side") or "SELL").upper(),
                 "action": str(s.get("action") or "TRIM").upper(),
                 "pct": int(s.get("pct") or 50),
-                "rationale": str(s.get("rationale") or "")
+                "rationale": str(s.get("rationale") or ""),
+                "advisoryOnly": bool(s.get("advisoryOnly", False))
             })
 
     os.makedirs(DEBUG_DIR, exist_ok=True)
