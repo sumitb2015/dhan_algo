@@ -17,7 +17,7 @@ import MultiLegOptionChainModal from './multiLegFocus/MultiLegOptionChainModal';
 import {
   resolveTemplateLegs, reconcileLegWithBroker, sortLegsForExit, findLegPosition,
   computeLegTrailingSL, computeStrategyMetrics, checkStrategyRisk, fallbackLotSize,
-  positionProduct, computeBasketStatus,
+  positionProduct, computeBasketStatus, closedFillFromRow,
   type MultiLegLeg, type MultiLegBasket, type StrategyRiskConfig, type MultiLegStatus,
 } from '@/lib/multiLegFocus';
 import { closeOrderProduct } from '@/lib/positionProduct';
@@ -952,12 +952,15 @@ export default function MultiLegFocus() {
           const res = await fetch(reverseReq.url, {
             method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(reverseReq.body),
           });
-          const j = await res.json() as { success: boolean; order_id?: string; error?: string };
+          const j = await res.json() as { success: boolean; order_id?: string; price?: number; error?: string };
           if (j.success) {
             addToast('success', `Reversed ${p.label}`, `ID: ${j.order_id}`);
+            const reversedLeg = basketsRef.current.find(b => b.id === basketId)?.legs.find(l => l.id === p.legId);
+            const currentLtp = reversedLeg ? ltpFor(basket, reversedLeg) : 0;
+            const exitPrice = (j.price && j.price > 0) ? j.price : (currentLtp > 0 ? currentLtp : (reversedLeg?.fill?.avgPrice ?? 0));
             updateBasket(basketId, {
               legs: basketsRef.current.find(b => b.id === basketId)?.legs.map(l =>
-                (l.id === p.legId ? { ...l, status: 'CLOSED' as MultiLegStatus, fill: { qty: 0, avgPrice: l.fill?.avgPrice ?? 0 } } : l)
+                (l.id === p.legId ? { ...l, status: 'CLOSED' as MultiLegStatus, fill: { qty: 0, avgPrice: l.fill?.avgPrice ?? 0 }, closedFill: { qty: p.qty, exitPrice } } : l)
               ) ?? [],
             });
           } else {
@@ -1073,8 +1076,9 @@ export default function MultiLegFocus() {
       }
 
       if (match.kind === 'flat') {
+        const closedFill = closedFillFromRow(match.row, leg.side === 'B') ?? leg.closedFill;
         updateBasket(basketId, {
-          legs: basketsRef.current.find(b => b.id === basketId)?.legs.map(l => (l.id === leg.id ? { ...l, status: 'CLOSED' as const, fill: { qty: 0, avgPrice: l.fill?.avgPrice ?? 0 } } : l)) ?? [],
+          legs: basketsRef.current.find(b => b.id === basketId)?.legs.map(l => (l.id === leg.id ? { ...l, status: 'CLOSED' as const, fill: { qty: 0, avgPrice: l.fill?.avgPrice ?? 0 }, closedFill } : l)) ?? [],
         });
         addToast('success', `${label} already flat at broker`, 'Updated status to CLOSED');
         return;
@@ -1127,12 +1131,14 @@ export default function MultiLegFocus() {
         : { tradingsymbol: leg.orderRef?.symbol, quantity: qty, side, orderType: 'MARKET', exchange: match.row.exchange ?? defaultExchOther, ...productPayload.fields };
 
       const res2 = await fetch(orderUrl, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
-      const j2 = await res2.json() as { success: boolean; order_id?: string; error?: string };
+      const j2 = await res2.json() as { success: boolean; order_id?: string; price?: number; error?: string };
 
       if (j2.success) {
         addToast('success', `Exited ${label}`, `ID: ${j2.order_id}`);
+        const currentLtp = basket ? ltpFor(basket, leg) : 0;
+        const exitPrice = (j2.price && j2.price > 0) ? j2.price : (currentLtp > 0 ? currentLtp : (leg.fill?.avgPrice ?? 0));
         updateBasket(basketId, {
-          legs: basketsRef.current.find(b => b.id === basketId)?.legs.map(l => (l.id === leg.id ? { ...l, status: 'CLOSED' as const, fill: { qty: 0, avgPrice: l.fill?.avgPrice ?? 0 } } : l)) ?? [],
+          legs: basketsRef.current.find(b => b.id === basketId)?.legs.map(l => (l.id === leg.id ? { ...l, status: 'CLOSED' as const, fill: { qty: 0, avgPrice: l.fill?.avgPrice ?? 0 }, closedFill: { qty, exitPrice } } : l)) ?? [],
         });
       } else {
         addToast('error', `Exit failed for ${label}`, j2.error ?? 'Unknown error');

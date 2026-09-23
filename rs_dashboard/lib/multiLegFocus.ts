@@ -407,7 +407,7 @@ export type MultiLegMatch =
  * `buyAvg` (what it was bought back at). Same field family Scalper.tsx already
  * reads for its realizedProfit-on-flat-position fix (components/Scalper.tsx).
  */
-function closedFillFromRow(
+export function closedFillFromRow(
   row: Record<string, unknown> | undefined,
   isBuy: boolean,
 ): { qty: number; exitPrice: number } | undefined {
