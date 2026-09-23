@@ -191,6 +191,35 @@ Option traders analyze Greeks both per-contract and position-wide:
 - **Token Resolution in Recharts**: Recharts resolves CSS variables in `stroke="var(--chart-tick)"` and `fill="var(--chart-grid)"` natively.
 - **Custom ReferenceLine Labels**: Use custom SVG rendering functions for callout boxes (Current Spot pill, Target P&L badge) with `<rect>` background to prevent collision with tick labels.
 
+### Zero P&L Line & Breakeven Markers — Uniform Across Every Payoff Diagram (2026-09)
+The $y=0$ line and its breakeven crossings are load-bearing reference points, not decoration —
+a zero line rendered in the same faint tone as the gridlines (`var(--chart-grid)`) reads as just
+another gridline and disappears against the curves. All four payoff-diagram surfaces
+(`PositionsStrategyMonitor.tsx`, `BasketPayoffChart.tsx`, `PositionsPayoffChart.tsx`,
+`PayoffDiagram.tsx`) now render both consistently:
+- **Zero line color**: `var(--chart-axis)`, never `var(--chart-grid)` (too faint — the original
+  bug report) or `var(--chart-tick)` (over-corrected too dark on a follow-up report). `--chart-axis`
+  is the deliberate middle tone already used for the X/Y axis lines themselves, so the zero line
+  reads as "another axis," not a gridline or bold annotation.
+- **Zero line width**: `1.5` in the Recharts family (`PositionsStrategyMonitor.tsx`,
+  `BasketPayoffChart.tsx` — `<ReferenceLine y={0} stroke="var(--chart-axis)" strokeWidth={1.5} />`),
+  `1.25` in the hand-rolled SVG family (`PositionsPayoffChart.tsx`, `PayoffDiagram.tsx` — same
+  token, drawn as a plain `<line>` at `zeroY`). The two families don't need pixel-identical
+  widths; they need the same *token* and the same "visibly heavier than the gridlines" weight.
+- **Breakeven markers**: a small circle (`r={4}`) sitting on the zero line at each breakeven's
+  x-coordinate, on top of the curve it belongs to:
+  - Recharts family: `<ReferenceDot x={breakeven} y={0} r={4} fill="var(--color-zinc-900)" stroke={PAYOFF_EXPIRY} strokeWidth={2} isFront />` — a hollow ring in the expiry-curve's red, punched through by the panel background color so it doesn't add a new fill color to the palette. Import `ReferenceDot` from `recharts` alongside the other reference primitives.
+  - Hand-rolled SVG family: solid amber circle (`fill="#f59e0b"`, `stroke` matched to the panel's near-black background, `strokeWidth={2}`) with a small numeric label above it — this family already had breakeven markers before the 2026-09 pass, so the Recharts family's `ReferenceDot` styling was matched to fit next to it, not the other way around.
+  - Filter to the visible domain before mapping (`breakevens.filter(b => b > lo && b < hi)`) —
+    rendering a dot outside the current spot/zoom window throws off Recharts' auto-layout.
+- **`BasketPayoffChart.tsx` was the outlier** until this pass: it had the `breakevens` array
+  (used only for the strike-clearance width text) but never rendered it on the curve, and its
+  zero line was still on the pre-2026-09 `var(--chart-grid)` treatment. `PositionsPayoffChart.tsx`
+  and `PayoffDiagram.tsx` were already correct — they're the reference for the hand-rolled family.
+- If you add a fifth payoff-diagram surface, copy the token/width/marker pattern from whichever
+  family it renders with (Recharts vs hand-rolled SVG) rather than re-deriving colors — a payoff
+  chart that reintroduces `var(--chart-grid)` for the zero line is a regression to catch in review.
+
 ---
 
 ## Every Payoff Diagram Must Plot the T+0 (Today) Curve

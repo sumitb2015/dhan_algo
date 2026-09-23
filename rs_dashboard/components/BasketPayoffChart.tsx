@@ -12,6 +12,7 @@ import {
   Tooltip,
   ReferenceLine,
   ReferenceArea,
+  ReferenceDot,
 } from 'recharts';
 import { Maximize2, Minimize2, TrendingUp } from 'lucide-react';
 import TerminalPanel from '@/components/options-monitor/TerminalPanel';
@@ -409,7 +410,7 @@ export default function BasketPayoffChart({
                 ))}
 
                 {/* Zero P&L Line */}
-                <ReferenceLine y={0} stroke="var(--chart-grid)" strokeWidth={1} />
+                <ReferenceLine y={0} stroke="var(--chart-axis)" strokeWidth={1.5} />
 
                 {/* 1SD Range Shading (Sensibull Parity: 68% probability zone) */}
                 {sdLevels && (
@@ -607,6 +608,22 @@ export default function BasketPayoffChart({
                   name="On Expiry"
                   isAnimationActive={false}
                 />
+
+                {/* Breakeven markers: where the On Expiry curve crosses zero P&L */}
+                {breakevens
+                  .filter((b) => spotDomain && b > spotDomain[0] && b < spotDomain[1])
+                  .map((b) => (
+                    <ReferenceDot
+                      key={`be-${b}`}
+                      x={b}
+                      y={0}
+                      r={4}
+                      fill="var(--color-zinc-900)"
+                      stroke={PAYOFF_EXPIRY}
+                      strokeWidth={2}
+                      isFront
+                    />
+                  ))}
               </LineChart>
             </ResponsiveContainer>
           </div>
