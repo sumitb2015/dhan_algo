@@ -15,6 +15,29 @@ function todayIst(): string {
   return ist.toISOString().slice(0, 10);
 }
 
+/** The collector's own market-hours gate (09:00–15:30 IST) exits within the
+ *  first loop iteration outside that window, flipping straight back to
+ *  STOPPED — so Start must be disabled (with a reason) rather than silently
+ *  doing nothing, which is exactly what looked like a dead button. */
+function isMarketHoursIst(): boolean {
+  const ist = new Date(Date.now() + 5.5 * 60 * 60 * 1000);
+  const mins = ist.getUTCHours() * 60 + ist.getUTCMinutes();
+  return mins >= 9 * 60 && mins < 15 * 60 + 30;
+}
+
+function statusReasonText(reason?: string): string | null {
+  switch (reason) {
+    case 'market_closed':
+      return 'Collector exited immediately — it only runs 09:00–15:30 IST.';
+    case 'stop_trigger':
+      return 'Stopped manually.';
+    case 'error':
+      return 'Collector crashed — check debug/nifty_time_analysis_collector.log.';
+    default:
+      return null;
+  }
+}
+
 /** Up/down/flat arrow, colored — the repeated "value + trend" cell used across
  *  most columns in this table. */
 function DirCell({ value, dir, decimals = 2 }: { value: number; dir: -1 | 0 | 1; decimals?: number }) {
@@ -86,6 +109,8 @@ export default function NiftyTimeAnalysis() {
 
   const isRunning = data?.status?.status === 'RUNNING';
   const runningInterval = data?.status?.interval_min;
+  const marketOpen = isMarketHoursIst();
+  const statusReason = statusReasonText(data?.status?.reason);
 
   const handleStart = useCallback(async () => {
     setBusy(true);
@@ -174,11 +199,12 @@ export default function NiftyTimeAnalysis() {
           ) : (
             <button
               onClick={handleStart}
-              disabled={busy}
-              className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border text-[11px] font-bold transition bg-emerald-950/60 text-emerald-400 border-emerald-800 hover:bg-emerald-900/60 disabled:opacity-50"
+              disabled={busy || !marketOpen}
+              title={marketOpen ? undefined : 'Market closed — the collector only runs 09:00–15:30 IST and would exit immediately'}
+              className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border text-[11px] font-bold transition bg-emerald-950/60 text-emerald-400 border-emerald-800 hover:bg-emerald-900/60 disabled:opacity-50 disabled:cursor-not-allowed"
             >
               <Play className="w-3 h-3" />
-              Start collector
+              {marketOpen ? 'Start collector' : 'Market closed'}
             </button>
           )}
 
@@ -218,8 +244,14 @@ export default function NiftyTimeAnalysis() {
         {!isRunning && rows.length === 0 && !initialLoading && (
           <div className="bg-zinc-900/60 border border-zinc-800 rounded-xl p-4 text-xs text-zinc-400 flex items-center gap-2">
             <Info className="w-4 h-4 text-amber-400 shrink-0" />
-            No rows for {interval}m today yet. Dhan&apos;s option chain API only returns the live snapshot &mdash;
-            start the collector above to begin building this table forward from now (it can&apos;t backfill earlier rows).
+            <span>
+              {statusReason ? (
+                <><span className="text-amber-300 font-semibold">{statusReason}</span>{' '}</>
+              ) : null}
+              No rows for {interval}m today yet. Dhan&apos;s option chain API only returns the live snapshot &mdash;
+              start the collector above to begin building this table forward from now (it can&apos;t backfill earlier rows).
+              {!marketOpen && ' The collector only runs 09:00–15:30 IST, so Start is disabled right now.'}
+            </span>
           </div>
         )}
 
@@ -312,7 +344,10 @@ export default function NiftyTimeAnalysis() {
           <span>
             {rows.length} row{rows.length === 1 ? '' : 's'} &middot; {data?.nearest_expiry ? `expiry ${data.nearest_expiry}` : ''}
           </span>
-          <span>Collector: <span className={isRunning ? 'text-emerald-400 font-semibold' : 'text-zinc-500'}>{data?.status?.status ?? 'STOPPED'}</span></span>
+          <span>
+            Collector: <span className={isRunning ? 'text-emerald-400 font-semibold' : 'text-zinc-500'}>{data?.status?.status ?? 'STOPPED'}</span>
+            {!isRunning && statusReason && <span className="text-zinc-600"> &mdash; {statusReason}</span>}
+          </span>
         </div>
       </div>
     </div>

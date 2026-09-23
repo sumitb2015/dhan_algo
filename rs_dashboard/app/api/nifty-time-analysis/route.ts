@@ -38,7 +38,7 @@ export interface NiftyTimeAnalysisRow {
 
 export interface NiftyTimeAnalysisResponse {
   success: boolean;
-  status: { status: string; pid?: number; interval_min?: number; rows?: number; last_update?: string; error?: string };
+  status: { status: string; pid?: number; interval_min?: number; rows?: number; last_update?: string; error?: string; reason?: string };
   date: string | null;
   interval_min: number | null;
   nearest_expiry: string | null;
