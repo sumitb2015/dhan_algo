@@ -559,6 +559,13 @@ export default function AdvancedScalper() {
   const vix = vixData?.quotes?.VIX;
   const vixTickMs = vixData?.updated_at ? new Date(vixData.updated_at).getTime() : NaN;
   const vixStale = isStale(vixTickMs, vixNow);
+  // Prefer the options WS bridge's own VIX tick (liveQuotes.vix, same security
+  // id as the hub above) when it's live — zero polling delay vs. the 3s hub
+  // poll, and it's already running on this page for option/spot ticks anyway.
+  const liveVixWs = liveQuotes?.vix;
+  const vixIsLive = !!(liveVixWs && liveVixWs.ltp > 0);
+  const displayVix = vixIsLive ? { ltp: liveVixWs!.ltp, change_pct: liveVixWs!.change_pct ?? null } : vix;
+  const displayVixStale = !vixIsLive && vixStale;
 
   // Combined Multi-Leg Premium Tracking & Strategy Stats
   const combinedStrategyStats = useMemo(() => {
@@ -2788,26 +2795,27 @@ export default function AdvancedScalper() {
               )}
             </div>
 
-            {/* India VIX Pill — WS-hub sourced, see pickVixLtp above. */}
+            {/* India VIX Pill — prefers the options WS bridge's own tick
+                (liveVixWs) over the hub poll (vix), see liveVixWs above. */}
             <div
               className="flex items-baseline gap-2.5 bg-zinc-900/60 border border-zinc-800 rounded-2xl px-5 py-2"
-              title={vixStale ? 'VIX feed is stale — the indices WebSocket bridge may be starting up or has stalled' : 'India VIX, live via the shared market-data WebSocket hub'}
+              title={displayVixStale ? 'VIX feed is stale — the indices WebSocket bridge may be starting up or has stalled' : 'India VIX, live via WebSocket'}
             >
               <span className="text-xs font-bold text-zinc-500 uppercase tracking-widest">VIX</span>
-              {vix ? (
+              {displayVix ? (
                 <>
-                  <span className={`text-xl font-bold font-mono tabular-nums ${vixStale ? 'text-zinc-500' : 'text-white'}`}>
-                    {vix.ltp.toFixed(2)}
+                  <span className={`text-xl font-bold font-mono tabular-nums ${displayVixStale ? 'text-zinc-500' : 'text-white'}`}>
+                    {displayVix.ltp.toFixed(2)}
                   </span>
-                  {vix.change_pct != null && (
+                  {displayVix.change_pct != null && (
                     <span className={`flex items-baseline gap-1 text-xs font-semibold font-mono tabular-nums ${
-                      vixStale ? 'text-zinc-500' : vix.change_pct >= 0 ? 'text-emerald-400' : 'text-rose-400'
+                      displayVixStale ? 'text-zinc-500' : displayVix.change_pct >= 0 ? 'text-emerald-400' : 'text-rose-400'
                     }`}>
-                      <span>{vix.change_pct >= 0 ? '▲' : '▼'}</span>
-                      <span>({vix.change_pct >= 0 ? '+' : ''}{vix.change_pct.toFixed(2)}%)</span>
+                      <span>{displayVix.change_pct >= 0 ? '▲' : '▼'}</span>
+                      <span>({displayVix.change_pct >= 0 ? '+' : ''}{displayVix.change_pct.toFixed(2)}%)</span>
                     </span>
                   )}
-                  {vixStale && <span className="text-[9px] font-bold text-amber-500 uppercase">stale</span>}
+                  {displayVixStale && <span className="text-[9px] font-bold text-amber-500 uppercase">stale</span>}
                 </>
               ) : (
                 <span className="text-xs text-zinc-500 animate-pulse">loading…</span>

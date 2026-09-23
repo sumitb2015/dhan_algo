@@ -103,15 +103,15 @@ export default function MultiLegFocus() {
   }, [pollFunds]);
 
   // ── India VIX Ticker ────────────────────────────────────────────────
-  const [vixData, setVixData] = useState<{ vix: number; prevClose: number } | null>(null);
+  const [vixData, setVixData] = useState<{ vix: number; prevClose: number; stale: boolean } | null>(null);
 
   useEffect(() => {
     const pollVix = () => {
       fetch('/api/scalper/vix')
         .then(r => r.json())
-        .then((j: { success: boolean; vix?: number; prevClose?: number }) => {
+        .then((j: { success: boolean; vix?: number; prevClose?: number; stale?: boolean }) => {
           if (j.success && j.vix !== undefined && j.prevClose !== undefined) {
-            setVixData({ vix: j.vix, prevClose: j.prevClose });
+            setVixData({ vix: j.vix, prevClose: j.prevClose, stale: j.stale ?? false });
           }
         })
         .catch(() => {});
@@ -1712,21 +1712,28 @@ export default function MultiLegFocus() {
               </div>
             )}
 
-            {/* India VIX Ticker */}
-            {vixData && (
-              <div
-                className="h-8 flex items-baseline gap-2 px-3 rounded-lg bg-zinc-900 border border-zinc-700/80 font-mono tabular-nums shadow-sm"
-                title={`India VIX | Prev Close: ${vixData.prevClose.toFixed(2)}`}
-              >
-                <span className="text-[11px] font-bold text-zinc-400 tracking-wider">VIX</span>
-                <span className="text-sm font-bold text-white">{vixData.vix.toFixed(2)}</span>
-                <span className={`text-xs font-semibold flex items-center gap-0.5 ${vixChange >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
-                  <span>{vixChange >= 0 ? '▲' : '▼'}</span>
-                  <span>{Math.abs(vixChange).toFixed(2)}</span>
-                  <span className="text-[11px] opacity-90">({vixChange >= 0 ? '+' : ''}{vixChangePct.toFixed(2)}%)</span>
-                </span>
-              </div>
-            )}
+            {/* India VIX Ticker — prefers the live WS tick (liveVix) over the
+                60s REST poll (vixData); only shows STALE when falling back to
+                a REST/CSV value with no live WS tick to override it. */}
+            {(vixData || (liveVix && liveVix.ltp > 0)) && (() => {
+              const vixIsLive = !!(liveVix && liveVix.ltp > 0);
+              const vixShowsStale = !vixIsLive && !!vixData?.stale;
+              return (
+                <div
+                  className={`h-8 flex items-baseline gap-2 px-3 rounded-lg bg-zinc-900 border font-mono tabular-nums shadow-sm ${vixShowsStale ? 'border-amber-500/60' : 'border-zinc-700/80'}`}
+                  title={`India VIX | Prev Close: ${currentVixPrevClose.toFixed(2)}${vixShowsStale ? ' | STALE: live feed unavailable, showing yesterday\'s close from CSV' : ''}`}
+                >
+                  <span className="text-[11px] font-bold text-zinc-400 tracking-wider">VIX</span>
+                  <span className="text-sm font-bold text-white">{currentVix.toFixed(2)}</span>
+                  <span className={`text-xs font-semibold flex items-center gap-0.5 ${vixChange >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
+                    <span>{vixChange >= 0 ? '▲' : '▼'}</span>
+                    <span>{Math.abs(vixChange).toFixed(2)}</span>
+                    <span className="text-[11px] opacity-90">({vixChange >= 0 ? '+' : ''}{vixChangePct.toFixed(2)}%)</span>
+                  </span>
+                  {vixShowsStale && <span className="text-[10px] font-bold text-amber-400 tracking-wider">STALE</span>}
+                </div>
+              );
+            })()}
           </div>
 
           <div className="flex items-center gap-3 flex-wrap">

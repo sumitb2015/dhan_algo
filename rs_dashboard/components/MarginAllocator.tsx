@@ -43,6 +43,7 @@ import type { MarketTrendResponse } from '@/app/api/margin-allocator/trend/route
 import type { ScanResponse, ScannedLeg, ScannedStrategy, StrategyType, UnderlyingType } from '@/lib/ultimateScannerTypes';
 import type { MultiLegBasket } from '@/lib/multiLegFocus';
 import { STRESS_MOVES_PCT, bookExpiryPnl, type StressLeg } from '@/lib/marginStress';
+import { useLiveTickerPoll } from '@/lib/useLiveTickerPoll';
 import { BROKER_LABELS, type Broker } from '@/hooks/useBrokerSelector';
 import NavBar from './NavBar';
 
@@ -410,6 +411,33 @@ const VIX_DEPLOY_ANCHORS: readonly [number, number][] = [
 ];
 function vixPercentileToDeployMultiplier(percentile: number): number {
   return interpolatePiecewise(VIX_DEPLOY_ANCHORS, percentile);
+}
+
+// Live India VIX chip — sourced from the same WS-hub-backed /api/scalper/top-indices
+// route AdvancedScalper's header VIX pill uses (live_indices_ws.py's
+// live_indices_quotes.json snapshot), polled instead of waiting on the
+// mount-only /api/ultimate-scanner/scan calls below, which can go stale for
+// as long as this page stays open between manual refreshes.
+interface VixHubResponse {
+  updated_at: string;
+  quotes: Record<string, { ltp: number; prev_close: number; change_pct: number | null }>;
+}
+// Module scope: useLiveTickerPoll restarts its poll loop if this identity is
+// unstable across renders (see that hook's own doc comment).
+function pickVixHubLtp(d: VixHubResponse): Record<string, number> {
+  const ltp = d?.quotes?.VIX?.ltp;
+  return typeof ltp === 'number' && ltp > 0 ? { VIX: ltp } : {};
+}
+// Mirrors computeVixRegime's thresholds in lib/ultimateScannerDhan.ts (the
+// source for the scan-based vixInfo fallback below) so the regime badge text
+// stays identical regardless of which source is live. Duplicated rather than
+// imported because that module pulls in server-only fs/Node APIs that can't
+// go into a 'use client' bundle.
+function vixRegimeForLevel(vix: number): string {
+  if (vix <= 12.5) return 'Low Volatility';
+  if (vix <= 16.5) return 'Normal / Ideal Volatility';
+  if (vix <= 22.0) return 'Elevated Volatility';
+  return 'High Volatility / Panic';
 }
 
 function fromScannedStrategy(s: ScannedStrategy, trend: MarketTrend): RankedCandidate {
@@ -891,7 +919,15 @@ export default function MarginAllocator() {
     () => Object.values(scans).flatMap((s) => s?.candidates ?? []),
     [scans],
   );
-  const vixInfo = useMemo(() => Object.values(scans).find((s) => s?.vix)?.vix ?? null, [scans]);
+  const scanVixInfo = useMemo(() => Object.values(scans).find((s) => s?.vix)?.vix ?? null, [scans]);
+  // Live VIX chip: prefers the WS-hub poll over the mount-only scan result.
+  // `.advice` has no hub equivalent, so it's always carried over from the
+  // scan (or omitted) regardless of which source supplies `.vix`/`.regime`.
+  const { data: vixHub } = useLiveTickerPoll<VixHubResponse>('/api/scalper/top-indices', pickVixHubLtp);
+  const liveVixLtp = vixHub?.quotes?.VIX?.ltp;
+  const vixInfo = (typeof liveVixLtp === 'number' && liveVixLtp > 0)
+    ? { vix: liveVixLtp, regime: vixRegimeForLevel(liveVixLtp), advice: scanVixInfo?.advice }
+    : scanVixInfo;
 
   // High VIX means richer absolute premium per unit of margin, so the
   // undefined-risk (naked strangle/straddle/lizard) sub-budget is allowed to

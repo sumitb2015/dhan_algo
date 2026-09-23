@@ -89,7 +89,7 @@ export async function GET() {
         const prevClose = entry?.ohlc?.close ?? 0;
 
         if (ltp > 0 && prevClose > 0) {
-          return NextResponse.json({ success: true, vix: ltp, prevClose });
+          return NextResponse.json({ success: true, vix: ltp, prevClose, stale: false });
         }
       }
     } catch {
@@ -97,10 +97,10 @@ export async function GET() {
     }
   }
 
-  // Fallback: use last two CSV rows
+  // Fallback: use last two CSV rows (yesterday's close, not live)
   const fallback = csvFallback();
   if (fallback) {
-    return NextResponse.json({ success: true, ...fallback });
+    return NextResponse.json({ success: true, ...fallback, stale: true });
   }
 
   return NextResponse.json({ success: false, error: 'Could not fetch VIX data' }, { status: 500 });
