@@ -187,6 +187,19 @@ c:\dhan_algo\dhan_algo\venv\Scripts\activate
 
 ### Strategy commands & parameter tables
 
+**Nifty Flyagonal** (`strategies/flyagonal/nifty_flyagonal.py`, NOT VALIDATED, dry-run default; `--live` places real orders). Call BWB + put diagonal, positional `MARGIN`. Full flag list and defaults in `strategies/flyagonal/strategy.md` §10; tests `venv/bin/python tests/test_flyagonal.py`.
+
+**Nifty Volcano Calendar** (`strategies/volcano_calendar/nifty_volcano_calendar.py`, UNVALIDATED — no backtest, no losing-month example in its source evidence; dry-run default; `--live` requires `--i-understand-this-is-unvalidated`). Monthly-hold 5-leg combo: Put Butterfly (1×2×1: buy ATM PE, sell 2× ATM−400 PE, buy 1× ATM−800 PE) + Call Calendar (sell ATM+300 CE on the current monthly expiry, buy the same strike on a further monthly expiry — `--far-expiry {next-month,two-months}`). Entry once per month on the last trading Friday at `--entry-time` (default 15:16). Exit on a flat `--target-profit`/`--stop-loss` (default 2%/2%, resolved against **deployed margin**, not entry premium) or at the near leg's expiry-day EOD; otherwise held untouched with zero adjustment. Product `MARGIN`. Full flag list and defaults in `strategies/volcano_calendar/strategy.md`; research trail in the Obsidian vault's `wiki/strategies/volcano-calendar.md` (stage `analysed`).
+
+```
+python strategies/volcano_calendar/nifty_volcano_calendar.py [--live --i-understand-this-is-unvalidated]
+    [--lots N] [--wing-points N] [--ce-offset-points N] [--strike-step N]
+    [--far-expiry {next-month,two-months}]
+    [--target-profit INR|%] [--stop-loss INR|%] [--fallback-margin-per-lot INR]
+    [--entry-time HH:MM] [--entry-window-min MIN] [--eod-exit-time HH:MM]
+    [--max-consecutive-stops N] [--instance-id ID] [--broker {dhan,zerodha,kotak}]
+```
+
 See the per-folder `strategy.md` files linked in the table above. Each file contains full CLI flag tables, parameter tuning guidance, dry-run and live examples, and worked trade scenarios.
 
 ---

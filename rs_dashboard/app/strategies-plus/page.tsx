@@ -5,7 +5,7 @@ import {
   Layers, RefreshCw, TrendingUp, TrendingDown, AlertTriangle,
   Power, ShieldOff, Activity, Zap, LayoutList, ChevronDown, ChevronRight, Shield,
   Repeat, CheckCircle2, XCircle, Play, Square, ChevronsDownUp, ChevronsUpDown,
-  Sprout, Flame, Rocket, Boxes, ListTree, Moon, Clock, Calendar, Sun,
+  Sprout, Flame, Rocket, Boxes, ListTree, Moon, Clock, Calendar, Sun, Mountain,
 } from 'lucide-react';
 import StrategyRowWide from '@/components/StrategyRowWide';
 import NavBar from '@/components/NavBar';
@@ -40,6 +40,7 @@ const LOGIC_GROUPS: Record<string, { title: string; tagline: string; icon: React
   futures_trend: { title: 'Futures Trend', tagline: 'Ride MCX momentum in one direction', icon: Flame, accent: 'orange' },
   momentum: { title: 'Equity Momentum', tagline: 'Relative-strength stock rotation', icon: Rocket, accent: 'fuchsia' },
   overnight_hedge: { title: 'Overnight Hedge', tagline: 'Hedged straddle held past the close', icon: Moon, accent: 'cyan' },
+  calendar_hedge: { title: 'Calendar & Butterfly', tagline: 'Defined-risk butterfly + calendar combo, held to monthly expiry', icon: Mountain, accent: 'rose' },
 };
 const OTHER_LOGIC_GROUP = { title: 'Other', tagline: 'Uncategorised', icon: Boxes, accent: 'zinc' };
 
@@ -77,6 +78,7 @@ const ACCENT_CLASSES: Record<string, { icon: string; iconBg: string; iconBorder:
   fuchsia: { icon: 'text-fuchsia-400', iconBg: 'bg-fuchsia-500/10', iconBorder: 'border-fuchsia-500/25', ring: 'hover:border-fuchsia-700/60', badge: 'bg-fuchsia-500/15 text-fuchsia-300 border-fuchsia-500/30' },
   zinc:    { icon: 'text-zinc-400',    iconBg: 'bg-zinc-500/10',    iconBorder: 'border-zinc-500/25',    ring: 'hover:border-zinc-700/60',    badge: 'bg-zinc-500/15 text-zinc-300 border-zinc-500/30' },
   cyan:    { icon: 'text-cyan-400',    iconBg: 'bg-cyan-500/10',    iconBorder: 'border-cyan-500/25',    ring: 'hover:border-cyan-700/60',    badge: 'bg-cyan-500/15 text-cyan-300 border-cyan-500/30' },
+  rose:    { icon: 'text-rose-400',    iconBg: 'bg-rose-500/10',    iconBorder: 'border-rose-500/25',    ring: 'hover:border-rose-700/60',    badge: 'bg-rose-500/15 text-rose-300 border-rose-500/30' },
 };
 
 interface IndexQuote { ltp: number; prevClose: number }
