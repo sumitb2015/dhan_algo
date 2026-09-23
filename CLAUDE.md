@@ -311,10 +311,18 @@ star rating — four separate algorithms, not one shared gate),
 `dhan-data-sync-pipeline` (the CSV refresh/backfill pipeline behind
 `refresh_dashboard_data.py`: Yahoo Finance is the DEFAULT source not a
 fallback, the incremental-append-not-redownload logic, the flat-candle/
-data-gap repair scripts, and the full script/API-route spawn map).
-Run `dhan-context-audit` periodically (not tied to any one
-change) to review CLAUDE.md and this skill library itself against recent
-commits.
+data-gap repair scripts, and the full script/API-route spawn map),
+`dhan-option-chain-analysis` (fetching/reading a live Dhan option chain:
+the chain-id-vs-spot-id split for SENSEX/MCX, `get_option_chain_df`'s
+column-naming traps and change-pct guards, the 5s cache/3s rate limit,
+ATM/strike-window lookup — the base layer under dhan-oi-analytics,
+dhan-position-greeks, dhan-payoff-diagrams and dhan-csp-desk), and
+`dhan-crudeoil-trading` (MCX CRUDEOIL/CRUDEOILM futures and options: the
+lots-vs-barrels quantity trap across strategies, dashboard P&L and Kotak
+order sizing, and why `get_expiries()` needs the futures-contract id, not
+the commodity id, for MCX). Run `dhan-context-audit` periodically (not
+tied to any one change) to review CLAUDE.md and this skill library itself
+against recent commits.
 
 **"Quant-terminal" chart pages**: several pages (Options Premium Bar, Futures, IV Charts, Straddle/Strangle Analysis, Breadth, Live Charts) share a chart-driven dark-glass redesign built around `recharts`. Use the `dhan-quant-terminal-page` skill when building or redesigning a page into this style — it documents the sticky-header shell, chart-panel/tooltip conventions, and the reference implementation to copy from.
 
