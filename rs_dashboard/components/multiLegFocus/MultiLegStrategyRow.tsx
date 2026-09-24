@@ -2,7 +2,7 @@
 
 import React, { useState, useMemo, useCallback } from 'react';
 import {
-  ChevronDown, ChevronUp, Trash2, Plus, X, Check, Layers,
+  ChevronDown, ChevronUp, Trash2, Plus, X, Check, Layers, Sigma, Loader2, RefreshCw,
 } from 'lucide-react';
 import MultiLegLegRow from './MultiLegLegRow';
 import RuleNumInput from './RuleNumInput';
@@ -18,6 +18,12 @@ import { computeBsGreeks, calculateTimeToExpiryYears } from '@/lib/optionsMonito
 import { FOCUS_RING } from '@/components/Scalper';
 import { BROKER_LABELS, type Broker } from '@/hooks/useBrokerSelector';
 import PayoffDiagram from '@/components/strategy/PayoffDiagram';
+import { StatChip } from '@/components/analytics/PayoffMetricStrip';
+import { basketToGreekLegs, computeBasketGreeks } from '@/lib/multiLegGreeks';
+import type { ChainOc } from '@/lib/optionsStrategy';
+
+/** Dhan's option-chain API is rate limited (~1 call / 3.5 s per underlying). */
+const GREEKS_CHAIN_SPACING_MS = 3_800;
 
 /** Placeholder IV used only when no live chain IV is available yet for a leg's
  *  strike — same role as the `atmIv > 0 ? atmIv / 100 : 0.1313`-style fallback
@@ -222,6 +228,43 @@ export default function MultiLegStrategyRow({
     if (basket.underlying === 'SENSEX') return 20;
     return broker === 'dhan' ? 1 : (basket.underlying === 'CRUDEOIL' ? 100 : 10);
   }, [lotSize, basket.underlying, broker]);
+
+  // On-demand Greeks: nothing is fetched until the user clicks the button.
+  const [greeks, setGreeks] = useState<{
+    result: ReturnType<typeof computeBasketGreeks>; at: Date; errors: string[];
+  } | null>(null);
+  const [greeksLoading, setGreeksLoading] = useState(false);
+  const [greeksOpen, setGreeksOpen] = useState(false);
+  const greeksReq = React.useRef(0);
+  const runGreeks = useCallback(async () => {
+    const legs = basketToGreekLegs(basket, defaultLotSize, crudeMult);
+    setGreeksOpen(true);
+    if (!legs.length) { setGreeks({ result: computeBasketGreeks([], {}), at: new Date(), errors: [] }); return; }
+    const req = ++greeksReq.current;
+    setGreeksLoading(true);
+    const expiriesNeeded = [...new Set(legs.map(l => l.expiry))];
+    const chains: Record<string, ChainOc | undefined> = {};
+    const errors: string[] = [];
+    for (let i = 0; i < expiriesNeeded.length; i++) {
+      if (i > 0) await new Promise(r => setTimeout(r, GREEKS_CHAIN_SPACING_MS));
+      const ex = expiriesNeeded[i];
+      try {
+        // No `broker` param — greeks always come from Dhan's chain.
+        const res = await fetch(`/api/options/chain?underlying=${basket.underlying}&expiry=${ex}`);
+        const json = await res.json();
+        if (!json?.success || !json.data?.chain?.oc) errors.push(`${ex}: ${json?.error ?? 'chain unavailable'}`);
+        else chains[ex] = json.data.chain.oc as ChainOc;
+      } catch (e) {
+        errors.push(`${ex}: ${String((e as Error).message ?? e)}`);
+      }
+    }
+    if (req !== greeksReq.current) return; // superseded by a newer click
+    setGreeks({ result: computeBasketGreeks(legs, chains), at: new Date(), errors });
+    setGreeksLoading(false);
+  }, [basket, defaultLotSize, crudeMult]);
+
+
+
 
   // Calendar/Diagonal strategies stage legs on two different expiries — a
   // single "payoff at expiry, both legs at intrinsic value" curve/BE/max-P&L
@@ -669,6 +712,17 @@ export default function MultiLegStrategyRow({
             )}
           </span>
 
+          <button
+            type="button"
+            onClick={runGreeks}
+            disabled={greeksLoading}
+            title="Compute Net Delta / Gamma / Theta / Vega for this strategy (fetches the option chain now)"
+            className={`h-7 px-2.5 inline-flex items-center gap-1 text-[11px] font-bold rounded-lg border border-violet-500/40 bg-violet-500/10 text-violet-300 hover:bg-violet-500/20 disabled:opacity-50 ${FOCUS_RING}`}
+          >
+            {greeksLoading ? <Loader2 className="w-3 h-3 animate-spin" /> : <Sigma className="w-3 h-3" />}
+            Greeks
+          </button>
+
           {/* Draft Actions */}
           {!hasPlacedLeg && (
             <>
@@ -744,6 +798,82 @@ export default function MultiLegStrategyRow({
           </button>
         </div>
       </div>
+
+      {greeksOpen && (
+        <div className="px-4 py-2.5 border-t border-zinc-800/80 bg-zinc-950/40 flex flex-col gap-2">
+          {greeksLoading && !greeks ? (
+            <div className="flex items-center gap-2 text-xs text-zinc-300">
+              <Loader2 className="w-3.5 h-3.5 animate-spin text-violet-400" /> Loading option chain…
+            </div>
+          ) : greeks && (
+            <>
+              <div className="flex items-center gap-2 flex-wrap">
+                <div className="flex flex-wrap items-center rounded-lg border border-zinc-800/80 bg-zinc-950/60 py-1.5">
+                  <StatChip label="Net Delta" value={greeks.result.net.delta.toFixed(2)}
+                    color={greeks.result.net.delta > 0 ? 'text-emerald-400' : greeks.result.net.delta < 0 ? 'text-red-400' : 'text-zinc-100'} />
+                  <StatChip label="Net Gamma" value={greeks.result.net.gamma.toFixed(4)}
+                    color={greeks.result.net.gamma < 0 ? 'text-rose-400' : 'text-zinc-100'} />
+                  <StatChip label="Net Theta" value={`₹${greeks.result.net.theta.toLocaleString('en-IN', { maximumFractionDigits: 0 })}`}
+                    sub="per day" color={greeks.result.net.theta > 0 ? 'text-emerald-400' : 'text-red-400'} />
+                  <StatChip label="Net Vega" value={greeks.result.net.vega.toFixed(2)} sub="per 1 vol pt"
+                    color={greeks.result.net.vega < 0 ? 'text-rose-400' : 'text-zinc-100'} />
+                  <StatChip label="Legs" value={String(greeks.result.legs.length)} />
+                </div>
+                <span className="text-[10px] text-zinc-500">as of {greeks.at.toLocaleTimeString('en-IN')}</span>
+                <button type="button" onClick={runGreeks} disabled={greeksLoading} aria-label="Recompute greeks"
+                  className={`h-6 px-2 inline-flex items-center gap-1 text-[10px] font-bold rounded-md border border-zinc-700 text-zinc-300 hover:bg-zinc-800 disabled:opacity-50 ${FOCUS_RING}`}>
+                  {greeksLoading ? <Loader2 className="w-3 h-3 animate-spin" /> : <RefreshCw className="w-3 h-3" />} Refresh
+                </button>
+                <button type="button" onClick={() => setGreeksOpen(false)} aria-label="Close greeks"
+                  className={`ml-auto h-6 w-6 inline-flex items-center justify-center rounded-md text-zinc-400 hover:bg-zinc-800 hover:text-white ${FOCUS_RING}`}>
+                  <X className="w-3.5 h-3.5" />
+                </button>
+              </div>
+              {greeks.result.legs.length === 0 && (
+                <p className="text-[11px] text-zinc-500">No open legs to compute greeks for.</p>
+              )}
+              {greeks.result.legs.length > 0 && (
+                <table className="text-[11px] font-mono tabular-nums w-full max-w-2xl">
+                  <thead>
+                    <tr className="bg-zinc-800 text-xs font-bold text-white">
+                      <th className="text-left px-2 py-1">Leg</th>
+                      <th className="text-right px-2 py-1">Delta</th>
+                      <th className="text-right px-2 py-1">Gamma</th>
+                      <th className="text-right px-2 py-1">Theta</th>
+                      <th className="text-right px-2 py-1">Vega</th>
+                      <th className="text-right px-2 py-1">IV</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {greeks.result.legs.map(l => {
+                      const k = (l.side === 'S' ? -1 : 1) * l.units;
+                      const f = (v: number | null, d: number) => v === null ? '—' : (v * k).toFixed(d);
+                      return (
+                        <tr key={l.legId} className="border-b border-zinc-800/60 text-zinc-300">
+                          <td className="px-2 py-1">{l.side === 'S' ? 'SELL' : 'BUY'} {l.strike} {l.option}</td>
+                          <td className="text-right px-2 py-1">{f(l.delta, 2)}</td>
+                          <td className="text-right px-2 py-1">{f(l.gamma, 4)}</td>
+                          <td className="text-right px-2 py-1">{f(l.theta, 0)}</td>
+                          <td className="text-right px-2 py-1">{f(l.vega, 2)}</td>
+                          <td className="text-right px-2 py-1">{l.iv === null ? '—' : `${(l.iv * 100).toFixed(1)}%`}</td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              )}
+              {greeks.result.missing.length > 0 && (
+                <p className="text-[11px] text-amber-300">
+                  {greeks.result.missing.length} leg(s) had no greeks in the chain ({greeks.result.missing.map(l => `${l.strike} ${l.option}`).join(', ')}) — excluded from the net figures; real exposure is larger.
+                </p>
+              )}
+              {greeks.errors.length > 0 && (
+                <p className="text-[11px] text-zinc-400">Chain fetch failed for: {greeks.errors.join('; ')}</p>
+              )}
+            </>
+          )}
+        </div>
+      )}
 
       {expanded && (
         <div className="p-4 flex flex-col gap-3">
