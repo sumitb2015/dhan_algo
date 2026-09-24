@@ -1,7 +1,7 @@
 'use client';
 
 import React, { useState, useEffect, useMemo, useRef, useCallback } from 'react';
-import { Plus, RefreshCw, Layers, ClipboardList, ListTree } from 'lucide-react';
+import { Plus, RefreshCw, Layers, ClipboardList, ListTree, ChevronDown, ChevronRight } from 'lucide-react';
 import NavBar from './NavBar';
 import { type Toast, FOCUS_RING } from './Scalper';
 import { useLiveOptionsWS } from '@/lib/useLiveOptionsWS';
@@ -773,6 +773,17 @@ export default function MultiLegFocus() {
 
   // ── Add Strategy (from template or blank) ──────────────────────────
   const [category, setCategory] = useState<StrategyCategory>('Range Bound');
+  const [presetsCollapsed, setPresetsCollapsed] = useState(false);
+  useEffect(() => {
+    try { setPresetsCollapsed(localStorage.getItem('mlf_presets_collapsed') === '1'); } catch { /* ignore */ }
+  }, []);
+  const togglePresets = useCallback(() => {
+    setPresetsCollapsed(prev => {
+      const next = !prev;
+      try { localStorage.setItem('mlf_presets_collapsed', next ? '1' : '0'); } catch { /* ignore */ }
+      return next;
+    });
+  }, []);
 
   const addStrategy = useCallback((template?: StrategyTemplate, targetUnderlying?: Underlying) => {
     const u: Underlying = targetUnderlying ?? selectedUnderlying ?? 'NIFTY';
@@ -1868,15 +1879,24 @@ export default function MultiLegFocus() {
 
         {/* Strategy Templates Bar — NEVER disabled so user can always add another strategy! */}
         <div className="mt-2.5 pt-2.5 border-t border-zinc-800/80">
-          <div className="flex items-center justify-between mb-1.5">
-            <span className="text-[11px] font-bold text-zinc-400 uppercase tracking-wider">
+          <div className={`flex items-center justify-between ${presetsCollapsed ? '' : 'mb-1.5'}`}>
+            <button
+              type="button"
+              onClick={togglePresets}
+              aria-expanded={!presetsCollapsed}
+              aria-label={presetsCollapsed ? 'Expand strategy presets' : 'Collapse strategy presets'}
+              className="flex items-center gap-1 text-[11px] font-bold text-zinc-400 hover:text-zinc-200 uppercase tracking-wider rounded focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500/60"
+            >
+              {presetsCollapsed ? <ChevronRight className="w-3.5 h-3.5" /> : <ChevronDown className="w-3.5 h-3.5" />}
               Quick Add Strategy Presets
-            </span>
-            <span className="text-[10px] text-zinc-500">
-              Click any strategy to instantiate a new independent parallel row
-            </span>
+            </button>
+            {!presetsCollapsed && (
+              <span className="text-[10px] text-zinc-500">
+                Click any strategy to instantiate a new independent parallel row
+              </span>
+            )}
           </div>
-          <StrategyCardGrid
+          {!presetsCollapsed && <StrategyCardGrid
             category={category}
             onCategoryChange={setCategory}
             selectedKey={null}
@@ -1888,7 +1908,7 @@ export default function MultiLegFocus() {
             autoPremium={autoPremium}
             frontExpiry={activeExpiry}
             farExpiry={expiriesMap[activeUnderlying]?.[1] ?? ''}
-          />
+          />}
         </div>
       </div>
 
