@@ -11,6 +11,7 @@ import AddNewLegModal from './AddNewLegModal';
 import {
   computeLegTrailingSL, computeStrategyMetrics, checkStrategyRisk, computeBasketStatus, computeCalendarPayoffCurve,
   classifyBasketStructure, legPnl,
+  findSiblingLegCollisions, type SiblingLegCollision,
   type MultiLegBasket, type MultiLegLeg, type StrategyRiskConfig,
 } from '@/lib/multiLegFocus';
 import { computePayoff, type PayoffLeg, type PayoffResult } from '@/lib/basketStrategies';
@@ -106,6 +107,8 @@ export interface MultiLegStrategyRowProps {
   availableFunds?: number;
   /** Keyed `${basketId}:${legId}` — see MultiLegFocus.tsx's legQtyWarnings. */
   legQtyWarnings?: Record<string, { ownQty: number; brokerQty: number }>;
+  /** All baskets on the page — used only to flag Greeks legs that share a contract with a sibling. */
+  allBaskets?: MultiLegBasket[];
 }
 
 export default function MultiLegStrategyRow({
@@ -140,6 +143,7 @@ export default function MultiLegStrategyRow({
   hedgeBenefit,
   availableFunds,
   legQtyWarnings,
+  allBaskets,
 }: MultiLegStrategyRowProps) {
   // Existing/already-placed positions default collapsed (this page can carry
   // several parallel strategies, most of them just sitting open) — the user
@@ -232,6 +236,7 @@ export default function MultiLegStrategyRow({
   // On-demand Greeks: nothing is fetched until the user clicks the button.
   const [greeks, setGreeks] = useState<{
     result: ReturnType<typeof computeBasketGreeks>; at: Date; errors: string[];
+    collisions: SiblingLegCollision[];
   } | null>(null);
   const [greeksLoading, setGreeksLoading] = useState(false);
   const [greeksOpen, setGreeksOpen] = useState(false);
@@ -239,7 +244,7 @@ export default function MultiLegStrategyRow({
   const runGreeks = useCallback(async () => {
     const legs = basketToGreekLegs(basket, defaultLotSize, crudeMult);
     setGreeksOpen(true);
-    if (!legs.length) { setGreeks({ result: computeBasketGreeks([], {}), at: new Date(), errors: [] }); return; }
+    if (!legs.length) { setGreeks({ result: computeBasketGreeks([], {}), at: new Date(), errors: [], collisions: [] }); return; }
     const req = ++greeksReq.current;
     setGreeksLoading(true);
     const expiriesNeeded = [...new Set(legs.map(l => l.expiry))];
@@ -259,9 +264,14 @@ export default function MultiLegStrategyRow({
       }
     }
     if (req !== greeksReq.current) return; // superseded by a newer click
-    setGreeks({ result: computeBasketGreeks(legs, chains), at: new Date(), errors });
+    // Sibling baskets holding the same contract share one netted broker row,
+    // so this basket's own ledger quantity may not match the broker's.
+    const collisions = allBaskets
+      ? findSiblingLegCollisions(allBaskets, basket.id, legs.map(l => ({ side: l.side, option: l.option, strike: l.strike, expiry: l.expiry })))
+      : [];
+    setGreeks({ result: computeBasketGreeks(legs, chains), at: new Date(), errors, collisions });
     setGreeksLoading(false);
-  }, [basket, defaultLotSize, crudeMult]);
+  }, [basket, allBaskets, defaultLotSize, crudeMult]);
 
 
 
@@ -865,6 +875,12 @@ export default function MultiLegStrategyRow({
               {greeks.result.missing.length > 0 && (
                 <p className="text-[11px] text-amber-300">
                   {greeks.result.missing.length} leg(s) had no greeks in the chain ({greeks.result.missing.map(l => `${l.strike} ${l.option}`).join(', ')}) — excluded from the net figures; real exposure is larger.
+                </p>
+              )}
+              {greeks.collisions.length > 0 && (
+                <p className="text-[11px] text-amber-300">
+                  Shares a contract with another strategy ({[...new Set(greeks.collisions.map(c => `${c.basketName}: ${c.strike} ${c.option}`))].join(', ')}).
+                  These Greeks follow this strategy&apos;s own record, not the broker&apos;s netted position, so they may be off.
                 </p>
               )}
               {greeks.errors.length > 0 && (

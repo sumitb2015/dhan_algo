@@ -2004,6 +2004,7 @@ export default function MultiLegFocus() {
                 hedgeBenefit={basketMargins[basket.id]?.hedgeBenefit}
                 availableFunds={fundsData?.available}
                 legQtyWarnings={legQtyWarnings}
+                allBaskets={baskets}
                 />
               </React.Fragment>
             );
