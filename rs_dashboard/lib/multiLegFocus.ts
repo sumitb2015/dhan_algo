@@ -688,3 +688,63 @@ export function computeCalendarPayoffCurve(
   };
 }
 
+
+export interface SiblingLegCollision {
+  basketId: string;
+  basketName: string;
+  side: 'B' | 'S';
+  option: 'CE' | 'PE';
+  strike: number;
+  expiry: string;
+  lots: number;
+  /** true when the sibling leg is on the opposite side, i.e. the broker's
+   *  netted row will carry one sign that matches only one of the two baskets. */
+  opposite: boolean;
+}
+
+/**
+ * Finds live (OPEN/CLOSING/in-flight PLACING) legs in OTHER baskets that resolve to the same contract as any of
+ * `candidates` (same broker/underlying/expiry/strike/option). Dhan nets by
+ * security id, so two baskets on one contract share a single broker row —
+ * exits and reconciliation for both then read the pooled quantity. Identity is
+ * matched on contract fields rather than securityId so draft legs (no orderRef
+ * yet) and symbol-keyed brokers are covered too. Same-basket legs and
+ * CLOSED/FAILED/DRAFT legs are ignored.
+ */
+export function findSiblingLegCollisions(
+  baskets: MultiLegBasket[],
+  basketId: string,
+  candidates: { side: 'B' | 'S'; option: 'CE' | 'PE'; strike: number; expiry: string }[],
+): SiblingLegCollision[] {
+  const self = baskets.find(b => b.id === basketId);
+  if (!self) return [];
+  const out: SiblingLegCollision[] = [];
+  for (const b of baskets) {
+    if (b.id === basketId || b.broker !== self.broker || b.underlying !== self.underlying) continue;
+    for (const l of b.legs) {
+      if (l.status !== 'OPEN' && l.status !== 'CLOSING' && l.status !== 'PLACING') continue;
+      const legExpiry = l.expiry || b.expiry;
+      for (const c of candidates) {
+        if (c.option === l.option && c.strike === l.strike && c.expiry === legExpiry) {
+          out.push({
+            basketId: b.id, basketName: b.name || b.presetKey || 'Unnamed basket',
+            side: l.side, option: l.option, strike: l.strike, expiry: legExpiry, lots: l.lots,
+            opposite: c.side !== l.side,
+          });
+        }
+      }
+    }
+  }
+  return out;
+}
+
+/** Human-readable confirm text for the collisions above. */
+export function describeSiblingCollisions(collisions: SiblingLegCollision[]): string {
+  const lines = collisions.map(c =>
+    `• ${c.basketName}: ${c.side === 'B' ? 'BUY' : 'SELL'} ${c.strike} ${c.option} (${c.lots} lots)${c.opposite ? ' — OPPOSITE side' : ''}`);
+  return `This contract is already held by another basket:\n${lines.join('\n')}\n\n`
+    + 'Dhan nets positions by security id, so both baskets will share one broker position. '
+    + 'Exits and quantity reconciliation for either basket can then read the pooled total'
+    + (collisions.some(c => c.opposite) ? ', and an exit on an opposite-side leg may be refused (sign mismatch)' : '')
+    + '.\n\nPlace anyway?';
+}

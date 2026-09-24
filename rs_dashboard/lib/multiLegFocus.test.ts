@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert';
 import {
   resolveTemplateLegs, reconcileLegFillDown, reconcileLegWithBroker, legPnl, basketTotalPnl, sortLegsForExit, findLegPosition,
-  computeLegTrailingSL, computeStrategyMetrics, checkStrategyRisk, computeCalendarPayoffCurve, classifyBasketStructure,
+  computeLegTrailingSL, computeStrategyMetrics, checkStrategyRisk, computeCalendarPayoffCurve, classifyBasketStructure, findSiblingLegCollisions,
   type StrategyMetrics, type MultiLegLeg,
 } from './multiLegFocus.ts';
 import type { StrategyTemplate } from './basketStrategies.ts';
@@ -584,3 +584,22 @@ test('classifyBasketStructure: returns null for a shape the classifier only reco
 
 
 
+
+test('findSiblingLegCollisions flags live legs in OTHER baskets on the same contract, ignoring own/closed/other-broker', () => {
+  const mk = (id: string, broker: string, legs: Partial<MultiLegLeg>[]) => ({
+    id, name: id, underlying: 'NIFTY', expiry: '2026-10-27', broker, createdAt: '', updatedAt: '',
+    legs: legs.map((l, i) => ({ id: `${id}${i}`, side: 'S', option: 'CE', strike: 23900, lots: 1, type: 'MARKET', status: 'OPEN', ...l })) as MultiLegLeg[],
+  });
+  const baskets = [
+    mk('A', 'dhan', [{ side: 'B', status: 'DRAFT' }]),
+    mk('B', 'dhan', [{ side: 'S' }, { strike: 24000 }, { status: 'CLOSED' }]),
+    mk('C', 'zerodha', [{ side: 'S' }]),
+  ];
+  const c = findSiblingLegCollisions(baskets, 'A', [{ side: 'B', option: 'CE', strike: 23900, expiry: '2026-10-27' }]);
+  assert.strictEqual(c.length, 1);
+  assert.strictEqual(c[0].basketId, 'B');
+  assert.strictEqual(c[0].opposite, true);
+  assert.strictEqual(findSiblingLegCollisions(baskets, 'A', [{ side: 'B', option: 'PE', strike: 23900, expiry: '2026-10-27' }]).length, 0);
+  assert.strictEqual(findSiblingLegCollisions(baskets, 'A', [{ side: 'B', option: 'CE', strike: 23900, expiry: '2026-11-24' }]).length, 0);
+  assert.strictEqual(findSiblingLegCollisions(baskets, 'B', [{ side: 'S', option: 'CE', strike: 23900, expiry: '2026-10-27' }]).length, 0);
+});

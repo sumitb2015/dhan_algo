@@ -18,6 +18,7 @@ import {
   resolveTemplateLegs, reconcileLegWithBroker, sortLegsForExit, findLegPosition,
   computeLegTrailingSL, computeStrategyMetrics, checkStrategyRisk, fallbackLotSize,
   positionProduct, computeBasketStatus, closedFillFromRow,
+  findSiblingLegCollisions, describeSiblingCollisions,
   type MultiLegLeg, type MultiLegBasket, type StrategyRiskConfig, type MultiLegStatus,
 } from '@/lib/multiLegFocus';
 import { closeOrderProduct } from '@/lib/positionProduct';
@@ -898,6 +899,14 @@ export default function MultiLegFocus() {
     // against ITS OWN expiry's strike map, never the front one.
     const strikeMapFor = (legExpiry: string) => lookupCache[`${basket.underlying}:${legExpiry}`]?.strikes ?? {};
 
+    // Another basket already holding one of these contracts means both share a
+    // single netted broker row — warn before placing, let the user override.
+    const collisions = findSiblingLegCollisions(
+      basketsRef.current, basketId,
+      basket.legs.map(l => ({ side: l.side, option: l.option, strike: l.strike, expiry: l.expiry || basket.expiry })),
+    );
+    if (collisions.length && !window.confirm(describeSiblingCollisions(collisions))) return;
+
     setPlacingMap(prev => ({ ...prev, [basketId]: true }));
 
     const ordered = sortLegsForPlacement(basket.legs);
@@ -1205,6 +1214,10 @@ export default function MultiLegFocus() {
     const qty = params.lots * lotSize;
     const label = `${leg.side === 'B' ? 'BUY' : 'SELL'} ${leg.strike} ${leg.option}`;
 
+    const collisions = findSiblingLegCollisions(
+      basketsRef.current, basketId, [{ side: leg.side, option: leg.option, strike: leg.strike, expiry: legExpiry }]);
+    if (collisions.length && !window.confirm(describeSiblingCollisions(collisions))) return;
+
     const req = resolveOrderRequest(broker, {
       side: leg.side,
       option: leg.option,
@@ -1298,6 +1311,10 @@ export default function MultiLegFocus() {
 
     const qty = params.lots * lotSize;
     const label = `${params.side === 'B' ? 'BUY' : 'SELL'} ${params.strike} ${params.option}`;
+
+    const collisions = findSiblingLegCollisions(
+      basketsRef.current, basketId, [{ side: params.side, option: params.option, strike: params.strike, expiry: legExpiry }]);
+    if (collisions.length && !window.confirm(describeSiblingCollisions(collisions))) return;
 
     const req = resolveOrderRequest(broker, {
       side: params.side,
