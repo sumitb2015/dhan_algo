@@ -10,7 +10,7 @@ import AddLotsModal from './AddLotsModal';
 import AddNewLegModal from './AddNewLegModal';
 import {
   computeLegTrailingSL, computeStrategyMetrics, checkStrategyRisk, computeBasketStatus, computeCalendarPayoffCurve,
-  classifyBasketStructure,
+  classifyBasketStructure, legPnl,
   type MultiLegBasket, type MultiLegLeg, type StrategyRiskConfig,
 } from '@/lib/multiLegFocus';
 import { computePayoff, type PayoffLeg, type PayoffResult } from '@/lib/basketStrategies';
@@ -24,6 +24,8 @@ import PayoffDiagram from '@/components/strategy/PayoffDiagram';
  *  used elsewhere in the dashboard (Baskets.tsx), just without a tracked ATM
  *  IV of its own here. Never a claim about the real market IV. */
 const FALLBACK_IV = 0.15;
+
+type LegSortKey = 'side' | 'option' | 'strike' | 'lots' | 'ltp' | 'expiry' | 'margin' | 'pnl' | 'status';
 
 const UNDERLYINGS = ['NIFTY', 'BANKNIFTY', 'SENSEX', 'CRUDEOIL', 'CRUDEOILM'] as const;
 type Underlying = typeof UNDERLYINGS[number];
@@ -150,6 +152,15 @@ export default function MultiLegStrategyRow({
   const [selectedLegForAddLots, setSelectedLegForAddLots] = useState<MultiLegLeg | null>(null);
   const [isAddNewLegModalOpen, setIsAddNewLegModalOpen] = useState<boolean>(false);
 
+  // Legs-table view state: purely presentational (never written back to the
+  // basket). Sorting is opt-in — with no sort key the legs keep their stored
+  // order, so a draft leg being edited doesn't jump rows as its strike changes.
+  const [legFilter, setLegFilter] = useState<'all' | 'open' | 'closed'>('all');
+  const [legSort, setLegSort] = useState<{ key: LegSortKey; dir: 'asc' | 'desc' } | null>(null);
+  const toggleLegSort = useCallback((key: LegSortKey) => {
+    setLegSort(prev => (!prev || prev.key !== key) ? { key, dir: 'asc' } : prev.dir === 'asc' ? { key, dir: 'desc' } : null);
+  }, []);
+
   const hasPlacedLeg = useMemo(() => {
     return basket.legs.some(l => l.status !== 'DRAFT');
   }, [basket.legs]);
@@ -160,9 +171,43 @@ export default function MultiLegStrategyRow({
 
   const basketStatus = useMemo(() => computeBasketStatus(basket.legs), [basket.legs]);
 
+  const legCounts = useMemo(() => {
+    let closed = 0;
+    for (const l of basket.legs) if (l.status === 'CLOSED') closed++;
+    return { all: basket.legs.length, closed, open: basket.legs.length - closed };
+  }, [basket.legs]);
+
   const crudeMult = broker === 'dhan'
     ? (basket.underlying === 'CRUDEOIL' ? 100 : basket.underlying === 'CRUDEOILM' ? 10 : 1)
     : 1;
+
+  const visibleLegs = useMemo(() => {
+    // No closed legs → chips are hidden, so a stale 'open'/'closed' filter must not linger.
+    const filter = legCounts.closed > 0 ? legFilter : 'all';
+    let legs = filter === 'all' ? basket.legs
+      : basket.legs.filter(l => (filter === 'closed') === (l.status === 'CLOSED'));
+    if (legSort) {
+      const val = (l: MultiLegLeg): number | string => {
+        switch (legSort.key) {
+          case 'side': return l.side;
+          case 'option': return l.option;
+          case 'strike': return l.strike;
+          case 'lots': return l.lots;
+          case 'ltp': return ltpFor(l);
+          case 'expiry': return l.expiry || basket.expiry;
+          case 'margin': return legMargins?.[l.id] ?? 0;
+          case 'pnl': return l.fill ? legPnl(l, ltpFor(l), crudeMult) : 0;
+          case 'status': return l.status;
+        }
+      };
+      const dir = legSort.dir === 'asc' ? 1 : -1;
+      legs = [...legs].sort((x, y) => {
+        const a = val(x), b = val(y);
+        return (typeof a === 'number' && typeof b === 'number' ? a - b : String(a).localeCompare(String(b))) * dir;
+      });
+    }
+    return legs;
+  }, [basket.legs, basket.expiry, legCounts.closed, legFilter, legSort, ltpFor, legMargins, crudeMult]);
 
   const stratMetrics = useMemo(
     () => computeStrategyMetrics(basket.legs, ltpFor, crudeMult),
@@ -880,6 +925,21 @@ export default function MultiLegStrategyRow({
             </div>
           ) : (
             <div className="overflow-x-auto">
+              {legCounts.closed > 0 && (
+                <div className="flex items-center gap-1 pb-1.5" role="group" aria-label="Filter legs by status">
+                  {([['all', 'All', legCounts.all], ['open', 'Open', legCounts.open], ['closed', 'Closed', legCounts.closed]] as const).map(([k, label, n]) => (
+                    <button
+                      key={k}
+                      type="button"
+                      aria-pressed={legFilter === k}
+                      onClick={() => setLegFilter(k)}
+                      className={`px-2 py-0.5 rounded text-xs font-semibold border ${FOCUS_RING} ${legFilter === k ? 'bg-emerald-500/10 border-emerald-500/40 text-emerald-400' : 'bg-zinc-900 border-zinc-800 text-zinc-400 hover:text-zinc-200'}`}
+                    >
+                      {label} <span className="text-zinc-500">{n}</span>
+                    </button>
+                  ))}
+                </div>
+              )}
               <table className="w-full table-fixed text-xs">
                 <colgroup>
                   <col className="w-[5%]" />
@@ -899,24 +959,60 @@ export default function MultiLegStrategyRow({
                 </colgroup>
                 <thead>
                   <tr className="text-xs font-bold text-white border-b border-zinc-800 bg-zinc-800">
-                    <th className="px-2 py-2 text-left">Side</th>
-                    <th className="px-1.5 py-2 text-left">CE/PE</th>
-                    <th className="px-2 py-2 text-left">Strike</th>
-                    <th className="px-1.5 py-2 text-center">Lots</th>
+                    <th className="px-2 py-2 text-left" aria-sort={legSort?.key === 'side' ? (legSort.dir === 'asc' ? 'ascending' : 'descending') : 'none'}>
+                      <button type="button" onClick={() => toggleLegSort('side')} className={`inline-flex w-full items-center gap-0.5 justify-start font-bold hover:text-emerald-300 ${FOCUS_RING}`}>
+                        Side<span aria-hidden className="text-[10px]">{legSort?.key === 'side' ? (legSort.dir === 'asc' ? '▲' : '▼') : ''}</span>
+                      </button>
+                    </th>
+                    <th className="px-1.5 py-2 text-left" aria-sort={legSort?.key === 'option' ? (legSort.dir === 'asc' ? 'ascending' : 'descending') : 'none'}>
+                      <button type="button" onClick={() => toggleLegSort('option')} className={`inline-flex w-full items-center gap-0.5 justify-start font-bold hover:text-emerald-300 ${FOCUS_RING}`}>
+                        CE/PE<span aria-hidden className="text-[10px]">{legSort?.key === 'option' ? (legSort.dir === 'asc' ? '▲' : '▼') : ''}</span>
+                      </button>
+                    </th>
+                    <th className="px-2 py-2 text-left" aria-sort={legSort?.key === 'strike' ? (legSort.dir === 'asc' ? 'ascending' : 'descending') : 'none'}>
+                      <button type="button" onClick={() => toggleLegSort('strike')} className={`inline-flex w-full items-center gap-0.5 justify-start font-bold hover:text-emerald-300 ${FOCUS_RING}`}>
+                        Strike<span aria-hidden className="text-[10px]">{legSort?.key === 'strike' ? (legSort.dir === 'asc' ? '▲' : '▼') : ''}</span>
+                      </button>
+                    </th>
+                    <th className="px-1.5 py-2 text-center" aria-sort={legSort?.key === 'lots' ? (legSort.dir === 'asc' ? 'ascending' : 'descending') : 'none'}>
+                      <button type="button" onClick={() => toggleLegSort('lots')} className={`inline-flex w-full items-center gap-0.5 justify-center font-bold hover:text-emerald-300 ${FOCUS_RING}`}>
+                        Lots<span aria-hidden className="text-[10px]">{legSort?.key === 'lots' ? (legSort.dir === 'asc' ? '▲' : '▼') : ''}</span>
+                      </button>
+                    </th>
                     <th className="px-2 py-2 text-left">Type</th>
-                    <th className="px-2 py-2 text-right">LTP</th>
+                    <th className="px-2 py-2 text-right" aria-sort={legSort?.key === 'ltp' ? (legSort.dir === 'asc' ? 'ascending' : 'descending') : 'none'}>
+                      <button type="button" onClick={() => toggleLegSort('ltp')} className={`inline-flex w-full items-center gap-0.5 justify-end font-bold hover:text-emerald-300 ${FOCUS_RING}`}>
+                        LTP<span aria-hidden className="text-[10px]">{legSort?.key === 'ltp' ? (legSort.dir === 'asc' ? '▲' : '▼') : ''}</span>
+                      </button>
+                    </th>
                     <th className="px-2 py-2 text-left">SL</th>
                     <th className="px-2 py-2 text-left">TP</th>
                     <th className="px-1 py-2 text-center">Trail</th>
-                    <th className="px-1.5 py-2 text-center">Expiry</th>
-                    <th className="px-2 py-2 text-right">Margin</th>
-                    <th className="px-2 py-2 text-right">P&L</th>
-                    <th className="px-1.5 py-2 text-center">Status</th>
+                    <th className="px-1.5 py-2 text-center" aria-sort={legSort?.key === 'expiry' ? (legSort.dir === 'asc' ? 'ascending' : 'descending') : 'none'}>
+                      <button type="button" onClick={() => toggleLegSort('expiry')} className={`inline-flex w-full items-center gap-0.5 justify-center font-bold hover:text-emerald-300 ${FOCUS_RING}`}>
+                        Expiry<span aria-hidden className="text-[10px]">{legSort?.key === 'expiry' ? (legSort.dir === 'asc' ? '▲' : '▼') : ''}</span>
+                      </button>
+                    </th>
+                    <th className="px-2 py-2 text-right" aria-sort={legSort?.key === 'margin' ? (legSort.dir === 'asc' ? 'ascending' : 'descending') : 'none'}>
+                      <button type="button" onClick={() => toggleLegSort('margin')} className={`inline-flex w-full items-center gap-0.5 justify-end font-bold hover:text-emerald-300 ${FOCUS_RING}`}>
+                        Margin<span aria-hidden className="text-[10px]">{legSort?.key === 'margin' ? (legSort.dir === 'asc' ? '▲' : '▼') : ''}</span>
+                      </button>
+                    </th>
+                    <th className="px-2 py-2 text-right" aria-sort={legSort?.key === 'pnl' ? (legSort.dir === 'asc' ? 'ascending' : 'descending') : 'none'}>
+                      <button type="button" onClick={() => toggleLegSort('pnl')} className={`inline-flex w-full items-center gap-0.5 justify-end font-bold hover:text-emerald-300 ${FOCUS_RING}`}>
+                        P&L<span aria-hidden className="text-[10px]">{legSort?.key === 'pnl' ? (legSort.dir === 'asc' ? '▲' : '▼') : ''}</span>
+                      </button>
+                    </th>
+                    <th className="px-1.5 py-2 text-center" aria-sort={legSort?.key === 'status' ? (legSort.dir === 'asc' ? 'ascending' : 'descending') : 'none'}>
+                      <button type="button" onClick={() => toggleLegSort('status')} className={`inline-flex w-full items-center gap-0.5 justify-center font-bold hover:text-emerald-300 ${FOCUS_RING}`}>
+                        Status<span aria-hidden className="text-[10px]">{legSort?.key === 'status' ? (legSort.dir === 'asc' ? '▲' : '▼') : ''}</span>
+                      </button>
+                    </th>
                     <th className="px-2 py-2 text-center">Action</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {basket.legs.map(leg => (
+                  {visibleLegs.map(leg => (
                     <MultiLegLegRow
                       key={leg.id}
                       leg={leg}
