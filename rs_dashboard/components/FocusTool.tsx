@@ -2869,6 +2869,32 @@ export default function FocusTool() {
     }).catch(() => {});
   }, [niftyBridgeExpiry, bankniftyBridgeExpiry, sensexBridgeExpiry]);
 
+  // Self-heal: the effect above fires only when an expiry changes, so a bridge
+  // that dies mid-session (a dashboard restart's PID sweep, a crash) is never
+  // brought back and every premium silently falls back to the slower REST
+  // chain. While it reads down, re-POST start every 15s — the route is
+  // idempotent (start lock + "already running" check), so this is safe.
+  const bridgeDown = ['STOPPED', 'STALE', 'ERROR'].includes(focusWsStatus.status);
+  useEffect(() => {
+    if (!bridgeDown || !niftyBridgeExpiry || !bankniftyBridgeExpiry || !sensexBridgeExpiry) return;
+    const restart = () => {
+      fetch('/api/focus-tool/live-ws', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          action: 'start',
+          expiries: {
+            NIFTY: niftyBridgeExpiry,
+            BANKNIFTY: bankniftyBridgeExpiry,
+            SENSEX: sensexBridgeExpiry,
+          },
+        }),
+      }).catch(() => {});
+    };
+    const t = setInterval(restart, 15_000);
+    return () => clearInterval(t);
+  }, [bridgeDown, niftyBridgeExpiry, bankniftyBridgeExpiry, sensexBridgeExpiry]);
+
   /** Adopt a server-authoritative config: state plus the risk-bar mirrors. */
   const applyServerConfig = useCallback((d: FocusToolConfig) => {
     setConfig(d);
@@ -3740,6 +3766,22 @@ export default function FocusTool() {
       return nextConfig;
     });
   }
+
+  // A saved row can carry an expiry that has since expired (e.g. NIFTY
+  // 2026-09-08 saved weeks ago). The EXPY dropdown silently displays the
+  // nearest listed date for it, but every chain/WS lookup keys on the dead
+  // string — so premiums show "—" and the bridge subscribes to a contract-less
+  // expiry. Snap a flat row to the nearest listed expiry once that underlying's
+  // list has loaded. Never touches a row that is open or holds a fill.
+  useEffect(() => {
+    for (const r of config.rows) {
+      const listed = expiries[r.underlying];
+      if (!listed?.length || !r.expiry || listed.includes(r.expiry)) continue;
+      if (r.fill || r.status === 'entered') continue;
+      updateRow(r.id, { expiry: listed[0] }, true);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- updateRow is re-created every render
+  }, [config.rows, expiries]);
 
   /** Arm a row for the scheduler. Clears the one-entry-per-row latch so a row
    *  that already entered and exited can be deliberately re-armed to trade
