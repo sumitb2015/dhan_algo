@@ -13,7 +13,7 @@
  * - Theme-token compliant: adapts seamlessly to Dark, White, and Beige themes.
  */
 
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { Maximize2, Minimize2, ZoomIn, ZoomOut, RotateCcw, SlidersHorizontal } from 'lucide-react';
 
@@ -124,6 +124,10 @@ export default function PayoffDiagram({
   strikes,
   expectedMove,
 }: PayoffDiagramProps) {
+  const uid = useId().replace(/[^a-zA-Z0-9_-]/g, '');
+  const profitClipId = `sb-clip-profit-${uid}`;
+  const lossClipId = `sb-clip-loss-${uid}`;
+
   const svgRef = useRef<SVGSVGElement | null>(null);
   const [hoverSpot, setHoverSpot] = useState<number | null>(null);
   const [boxW, setBoxW] = useState(900);
@@ -197,11 +201,38 @@ export default function PayoffDiagram({
     const atMinZoom = half <= STEP * 2 + 1e-6;
     const atMaxZoom = half >= fullHalf * 1.15 - 1e-6;
 
-    const visible = curve.filter((c) => c.spot >= xLo && c.spot <= xHi);
+    // Exact edge interpolation so curves cleanly touch the left (xLo) and right (xHi) boundaries
+    const pnlAtLo = pnlAt(curve, xLo);
+    const pnlAtHi = pnlAt(curve, xHi);
+    const visiblePoints = curve.filter((c) => c.spot > xLo && c.spot < xHi);
+    const visible = [
+      ...(pnlAtLo !== null ? [{ spot: xLo, pnl: pnlAtLo }] : []),
+      ...visiblePoints,
+      ...(pnlAtHi !== null ? [{ spot: xHi, pnl: pnlAtHi }] : []),
+    ];
     if (visible.length < 2) return null;
 
-    const visibleToday = todayCurve ? todayCurve.filter((c) => c.spot >= xLo && c.spot <= xHi) : [];
-    const visibleTarget = targetCurve ? targetCurve.filter((c) => c.spot >= xLo && c.spot <= xHi) : [];
+    const visibleToday = todayCurve ? (() => {
+      const todayLo = pnlAt(todayCurve, xLo);
+      const todayHi = pnlAt(todayCurve, xHi);
+      const todayMid = todayCurve.filter((c) => c.spot > xLo && c.spot < xHi);
+      return [
+        ...(todayLo !== null ? [{ spot: xLo, pnl: todayLo }] : []),
+        ...todayMid,
+        ...(todayHi !== null ? [{ spot: xHi, pnl: todayHi }] : []),
+      ];
+    })() : [];
+
+    const visibleTarget = targetCurve ? (() => {
+      const targetLo = pnlAt(targetCurve, xLo);
+      const targetHi = pnlAt(targetCurve, xHi);
+      const targetMid = targetCurve.filter((c) => c.spot > xLo && c.spot < xHi);
+      return [
+        ...(targetLo !== null ? [{ spot: xLo, pnl: targetLo }] : []),
+        ...targetMid,
+        ...(targetHi !== null ? [{ spot: xHi, pnl: targetHi }] : []),
+      ];
+    })() : [];
 
     // --- Smart Y domain: clamp so zero-crossing is prominent ---
     const visiblePnls = [
@@ -213,9 +244,11 @@ export default function PayoffDiagram({
     const rawYMax = Math.max(...visiblePnls);
     const clampedYMin = rawYMax > 0 ? Math.max(rawYMin, -rawYMax * 3) : rawYMin * 1.1;
     const clampedYMax = rawYMin < 0 ? Math.min(rawYMax, Math.abs(rawYMin) * 3) : rawYMax * 1.1;
-    const yPad = (clampedYMax - clampedYMin) * 0.08 || 1;
-    const yLo = clampedYMin - yPad;
-    const yHi = clampedYMax + yPad;
+    const yMinWithZero = Math.min(0, clampedYMin);
+    const yMaxWithZero = Math.max(0, clampedYMax);
+    const yPad = (yMaxWithZero - yMinWithZero) * 0.08 || 1;
+    const yLo = yMinWithZero - yPad;
+    const yHi = yMaxWithZero + yPad;
 
     const sx = (x: number) => PAD.left + ((x - xLo) / (xHi - xLo)) * (W - PAD.left - PAD.right);
     const sy = (y: number) => PAD.top + ((yHi - y) / (yHi - yLo)) * (H_ - PAD.top - PAD.bottom);
@@ -455,8 +488,8 @@ export default function PayoffDiagram({
           onMouseLeave={() => setHoverSpot(null)}
         >
           <defs>
-            <clipPath id="sb-clip-profit"><rect x={0} y={0} width={W} height={zeroY} /></clipPath>
-            <clipPath id="sb-clip-loss"><rect x={0} y={zeroY} width={W} height={H_ - zeroY} /></clipPath>
+            <clipPath id={profitClipId}><rect x={0} y={0} width={W} height={zeroY} /></clipPath>
+            <clipPath id={lossClipId}><rect x={0} y={zeroY} width={W} height={H_ - zeroY} /></clipPath>
           </defs>
 
           {/* Expected Move (±1SD) Shaded Background Area */}
@@ -564,10 +597,10 @@ export default function PayoffDiagram({
           ))}
 
           {/* Payoff curve: green above zero, red below */}
-          <g clipPath="url(#sb-clip-profit)"><path d={model.area} fill="#10b981" fillOpacity={0.18} /></g>
-          <g clipPath="url(#sb-clip-loss)"><path d={model.area} fill="#ef4444" fillOpacity={0.18} /></g>
-          <g clipPath="url(#sb-clip-profit)"><path d={model.line} fill="none" stroke="#10b981" strokeWidth={2} /></g>
-          <g clipPath="url(#sb-clip-loss)"><path d={model.line} fill="none" stroke="#ef4444" strokeWidth={2} /></g>
+          <g clipPath={`url(#${profitClipId})`}><path d={model.area} fill="#10b981" fillOpacity={0.18} /></g>
+          <g clipPath={`url(#${lossClipId})`}><path d={model.area} fill="#ef4444" fillOpacity={0.18} /></g>
+          <g clipPath={`url(#${profitClipId})`}><path d={model.line} fill="none" stroke="#10b981" strokeWidth={2} /></g>
+          <g clipPath={`url(#${lossClipId})`}><path d={model.line} fill="none" stroke="#ef4444" strokeWidth={2} /></g>
 
           {/* T+0 curve: today's mark-to-market Black-Scholes curve */}
           {model.todayLine && (
