@@ -52,6 +52,8 @@ interface MultiLegLegRowProps {
   columns?: LegColumns;
   /** Exit column shown (only when the strategy has a closed leg). */
   showExit?: boolean;
+  /** Strategy-level multiplier (for display of base ratio). */
+  strategyMultiplier?: number;
   /** Live implied volatility as a fraction (0.14 = 14%); 0 when unknown. */
   iv?: number;
   /** Set when the broker shows more quantity at this strike than this
@@ -64,7 +66,7 @@ interface MultiLegLegRowProps {
 }
 
 export default function MultiLegLegRow({
-  leg, allStrikes, ltp, spot, editable, exiting, margin, multiplier = 1, frontExpiry, farExpiry, onChange, onRemove, onExit, onOpenAddLots, onShift, shiftSteps = 1, shiftBusy = false, strikeBlocked = false, columns = DEFAULT_LEG_COLUMNS, showExit = false, iv = 0, qtyWarning,
+  leg, allStrikes, ltp, spot, editable, exiting, margin, multiplier = 1, strategyMultiplier = 1, frontExpiry, farExpiry, onChange, onRemove, onExit, onOpenAddLots, onShift, shiftSteps = 1, shiftBusy = false, strikeBlocked = false, columns = DEFAULT_LEG_COLUMNS, showExit = false, iv = 0, qtyWarning,
 }: MultiLegLegRowProps) {
   const pnl = leg.fill ? legPnl(leg, ltp, multiplier) : 0;
   const pnlColor = pnl > 0 ? 'text-emerald-400' : pnl < 0 ? 'text-rose-400' : 'text-zinc-400';
@@ -134,6 +136,14 @@ export default function MultiLegLegRow({
         <input type="number" min={1} value={leg.lots} disabled={!editable}
           onChange={e => onChange({ lots: Math.max(1, Number(e.target.value) || 1) })}
           className={`h-7 w-12 bg-zinc-900 border border-zinc-700 text-zinc-200 text-xs font-mono rounded px-1 text-center focus:outline-none focus:border-emerald-500 disabled:opacity-50 ${FOCUS_RING}`} />
+        {(leg.ratio != null || (strategyMultiplier != null && strategyMultiplier > 1)) && (
+          <span
+            className="block text-[9px] font-mono text-zinc-500 mt-0.5 tabular-nums"
+            title={`Base ratio: ${Number((leg.ratio ?? 1).toFixed(2))} lot(s) · Strategy Multiplier: ${strategyMultiplier ?? 1}×`}
+          >
+            {Number((leg.ratio ?? 1).toFixed(2))}× ratio
+          </span>
+        )}
         {qtyWarning && (
           <span
             className="mt-0.5 flex items-center justify-center gap-0.5 text-[9px] font-bold text-amber-400"

@@ -1643,14 +1643,19 @@ class DhanHelper:
         try:
             res = self.dhan.convert_position(
                 security_id=str(security_id),
-                trading_symbol=trading_symbol,
                 exchange_segment=exchange_segment,
                 position_type=position_type.upper(),
                 convert_qty=int(convert_qty),
                 from_product_type=from_product_type.upper(),
                 to_product_type=to_product_type.upper(),
             )
-            if isinstance(res, dict) and res.get('status') == 'success':
+            # Dhan POST /positions/convert returns HTTP 202 Accepted with an empty body, which causes
+            # the dhanhq SDK parser (_parse_response) to fail json_loads and return 'Expecting value: line 1 column 1'.
+            # That error remark actually indicates the conversion was accepted by Dhan.
+            is_success = isinstance(res, dict) and (
+                res.get('status') == 'success' or 'Expecting value' in str(res.get('remarks', ''))
+            )
+            if is_success:
                 logger.info(
                     f"Position converted: {trading_symbol} {convert_qty} qty "
                     f"{from_product_type} → {to_product_type}"

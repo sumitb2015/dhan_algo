@@ -497,9 +497,10 @@ export default function MultiLegFocus() {
             expiry: activeExpiry,
             broker,
             presetKey: 'short-strangle',
+            multiplier: 1,
             legs: [
-              { id: '1', side: 'S', option: 'CE', strike: atm + step, expiry: activeExpiry, lots: 1, type: 'MARKET', status: 'DRAFT' },
-              { id: '2', side: 'S', option: 'PE', strike: atm - step, expiry: activeExpiry, lots: 1, type: 'MARKET', status: 'DRAFT' },
+              { id: '1', side: 'S', option: 'CE', strike: atm + step, expiry: activeExpiry, ratio: 1, lots: 1, type: 'MARKET', status: 'DRAFT' },
+              { id: '2', side: 'S', option: 'PE', strike: atm - step, expiry: activeExpiry, ratio: 1, lots: 1, type: 'MARKET', status: 'DRAFT' },
             ],
             createdAt: new Date().toISOString(),
             updatedAt: new Date().toISOString(),
@@ -720,7 +721,7 @@ export default function MultiLegFocus() {
               return b;
             }
             if (tpl) {
-              newLegs = resolveTemplateLegs(tpl, newAtm, strikes, step, newExp, newFarExp);
+              newLegs = resolveTemplateLegs(tpl, newAtm, strikes, step, newExp, newFarExp, b.multiplier || 1);
             } else {
               const oldPair = `${b.underlying}:${b.expiry}`;
               const oldStrikes = chainData[oldPair]?.strikes?.length ? chainData[oldPair].strikes : [];
@@ -874,7 +875,8 @@ export default function MultiLegFocus() {
       farExpiry: farExp && farExp !== exp ? farExp : undefined,
       broker,
       presetKey: tpl.key,
-      legs: resolveTemplateLegs(tpl, atm, strikes, step, exp, farExp),
+      multiplier: 1,
+      legs: resolveTemplateLegs(tpl, atm, strikes, step, exp, farExp, 1),
       riskConfig: {
         targetValue: undefined,
         targetUnit: 'pts',
@@ -1683,6 +1685,142 @@ export default function MultiLegFocus() {
     await addNewLegCore(basketId, params);
   }, [addNewLegCore]);
 
+  const [scalingMap, setScalingMap] = useState<Record<string, boolean>>({});
+
+  const scaleStrategy = useCallback(async (basketId: string, multiplierDelta: number = 1) => {
+    if (scalingMap[basketId]) return;
+    const basket = basketsRef.current.find(b => b.id === basketId);
+    if (!basket) return;
+
+    const openLegs = basket.legs.filter(l => l.status === 'OPEN');
+    if (!openLegs.length) return;
+
+    if (!hasAuthenticatedBroker) {
+      addToast('error', 'No broker logged in', 'Log in before placing orders');
+      return;
+    }
+
+    setScalingMap(prev => ({ ...prev, [basketId]: true }));
+
+    try {
+      const currentMult = basket.multiplier || 1;
+      const newMult = currentMult + multiplierDelta;
+
+      // Sibling collisions check
+      const collisions = findSiblingLegCollisions(
+        basketsRef.current, basketId,
+        openLegs.map(l => ({ side: l.side, option: l.option, strike: l.strike, expiry: l.expiry || basket.expiry })),
+      );
+      if (collisions.length && !window.confirm(describeSiblingCollisions(collisions))) return;
+
+      // Invariant 9: 2-phase placement (BUYs first, then SELLs)
+      const buyLegs = openLegs.filter(l => l.side === 'B');
+      const sellLegs = openLegs.filter(l => l.side === 'S');
+
+      const placeScaleLeg = async (leg: MultiLegLeg) => {
+        const legExpiry = leg.expiry || basket.expiry;
+        const pair = `${basket.underlying}:${legExpiry}`;
+        const lookup = lookupCache[pair];
+        const strikeMap = lookup?.strikes ?? {};
+        const lotSize = lookup?.lotSize ?? fallbackLotSize(basket.underlying as Underlying, broker);
+        const baseRatio = leg.ratio ?? Math.max(1, Math.round(leg.lots / currentMult));
+        const addLots = baseRatio * multiplierDelta;
+        const qty = addLots * lotSize;
+
+        const req = resolveOrderRequest(broker, {
+          side: leg.side,
+          option: leg.option,
+          strike: leg.strike,
+          qty,
+          type: 'MARKET',
+          underlying: basket.underlying as Underlying,
+          productType: 'MARGIN',
+        }, strikeMap);
+
+        if (!req) throw new Error(`Could not resolve security for ${leg.strike} ${leg.option}`);
+
+        const res = await fetch(req.url, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(req.body),
+        });
+        const j = await res.json() as { success: boolean; order_id?: string; price?: number; error?: string };
+        if (!j.success) throw new Error(j.error || `Order failed for ${leg.strike} ${leg.option}`);
+
+        const currentLtp = ltpFor(basket, leg);
+        const fillPrice = (j.price && j.price > 0) ? j.price : (currentLtp > 0 ? currentLtp : (leg.price ?? 0));
+        const oldQty = (leg.fill?.qty && leg.fill.qty > 0) ? leg.fill.qty : (leg.lots * lotSize);
+        const oldAvg = (leg.fill?.avgPrice && leg.fill.avgPrice > 0) ? leg.fill.avgPrice : (leg.price || currentLtp);
+        const newTotalQty = oldQty + qty;
+        const newAvgPrice = ((oldAvg * oldQty) + (fillPrice * qty)) / newTotalQty;
+        const newLots = leg.lots + addLots;
+
+        // Immediately update leg fill ledger so partial fills are never orphaned (Invariant 1)
+        patchLegs(basketId, legs => legs.map(l => {
+          if (l.id !== leg.id) return l;
+          return {
+            ...l,
+            lots: newLots,
+            price: newAvgPrice,
+            fill: {
+              qty: newTotalQty,
+              avgPrice: newAvgPrice,
+              orderId: j.order_id ?? l.fill?.orderId,
+            },
+          };
+        }));
+
+        return {
+          legId: leg.id,
+          newLots,
+          newAvgPrice,
+          newTotalQty,
+          orderId: j.order_id,
+        };
+      };
+
+      // Phase 1: Place BUY legs concurrently
+      const buyResults = await Promise.all(buyLegs.map(placeScaleLeg));
+
+      // Phase 2: Place SELL legs concurrently (only if all BUYs succeeded)
+      const sellResults = await Promise.all(sellLegs.map(placeScaleLeg));
+
+      const allResults = [...buyResults, ...sellResults];
+      const resultMap = new Map(allResults.map(r => [r.legId, r]));
+
+      // Update basket legs and multiplier (re-reading basketsRef.current post-await per Invariant 7)
+      const latestBaskets = basketsRef.current;
+      const curBasket = latestBaskets.find(b => b.id === basketId) ?? basket;
+      const updatedLegs = curBasket.legs.map(l => {
+        const res = resultMap.get(l.id);
+        if (!res) return l;
+        return {
+          ...l,
+          lots: res.newLots,
+          price: res.newAvgPrice,
+          fill: {
+            qty: res.newTotalQty,
+            avgPrice: res.newAvgPrice,
+            orderId: res.orderId ?? l.fill?.orderId,
+          },
+        };
+      });
+
+      updateBasket(basketId, {
+        multiplier: newMult,
+        legs: updatedLegs,
+      });
+
+      addToast('success', `Scaled ${basket.name || basket.underlying} to ${newMult}×`, `Added +${multiplierDelta}× to all ${openLegs.length} open legs`);
+      pollFunds();
+      fetchMarginsForBaskets();
+    } catch (e) {
+      addToast('error', 'Scale strategy failed', String(e));
+    } finally {
+      setScalingMap(prev => ({ ...prev, [basketId]: false }));
+    }
+  }, [hasAuthenticatedBroker, broker, lookupCache, ltpFor, updateBasket, patchLegs, addToast, pollFunds, fetchMarginsForBaskets]);
+
 
   // ── Shift legs N strikes (roll: close old leg, reopen at strike ± N) ──
   // The old leg stays in the basket as CLOSED (realized P&L kept); the new leg is
@@ -2431,6 +2569,8 @@ export default function MultiLegFocus() {
                 onLegColumnsChange={changeLegColumns}
                 onAddLots={params => addLotsToLeg(basket.id, params)}
                 onAddNewLeg={params => addNewLegToBasket(basket.id, params)}
+                onScaleStrategy={multiplierDelta => scaleStrategy(basket.id, multiplierDelta)}
+                scaling={!!scalingMap[basket.id]}
                 placing={!!placingMap[basket.id]}
                 exiting={!!exitingMap[basket.id]}
                 exitingLegs={exitingLegs}

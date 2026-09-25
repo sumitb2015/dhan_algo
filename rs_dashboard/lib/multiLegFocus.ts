@@ -25,6 +25,8 @@ export interface MultiLegLeg {
    *  every caller must read it as `leg.expiry || basket.expiry`, never bare. */
   expiry?: string;
   lots: number;
+  /** Base ratio for strategy-level multiplier scaling. */
+  ratio?: number;
   type: 'MARKET' | 'LIMIT';
   price?: number;              // manual override, only used when type === 'LIMIT'
   /** This basket's own fill ledger for this leg — never derived from broker net qty. */
@@ -80,6 +82,8 @@ export interface MultiLegBasket {
   farExpiry?: string;
   broker: string;
   presetKey?: string;
+  /** Strategy-level lot multiplier (default 1). */
+  multiplier?: number;
   legs: MultiLegLeg[];
   riskConfig?: StrategyRiskConfig;
   createdAt: string;
@@ -101,17 +105,51 @@ export function resolveTemplateLegs(
   step: number,
   frontExpiry: string = '',
   farExpiry?: string,
+  multiplier: number = 1,
 ): MultiLegLeg[] {
-  return template.legs.map(tl => ({
-    id: newLegId(),
-    side: tl.side,
-    option: tl.option,
-    strike: nearestStrike(allStrikes, atmStrike + tl.offset * step) ?? atmStrike,
-    expiry: tl.expiryRole === 'far' ? (farExpiry || frontExpiry) : frontExpiry,
-    lots: tl.ratio,
-    type: 'MARKET' as const,
-    status: 'DRAFT' as const,
-  }));
+  const safe = isNaN(multiplier) || !multiplier ? 1 : multiplier;
+  const m = Math.max(1, Math.min(50, Math.round(safe)));
+  return template.legs.map(tl => {
+    const baseRatio = Math.max(1, Math.round(tl.ratio || 1));
+    return {
+      id: newLegId(),
+      side: tl.side,
+      option: tl.option,
+      strike: nearestStrike(allStrikes, atmStrike + tl.offset * step) ?? atmStrike,
+      expiry: tl.expiryRole === 'far' ? (farExpiry || frontExpiry) : frontExpiry,
+      ratio: baseRatio,
+      lots: Math.max(1, Math.round(baseRatio * m)),
+      type: 'MARKET' as const,
+      status: 'DRAFT' as const,
+    };
+  });
+}
+
+/**
+ * Scales a basket's multiplier and updates every leg's lots according to its ratio.
+ * Clamps multiplier between 1 and 50.
+ */
+export function scaleBasketMultiplier(basket: MultiLegBasket, newMultiplier: number): MultiLegBasket {
+  const safe = isNaN(newMultiplier) || !newMultiplier ? 1 : newMultiplier;
+  const clampedMultiplier = Math.max(1, Math.min(50, Math.round(safe)));
+  const currentBasketMultiplier = Math.max(1, basket.multiplier && !isNaN(basket.multiplier) ? basket.multiplier : 1);
+
+  const updatedLegs = basket.legs.map(leg => {
+    const rawRatio = leg.ratio ?? (leg.lots ? leg.lots / currentBasketMultiplier : 1);
+    const baseRatio = Math.max(1, Math.round(isNaN(rawRatio) ? 1 : rawRatio));
+    return {
+      ...leg,
+      ratio: baseRatio,
+      lots: Math.max(1, Math.round(baseRatio * clampedMultiplier)),
+    };
+  });
+
+  return {
+    ...basket,
+    multiplier: clampedMultiplier,
+    legs: updatedLegs,
+    updatedAt: new Date().toISOString(),
+  };
 }
 
 /**
@@ -390,7 +428,10 @@ export function computeStrategyMetrics(
     totalPnlRupees += legPnl(leg, current, multiplier);
   }
 
-  const capitalPts = Math.abs(netCreditDebit) > 0 ? Math.abs(netCreditDebit) : combinedEntryPts;
+  // Capital basis for percentage: use combined gross entry points across all legs (total premium in play).
+  // Never prioritize Math.abs(netCreditDebit) because ratio spreads, butterflies, calendars, and near-zero cost
+  // combos have a net credit/debit near zero (e.g. 1.3 pts), which causes wild, distorted percentages (e.g. +54.3%, -84.6%).
+  const capitalPts = combinedEntryPts > 0 ? combinedEntryPts : Math.abs(netCreditDebit);
   const pnlPct = capitalPts > 0 ? (pnlPts / capitalPts) * 100 : 0;
 
   return {

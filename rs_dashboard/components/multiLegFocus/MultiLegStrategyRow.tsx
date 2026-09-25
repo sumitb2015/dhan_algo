@@ -13,7 +13,7 @@ import { DEFAULT_LEG_COLUMNS, type LegColumns } from '@/lib/legColumns';
 import {
   computeLegTrailingSL, computeStrategyMetrics, checkStrategyRisk, computeBasketStatus, computeCalendarPayoffCurve,
   classifyBasketStructure, legPnl, legAvgPrice, legPnlPct, legQtyUnits,
-  findSiblingLegCollisions, type SiblingLegCollision,
+  findSiblingLegCollisions, type SiblingLegCollision, scaleBasketMultiplier,
   type MultiLegBasket, type MultiLegLeg, type StrategyRiskConfig,
 } from '@/lib/multiLegFocus';
 import { computePayoff, type PayoffLeg, type PayoffResult } from '@/lib/basketStrategies';
@@ -104,6 +104,9 @@ export interface MultiLegStrategyRowProps {
     orderType: 'MARKET' | 'LIMIT';
     limitPrice?: number;
   }) => Promise<void>;
+  /** Scale all open legs of this strategy by adding N multiplier units (BUYs first, then SELLs). */
+  onScaleStrategy?: (multiplierDelta: number) => Promise<void>;
+  scaling?: boolean;
   placing: boolean;
   exiting: boolean;
   exitingLegs: Set<string>;
@@ -144,6 +147,8 @@ export default function MultiLegStrategyRow({
   onLegColumnsChange,
   onAddLots,
   onAddNewLeg,
+  onScaleStrategy,
+  scaling = false,
   placing,
   exiting,
   exitingLegs,
@@ -171,6 +176,7 @@ export default function MultiLegStrategyRow({
   // opens it only when they actually want to look at the curve.
   const [showPayoffChart, setShowPayoffChart] = useState(false);
   const [confirmPlace, setConfirmPlace] = useState(false);
+  const [confirmScale, setConfirmScale] = useState(false);
   const [shiftSteps, setShiftSteps] = useState(1);   // per-strategy Steps stepper (UI only, not persisted)
   const [shifting, setShifting] = useState(false);
   const runShift = useCallback(async (legIds: string[], direction: 'UP' | 'DOWN') => {
@@ -178,6 +184,17 @@ export default function MultiLegStrategyRow({
     setShifting(true);
     try { await onShiftLegs(legIds, direction, shiftSteps); } finally { setShifting(false); }
   }, [onShiftLegs, shiftSteps]);
+
+  const handleScaleStrategy = useCallback(async () => {
+    if (!onScaleStrategy) return;
+    if (!confirmScale) {
+      setConfirmScale(true);
+      setTimeout(() => setConfirmScale(false), 4000);
+      return;
+    }
+    setConfirmScale(false);
+    await onScaleStrategy(1);
+  }, [onScaleStrategy, confirmScale]);
   const [selectedLegForAddLots, setSelectedLegForAddLots] = useState<MultiLegLeg | null>(null);
   const [isAddNewLegModalOpen, setIsAddNewLegModalOpen] = useState<boolean>(false);
 
@@ -503,6 +520,12 @@ export default function MultiLegStrategyRow({
     return (payoffResult.maxProfit / basketMargin) * 100;
   }, [payoffResult, basketMargin]);
 
+  // Current P&L as a % of margin blocked (Return on Margin / Capital)
+  const pnlPctOfMargin = useMemo(() => {
+    if (!basketMargin || basketMargin <= 0) return null;
+    return (totalPnl / basketMargin) * 100;
+  }, [totalPnl, basketMargin]);
+
   const maxLossDisplay = useMemo(() => {
     if (!payoffResult) return '—';
     if (payoffResult.maxLossUnlimited) return 'Unlimited';
@@ -546,6 +569,17 @@ export default function MultiLegStrategyRow({
     onUpdate({ riskConfig: nextRisk });
   }, [strategyRisk, onUpdate]);
 
+  const currentMultiplier = basket.multiplier ?? 1;
+
+  const handleMultiplierChange = useCallback((newMultiplier: number) => {
+    if (hasPlacedLeg) return;
+    const scaled = scaleBasketMultiplier(basket, newMultiplier);
+    onUpdate({
+      multiplier: scaled.multiplier,
+      legs: scaled.legs,
+    });
+  }, [basket, hasPlacedLeg, onUpdate]);
+
   const updateLeg = useCallback((legId: string, patch: Partial<MultiLegLeg>) => {
     const updatedLegs = basket.legs.map(l => {
       if (l.id !== legId) return l;
@@ -560,13 +594,19 @@ export default function MultiLegStrategyRow({
         return { ...l, ...allowed };
       }
       const next = { ...l, ...patch };
+      // When lots are directly edited in draft mode, update base ratio so subsequent multiplier changes scale proportionally
+      if (patch.lots !== undefined) {
+        const safeLots = isNaN(patch.lots) || patch.lots < 1 ? 1 : Math.round(patch.lots);
+        next.lots = safeLots;
+        next.ratio = Math.max(1, Math.round(safeLots / currentMultiplier));
+      }
       // Toggling a leg onto another expiry: a strike that isn't tradable there (far expiry, not a
       // multiple of 100) snaps to the nearest one that is, instead of leaving an unplaceable leg.
       if (patch.expiry) next.strike = snapToAllowed(basket.underlying, patch.expiry, expiries, next.strike, allStrikes);
       return next;
     });
     onUpdate({ legs: updatedLegs });
-  }, [basket.legs, basket.underlying, hasPlacedLeg, onUpdate, expiries, allStrikes]);
+  }, [basket.legs, basket.underlying, currentMultiplier, hasPlacedLeg, onUpdate, expiries, allStrikes]);
 
   const removeLeg = useCallback((legId: string) => {
     if (hasPlacedLeg) return;
@@ -582,12 +622,13 @@ export default function MultiLegStrategyRow({
       option: 'CE',
       strike: atm,
       expiry: basket.expiry,
-      lots: 1,
+      ratio: 1,
+      lots: 1 * currentMultiplier,
       type: 'MARKET',
       status: 'DRAFT',
     };
     onUpdate({ legs: [...basket.legs, newLeg] });
-  }, [hasPlacedLeg, atmStrike, allStrikes, basket.legs, basket.underlying, basket.expiry, expiries, onUpdate]);
+  }, [hasPlacedLeg, atmStrike, allStrikes, basket.legs, basket.underlying, basket.expiry, currentMultiplier, expiries, onUpdate]);
 
   // Only blocks once margin has actually been computed for this exact
   // composition — before that resolves, `basketMargin` is undefined and this
@@ -652,11 +693,16 @@ export default function MultiLegStrategyRow({
              so show them as plain compact text once placed and keep the real
              editable dropdowns only for a still-DRAFT basket. */}
           {hasPlacedLeg ? (
-            <span className="text-xs font-bold text-zinc-300 whitespace-nowrap">
-              {basket.underlying} <span className="text-zinc-600">·</span> {basket.expiry}
-              {hasMixedExpiry && basket.farExpiry && (
-                <span className="text-fuchsia-400"> / {basket.farExpiry}</span>
-              )}
+            <span className="text-xs font-bold text-zinc-300 whitespace-nowrap flex items-center gap-1.5">
+              <span>
+                {basket.underlying} <span className="text-zinc-600">·</span> {basket.expiry}
+                {hasMixedExpiry && basket.farExpiry && (
+                  <span className="text-fuchsia-400"> / {basket.farExpiry}</span>
+                )}
+              </span>
+              <span className="px-1.5 py-0.5 rounded text-[10px] font-mono font-bold text-amber-400 bg-amber-500/10 border border-amber-500/20" title={`Strategy Multiplier: ${currentMultiplier}×`}>
+                {currentMultiplier}×
+              </span>
             </span>
           ) : (
             <>
@@ -714,6 +760,41 @@ export default function MultiLegStrategyRow({
                   </select>
                 </div>
               )}
+
+              {/* Strategy Multiplier Stepper */}
+              <div className="flex items-center gap-1.5 h-7 bg-zinc-950 border border-zinc-700/80 rounded px-1.5" title="Strategy Multiplier: scales all legs according to their ratio">
+                <label className="text-[10px] text-zinc-400 font-semibold uppercase select-none">Mult:</label>
+                <div className="inline-flex items-center rounded border border-zinc-700 bg-zinc-900 overflow-hidden h-5">
+                  <button
+                    type="button"
+                    onClick={() => handleMultiplierChange(currentMultiplier - 1)}
+                    disabled={currentMultiplier <= 1}
+                    className="w-5 h-full flex items-center justify-center text-zinc-400 hover:text-white hover:bg-zinc-800 disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
+                    title="Decrease multiplier"
+                  >
+                    <Minus className="w-3 h-3" />
+                  </button>
+                  <RuleNumInput
+                    value={currentMultiplier}
+                    min={1}
+                    step={1}
+                    onCommit={val => {
+                      if (val != null) handleMultiplierChange(val);
+                    }}
+                    className="w-8 h-full bg-transparent border-0 text-center font-mono font-bold text-xs text-amber-400 tabular-nums focus:outline-none focus:ring-0 p-0"
+                  />
+                  <span className="text-[10px] font-bold text-amber-400 pr-1 select-none">×</span>
+                  <button
+                    type="button"
+                    onClick={() => handleMultiplierChange(currentMultiplier + 1)}
+                    disabled={currentMultiplier >= 50}
+                    className="w-5 h-full flex items-center justify-center text-zinc-400 hover:text-white hover:bg-zinc-800 disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
+                    title="Increase multiplier"
+                  >
+                    <Plus className="w-3 h-3" />
+                  </button>
+                </div>
+              </div>
             </>
           )}
         </div>
@@ -759,9 +840,14 @@ export default function MultiLegStrategyRow({
           )}
 
           {/* Strategy Total P&L */}
-          <span className={`h-7 flex items-center px-2.5 rounded-lg text-xs font-bold font-mono tabular-nums border ${
-            totalPnl >= 0 ? 'text-emerald-400 border-emerald-500/30 bg-emerald-500/5' : 'text-rose-400 border-rose-500/30 bg-rose-500/5'
-          }`}>
+          <span
+            className={`h-7 flex items-center px-2.5 rounded-lg text-xs font-bold font-mono tabular-nums border ${
+              totalPnl >= 0 ? 'text-emerald-400 border-emerald-500/30 bg-emerald-500/5' : 'text-rose-400 border-rose-500/30 bg-rose-500/5'
+            }`}
+            title={`Strategy P&L: ${totalPnl >= 0 ? '+' : ''}${fmtMoney(totalPnl)}${
+              stratMetrics.combinedEntryPts > 0 ? ` (${stratMetrics.pnlPct >= 0 ? '+' : ''}${stratMetrics.pnlPct.toFixed(1)}% of premium)` : ''
+            }${pnlPctOfMargin != null ? ` · ${pnlPctOfMargin >= 0 ? '+' : ''}${pnlPctOfMargin.toFixed(2)}% of margin` : ''}`}
+          >
             {totalPnl >= 0 ? '+' : ''}{fmtMoney(totalPnl)}
             {stratMetrics.combinedEntryPts > 0 && (
               <span className="ml-1.5 text-[10px] opacity-80">
@@ -874,6 +960,22 @@ export default function MultiLegStrategyRow({
                   </div>
                 );
               })()}
+              {onScaleStrategy && (
+                <button
+                  type="button"
+                  onClick={handleScaleStrategy}
+                  disabled={scaling || shifting || exiting || exitingLegs.size > 0}
+                  title="Scale this active strategy by adding +1× lots to all open legs (BUYs first, then SELLs)"
+                  className={`h-7 px-2.5 inline-flex items-center gap-1 text-[11px] font-bold rounded-lg border transition-all disabled:opacity-50 disabled:cursor-not-allowed ${
+                    confirmScale
+                      ? 'bg-amber-500/20 border-amber-500/50 text-amber-200'
+                      : 'border-amber-500/40 bg-amber-500/10 text-amber-300 hover:bg-amber-500/20'
+                  } ${FOCUS_RING}`}
+                >
+                  {scaling ? <Loader2 className="w-3 h-3 animate-spin" /> : <Plus className="w-3 h-3" />}
+                  {scaling ? 'Scaling…' : confirmScale ? 'Confirm Scale (+1×)?' : 'Scale (+1×)'}
+                </button>
+              )}
               {onAddNewLeg && (
                 <button
                   type="button"
@@ -1275,6 +1377,7 @@ export default function MultiLegStrategyRow({
                       exiting={exitingLegs.has(leg.id)}
                       margin={legMargins?.[leg.id]}
                       multiplier={crudeMult}
+                      strategyMultiplier={currentMultiplier}
                       frontExpiry={basket.expiry}
                       farExpiry={basket.farExpiry}
                       onChange={patch => updateLeg(leg.id, patch)}

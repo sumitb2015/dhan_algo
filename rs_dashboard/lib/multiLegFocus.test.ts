@@ -3,8 +3,8 @@ import assert from 'node:assert';
 import {
   resolveTemplateLegs, reconcileLegFillDown, reconcileLegWithBroker, legPnl, basketTotalPnl, sortLegsForExit, findLegPosition,
   computeLegTrailingSL, computeStrategyMetrics, checkStrategyRisk, computeCalendarPayoffCurve, classifyBasketStructure, findSiblingLegCollisions,
-  formatExpiryLabel, legAvgPrice, legExitPrice, legQtyUnits, legPnlPct, legOtmPct,
-  type StrategyMetrics, type MultiLegLeg,
+  formatExpiryLabel, legAvgPrice, legExitPrice, legQtyUnits, legPnlPct, legOtmPct, scaleBasketMultiplier,
+  type StrategyMetrics, type MultiLegLeg, type MultiLegBasket,
 } from './multiLegFocus.ts';
 import type { StrategyTemplate } from './basketStrategies.ts';
 
@@ -532,6 +532,49 @@ test('computeStrategyMetrics: unpriced open legs (ltp <= 0) freeze at entry and 
   assert.strictEqual(checkStrategyRisk(metrics, { slValue: 10, slUnit: 'pts', armed: true, targetUnit: 'pts' }), null);
 });
 
+test('computeStrategyMetrics: ratio spreads and combos calculate pnlPct against combinedEntryPts, not tiny netCreditDebit', () => {
+  // Put Ratio Backspread (4x Sell @ 129.90, 2x Buy @ 232.225)
+  // combinedEntryPts = 519.6 + 464.45 = 984.05 pts
+  // netCreditDebit = 519.6 - 464.45 = +55.15 pts (tiny residual net credit)
+  const legs: MultiLegLeg[] = [
+    { id: '1', side: 'S', option: 'PE', strike: 22500, lots: 4, type: 'MARKET', status: 'OPEN', fill: { qty: 260, avgPrice: 129.90 } },
+    { id: '2', side: 'B', option: 'PE', strike: 22900, lots: 2, type: 'MARKET', status: 'OPEN', fill: { qty: 130, avgPrice: 232.225 } },
+  ];
+  // Suppose current market has PE 22500 @ 120 and PE 22900 @ 227.4
+  // Sell leg gain: (129.90 - 120.00) * 4 = +39.6 pts
+  // Buy leg loss: (227.40 - 232.225) * 2 = -9.65 pts
+  // Net pnlPts = +29.95 pts (totalPnlRupees = 29.95 * 65 = +1,946.75)
+  const ltpFor = (l: MultiLegLeg) => (l.strike === 22500 ? 120.00 : 227.40);
+  const metrics = computeStrategyMetrics(legs, ltpFor);
+
+  assert.strictEqual(metrics.combinedEntryPts, 984.05);
+  assert.strictEqual(Math.round(metrics.pnlPts * 100) / 100, 29.95);
+  // Must be ~3.04% (29.95 / 984.05), NOT +54.3% (29.95 / 55.15)!
+  assert.strictEqual(Math.round(metrics.pnlPct * 100) / 100, 3.04);
+});
+
+test('computeStrategyMetrics: broken wing butterfly with near-zero net debit does not blow up pnlPct', () => {
+  // Call Broken Wing with net debit of ~1.30 pts (Buy 1x @ 117.25, Sell 2x @ 64.65, Buy 1x @ 13.35)
+  // combinedEntryPts = 117.25 + 129.30 + 13.35 = 259.90 pts
+  // netCreditDebit = 129.30 - 117.25 - 13.35 = -1.30 pts
+  const legs: MultiLegLeg[] = [
+    { id: '1', side: 'B', option: 'CE', strike: 23300, lots: 1, type: 'MARKET', status: 'OPEN', fill: { qty: 65, avgPrice: 117.25 } },
+    { id: '2', side: 'S', option: 'CE', strike: 23450, lots: 2, type: 'MARKET', status: 'OPEN', fill: { qty: 130, avgPrice: 64.65 } },
+    { id: '3', side: 'B', option: 'CE', strike: 23800, lots: 1, type: 'MARKET', status: 'OPEN', fill: { qty: 65, avgPrice: 13.35 } },
+  ];
+  // Suppose strategy is down ~1.1 pts (-71.5 rupees)
+  const ltpFor = (l: MultiLegLeg) => {
+    if (l.strike === 23300) return 116.50; // -0.75
+    if (l.strike === 23450) return 65.00;  // -0.70 (2x = -0.70)
+    return 13.70;                          // +0.35
+  };
+  const metrics = computeStrategyMetrics(legs, ltpFor);
+  assert.strictEqual(metrics.combinedEntryPts, 259.90);
+  assert.strictEqual(Math.round(metrics.pnlPts * 100) / 100, -1.1);
+  // Must be -0.42% (-1.1 / 259.90), NOT -84.6% (-1.1 / 1.30)!
+  assert.strictEqual(Math.round(metrics.pnlPct * 100) / 100, -0.42);
+});
+
 test('classifyBasketStructure: legs edited from an Iron Condor preset into a Batman shape are relabeled Batman, not the stale preset', () => {
   // Same shape as the real basket that triggered this fix: created from the
   // 'iron-condor' preset, then edited so the long strikes sit INSIDE the
@@ -659,4 +702,88 @@ test('formatExpiryLabel renders an ISO date compactly and leaves anything else a
   assert.strictEqual(formatExpiryLabel('soon'), 'soon');
   assert.strictEqual(formatExpiryLabel(''), '');
   assert.strictEqual(formatExpiryLabel(undefined), '');
+});
+
+test('resolveTemplateLegs preserves ratio and scales lots with multiplier', () => {
+  const template: StrategyTemplate = {
+    key: 'batman', name: 'Batman',
+    legs: [
+      { side: 'B', option: 'PE', offset: -4, ratio: 1 },
+      { side: 'S', option: 'PE', offset: -2, ratio: 2 },
+      { side: 'S', option: 'CE', offset: 2, ratio: 2 },
+      { side: 'B', option: 'CE', offset: 4, ratio: 1 },
+    ],
+  };
+  const strikes = [23200, 23400, 23600, 23800, 24000, 24200, 24400, 24600, 24800];
+  const legs = resolveTemplateLegs(template, 24000, strikes, 100, '2026-10-01', undefined, 3);
+  assert.strictEqual(legs.length, 4);
+  assert.strictEqual(legs[0].ratio, 1);
+  assert.strictEqual(legs[0].lots, 3);
+  assert.strictEqual(legs[1].ratio, 2);
+  assert.strictEqual(legs[1].lots, 6);
+  assert.strictEqual(legs[2].ratio, 2);
+  assert.strictEqual(legs[2].lots, 6);
+  assert.strictEqual(legs[3].ratio, 1);
+  assert.strictEqual(legs[3].lots, 3);
+});
+
+test('scaleBasketMultiplier scales all legs proportionally and clamps 1..50', () => {
+  const basket: MultiLegBasket = {
+    id: 'b1',
+    underlying: 'NIFTY',
+    expiry: '2026-10-01',
+    broker: 'dhan',
+    multiplier: 1,
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+    legs: [
+      { id: 'l1', side: 'B', option: 'CE', strike: 24200, ratio: 1, lots: 1, type: 'MARKET', status: 'DRAFT' },
+      { id: 'l2', side: 'S', option: 'CE', strike: 24400, ratio: 2, lots: 2, type: 'MARKET', status: 'DRAFT' },
+    ],
+  };
+
+  // Scale up to 3x
+  const scaled3x = scaleBasketMultiplier(basket, 3);
+  assert.strictEqual(scaled3x.multiplier, 3);
+  assert.strictEqual(scaled3x.legs[0].lots, 3);
+  assert.strictEqual(scaled3x.legs[1].lots, 6);
+  assert.strictEqual(scaled3x.legs[0].ratio, 1);
+  assert.strictEqual(scaled3x.legs[1].ratio, 2);
+
+  // Clamps to min 1
+  const scaledMin = scaleBasketMultiplier(scaled3x, 0);
+  assert.strictEqual(scaledMin.multiplier, 1);
+  assert.strictEqual(scaledMin.legs[0].lots, 1);
+  assert.strictEqual(scaledMin.legs[1].lots, 2);
+
+  // Clamps to max 50
+  const scaledMax = scaleBasketMultiplier(scaled3x, 100);
+  assert.strictEqual(scaledMax.multiplier, 50);
+  assert.strictEqual(scaledMax.legs[0].lots, 50);
+  assert.strictEqual(scaledMax.legs[1].lots, 100);
+});
+
+test('scaleBasketMultiplier derives base ratio when ratio is missing on legacy legs', () => {
+  const basket: MultiLegBasket = {
+    id: 'b2',
+    underlying: 'NIFTY',
+    expiry: '2026-10-01',
+    broker: 'dhan',
+    multiplier: 2,
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+    legs: [
+      { id: 'l1', side: 'S', option: 'CE', strike: 24000, lots: 2, type: 'MARKET', status: 'DRAFT' },
+      { id: 'l2', side: 'S', option: 'PE', strike: 23800, lots: 6, type: 'MARKET', status: 'DRAFT' },
+    ],
+  };
+
+  // l1 has 2 lots with multiplier 2 -> derived ratio 1
+  // l2 has 6 lots with multiplier 2 -> derived ratio 3
+  const scaled4x = scaleBasketMultiplier(basket, 4);
+  assert.strictEqual(scaled4x.multiplier, 4);
+  assert.strictEqual(scaled4x.legs[0].ratio, 1);
+  assert.strictEqual(scaled4x.legs[0].lots, 4);
+  assert.strictEqual(scaled4x.legs[1].ratio, 3);
+  assert.strictEqual(scaled4x.legs[1].lots, 12);
 });

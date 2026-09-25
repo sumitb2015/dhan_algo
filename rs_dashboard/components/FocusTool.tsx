@@ -4097,7 +4097,8 @@ export default function FocusTool() {
       // true size of. A strike-shift reopen (`strikeOverride`) is exempt —
       // handleShiftStrike already refuses the whole shift earlier when the
       // worker holds the leg being rolled, so reaching here means it doesn't.
-      const workerHold = (workerStatus.rows ?? []).find(r => r.id === row.id);
+      const isWorkerActive = workerStatus.status === 'RUNNING' || workerStatus.status === 'STALE';
+      const workerHold = isWorkerActive ? (workerStatus.rows ?? []).find(r => r.id === row.id) : null;
       const heldStrike = leg === 'CE' ? workerHold?.ceStrike : workerHold?.peStrike;
       if (workerHold?.open && heldStrike != null && !opts.strikeOverride) {
         addToast('error', `${what} blocked`,
@@ -4369,8 +4370,9 @@ export default function FocusTool() {
       // enforcement for it on both engines. Refuse rather than shift into a
       // state the worker can't track; the user must stop the worker (or exit
       // the leg through it) first.
+      const isWorkerActive = workerStatus.status === 'RUNNING' || workerStatus.status === 'STALE';
       const heldStrike = leg === 'CE' ? workerHold?.ceStrike : workerHold?.peStrike;
-      if (workerHold?.open && heldStrike != null) {
+      if (isWorkerActive && workerHold?.open && heldStrike != null) {
         addToast('error', 'Cannot shift',
           `${currStrike} ${leg} is held by the server-side worker — stop the worker (or exit this leg through it) before rolling it from this tab`);
         return;
