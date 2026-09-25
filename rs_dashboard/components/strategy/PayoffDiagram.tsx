@@ -213,15 +213,18 @@ export default function PayoffDiagram({
 
     const clampedZoom = Math.min(Math.max(zoom, MIN_ZOOM), MAX_ZOOM);
     const half = Math.min(Math.max(baseHalf * clampedZoom, STEP * 2), fullHalf * 1.15);
-    const xLo = center - half;
-    const xHi = center + half;
+    const curveMin = curve[0].spot;
+    const curveMax = curve[curve.length - 1].spot;
+    const xLo = Math.max(curveMin, center - half);
+    const xHi = Math.min(curveMax, center + half);
+    if (xHi - xLo < 1e-4) return null;
     const atMinZoom = half <= STEP * 2 + 1e-6;
     const atMaxZoom = half >= fullHalf * 1.15 - 1e-6;
 
     // Exact edge interpolation so curves cleanly touch the left (xLo) and right (xHi) boundaries
     const pnlAtLo = pnlAt(curve, xLo);
     const pnlAtHi = pnlAt(curve, xHi);
-    const visiblePoints = curve.filter((c) => c.spot > xLo && c.spot < xHi);
+    const visiblePoints = curve.filter((c) => c.spot > xLo + 1e-4 && c.spot < xHi - 1e-4);
     const visible = [
       ...(pnlAtLo !== null ? [{ spot: xLo, pnl: pnlAtLo }] : []),
       ...visiblePoints,
@@ -232,7 +235,7 @@ export default function PayoffDiagram({
     const visibleToday = todayCurve ? (() => {
       const todayLo = pnlAt(todayCurve, xLo);
       const todayHi = pnlAt(todayCurve, xHi);
-      const todayMid = todayCurve.filter((c) => c.spot > xLo && c.spot < xHi);
+      const todayMid = todayCurve.filter((c) => c.spot > xLo + 1e-4 && c.spot < xHi - 1e-4);
       return [
         ...(todayLo !== null ? [{ spot: xLo, pnl: todayLo }] : []),
         ...todayMid,
@@ -243,7 +246,7 @@ export default function PayoffDiagram({
     const visibleTarget = targetCurve ? (() => {
       const targetLo = pnlAt(targetCurve, xLo);
       const targetHi = pnlAt(targetCurve, xHi);
-      const targetMid = targetCurve.filter((c) => c.spot > xLo && c.spot < xHi);
+      const targetMid = targetCurve.filter((c) => c.spot > xLo + 1e-4 && c.spot < xHi - 1e-4);
       return [
         ...(targetLo !== null ? [{ spot: xLo, pnl: targetLo }] : []),
         ...targetMid,
@@ -573,26 +576,30 @@ export default function PayoffDiagram({
                 fill="#0ea5e9"
                 fillOpacity={0.045}
               />
-              <line
-                x1={sx(expectedMove.sd1Lo)}
-                x2={sx(expectedMove.sd1Lo)}
-                y1={PAD.top}
-                y2={H_ - PAD.bottom}
-                stroke="#0ea5e9"
-                strokeWidth={1}
-                strokeDasharray="3 3"
-                strokeOpacity={0.4}
-              />
-              <line
-                x1={sx(expectedMove.sd1Hi)}
-                x2={sx(expectedMove.sd1Hi)}
-                y1={PAD.top}
-                y2={H_ - PAD.bottom}
-                stroke="#0ea5e9"
-                strokeWidth={1}
-                strokeDasharray="3 3"
-                strokeOpacity={0.4}
-              />
+              {expectedMove.sd1Lo >= xLo && expectedMove.sd1Lo <= xHi && (
+                <line
+                  x1={sx(expectedMove.sd1Lo)}
+                  x2={sx(expectedMove.sd1Lo)}
+                  y1={PAD.top}
+                  y2={H_ - PAD.bottom}
+                  stroke="#0ea5e9"
+                  strokeWidth={1}
+                  strokeDasharray="3 3"
+                  strokeOpacity={0.4}
+                />
+              )}
+              {expectedMove.sd1Hi >= xLo && expectedMove.sd1Hi <= xHi && (
+                <line
+                  x1={sx(expectedMove.sd1Hi)}
+                  x2={sx(expectedMove.sd1Hi)}
+                  y1={PAD.top}
+                  y2={H_ - PAD.bottom}
+                  stroke="#0ea5e9"
+                  strokeWidth={1}
+                  strokeDasharray="3 3"
+                  strokeOpacity={0.4}
+                />
+              )}
               {expectedMove.sd1Lo >= xLo && expectedMove.sd1Lo <= xHi && (
                 <text
                   x={sx(expectedMove.sd1Lo)}
