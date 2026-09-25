@@ -242,6 +242,28 @@ test('Sensibull & Options Monitor Parity: Baskets Short Strangle generates ident
   assert.strictEqual(spotPt.pnlExpiry, 7595);
 });
 
+
+test('bear-call-ladder template reproduces Zerodha Varsity M6 ch5 worked example', () => {
+  const tpl = Object.values(STRATEGY_CATEGORIES).flat().find(t => t.key === 'bear-call-ladder');
+  assert.ok(tpl, 'bear-call-ladder template must exist');
+  // Varsity: Nifty 7790, ATM 7800, 50-pt step; premiums 7600CE=247, 7800CE=117, 7900CE=70.
+  const premiumByStrike: Record<number, number> = { 7600: 247, 7800: 117, 7900: 70 };
+  const legs = tpl!.legs.map(l => {
+    const strike = 7800 + l.offset * 50;
+    assert.ok(strike in premiumByStrike, `unexpected strike ${strike}`);
+    return { side: l.side, option: l.option, strike, premium: premiumByStrike[strike], qty: l.ratio };
+  });
+  assert.deepStrictEqual(legs.map(l => l.strike), [7600, 7800, 7900]);
+  const r = computePayoff(legs, 7300, 8400, 1101);
+  assert.ok(Math.abs(r.netPremium - 60) < 1e-6);          // net credit 60
+  assert.strictEqual(r.maxProfitUnlimited, true);          // uncapped above the upper breakeven
+  assert.strictEqual(r.maxLossUnlimited, false);
+  assert.ok(Math.abs(r.maxLoss + 140) < 1e-6);             // worst loss 140 at 7800..7900
+  assert.strictEqual(r.breakevens.length, 2);
+  assert.ok(Math.abs(r.breakevens[0] - 7660) < 1.5);
+  assert.ok(Math.abs(r.breakevens[1] - 8040) < 1.5);
+});
+
 test('double-calendar template: short front / long far at ATM ±300 pts on a 50-pt step', () => {
   const tpl = STRATEGY_CATEGORIES.Calendar.find(t => t.key === 'double-calendar');
   assert.ok(tpl, 'double-calendar template must exist under Calendar');

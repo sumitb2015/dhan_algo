@@ -14,6 +14,7 @@ import { useBrokerSelector } from '@/hooks/useBrokerSelector';
 import {
   useGroupCollapse, groupByUnderlying, runningInstancesOf, sessionPnlOf, inr, signedInr,
 } from '@/lib/useStrategyGroups';
+import { findCollisions } from '@/lib/strategyCollisions';
 
 type StatusFilter = 'all' | 'running' | 'stopped';
 
@@ -61,6 +62,15 @@ export default function StrategiesPage() {
 
   const [query, setQuery] = useState<string>('');
   const [statusFilter, setStatusFilter] = useState<StatusFilter>('all');
+
+  // Read-only collision awareness (2026-07-30 incident follow-up): two running
+  // instances sharing the exact same strike/expiry/CE-PE at the broker. Never
+  // blocks anything — Dhan nets by security ID regardless of what this banner
+  // says — it only surfaces what's already true so it can be noticed sooner.
+  const collisions = useMemo(() => findCollisions(strategies), [strategies]);
+  const [dismissedCollisionKeys, setDismissedCollisionKeys] = useState<Set<string>>(new Set());
+  const collisionKeyOf = (c: (typeof collisions)[number]) => `${c.underlying}|${c.expiry}|${c.strike}|${c.optType}`;
+  const visibleCollisions = collisions.filter((c) => !dismissedCollisionKeys.has(collisionKeyOf(c)));
 
   // Groups default to open only when something inside is running, so the page opens on
   // live strategies and folds the rest away behind their index header.
@@ -319,6 +329,33 @@ export default function StrategiesPage() {
           </button>
         </div>
       </div>
+
+      {/* Strike-collision banner — read-only, never blocks anything (see lib/strategyCollisions.ts) */}
+      {visibleCollisions.length > 0 && (
+        <div className="w-full border-b border-amber-900/50 bg-amber-950/20 px-4 py-2 flex flex-col gap-1.5">
+          {visibleCollisions.map((c) => {
+            const key = collisionKeyOf(c);
+            const holders = c.legs.map((l) => `${l.strategyKey}${l.instanceId ? `:${l.instanceId}` : ''}`).join(' + ');
+            return (
+              <div key={key} className="flex items-center gap-2 text-[11px]">
+                <AlertTriangle className="h-3.5 w-3.5 text-amber-400 shrink-0" />
+                <span className="text-amber-300">
+                  <span className="font-bold">{holders}</span> are both short {c.underlying} {c.strike.toLocaleString('en-IN')} {c.optType} ({c.expiry}) —
+                  Dhan nets this as ONE broker position; either instance exiting will size against the combined
+                  quantity. Each strategy's own <code className="font-mono bg-amber-500/10 px-1 rounded">detect_phantom_leg_broker()</code> check
+                  will self-correct if the other's exit flattens it, but review before manually squaring off.
+                </span>
+                <button
+                  onClick={() => setDismissedCollisionKeys((prev) => new Set(prev).add(key))}
+                  className="ml-auto shrink-0 rounded border border-amber-800/60 px-1.5 py-0.5 text-[10px] text-amber-400 hover:text-amber-200 hover:border-amber-600"
+                >
+                  Dismiss
+                </button>
+              </div>
+            );
+          })}
+        </div>
+      )}
 
       {/* Filter toolbar — sticky so search/status stay reachable while scrolling groups */}
       <div className="sticky top-0 z-10 w-full border-b border-zinc-900 bg-zinc-950/95 backdrop-blur-md px-4 py-2 flex items-center gap-2 flex-wrap">
