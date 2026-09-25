@@ -24,6 +24,13 @@ export interface StrikeMarker {
   lots?: number;
 }
 
+export interface NetGreeks {
+  delta: number;
+  theta: number;
+  vega: number;
+  gamma?: number;
+}
+
 export interface PayoffDiagramProps {
   curve: { spot: number; pnl: number }[];
   currentSpot: number;
@@ -38,6 +45,10 @@ export interface PayoffDiagramProps {
   maxDays?: number;
   onTargetDaysChange?: (days: number) => void;
 
+  /** IV Shift simulation (% change, e.g. -5 for -5% IV) */
+  ivShift?: number;
+  onIvShiftChange?: (shift: number) => void;
+
   /** Key strategy metrics overlay (OpenAlgo institutional style) */
   maxProfit?: number | null;
   maxProfitUnlimited?: boolean;
@@ -46,6 +57,9 @@ export interface PayoffDiagramProps {
   rom?: number | null; // Return on margin %
   pop?: number | null; // Probability of Profit %
   riskReward?: string | null;
+
+  /** Net strategy Greeks overlay */
+  netGreeks?: NetGreeks | null;
 
   /** Active leg strikes to pin on the X-axis */
   strikes?: StrikeMarker[];
@@ -62,7 +76,7 @@ const TARGET_COLOR = '#f59e0b'; // amber dashed line for What-If time decay simu
 
 const STEP = 50;
 const H = 320;
-const PAD = { top: 24, right: 24, bottom: 34, left: 68 };
+const PAD = { top: 24, right: 24, bottom: 38, left: 68 };
 
 // Zoom multipliers for X domain. 1 = default view scaled to breakevens/spot
 const MIN_ZOOM = 0.35;
@@ -114,6 +128,8 @@ export default function PayoffDiagram({
   targetDays,
   maxDays,
   onTargetDaysChange,
+  ivShift,
+  onIvShiftChange,
   maxProfit,
   maxProfitUnlimited,
   maxLoss,
@@ -121,6 +137,7 @@ export default function PayoffDiagram({
   rom,
   pop,
   riskReward,
+  netGreeks,
   strikes,
   expectedMove,
 }: PayoffDiagramProps) {
@@ -235,6 +252,7 @@ export default function PayoffDiagram({
     })() : [];
 
     // --- Smart Y domain: clamp so zero-crossing is prominent ---
+    // Undefined-risk tails clamped to 1.8x max profit to give the profit zone ~45% vertical height
     const visiblePnls = [
       ...visible.map((c) => c.pnl),
       ...visibleToday.map((c) => c.pnl),
@@ -242,8 +260,8 @@ export default function PayoffDiagram({
     ];
     const rawYMin = Math.min(...visiblePnls);
     const rawYMax = Math.max(...visiblePnls);
-    const clampedYMin = rawYMax > 0 ? Math.max(rawYMin, -rawYMax * 3) : rawYMin * 1.1;
-    const clampedYMax = rawYMin < 0 ? Math.min(rawYMax, Math.abs(rawYMin) * 3) : rawYMax * 1.1;
+    const clampedYMin = rawYMax > 0 ? Math.max(rawYMin, -rawYMax * 1.8) : rawYMin * 1.1;
+    const clampedYMax = rawYMin < 0 ? Math.min(rawYMax, Math.abs(rawYMin) * 1.8) : rawYMax * 1.1;
     const yMinWithZero = Math.min(0, clampedYMin);
     const yMaxWithZero = Math.max(0, clampedYMax);
     const yPad = (yMaxWithZero - yMinWithZero) * 0.08 || 1;
@@ -270,7 +288,7 @@ export default function PayoffDiagram({
       xLo, xHi, yLo, yHi, sx, sy, line, area, todayLine, targetLine,
       zeroY: sy(0),
       xTicks: niceTicks(xLo, xHi, 6),
-      yTicks: niceTicks(yLo, yHi, 6),
+      yTicks: niceTicks(yLo, yHi, 7),
       visible,
       visibleToday,
       visibleTarget,
@@ -351,6 +369,23 @@ export default function PayoffDiagram({
               POP {pop.toFixed(0)}%
             </span>
           )}
+          {netGreeks && (
+            <>
+              <span className="text-[11px] font-mono px-2 py-0.5 rounded bg-sky-500/10 border border-sky-500/20 text-sky-400 font-semibold" title="Net Strategy Delta">
+                Δ {netGreeks.delta >= 0 ? '+' : ''}{netGreeks.delta.toFixed(2)}
+              </span>
+              <span className={`text-[11px] font-mono px-2 py-0.5 rounded border font-semibold ${
+                netGreeks.theta >= 0
+                  ? 'bg-emerald-500/10 border-emerald-500/20 text-emerald-400'
+                  : 'bg-rose-500/10 border-rose-500/20 text-rose-400'
+              }`} title="Net Strategy Theta (₹ decay / day)">
+                θ {netGreeks.theta >= 0 ? '+' : ''}₹{Math.round(netGreeks.theta).toLocaleString('en-IN')}/d
+              </span>
+              <span className="text-[11px] font-mono px-2 py-0.5 rounded bg-purple-500/10 border border-purple-500/20 text-purple-300 font-semibold" title="Net Strategy Vega (₹ / 1% IV shift)">
+                ν {netGreeks.vega >= 0 ? '+' : ''}₹{Math.round(netGreeks.vega).toLocaleString('en-IN')}/%
+              </span>
+            </>
+          )}
         </div>
 
         <div className="flex items-center gap-1.5 ml-auto">
@@ -377,16 +412,16 @@ export default function PayoffDiagram({
           </div>
 
           {/* What-If Simulation Toggle */}
-          {onTargetDaysChange && (
+          {(onTargetDaysChange || onIvShiftChange) && (
             <button
               type="button"
               onClick={() => setShowSimulator((s) => !s)}
               className={`flex items-center gap-1 px-2 py-1 rounded-lg border text-xs font-semibold cursor-pointer transition-colors ${
-                showSimulator || (targetDays !== undefined && targetDays > 0)
+                showSimulator || (targetDays !== undefined && targetDays > 0) || (ivShift !== undefined && ivShift !== 0)
                   ? 'border-amber-500/40 bg-amber-500/15 text-amber-300'
                   : 'border-zinc-700 bg-zinc-850 text-zinc-300 hover:bg-zinc-750 hover:text-white'
               }`}
-              title="Toggle What-If Time Decay Simulator"
+              title="Toggle What-If Time Decay and IV Shift Simulator"
             >
               <SlidersHorizontal className="h-3.5 w-3.5" />
               <span>What-If</span>
@@ -441,37 +476,72 @@ export default function PayoffDiagram({
         </div>
       </div>
 
-      {/* What-If Time Decay Simulation Bar */}
-      {showSimulator && onTargetDaysChange && (
-        <div className="flex items-center gap-3 py-1.5 px-3 bg-zinc-900/80 rounded-lg border border-zinc-800 text-xs mb-2.5 flex-wrap sm:flex-nowrap">
-          <div className="flex items-center gap-1.5 shrink-0">
-            <SlidersHorizontal className="w-3.5 h-3.5 text-amber-400" />
-            <span className="font-bold text-zinc-200">Time Decay (Theta):</span>
+      {/* What-If Time Decay & IV Shift Simulation Bar */}
+      {showSimulator && (onTargetDaysChange || onIvShiftChange) && (
+        <div className="flex flex-col gap-2 py-2 px-3 bg-zinc-900/90 rounded-lg border border-zinc-800 text-xs mb-2.5">
+          <div className="flex items-center gap-3 flex-wrap sm:flex-nowrap">
+            {onTargetDaysChange && (
+              <div className="flex items-center gap-2.5 flex-1 min-w-[280px]">
+                <div className="flex items-center gap-1.5 shrink-0">
+                  <SlidersHorizontal className="w-3.5 h-3.5 text-amber-400" />
+                  <span className="font-bold text-zinc-200">Time Decay (θ):</span>
+                </div>
+                <span className="text-amber-400 font-mono font-bold shrink-0 min-w-[85px] text-right">
+                  {targetDays && targetDays > 0 ? `+${targetDays.toFixed(1)}d fwd` : 'Today (T+0)'}
+                </span>
+                <input
+                  type="range"
+                  min={0}
+                  max={Math.max(1, maxDays ?? 7)}
+                  step={0.5}
+                  value={targetDays ?? 0}
+                  onChange={(e) => onTargetDaysChange(parseFloat(e.target.value))}
+                  className="w-full accent-amber-500 bg-zinc-800 h-1.5 rounded-lg cursor-pointer"
+                />
+                <span className="text-[10px] text-zinc-400 font-mono shrink-0">
+                  Exp ({maxDays ? maxDays.toFixed(1) : 0}d)
+                </span>
+              </div>
+            )}
+
+            {onIvShiftChange && (
+              <div className="flex items-center gap-2.5 flex-1 min-w-[260px] pl-0 sm:pl-3 border-t sm:border-t-0 sm:border-l border-zinc-800 pt-1.5 sm:pt-0">
+                <div className="flex items-center gap-1.5 shrink-0">
+                  <span className="font-bold text-zinc-200">IV Shift (ν):</span>
+                </div>
+                <span className={`font-mono font-bold shrink-0 min-w-[75px] text-right ${
+                  (ivShift || 0) > 0 ? 'text-purple-400' : (ivShift || 0) < 0 ? 'text-amber-400' : 'text-zinc-400'
+                }`}>
+                  {(ivShift || 0) > 0 ? `+${ivShift}%` : (ivShift || 0) < 0 ? `${ivShift}%` : 'Base IV'}
+                </span>
+                <input
+                  type="range"
+                  min={-15}
+                  max={15}
+                  step={1}
+                  value={ivShift ?? 0}
+                  onChange={(e) => onIvShiftChange(parseFloat(e.target.value))}
+                  className="w-full accent-purple-500 bg-zinc-800 h-1.5 rounded-lg cursor-pointer"
+                />
+                <span className="text-[10px] text-zinc-400 font-mono shrink-0">
+                  ±15%
+                </span>
+              </div>
+            )}
+
+            {((targetDays !== undefined && targetDays > 0) || (ivShift !== undefined && ivShift !== 0)) && (
+              <button
+                type="button"
+                onClick={() => {
+                  onTargetDaysChange?.(0);
+                  onIvShiftChange?.(0);
+                }}
+                className="text-[11px] text-sky-400 hover:text-sky-300 underline font-medium cursor-pointer shrink-0 ml-auto"
+              >
+                Reset All
+              </button>
+            )}
           </div>
-          <span className="text-amber-400 font-mono font-bold shrink-0 min-w-[90px]">
-            {targetDays && targetDays > 0 ? `+${targetDays.toFixed(1)}d forward` : 'Today (T+0)'}
-          </span>
-          <input
-            type="range"
-            min={0}
-            max={Math.max(1, maxDays ?? 7)}
-            step={0.5}
-            value={targetDays ?? 0}
-            onChange={(e) => onTargetDaysChange(parseFloat(e.target.value))}
-            className="w-full accent-amber-500 bg-zinc-800 h-1.5 rounded-lg cursor-pointer"
-          />
-          <span className="text-[10px] text-zinc-400 font-mono shrink-0">
-            Expiry ({maxDays ? maxDays.toFixed(1) : 0}d)
-          </span>
-          {targetDays !== undefined && targetDays > 0 && (
-            <button
-              type="button"
-              onClick={() => onTargetDaysChange(0)}
-              className="text-[11px] text-sky-400 hover:text-sky-300 underline font-medium cursor-pointer shrink-0 ml-1"
-            >
-              Reset
-            </button>
-          )}
         </div>
       )}
 

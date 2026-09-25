@@ -176,6 +176,7 @@ export default function MultiLegStrategyRow({
   // opens it only when they actually want to look at the curve.
   const [showPayoffChart, setShowPayoffChart] = useState(false);
   const [simTargetDays, setSimTargetDays] = useState<number>(0);
+  const [simIvShift, setSimIvShift] = useState<number>(0);
   const [confirmPlace, setConfirmPlace] = useState(false);
   const [confirmScale, setConfirmScale] = useState(false);
   const [shiftSteps, setShiftSteps] = useState(1);   // per-strategy Steps stepper (UI only, not persisted)
@@ -511,9 +512,10 @@ export default function MultiLegStrategyRow({
     return Math.max(0.1, Math.round(calculateTimeToExpiryYears(basket.expiry) * 365 * 10) / 10);
   }, [basket.expiry]);
 
-  // ── Projected Target Curve at T+simTargetDays ────────────────────────
+  // ── Projected Target Curve at T+simTargetDays & IV shift ─────────────
   const targetCurve = useMemo(() => {
-    if (!showPayoffChart || !simTargetDays || simTargetDays <= 0) return null;
+    const isSimActive = (simTargetDays && simTargetDays > 0) || (simIvShift && simIvShift !== 0);
+    if (!showPayoffChart || !isSimActive) return null;
     if (!spot || spot <= 0) return null;
     const xs = hasMixedExpiry ? calendarCurve?.points.map(p => p.x) : payoffResult?.points.map(p => p.x);
     if (!xs || xs.length === 0) return null;
@@ -530,10 +532,11 @@ export default function MultiLegStrategyRow({
         ? l.fill.avgPrice
         : (currentLtp > 0 ? currentLtp : (l.price || 0));
       const qty = ((l.fill?.qty && l.fill.qty > 0) ? l.fill.qty : (l.lots * defaultLotSize)) * payoffMultiplier;
-      const iv = ivForStrike?.(l.strike, l.option, legExpiry) || FALLBACK_IV;
+      const baseIv = ivForStrike?.(l.strike, l.option, legExpiry) || FALLBACK_IV;
+      const shiftedIv = Math.max(0.01, baseIv + ((simIvShift || 0) / 100));
       const totalTimeYears = calculateTimeToExpiryYears(legExpiry);
-      const remainingTimeYears = Math.max(0.0001, totalTimeYears - (simTargetDays / 365));
-      return { side: l.side, option: l.option, strike: l.strike, premium, qty, iv, timeYears: remainingTimeYears };
+      const remainingTimeYears = Math.max(0.0001, totalTimeYears - ((simTargetDays || 0) / 365));
+      return { side: l.side, option: l.option, strike: l.strike, premium, qty, iv: shiftedIv, timeYears: remainingTimeYears };
     });
 
     if (legsForPricing.some(l => l.premium <= 0)) return null;
@@ -550,7 +553,35 @@ export default function MultiLegStrategyRow({
     } catch {
       return null;
     }
-  }, [showPayoffChart, simTargetDays, spot, hasMixedExpiry, calendarCurve, payoffResult, basket.legs, basket.underlying, basket.expiry, broker, crudeMult, defaultLotSize, ltpFor, ivForStrike]);
+  }, [showPayoffChart, simTargetDays, simIvShift, spot, hasMixedExpiry, calendarCurve, payoffResult, basket.legs, basket.underlying, basket.expiry, broker, crudeMult, defaultLotSize, ltpFor, ivForStrike]);
+
+  // ── Net strategy Greeks for payoff diagram header ────────────────────
+  const netGreeks = useMemo(() => {
+    if (!showPayoffChart || !spot || spot <= 0) return null;
+    const activeLegs = basket.legs.filter(l => l.status !== 'CLOSED');
+    if (activeLegs.length === 0) return null;
+
+    const payoffMultiplier = (broker === 'dhan' && (basket.underlying === 'CRUDEOIL' || basket.underlying === 'CRUDEOILM')) ? crudeMult : 1;
+
+    let delta = 0;
+    let theta = 0;
+    let vega = 0;
+    let gamma = 0;
+
+    for (const l of activeLegs) {
+      const legExpiry = l.expiry || basket.expiry;
+      const qty = ((l.fill?.qty && l.fill.qty > 0) ? l.fill.qty : (l.lots * defaultLotSize)) * payoffMultiplier;
+      const iv = ivForStrike?.(l.strike, l.option, legExpiry) || FALLBACK_IV;
+      const timeYears = calculateTimeToExpiryYears(legExpiry);
+      const sign = l.side === 'B' ? 1 : -1;
+      const g = computeBsGreeks(l.option, spot, l.strike, timeYears, iv, 1);
+      delta += sign * g.delta * qty;
+      theta += sign * g.theta * qty;
+      vega += sign * g.vega * qty;
+      gamma += sign * g.gamma * qty;
+    }
+    return { delta, theta, vega, gamma };
+  }, [showPayoffChart, spot, basket.legs, basket.expiry, basket.underlying, broker, crudeMult, defaultLotSize, ivForStrike]);
 
   // ── Active leg strike markers for X-axis pins ────────────────────────
   const strategyStrikes = useMemo(() => {
@@ -1565,9 +1596,12 @@ export default function MultiLegStrategyRow({
                         targetDays={simTargetDays}
                         maxDays={maxDays}
                         onTargetDaysChange={setSimTargetDays}
+                        ivShift={simIvShift}
+                        onIvShiftChange={setSimIvShift}
                         maxProfit={calendarCurve.maxPnl}
                         maxProfitUnlimited={false}
                         rom={calendarCurve && basketMargin && basketMargin > 0 ? (calendarCurve.maxPnl / basketMargin) * 100 : null}
+                        netGreeks={greeks?.result?.net ?? netGreeks}
                         strikes={strategyStrikes}
                         expectedMove={expectedMove}
                       />
@@ -1599,6 +1633,8 @@ export default function MultiLegStrategyRow({
                       targetDays={simTargetDays}
                       maxDays={maxDays}
                       onTargetDaysChange={setSimTargetDays}
+                      ivShift={simIvShift}
+                      onIvShiftChange={setSimIvShift}
                       maxProfit={payoffResult.maxProfit}
                       maxProfitUnlimited={payoffResult.maxProfitUnlimited}
                       maxLoss={payoffResult.maxLoss}
@@ -1606,6 +1642,7 @@ export default function MultiLegStrategyRow({
                       rom={maxProfitPctOfMargin}
                       riskReward={riskRewardRatio}
                       pop={popPct}
+                      netGreeks={greeks?.result?.net ?? netGreeks}
                       strikes={strategyStrikes}
                       expectedMove={expectedMove}
                     />
