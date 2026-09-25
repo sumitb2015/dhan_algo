@@ -23,6 +23,8 @@ import {
 } from '@/lib/multiLegFocus';
 import { closeOrderProduct } from '@/lib/positionProduct';
 import { planLegShifts, clampShiftSteps } from '@/lib/strikeShift';
+import { DEFAULT_LEG_COLUMNS, loadLegColumns, saveLegColumns, type LegColumns } from '@/lib/legColumns';
+import { strikeAllowed, strikeRuleApplies, allowedStrikes, snapToAllowed, assessSpread } from '@/lib/farExpiryRules';
 
 const UNDERLYINGS = ['NIFTY', 'BANKNIFTY', 'SENSEX', 'CRUDEOIL', 'CRUDEOILM'] as const;
 type Underlying = typeof UNDERLYINGS[number];
@@ -89,14 +91,27 @@ export default function MultiLegFocus() {
     exposureMargin: number;
   }>>({});
 
+  // Optional legs-table columns (shared by every strategy row); a browser-local preference. Read in the
+  // initial state: strategy rows only exist after the baskets load client-side, so nothing that depends on
+  // this is ever part of the server-rendered HTML.
+  const [legColumns, setLegColumns] = useState<LegColumns>(() => (typeof window === 'undefined' ? DEFAULT_LEG_COLUMNS : loadLegColumns()));
+  const changeLegColumns = useCallback((next: LegColumns) => { setLegColumns(next); saveLegColumns(next); }, []);
+
   const marginCompRef = useRef<Record<string, string>>({});   // basketId -> composition the stored margin was computed for
   const fundsAtRef = useRef(0);                               // when fundsData was last read
   const placementLockRef = useRef(false);                     // one placement in flight at a time
 
+  const fundsInflightRef = useRef<string | null>(null);   // broker with a funds read in flight: an N-leg exit ends N times in a row, one read not N
+  const brokerNowRef = useRef(broker);
+  useEffect(() => { brokerNowRef.current = broker; }, [broker]);
   const pollFunds = useCallback(() => {
+    if (fundsInflightRef.current === broker) return;
+    fundsInflightRef.current = broker;
     fetch(scalperRoute(broker, 'funds'))
       .then(r => r.json())
       .then((j: { success: boolean; data?: Record<string, unknown> }) => {
+        // A reply for a broker that is no longer selected must not become the funds the order gate trusts.
+        if (brokerNowRef.current !== broker) return;
         if (j.success && j.data) {
           const available = Number(j.data.availabelBalance ?? j.data.availableBalance ?? 0);
           const used = Number(j.data.utilizedAmount ?? j.data.usedMargin ?? j.data.marginUsed ?? 0);
@@ -104,10 +119,12 @@ export default function MultiLegFocus() {
           fundsAtRef.current = Date.now();
         }
       })
-      .catch(() => {});
+      .catch(() => {})
+      .finally(() => { if (fundsInflightRef.current === broker) fundsInflightRef.current = null; });
   }, [broker]);
 
   useEffect(() => {
+    fundsAtRef.current = 0;   // broker changed: whatever funds we hold belong to the previous one
     pollFunds();
     const interval = setInterval(pollFunds, 4000);
     return () => clearInterval(interval);
@@ -737,12 +754,25 @@ export default function MultiLegFocus() {
         // a different (far) expiry, and placed legs, are left untouched.
         if (patch.expiry && patch.expiry !== b.expiry) {
           const newExp = patch.expiry;
+          // Moving onto a far expiry: DRAFT legs on a non-100 strike snap to the nearest allowed one.
+          const listed = expiriesMap[b.underlying] ?? [];
+          const pool = chainData[`${b.underlying}:${newExp}`]?.strikes?.length
+            ? chainData[`${b.underlying}:${newExp}`].strikes
+            : (chainData[`${b.underlying}:${b.expiry}`]?.strikes ?? []);
+          const snappedLegs: string[] = [];
+          const movedLegs = b.legs.map(l => {
+            if (!(l.status === 'DRAFT' && (!l.expiry || l.expiry === b.expiry))) return l;
+            const snapped = snapToAllowed(b.underlying, newExp, listed, l.strike, pool);
+            if (snapped !== l.strike) snappedLegs.push(`${l.strike}→${snapped} ${l.option}`);
+            return { ...l, expiry: newExp, strike: snapped };
+          });
+          if (snappedLegs.length) {
+            addToast('success', 'Strikes snapped to ×100', `Far expiry only trades multiples of 100: ${snappedLegs.join(', ')}`);
+          }
           return {
             ...b,
             ...patch,
-            legs: b.legs.map(l =>
-              l.status === 'DRAFT' && (!l.expiry || l.expiry === b.expiry) ? { ...l, expiry: newExp } : l,
-            ),
+            legs: movedLegs,
             farExpiry: patch.farExpiry ?? (b.farExpiry === newExp ? undefined : b.farExpiry),
             updatedAt: new Date().toISOString(),
           };
@@ -900,6 +930,75 @@ export default function MultiLegFocus() {
   // tick (not merged) so a resolved gap disappears from the row immediately.
   const [legQtyWarnings, setLegQtyWarnings] = useState<Record<string, { ownQty: number; brokerQty: number }>>({});
 
+  // ── Far-expiry strike rule + bid/ask spread guards ───────────────────
+  // Far expiries (3rd listed onward) only trade liquidly on multiples of 100, and a
+  // wide or one-sided book means a market order fills badly. Both are checked BEFORE
+  // any order leaves; see lib/farExpiryRules.ts for the rules and thresholds.
+  /** Legs whose strike is not tradable on their own expiry (far expiry, non-100 strike). */
+  const blockedStrikeLegs = useCallback(<T extends { strike: number; expiry?: string }>(basket: MultiLegBasket, legs: T[]): T[] => {
+    const listed = expiriesMap[basket.underlying] ?? [];
+    // Order paths fail CLOSED: with the expiry list not loaded yet we cannot tell near from
+    // far, so require a multiple of 100 rather than let a far 50-strike through.
+    if (!listed.length && strikeRuleApplies(basket.underlying)) return legs.filter(l => l.strike % 100 !== 0);
+    return legs.filter(l => !strikeAllowed(basket.underlying, l.expiry || basket.expiry, listed, l.strike));
+  }, [expiriesMap]);
+
+  const toastBlockedStrikes = useCallback((blocked: { strike: number; option: OptionType; expiry?: string }[], basket: MultiLegBasket) => {
+    const listLoaded = (expiriesMap[basket.underlying] ?? []).length > 0;
+    addToast('error', listLoaded ? 'Strike not allowed on a far expiry' : 'Expiry list not loaded — only ×100 strikes allowed',
+      `${blocked.map(l => `${l.strike} ${l.option} (${l.expiry || basket.expiry})`).join(', ')} — ${listLoaded ? 'far expiries only trade strikes in multiples of 100' : 'until the expiry list loads, only strikes in multiples of 100 can be placed'}. Nothing was placed.`);
+  }, [addToast, expiriesMap]);
+
+  type SpreadIssues = { noMarket: string[]; wide: string[]; unavailable: boolean };
+  /** One depth call for every leg about to be opened. Never throws; a failed or
+   *  partial lookup is `unavailable` / skipped (unknown never blocks trading). */
+  const fetchSpreadIssues = useCallback(async (
+    basket: MultiLegBasket,
+    legs: { option: OptionType; strike: number; expiry?: string; type: 'MARKET' | 'LIMIT' }[],
+  ): Promise<SpreadIssues> => {
+    const out: SpreadIssues = { noMarket: [], wide: [], unavailable: false };
+    if (!legs.length) return out;
+    try {
+      const res = await fetch('/api/multi-leg-focus/depth', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        // Bounded: an order must never wait long on a market-data nicety; a timeout is
+        // treated as 'unavailable' (proceed with a toast), like any other failure.
+        signal: AbortSignal.timeout(2500),
+        body: JSON.stringify({
+          underlying: basket.underlying,
+          legs: legs.map(l => {
+            const exp = l.expiry || basket.expiry;
+            const ident = broker === 'dhan' ? lookupCache[`${basket.underlying}:${exp}`]?.strikes?.[String(l.strike)] : undefined;
+            return { strike: l.strike, option: l.option, expiry: exp, securityId: l.option === 'CE' ? ident?.ceId : ident?.peId };
+          }),
+        }),
+      });
+      const j = await res.json() as { success: boolean; data?: Record<string, { bid: number; ask: number }> };
+      if (!j.success || !j.data) { out.unavailable = true; return out; }
+      for (const l of legs) {
+        const exp = l.expiry || basket.expiry;
+        const a = assessSpread(j.data[`${exp}:${l.strike}:${l.option}`]);
+        const tag = `${l.strike} ${l.option}`;
+        if (a.status === 'no_market') out.noMarket.push(`${tag} (bid ${a.bid || '—'} / ask ${a.ask || '—'})`);
+        // A user-set LIMIT price is its own protection; only MARKET legs warn on width.
+        else if (a.status === 'wide' && l.type === 'MARKET') out.wide.push(`${tag}: ${a.bid} / ${a.ask} (spread ₹${a.spread.toFixed(2)}, ${a.pct.toFixed(1)}%)`);
+      }
+    } catch { out.unavailable = true; }
+    return out;
+  }, [broker, lookupCache]);
+
+  /** Turns spread findings into UI: blocks on no bid/ask, confirms on wide. true = proceed. */
+  const resolveSpreadIssues = useCallback((issues: SpreadIssues): boolean => {
+    if (issues.noMarket.length) {
+      addToast('error', 'No bid/ask — order blocked', `${issues.noMarket.join(', ')} — the book is empty on one side. Nothing was placed.`);
+      return false;
+    }
+    if (issues.unavailable) addToast('error', 'Spread check unavailable', 'Could not read bid/ask — continuing without the spread check.');
+    if (issues.wide.length && !window.confirm(`Wide bid/ask spread — a market order may fill poorly:\n\n${issues.wide.join('\n')}\n\nContinue?`)) return false;
+    return true;
+  }, [addToast]);
+
   const placeBasketInner = useCallback(async (basketId: string) => {
     const basket = basketsRef.current.find(b => b.id === basketId);
     if (!basket || !basket.legs.length || !basket.expiry) return;
@@ -908,6 +1007,12 @@ export default function MultiLegFocus() {
       addToast('error', 'No broker logged in', 'Log in before placing orders');
       return;
     }
+
+    const blockedLegs = blockedStrikeLegs(basket, basket.legs);
+    if (blockedLegs.length) { toastBlockedStrikes(blockedLegs, basket); return; }
+    // Started now so it overlaps the margin/funds checks below (no added round trip
+    // on the happy path); its verdict is applied only once margin has passed.
+    const spreadPromise = fetchSpreadIssues(basket, basket.legs);
 
     // Pre-trade margin gate — block placement outright rather than letting a
     // leg-by-leg sequence run into a mid-strategy margin rejection with no
@@ -955,6 +1060,7 @@ export default function MultiLegFocus() {
       );
       return;
     }
+    if (!resolveSpreadIssues(await spreadPromise)) return;
 
     const pair = `${basket.underlying}:${basket.expiry}`;
     const lookup = lookupCache[pair];
@@ -1170,7 +1276,7 @@ export default function MultiLegFocus() {
       pollFunds();
       fetchMarginsForBaskets();
     }
-  }, [broker, hasAuthenticatedBroker, lookupCache, updateBasket, ltpFor, addToast, pollFunds, fetchMarginsForBaskets, basketMargins, fundsData]);
+  }, [broker, hasAuthenticatedBroker, lookupCache, updateBasket, ltpFor, addToast, pollFunds, fetchMarginsForBaskets, basketMargins, fundsData, blockedStrikeLegs, toastBlockedStrikes, fetchSpreadIssues, resolveSpreadIssues]);
 
   // The lock is taken synchronously, before any await inside placeBasketInner
   // (funds read, confirm dialogs), so a fast double-click cannot slip a second
@@ -1446,6 +1552,8 @@ export default function MultiLegFocus() {
     skipCollisionCheck?: boolean;
     /** Risk settings inherited from the leg this one replaces (strike shift). */
     carry?: Partial<MultiLegLeg>;
+    /** Caller already ran the bid/ask check (shift checks BEFORE closing anything). */
+    skipSpreadCheck?: boolean;
   }): Promise<boolean> => {
     const basket = basketsRef.current.find(b => b.id === basketId);
     if (!basket) return false;
@@ -1456,6 +1564,8 @@ export default function MultiLegFocus() {
     }
 
     const legExpiry = params.expiry || basket.expiry;
+    const blockedNew = blockedStrikeLegs(basket, [{ strike: params.strike, option: params.option, expiry: legExpiry }]);
+    if (blockedNew.length) { toastBlockedStrikes(blockedNew, basket); return false; }
     const pair = `${basket.underlying}:${legExpiry}`;
     const lookup = lookupCache[pair];
     const lotSize = lookup?.lotSize ?? fallbackLotSize(basket.underlying as Underlying, broker);
@@ -1467,6 +1577,8 @@ export default function MultiLegFocus() {
     const collisions = findSiblingLegCollisions(
       basketsRef.current, basketId, [{ side: params.side, option: params.option, strike: params.strike, expiry: legExpiry }]);
     if (!opts?.skipCollisionCheck && collisions.length && !window.confirm(describeSiblingCollisions(collisions))) return false;
+    if (!opts?.skipSpreadCheck
+        && !resolveSpreadIssues(await fetchSpreadIssues(basket, [{ option: params.option, strike: params.strike, expiry: legExpiry, type: params.orderType }]))) return false;
 
     const req = resolveOrderRequest(broker, {
       side: params.side,
@@ -1565,7 +1677,7 @@ export default function MultiLegFocus() {
       addToast('error', `Add leg failed for ${label}`, String(e));
       return false;
     }
-  }, [broker, hasAuthenticatedBroker, lookupCache, chainData, patchLegs, addToast, pollFunds, fetchMarginsForBaskets]);
+  }, [broker, hasAuthenticatedBroker, lookupCache, chainData, patchLegs, addToast, pollFunds, fetchMarginsForBaskets, blockedStrikeLegs, toastBlockedStrikes, fetchSpreadIssues, resolveSpreadIssues]);
 
   const addNewLegToBasket = useCallback(async (basketId: string, params: Parameters<typeof addNewLegCore>[1]) => {
     await addNewLegCore(basketId, params);
@@ -1604,7 +1716,8 @@ export default function MultiLegFocus() {
     const targets = selected;
 
     const strikesFor = (legExpiry: string | undefined) =>
-      Object.keys(lookupCache[`${basket.underlying}:${legExpiry || basket.expiry}`]?.strikes ?? {}).map(Number).sort((a, b) => a - b);
+      allowedStrikes(basket.underlying, legExpiry || basket.expiry, expiriesMap[basket.underlying] ?? [],
+        Object.keys(lookupCache[`${basket.underlying}:${legExpiry || basket.expiry}`]?.strikes ?? {}).map(Number).sort((a, b) => a - b));
     const fallbackStep = DEFAULT_INDEX_STEP[basket.underlying as Underlying] || 50;
     const plan = planLegShifts(targets, strikesFor, direction, steps, fallbackStep);
     if (!plan.ok) {
@@ -1612,6 +1725,8 @@ export default function MultiLegFocus() {
       return;
     }
     const moveFor = new Map(plan.moves.map(m => [m.legId, m]));
+    const blockedTargets = blockedStrikeLegs(basket, targets.map(t => ({ strike: moveFor.get(t.id)!.to, option: t.option, expiry: t.expiry })));
+    if (blockedTargets.length) { toastBlockedStrikes(blockedTargets, basket); return; }
 
     // One confirm for every contract the shift lands on: another basket already
     // holding it, or one of THIS basket's other open legs (the reopen would merge).
@@ -1643,6 +1758,9 @@ export default function MultiLegFocus() {
     placementLockRef.current = true;
     const desc = plan.moves.map(m => { const l = targets.find(t => t.id === m.legId)!; return `${m.from}→${m.to} ${l.option}`; }).join(', ');
     try {
+      // Bid/ask of the NEW strikes, checked before anything is closed (lock already held, so a
+      // double-click cannot slip in); a refusal after the close would strand the strategy half-rolled.
+      if (!resolveSpreadIssues(await fetchSpreadIssues(basket, targets.map(t => ({ option: t.option, strike: moveFor.get(t.id)!.to, expiry: t.expiry, type: 'MARKET' as const }))))) return;
       addToast('success', `Shifting ${direction.toLowerCase()} ${clampShiftSteps(steps)}: ${desc}`, 'Closing current legs first…');
 
       // ── Phase A: close. Shorts first (concurrently), then longs; longs are
@@ -1712,6 +1830,7 @@ export default function MultiLegFocus() {
           side: l.side, option: l.option, strike: mv.to, expiry: legExpiryOf(l), lots, orderType: 'MARKET',
         }, {
           skipCollisionCheck: true,
+          skipSpreadCheck: true,
           carry: { sl: l.sl, slType: l.slType, tp: l.tp, tpType: l.tpType, trail: l.trail },
         });
         if (!ok) addToast('error', `Closed ${mv.from} ${l.option} but NOT reopened at ${mv.to}`, 'Position is flat at that leg — add the new leg manually');
@@ -1731,7 +1850,7 @@ export default function MultiLegFocus() {
       pollFunds();
       fetchMarginsForBaskets();
     }
-  }, [hasAuthenticatedBroker, lookupCache, broker, addToast, exitOneLeg, addNewLegCore, resolveDhanSecurityId, pollFunds, fetchMarginsForBaskets]);
+  }, [hasAuthenticatedBroker, lookupCache, broker, expiriesMap, addToast, exitOneLeg, addNewLegCore, resolveDhanSecurityId, pollFunds, fetchMarginsForBaskets, blockedStrikeLegs, toastBlockedStrikes, fetchSpreadIssues, resolveSpreadIssues]);
 
   // ── Broker Positions Poller across ALL Baskets ─────────────────────
   useEffect(() => {
@@ -2229,7 +2348,7 @@ export default function MultiLegFocus() {
       </div>
 
       {/* Main Container: Parallel Strategy Rows */}
-      <div className="p-4 flex flex-col gap-4 max-w-[1700px] mx-auto">
+      <div className="p-4 flex flex-col gap-4 w-full">
         {baskets.length === 0 ? (
           <div className="flex flex-col items-center justify-center py-24 gap-3 border border-zinc-800/60 rounded-xl bg-zinc-900/20">
             <Layers className="w-10 h-10 text-zinc-600" />
@@ -2308,6 +2427,8 @@ export default function MultiLegFocus() {
                 onExit={() => exitBasket(basket.id)}
                 onExitLeg={async leg => { await exitOneLeg(basket.id, leg); }}
                 onShiftLegs={(legIds, direction, steps) => shiftLegs(basket.id, legIds, direction, steps)}
+                legColumns={legColumns}
+                onLegColumnsChange={changeLegColumns}
                 onAddLots={params => addLotsToLeg(basket.id, params)}
                 onAddNewLeg={params => addNewLegToBasket(basket.id, params)}
                 placing={!!placingMap[basket.id]}

@@ -8,9 +8,11 @@ import MultiLegLegRow from './MultiLegLegRow';
 import RuleNumInput from './RuleNumInput';
 import AddLotsModal from './AddLotsModal';
 import AddNewLegModal from './AddNewLegModal';
+import LegColumnsMenu from './LegColumnsMenu';
+import { DEFAULT_LEG_COLUMNS, type LegColumns } from '@/lib/legColumns';
 import {
   computeLegTrailingSL, computeStrategyMetrics, checkStrategyRisk, computeBasketStatus, computeCalendarPayoffCurve,
-  classifyBasketStructure, legPnl,
+  classifyBasketStructure, legPnl, legAvgPrice, legPnlPct, legQtyUnits,
   findSiblingLegCollisions, type SiblingLegCollision,
   type MultiLegBasket, type MultiLegLeg, type StrategyRiskConfig,
 } from '@/lib/multiLegFocus';
@@ -18,6 +20,7 @@ import { computePayoff, type PayoffLeg, type PayoffResult } from '@/lib/basketSt
 import { computeBsGreeks, calculateTimeToExpiryYears } from '@/lib/optionsMonitorMath';
 import { FOCUS_RING } from '@/components/Scalper';
 import { clampShiftSteps, MAX_SHIFT_STEPS } from '@/lib/strikeShift';
+import { allowedStrikes, strikeAllowed, snapToAllowed } from '@/lib/farExpiryRules';
 import { BROKER_LABELS, type Broker } from '@/hooks/useBrokerSelector';
 import PayoffDiagram from '@/components/strategy/PayoffDiagram';
 import { StatChip } from '@/components/analytics/PayoffMetricStrip';
@@ -33,7 +36,7 @@ const GREEKS_CHAIN_SPACING_MS = 3_800;
  *  IV of its own here. Never a claim about the real market IV. */
 const FALLBACK_IV = 0.15;
 
-type LegSortKey = 'side' | 'option' | 'strike' | 'lots' | 'ltp' | 'expiry' | 'margin' | 'pnl' | 'status';
+type LegSortKey = 'side' | 'option' | 'strike' | 'lots' | 'ltp' | 'expiry' | 'margin' | 'pnl' | 'status' | 'avg' | 'pnlPct' | 'qty';
 
 const UNDERLYINGS = ['NIFTY', 'BANKNIFTY', 'SENSEX', 'CRUDEOIL', 'CRUDEOILM'] as const;
 type Underlying = typeof UNDERLYINGS[number];
@@ -81,6 +84,9 @@ export interface MultiLegStrategyRowProps {
   onExitLeg: (leg: MultiLegLeg) => Promise<void>;
   /** Roll the given OPEN legs N strikes up/down (close, then reopen). */
   onShiftLegs?: (legIds: string[], direction: 'UP' | 'DOWN', steps: number) => Promise<void>;
+  /** Which optional legs-table columns are shown (owned by MultiLegFocus so every row agrees). */
+  legColumns?: LegColumns;
+  onLegColumnsChange?: (next: LegColumns) => void;
   onAddLots?: (params: {
     legId: string;
     lots: number;
@@ -134,6 +140,8 @@ export default function MultiLegStrategyRow({
   onExit,
   onExitLeg,
   onShiftLegs,
+  legColumns = DEFAULT_LEG_COLUMNS,
+  onLegColumnsChange,
   onAddLots,
   onAddNewLeg,
   placing,
@@ -219,6 +227,9 @@ export default function MultiLegStrategyRow({
           case 'margin': return legMargins?.[l.id] ?? 0;
           case 'pnl': return l.fill ? legPnl(l, ltpFor(l), crudeMult) : 0;
           case 'status': return l.status;
+          case 'avg': return legAvgPrice(l) ?? 0;
+          case 'pnlPct': return legPnlPct(l, ltpFor(l), crudeMult) ?? 0;
+          case 'qty': return legQtyUnits(l) ?? 0;
         }
       };
       const dir = legSort.dir === 'asc' ? 1 : -1;
@@ -229,6 +240,28 @@ export default function MultiLegStrategyRow({
     }
     return legs;
   }, [basket.legs, basket.expiry, legCounts.closed, legFilter, legSort, ltpFor, legMargins, crudeMult]);
+
+  // Columns actually rendered, in table order. Header cells, row cells and this colgroup must all
+  // follow the same conditions. Exit only exists once something has closed, so it hides itself
+  // (even when enabled) until then rather than showing a column of dashes.
+  const showExitCol = legColumns.exit && legCounts.closed > 0;
+  const colWeights = [
+    5, 5, 8, ...(legColumns.otm ? [7] : []), ...(legColumns.iv ? [5] : []),
+    5, ...(legColumns.qty ? [6] : []), 6, 6, ...(legColumns.avg ? [6] : []), ...(showExitCol ? [6] : []),
+    8, 8, 4, 6, 9, 7, ...(legColumns.pnlPct ? [6] : []), 6, 14,
+  ];
+  const colTotal = colWeights.reduce((a, b) => a + b, 0);
+  const sortTh = (key: LegSortKey, label: string, align: 'left' | 'right' | 'center', title?: string) => {
+    const alignCls = { left: 'text-left', right: 'text-right', center: 'text-center' }[align];
+    const justifyCls = { left: 'justify-start', right: 'justify-end', center: 'justify-center' }[align];
+    return (
+      <th className={`px-2 py-2 ${alignCls}`} title={title} aria-sort={legSort?.key === key ? (legSort.dir === 'asc' ? 'ascending' : 'descending') : 'none'}>
+        <button type="button" onClick={() => toggleLegSort(key)} className={`inline-flex w-full items-center gap-0.5 ${justifyCls} font-bold hover:text-emerald-300 ${FOCUS_RING}`}>
+          {label}<span aria-hidden className="text-[10px]">{legSort?.key === key ? (legSort.dir === 'asc' ? '▲' : '▼') : ''}</span>
+        </button>
+      </th>
+    );
+  };
 
   const stratMetrics = useMemo(
     () => computeStrategyMetrics(basket.legs, ltpFor, crudeMult),
@@ -526,10 +559,14 @@ export default function MultiLegStrategyRow({
         if ('trail' in patch) allowed.trail = patch.trail;
         return { ...l, ...allowed };
       }
-      return { ...l, ...patch };
+      const next = { ...l, ...patch };
+      // Toggling a leg onto another expiry: a strike that isn't tradable there (far expiry, not a
+      // multiple of 100) snaps to the nearest one that is, instead of leaving an unplaceable leg.
+      if (patch.expiry) next.strike = snapToAllowed(basket.underlying, patch.expiry, expiries, next.strike, allStrikes);
+      return next;
     });
     onUpdate({ legs: updatedLegs });
-  }, [basket.legs, hasPlacedLeg, onUpdate]);
+  }, [basket.legs, basket.underlying, hasPlacedLeg, onUpdate, expiries, allStrikes]);
 
   const removeLeg = useCallback((legId: string) => {
     if (hasPlacedLeg) return;
@@ -538,7 +575,7 @@ export default function MultiLegStrategyRow({
 
   const addBlankLeg = useCallback(() => {
     if (hasPlacedLeg) return;
-    const atm = atmStrike > 0 ? atmStrike : (allStrikes[0] ?? 24000);
+    const atm = snapToAllowed(basket.underlying, basket.expiry, expiries, atmStrike > 0 ? atmStrike : (allStrikes[0] ?? 24000), allStrikes);
     const newLeg: MultiLegLeg = {
       id: `mll_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`,
       side: 'S',
@@ -550,7 +587,7 @@ export default function MultiLegStrategyRow({
       status: 'DRAFT',
     };
     onUpdate({ legs: [...basket.legs, newLeg] });
-  }, [hasPlacedLeg, atmStrike, allStrikes, basket.legs, onUpdate]);
+  }, [hasPlacedLeg, atmStrike, allStrikes, basket.legs, basket.underlying, basket.expiry, expiries, onUpdate]);
 
   // Only blocks once margin has actually been computed for this exact
   // composition — before that resolves, `basketMargin` is undefined and this
@@ -783,45 +820,57 @@ export default function MultiLegStrategyRow({
                 const openLegs = basket.legs.filter(l => l.status === 'OPEN');
                 if (!openLegs.length) return null;
                 const busy = placing || exiting || shifting;
-                const groups: { label: string; ids: string[] }[] = [
-                  { label: 'CE', ids: openLegs.filter(l => l.option === 'CE').map(l => l.id) },
-                  { label: 'PE', ids: openLegs.filter(l => l.option === 'PE').map(l => l.id) },
-                  { label: 'All', ids: openLegs.map(l => l.id) },
+                const groups: { label: string; noun: string; ids: string[] }[] = [
+                  { label: 'CE', noun: 'CE legs', ids: openLegs.filter(l => l.option === 'CE').map(l => l.id) },
+                  { label: 'PE', noun: 'PE legs', ids: openLegs.filter(l => l.option === 'PE').map(l => l.id) },
+                  { label: 'All', noun: 'all open legs', ids: openLegs.map(l => l.id) },
                 ].filter((g, i, arr) => g.ids.length > 0 && !(g.label !== 'All' && g.ids.length === arr[arr.length - 1].ids.length));
-                const btn = `h-7 w-6 inline-flex items-center justify-center text-zinc-300 hover:text-white hover:bg-zinc-800 disabled:opacity-50 disabled:cursor-not-allowed ${FOCUS_RING}`;
+                const unit = `strike${shiftSteps > 1 ? 's' : ''}`;
+                const iconBtn = `h-full w-6 inline-flex items-center justify-center text-zinc-400 hover:text-white hover:bg-zinc-800 disabled:opacity-40 disabled:cursor-not-allowed transition-colors ${FOCUS_RING}`;
                 return (
-                  <div className="flex items-center gap-1.5">
-                    <div className="inline-flex items-center rounded-lg border border-zinc-700 overflow-hidden" title="Strikes moved per shift click">
-                      <button type="button" className={btn} disabled={busy || shiftSteps <= 1}
-                        aria-label="Decrease shift steps" onClick={() => setShiftSteps(n => clampShiftSteps(n - 1))}>
+                  <div
+                    role="group"
+                    aria-label="Shift strikes"
+                    className="inline-flex items-stretch h-7 rounded-lg border border-zinc-700 bg-zinc-900 overflow-hidden divide-x divide-zinc-700"
+                  >
+                    {/* How far one click moves */}
+                    <div className="flex items-center" title="Strikes moved per click">
+                      <span className="pl-2 pr-1 text-[10px] font-bold uppercase tracking-wider text-zinc-500 select-none">Shift</span>
+                      <button type="button" className={iconBtn} disabled={busy || shiftSteps <= 1}
+                        aria-label="Decrease shift distance" onClick={() => setShiftSteps(n => clampShiftSteps(n - 1))}>
                         <Minus className="w-3 h-3" />
                       </button>
-                      <span className="px-1.5 text-[11px] font-mono font-bold text-zinc-200 tabular-nums" aria-live="polite">
-                        {shiftSteps}<span className="text-zinc-500 font-sans font-semibold"> step{shiftSteps > 1 ? 's' : ''}</span>
+                      <span className="min-w-[3.25rem] px-1 text-center text-[11px] font-mono font-bold text-zinc-100 tabular-nums select-none" aria-live="polite">
+                        {shiftSteps}<span className="ml-0.5 font-sans text-[10px] font-semibold text-zinc-500">{unit}</span>
                       </span>
-                      <button type="button" className={btn} disabled={busy || shiftSteps >= MAX_SHIFT_STEPS}
-                        aria-label="Increase shift steps" onClick={() => setShiftSteps(n => clampShiftSteps(n + 1))}>
+                      <button type="button" className={iconBtn} disabled={busy || shiftSteps >= MAX_SHIFT_STEPS}
+                        aria-label="Increase shift distance" onClick={() => setShiftSteps(n => clampShiftSteps(n + 1))}>
                         <Plus className="w-3 h-3" />
                       </button>
                     </div>
+                    {/* Which legs move, and which way */}
                     {groups.map(g => (
-                      <div key={g.label} className="inline-flex items-center rounded-lg border border-zinc-700 overflow-hidden">
-                        <span className="px-1.5 text-[10px] font-bold text-zinc-400 bg-zinc-900">{g.label}</span>
-                        <button type="button" className={`${btn} border-l border-zinc-700`} disabled={busy}
-                          aria-label={`Shift ${g.label === 'All' ? 'all open legs' : `${g.label} legs`} down ${shiftSteps} strike${shiftSteps > 1 ? 's' : ''}`}
-                          title={`Roll ${g.label === 'All' ? 'all open legs' : `${g.label} legs`} down ${shiftSteps}`}
+                      <div key={g.label} className="flex items-center">
+                        <span className={`px-2 text-[10px] font-bold select-none ${g.label === 'All' ? 'text-zinc-100' : 'text-zinc-300'}`}>{g.label}</span>
+                        <button type="button" className={iconBtn} disabled={busy}
+                          aria-label={`Shift ${g.noun} down ${shiftSteps} ${unit}`}
+                          title={`Move ${g.noun} to lower strikes (${shiftSteps} ${unit})`}
                           onClick={() => runShift(g.ids, 'DOWN')}>
                           <ChevronDown className="w-3.5 h-3.5" />
                         </button>
-                        <button type="button" className={`${btn} border-l border-zinc-700`} disabled={busy}
-                          aria-label={`Shift ${g.label === 'All' ? 'all open legs' : `${g.label} legs`} up ${shiftSteps} strike${shiftSteps > 1 ? 's' : ''}`}
-                          title={`Roll ${g.label === 'All' ? 'all open legs' : `${g.label} legs`} up ${shiftSteps}`}
+                        <button type="button" className={iconBtn} disabled={busy}
+                          aria-label={`Shift ${g.noun} up ${shiftSteps} ${unit}`}
+                          title={`Move ${g.noun} to higher strikes (${shiftSteps} ${unit})`}
                           onClick={() => runShift(g.ids, 'UP')}>
                           <ChevronUp className="w-3.5 h-3.5" />
                         </button>
                       </div>
                     ))}
-                    {shifting && <Loader2 className="w-3.5 h-3.5 animate-spin text-zinc-400" aria-label="Shifting" />}
+                    {shifting && (
+                      <div className="flex items-center px-2" role="status">
+                        <Loader2 className="w-3.5 h-3.5 animate-spin text-zinc-400" aria-label="Shifting" />
+                      </div>
+                    )}
                   </div>
                 );
               })()}
@@ -1128,9 +1177,11 @@ export default function MultiLegStrategyRow({
               </button>
             </div>
           ) : (
-            <div className="overflow-x-auto">
-              {legCounts.closed > 0 && (
-                <div className="flex items-center gap-1 pb-1.5" role="group" aria-label="Filter legs by status">
+            <div>
+              <div className="flex items-center justify-between gap-2 pb-1.5">
+                <div className="flex items-center gap-1" role="group" aria-label="Filter legs by status">
+                  {legCounts.closed > 0 && (
+                    <>
                   {([['all', 'All', legCounts.all], ['open', 'Open', legCounts.open], ['closed', 'Closed', legCounts.closed]] as const).map(([k, label, n]) => (
                     <button
                       key={k}
@@ -1142,24 +1193,15 @@ export default function MultiLegStrategyRow({
                       {label} <span className="text-zinc-500">{n}</span>
                     </button>
                   ))}
+                    </>
+                  )}
                 </div>
-              )}
-              <table className="w-full table-fixed text-xs">
+                {onLegColumnsChange && <LegColumnsMenu columns={legColumns} onChange={onLegColumnsChange} />}
+              </div>
+              <div className="overflow-x-auto">
+              <table className="w-full table-fixed text-xs" style={{ minWidth: `${Math.round(colTotal * 12)}px` }}>
                 <colgroup>
-                  <col className="w-[5%]" />
-                  <col className="w-[5%]" />
-                  <col className="w-[8%]" />
-                  <col className="w-[5%]" />
-                  <col className="w-[6%]" />
-                  <col className="w-[6%]" />
-                  <col className="w-[8%]" />
-                  <col className="w-[8%]" />
-                  <col className="w-[4%]" />
-                  <col className="w-[6%]" />
-                  <col className="w-[9%]" />
-                  <col className="w-[7%]" />
-                  <col className="w-[6%]" />
-                  <col className="w-[14%]" />
+                  {colWeights.map((w, i) => <col key={i} style={{ width: `${((w / colTotal) * 100).toFixed(2)}%` }} />)}
                 </colgroup>
                 <thead>
                   <tr className="text-xs font-bold text-white border-b border-zinc-800 bg-zinc-800">
@@ -1178,17 +1220,22 @@ export default function MultiLegStrategyRow({
                         Strike<span aria-hidden className="text-[10px]">{legSort?.key === 'strike' ? (legSort.dir === 'asc' ? '▲' : '▼') : ''}</span>
                       </button>
                     </th>
+                    {legColumns.otm && <th className="px-2 py-2 text-right" title="Distance of the strike from spot (negative = in the money)">OTM %</th>}
+                    {legColumns.iv && <th className="px-2 py-2 text-right" title="Live implied volatility">IV</th>}
                     <th className="px-1.5 py-2 text-center" aria-sort={legSort?.key === 'lots' ? (legSort.dir === 'asc' ? 'ascending' : 'descending') : 'none'}>
                       <button type="button" onClick={() => toggleLegSort('lots')} className={`inline-flex w-full items-center gap-0.5 justify-center font-bold hover:text-emerald-300 ${FOCUS_RING}`}>
                         Lots<span aria-hidden className="text-[10px]">{legSort?.key === 'lots' ? (legSort.dir === 'asc' ? '▲' : '▼') : ''}</span>
                       </button>
                     </th>
+                    {legColumns.qty && sortTh('qty', 'Qty', 'right', 'Quantity in units (lots x lot size)')}
                     <th className="px-2 py-2 text-left">Type</th>
                     <th className="px-2 py-2 text-right" aria-sort={legSort?.key === 'ltp' ? (legSort.dir === 'asc' ? 'ascending' : 'descending') : 'none'}>
                       <button type="button" onClick={() => toggleLegSort('ltp')} className={`inline-flex w-full items-center gap-0.5 justify-end font-bold hover:text-emerald-300 ${FOCUS_RING}`}>
                         LTP<span aria-hidden className="text-[10px]">{legSort?.key === 'ltp' ? (legSort.dir === 'asc' ? '▲' : '▼') : ''}</span>
                       </button>
                     </th>
+                    {legColumns.avg && sortTh('avg', 'Avg', 'right', 'Average entry price')}
+                    {showExitCol && <th className="px-2 py-2 text-right" title="Closing fill price">Exit</th>}
                     <th className="px-2 py-2 text-left">SL</th>
                     <th className="px-2 py-2 text-left">TP</th>
                     <th className="px-1 py-2 text-center">Trail</th>
@@ -1207,6 +1254,7 @@ export default function MultiLegStrategyRow({
                         P&L<span aria-hidden className="text-[10px]">{legSort?.key === 'pnl' ? (legSort.dir === 'asc' ? '▲' : '▼') : ''}</span>
                       </button>
                     </th>
+                    {legColumns.pnlPct && sortTh('pnlPct', 'P&L %', 'right', 'P&L as a % of the entry premium')}
                     <th className="px-1.5 py-2 text-center" aria-sort={legSort?.key === 'status' ? (legSort.dir === 'asc' ? 'ascending' : 'descending') : 'none'}>
                       <button type="button" onClick={() => toggleLegSort('status')} className={`inline-flex w-full items-center gap-0.5 justify-center font-bold hover:text-emerald-300 ${FOCUS_RING}`}>
                         Status<span aria-hidden className="text-[10px]">{legSort?.key === 'status' ? (legSort.dir === 'asc' ? '▲' : '▼') : ''}</span>
@@ -1220,7 +1268,7 @@ export default function MultiLegStrategyRow({
                     <MultiLegLegRow
                       key={leg.id}
                       leg={leg}
-                      allStrikes={allStrikes}
+                      allStrikes={allowedStrikes(basket.underlying, leg.expiry || basket.expiry, expiries, allStrikes)}
                       spot={spot}
                       ltp={ltpFor(leg)}
                       editable={!hasPlacedLeg}
@@ -1236,11 +1284,16 @@ export default function MultiLegStrategyRow({
                       onShift={onShiftLegs ? (d => runShift([leg.id], d)) : undefined}
                       shiftSteps={shiftSteps}
                       shiftBusy={placing || exiting || shifting}
+                      columns={legColumns}
+                      showExit={showExitCol}
+                      iv={ivForStrike?.(leg.strike, leg.option, leg.expiry || basket.expiry) ?? 0}
+                      strikeBlocked={leg.status === 'DRAFT' && !strikeAllowed(basket.underlying, leg.expiry || basket.expiry, expiries, leg.strike)}
                       qtyWarning={legQtyWarnings?.[`${basket.id}:${leg.id}`]}
                     />
                   ))}
                 </tbody>
               </table>
+              </div>
             </div>
           )}
 
@@ -1335,6 +1388,7 @@ export default function MultiLegStrategyRow({
           onClose={() => setIsAddNewLegModalOpen(false)}
           basket={basket}
           allStrikes={allStrikes}
+          listedExpiries={expiries}
           atmStrike={atmStrike}
           lotSize={defaultLotSize}
           ltpForStrike={ltpForStrike ?? ((s, o) => 0)}

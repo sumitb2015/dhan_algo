@@ -150,6 +150,48 @@ export function legPnl(leg: MultiLegLeg, ltp: number, multiplier: number = 1): n
   return perUnit * leg.fill.qty * multiplier;
 }
 
+// ── Per-leg display helpers for the legs table columns ──────────────────
+// All read the leg's own fill ledger (never broker net qty) and return null when a
+// value does not exist yet, so the UI renders a dash instead of a misleading 0.
+
+/** Average entry price; null for a leg with no recorded fill (e.g. DRAFT). */
+export function legAvgPrice(leg: MultiLegLeg): number | null {
+  const a = leg.fill?.avgPrice;
+  return a != null && a > 0 ? a : null;
+}
+
+/** Closing fill price; only exists for a CLOSED leg. */
+export function legExitPrice(leg: MultiLegLeg): number | null {
+  if (leg.status !== 'CLOSED') return null;
+  const e = leg.closedFill?.exitPrice;
+  return e != null && e > 0 ? e : null;
+}
+
+/** Ledger quantity in units (lots x lot size): closed qty for CLOSED, live fill qty otherwise. */
+export function legQtyUnits(leg: MultiLegLeg): number | null {
+  const q = leg.status === 'CLOSED' ? leg.closedFill?.qty : leg.fill?.qty;
+  return q != null && q > 0 ? q : null;
+}
+
+/** Leg P&L as a percentage of the entry premium it was opened for. */
+export function legPnlPct(leg: MultiLegLeg, ltp: number, multiplier: number = 1): number | null {
+  const avg = legAvgPrice(leg);
+  const qty = legQtyUnits(leg);
+  if (avg == null || qty == null) return null;
+  // A live leg with no price yet would read as a full-premium gain (avg - 0); show nothing instead.
+  if (leg.status !== 'CLOSED' && !(ltp > 0)) return null;
+  const premium = avg * qty * multiplier;
+  if (premium <= 0) return null;
+  return (legPnl(leg, ltp, multiplier) / premium) * 100;
+}
+
+/** Distance of the strike from spot in %: positive = OTM, negative = ITM. */
+export function legOtmPct(leg: MultiLegLeg, spot: number): number | null {
+  if (!(spot > 0)) return null;
+  const diff = leg.option === 'CE' ? leg.strike - spot : spot - leg.strike;
+  return (diff / spot) * 100;
+}
+
 export function basketTotalPnl(legs: MultiLegLeg[], ltpFor: (leg: MultiLegLeg) => number, multiplier: number = 1): number {
   return legs.reduce((sum, l) => sum + legPnl(l, ltpFor(l), multiplier), 0);
 }

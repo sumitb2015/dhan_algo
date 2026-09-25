@@ -8,6 +8,25 @@ const RECONCILE_TIMEOUT_MS = 8_000;
 const RECONCILE_ATTEMPTS = 3;
 const RECONCILE_GAP_MS = 2_000;
 
+// Dhan limits order requests per ACCOUNT (about 10/second). Concurrent multi-leg
+// entries/exits, several baskets hitting a stop together, and every terminal that
+// posts here all share this one Node process, so a sliding window here keeps the
+// whole account under the limit. Stay below 10 to leave headroom; a burst larger
+// than this waits for the window instead of drawing DH-904 rejections mid-strategy
+// (a rejected leg of a concurrent entry would trigger a rollback).
+const ORDER_RATE_LIMIT = 8;
+const ORDER_WINDOW_MS = 1_000;
+const orderSendTimes: number[] = [];
+
+async function reserveOrderSlot(): Promise<void> {
+  for (;;) {
+    const now = Date.now();
+    while (orderSendTimes.length && now - orderSendTimes[0] >= ORDER_WINDOW_MS) orderSendTimes.shift();
+    if (orderSendTimes.length < ORDER_RATE_LIMIT) { orderSendTimes.push(now); return; }
+    await new Promise(r => setTimeout(r, orderSendTimes[0] + ORDER_WINDOW_MS - now + 5));
+  }
+}
+
 /** Products this route will book. CNC is included so a delivery position can be
  *  closed under its own product; CO/BO are excluded because the broker holds its
  *  own exit order against them. */
@@ -131,17 +150,30 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       triggerPrice:     0,
     };
 
-    const res = await fetch(DHAN_ORDERS, {
-      method:  'POST',
-      headers: {
-        'access-token':  token,
-        'client-id':     clientId,
-        'Content-Type':  'application/json',
-        'Accept':        'application/json',
-      },
-      body: JSON.stringify(payload),
-      signal: AbortSignal.timeout(ORDER_TIMEOUT_MS),
-    });
+    const send = async () => {
+      await reserveOrderSlot();
+      return fetch(DHAN_ORDERS, {
+        method:  'POST',
+        headers: {
+          'access-token':  token,
+          'client-id':     clientId,
+          'Content-Type':  'application/json',
+          'Accept':        'application/json',
+        },
+        body: JSON.stringify(payload),
+        signal: AbortSignal.timeout(ORDER_TIMEOUT_MS),
+      });
+    };
+    let res = await send();
+    // HTTP 429 means Dhan rejected the request before booking anything, so ONE retry
+    // after the window rolls over cannot double-place (unlike a timeout, which is
+    // reconciled by correlationId below). No further retries: a sustained limit
+    // should surface as a rejected order, not loop.
+    if (res.status === 429) {
+      console.warn('[scalper/fast-order] Dhan 429 — retrying once after the rate window');
+      await new Promise(r => setTimeout(r, ORDER_WINDOW_MS + 100));
+      res = await send();
+    }
 
     const json = await res.json() as Record<string, unknown>;
 
