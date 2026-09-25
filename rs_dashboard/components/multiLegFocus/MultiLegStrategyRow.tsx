@@ -2,7 +2,7 @@
 
 import React, { useState, useMemo, useCallback } from 'react';
 import {
-  ChevronDown, ChevronUp, Trash2, Plus, X, Check, Layers, Sigma, Loader2, RefreshCw,
+  ChevronDown, ChevronUp, Trash2, Plus, Minus, X, Check, Layers, Sigma, Loader2, RefreshCw,
 } from 'lucide-react';
 import MultiLegLegRow from './MultiLegLegRow';
 import RuleNumInput from './RuleNumInput';
@@ -17,6 +17,7 @@ import {
 import { computePayoff, type PayoffLeg, type PayoffResult } from '@/lib/basketStrategies';
 import { computeBsGreeks, calculateTimeToExpiryYears } from '@/lib/optionsMonitorMath';
 import { FOCUS_RING } from '@/components/Scalper';
+import { clampShiftSteps, MAX_SHIFT_STEPS } from '@/lib/strikeShift';
 import { BROKER_LABELS, type Broker } from '@/hooks/useBrokerSelector';
 import PayoffDiagram from '@/components/strategy/PayoffDiagram';
 import { StatChip } from '@/components/analytics/PayoffMetricStrip';
@@ -78,6 +79,8 @@ export interface MultiLegStrategyRowProps {
   onPlace: () => Promise<void>;
   onExit: () => Promise<void>;
   onExitLeg: (leg: MultiLegLeg) => Promise<void>;
+  /** Roll the given OPEN legs N strikes up/down (close, then reopen). */
+  onShiftLegs?: (legIds: string[], direction: 'UP' | 'DOWN', steps: number) => Promise<void>;
   onAddLots?: (params: {
     legId: string;
     lots: number;
@@ -130,6 +133,7 @@ export default function MultiLegStrategyRow({
   onPlace,
   onExit,
   onExitLeg,
+  onShiftLegs,
   onAddLots,
   onAddNewLeg,
   placing,
@@ -159,6 +163,13 @@ export default function MultiLegStrategyRow({
   // opens it only when they actually want to look at the curve.
   const [showPayoffChart, setShowPayoffChart] = useState(false);
   const [confirmPlace, setConfirmPlace] = useState(false);
+  const [shiftSteps, setShiftSteps] = useState(1);   // per-strategy Steps stepper (UI only, not persisted)
+  const [shifting, setShifting] = useState(false);
+  const runShift = useCallback(async (legIds: string[], direction: 'UP' | 'DOWN') => {
+    if (!onShiftLegs || !legIds.length) return;
+    setShifting(true);
+    try { await onShiftLegs(legIds, direction, shiftSteps); } finally { setShifting(false); }
+  }, [onShiftLegs, shiftSteps]);
   const [selectedLegForAddLots, setSelectedLegForAddLots] = useState<MultiLegLeg | null>(null);
   const [isAddNewLegModalOpen, setIsAddNewLegModalOpen] = useState<boolean>(false);
 
@@ -768,12 +779,59 @@ export default function MultiLegStrategyRow({
           {/* Open Strategy Actions */}
           {basket.legs.some(l => l.status === 'OPEN' || l.status === 'CLOSING') && (
             <div className="flex items-center gap-1.5">
+              {onShiftLegs && (() => {
+                const openLegs = basket.legs.filter(l => l.status === 'OPEN');
+                if (!openLegs.length) return null;
+                const busy = placing || exiting || shifting;
+                const groups: { label: string; ids: string[] }[] = [
+                  { label: 'CE', ids: openLegs.filter(l => l.option === 'CE').map(l => l.id) },
+                  { label: 'PE', ids: openLegs.filter(l => l.option === 'PE').map(l => l.id) },
+                  { label: 'All', ids: openLegs.map(l => l.id) },
+                ].filter((g, i, arr) => g.ids.length > 0 && !(g.label !== 'All' && g.ids.length === arr[arr.length - 1].ids.length));
+                const btn = `h-7 w-6 inline-flex items-center justify-center text-zinc-300 hover:text-white hover:bg-zinc-800 disabled:opacity-50 disabled:cursor-not-allowed ${FOCUS_RING}`;
+                return (
+                  <div className="flex items-center gap-1.5">
+                    <div className="inline-flex items-center rounded-lg border border-zinc-700 overflow-hidden" title="Strikes moved per shift click">
+                      <button type="button" className={btn} disabled={busy || shiftSteps <= 1}
+                        aria-label="Decrease shift steps" onClick={() => setShiftSteps(n => clampShiftSteps(n - 1))}>
+                        <Minus className="w-3 h-3" />
+                      </button>
+                      <span className="px-1.5 text-[11px] font-mono font-bold text-zinc-200 tabular-nums" aria-live="polite">
+                        {shiftSteps}<span className="text-zinc-500 font-sans font-semibold"> step{shiftSteps > 1 ? 's' : ''}</span>
+                      </span>
+                      <button type="button" className={btn} disabled={busy || shiftSteps >= MAX_SHIFT_STEPS}
+                        aria-label="Increase shift steps" onClick={() => setShiftSteps(n => clampShiftSteps(n + 1))}>
+                        <Plus className="w-3 h-3" />
+                      </button>
+                    </div>
+                    {groups.map(g => (
+                      <div key={g.label} className="inline-flex items-center rounded-lg border border-zinc-700 overflow-hidden">
+                        <span className="px-1.5 text-[10px] font-bold text-zinc-400 bg-zinc-900">{g.label}</span>
+                        <button type="button" className={`${btn} border-l border-zinc-700`} disabled={busy}
+                          aria-label={`Shift ${g.label === 'All' ? 'all open legs' : `${g.label} legs`} down ${shiftSteps} strike${shiftSteps > 1 ? 's' : ''}`}
+                          title={`Roll ${g.label === 'All' ? 'all open legs' : `${g.label} legs`} down ${shiftSteps}`}
+                          onClick={() => runShift(g.ids, 'DOWN')}>
+                          <ChevronDown className="w-3.5 h-3.5" />
+                        </button>
+                        <button type="button" className={`${btn} border-l border-zinc-700`} disabled={busy}
+                          aria-label={`Shift ${g.label === 'All' ? 'all open legs' : `${g.label} legs`} up ${shiftSteps} strike${shiftSteps > 1 ? 's' : ''}`}
+                          title={`Roll ${g.label === 'All' ? 'all open legs' : `${g.label} legs`} up ${shiftSteps}`}
+                          onClick={() => runShift(g.ids, 'UP')}>
+                          <ChevronUp className="w-3.5 h-3.5" />
+                        </button>
+                      </div>
+                    ))}
+                    {shifting && <Loader2 className="w-3.5 h-3.5 animate-spin text-zinc-400" aria-label="Shifting" />}
+                  </div>
+                );
+              })()}
               {onAddNewLeg && (
                 <button
                   type="button"
                   onClick={() => setIsAddNewLegModalOpen(true)}
+                  disabled={shifting}
                   title="Add a new leg to this active strategy"
-                  className={`h-7 px-2.5 inline-flex items-center gap-1 text-[11px] font-bold rounded-lg border border-emerald-500/40 bg-emerald-500/10 text-emerald-300 hover:bg-emerald-500/20 ${FOCUS_RING}`}
+                  className={`h-7 px-2.5 inline-flex items-center gap-1 text-[11px] font-bold rounded-lg border border-emerald-500/40 bg-emerald-500/10 text-emerald-300 hover:bg-emerald-500/20 disabled:opacity-50 disabled:cursor-not-allowed ${FOCUS_RING}`}
                 >
                   <Plus className="w-3 h-3" /> Add Leg
                 </button>
@@ -781,7 +839,7 @@ export default function MultiLegStrategyRow({
               <button
                 type="button"
                 onClick={onExit}
-                disabled={exiting}
+                disabled={exiting || shifting}
                 className={`h-7 px-3 text-[11px] font-bold rounded-lg border border-rose-500/40 text-rose-400 hover:bg-rose-500/10 hover:text-rose-300 disabled:opacity-50 ${FOCUS_RING}`}
               >
                 {exiting ? 'Exiting…' : 'Exit Strategy'}
@@ -1175,6 +1233,9 @@ export default function MultiLegStrategyRow({
                       onRemove={() => removeLeg(leg.id)}
                       onExit={() => onExitLeg(leg)}
                       onOpenAddLots={() => setSelectedLegForAddLots(leg)}
+                      onShift={onShiftLegs ? (d => runShift([leg.id], d)) : undefined}
+                      shiftSteps={shiftSteps}
+                      shiftBusy={placing || exiting || shifting}
                       qtyWarning={legQtyWarnings?.[`${basket.id}:${leg.id}`]}
                     />
                   ))}

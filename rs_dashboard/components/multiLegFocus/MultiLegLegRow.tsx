@@ -1,7 +1,7 @@
 'use client';
 
 import React from 'react';
-import { X, Plus, AlertTriangle } from 'lucide-react';
+import { X, Plus, AlertTriangle, ChevronUp, ChevronDown } from 'lucide-react';
 import { legPnl, computeLegTrailingSL, type MultiLegLeg } from '@/lib/multiLegFocus';
 import { FOCUS_RING } from '@/components/Scalper';
 import RuleNumInput from './RuleNumInput';
@@ -39,6 +39,10 @@ interface MultiLegLegRowProps {
   onRemove: () => void;
   onExit: () => void;
   onOpenAddLots?: () => void;
+  /** Roll this OPEN leg N strikes (N is the strategy card's Steps stepper). */
+  onShift?: (direction: 'UP' | 'DOWN') => void;
+  shiftSteps?: number;
+  shiftBusy?: boolean;
   /** Set when the broker shows more quantity at this strike than this
    *  strategy's own tracked qty — see MultiLegFocus.tsx's legQtyWarnings and
    *  the dhan-terminal-position-ownership skill's Invariant 6: the displayed
@@ -49,7 +53,7 @@ interface MultiLegLegRowProps {
 }
 
 export default function MultiLegLegRow({
-  leg, allStrikes, ltp, spot, editable, exiting, margin, multiplier = 1, frontExpiry, farExpiry, onChange, onRemove, onExit, onOpenAddLots, qtyWarning,
+  leg, allStrikes, ltp, spot, editable, exiting, margin, multiplier = 1, frontExpiry, farExpiry, onChange, onRemove, onExit, onOpenAddLots, onShift, shiftSteps = 1, shiftBusy = false, qtyWarning,
 }: MultiLegLegRowProps) {
   const pnl = leg.fill ? legPnl(leg, ltp, multiplier) : 0;
   const pnlColor = pnl > 0 ? 'text-emerald-400' : pnl < 0 ? 'text-rose-400' : 'text-zinc-400';
@@ -235,11 +239,35 @@ export default function MultiLegLegRow({
       <td className="px-2 py-1.5 text-center">
         {leg.status === 'OPEN' ? (
           <div className="flex items-center justify-center gap-1.5 whitespace-nowrap">
+            {onShift && (
+              <div className="inline-flex items-center rounded border border-zinc-700 overflow-hidden">
+                <button
+                  type="button"
+                  onClick={() => onShift('DOWN')}
+                  disabled={exiting || shiftBusy}
+                  aria-label={`Shift this leg down ${shiftSteps} strike${shiftSteps > 1 ? 's' : ''}`}
+                  title={`Roll down ${shiftSteps} strike${shiftSteps > 1 ? 's' : ''} (close, then reopen lower)`}
+                  className={`h-6 w-6 inline-flex items-center justify-center text-zinc-300 hover:text-white hover:bg-zinc-800 disabled:opacity-50 disabled:cursor-not-allowed ${FOCUS_RING}`}
+                >
+                  <ChevronDown className="w-3.5 h-3.5" />
+                </button>
+                <button
+                  type="button"
+                  onClick={() => onShift('UP')}
+                  disabled={exiting || shiftBusy}
+                  aria-label={`Shift this leg up ${shiftSteps} strike${shiftSteps > 1 ? 's' : ''}`}
+                  title={`Roll up ${shiftSteps} strike${shiftSteps > 1 ? 's' : ''} (close, then reopen higher)`}
+                  className={`h-6 w-6 inline-flex items-center justify-center text-zinc-300 hover:text-white hover:bg-zinc-800 border-l border-zinc-700 disabled:opacity-50 disabled:cursor-not-allowed ${FOCUS_RING}`}
+                >
+                  <ChevronUp className="w-3.5 h-3.5" />
+                </button>
+              </div>
+            )}
             {onOpenAddLots && (
               <button
                 type="button"
                 onClick={onOpenAddLots}
-                disabled={exiting}
+                disabled={exiting || shiftBusy}
                 title="Add lots to this open position"
                 className={`h-6 px-2 text-[10px] font-bold text-emerald-400 hover:text-emerald-300 rounded border border-emerald-500/30 hover:bg-emerald-500/10 disabled:opacity-50 transition-colors inline-flex items-center gap-0.5 ${FOCUS_RING}`}
               >
@@ -249,7 +277,7 @@ export default function MultiLegLegRow({
             <button
               type="button"
               onClick={onExit}
-              disabled={exiting}
+              disabled={exiting || shiftBusy}
               aria-label="Exit this leg"
               title="Exit this leg"
               className={`h-6 px-2.5 text-[10px] font-bold text-rose-400 hover:text-rose-300 rounded border border-rose-500/30 hover:bg-rose-500/10 disabled:opacity-50 disabled:cursor-not-allowed transition-colors ${FOCUS_RING}`}
