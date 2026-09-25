@@ -196,7 +196,7 @@ Non-obvious route behaviors:
   [docs/API_GOTCHAS.md](docs/API_GOTCHAS.md) before touching either parser.
 - `exit-all/`, `pnl-exit/`, `quiktrade/`, `crudeoil/kotak-order/` — square off positions / place quick trades: real-money endpoints.
 - `multi-leg-focus/` — N-leg options basket builder (`components/MultiLegFocus.tsx`,
-  `lib/multiLegFocus.ts`): sequenced order placement with rollback, `api/multi-leg-focus/baskets/`
+  `lib/multiLegFocus.ts`): two-phase order placement (BUY hedges concurrently, then SELL legs concurrently) with rollback, fail-closed margin gate (composition-matched margin + fresh funds + one placement at a time via the `placeBasket` lock wrapper; a hedge-then-recheck before the sells when funds are tight), exits shorts before longs and never sells hedges while a short is still open, `api/multi-leg-focus/baskets/`
   persists the basket JSON, `api/multi-leg-focus/margin/` polls broker margin on its own
   interval decoupled from price ticks. Real-money endpoint. Read `dhan-terminal-position-ownership`
   (ledger/reconciliation) and `dhan-polling-guards` (poller/stale-closure pitfalls) before touching it.
