@@ -34,6 +34,7 @@ const STRATEGY_LOG_DIRS: Record<string, string> = {
   crudeoilm_orb:                 'crudeoil_orb',
   crudeoilm_ema_supertrend:      'crudeoil_ema',
   nifty500_momentum:             'momentum_investing',
+  nifty_volcano_calendar:        'volcano_calendar',
 };
 
 // Duplicated instances write `<YYYYMMDD>_<instanceId>.log` alongside the primary's

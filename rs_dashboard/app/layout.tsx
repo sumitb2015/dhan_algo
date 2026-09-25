@@ -1,5 +1,5 @@
 import type { Metadata } from "next";
-import { Inter, Geist_Mono } from "next/font/google";
+import { Inter, Geist_Mono, Poppins, DM_Sans, Playfair_Display, Lora, Montserrat } from "next/font/google";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import ThemeInit from "@/components/ThemeInit";
 import Sidebar from "@/components/Sidebar";
@@ -25,6 +25,33 @@ const geistMono = Geist_Mono({
   subsets: ["latin"],
 });
 
+// Selectable heading fonts (Settings > Typography, lib/preferences.ts).
+// All five load unconditionally — next/font requires a static import per
+// font — but only the user's chosen one is ever assigned to `--heading-font`
+// (app/globals.css), so the unused ones cost a stylesheet entry, not a paint.
+const poppins = Poppins({
+  variable: "--font-poppins",
+  subsets: ["latin"],
+  weight: ["500", "600", "700"],
+});
+const dmSans = DM_Sans({
+  variable: "--font-dm-sans",
+  subsets: ["latin"],
+});
+const playfair = Playfair_Display({
+  variable: "--font-playfair",
+  subsets: ["latin"],
+});
+const lora = Lora({
+  variable: "--font-lora",
+  subsets: ["latin"],
+});
+const montserrat = Montserrat({
+  variable: "--font-montserrat",
+  subsets: ["latin"],
+  weight: ["500", "600", "700"],
+});
+
 export const metadata: Metadata = {
   title: {
     default: "Relative Strength Scanner | Nifty 50 & Nifty 500 Mansfield RS",
@@ -34,17 +61,22 @@ export const metadata: Metadata = {
 };
 
 /**
- * Applies the stored theme before first paint, so a light/beige-mode user
- * never sees a flash of the dark shell. SSR renders `dark` (the historical
- * default, and what lib/theme.ts uses as its server snapshot); this script
- * strips the class and sets data-theme once the real preference is known.
- * Keep the storage key and the mode set in sync with lib/theme.ts.
+ * Applies the stored theme + heading-font preference before first paint, so
+ * a light/beige-mode or custom-font user never sees a flash of the dark
+ * shell / default font. SSR renders `dark` + the default font (the
+ * historical default, and what lib/theme.ts + lib/preferences.ts use as
+ * their server snapshot); this script sets the real attributes once the
+ * stored preference is known. Keep the storage keys and value sets in sync
+ * with lib/theme.ts and lib/preferences.ts.
  */
 const THEME_INIT_SCRIPT = `(function(){try{
 var m=localStorage.getItem('dhan-theme')||'dark';
 if(m!=='light'&&m!=='dark'&&m!=='beige')m='dark';
 var d=m==='dark';
 var e=document.documentElement;e.classList.toggle('dark',d);e.setAttribute('data-theme',m);e.style.colorScheme=d?'dark':'light';
+var f=localStorage.getItem('dhan-heading-font')||'inter';
+if(f!=='inter'&&f!=='poppins'&&f!=='dmsans'&&f!=='playfair'&&f!=='lora'&&f!=='montserrat')f='inter';
+e.setAttribute('data-heading-font',f);
 }catch(_){}})()`;
 
 export default function RootLayout({
@@ -55,8 +87,9 @@ export default function RootLayout({
   return (
     <html
       lang="en"
-      className={`${inter.variable} ${geistMono.variable} dark h-full antialiased`}
+      className={`${inter.variable} ${geistMono.variable} ${poppins.variable} ${dmSans.variable} ${playfair.variable} ${lora.variable} ${montserrat.variable} dark h-full antialiased`}
       data-theme="dark"
+      data-heading-font="inter"
       suppressHydrationWarning
     >
       <head>

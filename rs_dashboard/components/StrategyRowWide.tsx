@@ -1421,7 +1421,7 @@ function StrategyRowWide({ meta, state, onRefresh, instanceId, onAddInstance, on
           </>
         )}
 
-        {meta.key !== 'nifty_spread_trend' && meta.key !== 'crudeoilm_supertrend' && meta.key !== 'crudeoilm_renko_sar' && meta.key !== 'crudeoilm_vwap_supertrend' && meta.key !== 'crudeoilm_ema_supertrend' && meta.key !== 'nifty_st_oi_bearcall' && meta.key !== 'nifty500_momentum' && meta.key !== 'nifty_delta_strangle' && meta.key !== 'nifty_flyagonal' && (
+        {meta.key !== 'nifty_spread_trend' && meta.key !== 'crudeoilm_supertrend' && meta.key !== 'crudeoilm_renko_sar' && meta.key !== 'crudeoilm_vwap_supertrend' && meta.key !== 'crudeoilm_ema_supertrend' && meta.key !== 'nifty_st_oi_bearcall' && meta.key !== 'nifty500_momentum' && meta.key !== 'nifty_delta_strangle' && meta.key !== 'nifty_flyagonal' && meta.key !== 'nifty_volcano_calendar' && (
           <div className={fieldCls}>
             <FieldLabel text="Start Time" tip="Time (HH:MM IST) the strategy begins monitoring for entries." />
             <Input type="text" value={startTime} onChange={e => setStartTime(e.target.value)} placeholder="09:20" className={inputCls} style={{ width: 72 }} />

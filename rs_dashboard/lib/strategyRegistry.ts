@@ -58,6 +58,11 @@ export const LOGIC_GROUPS: Record<string, { title: string; tagline: string; icon
     tagline: 'Hedged straddle held past the close',
     icon: 'Moon',
   },
+  calendar_hedge: {
+    title: 'Calendar & Butterfly',
+    tagline: 'Defined-risk butterfly + calendar combo, held to monthly expiry',
+    icon: 'Mountain',
+  },
 };
 
 export const STRATEGIES_METADATA: Record<string, {
@@ -233,6 +238,18 @@ export const STRATEGIES_METADATA: Record<string, {
     logicGroup: 'overnight_hedge',
     timeframe: 'positional',
     path: path.join(PROJECT_ROOT, 'strategies', 'overnight_fly', 'nifty_overnight_fly.py'),
+    execBrokerEligible: true,
+  },
+  // UNVALIDATED (see strategies/volcano_calendar/strategy.md): no backtest, no losing-month
+  // example in its source evidence. The only 5-leg / dual-expiry structure in the repo — a
+  // monthly Put Butterfly + Call Calendar held to expiry with a flat 2%/2% target-stop on
+  // deployed margin. --live requires --i-understand-this-is-unvalidated.
+  nifty_volcano_calendar: {
+    name: 'Nifty Volcano Calendar (Butterfly + Calendar)',
+    underlying: 'NIFTY',
+    logicGroup: 'calendar_hedge',
+    timeframe: 'positional',
+    path: path.join(PROJECT_ROOT, 'strategies', 'volcano_calendar', 'nifty_volcano_calendar.py'),
     execBrokerEligible: true,
   },
 };
