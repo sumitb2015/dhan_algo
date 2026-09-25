@@ -44,6 +44,12 @@ const DEFAULT_INDEX_SPOT: Record<Underlying, number> = {
   CRUDEOILM: 8500,
 };
 
+function fallbackStrikesFor(underlying: Underlying): number[] {
+  const spot = DEFAULT_INDEX_SPOT[underlying] ?? 24000;
+  const step = DEFAULT_INDEX_STEP[underlying] ?? 50;
+  return Array.from({ length: 9 }, (_, i) => spot + (i - 4) * step);
+}
+
 const ALL_STRATEGY_TEMPLATES: StrategyTemplate[] = Object.values(STRATEGY_CATEGORIES).flat();
 
 function fmtMoney(n: number): string {
@@ -324,8 +330,8 @@ export default function MultiLegFocus() {
       const keys = Object.keys(liveQuotes.strikes).map(Number).filter(n => !isNaN(n)).sort((a, b) => a - b);
       if (keys.length) return keys;
     }
-    return [23600, 23800, 24000, 24200, 24400];
-  }, [activeChain?.strikes, liveQuotes?.strikes]);
+    return fallbackStrikesFor(activeUnderlying);
+  }, [activeChain?.strikes, liveQuotes?.strikes, activeUnderlying]);
 
   const gridStep = useMemo(() => strikeStep(gridStrikes) || DEFAULT_INDEX_STEP[activeUnderlying] || 50, [gridStrikes, activeUnderlying]);
   const gridAtm = useMemo(() => (activeSpot > 0 ? nearestStrike(gridStrikes, activeSpot) : null), [gridStrikes, activeSpot]);
@@ -485,7 +491,7 @@ export default function MultiLegFocus() {
           // If no baskets stored yet, create a default Short Strangle draft row
           const pair = `${activeUnderlying}:${activeExpiry}`;
           const chain = chainData[pair];
-          const allStrikes = chain?.strikes?.length ? chain.strikes : [23600, 23800, 24000, 24200, 24400];
+          const allStrikes = chain?.strikes?.length ? chain.strikes : fallbackStrikesFor(activeUnderlying);
           const step = strikeStep(allStrikes) || DEFAULT_INDEX_STEP[activeUnderlying] || 50;
           const spot = chain?.spot ?? DEFAULT_INDEX_SPOT[activeUnderlying] ?? 24000;
           const atm = nearestStrike(allStrikes, spot) ?? (Math.round(spot / step) * step);
@@ -1307,6 +1313,26 @@ export default function MultiLegFocus() {
     const label = `${leg.side === 'B' ? 'BUY' : 'SELL'} ${leg.strike} ${leg.option}`;
     const basket = basketsRef.current.find(b => b.id === basketId);
 
+    // Hedge Protection Guard: Warn if manually exiting a BUY leg while short legs remain open
+    if (leg.side === 'B') {
+      const openShorts = (basket?.legs ?? []).filter(l => l.status === 'OPEN' && l.side === 'S' && l.id !== leg.id);
+      if (openShorts.length > 0) {
+        const matchingShorts = openShorts.filter(l => l.option === leg.option);
+        const warning = matchingShorts.length > 0
+          ? `Warning: Exiting this ${leg.strike} ${leg.option} BUY hedge will leave your short ${matchingShorts.map(s => `${s.strike} ${s.option}`).join(', ')} leg completely NAKED without protection, and will increase margin requirements.\n\nExit this hedge anyway?`
+          : `Warning: This strategy still has open short legs (${openShorts.map(s => `${s.strike} ${s.option}`).join(', ')}). Exiting this BUY leg will increase margin requirements.\n\nExit anyway?`;
+        if (!window.confirm(warning)) {
+          exitingLegsRef.current.delete(leg.id);
+          setExitingLegs(prev => {
+            const next = new Set(prev);
+            next.delete(leg.id);
+            return next;
+          });
+          return { closed: false, qty: 0 };
+        }
+      }
+    }
+
     try {
       const res = await fetch(scalperRoute(broker, 'positions'));
       const j = await res.json() as { success: boolean; data?: Record<string, unknown>[] };
@@ -1380,7 +1406,17 @@ export default function MultiLegFocus() {
       const orderUrl = broker === 'dhan' ? '/api/scalper/fast-order' : scalperRoute(broker, 'order');
       const body = broker === 'dhan'
         ? { securityId, quantity: qty, side, orderType: 'MARKET', exchangeSegment: match.row.exchangeSegment ?? defaultSegDhan, ...productPayload.fields }
-        : { tradingsymbol: leg.orderRef?.symbol, quantity: qty, side, orderType: 'MARKET', exchange: match.row.exchange ?? defaultExchOther, ...productPayload.fields };
+        : {
+            tradingsymbol: leg.orderRef?.symbol
+              ?? (match.row.tradingSymbol as string | undefined)
+              ?? (match.row.tradingsymbol as string | undefined)
+              ?? (match.row.symbol as string | undefined),
+            quantity: qty,
+            side,
+            orderType: 'MARKET',
+            exchange: match.row.exchange ?? defaultExchOther,
+            ...productPayload.fields,
+          };
 
       const res2 = await fetch(orderUrl, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
       const j2 = await res2.json() as { success: boolean; order_id?: string; price?: number; error?: string };
@@ -1482,6 +1518,8 @@ export default function MultiLegFocus() {
       price: params.orderType === 'LIMIT' ? params.limitPrice : undefined,
       underlying: basket.underlying as Underlying,
       productType: 'MARGIN',
+      securityId: leg.orderRef?.securityId,
+      tradingsymbol: leg.orderRef?.symbol,
     }, strikeMap);
 
     if (!req) {
@@ -1735,6 +1773,8 @@ export default function MultiLegFocus() {
           type: 'MARKET',
           underlying: basket.underlying as Underlying,
           productType: 'MARGIN',
+          securityId: leg.orderRef?.securityId,
+          tradingsymbol: leg.orderRef?.symbol,
         }, strikeMap);
 
         if (!req) throw new Error(`Could not resolve security for ${leg.strike} ${leg.option}`);
@@ -2506,7 +2546,7 @@ export default function MultiLegFocus() {
             const chain = chainData[pair];
             const lookup = lookupCache[pair];
             const expiries = expiriesMap[basket.underlying] ?? [];
-            const allStrikes = chain?.strikes?.length ? chain.strikes : [23600, 23800, 24000, 24200, 24400];
+            const allStrikes = chain?.strikes?.length ? chain.strikes : fallbackStrikesFor(basket.underlying as Underlying);
             const step = strikeStep(allStrikes) || DEFAULT_INDEX_STEP[basket.underlying as Underlying] || 50;
             const rowSpot = (basket.underlying === activeUnderlying && liveQuotes?.spot && liveQuotes.spot > 0)
               ? liveQuotes.spot

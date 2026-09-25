@@ -352,6 +352,12 @@ export default function MultiLegStrategyRow({
     [basket.legs, basket.expiry],
   );
 
+  const effectiveFarExpiry = useMemo(() => {
+    if (basket.farExpiry) return basket.farExpiry;
+    const farLeg = basket.legs.find(l => l.status !== 'CLOSED' && l.expiry && l.expiry !== basket.expiry);
+    return farLeg?.expiry;
+  }, [basket.farExpiry, basket.legs, basket.expiry]);
+
   // Re-derived from the live legs rather than trusting the stored preset
   // label, which is frozen at creation and goes stale the moment a leg is
   // edited (strike moved, ratio changed) — see classifyBasketStructure's
@@ -371,7 +377,7 @@ export default function MultiLegStrategyRow({
   // see computeCalendarPayoffCurve's own doc comment for why this (not a
   // same-day-both-legs-at-intrinsic curve) is the economically meaningful one.
   const calendarCurve = useMemo(() => {
-    if (!hasMixedExpiry || !basket.farExpiry || !spot || spot <= 0) return null;
+    if (!hasMixedExpiry || !effectiveFarExpiry || !spot || spot <= 0) return null;
     const activeLegs = basket.legs.filter(l => l.status !== 'CLOSED');
     if (activeLegs.length === 0) return null;
 
@@ -389,11 +395,11 @@ export default function MultiLegStrategyRow({
     if (legs.some(l => l.entryPrice <= 0)) return null;
 
     try {
-      return computeCalendarPayoffCurve(legs, spot, basket.expiry, basket.farExpiry, step || 50);
+      return computeCalendarPayoffCurve(legs, spot, basket.expiry, effectiveFarExpiry, step || 50);
     } catch {
       return null;
     }
-  }, [hasMixedExpiry, basket.farExpiry, basket.expiry, basket.legs, spot, step, defaultLotSize, crudeMult, ltpFor, ivForStrike]);
+  }, [hasMixedExpiry, effectiveFarExpiry, basket.expiry, basket.legs, spot, step, defaultLotSize, crudeMult, ltpFor, ivForStrike]);
 
   // ── Payoff: Breakevens, Max Profit, Max Loss ───────────────────────
   const payoffResult: PayoffResult | null = useMemo(() => {
@@ -434,7 +440,7 @@ export default function MultiLegStrategyRow({
     } catch {
       return null;
     }
-  }, [basket.legs, basket.underlying, lotSize, ltpFor, hasMixedExpiry]);
+  }, [basket.legs, basket.underlying, defaultLotSize, broker, crudeMult, ltpFor, hasMixedExpiry]);
 
   // ── T+0 live mark-to-market curve (dhan-payoff-diagrams: every payoff
   // diagram must plot this alongside the at-expiry curve) ────────────────
@@ -548,6 +554,11 @@ export default function MultiLegStrategyRow({
     if (!calendarCurve) return '—';
     return calendarCurve.maxPnl > 0 ? `+${fmtMoney(calendarCurve.maxPnl)}` : fmtMoney(calendarCurve.maxPnl);
   }, [calendarCurve]);
+
+  const calendarMaxProfitPctOfMargin = useMemo(() => {
+    if (!calendarCurve || !basketMargin || basketMargin <= 0) return null;
+    return (calendarCurve.maxPnl / basketMargin) * 100;
+  }, [calendarCurve, basketMargin]);
 
   const calendarMaxLossDisplay = useMemo(() => {
     if (!calendarCurve) return '—';
@@ -696,8 +707,8 @@ export default function MultiLegStrategyRow({
             <span className="text-xs font-bold text-zinc-300 whitespace-nowrap flex items-center gap-1.5">
               <span>
                 {basket.underlying} <span className="text-zinc-600">·</span> {basket.expiry}
-                {hasMixedExpiry && basket.farExpiry && (
-                  <span className="text-fuchsia-400"> / {basket.farExpiry}</span>
+                {hasMixedExpiry && effectiveFarExpiry && (
+                  <span className="text-fuchsia-400"> / {effectiveFarExpiry}</span>
                 )}
               </span>
               <span className="px-1.5 py-0.5 rounded text-[10px] font-mono font-bold text-amber-400 bg-amber-500/10 border border-amber-500/20" title={`Strategy Multiplier: ${currentMultiplier}×`}>
@@ -813,7 +824,12 @@ export default function MultiLegStrategyRow({
               <span className="text-zinc-700">·</span>
               <div className="flex items-center gap-1">
                 <span className="text-fuchsia-400 text-[10px] uppercase font-semibold">Max P/L:</span>
-                <span className="text-emerald-400 font-bold">{calendarMaxProfitDisplay}</span>
+                <span className="text-emerald-400 font-bold">
+                  {calendarMaxProfitDisplay}
+                  {calendarMaxProfitPctOfMargin != null && (
+                    <span className="text-[10px] opacity-80"> ({calendarMaxProfitPctOfMargin >= 0 ? '+' : ''}{calendarMaxProfitPctOfMargin.toFixed(1)}% of margin)</span>
+                  )}
+                </span>
                 <span className="text-zinc-600">/</span>
                 <span className="text-rose-400 font-bold">{calendarMaxLossDisplay}</span>
               </div>
@@ -1379,7 +1395,7 @@ export default function MultiLegStrategyRow({
                       multiplier={crudeMult}
                       strategyMultiplier={currentMultiplier}
                       frontExpiry={basket.expiry}
-                      farExpiry={basket.farExpiry}
+                      farExpiry={effectiveFarExpiry}
                       onChange={patch => updateLeg(leg.id, patch)}
                       onRemove={() => removeLeg(leg.id)}
                       onExit={() => onExitLeg(leg)}
@@ -1434,7 +1450,7 @@ export default function MultiLegStrategyRow({
                       />
                       <p className="mt-1 text-[10px] text-zinc-500 font-mono">
                         Value as of the near leg&apos;s expiry ({basket.expiry}) — the far leg
-                        ({basket.farExpiry}) still carries {calendarCurve.daysBetweenExpiries}d of theoretical time value, priced via Black-76/Black-Scholes.
+                        ({effectiveFarExpiry}) still carries {calendarCurve.daysBetweenExpiries}d of theoretical time value, priced via Black-76/Black-Scholes.
                       </p>
                     </>
                   )}

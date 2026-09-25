@@ -10,6 +10,8 @@ export interface OrderLeg {
   price?: number;
   underlying: string;
   productType: 'INTRADAY' | 'MARGIN';
+  securityId?: string;
+  tradingsymbol?: string;
 }
 
 /** Unified strike->identifier shape, matching what every broker's
@@ -41,8 +43,6 @@ export function resolveOrderRequest(
   strikeMap: Record<string, StrikeIdentifier>,
 ): ResolvedOrder | null {
   const ident = strikeMap[String(leg.strike)];
-  if (!ident) return null;
-
   const side = leg.side === 'B' ? 'BUY' : 'SELL';
   const limitPrice = leg.type === 'LIMIT' && leg.price != null
     ? Math.round(leg.price * 20) / 20   // snap to 0.05 tick
@@ -52,7 +52,7 @@ export function resolveOrderRequest(
   const isCrude = leg.underlying === 'CRUDEOIL' || leg.underlying === 'CRUDEOILM';
 
   if (broker === 'dhan') {
-    const securityId = leg.option === 'CE' ? ident.ceId : ident.peId;
+    const securityId = leg.securityId || (leg.option === 'CE' ? ident?.ceId : ident?.peId);
     if (!securityId) return null;
     const exchangeSegment = isSensex ? 'BSE_FNO' : (isCrude ? 'MCX_COMM' : 'NSE_FNO');
     return {
@@ -68,7 +68,7 @@ export function resolveOrderRequest(
 
   // Every non-Dhan broker orders by trading symbol and shares this request
   // shape; only the exchange spelling differs (Kotak uses lowercase segments).
-  const tradingsymbol = leg.option === 'CE' ? ident.ceSymbol : ident.peSymbol;
+  const tradingsymbol = leg.tradingsymbol || (leg.option === 'CE' ? ident?.ceSymbol : ident?.peSymbol);
   if (!tradingsymbol) return null;
   const exchange = broker === 'kotak'
     ? (isSensex ? 'bse_fo' : (isCrude ? 'mcx_fo' : 'nse_fo'))
