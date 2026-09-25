@@ -85,16 +85,34 @@ function StrategyGlyph({
     // shape family a calendar spread's payoff actually has.
     const hasMixed = template.legs.some(l => l.expiryRole === 'far');
     if (hasMixed) {
-      const frontOffset = template.legs.find(l => l.expiryRole !== 'far')?.offset ?? 0;
-      const farOffset = template.legs.find(l => l.expiryRole === 'far')?.offset ?? 0;
-      const center = 100 + ((frontOffset + farOffset) / 2) * 5;
-      const halfWidth = Math.max(10, Math.abs(farOffset - frontOffset) * 5 / 2 + 10);
+      // One tent per option side (a double calendar has a put tent below spot AND a
+      // call tent above it); a single calendar/diagonal has just one.
+      const tents: { center: number; halfWidth: number }[] = (['CE', 'PE'] as const).flatMap(opt => {
+        const front = template.legs.find(l => l.option === opt && l.expiryRole !== 'far');
+        const far = template.legs.find(l => l.option === opt && l.expiryRole === 'far');
+        if (!front || !far) return [];
+        return [{
+          center: 100 + ((front.offset + far.offset) / 2) * 5,
+          halfWidth: Math.max(10, Math.abs(far.offset - front.offset) * 5 / 2 + 10),
+        }];
+      });
+      if (tents.length < 2) {
+        // Single calendar/diagonal, or a mixed-expiry combo like Flyagonal where the
+        // front and far legs sit on different option sides: one tent between the
+        // first front leg and the first far leg.
+        const frontOffset = template.legs.find(l => l.expiryRole !== 'far')?.offset ?? 0;
+        const farOffset = template.legs.find(l => l.expiryRole === 'far')?.offset ?? 0;
+        tents.length = 0;
+        tents.push({
+          center: 100 + ((frontOffset + farOffset) / 2) * 5,
+          halfWidth: Math.max(10, Math.abs(farOffset - frontOffset) * 5 / 2 + 10),
+        });
+      }
       const floor = -0.55;
       const samples = 48;
       const points = Array.from({ length: samples + 1 }, (_, i) => {
         const x = 60 + (80 * i) / samples;
-        const dist = Math.abs(x - center);
-        const y = Math.max(floor, 1 - dist / halfWidth);
+        const y = Math.max(floor, ...tents.map(t => 1 - Math.abs(x - t.center) / t.halfWidth));
         return { x, y };
       });
       const ys = points.map(p => p.y);

@@ -242,3 +242,18 @@ test('Sensibull & Options Monitor Parity: Baskets Short Strangle generates ident
   assert.strictEqual(spotPt.pnlExpiry, 7595);
 });
 
+test('double-calendar template: short front / long far at ATM ±300 pts on a 50-pt step', () => {
+  const tpl = STRATEGY_CATEGORIES.Calendar.find(t => t.key === 'double-calendar');
+  assert.ok(tpl, 'double-calendar template must exist under Calendar');
+  const legs = tpl!.legs;
+  assert.strictEqual(legs.length, 4);
+  for (const opt of ['PE', 'CE'] as const) {
+    const sign = opt === 'CE' ? 1 : -1;
+    const front = legs.find(l => l.option === opt && l.expiryRole === 'front')!;
+    const far = legs.find(l => l.option === opt && l.expiryRole === 'far')!;
+    assert.strictEqual(front.side, 'S');
+    assert.strictEqual(far.side, 'B');
+    assert.strictEqual(front.offset, far.offset);          // same strike = calendar, not diagonal
+    assert.strictEqual(front.offset * 50, sign * 300);     // 300 pts either side of ATM
+  }
+});

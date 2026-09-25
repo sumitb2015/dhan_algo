@@ -270,3 +270,12 @@ export function daysToExpiry(expiry: string, now = new Date()): number | null {
   const diff = startOfDay(new Date(y, mi, d)).getTime() - startOfDay(now).getTime();
   return Math.max(0, Math.round(diff / 86_400_000));
 }
+    // Double calendar: a put calendar below spot plus a call calendar above it, same two expiries,
+    // net long vega, max loss = the debit. Initial offset 300 pts each side = 6 steps on a 50-pt step
+    // (NIFTY); offsets are in strike STEPS, so BANKNIFTY/SENSEX (100-pt step) land at 600 pts.
+    { key: 'double-calendar',      name: 'Double Calendar',      legs: [
+      { side: 'S', option: 'PE', offset: -6, ratio: 1, expiryRole: 'front' },
+      { side: 'B', option: 'PE', offset: -6, ratio: 1, expiryRole: 'far' },
+      { side: 'S', option: 'CE', offset: 6, ratio: 1, expiryRole: 'front' },
+      { side: 'B', option: 'CE', offset: 6, ratio: 1, expiryRole: 'far' },
+    ] },

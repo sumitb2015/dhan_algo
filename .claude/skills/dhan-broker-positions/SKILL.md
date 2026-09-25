@@ -40,6 +40,7 @@ multipliers, or close-order product inline. Every one of them already has a help
 | Real (not order-quantity) lot size | `lib/lotSize.ts` - `resolveLotSize()` |
 | Per-broker endpoint routing | `hooks/useBrokerSelector.ts` - `scalperRoute()`, `brokerRoute()` |
 | Partial square-off quantities | `lib/partialQty.ts` |
+| Strike-shift target index (N steps, chain-edge clamp) | `lib/strikeShift.ts` - `resolveShiftTarget()`, `clampShiftSteps()` |
 | Kotak LTP join for a read-only summary page (no live WS bridge available) | `lib/kotakLtpJoin.ts` - `joinKotakLtp()` |
 | Sharing a positions/funds fetch across pages (display/aggregation reads only — never an order-sizing read) | `lib/brokerPositionsCache.ts` - see `dhan-broker-cache` |
 
@@ -149,6 +150,19 @@ equity holdings alongside F&O. The terminals must send `scope:'fno'`, which clos
 only NSE_FNO/BSE_FNO positions and cancels only F&O orders via per-position REST
 calls. Only the strategies-plus portfolio page keeps the full nuclear exit. (`31d907e`)
 
+### 8. Strike shift (chevrons) rolls a live leg — N strikes, one close + one reopen
+`handleShiftStrike` in `AdvancedScalper.tsx` closes the leg then reopens at the new
+strike. The shared **Steps** stepper (1-10) sets N; `resolveShiftTarget` picks
+`current ± N` listed strikes. Rules:
+- One close and one reopen regardless of N — never loop single-strike rolls.
+- If a position is open and the chain edge clamps N, **refuse** (leave everything
+  untouched). Only a flat box may clamp to the edge.
+- Before closing, confirm if the target contract already has an open position
+  (Dhan secId lookup) or another box is on the same strike+side — the reopen would
+  pool into one netted broker row. The position check is Dhan-only.
+- Size the reopen off `closeResult.closedUnits`, not the requested fraction.
+- The FULL roll still closes the whole netted row; see the Python Side note. (`f389ac5`)
+
 ## Python Side
 The same class of bug exists for strategies: Dhan nets every position by security ID,
 so two strategy instances short of the same strike share ONE broker position. Sizing
@@ -164,5 +178,5 @@ leg. Use `lib/strategy_risk.py`'s `resolve_exit_qty(helper, security_id, own_qty
 - Is the change broker-agnostic? Dhan is the only broker with a numeric `securityId`;
   everything else joins by trading symbol, so branch on `broker !== 'dhan'` rather
   than on a specific broker name.
-- `lib/positionProduct.test.ts`, `positionLegs.test.ts`, `partialQty.test.ts` and
+- `lib/positionProduct.test.ts`, `positionLegs.test.ts`, `partialQty.test.ts`, `strikeShift.test.ts` and
   `brokerRoute.test.ts` exist — run `npm test` in `rs_dashboard/`.
