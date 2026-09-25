@@ -6,7 +6,7 @@ import React, {
 import NavBar from './NavBar';
 import {
   TrendingUp, Zap, ShieldOff, Shield, Activity,
-  Clock, Plus, Check, Save, Layers, Target, Lock, RefreshCw, X,
+  Clock, Plus, Check, Save, Layers, Target, Lock, RefreshCw, X, Trash2,
   ChevronUp, ChevronDown, Grid3x3, Calendar,
 } from 'lucide-react';
 import { TabTable, type SortState, BUILDUP_STYLES } from './Scalper';
@@ -304,7 +304,29 @@ function legValues(row: FocusRow, live: RowLive, lotSize: number | null): {
   };
 }
 
-/** Compact LTP column: combined premium → VWAP 1m → CE/PE → ₹ values → total ₹ → Val/OI PCR strip. */
+/** Computes the live mark-to-market P&L for a single owned leg of a row. */
+function computeLegPnl(row: FocusRow, leg: 'CE' | 'PE', live: RowLive): number | null {
+  const pos = leg === 'CE' ? live.cePosition : live.pePosition;
+  if (!pos || !rowOwnsLeg(row, leg)) return null;
+  const brokerQty = Math.abs(Number(pos.netQty) || 0);
+  if (brokerQty <= 0) return null;
+  const owned = legOwnContracts(row, leg, live);
+  const qty = Math.min(owned > 0 ? owned : 0, brokerQty);
+  if (qty <= 0) return null;
+  const ltp = leg === 'CE' ? live.ltpCe : live.ltpPe;
+  if (ltp != null && ltp > 0) {
+    return mtmForQty({
+      netQty: Number(pos.netQty) || 0,
+      buyAvg: Number(pos.buyAvg) || 0,
+      sellAvg: Number(pos.sellAvg) || 0,
+      ltp,
+      qty,
+    });
+  }
+  return (Number(pos.unrealizedProfit) || 0) * (qty / brokerQty);
+}
+
+/** Compact LTP column: combined premium → VWAP 1m → CE/PE → ₹ values → total ₹ → PnL → Val/OI PCR strip. */
 function LtpStack({
   combinedLtp, live, ceValue, peValue, totalValue, pcr, pcrOi, compact = false,
 }: {
@@ -364,6 +386,15 @@ function LtpStack({
         title="Total rupee value across every lot this row holds — CE + PE combined"
       >
         Total ₹{fmtValue(totalValue)}
+      </div>
+      <div className="flex items-center justify-between text-[11px] font-mono leading-none py-1 border-t border-zinc-800/60">
+        <span className="text-[9px] font-black uppercase tracking-wider text-zinc-400">P&amp;L</span>
+        <span className={cn(
+          'font-black tabular-nums',
+          live.pnl > 0 ? 'text-emerald-400' : live.pnl < 0 ? 'text-rose-400' : 'text-zinc-400'
+        )} title="Row current total P&L (realized + open mark-to-market)">
+          {live.pnl > 0 ? '+' : ''}₹{live.pnl.toFixed(0)}
+        </span>
       </div>
       <div className="flex rounded-md border border-zinc-800 divide-x divide-zinc-800 overflow-hidden">
         <span
@@ -1700,6 +1731,8 @@ function FocusTableRowImpl({
   // How many lots the +/- buttons act on, independently per leg
   const [ceQty, setCeQty] = useState(1);
   const [peQty, setPeQty] = useState(1);
+  const cePnl = computeLegPnl(row, 'CE', live);
+  const pePnl = computeLegPnl(row, 'PE', live);
   // Expiry is locked once this row owns an active leg.
   const expiryLocked = rowOwnsLeg(row, 'CE') || rowOwnsLeg(row, 'PE');
   // DTE (0/1/0+1) only means something relative to the NEAREST expiry — a row
@@ -1724,7 +1757,7 @@ function FocusTableRowImpl({
         flat && row.status !== 'armed' && 'border-l-4 border-l-transparent',
       )}>
         <div className="flex flex-col gap-2">
-          {/* Top Line: Underlying chip + Side Selector + Lots */}
+          {/* Top Line: Underlying chip + Side Selector + Lots + Delete */}
           <div className="flex items-center justify-between gap-1.5 pb-1.5 border-b border-zinc-800/60">
             <div className="flex items-center gap-1.5">
               <span className={cn('inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[9px] font-black border', UNDERLYING_CHIP[row.underlying])}>
@@ -1738,9 +1771,27 @@ function FocusTableRowImpl({
                 onChange={s => onUpdate({ side: s })}
               />
             </div>
-            <div className="flex items-center gap-1">
-              <span className="text-[8.5px] font-bold text-zinc-500 uppercase">Lots</span>
-              <LotStepper value={row.lots} onChange={v => onUpdate({ lots: v })} />
+            <div className="flex items-center gap-1.5">
+              <div className="flex items-center gap-1">
+                <span className="text-[8.5px] font-bold text-zinc-500 uppercase">Lots</span>
+                <LotStepper value={row.lots} onChange={v => onUpdate({ lots: v })} />
+              </div>
+              <button
+                type="button"
+                onClick={flat ? onDelete : undefined}
+                disabled={!flat}
+                title={flat ? 'Delete this row' : 'Position open — exit position first to delete row'}
+                aria-label="Delete row"
+                className={cn(
+                  'p-1 rounded text-zinc-500 transition-colors',
+                  flat
+                    ? 'hover:text-rose-400 hover:bg-rose-500/10 cursor-pointer'
+                    : 'opacity-30 cursor-not-allowed hover:text-zinc-500',
+                  FOCUS_RING,
+                )}
+              >
+                <Trash2 className="h-3.5 w-3.5" />
+              </button>
             </div>
           </div>
 
@@ -1833,6 +1884,16 @@ function FocusTableRowImpl({
                 ) : (
                   <span className="text-[8px] font-mono font-bold text-zinc-500 uppercase tracking-widest px-1">Flat</span>
                 )}
+                {cePnl != null && (
+                  <span className={cn(
+                    'text-[10px] font-mono font-black px-1.5 py-0.5 rounded border tabular-nums',
+                    cePnl > 0 ? 'bg-emerald-500/15 text-emerald-400 border-emerald-500/40 shadow-sm'
+                      : cePnl < 0 ? 'bg-rose-500/15 text-rose-400 border-rose-500/40 shadow-sm'
+                      : 'bg-zinc-800 text-zinc-400 border-zinc-700'
+                  )} title="CE leg mark-to-market P&L">
+                    {cePnl > 0 ? '+' : ''}₹{cePnl.toFixed(0)}
+                  </span>
+                )}
                 <LegSlLevels row={row} live={live} leg="CE" lotSize={lotSize} inline />
               </div>
               <div className="flex items-center gap-1">
@@ -1869,6 +1930,16 @@ function FocusTableRowImpl({
                 ) : (
                   <span className="text-[8px] font-mono font-bold text-zinc-500 uppercase tracking-widest px-1">Flat</span>
                 )}
+                {pePnl != null && (
+                  <span className={cn(
+                    'text-[10px] font-mono font-black px-1.5 py-0.5 rounded border tabular-nums',
+                    pePnl > 0 ? 'bg-emerald-500/15 text-emerald-400 border-emerald-500/40 shadow-sm'
+                      : pePnl < 0 ? 'bg-rose-500/15 text-rose-400 border-rose-500/40 shadow-sm'
+                      : 'bg-zinc-800 text-zinc-400 border-zinc-700'
+                  )} title="PE leg mark-to-market P&L">
+                    {pePnl > 0 ? '+' : ''}₹{pePnl.toFixed(0)}
+                  </span>
+                )}
                 <LegSlLevels row={row} live={live} leg="PE" lotSize={lotSize} inline />
               </div>
               <div className="flex items-center gap-1">
@@ -1903,16 +1974,17 @@ function FocusTableRowImpl({
               <span className={cn('text-[9px] font-black uppercase tracking-wider px-2 py-0.5 rounded-full border', STATUS_PILL[row.status])}>
                 {row.status}
               </span>
-              {!flat ? (
-                <span className={cn('text-[11px] font-mono font-bold px-1.5 py-0.5 rounded border tabular-nums',
-                  live.pnl > 0 ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30'
-                    : live.pnl < 0 ? 'bg-rose-500/10 text-rose-400 border-rose-500/30'
-                    : 'bg-zinc-800 text-zinc-400 border-zinc-700')}>
-                  {live.pnl >= 0 ? '+' : ''}₹{live.pnl.toFixed(0)}
+              <div className="flex items-center gap-1">
+                <span className="text-[9px] font-black uppercase tracking-wider text-zinc-400">P&amp;L:</span>
+                <span className={cn(
+                  'text-xs font-mono font-black px-2 py-0.5 rounded border tabular-nums',
+                  live.pnl > 0 ? 'bg-emerald-500/15 text-emerald-400 border-emerald-500/40 shadow-sm shadow-emerald-500/10'
+                    : live.pnl < 0 ? 'bg-rose-500/15 text-rose-400 border-rose-500/40 shadow-sm shadow-rose-500/10'
+                    : 'bg-zinc-900 border-zinc-700/60 text-zinc-400'
+                )} title="Row total P&L (realized + open mark-to-market)">
+                  {live.pnl > 0 ? '+' : ''}₹{live.pnl.toFixed(0)}
                 </span>
-              ) : (
-                <span className="text-[9px] font-mono text-zinc-500">₹0</span>
-              )}
+              </div>
             </div>
 
             <div className="flex items-center gap-1.5">
@@ -1930,12 +2002,22 @@ function FocusTableRowImpl({
               >
                 &times; clear
               </button>
-              {flat && (
-                <button onClick={onDelete} title="Delete row" aria-label="Delete row"
-                  className={cn('text-zinc-500 hover:text-rose-400 p-0.5 transition-colors cursor-pointer', FOCUS_RING)}>
-                  <X className="h-3 w-3" />
-                </button>
-              )}
+              <button
+                type="button"
+                onClick={flat ? onDelete : undefined}
+                disabled={!flat}
+                title={flat ? 'Delete this row' : 'Position open — exit position first to delete row'}
+                aria-label="Delete row"
+                className={cn(
+                  'p-1 rounded text-zinc-500 transition-colors',
+                  flat
+                    ? 'hover:text-rose-400 hover:bg-rose-500/10 cursor-pointer'
+                    : 'opacity-30 cursor-not-allowed hover:text-zinc-500',
+                  FOCUS_RING,
+                )}
+              >
+                <Trash2 className="h-3.5 w-3.5" />
+              </button>
             </div>
           </div>
 
@@ -2048,6 +2130,8 @@ function FocusRowCardImpl({
   // How many lots the +/- buttons act on, independently per leg
   const [ceQty, setCeQty] = useState(1);
   const [peQty, setPeQty] = useState(1);
+  const cePnl = computeLegPnl(row, 'CE', live);
+  const pePnl = computeLegPnl(row, 'PE', live);
   // Expiry is locked once this row owns an active leg.
   const expiryLocked = rowOwnsLeg(row, 'CE') || rowOwnsLeg(row, 'PE');
   const onNearestExpiry = !row.expiry || row.expiry === expiries[0];
@@ -2077,26 +2161,25 @@ function FocusRowCardImpl({
         </div>
 
         <div className="flex items-center gap-1.5">
-          {!flat && (
-            <span title="Realised + unrealised P&L across the legs this row trades"
-              className={cn('text-xs font-mono font-bold px-2 py-0.5 rounded-md border tabular-nums',
-                live.pnl > 0 ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30'
-                  : live.pnl < 0 ? 'bg-rose-500/10 text-rose-400 border-rose-500/30'
-                  : 'bg-zinc-800 text-zinc-400 border-zinc-700')}>
-              {live.pnl >= 0 ? '+' : ''}₹{live.pnl.toFixed(0)}
-            </span>
-          )}
+          <span title="Realised + unrealised P&L across the legs this row trades"
+            className={cn('text-xs font-mono font-bold px-2 py-0.5 rounded-md border tabular-nums',
+              live.pnl > 0 ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30'
+                : live.pnl < 0 ? 'bg-rose-500/10 text-rose-400 border-rose-500/30'
+                : 'bg-zinc-800 text-zinc-400 border-zinc-700')}>
+            {live.pnl > 0 ? '+' : ''}₹{live.pnl.toFixed(0)}
+          </span>
           <span className={cn('text-[9px] font-black px-2 py-0.5 rounded-md border uppercase tracking-wider', STATUS_PILL[row.status])}>
             {row.status}
           </span>
           <button
-            onClick={onDelete}
+            type="button"
+            onClick={flat ? onDelete : undefined}
             disabled={!flat}
-            title={flat ? 'Delete this row' : 'Exit the CE/PE legs before this row can be deleted'}
+            title={flat ? 'Delete this row' : 'Position open — exit position first to delete row'}
             aria-label="Delete row"
-            className={cn('h-6 w-6 rounded-md text-zinc-500 hover:text-rose-400 hover:bg-rose-500/10 disabled:hover:text-zinc-700 disabled:cursor-not-allowed disabled:opacity-40 font-bold flex items-center justify-center transition-colors', FOCUS_RING)}
+            className={cn('h-6 w-6 rounded-md text-zinc-500 hover:text-rose-400 hover:bg-rose-500/10 disabled:cursor-not-allowed disabled:opacity-40 font-bold flex items-center justify-center transition-colors', FOCUS_RING)}
           >
-            <X className="h-3.5 w-3.5" />
+            <Trash2 className="h-3.5 w-3.5" />
           </button>
         </div>
       </div>
@@ -2253,6 +2336,16 @@ function FocusRowCardImpl({
               {live.ltpCe != null ? `₹${live.ltpCe.toFixed(2)}` : '—'}
             </span>
             <LegOpenBadge pos={live.cePosition} />
+            {cePnl != null && (
+              <span className={cn(
+                'text-[10px] font-mono font-black px-1.5 py-0.5 rounded border tabular-nums',
+                cePnl > 0 ? 'bg-emerald-500/15 text-emerald-400 border-emerald-500/40 shadow-sm'
+                  : cePnl < 0 ? 'bg-rose-500/15 text-rose-400 border-rose-500/40 shadow-sm'
+                  : 'bg-zinc-800 text-zinc-400 border-zinc-700'
+              )} title="CE leg mark-to-market P&L">
+                {cePnl > 0 ? '+' : ''}₹{cePnl.toFixed(0)}
+              </span>
+            )}
             <LegSlLevels row={row} live={live} leg="CE" lotSize={lotSize} inline />
           </div>
           <div className="flex items-center gap-1 shrink-0">
@@ -2285,6 +2378,16 @@ function FocusRowCardImpl({
               {live.ltpPe != null ? `₹${live.ltpPe.toFixed(2)}` : '—'}
             </span>
             <LegOpenBadge pos={live.pePosition} />
+            {pePnl != null && (
+              <span className={cn(
+                'text-[10px] font-mono font-black px-1.5 py-0.5 rounded border tabular-nums',
+                pePnl > 0 ? 'bg-emerald-500/15 text-emerald-400 border-emerald-500/40 shadow-sm'
+                  : pePnl < 0 ? 'bg-rose-500/15 text-rose-400 border-rose-500/40 shadow-sm'
+                  : 'bg-zinc-800 text-zinc-400 border-zinc-700'
+              )} title="PE leg mark-to-market P&L">
+                {pePnl > 0 ? '+' : ''}₹{pePnl.toFixed(0)}
+              </span>
+            )}
             <LegSlLevels row={row} live={live} leg="PE" lotSize={lotSize} inline />
           </div>
           <div className="flex items-center gap-1 shrink-0">
