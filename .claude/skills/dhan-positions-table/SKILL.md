@@ -29,7 +29,7 @@ Read these sibling skills for their part, and do not restate them here: `dhan-te
 Every per-leg helper returns `null` when its inputs are missing, and the cell renders `—`. A closed leg with no
 recorded close price, a DRAFT leg with no fill, a live leg with no LTP yet: showing `0`, `+100%` or a full-premium
 gain here reads as real data and gets acted on. `legPnlPct` returns null for a live leg with `ltp <= 0` for exactly
-this reason. (The older rupee `legPnl` still shows the full premium with no LTP — do not copy that.)
+this reason. The reference implementation is `computeStrategyMetrics`: it freezes an unpriced live leg at its entry and sets `hasUnpricedLegs`, and `checkStrategyRisk` refuses to fire a target or stop on it. Still unguarded: the per-leg rupee `legPnl` (and the row's P&L sort key) and `basketTotalPnl`, which feeds the page-level Total P&L. Do not copy them.
 
 ### 2. One condition list drives header, colgroup and cells
 The legs table is `table-fixed` with a `<colgroup>`. When columns are optional, build a single ordered weights

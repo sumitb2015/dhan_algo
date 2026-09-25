@@ -10,7 +10,7 @@ Table of contents: Data and P&L · Expiry and calendars · Payoff diagram · Gre
 |---|---|---|
 | An exited leg or straddle shows +Rs 0 after a real gain | closed paths never set `closedFill`, so `legPnl` had nothing to compute from | set `closedFill` on manual exit, already-flat and rollback (`956810f`) |
 | Running P&L drifts from Dhan's own platform | Dhan `/positions` has no LTP; client recomputed off a stale chain | trust Dhan's `unrealizedProfit` for Dhan legs (`491281d`) |
-| Live leg with no price shows a full-premium gain | `avg - 0` in `legPnl`; also true of the rupee P&L column | new P&L % column returns null without an LTP; rupee column still open (roadmap) |
+| Live leg with no price shows a full-premium gain | `ltpFor` returns 0 before the first quote and `legPnl` computes `avg - 0`; affects the row's rupee P&L, its sort key and `basketTotalPnl` (page Total P&L). `computeStrategyMetrics` is already guarded (`hasUnpricedLegs`) | new P&L % column returns null without an LTP; rupee column, sort key and page total still open (roadmap) |
 | Header still says "Iron Condor" after the legs became a Batman | label came from stored `presetKey` | `classifyBasketStructure()` from live legs (`251a509`) |
 | Two baskets on one contract: ghost OPEN legs, exit fails with a sign mismatch | Dhan nets by security id | confirm guard before place/add lots/add leg (`a9c6608`), Greeks-panel warning (`86cb6e0`) |
 
