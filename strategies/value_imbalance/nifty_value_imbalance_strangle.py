@@ -12,7 +12,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspa
 from login import get_dhan_client
 from lib.dhan_helper import DhanHelper
 from lib.strategy_state_helper import save_strategy_state, check_shutdown_trigger, exit_if_market_closed, parse_target_spec, instance_log_suffix
-from lib.strategy_risk import resolve_exit_qty_broker
+from lib.strategy_risk import resolve_exit_qty_broker, detect_phantom_leg_broker, PHANTOM_CHECK_INTERVAL_SEC
 from lib.execution_broker import ExecutionBroker, ExecutionBrokerError
 from lib.telegram_alert import notify
 
@@ -654,6 +654,7 @@ class ValueImbalanceStrangle:
                     logger.info(f"Resolved stop loss: {self.stop_pct}% of entry premium INR{entry_value:.0f} = -INR{abs(self.stop_loss):.0f}")
 
             last_log_time = time.time()
+            last_phantom_check = time.time()
             cycle_active = True
 
             while cycle_active:
@@ -689,9 +690,29 @@ class ValueImbalanceStrangle:
                      curr_nifty = chain_df.attrs.get('underlying_ltp', 0)
                      if curr_nifty <= 0: continue
 
+                # Victim-side check (2026-07-30 incident follow-up): notice if a
+                # sibling instance's exit or a manual dashboard square-off already
+                # flattened a leg we still think is open.
+                if time.time() - last_phantom_check >= PHANTOM_CHECK_INTERVAL_SEC:
+                    last_phantom_check = time.time()
+                    if self.ce_id and self.ce_lots > 0 and detect_phantom_leg_broker(
+                        self.broker, self.ce_strike, self.expiry, "CE",
+                        self.ce_lots * self.nifty_lot_size, "BUY", logger,
+                    ):
+                        logger.warning(f"Phantom CE leg detected ({self.ce_strike}) — broker shows it "
+                                       f"already closed elsewhere. Correcting internal state, not placing an order.")
+                        self.ce_lots = 0
+                    if self.pe_id and self.pe_lots > 0 and detect_phantom_leg_broker(
+                        self.broker, self.pe_strike, self.expiry, "PE",
+                        self.pe_lots * self.nifty_lot_size, "BUY", logger,
+                    ):
+                        logger.warning(f"Phantom PE leg detected ({self.pe_strike}) — broker shows it "
+                                       f"already closed elsewhere. Correcting internal state, not placing an order.")
+                        self.pe_lots = 0
+
                 # Save current state
                 self.save_state(curr_nifty, ce_ltp, pe_ltp, total_pnl, status="RUNNING")
-                
+
                 if curr_nifty <= 0:
                      # Attempt fallback to option chain attr
                      chain_df = self.helper.get_option_chain_df("NIFTY", self.expiry)

@@ -142,6 +142,50 @@ reverts whatever the poller just wrote. Re-read the current ref
 (`basketsRef.current`) after the await completes and merge into *that*. (`49bd98e`
 — see `dhan-polling-guards` for the sibling stale-closure fix in the same commit)
 
+### 8. Changing the basket/page's own expiry (or underlying) does not silently move to its legs
+Each leg stores its own `expiry`, copied from the basket/page at creation. A control that lets
+the user switch the basket/page's expiry (or underlying) after legs already exist changes only
+that top-level value — the legs' own stored `expiry` doesn't follow unless the change handler
+explicitly moves them. Left unhandled, anything derived from "legs differ from the basket's
+expiry" reads the mismatch as a different strategy shape than what's actually open — a strangle
+whose legs got left behind renders as a calendar spread (mixed-expiry badges, a calendar payoff)
+once the basket's expiry moves on without them. Same bug, same root cause, on a different page:
+Options Monitor's legs table kept showing the *previous* expiry's legs and prices after the
+top-bar expiry control was switched.
+
+The fix is state-dependent per leg, not a blanket move:
+- **DRAFT** (not yet entered) legs on the front/near expiry move to the new expiry — nothing was
+  placed yet, so there's nothing to reconcile against.
+- **Entered/live** legs on the *previous* active expiry get re-anchored (expiry, security id,
+  price, IV re-resolved) when the new expiry's chain loads, so they keep pricing correctly.
+- **Executed** legs, and legs the user deliberately parked on another expiry (e.g. a calendar's
+  far leg), are left alone — re-anchoring those would be the actual bug this invariant prevents
+  in the other direction.
+- **Never reprice a leg from a chain or tick stream keyed only by strike** unless the leg's own
+  `expiry` matches that stream's expiry — a same-strike leg on a different expiry has a different
+  price, and silently repricing it from the wrong expiry's chain reintroduces the exact
+  mixed-expiry confusion this invariant exists to prevent.
+(`ac7981f`, `9ac9443`, `6ef9265`, `4792b48` — MultiLegFocus's `updateBasket`/`addNewLegToBasket`
+and Options Monitor's expiry-switch re-anchoring, 2026-09-21.)
+
+### 9. Concurrent leg placement: gate first, lock synchronously, never sell a hedge under an open short
+`MultiLegFocus.placeBasket` fires legs concurrently in two phases (all BUY, then all SELL) —
+2 round trips instead of N. That removes the chance to react between legs, so:
+- **Fail closed on margin.** Block unless required margin was computed for the *current*
+  composition (`marginCompRef` vs `basketCompKey`) and funds are known. Funds reuse the poll
+  reading if <5s old, else read live. An `estimate` margin needs an explicit confirm.
+- **Take the placement lock before any `await`** (`placeBasket` wrapper around
+  `placeBasketInner`). A lock set after the funds read/confirm dialogs lets a double-click place
+  the strategy twice.
+- **Recheck funds between phases only when tight** (`available - premiumPaid < 1.2 x required`)
+  so the common case pays no extra round trip; on shortfall skip the sells and roll back the
+  hedges. The 1.2 factor is untuned, and whether `basketMargin` already includes buy premium is
+  unverified — a wrong assumption unwinds fundable strategies.
+- **Aborts release unattempted legs to DRAFT** (from the run's local `working`, before
+  `rollbackPlacedLegs`), never leave them PLACING; each leg's placement never throws, so
+  `Promise.all` can't reject early and skip the rollback.
+- **Exits go shorts first, then longs, and longs are skipped if any short is not CLOSED.**
+
 ## Before You Ship
 - Does every lock/exit/P&L decision route through an ownership check
   (ledger + worker-hold), not a raw broker position/netQty read?
@@ -154,3 +198,6 @@ reverts whatever the poller just wrote. Re-read the current ref
 - If there are two execution engines, does a tab-side mutation check the
   other engine's ownership first, and does a stale-but-alive engine refuse
   to hand over?
+- If this surface lets the user change the basket/page's expiry or underlying after legs
+  exist, does the change handler explicitly decide each leg's fate (move DRAFT, re-anchor
+  live, leave executed/deliberately-parked alone) instead of leaving it implicit?

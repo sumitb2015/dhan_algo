@@ -3,6 +3,7 @@ import assert from 'node:assert';
 import {
   resolveTemplateLegs, reconcileLegFillDown, reconcileLegWithBroker, legPnl, basketTotalPnl, sortLegsForExit, findLegPosition,
   computeLegTrailingSL, computeStrategyMetrics, checkStrategyRisk, computeCalendarPayoffCurve, classifyBasketStructure, findSiblingLegCollisions,
+  formatExpiryLabel, legAvgPrice, legExitPrice, legQtyUnits, legPnlPct, legOtmPct,
   type StrategyMetrics, type MultiLegLeg,
 } from './multiLegFocus.ts';
 import type { StrategyTemplate } from './basketStrategies.ts';
@@ -602,4 +603,60 @@ test('findSiblingLegCollisions flags live legs in OTHER baskets on the same cont
   assert.strictEqual(findSiblingLegCollisions(baskets, 'A', [{ side: 'B', option: 'PE', strike: 23900, expiry: '2026-10-27' }]).length, 0);
   assert.strictEqual(findSiblingLegCollisions(baskets, 'A', [{ side: 'B', option: 'CE', strike: 23900, expiry: '2026-11-24' }]).length, 0);
   assert.strictEqual(findSiblingLegCollisions(baskets, 'B', [{ side: 'S', option: 'CE', strike: 23900, expiry: '2026-10-27' }]).length, 0);
+});
+
+// ── legs-table column helpers ─────────────────────────────────────────
+const colLeg = (over: Partial<MultiLegLeg>): MultiLegLeg => ({
+  id: 'l', side: 'S', option: 'CE', strike: 24000, lots: 1, type: 'MARKET', status: 'OPEN',
+  fill: { qty: 100, avgPrice: 50 }, ...over,
+});
+
+test('legAvgPrice / legQtyUnits are null until a fill is recorded', () => {
+  const draft = colLeg({ status: 'DRAFT', fill: undefined });
+  assert.strictEqual(legAvgPrice(draft), null);
+  assert.strictEqual(legQtyUnits(draft), null);
+  assert.strictEqual(legAvgPrice(colLeg({})), 50);
+  assert.strictEqual(legQtyUnits(colLeg({})), 100);
+});
+
+test('legExitPrice exists only for a CLOSED leg; qty then comes from closedFill', () => {
+  const open = colLeg({});
+  assert.strictEqual(legExitPrice(open), null);
+  const closed = colLeg({ status: 'CLOSED', fill: { qty: 0, avgPrice: 50 }, closedFill: { qty: 100, exitPrice: 20 } });
+  assert.strictEqual(legExitPrice(closed), 20);
+  assert.strictEqual(legQtyUnits(closed), 100);
+});
+
+test('legPnlPct: short gains as premium decays, long loses; closed uses the exit price', () => {
+  assert.strictEqual(legPnlPct(colLeg({}), 30), 40);                       // sold 50, now 30 => +40%
+  assert.strictEqual(legPnlPct(colLeg({ side: 'B' }), 30), -40);            // bought 50, now 30 => -40%
+  const closed = colLeg({ status: 'CLOSED', fill: { qty: 0, avgPrice: 50 }, closedFill: { qty: 100, exitPrice: 20 } });
+  assert.strictEqual(legPnlPct(closed, 999), 60);                          // LTP ignored once closed
+});
+
+test('legPnlPct is null with no entry price or quantity, and scales with the multiplier consistently', () => {
+  assert.strictEqual(legPnlPct(colLeg({ status: 'DRAFT', fill: undefined }), 30), null);
+  assert.strictEqual(legPnlPct(colLeg({}), 30, 100), 40);                   // multiplier cancels out of the ratio
+});
+
+test('legOtmPct: positive OTM, negative ITM, CE and PE mirror each other', () => {
+  assert.strictEqual(legOtmPct(colLeg({ option: 'CE', strike: 24240 }), 24000), 1);
+  assert.strictEqual(legOtmPct(colLeg({ option: 'PE', strike: 23760 }), 24000), 1);
+  assert.strictEqual(legOtmPct(colLeg({ option: 'CE', strike: 23760 }), 24000), -1);
+  assert.strictEqual(legOtmPct(colLeg({}), 0), null);
+});
+
+test('legPnlPct is null for a live leg with no price yet, but not for a closed one', () => {
+  assert.strictEqual(legPnlPct(colLeg({}), 0), null);
+  const closed = colLeg({ status: 'CLOSED', fill: { qty: 0, avgPrice: 50 }, closedFill: { qty: 100, exitPrice: 20 } });
+  assert.strictEqual(legPnlPct(closed, 0), 60);
+});
+
+test('formatExpiryLabel renders an ISO date compactly and leaves anything else alone', () => {
+  assert.strictEqual(formatExpiryLabel('2026-10-27'), '27 Oct 26');
+  assert.strictEqual(formatExpiryLabel('2026-01-05'), '5 Jan 26');
+  assert.strictEqual(formatExpiryLabel('2026-13-05'), '2026-13-05');
+  assert.strictEqual(formatExpiryLabel('soon'), 'soon');
+  assert.strictEqual(formatExpiryLabel(''), '');
+  assert.strictEqual(formatExpiryLabel(undefined), '');
 });

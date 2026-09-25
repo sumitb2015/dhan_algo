@@ -42,6 +42,9 @@ export const STRATEGY_CATEGORIES: Record<StrategyCategory, StrategyTemplate[]> =
     { key: 'bull-put-spread',   name: 'Bull Put Spread',        legs: [{ side: 'S', option: 'PE', offset: 0, ratio: 1 }, { side: 'B', option: 'PE', offset: -4, ratio: 1 }] },
     { key: 'long-synthetic',    name: 'Long Synthetic Future',  legs: [{ side: 'B', option: 'CE', offset: 0, ratio: 1 }, { side: 'S', option: 'PE', offset: 0, ratio: 1 }] },
     { key: 'range-forward',     name: 'Range Forward',          legs: [{ side: 'B', option: 'CE', offset: 4, ratio: 1 }, { side: 'S', option: 'PE', offset: -4, ratio: 1 }] },
+    // Zerodha Varsity M6 ch5: sell 1 ITM call, buy 1 ATM call, buy 1 OTM call (1:1:1). Bullish despite the name;
+    // Varsity's example on Nifty 7790 is 7600 / 7800 / 7900 = offsets -4 / 0 / +2 on a 50-pt step.
+    { key: 'bear-call-ladder',  name: 'Bear Call Ladder',       legs: [{ side: 'S', option: 'CE', offset: -4, ratio: 1 }, { side: 'B', option: 'CE', offset: 0, ratio: 1 }, { side: 'B', option: 'CE', offset: 2, ratio: 1 }] },
   ],
   Bearish: [
     { key: 'buy-put',           name: 'Buy Put',                legs: [{ side: 'B', option: 'PE', offset: 0, ratio: 1 }] },
@@ -129,6 +132,15 @@ export const STRATEGY_CATEGORIES: Record<StrategyCategory, StrategyTemplate[]> =
     { key: 'diagonal-put-spread',  name: 'Diagonal Put Spread',  legs: [
       { side: 'S', option: 'PE', offset: -4, ratio: 1, expiryRole: 'front' },
       { side: 'B', option: 'PE', offset: 0, ratio: 1, expiryRole: 'far' },
+    ] },
+    // Double calendar: a put calendar below spot plus a call calendar above it, same two expiries,
+    // net long vega, max loss = the debit. Initial offset 300 pts each side = 6 steps on a 50-pt step
+    // (NIFTY); offsets are in strike STEPS, so BANKNIFTY/SENSEX (100-pt step) land at 600 pts.
+    { key: 'double-calendar',      name: 'Double Calendar',      legs: [
+      { side: 'S', option: 'PE', offset: -6, ratio: 1, expiryRole: 'front' },
+      { side: 'B', option: 'PE', offset: -6, ratio: 1, expiryRole: 'far' },
+      { side: 'S', option: 'CE', offset: 6, ratio: 1, expiryRole: 'front' },
+      { side: 'B', option: 'CE', offset: 6, ratio: 1, expiryRole: 'far' },
     ] },
     // Flyagonal (thetaprofits / Steve): front 8-10 DTE for the call broken-wing butterfly and the
     // short put, long put at double the days (16-20; 15 accepted since Nifty weeklies are 7 days apart). Shorts ~3% from spot (~14 strike steps at 50

@@ -54,7 +54,7 @@ from lib.strategy_state_helper import (
     instance_log_suffix,
     save_strategy_state,
 )
-from lib.strategy_risk import resolve_exit_qty_broker
+from lib.strategy_risk import resolve_exit_qty_broker, detect_phantom_leg_broker, PHANTOM_CHECK_INTERVAL_SEC
 from lib.execution_broker import ExecutionBroker, ExecutionBrokerError
 
 STRIKE_STEP = 50
@@ -722,6 +722,7 @@ class NiftyOvernightFly:
             f"Max rolls/leg: {self.max_rolls_per_leg} | Hedge: {self.hedge_multiplier}x straddle premium"
         )
         exit_if_market_closed(self.helper, self.dry_run)
+        last_phantom_check = time.time()
 
         while True:
             if check_shutdown_trigger(self.state_key):
@@ -774,6 +775,25 @@ class NiftyOvernightFly:
                 ltp = self.helper.get_ltp(str(leg['id']), exchange="NSE_FNO", instrument="OPTIDX")
                 if ltp > 0 and ltp >= leg['sl']:
                     self.roll_leg(opt_type, ltp)
+
+            # Victim-side check (2026-07-30 incident follow-up): notice if a
+            # sibling instance's exit or a manual dashboard square-off already
+            # flattened a leg we still think is open. This strategy holds
+            # overnight, past a normal intraday square-off, so this matters more
+            # than most — a phantom leg here could otherwise go unnoticed for a day.
+            if self.position_open and time.time() - last_phantom_check >= PHANTOM_CHECK_INTERVAL_SEC:
+                last_phantom_check = time.time()
+                for attr, opt_type, side in (
+                    ("ce_short", "CE", "BUY"), ("pe_short", "PE", "BUY"),
+                    ("ce_hedge", "CE", "SELL"), ("pe_hedge", "PE", "SELL"),
+                ):
+                    leg = getattr(self, attr)
+                    if leg and detect_phantom_leg_broker(
+                        self.broker, leg["strike"], self.expiry, opt_type, leg["qty"], side, logger,
+                    ):
+                        logger.warning(f"Phantom {attr} leg detected ({leg['strike']}) — broker shows it "
+                                       f"already closed elsewhere. Correcting internal state, not placing an order.")
+                        setattr(self, attr, None)
 
             # Re-derive P&L after the roll loop — a roll can materially change
             # realized_pnl, and the trailing-stop decision below must not act on

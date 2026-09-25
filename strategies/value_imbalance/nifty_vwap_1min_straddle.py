@@ -57,7 +57,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspa
 from login import get_dhan_client
 from lib.dhan_helper import DhanHelper
 from lib.strategy_state_helper import save_strategy_state, check_shutdown_trigger, exit_if_market_closed, parse_target_spec, instance_log_suffix
-from lib.strategy_risk import resolve_exit_qty_broker
+from lib.strategy_risk import resolve_exit_qty_broker, detect_phantom_leg_broker, PHANTOM_CHECK_INTERVAL_SEC
 from lib.execution_broker import ExecutionBroker, ExecutionBrokerError
 
 # ── Logging setup ────────────────────────────────────────────────────────────
@@ -778,6 +778,7 @@ class NiftyVWAP1MinStraddle:
             last_log_time = 0.0
             last_cap_log_time = 0.0
             last_cooldown_log_time = 0.0
+            last_phantom_check = time.time()
             pending_atm: int = 0
 
             # ── Inner monitoring loop ──────────────────────────────────────────
@@ -824,6 +825,25 @@ class NiftyVWAP1MinStraddle:
                     spot, ce_ltp, pe_ltp, total_pnl,
                     "RUNNING" if self.in_position else "MONITORING",
                 )
+
+                # Victim-side check (2026-07-30 incident follow-up): notice if a
+                # sibling instance's exit or a manual dashboard square-off already
+                # flattened a leg we still think is open.
+                if self.in_position and time.time() - last_phantom_check >= PHANTOM_CHECK_INTERVAL_SEC:
+                    last_phantom_check = time.time()
+                    qty = self.lots * self.lot_size
+                    if not self.ce_closed and detect_phantom_leg_broker(
+                        self.broker, self.ce_strike, self.expiry, "CE", qty, "BUY", logger,
+                    ):
+                        logger.warning(f"Phantom CE leg detected ({self.ce_strike}) — broker shows it "
+                                       f"already closed elsewhere. Correcting internal state, not placing an order.")
+                        self.ce_closed = True
+                    if not self.pe_closed and detect_phantom_leg_broker(
+                        self.broker, self.pe_strike, self.expiry, "PE", qty, "BUY", logger,
+                    ):
+                        logger.warning(f"Phantom PE leg detected ({self.pe_strike}) — broker shows it "
+                                       f"already closed elsewhere. Correcting internal state, not placing an order.")
+                        self.pe_closed = True
 
                 # ── ATM shift detection ───────────────────────────────────────
                 current_atm = self._atm(spot)

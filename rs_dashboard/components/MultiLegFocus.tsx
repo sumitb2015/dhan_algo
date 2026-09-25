@@ -22,6 +22,9 @@ import {
   type MultiLegLeg, type MultiLegBasket, type StrategyRiskConfig, type MultiLegStatus,
 } from '@/lib/multiLegFocus';
 import { closeOrderProduct } from '@/lib/positionProduct';
+import { planLegShifts, clampShiftSteps } from '@/lib/strikeShift';
+import { DEFAULT_LEG_COLUMNS, loadLegColumns, saveLegColumns, type LegColumns } from '@/lib/legColumns';
+import { strikeAllowed, strikeRuleApplies, allowedStrikes, snapToAllowed, assessSpread } from '@/lib/farExpiryRules';
 
 const UNDERLYINGS = ['NIFTY', 'BANKNIFTY', 'SENSEX', 'CRUDEOIL', 'CRUDEOILM'] as const;
 type Underlying = typeof UNDERLYINGS[number];
@@ -46,6 +49,10 @@ const ALL_STRATEGY_TEMPLATES: StrategyTemplate[] = Object.values(STRATEGY_CATEGO
 function fmtMoney(n: number): string {
   return `${n < 0 ? '-' : ''}₹${Math.abs(n).toLocaleString('en-IN', { maximumFractionDigits: 0 })}`;
 }
+
+/** Margin-relevant composition of a basket — LTP ticks don't change it. */
+const basketCompKey = (b: MultiLegBasket) =>
+  `${b.underlying}:${b.expiry}:${b.legs.map(l => `${l.side}-${l.option}-${l.strike}@${l.expiry || b.expiry}x${l.lots}`).join('|')}`;
 
 export default function MultiLegFocus() {
   const { broker, setBroker, authenticatedBrokers, hasAuthenticatedBroker } = useBrokerSelector();
@@ -84,22 +91,42 @@ export default function MultiLegFocus() {
     exposureMargin: number;
   }>>({});
 
+  // Optional legs-table columns (shared by every strategy row); a browser-local preference. Read in the
+  // initial state: strategy rows only exist after the baskets load client-side, so nothing that depends on
+  // this is ever part of the server-rendered HTML.
+  const [legColumns, setLegColumns] = useState<LegColumns>(() => (typeof window === 'undefined' ? DEFAULT_LEG_COLUMNS : loadLegColumns()));
+  const changeLegColumns = useCallback((next: LegColumns) => { setLegColumns(next); saveLegColumns(next); }, []);
+
+  const marginCompRef = useRef<Record<string, string>>({});   // basketId -> composition the stored margin was computed for
+  const fundsAtRef = useRef(0);                               // when fundsData was last read
+  const placementLockRef = useRef(false);                     // one placement in flight at a time
+
+  const fundsInflightRef = useRef<string | null>(null);   // broker with a funds read in flight: an N-leg exit ends N times in a row, one read not N
+  const brokerNowRef = useRef(broker);
+  useEffect(() => { brokerNowRef.current = broker; }, [broker]);
   const pollFunds = useCallback(() => {
+    if (fundsInflightRef.current === broker) return;
+    fundsInflightRef.current = broker;
     fetch(scalperRoute(broker, 'funds'))
       .then(r => r.json())
       .then((j: { success: boolean; data?: Record<string, unknown> }) => {
+        // A reply for a broker that is no longer selected must not become the funds the order gate trusts.
+        if (brokerNowRef.current !== broker) return;
         if (j.success && j.data) {
           const available = Number(j.data.availabelBalance ?? j.data.availableBalance ?? 0);
           const used = Number(j.data.utilizedAmount ?? j.data.usedMargin ?? j.data.marginUsed ?? 0);
           setFundsData({ available, used });
+          fundsAtRef.current = Date.now();
         }
       })
-      .catch(() => {});
+      .catch(() => {})
+      .finally(() => { if (fundsInflightRef.current === broker) fundsInflightRef.current = null; });
   }, [broker]);
 
   useEffect(() => {
+    fundsAtRef.current = 0;   // broker changed: whatever funds we hold belong to the previous one
     pollFunds();
-    const interval = setInterval(pollFunds, 12000);
+    const interval = setInterval(pollFunds, 4000);
     return () => clearInterval(interval);
   }, [pollFunds]);
 
@@ -591,6 +618,7 @@ export default function MultiLegFocus() {
       ).join('|')}`;
       if (lastFetchedMarginSignatureRef.current[basket.id] === signature) continue;
       lastFetchedMarginSignatureRef.current[basket.id] = signature;
+      const compAtRequest = basketCompKey(basket);
 
       fetch('/api/multi-leg-focus/margin', {
         method: 'POST',
@@ -614,6 +642,7 @@ export default function MultiLegFocus() {
           exposureMargin: number;
         } }) => {
           if (j.success && j.data) {
+            marginCompRef.current[basket.id] = compAtRequest;
             setBasketMargins(prev => ({
               ...prev,
               [basket.id]: j.data!,
@@ -725,12 +754,25 @@ export default function MultiLegFocus() {
         // a different (far) expiry, and placed legs, are left untouched.
         if (patch.expiry && patch.expiry !== b.expiry) {
           const newExp = patch.expiry;
+          // Moving onto a far expiry: DRAFT legs on a non-100 strike snap to the nearest allowed one.
+          const listed = expiriesMap[b.underlying] ?? [];
+          const pool = chainData[`${b.underlying}:${newExp}`]?.strikes?.length
+            ? chainData[`${b.underlying}:${newExp}`].strikes
+            : (chainData[`${b.underlying}:${b.expiry}`]?.strikes ?? []);
+          const snappedLegs: string[] = [];
+          const movedLegs = b.legs.map(l => {
+            if (!(l.status === 'DRAFT' && (!l.expiry || l.expiry === b.expiry))) return l;
+            const snapped = snapToAllowed(b.underlying, newExp, listed, l.strike, pool);
+            if (snapped !== l.strike) snappedLegs.push(`${l.strike}→${snapped} ${l.option}`);
+            return { ...l, expiry: newExp, strike: snapped };
+          });
+          if (snappedLegs.length) {
+            addToast('success', 'Strikes snapped to ×100', `Far expiry only trades multiples of 100: ${snappedLegs.join(', ')}`);
+          }
           return {
             ...b,
             ...patch,
-            legs: b.legs.map(l =>
-              l.status === 'DRAFT' && (!l.expiry || l.expiry === b.expiry) ? { ...l, expiry: newExp } : l,
-            ),
+            legs: movedLegs,
             farExpiry: patch.farExpiry ?? (b.farExpiry === newExp ? undefined : b.farExpiry),
             updatedAt: new Date().toISOString(),
           };
@@ -749,6 +791,21 @@ export default function MultiLegFocus() {
       return next;
     });
   }, [expiriesMap, chainData, persistBasket, addToast]);
+
+  // Functional legs update: `fn` always receives the LATEST legs (React's `prev`),
+  // never a basketsRef snapshot. updateBasket's updater is deferred when another
+  // update is already queued, so two async continuations finishing in the same
+  // tick (concurrent exits / reopens) could otherwise each write from a stale
+  // list and silently revert or drop the other's leg.
+  const patchLegs = useCallback((basketId: string, fn: (legs: MultiLegLeg[]) => MultiLegLeg[]) => {
+    setBaskets(prev => {
+      const next = prev.map(b => (b.id === basketId ? { ...b, legs: fn(b.legs), updatedAt: new Date().toISOString() } : b));
+      const target = next.find(b => b.id === basketId);
+      if (target) persistBasket(target);
+      basketsRef.current = next;
+      return next;
+    });
+  }, [persistBasket]);
 
   const deleteBasket = useCallback((basketId: string) => {
     const target = basketsRef.current.find(b => b.id === basketId);
@@ -873,7 +930,76 @@ export default function MultiLegFocus() {
   // tick (not merged) so a resolved gap disappears from the row immediately.
   const [legQtyWarnings, setLegQtyWarnings] = useState<Record<string, { ownQty: number; brokerQty: number }>>({});
 
-  const placeBasket = useCallback(async (basketId: string) => {
+  // ── Far-expiry strike rule + bid/ask spread guards ───────────────────
+  // Far expiries (3rd listed onward) only trade liquidly on multiples of 100, and a
+  // wide or one-sided book means a market order fills badly. Both are checked BEFORE
+  // any order leaves; see lib/farExpiryRules.ts for the rules and thresholds.
+  /** Legs whose strike is not tradable on their own expiry (far expiry, non-100 strike). */
+  const blockedStrikeLegs = useCallback(<T extends { strike: number; expiry?: string }>(basket: MultiLegBasket, legs: T[]): T[] => {
+    const listed = expiriesMap[basket.underlying] ?? [];
+    // Order paths fail CLOSED: with the expiry list not loaded yet we cannot tell near from
+    // far, so require a multiple of 100 rather than let a far 50-strike through.
+    if (!listed.length && strikeRuleApplies(basket.underlying)) return legs.filter(l => l.strike % 100 !== 0);
+    return legs.filter(l => !strikeAllowed(basket.underlying, l.expiry || basket.expiry, listed, l.strike));
+  }, [expiriesMap]);
+
+  const toastBlockedStrikes = useCallback((blocked: { strike: number; option: OptionType; expiry?: string }[], basket: MultiLegBasket) => {
+    const listLoaded = (expiriesMap[basket.underlying] ?? []).length > 0;
+    addToast('error', listLoaded ? 'Strike not allowed on a far expiry' : 'Expiry list not loaded — only ×100 strikes allowed',
+      `${blocked.map(l => `${l.strike} ${l.option} (${l.expiry || basket.expiry})`).join(', ')} — ${listLoaded ? 'far expiries only trade strikes in multiples of 100' : 'until the expiry list loads, only strikes in multiples of 100 can be placed'}. Nothing was placed.`);
+  }, [addToast, expiriesMap]);
+
+  type SpreadIssues = { noMarket: string[]; wide: string[]; unavailable: boolean };
+  /** One depth call for every leg about to be opened. Never throws; a failed or
+   *  partial lookup is `unavailable` / skipped (unknown never blocks trading). */
+  const fetchSpreadIssues = useCallback(async (
+    basket: MultiLegBasket,
+    legs: { option: OptionType; strike: number; expiry?: string; type: 'MARKET' | 'LIMIT' }[],
+  ): Promise<SpreadIssues> => {
+    const out: SpreadIssues = { noMarket: [], wide: [], unavailable: false };
+    if (!legs.length) return out;
+    try {
+      const res = await fetch('/api/multi-leg-focus/depth', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        // Bounded: an order must never wait long on a market-data nicety; a timeout is
+        // treated as 'unavailable' (proceed with a toast), like any other failure.
+        signal: AbortSignal.timeout(2500),
+        body: JSON.stringify({
+          underlying: basket.underlying,
+          legs: legs.map(l => {
+            const exp = l.expiry || basket.expiry;
+            const ident = broker === 'dhan' ? lookupCache[`${basket.underlying}:${exp}`]?.strikes?.[String(l.strike)] : undefined;
+            return { strike: l.strike, option: l.option, expiry: exp, securityId: l.option === 'CE' ? ident?.ceId : ident?.peId };
+          }),
+        }),
+      });
+      const j = await res.json() as { success: boolean; data?: Record<string, { bid: number; ask: number }> };
+      if (!j.success || !j.data) { out.unavailable = true; return out; }
+      for (const l of legs) {
+        const exp = l.expiry || basket.expiry;
+        const a = assessSpread(j.data[`${exp}:${l.strike}:${l.option}`]);
+        const tag = `${l.strike} ${l.option}`;
+        if (a.status === 'no_market') out.noMarket.push(`${tag} (bid ${a.bid || '—'} / ask ${a.ask || '—'})`);
+        // A user-set LIMIT price is its own protection; only MARKET legs warn on width.
+        else if (a.status === 'wide' && l.type === 'MARKET') out.wide.push(`${tag}: ${a.bid} / ${a.ask} (spread ₹${a.spread.toFixed(2)}, ${a.pct.toFixed(1)}%)`);
+      }
+    } catch { out.unavailable = true; }
+    return out;
+  }, [broker, lookupCache]);
+
+  /** Turns spread findings into UI: blocks on no bid/ask, confirms on wide. true = proceed. */
+  const resolveSpreadIssues = useCallback((issues: SpreadIssues): boolean => {
+    if (issues.noMarket.length) {
+      addToast('error', 'No bid/ask — order blocked', `${issues.noMarket.join(', ')} — the book is empty on one side. Nothing was placed.`);
+      return false;
+    }
+    if (issues.unavailable) addToast('error', 'Spread check unavailable', 'Could not read bid/ask — continuing without the spread check.');
+    if (issues.wide.length && !window.confirm(`Wide bid/ask spread — a market order may fill poorly:\n\n${issues.wide.join('\n')}\n\nContinue?`)) return false;
+    return true;
+  }, [addToast]);
+
+  const placeBasketInner = useCallback(async (basketId: string) => {
     const basket = basketsRef.current.find(b => b.id === basketId);
     if (!basket || !basket.legs.length || !basket.expiry) return;
 
@@ -881,6 +1007,12 @@ export default function MultiLegFocus() {
       addToast('error', 'No broker logged in', 'Log in before placing orders');
       return;
     }
+
+    const blockedLegs = blockedStrikeLegs(basket, basket.legs);
+    if (blockedLegs.length) { toastBlockedStrikes(blockedLegs, basket); return; }
+    // Started now so it overlaps the margin/funds checks below (no added round trip
+    // on the happy path); its verdict is applied only once margin has passed.
+    const spreadPromise = fetchSpreadIssues(basket, basket.legs);
 
     // Pre-trade margin gate — block placement outright rather than letting a
     // leg-by-leg sequence run into a mid-strategy margin rejection with no
@@ -891,9 +1023,36 @@ export default function MultiLegFocus() {
     // edited); if it hasn't resolved yet, placement proceeds and the
     // broker's own reject is the backstop — same as MultiLegStrategyRow's
     // button-level check, kept here too since the button state can be stale.
-    const requiredMargin = basketMargins[basketId]?.basketMargin;
-    const availableFunds = fundsData?.available;
-    if (requiredMargin != null && availableFunds != null && requiredMargin > availableFunds) {
+    // Fail CLOSED: with legs fired concurrently there is no chance to react
+    // between legs, so an unverified margin check is a block.
+    const marginEntry = basketMargins[basketId];
+    const requiredMargin = marginEntry?.basketMargin;
+    if (requiredMargin == null || marginCompRef.current[basketId] !== basketCompKey(basket)) {
+      addToast('error', 'Margin not verified — placement blocked', 'Required margin is not calculated for the current legs yet. Wait a moment and retry.');
+      return;
+    }
+    if (marginEntry.basketMarginSource === 'estimate'
+        && !window.confirm('Required margin is only an ESTIMATE (broker calculator unavailable). Place anyway?')) return;
+
+    // Funds: reuse the poll reading when fresh (<5s) so the common case adds no
+    // round trip; otherwise read live.
+    const readFunds = async (): Promise<number | null> => {
+      try {
+        const fr = await fetch(scalperRoute(broker, 'funds'));
+        const fj = await fr.json() as { success: boolean; data?: Record<string, unknown> };
+        if (!fj.success || !fj.data) return null;
+        const available = Number(fj.data.availabelBalance ?? fj.data.availableBalance ?? 0);
+        setFundsData({ available, used: Number(fj.data.utilizedAmount ?? fj.data.usedMargin ?? fj.data.marginUsed ?? 0) });
+        fundsAtRef.current = Date.now();
+        return available;
+      } catch { return null; }
+    };
+    const availableFunds = (fundsData && Date.now() - fundsAtRef.current < 5000) ? fundsData.available : await readFunds();
+    if (availableFunds == null) {
+      addToast('error', 'Funds unavailable — placement blocked', 'Could not read available margin from the broker. Retry once funds load.');
+      return;
+    }
+    if (requiredMargin > availableFunds) {
       addToast(
         'error',
         'Insufficient margin — placement blocked',
@@ -901,6 +1060,7 @@ export default function MultiLegFocus() {
       );
       return;
     }
+    if (!resolveSpreadIssues(await spreadPromise)) return;
 
     const pair = `${basket.underlying}:${basket.expiry}`;
     const lookup = lookupCache[pair];
@@ -992,66 +1152,121 @@ export default function MultiLegFocus() {
       }
     };
 
-    try {
-      for (const leg of ordered) {
-        const label = `${leg.side === 'B' ? 'BUY' : 'SELL'} ${leg.strike} ${leg.option}`;
-        const qty = leg.lots * lotSize;
-        const req = resolveOrderRequest(broker, {
-          side: leg.side,
-          option: leg.option,
-          strike: leg.strike,
-          qty,
-          type: leg.type,
-          price: leg.type === 'LIMIT' ? leg.price : undefined,
-          underlying: basket.underlying as Underlying,
-          productType: 'MARGIN',
-        }, strikeMapFor(leg.expiry || basket.expiry));
+    // Place one leg; resolves false on any failure (already toasted + marked FAILED).
+    const placeOneLegRaw = async (leg: MultiLegLeg): Promise<boolean> => {
+      const label = `${leg.side === 'B' ? 'BUY' : 'SELL'} ${leg.strike} ${leg.option}`;
+      const qty = leg.lots * lotSize;
+      const req = resolveOrderRequest(broker, {
+        side: leg.side,
+        option: leg.option,
+        strike: leg.strike,
+        qty,
+        type: leg.type,
+        price: leg.type === 'LIMIT' ? leg.price : undefined,
+        underlying: basket.underlying as Underlying,
+        productType: 'MARGIN',
+      }, strikeMapFor(leg.expiry || basket.expiry));
 
-        if (!req) {
-          addToast('error', `${label} — no order identifier resolved`, 'Strike lookup not ready yet — strategy stopped');
-          working = working.map(l => (l.id === leg.id ? { ...l, status: 'FAILED' as MultiLegStatus } : l));
-          updateBasket(basketId, { legs: working });
-          await rollbackPlacedLegs();
-          return;
-        }
+      if (!req) {
+        addToast('error', `${label} — no order identifier resolved`, 'Strike lookup not ready yet — strategy stopped');
+        working = working.map(l => (l.id === leg.id ? { ...l, status: 'FAILED' as MultiLegStatus } : l));
+        updateBasket(basketId, { legs: working });
+        return false;
+      }
 
-        try {
-          const res = await fetch(req.url, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(req.body),
+      try {
+        const res = await fetch(req.url, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(req.body),
+        });
+        const j = await res.json() as { success: boolean; order_id?: string; securityId?: string; symbol?: string; price?: number; error?: string };
+
+        if (j.success) {
+          const currentLtp = ltpFor(basket, leg);
+          const fillPrice = (j.price && j.price > 0) ? j.price : (currentLtp > 0 ? currentLtp : (leg.price ?? 0));
+          const secId = j.securityId ?? (req.body.securityId as string | undefined);
+          const sym = j.symbol ?? (req.body.tradingsymbol as string | undefined);
+
+          working = working.map(l => {
+            if (l.id !== leg.id) return l;
+            return {
+              ...l,
+              status: 'OPEN' as MultiLegStatus,
+              fill: { qty, avgPrice: fillPrice },
+              orderRef: { securityId: secId, symbol: sym },
+            };
           });
-          const j = await res.json() as { success: boolean; order_id?: string; securityId?: string; symbol?: string; price?: number; error?: string };
-
-          if (j.success) {
-            const currentLtp = ltpFor(basket, leg);
-            const fillPrice = (j.price && j.price > 0) ? j.price : (currentLtp > 0 ? currentLtp : (leg.price ?? 0));
-            const secId = j.securityId ?? (req.body.securityId as string | undefined);
-            const sym = j.symbol ?? (req.body.tradingsymbol as string | undefined);
-
-            working = working.map(l => {
-              if (l.id !== leg.id) return l;
-              return {
-                ...l,
-                status: 'OPEN' as MultiLegStatus,
-                fill: { qty, avgPrice: fillPrice },
-                orderRef: { securityId: secId, symbol: sym },
-              };
-            });
-            updateBasket(basketId, { legs: working });
-            addToast('success', `Placed ${label}`, `ID: ${j.order_id ?? 'OK'}`);
-            placedLegs.push({ legId: leg.id, label, side: leg.side, option: leg.option, strike: leg.strike, qty, type: leg.type, expiry: leg.expiry || basket.expiry });
-          } else {
-            working = working.map(l => (l.id === leg.id ? { ...l, status: 'FAILED' as MultiLegStatus } : l));
-            updateBasket(basketId, { legs: working });
-            addToast('error', `Rejected ${label} — strategy stopped`, j.error ?? 'Unknown broker error');
-            await rollbackPlacedLegs();
-            return;
-          }
-        } catch (e) {
-          working = working.map(l => (l.id === leg.id ? { ...l, status: 'FAILED' as MultiLegStatus } : l));
           updateBasket(basketId, { legs: working });
-          addToast('error', `Order failed for ${label} — strategy stopped`, String(e));
+          addToast('success', `Placed ${label}`, `ID: ${j.order_id ?? 'OK'}`);
+          placedLegs.push({ legId: leg.id, label, side: leg.side, option: leg.option, strike: leg.strike, qty, type: leg.type, expiry: leg.expiry || basket.expiry });
+          return true;
+        }
+        working = working.map(l => (l.id === leg.id ? { ...l, status: 'FAILED' as MultiLegStatus } : l));
+        updateBasket(basketId, { legs: working });
+        addToast('error', `Rejected ${label} — strategy stopped`, j.error ?? 'Unknown broker error');
+        return false;
+      } catch (e) {
+        working = working.map(l => (l.id === leg.id ? { ...l, status: 'FAILED' as MultiLegStatus } : l));
+        updateBasket(basketId, { legs: working });
+        addToast('error', `Order failed for ${label} — strategy stopped`, String(e));
+        return false;
+      }
+    };
+
+    // Never throws: a synchronous failure before the fetch (identifier resolution,
+    // LTP lookup) must not reject Promise.all while sibling orders are in flight,
+    // or the rollback below would be skipped.
+    const placeOneLeg = async (leg: MultiLegLeg): Promise<boolean> => {
+      try {
+        return await placeOneLegRaw(leg);
+      } catch (e) {
+        working = working.map(l => (l.id === leg.id ? { ...l, status: 'FAILED' as MultiLegStatus } : l));
+        updateBasket(basketId, { legs: working });
+        addToast('error', `Order failed for ${leg.side === 'B' ? 'BUY' : 'SELL'} ${leg.strike} ${leg.option} — strategy stopped`, String(e));
+        return false;
+      }
+    };
+
+    // Legs never attempted (the run aborted before their phase) go back to DRAFT
+    // instead of hanging in PLACING. Must run BEFORE rollbackPlacedLegs, which
+    // writes CLOSED statuses via basketsRef.
+    const releaseUnattempted = () => {
+      // Off `working` (this run's synchronous truth), not basketsRef, which may
+      // not have applied the latest FAILED/OPEN writes yet.
+      working = working.map(l => (l.status === 'PLACING' ? { ...l, status: 'DRAFT' as MultiLegStatus } : l));
+      updateBasket(basketId, { legs: working });
+    };
+
+    try {
+      // Two phases, legs within a phase fired concurrently: all BUY (hedge)
+      // legs must be acknowledged before any SELL leg goes out, so a rejected
+      // hedge can never leave a naked short. A failure inside a phase stops
+      // the next phase and rolls back whatever already went through.
+      for (const phase of [ordered.filter(l => l.side === 'B'), ordered.filter(l => l.side === 'S')]) {
+        if (!phase.length) continue;
+        if (phase[0].side === 'S' && placedLegs.length) {
+          // Hedges are in. Premium paid may have eaten into the margin the sells
+          // need — re-read funds, but only when the buffer isn't obviously ample
+          // (keeps the common case free of an extra round trip).
+          const premiumPaid = placedLegs.reduce((sum, p) => {
+            const l = basket.legs.find(x => x.id === p.legId);
+            return sum + (l ? p.qty * (ltpFor(basket, l) || l.price || 0) : 0);
+          }, 0);
+          if (availableFunds - premiumPaid < requiredMargin * 1.2) {
+            const nowAvail = await readFunds();
+            if (nowAvail == null || nowAvail < requiredMargin) {
+              addToast('error', 'Margin short after hedges — sells NOT placed',
+                nowAvail == null ? 'Could not re-verify funds; unwinding hedges.' : `Available ${fmtMoney(nowAvail)} < required ${fmtMoney(requiredMargin)}; unwinding hedges.`);
+              releaseUnattempted();
+              await rollbackPlacedLegs();
+              return;
+            }
+          }
+        }
+        const results = await Promise.all(phase.map(placeOneLeg));
+        if (results.some(ok => !ok)) {
+          releaseUnattempted();
           await rollbackPlacedLegs();
           return;
         }
@@ -1061,10 +1276,29 @@ export default function MultiLegFocus() {
       pollFunds();
       fetchMarginsForBaskets();
     }
-  }, [broker, hasAuthenticatedBroker, lookupCache, updateBasket, ltpFor, addToast, pollFunds, fetchMarginsForBaskets, basketMargins, fundsData]);
+  }, [broker, hasAuthenticatedBroker, lookupCache, updateBasket, ltpFor, addToast, pollFunds, fetchMarginsForBaskets, basketMargins, fundsData, blockedStrikeLegs, toastBlockedStrikes, fetchSpreadIssues, resolveSpreadIssues]);
 
-  const exitOneLeg = useCallback(async (basketId: string, leg: MultiLegLeg) => {
-    if (exitingLegsRef.current.has(leg.id)) return;
+  // The lock is taken synchronously, before any await inside placeBasketInner
+  // (funds read, confirm dialogs), so a fast double-click cannot slip a second
+  // placement through the gap. Released on every exit path.
+  const placeBasket = useCallback(async (basketId: string) => {
+    if (placementLockRef.current) {
+      addToast('error', 'Another placement is in progress', 'Wait for it to finish before placing another strategy.');
+      return;
+    }
+    placementLockRef.current = true;
+    try {
+      await placeBasketInner(basketId);
+    } finally {
+      placementLockRef.current = false;
+      fundsAtRef.current = 0;   // force a live funds read for the next placement
+    }
+  }, [placeBasketInner, addToast]);
+
+  const exitOneLeg = useCallback(async (basketId: string, leg: MultiLegLeg): Promise<{ closed: boolean; qty: number }> => {
+    let closed = false;   // true once this leg is confirmed flat/exited
+    let closedQty = 0;    // units this call actually sent to close (0 when already flat)
+    if (exitingLegsRef.current.has(leg.id)) return { closed, qty: closedQty };
     exitingLegsRef.current.add(leg.id);
     setExitingLegs(prev => new Set(prev).add(leg.id));
 
@@ -1088,25 +1322,21 @@ export default function MultiLegFocus() {
       // resolved); binding the leg to an unconfirmed id would mask a real
       // lookup failure as if it had been validated.
       if (fallbackSecId && !leg.orderRef?.securityId && (match.kind === 'match' || match.kind === 'flat')) {
-        updateBasket(basketId, {
-          legs: basketsRef.current.find(b => b.id === basketId)?.legs.map(l =>
-            (l.id === leg.id ? { ...l, orderRef: { ...l.orderRef, securityId: fallbackSecId } } : l)
-          ) ?? [],
-        });
+        patchLegs(basketId, legs => legs.map(l =>
+          (l.id === leg.id ? { ...l, orderRef: { ...l.orderRef, securityId: fallbackSecId } } : l)));
       }
 
       if (match.kind === 'flat') {
         const closedFill = closedFillFromRow(match.row, leg.side === 'B') ?? leg.closedFill;
-        updateBasket(basketId, {
-          legs: basketsRef.current.find(b => b.id === basketId)?.legs.map(l => (l.id === leg.id ? { ...l, status: 'CLOSED' as const, fill: { qty: 0, avgPrice: l.fill?.avgPrice ?? 0 }, closedFill } : l)) ?? [],
-        });
+        patchLegs(basketId, legs => legs.map(l => (l.id === leg.id ? { ...l, status: 'CLOSED' as const, fill: { qty: 0, avgPrice: l.fill?.avgPrice ?? 0 }, closedFill } : l)));
         addToast('success', `${label} already flat at broker`, 'Updated status to CLOSED');
-        return;
+        closed = true;
+        return { closed, qty: closedQty };
       }
 
       if (match.kind !== 'match') {
         addToast('error', `Cannot exit ${label}`, 'Could not match broker position');
-        return;
+        return { closed, qty: closedQty };
       }
 
       const netQty = Number(match.row.netQty ?? 0);
@@ -1117,7 +1347,7 @@ export default function MultiLegFocus() {
           `Cannot exit ${label}`,
           `Broker position sign mismatch (netQty ${netQty}) for a ${leg.side === 'B' ? 'BUY' : 'SELL'} leg — check Orders/Positions`,
         );
-        return;
+        return { closed, qty: closedQty };
       }
 
       // Safe sizing: clamped to what this leg opened, clamped by what broker shows
@@ -1126,7 +1356,7 @@ export default function MultiLegFocus() {
       const qty = Math.min(ownQty, brokerAbs);
       if (qty <= 0) {
         addToast('error', `Cannot exit ${label}`, 'Resolved exit quantity is zero');
-        return;
+        return { closed, qty: closedQty };
       }
 
       const side = leg.side === 'B' ? 'SELL' : 'BUY';
@@ -1135,7 +1365,7 @@ export default function MultiLegFocus() {
 
       if (!productPayload) {
         addToast('error', `Cannot exit ${label}`, `Unsupported product "${product}"`);
-        return;
+        return { closed, qty: closedQty };
       }
 
       const isSensex = basket?.underlying === 'SENSEX';
@@ -1157,9 +1387,9 @@ export default function MultiLegFocus() {
         addToast('success', `Exited ${label}`, `ID: ${j2.order_id}`);
         const currentLtp = basket ? ltpFor(basket, leg) : 0;
         const exitPrice = (j2.price && j2.price > 0) ? j2.price : (currentLtp > 0 ? currentLtp : (leg.fill?.avgPrice ?? 0));
-        updateBasket(basketId, {
-          legs: basketsRef.current.find(b => b.id === basketId)?.legs.map(l => (l.id === leg.id ? { ...l, status: 'CLOSED' as const, fill: { qty: 0, avgPrice: l.fill?.avgPrice ?? 0 }, closedFill: { qty, exitPrice } } : l)) ?? [],
-        });
+        patchLegs(basketId, legs => legs.map(l => (l.id === leg.id ? { ...l, status: 'CLOSED' as const, fill: { qty: 0, avgPrice: l.fill?.avgPrice ?? 0 }, closedFill: { qty, exitPrice } } : l)));
+        closed = true;
+        closedQty = qty;
       } else {
         addToast('error', `Exit failed for ${label}`, j2.error ?? 'Unknown error');
       }
@@ -1175,7 +1405,8 @@ export default function MultiLegFocus() {
       pollFunds();
       fetchMarginsForBaskets();
     }
-  }, [broker, updateBasket, addToast, pollFunds, fetchMarginsForBaskets, resolveDhanSecurityId]);
+    return { closed, qty: closedQty };
+  }, [broker, patchLegs, addToast, pollFunds, fetchMarginsForBaskets, resolveDhanSecurityId]);
 
   const exitingBasketsRef = useRef<Set<string>>(new Set());
 
@@ -1188,14 +1419,25 @@ export default function MultiLegFocus() {
       const basket = basketsRef.current.find(b => b.id === basketId);
       if (!basket) return;
       const openLegs = sortLegsForExit(basket.legs.filter(l => l.status === 'OPEN' || l.status === 'CLOSING'));
-      for (const leg of openLegs) {
-        await exitOneLeg(basketId, leg);
+      // Legs exit concurrently within a side group; shorts (BUY-to-close) are
+      // fully done before longs so margin is never released out of order.
+      const shorts = openLegs.filter(l => l.side === 'S');
+      const longs = openLegs.filter(l => l.side === 'B');
+      const shortResults = shorts.length ? await Promise.all(shorts.map(leg => exitOneLeg(basketId, leg).then(r => r.closed, () => false))) : [];
+      if (longs.length) {
+        // Never sell the hedges while a short is still open — that would leave
+        // it naked (and release the margin that supports it).
+        if (shortResults.some(ok => !ok)) {
+          addToast('error', 'Long legs NOT exited', 'A short leg did not close — keeping the hedges in place. Resolve the short, then exit again.');
+        } else {
+          await Promise.allSettled(longs.map(leg => exitOneLeg(basketId, leg)));
+        }
       }
     } finally {
       exitingBasketsRef.current.delete(basketId);
       setExitingMap(prev => ({ ...prev, [basketId]: false }));
     }
-  }, [exitOneLeg]);
+  }, [exitOneLeg, addToast]);
 
   // ── Add Lots to Existing Position Leg ─────────────────────────────
   const addLotsToLeg = useCallback(async (basketId: string, params: {
@@ -1297,7 +1539,7 @@ export default function MultiLegFocus() {
   }, [broker, hasAuthenticatedBroker, lookupCache, ltpFor, updateBasket, addToast, pollFunds, fetchMarginsForBaskets]);
 
   // ── Add New Leg to Active Basket ──────────────────────────────────
-  const addNewLegToBasket = useCallback(async (basketId: string, params: {
+  const addNewLegCore = useCallback(async (basketId: string, params: {
     side: 'B' | 'S';
     option: 'CE' | 'PE';
     strike: number;
@@ -1305,16 +1547,25 @@ export default function MultiLegFocus() {
     lots: number;
     orderType: 'MARKET' | 'LIMIT';
     limitPrice?: number;
-  }) => {
+  }, opts?: {
+    /** Caller already confirmed sibling-contract collisions for a whole group. */
+    skipCollisionCheck?: boolean;
+    /** Risk settings inherited from the leg this one replaces (strike shift). */
+    carry?: Partial<MultiLegLeg>;
+    /** Caller already ran the bid/ask check (shift checks BEFORE closing anything). */
+    skipSpreadCheck?: boolean;
+  }): Promise<boolean> => {
     const basket = basketsRef.current.find(b => b.id === basketId);
-    if (!basket) return;
+    if (!basket) return false;
 
     if (!hasAuthenticatedBroker) {
       addToast('error', 'No broker logged in', 'Log in before placing orders');
-      return;
+      return false;
     }
 
     const legExpiry = params.expiry || basket.expiry;
+    const blockedNew = blockedStrikeLegs(basket, [{ strike: params.strike, option: params.option, expiry: legExpiry }]);
+    if (blockedNew.length) { toastBlockedStrikes(blockedNew, basket); return false; }
     const pair = `${basket.underlying}:${legExpiry}`;
     const lookup = lookupCache[pair];
     const lotSize = lookup?.lotSize ?? fallbackLotSize(basket.underlying as Underlying, broker);
@@ -1325,7 +1576,9 @@ export default function MultiLegFocus() {
 
     const collisions = findSiblingLegCollisions(
       basketsRef.current, basketId, [{ side: params.side, option: params.option, strike: params.strike, expiry: legExpiry }]);
-    if (collisions.length && !window.confirm(describeSiblingCollisions(collisions))) return;
+    if (!opts?.skipCollisionCheck && collisions.length && !window.confirm(describeSiblingCollisions(collisions))) return false;
+    if (!opts?.skipSpreadCheck
+        && !resolveSpreadIssues(await fetchSpreadIssues(basket, [{ option: params.option, strike: params.strike, expiry: legExpiry, type: params.orderType }]))) return false;
 
     const req = resolveOrderRequest(broker, {
       side: params.side,
@@ -1340,7 +1593,7 @@ export default function MultiLegFocus() {
 
     if (!req) {
       addToast('error', `Order failed for ${label}`, 'Could not resolve security identifier');
-      return;
+      return false;
     }
 
     try {
@@ -1360,6 +1613,8 @@ export default function MultiLegFocus() {
           : ((params.limitPrice && params.limitPrice > 0) ? params.limitPrice : curLtp);
 
         const newLeg: MultiLegLeg = {
+          ...(opts?.carry ?? {}),
+          bestPrice: undefined,
           id: `mll_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`,
           side: params.side,
           option: params.option,
@@ -1380,42 +1635,222 @@ export default function MultiLegFocus() {
           },
         };
 
-        const latestLegs = basketsRef.current.find(b => b.id === basket.id)?.legs ?? basket.legs;
         // Dhan nets by security id, so a leg identical to one already OPEN
         // (same side/option/strike/expiry) is the SAME position — merge the
         // lots into that row (weighted avg) instead of listing a duplicate.
-        const existing = latestLegs.find(l =>
+        // The write is functional (latest legs, never a snapshot) so concurrent
+        // reopens cannot drop each other's leg.
+        const sameContract = (l: MultiLegLeg) =>
           l.status === 'OPEN' && l.side === params.side && l.option === params.option
-          && l.strike === params.strike && (l.expiry || basket.expiry) === legExpiry);
-        if (existing) {
+          && l.strike === params.strike && (l.expiry || basket.expiry) === legExpiry;
+        const mergeInto = (existing: MultiLegLeg) => {
           const oldQty = (existing.fill?.qty && existing.fill.qty > 0) ? existing.fill.qty : existing.lots * lotSize;
           const oldAvg = (existing.fill?.avgPrice && existing.fill.avgPrice > 0) ? existing.fill.avgPrice : (existing.price || fillPrice);
           const totalQty = oldQty + qty;
           const avg = (oldAvg * oldQty + fillPrice * qty) / totalQty;
-          updateBasket(basket.id, {
-            legs: latestLegs.map(l => l.id !== existing.id ? l : {
-              ...l,
-              lots: l.lots + params.lots,
-              price: avg,
-              fill: { ...l.fill, qty: totalQty, avgPrice: avg, orderId: j.order_id ?? l.fill?.orderId },
-            }),
-          });
-          addToast('success', `Added ${params.lots} lot(s) to ${label}`, `New Avg: ₹${avg.toFixed(2)} (${existing.lots + params.lots} lots total)`);
-          pollFunds();
-          fetchMarginsForBaskets();
-          return;
+          return {
+            ...existing,
+            lots: existing.lots + params.lots,
+            price: avg,
+            fill: { ...existing.fill, qty: totalQty, avgPrice: avg, orderId: j.order_id ?? existing.fill?.orderId },
+          } as MultiLegLeg;
+        };
+        const seen = (basketsRef.current.find(b => b.id === basket.id)?.legs ?? basket.legs).find(sameContract);
+        patchLegs(basket.id, legs => {
+          const existing = legs.find(sameContract);
+          return existing ? legs.map(l => (l.id === existing.id ? mergeInto(existing) : l)) : [...legs, newLeg];
+        });
+        if (seen) {
+          const merged = mergeInto(seen);
+          addToast('success', `Added ${params.lots} lot(s) to ${label}`, `New Avg: ₹${(merged.price ?? 0).toFixed(2)} (${merged.lots} lots total)`);
+        } else {
+          addToast('success', `Added new leg ${label}`, `Filled @ ₹${fillPrice.toFixed(2)} (${params.lots} lots)`);
         }
-        updateBasket(basket.id, { legs: [...latestLegs, newLeg] });
-        addToast('success', `Added new leg ${label}`, `Filled @ ₹${fillPrice.toFixed(2)} (${params.lots} lots)`);
         pollFunds();
         fetchMarginsForBaskets();
+        return true;
       } else {
         addToast('error', `Add leg failed for ${label}`, j.error ?? 'Unknown broker error');
+        return false;
       }
     } catch (e) {
       addToast('error', `Add leg failed for ${label}`, String(e));
+      return false;
     }
-  }, [broker, hasAuthenticatedBroker, lookupCache, chainData, updateBasket, addToast, pollFunds, fetchMarginsForBaskets]);
+  }, [broker, hasAuthenticatedBroker, lookupCache, chainData, patchLegs, addToast, pollFunds, fetchMarginsForBaskets, blockedStrikeLegs, toastBlockedStrikes, fetchSpreadIssues, resolveSpreadIssues]);
+
+  const addNewLegToBasket = useCallback(async (basketId: string, params: Parameters<typeof addNewLegCore>[1]) => {
+    await addNewLegCore(basketId, params);
+  }, [addNewLegCore]);
+
+
+  // ── Shift legs N strikes (roll: close old leg, reopen at strike ± N) ──
+  // The old leg stays in the basket as CLOSED (realized P&L kept); the new leg is
+  // appended OPEN and inherits the old leg's SL/TP/trail settings. Same guards as
+  // the Advanced Scalper's shift: refuse on chain-edge clamp (whole plan), one
+  // combined collision confirm, close confirmed BEFORE anything reopens, reopen
+  // sized off what actually closed (never broker net qty).
+  const shiftLegs = useCallback(async (basketId: string, legIds: string[], direction: 'UP' | 'DOWN', steps: number) => {
+    const basket = basketsRef.current.find(b => b.id === basketId);
+    if (!basket) return;
+    if (!hasAuthenticatedBroker) {
+      addToast('error', 'No broker logged in', 'Log in before shifting');
+      return;
+    }
+    if (placementLockRef.current) {
+      addToast('error', 'Another placement is in progress', 'Wait for it to finish before shifting.');
+      return;
+    }
+    const selected = basket.legs.filter(l => legIds.includes(l.id) && l.status === 'OPEN');
+    if (!selected.length) {
+      addToast('error', 'Nothing to shift', 'No open legs selected');
+      return;
+    }
+    // A group shift must move every selected leg or none: a leg with no ledger
+    // quantity cannot be sized for a reopen, so refuse rather than shift the rest.
+    const unsized = selected.filter(l => !((l.fill?.qty ?? 0) > 0));
+    if (unsized.length) {
+      addToast('error', 'Cannot shift', `${unsized.map(l => `${l.strike} ${l.option}`).join(', ')} has no recorded fill quantity — positions left untouched`);
+      return;
+    }
+    const targets = selected;
+
+    const strikesFor = (legExpiry: string | undefined) =>
+      allowedStrikes(basket.underlying, legExpiry || basket.expiry, expiriesMap[basket.underlying] ?? [],
+        Object.keys(lookupCache[`${basket.underlying}:${legExpiry || basket.expiry}`]?.strikes ?? {}).map(Number).sort((a, b) => a - b));
+    const fallbackStep = DEFAULT_INDEX_STEP[basket.underlying as Underlying] || 50;
+    const plan = planLegShifts(targets, strikesFor, direction, steps, fallbackStep);
+    if (!plan.ok) {
+      addToast('error', `Cannot shift ${direction.toLowerCase()}`, `${plan.reason} — positions left untouched`);
+      return;
+    }
+    const moveFor = new Map(plan.moves.map(m => [m.legId, m]));
+    const blockedTargets = blockedStrikeLegs(basket, targets.map(t => ({ strike: moveFor.get(t.id)!.to, option: t.option, expiry: t.expiry })));
+    if (blockedTargets.length) { toastBlockedStrikes(blockedTargets, basket); return; }
+
+    // One confirm for every contract the shift lands on: another basket already
+    // holding it, or one of THIS basket's other open legs (the reopen would merge).
+    const legExpiryOf = (l: MultiLegLeg) => l.expiry || basket.expiry;
+    const collisions = findSiblingLegCollisions(
+      basketsRef.current, basketId,
+      targets.map(l => ({ side: l.side, option: l.option, strike: moveFor.get(l.id)!.to, expiry: legExpiryOf(l) })));
+    const selfHeld = basket.legs.filter(o => o.status === 'OPEN' && !moveFor.has(o.id) && targets.some(t => {
+      const mv = moveFor.get(t.id)!;
+      return t.side === o.side && t.option === o.option && mv.to === o.strike && legExpiryOf(t) === legExpiryOf(o);
+    }));
+    // Dhan nets by security id: landing on a contract this strategy already holds on the
+    // OPPOSITE side (e.g. shifting a short onto the long hedge strike) would offset the
+    // existing leg instead of opening a new one. Not a merge — refuse outright.
+    const opposite = basket.legs.filter(o => o.status === 'OPEN' && !moveFor.has(o.id) && targets.some(t => {
+      const mv = moveFor.get(t.id)!;
+      return t.side !== o.side && t.option === o.option && mv.to === o.strike && legExpiryOf(t) === legExpiryOf(o);
+    }));
+    if (opposite.length) {
+      addToast('error', 'Cannot shift onto an opposite leg',
+        `${opposite.map(l => `${l.side === 'B' ? 'BUY' : 'SELL'} ${l.strike} ${l.option}`).join(', ')} is open on that contract — it would net against the shifted leg. Positions left untouched.`);
+      return;
+    }
+    const warnings: string[] = [];
+    if (collisions.length) warnings.push(describeSiblingCollisions(collisions));
+    if (selfHeld.length) warnings.push(`This strategy already holds ${selfHeld.map(l => `${l.strike} ${l.option}`).join(', ')} — the shifted leg will merge into it.`);
+    if (warnings.length && !window.confirm(`${warnings.join('\n\n')}\n\nContinue?`)) return;
+
+    placementLockRef.current = true;
+    const desc = plan.moves.map(m => { const l = targets.find(t => t.id === m.legId)!; return `${m.from}→${m.to} ${l.option}`; }).join(', ');
+    try {
+      // Bid/ask of the NEW strikes, checked before anything is closed (lock already held, so a
+      // double-click cannot slip in); a refusal after the close would strand the strategy half-rolled.
+      if (!resolveSpreadIssues(await fetchSpreadIssues(basket, targets.map(t => ({ option: t.option, strike: moveFor.get(t.id)!.to, expiry: t.expiry, type: 'MARKET' as const }))))) return;
+      addToast('success', `Shifting ${direction.toLowerCase()} ${clampShiftSteps(steps)}: ${desc}`, 'Closing current legs first…');
+
+      // ── Phase A: close. Shorts first (concurrently), then longs; longs are
+      // skipped if any short did not close. Any failure aborts before reopening.
+      const lotSizeFor = (l: MultiLegLeg) =>
+        lookupCache[`${basket.underlying}:${legExpiryOf(l)}`]?.lotSize ?? fallbackLotSize(basket.underlying as Underlying, broker);
+      const ownQty = new Map(targets.map(l => [l.id, l.fill!.qty]));
+      const closedQty = new Map<string, number>();
+      const closeGroup = async (group: MultiLegLeg[]) => {
+        const res = await Promise.all(group.map(l => exitOneLeg(basketId, l).catch(() => ({ closed: false, qty: 0 }))));
+        group.forEach((l, i) => { if (res[i].closed) closedQty.set(l.id, res[i].qty); });
+        return res.every(r => r.closed);
+      };
+      const shorts = targets.filter(l => l.side === 'S');
+      const longs = targets.filter(l => l.side === 'B');
+      let allClosed = shorts.length ? await closeGroup(shorts) : true;
+      if (allClosed && longs.length) allClosed = await closeGroup(longs);
+      if (!allClosed) {
+        const closedNames = targets.filter(l => closedQty.has(l.id)).map(l => `${l.strike} ${l.option}`);
+        addToast('error', 'Shift aborted — nothing reopened',
+          `${closedNames.length ? `Closed: ${closedNames.join(', ')}. ` : 'Nothing closed. '}Other legs are still open. Check Orders/Positions, then retry.`);
+        return;
+      }
+
+      // A market close is acknowledged before it is guaranteed filled. Confirm the
+      // position book actually came down before opening the replacement, or a slow
+      // fill leaves old + new legs live at once.
+      const toReopen = targets.filter(l => (closedQty.get(l.id) ?? 0) > 0);
+      for (const l of targets) {
+        if (closedQty.has(l.id) && !toReopen.includes(l)) {
+          addToast('error', `${l.strike} ${l.option} was already flat`, `Nothing to roll — no new leg opened at ${moveFor.get(l.id)!.to}`);
+        }
+      }
+      let verified = false;
+      for (let attempt = 0; attempt < 3 && !verified && toReopen.length; attempt++) {
+        if (attempt > 0) await new Promise(r => setTimeout(r, 500));
+        try {
+          const res = await fetch(scalperRoute(broker, 'positions'));
+          const j = await res.json() as { success: boolean; data?: Record<string, unknown>[] };
+          if (!j.success || !Array.isArray(j.data)) continue;
+          verified = toReopen.every(l => {
+            const fb = broker === 'dhan' && !l.orderRef?.securityId ? resolveDhanSecurityId(basket, l) : undefined;
+            const m = findLegPosition(broker, l, j.data!, fb);
+            return m.kind === 'flat' || (m.kind === 'match' && Math.abs(Number(m.row.netQty ?? 0)) < (ownQty.get(l.id) ?? 0));
+          });
+        } catch { /* retry */ }
+      }
+      if (toReopen.length && !verified
+          && !window.confirm('Could not confirm the old legs are flat at the broker (a shared contract can hide it). Open the replacement legs anyway?')) {
+        addToast('error', 'Shift stopped — old legs closed, nothing reopened', 'Add the new legs manually once flat is confirmed.');
+        return;
+      }
+
+      // ── Phase B: reopen. BUY legs first (concurrently), then SELL legs; if a
+      // hedge fails to reopen the shorts stay closed (flat is safe, naked is not).
+      const reopen = async (l: MultiLegLeg) => {
+        const units = closedQty.get(l.id) ?? 0;
+        const ls = lotSizeFor(l);
+        const lots = Math.floor(units / ls);
+        const mv = moveFor.get(l.id)!;
+        if (lots < 1) {
+          addToast('error', `Not reopened: ${mv.to} ${l.option}`, `${units} qty closed is under one lot — add it manually`);
+          return false;
+        }
+        if (lots * ls !== units) addToast('error', 'Partial re-entry', `Reopening ${lots * ls} of ${units} qty at ${mv.to} ${l.option}`);
+        const ok = await addNewLegCore(basketId, {
+          side: l.side, option: l.option, strike: mv.to, expiry: legExpiryOf(l), lots, orderType: 'MARKET',
+        }, {
+          skipCollisionCheck: true,
+          skipSpreadCheck: true,
+          carry: { sl: l.sl, slType: l.slType, tp: l.tp, tpType: l.tpType, trail: l.trail },
+        });
+        if (!ok) addToast('error', `Closed ${mv.from} ${l.option} but NOT reopened at ${mv.to}`, 'Position is flat at that leg — add the new leg manually');
+        return ok;
+      };
+      const buys = toReopen.filter(l => l.side === 'B');
+      const sells = toReopen.filter(l => l.side === 'S');
+      const buyOk = buys.length ? (await Promise.all(buys.map(reopen))).every(Boolean) : true;
+      if (!buyOk) {
+        if (sells.length) addToast('error', 'Hedge reopen failed — short legs NOT reopened', 'Shorts stay closed (flat). Fix the hedge, then add the short legs.');
+        return;
+      }
+      if (sells.length) await Promise.all(sells.map(reopen));
+    } finally {
+      placementLockRef.current = false;
+      fundsAtRef.current = 0;
+      pollFunds();
+      fetchMarginsForBaskets();
+    }
+  }, [hasAuthenticatedBroker, lookupCache, broker, expiriesMap, addToast, exitOneLeg, addNewLegCore, resolveDhanSecurityId, pollFunds, fetchMarginsForBaskets, blockedStrikeLegs, toastBlockedStrikes, fetchSpreadIssues, resolveSpreadIssues]);
 
   // ── Broker Positions Poller across ALL Baskets ─────────────────────
   useEffect(() => {
@@ -1913,7 +2348,7 @@ export default function MultiLegFocus() {
       </div>
 
       {/* Main Container: Parallel Strategy Rows */}
-      <div className="p-4 flex flex-col gap-4 max-w-[1700px] mx-auto">
+      <div className="p-4 flex flex-col gap-4 w-full">
         {baskets.length === 0 ? (
           <div className="flex flex-col items-center justify-center py-24 gap-3 border border-zinc-800/60 rounded-xl bg-zinc-900/20">
             <Layers className="w-10 h-10 text-zinc-600" />
@@ -1990,7 +2425,10 @@ export default function MultiLegFocus() {
                 onDelete={() => deleteBasket(basket.id)}
                 onPlace={() => placeBasket(basket.id)}
                 onExit={() => exitBasket(basket.id)}
-                onExitLeg={leg => exitOneLeg(basket.id, leg)}
+                onExitLeg={async leg => { await exitOneLeg(basket.id, leg); }}
+                onShiftLegs={(legIds, direction, steps) => shiftLegs(basket.id, legIds, direction, steps)}
+                legColumns={legColumns}
+                onLegColumnsChange={changeLegColumns}
                 onAddLots={params => addLotsToLeg(basket.id, params)}
                 onAddNewLeg={params => addNewLegToBasket(basket.id, params)}
                 placing={!!placingMap[basket.id]}

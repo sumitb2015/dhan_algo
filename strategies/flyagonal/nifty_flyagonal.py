@@ -50,7 +50,9 @@ sys.path.insert(0, PROJECT_ROOT)
 from login import get_dhan_client                                      # noqa: E402
 from lib.dhan_helper import DhanHelper                                 # noqa: E402
 from lib.execution_broker import ExecutionBroker, ExecutionBrokerError  # noqa: E402
-from lib.strategy_risk import resolve_exit_qty_broker                  # noqa: E402
+from lib.strategy_risk import (                                        # noqa: E402
+    resolve_exit_qty_broker, detect_phantom_leg_broker, PHANTOM_CHECK_INTERVAL_SEC,
+)
 from lib.strategy_state_helper import (                                # noqa: E402
     save_strategy_state, check_shutdown_trigger, instance_log_suffix, parse_target_spec,
 )
@@ -217,6 +219,7 @@ class NiftyFlyagonal:
         self.front = None
         self.back = None
         self.legs = {}                  # name -> leg dict (absent/None when not held)
+        self._last_phantom_check = 0.0
         self.entry_date = None
         self.entry_spot = None
         self.max_loss_rs = 0.0
@@ -638,9 +641,29 @@ class NiftyFlyagonal:
                         f"(long back put remains, defined risk)", logging.ERROR)
         self.save_portfolio()
 
+    def _check_phantom_legs(self) -> None:
+        """Victim-side check (2026-07-30 incident follow-up): notice if a sibling
+        instance's exit or a manual dashboard square-off already flattened a leg
+        we still think is open. Never places an order — only corrects state."""
+        if time.time() - self._last_phantom_check < PHANTOM_CHECK_INTERVAL_SEC:
+            return
+        self._last_phantom_check = time.time()
+        for name, leg in list(self.legs.items()):
+            if not leg:
+                continue
+            close_side = BUY if leg["side"] == SELL else SELL
+            if detect_phantom_leg_broker(
+                self.broker, leg["strike"], leg["expiry"], leg["type"],
+                self._leg_qty(leg), close_side, logger,
+            ):
+                logger.warning(f"Phantom {name} leg detected ({leg['strike']}) — broker shows it "
+                               f"already closed elsewhere. Correcting internal state, not placing an order.")
+                self.legs[name] = None
+
     def monitor(self) -> None:
         a = self.args
         marked = self._mark()
+        self._check_phantom_legs()
         if marked:
             stop, target = self._stop_rs(), self._target_rs()
             if stop is not None and self.total_pnl <= -abs(stop):

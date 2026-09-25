@@ -2,14 +2,17 @@
 
 import React, { useState } from 'react';
 import { X, Plus } from 'lucide-react';
-import { fallbackLotSize, type MultiLegBasket } from '@/lib/multiLegFocus';
+import { fallbackLotSize, formatExpiryLabel, type MultiLegBasket } from '@/lib/multiLegFocus';
 import { FOCUS_RING } from '@/components/Scalper';
+import { allowedStrikes, snapToAllowed, strikeAllowed } from '@/lib/farExpiryRules';
 
 interface AddNewLegModalProps {
   isOpen: boolean;
   onClose: () => void;
   basket: MultiLegBasket | null;
   allStrikes: number[];
+  /** Sorted listed expiries for this underlying — drives the far-expiry 100-multiple rule. */
+  listedExpiries?: string[];
   atmStrike: number;
   lotSize: number;
   ltpForStrike: (strike: number, option: 'CE' | 'PE', expiry?: string) => number;
@@ -29,6 +32,7 @@ export default function AddNewLegModal({
   onClose,
   basket,
   allStrikes,
+  listedExpiries = [],
   atmStrike,
   lotSize,
   ltpForStrike,
@@ -36,7 +40,11 @@ export default function AddNewLegModal({
 }: AddNewLegModalProps) {
   const [side, setSide] = useState<'B' | 'S'>('S');
   const [option, setOption] = useState<'CE' | 'PE'>('CE');
-  const [strike, setStrike] = useState<number>(() => (atmStrike > 0 ? atmStrike : (allStrikes[0] ?? 24000)));
+  const [strike, setStrike] = useState<number>(() => {
+    const start = atmStrike > 0 ? atmStrike : (allStrikes[0] ?? 24000);
+    // Opens on the basket's own expiry; on a far expiry the ATM strike may not be a multiple of 100.
+    return basket ? snapToAllowed(basket.underlying, basket.expiry, listedExpiries, start, allStrikes) : start;
+  });
   // Defaults to the basket's front expiry; only togglable to FAR when this
   // basket actually has a second expiry (a Calendar/Diagonal strategy).
   const [expiry, setExpiry] = useState<string>(() => basket?.expiry ?? '');
@@ -49,13 +57,15 @@ export default function AddNewLegModal({
 
   const canPickFar = !!basket.farExpiry && basket.farExpiry !== basket.expiry;
   const effectiveExpiry = expiry || basket.expiry;
+  const strikeChoices = allowedStrikes(basket.underlying, effectiveExpiry, listedExpiries, allStrikes);
+  const strikeOk = strikeAllowed(basket.underlying, effectiveExpiry, listedExpiries, strike);
   const currentLtp = ltpForStrike(strike, option, effectiveExpiry);
   const effectiveLot = lotSize > 0 ? lotSize : fallbackLotSize(basket.underlying, basket.broker);
   const totalQty = lots * effectiveLot;
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (lots <= 0 || submitting) return;
+    if (lots <= 0 || submitting || !strikeOk) return;
     if (orderType === 'LIMIT' && (limitPrice <= 0 || isNaN(limitPrice))) return;
 
     setSubmitting(true);
@@ -86,7 +96,6 @@ export default function AddNewLegModal({
             </h2>
             <p className="text-xs text-zinc-400 font-mono">
               {basket.name} · {basket.underlying} · Expiry {effectiveExpiry}
-              {canPickFar && effectiveExpiry === basket.farExpiry && <span className="text-fuchsia-400"> (FAR)</span>}
             </p>
           </div>
           <button
@@ -185,8 +194,8 @@ export default function AddNewLegModal({
               }}
               className={`w-full h-9 bg-zinc-900 border border-zinc-700 text-zinc-100 font-mono text-sm rounded-lg px-3 focus:outline-none focus:border-emerald-500 ${FOCUS_RING}`}
             >
-              {!allStrikes.includes(strike) && <option value={strike}>{strike}</option>}
-              {allStrikes.map(s => (
+              {!strikeChoices.includes(strike) && <option value={strike}>{strike}</option>}
+              {strikeChoices.map(s => (
                 <option key={s} value={s}>
                   {s} {s === atmStrike ? '(ATM)' : ''}
                 </option>
@@ -206,7 +215,9 @@ export default function AddNewLegModal({
                   type="button"
                   onClick={() => {
                     setExpiry(basket.expiry);
-                    const l = ltpForStrike(strike, option, basket.expiry);
+                    const snapped = snapToAllowed(basket.underlying, basket.expiry, listedExpiries, strike, allStrikes);
+                    setStrike(snapped);
+                    const l = ltpForStrike(snapped, option, basket.expiry);
                     if (l > 0) setLimitPrice(l);
                   }}
                   className={`py-1.5 rounded-lg text-xs font-bold border transition-all ${
@@ -215,14 +226,16 @@ export default function AddNewLegModal({
                       : 'bg-zinc-900 border-zinc-800 text-zinc-400 hover:text-zinc-200'
                   }`}
                 >
-                  FRONT · {basket.expiry}
+                  {formatExpiryLabel(basket.expiry)}
                 </button>
                 <button
                   type="button"
                   onClick={() => {
                     if (!basket.farExpiry) return;
                     setExpiry(basket.farExpiry);
-                    const l = ltpForStrike(strike, option, basket.farExpiry);
+                    const snapped = snapToAllowed(basket.underlying, basket.farExpiry, listedExpiries, strike, allStrikes);
+                    setStrike(snapped);
+                    const l = ltpForStrike(snapped, option, basket.farExpiry);
                     if (l > 0) setLimitPrice(l);
                   }}
                   className={`py-1.5 rounded-lg text-xs font-bold border transition-all ${
@@ -231,7 +244,7 @@ export default function AddNewLegModal({
                       : 'bg-zinc-900 border-zinc-800 text-zinc-400 hover:text-zinc-200'
                   }`}
                 >
-                  FAR · {basket.farExpiry}
+                  {formatExpiryLabel(basket.farExpiry)}
                 </button>
               </div>
             </div>
@@ -330,7 +343,8 @@ export default function AddNewLegModal({
             </button>
             <button
               type="submit"
-              disabled={submitting}
+              disabled={submitting || !strikeOk}
+              title={strikeOk ? undefined : 'Far expiries only allow strikes in multiples of 100'}
               className={`h-9 px-5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold shadow-lg transition-all flex items-center gap-1.5 disabled:opacity-50 ${FOCUS_RING}`}
             >
               <Plus className="w-3.5 h-3.5" />

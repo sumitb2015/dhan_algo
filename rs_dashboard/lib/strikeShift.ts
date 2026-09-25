@@ -34,3 +34,41 @@ export function resolveShiftTarget(
   const moved = Math.abs(targetIdx - currIdx);
   return moved === 0 ? null : { targetIdx, moved };
 }
+
+export interface LegShiftInput { id: string; strike: number; expiry?: string }
+export interface LegShiftMove { legId: string; from: number; to: number }
+export type LegShiftPlan =
+  | { ok: true; moves: LegShiftMove[] }
+  | { ok: false; reason: string };
+
+/**
+ * Plan a multi-leg shift. All-or-nothing: if ANY leg cannot move the full
+ * `steps` (chain edge, unresolvable strike, missing chain), the whole plan is
+ * refused — a live strategy must never end up with only some legs moved, or a
+ * leg on a strike other than the one asked for.
+ *
+ * `strikesFor` returns the sorted listed strikes for a leg's own expiry (a
+ * Calendar/Diagonal far leg has a different chain from the front month).
+ */
+export function planLegShifts(
+  legs: LegShiftInput[],
+  strikesFor: (legExpiry: string | undefined) => number[],
+  direction: 'UP' | 'DOWN',
+  steps: number,
+  fallbackStep: number,
+): LegShiftPlan {
+  if (!legs.length) return { ok: false, reason: 'No open legs to shift' };
+  const n = clampShiftSteps(steps);
+  const moves: LegShiftMove[] = [];
+  for (const leg of legs) {
+    const sorted = strikesFor(leg.expiry);
+    if (!sorted.length) return { ok: false, reason: `Strike list for ${leg.strike} not loaded yet` };
+    const target = resolveShiftTarget(sorted, leg.strike, direction, n, fallbackStep);
+    if (!target) return { ok: false, reason: `No ${direction.toLowerCase()} strike available for ${leg.strike}` };
+    if (target.moved < n) {
+      return { ok: false, reason: `Only ${target.moved} strike${target.moved > 1 ? 's' : ''} available ${direction.toLowerCase()} of ${leg.strike}, ${n} requested` };
+    }
+    moves.push({ legId: leg.id, from: leg.strike, to: sorted[target.targetIdx] });
+  }
+  return { ok: true, moves };
+}

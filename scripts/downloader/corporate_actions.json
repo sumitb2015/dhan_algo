@@ -1,0 +1,6 @@
+{
+  "_readme": "Human-maintained registry of symbols with a CONFIRMED stock split/bonus that needed scripts/downloader/rebackfill_corporate_action.py run against them. The daily incremental pipeline (refresh_dashboard_data.py, download_yahoo_daily.py) does not read this file and is not split-aware — this is a runbook aid, not a live config. Each entry: {date, type, note}. Only add a symbol here after confirming a real corporate action (not just a Dhan-vs-Yahoo price divergence — see the VEDL note below).",
+  "_investigated_not_added": {
+    "VEDL": "compare_dhan_yahoo.py flagged VEDL as a potential_split (max_diff_pct 62.58% on 2025-09-19, Dhan 170.49 vs Yahoo 455.60), but yfinance's own repair=True found nothing to fix (Repaired: False) and a fresh auto_adjust=True fetch shows continuous prices (~445-455) through that date with no split-shaped jump. The divergence is real but its shape (match_rate_pct 37.65% across the whole trailing year, yet the most recent bar matches within 0.66%) doesn't fit a simple split — Vedanta's known 2024-2025 demerger (business spin-offs) is a more likely cause, and a demerger has no split ratio for auto_adjust to apply. rebackfill_corporate_action.py would not fix this; do not run it against VEDL without further research confirming an actual mechanism it could correct."
+  }
+}

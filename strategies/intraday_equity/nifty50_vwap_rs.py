@@ -61,7 +61,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspa
 
 from login import get_dhan_client                                    # noqa: E402
 from lib.dhan_helper import DhanHelper                               # noqa: E402
-from lib.strategy_risk import resolve_exit_qty                       # noqa: E402
+from lib.strategy_risk import resolve_exit_qty, detect_phantom_leg, PHANTOM_CHECK_INTERVAL_SEC  # noqa: E402
 from lib.strategy_state_helper import (                              # noqa: E402
     save_strategy_state, check_shutdown_trigger, instance_log_suffix, flush_state,
 )
@@ -629,6 +629,7 @@ class IntradayEquityStrategy:
                                              name="intraday-poller")
         self._poll_thread.start()
         self.status = "SCANNING"
+        last_phantom_check = time.time()
 
         try:
             while True:
@@ -650,6 +651,10 @@ class IntradayEquityStrategy:
 
                 self.refresh_ltps()
                 self._manage_positions(hhmm)
+
+                if self.positions and time.time() - last_phantom_check >= PHANTOM_CHECK_INTERVAL_SEC:
+                    last_phantom_check = time.time()
+                    self._check_phantom_positions()
 
                 if self._risk_halt():
                     break
@@ -692,6 +697,21 @@ class IntradayEquityStrategy:
             reason = exit_reason(pos, row, self.cfg, hhmm, ltp=ltp or None)
             if reason:
                 self._exit(pos, reason)
+
+    def _check_phantom_positions(self):
+        """Victim-side check (2026-07-30 incident follow-up, generalized to this
+        strategy): notice a position already closed elsewhere (another instance
+        sharing the same security id, or a manual dashboard square-off) instead of
+        holding it in `self.positions` until a stop/target happens to fire and
+        `_exit`'s own qty<=0 branch catches it. Reuses the same self-heal path
+        (`_finalize`) that branch already takes — no new order is placed."""
+        for pos in list(self.positions.values()):
+            if detect_phantom_leg(self.helper, pos.security_id, pos.qty,
+                                   "SELL" if pos.side == "LONG" else "BUY", logger):
+                ltp = self.ltps.get(pos.symbol, pos.entry_price)
+                self.event("WARN", "PHANTOM", f"broker shows {pos.symbol} already closed elsewhere "
+                                               f"— correcting internal state, not placing an order", pos.symbol)
+                self._finalize(pos, ltp, "PHANTOM_CLOSED_ELSEWHERE")
 
     def _risk_halt(self) -> bool:
         day, priced = self.day_pnl()
