@@ -260,6 +260,7 @@ distilled from 7-10 repeat bug-fix commits:
 `dhan-order-tickets` (order modals and trade routes: server-side lot cap, MCX/BSE contract resolution, margin estimates, draft inputs),
 `dhan-page-theme` (per-page header, icon, accent, DATA chip, z-index scale, shared components and page states; ships an audit script),
 `dhan-terminal-polish` (density/readability of order-placing terminals) and `dhan-a11y-controls` (focus ring, icon-button aria-labels),
+`dhan-positions-table` (the legs/positions table: column catalog and formulas — null not zero — dynamic table-fixed widths, column chooser, sort/filter, shift/roll N strikes, near vs far expiry and the x100 far-strike rule, bid/ask check, order-safety guards, Dhan rate limits, and a symptom-to-fix catalog; read before touching any legs-table column or row action),
 `dhan-broker-cache` (the shared positions/funds cache in `lib/brokerPositionsCache.ts` — when a route may share it vs. must stay live),
 `dhan-options-analytics-page` (Positions/Straddle/Strangle Analysis: draft legs, margin/ROI, validity modals),
 `dhan-live-chart` (lightweight-charts canvas charts and polled series),
