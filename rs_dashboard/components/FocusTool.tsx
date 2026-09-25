@@ -7,7 +7,7 @@ import NavBar from './NavBar';
 import {
   TrendingUp, Zap, ShieldOff, Shield, Activity,
   Clock, Plus, Check, Save, Layers, Target, Lock, RefreshCw, X,
-  ChevronUp, ChevronDown, Server, Grid3x3, Calendar,
+  ChevronUp, ChevronDown, Grid3x3, Calendar,
 } from 'lucide-react';
 import { TabTable, type SortState, BUILDUP_STYLES } from './Scalper';
 import { useBrokerSelector, scalperRoute, BROKER_LABELS, type Broker } from '@/hooks/useBrokerSelector';
@@ -22,8 +22,7 @@ import type {
   FocusToolConfig, FocusRow, FocusRowFill, FocusIndexGroup,
   FocusUnderlying, FocusDte, FocusSide, FocusRowStatus, FocusStrikeMode,
 } from '@/lib/focusToolRows';
-// The rule engine. Extracted so it can be tested, and so the same cases can be
-// run against focus_tool_rows_worker.py — see focusToolRules.cases.json.
+// The pure rule engine for entry and exit decisions.
 import {
   INTRADAY_BACKSTOP_HM, EMPTY_ROW_LIVE,
   legsOf, rowFlat, rowOwnsLeg, sidePremium, legStopReason, legOwnContracts,
@@ -157,11 +156,6 @@ function fmtPrice(n: number | null | undefined): string {
   if (n == null || !Number.isFinite(n) || n === 0) return '\u2014';
   return n.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 }
-
-/** Set once the user stops the server-side worker by hand, so the auto-start
- *  effect leaves it alone on the next mount. Per-browser, which is the right
- *  scope for a per-user decision on a local single-user tool. */
-const WORKER_OPT_OUT_KEY = 'focusTool.workerStoppedByUser';
 
 /** Wall-clock 'HH:MM' in IST, regardless of the browser's own timezone. */
 function istHm(): string {
@@ -441,56 +435,6 @@ function vwapKey(
   interval: string,
 ): string {
   return `${underlying}:${expiry}:${ceStrike}:${peStrike}:${side}:${interval}`;
-}
-
-/** Heartbeat record from scripts/tools/focus_tool_rows_worker.py, corrected by
- *  the API route against the PID and the heartbeat age. */
-interface WorkerStatusRow {
-  id: string;
-  /** The worker's ledger holds a position for this row. */
-  open?: boolean;
-  /** Config status the worker last saw / wrote (entered/exited). */
-  status?: string;
-  ceStrike?: number | null;
-  peStrike?: number | null;
-  /** Absolute units the worker still holds on each leg. */
-  ceQty?: number;
-  peQty?: number;
-  /** Unix seconds each leg was opened, or null/undefined if not held. Used to
-   *  refuse a ghost-drop request (see the Exit path's `netQty === 0` branch)
-   *  while the leg is still within the broker's own fill-settling window —
-   *  a single stale position poll right after a real fill has, for real,
-   *  made this page tell the worker to drop a live short as a "ghost". */
-  ceOpenedTs?: number | null;
-  peOpenedTs?: number | null;
-  /** Realised from legs this worker already closed/rolled on this row. */
-  bookedPnl?: number;
-  pnl?: number;
-}
-
-interface WorkerStatus {
-  /** UNKNOWN is the client-side initial value, before the first heartbeat poll
-   *  has landed — it is never reported by the API. It exists so the in-tab
-   *  executor can tell "the worker is stopped" apart from "we have not asked
-   *  yet", which are not the same decision. */
-  status: 'RUNNING' | 'STOPPED' | 'STALE' | 'ERROR' | 'UNKNOWN';
-  pid?: number;
-  broker?: string;
-  dryRun?: boolean;
-  liveRealMoney?: boolean;
-  openRows?: number;
-  totalPnl?: number;
-  peakPnl?: number;
-  lockFloor?: number | null;
-  trailState?: string;
-  lastUpdate?: string;
-  note?: string;
-  error?: string;
-  /** Per-row snapshot. Used as a strike pin for rows the WORKER entered — it
-   *  never writes `status: 'entered'` back into the config, so without this the
-   *  page would keep resolving those rows off the live ATM and lose them the
-   *  same way it lost its own (see FocusRowFill). */
-  rows?: WorkerStatusRow[];
 }
 
 interface Toast {
@@ -798,22 +742,21 @@ function slTone(now: number | null, stop: number | null, idle: string): string {
 
 /** Calculated SL × premiums under a CE/PE position cell. */
 function LegSlLevels({
-  row, live, leg, workerHold, lotSize, align = 'center', inline = false,
+  row, live, leg, lotSize, align = 'center', inline = false,
 }: {
   row: FocusRow;
   live: RowLive;
   leg: 'CE' | 'PE';
-  workerHold?: WorkerStatusRow | null;
   lotSize: number | null;
   align?: 'center' | 'start';
   inline?: boolean;
 }) {
-  const legLevel = legStopPremium(row, leg, live, workerHold);
-  const pairLevel = pairStopPremium(row, live, workerHold, lotSize);
+  const legLevel = legStopPremium(row, leg, live);
+  const pairLevel = pairStopPremium(row, live, undefined, lotSize);
   if (legLevel == null && pairLevel == null) return null;
   const nowLeg = (leg === 'CE' ? live.ltpCe : live.ltpPe) ?? null;
   const nowPair = live.entryPremium > 0
-    ? sidePremium(row, live, workerHold, lotSize)
+    ? sidePremium(row, live, undefined, lotSize)
     : (() => {
         const legs = legsOf(row);
         if (!legs.length) return 0;
@@ -1050,7 +993,7 @@ function StrikeLegSelector({
 /** The full CE/PE strike editor for one row: ATM±/₹ mode toggle, independent
  *  CE and PE selectors, a link checkbox to keep them mirrored, and Save/clear. */
 function StrikeEditor({
-  row, live, step, onUpdate, onShift, shiftDisabled, onBlocked, workerHold,
+  row, live, step, onUpdate, onShift, shiftDisabled, onBlocked,
   buildupWsActive, buildupExpiryHint,
 }: {
   row: FocusRow;
@@ -1060,7 +1003,6 @@ function StrikeEditor({
   onShift?: (leg: 'CE' | 'PE', direction: 'UP' | 'DOWN') => void;
   shiftDisabled?: boolean;
   onBlocked?: (message: string) => void;
-  workerHold?: WorkerStatusRow | null;
   /** Focus WS running and this row's expiry matches — show buildup / placeholder. */
   buildupWsActive?: boolean;
   /** When set, title explains why buildup is unavailable (usually far expiry). */
@@ -1083,8 +1025,8 @@ function StrikeEditor({
    * someone else's 24150 PE and refuse every offset change.
    */
   const legOpen = {
-    CE: rowOwnsLeg(row, 'CE', workerHold),
-    PE: rowOwnsLeg(row, 'PE', workerHold),
+    CE: rowOwnsLeg(row, 'CE'),
+    PE: rowOwnsLeg(row, 'PE'),
   };
   const anyOpen = legOpen.CE || legOpen.PE;
   const blockedNote = (leg: 'CE' | 'PE') =>
@@ -1375,7 +1317,6 @@ function ControlStrip({
   onSave, saving, totalPnl, peakMtm, lockMtm,
   copyTrade,
   onOpenRisk, onOpenOrders, onOpenOptionChain, onToggleViewMode, viewMode,
-  workerStatus, onToggleWorker,
   onExitAll, confirmExitAll, exitingAll,
 }: {
   liveRealMoney: boolean; onToggleLive: () => void; broker: Broker;
@@ -1392,8 +1333,6 @@ function ControlStrip({
   onOpenOptionChain: () => void;
   onToggleViewMode: () => void;
   viewMode: 'table' | 'cards';
-  workerStatus: WorkerStatus;
-  onToggleWorker: () => void;
   onExitAll: () => void;
   confirmExitAll: boolean;
   exitingAll: boolean;
@@ -1417,37 +1356,24 @@ function ControlStrip({
           <span className="h-1.5 w-1.5 rounded-full bg-oncolor animate-pulse" />
           LIVE &middot; REAL MONEY
         </button>
-        <button
-          onClick={onToggleWorker}
-          title={workerStatus.status === 'RUNNING'
-            ? `Rules are running server-side (PID ${workerStatus.pid ?? '?'}) — entries and exits fire even with this tab closed. Click to stop; open positions are left as they are.`
-            : workerStatus.status === 'STALE'
-              ? 'The worker process stopped heartbeating — nothing is watching. Click to restart.'
-              : workerStatus.status === 'UNKNOWN'
-                // Neither executor acts in this window — see tabMayTrade.
-                ? 'Checking whether the server-side worker is running. Nothing enters or exits until this resolves.'
-                : 'Rules currently run only while this tab is open. Start the worker to keep them running server-side.'}
+        <span
+          title={liveRealMoney
+            ? 'In-tab execution engine is active — watching scheduled entries, level exits, and stop losses'
+            : 'Paper / dry-run mode — rules are simulated while this tab is open'}
           className={cn(
-            'flex items-center gap-1.5 text-xs font-bold px-3 py-1.5 rounded-lg border cursor-pointer transition-colors',
-            workerStatus.status === 'RUNNING'
-              ? 'border-emerald-500/40 bg-emerald-500/10 text-emerald-300 hover:bg-emerald-500/20'
-              : workerStatus.status === 'STALE' || workerStatus.status === 'ERROR'
-                ? 'border-amber-500/40 bg-amber-500/10 text-amber-300 hover:bg-amber-500/20'
-                : 'border-zinc-700 bg-zinc-900 text-zinc-400 hover:bg-zinc-800 hover:border-zinc-600',
-            FOCUS_RING,
+            'flex items-center gap-1.5 text-xs font-bold px-3 py-1.5 rounded-lg border transition-colors select-none',
+            liveRealMoney
+              ? 'border-emerald-500/40 bg-emerald-500/10 text-emerald-300'
+              : 'border-zinc-700 bg-zinc-900 text-zinc-400',
           )}
         >
-          <Server className={cn('h-3.5 w-3.5', workerStatus.status === 'UNKNOWN' && 'animate-pulse')} />
-          {workerStatus.status === 'RUNNING'
-            ? `Worker on${workerStatus.openRows ? ` · ${workerStatus.openRows}` : ''}`
-            : workerStatus.status === 'STALE' ? 'Worker stale'
-              : workerStatus.status === 'ERROR' ? 'Worker error'
-                : workerStatus.status === 'UNKNOWN' ? 'Worker…' : 'Worker off'}
-        </button>
+          <Activity className={cn('h-3.5 w-3.5', liveRealMoney && 'animate-pulse text-emerald-400')} />
+          {liveRealMoney ? 'Auto Rules Active' : 'Rules Idle'}
+        </span>
         <button
           onClick={onSave}
           disabled={saving}
-          title="Save the free-typed number fields — Target / Stop / Trigger / Lock and each group's Spot H↑/L↓ — to disk, where the Python worker reads them. Everything else (Arm/Exit, Start/Stop, ATM BY, Product, Strikes±, Risk/Trail on-off, LIVE · REAL MONEY) already saves itself the instant you click it."
+          title="Save preferences — Target / Stop / Trigger / Lock and each group's Spot H↑/L↓ — to disk."
           className={cn('flex items-center gap-1 text-xs font-bold px-3 py-1 rounded-lg bg-violet-600 text-oncolor hover:bg-violet-500 transition-colors cursor-pointer disabled:opacity-50', FOCUS_RING)}
         >
           <Save className="h-3 w-3" /> {saving ? 'Saving…' : 'Save Preferences'}
@@ -1708,7 +1634,7 @@ function rowDataPropsEqual(
   prev: { row: FocusRow; live: RowLive; lotSize: number | null; spot: number;
     liveRealMoney: boolean; broker: Broker; busy: boolean;
     rowIndex?: number;
-    workerHold?: WorkerStatusRow | null; expiries?: string[];
+    expiries?: string[];
     buildupWsActive?: boolean; buildupExpiryHint?: string | null },
   next: typeof prev,
 ): boolean {
@@ -1716,9 +1642,6 @@ function rowDataPropsEqual(
     && prev.lotSize === next.lotSize && prev.spot === next.spot
     && prev.liveRealMoney === next.liveRealMoney && prev.broker === next.broker
     && prev.busy === next.busy && prev.rowIndex === next.rowIndex
-    && prev.workerHold?.open === next.workerHold?.open
-    && prev.workerHold?.ceStrike === next.workerHold?.ceStrike
-    && prev.workerHold?.peStrike === next.workerHold?.peStrike
     && prev.expiries === next.expiries
     && prev.buildupWsActive === next.buildupWsActive
     && prev.buildupExpiryHint === next.buildupExpiryHint;
@@ -1726,7 +1649,7 @@ function rowDataPropsEqual(
 
 function FocusTableRowImpl({
   row, rowIndex, live, lotSize, spot, liveRealMoney, broker, busy,
-  workerHold, expiries, buildupWsActive, buildupExpiryHint,
+  expiries, buildupWsActive, buildupExpiryHint,
   onUpdate, onDelete, onArm, onDisarm, onExit, onExitPartial, onAddLot, onReduceLot, onShift, onBlocked,
 }: {
   row: FocusRow;
@@ -1734,7 +1657,6 @@ function FocusTableRowImpl({
   live: RowLive;
   lotSize: number | null; spot: number; liveRealMoney: boolean; broker: Broker;
   busy: boolean;
-  workerHold?: WorkerStatusRow | null;
   /** This row's underlying's available expiries, nearest first. */
   expiries: string[];
   buildupWsActive?: boolean;
@@ -1753,17 +1675,14 @@ function FocusTableRowImpl({
   // Orders are only sendable once at least one leg's contract and the lot size
   // are known — placeLeg re-checks the specific leg it is about to trade.
   const canTrade = liveRealMoney && !busy && (live.ceStrike != null || live.peStrike != null) && (lotSize ?? 0) > 0;
-  // Ownership, not raw broker qty: a ghost worker pin (broker already flat) must
-  // still offer Exit so placeLeg can queue the drop-leg clear. A coincidental
-  // book at this strike that THIS row never opened stays locked out.
-  const flat = rowFlat(row, workerHold);
-  const ceFlat = !rowOwnsLeg(row, 'CE', workerHold);
-  const peFlat = !rowOwnsLeg(row, 'PE', workerHold);
+  // Ownership, not raw broker qty: checked against this row's own fill ledger.
+  const flat = rowFlat(row);
+  const ceFlat = !rowOwnsLeg(row, 'CE');
+  const peFlat = !rowOwnsLeg(row, 'PE');
   // Quick partial-exit chips, same lot-aware rounding as Scalper/AdvancedScalper.
   const ceChips = partialCloseChips(Number(live.cePosition?.netQty ?? 0), lotSize ?? 0, [25, 50, 75]);
   const peChips = partialCloseChips(Number(live.pePosition?.netQty ?? 0), lotSize ?? 0, [25, 50, 75]);
-  // Why the leg buttons are greyed out. They used to stay clickable in every
-  // one of these states and only report the problem as a toast after the fact.
+  // Why the leg buttons are greyed out.
   const tradeBlockedWhy = !liveRealMoney
     ? 'Dry run — turn on LIVE · REAL MONEY to place orders'
     : busy
@@ -1772,15 +1691,11 @@ function FocusTableRowImpl({
         ? 'Lot size for this index has not resolved yet'
         : 'Strike not resolved yet';
   const step = STRIKE_STEP[row.underlying];
-  // How many lots the +/- buttons act on, independently per leg — e.g. add 2
-  // lots of CE and 1 of PE in one click each, rather than clicking + twice on
-  // one side. UI-only convenience, not persisted with the row.
+  // How many lots the +/- buttons act on, independently per leg
   const [ceQty, setCeQty] = useState(1);
   const [peQty, setPeQty] = useState(1);
-  // Expiry, like strike, is locked once this row owns a leg — moving it would
-  // orphan position tracking the same way editing an owned leg's strike would
-  // (see StrikeEditor's doc comment).
-  const expiryLocked = rowOwnsLeg(row, 'CE', workerHold) || rowOwnsLeg(row, 'PE', workerHold);
+  // Expiry is locked once this row owns an active leg.
+  const expiryLocked = rowOwnsLeg(row, 'CE') || rowOwnsLeg(row, 'PE');
   // DTE (0/1/0+1) only means something relative to the NEAREST expiry — a row
   // that picked a further-out expiry has its own fixed DTE that never changes
   // day to day, so the filter is disabled rather than silently inert.
@@ -1861,7 +1776,7 @@ function FocusTableRowImpl({
 
       {/* CE / PE STRIKES */}
       <td className="p-3 align-top">
-        <StrikeEditor row={row} live={live} step={step} onUpdate={onUpdate} onShift={onShift} shiftDisabled={busy} onBlocked={onBlocked} workerHold={workerHold}
+        <StrikeEditor row={row} live={live} step={step} onUpdate={onUpdate} onShift={onShift} shiftDisabled={busy} onBlocked={onBlocked}
           buildupWsActive={buildupWsActive} buildupExpiryHint={buildupExpiryHint} />
       </td>
 
@@ -1979,7 +1894,7 @@ function FocusTableRowImpl({
               ))}
             </div>
           )}
-          <LegSlLevels row={row} live={live} leg="CE" workerHold={workerHold} lotSize={lotSize} />
+          <LegSlLevels row={row} live={live} leg="CE" lotSize={lotSize} />
         </div>
       </td>
 
@@ -2009,7 +1924,7 @@ function FocusTableRowImpl({
               ))}
             </div>
           )}
-          <LegSlLevels row={row} live={live} leg="PE" workerHold={workerHold} lotSize={lotSize} />
+          <LegSlLevels row={row} live={live} leg="PE" lotSize={lotSize} />
         </div>
       </td>
 
@@ -2104,14 +2019,13 @@ const FocusTableRow = memo(FocusTableRowImpl, rowDataPropsEqual);
 
 function FocusRowCardImpl({
   row, live, lotSize, spot, liveRealMoney, broker, busy,
-  workerHold, expiries, buildupWsActive, buildupExpiryHint,
+  expiries, buildupWsActive, buildupExpiryHint,
   onUpdate, onDelete, onArm, onDisarm, onExit, onExitPartial, onAddLot, onReduceLot, onShift, onBlocked,
 }: {
   row: FocusRow;
   live: RowLive;
   lotSize: number | null; spot: number; liveRealMoney: boolean; broker: Broker;
   busy: boolean;
-  workerHold?: WorkerStatusRow | null;
   /** This row's underlying's available expiries, nearest first. */
   expiries: string[];
   buildupWsActive?: boolean;
@@ -2128,17 +2042,14 @@ function FocusRowCardImpl({
   const combinedLtp = (live.ltpCe ?? 0) + (live.ltpPe ?? 0);
   const { ceValue, peValue, totalValue, pcr, pcrOi } = legValues(row, live, lotSize);
   const canTrade = liveRealMoney && !busy && (live.ceStrike != null || live.peStrike != null) && (lotSize ?? 0) > 0;
-  // Ownership, not raw broker qty: a ghost worker pin (broker already flat) must
-  // still offer Exit so placeLeg can queue the drop-leg clear. A coincidental
-  // book at this strike that THIS row never opened stays locked out.
-  const flat = rowFlat(row, workerHold);
-  const ceFlat = !rowOwnsLeg(row, 'CE', workerHold);
-  const peFlat = !rowOwnsLeg(row, 'PE', workerHold);
+  // Ownership, not raw broker qty: checked against this row's own fill ledger.
+  const flat = rowFlat(row);
+  const ceFlat = !rowOwnsLeg(row, 'CE');
+  const peFlat = !rowOwnsLeg(row, 'PE');
   // Quick partial-exit chips, same lot-aware rounding as Scalper/AdvancedScalper.
   const ceChips = partialCloseChips(Number(live.cePosition?.netQty ?? 0), lotSize ?? 0, [25, 50, 75]);
   const peChips = partialCloseChips(Number(live.pePosition?.netQty ?? 0), lotSize ?? 0, [25, 50, 75]);
-  // Why the leg buttons are greyed out. They used to stay clickable in every
-  // one of these states and only report the problem as a toast after the fact.
+  // Why the leg buttons are greyed out.
   const tradeBlockedWhy = !liveRealMoney
     ? 'Dry run — turn on LIVE · REAL MONEY to place orders'
     : busy
@@ -2147,12 +2058,11 @@ function FocusRowCardImpl({
         ? 'Lot size for this index has not resolved yet'
         : 'Strike not resolved yet';
   const step = STRIKE_STEP[row.underlying];
-  // How many lots the +/- buttons act on, independently per leg — see the
-  // matching note in FocusTableRow. UI-only, not persisted.
+  // How many lots the +/- buttons act on, independently per leg
   const [ceQty, setCeQty] = useState(1);
   const [peQty, setPeQty] = useState(1);
-  // See the matching note in FocusTableRow.
-  const expiryLocked = rowOwnsLeg(row, 'CE', workerHold) || rowOwnsLeg(row, 'PE', workerHold);
+  // Expiry is locked once this row owns an active leg.
+  const expiryLocked = rowOwnsLeg(row, 'CE') || rowOwnsLeg(row, 'PE');
   const onNearestExpiry = !row.expiry || row.expiry === expiries[0];
 
   return (
@@ -2342,7 +2252,7 @@ function FocusRowCardImpl({
 
       {/* ── Strike Configurator (StrikeEditor) ── */}
       <div className="bg-zinc-950/40 border border-zinc-800/50 rounded-xl p-2.5">
-        <StrikeEditor row={row} live={live} step={step} onUpdate={onUpdate} onShift={onShift} shiftDisabled={busy} onBlocked={onBlocked} workerHold={workerHold}
+        <StrikeEditor row={row} live={live} step={step} onUpdate={onUpdate} onShift={onShift} shiftDisabled={busy} onBlocked={onBlocked}
           buildupWsActive={buildupWsActive} buildupExpiryHint={buildupExpiryHint} />
       </div>
 
@@ -2356,7 +2266,7 @@ function FocusRowCardImpl({
               {live.ltpCe != null ? `₹${live.ltpCe.toFixed(2)}` : '—'}
             </span>
             <LegOpenBadge pos={live.cePosition} />
-            <LegSlLevels row={row} live={live} leg="CE" workerHold={workerHold} lotSize={lotSize} inline />
+            <LegSlLevels row={row} live={live} leg="CE" lotSize={lotSize} inline />
           </div>
           <div className="flex items-center gap-1 shrink-0">
             <LegLotSelect value={ceQty} onChange={setCeQty} className="w-9 h-5 text-[9px]" title="Lots the CE +/- buttons act on" />
@@ -2388,7 +2298,7 @@ function FocusRowCardImpl({
               {live.ltpPe != null ? `₹${live.ltpPe.toFixed(2)}` : '—'}
             </span>
             <LegOpenBadge pos={live.pePosition} />
-            <LegSlLevels row={row} live={live} leg="PE" workerHold={workerHold} lotSize={lotSize} inline />
+            <LegSlLevels row={row} live={live} leg="PE" lotSize={lotSize} inline />
           </div>
           <div className="flex items-center gap-1 shrink-0">
             <LegLotSelect value={peQty} onChange={setPeQty} className="w-9 h-5 text-[9px]" title="Lots the PE +/- buttons act on" />
@@ -2705,139 +2615,10 @@ export default function FocusTool() {
   const [lockRupees, setLockRupees] = useState(config.lockRupees);
   const [liveRealMoney, setLiveRealMoney] = useState(config.liveRealMoney);
 
-  // ── Server-side rule engine ──────────────────────────────────────
-  // scripts/tools/focus_tool_rows_worker.py runs the same entry/exit rules
-  // outside the browser, so a scheduled entry or a level exit still fires with
-  // this tab closed. While it is RUNNING the in-tab scheduler stands down —
-  // see the scheduler effect — so only one of the two ever places orders.
-  const [workerStatus, setWorkerStatus] = useState<WorkerStatus>({ status: 'UNKNOWN' });
-  const workerRunning = workerStatus.status === 'RUNNING';
-  /**
-   * May THIS TAB place orders right now?
-   *
-   * Not simply `liveRealMoney && !workerRunning`. On mount the worker status is
-   * UNKNOWN for up to one poll interval, and the saved config (which can carry
-   * liveRealMoney: true) usually lands first — so the scheduler's immediate
-   * first tick used to run while the worker was up and running the very same
-   * rules, double-entering any armed row whose entry time had passed.
-   *
-   * Standing down while UNKNOWN is the safe asymmetry: a false "stopped"
-   * duplicates real orders, a false "running" costs one 3s poll of delay.
-   *
-   * STALE is excluded for a different reason: it means the heartbeat stopped
-   * but the PID is still alive. That process can still place orders, so the tab
-   * taking over would be the double-driving this gate exists to prevent —
-   * except now against a worker nobody can see the state of. The banner below
-   * says so, and the Worker button restarts it (stop-and-wait, then respawn).
-   */
-  const tabMayTrade = liveRealMoney
-    && !['RUNNING', 'UNKNOWN', 'STALE'].includes(workerStatus.status);
-
-  const pollWorker = useCallback(() => {
-    fetch('/api/focus-tool/worker')
-      .then(r => r.json())
-      .then((j: { success?: boolean; status?: WorkerStatus }) => {
-        if (j.success && j.status) setWorkerStatus(j.status);
-      })
-      .catch(() => {});
-  }, []);
-
-  useEffect(() => {
-    pollWorker();
-    const t = setInterval(pollWorker, 3000);
-    return () => clearInterval(t);
-  }, [pollWorker]);
-
-  // Adopt enter/exit status the worker writes to disk. The page only loads
-  // config once on mount, so without this a worker-driven CE SL → full flat
-  // leaves the pill stuck on "armed" and the Arm button never comes back.
-  //
-  // Never overwrite a local `armed` with a stale `exited`/`entered` snapshot:
-  // Arm writes `armed` to disk immediately, but the worker status poll can lag
-  // a tick and still report the previous cycle's `exited` — adopting that
-  // wiped the Arm button (and a later Save could put `exited` back on disk
-  // over the user's Arm).
-  useEffect(() => {
-    const wrows = workerStatus.rows;
-    if (!wrows?.length) return;
-    setConfig(prev => {
-      let changed = false;
-      const nextRows = prev.rows.map(r => {
-        const w = wrows.find(x => x.id === r.id);
-        const ws = w?.status;
-        if (ws !== 'entered' && ws !== 'exited') return r;
-        if (r.status === ws) return r;
-        // Arm is explicit user intent. A lagging poll can still say `exited`
-        // from the previous cycle — never wipe Arm with that. DO adopt
-        // `entered` once the worker actually holds, so the pill matches the book.
-        if (r.status === 'armed') {
-          if (ws === 'entered' && w?.open) {
-            changed = true;
-            return { ...r, status: 'entered' as FocusRow['status'] };
-          }
-          return r;
-        }
-        // entered ← only while the worker still holds something; a stale
-        // "entered" after flat must not fight an exited/draft local state.
-        if (ws === 'entered' && !w?.open) return r;
-        changed = true;
-        return { ...r, status: ws as FocusRow['status'] };
-      });
-      return changed ? { ...prev, rows: nextRows } : prev;
-    });
-  }, [workerStatus.rows]);
-
-  const toggleWorker = useCallback(async () => {
-    const starting = !workerRunning;
-    // Remember an explicit stop so the auto-start effect below does not undo
-    // it the next time this page mounts. A process that places real orders
-    // must not come back just because the user navigated away and returned.
-    try {
-      if (starting) localStorage.removeItem(WORKER_OPT_OUT_KEY);
-      else localStorage.setItem(WORKER_OPT_OUT_KEY, '1');
-    } catch { /* private mode / storage disabled — auto-start stays as it was */ }
-    try {
-      const res = await fetch('/api/focus-tool/worker', {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(starting ? { action: 'start', broker } : { action: 'stop' }),
-      });
-      const j = await res.json() as { success?: boolean; message?: string; error?: string };
-      if (j.success) {
-        addToast('success', starting ? 'Worker starting' : 'Worker stopping',
-          starting
-            ? 'Rules now run server-side — safe to close this tab'
-            : 'Open positions are left exactly as they are');
-      } else {
-        addToast('error', starting ? 'Could not start worker' : 'Could not stop worker', j.error);
-      }
-    } catch (e) {
-      addToast('error', 'Worker request failed', String(e));
-    }
-    setTimeout(pollWorker, 800);
-  }, [workerRunning, broker, addToast, pollWorker]);
-
-  // Auto-start the worker on mount, and again whenever the order-routing
-  // broker changes — same convention as the live-quote bridge below: a
-  // long-lived background process that comes up on its own rather than
-  // waiting on a button, and restarts itself onto new routing rather than
-  // silently keeping stale broker credentials. Idempotent (the route reports
-  // "already running" when the broker hasn't changed) and silent — this isn't
-  // a user action, so it doesn't toast the way the manual button does. The
-  // worker only PLACES an order once the config's own LIVE - REAL MONEY switch
-  // is on, so starting it here is not itself a live-trading decision.
-  useEffect(() => {
-    // ...unless the user turned it off by hand. See toggleWorker.
-    try {
-      if (localStorage.getItem(WORKER_OPT_OUT_KEY) === '1') return;
-    } catch { /* storage unavailable — fall through and auto-start */ }
-    fetch('/api/focus-tool/worker', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ action: 'start', broker }),
-    })
-      .then(() => setTimeout(pollWorker, 800))
-      .catch(() => {});
-  }, [broker, pollWorker]);
+  // ── In-Tab Execution Engine ──────────────────────────────────────
+  // Rules (scheduled entries, stop losses, profit targets, level exits)
+  // execute directly within the browser session when LIVE · REAL MONEY is enabled.
+  const tabMayTrade = liveRealMoney;
 
   // Standalone bridge (scripts/tools/focus_tool_ws.py) — all three underlyings
   // over one WebSocket connection, independent of AdvancedScalper's
@@ -3318,16 +3099,6 @@ export default function FocusTool() {
   const rowLive = useMemo<Record<string, RowLive>>(() => {
     const out: Record<string, RowLive> = {};
     const prevOut = rowLivePrevRef.current;
-    // Strike pins for rows the WORKER holds — see WorkerStatus.rows.
-    const workerFills: Record<string, { ceStrike: number | null; peStrike: number | null; ceQty?: number; peQty?: number }> = {};
-    for (const r of workerStatus.rows ?? []) {
-      if (r?.open && r.id) {
-        workerFills[r.id] = {
-          ceStrike: r.ceStrike ?? null, peStrike: r.peStrike ?? null,
-          ceQty: r.ceQty, peQty: r.peQty,
-        };
-      }
-    }
     for (const row of config.rows) {
       const u = row.underlying;
       // The expiry THIS row trades — its own pick, or nearest until it picks
@@ -3359,13 +3130,8 @@ export default function FocusTool() {
       // that re-resolved would look its own position up at a strike nobody
       // holds: P&L blanks, legsFlat() goes true, and every exit rule silently
       // stops being evaluated against a position that is still very much open.
-      // The pin comes from this page's own fill record, or from the worker's
-      // ledger when the worker is the one holding it.
-      // The pin is live as soon as the ledger names a strike — not gated on
-      // `status`, because the worker never writes `entered` back into the
-      // config and the page's own first leg is away before it does.
       const hasPin = !!row.fill && (row.fill.ceStrike != null || row.fill.peStrike != null);
-      const pin = workerFills[row.id] ?? (hasPin ? row.fill : undefined);
+      const pin = hasPin ? row.fill : undefined;
       const ceStrike = pin ? (pin.ceStrike ?? null) : resolvedCe;
       const peStrike = pin ? (pin.peStrike ?? null) : resolvedPe;
 
@@ -3428,13 +3194,8 @@ export default function FocusTool() {
        *
        * Closed/rolled P&L lives on `fill.bookedPnl`, not on broker
        * `realizedProfit` of the current pin: a strike shift leaves realised on
-       * the OLD security id, which this row no longer looks up. When the
-       * worker holds the row it banks leg-wise SL closes into its own
-       * `bookedPnl` — the page fill is empty for worker-driven entries, so
-       * without preferring the worker's booked the row would show only the
-       * leftover PE's live MTM after a CE SL.
+       * the OLD security id, which this row no longer looks up.
        */
-      const workerHold = (workerStatus.rows ?? []).find(r => r.id === row.id) ?? null;
       const lotSize = lotSizes[u] ?? lookups[expKey(u, rowExpiry)]?.lotSize ?? 0;
       let entryNum = 0;
       const liveLegs: Parameters<typeof computeRowPnl>[1] = [];
@@ -3446,13 +3207,12 @@ export default function FocusTool() {
         // counted as this row's premium/P&L. Without this, ownShare()/
         // computeRowPnl() in focusToolPnl.ts read a missing own qty as
         // "attribute the whole position to this row" instead of "none of it."
-        if (!rowOwnsLeg(row, leg, workerHold)) continue;
-        // legOwnContracts sums the page ledger + the worker ledger (both can
-        // independently hold real lots for this row) and never falls back to
-        // the raw broker net — the single implementation of "how much does
+        if (!rowOwnsLeg(row, leg)) continue;
+        // legOwnContracts reads this row's own fill ledger and never falls back
+        // to the raw broker net — the single implementation of "how much does
         // this row own," also used by sidePremium/pairStopPremium so the
         // exit rules and this P&L calc can't disagree with each other.
-        const owned = legOwnContracts(row, leg, { cePosition, pePosition } as RowLive, workerHold);
+        const owned = legOwnContracts(row, leg, { cePosition, pePosition } as RowLive);
         const ownQty = owned > 0 ? owned : undefined;
         const isShort = Number(pos.netQty) < 0;
         const avg = isShort ? (Number(pos.sellAvg) || 0) : (Number(pos.buyAvg) || 0);
@@ -3468,17 +3228,6 @@ export default function FocusTool() {
         // Combined entry for pair SL ×: Σ (lots × entry) = Σ (contracts ×
         // entry) / lotSize. NEVER falls back to the broker net: an
         // unowned/unresolved leg contributes nothing (see legOwnContracts).
-        //
-        // The broker's live avg is only trusted as THIS row's own entry when
-        // this row's own qty fully accounts for the whole broker position
-        // (sole owner) — matching broker_avg_trusted's Python-side twin.
-        // Otherwise (a strike another row's own ledger also holds, or an
-        // untracked residual) the broker average is a blend of more than
-        // this row's own entries, so prefer the row's own stored
-        // ceEntry/peEntry (see FocusRowFill.ceEntry) — falling back to the
-        // broker average, with the same contamination caveat, only when
-        // this row genuinely has no stored entry yet (a worker-only entry,
-        // or a pre-follow-up session).
         const net = Math.abs(Number(pos.netQty) || 0);
         const soleOwner = net > 0 && owned === net;
         const storedEntry = Number(leg === 'CE' ? row.fill?.ceEntry : row.fill?.peEntry) || 0;
@@ -3490,7 +3239,7 @@ export default function FocusTool() {
       }
       const entryPremium = lotSize > 0 && entryNum > 0 ? entryNum / lotSize : 0;
       const pnl = computeRowPnl(
-        rowDisplayBookedPnl(row.fill?.bookedPnl, workerHold),
+        rowDisplayBookedPnl(row.fill?.bookedPnl),
         liveLegs,
       );
 
@@ -3523,7 +3272,7 @@ export default function FocusTool() {
     }
     rowLivePrevRef.current = out;
     return out;
-  }, [config.rows, config.groups, spots, effectiveFutQuotes, chains, focusWsQuotes, lookups, lotSizes, positions, broker, expiries, rowVwap, workerStatus.rows]);
+  }, [config.rows, config.groups, spots, effectiveFutQuotes, chains, focusWsQuotes, lookups, lotSizes, positions, broker, expiries, rowVwap]);
 
   /**
    * P&L across THIS TOOL'S OWN rows — the book the account budget is measured
@@ -3686,14 +3435,10 @@ export default function FocusTool() {
     } catch (e) {
       addToast('error', 'Network error calling exit-all API.', String(e));
     } finally {
-      // Retire every Focus row so the worker / tab scheduler cannot re-enter
-      // into a book we just nuked. Also queue ghost-leg drops for any pin the
-      // worker still holds (broker is flat; ledger may lag).
-      const wrows = workerStatus.rows ?? [];
+      // Retire every active Focus row so the tab scheduler cannot re-enter into a book we just nuked.
       setConfig(prev => {
         const nextRows = prev.rows.map(r => {
-          const w = wrows.find(x => x.id === r.id);
-          if (r.status === 'draft' && !w?.open) return r;
+          if (r.status === 'draft') return r;
           return {
             ...r,
             status: 'exited' as FocusRow['status'],
@@ -3705,18 +3450,6 @@ export default function FocusTool() {
         saveConfig(nextConfig);
         return nextConfig;
       });
-      for (const w of wrows) {
-        if (!w?.open || !w.id) continue;
-        for (const leg of ['CE', 'PE'] as const) {
-          const strike = leg === 'CE' ? w.ceStrike : w.peStrike;
-          if (strike == null) continue;
-          fetch('/api/focus-tool/worker', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ action: 'drop-leg', rowId: w.id, leg }),
-          }).catch(() => {});
-        }
-      }
       setExitingAll(false);
       setTimeout(pollPositions, 1000);
     }
@@ -3795,17 +3528,8 @@ export default function FocusTool() {
   }
 
   function deleteRow(id: string) {
-    // The worker's own ledger is checked before the broker book: deleting a row
-    // it holds leaves that position with no config row to evaluate it against
-    // — see orphan_rows() in focus_tool_rows_worker.py, which then has to keep
-    // it alive on the bell alone. Better to refuse the delete here.
-    if ((workerStatus.rows ?? []).some(r => r.id === id && r.open)) {
-      addToast('error', 'Cannot delete row', 'The server-side worker still holds a position for this row — exit it first');
-      return;
-    }
     const cfgRow = config.rows.find(r => r.id === id);
-    const workerHold = (workerStatus.rows ?? []).find(r => r.id === id);
-    if (cfgRow && (rowOwnsLeg(cfgRow, 'CE', workerHold) || rowOwnsLeg(cfgRow, 'PE', workerHold))) {
+    if (cfgRow && !rowFlat(cfgRow)) {
       addToast('error', 'Cannot delete row', 'Exit the CE/PE legs first — this row still holds a position');
       return;
     }
@@ -3999,47 +3723,17 @@ export default function FocusTool() {
     const pos = findPositionForRef(positions, broker, ref, leg, wantProduct);
     const netQty = Number(pos?.netQty ?? 0);
 
+    const pageOwn = Number(leg === 'CE' ? row.fill?.ceQty : row.fill?.peQty) || 0;
+    const ownQty = pageOwn > 0 ? pageOwn : undefined;
+
     let quantity: number;
     let side: 'BUY' | 'SELL';
     if (opts.reduce) {
+      const brokerQty = Math.abs(netQty);
+
       if (netQty === 0) {
-        // Broker already flat. If the worker still pins this leg (reconcile
-        // blocked by a dead token, or closed elsewhere), ask it to drop the
-        // ghost so the row can go exited and be re-armed — otherwise Exit is
-        // a dead end and Arm is blocked forever.
-        const workerHold = (workerStatus.rows ?? []).find(r => r.id === row.id);
-        const heldStrike = leg === 'CE' ? workerHold?.ceStrike : workerHold?.peStrike;
-        const heldOpenedTs = leg === 'CE' ? workerHold?.ceOpenedTs : workerHold?.peOpenedTs;
-        // Refuse to ghost-drop a leg the worker only just opened. This poll's
-        // netQty === 0 can be the broker's own book lagging a real fill —
-        // Kotak/Zerodha have no fill-confirmation socket the way Dhan does —
-        // and trusting it here has, for real, dropped a live short as a
-        // "ghost" and let a second entry double the position on top of it.
-        // Mirrors the worker's own RECONCILE_GRACE_SECONDS (focus_tool_rows_
-        // worker.py) — keep the two in sync.
-        const GHOST_DROP_GRACE_MS = 20_000;
-        if (heldOpenedTs != null && Date.now() - heldOpenedTs * 1000 < GHOST_DROP_GRACE_MS) {
-          addToast('error', `${what} not sent`,
-            'Position just opened — broker book may still be catching up. Wait a few seconds and retry.');
-          return false;
-        }
-        if (workerHold?.open && heldStrike != null && rowOwnsLeg(row, leg, workerHold)) {
-          try {
-            const dropRes = await fetch('/api/focus-tool/worker', {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ action: 'drop-leg', rowId: row.id, leg }),
-            });
-            const dropJ = await dropRes.json() as { success?: boolean; error?: string };
-            if (dropJ.success) {
-              addToast('success', `${what} cleared`, 'Broker already flat — dropped stale worker pin');
-              return true;
-            }
-            addToast('error', `${what} ghost pin`, dropJ.error || 'Could not clear worker ledger');
-          } catch (e) {
-            addToast('error', `${what} ghost pin`, e instanceof Error ? e.message : 'drop-leg failed');
-          }
-          return false;
+        if (pageOwn > 0) {
+          adjustFillQty(row.id, leg, -pageOwn);
         }
         // Exit All walks every Side leg; an already-flat unowned leg is a no-op
         // success so one ghost PE clear is not reported as "Exit incomplete".
@@ -4057,18 +3751,6 @@ export default function FocusTool() {
       // rows at the same strike (or a row sharing a strike with a running
       // strategy) are ONE broker position. Sizing off the raw net quantity lets
       // whichever exits first flatten the other's leg too.
-      // Sum the page fill and the worker's published qty — NOT "pick
-      // whichever is nonzero". The tab and the worker can each
-      // independently hold real lots for this same row (the worker enters/
-      // exits without ever writing the page's fill; the tab can add lots the
-      // worker never learns about), so this row's true ownership is often
-      // split across both ledgers. Picking one and discarding the other
-      // under-sizes the close against this row's real exposure.
-      const workerHold = (workerStatus.rows ?? []).find(r => r.id === row.id);
-      const pageOwn = Number(leg === 'CE' ? row.fill?.ceQty : row.fill?.peQty) || 0;
-      const workerOwn = Number(leg === 'CE' ? workerHold?.ceQty : workerHold?.peQty) || 0;
-      const ownQty = (pageOwn + workerOwn) > 0 ? (pageOwn + workerOwn) : undefined;
-      const brokerQty = Math.abs(netQty);
       if (ownQty === undefined || ownQty <= 0) {
         // No ledger entry — a position this page did not open (or one from
         // before the ledger existed). There is no "own" share to clamp to, so
@@ -4084,27 +3766,6 @@ export default function FocusTool() {
         quantity = Math.min(want, ownQty, brokerQty);
       }
     } else {
-      // Opening more exposure on a leg the WORKER already holds is how the
-      // two ledgers silently drift apart: the worker tracks only what IT
-      // placed (self.fills), never reads this page's fill record, and never
-      // learns about an order this tab sends. Its own leg-wise SL then closes
-      // only the qty it thinks it opened, leaving whatever the tab added
-      // behind as a live, unmanaged position — exactly what happened to the
-      // 2026-08-25 24150 CE (worker's ledger said 195; four tab-side adds
-      // brought the broker to -455 net; the worker's SL closed its own 195
-      // and left -260 short, untracked, until a further tab-side add grew it
-      // to -390). Refuse rather than add to a leg this tab cannot see the
-      // true size of. A strike-shift reopen (`strikeOverride`) is exempt —
-      // handleShiftStrike already refuses the whole shift earlier when the
-      // worker holds the leg being rolled, so reaching here means it doesn't.
-      const isWorkerActive = workerStatus.status === 'RUNNING' || workerStatus.status === 'STALE';
-      const workerHold = isWorkerActive ? (workerStatus.rows ?? []).find(r => r.id === row.id) : null;
-      const heldStrike = leg === 'CE' ? workerHold?.ceStrike : workerHold?.peStrike;
-      if (workerHold?.open && heldStrike != null && !opts.strikeOverride) {
-        addToast('error', `${what} blocked`,
-          `${leg} is held by the server-side worker — stop the worker before adding to this leg from the tab, or let the worker's own rules manage it`);
-        return false;
-      }
       side = 'SELL';
       quantity = (opts.lots ?? 1) * lotSize;
     }
@@ -4172,7 +3833,10 @@ export default function FocusTool() {
               markOk = false;
             }
           }
-          adjustFillQty(row.id, leg, opts.reduce ? -filled : filled,
+          const delta = (opts.reduce && opts.all && pageOwn > filled)
+            ? -pageOwn
+            : (opts.reduce ? -filled : filled);
+          adjustFillQty(row.id, leg, delta,
             opts.reduce ? undefined : Number(strike), bookedDelta, openEntryPx);
           return filled >= quantity && markOk;
         };
@@ -4269,8 +3933,7 @@ export default function FocusTool() {
     const deadline = Date.now() + maxWaitMs;
     for (;;) {
       const currentRow = schedulerRef.current.config.rows.find(r => r.id === rowId);
-      const workerHold = (schedulerRef.current.workerRows ?? []).find(w => w.id === rowId) ?? null;
-      if (currentRow && rowFlat(currentRow, workerHold)) return true;
+      if (currentRow && rowFlat(currentRow)) return true;
       if (Date.now() >= deadline) return false;
       await new Promise(r => setTimeout(r, 400));
     }
@@ -4359,24 +4022,7 @@ export default function FocusTool() {
     await runRowAction(row.id, async () => {
       const pos = leg === 'CE' ? live.cePosition : live.pePosition;
       const netQty = Number(pos?.netQty ?? 0);
-      const workerHold = (workerStatus.rows ?? []).find(r => r.id === row.id);
-      const owns = rowOwnsLeg(row, leg, workerHold);
-      // The worker tracks positions purely through its own state file,
-      // written only by itself — a shift placed from this tab goes through
-      // the dashboard's own order route and never touches it. The worker's
-      // own reconciliation pass would then see the old strike go flat and
-      // DROP the leg from its ledger entirely, never discovering the new
-      // strike — silently ending SL/exit-time/book-exit/account-risk
-      // enforcement for it on both engines. Refuse rather than shift into a
-      // state the worker can't track; the user must stop the worker (or exit
-      // the leg through it) first.
-      const isWorkerActive = workerStatus.status === 'RUNNING' || workerStatus.status === 'STALE';
-      const heldStrike = leg === 'CE' ? workerHold?.ceStrike : workerHold?.peStrike;
-      if (isWorkerActive && workerHold?.open && heldStrike != null) {
-        addToast('error', 'Cannot shift',
-          `${currStrike} ${leg} is held by the server-side worker — stop the worker (or exit this leg through it) before rolling it from this tab`);
-        return;
-      }
+      const owns = rowOwnsLeg(row, leg);
       // Only roll a position this row opened. A coincidental book at the
       // resolved strike is someone else's — moving THIS row's offset must
       // not close and reopen it.
@@ -4470,7 +4116,7 @@ export default function FocusTool() {
       // leave its live position at a strike this row no longer looks up —
       // untracked and unexitable from this page (see StrikeEditor's note).
       const otherLeg = leg === 'CE' ? 'PE' : 'CE';
-      const otherOpen = rowOwnsLeg(row, otherLeg, workerHold);
+      const otherOpen = rowOwnsLeg(row, otherLeg);
       const linked = (row.linked ?? true) && !otherOpen;
       if ((row.linked ?? true) && otherOpen) {
         addToast('error', 'Linked leg kept its strike', `${otherLeg} holds an open position — only ${leg} was rolled`);
@@ -4531,7 +4177,6 @@ export default function FocusTool() {
   const schedulerSnapshot = {
     config, rowLive, spots, toolPnl, lockMtm, peakMtm,
     riskEnabled, targetRupees, stopRupees, trailEnabled, triggerRupees, lockRupees,
-    workerRows: workerStatus.rows,
   };
   const schedulerRef = useRef(schedulerSnapshot);
   schedulerRef.current = schedulerSnapshot;
@@ -4614,16 +4259,12 @@ export default function FocusTool() {
   }
 
   useEffect(() => {
-    // Same hand-off as the scheduler below: the worker evaluates these very
-    // rules server-side, so the tab must not race it — and must not act at all
-    // until it knows whether the worker is up. See tabMayTrade.
     if (!tabMayTrade) return;
 
     const openRows = config.rows.filter(r => {
       const l = rowLive[r.id];
       if (!l) return false;
-      const workerHold = (workerStatus.rows ?? []).find(w => w.id === r.id) ?? null;
-      return !rowFlat(r, workerHold);
+      return !rowFlat(r);
     });
     if (!openRows.length) return;
 
@@ -4673,20 +4314,19 @@ export default function FocusTool() {
       // than, the pair-level rules below. Skip the whole-row check this tick
       // once a leg exit has been sent — the position book it would be
       // evaluated against is about to change.
-      const workerHold = (workerStatus.rows ?? []).find(w => w.id === row.id) ?? null;
-      const ceReason = legStopReason(row, 'CE', live, workerHold);
+      const ceReason = legStopReason(row, 'CE', live);
       if (ceReason) { autoExitLeg(row, 'CE', ceReason); continue; }
-      const peReason = legStopReason(row, 'PE', live, workerHold);
+      const peReason = legStopReason(row, 'PE', live);
       if (peReason) { autoExitLeg(row, 'PE', peReason); continue; }
 
       const reason = evaluateRowExit(
-        row, live, spots[row.underlying] ?? 0, workerHold, live.lotSize,
+        row, live, spots[row.underlying] ?? 0, undefined, live.lotSize,
       );
       if (reason) autoExitRow(row, reason);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [rowLive, spots, tabMayTrade, toolPnl, riskEnabled, targetRupees, stopRupees,
-      trailEnabled, triggerRupees, lockRupees, peakMtm, lockMtm, workerStatus.rows]);
+      trailEnabled, triggerRupees, lockRupees, peakMtm, lockMtm]);
 
   /**
    * Open every leg this row trades, at its configured lot size.
@@ -4751,7 +4391,7 @@ export default function FocusTool() {
   actionsRef.current = { autoEnterRow, autoExitRow };
 
   /**
-   * The scheduler: everything time- or account-level driven, on a 5s tick.
+   * The scheduler: everything time- or account-level driven, on a 1s tick.
    *
    * Split from the per-row level-exit watcher above because those rules are
    * data-driven (they fire the moment a price crosses), while these are clock-
@@ -4761,33 +4401,21 @@ export default function FocusTool() {
    * tick.
    *
    * Entirely gated on LIVE · REAL MONEY, and — like everything else on this
-   * page — only runs while the tab is open. There is no server-side worker
-   * behind any of this.
+   * page — only runs while the tab is open.
    */
   useEffect(() => {
-    // The Python worker is the authority whenever it is up: it runs the same
-    // rules against the same config, so both acting would double every entry
-    // and race every exit. Until its status is known, neither acts. See
-    // tabMayTrade.
     if (!tabMayTrade) return;
 
     const tick = () => {
-      const { config: cfg, rowLive: live, workerRows } = schedulerRef.current;
+      const { config: cfg, rowLive: live } = schedulerRef.current;
       // Display mirror of the authoritative floor — see lockFloorRef. The
       // identity return makes an unchanged floor a no-op rather than a render.
       setLockMtm(prev => (prev === lockFloorRef.current ? prev : lockFloorRef.current));
       const nowHm = istHm();
-      const findWorkerHold = (id: string) => (workerRows ?? []).find(w => w.id === id) ?? null;
       const openRows = cfg.rows.filter(r => {
         const l = live[r.id];
-        return l && !rowFlat(r, findWorkerHold(r.id));
+        return l && !rowFlat(r);
       });
-
-      // The account budget and Book Exit used to live here. Both are pure
-      // functions of data that arrives with the ticks, so they moved to the
-      // tick-driven watcher above — a spot level checked every 5s is a spot
-      // level checked five times a minute. What is left is genuinely
-      // clock-driven and must keep firing when no tick arrives at all.
 
       // ── 1. Per-row time exit, plus the repo-wide 15:17 intraday backstop ──
       for (const row of openRows) {
@@ -4802,9 +4430,6 @@ export default function FocusTool() {
       }
 
       // ── 2. Auto-entry for armed rows ──
-      // Every condition lives in the shared evaluateEntry, which the worker
-      // runs too — including the reason string, so both report the same thing
-      // about the same row.
       for (const row of cfg.rows) {
         const l = live[row.id] ?? EMPTY_ROW_LIVE;
         const group = cfg.groups.find(g => g.underlying === row.underlying);
@@ -4814,7 +4439,7 @@ export default function FocusTool() {
           product: group?.product ?? 'INTRADAY',
           dte: dteFor(row.expiry || expiriesRef.current[row.underlying]?.[0] || ''),
           strikesReady: l.ceStrike != null || l.peStrike != null,
-          flat: rowFlat(row, findWorkerHold(row.id)),
+          flat: rowFlat(row),
         });
         if (decision.enter) actionsRef.current.autoEnterRow(row, decision.reason);
       }
@@ -4963,33 +4588,17 @@ export default function FocusTool() {
         triggerRupees={triggerRupees} setTriggerRupees={setTriggerRupees}
         lockRupees={lockRupees} setLockRupees={setLockRupees}
         onSave={() => saveConfig()} saving={saving}
-        totalPnl={workerRunning ? (workerStatus.totalPnl ?? 0) : toolPnl}
-        peakMtm={workerRunning ? (workerStatus.peakPnl ?? 0) : peakMtm}
-        lockMtm={workerRunning ? (workerStatus.lockFloor ?? null) : lockMtm}
+        totalPnl={toolPnl}
+        peakMtm={peakMtm}
+        lockMtm={lockMtm}
         copyTrade={copyTrade}
         onOpenRisk={() => setActiveModal('risk')}
         onOpenOrders={() => setActiveModal('orderbook')}
         onOpenOptionChain={() => setActiveModal('optionchain')}
         onToggleViewMode={() => setViewMode(v => v === 'cards' ? 'table' : 'cards')}
         viewMode={viewMode}
-        workerStatus={workerStatus} onToggleWorker={toggleWorker}
         onExitAll={handleExitAll} confirmExitAll={confirmExitAll} exitingAll={exitingAll}
       />
-
-      {/* A wedged worker is the one state where NOTHING is watching: its PID is
-          alive so the tab must not take over (it would double-drive against a
-          process whose state nobody can see), but it has stopped evaluating.
-          Silence here would read exactly like a healthy quiet market. */}
-      {liveRealMoney && workerStatus.status === 'STALE' && (
-        <div className="mx-6 mt-4 rounded-xl border border-amber-500/40 bg-amber-500/10 px-4 py-2.5 flex items-center gap-3">
-          <ShieldOff className="h-4 w-4 text-amber-400 shrink-0" />
-          <p className="text-[11px] text-amber-300 leading-relaxed">
-            <strong>Nothing is watching your rules.</strong> The worker process (PID {workerStatus.pid ?? '?'})
-            {' '}is alive but has stopped heartbeating, so this tab will not take over — two executors against
-            {' '}one config would double every entry. Restart it with the Worker button. Open positions are untouched.
-          </p>
-        </div>
-      )}
 
       {/* Main */}
       <div className="flex-1 px-6 py-5 flex flex-col gap-6">
@@ -5042,7 +4651,6 @@ export default function FocusTool() {
                           lotSize={lotSizes[u]} spot={spots[u] ?? 0}
                           liveRealMoney={liveRealMoney} broker={broker}
                           busy={busyRows.has(row.id)}
-                          workerHold={(workerStatus.rows ?? []).find(r => r.id === row.id) ?? null}
                           expiries={expiries[u] ?? []}
                           buildupWsActive={buildupWsActive}
                           buildupExpiryHint={buildupExpiryHint}
@@ -5113,7 +4721,6 @@ export default function FocusTool() {
                           lotSize={lotSizes[u]} spot={spots[u] ?? 0}
                           liveRealMoney={liveRealMoney} broker={broker}
                           busy={busyRows.has(row.id)}
-                          workerHold={(workerStatus.rows ?? []).find(r => r.id === row.id) ?? null}
                           expiries={expiries[u] ?? []}
                           buildupWsActive={buildupWsActive}
                           buildupExpiryHint={buildupExpiryHint}
