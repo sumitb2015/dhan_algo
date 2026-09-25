@@ -67,7 +67,9 @@ sys.path.insert(0, PROJECT_ROOT)
 from login import get_dhan_client                                      # noqa: E402
 from lib.dhan_helper import DhanHelper                                 # noqa: E402
 from lib.execution_broker import ExecutionBroker, ExecutionBrokerError  # noqa: E402
-from lib.strategy_risk import resolve_exit_qty_broker                  # noqa: E402
+from lib.strategy_risk import (                                        # noqa: E402
+    resolve_exit_qty_broker, detect_phantom_leg_broker, PHANTOM_CHECK_INTERVAL_SEC,
+)
 from lib.strategy_state_helper import (                                # noqa: E402
     save_strategy_state, check_shutdown_trigger, instance_log_suffix,
 )
@@ -185,6 +187,7 @@ class NiftyDeltaStrangle:
         self.lots = 0
         self.entry_date = None
         self.legs = {"ce": None, "pe": None}   # each: {strike, entry_premium, entry_delta, sl_order_id, last_delta}
+        self._last_phantom_check = 0.0
         self.roll_count = {"ce": 0, "pe": 0}
         self.last_alert = ""
         # Set after an emergency flatten (post-roll inversion). CLAUDE.md's documented
@@ -578,6 +581,22 @@ class NiftyDeltaStrangle:
         if chain_df.empty:
             logger.warning("Empty option chain during monitoring — skipping this poll.")
             return
+
+        # Victim-side check (2026-07-30 incident follow-up): _reconcile_against_broker()
+        # only runs once at process start/restart — this is the mid-run equivalent,
+        # noticing if a sibling instance's exit or a manual dashboard square-off already
+        # flattened a leg we still think is open. Never places an order.
+        if time.time() - self._last_phantom_check >= PHANTOM_CHECK_INTERVAL_SEC:
+            self._last_phantom_check = time.time()
+            for side in ("ce", "pe"):
+                leg = self.legs.get(side)
+                if leg and leg.get("strike") and detect_phantom_leg_broker(
+                    self.broker, leg["strike"], self.expiry, side.upper(),
+                    self.lots * self.lot_size, "BUY", logger,
+                ):
+                    logger.warning(f"Phantom {side.upper()} leg detected ({leg['strike']}) — broker shows it "
+                                   f"already closed elsewhere. Correcting internal state, not placing an order.")
+                    self.legs[side] = None
 
         for side in ("ce", "pe"):
             # roll_leg() below can call exit_all()/EMERGENCY_FLATTEN mid-loop (post-roll

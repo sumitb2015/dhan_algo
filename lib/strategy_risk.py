@@ -9,11 +9,30 @@ straddle leg, which then found itself flat while still tracking a live position.
 
 `resolve_exit_qty()` is the correct primitive: exit what THIS strategy opened,
 clamped by what the broker actually still shows in our direction.
+
+That incident's own follow-up review flagged an open weakness: `resolve_exit_qty()`
+only protects the EXITING instance. The VICTIM instance — the one whose leg just got
+flattened by someone else's exit (a sibling strategy, or a manual square-off from the
+dashboard's exit-all/pnl-exit/scalper terminals) — has no way to notice mid-loop that
+its tracked leg no longer exists at the broker. It keeps running against phantom
+internal state until its own next exit attempt happens to get clamped to 0.
+`detect_phantom_leg()` / `detect_phantom_leg_broker()` are that missing check: a
+periodic (not per-tick) call from the strategy's own loop, reusing the exact same
+broker-truth lookup `resolve_exit_qty()` already trusts, that tells the strategy "the
+broker no longer shows this leg open — stop believing you hold it." It never places or
+sizes an order; it only corrects the strategy's own belief to match broker truth.
 """
 
 import logging
 
 logger = logging.getLogger(__name__)
+
+# How often a strategy's main loop should call detect_phantom_leg(_broker) — it's a
+# real broker API call, so every 1s tick would be wasteful; every 30s catches drift
+# quickly without adding meaningful load. Strategies check `time.time() - last >=
+# PHANTOM_CHECK_INTERVAL_SEC`, matching the existing time-based throttle idiom already
+# used for periodic logging in these files (not a tick-count modulo).
+PHANTOM_CHECK_INTERVAL_SEC = 30
 
 
 def resolve_exit_qty(helper, security_id, own_qty, side, log=None):
@@ -112,3 +131,49 @@ def resolve_exit_qty_broker(broker, strike, expiry, opt_type, own_qty, side, log
             f"auto-square-off)."
         )
     return qty, net_qty
+
+
+def detect_phantom_leg(helper, security_id, own_qty, side, log=None):
+    """True if this strategy still believes it holds `own_qty` of `security_id` but
+    the broker no longer shows it available in `side`'s direction — i.e. the leg was
+    closed elsewhere (a sibling instance's exit or a manual dashboard square-off) and
+    this strategy's internal state is now phantom.
+
+    Call this periodically from the main loop (not every tick — it's a real API call,
+    the same one resolve_exit_qty() makes at exit time), while the strategy still
+    believes the leg is open. Never places or sizes an order — the caller's job on a
+    True result is only to correct its own state (mark the leg inactive, zero its
+    tracked qty) so downstream logic already gated on that flag stops acting on a
+    position that no longer exists.
+    """
+    _log = log or logger
+    if int(own_qty or 0) <= 0:
+        return False
+    side = str(side).upper()
+    try:
+        net_qty = int(helper.get_net_quantity(str(security_id)))
+    except Exception as e:
+        # Fails closed like resolve_exit_qty() — an API hiccup must never be read as
+        # "confirmed gone" and clear real tracked state. Only a successful lookup
+        # that actually shows the leg flat/reversed counts as phantom.
+        _log.error(f"detect_phantom_leg: net quantity lookup failed for {security_id}: {e}")
+        return False
+    available = -net_qty if side == "BUY" else net_qty
+    return available <= 0
+
+
+def detect_phantom_leg_broker(broker, strike, expiry, opt_type, own_qty, side, log=None):
+    """Like detect_phantom_leg(), sourced from an ExecutionBroker instead of
+    DhanHelper — for strategies wired for broker-selectable execution."""
+    _log = log or logger
+    if int(own_qty or 0) <= 0:
+        return False
+    side = str(side).upper()
+    try:
+        net_qty = int(broker.get_owned_net_qty(strike, expiry, opt_type))
+    except Exception as e:
+        _log.error(f"detect_phantom_leg_broker: net quantity lookup failed for "
+                   f"{opt_type} {strike} ({expiry}): {e}")
+        return False
+    available = -net_qty if side == "BUY" else net_qty
+    return available <= 0

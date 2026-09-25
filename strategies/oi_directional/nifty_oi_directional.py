@@ -47,7 +47,7 @@ from login import get_dhan_client
 from lib.dhan_helper import DhanHelper
 from lib.execution_broker import ExecutionBroker, ExecutionBrokerError
 from lib.strategy_state_helper import save_strategy_state, check_shutdown_trigger, exit_if_market_closed, parse_target_spec, instance_log_suffix
-from lib.strategy_risk import resolve_exit_qty_broker
+from lib.strategy_risk import resolve_exit_qty_broker, detect_phantom_leg_broker, PHANTOM_CHECK_INTERVAL_SEC
 
 # ── Logging setup ────────────────────────────────────────────────────────────
 project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -581,6 +581,7 @@ class NiftyOIDirectional:
             self._start_chain_poller(expiry)
 
             # ── Inner session loop ─────────────────────────────────────────
+            last_phantom_check = time.time()
             while True:
                 if check_shutdown_trigger(STRATEGY_KEY):
                     if self.in_position:
@@ -622,6 +623,20 @@ class NiftyOIDirectional:
                     spot, current_ltp, direction, oi_diff,
                     "RUNNING" if self.in_position else "MONITORING",
                 )
+
+                # Victim-side check (2026-07-30 incident follow-up): notice if a
+                # sibling instance's exit or a manual dashboard square-off already
+                # flattened the leg we still think is open.
+                if self.in_position and time.time() - last_phantom_check >= PHANTOM_CHECK_INTERVAL_SEC:
+                    last_phantom_check = time.time()
+                    opt_type = "PE" if "PE" in self.position_type else "CE"
+                    if detect_phantom_leg_broker(
+                        self.broker, self.sold_strike, self.expiry, opt_type,
+                        self.lots * self.lot_size, "BUY", logger,
+                    ):
+                        logger.warning(f"Phantom {self.position_type} leg detected ({self.sold_strike}) — broker "
+                                       f"shows it already closed elsewhere. Correcting internal state, not placing an order.")
+                        self._reset_position()
 
                 logger.info(
                     f"Spot:{spot:.2f} ATM:{atm}"
