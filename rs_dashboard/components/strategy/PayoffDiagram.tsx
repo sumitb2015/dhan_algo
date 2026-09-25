@@ -195,8 +195,8 @@ export default function PayoffDiagram({
     ];
 
     const coreX = breakevens.length > 0 ? [...breakevens, currentSpot] : [currentSpot];
-    if (expectedMove) {
-      coreX.push(expectedMove.sd1Lo, expectedMove.sd1Hi);
+    if (strikes && strikes.length > 0) {
+      coreX.push(...strikes.map((s) => s.strike));
     }
     const coreMin = Math.min(...coreX);
     const coreMax = Math.max(...coreX);
@@ -206,6 +206,9 @@ export default function PayoffDiagram({
     const baseHalf = coreSpan / 2 + corePad;
 
     const fullX = [...coreX, ...allStrikes];
+    if (expectedMove) {
+      fullX.push(expectedMove.sd1Lo, expectedMove.sd1Hi);
+    }
     const fullMin = Math.min(...fullX);
     const fullMax = Math.max(...fullX);
     const fullPad = Math.max(STEP * 4, (fullMax - fullMin) * 0.12);
@@ -255,7 +258,8 @@ export default function PayoffDiagram({
     })() : [];
 
     // --- Smart Y domain: clamp so zero-crossing is prominent ---
-    // Undefined-risk tails clamped to 1.8x max profit to give the profit zone ~45% vertical height
+    // Only clamp undefined-risk tails when risk/profit is explicitly unlimited (e.g. naked short or naked long).
+    // NEVER clamp defined-risk strategies (Iron Fly, Iron Condor, Spreads) where profit or loss is fixed.
     const visiblePnls = [
       ...visible.map((c) => c.pnl),
       ...visibleToday.map((c) => c.pnl),
@@ -263,8 +267,14 @@ export default function PayoffDiagram({
     ];
     const rawYMin = Math.min(...visiblePnls);
     const rawYMax = Math.max(...visiblePnls);
-    const clampedYMin = rawYMax > 0 ? Math.max(rawYMin, -rawYMax * 1.8) : rawYMin * 1.1;
-    const clampedYMax = rawYMin < 0 ? Math.min(rawYMax, Math.abs(rawYMin) * 1.8) : rawYMax * 1.1;
+    let clampedYMin = rawYMin;
+    if (maxLossUnlimited) {
+      clampedYMin = rawYMax > 0 ? Math.max(rawYMin, -rawYMax * 2.2) : rawYMin * 1.1;
+    }
+    let clampedYMax = rawYMax;
+    if (maxProfitUnlimited) {
+      clampedYMax = rawYMin < 0 ? Math.min(rawYMax, Math.abs(rawYMin) * 2.2) : rawYMax * 1.1;
+    }
     const yMinWithZero = Math.min(0, clampedYMin);
     const yMaxWithZero = Math.max(0, clampedYMax);
     const yPad = (yMaxWithZero - yMinWithZero) * 0.08 || 1;

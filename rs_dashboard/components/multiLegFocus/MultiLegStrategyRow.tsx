@@ -25,7 +25,7 @@ import { BROKER_LABELS, type Broker } from '@/hooks/useBrokerSelector';
 import PayoffDiagram, { pnlAt } from '@/components/strategy/PayoffDiagram';
 import { StatChip } from '@/components/analytics/PayoffMetricStrip';
 import { basketToGreekLegs, computeBasketGreeks } from '@/lib/multiLegGreeks';
-import { type ChainOc, riskNeutralProbAbove } from '@/lib/optionsStrategy';
+import { type ChainOc, riskNeutralProbAbove, impliedVolFromPrice } from '@/lib/optionsStrategy';
 
 /** Dhan's option-chain API is rate limited (~1 call / 3.5 s per underlying). */
 const GREEKS_CHAIN_SPACING_MS = 3_800;
@@ -482,8 +482,14 @@ export default function MultiLegStrategyRow({
         ? l.fill.avgPrice
         : (currentLtp > 0 ? currentLtp : (l.price || 0));
       const qty = ((l.fill?.qty && l.fill.qty > 0) ? l.fill.qty : (l.lots * defaultLotSize)) * payoffMultiplier;
-      const iv = ivForStrike?.(l.strike, l.option, legExpiry) || FALLBACK_IV;
+      const chainIv = ivForStrike?.(l.strike, l.option, legExpiry) || FALLBACK_IV;
       const timeYears = calculateTimeToExpiryYears(legExpiry);
+      // Calibrate implied vol to actual market price so the T+0 curve starts at 0 PnL
+      // at current spot and isn't distorted by skewed broker-reported IVs.
+      const solvedIv = (spot > 0 && premium > 0 && timeYears > 0)
+        ? impliedVolFromPrice(l.option, spot, l.strike, timeYears, premium)
+        : null;
+      const iv = solvedIv ?? chainIv;
       return { side: l.side, option: l.option, strike: l.strike, premium, qty, iv, timeYears };
     });
 
@@ -532,9 +538,13 @@ export default function MultiLegStrategyRow({
         ? l.fill.avgPrice
         : (currentLtp > 0 ? currentLtp : (l.price || 0));
       const qty = ((l.fill?.qty && l.fill.qty > 0) ? l.fill.qty : (l.lots * defaultLotSize)) * payoffMultiplier;
-      const baseIv = ivForStrike?.(l.strike, l.option, legExpiry) || FALLBACK_IV;
-      const shiftedIv = Math.max(0.01, baseIv + ((simIvShift || 0) / 100));
+      const chainIv = ivForStrike?.(l.strike, l.option, legExpiry) || FALLBACK_IV;
       const totalTimeYears = calculateTimeToExpiryYears(legExpiry);
+      const solvedIv = (spot > 0 && premium > 0 && totalTimeYears > 0)
+        ? impliedVolFromPrice(l.option, spot, l.strike, totalTimeYears, premium)
+        : null;
+      const baseIv = solvedIv ?? chainIv;
+      const shiftedIv = Math.max(0.01, baseIv + ((simIvShift || 0) / 100));
       const remainingTimeYears = Math.max(0.0001, totalTimeYears - ((simTargetDays || 0) / 365));
       return { side: l.side, option: l.option, strike: l.strike, premium, qty, iv: shiftedIv, timeYears: remainingTimeYears };
     });
@@ -571,8 +581,16 @@ export default function MultiLegStrategyRow({
     for (const l of activeLegs) {
       const legExpiry = l.expiry || basket.expiry;
       const qty = ((l.fill?.qty && l.fill.qty > 0) ? l.fill.qty : (l.lots * defaultLotSize)) * payoffMultiplier;
-      const iv = ivForStrike?.(l.strike, l.option, legExpiry) || FALLBACK_IV;
+      const currentLtp = ltpFor(l);
+      const premium = (l.fill?.avgPrice && l.fill.avgPrice > 0)
+        ? l.fill.avgPrice
+        : (currentLtp > 0 ? currentLtp : (l.price || 0));
+      const chainIv = ivForStrike?.(l.strike, l.option, legExpiry) || FALLBACK_IV;
       const timeYears = calculateTimeToExpiryYears(legExpiry);
+      const solvedIv = (spot > 0 && premium > 0 && timeYears > 0)
+        ? impliedVolFromPrice(l.option, spot, l.strike, timeYears, premium)
+        : null;
+      const iv = solvedIv ?? chainIv;
       const sign = l.side === 'B' ? 1 : -1;
       const g = computeBsGreeks(l.option, spot, l.strike, timeYears, iv, 1);
       delta += sign * g.delta * qty;
@@ -581,7 +599,7 @@ export default function MultiLegStrategyRow({
       gamma += sign * g.gamma * qty;
     }
     return { delta, theta, vega, gamma };
-  }, [showPayoffChart, spot, basket.legs, basket.expiry, basket.underlying, broker, crudeMult, defaultLotSize, ivForStrike]);
+  }, [showPayoffChart, spot, basket.legs, basket.expiry, basket.underlying, broker, crudeMult, defaultLotSize, ltpFor, ivForStrike]);
 
   // ── Active leg strike markers for X-axis pins ────────────────────────
   const strategyStrikes = useMemo(() => {
@@ -599,9 +617,9 @@ export default function MultiLegStrategyRow({
     if (!spot || spot <= 0 || !basket.expiry) return null;
     const timeYears = calculateTimeToExpiryYears(basket.expiry);
     if (timeYears <= 0) return null;
-    const iv = (atmStrike && ivForStrike?.(atmStrike, 'CE', basket.expiry))
-      || (atmStrike && ivForStrike?.(atmStrike, 'PE', basket.expiry))
-      || FALLBACK_IV;
+    const ceIv = (atmStrike && ivForStrike?.(atmStrike, 'CE', basket.expiry)) || 0;
+    const peIv = (atmStrike && ivForStrike?.(atmStrike, 'PE', basket.expiry)) || 0;
+    const iv = (ceIv > 0 && peIv > 0) ? (ceIv + peIv) / 2 : (ceIv > 0 ? ceIv : (peIv > 0 ? peIv : FALLBACK_IV));
     const sd1 = spot * iv * Math.sqrt(timeYears);
     return {
       sd1Lo: Math.round((spot - sd1) * 10) / 10,
@@ -616,9 +634,9 @@ export default function MultiLegStrategyRow({
     if (!be || be.length === 0) return null;
     const timeYears = calculateTimeToExpiryYears(basket.expiry);
     if (timeYears <= 0) return null;
-    const iv = (atmStrike && ivForStrike?.(atmStrike, 'CE', basket.expiry))
-      || (atmStrike && ivForStrike?.(atmStrike, 'PE', basket.expiry))
-      || FALLBACK_IV;
+    const ceIv = (atmStrike && ivForStrike?.(atmStrike, 'CE', basket.expiry)) || 0;
+    const peIv = (atmStrike && ivForStrike?.(atmStrike, 'PE', basket.expiry)) || 0;
+    const iv = (ceIv > 0 && peIv > 0) ? (ceIv + peIv) / 2 : (ceIv > 0 ? ceIv : (peIv > 0 ? peIv : FALLBACK_IV));
     const sorted = [...be].sort((a, b) => a - b);
     const offset = Math.max(step || 50, spot * 0.05);
     let pop = 0;
