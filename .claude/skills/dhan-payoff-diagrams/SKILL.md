@@ -189,8 +189,27 @@ Option traders analyze Greeks both per-contract and position-wide:
 
 ## The Rendering Layer
 
-### Hand-Rolled SVG Family (`BasketPayoffChart.tsx`, etc.)
-- **Two `clipPath`s at `zeroY`**: Carves the plot at $y=0$. The curve path is rendered twice: once inside `profitClip` (green) and once inside `lossClip` (red).
+### Hand-Rolled SVG Family (`BasketPayoffChart.tsx`, `PayoffDiagram.tsx`, etc.)
+- **Dynamic `useId()` Scoped `clipPath` IDs (Crucial Bug Prevention)**:
+  - Carves the plot at $y=0$ (`zeroY`) into green (profit) and red (loss) halves.
+  - **Never use static DOM IDs** (like `id="sb-clip-profit"`). When multiple strategy rows render on the same page (e.g. `/multi-leg-focus`), SVGs resolve `url(#sb-clip-profit)` to the *first* matching element in the DOM tree. If Row 0 has `zeroY = 120` and Row 1 has `zeroY = 220`, Row 1 will clip at Row 0's coordinates, producing an inverted red wash across profitable territory!
+  - **Always scope via React `useId()`**:
+    ```tsx
+    const uid = useId().replace(/[^a-zA-Z0-9_-]/g, '');
+    const profitClipId = `sb-clip-profit-${uid}`;
+    const lossClipId = `sb-clip-loss-${uid}`;
+    ```
+- **Viewport Boundary Interpolation & Zero-Span Guards**:
+  - Zooming in narrows the visible domain $[x_{\text{Lo}}, x_{\text{Hi}}]$. Always clamp $x_{\text{Lo}}, x_{\text{Hi}}$ to the computed curve bounds (`[curve[0].spot, curve[curve.length - 1].spot]`) so points are never extrapolated into flat tails.
+  - Guard against zero/sub-epsilon domain span before dividing: `if (xHi - xLo < 1e-4) return null;`.
+  - Filter interior points with an epsilon to avoid duplicating edge samples: `curve.filter(c => c.spot > xLo + 1e-4 && c.spot < xHi - 1e-4)`.
+- **Y-Domain Scaling for Undefined Risk (1.8× Max Profit Clamp)**:
+  - For undefined-risk trades (short straddles, naked sales), negative P&L can extend to $-₹100,000+$. If clamped to $3.0\times$ Max Profit, the profit peak is squished into the top 20-25% of the chart height.
+  - Clamping undefined loss to **$1.8\times$ Max Profit** (`clampedYMin = Math.max(rawYMin, -rawYMax * 1.8)`) gives the profit zone and near-zero plateaus $\approx 45\%$ of the vertical height, ensuring peak kinks and flat zones remain prominent.
+  - Always bound with `Math.min(0, clampedYMin)` and `Math.max(0, clampedYMax)` with minimum padding (`|| 1`) so the zero line is never cropped out.
+- **Strike Pins & Axis Clearance**:
+  - Pin active leg strikes directly on the X-axis with colored badges (`#38bdf8` for BUY, `#fb7185` for SELL).
+  - Increase `PAD.bottom` to at least 38px to maintain an 18-20px vertical clearance between strike badges (`y = H - PAD.bottom - 16`) and spot tick numbers (`y = H - PAD.bottom + 17`), preventing badge collisions.
 - **Callback Ref for ResizeObserver**: Do not use `useRef` + `useEffect([])` because early-return loading states cause the mount effect to miss the element.
 - **Chrome Theming**: Always call `useChartChrome()` from `lib/chartTheme.ts` for axis, gridlines, and tooltip chrome. Never hardcode dark hexes.
 - **Full-Screen Viewport Portaling (`createPortal(chart, document.body)`)**:
@@ -198,7 +217,7 @@ Option traders analyze Greeks both per-contract and position-wide:
   - Portaling to `document.body` with `fixed inset-0 z-50 overflow-y-auto bg-zinc-950 p-4 md:p-6` escapes all parent stacking contexts and filters.
   - All dashboard payoff diagrams implement full screen:
     - **Options Monitor** (`PositionsStrategyMonitor.tsx`): Fullscreen terminal with expanded chart (`h-[52vh] min-h-[380px]`), target spot/date sliders, futures basis card, and SD table.
-    - **Strategy Builder** (`PayoffDiagram.tsx`): Fullscreen overlay with header, spot pill, breakevens, and responsive SVG height.
+    - **Strategy Builder / Multi-Leg Focus** (`PayoffDiagram.tsx`): Fullscreen overlay with header, spot pill, breakevens, What-If simulation bar, Net Greeks strip, and responsive SVG height.
     - **Baskets** (`BasketPayoffChart.tsx`): Fullscreen overlay with responsive SVG width and height (`H_ = 540`).
     - **Positions Analytics** (`PositionsPayoffChart.tsx`): Fullscreen overlay with OI bars and responsive height.
   - **Escape Key & Body Scroll Lock**: Always attach a `keydown` listener for `'Escape'` and lock `document.body.style.overflow = 'hidden'` while fullscreen is active.
