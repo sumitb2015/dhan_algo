@@ -2,7 +2,7 @@
 
 import React, { useState } from 'react';
 import { X, Plus } from 'lucide-react';
-import { fallbackLotSize, type MultiLegBasket } from '@/lib/multiLegFocus';
+import { fallbackLotSize, formatExpiryLabel, type MultiLegBasket } from '@/lib/multiLegFocus';
 import { FOCUS_RING } from '@/components/Scalper';
 import { allowedStrikes, snapToAllowed, strikeAllowed } from '@/lib/farExpiryRules';
 
@@ -96,7 +96,6 @@ export default function AddNewLegModal({
             </h2>
             <p className="text-xs text-zinc-400 font-mono">
               {basket.name} · {basket.underlying} · Expiry {effectiveExpiry}
-              {canPickFar && effectiveExpiry === basket.farExpiry && <span className="text-fuchsia-400"> (FAR)</span>}
             </p>
           </div>
           <button
@@ -227,7 +226,7 @@ export default function AddNewLegModal({
                       : 'bg-zinc-900 border-zinc-800 text-zinc-400 hover:text-zinc-200'
                   }`}
                 >
-                  FRONT · {basket.expiry}
+                  {formatExpiryLabel(basket.expiry)}
                 </button>
                 <button
                   type="button"
@@ -245,7 +244,7 @@ export default function AddNewLegModal({
                       : 'bg-zinc-900 border-zinc-800 text-zinc-400 hover:text-zinc-200'
                   }`}
                 >
-                  FAR · {basket.farExpiry}
+                  {formatExpiryLabel(basket.farExpiry)}
                 </button>
               </div>
             </div>

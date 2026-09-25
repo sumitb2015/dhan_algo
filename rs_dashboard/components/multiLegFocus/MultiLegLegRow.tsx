@@ -3,7 +3,7 @@
 import React from 'react';
 import { X, Plus, AlertTriangle, ChevronUp, ChevronDown } from 'lucide-react';
 import {
-  legPnl, computeLegTrailingSL, legAvgPrice, legExitPrice, legQtyUnits, legPnlPct, legOtmPct, type MultiLegLeg,
+  legPnl, computeLegTrailingSL, formatExpiryLabel, legAvgPrice, legExitPrice, legQtyUnits, legPnlPct, legOtmPct, type MultiLegLeg,
 } from '@/lib/multiLegFocus';
 import { DEFAULT_LEG_COLUMNS, type LegColumns } from '@/lib/legColumns';
 import { FOCUS_RING } from '@/components/Scalper';
@@ -33,7 +33,7 @@ interface MultiLegLegRowProps {
   exiting: boolean;
   margin?: number;
   multiplier?: number;
-  /** This basket's front (main) expiry — legs matching it show "FRONT". */
+  /** This basket's main expiry; a leg on any other expiry is highlighted as a second contract. */
   frontExpiry: string;
   /** Secondary expiry a leg toggles to for a Calendar/Diagonal strategy;
    *  undefined when the underlying only has one listed expiry available. */
@@ -232,22 +232,23 @@ export default function MultiLegLegRow({
           </span>
         </label>
       </td>
-      {/* Expiry Column: toggles between the basket's front and far expiry —
-         only relevant to a Calendar/Diagonal strategy staging legs across
-         two different contracts. */}
+      {/* Expiry Column: the leg's actual expiry date. For a Calendar/Diagonal strategy it also
+         toggles between the basket's two expiries; a leg on the second one is highlighted. */}
       <td className="px-1.5 py-1.5 text-center">
         <button
           type="button"
           disabled={!canToggleExpiry}
           onClick={() => onChange({ expiry: isFar ? frontExpiry : (farExpiry ?? frontExpiry) })}
-          title={canToggleExpiry ? 'Toggle between front and far expiry' : (leg.expiry || frontExpiry)}
-          className={`px-1.5 py-1 rounded font-mono font-bold text-[9px] border transition-all disabled:opacity-50 disabled:cursor-default ${
+          title={canToggleExpiry
+            ? `${leg.expiry || frontExpiry} — click to switch to ${isFar ? frontExpiry : farExpiry}`
+            : `Expiry ${leg.expiry || frontExpiry}`}
+          className={`px-1.5 py-1 rounded font-mono font-bold text-[10px] whitespace-nowrap border transition-all disabled:opacity-50 disabled:cursor-default ${
             isFar
               ? 'bg-fuchsia-500/10 text-fuchsia-400 border-fuchsia-500/40'
               : 'bg-zinc-800 text-zinc-400 border-zinc-700'
           }`}
         >
-          {isFar ? 'FAR' : 'FRONT'}
+          {formatExpiryLabel(leg.expiry || frontExpiry)}
         </button>
       </td>
       {/* Margin Column: Blocked for OPEN, Required for DRAFT */}

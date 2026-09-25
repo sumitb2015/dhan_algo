@@ -150,6 +150,18 @@ export function legPnl(leg: MultiLegLeg, ltp: number, multiplier: number = 1): n
   return perUnit * leg.fill.qty * multiplier;
 }
 
+const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+
+/** '2026-10-27' -> '27 Oct 26'. Parsed by hand (no Date) so the day never shifts with the time zone;
+ *  anything that is not a plain ISO date is returned unchanged. */
+export function formatExpiryLabel(iso: string | undefined | null): string {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(iso ?? '');
+  if (!m) return iso ?? '';
+  const month = MONTHS[Number(m[2]) - 1];
+  if (!month) return iso ?? '';
+  return `${Number(m[3])} ${month} ${m[1].slice(2)}`;
+}
+
 // ── Per-leg display helpers for the legs table columns ──────────────────
 // All read the leg's own fill ledger (never broker net qty) and return null when a
 // value does not exist yet, so the UI renders a dash instead of a misleading 0.

@@ -3,7 +3,7 @@ import assert from 'node:assert';
 import {
   resolveTemplateLegs, reconcileLegFillDown, reconcileLegWithBroker, legPnl, basketTotalPnl, sortLegsForExit, findLegPosition,
   computeLegTrailingSL, computeStrategyMetrics, checkStrategyRisk, computeCalendarPayoffCurve, classifyBasketStructure, findSiblingLegCollisions,
-  legAvgPrice, legExitPrice, legQtyUnits, legPnlPct, legOtmPct,
+  formatExpiryLabel, legAvgPrice, legExitPrice, legQtyUnits, legPnlPct, legOtmPct,
   type StrategyMetrics, type MultiLegLeg,
 } from './multiLegFocus.ts';
 import type { StrategyTemplate } from './basketStrategies.ts';
@@ -650,4 +650,13 @@ test('legPnlPct is null for a live leg with no price yet, but not for a closed o
   assert.strictEqual(legPnlPct(colLeg({}), 0), null);
   const closed = colLeg({ status: 'CLOSED', fill: { qty: 0, avgPrice: 50 }, closedFill: { qty: 100, exitPrice: 20 } });
   assert.strictEqual(legPnlPct(closed, 0), 60);
+});
+
+test('formatExpiryLabel renders an ISO date compactly and leaves anything else alone', () => {
+  assert.strictEqual(formatExpiryLabel('2026-10-27'), '27 Oct 26');
+  assert.strictEqual(formatExpiryLabel('2026-01-05'), '5 Jan 26');
+  assert.strictEqual(formatExpiryLabel('2026-13-05'), '2026-13-05');
+  assert.strictEqual(formatExpiryLabel('soon'), 'soon');
+  assert.strictEqual(formatExpiryLabel(''), '');
+  assert.strictEqual(formatExpiryLabel(undefined), '');
 });
