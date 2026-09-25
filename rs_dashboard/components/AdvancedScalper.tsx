@@ -16,6 +16,7 @@ import { useCopyTrade, CopyTradeControls } from './CopyTrade';
 import { useBrokerSelector, scalperRoute, BROKER_LABELS, type Broker } from '@/hooks/useBrokerSelector';
 import { contractMultiplier, scaleBrokerPnl } from '@/lib/positionPnl';
 import { openLots, fractionUnits } from '@/lib/partialQty';
+import { resolveShiftTarget, clampShiftSteps } from '@/lib/strikeShift';
 import { positionKey, positionProduct, findLivePosition, closeOrderProduct } from '@/lib/positionProduct';
 import { parseTradingSymbol } from '@/lib/positionLegs';
 import { cn } from '@/lib/utils';
@@ -91,6 +92,8 @@ export default function AdvancedScalper() {
   // Underlying
   const [underlying, setUnderlying] = useState<typeof UNDERLYINGS[number]>('NIFTY');
   const strikeStep = STRIKE_STEP[underlying] ?? 50;
+  // Strikes moved per chevron click (shared by all order boxes).
+  const [shiftSteps, setShiftSteps] = useState(1);
 
   // Expiry
   const [expiries, setExpiries]   = useState<string[]>([]);
@@ -1579,26 +1582,19 @@ export default function AdvancedScalper() {
 
     const strikesToSearch = allStrikes.length ? allStrikes : visibleStrikes;
     const sorted = [...strikesToSearch].sort((a, b) => a - b);
-    const currIdx = sorted.indexOf(box.strike);
-    let targetIdx = -1;
+    // If box.strike isn't in the list (stale/out-of-range) this falls back to a
+    // direct step lookup; otherwise it moves shiftSteps listed strikes, clamped
+    // to the chain edge.
+    const shiftTarget = resolveShiftTarget(sorted, box.strike, direction, shiftSteps, strikeStep);
 
-    if (currIdx === -1) {
-      // box.strike isn't in the list (stale/out-of-range) — fall back to a
-      // direct step lookup instead of a neighbor index.
-      const target = direction === 'UP' ? box.strike + strikeStep : box.strike - strikeStep;
-      if (sorted.includes(target)) targetIdx = sorted.indexOf(target);
-    } else if (direction === 'UP') {
-      if (currIdx < sorted.length - 1) targetIdx = currIdx + 1;
-    } else {
-      if (currIdx > 0) targetIdx = currIdx - 1;
-    }
-
-    if (targetIdx === -1) {
+    if (!shiftTarget) {
       addToast('error', `Cannot shift ${direction.toLowerCase()}`, `No ${direction.toLowerCase()} strike available`);
       return;
     }
 
-    const newStrike = sorted[targetIdx];
+    const newStrike = sorted[shiftTarget.targetIdx];
+    const requestedSteps = clampShiftSteps(shiftSteps);
+    const clamped = shiftTarget.moved < requestedSteps;
 
     // Check open position for this box. If strikeMap has no entry for the
     // CURRENT strike, we cannot reliably tell whether a live position exists
@@ -1628,6 +1624,29 @@ export default function AdvancedScalper() {
       if (wantHalf && moveUnits <= 0) {
         addToast('error', 'Cannot move half', `${box.strike} ${box.side} is ${openLots(posAbs, lotSize)} lot — need ≥2 lots to split`);
         return;
+      }
+
+      // A live leg must never be rolled to a different strike than the one asked
+      // for — refuse when the chain edge clamps the requested step count.
+      if (clamped) {
+        addToast('error', 'Shift aborted', `Only ${shiftTarget.moved} strike${shiftTarget.moved > 1 ? 's' : ''} available ${direction.toLowerCase()}, ${requestedSteps} requested — position left untouched`);
+        return;
+      }
+
+      // Dhan nets by security id: reopening on a contract another box or an
+      // existing position already holds pools with it (see dhan-position-netting).
+      const targetEntry = strikeMap[String(newStrike)];
+      const targetSecId = targetEntry?.[box.side === 'CE' ? 'ceId' : 'peId'];
+      const targetPos = targetSecId ? positionsBySecId[targetSecId] : undefined;
+      const heldByPosition = !!targetPos && Number(targetPos.netQty) !== 0;
+      const heldByBox = boxes.some(b => b.id !== boxId && b.side === box.side && b.strike === newStrike);
+      if (heldByPosition || heldByBox) {
+        const why = heldByPosition
+          ? `an open position already exists on ${newStrike} ${box.side} (net ${Number(targetPos!.netQty)})`
+          : `another order box is already on ${newStrike} ${box.side}`;
+        if (!window.confirm(`Shift ${box.strike} → ${newStrike} ${box.side}: ${why}. The new leg will pool with it in one broker position. Continue?`)) {
+          return;
+        }
       }
 
       orderInFlightRef.current.add(boxId);
@@ -1765,9 +1784,10 @@ export default function AdvancedScalper() {
     } else {
       // No active position: simply update strike
       updateBox(boxId, { strike: newStrike, limitPrice: '' });
-      addToast('success', `Strike shifted to ${newStrike} ${box.side}`);
+      addToast('success', `Strike shifted to ${newStrike} ${box.side}`,
+        clamped ? `Chain edge: moved ${shiftTarget.moved} of ${requestedSteps} strikes` : undefined);
     }
-  }, [boxes, visibleStrikes, allStrikes, strikeStep, boxSecId, positionsBySecId, lotSize, updateBox, strikeMap, broker, underlying, productType, expiry, closePosition, addToast, fetchTabData]);
+  }, [boxes, visibleStrikes, allStrikes, strikeStep, shiftSteps, boxSecId, positionsBySecId, lotSize, updateBox, strikeMap, broker, underlying, productType, expiry, closePosition, addToast, fetchTabData]);
 
   // ─── Client-side profit lock (total P&L floor) ────────────────────
   //
@@ -2869,6 +2889,8 @@ export default function AdvancedScalper() {
                 onStrikeChange={v => updateBox(box.id, { strike: v, limitPrice: '' })}
                 onShiftUp={() => handleShiftStrike(box.id, 'UP')}
                 onShiftDown={() => handleShiftStrike(box.id, 'DOWN')}
+                shiftSteps={shiftSteps}
+                onShiftStepsChange={n => setShiftSteps(clampShiftSteps(n))}
                 moveFraction={box.moveFraction ?? 'FULL'}
                 onMoveFractionChange={f => updateBox(box.id, { moveFraction: f })}
                 halfMoveDisabled={boxOpenLots < 2}

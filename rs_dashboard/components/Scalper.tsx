@@ -222,6 +222,9 @@ export interface OptionPanelProps {
   /** Callbacks for shifting the strike up or down (auto-closing active position if any) */
   onShiftUp?: () => void;
   onShiftDown?: () => void;
+  /** Strikes moved per chevron click. The −/+ stepper renders only when onShiftStepsChange is supplied. */
+  shiftSteps?: number;
+  onShiftStepsChange?: (n: number) => void;
   /** Fraction of the open position the shift chevrons roll. A compact ½/Full toggle renders
    *  only when this and onMoveFractionChange are both supplied; omit for the legacy full roll. */
   moveFraction?: 'HALF' | 'FULL';
@@ -272,7 +275,7 @@ function optionPanelPropsEqual(prev: OptionPanelProps, next: OptionPanelProps): 
     && prev.pct === next.pct && prev.high === next.high && prev.low === next.low
     && prev.buildup === next.buildup && prev.oiChgPct === next.oiChgPct
     && prev.limitPrice === next.limitPrice && prev.orderMode === next.orderMode
-    && prev.moveFraction === next.moveFraction && prev.halfMoveDisabled === next.halfMoveDisabled
+    && prev.shiftSteps === next.shiftSteps && prev.moveFraction === next.moveFraction && prev.halfMoveDisabled === next.halfMoveDisabled
     && prev.halfMoveDisabledReason === next.halfMoveDisabledReason
     && prev.lots === next.lots && prev.canRemove === next.canRemove && prev.pnl === next.pnl
     && prev.pending === next.pending && prev.strikesReady === next.strikesReady;
@@ -280,7 +283,7 @@ function optionPanelPropsEqual(prev: OptionPanelProps, next: OptionPanelProps): 
 
 export const OptionPanel = React.memo(function OptionPanel({
   side, label, strike, visibleStrikes, atm, ltp, pct, high, low, buildup, oiChgPct,
-  limitPrice, orderMode, onStrikeChange, onShiftUp, onShiftDown, onLimitPriceChange, onBuy, onSell,
+  limitPrice, orderMode, onStrikeChange, onShiftUp, onShiftDown, shiftSteps = 1, onShiftStepsChange, onLimitPriceChange, onBuy, onSell,
   lots, onLotsChange, onRemove, canRemove, pnl, onSideChange,
   moveFraction, onMoveFractionChange, halfMoveDisabled, halfMoveDisabledReason,
   pending = false, strikesReady = true,
@@ -350,8 +353,8 @@ export const OptionPanel = React.memo(function OptionPanel({
             <button
               onClick={onShiftUp}
               disabled={orderDisabled}
-              title={`Shift strike up — rolls ${rollsHalf ? 'HALF of' : 'the entire'} the open position`}
-              aria-label={`Shift ${side} strike up`}
+              title={`Shift strike up ${shiftSteps} — rolls ${rollsHalf ? 'HALF of' : 'the entire'} the open position`}
+              aria-label={`Shift ${side} strike up ${shiftSteps}`}
               className={cn(
                 'shrink-0 w-6 h-6 flex items-center justify-center rounded-lg border border-emerald-500/20',
                 'bg-emerald-500/10 text-emerald-400 hover:bg-emerald-500 hover:text-oncolor hover:border-emerald-500',
@@ -375,8 +378,8 @@ export const OptionPanel = React.memo(function OptionPanel({
             <button
               onClick={onShiftDown}
               disabled={orderDisabled}
-              title={`Shift strike down — rolls ${rollsHalf ? 'HALF of' : 'the entire'} the open position`}
-              aria-label={`Shift ${side} strike down`}
+              title={`Shift strike down ${shiftSteps} — rolls ${rollsHalf ? 'HALF of' : 'the entire'} the open position`}
+              aria-label={`Shift ${side} strike down ${shiftSteps}`}
               className={cn(
                 'shrink-0 w-6 h-6 flex items-center justify-center rounded-lg border border-rose-500/20',
                 'bg-rose-500/10 text-rose-400 hover:bg-rose-500 hover:text-oncolor hover:border-rose-500',
@@ -416,6 +419,18 @@ export const OptionPanel = React.memo(function OptionPanel({
               </span>
               <button onClick={() => onLotsChange(lots + 1)} title="Add one lot" aria-label="Add one lot"
                 className={cn('px-2.5 py-1 text-zinc-400 hover:text-white hover:bg-zinc-800 transition-colors font-bold text-sm', FOCUS_RING)}>+</button>
+            </div>
+          )}
+          {onShiftStepsChange && (
+            <div className="flex items-center gap-1 bg-zinc-900 border border-zinc-700 rounded-lg px-1.5 py-1">
+              <span className={cn(TXT_LABEL, 'font-bold uppercase tracking-wider text-zinc-400')}>Steps</span>
+              <button type="button" aria-label="Decrease strikes per shift" disabled={shiftSteps <= 1}
+                onClick={() => onShiftStepsChange(shiftSteps - 1)}
+                className={cn('px-1.5 text-zinc-400 hover:text-white font-bold text-sm disabled:opacity-30', FOCUS_RING)}>−</button>
+              <span className="text-xs font-mono font-bold text-zinc-200 tabular-nums w-4 text-center">{shiftSteps}</span>
+              <button type="button" aria-label="Increase strikes per shift" disabled={shiftSteps >= 10}
+                onClick={() => onShiftStepsChange(shiftSteps + 1)}
+                className={cn('px-1.5 text-zinc-400 hover:text-white font-bold text-sm disabled:opacity-30', FOCUS_RING)}>+</button>
             </div>
           )}
           {moveFraction && onMoveFractionChange && (
