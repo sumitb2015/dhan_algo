@@ -22,10 +22,10 @@ import { FOCUS_RING } from '@/components/Scalper';
 import { clampShiftSteps, MAX_SHIFT_STEPS } from '@/lib/strikeShift';
 import { allowedStrikes, strikeAllowed, snapToAllowed } from '@/lib/farExpiryRules';
 import { BROKER_LABELS, type Broker } from '@/hooks/useBrokerSelector';
-import PayoffDiagram from '@/components/strategy/PayoffDiagram';
+import PayoffDiagram, { pnlAt } from '@/components/strategy/PayoffDiagram';
 import { StatChip } from '@/components/analytics/PayoffMetricStrip';
 import { basketToGreekLegs, computeBasketGreeks } from '@/lib/multiLegGreeks';
-import type { ChainOc } from '@/lib/optionsStrategy';
+import { type ChainOc, riskNeutralProbAbove } from '@/lib/optionsStrategy';
 
 /** Dhan's option-chain API is rate limited (~1 call / 3.5 s per underlying). */
 const GREEKS_CHAIN_SPACING_MS = 3_800;
@@ -175,6 +175,7 @@ export default function MultiLegStrategyRow({
   // front of every row's legs table on load. Collapsed by default; the user
   // opens it only when they actually want to look at the curve.
   const [showPayoffChart, setShowPayoffChart] = useState(false);
+  const [simTargetDays, setSimTargetDays] = useState<number>(0);
   const [confirmPlace, setConfirmPlace] = useState(false);
   const [confirmScale, setConfirmScale] = useState(false);
   const [shiftSteps, setShiftSteps] = useState(1);   // per-strategy Steps stepper (UI only, not persisted)
@@ -503,6 +504,119 @@ export default function MultiLegStrategyRow({
       return null;
     }
   }, [showPayoffChart, spot, hasMixedExpiry, calendarCurve, payoffResult, basket.legs, basket.underlying, basket.expiry, broker, crudeMult, defaultLotSize, ltpFor, ivForStrike]);
+
+  // ── Max days to expiry for What-If time decay simulation ─────────────
+  const maxDays = useMemo(() => {
+    if (!basket.expiry) return 7;
+    return Math.max(0.1, Math.round(calculateTimeToExpiryYears(basket.expiry) * 365 * 10) / 10);
+  }, [basket.expiry]);
+
+  // ── Projected Target Curve at T+simTargetDays ────────────────────────
+  const targetCurve = useMemo(() => {
+    if (!showPayoffChart || !simTargetDays || simTargetDays <= 0) return null;
+    if (!spot || spot <= 0) return null;
+    const xs = hasMixedExpiry ? calendarCurve?.points.map(p => p.x) : payoffResult?.points.map(p => p.x);
+    if (!xs || xs.length === 0) return null;
+
+    const activeLegs = basket.legs.filter(l => l.status !== 'CLOSED');
+    if (activeLegs.length === 0) return null;
+
+    const payoffMultiplier = (broker === 'dhan' && (basket.underlying === 'CRUDEOIL' || basket.underlying === 'CRUDEOILM')) ? crudeMult : 1;
+
+    const legsForPricing = activeLegs.map(l => {
+      const legExpiry = l.expiry || basket.expiry;
+      const currentLtp = ltpFor(l);
+      const premium = (l.fill?.avgPrice && l.fill.avgPrice > 0)
+        ? l.fill.avgPrice
+        : (currentLtp > 0 ? currentLtp : (l.price || 0));
+      const qty = ((l.fill?.qty && l.fill.qty > 0) ? l.fill.qty : (l.lots * defaultLotSize)) * payoffMultiplier;
+      const iv = ivForStrike?.(l.strike, l.option, legExpiry) || FALLBACK_IV;
+      const totalTimeYears = calculateTimeToExpiryYears(legExpiry);
+      const remainingTimeYears = Math.max(0.0001, totalTimeYears - (simTargetDays / 365));
+      return { side: l.side, option: l.option, strike: l.strike, premium, qty, iv, timeYears: remainingTimeYears };
+    });
+
+    if (legsForPricing.some(l => l.premium <= 0)) return null;
+
+    try {
+      return xs.map(x => {
+        const pnl = legsForPricing.reduce((sum, l) => {
+          const price = computeBsGreeks(l.option, x, l.strike, l.timeYears, l.iv, 1).price;
+          const perUnit = l.side === 'B' ? (price - l.premium) : (l.premium - price);
+          return sum + perUnit * l.qty;
+        }, 0);
+        return { spot: x, pnl };
+      });
+    } catch {
+      return null;
+    }
+  }, [showPayoffChart, simTargetDays, spot, hasMixedExpiry, calendarCurve, payoffResult, basket.legs, basket.underlying, basket.expiry, broker, crudeMult, defaultLotSize, ltpFor, ivForStrike]);
+
+  // ── Active leg strike markers for X-axis pins ────────────────────────
+  const strategyStrikes = useMemo(() => {
+    const activeLegs = basket.legs.filter(l => l.status !== 'CLOSED');
+    return activeLegs.map(l => ({
+      strike: l.strike,
+      option: l.option,
+      side: l.side,
+      lots: l.lots,
+    }));
+  }, [basket.legs]);
+
+  // ── Standard Deviation expected move (±1SD) ──────────────────────────
+  const expectedMove = useMemo(() => {
+    if (!spot || spot <= 0 || !basket.expiry) return null;
+    const timeYears = calculateTimeToExpiryYears(basket.expiry);
+    if (timeYears <= 0) return null;
+    const iv = (atmStrike && ivForStrike?.(atmStrike, 'CE', basket.expiry))
+      || (atmStrike && ivForStrike?.(atmStrike, 'PE', basket.expiry))
+      || FALLBACK_IV;
+    const sd1 = spot * iv * Math.sqrt(timeYears);
+    return {
+      sd1Lo: Math.round((spot - sd1) * 10) / 10,
+      sd1Hi: Math.round((spot + sd1) * 10) / 10,
+    };
+  }, [spot, basket.expiry, atmStrike, ivForStrike]);
+
+  // ── Probability of Profit (POP %) ────────────────────────────────────
+  const popPct = useMemo(() => {
+    if (!spot || spot <= 0 || !basket.expiry || !payoffResult) return null;
+    const be = payoffResult.breakevens;
+    if (!be || be.length === 0) return null;
+    const timeYears = calculateTimeToExpiryYears(basket.expiry);
+    if (timeYears <= 0) return null;
+    const iv = (atmStrike && ivForStrike?.(atmStrike, 'CE', basket.expiry))
+      || (atmStrike && ivForStrike?.(atmStrike, 'PE', basket.expiry))
+      || FALLBACK_IV;
+    const sorted = [...be].sort((a, b) => a - b);
+    const offset = Math.max(step || 50, spot * 0.05);
+    let pop = 0;
+    for (let i = 0; i <= sorted.length; i++) {
+      const lo = i === 0 ? -Infinity : sorted[i - 1];
+      const hi = i === sorted.length ? Infinity : sorted[i];
+      const testSpot = lo === -Infinity && hi === Infinity ? spot
+        : lo === -Infinity ? hi - offset
+        : hi === Infinity ? lo + offset
+        : (lo + hi) / 2;
+      const pnl = pnlAt(payoffResult.points.map(p => ({ spot: p.x, pnl: p.y })), testSpot);
+      if (pnl === null || pnl <= 0) continue;
+      const probAboveLo = lo === -Infinity ? 1 : riskNeutralProbAbove(spot, lo, timeYears, iv);
+      const probAboveHi = hi === Infinity ? 0 : riskNeutralProbAbove(spot, hi, timeYears, iv);
+      pop += probAboveLo - probAboveHi;
+    }
+    return Math.round(Math.min(1, Math.max(0, pop)) * 100);
+  }, [spot, basket.expiry, payoffResult, atmStrike, ivForStrike, step]);
+
+  // ── Risk-to-Reward Ratio (e.g. 1 : 1.5) ───────────────────────────────
+  const riskRewardRatio = useMemo(() => {
+    if (!payoffResult || payoffResult.maxProfitUnlimited || payoffResult.maxLossUnlimited) return null;
+    if (payoffResult.maxLoss === 0) return null;
+    const ratio = Math.abs(payoffResult.maxProfit / payoffResult.maxLoss);
+    if (ratio >= 1) {
+      return `1 : ${ratio.toFixed(1)}`;
+    }
+    return `${(1 / ratio).toFixed(1)} : 1`;
+  }, [payoffResult]);
 
   const breakevensDisplay = useMemo(() => {
     if (!payoffResult || payoffResult.breakevens.length === 0) return 'None';
@@ -1447,6 +1561,15 @@ export default function MultiLegStrategyRow({
                         currentSpot={spot ?? 0}
                         breakevens={calendarCurve.breakevens}
                         todayCurve={todayCurve ?? undefined}
+                        targetCurve={targetCurve ?? undefined}
+                        targetDays={simTargetDays}
+                        maxDays={maxDays}
+                        onTargetDaysChange={setSimTargetDays}
+                        maxProfit={calendarCurve.maxPnl}
+                        maxProfitUnlimited={false}
+                        rom={calendarCurve && basketMargin && basketMargin > 0 ? (calendarCurve.maxPnl / basketMargin) * 100 : null}
+                        strikes={strategyStrikes}
+                        expectedMove={expectedMove}
                       />
                       <p className="mt-1 text-[10px] text-zinc-500 font-mono">
                         Value as of the near leg&apos;s expiry ({basket.expiry}) — the far leg
@@ -1472,6 +1595,19 @@ export default function MultiLegStrategyRow({
                       currentSpot={spot ?? 0}
                       breakevens={payoffResult.breakevens}
                       todayCurve={todayCurve ?? undefined}
+                      targetCurve={targetCurve ?? undefined}
+                      targetDays={simTargetDays}
+                      maxDays={maxDays}
+                      onTargetDaysChange={setSimTargetDays}
+                      maxProfit={payoffResult.maxProfit}
+                      maxProfitUnlimited={payoffResult.maxProfitUnlimited}
+                      maxLoss={payoffResult.maxLoss}
+                      maxLossUnlimited={payoffResult.maxLossUnlimited}
+                      rom={maxProfitPctOfMargin}
+                      riskReward={riskRewardRatio}
+                      pop={popPct}
+                      strikes={strategyStrikes}
+                      expectedMove={expectedMove}
                     />
                   )}
                   {!hasMixedExpiry && !payoffResult && (

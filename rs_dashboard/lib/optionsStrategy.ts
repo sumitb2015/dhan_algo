@@ -581,7 +581,7 @@ export function bsPrice(type: OptType, S: number, K: number, t: number, iv: numb
 }
 
 /** Risk-neutral P(S_T > K) under lognormal GBM — the same N(d2) term bsPrice() uses for a call. */
-function riskNeutralProbAbove(S: number, K: number, t: number, iv: number, r = 0.065): number {
+export function riskNeutralProbAbove(S: number, K: number, t: number, iv: number, r = 0.065): number {
   if (t <= 0 || iv <= 0) return S > K ? 1 : 0;
   const d2 = (Math.log(S / K) + (r - (iv * iv) / 2) * t) / (iv * Math.sqrt(t));
   return normCdf(d2);
