@@ -184,7 +184,18 @@ and Options Monitor's expiry-switch re-anchoring, 2026-09-21.)
 - **Aborts release unattempted legs to DRAFT** (from the run's local `working`, before
   `rollbackPlacedLegs`), never leave them PLACING; each leg's placement never throws, so
   `Promise.all` can't reject early and skip the rollback.
+- **Rollback auto-reversals pass verified contract identifiers.** Capture `securityId` and
+  `tradingsymbol` upon placement acknowledgement into `placedLegs` and feed them directly into
+  `resolveOrderRequest` during rollback, ensuring reverse MARKET orders do not fail if the
+  chain/strikeMap is reloading or missing.
 - **Exits go shorts first, then longs, and longs are skipped if any short is not CLOSED.**
+- **Manual single-leg exits enforce hedge protection.** Squaring off an individual BUY hedge
+  while short legs remain open prompts an explicit confirmation dialog warning the user that
+  exiting the hedge leaves open short leg(s) naked and spikes margin requirements.
+- **Order resolution prioritizes existing contract identifiers.** Scaling (`scaleStrategy`)
+  or adding lots (`addNewLotsToLeg`) to an existing leg passes `leg.orderRef.securityId` and
+  `leg.orderRef.symbol` so resolution does not fail if `strikeMap` is still loading or if an
+  off-expiry leg has shifted.
 
 ## Before You Ship
 - Does every lock/exit/P&L decision route through an ownership check
@@ -195,6 +206,8 @@ and Options Monitor's expiry-switch re-anchoring, 2026-09-21.)
 - Does fill confirmation look up the broker position for the *order's
   target symbol*, not a cached/pinned position reference?
 - Is a strike shift's reopen gated on the close having fully filled?
+- Does manual single-leg exit warn when closing a BUY hedge while short legs remain open?
+- Do rollback auto-reversals and scaling orders pass confirmed `securityId` and `tradingsymbol` identifiers?
 - If there are two execution engines, does a tab-side mutation check the
   other engine's ownership first, and does a stale-but-alive engine refuse
   to hand over?

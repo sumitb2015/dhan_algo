@@ -28,19 +28,25 @@ Two phases, legs inside a phase concurrent: all BUY legs, then all SELL legs (2 
 far-strike rule, margin verified for the **current** legs (`marginCompRef` vs `basketCompKey`), fresh funds (poll reading reused
 if < 5 s old), estimate margin needs a confirm, spread check (started early, applied after margin passes). Between phases, re-read
 funds only when tight (`available - premiumPaid < 1.2 x required`) and unwind hedges on shortfall. A failed leg ends the run:
-unattempted legs return to DRAFT (never left PLACING), placed MARKET legs are auto-reversed, LIMIT legs are surfaced for manual cancel.
-Each leg's placement wrapper never throws, so `Promise.all` cannot reject early and skip the rollback.
+unattempted legs return to DRAFT (never left PLACING), placed MARKET legs are auto-reversed passing verified contract identifiers
+(`securityId` and `tradingsymbol` captured on acknowledgement), LIMIT legs are surfaced for manual cancel. Each leg's placement
+wrapper never throws, so `Promise.all` cannot reject early and skip the rollback.
 
 ## Exit
 `exitOneLeg` fetches live positions, matches the leg by security id (fallback resolved id), clamps qty to `min(ledger qty, broker |netQty|)`,
-books the close under the position's own product, returns `{ closed, qty }` (qty = units sent, 0 when already flat). `exitBasket`:
-shorts (buy-to-close) concurrently first, then longs, and **never sell a hedge while a short is still open**. Capture `closedFill` on every
-close path (manual, already-flat, rollback) or realized P&L reads as 0.
+books the close under the position's own product with non-Dhan symbol fallbacks (`match.row.tradingSymbol`), returns `{ closed, qty }`
+(qty = units sent, 0 when already flat). `exitBasket`: shorts (buy-to-close) concurrently first, then longs, and **never sell a hedge while a short is still open**.
+**Manual Single-Leg Hedge Guard**: exiting an individual BUY hedge while short legs remain open prompts an explicit confirmation warning about unhedged naked short risk.
+Capture `closedFill` on every close path (manual, already-flat, rollback) or realized P&L reads as 0.
 
-## Add lots and add leg
+## Add lots, add leg, and strategy scaling
 `addNewLegCore(basketId, params, opts?)` returns boolean. A leg identical to an OPEN one (same side/option/strike/expiry) merges into it with a
 weighted average, because Dhan nets them into one row. The append/merge is a functional `patchLegs` write. Add Lots on an existing leg is not
-subject to the far-strike rule; Add Leg (a new open) is.
+subject to the far-strike rule; Add Leg (a new open) is. Both pass the leg's stored `orderRef.securityId` and `symbol` to prevent resolution
+failures on off-expiry or unlisted strikes.
+**Strategy Scaling (`scaleStrategy`)**: Scales all open legs by +1x (or +Nx) using the leg's base ratio via a 2-phase placement (all BUY hedges
+first, then all SELL legs) with sibling collision checks and post-await ref reads. Single-ticket draft multiplier allows scaling the entire combo
+from 1x to 50x before placement.
 
 ## Locking and state
 - Take the placement lock **synchronously, before the first await** (wrapper around the inner function, released in `finally`). A lock set after a funds read or a confirm dialog lets a double-click place twice.

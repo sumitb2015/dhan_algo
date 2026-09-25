@@ -76,6 +76,22 @@ Instead:
   where $d_2(S) = \frac{\ln(S_0 / S) + (r - 0.5 \sigma^2) t}{\sigma \sqrt{t}}$.
 - Sum probabilities across all winning intervals to obtain the true POP $\%$.
 
+### 6. Calendar & Diagonal Spreads (Mixed-Expiry Payoffs)
+A single "both legs at intrinsic value at expiration" curve is not economically meaningful across two different expiration dates:
+- **Evaluation Date**: Calendar/Diagonal spreads are evaluated **as of the near (front) leg's expiry** ($T_{\text{front}}$).
+- **Front Leg**: Reaches its expiration, so it is evaluated at **pure intrinsic value**:
+  - Front Call: $\max(0, S - K) - \text{entryPrice}$ (or inverted for short)
+  - Front Put: $\max(0, K - S) - \text{entryPrice}$ (or inverted for short)
+- **Far Leg**: Still carries residual time value. It is priced via **Black-76 / Black-Scholes** using remaining time $t_{\text{far}} = \max(D_{\text{far}} - D_{\text{front}}, 0.25) / 365$ and the leg's own IV:
+  $$\text{Far Leg Value} = \text{BS}(S + \text{basis}, K, t_{\text{far}}, \sigma_{\text{far}})$$
+- **Deriving `effectiveFarExpiry`**: Template-created baskets populate `basket.farExpiry`, but custom multi-expiry baskets (or legs manually toggled to a secondary expiry) may leave `basket.farExpiry` unset. Always derive `effectiveFarExpiry`:
+  ```ts
+  const effectiveFarExpiry = basket.farExpiry
+    || basket.legs.find(l => l.status !== 'CLOSED' && l.expiry && l.expiry !== basket.expiry)?.expiry;
+  ```
+  If `hasMixedExpiry` is true, suppress the naive single-expiry `computePayoff` and route through `computeCalendarPayoffCurve(legs, spot, basket.expiry, effectiveFarExpiry, step)`.
+- **Return on Margin**: Calculate and surface max profit as a percentage of margin (`(calendarCurve.maxPnl / basketMargin) * 100`) so capital efficiency is clearly visible alongside single-expiry strategies.
+
 ---
 
 ## Black-76 on Futures & Sensibull Parity
