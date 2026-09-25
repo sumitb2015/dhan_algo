@@ -6,7 +6,7 @@ import React, {
 import NavBar from './NavBar';
 import {
   TrendingUp, Zap, ShieldOff, Shield, Activity,
-  Clock, Plus, Check, Save, Layers, Target, Lock, RefreshCw, X, Trash2,
+  Clock, Plus, Layers, Target, Lock, RefreshCw, X, Trash2,
   ChevronUp, ChevronDown, Grid3x3, Calendar,
 } from 'lucide-react';
 import { TabTable, type SortState, BUILDUP_STYLES } from './Scalper';
@@ -1028,7 +1028,7 @@ function StrikeLegSelector({
 }
 
 /** The full CE/PE strike editor for one row: ATM±/₹ mode toggle, independent
- *  CE and PE selectors, a link checkbox to keep them mirrored, and Save/clear. */
+ *  CE and PE selectors, a link checkbox to keep them mirrored, and reset to ATM. */
 function StrikeEditor({
   row, live, step, onUpdate, onShift, shiftDisabled, onBlocked,
   buildupWsActive, buildupExpiryHint,
@@ -1036,7 +1036,7 @@ function StrikeEditor({
   row: FocusRow;
   live: RowLive;
   step: number;
-  onUpdate: (patch: Partial<FocusRow>, saveToDisk?: boolean) => void;
+  onUpdate: (patch: Partial<FocusRow>) => void;
   onShift?: (leg: 'CE' | 'PE', direction: 'UP' | 'DOWN') => void;
   shiftDisabled?: boolean;
   onBlocked?: (message: string) => void;
@@ -1120,12 +1120,27 @@ function StrikeEditor({
             ? 'Locked while a leg is open — exit it first'
             : 'ATM± picks a strike by steps from ATM; ₹ picks the closest strike priced at or below a target premium'}
         />
-        <label title="Keep CE and PE moving together" className="inline-flex items-center gap-1.5 text-[9px] font-bold text-zinc-400 hover:text-zinc-200 cursor-pointer select-none">
-          <input type="checkbox" checked={row.linked ?? true}
-            onChange={e => onUpdate({ linked: e.target.checked })}
-            className="h-3 w-3 rounded-sm border-zinc-700 bg-zinc-900 accent-violet-500 cursor-pointer" />
-          Link
-        </label>
+        <div className="flex items-center gap-2">
+          <label title="Keep CE and PE moving together" className="inline-flex items-center gap-1.5 text-[9px] font-bold text-zinc-400 hover:text-zinc-200 cursor-pointer select-none">
+            <input type="checkbox" checked={row.linked ?? true}
+              onChange={e => onUpdate({ linked: e.target.checked })}
+              className="h-3 w-3 rounded-sm border-zinc-700 bg-zinc-900 accent-violet-500 cursor-pointer" />
+            Link
+          </label>
+          <button
+            type="button"
+            onClick={() => {
+              if (anyOpen) { onBlocked?.(blockedNote(legOpen.CE ? 'CE' : 'PE')); return; }
+              onUpdate({
+                strikeMode: 'ATM', linked: true, ceOffset: 0, peOffset: 0, cePremium: '', pePremium: '',
+              });
+            }}
+            title={anyOpen ? 'Locked while a leg is open — exit it first' : "Reset this row's strike settings to ATM"}
+            className={cn('text-[9px] text-zinc-500 hover:text-zinc-300 transition-colors cursor-pointer', FOCUS_RING)}
+          >
+            &times; reset
+          </button>
+        </div>
       </div>
       <StrikeLegSelector leg="CE" mode={mode} offset={row.ceOffset ?? 0} premium={row.cePremium ?? ''}
         resolvedStrike={live.ceStrike} step={step} ltp={live.ltpCe} locked={legOpen.CE}
@@ -1141,24 +1156,6 @@ function StrikeEditor({
         onOffsetChange={n => setLeg('PE', { peOffset: n })}
         onPremiumChange={v => setLeg('PE', { pePremium: v })}
         onShift={onShift ? dir => onShift('PE', dir) : undefined} shiftDisabled={shiftDisabled} />
-      <div className="flex items-center justify-end gap-2 pt-0.5 border-t border-zinc-800/60">
-        <button onClick={() => onUpdate(row, true)} title="Save this row's strike settings"
-          className={cn('text-[9px] font-bold text-emerald-400 hover:text-emerald-300 cursor-pointer rounded flex items-center gap-0.5', FOCUS_RING)}>
-          <Check className="h-2.5 w-2.5" /> Save
-        </button>
-        <button
-          onClick={() => {
-            if (anyOpen) { onBlocked?.(blockedNote(legOpen.CE ? 'CE' : 'PE')); return; }
-            onUpdate({
-              strikeMode: 'ATM', linked: true, ceOffset: 0, peOffset: 0, cePremium: '', pePremium: '',
-            }, true);
-          }}
-          title={anyOpen ? 'Locked while a leg is open — exit it first' : "Reset this row's strike settings to ATM"}
-          className={cn('text-[9px] text-zinc-500 hover:text-zinc-400 cursor-pointer rounded', FOCUS_RING)}
-        >
-          &times; clear
-        </button>
-      </div>
     </div>
   );
 }
@@ -1351,7 +1348,7 @@ function ControlStrip({
   trailEnabled, onToggleTrail,
   triggerRupees, setTriggerRupees,
   lockRupees, setLockRupees,
-  onSave, saving, totalPnl, peakMtm, lockMtm,
+  totalPnl, peakMtm, lockMtm,
   copyTrade,
   onOpenRisk, onOpenOrders, onOpenOptionChain, onToggleViewMode, viewMode,
   onExitAll, confirmExitAll, exitingAll,
@@ -1363,7 +1360,7 @@ function ControlStrip({
   trailEnabled: boolean; onToggleTrail: () => void;
   triggerRupees: string; setTriggerRupees: (v: string) => void;
   lockRupees: string; setLockRupees: (v: string) => void;
-  onSave: () => void; saving: boolean; totalPnl: number; peakMtm: number; lockMtm: number | null;
+  totalPnl: number; peakMtm: number; lockMtm: number | null;
   copyTrade: CopyTradeApi;
   onOpenRisk: () => void;
   onOpenOrders: () => void;
@@ -1407,14 +1404,6 @@ function ControlStrip({
           <Activity className={cn('h-3.5 w-3.5', liveRealMoney && 'animate-pulse text-emerald-400')} />
           {liveRealMoney ? 'Auto Rules Active' : 'Rules Idle'}
         </span>
-        <button
-          onClick={onSave}
-          disabled={saving}
-          title="Save preferences — Target / Stop / Trigger / Lock and each group's Spot H↑/L↓ — to disk."
-          className={cn('flex items-center gap-1 text-xs font-bold px-3 py-1 rounded-lg bg-violet-600 text-oncolor hover:bg-violet-500 transition-colors cursor-pointer disabled:opacity-50', FOCUS_RING)}
-        >
-          <Save className="h-3 w-3" /> {saving ? 'Saving…' : 'Save Preferences'}
-        </button>
         <button
           onClick={onExitAll}
           disabled={exitingAll}
@@ -1698,7 +1687,7 @@ function FocusTableRowImpl({
   expiries: string[];
   buildupWsActive?: boolean;
   buildupExpiryHint?: string | null;
-  onUpdate: (patch: Partial<FocusRow>, saveToDisk?: boolean) => void;
+  onUpdate: (patch: Partial<FocusRow>) => void;
   onDelete: () => void; onArm: () => void; onDisarm: () => void;
   onExit: (leg: 'CE' | 'PE' | 'ALL') => void;
   onExitPartial: (leg: 'CE' | 'PE', pct: 25 | 50 | 75) => void;
@@ -1820,7 +1809,7 @@ function FocusTableRowImpl({
               <select
                 value={row.expiry || expiries[0] || ''}
                 disabled={expiryLocked || expiries.length === 0}
-                onChange={e => onUpdate({ expiry: e.target.value }, true)}
+                onChange={e => onUpdate({ expiry: e.target.value })}
                 title={expiryLocked ? 'Locked while leg open' : 'Contract Expiry'}
                 className="text-[9px] font-mono font-bold h-6 px-1.5 border border-zinc-700/80 rounded bg-zinc-900 text-zinc-200 focus:outline-none focus:border-violet-500 disabled:opacity-50 disabled:cursor-not-allowed w-full cursor-pointer"
               >
@@ -1988,15 +1977,11 @@ function FocusTableRowImpl({
             </div>
 
             <div className="flex items-center gap-1.5">
-              <button onClick={() => onUpdate(row, true)} title="Save rules"
-                className={cn('text-[8.5px] font-bold text-emerald-400 hover:text-emerald-300 border border-emerald-500/30 bg-emerald-500/10 px-1.5 py-0.5 rounded transition-colors cursor-pointer', FOCUS_RING)}>
-                Save
-              </button>
               <button
                 onClick={() => onUpdate({
                   levelHigh: '', levelLow: '', levelVw: false, vwapInterval: '1', vwapBufferPct: '0.1',
                   slRupees: '', slMultiplier: '1.2', ceSlMultiplier: '1.2', peSlMultiplier: '1.2'
-                }, true)}
+                })}
                 title="Clear rules"
                 className={cn('text-[8.5px] text-zinc-500 hover:text-zinc-300 transition-colors cursor-pointer', FOCUS_RING)}
               >
@@ -2099,7 +2084,7 @@ function FocusRowCardImpl({
   expiries: string[];
   buildupWsActive?: boolean;
   buildupExpiryHint?: string | null;
-  onUpdate: (patch: Partial<FocusRow>, saveToDisk?: boolean) => void;
+  onUpdate: (patch: Partial<FocusRow>) => void;
   onDelete: () => void; onArm: () => void; onDisarm: () => void;
   onExit: (leg: 'CE' | 'PE' | 'ALL') => void;
   onExitPartial: (leg: 'CE' | 'PE', pct: 25 | 50 | 75) => void;
@@ -2209,7 +2194,7 @@ function FocusRowCardImpl({
             <select
               value={row.expiry || expiries[0] || ''}
               disabled={expiryLocked || expiries.length === 0}
-              onChange={e => onUpdate({ expiry: e.target.value }, true)}
+              onChange={e => onUpdate({ expiry: e.target.value })}
               title={expiryLocked
                 ? 'Locked while a leg is open — exit it first, or use the shift chevrons to roll it'
                 : 'Which listed expiry this row trades'}
@@ -2420,13 +2405,7 @@ function FocusRowCardImpl({
           </span>
           <div className="flex items-center gap-1.5">
             <button
-              onClick={() => onUpdate(row, true)}
-              className={cn('text-[9px] font-bold text-emerald-400 hover:text-emerald-300 border border-emerald-500/30 bg-emerald-500/10 px-1.5 py-0.5 rounded transition-colors cursor-pointer', FOCUS_RING)}
-            >
-              Save
-            </button>
-            <button
-              onClick={() => onUpdate({ levelHigh: '', levelLow: '', levelVw: false, vwapInterval: '1', vwapBufferPct: '0.1', slRupees: '', slMultiplier: '1.2', ceSlMultiplier: '1.2', peSlMultiplier: '1.2' }, true)}
+              onClick={() => onUpdate({ levelHigh: '', levelLow: '', levelVw: false, vwapInterval: '1', vwapBufferPct: '0.1', slRupees: '', slMultiplier: '1.2', ceSlMultiplier: '1.2', peSlMultiplier: '1.2' })}
               className={cn('text-[9px] text-zinc-500 hover:text-zinc-300 transition-colors cursor-pointer', FOCUS_RING)}
             >
               Clear
@@ -2609,7 +2588,6 @@ export default function FocusTool() {
   const copyTrade = useCopyTrade(addToast);
 
   const [config, setConfig] = useState<FocusToolConfig>(DEFAULT_CONFIG);
-  const [saving, setSaving] = useState(false);
   // Saves fire from many independent places — Arm/Disarm, leg Exit buttons,
   // the auto-entry/auto-exit scheduler, strike shifts, Save Preferences — with
   // no coordination between them. Chaining every save onto this promise makes
@@ -3453,7 +3431,6 @@ export default function FocusTool() {
   }
 
   async function doSaveConfig(patch?: Partial<FocusToolConfig>) {
-    setSaving(true);
     try {
       const body = patch ?? {
         riskEnabled, targetRupees, stopRupees, trailEnabled, triggerRupees, lockRupees, liveRealMoney,
@@ -3466,14 +3443,11 @@ export default function FocusTool() {
       const j = await res.json();
       if (j.success && j.data) {
         applyServerConfig(j.data);
-        addToast('success', 'Ultimate Scalper Terminal configuration saved');
       } else if (j.error) {
         addToast('error', 'Failed to save config', j.error);
       }
     } catch (e) {
       addToast('error', 'Network error saving config', String(e));
-    } finally {
-      setSaving(false);
     }
   }
 
@@ -3563,7 +3537,7 @@ export default function FocusTool() {
     return null;
   }
 
-  function updateRow(id: string, patch: Partial<FocusRow>, saveToDisk = false) {
+  function updateRow(id: string, patch: Partial<FocusRow>) {
     // A level exit is validated before it reaches STATE, not just before it
     // reaches disk. The in-tab watcher reads component state directly, so a
     // level on the wrong side of spot fires a real exit the moment it lands —
@@ -3585,7 +3559,7 @@ export default function FocusTool() {
     setConfig(prev => {
       const nextRows = prev.rows.map(r => r.id === id ? { ...r, ...patch, updatedAt: new Date().toISOString() } : r);
       const nextConfig = { ...prev, rows: nextRows };
-      if (saveToDisk) saveConfig(nextConfig);
+      saveConfig(nextConfig);
       return nextConfig;
     });
   }
@@ -3601,7 +3575,7 @@ export default function FocusTool() {
       const listed = expiries[r.underlying];
       if (!listed?.length || !r.expiry || listed.includes(r.expiry)) continue;
       if (r.fill || r.status === 'entered') continue;
-      updateRow(r.id, { expiry: listed[0] }, true);
+      updateRow(r.id, { expiry: listed[0] });
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps -- updateRow is re-created every render
   }, [config.rows, expiries]);
@@ -3614,7 +3588,7 @@ export default function FocusTool() {
     // Drop any stale fill pin — arming means this row resolves its strikes
     // fresh at the next entry, so a pin from the previous cycle would make it
     // look its new position up at last time's strikes.
-    updateRow(id, { status: 'armed', fill: undefined }, true);
+    updateRow(id, { status: 'armed', fill: undefined });
   }
 
   function deleteRow(id: string) {
@@ -4054,7 +4028,7 @@ export default function FocusTool() {
         return;
       }
       if (leg === 'ALL' && await waitRowFlat(row.id)) {
-        updateRow(row.id, { status: 'exited', fill: undefined }, true);
+        updateRow(row.id, { status: 'exited', fill: undefined });
       }
     });
   }
@@ -4223,14 +4197,14 @@ export default function FocusTool() {
           const val = String(newLtp);
           const patch: Partial<FocusRow> = leg === 'CE' ? { cePremium: val } : { pePremium: val };
           if (linked) { if (leg === 'CE') patch.pePremium = val; else patch.cePremium = val; }
-          updateRow(row.id, patch, true);
+          updateRow(row.id, patch);
         }
       } else {
         const curOffset = leg === 'CE' ? (row.ceOffset ?? 0) : (row.peOffset ?? 0);
         const newOffset = curOffset + (direction === 'UP' ? 1 : -1);
         const patch: Partial<FocusRow> = leg === 'CE' ? { ceOffset: newOffset } : { peOffset: newOffset };
         if (linked) { if (leg === 'CE') patch.peOffset = -newOffset; else patch.ceOffset = -newOffset; }
-        updateRow(row.id, patch, true);
+        updateRow(row.id, patch);
       }
     });
   }
@@ -4301,7 +4275,7 @@ export default function FocusTool() {
         }
         if (await waitRowFlat(row.id)) {
           // Flat and confirmed — retire the row and drop its strike pin.
-          updateRow(row.id, { status: 'exited', fill: undefined }, true);
+          updateRow(row.id, { status: 'exited', fill: undefined });
         } else {
           addToast('error', 'Auto-exit unconfirmed',
             `${row.underlying}: orders were accepted but the book still shows quantity — left open so the rules keep watching it. Check the position book.`);
@@ -4339,7 +4313,7 @@ export default function FocusTool() {
       .then(async accepted => {
         if (!accepted) return;
         if (await waitRowFlat(row.id)) {
-          updateRow(row.id, { status: 'exited', fill: undefined }, true);
+          updateRow(row.id, { status: 'exited', fill: undefined });
         }
       })
       .finally(() => {
@@ -4461,7 +4435,7 @@ export default function FocusTool() {
         return;
       }
 
-      updateRow(row.id, { status: 'entered' }, true);
+      updateRow(row.id, { status: 'entered' });
 
       const stillMissing = wanted.filter(l => !filled[l]);
       if (stillMissing.length) {
@@ -4557,9 +4531,6 @@ export default function FocusTool() {
    * in that instant would read spot >= 2 as breached and fire a real exit.
    */
   function updateGroup(underlying: FocusUnderlying, patch: Partial<FocusIndexGroup>) {
-    const freeTextFields = new Set(['spotHigh', 'spotLow']);
-    const isFreeTextEdit = Object.keys(patch).every(k => freeTextFields.has(k));
-
     // Book Exit levels get the same before-state check as a row's H↑/L↓: the
     // 5s scheduler reads these out of memory, so a level already behind spot
     // books out every row in the index on the next tick.
@@ -4578,7 +4549,7 @@ export default function FocusTool() {
     setConfig(prev => {
       const nextGroups = prev.groups.map(g => g.underlying === underlying ? { ...g, ...patch } : g);
       const nextConfig = { ...prev, groups: nextGroups };
-      if (!isFreeTextEdit) saveConfig(nextConfig);
+      saveConfig(nextConfig);
       return nextConfig;
     });
   }
@@ -4588,13 +4559,12 @@ export default function FocusTool() {
    * master switch are each a single, complete flip — same reasoning as
    * updateGroup above, and the same stakes: liveRealMoney in particular is
    * the switch that gates every real order, so a toggle that only lives in
-   * this tab's memory until some later Save Preferences click means the
-   * Worker could keep trading (or stay dry) on the OLD value for however long
-   * that gap lasts. Reads the *new* value explicitly rather than the
-   * about-to-be-stale `riskEnabled`/etc. closures, since setState is async.
+   * this tab's memory means the Worker could keep trading (or stay dry) on
+   * the OLD value. Reads the *new* value explicitly rather than the
+   * about-to-be-stale closures, since setState is async.
    */
   function saveRiskPatch(partial: Partial<Pick<FocusToolConfig,
-    'riskEnabled' | 'trailEnabled' | 'liveRealMoney' | 'liveArmedOn'
+    'riskEnabled' | 'trailEnabled' | 'liveRealMoney' | 'liveArmedOn' | 'targetRupees' | 'stopRupees' | 'triggerRupees' | 'lockRupees'
   >>) {
     saveConfig({
       riskEnabled, targetRupees, stopRupees, trailEnabled, triggerRupees, lockRupees, liveRealMoney,
@@ -4619,6 +4589,23 @@ export default function FocusTool() {
     // Stamp the day the arm was made. Both this page and the worker refuse to
     // treat a stale stamp as live, so the arm has to be renewed each session.
     saveRiskPatch({ liveRealMoney: next, liveArmedOn: next ? istToday() : '' });
+  }
+
+  function handleSetTargetRupees(v: string) {
+    setTargetRupees(v);
+    saveRiskPatch({ targetRupees: v });
+  }
+  function handleSetStopRupees(v: string) {
+    setStopRupees(v);
+    saveRiskPatch({ stopRupees: v });
+  }
+  function handleSetTriggerRupees(v: string) {
+    setTriggerRupees(v);
+    saveRiskPatch({ triggerRupees: v });
+  }
+  function handleSetLockRupees(v: string) {
+    setLockRupees(v);
+    saveRiskPatch({ lockRupees: v });
   }
 
   const rowsByUnderlying = useMemo<Record<FocusUnderlying, FocusRow[]>>(() => {
@@ -4672,12 +4659,11 @@ export default function FocusTool() {
       <ControlStrip
         liveRealMoney={liveRealMoney} onToggleLive={toggleLiveRealMoney} broker={broker}
         riskEnabled={riskEnabled} onToggleRisk={toggleRiskEnabled}
-        targetRupees={targetRupees} setTargetRupees={setTargetRupees}
-        stopRupees={stopRupees} setStopRupees={setStopRupees}
+        targetRupees={targetRupees} setTargetRupees={handleSetTargetRupees}
+        stopRupees={stopRupees} setStopRupees={handleSetStopRupees}
         trailEnabled={trailEnabled} onToggleTrail={toggleTrailEnabled}
-        triggerRupees={triggerRupees} setTriggerRupees={setTriggerRupees}
-        lockRupees={lockRupees} setLockRupees={setLockRupees}
-        onSave={() => saveConfig()} saving={saving}
+        triggerRupees={triggerRupees} setTriggerRupees={handleSetTriggerRupees}
+        lockRupees={lockRupees} setLockRupees={handleSetLockRupees}
         totalPnl={toolPnl}
         peakMtm={peakMtm}
         lockMtm={lockMtm}
@@ -4744,10 +4730,10 @@ export default function FocusTool() {
                           expiries={expiries[u] ?? []}
                           buildupWsActive={buildupWsActive}
                           buildupExpiryHint={buildupExpiryHint}
-                          onUpdate={(patch, save) => updateRow(row.id, patch, save)}
+                          onUpdate={patch => updateRow(row.id, patch)}
                           onDelete={() => deleteRow(row.id)}
                           onArm={() => armRow(row.id)}
-                          onDisarm={() => updateRow(row.id, { status: 'draft' }, true)}
+                          onDisarm={() => updateRow(row.id, { status: 'draft' })}
                           onExit={leg => handleManualExit(row, leg)}
                           onExitPartial={(leg, pct) => handleManualExitPartial(row, leg, pct)}
                           onAddLot={(leg, lots) => runRowAction(row.id, () => placeLeg(row, leg, { reduce: false, lots }))}
@@ -4797,10 +4783,10 @@ export default function FocusTool() {
                           expiries={expiries[u] ?? []}
                           buildupWsActive={buildupWsActive}
                           buildupExpiryHint={buildupExpiryHint}
-                          onUpdate={(patch, save) => updateRow(row.id, patch, save)}
+                          onUpdate={patch => updateRow(row.id, patch)}
                           onDelete={() => deleteRow(row.id)}
                           onArm={() => armRow(row.id)}
-                          onDisarm={() => updateRow(row.id, { status: 'draft' }, true)}
+                          onDisarm={() => updateRow(row.id, { status: 'draft' })}
                           onExit={leg => handleManualExit(row, leg)}
                           onExitPartial={(leg, pct) => handleManualExitPartial(row, leg, pct)}
                           onAddLot={(leg, lots) => runRowAction(row.id, () => placeLeg(row, leg, { reduce: false, lots }))}
