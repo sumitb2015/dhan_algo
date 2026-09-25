@@ -1092,7 +1092,18 @@ export default function MultiLegFocus() {
     let working: MultiLegLeg[] = basket.legs.map(l => ({ ...l, status: 'PLACING' as MultiLegStatus }));
     updateBasket(basketId, { legs: working });
 
-    type PlacedLeg = { legId: string; label: string; side: 'B' | 'S'; option: OptionType; strike: number; qty: number; type: 'MARKET' | 'LIMIT'; expiry: string };
+    type PlacedLeg = {
+      legId: string;
+      label: string;
+      side: 'B' | 'S';
+      option: OptionType;
+      strike: number;
+      qty: number;
+      type: 'MARKET' | 'LIMIT';
+      expiry: string;
+      securityId?: string;
+      symbol?: string;
+    };
     const placedLegs: PlacedLeg[] = [];
 
     // Flattens whatever already filled in this call by firing opposite-side
@@ -1131,6 +1142,7 @@ export default function MultiLegFocus() {
         const reverseReq = resolveOrderRequest(broker, {
           side: p.side === 'B' ? 'S' : 'B', option: p.option, strike: p.strike, qty: p.qty, type: 'MARKET',
           underlying: basket.underlying as Underlying, productType: 'MARGIN',
+          securityId: p.securityId, tradingsymbol: p.symbol,
         }, strikeMapFor(p.expiry));
         if (!reverseReq) {
           addToast('error', `Could not auto-reverse ${p.label}`, 'No order identifier — close manually from Orders/Positions');
@@ -1207,7 +1219,11 @@ export default function MultiLegFocus() {
           });
           updateBasket(basketId, { legs: working });
           addToast('success', `Placed ${label}`, `ID: ${j.order_id ?? 'OK'}`);
-          placedLegs.push({ legId: leg.id, label, side: leg.side, option: leg.option, strike: leg.strike, qty, type: leg.type, expiry: leg.expiry || basket.expiry });
+          placedLegs.push({
+            legId: leg.id, label, side: leg.side, option: leg.option, strike: leg.strike, qty, type: leg.type,
+            expiry: leg.expiry || basket.expiry,
+            securityId: secId, symbol: sym,
+          });
           return true;
         }
         working = working.map(l => (l.id === leg.id ? { ...l, status: 'FAILED' as MultiLegStatus } : l));
