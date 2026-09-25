@@ -1716,43 +1716,62 @@ function FocusTableRowImpl({
       ),
     )}>
 
-      {/* TIMING */}
+      {/* 1. STRATEGY & SETUP */}
       <td className={cn(
-        'p-2.5 align-top min-w-[220px]',
+        'p-3 align-top min-w-[240px] border-r-2 border-r-zinc-700/80',
         !flat && 'border-l-4 border-l-emerald-500 bg-emerald-500/5',
         flat && row.status === 'armed' && 'border-l-4 border-l-violet-500/80 bg-violet-500/5',
         flat && row.status !== 'armed' && 'border-l-4 border-l-transparent',
       )}>
-        <div className="flex flex-col gap-1.5 bg-zinc-950/30 border border-zinc-800/50 rounded-xl p-2">
-          <div className="grid grid-cols-2 gap-1.5">
-            <div className="flex flex-col gap-0.5">
-              <span className="text-[8px] font-black text-zinc-500 uppercase tracking-wider flex items-center gap-1">
-                <Clock className="h-2.5 w-2.5 text-zinc-500" /> ENTRY
+        <div className="flex flex-col gap-2">
+          {/* Top Line: Underlying chip + Side Selector + Lots */}
+          <div className="flex items-center justify-between gap-1.5 pb-1.5 border-b border-zinc-800/60">
+            <div className="flex items-center gap-1.5">
+              <span className={cn('inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-black border', UNDERLYING_CHIP[row.underlying])}>
+                <span className={cn('h-1.5 w-1.5 rounded-full', UNDERLYING_DOT[row.underlying])} />
+                {row.underlying}
               </span>
-              <TimeInput value={row.entryTime} onChange={v => onUpdate({ entryTime: v })}
-                title="Time of day this row enters, once armed" />
+              <SegPill
+                options={['CE', 'BOTH', 'PE'] as const}
+                value={row.side as 'CE' | 'BOTH' | 'PE'}
+                title="Trade Call, Put, or Both"
+                onChange={s => onUpdate({ side: s })}
+              />
             </div>
-            <div className="flex flex-col gap-0.5">
-              <span className="text-[8px] font-black text-zinc-500 uppercase tracking-wider flex items-center gap-1">
-                <Clock className="h-2.5 w-2.5 text-zinc-500" /> EXIT
-              </span>
-              <TimeInput value={row.exitTime} onChange={v => onUpdate({ exitTime: v })}
-                title="Time of day this row closes, whatever the P&L" />
+            <div className="flex items-center gap-1">
+              <span className="text-[9px] font-bold text-zinc-500 uppercase">Lots</span>
+              <LotStepper value={row.lots} onChange={v => onUpdate({ lots: v })} />
             </div>
           </div>
-          <div className="flex items-center gap-1.5 pt-1 border-t border-zinc-800/60">
+
+          {/* Middle: Entry & Exit Timing */}
+          <div className="grid grid-cols-2 gap-2">
+            <div className="flex items-center justify-between gap-1 bg-zinc-900/60 border border-zinc-800/60 rounded-lg px-2 py-1">
+              <span className="text-[8px] font-black text-zinc-400 uppercase tracking-wider flex items-center gap-1">
+                <Clock className="h-2.5 w-2.5 text-zinc-500" /> ENTRY
+              </span>
+              <TimeInput value={row.entryTime} onChange={v => onUpdate({ entryTime: v })} />
+            </div>
+            <div className="flex items-center justify-between gap-1 bg-zinc-900/60 border border-zinc-800/60 rounded-lg px-2 py-1">
+              <span className="text-[8px] font-black text-zinc-400 uppercase tracking-wider flex items-center gap-1">
+                <Clock className="h-2.5 w-2.5 text-zinc-500" /> EXIT
+              </span>
+              <TimeInput value={row.exitTime} onChange={v => onUpdate({ exitTime: v })} />
+            </div>
+          </div>
+
+          {/* Bottom: Expiry + DTE */}
+          <div className="flex items-center justify-between gap-1 pt-1 border-t border-zinc-800/60">
             <div className="flex items-center gap-1 flex-1 min-w-0">
-              <span className="text-[8px] font-black text-zinc-500 uppercase tracking-wider shrink-0 flex items-center gap-0.5">
+              <span className="text-[8px] font-black text-zinc-500 uppercase shrink-0 flex items-center gap-0.5">
                 <Calendar className="h-2.5 w-2.5 text-zinc-500" /> EXPY
               </span>
               <select
                 value={row.expiry || expiries[0] || ''}
                 disabled={expiryLocked || expiries.length === 0}
                 onChange={e => onUpdate({ expiry: e.target.value }, true)}
-                title={expiryLocked
-                  ? 'Locked while a leg is open — exit it first, or use the shift chevrons to roll it'
-                  : 'Which listed expiry this row trades'}
-                className="text-[9px] font-mono font-bold h-6 px-1 border border-zinc-700/80 rounded bg-zinc-900 text-zinc-200 focus:outline-none focus:border-violet-500 disabled:opacity-50 disabled:cursor-not-allowed w-full cursor-pointer"
+                title={expiryLocked ? 'Locked while leg open' : 'Contract Expiry'}
+                className="text-[9px] font-mono font-bold h-6 px-1.5 border border-zinc-700/80 rounded bg-zinc-900 text-zinc-200 focus:outline-none focus:border-violet-500 disabled:opacity-50 disabled:cursor-not-allowed w-full cursor-pointer"
               >
                 {expiries.map(e => <option key={e} value={e}>{e}</option>)}
               </select>
@@ -1764,14 +1783,9 @@ function FocusTableRowImpl({
                   type="button"
                   onClick={() => onUpdate({ dte: d })}
                   disabled={!onNearestExpiry}
-                  title={!onNearestExpiry
-                    ? 'DTE only applies when trading the nearest expiry'
-                    : d === 'Any' ? 'Enter on any expiry' : `Enter only when expiry is ${d} day(s) away`}
                   className={cn(
                     'text-[9px] font-mono font-extrabold px-1.5 py-0.5 rounded cursor-pointer transition-colors disabled:opacity-30 disabled:cursor-not-allowed',
-                    row.dte === d
-                      ? 'bg-violet-600 text-oncolor'
-                      : 'text-zinc-400 hover:text-zinc-200',
+                    row.dte === d ? 'bg-violet-600 text-oncolor' : 'text-zinc-400 hover:text-zinc-200',
                     FOCUS_RING,
                   )}
                 >{d}</button>
@@ -1781,457 +1795,202 @@ function FocusTableRowImpl({
         </div>
       </td>
 
-      {/* CE / PE STRIKES */}
-      <td className="p-2.5 align-top min-w-[280px]">
-        <div className="bg-zinc-950/30 border border-zinc-800/50 rounded-xl p-2">
-          <StrikeEditor row={row} live={live} step={step} onUpdate={onUpdate} onShift={onShift} shiftDisabled={busy} onBlocked={onBlocked}
-            buildupWsActive={buildupWsActive} buildupExpiryHint={buildupExpiryHint} />
-        </div>
+      {/* 2. STRIKES & SELECTION */}
+      <td className="p-3 align-top min-w-[280px] border-r-2 border-r-zinc-700/80">
+        <StrikeEditor row={row} live={live} step={step} onUpdate={onUpdate} onShift={onShift} shiftDisabled={busy} onBlocked={onBlocked}
+          buildupWsActive={buildupWsActive} buildupExpiryHint={buildupExpiryHint} />
       </td>
 
-      {/* LTP */}
-      <td className="p-2.5 align-top">
-        <div className="bg-zinc-950/30 border border-zinc-800/50 rounded-xl p-2 h-full">
-          <LtpStack
-            combinedLtp={combinedLtp}
-            live={live}
-            ceValue={ceValue}
-            peValue={peValue}
-            totalValue={totalValue}
-            pcr={pcr}
-            pcrOi={pcrOi}
-          />
-        </div>
+      {/* 3. MARKET TELEMETRY */}
+      <td className="p-3 align-top min-w-[180px] border-r-2 border-r-zinc-700/80">
+        <LtpStack
+          combinedLtp={combinedLtp}
+          live={live}
+          ceValue={ceValue}
+          peValue={peValue}
+          totalValue={totalValue}
+          pcr={pcr}
+          pcrOi={pcrOi}
+        />
       </td>
 
-      {/* LOTS */}
-      <td className="p-2.5 align-top text-center">
-        <div className="flex flex-col items-center justify-center pt-2">
-          <LotStepper value={row.lots} onChange={v => onUpdate({ lots: v })} />
-        </div>
-      </td>
-
-      {/* SIDE */}
-      <td className="p-2.5 align-top text-center border-r-2 border-r-zinc-700/80">
-        <div className="flex flex-col items-center justify-center pt-2">
-          <SegPill
-            options={['CE', 'BOTH', 'PE'] as const}
-            value={row.side as 'CE' | 'BOTH' | 'PE'}
-            title="Which legs to trade: call only, put only, or both"
-            onChange={s => onUpdate({ side: s })}
-          />
-        </div>
-      </td>
-
-      {/* STATUS / ACTIONS */}
-      <td className="p-2.5 align-top text-center border-r-2 border-r-zinc-700/80 min-w-[130px]">
-        <div className="flex flex-col gap-1.5 bg-zinc-950/30 border border-zinc-800/50 rounded-xl p-2">
-          <div className="flex items-center justify-between gap-1">
-            <span
-              title="Row status: Draft, Armed, or Entered"
-              className={cn('text-[9px] font-black uppercase tracking-wider px-2 py-0.5 rounded-full border', STATUS_PILL[row.status])}
-            >
-              {row.status}
-            </span>
-            {!flat ? (
-              <span
-                title="Realised + unrealised P&L across this row's traded legs"
-                className={cn(
-                  'text-[11px] font-mono font-black tabular-nums px-1.5 py-0.5 rounded border leading-none',
-                  live.pnl > 0
-                    ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30'
-                    : live.pnl < 0
-                      ? 'bg-rose-500/10 text-rose-400 border-rose-500/30'
-                      : 'bg-zinc-800 text-zinc-400 border-zinc-700'
+      {/* 4. CALL & PUT LEG TRADING PODS */}
+      <td className="p-3 align-top min-w-[360px] border-r-2 border-r-zinc-700/80">
+        <div className="flex flex-col gap-2">
+          {/* CE Leg Strip */}
+          <div className="bg-zinc-950/40 border border-zinc-800/60 rounded-xl p-2 flex flex-col gap-1.5">
+            <div className="flex items-center justify-between gap-1.5">
+              <div className="flex items-center gap-1.5">
+                <span className="text-[9px] font-black px-1.5 py-0.5 rounded bg-emerald-500/15 text-emerald-400 border border-emerald-500/30">CE</span>
+                <span className="text-sm font-mono font-black text-emerald-400 tabular-nums">
+                  {live.ltpCe != null ? `₹${live.ltpCe.toFixed(2)}` : '—'}
+                </span>
+                {live.cePosition && Number(live.cePosition.netQty) !== 0 ? (
+                  <LegOpenBadge pos={live.cePosition} />
+                ) : (
+                  <span className="text-[8px] font-mono font-bold text-zinc-600 uppercase tracking-widest px-1">Flat</span>
                 )}
-              >
-                {live.pnl >= 0 ? '+' : ''}₹{live.pnl.toFixed(0)}
+                <LegSlLevels row={row} live={live} leg="CE" lotSize={lotSize} inline />
+              </div>
+              <div className="flex items-center gap-1">
+                <LegLotSelect value={ceQty} onChange={setCeQty} className="w-9 h-6 text-[10px]" title="Lots CE +/- buttons act on" />
+                <button onClick={() => onAddLot('CE', ceQty)} disabled={!canTrade} title={canTrade ? `Add ${ceQty} lot(s) to CE` : tradeBlockedWhy} aria-label={`Add ${ceQty} CE lots`} className={cn('h-6 w-6 rounded bg-zinc-800 border border-zinc-700 text-zinc-200 font-bold flex items-center justify-center hover:bg-emerald-600 hover:border-emerald-600 hover:text-oncolor transition-colors disabled:opacity-30 disabled:cursor-not-allowed cursor-pointer', FOCUS_RING)}>+</button>
+                <button onClick={() => onReduceLot('CE', ceQty)} disabled={!canTrade || ceFlat} title={ceFlat ? 'Nothing open' : canTrade ? `Reduce CE by ${ceQty} lot(s)` : tradeBlockedWhy} aria-label={`Reduce CE by ${ceQty} lots`} className={cn('h-6 w-6 rounded bg-zinc-800 border border-zinc-700 text-zinc-200 font-bold flex items-center justify-center hover:bg-zinc-700 transition-colors disabled:opacity-30 disabled:cursor-not-allowed cursor-pointer', FOCUS_RING)}>-</button>
+                <button onClick={() => onExit('CE')} disabled={!canTrade || ceFlat} title={ceFlat ? 'Nothing open' : canTrade ? 'Exit CE leg' : tradeBlockedWhy} className={cn('text-xs font-black px-2.5 h-6 rounded bg-rose-600 text-oncolor hover:bg-rose-500 transition-colors disabled:opacity-30 disabled:cursor-not-allowed cursor-pointer', FOCUS_RING)}>Exit</button>
+              </div>
+            </div>
+            {!ceFlat && (
+              <div className="flex items-center justify-end gap-1 font-mono text-[9px] pt-1 border-t border-zinc-800/40">
+                <span className="text-[8px] font-bold text-zinc-500 uppercase tracking-wider mr-1">Partial:</span>
+                {ceChips.map(c => (
+                  <button key={c.pct} type="button" onClick={() => onExitPartial('CE', c.pct as 25 | 50 | 75)}
+                    disabled={!canTrade || !c.enabled} title={canTrade ? c.title : tradeBlockedWhy}
+                    className={cn('px-1.5 py-0.5 rounded bg-rose-950/60 border border-rose-800/50 text-rose-300 hover:bg-rose-800 hover:text-oncolor transition-all disabled:opacity-30 disabled:cursor-not-allowed cursor-pointer', FOCUS_RING)}>
+                    {c.pct}%
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+
+          {/* PE Leg Strip */}
+          <div className="bg-zinc-950/40 border border-zinc-800/60 rounded-xl p-2 flex flex-col gap-1.5">
+            <div className="flex items-center justify-between gap-1.5">
+              <div className="flex items-center gap-1.5">
+                <span className="text-[9px] font-black px-1.5 py-0.5 rounded bg-rose-500/15 text-rose-400 border border-rose-500/30">PE</span>
+                <span className="text-sm font-mono font-black text-rose-400 tabular-nums">
+                  {live.ltpPe != null ? `₹${live.ltpPe.toFixed(2)}` : '—'}
+                </span>
+                {live.pePosition && Number(live.pePosition.netQty) !== 0 ? (
+                  <LegOpenBadge pos={live.pePosition} />
+                ) : (
+                  <span className="text-[8px] font-mono font-bold text-zinc-600 uppercase tracking-widest px-1">Flat</span>
+                )}
+                <LegSlLevels row={row} live={live} leg="PE" lotSize={lotSize} inline />
+              </div>
+              <div className="flex items-center gap-1">
+                <LegLotSelect value={peQty} onChange={setPeQty} className="w-9 h-6 text-[10px]" title="Lots PE +/- buttons act on" />
+                <button onClick={() => onAddLot('PE', peQty)} disabled={!canTrade} title={canTrade ? `Add ${peQty} lot(s) to PE` : tradeBlockedWhy} aria-label={`Add ${peQty} PE lots`} className={cn('h-6 w-6 rounded bg-zinc-800 border border-zinc-700 text-zinc-200 font-bold flex items-center justify-center hover:bg-rose-600 hover:border-rose-600 hover:text-oncolor transition-colors disabled:opacity-30 disabled:cursor-not-allowed cursor-pointer', FOCUS_RING)}>+</button>
+                <button onClick={() => onReduceLot('PE', peQty)} disabled={!canTrade || peFlat} title={peFlat ? 'Nothing open' : canTrade ? `Reduce PE by ${peQty} lot(s)` : tradeBlockedWhy} aria-label={`Reduce PE by ${peQty} lots`} className={cn('h-6 w-6 rounded bg-zinc-800 border border-zinc-700 text-zinc-200 font-bold flex items-center justify-center hover:bg-zinc-700 transition-colors disabled:opacity-30 disabled:cursor-not-allowed cursor-pointer', FOCUS_RING)}>-</button>
+                <button onClick={() => onExit('PE')} disabled={!canTrade || peFlat} title={peFlat ? 'Nothing open' : canTrade ? 'Exit PE leg' : tradeBlockedWhy} className={cn('text-xs font-black px-2.5 h-6 rounded bg-rose-600 text-oncolor hover:bg-rose-500 transition-colors disabled:opacity-30 disabled:cursor-not-allowed cursor-pointer', FOCUS_RING)}>Exit</button>
+              </div>
+            </div>
+            {!peFlat && (
+              <div className="flex items-center justify-end gap-1 font-mono text-[9px] pt-1 border-t border-zinc-800/40">
+                <span className="text-[8px] font-bold text-zinc-500 uppercase tracking-wider mr-1">Partial:</span>
+                {peChips.map(c => (
+                  <button key={c.pct} type="button" onClick={() => onExitPartial('PE', c.pct as 25 | 50 | 75)}
+                    disabled={!canTrade || !c.enabled} title={canTrade ? c.title : tradeBlockedWhy}
+                    className={cn('px-1.5 py-0.5 rounded bg-rose-950/60 border border-rose-800/50 text-rose-300 hover:bg-rose-800 hover:text-oncolor transition-all disabled:opacity-30 disabled:cursor-not-allowed cursor-pointer', FOCUS_RING)}>
+                    {c.pct}%
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+        </div>
+      </td>
+
+      {/* 5. SAFEGUARDS & COMMAND DESK */}
+      <td className="p-3 align-top min-w-[320px]">
+        <div className="flex flex-col gap-2 bg-zinc-950/40 border border-zinc-800/60 rounded-xl p-2.5">
+          {/* Header: Status Pill + Realised/Unrealised P&L */}
+          <div className="flex items-center justify-between border-b border-zinc-800/60 pb-1.5">
+            <div className="flex items-center gap-2">
+              <span className={cn('text-[9px] font-black uppercase tracking-wider px-2 py-0.5 rounded-full border', STATUS_PILL[row.status])}>
+                {row.status}
               </span>
-            ) : (
-              <span className="text-[10px] font-mono text-zinc-600">₹0</span>
-            )}
-          </div>
-
-          {(row.status === 'draft' || row.status === 'exited') && (
-            <button
-              onClick={onArm}
-              title="Watch this row and enter it at its entry time"
-              className={cn(
-                'flex items-center justify-center gap-1.5 w-full text-xs font-black py-1.5 rounded-lg',
-                'bg-violet-600 text-oncolor hover:bg-violet-500 cursor-pointer shadow-sm shadow-violet-600/20 active:scale-[0.98] transition-all',
-                FOCUS_RING,
+              {!flat ? (
+                <span className={cn('text-xs font-mono font-bold px-2 py-0.5 rounded border tabular-nums',
+                  live.pnl > 0 ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30'
+                    : live.pnl < 0 ? 'bg-rose-500/10 text-rose-400 border-rose-500/30'
+                    : 'bg-zinc-800 text-zinc-400 border-zinc-700')}>
+                  {live.pnl >= 0 ? '+' : ''}₹{live.pnl.toFixed(0)}
+                </span>
+              ) : (
+                <span className="text-[10px] font-mono text-zinc-500">₹0</span>
               )}
-            >
-              <Zap className="h-3 w-3" />
-              Arm
-            </button>
-          )}
-          {row.status === 'armed' && (
-            <button
-              onClick={onDisarm}
-              title="Stop watching this row — it will not enter"
-              className={cn(
-                'flex items-center justify-center gap-1.5 w-full text-xs font-bold py-1.5 rounded-lg',
-                'bg-zinc-800 border border-zinc-700 text-zinc-300 hover:bg-zinc-700 cursor-pointer active:scale-[0.98] transition-all',
-                FOCUS_RING,
-              )}
-            >
-              <ShieldOff className="h-3 w-3 text-zinc-400" />
-              Disarm
-            </button>
-          )}
-          {row.status === 'entered' && (
-            <div className="flex items-center justify-center gap-1.5 w-full py-1 text-[10px] font-bold text-emerald-400 bg-emerald-500/10 border border-emerald-500/20 rounded-lg">
-              <span className="h-1.5 w-1.5 rounded-full bg-emerald-400 animate-pulse" />
-              Active
             </div>
-          )}
 
-          <button
-            onClick={() => onExit('ALL')}
-            disabled={flat || !canTrade}
-            title={flat ? 'Nothing open on this row' : 'Close every open leg of this row at market'}
-            className={cn(
-              'flex items-center justify-center gap-1.5 w-full text-xs font-black py-1.5 rounded-lg',
-              'bg-rose-600 text-oncolor hover:bg-rose-500 cursor-pointer shadow-sm shadow-rose-600/20 active:scale-[0.98] transition-all',
-              'disabled:opacity-30 disabled:cursor-not-allowed disabled:shadow-none',
-              FOCUS_RING,
-            )}
-          >
-            <ShieldOff className="h-3 w-3" />
-            Exit All
-          </button>
-
-          <div className="flex items-center justify-end pt-0.5 border-t border-zinc-800/60">
-            {flat ? (
-              <button
-                onClick={onDelete}
-                title="Delete this row"
-                aria-label="Delete row"
-                className={cn('inline-flex items-center gap-1 text-[10px] font-bold text-zinc-500 hover:text-rose-400 cursor-pointer transition-colors', FOCUS_RING)}
-              >
-                <X className="h-3 w-3" /> Delete
-              </button>
-            ) : (
-              <span
-                title="Exit the CE/PE legs before this row can be deleted"
-                className="inline-flex items-center gap-1 text-[10px] font-bold text-zinc-700 cursor-not-allowed"
-              >
-                <X className="h-3 w-3" /> Delete
-              </span>
-            )}
-          </div>
-        </div>
-      </td>
-
-      {/* CE */}
-      <td className="p-2.5 align-top text-center min-w-[170px]">
-        <div className="flex flex-col items-center gap-1.5 bg-zinc-950/30 border border-zinc-800/50 rounded-xl p-2">
-          <div className="flex items-baseline justify-center gap-1.5 w-full">
-            <span className="text-[9px] font-black uppercase text-emerald-500 tracking-wider">CE LTP</span>
-            <span
-              title="Live premium of the call leg"
-              className="text-sm font-mono font-black text-emerald-400 tabular-nums leading-none"
-            >
-              {live.ltpCe != null ? live.ltpCe.toFixed(2) : '\u2014'}
-            </span>
-          </div>
-
-          {live.cePosition && Number(live.cePosition.netQty) !== 0 ? (
-            <LegOpenBadge pos={live.cePosition} />
-          ) : (
-            <span className="text-[8px] font-mono font-bold text-zinc-600 uppercase tracking-widest py-0.5">
-              Flat
-            </span>
-          )}
-
-          <div className="flex items-center gap-1 w-full justify-center">
-            <LegLotSelect
-              value={ceQty}
-              onChange={setCeQty}
-              className="w-10 h-6 text-[10px]"
-              title="Lots the CE +/- buttons act on"
-            />
-            <button
-              onClick={() => onAddLot('CE', ceQty)}
-              disabled={!canTrade}
-              title={canTrade ? `Add ${ceQty} lot(s) to the CE leg` : tradeBlockedWhy}
-              aria-label={`Add ${ceQty} lot(s) to the CE leg`}
-              className={cn(
-                'h-6 w-6 rounded-md bg-zinc-800 border border-zinc-700 text-zinc-200 font-bold flex items-center justify-center',
-                'hover:bg-emerald-600 hover:border-emerald-600 hover:text-oncolor cursor-pointer active:scale-95 disabled:opacity-30 disabled:cursor-not-allowed transition-all',
-                FOCUS_RING,
-              )}
-            >
-              +
-            </button>
-            <button
-              onClick={() => onReduceLot('CE', ceQty)}
-              disabled={!canTrade || ceFlat}
-              title={ceFlat ? 'Nothing open on the CE leg' : canTrade ? `Reduce the CE leg by ${ceQty} lot(s)` : tradeBlockedWhy}
-              aria-label={`Reduce the CE leg by ${ceQty} lot(s)`}
-              className={cn(
-                'h-6 w-6 rounded-md bg-zinc-800 border border-zinc-700 text-zinc-200 font-bold flex items-center justify-center',
-                'hover:bg-zinc-700 cursor-pointer active:scale-95 disabled:opacity-30 disabled:cursor-not-allowed transition-all',
-                FOCUS_RING,
-              )}
-            >
-              -
-            </button>
-            <button
-              onClick={() => onExit('CE')}
-              disabled={!canTrade || ceFlat}
-              title={ceFlat ? 'Nothing open on the CE leg' : canTrade ? 'Close the CE leg at market' : tradeBlockedWhy}
-              className={cn(
-                'text-xs font-black px-2.5 h-6 rounded-md bg-rose-600 text-oncolor hover:bg-rose-500 cursor-pointer active:scale-95 disabled:opacity-30 disabled:cursor-not-allowed transition-all shadow-sm',
-                FOCUS_RING,
-              )}
-            >
-              Exit
-            </button>
-          </div>
-
-          {!ceFlat && (
-            <div className="flex items-center justify-center gap-1 font-mono text-[9px] w-full pt-1 border-t border-zinc-800/60">
-              {ceChips.map(c => (
-                <button
-                  key={c.pct}
-                  type="button"
-                  onClick={() => onExitPartial('CE', c.pct as 25 | 50 | 75)}
-                  disabled={!canTrade || !c.enabled}
-                  title={canTrade ? c.title : tradeBlockedWhy}
-                  className={cn(
-                    'px-1.5 py-0.5 rounded bg-rose-950/60 border border-rose-800/50 text-rose-300 hover:bg-rose-800 hover:text-oncolor transition-all disabled:opacity-30 disabled:cursor-not-allowed cursor-pointer',
-                    FOCUS_RING,
-                  )}
-                >
-                  {c.pct}%
-                </button>
-              ))}
-            </div>
-          )}
-
-          <LegSlLevels row={row} live={live} leg="CE" lotSize={lotSize} />
-        </div>
-      </td>
-
-      {/* PE */}
-      <td className="p-2.5 align-top text-center border-r-2 border-r-zinc-700/80 min-w-[170px]">
-        <div className="flex flex-col items-center gap-1.5 bg-zinc-950/30 border border-zinc-800/50 rounded-xl p-2">
-          <div className="flex items-baseline justify-center gap-1.5 w-full">
-            <span className="text-[9px] font-black uppercase text-rose-500 tracking-wider">PE LTP</span>
-            <span
-              title="Live premium of the put leg"
-              className="text-sm font-mono font-black text-rose-400 tabular-nums leading-none"
-            >
-              {live.ltpPe != null ? live.ltpPe.toFixed(2) : '\u2014'}
-            </span>
-          </div>
-
-          {live.pePosition && Number(live.pePosition.netQty) !== 0 ? (
-            <LegOpenBadge pos={live.pePosition} />
-          ) : (
-            <span className="text-[8px] font-mono font-bold text-zinc-600 uppercase tracking-widest py-0.5">
-              Flat
-            </span>
-          )}
-
-          <div className="flex items-center gap-1 w-full justify-center">
-            <LegLotSelect
-              value={peQty}
-              onChange={setPeQty}
-              className="w-10 h-6 text-[10px]"
-              title="Lots the PE +/- buttons act on"
-            />
-            <button
-              onClick={() => onAddLot('PE', peQty)}
-              disabled={!canTrade}
-              title={canTrade ? `Add ${peQty} lot(s) to the PE leg` : tradeBlockedWhy}
-              aria-label={`Add ${peQty} lot(s) to the PE leg`}
-              className={cn(
-                'h-6 w-6 rounded-md bg-zinc-800 border border-zinc-700 text-zinc-200 font-bold flex items-center justify-center',
-                'hover:bg-rose-600 hover:border-rose-600 hover:text-oncolor cursor-pointer active:scale-95 disabled:opacity-30 disabled:cursor-not-allowed transition-all',
-                FOCUS_RING,
-              )}
-            >
-              +
-            </button>
-            <button
-              onClick={() => onReduceLot('PE', peQty)}
-              disabled={!canTrade || peFlat}
-              title={peFlat ? 'Nothing open on the PE leg' : canTrade ? `Reduce the PE leg by ${peQty} lot(s)` : tradeBlockedWhy}
-              aria-label={`Reduce the PE leg by ${peQty} lot(s)`}
-              className={cn(
-                'h-6 w-6 rounded-md bg-zinc-800 border border-zinc-700 text-zinc-200 font-bold flex items-center justify-center',
-                'hover:bg-zinc-700 cursor-pointer active:scale-95 disabled:opacity-30 disabled:cursor-not-allowed transition-all',
-                FOCUS_RING,
-              )}
-            >
-              -
-            </button>
-            <button
-              onClick={() => onExit('PE')}
-              disabled={!canTrade || peFlat}
-              title={peFlat ? 'Nothing open on the PE leg' : canTrade ? 'Close the PE leg at market' : tradeBlockedWhy}
-              className={cn(
-                'text-xs font-black px-2.5 h-6 rounded-md bg-rose-600 text-oncolor hover:bg-rose-500 cursor-pointer active:scale-95 disabled:opacity-30 disabled:cursor-not-allowed transition-all shadow-sm',
-                FOCUS_RING,
-              )}
-            >
-              Exit
-            </button>
-          </div>
-
-          {!peFlat && (
-            <div className="flex items-center justify-center gap-1 font-mono text-[9px] w-full pt-1 border-t border-zinc-800/60">
-              {peChips.map(c => (
-                <button
-                  key={c.pct}
-                  type="button"
-                  onClick={() => onExitPartial('PE', c.pct as 25 | 50 | 75)}
-                  disabled={!canTrade || !c.enabled}
-                  title={canTrade ? c.title : tradeBlockedWhy}
-                  className={cn(
-                    'px-1.5 py-0.5 rounded bg-rose-950/60 border border-rose-800/50 text-rose-300 hover:bg-rose-800 hover:text-oncolor transition-all disabled:opacity-30 disabled:cursor-not-allowed cursor-pointer',
-                    FOCUS_RING,
-                  )}
-                >
-                  {c.pct}%
-                </button>
-              ))}
-            </div>
-          )}
-
-          <LegSlLevels row={row} live={live} leg="PE" lotSize={lotSize} />
-        </div>
-      </td>
-
-      {/* LEVEL EXITS */}
-      <td className="p-2.5 align-top min-w-[340px]">
-        <div className="flex flex-col gap-1.5 bg-zinc-950/30 border border-zinc-800/50 rounded-xl p-2">
-          {/* Header */}
-          <div className="flex items-center justify-between border-b border-zinc-800/60 pb-1">
-            <span className="text-[9px] font-black text-zinc-400 uppercase tracking-wider flex items-center gap-1">
-              <Shield className="h-3 w-3 text-violet-400" />
-              Exit Rules &amp; Safeguards
-            </span>
             <div className="flex items-center gap-1.5">
-              <button
-                onClick={() => onUpdate(row, true)}
-                title="Save this row's exit rules to disk"
-                className={cn(
-                  'flex items-center gap-1 text-[9px] font-bold text-emerald-400 hover:text-emerald-300 border border-emerald-500/30 bg-emerald-500/10 px-2 py-0.5 rounded cursor-pointer transition-colors',
-                  FOCUS_RING,
-                )}
-              >
-                <Check className="h-2.5 w-2.5" /> Save
+              <button onClick={() => onUpdate(row, true)} title="Save rules"
+                className={cn('text-[9px] font-bold text-emerald-400 hover:text-emerald-300 border border-emerald-500/30 bg-emerald-500/10 px-1.5 py-0.5 rounded transition-colors cursor-pointer', FOCUS_RING)}>
+                Save
               </button>
               <button
                 onClick={() => onUpdate({
                   levelHigh: '', levelLow: '', levelVw: false, vwapInterval: '1', vwapBufferPct: '0.1',
                   slRupees: '', slMultiplier: '1.2', ceSlMultiplier: '1.2', peSlMultiplier: '1.2'
                 }, true)}
-                title="Clear every level exit on this row"
-                className={cn('text-[9px] font-bold text-zinc-500 hover:text-zinc-400 cursor-pointer transition-colors', FOCUS_RING)}
+                title="Clear rules"
+                className={cn('text-[9px] text-zinc-500 hover:text-zinc-300 transition-colors cursor-pointer', FOCUS_RING)}
               >
                 &times; clear
               </button>
+              {flat && (
+                <button onClick={onDelete} title="Delete row" aria-label="Delete row"
+                  className={cn('text-zinc-500 hover:text-rose-400 p-0.5 transition-colors cursor-pointer', FOCUS_RING)}>
+                  <X className="h-3 w-3" />
+                </button>
+              )}
             </div>
           </div>
 
-          {/* Grid of Rules: Spot & Multipliers */}
-          <div className="grid grid-cols-2 gap-x-2 gap-y-1.5 text-[10px]">
-            <div className="flex items-center gap-1 bg-zinc-900/60 border border-zinc-800/60 rounded-lg px-1.5 py-0.5">
-              <span className="text-rose-400 text-[9px] font-black w-6 shrink-0">H&uarr;</span>
-              <RuleNumStepper
-                value={row.levelHigh}
-                onCommit={v => onUpdate({ levelHigh: v })}
-                wrapperClassName="w-full flex-1 flex items-center gap-0.5"
-                className="w-full flex-1 min-w-0 h-5 text-center text-[10px]"
-                title="Exit this row when spot trades at or above this level"
-              />
-            </div>
-            <div className="flex items-center gap-1 bg-zinc-900/60 border border-zinc-800/60 rounded-lg px-1.5 py-0.5">
-              <span className="text-emerald-400 text-[9px] font-black w-6 shrink-0">L&darr;</span>
-              <RuleNumStepper
-                value={row.levelLow}
-                onCommit={v => onUpdate({ levelLow: v })}
-                wrapperClassName="w-full flex-1 flex items-center gap-0.5"
-                className="w-full flex-1 min-w-0 h-5 text-center text-[10px]"
-                title="Exit this row when spot trades at or below this level"
-              />
-            </div>
-            <div className="flex items-center gap-1 bg-zinc-900/60 border border-zinc-800/60 rounded-lg px-1.5 py-0.5">
+          {/* Quick Rules Grid */}
+          <div className="grid grid-cols-2 gap-1.5 text-[10px]">
+            <div className="flex items-center gap-1 bg-zinc-900/60 border border-zinc-800/60 rounded px-1.5 py-0.5">
               <span className="text-amber-400 text-[9px] font-black w-6 shrink-0">SL ₹</span>
-              <RuleNumInput
-                value={row.slRupees}
-                onCommit={v => onUpdate({ slRupees: v })}
-                className="w-full flex-1 min-w-0 h-5 text-center text-[10px]"
-                title="Exit at this rupee loss on the pair — independent of SL ×"
-              />
+              <RuleNumInput value={row.slRupees} onCommit={v => onUpdate({ slRupees: v })} className="w-full flex-1 min-w-0 h-5 text-center text-[10px]" title="Rupee Stop Loss" />
             </div>
-            <div className="flex items-center gap-1 bg-zinc-900/60 border border-zinc-800/60 rounded-lg px-1.5 py-0.5">
+            <div className="flex items-center gap-1 bg-zinc-900/60 border border-zinc-800/60 rounded px-1.5 py-0.5">
               <span className="text-amber-500 text-[9px] font-black w-6 shrink-0">SL &times;</span>
-              <RuleNumInput
-                value={row.slMultiplier}
-                onCommit={v => onUpdate({ slMultiplier: v })}
-                className="w-full flex-1 min-w-0 h-5 text-center text-[10px]"
-                title="Exit when combined premium moves this multiple against you (e.g. 1.2)"
-              />
+              <RuleNumInput value={row.slMultiplier} onCommit={v => onUpdate({ slMultiplier: v })} className="w-full flex-1 min-w-0 h-5 text-center text-[10px]" title="Pair Multiplier Stop Loss" />
             </div>
-            <div className="flex items-center gap-1 bg-zinc-900/60 border border-zinc-800/60 rounded-lg px-1.5 py-0.5">
-              <span className="text-emerald-400 text-[9px] font-black w-6 shrink-0" title="Exit CE alone when its own premium moves this multiple against its own entry">CE &times;</span>
-              <RuleNumInput
-                value={row.ceSlMultiplier ?? '1.2'}
-                onCommit={v => onUpdate({ ceSlMultiplier: v })}
-                className="w-full flex-1 min-w-0 h-5 text-center text-[10px]"
-                title="Exit CE alone when its own premium moves this multiple against its entry"
-              />
+            <div className="flex items-center gap-1 bg-zinc-900/60 border border-zinc-800/60 rounded px-1.5 py-0.5">
+              <span className="text-rose-400 text-[9px] font-black w-6 shrink-0">H&uarr;</span>
+              <RuleNumStepper value={row.levelHigh} onCommit={v => onUpdate({ levelHigh: v })} wrapperClassName="w-full flex-1 flex items-center gap-0.5" className="w-full flex-1 min-w-0 h-5 text-center text-[10px]" title="Spot High Exit" />
             </div>
-            <div className="flex items-center gap-1 bg-zinc-900/60 border border-zinc-800/60 rounded-lg px-1.5 py-0.5">
-              <span className="text-rose-400 text-[9px] font-black w-6 shrink-0" title="Exit PE alone when its own premium moves this multiple against its own entry">PE &times;</span>
-              <RuleNumInput
-                value={row.peSlMultiplier ?? '1.2'}
-                onCommit={v => onUpdate({ peSlMultiplier: v })}
-                className="w-full flex-1 min-w-0 h-5 text-center text-[10px]"
-                title="Exit PE alone when its own premium moves this multiple against its entry"
-              />
+            <div className="flex items-center gap-1 bg-zinc-900/60 border border-zinc-800/60 rounded px-1.5 py-0.5">
+              <span className="text-emerald-400 text-[9px] font-black w-6 shrink-0">L&darr;</span>
+              <RuleNumStepper value={row.levelLow} onCommit={v => onUpdate({ levelLow: v })} wrapperClassName="w-full flex-1 flex items-center gap-0.5" className="w-full flex-1 min-w-0 h-5 text-center text-[10px]" title="Spot Low Exit" />
             </div>
           </div>
 
-          {/* VWAP Exit Sub-Bar */}
-          <div className="flex items-center justify-between gap-2 border-t border-zinc-800/60 pt-1.5">
-            <SwitchToggle
-              checked={row.levelVw}
-              onChange={v => onUpdate({ levelVw: v })}
-              label="VWAP Exit"
-              title="Exit when the combined premium crosses its session-open VWAP against you"
-            />
+          {/* VWAP sub-bar */}
+          <div className="flex items-center justify-between gap-1 text-[9px]">
+            <SwitchToggle checked={row.levelVw} onChange={v => onUpdate({ levelVw: v })} label="VWAP" title="VWAP Exit Rule" />
             {row.levelVw && (
-              <div className="flex items-center gap-1.5">
-                <select
-                  value={row.vwapInterval || '1'}
-                  title="Candle interval for session-open VWAP"
-                  onChange={e => onUpdate({ vwapInterval: e.target.value })}
-                  className="text-[9px] font-bold h-5 px-1 border border-zinc-700 rounded bg-zinc-900 text-zinc-300 focus:outline-none focus:border-violet-500"
-                >
-                  <option value="1">1m</option>
-                  <option value="5">5m</option>
+              <div className="flex items-center gap-1">
+                <select value={row.vwapInterval || '1'} onChange={e => onUpdate({ vwapInterval: e.target.value })} className="text-[9px] font-bold h-5 px-1 border border-zinc-700 rounded bg-zinc-900 text-zinc-300">
+                  <option value="1">1m</option><option value="5">5m</option>
                 </select>
-                <div className="flex items-center gap-0.5">
-                  <span className="text-[8px] font-black text-zinc-500">buf%</span>
-                  <RuleNumInput
-                    value={row.vwapBufferPct}
-                    onCommit={v => onUpdate({ vwapBufferPct: v })}
-                    className="w-9 h-5 text-center text-[10px]"
-                    title="Require the closed candle to clear VWAP by more than this % before exiting"
-                  />
-                </div>
-                <span className="text-[9px] font-mono font-bold text-zinc-400">
-                  {live.vwap != null ? `VWAP ${live.vwap.toFixed(2)}` : 'VWAP —'}
-                </span>
+                <RuleNumInput value={row.vwapBufferPct} onCommit={v => onUpdate({ vwapBufferPct: v })} className="w-8 h-5 text-center text-[10px]" title="Buffer %" />
+                <span className="font-mono text-zinc-400">{live.vwap != null ? `VWAP ${live.vwap.toFixed(2)}` : 'VWAP —'}</span>
               </div>
             )}
+          </div>
+
+          {/* Actions: Arm & Exit All */}
+          <div className="flex items-center gap-2 pt-1 border-t border-zinc-800/60">
+            {(row.status === 'draft' || row.status === 'exited') && (
+              <button onClick={onArm} className={cn('flex-1 flex items-center justify-center gap-1 text-xs font-black py-1.5 rounded-lg bg-violet-600 text-oncolor hover:bg-violet-500 cursor-pointer shadow-sm transition-all', FOCUS_RING)}>
+                <Zap className="h-3 w-3" /> Arm
+              </button>
+            )}
+            {row.status === 'armed' && (
+              <button onClick={onDisarm} className={cn('flex-1 flex items-center justify-center gap-1 text-xs font-bold py-1.5 rounded-lg bg-zinc-800 border border-zinc-700 text-zinc-300 hover:bg-zinc-700 cursor-pointer transition-all', FOCUS_RING)}>
+                <ShieldOff className="h-3 w-3" /> Disarm
+              </button>
+            )}
+            {row.status === 'entered' && (
+              <div className="flex-1 flex items-center justify-center gap-1 py-1 text-[10px] font-bold text-emerald-400 bg-emerald-500/10 border border-emerald-500/20 rounded-lg">
+                <span className="h-1.5 w-1.5 rounded-full bg-emerald-400 animate-pulse" /> Active
+              </div>
+            )}
+            <button onClick={() => onExit('ALL')} disabled={flat || !canTrade}
+              className={cn('flex-1 flex items-center justify-center gap-1 text-xs font-black py-1.5 rounded-lg bg-rose-600 text-oncolor hover:bg-rose-500 disabled:opacity-30 disabled:cursor-not-allowed cursor-pointer shadow-sm transition-all', FOCUS_RING)}>
+              <ShieldOff className="h-3 w-3" /> Exit All
+            </button>
           </div>
         </div>
       </td>
@@ -4902,31 +4661,27 @@ export default function FocusTool() {
                      wrapper above and the Level Exits column was simply
                      clipped: no scrollbar, no way to reach it. */
                   <div className="overflow-x-auto">
-                  <table className="w-full border-collapse text-left min-w-[1560px]">
+                  <table className="w-full border-collapse text-left min-w-[1360px]">
                     <thead>
                       {/* Section group headers */}
                       <tr className="border-b border-zinc-700">
-                        <th colSpan={5} className="bg-zinc-800 px-4 py-2 text-xs font-bold text-white uppercase tracking-wider border-r-2 border-r-zinc-600" title="How this row enters: timing, strike, size and side">
-                          Configuration
+                        <th colSpan={3} className="bg-zinc-800 px-4 py-2 text-xs font-bold text-white uppercase tracking-wider border-r-2 border-r-zinc-600" title="Configuration and market pricing: timing, setup, strikes, and live telemetry">
+                          Configuration &amp; Telemetry
                         </th>
-                        <th className="bg-zinc-800 px-4 py-2 text-xs font-bold text-white uppercase tracking-wider border-r-2 border-r-zinc-600" title="Row state and its arm / disarm / exit control">
-                          Status
+                        <th className="bg-zinc-800 px-4 py-2 text-xs font-bold text-white uppercase tracking-wider border-r-2 border-r-zinc-600" title="Dual-leg execution: Call & Put trading pods, lots, steppers, and partial exits">
+                          Leg Execution &amp; Orders
                         </th>
-                        <th colSpan={3} className="bg-zinc-800 px-4 py-2 text-xs font-bold text-white uppercase tracking-wider" title="Open legs and every rule that can close them">
-                          Positions &amp; Exits
+                        <th className="bg-zinc-800 px-4 py-2 text-xs font-bold text-white uppercase tracking-wider" title="Safeguards, status, P&L, stop-loss and VWAP rules, and emergency exit controls">
+                          Safeguards &amp; Command
                         </th>
                       </tr>
                       {/* Column headers */}
                       <tr className="bg-zinc-800 border-b border-zinc-700 text-xs font-bold text-white uppercase tracking-wider">
-                        <th className="p-3" title="Entry time, exit time and the expiry-days filter">Timing</th>
-                        <th className="p-3" title="CE and PE strikes, picked by ATM offset or by target premium">CE / PE Strikes</th>
-                        <th className="p-3" title="Combined premium, CE/PE breakdown, ₹ value and Val/OI PCR">LTP</th>
-                        <th className="p-3" title="Lots per leg">Lots</th>
-                        <th className="p-3 border-r-2 border-r-zinc-600" title="Trade the call, the put, or both">Side</th>
-                        <th className="p-3 border-r-2 border-r-zinc-600" title="Where the row stands, and its arm / exit control">Status / Actions</th>
-                        <th className="p-3 text-center" title="Call leg: live premium, lot controls, and calculated CE × / pair SL × levels">CE</th>
-                        <th className="p-3 text-center border-r-2 border-r-zinc-600" title="Put leg: live premium, lot controls, and calculated PE × / pair SL × levels">PE</th>
-                        <th className="p-3 text-center" title="Spot, VWAP and stop-loss rules that close this row">Level Exits</th>
+                        <th className="p-3 border-r-2 border-r-zinc-700/80" title="Underlying, timing, side, lots, and expiry">Strategy &amp; Setup</th>
+                        <th className="p-3 border-r-2 border-r-zinc-700/80" title="CE and PE strikes, picked by ATM offset or target premium">Strikes &amp; Selection</th>
+                        <th className="p-3 border-r-2 border-r-zinc-600" title="Combined premium, CE/PE breakdown, ₹ value and Val/OI PCR">Market Telemetry</th>
+                        <th className="p-3 border-r-2 border-r-zinc-600" title="Call (CE) and Put (PE) trading controls, sizes, and quick exits">Call (CE) &amp; Put (PE) Orders</th>
+                        <th className="p-3" title="Status, P&L, stop loss, spot level exits, arm, and exit all">Safeguards &amp; Command</th>
                       </tr>
                     </thead>
                     <tbody>
@@ -4964,7 +4719,7 @@ export default function FocusTool() {
                       })}
                       {rows.length === 0 && (
                         <tr>
-                          <td colSpan={9} className="py-12 text-center">
+                          <td colSpan={5} className="py-12 text-center">
                             <div className="flex flex-col items-center gap-2">
                               <TrendingUp className="h-8 w-8 text-zinc-700" />
                               <span className="text-sm font-semibold text-zinc-500">No rows configured</span>
