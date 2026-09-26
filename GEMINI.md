@@ -272,4 +272,5 @@ Backtest results are never overwritten. Every completed simulation is archived i
 ### Dashboard Integration (`OptionsBacktester.tsx` & `/api/backtest/history`)
 - **Auto-Archiving**: Every simulation run from the dashboard is automatically archived upon completion.
 - **History Modal**: Searchable "Past Backtests" drawer/modal allowing operators to search runs, load parameters and results directly into performance charts, open interactive tearsheets, and download trades CSVs.
+- **Detailed Features & Quirks Guide**: See [`docs/OPTIONS_BACKTESTER_GUIDE.md`](docs/OPTIONS_BACKTESTER_GUIDE.md) for full documentation on Re-Entry vs Re-Execute, Range Breakout, Positional multi-day holding, Protect Profits (Lock & Trail), gap-at-open slippage, and dynamic DTE.
 
