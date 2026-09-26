@@ -867,8 +867,8 @@ def _simulate_one_day(
                     state.struck_sl = True
                     state.exit_dt = bar.dt
 
-                    rex_sl_max = getattr(leg, "re_execute_sl_count", 0)
-                    re_sl_max = getattr(leg, "re_entry_sl_count", 0)
+                    rex_sl_max = getattr(leg, "re_execute_sl_count", 0) if square_off_mode != "all_legs" else 0
+                    re_sl_max = getattr(leg, "re_entry_sl_count", 0) if square_off_mode != "all_legs" else 0
 
                     if state.current_re_execute_sl < rex_sl_max:
                         closed_legs.append({
@@ -955,8 +955,8 @@ def _simulate_one_day(
                     state.struck_target = True
                     state.exit_dt = bar.dt
 
-                    rex_tp_max = getattr(leg, "re_execute_tp_count", 0)
-                    re_tp_max = getattr(leg, "re_entry_tp_count", 0)
+                    rex_tp_max = getattr(leg, "re_execute_tp_count", 0) if square_off_mode != "all_legs" else 0
+                    re_tp_max = getattr(leg, "re_entry_tp_count", 0) if square_off_mode != "all_legs" else 0
 
                     if state.current_re_execute_tp < rex_tp_max:
                         closed_legs.append({
@@ -1052,8 +1052,9 @@ def _simulate_one_day(
                         state.exit_reason = "SQUARE_OFF_ALL"
                         state.struck_sl = True
                         state.exit_dt = bar.dt
-                    elif state.is_waiting:
+                    elif state.is_waiting or state.waiting_reentry_cost:
                         state.is_waiting = False
+                        state.waiting_reentry_cost = False
                         state.exit_reason = "CANCELLED_BY_SQUARE_OFF"
 
         # --- Dynamic Rolling Check (ATM Buffer Roll) ---

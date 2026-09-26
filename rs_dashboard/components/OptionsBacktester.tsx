@@ -1350,27 +1350,41 @@ export default function OptionsBacktester({
           {/* Right: Square Off mode & check toggles */}
           <div className="flex items-center gap-4 flex-wrap">
             <div className="flex items-center gap-3">
-              <label className="flex items-center gap-1 cursor-pointer">
+              <label className="flex items-center gap-1 cursor-pointer select-none">
                 <input
                   type="radio"
                   name="squareOffMode"
                   checked={squareOffMode === 'one_leg'}
                   onChange={() => setSquareOffMode('one_leg')}
-                  className="w-3.5 h-3.5 accent-teal-500"
+                  className="w-3.5 h-3.5 accent-teal-500 cursor-pointer"
                 />
-                <span>Square Off One Leg</span>
-                <Info className="w-3 h-3 text-zinc-500" />
+                <span className={squareOffMode === 'one_leg' ? 'text-teal-400 font-semibold' : 'text-zinc-300'}>
+                  Square Off One Leg
+                </span>
+                <span
+                  title="If any leg Stop Loss or Target Profit Condition is met then only that leg will be Squared off."
+                  className="cursor-help inline-flex items-center"
+                >
+                  <Info className="w-3 h-3 text-zinc-500 hover:text-zinc-300" />
+                </span>
               </label>
-              <label className="flex items-center gap-1 cursor-pointer">
+              <label className="flex items-center gap-1 cursor-pointer select-none">
                 <input
                   type="radio"
                   name="squareOffMode"
                   checked={squareOffMode === 'all_legs'}
                   onChange={() => setSquareOffMode('all_legs')}
-                  className="w-3.5 h-3.5 accent-teal-500"
+                  className="w-3.5 h-3.5 accent-teal-500 cursor-pointer"
                 />
-                <span>Square Off All Legs</span>
-                <Info className="w-3 h-3 text-zinc-500" />
+                <span className={squareOffMode === 'all_legs' ? 'text-teal-400 font-semibold' : 'text-zinc-300'}>
+                  Square Off All Legs
+                </span>
+                <span
+                  title="If any leg Stop Loss or Target Profit Condition is met then Square off entire Strategy."
+                  className="cursor-help inline-flex items-center"
+                >
+                  <Info className="w-3 h-3 text-zinc-500 hover:text-zinc-300" />
+                </span>
               </label>
             </div>
 
