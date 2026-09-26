@@ -42,6 +42,8 @@ type CpOperator = 'closest' | 'gte' | 'lte';
 
 type WaitAndTradeType = 'pct_up' | 'pct_down' | 'pts_up' | 'pts_down';
 
+type ReEntryType = 'asap' | 'cost';
+
 interface LegConfig {
   option_type: 'CE' | 'PE';
   position: 'sell' | 'buy';
@@ -54,6 +56,11 @@ interface LegConfig {
   cp_operator?: CpOperator; // 'closest' (~), 'gte' (>=), 'lte' (<=)
   wait_and_trade_val?: number; // 0 = disabled (immediate entry)
   wait_and_trade_type?: WaitAndTradeType; // 'pct_up' (% ↑), 'pct_down' (% ↓), 'pts_up' (Pts ↑), 'pts_down' (Pts ↓)
+  re_entry_sl_count?: number; // 0 = disabled
+  re_entry_sl_type?: ReEntryType; // 'asap' | 'cost'
+  re_execute_sl_count?: number; // 0 = disabled
+  re_execute_tp_count?: number; // 0 = disabled
+  re_entry_tp_count?: number; // 0 = disabled
 }
 
 interface LegResult {
@@ -486,6 +493,7 @@ export default function OptionsBacktester({
   const [selectedMainIndex, setSelectedMainIndex] = useState('Nifty');
   const [squareOffMode, setSquareOffMode] = useState<'one_leg' | 'all_legs'>('one_leg');
   const [waitAndTradeActive, setWaitAndTradeActive] = useState(false);
+  const [reEntryActive, setReEntryActive] = useState(false);
 
   // ── Active Legs
   const [legs, setLegs] = useState<LegConfig[]>(DEFAULT_STOCKMOCK_LEGS);
@@ -850,6 +858,11 @@ export default function OptionsBacktester({
             ...l,
             wait_and_trade_val: waitAndTradeActive ? (l.wait_and_trade_val ?? 0) : 0,
             wait_and_trade_type: l.wait_and_trade_type ?? 'pct_up',
+            re_entry_sl_count: reEntryActive ? (l.re_entry_sl_count ?? 0) : 0,
+            re_entry_sl_type: l.re_entry_sl_type ?? 'asap',
+            re_execute_sl_count: reEntryActive ? (l.re_execute_sl_count ?? 0) : 0,
+            re_execute_tp_count: reEntryActive ? (l.re_execute_tp_count ?? 0) : 0,
+            re_entry_tp_count: reEntryActive ? (l.re_entry_tp_count ?? 0) : 0,
           })),
           lot_size: lotSize,
           profit_target_pct: strategyTargetActive ? profitTargetPct : 0,
@@ -1384,10 +1397,22 @@ export default function OptionsBacktester({
                 <span>Move SL to Cost</span>
                 <Info className="w-3 h-3 text-zinc-500" />
               </label>
-              <label className="flex items-center gap-1 cursor-not-allowed opacity-50" title="Not implemented yet — needs multi-entry-per-day simulation">
-                <input type="checkbox" disabled className="w-3.5 h-3.5 rounded" />
-                <span>Re-Entry / Re-Execute</span>
-                <Info className="w-3 h-3 text-zinc-500" />
+              <label className="flex items-center gap-1 cursor-pointer select-none">
+                <input
+                  type="checkbox"
+                  checked={reEntryActive}
+                  onChange={e => setReEntryActive(e.target.checked)}
+                  className="w-3.5 h-3.5 accent-teal-500 rounded cursor-pointer"
+                />
+                <span className={reEntryActive ? 'text-teal-400 font-semibold' : 'text-zinc-300'}>
+                  Re-Entry / Re-Execute
+                </span>
+                <span
+                  title="Re-Execute: Re-runs entry logic and takes a fresh strike at current market price after SL/TP. Re-Entry: Re-enters the same strike/leg either immediately (ASAP) or when price retraces to original Cost."
+                  className="cursor-help inline-flex items-center"
+                >
+                  <Info className="w-3 h-3 text-zinc-500 hover:text-zinc-300 inline" />
+                </span>
               </label>
               <label className="flex items-center gap-1 cursor-not-allowed opacity-50" title="Not implemented yet — needs auto-generated hedge legs">
                 <input type="checkbox" disabled className="w-3.5 h-3.5 rounded" />
@@ -1671,6 +1696,136 @@ export default function OptionsBacktester({
                     >
                       <Plus className="w-3.5 h-3.5 stroke-[2.5]" /> Trail Stop Loss
                     </button>
+                  )}
+
+                  {/* Re-Entry / Re-Execute Controls */}
+                  {reEntryActive && (
+                    <>
+                      {/* SL Action Chip or Buttons */}
+                      {(leg.re_execute_sl_count ?? 0) > 0 ? (
+                        <div className="flex items-center gap-1 bg-indigo-500/10 border border-indigo-500/30 text-indigo-400 px-1.5 py-0.5 rounded text-xs font-semibold shadow-xs">
+                          <span className="text-[10px] uppercase font-bold text-indigo-300">REX-SL:</span>
+                          <span className="text-[10px] text-zinc-400">Fresh</span>
+                          <select
+                            value={leg.re_execute_sl_count || 1}
+                            onChange={e => handleUpdateLeg(index, { re_execute_sl_count: Number(e.target.value) })}
+                            className="bg-zinc-800 text-indigo-300 border border-zinc-700 rounded px-1 text-xs"
+                          >
+                            {[1, 2, 3, 4, 5].map(n => (
+                              <option key={n} value={n}>{n}x</option>
+                            ))}
+                          </select>
+                          <button
+                            type="button"
+                            onClick={() => handleUpdateLeg(index, { re_execute_sl_count: 0 })}
+                            className="text-zinc-500 hover:text-red-500 ml-0.5 leading-none"
+                            title="Remove Re-Execute (SL)"
+                          >
+                            ✕
+                          </button>
+                        </div>
+                      ) : (leg.re_entry_sl_count ?? 0) > 0 ? (
+                        <div className="flex items-center gap-1 bg-purple-500/10 border border-purple-500/30 text-purple-400 px-1.5 py-0.5 rounded text-xs font-semibold shadow-xs">
+                          <span className="text-[10px] uppercase font-bold text-purple-300">RE-SL:</span>
+                          <select
+                            value={leg.re_entry_sl_type || 'asap'}
+                            onChange={e => handleUpdateLeg(index, { re_entry_sl_type: e.target.value as ReEntryType })}
+                            className="bg-zinc-800 text-purple-300 border border-zinc-700 rounded px-1 text-xs"
+                          >
+                            <option value="asap">ASAP</option>
+                            <option value="cost">Cost</option>
+                          </select>
+                          <select
+                            value={leg.re_entry_sl_count || 1}
+                            onChange={e => handleUpdateLeg(index, { re_entry_sl_count: Number(e.target.value) })}
+                            className="bg-zinc-800 text-purple-300 border border-zinc-700 rounded px-1 text-xs"
+                          >
+                            {[1, 2, 3, 4, 5].map(n => (
+                              <option key={n} value={n}>{n}x</option>
+                            ))}
+                          </select>
+                          <button
+                            type="button"
+                            onClick={() => handleUpdateLeg(index, { re_entry_sl_count: 0 })}
+                            className="text-zinc-500 hover:text-red-500 ml-0.5 leading-none"
+                            title="Remove Re-Entry (SL)"
+                          >
+                            ✕
+                          </button>
+                        </div>
+                      ) : (
+                        <div className="flex items-center gap-2">
+                          <button
+                            type="button"
+                            onClick={() => handleUpdateLeg(index, { re_entry_sl_count: 1, re_entry_sl_type: 'asap', re_execute_sl_count: 0 })}
+                            className="text-xs text-teal-400 hover:underline font-semibold flex items-center gap-0.5 cursor-pointer"
+                          >
+                            <Plus className="w-3.5 h-3.5 stroke-[2.5]" /> Re-Entry (SL)
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => handleUpdateLeg(index, { re_execute_sl_count: 1, re_entry_sl_count: 0 })}
+                            className="text-xs text-indigo-400 hover:underline font-semibold flex items-center gap-0.5 cursor-pointer"
+                          >
+                            <Plus className="w-3.5 h-3.5 stroke-[2.5]" /> Re-Execute (SL)
+                          </button>
+                        </div>
+                      )}
+
+                      {/* TP Action Chip or Button */}
+                      {(leg.re_execute_tp_count ?? 0) > 0 ? (
+                        <div className="flex items-center gap-1 bg-emerald-500/10 border border-emerald-500/30 text-emerald-400 px-1.5 py-0.5 rounded text-xs font-semibold shadow-xs">
+                          <span className="text-[10px] uppercase font-bold text-emerald-300">REX-TP:</span>
+                          <span className="text-[10px] text-zinc-400">Fresh</span>
+                          <select
+                            value={leg.re_execute_tp_count || 1}
+                            onChange={e => handleUpdateLeg(index, { re_execute_tp_count: Number(e.target.value) })}
+                            className="bg-zinc-800 text-emerald-300 border border-zinc-700 rounded px-1 text-xs"
+                          >
+                            {[1, 2, 3, 4, 5].map(n => (
+                              <option key={n} value={n}>{n}x</option>
+                            ))}
+                          </select>
+                          <button
+                            type="button"
+                            onClick={() => handleUpdateLeg(index, { re_execute_tp_count: 0 })}
+                            className="text-zinc-500 hover:text-red-500 ml-0.5 leading-none"
+                            title="Remove Re-Execute (TP)"
+                          >
+                            ✕
+                          </button>
+                        </div>
+                      ) : (leg.re_entry_tp_count ?? 0) > 0 ? (
+                        <div className="flex items-center gap-1 bg-teal-500/10 border border-teal-500/30 text-teal-400 px-1.5 py-0.5 rounded text-xs font-semibold shadow-xs">
+                          <span className="text-[10px] uppercase font-bold text-teal-300">RE-TP:</span>
+                          <select
+                            value={leg.re_entry_tp_count || 1}
+                            onChange={e => handleUpdateLeg(index, { re_entry_tp_count: Number(e.target.value) })}
+                            className="bg-zinc-800 text-teal-300 border border-zinc-700 rounded px-1 text-xs"
+                          >
+                            {[1, 2, 3, 4, 5].map(n => (
+                              <option key={n} value={n}>{n}x</option>
+                            ))}
+                          </select>
+                          <button
+                            type="button"
+                            onClick={() => handleUpdateLeg(index, { re_entry_tp_count: 0 })}
+                            className="text-zinc-500 hover:text-red-500 ml-0.5 leading-none"
+                            title="Remove Re-Entry (TP)"
+                          >
+                            ✕
+                          </button>
+                        </div>
+                      ) : (
+                        <button
+                          type="button"
+                          onClick={() => handleUpdateLeg(index, { re_execute_tp_count: 1, re_entry_tp_count: 0 })}
+                          className="text-xs text-teal-400 hover:underline font-semibold flex items-center gap-0.5 cursor-pointer"
+                        >
+                          <Plus className="w-3.5 h-3.5 stroke-[2.5]" /> Re-Execute (TP)
+                        </button>
+                      )}
+                    </>
                   )}
 
                   {/* Journey Link — not implemented; a real multi-stage SL/target ladder */}
