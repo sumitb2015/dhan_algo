@@ -10,11 +10,11 @@
   "total_pnl": -13887.07,
   "max_drawdown": 35060.66,
   "has_tearsheet": true,
+  "has_report": true,
   "tags": [
     "straddle",
     "mean_reversion",
     "otm_shift",
     "tuesday_expiry"
-  ],
-  "has_report": true
+  ]
 }

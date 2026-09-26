@@ -327,6 +327,8 @@ class LegState:
     struck_target: bool = False
     strike: float = 0.0
     peak_favorable_pct: float = 0.0  # this leg's own best favorable move since entry, for trailing SL
+    entry_dt: Optional[datetime] = None
+    exit_dt: Optional[datetime] = None
 
     @property
     def is_open(self) -> bool:
@@ -606,6 +608,8 @@ def _simulate_one_day(
                     
             entered = True
             entry_dt = bar.dt
+            for s in leg_states:
+                s.entry_dt = bar.dt
             entry_spot = bar.spot
             ref_spot = bar.spot
             current_atm = atm_strike
@@ -1062,6 +1066,8 @@ def run_backtest(leg_configs: List[LegConfig], cycles: List[ExpiryCycle],
                     "exit_price": round(cleg["exit_price"], 2),
                     "pnl": round(lpnl, 2),
                     "exit_reason": cleg["exit_reason"],
+                    "entry_time": cleg.get("entry_time"),
+                    "exit_time": cleg.get("exit_time"),
                 })
 
             # 2. Add active legs at day's exit
@@ -1081,6 +1087,8 @@ def run_backtest(leg_configs: List[LegConfig], cycles: List[ExpiryCycle],
                         "exit_price": round(state.exit_price, 2),
                         "pnl": round(leg_pnl, 2),
                         "exit_reason": state.exit_reason,
+                        "entry_time": state.entry_dt.strftime("%H:%M") if getattr(state, "entry_dt", None) else (entry_dt.strftime("%H:%M") if entry_dt else None),
+                        "exit_time": state.exit_dt.strftime("%H:%M") if getattr(state, "exit_dt", None) else (exit_dt.strftime("%H:%M") if exit_dt else None),
                     })
 
             # Calculate commission including all rolls

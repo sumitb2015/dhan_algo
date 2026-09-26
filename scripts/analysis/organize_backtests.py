@@ -96,6 +96,11 @@ def organize_straddle_backtest():
     # Cycles
     cycles = []
     for _, r in df.iterrows():
+        pnl_pts = float(r['pnl_pts']) if pd.notna(r.get('pnl_pts')) else 0.0
+        comb_entry = float(r['comb_premium']) if pd.notna(r.get('comb_premium')) else (float(r['ce_entry']) + float(r['pe_entry']))
+        comb_exit = round(comb_entry - pnl_pts, 2)
+        half_pts = pnl_pts / 2.0
+
         legs_res = [
             {
                 "option_type": "CE",
@@ -103,9 +108,11 @@ def organize_straddle_backtest():
                 "strike": float(r['atm']),
                 "lots": 1,
                 "entry_price": float(r['ce_entry']),
-                "exit_price": None,
+                "exit_price": round(float(r['ce_entry']) - half_pts, 2),
                 "pnl": round(float(r['net_inr'] / 2.0), 2),
-                "exit_reason": str(r['exit_reason'])
+                "exit_reason": str(r['exit_reason']),
+                "entry_time": str(r['entry_time']),
+                "exit_time": str(r['exit_time']),
             },
             {
                 "option_type": "PE",
@@ -113,9 +120,11 @@ def organize_straddle_backtest():
                 "strike": float(r['atm']),
                 "lots": 1,
                 "entry_price": float(r['pe_entry']),
-                "exit_price": None,
+                "exit_price": round(float(r['pe_entry']) - half_pts, 2),
                 "pnl": round(float(r['net_inr'] / 2.0), 2),
-                "exit_reason": str(r['exit_reason'])
+                "exit_reason": str(r['exit_reason']),
+                "entry_time": str(r['entry_time']),
+                "exit_time": str(r['exit_time']),
             }
         ]
         cycles.append({
@@ -124,8 +133,8 @@ def organize_straddle_backtest():
             "exit_dt": f"{r['date']}T{r['exit_time']}:00",
             "entry_spot": float(r['spot']),
             "vix": None,
-            "net_credit": float(r['comb_premium']),
-            "exit_combined": None,
+            "net_credit": comb_entry,
+            "exit_combined": comb_exit,
             "pnl": round(float(r['net_inr']), 2),
             "exit_reason": str(r['exit_reason']),
             "is_complete": True,
@@ -197,6 +206,7 @@ def organize_straddle_backtest():
         "total_pnl": summary['total_pnl'],
         "max_drawdown": summary['max_drawdown'],
         "has_tearsheet": os.path.exists(ts_src),
+        "has_report": os.path.exists(os.path.join(dest_dir, "report.html")),
         "tags": ["straddle", "mean_reversion", "otm_shift", "tuesday_expiry"]
     }
     with open(os.path.join(dest_dir, "metadata.json"), "w") as fp:

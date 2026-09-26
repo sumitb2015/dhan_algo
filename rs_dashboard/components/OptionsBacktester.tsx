@@ -5,7 +5,8 @@ import dynamic from 'next/dynamic';
 import NavBar from './NavBar';
 import {
   Copy, Trash2, Settings, Share2, Save, Info, Plus, Calendar,
-  Square, RefreshCw, History, ExternalLink, Download, FileText, Search, X
+  Square, RefreshCw, History, ExternalLink, Download, FileText, Search, X,
+  Clock, Eye, ChevronLeft, ChevronRight, Layers, CheckCircle2, ArrowUpRight, ArrowDownRight
 } from 'lucide-react';
 import { toast } from 'sonner';
 
@@ -57,6 +58,8 @@ interface LegResult {
   exit_price: number | null;
   pnl: number;
   exit_reason: string;
+  entry_time?: string | null;
+  exit_time?: string | null;
 }
 
 interface CycleResult {
@@ -222,6 +225,124 @@ function formatStockMockDate(dateStr: string): string {
   }
 }
 
+function formatExpiryShort(dateStr: string): string {
+  try {
+    const cleanDate = dateStr.slice(0, 10);
+    const parts = cleanDate.split('-');
+    if (parts.length === 3) {
+      const d = new Date(parseInt(parts[0], 10), parseInt(parts[1], 10) - 1, parseInt(parts[2], 10));
+      const months = ['JAN', 'FEB', 'MAR', 'APR', 'MAY', 'JUN', 'JUL', 'AUG', 'SEP', 'OCT', 'NOV', 'DEC'];
+      return `${String(d.getDate()).padStart(2, '0')} ${months[d.getMonth()]}`;
+    }
+    return dateStr;
+  } catch {
+    return dateStr;
+  }
+}
+
+function formatDayFull(dateStr: string | null): string {
+  if (!dateStr) return '—';
+  try {
+    const cleanDate = dateStr.slice(0, 10);
+    const parts = cleanDate.split('-');
+    if (parts.length === 3) {
+      const d = new Date(parseInt(parts[0], 10), parseInt(parts[1], 10) - 1, parseInt(parts[2], 10));
+      const days = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+      const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+      return `${days[d.getDay()]}, ${months[d.getMonth()]} ${String(d.getDate()).padStart(2, '0')}, ${d.getFullYear()}`;
+    }
+    return dateStr;
+  } catch {
+    return dateStr;
+  }
+}
+
+export interface OrderExecutionItem {
+  id: number;
+  time: string;
+  side: 'BUY' | 'SELL';
+  action: 'ENTRY' | 'EXIT' | 'ADJUSTMENT';
+  instrument: string;
+  lots: number;
+  qty: number;
+  price: number;
+  turnover: number;
+  pnl?: number;
+  reason: string;
+  strike: number;
+  optionType: string;
+}
+
+export function getTimewiseOrders(c: CycleResult, lotSize: number = 65): OrderExecutionItem[] {
+  const orders: OrderExecutionItem[] = [];
+  let seq = 1;
+  const expiryFormatted = c.expiry_date ? formatExpiryShort(c.expiry_date) : '';
+  const defaultEntryTime = c.entry_dt ? fmtTime(c.entry_dt) : '09:20';
+  const defaultExitTime = c.exit_dt ? fmtTime(c.exit_dt) : '15:15';
+
+  // 1. Entry orders for each leg
+  c.legs.forEach((leg) => {
+    if (leg.entry_price != null && leg.entry_price > 0) {
+      const time = leg.entry_time || defaultEntryTime;
+      const side = (leg.position.toUpperCase() === 'BUY' ? 'BUY' : 'SELL') as 'BUY' | 'SELL';
+      const lots = leg.lots || 1;
+      const qty = lots * lotSize;
+      const price = leg.entry_price;
+      orders.push({
+        id: seq++,
+        time,
+        side,
+        action: 'ENTRY',
+        instrument: `NIFTY ${expiryFormatted} ${Math.round(leg.strike)} ${leg.option_type}`.trim(),
+        lots,
+        qty,
+        price,
+        turnover: price * qty,
+        reason: 'Initial Strategy Entry',
+        strike: leg.strike,
+        optionType: leg.option_type,
+      });
+    }
+  });
+
+  // 2. Exit orders for each leg
+  c.legs.forEach((leg) => {
+    const exitPrice = leg.exit_price != null 
+      ? Math.abs(leg.exit_price) 
+      : (c.exit_combined != null ? Math.abs(c.exit_combined) / c.legs.length : leg.entry_price);
+    if (exitPrice != null && exitPrice > 0) {
+      const time = leg.exit_time || defaultExitTime;
+      // Exit side is reverse of entry position: sell leg is bought back, buy leg is sold
+      const side = (leg.position.toLowerCase() === 'sell' ? 'BUY' : 'SELL') as 'BUY' | 'SELL';
+      const lots = leg.lots || 1;
+      const qty = lots * lotSize;
+      const reason = leg.exit_reason || c.exit_reason || 'Exit';
+      const action = reason.includes('ROLL') || reason.includes('SHIFT') ? 'ADJUSTMENT' : 'EXIT';
+      orders.push({
+        id: seq++,
+        time,
+        side,
+        action,
+        instrument: `NIFTY ${expiryFormatted} ${Math.round(leg.strike)} ${leg.option_type}`.trim(),
+        lots,
+        qty,
+        price: exitPrice,
+        turnover: exitPrice * qty,
+        pnl: leg.pnl,
+        reason,
+        strike: leg.strike,
+        optionType: leg.option_type,
+      });
+    }
+  });
+
+  // Sort orders chronologically by execution time
+  orders.sort((a, b) => a.time.localeCompare(b.time));
+  // Re-number sequence IDs
+  orders.forEach((o, idx) => { o.id = idx + 1; });
+  return orders;
+}
+
 function computeYearMDD(curve: { date: string; cumulative_pnl: number }[], year: string) {
   const pts = curve.filter(p => p.date.startsWith(year));
   if (!pts.length) return { mdd: 0, days: null };
@@ -380,6 +501,32 @@ export default function OptionsBacktester({
   const [loadedFromHistory, setLoadedFromHistory] = useState<BacktestHistoryItem | null>(null);
   const [viewingTearsheetId, setViewingTearsheetId] = useState<string | null>(null);
   const [viewingReportId, setViewingReportId] = useState<string | null>(null);
+
+  // Day trade execution modal
+  const [selectedDayCycle, setSelectedDayCycle] = useState<CycleResult | null>(null);
+  const [dayModalTab, setDayModalTab] = useState<'timeline' | 'legs'>('timeline');
+
+  // Keyboard navigation for Day Trade Execution modal
+  useEffect(() => {
+    if (!selectedDayCycle || !result) return;
+    const filtered = result.cycles.filter(c => c.exit_reason !== 'NO_ENTRY');
+    const idx = filtered.findIndex(
+      item => item === selectedDayCycle || (item.entry_dt === selectedDayCycle.entry_dt && item.expiry_date === selectedDayCycle.expiry_date)
+    );
+
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        setSelectedDayCycle(null);
+      } else if (e.key === 'ArrowLeft' && idx > 0) {
+        setSelectedDayCycle(filtered[idx - 1]);
+      } else if (e.key === 'ArrowRight' && idx < filtered.length - 1) {
+        setSelectedDayCycle(filtered[idx + 1]);
+      }
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [selectedDayCycle, result]);
 
   const fetchHistory = React.useCallback(async () => {
     setLoadingHistory(true);
@@ -2180,15 +2327,21 @@ export default function OptionsBacktester({
           </div>
 
           {/* Full Trade Log Table */}
+          {/* Full Trade Log Table */}
           <div className="bg-zinc-900 border border-zinc-800 rounded-xl overflow-hidden shadow-xs mb-8">
             <div className="px-4 py-3 border-b border-zinc-800 bg-zinc-850/60 flex items-center justify-between">
-              <h3 className="text-xs font-bold text-zinc-200 uppercase tracking-wider">
-                Full Execution Trade Log ({result.cycles.filter(c => c.exit_reason !== 'NO_ENTRY').length} cycles)
-              </h3>
+              <div>
+                <h3 className="text-xs font-bold text-zinc-200 uppercase tracking-wider flex items-center gap-2">
+                  Full Execution Trade Log ({result.cycles.filter(c => c.exit_reason !== 'NO_ENTRY').length} cycles)
+                </h3>
+                <p className="text-[11px] text-zinc-400 mt-0.5">
+                  Click any day row to view full timewise trade execution breakdown
+                </p>
+              </div>
             </div>
-            <div className="overflow-x-auto">
+            <div className="overflow-x-auto max-h-[600px] overflow-y-auto">
               <table className="text-xs whitespace-nowrap w-full">
-                <thead>
+                <thead className="sticky top-0 z-10">
                   <tr className="bg-zinc-800 text-white border-b border-zinc-700">
                     <th className="font-bold text-left px-3 py-2">#</th>
                     <th className="font-bold text-left px-3 py-2">Entry Date</th>
@@ -2201,16 +2354,22 @@ export default function OptionsBacktester({
                     <th className="font-bold text-right px-3 py-2">Exit ₹</th>
                     <th className="font-bold text-right px-3 py-2 border-l border-zinc-800">P/L</th>
                     <th className="font-bold text-center px-2 py-2">Reason</th>
+                    <th className="font-bold text-center px-2 py-2 border-l border-zinc-800">Action</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {result.cycles.filter(c => c.exit_reason !== 'NO_ENTRY').slice(0, 100).map((c, idx) => (
-                    <tr key={idx} className={`border-t border-zinc-800 ${idx % 2 === 0 ? 'bg-zinc-900' : 'bg-zinc-850/40'}`}>
+                  {result.cycles.filter(c => c.exit_reason !== 'NO_ENTRY').map((c, idx) => (
+                    <tr
+                      key={idx}
+                      onClick={() => setSelectedDayCycle(c)}
+                      className={`border-t border-zinc-800 cursor-pointer transition-colors hover:bg-teal-500/10 group ${idx % 2 === 0 ? 'bg-zinc-900' : 'bg-zinc-850/40'}`}
+                      title="Click to view full day trade execution"
+                    >
                       <td className="px-3 py-2 text-zinc-500 font-bold">{idx + 1}</td>
-                      <td className="px-3 py-2 text-zinc-200 font-mono">{fmtDate(c.entry_dt)}</td>
-                      <td className="px-2 py-2 text-right text-zinc-500 font-mono">{fmtTime(c.entry_dt)}</td>
+                      <td className="px-3 py-2 text-zinc-200 font-mono font-medium">{fmtDate(c.entry_dt)}</td>
+                      <td className="px-2 py-2 text-right text-zinc-400 font-mono">{fmtTime(c.entry_dt)}</td>
                       <td className="px-3 py-2 text-zinc-200 font-mono border-l border-zinc-800">{fmtDate(c.exit_dt)}</td>
-                      <td className="px-2 py-2 text-right text-zinc-500 font-mono">{fmtTime(c.exit_dt)}</td>
+                      <td className="px-2 py-2 text-right text-zinc-400 font-mono">{fmtTime(c.exit_dt)}</td>
                       <td className="px-2 py-2 text-center border-l border-zinc-800 font-medium">{cycleTypeLabel(c.legs)}</td>
                       <td className="px-2 py-2 text-right font-mono text-zinc-300">
                         {c.entry_spot != null ? Math.round(c.entry_spot).toLocaleString('en-IN') : '—'}
@@ -2221,13 +2380,22 @@ export default function OptionsBacktester({
                       <td className="px-3 py-2 text-right font-mono text-zinc-200">
                         {c.exit_combined != null ? Math.abs(c.exit_combined).toFixed(2) : '—'}
                       </td>
-                      <td className={`px-3 py-2 text-right font-mono font-bold border-l border-zinc-800 ${c.pnl >= 0 ? 'text-emerald-600' : 'text-red-600'}`}>
+                      <td className={`px-3 py-2 text-right font-mono font-bold border-l border-zinc-800 ${c.pnl >= 0 ? 'text-emerald-500' : 'text-red-500'}`}>
                         {fmtPnl(c.pnl)}
                       </td>
                       <td className="px-2 py-2 text-center">
                         <span className={`inline-block px-2 py-0.5 rounded text-[10px] font-bold ${EXIT_REASON_CLS[c.exit_reason] ?? 'bg-zinc-800 text-zinc-400'}`}>
                           {c.exit_reason}
                         </span>
+                      </td>
+                      <td className="px-2 py-2 text-center border-l border-zinc-800">
+                        <button
+                          type="button"
+                          onClick={(e) => { e.stopPropagation(); setSelectedDayCycle(c); }}
+                          className="px-2 py-1 rounded bg-zinc-800 group-hover:bg-teal-600 group-hover:text-white text-zinc-300 text-[10px] font-semibold flex items-center gap-1 mx-auto transition-colors cursor-pointer"
+                        >
+                          <Eye className="w-3 h-3 text-teal-400 group-hover:text-white" /> View
+                        </button>
                       </td>
                     </tr>
                   ))}
@@ -2238,6 +2406,351 @@ export default function OptionsBacktester({
 
         </div>
       )}
+
+      {/* ── Day Trade Execution Modal ── */}
+      {selectedDayCycle && (() => {
+        const filtered = result?.cycles.filter(c => c.exit_reason !== 'NO_ENTRY') || [];
+        const currIdx = filtered.findIndex(
+          item => item === selectedDayCycle || (item.entry_dt === selectedDayCycle.entry_dt && item.expiry_date === selectedDayCycle.expiry_date)
+        );
+        const orders = getTimewiseOrders(selectedDayCycle, lotSize || 65);
+        const totalTurnover = orders.reduce((sum, o) => sum + o.turnover, 0);
+        const netPts = (selectedDayCycle.net_credit != null && selectedDayCycle.exit_combined != null)
+          ? selectedDayCycle.net_credit - Math.abs(selectedDayCycle.exit_combined)
+          : null;
+
+        return (
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-oncolor-dark/70 backdrop-blur-xs p-3 sm:p-5">
+            <div className="bg-zinc-900 rounded-2xl shadow-2xl border border-zinc-800 max-w-4xl w-full text-zinc-200 max-h-[92vh] flex flex-col overflow-hidden animate-in fade-in-0 zoom-in-95 duration-150">
+              
+              {/* Header */}
+              <div className="flex items-center justify-between border-b border-zinc-800 px-5 py-3.5 bg-zinc-850/80 shrink-0">
+                <div className="flex items-center gap-3">
+                  <div className="w-8 h-8 rounded-lg bg-teal-500/10 border border-teal-500/30 flex items-center justify-center text-teal-400 shrink-0">
+                    <Clock className="w-4 h-4" />
+                  </div>
+                  <div>
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <h2 className="text-sm font-bold text-white tracking-tight">
+                        Day Execution Log — {formatDayFull(selectedDayCycle.entry_dt)}
+                      </h2>
+                      <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-zinc-800 text-zinc-300 border border-zinc-700">
+                        Expiry: {selectedDayCycle.expiry_date}
+                      </span>
+                    </div>
+                    <p className="text-[11px] text-zinc-400 mt-0.5">
+                      Spot: <span className="font-mono text-zinc-200 font-semibold">{selectedDayCycle.entry_spot != null ? Math.round(selectedDayCycle.entry_spot).toLocaleString('en-IN') : '—'}</span>
+                      {' '}• Type: <span className="font-medium text-teal-300">{cycleTypeLabel(selectedDayCycle.legs)}</span>
+                      {' '}• Reason: <span className="font-medium text-amber-300">{selectedDayCycle.exit_reason}</span>
+                    </p>
+                  </div>
+                </div>
+
+                <div className="flex items-center gap-3">
+                  <div className="text-right">
+                    <span className="text-[10px] text-zinc-500 block uppercase font-bold tracking-wider">Day Net P&amp;L</span>
+                    <span className={`text-base font-mono font-bold ${selectedDayCycle.pnl >= 0 ? 'text-emerald-500' : 'text-red-500'}`}>
+                      {fmtPnl(selectedDayCycle.pnl)}
+                    </span>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setSelectedDayCycle(null)}
+                    className="text-zinc-400 hover:text-white p-1 rounded-lg hover:bg-zinc-800 transition-colors cursor-pointer"
+                    title="Close (Esc)"
+                  >
+                    <X className="w-5 h-5" />
+                  </button>
+                </div>
+              </div>
+
+              {/* Top KPI Cards Strip */}
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5 p-4 border-b border-zinc-800 bg-zinc-950/40 text-xs shrink-0">
+                <div className="bg-zinc-900 border border-zinc-800/80 rounded-lg p-2.5">
+                  <span className="text-[10px] text-zinc-500 font-bold uppercase tracking-wider block">Entry Time &amp; Spot</span>
+                  <span className="text-xs font-mono font-semibold text-zinc-200 mt-0.5 block">
+                    {fmtTime(selectedDayCycle.entry_dt)} @ {selectedDayCycle.entry_spot ? Math.round(selectedDayCycle.entry_spot).toLocaleString('en-IN') : '—'}
+                  </span>
+                </div>
+                <div className="bg-zinc-900 border border-zinc-800/80 rounded-lg p-2.5">
+                  <span className="text-[10px] text-zinc-500 font-bold uppercase tracking-wider block">Exit Time &amp; Reason</span>
+                  <span className="text-xs font-mono font-semibold text-zinc-200 mt-0.5 block truncate" title={selectedDayCycle.exit_reason}>
+                    {fmtTime(selectedDayCycle.exit_dt)} ({selectedDayCycle.exit_reason})
+                  </span>
+                </div>
+                <div className="bg-zinc-900 border border-zinc-800/80 rounded-lg p-2.5">
+                  <span className="text-[10px] text-zinc-500 font-bold uppercase tracking-wider block">Combined Premium</span>
+                  <span className="text-xs font-mono font-semibold text-zinc-200 mt-0.5 block">
+                    ₹{selectedDayCycle.net_credit != null ? selectedDayCycle.net_credit.toFixed(2) : '—'} &rarr; ₹{selectedDayCycle.exit_combined != null ? Math.abs(selectedDayCycle.exit_combined).toFixed(2) : '—'}
+                  </span>
+                </div>
+                <div className="bg-zinc-900 border border-zinc-800/80 rounded-lg p-2.5">
+                  <span className="text-[10px] text-zinc-500 font-bold uppercase tracking-wider block">Orders &amp; Adjustments</span>
+                  <span className="text-xs font-mono font-semibold text-teal-400 mt-0.5 block">
+                    {orders.length} Executions ({selectedDayCycle.rolls ?? 0} Shifts)
+                  </span>
+                </div>
+              </div>
+
+              {/* Tabs Toggle Strip */}
+              <div className="px-5 pt-3 border-b border-zinc-800 flex items-center gap-2 bg-zinc-900 shrink-0">
+                <button
+                  type="button"
+                  onClick={() => setDayModalTab('timeline')}
+                  className={`pb-2.5 text-xs font-semibold flex items-center gap-1.5 border-b-2 transition-colors cursor-pointer ${
+                    dayModalTab === 'timeline'
+                      ? 'border-teal-500 text-teal-400'
+                      : 'border-transparent text-zinc-400 hover:text-zinc-200'
+                  }`}
+                >
+                  <Clock className="w-3.5 h-3.5" /> Timewise Order Ledger ({orders.length})
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setDayModalTab('legs')}
+                  className={`pb-2.5 text-xs font-semibold flex items-center gap-1.5 border-b-2 transition-colors cursor-pointer ${
+                    dayModalTab === 'legs'
+                      ? 'border-teal-500 text-teal-400'
+                      : 'border-transparent text-zinc-400 hover:text-zinc-200'
+                  }`}
+                >
+                  <Layers className="w-3.5 h-3.5" /> Position Legs ({selectedDayCycle.legs.length})
+                </button>
+              </div>
+
+              {/* Modal Body / Tables */}
+              <div className="overflow-y-auto flex-1 p-5">
+                {dayModalTab === 'timeline' ? (
+                  <div className="bg-zinc-950/60 border border-zinc-800 rounded-xl overflow-hidden shadow-xs">
+                    <table className="text-xs whitespace-nowrap w-full">
+                      <thead>
+                        <tr className="bg-zinc-800 text-white border-b border-zinc-700">
+                          <th className="font-bold text-left px-3 py-2.5">#</th>
+                          <th className="font-bold text-left px-3 py-2.5">Time</th>
+                          <th className="font-bold text-center px-3 py-2.5 border-l border-zinc-800">Side</th>
+                          <th className="font-bold text-center px-3 py-2.5">Action</th>
+                          <th className="font-bold text-left px-3 py-2.5 border-l border-zinc-800">Instrument / Contract</th>
+                          <th className="font-bold text-right px-2 py-2.5">Lots</th>
+                          <th className="font-bold text-right px-3 py-2.5">Qty</th>
+                          <th className="font-bold text-right px-3 py-2.5 border-l border-zinc-800">Price ₹</th>
+                          <th className="font-bold text-right px-3 py-2.5">Turnover ₹</th>
+                          <th className="font-bold text-center px-3 py-2.5 border-l border-zinc-800">Status</th>
+                          <th className="font-bold text-left px-3 py-2.5 border-l border-zinc-800">Trigger / Reason</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {orders.map((o, idx) => (
+                          <tr
+                            key={idx}
+                            className={`border-t border-zinc-850 hover:bg-zinc-800/40 transition-colors ${
+                              idx % 2 === 0 ? 'bg-zinc-900/60' : 'bg-zinc-950/40'
+                            }`}
+                          >
+                            <td className="px-3 py-2.5 text-zinc-500 font-bold">{o.id}</td>
+                            <td className="px-3 py-2.5 font-mono font-bold text-zinc-200">{o.time}</td>
+                            <td className="px-3 py-2.5 text-center border-l border-zinc-800/60">
+                              <span
+                                className={`inline-block px-2 py-0.5 rounded text-[10px] font-bold ${
+                                  o.side === 'BUY'
+                                    ? 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/40'
+                                    : 'bg-red-500/20 text-red-400 border border-red-500/40'
+                                }`}
+                              >
+                                {o.side}
+                              </span>
+                            </td>
+                            <td className="px-3 py-2.5 text-center">
+                              <span
+                                className={`inline-block px-2 py-0.5 rounded text-[10px] font-semibold ${
+                                  o.action === 'ENTRY'
+                                    ? 'bg-zinc-800 text-zinc-300 border border-zinc-700'
+                                    : o.action === 'ADJUSTMENT'
+                                    ? 'bg-purple-500/20 text-purple-300 border border-purple-500/40'
+                                    : 'bg-sky-500/20 text-sky-300 border border-sky-500/40'
+                                }`}
+                              >
+                                {o.action}
+                              </span>
+                            </td>
+                            <td className="px-3 py-2.5 font-mono font-bold text-white border-l border-zinc-800/60">
+                              {o.instrument}
+                            </td>
+                            <td className="px-2 py-2.5 text-right font-mono text-zinc-400">{o.lots}</td>
+                            <td className="px-3 py-2.5 text-right font-mono text-zinc-300">{o.qty}</td>
+                            <td className="px-3 py-2.5 text-right font-mono font-bold text-zinc-100 border-l border-zinc-800/60">
+                              ₹{o.price.toFixed(2)}
+                            </td>
+                            <td className="px-3 py-2.5 text-right font-mono text-zinc-300">
+                              ₹{Math.round(o.turnover).toLocaleString('en-IN')}
+                            </td>
+                            <td className="px-3 py-2.5 text-center border-l border-zinc-800/60">
+                              <span className="inline-flex items-center gap-1 text-[10px] font-bold text-emerald-400 bg-emerald-500/10 px-2 py-0.5 rounded border border-emerald-500/30">
+                                ● FILLED
+                              </span>
+                            </td>
+                            <td className="px-3 py-2.5 text-zinc-300 border-l border-zinc-800/60 text-[11px]">
+                              {o.reason}
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                ) : (
+                  <div className="bg-zinc-950/60 border border-zinc-800 rounded-xl overflow-hidden shadow-xs">
+                    <table className="text-xs whitespace-nowrap w-full">
+                      <thead>
+                        <tr className="bg-zinc-800 text-white border-b border-zinc-700">
+                          <th className="font-bold text-left px-3 py-2.5">#</th>
+                          <th className="font-bold text-center px-2 py-2.5">Option</th>
+                          <th className="font-bold text-right px-3 py-2.5">Strike</th>
+                          <th className="font-bold text-center px-3 py-2.5 border-l border-zinc-800">Position</th>
+                          <th className="font-bold text-right px-2 py-2.5">Lots</th>
+                          <th className="font-bold text-right px-3 py-2.5 border-l border-zinc-800">Entry Time &amp; Price</th>
+                          <th className="font-bold text-right px-3 py-2.5">Exit Time &amp; Price</th>
+                          <th className="font-bold text-right px-3 py-2.5 border-l border-zinc-800">Points</th>
+                          <th className="font-bold text-right px-3 py-2.5">Leg P/L ₹</th>
+                          <th className="font-bold text-center px-3 py-2.5 border-l border-zinc-800">Exit Reason</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {selectedDayCycle.legs.map((leg, idx) => {
+                          const legPts = leg.entry_price != null && leg.exit_price != null
+                            ? (leg.position.toLowerCase() === 'sell' ? (leg.entry_price - leg.exit_price) : (leg.exit_price - leg.entry_price))
+                            : null;
+                          return (
+                            <tr
+                              key={idx}
+                              className={`border-t border-zinc-850 hover:bg-zinc-800/40 transition-colors ${
+                                idx % 2 === 0 ? 'bg-zinc-900/60' : 'bg-zinc-950/40'
+                              }`}
+                            >
+                              <td className="px-3 py-2.5 text-zinc-500 font-bold">{idx + 1}</td>
+                              <td className="px-2 py-2.5 text-center font-bold text-zinc-200">
+                                <span className={leg.option_type === 'CE' ? 'text-teal-400' : 'text-amber-400'}>
+                                  {leg.option_type}
+                                </span>
+                              </td>
+                              <td className="px-3 py-2.5 text-right font-mono font-bold text-white">{leg.strike}</td>
+                              <td className="px-3 py-2.5 text-center border-l border-zinc-800/60">
+                                <span
+                                  className={`inline-block px-2 py-0.5 rounded text-[10px] font-bold ${
+                                    leg.position.toLowerCase() === 'sell'
+                                      ? 'bg-red-500/20 text-red-400 border border-red-500/40'
+                                      : 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/40'
+                                  }`}
+                                >
+                                  {leg.position.toUpperCase()}
+                                </span>
+                              </td>
+                              <td className="px-2 py-2.5 text-right font-mono text-zinc-400">{leg.lots}</td>
+                              <td className="px-3 py-2.5 text-right font-mono text-zinc-200 border-l border-zinc-800/60">
+                                <span className="text-zinc-500 mr-1.5 text-[11px]">{leg.entry_time || fmtTime(selectedDayCycle.entry_dt)}</span>
+                                <span className="font-bold">₹{leg.entry_price != null ? leg.entry_price.toFixed(2) : '—'}</span>
+                              </td>
+                              <td className="px-3 py-2.5 text-right font-mono text-zinc-200">
+                                <span className="text-zinc-500 mr-1.5 text-[11px]">{leg.exit_time || fmtTime(selectedDayCycle.exit_dt)}</span>
+                                <span className="font-bold">₹{leg.exit_price != null ? Math.abs(leg.exit_price).toFixed(2) : '—'}</span>
+                              </td>
+                              <td className={`px-3 py-2.5 text-right font-mono font-bold border-l border-zinc-800/60 ${
+                                (legPts ?? 0) >= 0 ? 'text-emerald-400' : 'text-red-400'
+                              }`}>
+                                {legPts != null ? `${legPts >= 0 ? '+' : ''}${legPts.toFixed(2)} pts` : '—'}
+                              </td>
+                              <td className={`px-3 py-2.5 text-right font-mono font-bold ${
+                                leg.pnl >= 0 ? 'text-emerald-500' : 'text-red-500'
+                              }`}>
+                                {fmtPnl(leg.pnl)}
+                              </td>
+                              <td className="px-3 py-2.5 text-center border-l border-zinc-800/60">
+                                <span className={`inline-block px-2 py-0.5 rounded text-[10px] font-bold ${EXIT_REASON_CLS[leg.exit_reason] ?? 'bg-zinc-800 text-zinc-400'}`}>
+                                  {leg.exit_reason || selectedDayCycle.exit_reason}
+                                </span>
+                              </td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+
+                {/* Financial Summary Footnote */}
+                <div className="mt-4 p-3 rounded-xl bg-zinc-950/60 border border-zinc-800/80 flex items-center justify-between flex-wrap gap-3 text-xs">
+                  <div className="flex items-center gap-4 text-zinc-400">
+                    <div>
+                      <span className="text-zinc-500 block text-[10px] uppercase font-bold">Gross Turnover</span>
+                      <span className="font-mono text-zinc-200 font-semibold">₹{Math.round(totalTurnover).toLocaleString('en-IN')}</span>
+                    </div>
+                    {netPts != null && (
+                      <div>
+                        <span className="text-zinc-500 block text-[10px] uppercase font-bold">Points Captured</span>
+                        <span className={`font-mono font-semibold ${netPts >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
+                          {netPts >= 0 ? '+' : ''}{netPts.toFixed(2)} pts
+                        </span>
+                      </div>
+                    )}
+                    <div>
+                      <span className="text-zinc-500 block text-[10px] uppercase font-bold">Execution Friction</span>
+                      <span className="font-mono text-zinc-300 font-semibold">
+                        ~₹{((includeCosts ? commissionPerLot : 40) * selectedDayCycle.legs.length).toFixed(0)}
+                      </span>
+                    </div>
+                  </div>
+                  <div className="text-right">
+                    <span className="text-zinc-500 block text-[10px] uppercase font-bold">Session Net Realized</span>
+                    <span className={`text-sm font-mono font-bold ${selectedDayCycle.pnl >= 0 ? 'text-emerald-500' : 'text-red-500'}`}>
+                      {fmtPnl(selectedDayCycle.pnl)}
+                    </span>
+                  </div>
+                </div>
+              </div>
+
+              {/* Footer with Prev / Next Navigation */}
+              <div className="border-t border-zinc-800 px-5 py-3 bg-zinc-850/80 flex items-center justify-between shrink-0">
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    disabled={currIdx <= 0}
+                    onClick={() => currIdx > 0 && setSelectedDayCycle(filtered[currIdx - 1])}
+                    className={`px-3 py-1.5 rounded-lg border text-xs font-semibold flex items-center gap-1.5 transition-colors cursor-pointer ${
+                      currIdx <= 0
+                        ? 'border-zinc-800 text-zinc-600 bg-zinc-900 cursor-not-allowed'
+                        : 'border-zinc-700 bg-zinc-800 hover:bg-zinc-700 text-zinc-200'
+                    }`}
+                  >
+                    <ChevronLeft className="w-4 h-4" /> Previous Day
+                  </button>
+                  <span className="text-xs font-mono text-zinc-400 px-2">
+                    Day {currIdx + 1} of {filtered.length}
+                  </span>
+                  <button
+                    type="button"
+                    disabled={currIdx >= filtered.length - 1}
+                    onClick={() => currIdx < filtered.length - 1 && setSelectedDayCycle(filtered[currIdx + 1])}
+                    className={`px-3 py-1.5 rounded-lg border text-xs font-semibold flex items-center gap-1.5 transition-colors cursor-pointer ${
+                      currIdx >= filtered.length - 1
+                        ? 'border-zinc-800 text-zinc-600 bg-zinc-900 cursor-not-allowed'
+                        : 'border-zinc-700 bg-zinc-800 hover:bg-zinc-700 text-zinc-200'
+                    }`}
+                  >
+                    Next Day <ChevronRight className="w-4 h-4" />
+                  </button>
+                </div>
+
+                <button
+                  type="button"
+                  onClick={() => setSelectedDayCycle(null)}
+                  className="px-4 py-1.5 bg-zinc-800 hover:bg-zinc-700 text-zinc-200 border border-zinc-700 rounded-lg text-xs font-bold transition-colors cursor-pointer"
+                >
+                  Close (Esc)
+                </button>
+              </div>
+
+            </div>
+          </div>
+        );
+      })()}
 
       {/* ── Past Backtests History Modal ── */}
       {historyModalOpen && (
