@@ -350,8 +350,16 @@ export function getTimewiseOrders(c: CycleResult, lotSize: number = 65): OrderEx
     }
   });
 
-  // Sort orders chronologically by execution time
-  orders.sort((a, b) => a.time.localeCompare(b.time));
+  // Sort orders chronologically by execution time (ENTRY before ADJUSTMENT before EXIT)
+  const actionPriority: Record<string, number> = { ENTRY: 1, ADJUSTMENT: 2, EXIT: 3 };
+  orders.sort((a, b) => {
+    const tCmp = a.time.localeCompare(b.time);
+    if (tCmp !== 0) return tCmp;
+    const pA = actionPriority[a.action] || 2;
+    const pB = actionPriority[b.action] || 2;
+    if (pA !== pB) return pA - pB;
+    return a.id - b.id;
+  });
   // Re-number sequence IDs
   orders.forEach((o, idx) => { o.id = idx + 1; });
   return orders;

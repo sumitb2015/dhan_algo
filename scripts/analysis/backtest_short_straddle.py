@@ -800,6 +800,7 @@ def _simulate_one_day(
                     state.exit_price = leg_prices[i][3] * slip
                     state.exit_reason = "ROLL_ATM"
                     state.struck_target = True
+                    state.exit_dt = bar.dt
                     closed_legs.append({
                         "option_type": leg.option_type,
                         "position": leg.position,
@@ -808,6 +809,10 @@ def _simulate_one_day(
                         "entry_price": state.entry_price,
                         "exit_price": state.exit_price,
                         "exit_reason": "ROLL_ATM",
+                        "entry_dt": state.entry_dt.isoformat() if getattr(state, "entry_dt", None) else None,
+                        "exit_dt": bar.dt.isoformat(),
+                        "entry_time": state.entry_dt.strftime("%H:%M") if getattr(state, "entry_dt", None) else None,
+                        "exit_time": bar.dt.strftime("%H:%M"),
                     })
 
                 # 2. Re-enter fresh ATM legs at new spot
@@ -821,6 +826,7 @@ def _simulate_one_day(
                 for i, (leg, state) in enumerate(zip(leg_configs, leg_states)):
                     slip = slip_sell_entry if leg.position == "sell" else slip_buy_entry
                     state.strike = new_atm
+                    state.entry_dt = bar.dt
                     _, _, _, leg_c = _get_leg_prices(
                         bar.dt, leg.option_type, state.strike, bar.legs[i],
                         bar.spot, days_to_expiry, strike_lookup
@@ -1223,10 +1229,16 @@ def run_backtest(leg_configs: List[LegConfig], cycles: List[ExpiryCycle],
                 current_dd_trades = 0
 
             net_credit = sum(
+                c["entry_price"] * (1 if c["position"] == "sell" else -1) * c["lots"]
+                for c in closed_legs
+            ) + sum(
                 s.entry_price * (1 if leg.position == "sell" else -1) * leg.lots
                 for leg, s in zip(leg_configs, leg_states)
             )
             exit_combined = sum(
+                c["exit_price"] * (1 if c["position"] == "sell" else -1) * c["lots"]
+                for c in closed_legs
+            ) + sum(
                 s.exit_price * (1 if leg.position == "sell" else -1) * leg.lots
                 for leg, s in zip(leg_configs, leg_states)
             )
