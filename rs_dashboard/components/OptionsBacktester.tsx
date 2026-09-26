@@ -518,6 +518,11 @@ export default function OptionsBacktester({
   const [overallSlVal, setOverallSlVal] = useState(0);
 
   const [protectProfitsActive, setProtectProfitsActive] = useState(false);
+  const [protectProfitMode, setProtectProfitMode] = useState<'lock' | 'trail' | 'lock_trail'>('lock');
+  const [lockProfitReaches, setLockProfitReaches] = useState(1000);
+  const [lockProfitMin, setLockProfitMin] = useState(0);
+  const [trailProfitStep, setTrailProfitStep] = useState(1000);
+  const [trailProfitBy, setTrailProfitBy] = useState(500);
   const [trailSlPct, setTrailSlPct] = useState(0);
 
   // Dates & bottom controls
@@ -644,6 +649,16 @@ export default function OptionsBacktester({
         setOverallSlVal(Number(p.overall_sl_pct));
         setOverallSlType('pct');
         setStrategySlActive(true);
+      }
+      if (p.protect_profit_mode && p.protect_profit_mode !== 'none') {
+        setProtectProfitsActive(true);
+        setProtectProfitMode(p.protect_profit_mode as 'lock' | 'trail' | 'lock_trail');
+        if (p.lock_profit_reaches !== undefined) setLockProfitReaches(Number(p.lock_profit_reaches));
+        if (p.lock_profit_min !== undefined) setLockProfitMin(Number(p.lock_profit_min));
+        if (p.trail_profit_step !== undefined) setTrailProfitStep(Number(p.trail_profit_step));
+        if (p.trail_profit_by !== undefined) setTrailProfitBy(Number(p.trail_profit_by));
+      } else {
+        setProtectProfitsActive(false);
       }
       if (p.max_diff_pct !== undefined && Number(p.max_diff_pct) > 0) {
         setMaxDiffPct(Number(p.max_diff_pct));
@@ -899,6 +914,11 @@ export default function OptionsBacktester({
           max_rolls: maxRolls,
           scalp_floor_pct: scalpFloorPct,
           trail_sl_pct: protectProfitsActive ? trailSlPct : 0,
+          protect_profit_mode: protectProfitsActive ? protectProfitMode : 'none',
+          lock_profit_reaches: protectProfitsActive && (protectProfitMode === 'lock' || protectProfitMode === 'lock_trail') ? lockProfitReaches : 0,
+          lock_profit_min: protectProfitsActive && (protectProfitMode === 'lock' || protectProfitMode === 'lock_trail') ? lockProfitMin : 0,
+          trail_profit_step: protectProfitsActive && (protectProfitMode === 'trail' || protectProfitMode === 'lock_trail') ? trailProfitStep : 0,
+          trail_profit_by: protectProfitsActive && (protectProfitMode === 'trail' || protectProfitMode === 'lock_trail') ? trailProfitBy : 0,
           square_off_mode: squareOffMode,
           max_diff_pct: priceDiffActive ? maxDiffPct : 0,
           entry_cutoff_time: entryCutoffTime,
@@ -988,6 +1008,12 @@ export default function OptionsBacktester({
       targetType: profitTargetType,
       sl: strategySlActive ? overallSlVal : 0,
       slType: overallSlType,
+      protectProfitsActive,
+      protectProfitMode,
+      lockProfitReaches,
+      lockProfitMin,
+      trailProfitStep,
+      trailProfitBy,
     };
     try {
       localStorage.setItem('stockmock_saved_strategy', JSON.stringify(payload));
@@ -2146,35 +2172,174 @@ export default function OptionsBacktester({
           </div>
         </div>
 
-        {/* Protect The Profits link centered */}
-        <div className="flex justify-center my-3">
+        {/* Protect The Profits Section */}
+        <div className="my-4">
           {protectProfitsActive ? (
-            <div className="flex items-center gap-2 bg-zinc-850 border border-zinc-700 rounded px-3 py-1.5 text-xs text-zinc-200 shadow-xs">
-              <span className="font-semibold text-amber-400">Protect Profits (Trail SL %):</span>
-              <input
-                type="number"
-                min={1}
-                value={trailSlPct}
-                onChange={e => setTrailSlPct(Number(e.target.value))}
-                className="w-14 bg-zinc-800 border border-zinc-700 rounded px-1.5 py-0.5 text-center text-xs text-zinc-100 font-semibold"
-              />
-              <span>%</span>
-              <button
-                type="button"
-                onClick={() => { setProtectProfitsActive(false); setTrailSlPct(0); }}
-                className="text-zinc-500 hover:text-red-500 ml-1"
-              >
-                ✕
-              </button>
+            <div className="bg-zinc-850/80 border border-zinc-700/80 rounded-lg p-3 text-xs shadow-xs">
+              {/* Top Bar with 3 Radio options */}
+              <div className="flex items-center justify-center gap-8 pb-2.5 mb-2.5 border-b border-zinc-700/50 text-xs">
+                <label className="flex items-center gap-2 cursor-pointer select-none">
+                  <input
+                    type="radio"
+                    name="protectProfitMode"
+                    checked={protectProfitMode === 'lock'}
+                    onChange={() => setProtectProfitMode('lock')}
+                    className="w-3.5 h-3.5 accent-teal-500 cursor-pointer"
+                  />
+                  <span className={protectProfitMode === 'lock' ? 'text-teal-400 font-semibold' : 'text-zinc-300'}>
+                    Lock Minimum Profit
+                  </span>
+                </label>
+                <label className="flex items-center gap-2 cursor-pointer select-none">
+                  <input
+                    type="radio"
+                    name="protectProfitMode"
+                    checked={protectProfitMode === 'trail'}
+                    onChange={() => setProtectProfitMode('trail')}
+                    className="w-3.5 h-3.5 accent-teal-500 cursor-pointer"
+                  />
+                  <span className={protectProfitMode === 'trail' ? 'text-teal-400 font-semibold' : 'text-zinc-300'}>
+                    Trail Profits
+                  </span>
+                </label>
+                <label className="flex items-center gap-2 cursor-pointer select-none">
+                  <input
+                    type="radio"
+                    name="protectProfitMode"
+                    checked={protectProfitMode === 'lock_trail'}
+                    onChange={() => setProtectProfitMode('lock_trail')}
+                    className="w-3.5 h-3.5 accent-teal-500 cursor-pointer"
+                  />
+                  <span className={protectProfitMode === 'lock_trail' ? 'text-teal-400 font-semibold' : 'text-zinc-300'}>
+                    Lock &amp; Trail Profits
+                  </span>
+                </label>
+              </div>
+
+              {/* Content Row */}
+              <div className="flex items-center justify-between flex-wrap gap-4 pt-1">
+                <span className="font-semibold text-zinc-300 text-xs shrink-0">Protect The Profits:</span>
+
+                <div className="flex items-center gap-6 flex-wrap flex-1">
+                  {/* Lock Minimum Profit Inputs */}
+                  {(protectProfitMode === 'lock' || protectProfitMode === 'lock_trail') && (
+                    <>
+                      <div className="flex items-center gap-2">
+                        <span className="text-zinc-400">If Profit Reaches</span>
+                        <div className="flex flex-col">
+                          <div className="flex items-center rounded overflow-hidden shadow-xs border border-zinc-700">
+                            <span className="bg-teal-600 text-white font-bold px-2 py-1 text-xs select-none">
+                              ₹
+                            </span>
+                            <input
+                              type="number"
+                              min={0}
+                              step={100}
+                              value={lockProfitReaches || ''}
+                              onChange={e => setLockProfitReaches(Math.max(0, Number(e.target.value)))}
+                              placeholder="1000"
+                              className="w-24 bg-zinc-800 px-2 py-1 text-xs text-zinc-100 font-medium focus:outline-hidden"
+                            />
+                          </div>
+                          <span className="text-[10px] text-zinc-500 text-center mt-0.5">
+                            (Min ₹{Math.round(lockProfitReaches * 0.5)})
+                          </span>
+                        </div>
+                      </div>
+
+                      <div className="flex items-center gap-2">
+                        <span className="text-zinc-400">Lock Minimum Profit at</span>
+                        <div className="flex flex-col">
+                          <div className="flex items-center rounded overflow-hidden shadow-xs border border-zinc-700">
+                            <span className="bg-teal-600 text-white font-bold px-2 py-1 text-xs select-none">
+                              ₹
+                            </span>
+                            <input
+                              type="number"
+                              min={0}
+                              step={100}
+                              value={lockProfitMin}
+                              onChange={e => setLockProfitMin(Math.max(0, Number(e.target.value)))}
+                              placeholder="0"
+                              className="w-24 bg-zinc-800 px-2 py-1 text-xs text-zinc-100 font-medium focus:outline-hidden"
+                            />
+                          </div>
+                          <span className="text-[10px] text-zinc-500 text-center mt-0.5">
+                            (Max ₹{lockProfitReaches || 500})
+                          </span>
+                        </div>
+                      </div>
+                    </>
+                  )}
+
+                  {/* Trail Profits Inputs */}
+                  {(protectProfitMode === 'trail' || protectProfitMode === 'lock_trail') && (
+                    <>
+                      <div className="flex items-center gap-2">
+                        <span className="text-zinc-400">Increase in Profit</span>
+                        <div className="flex items-center rounded overflow-hidden shadow-xs border border-zinc-700">
+                          <span className="bg-teal-600 text-white font-bold px-2 py-1 text-xs select-none">
+                            ₹
+                          </span>
+                          <input
+                            type="number"
+                            min={0}
+                            step={100}
+                            value={trailProfitStep || ''}
+                            onChange={e => setTrailProfitStep(Math.max(0, Number(e.target.value)))}
+                            placeholder="1000"
+                            className="w-24 bg-zinc-800 px-2 py-1 text-xs text-zinc-100 font-medium focus:outline-hidden"
+                          />
+                        </div>
+                      </div>
+
+                      <div className="flex items-center gap-2">
+                        <span className="text-zinc-400">Trail Minimum Profit by</span>
+                        <div className="flex items-center rounded overflow-hidden shadow-xs border border-zinc-700">
+                          <span className="bg-teal-600 text-white font-bold px-2 py-1 text-xs select-none">
+                            ₹
+                          </span>
+                          <input
+                            type="number"
+                            min={0}
+                            step={100}
+                            value={trailProfitBy || ''}
+                            onChange={e => setTrailProfitBy(Math.max(0, Number(e.target.value)))}
+                            placeholder="500"
+                            className="w-24 bg-zinc-800 px-2 py-1 text-xs text-zinc-100 font-medium focus:outline-hidden"
+                          />
+                        </div>
+                      </div>
+                    </>
+                  )}
+                </div>
+
+                {/* Close Button */}
+                <button
+                  type="button"
+                  onClick={() => setProtectProfitsActive(false)}
+                  className="text-zinc-500 hover:text-red-400 cursor-pointer text-sm p-1 ml-auto leading-none"
+                  title="Remove Protect The Profits"
+                >
+                  ✕
+                </button>
+              </div>
             </div>
           ) : (
-            <button
-              type="button"
-              onClick={() => { setProtectProfitsActive(true); setTrailSlPct(15); }}
-              className="text-xs text-teal-400 hover:underline font-semibold flex items-center gap-1 cursor-pointer"
-            >
-              <Plus className="w-3.5 h-3.5 stroke-[2.5]" /> Protect The Profits <Info className="w-3 h-3 text-zinc-500" />
-            </button>
+            <div className="flex justify-center">
+              <button
+                type="button"
+                onClick={() => {
+                  setProtectProfitsActive(true);
+                  setProtectProfitMode('lock');
+                  setLockProfitReaches(1000);
+                  setLockProfitMin(0);
+                }}
+                className="text-xs text-teal-400 hover:underline font-semibold flex items-center gap-1 cursor-pointer"
+              >
+                <Plus className="w-3.5 h-3.5 stroke-[2.5]" /> Protect The Profits
+              </button>
+            </div>
           )}
         </div>
 

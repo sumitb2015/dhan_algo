@@ -511,6 +511,11 @@ def _simulate_one_day(
     overall_sl_val: float = 0.0,
     overall_sl_type: str = "pct",
     lot_size: int = 65,
+    protect_profit_mode: Optional[str] = None,
+    lock_profit_reaches: float = 0.0,
+    lock_profit_min: float = 0.0,
+    trail_profit_step: float = 0.0,
+    trail_profit_by: float = 0.0,
 ) -> dict:
     """Simulate one intraday trade over day_bars. Returns state dict."""
     if profit_target_val == 0.0 and profit_target_pct > 0:
@@ -526,6 +531,7 @@ def _simulate_one_day(
     ref_spot = 0.0
     current_atm = 0.0
     peak_profit_pct = 0.0
+    current_locked_profit: Optional[float] = None
     entered = False
     entry_dt = None
     exit_dt = None
@@ -1247,6 +1253,55 @@ def _simulate_one_day(
             exit_dt = bar.dt
             break
 
+        # --- Protect The Profits ---
+        protect_profit_hit = False
+        if protect_profit_mode in ("lock", "trail", "lock_trail"):
+            if protect_profit_mode == "lock":
+                if lock_profit_reaches > 0:
+                    if current_locked_profit is None and current_strategy_mtm >= lock_profit_reaches:
+                        current_locked_profit = lock_profit_min
+                    if current_locked_profit is not None and current_strategy_mtm <= current_locked_profit:
+                        protect_profit_hit = True
+
+            elif protect_profit_mode == "trail":
+                if trail_profit_step > 0 and trail_profit_by > 0:
+                    if current_strategy_mtm >= trail_profit_step:
+                        steps = int(current_strategy_mtm // trail_profit_step)
+                        new_locked = steps * trail_profit_by
+                        if current_locked_profit is None or new_locked > current_locked_profit:
+                            current_locked_profit = new_locked
+                    if current_locked_profit is not None and current_strategy_mtm <= current_locked_profit:
+                        protect_profit_hit = True
+
+            elif protect_profit_mode == "lock_trail":
+                if lock_profit_reaches > 0:
+                    if current_locked_profit is None and current_strategy_mtm >= lock_profit_reaches:
+                        current_locked_profit = lock_profit_min
+                    if current_locked_profit is not None:
+                        extra_profit = current_strategy_mtm - lock_profit_reaches
+                        if trail_profit_step > 0 and trail_profit_by > 0 and extra_profit >= trail_profit_step:
+                            steps = int(extra_profit // trail_profit_step)
+                            new_locked = lock_profit_min + (steps * trail_profit_by)
+                            if new_locked > current_locked_profit:
+                                current_locked_profit = new_locked
+                        if current_strategy_mtm <= current_locked_profit:
+                            protect_profit_hit = True
+
+        if protect_profit_hit:
+            for i, (leg, state) in enumerate(zip(leg_configs, leg_states)):
+                if state.is_open:
+                    slip = slip_sell_exit if leg.position == "sell" else slip_buy_exit
+                    state.exit_price = leg_prices[i][3] * slip
+                    state.exit_reason = "PROTECT_PROFIT"
+                    state.exit_dt = bar.dt
+                elif state.is_waiting or state.waiting_reentry_cost:
+                    state.is_waiting = False
+                    state.waiting_reentry_cost = False
+                    state.exit_reason = "CANCELLED_BY_EXIT"
+            exit_reason = "PROTECT_PROFIT"
+            exit_dt = bar.dt
+            break
+
         # --- EOD ---
         if t >= eod_time:
             for i, (leg, state) in enumerate(zip(leg_configs, leg_states)):
@@ -1325,7 +1380,12 @@ def run_backtest(leg_configs: List[LegConfig], cycles: List[ExpiryCycle],
                  profit_target_val: float = 0.0,
                  profit_target_type: str = "pct",
                  overall_sl_val: float = 0.0,
-                 overall_sl_type: str = "pct"):
+                 overall_sl_type: str = "pct",
+                 protect_profit_mode: Optional[str] = None,
+                 lock_profit_reaches: float = 0.0,
+                 lock_profit_min: float = 0.0,
+                 trail_profit_step: float = 0.0,
+                 trail_profit_by: float = 0.0):
     """
     strategy_type:
       "intraday"   — one trade per trading day (AlgoTest Intraday mode)
@@ -1367,6 +1427,11 @@ def run_backtest(leg_configs: List[LegConfig], cycles: List[ExpiryCycle],
         overall_sl_val=overall_sl_val if overall_sl_val > 0 else overall_sl_pct,
         overall_sl_type=overall_sl_type,
         lot_size=lot_size,
+        protect_profit_mode=protect_profit_mode,
+        lock_profit_reaches=lock_profit_reaches,
+        lock_profit_min=lock_profit_min,
+        trail_profit_step=trail_profit_step,
+        trail_profit_by=trail_profit_by,
     )
 
     trade_results = []
@@ -1802,6 +1867,11 @@ def main():
     parser.add_argument("--profit-target-type", default="pct", choices=["pct", "mtm"])
     parser.add_argument("--overall-sl-val",     type=float, default=0.0)
     parser.add_argument("--overall-sl-type",    default="pct", choices=["pct", "mtm"])
+    parser.add_argument("--protect-profit-mode", default="none", choices=["none", "lock", "trail", "lock_trail"])
+    parser.add_argument("--lock-profit-reaches", type=float, default=0.0)
+    parser.add_argument("--lock-profit-min",     type=float, default=0.0)
+    parser.add_argument("--trail-profit-step",   type=float, default=0.0)
+    parser.add_argument("--trail-profit-by",     type=float, default=0.0)
     parser.add_argument("--commission-per-lot", type=float, default=40.0)
     parser.add_argument("--slippage-pct",       type=float, default=0.0)
     parser.add_argument("--strategy-type",      default="intraday",
@@ -1870,32 +1940,42 @@ def main():
         profit_target_type=args.profit_target_type,
         overall_sl_val=args.overall_sl_val,
         overall_sl_type=args.overall_sl_type,
+        protect_profit_mode=args.protect_profit_mode if args.protect_profit_mode != "none" else None,
+        lock_profit_reaches=args.lock_profit_reaches,
+        lock_profit_min=args.lock_profit_min,
+        trail_profit_step=args.trail_profit_step,
+        trail_profit_by=args.trail_profit_by,
     )
     result["params"] = {
-        "start_date":         args.start_date,
-        "end_date":           args.end_date,
-        "lot_size":           args.lot_size,
-        "entry_time":         args.entry_time,
-        "eod_time":           args.eod_time,
-        "profit_target_pct":  args.profit_target_pct,
-        "overall_sl_pct":     args.overall_sl_pct,
-        "profit_target_val":  args.profit_target_val,
-        "profit_target_type": args.profit_target_type,
-        "overall_sl_val":     args.overall_sl_val,
-        "overall_sl_type":    args.overall_sl_type,
-        "commission_per_lot": args.commission_per_lot,
-        "slippage_pct":       args.slippage_pct,
-        "strategy_type":      args.strategy_type,
-        "legs":               legs_raw,
-        "adjustment_mode":    args.adjustment_mode,
-        "roll_buffer":        args.roll_buffer,
-        "roll_type":          args.roll_type,
-        "max_rolls":          args.max_rolls,
-        "scalp_floor_pct":    args.scalp_floor_pct,
-        "trail_sl_pct":       args.trail_sl_pct,
-        "square_off_mode":    args.square_off_mode,
-        "max_diff_pct":       args.max_diff_pct,
-        "entry_cutoff_time":  args.entry_cutoff_time,
+        "start_date":          args.start_date,
+        "end_date":            args.end_date,
+        "lot_size":            args.lot_size,
+        "entry_time":          args.entry_time,
+        "eod_time":            args.eod_time,
+        "profit_target_pct":   args.profit_target_pct,
+        "overall_sl_pct":      args.overall_sl_pct,
+        "profit_target_val":   args.profit_target_val,
+        "profit_target_type":  args.profit_target_type,
+        "overall_sl_val":      args.overall_sl_val,
+        "overall_sl_type":     args.overall_sl_type,
+        "protect_profit_mode": args.protect_profit_mode,
+        "lock_profit_reaches": args.lock_profit_reaches,
+        "lock_profit_min":     args.lock_profit_min,
+        "trail_profit_step":   args.trail_profit_step,
+        "trail_profit_by":     args.trail_profit_by,
+        "commission_per_lot":  args.commission_per_lot,
+        "slippage_pct":        args.slippage_pct,
+        "strategy_type":       args.strategy_type,
+        "legs":                legs_raw,
+        "adjustment_mode":     args.adjustment_mode,
+        "roll_buffer":         args.roll_buffer,
+        "roll_type":           args.roll_type,
+        "max_rolls":           args.max_rolls,
+        "scalp_floor_pct":     args.scalp_floor_pct,
+        "trail_sl_pct":        args.trail_sl_pct,
+        "square_off_mode":     args.square_off_mode,
+        "max_diff_pct":        args.max_diff_pct,
+        "entry_cutoff_time":   args.entry_cutoff_time,
     }
     if db_conn:
         db_conn.close()
