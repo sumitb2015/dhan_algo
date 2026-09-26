@@ -20,6 +20,7 @@ export interface BacktestMetadata {
   has_tearsheet?: boolean;
   has_trades_csv?: boolean;
   has_scans_summary?: boolean;
+  has_report?: boolean;
   tags?: string[];
 }
 
@@ -72,6 +73,30 @@ export async function GET(req: NextRequest) {
         });
       }
 
+      // Serve Report HTML / Markdown directly
+      if (file === 'report') {
+        const reportHtmlPath = path.join(targetDir, 'report.html');
+        if (fs.existsSync(reportHtmlPath)) {
+          const html = fs.readFileSync(reportHtmlPath, 'utf-8');
+          return new NextResponse(html, {
+            headers: {
+              'Content-Type': 'text/html; charset=utf-8',
+            },
+          });
+        }
+        const reportMdPath = path.join(targetDir, 'report.md');
+        if (fs.existsSync(reportMdPath)) {
+          const md = fs.readFileSync(reportMdPath, 'utf-8');
+          const wrapped = `<!DOCTYPE html><html><head><meta charset="utf-8"><title>Backtest Report</title><script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script><style>body{background:#0b0f19;color:#e2e8f0;font-family:sans-serif;padding:2rem;max-width:1200px;margin:auto;}table{border-collapse:collapse;width:100%;}th,td{border:1px solid #334155;padding:8px;}</style></head><body><div id="c"></div><script>document.getElementById("c").innerHTML = marked.parse(${JSON.stringify(md)});</script></body></html>`;
+          return new NextResponse(wrapped, {
+            headers: {
+              'Content-Type': 'text/html; charset=utf-8',
+            },
+          });
+        }
+        return new NextResponse('Report not found for this backtest', { status: 404 });
+      }
+
       // Serve Scans Summary JSON directly
       if (file === 'scans') {
         const scansPath = path.join(targetDir, 'scans_summary.json');
@@ -104,6 +129,7 @@ export async function GET(req: NextRequest) {
       const hasTearsheet = fs.existsSync(path.join(targetDir, 'tearsheet.html'));
       const hasTradesCsv = fs.existsSync(path.join(targetDir, 'trades.csv'));
       const hasScansSummary = fs.existsSync(path.join(targetDir, 'scans_summary.json'));
+      const hasReport = fs.existsSync(path.join(targetDir, 'report.html')) || fs.existsSync(path.join(targetDir, 'report.md'));
 
       if (!metadata && result) {
         const s = result.summary ?? {};
@@ -122,11 +148,13 @@ export async function GET(req: NextRequest) {
           has_tearsheet: hasTearsheet,
           has_trades_csv: hasTradesCsv,
           has_scans_summary: hasScansSummary,
+          has_report: hasReport,
         };
       } else if (metadata) {
         metadata.has_tearsheet = hasTearsheet;
         metadata.has_trades_csv = hasTradesCsv;
         metadata.has_scans_summary = hasScansSummary;
+        metadata.has_report = hasReport;
       }
 
       return NextResponse.json({
@@ -147,6 +175,7 @@ export async function GET(req: NextRequest) {
       const hasTearsheet = fs.existsSync(path.join(dirPath, 'tearsheet.html'));
       const hasTradesCsv = fs.existsSync(path.join(dirPath, 'trades.csv'));
       const hasScansSummary = fs.existsSync(path.join(dirPath, 'scans_summary.json'));
+      const hasReport = fs.existsSync(path.join(dirPath, 'report.html')) || fs.existsSync(path.join(dirPath, 'report.md'));
 
       if (fs.existsSync(metaPath)) {
         try {
@@ -155,6 +184,7 @@ export async function GET(req: NextRequest) {
           meta.has_tearsheet = hasTearsheet;
           meta.has_trades_csv = hasTradesCsv;
           meta.has_scans_summary = hasScansSummary;
+          meta.has_report = hasReport;
           backtests.push(meta);
           continue;
         } catch { /* fallback to result.json */ }
@@ -179,6 +209,7 @@ export async function GET(req: NextRequest) {
             has_tearsheet: hasTearsheet,
             has_trades_csv: hasTradesCsv,
             has_scans_summary: hasScansSummary,
+            has_report: hasReport,
           });
         } catch { /* skip unparseable */ }
       }

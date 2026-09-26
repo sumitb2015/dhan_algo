@@ -15,5 +15,6 @@
     "mean_reversion",
     "otm_shift",
     "tuesday_expiry"
-  ]
+  ],
+  "has_report": true
 }

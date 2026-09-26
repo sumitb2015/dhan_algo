@@ -31,6 +31,7 @@ export interface BacktestHistoryItem {
   has_tearsheet?: boolean;
   has_trades_csv?: boolean;
   has_scans_summary?: boolean;
+  has_report?: boolean;
   tags?: string[];
 }
 
@@ -378,6 +379,7 @@ export default function OptionsBacktester({
   const [historySearch, setHistorySearch] = useState('');
   const [loadedFromHistory, setLoadedFromHistory] = useState<BacktestHistoryItem | null>(null);
   const [viewingTearsheetId, setViewingTearsheetId] = useState<string | null>(null);
+  const [viewingReportId, setViewingReportId] = useState<string | null>(null);
 
   const fetchHistory = React.useCallback(async () => {
     setLoadingHistory(true);
@@ -1864,6 +1866,15 @@ export default function OptionsBacktester({
                 </div>
               </div>
               <div className="flex items-center gap-2">
+                {loadedFromHistory.has_report && (
+                  <button
+                    type="button"
+                    onClick={() => setViewingReportId(loadedFromHistory.id)}
+                    className="border border-emerald-500 text-emerald-700 bg-white hover:bg-emerald-50 px-2.5 py-1 rounded text-xs font-semibold flex items-center gap-1 transition-colors cursor-pointer shadow-xs"
+                  >
+                    <FileText className="w-3.5 h-3.5 text-emerald-600" /> Research Report
+                  </button>
+                )}
                 {loadedFromHistory.has_tearsheet && (
                   <button
                     type="button"
@@ -1898,8 +1909,19 @@ export default function OptionsBacktester({
               <span className="text-[10px] font-bold text-[#54b4c7] uppercase tracking-wider block">Simulation Complete</span>
               <h2 className="text-lg font-bold text-slate-800">Backtest Performance Report</h2>
             </div>
-            <div className="text-xs font-mono text-slate-500 bg-oncolor border border-slate-300 rounded px-3 py-1">
-              {s.traded_cycles} Trades ({startDate} &rarr; {endDate})
+            <div className="flex items-center gap-2 flex-wrap">
+              {(loadedFromHistory?.has_report || historyList.some(h => h.has_report)) && (
+                <button
+                  type="button"
+                  onClick={() => setViewingReportId(loadedFromHistory?.id || historyList.find(h => h.has_report)?.id || 'nifty_straddle_10diff_20sl_shift')}
+                  className="bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs px-3.5 py-1.5 rounded-lg shadow-sm flex items-center gap-1.5 cursor-pointer transition-colors"
+                >
+                  <FileText className="w-3.5 h-3.5" /> View Research Report &amp; Trade Details
+                </button>
+              )}
+              <div className="text-xs font-mono text-slate-500 bg-oncolor border border-slate-300 rounded px-3 py-1">
+                {s.traded_cycles} Trades ({startDate} &rarr; {endDate})
+              </div>
             </div>
           </div>
 
@@ -2336,6 +2358,15 @@ export default function OptionsBacktester({
                         </div>
 
                         <div className="flex items-center gap-2 ml-auto">
+                          {item.has_report && (
+                            <button
+                              type="button"
+                              onClick={() => setViewingReportId(item.id)}
+                              className="border border-emerald-500 text-emerald-700 hover:bg-emerald-50 px-2.5 py-1 rounded text-[11px] font-semibold flex items-center gap-1 cursor-pointer transition-colors bg-white shadow-xs"
+                            >
+                              <FileText className="w-3 h-3 text-emerald-600" /> Research Report
+                            </button>
+                          )}
                           {item.has_tearsheet && (
                             <button
                               type="button"
@@ -2418,6 +2449,46 @@ export default function OptionsBacktester({
                 src={`/api/backtest/history?id=${encodeURIComponent(viewingTearsheetId)}&file=tearsheet`}
                 className="w-full h-full border-0"
                 title="Tearsheet Preview"
+              />
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ── Research Report Preview Modal ── */}
+      {viewingReportId && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-oncolor-dark/70 backdrop-blur-xs p-4">
+          <div className="bg-oncolor rounded-2xl shadow-2xl border border-slate-200 max-w-6xl w-full h-[92vh] flex flex-col overflow-hidden">
+            <div className="flex items-center justify-between px-4 py-2.5 border-b border-slate-200 bg-slate-50">
+              <div className="flex items-center gap-2">
+                <FileText className="w-4 h-4 text-emerald-600" />
+                <span className="font-bold text-slate-800 text-xs sm:text-sm">
+                  Research &amp; Trade Details Report: {viewingReportId}
+                </span>
+              </div>
+              <div className="flex items-center gap-3 text-xs">
+                <a
+                  href={`/api/backtest/history?id=${encodeURIComponent(viewingReportId)}&file=report`}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="text-emerald-700 hover:underline font-semibold flex items-center gap-1"
+                >
+                  <ExternalLink className="w-3.5 h-3.5" /> Open in New Tab
+                </a>
+                <button
+                  type="button"
+                  onClick={() => setViewingReportId(null)}
+                  className="text-slate-400 hover:text-slate-600 p-1 cursor-pointer"
+                >
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
+            </div>
+            <div className="flex-1 bg-[#0b0f19]">
+              <iframe
+                src={`/api/backtest/history?id=${encodeURIComponent(viewingReportId)}&file=report`}
+                className="w-full h-full border-0"
+                title="Research Report Preview"
               />
             </div>
           </div>
