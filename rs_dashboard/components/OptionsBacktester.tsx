@@ -477,6 +477,11 @@ export default function OptionsBacktester({
   const [maxRolls, setMaxRolls] = useState(5);
   const [scalpFloorPct, setScalpFloorPct] = useState(0);
 
+  // Balanced Entry / Price Diff Gate
+  const [priceDiffActive, setPriceDiffActive] = useState(false);
+  const [maxDiffPct, setMaxDiffPct] = useState(10);
+  const [entryCutoffTime, setEntryCutoffTime] = useState('15:00');
+
   // Results & execution
   const [result, setResult] = useState<BacktestResult | null>(null);
   const [loading, setLoading] = useState(false);
@@ -569,6 +574,15 @@ export default function OptionsBacktester({
       if (p.overall_sl_pct) {
         setOverallSlPct(Number(p.overall_sl_pct));
         setStrategySlActive(true);
+      }
+      if (p.max_diff_pct !== undefined && Number(p.max_diff_pct) > 0) {
+        setMaxDiffPct(Number(p.max_diff_pct));
+        setPriceDiffActive(true);
+      } else if (p.max_diff_pct !== undefined) {
+        setPriceDiffActive(false);
+      }
+      if (p.entry_cutoff_time) {
+        setEntryCutoffTime(String(p.entry_cutoff_time));
       }
       if (p.entry_time) {
         const parts = String(p.entry_time).split(':');
@@ -799,6 +813,8 @@ export default function OptionsBacktester({
           scalp_floor_pct: scalpFloorPct,
           trail_sl_pct: protectProfitsActive ? trailSlPct : 0,
           square_off_mode: squareOffMode,
+          max_diff_pct: priceDiffActive ? maxDiffPct : 0,
+          entry_cutoff_time: entryCutoffTime,
         }),
       });
 
@@ -1576,6 +1592,39 @@ export default function OptionsBacktester({
                 <Plus className="w-3.5 h-3.5 stroke-[2.5]" /> Strategy Target Profit
               </button>
             )}
+
+            {/* Price Difference Gate Link / Badge */}
+            {priceDiffActive ? (
+              <div className="flex items-center gap-2 mt-2 bg-zinc-850 border border-zinc-700 rounded px-2.5 py-1 text-xs text-zinc-200 w-fit shadow-xs">
+                <span className="font-semibold text-emerald-400">Price Diff Gate: &lt;</span>
+                <input
+                  type="number"
+                  min={1}
+                  max={100}
+                  value={maxDiffPct}
+                  onChange={e => setMaxDiffPct(Number(e.target.value))}
+                  className="w-12 bg-zinc-800 border border-zinc-700 rounded px-1.5 py-0.5 text-center text-xs text-zinc-100 font-semibold"
+                />
+                <span>%</span>
+                <button
+                  type="button"
+                  onClick={() => { setPriceDiffActive(false); }}
+                  className="text-zinc-500 hover:text-red-500 ml-1 cursor-pointer"
+                  title="Remove Price Diff Filter"
+                >
+                  ✕
+                </button>
+              </div>
+            ) : (
+              <button
+                type="button"
+                onClick={() => { setPriceDiffActive(true); setMaxDiffPct(10); }}
+                className="text-xs text-emerald-400 hover:underline font-semibold flex items-center gap-0.5 mt-2 cursor-pointer w-fit"
+                title="Only enter when CE and PE prices are balanced within threshold"
+              >
+                <Plus className="w-3.5 h-3.5 stroke-[2.5]" /> Price Diff Gate (&lt; 10%)
+              </button>
+            )}
           </div>
 
           {/* Right Column: Same Day / Next Day & Exit Time */}
@@ -1947,6 +1996,47 @@ export default function OptionsBacktester({
                         type="number"
                         value={maxRolls}
                         onChange={e => setMaxRolls(Number(e.target.value))}
+                        className="w-full bg-zinc-800 border border-zinc-700 text-zinc-100 rounded p-1.5 text-xs focus:outline-hidden"
+                      />
+                    </div>
+                  </div>
+                )}
+              </div>
+
+              {/* Balanced Entry Gate (Price Parity) */}
+              <div className="border border-zinc-800 rounded-xl p-3 bg-zinc-850/50">
+                <label className="flex items-center gap-2 cursor-pointer mb-1.5 font-semibold">
+                  <input
+                    type="checkbox"
+                    checked={priceDiffActive}
+                    onChange={e => setPriceDiffActive(e.target.checked)}
+                    className="accent-teal-500 rounded"
+                  />
+                  <span>Balanced Entry Gate (CE/PE Price Parity)</span>
+                </label>
+                <p className="text-[11px] text-zinc-500 mb-2 leading-relaxed">
+                  Waits past Entry Time until |CE − PE| / max(CE, PE) is below threshold before entering. Dynamically checks nearest ATM strike every minute. Skips day if never balanced before cutoff.
+                </p>
+                {priceDiffActive && (
+                  <div className="grid grid-cols-2 gap-3 mt-2 pt-2 border-t border-zinc-800">
+                    <div>
+                      <span className="block text-[11px] text-zinc-500 mb-1">Max CE/PE Price Diff %</span>
+                      <input
+                        type="number"
+                        min={1}
+                        max={100}
+                        value={maxDiffPct}
+                        onChange={e => setMaxDiffPct(Number(e.target.value))}
+                        className="w-full bg-zinc-800 border border-zinc-700 text-zinc-100 rounded p-1.5 text-xs focus:outline-hidden"
+                      />
+                    </div>
+                    <div>
+                      <span className="block text-[11px] text-zinc-500 mb-1">Entry Cutoff Time (HH:MM)</span>
+                      <input
+                        type="text"
+                        value={entryCutoffTime}
+                        onChange={e => setEntryCutoffTime(e.target.value)}
+                        placeholder="15:00"
                         className="w-full bg-zinc-800 border border-zinc-700 text-zinc-100 rounded p-1.5 text-xs focus:outline-hidden"
                       />
                     </div>

@@ -460,6 +460,8 @@ def _simulate_one_day(
     scalp_floor_pct: float = 0.0,
     trail_sl_pct: float = 0.0,
     square_off_mode: str = "one_leg",
+    max_diff_pct: float = 0.0,
+    entry_cutoff_time: Optional[time] = None,
 ) -> dict:
     """Simulate one intraday trade over day_bars. Returns state dict."""
     leg_states: List[LegState] = [LegState() for _ in leg_configs]
@@ -473,6 +475,12 @@ def _simulate_one_day(
     exit_dt = None
     exit_reason = "NO_ENTRY"
     entry_spot = 0.0
+
+    # Fast O(1) lookup of available strikes by datetime
+    strike_by_dt: Dict[datetime, List[Tuple[str, float, float, float, float, float]]] = defaultdict(list)
+    if strike_lookup:
+        for (dt_key, opt, stk), (o, h, l, c) in strike_lookup.items():
+            strike_by_dt[dt_key].append((opt, stk, o, h, l, c))
 
     def _resolve_strike(strike_str: str, atm_strike: float) -> float:
         if strike_str == "ATM":
@@ -495,6 +503,11 @@ def _simulate_one_day(
         # --- Entry ---
         # Use open_ price: AlgoTest enters at the first available price of the entry bar
         if not entered and t >= entry_time:
+            if entry_cutoff_time and t > entry_cutoff_time:
+                continue
+            if t >= eod_time:
+                continue
+
             entry_spot_ref = prev_bar.spot if prev_bar else bar.spot
             atm_strike = round(entry_spot_ref / STRIKE_STEP) * STRIKE_STEP
             ref_bar = prev_bar if prev_bar else bar
@@ -502,12 +515,12 @@ def _simulate_one_day(
             # Fetch all available option prices for the entry time boundary
             available_strikes_and_prices = []
             if strike_lookup:
-                for (dt_key, opt, stk), (o, h, l, c) in strike_lookup.items():
-                    if dt_key == ref_bar.dt:
-                        price = c if prev_bar else o
-                        available_strikes_and_prices.append((opt, stk, price))
+                for opt, stk, o, h, l, c in strike_by_dt.get(ref_bar.dt, []):
+                    price = c if prev_bar else o
+                    available_strikes_and_prices.append((opt, stk, price))
                         
-            for i, (leg, state) in enumerate(zip(leg_configs, leg_states)):
+            candidate_states = [LegState() for _ in leg_configs]
+            for i, (leg, state) in enumerate(zip(leg_configs, candidate_states)):
                 slip = slip_sell_entry if leg.position == "sell" else slip_buy_entry
                 
                 # Filter candidates for this option type
@@ -605,7 +618,25 @@ def _simulate_one_day(
                         bar.spot, days_to_expiry, strike_lookup
                     )
                     state.entry_price = leg_open * slip
+
+            # Ensure all legs found valid prices
+            if any(s.entry_price <= 0 for s in candidate_states):
+                continue
+
+            # Check Price Diff Threshold / Balanced Entry Gate if enabled
+            if max_diff_pct > 0.0:
+                ce_cand = [s.entry_price for l, s in zip(leg_configs, candidate_states) if l.option_type == "CE"]
+                pe_cand = [s.entry_price for l, s in zip(leg_configs, candidate_states) if l.option_type == "PE"]
+                if ce_cand and pe_cand:
+                    ce_p = ce_cand[0]
+                    pe_p = pe_cand[0]
+                    max_p = max(ce_p, pe_p)
+                    diff = (abs(ce_p - pe_p) / max_p * 100.0) if max_p > 0 else 0.0
+                    if diff > max_diff_pct:
+                        # Imbalance exceeds threshold, wait for premiums to balance on a later bar
+                        continue
                     
+            leg_states = candidate_states
             entered = True
             entry_dt = bar.dt
             for s in leg_states:
@@ -882,6 +913,8 @@ def run_backtest(leg_configs: List[LegConfig], cycles: List[ExpiryCycle],
                  scalp_floor_pct: float = 0.0,
                  trail_sl_pct: float = 0.0,
                  square_off_mode: str = "one_leg",
+                 max_diff_pct: float = 0.0,
+                 entry_cutoff_time_str: Optional[str] = "15:00",
                  status_file: Optional[str] = None):
     """
     strategy_type:
@@ -893,6 +926,7 @@ def run_backtest(leg_configs: List[LegConfig], cycles: List[ExpiryCycle],
     end   = _parse_date(end_date)
     entry_time = datetime.strptime(entry_time_str, "%H:%M").time()
     eod_time   = datetime.strptime(eod_time_str,   "%H:%M").time()
+    entry_cutoff_time = datetime.strptime(entry_cutoff_time_str, "%H:%M").time() if entry_cutoff_time_str else None
     # Adverse slippage: sell at lower price, buy at higher price
     slip_sell_entry = 1 - slippage_pct / 100
     slip_buy_entry  = 1 + slippage_pct / 100
@@ -916,6 +950,8 @@ def run_backtest(leg_configs: List[LegConfig], cycles: List[ExpiryCycle],
         scalp_floor_pct=scalp_floor_pct,
         trail_sl_pct=trail_sl_pct,
         square_off_mode=square_off_mode,
+        max_diff_pct=max_diff_pct,
+        entry_cutoff_time=entry_cutoff_time,
     )
 
     trade_results = []
@@ -988,7 +1024,7 @@ def run_backtest(leg_configs: List[LegConfig], cycles: List[ExpiryCycle],
             in_window = (any(start <= d <= end for d in bar_dates) if bar_dates
                          else start <= expiry_dt <= end)
             if in_window:
-                trade_results.append(_no_entry_result(cycle.expiry_date))
+                trade_results.append(_no_entry_result(cycle.expiry_date, entry_dt=f"{cycle.expiry_date}T{entry_time_str}:00"))
                 equity_curve.append(_equity_point(cycle.expiry_date, cumulative_pnl,
                                                   None, peak_equity))
             continue
@@ -1045,7 +1081,7 @@ def run_backtest(leg_configs: List[LegConfig], cycles: List[ExpiryCycle],
             vix = vix_map.get(entry_date_str)
 
             if not sim["entered"]:
-                trade_results.append(_no_entry_result(cycle.expiry_date))
+                trade_results.append(_no_entry_result(cycle.expiry_date, entry_dt=f"{entry_date_str}T{entry_time_str}:00"))
                 day_spot = day_bars[0].spot if day_bars else None
                 equity_curve.append(_equity_point(entry_date_str, cumulative_pnl,
                                                   day_spot, peak_equity))
@@ -1247,10 +1283,10 @@ def run_backtest(leg_configs: List[LegConfig], cycles: List[ExpiryCycle],
     return final_result
 
 
-def _no_entry_result(expiry_date: str) -> dict:
+def _no_entry_result(expiry_date: str, entry_dt: Optional[str] = None) -> dict:
     return {
         "expiry_date":   expiry_date,
-        "entry_dt":      None,
+        "entry_dt":      entry_dt,
         "exit_dt":       None,
         "entry_spot":    None,
         "vix":           None,
@@ -1332,6 +1368,10 @@ def main():
     parser.add_argument("--scalp-floor-pct",    type=float, default=0.0)
     parser.add_argument("--trail-sl-pct",       type=float, default=0.0)
     parser.add_argument("--square-off-mode",    default="one_leg", choices=["one_leg", "all_legs"])
+    parser.add_argument("--max-diff-pct",       type=float, default=0.0,
+                        help="Max CE/PE price difference %% threshold for entry (0 = disabled)")
+    parser.add_argument("--entry-cutoff-time",  default="15:00",
+                        help="Latest time to wait for balanced entry (default: 15:00)")
     parser.add_argument("--status-file",        default=None)
     parser.add_argument("--output-file",        default=None)
     args = parser.parse_args()
@@ -1375,6 +1415,8 @@ def main():
         scalp_floor_pct=args.scalp_floor_pct,
         trail_sl_pct=args.trail_sl_pct,
         square_off_mode=args.square_off_mode,
+        max_diff_pct=args.max_diff_pct,
+        entry_cutoff_time_str=args.entry_cutoff_time,
         status_file=args.status_file,
     )
     result["params"] = {
@@ -1396,6 +1438,8 @@ def main():
         "scalp_floor_pct":    args.scalp_floor_pct,
         "trail_sl_pct":       args.trail_sl_pct,
         "square_off_mode":    args.square_off_mode,
+        "max_diff_pct":       args.max_diff_pct,
+        "entry_cutoff_time":  args.entry_cutoff_time,
     }
     if db_conn:
         db_conn.close()

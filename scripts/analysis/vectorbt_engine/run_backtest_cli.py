@@ -93,6 +93,8 @@ def main() -> None:
     parser.add_argument("--scalp-floor-pct", type=float, default=0.0)
     parser.add_argument("--trail-sl-pct", type=float, default=0.0)
     parser.add_argument("--square-off-mode", default="one_leg", choices=["one_leg", "all_legs"])
+    parser.add_argument("--max-diff-pct", type=float, default=0.0)
+    parser.add_argument("--entry-cutoff-time", default="15:00")
     parser.add_argument("--cost-profile", default="fno_options", choices=COST_PROFILES)
     parser.add_argument("--benchmark-symbol", default="NIFTY")
     parser.add_argument("--status-file", required=True)
@@ -142,6 +144,8 @@ def main() -> None:
             scalp_floor_pct=args.scalp_floor_pct,
             trail_sl_pct=args.trail_sl_pct,
             square_off_mode=args.square_off_mode,
+            max_diff_pct=args.max_diff_pct,
+            entry_cutoff_time_str=args.entry_cutoff_time,
             status_file=args.status_file,
         )
         if db_conn:
@@ -157,6 +161,8 @@ def main() -> None:
             "roll_type": args.roll_type, "max_rolls": args.max_rolls,
             "scalp_floor_pct": args.scalp_floor_pct, "trail_sl_pct": args.trail_sl_pct,
             "square_off_mode": args.square_off_mode,
+            "max_diff_pct": args.max_diff_pct,
+            "entry_cutoff_time": args.entry_cutoff_time,
         }
 
         write_status(args.status_file, percent=95, stage="vectorbt_stats",

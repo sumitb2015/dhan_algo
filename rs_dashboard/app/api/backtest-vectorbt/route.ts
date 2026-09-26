@@ -142,6 +142,8 @@ export async function POST(req: NextRequest) {
     '--scalp-floor-pct',    String(body.scalp_floor_pct     ?? 0),
     '--trail-sl-pct',       String(body.trail_sl_pct        ?? 0),
     '--square-off-mode',    String(body.square_off_mode     ?? 'one_leg'),
+    '--max-diff-pct',       String(body.max_diff_pct        ?? 0),
+    '--entry-cutoff-time',  String(body.entry_cutoff_time   ?? '15:00'),
     '--cost-profile',       String(body.cost_profile        ?? 'fno_options'),
     '--benchmark-symbol',   String(body.benchmark_symbol    ?? 'NIFTY'),
     '--status-file',        STATUS_FILE,
