@@ -2217,10 +2217,10 @@ export default function OptionsBacktester({
               </div>
 
               {/* Content Row */}
-              <div className="flex items-center justify-between flex-wrap gap-4 pt-1">
+              <div className="relative flex items-center justify-center flex-wrap gap-6 pt-1 pr-8">
                 <span className="font-semibold text-zinc-300 text-xs shrink-0">Protect The Profits:</span>
 
-                <div className="flex items-center gap-6 flex-wrap flex-1">
+                <div className="flex items-center justify-center gap-6 flex-wrap">
                   {/* Lock Minimum Profit Inputs */}
                   {(protectProfitMode === 'lock' || protectProfitMode === 'lock_trail') && (
                     <>
@@ -2318,7 +2318,7 @@ export default function OptionsBacktester({
                 <button
                   type="button"
                   onClick={() => setProtectProfitsActive(false)}
-                  className="text-zinc-500 hover:text-red-400 cursor-pointer text-sm p-1 ml-auto leading-none"
+                  className="absolute right-1 top-1/2 -translate-y-1/2 text-zinc-500 hover:text-red-400 cursor-pointer text-sm p-1 leading-none"
                   title="Remove Protect The Profits"
                 >
                   ✕
