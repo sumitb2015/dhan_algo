@@ -51,6 +51,8 @@ class LegConfig:
     leg_trail_sl_pct: float = 0.0  # 0 = disabled — see the trailing-SL block below for the activation rule
     strike_type: str = "offset"  # "offset", "atm_percent", "closest_premium", "straddle_width", "cp_based_on_sp", or "closest_delta"
     cp_operator: str = "closest"  # "closest" (~), "gte" (>=), "lte" (<=)
+    wait_and_trade_val: float = 0.0  # 0 = disabled (immediate entry)
+    wait_and_trade_type: str = "pct_up"  # "pct_up" (% ↑), "pct_down" (% ↓), "pts_up" (Pts ↑), "pts_down" (Pts ↓)
 
 
 # ---------------------------------------------------------------------------
@@ -351,10 +353,18 @@ class LegState:
     peak_favorable_pct: float = 0.0  # this leg's own best favorable move since entry, for trailing SL
     entry_dt: Optional[datetime] = None
     exit_dt: Optional[datetime] = None
+    is_waiting: bool = False
+    is_entered: bool = False
+    base_ref_price: float = 0.0
+    trigger_price: float = 0.0
 
     @property
     def is_open(self) -> bool:
-        return not self.struck_sl and not self.struck_target
+        return self.is_entered and not self.struck_sl and not self.struck_target
+
+    @property
+    def has_exited(self) -> bool:
+        return self.is_entered and (self.struck_sl or self.struck_target)
 
 
 def _norm_cdf(x: float) -> float:
@@ -693,22 +703,24 @@ def _simulate_one_day(
                 else:
                     state.strike = _resolve_strike(leg.strike, atm_strike)
                 
-                # Fetch final entry price for resolved strike
+                # Fetch baseline reference price for resolved strike
                 if prev_bar:
                     _, _, _, leg_close = _get_leg_prices(
                         prev_bar.dt, leg.option_type, state.strike, prev_bar.legs[i],
                         prev_bar.spot, days_to_expiry, strike_lookup
                     )
-                    state.entry_price = leg_close * slip
+                    raw_price = leg_close
                 else:
                     leg_open, _, _, _ = _get_leg_prices(
                         bar.dt, leg.option_type, state.strike, bar.legs[i],
                         bar.spot, days_to_expiry, strike_lookup
                     )
-                    state.entry_price = leg_open * slip
+                    raw_price = leg_open
+                state.base_ref_price = raw_price
+                state.entry_price = raw_price * slip
 
             # Ensure all legs found valid prices
-            if any(s.entry_price <= 0 for s in candidate_states):
+            if any(s.base_ref_price <= 0 for s in candidate_states):
                 continue
 
             # Check Price Diff Threshold / Balanced Entry Gate if enabled
@@ -724,11 +736,34 @@ def _simulate_one_day(
                         # Imbalance exceeds threshold, wait for premiums to balance on a later bar
                         continue
                     
+            # Configure Wait & Trade for each leg
+            for leg, state in zip(leg_configs, candidate_states):
+                wt_val = float(getattr(leg, "wait_and_trade_val", 0.0) or 0.0)
+                wt_type = str(getattr(leg, "wait_and_trade_type", "pct_up") or "pct_up").lower().strip()
+                p0 = state.base_ref_price
+                if wt_val > 0.0:
+                    state.is_waiting = True
+                    state.is_entered = False
+                    state.entry_price = 0.0
+                    state.entry_dt = None
+                    if "pts" in wt_type:
+                        if "down" in wt_type or "↓" in wt_type:
+                            state.trigger_price = p0 - wt_val
+                        else:
+                            state.trigger_price = p0 + wt_val
+                    else:  # percentage
+                        if "down" in wt_type or "↓" in wt_type:
+                            state.trigger_price = p0 * (1.0 - wt_val / 100.0)
+                        else:
+                            state.trigger_price = p0 * (1.0 + wt_val / 100.0)
+                else:
+                    state.is_waiting = False
+                    state.is_entered = True
+                    state.entry_dt = bar.dt
+
             leg_states = candidate_states
             entered = True
             entry_dt = bar.dt
-            for s in leg_states:
-                s.entry_dt = bar.dt
             entry_spot = bar.spot
             ref_spot = bar.spot
             current_atm = atm_strike
@@ -745,6 +780,30 @@ def _simulate_one_day(
             )
             for i, (leg, state) in enumerate(zip(leg_configs, leg_states))
         ]
+
+        # --- Check Wait & Trade Trigger for waiting legs ---
+        for i, (leg, state) in enumerate(zip(leg_configs, leg_states)):
+            if state.is_waiting:
+                leg_open, leg_high, leg_low, leg_close = leg_prices[i]
+                slip = slip_sell_entry if leg.position == "sell" else slip_buy_entry
+                wt_type = str(getattr(leg, "wait_and_trade_type", "pct_up") or "pct_up").lower().strip()
+
+                triggered = False
+                fill_price = 0.0
+                if "up" in wt_type or "↑" in wt_type:
+                    if leg_high >= state.trigger_price:
+                        triggered = True
+                        fill_price = max(state.trigger_price, leg_open) * slip
+                elif "down" in wt_type or "↓" in wt_type:
+                    if leg_low <= state.trigger_price:
+                        triggered = True
+                        fill_price = min(state.trigger_price, leg_open) * slip
+
+                if triggered:
+                    state.entry_price = fill_price
+                    state.entry_dt = bar.dt
+                    state.is_entered = True
+                    state.is_waiting = False
 
         # --- Per-leg SL and Target ---
         for i, (leg, state) in enumerate(zip(leg_configs, leg_states)):
@@ -803,16 +862,18 @@ def _simulate_one_day(
         # force-closes every still-open leg the moment any one leg exits, at that
         # same bar's close — approximating "flatten the whole position together."
         if square_off_mode == "all_legs":
-            any_leg_closed = any(not state.is_open for state in leg_states)
+            any_leg_closed = any(state.has_exited for state in leg_states)
             if any_leg_closed:
                 for i, (leg, state) in enumerate(zip(leg_configs, leg_states)):
-                    if not state.is_open:
-                        continue
-                    slip = slip_sell_exit if leg.position == "sell" else slip_buy_exit
-                    state.exit_price = leg_prices[i][3] * slip
-                    state.exit_reason = "SQUARE_OFF_ALL"
-                    state.struck_sl = True
-                    state.exit_dt = bar.dt
+                    if state.is_open:
+                        slip = slip_sell_exit if leg.position == "sell" else slip_buy_exit
+                        state.exit_price = leg_prices[i][3] * slip
+                        state.exit_reason = "SQUARE_OFF_ALL"
+                        state.struck_sl = True
+                        state.exit_dt = bar.dt
+                    elif state.is_waiting:
+                        state.is_waiting = False
+                        state.exit_reason = "CANCELLED_BY_SQUARE_OFF"
 
         # --- Dynamic Rolling Check (ATM Buffer Roll) ---
         if adjustment_mode == "rolling_straddle" and rolls_count < max_rolls and all(s.is_open for s in leg_states):
@@ -864,7 +925,7 @@ def _simulate_one_day(
                     state.entry_price = leg_c * slip
                 continue
 
-        if all(not s.is_open for s in leg_states):
+        if all(not s.is_open and not s.is_waiting for s in leg_states):
             exit_reason = "ALL_LEGS_DONE"
             exit_dt = bar.dt
             break
@@ -874,11 +935,13 @@ def _simulate_one_day(
                 (s.exit_price if not s.is_open else leg_prices[i][3])
                 * (1 if leg.position == "sell" else -1) * leg.lots
                 for i, (leg, s) in enumerate(zip(leg_configs, leg_states))
+                if s.is_entered
             )
 
         net_credit_now = sum(
             s.entry_price * (1 if leg.position == "sell" else -1) * leg.lots
             for leg, s in zip(leg_configs, leg_states)
+            if s.is_entered
         )
 
         # --- Scalp Floor Exit ---
@@ -892,6 +955,9 @@ def _simulate_one_day(
                         state.exit_price = leg_prices[i][3] * slip
                         state.exit_reason = "SCALP_FLOOR"
                         state.exit_dt = bar.dt
+                    elif state.is_waiting:
+                        state.is_waiting = False
+                        state.exit_reason = "CANCELLED_BY_EXIT"
                 exit_reason = "SCALP_FLOOR"
                 exit_dt = bar.dt
                 break
@@ -909,6 +975,9 @@ def _simulate_one_day(
                         state.exit_price = leg_prices[i][3] * slip
                         state.exit_reason = "TRAIL_SL"
                         state.exit_dt = bar.dt
+                    elif state.is_waiting:
+                        state.is_waiting = False
+                        state.exit_reason = "CANCELLED_BY_EXIT"
                 exit_reason = "TRAIL_SL"
                 exit_dt = bar.dt
                 break
@@ -924,6 +993,9 @@ def _simulate_one_day(
                         state.exit_price = leg_prices[i][3] * slip
                         state.exit_reason = "OVERALL_SL"
                         state.exit_dt = bar.dt
+                    elif state.is_waiting:
+                        state.is_waiting = False
+                        state.exit_reason = "CANCELLED_BY_EXIT"
                 exit_reason = "OVERALL_SL"
                 exit_dt = bar.dt
                 break
@@ -939,6 +1011,9 @@ def _simulate_one_day(
                         state.exit_price = leg_prices[i][3] * slip
                         state.exit_reason = "TARGET"
                         state.exit_dt = bar.dt
+                    elif state.is_waiting:
+                        state.is_waiting = False
+                        state.exit_reason = "CANCELLED_BY_EXIT"
                 exit_reason = "TARGET"
                 exit_dt = bar.dt
                 break
@@ -957,6 +1032,10 @@ def _simulate_one_day(
                     else:
                         state.exit_price = leg_prices[i][0] * slip
                     state.exit_reason = "EOD"
+                    state.exit_dt = bar.dt
+                elif state.is_waiting:
+                    state.is_waiting = False
+                    state.exit_reason = "UNTRIGGERED"
                     state.exit_dt = bar.dt
             exit_reason = "EOD"
             exit_dt = bar.dt
@@ -1215,7 +1294,7 @@ def run_backtest(leg_configs: List[LegConfig], cycles: List[ExpiryCycle],
 
             # 2. Add active legs at day's exit
             for leg, state in zip(leg_configs, leg_states):
-                if state.entry_price > 0:
+                if state.is_entered and state.entry_price > 0:
                     if leg.position == "sell":
                         leg_pnl = (state.entry_price - state.exit_price) * leg.lots * lot_size
                     else:
@@ -1233,9 +1312,22 @@ def run_backtest(leg_configs: List[LegConfig], cycles: List[ExpiryCycle],
                         "entry_time": state.entry_dt.strftime("%H:%M") if getattr(state, "entry_dt", None) else (entry_dt.strftime("%H:%M") if entry_dt else None),
                         "exit_time": state.exit_dt.strftime("%H:%M") if getattr(state, "exit_dt", None) else (exit_dt.strftime("%H:%M") if exit_dt else None),
                     })
+                else:
+                    leg_results.append({
+                        "option_type": leg.option_type,
+                        "position": leg.position,
+                        "strike": state.strike,
+                        "lots": leg.lots,
+                        "entry_price": 0.0,
+                        "exit_price": 0.0,
+                        "pnl": 0.0,
+                        "exit_reason": state.exit_reason or "UNTRIGGERED",
+                        "entry_time": None,
+                        "exit_time": None,
+                    })
 
-            # Calculate commission including all rolls
-            total_legs_traded = len(leg_results)
+            # Calculate commission only on legs that actually traded (including rolls)
+            total_legs_traded = len([lr for lr in leg_results if lr.get("entry_price", 0) > 0])
             commission = commission_per_lot * total_legs_traded
             total_commission += commission
 
@@ -1264,6 +1356,7 @@ def run_backtest(leg_configs: List[LegConfig], cycles: List[ExpiryCycle],
             ) + sum(
                 s.entry_price * (1 if leg.position == "sell" else -1) * leg.lots
                 for leg, s in zip(leg_configs, leg_states)
+                if s.is_entered
             )
             exit_combined = sum(
                 c["exit_price"] * (1 if c["position"] == "sell" else -1) * c["lots"]
@@ -1271,6 +1364,7 @@ def run_backtest(leg_configs: List[LegConfig], cycles: List[ExpiryCycle],
             ) + sum(
                 s.exit_price * (1 if leg.position == "sell" else -1) * leg.lots
                 for leg, s in zip(leg_configs, leg_states)
+                if s.is_entered
             )
 
             trade_results.append({

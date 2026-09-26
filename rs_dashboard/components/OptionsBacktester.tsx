@@ -40,6 +40,8 @@ type StrikeMode = 'offset' | 'atm_percent' | 'closest_premium' | 'straddle_width
 
 type CpOperator = 'closest' | 'gte' | 'lte';
 
+type WaitAndTradeType = 'pct_up' | 'pct_down' | 'pts_up' | 'pts_down';
+
 interface LegConfig {
   option_type: 'CE' | 'PE';
   position: 'sell' | 'buy';
@@ -50,6 +52,8 @@ interface LegConfig {
   leg_trail_sl_pct?: number; // 0 = disabled
   strike_type?: StrikeMode;
   cp_operator?: CpOperator; // 'closest' (~), 'gte' (>=), 'lte' (<=)
+  wait_and_trade_val?: number; // 0 = disabled (immediate entry)
+  wait_and_trade_type?: WaitAndTradeType; // 'pct_up' (% ↑), 'pct_down' (% ↓), 'pts_up' (Pts ↑), 'pts_down' (Pts ↓)
 }
 
 interface LegResult {
@@ -186,6 +190,14 @@ const CP_OPERATORS = [
 
 // StockMock CP based on Straddle Premium percentage options (5% SP to 100% SP)
 const CP_SP_OPTIONS = Array.from({ length: 20 }, (_, i) => `${(i + 1) * 5}% SP`);
+
+// StockMock Wait & Trade direction types
+const WAIT_AND_TRADE_TYPES = [
+  { label: 'W&T % ↑', value: 'pct_up' as WaitAndTradeType, title: 'Wait for price to rise by percentage' },
+  { label: 'W&T % ↓', value: 'pct_down' as WaitAndTradeType, title: 'Wait for price to fall by percentage' },
+  { label: 'W&T Pts ↑', value: 'pts_up' as WaitAndTradeType, title: 'Wait for price to rise by points' },
+  { label: 'W&T Pts ↓', value: 'pts_down' as WaitAndTradeType, title: 'Wait for price to fall by points' },
+] as const;
 
 const MONTHS = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
 
@@ -473,6 +485,7 @@ export default function OptionsBacktester({
   // ── Underlying & execution options
   const [selectedMainIndex, setSelectedMainIndex] = useState('Nifty');
   const [squareOffMode, setSquareOffMode] = useState<'one_leg' | 'all_legs'>('one_leg');
+  const [waitAndTradeActive, setWaitAndTradeActive] = useState(false);
 
   // ── Active Legs
   const [legs, setLegs] = useState<LegConfig[]>(DEFAULT_STOCKMOCK_LEGS);
@@ -720,6 +733,8 @@ export default function OptionsBacktester({
       leg_sl_pct: 0,
       leg_target_pct: 0,
       leg_trail_sl_pct: 0,
+      wait_and_trade_val: 0,
+      wait_and_trade_type: 'pct_up',
     };
     setLegs(prev => [...prev, newLeg]);
     toast.success(`Added ${builderActionType} ${builderOptionType} (${newLeg.strike})`);
@@ -831,7 +846,11 @@ export default function OptionsBacktester({
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           action: 'start',
-          legs,
+          legs: legs.map(l => ({
+            ...l,
+            wait_and_trade_val: waitAndTradeActive ? (l.wait_and_trade_val ?? 0) : 0,
+            wait_and_trade_type: l.wait_and_trade_type ?? 'pct_up',
+          })),
           lot_size: lotSize,
           profit_target_pct: strategyTargetActive ? profitTargetPct : 0,
           overall_sl_pct: strategySlActive ? overallSlPct : 0,
@@ -1343,10 +1362,22 @@ export default function OptionsBacktester({
             </div>
 
             <div className="flex items-center gap-3">
-              <label className="flex items-center gap-1 cursor-not-allowed opacity-50" title="Not implemented yet — needs a re-architected entry trigger">
-                <input type="checkbox" disabled className="w-3.5 h-3.5 rounded" />
-                <span>Wait &amp; Trade</span>
-                <Info className="w-3 h-3 text-zinc-500" />
+              <label className="flex items-center gap-1 cursor-pointer select-none">
+                <input
+                  type="checkbox"
+                  checked={waitAndTradeActive}
+                  onChange={e => setWaitAndTradeActive(e.target.checked)}
+                  className="w-3.5 h-3.5 accent-teal-500 rounded cursor-pointer"
+                />
+                <span className={waitAndTradeActive ? 'text-teal-400 font-semibold' : 'text-zinc-300'}>
+                  Wait &amp; Trade
+                </span>
+                <span
+                  title="After your entry time, the leg will wait for premium to increase/decrease by specific percent/point to take the entry. Click to watch video."
+                  className="cursor-help inline-flex items-center"
+                >
+                  <Info className="w-3 h-3 text-zinc-500 hover:text-zinc-300 inline" />
+                </span>
               </label>
               <label className="flex items-center gap-1 cursor-not-allowed opacity-50" title="Not implemented yet — needs a defined profit threshold that moves the SL">
                 <input type="checkbox" disabled className="w-3.5 h-3.5 rounded" />
@@ -1529,8 +1560,32 @@ export default function OptionsBacktester({
                   </button>
                 </div>
 
-                {/* Right controls: + Target Profit, + Stop Loss, + Trail Stop Loss, + Journey, Expiry, Copy, Trash */}
+                {/* Right controls: W&T, + Target Profit, + Stop Loss, + Trail Stop Loss, + Journey, Expiry, Copy, Trash */}
                 <div className="flex items-center gap-3.5 flex-wrap">
+                  {/* Wait & Trade Chip */}
+                  {waitAndTradeActive && (
+                    <div className="flex items-center rounded overflow-hidden border border-zinc-700 shadow-xs">
+                      <select
+                        value={leg.wait_and_trade_type || 'pct_up'}
+                        onChange={e => handleUpdateLeg(index, { wait_and_trade_type: e.target.value as WaitAndTradeType })}
+                        className="bg-zinc-800 text-teal-400 font-semibold px-2 py-0.5 text-xs border-r border-zinc-700 focus:outline-hidden cursor-pointer"
+                        title="Wait & Trade Type"
+                      >
+                        {WAIT_AND_TRADE_TYPES.map(w => (
+                          <option key={w.value} value={w.value} title={w.title}>{w.label}</option>
+                        ))}
+                      </select>
+                      <input
+                        type="number"
+                        min={0}
+                        step={0.5}
+                        value={leg.wait_and_trade_val ?? 0}
+                        onChange={e => handleUpdateLeg(index, { wait_and_trade_val: Math.max(0, Number(e.target.value)) })}
+                        placeholder="0"
+                        className="w-12 bg-zinc-800 px-1.5 py-0.5 text-xs text-zinc-100 font-medium focus:outline-hidden text-center"
+                      />
+                    </div>
+                  )}
                   {/* Target Profit Chip */}
                   {leg.leg_target_pct > 0 ? (
                     <div className="flex items-center gap-1 bg-blue-500/10 border border-blue-500/30 text-blue-400 px-1.5 py-0.5 rounded text-xs font-semibold shadow-xs">
