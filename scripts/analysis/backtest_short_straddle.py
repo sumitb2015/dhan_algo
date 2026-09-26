@@ -552,42 +552,79 @@ def _simulate_one_day(
                 
                 strike_type_val = getattr(leg, "strike_type", "offset")
 
+                # Helper to find option price at entry time
+                def _find_candidate_price(opt_type: str, stk_val: float) -> float:
+                    p = next((p for o, s, p in available_strikes_and_prices if o == opt_type and s == stk_val), 0.0)
+                    if p > 0:
+                        return p
+                    if strike_lookup:
+                        row = strike_lookup.get((ref_bar.dt, opt_type, float(stk_val)))
+                        if row is None and prev_bar:
+                            row = strike_lookup.get((bar.dt, opt_type, float(stk_val)))
+                        if row:
+                            return row[3] if prev_bar else row[0]
+                    return 0.0
+
                 # 1. Closest Premium Strike Selection
                 if strike_type_val == "closest_premium":
                     try:
-                        target_premium = float(leg.strike)
+                        target_premium = float(str(leg.strike).replace("%", "").strip())
                         leg_candidates.sort(key=lambda x: (abs(x[1] - target_premium), x[1]))
                         state.strike = leg_candidates[0][0] if leg_candidates else atm_strike
                     except Exception:
                         state.strike = atm_strike
 
-                # 1b. ATM Percent Strike Selection — leg.strike is a % distance from
-                # spot (e.g. "2" = 2% OTM in the natural direction for that option
-                # type), snapped to the nearest listed strike rather than the
-                # nearest STRIKE_STEP multiple, since illiquid wings can be missing.
+                # 1b. ATM Percent Strike Selection — leg.strike is e.g. "ATM", "ATM+1%", "ATM-0.5%", "+1%", "2%"
+                # Snaps to ATM +- (Spot * pct%), rounded to nearest strike step (50).
                 elif strike_type_val == "atm_percent":
                     try:
-                        pct = float(leg.strike) / 100.0
-                        direction = 1 if leg.option_type == "CE" else -1
-                        target_strike = ref_bar.spot * (1 + direction * pct)
-                        candidates_stk = [stk for stk, _ in leg_candidates]
-                        state.strike = min(candidates_stk, key=lambda s: abs(s - target_strike)) \
-                            if candidates_stk else atm_strike
+                        raw_str = str(leg.strike).strip().upper()
+                        if raw_str in ("ATM", "0", "0%"):
+                            state.strike = atm_strike
+                        else:
+                            sign = 1 if "+" in raw_str else (-1 if "-" in raw_str else (1 if leg.option_type == "CE" else -1))
+                            cleaned = raw_str.replace("ATM", "").replace("+", "").replace("-", "").replace("%", "").strip()
+                            pct = float(cleaned) if cleaned else 0.0
+                            target_pts = ref_bar.spot * (pct / 100.0)
+                            target_strike = round((atm_strike + sign * target_pts) / STRIKE_STEP) * STRIKE_STEP
+                            candidates_stk = [stk for stk, _ in leg_candidates]
+                            state.strike = min(candidates_stk, key=lambda s: abs(s - target_strike)) \
+                                if candidates_stk else target_strike
                     except Exception:
                         state.strike = atm_strike
 
-                # 1c. Straddle Width Strike Selection — leg.strike is a % of the
-                # ATM straddle premium (CE ATM price + PE ATM price); the strike
-                # whose own premium is closest to that target is picked, same
-                # candidate-matching as Closest Premium but with a computed target.
+                # 1c. Straddle Width Strike Selection — leg.strike is e.g. "ATM", "ATM+1*SP", "ATM-0.5*SP", "+1*SP"
+                # SP = ATM CE price + ATM PE price at entry time. Strike is ATM +- (multiplier * SP).
                 elif strike_type_val == "straddle_width":
                     try:
-                        width_pct = float(leg.strike) / 100.0
-                        atm_ce = next((p for o, s, p in available_strikes_and_prices
-                                       if o == "CE" and s == atm_strike), 0.0)
-                        atm_pe = next((p for o, s, p in available_strikes_and_prices
-                                       if o == "PE" and s == atm_strike), 0.0)
-                        target_premium = (atm_ce + atm_pe) * width_pct
+                        raw_str = str(leg.strike).strip().upper()
+                        atm_ce = _find_candidate_price("CE", atm_strike)
+                        atm_pe = _find_candidate_price("PE", atm_strike)
+                        sp = atm_ce + atm_pe
+
+                        if raw_str in ("ATM", "0") or sp <= 0.0:
+                            state.strike = atm_strike
+                        else:
+                            sign = 1 if "+" in raw_str else (-1 if "-" in raw_str else (1 if leg.option_type == "CE" else -1))
+                            cleaned = raw_str.replace("ATM", "").replace("+", "").replace("-", "").replace("*SP", "").replace("SP", "").replace("*", "").strip()
+                            mult = float(cleaned) if cleaned else 1.0
+                            target_pts = mult * sp
+                            target_strike = round((atm_strike + sign * target_pts) / STRIKE_STEP) * STRIKE_STEP
+                            candidates_stk = [stk for stk, _ in leg_candidates]
+                            state.strike = min(candidates_stk, key=lambda s: abs(s - target_strike)) \
+                                if candidates_stk else target_strike
+                    except Exception:
+                        state.strike = atm_strike
+
+                # 1d. CP based on Straddle Premium (SP) — leg.strike is a % of the ATM straddle premium
+                elif strike_type_val in ("cp_based_on_sp", "cp_sp"):
+                    try:
+                        cleaned = str(leg.strike).replace("%", "").strip()
+                        width_pct = float(cleaned) / 100.0
+                        atm_ce = _find_candidate_price("CE", atm_strike)
+                        atm_pe = _find_candidate_price("PE", atm_strike)
+                        sp = atm_ce + atm_pe
+                        target_premium = sp * width_pct
                         leg_candidates.sort(key=lambda x: (abs(x[1] - target_premium), x[1]))
                         state.strike = leg_candidates[0][0] if leg_candidates else atm_strike
                     except Exception:

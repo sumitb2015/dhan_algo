@@ -36,7 +36,7 @@ export interface BacktestHistoryItem {
   tags?: string[];
 }
 
-type StrikeMode = 'offset' | 'atm_percent' | 'closest_premium' | 'straddle_width' | 'closest_delta';
+type StrikeMode = 'offset' | 'atm_percent' | 'closest_premium' | 'straddle_width' | 'cp_based_on_sp' | 'closest_delta';
 
 interface LegConfig {
   option_type: 'CE' | 'PE';
@@ -158,6 +158,20 @@ const STRIKE_OPTIONS = [
   'ATM',
   ...Array.from({ length: 10 }, (_, i) => `ATM+${i + 1}`),
   ...Array.from({ length: 10 }, (_, i) => `ATM-${i + 1}`),
+];
+
+// StockMock ATM Percent increments (0.25% steps up to 5%)
+const ATM_PERCENT_OPTIONS = [
+  'ATM',
+  ...Array.from({ length: 20 }, (_, i) => `ATM+${((i + 1) * 0.25).toFixed(2).replace(/\.?0+$/, '')}%`),
+  ...Array.from({ length: 20 }, (_, i) => `ATM-${((i + 1) * 0.25).toFixed(2).replace(/\.?0+$/, '')}%`),
+];
+
+// StockMock Straddle Width increments (0.25*SP steps up to 5*SP)
+const STRADDLE_WIDTH_OPTIONS = [
+  'ATM',
+  ...Array.from({ length: 20 }, (_, i) => `ATM+${((i + 1) * 0.25).toFixed(2).replace(/\.?0+$/, '')}*SP`),
+  ...Array.from({ length: 20 }, (_, i) => `ATM-${((i + 1) * 0.25).toFixed(2).replace(/\.?0+$/, '')}*SP`),
 ];
 
 const MONTHS = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
@@ -641,28 +655,24 @@ export default function OptionsBacktester({
       .catch(() => {});
   }, []);
 
-  // Map strike mode to Leg strike_type. "CP based on Straddle Premium (SP)" and
-  // "Straddle Width" both resolve to the backend's straddle_width mode — both are
-  // "pick the strike whose own premium is closest to X% of the ATM straddle
-  // premium," the only difference is which % StockMock's UI defaults the field to.
-  // There is no separate SP implementation on the backend, so aliasing here (rather
-  // than silently falling through to plain ATM offset) is what actually runs the
-  // calculation the user picked instead of a different one with no indication.
+  // Map strike mode to Leg strike_type.
   function strikeModeToType(m: StrikeModeLabel): StrikeMode {
     if (m === 'ATM Percent') return 'atm_percent';
     if (m === 'Closest Premium (CP)') return 'closest_premium';
-    if (m === 'Straddle Width' || m === 'CP based on Straddle Premium (SP)') return 'straddle_width';
+    if (m === 'Straddle Width') return 'straddle_width';
+    if (m === 'CP based on Straddle Premium (SP)') return 'cp_based_on_sp';
     return 'offset';
   }
 
   // Placeholder/default strike value per mode, used both by the top toolbar and
   // by a leg row's own strike-mode dropdown so a mode switch always leaves a
-  // numerically valid value instead of a stale offset string like "ATM+3".
+  // valid option instead of a stale offset string like "ATM+3".
   function defaultStrikeValueFor(m: StrikeModeLabel): string {
     if (m === 'ATM Point') return 'ATM';
-    if (m === 'ATM Percent') return '2';
+    if (m === 'ATM Percent') return 'ATM';
+    if (m === 'Straddle Width') return 'ATM';
     if (m === 'Closest Premium (CP)') return '100';
-    return '30'; // Straddle Width / CP based on Straddle Premium (SP)
+    return '30'; // CP based on Straddle Premium (SP)
   }
 
   // ─── Actions ───────────────────────────────────────────────────────────────
@@ -1127,6 +1137,26 @@ export default function OptionsBacktester({
                   <option key={s} value={s}>{s}</option>
                 ))}
               </select>
+            ) : selectedStrikeMode === 'ATM Percent' ? (
+              <select
+                value={builderStrike}
+                onChange={e => setBuilderStrike(e.target.value)}
+                className="w-full bg-zinc-800 border border-zinc-700 rounded px-2.5 py-1.5 text-xs text-zinc-100 font-medium focus:outline-hidden focus:border-teal-500 shadow-xs"
+              >
+                {ATM_PERCENT_OPTIONS.map(s => (
+                  <option key={s} value={s}>{s}</option>
+                ))}
+              </select>
+            ) : selectedStrikeMode === 'Straddle Width' ? (
+              <select
+                value={builderStrike}
+                onChange={e => setBuilderStrike(e.target.value)}
+                className="w-full bg-zinc-800 border border-zinc-700 rounded px-2.5 py-1.5 text-xs text-zinc-100 font-medium focus:outline-hidden focus:border-teal-500 shadow-xs"
+              >
+                {STRADDLE_WIDTH_OPTIONS.map(s => (
+                  <option key={s} value={s}>{s}</option>
+                ))}
+              </select>
             ) : (
               <input
                 type="number"
@@ -1134,7 +1164,6 @@ export default function OptionsBacktester({
                 value={builderStrike}
                 onChange={e => setBuilderStrike(e.target.value)}
                 placeholder={
-                  selectedStrikeMode === 'ATM Percent' ? 'e.g. 2 (%)' :
                   selectedStrikeMode === 'Closest Premium (CP)' ? 'e.g. 100 (premium)' :
                   'e.g. 30 (% of straddle)'
                 }
@@ -1319,14 +1348,15 @@ export default function OptionsBacktester({
                     <select
                       value={
                         strikeMode === 'atm_percent' ? 'ATM Percent' :
+                        strikeMode === 'straddle_width' ? 'Straddle Width' :
                         strikeMode === 'closest_premium' ? 'Closest Premium (CP)' :
-                        strikeMode === 'straddle_width' ? 'Straddle Width' : 'ATM Point'
+                        strikeMode === 'cp_based_on_sp' ? 'CP based on Straddle Premium (SP)' : 'ATM Point'
                       }
                       onChange={e => {
                         const m = e.target.value as StrikeModeLabel;
                         handleUpdateLeg(index, {
                           strike_type: strikeModeToType(m),
-                          strike: m === 'ATM Point' ? 'ATM' : '2',
+                          strike: defaultStrikeValueFor(m),
                         });
                       }}
                       className="bg-zinc-800 border border-zinc-700 rounded px-2 py-0.5 text-xs text-zinc-200 font-medium focus:outline-hidden"
@@ -1335,6 +1365,7 @@ export default function OptionsBacktester({
                       <option value="ATM Percent">ATM Percent</option>
                       <option value="Straddle Width">Straddle Width</option>
                       <option value="Closest Premium (CP)">Closest Premium (CP)</option>
+                      <option value="CP based on Straddle Premium (SP)">CP based on SP</option>
                     </select>
                   </div>
 
@@ -1346,6 +1377,26 @@ export default function OptionsBacktester({
                       className="bg-zinc-800 border border-zinc-700 rounded px-2 py-0.5 text-xs text-zinc-200 font-medium focus:outline-hidden"
                     >
                       {STRIKE_OPTIONS.map(s => (
+                        <option key={s} value={s}>{s}</option>
+                      ))}
+                    </select>
+                  ) : strikeMode === 'atm_percent' ? (
+                    <select
+                      value={leg.strike}
+                      onChange={e => handleUpdateLeg(index, { strike: e.target.value })}
+                      className="bg-zinc-800 border border-zinc-700 rounded px-2 py-0.5 text-xs text-zinc-200 font-medium focus:outline-hidden"
+                    >
+                      {ATM_PERCENT_OPTIONS.map(s => (
+                        <option key={s} value={s}>{s}</option>
+                      ))}
+                    </select>
+                  ) : strikeMode === 'straddle_width' ? (
+                    <select
+                      value={leg.strike}
+                      onChange={e => handleUpdateLeg(index, { strike: e.target.value })}
+                      className="bg-zinc-800 border border-zinc-700 rounded px-2 py-0.5 text-xs text-zinc-200 font-medium focus:outline-hidden"
+                    >
+                      {STRADDLE_WIDTH_OPTIONS.map(s => (
                         <option key={s} value={s}>{s}</option>
                       ))}
                     </select>
