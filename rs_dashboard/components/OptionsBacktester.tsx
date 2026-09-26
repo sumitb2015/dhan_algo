@@ -1019,6 +1019,30 @@ export default function OptionsBacktester({
       return;
     }
 
+    const entryMin = parseInt(entryH, 10) * 60 + parseInt(entryM, 10);
+    const exitMin = parseInt(exitH, 10) * 60 + parseInt(exitM, 10);
+
+    if (executionType === 'INTRADAY' && exitMin <= entryMin) {
+      toast.error('Exit Time must be after Entry Time for intraday backtest');
+      return;
+    }
+
+    if (rangeBreakoutActive) {
+      const untilMin = parseInt(rangeUntilH, 10) * 60 + parseInt(rangeUntilM, 10);
+      if (untilMin <= entryMin) {
+        toast.error('Range Breakout Until Time must be after Entry Time');
+        return;
+      }
+    }
+
+    if (noReentryAfterActive) {
+      const noReentryMin = parseInt(noReentryH, 10) * 60 + parseInt(noReentryM, 10);
+      if (noReentryMin <= entryMin) {
+        toast.error('No Re-Entry After Time must be after Entry Time');
+        return;
+      }
+    }
+
     const entryTimeFormatted = `${String(entryH).padStart(2, '0')}:${String(entryM).padStart(2, '0')}`;
     const eodTimeFormatted = `${String(exitH).padStart(2, '0')}:${String(exitM).padStart(2, '0')}`;
 

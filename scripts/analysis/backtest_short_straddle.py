@@ -853,6 +853,10 @@ def _simulate_one_day(
                     state.entry_dt = bar.dt
                     state.is_entered = True
                     state.is_waiting = False
+                    initial_net_credit = sum(
+                        s.original_entry_price * (1 if l.position == "sell" else -1) * l.lots * lot_size
+                        for l, s in zip(leg_configs, leg_states)
+                    )
 
         # --- Check No ReEntry Cutoff Time ---
         can_reenter = (no_reentry_after_time is None) or (t < no_reentry_after_time)
@@ -887,6 +891,10 @@ def _simulate_one_day(
                     state.struck_sl = False
                     state.struck_target = False
                     state.is_entered = True
+                    state.is_waiting = False
+                    state.exit_price = 0.0
+                    state.exit_reason = ""
+                    state.peak_favorable_pct = 0.0
 
         # --- Per-leg SL and Target ---
         for i, (leg, state) in enumerate(zip(leg_configs, leg_states)):
