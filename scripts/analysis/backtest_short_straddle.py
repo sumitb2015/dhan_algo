@@ -1418,7 +1418,8 @@ def run_backtest(leg_configs: List[LegConfig], cycles: List[ExpiryCycle],
                   trail_profit_by: float = 0.0,
                   no_reentry_after_time_str: Optional[str] = None,
                   range_breakout: bool = False,
-                  range_until_time_str: Optional[str] = "09:31"):
+                  range_until_time_str: Optional[str] = "09:31",
+                  entry_days_before_expiry: int = 3):
     """
     strategy_type:
       "intraday"   — one trade per trading day (AlgoTest Intraday mode)
@@ -1505,8 +1506,9 @@ def run_backtest(leg_configs: List[LegConfig], cycles: List[ExpiryCycle],
         s_dates = sorted(dg.keys())
         if strategy_type == "expiry_day":
             tds = [exp_dt] if exp_dt in dg else []
-        elif strategy_type == "first_day":
-            tds = [s_dates[0]] if s_dates else []
+        elif strategy_type in ("first_day", "positional"):
+            idx = max(0, len(s_dates) - 1 - entry_days_before_expiry)
+            tds = [s_dates[idx]] if s_dates else []
         else:
             tds = s_dates
         for d in tds:
@@ -1559,8 +1561,9 @@ def run_backtest(leg_configs: List[LegConfig], cycles: List[ExpiryCycle],
         sorted_dates = sorted(day_groups.keys())
         if strategy_type == "expiry_day":
             trade_dates = [expiry_dt] if expiry_dt in day_groups else []
-        elif strategy_type == "first_day":
-            trade_dates = [sorted_dates[0]] if sorted_dates else []
+        elif strategy_type in ("first_day", "positional"):
+            idx = max(0, len(sorted_dates) - 1 - entry_days_before_expiry)
+            trade_dates = [sorted_dates[idx]] if sorted_dates else []
         else:  # intraday — every day
             trade_dates = sorted_dates
 
@@ -1913,7 +1916,9 @@ def main():
     parser.add_argument("--commission-per-lot", type=float, default=40.0)
     parser.add_argument("--slippage-pct",       type=float, default=0.0)
     parser.add_argument("--strategy-type",      default="intraday",
-                        choices=["intraday", "expiry_day", "first_day"])
+                        choices=["intraday", "expiry_day", "first_day", "positional"])
+    parser.add_argument("--entry-days-before-expiry", type=int, default=3,
+                        help="Days before expiry to enter for positional strategy (0=expiry day, 1=1 day before, etc.)")
     parser.add_argument("--legs",               default=json.dumps(DEFAULT_LEGS))
     parser.add_argument("--use-db",             action="store_true", help="Use SQLite database for option price lookups")
     parser.add_argument("--adjustment-mode",    default="none", choices=["none", "rolling_straddle"])
@@ -1992,6 +1997,7 @@ def main():
         no_reentry_after_time_str=args.no_reentry_after_time,
         range_breakout=args.range_breakout,
         range_until_time_str=args.range_until_time,
+        entry_days_before_expiry=args.entry_days_before_expiry,
     )
     result["params"] = {
         "start_date":            args.start_date,
@@ -2013,6 +2019,7 @@ def main():
         "no_reentry_after_time": args.no_reentry_after_time,
         "range_breakout":        args.range_breakout,
         "range_until_time":      args.range_until_time,
+        "entry_days_before_expiry": args.entry_days_before_expiry,
         "commission_per_lot":    args.commission_per_lot,
         "slippage_pct":          args.slippage_pct,
         "strategy_type":         args.strategy_type,

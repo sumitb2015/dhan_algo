@@ -193,6 +193,7 @@ export async function POST(req: NextRequest) {
     '--commission-per-lot',  String(body.commission_per_lot  ?? 40),
     '--slippage-pct',        String(body.slippage_pct        ?? 0),
     '--strategy-type',       strategyType,
+    '--entry-days-before-expiry', String(body.entry_days_before_expiry ?? 3),
     '--legs',                legs,
     '--use-db',
     '--adjustment-mode',    String(body.adjustment_mode     ?? 'none'),

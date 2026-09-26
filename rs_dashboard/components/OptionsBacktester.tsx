@@ -549,6 +549,7 @@ export default function OptionsBacktester({
   const [startDate, setStartDate] = useState('2026-08-17');
   const [endDate, setEndDate] = useState('2026-09-17');
   const [executionType, setExecutionType] = useState<'INTRADAY' | 'POSITIONAL'>('INTRADAY');
+  const [entryDaysBeforeExpiry, setEntryDaysBeforeExpiry] = useState<number>(3);
 
   // Advanced settings & modal
   const [settingsModalOpen, setSettingsModalOpen] = useState(false);
@@ -716,6 +717,14 @@ export default function OptionsBacktester({
         if (parts[1]) setNoReentryM(parts[1]);
       } else {
         setNoReentryAfterActive(false);
+      }
+      if (p.strategy_type === 'positional' || p.strategy_type === 'first_day') {
+        setExecutionType('POSITIONAL');
+        if (p.entry_days_before_expiry !== undefined) {
+          setEntryDaysBeforeExpiry(Number(p.entry_days_before_expiry));
+        }
+      } else if (p.strategy_type === 'intraday') {
+        setExecutionType('INTRADAY');
       }
       if (Array.isArray(p.legs) && p.legs.length > 0) {
         setLegs(p.legs.map((l: any) => ({
@@ -943,7 +952,8 @@ export default function OptionsBacktester({
           eod_time: eodTimeFormatted,
           commission_per_lot: includeCosts ? commissionPerLot : 0,
           slippage_pct: includeCosts ? slippagePct : 0,
-          strategy_type: executionType === 'POSITIONAL' ? 'first_day' : 'intraday',
+          strategy_type: executionType === 'POSITIONAL' ? 'positional' : 'intraday',
+          entry_days_before_expiry: executionType === 'POSITIONAL' ? entryDaysBeforeExpiry : 3,
           start_date: startDate,
           end_date: endDate,
           adjustment_mode: adjustmentMode,
@@ -1059,6 +1069,8 @@ export default function OptionsBacktester({
       noReentryTime: `${noReentryH}:${noReentryM}`,
       rangeBreakoutActive,
       rangeUntilTime: `${rangeUntilH}:${rangeUntilM}`,
+      executionType,
+      entryDaysBeforeExpiry,
     };
     try {
       localStorage.setItem('stockmock_saved_strategy', JSON.stringify(payload));
@@ -2107,6 +2119,33 @@ export default function OptionsBacktester({
                 <p className="text-[11px] text-zinc-400 leading-snug mt-1 max-w-sm">
                   {getRangeDescription()}
                 </p>
+              </div>
+            )}
+
+            {/* Positional Entry Date Selection */}
+            {executionType === 'POSITIONAL' && (
+              <div className="flex items-start gap-2 text-xs text-zinc-400 mt-2">
+                <span className="w-20 font-medium pt-3.5">Entry Date:</span>
+                <div className="flex flex-col items-center w-64 max-w-full">
+                  <div className="text-[11px] text-zinc-300 font-medium text-center mb-1">
+                    {entryDaysBeforeExpiry} trading days before weekly expiry(excluding holidays)
+                  </div>
+                  <div className="w-full px-1">
+                    <input
+                      type="range"
+                      min={0}
+                      max={4}
+                      step={1}
+                      value={4 - entryDaysBeforeExpiry}
+                      onChange={e => setEntryDaysBeforeExpiry(4 - Number(e.target.value))}
+                      className="w-full h-1.5 bg-zinc-700 rounded-lg appearance-none cursor-pointer accent-teal-500"
+                    />
+                    <div className="flex justify-between text-[11px] text-zinc-500 font-semibold px-0.5 mt-0.5">
+                      <span>4</span>
+                      <span>0</span>
+                    </div>
+                  </div>
+                </div>
               </div>
             )}
 
