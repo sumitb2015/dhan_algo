@@ -520,6 +520,8 @@ def _simulate_one_day(
     range_breakout: bool = False,
     range_until_time: Optional[time] = None,
     exit_trade_date: Optional[date] = None,
+    entry_trade_date: Optional[date] = None,
+    expiry_dt: Optional[date] = None,
 ) -> dict:
     """Simulate one intraday trade over day_bars. Returns state dict."""
     if profit_target_val == 0.0 and profit_target_pct > 0:
@@ -528,6 +530,9 @@ def _simulate_one_day(
     if overall_sl_val == 0.0 and overall_sl_pct > 0:
         overall_sl_val = overall_sl_pct
         overall_sl_type = "pct"
+
+    if entry_trade_date is None and day_bars:
+        entry_trade_date = day_bars[0].dt.date()
 
     leg_states: List[LegState] = [LegState() for _ in leg_configs]
     closed_legs: List[dict] = []
@@ -541,6 +546,7 @@ def _simulate_one_day(
     exit_dt = None
     exit_reason = "NO_ENTRY"
     entry_spot = 0.0
+    initial_net_credit = 0.0
     range_high = float("-inf")
     range_low = float("inf")
     range_ready = False
@@ -693,9 +699,14 @@ def _simulate_one_day(
         t = bar.dt.time()
         prev_bar = day_bars[idx - 1] if idx > 0 else None
 
+        if expiry_dt:
+            cur_days_to_expiry = max(0.0, (datetime.combine(expiry_dt, EXPIRY_TIME) - bar.dt).total_seconds() / 86400.0)
+        else:
+            cur_days_to_expiry = days_to_expiry
+
         # --- Entry ---
-        # Use open_ price: AlgoTest enters at the first available price of the entry bar
-        if not entered and t >= entry_time:
+        # Confined to entry_trade_date; uses open_ price (AlgoTest enters at first available price of entry bar)
+        if not entered and (entry_trade_date is None or bar.dt.date() == entry_trade_date) and t >= entry_time:
             if entry_cutoff_time and t > entry_cutoff_time:
                 continue
             if t >= eod_time:
@@ -732,20 +743,20 @@ def _simulate_one_day(
             for i, (leg, state) in enumerate(zip(leg_configs, candidate_states)):
                 slip = slip_sell_entry if leg.position == "sell" else slip_buy_entry
                 state.strike = _resolve_strike_for_single_leg(
-                    leg, entry_spot_ref, ref_bar.dt, days_to_expiry, available_strikes_and_prices, atm_strike
+                    leg, entry_spot_ref, ref_bar.dt, cur_days_to_expiry, available_strikes_and_prices, atm_strike
                 )
                 
                 # Fetch baseline reference price for resolved strike
                 if not range_breakout and prev_bar:
                     _, _, _, leg_close = _get_leg_prices(
                         prev_bar.dt, leg.option_type, state.strike, prev_bar.legs[i],
-                        prev_bar.spot, days_to_expiry, strike_lookup
+                        prev_bar.spot, cur_days_to_expiry, strike_lookup
                     )
                     raw_price = leg_close
                 else:
                     leg_open, _, _, leg_close = _get_leg_prices(
                         bar.dt, leg.option_type, state.strike, bar.legs[i],
-                        bar.spot, days_to_expiry, strike_lookup
+                        bar.spot, cur_days_to_expiry, strike_lookup
                     )
                     raw_price = leg_close if range_breakout else leg_open
                 state.base_ref_price = raw_price
@@ -768,26 +779,6 @@ def _simulate_one_day(
                         # Imbalance exceeds threshold, wait for premiums to balance on a later bar
                         continue
                     
-            # Configure Wait & Trade for each leg
-            for leg, state in zip(leg_configs, candidate_states):
-                wt_val = float(getattr(leg, "wait_and_trade_val", 0.0) or 0.0)
-                wt_type = str(getattr(leg, "wait_and_trade_type", "pct_up") or "pct_up").lower().strip()
-                p0 = state.base_ref_price
-                if wt_val > 0.0:
-                    state.is_waiting = True
-                    state.is_entered = False
-                    state.entry_price = 0.0
-                    state.entry_dt = None
-                    if "pts" in wt_type:
-                        if "down" in wt_type or "↓" in wt_type:
-                            state.trigger_price = p0 - wt_val
-                        else:
-                            state.trigger_price = p0 + wt_val
-                    else:  # percentage
-                        if "down" in wt_type or "↓" in wt_type:
-                            state.trigger_price = p0 * (1.0 - wt_val / 100.0)
-                        else:
-                            state.trigger_price = p0 * (1.0 + wt_val / 100.0)
             # Configure Wait & Trade and store original entry price for each leg
             for leg, state in zip(leg_configs, candidate_states):
                 state.original_entry_price = state.entry_price
@@ -820,6 +811,10 @@ def _simulate_one_day(
             entry_spot = bar.spot
             ref_spot = bar.spot
             current_atm = atm_strike
+            initial_net_credit = sum(
+                s.original_entry_price * (1 if leg.position == "sell" else -1) * leg.lots * lot_size
+                for leg, s in zip(leg_configs, leg_states)
+            )
             continue
 
         if not entered:
@@ -829,7 +824,7 @@ def _simulate_one_day(
         leg_prices = [
             _get_leg_prices(
                 bar.dt, leg.option_type, state.strike, bar.legs[i],
-                bar.spot, days_to_expiry, strike_lookup
+                bar.spot, cur_days_to_expiry, strike_lookup
             )
             for i, (leg, state) in enumerate(zip(leg_configs, leg_states))
         ]
@@ -899,17 +894,21 @@ def _simulate_one_day(
                 continue
             leg_open, leg_high, leg_low, leg_close = leg_prices[i]
             # The trigger level is where the market touched; the fill is that level
-            # degraded by slippage, same as every other exit path.
+            # degraded by slippage, and accounts for opening gap past trigger.
             slip = slip_sell_exit if leg.position == "sell" else slip_buy_exit
 
             if leg.leg_sl_pct > 0:
                 hit_sl = False
-                if leg.position == "sell" and leg_high >= state.entry_price * (1 + leg.leg_sl_pct / 100):
-                    state.exit_price = state.entry_price * (1 + leg.leg_sl_pct / 100) * slip
-                    hit_sl = True
-                elif leg.position == "buy" and leg_low <= state.entry_price * (1 - leg.leg_sl_pct / 100):
-                    state.exit_price = state.entry_price * (1 - leg.leg_sl_pct / 100) * slip
-                    hit_sl = True
+                if leg.position == "sell":
+                    sl_trigger = state.entry_price * (1 + leg.leg_sl_pct / 100)
+                    if leg_high >= sl_trigger:
+                        state.exit_price = max(sl_trigger, leg_open) * slip
+                        hit_sl = True
+                elif leg.position == "buy":
+                    sl_trigger = state.entry_price * (1 - leg.leg_sl_pct / 100)
+                    if leg_low <= sl_trigger:
+                        state.exit_price = min(sl_trigger, leg_open) * slip
+                        hit_sl = True
 
                 if hit_sl:
                     state.exit_reason = "LEG_SL"
@@ -937,9 +936,9 @@ def _simulate_one_day(
                         state.current_re_execute_sl += 1
                         cur_quotes = [(o, s, c) for o, s, o_, h_, l_, c in strike_by_dt.get(bar.dt, [])]
                         cur_atm = round(bar.spot / STRIKE_STEP) * STRIKE_STEP
-                        new_strike = _resolve_strike_for_single_leg(leg, bar.spot, bar.dt, days_to_expiry, cur_quotes, cur_atm)
+                        new_strike = _resolve_strike_for_single_leg(leg, bar.spot, bar.dt, cur_days_to_expiry, cur_quotes, cur_atm)
                         slip_entry = slip_sell_entry if leg.position == "sell" else slip_buy_entry
-                        _, _, _, leg_c = _get_leg_prices(bar.dt, leg.option_type, new_strike, bar.legs[i], bar.spot, days_to_expiry, strike_lookup)
+                        _, _, _, leg_c = _get_leg_prices(bar.dt, leg.option_type, new_strike, bar.legs[i], bar.spot, cur_days_to_expiry, strike_lookup)
                         state.strike = new_strike
                         state.entry_price = leg_c * slip_entry
                         state.original_entry_price = state.entry_price
@@ -1025,9 +1024,9 @@ def _simulate_one_day(
                         state.current_re_execute_tp += 1
                         cur_quotes = [(o, s, c) for o, s, o_, h_, l_, c in strike_by_dt.get(bar.dt, [])]
                         cur_atm = round(bar.spot / STRIKE_STEP) * STRIKE_STEP
-                        new_strike = _resolve_strike_for_single_leg(leg, bar.spot, bar.dt, days_to_expiry, cur_quotes, cur_atm)
+                        new_strike = _resolve_strike_for_single_leg(leg, bar.spot, bar.dt, cur_days_to_expiry, cur_quotes, cur_atm)
                         slip_entry = slip_sell_entry if leg.position == "sell" else slip_buy_entry
-                        _, _, _, leg_c = _get_leg_prices(bar.dt, leg.option_type, new_strike, bar.legs[i], bar.spot, days_to_expiry, strike_lookup)
+                        _, _, _, leg_c = _get_leg_prices(bar.dt, leg.option_type, new_strike, bar.legs[i], bar.spot, cur_days_to_expiry, strike_lookup)
                         state.strike = new_strike
                         state.entry_price = leg_c * slip_entry
                         state.original_entry_price = state.entry_price
@@ -1152,7 +1151,7 @@ def _simulate_one_day(
                     state.entry_dt = bar.dt
                     _, _, _, leg_c = _get_leg_prices(
                         bar.dt, leg.option_type, state.strike, bar.legs[i],
-                        bar.spot, days_to_expiry, strike_lookup
+                        bar.spot, cur_days_to_expiry, strike_lookup
                     )
                     state.entry_price = leg_c * slip
                 continue
@@ -1236,11 +1235,12 @@ def _simulate_one_day(
             if overall_sl_type == "mtm":
                 if current_strategy_mtm <= -overall_sl_val:
                     sl_hit = True
-            elif abs(net_credit_now) > 0:
-                cur_net = _current_net()
-                loss_pct = (cur_net - net_credit_now) / abs(net_credit_now) * 100
-                if loss_pct >= overall_sl_val:
-                    sl_hit = True
+            else:
+                base_credit = abs(initial_net_credit) if abs(initial_net_credit) > 0 else (abs(net_credit_now) * lot_size)
+                if base_credit > 0:
+                    pnl_pct = (current_strategy_mtm / base_credit) * 100
+                    if pnl_pct <= -overall_sl_val:
+                        sl_hit = True
 
         if sl_hit:
             for i, (leg, state) in enumerate(zip(leg_configs, leg_states)):
@@ -1263,11 +1263,12 @@ def _simulate_one_day(
             if profit_target_type == "mtm":
                 if current_strategy_mtm >= profit_target_val:
                     tp_hit = True
-            elif abs(net_credit_now) > 0:
-                cur_net = _current_net()
-                profit_pct = (net_credit_now - cur_net) / abs(net_credit_now) * 100
-                if profit_pct >= profit_target_val:
-                    tp_hit = True
+            else:
+                base_credit = abs(initial_net_credit) if abs(initial_net_credit) > 0 else (abs(net_credit_now) * lot_size)
+                if base_credit > 0:
+                    pnl_pct = (current_strategy_mtm / base_credit) * 100
+                    if pnl_pct >= profit_target_val:
+                        tp_hit = True
 
         if tp_hit:
             for i, (leg, state) in enumerate(zip(leg_configs, leg_states)):
@@ -1342,7 +1343,7 @@ def _simulate_one_day(
                     if prev_bar:
                         prev_leg_prices = _get_leg_prices(
                             prev_bar.dt, leg.option_type, state.strike, prev_bar.legs[i],
-                            prev_bar.spot, days_to_expiry, strike_lookup
+                            prev_bar.spot, cur_days_to_expiry, strike_lookup
                         )
                         state.exit_price = prev_leg_prices[3] * slip
                     else:
@@ -1367,7 +1368,7 @@ def _simulate_one_day(
         last_leg_prices = [
             _get_leg_prices(
                 last_bar.dt, leg.option_type, state.strike, last_bar.legs[i],
-                last_bar.spot, days_to_expiry, strike_lookup
+                last_bar.spot, cur_days_to_expiry, strike_lookup
             )
             for i, (leg, state) in enumerate(zip(leg_configs, leg_states))
         ]
@@ -1609,6 +1610,8 @@ def run_backtest(leg_configs: List[LegConfig], cycles: List[ExpiryCycle],
                 days_to_expiry=dte,
                 strike_lookup=cycle.strike_lookup,
                 exit_trade_date=exit_trade_date,
+                entry_trade_date=trade_date,
+                expiry_dt=expiry_dt,
             )
 
             entry_date_str = trade_date.isoformat()

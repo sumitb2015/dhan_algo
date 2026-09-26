@@ -643,6 +643,84 @@ export default function OptionsBacktester({
     fetchHistory();
   }, [fetchHistory]);
 
+  useEffect(() => {
+    try {
+      const raw = localStorage.getItem('stockmock_saved_strategy');
+      if (raw) {
+        const saved = JSON.parse(raw);
+        if (saved && typeof saved === 'object') {
+          if (Array.isArray(saved.legs) && saved.legs.length > 0) {
+            setLegs(saved.legs);
+            if (saved.legs.some((l: any) => (l.wait_and_trade_val || 0) > 0)) setWaitAndTradeActive(true);
+            if (saved.legs.some((l: any) => (l.re_entry_sl_count || 0) > 0 || (l.re_execute_sl_count || 0) > 0 || (l.re_entry_tp_count || 0) > 0 || (l.re_execute_tp_count || 0) > 0)) setReEntryActive(true);
+          }
+          if (saved.entryTime) {
+            const [h, m] = String(saved.entryTime).split(':');
+            if (h) setEntryH(h);
+            if (m) setEntryM(m);
+          }
+          if (saved.exitTime) {
+            const [h, m] = String(saved.exitTime).split(':');
+            if (h) setExitH(h);
+            if (m) setExitM(m);
+          }
+          if (saved.startDate) setStartDate(saved.startDate);
+          if (saved.endDate) setEndDate(saved.endDate);
+          if (saved.lotSize) setLotSize(Number(saved.lotSize));
+          if (saved.target) {
+            setStrategyTargetActive(true);
+            setProfitTargetVal(Number(saved.target));
+            if (saved.targetType) setProfitTargetType(saved.targetType);
+          }
+          if (saved.sl) {
+            setStrategySlActive(true);
+            setOverallSlVal(Number(saved.sl));
+            if (saved.slType) setOverallSlType(saved.slType);
+          }
+          if (saved.protectProfitsActive) {
+            setProtectProfitsActive(true);
+            if (saved.protectProfitMode) setProtectProfitMode(saved.protectProfitMode);
+            if (saved.lockProfitReaches) setLockProfitReaches(Number(saved.lockProfitReaches));
+            if (saved.lockProfitMin) setLockProfitMin(Number(saved.lockProfitMin));
+            if (saved.trailProfitStep) setTrailProfitStep(Number(saved.trailProfitStep));
+            if (saved.trailProfitBy) setTrailProfitBy(Number(saved.trailProfitBy));
+          }
+          if (saved.noReentryAfterActive) {
+            setNoReentryAfterActive(true);
+            if (saved.noReentryTime) {
+              const [h, m] = String(saved.noReentryTime).split(':');
+              if (h) setNoReentryH(h);
+              if (m) setNoReentryM(m);
+            }
+          }
+          if (saved.rangeBreakoutActive) {
+            setRangeBreakoutActive(true);
+            if (saved.rangeUntilTime) {
+              const [h, m] = String(saved.rangeUntilTime).split(':');
+              if (h) setRangeUntilH(h);
+              if (m) setRangeUntilM(m);
+            }
+          }
+          if (saved.executionType === 'POSITIONAL') {
+            setExecutionType('POSITIONAL');
+            if (saved.entryDaysBeforeExpiry !== undefined) setEntryDaysBeforeExpiry(Number(saved.entryDaysBeforeExpiry));
+            if (saved.exitDaysBeforeExpiry !== undefined) setExitDaysBeforeExpiry(Number(saved.exitDaysBeforeExpiry));
+          }
+          if (saved.squareOffMode === 'all_legs' || saved.squareOffMode === 'one_leg') {
+            setSquareOffMode(saved.squareOffMode);
+          }
+          if (saved.priceDiffActive) {
+            setPriceDiffActive(true);
+            if (saved.maxDiffPct) setMaxDiffPct(Number(saved.maxDiffPct));
+          }
+          if (saved.entryCutoffTime) setEntryCutoffTime(saved.entryCutoffTime);
+        }
+      }
+    } catch {
+      // ignore parse issues
+    }
+  }, []);
+
   async function handleLoadHistoryItem(id: string) {
     try {
       const res = await fetch(`/api/backtest/history?id=${encodeURIComponent(id)}`);
@@ -734,17 +812,35 @@ export default function OptionsBacktester({
       } else if (p.strategy_type === 'intraday') {
         setExecutionType('INTRADAY');
       }
+      if (p.square_off_mode === 'all_legs' || p.square_off_mode === 'one_leg') {
+        setSquareOffMode(p.square_off_mode);
+      }
       if (Array.isArray(p.legs) && p.legs.length > 0) {
-        setLegs(p.legs.map((l: any) => ({
+        const loadedLegs: LegConfig[] = p.legs.map((l: any): LegConfig => ({
           option_type: l.option_type || 'CE',
           position: l.position || 'sell',
           lots: l.lots || 1,
           strike: String(l.strike || 'ATM'),
           strike_type: l.strike_type || 'offset',
-          leg_sl_pct: l.leg_sl_pct || 0,
-          leg_target_pct: l.leg_target_pct || 0,
-          leg_trail_sl_pct: l.leg_trail_sl_pct || 0,
-        })));
+          cp_operator: l.cp_operator || 'closest',
+          leg_sl_pct: Number(l.leg_sl_pct || 0),
+          leg_target_pct: Number(l.leg_target_pct || 0),
+          leg_trail_sl_pct: Number(l.leg_trail_sl_pct || 0),
+          wait_and_trade_val: Number(l.wait_and_trade_val || 0),
+          wait_and_trade_type: l.wait_and_trade_type || 'pct_up',
+          re_entry_sl_count: Number(l.re_entry_sl_count || 0),
+          re_entry_sl_type: l.re_entry_sl_type || 'asap',
+          re_execute_sl_count: Number(l.re_execute_sl_count || 0),
+          re_entry_tp_count: Number(l.re_entry_tp_count || 0),
+          re_execute_tp_count: Number(l.re_execute_tp_count || 0),
+        }));
+        setLegs(loadedLegs);
+        if (loadedLegs.some((l: LegConfig) => (l.wait_and_trade_val || 0) > 0)) {
+          setWaitAndTradeActive(true);
+        }
+        if (loadedLegs.some((l: LegConfig) => (l.re_entry_sl_count || 0) > 0 || (l.re_execute_sl_count || 0) > 0 || (l.re_entry_tp_count || 0) > 0 || (l.re_execute_tp_count || 0) > 0)) {
+          setReEntryActive(true);
+        }
       }
       setHistoryModalOpen(false);
       toast.success(`Loaded backtest: ${data.metadata?.name || id}`);
@@ -1081,6 +1177,10 @@ export default function OptionsBacktester({
       executionType,
       entryDaysBeforeExpiry,
       exitDaysBeforeExpiry,
+      squareOffMode,
+      priceDiffActive,
+      maxDiffPct,
+      entryCutoffTime,
     };
     try {
       localStorage.setItem('stockmock_saved_strategy', JSON.stringify(payload));
