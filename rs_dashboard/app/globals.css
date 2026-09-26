@@ -537,6 +537,7 @@
  * real, unlayered custom property + rule is what actually flips at runtime.
  * ===================================================================== */
 :root {
+  --sidebar-w: 56px;
   --heading-font: var(--font-sans);
 
   /* Fixed per-option refs so SettingsPanel can preview every choice at once,

@@ -1594,9 +1594,12 @@ export default function OptionsBacktester({
       </div>
 
       {/* ── Bottom Fixed Action Bar ── */}
-      <div className="fixed bottom-0 left-0 right-0 z-40 bg-zinc-950/95 border-t border-zinc-800 px-6 py-2.5 backdrop-blur-md shadow-lg flex items-center justify-between text-zinc-300">
+      <div
+        className="fixed bottom-0 right-0 z-30 bg-zinc-950/95 border-t border-zinc-800 px-4 sm:px-6 py-2.5 backdrop-blur-md shadow-lg flex items-center justify-between gap-3 text-zinc-300 transition-[left] duration-200 ease-out overflow-x-auto sm:overflow-visible"
+        style={{ left: 'var(--sidebar-w, 56px)' }}
+      >
         {/* Left: INTRADAY / POSITIONAL */}
-        <div className="flex rounded overflow-hidden border border-zinc-700 shadow-xs">
+        <div className="flex rounded overflow-hidden border border-zinc-700 shadow-xs shrink-0">
           <button
             type="button"
             onClick={() => setExecutionType('INTRADAY')}
@@ -1622,7 +1625,7 @@ export default function OptionsBacktester({
         </div>
 
         {/* Center: Past Runs, Save Strategy & Share Strategy */}
-        <div className="flex items-center gap-2 sm:gap-3 flex-wrap">
+        <div className="flex items-center gap-2 sm:gap-3 flex-wrap justify-center">
           <button
             type="button"
             onClick={() => { setHistoryModalOpen(true); fetchHistory(); }}
@@ -1647,7 +1650,7 @@ export default function OptionsBacktester({
         </div>
 
         {/* Right: START BACKTEST */}
-        <div>
+        <div className="shrink-0">
           {loading ? (
             <button
               type="button"
