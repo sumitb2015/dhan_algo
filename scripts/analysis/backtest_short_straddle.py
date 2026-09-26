@@ -101,7 +101,8 @@ def _load_vix() -> Dict[str, float]:
 
 def fetch_multi_leg_cycles(start_date: str, end_date: str,
                            leg_configs: List[LegConfig],
-                           db_conn = None) -> List[ExpiryCycle]:
+                           db_conn = None,
+                           status_file: Optional[str] = None) -> List[ExpiryCycle]:
     import sqlite3
     start = _parse_date(start_date)
     end   = _parse_date(end_date)
@@ -115,8 +116,28 @@ def fetch_multi_leg_cycles(start_date: str, end_date: str,
         )
         expiries = [row[0] for row in cursor.fetchall()]
         
+        total_exp = len(expiries)
         cycles: List[ExpiryCycle] = []
-        for expiry in expiries:
+        for idx_exp, expiry in enumerate(expiries):
+            if status_file and (idx_exp % 2 == 0 or idx_exp == total_exp - 1):
+                try:
+                    pct = round(((idx_exp + 1) / max(1, total_exp)) * 15.0, 1)
+                    with open(status_file, "w") as f:
+                        json.dump({
+                            "running": True,
+                            "done": False,
+                            "stage": "loading_data",
+                            "percent": pct,
+                            "current": idx_exp + 1,
+                            "total": total_exp,
+                            "date": f"{expiry} ({idx_exp + 1}/{total_exp})",
+                            "pnl": 0.0,
+                            "trades": 0,
+                            "pid": os.getpid(),
+                        }, f)
+                except Exception:
+                    pass
+
             try:
                 expiry_dt = _parse_date(expiry)
             except ValueError:
@@ -168,7 +189,7 @@ def fetch_multi_leg_cycles(start_date: str, end_date: str,
                 ]
                 bars.append(MultiLegBar(dt=ts.to_pydatetime(), spot=spot, legs=legs_bars))
                 
-            # Build strike_lookup for this cycle from SQLite
+            # Build strike_lookup for this cycle from SQLite using fast fromisoformat
             strike_lookup = {}
             cursor.execute(
                 "SELECT datetime, option_type, strike, open, high, low, close FROM option_prices "
@@ -177,7 +198,7 @@ def fetch_multi_leg_cycles(start_date: str, end_date: str,
             )
             for dt_str, opt, stk, o, h, l, c in cursor.fetchall():
                 try:
-                    dt_obj = datetime.strptime(dt_str, "%Y-%m-%d %H:%M:%S")
+                    dt_obj = datetime.fromisoformat(dt_str)
                 except ValueError:
                     continue
                 strike_lookup[(dt_obj, opt, float(stk))] = (float(o), float(h), float(l), float(c))
@@ -1006,12 +1027,14 @@ def run_backtest(leg_configs: List[LegConfig], cycles: List[ExpiryCycle],
                 json.dump({
                     "running": True,
                     "done": False,
+                    "stage": "simulating",
                     "current": 0,
                     "total": total_trade_dates,
-                    "percent": 0.0,
+                    "percent": 15.0 if total_trade_dates > 0 else 0.0,
                     "date": start_date,
                     "pnl": 0.0,
                     "trades": 0,
+                    "pid": os.getpid(),
                 }, f)
         except Exception:
             pass
@@ -1191,17 +1214,19 @@ def run_backtest(leg_configs: List[LegConfig], cycles: List[ExpiryCycle],
             # Update progress status periodically
             if status_file and (processed_count % 3 == 0 or processed_count == total_trade_dates):
                 try:
-                    pct = round((processed_count / max(1, total_trade_dates)) * 100, 1)
+                    pct = round(15.0 + (processed_count / max(1, total_trade_dates)) * 85.0, 1)
                     with open(status_file, "w") as f:
                         json.dump({
                             "running": True,
                             "done": False,
+                            "stage": "simulating",
                             "current": processed_count,
                             "total": total_trade_dates,
                             "percent": pct,
                             "date": entry_date_str,
                             "pnl": round(cumulative_pnl, 2),
                             "trades": len(trade_results),
+                            "pid": os.getpid(),
                         }, f)
                 except Exception:
                     pass
@@ -1276,6 +1301,7 @@ def run_backtest(leg_configs: List[LegConfig], cycles: List[ExpiryCycle],
                     "current": processed_count,
                     "trades": len(traded),
                     "pnl": round(cumulative_pnl, 2),
+                    "pid": os.getpid(),
                 }, f)
         except Exception:
             pass
@@ -1393,7 +1419,7 @@ def main():
         db_conn = sqlite3.connect(db_path, check_same_thread=False)
 
     vix_map = _load_vix()
-    cycles  = fetch_multi_leg_cycles(args.start_date, args.end_date, leg_configs, db_conn=db_conn)
+    cycles  = fetch_multi_leg_cycles(args.start_date, args.end_date, leg_configs, db_conn=db_conn, status_file=args.status_file)
     result  = run_backtest(
         leg_configs=leg_configs,
         cycles=cycles,

@@ -121,7 +121,7 @@ def main() -> None:
             db_conn = sqlite3.connect(db_path, check_same_thread=False)
 
         vix_map = sb._load_vix()
-        cycles = sb.fetch_multi_leg_cycles(args.start_date, args.end_date, leg_configs, db_conn=db_conn)
+        cycles = sb.fetch_multi_leg_cycles(args.start_date, args.end_date, leg_configs, db_conn=db_conn, status_file=args.status_file)
 
         engine_result = sb.run_backtest(
             leg_configs=leg_configs,

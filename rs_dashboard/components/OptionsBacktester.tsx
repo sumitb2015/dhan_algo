@@ -491,6 +491,7 @@ export default function OptionsBacktester({
     current?: number;
     total?: number;
     date?: string;
+    stage?: string;
     pnl?: number;
     trades?: number;
   } | null>(null);
@@ -834,13 +835,14 @@ export default function OptionsBacktester({
         try {
           const sRes = await fetch(apiBase);
           const sData = await sRes.json();
-          if (sData.running) {
+          if (sData.running || (!sData.done && sData.percent !== undefined)) {
             emptyDoneStreak = 0;
             setStatusData({
               percent: sData.percent ?? 0,
               current: sData.current ?? 0,
               total: sData.total ?? 0,
               date: sData.date,
+              stage: sData.stage,
               pnl: sData.pnl,
               trades: sData.trades,
             });
@@ -2065,9 +2067,15 @@ export default function OptionsBacktester({
             <div className="w-12 h-12 rounded-full bg-teal-500/15 flex items-center justify-center mx-auto mb-4 animate-spin text-teal-400">
               <RefreshCw className="w-6 h-6" />
             </div>
-            <h3 className="text-sm font-bold text-white mb-1">Simulating Historical Option Trades</h3>
+            <h3 className="text-sm font-bold text-white mb-1">
+              {statusData?.stage === 'loading_data'
+                ? 'Loading Historical Options Data'
+                : 'Simulating Historical Option Trades'}
+            </h3>
             <p className="text-xs text-zinc-500 mb-4">
-              Analyzing 1-min OHLC, underlying spot &amp; strikes across historical cycles…
+              {statusData?.stage === 'loading_data'
+                ? 'Extracting multi-leg option cycles and building memory cache…'
+                : 'Analyzing 1-min OHLC, underlying spot & strikes across historical cycles…'}
             </p>
 
             {/* Progress bar */}
@@ -2080,12 +2088,15 @@ export default function OptionsBacktester({
 
             <div className="flex justify-between text-xs font-medium text-zinc-500 mb-4">
               <span>{statusData?.percent?.toFixed(1) ?? '0.0'}% completed</span>
-              <span>{statusData?.current ?? 0} / {statusData?.total || '—'} days</span>
+              <span>
+                {statusData?.current ?? 0} / {statusData?.total || '—'}{' '}
+                {statusData?.stage === 'loading_data' ? 'expiries' : 'days'}
+              </span>
             </div>
 
             {statusData?.date && (
               <div className="bg-zinc-850 border border-zinc-800 rounded px-3 py-1.5 text-xs text-zinc-400 mb-4 flex justify-between font-mono">
-                <span>Processing Date:</span>
+                <span>{statusData.stage === 'loading_data' ? 'Expiry Date:' : 'Processing Date:'}</span>
                 <span className="font-bold text-white">{statusData.date}</span>
               </div>
             )}

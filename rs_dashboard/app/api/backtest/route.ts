@@ -14,6 +14,7 @@ const SCRIPT_PATH   = path.join(PROJECT_ROOT, 'scripts', 'analysis', 'backtest_s
 const STATUS_FILE   = path.join(DEBUG_DIR, 'backtest_status.json');
 const RESULT_FILE   = path.join(DEBUG_DIR, 'backtest_result.json');
 const STOP_FILE     = path.join(DEBUG_DIR, 'backtest_stop.trigger');
+const PID_FILE      = path.join(DEBUG_DIR, 'backtest.pid');
 
 const DEFAULT_LEGS = JSON.stringify([
   { option_type: 'CE', position: 'sell', lots: 1, strike: 'ATM', leg_sl_pct: 0, leg_target_pct: 0 },
@@ -38,6 +39,17 @@ function readResult() {
   }
 }
 
+function readPid(): number | null {
+  try {
+    if (!fs.existsSync(PID_FILE)) return null;
+    const raw = fs.readFileSync(PID_FILE, 'utf-8').trim();
+    const pid = Number(raw);
+    return Number.isFinite(pid) && pid > 0 ? pid : null;
+  } catch {
+    return null;
+  }
+}
+
 export async function GET() {
   const status = readStatus();
   if (!status) {
@@ -45,8 +57,9 @@ export async function GET() {
   }
 
   // Cross-check PID
-  const running = !status.done && status.pid && isPidRunning(status.pid);
-  if (!running && !status.done && status.pid) {
+  const pid = (status.pid && Number.isFinite(Number(status.pid))) ? Number(status.pid) : readPid();
+  const running = !status.done && ((pid && isPidRunning(pid)) || status.running === true);
+  if (!running && !status.done && pid && !isPidRunning(pid)) {
     status.done = true;
     status.running = false;
     try { fs.writeFileSync(STATUS_FILE, JSON.stringify(status)); } catch { /* ignore */ }
@@ -64,6 +77,7 @@ export async function GET() {
 
   return NextResponse.json({
     ...status,
+    pid,
     running: Boolean(running),
     result,
   });
@@ -216,6 +230,10 @@ export async function POST(req: NextRequest) {
       env: { ...process.env, PYTHONIOENCODING: 'utf-8' },
     });
     child.unref();
+
+    if (child.pid) {
+      try { fs.writeFileSync(PID_FILE, String(child.pid)); } catch { /* ignore */ }
+    }
 
     const initialStatus = {
       running: true,
