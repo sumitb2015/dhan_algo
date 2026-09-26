@@ -144,7 +144,7 @@ scripts/
   testing/                  # WebSocket and data validation checks
 Historical Data/            # Index CSVs: NIFTY_50_Daily_5Y.csv, NIFTY_500_Daily.csv
 Daily_Historical_Data_Fresh/ # Per-stock daily CSVs (<SYMBOL>_Daily_2Y.csv) for RS dashboard
-debug/                      # Runtime state JSON files, log files, trigger files (auto-created)
+debug/                      # Runtime state JSON files, log files, trigger files, and backtest archives (debug/backtests/options/<id>/)
 master_list.csv             # 288K-row security master list (~15 MB, cached)
 MW-NIFTY-500-25-Jan-2026.csv  # Nifty 500 constituent list used by refresh and quote scripts
 Options Data/nifty_options.db  # SQLite cache of historical/expired option chain data, built by
@@ -192,6 +192,7 @@ Non-obvious route behaviors:
 - `kotak-pnl/` — the Trader's Diary's Kotak source. Kotak Neo has **no historical trade endpoint** (`trade_report()` takes no dates and returns only the current day), so unlike the Dhan side this is not a broker sync: the user drops statement exports into `debug/kotak_pnl_reports/` and POST `{action:"import"}` runs `scripts/tools/import_kotak_pnl_reports.py` over them. Two formats, and the precedence matters: a **Transaction Statement** (sheet `On Market`) is one row per fill and is FIFO-matched into exact daily P&L; a **Gain/Loss** export is per-scrip over a date range with no per-trade date, so it collapses to one end-stamped point. Where both cover the same dates the transaction statement wins — not just for granularity, but because **the Gain/Loss F&O export omits the commodity segment entirely** (on the first real pair it hid −₹5,048 of MCX crude). Read that script's docstring before touching either parser: the Gain/Loss "Realised P&L" column is already net of GST/brokerage/misc (true gross is the separate `Gross P&L (T + (C + D + E))` column), and the transaction statement's "Total Charges" *excludes* STT while the Gain/Loss column of the same name includes it.
 - `exit-all/`, `pnl-exit/`, `quiktrade/`, `crudeoil/kotak-order/` — square off positions / place quick trades: real-money endpoints.
 - `csp-scan/` — spawns `scripts/tools/csp_scanner.py` (screening only, no orders); `csp-tracked/sell` and `csp-watchlist/exit` place and exit **real** cash-secured-put orders via `scripts/tools/csp_watchlist.py`, then track fills/strike-rolls in `lib/cspTracked.ts`'s JSON store — reconciled against broker truth by `csp-tracked/reconcile` and `csp-tracked/sync`.
+- `backtest/` and `backtest/history/` — options backtester and archive API: POST `/api/backtest` spawns `scripts/analysis/backtest_short_straddle.py` with status polling; completed simulations auto-archive to `debug/backtests/options/<id>/`; GET `/api/backtest/history` returns run summaries, single-run payloads, HTML tearsheets (`?file=tearsheet`), and CSVs (`?file=csv`).
 
 **lib/ files** (`rs_dashboard/lib/`) — the ones with non-obvious behavior:
 - `pyExec.ts` — `runPythonJson()` (async venv-Python spawn, parses last stdout line as JSON) + `dedupe()` in-flight dedup + `PROJECT_ROOT`/`PYTHON_EXE`. Use this from API routes; don't hand-roll `spawnSync` (blocks the Node event loop)

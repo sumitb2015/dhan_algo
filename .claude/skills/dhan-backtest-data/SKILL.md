@@ -157,13 +157,47 @@ ostz.dashboard(
 )
 ```
 
+## Structured Backtest Archival Architecture (`debug/backtests/options/`)
+Never overwrite a single `backtest_result.json` file. All completed options backtests are persisted in dedicated, structured directories:
+
+```
+debug/backtests/options/<id>/
+├── metadata.json       # Fast-indexed KPIs (id, name, timestamp, trades, win_rate, total_pnl, max_dd, tags, artifact flags)
+├── result.json         # Complete simulation payload (summary, cycles, equity_curve, monthly_pnl, params, vbt)
+├── trades.csv          # Full cycle-by-cycle trade ledger (date, spot, atm, entry/exit prices, gross/net P&L, taxes, shifts)
+├── tearsheet.html      # Interactive OpenStatz HTML tearsheet (self-contained, offline)
+└── scans_summary.json  # Multi-parameter sensitivity scan grids, heatmaps, and DTE matrices
+```
+
+### Automatic API Archiving (`rs_dashboard/app/api/backtest/route.ts`)
+When a simulation finishes—either via the asynchronous polling endpoint or synchronous execution—the backend invokes `autoArchiveBacktest(result)`. It auto-generates a timestamped identifier (e.g. `nifty_intraday_straddle_20260926_114500`), writes `result.json` and `metadata.json`, and indexes the run for instant retrieval.
+
+### Backtest History API (`/api/backtest/history`)
+- `GET /api/backtest/history`: Returns array of `BacktestMetadata` across all archived runs, sorted newest first.
+- `GET /api/backtest/history?id=<id>`: Returns `{ metadata, result }` to reconstruct full performance charts without re-simulating.
+- `GET /api/backtest/history?id=<id>&file=tearsheet`: Serves `tearsheet.html` directly with `Content-Type: text/html` for in-browser rendering.
+- `GET /api/backtest/history?id=<id>&file=csv`: Serves `trades.csv` with `Content-Disposition: attachment`.
+
+### Dashboard History Viewer (`OptionsBacktester.tsx`)
+- **Past Backtests Modal**: Accessible via the header button beside "Change Settings" and the "Past Runs" bottom toolbar button. Features instant search across strategy names, dates, and tags.
+- **Load Backtest**: Restores strategy parameters (dates, entry/exit times, legs, lot size, target/SL) and sets `result` so all charts, monthly heatmaps, drawdowns, and cycle logs render immediately.
+- **Tearsheet Modal**: Embeds the interactive OpenStatz HTML tearsheet in an expanded modal view with an "Open in New Tab" link.
+
 ## Options Strategy Quant Invariants
 Empirical findings verified across 248 sessions of 1-minute historical data and 4,155 real Dhan F&O trades (2025–2026):
 1. **Balanced Entry Gate is Alpha-Critical**: Enforcing `|CE - PE| / max(CE, PE) < 10%` before entering a straddle cuts max drawdown by 52% and boosts Net P&L by +600% vs blind entry at 09:30. Unbalanced entries create persistent one-sided delta drag.
 2. **1-Strike OTM Shift Outperforms Runners and Exits**: When leg SL is hit, shifting 1 strike OTM (+50 pts for CE, -50 pts for PE) halves the max drawdown compared to holding an unhedged runner (-₹21.7k vs -₹58.1k). However, shifting 2+ times flips net P&L negative due to double-churn commission drag.
-3. **SEBI 2025 Tuesday Expiry Rule & DTE Dynamics**: From 2025 onwards, NIFTY weekly contracts expire on **TUESDAYS** (prior to 2025 it was Thursday). Never hardcode expiry days; resolve dynamically via `dte = (expiry_date - trade_date)`. In backtesting, **Tuesday (0-DTE) is profitable (+₹6.4k net)** because accelerated theta decay overcomes friction. In contrast, **Wednesday & Thursday (4–5 DTE) bleed heavily (-₹19.2k combined)** because slow decay on high-premium contracts (~₹200) cannot compensate for 40-pt leg SL hits and high STT.
+3. **SEBI 2025 Tuesday Expiry Rule & DTE Dynamics**: From 2025 onwards, SEBI mandated NIFTY weekly index derivatives expire on **TUESDAYS** (prior to 2025 it was Thursday). In the 2025–2026 dataset, 49 of 53 0-DTE expiries occurred on Tuesday (3 on Monday due to holidays, 0 on Thursday). Never hardcode expiry days; resolve dynamically via `dte = (expiry_date - trade_date)`. In backtesting:
+   - **Tuesday (0-DTE) is profitable (+₹6.4k net)** because accelerated theta decay overcomes friction.
+   - **Wednesday & Thursday (4–5 DTE) bleed heavily (-₹19.2k combined)** because slow decay on high-premium contracts (~₹200) cannot compensate for 40-pt leg SL hits and high STT.
 4. **Decay Profile Favors EOD Hold**: Capping gains at +20% prematurely clips afternoon theta decay. Holding until 15:15 (while maintaining an adverse -20% combined stop loss) captures significantly higher net decay.
-5. **Dhan F&O Ledger Taxation Invariant**: Naive backtests assuming ₹20 flat fees severely distort reality. In India, STT is **0.10% on option SELL premium turnover**, NSE exchange fee is **0.05% on both BUY/SELL turnover + 18% GST**, and brokerage is **₹20 + 18% GST**. Average friction on Dhan is **~₹50 per executed order**. Any strategy averaging >4 orders/day will bleed net capital unless gross edge exceeds ₹300/day.
+5. **Dhan F&O Ledger Taxation Invariant**: Naive backtests assuming flat ₹20/order or flat ₹40/cycle severely distort reality (under-reporting costs by ₹41k+ across 231 sessions). An audit of 4,155 real Dhan broker trades revealed real transaction friction averages **~₹50.14 per executed order**:
+   - Brokerage: ₹20 / order
+   - GST on Brokerage: 18% (₹3.60)
+   - STT: **0.10% (₹1,000/cr) on option SELL premium turnover**
+   - Exchange Transaction Fee: ~0.05% on premium turnover + GST
+   - SEBI Turnover Fee + Stamp Duty: ₹3/cr
+   Any strategy averaging >4 orders/day will bleed net capital unless gross edge exceeds ₹300/day.
 
 ## Before you trust a result
 - [ ] Report `describe()` for every series (window, sessions) and the trade count.
@@ -179,4 +213,5 @@ Empirical findings verified across 248 sessions of 1-minute historical data and 
 `dhan-indicators` (which indicator implementation, warm-up and closed-candle rules), `dhan-expired-options-data` (options
 history), `dhan-new-strategy` (taking a validated idea live), the vendor `vectorbt-expert` rule files for VectorBT mechanics
 (position sizing, stops, walk-forward, robustness), which apply unchanged.
+
 

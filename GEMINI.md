@@ -244,3 +244,32 @@ All text in the `rs_dashboard` Next.js app must use the following opacity tiers 
 - **Never use raw Tailwind/CSS gray shades** (e.g. `#374151`, `#4b5563`) for visible text — they are too dark on the project's near-black backgrounds and will fail contrast checks.
 - Use `rgba(255,255,255,N)` (white with opacity) rather than a fixed hex gray, so the contrast automatically adapts if the background changes.
 - Accent-coloured text (`#a5b4fc`, `#34d399`, `#f87171`, etc.) is exempt — those colours already encode sufficient luminance.
+
+---
+
+## Options Backtesting & Past Runs Architecture
+
+### Historical Data Store
+- **Store**: `Options Data/nifty_options.db` (SQLite, 7.60 GB, 22,213,440 rows, 298 expiries, 1,418 trading days from 2021-01-07 to 2026-09-22).
+- **Strike Coverage**: 21 relative strikes (`ATM`, `ATM±1` to `ATM±10`, ±500 pts). Spot, Volume, OI, and IV available at 1-minute resolution.
+
+### Regulatory & Quant Invariants
+- **SEBI 2025 Tuesday Expiry**: In 2025 onwards, SEBI shifted NIFTY weekly index derivative expiries from Thursdays to Tuesdays. Backtesting scripts dynamically compute DTE via `(expiry - day).days == 0`. In backtesting, Tuesday 0-DTE is net profitable (+₹6.4k), while Wednesday and Thursday (4–5 DTE) bleed (-₹19.2k) due to sluggish theta decay failing to cover 40-pt SL hits and high STT.
+- **Realistic Dhan F&O Friction Model**: Calibrated against 4,155 real Dhan broker trades (`debug/portfolio_trade_history.json`). Average friction is **~₹50.14 per executed order**:
+  - Brokerage: ₹20 / order + 18% GST (₹3.60)
+  - STT: **0.10% on option SELL premium turnover**
+  - NSE Exchange Fee: 0.053% on premium turnover + GST
+  - Stamp Duty + SEBI Fee: ₹3/cr
+
+### Structured Run Archival (`debug/backtests/options/<id>/`)
+Backtest results are never overwritten. Every completed simulation is archived in its own directory:
+- `metadata.json`: Lightweight summary KPIs for fast listing.
+- `result.json`: Full `BacktestResult` payload (summary, cycles, equity curve, monthly heatmap, params).
+- `trades.csv`: Full cycle-by-cycle trade ledger with prices, P&L, slippage, and taxes.
+- `tearsheet.html`: Standalone interactive HTML dashboard via OpenStatz (`ostz.dashboard`).
+- `scans_summary.json`: Multi-parameter sensitivity scan grids and heatmaps.
+
+### Dashboard Integration (`OptionsBacktester.tsx` & `/api/backtest/history`)
+- **Auto-Archiving**: Every simulation run from the dashboard is automatically archived upon completion.
+- **History Modal**: Searchable "Past Backtests" drawer/modal allowing operators to search runs, load parameters and results directly into performance charts, open interactive tearsheets, and download trades CSVs.
+
