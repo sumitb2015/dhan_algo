@@ -550,6 +550,11 @@ export default function OptionsBacktester({
   const [endDate, setEndDate] = useState('2026-09-17');
   const [executionType, setExecutionType] = useState<'INTRADAY' | 'POSITIONAL'>('INTRADAY');
   const [entryDaysBeforeExpiry, setEntryDaysBeforeExpiry] = useState<number>(3);
+  const [exitDaysBeforeExpiry, setExitDaysBeforeExpiry] = useState<number>(0);
+
+  const getDaysBeforeExpiryLabel = (days: number) => {
+    return `${days} ${days === 1 || days === 0 ? 'trading day' : 'trading days'} before weekly expiry(excluding holidays)`;
+  };
 
   // Advanced settings & modal
   const [settingsModalOpen, setSettingsModalOpen] = useState(false);
@@ -722,6 +727,9 @@ export default function OptionsBacktester({
         setExecutionType('POSITIONAL');
         if (p.entry_days_before_expiry !== undefined) {
           setEntryDaysBeforeExpiry(Number(p.entry_days_before_expiry));
+        }
+        if (p.exit_days_before_expiry !== undefined) {
+          setExitDaysBeforeExpiry(Number(p.exit_days_before_expiry));
         }
       } else if (p.strategy_type === 'intraday') {
         setExecutionType('INTRADAY');
@@ -954,6 +962,7 @@ export default function OptionsBacktester({
           slippage_pct: includeCosts ? slippagePct : 0,
           strategy_type: executionType === 'POSITIONAL' ? 'positional' : 'intraday',
           entry_days_before_expiry: executionType === 'POSITIONAL' ? entryDaysBeforeExpiry : 3,
+          exit_days_before_expiry: executionType === 'POSITIONAL' ? exitDaysBeforeExpiry : 0,
           start_date: startDate,
           end_date: endDate,
           adjustment_mode: adjustmentMode,
@@ -1071,6 +1080,7 @@ export default function OptionsBacktester({
       rangeUntilTime: `${rangeUntilH}:${rangeUntilM}`,
       executionType,
       entryDaysBeforeExpiry,
+      exitDaysBeforeExpiry,
     };
     try {
       localStorage.setItem('stockmock_saved_strategy', JSON.stringify(payload));
@@ -2128,7 +2138,7 @@ export default function OptionsBacktester({
                 <span className="w-20 font-medium pt-3.5">Entry Date:</span>
                 <div className="flex flex-col items-center w-64 max-w-full">
                   <div className="text-[11px] text-zinc-300 font-medium text-center mb-1">
-                    {entryDaysBeforeExpiry} trading days before weekly expiry(excluding holidays)
+                    {getDaysBeforeExpiryLabel(entryDaysBeforeExpiry)}
                   </div>
                   <div className="w-full px-1">
                     <input
@@ -2137,7 +2147,13 @@ export default function OptionsBacktester({
                       max={4}
                       step={1}
                       value={4 - entryDaysBeforeExpiry}
-                      onChange={e => setEntryDaysBeforeExpiry(4 - Number(e.target.value))}
+                      onChange={e => {
+                        const val = 4 - Number(e.target.value);
+                        setEntryDaysBeforeExpiry(val);
+                        if (exitDaysBeforeExpiry > val) {
+                          setExitDaysBeforeExpiry(val);
+                        }
+                      }}
                       className="w-full h-1.5 bg-zinc-700 rounded-lg appearance-none cursor-pointer accent-teal-500"
                     />
                     <div className="flex justify-between text-[11px] text-zinc-500 font-semibold px-0.5 mt-0.5">
@@ -2230,16 +2246,20 @@ export default function OptionsBacktester({
 
           {/* Right Column: Same Day / Next Day & Exit Time */}
           <div className="flex flex-col gap-2">
-            <div className="flex items-center gap-4 text-xs text-zinc-400" title="Use the INTRADAY / POSITIONAL toggle at the bottom of the page for this instead">
-              <label className="flex items-center gap-1 cursor-not-allowed opacity-50">
-                <input type="radio" name="exitDay" checked disabled className="w-3.5 h-3.5" />
-                <span>Same Day</span>
-              </label>
-              <label className="flex items-center gap-1 cursor-not-allowed opacity-50">
-                <input type="radio" name="exitDay" disabled className="w-3.5 h-3.5" />
-                <span>Next Day (BTST/STBT)</span>
-              </label>
-            </div>
+            {executionType === 'INTRADAY' ? (
+              <div className="flex items-center gap-4 text-xs text-zinc-400" title="Use the INTRADAY / POSITIONAL toggle at the bottom of the page for this instead">
+                <label className="flex items-center gap-1 cursor-not-allowed opacity-50">
+                  <input type="radio" name="exitDay" checked disabled className="w-3.5 h-3.5" />
+                  <span>Same Day</span>
+                </label>
+                <label className="flex items-center gap-1 cursor-not-allowed opacity-50">
+                  <input type="radio" name="exitDay" disabled className="w-3.5 h-3.5" />
+                  <span>Next Day (BTST/STBT)</span>
+                </label>
+              </div>
+            ) : (
+              <div className="h-4"></div>
+            )}
 
             <div className="flex items-center gap-2 text-xs text-zinc-400 mt-1">
               <span className="w-20 font-medium">Exit Time:</span>
@@ -2277,6 +2297,36 @@ export default function OptionsBacktester({
                 </select>
               </div>
             </div>
+
+            {/* Positional Exit Date Selection */}
+            {executionType === 'POSITIONAL' && (
+              <div className="flex items-start gap-2 text-xs text-zinc-400 mt-2">
+                <span className="w-20 font-medium pt-3.5">Exit Date:</span>
+                <div className="flex flex-col items-center w-64 max-w-full">
+                  <div className="text-[11px] text-zinc-300 font-medium text-center mb-1">
+                    {getDaysBeforeExpiryLabel(exitDaysBeforeExpiry)}
+                  </div>
+                  <div className="w-full px-1">
+                    <input
+                      type="range"
+                      min={0}
+                      max={4}
+                      step={1}
+                      value={4 - exitDaysBeforeExpiry}
+                      onChange={e => {
+                        const val = 4 - Number(e.target.value);
+                        setExitDaysBeforeExpiry(Math.min(val, entryDaysBeforeExpiry));
+                      }}
+                      className="w-full h-1.5 bg-zinc-700 rounded-lg appearance-none cursor-pointer accent-teal-500"
+                    />
+                    <div className="flex justify-between text-[11px] text-zinc-500 font-semibold px-0.5 mt-0.5">
+                      <span>4</span>
+                      <span>0</span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            )}
 
             {/* Strategy Stop Loss */}
             {strategySlActive ? (

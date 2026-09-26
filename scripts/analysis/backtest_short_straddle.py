@@ -519,6 +519,7 @@ def _simulate_one_day(
     no_reentry_after_time: Optional[time] = None,
     range_breakout: bool = False,
     range_until_time: Optional[time] = None,
+    exit_trade_date: Optional[date] = None,
 ) -> dict:
     """Simulate one intraday trade over day_bars. Returns state dict."""
     if profit_target_val == 0.0 and profit_target_pct > 0:
@@ -1333,7 +1334,8 @@ def _simulate_one_day(
             break
 
         # --- EOD ---
-        if t >= eod_time:
+        is_exit_day = (exit_trade_date is None) or (bar.dt.date() >= exit_trade_date)
+        if (is_exit_day and t >= eod_time) or (idx == len(day_bars) - 1):
             for i, (leg, state) in enumerate(zip(leg_configs, leg_states)):
                 if state.is_open:
                     slip = slip_sell_exit if leg.position == "sell" else slip_buy_exit
@@ -1419,7 +1421,8 @@ def run_backtest(leg_configs: List[LegConfig], cycles: List[ExpiryCycle],
                   no_reentry_after_time_str: Optional[str] = None,
                   range_breakout: bool = False,
                   range_until_time_str: Optional[str] = "09:31",
-                  entry_days_before_expiry: int = 3):
+                  entry_days_before_expiry: int = 3,
+                  exit_days_before_expiry: int = 0):
     """
     strategy_type:
       "intraday"   — one trade per trading day (AlgoTest Intraday mode)
@@ -1587,7 +1590,14 @@ def run_backtest(leg_configs: List[LegConfig], cycles: List[ExpiryCycle],
                 stop_requested = True
                 break
 
-            day_bars = day_groups.get(trade_date, [])
+            if strategy_type in ("first_day", "positional"):
+                exit_idx = max(idx, len(sorted_dates) - 1 - exit_days_before_expiry)
+                exit_trade_date = sorted_dates[exit_idx]
+                day_bars = [b for b in cycle.bars if trade_date <= b.dt.date() <= exit_trade_date]
+            else:
+                exit_trade_date = trade_date
+                day_bars = day_groups.get(trade_date, [])
+
             if len(day_bars) < 3:
                 continue
 
@@ -1597,7 +1607,8 @@ def run_backtest(leg_configs: List[LegConfig], cycles: List[ExpiryCycle],
             sim = _simulate_one_day(
                 day_bars, **sim_kwargs,
                 days_to_expiry=dte,
-                strike_lookup=cycle.strike_lookup
+                strike_lookup=cycle.strike_lookup,
+                exit_trade_date=exit_trade_date,
             )
 
             entry_date_str = trade_date.isoformat()
@@ -1919,6 +1930,8 @@ def main():
                         choices=["intraday", "expiry_day", "first_day", "positional"])
     parser.add_argument("--entry-days-before-expiry", type=int, default=3,
                         help="Days before expiry to enter for positional strategy (0=expiry day, 1=1 day before, etc.)")
+    parser.add_argument("--exit-days-before-expiry",  type=int, default=0,
+                        help="Days before expiry to exit for positional strategy (0=expiry day, 1=1 day before, etc.)")
     parser.add_argument("--legs",               default=json.dumps(DEFAULT_LEGS))
     parser.add_argument("--use-db",             action="store_true", help="Use SQLite database for option price lookups")
     parser.add_argument("--adjustment-mode",    default="none", choices=["none", "rolling_straddle"])
@@ -1998,6 +2011,7 @@ def main():
         range_breakout=args.range_breakout,
         range_until_time_str=args.range_until_time,
         entry_days_before_expiry=args.entry_days_before_expiry,
+        exit_days_before_expiry=args.exit_days_before_expiry,
     )
     result["params"] = {
         "start_date":            args.start_date,
@@ -2020,6 +2034,7 @@ def main():
         "range_breakout":        args.range_breakout,
         "range_until_time":      args.range_until_time,
         "entry_days_before_expiry": args.entry_days_before_expiry,
+        "exit_days_before_expiry":  args.exit_days_before_expiry,
         "commission_per_lot":    args.commission_per_lot,
         "slippage_pct":          args.slippage_pct,
         "strategy_type":         args.strategy_type,
