@@ -641,19 +641,23 @@ def _simulate_one_day(
                     state.exit_price = state.entry_price * (1 + leg.leg_sl_pct / 100) * slip
                     state.exit_reason = "LEG_SL"
                     state.struck_sl = True
+                    state.exit_dt = bar.dt
                 elif leg.position == "buy" and leg_low <= state.entry_price * (1 - leg.leg_sl_pct / 100):
                     state.exit_price = state.entry_price * (1 - leg.leg_sl_pct / 100) * slip
                     state.exit_reason = "LEG_SL"
                     state.struck_sl = True
+                    state.exit_dt = bar.dt
             if state.is_open and leg.leg_target_pct > 0:
                 if leg.position == "sell" and leg_low <= state.entry_price * (1 - leg.leg_target_pct / 100):
                     state.exit_price = state.entry_price * (1 - leg.leg_target_pct / 100) * slip
                     state.exit_reason = "LEG_TARGET"
                     state.struck_target = True
+                    state.exit_dt = bar.dt
                 elif leg.position == "buy" and leg_high >= state.entry_price * (1 + leg.leg_target_pct / 100):
                     state.exit_price = state.entry_price * (1 + leg.leg_target_pct / 100) * slip
                     state.exit_reason = "LEG_TARGET"
                     state.struck_target = True
+                    state.exit_dt = bar.dt
 
             # --- Per-leg Trailing SL ---
             # Mirrors the strategy-level trail_sl_pct pattern below (15% peak-profit
@@ -672,6 +676,7 @@ def _simulate_one_day(
                     state.exit_price = leg_close * slip
                     state.exit_reason = "LEG_TRAIL_SL"
                     state.struck_sl = True
+                    state.exit_dt = bar.dt
 
         # --- Square Off All Legs ---
         # StockMock's "Square Off One Leg" (the default above) lets each leg's own
@@ -688,6 +693,7 @@ def _simulate_one_day(
                     state.exit_price = leg_prices[i][3] * slip
                     state.exit_reason = "SQUARE_OFF_ALL"
                     state.struck_sl = True
+                    state.exit_dt = bar.dt
 
         # --- Dynamic Rolling Check (ATM Buffer Roll) ---
         if adjustment_mode == "rolling_straddle" and rolls_count < max_rolls and all(s.is_open for s in leg_states):
@@ -760,6 +766,7 @@ def _simulate_one_day(
                         slip = slip_sell_exit if leg.position == "sell" else slip_buy_exit
                         state.exit_price = leg_prices[i][3] * slip
                         state.exit_reason = "SCALP_FLOOR"
+                        state.exit_dt = bar.dt
                 exit_reason = "SCALP_FLOOR"
                 exit_dt = bar.dt
                 break
@@ -776,6 +783,7 @@ def _simulate_one_day(
                         slip = slip_sell_exit if leg.position == "sell" else slip_buy_exit
                         state.exit_price = leg_prices[i][3] * slip
                         state.exit_reason = "TRAIL_SL"
+                        state.exit_dt = bar.dt
                 exit_reason = "TRAIL_SL"
                 exit_dt = bar.dt
                 break
@@ -790,6 +798,7 @@ def _simulate_one_day(
                         slip = slip_sell_exit if leg.position == "sell" else slip_buy_exit
                         state.exit_price = leg_prices[i][3] * slip
                         state.exit_reason = "OVERALL_SL"
+                        state.exit_dt = bar.dt
                 exit_reason = "OVERALL_SL"
                 exit_dt = bar.dt
                 break
@@ -804,6 +813,7 @@ def _simulate_one_day(
                         slip = slip_sell_exit if leg.position == "sell" else slip_buy_exit
                         state.exit_price = leg_prices[i][3] * slip
                         state.exit_reason = "TARGET"
+                        state.exit_dt = bar.dt
                 exit_reason = "TARGET"
                 exit_dt = bar.dt
                 break
@@ -822,6 +832,7 @@ def _simulate_one_day(
                     else:
                         state.exit_price = leg_prices[i][0] * slip
                     state.exit_reason = "EOD"
+                    state.exit_dt = bar.dt
             exit_reason = "EOD"
             exit_dt = bar.dt
             break

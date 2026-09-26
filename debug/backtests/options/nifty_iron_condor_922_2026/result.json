@@ -1,1 +1,164 @@
-{"summary": {"total_cycles": 21, "traded_cycles": 21, "wins": 14, "losses": 7, "win_rate": 66.7, "total_pnl": -6724.56, "avg_pnl": -320.22, "max_win": 1004.25, "max_loss": -8244.8, "avg_win": 450.3, "avg_loss": 1861.26, "max_drawdown": 10851.3, "max_drawdown_start": "2026-09-10", "max_drawdown_end": "2026-09-15", "max_drawdown_days": 5, "max_trades_in_drawdown": 5, "max_win_streak": 8, "max_loss_streak": 2, "return_maxdd_ratio": -0.62, "reward_risk_ratio": 0.24, "expectancy": -320.22, "expectancy_ratio": -0.17, "commission_paid": 0.0}, "cycles": [{"expiry_date": "2026-08-18", "entry_dt": "2026-08-17T09:22:00", "exit_dt": "2026-08-17T15:15:00", "entry_spot": 24299.05, "vix": 11.33, "net_credit": 116.3, "exit_combined": 122.1, "pnl": -377.0, "exit_reason": "EOD", "is_complete": true, "rolls": 0, "legs": [{"option_type": "CE", "position": "sell", "strike": 24300.0, "lots": 1, "entry_price": 74.75, "exit_price": 106.0, "pnl": -2031.25, "exit_reason": "EOD"}, {"option_type": "PE", "position": "sell", "strike": 24300.0, "lots": 1, "entry_price": 56.85, "exit_price": 29.8, "pnl": 1758.25, "exit_reason": "EOD"}, {"option_type": "CE", "position": "buy", "strike": 24550.0, "lots": 1, "entry_price": 9.6, "exit_price": 10.3, "pnl": 45.5, "exit_reason": "EOD"}, {"option_type": "PE", "position": "buy", "strike": 24050.0, "lots": 1, "entry_price": 5.7, "exit_price": 3.4, "pnl": -149.5, "exit_reason": "EOD"}]}, {"expiry_date": "2026-08-18", "entry_dt": "2026-08-18T09:22:00", "exit_dt": "2026-08-18T15:15:00", "entry_spot": 24232.85, "vix": 11.39, "net_credit": 80.35, "exit_combined": 64.9, "pnl": 1004.25, "exit_reason": "EOD", "is_complete": true, "rolls": 0, "legs": [{"option_type": "CE", "position": "sell", "strike": 24250.0, "lots": 1, "entry_price": 34.15, "exit_price": 4.75, "pnl": 1911.0, "exit_reason": "EOD"}, {"option_type": "PE", "position": "sell", "strike": 24250.0, "lots": 1, "entry_price": 49.8, "exit_price": 60.65, "pnl": -705.25, "exit_reason": "EOD"}, {"option_type": "CE", "position": "buy", "strike": 24500.0, "lots": 1, "entry_price": 1.9, "exit_price": 0.15, "pnl": -113.75, "exit_reason": "EOD"}, {"option_type": "PE", "position": "buy", "strike": 24000.0, "lots": 1, "entry_price": 1.7, "exit_price": 0.35, "pnl": -87.75, "exit_reason": "EOD"}]}, {"expiry_date": "2026-08-25", "entry_dt": "2026-08-19T09:22:00", "exit_dt": "2026-08-19T15:15:00", "entry_spot": 24118.75, "vix": 11.32, "net_credit": 174.25, "exit_combined": 164.5, "pnl": 633.75, "exit_reason": "EOD", "is_complete": true, "rolls": 0, "legs": [{"option_type": "CE", "position": "sell", "strike": 24100.0, "lots": 1, "entry_price": 157.1, "exit_price": 123.35, "pnl": 2193.75, "exit_reason": "EOD"}, {"option_type": "PE", "position": "sell", "strike": 24100.0, "lots": 1, "entry_price": 101.75, "exit_price": 110.95, "pnl": -598.0, "exit_reason": "EOD"}, {"option_type": "CE", "position": "buy", "strike": 24350.0, "lots": 1, "entry_price": 51.9, "exit_price": 36.25, "pnl": -1017.25, "exit_reason": "EOD"}, {"option_type": "PE", "position": "buy", "strike": 23850.0, "lots": 1, "entry_price": 32.7, "exit_price": 33.55, "pnl": 55.25, "exit_reason": "EOD"}]}, {"expiry_date": "2026-08-25", "entry_dt": "2026-08-20T09:22:00", "exit_dt": "2026-08-20T15:15:00", "entry_spot": 24195.6, "vix": 10.76, "net_credit": 157.05, "exit_combined": 161.7, "pnl": -302.25, "exit_reason": "EOD", "is_complete": true, "rolls": 0, "legs": [{"option_type": "CE", "position": "sell", "strike": 24200.0, "lots": 1, "entry_price": 130.95, "exit_price": 154.0, "pnl": -1498.25, "exit_reason": "EOD"}, {"option_type": "PE", "position": "sell", "strike": 24200.0, "lots": 1, "entry_price": 77.9, "exit_price": 54.9, "pnl": 1495.0, "exit_reason": "EOD"}, {"option_type": "CE", "position": "buy", "strike": 24450.0, "lots": 1, "entry_price": 33.15, "exit_price": 33.85, "pnl": 45.5, "exit_reason": "EOD"}, {"option_type": "PE", "position": "buy", "strike": 23950.0, "lots": 1, "entry_price": 18.65, "exit_price": 13.35, "pnl": -344.5, "exit_reason": "EOD"}]}, {"expiry_date": "2026-08-25", "entry_dt": "2026-08-21T09:22:00", "exit_dt": "2026-08-21T15:15:00", "entry_spot": 24217.35, "vix": 11.2, "net_credit": 153.1, "exit_combined": 149.9, "pnl": 208.0, "exit_reason": "EOD", "is_complete": true, "rolls": 0, "legs": [{"option_type": "CE", "position": "sell", "strike": 24200.0, "lots": 1, "entry_price": 133.7, "exit_price": 134.0, "pnl": -19.5, "exit_reason": "EOD"}, {"option_type": "PE", "position": "sell", "strike": 24200.0, "lots": 1, "entry_price": 56.15, "exit_price": 46.85, "pnl": 604.5, "exit_reason": "EOD"}, {"option_type": "CE", "position": "buy", "strike": 24450.0, "lots": 1, "entry_price": 24.9, "exit_price": 21.9, "pnl": -195.0, "exit_reason": "EOD"}, {"option_type": "PE", "position": "buy", "strike": 23950.0, "lots": 1, "entry_price": 11.85, "exit_price": 9.05, "pnl": -182.0, "exit_reason": "EOD"}]}, {"expiry_date": "2026-08-25", "entry_dt": "2026-08-24T09:22:00", "exit_dt": "2026-08-24T15:15:00", "entry_spot": 24304.15, "vix": 11.53, "net_credit": 113.15, "exit_combined": 131.8, "pnl": -1212.25, "exit_reason": "EOD", "is_complete": true, "rolls": 0, "legs": [{"option_type": "CE", "position": "sell", "strike": 24300.0, "lots": 1, "entry_price": 81.7, "exit_price": 26.2, "pnl": 3607.5, "exit_reason": "EOD"}, {"option_type": "PE", "position": "sell", "strike": 24300.0, "lots": 1, "entry_price": 43.35, "exit_price": 123.55, "pnl": -5213.0, "exit_reason": "EOD"}, {"option_type": "CE", "position": "buy", "strike": 24550.0, "lots": 1, "entry_price": 5.85, "exit_price": 3.0, "pnl": -185.25, "exit_reason": "EOD"}, {"option_type": "PE", "position": "buy", "strike": 24050.0, "lots": 1, "entry_price": 6.05, "exit_price": 14.95, "pnl": 578.5, "exit_reason": "EOD"}]}, {"expiry_date": "2026-08-25", "entry_dt": "2026-08-25T09:22:00", "exit_dt": "2026-08-25T15:15:00", "entry_spot": 24181.65, "vix": 11.08, "net_credit": 82.85, "exit_combined": 69.1, "pnl": 893.75, "exit_reason": "EOD", "is_complete": true, "rolls": 0, "legs": [{"option_type": "CE", "position": "sell", "strike": 24200.0, "lots": 1, "entry_price": 45.0, "exit_price": 64.3, "pnl": -1254.5, "exit_reason": "EOD"}, {"option_type": "PE", "position": "sell", "strike": 24200.0, "lots": 1, "entry_price": 41.6, "exit_price": 5.45, "pnl": 2349.75, "exit_reason": "EOD"}, {"option_type": "CE", "position": "buy", "strike": 24450.0, "lots": 1, "entry_price": 1.75, "exit_price": 0.35, "pnl": -91.0, "exit_reason": "EOD"}, {"option_type": "PE", "position": "buy", "strike": 23950.0, "lots": 1, "entry_price": 2.0, "exit_price": 0.3, "pnl": -110.5, "exit_reason": "EOD"}]}, {"expiry_date": "2026-09-01", "entry_dt": "2026-08-26T09:22:00", "exit_dt": "2026-08-26T15:15:00", "entry_spot": 24343.9, "vix": 10.57, "net_credit": 164.9, "exit_combined": 159.25, "pnl": 367.25, "exit_reason": "EOD", "is_complete": true, "rolls": 0, "legs": [{"option_type": "CE", "position": "sell", "strike": 24350.0, "lots": 1, "entry_price": 154.65, "exit_price": 119.5, "pnl": 2284.75, "exit_reason": "EOD"}, {"option_type": "PE", "position": "sell", "strike": 24350.0, "lots": 1, "entry_price": 71.65, "exit_price": 94.65, "pnl": -1495.0, "exit_reason": "EOD"}, {"option_type": "CE", "position": "buy", "strike": 24600.0, "lots": 1, "entry_price": 41.4, "exit_price": 29.2, "pnl": -793.0, "exit_reason": "EOD"}, {"option_type": "PE", "position": "buy", "strike": 24100.0, "lots": 1, "entry_price": 20.0, "exit_price": 25.7, "pnl": 370.5, "exit_reason": "EOD"}]}, {"expiry_date": "2026-09-01", "entry_dt": "2026-08-27T09:22:00", "exit_dt": "2026-08-27T15:15:00", "entry_spot": 24231.5, "vix": 11.07, "net_credit": 158.1, "exit_combined": 154.25, "pnl": 250.25, "exit_reason": "EOD", "is_complete": true, "rolls": 0, "legs": [{"option_type": "CE", "position": "sell", "strike": 24250.0, "lots": 1, "entry_price": 129.5, "exit_price": 85.3, "pnl": 2873.0, "exit_reason": "EOD"}, {"option_type": "PE", "position": "sell", "strike": 24250.0, "lots": 1, "entry_price": 79.1, "exit_price": 119.9, "pnl": -2652.0, "exit_reason": "EOD"}, {"option_type": "CE", "position": "buy", "strike": 24500.0, "lots": 1, "entry_price": 32.35, "exit_price": 20.2, "pnl": -789.75, "exit_reason": "EOD"}, {"option_type": "PE", "position": "buy", "strike": 24000.0, "lots": 1, "entry_price": 18.15, "exit_price": 30.75, "pnl": 819.0, "exit_reason": "EOD"}]}, {"expiry_date": "2026-09-01", "entry_dt": "2026-08-28T09:22:00", "exit_dt": "2026-08-28T15:15:00", "entry_spot": 24113.6, "vix": 10.68, "net_credit": 150.75, "exit_combined": 151.9, "pnl": -74.75, "exit_reason": "EOD", "is_complete": true, "rolls": 0, "legs": [{"option_type": "CE", "position": "sell", "strike": 24150.0, "lots": 1, "entry_price": 117.0, "exit_price": 134.15, "pnl": -1114.75, "exit_reason": "EOD"}, {"option_type": "PE", "position": "sell", "strike": 24150.0, "lots": 1, "entry_price": 76.0, "exit_price": 58.75, "pnl": 1121.25, "exit_reason": "EOD"}, {"option_type": "CE", "position": "buy", "strike": 24400.0, "lots": 1, "entry_price": 25.25, "exit_price": 28.55, "pnl": 214.5, "exit_reason": "EOD"}, {"option_type": "PE", "position": "buy", "strike": 23900.0, "lots": 1, "entry_price": 17.0, "exit_price": 12.45, "pnl": -295.75, "exit_reason": "EOD"}]}, {"expiry_date": "2026-09-01", "entry_dt": "2026-08-31T09:22:00", "exit_dt": "2026-08-31T15:15:00", "entry_spot": 24077.45, "vix": 11.19, "net_credit": 125.05, "exit_combined": 128.3, "pnl": -211.25, "exit_reason": "EOD", "is_complete": true, "rolls": 0, "legs": [{"option_type": "CE", "position": "sell", "strike": 24100.0, "lots": 1, "entry_price": 62.65, "exit_price": 81.15, "pnl": -1202.5, "exit_reason": "EOD"}, {"option_type": "PE", "position": "sell", "strike": 24100.0, "lots": 1, "entry_price": 82.65, "exit_price": 68.8, "pnl": 900.25, "exit_reason": "EOD"}, {"option_type": "CE", "position": "buy", "strike": 24350.0, "lots": 1, "entry_price": 9.45, "exit_price": 10.0, "pnl": 35.75, "exit_reason": "EOD"}, {"option_type": "PE", "position": "buy", "strike": 23850.0, "lots": 1, "entry_price": 10.8, "exit_price": 11.65, "pnl": 55.25, "exit_reason": "EOD"}]}, {"expiry_date": "2026-09-01", "entry_dt": "2026-09-01T09:22:00", "exit_dt": "2026-09-01T15:15:00", "entry_spot": 24042.2, "vix": 11.49, "net_credit": 81.3, "exit_combined": 74.75, "pnl": 425.75, "exit_reason": "EOD", "is_complete": true, "rolls": 0, "legs": [{"option_type": "CE", "position": "sell", "strike": 24050.0, "lots": 1, "entry_price": 40.5, "exit_price": 16.65, "pnl": 1550.25, "exit_reason": "EOD"}, {"option_type": "PE", "position": "sell", "strike": 24050.0, "lots": 1, "entry_price": 45.5, "exit_price": 61.75, "pnl": -1056.25, "exit_reason": "EOD"}, {"option_type": "CE", "position": "buy", "strike": 24300.0, "lots": 1, "entry_price": 3.05, "exit_price": 1.45, "pnl": -104.0, "exit_reason": "EOD"}, {"option_type": "PE", "position": "buy", "strike": 23800.0, "lots": 1, "entry_price": 1.65, "exit_price": 2.2, "pnl": 35.75, "exit_reason": "EOD"}]}, {"expiry_date": "2026-09-08", "entry_dt": "2026-09-02T09:22:00", "exit_dt": "2026-09-02T15:15:00", "entry_spot": 23805.45, "vix": 11.59, "net_credit": 183.55, "exit_combined": 181.85, "pnl": 110.5, "exit_reason": "EOD", "is_complete": true, "rolls": 0, "legs": [{"option_type": "CE", "position": "sell", "strike": 23800.0, "lots": 1, "entry_price": 183.25, "exit_price": 203.9, "pnl": -1342.25, "exit_reason": "EOD"}, {"option_type": "PE", "position": "sell", "strike": 23800.0, "lots": 1, "entry_price": 108.35, "exit_price": 77.5, "pnl": 2005.25, "exit_reason": "EOD"}, {"option_type": "CE", "position": "buy", "strike": 24050.0, "lots": 1, "entry_price": 68.0, "exit_price": 73.5, "pnl": 357.5, "exit_reason": "EOD"}, {"option_type": "PE", "position": "buy", "strike": 23550.0, "lots": 1, "entry_price": 40.05, "exit_price": 26.05, "pnl": -910.0, "exit_reason": "EOD"}]}, {"expiry_date": "2026-09-08", "entry_dt": "2026-09-03T09:22:00", "exit_dt": "2026-09-03T15:15:00", "entry_spot": 23974.75, "vix": 11.34, "net_credit": 159.4, "exit_combined": 158.95, "pnl": 29.25, "exit_reason": "EOD", "is_complete": true, "rolls": 0, "legs": [{"option_type": "CE", "position": "sell", "strike": 24000.0, "lots": 1, "entry_price": 115.45, "exit_price": 83.8, "pnl": 2057.25, "exit_reason": "EOD"}, {"option_type": "PE", "position": "sell", "strike": 24000.0, "lots": 1, "entry_price": 98.5, "exit_price": 132.6, "pnl": -2216.5, "exit_reason": "EOD"}, {"option_type": "CE", "position": "buy", "strike": 24250.0, "lots": 1, "entry_price": 26.25, "exit_price": 19.4, "pnl": -445.25, "exit_reason": "EOD"}, {"option_type": "PE", "position": "buy", "strike": 23750.0, "lots": 1, "entry_price": 28.3, "exit_price": 38.05, "pnl": 633.75, "exit_reason": "EOD"}]}, {"expiry_date": "2026-09-08", "entry_dt": "2026-09-04T09:22:00", "exit_dt": "2026-09-04T15:15:00", "entry_spot": 23912.4, "vix": 10.68, "net_credit": 159.85, "exit_combined": 154.55, "pnl": 344.5, "exit_reason": "EOD", "is_complete": true, "rolls": 0, "legs": [{"option_type": "CE", "position": "sell", "strike": 23900.0, "lots": 1, "entry_price": 134.9, "exit_price": 134.25, "pnl": 42.25, "exit_reason": "EOD"}, {"option_type": "PE", "position": "sell", "strike": 23900.0, "lots": 1, "entry_price": 74.2, "exit_price": 58.0, "pnl": 1053.0, "exit_reason": "EOD"}, {"option_type": "CE", "position": "buy", "strike": 24150.0, "lots": 1, "entry_price": 31.65, "exit_price": 26.0, "pnl": -367.25, "exit_reason": "EOD"}, {"option_type": "PE", "position": "buy", "strike": 23650.0, "lots": 1, "entry_price": 17.6, "exit_price": 11.7, "pnl": -383.5, "exit_reason": "EOD"}]}, {"expiry_date": "2026-09-08", "entry_dt": "2026-09-07T09:22:00", "exit_dt": "2026-09-07T15:15:00", "entry_spot": 23857.75, "vix": 11.16, "net_credit": 123.3, "exit_combined": 120.65, "pnl": 172.25, "exit_reason": "EOD", "is_complete": true, "rolls": 0, "legs": [{"option_type": "CE", "position": "sell", "strike": 23850.0, "lots": 1, "entry_price": 73.15, "exit_price": 52.9, "pnl": 1316.25, "exit_reason": "EOD"}, {"option_type": "PE", "position": "sell", "strike": 23850.0, "lots": 1, "entry_price": 68.85, "exit_price": 83.9, "pnl": -978.25, "exit_reason": "EOD"}, {"option_type": "CE", "position": "buy", "strike": 24100.0, "lots": 1, "entry_price": 10.95, "exit_price": 6.85, "pnl": -266.5, "exit_reason": "EOD"}, {"option_type": "PE", "position": "buy", "strike": 23600.0, "lots": 1, "entry_price": 7.75, "exit_price": 9.3, "pnl": 100.75, "exit_reason": "EOD"}]}, {"expiry_date": "2026-09-08", "entry_dt": "2026-09-08T09:22:00", "exit_dt": "2026-09-08T15:15:00", "entry_spot": 23691.75, "vix": 11.23, "net_credit": 91.75, "exit_combined": 86.01, "pnl": 372.99, "exit_reason": "EOD", "is_complete": true, "rolls": 0, "legs": [{"option_type": "CE", "position": "sell", "strike": 23700.0, "lots": 1, "entry_price": 51.6, "exit_price": 12.56, "pnl": 2537.49, "exit_reason": "EOD"}, {"option_type": "PE", "position": "sell", "strike": 23700.0, "lots": 1, "entry_price": 46.95, "exit_price": 75.7, "pnl": -1868.75, "exit_reason": "EOD"}, {"option_type": "CE", "position": "buy", "strike": 23950.0, "lots": 1, "entry_price": 4.55, "exit_price": 0.95, "pnl": -234.0, "exit_reason": "EOD"}, {"option_type": "PE", "position": "buy", "strike": 23450.0, "lots": 1, "entry_price": 2.25, "exit_price": 1.3, "pnl": -61.75, "exit_reason": "EOD"}]}, {"expiry_date": "2026-09-15", "entry_dt": "2026-09-09T09:22:00", "exit_dt": "2026-09-09T15:15:00", "entry_spot": 23502.45, "vix": 11.92, "net_credit": 177.25, "exit_combined": 166.85, "pnl": 676.0, "exit_reason": "EOD", "is_complete": true, "rolls": 0, "legs": [{"option_type": "CE", "position": "sell", "strike": 23500.0, "lots": 1, "entry_price": 163.0, "exit_price": 136.5, "pnl": 1722.5, "exit_reason": "EOD"}, {"option_type": "PE", "position": "sell", "strike": 23500.0, "lots": 1, "entry_price": 106.45, "exit_price": 108.75, "pnl": -149.5, "exit_reason": "EOD"}, {"option_type": "CE", "position": "buy", "strike": 23750.0, "lots": 1, "entry_price": 55.5, "exit_price": 41.1, "pnl": -936.0, "exit_reason": "EOD"}, {"option_type": "PE", "position": "buy", "strike": 23250.0, "lots": 1, "entry_price": 36.7, "exit_price": 37.3, "pnl": 39.0, "exit_reason": "EOD"}]}, {"expiry_date": "2026-09-15", "entry_dt": "2026-09-10T09:22:00", "exit_dt": "2026-09-10T15:15:00", "entry_spot": 23421.7, "vix": 11.8, "net_credit": 165.2, "exit_combined": 152.65, "pnl": 815.75, "exit_reason": "EOD", "is_complete": true, "rolls": 0, "legs": [{"option_type": "CE", "position": "sell", "strike": 23450.0, "lots": 1, "entry_price": 139.65, "exit_price": 92.4, "pnl": 3071.25, "exit_reason": "EOD"}, {"option_type": "PE", "position": "sell", "strike": 23450.0, "lots": 1, "entry_price": 93.1, "exit_price": 116.45, "pnl": -1517.75, "exit_reason": "EOD"}, {"option_type": "CE", "position": "buy", "strike": 23700.0, "lots": 1, "entry_price": 38.8, "exit_price": 21.8, "pnl": -1105.0, "exit_reason": "EOD"}, {"option_type": "PE", "position": "buy", "strike": 23200.0, "lots": 1, "entry_price": 28.75, "exit_price": 34.4, "pnl": 367.25, "exit_reason": "EOD"}]}, {"expiry_date": "2026-09-15", "entry_dt": "2026-09-11T09:22:00", "exit_dt": "2026-09-11T15:15:00", "entry_spot": 23258.0, "vix": 12.24, "net_credit": 154.05, "exit_combined": 194.15, "pnl": -2606.5, "exit_reason": "EOD", "is_complete": true, "rolls": 0, "legs": [{"option_type": "CE", "position": "sell", "strike": 23250.0, "lots": 1, "entry_price": 110.05, "exit_price": 241.95, "pnl": -8573.5, "exit_reason": "EOD"}, {"option_type": "PE", "position": "sell", "strike": 23250.0, "lots": 1, "entry_price": 99.3, "exit_price": 42.95, "pnl": 3662.75, "exit_reason": "EOD"}, {"option_type": "CE", "position": "buy", "strike": 23500.0, "lots": 1, "entry_price": 26.85, "exit_price": 76.25, "pnl": 3211.0, "exit_reason": "EOD"}, {"option_type": "PE", "position": "buy", "strike": 23000.0, "lots": 1, "entry_price": 28.45, "exit_price": 14.5, "pnl": -906.75, "exit_reason": "EOD"}]}, {"expiry_date": "2026-09-15", "entry_dt": "2026-09-15T09:22:00", "exit_dt": "2026-09-15T15:15:00", "entry_spot": 23485.4, "vix": 13.43, "net_credit": 97.0, "exit_combined": 223.84, "pnl": -8244.8, "exit_reason": "EOD", "is_complete": true, "rolls": 0, "legs": [{"option_type": "CE", "position": "sell", "strike": 23500.0, "lots": 1, "entry_price": 49.25, "exit_price": 2.6, "pnl": 3032.25, "exit_reason": "EOD"}, {"option_type": "PE", "position": "sell", "strike": 23500.0, "lots": 1, "entry_price": 55.45, "exit_price": 299.1, "pnl": -15837.25, "exit_reason": "EOD"}, {"option_type": "CE", "position": "buy", "strike": 23750.0, "lots": 1, "entry_price": 2.8, "exit_price": 0.01, "pnl": -181.55, "exit_reason": "EOD"}, {"option_type": "PE", "position": "buy", "strike": 23250.0, "lots": 1, "entry_price": 4.9, "exit_price": 77.85, "pnl": 4741.75, "exit_reason": "EOD"}]}], "equity_curve": [{"date": "2026-08-17", "cumulative_pnl": -377.0, "spot": 24299.05, "drawdown": -377.0}, {"date": "2026-08-18", "cumulative_pnl": 627.25, "spot": 24232.85, "drawdown": 0.0}, {"date": "2026-08-19", "cumulative_pnl": 1261.0, "spot": 24118.75, "drawdown": 0.0}, {"date": "2026-08-20", "cumulative_pnl": 958.75, "spot": 24195.6, "drawdown": -302.25}, {"date": "2026-08-21", "cumulative_pnl": 1166.75, "spot": 24217.35, "drawdown": -94.25}, {"date": "2026-08-24", "cumulative_pnl": -45.5, "spot": 24304.15, "drawdown": -1306.5}, {"date": "2026-08-25", "cumulative_pnl": 848.25, "spot": 24181.65, "drawdown": -412.75}, {"date": "2026-08-26", "cumulative_pnl": 1215.5, "spot": 24343.9, "drawdown": -45.5}, {"date": "2026-08-27", "cumulative_pnl": 1465.75, "spot": 24231.5, "drawdown": 0.0}, {"date": "2026-08-28", "cumulative_pnl": 1391.0, "spot": 24113.6, "drawdown": -74.75}, {"date": "2026-08-31", "cumulative_pnl": 1179.75, "spot": 24077.45, "drawdown": -286.0}, {"date": "2026-09-01", "cumulative_pnl": 1605.5, "spot": 24042.2, "drawdown": 0.0}, {"date": "2026-09-02", "cumulative_pnl": 1716.0, "spot": 23805.45, "drawdown": 0.0}, {"date": "2026-09-03", "cumulative_pnl": 1745.25, "spot": 23974.75, "drawdown": 0.0}, {"date": "2026-09-04", "cumulative_pnl": 2089.75, "spot": 23912.4, "drawdown": 0.0}, {"date": "2026-09-07", "cumulative_pnl": 2262.0, "spot": 23857.75, "drawdown": 0.0}, {"date": "2026-09-08", "cumulative_pnl": 2634.99, "spot": 23691.75, "drawdown": 0.0}, {"date": "2026-09-09", "cumulative_pnl": 3310.99, "spot": 23502.45, "drawdown": 0.0}, {"date": "2026-09-10", "cumulative_pnl": 4126.74, "spot": 23421.7, "drawdown": 0.0}, {"date": "2026-09-11", "cumulative_pnl": 1520.24, "spot": 23258.0, "drawdown": -2606.5}, {"date": "2026-09-15", "cumulative_pnl": -6724.56, "spot": 23485.4, "drawdown": -10851.3}], "monthly_pnl": {"2026": {"Aug": 1179.75, "Total": -6724.56, "Sep": -7904.31}}, "params": {"start_date": "2026-08-17", "end_date": "2026-09-17", "lot_size": 65, "entry_time": "09:22", "eod_time": "15:15", "profit_target_pct": 0.0, "overall_sl_pct": 0.0, "commission_per_lot": 0.0, "slippage_pct": 0.0, "strategy_type": "intraday", "legs": [{"option_type": "CE", "position": "sell", "lots": 1, "strike": "ATM", "leg_sl_pct": 0, "leg_target_pct": 0, "strike_type": "offset"}, {"option_type": "PE", "position": "sell", "lots": 1, "strike": "ATM", "leg_sl_pct": 0, "leg_target_pct": 0, "strike_type": "offset"}, {"option_type": "CE", "position": "buy", "lots": 1, "strike": "ATM+5", "strike_type": "offset", "leg_sl_pct": 0, "leg_target_pct": 0, "leg_trail_sl_pct": 0}, {"option_type": "PE", "position": "buy", "lots": 1, "strike": "ATM-5", "strike_type": "offset", "leg_sl_pct": 0, "leg_target_pct": 0, "leg_trail_sl_pct": 0}], "adjustment_mode": "none", "roll_buffer": 35.0, "roll_type": "points", "max_rolls": 5, "scalp_floor_pct": 0.0, "trail_sl_pct": 0.0, "square_off_mode": "one_leg"}}
+{
+  "summary": {
+    "total_cycles": 2,
+    "traded_cycles": 2,
+    "wins": 2,
+    "losses": 0,
+    "win_rate": 100.0,
+    "total_pnl": 3739.45,
+    "avg_pnl": 1869.73,
+    "max_win": 2017.6,
+    "max_loss": 0.0,
+    "avg_win": 1869.72,
+    "avg_loss": 0.0,
+    "max_drawdown": 0.0,
+    "max_drawdown_start": "",
+    "max_drawdown_end": "",
+    "max_drawdown_days": null,
+    "max_trades_in_drawdown": 0,
+    "max_win_streak": 2,
+    "max_loss_streak": 0,
+    "return_maxdd_ratio": null,
+    "reward_risk_ratio": null,
+    "expectancy": 1869.72,
+    "expectancy_ratio": null,
+    "commission_paid": 0.0
+  },
+  "cycles": [
+    {
+      "expiry_date": "2026-09-22",
+      "entry_dt": "2026-09-21T09:22:00",
+      "exit_dt": "2026-09-21T15:15:00",
+      "entry_spot": 23376.15,
+      "vix": 11.25,
+      "net_credit": 151.0,
+      "exit_combined": 124.51,
+      "pnl": 1721.85,
+      "exit_reason": "EOD",
+      "is_complete": true,
+      "rolls": 0,
+      "legs": [
+        {
+          "option_type": "CE",
+          "position": "sell",
+          "strike": 23400.0,
+          "lots": 1,
+          "entry_price": 63.8,
+          "exit_price": 76.56,
+          "pnl": -829.4,
+          "exit_reason": "LEG_SL"
+        },
+        {
+          "option_type": "PE",
+          "position": "sell",
+          "strike": 23400.0,
+          "lots": 1,
+          "entry_price": 87.2,
+          "exit_price": 47.95,
+          "pnl": 2551.25,
+          "exit_reason": "EOD"
+        }
+      ]
+    },
+    {
+      "expiry_date": "2026-09-22",
+      "entry_dt": "2026-09-22T09:22:00",
+      "exit_dt": "2026-09-22T15:15:00",
+      "entry_spot": 23447.25,
+      "vix": 11.0,
+      "net_credit": 99.0,
+      "exit_combined": 67.96,
+      "pnl": 2017.6,
+      "exit_reason": "EOD",
+      "is_complete": true,
+      "rolls": 0,
+      "legs": [
+        {
+          "option_type": "CE",
+          "position": "sell",
+          "strike": 23450.0,
+          "lots": 1,
+          "entry_price": 45.7,
+          "exit_price": 4.0,
+          "pnl": 2710.5,
+          "exit_reason": "EOD",
+          "entry_time": "09:22",
+          "exit_time": "15:15"
+        },
+        {
+          "option_type": "PE",
+          "position": "sell",
+          "strike": 23450.0,
+          "lots": 1,
+          "entry_price": 53.3,
+          "exit_price": 63.96,
+          "pnl": -692.9,
+          "exit_reason": "LEG_SL",
+          "entry_time": "09:22",
+          "exit_time": "10:33"
+        }
+      ]
+    }
+  ],
+  "equity_curve": [
+    {
+      "date": "2026-09-21",
+      "cumulative_pnl": 1721.85,
+      "spot": 23376.15,
+      "drawdown": 0.0
+    },
+    {
+      "date": "2026-09-22",
+      "cumulative_pnl": 3739.45,
+      "spot": 23447.25,
+      "drawdown": 0.0
+    }
+  ],
+  "monthly_pnl": {
+    "2026": {
+      "Sep": 3739.45,
+      "Total": 3739.45
+    }
+  },
+  "params": {
+    "start_date": "2026-09-21",
+    "end_date": "2026-09-24",
+    "lot_size": 65,
+    "entry_time": "09:22",
+    "eod_time": "15:15",
+    "profit_target_pct": 0.0,
+    "overall_sl_pct": 0.0,
+    "commission_per_lot": 0.0,
+    "slippage_pct": 0.0,
+    "strategy_type": "intraday",
+    "legs": [
+      {
+        "option_type": "CE",
+        "position": "sell",
+        "lots": 1,
+        "strike": "ATM",
+        "strike_type": "offset",
+        "leg_sl_pct": 20,
+        "leg_target_pct": 0,
+        "leg_trail_sl_pct": 0
+      },
+      {
+        "option_type": "PE",
+        "position": "sell",
+        "lots": 1,
+        "strike": "ATM",
+        "strike_type": "offset",
+        "leg_sl_pct": 20,
+        "leg_target_pct": 0,
+        "leg_trail_sl_pct": 0
+      }
+    ],
+    "adjustment_mode": "none",
+    "roll_buffer": 35.0,
+    "roll_type": "points",
+    "max_rolls": 5,
+    "scalp_floor_pct": 0.0,
+    "trail_sl_pct": 0.0,
+    "square_off_mode": "one_leg"
+  }
+}
