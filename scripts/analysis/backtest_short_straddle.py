@@ -506,8 +506,20 @@ def _simulate_one_day(
     square_off_mode: str = "one_leg",
     max_diff_pct: float = 0.0,
     entry_cutoff_time: Optional[time] = None,
+    profit_target_val: float = 0.0,
+    profit_target_type: str = "pct",
+    overall_sl_val: float = 0.0,
+    overall_sl_type: str = "pct",
+    lot_size: int = 65,
 ) -> dict:
     """Simulate one intraday trade over day_bars. Returns state dict."""
+    if profit_target_val == 0.0 and profit_target_pct > 0:
+        profit_target_val = profit_target_pct
+        profit_target_type = "pct"
+    if overall_sl_val == 0.0 and overall_sl_pct > 0:
+        overall_sl_val = overall_sl_pct
+        overall_sl_type = "pct"
+
     leg_states: List[LegState] = [LegState() for _ in leg_configs]
     closed_legs: List[dict] = []
     rolls_count = 0
@@ -1167,43 +1179,73 @@ def _simulate_one_day(
                 exit_dt = bar.dt
                 break
 
+        # Calculate current running MTM across closed and open legs (in rupees)
+        closed_legs_pnl = sum(
+            ((c["entry_price"] - c["exit_price"]) if c["position"] == "sell" else (c["exit_price"] - c["entry_price"]))
+            * c["lots"] * lot_size
+            for c in closed_legs
+        )
+        open_legs_pnl = sum(
+            ((s.entry_price - leg_prices[i][3]) if leg.position == "sell" else (leg_prices[i][3] - s.entry_price))
+            * leg.lots * lot_size
+            for i, (leg, s) in enumerate(zip(leg_configs, leg_states))
+            if s.is_open
+        )
+        current_strategy_mtm = closed_legs_pnl + open_legs_pnl
+
         # --- Overall SL ---
-        if overall_sl_pct > 0 and abs(net_credit_now) > 0:
-            cur_net = _current_net()
-            loss_pct = (cur_net - net_credit_now) / abs(net_credit_now) * 100
-            if loss_pct >= overall_sl_pct:
-                for i, (leg, state) in enumerate(zip(leg_configs, leg_states)):
-                    if state.is_open:
-                        slip = slip_sell_exit if leg.position == "sell" else slip_buy_exit
-                        state.exit_price = leg_prices[i][3] * slip
-                        state.exit_reason = "OVERALL_SL"
-                        state.exit_dt = bar.dt
-                    elif state.is_waiting or state.waiting_reentry_cost:
-                        state.is_waiting = False
-                        state.waiting_reentry_cost = False
-                        state.exit_reason = "CANCELLED_BY_EXIT"
-                exit_reason = "OVERALL_SL"
-                exit_dt = bar.dt
-                break
+        sl_hit = False
+        if overall_sl_val > 0:
+            if overall_sl_type == "mtm":
+                if current_strategy_mtm <= -overall_sl_val:
+                    sl_hit = True
+            elif abs(net_credit_now) > 0:
+                cur_net = _current_net()
+                loss_pct = (cur_net - net_credit_now) / abs(net_credit_now) * 100
+                if loss_pct >= overall_sl_val:
+                    sl_hit = True
+
+        if sl_hit:
+            for i, (leg, state) in enumerate(zip(leg_configs, leg_states)):
+                if state.is_open:
+                    slip = slip_sell_exit if leg.position == "sell" else slip_buy_exit
+                    state.exit_price = leg_prices[i][3] * slip
+                    state.exit_reason = "OVERALL_SL"
+                    state.exit_dt = bar.dt
+                elif state.is_waiting or state.waiting_reentry_cost:
+                    state.is_waiting = False
+                    state.waiting_reentry_cost = False
+                    state.exit_reason = "CANCELLED_BY_EXIT"
+            exit_reason = "OVERALL_SL"
+            exit_dt = bar.dt
+            break
 
         # --- Overall Target ---
-        if profit_target_pct > 0 and abs(net_credit_now) > 0:
-            cur_net = _current_net()
-            profit_pct = (net_credit_now - cur_net) / abs(net_credit_now) * 100
-            if profit_pct >= profit_target_pct:
-                for i, (leg, state) in enumerate(zip(leg_configs, leg_states)):
-                    if state.is_open:
-                        slip = slip_sell_exit if leg.position == "sell" else slip_buy_exit
-                        state.exit_price = leg_prices[i][3] * slip
-                        state.exit_reason = "TARGET"
-                        state.exit_dt = bar.dt
-                    elif state.is_waiting or state.waiting_reentry_cost:
-                        state.is_waiting = False
-                        state.waiting_reentry_cost = False
-                        state.exit_reason = "CANCELLED_BY_EXIT"
-                exit_reason = "TARGET"
-                exit_dt = bar.dt
-                break
+        tp_hit = False
+        if profit_target_val > 0:
+            if profit_target_type == "mtm":
+                if current_strategy_mtm >= profit_target_val:
+                    tp_hit = True
+            elif abs(net_credit_now) > 0:
+                cur_net = _current_net()
+                profit_pct = (net_credit_now - cur_net) / abs(net_credit_now) * 100
+                if profit_pct >= profit_target_val:
+                    tp_hit = True
+
+        if tp_hit:
+            for i, (leg, state) in enumerate(zip(leg_configs, leg_states)):
+                if state.is_open:
+                    slip = slip_sell_exit if leg.position == "sell" else slip_buy_exit
+                    state.exit_price = leg_prices[i][3] * slip
+                    state.exit_reason = "TARGET"
+                    state.exit_dt = bar.dt
+                elif state.is_waiting or state.waiting_reentry_cost:
+                    state.is_waiting = False
+                    state.waiting_reentry_cost = False
+                    state.exit_reason = "CANCELLED_BY_EXIT"
+            exit_reason = "TARGET"
+            exit_dt = bar.dt
+            break
 
         # --- EOD ---
         if t >= eod_time:
@@ -1279,7 +1321,11 @@ def run_backtest(leg_configs: List[LegConfig], cycles: List[ExpiryCycle],
                  square_off_mode: str = "one_leg",
                  max_diff_pct: float = 0.0,
                  entry_cutoff_time_str: Optional[str] = "15:00",
-                 status_file: Optional[str] = None):
+                 status_file: Optional[str] = None,
+                 profit_target_val: float = 0.0,
+                 profit_target_type: str = "pct",
+                 overall_sl_val: float = 0.0,
+                 overall_sl_type: str = "pct"):
     """
     strategy_type:
       "intraday"   — one trade per trading day (AlgoTest Intraday mode)
@@ -1316,6 +1362,11 @@ def run_backtest(leg_configs: List[LegConfig], cycles: List[ExpiryCycle],
         square_off_mode=square_off_mode,
         max_diff_pct=max_diff_pct,
         entry_cutoff_time=entry_cutoff_time,
+        profit_target_val=profit_target_val if profit_target_val > 0 else profit_target_pct,
+        profit_target_type=profit_target_type,
+        overall_sl_val=overall_sl_val if overall_sl_val > 0 else overall_sl_pct,
+        overall_sl_type=overall_sl_type,
+        lot_size=lot_size,
     )
 
     trade_results = []
@@ -1747,6 +1798,10 @@ def main():
     parser.add_argument("--eod-time",           default="15:15")
     parser.add_argument("--profit-target-pct",  type=float, default=50.0)
     parser.add_argument("--overall-sl-pct",     type=float, default=0.0)
+    parser.add_argument("--profit-target-val",  type=float, default=0.0)
+    parser.add_argument("--profit-target-type", default="pct", choices=["pct", "mtm"])
+    parser.add_argument("--overall-sl-val",     type=float, default=0.0)
+    parser.add_argument("--overall-sl-type",    default="pct", choices=["pct", "mtm"])
     parser.add_argument("--commission-per-lot", type=float, default=40.0)
     parser.add_argument("--slippage-pct",       type=float, default=0.0)
     parser.add_argument("--strategy-type",      default="intraday",
@@ -1811,6 +1866,10 @@ def main():
         max_diff_pct=args.max_diff_pct,
         entry_cutoff_time_str=args.entry_cutoff_time,
         status_file=args.status_file,
+        profit_target_val=args.profit_target_val,
+        profit_target_type=args.profit_target_type,
+        overall_sl_val=args.overall_sl_val,
+        overall_sl_type=args.overall_sl_type,
     )
     result["params"] = {
         "start_date":         args.start_date,
@@ -1820,6 +1879,10 @@ def main():
         "eod_time":           args.eod_time,
         "profit_target_pct":  args.profit_target_pct,
         "overall_sl_pct":     args.overall_sl_pct,
+        "profit_target_val":  args.profit_target_val,
+        "profit_target_type": args.profit_target_type,
+        "overall_sl_val":     args.overall_sl_val,
+        "overall_sl_type":    args.overall_sl_type,
         "commission_per_lot": args.commission_per_lot,
         "slippage_pct":       args.slippage_pct,
         "strategy_type":      args.strategy_type,

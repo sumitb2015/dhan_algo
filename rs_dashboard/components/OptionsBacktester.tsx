@@ -510,10 +510,12 @@ export default function OptionsBacktester({
 
   // Strategy target & SL
   const [strategyTargetActive, setStrategyTargetActive] = useState(false);
-  const [profitTargetPct, setProfitTargetPct] = useState(0);
+  const [profitTargetType, setProfitTargetType] = useState<'mtm' | 'pct'>('mtm');
+  const [profitTargetVal, setProfitTargetVal] = useState(0);
 
   const [strategySlActive, setStrategySlActive] = useState(false);
-  const [overallSlPct, setOverallSlPct] = useState(0);
+  const [overallSlType, setOverallSlType] = useState<'mtm' | 'pct'>('mtm');
+  const [overallSlVal, setOverallSlVal] = useState(0);
 
   const [protectProfitsActive, setProtectProfitsActive] = useState(false);
   const [trailSlPct, setTrailSlPct] = useState(0);
@@ -625,12 +627,22 @@ export default function OptionsBacktester({
       if (p.start_date) setStartDate(String(p.start_date));
       if (p.end_date) setEndDate(String(p.end_date));
       if (p.lot_size) setLotSize(Number(p.lot_size));
-      if (p.profit_target_pct) {
-        setProfitTargetPct(Number(p.profit_target_pct));
+      if (p.profit_target_val !== undefined && Number(p.profit_target_val) > 0) {
+        setProfitTargetVal(Number(p.profit_target_val));
+        setProfitTargetType((p.profit_target_type as 'mtm' | 'pct') || 'pct');
+        setStrategyTargetActive(true);
+      } else if (p.profit_target_pct) {
+        setProfitTargetVal(Number(p.profit_target_pct));
+        setProfitTargetType('pct');
         setStrategyTargetActive(true);
       }
-      if (p.overall_sl_pct) {
-        setOverallSlPct(Number(p.overall_sl_pct));
+      if (p.overall_sl_val !== undefined && Number(p.overall_sl_val) > 0) {
+        setOverallSlVal(Number(p.overall_sl_val));
+        setOverallSlType((p.overall_sl_type as 'mtm' | 'pct') || 'pct');
+        setStrategySlActive(true);
+      } else if (p.overall_sl_pct) {
+        setOverallSlVal(Number(p.overall_sl_pct));
+        setOverallSlType('pct');
         setStrategySlActive(true);
       }
       if (p.max_diff_pct !== undefined && Number(p.max_diff_pct) > 0) {
@@ -771,9 +783,11 @@ export default function OptionsBacktester({
     if (name === 'straddle_35sl') {
       setEntryH('9'); setEntryM('20');
       setExitH('15'); setExitM('15');
-      setProfitTargetPct(50);
+      setProfitTargetVal(50);
+      setProfitTargetType('pct');
       setStrategyTargetActive(true);
-      setOverallSlPct(0);
+      setOverallSlVal(0);
+      setOverallSlType('pct');
       setStrategySlActive(false);
       setAdjustmentMode('none');
       setScalpFloorPct(0);
@@ -786,7 +800,8 @@ export default function OptionsBacktester({
     } else if (name === 'rolling_straddle') {
       setEntryH('9'); setEntryM('20');
       setExitH('15'); setExitM('15');
-      setProfitTargetPct(60);
+      setProfitTargetVal(60);
+      setProfitTargetType('pct');
       setStrategyTargetActive(true);
       setAdjustmentMode('rolling_straddle');
       setRollBuffer(35);
@@ -865,8 +880,12 @@ export default function OptionsBacktester({
             re_entry_tp_count: reEntryActive ? (l.re_entry_tp_count ?? 0) : 0,
           })),
           lot_size: lotSize,
-          profit_target_pct: strategyTargetActive ? profitTargetPct : 0,
-          overall_sl_pct: strategySlActive ? overallSlPct : 0,
+          profit_target_val: strategyTargetActive ? profitTargetVal : 0,
+          profit_target_type: profitTargetType,
+          profit_target_pct: strategyTargetActive && profitTargetType === 'pct' ? profitTargetVal : 0,
+          overall_sl_val: strategySlActive ? overallSlVal : 0,
+          overall_sl_type: overallSlType,
+          overall_sl_pct: strategySlActive && overallSlType === 'pct' ? overallSlVal : 0,
           entry_time: entryTimeFormatted,
           eod_time: eodTimeFormatted,
           commission_per_lot: includeCosts ? commissionPerLot : 0,
@@ -965,8 +984,10 @@ export default function OptionsBacktester({
       startDate,
       endDate,
       lotSize,
-      target: strategyTargetActive ? profitTargetPct : 0,
-      sl: strategySlActive ? overallSlPct : 0,
+      target: strategyTargetActive ? profitTargetVal : 0,
+      targetType: profitTargetType,
+      sl: strategySlActive ? overallSlVal : 0,
+      slType: overallSlType,
     };
     try {
       localStorage.setItem('stockmock_saved_strategy', JSON.stringify(payload));
@@ -1949,22 +1970,37 @@ export default function OptionsBacktester({
               </div>
             </div>
 
-            {/* Strategy Target Profit Link */}
+            {/* Strategy Target Profit */}
             {strategyTargetActive ? (
-              <div className="flex items-center gap-2 mt-2 bg-zinc-850 border border-zinc-700 rounded px-2.5 py-1 text-xs text-zinc-200 w-fit shadow-xs">
-                <span className="font-semibold text-teal-400">Strategy Target:</span>
-                <input
-                  type="number"
-                  min={1}
-                  value={profitTargetPct}
-                  onChange={e => setProfitTargetPct(Number(e.target.value))}
-                  className="w-14 bg-zinc-800 border border-zinc-700 rounded px-1.5 py-0.5 text-center text-xs text-zinc-100 font-semibold"
-                />
-                <span>%</span>
+              <div className="flex items-center gap-2 mt-2 text-xs text-zinc-300">
+                <span className="font-medium text-zinc-300">Target Profit:</span>
+                <select
+                  value={profitTargetType}
+                  onChange={e => setProfitTargetType(e.target.value as 'mtm' | 'pct')}
+                  className="bg-zinc-800 border border-zinc-700 rounded px-2 py-1 text-xs text-zinc-100 font-medium focus:outline-hidden cursor-pointer"
+                >
+                  <option value="mtm">Total MTM</option>
+                  <option value="pct">% of Total Premium</option>
+                </select>
+                <div className="flex items-center border border-zinc-700 rounded overflow-hidden shadow-xs">
+                  <span className="bg-teal-500/20 text-teal-400 font-semibold px-2 py-1 text-xs border-r border-zinc-700 select-none">
+                    {profitTargetType === 'mtm' ? '₹' : '%'}
+                  </span>
+                  <input
+                    type="number"
+                    min={0}
+                    step={profitTargetType === 'mtm' ? 100 : 1}
+                    value={profitTargetVal || ''}
+                    onChange={e => setProfitTargetVal(Math.max(0, Number(e.target.value)))}
+                    placeholder="0"
+                    className="w-20 bg-zinc-800 px-2 py-1 text-xs text-zinc-100 font-medium focus:outline-hidden"
+                  />
+                </div>
                 <button
                   type="button"
-                  onClick={() => { setStrategyTargetActive(false); setProfitTargetPct(0); }}
-                  className="text-zinc-500 hover:text-red-500 ml-1"
+                  onClick={() => { setStrategyTargetActive(false); setProfitTargetVal(0); }}
+                  className="text-zinc-500 hover:text-red-400 p-0.5 cursor-pointer leading-none text-sm"
+                  title="Remove Target Profit"
                 >
                   ✕
                 </button>
@@ -1972,10 +2008,10 @@ export default function OptionsBacktester({
             ) : (
               <button
                 type="button"
-                onClick={() => { setStrategyTargetActive(true); setProfitTargetPct(50); }}
+                onClick={() => { setStrategyTargetActive(true); setProfitTargetVal(2000); setProfitTargetType('mtm'); }}
                 className="text-xs text-teal-400 hover:underline font-semibold flex items-center gap-0.5 mt-2 cursor-pointer w-fit"
               >
-                <Plus className="w-3.5 h-3.5 stroke-[2.5]" /> Strategy Target Profit
+                <Plus className="w-3.5 h-3.5 stroke-[2.5]" /> Target Profit
               </button>
             )}
 
@@ -2063,22 +2099,37 @@ export default function OptionsBacktester({
               </div>
             </div>
 
-            {/* Strategy Stop Loss Link */}
+            {/* Strategy Stop Loss */}
             {strategySlActive ? (
-              <div className="flex items-center gap-2 mt-2 bg-zinc-850 border border-zinc-700 rounded px-2.5 py-1 text-xs text-zinc-200 w-fit shadow-xs">
-                <span className="font-semibold text-red-600">Strategy Stop Loss:</span>
-                <input
-                  type="number"
-                  min={1}
-                  value={overallSlPct}
-                  onChange={e => setOverallSlPct(Number(e.target.value))}
-                  className="w-14 bg-zinc-800 border border-zinc-700 rounded px-1.5 py-0.5 text-center text-xs text-zinc-100 font-semibold"
-                />
-                <span>%</span>
+              <div className="flex items-center gap-2 mt-2 text-xs text-zinc-300">
+                <span className="font-medium text-zinc-300">Stop Loss:</span>
+                <select
+                  value={overallSlType}
+                  onChange={e => setOverallSlType(e.target.value as 'mtm' | 'pct')}
+                  className="bg-zinc-800 border border-zinc-700 rounded px-2 py-1 text-xs text-zinc-100 font-medium focus:outline-hidden cursor-pointer"
+                >
+                  <option value="mtm">Total MTM</option>
+                  <option value="pct">% of Total Premium</option>
+                </select>
+                <div className="flex items-center border border-zinc-700 rounded overflow-hidden shadow-xs">
+                  <span className="bg-red-500/20 text-red-400 font-semibold px-2 py-1 text-xs border-r border-zinc-700 select-none">
+                    {overallSlType === 'mtm' ? '- ₹' : '- %'}
+                  </span>
+                  <input
+                    type="number"
+                    min={0}
+                    step={overallSlType === 'mtm' ? 100 : 1}
+                    value={overallSlVal || ''}
+                    onChange={e => setOverallSlVal(Math.max(0, Number(e.target.value)))}
+                    placeholder="0"
+                    className="w-20 bg-zinc-800 px-2 py-1 text-xs text-zinc-100 font-medium focus:outline-hidden"
+                  />
+                </div>
                 <button
                   type="button"
-                  onClick={() => { setStrategySlActive(false); setOverallSlPct(0); }}
-                  className="text-zinc-500 hover:text-red-500 ml-1"
+                  onClick={() => { setStrategySlActive(false); setOverallSlVal(0); }}
+                  className="text-zinc-500 hover:text-red-400 p-0.5 cursor-pointer leading-none text-sm"
+                  title="Remove Stop Loss"
                 >
                   ✕
                 </button>
@@ -2086,10 +2137,10 @@ export default function OptionsBacktester({
             ) : (
               <button
                 type="button"
-                onClick={() => { setStrategySlActive(true); setOverallSlPct(35); }}
+                onClick={() => { setStrategySlActive(true); setOverallSlVal(2000); setOverallSlType('mtm'); }}
                 className="text-xs text-teal-400 hover:underline font-semibold flex items-center gap-0.5 mt-2 cursor-pointer w-fit"
               >
-                <Plus className="w-3.5 h-3.5 stroke-[2.5]" /> Strategy Stop Loss
+                <Plus className="w-3.5 h-3.5 stroke-[2.5]" /> Stop Loss
               </button>
             )}
           </div>
