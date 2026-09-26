@@ -60,7 +60,21 @@ function fmtMoney(n: number): string {
 const basketCompKey = (b: MultiLegBasket) =>
   `${b.underlying}:${b.expiry}:${b.legs.map(l => `${l.side}-${l.option}-${l.strike}@${l.expiry || b.expiry}x${l.lots}`).join('|')}`;
 
-export default function MultiLegFocus() {
+export interface MultiLegFocusProps {
+  embedded?: boolean;
+  hideHeader?: boolean;
+  activeUnderlyingProp?: Underlying;
+  onUnderlyingChangeProp?: (u: Underlying) => void;
+  expiriesMapProp?: Record<string, string[]>;
+}
+
+export default function MultiLegFocus({
+  embedded = false,
+  hideHeader = false,
+  activeUnderlyingProp,
+  onUnderlyingChangeProp,
+  expiriesMapProp,
+}: MultiLegFocusProps = {}) {
   const { broker, setBroker, authenticatedBrokers, hasAuthenticatedBroker } = useBrokerSelector();
 
   // Multi-Basket State: list of all strategies
@@ -208,11 +222,18 @@ export default function MultiLegFocus() {
     return l.option === 'CE' ? strikeEntry?.ceId : strikeEntry?.peId;
   }, []);
 
-  const [selectedUnderlying, setSelectedUnderlying] = useState<Underlying>('NIFTY');
+  const [selectedUnderlying, setSelectedUnderlying] = useState<Underlying>(activeUnderlyingProp ?? 'NIFTY');
   // Set once the user explicitly clicks an underlying pill — from then on their
   // choice wins over whatever basket happens to be first/open (previously a
   // pill click was inert as soon as any basket existed).
-  const [hasManualUnderlying, setHasManualUnderlying] = useState(false);
+  const [hasManualUnderlying, setHasManualUnderlying] = useState(Boolean(activeUnderlyingProp));
+
+  useEffect(() => {
+    if (activeUnderlyingProp && activeUnderlyingProp !== selectedUnderlying) {
+      setSelectedUnderlying(activeUnderlyingProp);
+      setHasManualUnderlying(true);
+    }
+  }, [activeUnderlyingProp, selectedUnderlying]);
 
   // Active / Primary underlying & expiry for WebSocket streaming
   const activeUnderlying = useMemo(() => {
@@ -356,19 +377,22 @@ export default function MultiLegFocus() {
     return 0;
   }, [liveQuotes, activeExpiry, activeUnderlying, chainData]);
 
-  // Fetch expiries for all underlyings on mount or broker change
+  // Sync expiriesMap from parent prop if supplied, or lazy-load per activeUnderlying
   useEffect(() => {
-    for (const u of UNDERLYINGS) {
-      fetch(`/api/options/expiries?underlying=${u}&broker=${broker}`)
-        .then(r => r.json())
-        .then((j: { success: boolean; data?: string[] }) => {
-          if (j.success && j.data?.length) {
-            setExpiriesMap(prev => ({ ...prev, [u]: j.data! }));
-          }
-        })
-        .catch(() => {});
+    if (expiriesMapProp && Object.keys(expiriesMapProp).length > 0) {
+      setExpiriesMap(prev => ({ ...prev, ...expiriesMapProp }));
+      return;
     }
-  }, [broker]);
+    if (!activeUnderlying || expiriesMap[activeUnderlying]?.length) return;
+    fetch(`/api/options/expiries?underlying=${activeUnderlying}&broker=${broker}`)
+      .then(r => r.json())
+      .then((j: { success: boolean; data?: string[] }) => {
+        if (j.success && j.data?.length) {
+          setExpiriesMap(prev => ({ ...prev, [activeUnderlying]: j.data! }));
+        }
+      })
+      .catch(() => {});
+  }, [broker, activeUnderlying, expiriesMapProp]);
 
   // Auto-backfill empty expiry on initial baskets once expiriesMap resolves
   useEffect(() => {
@@ -2303,8 +2327,8 @@ export default function MultiLegFocus() {
   );
 
   return (
-    <div className="min-h-screen bg-zinc-950 text-zinc-100">
-      <NavBar />
+    <div className={embedded ? 'flex flex-col w-full' : 'min-h-screen bg-zinc-950 text-zinc-100'}>
+      {!hideHeader && <NavBar />}
 
       {/* Floating Notifications */}
       <div className="fixed top-16 right-4 z-50 flex flex-col gap-2 pointer-events-none">
@@ -2325,13 +2349,15 @@ export default function MultiLegFocus() {
       )}
 
       {/* Top Global Command Bar */}
-      <div className="sticky top-0 z-30 bg-zinc-950/95 backdrop-blur border-b border-zinc-800 px-4 py-3">
+      <div className={`${hideHeader ? 'bg-zinc-950/95 border-b border-zinc-800 px-3 py-2' : 'sticky top-0 z-30 bg-zinc-950/95 backdrop-blur border-b border-zinc-800 px-4 py-3'}`}>
         <div className="flex items-center justify-between gap-4 flex-wrap">
           <div className="flex items-center gap-3">
-            <h1 className="text-sm font-bold tracking-wide uppercase text-white flex items-center gap-1.5">
-              <Layers className="w-4 h-4 text-emerald-400" />
-              Multi-Leg Strategy Focus
-            </h1>
+            {!hideHeader && (
+              <h1 className="text-sm font-bold tracking-wide uppercase text-white flex items-center gap-1.5">
+                <Layers className="w-4 h-4 text-emerald-400" />
+                Multi-Leg Strategy Focus
+              </h1>
+            )}
             <span className="text-xs text-zinc-400 font-semibold">
               {activeStrategiesCount} Running · {baskets.length} Total
             </span>
@@ -2342,7 +2368,11 @@ export default function MultiLegFocus() {
                 <button
                   key={u}
                   type="button"
-                  onClick={() => { setSelectedUnderlying(u); setHasManualUnderlying(true); }}
+                  onClick={() => {
+                    setSelectedUnderlying(u);
+                    setHasManualUnderlying(true);
+                    onUnderlyingChangeProp?.(u);
+                  }}
                   className={`px-2 py-1 text-[11px] font-bold rounded-md transition-colors ${
                     activeUnderlying === u
                       ? 'bg-zinc-700 text-white shadow-sm'
@@ -2508,20 +2538,38 @@ export default function MultiLegFocus() {
 
         {/* Strategy Templates Bar — NEVER disabled so user can always add another strategy! */}
         <div className="mt-2.5 pt-2.5 border-t border-zinc-800/80">
-          <div className={`flex items-center justify-between ${presetsCollapsed ? '' : 'mb-1.5'}`}>
-            <button
-              type="button"
-              onClick={togglePresets}
-              aria-expanded={!presetsCollapsed}
-              aria-label={presetsCollapsed ? 'Expand strategy presets' : 'Collapse strategy presets'}
-              className="flex items-center gap-1 text-[11px] font-bold text-zinc-400 hover:text-zinc-200 uppercase tracking-wider rounded focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500/60"
-            >
-              {presetsCollapsed ? <ChevronRight className="w-3.5 h-3.5" /> : <ChevronDown className="w-3.5 h-3.5" />}
-              Quick Add Strategy Presets
-            </button>
+          <div className={`flex items-center justify-between flex-wrap gap-2 ${presetsCollapsed ? '' : 'mb-1.5'}`}>
+            <div className="flex items-center gap-2 flex-wrap">
+              <button
+                type="button"
+                onClick={togglePresets}
+                aria-expanded={!presetsCollapsed}
+                aria-label={presetsCollapsed ? 'Expand strategy presets' : 'Collapse strategy presets'}
+                className="flex items-center gap-1 text-[11px] font-bold text-zinc-400 hover:text-zinc-200 uppercase tracking-wider rounded focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500/60"
+              >
+                {presetsCollapsed ? <ChevronRight className="w-3.5 h-3.5" /> : <ChevronDown className="w-3.5 h-3.5" />}
+                Strategy Presets
+              </button>
+
+              {/* 1-Click Fast Scalp Buttons */}
+              <div className="flex items-center gap-1 flex-wrap">
+                {ALL_STRATEGY_TEMPLATES.filter(t => ['short-straddle', 'short-strangle', 'iron-condor', 'bull-call-spread', 'bear-put-spread'].includes(t.key)).map(tpl => (
+                  <button
+                    key={tpl.key}
+                    type="button"
+                    onClick={() => addStrategy(tpl)}
+                    className="px-2 py-0.5 text-[10px] font-bold rounded bg-zinc-900 hover:bg-zinc-800 text-zinc-300 hover:text-emerald-400 border border-zinc-700/80 transition-colors"
+                    title={`Instant 1-click ${tpl.name} with ATM strikes`}
+                  >
+                    + {tpl.name.replace('Short ', '').replace(' Spread', '')}
+                  </button>
+                ))}
+              </div>
+            </div>
+
             {!presetsCollapsed && (
               <span className="text-[10px] text-zinc-500">
-                Click any strategy to instantiate a new independent parallel row
+                Click any strategy card below to instantiate a new row
               </span>
             )}
           </div>
@@ -2542,7 +2590,7 @@ export default function MultiLegFocus() {
       </div>
 
       {/* Main Container: Parallel Strategy Rows */}
-      <div className="p-4 flex flex-col gap-4 w-full">
+      <div className={embedded ? 'p-2 flex flex-col gap-2.5 w-full' : 'p-4 flex flex-col gap-4 w-full'}>
         {baskets.length === 0 ? (
           <div className="flex flex-col items-center justify-center py-24 gap-3 border border-zinc-800/60 rounded-xl bg-zinc-900/20">
             <Layers className="w-10 h-10 text-zinc-600" />

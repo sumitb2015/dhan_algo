@@ -5,7 +5,7 @@ import dynamic from 'next/dynamic';
 import NavBar from './NavBar';
 import {
   Copy, Trash2, Settings, Share2, Save, Info, Plus, Calendar,
-  Square, RefreshCw
+  Square, RefreshCw, History, ExternalLink, Download, FileText, Search, X
 } from 'lucide-react';
 import { toast } from 'sonner';
 
@@ -16,6 +16,23 @@ const BacktestCharts = dynamic(() => import('@/components/BacktestCharts'), {
 });
 
 // ─── Types ───────────────────────────────────────────────────────────────────
+
+export interface BacktestHistoryItem {
+  id: string;
+  name: string;
+  timestamp: string;
+  strategy_type?: string;
+  start_date?: string;
+  end_date?: string;
+  trades?: number;
+  win_rate?: number;
+  total_pnl?: number;
+  max_drawdown?: number;
+  has_tearsheet?: boolean;
+  has_trades_csv?: boolean;
+  has_scans_summary?: boolean;
+  tags?: string[];
+}
 
 type StrikeMode = 'offset' | 'atm_percent' | 'closest_premium' | 'straddle_width' | 'closest_delta';
 
@@ -354,6 +371,98 @@ export default function OptionsBacktester({
   const pollRef = useRef<NodeJS.Timeout | null>(null);
   const resultsRef = useRef<HTMLDivElement>(null);
 
+  // Past Backtests History
+  const [historyModalOpen, setHistoryModalOpen] = useState(false);
+  const [historyList, setHistoryList] = useState<BacktestHistoryItem[]>([]);
+  const [loadingHistory, setLoadingHistory] = useState(false);
+  const [historySearch, setHistorySearch] = useState('');
+  const [loadedFromHistory, setLoadedFromHistory] = useState<BacktestHistoryItem | null>(null);
+  const [viewingTearsheetId, setViewingTearsheetId] = useState<string | null>(null);
+
+  const fetchHistory = React.useCallback(async () => {
+    setLoadingHistory(true);
+    try {
+      const res = await fetch('/api/backtest/history');
+      const data = await res.json();
+      if (Array.isArray(data.backtests)) {
+        setHistoryList(data.backtests);
+      }
+    } catch (e) {
+      console.error('Failed to fetch backtest history:', e);
+    } finally {
+      setLoadingHistory(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    fetchHistory();
+  }, [fetchHistory]);
+
+  async function handleLoadHistoryItem(id: string) {
+    try {
+      const res = await fetch(`/api/backtest/history?id=${encodeURIComponent(id)}`);
+      const data = await res.json();
+      if (!data.result) {
+        toast.error('Failed to load backtest result');
+        return;
+      }
+      setResult(data.result);
+      setLoadedFromHistory(data.metadata || null);
+
+      const p = data.result.params || {};
+      if (p.start_date) setStartDate(String(p.start_date));
+      if (p.end_date) setEndDate(String(p.end_date));
+      if (p.lot_size) setLotSize(Number(p.lot_size));
+      if (p.profit_target_pct) {
+        setProfitTargetPct(Number(p.profit_target_pct));
+        setStrategyTargetActive(true);
+      }
+      if (p.overall_sl_pct) {
+        setOverallSlPct(Number(p.overall_sl_pct));
+        setStrategySlActive(true);
+      }
+      if (p.entry_time) {
+        const parts = String(p.entry_time).split(':');
+        if (parts[0]) setEntryH(parts[0]);
+        if (parts[1]) setEntryM(parts[1]);
+      }
+      if (p.eod_time) {
+        const parts = String(p.eod_time).split(':');
+        if (parts[0]) setExitH(parts[0]);
+        if (parts[1]) setExitM(parts[1]);
+      }
+      if (Array.isArray(p.legs) && p.legs.length > 0) {
+        setLegs(p.legs.map((l: any) => ({
+          option_type: l.option_type || 'CE',
+          position: l.position || 'sell',
+          lots: l.lots || 1,
+          strike: String(l.strike || 'ATM'),
+          strike_type: l.strike_type || 'offset',
+          leg_sl_pct: l.leg_sl_pct || 0,
+          leg_target_pct: l.leg_target_pct || 0,
+          leg_trail_sl_pct: l.leg_trail_sl_pct || 0,
+        })));
+      }
+      setHistoryModalOpen(false);
+      toast.success(`Loaded backtest: ${data.metadata?.name || id}`);
+      setTimeout(() => {
+        resultsRef.current?.scrollIntoView({ behavior: 'smooth' });
+      }, 200);
+    } catch (e) {
+      toast.error(`Error loading backtest: ${e}`);
+    }
+  }
+
+  const filteredHistory = historyList.filter(item => {
+    if (!historySearch.trim()) return true;
+    const query = historySearch.toLowerCase();
+    const nameMatch = (item.name || '').toLowerCase().includes(query);
+    const idMatch = (item.id || '').toLowerCase().includes(query);
+    const tagMatch = (item.tags || []).some(t => t.toLowerCase().includes(query));
+    const dateMatch = `${item.start_date || ''} ${item.end_date || ''}`.toLowerCase().includes(query);
+    return nameMatch || idMatch || tagMatch || dateMatch;
+  });
+
   useEffect(() => {
     return () => {
       if (pollRef.current) clearInterval(pollRef.current);
@@ -579,6 +688,8 @@ export default function OptionsBacktester({
               if (pollRef.current) clearInterval(pollRef.current);
               setLoading(false);
               setResult(sData.result);
+              setLoadedFromHistory(null);
+              fetchHistory();
               setStatusData(null);
               toast.success('Backtest complete!');
               setTimeout(() => {
@@ -1425,13 +1536,25 @@ export default function OptionsBacktester({
             Nifty lot size is fetched live per period from the master contract, not hardcoded (see the Lot Size field under Change Settings).
           </p>
 
-          <div className="flex justify-center mt-2.5">
+          <div className="flex justify-center items-center gap-3 mt-2.5">
             <button
               type="button"
               onClick={() => setSettingsModalOpen(true)}
               className="border border-[#54b4c7] text-[#54b4c7] hover:bg-[#54b4c7]/10 px-3 py-1 rounded text-xs font-semibold flex items-center gap-1.5 transition-colors cursor-pointer shadow-sm bg-oncolor"
             >
               <Settings className="w-3.5 h-3.5" /> Change Settings
+            </button>
+            <button
+              type="button"
+              onClick={() => { setHistoryModalOpen(true); fetchHistory(); }}
+              className="border border-[#54b4c7] bg-[#54b4c7] hover:bg-[#469fb1] text-white px-3.5 py-1 rounded text-xs font-semibold flex items-center gap-1.5 transition-colors cursor-pointer shadow-sm"
+            >
+              <History className="w-3.5 h-3.5" /> Past Backtests
+              {historyList.length > 0 && (
+                <span className="ml-1 px-1.5 py-0.2 bg-white/25 rounded-full text-[10px] font-bold">
+                  {historyList.length}
+                </span>
+              )}
             </button>
           </div>
         </div>
@@ -1480,8 +1603,15 @@ export default function OptionsBacktester({
           </button>
         </div>
 
-        {/* Center: Save Strategy & Share Strategy */}
-        <div className="flex items-center gap-3">
+        {/* Center: Past Runs, Save Strategy & Share Strategy */}
+        <div className="flex items-center gap-2 sm:gap-3 flex-wrap">
+          <button
+            type="button"
+            onClick={() => { setHistoryModalOpen(true); fetchHistory(); }}
+            className="border border-slate-300 bg-oncolor hover:bg-slate-50 text-slate-700 font-semibold text-xs px-3 py-1.5 rounded shadow-sm flex items-center gap-1.5 transition-colors cursor-pointer"
+          >
+            <History className="w-3.5 h-3.5 text-[#54b4c7]" /> Past Runs ({historyList.length})
+          </button>
           <button
             type="button"
             onClick={handleSaveStrategy}
@@ -1522,7 +1652,7 @@ export default function OptionsBacktester({
 
       {/* ── Settings Modal ── */}
       {settingsModalOpen && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-xs p-4">
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-oncolor-dark/70 backdrop-blur-xs p-4">
           <div className="bg-oncolor rounded-xl shadow-2xl border border-slate-200 max-w-lg w-full p-5 text-slate-700 max-h-[90vh] overflow-y-auto">
             <div className="flex items-center justify-between border-b border-slate-200 pb-3 mb-4">
               <h2 className="text-sm font-bold text-slate-800 flex items-center gap-2">
@@ -1672,7 +1802,7 @@ export default function OptionsBacktester({
 
       {/* ── Progress Overlay Modal during Backtest ── */}
       {loading && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-xs p-4">
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-oncolor-dark/70 backdrop-blur-xs p-4">
           <div className="bg-oncolor rounded-2xl shadow-2xl border border-slate-200 p-6 max-w-md w-full text-center">
             <div className="w-12 h-12 rounded-full bg-[#54b4c7]/15 flex items-center justify-center mx-auto mb-4 animate-spin text-[#54b4c7]">
               <RefreshCw className="w-6 h-6" />
@@ -1716,6 +1846,53 @@ export default function OptionsBacktester({
       {/* ── Backtest Results Section ── */}
       {result && s && (
         <div ref={resultsRef} className="w-full max-w-[1550px] mx-auto px-4 mt-8 pt-6 border-t border-slate-300">
+          {/* Loaded from History Banner */}
+          {loadedFromHistory && (
+            <div className="mb-4 bg-teal-50 border border-teal-200 text-teal-900 rounded-xl p-3.5 flex items-center justify-between shadow-xs flex-wrap gap-2">
+              <div className="flex items-center gap-2.5">
+                <div className="w-7 h-7 rounded-lg bg-[#54b4c7]/20 flex items-center justify-center text-[#54b4c7]">
+                  <History className="w-4 h-4" />
+                </div>
+                <div>
+                  <div className="text-xs font-bold text-slate-800 flex items-center gap-2">
+                    <span>Viewing Archived Backtest:</span>
+                    <span className="text-[#2596be]">{loadedFromHistory.name}</span>
+                  </div>
+                  <div className="text-[11px] text-slate-500 font-mono">
+                    ID: {loadedFromHistory.id} &bull; Period: {loadedFromHistory.start_date || '—'} &rarr; {loadedFromHistory.end_date || '—'} &bull; {loadedFromHistory.trades} cycles
+                  </div>
+                </div>
+              </div>
+              <div className="flex items-center gap-2">
+                {loadedFromHistory.has_tearsheet && (
+                  <button
+                    type="button"
+                    onClick={() => setViewingTearsheetId(loadedFromHistory.id)}
+                    className="border border-[#54b4c7] text-[#54b4c7] bg-white hover:bg-teal-50 px-2.5 py-1 rounded text-xs font-semibold flex items-center gap-1 transition-colors cursor-pointer shadow-xs"
+                  >
+                    <FileText className="w-3.5 h-3.5" /> Tearsheet
+                  </button>
+                )}
+                {loadedFromHistory.has_trades_csv && (
+                  <a
+                    href={`/api/backtest/history?id=${encodeURIComponent(loadedFromHistory.id)}&file=csv`}
+                    download
+                    className="border border-slate-300 text-slate-700 bg-white hover:bg-slate-50 px-2.5 py-1 rounded text-xs font-semibold flex items-center gap-1 transition-colors cursor-pointer shadow-xs"
+                  >
+                    <Download className="w-3.5 h-3.5" /> CSV
+                  </a>
+                )}
+                <button
+                  type="button"
+                  onClick={() => setLoadedFromHistory(null)}
+                  className="text-slate-400 hover:text-slate-600 px-1 text-xs"
+                  title="Dismiss banner"
+                >
+                  ✕
+                </button>
+              </div>
+            </div>
+          )}
           <div className="flex items-center justify-between mb-4 flex-wrap gap-2">
             <div>
               <span className="text-[10px] font-bold text-[#54b4c7] uppercase tracking-wider block">Simulation Complete</span>
@@ -2018,6 +2195,232 @@ export default function OptionsBacktester({
             </div>
           </div>
 
+        </div>
+      )}
+
+      {/* ── Past Backtests History Modal ── */}
+      {historyModalOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-oncolor-dark/70 backdrop-blur-xs p-4">
+          <div className="bg-oncolor rounded-2xl shadow-2xl border border-slate-200 max-w-4xl w-full p-5 text-slate-700 max-h-[88vh] flex flex-col">
+            {/* Header */}
+            <div className="flex items-center justify-between border-b border-slate-200 pb-3 mb-3">
+              <div>
+                <h2 className="text-sm font-bold text-slate-800 flex items-center gap-2">
+                  <History className="w-4 h-4 text-[#54b4c7]" /> Past Options Backtests
+                </h2>
+                <p className="text-[11px] text-slate-400 mt-0.5">
+                  Archived simulations stored under <code className="bg-slate-100 px-1 py-0.5 rounded text-[10px] font-mono text-slate-600">debug/backtests/options/</code>
+                </p>
+              </div>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={fetchHistory}
+                  title="Refresh backtest list"
+                  className="p-1.5 text-slate-400 hover:text-slate-600 rounded hover:bg-slate-100 transition-colors cursor-pointer"
+                >
+                  <RefreshCw className={`w-3.5 h-3.5 ${loadingHistory ? 'animate-spin text-[#54b4c7]' : ''}`} />
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setHistoryModalOpen(false)}
+                  className="text-slate-400 hover:text-slate-600 p-1 rounded hover:bg-slate-100 transition-colors cursor-pointer"
+                >
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
+            </div>
+
+            {/* Search Input */}
+            <div className="relative mb-3">
+              <Search className="w-3.5 h-3.5 text-slate-400 absolute left-2.5 top-1/2 -translate-y-1/2 pointer-events-none" />
+              <input
+                type="text"
+                placeholder="Search backtests by strategy name, date, tag (e.g. straddle, iron condor, 2026)..."
+                value={historySearch}
+                onChange={e => setHistorySearch(e.target.value)}
+                className="w-full bg-slate-50 border border-slate-200 rounded-lg pl-8 pr-8 py-1.5 text-xs text-slate-700 focus:outline-none focus:border-[#54b4c7] focus:bg-white transition-colors"
+              />
+              {historySearch && (
+                <button
+                  type="button"
+                  onClick={() => setHistorySearch('')}
+                  className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600 text-xs cursor-pointer"
+                >
+                  ✕
+                </button>
+              )}
+            </div>
+
+            {/* Backtest Cards List */}
+            <div className="overflow-y-auto flex-1 pr-1 space-y-3">
+              {loadingHistory && historyList.length === 0 ? (
+                <div className="py-12 text-center text-xs text-slate-400">
+                  <RefreshCw className="w-6 h-6 animate-spin mx-auto mb-2 text-[#54b4c7]" />
+                  Loading archived backtests…
+                </div>
+              ) : filteredHistory.length === 0 ? (
+                <div className="py-12 text-center text-xs text-slate-400 bg-slate-50 rounded-xl border border-dashed border-slate-200">
+                  {historySearch ? 'No backtests match your search filter.' : 'No saved backtests found in debug/backtests/options/.'}
+                </div>
+              ) : (
+                filteredHistory.map(item => {
+                  const pnl = item.total_pnl ?? 0;
+                  const isProfit = pnl >= 0;
+                  const winRate = item.win_rate ?? 0;
+                  return (
+                    <div
+                      key={item.id}
+                      className="border border-slate-200 rounded-xl p-3.5 bg-oncolor hover:border-[#54b4c7]/60 hover:shadow-xs transition-all text-xs"
+                    >
+                      <div className="flex items-start justify-between gap-3 mb-2">
+                        <div>
+                          <div className="font-bold text-slate-800 text-sm flex items-center gap-2 flex-wrap">
+                            <span>{item.name}</span>
+                            {item.strategy_type && (
+                              <span className="text-[9px] uppercase px-1.5 py-0.5 bg-slate-100 text-slate-600 rounded font-semibold tracking-wider">
+                                {item.strategy_type}
+                              </span>
+                            )}
+                          </div>
+                          <div className="text-[11px] text-slate-400 mt-0.5 font-mono">
+                            {item.start_date || '—'} &rarr; {item.end_date || '—'} &bull; Run: {item.timestamp ? new Date(item.timestamp).toLocaleString('en-IN') : item.id}
+                          </div>
+                        </div>
+
+                        {/* P&L Pill */}
+                        <div className="text-right shrink-0">
+                          <span className={`text-sm font-bold font-mono ${isProfit ? 'text-emerald-600' : 'text-red-600'}`}>
+                            {fmtPnl(pnl)}
+                          </span>
+                          <span className="block text-[10px] text-slate-400">Total P&amp;L</span>
+                        </div>
+                      </div>
+
+                      {/* Metrics strip */}
+                      <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 bg-slate-50/70 border border-slate-100 rounded-lg p-2 mb-3 font-mono text-[11px]">
+                        <div>
+                          <span className="text-[9px] text-slate-400 font-sans block">Win Rate</span>
+                          <span className={`font-semibold ${winRate >= 50 ? 'text-emerald-600' : 'text-red-600'}`}>
+                            {winRate.toFixed(1)}%
+                          </span>
+                        </div>
+                        <div>
+                          <span className="text-[9px] text-slate-400 font-sans block">Max Drawdown</span>
+                          <span className="font-semibold text-amber-600">
+                            ₹{fmt(item.max_drawdown ?? 0)}
+                          </span>
+                        </div>
+                        <div>
+                          <span className="text-[9px] text-slate-400 font-sans block">Total Cycles</span>
+                          <span className="font-semibold text-slate-700">
+                            {item.trades ?? '—'}
+                          </span>
+                        </div>
+                        <div>
+                          <span className="text-[9px] text-slate-400 font-sans block">Folder</span>
+                          <span className="text-[10px] text-slate-500 truncate block" title={item.id}>
+                            {item.id}
+                          </span>
+                        </div>
+                      </div>
+
+                      {/* Tags & Action Buttons */}
+                      <div className="flex items-center justify-between flex-wrap gap-2 pt-1 border-t border-slate-100">
+                        <div className="flex items-center gap-1.5 flex-wrap">
+                          {item.tags?.map(t => (
+                            <span key={t} className="text-[10px] bg-slate-100 text-slate-500 px-1.5 py-0.5 rounded">
+                              #{t}
+                            </span>
+                          ))}
+                        </div>
+
+                        <div className="flex items-center gap-2 ml-auto">
+                          {item.has_tearsheet && (
+                            <button
+                              type="button"
+                              onClick={() => setViewingTearsheetId(item.id)}
+                              className="border border-[#54b4c7] text-[#54b4c7] hover:bg-[#54b4c7]/10 px-2.5 py-1 rounded text-[11px] font-semibold flex items-center gap-1 cursor-pointer transition-colors bg-white"
+                            >
+                              <FileText className="w-3 h-3" /> Tearsheet
+                            </button>
+                          )}
+                          {item.has_trades_csv && (
+                            <a
+                              href={`/api/backtest/history?id=${encodeURIComponent(item.id)}&file=csv`}
+                              download
+                              className="border border-slate-200 text-slate-600 hover:bg-slate-100 px-2.5 py-1 rounded text-[11px] font-semibold flex items-center gap-1 cursor-pointer transition-colors bg-white"
+                            >
+                              <Download className="w-3 h-3" /> CSV
+                            </a>
+                          )}
+                          <button
+                            type="button"
+                            onClick={() => handleLoadHistoryItem(item.id)}
+                            className="bg-[#54b4c7] hover:bg-[#469fb1] text-white px-3 py-1 rounded text-[11px] font-bold shadow-xs cursor-pointer transition-colors flex items-center gap-1"
+                          >
+                            Load Backtest
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })
+              )}
+            </div>
+
+            {/* Footer */}
+            <div className="mt-3 pt-3 border-t border-slate-200 flex justify-between items-center text-[11px] text-slate-400">
+              <span>{historyList.length} backtest{historyList.length === 1 ? '' : 's'} archived in debug/backtests/options/</span>
+              <button
+                type="button"
+                onClick={() => setHistoryModalOpen(false)}
+                className="text-slate-600 hover:text-slate-800 font-semibold px-3 py-1 rounded hover:bg-slate-100 cursor-pointer"
+              >
+                Close
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ── Tearsheet Preview Modal ── */}
+      {viewingTearsheetId && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-oncolor-dark/70 backdrop-blur-xs p-4">
+          <div className="bg-oncolor rounded-2xl shadow-2xl border border-slate-200 max-w-6xl w-full h-[90vh] flex flex-col overflow-hidden">
+            <div className="flex items-center justify-between px-4 py-2.5 border-b border-slate-200 bg-slate-50">
+              <div className="flex items-center gap-2">
+                <FileText className="w-4 h-4 text-[#54b4c7]" />
+                <span className="font-bold text-slate-800 text-xs sm:text-sm">
+                  Interactive Tearsheet: {viewingTearsheetId}
+                </span>
+              </div>
+              <div className="flex items-center gap-3 text-xs">
+                <a
+                  href={`/api/backtest/history?id=${encodeURIComponent(viewingTearsheetId)}&file=tearsheet`}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="text-[#2596be] hover:underline font-semibold flex items-center gap-1"
+                >
+                  <ExternalLink className="w-3.5 h-3.5" /> Open in New Tab
+                </a>
+                <button
+                  type="button"
+                  onClick={() => setViewingTearsheetId(null)}
+                  className="text-slate-400 hover:text-slate-600 p-1 cursor-pointer"
+                >
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
+            </div>
+            <div className="flex-1 bg-white">
+              <iframe
+                src={`/api/backtest/history?id=${encodeURIComponent(viewingTearsheetId)}&file=tearsheet`}
+                className="w-full h-full border-0"
+                title="Tearsheet Preview"
+              />
+            </div>
+          </div>
         </div>
       )}
 

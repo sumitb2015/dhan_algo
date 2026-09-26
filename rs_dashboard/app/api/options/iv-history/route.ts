@@ -3,23 +3,76 @@ import path from 'path';
 import fs from 'fs';
 import { computeRegimeSeries, type RegimeInputPoint } from '@/lib/optionsRegime';
 
-const PROJECT_ROOT = path.resolve(process.cwd(), '..');
-const DEBUG_DIR    = path.join(PROJECT_ROOT, 'debug');
+import { execSync } from 'child_process';
+import { PROJECT_ROOT, PYTHON_EXE } from '@/lib/pyExec';
+
+const DEBUG_DIR = path.join(PROJECT_ROOT, 'debug');
 
 function todayIST(): string {
   const now = new Date(Date.now() + 5.5 * 60 * 60 * 1000);
   return now.toISOString().slice(0, 10);
 }
 
-/** Snapshot dates present on disk, newest first. */
-function listDates(isCrude: boolean): string[] {
-  const prefix = isCrude ? 'crudeoil_oi_snapshots_' : 'iv_snapshots_';
+function getPrefixesForUnderlying(underlying: string): string[] {
+  const u = (underlying || 'NIFTY').toUpperCase();
+  if (u === 'CRUDEOIL') {
+    return ['crudeoil_oi_snapshots_', 'iv_snapshots_CRUDEOIL_'];
+  }
+  if (u === 'CRUDEOILM') {
+    return ['crudeoilm_oi_snapshots_', 'crudeoil_oi_snapshots_', 'iv_snapshots_CRUDEOILM_'];
+  }
+  if (u === 'BANKNIFTY') {
+    return ['iv_snapshots_BANKNIFTY_', 'banknifty_oi_snapshots_'];
+  }
+  if (u === 'SENSEX') {
+    return ['iv_snapshots_SENSEX_', 'sensex_oi_snapshots_'];
+  }
+  if (u === 'NIFTY') {
+    return ['iv_snapshots_NIFTY_', 'iv_snapshots_'];
+  }
+  return [`iv_snapshots_${u}_`];
+}
+
+/** Snapshot dates present on disk for this underlying, newest first. */
+function listDates(underlying: string): string[] {
   if (!fs.existsSync(DEBUG_DIR)) return [];
-  return fs.readdirSync(DEBUG_DIR)
-    .filter(f => f.startsWith(prefix) && f.endsWith('.csv'))
-    .map(f => f.slice(prefix.length, -4))
-    .filter(d => /^\d{4}-\d{2}-\d{2}$/.test(d))
-    .sort((a, b) => b.localeCompare(a));
+  const prefixes = getPrefixesForUnderlying(underlying);
+  const files = fs.readdirSync(DEBUG_DIR);
+  const dates = new Set<string>();
+
+  for (const prefix of prefixes) {
+    for (const f of files) {
+      if (f.startsWith(prefix) && f.endsWith('.csv')) {
+        const d = f.slice(prefix.length, -4);
+        if (/^\d{4}-\d{2}-\d{2}$/.test(d)) {
+          dates.add(d);
+        }
+      }
+    }
+  }
+
+  // Fallback: if no date exists for this specific underlying, offer NIFTY's available dates
+  // so the date picker in IV charts has valid session dates to request.
+  if (dates.size === 0 && underlying.toUpperCase() !== 'NIFTY') {
+    return listDates('NIFTY');
+  }
+
+  return [...dates].sort((a, b) => b.localeCompare(a));
+}
+
+function resolveCsvPath(underlying: string, date: string): string | null {
+  const prefixes = getPrefixesForUnderlying(underlying);
+  for (const prefix of prefixes) {
+    const candidate = path.join(DEBUG_DIR, `${prefix}${date}.csv`);
+    if (fs.existsSync(candidate)) {
+      try {
+        if (fs.statSync(candidate).size > 200) {
+          return candidate;
+        }
+      } catch {}
+    }
+  }
+  return null;
 }
 
 /** Treat 0 / NaN as "not reported" so charts break the line instead of dropping to zero. */
@@ -43,42 +96,46 @@ export async function GET(request: NextRequest) {
   const { searchParams } = new URL(request.url);
   const mode       = searchParams.get('mode') ?? 'iv';           // 'iv' | 'cumulative' | 'all' | 'dates'
   const underlying = (searchParams.get('underlying') ?? 'NIFTY').toUpperCase();
-  const isCrude    = underlying === 'CRUDEOIL';
+  const isCrude    = underlying === 'CRUDEOIL' || underlying === 'CRUDEOILM';
   const strike     = searchParams.get('strike') ? parseInt(searchParams.get('strike')!, 10) : null;
   const defaultWings = isCrude ? 6 : 10;
   const wings      = searchParams.get('wings')  ? parseInt(searchParams.get('wings')!,  10) : defaultWings;
 
-  const availableDates = listDates(isCrude);
+  const availableDates = listDates(underlying);
 
   if (mode === 'dates') {
     return NextResponse.json({ success: true, dates: availableDates, today: todayIST() });
   }
 
   // Fall back to the most recent day on disk when the requested date (default: today)
-  // has no file — the collector may not have run, and an empty page is worse than
-  // the last session's data clearly labelled as such.
-  // Opt-in (`fallback=1`) so the existing cumulative-OI tabs keep their strict
-  // "no data today" behaviour and only the IV Charts page shows last-session data.
+  // has no file.
   const allowFallback = searchParams.get('fallback') === '1';
   const requested = searchParams.get('date') ?? todayIST();
   const date      = availableDates.includes(requested) || !allowFallback
     ? requested
-    : availableDates[0];
+    : (availableDates[0] || requested);
   const isFallback = date !== requested;
 
-  if (!date) {
-    return NextResponse.json(
-      { success: false, error: `No IV snapshot data for ${requested}`, availableDates },
-      { status: 404 },
-    );
+  let csvPath = resolveCsvPath(underlying, date);
+
+  // If CSV does not exist for this underlying, attempt on-demand reconstruction via build_oi_snapshots.py
+  if (!csvPath) {
+    try {
+      const buildScript = path.join(PROJECT_ROOT, 'scripts', 'tools', 'build_oi_snapshots.py');
+      execSync(`"${PYTHON_EXE}" "${buildScript}" --underlying ${underlying} --date ${date} --wings ${wings}`, {
+        timeout: 25000,
+        encoding: 'utf8',
+        stdio: ['pipe', 'pipe', 'pipe'],
+      });
+      csvPath = resolveCsvPath(underlying, date);
+    } catch (buildErr) {
+      console.warn(`[iv-history] On-demand snapshot builder failed for ${underlying} on ${date}:`, buildErr);
+    }
   }
 
-  const csvFile = isCrude ? `crudeoil_oi_snapshots_${date}.csv` : `iv_snapshots_${date}.csv`;
-  const csvPath = path.join(DEBUG_DIR, csvFile);
-
-  if (!fs.existsSync(csvPath)) {
+  if (!csvPath || !fs.existsSync(csvPath)) {
     return NextResponse.json(
-      { success: false, error: `No IV snapshot data for ${date}`, availableDates },
+      { success: false, error: `No IV snapshot data for ${underlying} on ${date}`, availableDates },
       { status: 404 },
     );
   }
@@ -136,7 +193,7 @@ export async function GET(request: NextRequest) {
   }
 
   const firstRow = allRows[0];
-  const strikeStep = isCrude ? 100 : 50;
+  const strikeStep = (underlying === 'BANKNIFTY' || underlying === 'SENSEX' || isCrude) ? 100 : 50;
   // ATM is locked at 9:15 (first snapshot) — the collector records a constant strike set per day
   const atm    = Math.round(firstRow.spot / strikeStep) * strikeStep;
   const expiry = firstRow.expiry;

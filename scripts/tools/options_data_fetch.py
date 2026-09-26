@@ -147,6 +147,19 @@ def main():
             fut_sid = int(fut["SECURITY_ID"])
             chain_symbol = str(fut_sid)
 
+        target_expiry = args.expiry
+        if str(target_expiry).lower() == 'nearest':
+            exp_uid = UNDERLYINGS[under]['chain_id'] if is_index else (fut_sid if is_crude else int(helper.find_equity(under)['SECURITY_ID']))
+            exp_list = helper.get_expiry_list(
+                under_security_id=exp_uid,
+                under_exchange_segment=seg or 'NSE_FNO',
+            )
+            if exp_list:
+                target_expiry = exp_list[0]
+            else:
+                print(json.dumps({'error': f'Failed to resolve nearest expiry for {under}'}))
+                sys.exit(0)
+
         # Empty chain almost always means the Dhan option-chain API rate
         # limit (~1 call/3s per token) was hit — the helper's in-process
         # spacing can't protect across processes. Retry a few times with
@@ -157,7 +170,7 @@ def main():
                 time.sleep(backoff)
             chain = helper.get_option_chain(
                 symbol=chain_symbol,
-                expiry=args.expiry,
+                expiry=target_expiry,
                 exchange_segment=seg,
             )
             if chain:

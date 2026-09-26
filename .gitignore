@@ -92,6 +92,7 @@ temp_data/
 
 # Data and Binary Files
 *.csv
+!debug/backtests/**/*.csv
 *.xlsx
 *.zip
 !stocks_indices_data.zip

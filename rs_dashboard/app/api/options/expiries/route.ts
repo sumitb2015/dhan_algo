@@ -4,7 +4,7 @@ import fs from 'fs';
 import { execFile } from 'child_process';
 import { promisify } from 'util';
 
-import { PROJECT_ROOT, PYTHON_EXE } from '@/lib/pyExec';
+import { PROJECT_ROOT, PYTHON_EXE, dedupe } from '@/lib/pyExec';
 
 const execFileAsync = promisify(execFile);
 
@@ -80,10 +80,12 @@ export async function GET(request: NextRequest) {
   }
 
   try {
-    const { stdout, stderr } = await execFileAsync(
-      PYTHON_EXE,
-      [FETCH_SCRIPT, 'expiries', '--underlying', underlying],
-      { encoding: 'utf8', timeout: 30_000, windowsHide: true },
+    const { stdout, stderr } = await dedupe(`expiries:${cacheKey}`, () =>
+      execFileAsync(
+        PYTHON_EXE,
+        [FETCH_SCRIPT, 'expiries', '--underlying', underlying],
+        { encoding: 'utf8', timeout: 30_000, windowsHide: true },
+      )
     );
 
     // Script prints one JSON line to stdout; Python/DhanHelper logs go to stderr.

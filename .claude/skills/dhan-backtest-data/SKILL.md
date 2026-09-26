@@ -14,7 +14,7 @@ benchmark comparison, realistic fees, plain-language report). Their **data layer
 | `client.history()` via OpenAlgo | no OpenAlgo server, `openalgo` is not installed | `scripts/dhan_data.py` `load_ohlcv()` |
 | `from openalgo import ta` (EMA, RSI, Supertrend, `exrem`) | package not installed | `pandas_ta` (installed) or `lib/intraday_signals.py`; inline `exrem` (below) |
 | yfinance / `^NSEI` benchmark or fallback | not Dhan; breaks the Dhan-only data rule | `benchmark()` (NIFTY 50 from the repo CSV) |
-| `openstatz` tearsheet | not installed | printed stats table + Plotly equity/drawdown (Plotly 6.9 installed) |
+| `openstatz` tearsheet | installed (v0.4.1) | `ostz.dashboard(returns, output="tearsheet.html", open_browser=False)` (self-contained offline interactive HTML) |
 | hard-coded NIFTY `min_size=65`, BANKNIFTY `30` | lot size changed several times; today's lot on old data is wrong | size in lots from a dated table, or `DhanHelper.get_lot_size()` for a live-sized run |
 | outputs into `backtesting/<name>/` | not gitignored, so every run leaves untracked files | keepers go to `scripts/analysis/backtest_<name>.py` (existing convention); scratch stays uncommitted |
 Read the vendor skill for *how* to structure the run; apply this table for *where the data and indicators come from*.
@@ -43,7 +43,7 @@ Same shape the vendor templates expect from OpenAlgo, so their strategy/portfoli
 fetch step. Intervals: `D`, `1m`, `3m`, `5m`, `15m`, `60m`... Bars above 1 m go through `lib.intraday_signals.resample_tf`,
 so backtest bars equal the live strategies' bars. `python dhan_data.py` runs a self-check.
 
-## What data exists (verified 2026-09-21; run `describe()` for the truth)
+## What data exists (verified 2026-09-26; run `describe()` for the truth)
 | Data | Location | Coverage |
 |---|---|---|
 | Index daily | `Historical Data/NIFTY_50_Daily_5Y.csv`, `NIFTY_500_Daily.csv`, `Indices/<NAME>.csv` (BANKNIFTY, FINNIFTY, INDIA_VIX, SENSEX plus 25 broad and sector indices) | NIFTY 2019-01-01 to 2026-09-18 (1901 sessions) |
@@ -51,11 +51,26 @@ so backtest bars equal the live strategies' bars. `python dhan_data.py` runs a s
 | Futures daily / 1-min | `Historical Data/{NIFTY,BANKNIFTY}_Futures_Daily.csv`, `*_Futures_1min_Manual.csv` (has `OI`, `Contract`) | manually maintained; check `describe()` |
 | Index 1-min | `Historical Data/NIFTY_50_1Min_5Y.csv` | 2021-06-21 to 2026-06-18, 1244 sessions |
 | Stock 1-min | `Intraday_Historical_Data/1min/<SYMBOL>.parquet` + `manifest.json` | **Nifty 50 members only, about 4 months**: never call an edge robust on it |
-| Option prices | `Options Data/nifty_options.db`, table `option_prices(expiry, datetime, option_type, strike, strike_relative, open, high, low, close, spot, volume, oi, iv)` | 22.1 M rows, 2020-12-31 to 2026-09-15, 297 expiries |
+| Option prices | `Options Data/nifty_options.db`, table `option_prices(expiry, datetime, option_type, strike, strike_relative, open, high, low, close, spot, volume, oi, iv)` | **22.21 M rows, 7.6 GB**, 2020-12-31 to 2026-09-22, **298 expiries**, 1418 sessions. Covers **NIFTY only**, 21 relative strikes (`ATM`, `ATM±1` to `ATM±10`), 276 absolute strikes (13,100 to 26,850). Mirrored in `Options Data/NIFTY/` (21 folders x 298 CSVs). |
+
 Options research does not go through the loader: use the SQLite table directly and follow `dhan-expired-options-data`;
 `scripts/analysis/backtest_short_straddle.py` and `backtest_rolling_straddle.py` are the reference implementations.
 Refresh data with the scripts under `scripts/downloader/` (`refresh_dashboard_data.py`, `fetch_today_quotes.py`); never
 fetch from a second provider to fill a gap.
+
+## Strategy Backtest Feasibility & Scope Limits
+**Can any strategy be backtested?** No. Backtest feasibility is strictly gated by data availability and contract coverage:
+- **Full Support**:
+  - **Nifty Near-ATM Options Selling / Straddles / Strangles** (`strategies/value_imbalance/`): Tested via `backtest_short_straddle.py` / `backtest_rolling_straddle.py` on 298 expiries (1-min resolution, ATM±10).
+  - **Nifty 500 Positional Momentum / CNC** (`strategies/momentum_investing/`): Tested via `backtest_momentum_portfolio.py` using 500 stock daily CSVs (2019-2026).
+  - **Nifty Index Breakout / Trend / Intraday**: Tested via VectorBT on `Historical Data/NIFTY_50_1Min_5Y.csv` (1244 sessions).
+- **Partial / Restricted Support**:
+  - **Wide-Wing / Deep OTM Options** (e.g. `nifty_volcano_calendar.py`, `nifty_flyagonal.py`): Missing strikes >500 points from ATM (ATM-400 / ATM-800 wings) and far-month expiries (>35 DTE).
+  - **OI Imbalance / PCR Directional** (`strategies/oi_directional/`, `st_oi_bearcall/`): 1-min OI is present, but only across the 21 relative strikes stored (not full-chain PCR).
+  - **Intraday Cash Equity** (`strategies/intraday_equity/`): 1-min stock parquet data covers only ~81 sessions (4 months).
+- **No Support (Missing Data)**:
+  - **BankNifty / Sensex / Stock Options**: Zero expired option contracts in the repo.
+  - **MCX Crude Oil Futures / Options** (`strategies/crudeoil/`): No historical 1-minute MCX candle dataset exists.
 
 ## Traps found in the repo's own data
 - **NIFTY 1-min contains out-of-session bars**: 26,187 pre-open bars (09:00 to 09:14) and 36,811 post-close bars
@@ -109,6 +124,47 @@ print(pf.stats()); print("benchmark return", bh.total_return())
 ```
 Verified in this venv (vectorbt 1.1.0, pandas_ta 0.4.71b0). Run with `venv/bin/python` from the project root.
 
+## Options Backtesting Architecture & Sensitivity Scans
+For multi-leg intraday and positional options strategies, do not use VectorBT. Query the SQLite store directly:
+- **Data Source**: `Options Data/nifty_options.db` (table `option_prices`, 22.2M rows, 298 expiries, 1-min resolution, 21 relative strikes `ATM` and `ATM±1` to `ATM±10`, step 50 pts).
+- **Core Strategy Simulators**:
+  - `scripts/analysis/backtest_straddle_diff_sl_shift.py`: Full simulation of intraday straddles with balanced entry gate (`diff < 10%`), leg SL %, OTM strike shift, combined profit target and stop loss.
+  - `scripts/analysis/run_straddle_scans.py`: Grid scan engine running 5 dimensions of sensitivity:
+    1. **Entry Gate Filter** (`diff_pct` < 5%, 10%, 15%, 20%, raw)
+    2. **Leg SL Tightness** (15%, 20%, 25%, 30%, 40%)
+    3. **Adjustment Architecture** (Shift 1 OTM vs Shift 2 OTM vs Hold Runner vs Close All)
+    4. **Profit Target Barrier** (+10%, +15%, +20%, +30%, EOD only)
+    5. **Entry Timing** (09:20, 09:30, 09:45, 10:00)
+    6. **Day-of-Week & Gamma Risk** (Mon–Fri breakdown)
+  - `scripts/analysis/backtest_short_straddle.py` & `backtest_rolling_straddle.py`: Strike-buffer and delta-proximity rolling straddle engines.
+
+## OpenStatz Tearsheet Reporting
+`openstatz` (v0.4.1) is installed and replaces static reporting with self-contained, interactive offline HTML dashboards:
+```python
+import openstatz as ostz
+
+# 1. Convert trade P&L (₹) to daily percentage returns on deployed capital (e.g. ₹1.5L/lot)
+capital = 150_000.0
+daily_returns = df.set_index("date")["net_inr"] / capital
+daily_returns.name = "Nifty Intraday Straddle"  # Controls the tearsheet <h1> and legend
+
+# 2. Generate the modern interactive dashboard (no server needed, purely offline HTML)
+ostz.dashboard(
+    daily_returns,
+    output="debug/straddle_backtest_tearsheet.html",
+    title="Nifty Straddle Tearsheet",
+    open_browser=False
+)
+```
+
+## Options Strategy Quant Invariants
+Empirical findings verified across 248 sessions of 1-minute historical data and 4,155 real Dhan F&O trades (2025–2026):
+1. **Balanced Entry Gate is Alpha-Critical**: Enforcing `|CE - PE| / max(CE, PE) < 10%` before entering a straddle cuts max drawdown by 52% and boosts Net P&L by +600% vs blind entry at 09:30. Unbalanced entries create persistent one-sided delta drag.
+2. **1-Strike OTM Shift Outperforms Runners and Exits**: When leg SL is hit, shifting 1 strike OTM (+50 pts for CE, -50 pts for PE) halves the max drawdown compared to holding an unhedged runner (-₹21.7k vs -₹58.1k). However, shifting 2+ times flips net P&L negative due to double-churn commission drag.
+3. **SEBI 2025 Tuesday Expiry Rule & DTE Dynamics**: From 2025 onwards, NIFTY weekly contracts expire on **TUESDAYS** (prior to 2025 it was Thursday). Never hardcode expiry days; resolve dynamically via `dte = (expiry_date - trade_date)`. In backtesting, **Tuesday (0-DTE) is profitable (+₹6.4k net)** because accelerated theta decay overcomes friction. In contrast, **Wednesday & Thursday (4–5 DTE) bleed heavily (-₹19.2k combined)** because slow decay on high-premium contracts (~₹200) cannot compensate for 40-pt leg SL hits and high STT.
+4. **Decay Profile Favors EOD Hold**: Capping gains at +20% prematurely clips afternoon theta decay. Holding until 15:15 (while maintaining an adverse -20% combined stop loss) captures significantly higher net decay.
+5. **Dhan F&O Ledger Taxation Invariant**: Naive backtests assuming ₹20 flat fees severely distort reality. In India, STT is **0.10% on option SELL premium turnover**, NSE exchange fee is **0.05% on both BUY/SELL turnover + 18% GST**, and brokerage is **₹20 + 18% GST**. Average friction on Dhan is **~₹50 per executed order**. Any strategy averaging >4 orders/day will bleed net capital unless gross edge exceeds ₹300/day.
+
 ## Before you trust a result
 - [ ] Report `describe()` for every series (window, sessions) and the trade count.
 - [ ] Net and gross of costs, against the NIFTY benchmark.
@@ -123,3 +179,4 @@ Verified in this venv (vectorbt 1.1.0, pandas_ta 0.4.71b0). Run with `venv/bin/p
 `dhan-indicators` (which indicator implementation, warm-up and closed-candle rules), `dhan-expired-options-data` (options
 history), `dhan-new-strategy` (taking a validated idea live), the vendor `vectorbt-expert` rule files for VectorBT mechanics
 (position sizing, stops, walk-forward, robustness), which apply unchanged.
+

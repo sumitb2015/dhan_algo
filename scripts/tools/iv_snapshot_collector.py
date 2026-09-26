@@ -1,16 +1,12 @@
 """
-IV Snapshot Collector — runs from 09:15 to 15:40 IST, polling the NIFTY option chain
-every 30 seconds and writing a full snapshot of ATM±10 strikes to a daily CSV file.
-(F&O closes at 15:40, not 15:30, since SEBI's Close Auction Session pushed the
-derivatives close 10 minutes later — this collector was stopping 10 minutes early.)
-
-The ATM is locked at market open (first poll after 09:15) so the strike list stays
-constant throughout the day, making the CSV suitable for multi-strike IV charts.
+IV Snapshot Collector — runs from 09:15 to 15:40 IST, polling the NIFTY, BANKNIFTY,
+and SENSEX option chains every 30 seconds and writing a full snapshot of ATM±10
+strikes to daily CSV files in debug/.
 
 Usage:
-    python scripts/tools/iv_snapshot_collector.py
-    python scripts/tools/iv_snapshot_collector.py --expiry 2026-07-03
-    python scripts/tools/iv_snapshot_collector.py --dry-run   # prints rows, no file write
+    python scripts/tools/iv_snapshot_collector.py                    # Collects NIFTY, BANKNIFTY, SENSEX
+    python scripts/tools/iv_snapshot_collector.py --underlying NIFTY # Collects only NIFTY
+    python scripts/tools/iv_snapshot_collector.py --dry-run          # prints rows, no file write
 
 Stop gracefully by writing debug/iv_snapshots_stop.trigger, or wait until 15:40.
 """
@@ -39,12 +35,34 @@ logging.basicConfig(
 )
 log = logging.getLogger(__name__)
 
-UNDERLYING_IDS = {'NIFTY': 13, 'BANKNIFTY': 25, 'FINNIFTY': 27}
-STRIKE_STEP = 50
+TARGETS = {
+    'NIFTY': {
+        'spot_id': '13',
+        'seg': 'IDX_I',
+        'step': 50,
+        'chain_id': 13,
+        'chain_seg': 'IDX_I',
+    },
+    'BANKNIFTY': {
+        'spot_id': '25',
+        'seg': 'IDX_I',
+        'step': 100,
+        'chain_id': 25,
+        'chain_seg': 'IDX_I',
+    },
+    'SENSEX': {
+        'spot_id': '51',
+        'seg': 'IDX_I',
+        'step': 100,
+        'chain_id': 1,
+        'chain_seg': 'BSE_FNO',
+    },
+}
+
 ATM_RANGE   = 10          # ATM ± 10 strikes = 21 total
 POLL_SEC    = 30
 MARKET_OPEN = (9, 15)     # HH, MM
-MARKET_CLOSE = (15, 40)   # HH, MM — F&O close post-SEBI-CAS, not the cash segment's 15:30
+MARKET_CLOSE = (15, 40)   # HH, MM — F&O close post-SEBI-CAS
 
 CSV_COLUMNS = [
     'timestamp', 'spot', 'expiry', 'strike',
@@ -74,22 +92,21 @@ def is_after_close(dt: datetime) -> bool:
 
 
 def is_trading_day(d: date) -> bool:
-    """Weekday + NSE holiday check.
-
-    The collector is auto-spawned with the dashboard server every day, including
-    weekends and holidays. Without this gate it still polls the option chain and
-    writes a full 09:15-15:40 CSV of the market's last stale quote (confirmed on
-    2026-08-16/22/23) — junk data indistinguishable from a real session until read.
-    """
     if d.weekday() >= 5:  # 5=Sat, 6=Sun
         return False
     return d.isoformat() not in DhanHelper.NSE_HOLIDAYS
 
 
-def csv_path(today: date) -> str:
+def get_csv_paths(today: date, underlying: str) -> list[str]:
     debug_dir = os.path.join(ROOT, 'debug')
     os.makedirs(debug_dir, exist_ok=True)
-    return os.path.join(debug_dir, f'iv_snapshots_{today.isoformat()}.csv')
+    d_str = today.isoformat()
+    if underlying == 'NIFTY':
+        return [
+            os.path.join(debug_dir, f'iv_snapshots_{d_str}.csv'),
+            os.path.join(debug_dir, f'iv_snapshots_NIFTY_{d_str}.csv'),
+        ]
+    return [os.path.join(debug_dir, f'iv_snapshots_{underlying}_{d_str}.csv')]
 
 
 def stop_trigger_path() -> str:
@@ -97,14 +114,6 @@ def stop_trigger_path() -> str:
 
 
 def extract_side(side: dict) -> dict:
-    """Extract all useful fields from a CE or PE option side dict.
-
-    Dhan's option-chain response has no direct OI-change field — the keys this
-    used to look for ('change_in_open_interest', 'oi_change') don't exist in the
-    actual response, so change_OI was silently blank for every row ever collected.
-    Dhan reports 'oi' (current) and 'previous_oi' (prior day's close OI, per
-    CLAUDE.md) — change is derived from those two.
-    """
     greeks = side.get('greeks', {}) or {}
     oi = side.get('oi', '')
     previous_oi = side.get('previous_oi', '')
@@ -125,7 +134,6 @@ def extract_side(side: dict) -> dict:
 
 
 def build_oc_lookup(oc: dict) -> dict:
-    """Convert the raw oc dict to a float-keyed lookup, handling any numeric string format."""
     lookup = {}
     for k, v in oc.items():
         try:
@@ -135,28 +143,11 @@ def build_oc_lookup(oc: dict) -> dict:
     return lookup
 
 
-def build_rows(ts: str, spot: float, expiry: str, strikes: list, oc: dict,
-               _logged_keys: list = None) -> list:
-    """Build one CSV row per strike from the raw `oc` dict."""
+def build_rows(ts: str, spot: float, expiry: str, strikes: list, oc: dict) -> list:
     oc_lookup = build_oc_lookup(oc)
-
-    # One-time diagnostic: log actual key samples when nothing matches
-    if _logged_keys is not None and not _logged_keys and not oc_lookup:
-        sample = list(oc.keys())[:5]
-        log.warning('OC dict has %d keys but none are numeric. Sample keys: %s', len(oc), sample)
-        _logged_keys.append(True)
-    elif _logged_keys is not None and not _logged_keys and oc_lookup:
-        sample_keys = list(oc.keys())[:5]
-        log.info('OC key format sample (first 5): %s', sample_keys)
-        _logged_keys.append(True)
-
     rows = []
-    missed = []
     for strike in strikes:
-        entry = oc_lookup.get(float(strike))
-        if not entry:
-            missed.append(strike)
-            entry = {}
+        entry = oc_lookup.get(float(strike)) or {}
         ce = extract_side(entry.get('ce') or {})
         pe = extract_side(entry.get('pe') or {})
         row = {
@@ -177,7 +168,7 @@ def build_rows(ts: str, spot: float, expiry: str, strikes: list, oc: dict,
             'CE_vega':      ce['vega'],
             'PE_LTP':       pe['LTP'],
             'PE_IV':        pe['IV'],
-            'PE_OI':        pe['OI'],
+            'PE_OI':        pe['PE_OI'] if 'PE_OI' in pe else pe['OI'],
             'PE_change_OI': pe['change_OI'],
             'PE_volume':    pe['volume'],
             'PE_bid':       pe['bid'],
@@ -188,66 +179,20 @@ def build_rows(ts: str, spot: float, expiry: str, strikes: list, oc: dict,
             'PE_vega':      pe['vega'],
         }
         rows.append(row)
-    if missed:
-        log.warning('Strikes not found in OC response: %d/%d missing', len(missed), len(strikes))
     return rows
 
 
 def rebuild_helper(reason: str):
-    """Re-read access_token.json and rebuild the client.
-
-    The usual cause of a hard failure at 09:15 is a token that expired overnight.
-    It normally gets refreshed shortly after (login.py, or the dashboard's
-    autologin) — re-reading the file lets a running collector pick that up instead
-    of losing the whole session.
-    """
-    log.warning('Re-authenticating after %s', reason)
+    log.info('Attempting to rebuild DhanHelper: %s', reason)
     try:
         dhan = get_dhan_client()
-        if not dhan:
-            log.error('Re-authentication failed — token still unusable')
-            return None
-        return DhanHelper(dhan)
+        if dhan:
+            h = DhanHelper(dhan)
+            log.info('DhanHelper rebuilt successfully')
+            return h
     except Exception as exc:
-        log.error('Re-authentication raised: %s', exc)
-        return None
-
-
-def fetch_with_recovery(fetch, helper, label: str, ignore_market_hours: bool,
-                        max_attempts: int = 400):
-    """Retry `fetch(helper)` until it returns a truthy value or the market closes.
-
-    Returns (result_or_None, helper) — `helper` may be a fresh instance if a
-    re-auth happened. Backoff is 10s for the first three attempts (transient
-    hiccups around the open), 60s after that, with a token refresh every fifth
-    attempt. The previous fixed 5-attempt / 50-second budget discarded entire
-    sessions whenever the token was renewed a few minutes late.
-    """
-    attempt = 0
-    while attempt < max_attempts:
-        result = fetch(helper)
-        if result:
-            if attempt:
-                log.info('%s succeeded on attempt %d', label, attempt + 1)
-            return result, helper
-
-        attempt += 1
-        if not ignore_market_hours and is_after_close(ist_now()):
-            log.error('%s still failing at market close — giving up after %d attempts', label, attempt)
-            return None, helper
-
-        err = getattr(helper, 'last_api_error', None)
-        log.warning('%s attempt %d failed%s', label, attempt, f' — {err}' if err else '')
-
-        if attempt % 5 == 0:
-            fresh = rebuild_helper(f'{label} failed {attempt}x')
-            if fresh:
-                helper = fresh
-
-        time.sleep(10 if attempt <= 3 else 60)
-
-    log.error('%s exhausted %d attempts — giving up', label, max_attempts)
-    return None, helper
+        log.warning('Rebuild attempt failed: %s', exc)
+    return None
 
 
 def write_rows(path: str, rows: list, write_header: bool) -> None:
@@ -260,14 +205,21 @@ def write_rows(path: str, rows: list, write_header: bool) -> None:
 
 
 def main():
-    parser = argparse.ArgumentParser(description='IV Snapshot Collector')
-    parser.add_argument('--underlying', default='NIFTY')
-    parser.add_argument('--expiry',     default='', help='Expiry date YYYY-MM-DD; auto-detects nearest if omitted')
+    parser = argparse.ArgumentParser(description='Multi-Underlying IV Snapshot Collector')
+    parser.add_argument('--underlying', default='ALL', help='NIFTY, BANKNIFTY, SENSEX, or ALL')
+    parser.add_argument('--expiry',     default='', help='Expiry date YYYY-MM-DD; auto-detects if omitted')
     parser.add_argument('--dry-run',    action='store_true', help='Print rows to stdout, do not write CSV')
     parser.add_argument('--ignore-market-hours', action='store_true', help='Ignore market open/close times')
     args = parser.parse_args()
 
-    underlying = args.underlying.upper()
+    req_u = args.underlying.upper()
+    if req_u == 'ALL':
+        active_underlyings = ['NIFTY', 'BANKNIFTY', 'SENSEX']
+    elif req_u in TARGETS:
+        active_underlyings = [req_u]
+    else:
+        log.error('Unsupported underlying: %s', req_u)
+        sys.exit(1)
 
     if not args.ignore_market_hours and not is_trading_day(ist_now().date()):
         log.info('Not a trading day (%s) — exiting without collecting', ist_now().date().isoformat())
@@ -288,7 +240,7 @@ def main():
 
     helper = DhanHelper(dhan)
 
-    # ── Wait for market open ──────────────────────────────────────────
+    # Wait for market open
     if not args.ignore_market_hours:
         while is_before_open(ist_now()):
             now = ist_now()
@@ -296,52 +248,66 @@ def main():
             log.info('Market not open yet — sleeping %d min', wait_mins)
             time.sleep(min(wait_mins * 60, 60))
 
-    # ── Resolve expiry ────────────────────────────────────────────────
-    # Retried until market close: the Dhan API is prone to transient hiccups in
-    # the first minute after the open, and an expired token here used to kill the
-    # whole day's collection since nothing restarts this process.
-    expiry = args.expiry
-    if not expiry:
-        uid = UNDERLYING_IDS.get(underlying)
-        expiries, helper = fetch_with_recovery(
-            lambda h: h.get_expiry_list(under_security_id=uid, under_exchange_segment='IDX_I'),
-            helper, 'Expiry list fetch', args.ignore_market_hours,
-        )
-        if not expiries:
-            log.error('Could not fetch expiry list — check auth token (run login.py)')
-            sys.exit(1)
-        expiry = expiries[0]
-        log.info('Auto-selected expiry: %s', expiry)
+    # Resolve expiries, spots, and strikes for each active underlying
+    today = date.today()
+    underlying_states = {}
 
-    # ── Lock ATM from market-open spot ───────────────────────────────
-    spot, helper = fetch_with_recovery(
-        lambda h: h.get_ltp(underlying, exchange='IDX_I', instrument='INDEX') or 0,
-        helper, f'Spot price fetch ({underlying})', args.ignore_market_hours,
-    )
-    if not spot or spot <= 0:
-        log.error('Could not fetch spot price for %s — check auth token (run login.py)', underlying)
+    for u in active_underlyings:
+        cfg = TARGETS[u]
+        # Resolve expiry
+        exp = args.expiry if (len(active_underlyings) == 1 and args.expiry) else None
+        if not exp:
+            try:
+                exps = helper.get_expiry_list(under_security_id=cfg['chain_id'], under_exchange_segment=cfg['chain_seg'])
+                exp = exps[0] if exps else None
+            except Exception as e:
+                log.error('Failed to get expiry for %s: %s', u, e)
+                exp = None
+
+        if not exp:
+            log.warning('Skipping %s due to missing expiry', u)
+            continue
+
+        # Spot & ATM
+        try:
+            spot = helper.get_ltp(cfg['spot_id'], exchange='IDX_I', instrument='INDEX') or 0.0
+        except Exception as e:
+            log.error('Failed to get spot for %s: %s', u, e)
+            spot = 0.0
+
+        if not spot or spot <= 0:
+            log.warning('Skipping %s due to zero spot price', u)
+            continue
+
+        step = cfg['step']
+        atm = int(round(spot / step) * step)
+        strikes = [atm + i * step for i in range(-ATM_RANGE, ATM_RANGE + 1)]
+
+        out_paths = get_csv_paths(today, u)
+        need_header = any(not os.path.exists(p) or os.path.getsize(p) == 0 for p in out_paths)
+
+        underlying_states[u] = {
+            'cfg': cfg,
+            'expiry': exp,
+            'spot': spot,
+            'last_good_spot': spot,
+            'atm': atm,
+            'strikes': strikes,
+            'out_paths': out_paths,
+            'need_header': need_header,
+        }
+        log.info('[%s] Spot=%.2f  ATM=%d  strikes=%d–%d  expiry=%s',
+                 u, spot, atm, strikes[0], strikes[-1], exp)
+
+    if not underlying_states:
+        log.error('No underlying could be initialized — exiting')
         sys.exit(1)
 
-    atm     = round(spot / STRIKE_STEP) * STRIKE_STEP
-    strikes = [atm + i * STRIKE_STEP for i in range(-ATM_RANGE, ATM_RANGE + 1)]
-    log.info('Spot=%.2f  ATM=%d  strikes=%d–%d  expiry=%s',
-             spot, atm, strikes[0], strikes[-1], expiry)
+    log.info('Starting snapshot collection for %s', list(underlying_states.keys()))
 
-    # ── CSV setup ─────────────────────────────────────────────────────
-    today    = date.today()
-    out_path = csv_path(today)
-    need_header = not os.path.exists(out_path) or os.path.getsize(out_path) == 0
-
-    if not args.dry_run:
-        log.info('Writing to %s', out_path)
-    else:
-        log.info('DRY RUN — output goes to stdout')
-
-    # ── Main loop ─────────────────────────────────────────────────────
+    # Main collection loop
     iteration = 0
     consecutive_failures = 0
-    _key_format_logged = []  # sentinel: log oc key format exactly once
-    last_good_spot = spot    # updated on every successful LTP fetch — see below
 
     while True:
         now = ist_now()
@@ -357,57 +323,45 @@ def main():
 
         ts = now.strftime('%Y-%m-%d %H:%M:%S')
 
-        try:
-            # Refresh spot each iteration (but keep ATM locked). A transient
-            # get_ltp() hiccup used to fall back to the market-open `spot` —
-            # producing a one-tick spike back to the 09:15 price every time
-            # the LTP call blipped, hours into the session. Fall back to the
-            # last successfully-fetched live price instead.
-            fetched_spot = helper.get_ltp(underlying, exchange='IDX_I', instrument='INDEX')
-            if fetched_spot:
-                last_good_spot = fetched_spot
-            live_spot = last_good_spot
-            chain_data = helper.get_option_chain(underlying, expiry, exchange_segment='IDX_I')
-            oc = chain_data.get('oc', {}) if chain_data else {}
+        for u, state in underlying_states.items():
+            cfg = state['cfg']
+            try:
+                # Refresh spot
+                fetched_spot = helper.get_ltp(cfg['spot_id'], exchange='IDX_I', instrument='INDEX')
+                if fetched_spot and fetched_spot > 0:
+                    state['last_good_spot'] = fetched_spot
+                live_spot = state['last_good_spot']
 
-            if not oc:
-                consecutive_failures += 1
-                err = getattr(helper, 'last_api_error', None)
-                log.warning('[%s] Empty option chain response — skipping (failure #%d)%s',
-                            ts, consecutive_failures, f' — {err}' if err else '')
-            else:
-                consecutive_failures = 0
-                rows = build_rows(ts, live_spot, expiry, strikes, oc,
-                                  _logged_keys=_key_format_logged)
-                if args.dry_run:
-                    for row in rows:
-                        print(row)
+                chain_data = helper.get_option_chain(cfg['chain_id'], state['expiry'], exchange_segment=cfg['chain_seg'])
+                oc = chain_data.get('oc', {}) if chain_data else {}
+
+                if not oc:
+                    log.warning('[%s %s] Empty option chain response', u, ts)
                 else:
-                    write_rows(out_path, rows, write_header=(need_header and iteration == 0))
-                    need_header = False
-                log.info('[%s] Wrote %d rows (spot=%.2f)', ts, len(rows), live_spot)
+                    rows = build_rows(ts, live_spot, state['expiry'], state['strikes'], oc)
+                    if args.dry_run:
+                        log.info('[%s %s] DRY RUN: %d rows (spot=%.2f)', u, ts, len(rows), live_spot)
+                    else:
+                        for out_path in state['out_paths']:
+                            write_rows(out_path, rows, write_header=(state['need_header'] and iteration == 0))
+                        state['need_header'] = False
+                        log.info('[%s %s] Wrote %d rows (spot=%.2f)', u, ts, len(rows), live_spot)
 
-        except Exception as exc:
-            consecutive_failures += 1
-            log.error('[%s] Error: %s', ts, exc)
+                # Pace between underlying chain calls to avoid 429
+                time.sleep(1.0)
+
+            except Exception as exc:
+                consecutive_failures += 1
+                log.error('[%s %s] Error: %s', u, ts, exc)
 
         iteration += 1
 
-        # A sustained run of failures mid-session is usually the token going bad
-        # rather than the market — re-auth every 10 consecutive failures.
-        if consecutive_failures and consecutive_failures % 10 == 0:
+        if consecutive_failures and consecutive_failures % 15 == 0:
             fresh = rebuild_helper(f'{consecutive_failures} consecutive poll failures')
             if fresh:
                 helper = fresh
 
-        # Exponential backoff on consecutive failures: 30s → 60s → 120s → 300s (cap)
-        if consecutive_failures > 0:
-            backoff = min(30 * (2 ** (consecutive_failures - 1)), 300)
-            if consecutive_failures == 1 or consecutive_failures % 5 == 0:
-                log.info('Backing off %ds after %d consecutive failures', backoff, consecutive_failures)
-            time.sleep(backoff)
-        else:
-            time.sleep(POLL_SEC)
+        time.sleep(max(5, POLL_SEC - (len(underlying_states) * 1.5)))
 
 
 if __name__ == '__main__':

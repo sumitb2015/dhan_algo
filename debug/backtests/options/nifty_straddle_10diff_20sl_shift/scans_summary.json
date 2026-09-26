@@ -1,0 +1,265 @@
+{
+  "entry_diff": [
+    {
+      "trades": 217,
+      "win_pct": 58.1,
+      "pts": 732.9,
+      "gross": 47639.0,
+      "net": 19834.0,
+      "max_dd": -19962.0,
+      "sharpe": 0.72,
+      "profit_factor": 1.12,
+      "param": "< 5.0%"
+    },
+    {
+      "trades": 231,
+      "win_pct": 62.3,
+      "pts": 838.1,
+      "gross": 54478.0,
+      "net": 24738.0,
+      "max_dd": -21698.0,
+      "sharpe": 0.83,
+      "profit_factor": 1.15,
+      "param": "< 10.0%"
+    },
+    {
+      "trades": 237,
+      "win_pct": 59.1,
+      "pts": 453.2,
+      "gross": 29460.0,
+      "net": -1093.0,
+      "max_dd": -41519.0,
+      "sharpe": -0.03,
+      "profit_factor": 0.99,
+      "param": "< 15.0%"
+    },
+    {
+      "trades": 240,
+      "win_pct": 60.0,
+      "pts": 579.9,
+      "gross": 37695.0,
+      "net": 6696.0,
+      "max_dd": -36097.0,
+      "sharpe": 0.21,
+      "profit_factor": 1.03,
+      "param": "< 20.0%"
+    },
+    {
+      "trades": 248,
+      "win_pct": 59.3,
+      "pts": 548.2,
+      "gross": 35631.0,
+      "net": 3493.0,
+      "max_dd": -45950.0,
+      "sharpe": 0.1,
+      "profit_factor": 1.02,
+      "param": "No Gate"
+    }
+  ],
+  "leg_sl": [
+    {
+      "trades": 231,
+      "win_pct": 60.6,
+      "pts": 552.1,
+      "gross": 35884.0,
+      "net": 4518.0,
+      "max_dd": -40206.0,
+      "sharpe": 0.14,
+      "profit_factor": 1.02,
+      "param": "15.0%"
+    },
+    {
+      "trades": 231,
+      "win_pct": 62.3,
+      "pts": 838.1,
+      "gross": 54478.0,
+      "net": 24738.0,
+      "max_dd": -21698.0,
+      "sharpe": 0.83,
+      "profit_factor": 1.15,
+      "param": "20.0%"
+    },
+    {
+      "trades": 231,
+      "win_pct": 61.0,
+      "pts": 968.9,
+      "gross": 62979.0,
+      "net": 34451.0,
+      "max_dd": -19522.0,
+      "sharpe": 1.27,
+      "profit_factor": 1.22,
+      "param": "25.0%"
+    },
+    {
+      "trades": 231,
+      "win_pct": 58.9,
+      "pts": -197.1,
+      "gross": -12811.0,
+      "net": -40800.0,
+      "max_dd": -62889.0,
+      "sharpe": -1.29,
+      "profit_factor": 0.81,
+      "param": "30.0%"
+    },
+    {
+      "trades": 231,
+      "win_pct": 63.2,
+      "pts": 439.1,
+      "gross": 28544.0,
+      "net": 2681.0,
+      "max_dd": -51123.0,
+      "sharpe": 0.09,
+      "profit_factor": 1.01,
+      "param": "40.0%"
+    }
+  ],
+  "adjustment_mode": [
+    {
+      "trades": 231,
+      "win_pct": 62.3,
+      "pts": 838.1,
+      "gross": 54478.0,
+      "net": 24738.0,
+      "max_dd": -21698.0,
+      "sharpe": 0.83,
+      "profit_factor": 1.15,
+      "param": "shift_1_otm"
+    },
+    {
+      "trades": 231,
+      "win_pct": 55.0,
+      "pts": 472.3,
+      "gross": 30698.0,
+      "net": 11933.0,
+      "max_dd": -58106.0,
+      "sharpe": 0.33,
+      "profit_factor": 1.05,
+      "param": "no_shift"
+    },
+    {
+      "trades": 231,
+      "win_pct": 36.4,
+      "pts": 203.4,
+      "gross": 13222.0,
+      "net": -5329.0,
+      "max_dd": -14997.0,
+      "sharpe": -0.49,
+      "profit_factor": 0.92,
+      "param": "close_all"
+    },
+    {
+      "trades": 231,
+      "win_pct": 61.5,
+      "pts": 544.7,
+      "gross": 35406.0,
+      "net": -1095.0,
+      "max_dd": -46656.0,
+      "sharpe": -0.04,
+      "profit_factor": 0.99,
+      "param": "shift_2_otm"
+    }
+  ],
+  "combined_target": [
+    {
+      "trades": 231,
+      "win_pct": 68.4,
+      "pts": 928.2,
+      "gross": 60330.0,
+      "net": 31380.0,
+      "max_dd": -14759.0,
+      "sharpe": 1.22,
+      "profit_factor": 1.23,
+      "param": "+10.0%"
+    },
+    {
+      "trades": 231,
+      "win_pct": 64.5,
+      "pts": 860.5,
+      "gross": 55932.0,
+      "net": 26359.0,
+      "max_dd": -16840.0,
+      "sharpe": 0.92,
+      "profit_factor": 1.16,
+      "param": "+15.0%"
+    },
+    {
+      "trades": 231,
+      "win_pct": 62.3,
+      "pts": 838.1,
+      "gross": 54478.0,
+      "net": 24738.0,
+      "max_dd": -21698.0,
+      "sharpe": 0.83,
+      "profit_factor": 1.15,
+      "param": "+20.0%"
+    },
+    {
+      "trades": 231,
+      "win_pct": 61.9,
+      "pts": 1013.1,
+      "gross": 65852.0,
+      "net": 35979.0,
+      "max_dd": -24770.0,
+      "sharpe": 1.16,
+      "profit_factor": 1.21,
+      "param": "+30.0%"
+    },
+    {
+      "trades": 231,
+      "win_pct": 61.9,
+      "pts": 1390.3,
+      "gross": 90371.0,
+      "net": 60444.0,
+      "max_dd": -19707.0,
+      "sharpe": 1.72,
+      "profit_factor": 1.35,
+      "param": "EOD Only"
+    }
+  ],
+  "entry_time": [
+    {
+      "trades": 231,
+      "win_pct": 57.6,
+      "pts": 394.5,
+      "gross": 25645.0,
+      "net": -4066.0,
+      "max_dd": -43311.0,
+      "sharpe": -0.13,
+      "profit_factor": 0.98,
+      "param": "09:20"
+    },
+    {
+      "trades": 231,
+      "win_pct": 62.3,
+      "pts": 838.1,
+      "gross": 54478.0,
+      "net": 24738.0,
+      "max_dd": -21698.0,
+      "sharpe": 0.83,
+      "profit_factor": 1.15,
+      "param": "09:30"
+    },
+    {
+      "trades": 231,
+      "win_pct": 60.6,
+      "pts": 794.9,
+      "gross": 51667.0,
+      "net": 22253.0,
+      "max_dd": -24846.0,
+      "sharpe": 0.78,
+      "profit_factor": 1.14,
+      "param": "09:45"
+    },
+    {
+      "trades": 229,
+      "win_pct": 60.3,
+      "pts": 287.8,
+      "gross": 18708.0,
+      "net": -10224.0,
+      "max_dd": -44333.0,
+      "sharpe": -0.36,
+      "profit_factor": 0.94,
+      "param": "10:00"
+    }
+  ]
+}

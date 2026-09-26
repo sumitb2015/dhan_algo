@@ -20,6 +20,7 @@ const CACHE_TTL = 60_000;
 
 export async function GET(request: NextRequest) {
   const { searchParams } = new URL(request.url);
+  const underlying = (searchParams.get('underlying') ?? 'NIFTY').toUpperCase();
   const expiry   = searchParams.get('expiry')   ?? '';
   const strike   = searchParams.get('strike')   ?? '';
   const interval = searchParams.get('interval') ?? '1';
@@ -28,7 +29,7 @@ export async function GET(request: NextRequest) {
     return NextResponse.json({ success: false, error: 'expiry and strike required' }, { status: 400 });
   }
 
-  const cacheKey = `${expiry}:${strike}:${interval}`;
+  const cacheKey = `${underlying}:${expiry}:${strike}:${interval}`;
   const hit = cache.get(cacheKey);
   if (hit && Date.now() - hit.ts < CACHE_TTL) {
     return NextResponse.json({
@@ -50,7 +51,7 @@ export async function GET(request: NextRequest) {
         is_today?: boolean;
         ce_prev_close?: number;
         pe_prev_close?: number;
-      }>(CANDLE_SCRIPT, ['--expiry', expiry, '--strike', strike, '--interval', interval], 45_000)
+      }>(CANDLE_SCRIPT, ['--underlying', underlying, '--expiry', expiry, '--strike', strike, '--interval', interval], 45_000)
     );
 
     if (parsed.error) {

@@ -55,6 +55,11 @@ export async function GET() {
   let result = null;
   if (status.done) {
     result = readResult();
+    if (result && !status.archived) {
+      autoArchiveBacktest(result);
+      status.archived = true;
+      try { fs.writeFileSync(STATUS_FILE, JSON.stringify(status)); } catch { /* ignore */ }
+    }
   }
 
   return NextResponse.json({
@@ -62,6 +67,50 @@ export async function GET() {
     running: Boolean(running),
     result,
   });
+}
+
+function autoArchiveBacktest(result: Record<string, unknown>) {
+  try {
+    const BACKTESTS_DIR = path.join(DEBUG_DIR, 'backtests', 'options');
+    if (!fs.existsSync(BACKTESTS_DIR)) {
+      fs.mkdirSync(BACKTESTS_DIR, { recursive: true });
+    }
+    const params = (result.params as Record<string, unknown>) || {};
+    const summary = (result.summary as Record<string, unknown>) || {};
+    const timestamp = new Date().toISOString();
+    const dateStr = timestamp.slice(0, 10).replace(/-/g, '');
+    const timeStr = timestamp.slice(11, 19).replace(/:/g, '');
+    const rawName = String(params.strategy_name || 'backtest');
+    const slug = rawName.toLowerCase().replace(/[^a-z0-9]+/g, '_').slice(0, 30);
+    const id = `${slug}_${dateStr}_${timeStr}`;
+
+    const destDir = path.join(BACKTESTS_DIR, id);
+    if (!fs.existsSync(destDir)) {
+      fs.mkdirSync(destDir, { recursive: true });
+    }
+
+    fs.writeFileSync(path.join(destDir, 'result.json'), JSON.stringify(result, null, 2));
+
+    const metadata = {
+      id,
+      name: params.strategy_name || id,
+      timestamp,
+      strategy_type: params.strategy_type || 'intraday',
+      start_date: params.start_date,
+      end_date: params.end_date,
+      trades: summary.traded_cycles ?? summary.total_cycles ?? 0,
+      win_rate: summary.win_rate ?? 0,
+      total_pnl: summary.total_pnl ?? 0,
+      max_drawdown: summary.max_drawdown ?? 0,
+      has_tearsheet: false,
+      has_trades_csv: false,
+      tags: [params.strategy_type || 'intraday', 'options'],
+    };
+
+    fs.writeFileSync(path.join(destDir, 'metadata.json'), JSON.stringify(metadata, null, 2));
+  } catch (e) {
+    console.error('Failed to auto-archive backtest:', e);
+  }
 }
 
 export async function POST(req: NextRequest) {
@@ -146,6 +195,7 @@ export async function POST(req: NextRequest) {
         windowsHide: true,
       });
       const result = JSON.parse(stdout);
+      autoArchiveBacktest(result);
       return NextResponse.json(result);
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);

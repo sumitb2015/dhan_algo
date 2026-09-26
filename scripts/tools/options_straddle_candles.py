@@ -24,7 +24,20 @@ from login import get_dhan_client
 from lib.dhan_helper import DhanHelper
 
 
-def _fetch_leg(helper, sid: str, from_date: str, to_date: str, interval: str, retries: int = 2):
+UNDERLYINGS_MAP = {
+    'NIFTY':      {'exchange': 'NSE', 'instrument': 'OPTIDX', 'segment': 'NSE_FNO'},
+    'BANKNIFTY':  {'exchange': 'NSE', 'instrument': 'OPTIDX', 'segment': 'NSE_FNO'},
+    'FINNIFTY':   {'exchange': 'NSE', 'instrument': 'OPTIDX', 'segment': 'NSE_FNO'},
+    'MIDCPNIFTY': {'exchange': 'NSE', 'instrument': 'OPTIDX', 'segment': 'NSE_FNO'},
+    'SENSEX':     {'exchange': 'BSE', 'instrument': 'OPTIDX', 'segment': 'BSE_FNO'},
+    'BANKEX':     {'exchange': 'BSE', 'instrument': 'OPTIDX', 'segment': 'BSE_FNO'},
+    'CRUDEOIL':   {'exchange': 'MCX', 'instrument': 'OPTFUT', 'segment': 'MCX_COMM'},
+    'CRUDEOILM':  {'exchange': 'MCX', 'instrument': 'OPTFUT', 'segment': 'MCX_COMM'},
+}
+
+
+def _fetch_leg(helper, sid: str, from_date: str, to_date: str, interval: str,
+               exchange_segment: str = 'NSE_FNO', instrument_type: str = 'OPTIDX', retries: int = 2):
     """Fetch intraday candles for one leg over a date range, returning the DataFrame.
 
     The Multi-Strike tab fires several strikes concurrently, each spawning its
@@ -39,8 +52,8 @@ def _fetch_leg(helper, sid: str, from_date: str, to_date: str, interval: str, re
     for attempt in range(retries + 1):
         df = helper.get_intraday_minute_data(
             security_id=sid,
-            exchange_segment='NSE_FNO',
-            instrument_type='OPTIDX',
+            exchange_segment=exchange_segment,
+            instrument_type=instrument_type,
             interval=interval,
             from_date=from_date,
             to_date=to_date,
@@ -81,7 +94,8 @@ def _filter_last_day(df) -> tuple:
     return df[mask].copy(), str(last_day)
 
 
-def _find_last_trading_day(helper, ce_sid: str, pe_sid: str, interval: str, lookback: int = 7):
+def _find_last_trading_day(helper, ce_sid: str, pe_sid: str, interval: str,
+                           exchange_segment: str = 'NSE_FNO', instrument_type: str = 'OPTIDX', lookback: int = 7):
     """
     Fetch a date range in TWO API calls (not one per day) and slice out the
     last trading day.  Returns (ce_df, pe_df, date_used, ce_all, pe_all).
@@ -90,8 +104,10 @@ def _find_last_trading_day(helper, ce_sid: str, pe_sid: str, interval: str, look
     from_date  = (today - timedelta(days=lookback)).strftime('%Y-%m-%d')
     to_date    = today.strftime('%Y-%m-%d')
 
-    ce_all = _fetch_leg(helper, ce_sid, from_date, to_date, interval)
-    pe_all = _fetch_leg(helper, pe_sid, from_date, to_date, interval)
+    ce_all = _fetch_leg(helper, ce_sid, from_date, to_date, interval,
+                        exchange_segment=exchange_segment, instrument_type=instrument_type)
+    pe_all = _fetch_leg(helper, pe_sid, from_date, to_date, interval,
+                        exchange_segment=exchange_segment, instrument_type=instrument_type)
 
     ce_df, ce_date = _filter_last_day(ce_all)
     pe_df, pe_date = _filter_last_day(pe_all)
@@ -142,11 +158,15 @@ def _prev_day_close_from_intraday(raw_df, today_date_str: str) -> float:
 
 def main():
     parser = argparse.ArgumentParser()
+    parser.add_argument('--underlying', default='NIFTY', help='Underlying symbol (default NIFTY)')
     parser.add_argument('--expiry',   required=True, help='Expiry date YYYY-MM-DD')
     parser.add_argument('--strike',   required=True, type=float, help='Strike price')
     parser.add_argument('--interval', default='1', choices=['1', '5', '15'],
                         help='Candle interval in minutes (default 1)')
     args = parser.parse_args()
+
+    underlying = args.underlying.upper()
+    cfg = UNDERLYINGS_MAP.get(underlying, {'exchange': 'NSE', 'instrument': 'OPTIDX', 'segment': 'NSE_FNO'})
 
     today = date.today().strftime('%Y-%m-%d')
 
@@ -158,11 +178,13 @@ def main():
     helper = DhanHelper(dhan)
 
     # Resolve CE and PE security IDs from master list
-    ce_opt = helper.find_option('NIFTY', args.expiry, args.strike, 'CE')
-    pe_opt = helper.find_option('NIFTY', args.expiry, args.strike, 'PE')
+    ce_opt = helper.find_option(underlying, args.expiry, args.strike, 'CE',
+                                exchange=cfg['exchange'], instrument=cfg['instrument'])
+    pe_opt = helper.find_option(underlying, args.expiry, args.strike, 'PE',
+                                exchange=cfg['exchange'], instrument=cfg['instrument'])
 
     if ce_opt is None or pe_opt is None:
-        print(json.dumps({'error': f'Could not resolve NIFTY {int(args.strike)} CE/PE for expiry {args.expiry}'}))
+        print(json.dumps({'error': f'Could not resolve {underlying} {int(args.strike)} CE/PE for expiry {args.expiry}'}))
         return
 
     ce_sid = str(int(ce_opt['SECURITY_ID']))
@@ -170,7 +192,9 @@ def main():
 
     # Fetch candles: try today first, fall back up to 5 calendar days to find the last trading day
     ce_df, pe_df, data_date, ce_all, pe_all = _find_last_trading_day(
-        helper, ce_sid, pe_sid, args.interval, lookback=5
+        helper, ce_sid, pe_sid, args.interval,
+        exchange_segment=cfg['segment'], instrument_type=cfg['instrument'],
+        lookback=5
     )
 
     if ce_df is None or (ce_df.empty and pe_df.empty):
@@ -264,6 +288,7 @@ def main():
     pe_prev = _prev_day_close_from_intraday(pe_all, data_date)
 
     print(json.dumps({
+        'underlying': underlying,
         'candles':   rows,
         'strike':    int(args.strike),
         'expiry':    args.expiry,

@@ -23,7 +23,7 @@ interface ChainResponse {
 }
 
 const cache = new Map<string, CacheEntry>();
-const CACHE_TTL = 10_000; // 10 s
+const CACHE_TTL = 30_000; // 30 s — protects against Dhan account-wide rate limit (1 call/3s)
 
 // Brokers whose strike list comes from a locally cached instrument master.
 // Both caches share a row shape, so one branch serves them. Prices are always
@@ -41,11 +41,24 @@ const QUOTE_SOURCE: Record<string, string> = { zerodha: 'zerodha', kotak: 'dhan'
 export async function GET(request: NextRequest) {
   const { searchParams } = new URL(request.url);
   const underlying = (searchParams.get('underlying') ?? 'NIFTY').toUpperCase();
-  const expiry     = searchParams.get('expiry') ?? '';
+  let expiry       = searchParams.get('expiry') ?? '';
   const broker     = (searchParams.get('broker') ?? 'dhan').toLowerCase();
 
   if (!expiry) {
     return NextResponse.json({ success: false, error: 'expiry required' }, { status: 400 });
+  }
+
+  // Resolve 'nearest' to actual date if known from live feed to ensure cache hits across callers
+  if (expiry.toLowerCase() === 'nearest') {
+    try {
+      const qFile = path.join(PROJECT_ROOT, 'debug', 'live_options_quotes_dhan.json');
+      if (fs.existsSync(qFile)) {
+        const q = JSON.parse(fs.readFileSync(qFile, 'utf8'));
+        if (q.underlying === underlying && q.expiry) {
+          expiry = q.expiry;
+        }
+      }
+    } catch {}
   }
 
   const supported = CACHE_BROKERS[broker];

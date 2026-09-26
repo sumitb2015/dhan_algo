@@ -65,6 +65,11 @@ this before touching any stage of downloader → SQLite → API route → chart.
    route typed but never read, while `StrikeHistoryTab.tsx` independently
    recomputed the same numbers client-side — the server computation was dead code,
    removed in `1bcbf9c`. Decide once which side owns a derived stat.
+7. **Instrument and strike boundaries are strictly bounded.** The store (`Options Data/nifty_options.db`)
+   contains **only NIFTY 50** options (298 expiries, 22.21M rows, 2020-12-31 to 2026-09-22) across
+   21 relative strikes (`ATM` and `ATM±1` to `ATM±10`, step 50 pts, spanning ±500 pts from ATM).
+   There is zero data for BANKNIFTY, SENSEX, or equities, and no deep OTM/ITM strikes beyond ±10.
+   Consumers and backtest scripts must not assume full-chain or multi-index coverage.
 
 ## Common Mistakes
 - Fixing a date-window bug in the downloader without checking whether the tracked
@@ -73,3 +78,6 @@ this before touching any stage of downloader → SQLite → API route → chart.
   bare `.toLocaleString()` / arithmetic op on the frontend instead of a null guard.
 - Computing a "total"/"cumulative" stat against a filtered/windowed array when the
   label implies a lifetime quantity.
+- Querying for BANKNIFTY or far OTM strikes (>500 pts) from `nifty_options.db` and
+  assuming an empty result is an API failure rather than a structural data boundary.
+

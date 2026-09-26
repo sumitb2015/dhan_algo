@@ -141,7 +141,22 @@ export default function MultiLegOptionChainModal({
     if (isOpen) setSelUnderlying(underlying);
   }, [isOpen, underlying]);
 
-  const expiries = expiriesMap[selUnderlying] ?? [];
+  const [localExpiries, setLocalExpiries] = useState<Record<string, string[]>>({});
+  const expiries = expiriesMap[selUnderlying] ?? localExpiries[selUnderlying] ?? [];
+
+  // If selected underlying has no expiries in expiriesMap, fetch on-demand
+  useEffect(() => {
+    if (!isOpen) return;
+    if (expiries.length > 0) return;
+    fetch(`/api/options/expiries?underlying=${selUnderlying}&broker=${broker || 'dhan'}`)
+      .then(r => r.json())
+      .then((j: { success: boolean; data?: string[] }) => {
+        if (j.success && j.data?.length) {
+          setLocalExpiries(prev => ({ ...prev, [selUnderlying]: j.data! }));
+        }
+      })
+      .catch(() => {});
+  }, [isOpen, selUnderlying, expiries.length, broker]);
 
   useEffect(() => {
     if ((!expiry || (expiries.length > 0 && !expiries.includes(expiry))) && expiries.length > 0) {
@@ -149,8 +164,11 @@ export default function MultiLegOptionChainModal({
     }
   }, [expiries, expiry]);
 
+  const requestSeq = useRef(0);
+
   const fetchChain = useCallback(async () => {
     if (!expiry) return;
+    const seq = ++requestSeq.current;
     setLoading(true);
     try {
       const url = `/api/options/chain?underlying=${selUnderlying}&expiry=${expiry}${broker ? `&broker=${broker}` : ''}`;
@@ -160,6 +178,8 @@ export default function MultiLegOptionChainModal({
         data?: { chain: { oc?: Record<string, RawChainEntry> }; spot: number };
         error?: string;
       };
+
+      if (seq !== requestSeq.current) return;
 
       if (!json.success || !json.data?.chain?.oc) {
         setError(json.error ?? 'No chain data');
@@ -171,7 +191,7 @@ export default function MultiLegOptionChainModal({
         setError('Spot price unavailable — showing last known chain');
         return;
       }
-      const step = STRIKE_STEP[selUnderlying];
+      const step = STRIKE_STEP[selUnderlying] || 50;
       const atmStrike = Math.round(spotPrice / step) * step;
       const oc = json.data.chain.oc;
       if (!oc || Object.keys(oc).length === 0) {

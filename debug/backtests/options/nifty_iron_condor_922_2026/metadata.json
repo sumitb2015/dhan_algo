@@ -1,0 +1,18 @@
+{
+  "id": "nifty_iron_condor_922_2026",
+  "name": "Nifty Iron Condor (9:22 Entry, 2026-08 to 2026-09)",
+  "timestamp": "2026-09-25T14:30:00",
+  "strategy_type": "intraday",
+  "start_date": "2026-08-17",
+  "end_date": "2026-09-17",
+  "trades": 21,
+  "win_rate": 66.7,
+  "total_pnl": -6724.56,
+  "max_drawdown": 10851.3,
+  "has_tearsheet": false,
+  "tags": [
+    "iron_condor",
+    "delta_neutral",
+    "intraday"
+  ]
+}

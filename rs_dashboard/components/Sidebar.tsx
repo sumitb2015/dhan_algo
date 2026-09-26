@@ -97,6 +97,7 @@ const NAV_GROUPS = [
     label: 'Trading',
     icon: Zap,
     links: [
+      { href: '/scalp-cockpit', label: 'Scalp Cockpit', desc: 'Tight multi-window scalping desk: Cumulative OI, Strikes OI slider, India VIX, collapsible Multi-Leg Focus trade desk & analysis windows' },
       { href: '/options-monitor', label: 'Options Monitor', desc: 'Real-time positions & Greeks risk monitor with live 2D payoff curve, strike clearance & hotkey execution [C, P, H, W, X, ESC]' },
       { href: '/cyber-scalper', label: 'Cyber Scalper (9/20 EMA)', desc: 'Futuristic 9/20 EMA & VWAP scalping terminal with live difference bias & big buy/sell order execution' },
       { href: '/ultimate-scanner', label: 'Ultimate Scanner', desc: 'Process-driven Nifty & Sensex option chain scanner, watchlist & multi-leg execution' },
