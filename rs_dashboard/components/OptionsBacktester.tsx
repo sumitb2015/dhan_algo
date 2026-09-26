@@ -508,6 +508,11 @@ export default function OptionsBacktester({
   const [exitM, setExitM] = useState('15');
   const [exitS, setExitS] = useState('00');
 
+  const [noReentryAfterActive, setNoReentryAfterActive] = useState(false);
+  const [noReentryH, setNoReentryH] = useState('15');
+  const [noReentryM, setNoReentryM] = useState('15');
+  const [noReentryS, setNoReentryS] = useState('00');
+
   // Strategy target & SL
   const [strategyTargetActive, setStrategyTargetActive] = useState(false);
   const [profitTargetType, setProfitTargetType] = useState<'mtm' | 'pct'>('mtm');
@@ -678,6 +683,14 @@ export default function OptionsBacktester({
         const parts = String(p.eod_time).split(':');
         if (parts[0]) setExitH(parts[0]);
         if (parts[1]) setExitM(parts[1]);
+      }
+      if (p.no_reentry_after_time) {
+        setNoReentryAfterActive(true);
+        const parts = String(p.no_reentry_after_time).split(':');
+        if (parts[0]) setNoReentryH(parts[0]);
+        if (parts[1]) setNoReentryM(parts[1]);
+      } else {
+        setNoReentryAfterActive(false);
       }
       if (Array.isArray(p.legs) && p.legs.length > 0) {
         setLegs(p.legs.map((l: any) => ({
@@ -922,6 +935,7 @@ export default function OptionsBacktester({
           square_off_mode: squareOffMode,
           max_diff_pct: priceDiffActive ? maxDiffPct : 0,
           entry_cutoff_time: entryCutoffTime,
+          no_reentry_after_time: noReentryAfterActive ? `${String(noReentryH).padStart(2, '0')}:${String(noReentryM).padStart(2, '0')}` : undefined,
         }),
       });
 
@@ -1014,6 +1028,8 @@ export default function OptionsBacktester({
       lockProfitMin,
       trailProfitStep,
       trailProfitBy,
+      noReentryAfterActive,
+      noReentryTime: `${noReentryH}:${noReentryM}`,
     };
     try {
       localStorage.setItem('stockmock_saved_strategy', JSON.stringify(payload));
@@ -1938,19 +1954,31 @@ export default function OptionsBacktester({
           })}
         </div>
 
-        {/* No ReEntry toggle on right — moot while Re-Entry/Re-Execute and Journey
-             above are themselves disabled */}
+        {/* No ReEntry toggle on right */}
         <div className="flex justify-end items-center gap-2 py-1 text-xs text-zinc-400">
-          <label className="flex items-center gap-2 cursor-not-allowed opacity-50" title="Depends on Re-Entry/Re-Execute and Journey, both not implemented yet">
-            <div className="w-7 h-4 bg-zinc-700 rounded-full relative p-0.5">
-              <div className="w-3 h-3 rounded-full bg-zinc-400 shadow-xs" />
+          <label
+            onClick={() => setNoReentryAfterActive(prev => !prev)}
+            className="flex items-center gap-2 cursor-pointer select-none"
+          >
+            <div
+              className={`w-7 h-4 rounded-full relative p-0.5 transition-colors ${
+                noReentryAfterActive ? 'bg-teal-500' : 'bg-zinc-700'
+              }`}
+            >
+              <div
+                className={`w-3 h-3 rounded-full bg-white shadow-xs transition-transform ${
+                  noReentryAfterActive ? 'translate-x-3' : 'translate-x-0'
+                }`}
+              />
             </div>
-            <span>No ReEntry/ReExecute/Journey After</span>
+            <span className={noReentryAfterActive ? 'text-teal-400 font-semibold' : 'text-zinc-300'}>
+              No ReEntry/ReExecute/Journey After
+            </span>
           </label>
         </div>
 
         {/* ── Timing & Strategy Controls Section ── */}
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-8 my-4 pt-2">
+        <div className={`grid grid-cols-1 ${noReentryAfterActive ? 'md:grid-cols-3' : 'md:grid-cols-2'} gap-8 my-4 pt-2`}>
           {/* Left Column: Range Breakout & Entry Time */}
           <div className="flex flex-col gap-2">
             <label className="flex items-center gap-1.5 text-xs text-zinc-400 cursor-not-allowed opacity-50" title="Not implemented yet — needs opening-range computation + breakout-triggered entry">
@@ -2170,6 +2198,49 @@ export default function OptionsBacktester({
               </button>
             )}
           </div>
+
+          {/* Column 3: No ReEntry / ReExecute / Journey After */}
+          {noReentryAfterActive && (
+            <div className="flex flex-col gap-2">
+              <span className="text-xs font-semibold text-zinc-300">
+                No ReEntry/ReExecute/Journey After
+              </span>
+
+              <div className="flex items-center gap-1 text-xs text-zinc-400 mt-1">
+                <select
+                  value={noReentryH}
+                  onChange={e => setNoReentryH(e.target.value)}
+                  className="bg-zinc-800 border border-zinc-700 rounded px-2 py-1 text-xs text-zinc-100 font-medium focus:outline-hidden"
+                >
+                  {['9', '10', '11', '12', '13', '14', '15'].map(h => (
+                    <option key={h} value={h}>{h}</option>
+                  ))}
+                </select>
+                <span>:</span>
+                <select
+                  value={noReentryM}
+                  onChange={e => setNoReentryM(e.target.value)}
+                  className="bg-zinc-800 border border-zinc-700 rounded px-2 py-1 text-xs text-zinc-100 font-medium focus:outline-hidden"
+                >
+                  {Array.from({ length: 60 }, (_, i) => String(i).padStart(2, '0')).map(m => (
+                    <option key={m} value={m}>{m}</option>
+                  ))}
+                </select>
+                <span>:</span>
+                <select
+                  value={noReentryS}
+                  onChange={e => setNoReentryS(e.target.value)}
+                  disabled
+                  title="Option data is 1-minute resolution — seconds aren't meaningful"
+                  className="bg-zinc-800/50 border border-zinc-700 rounded px-2 py-1 text-xs text-zinc-500 font-medium cursor-not-allowed"
+                >
+                  {['00', '15', '30', '45'].map(s => (
+                    <option key={s} value={s}>{s}</option>
+                  ))}
+                </select>
+              </div>
+            </div>
+          )}
         </div>
 
         {/* Protect The Profits Section */}

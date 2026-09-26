@@ -516,6 +516,7 @@ def _simulate_one_day(
     lock_profit_min: float = 0.0,
     trail_profit_step: float = 0.0,
     trail_profit_by: float = 0.0,
+    no_reentry_after_time: Optional[time] = None,
 ) -> dict:
     """Simulate one intraday trade over day_bars. Returns state dict."""
     if profit_target_val == 0.0 and profit_target_pct > 0:
@@ -836,6 +837,14 @@ def _simulate_one_day(
                     state.is_entered = True
                     state.is_waiting = False
 
+        # --- Check No ReEntry Cutoff Time ---
+        can_reenter = (no_reentry_after_time is None) or (t < no_reentry_after_time)
+        if not can_reenter:
+            for state in leg_states:
+                if state.waiting_reentry_cost:
+                    state.waiting_reentry_cost = False
+                    state.exit_reason = "NO_REENTRY_CUTOFF"
+
         # --- Check waiting for Re-Entry at Cost ---
         for i, (leg, state) in enumerate(zip(leg_configs, leg_states)):
             if state.waiting_reentry_cost:
@@ -885,8 +894,8 @@ def _simulate_one_day(
                     state.struck_sl = True
                     state.exit_dt = bar.dt
 
-                    rex_sl_max = getattr(leg, "re_execute_sl_count", 0) if square_off_mode != "all_legs" else 0
-                    re_sl_max = getattr(leg, "re_entry_sl_count", 0) if square_off_mode != "all_legs" else 0
+                    rex_sl_max = getattr(leg, "re_execute_sl_count", 0) if (square_off_mode != "all_legs" and can_reenter) else 0
+                    re_sl_max = getattr(leg, "re_entry_sl_count", 0) if (square_off_mode != "all_legs" and can_reenter) else 0
 
                     if state.current_re_execute_sl < rex_sl_max:
                         closed_legs.append({
@@ -973,8 +982,8 @@ def _simulate_one_day(
                     state.struck_target = True
                     state.exit_dt = bar.dt
 
-                    rex_tp_max = getattr(leg, "re_execute_tp_count", 0) if square_off_mode != "all_legs" else 0
-                    re_tp_max = getattr(leg, "re_entry_tp_count", 0) if square_off_mode != "all_legs" else 0
+                    rex_tp_max = getattr(leg, "re_execute_tp_count", 0) if (square_off_mode != "all_legs" and can_reenter) else 0
+                    re_tp_max = getattr(leg, "re_entry_tp_count", 0) if (square_off_mode != "all_legs" and can_reenter) else 0
 
                     if state.current_re_execute_tp < rex_tp_max:
                         closed_legs.append({
@@ -1384,8 +1393,9 @@ def run_backtest(leg_configs: List[LegConfig], cycles: List[ExpiryCycle],
                  protect_profit_mode: Optional[str] = None,
                  lock_profit_reaches: float = 0.0,
                  lock_profit_min: float = 0.0,
-                 trail_profit_step: float = 0.0,
-                 trail_profit_by: float = 0.0):
+                  trail_profit_step: float = 0.0,
+                  trail_profit_by: float = 0.0,
+                  no_reentry_after_time_str: Optional[str] = None):
     """
     strategy_type:
       "intraday"   — one trade per trading day (AlgoTest Intraday mode)
@@ -1397,6 +1407,7 @@ def run_backtest(leg_configs: List[LegConfig], cycles: List[ExpiryCycle],
     entry_time = datetime.strptime(entry_time_str, "%H:%M").time()
     eod_time   = datetime.strptime(eod_time_str,   "%H:%M").time()
     entry_cutoff_time = datetime.strptime(entry_cutoff_time_str, "%H:%M").time() if entry_cutoff_time_str else None
+    no_reentry_after_time = datetime.strptime(no_reentry_after_time_str, "%H:%M").time() if no_reentry_after_time_str else None
     # Adverse slippage: sell at lower price, buy at higher price
     slip_sell_entry = 1 - slippage_pct / 100
     slip_buy_entry  = 1 + slippage_pct / 100
@@ -1432,6 +1443,7 @@ def run_backtest(leg_configs: List[LegConfig], cycles: List[ExpiryCycle],
         lock_profit_min=lock_profit_min,
         trail_profit_step=trail_profit_step,
         trail_profit_by=trail_profit_by,
+        no_reentry_after_time=no_reentry_after_time,
     )
 
     trade_results = []
@@ -1889,6 +1901,8 @@ def main():
                         help="Max CE/PE price difference %% threshold for entry (0 = disabled)")
     parser.add_argument("--entry-cutoff-time",  default="15:00",
                         help="Latest time to wait for balanced entry (default: 15:00)")
+    parser.add_argument("--no-reentry-after-time", default=None,
+                        help="Cutoff time after which no Re-Entry/Re-Execute takes place (e.g. 15:15)")
     parser.add_argument("--status-file",        default=None)
     parser.add_argument("--output-file",        default=None)
     args = parser.parse_args()
@@ -1945,37 +1959,39 @@ def main():
         lock_profit_min=args.lock_profit_min,
         trail_profit_step=args.trail_profit_step,
         trail_profit_by=args.trail_profit_by,
+        no_reentry_after_time_str=args.no_reentry_after_time,
     )
     result["params"] = {
-        "start_date":          args.start_date,
-        "end_date":            args.end_date,
-        "lot_size":            args.lot_size,
-        "entry_time":          args.entry_time,
-        "eod_time":            args.eod_time,
-        "profit_target_pct":   args.profit_target_pct,
-        "overall_sl_pct":      args.overall_sl_pct,
-        "profit_target_val":   args.profit_target_val,
-        "profit_target_type":  args.profit_target_type,
-        "overall_sl_val":      args.overall_sl_val,
-        "overall_sl_type":     args.overall_sl_type,
-        "protect_profit_mode": args.protect_profit_mode,
-        "lock_profit_reaches": args.lock_profit_reaches,
-        "lock_profit_min":     args.lock_profit_min,
-        "trail_profit_step":   args.trail_profit_step,
-        "trail_profit_by":     args.trail_profit_by,
-        "commission_per_lot":  args.commission_per_lot,
-        "slippage_pct":        args.slippage_pct,
-        "strategy_type":       args.strategy_type,
-        "legs":                legs_raw,
-        "adjustment_mode":     args.adjustment_mode,
-        "roll_buffer":         args.roll_buffer,
-        "roll_type":           args.roll_type,
-        "max_rolls":           args.max_rolls,
-        "scalp_floor_pct":     args.scalp_floor_pct,
-        "trail_sl_pct":        args.trail_sl_pct,
-        "square_off_mode":     args.square_off_mode,
-        "max_diff_pct":        args.max_diff_pct,
-        "entry_cutoff_time":   args.entry_cutoff_time,
+        "start_date":            args.start_date,
+        "end_date":              args.end_date,
+        "lot_size":              args.lot_size,
+        "entry_time":            args.entry_time,
+        "eod_time":              args.eod_time,
+        "profit_target_pct":     args.profit_target_pct,
+        "overall_sl_pct":        args.overall_sl_pct,
+        "profit_target_val":     args.profit_target_val,
+        "profit_target_type":    args.profit_target_type,
+        "overall_sl_val":        args.overall_sl_val,
+        "overall_sl_type":       args.overall_sl_type,
+        "protect_profit_mode":   args.protect_profit_mode,
+        "lock_profit_reaches":   args.lock_profit_reaches,
+        "lock_profit_min":       args.lock_profit_min,
+        "trail_profit_step":     args.trail_profit_step,
+        "trail_profit_by":       args.trail_profit_by,
+        "no_reentry_after_time": args.no_reentry_after_time,
+        "commission_per_lot":    args.commission_per_lot,
+        "slippage_pct":          args.slippage_pct,
+        "strategy_type":         args.strategy_type,
+        "legs":                  legs_raw,
+        "adjustment_mode":       args.adjustment_mode,
+        "roll_buffer":           args.roll_buffer,
+        "roll_type":             args.roll_type,
+        "max_rolls":             args.max_rolls,
+        "scalp_floor_pct":       args.scalp_floor_pct,
+        "trail_sl_pct":          args.trail_sl_pct,
+        "square_off_mode":       args.square_off_mode,
+        "max_diff_pct":          args.max_diff_pct,
+        "entry_cutoff_time":     args.entry_cutoff_time,
     }
     if db_conn:
         db_conn.close()
