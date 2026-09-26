@@ -504,6 +504,21 @@ export default function OptionsBacktester({
   const [entryM, setEntryM] = useState('22');
   const [entryS, setEntryS] = useState('00');
 
+  const [rangeBreakoutActive, setRangeBreakoutActive] = useState(false);
+  const [rangeUntilH, setRangeUntilH] = useState('9');
+  const [rangeUntilM, setRangeUntilM] = useState('31');
+  const [rangeUntilS, setRangeUntilS] = useState('00');
+
+  const getRangeDescription = () => {
+    const startH = entryH;
+    const startM = entryM;
+    const untilTotalMin = parseInt(rangeUntilH, 10) * 60 + parseInt(rangeUntilM, 10);
+    const closeTotalMin = Math.max(0, untilTotalMin - 1);
+    const closeH = Math.floor(closeTotalMin / 60);
+    const closeM = closeTotalMin % 60;
+    return `High & Low of the Range will be considered between ${startH}:${String(startM).padStart(2, '0')} open and ${closeH}:${String(closeM).padStart(2, '0')} closing time.`;
+  };
+
   const [exitH, setExitH] = useState('15');
   const [exitM, setExitM] = useState('15');
   const [exitS, setExitS] = useState('00');
@@ -678,6 +693,16 @@ export default function OptionsBacktester({
         const parts = String(p.entry_time).split(':');
         if (parts[0]) setEntryH(parts[0]);
         if (parts[1]) setEntryM(parts[1]);
+      }
+      if (p.range_breakout) {
+        setRangeBreakoutActive(true);
+        if (p.range_until_time) {
+          const parts = String(p.range_until_time).split(':');
+          if (parts[0]) setRangeUntilH(parts[0]);
+          if (parts[1]) setRangeUntilM(parts[1]);
+        }
+      } else {
+        setRangeBreakoutActive(false);
       }
       if (p.eod_time) {
         const parts = String(p.eod_time).split(':');
@@ -936,6 +961,8 @@ export default function OptionsBacktester({
           max_diff_pct: priceDiffActive ? maxDiffPct : 0,
           entry_cutoff_time: entryCutoffTime,
           no_reentry_after_time: noReentryAfterActive ? `${String(noReentryH).padStart(2, '0')}:${String(noReentryM).padStart(2, '0')}` : undefined,
+          range_breakout: rangeBreakoutActive,
+          range_until_time: rangeBreakoutActive ? `${String(rangeUntilH).padStart(2, '0')}:${String(rangeUntilM).padStart(2, '0')}` : undefined,
         }),
       });
 
@@ -1030,6 +1057,8 @@ export default function OptionsBacktester({
       trailProfitBy,
       noReentryAfterActive,
       noReentryTime: `${noReentryH}:${noReentryM}`,
+      rangeBreakoutActive,
+      rangeUntilTime: `${rangeUntilH}:${rangeUntilM}`,
     };
     try {
       localStorage.setItem('stockmock_saved_strategy', JSON.stringify(payload));
@@ -1981,10 +2010,17 @@ export default function OptionsBacktester({
         <div className={`grid grid-cols-1 ${noReentryAfterActive ? 'md:grid-cols-3' : 'md:grid-cols-2'} gap-8 my-4 pt-2`}>
           {/* Left Column: Range Breakout & Entry Time */}
           <div className="flex flex-col gap-2">
-            <label className="flex items-center gap-1.5 text-xs text-zinc-400 cursor-not-allowed opacity-50" title="Not implemented yet — needs opening-range computation + breakout-triggered entry">
-              <input type="checkbox" disabled className="w-3.5 h-3.5 rounded" />
-              <span>Range Breakout</span>
-              <Info className="w-3 h-3 text-zinc-500" />
+            <label className="flex items-center gap-1.5 text-xs cursor-pointer select-none">
+              <input
+                type="checkbox"
+                checked={rangeBreakoutActive}
+                onChange={e => setRangeBreakoutActive(e.target.checked)}
+                className="w-3.5 h-3.5 rounded accent-teal-500 cursor-pointer"
+              />
+              <span className={rangeBreakoutActive ? 'text-teal-400 font-semibold' : 'text-zinc-300'}>Range Breakout</span>
+              <span title="Tracks High and Low of underlying spot during the range observation window, enters on breakout">
+                <Info className="w-3 h-3 text-zinc-500" />
+              </span>
             </label>
 
             <div className="flex items-center gap-2 text-xs text-zinc-400 mt-1">
@@ -2023,6 +2059,56 @@ export default function OptionsBacktester({
                 </select>
               </div>
             </div>
+
+            {rangeBreakoutActive && (
+              <div className="flex flex-col gap-1.5 mt-0.5">
+                <div className="flex items-center text-xs text-zinc-400">
+                  <span className="w-20"></span>
+                  <div className="w-[146px] text-center font-semibold text-zinc-400 text-xs">
+                    Until
+                  </div>
+                </div>
+                <div className="flex items-center gap-2 text-xs text-zinc-400">
+                  <span className="w-20"></span>
+                  <div className="flex items-center gap-1">
+                    <select
+                      value={rangeUntilH}
+                      onChange={e => setRangeUntilH(e.target.value)}
+                      className="bg-zinc-800 border border-zinc-700 rounded px-2 py-1 text-xs text-zinc-100 font-medium focus:outline-hidden"
+                    >
+                      {['9', '10', '11', '12', '13', '14', '15'].map(h => (
+                        <option key={h} value={h}>{h}</option>
+                      ))}
+                    </select>
+                    <span>:</span>
+                    <select
+                      value={rangeUntilM}
+                      onChange={e => setRangeUntilM(e.target.value)}
+                      className="bg-zinc-800 border border-zinc-700 rounded px-2 py-1 text-xs text-zinc-100 font-medium focus:outline-hidden"
+                    >
+                      {Array.from({ length: 60 }, (_, i) => String(i).padStart(2, '0')).map(m => (
+                        <option key={m} value={m}>{m}</option>
+                      ))}
+                    </select>
+                    <span>:</span>
+                    <select
+                      value={rangeUntilS}
+                      onChange={e => setRangeUntilS(e.target.value)}
+                      disabled
+                      title="Option data is 1-minute resolution — seconds aren't meaningful"
+                      className="bg-zinc-800/50 border border-zinc-700 rounded px-2 py-1 text-xs text-zinc-500 font-medium cursor-not-allowed"
+                    >
+                      {['00', '15', '30', '45'].map(s => (
+                        <option key={s} value={s}>{s}</option>
+                      ))}
+                    </select>
+                  </div>
+                </div>
+                <p className="text-[11px] text-zinc-400 leading-snug mt-1 max-w-sm">
+                  {getRangeDescription()}
+                </p>
+              </div>
+            )}
 
             {/* Strategy Target Profit */}
             {strategyTargetActive ? (

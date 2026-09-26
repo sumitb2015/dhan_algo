@@ -517,6 +517,8 @@ def _simulate_one_day(
     trail_profit_step: float = 0.0,
     trail_profit_by: float = 0.0,
     no_reentry_after_time: Optional[time] = None,
+    range_breakout: bool = False,
+    range_until_time: Optional[time] = None,
 ) -> dict:
     """Simulate one intraday trade over day_bars. Returns state dict."""
     if profit_target_val == 0.0 and profit_target_pct > 0:
@@ -538,6 +540,9 @@ def _simulate_one_day(
     exit_dt = None
     exit_reason = "NO_ENTRY"
     entry_spot = 0.0
+    range_high = float("-inf")
+    range_low = float("inf")
+    range_ready = False
 
     # Fast O(1) lookup of available strikes by datetime
     strike_by_dt: Dict[datetime, List[Tuple[str, float, float, float, float, float]]] = defaultdict(list)
@@ -695,15 +700,31 @@ def _simulate_one_day(
             if t >= eod_time:
                 continue
 
-            entry_spot_ref = prev_bar.spot if prev_bar else bar.spot
+            # Range Breakout observation & trigger check
+            if range_breakout and range_until_time:
+                if t < range_until_time:
+                    range_high = max(range_high, bar.spot)
+                    range_low = min(range_low, bar.spot)
+                    range_ready = True
+                    continue
+                # t >= range_until_time: check if spot broke out of range
+                if range_ready:
+                    if not (bar.spot > range_high or bar.spot < range_low):
+                        continue
+
+            if range_breakout:
+                entry_spot_ref = bar.spot
+                ref_bar = bar
+            else:
+                entry_spot_ref = prev_bar.spot if prev_bar else bar.spot
+                ref_bar = prev_bar if prev_bar else bar
             atm_strike = round(entry_spot_ref / STRIKE_STEP) * STRIKE_STEP
-            ref_bar = prev_bar if prev_bar else bar
             
             # Fetch all available option prices for the entry time boundary
             available_strikes_and_prices = []
             if strike_lookup:
                 for opt, stk, o, h, l, c in strike_by_dt.get(ref_bar.dt, []):
-                    price = c if prev_bar else o
+                    price = c if (prev_bar and not range_breakout) else (c if range_breakout else o)
                     available_strikes_and_prices.append((opt, stk, price))
                         
             candidate_states = [LegState() for _ in leg_configs]
@@ -714,18 +735,18 @@ def _simulate_one_day(
                 )
                 
                 # Fetch baseline reference price for resolved strike
-                if prev_bar:
+                if not range_breakout and prev_bar:
                     _, _, _, leg_close = _get_leg_prices(
                         prev_bar.dt, leg.option_type, state.strike, prev_bar.legs[i],
                         prev_bar.spot, days_to_expiry, strike_lookup
                     )
                     raw_price = leg_close
                 else:
-                    leg_open, _, _, _ = _get_leg_prices(
+                    leg_open, _, _, leg_close = _get_leg_prices(
                         bar.dt, leg.option_type, state.strike, bar.legs[i],
                         bar.spot, days_to_expiry, strike_lookup
                     )
-                    raw_price = leg_open
+                    raw_price = leg_close if range_breakout else leg_open
                 state.base_ref_price = raw_price
                 state.entry_price = raw_price * slip
 
@@ -1395,7 +1416,9 @@ def run_backtest(leg_configs: List[LegConfig], cycles: List[ExpiryCycle],
                  lock_profit_min: float = 0.0,
                   trail_profit_step: float = 0.0,
                   trail_profit_by: float = 0.0,
-                  no_reentry_after_time_str: Optional[str] = None):
+                  no_reentry_after_time_str: Optional[str] = None,
+                  range_breakout: bool = False,
+                  range_until_time_str: Optional[str] = "09:31"):
     """
     strategy_type:
       "intraday"   — one trade per trading day (AlgoTest Intraday mode)
@@ -1408,6 +1431,7 @@ def run_backtest(leg_configs: List[LegConfig], cycles: List[ExpiryCycle],
     eod_time   = datetime.strptime(eod_time_str,   "%H:%M").time()
     entry_cutoff_time = datetime.strptime(entry_cutoff_time_str, "%H:%M").time() if entry_cutoff_time_str else None
     no_reentry_after_time = datetime.strptime(no_reentry_after_time_str, "%H:%M").time() if no_reentry_after_time_str else None
+    range_until_time = datetime.strptime(range_until_time_str, "%H:%M").time() if (range_breakout and range_until_time_str) else None
     # Adverse slippage: sell at lower price, buy at higher price
     slip_sell_entry = 1 - slippage_pct / 100
     slip_buy_entry  = 1 + slippage_pct / 100
@@ -1444,6 +1468,8 @@ def run_backtest(leg_configs: List[LegConfig], cycles: List[ExpiryCycle],
         trail_profit_step=trail_profit_step,
         trail_profit_by=trail_profit_by,
         no_reentry_after_time=no_reentry_after_time,
+        range_breakout=range_breakout,
+        range_until_time=range_until_time,
     )
 
     trade_results = []
@@ -1903,6 +1929,10 @@ def main():
                         help="Latest time to wait for balanced entry (default: 15:00)")
     parser.add_argument("--no-reentry-after-time", default=None,
                         help="Cutoff time after which no Re-Entry/Re-Execute takes place (e.g. 15:15)")
+    parser.add_argument("--range-breakout",     action="store_true", default=False,
+                        help="Enable Range Breakout entry")
+    parser.add_argument("--range-until-time",   default="09:31",
+                        help="Range Breakout observation window end time (default: 09:31)")
     parser.add_argument("--status-file",        default=None)
     parser.add_argument("--output-file",        default=None)
     args = parser.parse_args()
@@ -1960,6 +1990,8 @@ def main():
         trail_profit_step=args.trail_profit_step,
         trail_profit_by=args.trail_profit_by,
         no_reentry_after_time_str=args.no_reentry_after_time,
+        range_breakout=args.range_breakout,
+        range_until_time_str=args.range_until_time,
     )
     result["params"] = {
         "start_date":            args.start_date,
@@ -1979,6 +2011,8 @@ def main():
         "trail_profit_step":     args.trail_profit_step,
         "trail_profit_by":       args.trail_profit_by,
         "no_reentry_after_time": args.no_reentry_after_time,
+        "range_breakout":        args.range_breakout,
+        "range_until_time":      args.range_until_time,
         "commission_per_lot":    args.commission_per_lot,
         "slippage_pct":          args.slippage_pct,
         "strategy_type":         args.strategy_type,

@@ -205,6 +205,7 @@ export async function POST(req: NextRequest) {
     '--max-diff-pct',       String(body.max_diff_pct        ?? 0),
     '--entry-cutoff-time',  String(body.entry_cutoff_time   ?? '15:00'),
     ...(body.no_reentry_after_time ? ['--no-reentry-after-time', String(body.no_reentry_after_time)] : []),
+    ...(body.range_breakout ? ['--range-breakout', '--range-until-time', String(body.range_until_time ?? '09:31')] : []),
     '--status-file',        STATUS_FILE,
     '--output-file',        RESULT_FILE,
   ];
