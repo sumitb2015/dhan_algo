@@ -49,7 +49,8 @@ class LegConfig:
     leg_sl_pct: float       # 0 = disabled
     leg_target_pct: float = 0.0  # 0 = disabled
     leg_trail_sl_pct: float = 0.0  # 0 = disabled — see the trailing-SL block below for the activation rule
-    strike_type: str = "offset"  # "offset", "atm_percent", "closest_premium", "straddle_width", or "closest_delta"
+    strike_type: str = "offset"  # "offset", "atm_percent", "closest_premium", "straddle_width", "cp_based_on_sp", or "closest_delta"
+    cp_operator: str = "closest"  # "closest" (~), "gte" (>=), "lte" (<=)
 
 
 # ---------------------------------------------------------------------------
@@ -565,12 +566,36 @@ def _simulate_one_day(
                             return row[3] if prev_bar else row[0]
                     return 0.0
 
+                # Helper for Closest Premium selection with ~, >=, <= operator
+                def _select_closest_premium(candidates: List[Tuple[float, float]], target: float, operator: str, fallback_atm: float) -> float:
+                    if not candidates:
+                        return fallback_atm
+                    op = str(operator).lower().strip()
+                    if op in (">=", "gte", "cp >="):
+                        valid = [c for c in candidates if c[1] >= target]
+                        if valid:
+                            valid.sort(key=lambda x: (x[1] - target, x[0]))
+                            return valid[0][0]
+                    elif op in ("<=", "lte", "cp <="):
+                        valid = [c for c in candidates if c[1] <= target]
+                        if valid:
+                            valid.sort(key=lambda x: (target - x[1], x[0]))
+                            return valid[0][0]
+                    candidates_sorted = sorted(candidates, key=lambda x: (abs(x[1] - target), x[1]))
+                    return candidates_sorted[0][0]
+
                 # 1. Closest Premium Strike Selection
                 if strike_type_val == "closest_premium":
                     try:
-                        target_premium = float(str(leg.strike).replace("%", "").strip())
-                        leg_candidates.sort(key=lambda x: (abs(x[1] - target_premium), x[1]))
-                        state.strike = leg_candidates[0][0] if leg_candidates else atm_strike
+                        raw_str = str(leg.strike).strip().upper()
+                        op = getattr(leg, "cp_operator", "closest")
+                        if ">=" in raw_str:
+                            op = "gte"
+                        elif "<=" in raw_str:
+                            op = "lte"
+                        cleaned = raw_str.replace("CP", "").replace("~", "").replace(">=", "").replace("<=", "").replace("%", "").strip()
+                        target_premium = float(cleaned) if cleaned else 100.0
+                        state.strike = _select_closest_premium(leg_candidates, target_premium, op, atm_strike)
                     except Exception:
                         state.strike = atm_strike
 
@@ -619,14 +644,19 @@ def _simulate_one_day(
                 # 1d. CP based on Straddle Premium (SP) — leg.strike is a % of the ATM straddle premium
                 elif strike_type_val in ("cp_based_on_sp", "cp_sp"):
                     try:
-                        cleaned = str(leg.strike).replace("%", "").strip()
-                        width_pct = float(cleaned) / 100.0
+                        raw_str = str(leg.strike).strip().upper()
+                        op = getattr(leg, "cp_operator", "closest")
+                        if ">=" in raw_str:
+                            op = "gte"
+                        elif "<=" in raw_str:
+                            op = "lte"
+                        cleaned = raw_str.replace("CP", "").replace("~", "").replace(">=", "").replace("<=", "").replace("*SP", "").replace("SP", "").replace("%", "").strip()
+                        width_pct = (float(cleaned) if cleaned else 5.0) / 100.0
                         atm_ce = _find_candidate_price("CE", atm_strike)
                         atm_pe = _find_candidate_price("PE", atm_strike)
                         sp = atm_ce + atm_pe
                         target_premium = sp * width_pct
-                        leg_candidates.sort(key=lambda x: (abs(x[1] - target_premium), x[1]))
-                        state.strike = leg_candidates[0][0] if leg_candidates else atm_strike
+                        state.strike = _select_closest_premium(leg_candidates, target_premium, op, atm_strike)
                     except Exception:
                         state.strike = atm_strike
 
@@ -1453,7 +1483,8 @@ def main():
 
     try:
         legs_raw = json.loads(args.legs)
-        leg_configs = [LegConfig(**l) for l in legs_raw]
+        leg_fields = set(LegConfig.__dataclass_fields__.keys())
+        leg_configs = [LegConfig(**{k: v for k, v in l.items() if k in leg_fields}) for l in legs_raw]
     except Exception as e:
         sys.stdout.write(json.dumps({"error": f"Invalid --legs JSON: {e}"}))
         sys.exit(1)

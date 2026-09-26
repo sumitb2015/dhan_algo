@@ -38,6 +38,8 @@ export interface BacktestHistoryItem {
 
 type StrikeMode = 'offset' | 'atm_percent' | 'closest_premium' | 'straddle_width' | 'cp_based_on_sp' | 'closest_delta';
 
+type CpOperator = 'closest' | 'gte' | 'lte';
+
 interface LegConfig {
   option_type: 'CE' | 'PE';
   position: 'sell' | 'buy';
@@ -47,6 +49,7 @@ interface LegConfig {
   leg_target_pct: number;  // 0 = disabled
   leg_trail_sl_pct?: number; // 0 = disabled
   strike_type?: StrikeMode;
+  cp_operator?: CpOperator; // 'closest' (~), 'gte' (>=), 'lte' (<=)
 }
 
 interface LegResult {
@@ -173,6 +176,16 @@ const STRADDLE_WIDTH_OPTIONS = [
   ...Array.from({ length: 20 }, (_, i) => `ATM+${((i + 1) * 0.25).toFixed(2).replace(/\.?0+$/, '')}*SP`),
   ...Array.from({ length: 20 }, (_, i) => `ATM-${((i + 1) * 0.25).toFixed(2).replace(/\.?0+$/, '')}*SP`),
 ];
+
+// StockMock Closest Premium Operators (~, >=, <=)
+const CP_OPERATORS = [
+  { label: 'CP ~', value: 'closest' as CpOperator, title: 'Closest to target premium' },
+  { label: 'CP >=', value: 'gte' as CpOperator, title: 'Closest premium greater than or equal to target' },
+  { label: 'CP <=', value: 'lte' as CpOperator, title: 'Closest premium less than or equal to target' },
+] as const;
+
+// StockMock CP based on Straddle Premium percentage options (5% SP to 100% SP)
+const CP_SP_OPTIONS = Array.from({ length: 20 }, (_, i) => `${(i + 1) * 5}% SP`);
 
 const MONTHS = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
 
@@ -454,6 +467,7 @@ export default function OptionsBacktester({
   const [builderOptionType, setBuilderOptionType] = useState<'Call' | 'Put'>('Call');
   const [builderActionType, setBuilderActionType] = useState<'Buy' | 'Sell'>('Sell');
   const [builderStrike, setBuilderStrike] = useState('ATM');
+  const [builderCpOperator, setBuilderCpOperator] = useState<CpOperator>('closest');
   const [builderLots, setBuilderLots] = useState(1);
 
   // ── Underlying & execution options
@@ -679,8 +693,8 @@ export default function OptionsBacktester({
     if (m === 'ATM Point') return 'ATM';
     if (m === 'ATM Percent') return 'ATM';
     if (m === 'Straddle Width') return 'ATM';
-    if (m === 'Closest Premium (CP)') return '100';
-    return '30'; // CP based on Straddle Premium (SP)
+    if (m === 'Closest Premium (CP)') return '25';
+    return '5% SP'; // CP based on Straddle Premium (SP)
   }
 
   // ─── Actions ───────────────────────────────────────────────────────────────
@@ -694,18 +708,21 @@ export default function OptionsBacktester({
       toast.error('Futures legs are not supported yet — switch Select Segment to Options');
       return;
     }
+    const isCpMode = selectedStrikeMode.includes('(CP)') || selectedStrikeMode.includes('(SP)');
+    const defaultStrike = selectedStrikeMode.includes('(SP)') ? '5% SP' : selectedStrikeMode.includes('(CP)') ? '25' : 'ATM';
     const newLeg: LegConfig = {
       option_type: builderOptionType === 'Call' ? 'CE' : 'PE',
       position: builderActionType.toLowerCase() as 'buy' | 'sell',
       lots: Math.max(1, builderLots),
-      strike: builderStrike || 'ATM',
+      strike: builderStrike || defaultStrike,
       strike_type: strikeModeToType(selectedStrikeMode),
+      cp_operator: isCpMode ? builderCpOperator : undefined,
       leg_sl_pct: 0,
       leg_target_pct: 0,
       leg_trail_sl_pct: 0,
     };
     setLegs(prev => [...prev, newLeg]);
-    toast.success(`Added ${builderActionType} ${builderOptionType} (${builderStrike})`);
+    toast.success(`Added ${builderActionType} ${builderOptionType} (${newLeg.strike})`);
   }
 
   function handleCloneLeg(index: number) {
@@ -1017,7 +1034,16 @@ export default function OptionsBacktester({
               />
               <span>{mode}</span>
               {(mode.includes('(CP)') || mode.includes('(SP)')) && (
-                <Info className="w-3 h-3 text-zinc-500 inline" />
+                <span
+                  title={
+                    mode.includes('(CP)')
+                      ? 'This will select strike which is closest to the choosen premium at entry time.'
+                      : 'This will select strike which is closest to the choosen percent value of straddle premium at entry time.'
+                  }
+                  className="cursor-help inline-flex items-center"
+                >
+                  <Info className="w-3.5 h-3.5 text-zinc-400 hover:text-zinc-200 inline" />
+                </span>
               )}
             </label>
           ))}
@@ -1132,9 +1158,13 @@ export default function OptionsBacktester({
             </div>
           </div>
 
-          {/* 5. Strike Price */}
+          {/* 5. Strike Price / Closest Premium */}
           <div>
-            <label className="block text-[11px] text-zinc-400 font-medium mb-1">Strike Price:</label>
+            <label className="block text-[11px] text-zinc-400 font-medium mb-1">
+              {(selectedStrikeMode.includes('(CP)') || selectedStrikeMode.includes('(SP)'))
+                ? 'Closest Premium:'
+                : 'Strike Price:'}
+            </label>
             {selectedStrikeMode === 'ATM Point' ? (
               <select
                 value={builderStrike}
@@ -1165,18 +1195,51 @@ export default function OptionsBacktester({
                   <option key={s} value={s}>{s}</option>
                 ))}
               </select>
+            ) : selectedStrikeMode === 'Closest Premium (CP)' ? (
+              <div className="flex rounded overflow-hidden border border-zinc-700 shadow-xs">
+                <select
+                  value={builderCpOperator}
+                  onChange={e => setBuilderCpOperator(e.target.value as CpOperator)}
+                  className="bg-zinc-800 text-teal-400 font-semibold px-2 py-1.5 text-xs border-r border-zinc-700 focus:outline-hidden cursor-pointer"
+                  title="Comparator: Closest (~), Greater than or equal (>=), Less than or equal (<=)"
+                >
+                  {CP_OPERATORS.map(op => (
+                    <option key={op.value} value={op.value} title={op.title}>{op.label}</option>
+                  ))}
+                </select>
+                <input
+                  type="number"
+                  min={0}
+                  step={0.5}
+                  value={builderStrike}
+                  onChange={e => setBuilderStrike(e.target.value)}
+                  placeholder="25"
+                  className="w-full bg-zinc-800 px-2.5 py-1.5 text-xs text-zinc-100 font-medium focus:outline-hidden focus:border-teal-500"
+                />
+              </div>
             ) : (
-              <input
-                type="number"
-                min={0}
-                value={builderStrike}
-                onChange={e => setBuilderStrike(e.target.value)}
-                placeholder={
-                  selectedStrikeMode === 'Closest Premium (CP)' ? 'e.g. 100 (premium)' :
-                  'e.g. 30 (% of straddle)'
-                }
-                className="w-full bg-zinc-800 border border-zinc-700 rounded px-2.5 py-1.5 text-xs text-zinc-100 font-medium focus:outline-hidden focus:border-teal-500 shadow-xs"
-              />
+              /* CP based on Straddle Premium (SP) */
+              <div className="flex rounded overflow-hidden border border-zinc-700 shadow-xs">
+                <select
+                  value={builderCpOperator}
+                  onChange={e => setBuilderCpOperator(e.target.value as CpOperator)}
+                  className="bg-zinc-800 text-teal-400 font-semibold px-2 py-1.5 text-xs border-r border-zinc-700 focus:outline-hidden cursor-pointer"
+                  title="Comparator: Closest (~), Greater than or equal (>=), Less than or equal (<=)"
+                >
+                  {CP_OPERATORS.map(op => (
+                    <option key={op.value} value={op.value} title={op.title}>{op.label}</option>
+                  ))}
+                </select>
+                <select
+                  value={builderStrike}
+                  onChange={e => setBuilderStrike(e.target.value)}
+                  className="w-full bg-zinc-800 px-2.5 py-1.5 text-xs text-zinc-100 font-medium focus:outline-hidden focus:border-teal-500 cursor-pointer"
+                >
+                  {CP_SP_OPTIONS.map(opt => (
+                    <option key={opt} value={opt}>{opt}</option>
+                  ))}
+                </select>
+              </div>
             )}
           </div>
 
@@ -1365,6 +1428,7 @@ export default function OptionsBacktester({
                         handleUpdateLeg(index, {
                           strike_type: strikeModeToType(m),
                           strike: defaultStrikeValueFor(m),
+                          cp_operator: (m.includes('(CP)') || m.includes('(SP)')) ? (leg.cp_operator || 'closest') : undefined,
                         });
                       }}
                       className="bg-zinc-800 border border-zinc-700 rounded px-2 py-0.5 text-xs text-zinc-200 font-medium focus:outline-hidden"
@@ -1408,14 +1472,51 @@ export default function OptionsBacktester({
                         <option key={s} value={s}>{s}</option>
                       ))}
                     </select>
+                  ) : strikeMode === 'closest_premium' ? (
+                    <div className="flex items-center rounded overflow-hidden border border-zinc-700 shadow-xs">
+                      <select
+                        value={leg.cp_operator || 'closest'}
+                        onChange={e => handleUpdateLeg(index, { cp_operator: e.target.value as CpOperator })}
+                        className="bg-zinc-800 text-teal-400 font-semibold px-1.5 py-0.5 text-xs border-r border-zinc-700 focus:outline-hidden cursor-pointer"
+                        title="Comparator: Closest (~), Greater than or equal (>=), Less than or equal (<=)"
+                      >
+                        {CP_OPERATORS.map(op => (
+                          <option key={op.value} value={op.value} title={op.title}>{op.label}</option>
+                        ))}
+                      </select>
+                      <input
+                        type="number"
+                        min={0}
+                        step={0.5}
+                        value={leg.strike}
+                        onChange={e => handleUpdateLeg(index, { strike: e.target.value })}
+                        placeholder="25"
+                        className="w-14 bg-zinc-800 px-1.5 py-0.5 text-xs text-zinc-100 font-medium focus:outline-hidden text-center"
+                      />
+                    </div>
                   ) : (
-                    <input
-                      type="number"
-                      value={leg.strike}
-                      onChange={e => handleUpdateLeg(index, { strike: e.target.value })}
-                      placeholder="Value"
-                      className="w-16 bg-zinc-800 border border-zinc-700 rounded px-2 py-0.5 text-xs text-zinc-100 font-medium focus:outline-hidden text-center"
-                    />
+                    /* cp_based_on_sp */
+                    <div className="flex items-center rounded overflow-hidden border border-zinc-700 shadow-xs">
+                      <select
+                        value={leg.cp_operator || 'closest'}
+                        onChange={e => handleUpdateLeg(index, { cp_operator: e.target.value as CpOperator })}
+                        className="bg-zinc-800 text-teal-400 font-semibold px-1.5 py-0.5 text-xs border-r border-zinc-700 focus:outline-hidden cursor-pointer"
+                        title="Comparator: Closest (~), Greater than or equal (>=), Less than or equal (<=)"
+                      >
+                        {CP_OPERATORS.map(op => (
+                          <option key={op.value} value={op.value} title={op.title}>{op.label}</option>
+                        ))}
+                      </select>
+                      <select
+                        value={leg.strike}
+                        onChange={e => handleUpdateLeg(index, { strike: e.target.value })}
+                        className="bg-zinc-800 px-1.5 py-0.5 text-xs text-zinc-100 font-medium focus:outline-hidden cursor-pointer"
+                      >
+                        {CP_SP_OPTIONS.map(opt => (
+                          <option key={opt} value={opt}>{opt}</option>
+                        ))}
+                      </select>
+                    </div>
                   )}
 
                   {/* Call / Put option badge */}
