@@ -12,7 +12,7 @@ import { toast } from 'sonner';
 // Lazy-load recharts so initial bundle stays lightweight
 const BacktestCharts = dynamic(() => import('@/components/BacktestCharts'), {
   ssr: false,
-  loading: () => <div className="h-64 bg-slate-100 border border-slate-200 rounded-lg animate-pulse" />,
+  loading: () => <div className="h-64 bg-zinc-900 border border-zinc-800 rounded-xl animate-pulse" />,
 });
 
 // ─── Types ───────────────────────────────────────────────────────────────────
@@ -160,19 +160,19 @@ const STRIKE_OPTIONS = [
 const MONTHS = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
 
 const EXIT_REASON_CLS: Record<string, string> = {
-  TARGET:        'bg-emerald-50 text-emerald-700 border border-emerald-300',
-  SCALP_FLOOR:   'bg-emerald-50 text-emerald-700 border border-emerald-400',
-  LEG_TARGET:    'bg-emerald-50 text-emerald-700 border border-emerald-300',
-  EOD:           'bg-sky-50 text-sky-700 border border-sky-300',
-  LEG_SL:        'bg-red-50 text-red-700 border border-red-300',
-  LEG_TRAIL_SL:  'bg-amber-50 text-amber-700 border border-amber-300',
-  TRAIL_SL:      'bg-amber-50 text-amber-700 border border-amber-300',
-  ALL_LEGS_DONE: 'bg-red-50 text-red-700 border border-red-300',
-  SQUARE_OFF_ALL: 'bg-purple-50 text-purple-700 border border-purple-300',
-  OVERALL_SL:    'bg-red-100 text-red-800 border border-red-400',
-  INCOMPLETE:    'bg-amber-50 text-amber-700 border border-amber-300',
-  ROLL_ATM:      'bg-purple-50 text-purple-700 border border-purple-300',
-  NO_ENTRY:      'bg-slate-100 text-slate-500 border border-slate-200',
+  TARGET:        'bg-emerald-500/15 text-emerald-400 border border-emerald-500/30',
+  SCALP_FLOOR:   'bg-emerald-500/15 text-emerald-400 border border-emerald-500/30',
+  LEG_TARGET:    'bg-emerald-500/15 text-emerald-400 border border-emerald-500/30',
+  EOD:           'bg-sky-500/15 text-sky-400 border border-sky-500/30',
+  LEG_SL:        'bg-red-500/15 text-red-400 border border-red-500/30',
+  LEG_TRAIL_SL:  'bg-amber-500/15 text-amber-400 border border-amber-500/30',
+  TRAIL_SL:      'bg-amber-500/15 text-amber-400 border border-amber-500/30',
+  ALL_LEGS_DONE: 'bg-red-500/15 text-red-400 border border-red-500/30',
+  SQUARE_OFF_ALL: 'bg-purple-500/15 text-purple-400 border border-purple-500/30',
+  OVERALL_SL:    'bg-red-500/20 text-red-400 border border-red-500/40',
+  INCOMPLETE:    'bg-amber-500/15 text-amber-400 border border-amber-500/30',
+  ROLL_ATM:      'bg-purple-500/15 text-purple-400 border border-purple-500/30',
+  NO_ENTRY:      'bg-zinc-800 text-zinc-400 border border-zinc-700',
 };
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -263,13 +263,13 @@ function DateInputBox({
 
   return (
     <div className="flex-1 flex flex-col">
-      <span className="text-[11px] text-slate-500 font-medium mb-1">{label}</span>
+      <span className="text-[11px] text-zinc-400 font-medium mb-1">{label}</span>
       <div
         onClick={() => inputRef.current?.showPicker ? inputRef.current.showPicker() : inputRef.current?.focus()}
-        className="relative bg-oncolor border border-slate-300 rounded px-3 py-1.5 text-xs text-slate-700 font-medium cursor-pointer flex items-center justify-between hover:border-[#54b4c7] transition-colors shadow-sm"
+        className="relative bg-zinc-800 border border-zinc-700 rounded px-3 py-1.5 text-xs text-zinc-100 font-medium cursor-pointer flex items-center justify-between hover:border-teal-400 transition-colors shadow-xs"
       >
         <span>{formatted}</span>
-        <Calendar className="w-3.5 h-3.5 text-slate-400" />
+        <Calendar className="w-3.5 h-3.5 text-zinc-400" />
         <input
           ref={inputRef}
           type="date"
@@ -756,23 +756,39 @@ export default function OptionsBacktester({
   const s = result?.summary;
 
   return (
-    <div className="min-h-screen bg-[#edf2f6] text-slate-700 font-sans pb-24 select-none">
-      {/* ── Top Header Banner: POSITIONS ── */}
-      <div className="w-full bg-[#54b4c7] py-2 px-4 shadow-sm flex items-center justify-center relative">
-        <h1 className="text-white text-xs md:text-sm font-bold tracking-widest uppercase">
-          {pageTitle ?? 'POSITIONS'}
-        </h1>
-        {/* Standard global controls (theme toggle, Sync Data, Update, Disconnect) —
-            every other page carries these; this StockMock-styled header dropped them
-            in the rewrite, which also meant losing the way out of the page (Disconnect)
-            and the site-wide data-freshness controls.
-            NavBar's plain-text items (Disconnect, the theme toggle) are styled for a
-            dark backdrop and are nearly invisible directly on this light teal banner —
-            the dark pill below gives them the backdrop they need, same as they'd have
-            on every other page. Must be bg-oncolor-dark, not bg-zinc-900: zinc-900 is
-            a themed token that inverts to near-white in light mode, which would turn
-            this "dark" pill light and make NavBar's light-mode text disappear on it. */}
-        <div className="absolute right-3 top-1/2 -translate-y-1/2 bg-oncolor-dark rounded-xl px-1.5 py-1 shadow-sm">
+    <div className="min-h-screen bg-zinc-950 text-zinc-300 font-sans pb-28 select-none">
+      {/* ── Standard Sticky Page Header ── */}
+      <div className="sticky top-0 z-30 flex items-center justify-between gap-3 flex-wrap px-6 py-2.5 border-b border-zinc-800 bg-zinc-950/95 backdrop-blur shadow-xs">
+        <div className="flex items-center gap-3">
+          <div className="flex items-center justify-center w-8 h-8 rounded-lg shrink-0 bg-teal-500/10 border border-teal-500/25">
+            <History className="w-4 h-4 text-teal-400" />
+          </div>
+          <div>
+            <p className="text-[10px] font-bold uppercase tracking-[0.16em] text-teal-400 mb-0.5">Options · Backtesting</p>
+            <h1 className="text-sm font-bold text-white tracking-tight leading-none">{pageTitle ?? 'Options Backtester'}</h1>
+          </div>
+        </div>
+        <div className="flex items-center gap-2 flex-wrap">
+          <button
+            type="button"
+            onClick={() => setSettingsModalOpen(true)}
+            className="border border-zinc-700 bg-zinc-900 hover:bg-zinc-800 text-zinc-300 px-3 py-1 rounded text-xs font-semibold flex items-center gap-1.5 transition-colors cursor-pointer shadow-xs"
+          >
+            <Settings className="w-3.5 h-3.5 text-teal-400" /> Change Settings
+          </button>
+          <button
+            type="button"
+            onClick={() => { setHistoryModalOpen(true); fetchHistory(); }}
+            className="border border-teal-500/40 bg-teal-500/15 hover:bg-teal-500/25 text-teal-300 px-3 py-1 rounded text-xs font-semibold flex items-center gap-1.5 transition-colors cursor-pointer shadow-xs"
+          >
+            <History className="w-3.5 h-3.5" /> Past Backtests
+            {historyList.length > 0 && (
+              <span className="ml-1 px-1.5 py-0.2 bg-teal-500/30 rounded-full text-[10px] font-bold text-teal-200">
+                {historyList.length}
+              </span>
+            )}
+          </button>
+          <span className="w-px h-5 bg-zinc-800 shrink-0" />
           <NavBar />
         </div>
       </div>
@@ -799,9 +815,9 @@ export default function OptionsBacktester({
       <div className="w-full max-w-[1550px] mx-auto px-4 py-3">
 
         {/* ── Strike Selection Mode Radios ── */}
-        <div className="flex items-center justify-center flex-wrap gap-4 md:gap-7 py-2 text-xs text-slate-600 font-medium">
+        <div className="flex items-center justify-center flex-wrap gap-4 md:gap-7 py-2 text-xs text-zinc-400 font-medium">
           {STRIKE_MODES.map(mode => (
-            <label key={mode} className="flex items-center gap-1.5 cursor-pointer hover:text-slate-900 transition-colors">
+            <label key={mode} className="flex items-center gap-1.5 cursor-pointer hover:text-white transition-colors">
               <input
                 type="radio"
                 name="strikeMode"
@@ -814,18 +830,18 @@ export default function OptionsBacktester({
                   // silently can't parse and falls back to plain ATM with no indication.
                   setBuilderStrike(defaultStrikeValueFor(mode));
                 }}
-                className="w-3.5 h-3.5 accent-[#54b4c7] cursor-pointer"
+                className="w-3.5 h-3.5 accent-teal-500 cursor-pointer"
               />
               <span>{mode}</span>
               {(mode.includes('(CP)') || mode.includes('(SP)')) && (
-                <Info className="w-3 h-3 text-slate-400 inline" />
+                <Info className="w-3 h-3 text-zinc-500 inline" />
               )}
             </label>
           ))}
         </div>
 
         {/* Dotted Divider */}
-        <div className="w-full border-b border-dashed border-slate-300 my-2.5" />
+        <div className="w-full border-b border-dashed border-zinc-800 my-2.5" />
 
         {/* ── Position Builder Controls Row ── */}
         <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-7 gap-3 items-end pt-1 pb-3">
@@ -833,11 +849,11 @@ export default function OptionsBacktester({
                the leg rows); the others are shown per the StockMock layout but disabled
                rather than silently accepted and ignored. */}
           <div>
-            <label className="block text-[11px] text-slate-500 font-medium mb-1">Select Index:</label>
+            <label className="block text-[11px] text-zinc-400 font-medium mb-1">Select Index:</label>
             <select
               value={builderIndex}
               onChange={e => setBuilderIndex(e.target.value)}
-              className="w-full bg-oncolor border border-slate-300 rounded px-2.5 py-1.5 text-xs text-slate-700 font-medium focus:outline-none focus:border-[#54b4c7] shadow-sm"
+              className="w-full bg-zinc-800 border border-zinc-700 rounded px-2.5 py-1.5 text-xs text-zinc-100 font-medium focus:outline-hidden focus:border-teal-500 shadow-xs"
             >
               <option value="Nifty">Nifty</option>
               <option value="Banknifty" disabled title="No local Banknifty option data">Banknifty (no data)</option>
@@ -848,15 +864,15 @@ export default function OptionsBacktester({
 
           {/* 2. Select Segment */}
           <div>
-            <label className="block text-[11px] text-slate-500 font-medium mb-1">Select Segment:</label>
-            <div className="flex rounded overflow-hidden border border-slate-300 shadow-sm">
+            <label className="block text-[11px] text-zinc-400 font-medium mb-1">Select Segment:</label>
+            <div className="flex rounded overflow-hidden border border-zinc-700 shadow-xs">
               <button
                 type="button"
                 onClick={() => setBuilderSegment('Futures')}
                 className={`flex-1 py-1.5 text-xs font-medium transition-colors ${
                   builderSegment === 'Futures'
-                    ? 'bg-[#54b4c7] text-white'
-                    : 'bg-oncolor text-slate-600 hover:bg-slate-50'
+                    ? 'bg-teal-600 text-oncolor font-bold'
+                    : 'bg-zinc-800 text-zinc-400 hover:bg-zinc-700 hover:text-zinc-200'
                 }`}
               >
                 Futures
@@ -866,8 +882,8 @@ export default function OptionsBacktester({
                 onClick={() => setBuilderSegment('Options')}
                 className={`flex-1 py-1.5 text-xs font-medium transition-colors ${
                   builderSegment === 'Options'
-                    ? 'bg-[#54b4c7] text-white'
-                    : 'bg-oncolor text-slate-600 hover:bg-slate-50'
+                    ? 'bg-teal-600 text-oncolor font-bold'
+                    : 'bg-zinc-800 text-zinc-400 hover:bg-zinc-700 hover:text-zinc-200'
                 }`}
               >
                 Options
@@ -877,15 +893,15 @@ export default function OptionsBacktester({
 
           {/* 3. Option Type */}
           <div>
-            <label className="block text-[11px] text-slate-500 font-medium mb-1">Option Type:</label>
-            <div className="flex rounded overflow-hidden border border-slate-300 shadow-sm">
+            <label className="block text-[11px] text-zinc-400 font-medium mb-1">Option Type:</label>
+            <div className="flex rounded overflow-hidden border border-zinc-700 shadow-xs">
               <button
                 type="button"
                 onClick={() => setBuilderOptionType('Call')}
                 className={`flex-1 py-1.5 text-xs font-medium transition-colors ${
                   builderOptionType === 'Call'
-                    ? 'bg-[#54b4c7] text-white'
-                    : 'bg-oncolor text-slate-600 hover:bg-slate-50'
+                    ? 'bg-teal-600 text-oncolor font-bold'
+                    : 'bg-zinc-800 text-zinc-400 hover:bg-zinc-700 hover:text-zinc-200'
                 }`}
               >
                 Call
@@ -895,8 +911,8 @@ export default function OptionsBacktester({
                 onClick={() => setBuilderOptionType('Put')}
                 className={`flex-1 py-1.5 text-xs font-medium transition-colors ${
                   builderOptionType === 'Put'
-                    ? 'bg-[#54b4c7] text-white'
-                    : 'bg-oncolor text-slate-600 hover:bg-slate-50'
+                    ? 'bg-teal-600 text-oncolor font-bold'
+                    : 'bg-zinc-800 text-zinc-400 hover:bg-zinc-700 hover:text-zinc-200'
                 }`}
               >
                 Put
@@ -906,15 +922,15 @@ export default function OptionsBacktester({
 
           {/* 4. Action Type */}
           <div>
-            <label className="block text-[11px] text-slate-500 font-medium mb-1">Action Type:</label>
-            <div className="flex rounded overflow-hidden border border-slate-300 shadow-sm">
+            <label className="block text-[11px] text-zinc-400 font-medium mb-1">Action Type:</label>
+            <div className="flex rounded overflow-hidden border border-zinc-700 shadow-xs">
               <button
                 type="button"
                 onClick={() => setBuilderActionType('Buy')}
                 className={`flex-1 py-1.5 text-xs font-medium transition-colors ${
                   builderActionType === 'Buy'
-                    ? 'bg-[#54b4c7] text-white'
-                    : 'bg-oncolor text-slate-600 hover:bg-slate-50'
+                    ? 'bg-teal-600 text-oncolor font-bold'
+                    : 'bg-zinc-800 text-zinc-400 hover:bg-zinc-700 hover:text-zinc-200'
                 }`}
               >
                 Buy
@@ -924,8 +940,8 @@ export default function OptionsBacktester({
                 onClick={() => setBuilderActionType('Sell')}
                 className={`flex-1 py-1.5 text-xs font-medium transition-colors ${
                   builderActionType === 'Sell'
-                    ? 'bg-[#54b4c7] text-white'
-                    : 'bg-oncolor text-slate-600 hover:bg-slate-50'
+                    ? 'bg-teal-600 text-oncolor font-bold'
+                    : 'bg-zinc-800 text-zinc-400 hover:bg-zinc-700 hover:text-zinc-200'
                 }`}
               >
                 Sell
@@ -935,12 +951,12 @@ export default function OptionsBacktester({
 
           {/* 5. Strike Price */}
           <div>
-            <label className="block text-[11px] text-slate-500 font-medium mb-1">Strike Price:</label>
+            <label className="block text-[11px] text-zinc-400 font-medium mb-1">Strike Price:</label>
             {selectedStrikeMode === 'ATM Point' ? (
               <select
                 value={builderStrike}
                 onChange={e => setBuilderStrike(e.target.value)}
-                className="w-full bg-oncolor border border-slate-300 rounded px-2.5 py-1.5 text-xs text-slate-700 font-medium focus:outline-none focus:border-[#54b4c7] shadow-sm"
+                className="w-full bg-zinc-800 border border-zinc-700 rounded px-2.5 py-1.5 text-xs text-zinc-100 font-medium focus:outline-hidden focus:border-teal-500 shadow-xs"
               >
                 {STRIKE_OPTIONS.map(s => (
                   <option key={s} value={s}>{s}</option>
@@ -957,32 +973,32 @@ export default function OptionsBacktester({
                   selectedStrikeMode === 'Closest Premium (CP)' ? 'e.g. 100 (premium)' :
                   'e.g. 30 (% of straddle)'
                 }
-                className="w-full bg-oncolor border border-slate-300 rounded px-2.5 py-1.5 text-xs text-slate-700 font-medium focus:outline-none focus:border-[#54b4c7] shadow-sm"
+                className="w-full bg-zinc-800 border border-zinc-700 rounded px-2.5 py-1.5 text-xs text-zinc-100 font-medium focus:outline-hidden focus:border-teal-500 shadow-xs"
               />
             )}
           </div>
 
           {/* 6. Total Lot */}
           <div>
-            <label className="block text-[11px] text-slate-500 font-medium mb-1">Total Lot</label>
+            <label className="block text-[11px] text-zinc-400 font-medium mb-1">Total Lot</label>
             <input
               type="number"
               min={1}
               value={builderLots}
               onChange={e => setBuilderLots(Math.max(1, Number(e.target.value)))}
-              className="w-full bg-oncolor border border-slate-300 rounded px-2.5 py-1.5 text-xs text-slate-700 font-medium text-center focus:outline-none focus:border-[#54b4c7] shadow-sm"
+              className="w-full bg-zinc-800 border border-zinc-700 rounded px-2.5 py-1.5 text-xs text-zinc-100 font-medium text-center focus:outline-hidden focus:border-teal-500 shadow-xs"
             />
           </div>
 
           {/* 7. Expiry Type — same single-expiry-cycle limitation as the per-leg
                dropdown below; the engine always trades the nearest weekly cycle. */}
           <div>
-            <label className="block text-[11px] text-slate-500 font-medium mb-1">Expiry Type:</label>
+            <label className="block text-[11px] text-zinc-400 font-medium mb-1">Expiry Type:</label>
             <select
               disabled
               defaultValue="Weekly"
               title="Not implemented yet — the engine always trades the nearest weekly expiry"
-              className="w-full bg-slate-100 border border-slate-300 rounded px-2.5 py-1.5 text-xs text-slate-400 font-medium cursor-not-allowed"
+              className="w-full bg-zinc-800/50 border border-zinc-700 rounded px-2.5 py-1.5 text-xs text-zinc-500 font-medium cursor-not-allowed"
             >
               <option value="Weekly">Weekly</option>
               <option value="Next Weekly">Next Weekly</option>
@@ -996,36 +1012,36 @@ export default function OptionsBacktester({
           <button
             type="button"
             onClick={handleAddPosition}
-            className="bg-[#54b4c7] hover:bg-[#469fb1] text-white font-semibold text-xs px-5 py-1.5 rounded shadow-sm transition-colors cursor-pointer flex items-center gap-1.5"
+            className="bg-teal-600 hover:bg-teal-500 text-oncolor font-semibold text-xs px-5 py-1.5 rounded shadow-xs transition-colors cursor-pointer flex items-center gap-1.5"
           >
             Add Position
           </button>
         </div>
 
         {/* ── Settings Bar above Leg Rows ── */}
-        <div className="flex items-center justify-between flex-wrap gap-4 pt-3 pb-2 text-xs text-slate-600">
+        <div className="flex items-center justify-between flex-wrap gap-4 pt-3 pb-2 text-xs text-zinc-400">
           {/* Left: Spot / Futures toggle & Index */}
           <div className="flex items-center gap-4">
             <div className="flex items-center gap-2" title="Futures-as-ATM needs a futures price series; the option data here only carries spot">
               <span className="flex items-center gap-1.5 text-xs cursor-not-allowed opacity-50">
-                <span className="font-semibold text-slate-800">
+                <span className="font-semibold text-zinc-300">
                   Use Spot as ATM
                 </span>
-                <div className="w-7 h-4 bg-slate-300 rounded-full relative p-0.5">
-                  <div className="w-3 h-3 rounded-full bg-oncolor shadow-sm" />
+                <div className="w-7 h-4 bg-zinc-700 rounded-full relative p-0.5">
+                  <div className="w-3 h-3 rounded-full bg-zinc-400 shadow-xs" />
                 </div>
-                <span className="text-slate-500">
+                <span className="text-zinc-500">
                   Use Futures as ATM
                 </span>
               </span>
             </div>
 
             <div className="flex items-center gap-1.5">
-              <span className="text-slate-500">Index:</span>
+              <span className="text-zinc-500">Index:</span>
               <select
                 value={selectedMainIndex}
                 onChange={e => setSelectedMainIndex(e.target.value)}
-                className="bg-oncolor border border-slate-300 rounded px-2 py-0.5 text-xs text-slate-700 font-medium focus:outline-none"
+                className="bg-zinc-800 border border-zinc-700 rounded px-2 py-0.5 text-xs text-zinc-200 font-medium focus:outline-hidden"
               >
                 <option value="Nifty">Nifty</option>
                 <option value="Banknifty" disabled title="No local Banknifty option data">Banknifty (no data)</option>
@@ -1043,10 +1059,10 @@ export default function OptionsBacktester({
                   name="squareOffMode"
                   checked={squareOffMode === 'one_leg'}
                   onChange={() => setSquareOffMode('one_leg')}
-                  className="w-3.5 h-3.5 accent-[#54b4c7]"
+                  className="w-3.5 h-3.5 accent-teal-500"
                 />
                 <span>Square Off One Leg</span>
-                <Info className="w-3 h-3 text-slate-400" />
+                <Info className="w-3 h-3 text-zinc-500" />
               </label>
               <label className="flex items-center gap-1 cursor-pointer">
                 <input
@@ -1054,10 +1070,10 @@ export default function OptionsBacktester({
                   name="squareOffMode"
                   checked={squareOffMode === 'all_legs'}
                   onChange={() => setSquareOffMode('all_legs')}
-                  className="w-3.5 h-3.5 accent-[#54b4c7]"
+                  className="w-3.5 h-3.5 accent-teal-500"
                 />
                 <span>Square Off All Legs</span>
-                <Info className="w-3 h-3 text-slate-400" />
+                <Info className="w-3 h-3 text-zinc-500" />
               </label>
             </div>
 
@@ -1065,17 +1081,17 @@ export default function OptionsBacktester({
               <label className="flex items-center gap-1 cursor-not-allowed opacity-50" title="Not implemented yet — needs a re-architected entry trigger">
                 <input type="checkbox" disabled className="w-3.5 h-3.5 rounded" />
                 <span>Wait &amp; Trade</span>
-                <Info className="w-3 h-3 text-slate-400" />
+                <Info className="w-3 h-3 text-zinc-500" />
               </label>
               <label className="flex items-center gap-1 cursor-not-allowed opacity-50" title="Not implemented yet — needs a defined profit threshold that moves the SL">
                 <input type="checkbox" disabled className="w-3.5 h-3.5 rounded" />
                 <span>Move SL to Cost</span>
-                <Info className="w-3 h-3 text-slate-400" />
+                <Info className="w-3 h-3 text-zinc-500" />
               </label>
               <label className="flex items-center gap-1 cursor-not-allowed opacity-50" title="Not implemented yet — needs multi-entry-per-day simulation">
                 <input type="checkbox" disabled className="w-3.5 h-3.5 rounded" />
                 <span>Re-Entry / Re-Execute</span>
-                <Info className="w-3 h-3 text-slate-400" />
+                <Info className="w-3 h-3 text-zinc-500" />
               </label>
               <label className="flex items-center gap-1 cursor-not-allowed opacity-50" title="Not implemented yet — needs auto-generated hedge legs">
                 <input type="checkbox" disabled className="w-3.5 h-3.5 rounded" />
@@ -1095,20 +1111,20 @@ export default function OptionsBacktester({
             return (
               <div
                 key={index}
-                className="bg-[#edf2f6] border border-slate-300/80 rounded px-3 py-2 flex items-center justify-between flex-wrap gap-2.5 shadow-sm"
+                className="bg-zinc-900 border border-zinc-800 rounded-xl px-3 py-2.5 flex items-center justify-between flex-wrap gap-2.5 shadow-xs"
               >
                 {/* Left controls */}
                 <div className="flex items-center gap-2.5 flex-wrap">
                   <input
                     type="checkbox"
                     defaultChecked
-                    className="w-3.5 h-3.5 accent-[#54b4c7] rounded cursor-pointer"
+                    className="w-3.5 h-3.5 accent-teal-500 rounded cursor-pointer"
                   />
 
                   {/* Leg index badge */}
                   <div className="flex flex-col">
-                    <span className="text-[9px] font-bold text-slate-400 leading-none">L{index + 1}</span>
-                    <span className="text-[10px] text-slate-500 font-medium">Lots:</span>
+                    <span className="text-[9px] font-bold text-zinc-500 leading-none">L{index + 1}</span>
+                    <span className="text-[10px] text-zinc-500 font-medium">Lots:</span>
                   </div>
 
                   {/* Lots input */}
@@ -1117,7 +1133,7 @@ export default function OptionsBacktester({
                     min={1}
                     value={leg.lots}
                     onChange={e => handleUpdateLeg(index, { lots: Math.max(1, Number(e.target.value)) })}
-                    className="w-11 bg-oncolor border border-slate-300 rounded px-1 py-0.5 text-xs text-slate-800 text-center font-semibold focus:outline-none"
+                    className="w-11 bg-zinc-800 border border-zinc-700 rounded px-1 py-0.5 text-xs text-zinc-100 text-center font-semibold focus:outline-hidden"
                   />
 
                   {/* Sell / Buy action badge */}
@@ -1126,8 +1142,8 @@ export default function OptionsBacktester({
                     onClick={() => handleUpdateLeg(index, { position: isSell ? 'buy' : 'sell' })}
                     className={`text-[11px] font-bold px-2 py-0.5 rounded cursor-pointer transition-colors ${
                       isSell
-                        ? 'border border-red-400 text-red-500 bg-oncolor hover:bg-red-50'
-                        : 'border border-emerald-500 text-emerald-600 bg-oncolor hover:bg-emerald-50'
+                        ? 'border border-red-500/40 text-red-400 bg-red-500/10 hover:bg-red-500/20'
+                        : 'border border-emerald-500/40 text-emerald-400 bg-emerald-500/10 hover:bg-emerald-500/20'
                     }`}
                   >
                     {leg.position.toUpperCase()}
@@ -1148,7 +1164,7 @@ export default function OptionsBacktester({
                           strike: m === 'ATM Point' ? 'ATM' : '2',
                         });
                       }}
-                      className="bg-oncolor border border-slate-300 rounded px-2 py-0.5 text-xs text-slate-700 font-medium focus:outline-none"
+                      className="bg-zinc-800 border border-zinc-700 rounded px-2 py-0.5 text-xs text-zinc-200 font-medium focus:outline-hidden"
                     >
                       <option value="ATM Point">ATM Point</option>
                       <option value="ATM Percent">ATM Percent</option>
@@ -1162,7 +1178,7 @@ export default function OptionsBacktester({
                     <select
                       value={leg.strike}
                       onChange={e => handleUpdateLeg(index, { strike: e.target.value })}
-                      className="bg-oncolor border border-slate-300 rounded px-2 py-0.5 text-xs text-slate-700 font-medium focus:outline-none"
+                      className="bg-zinc-800 border border-zinc-700 rounded px-2 py-0.5 text-xs text-zinc-200 font-medium focus:outline-hidden"
                     >
                       {STRIKE_OPTIONS.map(s => (
                         <option key={s} value={s}>{s}</option>
@@ -1174,7 +1190,7 @@ export default function OptionsBacktester({
                       value={leg.strike}
                       onChange={e => handleUpdateLeg(index, { strike: e.target.value })}
                       placeholder="Value"
-                      className="w-16 bg-oncolor border border-slate-300 rounded px-2 py-0.5 text-xs text-slate-700 font-medium focus:outline-none text-center"
+                      className="w-16 bg-zinc-800 border border-zinc-700 rounded px-2 py-0.5 text-xs text-zinc-100 font-medium focus:outline-hidden text-center"
                     />
                   )}
 
@@ -1182,7 +1198,7 @@ export default function OptionsBacktester({
                   <button
                     type="button"
                     onClick={() => handleUpdateLeg(index, { option_type: isCall ? 'PE' : 'CE' })}
-                    className="bg-[#54b4c7] hover:bg-[#459eb0] text-white font-bold text-[11px] px-2.5 py-0.5 rounded cursor-pointer transition-colors shadow-sm"
+                    className="bg-teal-600 hover:bg-teal-500 text-oncolor font-bold text-[11px] px-2.5 py-0.5 rounded cursor-pointer transition-colors shadow-xs"
                   >
                     {isCall ? 'CALL' : 'PUT'}
                   </button>
@@ -1192,19 +1208,19 @@ export default function OptionsBacktester({
                 <div className="flex items-center gap-3.5 flex-wrap">
                   {/* Target Profit Chip */}
                   {leg.leg_target_pct > 0 ? (
-                    <div className="flex items-center gap-1 bg-oncolor border border-blue-300 text-[#2596be] px-1.5 py-0.5 rounded text-xs font-semibold shadow-sm">
+                    <div className="flex items-center gap-1 bg-blue-500/10 border border-blue-500/30 text-blue-400 px-1.5 py-0.5 rounded text-xs font-semibold shadow-xs">
                       <span className="text-[10px]">Tgt:</span>
                       <input
                         type="number"
                         value={leg.leg_target_pct}
                         onChange={e => handleUpdateLeg(index, { leg_target_pct: Number(e.target.value) })}
-                        className="w-10 bg-slate-50 border border-slate-200 rounded px-1 text-center text-xs text-slate-800"
+                        className="w-10 bg-zinc-800 border border-zinc-700 rounded px-1 text-center text-xs text-zinc-100"
                       />
                       <span>%</span>
                       <button
                         type="button"
                         onClick={() => handleUpdateLeg(index, { leg_target_pct: 0 })}
-                        className="text-slate-400 hover:text-red-500 ml-0.5 leading-none"
+                        className="text-zinc-500 hover:text-red-500 ml-0.5 leading-none"
                       >
                         ✕
                       </button>
@@ -1213,7 +1229,7 @@ export default function OptionsBacktester({
                     <button
                       type="button"
                       onClick={() => handleUpdateLeg(index, { leg_target_pct: 50 })}
-                      className="text-xs text-[#2596be] hover:underline font-semibold flex items-center gap-0.5 cursor-pointer"
+                      className="text-xs text-teal-400 hover:underline font-semibold flex items-center gap-0.5 cursor-pointer"
                     >
                       <Plus className="w-3.5 h-3.5 stroke-[2.5]" /> Target Profit
                     </button>
@@ -1221,19 +1237,19 @@ export default function OptionsBacktester({
 
                   {/* Stop Loss Chip */}
                   {leg.leg_sl_pct > 0 ? (
-                    <div className="flex items-center gap-1 bg-oncolor border border-red-300 text-red-600 px-1.5 py-0.5 rounded text-xs font-semibold shadow-sm">
+                    <div className="flex items-center gap-1 bg-red-500/10 border border-red-500/30 text-red-400 px-1.5 py-0.5 rounded text-xs font-semibold shadow-xs">
                       <span className="text-[10px]">SL:</span>
                       <input
                         type="number"
                         value={leg.leg_sl_pct}
                         onChange={e => handleUpdateLeg(index, { leg_sl_pct: Number(e.target.value) })}
-                        className="w-10 bg-slate-50 border border-slate-200 rounded px-1 text-center text-xs text-slate-800"
+                        className="w-10 bg-zinc-800 border border-zinc-700 rounded px-1 text-center text-xs text-zinc-100"
                       />
                       <span>%</span>
                       <button
                         type="button"
                         onClick={() => handleUpdateLeg(index, { leg_sl_pct: 0 })}
-                        className="text-slate-400 hover:text-red-500 ml-0.5 leading-none"
+                        className="text-zinc-500 hover:text-red-500 ml-0.5 leading-none"
                       >
                         ✕
                       </button>
@@ -1242,7 +1258,7 @@ export default function OptionsBacktester({
                     <button
                       type="button"
                       onClick={() => handleUpdateLeg(index, { leg_sl_pct: 35 })}
-                      className="text-xs text-[#2596be] hover:underline font-semibold flex items-center gap-0.5 cursor-pointer"
+                      className="text-xs text-teal-400 hover:underline font-semibold flex items-center gap-0.5 cursor-pointer"
                     >
                       <Plus className="w-3.5 h-3.5 stroke-[2.5]" /> Stop Loss
                     </button>
@@ -1250,19 +1266,19 @@ export default function OptionsBacktester({
 
                   {/* Trail Stop Loss Chip */}
                   {(leg.leg_trail_sl_pct ?? 0) > 0 ? (
-                    <div className="flex items-center gap-1 bg-oncolor border border-amber-300 text-amber-700 px-1.5 py-0.5 rounded text-xs font-semibold shadow-sm">
+                    <div className="flex items-center gap-1 bg-amber-500/10 border border-amber-500/30 text-amber-400 px-1.5 py-0.5 rounded text-xs font-semibold shadow-xs">
                       <span className="text-[10px]">Trail:</span>
                       <input
                         type="number"
                         value={leg.leg_trail_sl_pct}
                         onChange={e => handleUpdateLeg(index, { leg_trail_sl_pct: Number(e.target.value) })}
-                        className="w-10 bg-slate-50 border border-slate-200 rounded px-1 text-center text-xs text-slate-800"
+                        className="w-10 bg-zinc-800 border border-zinc-700 rounded px-1 text-center text-xs text-zinc-100"
                       />
                       <span>%</span>
                       <button
                         type="button"
                         onClick={() => handleUpdateLeg(index, { leg_trail_sl_pct: 0 })}
-                        className="text-slate-400 hover:text-red-500 ml-0.5 leading-none"
+                        className="text-zinc-500 hover:text-red-500 ml-0.5 leading-none"
                       >
                         ✕
                       </button>
@@ -1271,7 +1287,7 @@ export default function OptionsBacktester({
                     <button
                       type="button"
                       onClick={() => handleUpdateLeg(index, { leg_trail_sl_pct: 10 })}
-                      className="text-xs text-[#2596be] hover:underline font-semibold flex items-center gap-0.5 cursor-pointer"
+                      className="text-xs text-teal-400 hover:underline font-semibold flex items-center gap-0.5 cursor-pointer"
                     >
                       <Plus className="w-3.5 h-3.5 stroke-[2.5]" /> Trail Stop Loss
                     </button>
@@ -1282,7 +1298,7 @@ export default function OptionsBacktester({
                     type="button"
                     disabled
                     title="Not implemented yet — a multi-stage SL/target ladder per leg"
-                    className="text-xs text-slate-400 font-semibold flex items-center gap-0.5 cursor-not-allowed opacity-60"
+                    className="text-xs text-zinc-500 font-semibold flex items-center gap-0.5 cursor-not-allowed opacity-60"
                   >
                     <Plus className="w-3.5 h-3.5 stroke-[2.5]" /> Journey
                   </button>
@@ -1294,7 +1310,7 @@ export default function OptionsBacktester({
                     disabled
                     defaultValue="Weekly"
                     title="Not implemented yet — every leg shares the same expiry cycle"
-                    className="bg-slate-100 border border-slate-300 rounded px-2 py-0.5 text-xs text-slate-400 font-medium cursor-not-allowed"
+                    className="bg-zinc-800/50 border border-zinc-700 rounded px-2 py-0.5 text-xs text-zinc-500 font-medium cursor-not-allowed"
                   >
                     <option value="Weekly">Weekly</option>
                     <option value="Next Weekly">Next Weekly</option>
@@ -1306,7 +1322,7 @@ export default function OptionsBacktester({
                     type="button"
                     onClick={() => handleCloneLeg(index)}
                     title="Clone leg"
-                    className="text-slate-400 hover:text-slate-600 transition-colors p-1"
+                    className="text-zinc-500 hover:text-zinc-300 transition-colors p-1"
                   >
                     <Copy className="w-3.5 h-3.5" />
                   </button>
@@ -1316,7 +1332,7 @@ export default function OptionsBacktester({
                     type="button"
                     onClick={() => handleRemoveLeg(index)}
                     title="Remove leg"
-                    className="text-slate-400 hover:text-red-500 transition-colors p-1"
+                    className="text-zinc-500 hover:text-red-500 transition-colors p-1"
                   >
                     <Trash2 className="w-3.5 h-3.5" />
                   </button>
@@ -1328,10 +1344,10 @@ export default function OptionsBacktester({
 
         {/* No ReEntry toggle on right — moot while Re-Entry/Re-Execute and Journey
              above are themselves disabled */}
-        <div className="flex justify-end items-center gap-2 py-1 text-xs text-slate-600">
+        <div className="flex justify-end items-center gap-2 py-1 text-xs text-zinc-400">
           <label className="flex items-center gap-2 cursor-not-allowed opacity-50" title="Depends on Re-Entry/Re-Execute and Journey, both not implemented yet">
-            <div className="w-7 h-4 bg-slate-300 rounded-full relative p-0.5">
-              <div className="w-3 h-3 rounded-full bg-oncolor shadow-sm" />
+            <div className="w-7 h-4 bg-zinc-700 rounded-full relative p-0.5">
+              <div className="w-3 h-3 rounded-full bg-zinc-400 shadow-xs" />
             </div>
             <span>No ReEntry/ReExecute/Journey After</span>
           </label>
@@ -1341,19 +1357,19 @@ export default function OptionsBacktester({
         <div className="grid grid-cols-1 md:grid-cols-2 gap-8 my-4 pt-2">
           {/* Left Column: Range Breakout & Entry Time */}
           <div className="flex flex-col gap-2">
-            <label className="flex items-center gap-1.5 text-xs text-slate-600 cursor-not-allowed opacity-50" title="Not implemented yet — needs opening-range computation + breakout-triggered entry">
+            <label className="flex items-center gap-1.5 text-xs text-zinc-400 cursor-not-allowed opacity-50" title="Not implemented yet — needs opening-range computation + breakout-triggered entry">
               <input type="checkbox" disabled className="w-3.5 h-3.5 rounded" />
               <span>Range Breakout</span>
-              <Info className="w-3 h-3 text-slate-400" />
+              <Info className="w-3 h-3 text-zinc-500" />
             </label>
 
-            <div className="flex items-center gap-2 text-xs text-slate-600 mt-1">
+            <div className="flex items-center gap-2 text-xs text-zinc-400 mt-1">
               <span className="w-20 font-medium">Entry Time:</span>
               <div className="flex items-center gap-1">
                 <select
                   value={entryH}
                   onChange={e => setEntryH(e.target.value)}
-                  className="bg-oncolor border border-slate-300 rounded px-2 py-1 text-xs text-slate-700 font-medium focus:outline-none"
+                  className="bg-zinc-800 border border-zinc-700 rounded px-2 py-1 text-xs text-zinc-100 font-medium focus:outline-hidden"
                 >
                   {['9', '10', '11', '12', '13', '14', '15'].map(h => (
                     <option key={h} value={h}>{h}</option>
@@ -1363,7 +1379,7 @@ export default function OptionsBacktester({
                 <select
                   value={entryM}
                   onChange={e => setEntryM(e.target.value)}
-                  className="bg-oncolor border border-slate-300 rounded px-2 py-1 text-xs text-slate-700 font-medium focus:outline-none"
+                  className="bg-zinc-800 border border-zinc-700 rounded px-2 py-1 text-xs text-zinc-100 font-medium focus:outline-hidden"
                 >
                   {Array.from({ length: 60 }, (_, i) => String(i).padStart(2, '0')).map(m => (
                     <option key={m} value={m}>{m}</option>
@@ -1375,7 +1391,7 @@ export default function OptionsBacktester({
                   onChange={e => setEntryS(e.target.value)}
                   disabled
                   title="Option data is 1-minute resolution — seconds aren't meaningful"
-                  className="bg-slate-100 border border-slate-300 rounded px-2 py-1 text-xs text-slate-400 font-medium cursor-not-allowed"
+                  className="bg-zinc-800/50 border border-zinc-700 rounded px-2 py-1 text-xs text-zinc-500 font-medium cursor-not-allowed"
                 >
                   {['00', '15', '30', '45'].map(s => (
                     <option key={s} value={s}>{s}</option>
@@ -1386,20 +1402,20 @@ export default function OptionsBacktester({
 
             {/* Strategy Target Profit Link */}
             {strategyTargetActive ? (
-              <div className="flex items-center gap-2 mt-2 bg-oncolor border border-blue-200 rounded px-2.5 py-1 text-xs text-slate-700 w-fit shadow-sm">
-                <span className="font-semibold text-[#2596be]">Strategy Target:</span>
+              <div className="flex items-center gap-2 mt-2 bg-zinc-850 border border-zinc-700 rounded px-2.5 py-1 text-xs text-zinc-200 w-fit shadow-xs">
+                <span className="font-semibold text-teal-400">Strategy Target:</span>
                 <input
                   type="number"
                   min={1}
                   value={profitTargetPct}
                   onChange={e => setProfitTargetPct(Number(e.target.value))}
-                  className="w-14 bg-slate-50 border border-slate-300 rounded px-1.5 py-0.5 text-center text-xs text-slate-800 font-semibold"
+                  className="w-14 bg-zinc-800 border border-zinc-700 rounded px-1.5 py-0.5 text-center text-xs text-zinc-100 font-semibold"
                 />
                 <span>%</span>
                 <button
                   type="button"
                   onClick={() => { setStrategyTargetActive(false); setProfitTargetPct(0); }}
-                  className="text-slate-400 hover:text-red-500 ml-1"
+                  className="text-zinc-500 hover:text-red-500 ml-1"
                 >
                   ✕
                 </button>
@@ -1408,7 +1424,7 @@ export default function OptionsBacktester({
               <button
                 type="button"
                 onClick={() => { setStrategyTargetActive(true); setProfitTargetPct(50); }}
-                className="text-xs text-[#2596be] hover:underline font-semibold flex items-center gap-0.5 mt-2 cursor-pointer w-fit"
+                className="text-xs text-teal-400 hover:underline font-semibold flex items-center gap-0.5 mt-2 cursor-pointer w-fit"
               >
                 <Plus className="w-3.5 h-3.5 stroke-[2.5]" /> Strategy Target Profit
               </button>
@@ -1417,7 +1433,7 @@ export default function OptionsBacktester({
 
           {/* Right Column: Same Day / Next Day & Exit Time */}
           <div className="flex flex-col gap-2">
-            <div className="flex items-center gap-4 text-xs text-slate-600" title="Use the INTRADAY / POSITIONAL toggle at the bottom of the page for this instead">
+            <div className="flex items-center gap-4 text-xs text-zinc-400" title="Use the INTRADAY / POSITIONAL toggle at the bottom of the page for this instead">
               <label className="flex items-center gap-1 cursor-not-allowed opacity-50">
                 <input type="radio" name="exitDay" checked disabled className="w-3.5 h-3.5" />
                 <span>Same Day</span>
@@ -1428,13 +1444,13 @@ export default function OptionsBacktester({
               </label>
             </div>
 
-            <div className="flex items-center gap-2 text-xs text-slate-600 mt-1">
+            <div className="flex items-center gap-2 text-xs text-zinc-400 mt-1">
               <span className="w-20 font-medium">Exit Time:</span>
               <div className="flex items-center gap-1">
                 <select
                   value={exitH}
                   onChange={e => setExitH(e.target.value)}
-                  className="bg-oncolor border border-slate-300 rounded px-2 py-1 text-xs text-slate-700 font-medium focus:outline-none"
+                  className="bg-zinc-800 border border-zinc-700 rounded px-2 py-1 text-xs text-zinc-100 font-medium focus:outline-hidden"
                 >
                   {['9', '10', '11', '12', '13', '14', '15'].map(h => (
                     <option key={h} value={h}>{h}</option>
@@ -1444,7 +1460,7 @@ export default function OptionsBacktester({
                 <select
                   value={exitM}
                   onChange={e => setExitM(e.target.value)}
-                  className="bg-oncolor border border-slate-300 rounded px-2 py-1 text-xs text-slate-700 font-medium focus:outline-none"
+                  className="bg-zinc-800 border border-zinc-700 rounded px-2 py-1 text-xs text-zinc-100 font-medium focus:outline-hidden"
                 >
                   {Array.from({ length: 60 }, (_, i) => String(i).padStart(2, '0')).map(m => (
                     <option key={m} value={m}>{m}</option>
@@ -1456,7 +1472,7 @@ export default function OptionsBacktester({
                   onChange={e => setExitS(e.target.value)}
                   disabled
                   title="Option data is 1-minute resolution — seconds aren't meaningful"
-                  className="bg-slate-100 border border-slate-300 rounded px-2 py-1 text-xs text-slate-400 font-medium cursor-not-allowed"
+                  className="bg-zinc-800/50 border border-zinc-700 rounded px-2 py-1 text-xs text-zinc-500 font-medium cursor-not-allowed"
                 >
                   {['00', '15', '30', '45'].map(s => (
                     <option key={s} value={s}>{s}</option>
@@ -1467,20 +1483,20 @@ export default function OptionsBacktester({
 
             {/* Strategy Stop Loss Link */}
             {strategySlActive ? (
-              <div className="flex items-center gap-2 mt-2 bg-oncolor border border-red-200 rounded px-2.5 py-1 text-xs text-slate-700 w-fit shadow-sm">
+              <div className="flex items-center gap-2 mt-2 bg-zinc-850 border border-zinc-700 rounded px-2.5 py-1 text-xs text-zinc-200 w-fit shadow-xs">
                 <span className="font-semibold text-red-600">Strategy Stop Loss:</span>
                 <input
                   type="number"
                   min={1}
                   value={overallSlPct}
                   onChange={e => setOverallSlPct(Number(e.target.value))}
-                  className="w-14 bg-slate-50 border border-slate-300 rounded px-1.5 py-0.5 text-center text-xs text-slate-800 font-semibold"
+                  className="w-14 bg-zinc-800 border border-zinc-700 rounded px-1.5 py-0.5 text-center text-xs text-zinc-100 font-semibold"
                 />
                 <span>%</span>
                 <button
                   type="button"
                   onClick={() => { setStrategySlActive(false); setOverallSlPct(0); }}
-                  className="text-slate-400 hover:text-red-500 ml-1"
+                  className="text-zinc-500 hover:text-red-500 ml-1"
                 >
                   ✕
                 </button>
@@ -1489,7 +1505,7 @@ export default function OptionsBacktester({
               <button
                 type="button"
                 onClick={() => { setStrategySlActive(true); setOverallSlPct(35); }}
-                className="text-xs text-[#2596be] hover:underline font-semibold flex items-center gap-0.5 mt-2 cursor-pointer w-fit"
+                className="text-xs text-teal-400 hover:underline font-semibold flex items-center gap-0.5 mt-2 cursor-pointer w-fit"
               >
                 <Plus className="w-3.5 h-3.5 stroke-[2.5]" /> Strategy Stop Loss
               </button>
@@ -1500,20 +1516,20 @@ export default function OptionsBacktester({
         {/* Protect The Profits link centered */}
         <div className="flex justify-center my-3">
           {protectProfitsActive ? (
-            <div className="flex items-center gap-2 bg-oncolor border border-amber-300 rounded px-3 py-1.5 text-xs text-slate-700 shadow-sm">
-              <span className="font-semibold text-amber-700">Protect Profits (Trail SL %):</span>
+            <div className="flex items-center gap-2 bg-zinc-850 border border-zinc-700 rounded px-3 py-1.5 text-xs text-zinc-200 shadow-xs">
+              <span className="font-semibold text-amber-400">Protect Profits (Trail SL %):</span>
               <input
                 type="number"
                 min={1}
                 value={trailSlPct}
                 onChange={e => setTrailSlPct(Number(e.target.value))}
-                className="w-14 bg-slate-50 border border-slate-300 rounded px-1.5 py-0.5 text-center text-xs text-slate-800 font-semibold"
+                className="w-14 bg-zinc-800 border border-zinc-700 rounded px-1.5 py-0.5 text-center text-xs text-zinc-100 font-semibold"
               />
               <span>%</span>
               <button
                 type="button"
                 onClick={() => { setProtectProfitsActive(false); setTrailSlPct(0); }}
-                className="text-slate-400 hover:text-red-500 ml-1"
+                className="text-zinc-500 hover:text-red-500 ml-1"
               >
                 ✕
               </button>
@@ -1522,17 +1538,17 @@ export default function OptionsBacktester({
             <button
               type="button"
               onClick={() => { setProtectProfitsActive(true); setTrailSlPct(15); }}
-              className="text-xs text-[#2596be] hover:underline font-semibold flex items-center gap-1 cursor-pointer"
+              className="text-xs text-teal-400 hover:underline font-semibold flex items-center gap-1 cursor-pointer"
             >
-              <Plus className="w-3.5 h-3.5 stroke-[2.5]" /> Protect The Profits <Info className="w-3 h-3 text-slate-400" />
+              <Plus className="w-3.5 h-3.5 stroke-[2.5]" /> Protect The Profits <Info className="w-3 h-3 text-zinc-500" />
             </button>
           )}
         </div>
 
         {/* ── Data Notice & Change Settings ── */}
-        <div className="text-center text-[11px] text-slate-500 leading-relaxed max-w-4xl mx-auto my-3">
+        <div className="text-center text-[11px] text-zinc-500 leading-relaxed max-w-4xl mx-auto my-3">
           <p>
-            Only <strong className="text-slate-700 font-semibold">Nifty</strong> option data is backed by this backtester today — Banknifty/FinNifty/Sensex selections above run against no real data and won&apos;t produce trades. Nifty data is available from <strong className="text-slate-700 font-semibold">Thu Dec 31 2020</strong>.
+            Only <strong className="text-zinc-200 font-semibold">Nifty</strong> option data is backed by this backtester today — Banknifty/FinNifty/Sensex selections above run against no real data and won&apos;t produce trades. Nifty data is available from <strong className="text-zinc-200 font-semibold">Thu Dec 31 2020</strong>.
           </p>
           <p>
             Nifty lot size is fetched live per period from the master contract, not hardcoded (see the Lot Size field under Change Settings).
@@ -1542,18 +1558,18 @@ export default function OptionsBacktester({
             <button
               type="button"
               onClick={() => setSettingsModalOpen(true)}
-              className="border border-[#54b4c7] text-[#54b4c7] hover:bg-[#54b4c7]/10 px-3 py-1 rounded text-xs font-semibold flex items-center gap-1.5 transition-colors cursor-pointer shadow-sm bg-oncolor"
+              className="border border-zinc-700 bg-zinc-900 hover:bg-zinc-800 text-zinc-300 px-3 py-1 rounded text-xs font-semibold flex items-center gap-1.5 transition-colors cursor-pointer shadow-xs"
             >
               <Settings className="w-3.5 h-3.5" /> Change Settings
             </button>
             <button
               type="button"
               onClick={() => { setHistoryModalOpen(true); fetchHistory(); }}
-              className="border border-[#54b4c7] bg-[#54b4c7] hover:bg-[#469fb1] text-white px-3.5 py-1 rounded text-xs font-semibold flex items-center gap-1.5 transition-colors cursor-pointer shadow-sm"
+              className="border border-teal-500/40 bg-teal-500/15 hover:bg-teal-500/25 text-teal-300 px-3.5 py-1 rounded text-xs font-semibold flex items-center gap-1.5 transition-colors cursor-pointer shadow-xs"
             >
               <History className="w-3.5 h-3.5" /> Past Backtests
               {historyList.length > 0 && (
-                <span className="ml-1 px-1.5 py-0.2 bg-white/25 rounded-full text-[10px] font-bold">
+                <span className="ml-1 px-1.5 py-0.2 bg-teal-500/25 text-teal-200 rounded-full text-[10px] font-bold">
                   {historyList.length}
                 </span>
               )}
@@ -1578,16 +1594,16 @@ export default function OptionsBacktester({
       </div>
 
       {/* ── Bottom Fixed Action Bar ── */}
-      <div className="fixed bottom-0 left-0 right-0 z-40 bg-[#edf2f6]/95 border-t border-slate-300/80 px-4 py-2.5 backdrop-blur-md shadow-lg flex items-center justify-between">
+      <div className="fixed bottom-0 left-0 right-0 z-40 bg-zinc-950/95 border-t border-zinc-800 px-6 py-2.5 backdrop-blur-md shadow-lg flex items-center justify-between text-zinc-300">
         {/* Left: INTRADAY / POSITIONAL */}
-        <div className="flex rounded overflow-hidden border border-slate-300 shadow-sm">
+        <div className="flex rounded overflow-hidden border border-zinc-700 shadow-xs">
           <button
             type="button"
             onClick={() => setExecutionType('INTRADAY')}
             className={`px-3 py-1.5 text-xs font-bold transition-colors ${
               executionType === 'INTRADAY'
-                ? 'bg-[#54b4c7] text-white'
-                : 'bg-oncolor text-slate-600 hover:bg-slate-50'
+                ? 'bg-teal-600 text-oncolor'
+                : 'bg-zinc-900 text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200'
             }`}
           >
             INTRADAY
@@ -1597,8 +1613,8 @@ export default function OptionsBacktester({
             onClick={() => setExecutionType('POSITIONAL')}
             className={`px-3 py-1.5 text-xs font-bold transition-colors ${
               executionType === 'POSITIONAL'
-                ? 'bg-[#54b4c7] text-white'
-                : 'bg-oncolor text-slate-600 hover:bg-slate-50'
+                ? 'bg-teal-600 text-oncolor'
+                : 'bg-zinc-900 text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200'
             }`}
           >
             POSITIONAL
@@ -1610,23 +1626,23 @@ export default function OptionsBacktester({
           <button
             type="button"
             onClick={() => { setHistoryModalOpen(true); fetchHistory(); }}
-            className="border border-slate-300 bg-oncolor hover:bg-slate-50 text-slate-700 font-semibold text-xs px-3 py-1.5 rounded shadow-sm flex items-center gap-1.5 transition-colors cursor-pointer"
+            className="border border-zinc-700 bg-zinc-900 hover:bg-zinc-800 text-zinc-200 font-semibold text-xs px-3.5 py-1.5 rounded shadow-xs flex items-center gap-1.5 transition-colors cursor-pointer"
           >
-            <History className="w-3.5 h-3.5 text-[#54b4c7]" /> Past Runs ({historyList.length})
+            <History className="w-3.5 h-3.5 text-teal-400" /> Past Runs ({historyList.length})
           </button>
           <button
             type="button"
             onClick={handleSaveStrategy}
-            className="bg-[#54b4c7] hover:bg-[#469fb1] text-white font-semibold text-xs px-4 py-1.5 rounded shadow-sm flex items-center gap-1.5 transition-colors cursor-pointer"
+            className="border border-zinc-700 bg-zinc-900 hover:bg-zinc-800 text-zinc-200 font-semibold text-xs px-3.5 py-1.5 rounded shadow-xs flex items-center gap-1.5 transition-colors cursor-pointer"
           >
-            <Save className="w-3.5 h-3.5" /> Save Strategy
+            <Save className="w-3.5 h-3.5 text-teal-400" /> Save Strategy
           </button>
           <button
             type="button"
             onClick={handleShareStrategy}
-            className="bg-[#54b4c7] hover:bg-[#469fb1] text-white font-semibold text-xs px-4 py-1.5 rounded shadow-sm flex items-center gap-1.5 transition-colors cursor-pointer"
+            className="border border-zinc-700 bg-zinc-900 hover:bg-zinc-800 text-zinc-200 font-semibold text-xs px-3.5 py-1.5 rounded shadow-xs flex items-center gap-1.5 transition-colors cursor-pointer"
           >
-            <Share2 className="w-3.5 h-3.5" /> Share Strategy
+            <Share2 className="w-3.5 h-3.5 text-teal-400" /> Share Strategy
           </button>
         </div>
 
@@ -1644,7 +1660,7 @@ export default function OptionsBacktester({
             <button
               type="button"
               onClick={runBacktest}
-              className="bg-[#8ec341] hover:bg-[#7eb034] text-white font-bold text-xs uppercase px-7 py-2 rounded shadow-md tracking-wider cursor-pointer transition-all hover:scale-[1.02] active:scale-[0.98]"
+              className="bg-emerald-600 hover:bg-emerald-500 text-oncolor font-bold text-xs uppercase px-7 py-2 rounded shadow-md tracking-wider cursor-pointer transition-all hover:scale-[1.02] active:scale-[0.98]"
             >
               START BACKTEST
             </button>
@@ -1655,15 +1671,15 @@ export default function OptionsBacktester({
       {/* ── Settings Modal ── */}
       {settingsModalOpen && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-oncolor-dark/70 backdrop-blur-xs p-4">
-          <div className="bg-oncolor rounded-xl shadow-2xl border border-slate-200 max-w-lg w-full p-5 text-slate-700 max-h-[90vh] overflow-y-auto">
-            <div className="flex items-center justify-between border-b border-slate-200 pb-3 mb-4">
-              <h2 className="text-sm font-bold text-slate-800 flex items-center gap-2">
-                <Settings className="w-4 h-4 text-[#54b4c7]" /> Strategy &amp; Simulation Settings
+          <div className="bg-zinc-900 rounded-2xl shadow-2xl border border-zinc-800 max-w-lg w-full p-5 text-zinc-200 max-h-[90vh] overflow-y-auto">
+            <div className="flex items-center justify-between border-b border-zinc-800 pb-3 mb-4">
+              <h2 className="text-sm font-bold text-white flex items-center gap-2">
+                <Settings className="w-4 h-4 text-teal-400" /> Strategy &amp; Simulation Settings
               </h2>
               <button
                 type="button"
                 onClick={() => setSettingsModalOpen(false)}
-                className="text-slate-400 hover:text-slate-600 p-1"
+                className="text-zinc-500 hover:text-zinc-300 p-1"
               >
                 ✕
               </button>
@@ -1672,14 +1688,14 @@ export default function OptionsBacktester({
             <div className="flex flex-col gap-4 text-xs">
               {/* Preset Strategies Quick Loader */}
               <div>
-                <label className="block font-semibold text-slate-600 mb-1">Quick Strategy Presets</label>
+                <label className="block font-semibold text-zinc-300 mb-1">Quick Strategy Presets</label>
                 <select
                   onChange={e => {
                     applyPreset(e.target.value);
                     setSettingsModalOpen(false);
                   }}
                   defaultValue=""
-                  className="w-full bg-slate-50 border border-slate-300 rounded p-2 text-xs"
+                  className="w-full bg-zinc-800 border border-zinc-700 text-zinc-100 rounded p-2 text-xs focus:outline-hidden"
                 >
                   <option value="" disabled>Load a standard preset...</option>
                   <option value="straddle_35sl">9:20 Short Straddle (35% Leg SL)</option>
@@ -1691,48 +1707,48 @@ export default function OptionsBacktester({
 
               {/* Lot size */}
               <div>
-                <label className="block font-semibold text-slate-600 mb-1">Lot Size</label>
+                <label className="block font-semibold text-zinc-300 mb-1">Lot Size</label>
                 <input
                   type="number"
                   min={1}
                   value={lotSize}
                   onChange={e => setLotSize(Number(e.target.value))}
-                  className="w-full border border-slate-300 rounded p-1.5 text-xs"
+                  className="w-full bg-zinc-800 border border-zinc-700 text-zinc-100 rounded p-1.5 text-xs focus:outline-hidden"
                 />
               </div>
 
               {/* Costs & Slippage */}
-              <div className="border border-slate-200 rounded-lg p-3 bg-slate-50/50">
+              <div className="border border-zinc-800 rounded-xl p-3 bg-zinc-850/50">
                 <label className="flex items-center gap-2 cursor-pointer mb-2 font-semibold">
                   <input
                     type="checkbox"
                     checked={includeCosts}
                     onChange={e => setIncludeCosts(e.target.checked)}
-                    className="accent-[#54b4c7] rounded"
+                    className="accent-teal-500 rounded"
                   />
                   <span>Include Costs &amp; Slippage</span>
                 </label>
                 {includeCosts && (
                   <div className="grid grid-cols-2 gap-3 mt-2">
                     <div>
-                      <span className="block text-[11px] text-slate-500 mb-1">Commission / Lot (₹)</span>
+                      <span className="block text-[11px] text-zinc-500 mb-1">Commission / Lot (₹)</span>
                       <input
                         type="number"
                         min={0}
                         value={commissionPerLot}
                         onChange={e => setCommissionPerLot(Number(e.target.value))}
-                        className="w-full bg-oncolor border border-slate-300 rounded p-1.5 text-xs"
+                        className="w-full bg-zinc-800 border border-zinc-700 text-zinc-100 rounded p-1.5 text-xs focus:outline-hidden"
                       />
                     </div>
                     <div>
-                      <span className="block text-[11px] text-slate-500 mb-1">Slippage %</span>
+                      <span className="block text-[11px] text-zinc-500 mb-1">Slippage %</span>
                       <input
                         type="number"
                         min={0}
                         step={0.05}
                         value={slippagePct}
                         onChange={e => setSlippagePct(Number(e.target.value))}
-                        className="w-full bg-oncolor border border-slate-300 rounded p-1.5 text-xs"
+                        className="w-full bg-zinc-800 border border-zinc-700 text-zinc-100 rounded p-1.5 text-xs focus:outline-hidden"
                       />
                     </div>
                   </div>
@@ -1740,7 +1756,7 @@ export default function OptionsBacktester({
               </div>
 
               {/* Rolling straddle mode */}
-              <div className="border border-slate-200 rounded-lg p-3 bg-slate-50/50">
+              <div className="border border-zinc-800 rounded-xl p-3 bg-zinc-850/50">
                 <span className="block font-semibold mb-2">Dynamic Roll Adjustment</span>
                 <div className="flex gap-4 mb-2">
                   <label className="flex items-center gap-1.5 cursor-pointer">
@@ -1749,7 +1765,7 @@ export default function OptionsBacktester({
                       name="adjMode"
                       checked={adjustmentMode === 'none'}
                       onChange={() => setAdjustmentMode('none')}
-                      className="accent-[#54b4c7]"
+                      className="accent-teal-500"
                     />
                     <span>Static Hold</span>
                   </label>
@@ -1759,7 +1775,7 @@ export default function OptionsBacktester({
                       name="adjMode"
                       checked={adjustmentMode === 'rolling_straddle'}
                       onChange={() => setAdjustmentMode('rolling_straddle')}
-                      className="accent-[#54b4c7]"
+                      className="accent-teal-500"
                     />
                     <span>ATM Roll (Rolling Straddle)</span>
                   </label>
@@ -1767,21 +1783,21 @@ export default function OptionsBacktester({
                 {adjustmentMode === 'rolling_straddle' && (
                   <div className="grid grid-cols-2 gap-3 mt-2">
                     <div>
-                      <span className="block text-[11px] text-slate-500 mb-1">Roll Buffer</span>
+                      <span className="block text-[11px] text-zinc-500 mb-1">Roll Buffer</span>
                       <input
                         type="number"
                         value={rollBuffer}
                         onChange={e => setRollBuffer(Number(e.target.value))}
-                        className="w-full bg-oncolor border border-slate-300 rounded p-1.5 text-xs"
+                        className="w-full bg-zinc-800 border border-zinc-700 text-zinc-100 rounded p-1.5 text-xs focus:outline-hidden"
                       />
                     </div>
                     <div>
-                      <span className="block text-[11px] text-slate-500 mb-1">Max Rolls / Day</span>
+                      <span className="block text-[11px] text-zinc-500 mb-1">Max Rolls / Day</span>
                       <input
                         type="number"
                         value={maxRolls}
                         onChange={e => setMaxRolls(Number(e.target.value))}
-                        className="w-full bg-oncolor border border-slate-300 rounded p-1.5 text-xs"
+                        className="w-full bg-zinc-800 border border-zinc-700 text-zinc-100 rounded p-1.5 text-xs focus:outline-hidden"
                       />
                     </div>
                   </div>
@@ -1789,11 +1805,11 @@ export default function OptionsBacktester({
               </div>
             </div>
 
-            <div className="mt-5 pt-3 border-t border-slate-200 flex justify-end">
+            <div className="mt-5 pt-3 border-t border-zinc-800 flex justify-end">
               <button
                 type="button"
                 onClick={() => setSettingsModalOpen(false)}
-                className="bg-[#54b4c7] hover:bg-[#459eb0] text-white px-4 py-1.5 rounded text-xs font-semibold"
+                className="bg-teal-600 hover:bg-teal-500 text-oncolor px-4 py-1.5 rounded text-xs font-semibold cursor-pointer"
               >
                 Apply &amp; Close
               </button>
@@ -1805,32 +1821,32 @@ export default function OptionsBacktester({
       {/* ── Progress Overlay Modal during Backtest ── */}
       {loading && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-oncolor-dark/70 backdrop-blur-xs p-4">
-          <div className="bg-oncolor rounded-2xl shadow-2xl border border-slate-200 p-6 max-w-md w-full text-center">
-            <div className="w-12 h-12 rounded-full bg-[#54b4c7]/15 flex items-center justify-center mx-auto mb-4 animate-spin text-[#54b4c7]">
+          <div className="bg-zinc-900 rounded-2xl shadow-2xl border border-zinc-800 p-6 max-w-md w-full text-center text-zinc-200">
+            <div className="w-12 h-12 rounded-full bg-teal-500/15 flex items-center justify-center mx-auto mb-4 animate-spin text-teal-400">
               <RefreshCw className="w-6 h-6" />
             </div>
-            <h3 className="text-sm font-bold text-slate-800 mb-1">Simulating Historical Option Trades</h3>
-            <p className="text-xs text-slate-500 mb-4">
+            <h3 className="text-sm font-bold text-white mb-1">Simulating Historical Option Trades</h3>
+            <p className="text-xs text-zinc-500 mb-4">
               Analyzing 1-min OHLC, underlying spot &amp; strikes across historical cycles…
             </p>
 
             {/* Progress bar */}
-            <div className="w-full bg-slate-100 rounded-full h-3.5 overflow-hidden p-0.5 border border-slate-200 mb-2">
+            <div className="w-full bg-zinc-800 rounded-full h-3.5 overflow-hidden p-0.5 border border-zinc-700 mb-2">
               <div
-                className="bg-[#54b4c7] h-full rounded-full transition-all duration-300"
+                className="bg-teal-500 h-full rounded-full transition-all duration-300"
                 style={{ width: `${Math.max(3, statusData?.percent ?? 0)}%` }}
               />
             </div>
 
-            <div className="flex justify-between text-xs font-medium text-slate-500 mb-4">
+            <div className="flex justify-between text-xs font-medium text-zinc-500 mb-4">
               <span>{statusData?.percent?.toFixed(1) ?? '0.0'}% completed</span>
               <span>{statusData?.current ?? 0} / {statusData?.total || '—'} days</span>
             </div>
 
             {statusData?.date && (
-              <div className="bg-slate-50 border border-slate-200 rounded px-3 py-1.5 text-xs text-slate-600 mb-4 flex justify-between font-mono">
+              <div className="bg-zinc-850 border border-zinc-800 rounded px-3 py-1.5 text-xs text-zinc-400 mb-4 flex justify-between font-mono">
                 <span>Processing Date:</span>
-                <span className="font-bold text-slate-800">{statusData.date}</span>
+                <span className="font-bold text-white">{statusData.date}</span>
               </div>
             )}
 
@@ -1847,20 +1863,20 @@ export default function OptionsBacktester({
 
       {/* ── Backtest Results Section ── */}
       {result && s && (
-        <div ref={resultsRef} className="w-full max-w-[1550px] mx-auto px-4 mt-8 pt-6 border-t border-slate-300">
+        <div ref={resultsRef} className="w-full max-w-[1550px] mx-auto px-4 mt-8 pt-6 border-t border-zinc-800">
           {/* Loaded from History Banner */}
           {loadedFromHistory && (
-            <div className="mb-4 bg-teal-50 border border-teal-200 text-teal-900 rounded-xl p-3.5 flex items-center justify-between shadow-xs flex-wrap gap-2">
+            <div className="mb-4 bg-teal-500/10 border border-teal-500/30 text-teal-200 rounded-xl p-3.5 flex items-center justify-between shadow-xs flex-wrap gap-2">
               <div className="flex items-center gap-2.5">
-                <div className="w-7 h-7 rounded-lg bg-[#54b4c7]/20 flex items-center justify-center text-[#54b4c7]">
+                <div className="w-7 h-7 rounded-lg bg-teal-500/20 flex items-center justify-center text-teal-400">
                   <History className="w-4 h-4" />
                 </div>
                 <div>
-                  <div className="text-xs font-bold text-slate-800 flex items-center gap-2">
+                  <div className="text-xs font-bold text-white flex items-center gap-2">
                     <span>Viewing Archived Backtest:</span>
-                    <span className="text-[#2596be]">{loadedFromHistory.name}</span>
+                    <span className="text-teal-400 font-bold">{loadedFromHistory.name}</span>
                   </div>
-                  <div className="text-[11px] text-slate-500 font-mono">
+                  <div className="text-[11px] text-zinc-500 font-mono">
                     ID: {loadedFromHistory.id} &bull; Period: {loadedFromHistory.start_date || '—'} &rarr; {loadedFromHistory.end_date || '—'} &bull; {loadedFromHistory.trades} cycles
                   </div>
                 </div>
@@ -1870,25 +1886,25 @@ export default function OptionsBacktester({
                   <button
                     type="button"
                     onClick={() => setViewingReportId(loadedFromHistory.id)}
-                    className="border border-emerald-500 text-emerald-700 bg-white hover:bg-emerald-50 px-2.5 py-1 rounded text-xs font-semibold flex items-center gap-1 transition-colors cursor-pointer shadow-xs"
+                    className="border border-emerald-500/40 text-emerald-300 bg-emerald-500/10 hover:bg-emerald-500/20 px-2.5 py-1 rounded text-xs font-semibold flex items-center gap-1 transition-colors cursor-pointer shadow-xs"
                   >
-                    <FileText className="w-3.5 h-3.5 text-emerald-600" /> Research Report
+                    <FileText className="w-3.5 h-3.5 text-emerald-400" /> Research Report
                   </button>
                 )}
                 {loadedFromHistory.has_tearsheet && (
                   <button
                     type="button"
                     onClick={() => setViewingTearsheetId(loadedFromHistory.id)}
-                    className="border border-[#54b4c7] text-[#54b4c7] bg-white hover:bg-teal-50 px-2.5 py-1 rounded text-xs font-semibold flex items-center gap-1 transition-colors cursor-pointer shadow-xs"
+                    className="border border-teal-500/40 text-teal-300 bg-teal-500/10 hover:bg-teal-500/20 px-2.5 py-1 rounded text-xs font-semibold flex items-center gap-1 transition-colors cursor-pointer shadow-xs"
                   >
-                    <FileText className="w-3.5 h-3.5" /> Tearsheet
+                    <FileText className="w-3.5 h-3.5 text-teal-400" /> Tearsheet
                   </button>
                 )}
                 {loadedFromHistory.has_trades_csv && (
                   <a
                     href={`/api/backtest/history?id=${encodeURIComponent(loadedFromHistory.id)}&file=csv`}
                     download
-                    className="border border-slate-300 text-slate-700 bg-white hover:bg-slate-50 px-2.5 py-1 rounded text-xs font-semibold flex items-center gap-1 transition-colors cursor-pointer shadow-xs"
+                    className="border border-zinc-700 text-zinc-300 bg-zinc-800 hover:bg-zinc-700 px-2.5 py-1 rounded text-xs font-semibold flex items-center gap-1 transition-colors cursor-pointer shadow-xs"
                   >
                     <Download className="w-3.5 h-3.5" /> CSV
                   </a>
@@ -1896,7 +1912,7 @@ export default function OptionsBacktester({
                 <button
                   type="button"
                   onClick={() => setLoadedFromHistory(null)}
-                  className="text-slate-400 hover:text-slate-600 px-1 text-xs"
+                  className="text-zinc-500 hover:text-zinc-300 px-1 text-xs"
                   title="Dismiss banner"
                 >
                   ✕
@@ -1906,8 +1922,8 @@ export default function OptionsBacktester({
           )}
           <div className="flex items-center justify-between mb-4 flex-wrap gap-2">
             <div>
-              <span className="text-[10px] font-bold text-[#54b4c7] uppercase tracking-wider block">Simulation Complete</span>
-              <h2 className="text-lg font-bold text-slate-800">Backtest Performance Report</h2>
+              <span className="text-[10px] font-bold text-teal-400 uppercase tracking-wider block">Simulation Complete</span>
+              <h2 className="text-lg font-bold text-white">Backtest Performance Report</h2>
             </div>
             <div className="flex items-center gap-2 flex-wrap">
               {(loadedFromHistory?.has_report || historyList.some(h => h.has_report)) && (
@@ -1919,7 +1935,7 @@ export default function OptionsBacktester({
                   <FileText className="w-3.5 h-3.5" /> View Research Report &amp; Trade Details
                 </button>
               )}
-              <div className="text-xs font-mono text-slate-500 bg-oncolor border border-slate-300 rounded px-3 py-1">
+              <div className="text-xs font-mono text-zinc-400 bg-zinc-900 border border-zinc-800 rounded px-3 py-1">
                 {s.traded_cycles} Trades ({startDate} &rarr; {endDate})
               </div>
             </div>
@@ -1927,118 +1943,118 @@ export default function OptionsBacktester({
 
           {/* Headline KPIs */}
           <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3 mb-6">
-            <div className="bg-oncolor border border-slate-200 rounded-xl p-3 shadow-xs">
-              <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider block mb-1">Overall Profit</span>
+            <div className="bg-zinc-900 border border-zinc-800 rounded-xl p-3 shadow-xs">
+              <span className="text-[10px] font-bold text-zinc-500 uppercase tracking-wider block mb-1">Overall Profit</span>
               <span className={`text-xl font-bold font-mono ${s.total_pnl >= 0 ? 'text-emerald-600' : 'text-red-600'}`}>
                 {fmtPnl(s.total_pnl)}
               </span>
             </div>
 
-            <div className="bg-oncolor border border-slate-200 rounded-xl p-3 shadow-xs">
-              <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider block mb-1">Win Rate</span>
+            <div className="bg-zinc-900 border border-zinc-800 rounded-xl p-3 shadow-xs">
+              <span className="text-[10px] font-bold text-zinc-500 uppercase tracking-wider block mb-1">Win Rate</span>
               <span className={`text-xl font-bold font-mono ${s.win_rate >= 50 ? 'text-emerald-600' : 'text-red-600'}`}>
                 {s.win_rate.toFixed(1)}%
               </span>
-              <span className="text-[10px] text-slate-500 block mt-0.5">{s.wins}W / {s.losses}L</span>
+              <span className="text-[10px] text-zinc-500 block mt-0.5">{s.wins}W / {s.losses}L</span>
             </div>
 
-            <div className="bg-oncolor border border-slate-200 rounded-xl p-3 shadow-xs">
-              <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider block mb-1">Max Drawdown</span>
+            <div className="bg-zinc-900 border border-zinc-800 rounded-xl p-3 shadow-xs">
+              <span className="text-[10px] font-bold text-zinc-500 uppercase tracking-wider block mb-1">Max Drawdown</span>
               <span className="text-xl font-bold font-mono text-amber-600">
                 ₹{fmt(s.max_drawdown)}
               </span>
               {s.max_drawdown_days != null && (
-                <span className="text-[10px] text-slate-500 block mt-0.5">{s.max_drawdown_days} days</span>
+                <span className="text-[10px] text-zinc-500 block mt-0.5">{s.max_drawdown_days} days</span>
               )}
             </div>
 
-            <div className="bg-oncolor border border-slate-200 rounded-xl p-3 shadow-xs">
-              <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider block mb-1">Traded Cycles</span>
-              <span className="text-xl font-bold font-mono text-slate-800">
+            <div className="bg-zinc-900 border border-zinc-800 rounded-xl p-3 shadow-xs">
+              <span className="text-[10px] font-bold text-zinc-500 uppercase tracking-wider block mb-1">Traded Cycles</span>
+              <span className="text-xl font-bold font-mono text-zinc-100">
                 {s.traded_cycles}
               </span>
-              <span className="text-[10px] text-slate-500 block mt-0.5">of {s.total_cycles} evaluated</span>
+              <span className="text-[10px] text-zinc-500 block mt-0.5">of {s.total_cycles} evaluated</span>
             </div>
 
-            <div className="bg-oncolor border border-slate-200 rounded-xl p-3 shadow-xs">
-              <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider block mb-1">Return / Max DD</span>
-              <span className="text-xl font-bold font-mono text-slate-800">
+            <div className="bg-zinc-900 border border-zinc-800 rounded-xl p-3 shadow-xs">
+              <span className="text-[10px] font-bold text-zinc-500 uppercase tracking-wider block mb-1">Return / Max DD</span>
+              <span className="text-xl font-bold font-mono text-zinc-100">
                 {s.return_maxdd_ratio != null ? s.return_maxdd_ratio.toFixed(2) : '—'}
               </span>
             </div>
 
-            <div className="bg-oncolor border border-slate-200 rounded-xl p-3 shadow-xs">
-              <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider block mb-1">Reward : Risk</span>
-              <span className="text-xl font-bold font-mono text-slate-800">
+            <div className="bg-zinc-900 border border-zinc-800 rounded-xl p-3 shadow-xs">
+              <span className="text-[10px] font-bold text-zinc-500 uppercase tracking-wider block mb-1">Reward : Risk</span>
+              <span className="text-xl font-bold font-mono text-zinc-100">
                 {s.reward_risk_ratio != null ? s.reward_risk_ratio.toFixed(2) : '—'}
               </span>
             </div>
           </div>
 
           {/* Detailed Statistics Matrix */}
-          <div className="bg-oncolor border border-slate-200 rounded-xl p-4 shadow-xs mb-6">
-            <h3 className="text-xs font-bold text-slate-700 uppercase tracking-wider mb-3">Detailed Statistics</h3>
+          <div className="bg-zinc-900 border border-zinc-800 rounded-xl p-4 shadow-xs mb-6">
+            <h3 className="text-xs font-bold text-zinc-200 uppercase tracking-wider mb-3">Detailed Statistics</h3>
             <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-4 text-xs">
               <div>
-                <span className="text-slate-400 block mb-0.5">Avg Profit / Trade</span>
+                <span className="text-zinc-500 block mb-0.5">Avg Profit / Trade</span>
                 <span className={`font-mono font-bold ${s.avg_pnl >= 0 ? 'text-emerald-600' : 'text-red-600'}`}>
                   {fmtPnl(s.avg_pnl)}
                 </span>
               </div>
               <div>
-                <span className="text-slate-400 block mb-0.5">Avg Winning Trade</span>
+                <span className="text-zinc-500 block mb-0.5">Avg Winning Trade</span>
                 <span className="font-mono font-bold text-emerald-600">{fmtPnl(s.avg_win)}</span>
               </div>
               <div>
-                <span className="text-slate-400 block mb-0.5">Avg Losing Trade</span>
+                <span className="text-zinc-500 block mb-0.5">Avg Losing Trade</span>
                 <span className="font-mono font-bold text-red-600">-₹{fmt(s.avg_loss)}</span>
               </div>
               <div>
-                <span className="text-slate-400 block mb-0.5">Max Single Profit</span>
+                <span className="text-zinc-500 block mb-0.5">Max Single Profit</span>
                 <span className="font-mono font-bold text-emerald-600">{fmtPnl(s.max_win)}</span>
               </div>
               <div>
-                <span className="text-slate-400 block mb-0.5">Max Single Loss</span>
+                <span className="text-zinc-500 block mb-0.5">Max Single Loss</span>
                 <span className="font-mono font-bold text-red-600">{fmtPnl(s.max_loss)}</span>
               </div>
               <div>
-                <span className="text-slate-400 block mb-0.5">Commission Paid</span>
-                <span className="font-mono font-bold text-slate-700">₹{fmt(s.commission_paid)}</span>
+                <span className="text-zinc-500 block mb-0.5">Commission Paid</span>
+                <span className="font-mono font-bold text-zinc-200">₹{fmt(s.commission_paid)}</span>
               </div>
               <div>
-                <span className="text-slate-400 block mb-0.5">Max Win Streak</span>
+                <span className="text-zinc-500 block mb-0.5">Max Win Streak</span>
                 <span className="font-mono font-bold text-emerald-600">{s.max_win_streak}</span>
               </div>
               <div>
-                <span className="text-slate-400 block mb-0.5">Max Loss Streak</span>
+                <span className="text-zinc-500 block mb-0.5">Max Loss Streak</span>
                 <span className="font-mono font-bold text-red-600">{s.max_loss_streak}</span>
               </div>
               <div>
-                <span className="text-slate-400 block mb-0.5">Max Trades in DD</span>
+                <span className="text-zinc-500 block mb-0.5">Max Trades in DD</span>
                 <span className="font-mono font-bold text-amber-600">{s.max_trades_in_drawdown}</span>
               </div>
               <div>
-                <span className="text-slate-400 block mb-0.5">Expectancy Ratio</span>
-                <span className="font-mono font-bold text-slate-700">{s.expectancy_ratio != null ? s.expectancy_ratio.toFixed(2) : '—'}</span>
+                <span className="text-zinc-500 block mb-0.5">Expectancy Ratio</span>
+                <span className="font-mono font-bold text-zinc-200">{s.expectancy_ratio != null ? s.expectancy_ratio.toFixed(2) : '—'}</span>
               </div>
             </div>
           </div>
 
           {/* Year-wise Returns Matrix */}
           {Object.keys(result.monthly_pnl).length > 0 && (
-            <div className="bg-oncolor border border-slate-200 rounded-xl overflow-hidden shadow-xs mb-6">
-              <div className="px-4 py-3 border-b border-slate-200 bg-slate-50 flex items-center justify-between">
-                <h3 className="text-xs font-bold text-slate-700 uppercase tracking-wider">Year-wise &amp; Month-wise Returns</h3>
+            <div className="bg-zinc-900 border border-zinc-800 rounded-xl overflow-hidden shadow-xs mb-6">
+              <div className="px-4 py-3 border-b border-zinc-800 bg-zinc-850/60 flex items-center justify-between">
+                <h3 className="text-xs font-bold text-zinc-200 uppercase tracking-wider">Year-wise &amp; Month-wise Returns</h3>
               </div>
               <div className="overflow-x-auto">
                 <table className="text-xs whitespace-nowrap w-full">
                   <thead>
-                    <tr className="bg-slate-100 text-slate-600 border-b border-slate-200">
+                    <tr className="bg-zinc-800 text-white border-b border-zinc-700">
                       <th className="font-bold text-left px-3 py-2">Year</th>
                       {MONTHS.map(m => (
                         <th key={m} className="font-bold text-right px-2 py-2">{m}</th>
                       ))}
-                      <th className="font-bold text-right px-3 py-2 border-l border-slate-200">Total</th>
+                      <th className="font-bold text-right px-3 py-2 border-l border-zinc-800">Total</th>
                       <th className="font-bold text-right px-3 py-2">Max DD</th>
                       <th className="font-bold text-right px-3 py-2">Days</th>
                       <th className="font-bold text-right px-3 py-2">R/MDD</th>
@@ -2051,8 +2067,8 @@ export default function OptionsBacktester({
                       const { mdd, days } = computeYearMDD(result.equity_curve, yr);
                       const rMdd = mdd > 0 ? (total / mdd).toFixed(2) : '—';
                       return (
-                        <tr key={yr} className={`border-t border-slate-200 ${i % 2 === 0 ? 'bg-oncolor' : 'bg-slate-50/50'}`}>
-                          <td className="px-3 py-2 font-bold text-slate-800">{yr}</td>
+                        <tr key={yr} className={`border-t border-zinc-800 ${i % 2 === 0 ? 'bg-zinc-900' : 'bg-zinc-850/40'}`}>
+                          <td className="px-3 py-2 font-bold text-zinc-100">{yr}</td>
                           {MONTHS.map(m => {
                             const v = yData[m];
                             const isPositive = v != null && v > 0;
@@ -2061,23 +2077,23 @@ export default function OptionsBacktester({
                               <td
                                 key={m}
                                 className={`px-2 py-2 text-right font-mono ${
-                                  isPositive ? 'text-emerald-600 font-medium' : isNegative ? 'text-red-600 font-medium' : 'text-slate-400'
+                                  isPositive ? 'text-emerald-600 font-medium' : isNegative ? 'text-red-600 font-medium' : 'text-zinc-500'
                                 }`}
                               >
                                 {v != null && v !== 0 ? (v > 0 ? '+' : '') + Math.round(v).toLocaleString('en-IN') : '—'}
                               </td>
                             );
                           })}
-                          <td className={`px-3 py-2 text-right font-mono font-bold border-l border-slate-200 ${total >= 0 ? 'text-emerald-600' : 'text-red-600'}`}>
+                          <td className={`px-3 py-2 text-right font-mono font-bold border-l border-zinc-800 ${total >= 0 ? 'text-emerald-600' : 'text-red-600'}`}>
                             {total !== 0 ? (total > 0 ? '+' : '') + Math.round(total).toLocaleString('en-IN') : '—'}
                           </td>
                           <td className="px-3 py-2 text-right font-mono text-amber-600 font-medium">
                             {mdd > 0 ? `₹${mdd.toLocaleString('en-IN')}` : '—'}
                           </td>
-                          <td className="px-3 py-2 text-right font-mono text-slate-500">
+                          <td className="px-3 py-2 text-right font-mono text-zinc-500">
                             {days != null ? days : '—'}
                           </td>
-                          <td className="px-3 py-2 text-right font-mono text-slate-700">
+                          <td className="px-3 py-2 text-right font-mono text-zinc-200">
                             {rMdd}
                           </td>
                         </tr>
@@ -2096,14 +2112,14 @@ export default function OptionsBacktester({
               so any gap vs. the "Detailed Statistics" box above is a stats-
               methodology difference, not a different backtest. */}
           {result.vbt && !result.vbt.error && (
-            <div className="bg-oncolor border border-slate-200 rounded-xl p-4 shadow-xs mb-6">
+            <div className="bg-zinc-900 border border-zinc-800 rounded-xl p-4 shadow-xs mb-6">
               <div className="flex items-center justify-between flex-wrap gap-2 mb-3">
-                <h3 className="text-xs font-bold text-slate-700 uppercase tracking-wider">
-                  VectorBT Stats <span className="text-slate-400 font-normal normal-case">(same trades, computed by vbt.Portfolio)</span>
+                <h3 className="text-xs font-bold text-zinc-200 uppercase tracking-wider">
+                  VectorBT Stats <span className="text-zinc-500 font-normal normal-case">(same trades, computed by vbt.Portfolio)</span>
                 </h3>
                 {result.vbt.tearsheet_available && (
                   <a href="/api/backtest-vectorbt/report" target="_blank" rel="noopener noreferrer"
-                     className="text-[11px] font-bold text-[#54b4c7] hover:underline">
+                     className="text-[11px] font-bold text-teal-400 hover:underline">
                     Open OpenStatz Tearsheet →
                   </a>
                 )}
@@ -2113,7 +2129,7 @@ export default function OptionsBacktester({
                 <div className="overflow-x-auto mb-4">
                   <table className="w-full text-xs">
                     <thead>
-                      <tr className="bg-slate-100 text-slate-600 border-b border-slate-200">
+                      <tr className="bg-zinc-800 text-white border-b border-zinc-700">
                         {Object.keys(result.vbt.comparison[0]).map(col => (
                           <th key={col} className="text-left font-bold px-3 py-1.5">{col}</th>
                         ))}
@@ -2121,9 +2137,9 @@ export default function OptionsBacktester({
                     </thead>
                     <tbody>
                       {result.vbt.comparison.map((row, i) => (
-                        <tr key={i} className="border-b border-slate-100 last:border-0">
+                        <tr key={i} className="border-b border-zinc-800 last:border-0 hover:bg-zinc-800/40">
                           {Object.entries(row).map(([col, val]) => (
-                            <td key={col} className="px-3 py-1.5 font-mono text-slate-700">{String(val)}</td>
+                            <td key={col} className="px-3 py-1.5 font-mono text-zinc-200">{String(val)}</td>
                           ))}
                         </tr>
                       ))}
@@ -2135,16 +2151,16 @@ export default function OptionsBacktester({
               {result.vbt.stats && (
                 <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-x-6 gap-y-1.5 text-xs">
                   {Object.entries(result.vbt.stats).map(([key, val]) => (
-                    <div key={key} className="flex justify-between border-b border-slate-100 py-1">
-                      <span className="text-slate-400">{key.replace(' [%]', '')}</span>
-                      <span className="text-slate-700 font-mono font-medium">{formatVbtStat(key, val)}</span>
+                    <div key={key} className="flex justify-between border-b border-zinc-800 py-1">
+                      <span className="text-zinc-500">{key.replace(' [%]', '')}</span>
+                      <span className="text-zinc-200 font-mono font-medium">{formatVbtStat(key, val)}</span>
                     </div>
                   ))}
                 </div>
               )}
 
               {result.vbt.monte_carlo_summary && (
-                <p className="text-[11px] text-slate-500 mt-3">{result.vbt.monte_carlo_summary}</p>
+                <p className="text-[11px] text-zinc-500 mt-3">{result.vbt.monte_carlo_summary}</p>
               )}
             </div>
           )}
@@ -2155,58 +2171,58 @@ export default function OptionsBacktester({
           )}
 
           {/* Equity Curve & Underwater Charts */}
-          <div className="bg-oncolor border border-slate-200 rounded-xl p-4 shadow-xs mb-6">
-            <h3 className="text-xs font-bold text-slate-700 uppercase tracking-wider mb-4">Cumulative Equity &amp; Drawdown Curve</h3>
+          <div className="bg-zinc-900 border border-zinc-800 rounded-xl p-4 shadow-xs mb-6">
+            <h3 className="text-xs font-bold text-zinc-200 uppercase tracking-wider mb-4">Cumulative Equity &amp; Drawdown Curve</h3>
             <BacktestCharts equityCurve={result.equity_curve} />
           </div>
 
           {/* Full Trade Log Table */}
-          <div className="bg-oncolor border border-slate-200 rounded-xl overflow-hidden shadow-xs mb-8">
-            <div className="px-4 py-3 border-b border-slate-200 bg-slate-50 flex items-center justify-between">
-              <h3 className="text-xs font-bold text-slate-700 uppercase tracking-wider">
+          <div className="bg-zinc-900 border border-zinc-800 rounded-xl overflow-hidden shadow-xs mb-8">
+            <div className="px-4 py-3 border-b border-zinc-800 bg-zinc-850/60 flex items-center justify-between">
+              <h3 className="text-xs font-bold text-zinc-200 uppercase tracking-wider">
                 Full Execution Trade Log ({result.cycles.filter(c => c.exit_reason !== 'NO_ENTRY').length} cycles)
               </h3>
             </div>
             <div className="overflow-x-auto">
               <table className="text-xs whitespace-nowrap w-full">
                 <thead>
-                  <tr className="bg-slate-100 text-slate-600 border-b border-slate-200">
+                  <tr className="bg-zinc-800 text-white border-b border-zinc-700">
                     <th className="font-bold text-left px-3 py-2">#</th>
                     <th className="font-bold text-left px-3 py-2">Entry Date</th>
                     <th className="font-bold text-right px-2 py-2">Time</th>
-                    <th className="font-bold text-left px-3 py-2 border-l border-slate-200">Exit Date</th>
+                    <th className="font-bold text-left px-3 py-2 border-l border-zinc-800">Exit Date</th>
                     <th className="font-bold text-right px-2 py-2">Time</th>
-                    <th className="font-bold text-center px-2 py-2 border-l border-slate-200">Type</th>
+                    <th className="font-bold text-center px-2 py-2 border-l border-zinc-800">Type</th>
                     <th className="font-bold text-right px-2 py-2">Spot</th>
-                    <th className="font-bold text-right px-3 py-2 border-l border-slate-200">Entry ₹</th>
+                    <th className="font-bold text-right px-3 py-2 border-l border-zinc-800">Entry ₹</th>
                     <th className="font-bold text-right px-3 py-2">Exit ₹</th>
-                    <th className="font-bold text-right px-3 py-2 border-l border-slate-200">P/L</th>
+                    <th className="font-bold text-right px-3 py-2 border-l border-zinc-800">P/L</th>
                     <th className="font-bold text-center px-2 py-2">Reason</th>
                   </tr>
                 </thead>
                 <tbody>
                   {result.cycles.filter(c => c.exit_reason !== 'NO_ENTRY').slice(0, 100).map((c, idx) => (
-                    <tr key={idx} className={`border-t border-slate-200 ${idx % 2 === 0 ? 'bg-oncolor' : 'bg-slate-50/50'}`}>
-                      <td className="px-3 py-2 text-slate-500 font-bold">{idx + 1}</td>
-                      <td className="px-3 py-2 text-slate-700 font-mono">{fmtDate(c.entry_dt)}</td>
-                      <td className="px-2 py-2 text-right text-slate-500 font-mono">{fmtTime(c.entry_dt)}</td>
-                      <td className="px-3 py-2 text-slate-700 font-mono border-l border-slate-200">{fmtDate(c.exit_dt)}</td>
-                      <td className="px-2 py-2 text-right text-slate-500 font-mono">{fmtTime(c.exit_dt)}</td>
-                      <td className="px-2 py-2 text-center border-l border-slate-200 font-medium">{cycleTypeLabel(c.legs)}</td>
-                      <td className="px-2 py-2 text-right font-mono text-slate-600">
+                    <tr key={idx} className={`border-t border-zinc-800 ${idx % 2 === 0 ? 'bg-zinc-900' : 'bg-zinc-850/40'}`}>
+                      <td className="px-3 py-2 text-zinc-500 font-bold">{idx + 1}</td>
+                      <td className="px-3 py-2 text-zinc-200 font-mono">{fmtDate(c.entry_dt)}</td>
+                      <td className="px-2 py-2 text-right text-zinc-500 font-mono">{fmtTime(c.entry_dt)}</td>
+                      <td className="px-3 py-2 text-zinc-200 font-mono border-l border-zinc-800">{fmtDate(c.exit_dt)}</td>
+                      <td className="px-2 py-2 text-right text-zinc-500 font-mono">{fmtTime(c.exit_dt)}</td>
+                      <td className="px-2 py-2 text-center border-l border-zinc-800 font-medium">{cycleTypeLabel(c.legs)}</td>
+                      <td className="px-2 py-2 text-right font-mono text-zinc-300">
                         {c.entry_spot != null ? Math.round(c.entry_spot).toLocaleString('en-IN') : '—'}
                       </td>
-                      <td className="px-3 py-2 text-right font-mono text-slate-700 border-l border-slate-200">
+                      <td className="px-3 py-2 text-right font-mono text-zinc-200 border-l border-zinc-800">
                         {c.net_credit != null ? c.net_credit.toFixed(2) : '—'}
                       </td>
-                      <td className="px-3 py-2 text-right font-mono text-slate-700">
+                      <td className="px-3 py-2 text-right font-mono text-zinc-200">
                         {c.exit_combined != null ? Math.abs(c.exit_combined).toFixed(2) : '—'}
                       </td>
-                      <td className={`px-3 py-2 text-right font-mono font-bold border-l border-slate-200 ${c.pnl >= 0 ? 'text-emerald-600' : 'text-red-600'}`}>
+                      <td className={`px-3 py-2 text-right font-mono font-bold border-l border-zinc-800 ${c.pnl >= 0 ? 'text-emerald-600' : 'text-red-600'}`}>
                         {fmtPnl(c.pnl)}
                       </td>
                       <td className="px-2 py-2 text-center">
-                        <span className={`inline-block px-2 py-0.5 rounded text-[10px] font-bold ${EXIT_REASON_CLS[c.exit_reason] ?? 'bg-slate-100 text-slate-600'}`}>
+                        <span className={`inline-block px-2 py-0.5 rounded text-[10px] font-bold ${EXIT_REASON_CLS[c.exit_reason] ?? 'bg-zinc-800 text-zinc-400'}`}>
                           {c.exit_reason}
                         </span>
                       </td>
@@ -2223,15 +2239,15 @@ export default function OptionsBacktester({
       {/* ── Past Backtests History Modal ── */}
       {historyModalOpen && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-oncolor-dark/70 backdrop-blur-xs p-4">
-          <div className="bg-oncolor rounded-2xl shadow-2xl border border-slate-200 max-w-4xl w-full p-5 text-slate-700 max-h-[88vh] flex flex-col">
+          <div className="bg-zinc-900 rounded-2xl shadow-2xl border border-zinc-800 max-w-4xl w-full p-5 text-zinc-200 max-h-[88vh] flex flex-col">
             {/* Header */}
-            <div className="flex items-center justify-between border-b border-slate-200 pb-3 mb-3">
+            <div className="flex items-center justify-between border-b border-zinc-800 pb-3 mb-3">
               <div>
-                <h2 className="text-sm font-bold text-slate-800 flex items-center gap-2">
-                  <History className="w-4 h-4 text-[#54b4c7]" /> Past Options Backtests
+                <h2 className="text-sm font-bold text-white flex items-center gap-2">
+                  <History className="w-4 h-4 text-teal-400" /> Past Options Backtests
                 </h2>
-                <p className="text-[11px] text-slate-400 mt-0.5">
-                  Archived simulations stored under <code className="bg-slate-100 px-1 py-0.5 rounded text-[10px] font-mono text-slate-600">debug/backtests/options/</code>
+                <p className="text-[11px] text-zinc-500 mt-0.5">
+                  Archived simulations stored under <code className="bg-zinc-800 px-1 py-0.5 rounded text-[10px] font-mono text-zinc-300">debug/backtests/options/</code>
                 </p>
               </div>
               <div className="flex items-center gap-2">
@@ -2239,14 +2255,14 @@ export default function OptionsBacktester({
                   type="button"
                   onClick={fetchHistory}
                   title="Refresh backtest list"
-                  className="p-1.5 text-slate-400 hover:text-slate-600 rounded hover:bg-slate-100 transition-colors cursor-pointer"
+                  className="p-1.5 text-zinc-400 hover:text-zinc-200 rounded hover:bg-zinc-800 transition-colors cursor-pointer"
                 >
-                  <RefreshCw className={`w-3.5 h-3.5 ${loadingHistory ? 'animate-spin text-[#54b4c7]' : ''}`} />
+                  <RefreshCw className={`w-3.5 h-3.5 ${loadingHistory ? 'animate-spin text-teal-400' : ''}`} />
                 </button>
                 <button
                   type="button"
                   onClick={() => setHistoryModalOpen(false)}
-                  className="text-slate-400 hover:text-slate-600 p-1 rounded hover:bg-slate-100 transition-colors cursor-pointer"
+                  className="text-zinc-400 hover:text-zinc-200 p-1 rounded hover:bg-zinc-800 transition-colors cursor-pointer"
                 >
                   <X className="w-4 h-4" />
                 </button>
@@ -2255,19 +2271,19 @@ export default function OptionsBacktester({
 
             {/* Search Input */}
             <div className="relative mb-3">
-              <Search className="w-3.5 h-3.5 text-slate-400 absolute left-2.5 top-1/2 -translate-y-1/2 pointer-events-none" />
+              <Search className="w-3.5 h-3.5 text-zinc-500 absolute left-2.5 top-1/2 -translate-y-1/2 pointer-events-none" />
               <input
                 type="text"
                 placeholder="Search backtests by strategy name, date, tag (e.g. straddle, iron condor, 2026)..."
                 value={historySearch}
                 onChange={e => setHistorySearch(e.target.value)}
-                className="w-full bg-slate-50 border border-slate-200 rounded-lg pl-8 pr-8 py-1.5 text-xs text-slate-700 focus:outline-none focus:border-[#54b4c7] focus:bg-white transition-colors"
+                className="w-full bg-zinc-800 border border-zinc-700 rounded-lg pl-8 pr-8 py-1.5 text-xs text-zinc-100 placeholder:text-zinc-500 focus:outline-hidden focus:border-teal-500 transition-colors"
               />
               {historySearch && (
                 <button
                   type="button"
                   onClick={() => setHistorySearch('')}
-                  className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600 text-xs cursor-pointer"
+                  className="absolute right-2.5 top-1/2 -translate-y-1/2 text-zinc-500 hover:text-zinc-300 text-xs cursor-pointer"
                 >
                   ✕
                 </button>
@@ -2277,12 +2293,12 @@ export default function OptionsBacktester({
             {/* Backtest Cards List */}
             <div className="overflow-y-auto flex-1 pr-1 space-y-3">
               {loadingHistory && historyList.length === 0 ? (
-                <div className="py-12 text-center text-xs text-slate-400">
-                  <RefreshCw className="w-6 h-6 animate-spin mx-auto mb-2 text-[#54b4c7]" />
+                <div className="py-12 text-center text-xs text-zinc-500">
+                  <RefreshCw className="w-6 h-6 animate-spin mx-auto mb-2 text-teal-400" />
                   Loading archived backtests…
                 </div>
               ) : filteredHistory.length === 0 ? (
-                <div className="py-12 text-center text-xs text-slate-400 bg-slate-50 rounded-xl border border-dashed border-slate-200">
+                <div className="py-12 text-center text-xs text-zinc-500 bg-zinc-850/40 rounded-xl border border-dashed border-zinc-800">
                   {historySearch ? 'No backtests match your search filter.' : 'No saved backtests found in debug/backtests/options/.'}
                 </div>
               ) : (
@@ -2293,19 +2309,19 @@ export default function OptionsBacktester({
                   return (
                     <div
                       key={item.id}
-                      className="border border-slate-200 rounded-xl p-3.5 bg-oncolor hover:border-[#54b4c7]/60 hover:shadow-xs transition-all text-xs"
+                      className="border border-zinc-800 rounded-xl p-3.5 bg-zinc-850/60 hover:border-teal-500/60 hover:bg-zinc-850 transition-all text-xs"
                     >
                       <div className="flex items-start justify-between gap-3 mb-2">
                         <div>
-                          <div className="font-bold text-slate-800 text-sm flex items-center gap-2 flex-wrap">
+                          <div className="font-bold text-white text-sm flex items-center gap-2 flex-wrap">
                             <span>{item.name}</span>
                             {item.strategy_type && (
-                              <span className="text-[9px] uppercase px-1.5 py-0.5 bg-slate-100 text-slate-600 rounded font-semibold tracking-wider">
+                              <span className="text-[9px] uppercase px-1.5 py-0.5 bg-zinc-800 text-zinc-400 rounded font-semibold tracking-wider">
                                 {item.strategy_type}
                               </span>
                             )}
                           </div>
-                          <div className="text-[11px] text-slate-400 mt-0.5 font-mono">
+                          <div className="text-[11px] text-zinc-500 mt-0.5 font-mono">
                             {item.start_date || '—'} &rarr; {item.end_date || '—'} &bull; Run: {item.timestamp ? new Date(item.timestamp).toLocaleString('en-IN') : item.id}
                           </div>
                         </div>
@@ -2315,43 +2331,43 @@ export default function OptionsBacktester({
                           <span className={`text-sm font-bold font-mono ${isProfit ? 'text-emerald-600' : 'text-red-600'}`}>
                             {fmtPnl(pnl)}
                           </span>
-                          <span className="block text-[10px] text-slate-400">Total P&amp;L</span>
+                          <span className="block text-[10px] text-zinc-500">Total P&amp;L</span>
                         </div>
                       </div>
 
                       {/* Metrics strip */}
-                      <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 bg-slate-50/70 border border-slate-100 rounded-lg p-2 mb-3 font-mono text-[11px]">
+                      <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 bg-zinc-800/60 border border-zinc-750 rounded-lg p-2 mb-3 font-mono text-[11px]">
                         <div>
-                          <span className="text-[9px] text-slate-400 font-sans block">Win Rate</span>
+                          <span className="text-[9px] text-zinc-500 font-sans block">Win Rate</span>
                           <span className={`font-semibold ${winRate >= 50 ? 'text-emerald-600' : 'text-red-600'}`}>
                             {winRate.toFixed(1)}%
                           </span>
                         </div>
                         <div>
-                          <span className="text-[9px] text-slate-400 font-sans block">Max Drawdown</span>
+                          <span className="text-[9px] text-zinc-500 font-sans block">Max Drawdown</span>
                           <span className="font-semibold text-amber-600">
                             ₹{fmt(item.max_drawdown ?? 0)}
                           </span>
                         </div>
                         <div>
-                          <span className="text-[9px] text-slate-400 font-sans block">Total Cycles</span>
-                          <span className="font-semibold text-slate-700">
+                          <span className="text-[9px] text-zinc-500 font-sans block">Total Cycles</span>
+                          <span className="font-semibold text-zinc-200">
                             {item.trades ?? '—'}
                           </span>
                         </div>
                         <div>
-                          <span className="text-[9px] text-slate-400 font-sans block">Folder</span>
-                          <span className="text-[10px] text-slate-500 truncate block" title={item.id}>
+                          <span className="text-[9px] text-zinc-500 font-sans block">Folder</span>
+                          <span className="text-[10px] text-zinc-500 truncate block" title={item.id}>
                             {item.id}
                           </span>
                         </div>
                       </div>
 
                       {/* Tags & Action Buttons */}
-                      <div className="flex items-center justify-between flex-wrap gap-2 pt-1 border-t border-slate-100">
+                      <div className="flex items-center justify-between flex-wrap gap-2 pt-1 border-t border-zinc-800">
                         <div className="flex items-center gap-1.5 flex-wrap">
                           {item.tags?.map(t => (
-                            <span key={t} className="text-[10px] bg-slate-100 text-slate-500 px-1.5 py-0.5 rounded">
+                            <span key={t} className="text-[10px] bg-zinc-800 text-zinc-400 px-1.5 py-0.5 rounded">
                               #{t}
                             </span>
                           ))}
@@ -2362,16 +2378,16 @@ export default function OptionsBacktester({
                             <button
                               type="button"
                               onClick={() => setViewingReportId(item.id)}
-                              className="border border-emerald-500 text-emerald-700 hover:bg-emerald-50 px-2.5 py-1 rounded text-[11px] font-semibold flex items-center gap-1 cursor-pointer transition-colors bg-white shadow-xs"
+                              className="border border-emerald-500/40 text-emerald-300 hover:bg-emerald-500/20 px-2.5 py-1 rounded text-[11px] font-semibold flex items-center gap-1 cursor-pointer transition-colors bg-emerald-500/10 shadow-xs"
                             >
-                              <FileText className="w-3 h-3 text-emerald-600" /> Research Report
+                              <FileText className="w-3 h-3 text-emerald-400" /> Research Report
                             </button>
                           )}
                           {item.has_tearsheet && (
                             <button
                               type="button"
                               onClick={() => setViewingTearsheetId(item.id)}
-                              className="border border-[#54b4c7] text-[#54b4c7] hover:bg-[#54b4c7]/10 px-2.5 py-1 rounded text-[11px] font-semibold flex items-center gap-1 cursor-pointer transition-colors bg-white"
+                              className="border border-teal-500/40 text-teal-300 bg-teal-500/10 hover:bg-teal-500/20 px-2.5 py-1 rounded text-[11px] font-semibold flex items-center gap-1 cursor-pointer transition-colors"
                             >
                               <FileText className="w-3 h-3" /> Tearsheet
                             </button>
@@ -2380,7 +2396,7 @@ export default function OptionsBacktester({
                             <a
                               href={`/api/backtest/history?id=${encodeURIComponent(item.id)}&file=csv`}
                               download
-                              className="border border-slate-200 text-slate-600 hover:bg-slate-100 px-2.5 py-1 rounded text-[11px] font-semibold flex items-center gap-1 cursor-pointer transition-colors bg-white"
+                              className="border border-zinc-700 text-zinc-300 hover:bg-zinc-800 px-2.5 py-1 rounded text-[11px] font-semibold flex items-center gap-1 cursor-pointer transition-colors bg-zinc-800"
                             >
                               <Download className="w-3 h-3" /> CSV
                             </a>
@@ -2388,7 +2404,7 @@ export default function OptionsBacktester({
                           <button
                             type="button"
                             onClick={() => handleLoadHistoryItem(item.id)}
-                            className="bg-[#54b4c7] hover:bg-[#469fb1] text-white px-3 py-1 rounded text-[11px] font-bold shadow-xs cursor-pointer transition-colors flex items-center gap-1"
+                            className="bg-teal-600 hover:bg-teal-500 text-oncolor px-3 py-1 rounded text-[11px] font-bold shadow-xs cursor-pointer transition-colors flex items-center gap-1"
                           >
                             Load Backtest
                           </button>
@@ -2401,12 +2417,12 @@ export default function OptionsBacktester({
             </div>
 
             {/* Footer */}
-            <div className="mt-3 pt-3 border-t border-slate-200 flex justify-between items-center text-[11px] text-slate-400">
+            <div className="mt-3 pt-3 border-t border-zinc-800 flex justify-between items-center text-[11px] text-zinc-500">
               <span>{historyList.length} backtest{historyList.length === 1 ? '' : 's'} archived in debug/backtests/options/</span>
               <button
                 type="button"
                 onClick={() => setHistoryModalOpen(false)}
-                className="text-slate-600 hover:text-slate-800 font-semibold px-3 py-1 rounded hover:bg-slate-100 cursor-pointer"
+                className="text-zinc-400 hover:text-white font-semibold px-3 py-1 rounded hover:bg-zinc-800 cursor-pointer"
               >
                 Close
               </button>
@@ -2418,11 +2434,11 @@ export default function OptionsBacktester({
       {/* ── Tearsheet Preview Modal ── */}
       {viewingTearsheetId && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-oncolor-dark/70 backdrop-blur-xs p-4">
-          <div className="bg-oncolor rounded-2xl shadow-2xl border border-slate-200 max-w-6xl w-full h-[90vh] flex flex-col overflow-hidden">
-            <div className="flex items-center justify-between px-4 py-2.5 border-b border-slate-200 bg-slate-50">
+          <div className="bg-zinc-900 rounded-2xl shadow-2xl border border-zinc-800 max-w-6xl w-full h-[90vh] flex flex-col overflow-hidden">
+            <div className="flex items-center justify-between px-4 py-2.5 border-b border-zinc-800 bg-zinc-850/80">
               <div className="flex items-center gap-2">
-                <FileText className="w-4 h-4 text-[#54b4c7]" />
-                <span className="font-bold text-slate-800 text-xs sm:text-sm">
+                <FileText className="w-4 h-4 text-teal-400" />
+                <span className="font-bold text-white text-xs sm:text-sm">
                   Interactive Tearsheet: {viewingTearsheetId}
                 </span>
               </div>
@@ -2431,20 +2447,20 @@ export default function OptionsBacktester({
                   href={`/api/backtest/history?id=${encodeURIComponent(viewingTearsheetId)}&file=tearsheet`}
                   target="_blank"
                   rel="noreferrer"
-                  className="text-[#2596be] hover:underline font-semibold flex items-center gap-1"
+                  className="text-teal-400 hover:underline font-semibold flex items-center gap-1"
                 >
                   <ExternalLink className="w-3.5 h-3.5" /> Open in New Tab
                 </a>
                 <button
                   type="button"
                   onClick={() => setViewingTearsheetId(null)}
-                  className="text-slate-400 hover:text-slate-600 p-1 cursor-pointer"
+                  className="text-zinc-500 hover:text-zinc-300 p-1 cursor-pointer"
                 >
                   <X className="w-4 h-4" />
                 </button>
               </div>
             </div>
-            <div className="flex-1 bg-white">
+            <div className="flex-1 bg-zinc-950">
               <iframe
                 src={`/api/backtest/history?id=${encodeURIComponent(viewingTearsheetId)}&file=tearsheet`}
                 className="w-full h-full border-0"
@@ -2458,11 +2474,11 @@ export default function OptionsBacktester({
       {/* ── Research Report Preview Modal ── */}
       {viewingReportId && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-oncolor-dark/70 backdrop-blur-xs p-4">
-          <div className="bg-oncolor rounded-2xl shadow-2xl border border-slate-200 max-w-6xl w-full h-[92vh] flex flex-col overflow-hidden">
-            <div className="flex items-center justify-between px-4 py-2.5 border-b border-slate-200 bg-slate-50">
+          <div className="bg-zinc-900 rounded-2xl shadow-2xl border border-zinc-800 max-w-6xl w-full h-[92vh] flex flex-col overflow-hidden">
+            <div className="flex items-center justify-between px-4 py-2.5 border-b border-zinc-800 bg-zinc-850/80">
               <div className="flex items-center gap-2">
                 <FileText className="w-4 h-4 text-emerald-600" />
-                <span className="font-bold text-slate-800 text-xs sm:text-sm">
+                <span className="font-bold text-white text-xs sm:text-sm">
                   Research &amp; Trade Details Report: {viewingReportId}
                 </span>
               </div>
@@ -2478,13 +2494,13 @@ export default function OptionsBacktester({
                 <button
                   type="button"
                   onClick={() => setViewingReportId(null)}
-                  className="text-slate-400 hover:text-slate-600 p-1 cursor-pointer"
+                  className="text-zinc-500 hover:text-zinc-300 p-1 cursor-pointer"
                 >
                   <X className="w-4 h-4" />
                 </button>
               </div>
             </div>
-            <div className="flex-1 bg-[#0b0f19]">
+            <div className="flex-1 bg-zinc-950">
               <iframe
                 src={`/api/backtest/history?id=${encodeURIComponent(viewingReportId)}&file=report`}
                 className="w-full h-full border-0"
