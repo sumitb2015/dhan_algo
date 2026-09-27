@@ -4018,10 +4018,9 @@ export default function FocusTool() {
    * order's fill is CONFIRMED — callers MUST place the close with
    * `awaitFill: true` before calling this, or the ledger still shows the
    * pre-close qty on the very first check and this returns false even
-   * though the close landed. Re-reads the row/workerHold fresh off
-   * `schedulerRef` each pass rather than a snapshot captured before the
-   * close, since `adjustFillQty`/the worker-status poll both update
-   * asynchronously.
+   * though the close landed. Re-reads the row fresh off `schedulerRef` each
+   * pass rather than a snapshot captured before the close, since
+   * `adjustFillQty` updates asynchronously.
    */
   async function waitRowFlat(rowId: string, maxWaitMs = 4000): Promise<boolean> {
     const deadline = Date.now() + maxWaitMs;

@@ -140,11 +140,21 @@ a fatal error rather than burning 25s of paced calls to reach the same answer.
 
 ### 8. A detached spawn outlives the frontend that started it
 
-`spawn(PYTHON_EXE, [...], { detached: true })` (the Focus Tool rows worker,
-started from `app/api/focus-tool/worker/route.ts`) is intentionally independent
-of the Next.js process — that's what lets it keep watching entries/exits after
-the browser tab closes. It also means **restarting the Next.js dev server does
-not stop it**. Debugging a worker that appears stuck after a frontend restart
+The Focus Tool rows worker this section was written against
+(`scripts/tools/focus_tool_rows_worker.py`, spawned from
+`app/api/focus-tool/worker/route.ts`) was removed entirely in `31fadcf`
+(2026-09-25) — that route is now a stub that only cleans up any leftover
+files from a pre-refactor instance, and FocusTool.tsx runs single-engine, in
+the browser tab, with no background process. The lesson below still applies
+to every *other* `detached: true` spawn in the dashboard (the copy-trade
+bridge, refresh/backfill scripts, the live-quote WS bridges) — grep
+`detached: true` in `app/api/` before assuming a restart cleared anything —
+it just no longer describes Focus Tool.
+
+`spawn(PYTHON_EXE, [...], { detached: true })` is intentionally independent
+of the Next.js process — that's what lets it keep running after the browser
+tab closes. It also means **restarting the Next.js dev server does not stop
+it**. Debugging a worker that appears stuck after a frontend restart
 by only restarting the frontend again is chasing nothing — the old process (or
 several, from repeated Start clicks) is still running, still writing to the
 same status file, and a fresh Start click can no-op against it (`currentStatus()`

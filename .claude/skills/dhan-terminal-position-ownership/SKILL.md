@@ -24,6 +24,20 @@ a raw broker query. Ownership lives in a ledger this component writes when it
 places an order; the broker is only ever consulted to confirm or shrink that
 ledger, never to originate it.**
 
+`FocusTool.tsx`'s server-side worker (`scripts/tools/focus_tool_rows_worker.py`)
+was removed entirely in `31fadcf` (2026-09-25) in favor of single-engine,
+in-tab execution — that refactor also silently dropped the worker's own
+propagation grace window (Invariant 2/6), restored in `1ea9d3d`/`f8e9665` as
+`nextOpenedTs`/`isGhostDropProtected` in `lib/focusToolRules.ts`, with the
+per-leg open timestamp now persisted in `FocusRowFill.{ce,pe}OpenedTs` on disk
+instead of a worker heartbeat. Invariant 5 (tab vs. server worker) is now
+historical for FocusTool specifically — no current surface in this repo runs
+two independent execution engines against the same ledger — but keep it: it's
+the shape to recognize immediately if a background watcher is ever
+reintroduced here or added to another terminal, and the "grace window survives
+a stale post-fill poll" half of it (Invariant 2) is very much still live,
+just backed by a JSON file instead of a worker.
+
 ## When to Use
 - Any surface with multiple rows/instances that can independently resolve to
   the same underlying strike (a straddle/strangle terminal, a multi-leg
@@ -68,7 +82,16 @@ quantities DOWN to what the broker's position book actually shows. Never up
 (another row, a manual trade), and adopting it would let this component
 close a position it never opened. A failed positions call reads as unknown
 and leaves the ledger alone; a leg is exempt from reconciliation for ~20s
-after opening, because the position book lags a fresh fill.
+after opening, because the position book lags a fresh fill — Kotak/Zerodha
+in particular have no fill-confirmation socket, so a poll can still read a
+just-filled leg as flat. In `FocusTool.tsx` this is `GHOST_DROP_GRACE_MS`
+(20s) / `isGhostDropProtected()` in `lib/focusToolRules.ts`, gated on
+`FocusRowFill.{ce,pe}OpenedTs` — stamped by `nextOpenedTs()` on the
+flat→held transition and persisted to `debug/focus_tool_rows.json`, so the
+window survives a tab reload, not just an in-memory ref. This exact
+protection was silently dropped when the worker was removed (`31fadcf`) and
+had to be restored (`1ea9d3d`, extracted+tested in `f8e9665`) — it's easy to
+lose by accident in any refactor that touches the fill-ledger update path.
 
 ### 3. Confirm every fill against the target symbol, not a cached position
 `ackId = await placeOrder(...)` means the broker *accepted* the order, not
