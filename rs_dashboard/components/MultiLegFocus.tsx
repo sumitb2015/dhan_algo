@@ -402,7 +402,12 @@ export default function MultiLegFocus({
   useEffect(() => {
     const list = neededUnderlyings ? neededUnderlyings.split(',') : [];
     for (const u of list) {
-      if (expiriesMap[u]?.length) continue;
+      // Also check expiriesMapProp directly, not just the expiriesMap state
+      // it feeds: the prop-sync effect above updates that state via its own
+      // setExpiriesMap call, which may not have committed yet in the same
+      // render pass this effect runs in — reading only the state here would
+      // race a redundant fetch for an underlying the parent already supplied.
+      if (expiriesMap[u]?.length || expiriesMapProp?.[u]?.length) continue;
       fetch(`/api/options/expiries?underlying=${u}&broker=${broker}`)
         .then(r => r.json())
         .then((j: { success: boolean; data?: string[] }) => {
@@ -412,7 +417,7 @@ export default function MultiLegFocus({
         })
         .catch(() => {});
     }
-  }, [broker, neededUnderlyings]);
+  }, [broker, neededUnderlyings, expiriesMapProp]);
 
   // Auto-backfill empty expiry on initial baskets once expiriesMap resolves
   useEffect(() => {

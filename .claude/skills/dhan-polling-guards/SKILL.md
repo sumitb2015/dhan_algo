@@ -142,10 +142,15 @@ a fatal error rather than burning 25s of paced calls to reach the same answer.
 
 The Focus Tool rows worker this section was written against
 (`scripts/tools/focus_tool_rows_worker.py`, spawned from
-`app/api/focus-tool/worker/route.ts`) was removed entirely in `31fadcf`
-(2026-09-25) — that route is now a stub that only cleans up any leftover
-files from a pre-refactor instance, and FocusTool.tsx runs single-engine, in
-the browser tab, with no background process. The lesson below still applies
+`app/api/focus-tool/worker/route.ts`) stopped being spawned as a live process
+in `31fadcf` (2026-09-25) — that route is now a stub that only cleans up any
+leftover files from a pre-refactor instance, and FocusTool.tsx runs
+single-engine, in the browser tab, with no background process. The script
+file itself is still in the repo, retained purely as the Python-side
+reference for `tests/test_focus_tool_parity.py`'s cross-language parity
+checks against `lib/focusToolRules.ts` — it just never runs as a detached
+spawn anymore, so it's no longer an example of this section's failure mode.
+The lesson below still applies
 to every *other* `detached: true` spawn in the dashboard (the copy-trade
 bridge, refresh/backfill scripts, the live-quote WS bridges) — grep
 `detached: true` in `app/api/` before assuming a restart cleared anything —

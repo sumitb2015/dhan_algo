@@ -54,6 +54,16 @@ function readPid(): number | null {
   }
 }
 
+// Single source of truth for "which PID does this status represent" — PID_FILE
+// is written by Node itself right after spawn() returns, so it's available
+// before the Python process has written its own `pid` into STATUS_FILE; prefer
+// it, falling back to the status file's own `pid` field. Previously this
+// precedence was hand-duplicated (and inconsistently ordered) at three call
+// sites in this file.
+function resolvePid(status: { pid?: unknown } | null): number | null {
+  return readPid() ?? (status?.pid && Number.isFinite(Number(status.pid)) ? Number(status.pid) : null);
+}
+
 export async function GET() {
   const status = readStatus();
   if (!status) {
@@ -61,7 +71,7 @@ export async function GET() {
   }
 
   // Cross-check PID
-  const pid = (status.pid && Number.isFinite(Number(status.pid))) ? Number(status.pid) : readPid();
+  const pid = resolvePid(status);
   const running = !status.done && ((pid && isPidRunning(pid)) || status.running === true);
   if (!running && !status.done && pid && !isPidRunning(pid)) {
     status.done = true;
@@ -75,9 +85,16 @@ export async function GET() {
     const runKey = status.started_at || String(status.pid || '');
     if (result && !status.archived && runKey && !archivedRunIds.has(runKey)) {
       archivedRunIds.add(runKey);
-      status.archived = true;
-      try { fs.writeFileSync(STATUS_FILE, JSON.stringify(status)); } catch { /* ignore */ }
-      autoArchiveBacktest(result);
+      const archived = autoArchiveBacktest(result);
+      if (archived) {
+        status.archived = true;
+        try { fs.writeFileSync(STATUS_FILE, JSON.stringify(status)); } catch { /* ignore */ }
+      } else {
+        // Archiving failed (disk full, permission error, etc.) — don't persist
+        // `archived: true` or every future GET would permanently skip retrying.
+        // Drop the in-memory guard too so the very next poll can retry.
+        archivedRunIds.delete(runKey);
+      }
     }
   }
 
@@ -89,7 +106,7 @@ export async function GET() {
   });
 }
 
-function autoArchiveBacktest(result: Record<string, unknown>) {
+function autoArchiveBacktest(result: Record<string, unknown>): boolean {
   try {
     const BACKTESTS_DIR = path.join(DEBUG_DIR, 'backtests', 'options');
     if (!fs.existsSync(BACKTESTS_DIR)) {
@@ -128,8 +145,10 @@ function autoArchiveBacktest(result: Record<string, unknown>) {
     };
 
     fs.writeFileSync(path.join(destDir, 'metadata.json'), JSON.stringify(metadata, null, 2));
+    return true;
   } catch (e) {
     console.error('Failed to auto-archive backtest:', e);
+    return false;
   }
 }
 
@@ -148,7 +167,7 @@ export async function POST(req: NextRequest) {
     } catch { /* ignore */ }
 
     const status = readStatus();
-    const pid = readPid() ?? (status?.pid && Number.isFinite(Number(status.pid)) ? Number(status.pid) : null);
+    const pid = resolvePid(status);
     if (pid && isPidRunning(pid)) {
       try { process.kill(pid); } catch { /* ignore */ }
     }
@@ -166,7 +185,7 @@ export async function POST(req: NextRequest) {
   // Handle Start / Run Action
   // Concurrency Guard: prevent duplicate simultaneous spawns
   const currentStatus = readStatus();
-  const activePid = readPid() ?? (currentStatus?.pid && Number.isFinite(Number(currentStatus.pid)) ? Number(currentStatus.pid) : null);
+  const activePid = resolvePid(currentStatus);
   if (currentStatus && !currentStatus.done && activePid && isPidRunning(activePid)) {
     return NextResponse.json({ error: 'A backtest is already running', pid: activePid }, { status: 409 });
   }
@@ -205,6 +224,7 @@ export async function POST(req: NextRequest) {
     '--trail-profit-step',   String(body.trail_profit_step   ?? 0),
     '--trail-profit-by',     String(body.trail_profit_by     ?? 0),
     '--commission-per-lot',  String(body.commission_per_lot  ?? 40),
+    '--cost-model',          String(body.cost_model          ?? 'flat'),
     '--slippage-pct',        String(body.slippage_pct        ?? 0),
     '--strategy-type',       strategyType,
     '--entry-days-before-expiry', String(body.entry_days_before_expiry ?? 3),
@@ -221,7 +241,12 @@ export async function POST(req: NextRequest) {
     '--max-diff-pct',       String(body.max_diff_pct        ?? 0),
     '--entry-cutoff-time',  String(body.entry_cutoff_time   ?? '15:00'),
     ...(body.no_reentry_after_time ? ['--no-reentry-after-time', String(body.no_reentry_after_time)] : []),
-    ...(body.range_breakout ? ['--range-breakout', '--range-until-time', String(body.range_until_time ?? '09:31')] : []),
+    ...(body.range_breakout ? [
+      '--range-breakout',
+      '--range-until-time', String(body.range_until_time ?? '09:31'),
+      '--range-breakout-mode', String(body.range_breakout_mode ?? 'independent'),
+      '--range-breakout-ref', String(body.range_breakout_ref ?? 'option'),
+    ] : []),
     '--status-file',        STATUS_FILE,
     '--output-file',        RESULT_FILE,
     '--strategy-name',      String(body.strategy_name ?? 'backtest'),

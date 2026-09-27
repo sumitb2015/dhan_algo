@@ -36,6 +36,44 @@ EXPIRY_TIME = time(15, 30)   # NSE close — the moment contracts actually expir
 STRIKE_STEP = 50.0           # NIFTY strike interval
 
 
+def calc_dhan_cost(txn_type: str, qty: int, price: float) -> float:
+    """Exact Dhan broker + statutory taxes for one executed F&O leg order.
+
+    Mirrors scripts/analysis/backtest_straddle_diff_sl_shift.py's calc_dhan_cost
+    (audited against 4,155 real Dhan F&O trades) — kept in sync manually since
+    that script has its own CLI/__main__ and isn't meant to be imported.
+    """
+    turnover = qty * price
+    brokerage = 20.0
+    gst_brokerage = brokerage * 0.18  # Rs 3.60
+
+    # Exchange turnover charge (NSE: ~0.05% on premium turnover + 18% GST)
+    exch_charge = turnover * 0.0005
+    gst_exch = exch_charge * 0.18
+
+    # STT (0.10% on SELL premium turnover only)
+    stt = (turnover * 0.0010) if txn_type == "SELL" else 0.0
+
+    # Stamp duty (0.003% on BUY premium turnover only)
+    stamp = (turnover * 0.00003) if txn_type == "BUY" else 0.0
+
+    # SEBI turnover charge (Rs 10/crore + 18% GST)
+    sebi = turnover * 0.000001 * 1.18
+
+    return brokerage + gst_brokerage + exch_charge + gst_exch + stt + stamp + sebi
+
+
+def _write_status_atomic(path: str, payload: dict) -> None:
+    """Write the status/progress JSON via temp-file + os.replace so a concurrent
+    reader (app/api/backtest/route.ts's readStatus()) never observes a partially
+    written file and mistakes it for a missing/corrupt status (which would let
+    its duplicate-spawn concurrency guard silently pass)."""
+    tmp_path = f"{path}.tmp{os.getpid()}"
+    with open(tmp_path, "w") as f:
+        json.dump(payload, f)
+    os.replace(tmp_path, path)
+
+
 # ---------------------------------------------------------------------------
 # Config
 # ---------------------------------------------------------------------------
@@ -58,6 +96,7 @@ class LegConfig:
     re_execute_sl_count: int = 0    # 0 = disabled, max re-executions (fresh strike) on SL
     re_execute_tp_count: int = 0    # 0 = disabled, max re-executions (fresh strike) on TP
     re_entry_tp_count: int = 0      # 0 = disabled, max re-entries in same strike on TP
+    is_ctc: bool = False            # True = Cost-to-Cost trailing SL (shift SL to entry cost when sibling leg hits SL)
 
 
 # ---------------------------------------------------------------------------
@@ -130,19 +169,18 @@ def fetch_multi_leg_cycles(start_date: str, end_date: str,
             if status_file and (idx_exp % 2 == 0 or idx_exp == total_exp - 1):
                 try:
                     pct = round(((idx_exp + 1) / max(1, total_exp)) * 15.0, 1)
-                    with open(status_file, "w") as f:
-                        json.dump({
-                            "running": True,
-                            "done": False,
-                            "stage": "loading_data",
-                            "percent": pct,
-                            "current": idx_exp + 1,
-                            "total": total_exp,
-                            "date": f"{expiry} ({idx_exp + 1}/{total_exp})",
-                            "pnl": 0.0,
-                            "trades": 0,
-                            "pid": os.getpid(),
-                        }, f)
+                    _write_status_atomic(status_file, {
+                        "running": True,
+                        "done": False,
+                        "stage": "loading_data",
+                        "percent": pct,
+                        "current": idx_exp + 1,
+                        "total": total_exp,
+                        "date": f"{expiry} ({idx_exp + 1}/{total_exp})",
+                        "pnl": 0.0,
+                        "trades": 0,
+                        "pid": os.getpid(),
+                    })
                 except Exception:
                     pass
 
@@ -155,7 +193,13 @@ def fetch_multi_leg_cycles(start_date: str, end_date: str,
             all_ok = True
             for i, leg in enumerate(leg_configs):
                 strike_ref = leg.strike
-                if getattr(leg, "strike_type", "offset") != "offset":
+                is_num = False
+                try:
+                    if float(str(leg.strike).strip()) > 1000:
+                        is_num = True
+                except Exception:
+                    pass
+                if getattr(leg, "strike_type", "offset") != "offset" or is_num:
                     strike_ref = "ATM"
                 df = pd.read_sql_query(
                     "SELECT datetime, open, high, low, close, strike, spot FROM option_prices "
@@ -217,15 +261,20 @@ def fetch_multi_leg_cycles(start_date: str, end_date: str,
             
         return cycles
 
-    # Otherwise fallback to CSV loading
+    def _is_num_strike(s):
+        try:
+            return float(str(s).strip()) > 1000
+        except Exception:
+            return False
+
     unique_folders = {
-        (leg.strike if getattr(leg, "strike_type", "offset") == "offset" else "ATM")
+        (leg.strike if getattr(leg, "strike_type", "offset") == "offset" and not _is_num_strike(leg.strike) else "ATM")
         for leg in leg_configs
     }
 
     first_strike_ref = (
         leg_configs[0].strike
-        if leg_configs and getattr(leg_configs[0], "strike_type", "offset") == "offset"
+        if leg_configs and getattr(leg_configs[0], "strike_type", "offset") == "offset" and not _is_num_strike(leg_configs[0].strike)
         else "ATM"
     )
     first_folder = os.path.join(DATA_ROOT, first_strike_ref)
@@ -369,6 +418,8 @@ class LegState:
     original_entry_price: float = 0.0
     waiting_reentry_cost: bool = False
     reentry_cost_target: float = 0.0
+    pending_entry: bool = False
+    cost_to_cost_active: bool = False
 
     @property
     def is_open(self) -> bool:
@@ -510,6 +561,7 @@ def _simulate_one_day(
     profit_target_type: str = "pct",
     overall_sl_val: float = 0.0,
     overall_sl_type: str = "pct",
+    overall_sl_execution: str = "clamped",
     lot_size: int = 65,
     protect_profit_mode: Optional[str] = None,
     lock_profit_reaches: float = 0.0,
@@ -519,9 +571,13 @@ def _simulate_one_day(
     no_reentry_after_time: Optional[time] = None,
     range_breakout: bool = False,
     range_until_time: Optional[time] = None,
+    range_breakout_mode: str = "independent",
+    range_breakout_ref: str = "option",
     exit_trade_date: Optional[date] = None,
     entry_trade_date: Optional[date] = None,
     expiry_dt: Optional[date] = None,
+    entry_price_mode: str = "bar_open",   # "bar_open" (default/correct) | "prev_close" (legacy/StockMock-compat)
+    eod_exit_price_mode: str = "bar_open", # "bar_open" (default/correct) | "prev_close" (legacy)
 ) -> dict:
     """Simulate one intraday trade over day_bars. Returns state dict."""
     if profit_target_val == 0.0 and profit_target_pct > 0:
@@ -550,6 +606,9 @@ def _simulate_one_day(
     range_high = float("-inf")
     range_low = float("inf")
     range_ready = False
+    leg_range_high = [float("-inf")] * len(leg_configs)
+    leg_range_low = [float("inf")] * len(leg_configs)
+    range_strikes_resolved = False
 
     # Fast O(1) lookup of available strikes by datetime
     strike_by_dt: Dict[datetime, List[Tuple[str, float, float, float, float, float]]] = defaultdict(list)
@@ -560,6 +619,12 @@ def _simulate_one_day(
     def _resolve_strike(strike_str: str, atm_strike: float) -> float:
         if strike_str == "ATM":
             return atm_strike
+        try:
+            val = float(str(strike_str).strip())
+            if val > 1000:
+                return val
+        except (ValueError, TypeError):
+            pass
         try:
             if "+" in strike_str:
                 offset = int(strike_str.split("+")[1])
@@ -692,6 +757,14 @@ def _simulate_one_day(
             except Exception:
                 return atm_stk
 
+        elif strike_type_val == "strike":
+            try:
+                target_stk = float(str(leg_cfg.strike).strip())
+                candidates_stk = [stk for stk, _ in leg_candidates]
+                return min(candidates_stk, key=lambda s: abs(s - target_stk)) if candidates_stk else target_stk
+            except Exception:
+                return atm_stk
+
         else:
             return _resolve_strike(leg_cfg.strike, atm_stk)
 
@@ -714,110 +787,158 @@ def _simulate_one_day(
 
             # Range Breakout observation & trigger check
             if range_breakout and range_until_time:
-                if t < range_until_time:
-                    range_high = max(range_high, bar.spot)
-                    range_low = min(range_low, bar.spot)
-                    range_ready = True
-                    continue
-                # t >= range_until_time: check if spot broke out of range
-                if range_ready:
-                    if not (bar.spot > range_high or bar.spot < range_low):
-                        continue
+                if range_breakout_mode == "independent":
+                    if not range_strikes_resolved and t >= entry_time:
+                        entry_spot_ref = bar.spot
+                        ref_bar = bar
+                        atm_strike = round(entry_spot_ref / STRIKE_STEP) * STRIKE_STEP
+                        available_strikes_and_prices = []
+                        if strike_lookup:
+                            for opt, stk, o, h, l, c in strike_by_dt.get(ref_bar.dt, []):
+                                available_strikes_and_prices.append((opt, stk, c))
+                        candidate_states = [LegState() for _ in leg_configs]
+                        for i, (leg, state) in enumerate(zip(leg_configs, candidate_states)):
+                            slip = slip_sell_entry if leg.position == "sell" else slip_buy_entry
+                            state.strike = _resolve_strike_for_single_leg(
+                                leg, entry_spot_ref, ref_bar.dt, cur_days_to_expiry, available_strikes_and_prices, atm_strike
+                            )
+                            leg_open, leg_high, leg_low, leg_close = _get_leg_prices(
+                                bar.dt, leg.option_type, state.strike, bar.legs[i],
+                                bar.spot, cur_days_to_expiry, strike_lookup
+                            )
+                            state.base_ref_price = leg_close
+                            state.entry_price = 0.0
+                            state.original_entry_price = 0.0
+                            state.is_waiting = True
+                            state.is_entered = False
+                            state.entry_dt = None
 
-            if range_breakout:
+                        if not any(s.base_ref_price <= 0 for s in candidate_states):
+                            leg_states = candidate_states
+                            range_strikes_resolved = True
+                            entry_dt = bar.dt
+                            entry_spot = bar.spot
+                            ref_spot = bar.spot
+                            current_atm = atm_strike
+
+                    if range_strikes_resolved and t < range_until_time:
+                        range_high = max(range_high, bar.spot)
+                        range_low = min(range_low, bar.spot)
+                        for i, (leg, state) in enumerate(zip(leg_configs, leg_states)):
+                            leg_open, leg_high, leg_low, leg_close = _get_leg_prices(
+                                bar.dt, leg.option_type, state.strike, bar.legs[i],
+                                bar.spot, cur_days_to_expiry, strike_lookup
+                            )
+                            leg_range_high[i] = max(leg_range_high[i], leg_high)
+                            leg_range_low[i] = min(leg_range_low[i], leg_low)
+                        continue
+                    elif range_strikes_resolved and t >= range_until_time:
+                        range_ready = True
+                        entered = True
+                else:  # basket mode
+                    if t < range_until_time:
+                        range_high = max(range_high, bar.spot)
+                        range_low = min(range_low, bar.spot)
+                        range_ready = True
+                        continue
+                    if range_ready:
+                        if not (bar.spot > range_high or bar.spot < range_low):
+                            continue
+
+            if not (range_breakout and range_breakout_mode == "independent"):
                 entry_spot_ref = bar.spot
                 ref_bar = bar
-            else:
-                entry_spot_ref = prev_bar.spot if prev_bar else bar.spot
-                ref_bar = prev_bar if prev_bar else bar
-            atm_strike = round(entry_spot_ref / STRIKE_STEP) * STRIKE_STEP
-            
-            # Fetch all available option prices for the entry time boundary
-            available_strikes_and_prices = []
-            if strike_lookup:
-                for opt, stk, o, h, l, c in strike_by_dt.get(ref_bar.dt, []):
-                    price = c if (prev_bar and not range_breakout) else (c if range_breakout else o)
-                    available_strikes_and_prices.append((opt, stk, price))
-                        
-            candidate_states = [LegState() for _ in leg_configs]
-            for i, (leg, state) in enumerate(zip(leg_configs, candidate_states)):
-                slip = slip_sell_entry if leg.position == "sell" else slip_buy_entry
-                state.strike = _resolve_strike_for_single_leg(
-                    leg, entry_spot_ref, ref_bar.dt, cur_days_to_expiry, available_strikes_and_prices, atm_strike
-                )
+                atm_strike = round(entry_spot_ref / STRIKE_STEP) * STRIKE_STEP
                 
-                # Fetch baseline reference price for resolved strike
-                if not range_breakout and prev_bar:
-                    _, _, _, leg_close = _get_leg_prices(
-                        prev_bar.dt, leg.option_type, state.strike, prev_bar.legs[i],
-                        prev_bar.spot, cur_days_to_expiry, strike_lookup
+                # Fetch all available option prices for the entry time boundary
+                available_strikes_and_prices = []
+                if strike_lookup:
+                    for opt, stk, o, h, l, c in strike_by_dt.get(ref_bar.dt, []):
+                        price = c if range_breakout else o
+                        available_strikes_and_prices.append((opt, stk, price))
+                            
+                candidate_states = [LegState() for _ in leg_configs]
+                for i, (leg, state) in enumerate(zip(leg_configs, candidate_states)):
+                    slip = slip_sell_entry if leg.position == "sell" else slip_buy_entry
+                    state.strike = _resolve_strike_for_single_leg(
+                        leg, entry_spot_ref, ref_bar.dt, cur_days_to_expiry, available_strikes_and_prices, atm_strike
                     )
-                    raw_price = leg_close
-                else:
+                    
+                    # Fetch baseline reference price for resolved strike
                     leg_open, _, _, leg_close = _get_leg_prices(
                         bar.dt, leg.option_type, state.strike, bar.legs[i],
                         bar.spot, cur_days_to_expiry, strike_lookup
                     )
-                    raw_price = leg_close if range_breakout else leg_open
-                state.base_ref_price = raw_price
-                state.entry_price = raw_price * slip
+                    if range_breakout:
+                        raw_price = leg_close
+                    elif entry_price_mode == "prev_close" and prev_bar is not None:
+                        # Legacy/StockMock-compat: use previous bar's close as entry price
+                        _, _, _, prev_leg_close = _get_leg_prices(
+                            prev_bar.dt, leg.option_type, state.strike, prev_bar.legs[i] if i < len(prev_bar.legs) else None,
+                            prev_bar.spot, cur_days_to_expiry, strike_lookup
+                        )
+                        raw_price = prev_leg_close if prev_leg_close > 0 else leg_open
+                    else:
+                        raw_price = leg_open
+                    state.base_ref_price = raw_price
+                    state.entry_price = raw_price * slip
 
-            # Ensure all legs found valid prices
-            if any(s.base_ref_price <= 0 for s in candidate_states):
+                # Ensure all legs found valid prices
+                if any(s.base_ref_price <= 0 for s in candidate_states):
+                    continue
+
+                # Check Price Diff Threshold / Balanced Entry Gate if enabled
+                if max_diff_pct > 0.0:
+                    ce_cand = [s.entry_price for l, s in zip(leg_configs, candidate_states) if l.option_type == "CE"]
+                    pe_cand = [s.entry_price for l, s in zip(leg_configs, candidate_states) if l.option_type == "PE"]
+                    if ce_cand and pe_cand:
+                        ce_p = ce_cand[0]
+                        pe_p = pe_cand[0]
+                        max_p = max(ce_p, pe_p)
+                        diff = (abs(ce_p - pe_p) / max_p * 100.0) if max_p > 0 else 0.0
+                        if diff > max_diff_pct:
+                            # Imbalance exceeds threshold, wait for premiums to balance on a later bar
+                            continue
+                        
+                # Configure Wait & Trade and store original entry price for each leg
+                for leg, state in zip(leg_configs, candidate_states):
+                    state.original_entry_price = state.entry_price
+                    wt_val = float(getattr(leg, "wait_and_trade_val", 0.0) or 0.0)
+                    wt_type = str(getattr(leg, "wait_and_trade_type", "pct_up") or "pct_up").lower().strip()
+                    p0 = state.base_ref_price
+                    if wt_val > 0.0:
+                        state.is_waiting = True
+                        state.is_entered = False
+                        state.entry_price = 0.0
+                        state.original_entry_price = 0.0
+                        state.entry_dt = None
+                        if "pts" in wt_type:
+                            if "down" in wt_type or "↓" in wt_type:
+                                state.trigger_price = p0 - wt_val
+                            else:
+                                state.trigger_price = p0 + wt_val
+                        else:  # percentage
+                            if "down" in wt_type or "↓" in wt_type:
+                                state.trigger_price = p0 * (1.0 - wt_val / 100.0)
+                            else:
+                                state.trigger_price = p0 * (1.0 + wt_val / 100.0)
+                    else:
+                        state.is_waiting = False
+                        state.is_entered = True
+                        state.entry_dt = bar.dt
+
+                leg_states = candidate_states
+                entered = True
+                entry_dt = bar.dt
+                entry_spot = bar.spot
+                ref_spot = bar.spot
+                current_atm = atm_strike
+                initial_net_credit = sum(
+                    s.original_entry_price * (1 if leg.position == "sell" else -1) * leg.lots * lot_size
+                    for leg, s in zip(leg_configs, leg_states)
+                    if s.is_entered
+                )
                 continue
-
-            # Check Price Diff Threshold / Balanced Entry Gate if enabled
-            if max_diff_pct > 0.0:
-                ce_cand = [s.entry_price for l, s in zip(leg_configs, candidate_states) if l.option_type == "CE"]
-                pe_cand = [s.entry_price for l, s in zip(leg_configs, candidate_states) if l.option_type == "PE"]
-                if ce_cand and pe_cand:
-                    ce_p = ce_cand[0]
-                    pe_p = pe_cand[0]
-                    max_p = max(ce_p, pe_p)
-                    diff = (abs(ce_p - pe_p) / max_p * 100.0) if max_p > 0 else 0.0
-                    if diff > max_diff_pct:
-                        # Imbalance exceeds threshold, wait for premiums to balance on a later bar
-                        continue
-                    
-            # Configure Wait & Trade and store original entry price for each leg
-            for leg, state in zip(leg_configs, candidate_states):
-                state.original_entry_price = state.entry_price
-                wt_val = float(getattr(leg, "wait_and_trade_val", 0.0) or 0.0)
-                wt_type = str(getattr(leg, "wait_and_trade_type", "pct_up") or "pct_up").lower().strip()
-                p0 = state.base_ref_price
-                if wt_val > 0.0:
-                    state.is_waiting = True
-                    state.is_entered = False
-                    state.entry_price = 0.0
-                    state.original_entry_price = 0.0
-                    state.entry_dt = None
-                    if "pts" in wt_type:
-                        if "down" in wt_type or "↓" in wt_type:
-                            state.trigger_price = p0 - wt_val
-                        else:
-                            state.trigger_price = p0 + wt_val
-                    else:  # percentage
-                        if "down" in wt_type or "↓" in wt_type:
-                            state.trigger_price = p0 * (1.0 - wt_val / 100.0)
-                        else:
-                            state.trigger_price = p0 * (1.0 + wt_val / 100.0)
-                else:
-                    state.is_waiting = False
-                    state.is_entered = True
-                    state.entry_dt = bar.dt
-
-            leg_states = candidate_states
-            entered = True
-            entry_dt = bar.dt
-            entry_spot = bar.spot
-            ref_spot = bar.spot
-            current_atm = atm_strike
-            initial_net_credit = sum(
-                s.original_entry_price * (1 if leg.position == "sell" else -1) * leg.lots * lot_size
-                for leg, s in zip(leg_configs, leg_states)
-                if s.is_entered
-            )
-            continue
 
         if not entered:
             continue
@@ -831,35 +952,64 @@ def _simulate_one_day(
             for i, (leg, state) in enumerate(zip(leg_configs, leg_states))
         ]
 
-        # --- Check Wait & Trade Trigger for waiting legs ---
+        # --- Check Wait & Trade / Range Breakout Trigger for waiting legs ---
         for i, (leg, state) in enumerate(zip(leg_configs, leg_states)):
-            if state.is_waiting:
-                leg_open, leg_high, leg_low, leg_close = leg_prices[i]
-                slip = slip_sell_entry if leg.position == "sell" else slip_buy_entry
-                wt_type = str(getattr(leg, "wait_and_trade_type", "pct_up") or "pct_up").lower().strip()
+            leg_open, leg_high, leg_low, leg_close = leg_prices[i]
+            slip = slip_sell_entry if leg.position == "sell" else slip_buy_entry
 
-                triggered = False
-                fill_price = 0.0
-                if "up" in wt_type or "↑" in wt_type:
-                    if leg_high >= state.trigger_price:
-                        triggered = True
-                        fill_price = max(state.trigger_price, leg_open) * slip
-                elif "down" in wt_type or "↓" in wt_type:
-                    if leg_low <= state.trigger_price:
-                        triggered = True
-                        fill_price = min(state.trigger_price, leg_open) * slip
+            if state.pending_entry:
+                state.entry_price = leg_open * slip
+                state.original_entry_price = state.entry_price
+                state.entry_dt = bar.dt
+                state.is_entered = True
+                state.is_waiting = False
+                state.pending_entry = False
+                initial_net_credit = sum(
+                    s.original_entry_price * (1 if l.position == "sell" else -1) * l.lots * lot_size
+                    for l, s in zip(leg_configs, leg_states)
+                    if s.is_entered
+                )
+            elif state.is_waiting:
+                if range_breakout and range_ready and range_breakout_mode == "independent":
+                    triggered = False
+                    if range_breakout_ref == "spot":
+                        if leg.position == "sell":
+                            triggered = (bar.spot > range_high) if leg.option_type == "PE" else (bar.spot < range_low)
+                        else:
+                            triggered = (bar.spot > range_high) if leg.option_type == "CE" else (bar.spot < range_low)
+                    else:  # option premium range breakout
+                        if leg.option_type == "CE":
+                            triggered = (leg_high >= leg_range_high[i])
+                        else:
+                            triggered = (leg_low <= leg_range_low[i])
 
-                if triggered:
-                    state.entry_price = fill_price
-                    state.original_entry_price = fill_price
-                    state.entry_dt = bar.dt
-                    state.is_entered = True
-                    state.is_waiting = False
-                    initial_net_credit = sum(
-                        s.original_entry_price * (1 if l.position == "sell" else -1) * l.lots * lot_size
-                        for l, s in zip(leg_configs, leg_states)
-                        if s.is_entered
-                    )
+                    if triggered:
+                        state.pending_entry = True
+                else:
+                    wt_type = str(getattr(leg, "wait_and_trade_type", "pct_up") or "pct_up").lower().strip()
+
+                    triggered = False
+                    fill_price = 0.0
+                    if "up" in wt_type or "↑" in wt_type:
+                        if leg_high >= state.trigger_price:
+                            triggered = True
+                            fill_price = max(state.trigger_price, leg_open) * slip
+                    elif "down" in wt_type or "↓" in wt_type:
+                        if leg_low <= state.trigger_price:
+                            triggered = True
+                            fill_price = min(state.trigger_price, leg_open) * slip
+
+                    if triggered:
+                        state.entry_price = fill_price
+                        state.original_entry_price = fill_price
+                        state.entry_dt = bar.dt
+                        state.is_entered = True
+                        state.is_waiting = False
+                        initial_net_credit = sum(
+                            s.original_entry_price * (1 if l.position == "sell" else -1) * l.lots * lot_size
+                            for l, s in zip(leg_configs, leg_states)
+                            if s.is_entered
+                        )
 
         # --- Check No ReEntry Cutoff Time ---
         can_reenter = (no_reentry_after_time is None) or (t < no_reentry_after_time)
@@ -908,23 +1058,31 @@ def _simulate_one_day(
             # degraded by slippage, and accounts for opening gap past trigger.
             slip = slip_sell_exit if leg.position == "sell" else slip_buy_exit
 
-            if leg.leg_sl_pct > 0:
+            if leg.leg_sl_pct > 0 or state.cost_to_cost_active:
                 hit_sl = False
-                if leg.position == "sell":
+                if state.cost_to_cost_active:
+                    sl_trigger = state.entry_price
+                elif leg.position == "sell":
                     sl_trigger = state.entry_price * (1 + leg.leg_sl_pct / 100)
-                    if leg_high >= sl_trigger:
-                        state.exit_price = max(sl_trigger, leg_open) * slip
-                        hit_sl = True
                 elif leg.position == "buy":
                     sl_trigger = state.entry_price * (1 - leg.leg_sl_pct / 100)
-                    if leg_low <= sl_trigger:
-                        state.exit_price = min(sl_trigger, leg_open) * slip
-                        hit_sl = True
+
+                if leg.position == "sell" and leg_high >= sl_trigger:
+                    state.exit_price = max(sl_trigger, leg_open) * slip
+                    hit_sl = True
+                elif leg.position == "buy" and leg_low <= sl_trigger:
+                    state.exit_price = min(sl_trigger, leg_open) * slip
+                    hit_sl = True
 
                 if hit_sl:
-                    state.exit_reason = "LEG_SL"
+                    state.exit_reason = "LEG_CTC" if state.cost_to_cost_active else "LEG_SL"
                     state.struck_sl = True
                     state.exit_dt = bar.dt
+
+                    # Trigger Cost-to-Cost (CTC) on surviving sibling legs if configured
+                    for sibling_i, (sibling_leg, sibling_st) in enumerate(zip(leg_configs, leg_states)):
+                        if sibling_i != i and sibling_st.is_open and getattr(sibling_leg, "is_ctc", False):
+                            sibling_st.cost_to_cost_active = True
 
                     rex_sl_max = getattr(leg, "re_execute_sl_count", 0) if (square_off_mode != "all_legs" and can_reenter) else 0
                     re_sl_max = getattr(leg, "re_entry_sl_count", 0) if (square_off_mode != "all_legs" and can_reenter) else 0
@@ -1261,16 +1419,38 @@ def _simulate_one_day(
                         sl_hit = True
 
         if sl_hit:
-            for i, (leg, state) in enumerate(zip(leg_configs, leg_states)):
-                if state.is_open:
-                    slip = slip_sell_exit if leg.position == "sell" else slip_buy_exit
-                    state.exit_price = leg_prices[i][3] * slip
-                    state.exit_reason = "OVERALL_SL"
-                    state.exit_dt = bar.dt
-                elif state.is_waiting or state.waiting_reentry_cost:
-                    state.is_waiting = False
-                    state.waiting_reentry_cost = False
-                    state.exit_reason = "CANCELLED_BY_EXIT"
+            if overall_sl_execution == "clamped" and overall_sl_type == "mtm" and open_legs_pnl < 0:
+                target_open_pnl = -overall_sl_val - closed_legs_pnl
+                scale = target_open_pnl / open_legs_pnl if open_legs_pnl != 0 else 1.0
+                for i, (leg, state) in enumerate(zip(leg_configs, leg_states)):
+                    if state.is_open:
+                        slip = slip_sell_exit if leg.position == "sell" else slip_buy_exit
+                        raw_leg_pnl = ((state.entry_price - leg_prices[i][3]) if leg.position == "sell" else (leg_prices[i][3] - state.entry_price)) * leg.lots * lot_size
+                        clamped_leg_pnl = raw_leg_pnl * scale
+                        if leg.position == "sell":
+                            clamped_exit_p = state.entry_price - (clamped_leg_pnl / (leg.lots * lot_size))
+                        else:
+                            clamped_exit_p = state.entry_price + (clamped_leg_pnl / (leg.lots * lot_size))
+                        state.exit_price = max(0.05, clamped_exit_p) * slip
+                        state.exit_reason = "OVERALL_SL"
+                        state.exit_dt = bar.dt
+                    elif state.is_waiting or state.waiting_reentry_cost or state.pending_entry:
+                        state.is_waiting = False
+                        state.pending_entry = False
+                        state.waiting_reentry_cost = False
+                        state.exit_reason = "CANCELLED_BY_EXIT"
+            else:
+                for i, (leg, state) in enumerate(zip(leg_configs, leg_states)):
+                    if state.is_open:
+                        slip = slip_sell_exit if leg.position == "sell" else slip_buy_exit
+                        state.exit_price = leg_prices[i][3] * slip
+                        state.exit_reason = "OVERALL_SL"
+                        state.exit_dt = bar.dt
+                    elif state.is_waiting or state.waiting_reentry_cost or state.pending_entry:
+                        state.is_waiting = False
+                        state.pending_entry = False
+                        state.waiting_reentry_cost = False
+                        state.exit_reason = "CANCELLED_BY_EXIT"
             exit_reason = "OVERALL_SL"
             exit_dt = bar.dt
             break
@@ -1295,8 +1475,9 @@ def _simulate_one_day(
                     state.exit_price = leg_prices[i][3] * slip
                     state.exit_reason = "TARGET"
                     state.exit_dt = bar.dt
-                elif state.is_waiting or state.waiting_reentry_cost:
+                elif state.is_waiting or state.waiting_reentry_cost or state.pending_entry:
                     state.is_waiting = False
+                    state.pending_entry = False
                     state.waiting_reentry_cost = False
                     state.exit_reason = "CANCELLED_BY_EXIT"
             exit_reason = "TARGET"
@@ -1344,8 +1525,9 @@ def _simulate_one_day(
                     state.exit_price = leg_prices[i][3] * slip
                     state.exit_reason = "PROTECT_PROFIT"
                     state.exit_dt = bar.dt
-                elif state.is_waiting or state.waiting_reentry_cost:
+                elif state.is_waiting or state.waiting_reentry_cost or state.pending_entry:
                     state.is_waiting = False
+                    state.pending_entry = False
                     state.waiting_reentry_cost = False
                     state.exit_reason = "CANCELLED_BY_EXIT"
             exit_reason = "PROTECT_PROFIT"
@@ -1358,18 +1540,18 @@ def _simulate_one_day(
             for i, (leg, state) in enumerate(zip(leg_configs, leg_states)):
                 if state.is_open:
                     slip = slip_sell_exit if leg.position == "sell" else slip_buy_exit
-                    if prev_bar:
-                        prev_leg_prices = _get_leg_prices(
-                            prev_bar.dt, leg.option_type, state.strike, prev_bar.legs[i],
-                            prev_bar.spot, cur_days_to_expiry, strike_lookup
-                        )
-                        state.exit_price = prev_leg_prices[3] * slip
+                    if idx == len(day_bars) - 1 and t < eod_time:
+                        eod_p = leg_prices[i][3]  # last bar's close if we never reached eod_time
+                    elif eod_exit_price_mode == "prev_close":
+                        eod_p = leg_prices[i][3]  # use current bar's close (legacy/StockMock-compat)
                     else:
-                        state.exit_price = leg_prices[i][0] * slip
+                        eod_p = leg_prices[i][0]  # use current bar's open (default, correct)
+                    state.exit_price = eod_p * slip
                     state.exit_reason = "EOD"
                     state.exit_dt = bar.dt
-                elif state.is_waiting:
+                elif state.is_waiting or state.pending_entry:
                     state.is_waiting = False
+                    state.pending_entry = False
                     state.exit_reason = "UNTRIGGERED"
                     state.exit_dt = bar.dt
                 elif state.waiting_reentry_cost:
@@ -1398,8 +1580,9 @@ def _simulate_one_day(
         exit_reason = "INCOMPLETE"
         exit_dt = last_bar.dt
 
+    actually_entered = any(s.is_entered for s in leg_states) or bool(closed_legs)
     return {
-        "entered": entered,
+        "entered": actually_entered if (range_breakout and range_breakout_mode == "independent") else entered,
         "entry_dt": entry_dt,
         "exit_dt": exit_dt,
         "entry_spot": entry_spot,
@@ -1432,6 +1615,7 @@ def run_backtest(leg_configs: List[LegConfig], cycles: List[ExpiryCycle],
                  profit_target_type: str = "pct",
                  overall_sl_val: float = 0.0,
                  overall_sl_type: str = "pct",
+                 overall_sl_execution: str = "clamped",
                  protect_profit_mode: Optional[str] = None,
                  lock_profit_reaches: float = 0.0,
                  lock_profit_min: float = 0.0,
@@ -1440,8 +1624,13 @@ def run_backtest(leg_configs: List[LegConfig], cycles: List[ExpiryCycle],
                   no_reentry_after_time_str: Optional[str] = None,
                   range_breakout: bool = False,
                   range_until_time_str: Optional[str] = "09:31",
+                  range_breakout_mode: str = "independent",
+                  range_breakout_ref: str = "option",
                   entry_days_before_expiry: int = 3,
-                  exit_days_before_expiry: int = 0):
+                  exit_days_before_expiry: int = 0,
+                  entry_price_mode: str = "bar_open",
+                  eod_exit_price_mode: str = "bar_open",
+                  cost_model: str = "flat"):
     """
     strategy_type:
       "intraday"   — one trade per trading day (AlgoTest Intraday mode)
@@ -1484,6 +1673,7 @@ def run_backtest(leg_configs: List[LegConfig], cycles: List[ExpiryCycle],
         profit_target_type=profit_target_type,
         overall_sl_val=overall_sl_val if overall_sl_val > 0 else (overall_sl_pct if overall_sl_pct > 0 else 0.0),
         overall_sl_type=overall_sl_type,
+        overall_sl_execution=overall_sl_execution,
         lot_size=lot_size,
         protect_profit_mode=protect_profit_mode,
         lock_profit_reaches=lock_profit_reaches,
@@ -1493,6 +1683,10 @@ def run_backtest(leg_configs: List[LegConfig], cycles: List[ExpiryCycle],
         no_reentry_after_time=no_reentry_after_time,
         range_breakout=range_breakout,
         range_until_time=range_until_time,
+        range_breakout_mode=range_breakout_mode,
+        range_breakout_ref=range_breakout_ref,
+        entry_price_mode=entry_price_mode,
+        eod_exit_price_mode=eod_exit_price_mode,
     )
 
     trade_results = []
@@ -1544,19 +1738,18 @@ def run_backtest(leg_configs: List[LegConfig], cycles: List[ExpiryCycle],
 
     if status_file:
         try:
-            with open(status_file, "w") as f:
-                json.dump({
-                    "running": True,
-                    "done": False,
-                    "stage": "simulating",
-                    "current": 0,
-                    "total": total_trade_dates,
-                    "percent": 15.0 if total_trade_dates > 0 else 0.0,
-                    "date": start_date,
-                    "pnl": 0.0,
-                    "trades": 0,
-                    "pid": os.getpid(),
-                }, f)
+            _write_status_atomic(status_file, {
+                "running": True,
+                "done": False,
+                "stage": "simulating",
+                "current": 0,
+                "total": total_trade_dates,
+                "percent": 15.0 if total_trade_dates > 0 else 0.0,
+                "date": start_date,
+                "pnl": 0.0,
+                "trades": 0,
+                "pid": os.getpid(),
+            })
         except Exception:
             pass
 
@@ -1709,8 +1902,19 @@ def run_backtest(leg_configs: List[LegConfig], cycles: List[ExpiryCycle],
                         })
 
             # Calculate commission only on legs that actually traded (including rolls)
-            total_legs_traded = len([lr for lr in leg_results if lr.get("entry_price", 0) > 0])
-            commission = commission_per_lot * total_legs_traded
+            if cost_model == "dhan_fno":
+                commission = 0.0
+                for lr in leg_results:
+                    if lr.get("entry_price", 0) <= 0:
+                        continue
+                    qty = lr["lots"] * lot_size
+                    entry_txn = "SELL" if lr["position"] == "sell" else "BUY"
+                    exit_txn = "BUY" if lr["position"] == "sell" else "SELL"
+                    commission += calc_dhan_cost(entry_txn, qty, lr["entry_price"])
+                    commission += calc_dhan_cost(exit_txn, qty, lr["exit_price"])
+            else:
+                total_legs_traded = len([lr for lr in leg_results if lr.get("entry_price", 0) > 0])
+                commission = commission_per_lot * total_legs_traded
             total_commission += commission
 
             net_pnl -= commission
@@ -1770,19 +1974,18 @@ def run_backtest(leg_configs: List[LegConfig], cycles: List[ExpiryCycle],
             if status_file and (processed_count % 3 == 0 or processed_count == total_trade_dates):
                 try:
                     pct = round(15.0 + (processed_count / max(1, total_trade_dates)) * 85.0, 1)
-                    with open(status_file, "w") as f:
-                        json.dump({
-                            "running": True,
-                            "done": False,
-                            "stage": "simulating",
-                            "current": processed_count,
-                            "total": total_trade_dates,
-                            "percent": pct,
-                            "date": entry_date_str,
-                            "pnl": round(cumulative_pnl, 2),
-                            "trades": len(trade_results),
-                            "pid": os.getpid(),
-                        }, f)
+                    _write_status_atomic(status_file, {
+                        "running": True,
+                        "done": False,
+                        "stage": "simulating",
+                        "current": processed_count,
+                        "total": total_trade_dates,
+                        "percent": pct,
+                        "date": entry_date_str,
+                        "pnl": round(cumulative_pnl, 2),
+                        "trades": len(trade_results),
+                        "pid": os.getpid(),
+                    })
                 except Exception:
                     pass
 
@@ -1847,17 +2050,16 @@ def run_backtest(leg_configs: List[LegConfig], cycles: List[ExpiryCycle],
 
     if status_file:
         try:
-            with open(status_file, "w") as f:
-                json.dump({
-                    "running": False,
-                    "done": True,
-                    "percent": 100.0,
-                    "total": total_trade_dates,
-                    "current": processed_count,
-                    "trades": len(traded),
-                    "pnl": round(cumulative_pnl, 2),
-                    "pid": os.getpid(),
-                }, f)
+            _write_status_atomic(status_file, {
+                "running": False,
+                "done": True,
+                "percent": 100.0,
+                "total": total_trade_dates,
+                "current": processed_count,
+                "trades": len(traded),
+                "pnl": round(cumulative_pnl, 2),
+                "pid": os.getpid(),
+            })
         except Exception:
             pass
 
@@ -1940,6 +2142,12 @@ def main():
     parser.add_argument("--profit-target-type", default="pct", choices=["pct", "mtm"])
     parser.add_argument("--overall-sl-val",     type=float, default=0.0)
     parser.add_argument("--overall-sl-type",    default="pct", choices=["pct", "mtm"])
+    parser.add_argument("--overall-sl-execution", default="clamped", choices=["clamped", "bar_close"],
+                        help="Overall SL exit execution model: clamped (exact stop value + slippage) or bar_close (pessimistic bar close)")
+    parser.add_argument("--entry-price-mode", default="bar_open", choices=["bar_open", "prev_close"],
+                        help="Entry price: bar_open (correct, default) | prev_close (legacy/StockMock-compat)")
+    parser.add_argument("--eod-exit-price-mode", default="bar_open", choices=["bar_open", "prev_close"],
+                        help="EOD exit price: bar_open (correct, default) | prev_close (legacy/StockMock-compat)")
     parser.add_argument("--protect-profit-mode", default="none", choices=["none", "lock", "trail", "lock_trail"])
     parser.add_argument("--lock-profit-reaches", type=float, default=0.0)
     parser.add_argument("--lock-profit-min",     type=float, default=0.0)
@@ -1947,6 +2155,10 @@ def main():
     parser.add_argument("--trail-profit-by",     type=float, default=0.0)
     parser.add_argument("--commission-per-lot", type=float, default=40.0)
     parser.add_argument("--slippage-pct",       type=float, default=0.0)
+    parser.add_argument("--cost-model",         default="flat", choices=["flat", "dhan_fno"],
+                        help="flat: commission_per_lot x legs traded. dhan_fno: exact "
+                             "brokerage+GST+STT+exchange-fee+SEBI formula per executed order "
+                             "(see calc_dhan_cost), ignoring --commission-per-lot.")
     parser.add_argument("--strategy-type",      default="intraday",
                         choices=["intraday", "expiry_day", "first_day", "positional"])
     parser.add_argument("--entry-days-before-expiry", type=int, default=3,
@@ -1972,6 +2184,10 @@ def main():
                         help="Enable Range Breakout entry")
     parser.add_argument("--range-until-time",   default="09:31",
                         help="Range Breakout observation window end time (default: 09:31)")
+    parser.add_argument("--range-breakout-mode", default="independent", choices=["independent", "basket"],
+                        help="Range Breakout entry mode: independent (per-leg) or basket (all legs together)")
+    parser.add_argument("--range-breakout-ref",  default="option", choices=["option", "spot"],
+                        help="Range Breakout trigger reference: option (premium high/low) or spot (index high/low)")
     parser.add_argument("--status-file",        default=None)
     parser.add_argument("--output-file",        default=None)
     parser.add_argument("--strategy-name",      default="backtest",
@@ -2002,6 +2218,7 @@ def main():
             leg_configs=leg_configs,
             cycles=cycles,
             lot_size=args.lot_size,
+            cost_model=args.cost_model,
             commission_per_lot=args.commission_per_lot,
             slippage_pct=args.slippage_pct,
             entry_time_str=args.entry_time,
@@ -2026,6 +2243,7 @@ def main():
             profit_target_type=args.profit_target_type,
             overall_sl_val=args.overall_sl_val,
             overall_sl_type=args.overall_sl_type,
+            overall_sl_execution=args.overall_sl_execution,
             protect_profit_mode=args.protect_profit_mode if args.protect_profit_mode != "none" else None,
             lock_profit_reaches=args.lock_profit_reaches,
             lock_profit_min=args.lock_profit_min,
@@ -2034,8 +2252,12 @@ def main():
             no_reentry_after_time_str=args.no_reentry_after_time,
             range_breakout=args.range_breakout,
             range_until_time_str=args.range_until_time,
+            range_breakout_mode=args.range_breakout_mode,
+            range_breakout_ref=args.range_breakout_ref,
             entry_days_before_expiry=args.entry_days_before_expiry,
             exit_days_before_expiry=args.exit_days_before_expiry,
+            entry_price_mode=args.entry_price_mode,
+            eod_exit_price_mode=args.eod_exit_price_mode,
         )
         result["params"] = {
             "start_date":            args.start_date,
@@ -2049,6 +2271,7 @@ def main():
             "profit_target_type":    args.profit_target_type,
             "overall_sl_val":        args.overall_sl_val,
             "overall_sl_type":       args.overall_sl_type,
+            "overall_sl_execution":  args.overall_sl_execution,
             "protect_profit_mode":   args.protect_profit_mode,
             "lock_profit_reaches":   args.lock_profit_reaches,
             "lock_profit_min":       args.lock_profit_min,
@@ -2057,9 +2280,14 @@ def main():
             "no_reentry_after_time": args.no_reentry_after_time,
             "range_breakout":        args.range_breakout,
             "range_until_time":      args.range_until_time,
+            "range_breakout_mode":   args.range_breakout_mode,
+            "range_breakout_ref":    args.range_breakout_ref,
             "entry_days_before_expiry": args.entry_days_before_expiry,
             "exit_days_before_expiry":  args.exit_days_before_expiry,
+            "entry_price_mode":           args.entry_price_mode,
+            "eod_exit_price_mode":         args.eod_exit_price_mode,
             "commission_per_lot":    args.commission_per_lot,
+            "cost_model":            args.cost_model,
             "slippage_pct":          args.slippage_pct,
             "strategy_type":         args.strategy_type,
             "legs":                  legs_raw,
@@ -2095,14 +2323,13 @@ def main():
                 pass
         if args.status_file:
             try:
-                with open(args.status_file, "w") as f:
-                    json.dump({
-                        "running": False,
-                        "done": True,
-                        "percent": 100.0,
-                        "error": str(e),
-                        "pid": os.getpid(),
-                    }, f)
+                _write_status_atomic(args.status_file, {
+                    "running": False,
+                    "done": True,
+                    "percent": 100.0,
+                    "error": str(e),
+                    "pid": os.getpid(),
+                })
             except Exception:
                 pass
         sys.stderr.write(f"Backtest error: {e}\n")

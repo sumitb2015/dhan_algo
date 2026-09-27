@@ -230,8 +230,38 @@ const EXIT_REASON_CLS: Record<string, string> = {
 function fmt(n: number) {
   return Math.abs(n).toLocaleString('en-IN', { maximumFractionDigits: 0 });
 }
+// Entry Cutoff Time's hour/minute <select> pair uses un-padded, 9-15-only hour
+// options — clamp any stored value (including legacy zero-padded/out-of-range
+// free-text from before these were dropdowns) into a value guaranteed to match
+// one of the rendered options, so the dropdown never silently desyncs from
+// the underlying entryCutoffTime state.
+function clampCutoffHour(raw: string): string {
+  const n = parseInt(raw, 10);
+  if (!Number.isFinite(n)) return '15';
+  return String(Math.min(15, Math.max(9, n)));
+}
+function clampCutoffMinute(raw: string): string {
+  const n = parseInt(raw, 10);
+  if (!Number.isFinite(n) || n < 0 || n > 59) return '00';
+  return String(n).padStart(2, '0');
+}
 function fmtPnl(n: number) {
   return `${n >= 0 ? '+' : '-'}₹${fmt(n)}`;
+}
+// TS mirror of scripts/analysis/backtest_short_straddle.py's calc_dhan_cost —
+// used only for the day-timeline modal's "Execution Friction" display
+// estimate; the authoritative number is whatever the Python engine reports
+// in the backtest result (commission_paid).
+function calcDhanCostTs(txnType: 'BUY' | 'SELL', qty: number, price: number): number {
+  const turnover = qty * price;
+  const brokerage = 20.0;
+  const gstBrokerage = brokerage * 0.18;
+  const exchCharge = turnover * 0.0005;
+  const gstExch = exchCharge * 0.18;
+  const stt = txnType === 'SELL' ? turnover * 0.0010 : 0.0;
+  const stamp = txnType === 'BUY' ? turnover * 0.00003 : 0.0;
+  const sebi = turnover * 0.000001 * 1.18;
+  return brokerage + gstBrokerage + exchCharge + gstExch + stt + stamp + sebi;
 }
 function fmtNum(n: number | null, decimals = 2): string {
   if (n == null) return '—';
@@ -508,6 +538,8 @@ export default function OptionsBacktester({
   const [entryS, setEntryS] = useState('00');
 
   const [rangeBreakoutActive, setRangeBreakoutActive] = useState(false);
+  const [rangeBreakoutMode, setRangeBreakoutMode] = useState<'independent' | 'basket'>('independent');
+  const [rangeBreakoutRef, setRangeBreakoutRef] = useState<'option' | 'spot'>('option');
   const [rangeUntilH, setRangeUntilH] = useState('9');
   const [rangeUntilM, setRangeUntilM] = useState('31');
   const [rangeUntilS, setRangeUntilS] = useState('00');
@@ -542,8 +574,17 @@ export default function OptionsBacktester({
 
   const [protectProfitsActive, setProtectProfitsActive] = useState(false);
   const [protectProfitMode, setProtectProfitMode] = useState<'lock' | 'trail' | 'lock_trail'>('lock');
-  const [lockProfitReaches, setLockProfitReaches] = useState(1000);
+  const [lockProfitReaches, setLockProfitReachesRaw] = useState(1000);
   const [lockProfitMin, setLockProfitMin] = useState(0);
+  // Re-clamp lockProfitMin whenever lockProfitReaches is lowered below it —
+  // the onChange clamp on lockProfitMin's own input only catches edits to
+  // that field, not a later edit to lockProfitReaches leaving a stale,
+  // now-invalid (Min >= Reaches) pair. Done inside the setter itself (not a
+  // useEffect) to avoid a same-render cascading setState.
+  const setLockProfitReaches = (next: number) => {
+    setLockProfitReachesRaw(next);
+    setLockProfitMin(m => (next > 0 ? Math.min(m, next - 1) : m));
+  };
   const [trailProfitStep, setTrailProfitStep] = useState(1000);
   const [trailProfitBy, setTrailProfitBy] = useState(500);
   const [trailSlPct, setTrailSlPct] = useState(0);
@@ -562,6 +603,12 @@ export default function OptionsBacktester({
   // Advanced settings & modal
   const [settingsModalOpen, setSettingsModalOpen] = useState(false);
   const [includeCosts, setIncludeCosts] = useState(false);
+  // 'dhan_fno': exact brokerage+GST+STT+exchange-fee+SEBI formula per executed
+  // order (~₹50/order on Dhan, see docs/API_GOTCHAS.md and the vault's
+  // 2026-09-26 cost-modeling decision) — recommended default once costs are
+  // on. 'flat': the old user-typed ₹/lot number, kept for anyone who wants a
+  // simpler approximation instead.
+  const [costModel, setCostModel] = useState<'dhan_fno' | 'flat'>('dhan_fno');
   const [commissionPerLot, setCommissionPerLot] = useState(40);
   const [slippagePct, setSlippagePct] = useState(0);
   const [adjustmentMode, setAdjustmentMode] = useState<'none' | 'rolling_straddle'>('none');
@@ -701,6 +748,12 @@ export default function OptionsBacktester({
           }
           if (saved.rangeBreakoutActive) {
             setRangeBreakoutActive(true);
+            if (saved.rangeBreakoutMode === 'independent' || saved.rangeBreakoutMode === 'basket') {
+              setRangeBreakoutMode(saved.rangeBreakoutMode);
+            }
+            if (saved.rangeBreakoutRef === 'option' || saved.rangeBreakoutRef === 'spot') {
+              setRangeBreakoutRef(saved.rangeBreakoutRef);
+            }
             if (saved.rangeUntilTime) {
               const [h, m] = String(saved.rangeUntilTime).split(':');
               if (h) setRangeUntilH(h);
@@ -728,6 +781,7 @@ export default function OptionsBacktester({
           if (saved.maxRolls !== undefined) setMaxRolls(Number(saved.maxRolls));
           if (saved.scalpFloorPct !== undefined) setScalpFloorPct(Number(saved.scalpFloorPct));
           if (saved.includeCosts !== undefined) setIncludeCosts(Boolean(saved.includeCosts));
+          if (saved.costModel === 'flat' || saved.costModel === 'dhan_fno') setCostModel(saved.costModel);
           if (saved.commissionPerLot !== undefined) setCommissionPerLot(Number(saved.commissionPerLot));
           if (saved.slippagePct !== undefined) setSlippagePct(Number(saved.slippagePct));
         }
@@ -796,6 +850,12 @@ export default function OptionsBacktester({
       }
       if (p.range_breakout) {
         setRangeBreakoutActive(true);
+        if (p.range_breakout_mode === 'independent' || p.range_breakout_mode === 'basket') {
+          setRangeBreakoutMode(p.range_breakout_mode);
+        }
+        if (p.range_breakout_ref === 'option' || p.range_breakout_ref === 'spot') {
+          setRangeBreakoutRef(p.range_breakout_ref);
+        }
         if (p.range_until_time) {
           const parts = String(p.range_until_time).split(':');
           if (parts[0]) setRangeUntilH(parts[0]);
@@ -899,6 +959,10 @@ export default function OptionsBacktester({
     fetch(apiBase)
       .then(r => r.json())
       .then(sData => {
+        // If the user already clicked Run Backtest (or a prior resume already
+        // fired) while this fetch was in flight, pollRef is already owned by
+        // that poll loop — don't stomp it and orphan it uncleared.
+        if (pollRef.current) return;
         if (sData.running && !sData.done) {
           setLoading(true);
           setError(null);
@@ -1125,11 +1189,15 @@ export default function OptionsBacktester({
       return;
     }
 
-    // Guard: Re-Entry after SL configured but no leg SL is set — re-entry will never fire
+    // Guard: Re-Entry/Re-Execute (SL) configured but no leg SL is set — neither
+    // variant can ever fire without leg_sl_pct > 0 (they're mutually exclusive
+    // per leg, so both fields must be checked).
     if (reEntryActive) {
-      const legWithReEntrySLButNoSL = legs.find(l => (l.re_entry_sl_count ?? 0) > 0 && (l.leg_sl_pct ?? 0) === 0);
+      const legWithReEntrySLButNoSL = legs.find(l =>
+        ((l.re_entry_sl_count ?? 0) > 0 || (l.re_execute_sl_count ?? 0) > 0) && (l.leg_sl_pct ?? 0) === 0
+      );
       if (legWithReEntrySLButNoSL) {
-        toast.error('Leg has Re-Entry (SL) configured but no Leg SL is set. Add a Leg SL % or remove the Re-Entry.');
+        toast.error('Leg has Re-Entry/Re-Execute (SL) configured but no Leg SL is set. Add a Leg SL % or remove the Re-Entry.');
         return;
       }
     }
@@ -1176,7 +1244,8 @@ export default function OptionsBacktester({
           overall_sl_pct: strategySlActive && overallSlType === 'pct' ? overallSlVal : 0,
           entry_time: entryTimeFormatted,
           eod_time: eodTimeFormatted,
-          commission_per_lot: includeCosts ? commissionPerLot : 0,
+          cost_model: includeCosts ? costModel : 'flat',
+          commission_per_lot: includeCosts && costModel === 'flat' ? commissionPerLot : 0,
           slippage_pct: includeCosts ? slippagePct : 0,
           strategy_type: executionType === 'POSITIONAL' ? 'positional' : 'intraday',
           entry_days_before_expiry: executionType === 'POSITIONAL' ? entryDaysBeforeExpiry : 3,
@@ -1200,6 +1269,8 @@ export default function OptionsBacktester({
           no_reentry_after_time: noReentryAfterActive ? `${String(noReentryH).padStart(2, '0')}:${String(noReentryM).padStart(2, '0')}` : undefined,
           range_breakout: rangeBreakoutActive,
           range_until_time: rangeBreakoutActive ? `${String(rangeUntilH).padStart(2, '0')}:${String(rangeUntilM).padStart(2, '0')}` : undefined,
+          range_breakout_mode: rangeBreakoutActive ? rangeBreakoutMode : undefined,
+          range_breakout_ref: rangeBreakoutActive ? rangeBreakoutRef : undefined,
         }),
       });
 
@@ -1295,6 +1366,8 @@ export default function OptionsBacktester({
       noReentryAfterActive,
       noReentryTime: `${noReentryH}:${noReentryM}`,
       rangeBreakoutActive,
+      rangeBreakoutMode,
+      rangeBreakoutRef,
       rangeUntilTime: `${rangeUntilH}:${rangeUntilM}`,
       executionType,
       entryDaysBeforeExpiry,
@@ -1311,6 +1384,7 @@ export default function OptionsBacktester({
       maxRolls,
       scalpFloorPct,
       includeCosts,
+      costModel,
       commissionPerLot,
       slippagePct,
     };
@@ -2361,6 +2435,28 @@ export default function OptionsBacktester({
                 <p className="text-[11px] text-zinc-400 leading-snug mt-1 max-w-sm">
                   {getRangeDescription()}
                 </p>
+                <div className="flex items-center gap-2 text-xs text-zinc-400 mt-1">
+                  <span className="w-20 font-medium">Mode:</span>
+                  <select
+                    value={rangeBreakoutMode}
+                    onChange={e => setRangeBreakoutMode(e.target.value as 'independent' | 'basket')}
+                    className="bg-zinc-800 border border-zinc-700 rounded px-2 py-1 text-xs text-zinc-100 font-medium focus:outline-hidden"
+                  >
+                    <option value="independent">Independent (Per-leg trigger)</option>
+                    <option value="basket">Basket (Simultaneous entry)</option>
+                  </select>
+                </div>
+                <div className="flex items-center gap-2 text-xs text-zinc-400 mt-1">
+                  <span className="w-20 font-medium">Reference:</span>
+                  <select
+                    value={rangeBreakoutRef}
+                    onChange={e => setRangeBreakoutRef(e.target.value as 'option' | 'spot')}
+                    className="bg-zinc-800 border border-zinc-700 rounded px-2 py-1 text-xs text-zinc-100 font-medium focus:outline-hidden"
+                  >
+                    <option value="option">Option Premium (CE High / PE Low)</option>
+                    <option value="spot">Spot Index (Nifty High / Low)</option>
+                  </select>
+                </div>
               </div>
             )}
 
@@ -3023,27 +3119,56 @@ export default function OptionsBacktester({
                   <span>Include Costs &amp; Slippage</span>
                 </label>
                 {includeCosts && (
-                  <div className="grid grid-cols-2 gap-3 mt-2">
+                  <div className="mt-2 space-y-3">
                     <div>
-                      <span className="block text-[11px] text-zinc-500 mb-1">Commission / Lot (₹)</span>
-                      <input
-                        type="number"
-                        min={0}
-                        value={commissionPerLot}
-                        onChange={e => setCommissionPerLot(Number(e.target.value))}
-                        className="w-full bg-zinc-800 border border-zinc-700 text-zinc-100 rounded p-1.5 text-xs focus:outline-hidden"
-                      />
+                      <span className="block text-[11px] text-zinc-500 mb-1">Cost Model</span>
+                      <div className="flex gap-4">
+                        <label className="flex items-center gap-1.5 cursor-pointer text-xs">
+                          <input
+                            type="radio"
+                            name="costModel"
+                            checked={costModel === 'dhan_fno'}
+                            onChange={() => setCostModel('dhan_fno')}
+                            className="accent-teal-500"
+                          />
+                          Realistic Dhan F&amp;O (brokerage+GST+STT+exchange fees)
+                        </label>
+                        <label className="flex items-center gap-1.5 cursor-pointer text-xs">
+                          <input
+                            type="radio"
+                            name="costModel"
+                            checked={costModel === 'flat'}
+                            onChange={() => setCostModel('flat')}
+                            className="accent-teal-500"
+                          />
+                          Flat ₹/lot
+                        </label>
+                      </div>
                     </div>
-                    <div>
-                      <span className="block text-[11px] text-zinc-500 mb-1">Slippage %</span>
-                      <input
-                        type="number"
-                        min={0}
-                        step={0.05}
-                        value={slippagePct}
-                        onChange={e => setSlippagePct(Number(e.target.value))}
-                        className="w-full bg-zinc-800 border border-zinc-700 text-zinc-100 rounded p-1.5 text-xs focus:outline-hidden"
-                      />
+                    <div className="grid grid-cols-2 gap-3">
+                      {costModel === 'flat' && (
+                        <div>
+                          <span className="block text-[11px] text-zinc-500 mb-1">Commission / Lot (₹)</span>
+                          <input
+                            type="number"
+                            min={0}
+                            value={commissionPerLot}
+                            onChange={e => setCommissionPerLot(Number(e.target.value))}
+                            className="w-full bg-zinc-800 border border-zinc-700 text-zinc-100 rounded p-1.5 text-xs focus:outline-hidden"
+                          />
+                        </div>
+                      )}
+                      <div>
+                        <span className="block text-[11px] text-zinc-500 mb-1">Slippage %</span>
+                        <input
+                          type="number"
+                          min={0}
+                          step={0.05}
+                          value={slippagePct}
+                          onChange={e => setSlippagePct(Number(e.target.value))}
+                          className="w-full bg-zinc-800 border border-zinc-700 text-zinc-100 rounded p-1.5 text-xs focus:outline-hidden"
+                        />
+                      </div>
                     </div>
                   </div>
                 )}
@@ -3129,16 +3254,16 @@ export default function OptionsBacktester({
                         <span className="block text-[11px] text-zinc-500 mb-1">Entry Cutoff Time</span>
                         <div className="flex items-center gap-1 rounded overflow-hidden border border-zinc-700 bg-zinc-800">
                           <select
-                            value={entryCutoffTime.split(':')[0] ?? '15'}
-                            onChange={e => setEntryCutoffTime(`${e.target.value}:${entryCutoffTime.split(':')[1] ?? '00'}`)}
+                            value={clampCutoffHour(entryCutoffTime.split(':')[0] ?? '15')}
+                            onChange={e => setEntryCutoffTime(`${e.target.value}:${clampCutoffMinute(entryCutoffTime.split(':')[1] ?? '00')}`)}
                             className="bg-transparent text-zinc-100 text-xs px-1.5 py-1.5 focus:outline-hidden"
                           >
                             {['9','10','11','12','13','14','15'].map(h => <option key={h} value={h}>{h}</option>)}
                           </select>
                           <span className="text-zinc-500 font-bold">:</span>
                           <select
-                            value={entryCutoffTime.split(':')[1] ?? '00'}
-                            onChange={e => setEntryCutoffTime(`${entryCutoffTime.split(':')[0] ?? '15'}:${e.target.value}`)}
+                            value={clampCutoffMinute(entryCutoffTime.split(':')[1] ?? '00')}
+                            onChange={e => setEntryCutoffTime(`${clampCutoffHour(entryCutoffTime.split(':')[0] ?? '15')}:${e.target.value}`)}
                             className="bg-transparent text-zinc-100 text-xs px-1.5 py-1.5 focus:outline-hidden"
                           >
                             {Array.from({ length: 60 }, (_, i) => String(i).padStart(2, '0')).map(m => (
@@ -3899,7 +4024,18 @@ export default function OptionsBacktester({
                     <div>
                       <span className="text-zinc-500 block text-[10px] uppercase font-bold">Execution Friction</span>
                       <span className="font-mono text-zinc-300 font-semibold">
-                        ~₹{((includeCosts ? commissionPerLot : 40) * selectedDayCycle.legs.length).toFixed(0)}
+                        ~₹{(includeCosts && costModel === 'dhan_fno'
+                          ? selectedDayCycle.legs.reduce((sum, lr) => {
+                              if (!lr.entry_price || lr.entry_price <= 0) return sum;
+                              const qty = lr.lots * lotSize;
+                              const entryTxn = lr.position === 'sell' ? 'SELL' : 'BUY';
+                              const exitTxn = lr.position === 'sell' ? 'BUY' : 'SELL';
+                              return sum
+                                + calcDhanCostTs(entryTxn, qty, lr.entry_price)
+                                + calcDhanCostTs(exitTxn, qty, lr.exit_price ?? lr.entry_price);
+                            }, 0)
+                          : (includeCosts ? commissionPerLot : 40) * selectedDayCycle.legs.length
+                        ).toFixed(0)}
                       </span>
                     </div>
                   </div>

@@ -25,9 +25,14 @@ places an order; the broker is only ever consulted to confirm or shrink that
 ledger, never to originate it.**
 
 `FocusTool.tsx`'s server-side worker (`scripts/tools/focus_tool_rows_worker.py`)
-was removed entirely in `31fadcf` (2026-09-25) in favor of single-engine,
-in-tab execution — that refactor also silently dropped the worker's own
-propagation grace window (Invariant 2/6), restored in `1ea9d3d`/`f8e9665` as
+stopped being spawned as a live process in `31fadcf` (2026-09-25) — the route
+that launched it (`app/api/focus-tool/worker/route.ts`) was gutted to a stub,
+in favor of single-engine, in-tab execution. The script file itself was NOT
+deleted; it's still tracked and still imported by `tests/test_focus_tool_parity.py`
+and three sibling test modules as the Python-side reference for a cross-language
+parity suite against `lib/focusToolRules.ts` — it just never runs live anymore.
+That refactor also silently dropped the worker's own
+propagation grace window (Invariant 2/6) from the *live* path, restored in `1ea9d3d`/`f8e9665` as
 `nextOpenedTs`/`isGhostDropProtected` in `lib/focusToolRules.ts`, with the
 per-leg open timestamp now persisted in `FocusRowFill.{ce,pe}OpenedTs` on disk
 instead of a worker heartbeat. Invariant 5 (tab vs. server worker) is now
