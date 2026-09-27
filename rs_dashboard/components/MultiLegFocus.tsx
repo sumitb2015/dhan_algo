@@ -377,22 +377,42 @@ export default function MultiLegFocus({
     return 0;
   }, [liveQuotes, activeExpiry, activeUnderlying, chainData]);
 
-  // Sync expiriesMap from parent prop if supplied, or lazy-load per activeUnderlying
+  // Sync expiriesMap from parent prop if supplied. Runs alongside (not instead
+  // of) the self-fetch below: the parent (Scalp Cockpit) only ever tracks its
+  // own single active underlying, so it cannot supply expiries for whatever
+  // underlying an individual DRAFT basket's own "Index" dropdown picks.
   useEffect(() => {
     if (expiriesMapProp && Object.keys(expiriesMapProp).length > 0) {
       setExpiriesMap(prev => ({ ...prev, ...expiriesMapProp }));
-      return;
     }
-    if (!activeUnderlying || expiriesMap[activeUnderlying]?.length) return;
-    fetch(`/api/options/expiries?underlying=${activeUnderlying}&broker=${broker}`)
-      .then(r => r.json())
-      .then((j: { success: boolean; data?: string[] }) => {
-        if (j.success && j.data?.length) {
-          setExpiriesMap(prev => ({ ...prev, [activeUnderlying]: j.data! }));
-        }
-      })
-      .catch(() => {});
-  }, [broker, activeUnderlying, expiriesMapProp]);
+  }, [expiriesMapProp]);
+
+  // Underlyings actually in play: the top-level active pill plus every basket
+  // row's own underlying (each row can independently pick any of the 5 via
+  // its "Index" dropdown, so it must not be left waiting on the active pill).
+  const neededUnderlyings = useMemo(() => {
+    const set = new Set<string>();
+    if (activeUnderlying) set.add(activeUnderlying);
+    for (const b of baskets) {
+      if (b.underlying) set.add(b.underlying);
+    }
+    return Array.from(set).sort().join(',');
+  }, [activeUnderlying, baskets]);
+
+  useEffect(() => {
+    const list = neededUnderlyings ? neededUnderlyings.split(',') : [];
+    for (const u of list) {
+      if (expiriesMap[u]?.length) continue;
+      fetch(`/api/options/expiries?underlying=${u}&broker=${broker}`)
+        .then(r => r.json())
+        .then((j: { success: boolean; data?: string[] }) => {
+          if (j.success && j.data?.length) {
+            setExpiriesMap(prev => ({ ...prev, [u]: j.data! }));
+          }
+        })
+        .catch(() => {});
+    }
+  }, [broker, neededUnderlyings]);
 
   // Auto-backfill empty expiry on initial baskets once expiriesMap resolves
   useEffect(() => {

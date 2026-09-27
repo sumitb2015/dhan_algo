@@ -23,6 +23,7 @@ import OpenInterestStrikesWidget from '@/components/scalpCockpit/OpenInterestStr
 import VixWidget from '@/components/scalpCockpit/VixWidget';
 import StraddleDecayWidget from '@/components/scalpCockpit/StraddleDecayWidget';
 import OiQuadrantsWidget from '@/components/scalpCockpit/OiQuadrantsWidget';
+import TrendingOiWidget from '@/components/scalpCockpit/TrendingOiWidget';
 import MultiLegFocus from '@/components/MultiLegFocus';
 import MultiLegOptionChainModal from '@/components/multiLegFocus/MultiLegOptionChainModal';
 
@@ -339,19 +340,19 @@ export default function ScalpCockpit() {
               className="flex items-center gap-1.5 text-zinc-400 hover:text-zinc-200 font-bold uppercase tracking-wider"
             >
               <LayoutGrid className="w-3 h-3 text-emerald-400" />
-              <span>{showSecondaryGrid ? 'Hide Straddle & Quadrants Grid' : 'Show Straddle Decay & OI Quadrants Grid'}</span>
+              <span>{showSecondaryGrid ? 'Hide Straddle, Quadrants & Trending OI Grid' : 'Show Straddle Decay, OI Quadrants & Trending OI Grid'}</span>
               {showSecondaryGrid ? <ChevronUp className="w-3 h-3" /> : <ChevronDown className="w-3 h-3" />}
             </button>
             <span className="text-[10px] text-zinc-500">
-              {showSecondaryGrid ? 'Expanded 5-widget analytics view' : 'Click to display ATM Straddle Decay & OI Buildup Quadrants'}
+              {showSecondaryGrid ? 'Expanded 6-widget analytics view' : 'Click to display ATM Straddle Decay, OI Buildup Quadrants & Trending OI Tape'}
             </span>
           </div>
 
-          {/* Secondary Analytics Grid (Straddle Decay + OI Quadrants) */}
+          {/* Secondary Analytics Grid (Straddle Decay + OI Quadrants + Trending OI) */}
           {(showSecondaryGrid || isAnalyticsFocus) && (
             <div className="mt-2.5 grid grid-cols-1 lg:grid-cols-12 gap-2.5">
               {/* Window 4: ATM Straddle Premium Decay Curve */}
-              <div className="lg:col-span-6 h-[215px]">
+              <div className="lg:col-span-4 h-[215px]">
                 <StraddleDecayWidget
                   underlying={underlying}
                   atmStrikeProp={atmStrike}
@@ -360,12 +361,27 @@ export default function ScalpCockpit() {
               </div>
 
               {/* Window 5: OI Buildup Quadrants */}
-              <div className="lg:col-span-6 h-[215px]">
+              <div className="lg:col-span-4 h-[215px]">
                 <OiQuadrantsWidget
                   underlying={underlying}
                   chainOc={sharedChainOc}
                   expiry={selectedExpiry}
                 />
+              </div>
+
+              {/* Window 6: Trending OI Tape (interval-bucketed OI/PCR snapshots).
+                  /api/trending-oi is NIFTY-only — show a clear placeholder rather
+                  than silently rendering NIFTY data while another underlying tab
+                  is selected (would look like it's tracking BANKNIFTY/SENSEX/etc). */}
+              <div className="lg:col-span-4 h-[215px]">
+                {underlying === 'NIFTY' ? (
+                  <TrendingOiWidget underlying={underlying} />
+                ) : (
+                  <div className="flex flex-col h-full items-center justify-center gap-1.5 bg-zinc-900/90 border border-zinc-800 rounded-xl text-center px-3">
+                    <span className="text-[11px] font-bold text-zinc-400">Trending OI Tape is NIFTY-only</span>
+                    <span className="text-[10px] text-zinc-600">Switch to the NIFTY tab above to view interval OI/PCR snapshots</span>
+                  </div>
+                )}
               </div>
             </div>
           )}
