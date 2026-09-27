@@ -27,7 +27,7 @@ import {
   INTRADAY_BACKSTOP_HM, EMPTY_ROW_LIVE,
   legsOf, rowFlat, rowOwnsLeg, sidePremium, legStopReason, legOwnContracts,
   dteMatches, dteForExpiry, evaluateRowExit, evaluateEntry, evaluateGlobalRisk,
-  legStopPremium, pairStopPremium,
+  legStopPremium, pairStopPremium, nextOpenedTs, isGhostDropProtected,
   type PosRow, type RowLive,
 } from '@/lib/focusToolRules';
 import { computeRowPnl, mtmForQty, shiftMayReopen, canMarkMtm, shiftCloseConfirmed, rowDisplayBookedPnl, putCallRatio, valuePutCallRatio, pickOpenInterest } from '@/lib/focusToolPnl';
@@ -155,21 +155,6 @@ function fmtInr(n: number, signed = false): string {
 function fmtPrice(n: number | null | undefined): string {
   if (n == null || !Number.isFinite(n) || n === 0) return '\u2014';
   return n.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-}
-
-/** How long a just-opened leg is protected from being ghost-dropped by a
- *  stale netQty===0 position poll \u2014 see the reduce path in placeLeg. Matches
- *  the retired focus_tool_rows_worker.py's RECONCILE_GRACE_SECONDS. */
-const GHOST_DROP_GRACE_MS = 20_000;
-
-/** Shared 0\u2192positive edge detection for one leg's openedTs stamp \u2014 see
- *  adjustFillQty. Re-stamps only on the flat\u2192held transition; an add-on-top
- *  of an already-held leg keeps the original open time, and a leg that's
- *  flat (nextQty <= 0) has no open time at all. */
-function nextOpenedTs(prevQty: number, nextQty: number, prevTs: number | null | undefined): number | null {
-  if (nextQty <= 0) return null;
-  if (prevQty <= 0) return Date.now();
-  return prevTs ?? Date.now();
 }
 
 /** Wall-clock 'HH:MM' in IST, regardless of the browser's own timezone. */
@@ -3673,12 +3658,13 @@ export default function FocusTool() {
         // Stamp the moment a leg goes from flat to held (persisted, not just
         // an in-memory ref) so a stale post-fill position poll has something
         // to check against before treating it as a ghost — see
-        // GHOST_DROP_GRACE_MS below. Cleared once the leg is flat again.
+        // isGhostDropProtected below. Cleared once the leg is flat again.
+        const now = Date.now();
         const ceOpenedTs = leg === 'CE'
-          ? nextOpenedTs(prevQty, nextCeQty, f?.ceOpenedTs)
+          ? nextOpenedTs(prevQty, nextCeQty, f?.ceOpenedTs, now)
           : (f?.ceOpenedTs ?? null);
         const peOpenedTs = leg === 'PE'
-          ? nextOpenedTs(prevQty, nextPeQty, f?.peOpenedTs)
+          ? nextOpenedTs(prevQty, nextPeQty, f?.peOpenedTs, now)
           : (f?.peOpenedTs ?? null);
         const nextFill: FocusRowFill = {
           ceStrike: leg === 'CE' && strike != null ? strike : (f?.ceStrike ?? null),
@@ -3835,7 +3821,7 @@ export default function FocusTool() {
         // persisted (see FocusRowFill), so this protects across a reload
         // too, not just within one tab session. Mirrors the retired
         // worker's own RECONCILE_GRACE_SECONDS.
-        if (pageOwn > 0 && openedTs != null && Date.now() - openedTs < GHOST_DROP_GRACE_MS) {
+        if (isGhostDropProtected(pageOwn, openedTs, Date.now())) {
           addToast('error', `${what} fill settling`,
             'Broker position not caught up with a just-opened fill yet — retry in a few seconds');
           return false;

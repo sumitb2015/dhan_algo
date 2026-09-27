@@ -32,6 +32,49 @@ import type { FocusRow, FocusDte, FocusRowStatus } from '@/lib/focusToolRows';
  */
 export const INTRADAY_BACKSTOP_HM = '15:17';
 
+/**
+ * How long a just-opened leg is protected from being ghost-dropped by a
+ * stale netQty===0 position poll — see isGhostDropProtected. Matches the
+ * retired focus_tool_rows_worker.py's RECONCILE_GRACE_SECONDS.
+ */
+export const GHOST_DROP_GRACE_MS = 20_000;
+
+// ── Fill ledger timestamps ────────────────────────────────────────────────────
+
+/**
+ * The next `ceOpenedTs`/`peOpenedTs` stamp for one leg, given its qty before
+ * and after a fill-ledger adjustment. Pure and takes `now` as an argument (not
+ * `Date.now()` internally) so callers — and tests — control the clock.
+ *
+ * Re-stamps only on the flat→held transition (`prevQty <= 0 && nextQty > 0`):
+ * an add-on-top of an already-held leg keeps the original open time, and a
+ * leg that's flat (`nextQty <= 0`) has no open time at all.
+ */
+export function nextOpenedTs(
+  prevQty: number, nextQty: number, prevTs: number | null | undefined, now: number,
+): number | null {
+  if (nextQty <= 0) return null;
+  if (prevQty <= 0) return now;
+  return prevTs ?? now;
+}
+
+/**
+ * Whether a leg this row believes it still owns (`pageOwn > 0`) should be
+ * protected from a `netQty === 0` broker-poll ghost-drop right now.
+ *
+ * Kotak/Zerodha have no fill-confirmation socket, so a position poll can
+ * still read the pre-fill (flat) book for a few seconds after a real order
+ * goes through. Treating that read as "actually flat" zeroes a live short
+ * out of the ledger and stops tracking it entirely — this is the guard that
+ * refuses to, for GHOST_DROP_GRACE_MS after the leg was opened.
+ */
+export function isGhostDropProtected(
+  pageOwn: number, openedTs: number | null | undefined, now: number,
+  graceMs: number = GHOST_DROP_GRACE_MS,
+): boolean {
+  return pageOwn > 0 && openedTs != null && now - openedTs < graceMs;
+}
+
 // ── Position / row views ─────────────────────────────────────────────────────
 
 /** One leg of a broker position book row, as this page reads it. */

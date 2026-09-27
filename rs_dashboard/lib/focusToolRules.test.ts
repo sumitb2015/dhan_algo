@@ -17,6 +17,7 @@ import {
   evaluateEntry, evaluateGlobalRisk, evaluateRowExit, legStopReason,
   dteForExpiry, dteMatches, sidePremium, legsOf, legsFlat, rowOwnsLeg,
   stopPremium, legStopPremium, pairStopPremium, legOwnContracts,
+  nextOpenedTs, isGhostDropProtected, GHOST_DROP_GRACE_MS,
   type RowLive, type PosRow, type WorkerHold,
 } from './focusToolRules.ts';
 import type { FocusRow } from './focusToolRows.ts';
@@ -345,4 +346,67 @@ test('pairStopPremium: CE 2@40 + PE 4@60 → combined 320, SL ×1.2 = 384', () =
   const open = ownedRow({ slMultiplier: '1.2' }, c);
   assert.equal(pairStopPremium(open, live(c), undefined, 75), 384);
   assert.equal(sidePremium(open, live(c), undefined, 75), 320);
+});
+
+// ── Ghost-drop grace window ──────────────────────────────────────────────────
+//
+// Regression coverage for the race the worker removal (31fadcf) dropped and
+// 1ea9d3d restored: Kotak/Zerodha have no fill-confirmation socket, so a
+// position poll can still read a leg as flat (netQty===0) for a few seconds
+// after a real fill. Without the grace window that poll zeroes the row's own
+// fill ledger and marks it exited while the broker position is still open —
+// nothing then watches it for SL/target/exit-time again.
+
+test('nextOpenedTs stamps only the flat→held transition, and clears on flat', () => {
+  const t0 = 1_000_000;
+  // Flat → held: stamps now.
+  assert.equal(nextOpenedTs(0, 75, null, t0), t0);
+  // Already held, adding more on the same leg: keeps the original stamp.
+  assert.equal(nextOpenedTs(75, 150, t0, t0 + 5_000), t0);
+  // Held → flat (full reduce): no open time at all.
+  assert.equal(nextOpenedTs(75, 0, t0, t0 + 5_000), null);
+  // A leg with no prior stamp that's already held (legacy fill) still gets one.
+  assert.equal(nextOpenedTs(75, 150, undefined, t0), t0);
+});
+
+test('isGhostDropProtected shields a just-opened leg from a stale zero poll, then releases it', () => {
+  const openedAt = 1_000_000;
+  const pageOwn = 75; // this row's own ledger still shows the leg held
+
+  // A poll landing seconds after the fill, still reading the old (flat) book:
+  // must NOT be treated as "actually flat".
+  assert.equal(isGhostDropProtected(pageOwn, openedAt, openedAt + 5_000), true);
+  assert.equal(isGhostDropProtected(pageOwn, openedAt, openedAt + GHOST_DROP_GRACE_MS - 1), true);
+
+  // The same poll, once the grace window has fully elapsed: now trusted —
+  // a leg still reading flat this long after opening really is flat.
+  assert.equal(isGhostDropProtected(pageOwn, openedAt, openedAt + GHOST_DROP_GRACE_MS), false);
+  assert.equal(isGhostDropProtected(pageOwn, openedAt, openedAt + 60_000), false);
+});
+
+test('isGhostDropProtected never shields a leg this row does not own', () => {
+  const openedAt = 1_000_000;
+  // No fill-ledger qty (pageOwn===0) — nothing to protect, regardless of any
+  // stale timestamp still sitting on disk from a prior position.
+  assert.equal(isGhostDropProtected(0, openedAt, openedAt + 1_000), false);
+  // Owned, but no stamp at all (legacy session, or never opened) — no grace.
+  assert.equal(isGhostDropProtected(75, null, openedAt), false);
+  assert.equal(isGhostDropProtected(75, undefined, openedAt), false);
+});
+
+test('a full exit-then-reentry gets a fresh grace window, not the old one', () => {
+  const openedAt = 1_000_000;
+  // First fill opens the leg…
+  let ts = nextOpenedTs(0, 75, null, openedAt);
+  assert.equal(ts, openedAt);
+  // …a real exit closes it, clearing the stamp…
+  ts = nextOpenedTs(75, 0, ts, openedAt + 60_000);
+  assert.equal(ts, null);
+  // …well past the original grace window, so if the old stamp had lingered
+  // this would already be unprotected. A later re-entry must start its own
+  // window from the new open time, not read as protected off the stale one.
+  const reenteredAt = openedAt + 120_000;
+  ts = nextOpenedTs(0, 75, ts, reenteredAt);
+  assert.equal(ts, reenteredAt);
+  assert.equal(isGhostDropProtected(75, ts, reenteredAt + 5_000), true);
 });
