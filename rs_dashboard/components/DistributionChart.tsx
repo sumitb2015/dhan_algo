@@ -142,22 +142,22 @@ function DistributionSVGChart({ stats, histogram, normalCurve }: SVGChartProps) 
         onMouseMove={handleMouseMove}
         onMouseLeave={() => setTooltip(null)}
       >
-        {/* Chart background */}
-        <rect x={M.left} y={M.top} width={CW} height={CH} fill="#09090b" rx={2} />
+        {/* Chart background — themed page-ground token, not a literal color, so it flips with theme */}
+        <rect x={M.left} y={M.top} width={CW} height={CH} fill="var(--z-950)" rx={2} />
 
         {/* Horizontal grid */}
         {yTicks.slice(1).map((y, i) => (
           <line key={i}
             x1={M.left} y1={yS(y)} x2={M.left + CW} y2={yS(y)}
-            stroke="#27272a" strokeWidth={0.8} strokeDasharray="3 3"
+            stroke="var(--z-800)" strokeWidth={0.8} strokeDasharray="3 3"
           />
         ))}
 
-        {/* Y axis labels — zinc-400 (#a1a1aa) */}
+        {/* Y axis labels — muted text */}
         {yTicks.map((y, i) => (
           <text key={i}
             x={M.left - 8} y={yS(y) + 3.5}
-            textAnchor="end" fontSize={9.5} fill="#a1a1aa"
+            textAnchor="end" fontSize={9.5} fill="var(--z-500)"
           >
             {y.toFixed(y < 0.01 ? 4 : 3)}
           </text>
@@ -182,7 +182,7 @@ function DistributionSVGChart({ stats, histogram, normalCurve }: SVGChartProps) 
             <rect
               key={i}
               x={bx} y={by} width={binWidthPx} height={bh}
-              fill={isHovered ? '#60a5fa' : '#3b82f6'}
+              fill={isHovered ? 'var(--a-blue-400)' : '#3b82f6'}
               fillOpacity={isHovered ? 0.75 : 0.48}
               stroke="#1d4ed8"
               strokeWidth={0.35}
@@ -220,18 +220,19 @@ function DistributionSVGChart({ stats, histogram, normalCurve }: SVGChartProps) 
         {/* Mean vertical marker */}
         <line
           x1={xS(stats.mean)} y1={M.top} x2={xS(stats.mean)} y2={y0}
-          stroke="#93c5fd" strokeWidth={2} strokeDasharray="6 3"
+          stroke="var(--a-blue-300)" strokeWidth={2} strokeDasharray="6 3"
         />
 
-        {/* σ labels at top */}
-        <text x={xS(stats.mean)} y={M.top - 8} textAnchor="middle" fontSize={11} fill="#93c5fd" fontWeight="bold">μ</text>
+        {/* σ labels at top — accent text steps 200-400 flip to a darker shade in
+            light mode (see dhan-theme-tokens skill), unlike the 500+ line/band colors */}
+        <text x={xS(stats.mean)} y={M.top - 8} textAnchor="middle" fontSize={11} fill="var(--a-blue-300)" fontWeight="bold">μ</text>
         {[
-          { x: stats.sd1Low, label: '−1σ', color: '#4ade80' },
-          { x: stats.sd1High, label: '+1σ', color: '#4ade80' },
-          { x: stats.sd2Low, label: '−2σ', color: '#fb923c' },
-          { x: stats.sd2High, label: '+2σ', color: '#fb923c' },
-          { x: stats.sd3Low, label: '−3σ', color: '#c084fc' },
-          { x: stats.sd3High, label: '+3σ', color: '#c084fc' },
+          { x: stats.sd1Low, label: '−1σ', color: 'var(--a-green-400)' },
+          { x: stats.sd1High, label: '+1σ', color: 'var(--a-green-400)' },
+          { x: stats.sd2Low, label: '−2σ', color: 'var(--a-orange-400)' },
+          { x: stats.sd2High, label: '+2σ', color: 'var(--a-orange-400)' },
+          { x: stats.sd3Low, label: '−3σ', color: 'var(--a-purple-400)' },
+          { x: stats.sd3High, label: '+3σ', color: 'var(--a-purple-400)' },
         ].map(({ x, label, color }) => {
           const px = xS(x);
           if (px < M.left + 16 || px > M.left + CW - 16) return null;
@@ -243,72 +244,72 @@ function DistributionSVGChart({ stats, histogram, normalCurve }: SVGChartProps) 
         })}
 
         {/* Outer chart border */}
-        <rect x={M.left} y={M.top} width={CW} height={CH} fill="none" stroke="#3f3f46" strokeWidth={0.8} rx={2} />
+        <rect x={M.left} y={M.top} width={CW} height={CH} fill="none" stroke="var(--z-700)" strokeWidth={0.8} rx={2} />
 
         {/* X axis baseline */}
-        <line x1={M.left} y1={y0} x2={M.left + CW} y2={y0} stroke="#71717a" strokeWidth={1} />
+        <line x1={M.left} y1={y0} x2={M.left + CW} y2={y0} stroke="var(--z-600)" strokeWidth={1} />
 
-        {/* X axis ticks + labels — zinc-300 (#d4d4d8) */}
+        {/* X axis ticks + labels */}
         {xTicks.map((t) => {
           const px = xS(t);
           if (px < M.left + 2 || px > M.left + CW - 2) return null;
           return (
             <g key={t}>
-              <line x1={px} y1={y0} x2={px} y2={y0 + 4} stroke="#71717a" strokeWidth={1} />
-              <text x={px} y={y0 + 17} textAnchor="middle" fontSize={9.5} fill="#d4d4d8">
+              <line x1={px} y1={y0} x2={px} y2={y0 + 4} stroke="var(--z-600)" strokeWidth={1} />
+              <text x={px} y={y0 + 17} textAnchor="middle" fontSize={9.5} fill="var(--z-300)">
                 {t >= 0 ? '+' : ''}{t.toFixed(1)}%
               </text>
             </g>
           );
         })}
 
-        {/* Y axis label — zinc-300 */}
+        {/* Y axis label */}
         <text
-          x={16} y={M.top + CH / 2} textAnchor="middle" fontSize={10} fill="#d4d4d8"
+          x={16} y={M.top + CH / 2} textAnchor="middle" fontSize={10} fill="var(--z-300)"
           transform={`rotate(-90 16 ${M.top + CH / 2})`}
         >
           Probability Density
         </text>
 
-        {/* X axis label — zinc-300 */}
-        <text x={M.left + CW / 2} y={SVG_H - 6} textAnchor="middle" fontSize={10} fill="#d4d4d8">
+        {/* X axis label */}
+        <text x={M.left + CW / 2} y={SVG_H - 6} textAnchor="middle" fontSize={10} fill="var(--z-300)">
           Daily Return (%)
         </text>
 
         {/* Legend box */}
         <g transform={`translate(${M.left + CW - 252}, ${M.top + 8})`}>
-          <rect x={0} y={0} width={242} height={84} fill="#18181b" rx={5} stroke="#3f3f46" strokeWidth={0.8} opacity={0.95} />
+          <rect x={0} y={0} width={242} height={84} fill="var(--z-900)" rx={5} stroke="var(--z-700)" strokeWidth={0.8} opacity={0.95} />
           <rect x={10} y={12} width={14} height={8} fill="#3b82f6" fillOpacity={0.55} stroke="#1d4ed8" strokeWidth={0.5} />
-          <text x={30} y={20} fontSize={9.5} fill="#e4e4e7">Actual Daily Returns (histogram)</text>
+          <text x={30} y={20} fontSize={9.5} fill="var(--z-200)">Actual Daily Returns (histogram)</text>
           <line x1={10} y1={33} x2={24} y2={33} stroke="#ef4444" strokeWidth={2.5} />
-          <text x={30} y={37} fontSize={9.5} fill="#e4e4e7">
+          <text x={30} y={37} fontSize={9.5} fill="var(--z-200)">
             {'Fitted Normal (μ='}
-            <tspan fill="#93c5fd">{stats.mean.toFixed(3)}%</tspan>
+            <tspan fill="var(--a-blue-300)">{stats.mean.toFixed(3)}%</tspan>
             {', σ='}
-            <tspan fill="#93c5fd">{stats.std.toFixed(3)}%</tspan>
+            <tspan fill="var(--a-blue-300)">{stats.std.toFixed(3)}%</tspan>
             {')'}
           </text>
           <rect x={10} y={46} width={14} height={8} fill="#22c55e" fillOpacity={0.35} />
-          <text x={30} y={54} fontSize={9.5} fill="#e4e4e7">
-            1σ Band — <tspan fill="#4ade80">{stats.within1SD.toFixed(1)}%</tspan> of days (theory 68.3%)
+          <text x={30} y={54} fontSize={9.5} fill="var(--z-200)">
+            1σ Band — <tspan fill="var(--a-green-400)">{stats.within1SD.toFixed(1)}%</tspan> of days (theory 68.3%)
           </text>
           <rect x={10} y={63} width={14} height={8} fill="#f97316" fillOpacity={0.25} />
-          <text x={30} y={71} fontSize={9.5} fill="#e4e4e7">
-            2σ Band — <tspan fill="#fb923c">{stats.within2SD.toFixed(1)}%</tspan> of days (theory 95.5%)
+          <text x={30} y={71} fontSize={9.5} fill="var(--z-200)">
+            2σ Band — <tspan fill="var(--a-orange-400)">{stats.within2SD.toFixed(1)}%</tspan> of days (theory 95.5%)
           </text>
         </g>
 
         {/* Tooltip */}
         {tooltip && (
           <g transform={`translate(${Math.min(tooltip.x, M.left + CW - 130)}, ${Math.max(tooltip.y, M.top + 8)})`}>
-            <rect x={-64} y={-28} width={128} height={50} fill="#18181b" rx={4} stroke="#52525b" strokeWidth={0.8} opacity={0.96} />
-            <text x={0} y={-12} textAnchor="middle" fontSize={10} fill="#d4d4d8">
+            <rect x={-64} y={-28} width={128} height={50} fill="var(--z-900)" rx={4} stroke="var(--z-700)" strokeWidth={0.8} opacity={0.96} />
+            <text x={0} y={-12} textAnchor="middle" fontSize={10} fill="var(--z-300)">
               {fmtPct(tooltip.bin.binLeft, 2)} to {fmtPct(tooltip.bin.binRight, 2, false)}
             </text>
-            <text x={0} y={3} textAnchor="middle" fontSize={11} fill="#ffffff" fontWeight="bold">
+            <text x={0} y={3} textAnchor="middle" fontSize={11} fill="var(--c-white)" fontWeight="bold">
               {tooltip.bin.count} days
             </text>
-            <text x={0} y={17} textAnchor="middle" fontSize={9.5} fill="#a1a1aa">
+            <text x={0} y={17} textAnchor="middle" fontSize={9.5} fill="var(--z-500)">
               density {tooltip.bin.density.toFixed(4)}
             </text>
           </g>
