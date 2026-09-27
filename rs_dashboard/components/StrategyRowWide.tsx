@@ -1,8 +1,9 @@
 'use client';
 
 import React, { useState, useEffect } from 'react';
-import { Play, Square, Settings, ShieldAlert, Loader2, ChevronDown, ChevronUp, Terminal, RotateCcw } from 'lucide-react';
+import { Play, Square, Settings, ShieldAlert, Loader2, ChevronDown, ChevronUp, Terminal, RotateCcw, BookOpen } from 'lucide-react';
 import LogConsole from './LogConsole';
+import StrategyReadmeModal from './StrategyReadmeModal';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { Input } from '@/components/ui/input';
@@ -100,6 +101,7 @@ interface Props {
 function StrategyRowWide({ meta, state, onRefresh, instanceId, onAddInstance, onRemoveInstance, selectedBroker }: Props) {
   const [showConfig, setShowConfig] = useState(false);
   const [showLogs, setShowLogs] = useState(false);
+  const [showReadme, setShowReadme] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [confirmStop, setConfirmStop] = useState(false);
   const [confirmTimeoutId, setConfirmTimeoutId] = useState<NodeJS.Timeout | null>(null);
@@ -2017,6 +2019,14 @@ function StrategyRowWide({ meta, state, onRefresh, instanceId, onAddInstance, on
         <div className="w-[240px] shrink-0 flex flex-col gap-0.5">
           <div className="flex items-center gap-1.5 min-w-0">
             <span className="text-sm font-bold text-white truncate">{meta.name}{instanceId ? ` #${instanceId}` : ''}</span>
+            <button
+              onClick={() => setShowReadme(true)}
+              title="Read strategy summary: entry, exit, target &amp; stop-loss rules"
+              aria-label={`Read ${meta.name} strategy readme`}
+              className="text-zinc-500 hover:text-amber-400 transition-colors shrink-0"
+            >
+              <BookOpen className="h-3.5 w-3.5" />
+            </button>
           </div>
           {isRunning && (
             <div className="flex items-center gap-1 flex-wrap">
@@ -2179,6 +2189,14 @@ function StrategyRowWide({ meta, state, onRefresh, instanceId, onAddInstance, on
           <span className="text-xs text-rose-400 truncate">{startError}</span>
           <button onClick={() => setStartError(null)} className="text-rose-500 hover:text-rose-300 font-bold text-sm shrink-0">×</button>
         </div>
+      )}
+
+      {showReadme && (
+        <StrategyReadmeModal
+          strategyKey={meta.key}
+          fallbackName={meta.name}
+          onClose={() => setShowReadme(false)}
+        />
       )}
     </div>
   );
