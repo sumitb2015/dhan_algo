@@ -162,6 +162,16 @@ function fmtPrice(n: number | null | undefined): string {
  *  the retired focus_tool_rows_worker.py's RECONCILE_GRACE_SECONDS. */
 const GHOST_DROP_GRACE_MS = 20_000;
 
+/** Shared 0\u2192positive edge detection for one leg's openedTs stamp \u2014 see
+ *  adjustFillQty. Re-stamps only on the flat\u2192held transition; an add-on-top
+ *  of an already-held leg keeps the original open time, and a leg that's
+ *  flat (nextQty <= 0) has no open time at all. */
+function nextOpenedTs(prevQty: number, nextQty: number, prevTs: number | null | undefined): number | null {
+  if (nextQty <= 0) return null;
+  if (prevQty <= 0) return Date.now();
+  return prevTs ?? Date.now();
+}
+
 /** Wall-clock 'HH:MM' in IST, regardless of the browser's own timezone. */
 function istHm(): string {
   return new Date().toLocaleTimeString('en-GB', {
@@ -3665,10 +3675,10 @@ export default function FocusTool() {
         // to check against before treating it as a ghost — see
         // GHOST_DROP_GRACE_MS below. Cleared once the leg is flat again.
         const ceOpenedTs = leg === 'CE'
-          ? (prevQty <= 0 && nextCeQty > 0 ? Date.now() : (nextCeQty > 0 ? (f?.ceOpenedTs ?? Date.now()) : null))
+          ? nextOpenedTs(prevQty, nextCeQty, f?.ceOpenedTs)
           : (f?.ceOpenedTs ?? null);
         const peOpenedTs = leg === 'PE'
-          ? (prevQty <= 0 && nextPeQty > 0 ? Date.now() : (nextPeQty > 0 ? (f?.peOpenedTs ?? Date.now()) : null))
+          ? nextOpenedTs(prevQty, nextPeQty, f?.peOpenedTs)
           : (f?.peOpenedTs ?? null);
         const nextFill: FocusRowFill = {
           ceStrike: leg === 'CE' && strike != null ? strike : (f?.ceStrike ?? null),
