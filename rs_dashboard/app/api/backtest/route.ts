@@ -21,6 +21,10 @@ const DEFAULT_LEGS = JSON.stringify([
   { option_type: 'PE', position: 'sell', lots: 1, strike: 'ATM', leg_sl_pct: 0, leg_target_pct: 0 },
 ]);
 
+// Tracks already-archived run IDs to prevent double-archiving when two browser
+// tabs poll simultaneously and both see !status.archived before either write the flag.
+const archivedRunIds = new Set<string>();
+
 function readStatus() {
   try {
     if (!fs.existsSync(STATUS_FILE)) return null;
@@ -68,10 +72,12 @@ export async function GET() {
   let result = null;
   if (status.done) {
     result = readResult();
-    if (result && !status.archived) {
-      autoArchiveBacktest(result);
+    const runKey = status.started_at || String(status.pid || '');
+    if (result && !status.archived && runKey && !archivedRunIds.has(runKey)) {
+      archivedRunIds.add(runKey);
       status.archived = true;
       try { fs.writeFileSync(STATUS_FILE, JSON.stringify(status)); } catch { /* ignore */ }
+      autoArchiveBacktest(result);
     }
   }
 
@@ -142,8 +148,9 @@ export async function POST(req: NextRequest) {
     } catch { /* ignore */ }
 
     const status = readStatus();
-    if (status && status.pid && isPidRunning(status.pid)) {
-      try { process.kill(status.pid); } catch { /* ignore */ }
+    const pid = readPid() ?? (status?.pid && Number.isFinite(Number(status.pid)) ? Number(status.pid) : null);
+    if (pid && isPidRunning(pid)) {
+      try { process.kill(pid); } catch { /* ignore */ }
     }
 
     if (status) {
@@ -157,6 +164,13 @@ export async function POST(req: NextRequest) {
   }
 
   // Handle Start / Run Action
+  // Concurrency Guard: prevent duplicate simultaneous spawns
+  const currentStatus = readStatus();
+  const activePid = readPid() ?? (currentStatus?.pid && Number.isFinite(Number(currentStatus.pid)) ? Number(currentStatus.pid) : null);
+  if (currentStatus && !currentStatus.done && activePid && isPidRunning(activePid)) {
+    return NextResponse.json({ error: 'A backtest is already running', pid: activePid }, { status: 409 });
+  }
+
   if (!fs.existsSync(DEBUG_DIR)) {
     try { fs.mkdirSync(DEBUG_DIR, { recursive: true }); } catch { /* ignore */ }
   }
@@ -179,7 +193,7 @@ export async function POST(req: NextRequest) {
     '--lot-size',            String(body.lot_size            ?? 65),
     '--entry-time',          String(body.entry_time          ?? '09:20'),
     '--eod-time',            String(body.eod_time            ?? '15:15'),
-    '--profit-target-pct',   String(body.profit_target_pct   ?? 50),
+    '--profit-target-pct',   String(body.profit_target_pct   ?? 0),
     '--overall-sl-pct',      String(body.overall_sl_pct      ?? 0),
     '--profit-target-val',   String(body.profit_target_val   ?? body.profit_target_pct ?? 0),
     '--profit-target-type',  String(body.profit_target_type  ?? 'pct'),
@@ -210,6 +224,7 @@ export async function POST(req: NextRequest) {
     ...(body.range_breakout ? ['--range-breakout', '--range-until-time', String(body.range_until_time ?? '09:31')] : []),
     '--status-file',        STATUS_FILE,
     '--output-file',        RESULT_FILE,
+    '--strategy-name',      String(body.strategy_name ?? 'backtest'),
   ];
 
   // Optional synchronous fallback mode

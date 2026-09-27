@@ -209,19 +209,20 @@ const WAIT_AND_TRADE_TYPES = [
 const MONTHS = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
 
 const EXIT_REASON_CLS: Record<string, string> = {
-  TARGET:        'bg-emerald-500/15 text-emerald-400 border border-emerald-500/30',
-  SCALP_FLOOR:   'bg-emerald-500/15 text-emerald-400 border border-emerald-500/30',
-  LEG_TARGET:    'bg-emerald-500/15 text-emerald-400 border border-emerald-500/30',
-  EOD:           'bg-sky-500/15 text-sky-400 border border-sky-500/30',
-  LEG_SL:        'bg-red-500/15 text-red-400 border border-red-500/30',
-  LEG_TRAIL_SL:  'bg-amber-500/15 text-amber-400 border border-amber-500/30',
-  TRAIL_SL:      'bg-amber-500/15 text-amber-400 border border-amber-500/30',
-  ALL_LEGS_DONE: 'bg-red-500/15 text-red-400 border border-red-500/30',
+  TARGET:         'bg-emerald-500/15 text-emerald-400 border border-emerald-500/30',
+  SCALP_FLOOR:    'bg-emerald-500/15 text-emerald-400 border border-emerald-500/30',
+  LEG_TARGET:     'bg-emerald-500/15 text-emerald-400 border border-emerald-500/30',
+  PROTECT_PROFIT: 'bg-teal-500/15 text-teal-400 border border-teal-500/30',
+  EOD:            'bg-sky-500/15 text-sky-400 border border-sky-500/30',
+  LEG_SL:         'bg-red-500/15 text-red-400 border border-red-500/30',
+  LEG_TRAIL_SL:   'bg-amber-500/15 text-amber-400 border border-amber-500/30',
+  TRAIL_SL:       'bg-amber-500/15 text-amber-400 border border-amber-500/30',
+  ALL_LEGS_DONE:  'bg-red-500/15 text-red-400 border border-red-500/30',
   SQUARE_OFF_ALL: 'bg-purple-500/15 text-purple-400 border border-purple-500/30',
-  OVERALL_SL:    'bg-red-500/20 text-red-400 border border-red-500/40',
-  INCOMPLETE:    'bg-amber-500/15 text-amber-400 border border-amber-500/30',
-  ROLL_ATM:      'bg-purple-500/15 text-purple-400 border border-purple-500/30',
-  NO_ENTRY:      'bg-zinc-800 text-zinc-400 border border-zinc-700',
+  OVERALL_SL:     'bg-red-500/20 text-red-400 border border-red-500/40',
+  INCOMPLETE:     'bg-amber-500/15 text-amber-400 border border-amber-500/30',
+  ROLL_ATM:       'bg-purple-500/15 text-purple-400 border border-purple-500/30',
+  NO_ENTRY:       'bg-zinc-800 text-zinc-400 border border-zinc-700',
 };
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -351,11 +352,13 @@ export function getTimewiseOrders(c: CycleResult, lotSize: number = 65): OrderEx
     }
   });
 
-  // 2. Exit orders for each leg
+  // 2. Exit orders for each leg (only legs that actually entered)
   c.legs.forEach((leg) => {
-    const exitPrice = leg.exit_price != null 
-      ? Math.abs(leg.exit_price) 
-      : (c.exit_combined != null ? Math.abs(c.exit_combined) / c.legs.length : leg.entry_price);
+    // Skip legs that never entered (W&T waiting, or unmatched iron condor leg)
+    if (!leg.entry_price || leg.entry_price <= 0) return;
+    const exitPrice = leg.exit_price != null
+      ? Math.abs(leg.exit_price)
+      : (c.exit_combined != null ? Math.abs(c.exit_combined) / c.legs.filter(l => l.entry_price && l.entry_price > 0).length : null);
     if (exitPrice != null && exitPrice > 0) {
       const time = leg.exit_time || defaultExitTime;
       // Exit side is reverse of entry position: sell leg is bought back, buy leg is sold
@@ -589,6 +592,9 @@ export default function OptionsBacktester({
   const pollRef = useRef<NodeJS.Timeout | null>(null);
   const resultsRef = useRef<HTMLDivElement>(null);
 
+  // Strategy name used to label archived result folders
+  const [strategyName, setStrategyName] = useState('Nifty Short Straddle');
+
   // Past Backtests History
   const [historyModalOpen, setHistoryModalOpen] = useState(false);
   const [historyList, setHistoryList] = useState<BacktestHistoryItem[]>([]);
@@ -714,6 +720,16 @@ export default function OptionsBacktester({
             if (saved.maxDiffPct) setMaxDiffPct(Number(saved.maxDiffPct));
           }
           if (saved.entryCutoffTime) setEntryCutoffTime(saved.entryCutoffTime);
+          // Restore settings modal fields
+          if (saved.strategyName) setStrategyName(saved.strategyName);
+          if (saved.adjustmentMode === 'rolling_straddle' || saved.adjustmentMode === 'none') setAdjustmentMode(saved.adjustmentMode);
+          if (saved.rollBuffer !== undefined) setRollBuffer(Number(saved.rollBuffer));
+          if (saved.rollType === 'points' || saved.rollType === 'percentage') setRollType(saved.rollType);
+          if (saved.maxRolls !== undefined) setMaxRolls(Number(saved.maxRolls));
+          if (saved.scalpFloorPct !== undefined) setScalpFloorPct(Number(saved.scalpFloorPct));
+          if (saved.includeCosts !== undefined) setIncludeCosts(Boolean(saved.includeCosts));
+          if (saved.commissionPerLot !== undefined) setCommissionPerLot(Number(saved.commissionPerLot));
+          if (saved.slippagePct !== undefined) setSlippagePct(Number(saved.slippagePct));
         }
       }
     } catch {
@@ -876,6 +892,50 @@ export default function OptionsBacktester({
       .catch(() => {});
   }, []);
 
+  // Re-mount resume: if a backtest was already running before this component mounted
+  // (user navigated away and came back), detect it and resume the poll loop so the
+  // progress bar and result are not silently lost.
+  useEffect(() => {
+    fetch(apiBase)
+      .then(r => r.json())
+      .then(sData => {
+        if (sData.running && !sData.done) {
+          setLoading(true);
+          setError(null);
+          setStatusData({
+            percent: sData.percent ?? 0,
+            current: sData.current ?? 0,
+            total: sData.total ?? 0,
+            date: sData.date,
+            stage: sData.stage,
+          });
+          let emptyDoneStreak = 0;
+          const MAX_EMPTY_DONE_POLLS = 3;
+          pollRef.current = setInterval(async () => {
+            try {
+              const pr = await fetch(apiBase);
+              const pd = await pr.json();
+              if (pd.running || (!pd.done && pd.percent !== undefined)) {
+                emptyDoneStreak = 0;
+                setStatusData({ percent: pd.percent ?? 0, current: pd.current ?? 0, total: pd.total ?? 0, date: pd.date, stage: pd.stage, pnl: pd.pnl, trades: pd.trades });
+              } else if (pd.done) {
+                if (pollRef.current) clearInterval(pollRef.current);
+                setLoading(false);
+                if (pd.stopped) { setError('Backtest stopped by user'); }
+                else if (pd.result) { setResult(pd.result); setLoadedFromHistory(null); fetchHistory(); setStatusData(null); }
+                else if (pd.error) { setError(pd.error); }
+                else if (emptyDoneStreak < MAX_EMPTY_DONE_POLLS) { emptyDoneStreak += 1; }
+                else { setError('Backtest completed or exited unexpectedly without results'); }
+              }
+            } catch { /* ignore transient */ }
+          }, 1000);
+        }
+      })
+      .catch(() => {}); // ignore — user may be offline or API not yet ready
+    return () => { if (pollRef.current) clearInterval(pollRef.current); };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [apiBase]);
+
   // Map strike mode to Leg strike_type.
   function strikeModeToType(m: StrikeModeLabel): StrikeMode {
     if (m === 'ATM Percent') return 'atm_percent';
@@ -1019,6 +1079,12 @@ export default function OptionsBacktester({
       return;
     }
 
+    // Date range validation
+    if (startDate >= endDate) {
+      toast.error('End date must be after Start date');
+      return;
+    }
+
     const entryMin = parseInt(entryH, 10) * 60 + parseInt(entryM, 10);
     const exitMin = parseInt(exitH, 10) * 60 + parseInt(exitM, 10);
 
@@ -1043,6 +1109,37 @@ export default function OptionsBacktester({
       }
     }
 
+    // Guard: active Target Profit / Stop Loss with a zero value is a silent no-op
+    if (strategyTargetActive && profitTargetVal <= 0) {
+      toast.error('Target Profit is enabled but value is 0. Set a value or disable it.');
+      return;
+    }
+    if (strategySlActive && overallSlVal <= 0) {
+      toast.error('Stop Loss is enabled but value is 0. Set a value or disable it.');
+      return;
+    }
+
+    // Guard: W&T enabled but all legs have val=0 — would behave exactly like disabled W&T
+    if (waitAndTradeActive && legs.every(l => (l.wait_and_trade_val ?? 0) === 0)) {
+      toast.error('Wait & Trade is enabled but all legs have value = 0. Set a W&T value on at least one leg, or disable it.');
+      return;
+    }
+
+    // Guard: Re-Entry after SL configured but no leg SL is set — re-entry will never fire
+    if (reEntryActive) {
+      const legWithReEntrySLButNoSL = legs.find(l => (l.re_entry_sl_count ?? 0) > 0 && (l.leg_sl_pct ?? 0) === 0);
+      if (legWithReEntrySLButNoSL) {
+        toast.error('Leg has Re-Entry (SL) configured but no Leg SL is set. Add a Leg SL % or remove the Re-Entry.');
+        return;
+      }
+    }
+
+    // Guard: entryCutoffTime must be HH:MM format when priceDiffActive
+    if (priceDiffActive && !/^\d{1,2}:\d{2}$/.test(entryCutoffTime)) {
+      toast.error('Entry Cutoff Time must be in HH:MM format (e.g. 15:00)');
+      return;
+    }
+
     const entryTimeFormatted = `${String(entryH).padStart(2, '0')}:${String(entryM).padStart(2, '0')}`;
     const eodTimeFormatted = `${String(exitH).padStart(2, '0')}:${String(exitM).padStart(2, '0')}`;
 
@@ -1059,6 +1156,7 @@ export default function OptionsBacktester({
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           action: 'start',
+          strategy_name: strategyName.trim() || 'backtest',
           legs: legs.map(l => ({
             ...l,
             wait_and_trade_val: waitAndTradeActive ? (l.wait_and_trade_val ?? 0) : 0,
@@ -1205,6 +1303,16 @@ export default function OptionsBacktester({
       priceDiffActive,
       maxDiffPct,
       entryCutoffTime,
+      // Settings modal fields (previously not saved)
+      strategyName,
+      adjustmentMode,
+      rollBuffer,
+      rollType,
+      maxRolls,
+      scalpFloorPct,
+      includeCosts,
+      commissionPerLot,
+      slippagePct,
     };
     try {
       localStorage.setItem('stockmock_saved_strategy', JSON.stringify(payload));
@@ -2627,9 +2735,10 @@ export default function OptionsBacktester({
                             <input
                               type="number"
                               min={0}
+                              max={lockProfitReaches > 0 ? lockProfitReaches - 1 : undefined}
                               step={100}
                               value={lockProfitMin}
-                              onChange={e => setLockProfitMin(Math.max(0, Number(e.target.value)))}
+                              onChange={e => setLockProfitMin(Math.max(0, Math.min(lockProfitReaches > 0 ? lockProfitReaches - 1 : Infinity, Number(e.target.value))))}
                               placeholder="0"
                               className="w-24 bg-zinc-800 px-2 py-1 text-xs text-zinc-100 font-medium focus:outline-hidden"
                             />
@@ -2857,6 +2966,20 @@ export default function OptionsBacktester({
             </div>
 
             <div className="flex flex-col gap-4 text-xs">
+              {/* Strategy Name — flows into the archive folder label */}
+              <div>
+                <label className="block font-semibold text-zinc-300 mb-1">Strategy Name</label>
+                <input
+                  type="text"
+                  value={strategyName}
+                  onChange={e => setStrategyName(e.target.value)}
+                  onBlur={e => { if (!e.target.value.trim()) setStrategyName('backtest'); }}
+                  placeholder="e.g. Nifty Short Straddle 35SL"
+                  className="w-full bg-zinc-800 border border-zinc-700 text-zinc-100 rounded p-1.5 text-xs focus:outline-hidden focus:border-teal-500"
+                />
+                <span className="text-[11px] text-zinc-500 mt-0.5 block">Used to label the archive folder and history entries.</span>
+              </div>
+
               {/* Preset Strategies Quick Loader */}
               <div>
                 <label className="block font-semibold text-zinc-300 mb-1">Quick Strategy Presets</label>
@@ -3002,17 +3125,29 @@ export default function OptionsBacktester({
                         className="w-full bg-zinc-800 border border-zinc-700 text-zinc-100 rounded p-1.5 text-xs focus:outline-hidden"
                       />
                     </div>
-                    <div>
-                      <span className="block text-[11px] text-zinc-500 mb-1">Entry Cutoff Time (HH:MM)</span>
-                      <input
-                        type="text"
-                        value={entryCutoffTime}
-                        onChange={e => setEntryCutoffTime(e.target.value)}
-                        placeholder="15:00"
-                        className="w-full bg-zinc-800 border border-zinc-700 text-zinc-100 rounded p-1.5 text-xs focus:outline-hidden"
-                      />
+                      <div>
+                        <span className="block text-[11px] text-zinc-500 mb-1">Entry Cutoff Time</span>
+                        <div className="flex items-center gap-1 rounded overflow-hidden border border-zinc-700 bg-zinc-800">
+                          <select
+                            value={entryCutoffTime.split(':')[0] ?? '15'}
+                            onChange={e => setEntryCutoffTime(`${e.target.value}:${entryCutoffTime.split(':')[1] ?? '00'}`)}
+                            className="bg-transparent text-zinc-100 text-xs px-1.5 py-1.5 focus:outline-hidden"
+                          >
+                            {['9','10','11','12','13','14','15'].map(h => <option key={h} value={h}>{h}</option>)}
+                          </select>
+                          <span className="text-zinc-500 font-bold">:</span>
+                          <select
+                            value={entryCutoffTime.split(':')[1] ?? '00'}
+                            onChange={e => setEntryCutoffTime(`${entryCutoffTime.split(':')[0] ?? '15'}:${e.target.value}`)}
+                            className="bg-transparent text-zinc-100 text-xs px-1.5 py-1.5 focus:outline-hidden"
+                          >
+                            {Array.from({ length: 60 }, (_, i) => String(i).padStart(2, '0')).map(m => (
+                              <option key={m} value={m}>{m}</option>
+                            ))}
+                          </select>
+                        </div>
+                      </div>
                     </div>
-                  </div>
                 )}
               </div>
             </div>

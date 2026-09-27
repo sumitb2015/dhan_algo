@@ -789,6 +789,7 @@ def _simulate_one_day(
                     state.is_waiting = True
                     state.is_entered = False
                     state.entry_price = 0.0
+                    state.original_entry_price = 0.0
                     state.entry_dt = None
                     if "pts" in wt_type:
                         if "down" in wt_type or "↓" in wt_type:
@@ -814,6 +815,7 @@ def _simulate_one_day(
             initial_net_credit = sum(
                 s.original_entry_price * (1 if leg.position == "sell" else -1) * leg.lots * lot_size
                 for leg, s in zip(leg_configs, leg_states)
+                if s.is_entered
             )
             continue
 
@@ -856,6 +858,7 @@ def _simulate_one_day(
                     initial_net_credit = sum(
                         s.original_entry_price * (1 if l.position == "sell" else -1) * l.lots * lot_size
                         for l, s in zip(leg_configs, leg_states)
+                        if s.is_entered
                     )
 
         # --- Check No ReEntry Cutoff Time ---
@@ -1157,11 +1160,18 @@ def _simulate_one_day(
                     slip = slip_sell_entry if leg.position == "sell" else slip_buy_entry
                     state.strike = new_atm
                     state.entry_dt = bar.dt
+                    state.is_entered = True
                     _, _, _, leg_c = _get_leg_prices(
                         bar.dt, leg.option_type, state.strike, bar.legs[i],
                         bar.spot, cur_days_to_expiry, strike_lookup
                     )
                     state.entry_price = leg_c * slip
+                    state.original_entry_price = state.entry_price
+
+                initial_net_credit = sum(
+                    s.entry_price * (1 if leg.position == "sell" else -1) * leg.lots * lot_size
+                    for leg, s in zip(leg_configs, leg_states)
+                )
                 continue
 
         if all(not s.is_open and not s.is_waiting and not s.waiting_reentry_cost for s in leg_states):
@@ -1470,9 +1480,9 @@ def run_backtest(leg_configs: List[LegConfig], cycles: List[ExpiryCycle],
         square_off_mode=square_off_mode,
         max_diff_pct=max_diff_pct,
         entry_cutoff_time=entry_cutoff_time,
-        profit_target_val=profit_target_val if profit_target_val > 0 else profit_target_pct,
+        profit_target_val=profit_target_val if profit_target_val > 0 else (profit_target_pct if profit_target_pct > 0 else 0.0),
         profit_target_type=profit_target_type,
-        overall_sl_val=overall_sl_val if overall_sl_val > 0 else overall_sl_pct,
+        overall_sl_val=overall_sl_val if overall_sl_val > 0 else (overall_sl_pct if overall_sl_pct > 0 else 0.0),
         overall_sl_type=overall_sl_type,
         lot_size=lot_size,
         protect_profit_mode=protect_profit_mode,
@@ -1924,7 +1934,7 @@ def main():
     parser.add_argument("--lot-size",           type=int,   default=65)
     parser.add_argument("--entry-time",         default="09:20")
     parser.add_argument("--eod-time",           default="15:15")
-    parser.add_argument("--profit-target-pct",  type=float, default=50.0)
+    parser.add_argument("--profit-target-pct",  type=float, default=0.0)
     parser.add_argument("--overall-sl-pct",     type=float, default=0.0)
     parser.add_argument("--profit-target-val",  type=float, default=0.0)
     parser.add_argument("--profit-target-type", default="pct", choices=["pct", "mtm"])
@@ -1964,6 +1974,8 @@ def main():
                         help="Range Breakout observation window end time (default: 09:31)")
     parser.add_argument("--status-file",        default=None)
     parser.add_argument("--output-file",        default=None)
+    parser.add_argument("--strategy-name",      default="backtest",
+                        help="Human-readable name for the archived result folder")
     args = parser.parse_args()
 
     try:
@@ -1983,96 +1995,118 @@ def main():
             sys.exit(1)
         db_conn = sqlite3.connect(db_path, check_same_thread=False)
 
-    vix_map = _load_vix()
-    cycles  = fetch_multi_leg_cycles(args.start_date, args.end_date, leg_configs, db_conn=db_conn, status_file=args.status_file)
-    result  = run_backtest(
-        leg_configs=leg_configs,
-        cycles=cycles,
-        lot_size=args.lot_size,
-        commission_per_lot=args.commission_per_lot,
-        slippage_pct=args.slippage_pct,
-        entry_time_str=args.entry_time,
-        eod_time_str=args.eod_time,
-        profit_target_pct=args.profit_target_pct,
-        overall_sl_pct=args.overall_sl_pct,
-        vix_map=vix_map,
-        strategy_type=args.strategy_type,
-        start_date=args.start_date,
-        end_date=args.end_date,
-        adjustment_mode=args.adjustment_mode,
-        roll_buffer=args.roll_buffer,
-        roll_type=args.roll_type,
-        max_rolls=args.max_rolls,
-        scalp_floor_pct=args.scalp_floor_pct,
-        trail_sl_pct=args.trail_sl_pct,
-        square_off_mode=args.square_off_mode,
-        max_diff_pct=args.max_diff_pct,
-        entry_cutoff_time_str=args.entry_cutoff_time,
-        status_file=args.status_file,
-        profit_target_val=args.profit_target_val,
-        profit_target_type=args.profit_target_type,
-        overall_sl_val=args.overall_sl_val,
-        overall_sl_type=args.overall_sl_type,
-        protect_profit_mode=args.protect_profit_mode if args.protect_profit_mode != "none" else None,
-        lock_profit_reaches=args.lock_profit_reaches,
-        lock_profit_min=args.lock_profit_min,
-        trail_profit_step=args.trail_profit_step,
-        trail_profit_by=args.trail_profit_by,
-        no_reentry_after_time_str=args.no_reentry_after_time,
-        range_breakout=args.range_breakout,
-        range_until_time_str=args.range_until_time,
-        entry_days_before_expiry=args.entry_days_before_expiry,
-        exit_days_before_expiry=args.exit_days_before_expiry,
-    )
-    result["params"] = {
-        "start_date":            args.start_date,
-        "end_date":              args.end_date,
-        "lot_size":              args.lot_size,
-        "entry_time":            args.entry_time,
-        "eod_time":              args.eod_time,
-        "profit_target_pct":     args.profit_target_pct,
-        "overall_sl_pct":        args.overall_sl_pct,
-        "profit_target_val":     args.profit_target_val,
-        "profit_target_type":    args.profit_target_type,
-        "overall_sl_val":        args.overall_sl_val,
-        "overall_sl_type":       args.overall_sl_type,
-        "protect_profit_mode":   args.protect_profit_mode,
-        "lock_profit_reaches":   args.lock_profit_reaches,
-        "lock_profit_min":       args.lock_profit_min,
-        "trail_profit_step":     args.trail_profit_step,
-        "trail_profit_by":       args.trail_profit_by,
-        "no_reentry_after_time": args.no_reentry_after_time,
-        "range_breakout":        args.range_breakout,
-        "range_until_time":      args.range_until_time,
-        "entry_days_before_expiry": args.entry_days_before_expiry,
-        "exit_days_before_expiry":  args.exit_days_before_expiry,
-        "commission_per_lot":    args.commission_per_lot,
-        "slippage_pct":          args.slippage_pct,
-        "strategy_type":         args.strategy_type,
-        "legs":                  legs_raw,
-        "adjustment_mode":       args.adjustment_mode,
-        "roll_buffer":           args.roll_buffer,
-        "roll_type":             args.roll_type,
-        "max_rolls":             args.max_rolls,
-        "scalp_floor_pct":       args.scalp_floor_pct,
-        "trail_sl_pct":          args.trail_sl_pct,
-        "square_off_mode":       args.square_off_mode,
-        "max_diff_pct":          args.max_diff_pct,
-        "entry_cutoff_time":     args.entry_cutoff_time,
-    }
-    if db_conn:
-        db_conn.close()
+    try:
+        vix_map = _load_vix()
+        cycles  = fetch_multi_leg_cycles(args.start_date, args.end_date, leg_configs, db_conn=db_conn, status_file=args.status_file)
+        result  = run_backtest(
+            leg_configs=leg_configs,
+            cycles=cycles,
+            lot_size=args.lot_size,
+            commission_per_lot=args.commission_per_lot,
+            slippage_pct=args.slippage_pct,
+            entry_time_str=args.entry_time,
+            eod_time_str=args.eod_time,
+            profit_target_pct=args.profit_target_pct,
+            overall_sl_pct=args.overall_sl_pct,
+            vix_map=vix_map,
+            strategy_type=args.strategy_type,
+            start_date=args.start_date,
+            end_date=args.end_date,
+            adjustment_mode=args.adjustment_mode,
+            roll_buffer=args.roll_buffer,
+            roll_type=args.roll_type,
+            max_rolls=args.max_rolls,
+            scalp_floor_pct=args.scalp_floor_pct,
+            trail_sl_pct=args.trail_sl_pct,
+            square_off_mode=args.square_off_mode,
+            max_diff_pct=args.max_diff_pct,
+            entry_cutoff_time_str=args.entry_cutoff_time,
+            status_file=args.status_file,
+            profit_target_val=args.profit_target_val,
+            profit_target_type=args.profit_target_type,
+            overall_sl_val=args.overall_sl_val,
+            overall_sl_type=args.overall_sl_type,
+            protect_profit_mode=args.protect_profit_mode if args.protect_profit_mode != "none" else None,
+            lock_profit_reaches=args.lock_profit_reaches,
+            lock_profit_min=args.lock_profit_min,
+            trail_profit_step=args.trail_profit_step,
+            trail_profit_by=args.trail_profit_by,
+            no_reentry_after_time_str=args.no_reentry_after_time,
+            range_breakout=args.range_breakout,
+            range_until_time_str=args.range_until_time,
+            entry_days_before_expiry=args.entry_days_before_expiry,
+            exit_days_before_expiry=args.exit_days_before_expiry,
+        )
+        result["params"] = {
+            "start_date":            args.start_date,
+            "end_date":              args.end_date,
+            "lot_size":              args.lot_size,
+            "entry_time":            args.entry_time,
+            "eod_time":              args.eod_time,
+            "profit_target_pct":     args.profit_target_pct,
+            "overall_sl_pct":        args.overall_sl_pct,
+            "profit_target_val":     args.profit_target_val,
+            "profit_target_type":    args.profit_target_type,
+            "overall_sl_val":        args.overall_sl_val,
+            "overall_sl_type":       args.overall_sl_type,
+            "protect_profit_mode":   args.protect_profit_mode,
+            "lock_profit_reaches":   args.lock_profit_reaches,
+            "lock_profit_min":       args.lock_profit_min,
+            "trail_profit_step":     args.trail_profit_step,
+            "trail_profit_by":       args.trail_profit_by,
+            "no_reentry_after_time": args.no_reentry_after_time,
+            "range_breakout":        args.range_breakout,
+            "range_until_time":      args.range_until_time,
+            "entry_days_before_expiry": args.entry_days_before_expiry,
+            "exit_days_before_expiry":  args.exit_days_before_expiry,
+            "commission_per_lot":    args.commission_per_lot,
+            "slippage_pct":          args.slippage_pct,
+            "strategy_type":         args.strategy_type,
+            "legs":                  legs_raw,
+            "adjustment_mode":       args.adjustment_mode,
+            "roll_buffer":           args.roll_buffer,
+            "roll_type":             args.roll_type,
+            "max_rolls":             args.max_rolls,
+            "scalp_floor_pct":       args.scalp_floor_pct,
+            "trail_sl_pct":          args.trail_sl_pct,
+            "square_off_mode":       args.square_off_mode,
+            "max_diff_pct":          args.max_diff_pct,
+            "entry_cutoff_time":     args.entry_cutoff_time,
+            "strategy_name":         args.strategy_name,
+        }
+        if db_conn:
+            db_conn.close()
 
-    result_json = json.dumps(result)
-    if args.output_file:
-        try:
-            with open(args.output_file, "w") as f:
-                f.write(result_json)
-        except Exception as e:
-            sys.stderr.write(f"Failed to write output file: {e}\n")
+        result_json = json.dumps(result)
+        if args.output_file:
+            try:
+                with open(args.output_file, "w") as f:
+                    f.write(result_json)
+            except Exception as e:
+                sys.stderr.write(f"Failed to write output file: {e}\n")
 
-    sys.stdout.write("\n" + result_json + "\n")
-    sys.stdout.flush()
+        sys.stdout.write("\n" + result_json + "\n")
+        sys.stdout.flush()
+    except Exception as e:
+        if db_conn:
+            try:
+                db_conn.close()
+            except Exception:
+                pass
+        if args.status_file:
+            try:
+                with open(args.status_file, "w") as f:
+                    json.dump({
+                        "running": False,
+                        "done": True,
+                        "percent": 100.0,
+                        "error": str(e),
+                        "pid": os.getpid(),
+                    }, f)
+            except Exception:
+                pass
+        sys.stderr.write(f"Backtest error: {e}\n")
+        sys.exit(1)
 
 
 if __name__ == "__main__":
