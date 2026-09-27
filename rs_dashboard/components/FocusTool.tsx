@@ -157,6 +157,11 @@ function fmtPrice(n: number | null | undefined): string {
   return n.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 }
 
+/** How long a just-opened leg is protected from being ghost-dropped by a
+ *  stale netQty===0 position poll \u2014 see the reduce path in placeLeg. Matches
+ *  the retired focus_tool_rows_worker.py's RECONCILE_GRACE_SECONDS. */
+const GHOST_DROP_GRACE_MS = 20_000;
+
 /** Wall-clock 'HH:MM' in IST, regardless of the browser's own timezone. */
 function istHm(): string {
   return new Date().toLocaleTimeString('en-GB', {
@@ -3653,13 +3658,27 @@ export default function FocusTool() {
         const nextEntry = delta > 0 && Number(entryPrice) > 0
           ? ((Number(prevEntry) || 0) * prevQty + Number(entryPrice) * delta) / (prevQty + delta)
           : prevEntry;
+        const nextCeQty = leg === 'CE' ? Math.max(0, (f?.ceQty ?? 0) + delta) : (f?.ceQty ?? 0);
+        const nextPeQty = leg === 'PE' ? Math.max(0, (f?.peQty ?? 0) + delta) : (f?.peQty ?? 0);
+        // Stamp the moment a leg goes from flat to held (persisted, not just
+        // an in-memory ref) so a stale post-fill position poll has something
+        // to check against before treating it as a ghost — see
+        // GHOST_DROP_GRACE_MS below. Cleared once the leg is flat again.
+        const ceOpenedTs = leg === 'CE'
+          ? (prevQty <= 0 && nextCeQty > 0 ? Date.now() : (nextCeQty > 0 ? (f?.ceOpenedTs ?? Date.now()) : null))
+          : (f?.ceOpenedTs ?? null);
+        const peOpenedTs = leg === 'PE'
+          ? (prevQty <= 0 && nextPeQty > 0 ? Date.now() : (nextPeQty > 0 ? (f?.peOpenedTs ?? Date.now()) : null))
+          : (f?.peOpenedTs ?? null);
         const nextFill: FocusRowFill = {
           ceStrike: leg === 'CE' && strike != null ? strike : (f?.ceStrike ?? null),
           peStrike: leg === 'PE' && strike != null ? strike : (f?.peStrike ?? null),
-          ceQty: leg === 'CE' ? Math.max(0, (f?.ceQty ?? 0) + delta) : (f?.ceQty ?? 0),
-          peQty: leg === 'PE' ? Math.max(0, (f?.peQty ?? 0) + delta) : (f?.peQty ?? 0),
+          ceQty: nextCeQty,
+          peQty: nextPeQty,
           ceEntry: leg === 'CE' ? nextEntry : (f?.ceEntry ?? null),
           peEntry: leg === 'PE' ? nextEntry : (f?.peEntry ?? null),
+          ceOpenedTs,
+          peOpenedTs,
           bookedPnl: (f?.bookedPnl ?? 0) + (Number(bookedDelta) || 0),
           ts: f?.ts ?? new Date().toISOString(),
         };
@@ -3796,6 +3815,21 @@ export default function FocusTool() {
       const brokerQty = Math.abs(netQty);
 
       if (netQty === 0) {
+        const openedTs = leg === 'CE' ? row.fill?.ceOpenedTs : row.fill?.peOpenedTs;
+        // Refuse to ghost-drop a leg this row only just opened — Kotak/
+        // Zerodha have no fill-confirmation socket, so a poll right after a
+        // real fill can still read the old (flat) position for a few
+        // seconds. Treat that as "not caught up yet", not "actually flat",
+        // and let the caller retry once the book settles rather than
+        // silently dropping a live short from the ledger. `openedTs` is
+        // persisted (see FocusRowFill), so this protects across a reload
+        // too, not just within one tab session. Mirrors the retired
+        // worker's own RECONCILE_GRACE_SECONDS.
+        if (pageOwn > 0 && openedTs != null && Date.now() - openedTs < GHOST_DROP_GRACE_MS) {
+          addToast('error', `${what} fill settling`,
+            'Broker position not caught up with a just-opened fill yet — retry in a few seconds');
+          return false;
+        }
         if (pageOwn > 0) {
           adjustFillQty(row.id, leg, -pageOwn);
         }

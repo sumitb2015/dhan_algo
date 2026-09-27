@@ -75,6 +75,22 @@ export interface FocusRowFill {
    */
   ceEntry?: number | null;
   peEntry?: number | null;
+  /**
+   * Unix ms this leg's qty last went from 0 to positive. Persisted to disk
+   * (same file as the rest of `fill`) so it survives a page reload, not just
+   * an in-memory ref — the whole point is to protect a fresh fill across
+   * exactly the kind of interruption (tab reload/reopen) that clears memory.
+   *
+   * Exists to refuse a ghost-drop: a leg the broker's polled position still
+   * reads as flat (netQty === 0) within GHOST_DROP_GRACE_MS of opening is
+   * treated as "fill not caught up yet", not "actually flat" — Kotak/Zerodha
+   * have no fill-confirmation socket, so a stale poll right after a real
+   * fill can otherwise make this page zero a live short out of its own
+   * ledger and stop tracking it entirely. Cleared when the leg returns to 0.
+   * Mirrors the retired focus_tool_rows_worker.py's RECONCILE_GRACE_SECONDS.
+   */
+  ceOpenedTs?: number | null;
+  peOpenedTs?: number | null;
   ts: string;
 }
 
