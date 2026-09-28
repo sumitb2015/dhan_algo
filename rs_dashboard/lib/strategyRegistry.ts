@@ -288,6 +288,20 @@ export const STRATEGIES_METADATA: Record<string, {
     readmePath: readmePath('volcano_calendar', 'nifty_volcano_calendar'),
     execBrokerEligible: true,
   },
+  // UNVALIDATED (see strategies/put_condor/strategy.md): no backtest, single static worked
+  // example in its source evidence. A 4-leg puts-only condor (BUY/SELL/SELL/BUY by strike) —
+  // described in the source as two stacked bear put spreads — held to monthly expiry with a
+  // partial-booking step (half the lots at a small profit) before the full target/stop.
+  // --live requires --i-understand-this-is-unvalidated.
+  nifty_put_condor: {
+    name: 'Nifty Put Condor (Double Bear Put Spread)',
+    underlying: 'NIFTY',
+    logicGroup: 'directional',
+    timeframe: 'positional',
+    path: path.join(PROJECT_ROOT, 'strategies', 'put_condor', 'nifty_put_condor.py'),
+    readmePath: readmePath('put_condor', 'nifty_put_condor'),
+    execBrokerEligible: true,
+  },
 };
 
 // Python's save_strategy_state() rewrites the whole <key>_state.json every cycle with only

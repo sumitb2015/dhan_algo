@@ -200,6 +200,19 @@ python strategies/volcano_calendar/nifty_volcano_calendar.py [--live --i-underst
     [--max-consecutive-stops N] [--instance-id ID] [--broker {dhan,zerodha,kotak}]
 ```
 
+**Nifty Put Condor** (`strategies/put_condor/nifty_put_condor.py`, UNVALIDATED — no backtest, one static worked example in its source evidence; dry-run default; `--live` requires `--i-understand-this-is-unvalidated`). Monthly-hold 4-leg puts-only condor (BUY/SELL/SELL/BUY by strike, described in the source as two stacked bear put spreads): buy PE at spot−`--upper-long-offset` (default 150), sell PE at spot−`--upper-short-offset` (350), sell PE at spot−`--lower-short-offset` (550), buy PE at spot−`--lower-long-offset` (700), all rounded to `--strike-step` (default 50). One cycle per monthly expiry: when flat, enters the first monthly expiry with DTE in `--min-dte`..`--max-dte` (default 20..38), skipping the one last traded, between `--entry-time` and `--entry-end` (default 09:45-15:00). Exit order: full `--target-profit`/`--stop-loss` (default 10%/4% of deployed margin, resolved once at entry), expiry-day EOD, then a one-time partial booking of half the entry lots (`--lots >= 2` only) at `--partial-booking-profit` (default 2.5%); all exits close shorts before longs; otherwise held untouched with zero adjustment. Product `MARGIN`. Full flag list and defaults in `strategies/put_condor/strategy.md`.
+
+```
+python strategies/put_condor/nifty_put_condor.py [--live --i-understand-this-is-unvalidated]
+    [--lots N] [--strike-step N]
+    [--upper-long-offset PTS] [--upper-short-offset PTS]
+    [--lower-short-offset PTS] [--lower-long-offset PTS]
+    [--partial-booking-profit INR|%] [--target-profit INR|%] [--stop-loss INR|%]
+    [--fallback-margin-per-lot INR] [--min-dte DAYS] [--max-dte DAYS]
+    [--entry-time HH:MM] [--entry-end HH:MM] [--eod-exit-time HH:MM]
+    [--max-consecutive-stops N] [--instance-id ID] [--broker {dhan,zerodha,kotak}]
+```
+
 See the per-folder `strategy.md` files linked in the table above. Each file contains full CLI flag tables, parameter tuning guidance, dry-run and live examples, and worked trade scenarios.
 
 ---
