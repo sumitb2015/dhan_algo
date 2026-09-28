@@ -2,8 +2,13 @@
 
 Intraday Nifty short ATM straddle. Sells CE and PE at the ATM strike once their premiums
 balance, then averages down the winning leg as the market trends and imbalance grows,
-resetting the whole cycle if the ATM strike shifts far enough. The simpler, non-mode-selectable
-sibling of `nifty_advanced_imbalance.py`'s `winner_roll_atm` mode.
+resetting the whole cycle if the ATM strike shifts far enough. Distinct from
+`nifty_advanced_imbalance.py`: none of that strategy's modes reproduce this file's
+adjustment sequence (add winner lots to `max_lots`, then roll the *losing* leg's strike
+further OTM) under `--entry-type straddle` — `winner_roll_atm` is blocked for straddle
+entry, `loser_ratio_roll` rolls the loser's strike but also adds to its lot count in the
+same move, `hedged_addition` buys a protective wing instead of rolling, and `legacy` exits
+at max lots rather than rolling the loser's strike.
 
 ## Entry
 
