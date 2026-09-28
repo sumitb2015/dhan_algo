@@ -10,6 +10,7 @@ export interface SavedLeg {
 }
 
 export interface SavedBasket {
+  id: string;
   name: string;
   category: StrategyCategory;
   strategy: string | null;
@@ -28,9 +29,15 @@ export function offsetToStrike(offset: number, atmStrike: number, allStrikes: nu
   return nearestStrike(allStrikes, atmStrike + offset * step) ?? atmStrike;
 }
 
-// Baskets are persisted server-side (debug/saved_baskets.json via /api/baskets)
-// rather than localStorage, so the same list is shared across the Baskets page
-// and the Option Strats page, and across browsers/sessions.
+let _clientBasketSeq = 0;
+export function newBasketId(): string {
+  _clientBasketSeq += 1;
+  return `bkt_${Date.now().toString(36)}_${_clientBasketSeq.toString(36)}`;
+}
+
+// Baskets are persisted server-side (debug/saved_baskets.json via /api/baskets) so the Baskets and
+// Option Strats pages share one list. Each basket is upserted/deleted by id, never by re-posting the
+// whole array, so two tabs editing different baskets can't overwrite each other.
 export async function loadSavedBaskets(): Promise<SavedBasket[]> {
   try {
     const res = await fetch('/api/baskets');
@@ -41,12 +48,16 @@ export async function loadSavedBaskets(): Promise<SavedBasket[]> {
   }
 }
 
-export async function persistSavedBaskets(baskets: SavedBasket[]): Promise<void> {
+async function basketRequest(method: 'POST' | 'DELETE', body: unknown, what: string): Promise<SavedBasket[]> {
   const res = await fetch('/api/baskets', {
-    method: 'POST',
+    method,
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ baskets }),
+    body: JSON.stringify(body),
   });
   const json = await res.json().catch(() => null);
-  if (!json?.success) throw new Error(json?.error ?? 'Failed to save baskets');
+  if (!json?.success) throw new Error(json?.error ?? `Failed to ${what} basket`);
+  return json.data as SavedBasket[];
 }
+
+export const saveBasketRemote = (basket: SavedBasket) => basketRequest('POST', { basket }, 'save');
+export const deleteBasketRemote = (id: string) => basketRequest('DELETE', { id }, 'delete');

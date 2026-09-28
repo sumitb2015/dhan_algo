@@ -13,8 +13,9 @@ import { useBrokerSelector, scalperRoute, type Broker } from '@/hooks/useBrokerS
 import { fetchMarginSummary, type MarginSummary } from '@/lib/optionsMargin';
 import { useLiveOptionsWS } from '@/lib/useLiveOptionsWS';
 import {
-  type SavedBasket, loadSavedBaskets, persistSavedBaskets, legToOffset, offsetToStrike,
+  type SavedBasket, legToOffset, offsetToStrike,
 } from '@/lib/basketStorage';
+import { useSavedBaskets } from '@/lib/useSavedBaskets';
 import SavedBasketsPanel from './basket/SavedBasketsPanel';
 import type { Toast } from './Scalper';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
@@ -213,16 +214,7 @@ export default function OptionStrats() {
   // ── Saved baskets ──────────────────────────────────────────────
   const [saveOpen, setSaveOpen] = useState(false);
   const [saveName, setSaveName] = useState('');
-  const [saved, setSaved] = useState<SavedBasket[]>([]);
-
-  useEffect(() => {
-    loadSavedBaskets().then(setSaved);
-  }, []);
-
-  const persistSaved = (next: SavedBasket[]) => {
-    setSaved(next);
-    persistSavedBaskets(next).catch(() => addToast('error', 'Failed to save baskets', 'Changes may not persist — check the server'));
-  };
+  const { saved, saveByName, remove: deleteSaved, rename: renameSaved, duplicate: duplicateSaved } = useSavedBaskets(addToast);
 
   const saveBasket = useCallback(() => {
     const name = saveName.trim();
@@ -234,8 +226,7 @@ export default function OptionStrats() {
       addToast('error', 'Cannot save yet', 'Wait for the option chain to load so ATM is known');
       return;
     }
-    const isUpdate = saved.some((s) => s.name === name);
-    const entry: SavedBasket = {
+    const isUpdate = saveByName({
       name, category: 'Bullish', strategy: null, multiplier: 1, underlying: UNDERLYING,
       legs: legs.map((l) => ({
         side: l.side === 'BUY' ? 'B' : 'S',
@@ -244,14 +235,13 @@ export default function OptionStrats() {
         type: 'MARKET',
         offset: legToOffset(l.strike, atmStrike, STRIKE_STEP),
       })),
-    };
-    persistSaved([...saved.filter((s) => s.name !== name), entry]);
+    });
     // Keep the name filled in (rather than clearing it) so pressing Save again
     // — e.g. after tweaking a loaded basket's legs — overwrites this same
     // basket instead of demanding the name be retyped every time.
     setSaveName(name);
     addToast('success', isUpdate ? `Basket "${name}" updated` : `Basket "${name}" saved`);
-  }, [saveName, legs, atmStrike, saved, addToast]);
+  }, [saveName, legs, atmStrike, saveByName, addToast]);
 
   const loadBasket = useCallback((b: SavedBasket) => {
     if (b.underlying !== UNDERLYING) {
@@ -677,7 +667,9 @@ export default function OptionStrats() {
               open={saveOpen}
               onToggleOpen={() => setSaveOpen((o) => !o)}
               onLoad={loadBasket}
-              onDelete={(name) => persistSaved(saved.filter((s) => s.name !== name))}
+              onDelete={deleteSaved}
+              onRename={renameSaved}
+              onDuplicate={duplicateSaved}
             />
           </div>
           <CardContent className="space-y-2 pt-4">

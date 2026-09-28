@@ -1,35 +1,38 @@
 import { NextRequest, NextResponse } from 'next/server';
-import path from 'path';
-import fs from 'fs/promises';
-import { PROJECT_ROOT } from '@/lib/pyExec';
+import { readBaskets, upsertBasket, deleteBasket } from '@/lib/basketStore';
+import type { SavedBasket } from '@/lib/basketStorage';
 
-const STORE_PATH = path.join(PROJECT_ROOT, 'debug', 'saved_baskets.json');
-
-async function readStore(): Promise<unknown[]> {
+export async function GET(): Promise<NextResponse> {
   try {
-    const raw = await fs.readFile(STORE_PATH, 'utf8');
-    const parsed = JSON.parse(raw);
-    return Array.isArray(parsed) ? parsed : [];
-  } catch {
-    return [];
-  }
-}
-
-export async function GET() {
-  const baskets = await readStore();
-  return NextResponse.json({ success: true, data: baskets });
-}
-
-export async function POST(request: NextRequest) {
-  const body = await request.json().catch(() => null) as { baskets?: unknown } | null;
-  if (!body || !Array.isArray(body.baskets)) {
-    return NextResponse.json({ success: false, error: 'baskets must be an array' }, { status: 400 });
-  }
-  try {
-    await fs.mkdir(path.dirname(STORE_PATH), { recursive: true });
-    await fs.writeFile(STORE_PATH, JSON.stringify(body.baskets, null, 2), 'utf8');
-    return NextResponse.json({ success: true });
+    return NextResponse.json({ success: true, data: readBaskets() });
   } catch (err) {
+    console.error('[/api/baskets GET]', err);
+    return NextResponse.json({ success: false, error: String(err) }, { status: 500 });
+  }
+}
+
+export async function POST(req: NextRequest): Promise<NextResponse> {
+  try {
+    const body = await req.json() as { basket?: SavedBasket };
+    if (!body?.basket?.id) {
+      return NextResponse.json({ success: false, error: 'basket (with id) is required' }, { status: 400 });
+    }
+    const baskets = upsertBasket(body.basket);
+    return NextResponse.json({ success: true, data: baskets });
+  } catch (err) {
+    console.error('[/api/baskets POST]', err);
+    return NextResponse.json({ success: false, error: String(err) }, { status: 500 });
+  }
+}
+
+export async function DELETE(req: NextRequest): Promise<NextResponse> {
+  try {
+    const { id } = await req.json() as { id?: string };
+    if (!id) return NextResponse.json({ success: false, error: 'id required' }, { status: 400 });
+    const baskets = deleteBasket(id);
+    return NextResponse.json({ success: true, data: baskets });
+  } catch (err) {
+    console.error('[/api/baskets DELETE]', err);
     return NextResponse.json({ success: false, error: String(err) }, { status: 500 });
   }
 }

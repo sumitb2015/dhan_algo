@@ -17,8 +17,10 @@ import {
   computePayoff, nearestStrike, strikeStep, daysToExpiry,
 } from '@/lib/basketStrategies';
 import {
-  type SavedBasket, loadSavedBaskets, persistSavedBaskets, legToOffset, offsetToStrike,
+  type SavedBasket, legToOffset, offsetToStrike,
 } from '@/lib/basketStorage';
+import { useSavedBaskets } from '@/lib/useSavedBaskets';
+import { fetchMarginSummary, type MarginSummary } from '@/lib/optionsMargin';
 import { sortLegsForPlacement, resolveOrderRequest, type StrikeIdentifier } from '@/lib/basketOrders';
 import { useCopyTrade, CopyTradeControls } from './CopyTrade';
 import BasketPayoffChart from './BasketPayoffChart';
@@ -211,7 +213,6 @@ export default function Baskets() {
 
   const [saveOpen, setSaveOpen]   = useState(false);
   const [saveName, setSaveName]   = useState('');
-  const [saved, setSaved]         = useState<SavedBasket[]>([]);
 
   const [fundsData, setFundsData] = useState<Record<string, number> | null>(null);
 
@@ -296,7 +297,7 @@ export default function Baskets() {
 
   const copyTrade = useCopyTrade(addToast);
 
-  useEffect(() => { loadSavedBaskets().then(setSaved); }, []);
+  const { saved, saveByName, remove: deleteSaved, rename: renameSaved, duplicate: duplicateSaved } = useSavedBaskets(addToast);
 
   useEffect(() => {
     fetch(`/api/options/expiries?underlying=${underlying}&broker=${broker}`)
@@ -594,6 +595,31 @@ export default function Baskets() {
   })), [legs, multiplier, effectiveLotSize, effectivePremium]);
 
   const hasMixedExpiry = useMemo(() => legs.some(l => l.expiry !== expiry), [legs, expiry]);
+
+  // Keyed on composition only: legs gets a new identity on every premium tick, and keying on it
+  // would refire the broker margin call every tick. /api/options/margin takes a single expiry.
+  const legsSignature = useMemo(
+    () => legs.map(l => `${l.side}-${l.option}-${l.strike}x${l.lots}-${l.expiry}`).join('|'),
+    [legs]);
+  const marginKey = legs.length && expiry && !hasMixedExpiry
+    ? `${legsSignature}|${underlying}|${expiry}|${multiplier}` : null;
+  const [marginResult, setMarginResult] = useState<{ key: string; data: MarginSummary | null } | null>(null);
+  const margin = marginKey && marginResult?.key === marginKey ? marginResult.data : null;
+  const marginLoading = marginKey !== null && marginResult?.key !== marginKey;
+  useEffect(() => {
+    if (!marginKey) return;
+    const ac = new AbortController();
+    fetchMarginSummary(
+      underlying, expiry,
+      legs.map(l => ({
+        strike: l.strike, type: l.option, side: l.side === 'B' ? 'BUY' as const : 'SELL' as const,
+        qtyLots: l.lots * multiplier, price: effectivePremium(l),
+      })),
+      ac.signal,
+    ).then(data => { if (!ac.signal.aborted) setMarginResult({ key: marginKey, data }); });
+    return () => ac.abort();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [marginKey]);
   const daysLeft = useMemo(() => (expiry ? daysToExpiry(expiry) : null), [expiry]);
 
   const monitorLegs = useMemo<OptionLegModel[]>(() => {
@@ -719,25 +745,20 @@ export default function Baskets() {
     } finally { placingRef.current = false; setPlacing(false); }
   }, [legs, expiry, farExpiry, confirmPlace, multiplier, lotSize, strikeMap, farStrikeMap, broker, underlying, effectivePremium, addToast, hasAuthenticatedBroker, rollbackPlacedLegs]);
 
-  const persistSaved = (next: SavedBasket[]) => {
-    setSaved(next);
-    persistSavedBaskets(next).catch(() => addToast('error', 'Failed to save basket preset — change was not persisted'));
-  };
   const saveBasket = () => {
     const name = saveName.trim();
     if (!name) { addToast('error', 'Enter a basket name'); return; }
     if (!legs.length) { addToast('error', 'Nothing to save'); return; }
     if (atmStrike == null) { addToast('error', 'Wait for the option chain to load'); return; }
-    const entry: SavedBasket = {
+    const updated = saveByName({
       name, category, strategy, multiplier, underlying,
       legs: legs.map(({ side, option, strike, lots, type, expiry: legExpiry }) => ({
         side, option, lots, type, offset: legToOffset(strike, atmStrike, step),
         ...(legExpiry === farExpiry && farExpiry !== expiry ? { expiryRole: 'far' as const } : {}),
       })),
-    };
-    persistSaved([...saved.filter(s => s.name !== name), entry]);
+    });
     setSaveName(name);
-    addToast('success', `Preset "${name}" saved`);
+    addToast('success', updated ? `Preset "${name}" updated` : `Preset "${name}" saved`);
   };
 
   const pendingLoadRef = useRef<SavedBasket | null>(null);
@@ -1082,7 +1103,9 @@ export default function Baskets() {
                   open={saveOpen}
                   onToggleOpen={() => setSaveOpen(o => !o)}
                   onLoad={loadBasket}
-                  onDelete={name => persistSaved(saved.filter(s => s.name !== name))}
+                  onDelete={deleteSaved}
+                  onRename={renameSaved}
+                  onDuplicate={duplicateSaved}
                 />
               </div>
 
@@ -1208,13 +1231,27 @@ export default function Baskets() {
                   sub={`${expiry || 'Front'} · IV ${atmIv.toFixed(2)}%`}
                   tooltip="Calendar days remaining until contract expiry"
                 />
-                <StatTile
-                  label="Est. Margin"
-                  tone="neutral"
-                  value={portfolioMetrics && portfolioMetrics.estimatedMargin > 0 ? fmtMoney(portfolioMetrics.estimatedMargin) : '—'}
-                  sub={effectiveLotSize ? `${totalQty} lots (${totalQty * effectiveLotSize} units)` : undefined}
-                  tooltip="Theoretical margin requirement based on standard exchange span"
-                />
+                {margin ? (
+                  <StatTile
+                    label="Margin Required"
+                    tone={margin.available_funds > 0 && margin.total_margin > margin.available_funds ? 'down' : 'neutral'}
+                    value={fmtMoney(margin.total_margin)}
+                    sub={margin.available_funds > 0
+                      ? `Available ${fmtMoney(margin.available_funds)}${margin.total_margin > margin.available_funds ? ' · SHORT' : ''}`
+                      : undefined}
+                    tooltip="Portfolio-netted margin from Dhan's multi-leg margin calculator (hedge benefit applied)"
+                  />
+                ) : (
+                  <StatTile
+                    label="Est. Margin"
+                    tone="neutral"
+                    value={marginLoading ? '…' : portfolioMetrics && portfolioMetrics.estimatedMargin > 0 ? fmtMoney(portfolioMetrics.estimatedMargin) : '—'}
+                    sub={effectiveLotSize ? `${totalQty} lots (${totalQty * effectiveLotSize} units)` : undefined}
+                    tooltip={hasMixedExpiry
+                      ? 'Rough estimate: broker margin is unavailable for mixed-expiry baskets'
+                      : 'Rough estimate until the broker margin calculator responds'}
+                  />
+                )}
               </div>
             </TerminalPanel>
 
