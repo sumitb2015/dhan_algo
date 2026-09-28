@@ -396,7 +396,6 @@ function WeightingConsole({
 // ─── Data checks strip ───────────────────────────────────────────────────────
 
 function DataChecks({ stocks, missing }: { stocks: RankingStockWithStatus[]; missing: string[] }) {
-  const holidayRows = stocks.reduce((s, x) => s + x.nonSessionRowsDropped, 0);
   const corp = stocks.filter(s => s.corporateAction);
   const stale = stocks.filter(s => s.stale);
   const young = stocks.filter(s => !s.corporateAction && s.factors['1y'] == null);
@@ -421,10 +420,6 @@ function DataChecks({ stocks, missing }: { stocks: RankingStockWithStatus[]; mis
     young.length > 0 && {
       label: `${young.length} listed under a year — 1Y/52W n/a`,
       title: young.map(s => `${s.symbol} (${s.sessions} sessions)`).join('\n'),
-    },
-    holidayRows > 0 && {
-      label: `${holidayRows.toLocaleString('en-IN')} holiday placeholder rows ignored`,
-      title: 'Zero-volume rows with a flat OHLC on exchange holidays are dropped before any factor is computed',
     },
     synthVol.length > 0 && {
       label: `${synthVol.length} without live volume — VolR n/a`,

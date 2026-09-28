@@ -23,11 +23,10 @@ export interface RankingStock {
   sector: Sector;
   latestClose: number;
   latestDate: string;
-  /** Clean sessions the factors were computed from (after dropping non-sessions and truncating at a corporate action). */
+  /** Sessions the factors were computed from (after truncating at a corporate action). */
   sessions: number;
   factors: FactorValues;
   corporateAction: CorporateAction | null;
-  nonSessionRowsDropped: number;
   volumeSynthetic: boolean;
 }
 
@@ -45,11 +44,6 @@ const RSI_PERIOD = 14;
 const RSI_LOOKBACK = 250;
 const VOL_AVG_SESSIONS = 20;
 const YEAR_COVERAGE_SLACK_DAYS = 7;
-
-/** Rows with no trades and a flat OHLC are exchange holidays the downloader wrote as placeholders, not sessions. */
-function isNonSession(r: OHLCVRow): boolean {
-  return r.volume === 0 && r.open === r.high && r.high === r.low && r.low === r.close;
-}
 
 function detectCorporateAction(rows: OHLCVRow[]): { index: number; action: CorporateAction } | null {
   const start = Math.max(1, rows.length - CA_SCAN_SESSIONS);
@@ -160,8 +154,8 @@ function volumeRatio(rows: OHLCVRow[], todayIST: string): { ratio: number | null
 }
 
 export function computeRankingStock(symbol: string, rawRows: OHLCVRow[], todayIST: string): RankingStock | null {
-  const sessions = rawRows.filter(r => !isNonSession(r) && r.close > 0);
-  const nonSessionRowsDropped = rawRows.length - sessions.length;
+  // Holiday placeholder rows are already dropped by lib/dataLoader.
+  const sessions = rawRows.filter(r => r.close > 0);
   if (sessions.length < 2) return null;
 
   const ca = detectCorporateAction(sessions);
@@ -193,7 +187,6 @@ export function computeRankingStock(symbol: string, rawRows: OHLCVRow[], todayIS
       volr: vol.ratio,
     },
     corporateAction: ca?.action ?? null,
-    nonSessionRowsDropped,
     volumeSynthetic: vol.synthetic,
   };
 }

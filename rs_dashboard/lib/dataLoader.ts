@@ -71,6 +71,18 @@ function isGenuineQuoteRow(row: OHLCVRow): boolean {
   return true;
 }
 
+/**
+ * The stock downloader writes a zero-volume, flat-OHLC row for exchange
+ * holidays (2,401 of them across 495 of the 500 files as of 2026-09-29, all
+ * on 5 NSE holiday dates). They aren't sessions: kept, they dilute the
+ * 20-day volume average, add a zero-range "day" to NR4/NR7, and a
+ * zero-change bar to RSI. Stock CSVs only — some index readers below build
+ * flat, zero-volume rows from close-only data on purpose.
+ */
+function isHolidayPlaceholder(r: OHLCVRow): boolean {
+  return r.volume === 0 && r.open === r.high && r.high === r.low && r.low === r.close;
+}
+
 function parseAndPatchStockRows(symbol: string, content: string): OHLCVRow[] {
   try {
     const rows = parseCSV(content);
@@ -84,7 +96,7 @@ function parseAndPatchStockRows(symbol: string, content: string): OHLCVRow[] {
         close: parseFloat(r.Close),
         volume: parseFloat(r.Volume) || 0,
       }))
-      .filter((r) => !isWeekend(r.date))
+      .filter((r) => !isWeekend(r.date) && !isHolidayPlaceholder(r))
       .sort((a, b) => a.date.localeCompare(b.date));
 
     // Apply live-quote patch so today's data is accurate during market hours.
