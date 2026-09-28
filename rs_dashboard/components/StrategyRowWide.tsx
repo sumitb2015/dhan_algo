@@ -154,6 +154,10 @@ function StrategyRowWide({ meta, state, onRefresh, instanceId, onAddInstance, on
   const [maxRolls, setMaxRolls] = useState(5);
   const [rollCooldown, setRollCooldown] = useState(60);
   const [entryBalanceThresholdRS, setEntryBalanceThresholdRS] = useState(15.0);
+  // Winner-Roll Straddle
+  const [rollThresholdPct, setRollThresholdPct] = useState(50.0);
+  const [winnerRollEntryBalance, setWinnerRollEntryBalance] = useState(10.0);
+  const [atmShiftResetPts, setAtmShiftResetPts] = useState(100.0);
   const [pcrThreshold, setPcrThreshold] = useState(1.5);
   const [exitPcrChange, setExitPcrChange] = useState(30);
   const [pollInterval, setPollInterval] = useState(60);
@@ -514,6 +518,15 @@ function StrategyRowWide({ meta, state, onRefresh, instanceId, onAddInstance, on
         args.push('--max-rolls', String(maxRolls));
         args.push('--roll-cooldown', String(rollCooldown));
         args.push('--entry-balance-threshold', String(entryBalanceThresholdRS));
+        args.push('--start-time', startTime);
+        args.push('--trail-start-rs', String(trailStartRs));
+        args.push('--trail-gap-rs', String(trailGapRs));
+      } else if (meta.key === 'nifty_winner_roll_straddle') {
+        args.push('--entry-balance-threshold', String(winnerRollEntryBalance));
+        args.push('--roll-threshold-pct', String(rollThresholdPct));
+        args.push('--max-rolls', String(maxRolls));
+        args.push('--roll-cooldown', String(rollCooldown));
+        args.push('--atm-shift-reset-pts', String(atmShiftResetPts));
         args.push('--start-time', startTime);
         args.push('--trail-start-rs', String(trailStartRs));
         args.push('--trail-gap-rs', String(trailGapRs));
@@ -1642,11 +1655,36 @@ function StrategyRowWide({ meta, state, onRefresh, instanceId, onAddInstance, on
             </div>
             <div className={fieldCls}>
               <FieldLabel text="Roll Cooldown (s)" tip="Minimum delay in seconds between consecutive straddle rolls to prevent whipsaws." />
-              <Input type="number" value={rollCooldown} onChange={(e) => setRollCooldown(parseInt(e.target.value) || 60)} min={0} step={10} className={inputCls} style={{ width: 64 }} />
+              <Input type="number" value={rollCooldown} onChange={(e) => { const v = parseInt(e.target.value); setRollCooldown(Number.isNaN(v) ? 60 : v); }} min={0} step={10} className={inputCls} style={{ width: 64 }} />
             </div>
             <div className={fieldCls}>
               <FieldLabel text="Entry Balance (%)" tip="Maximum CE/PE premium difference % to allow entry. Strategy waits until premiums are within this threshold. Set 0 to disable." />
               <Input type="number" step="0.5" min={0} max={50} value={entryBalanceThresholdRS} onChange={(e) => setEntryBalanceThresholdRS(parseFloat(e.target.value) || 0)} className={inputCls} style={{ width: 64 }} />
+            </div>
+          </>
+        )}
+
+        {meta.key === 'nifty_winner_roll_straddle' && (
+          <>
+            <div className={fieldCls}>
+              <FieldLabel text="Entry Balance (%)" tip="Maximum CE/PE premium difference % allowed before entry; strategy waits (BALANCING) until premiums are within this band." />
+              <Input type="number" step="0.5" min={0} max={50} value={winnerRollEntryBalance} onChange={(e) => { const v = parseFloat(e.target.value); setWinnerRollEntryBalance(Number.isNaN(v) ? 10.0 : v); }} className={inputCls} style={{ width: 64 }} />
+            </div>
+            <div className={fieldCls}>
+              <FieldLabel text="Roll Threshold (%)" tip="Roll the winner (lower-premium) leg once it falls to this % of the loser leg's value beyond the baseline offset. Must exceed Entry Balance %." />
+              <Input type="number" step="1" min={1} max={99} value={rollThresholdPct} onChange={(e) => setRollThresholdPct(parseFloat(e.target.value) || 50.0)} className={inputCls} style={{ width: 64 }} />
+            </div>
+            <div className={fieldCls}>
+              <FieldLabel text="Max Rolls / Cycle" tip="Maximum winner-leg rolls allowed per cycle; the next breach past this cap forces a full exit and a fresh ATM cycle." />
+              <Input type="number" value={maxRolls} onChange={(e) => setMaxRolls(parseInt(e.target.value) || 5)} min={1} max={20} className={inputCls} style={{ width: 64 }} />
+            </div>
+            <div className={fieldCls}>
+              <FieldLabel text="Roll Cooldown (s)" tip="Minimum seconds between consecutive winner-leg rolls." />
+              <Input type="number" value={rollCooldown} onChange={(e) => { const v = parseInt(e.target.value); setRollCooldown(Number.isNaN(v) ? 60 : v); }} min={0} step={10} className={inputCls} style={{ width: 64 }} />
+            </div>
+            <div className={fieldCls}>
+              <FieldLabel text="ATM Shift Reset (pts)" tip="If spot moves this many points from the entry ATM strike, square off everything and start a fresh cycle at the new ATM." />
+              <Input type="number" step="5" min={0} value={atmShiftResetPts} onChange={(e) => { const v = parseFloat(e.target.value); setAtmShiftResetPts(Number.isNaN(v) ? 100.0 : v); }} className={inputCls} style={{ width: 72 }} />
             </div>
           </>
         )}
@@ -1963,7 +2001,8 @@ function StrategyRowWide({ meta, state, onRefresh, instanceId, onAddInstance, on
         {(meta.key === 'nifty_advanced_imbalance' ||
           meta.key === 'nifty_value_imbalance_straddle' ||
           meta.key === 'nifty_value_imbalance_strangle' ||
-          meta.key === 'nifty_delta_neutral') && (
+          meta.key === 'nifty_delta_neutral' ||
+          meta.key === 'nifty_winner_roll_straddle') && (
           <>
             <div className={fieldCls}>
               <FieldLabel text="Trail Arm (₹)" tip="Arms the trailing stop once MTM profit reaches this many rupees. Size it against your lot count." />

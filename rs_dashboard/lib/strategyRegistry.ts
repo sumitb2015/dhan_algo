@@ -169,6 +169,15 @@ export const STRATEGIES_METADATA: Record<string, {
     readmePath: readmePath('value_imbalance', 'nifty_rolling_straddle'),
     execBrokerEligible: true,
   },
+  nifty_winner_roll_straddle: {
+    name: 'Nifty Winner-Roll Straddle',
+    underlying: 'NIFTY',
+    logicGroup: 'rotation',
+    timeframe: 'intraday',
+    path: path.join(PROJECT_ROOT, 'strategies', 'value_imbalance', 'nifty_winner_roll_straddle.py'),
+    readmePath: readmePath('value_imbalance', 'nifty_winner_roll_straddle'),
+    execBrokerEligible: true,
+  },
   nifty_delta_strangle: {
     name: 'Nifty Delta Strangle (Weekly)',
     underlying: 'NIFTY',

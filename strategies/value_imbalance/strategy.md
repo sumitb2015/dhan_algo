@@ -780,3 +780,66 @@ venv\Scripts\python.exe strategies/value_imbalance/nifty_rolling_straddle.py --r
 # Live trading — Rolling Trigger % variant with 2 lots and custom trailing SL
 venv\Scripts\python.exe strategies/value_imbalance/nifty_rolling_straddle.py --live --lots 2 --roll-type percentage --roll-trigger-pct 0.4 --trail-start-rs 1000 --trail-gap-rs 500
 ```
+
+## 11. Nifty Winner-Roll Straddle (`nifty_winner_roll_straddle.py`)
+
+An intraday short ATM straddle that rolls only the **winning** (lower-premium) leg toward spot
+as it decays relative to the losing leg, instead of rolling both legs to a new ATM
+(`nifty_rolling_straddle.py`) or shifting a single leg by a fixed points/percentage buffer. Each
+roll value-matches the winner to a strike near the loser's premium and re-baselines the
+imbalance check via `update_baseline_imbalance()`, so the cycle keeps harvesting decay from the
+cheaper side without abandoning the straddle structure.
+
+### A. Roll Trigger
+
+- Tracks `|CE-PE| / max(CE,PE)` against a baseline set at entry (and reset after every roll).
+- Once the winner leg's premium has fallen to `--roll-threshold-pct` of the loser leg's premium
+  beyond the baseline offset, rolls **only the winner** to a value-matched strike, then
+  re-baselines.
+- Config validation at startup: `--roll-threshold-pct` must exceed `--entry-balance-threshold`,
+  or the roll could fire immediately after entry — a bad combination is rejected before the run
+  starts.
+
+### B. Strike-Inversion Guard & ATM-Shift Reset
+
+- Rolling the winner toward spot can cross the loser's strike. Since `CE strike > PE strike`
+  must hold for a straddle, a crossing roll is blocked: the strategy emergency-exits both legs,
+  pauses 5 minutes, then starts a fresh ATM cycle — the same inversion-guard convention used
+  elsewhere in this file (see §2), applied here to a single-leg roll rather than a full
+  strike-shift adjustment.
+- If spot moves `--atm-shift-reset-pts` from the cycle's entry ATM strike, the strategy squares
+  off everything and starts a fresh cycle at the new ATM, rather than letting the winner roll
+  arbitrarily far from the original strike pair.
+
+### C. CLI Parameter Reference
+
+| Flag | Default | Description |
+|---|---|---|
+| `--live` | off (dry run) | Enable real order placement |
+| `--broker BROKER` | `dhan` | Execution broker (`dhan`, `zerodha`, `kotak`). Market data remains on Dhan |
+| `--lots N` | `1` | Fixed lots per leg for the whole cycle — no lot-averaging |
+| `--start-time TIME` | `09:20` | Strategy start time (HH:MM IST) |
+| `--eod-time TIME` | `15:17` | Intraday auto square-off time (HH:MM IST) |
+| `--entry-balance-threshold PCT` | `10.0` | Max CE/PE premium difference % allowed before entry; waits (`BALANCING`) until within this band |
+| `--roll-threshold-pct PCT` | `50.0` | Roll the winner leg once it falls to this % of the loser leg's value beyond the baseline offset. Must exceed `--entry-balance-threshold` |
+| `--max-rolls N` | `5` | Maximum winner-leg rolls per cycle; the next breach past this cap forces a full exit and a fresh ATM cycle |
+| `--roll-cooldown SEC` | `60` | Minimum seconds between consecutive winner-leg rolls |
+| `--atm-shift-reset-pts PTS` | `100.0` | Spot move (points) from the entry ATM strike that forces a full square-off and fresh cycle |
+| `--target-profit VAL` | `20%` | Target profit in INR or % of combined entry premium |
+| `--stop-loss VAL` | `20%` | Stop loss in INR or % of combined entry premium |
+| `--trail-start-rs INR` | `500` | MTM profit level to activate trailing stop loss |
+| `--trail-gap-rs INR` | `300` | Trailing stop loss gap in INR |
+| `--instance-id ID` | *(none)* | Optional identifier appended to the state key, for running multiple instances side by side |
+
+### D. Execution Examples
+
+```powershell
+# Dry run, 1 lot, all defaults (10% entry balance, 50% roll threshold, 20% target/stop)
+venv\Scripts\python.exe strategies/value_imbalance/nifty_winner_roll_straddle.py
+
+# Live run, 2 lots
+venv\Scripts\python.exe strategies/value_imbalance/nifty_winner_roll_straddle.py --live --lots 2
+
+# Tighter roll trigger (rolls sooner), fewer rolls allowed, flat-rupee target/stop
+venv\Scripts\python.exe strategies/value_imbalance/nifty_winner_roll_straddle.py --roll-threshold-pct 35 --max-rolls 3 --target-profit 4000 --stop-loss 4000
+```
