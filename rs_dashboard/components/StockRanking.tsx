@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState, useEffect, useMemo, useCallback } from 'react';
+import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import NavBar from '@/components/NavBar';
 import {
   Award, RefreshCw, Search, Loader2, AlertCircle, ChevronDown, ChevronUp,
@@ -74,6 +74,28 @@ const PRESETS: Record<string, Preset> = {
   },
 };
 
+// ─── Persisted weights ───────────────────────────────────────────────────────
+// A trader who tunes a custom weighting shouldn't lose it on refresh — save
+// to localStorage on every change, restore on mount.
+
+const WEIGHTS_STORAGE_KEY = 'dhanAlgo.stockRanking.weights.v1';
+
+function clampWeights(raw: unknown): Record<string, number> | null {
+  if (typeof raw !== 'object' || raw === null) return null;
+  const obj = raw as Record<string, unknown>;
+  const out: Record<string, number> = {};
+  for (const f of FACTORS) {
+    const v = obj[f.id];
+    out[f.id] = typeof v === 'number' && Number.isFinite(v) ? Math.max(0, Math.min(100, v)) : f.defaultWeight;
+  }
+  return out;
+}
+
+function matchPreset(weights: Record<string, number>): string {
+  const match = Object.entries(PRESETS).find(([, p]) => FACTORS.every(f => (p.weights[f.id] ?? 0) === weights[f.id]));
+  return match ? match[0] : 'custom';
+}
+
 // Rank each stock's raw factor value into a 0-100 percentile within the
 // universe. Invalid readings (e.g. a stock too new to have a 200DMA) fall
 // back to 50 — neutral, rather than dragging the composite to zero.
@@ -113,6 +135,19 @@ function useRanking(rows: MoverResult[], weights: Record<string, number>): Ranke
     ranked.sort((a, b) => b.score - a.score);
     return ranked;
   }, [rows, weights]);
+}
+
+// One sentence naming the 1-2 factors that actually moved a stock's score —
+// the factors with the largest weight × percentile contribution, not just
+// the highest raw percentile (a 100th-percentile factor weighted at 0
+// explains nothing about the score).
+function explainRank(breakdown: RankedStock['breakdown']): string {
+  const contributors = breakdown
+    .filter(b => b.weight > 0)
+    .sort((a, b) => b.weight * b.pct - a.weight * a.pct)
+    .slice(0, 2);
+  if (contributors.length === 0) return 'Every factor weight is 0 — the score is undefined.';
+  return `Led by ${contributors.map(b => `${b.factor.label} (${b.pct.toFixed(0)}p)`).join(' and ')}`;
 }
 
 // ─── Score gauge (top-3 podium) ─────────────────────────────────────────────
@@ -274,7 +309,8 @@ function WeightingConsole({
       <p className="text-[10px] text-zinc-600 mt-3 flex items-center gap-1.5">
         <Info className="h-3 w-3 shrink-0" />
         Each factor is ranked to a 0-100 percentile within the current universe, then blended by these weights
-        (total weight {totalWeight}) into the composite score. Drag any fader — the board re-ranks live.
+        (total weight {totalWeight}) into the composite score. Drag any fader — the board re-ranks live and your
+        weighting is saved on this device for next time.
       </p>
     </div>
   );
@@ -297,6 +333,7 @@ function PodiumCard({ rank, entry }: { rank: number; entry: RankedStock }) {
           <span className={pctColor(entry.row.priceChange1D)}>1D {pctFmt(entry.row.priceChange1D)}</span>
           <span className={pctColor(entry.row.priceChange1M)}>1M {pctFmt(entry.row.priceChange1M)}</span>
         </div>
+        <p className="text-[10px] text-zinc-500 mt-1 truncate">{explainRank(entry.breakdown)}</p>
         <div className="mt-1.5"><HeatStrip breakdown={entry.breakdown} /></div>
       </div>
     </div>
@@ -396,6 +433,7 @@ function RankedTable({ ranked, search }: { ranked: RankedStock[]; search: string
                   {isOpen && (
                     <tr className="bg-zinc-950/70 border-b border-zinc-900">
                       <td colSpan={10} className="px-4 py-3">
+                        <p className="text-[11px] text-zinc-400 mb-2">{explainRank(entry.breakdown)}</p>
                         <div className="flex flex-wrap gap-x-6 gap-y-2">
                           {entry.breakdown.map(b => (
                             <div key={b.factor.id} className="flex items-center gap-2 min-w-[150px]">
@@ -434,6 +472,33 @@ export default function StockRanking() {
   const [consoleOpen, setConsoleOpen] = useState(true);
   const [weights, setWeights] = useState<Record<string, number>>(PRESETS.balanced.weights);
   const [activePreset, setActivePreset] = useState<string>('balanced');
+  const skipNextPersistRef = useRef(true);
+
+  // Restore any weighting saved from a previous visit. Runs client-only
+  // (avoids an SSR/hydration mismatch from reading localStorage during
+  // render), so the first paint briefly shows the Balanced default before
+  // this effect swaps in the saved weights.
+  useEffect(() => {
+    try {
+      const raw = localStorage.getItem(WEIGHTS_STORAGE_KEY);
+      if (raw) {
+        const clamped = clampWeights(JSON.parse(raw));
+        if (clamped) {
+          setWeights(clamped);
+          setActivePreset(matchPreset(clamped));
+        }
+      }
+    } catch { /* localStorage unavailable (private window, etc.) — keep defaults */ }
+  }, []);
+
+  // Persist on every change, but skip the very first run: without this, the
+  // initial-mount commit (still holding the Balanced default) would write
+  // over a previously saved custom weighting before the restore effect above
+  // gets a chance to apply it.
+  useEffect(() => {
+    if (skipNextPersistRef.current) { skipNextPersistRef.current = false; return; }
+    try { localStorage.setItem(WEIGHTS_STORAGE_KEY, JSON.stringify(weights)); } catch { /* ignore */ }
+  }, [weights]);
 
   const fetchData = useCallback(async (bust = false) => {
     setLoading(true);
