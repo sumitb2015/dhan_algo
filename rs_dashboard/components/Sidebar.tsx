@@ -43,6 +43,7 @@ const NAV_GROUPS = [
       { href: '/stage-screener', label: 'Stage Screener', desc: 'Minervini 8-point Trend Template & Stage 2 breakout screener' },
       { href: '/trend-confluence', label: 'Trend Confluence', desc: 'Multi-timeframe Weekly/Daily EMA alignment, ADX & RS blotter' },
       { href: '/rs-scanner', label: 'RS Scanner', desc: 'Relative strength scanner vs Nifty index' },
+      { href: '/stock-ranking', label: 'Stock Ranking', desc: 'Weighted multi-factor composite score across momentum, trend & 52-week strength, with adjustable factor weights' },
       { href: '/scanner', label: 'Scanner', desc: 'Custom criteria and queries scanner' },
       { href: '/movers', label: 'Movers', desc: 'Top gainers, losers & volume breakouts' },
       { href: '/movers-plus', label: 'Movers+', desc: 'Multi-timeframe activity dashboard' },
