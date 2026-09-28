@@ -4,22 +4,11 @@ import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react'
 import NavBar from '@/components/NavBar';
 import { TrendingUp, RefreshCw, Search, ChevronUp, ChevronDown, Loader2, AlertCircle, AlertTriangle, Download, CheckCircle2, Square, History } from 'lucide-react';
 import { NIFTY50_SET } from '@/lib/nifty50';
+import { pctFrom, pctColor, pctFmt } from '@/lib/pctFormat';
 import type { MoverResult, MoversResponse } from '@/app/api/movers/route';
 import type { IndexResult, IndicesResponse, IndexCategory } from '@/app/api/indices-performance/route';
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
-
-function pctColor(v: number | null | undefined): string {
-  if (v == null) return 'text-zinc-400';
-  if (v > 0) return 'text-emerald-300';
-  if (v < 0) return 'text-red-400';
-  return 'text-zinc-300';
-}
-
-function pctFmt(v: number | null | undefined, decimals = 2): string {
-  if (v == null) return '—';
-  return (v >= 0 ? '+' : '') + v.toFixed(decimals) + '%';
-}
 
 function numFmt(v: number | null | undefined, decimals = 2): string {
   if (v == null || v === 0) return '—';
@@ -30,11 +19,6 @@ function rsiColor(v: number): string {
   if (v >= 70) return 'text-red-300';
   if (v <= 30) return 'text-emerald-300';
   return 'text-zinc-100';
-}
-
-function pctFrom(close: number, ma: number): number | null {
-  if (!ma || ma === 0) return null;
-  return ((close - ma) / ma) * 100;
 }
 
 // ─── Refresh status hook ─────────────────────────────────────────────────────

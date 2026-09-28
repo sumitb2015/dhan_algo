@@ -7,6 +7,7 @@ import {
   RotateCcw, Info,
 } from 'lucide-react';
 import { NIFTY50_SET } from '@/lib/nifty50';
+import { pctFrom, pctColor, pctFmt } from '@/lib/pctFormat';
 import type { MoverResult, MoversResponse } from '@/app/api/movers/route';
 
 // ─── Factor model ───────────────────────────────────────────────────────────
@@ -24,13 +25,8 @@ interface FactorDef {
   short: string;
   category: FactorCategory;
   hint: string;
-  extract: (r: MoverResult) => number;
+  extract: (r: MoverResult) => number | null;
   defaultWeight: number;
-}
-
-function pctFrom(close: number, ma: number): number {
-  if (!ma) return NaN;
-  return ((close - ma) / ma) * 100;
 }
 
 const FACTORS: FactorDef[] = [
@@ -78,23 +74,11 @@ const PRESETS: Record<string, Preset> = {
   },
 };
 
-function pctFmt(v: number, decimals = 2): string {
-  if (!Number.isFinite(v)) return '—';
-  return (v >= 0 ? '+' : '') + v.toFixed(decimals) + '%';
-}
-
-function pctColor(v: number): string {
-  if (!Number.isFinite(v)) return 'text-zinc-500';
-  if (v > 0) return 'text-emerald-300';
-  if (v < 0) return 'text-red-400';
-  return 'text-zinc-300';
-}
-
 // Rank each stock's raw factor value into a 0-100 percentile within the
 // universe. Invalid readings (e.g. a stock too new to have a 200DMA) fall
 // back to 50 — neutral, rather than dragging the composite to zero.
-function percentileRanks(values: number[]): number[] {
-  const valid = values.map((v, i) => ({ v, i })).filter(x => Number.isFinite(x.v));
+function percentileRanks(values: (number | null)[]): number[] {
+  const valid = values.map((v, i) => ({ v, i })).filter((x): x is { v: number; i: number } => x.v != null && Number.isFinite(x.v));
   const out = new Array(values.length).fill(50);
   if (valid.length <= 1) return out;
   const sorted = [...valid].sort((a, b) => a.v - b.v);
@@ -106,7 +90,7 @@ function percentileRanks(values: number[]): number[] {
 interface RankedStock {
   row: MoverResult;
   score: number;
-  breakdown: { factor: FactorDef; raw: number; pct: number; weight: number }[];
+  breakdown: { factor: FactorDef; raw: number | null; pct: number; weight: number }[];
 }
 
 function useRanking(rows: MoverResult[], weights: Record<string, number>): RankedStock[] {
@@ -166,7 +150,7 @@ function HeatStrip({ breakdown }: { breakdown: RankedStock['breakdown'] }) {
       {breakdown.map(b => (
         <div
           key={b.factor.id}
-          title={`${b.factor.label}: ${Number.isFinite(b.raw) ? b.raw.toFixed(2) : '—'} (${b.pct.toFixed(0)}th pct, weight ${b.weight})`}
+          title={`${b.factor.label}: ${b.raw != null && Number.isFinite(b.raw) ? b.raw.toFixed(2) : '—'} (${b.pct.toFixed(0)}th pct, weight ${b.weight})`}
           className={`h-4 w-2 rounded-[1px] ${heatColor(b.pct)}`}
         />
       ))}
@@ -216,7 +200,7 @@ function Fader({ factor, value, onChange }: { factor: FactorDef; value: number; 
           border-radius: 2px;
           background: var(--color-zinc-100);
           border: 1px solid var(--color-zinc-500);
-          box-shadow: 0 1px 2px rgba(0, 0, 0, 0.4);
+          box-shadow: 0 1px 2px color-mix(in srgb, var(--color-zinc-950) 40%, transparent);
         }
         .ranking-fader::-moz-range-thumb {
           width: 18px;
@@ -323,7 +307,7 @@ function PodiumCard({ rank, entry }: { rank: number; entry: RankedStock }) {
 
 function RankedTable({ ranked, search }: { ranked: RankedStock[]; search: string }) {
   const [expanded, setExpanded] = useState<string | null>(null);
-  const [page, setPage] = useState(0);
+  const [rawPage, setPage] = useState(0);
   const PAGE_SIZE = 50;
 
   const filtered = useMemo(() => {
@@ -332,8 +316,21 @@ function RankedTable({ ranked, search }: { ranked: RankedStock[]; search: string
     return ranked.filter(e => e.row.symbol.toLowerCase().includes(q) || (e.row.sector || '').toLowerCase().includes(q));
   }, [ranked, search]);
 
+  // O(1) rank lookup for the visible rows instead of an indexOf scan of the
+  // full universe on every render (each row's global rank was already known,
+  // and discarded, when useRanking sorted `ranked`).
+  const rankBySymbol = useMemo(() => {
+    const m = new Map<string, number>();
+    ranked.forEach((e, i) => m.set(e.row.symbol, i + 1));
+    return m;
+  }, [ranked]);
+
   useEffect(() => setPage(0), [search]);
   const pages = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE));
+  // Clamp rather than rely on an effect: `ranked` can shrink (e.g. the Nifty
+  // 500 -> Nifty 50 tab switch) without `search` changing, which would
+  // otherwise leave `page` pointing past the end and render an empty table.
+  const page = Math.min(rawPage, pages - 1);
   const pageRows = filtered.slice(page * PAGE_SIZE, (page + 1) * PAGE_SIZE);
 
   return (
@@ -367,7 +364,7 @@ function RankedTable({ ranked, search }: { ranked: RankedStock[]; search: string
           </thead>
           <tbody>
             {pageRows.map((entry, i) => {
-              const rank = ranked.indexOf(entry) + 1;
+              const rank = rankBySymbol.get(entry.row.symbol) ?? 0;
               const isOpen = expanded === entry.row.symbol;
               return (
                 <React.Fragment key={entry.row.symbol}>
