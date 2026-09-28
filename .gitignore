@@ -5,6 +5,7 @@ venv/
 .env
 .env.zerodha
 .env.kotak
+.env.stockmock
 access_token.json
 zerodha_access_token.json
 kotak_access_token.json
@@ -106,3 +107,6 @@ temp_data/
 
 # Codex local config — carries an API key, same reason .claude/settings.local.json is ignored
 .codex/config.toml
+
+# Claude Code local runtime files (tokens, scratch)
+.claude/debug/
