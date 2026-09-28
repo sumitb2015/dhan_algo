@@ -1249,7 +1249,7 @@ export default function ExpiryAnalysis() {
                 <XAxis
                   dataKey="index"
                   type="number"
-                  domain={[0, weeklyAnalysis.chartData.length - 1]}
+                  domain={[-0.5, weeklyAnalysis.chartData.length - 0.5]}
                   tick={{ fontSize: 9, fill: '#71717a' }}
                   axisLine={false}
                   tickLine={false}
