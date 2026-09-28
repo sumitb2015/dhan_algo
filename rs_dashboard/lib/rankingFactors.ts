@@ -158,6 +158,8 @@ export function computeRankingStock(symbol: string, rawRows: OHLCVRow[], todayIS
   const sessions = rawRows.filter(r => r.close > 0);
   if (sessions.length < 2) return null;
 
+  // Confirmed actions in scripts/downloader/corporate_actions.json are already
+  // adjusted away by lib/dataLoader, so this only catches unregistered ones.
   const ca = detectCorporateAction(sessions);
   // Price history before a split/demerger is on a different basis; treat the
   // action date as a fresh listing so every lookback that would span it

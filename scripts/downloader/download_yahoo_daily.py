@@ -35,6 +35,8 @@ warnings.filterwarnings("ignore")
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, PROJECT_ROOT)
 
+from lib.market_data_hygiene import NIFTY500_LIST, drop_no_trade_bars, is_constituent_symbol  # noqa: E402
+
 HIST_DIR     = os.path.join(PROJECT_ROOT, "Historical Data")
 YAHOO_DIR    = os.path.join(HIST_DIR, "Yahoo_Daily_1Y")
 STOCKS_DIR   = os.path.join(PROJECT_ROOT, "Daily_Historical_Data_Fresh")
@@ -42,7 +44,7 @@ DEBUG_DIR    = os.path.join(PROJECT_ROOT, "debug")
 STATUS_FILE  = os.path.join(DEBUG_DIR, "yahoo_refresh_status.json")
 STOP_FILE    = os.path.join(DEBUG_DIR, "yahoo_refresh_stop.trigger")
 GLOBAL_STOP  = os.path.join(DEBUG_DIR, "refresh_stop.trigger")
-N500_LIST    = os.path.join(PROJECT_ROOT, "ind_nifty500list.csv")
+N500_LIST    = NIFTY500_LIST
 NIFTY50_CSV  = os.path.join(HIST_DIR, "NIFTY_50_Daily_5Y.csv")
 N500IDX_CSV  = os.path.join(HIST_DIR, "NIFTY_500_Daily.csv")
 
@@ -96,7 +98,7 @@ def get_nifty500_symbols() -> list[str]:
             col = next((c for c in df.columns if str(c).strip().upper() == "SYMBOL"), None)
             if col:
                 symbols = df[col].astype(str).str.strip().tolist()
-                valid = [s for s in symbols if s and s != "NIFTY 500" and not s.startswith("Note") and s != "nan"]
+                valid = [s for s in symbols if is_constituent_symbol(s)]
                 if len(valid) >= 400:
                     return sorted(valid)
         except Exception:
@@ -166,6 +168,8 @@ def extract_ohlcv_from_yf(df: pd.DataFrame, ticker: str) -> pd.DataFrame:
     out = out[out["dt_obj"].dt.dayofweek < 5].drop(columns=["dt_obj"])
     out = out.drop_duplicates(subset=["Datetime"], keep="last").sort_values("Datetime")
     out = out[out["Close"] > 0]
+    # yfinance returns a zero-volume, flat bar for every NSE holiday.
+    out = drop_no_trade_bars(out)
     return out.reset_index(drop=True)
 
 
@@ -246,7 +250,8 @@ def download_yahoo_stocks(symbols: list[str], period: str = "1y", batch_size: in
                                 if not old_df.empty:
                                     old_df["Datetime"] = old_df["Datetime"].astype(str)
                                     combined = pd.concat([old_df, df_sym]).drop_duplicates(subset=["Datetime"], keep="last")
-                                    combined = combined.sort_values("Datetime")
+                                    # Also clears holiday rows an older sync already merged in.
+                                    combined = drop_no_trade_bars(combined.sort_values("Datetime"))
                                     combined.to_csv(fresh_csv, index=False)
                                 else:
                                     df_sym.to_csv(fresh_csv, index=False)

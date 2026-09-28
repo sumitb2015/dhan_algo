@@ -27,6 +27,8 @@ warnings.filterwarnings("ignore")
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, PROJECT_ROOT)
 
+from lib.market_data_hygiene import NIFTY500_LIST, drop_no_trade_bars, is_constituent_symbol  # noqa: E402
+
 HIST_DIR     = os.path.join(PROJECT_ROOT, "Historical Data")
 INDICES_DIR  = os.path.join(HIST_DIR, "Indices")
 STOCKS_DIR   = os.path.join(PROJECT_ROOT, "Daily_Historical_Data_Fresh")
@@ -35,7 +37,7 @@ STATUS_FILE  = os.path.join(DEBUG_DIR, "refresh_status.json")
 STOP_FILE    = os.path.join(DEBUG_DIR, "refresh_stop.trigger")
 NIFTY50_CSV  = os.path.join(HIST_DIR, "NIFTY_50_Daily_5Y.csv")
 N500IDX_CSV  = os.path.join(HIST_DIR, "NIFTY_500_Daily.csv")
-N500_LIST    = os.path.join(PROJECT_ROOT, "ind_nifty500list.csv")
+N500_LIST    = NIFTY500_LIST
 # Multi-year holes that a repair fetch confirms have zero data (e.g. a stock
 # delisted-then-relisted, like Hexaware's 2020-10-31 to 2025-02-19 trading
 # suspension) can never self-heal — the API has nothing to return for that
@@ -703,8 +705,7 @@ def parse_nifty500_symbols() -> list[str]:
                 df = pd.read_csv(N500_LIST, skiprows=16)
             symbol_col = df.columns[0]
         symbols = df[symbol_col].astype(str).str.strip().tolist()
-        return [s for s in symbols if s and s != "NIFTY 500" and not s.startswith("Note")
-                and len(s) > 0 and s != "nan"]
+        return [s for s in symbols if is_constituent_symbol(s)]
     except Exception:
         files = [f for f in os.listdir(STOCKS_DIR) if f.endswith("_Daily_2Y.csv")]
         return [f.replace("_Daily_2Y.csv", "") for f in sorted(files)]
@@ -876,7 +877,8 @@ def refresh_stocks(helper):
                 combined = combined[~combined.index.duplicated(keep="last")].sort_index()
             else:
                 combined = new_df
-            combined = strip_weekend_rows(combined)
+            # Also clears holiday rows an older Yahoo sync merged into this file.
+            combined = drop_no_trade_bars(strip_weekend_rows(combined))
 
             df_to_stock_csv(combined, csv_path)
 

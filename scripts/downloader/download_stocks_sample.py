@@ -1,6 +1,6 @@
 """
 Script to download 3 years of 1-minute data for a sample of NIFTY 500 stocks.
-Reads symbols from MW-NIFTY-500-25-Jan-2026.csv.
+Reads symbols from ind_nifty500list.csv (NSE's official constituent list).
 """
 import sys
 import os
@@ -14,7 +14,7 @@ from lib.dhan_helper import DhanHelper
 
 def main():
     PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-    csv_path = os.path.join(PROJECT_ROOT, "MW-NIFTY-500-25-Jan-2026.csv")
+    csv_path = os.path.join(PROJECT_ROOT, "ind_nifty500list.csv")
     save_dir = os.path.join(PROJECT_ROOT, "Stocks Historical Data")
     os.makedirs(save_dir, exist_ok=True)
     

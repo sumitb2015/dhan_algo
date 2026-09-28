@@ -216,7 +216,7 @@ function StockBadges({ entry }: { entry: RankedStock }) {
         <Badge
           tone="amber"
           label="CA"
-          title={`Corporate action on ${ca.date} (${ca.gapPct.toFixed(0)}% opening gap) — history before it is on a different price basis and is excluded`}
+          title={`Unregistered corporate action on ${ca.date} (${ca.gapPct.toFixed(0)}% opening gap) — history before it is on a different price basis and is excluded. Once confirmed, add it to scripts/downloader/corporate_actions.json to adjust the history instead.`}
         />
       )}
       {s.stale && <Badge tone="amber" label="STALE" title={`Last session ${s.latestDate} — behind the universe's data date`} />}
@@ -403,8 +403,12 @@ function DataChecks({ stocks, missing }: { stocks: RankingStockWithStatus[]; mis
 
   const warnings = [
     corp.length > 0 && {
-      label: `${corp.length} corporate action${corp.length > 1 ? 's' : ''} — pre-action history excluded`,
-      title: corp.map(s => `${s.symbol}: ${s.corporateAction!.date} (${s.corporateAction!.gapPct.toFixed(0)}% gap)`).join('\n'),
+      label: `${corp.length} unregistered corporate action${corp.length > 1 ? 's' : ''} — pre-action history excluded`,
+      title: [
+        ...corp.map(s => `${s.symbol}: ${s.corporateAction!.date} (${s.corporateAction!.gapPct.toFixed(0)}% gap)`),
+        '',
+        'Run scripts/downloader/find_price_breaks.py, confirm each against an announcement, and add it to corporate_actions.json.',
+      ].join('\n'),
     },
     stale.length > 0 && {
       label: `${stale.length} stale — not ranked`,

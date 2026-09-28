@@ -1,6 +1,51 @@
 {
-  "_readme": "Human-maintained registry of symbols with a CONFIRMED stock split/bonus that needed scripts/downloader/rebackfill_corporate_action.py run against them. The daily incremental pipeline (refresh_dashboard_data.py, download_yahoo_daily.py) does not read this file and is not split-aware — this is a runbook aid, not a live config. Each entry: {date, type, note}. Only add a symbol here after confirming a real corporate action (not just a Dhan-vs-Yahoo price divergence — see the VEDL note below).",
+  "_readme": "Human-maintained registry of CONFIRMED corporate actions that leave a price-basis break in Daily_Historical_Data_Fresh/*.csv. The CSVs stay raw; rs_dashboard/lib/dataLoader.ts reads `price_adjustments` and multiplies every row BEFORE `break_date` by `factor` (and divides volume by it when `adjust_volume` is true, i.e. a split/bonus that changed the share count; never for a demerger). Each entry is applied only while the break is still in the data: the row dated `break_date` must open within 3% of `factor` x the prior close (every registered jump is 30%+, so 3% can't confuse an adjusted series with a raw one). If a re-download already adjusted the history, the entry switches itself off instead of adjusting twice. `break_date` is where the jump sits IN OUR DATA, which is not always the ex-date (see TRENT). Optional `from_date`: the first row of a raw stretch when the rows BEFORE it came from a later download that had already adjusted for this action (visible as an upward jump of about 1/factor at from_date). Only [from_date, break_date) is then scaled, and only while that seam is still in the data; if it's gone, everything before break_date is scaled. To find candidates, run scripts/downloader/find_price_breaks.py, confirm each against an exchange/company announcement, then add it here with its source. Python strategies read the CSVs directly and do NOT see these adjustments.",
+  "price_adjustments": [
+    {
+      "symbol": "TMPV",
+      "from_date": "2025-09-11",
+      "break_date": "2025-10-14",
+      "factor": 0.605373,
+      "adjust_volume": false,
+      "type": "demerger",
+      "ex_date": "2025-10-14",
+      "evidence": "Close 660.75 on 2025-10-13 -> open 400.00 on 2025-10-14 (special pre-open price discovery). Tata Motors demerged its commercial-vehicle business 1:1 (record date 2025-10-14); the parent now trades as TMPV. Rows before 2025-09-11 come from a later backfill already adjusted for this demerger: close 429.27 on 2025-09-10 -> open 710.20 on 2025-09-11, a jump of 1/0.6044.",
+      "source": "https://m.economictimes.com/markets/stocks/news/tata-motors-sets-october-14-as-record-date-for-demerger-of-cv-business/articleshow/124250739.cms"
+    },
+    {
+      "symbol": "TRENT",
+      "from_date": "2025-09-11",
+      "break_date": "2026-01-01",
+      "factor": 0.666667,
+      "adjust_volume": true,
+      "type": "bonus",
+      "ex_date": "2026-06-04",
+      "evidence": "1:2 bonus (ex/record date 2026-06-04). Yahoo's history back-adjusts for it from 2026-01-01 instead of the ex-date: rows 2026-01 to 2026-05 are scaled (non-tick prices), rows before 2026-01-01 are raw. Close 4279.00 on 2025-12-31 -> open 2852.67 on 2026-01-01, exactly 2/3. Adjusting everything before the break joins the series with no gap at the real ex-date. Rows before 2025-09-11 come from a later backfill already adjusted for the bonus: close 3462.02 on 2025-09-10 -> open 5214.50 on 2025-09-11, a jump of 1/0.6639.",
+      "source": "https://www.etmoney.com/stocks/trent-ltd/corporate-actions/844"
+    },
+    {
+      "symbol": "VEDL",
+      "from_date": "2025-09-11",
+      "break_date": "2026-04-30",
+      "factor": 0.374224,
+      "adjust_volume": false,
+      "type": "demerger",
+      "ex_date": "2026-04-30",
+      "evidence": "Close 773.60 on 2026-04-29 -> open 289.50 on 2026-04-30. Vedanta demerged into four new companies 1:1 each (ex-date 2026-04-30, record date 2026-05-01). Rows before 2025-09-11 come from a later backfill already adjusted for this demerger: close 162.30 on 2025-09-10 -> open 434.05 on 2025-09-11, a jump of 1/0.3739.",
+      "source": "https://www.livemint.com/market/stock-market-news/vedanta-demerger-record-date-approaching-soon-ex-date-eligibility-other-details-you-may-like-to-know-11777264798152.html"
+    },
+    {
+      "symbol": "HEG",
+      "break_date": "2026-09-07",
+      "factor": 0.35702,
+      "adjust_volume": false,
+      "type": "demerger",
+      "ex_date": "2026-09-07",
+      "evidence": "Close 728.25 on 2026-09-04 -> open 260.00 on 2026-09-07. Graphite electrode business demerged into HEG Graphite Ltd (record date 2026-09-07); NSE's index file carries a DUMMYHEG placeholder for it until listing.",
+      "source": "https://www.livemint.com/market/stock-market-news/heg-demerger-news-record-date-today-ratio-latest-updates-other-details-in-5-points-11788752191542.html"
+    }
+  ],
   "_investigated_not_added": {
-    "VEDL": "compare_dhan_yahoo.py flagged VEDL as a potential_split (max_diff_pct 62.58% on 2025-09-19, Dhan 170.49 vs Yahoo 455.60), but yfinance's own repair=True found nothing to fix (Repaired: False) and a fresh auto_adjust=True fetch shows continuous prices (~445-455) through that date with no split-shaped jump. The divergence is real but its shape (match_rate_pct 37.65% across the whole trailing year, yet the most recent bar matches within 0.66%) doesn't fit a simple split — Vedanta's known 2024-2025 demerger (business spin-offs) is a more likely cause, and a demerger has no split ratio for auto_adjust to apply. rebackfill_corporate_action.py would not fix this; do not run it against VEDL without further research confirming an actual mechanism it could correct."
+    "VEDL": "compare_dhan_yahoo.py flagged VEDL as a potential_split (max_diff_pct 62.58% on 2025-09-19, Dhan 170.49 vs Yahoo 455.60), but yfinance's own repair=True found nothing to fix (Repaired: False) and a fresh auto_adjust=True fetch shows continuous prices (~445-455) through that date with no split-shaped jump. The divergence is real but its shape (match_rate_pct 37.65% across the whole trailing year, yet the most recent bar matches within 0.66%) doesn't fit a simple split. This 2025-09-19 divergence is separate from, and not explained by, the 2026-04-30 demerger registered above. rebackfill_corporate_action.py would not fix this; do not run it against VEDL without further research confirming an actual mechanism it could correct. UPDATE 2026-09-29: explained. 62.58% is exactly 1 - 0.374224, the 2026-04-30 demerger's price factor: one source had adjusted VEDL's history for the demerger and the other hadn't. That demerger is now registered in price_adjustments, which is the fix; the rebackfill script still shouldn't be run for it."
   }
 }

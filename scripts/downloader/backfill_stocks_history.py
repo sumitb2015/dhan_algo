@@ -32,8 +32,10 @@ warnings.filterwarnings("ignore")
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, PROJECT_ROOT)
 
+from lib.market_data_hygiene import NIFTY500_LIST, drop_no_trade_bars, is_constituent_symbol  # noqa: E402
+
 STOCKS_DIR = os.path.join(PROJECT_ROOT, "Daily_Historical_Data_Fresh")
-N500_LIST = os.path.join(PROJECT_ROOT, "MW-NIFTY-500-25-Jan-2026.csv")
+N500_LIST = NIFTY500_LIST
 DEBUG_DIR = os.path.join(PROJECT_ROOT, "debug")
 STATUS_FILE = os.path.join(DEBUG_DIR, "backfill_status.json")
 STOP_FILE = os.path.join(DEBUG_DIR, "backfill_stop.trigger")
@@ -82,8 +84,7 @@ def parse_nifty500_symbols() -> list:
                 df = pd.read_csv(N500_LIST, skiprows=16)
             symbol_col = df.columns[0]
         symbols = df[symbol_col].astype(str).str.strip().tolist()
-        return [s for s in symbols if s and s != "NIFTY 500" and not s.startswith("Note")
-                and len(s) > 0 and s != "nan"]
+        return [s for s in symbols if is_constituent_symbol(s)]
     except Exception:
         files = [f for f in os.listdir(STOCKS_DIR) if f.endswith("_Daily_2Y.csv")]
         return [f.replace("_Daily_2Y.csv", "") for f in sorted(files)]
@@ -203,7 +204,7 @@ def backfill_symbol(helper, symbol: str, start_date: str) -> str:
     else:
         combined = old_df
 
-    df_to_stock_csv(combined, csv_path)
+    df_to_stock_csv(drop_no_trade_bars(combined), csv_path)
     return f"+{len(old_df)} rows -> {len(combined)} total (now starts {combined.index.min().strftime('%Y-%m-%d')})"
 
 

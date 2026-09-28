@@ -29,7 +29,7 @@ logger = logging.getLogger(__name__)
 # --- SYMBOLS UTILS ---
 
 def parse_nifty500_symbols(csv_path: str) -> List[str]:
-    """Parse MW-NIFTY-500 CSV file and extract symbols robustly."""
+    """Parse the Nifty 500 constituent CSV and extract symbols robustly."""
     if not os.path.exists(csv_path):
         print(f"[FAIL] CSV file not found: {csv_path}")
         return []
@@ -44,7 +44,7 @@ def parse_nifty500_symbols(csv_path: str) -> List[str]:
             
         symbols = df[symbol_col].astype(str).str.strip().tolist()
         # Filter unwanted symbols
-        symbols = [s for s in symbols if s and s != "NIFTY 500" and not s.startswith("Note") and len(s) > 0 and s != 'nan']
+        symbols = [s for s in symbols if s and s != "NIFTY 500" and not s.startswith("Note") and len(s) > 0 and s != 'nan' and not s.upper().startswith("DUMMY")]
         return symbols
     except Exception as e:
         print(f"[FAIL] Could not parse CSV symbols: {e}")
@@ -383,7 +383,7 @@ def show_menu():
 
 def main():
     PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-    csv_path = os.path.join(PROJECT_ROOT, "MW-NIFTY-500-25-Jan-2026.csv")
+    csv_path = os.path.join(PROJECT_ROOT, "ind_nifty500list.csv")
     save_dir = PROJECT_ROOT
     os.makedirs(save_dir, exist_ok=True)
     

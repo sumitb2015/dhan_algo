@@ -27,6 +27,14 @@ Usage:
 Always writes a timestamped .bak copy of the existing CSV before overwriting, since
 this is a full overwrite rather than the merge/dedupe pattern the rest of the
 downloader pipeline uses.
+
+Prefer a `price_adjustments` entry in corporate_actions.json over running this.
+The next `download_yahoo_daily.py --sync-to-fresh` run merges unadjusted
+(auto_adjust=False) rows over the trailing year with keep="last", which quietly
+undoes this rewrite for those dates and moves the break to the one-year
+boundary. The registry is applied when the dashboard reads the file, so a
+re-download can't undo it, and it can adjust demergers, which Yahoo's
+auto_adjust can't.
 """
 import os
 import sys
@@ -111,9 +119,9 @@ def rebackfill_symbol(symbol: str, dry_run: bool = False) -> None:
     print(f"  Wrote {len(new_df)} rows to {csv_path}")
 
     registry = load_registry()
-    entry = registry.get(symbol)
+    entry = next((a for a in registry.get("price_adjustments", []) if a.get("symbol") == symbol), None)
     if entry is None:
-        print(f"  Note: {symbol} has no entry in {REGISTRY_FILE} — add one (date/type/note) to record why this "
+        print(f"  Note: {symbol} has no entry in {REGISTRY_FILE} — add a price_adjustments entry to record why this "
               f"corrective rebackfill was run, for anyone reading the CSV history later.")
 
 

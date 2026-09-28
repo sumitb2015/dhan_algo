@@ -10,6 +10,9 @@ const NIFTY50_5Y_CSV  = path.join(HIST_DIR, 'NIFTY_50_Daily_5Y.csv');
 const NIFTY50_1Y_CSV  = path.join(HIST_DIR, 'NIFTY_50_Daily_1Y.csv');
 const NIFTY500_INDEX_CSV = path.join(HIST_DIR, 'NIFTY_500_Daily.csv');
 const TODAY_QUOTES_JSON = path.join(DEBUG_DIR, 'today_quotes.json');
+// NSE's official constituent list, kept current by scripts/download_nifty500_symbols.py.
+const NIFTY500_LIST_CSV = path.join(process.cwd(), '..', 'ind_nifty500list.csv');
+const CORPORATE_ACTIONS_JSON = path.join(process.cwd(), '..', 'scripts', 'downloader', 'corporate_actions.json');
 
 // ─── Simple CSV Parser ────────────────────────────────────────────────────────
 function parseCSV(content: string): Record<string, string>[] {
@@ -72,21 +75,98 @@ function isGenuineQuoteRow(row: OHLCVRow): boolean {
 }
 
 /**
- * The stock downloader writes a zero-volume, flat-OHLC row for exchange
- * holidays (2,401 of them across 495 of the 500 files as of 2026-09-29, all
- * on 5 NSE holiday dates). They aren't sessions: kept, they dilute the
- * 20-day volume average, add a zero-range "day" to NR4/NR7, and a
- * zero-change bar to RSI. Stock CSVs only — some index readers below build
- * flat, zero-volume rows from close-only data on purpose.
+ * yfinance returns a zero-volume, flat-OHLC bar for every NSE holiday, and the
+ * Yahoo sync used to merge them into the stock CSVs (2,401 rows across 495
+ * files as of 2026-09-29). The downloaders now drop them on write
+ * (lib/market_data_hygiene.py); this read-side check covers older files. Kept,
+ * they dilute the 20-day volume average, add a zero-range "day" to NR4/NR7,
+ * and a zero-change bar to RSI. Stock CSVs only — some index readers below
+ * build flat, zero-volume rows from close-only data on purpose.
  */
 function isHolidayPlaceholder(r: OHLCVRow): boolean {
   return r.volume === 0 && r.open === r.high && r.high === r.low && r.low === r.close;
 }
 
+// ─── Corporate-action price adjustments ──────────────────────────────────────
+// The stock CSVs are stored raw, so a split, bonus or demerger shows up as a
+// one-day -33% to -64% "crash" in every return, 52-week range and moving
+// average that spans it. scripts/downloader/corporate_actions.json lists the
+// confirmed ones; each entry scales the rows before its break onto the
+// post-event basis. See that file's _readme for the fields.
+
+interface PriceAdjustment {
+  symbol: string;
+  from_date?: string;
+  break_date: string;
+  factor: number;
+  adjust_volume?: boolean;
+}
+
+// Every registered break is a 30%+ jump, so a 3% band can't mistake an
+// already-adjusted series (ratio ~1) for a raw one.
+const JUMP_TOLERANCE = 0.03;
+
+let _adjustments: { mtimeMs: number; bySymbol: Map<string, PriceAdjustment[]> } | null = null;
+const _staleAdjustmentWarned = new Set<string>();
+
+function priceAdjustmentsFor(symbol: string): PriceAdjustment[] {
+  try {
+    const { mtimeMs } = fs.statSync(CORPORATE_ACTIONS_JSON);
+    if (!_adjustments || _adjustments.mtimeMs !== mtimeMs) {
+      const raw = JSON.parse(fs.readFileSync(CORPORATE_ACTIONS_JSON, 'utf-8'));
+      const bySymbol = new Map<string, PriceAdjustment[]>();
+      for (const a of Array.isArray(raw?.price_adjustments) ? raw.price_adjustments : []) {
+        if (typeof a?.symbol !== 'string' || typeof a.break_date !== 'string') continue;
+        if (typeof a.factor !== 'number' || !(a.factor > 0)) continue;
+        bySymbol.set(a.symbol, [...(bySymbol.get(a.symbol) ?? []), a]);
+      }
+      _adjustments = { mtimeMs, bySymbol };
+    }
+    return _adjustments.bySymbol.get(symbol) ?? [];
+  } catch {
+    return [];
+  }
+}
+
+function opensAtRatio(prev: OHLCVRow, cur: OHLCVRow, ratio: number): boolean {
+  return prev.close > 0 && Math.abs(cur.open / prev.close / ratio - 1) <= JUMP_TOLERANCE;
+}
+
+function applyPriceAdjustments(symbol: string, rows: OHLCVRow[]): OHLCVRow[] {
+  let out = rows;
+  for (const a of priceAdjustmentsFor(symbol)) {
+    const bi = out.findIndex(r => r.date === a.break_date);
+    // Only while the break is still in the data: if a re-download already
+    // adjusted this history, applying the factor again would double it.
+    if (bi <= 0 || !opensAtRatio(out[bi - 1], out[bi], a.factor)) {
+      const key = `${symbol}:${a.break_date}`;
+      if (!_staleAdjustmentWarned.has(key)) {
+        _staleAdjustmentWarned.add(key);
+        console.warn(`[dataLoader] corporate_actions.json: no ${a.factor} break on ${a.break_date} for ${symbol} — entry skipped`);
+      }
+      continue;
+    }
+    let start = 0;
+    if (a.from_date) {
+      // Rows before from_date came from a download that had already adjusted
+      // for this action (visible as a ~1/factor jump up at from_date). Leave
+      // them alone while that's still true; otherwise scale everything.
+      const si = out.findIndex(r => r.date === a.from_date);
+      if (si > 0 && si < bi && opensAtRatio(out[si - 1], out[si], 1 / a.factor)) start = si;
+    }
+    const f = a.factor;
+    const volF = a.adjust_volume ? 1 / f : 1;
+    out = out.map((r, k) => (k >= start && k < bi
+      ? { ...r, open: r.open * f, high: r.high * f, low: r.low * f, close: r.close * f, volume: r.volume * volF }
+      : r));
+  }
+  return out;
+}
+
 function parseAndPatchStockRows(symbol: string, content: string): OHLCVRow[] {
   try {
     const rows = parseCSV(content);
-    const parsed: OHLCVRow[] = rows
+    const parsed: OHLCVRow[] = applyPriceAdjustments(symbol, rows
       .filter((r) => r.Datetime && r.Close && !isNaN(parseFloat(r.Close)))
       .map((r) => ({
         date: r.Datetime.slice(0, 10),
@@ -97,7 +177,7 @@ function parseAndPatchStockRows(symbol: string, content: string): OHLCVRow[] {
         volume: parseFloat(r.Volume) || 0,
       }))
       .filter((r) => !isWeekend(r.date) && !isHolidayPlaceholder(r))
-      .sort((a, b) => a.date.localeCompare(b.date));
+      .sort((a, b) => a.date.localeCompare(b.date)));
 
     // Apply live-quote patch so today's data is accurate during market hours.
     //
@@ -614,22 +694,34 @@ export function readIndexCSV(meta: IndexMeta): OHLCVRow[] {
 let _nifty500ListCache: string[] | null = null;
 export function readNifty500List(): string[] {
   if (_nifty500ListCache && _nifty500ListCache.length > 0) return _nifty500ListCache;
-  const listPath = path.join(process.cwd(), '..', 'MW-NIFTY-500-25-Jan-2026.csv');
   try {
-    const content = fs.readFileSync(listPath, 'utf-8');
-    const rows = parseCSV(content);
-    const syms = rows
-      .map((r) => (r.Symbol || r.SYMBOL || r.symbol || '').trim())
-      .filter((s) => s && s !== 'NIFTY 500' && !s.startsWith('Note') && s !== 'nan');
-    if (syms.length > 0) {
+    const syms = parseConstituentSymbols(fs.readFileSync(NIFTY500_LIST_CSV, 'utf-8'));
+    // A truncated download must not silently shrink the universe.
+    if (syms.length >= 400) {
       _nifty500ListCache = syms;
       return _nifty500ListCache;
     }
-    _nifty500ListCache = listAvailableSymbols().slice(0, 500);
-    return _nifty500ListCache;
-  } catch {
-    // Fall back to all available symbols
-    _nifty500ListCache = listAvailableSymbols().slice(0, 500);
-    return _nifty500ListCache;
+  } catch { /* fall through */ }
+  _nifty500ListCache = listAvailableSymbols().slice(0, 500);
+  return _nifty500ListCache;
+}
+
+// NSE's file: Company Name, Industry, Symbol, Series, ISIN Code. The symbol is
+// read counting from the end so a comma inside a company name can't shift a
+// wrong value into it, and anything that isn't ticker-shaped is dropped.
+// DUMMY<parent> rows are NSE's placeholders for a spun-off business during a
+// demerger (DUMMYHEG in 2026-09); they have no price history.
+function parseConstituentSymbols(content: string): string[] {
+  const lines = content.split(/\r?\n/).filter(Boolean);
+  if (lines.length < 2) return [];
+  const header = lines[0].split(',').map(h => h.trim().toUpperCase());
+  const fromEnd = header.length - header.indexOf('SYMBOL');
+  if (fromEnd > header.length) return [];
+  const out: string[] = [];
+  for (const line of lines.slice(1)) {
+    const vals = line.split(',');
+    const sym = (vals[vals.length - fromEnd] ?? '').trim();
+    if (/^[A-Z0-9][A-Z0-9&-]*$/.test(sym) && !sym.startsWith('DUMMY')) out.push(sym);
   }
+  return out;
 }

@@ -17,7 +17,9 @@ sys.path.insert(0, PROJECT_ROOT)
 STOCKS_DIR     = os.path.join(PROJECT_ROOT, "Daily_Historical_Data_Fresh")
 HIST_DIR       = os.path.join(PROJECT_ROOT, "Historical Data")
 DEBUG_DIR      = os.path.join(PROJECT_ROOT, "debug")
-N500_LIST      = os.path.join(PROJECT_ROOT, "ind_nifty500list.csv")
+from lib.market_data_hygiene import NIFTY500_LIST, is_constituent_symbol  # noqa: E402
+
+N500_LIST      = NIFTY500_LIST
 OUTPUT_FILE    = os.path.join(DEBUG_DIR, "today_quotes.json")
 MASTER_LIST    = os.path.join(PROJECT_ROOT, "master_list.csv")
 NIFTY50_CSV    = os.path.join(HIST_DIR, "NIFTY_50_Daily_5Y.csv")
@@ -41,7 +43,7 @@ def load_symbols(cli_symbols: list[str] | None) -> list[str]:
             df = pd.read_csv(N500_LIST)
             symbol_col = next((c for c in df.columns if str(c).strip().upper() == "SYMBOL"), df.columns[0])
             syms = df[symbol_col].astype(str).str.strip().tolist()
-            syms = [s for s in syms if s and s != "NIFTY 500" and not s.startswith("Note") and s != "nan"]
+            syms = [s for s in syms if is_constituent_symbol(s)]
             if syms:
                 return syms
         except Exception:

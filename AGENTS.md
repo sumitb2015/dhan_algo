@@ -146,7 +146,7 @@ Historical Data/            # Index CSVs: NIFTY_50_Daily_5Y.csv, NIFTY_500_Daily
 Daily_Historical_Data_Fresh/ # Per-stock daily CSVs (<SYMBOL>_Daily_2Y.csv) for RS dashboard
 debug/                      # Runtime state JSON files, log files, trigger files, and backtest archives (debug/backtests/options/<id>/)
 master_list.csv             # 288K-row security master list (~15 MB, cached)
-MW-NIFTY-500-25-Jan-2026.csv  # Nifty 500 constituent list used by refresh and quote scripts
+ind_nifty500list.csv          # NSE's official Nifty 500 constituent list (refresh: scripts/download_nifty500_symbols.py); DUMMY* demerger placeholders are skipped
 Options Data/nifty_options.db  # SQLite cache of historical/expired option chain data, built by
                                 # scripts/analysis/convert_options_to_sqlite.py; read by backtests
                                 # (e.g. backtest_short_straddle.py) and tests/test_18_expired_options.py
@@ -198,7 +198,7 @@ Non-obvious route behaviors:
 - `pyExec.ts` — `runPythonJson()` (async venv-Python spawn, parses last stdout line as JSON) + `dedupe()` in-flight dedup + `PROJECT_ROOT`/`PYTHON_EXE`. Use this from API routes; don't hand-roll `spawnSync` (blocks the Node event loop)
 - `processCheck.ts` — `isPidRunning()` with a 3 s per-PID cache (raw `tasklist` on every poll starves the event loop)
 - `dhanToken.ts` — `getDhanCredentials()`: cached read of `.env` client_id + `access_token.json` for direct Dhan REST calls from Node
-- `dataLoader.ts` — CSV readers; patches today's row from `debug/today_quotes.json` before EOD CSVs are available
+- `dataLoader.ts` — CSV readers; patches today's row from `debug/today_quotes.json` before EOD CSVs are available; drops holiday placeholder rows and applies the confirmed split/bonus/demerger adjustments in `scripts/downloader/corporate_actions.json` (find new candidates with `scripts/downloader/find_price_breaks.py`; Python strategies read the raw CSVs and don't get these adjustments)
 - `clientCache.ts` — client-side stale-while-revalidate cache for page mount fetches
 - Others (`rs.ts`, `indicators.ts`, `sectors.ts`, `nifty50.ts`, `scannerTypes.ts`, `optionsStrategy.ts`, `auth.ts`, hooks) do what their names say.
 
