@@ -3,47 +3,54 @@
 import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import NavBar from '@/components/NavBar';
 import {
-  Award, RefreshCw, Search, Loader2, AlertCircle, ChevronDown, ChevronUp,
-  RotateCcw, Info,
+  Award, RefreshCw, Search, Loader2, AlertCircle, ChevronDown,
+  RotateCcw, Info, ShieldCheck,
 } from 'lucide-react';
 import { NIFTY50_SET } from '@/lib/nifty50';
-import { pctFrom, pctColor, pctFmt } from '@/lib/pctFormat';
-import type { MoverResult, MoversResponse } from '@/app/api/movers/route';
+import { pctColor, pctFmt } from '@/lib/pctFormat';
+import { SECTOR_COLORS, type Sector } from '@/lib/sectors';
+import type { FactorId } from '@/lib/rankingFactors';
+import type { StockRankingResponse, RankingStockWithStatus } from '@/app/api/stock-ranking/route';
 
 // ─── Factor model ───────────────────────────────────────────────────────────
 // Every factor is reduced to a 0-100 percentile rank *within the currently
 // selected universe* (Nifty 50 or Nifty 500), so a 3-month return and an RSI
 // reading can be blended on the same scale. The composite score is the
-// weight-normalized average of those percentiles — move a fader, the whole
-// board re-ranks.
+// weighted average of those percentiles over the factors a stock actually
+// has data for — move a fader, the whole board re-ranks.
 
 type FactorCategory = 'Momentum' | 'Trend' | 'Strength' | 'Participation';
 
 interface FactorDef {
-  id: string;
+  id: FactorId;
   label: string;
   short: string;
   category: FactorCategory;
   hint: string;
-  extract: (r: MoverResult) => number | null;
   defaultWeight: number;
 }
 
 const FACTORS: FactorDef[] = [
-  { id: '1d', label: '1 Day Change', short: '1D', category: 'Momentum', hint: 'Latest session % move', extract: r => r.priceChange1D, defaultWeight: 5 },
-  { id: '1w', label: '1 Week Change', short: '1W', category: 'Momentum', hint: '5-session % move', extract: r => r.priceChange1W, defaultWeight: 10 },
-  { id: '1m', label: '1 Month Change', short: '1M', category: 'Momentum', hint: '~21-session % move', extract: r => r.priceChange1M, defaultWeight: 15 },
-  { id: '3m', label: '3 Month Change', short: '3M', category: 'Momentum', hint: '~65-session % move', extract: r => r.priceChange3M, defaultWeight: 15 },
-  { id: '1y', label: '1 Year Change', short: '1Y', category: 'Momentum', hint: '~252-session % move', extract: r => r.priceChange1Y, defaultWeight: 10 },
-  { id: 'rsi', label: 'RSI (14)', short: 'RSI', category: 'Momentum', hint: 'Wilder 14-period RSI — higher reads more bullish', extract: r => r.rsi14, defaultWeight: 5 },
-  { id: 'hi52', label: 'vs 52W High', short: '52W Hi', category: 'Strength', hint: '% below 52-week high — closer to 0 is stronger', extract: r => r.pctFrom52WHigh, defaultWeight: 10 },
-  { id: 'lo52', label: 'vs 52W Low', short: '52W Lo', category: 'Strength', hint: '% above 52-week low — further from the bottom is stronger', extract: r => r.pctFrom52WLow, defaultWeight: 5 },
-  { id: 'ma50', label: 'vs 50DMA', short: '50DMA', category: 'Trend', hint: '% above/below the 50-day moving average', extract: r => pctFrom(r.latestClose, r.ma50), defaultWeight: 10 },
-  { id: 'ma200', label: 'vs 200DMA', short: '200DMA', category: 'Trend', hint: '% above/below the 200-day moving average', extract: r => pctFrom(r.latestClose, r.ma200), defaultWeight: 10 },
-  { id: 'volr', label: 'Volume Ratio', short: 'VolR', category: 'Participation', hint: 'Latest volume ÷ 20-day average volume', extract: r => r.volumeRatio, defaultWeight: 5 },
+  { id: '1d', label: '1 Day Change', short: '1D', category: 'Momentum', hint: 'Latest session % move', defaultWeight: 5 },
+  { id: '1w', label: '1 Week Change', short: '1W', category: 'Momentum', hint: '% move over 7 calendar days', defaultWeight: 10 },
+  { id: '1m', label: '1 Month Change', short: '1M', category: 'Momentum', hint: '% move over ~1 month', defaultWeight: 15 },
+  { id: '3m', label: '3 Month Change', short: '3M', category: 'Momentum', hint: '% move over ~3 months', defaultWeight: 15 },
+  { id: '1y', label: '1 Year Change', short: '1Y', category: 'Momentum', hint: '% move over 1 year — n/a for stocks listed less than a year', defaultWeight: 10 },
+  { id: 'rsi', label: 'RSI (14)', short: 'RSI', category: 'Momentum', hint: 'Wilder 14-period RSI — higher reads more bullish', defaultWeight: 5 },
+  { id: 'hi52', label: 'vs 52W High', short: '52W Hi', category: 'Strength', hint: '% below 52-week high — closer to 0 is stronger', defaultWeight: 10 },
+  { id: 'lo52', label: 'vs 52W Low', short: '52W Lo', category: 'Strength', hint: '% above 52-week low — further from the bottom is stronger', defaultWeight: 5 },
+  { id: 'ma50', label: 'vs 50DMA', short: '50DMA', category: 'Trend', hint: '% above/below the 50-day moving average', defaultWeight: 10 },
+  { id: 'ma200', label: 'vs 200DMA', short: '200DMA', category: 'Trend', hint: '% above/below the 200-day moving average', defaultWeight: 10 },
+  { id: 'volr', label: 'Volume Ratio', short: 'VolR', category: 'Participation', hint: 'Latest volume ÷ average of the 20 sessions before it', defaultWeight: 5 },
 ];
 
 const CATEGORY_ORDER: FactorCategory[] = ['Momentum', 'Trend', 'Strength', 'Participation'];
+
+// A stock whose available factors carry less than this share of the total
+// weight is listed but not ranked: a score built from one or two factors
+// isn't comparable with one built from all eleven.
+const MIN_COVERAGE = 0.6;
+const TOP_N = 20;
 
 interface Preset {
   label: string;
@@ -96,61 +103,130 @@ function matchPreset(weights: Record<string, number>): string {
   return match ? match[0] : 'custom';
 }
 
-// Rank each stock's raw factor value into a 0-100 percentile within the
-// universe. Invalid readings (e.g. a stock too new to have a 200DMA) fall
-// back to 50 — neutral, rather than dragging the composite to zero.
-function percentileRanks(values: (number | null)[]): number[] {
-  const valid = values.map((v, i) => ({ v, i })).filter((x): x is { v: number; i: number } => x.v != null && Number.isFinite(x.v));
-  const out = new Array(values.length).fill(50);
-  if (valid.length <= 1) return out;
-  const sorted = [...valid].sort((a, b) => a.v - b.v);
-  const n = sorted.length;
-  sorted.forEach((x, rank) => { out[x.i] = (rank / (n - 1)) * 100; });
+// ─── Scoring ────────────────────────────────────────────────────────────────
+
+// Percentile of each value within the universe, 0 (lowest) to 100 (highest).
+// Tied values share the midpoint of the positions they occupy — otherwise a
+// sort's arbitrary tie order would hand identical readings different scores.
+// Missing values stay null; they are excluded from the score, not imputed.
+function percentileRanks(values: (number | null)[]): (number | null)[] {
+  const valid = values
+    .map((v, i) => ({ v, i }))
+    .filter((x): x is { v: number; i: number } => x.v != null && Number.isFinite(x.v));
+  const out: (number | null)[] = new Array(values.length).fill(null);
+  const n = valid.length;
+  if (n === 0) return out;
+  if (n === 1) { out[valid[0].i] = 50; return out; }
+  valid.sort((a, b) => a.v - b.v);
+  for (let start = 0; start < n; ) {
+    let end = start;
+    while (end + 1 < n && valid[end + 1].v === valid[start].v) end++;
+    const pct = ((start + end) / 2 / (n - 1)) * 100;
+    for (let k = start; k <= end; k++) out[valid[k].i] = pct;
+    start = end + 1;
+  }
   return out;
 }
 
-interface RankedStock {
-  row: MoverResult;
-  score: number;
-  breakdown: { factor: FactorDef; raw: number | null; pct: number; weight: number }[];
+interface Breakdown {
+  factor: FactorDef;
+  raw: number | null;
+  pct: number | null;
+  weight: number;
 }
 
-function useRanking(rows: MoverResult[], weights: Record<string, number>): RankedStock[] {
+interface RankedStock {
+  stock: RankingStockWithStatus;
+  /** Weighted mean percentile over the weighted factors this stock has data for. */
+  score: number;
+  /** Share of the total weight that had data (0-1). */
+  coverage: number;
+  /** 1-based rank among eligible stocks; null when not ranked. */
+  rank: number | null;
+  /** Why the stock is not ranked, if it isn't. */
+  unrankedReason: string | null;
+  breakdown: Breakdown[];
+}
+
+function useRanking(rows: RankingStockWithStatus[], weights: Record<string, number>, dataDate: string): RankedStock[] {
   return useMemo(() => {
     if (rows.length === 0) return [];
-    const percentilesByFactor = FACTORS.map(f => percentileRanks(rows.map(f.extract)));
-    const totalWeight = FACTORS.reduce((s, f) => s + (weights[f.id] ?? 0), 0) || 1;
+    const percentilesByFactor = FACTORS.map(f => percentileRanks(rows.map(r => r.factors[f.id])));
+    const totalWeight = FACTORS.reduce((s, f) => s + (weights[f.id] ?? 0), 0);
 
-    const ranked = rows.map((row, i) => {
+    const scored = rows.map((stock, i): RankedStock => {
       let sum = 0;
+      let covered = 0;
       const breakdown = FACTORS.map((f, fi) => {
-        const w = weights[f.id] ?? 0;
+        const weight = weights[f.id] ?? 0;
         const pct = percentilesByFactor[fi][i];
-        sum += w * pct;
-        return { factor: f, raw: f.extract(row), pct, weight: w };
+        if (pct != null && weight > 0) { sum += weight * pct; covered += weight; }
+        return { factor: f, raw: stock.factors[f.id], pct, weight };
       });
-      return { row, score: sum / totalWeight, breakdown };
+      const coverage = totalWeight > 0 ? covered / totalWeight : 0;
+      let unrankedReason: string | null = null;
+      if (totalWeight === 0) unrankedReason = 'Every factor weight is 0';
+      else if (stock.stale) unrankedReason = `Last session ${stock.latestDate} is behind the ${dataDate} data date`;
+      else if (coverage < MIN_COVERAGE) unrankedReason = `Only ${Math.round(coverage * 100)}% of the weighting has data (needs ${MIN_COVERAGE * 100}%)`;
+      return { stock, score: covered > 0 ? sum / covered : 0, coverage, rank: null, unrankedReason, breakdown };
     });
 
-    ranked.sort((a, b) => b.score - a.score);
-    return ranked;
-  }, [rows, weights]);
+    const eligible = scored.filter(s => !s.unrankedReason).sort((a, b) => b.score - a.score);
+    const unranked = scored.filter(s => s.unrankedReason).sort((a, b) => b.score - a.score);
+    eligible.forEach((s, i) => { s.rank = i + 1; });
+    return [...eligible, ...unranked];
+  }, [rows, weights, dataDate]);
 }
 
 // One sentence naming the 1-2 factors that actually moved a stock's score —
 // the factors with the largest weight × percentile contribution, not just
 // the highest raw percentile (a 100th-percentile factor weighted at 0
 // explains nothing about the score).
-function explainRank(breakdown: RankedStock['breakdown']): string {
+function explainRank(breakdown: Breakdown[]): string {
   const contributors = breakdown
-    .filter(b => b.weight > 0)
+    .filter((b): b is Breakdown & { pct: number } => b.weight > 0 && b.pct != null)
     .sort((a, b) => b.weight * b.pct - a.weight * a.pct)
     .slice(0, 2);
-  if (contributors.length === 0) return 'Every factor weight is 0 — the score is undefined.';
+  if (contributors.length === 0) return 'No weighted factor has data for this stock.';
   return `Led by ${contributors.map(b => `${b.factor.label} (${b.pct.toFixed(0)}p)`).join(' and ')}`;
 }
 
-// ─── Score gauge (top-3 podium) ─────────────────────────────────────────────
+// ─── Small pieces ───────────────────────────────────────────────────────────
+
+const BADGE_TONES = {
+  amber: 'text-amber-300 bg-amber-500/10 border-amber-500/25',
+  sky: 'text-sky-300 bg-sky-500/10 border-sky-500/25',
+  zinc: 'text-zinc-400 bg-zinc-800 border-zinc-700',
+} as const;
+
+function Badge({ tone, label, title }: { tone: keyof typeof BADGE_TONES; label: string; title: string }) {
+  return (
+    <span title={title} className={`ml-1.5 px-1 py-px text-[9px] font-bold rounded border align-middle ${BADGE_TONES[tone]}`}>
+      {label}
+    </span>
+  );
+}
+
+function StockBadges({ entry }: { entry: RankedStock }) {
+  const s = entry.stock;
+  const ca = s.corporateAction;
+  return (
+    <>
+      {ca && (
+        <Badge
+          tone="amber"
+          label="CA"
+          title={`Corporate action on ${ca.date} (${ca.gapPct.toFixed(0)}% opening gap) — history before it is on a different price basis and is excluded`}
+        />
+      )}
+      {s.stale && <Badge tone="amber" label="STALE" title={`Last session ${s.latestDate} — behind the universe's data date`} />}
+      {!ca && s.factors['1y'] == null && (
+        <Badge tone="sky" label="NEW" title={`${s.sessions} sessions of history — 1Y and 52-week factors need a full year`} />
+      )}
+      {!s.stale && entry.unrankedReason && <Badge tone="zinc" label="PARTIAL" title={entry.unrankedReason} />}
+    </>
+  );
+}
 
 function ScoreGauge({ score, size = 60 }: { score: number; size?: number }) {
   const deg = Math.max(0, Math.min(100, score)) * 3.6;
@@ -169,9 +245,8 @@ function ScoreGauge({ score, size = 60 }: { score: number; size?: number }) {
   );
 }
 
-// ─── Heat strip — one cell per factor, coloured by percentile tier ──────────
-
-function heatColor(pct: number): string {
+function heatColor(pct: number | null): string {
+  if (pct == null) return 'border border-zinc-600';
   if (pct >= 75) return 'bg-emerald-400';
   if (pct >= 55) return 'bg-emerald-700';
   if (pct > 45) return 'bg-zinc-700';
@@ -179,13 +254,15 @@ function heatColor(pct: number): string {
   return 'bg-red-400';
 }
 
-function HeatStrip({ breakdown }: { breakdown: RankedStock['breakdown'] }) {
+function HeatStrip({ breakdown }: { breakdown: Breakdown[] }) {
   return (
     <div className="flex items-center gap-[2px]" role="img" aria-label="Per-factor percentile heat strip">
       {breakdown.map(b => (
         <div
           key={b.factor.id}
-          title={`${b.factor.label}: ${b.raw != null && Number.isFinite(b.raw) ? b.raw.toFixed(2) : '—'} (${b.pct.toFixed(0)}th pct, weight ${b.weight})`}
+          title={b.pct == null
+            ? `${b.factor.label}: no data`
+            : `${b.factor.label}: ${b.raw != null ? b.raw.toFixed(2) : '—'} (${b.pct.toFixed(0)}th pct, weight ${b.weight})`}
           className={`h-4 w-2 rounded-[1px] ${heatColor(b.pct)}`}
         />
       ))}
@@ -309,29 +386,189 @@ function WeightingConsole({
       <p className="text-[10px] text-zinc-600 mt-3 flex items-center gap-1.5">
         <Info className="h-3 w-3 shrink-0" />
         Each factor is ranked to a 0-100 percentile within the current universe, then blended by these weights
-        (total weight {totalWeight}) into the composite score. Drag any fader — the board re-ranks live and your
-        weighting is saved on this device for next time.
+        (total weight {totalWeight}) over the factors each stock has data for. Drag any fader — the board re-ranks
+        live and your weighting is saved on this device for next time.
       </p>
+    </div>
+  );
+}
+
+// ─── Data checks strip ───────────────────────────────────────────────────────
+
+function DataChecks({ stocks, missing }: { stocks: RankingStockWithStatus[]; missing: string[] }) {
+  const holidayRows = stocks.reduce((s, x) => s + x.nonSessionRowsDropped, 0);
+  const corp = stocks.filter(s => s.corporateAction);
+  const stale = stocks.filter(s => s.stale);
+  const young = stocks.filter(s => !s.corporateAction && s.factors['1y'] == null);
+  const synthVol = stocks.filter(s => s.volumeSynthetic);
+
+  const warnings = [
+    corp.length > 0 && {
+      label: `${corp.length} corporate action${corp.length > 1 ? 's' : ''} — pre-action history excluded`,
+      title: corp.map(s => `${s.symbol}: ${s.corporateAction!.date} (${s.corporateAction!.gapPct.toFixed(0)}% gap)`).join('\n'),
+    },
+    stale.length > 0 && {
+      label: `${stale.length} stale — not ranked`,
+      title: stale.map(s => `${s.symbol}: last session ${s.latestDate}`).join('\n'),
+    },
+    missing.length > 0 && {
+      label: `${missing.length} with no usable data`,
+      title: missing.join(', '),
+    },
+  ].filter((x): x is { label: string; title: string } => !!x);
+
+  const notes = [
+    young.length > 0 && {
+      label: `${young.length} listed under a year — 1Y/52W n/a`,
+      title: young.map(s => `${s.symbol} (${s.sessions} sessions)`).join('\n'),
+    },
+    holidayRows > 0 && {
+      label: `${holidayRows.toLocaleString('en-IN')} holiday placeholder rows ignored`,
+      title: 'Zero-volume rows with a flat OHLC on exchange holidays are dropped before any factor is computed',
+    },
+    synthVol.length > 0 && {
+      label: `${synthVol.length} without live volume — VolR n/a`,
+      title: synthVol.map(s => s.symbol).join(', '),
+    },
+  ].filter((x): x is { label: string; title: string } => !!x);
+
+  return (
+    <div className="flex items-center gap-2 flex-wrap text-[11px]">
+      <span className="flex items-center gap-1.5 font-semibold text-zinc-400">
+        <ShieldCheck className="h-3.5 w-3.5" /> Data checks
+      </span>
+      {warnings.length === 0 && (
+        <span className="px-2 py-0.5 rounded-md border border-emerald-500/25 bg-emerald-500/10 text-emerald-400 font-semibold">
+          No stale data or price-basis breaks
+        </span>
+      )}
+      {warnings.map(w => (
+        <span key={w.label} title={w.title} className="px-2 py-0.5 rounded-md border border-amber-500/25 bg-amber-500/10 text-amber-300 font-semibold cursor-help">
+          {w.label}
+        </span>
+      ))}
+      {notes.map(n => (
+        <span key={n.label} title={n.title} className="px-2 py-0.5 rounded-md border border-zinc-800 bg-zinc-900 text-zinc-400 cursor-help">
+          {n.label}
+        </span>
+      ))}
+    </div>
+  );
+}
+
+// ─── Sector concentration in the top N ──────────────────────────────────────
+
+function SectorConcentration({ ranked, universe, universeLabel }: {
+  ranked: RankedStock[];
+  universe: RankingStockWithStatus[];
+  universeLabel: string;
+}) {
+  const stats = useMemo(() => {
+    const top = ranked.filter(r => r.rank != null).slice(0, TOP_N);
+    const baseCounts = new Map<Sector, number>();
+    for (const s of universe) baseCounts.set(s.sector, (baseCounts.get(s.sector) ?? 0) + 1);
+    const groups = new Map<Sector, string[]>();
+    for (const r of top) groups.set(r.stock.sector, [...(groups.get(r.stock.sector) ?? []), r.stock.symbol]);
+
+    const rows = [...groups.entries()]
+      .map(([sector, symbols]) => {
+        const share = symbols.length / top.length;
+        const baseShare = (baseCounts.get(sector) ?? 0) / Math.max(1, universe.length);
+        return { sector, symbols, share, tilt: baseShare > 0 ? share / baseShare : null };
+      })
+      .sort((a, b) => b.symbols.length - a.symbols.length || (b.tilt ?? 0) - (a.tilt ?? 0));
+
+    const hhi = rows.reduce((s, r) => s + r.share * r.share, 0);
+    const effective = hhi > 0 ? 1 / hhi : 0;
+    const maxShare = rows[0]?.share ?? 0;
+    const verdict =
+      maxShare >= 0.35 || effective < 4 ? { label: 'Concentrated', cls: 'border-red-500/30 bg-red-500/10 text-red-300' }
+      : maxShare >= 0.25 || effective < 6 ? { label: 'Moderately concentrated', cls: 'border-amber-500/25 bg-amber-500/10 text-amber-300' }
+      : { label: 'Diversified', cls: 'border-emerald-500/25 bg-emerald-500/10 text-emerald-400' };
+    return { top, rows, effective, verdict };
+  }, [ranked, universe]);
+
+  const { top } = stats;
+  if (top.length === 0) return null;
+  const lead = stats.rows[0];
+
+  return (
+    <div className="rounded-xl border border-zinc-800 bg-zinc-950/60 p-4">
+      <div className="flex items-start justify-between gap-3 flex-wrap mb-3">
+        <div>
+          <h2 className="text-xs font-bold text-zinc-100">Sector concentration in the top {top.length}</h2>
+          <p className="text-[10px] text-zinc-500 mt-0.5 max-w-xl">
+            {lead.sector} holds {lead.symbols.length} of the top {top.length}
+            {lead.tilt != null && ` — ${lead.tilt.toFixed(1)}× its share of the ${universeLabel} universe`}.
+            Leaders that cluster in one sector tend to move together, so a basket built from them carries less
+            diversification than its name count suggests.
+          </p>
+        </div>
+        <div className="flex items-center gap-2 shrink-0">
+          <span className={`px-2 py-0.5 text-[11px] font-semibold rounded-md border ${stats.verdict.cls}`}>{stats.verdict.label}</span>
+          <span
+            className="px-2 py-0.5 text-[11px] rounded-md border border-zinc-800 bg-zinc-900 text-zinc-300 tabular-nums cursor-help"
+            title="1 ÷ Σ(sector share²): the number of equal-sized sectors that would give the same concentration. 20 names spread evenly over 10 sectors scores 10; all in one sector scores 1."
+          >
+            Effective sectors {stats.effective.toFixed(1)}
+          </span>
+        </div>
+      </div>
+
+      <div className="flex h-3 w-full rounded-full overflow-hidden gap-px bg-zinc-800" role="img" aria-label="Sector share of the top-ranked stocks">
+        {stats.rows.map(r => (
+          <div
+            key={r.sector}
+            title={`${r.sector}: ${r.symbols.length} — ${r.symbols.join(', ')}`}
+            style={{ width: `${r.share * 100}%`, backgroundColor: SECTOR_COLORS[r.sector] }}
+          />
+        ))}
+      </div>
+
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-x-6 gap-y-2 mt-3">
+        {stats.rows.map(r => {
+          const overweight = r.tilt != null && r.tilt >= 2 && r.symbols.length >= 3;
+          return (
+            <div key={r.sector} className="flex items-start gap-2 min-w-0" title={r.symbols.join(', ')}>
+              <span className="mt-1 h-2 w-2 rounded-sm shrink-0" style={{ backgroundColor: SECTOR_COLORS[r.sector] }} />
+              <div className="min-w-0">
+                <div className="flex items-baseline gap-2 text-[11px]">
+                  <span className="font-semibold text-zinc-200">{r.sector}</span>
+                  <span className="text-zinc-400 tabular-nums">{r.symbols.length} · {(r.share * 100).toFixed(0)}%</span>
+                  {r.tilt != null && (
+                    <span className={`tabular-nums ${overweight ? 'text-amber-300 font-semibold' : 'text-zinc-500'}`}>
+                      {r.tilt.toFixed(1)}×
+                    </span>
+                  )}
+                </div>
+                <p className="text-[10px] text-zinc-500 truncate">{r.symbols.join(', ')}</p>
+              </div>
+            </div>
+          );
+        })}
+      </div>
     </div>
   );
 }
 
 // ─── Podium ──────────────────────────────────────────────────────────────────
 
-function PodiumCard({ rank, entry }: { rank: number; entry: RankedStock }) {
+function PodiumCard({ entry }: { entry: RankedStock }) {
+  const rank = entry.rank ?? 0;
   const medal = rank === 1 ? 'border-amber-500/40 bg-amber-500/5' : rank === 2 ? 'border-zinc-400/30 bg-zinc-400/5' : 'border-orange-700/40 bg-orange-700/5';
+  const f = entry.stock.factors;
   return (
     <div className={`flex items-center gap-3 rounded-xl border p-3 ${medal}`}>
       <span className="text-2xl font-bold text-zinc-600 w-6 shrink-0 tabular-nums">{rank}</span>
       <ScoreGauge score={entry.score} size={56} />
       <div className="min-w-0 flex-1">
         <div className="flex items-baseline gap-2">
-          <span className="font-bold text-white truncate">{entry.row.symbol}</span>
-          <span className="text-[10px] text-zinc-500 truncate">{entry.row.sector || '—'}</span>
+          <span className="font-bold text-white truncate">{entry.stock.symbol}</span>
+          <span className="text-[10px] text-zinc-500 truncate">{entry.stock.sector}</span>
         </div>
         <div className="flex items-center gap-2 mt-1 text-[11px]">
-          <span className={pctColor(entry.row.priceChange1D)}>1D {pctFmt(entry.row.priceChange1D)}</span>
-          <span className={pctColor(entry.row.priceChange1M)}>1M {pctFmt(entry.row.priceChange1M)}</span>
+          <span className={pctColor(f['1d'])}>1D {pctFmt(f['1d'])}</span>
+          <span className={pctColor(f['1m'])}>1M {pctFmt(f['1m'])}</span>
         </div>
         <p className="text-[10px] text-zinc-500 mt-1 truncate">{explainRank(entry.breakdown)}</p>
         <div className="mt-1.5"><HeatStrip breakdown={entry.breakdown} /></div>
@@ -344,41 +581,40 @@ function PodiumCard({ rank, entry }: { rank: number; entry: RankedStock }) {
 
 function RankedTable({ ranked, search }: { ranked: RankedStock[]; search: string }) {
   const [expanded, setExpanded] = useState<string | null>(null);
-  const [rawPage, setPage] = useState(0);
+  // The page is remembered per search string, so typing a new filter lands
+  // on page 1 without a reset effect.
+  const [pageState, setPageState] = useState({ search, page: 0 });
+  const rawPage = pageState.search === search ? pageState.page : 0;
   const PAGE_SIZE = 50;
 
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase();
     if (!q) return ranked;
-    return ranked.filter(e => e.row.symbol.toLowerCase().includes(q) || (e.row.sector || '').toLowerCase().includes(q));
+    return ranked.filter(e => e.stock.symbol.toLowerCase().includes(q) || e.stock.sector.toLowerCase().includes(q));
   }, [ranked, search]);
 
-  // O(1) rank lookup for the visible rows instead of an indexOf scan of the
-  // full universe on every render (each row's global rank was already known,
-  // and discarded, when useRanking sorted `ranked`).
-  const rankBySymbol = useMemo(() => {
-    const m = new Map<string, number>();
-    ranked.forEach((e, i) => m.set(e.row.symbol, i + 1));
-    return m;
-  }, [ranked]);
-
-  useEffect(() => setPage(0), [search]);
   const pages = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE));
   // Clamp rather than rely on an effect: `ranked` can shrink (e.g. the Nifty
   // 500 -> Nifty 50 tab switch) without `search` changing, which would
   // otherwise leave `page` pointing past the end and render an empty table.
   const page = Math.min(rawPage, pages - 1);
+  const setPage = (update: (p: number) => number) => setPageState({ search, page: update(page) });
   const pageRows = filtered.slice(page * PAGE_SIZE, (page + 1) * PAGE_SIZE);
+  const rankedCount = filtered.filter(e => e.rank != null).length;
+  const unrankedCount = filtered.length - rankedCount;
 
   return (
     <div>
       <div className="flex items-center justify-between gap-3 mb-3 flex-wrap text-xs text-zinc-300">
-        <span>{filtered.length} ranked stocks</span>
+        <span>
+          {rankedCount} ranked
+          {unrankedCount > 0 && <span className="text-zinc-500"> · {unrankedCount} listed at the bottom without a rank (insufficient or stale data)</span>}
+        </span>
         {pages > 1 && (
           <div className="flex items-center gap-2">
-            <button onClick={() => setPage(p => Math.max(0, p - 1))} disabled={page === 0} className="px-2 py-1 rounded border border-zinc-700 bg-zinc-900 disabled:opacity-30 hover:border-zinc-500 text-zinc-200">‹</button>
+            <button onClick={() => setPage(p => Math.max(0, p - 1))} disabled={page === 0} aria-label="Previous page" className="px-2 py-1 rounded border border-zinc-700 bg-zinc-900 disabled:opacity-30 hover:border-zinc-500 text-zinc-200">‹</button>
             <span>{page + 1} / {pages}</span>
-            <button onClick={() => setPage(p => Math.min(pages - 1, p + 1))} disabled={page >= pages - 1} className="px-2 py-1 rounded border border-zinc-700 bg-zinc-900 disabled:opacity-30 hover:border-zinc-500 text-zinc-200">›</button>
+            <button onClick={() => setPage(p => Math.min(pages - 1, p + 1))} disabled={page >= pages - 1} aria-label="Next page" className="px-2 py-1 rounded border border-zinc-700 bg-zinc-900 disabled:opacity-30 hover:border-zinc-500 text-zinc-200">›</button>
           </div>
         )}
       </div>
@@ -391,7 +627,7 @@ function RankedTable({ ranked, search }: { ranked: RankedStock[]; search: string
               <th className="px-3 py-2 text-left text-xs font-bold text-white">Symbol</th>
               <th className="px-3 py-2 text-left text-xs font-bold text-white">Sector</th>
               <th className="px-3 py-2 text-right text-xs font-bold text-white">Score</th>
-              <th className="px-3 py-2 text-left text-xs font-bold text-white" title="Momentum · Trend · Strength · Participation, left to right">Factors</th>
+              <th className="px-3 py-2 text-left text-xs font-bold text-white" title="Momentum · Trend · Strength · Participation, left to right. Hollow cells have no data.">Factors</th>
               <th className="px-3 py-2 text-right text-xs font-bold text-white">Price</th>
               <th className="px-3 py-2 text-right text-xs font-bold text-white">1D %</th>
               <th className="px-3 py-2 text-right text-xs font-bold text-white">1M %</th>
@@ -401,47 +637,66 @@ function RankedTable({ ranked, search }: { ranked: RankedStock[]; search: string
           </thead>
           <tbody>
             {pageRows.map((entry, i) => {
-              const rank = rankBySymbol.get(entry.row.symbol) ?? 0;
-              const isOpen = expanded === entry.row.symbol;
+              const s = entry.stock;
+              const f = s.factors;
+              const isOpen = expanded === s.symbol;
+              const ranked = entry.rank != null;
+              // A score from a sliver of the weighting (HEG after its corporate
+              // action: 1D + 1W only) would read like a top score even muted.
+              const showScore = entry.coverage >= MIN_COVERAGE;
               return (
-                <React.Fragment key={entry.row.symbol}>
+                <React.Fragment key={s.symbol}>
                   <tr
-                    onClick={() => setExpanded(isOpen ? null : entry.row.symbol)}
+                    onClick={() => setExpanded(isOpen ? null : s.symbol)}
                     className={`border-b border-zinc-900 hover:bg-zinc-900/50 transition-colors cursor-pointer ${i % 2 === 0 ? '' : 'bg-zinc-950/30'}`}
                   >
-                    <td className="px-3 py-2 text-zinc-500 tabular-nums">{rank}</td>
-                    <td className="px-3 py-2 font-semibold text-zinc-100 whitespace-nowrap">{entry.row.symbol}</td>
-                    <td className="px-3 py-2 text-zinc-300 text-[11px] whitespace-nowrap">{entry.row.sector || '—'}</td>
+                    <td className="px-3 py-2 text-zinc-500 tabular-nums">{entry.rank ?? '—'}</td>
+                    <td className="px-3 py-2 font-semibold text-zinc-100 whitespace-nowrap">
+                      {s.symbol}
+                      <StockBadges entry={entry} />
+                    </td>
+                    <td className="px-3 py-2 text-zinc-300 text-[11px] whitespace-nowrap">{s.sector}</td>
                     <td className="px-3 py-2 text-right">
                       <div className="flex items-center justify-end gap-2">
-                        <span className={`font-bold tabular-nums ${entry.score >= 50 ? 'text-emerald-300' : 'text-red-400'}`}>{entry.score.toFixed(1)}</span>
+                        <span className={`font-bold tabular-nums ${!ranked ? 'text-zinc-500' : entry.score >= 50 ? 'text-emerald-300' : 'text-red-400'}`}>
+                          {showScore ? entry.score.toFixed(1) : '—'}
+                        </span>
                         <div className="w-14 h-1.5 rounded-full bg-zinc-800 overflow-hidden">
-                          <div
-                            className={`h-full ${entry.score >= 50 ? 'bg-emerald-400' : 'bg-red-400'}`}
-                            style={{ width: `${Math.max(0, Math.min(100, entry.score))}%` }}
-                          />
+                          {showScore && (
+                            <div
+                              className={`h-full ${!ranked ? 'bg-zinc-600' : entry.score >= 50 ? 'bg-emerald-400' : 'bg-red-400'}`}
+                              style={{ width: `${Math.max(0, Math.min(100, entry.score))}%` }}
+                            />
+                          )}
                         </div>
                       </div>
                     </td>
                     <td className="px-3 py-2"><HeatStrip breakdown={entry.breakdown} /></td>
-                    <td className="px-3 py-2 text-right text-white whitespace-nowrap">{entry.row.latestClose.toFixed(2)}</td>
-                    <td className={`px-3 py-2 text-right whitespace-nowrap ${pctColor(entry.row.priceChange1D)}`}>{pctFmt(entry.row.priceChange1D)}</td>
-                    <td className={`px-3 py-2 text-right whitespace-nowrap ${pctColor(entry.row.priceChange1M)}`}>{pctFmt(entry.row.priceChange1M)}</td>
-                    <td className="px-3 py-2 text-right text-zinc-200 tabular-nums">{entry.row.rsi14.toFixed(1)}</td>
-                    <td className={`px-3 py-2 text-right whitespace-nowrap ${pctColor(pctFrom(entry.row.latestClose, entry.row.ma200))}`}>{pctFmt(pctFrom(entry.row.latestClose, entry.row.ma200))}</td>
+                    <td className="px-3 py-2 text-right text-white whitespace-nowrap tabular-nums">{s.latestClose.toFixed(2)}</td>
+                    <td className={`px-3 py-2 text-right whitespace-nowrap tabular-nums ${pctColor(f['1d'])}`}>{pctFmt(f['1d'])}</td>
+                    <td className={`px-3 py-2 text-right whitespace-nowrap tabular-nums ${pctColor(f['1m'])}`}>{pctFmt(f['1m'])}</td>
+                    <td className="px-3 py-2 text-right text-zinc-200 tabular-nums">{f.rsi != null ? f.rsi.toFixed(1) : '—'}</td>
+                    <td className={`px-3 py-2 text-right whitespace-nowrap tabular-nums ${pctColor(f.ma200)}`}>{pctFmt(f.ma200)}</td>
                   </tr>
                   {isOpen && (
                     <tr className="bg-zinc-950/70 border-b border-zinc-900">
                       <td colSpan={10} className="px-4 py-3">
-                        <p className="text-[11px] text-zinc-400 mb-2">{explainRank(entry.breakdown)}</p>
+                        <p className="text-[11px] text-zinc-400 mb-1">{explainRank(entry.breakdown)}</p>
+                        <p className="text-[10px] text-zinc-500 mb-2">
+                          {entry.unrankedReason ?? `Score uses ${Math.round(entry.coverage * 100)}% of the weighting`}
+                          {' · '}{s.sessions} sessions, last {s.latestDate}
+                          {s.corporateAction && ` · history starts at the ${s.corporateAction.date} corporate action`}
+                        </p>
                         <div className="flex flex-wrap gap-x-6 gap-y-2">
                           {entry.breakdown.map(b => (
                             <div key={b.factor.id} className="flex items-center gap-2 min-w-[150px]">
                               <span className="text-[10px] text-zinc-500 w-14 shrink-0">{b.factor.short}</span>
                               <div className="w-20 h-1.5 rounded-full bg-zinc-800 overflow-hidden">
-                                <div className={`h-full ${b.pct >= 50 ? 'bg-emerald-400' : 'bg-red-400'}`} style={{ width: `${b.pct}%` }} />
+                                {b.pct != null && (
+                                  <div className={`h-full ${b.pct >= 50 ? 'bg-emerald-400' : 'bg-red-400'}`} style={{ width: `${b.pct}%` }} />
+                                )}
                               </div>
-                              <span className="text-[10px] text-zinc-400 tabular-nums w-10">{b.pct.toFixed(0)}p</span>
+                              <span className="text-[10px] text-zinc-400 tabular-nums w-12">{b.pct != null ? `${b.pct.toFixed(0)}p` : 'no data'}</span>
                               <span className="text-[10px] text-zinc-600">w={b.weight}</span>
                             </div>
                           ))}
@@ -464,7 +719,7 @@ function RankedTable({ ranked, search }: { ranked: RankedStock[]; search: string
 type Universe = 'nifty50' | 'nifty500';
 
 export default function StockRanking() {
-  const [stockData, setStockData] = useState<MoversResponse | null>(null);
+  const [data, setData] = useState<StockRankingResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [universe, setUniverse] = useState<Universe>('nifty50');
@@ -504,10 +759,10 @@ export default function StockRanking() {
     setLoading(true);
     setError(null);
     try {
-      const res = await fetch(`/api/movers?index=nifty500${bust ? '&bust=1' : ''}`);
+      const res = await fetch(`/api/stock-ranking${bust ? '?bust=1' : ''}`);
       const json = await res.json();
       if (!json.success) throw new Error(json.error || 'API error');
-      setStockData(json.data as MoversResponse);
+      setData(json.data as StockRankingResponse);
     } catch (e: unknown) {
       setError(e instanceof Error ? e.message : 'Failed to load data');
     } finally {
@@ -518,11 +773,18 @@ export default function StockRanking() {
   useEffect(() => { fetchData(); }, [fetchData]);
 
   const universeRows = useMemo(() => {
-    if (!stockData?.allMovers) return [];
-    return universe === 'nifty50' ? stockData.allMovers.filter(r => NIFTY50_SET.has(r.symbol)) : stockData.allMovers;
-  }, [stockData, universe]);
+    if (!data) return [];
+    return universe === 'nifty50' ? data.stocks.filter(s => NIFTY50_SET.has(s.symbol)) : data.stocks;
+  }, [data, universe]);
 
-  const ranked = useRanking(universeRows, weights);
+  const universeMissing = useMemo(() => {
+    if (!data) return [];
+    return universe === 'nifty50' ? data.missing.filter(s => NIFTY50_SET.has(s)) : data.missing;
+  }, [data, universe]);
+
+  const ranked = useRanking(universeRows, weights, data?.dataDate ?? '');
+  const podium = ranked.filter(r => r.rank != null).slice(0, 3);
+  const universeLabel = universe === 'nifty50' ? 'Nifty 50' : 'Nifty 500';
 
   const handleWeightChange = (id: string, v: number) => {
     setWeights(w => ({ ...w, [id]: v }));
@@ -533,12 +795,13 @@ export default function StockRanking() {
     setActivePreset(key);
   };
   const handleReset = () => {
-    setWeights(Object.fromEntries(FACTORS.map(f => [f.id, 10])));
-    setActivePreset('custom');
+    const equal = Object.fromEntries(FACTORS.map(f => [f.id, 10]));
+    setWeights(equal);
+    setActivePreset(matchPreset(equal));
   };
 
-  const n50Count = stockData?.allMovers ? stockData.allMovers.filter(r => NIFTY50_SET.has(r.symbol)).length : 0;
-  const n500Count = stockData?.allMovers?.length ?? 0;
+  const n50Count = data ? data.stocks.filter(s => NIFTY50_SET.has(s.symbol)).length : 0;
+  const n500Count = data?.stocks.length ?? 0;
 
   return (
     <div className="flex flex-col min-h-screen bg-zinc-950 text-white">
@@ -557,13 +820,14 @@ export default function StockRanking() {
           <button
             onClick={() => fetchData(true)}
             disabled={loading}
+            aria-label="Reload data from disk"
             className="p-1.5 border border-zinc-800 rounded-lg bg-zinc-900/40 text-zinc-400 hover:text-white transition-all hover:border-zinc-700 disabled:opacity-40"
             title="Reload from disk"
           >
             <RefreshCw className={`h-3.5 w-3.5 ${loading ? 'animate-spin' : ''}`} />
           </button>
           <span className="text-[10px] font-mono font-bold uppercase tracking-wider text-amber-300 px-1.5 py-0.5 rounded bg-amber-500/10 border border-amber-500/20">
-            DATA: {stockData?.dataDate ?? '—'}
+            DATA: {data?.dataDate || '—'}
           </span>
           <span className="w-px h-5 bg-zinc-800 shrink-0" />
           <NavBar />
@@ -572,7 +836,6 @@ export default function StockRanking() {
 
       <main className="flex-1 flex flex-col gap-4 px-6 py-5 max-w-[1680px] w-full mx-auto">
 
-        {/* Controls row */}
         <div className="flex items-center justify-between gap-4 flex-wrap">
           <div className="flex items-center gap-1 p-1 bg-zinc-900/60 border border-zinc-800 rounded-xl">
             {([
@@ -587,7 +850,7 @@ export default function StockRanking() {
                 }`}
               >
                 {label}
-                {count > 0 && <span className="ml-1.5 text-[10px] opacity-60">{count}</span>}
+                {count > 0 && <span className="ml-1.5 text-[10px] text-zinc-500">{count}</span>}
               </button>
             ))}
           </div>
@@ -595,6 +858,7 @@ export default function StockRanking() {
           <div className="flex items-center gap-3 ml-auto">
             <button
               onClick={() => setConsoleOpen(o => !o)}
+              aria-expanded={consoleOpen}
               className="flex items-center gap-1.5 px-2.5 py-1.5 text-[11px] font-semibold rounded-lg border border-zinc-800 bg-zinc-900/40 text-zinc-300 hover:text-white hover:border-zinc-700 transition-all"
             >
               Weighting console
@@ -606,6 +870,7 @@ export default function StockRanking() {
                 value={search}
                 onChange={e => setSearch(e.target.value)}
                 placeholder="Filter symbol or sector…"
+                aria-label="Filter by symbol or sector"
                 className="pl-8 pr-3 py-1.5 text-xs bg-zinc-900 border border-zinc-800 rounded-lg text-zinc-200 placeholder-zinc-600 focus:outline-none focus:border-zinc-600 w-52"
               />
             </div>
@@ -622,15 +887,15 @@ export default function StockRanking() {
           />
         )}
 
-        {loading ? (
+        {loading && !data ? (
           <div className="flex items-center justify-center py-24 text-zinc-300 gap-2">
-            <Loader2 className="h-5 w-5 animate-spin" />
-            <span className="text-sm">Ranking {universe === 'nifty50' ? 'Nifty 50' : 'Nifty 500'} stocks…</span>
+            <Loader2 className="h-5 w-5 animate-spin text-emerald-400" />
+            <span className="text-sm">Ranking {universeLabel} stocks…</span>
           </div>
         ) : error ? (
           <div className="flex items-center justify-center py-24 text-red-400 gap-2">
             <AlertCircle className="h-5 w-5" />
-            <span className="text-sm">{error}</span>
+            <span className="text-sm">Couldn&apos;t load ranking data: {error}. Use the reload button to retry.</span>
           </div>
         ) : ranked.length === 0 ? (
           <div className="flex items-center justify-center py-24 text-zinc-500 gap-2 text-sm">
@@ -638,12 +903,13 @@ export default function StockRanking() {
           </div>
         ) : (
           <>
-            {/* Podium — top 3 */}
+            <DataChecks stocks={universeRows} missing={universeMissing} />
+
             <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-              {ranked.slice(0, 3).map((entry, i) => (
-                <PodiumCard key={entry.row.symbol} rank={i + 1} entry={entry} />
-              ))}
+              {podium.map(entry => <PodiumCard key={entry.stock.symbol} entry={entry} />)}
             </div>
+
+            <SectorConcentration ranked={ranked} universe={universeRows} universeLabel={universeLabel} />
 
             <RankedTable ranked={ranked} search={search} />
           </>
