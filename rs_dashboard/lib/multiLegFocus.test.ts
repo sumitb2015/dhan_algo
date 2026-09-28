@@ -93,6 +93,46 @@ test('computeCalendarPayoffCurve: far leg carries positive time value even exact
   assert.ok(atmPoint.y > -150 * 65);
 });
 
+test('computeCalendarPayoffCurve: a balanced calendar (equal qty both legs) is defined-risk, not unlimited', () => {
+  const legs = [
+    { side: 'S' as const, option: 'CE' as const, strike: 24000, qty: 65, entryPrice: 100, iv: 0.13, expiry: '2026-09-25' },
+    { side: 'B' as const, option: 'CE' as const, strike: 24000, qty: 65, entryPrice: 150, iv: 0.13, expiry: '2026-10-30' },
+  ];
+  const { maxLossUnlimited, maxProfitUnlimited } = computeCalendarPayoffCurve(legs, 24000, '2026-09-25', '2026-10-30', 50);
+  assert.strictEqual(maxLossUnlimited, false);
+  assert.strictEqual(maxProfitUnlimited, false);
+});
+
+test('computeCalendarPayoffCurve: selling more near calls than are bought on the far leg is net short calls → unlimited loss', () => {
+  const legs = [
+    { side: 'S' as const, option: 'CE' as const, strike: 24000, qty: 130, entryPrice: 100, iv: 0.13, expiry: '2026-09-25' },
+    { side: 'B' as const, option: 'CE' as const, strike: 24000, qty: 65, entryPrice: 150, iv: 0.13, expiry: '2026-10-30' },
+  ];
+  const { maxLossUnlimited, maxProfitUnlimited } = computeCalendarPayoffCurve(legs, 24000, '2026-09-25', '2026-10-30', 50);
+  assert.strictEqual(maxLossUnlimited, true);
+  assert.strictEqual(maxProfitUnlimited, false);
+});
+
+test('computeCalendarPayoffCurve: buying more far calls than are sold on the near leg is net long calls → unlimited profit', () => {
+  const legs = [
+    { side: 'S' as const, option: 'CE' as const, strike: 24000, qty: 65, entryPrice: 100, iv: 0.13, expiry: '2026-09-25' },
+    { side: 'B' as const, option: 'CE' as const, strike: 24000, qty: 130, entryPrice: 150, iv: 0.13, expiry: '2026-10-30' },
+  ];
+  const { maxLossUnlimited, maxProfitUnlimited } = computeCalendarPayoffCurve(legs, 24000, '2026-09-25', '2026-10-30', 50);
+  assert.strictEqual(maxLossUnlimited, false);
+  assert.strictEqual(maxProfitUnlimited, true);
+});
+
+test('computeCalendarPayoffCurve: net long puts is capped downside profit, not unlimited (spot cannot fall below 0)', () => {
+  const legs = [
+    { side: 'S' as const, option: 'PE' as const, strike: 24000, qty: 65, entryPrice: 100, iv: 0.13, expiry: '2026-09-25' },
+    { side: 'B' as const, option: 'PE' as const, strike: 24000, qty: 130, entryPrice: 150, iv: 0.13, expiry: '2026-10-30' },
+  ];
+  const { maxLossUnlimited, maxProfitUnlimited } = computeCalendarPayoffCurve(legs, 24000, '2026-09-25', '2026-10-30', 50);
+  assert.strictEqual(maxLossUnlimited, false);
+  assert.strictEqual(maxProfitUnlimited, false);
+});
+
 test('computeCalendarPayoffCurve: breakevens are found via linear interpolation, not snapped to sample points', () => {
   const legs = [
     { side: 'S' as const, option: 'CE' as const, strike: 24000, qty: 65, entryPrice: 120, iv: 0.13, expiry: '2026-09-25' },

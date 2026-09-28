@@ -692,6 +692,11 @@ export interface CalendarPayoffResult {
   /** Calendar days between the two expiries — the far leg's remaining time
    *  value at the point this curve is drawn (the front leg's expiry date). */
   daysBetweenExpiries: number;
+  /** Net short calls (across both expiries) → loss grows without bound as spot rises. */
+  maxLossUnlimited: boolean;
+  /** Net long calls (across both expiries) → profit grows without bound as spot rises.
+   *  Net long puts is deliberately excluded — downside profit is capped at spot=0. */
+  maxProfitUnlimited: boolean;
 }
 
 /**
@@ -774,12 +779,26 @@ export function computeCalendarPayoffCurve(
     }
   }
 
+  // True unlimited-risk contract (dhan-payoff-diagrams skill §4): net signed
+  // quantity per option type across BOTH expiries, never inferred from the
+  // sampled curve's tail slope — the far leg's Black-76/Scholes price still
+  // trends linearly with spot far OTM/ITM, so it participates in the same
+  // net-short-call / net-long-call tail as the front leg.
+  let netCE = 0;
+  let netPE = 0;
+  for (const leg of legs) {
+    const signed = leg.side === 'B' ? leg.qty : -leg.qty;
+    if (leg.option === 'CE') netCE += signed; else netPE += signed;
+  }
+
   return {
     points,
     minPnl: minPnl === Infinity ? 0 : minPnl,
     maxPnl: maxPnl === -Infinity ? 0 : maxPnl,
     breakevens: Array.from(new Set(rawBreakevens)).sort((a, b) => a - b),
     daysBetweenExpiries,
+    maxLossUnlimited: netCE < 0 || netPE < 0,
+    maxProfitUnlimited: netCE > 0,
   };
 }
 

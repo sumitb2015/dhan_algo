@@ -1617,7 +1617,9 @@ export default function MultiLegStrategyRow({
                         ivShift={simIvShift}
                         onIvShiftChange={setSimIvShift}
                         maxProfit={calendarCurve.maxPnl}
-                        maxProfitUnlimited={false}
+                        maxProfitUnlimited={calendarCurve.maxProfitUnlimited}
+                        maxLoss={calendarCurve.minPnl}
+                        maxLossUnlimited={calendarCurve.maxLossUnlimited}
                         rom={calendarCurve && basketMargin && basketMargin > 0 ? (calendarCurve.maxPnl / basketMargin) * 100 : null}
                         netGreeks={greeks?.result?.net ?? netGreeks}
                         strikes={strategyStrikes}
