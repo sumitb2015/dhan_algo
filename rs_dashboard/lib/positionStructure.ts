@@ -56,14 +56,14 @@ export function classifyStructure(legs: GroupLeg[]): { structure: string; riskTy
       : { structure: 'Short Strangle', riskType: 'undefined' };
   }
   if (shortCE.length === 1 && longCE.length === 1 && shortPE.length === 0 && longPE.length === 0) {
-    return longCE[0].strike > shortCE[0].strike
-      ? { structure: 'Bear Call Spread', riskType: 'defined' }
-      : { structure: 'Custom Call Combo', riskType: 'defined' };
+    if (longCE[0].strike > shortCE[0].strike) return { structure: 'Bear Call Spread', riskType: 'defined' };
+    if (longCE[0].strike < shortCE[0].strike) return { structure: 'Bull Call Spread', riskType: 'defined' };
+    return { structure: 'Custom Call Combo', riskType: 'defined' };
   }
   if (shortPE.length === 1 && longPE.length === 1 && shortCE.length === 0 && longCE.length === 0) {
-    return longPE[0].strike < shortPE[0].strike
-      ? { structure: 'Bull Put Spread', riskType: 'defined' }
-      : { structure: 'Custom Put Combo', riskType: 'defined' };
+    if (longPE[0].strike < shortPE[0].strike) return { structure: 'Bull Put Spread', riskType: 'defined' };
+    if (longPE[0].strike > shortPE[0].strike) return { structure: 'Bear Put Spread', riskType: 'defined' };
+    return { structure: 'Custom Put Combo', riskType: 'defined' };
   }
   // Single-type Butterfly: one short body strike flanked by two long wing
   // strikes of the same option type, symmetric (equal distance each side)

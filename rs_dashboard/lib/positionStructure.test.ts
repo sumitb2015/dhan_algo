@@ -76,3 +76,12 @@ test('aggregateLegs: flipping through zero adopts the new fill\'s price', () => 
   assert.strictEqual(g.qty, 30);
   assert.strictEqual(g.avgPrice, 70);
 });
+
+test('classifyStructure names debit vertical spreads, not just credit ones', () => {
+  const g = (strike: number, type: 'CE' | 'PE', side: 'BUY' | 'SELL') =>
+    ({ strike, type, side, qty: 1, avgPrice: 0, securityId: null, symbol: null });
+  assert.strictEqual(classifyStructure([g(23000, 'CE', 'BUY'), g(24000, 'CE', 'SELL')]).structure, 'Bull Call Spread');
+  assert.strictEqual(classifyStructure([g(24000, 'CE', 'BUY'), g(23000, 'CE', 'SELL')]).structure, 'Bear Call Spread');
+  assert.strictEqual(classifyStructure([g(23000, 'PE', 'BUY'), g(22000, 'PE', 'SELL')]).structure, 'Bear Put Spread');
+  assert.strictEqual(classifyStructure([g(22000, 'PE', 'BUY'), g(23000, 'PE', 'SELL')]).structure, 'Bull Put Spread');
+});

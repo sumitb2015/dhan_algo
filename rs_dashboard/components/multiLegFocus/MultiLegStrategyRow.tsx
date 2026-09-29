@@ -377,7 +377,8 @@ export default function MultiLegStrategyRow({
     [basket.legs, hasMixedExpiry],
   );
   const strategyLabel = derivedStructure?.structure
-    ?? (basket.presetKey ? basket.presetKey.replace(/-/g, ' ') : (basket.name ?? `Strategy #${index + 1}`));
+    ?? basket.name
+    ?? (basket.presetKey ? basket.presetKey.replace(/-/g, ' ') : `Strategy #${index + 1}`);
 
   // The Calendar/Diagonal spread's actual payoff shape: strategy value AS OF
   // THE NEAR (front) LEG'S EXPIRY, where the front leg is pure intrinsic and
