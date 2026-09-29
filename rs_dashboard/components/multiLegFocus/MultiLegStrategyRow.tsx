@@ -12,7 +12,7 @@ import LegColumnsMenu from './LegColumnsMenu';
 import { DEFAULT_LEG_COLUMNS, type LegColumns } from '@/lib/legColumns';
 import {
   computeLegTrailingSL, computeStrategyMetrics, checkStrategyRisk, computeBasketStatus, computeCalendarPayoffCurve,
-  classifyBasketStructure, legPnl, legAvgPrice, legPnlPct, legQtyUnits,
+  classifyBasketStructure, legCountsToday, legPnl, legAvgPrice, legPnlPct, legQtyUnits,
   findSiblingLegCollisions, type SiblingLegCollision, scaleBasketMultiplier,
   type MultiLegBasket, type MultiLegLeg, type StrategyRiskConfig, type LegQtyWarning,
 } from '@/lib/multiLegFocus';
@@ -99,6 +99,8 @@ export interface MultiLegStrategyRowProps {
   onClaimBrokerQty?: (legId: string) => Promise<void>;
   /** Record quantity closed outside this tool on this leg (no order). */
   onReduceOutsideQty?: (legId: string) => Promise<void>;
+  /** Page clock (epoch ms, ticks each minute) that splits Today from earlier days. */
+  pnlNow: number;
   onAddNewLeg?: (params: {
     side: 'B' | 'S';
     option: 'CE' | 'PE';
@@ -152,6 +154,7 @@ export default function MultiLegStrategyRow({
   onAddLots,
   onClaimBrokerQty,
   onReduceOutsideQty,
+  pnlNow,
   onAddNewLeg,
   onScaleStrategy,
   scaling = false,
@@ -293,6 +296,11 @@ export default function MultiLegStrategyRow({
     [basket.legs, ltpFor, crudeMult],
   );
   const totalPnl = stratMetrics.totalPnlRupees;
+  // Broker-MTM scope (live legs + legs closed today) — same split as the page header.
+  const todayPnl = useMemo(
+    () => computeStrategyMetrics(basket.legs.filter(l => legCountsToday(l, pnlNow)), ltpFor, crudeMult).totalPnlRupees,
+    [basket.legs, ltpFor, crudeMult, pnlNow],
+  );
 
   const defaultLotSize = useMemo(() => {
     if (lotSize && lotSize > 0) return lotSize;
@@ -1025,12 +1033,21 @@ export default function MultiLegStrategyRow({
             </div>
           )}
 
-          {/* Strategy Total P&L */}
+          {/* Strategy P&L: today (broker MTM scope), then lifetime */}
+          <span
+            className={`h-7 flex items-center gap-1 px-2.5 rounded-lg text-xs font-bold font-mono tabular-nums border ${
+              todayPnl >= 0 ? 'text-emerald-400 border-emerald-500/30 bg-emerald-500/5' : 'text-rose-400 border-rose-500/30 bg-rose-500/5'
+            }`}
+            title="Today: open legs (MTM from entry) plus legs closed today, the broker's positions P&L scope"
+          >
+            <span className="text-[10px] font-bold text-zinc-400">Today</span>
+            {todayPnl >= 0 ? '+' : ''}{fmtMoney(todayPnl)}
+          </span>
           <span
             className={`h-7 flex items-center px-2.5 rounded-lg text-xs font-bold font-mono tabular-nums border ${
               totalPnl >= 0 ? 'text-emerald-400 border-emerald-500/30 bg-emerald-500/5' : 'text-rose-400 border-rose-500/30 bg-rose-500/5'
             }`}
-            title={`Strategy P&L: ${totalPnl >= 0 ? '+' : ''}${fmtMoney(totalPnl)}${
+            title={`Strategy P&L since it started (incl. legs closed on earlier days): ${totalPnl >= 0 ? '+' : ''}${fmtMoney(totalPnl)}${
               stratMetrics.combinedEntryPts > 0 ? ` (${stratMetrics.pnlPct >= 0 ? '+' : ''}${stratMetrics.pnlPct.toFixed(1)}% of premium)` : ''
             }${pnlPctOfMargin != null ? ` · ${pnlPctOfMargin >= 0 ? '+' : ''}${pnlPctOfMargin.toFixed(2)}% of margin` : ''}`}
           >

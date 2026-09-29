@@ -980,10 +980,16 @@ export default function MultiLegFocus({
   // ── Global P&L Across All Baskets ─────────────────────────────────
   // Lifetime (every leg since each strategy started) and today — the latter is
   // the broker positions MTM's scope: live legs in full plus legs closed today.
+  // Ticks each minute so Today rolls over at IST midnight on a page left open.
+  const [pnlNow, setPnlNow] = useState(() => Date.now());
+  useEffect(() => {
+    const t = setInterval(() => setPnlNow(Date.now()), 60_000);
+    return () => clearInterval(t);
+  }, []);
   const { overallTotalPnl, overallTodayPnl } = useMemo(() => {
     let total = 0;
     let today = 0;
-    const now = Date.now();
+    const now = pnlNow;
     for (const b of baskets) {
       const crudeMult = b.broker === 'dhan'
         ? (b.underlying === 'CRUDEOIL' ? 100 : b.underlying === 'CRUDEOILM' ? 10 : 1)
@@ -992,7 +998,7 @@ export default function MultiLegFocus({
       today += computeStrategyMetrics(b.legs.filter(l => legCountsToday(l, now)), l => ltpFor(b, l), crudeMult).totalPnlRupees;
     }
     return { overallTotalPnl: total, overallTodayPnl: today };
-  }, [baskets, ltpFor]);
+  }, [baskets, ltpFor, pnlNow]);
 
   const activeStrategiesCount = useMemo(() => {
     return baskets.filter(b => b.legs.some(l => l.status === 'OPEN')).length;
@@ -3176,6 +3182,7 @@ export default function MultiLegFocus({
                 onAddLots={params => addLotsToLeg(basket.id, params)}
                 onClaimBrokerQty={legId => claimBrokerQty(basket.id, legId)}
                 onReduceOutsideQty={legId => reduceOutsideQty(basket.id, legId)}
+                pnlNow={pnlNow}
                 onAddNewLeg={params => addNewLegToBasket(basket.id, params)}
                 onScaleStrategy={multiplierDelta => scaleStrategy(basket.id, multiplierDelta)}
                 scaling={!!scalingMap[basket.id]}
