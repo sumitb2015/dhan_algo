@@ -95,12 +95,15 @@ function StatTile({
   label,
   value,
   sub,
+  labelTag,
   tone = 'neutral',
   title,
 }: {
   label: string;
   value: string;
   sub?: React.ReactNode;
+  // Rendered inline beside the label, so unlike `sub` it adds no tile height.
+  labelTag?: React.ReactNode;
   tone?: 'neutral' | 'up' | 'down' | 'accent';
   title?: string;
 }) {
@@ -116,10 +119,26 @@ function StatTile({
       className="flex min-w-[128px] flex-col justify-between gap-1 rounded-lg border border-zinc-800 bg-zinc-950 px-3 py-2 transition-colors hover:border-zinc-700"
       title={title}
     >
-      <span className="text-[9px] font-bold uppercase tracking-[0.15em] text-zinc-500 whitespace-nowrap">{label}</span>
+      <span className="flex items-center gap-1.5 text-[9px] font-bold uppercase tracking-[0.15em] text-zinc-500 whitespace-nowrap">
+        {label}
+        {labelTag}
+      </span>
       <span className={`font-mono text-lg font-bold leading-none tabular-nums ${valueClass}`}>{value}</span>
       {sub ? <span className="font-mono text-[10px] text-zinc-500 truncate">{sub}</span> : null}
     </div>
+  );
+}
+
+// Direction tag for the signed CE/PE Val tiles. The value is shorts minus longs, so
+// positive means net short (a liability held), not a gain — which is why those
+// tiles stay neutral-coloured and carry this tag instead of a green/red tone.
+function NetSideTag({ value }: { value: number }) {
+  if (Math.abs(value) <= 0.01) return null;
+  const short = value > 0;
+  return (
+    <span className="inline-flex items-center rounded border border-zinc-700 bg-zinc-900 px-1 text-[8px] font-bold leading-[11px] tracking-wider text-zinc-300">
+      {short ? 'NET SHORT' : 'NET LONG'}
+    </span>
   );
 }
 
@@ -714,7 +733,9 @@ export default function AdvancedScalper() {
       // Both sums are SIGNED (a net-long side goes negative), so the ratio is only
       // meaningful when the denominator is a real CE exposure — null renders a dash
       // instead of Infinity/NaN when the CE side is flat or fully hedged out.
-      peCeRatio: Math.abs(ceSum) > 0.01 ? peSum / ceSum : null,
+      // Opposite signs (one side net short, the other net long) also give null: a
+      // negative ratio has no "balanced vs lopsided" reading.
+      peCeRatio: Math.abs(ceSum) > 0.01 && peSum * ceSum >= 0 ?peSum / ceSum : null,
     };
   }, [enrichedPositions, optionSideOf]);
 
@@ -2784,16 +2805,16 @@ export default function AdvancedScalper() {
             <StatTile
               label="CE VAL"
               value={`₹${totalCEVal.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`}
-              tone="up"
-              title="Net Call Value = Sum(short CE Qty × Price) − Sum(long CE Qty × Price)"
+              title="Net Call Value = Sum(short CE Qty × Price) − Sum(long CE Qty × Price). Positive = net short calls, negative = net long calls."
+              labelTag={<NetSideTag value={totalCEVal} />}
             />
 
             {/* Total PE Value */}
             <StatTile
               label="PE VAL"
               value={`₹${totalPEVal.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`}
-              tone="down"
-              title="Net Put Value = Sum(short PE Qty × Price) − Sum(long PE Qty × Price)"
+              title="Net Put Value = Sum(short PE Qty × Price) − Sum(long PE Qty × Price). Positive = net short puts, negative = net long puts."
+              labelTag={<NetSideTag value={totalPEVal} />}
             />
 
             {/* PE / CE value ratio — scale-free skew between the two sides */}
@@ -2801,7 +2822,7 @@ export default function AdvancedScalper() {
               label="PE / CE"
               value={peCeRatio == null ? '—' : `${peCeRatio.toFixed(2)}x`}
               tone="accent"
-              title="Ratio = Total PE Value ÷ Total CE Value. 1.00 = balanced, above 1 = PE-heavy, below 1 = CE-heavy. Shows — when the CE side is flat."
+              title="Ratio = Total PE Value ÷ Total CE Value. 1.00 = balanced, above 1 = PE-heavy, below 1 = CE-heavy. Shows — when the CE side is flat or the two sides point opposite ways (one net short, one net long)."
             />
 
             {/* Difference (CE - PE) */}
