@@ -50,12 +50,19 @@ export interface SnapshotRow {
   iv: number | null;
   ts: number;
   d: Record<string, WindowDiff | null>;
+  /** Quote batch failed this scan: last known values, no diffs. */
+  stale?: boolean;
 }
 
+/** Changes over a window, measured on the same contracts now and then (so an ATM roll or
+ *  the ATM±N band sliding by a strike is not a change). */
 export interface GroupWindow {
   pcr: number | null;
   ceWallFrom: number | null;
   peWallFrom: number | null;
+  /** Wall over those same contracts now (absent in snapshots from older collectors). */
+  ceWallNow?: number | null;
+  peWallNow?: number | null;
   str: number | null;
   tilt: number | null;
 }
@@ -320,11 +327,11 @@ export const PRESETS: PresetDef[] = [
   { id: 'atm_otm_momentum', group: 'activity', label: 'ATM/OTM momentum', tag: 'MO',
     desc: `ATM to OTM3 premium up ≥ ${T.momentumPct}% on ≥ ${T.minWinVol} lots.` },
   { id: 'gamma_burst', group: 'activity', label: 'Expiry-day gamma burst', tag: 'GB',
-    desc: `Expires today, within 2 strikes of ATM, premium up ≥ ${T.gammaPct}%.` },
+    desc: `Expires today, within 2 strikes of ATM, premium up ≥ ${T.gammaPct}% on ≥ ${T.minWinVol} lots.` },
   { id: 'big_ticket', group: 'activity', label: 'Big-ticket print', tag: 'BT',
     desc: `Premium turnover in the window ≥ ₹${T.bigTicketLakh} lakh.` },
   { id: 'iv_spike_crush', group: 'volatility', label: 'IV spike / crush', tag: 'IV',
-    desc: `IV moved ≥ ${T.ivPts} vol points either way.` },
+    desc: `IV moved ≥ ${T.ivPts} vol points either way on ≥ ${T.minWinVol} lots — IV is solved from the last trade, so an untraded contract's IV drifts with spot.` },
   { id: 'pcr_shift', group: 'underlying', label: 'PCR shift', tag: 'PCR',
     desc: `Put-call OI ratio (ATM±band) moved ≥ ${T.pcrShift}. Flags the ATM CE and PE.` },
   { id: 'atm_tilt', group: 'underlying', label: 'ATM call-vs-put tilt', tag: 'TL',
@@ -397,15 +404,17 @@ const ROW_TESTS: Partial<Record<PresetId, RowTest>> = {
   },
   gamma_burst: (r, w, ctx) => {
     const p = diffAt(r, w, D_PRICE_PCT);
-    return r.e === ctx.today && Math.abs(r.off) <= 2 && p != null && p >= T.gammaPct;
+    return r.e === ctx.today && Math.abs(r.off) <= 2 && liquid(r, w) && p != null && p >= T.gammaPct;
   },
   big_ticket: (r, w) => {
     const t = windowTurnoverLakh(r, w);
     return t != null && t >= T.bigTicketLakh;
   },
   iv_spike_crush: (r, w) => {
+    // IV comes from the last traded price: with no trades in the window a stale LTP against
+    // a moving spot reads as an IV move (a 1-lot SILVER print fired this live, 2026-09-29).
     const iv = diffAt(r, w, D_IV_CHG);
-    return iv != null && Math.abs(iv) >= T.ivPts;
+    return liquid(r, w) && iv != null && Math.abs(iv) >= T.ivPts;
   },
 };
 
@@ -437,12 +446,14 @@ function groupHits(
       const lead = d.tilt > 0 ? atmCe : atmPe;
       if (lead) out.get('atm_tilt')!.add(lead.id);
     }
-    if (g.ceWall != null && d.ceWallFrom != null && g.ceWall !== d.ceWallFrom) {
-      const r = byKey.get(key(g.u, g.e, g.ceWall, 'CE'));
+    const ceNow = d.ceWallNow !== undefined ? d.ceWallNow : g.ceWall;
+    const peNow = d.peWallNow !== undefined ? d.peWallNow : g.peWall;
+    if (ceNow != null && d.ceWallFrom != null && ceNow !== d.ceWallFrom) {
+      const r = byKey.get(key(g.u, g.e, ceNow, 'CE'));
       if (r) out.get('oi_wall_shift')!.add(r.id);
     }
-    if (g.peWall != null && d.peWallFrom != null && g.peWall !== d.peWallFrom) {
-      const r = byKey.get(key(g.u, g.e, g.peWall, 'PE'));
+    if (peNow != null && d.peWallFrom != null && peNow !== d.peWallFrom) {
+      const r = byKey.get(key(g.u, g.e, peNow, 'PE'));
       if (r) out.get('oi_wall_shift')!.add(r.id);
     }
   }

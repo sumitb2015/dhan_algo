@@ -104,3 +104,32 @@ test('roundToTick', () => {
   assert.equal(roundToTick(18.38, 0.05), 18.4);
   assert.equal(roundToTick(5501.3, 1), 5501);
 });
+
+test('presets: IV spike and gamma burst need window volume (stale-LTP IV is noise)', () => {
+  const rows = [
+    row({ id: 'I:1', d5: [7, 0, 1, 50, 3.7, 0, 800] }),                   // 1-lot print → no IV hit
+    row({ id: 'I:2', d5: [1, 0, 20, 2, 3.7, 0, 0.2] }),                   // traded → IV hit
+    row({ id: 'G:1', e: '2026-09-29', d5: [40, 0, 0, null, 0, 0, 2] }),   // expiry day, no trades → no gamma
+    row({ id: 'G:2', e: '2026-09-29', d5: [40, 0, 30, 3, 0, 0, 2] }),     // expiry day, traded → gamma
+  ];
+  const { hits } = evaluatePresets(rows, [], und, 5, '2026-09-29');
+  assert.equal(hits.get('I:1')?.includes('iv_spike_crush') ?? false, false);
+  assert.deepEqual(hits.get('I:2'), ['iv_spike_crush']);
+  assert.equal(hits.get('G:1')?.includes('gamma_burst') ?? false, false);
+  assert.ok(hits.get('G:2')?.includes('gamma_burst'));
+});
+
+test('presets: wall shift uses the same-contract now-wall, not the band-wide wall', () => {
+  const rows = [
+    row({ id: 'W:1', u: 'NIFTY', e: '2026-09-30', s: 25200, t: 'CE', off: 4 }),
+    row({ id: 'W:2', u: 'NIFTY', e: '2026-09-30', s: 25500, t: 'CE', off: 10 }),
+  ];
+  // Band-wide wall is 25500 (a strike that just entered the band); over contracts with a
+  // baseline the wall is still 25200 → no shift.
+  const g = (ceWallNow: number): SnapshotGroup[] => [{
+    u: 'NIFTY', e: '2026-09-30', x: 'NSE', atm: 25000, pcr: 0.9, ceWall: 25500, peWall: null, straddle: 200,
+    d: { '5': { pcr: 0, ceWallFrom: 25200, peWallFrom: null, ceWallNow, peWallNow: null, str: 0, tilt: 0 } },
+  }];
+  assert.equal(evaluatePresets(rows, g(25200), {}, 5, '2026-09-29').hits.get('W:2'), undefined);
+  assert.deepEqual(evaluatePresets(rows, g(25500), {}, 5, '2026-09-29').hits.get('W:2'), ['oi_wall_shift']);
+});

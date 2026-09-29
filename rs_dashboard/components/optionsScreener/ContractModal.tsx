@@ -66,6 +66,9 @@ export default function ContractModal({ row, onClose }: Props) {
   const [placing, setPlacing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [placed, setPlaced] = useState<string | null>(null);
+  // Set when the server could not confirm whether Dhan booked the order. The ticket stays
+  // locked for this contract so a retry can't double-place; reopening it is a deliberate act.
+  const [unknownOutcome, setUnknownOutcome] = useState(false);
 
   // Any edit to the ticket voids a pending confirmation.
   const voiding = <V,>(set: (v: V) => void) => (v: V) => { setConfirming(false); set(v); };
@@ -87,6 +90,7 @@ export default function ContractModal({ row, onClose }: Props) {
   const label = `${contractLabel(row)} ${row.t}`;
 
   const place = async () => {
+    if (unknownOutcome) return;
     if (!confirming) { setConfirming(true); return; }
     setPlacing(true);
     setError(null);
@@ -97,6 +101,7 @@ export default function ContractModal({ row, onClose }: Props) {
         body: JSON.stringify({ id: row.id, side, lots, orderType: ordType, price: ordType === 'LIMIT' ? price : undefined, product }),
       });
       const json = await res.json();
+      if (json.unknown) setUnknownOutcome(true);
       if (!json.success) throw new Error(json.error || 'Order failed');
       setPlaced(`${json.summary} · order ${json.orderId}`);
       toast.success('Order placed', { description: `${json.summary} · #${json.orderId}` });
@@ -290,7 +295,8 @@ export default function ContractModal({ row, onClose }: Props) {
             <button
               type="button"
               onClick={place}
-              disabled={placing}
+              disabled={placing || unknownOutcome}
+              title={unknownOutcome ? 'Order status unknown — check the Dhan order book, then close and reopen this ticket to place again' : undefined}
               className={`px-4 py-2 rounded-md text-xs font-bold text-oncolor transition disabled:opacity-60 ${FOCUS_RING} ${
                 side === 'BUY' ? 'bg-emerald-600 hover:bg-emerald-500' : 'bg-red-600 hover:bg-red-500'
               } ${confirming ? 'ring-2 ring-amber-400' : ''}`}

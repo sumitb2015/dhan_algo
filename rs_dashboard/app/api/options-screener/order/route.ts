@@ -17,6 +17,34 @@ import { roundToTick } from '@/lib/optionsScreener';
 const DHAN_ORDERS = 'https://api.dhan.co/v2/orders';
 const MAX_LOTS_PER_ORDER = 25;
 const MAX_QTY_PER_ORDER = 30_000;
+const RECONCILE_ATTEMPTS = 4;
+const RECONCILE_GAP_MS = 1_500;
+
+/**
+ * The place call timed out, errored, or came back as a 5xx: we don't know whether Dhan
+ * booked it. Look it up by our correlationId instead of reporting a failure, since a
+ * "failed" order that actually went through invites a duplicate on retry. Same approach
+ * as app/api/scalper/fast-order.
+ */
+async function reconcileByCorrelationId(correlationId: string, clientId: string, token: string) {
+  for (let attempt = 0; attempt < RECONCILE_ATTEMPTS; attempt++) {
+    if (attempt > 0) await new Promise((r) => setTimeout(r, RECONCILE_GAP_MS));
+    try {
+      const res = await fetch(`${DHAN_ORDERS}/external/${correlationId}`, {
+        headers: { 'access-token': token, 'client-id': clientId, Accept: 'application/json' },
+        signal: AbortSignal.timeout(5_000),
+      });
+      if (!res.ok) continue;
+      const json = (await res.json()) as Record<string, unknown> | Record<string, unknown>[];
+      const r = (Array.isArray(json) ? json[0] : json) as Record<string, unknown> | undefined;
+      // Only adopt a row that echoes our own correlationId.
+      if (r && String(r.correlationId ?? '') === correlationId && r.orderId) {
+        return { orderId: String(r.orderId), orderStatus: r.orderStatus ?? null };
+      }
+    } catch { /* Dhan may still be catching up */ }
+  }
+  return null;
+}
 
 interface OrderBody {
   id?: string;
@@ -94,8 +122,13 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ success: false, error: `Dhan token unavailable: ${String(e)}` }, { status: 500 });
   }
 
+  const correlationId = `os${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
+  const label = `${side} ${lots} lot${lots === 1 ? '' : 's'} ${row.u} ${row.e} ${row.s} ${row.t}`;
+  const summary = `${label} · qty ${qty} · ${product} · ${orderType}${orderType === 'LIMIT' ? ` @ ${price}` : ''}`;
+
   const payload = {
     dhanClientId: creds.clientId,
+    correlationId,
     transactionType: side,
     exchangeSegment: row.xs,
     productType: product,
@@ -109,8 +142,25 @@ export async function POST(req: NextRequest) {
     afterMarketOrder: false,
   };
 
+  const unknownOutcome = async (why: string) => {
+    const found = await reconcileByCorrelationId(correlationId, creds.clientId, creds.token);
+    invalidateBrokerCache('dhan');
+    if (found) {
+      return NextResponse.json({ success: true, orderId: found.orderId, orderStatus: found.orderStatus, summary });
+    }
+    return NextResponse.json(
+      {
+        success: false,
+        unknown: true,
+        error: `Order status unknown (${why}). Dhan did not confirm ${label} — check the Dhan order book before placing it again.`,
+      },
+      { status: 504 },
+    );
+  };
+
+  let res: Response;
   try {
-    const res = await fetch(DHAN_ORDERS, {
+    res = await fetch(DHAN_ORDERS, {
       method: 'POST',
       headers: {
         'access-token': creds.token,
@@ -121,21 +171,18 @@ export async function POST(req: NextRequest) {
       body: JSON.stringify(payload),
       signal: AbortSignal.timeout(15_000),
     });
-    const json = (await res.json().catch(() => ({}))) as Record<string, unknown>;
-    const orderId = String(json.orderId ?? (json.data as Record<string, unknown> | undefined)?.orderId ?? '');
-    const label = `${side} ${lots} lot${lots === 1 ? '' : 's'} ${row.u} ${row.e} ${row.s} ${row.t}`;
-    if (!orderId) {
-      const err = String(json.errorMessage ?? json.remarks ?? json.message ?? JSON.stringify(json));
-      return NextResponse.json({ success: false, error: `Dhan rejected ${label}: ${err}` }, { status: 502 });
-    }
-    invalidateBrokerCache('dhan');
-    return NextResponse.json({
-      success: true,
-      orderId,
-      orderStatus: json.orderStatus ?? null,
-      summary: `${label} · qty ${qty} · ${product} · ${orderType}${orderType === 'LIMIT' ? ` @ ${price}` : ''}`,
-    });
   } catch (e) {
-    return NextResponse.json({ success: false, error: `Order request failed: ${String(e)}` }, { status: 502 });
+    return unknownOutcome(String(e));
   }
+  // A gateway error can arrive after the order was booked; a 4xx/429 is a pre-booking rejection.
+  if (res.status >= 500) return unknownOutcome(`HTTP ${res.status}`);
+
+  const json = (await res.json().catch(() => ({}))) as Record<string, unknown>;
+  const orderId = String(json.orderId ?? (json.data as Record<string, unknown> | undefined)?.orderId ?? '');
+  if (!orderId) {
+    const err = String(json.errorMessage ?? json.remarks ?? json.message ?? JSON.stringify(json));
+    return NextResponse.json({ success: false, error: `Dhan rejected ${label}: ${err}` }, { status: 502 });
+  }
+  invalidateBrokerCache('dhan');
+  return NextResponse.json({ success: true, orderId, orderStatus: json.orderStatus ?? null, summary });
 }

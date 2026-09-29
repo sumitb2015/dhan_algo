@@ -223,10 +223,14 @@ def implied_vols(price, S, K, T, is_call, black76) -> np.ndarray:
 # ---------------------------------------------------------------------------
 
 def build_universe(df, today: date, n_expiries: int):
-    """Return (underlyings, strikes_by_group).
+    """Return (underlyings, strikes_by_group, group_spot).
 
-    underlyings: sym -> {kind, exch, spot_seg, spot_id}
+    underlyings: sym -> {kind, exch, spot_seg, spot_id}   (spot_id = display/"underlying %" spot)
     strikes_by_group: (sym, expiry) -> sorted list of dicts {strike, CE: row, PE: row}
+    group_spot: (sym, expiry) -> (seg, id) the option expiry is priced off. Index/stock: the
+        underlying itself. MCX: the first future expiring on/after the option — CRUDEOIL Nov
+        options sit on the Nov future and GOLD Oct options on the Dec future, not on the nearest
+        future (master_list's UNDERLYING_SECURITY_ID for MCX options is the commodity, not a future).
     """
     import pandas as pd
 
@@ -260,6 +264,7 @@ def build_universe(df, today: date, n_expiries: int):
 
     underlyings = {}
     groups = {}
+    group_spot = {}
     for sym, g in opt.groupby('UNDERLYING_SYMBOL'):
         sym = str(sym).upper()
         instr = str(g['INSTRUMENT'].iloc[0])
@@ -282,6 +287,13 @@ def build_universe(df, today: date, n_expiries: int):
 
         seg = {'NSE': 'NSE_FNO', 'BSE': 'BSE_FNO', 'MCX': 'MCX_COMM'}[exch]
         for exp in sorted(g['EXP'].unique())[:n_expiries]:
+            if meta['kind'] == 'mcx':
+                fx = f[f['EXP'] >= exp]
+                if fx.empty:
+                    continue
+                spot_key = ('MCX_COMM', int(fx['SECURITY_ID'].iloc[0]))
+            else:
+                spot_key = (meta['spot_seg'], int(meta['spot_id']))
             ge = g[g['EXP'] == exp]
             by_strike = {}
             for r in ge.itertuples(index=False):
@@ -306,7 +318,8 @@ def build_universe(df, today: date, n_expiries: int):
             ladder = [v for _, v in sorted(by_strike.items()) if 'CE' in v or 'PE' in v]
             if ladder:
                 groups[(sym, exp)] = ladder
-    return underlyings, groups
+                group_spot[(sym, exp)] = spot_key
+    return underlyings, groups, group_spot
 
 
 # ---------------------------------------------------------------------------
@@ -402,9 +415,9 @@ class Collector:
         self.universe_day = None
         self.underlyings = {}
         self.groups = {}
+        self.group_spot = {}
         self.hist = {}        # (seg, sid) -> deque[(ts, ltp, oi_lots, vol_lots, iv)]
         self.spot_hist = {}   # sym -> deque[(ts, spot)]
-        self.group_hist = {}  # (sym, exp) -> deque[(ts, pcr, ce_wall, pe_wall, straddle, atm_ce, atm_pe)]
         self.exch_scan = {}   # exch -> last scan epoch
         self.last_payload = None
 
@@ -413,12 +426,11 @@ class Collector:
         if self.universe_day == today:
             return
         df = self.helper._load_master_list()
-        self.underlyings, self.groups = build_universe(df, today, self.n_expiries)
+        self.underlyings, self.groups, self.group_spot = build_universe(df, today, self.n_expiries)
         self.universe_day = today
         # A new trading day resets day volume/OI; yesterday's history would diff against it.
         self.hist.clear()
         self.spot_hist.clear()
-        self.group_hist.clear()
         log.info('universe: %d underlyings, %d expiry groups', len(self.underlyings), len(self.groups))
 
     def scan(self, exchanges):
@@ -427,30 +439,46 @@ class Collector:
         if not syms:
             return 0
 
-        # 1) spots
-        spot_req = [(self.underlyings[s]['spot_seg'], self.underlyings[s]['spot_id']) for s in syms]
-        spot_q = self.qc.quote(spot_req)
+        # 1) spots: each underlying's own spot (display / "underlying %"), plus every
+        #    group's pricing spot (the MCX option's own-month future).
+        spot_keys = {(self.underlyings[s]['spot_seg'], int(self.underlyings[s]['spot_id'])) for s in syms}
+        gkeys = [gk for gk in self.groups if gk[0] in self.underlyings and self.underlyings[gk[0]]['exch'] in exchanges]
+        spot_keys.update(self.group_spot[gk] for gk in gkeys)
+        spot_q = self.qc.quote(sorted(spot_keys))
+
+        def ltp_of(key):
+            got = spot_q.get(key)
+            if not got:
+                return None
+            v = num(got[0].get('last_price'))
+            return (v, got[1]) if v and v > 0 else None
+
         spots = {}
         for s in syms:
             m = self.underlyings[s]
-            got = spot_q.get((m['spot_seg'], int(m['spot_id'])))
+            got = ltp_of((m['spot_seg'], int(m['spot_id'])))
             if got:
-                ltp = num(got[0].get('last_price'))
-                if ltp and ltp > 0:
-                    spots[s] = (ltp, got[1])
+                spots[s] = got
+        gspots = {}
+        for gk in gkeys:
+            got = ltp_of(self.group_spot[gk])
+            if got:
+                gspots[gk] = got[0]
 
         # 2) contract selection: ATM ± n on each tracked expiry
         picked = []   # (sym, exp, strike, typ, contract_meta, offset, atm_strike)
         group_meta = {}
-        for (sym, exp), ladder in self.groups.items():
-            if sym not in spots:
+        for gk in gkeys:
+            if gk not in gspots:
                 continue
-            spot = spots[sym][0]
+            sym, exp = gk
+            ladder = self.groups[gk]
+            spot = gspots[gk]
             strikes = [r['strike'] for r in ladder]
             atm_idx = min(range(len(strikes)), key=lambda i: abs(strikes[i] - spot))
             lo = max(0, atm_idx - self.n_strikes)
             hi = min(len(ladder), atm_idx + self.n_strikes + 1)
-            group_meta[(sym, exp)] = {'atm': strikes[atm_idx], 'spot': spot}
+            group_meta[gk] = {'atm': strikes[atm_idx], 'spot': spot}
             for i in range(lo, hi):
                 row = ladder[i]
                 for typ in ('CE', 'PE'):
@@ -462,9 +490,16 @@ class Collector:
 
         # 3) raw values + IV
         recs = []
+        # Groups with a contract whose quote batch failed. Their PCR / walls / straddle would be
+        # computed over a partial ladder, so they keep the previous scan's group entry instead,
+        # and the missing contracts keep their last row (without diffs).
+        incomplete = set()
+        missing_ids = set()
         for sym, exp, strike, typ, c, off, atm in picked:
             got = quotes.get((c['seg'], c['sid']))
             if not got:
+                incomplete.add((sym, exp))
+                missing_ids.add(f"{c['seg']}:{c['sid']}")
                 continue
             q, ts = got
             ltp = num(q.get('last_price'))
@@ -483,26 +518,28 @@ class Collector:
             log.warning('scan %s returned no quotes (%s) — snapshot left unchanged',
                         ','.join(exchanges), self.qc.last_error)
             return 0
+        if incomplete:
+            log.warning('%d contracts in %d groups missing quotes — their group stats kept from the last scan',
+                        len(missing_ids), len(incomplete))
 
         now = now_ist()
-        if recs:
-            S, K, T, isc, b76, P = [], [], [], [], [], []
-            for r in recs:
-                exch = self.underlyings[r['sym']]['exch']
-                eh, em = EXPIRY_CLOSE[exch]
-                exp_dt = datetime.strptime(r['exp'], '%Y-%m-%d').replace(hour=eh, minute=em)
-                t_years = max((exp_dt - now).total_seconds(), 1800.0) / (365.0 * 86400.0)
-                S.append(spots[r['sym']][0])
-                K.append(r['strike'])
-                T.append(t_years)
-                isc.append(r['typ'] == 'CE')
-                b76.append(exch == 'MCX')
-                P.append(r['ltp'])
-            ivs = implied_vols(P, S, K, T, isc, b76)
-            for r, iv in zip(recs, ivs):
-                r['iv'] = None if np.isnan(iv) else float(iv)
+        S, K, T, isc, b76, P = [], [], [], [], [], []
+        for r in recs:
+            exch = self.underlyings[r['sym']]['exch']
+            eh, em = EXPIRY_CLOSE[exch]
+            exp_dt = datetime.strptime(r['exp'], '%Y-%m-%d').replace(hour=eh, minute=em)
+            t_years = max((exp_dt - now).total_seconds(), 1800.0) / (365.0 * 86400.0)
+            S.append(gspots[(r['sym'], r['exp'])])
+            K.append(r['strike'])
+            T.append(t_years)
+            isc.append(r['typ'] == 'CE')
+            b76.append(exch == 'MCX')
+            P.append(r['ltp'])
+        ivs = implied_vols(P, S, K, T, isc, b76)
+        for r, iv in zip(recs, ivs):
+            r['iv'] = None if np.isnan(iv) else float(iv)
 
-        # 4) history + diffs
+        # 4) history
         for s, (spot, ts) in spots.items():
             self.spot_hist.setdefault(s, deque()).append((ts, spot))
         for r in recs:
@@ -510,30 +547,9 @@ class Collector:
             h = self.hist.setdefault(key, deque())
             h.append((r['ts'], r['ltp'], r['oi'], r['vol'], r.get('iv')))
 
-        # group-level (PCR / walls / ATM straddle) from this scan's records
-        by_group = {}
-        for r in recs:
-            by_group.setdefault((r['sym'], r['exp']), []).append(r)
-        group_now = {}
-        for gk, rows in by_group.items():
-            ce_oi = sum(r['oi'] for r in rows if r['typ'] == 'CE')
-            pe_oi = sum(r['oi'] for r in rows if r['typ'] == 'PE')
-            ce_rows = [r for r in rows if r['typ'] == 'CE']
-            pe_rows = [r for r in rows if r['typ'] == 'PE']
-            ce_wall = max(ce_rows, key=lambda r: r['oi'])['strike'] if ce_rows else None
-            pe_wall = max(pe_rows, key=lambda r: r['oi'])['strike'] if pe_rows else None
-            atm_ce = next((r['ltp'] for r in ce_rows if r['off'] == 0), None)
-            atm_pe = next((r['ltp'] for r in pe_rows if r['off'] == 0), None)
-            straddle = atm_ce + atm_pe if atm_ce is not None and atm_pe is not None else None
-            pcr = pe_oi / ce_oi if ce_oi > 0 else None
-            ts = max(r['ts'] for r in rows)
-            snap = (ts, pcr, ce_wall, pe_wall, straddle, atm_ce, atm_pe)
-            self.group_hist.setdefault(gk, deque()).append(snap)
-            group_now[gk] = snap
-
         # prune history
         cutoff = time.time() - HISTORY_SEC
-        for store in (self.hist, self.spot_hist, self.group_hist):
+        for store in (self.hist, self.spot_hist):
             for k in list(store):
                 dq = store[k]
                 while dq and dq[0][0] < cutoff:
@@ -545,17 +561,71 @@ class Collector:
         for ex in exchanges:
             self.exch_scan[ex] = scan_ts
 
-        self.write_payload(exchanges, recs, spots, group_meta, group_now)
+        self.write_payload(exchanges, recs, spots, group_meta, incomplete, missing_ids)
         return len(recs)
 
-    def write_payload(self, exchanges, recs, spots, group_meta, group_now):
+    def _group_window(self, rows, atm, w):
+        """Group-level change over `w` minutes, measured on the SAME contracts now and then.
+
+        Baselines come from each contract's own history, so a spot move that rolls the ATM
+        strike (or slides the ATM±N band by one strike) doesn't show up as a PCR, wall,
+        straddle or tilt change: the straddle/tilt compare today's ATM strike with that same
+        strike's premiums w minutes ago, and PCR/walls use only contracts that have a baseline.
+        """
+        pairs = []  # (row, baseline)
+        for r in rows:
+            b = baseline(self.hist.get((r['c']['seg'], r['c']['sid'])), r['ts'], w)
+            if b:
+                pairs.append((r, b))
+        if not pairs:
+            return None
+
+        def wall(typ, then):
+            # b[2] is the contract's OI (lots) at the baseline
+            cands = [(b[2] if then else r['oi'], r['strike']) for r, b in pairs if r['typ'] == typ]
+            return max(cands)[1] if cands else None
+
+        ce_now_oi = sum(r['oi'] for r, _ in pairs if r['typ'] == 'CE')
+        pe_now_oi = sum(r['oi'] for r, _ in pairs if r['typ'] == 'PE')
+        ce_then_oi = sum(b[2] for r, b in pairs if r['typ'] == 'CE')
+        pe_then_oi = sum(b[2] for r, b in pairs if r['typ'] == 'PE')
+        pcr_d = None
+        if ce_now_oi > 0 and ce_then_oi > 0:
+            pcr_d = pe_now_oi / ce_now_oi - pe_then_oi / ce_then_oi
+
+        atm_ce = next(((r, b) for r, b in pairs if r['strike'] == atm and r['typ'] == 'CE'), None)
+        atm_pe = next(((r, b) for r, b in pairs if r['strike'] == atm and r['typ'] == 'PE'), None)
+        str_d = tilt = None
+        if atm_ce and atm_pe:
+            str_d = pct(atm_ce[0]['ltp'] + atm_pe[0]['ltp'], atm_ce[1][1] + atm_pe[1][1])
+            ce_p, pe_p = pct(atm_ce[0]['ltp'], atm_ce[1][1]), pct(atm_pe[0]['ltp'], atm_pe[1][1])
+            tilt = ce_p - pe_p if ce_p is not None and pe_p is not None else None
+
+        return {
+            'pcr': rnd(pcr_d, 3),
+            # "from" = the wall among these same contracts w minutes ago; now-wall is also taken
+            # over the same set so a strike that merely entered/left the band can't move it.
+            'ceWallFrom': wall('CE', True),
+            'peWallFrom': wall('PE', True),
+            'ceWallNow': wall('CE', False),
+            'peWallNow': wall('PE', False),
+            'str': rnd(str_d),
+            'tilt': rnd(tilt),
+        }
+
+    def write_payload(self, exchanges, recs, spots, group_meta, incomplete, missing_ids):
         # Rows from exchanges not scanned this cycle (e.g. NSE after 15:30 while MCX runs on)
         # are carried from the previous payload so the page keeps showing their last state.
         carried_rows, carried_groups, carried_und = [], [], {}
         prev = self.last_payload
         if prev:
             carried_rows = [r for r in prev['rows'] if r['x'] not in exchanges]
-            carried_groups = [g for g in prev['groups'] if g['x'] not in exchanges]
+            # Contracts whose quote batch failed this scan keep their last values (so they stay
+            # visible and tradable) but lose their diffs — no preset may fire on a stale row.
+            no_diff = {str(w): None for w in WINDOWS}
+            carried_rows += [dict(r, d=no_diff, stale=True) for r in prev['rows'] if r['id'] in missing_ids]
+            carried_groups = [g for g in prev['groups']
+                              if g['x'] not in exchanges or (g['u'], g['e']) in incomplete]
             carried_und = {k: v for k, v in prev['underlyings'].items() if v['exch'] not in exchanges}
 
         und_out = dict(carried_und)
@@ -620,30 +690,28 @@ class Collector:
             })
 
         groups_out = list(carried_groups)
-        for gk, snap in group_now.items():
+        by_group = {}
+        for r in recs:
+            by_group.setdefault((r['sym'], r['exp']), []).append(r)
+        for gk, rows in by_group.items():
+            if gk in incomplete:
+                continue  # previous entry carried above; a partial ladder would skew PCR/walls
             sym, exp = gk
-            h = self.group_hist.get(gk)
-            ts, pcr, ce_wall, pe_wall, straddle, atm_ce, atm_pe = snap
-            d = {}
-            for w in WINDOWS:
-                b = baseline(h, ts, w)
-                if not b:
-                    d[str(w)] = None
-                    continue
-                _, b_pcr, b_cew, b_pew, b_str, b_ce, b_pe = b
-                ce_p, pe_p = pct(atm_ce, b_ce), pct(atm_pe, b_pe)
-                d[str(w)] = {
-                    'pcr': rnd(pcr - b_pcr, 3) if pcr is not None and b_pcr is not None else None,
-                    'ceWallFrom': b_cew,
-                    'peWallFrom': b_pew,
-                    'str': rnd(pct(straddle, b_str)),
-                    'tilt': rnd(ce_p - pe_p) if ce_p is not None and pe_p is not None else None,
-                }
+            atm = group_meta.get(gk, {}).get('atm')
+            ce_rows = [r for r in rows if r['typ'] == 'CE']
+            pe_rows = [r for r in rows if r['typ'] == 'PE']
+            ce_oi = sum(r['oi'] for r in ce_rows)
+            pe_oi = sum(r['oi'] for r in pe_rows)
+            atm_ce = next((r['ltp'] for r in ce_rows if r['strike'] == atm), None)
+            atm_pe = next((r['ltp'] for r in pe_rows if r['strike'] == atm), None)
             groups_out.append({
                 'u': sym, 'e': exp, 'x': self.underlyings[sym]['exch'],
-                'atm': group_meta.get(gk, {}).get('atm'),
-                'pcr': rnd(pcr, 3), 'ceWall': ce_wall, 'peWall': pe_wall,
-                'straddle': rnd(straddle), 'd': d,
+                'atm': atm,
+                'pcr': rnd(pe_oi / ce_oi if ce_oi > 0 else None, 3),
+                'ceWall': max(ce_rows, key=lambda r: r['oi'])['strike'] if ce_rows else None,
+                'peWall': max(pe_rows, key=lambda r: r['oi'])['strike'] if pe_rows else None,
+                'straddle': rnd(atm_ce + atm_pe if atm_ce is not None and atm_pe is not None else None),
+                'd': {str(w): self._group_window(rows, atm, w) for w in WINDOWS},
             })
 
         exch_out = {}
