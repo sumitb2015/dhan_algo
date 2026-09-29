@@ -1,6 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert';
-import { pacedQuoteCall } from './dhanQuotePacer.ts';
+import { pacedQuoteCall, setSharedQuoteLane } from './dhanQuotePacer.ts';
+
+setSharedQuoteLane(false);
 
 test('a third concurrent caller is rejected as busy instead of queueing', async () => {
   const gate = new Promise<void>(r => setTimeout(r, 50));

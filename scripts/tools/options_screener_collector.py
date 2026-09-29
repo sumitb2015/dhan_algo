@@ -3,13 +3,18 @@ Options Screener collector — "what changed in the last 1-30 min" across index,
 MCX options. Backs the dashboard's /options-screener page.
 
 Every minute it:
-  1. resolves each underlying's spot (index/equity LTP, or the nearest MCX future),
-  2. picks ATM±N strikes (CE+PE) on the nearest `--expiries` expiries of every option
-     underlying in master_list.csv (NSE index + stock options, SENSEX/BANKEX, MCX options),
-  3. pulls LTP / OI / day volume for all of them through Dhan's batched
-     /marketfeed/quote (≤1000 instruments per call, paced 1.1 s — the bucket is account-wide),
-  4. solves IV locally (Black-Scholes for NSE/BSE, Black-76 for MCX options on futures),
-  5. diffs each contract against its own snapshot 1/3/5/10/15/30 minutes ago and writes the
+  1. reads the SCOPE — the underlyings the open screener tabs are looking at
+     (debug/options_screener_scope.json, written by the scan route; see read_scope()).
+     Only those are scanned, so watching one asset costs one or two quote calls a minute
+     instead of ~18 for the whole universe,
+  2. resolves each scoped underlying's spot (index/equity LTP, or the MCX option's own future),
+  3. picks ATM±N strikes (CE+PE) on the nearest `--expiries` expiries of each of them
+     (NSE index + stock options, SENSEX/BANKEX, MCX options),
+  4. pulls LTP / OI / day volume through Dhan's batched /marketfeed/quote (≤1000 instruments
+     per call), paced through the cross-process quote lane (lib/dhan_quote_lane.py: shared
+     1.1 s slots, gap doubles on a 429 for every participant),
+  5. solves IV locally (Black-Scholes for NSE/BSE, Black-76 for MCX options on futures),
+  6. diffs each contract against its own snapshot 1/3/5/10/15/30 minutes ago and writes the
      result to debug/options_screener_snapshot.json (atomic replace).
 
 The dashboard route evaluates custom/preset scans over that file — this script only measures.
@@ -40,13 +45,21 @@ from datetime import datetime, date
 from zoneinfo import ZoneInfo
 
 import numpy as np
+import requests
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, ROOT)
 
+from lib import dhan_quote_lane  # noqa: E402  (needs ROOT on sys.path)
+
 DEBUG_DIR = os.path.join(ROOT, 'debug')
+TOKEN_FILE = os.path.join(ROOT, 'access_token.json')
+QUOTE_URL = 'https://api.dhan.co/v2/marketfeed/quote'
 SNAPSHOT_FILE = os.path.join(DEBUG_DIR, 'options_screener_snapshot.json')
 STATUS_FILE = os.path.join(DEBUG_DIR, 'options_screener_status.json')
+SCOPE_FILE = os.path.join(DEBUG_DIR, 'options_screener_scope.json')
+# A tab that hasn't polled the scan route for this long no longer widens the scope.
+SCOPE_TAB_TTL_SEC = 120
 STOP_TRIGGER = os.path.join(DEBUG_DIR, 'options_screener_stop.trigger')
 LOG_FILE = os.path.join(DEBUG_DIR, 'options_screener_collector.log')
 
@@ -163,6 +176,48 @@ def write_status(**fields) -> None:
         write_json_atomic(STATUS_FILE, payload)
     except OSError as exc:
         log.warning('status write failed: %s', exc)
+
+
+def read_scope(underlyings, force_all=False):
+    """Which underlyings to scan this cycle -> (set of symbols, is_everything).
+
+    The scan route records each open tab's segment + symbols (watchlists arrive already
+    expanded to symbols) in SCOPE_FILE. The union over tabs seen in the last
+    SCOPE_TAB_TTL_SEC is scanned. With no tab open, the most recent selection keeps being
+    scanned, so the look-back history for it stays continuous until the collector is
+    stopped. No scope file at all (collector run from the command line, page never
+    opened) means everything, as does any tab showing segment "All" with no symbols.
+    """
+    everything = set(underlyings)
+    if force_all:
+        return everything, True
+    try:
+        with open(SCOPE_FILE, 'r', encoding='utf-8') as f:
+            raw = json.load(f)
+    except (OSError, ValueError):
+        return everything, True
+    if not isinstance(raw, dict):
+        return everything, True
+    now_ms = time.time() * 1000
+    tabs = raw.get('tabs') if isinstance(raw.get('tabs'), dict) else {}
+    active = [t for t in tabs.values()
+              if isinstance(t, dict) and now_ms - num(t.get('at'), 0) <= SCOPE_TAB_TTL_SEC * 1000]
+    if not active:
+        last = raw.get('last')
+        active = [last] if isinstance(last, dict) else []
+    if not active:
+        return everything, True
+
+    picked = set()
+    for t in active:
+        seg = t.get('segment') if t.get('segment') in ('index', 'stock', 'mcx') else 'all'
+        syms = {str(s).upper() for s in (t.get('symbols') or []) if isinstance(s, str)}
+        if seg == 'all' and not syms:
+            return everything, True
+        for u, m in underlyings.items():
+            if (seg == 'all' or m['kind'] == seg) and (not syms or u in syms):
+                picked.add(u)
+    return picked, picked == everything
 
 
 # ---------------------------------------------------------------------------
@@ -327,16 +382,55 @@ def build_universe(df, today: date, n_expiries: int):
 # ---------------------------------------------------------------------------
 
 class QuoteClient:
-    def __init__(self, dhan):
-        self.dhan = dhan
-        self._last = 0.0
-        self.last_error = None
+    """Batched POST /v2/marketfeed/quote through the cross-process quote lane.
 
-    def _pace(self):
-        wait = self._last + QUOTE_GAP_SEC - time.monotonic()
-        if wait > 0:
-            time.sleep(wait)
-        self._last = time.monotonic()
+    Called directly rather than via the SDK: dhanhq's quote_data() collapses every HTTP
+    failure into {'error_code': None, ...}, so a 429 was indistinguishable from any other
+    error and could not drive a backoff. Here a 429 widens the SHARED gap
+    (lib/dhan_quote_lane.py), which slows every lane participant — dashboard included.
+    """
+
+    def __init__(self):
+        self.last_error = None
+        self.gap_ms = dhan_quote_lane.BASE_GAP_MS
+        self.rate_limited = 0          # 429s seen in the current scan
+
+    @staticmethod
+    def _credentials():
+        # Re-read every call: login.py may refresh the token while the collector runs.
+        with open(TOKEN_FILE, 'r', encoding='utf-8') as f:
+            token = json.load(f).get('accessToken') or ''
+        return os.getenv('client_id') or '', token
+
+    def _post(self, securities):
+        """One call. Returns (data | None, rate_limited, error)."""
+        time.sleep(max(0.0, dhan_quote_lane.reserve(QUOTE_GAP_SEC * 1000)))
+        try:
+            client_id, token = self._credentials()
+            res = requests.post(
+                QUOTE_URL,
+                json=securities,
+                headers={'access-token': token, 'client-id': client_id,
+                         'Content-Type': 'application/json', 'Accept': 'application/json'},
+                timeout=15,
+            )
+        except (OSError, ValueError, requests.RequestException) as exc:
+            return None, False, f'network: {exc}'
+        if res.status_code == 429:
+            self.gap_ms = dhan_quote_lane.report(True)
+            return None, True, f'HTTP 429 rate limited (gap now {self.gap_ms / 1000:.1f}s)'
+        try:
+            body = res.json()
+        except ValueError:
+            body = {}
+        if res.status_code != 200 or not isinstance(body, dict) or body.get('status') != 'success':
+            err = body.get('errorMessage') or body.get('remarks') or body.get('message') if isinstance(body, dict) else None
+            return None, False, f'HTTP {res.status_code}: {err or str(body)[:200]}'
+        self.gap_ms = dhan_quote_lane.report(False)
+        data = body.get('data', {})
+        if isinstance(data, dict) and 'data' in data:
+            data = data['data']
+        return data, False, None
 
     def quote(self, instruments):
         """instruments: list of (seg, sid). Returns {(seg, sid): (quote_dict, fetch_ts)}."""
@@ -350,20 +444,15 @@ class QuoteClient:
                 securities.setdefault(seg, []).append(int(sid))
             data = None
             for attempt in range(3):
-                self._pace()
-                try:
-                    res = self.dhan.quote_data(securities=securities)
-                except Exception as exc:  # network / SDK error
-                    res = {'status': 'failure', 'remarks': str(exc)}
-                if isinstance(res, dict) and res.get('status') == 'success':
-                    data = res.get('data', {})
-                    if isinstance(data, dict) and 'data' in data:
-                        data = data['data']
+                data, limited, err = self._post(securities)
+                if isinstance(data, dict):
                     break
-                remark = res.get('remarks') if isinstance(res, dict) else str(res)
-                self.last_error = str(remark)[:300]
-                # Rate-limited or transient: back off harder than the pacer before retrying.
-                time.sleep(2.0 * (attempt + 1))
+                self.last_error = err
+                if limited:
+                    # The lane has already pushed the next slot out by the widened gap.
+                    self.rate_limited += 1
+                else:
+                    time.sleep(2.0 * (attempt + 1))
             if not isinstance(data, dict):
                 log.warning('quote batch %d failed: %s', i // QUOTE_BATCH, self.last_error)
                 continue
@@ -409,7 +498,7 @@ def pct(now_v, then_v):
 class Collector:
     def __init__(self, helper, n_strikes: int, n_expiries: int):
         self.helper = helper
-        self.qc = QuoteClient(helper.dhan)
+        self.qc = QuoteClient()
         self.n_strikes = n_strikes
         self.n_expiries = n_expiries
         self.universe_day = None
@@ -419,6 +508,7 @@ class Collector:
         self.hist = {}        # (seg, sid) -> deque[(ts, ltp, oi_lots, vol_lots, iv)]
         self.spot_hist = {}   # sym -> deque[(ts, spot)]
         self.exch_scan = {}   # exch -> last scan epoch
+        self.scanned_today = set()   # underlyings scanned at least once today
         self.last_payload = None
 
     def ensure_universe(self):
@@ -431,18 +521,27 @@ class Collector:
         # A new trading day resets day volume/OI; yesterday's history would diff against it.
         self.hist.clear()
         self.spot_hist.clear()
+        self.scanned_today.clear()
         log.info('universe: %d underlyings, %d expiry groups', len(self.underlyings), len(self.groups))
 
-    def scan(self, exchanges):
+    def scan(self, scope, live_exchanges):
+        """Scan the underlyings in `scope` whose exchange is open. An underlying that is in
+        scope but hasn't been scanned yet today is scanned once even with its exchange shut,
+        so a symbol added in the evening (or an off-hours start) shows its last session."""
         self.ensure_universe()
-        syms = [s for s, m in self.underlyings.items() if m['exch'] in exchanges]
+        syms = [s for s in sorted(scope) if s in self.underlyings
+                and (self.underlyings[s]['exch'] in live_exchanges or s not in self.scanned_today)]
         if not syms:
+            # Nothing to fetch, but a scope that SHRANK must still drop rows from the page.
+            if self.last_payload and {r['u'] for r in self.last_payload['rows']} - set(scope):
+                self.write_payload(set(), scope, [], {}, {}, set(), set())
             return 0
+        sym_set = set(syms)
 
         # 1) spots: each underlying's own spot (display / "underlying %"), plus every
         #    group's pricing spot (the MCX option's own-month future).
         spot_keys = {(self.underlyings[s]['spot_seg'], int(self.underlyings[s]['spot_id'])) for s in syms}
-        gkeys = [gk for gk in self.groups if gk[0] in self.underlyings and self.underlyings[gk[0]]['exch'] in exchanges]
+        gkeys = [gk for gk in self.groups if gk[0] in sym_set]
         spot_keys.update(self.group_spot[gk] for gk in gkeys)
         spot_q = self.qc.quote(sorted(spot_keys))
 
@@ -515,8 +614,8 @@ class Collector:
             # Every quote batch failed (rate limit / token): keep the last good snapshot on
             # screen rather than overwriting it with an empty one. The status file carries
             # last_error for the page's banner.
-            log.warning('scan %s returned no quotes (%s) — snapshot left unchanged',
-                        ','.join(exchanges), self.qc.last_error)
+            log.warning('scan of %d underlyings returned no quotes (%s) — snapshot left unchanged',
+                        len(syms), self.qc.last_error)
             return 0
         if incomplete:
             log.warning('%d contracts in %d groups missing quotes — their group stats kept from the last scan',
@@ -558,10 +657,11 @@ class Collector:
                     del store[k]
 
         scan_ts = time.time()
-        for ex in exchanges:
-            self.exch_scan[ex] = scan_ts
+        for s in syms:
+            self.exch_scan[self.underlyings[s]['exch']] = scan_ts
+        self.scanned_today.update(syms)
 
-        self.write_payload(exchanges, recs, spots, group_meta, incomplete, missing_ids)
+        self.write_payload(sym_set, scope, recs, spots, group_meta, incomplete, missing_ids)
         return len(recs)
 
     def _group_window(self, rows, atm, w):
@@ -613,20 +713,22 @@ class Collector:
             'tilt': rnd(tilt),
         }
 
-    def write_payload(self, exchanges, recs, spots, group_meta, incomplete, missing_ids):
-        # Rows from exchanges not scanned this cycle (e.g. NSE after 15:30 while MCX runs on)
-        # are carried from the previous payload so the page keeps showing their last state.
+    def write_payload(self, scanned, scope, recs, spots, group_meta, incomplete, missing_ids):
+        # Underlyings still in scope but not scanned this cycle (e.g. NSE after 15:30 while MCX
+        # runs on) are carried from the previous payload so the page keeps their last state.
+        # Anything that left the scope is dropped.
         carried_rows, carried_groups, carried_und = [], [], {}
         prev = self.last_payload
         if prev:
-            carried_rows = [r for r in prev['rows'] if r['x'] not in exchanges]
+            keep = lambda u: u in scope and u not in scanned  # noqa: E731
+            carried_rows = [r for r in prev['rows'] if keep(r['u'])]
             # Contracts whose quote batch failed this scan keep their last values (so they stay
             # visible and tradable) but lose their diffs — no preset may fire on a stale row.
             no_diff = {str(w): None for w in WINDOWS}
             carried_rows += [dict(r, d=no_diff, stale=True) for r in prev['rows'] if r['id'] in missing_ids]
             carried_groups = [g for g in prev['groups']
-                              if g['x'] not in exchanges or (g['u'], g['e']) in incomplete]
-            carried_und = {k: v for k, v in prev['underlyings'].items() if v['exch'] not in exchanges}
+                              if keep(g['u']) or (g['u'], g['e']) in incomplete]
+            carried_und = {k: v for k, v in prev['underlyings'].items() if keep(k)}
 
         und_out = dict(carried_und)
         for s, (spot, ts) in spots.items():
@@ -731,6 +833,11 @@ class Collector:
             'windows': list(WINDOWS),
             'strikes': self.n_strikes,
             'exchanges': exch_out,
+            # Every scannable underlying (the page's symbol picker must offer assets that are
+            # not in scope yet) and what is actually being scanned right now.
+            'universe': [{'u': u, 'k': m['kind']} for u, m in sorted(self.underlyings.items())],
+            'scope': {'all': set(scope) >= set(self.underlyings), 'count': len(scope),
+                      'symbols': sorted(scope) if len(scope) <= 40 else []},
             'underlyings': und_out,
             'groups': groups_out,
             'rows': carried_rows + rows_out,
@@ -759,6 +866,8 @@ def main():
     ap.add_argument('--expiries', type=int, default=2, help='nearest expiries per underlying (default 2)')
     ap.add_argument('--interval', type=int, default=60, help='seconds between scans (default 60)')
     ap.add_argument('--once', action='store_true', help='run a single scan and exit')
+    ap.add_argument('--all', action='store_true',
+                    help='scan every underlying, ignoring the page selection (debug/options_screener_scope.json)')
     args = ap.parse_args()
     if not (1 <= args.strikes <= 15) or not (1 <= args.expiries <= 3) or args.interval < 30:
         print(json.dumps({'success': False, 'error': 'strikes 1-15, expiries 1-3, interval >= 30'}))
@@ -775,7 +884,7 @@ def main():
         return
 
     col = Collector(helper, args.strikes, args.expiries)
-    first = True
+    skipped = 0
     try:
         while True:
             if stop_requested():
@@ -785,27 +894,41 @@ def main():
             cycle_start = time.time()
             now = now_ist()
             live = [ex for ex in ('NSE', 'BSE', 'MCX') if session_open(ex, now)]
-            # The first scan always runs so an off-hours start still shows the last session.
-            exchanges = ('NSE', 'BSE', 'MCX') if first else tuple(live)
             n = 0
-            if exchanges:
-                try:
-                    n = col.scan(exchanges)
-                    first = False
-                except Exception as exc:
-                    log.exception('scan failed')
-                    write_status(status='RUNNING', error=str(exc), last_error=col.qc.last_error)
+            scope, scope_all = set(), False
+            col.qc.rate_limited = 0
+            try:
+                col.ensure_universe()
+                scope, scope_all = read_scope(col.underlyings, args.all)
+                n = col.scan(scope, live)
+            except Exception as exc:
+                log.exception('scan failed')
+                write_status(status='RUNNING', error=str(exc), last_error=col.qc.last_error)
             took = time.time() - cycle_start
+            # A scan that overran the interval (throttled by 429s) must not be followed
+            # immediately by another one: wait for the next boundary instead, which also gives
+            # the shared quote lane room to recover.
+            periods = max(1, math.ceil(took / args.interval))
+            if periods > 1:
+                skipped += periods - 1
+                log.warning('scan took %.0fs (> %ds interval) — skipping %d cycle(s)',
+                            took, args.interval, periods - 1)
             write_status(
                 status='RUNNING',
                 last_scan=now.isoformat(timespec='seconds'),
                 scan_seconds=round(took, 1),
                 contracts=n,
                 live=live,
+                scope_count=len(scope),
+                scope_all=scope_all,
+                quote_gap_ms=int(col.qc.gap_ms),
+                rate_limited=col.qc.rate_limited,
+                skipped_cycles=skipped,
                 last_error=col.qc.last_error,
             )
             if n:
-                log.info('scan %s: %d contracts in %.1fs', ','.join(exchanges), n, took)
+                log.info('scan %d underlyings%s: %d contracts in %.1fs (quote gap %.1fs)',
+                         len(scope), ' (all)' if scope_all else '', n, took, col.qc.gap_ms / 1000)
             if args.once:
                 write_status(status='STOPPED', reason='once')
                 return
@@ -814,7 +937,7 @@ def main():
                 write_status(status='STOPPED', reason='market_closed')
                 return
             # Align to the next interval boundary; poll the stop trigger meanwhile.
-            sleep_until = cycle_start + args.interval
+            sleep_until = cycle_start + args.interval * periods
             while time.time() < sleep_until:
                 if os.path.exists(STOP_TRIGGER):
                     break

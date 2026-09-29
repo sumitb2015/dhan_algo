@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { readScreenerSnapshot } from '@/lib/optionsScreenerStore';
+import { readScreenerSnapshot, recordScreenerScope } from '@/lib/optionsScreenerStore';
 import {
   PRESETS,
   WINDOWS,
@@ -48,11 +48,15 @@ export async function POST(req: NextRequest): Promise<NextResponse<ScanResponse>
     presetHits: [],
   };
 
+  const filters = sanitizeFilters((body?.filters as Record<string, unknown>) ?? null);
+  // Tell the collector what this tab is looking at — it scans only the union of open tabs'
+  // selections. Recorded before the snapshot check so a fresh start picks it up at once.
+  if (typeof body?.tabId === 'string') recordScreenerScope(body.tabId, filters);
+
   const loaded = readScreenerSnapshot();
   if (!loaded) return NextResponse.json(base);
   const { snap, byId, mtimeMs } = loaded;
 
-  const filters = sanitizeFilters((body?.filters as Record<string, unknown>) ?? null);
   const conditions = sanitizeConditions(body?.conditions);
   const presets = Array.isArray(body?.presets)
     ? (body!.presets as unknown[]).map(String).filter(isPresetId)
@@ -105,8 +109,11 @@ export async function POST(req: NextRequest): Promise<NextResponse<ScanResponse>
     }
   }
 
+  // The picker must offer every scannable underlying, not just those in the current scope
+  // (older snapshots have no `universe`: fall back to what's in the rows).
   const symbolKinds = new Map<string, Segment>();
   const expiries = new Set<string>();
+  for (const x of snap.universe ?? []) symbolKinds.set(x.u, x.k);
   for (const r of snap.rows) {
     symbolKinds.set(r.u, r.k);
     expiries.add(r.e);
@@ -119,6 +126,7 @@ export async function POST(req: NextRequest): Promise<NextResponse<ScanResponse>
     generatedAt: snap.generated_at,
     snapshotAgeSec: Math.round((Date.now() - mtimeMs) / 1000),
     exchanges: snap.exchanges,
+    scope: snap.scope ?? null,
     totalContracts: snap.rows.length,
     filteredContracts: rows.length,
     symbols: [...symbolKinds].map(([u, k]) => ({ u, k })).sort((a, b) => a.u.localeCompare(b.u)),

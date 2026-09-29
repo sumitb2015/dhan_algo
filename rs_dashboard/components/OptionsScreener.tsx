@@ -169,6 +169,12 @@ interface CollectorStatus {
   last_scan?: string;
   scan_seconds?: number;
   contracts?: number;
+  scope_count?: number;
+  scope_all?: boolean;
+  /** Shared Dhan quote-lane gap; above 1100 ms means Dhan has been returning 429s. */
+  quote_gap_ms?: number;
+  rate_limited?: number;
+  skipped_cycles?: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -244,11 +250,14 @@ function ScreenerInner() {
   }), [filters, effWindow, prefs.conditions, prefs.presets, prefs.match]);
 
   // ---- scan polling -------------------------------------------------------
+  // Identifies this tab to the scan route, which records its segment/symbols as the
+  // collector's scan scope (only what open tabs are looking at gets fetched from Dhan).
+  const [tabId] = useState(() => `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`);
   const seq = useRef(0);
   const runScan = useCallback(async () => {
     const mySeq = ++seq.current;
     try {
-      const body = { ...JSON.parse(requestBody), sticky: stickyRef.current };
+      const body = { ...JSON.parse(requestBody), sticky: stickyRef.current, tabId };
       const res = await fetch('/api/options-screener/scan', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -290,7 +299,7 @@ function ScreenerInner() {
       if (mySeq !== seq.current) return;
       setError(e instanceof Error ? e.message : String(e));
     }
-  }, [requestBody, customSig, presetSig]);
+  }, [requestBody, customSig, presetSig, tabId]);
 
   useEffect(() => {
     const t0 = setTimeout(runScan, 150); // coalesce a burst of control changes
@@ -467,6 +476,19 @@ function ScreenerInner() {
   const presetCountTicked = prefs.presets.length;
   const newCount = presetRows.filter((r) => presetSeen[r.id]?.isNew).length;
 
+  // What the collector is fetching (union of open tabs' selections) and whether this tab's
+  // symbols are in it yet — a newly picked symbol joins on the collector's next cycle.
+  const scope = data?.scope ?? null;
+  const scopeLabel = !scope ? null
+    : scope.all ? `all ${scope.count}`
+    : scope.symbols.length ? `${scope.symbols.slice(0, 3).join(', ')}${scope.symbols.length > 3 ? ` +${scope.symbols.length - 3}` : ''}`
+    : `${scope.count} underlyings`;
+  const knownSymbols = new Set((data?.symbols ?? []).map((s) => s.u));
+  const pendingSymbols = scope && !scope.all && scope.symbols.length
+    ? symbols.filter((s) => knownSymbols.has(s) && !scope.symbols.includes(s))
+    : [];
+  const throttledGap = collectorRunning && (collector?.quote_gap_ms ?? 0) > 1_100 ? collector!.quote_gap_ms! : null;
+
   return (
     <div className="flex flex-col min-h-screen bg-zinc-950 text-white">
       {/* ---------------- header ---------------- */}
@@ -479,7 +501,7 @@ function ScreenerInner() {
             <p className="text-[10px] font-bold uppercase tracking-[0.16em] text-emerald-400 mb-0.5">Trading · Index, stock &amp; MCX options</p>
             <h1 className="text-sm font-bold text-white tracking-tight leading-none">Options Screener</h1>
             <p className="text-[10px] text-zinc-500 font-medium mt-1">
-              What changed in the last 1–30 min across index, stock &amp; MCX options · rescanned every minute
+              What changed in the last 1–30 min across index, stock &amp; MCX options · selected assets rescanned every minute
             </p>
           </div>
         </div>
@@ -492,6 +514,18 @@ function ScreenerInner() {
           }`} title={collector?.last_error ? `Last API error: ${collector.last_error}` : 'Minute-by-minute snapshot collector'}>
             Collector {collector?.status ?? '…'}
           </span>
+          {collectorRunning && scopeLabel && (
+            <span className="text-[10px] font-mono text-zinc-300 px-1.5 py-0.5 rounded border border-zinc-700 bg-zinc-900"
+              title="The collector fetches only what open screener tabs are showing (segment + symbols / watchlist). Pick “All” with no symbols to scan everything.">
+              SCANNING: {scopeLabel}
+            </span>
+          )}
+          {throttledGap != null && (
+            <span className="text-[10px] font-mono text-amber-300 px-1.5 py-0.5 rounded border border-amber-500/30 bg-amber-500/10"
+              title="Dhan returned 429 (rate limit). The shared quote lane has widened the gap between calls for the collector and the dashboard; it eases back after successful calls.">
+              DHAN THROTTLED · {(throttledGap / 1000).toFixed(1)}s/call
+            </span>
+          )}
           <button
             type="button"
             disabled={collectorBusy}
@@ -585,6 +619,12 @@ function ScreenerInner() {
         </div>
 
         {/* ---------------- banners ---------------- */}
+        {collectorRunning && pendingSymbols.length > 0 && (
+          <div className="rounded-lg border border-sky-500/30 bg-sky-500/10 px-3 py-2 text-xs text-sky-300">
+            Adding {pendingSymbols.join(', ')} to the scan — first data on the collector&apos;s next cycle (within a minute);
+            the 1–30 min change columns fill in as history builds.
+          </div>
+        )}
         {error && (
           <div className="rounded-lg border border-red-500/30 bg-red-500/10 px-3 py-2 text-xs text-red-300">Scan error: {error}</div>
         )}

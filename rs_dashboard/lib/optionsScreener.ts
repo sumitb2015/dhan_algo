@@ -86,6 +86,13 @@ export interface SnapshotUnderlying {
   chg: Record<string, number | null>;
 }
 
+export interface ScanScope {
+  all: boolean;
+  count: number;
+  /** Listed only when small (≤ 40). */
+  symbols: string[];
+}
+
 export interface ExchangeScan {
   last_scan: number | null;
   live: boolean;
@@ -99,6 +106,10 @@ export interface Snapshot {
   windows: number[];
   strikes: number;
   exchanges: Record<'NSE' | 'BSE' | 'MCX', ExchangeScan>;
+  /** Every scannable underlying (absent in snapshots from older collectors). */
+  universe?: { u: string; k: Segment }[];
+  /** What the collector is scanning: the union of open tabs' selections. */
+  scope?: ScanScope;
   underlyings: Record<string, SnapshotUnderlying>;
   groups: SnapshotGroup[];
   rows: SnapshotRow[];
@@ -651,6 +662,7 @@ export interface ScanResponse {
   generatedAt: string | null;
   snapshotAgeSec: number | null;
   exchanges: Snapshot['exchanges'] | null;
+  scope?: ScanScope | null;
   window: number;
   totalContracts: number;
   filteredContracts: number;
