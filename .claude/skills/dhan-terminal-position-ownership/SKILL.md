@@ -138,6 +138,16 @@ tick (`reconcileLegWithBroker` in `lib/multiLegFocus.ts`).
   order ack races the position-book write. Reconciling immediately reads that as
   "closed" and drops a live leg. Give a fresh leg a grace window (as in Invariant 2)
   before trusting an absent broker position as a real close. (`5a70b1f`)
+  That window was later lost from `reconcileLegWithBroker` entirely, and it bit on
+  *growth*, not just placement: "+ADD 5 lots" on a 1-lot leg set the ledger to 6 lots,
+  the next poll still read the broker's pre-order 65, clamped down to 1 lot, and
+  clamp-down-only meant it never came back (2026-09-29). Now `MultiLegLeg.filledAt`
+  is stamped on every ledger-growing path (place, add lots, add/merge leg, scale) and
+  `reconcileLegWithBroker` refuses any shrink/close inside `LEG_FILL_GRACE_MS` (20s).
+  Any new path that grows a leg's `fill.qty` MUST stamp `filledAt` too. A gap that
+  already slipped through is recoverable only by the user-confirmed "Claim" action
+  (`claimableLegQty`: broker qty minus every other tracked leg on that contract) —
+  never automatically.
 - **Ledger qty is clamped DOWN to broker qty, never inflated up — this is the
   same rule as Invariant 2, and it was briefly reverted for this leg's *own*
   quantity, which caused a real incident.** `d922a56` argued that once a leg is

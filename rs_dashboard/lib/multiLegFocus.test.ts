@@ -3,7 +3,7 @@ import assert from 'node:assert';
 import {
   resolveTemplateLegs, reconcileLegFillDown, reconcileLegWithBroker, legPnl, basketTotalPnl, sortLegsForExit, findLegPosition,
   computeLegTrailingSL, computeStrategyMetrics, checkStrategyRisk, computeCalendarPayoffCurve, classifyBasketStructure, findSiblingLegCollisions,
-  formatExpiryLabel, legAvgPrice, legExitPrice, legQtyUnits, legPnlPct, legOtmPct, scaleBasketMultiplier,
+  formatExpiryLabel, LEG_FILL_GRACE_MS, claimableLegQty, legAvgPrice, legExitPrice, legQtyUnits, legPnlPct, legOtmPct, scaleBasketMultiplier,
   type StrategyMetrics, type MultiLegLeg, type MultiLegBasket,
 } from './multiLegFocus.ts';
 import type { StrategyTemplate } from './basketStrategies.ts';
@@ -826,4 +826,32 @@ test('scaleBasketMultiplier derives base ratio when ratio is missing on legacy l
   assert.strictEqual(scaled4x.legs[0].lots, 4);
   assert.strictEqual(scaled4x.legs[1].ratio, 3);
   assert.strictEqual(scaled4x.legs[1].lots, 12);
+});
+
+test('reconcileLegWithBroker holds a just-grown leg against a stale smaller broker read (fill grace)', () => {
+  // 1 lot open, user adds 5 lots from the tool → ledger 390. The next poll can
+  // still read the pre-order 65; clamping to it would lose 5 lots for good.
+  const now = 1_000_000;
+  const leg: MultiLegLeg = { id: '1', side: 'S', option: 'CE', strike: 23400, lots: 6, type: 'MARKET', status: 'OPEN', fill: { qty: 390, avgPrice: 98 }, orderRef: { securityId: '1' }, filledAt: now - 3_000 };
+  const stale = { kind: 'match' as const, row: { securityId: '1', netQty: -65, sellAvg: 98 } };
+  const held = reconcileLegWithBroker(leg, stale, 390, 65, now);
+  assert.strictEqual(held.fill?.qty, 390);
+  assert.strictEqual(held.lots, 6);
+  // A flat read inside the window doesn't close it either.
+  assert.strictEqual(reconcileLegWithBroker(leg, { kind: 'flat' }, 390, 65, now).status, 'OPEN');
+  // After the window a real reduction still lands.
+  const later = reconcileLegWithBroker(leg, stale, 390, 65, now + LEG_FILL_GRACE_MS);
+  assert.strictEqual(later.fill?.qty, 65);
+  assert.strictEqual(later.lots, 1);
+});
+
+test('claimableLegQty subtracts every other leg tracking the same contract', () => {
+  const mk = (id: string, legs: MultiLegLeg[]): MultiLegBasket => ({ id, underlying: 'NIFTY', expiry: '2026-10-27', broker: 'dhan', legs } as unknown as MultiLegBasket);
+  const legA: MultiLegLeg = { id: 'a', side: 'S', option: 'CE', strike: 23400, lots: 1, type: 'MARKET', status: 'OPEN', fill: { qty: 65, avgPrice: 98 } };
+  const legB: MultiLegLeg = { id: 'b', side: 'S', option: 'CE', strike: 23400, lots: 2, type: 'MARKET', status: 'OPEN', fill: { qty: 130, avgPrice: 90 } };
+  const closed: MultiLegLeg = { ...legB, id: 'c', status: 'CLOSED', fill: { qty: 0, avgPrice: 90 } };
+  const baskets = [mk('x', [legA, closed]), mk('y', [legB])];
+  assert.deepStrictEqual(claimableLegQty(baskets, 'x', 'a', -390), { claimQty: 260, othersQty: 130 });
+  assert.deepStrictEqual(claimableLegQty([mk('x', [legA])], 'x', 'a', -390), { claimQty: 390, othersQty: 0 });
+  assert.strictEqual(claimableLegQty(baskets, 'x', 'a', 390), null); // long position, short leg
 });

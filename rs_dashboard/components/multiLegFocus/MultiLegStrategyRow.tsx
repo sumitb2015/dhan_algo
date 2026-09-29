@@ -95,6 +95,8 @@ export interface MultiLegStrategyRowProps {
     newSl?: number;
     newTp?: number;
   }) => Promise<void>;
+  /** Explicitly attribute an under-tracked broker qty gap to this leg (user-confirmed). */
+  onClaimBrokerQty?: (legId: string) => Promise<void>;
   onAddNewLeg?: (params: {
     side: 'B' | 'S';
     option: 'CE' | 'PE';
@@ -146,6 +148,7 @@ export default function MultiLegStrategyRow({
   legColumns = DEFAULT_LEG_COLUMNS,
   onLegColumnsChange,
   onAddLots,
+  onClaimBrokerQty,
   onAddNewLeg,
   onScaleStrategy,
   scaling = false,
@@ -1571,6 +1574,7 @@ export default function MultiLegStrategyRow({
                       iv={ivForStrike?.(leg.strike, leg.option, leg.expiry || basket.expiry) ?? 0}
                       strikeBlocked={leg.status === 'DRAFT' && !strikeAllowed(basket.underlying, leg.expiry || basket.expiry, expiries, leg.strike)}
                       qtyWarning={legQtyWarnings?.[`${basket.id}:${leg.id}`]}
+                      onClaimQty={onClaimBrokerQty && leg.status === 'OPEN' ? (() => onClaimBrokerQty(leg.id)) : undefined}
                     />
                   ))}
                 </tbody>

@@ -63,10 +63,12 @@ interface MultiLegLegRowProps {
    *  (it can include a sibling strategy's contribution), so this is the only
    *  visible sign of the gap once the one-shot toast has scrolled away. */
   qtyWarning?: { ownQty: number; brokerQty: number };
+  /** Adopt the broker-qty gap into this leg (confirmed by the handler). */
+  onClaimQty?: () => void;
 }
 
 export default function MultiLegLegRow({
-  leg, allStrikes, ltp, spot, editable, exiting, margin, multiplier = 1, strategyMultiplier = 1, frontExpiry, farExpiry, onChange, onRemove, onExit, onOpenAddLots, onShift, shiftSteps = 1, shiftBusy = false, strikeBlocked = false, columns = DEFAULT_LEG_COLUMNS, showExit = false, iv = 0, qtyWarning,
+  leg, allStrikes, ltp, spot, editable, exiting, margin, multiplier = 1, strategyMultiplier = 1, frontExpiry, farExpiry, onChange, onRemove, onExit, onOpenAddLots, onShift, shiftSteps = 1, shiftBusy = false, strikeBlocked = false, columns = DEFAULT_LEG_COLUMNS, showExit = false, iv = 0, qtyWarning, onClaimQty,
 }: MultiLegLegRowProps) {
   const pnl = leg.fill ? legPnl(leg, ltp, multiplier) : 0;
   const pnlColor = pnl > 0 ? 'text-emerald-400' : pnl < 0 ? 'text-rose-400' : 'text-zinc-400';
@@ -151,6 +153,14 @@ export default function MultiLegLegRow({
           >
             <AlertTriangle className="w-2.5 h-2.5" /> Broker: {qtyWarning.brokerQty}
           </span>
+        )}
+        {qtyWarning && onClaimQty && (
+          <button type="button" onClick={onClaimQty}
+            aria-label={`Track broker quantity ${qtyWarning.brokerQty} on this leg`}
+            title="Placed the extra quantity for this leg from this tool? Adopt it into this leg's tracked qty (other strategies' share on this strike is excluded; asks to confirm)."
+            className={`mt-0.5 mx-auto block px-1.5 rounded border border-amber-500/40 bg-amber-500/10 text-[9px] font-bold text-amber-400 hover:bg-amber-500/20 ${FOCUS_RING}`}>
+            Claim
+          </button>
         )}
       </td>
       {columns.qty && (

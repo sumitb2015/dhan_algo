@@ -40,6 +40,14 @@ export interface MultiLegLeg {
   /** Captured from the order response at placement time; used to match this
    *  leg's own broker position row on every monitoring poll. */
   orderRef?: { securityId?: string; symbol?: string };
+  /** Epoch ms of the last time THIS tool's own order grew this leg's fill
+   *  ledger (initial placement, add lots, scale, merge-on-reopen). The broker
+   *  position book lags an acknowledged order by seconds, so a reconciliation
+   *  poll inside LEG_FILL_GRACE_MS of this can still read the pre-order qty —
+   *  clamping DOWN on that stale read (which can never recover, since
+   *  reconciliation never grows the ledger) is how an added 5 lots vanished
+   *  from a 1-lot leg. See reconcileLegWithBroker. */
+  filledAt?: number;
   status: MultiLegStatus;
 
   // ── Leg-wise Stop Loss, Take Profit, and Trailing SL ─────────────
@@ -544,7 +552,36 @@ export function closedFillFromRow(
  * - If broker position is not found or ambiguous:
  *   Leaves the leg untouched (handles API propagation lag after order placement).
  */
+/** How long after this tool grows a leg's ledger that a smaller/flat broker
+ *  read is treated as position-book lag rather than a real reduction. */
+export const LEG_FILL_GRACE_MS = 20_000;
+
+export function isLegInFillGrace(leg: MultiLegLeg, now: number = Date.now()): boolean {
+  return leg.filledAt != null && now - leg.filledAt >= 0 && now - leg.filledAt < LEG_FILL_GRACE_MS;
+}
+
 export function reconcileLegWithBroker(
+  leg: MultiLegLeg,
+  match: MultiLegMatch,
+  ownQtyHint?: number | null,
+  lotSize?: number | null,
+  now: number = Date.now(),
+): MultiLegLeg {
+  const next = reconcileLegWithBrokerRaw(leg, match, ownQtyHint, lotSize);
+  // Propagation grace (skill invariant 6): right after this tool's own order
+  // grew the leg, the broker can still show the OLD (smaller) qty, or flat.
+  // Reconciliation only ever moves DOWN, so acting on that stale read would
+  // permanently drop the just-placed lots. Hold the ledger until the window
+  // passes; a real reduction still lands on the first poll after it.
+  if (next !== leg && isLegInFillGrace(leg, now)) {
+    const ownQty = leg.fill?.qty ?? 0;
+    const shrinks = next.status === 'CLOSED' || (next.fill?.qty ?? 0) < ownQty || next.lots < leg.lots;
+    if (shrinks) return leg;
+  }
+  return next;
+}
+
+function reconcileLegWithBrokerRaw(
   leg: MultiLegLeg,
   match: MultiLegMatch,
   ownQtyHint?: number | null,
@@ -861,4 +898,40 @@ export function describeSiblingCollisions(collisions: SiblingLegCollision[]): st
     + 'Exits and quantity reconciliation for either basket can then read the pooled total'
     + (collisions.some(c => c.opposite) ? ', and an exit on an opposite-side leg may be refused (sign mismatch)' : '')
     + '.\n\nPlace anyway?';
+}
+
+/**
+ * How much of a pooled broker position a leg may claim as its own when the
+ * user explicitly attributes an under-tracked gap to it (the "Claim" action on
+ * the Broker-qty warning). Never automatic — reconcileLegWithBroker still only
+ * ever clamps down. The claim is the broker's net qty MINUS every other OPEN /
+ * CLOSING / PLACING leg (any basket on the same broker, including this
+ * basket's own other legs) tracking the same contract, so a sibling
+ * strategy's share can never be absorbed. Returns null when the broker row's
+ * sign disagrees with the leg's side (that position isn't this leg's shape).
+ */
+export function claimableLegQty(
+  baskets: MultiLegBasket[],
+  basketId: string,
+  legId: string,
+  brokerNetQty: number,
+): { claimQty: number; othersQty: number } | null {
+  const self = baskets.find(b => b.id === basketId);
+  const leg = self?.legs.find(l => l.id === legId);
+  if (!self || !leg) return null;
+  const expectedSign = leg.side === 'B' ? 1 : -1;
+  if (brokerNetQty === 0 || Math.sign(brokerNetQty) !== expectedSign) return null;
+  const legExpiry = leg.expiry || self.expiry;
+  let othersQty = 0;
+  for (const b of baskets) {
+    if (b.broker !== self.broker || b.underlying !== self.underlying) continue;
+    for (const l of b.legs) {
+      if (b.id === basketId && l.id === legId) continue;
+      if (l.status !== 'OPEN' && l.status !== 'CLOSING' && l.status !== 'PLACING') continue;
+      if (l.option !== leg.option || l.strike !== leg.strike || (l.expiry || b.expiry) !== legExpiry) continue;
+      const q = l.fill?.qty ?? 0;
+      othersQty += l.side === leg.side ? q : -q;
+    }
+  }
+  return { claimQty: Math.max(0, Math.abs(brokerNetQty) - othersQty), othersQty };
 }

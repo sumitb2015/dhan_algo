@@ -15,7 +15,7 @@ import MultiLegStrategyRow from './multiLegFocus/MultiLegStrategyRow';
 import OrdersTradesModal from './multiLegFocus/OrdersTradesModal';
 import MultiLegOptionChainModal from './multiLegFocus/MultiLegOptionChainModal';
 import {
-  resolveTemplateLegs, reconcileLegWithBroker, sortLegsForExit, findLegPosition,
+  resolveTemplateLegs, reconcileLegWithBroker, sortLegsForExit, findLegPosition, claimableLegQty,
   computeLegTrailingSL, computeStrategyMetrics, checkStrategyRisk, fallbackLotSize,
   positionProduct, computeBasketStatus, closedFillFromRow,
   findSiblingLegCollisions, describeSiblingCollisions,
@@ -1263,6 +1263,7 @@ export default function MultiLegFocus({
               ...l,
               status: 'OPEN' as MultiLegStatus,
               fill: { qty, avgPrice: fillPrice },
+              filledAt: Date.now(),
               orderRef: { securityId: secId, symbol: sym },
             };
           });
@@ -1623,6 +1624,7 @@ export default function MultiLegFocus({
             price: newAvgPrice,
             ...(params.newSl !== undefined ? { sl: params.newSl } : {}),
             ...(params.newTp !== undefined ? { tp: params.newTp } : {}),
+            filledAt: Date.now(),
             fill: {
               qty: newTotalQty,
               avgPrice: newAvgPrice,
@@ -1642,6 +1644,69 @@ export default function MultiLegFocus({
       addToast('error', `Add lots failed for ${label}`, String(e));
     }
   }, [broker, hasAuthenticatedBroker, lookupCache, ltpFor, updateBasket, addToast, pollFunds, fetchMarginsForBaskets]);
+
+  // ── Claim an under-tracked broker qty for this leg ─────────────────
+  // Reconciliation never grows a leg's ledger from broker qty (a pooled Dhan
+  // position can hold a sibling's share), so a gap it can't attribute stays a
+  // warning. This is the explicit, user-confirmed attribution: read the broker
+  // live, subtract every other tracked leg on the contract, and adopt the rest.
+  const claimBrokerQty = useCallback(async (basketId: string, legId: string) => {
+    const basket = basketsRef.current.find(b => b.id === basketId);
+    const leg = basket?.legs.find(l => l.id === legId);
+    if (!basket || !leg || leg.status !== 'OPEN') return;
+    const label = `${leg.side === 'B' ? 'BUY' : 'SELL'} ${leg.strike} ${leg.option}`;
+    try {
+      const res = await fetch(scalperRoute(basket.broker as Broker, 'positions'));
+      const j = await res.json() as { success: boolean; data?: Record<string, unknown>[]; error?: string };
+      if (!j.success || !Array.isArray(j.data)) {
+        addToast('error', `Cannot claim ${label}`, j.error ?? 'Broker positions unavailable');
+        return;
+      }
+      const fb = basket.broker === 'dhan' && !leg.orderRef?.securityId ? resolveDhanSecurityId(basket, leg) : undefined;
+      const match = findLegPosition(basket.broker, leg, j.data, fb);
+      if (match.kind !== 'match') {
+        addToast('error', `Cannot claim ${label}`, 'No single live broker position matches this leg');
+        return;
+      }
+      const latest = basketsRef.current;
+      const claim = claimableLegQty(latest, basketId, legId, Number(match.row.netQty) || 0);
+      const cur = latest.find(b => b.id === basketId)?.legs.find(l => l.id === legId);
+      if (!claim || !cur) {
+        addToast('error', `Cannot claim ${label}`, 'Broker position side does not match this leg');
+        return;
+      }
+      const ownQty = cur.fill?.qty ?? 0;
+      const legExpiry = cur.expiry || basket.expiry;
+      const lotSize = lookupCacheRef.current[`${basket.underlying}:${legExpiry}`]?.lotSize
+        ?? fallbackLotSize(basket.underlying as Underlying, basket.broker);
+      const claimQty = Math.floor(claim.claimQty / lotSize) * lotSize;
+      if (claimQty <= ownQty) {
+        addToast('error', `Nothing to claim for ${label}`, claim.othersQty > 0
+          ? `Broker ${Math.abs(Number(match.row.netQty))} − ${claim.othersQty} tracked by other legs leaves no extra for this leg`
+          : 'This leg already tracks the full broker quantity');
+        return;
+      }
+      if (!window.confirm(
+        `${label}: this leg tracks ${ownQty} qty, broker shows ${Math.abs(Number(match.row.netQty))}`
+        + (claim.othersQty > 0 ? ` (${claim.othersQty} of it tracked by other legs)` : '')
+        + `.\n\nSet this leg to ${claimQty} qty (${claimQty / lotSize} lots)? Exits will then close the full ${claimQty}.`
+        + '\n\nOnly do this if the extra quantity was placed for THIS leg (not a manual trade meant to stay separate).',
+      )) return;
+      const brokerAvg = Number(match.row.sellAvg || match.row.buyAvg || match.row.costPrice || 0);
+      patchLegs(basketId, legs => legs.map(l => {
+        if (l.id !== legId) return l;
+        const oldAvg = l.fill?.avgPrice ?? 0;
+        // Broker avg is the pooled position's; it's this leg's only when nothing else shares the contract.
+        const avgPrice = claim.othersQty === 0 && brokerAvg > 0 ? brokerAvg : oldAvg;
+        return { ...l, lots: claimQty / lotSize, price: avgPrice, fill: { ...l.fill, qty: claimQty, avgPrice }, filledAt: Date.now() };
+      }));
+      underAllocatedWarnedRef.current.delete(`${basketId}:${legId}`);
+      addToast('success', `${label} now tracks ${claimQty} qty`, `${claimQty / lotSize} lots`);
+      fetchMarginsForBaskets();
+    } catch (e) {
+      addToast('error', `Cannot claim ${label}`, String(e));
+    }
+  }, [addToast, patchLegs, resolveDhanSecurityId, fetchMarginsForBaskets]);
 
   // ── Add New Leg to Active Basket ──────────────────────────────────
   const addNewLegCore = useCallback(async (basketId: string, params: {
@@ -1729,6 +1794,7 @@ export default function MultiLegFocus({
           type: params.orderType,
           price: fillPrice,
           status: 'OPEN',
+          filledAt: Date.now(),
           fill: {
             qty,
             avgPrice: fillPrice,
@@ -1757,6 +1823,7 @@ export default function MultiLegFocus({
             ...existing,
             lots: existing.lots + params.lots,
             price: avg,
+            filledAt: Date.now(),
             fill: { ...existing.fill, qty: totalQty, avgPrice: avg, orderId: j.order_id ?? existing.fill?.orderId },
           } as MultiLegLeg;
         };
@@ -1867,6 +1934,7 @@ export default function MultiLegFocus({
             ...l,
             lots: newLots,
             price: newAvgPrice,
+            filledAt: Date.now(),
             fill: {
               qty: newTotalQty,
               avgPrice: newAvgPrice,
@@ -1903,6 +1971,7 @@ export default function MultiLegFocus({
           ...l,
           lots: res.newLots,
           price: res.newAvgPrice,
+          filledAt: Date.now(),
           fill: {
             qty: res.newTotalQty,
             avgPrice: res.newAvgPrice,
@@ -2697,6 +2766,7 @@ export default function MultiLegFocus({
                 legColumns={legColumns}
                 onLegColumnsChange={changeLegColumns}
                 onAddLots={params => addLotsToLeg(basket.id, params)}
+                onClaimBrokerQty={legId => claimBrokerQty(basket.id, legId)}
                 onAddNewLeg={params => addNewLegToBasket(basket.id, params)}
                 onScaleStrategy={multiplierDelta => scaleStrategy(basket.id, multiplierDelta)}
                 scaling={!!scalingMap[basket.id]}
