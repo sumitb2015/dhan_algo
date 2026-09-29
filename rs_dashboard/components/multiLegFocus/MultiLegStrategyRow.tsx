@@ -14,7 +14,7 @@ import {
   computeLegTrailingSL, computeStrategyMetrics, checkStrategyRisk, computeBasketStatus, computeCalendarPayoffCurve,
   classifyBasketStructure, legPnl, legAvgPrice, legPnlPct, legQtyUnits,
   findSiblingLegCollisions, type SiblingLegCollision, scaleBasketMultiplier,
-  type MultiLegBasket, type MultiLegLeg, type StrategyRiskConfig,
+  type MultiLegBasket, type MultiLegLeg, type StrategyRiskConfig, type LegQtyWarning,
 } from '@/lib/multiLegFocus';
 import { computePayoff, type PayoffLeg, type PayoffResult } from '@/lib/basketStrategies';
 import { computeBsGreeks, calculateTimeToExpiryYears } from '@/lib/optionsMonitorMath';
@@ -97,6 +97,8 @@ export interface MultiLegStrategyRowProps {
   }) => Promise<void>;
   /** Explicitly attribute an under-tracked broker qty gap to this leg (user-confirmed). */
   onClaimBrokerQty?: (legId: string) => Promise<void>;
+  /** Record quantity closed outside this tool on this leg (no order). */
+  onReduceOutsideQty?: (legId: string) => Promise<void>;
   onAddNewLeg?: (params: {
     side: 'B' | 'S';
     option: 'CE' | 'PE';
@@ -120,7 +122,7 @@ export interface MultiLegStrategyRowProps {
   hedgeBenefit?: number;
   availableFunds?: number;
   /** Keyed `${basketId}:${legId}` — see MultiLegFocus.tsx's legQtyWarnings. */
-  legQtyWarnings?: Record<string, { ownQty: number; brokerQty: number }>;
+  legQtyWarnings?: Record<string, LegQtyWarning>;
   /** All baskets on the page — used only to flag Greeks legs that share a contract with a sibling. */
   allBaskets?: MultiLegBasket[];
 }
@@ -149,6 +151,7 @@ export default function MultiLegStrategyRow({
   onLegColumnsChange,
   onAddLots,
   onClaimBrokerQty,
+  onReduceOutsideQty,
   onAddNewLeg,
   onScaleStrategy,
   scaling = false,
@@ -1575,6 +1578,7 @@ export default function MultiLegStrategyRow({
                       strikeBlocked={leg.status === 'DRAFT' && !strikeAllowed(basket.underlying, leg.expiry || basket.expiry, expiries, leg.strike)}
                       qtyWarning={legQtyWarnings?.[`${basket.id}:${leg.id}`]}
                       onClaimQty={onClaimBrokerQty && leg.status === 'OPEN' ? (() => onClaimBrokerQty(leg.id)) : undefined}
+                      onReduceQty={onReduceOutsideQty && leg.status === 'OPEN' ? (() => onReduceOutsideQty(leg.id)) : undefined}
                     />
                   ))}
                 </tbody>

@@ -148,6 +148,21 @@ tick (`reconcileLegWithBroker` in `lib/multiLegFocus.ts`).
   already slipped through is recoverable only by the user-confirmed "Claim" action
   (`claimableLegQty`: broker qty minus every other tracked leg on that contract) —
   never automatically.
+- **Per-leg clamping cannot see siblings over-tracking one pooled row.** Each leg is
+  clamped against the pooled broker qty on its own, so legs of 390 + 130 on a 390
+  position both pass (2026-09-29: 130 of 23400 CE bought back from outside the tool;
+  tracked 520, broker 390, no warning, and exiting the stale 130 would later have
+  clamped the sibling's 390 down to 260). `legQtyWarningsFor` checks the SUM per
+  contract: 'under' → Claim / Import, 'over' → Reduce (`recordOutsideReduction`, no
+  order; a partial cut splits off a CLOSED slice so its realized P&L survives), and a
+  manual exit on an 'over' leg asks first. Which leg absorbs a gap is always the
+  user's call. Groups in flux (PLACING/CLOSING, fill grace, pendingOrders, mixed sides)
+  are skipped.
+- **Importing outside trades** (`findUntrackedPositions` → ImportPositionsModal) offers
+  only broker qty no live leg tracks (matched by securityId / symbol, same as
+  `findLegPosition`), and adopts a contract only after verifying the row's parsed
+  strike/expiry against that broker's own lookup (`ensureLookup`) — a symbol parse
+  is a hint, not truth. Import re-reads the broker before writing.
 - **Ledger qty is clamped DOWN to broker qty, never inflated up — this is the
   same rule as Invariant 2, and it was briefly reverted for this leg's *own*
   quantity, which caused a real incident.** `d922a56` argued that once a leg is

@@ -3,7 +3,7 @@
 import React from 'react';
 import { X, Plus, AlertTriangle, ChevronUp, ChevronDown } from 'lucide-react';
 import {
-  legPnl, computeLegTrailingSL, formatExpiryLabel, legAvgPrice, legExitPrice, legQtyUnits, legPnlPct, legOtmPct, type MultiLegLeg,
+  legPnl, computeLegTrailingSL, formatExpiryLabel, legAvgPrice, legExitPrice, legQtyUnits, legPnlPct, legOtmPct, type MultiLegLeg, type LegQtyWarning,
 } from '@/lib/multiLegFocus';
 import { DEFAULT_LEG_COLUMNS, type LegColumns } from '@/lib/legColumns';
 import { FOCUS_RING } from '@/components/Scalper';
@@ -56,19 +56,20 @@ interface MultiLegLegRowProps {
   strategyMultiplier?: number;
   /** Live implied volatility as a fraction (0.14 = 14%); 0 when unknown. */
   iv?: number;
-  /** Set when the broker shows more quantity at this strike than this
-   *  strategy's own tracked qty — see MultiLegFocus.tsx's legQtyWarnings and
-   *  the dhan-terminal-position-ownership skill's Invariant 6: the displayed
-   *  qty/lots deliberately never inflate to match the broker's pooled total
-   *  (it can include a sibling strategy's contribution), so this is the only
+  /** Set when every live leg on this contract together tracks a different qty
+   *  than the broker holds — see MultiLegFocus.tsx's legQtyWarnings and the
+   *  dhan-terminal-position-ownership skill's Invariant 6: the displayed
+   *  qty/lots never follow the broker's pooled total, so this is the only
    *  visible sign of the gap once the one-shot toast has scrolled away. */
-  qtyWarning?: { ownQty: number; brokerQty: number };
-  /** Adopt the broker-qty gap into this leg (confirmed by the handler). */
+  qtyWarning?: LegQtyWarning;
+  /** 'under': adopt the untracked gap into this leg (confirmed by the handler). */
   onClaimQty?: () => void;
+  /** 'over': record the outside close against this leg (confirmed, no order). */
+  onReduceQty?: () => void;
 }
 
 export default function MultiLegLegRow({
-  leg, allStrikes, ltp, spot, editable, exiting, margin, multiplier = 1, strategyMultiplier = 1, frontExpiry, farExpiry, onChange, onRemove, onExit, onOpenAddLots, onShift, shiftSteps = 1, shiftBusy = false, strikeBlocked = false, columns = DEFAULT_LEG_COLUMNS, showExit = false, iv = 0, qtyWarning, onClaimQty,
+  leg, allStrikes, ltp, spot, editable, exiting, margin, multiplier = 1, strategyMultiplier = 1, frontExpiry, farExpiry, onChange, onRemove, onExit, onOpenAddLots, onShift, shiftSteps = 1, shiftBusy = false, strikeBlocked = false, columns = DEFAULT_LEG_COLUMNS, showExit = false, iv = 0, qtyWarning, onClaimQty, onReduceQty,
 }: MultiLegLegRowProps) {
   const pnl = leg.fill ? legPnl(leg, ltp, multiplier) : 0;
   const pnlColor = pnl > 0 ? 'text-emerald-400' : pnl < 0 ? 'text-rose-400' : 'text-zinc-400';
@@ -148,18 +149,28 @@ export default function MultiLegLegRow({
         )}
         {qtyWarning && (
           <span
-            className="mt-0.5 flex items-center justify-center gap-0.5 text-[9px] font-bold text-amber-400"
-            title={`This strategy tracks ${qtyWarning.ownQty} qty, broker shows ${qtyWarning.brokerQty} at this strike — could be a manual top-up on this leg, or a sibling strategy sharing the strike. Check Orders/Positions.`}
+            className={`mt-0.5 flex items-center justify-center gap-0.5 text-[9px] font-bold ${qtyWarning.kind === 'over' ? 'text-red-400' : 'text-amber-400'}`}
+            title={qtyWarning.kind === 'over'
+              ? `Strategies on this contract track ${qtyWarning.trackedQty} (this leg ${qtyWarning.ownQty}), but the broker holds only ${qtyWarning.brokerQty}: ${qtyWarning.gap} was closed outside this tool.`
+              : `Strategies on this contract track ${qtyWarning.trackedQty} (this leg ${qtyWarning.ownQty}), but the broker holds ${qtyWarning.brokerQty}: ${qtyWarning.gap} is untracked — a manual top-up, or an outside trade.`}
           >
-            <AlertTriangle className="w-2.5 h-2.5" /> Broker: {qtyWarning.brokerQty}
+            <AlertTriangle className="w-2.5 h-2.5" /> {qtyWarning.kind === 'over' ? `Over ${qtyWarning.gap}` : `Untracked ${qtyWarning.gap}`}
           </span>
         )}
-        {qtyWarning && onClaimQty && (
+        {qtyWarning?.kind === 'under' && onClaimQty && (
           <button type="button" onClick={onClaimQty}
-            aria-label={`Track broker quantity ${qtyWarning.brokerQty} on this leg`}
-            title="Placed the extra quantity for this leg from this tool? Adopt it into this leg's tracked qty (other strategies' share on this strike is excluded; asks to confirm)."
+            aria-label={`Track ${qtyWarning.gap} untracked broker quantity on this leg`}
+            title="Placed the extra quantity for this leg? Adopt it into this leg's tracked qty (other strategies' share on this contract is excluded; asks to confirm)."
             className={`mt-0.5 mx-auto block px-1.5 rounded border border-amber-500/40 bg-amber-500/10 text-[9px] font-bold text-amber-400 hover:bg-amber-500/20 ${FOCUS_RING}`}>
             Claim
+          </button>
+        )}
+        {qtyWarning?.kind === 'over' && onReduceQty && (
+          <button type="button" onClick={onReduceQty}
+            aria-label={`Record ${qtyWarning.gap} quantity closed outside the tool on this leg`}
+            title="Was the outside close for THIS leg? Record it here — no order is placed (asks for the exit price and confirms)."
+            className={`mt-0.5 mx-auto block px-1.5 rounded border border-red-500/40 bg-red-500/10 text-[9px] font-bold text-red-400 hover:bg-red-500/20 ${FOCUS_RING}`}>
+            Reduce
           </button>
         )}
       </td>

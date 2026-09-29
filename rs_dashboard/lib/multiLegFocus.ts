@@ -9,6 +9,7 @@ import { nearestStrike, type LegSide, type OptionType, type StrategyTemplate } f
 import { positionProduct, findLivePosition } from './positionProduct.ts';
 import { computeBsGreeks, type OptType } from './optionsMonitorMath.ts';
 import { classifyStructure, type GroupLeg } from './positionStructure.ts';
+import { normalizeExpiry, normalizeOptType, parseTradingSymbol, symbolMatchesUnderlying } from './positionLegs.ts';
 
 export type MultiLegStatus = 'DRAFT' | 'PLACING' | 'OPEN' | 'CLOSING' | 'CLOSED' | 'FAILED';
 
@@ -946,6 +947,215 @@ export function claimableLegQty(
     }
   }
   return { claimQty: Math.max(0, Math.abs(brokerNetQty) - othersQty), othersQty };
+}
+
+// ─── Cross-leg allocation: every leg on a contract vs the broker ─────────
+
+export interface LegQtyWarning {
+  /** 'under': the broker holds more than every tracked leg together (Claim);
+   *  'over': less — something closed quantity outside this tool (Reduce). */
+  kind: 'under' | 'over';
+  ownQty: number;
+  brokerQty: number;
+  /** Sum of every live leg, in any basket on the same broker, on this contract. */
+  trackedQty: number;
+  gap: number;
+}
+
+function contractKey(basket: MultiLegBasket, leg: MultiLegLeg): string {
+  return `${basket.broker}|${basket.underlying}|${leg.option}|${leg.strike}|${leg.expiry || basket.expiry}`;
+}
+
+/**
+ * reconcileLegWithBroker clamps each leg against the pooled broker row on its
+ * own, so legs of 130 and 390 on a 390 position both pass while together they
+ * over-track by 130 (a buy placed outside the tool). This compares the SUM per
+ * contract. It only reports: which leg absorbs a gap is the user's call.
+ * `brokerNetQty` is keyed `${basketId}:${legId}` -> the signed netQty of that
+ * leg's matched live row. Groups in flux (an order in flight, fill grace) or
+ * with mixed sides are skipped.
+ */
+export function legQtyWarningsFor(
+  baskets: MultiLegBasket[],
+  brokerNetQty: Map<string, number>,
+  now: number = Date.now(),
+): Record<string, LegQtyWarning> {
+  const groups = new Map<string, { basket: MultiLegBasket; leg: MultiLegLeg }[]>();
+  for (const b of baskets) {
+    for (const l of b.legs) {
+      if (l.status !== 'OPEN' && l.status !== 'CLOSING' && l.status !== 'PLACING') continue;
+      const k = contractKey(b, l);
+      if (!groups.has(k)) groups.set(k, []);
+      groups.get(k)!.push({ basket: b, leg: l });
+    }
+  }
+  const out: Record<string, LegQtyWarning> = {};
+  for (const members of groups.values()) {
+    if (members.some(({ leg }) => leg.status !== 'OPEN' || isLegInFillGrace(leg, now) || (leg.pendingOrders?.length ?? 0) > 0)) continue;
+    const side = members[0].leg.side;
+    if (members.some(({ leg }) => leg.side !== side)) continue;
+    let net: number | undefined;
+    for (const { basket, leg } of members) {
+      net = brokerNetQty.get(`${basket.id}:${leg.id}`);
+      if (net != null) break;
+    }
+    if (net == null || net === 0 || Math.sign(net) !== (side === 'B' ? 1 : -1)) continue;
+    const brokerQty = Math.abs(net);
+    const trackedQty = members.reduce((s, { leg }) => s + (leg.fill?.qty ?? 0), 0);
+    if (brokerQty === trackedQty) continue;
+    const kind = brokerQty > trackedQty ? 'under' : 'over';
+    for (const { basket, leg } of members) {
+      out[`${basket.id}:${leg.id}`] = {
+        kind, ownQty: leg.fill?.qty ?? 0, brokerQty, trackedQty, gap: Math.abs(brokerQty - trackedQty),
+      };
+    }
+  }
+  return out;
+}
+
+/**
+ * Records that `qty` of a leg was closed outside this tool — no order placed.
+ * A live leg has no field for a partially realized slice, so a partial
+ * reduction splits off a CLOSED leg holding that slice; its P&L then survives
+ * in basketTotalPnl like any other closed leg.
+ */
+export function recordOutsideReduction(
+  leg: MultiLegLeg,
+  qty: number,
+  exitPrice: number,
+  lotSize: number,
+): MultiLegLeg[] {
+  const own = leg.fill?.qty ?? 0;
+  const avgPrice = leg.fill?.avgPrice ?? 0;
+  const cut = Math.min(Math.max(0, qty), own);
+  if (cut <= 0) return [leg];
+  if (cut >= own) {
+    return [{ ...leg, status: 'CLOSED', fill: { qty: 0, avgPrice }, closedFill: { qty: own, exitPrice } }];
+  }
+  const lots = (q: number) => (lotSize > 0 ? Math.max(1, Math.round(q / lotSize)) : leg.lots);
+  const remaining = own - cut;
+  const closedSlice: MultiLegLeg = {
+    id: newLegId(), side: leg.side, option: leg.option, strike: leg.strike, expiry: leg.expiry,
+    lots: lots(cut), type: leg.type, price: leg.price, orderRef: leg.orderRef,
+    status: 'CLOSED', fill: { qty: 0, avgPrice }, closedFill: { qty: cut, exitPrice },
+  };
+  return [{ ...leg, lots: lots(remaining), fill: { ...leg.fill, qty: remaining, avgPrice } }, closedSlice];
+}
+
+// ─── Importing positions opened outside the tool ─────────────────────────
+
+export interface ContractHint {
+  underlying: string;
+  option: 'CE' | 'PE';
+  strike: number;
+  /** null when the broker row carries only month precision (verify via lookup). */
+  expiry: string | null;
+}
+
+export interface UntrackedPosition {
+  broker: string;
+  /** Dhan securityId, else the trading symbol — what findLegPosition matches on. */
+  ident: string;
+  tradingSymbol: string;
+  hint: ContractHint | null;
+  side: 'B' | 'S';
+  brokerQty: number;
+  trackedQty: number;
+  untrackedQty: number;
+  /** The broker's pooled entry average for this side — exact only when nothing else is tracked on it. */
+  brokerAvg: number;
+}
+
+/**
+ * Broker option positions whose net qty is not fully covered by live legs.
+ * Legs are matched by the same identity findLegPosition uses (Dhan securityId,
+ * else trading symbol), so what shows here is exactly what reconciliation
+ * would not attribute to any leg. An over-tracked contract never appears —
+ * that's legQtyWarningsFor's 'over' case, not something to import.
+ */
+export function findUntrackedPositions(
+  broker: string,
+  rows: Record<string, unknown>[],
+  baskets: MultiLegBasket[],
+  hintFor: (row: Record<string, unknown>) => ContractHint | null,
+): UntrackedPosition[] {
+  const trackedSigned = new Map<string, number>();
+  for (const b of baskets) {
+    if (b.broker !== broker) continue;
+    for (const l of b.legs) {
+      if (l.status !== 'OPEN' && l.status !== 'CLOSING' && l.status !== 'PLACING') continue;
+      const ident = broker === 'dhan' ? l.orderRef?.securityId : l.orderRef?.symbol;
+      if (!ident) continue;
+      const q = l.fill?.qty ?? 0;
+      trackedSigned.set(ident, (trackedSigned.get(ident) ?? 0) + (l.side === 'B' ? q : -q));
+    }
+  }
+  const out: UntrackedPosition[] = [];
+  for (const row of rows) {
+    const net = Number(row.netQty) || 0;
+    if (net === 0) continue;
+    if (String(row.positionType ?? '').trim().toUpperCase() === 'CLOSED') continue;
+    const tradingSymbol = String(row.tradingSymbol ?? '');
+    const ident = broker === 'dhan' ? String(row.securityId ?? '') : tradingSymbol;
+    if (!ident) continue;
+    const hint = hintFor(row);
+    if (!hint) continue;
+    const tracked = trackedSigned.get(ident) ?? 0;
+    const rest = net - tracked;
+    if (rest === 0 || Math.sign(rest) !== Math.sign(net)) continue;
+    const side = net > 0 ? 'B' : 'S';
+    out.push({
+      broker, ident, tradingSymbol, hint, side,
+      brokerQty: Math.abs(net),
+      trackedQty: Math.abs(tracked),
+      untrackedQty: Math.abs(rest),
+      brokerAvg: Number((side === 'B' ? row.buyAvg : row.sellAvg) || row.costPrice || 0),
+    });
+  }
+  return out;
+}
+
+/**
+ * Best-effort contract for a broker position row: Dhan's drv* fields, else
+ * the trading symbol. Only a HINT — Zerodha's monthly symbols can misparse
+ * (NIFTY26OCT23400CE reads as day 26), so the caller must verify it against the
+ * broker's own strike lookup before adopting anything.
+ */
+export function contractHintFromRow(row: Record<string, unknown>, underlyings: string[]): ContractHint | null {
+  const sym = String(row.tradingSymbol ?? '');
+  const underlying = [...underlyings].sort((a, b) => b.length - a.length).find(u => symbolMatchesUnderlying(sym, u));
+  if (!underlying) return null;
+  const drvType = normalizeOptType(row.drvOptionType);
+  const drvStrike = Number(row.drvStrikePrice ?? 0);
+  if (drvType && drvStrike > 0) {
+    return { underlying, option: drvType, strike: drvStrike, expiry: normalizeExpiry(row.drvExpiryDate) };
+  }
+  const parsed = parseTradingSymbol(sym);
+  if (!parsed) return null;
+  return { underlying, option: parsed.type, strike: parsed.strike, expiry: parsed.expiry };
+}
+
+/** A live leg adopting `qty` of an untracked broker position (no order placed). */
+export function legFromUntracked(
+  pos: UntrackedPosition,
+  contract: { option: 'CE' | 'PE'; strike: number; expiry: string },
+  qty: number,
+  avgPrice: number,
+  lotSize: number,
+): MultiLegLeg {
+  return {
+    id: newLegId(),
+    side: pos.side,
+    option: contract.option,
+    strike: contract.strike,
+    expiry: contract.expiry,
+    lots: lotSize > 0 ? Math.max(1, Math.round(qty / lotSize)) : 1,
+    type: 'MARKET',
+    price: avgPrice,
+    status: 'OPEN',
+    fill: { qty, avgPrice },
+    orderRef: pos.broker === 'dhan' ? { securityId: pos.ident } : { symbol: pos.ident },
+  };
 }
 
 // ─── Execution broker ────────────────────────────────────────────────────

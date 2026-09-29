@@ -4,6 +4,7 @@ import {
   resolveTemplateLegs, reconcileLegFillDown, reconcileLegWithBroker, legPnl, basketTotalPnl, sortLegsForExit, findLegPosition,
   computeLegTrailingSL, computeStrategyMetrics, checkStrategyRisk, computeCalendarPayoffCurve, classifyBasketStructure, findSiblingLegCollisions,
   formatExpiryLabel, LEG_FILL_GRACE_MS, claimableLegQty, executionBroker, applyOrderOutcomes, normalizeOrderRow, PENDING_ORDER_TTL_MS, legBrokerMismatch, classifyDhanOrder, type NormalizedOrder, legAvgPrice, legExitPrice, legQtyUnits, legPnlPct, legOtmPct, scaleBasketMultiplier,
+  legQtyWarningsFor, recordOutsideReduction, findUntrackedPositions, legFromUntracked, contractHintFromRow,
   type StrategyMetrics, type MultiLegLeg, type MultiLegBasket,
 } from './multiLegFocus.ts';
 import type { StrategyTemplate } from './basketStrategies.ts';
@@ -926,4 +927,83 @@ test('classifyDhanOrder: MARKET is placed only once TRADED; LIMIT once resting',
   assert.strictEqual(classifyDhanOrder('PART_TRADED', 'LIMIT'), 'working');
   assert.strictEqual(classifyDhanOrder('CANCELLED', 'LIMIT'), 'dead');
   assert.strictEqual(classifyDhanOrder('', 'LIMIT'), 'pending');
+});
+
+// ── Cross-leg allocation (2026-09-29: 23400 CE shared by Short Strangle 390 + naked call 130,
+//    then 130 bought back outside the tool — broker 390, tracked 520, no warning) ──
+const alloc = (id: string, legs: MultiLegLeg[]): MultiLegBasket =>
+  ({ id, underlying: 'NIFTY', expiry: '2026-10-27', broker: 'dhan', legs } as unknown as MultiLegBasket);
+const shortCe = (id: string, qty: number, extra: Partial<MultiLegLeg> = {}): MultiLegLeg =>
+  ({ id, side: 'S', option: 'CE', strike: 23400, lots: qty / 65, type: 'MARKET', status: 'OPEN', fill: { qty, avgPrice: 96.85 }, orderRef: { securityId: '51368' }, ...extra });
+
+test('legQtyWarningsFor flags sibling legs that together over-track the broker', () => {
+  const baskets = [alloc('strangle', [shortCe('s', 390)]), alloc('naked', [shortCe('n', 130)])];
+  const net = new Map([['strangle:s', -390], ['naked:n', -390]]);
+  const w = legQtyWarningsFor(baskets, net, 0);
+  assert.deepStrictEqual(w['naked:n'], { kind: 'over', ownQty: 130, brokerQty: 390, trackedQty: 520, gap: 130 });
+  assert.strictEqual(w['strangle:s'].kind, 'over');
+});
+
+test('legQtyWarningsFor: under-tracked, balanced, and in-flux groups', () => {
+  const two = [alloc('strangle', [shortCe('s', 390)]), alloc('naked', [shortCe('n', 130)])];
+  assert.deepStrictEqual(legQtyWarningsFor(two, new Map([['strangle:s', -520]]), 0), {});
+  const under = legQtyWarningsFor(two, new Map([['strangle:s', -585]]), 0);
+  assert.deepStrictEqual(under['naked:n'], { kind: 'under', ownQty: 130, brokerQty: 585, trackedQty: 520, gap: 65 });
+  // A leg inside its fill grace window: the broker can still show the pre-order qty.
+  const fresh = [alloc('strangle', [shortCe('s', 390)]), alloc('naked', [shortCe('n', 130, { filledAt: 1_000 })])];
+  assert.deepStrictEqual(legQtyWarningsFor(fresh, new Map([['strangle:s', -390]]), 1_000 + LEG_FILL_GRACE_MS - 1), {});
+  // Broker row on the other side / unknown: nothing to say.
+  assert.deepStrictEqual(legQtyWarningsFor(two, new Map([['strangle:s', 390]]), 0), {});
+  assert.deepStrictEqual(legQtyWarningsFor(two, new Map(), 0), {});
+});
+
+test('recordOutsideReduction closes fully, or splits off a CLOSED slice on a partial', () => {
+  const [closed] = recordOutsideReduction(shortCe('n', 130, { fill: { qty: 130, avgPrice: 92.65 } }), 130, 103.075, 65);
+  assert.strictEqual(closed.status, 'CLOSED');
+  assert.deepStrictEqual(closed.fill, { qty: 0, avgPrice: 92.65 });
+  assert.deepStrictEqual(closed.closedFill, { qty: 130, exitPrice: 103.075 });
+  assert.ok(Math.abs(legPnl(closed, 0) - (92.65 - 103.075) * 130) < 1e-9);
+
+  const parts = recordOutsideReduction(shortCe('s', 390, { fill: { qty: 390, avgPrice: 98.25 }, sl: 20 }), 130, 103.075, 65);
+  assert.strictEqual(parts.length, 2);
+  assert.strictEqual(parts[0].id, 's');
+  assert.strictEqual(parts[0].status, 'OPEN');
+  assert.deepStrictEqual(parts[0].fill, { qty: 260, avgPrice: 98.25 });
+  assert.strictEqual(parts[0].lots, 4);
+  assert.strictEqual(parts[1].status, 'CLOSED');
+  assert.deepStrictEqual(parts[1].closedFill, { qty: 130, exitPrice: 103.075 });
+  assert.strictEqual(parts[1].lots, 2);
+  assert.strictEqual(parts[1].sl, undefined);
+  assert.notStrictEqual(parts[1].id, 's');
+
+  const leg = shortCe('x', 65);
+  assert.deepStrictEqual(recordOutsideReduction(leg, 0, 100, 65), [leg]);
+});
+
+test('findUntrackedPositions reports only the qty no live leg tracks', () => {
+  const dhanRow = { securityId: '51368', tradingSymbol: 'NIFTY-Oct2026-23400-CE', netQty: -520, sellAvg: 96.85, buyAvg: 0,
+    drvOptionType: 'CALL', drvStrikePrice: 23400, drvExpiryDate: '2026-10-27 14:30:00' };
+  const hint = (r: Record<string, unknown>) => contractHintFromRow(r, ['NIFTY', 'BANKNIFTY']);
+  const baskets = [alloc('strangle', [shortCe('s', 390), { ...shortCe('old', 130), status: 'CLOSED', fill: { qty: 0, avgPrice: 90 } }])];
+  const [u] = findUntrackedPositions('dhan', [dhanRow], baskets, hint);
+  assert.strictEqual(u.untrackedQty, 130);
+  assert.strictEqual(u.trackedQty, 390);
+  assert.strictEqual(u.side, 'S');
+  assert.deepStrictEqual(u.hint, { underlying: 'NIFTY', option: 'CE', strike: 23400, expiry: '2026-10-27' });
+  // Fully tracked, over-tracked, flat, or another underlying: not importable.
+  assert.deepStrictEqual(findUntrackedPositions('dhan', [{ ...dhanRow, netQty: -390 }], baskets, hint), []);
+  assert.deepStrictEqual(findUntrackedPositions('dhan', [{ ...dhanRow, netQty: -260 }], baskets, hint), []);
+  assert.deepStrictEqual(findUntrackedPositions('dhan', [{ ...dhanRow, netQty: 0 }], [], hint), []);
+  assert.deepStrictEqual(findUntrackedPositions('dhan', [{ ...dhanRow, tradingSymbol: 'NIFTYNXT50-Oct2026-700-CE' }], [], hint), []);
+  // Another broker's legs never count against this broker's rows.
+  assert.strictEqual(findUntrackedPositions('dhan', [dhanRow], [{ ...baskets[0], broker: 'kotak' }], hint)[0].untrackedQty, 520);
+
+  const leg = legFromUntracked(u, { option: 'CE', strike: 23400, expiry: '2026-10-27' }, 130, 92.65, 65);
+  assert.strictEqual(leg.status, 'OPEN');
+  assert.strictEqual(leg.lots, 2);
+  assert.deepStrictEqual(leg.fill, { qty: 130, avgPrice: 92.65 });
+  assert.deepStrictEqual(leg.orderRef, { securityId: '51368' });
+  // Symbol-keyed brokers match on the trading symbol.
+  const z = findUntrackedPositions('zerodha', [{ tradingSymbol: 'NIFTY2692224600CE', netQty: 65, buyAvg: 50 }], [], hint)[0];
+  assert.deepStrictEqual(legFromUntracked(z, { option: 'CE', strike: 24600, expiry: '2026-09-22' }, 65, 50, 65).orderRef, { symbol: 'NIFTY2692224600CE' });
 });
