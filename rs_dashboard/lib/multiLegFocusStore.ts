@@ -3,8 +3,10 @@ import fs from 'fs';
 import { PROJECT_ROOT } from '@/lib/pyExec';
 
 import type { MultiLegBasket } from './multiLegFocus';
+import { appendToArchive, splitStaleClosed, type ArchivedBasket } from './multiLegArchive';
 
 const STORE_FILE = path.join(PROJECT_ROOT, 'debug', 'multi_leg_baskets.json');
+const ARCHIVE_FILE = path.join(PROJECT_ROOT, 'debug', 'multi_leg_baskets_archive.json');
 
 interface Store {
   baskets: MultiLegBasket[];
@@ -30,6 +32,24 @@ export function readBaskets(): MultiLegBasket[] {
 
 export function writeBaskets(baskets: MultiLegBasket[]): void {
   writeJsonAtomic(STORE_FILE, { baskets });
+}
+
+export function readArchive(): ArchivedBasket[] {
+  try {
+    if (!fs.existsSync(ARCHIVE_FILE)) return [];
+    const raw = JSON.parse(fs.readFileSync(ARCHIVE_FILE, 'utf-8')) as { baskets?: ArchivedBasket[] };
+    return Array.isArray(raw.baskets) ? raw.baskets : [];
+  } catch (err) {
+    // An unreadable archive must not be overwritten with just today's retirees.
+    throw new Error(`multi_leg_baskets_archive.json unreadable: ${String(err)}`);
+  }
+}
+
+/** Written BEFORE the live store drops these baskets — see appendToArchive. */
+function archiveBaskets(retired: MultiLegBasket[]): void {
+  if (retired.length === 0) return;
+  const next = appendToArchive(readArchive(), retired, new Date().toISOString());
+  writeJsonAtomic(ARCHIVE_FILE, { baskets: next });
 }
 
 /** Upsert one basket — full-basket save or a smaller patch merged onto the
@@ -60,38 +80,40 @@ export function upsertBasket(basket: Partial<MultiLegBasket> & { id?: string }):
   return baskets;
 }
 
+/** Removes a basket from the live store; one with trade history is archived first. */
 export function deleteBasket(id: string): MultiLegBasket[] {
-  const baskets = readBaskets().filter(b => b.id !== id);
+  const all = readBaskets();
+  archiveBaskets(all.filter(b => b.id === id));
+  const baskets = all.filter(b => b.id !== id);
   writeBaskets(baskets);
   return baskets;
-}
-
-function istDateOf(iso: string): string {
-  return new Date(iso).toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
 }
 
 function istToday(): string {
   return new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
 }
 
-function isFullyClosed(basket: MultiLegBasket): boolean {
-  return basket.legs.length > 0 && basket.legs.every(l => l.status === 'CLOSED');
-}
-
-/** Drops any basket whose every leg is CLOSED and whose last update (the
+/** Moves any basket whose every leg is CLOSED and whose last update (the
  *  reconciliation tick that closed its final leg, or a manual exit) landed on
- *  a previous IST calendar day — a strategy exited today keeps showing all
- *  day, then is gone the next time this is called after midnight IST. Runs
- *  on every GET (see the baskets route) rather than a separate scheduled job,
- *  so the store never accumulates more than one day of finished history. A
- *  basket with any still-open/placing/closing leg is never touched here,
- *  regardless of age. */
+ *  a previous IST calendar day out of the live store and into
+ *  debug/multi_leg_baskets_archive.json — a strategy exited today keeps
+ *  showing all day, then leaves the page the first time this runs after
+ *  midnight IST. Runs on every GET (see the baskets route) rather than a
+ *  separate scheduled job. A basket with any still-open/placing/closing leg is
+ *  never touched here, regardless of age. */
 export function pruneStaleClosedBaskets(): MultiLegBasket[] {
   const baskets = readBaskets();
-  const today = istToday();
-  const kept = baskets.filter(b => !(isFullyClosed(b) && istDateOf(b.updatedAt) < today));
-  if (kept.length !== baskets.length) writeBaskets(kept);
-  return kept;
+  const { keep, retire } = splitStaleClosed(baskets, istToday());
+  if (retire.length === 0) return baskets;
+  try {
+    archiveBaskets(retire);
+  } catch (err) {
+    // Keep them live rather than lose them; the page still loads.
+    console.error('[multiLegFocusStore] archive failed, not pruning:', err);
+    return baskets;
+  }
+  writeBaskets(keep);
+  return keep;
 }
 
 let _basketSeq = 0;
