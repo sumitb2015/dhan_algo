@@ -1,7 +1,8 @@
 'use client';
 
 import React, { useState, useEffect, useMemo, useRef, useCallback } from 'react';
-import { Plus, RefreshCw, Layers, ClipboardList, ListTree, ChevronDown, ChevronRight, Download } from 'lucide-react';
+import { Plus, RefreshCw, Layers, ClipboardList, ListTree, ChevronDown, ChevronRight, Download, History } from 'lucide-react';
+import Link from 'next/link';
 import NavBar from './NavBar';
 import { type Toast, FOCUS_RING } from './Scalper';
 import { useLiveOptionsWS } from '@/lib/useLiveOptionsWS';
@@ -14,6 +15,7 @@ import StrategyCardGrid from './basket/StrategyCardGrid';
 import MultiLegStrategyRow from './multiLegFocus/MultiLegStrategyRow';
 import OrdersTradesModal from './multiLegFocus/OrdersTradesModal';
 import ImportPositionsModal, { type ImportCandidate, type ImportRequest } from './multiLegFocus/ImportPositionsModal';
+import HistoryModal from './multiLegFocus/HistoryModal';
 import MultiLegOptionChainModal from './multiLegFocus/MultiLegOptionChainModal';
 import {
   resolveTemplateLegs, reconcileLegWithBroker, sortLegsForExit, findLegPosition, claimableLegQty, executionBroker,
@@ -27,6 +29,8 @@ import {
 } from '@/lib/multiLegFocus';
 import { closeOrderProduct } from '@/lib/positionProduct';
 import { planLegShifts, clampShiftSteps } from '@/lib/strikeShift';
+import { pnlMultiplier } from '@/lib/multiLegArchive';
+import { previousDaysPnl, type TradeHistoryResponse } from '@/lib/portfolioDailyPnl';
 import { DEFAULT_LEG_COLUMNS, loadLegColumns, saveLegColumns, type LegColumns } from '@/lib/legColumns';
 import { strikeAllowed, strikeRuleApplies, allowedStrikes, snapToAllowed, assessSpread } from '@/lib/farExpiryRules';
 
@@ -978,27 +982,43 @@ export default function MultiLegFocus({
   }, [selectedUnderlying, expiriesMap, chainData, broker, persistBasket, addToast]);
 
   // ── Global P&L Across All Baskets ─────────────────────────────────
-  // Lifetime (every leg since each strategy started) and today — the latter is
-  // the broker positions MTM's scope: live legs in full plus legs closed today.
-  // Ticks each minute so Today rolls over at IST midnight on a page left open.
+  // Today is the broker positions MTM's scope: live legs in full plus legs
+  // closed today. Prev 3D is the whole Dhan account's net realized P&L over
+  // the 3 market days before today — the Trader's Diary's own daily series
+  // (/api/portfolio-trades), so the two pages can't disagree.
+  // Ticks each minute so both roll over at IST midnight on a page left open.
   const [pnlNow, setPnlNow] = useState(() => Date.now());
   useEffect(() => {
     const t = setInterval(() => setPnlNow(Date.now()), 60_000);
     return () => clearInterval(t);
   }, []);
-  const { overallTotalPnl, overallTodayPnl } = useMemo(() => {
-    let total = 0;
+  const [tradeHistory, setTradeHistory] = useState<TradeHistoryResponse | null>(null);
+  useEffect(() => {
+    let alive = true;
+    const load = async () => {
+      try {
+        const res = await fetch('/api/portfolio-trades');
+        const j = await res.json() as TradeHistoryResponse;
+        if (alive && j.success && j.available) setTradeHistory(j);
+      } catch { /* keep the last good copy */ }
+    };
+    void load();
+    // The file only changes when a Diary/Weekly Target sync runs, so a slow refresh is enough.
+    const t = setInterval(load, 10 * 60_000);
+    return () => { alive = false; clearInterval(t); };
+  }, []);
+  const overallTodayPnl = useMemo(() => {
     let today = 0;
-    const now = pnlNow;
     for (const b of baskets) {
-      const crudeMult = b.broker === 'dhan'
-        ? (b.underlying === 'CRUDEOIL' ? 100 : b.underlying === 'CRUDEOILM' ? 10 : 1)
-        : 1;
-      total += computeStrategyMetrics(b.legs, l => ltpFor(b, l), crudeMult).totalPnlRupees;
-      today += computeStrategyMetrics(b.legs.filter(l => legCountsToday(l, now)), l => ltpFor(b, l), crudeMult).totalPnlRupees;
+      today += computeStrategyMetrics(b.legs.filter(l => legCountsToday(l, pnlNow)), l => ltpFor(b, l), pnlMultiplier(b)).totalPnlRupees;
     }
-    return { overallTotalPnl: total, overallTodayPnl: today };
+    return today;
   }, [baskets, ltpFor, pnlNow]);
+  const prevDaysPnl = useMemo(() => {
+    if (!tradeHistory) return null;
+    const todayIst = new Date(pnlNow).toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
+    return previousDaysPnl(tradeHistory, todayIst, 3);
+  }, [tradeHistory, pnlNow]);
 
   const activeStrategiesCount = useMemo(() => {
     return baskets.filter(b => b.legs.some(l => l.status === 'OPEN')).length;
@@ -1953,6 +1973,7 @@ export default function MultiLegFocus({
 
   // ── Import positions taken outside the tool ────────────────────────
   const [showImportModal, setShowImportModal] = useState(false);
+  const [showHistoryModal, setShowHistoryModal] = useState(false);
 
   // Untracked qty per logged-in broker, each contract verified against that
   // broker's own strike lookup: a symbol parse is only a hint (Zerodha's
@@ -2949,14 +2970,28 @@ export default function MultiLegFocus({
             >
               Today: {overallTodayPnl >= 0 ? '+' : ''}{fmtMoney(overallTodayPnl)}
             </span>
-            <span
-              className={`h-8 flex items-center px-3 rounded-lg text-xs font-bold font-mono tabular-nums border ${
-                overallTotalPnl >= 0 ? 'text-emerald-400 border-emerald-500/30 bg-emerald-500/5' : 'text-rose-400 border-rose-500/30 bg-rose-500/5'
-              }`}
-              title="Every leg since each strategy started, including legs closed on earlier days"
-            >
-              Total P&L: {overallTotalPnl >= 0 ? '+' : ''}{fmtMoney(overallTotalPnl)}
-            </span>
+            {prevDaysPnl ? (
+              <Link
+                href="/portfolio/diary"
+                className={`h-8 flex items-center px-3 rounded-lg text-xs font-bold font-mono tabular-nums border ${
+                  prevDaysPnl.net >= 0 ? 'text-emerald-400 border-emerald-500/30 bg-emerald-500/5' : 'text-rose-400 border-rose-500/30 bg-rose-500/5'
+                } ${FOCUS_RING}`}
+                title={`Whole Dhan account, net realized P&L (after charges) over the previous 3 market days — from the Trader's Diary${
+                  tradeHistory?.generatedAt ? `, synced ${tradeHistory.generatedAt.slice(0, 16).replace('T', ' ')}` : ''
+                }:\n${
+                  prevDaysPnl.days.map(d => `${d.date}: ${d.netPnl >= 0 ? '+' : ''}${fmtMoney(d.netPnl)}`).join('\n')
+                }\nGross ${prevDaysPnl.gross >= 0 ? '+' : ''}${fmtMoney(prevDaysPnl.gross)} − charges ${fmtMoney(prevDaysPnl.charges)}`}
+              >
+                Prev 3D: {prevDaysPnl.net >= 0 ? '+' : ''}{fmtMoney(prevDaysPnl.net)}
+              </Link>
+            ) : (
+              <span
+                className="h-8 flex items-center px-3 rounded-lg text-xs font-bold font-mono border border-zinc-700 text-zinc-500"
+                title="No trade history yet: run a sync from the Trader's Diary"
+              >
+                Prev 3D: —
+              </span>
+            )}
 
             {/* Orders & Tradebook Button */}
             <button
@@ -2987,6 +3022,17 @@ export default function MultiLegFocus({
             >
               <Download className="w-3.5 h-3.5 text-emerald-400" />
               <span>Import</span>
+            </button>
+
+            {/* Archived (closed on earlier days) strategies */}
+            <button
+              type="button"
+              onClick={() => setShowHistoryModal(true)}
+              className={`h-8 px-3 inline-flex items-center gap-1.5 text-xs font-bold rounded-lg border border-zinc-700 bg-zinc-900 hover:bg-zinc-800 text-zinc-200 hover:text-white transition-colors cursor-pointer ${FOCUS_RING}`}
+              title="Strategies closed on earlier days, with realized P&L"
+            >
+              <History className="w-3.5 h-3.5 text-amber-400" />
+              <span>History</span>
             </button>
 
             {/* Option Chain & Greeks Button */}
@@ -3216,6 +3262,8 @@ export default function MultiLegFocus({
         error={ordersError}
         onRefresh={fetchOrdersAndTrades}
       />
+
+      {showHistoryModal && <HistoryModal onClose={() => setShowHistoryModal(false)} />}
 
       {showImportModal && (
         <ImportPositionsModal

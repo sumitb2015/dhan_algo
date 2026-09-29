@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert';
-import { splitStaleClosed, appendToArchive, hasTradeHistory, type ArchivedBasket } from './multiLegArchive.ts';
+import { splitStaleClosed, appendToArchive, hasTradeHistory, summarizeArchived, type ArchivedBasket } from './multiLegArchive.ts';
 import type { MultiLegBasket, MultiLegLeg } from './multiLegFocus.ts';
 
 const leg = (status: MultiLegLeg['status'], extra: Partial<MultiLegLeg> = {}): MultiLegLeg =>
@@ -35,3 +35,22 @@ test('appendToArchive stamps archivedAt, skips never-traded drafts, and is idemp
   assert.strictEqual(twice[1].archivedAt, '2026-09-30T00:05:00Z');
   assert.strictEqual(appendToArchive(prior, [draft], 'x'), prior);
 });
+
+test('summarizeArchived sums realized P&L, applies the Dhan MCX multiplier, and counts unpriced closes', () => {
+  const closedLeg = (side: 'B' | 'S', entry: number, exit: number, qty: number, closedAt?: number): MultiLegLeg =>
+    leg('CLOSED', { side, fill: { qty: 0, avgPrice: entry }, closedFill: { qty, exitPrice: exit }, closedAt });
+  const b = basket('s', '2026-09-29T10:00:00Z', [
+    closedLeg('S', 31.45, 170.675, 260, 1_000),
+    closedLeg('B', 36, 192.05, 130, 2_000),
+    leg('CLOSED', { fill: { qty: 0, avgPrice: 50 } }),
+  ]);
+  const s = summarizeArchived(b);
+  assert.ok(Math.abs(s.realized - ((31.45 - 170.675) * 260 + (192.05 - 36) * 130)) < 1e-6);
+  assert.strictEqual(s.closedAt, 2_000);
+  assert.strictEqual(s.unpricedLegs, 1);
+  const crude = { ...basket('c', '2026-09-29T10:00:00Z', [closedLeg('B', 100, 110, 2)]), underlying: 'CRUDEOIL' };
+  assert.strictEqual(summarizeArchived(crude).realized, 2000);
+  assert.strictEqual(summarizeArchived({ ...crude, broker: 'kotak' }).realized, 20);
+  assert.strictEqual(summarizeArchived(basket('u', '2026-09-28T10:00:00Z', [])).closedAt, Date.parse('2026-09-28T10:00:00Z'));
+});
+
