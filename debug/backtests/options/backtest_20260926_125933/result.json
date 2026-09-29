@@ -1,0 +1,71 @@
+{
+  "summary": {
+    "total_cycles": 0,
+    "traded_cycles": 0,
+    "wins": 0,
+    "losses": 0,
+    "win_rate": 0,
+    "total_pnl": 0,
+    "avg_pnl": 0,
+    "max_win": 0,
+    "max_loss": 0,
+    "avg_win": 0,
+    "avg_loss": 0,
+    "max_drawdown": 0,
+    "max_drawdown_start": "",
+    "max_drawdown_end": "",
+    "max_drawdown_days": null,
+    "max_trades_in_drawdown": 0,
+    "max_win_streak": 0,
+    "max_loss_streak": 0,
+    "return_maxdd_ratio": null,
+    "reward_risk_ratio": null,
+    "expectancy": 0,
+    "expectancy_ratio": null,
+    "commission_paid": 0
+  },
+  "cycles": [],
+  "equity_curve": [],
+  "monthly_pnl": {},
+  "params": {
+    "start_date": "2026-09-24",
+    "end_date": "2026-09-24",
+    "lot_size": 65,
+    "entry_time": "09:22",
+    "eod_time": "15:15",
+    "profit_target_pct": 0,
+    "overall_sl_pct": 0,
+    "commission_per_lot": 0,
+    "slippage_pct": 0,
+    "strategy_type": "intraday",
+    "legs": [
+      {
+        "option_type": "CE",
+        "position": "sell",
+        "lots": 1,
+        "strike": "ATM",
+        "strike_type": "offset",
+        "leg_sl_pct": 20,
+        "leg_target_pct": 0,
+        "leg_trail_sl_pct": 0
+      },
+      {
+        "option_type": "PE",
+        "position": "sell",
+        "lots": 1,
+        "strike": "ATM",
+        "strike_type": "offset",
+        "leg_sl_pct": 20,
+        "leg_target_pct": 0,
+        "leg_trail_sl_pct": 0
+      }
+    ],
+    "adjustment_mode": "none",
+    "roll_buffer": 35,
+    "roll_type": "points",
+    "max_rolls": 5,
+    "scalp_floor_pct": 0,
+    "trail_sl_pct": 0,
+    "square_off_mode": "one_leg"
+  }
+}

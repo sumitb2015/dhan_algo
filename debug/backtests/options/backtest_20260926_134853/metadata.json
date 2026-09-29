@@ -1,0 +1,18 @@
+{
+  "id": "backtest_20260926_134853",
+  "name": "backtest_20260926_134853",
+  "timestamp": "2026-09-26T13:48:53.774Z",
+  "strategy_type": "intraday",
+  "start_date": "2026-09-01",
+  "end_date": "2026-09-24",
+  "trades": 15,
+  "win_rate": 60,
+  "total_pnl": 4619.55,
+  "max_drawdown": 8056.1,
+  "has_tearsheet": false,
+  "has_trades_csv": false,
+  "tags": [
+    "intraday",
+    "options"
+  ]
+}

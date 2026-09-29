@@ -1,0 +1,19 @@
+{
+  "id": "nifty_iron_fly_20260927_191700",
+  "name": "Nifty Iron Fly",
+  "timestamp": "2026-09-27T19:17:04.375594Z",
+  "strategy_type": "intraday",
+  "start_date": "2026-08-17",
+  "end_date": "2026-09-17",
+  "trades": 19,
+  "win_rate": 36.8,
+  "total_pnl": 830.52,
+  "max_drawdown": 8716.17,
+  "has_tearsheet": false,
+  "has_trades_csv": false,
+  "tags": [
+    "intraday",
+    "options",
+    "iron-fly"
+  ]
+}

@@ -1,0 +1,18 @@
+{
+  "id": "nifty_short_straddle_20260927_034436",
+  "name": "Nifty Short Straddle",
+  "timestamp": "2026-09-27T03:44:36.141Z",
+  "strategy_type": "intraday",
+  "start_date": "2026-08-17",
+  "end_date": "2026-09-17",
+  "trades": 23,
+  "win_rate": 65.2,
+  "total_pnl": -3687.52,
+  "max_drawdown": 8606.65,
+  "has_tearsheet": false,
+  "has_trades_csv": false,
+  "tags": [
+    "intraday",
+    "options"
+  ]
+}
