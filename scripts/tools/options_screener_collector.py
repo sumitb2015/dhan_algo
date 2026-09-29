@@ -291,7 +291,10 @@ def build_universe(df, today: date, n_expiries: int):
                 lot_raw = num(getattr(r, 'LOT_SIZE'), 1) or 1
                 lot = 1 if exch == 'MCX' else int(lot_raw)
                 mult = MCX_CONTRACT_SIZE.get(sym, 1) if exch == 'MCX' else int(lot_raw)
-                tick = num(getattr(r, tick_col), 0.05) if tick_col else 0.05
+                # master_list TICK_SIZE is in PAISE (5.0 = Rs 0.05, MCX GOLD 50.0 = Rs 0.50).
+                # Using it raw made the order route round a 16.25 limit to 15 or 20.
+                tick_p = num(getattr(r, tick_col)) if tick_col else None
+                tick = round(tick_p / 100.0, 4) if tick_p else 0.05
                 by_strike.setdefault(strike, {'strike': strike})[str(getattr(r, 'OPTION_TYPE'))] = {
                     'sid': int(getattr(r, 'SECURITY_ID')),
                     'seg': seg,
@@ -325,6 +328,8 @@ class QuoteClient:
     def quote(self, instruments):
         """instruments: list of (seg, sid). Returns {(seg, sid): (quote_dict, fetch_ts)}."""
         out = {}
+        # Per-scan: a batch that failed once must not keep flagging every later clean scan.
+        self.last_error = None
         for i in range(0, len(instruments), QUOTE_BATCH):
             chunk = instruments[i:i + QUOTE_BATCH]
             securities = {}

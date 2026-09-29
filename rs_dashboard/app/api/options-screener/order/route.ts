@@ -68,6 +68,14 @@ export async function POST(req: NextRequest) {
     if (!Number.isFinite(p) || p <= 0) {
       return NextResponse.json({ success: false, error: 'LIMIT order requires a valid price' }, { status: 400 });
     }
+    // Option ticks are ₹0.01–₹0.50. A larger value means a snapshot written before the
+    // collector converted master_list's paise TICK_SIZE — rounding to it would move the price.
+    if (!(row.tick > 0 && row.tick <= 1)) {
+      return NextResponse.json(
+        { success: false, error: `Implausible tick ${row.tick} in snapshot — restart the collector` },
+        { status: 400 },
+      );
+    }
     price = roundToTick(p, row.tick);
     // A fat-fingered limit far from the market fills instantly at a terrible price on a BUY
     // (or gives the premium away on a SELL). Refuse anything wildly off the last print.
