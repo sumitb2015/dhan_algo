@@ -101,6 +101,7 @@ const NAV_GROUPS = [
       { href: '/scalp-cockpit', label: 'Scalp Cockpit', desc: 'Tight multi-window scalping desk: Cumulative OI, Strikes OI slider, India VIX, collapsible Multi-Leg Focus trade desk & analysis windows' },
       { href: '/options-monitor', label: 'Options Monitor', desc: 'Real-time positions & Greeks risk monitor with live 2D payoff curve, strike clearance & hotkey execution [C, P, H, W, X, ESC]' },
       { href: '/cyber-scalper', label: 'Cyber Scalper (9/20 EMA)', desc: 'Futuristic 9/20 EMA & VWAP scalping terminal with live difference bias & big buy/sell order execution' },
+      { href: '/options-screener', label: 'Options Screener', desc: 'What changed in the last 1-30 min across index, stock & MCX options — custom & preset scans (buildup, unusual volume, IV, PCR, OI walls) with a Dhan order ticket' },
       { href: '/ultimate-scanner', label: 'Ultimate Scanner', desc: 'Process-driven Nifty & Sensex option chain scanner, watchlist & multi-leg execution' },
       { href: '/level-chart', label: 'Level Chart', desc: 'Live High/50%/Low interval-level zones for any stock, index or crude oil future' },
       { href: '/options-analytics/live', label: 'Live Payoff', desc: 'Live combined payoff diagram for every underlying with open option positions' },
