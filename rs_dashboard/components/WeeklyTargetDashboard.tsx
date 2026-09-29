@@ -11,18 +11,10 @@ import {
 } from 'recharts';
 import { cn } from '@/lib/utils';
 import { useTradeSync } from '@/lib/useTradeSync';
+import type { DailyPnlPoint, TradeHistoryResponse } from '@/lib/portfolioDailyPnl';
 import NavBar from './NavBar';
 
 // ─── Types ──────────────────────────────────────────────────────────────────
-
-interface DailyPnlPoint {
-  date: string;
-  grossPnl: number;
-  charges: number;
-  statutoryCharges: number;
-  netPnl: number;
-  tradeCount: number;
-}
 
 interface TradeLogRow {
   date: string;
@@ -52,17 +44,7 @@ interface SegmentTotals {
   symbolCount: number;
 }
 
-interface TradeHistoryResponse {
-  success: boolean;
-  available: boolean;
-  syncRunning?: boolean;
-  syncError?: string | null;
-  generatedAt?: string;
-  fromDate?: string;
-  toDate?: string;
-  marketTradingDates?: string[];
-  dailyPnl?: DailyPnlPoint[];
-  dailyPnlBySegment?: Record<string, DailyPnlPoint[]>;
+interface WeeklyTradeHistory extends TradeHistoryResponse {
   trades?: TradeLogRow[];
   segments?: Record<string, SegmentTotals>;
 }
@@ -230,7 +212,7 @@ function useZeroSplit(values: number[], target: number) {
 // ─── Main component ──────────────────────────────────────────────────────────
 
 export default function WeeklyTargetDashboard() {
-  const [data, setData] = useState<TradeHistoryResponse | null>(null);
+  const [data, setData] = useState<WeeklyTradeHistory | null>(null);
   const [loading, setLoading] = useState(true);
   const [segment, setSegment] = useState<Segment>('ALL');
   const [weekOffset, setWeekOffset] = useState(0);

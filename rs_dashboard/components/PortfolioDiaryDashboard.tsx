@@ -6,34 +6,10 @@ import { LineChart, Line, BarChart, Bar, Cell, XAxis, YAxis, CartesianGrid, Tool
 import Link from 'next/link';
 import { cn } from '@/lib/utils';
 import { useTradeSync } from '@/lib/useTradeSync';
+import type { DailyPnlPoint, TradeHistoryResponse } from '@/lib/portfolioDailyPnl';
 import NavBar from './NavBar';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
-
-interface DailyPnlPoint {
-  date: string;
-  grossPnl: number;
-  charges: number;
-  statutoryCharges: number;
-  netPnl: number;
-  tradeCount: number;
-  // Kotak-only. Its Gain/Loss export aggregates per scrip over a DATE RANGE and carries no per-trade
-  // date, so a multi-day export cannot be split into daily points — it becomes one point stamped at
-  // the range's end date with approx=true. Exact when the export covers a single day.
-  approx?: boolean;
-  spanDays?: number;
-  fromDate?: string;
-}
-
-interface TradeHistoryResponse {
-  success: boolean;
-  available: boolean;
-  fromDate?: string;
-  toDate?: string;
-  marketTradingDates?: string[];
-  dailyPnl?: DailyPnlPoint[];
-  dailyPnlBySegment?: Record<string, DailyPnlPoint[]>;
-}
 
 interface KotakPeriod {
   sourceFile: string;

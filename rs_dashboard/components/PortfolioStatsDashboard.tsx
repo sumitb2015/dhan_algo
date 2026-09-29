@@ -6,28 +6,10 @@ import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContai
 import Link from 'next/link';
 import { cn } from '@/lib/utils';
 import { useTradeSync } from '@/lib/useTradeSync';
+import type { DailyPnlPoint, TradeHistoryResponse } from '@/lib/portfolioDailyPnl';
 import NavBar from './NavBar';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
-
-interface DailyPnlPoint {
-  date: string;
-  grossPnl: number;
-  charges: number;
-  statutoryCharges: number;
-  netPnl: number;
-  tradeCount: number;
-}
-
-interface TradeHistoryResponse {
-  success: boolean;
-  available: boolean;
-  fromDate?: string;
-  toDate?: string;
-  syncError?: string | null;
-  dailyPnl?: DailyPnlPoint[];
-  dailyPnlBySegment?: Record<string, DailyPnlPoint[]>;
-}
 
 // Mirrors the defaults in app/api/portfolio-capital/route.ts so a failed config fetch degrades
 // to the same numbers the route would have served.
