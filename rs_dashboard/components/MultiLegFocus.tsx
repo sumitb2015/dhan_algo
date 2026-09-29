@@ -15,7 +15,8 @@ import MultiLegStrategyRow from './multiLegFocus/MultiLegStrategyRow';
 import OrdersTradesModal from './multiLegFocus/OrdersTradesModal';
 import MultiLegOptionChainModal from './multiLegFocus/MultiLegOptionChainModal';
 import {
-  resolveTemplateLegs, reconcileLegWithBroker, sortLegsForExit, findLegPosition, claimableLegQty,
+  resolveTemplateLegs, reconcileLegWithBroker, sortLegsForExit, findLegPosition, claimableLegQty, executionBroker,
+  applyOrderOutcomes, normalizeOrderRow, withPendingOrder, LEG_FILL_GRACE_MS, legBrokerMismatch, type NormalizedOrder,
   computeLegTrailingSL, computeStrategyMetrics, checkStrategyRisk, fallbackLotSize,
   positionProduct, computeBasketStatus, closedFillFromRow,
   findSiblingLegCollisions, describeSiblingCollisions,
@@ -51,6 +52,13 @@ function fallbackStrikesFor(underlying: Underlying): number[] {
 }
 
 const ALL_STRATEGY_TEMPLATES: StrategyTemplate[] = Object.values(STRATEGY_CATEGORIES).flat();
+
+/** lookupCache key. Per broker: Dhan's entries carry security ids, Zerodha/Kotak's
+ *  carry trading symbols, and MCX lot sizes differ 100x between them — one
+ *  broker's entry must never size or resolve another broker's order. */
+function lkKey(broker: string, underlying: string, expiry: string): string {
+  return `${broker}|${underlying}:${expiry}`;
+}
 
 function fmtMoney(n: number): string {
   return `${n < 0 ? '-' : ''}₹${Math.abs(n).toLocaleString('en-IN', { maximumFractionDigits: 0 })}`;
@@ -209,6 +217,7 @@ export default function MultiLegFocus({
   const [chainData, setChainData] = useState<Record<string, { spot: number; strikes: number[]; quotes: Record<string, { ce: number; pe: number; ceIv?: number; peIv?: number }>; prevClose?: number }>>({});
   const [lookupCache, setLookupCache] = useState<Record<string, { lotSize: number; strikes: Record<string, StrikeIdentifier> }>>({});
   const lookupCacheRef = useRef(lookupCache);
+  const lookupInflightRef = useRef<Set<string>>(new Set());
   useEffect(() => { lookupCacheRef.current = lookupCache; }, [lookupCache]);
 
   // Fallback securityId for a Dhan leg whose orderRef never captured one (or
@@ -217,8 +226,7 @@ export default function MultiLegFocus({
   // isn't permanently unmatchable/unexitable. Dhan-only: every other broker
   // matches by trading symbol instead (see findLegPosition).
   const resolveDhanSecurityId = useCallback((b: MultiLegBasket, l: MultiLegLeg): string | undefined => {
-    const pair = `${b.underlying}:${l.expiry || b.expiry}`;
-    const strikeEntry = lookupCacheRef.current[pair]?.strikes?.[String(l.strike)];
+    const strikeEntry = lookupCacheRef.current[lkKey('dhan', b.underlying, l.expiry || b.expiry)]?.strikes?.[String(l.strike)];
     return l.option === 'CE' ? strikeEntry?.ceId : strikeEntry?.peId;
   }, []);
 
@@ -436,25 +444,32 @@ export default function MultiLegFocus({
 
   // Fetch chain data for all unique (underlying, expiry) pairs needed by current baskets
   const fetchAllChains = useCallback(() => {
-    const pairs = new Set<string>();
+    // pair -> brokers that need its lookup (ids/lot size): each basket's own
+    // execution broker, plus the selected one for drafts and the active pair.
+    const pairs = new Map<string, Set<string>>();
+    const need = (pair: string, b: string) => {
+      if (!pairs.has(pair)) pairs.set(pair, new Set());
+      pairs.get(pair)!.add(b);
+    };
     for (const b of basketsRef.current) {
+      const bk = executionBroker(b, broker);
       if (b.underlying && b.expiry) {
-        pairs.add(`${b.underlying}:${b.expiry}`);
+        need(`${b.underlying}:${b.expiry}`, bk);
       }
       // A Calendar/Diagonal leg's far expiry needs its own chain/lookup data
       // — it's a different contract from the basket's front-month expiry.
       for (const l of b.legs) {
         if (b.underlying && l.expiry && l.expiry !== b.expiry) {
-          pairs.add(`${b.underlying}:${l.expiry}`);
+          need(`${b.underlying}:${l.expiry}`, bk);
         }
       }
     }
     // Also include active if not present
     if (activeUnderlying && activeExpiry) {
-      pairs.add(`${activeUnderlying}:${activeExpiry}`);
+      need(`${activeUnderlying}:${activeExpiry}`, broker);
     }
 
-    for (const pair of pairs) {
+    for (const [pair, lookupBrokers] of pairs) {
       const [u, exp] = pair.split(':');
       if (!u || !exp) continue;
 
@@ -499,25 +514,29 @@ export default function MultiLegFocus({
         })
         .catch(() => {});
 
-      // Also ensure lookup data (lot size & strike map) is loaded
-      if (!lookupCacheRef.current[pair]) {
-        const lookupUrl = broker === 'dhan'
+      // Also ensure lookup data (lot size & strike map) is loaded, per broker
+      for (const lb of lookupBrokers) {
+        const key = lkKey(lb, u, exp);
+        if (lookupCacheRef.current[key] || lookupInflightRef.current.has(key)) continue;
+        lookupInflightRef.current.add(key);
+        const lookupUrl = lb === 'dhan'
           ? `/api/scalper/lookup?underlying=${u}&expiry=${exp}`
-          : scalperRoute(broker, `lookup?underlying=${u}&expiry=${exp}`);
+          : scalperRoute(lb as Broker, `lookup?underlying=${u}&expiry=${exp}`);
         fetch(lookupUrl)
           .then(r => r.json())
           .then((j: { success: boolean; data?: { lotSize?: number; strikes?: Record<string, StrikeIdentifier> } }) => {
             if (j.success && j.data) {
               setLookupCache(prev => ({
                 ...prev,
-                [pair]: {
-                  lotSize: j.data!.lotSize ?? fallbackLotSize(u as Underlying, broker),
+                [key]: {
+                  lotSize: j.data!.lotSize ?? fallbackLotSize(u as Underlying, lb),
                   strikes: j.data!.strikes ?? {},
                 },
               }));
             }
           })
-          .catch(() => {});
+          .catch(() => {})
+          .finally(() => { lookupInflightRef.current.delete(key); });
       }
     }
   }, [broker, activeUnderlying, activeExpiry]);
@@ -638,15 +657,14 @@ export default function MultiLegFocus({
   const fetchMarginsForBaskets = useCallback(() => {
     for (const basket of basketsRef.current) {
       if (!basket.legs || basket.legs.length === 0 || !basket.expiry) continue;
-      const pair = `${basket.underlying}:${basket.expiry}`;
-      const lookup = lookupCache[pair];
-      const lotSize = lookup?.lotSize ?? fallbackLotSize(basket.underlying as Underlying, broker);
+      const bk = executionBroker(basket, broker);
+      const lookup = lookupCache[lkKey(bk, basket.underlying, basket.expiry)];
+      const lotSize = lookup?.lotSize ?? fallbackLotSize(basket.underlying as Underlying, bk);
 
       const legsPayload = basket.legs.map(leg => {
         // A Calendar/Diagonal far leg resolves its security id against its
         // OWN expiry's strike map, never the basket's front-month one.
-        const legPair = `${basket.underlying}:${leg.expiry || basket.expiry}`;
-        const legStrikes = lookupCache[legPair]?.strikes ?? {};
+        const legStrikes = lookupCache[lkKey(bk, basket.underlying, leg.expiry || basket.expiry)]?.strikes ?? {};
         const strikeEntry = legStrikes[String(leg.strike)];
         const resolvedSecId = leg.orderRef?.securityId || (leg.option === 'CE' ? strikeEntry?.ceId : strikeEntry?.peId);
         const price = (leg.fill?.avgPrice && leg.fill.avgPrice > 0) ? leg.fill.avgPrice : (leg.price ?? 0);
@@ -669,12 +687,12 @@ export default function MultiLegFocus({
       // Include the *resolved* securityId (not just leg.orderRef?.securityId)
       // so a leg going from unresolved -> resolved as lookupCache populates
       // is treated as a real composition change, not skipped as unchanged.
-      const signature = `${broker}:${basket.underlying}:${basket.expiry}:${legsPayload.map(l =>
+      const signature = `${bk}:${basket.underlying}:${basket.expiry}:${legsPayload.map(l =>
         `${l.side}-${l.option}-${l.strike}@${l.expiry}x${l.lots}-${l.status}-${l.securityId || ''}`
       ).join('|')}`;
       if (lastFetchedMarginSignatureRef.current[basket.id] === signature) continue;
       lastFetchedMarginSignatureRef.current[basket.id] = signature;
-      const compAtRequest = basketCompKey(basket);
+      const compAtRequest = `${bk}|${basketCompKey(basket)}`;
 
       fetch('/api/multi-leg-focus/margin', {
         method: 'POST',
@@ -682,7 +700,7 @@ export default function MultiLegFocus({
         body: JSON.stringify({
           underlying: basket.underlying,
           expiry: basket.expiry,
-          broker,
+          broker: bk,
           legs: legsPayload,
         }),
       })
@@ -1026,7 +1044,8 @@ export default function MultiLegFocus({
           underlying: basket.underlying,
           legs: legs.map(l => {
             const exp = l.expiry || basket.expiry;
-            const ident = broker === 'dhan' ? lookupCache[`${basket.underlying}:${exp}`]?.strikes?.[String(l.strike)] : undefined;
+            // Depth is Dhan market data whatever broker trades the leg; ids only when Dhan's lookup is loaded.
+            const ident = lookupCache[lkKey('dhan', basket.underlying, exp)]?.strikes?.[String(l.strike)];
             return { strike: l.strike, option: l.option, expiry: exp, securityId: l.option === 'CE' ? ident?.ceId : ident?.peId };
           }),
         }),
@@ -1043,7 +1062,7 @@ export default function MultiLegFocus({
       }
     } catch { out.unavailable = true; }
     return out;
-  }, [broker, lookupCache]);
+  }, [lookupCache]);
 
   /** Turns spread findings into UI: blocks on no bid/ask, confirms on wide. true = proceed. */
   const resolveSpreadIssues = useCallback((issues: SpreadIssues): boolean => {
@@ -1064,6 +1083,8 @@ export default function MultiLegFocus({
       addToast('error', 'No broker logged in', 'Log in before placing orders');
       return;
     }
+    // The strategy's own account (its row badge) — never the toolbar selection.
+    const bk = executionBroker(basket, broker) as Broker;
 
     const blockedLegs = blockedStrikeLegs(basket, basket.legs);
     if (blockedLegs.length) { toastBlockedStrikes(blockedLegs, basket); return; }
@@ -1084,7 +1105,7 @@ export default function MultiLegFocus({
     // between legs, so an unverified margin check is a block.
     const marginEntry = basketMargins[basketId];
     const requiredMargin = marginEntry?.basketMargin;
-    if (requiredMargin == null || marginCompRef.current[basketId] !== basketCompKey(basket)) {
+    if (requiredMargin == null || marginCompRef.current[basketId] !== `${bk}|${basketCompKey(basket)}`) {
       addToast('error', 'Margin not verified — placement blocked', 'Required margin is not calculated for the current legs yet. Wait a moment and retry.');
       return;
     }
@@ -1095,16 +1116,18 @@ export default function MultiLegFocus({
     // round trip; otherwise read live.
     const readFunds = async (): Promise<number | null> => {
       try {
-        const fr = await fetch(scalperRoute(broker, 'funds'));
+        const fr = await fetch(scalperRoute(bk, 'funds'));
         const fj = await fr.json() as { success: boolean; data?: Record<string, unknown> };
         if (!fj.success || !fj.data) return null;
         const available = Number(fj.data.availabelBalance ?? fj.data.availableBalance ?? 0);
-        setFundsData({ available, used: Number(fj.data.utilizedAmount ?? fj.data.usedMargin ?? fj.data.marginUsed ?? 0) });
-        fundsAtRef.current = Date.now();
+        if (brokerNowRef.current === bk) {
+          setFundsData({ available, used: Number(fj.data.utilizedAmount ?? fj.data.usedMargin ?? fj.data.marginUsed ?? 0) });
+          fundsAtRef.current = Date.now();
+        }
         return available;
       } catch { return null; }
     };
-    const availableFunds = (fundsData && Date.now() - fundsAtRef.current < 5000) ? fundsData.available : await readFunds();
+    const availableFunds = (bk === broker && fundsData && Date.now() - fundsAtRef.current < 5000) ? fundsData.available : await readFunds();
     if (availableFunds == null) {
       addToast('error', 'Funds unavailable — placement blocked', 'Could not read available margin from the broker. Retry once funds load.');
       return;
@@ -1119,13 +1142,12 @@ export default function MultiLegFocus({
     }
     if (!resolveSpreadIssues(await spreadPromise)) return;
 
-    const pair = `${basket.underlying}:${basket.expiry}`;
-    const lookup = lookupCache[pair];
-    const lotSize = lookup?.lotSize ?? fallbackLotSize(basket.underlying as Underlying, broker);
+    const lookup = lookupCache[lkKey(bk, basket.underlying, basket.expiry)];
+    const lotSize = lookup?.lotSize ?? fallbackLotSize(basket.underlying as Underlying, bk);
     // A Calendar/Diagonal far leg trades a different contract than the
     // basket's front-month expiry — it must resolve its own security id
     // against ITS OWN expiry's strike map, never the front one.
-    const strikeMapFor = (legExpiry: string) => lookupCache[`${basket.underlying}:${legExpiry}`]?.strikes ?? {};
+    const strikeMapFor = (legExpiry: string) => lookupCache[lkKey(bk, basket.underlying, legExpiry)]?.strikes ?? {};
 
     // Another basket already holding one of these contracts means both share a
     // single netted broker row — warn before placing, let the user override.
@@ -1139,7 +1161,7 @@ export default function MultiLegFocus({
 
     const ordered = sortLegsForPlacement(basket.legs);
     let working: MultiLegLeg[] = basket.legs.map(l => ({ ...l, status: 'PLACING' as MultiLegStatus }));
-    updateBasket(basketId, { legs: working });
+    updateBasket(basketId, { broker: bk, legs: working });
 
     type PlacedLeg = {
       legId: string;
@@ -1188,7 +1210,7 @@ export default function MultiLegFocus({
         );
       }
       for (const p of [...marketLegs].reverse()) {
-        const reverseReq = resolveOrderRequest(broker, {
+        const reverseReq = resolveOrderRequest(bk, {
           side: p.side === 'B' ? 'S' : 'B', option: p.option, strike: p.strike, qty: p.qty, type: 'MARKET',
           underlying: basket.underlying as Underlying, productType: 'MARGIN',
           securityId: p.securityId, tradingsymbol: p.symbol,
@@ -1207,11 +1229,10 @@ export default function MultiLegFocus({
             const reversedLeg = basketsRef.current.find(b => b.id === basketId)?.legs.find(l => l.id === p.legId);
             const currentLtp = reversedLeg ? ltpFor(basket, reversedLeg) : 0;
             const exitPrice = (j.price && j.price > 0) ? j.price : (currentLtp > 0 ? currentLtp : (reversedLeg?.fill?.avgPrice ?? 0));
-            updateBasket(basketId, {
-              legs: basketsRef.current.find(b => b.id === basketId)?.legs.map(l =>
-                (l.id === p.legId ? { ...l, status: 'CLOSED' as MultiLegStatus, fill: { qty: 0, avgPrice: l.fill?.avgPrice ?? 0 }, closedFill: { qty: p.qty, exitPrice } } : l)
-              ) ?? [],
-            });
+            patchLegs(basketId, legs => legs.map(l =>
+              (l.id === p.legId
+                ? withPendingOrder({ ...l, status: 'CLOSED' as MultiLegStatus, fill: { qty: 0, avgPrice: l.fill?.avgPrice ?? 0 }, closedFill: { qty: p.qty, exitPrice } }, j.order_id, 'exit', p.qty)
+                : l)));
           } else {
             addToast('error', `Reverse failed for ${p.label}`, `${j.error ?? 'Unknown error'} — close manually from Orders/Positions`);
           }
@@ -1225,7 +1246,7 @@ export default function MultiLegFocus({
     const placeOneLegRaw = async (leg: MultiLegLeg): Promise<boolean> => {
       const label = `${leg.side === 'B' ? 'BUY' : 'SELL'} ${leg.strike} ${leg.option}`;
       const qty = leg.lots * lotSize;
-      const req = resolveOrderRequest(broker, {
+      const req = resolveOrderRequest(bk, {
         side: leg.side,
         option: leg.option,
         strike: leg.strike,
@@ -1262,9 +1283,10 @@ export default function MultiLegFocus({
             return {
               ...l,
               status: 'OPEN' as MultiLegStatus,
-              fill: { qty, avgPrice: fillPrice },
+              fill: { qty, avgPrice: fillPrice, orderId: j.order_id },
               filledAt: Date.now(),
               orderRef: { securityId: secId, symbol: sym },
+              pendingOrders: j.order_id ? [{ id: String(j.order_id), kind: 'grow' as const, qty, at: Date.now() }] : undefined,
             };
           });
           updateBasket(basketId, { legs: working });
@@ -1350,7 +1372,7 @@ export default function MultiLegFocus({
       pollFunds();
       fetchMarginsForBaskets();
     }
-  }, [broker, hasAuthenticatedBroker, lookupCache, updateBasket, ltpFor, addToast, pollFunds, fetchMarginsForBaskets, basketMargins, fundsData, blockedStrikeLegs, toastBlockedStrikes, fetchSpreadIssues, resolveSpreadIssues]);
+  }, [broker, hasAuthenticatedBroker, lookupCache, updateBasket, patchLegs, ltpFor, addToast, pollFunds, fetchMarginsForBaskets, basketMargins, fundsData, blockedStrikeLegs, toastBlockedStrikes, fetchSpreadIssues, resolveSpreadIssues]);
 
   // The lock is taken synchronously, before any await inside placeBasketInner
   // (funds read, confirm dialogs), so a fast double-click cannot slip a second
@@ -1369,15 +1391,24 @@ export default function MultiLegFocus({
     }
   }, [placeBasketInner, addToast]);
 
-  const exitOneLeg = useCallback(async (basketId: string, leg: MultiLegLeg): Promise<{ closed: boolean; qty: number }> => {
+  const exitOneLeg = useCallback(async (basketId: string, leg: MultiLegLeg): Promise<{ closed: boolean; qty: number; maxAfter?: number }> => {
     let closed = false;   // true once this leg is confirmed flat/exited
     let closedQty = 0;    // units this call actually sent to close (0 when already flat)
+    let maxAfter: number | undefined;   // broker |netQty| once the exit fills (set when an order was sent)
     if (exitingLegsRef.current.has(leg.id)) return { closed, qty: closedQty };
     exitingLegsRef.current.add(leg.id);
     setExitingLegs(prev => new Set(prev).add(leg.id));
 
     const label = `${leg.side === 'B' ? 'BUY' : 'SELL'} ${leg.strike} ${leg.option}`;
     const basket = basketsRef.current.find(b => b.id === basketId);
+    // The strategy's own account — never the toolbar selection (see executionBroker).
+    const bk = (basket ? executionBroker(basket, broker) : broker) as Broker;
+    if (legBrokerMismatch(leg, bk)) {
+      addToast('error', `Cannot exit ${label} here`, `This leg was placed on a different broker than this strategy's ${BROKER_LABELS[bk] ?? bk} badge — exit it from that broker's Orders/Positions.`);
+      exitingLegsRef.current.delete(leg.id);
+      setExitingLegs(prev => { const next = new Set(prev); next.delete(leg.id); return next; });
+      return { closed, qty: closedQty };
+    }
 
     // Hedge Protection Guard: Warn if manually exiting a BUY leg while short legs remain open
     if (leg.side === 'B') {
@@ -1400,13 +1431,13 @@ export default function MultiLegFocus({
     }
 
     try {
-      const res = await fetch(scalperRoute(broker, 'positions'));
+      const res = await fetch(scalperRoute(bk, 'positions'));
       const j = await res.json() as { success: boolean; data?: Record<string, unknown>[] };
       const rows = j.success && Array.isArray(j.data) ? j.data : [];
-      const fallbackSecId = (broker === 'dhan' && basket && !leg.orderRef?.securityId)
+      const fallbackSecId = (bk === 'dhan' && basket && !leg.orderRef?.securityId)
         ? resolveDhanSecurityId(basket, leg)
         : undefined;
-      const match = findLegPosition(broker, leg, rows, fallbackSecId);
+      const match = findLegPosition(bk, leg, rows, fallbackSecId);
       const securityId = leg.orderRef?.securityId ?? fallbackSecId;
 
       // Persist a resolved fallback securityId onto the leg — but only once
@@ -1418,6 +1449,19 @@ export default function MultiLegFocus({
       if (fallbackSecId && !leg.orderRef?.securityId && (match.kind === 'match' || match.kind === 'flat')) {
         patchLegs(basketId, legs => legs.map(l =>
           (l.id === leg.id ? { ...l, orderRef: { ...l.orderRef, securityId: fallbackSecId } } : l)));
+      }
+
+      // Just placed/added: the position book can lag the fill by seconds, so
+      // "flat"/"not found" here is not evidence the leg is closed. Don't mark
+      // it CLOSED (that would untrack a live position) — ask for a retry.
+      // Only the short post-fill window (not a still-pending grow order, which can
+      // hold for minutes if the order book is unreachable) — a manual exit must
+      // never be blocked for long.
+      const latestLeg = basketsRef.current.find(b => b.id === basketId)?.legs.find(l => l.id === leg.id) ?? leg;
+      const freshFill = latestLeg.filledAt != null && Date.now() - latestLeg.filledAt < LEG_FILL_GRACE_MS;
+      if (match.kind !== 'match' && freshFill) {
+        addToast('error', `Cannot exit ${label} yet`, 'The broker has not shown this just-placed position yet — retry in a few seconds.');
+        return { closed, qty: closedQty };
       }
 
       if (match.kind === 'flat') {
@@ -1448,6 +1492,13 @@ export default function MultiLegFocus({
       const brokerAbs = Math.abs(netQty);
       const ownQty = leg.fill?.qty && leg.fill.qty > 0 ? leg.fill.qty : brokerAbs;
       const qty = Math.min(ownQty, brokerAbs);
+      // Mid-lag after an add: the broker shows only part of what was just
+      // placed. Exiting now would close that part and mark the whole leg
+      // CLOSED, untracking the rest when it lands — wait for the book instead.
+      if (brokerAbs < ownQty && freshFill) {
+        addToast('error', `Cannot exit ${label} yet`, `Broker shows ${brokerAbs} of this leg's ${ownQty} — a just-placed order is still settling. Retry in a few seconds.`);
+        return { closed, qty: closedQty };
+      }
       if (qty <= 0) {
         addToast('error', `Cannot exit ${label}`, 'Resolved exit quantity is zero');
         return { closed, qty: closedQty };
@@ -1455,7 +1506,7 @@ export default function MultiLegFocus({
 
       const side = leg.side === 'B' ? 'SELL' : 'BUY';
       const product = positionProduct(match.row);
-      const productPayload = closeOrderProduct(broker, product);
+      const productPayload = closeOrderProduct(bk, product);
 
       if (!productPayload) {
         addToast('error', `Cannot exit ${label}`, `Unsupported product "${product}"`);
@@ -1465,12 +1516,12 @@ export default function MultiLegFocus({
       const isSensex = basket?.underlying === 'SENSEX';
       const isCrude = basket?.underlying === 'CRUDEOIL' || basket?.underlying === 'CRUDEOILM';
       const defaultSegDhan = isSensex ? 'BSE_FNO' : (isCrude ? 'MCX_COMM' : 'NSE_FNO');
-      const defaultExchOther = broker === 'kotak'
+      const defaultExchOther = bk === 'kotak'
         ? (isSensex ? 'bse_fo' : (isCrude ? 'mcx_fo' : 'nse_fo'))
         : (isSensex ? 'BFO' : (isCrude ? 'MCX' : 'NFO'));
 
-      const orderUrl = broker === 'dhan' ? '/api/scalper/fast-order' : scalperRoute(broker, 'order');
-      const body = broker === 'dhan'
+      const orderUrl = bk === 'dhan' ? '/api/scalper/fast-order' : scalperRoute(bk, 'order');
+      const body = bk === 'dhan'
         ? { securityId, quantity: qty, side, orderType: 'MARKET', exchangeSegment: match.row.exchangeSegment ?? defaultSegDhan, ...productPayload.fields }
         : {
             tradingsymbol: leg.orderRef?.symbol
@@ -1491,9 +1542,12 @@ export default function MultiLegFocus({
         addToast('success', `Exited ${label}`, `ID: ${j2.order_id}`);
         const currentLtp = basket ? ltpFor(basket, leg) : 0;
         const exitPrice = (j2.price && j2.price > 0) ? j2.price : (currentLtp > 0 ? currentLtp : (leg.fill?.avgPrice ?? 0));
-        patchLegs(basketId, legs => legs.map(l => (l.id === leg.id ? { ...l, status: 'CLOSED' as const, fill: { qty: 0, avgPrice: l.fill?.avgPrice ?? 0 }, closedFill: { qty, exitPrice } } : l)));
+        patchLegs(basketId, legs => legs.map(l => (l.id === leg.id
+          ? withPendingOrder({ ...l, status: 'CLOSED' as const, fill: { qty: 0, avgPrice: l.fill?.avgPrice ?? 0 }, closedFill: { qty, exitPrice } }, j2.order_id, 'exit', qty)
+          : l)));
         closed = true;
         closedQty = qty;
+        maxAfter = brokerAbs - qty;
       } else {
         addToast('error', `Exit failed for ${label}`, j2.error ?? 'Unknown error');
       }
@@ -1509,7 +1563,7 @@ export default function MultiLegFocus({
       pollFunds();
       fetchMarginsForBaskets();
     }
-    return { closed, qty: closedQty };
+    return { closed, qty: closedQty, maxAfter };
   }, [broker, patchLegs, addToast, pollFunds, fetchMarginsForBaskets, resolveDhanSecurityId]);
 
   const exitingBasketsRef = useRef<Set<string>>(new Set());
@@ -1527,21 +1581,47 @@ export default function MultiLegFocus({
       // fully done before longs so margin is never released out of order.
       const shorts = openLegs.filter(l => l.side === 'S');
       const longs = openLegs.filter(l => l.side === 'B');
-      const shortResults = shorts.length ? await Promise.all(shorts.map(leg => exitOneLeg(basketId, leg).then(r => r.closed, () => false))) : [];
+      const shortResults = shorts.length
+        ? await Promise.all(shorts.map(leg => exitOneLeg(basketId, leg).catch(() => ({ closed: false, qty: 0, maxAfter: undefined as number | undefined }))))
+        : [];
       if (longs.length) {
         // Never sell the hedges while a short is still open — that would leave
         // it naked (and release the margin that supports it).
-        if (shortResults.some(ok => !ok)) {
+        if (shortResults.some(r => !r.closed)) {
           addToast('error', 'Long legs NOT exited', 'A short leg did not close — keeping the hedges in place. Resolve the short, then exit again.');
-        } else {
-          await Promise.allSettled(longs.map(leg => exitOneLeg(basketId, leg)));
+          return;
         }
+        // An exit ACK is not a fill (it can still be rejected by RMS). Confirm the
+        // shorts actually came down at the broker before selling the hedges.
+        const toVerify = shorts.map((l, i) => ({ l, maxAfter: shortResults[i].maxAfter })).filter(v => v.maxAfter != null);
+        if (toVerify.length) {
+          const bk = executionBroker(basket, brokerNowRef.current) as Broker;
+          let verified = false;
+          for (let attempt = 0; attempt < 4 && !verified; attempt++) {
+            if (attempt > 0) await new Promise(r => setTimeout(r, 700));
+            try {
+              const res = await fetch(scalperRoute(bk, 'positions'));
+              const j = await res.json() as { success: boolean; data?: Record<string, unknown>[] };
+              if (!j.success || !Array.isArray(j.data)) continue;
+              verified = toVerify.every(({ l, maxAfter }) => {
+                const fb = bk === 'dhan' && !l.orderRef?.securityId ? resolveDhanSecurityId(basket, l) : undefined;
+                const m = findLegPosition(bk, l, j.data!, fb);
+                return m.kind === 'flat' || (m.kind === 'match' && Math.abs(Number(m.row.netQty ?? 0)) <= maxAfter!);
+              });
+            } catch { /* retry */ }
+          }
+          if (!verified && !window.confirm('Could not confirm the short legs are closed at the broker yet (an exit can still be rejected). Exit the hedge (BUY) legs anyway?')) {
+            addToast('error', 'Hedges kept', 'Short exits not confirmed yet — exit the long legs once Orders/Positions show the shorts closed.');
+            return;
+          }
+        }
+        await Promise.allSettled(longs.map(leg => exitOneLeg(basketId, leg)));
       }
     } finally {
       exitingBasketsRef.current.delete(basketId);
       setExitingMap(prev => ({ ...prev, [basketId]: false }));
     }
-  }, [exitOneLeg, addToast]);
+  }, [exitOneLeg, addToast, resolveDhanSecurityId]);
 
   // ── Add Lots to Existing Position Leg ─────────────────────────────
   const addLotsToLeg = useCallback(async (basketId: string, params: {
@@ -1563,19 +1643,24 @@ export default function MultiLegFocus({
     }
 
     const legExpiry = leg.expiry || basket.expiry;
-    const pair = `${basket.underlying}:${legExpiry}`;
-    const lookup = lookupCache[pair];
-    const lotSize = lookup?.lotSize ?? fallbackLotSize(basket.underlying as Underlying, broker);
+    // The strategy's own account — never the toolbar selection (see executionBroker).
+    const bk = executionBroker(basket, broker) as Broker;
+    const lookup = lookupCache[lkKey(bk, basket.underlying, legExpiry)];
+    const lotSize = lookup?.lotSize ?? fallbackLotSize(basket.underlying as Underlying, bk);
     const strikeMap = lookup?.strikes ?? {};
 
     const qty = params.lots * lotSize;
     const label = `${leg.side === 'B' ? 'BUY' : 'SELL'} ${leg.strike} ${leg.option}`;
+    if (legBrokerMismatch(leg, bk)) {
+      addToast('error', `Cannot add to ${label}`, `This leg was placed on a different broker than this strategy's ${BROKER_LABELS[bk] ?? bk} badge.`);
+      return;
+    }
 
     const collisions = findSiblingLegCollisions(
       basketsRef.current, basketId, [{ side: leg.side, option: leg.option, strike: leg.strike, expiry: legExpiry }]);
     if (collisions.length && !window.confirm(describeSiblingCollisions(collisions))) return;
 
-    const req = resolveOrderRequest(broker, {
+    const req = resolveOrderRequest(bk, {
       side: leg.side,
       option: leg.option,
       strike: leg.strike,
@@ -1609,31 +1694,28 @@ export default function MultiLegFocus({
             ? params.limitPrice
             : (currentLtp > 0 ? currentLtp : (leg.price ?? 0)));
 
-        const oldQty = (leg.fill?.qty && leg.fill.qty > 0) ? leg.fill.qty : (leg.lots * lotSize);
-        const oldAvg = (leg.fill?.avgPrice && leg.fill.avgPrice > 0) ? leg.fill.avgPrice : (leg.price || currentLtp);
-        const newTotalQty = oldQty + qty;
-        const newAvgPrice = ((oldAvg * oldQty) + (fillPrice * qty)) / newTotalQty;
-        const newLots = leg.lots + params.lots;
-
-        const latestLegs = basketsRef.current.find(b => b.id === basket.id)?.legs ?? basket.legs;
-        const updatedLegs = latestLegs.map(l => {
-          if (l.id !== leg.id) return l;
-          return {
+        // Grown from the LATEST leg (functional update), not the pre-await
+        // snapshot — a poll tick may have reconciled it while the order was out.
+        const grow = (l: MultiLegLeg): MultiLegLeg => {
+          const oldQty = (l.fill?.qty && l.fill.qty > 0) ? l.fill.qty : (l.lots * lotSize);
+          const oldAvg = (l.fill?.avgPrice && l.fill.avgPrice > 0) ? l.fill.avgPrice : (l.price || currentLtp);
+          const totalQty = oldQty + qty;
+          const avg = ((oldAvg * oldQty) + (fillPrice * qty)) / totalQty;
+          return withPendingOrder({
             ...l,
-            lots: newLots,
-            price: newAvgPrice,
+            lots: Math.max(1, Math.round(totalQty / lotSize)),
+            price: avg,
             ...(params.newSl !== undefined ? { sl: params.newSl } : {}),
             ...(params.newTp !== undefined ? { tp: params.newTp } : {}),
             filledAt: Date.now(),
-            fill: {
-              qty: newTotalQty,
-              avgPrice: newAvgPrice,
-              orderId: j.order_id ?? l.fill?.orderId,
-            },
-          };
-        });
-
-        updateBasket(basket.id, { legs: updatedLegs });
+            fill: { qty: totalQty, avgPrice: avg, orderId: j.order_id ?? l.fill?.orderId },
+          }, j.order_id, 'grow', qty);
+        };
+        const latest = basketsRef.current.find(b => b.id === basket.id)?.legs.find(l => l.id === leg.id) ?? leg;
+        const preview = grow(latest);
+        const newAvgPrice = preview.price ?? fillPrice;
+        const newLots = preview.lots;
+        patchLegs(basket.id, legs => legs.map(l => (l.id === leg.id ? grow(l) : l)));
         addToast('success', `Added ${params.lots} lot(s) to ${label}`, `New Avg: ₹${newAvgPrice.toFixed(2)} (${newLots} lots total)`);
         pollFunds();
         fetchMarginsForBaskets();
@@ -1643,7 +1725,7 @@ export default function MultiLegFocus({
     } catch (e) {
       addToast('error', `Add lots failed for ${label}`, String(e));
     }
-  }, [broker, hasAuthenticatedBroker, lookupCache, ltpFor, updateBasket, addToast, pollFunds, fetchMarginsForBaskets]);
+  }, [broker, hasAuthenticatedBroker, lookupCache, ltpFor, patchLegs, addToast, pollFunds, fetchMarginsForBaskets]);
 
   // ── Claim an under-tracked broker qty for this leg ─────────────────
   // Reconciliation never grows a leg's ledger from broker qty (a pooled Dhan
@@ -1654,6 +1736,7 @@ export default function MultiLegFocus({
     const basket = basketsRef.current.find(b => b.id === basketId);
     const leg = basket?.legs.find(l => l.id === legId);
     if (!basket || !leg || leg.status !== 'OPEN') return;
+    if (legBrokerMismatch(leg, basket.broker)) return;
     const label = `${leg.side === 'B' ? 'BUY' : 'SELL'} ${leg.strike} ${leg.option}`;
     try {
       const res = await fetch(scalperRoute(basket.broker as Broker, 'positions'));
@@ -1677,7 +1760,7 @@ export default function MultiLegFocus({
       }
       const ownQty = cur.fill?.qty ?? 0;
       const legExpiry = cur.expiry || basket.expiry;
-      const lotSize = lookupCacheRef.current[`${basket.underlying}:${legExpiry}`]?.lotSize
+      const lotSize = lookupCacheRef.current[lkKey(basket.broker, basket.underlying, legExpiry)]?.lotSize
         ?? fallbackLotSize(basket.underlying as Underlying, basket.broker);
       const claimQty = Math.floor(claim.claimQty / lotSize) * lotSize;
       if (claimQty <= ownQty) {
@@ -1737,8 +1820,10 @@ export default function MultiLegFocus({
     const blockedNew = blockedStrikeLegs(basket, [{ strike: params.strike, option: params.option, expiry: legExpiry }]);
     if (blockedNew.length) { toastBlockedStrikes(blockedNew, basket); return false; }
     const pair = `${basket.underlying}:${legExpiry}`;
-    const lookup = lookupCache[pair];
-    const lotSize = lookup?.lotSize ?? fallbackLotSize(basket.underlying as Underlying, broker);
+    // The strategy's own account — never the toolbar selection (see executionBroker).
+    const bk = executionBroker(basket, broker) as Broker;
+    const lookup = lookupCache[lkKey(bk, basket.underlying, legExpiry)];
+    const lotSize = lookup?.lotSize ?? fallbackLotSize(basket.underlying as Underlying, bk);
     const strikeMap = lookup?.strikes ?? {};
 
     const qty = params.lots * lotSize;
@@ -1750,7 +1835,7 @@ export default function MultiLegFocus({
     if (!opts?.skipSpreadCheck
         && !resolveSpreadIssues(await fetchSpreadIssues(basket, [{ option: params.option, strike: params.strike, expiry: legExpiry, type: params.orderType }]))) return false;
 
-    const req = resolveOrderRequest(broker, {
+    const req = resolveOrderRequest(bk, {
       side: params.side,
       option: params.option,
       strike: params.strike,
@@ -1804,6 +1889,7 @@ export default function MultiLegFocus({
             securityId: j.securityId ?? (req.body.securityId as string | undefined),
             symbol: j.symbol ?? (req.body.tradingsymbol as string | undefined),
           },
+          pendingOrders: j.order_id ? [{ id: String(j.order_id), kind: 'grow', qty, at: Date.now() }] : undefined,
         };
 
         // Dhan nets by security id, so a leg identical to one already OPEN
@@ -1819,13 +1905,13 @@ export default function MultiLegFocus({
           const oldAvg = (existing.fill?.avgPrice && existing.fill.avgPrice > 0) ? existing.fill.avgPrice : (existing.price || fillPrice);
           const totalQty = oldQty + qty;
           const avg = (oldAvg * oldQty + fillPrice * qty) / totalQty;
-          return {
+          return withPendingOrder({
             ...existing,
             lots: existing.lots + params.lots,
             price: avg,
             filledAt: Date.now(),
             fill: { ...existing.fill, qty: totalQty, avgPrice: avg, orderId: j.order_id ?? existing.fill?.orderId },
-          } as MultiLegLeg;
+          } as MultiLegLeg, j.order_id, 'grow', qty);
         };
         const seen = (basketsRef.current.find(b => b.id === basket.id)?.legs ?? basket.legs).find(sameContract);
         patchLegs(basket.id, legs => {
@@ -1859,11 +1945,17 @@ export default function MultiLegFocus({
 
   const scaleStrategy = useCallback(async (basketId: string, multiplierDelta: number = 1) => {
     if (scalingMap[basketId]) return;
+    // Scaling only ever ADDS; a reduction would need exit sizing (resolveOrderRequest has no sign guard).
+    if (!(multiplierDelta >= 1)) return;
     const basket = basketsRef.current.find(b => b.id === basketId);
     if (!basket) return;
 
     const openLegs = basket.legs.filter(l => l.status === 'OPEN');
     if (!openLegs.length) return;
+    if (openLegs.some(l => legBrokerMismatch(l, executionBroker(basket, broker)))) {
+      addToast('error', 'Cannot scale', "Some legs were placed on a different broker than this strategy's badge — scale them from that broker.");
+      return;
+    }
 
     if (!hasAuthenticatedBroker) {
       addToast('error', 'No broker logged in', 'Log in before placing orders');
@@ -1871,6 +1963,7 @@ export default function MultiLegFocus({
     }
 
     setScalingMap(prev => ({ ...prev, [basketId]: true }));
+    const bk = executionBroker(basket, broker) as Broker;
 
     try {
       const currentMult = basket.multiplier || 1;
@@ -1889,15 +1982,14 @@ export default function MultiLegFocus({
 
       const placeScaleLeg = async (leg: MultiLegLeg) => {
         const legExpiry = leg.expiry || basket.expiry;
-        const pair = `${basket.underlying}:${legExpiry}`;
-        const lookup = lookupCache[pair];
+        const lookup = lookupCache[lkKey(bk, basket.underlying, legExpiry)];
         const strikeMap = lookup?.strikes ?? {};
-        const lotSize = lookup?.lotSize ?? fallbackLotSize(basket.underlying as Underlying, broker);
+        const lotSize = lookup?.lotSize ?? fallbackLotSize(basket.underlying as Underlying, bk);
         const baseRatio = leg.ratio ?? Math.max(1, Math.round(leg.lots / currentMult));
         const addLots = baseRatio * multiplierDelta;
         const qty = addLots * lotSize;
 
-        const req = resolveOrderRequest(broker, {
+        const req = resolveOrderRequest(bk, {
           side: leg.side,
           option: leg.option,
           strike: leg.strike,
@@ -1921,69 +2013,37 @@ export default function MultiLegFocus({
 
         const currentLtp = ltpFor(basket, leg);
         const fillPrice = (j.price && j.price > 0) ? j.price : (currentLtp > 0 ? currentLtp : (leg.price ?? 0));
-        const oldQty = (leg.fill?.qty && leg.fill.qty > 0) ? leg.fill.qty : (leg.lots * lotSize);
-        const oldAvg = (leg.fill?.avgPrice && leg.fill.avgPrice > 0) ? leg.fill.avgPrice : (leg.price || currentLtp);
-        const newTotalQty = oldQty + qty;
-        const newAvgPrice = ((oldAvg * oldQty) + (fillPrice * qty)) / newTotalQty;
-        const newLots = leg.lots + addLots;
-
-        // Immediately update leg fill ledger so partial fills are never orphaned (Invariant 1)
+        // Immediately update leg fill ledger so partial fills are never orphaned (Invariant 1).
+        // Functional: grown from the LATEST leg, not the pre-await snapshot.
         patchLegs(basketId, legs => legs.map(l => {
           if (l.id !== leg.id) return l;
-          return {
+          const oldQty = (l.fill?.qty && l.fill.qty > 0) ? l.fill.qty : (l.lots * lotSize);
+          const oldAvg = (l.fill?.avgPrice && l.fill.avgPrice > 0) ? l.fill.avgPrice : (l.price || currentLtp);
+          const totalQty = oldQty + qty;
+          const avg = ((oldAvg * oldQty) + (fillPrice * qty)) / totalQty;
+          return withPendingOrder({
             ...l,
-            lots: newLots,
-            price: newAvgPrice,
+            lots: l.lots + addLots,
+            price: avg,
             filledAt: Date.now(),
-            fill: {
-              qty: newTotalQty,
-              avgPrice: newAvgPrice,
-              orderId: j.order_id ?? l.fill?.orderId,
-            },
-          };
+            fill: { qty: totalQty, avgPrice: avg, orderId: j.order_id ?? l.fill?.orderId },
+          }, j.order_id, 'grow', qty);
         }));
-
-        return {
-          legId: leg.id,
-          newLots,
-          newAvgPrice,
-          newTotalQty,
-          orderId: j.order_id,
-        };
       };
 
-      // Phase 1: Place BUY legs concurrently
-      const buyResults = await Promise.all(buyLegs.map(placeScaleLeg));
+      // Phase 1: BUY legs concurrently. allSettled, not all: a rejected hedge must
+      // stop the sells, but its siblings' fills are already on the ledger.
+      const buyResults = await Promise.allSettled(buyLegs.map(placeScaleLeg));
+      const buyFail = buyResults.find((r): r is PromiseRejectedResult => r.status === 'rejected');
+      if (buyFail) throw new Error(`Hedge leg failed — SELL legs NOT scaled: ${String(buyFail.reason)}`);
 
-      // Phase 2: Place SELL legs concurrently (only if all BUYs succeeded)
-      const sellResults = await Promise.all(sellLegs.map(placeScaleLeg));
+      // Phase 2: SELL legs concurrently (only if all BUYs succeeded)
+      const sellResults = await Promise.allSettled(sellLegs.map(placeScaleLeg));
+      const sellFail = sellResults.find((r): r is PromiseRejectedResult => r.status === 'rejected');
+      if (sellFail) throw new Error(`Some SELL legs did not scale (the rest did — check the legs table): ${String(sellFail.reason)}`);
 
-      const allResults = [...buyResults, ...sellResults];
-      const resultMap = new Map(allResults.map(r => [r.legId, r]));
-
-      // Update basket legs and multiplier (re-reading basketsRef.current post-await per Invariant 7)
-      const latestBaskets = basketsRef.current;
-      const curBasket = latestBaskets.find(b => b.id === basketId) ?? basket;
-      const updatedLegs = curBasket.legs.map(l => {
-        const res = resultMap.get(l.id);
-        if (!res) return l;
-        return {
-          ...l,
-          lots: res.newLots,
-          price: res.newAvgPrice,
-          filledAt: Date.now(),
-          fill: {
-            qty: res.newTotalQty,
-            avgPrice: res.newAvgPrice,
-            orderId: res.orderId ?? l.fill?.orderId,
-          },
-        };
-      });
-
-      updateBasket(basketId, {
-        multiplier: newMult,
-        legs: updatedLegs,
-      });
+      // Legs were already written per order above; only the multiplier is left.
+      updateBasket(basketId, { multiplier: newMult });
 
       addToast('success', `Scaled ${basket.name || basket.underlying} to ${newMult}×`, `Added +${multiplierDelta}× to all ${openLegs.length} open legs`);
       pollFunds();
@@ -2026,10 +2086,16 @@ export default function MultiLegFocus({
       return;
     }
     const targets = selected;
+    // The strategy's own account — never the toolbar selection (see executionBroker).
+    const bk = executionBroker(basket, broker) as Broker;
+    if (targets.some(l => legBrokerMismatch(l, bk))) {
+      addToast('error', 'Cannot shift', "A selected leg was placed on a different broker than this strategy's badge — positions left untouched.");
+      return;
+    }
 
     const strikesFor = (legExpiry: string | undefined) =>
       allowedStrikes(basket.underlying, legExpiry || basket.expiry, expiriesMap[basket.underlying] ?? [],
-        Object.keys(lookupCache[`${basket.underlying}:${legExpiry || basket.expiry}`]?.strikes ?? {}).map(Number).sort((a, b) => a - b));
+        Object.keys(lookupCache[lkKey(bk, basket.underlying, legExpiry || basket.expiry)]?.strikes ?? {}).map(Number).sort((a, b) => a - b));
     const fallbackStep = DEFAULT_INDEX_STEP[basket.underlying as Underlying] || 50;
     const plan = planLegShifts(targets, strikesFor, direction, steps, fallbackStep);
     if (!plan.ok) {
@@ -2078,7 +2144,7 @@ export default function MultiLegFocus({
       // ── Phase A: close. Shorts first (concurrently), then longs; longs are
       // skipped if any short did not close. Any failure aborts before reopening.
       const lotSizeFor = (l: MultiLegLeg) =>
-        lookupCache[`${basket.underlying}:${legExpiryOf(l)}`]?.lotSize ?? fallbackLotSize(basket.underlying as Underlying, broker);
+        lookupCache[lkKey(bk, basket.underlying, legExpiryOf(l))]?.lotSize ?? fallbackLotSize(basket.underlying as Underlying, bk);
       const ownQty = new Map(targets.map(l => [l.id, l.fill!.qty]));
       const closedQty = new Map<string, number>();
       const closeGroup = async (group: MultiLegLeg[]) => {
@@ -2110,12 +2176,12 @@ export default function MultiLegFocus({
       for (let attempt = 0; attempt < 3 && !verified && toReopen.length; attempt++) {
         if (attempt > 0) await new Promise(r => setTimeout(r, 500));
         try {
-          const res = await fetch(scalperRoute(broker, 'positions'));
+          const res = await fetch(scalperRoute(bk, 'positions'));
           const j = await res.json() as { success: boolean; data?: Record<string, unknown>[] };
           if (!j.success || !Array.isArray(j.data)) continue;
           verified = toReopen.every(l => {
-            const fb = broker === 'dhan' && !l.orderRef?.securityId ? resolveDhanSecurityId(basket, l) : undefined;
-            const m = findLegPosition(broker, l, j.data!, fb);
+            const fb = bk === 'dhan' && !l.orderRef?.securityId ? resolveDhanSecurityId(basket, l) : undefined;
+            const m = findLegPosition(bk, l, j.data!, fb);
             return m.kind === 'flat' || (m.kind === 'match' && Math.abs(Number(m.row.netQty ?? 0)) < (ownQty.get(l.id) ?? 0));
           });
         } catch { /* retry */ }
@@ -2208,9 +2274,18 @@ export default function MultiLegFocus({
         );
         if (cancelled) return;
 
+        // A poll that answered success but flagged positionsError carries an
+        // EMPTY positions list — that's "unknown", not "flat", so it must not
+        // reach reconciliation (which would read every leg as not found/flat).
         const rowsByBroker: Partial<Record<Broker, Record<string, unknown>[]>> = {};
+        const ordersByBroker: Partial<Record<Broker, Map<string, NormalizedOrder>>> = {};
         for (const r of results) {
-          if (r.rows) rowsByBroker[r.broker] = r.rows;
+          if (r.rows && !r.j?.positionsError) rowsByBroker[r.broker] = r.rows;
+          if (Array.isArray(r.j?.orders)) {
+            const m = new Map<string, NormalizedOrder>();
+            for (const row of r.j!.orders!) { const n = normalizeOrderRow(row); if (n) m.set(n.id, n); }
+            ordersByBroker[r.broker] = m;
+          }
         }
 
         const selectedResult = results.find(r => r.broker === broker);
@@ -2229,21 +2304,39 @@ export default function MultiLegFocus({
           // tick (not merged with the previous one) — see legQtyWarnings'
           // declaration for why this exists alongside the one-shot toast above.
           const nextLegQtyWarnings: Record<string, { ownQty: number; brokerQty: number }> = {};
+          // Rejected/cancelled orders found this tick — toasted once, outside the updater.
+          const orderOutcomeToasts = new Map<string, { label: string; kind: 'grow' | 'exit'; status: string; unfilled: number; unknownFill?: boolean }>();
 
           setBaskets(prevBaskets => {
             let anyChange = false;
             const nextBaskets = prevBaskets.map(basket => {
               let basketChange = false;
-              const pair = `${basket.underlying}:${basket.expiry}`;
-              const lotSize = lookupCacheRef.current[pair]?.lotSize ?? fallbackLotSize(basket.underlying as Underlying, basket.broker);
-              const basketRows = rowsByBroker[basket.broker as Broker] ?? [];
+              const lotSize = lookupCacheRef.current[lkKey(basket.broker, basket.underlying, basket.expiry)]?.lotSize ?? fallbackLotSize(basket.underlying as Underlying, basket.broker);
+              const basketRows = rowsByBroker[basket.broker as Broker];
+              const basketOrders = ordersByBroker[basket.broker as Broker];
 
-              const nextLegs = basket.legs.map(leg => {
-                if (!leg.orderRef) return leg;
+              const nextLegs = basket.legs.map(origLeg => {
+                // 1. Settle orders the broker ACKed but later rejected/cancelled.
+                let leg = origLeg;
+                if (basketOrders && leg.pendingOrders?.length) {
+                  const out = applyOrderOutcomes(leg, basketOrders, lotSize);
+                  leg = out.leg;
+                  for (const n of out.notes) {
+                    orderOutcomeToasts.set(`${basket.id}:${leg.id}:${n.kind}:${n.status}:${n.unfilled}`, {
+                      label: `${leg.side === 'B' ? 'BUY' : 'SELL'} ${leg.strike} ${leg.option}`, ...n,
+                    });
+                  }
+                }
+                if (!leg.orderRef || !basketRows || legBrokerMismatch(leg, basket.broker)) {
+                  if (leg !== origLeg) { basketChange = true; anyChange = true; }
+                  return leg;
+                }
                 const fallbackSecId = (basket.broker === 'dhan' && !leg.orderRef.securityId)
                   ? resolveDhanSecurityId(basket, leg)
                   : undefined;
                 const match = findLegPosition(basket.broker, leg, basketRows, fallbackSecId);
+                // reconcileLegWithBroker compares against `leg` (post order-outcome);
+                // the change check below compares against the original.
                 let reconciled = reconcileLegWithBroker(leg, match, leg.lots * lotSize, lotSize);
                 // Self-heal a leg that only ever recorded a symbol/no securityId
                 // (see resolveDhanSecurityId) as soon as the poll resolves one,
@@ -2283,6 +2376,7 @@ export default function MultiLegFocus({
                 }
 
                 if (
+                  leg !== origLeg ||
                   reconciled.status !== leg.status ||
                   reconciled.lots !== leg.lots ||
                   reconciled.fill?.qty !== leg.fill?.qty ||
@@ -2294,7 +2388,7 @@ export default function MultiLegFocus({
                   anyChange = true;
                   return reconciled;
                 }
-                return leg;
+                return origLeg;
               });
 
               if (basketChange) {
@@ -2316,6 +2410,16 @@ export default function MultiLegFocus({
             return same ? prev : nextLegQtyWarnings;
           });
 
+          for (const o of orderOutcomeToasts.values()) {
+            if (o.unknownFill) {
+              addToast('error', `${o.label}: order ${o.status}`, 'Broker did not report how much filled — this leg was NOT adjusted. Check Orders/Positions.');
+            } else if (o.kind === 'grow') {
+              addToast('error', `${o.label}: order ${o.status} after acceptance`, `${o.unfilled} qty never opened — removed from this leg's tracked quantity.`);
+            } else {
+              addToast('error', `${o.label}: EXIT ${o.status} — position is still OPEN`, `${o.unfilled} qty did not close; the leg is tracked as OPEN again. Exit it again or check Orders.`);
+            }
+          }
+
           for (const w of underAllocatedWarnings) {
             addToast(
               'error',
@@ -2335,8 +2439,16 @@ export default function MultiLegFocus({
   }, [broker, persistBasket, resolveDhanSecurityId, addToast]);
 
   // ── Automated Risk Watcher: SL, TP, Trailing SL, Strategy Target/SL ─
-  const triggeredLegExitsRef = useRef<Set<string>>(new Set());
-  const triggeredStrategyExitsRef = useRef<Set<string>>(new Set());
+  // id -> when its auto-exit last fired. An exit that fails (429, match miss,
+  // reject) leaves the leg OPEN; after RISK_EXIT_RETRY_MS the rule may fire
+  // again instead of the stop being silently disarmed for the rest of the day.
+  const triggeredLegExitsRef = useRef<Map<string, number>>(new Map());
+  const triggeredStrategyExitsRef = useRef<Map<string, number>>(new Map());
+  const RISK_EXIT_RETRY_MS = 15_000;
+  const recentlyTriggered = (m: Map<string, number>, id: string) => {
+    const t = m.get(id);
+    return t != null && Date.now() - t < RISK_EXIT_RETRY_MS;
+  };
 
   useEffect(() => {
     for (const basket of baskets) {
@@ -2347,7 +2459,7 @@ export default function MultiLegFocus({
       }
 
       // 1. Strategy Target and SL
-      if (basket.riskConfig?.armed && !triggeredStrategyExitsRef.current.has(basket.id) && !exitingMap[basket.id]) {
+      if (basket.riskConfig?.armed && !recentlyTriggered(triggeredStrategyExitsRef.current, basket.id) && !exitingMap[basket.id]) {
         const crudeMult = basket.broker === 'dhan'
           ? (basket.underlying === 'CRUDEOIL' ? 100 : basket.underlying === 'CRUDEOILM' ? 10 : 1)
           : 1;
@@ -2355,12 +2467,12 @@ export default function MultiLegFocus({
         const decision = checkStrategyRisk(metrics, basket.riskConfig);
 
         if (decision === 'TARGET') {
-          triggeredStrategyExitsRef.current.add(basket.id);
+          triggeredStrategyExitsRef.current.set(basket.id, Date.now());
           addToast('success', `${basket.name ?? 'Strategy'} Target Reached`, `Closed basket at ${metrics.pnlPts >= 0 ? '+' : ''}${metrics.pnlPts.toFixed(1)} pts (${metrics.pnlPct >= 0 ? '+' : ''}${metrics.pnlPct.toFixed(1)}%)`);
           exitBasket(basket.id);
           continue;
         } else if (decision === 'SL') {
-          triggeredStrategyExitsRef.current.add(basket.id);
+          triggeredStrategyExitsRef.current.set(basket.id, Date.now());
           addToast('error', `${basket.name ?? 'Strategy'} Stop Loss Reached`, `Closed basket at ${metrics.pnlPts.toFixed(1)} pts (${metrics.pnlPct.toFixed(1)}%)`);
           exitBasket(basket.id);
           continue;
@@ -2368,21 +2480,20 @@ export default function MultiLegFocus({
       }
 
       // 2. Leg-wise SL, TP, and Trailing SL
-      let bestUpdated = false;
-      const updatedLegs = basket.legs.map(leg => {
-        if (leg.status !== 'OPEN' || !leg.fill) return leg;
+      const bestUpdates = new Map<string, number>();
+      for (const leg of basket.legs) {
+        if (leg.status !== 'OPEN' || !leg.fill) continue;
         const ltp = ltpFor(basket, leg);
-        if (ltp <= 0) return leg;
+        if (ltp <= 0) continue;
 
         const evalResult = computeLegTrailingSL(leg, ltp);
 
         if (evalResult.newBestPrice !== leg.bestPrice && evalResult.newBestPrice != null) {
-          bestUpdated = true;
-          leg = { ...leg, bestPrice: evalResult.newBestPrice };
+          bestUpdates.set(leg.id, evalResult.newBestPrice);
         }
 
-        if (evalResult.triggered && !triggeredLegExitsRef.current.has(leg.id) && !exitingLegsRef.current.has(leg.id)) {
-          triggeredLegExitsRef.current.add(leg.id);
+        if (evalResult.triggered && !recentlyTriggered(triggeredLegExitsRef.current, leg.id) && !exitingLegsRef.current.has(leg.id)) {
+          triggeredLegExitsRef.current.set(leg.id, Date.now());
           const label = `${leg.side === 'B' ? 'BUY' : 'SELL'} ${leg.strike} ${leg.option}`;
           const trigMsg =
             evalResult.triggered === 'TRAIL_SL'
@@ -2394,15 +2505,18 @@ export default function MultiLegFocus({
           addToast(evalResult.triggered === 'TP' ? 'success' : 'error', `${label} Triggered`, trigMsg);
           exitOneLeg(basket.id, leg);
         }
+      }
 
-        return leg;
-      });
-
-      if (bestUpdated) {
-        updateBasket(basket.id, { legs: updatedLegs });
+      // Functional, bestPrice only: writing back this render's `basket.legs`
+      // wholesale could revert a fill an in-flight order just recorded.
+      if (bestUpdates.size) {
+        patchLegs(basket.id, legs => legs.map(l => {
+          const bp = bestUpdates.get(l.id);
+          return bp != null && l.status === 'OPEN' ? { ...l, bestPrice: bp } : l;
+        }));
       }
     }
-  }, [baskets, ltpFor, exitingMap, exitBasket, exitOneLeg, updateBasket, addToast]);
+  }, [baskets, ltpFor, exitingMap, exitBasket, exitOneLeg, patchLegs, addToast]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Open/draft/placing rows stay put; fully-exited (every leg CLOSED) rows sink
   // to the bottom so a long-running page doesn't bury active positions under
@@ -2530,6 +2644,8 @@ export default function MultiLegFocus({
               <select
                 value={broker}
                 onChange={e => setBroker(e.target.value as Broker)}
+                title="Broker for NEW strategies, and for the funds/orders shown here. An existing strategy always trades on the broker badge on its own row."
+                aria-label="Broker for new strategies"
                 className="h-8 bg-zinc-900 border border-zinc-700 text-zinc-200 text-xs font-bold rounded-lg px-2 focus:outline-none focus:border-emerald-500"
               >
                 {Object.entries(BROKER_LABELS).map(([k, v]) => (
@@ -2702,7 +2818,8 @@ export default function MultiLegFocus({
           sortedBaskets.map((basket, idx) => {
             const pair = `${basket.underlying}:${basket.expiry}`;
             const chain = chainData[pair];
-            const lookup = lookupCache[pair];
+            const rowBroker = executionBroker(basket, broker);
+            const lookup = lookupCache[lkKey(rowBroker, basket.underlying, basket.expiry)];
             const expiries = expiriesMap[basket.underlying] ?? [];
             const allStrikes = chain?.strikes?.length ? chain.strikes : fallbackStrikesFor(basket.underlying as Underlying);
             const step = strikeStep(allStrikes) || DEFAULT_INDEX_STEP[basket.underlying as Underlying] || 50;
@@ -2710,7 +2827,7 @@ export default function MultiLegFocus({
               ? liveQuotes.spot
               : (chain?.spot ?? DEFAULT_INDEX_SPOT[basket.underlying as Underlying] ?? 24000);
             const atmStrike = nearestStrike(allStrikes, rowSpot) ?? (Math.round(rowSpot / step) * step);
-            const lotSize = lookup?.lotSize ?? fallbackLotSize(basket.underlying as Underlying, broker);
+            const lotSize = lookup?.lotSize ?? fallbackLotSize(basket.underlying as Underlying, rowBroker);
 
             return (
               <React.Fragment key={basket.id}>
@@ -2723,7 +2840,7 @@ export default function MultiLegFocus({
                 <MultiLegStrategyRow
                 basket={basket}
                 index={idx}
-                broker={broker}
+                broker={rowBroker as Broker}
                 hasAuthenticatedBroker={hasAuthenticatedBroker}
                 expiries={expiries}
                 allStrikes={allStrikes}
@@ -2779,7 +2896,7 @@ export default function MultiLegFocus({
                 basketMarginSource={basketMargins[basket.id]?.basketMarginSource}
                 overallMargin={basketMargins[basket.id]?.overallMargin}
                 hedgeBenefit={basketMargins[basket.id]?.hedgeBenefit}
-                availableFunds={fundsData?.available}
+                availableFunds={rowBroker === broker ? fundsData?.available : undefined}
                 legQtyWarnings={legQtyWarnings}
                 allBaskets={baskets}
                 />

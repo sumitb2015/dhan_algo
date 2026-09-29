@@ -3,7 +3,7 @@ import assert from 'node:assert';
 import {
   resolveTemplateLegs, reconcileLegFillDown, reconcileLegWithBroker, legPnl, basketTotalPnl, sortLegsForExit, findLegPosition,
   computeLegTrailingSL, computeStrategyMetrics, checkStrategyRisk, computeCalendarPayoffCurve, classifyBasketStructure, findSiblingLegCollisions,
-  formatExpiryLabel, LEG_FILL_GRACE_MS, claimableLegQty, legAvgPrice, legExitPrice, legQtyUnits, legPnlPct, legOtmPct, scaleBasketMultiplier,
+  formatExpiryLabel, LEG_FILL_GRACE_MS, claimableLegQty, executionBroker, applyOrderOutcomes, normalizeOrderRow, PENDING_ORDER_TTL_MS, legBrokerMismatch, type NormalizedOrder, legAvgPrice, legExitPrice, legQtyUnits, legPnlPct, legOtmPct, scaleBasketMultiplier,
   type StrategyMetrics, type MultiLegLeg, type MultiLegBasket,
 } from './multiLegFocus.ts';
 import type { StrategyTemplate } from './basketStrategies.ts';
@@ -854,4 +854,65 @@ test('claimableLegQty subtracts every other leg tracking the same contract', () 
   assert.deepStrictEqual(claimableLegQty(baskets, 'x', 'a', -390), { claimQty: 260, othersQty: 130 });
   assert.deepStrictEqual(claimableLegQty([mk('x', [legA])], 'x', 'a', -390), { claimQty: 390, othersQty: 0 });
   assert.strictEqual(claimableLegQty(baskets, 'x', 'a', 390), null); // long position, short leg
+});
+
+const ob = (rows: Record<string, unknown>[]) => {
+  const m = new Map<string, NormalizedOrder>();
+  for (const r of rows) { const n = normalizeOrderRow(r); if (n) m.set(n.id, n); }
+  return m;
+};
+
+test('executionBroker: a basket always trades on its own broker, not the selector', () => {
+  assert.strictEqual(executionBroker({ broker: 'dhan' }, 'kotak'), 'dhan');
+  assert.strictEqual(executionBroker({ broker: '' } as Pick<MultiLegBasket, 'broker'>, 'kotak'), 'kotak');
+});
+
+test('applyOrderOutcomes: rejected add-lots order comes back off the ledger', () => {
+  const leg: MultiLegLeg = { id: '1', side: 'S', option: 'CE', strike: 23400, lots: 6, type: 'MARKET', status: 'OPEN', fill: { qty: 390, avgPrice: 98 },
+    pendingOrders: [{ id: 'A', kind: 'grow', qty: 325, at: 0 }] };
+  const { leg: out, notes } = applyOrderOutcomes(leg, ob([{ orderId: 'A', orderStatus: 'REJECTED' }]), 65, 1000);
+  assert.strictEqual(out.fill?.qty, 65);
+  assert.strictEqual(out.lots, 1);
+  assert.strictEqual(out.pendingOrders, undefined);
+  assert.strictEqual(notes[0].unfilled, 325);
+});
+
+test('applyOrderOutcomes: rejected entry makes the leg FAILED; filled order is simply dropped', () => {
+  const leg: MultiLegLeg = { id: '1', side: 'S', option: 'CE', strike: 23400, lots: 1, type: 'MARKET', status: 'OPEN', fill: { qty: 65, avgPrice: 98 },
+    pendingOrders: [{ id: 'A', kind: 'grow', qty: 65, at: 0 }] };
+  assert.strictEqual(applyOrderOutcomes(leg, ob([{ order_id: 'A', status: 'REJECTED' }]), 65, 1).leg.status, 'FAILED');
+  const ok = applyOrderOutcomes(leg, ob([{ orderId: 'A', orderStatus: 'TRADED' }]), 65, 1);
+  assert.strictEqual(ok.leg.fill?.qty, 65);
+  assert.strictEqual(ok.leg.pendingOrders, undefined);
+  assert.strictEqual(ok.notes.length, 0);
+});
+
+test('applyOrderOutcomes: rejected exit reopens the CLOSED leg with its qty', () => {
+  const leg: MultiLegLeg = { id: '1', side: 'S', option: 'PE', strike: 22300, lots: 6, type: 'MARKET', status: 'CLOSED', fill: { qty: 0, avgPrice: 70 },
+    closedFill: { qty: 390, exitPrice: 80 }, pendingOrders: [{ id: 'X', kind: 'exit', qty: 390, at: 0 }] };
+  const { leg: out } = applyOrderOutcomes(leg, ob([{ orderId: 'X', orderStatus: 'REJECTED' }]), 65, 5);
+  assert.strictEqual(out.status, 'OPEN');
+  assert.strictEqual(out.fill?.qty, 390);
+  assert.strictEqual(out.closedFill, undefined);
+  assert.strictEqual(out.filledAt, 5);
+});
+
+test('applyOrderOutcomes: cancelled with partial fill undoes only the unfilled part; unknown fill is not guessed', () => {
+  const leg: MultiLegLeg = { id: '1', side: 'S', option: 'CE', strike: 23400, lots: 3, type: 'LIMIT', status: 'OPEN', fill: { qty: 195, avgPrice: 98 },
+    pendingOrders: [{ id: 'A', kind: 'grow', qty: 195, at: 0 }] };
+  assert.strictEqual(applyOrderOutcomes(leg, ob([{ orderId: 'A', orderStatus: 'CANCELLED', filledQty: 65 }]), 65, 1).leg.fill?.qty, 65);
+  const unk = applyOrderOutcomes(leg, ob([{ orderId: 'A', orderStatus: 'CANCELLED' }]), 65, 1);
+  assert.strictEqual(unk.leg.fill?.qty, 195);
+  assert.strictEqual(unk.notes[0].unknownFill, true);
+  // Still pending (not in the book yet) stays; expired TTL is dropped.
+  assert.strictEqual(applyOrderOutcomes(leg, ob([]), 65, 1).leg.pendingOrders?.length, 1);
+  assert.strictEqual(applyOrderOutcomes(leg, ob([]), 65, PENDING_ORDER_TTL_MS + 1).leg.pendingOrders, undefined);
+});
+
+test('legBrokerMismatch flags a leg whose order identity belongs to another broker', () => {
+  assert.strictEqual(legBrokerMismatch({ orderRef: { symbol: 'NIFTY26OCT23400CE' } }, 'dhan'), true);
+  assert.strictEqual(legBrokerMismatch({ orderRef: { securityId: '1', symbol: 'X' } }, 'dhan'), false);
+  assert.strictEqual(legBrokerMismatch({ orderRef: { securityId: '1' } }, 'kotak'), true);
+  assert.strictEqual(legBrokerMismatch({ orderRef: { symbol: 'X' } }, 'zerodha'), false);
+  assert.strictEqual(legBrokerMismatch({}, 'dhan'), false);
 });

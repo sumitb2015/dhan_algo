@@ -235,6 +235,27 @@ and Options Monitor's expiry-switch re-anchoring, 2026-09-21.)
   `leg.orderRef.symbol` so resolution does not fail if `strikeMap` is still loading or if an
   off-expiry leg has shifted.
 
+### 10. A basket trades on its own broker; ACKs are not outcomes (MultiLegFocus, 2026-09-29)
+- **Route every basket action through `executionBroker(basket, selected)`** (= `basket.broker`,
+  the row badge). Until 2026-09-29 exit/add-lots/add-leg/scale/shift/rollback/margin all used the
+  toolbar's selected broker, so switching the selector sent a Dhan strategy's exit to Kotak —
+  where a same-strike Kotak position would be found and closed (wrong account). `lookupCache` is
+  keyed `broker|underlying:expiry` (`lkKey`) for the same reason: Dhan entries hold security ids,
+  Zerodha/Kotak hold symbols, and MCX lot sizes differ 100x. `legBrokerMismatch` refuses legs
+  whose `orderRef` shape can't belong to the basket's broker (legacy data from before the fix).
+- **Every order that changes a leg's ledger records a `pendingOrders` entry** (`withPendingOrder`);
+  the poll settles it against the order book via `applyOrderOutcomes`. A rejected/cancelled
+  grow order comes back off `fill.qty` (a never-opened leg becomes FAILED); a rejected exit
+  REOPENS the leg — exits mark CLOSED on ACK and reconciliation never resurrects CLOSED, so
+  without this a rejected exit leaves a live position untracked. Cancelled with no filled-qty
+  field is reported, never guessed.
+- **`exitBasket` confirms shorts came down at the broker** (`maxAfter` from `exitOneLeg`) before
+  selling hedges; unconfirmed → ask, default keep hedges.
+- **Auto-exits retry**: SL/TP/strategy triggers are timestamped (15s), not one-shot sets — a
+  failed exit used to disarm the stop for the rest of the session.
+- Risk-watcher writes (`bestPrice`) go through `patchLegs` (functional), never `updateBasket`
+  with the render's `basket.legs` — that could revert a fill recorded by an in-flight order.
+
 ## Before You Ship
 - Does every lock/exit/P&L decision route through an ownership check
   (ledger + worker-hold), not a raw broker position/netQty read?
@@ -245,6 +266,8 @@ and Options Monitor's expiry-switch re-anchoring, 2026-09-21.)
   target symbol*, not a cached/pinned position reference?
 - Is a strike shift's reopen gated on the close having fully filled?
 - Does manual single-leg exit warn when closing a BUY hedge while short legs remain open?
+- Does every order/exit/lookup for a basket use `executionBroker(basket, …)`, and does every
+  ledger-changing order record a `pendingOrders` entry?
 - Do rollback auto-reversals and scaling orders pass confirmed `securityId` and `tradingsymbol` identifiers?
 - If there are two execution engines, does a tab-side mutation check the
   other engine's ownership first, and does a stale-but-alive engine refuse

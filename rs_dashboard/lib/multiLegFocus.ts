@@ -48,6 +48,12 @@ export interface MultiLegLeg {
    *  reconciliation never grows the ledger) is how an added 5 lots vanished
    *  from a 1-lot leg. See reconcileLegWithBroker. */
   filledAt?: number;
+  /** Orders this tool sent for this leg whose final outcome isn't known yet.
+   *  An order ACK only means the broker accepted it — Dhan/Zerodha/Kotak can
+   *  still reject it seconds later (RMS/margin/freeze). The poll matches each
+   *  against the order book and undoes the ledger effect of a rejected or
+   *  cancelled one — see applyOrderOutcomes. */
+  pendingOrders?: PendingLegOrder[];
   status: MultiLegStatus;
 
   // ── Leg-wise Stop Loss, Take Profit, and Trailing SL ─────────────
@@ -556,8 +562,14 @@ export function closedFillFromRow(
  *  read is treated as position-book lag rather than a real reduction. */
 export const LEG_FILL_GRACE_MS = 20_000;
 
+/** A grow order not yet confirmed filled also holds the ledger (up to this
+ *  long): if it's then rejected, applyOrderOutcomes takes its qty back off —
+ *  which would double-count if reconciliation had already clamped it away. */
+export const PENDING_GROW_GRACE_MS = 120_000;
+
 export function isLegInFillGrace(leg: MultiLegLeg, now: number = Date.now()): boolean {
-  return leg.filledAt != null && now - leg.filledAt >= 0 && now - leg.filledAt < LEG_FILL_GRACE_MS;
+  if (leg.filledAt != null && now - leg.filledAt >= 0 && now - leg.filledAt < LEG_FILL_GRACE_MS) return true;
+  return (leg.pendingOrders ?? []).some(p => p.kind === 'grow' && now - p.at >= 0 && now - p.at < PENDING_GROW_GRACE_MS);
 }
 
 export function reconcileLegWithBroker(
@@ -934,4 +946,134 @@ export function claimableLegQty(
     }
   }
   return { claimQty: Math.max(0, Math.abs(brokerNetQty) - othersQty), othersQty };
+}
+
+// ─── Execution broker ────────────────────────────────────────────────────
+
+/** A basket trades on the broker stamped on it at creation (`basket.broker`,
+ *  shown as the badge on its row), whatever the toolbar selector says now; the
+ *  selector only picks the broker for NEW strategies. Every order, exit,
+ *  lookup and margin call for a basket must go through this — otherwise
+ *  switching the selector sends a Dhan strategy's exit or add-lots to Kotak
+ *  (wrong account). Falls back to the selector only for a legacy basket
+ *  persisted without a broker. */
+export function executionBroker(basket: Pick<MultiLegBasket, 'broker'>, selected: string): string {
+  return basket.broker || selected;
+}
+
+// ─── Post-ACK order outcomes ─────────────────────────────────────────────
+
+export interface PendingLegOrder {
+  id: string;
+  /** 'grow' = opened / added to the leg; 'exit' = closed it. */
+  kind: 'grow' | 'exit';
+  qty: number;
+  at: number;
+}
+
+/** Give up on an order that never shows up in the order book after this long. */
+export const PENDING_ORDER_TTL_MS = 30 * 60_000;
+
+export interface NormalizedOrder { id: string; status: string; filled: number | null }
+
+/** Dhan (raw), Zerodha and Kotak (shaped) order-book rows → one shape.
+ *  `filled` is null when the row carries no filled-quantity field. */
+export function normalizeOrderRow(row: Record<string, unknown>): NormalizedOrder | null {
+  const id = String(row.orderId ?? row.order_id ?? row.nOrdNo ?? '');
+  if (!id) return null;
+  const status = String(row.orderStatus ?? row.status ?? row.ordSt ?? '').toUpperCase();
+  const rawFilled = row.filledQty ?? row.filled_quantity ?? row.fldQty ?? row.tradedQuantity;
+  const filled = rawFilled == null || rawFilled === '' ? null : (Number(rawFilled) || 0);
+  return { id, status, filled };
+}
+
+const FILLED_STATUSES = new Set(['TRADED', 'COMPLETE', 'FILLED']);
+const DEAD_STATUSES = new Set(['REJECTED', 'CANCELLED', 'CANCELED', 'EXPIRED']);
+
+export interface OrderOutcomeNote { kind: 'grow' | 'exit'; status: string; unfilled: number; unknownFill?: boolean }
+
+/**
+ * Settles a leg's pending orders against the order book. A filled order is
+ * just dropped. A rejected/cancelled/expired one has its ledger effect undone
+ * for the UNFILLED part only:
+ * - grow: the qty it added comes back off `fill.qty` (a leg left with nothing
+ *   becomes FAILED) — otherwise a rejected entry is a phantom OPEN leg the
+ *   position book never confirms, and nothing else would ever clear it.
+ * - exit: the leg is reopened with the unfilled qty — exitOneLeg marks CLOSED
+ *   on ACK, and reconciliation never resurrects a CLOSED leg, so a rejected
+ *   exit would otherwise leave a live position the tool no longer tracks.
+ * A cancelled/expired order whose row has no filled-qty field can't be sized
+ * safely; it is dropped and reported (`unknownFill`) instead of guessed at.
+ */
+export function applyOrderOutcomes(
+  leg: MultiLegLeg,
+  ordersById: Map<string, NormalizedOrder>,
+  lotSize: number,
+  now: number = Date.now(),
+): { leg: MultiLegLeg; notes: OrderOutcomeNote[] } {
+  const pending = leg.pendingOrders;
+  if (!pending?.length) return { leg, notes: [] };
+  const notes: OrderOutcomeNote[] = [];
+  const keep: PendingLegOrder[] = [];
+  let next = leg;
+  for (const p of pending) {
+    const o = ordersById.get(p.id);
+    if (!o) {
+      if (now - p.at < PENDING_ORDER_TTL_MS) keep.push(p);
+      continue;
+    }
+    if (FILLED_STATUSES.has(o.status)) continue;
+    if (!DEAD_STATUSES.has(o.status)) { keep.push(p); continue; }
+    const rejected = o.status === 'REJECTED';
+    if (!rejected && o.filled == null) {
+      notes.push({ kind: p.kind, status: o.status, unfilled: 0, unknownFill: true });
+      continue;
+    }
+    const unfilled = Math.max(0, p.qty - (rejected ? 0 : (o.filled ?? 0)));
+    if (unfilled <= 0) continue;
+    notes.push({ kind: p.kind, status: o.status, unfilled });
+    const lotsOf = (q: number) => (lotSize > 0 ? Math.max(1, Math.round(q / lotSize)) : next.lots);
+    if (p.kind === 'grow') {
+      const qty = Math.max(0, (next.fill?.qty ?? 0) - unfilled);
+      next = {
+        ...next,
+        fill: { ...(next.fill ?? { avgPrice: 0 }), qty },
+        lots: qty > 0 ? lotsOf(qty) : next.lots,
+        status: qty > 0 ? next.status : (next.status === 'OPEN' ? 'FAILED' : next.status),
+        filledAt: undefined,
+      };
+    } else {
+      const qty = (next.status === 'CLOSED' ? 0 : (next.fill?.qty ?? 0)) + unfilled;
+      const closedQty = (next.closedFill?.qty ?? 0) - unfilled;
+      next = {
+        ...next,
+        status: 'OPEN',
+        fill: { ...(next.fill ?? { avgPrice: 0 }), qty },
+        lots: lotsOf(qty),
+        closedFill: closedQty > 0 && next.closedFill ? { ...next.closedFill, qty: closedQty } : undefined,
+        filledAt: now,
+      };
+    }
+  }
+  if (keep.length === pending.length && notes.length === 0) return { leg, notes };
+  return { leg: { ...next, pendingOrders: keep.length ? keep : undefined }, notes };
+}
+
+/** Appends a just-ACKed order to a leg's pending list. */
+export function withPendingOrder(leg: MultiLegLeg, id: string | undefined, kind: 'grow' | 'exit', qty: number, now: number = Date.now()): MultiLegLeg {
+  if (!id || qty <= 0) return leg;
+  return { ...leg, pendingOrders: [...(leg.pendingOrders ?? []), { id: String(id), kind, qty, at: now }] };
+}
+
+/** True when a leg's recorded order identity can't have come from `broker`:
+ *  Dhan orders always carry a securityId; Zerodha/Kotak orders carry only a
+ *  trading symbol. Before executionBroker existed, a leg could be placed on the
+ *  toolbar's broker while its basket was stamped with another — such a leg
+ *  must not be exited/added/reconciled against the basket's broker, where a
+ *  same-strike position would be someone else's (wrong account). */
+export function legBrokerMismatch(leg: Pick<MultiLegLeg, 'orderRef'>, broker: string): boolean {
+  const ref = leg.orderRef;
+  if (!ref) return false;
+  if (broker === 'dhan') return !ref.securityId && !!ref.symbol;
+  return !ref.symbol && !!ref.securityId;
 }
