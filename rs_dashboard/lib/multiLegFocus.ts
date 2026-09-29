@@ -1077,3 +1077,19 @@ export function legBrokerMismatch(leg: Pick<MultiLegLeg, 'orderRef'>, broker: st
   if (broker === 'dhan') return !ref.securityId && !!ref.symbol;
   return !ref.symbol && !!ref.securityId;
 }
+
+/** Dhan order status → what a just-placed leg's order means for placement.
+ * - filled: TRADED (a MARKET order is only "placed" once this is seen).
+ * - working: a LIMIT order resting / part-filled at the exchange — accepted,
+ *   may still fill; handled like before (never auto-reversed).
+ * - dead: REJECTED / CANCELLED / EXPIRED — the leg never opened.
+ * - pending: TRANSIT / PENDING-for-MARKET / unknown — keep waiting. */
+export type DhanOrderPhase = 'filled' | 'working' | 'dead' | 'pending';
+
+export function classifyDhanOrder(status: string, orderType: 'MARKET' | 'LIMIT'): DhanOrderPhase {
+  const s = status.toUpperCase();
+  if (s === 'TRADED') return 'filled';
+  if (s === 'REJECTED' || s === 'CANCELLED' || s === 'CANCELED' || s === 'EXPIRED') return 'dead';
+  if (orderType === 'LIMIT' && (s === 'PENDING' || s === 'PART_TRADED')) return 'working';
+  return 'pending';
+}

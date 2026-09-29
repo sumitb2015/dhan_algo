@@ -1,9 +1,33 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { dhanGet, dhanPut, dhanDelete } from '@/lib/dhanToken';
 
-// Direct Dhan REST call for fetching orders.
-export async function GET(): Promise<NextResponse> {
+// Direct Dhan REST call for fetching orders. With ?orderId= returns that one
+// order's live status (used to confirm a fill before counting a leg as placed).
+export async function GET(req: NextRequest): Promise<NextResponse> {
   try {
+    const orderId = req.nextUrl.searchParams.get('orderId');
+    if (orderId) {
+      if (!/^[A-Za-z0-9-]+$/.test(orderId)) {
+        return NextResponse.json({ success: false, error: 'Invalid orderId' }, { status: 400 });
+      }
+      const raw = await dhanGet(`/orders/${orderId}`, 5_000);
+      // Dhan returns either the order object or a one-element array.
+      const o = (Array.isArray(raw) ? raw[0] : raw) as Record<string, unknown> | undefined;
+      if (!o || typeof o !== 'object') {
+        return NextResponse.json({ success: false, error: 'Order not found' }, { status: 404 });
+      }
+      return NextResponse.json({
+        success: true,
+        data: {
+          orderId: String(o.orderId ?? orderId),
+          orderStatus: String(o.orderStatus ?? '').toUpperCase(),
+          quantity: Number(o.quantity) || 0,
+          filledQty: Number(o.filledQty) || 0,
+          averageTradedPrice: Number(o.averageTradedPrice) || 0,
+          reason: String(o.omsErrorDescription ?? o.omsErrorCode ?? ''),
+        },
+      });
+    }
     const data = await dhanGet('/orders');
     return NextResponse.json({ success: true, data: Array.isArray(data) ? data : [] });
   } catch (err) {

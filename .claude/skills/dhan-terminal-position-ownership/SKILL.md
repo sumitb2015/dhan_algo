@@ -249,6 +249,11 @@ and Options Monitor's expiry-switch re-anchoring, 2026-09-21.)
   REOPENS the leg — exits mark CLOSED on ACK and reconciliation never resurrects CLOSED, so
   without this a rejected exit leaves a live position untracked. Cancelled with no filled-qty
   field is reported, never guessed.
+- **Dhan: an order counts as placed only once confirmed** (`confirmDhanOrder` →
+  `GET /api/scalper/orders?orderId=`, `classifyDhanOrder`, ~6s). Dhan ACKs as TRANSIT and can
+  reject later, so `placeBasket`'s SELL phase, `scaleStrategy`'s SELL phase and a shift's SELL
+  reopen all wait for the hedge's TRADED; an abort auto-reverses only CONFIRMED legs. Unconfirmed
+  after the deadline = stop, keep tracked via `pendingOrders`, never auto-reverse.
 - **`exitBasket` confirms shorts came down at the broker** (`maxAfter` from `exitOneLeg`) before
   selling hedges; unconfirmed → ask, default keep hedges.
 - **Auto-exits retry**: SL/TP/strategy triggers are timestamped (15s), not one-shot sets — a

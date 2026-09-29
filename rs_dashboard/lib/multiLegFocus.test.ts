@@ -3,7 +3,7 @@ import assert from 'node:assert';
 import {
   resolveTemplateLegs, reconcileLegFillDown, reconcileLegWithBroker, legPnl, basketTotalPnl, sortLegsForExit, findLegPosition,
   computeLegTrailingSL, computeStrategyMetrics, checkStrategyRisk, computeCalendarPayoffCurve, classifyBasketStructure, findSiblingLegCollisions,
-  formatExpiryLabel, LEG_FILL_GRACE_MS, claimableLegQty, executionBroker, applyOrderOutcomes, normalizeOrderRow, PENDING_ORDER_TTL_MS, legBrokerMismatch, type NormalizedOrder, legAvgPrice, legExitPrice, legQtyUnits, legPnlPct, legOtmPct, scaleBasketMultiplier,
+  formatExpiryLabel, LEG_FILL_GRACE_MS, claimableLegQty, executionBroker, applyOrderOutcomes, normalizeOrderRow, PENDING_ORDER_TTL_MS, legBrokerMismatch, classifyDhanOrder, type NormalizedOrder, legAvgPrice, legExitPrice, legQtyUnits, legPnlPct, legOtmPct, scaleBasketMultiplier,
   type StrategyMetrics, type MultiLegLeg, type MultiLegBasket,
 } from './multiLegFocus.ts';
 import type { StrategyTemplate } from './basketStrategies.ts';
@@ -915,4 +915,15 @@ test('legBrokerMismatch flags a leg whose order identity belongs to another brok
   assert.strictEqual(legBrokerMismatch({ orderRef: { securityId: '1' } }, 'kotak'), true);
   assert.strictEqual(legBrokerMismatch({ orderRef: { symbol: 'X' } }, 'zerodha'), false);
   assert.strictEqual(legBrokerMismatch({}, 'dhan'), false);
+});
+
+test('classifyDhanOrder: MARKET is placed only once TRADED; LIMIT once resting', () => {
+  assert.strictEqual(classifyDhanOrder('TRANSIT', 'MARKET'), 'pending');
+  assert.strictEqual(classifyDhanOrder('PENDING', 'MARKET'), 'pending');
+  assert.strictEqual(classifyDhanOrder('TRADED', 'MARKET'), 'filled');
+  assert.strictEqual(classifyDhanOrder('REJECTED', 'MARKET'), 'dead');
+  assert.strictEqual(classifyDhanOrder('PENDING', 'LIMIT'), 'working');
+  assert.strictEqual(classifyDhanOrder('PART_TRADED', 'LIMIT'), 'working');
+  assert.strictEqual(classifyDhanOrder('CANCELLED', 'LIMIT'), 'dead');
+  assert.strictEqual(classifyDhanOrder('', 'LIMIT'), 'pending');
 });

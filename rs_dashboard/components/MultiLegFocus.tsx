@@ -16,7 +16,7 @@ import OrdersTradesModal from './multiLegFocus/OrdersTradesModal';
 import MultiLegOptionChainModal from './multiLegFocus/MultiLegOptionChainModal';
 import {
   resolveTemplateLegs, reconcileLegWithBroker, sortLegsForExit, findLegPosition, claimableLegQty, executionBroker,
-  applyOrderOutcomes, normalizeOrderRow, withPendingOrder, LEG_FILL_GRACE_MS, legBrokerMismatch, type NormalizedOrder,
+  applyOrderOutcomes, normalizeOrderRow, withPendingOrder, LEG_FILL_GRACE_MS, legBrokerMismatch, classifyDhanOrder, type DhanOrderPhase, type NormalizedOrder,
   computeLegTrailingSL, computeStrategyMetrics, checkStrategyRisk, fallbackLotSize,
   positionProduct, computeBasketStatus, closedFillFromRow,
   findSiblingLegCollisions, describeSiblingCollisions,
@@ -1075,6 +1075,33 @@ export default function MultiLegFocus({
     return true;
   }, [addToast]);
 
+  // Dhan ACKs an order as TRANSIT and can reject it (RMS/margin/freeze) seconds
+  // later. Where a later step depends on a leg really being open — the SELLs
+  // after the hedges, or auto-reversing legs on an abort — the ACK is not
+  // enough: wait for the order's actual outcome. 'pending' after the deadline
+  // means unknown (treat as NOT confirmed; the poll's pendingOrders settles it).
+  const confirmDhanOrder = useCallback(async (orderId: string, orderType: 'MARKET' | 'LIMIT', timeoutMs = 6000): Promise<{
+    phase: DhanOrderPhase; filledQty: number; avgPrice: number; reason: string;
+  }> => {
+    const deadline = Date.now() + timeoutMs;
+    let last = { phase: 'pending' as DhanOrderPhase, filledQty: 0, avgPrice: 0, reason: '' };
+    for (;;) {
+      try {
+        const res = await fetch(`/api/scalper/orders?orderId=${encodeURIComponent(orderId)}`);
+        const j = await res.json() as { success: boolean; data?: { orderStatus: string; filledQty: number; averageTradedPrice: number; reason: string } };
+        if (j.success && j.data) {
+          last = {
+            phase: classifyDhanOrder(j.data.orderStatus, orderType),
+            filledQty: j.data.filledQty, avgPrice: j.data.averageTradedPrice, reason: j.data.reason,
+          };
+          if (last.phase !== 'pending') return last;
+        }
+      } catch { /* retry until the deadline */ }
+      if (Date.now() + 400 > deadline) return last;
+      await new Promise(r => setTimeout(r, 400));
+    }
+  }, []);
+
   const placeBasketInner = useCallback(async (basketId: string) => {
     const basket = basketsRef.current.find(b => b.id === basketId);
     if (!basket || !basket.legs.length || !basket.expiry) return;
@@ -1274,25 +1301,50 @@ export default function MultiLegFocus({
 
         if (j.success) {
           const currentLtp = ltpFor(basket, leg);
-          const fillPrice = (j.price && j.price > 0) ? j.price : (currentLtp > 0 ? currentLtp : (leg.price ?? 0));
+          let fillPrice = (j.price && j.price > 0) ? j.price : (currentLtp > 0 ? currentLtp : (leg.price ?? 0));
           const secId = j.securityId ?? (req.body.securityId as string | undefined);
           const sym = j.symbol ?? (req.body.tradingsymbol as string | undefined);
+
+          // Dhan: an ACK is not a fill. Confirm before this leg counts as placed —
+          // it gates the SELL phase and decides what an abort auto-reverses.
+          let confirmedQty = qty;
+          let unconfirmed = false;
+          if (bk === 'dhan' && j.order_id) {
+            const c = await confirmDhanOrder(String(j.order_id), leg.type);
+            if (c.phase === 'dead') {
+              working = working.map(l => (l.id === leg.id ? { ...l, status: 'FAILED' as MultiLegStatus } : l));
+              updateBasket(basketId, { legs: working });
+              addToast('error', `Rejected ${label} after acceptance — strategy stopped`, c.reason || 'Order rejected/cancelled by the broker');
+              return false;
+            }
+            if (c.phase === 'filled') {
+              if (c.avgPrice > 0) fillPrice = c.avgPrice;
+              if (c.filledQty > 0) confirmedQty = c.filledQty;
+            }
+            unconfirmed = c.phase === 'pending';
+          }
 
           working = working.map(l => {
             if (l.id !== leg.id) return l;
             return {
               ...l,
               status: 'OPEN' as MultiLegStatus,
-              fill: { qty, avgPrice: fillPrice, orderId: j.order_id },
+              fill: { qty: confirmedQty, avgPrice: fillPrice, orderId: j.order_id },
               filledAt: Date.now(),
               orderRef: { securityId: secId, symbol: sym },
-              pendingOrders: j.order_id ? [{ id: String(j.order_id), kind: 'grow' as const, qty, at: Date.now() }] : undefined,
+              pendingOrders: j.order_id ? [{ id: String(j.order_id), kind: 'grow' as const, qty: confirmedQty, at: Date.now() }] : undefined,
             };
           });
           updateBasket(basketId, { legs: working });
+          if (unconfirmed) {
+            // Tracked (the poll settles it) but NOT counted as placed: no later phase
+            // runs on it, and an abort never auto-reverses an order that may not exist.
+            addToast('error', `${label}: fill not confirmed — strategy stopped`, `Order ${j.order_id} still not TRADED. It is tracked on this row; check Orders before acting — it will NOT be auto-reversed.`);
+            return false;
+          }
           addToast('success', `Placed ${label}`, `ID: ${j.order_id ?? 'OK'}`);
           placedLegs.push({
-            legId: leg.id, label, side: leg.side, option: leg.option, strike: leg.strike, qty, type: leg.type,
+            legId: leg.id, label, side: leg.side, option: leg.option, strike: leg.strike, qty: confirmedQty, type: leg.type,
             expiry: leg.expiry || basket.expiry,
             securityId: secId, symbol: sym,
           });
@@ -1372,7 +1424,7 @@ export default function MultiLegFocus({
       pollFunds();
       fetchMarginsForBaskets();
     }
-  }, [broker, hasAuthenticatedBroker, lookupCache, updateBasket, patchLegs, ltpFor, addToast, pollFunds, fetchMarginsForBaskets, basketMargins, fundsData, blockedStrikeLegs, toastBlockedStrikes, fetchSpreadIssues, resolveSpreadIssues]);
+  }, [broker, hasAuthenticatedBroker, lookupCache, updateBasket, patchLegs, ltpFor, addToast, confirmDhanOrder, pollFunds, fetchMarginsForBaskets, basketMargins, fundsData, blockedStrikeLegs, toastBlockedStrikes, fetchSpreadIssues, resolveSpreadIssues]);
 
   // The lock is taken synchronously, before any await inside placeBasketInner
   // (funds read, confirm dialogs), so a fast double-click cannot slip a second
@@ -1863,9 +1915,22 @@ export default function MultiLegFocus({
         const chain = chainData[pair];
         const q = chain?.quotes?.[String(params.strike)];
         const curLtp = (params.option === 'CE' ? q?.ce : q?.pe) ?? 0;
-        const fillPrice = (j.price && j.price > 0)
+        let fillPrice = (j.price && j.price > 0)
           ? j.price
           : ((params.limitPrice && params.limitPrice > 0) ? params.limitPrice : curLtp);
+
+        // Dhan: confirm the ACK became a fill before reporting success — a shift
+        // reopens its SELLs only after the BUY reopen returns true.
+        let unconfirmed = false;
+        if (bk === 'dhan' && j.order_id) {
+          const c = await confirmDhanOrder(String(j.order_id), params.orderType);
+          if (c.phase === 'dead') {
+            addToast('error', `${label} rejected after acceptance`, c.reason || 'Order rejected/cancelled by the broker — nothing opened');
+            return false;
+          }
+          if (c.phase === 'filled' && c.avgPrice > 0) fillPrice = c.avgPrice;
+          unconfirmed = c.phase === 'pending';
+        }
 
         const newLeg: MultiLegLeg = {
           ...(opts?.carry ?? {}),
@@ -1918,14 +1983,18 @@ export default function MultiLegFocus({
           const existing = legs.find(sameContract);
           return existing ? legs.map(l => (l.id === existing.id ? mergeInto(existing) : l)) : [...legs, newLeg];
         });
+        pollFunds();
+        fetchMarginsForBaskets();
+        if (unconfirmed) {
+          addToast('error', `${label}: fill not confirmed`, `Order ${j.order_id} still not TRADED — tracked on this row; check Orders. Nothing further was placed on it.`);
+          return false;
+        }
         if (seen) {
           const merged = mergeInto(seen);
           addToast('success', `Added ${params.lots} lot(s) to ${label}`, `New Avg: ₹${(merged.price ?? 0).toFixed(2)} (${merged.lots} lots total)`);
         } else {
           addToast('success', `Added new leg ${label}`, `Filled @ ₹${fillPrice.toFixed(2)} (${params.lots} lots)`);
         }
-        pollFunds();
-        fetchMarginsForBaskets();
         return true;
       } else {
         addToast('error', `Add leg failed for ${label}`, j.error ?? 'Unknown broker error');
@@ -1935,7 +2004,7 @@ export default function MultiLegFocus({
       addToast('error', `Add leg failed for ${label}`, String(e));
       return false;
     }
-  }, [broker, hasAuthenticatedBroker, lookupCache, chainData, patchLegs, addToast, pollFunds, fetchMarginsForBaskets, blockedStrikeLegs, toastBlockedStrikes, fetchSpreadIssues, resolveSpreadIssues]);
+  }, [broker, hasAuthenticatedBroker, lookupCache, chainData, patchLegs, addToast, confirmDhanOrder, pollFunds, fetchMarginsForBaskets, blockedStrikeLegs, toastBlockedStrikes, fetchSpreadIssues, resolveSpreadIssues]);
 
   const addNewLegToBasket = useCallback(async (basketId: string, params: Parameters<typeof addNewLegCore>[1]) => {
     await addNewLegCore(basketId, params);
@@ -2012,7 +2081,15 @@ export default function MultiLegFocus({
         if (!j.success) throw new Error(j.error || `Order failed for ${leg.strike} ${leg.option}`);
 
         const currentLtp = ltpFor(basket, leg);
-        const fillPrice = (j.price && j.price > 0) ? j.price : (currentLtp > 0 ? currentLtp : (leg.price ?? 0));
+        let fillPrice = (j.price && j.price > 0) ? j.price : (currentLtp > 0 ? currentLtp : (leg.price ?? 0));
+        // Dhan: a hedge ACK must be a real fill before the SELL phase runs.
+        let unconfirmed = false;
+        if (bk === 'dhan' && j.order_id) {
+          const c = await confirmDhanOrder(String(j.order_id), 'MARKET');
+          if (c.phase === 'dead') throw new Error(`${leg.strike} ${leg.option} rejected after acceptance${c.reason ? `: ${c.reason}` : ''}`);
+          if (c.phase === 'filled' && c.avgPrice > 0) fillPrice = c.avgPrice;
+          unconfirmed = c.phase === 'pending';
+        }
         // Immediately update leg fill ledger so partial fills are never orphaned (Invariant 1).
         // Functional: grown from the LATEST leg, not the pre-await snapshot.
         patchLegs(basketId, legs => legs.map(l => {
@@ -2029,6 +2106,8 @@ export default function MultiLegFocus({
             fill: { qty: totalQty, avgPrice: avg, orderId: j.order_id ?? l.fill?.orderId },
           }, j.order_id, 'grow', qty);
         }));
+        // Recorded above (the poll settles it), but not confirmed: stop the next phase.
+        if (unconfirmed) throw new Error(`${leg.strike} ${leg.option} fill not confirmed (order ${j.order_id}) — check Orders`);
       };
 
       // Phase 1: BUY legs concurrently. allSettled, not all: a rejected hedge must
@@ -2053,7 +2132,7 @@ export default function MultiLegFocus({
     } finally {
       setScalingMap(prev => ({ ...prev, [basketId]: false }));
     }
-  }, [hasAuthenticatedBroker, broker, lookupCache, ltpFor, updateBasket, patchLegs, addToast, pollFunds, fetchMarginsForBaskets]);
+  }, [hasAuthenticatedBroker, broker, lookupCache, ltpFor, updateBasket, patchLegs, addToast, confirmDhanOrder, pollFunds, fetchMarginsForBaskets]);
 
 
   // ── Shift legs N strikes (roll: close old leg, reopen at strike ± N) ──
