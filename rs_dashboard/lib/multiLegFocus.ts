@@ -38,6 +38,8 @@ export interface MultiLegLeg {
    *  CLOSED leg reads this instead of drifting off live LTP against a
    *  zeroed quantity — see reconcileLegWithBroker and legPnl. */
   closedFill?: { qty: number; exitPrice: number };
+  /** Epoch ms the leg went CLOSED — splits today's realized P&L from earlier days' (legTodayCounts). */
+  closedAt?: number;
   /** Captured from the order response at placement time; used to match this
    *  leg's own broker position row on every monitoring poll. */
   orderRef?: { securityId?: string; symbol?: string };
@@ -255,6 +257,22 @@ export function legOtmPct(leg: MultiLegLeg, spot: number): number | null {
   if (!(spot > 0)) return null;
   const diff = leg.option === 'CE' ? leg.strike - spot : spot - leg.strike;
   return (diff / spot) * 100;
+}
+
+/** 'YYYY-MM-DD' of an epoch ms in IST (the exchange's calendar day). */
+function istDay(ts: number): string {
+  return new Date(ts + 5.5 * 3_600_000).toISOString().slice(0, 10);
+}
+
+/**
+ * Whether a leg's P&L belongs in TODAY's figure — the same scope as the
+ * broker's positions MTM: every live leg in full (a carried position's MTM is
+ * from its entry), plus legs closed today. A CLOSED leg without `closedAt`
+ * (closed before the stamp existed) is treated as an earlier day.
+ */
+export function legCountsToday(leg: MultiLegLeg, now: number = Date.now()): boolean {
+  if (leg.status !== 'CLOSED') return true;
+  return leg.closedAt != null && istDay(leg.closedAt) === istDay(now);
 }
 
 export function basketTotalPnl(legs: MultiLegLeg[], ltpFor: (leg: MultiLegLeg) => number, multiplier: number = 1): number {
@@ -580,7 +598,7 @@ export function reconcileLegWithBroker(
   lotSize?: number | null,
   now: number = Date.now(),
 ): MultiLegLeg {
-  const next = reconcileLegWithBrokerRaw(leg, match, ownQtyHint, lotSize);
+  const next = reconcileLegWithBrokerRaw(leg, match, ownQtyHint, lotSize, now);
   // Propagation grace (skill invariant 6): right after this tool's own order
   // grew the leg, the broker can still show the OLD (smaller) qty, or flat.
   // Reconciliation only ever moves DOWN, so acting on that stale read would
@@ -599,6 +617,7 @@ function reconcileLegWithBrokerRaw(
   match: MultiLegMatch,
   ownQtyHint?: number | null,
   lotSize?: number | null,
+  now: number = Date.now(),
 ): MultiLegLeg {
   if (leg.status === 'CLOSED') return leg;
 
@@ -621,6 +640,7 @@ function reconcileLegWithBrokerRaw(
     return {
       ...leg,
       status: 'CLOSED',
+      closedAt: now,
       fill: { qty: 0, avgPrice: leg.fill?.avgPrice ?? 0 },
       closedFill: closedFillFromRow(match.row, leg.side === 'B') ?? leg.closedFill,
     };
@@ -630,6 +650,7 @@ function reconcileLegWithBrokerRaw(
     return {
       ...leg,
       status: 'CLOSED',
+      closedAt: now,
       fill: { qty: 0, avgPrice: leg.fill?.avgPrice ?? 0 },
       closedFill: closedFillFromRow(match.row, leg.side === 'B') ?? leg.closedFill,
     };
@@ -1024,20 +1045,21 @@ export function recordOutsideReduction(
   qty: number,
   exitPrice: number,
   lotSize: number,
+  now: number = Date.now(),
 ): MultiLegLeg[] {
   const own = leg.fill?.qty ?? 0;
   const avgPrice = leg.fill?.avgPrice ?? 0;
   const cut = Math.min(Math.max(0, qty), own);
   if (cut <= 0) return [leg];
   if (cut >= own) {
-    return [{ ...leg, status: 'CLOSED', fill: { qty: 0, avgPrice }, closedFill: { qty: own, exitPrice } }];
+    return [{ ...leg, status: 'CLOSED', closedAt: now, fill: { qty: 0, avgPrice }, closedFill: { qty: own, exitPrice } }];
   }
   const lots = (q: number) => (lotSize > 0 ? Math.max(1, Math.round(q / lotSize)) : leg.lots);
   const remaining = own - cut;
   const closedSlice: MultiLegLeg = {
     id: newLegId(), side: leg.side, option: leg.option, strike: leg.strike, expiry: leg.expiry,
     lots: lots(cut), type: leg.type, price: leg.price, orderRef: leg.orderRef,
-    status: 'CLOSED', fill: { qty: 0, avgPrice }, closedFill: { qty: cut, exitPrice },
+    status: 'CLOSED', closedAt: now, fill: { qty: 0, avgPrice }, closedFill: { qty: cut, exitPrice },
   };
   return [{ ...leg, lots: lots(remaining), fill: { ...leg.fill, qty: remaining, avgPrice } }, closedSlice];
 }
@@ -1179,12 +1201,15 @@ export interface PendingLegOrder {
   kind: 'grow' | 'exit';
   qty: number;
   at: number;
+  /** Price the ledger recorded on ACK (response price, else LTP, else entry)
+   *  — a placeholder. Replaced by the traded average once the order fills. */
+  price?: number;
 }
 
 /** Give up on an order that never shows up in the order book after this long. */
 export const PENDING_ORDER_TTL_MS = 30 * 60_000;
 
-export interface NormalizedOrder { id: string; status: string; filled: number | null }
+export interface NormalizedOrder { id: string; status: string; filled: number | null; avgPrice: number | null }
 
 /** Dhan (raw), Zerodha and Kotak (shaped) order-book rows → one shape.
  *  `filled` is null when the row carries no filled-quantity field. */
@@ -1194,7 +1219,8 @@ export function normalizeOrderRow(row: Record<string, unknown>): NormalizedOrder
   const status = String(row.orderStatus ?? row.status ?? row.ordSt ?? '').toUpperCase();
   const rawFilled = row.filledQty ?? row.filled_quantity ?? row.fldQty ?? row.tradedQuantity;
   const filled = rawFilled == null || rawFilled === '' ? null : (Number(rawFilled) || 0);
-  return { id, status, filled };
+  const avg = Number(row.averageTradedPrice ?? row.averagePrice ?? row.average_price ?? row.avgPrc) || 0;
+  return { id, status, filled, avgPrice: avg > 0 ? avg : null };
 }
 
 const FILLED_STATUSES = new Set(['TRADED', 'COMPLETE', 'FILLED']);
@@ -1232,7 +1258,10 @@ export function applyOrderOutcomes(
       if (now - p.at < PENDING_ORDER_TTL_MS) keep.push(p);
       continue;
     }
-    if (FILLED_STATUSES.has(o.status)) continue;
+    if (FILLED_STATUSES.has(o.status)) {
+      if (o.avgPrice != null) next = settleFillPrice(next, p, o.avgPrice);
+      continue;
+    }
     if (!DEAD_STATUSES.has(o.status)) { keep.push(p); continue; }
     const rejected = o.status === 'REJECTED';
     if (!rejected && o.filled == null) {
@@ -1261,6 +1290,7 @@ export function applyOrderOutcomes(
         fill: { ...(next.fill ?? { avgPrice: 0 }), qty },
         lots: lotsOf(qty),
         closedFill: closedQty > 0 && next.closedFill ? { ...next.closedFill, qty: closedQty } : undefined,
+        closedAt: undefined,
         filledAt: now,
       };
     }
@@ -1269,10 +1299,37 @@ export function applyOrderOutcomes(
   return { leg: { ...next, pendingOrders: keep.length ? keep : undefined }, notes };
 }
 
-/** Appends a just-ACKed order to a leg's pending list. */
-export function withPendingOrder(leg: MultiLegLeg, id: string | undefined, kind: 'grow' | 'exit', qty: number, now: number = Date.now()): MultiLegLeg {
+/**
+ * Swaps the ACK-time placeholder price for the order's traded average. Exits
+ * mark CLOSED on ACK with LTP (or, when no LTP is loaded, the ENTRY price —
+ * a zero-P&L close), and reconciliation never revisits a CLOSED leg, so
+ * without this the realized P&L stays whatever was guessed at ACK
+ * (2026-09-29: a 22600 PE bought back at 170.675 booked ₹0).
+ */
+function settleFillPrice(leg: MultiLegLeg, p: PendingLegOrder, actual: number): MultiLegLeg {
+  if (p.kind === 'exit') {
+    const cf = leg.closedFill;
+    if (!cf || cf.qty <= 0) return leg;
+    let exitPrice: number;
+    if (p.price != null && p.qty <= cf.qty) exitPrice = cf.exitPrice + ((actual - p.price) * p.qty) / cf.qty;
+    else if (cf.qty === p.qty) exitPrice = actual;
+    else return leg;
+    return { ...leg, closedFill: { ...cf, exitPrice } };
+  }
+  if (p.price == null || !leg.fill) return leg;
+  const base = leg.status === 'CLOSED' ? (leg.closedFill?.qty ?? 0) : leg.fill.qty;
+  if (base < p.qty || base <= 0) return leg;
+  const avgPrice = leg.fill.avgPrice + ((actual - p.price) * p.qty) / base;
+  return { ...leg, price: avgPrice, fill: { ...leg.fill, avgPrice } };
+}
+
+/** Appends a just-ACKed order to a leg's pending list, with the price the ledger recorded for it. */
+export function withPendingOrder(
+  leg: MultiLegLeg, id: string | undefined, kind: 'grow' | 'exit', qty: number, price?: number, now: number = Date.now(),
+): MultiLegLeg {
   if (!id || qty <= 0) return leg;
-  return { ...leg, pendingOrders: [...(leg.pendingOrders ?? []), { id: String(id), kind, qty, at: now }] };
+  const entry: PendingLegOrder = { id: String(id), kind, qty, at: now, ...(price != null && price > 0 ? { price } : {}) };
+  return { ...leg, pendingOrders: [...(leg.pendingOrders ?? []), entry] };
 }
 
 /** True when a leg's recorded order identity can't have come from `broker`:

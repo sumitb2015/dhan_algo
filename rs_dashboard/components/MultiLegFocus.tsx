@@ -21,7 +21,7 @@ import {
   computeLegTrailingSL, computeStrategyMetrics, checkStrategyRisk, fallbackLotSize,
   positionProduct, computeBasketStatus, closedFillFromRow,
   findSiblingLegCollisions, describeSiblingCollisions,
-  legQtyWarningsFor, recordOutsideReduction, type LegQtyWarning,
+  legQtyWarningsFor, recordOutsideReduction, legCountsToday, type LegQtyWarning,
   findUntrackedPositions, contractHintFromRow, legFromUntracked,
   type MultiLegLeg, type MultiLegBasket, type StrategyRiskConfig, type MultiLegStatus,
 } from '@/lib/multiLegFocus';
@@ -978,16 +978,20 @@ export default function MultiLegFocus({
   }, [selectedUnderlying, expiriesMap, chainData, broker, persistBasket, addToast]);
 
   // ── Global P&L Across All Baskets ─────────────────────────────────
-  const overallTotalPnl = useMemo(() => {
-    let sum = 0;
+  // Lifetime (every leg since each strategy started) and today — the latter is
+  // the broker positions MTM's scope: live legs in full plus legs closed today.
+  const { overallTotalPnl, overallTodayPnl } = useMemo(() => {
+    let total = 0;
+    let today = 0;
+    const now = Date.now();
     for (const b of baskets) {
       const crudeMult = b.broker === 'dhan'
         ? (b.underlying === 'CRUDEOIL' ? 100 : b.underlying === 'CRUDEOILM' ? 10 : 1)
         : 1;
-      const metrics = computeStrategyMetrics(b.legs, l => ltpFor(b, l), crudeMult);
-      sum += metrics.totalPnlRupees;
+      total += computeStrategyMetrics(b.legs, l => ltpFor(b, l), crudeMult).totalPnlRupees;
+      today += computeStrategyMetrics(b.legs.filter(l => legCountsToday(l, now)), l => ltpFor(b, l), crudeMult).totalPnlRupees;
     }
-    return sum;
+    return { overallTotalPnl: total, overallTodayPnl: today };
   }, [baskets, ltpFor]);
 
   const activeStrategiesCount = useMemo(() => {
@@ -1272,7 +1276,7 @@ export default function MultiLegFocus({
             const exitPrice = (j.price && j.price > 0) ? j.price : (currentLtp > 0 ? currentLtp : (reversedLeg?.fill?.avgPrice ?? 0));
             patchLegs(basketId, legs => legs.map(l =>
               (l.id === p.legId
-                ? withPendingOrder({ ...l, status: 'CLOSED' as MultiLegStatus, fill: { qty: 0, avgPrice: l.fill?.avgPrice ?? 0 }, closedFill: { qty: p.qty, exitPrice } }, j.order_id, 'exit', p.qty)
+                ? withPendingOrder({ ...l, status: 'CLOSED' as MultiLegStatus, closedAt: Date.now(), fill: { qty: 0, avgPrice: l.fill?.avgPrice ?? 0 }, closedFill: { qty: p.qty, exitPrice } }, j.order_id, 'exit', p.qty, exitPrice)
                 : l)));
           } else {
             addToast('error', `Reverse failed for ${p.label}`, `${j.error ?? 'Unknown error'} — close manually from Orders/Positions`);
@@ -1346,7 +1350,7 @@ export default function MultiLegFocus({
               fill: { qty: confirmedQty, avgPrice: fillPrice, orderId: j.order_id },
               filledAt: Date.now(),
               orderRef: { securityId: secId, symbol: sym },
-              pendingOrders: j.order_id ? [{ id: String(j.order_id), kind: 'grow' as const, qty: confirmedQty, at: Date.now() }] : undefined,
+              pendingOrders: j.order_id ? [{ id: String(j.order_id), kind: 'grow' as const, qty: confirmedQty, at: Date.now(), price: fillPrice }] : undefined,
             };
           });
           updateBasket(basketId, { legs: working });
@@ -1532,7 +1536,7 @@ export default function MultiLegFocus({
 
       if (match.kind === 'flat') {
         const closedFill = closedFillFromRow(match.row, leg.side === 'B') ?? leg.closedFill;
-        patchLegs(basketId, legs => legs.map(l => (l.id === leg.id ? { ...l, status: 'CLOSED' as const, fill: { qty: 0, avgPrice: l.fill?.avgPrice ?? 0 }, closedFill } : l)));
+        patchLegs(basketId, legs => legs.map(l => (l.id === leg.id ? { ...l, status: 'CLOSED' as const, closedAt: Date.now(), fill: { qty: 0, avgPrice: l.fill?.avgPrice ?? 0 }, closedFill } : l)));
         addToast('success', `${label} already flat at broker`, 'Updated status to CLOSED');
         closed = true;
         return { closed, qty: closedQty };
@@ -1609,7 +1613,7 @@ export default function MultiLegFocus({
         const currentLtp = basket ? ltpFor(basket, leg) : 0;
         const exitPrice = (j2.price && j2.price > 0) ? j2.price : (currentLtp > 0 ? currentLtp : (leg.fill?.avgPrice ?? 0));
         patchLegs(basketId, legs => legs.map(l => (l.id === leg.id
-          ? withPendingOrder({ ...l, status: 'CLOSED' as const, fill: { qty: 0, avgPrice: l.fill?.avgPrice ?? 0 }, closedFill: { qty, exitPrice } }, j2.order_id, 'exit', qty)
+          ? withPendingOrder({ ...l, status: 'CLOSED' as const, closedAt: Date.now(), fill: { qty: 0, avgPrice: l.fill?.avgPrice ?? 0 }, closedFill: { qty, exitPrice } }, j2.order_id, 'exit', qty, exitPrice)
           : l)));
         closed = true;
         closedQty = qty;
@@ -1775,7 +1779,7 @@ export default function MultiLegFocus({
             ...(params.newTp !== undefined ? { tp: params.newTp } : {}),
             filledAt: Date.now(),
             fill: { qty: totalQty, avgPrice: avg, orderId: j.order_id ?? l.fill?.orderId },
-          }, j.order_id, 'grow', qty);
+          }, j.order_id, 'grow', qty, fillPrice);
         };
         const latest = basketsRef.current.find(b => b.id === basket.id)?.legs.find(l => l.id === leg.id) ?? leg;
         const preview = grow(latest);
@@ -2187,7 +2191,7 @@ export default function MultiLegFocus({
             price: avg,
             filledAt: Date.now(),
             fill: { ...existing.fill, qty: totalQty, avgPrice: avg, orderId: j.order_id ?? existing.fill?.orderId },
-          } as MultiLegLeg, j.order_id, 'grow', qty);
+          } as MultiLegLeg, j.order_id, 'grow', qty, fillPrice);
         };
         const seen = (basketsRef.current.find(b => b.id === basket.id)?.legs ?? basket.legs).find(sameContract);
         patchLegs(basket.id, legs => {
@@ -2315,7 +2319,7 @@ export default function MultiLegFocus({
             price: avg,
             filledAt: Date.now(),
             fill: { qty: totalQty, avgPrice: avg, orderId: j.order_id ?? l.fill?.orderId },
-          }, j.order_id, 'grow', qty);
+          }, j.order_id, 'grow', qty, fillPrice);
         }));
         // Recorded above (the poll settles it), but not confirmed: stop the next phase.
         if (unconfirmed) throw new Error(`${leg.strike} ${leg.option} fill not confirmed (order ${j.order_id}) — check Orders`);
@@ -2930,10 +2934,21 @@ export default function MultiLegFocus({
               </div>
             )}
 
-            {/* Overall P&L */}
-            <span className={`h-8 flex items-center px-3 rounded-lg text-xs font-bold font-mono tabular-nums border ${
-              overallTotalPnl >= 0 ? 'text-emerald-400 border-emerald-500/30 bg-emerald-500/5' : 'text-rose-400 border-rose-500/30 bg-rose-500/5'
-            }`}>
+            {/* Today's P&L (broker MTM scope) and lifetime P&L */}
+            <span
+              className={`h-8 flex items-center px-3 rounded-lg text-xs font-bold font-mono tabular-nums border ${
+                overallTodayPnl >= 0 ? 'text-emerald-400 border-emerald-500/30 bg-emerald-500/5' : 'text-rose-400 border-rose-500/30 bg-rose-500/5'
+              }`}
+              title="Open legs (MTM from entry) plus legs closed today: the same scope as the broker's positions P&L. Positions no strategy tracks are not included."
+            >
+              Today: {overallTodayPnl >= 0 ? '+' : ''}{fmtMoney(overallTodayPnl)}
+            </span>
+            <span
+              className={`h-8 flex items-center px-3 rounded-lg text-xs font-bold font-mono tabular-nums border ${
+                overallTotalPnl >= 0 ? 'text-emerald-400 border-emerald-500/30 bg-emerald-500/5' : 'text-rose-400 border-rose-500/30 bg-rose-500/5'
+              }`}
+              title="Every leg since each strategy started, including legs closed on earlier days"
+            >
               Total P&L: {overallTotalPnl >= 0 ? '+' : ''}{fmtMoney(overallTotalPnl)}
             </span>
 

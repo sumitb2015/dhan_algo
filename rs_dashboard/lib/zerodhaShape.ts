@@ -31,6 +31,8 @@ export interface ScalperOrder {
   price: number;
   orderType: string;
   createTime: string;
+  /** Traded average; 0 until something fills. */
+  averagePrice?: number;
 }
 
 export interface ScalperTrade {
@@ -89,6 +91,7 @@ export function shapeZerodhaOrder(o: Record<string, any>): ScalperOrder {
     price: Number(o.price) || 0,
     orderType: String(o.order_type ?? ''),
     createTime: String(o.order_timestamp ?? ''),
+    averagePrice: Number(o.average_price) || 0,
   };
 }
 

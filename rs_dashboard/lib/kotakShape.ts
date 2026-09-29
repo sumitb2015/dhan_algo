@@ -103,6 +103,7 @@ export function shapeKotakOrder(o: Record<string, any>): ScalperOrder {
     price: Number(o.prc ?? o.ordPrc) || 0,
     orderType: priceType === 'MKT' ? 'MARKET' : priceType === 'L' ? 'LIMIT' : priceType,
     createTime: String(o.ordEntTm ?? o.ordDtTm ?? o.ordTm ?? o.exCfmTm ?? o.orderDateTime ?? o.orderTimestamp ?? o.createTime ?? ''),
+    averagePrice: Number(o.avgPrc) || 0,
   };
 }
 

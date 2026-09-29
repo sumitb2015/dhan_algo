@@ -264,6 +264,13 @@ and Options Monitor's expiry-switch re-anchoring, 2026-09-21.)
   REOPENS the leg — exits mark CLOSED on ACK and reconciliation never resurrects CLOSED, so
   without this a rejected exit leaves a live position untracked. Cancelled with no filled-qty
   field is reported, never guessed.
+- **An ACK-time price is a placeholder.** Exits record LTP (or the ENTRY price when no LTP is
+  loaded — a ₹0 close) on ACK; grows record response price/LTP. Pass that price to
+  `withPendingOrder(…, price)` so `applyOrderOutcomes` can swap in the order book's traded
+  average on fill (`settleFillPrice`). Before this (2026-09-29) five closed legs kept guessed exits
+  and the page read -7,809 vs the broker's -27,908. Every CLOSED transition also stamps
+  `closedAt`, which splits the header's Today P&L (broker MTM scope: live legs + closed today,
+  `legCountsToday`) from the lifetime Total.
 - **Dhan: an order counts as placed only once confirmed** (`confirmDhanOrder` →
   `GET /api/scalper/orders?orderId=`, `classifyDhanOrder`, ~6s). Dhan ACKs as TRANSIT and can
   reject later, so `placeBasket`'s SELL phase, `scaleStrategy`'s SELL phase and a shift's SELL

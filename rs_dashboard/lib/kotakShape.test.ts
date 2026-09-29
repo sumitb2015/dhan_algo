@@ -22,6 +22,7 @@ test('shapeKotakOrder maps Kotak Neo fields to the UI order shape with ordEntTm/
     price: 102.35,
     orderType: 'LIMIT',
     createTime: '21-Aug-2026 10:15:22',
+    averagePrice: 0,
   });
 
   const rawWithOrdDtTm = {
@@ -43,6 +44,7 @@ test('shapeKotakOrder maps Kotak Neo fields to the UI order shape with ordEntTm/
     price: 51.8,
     orderType: 'MARKET',
     createTime: '2026-08-21 10:16:00',
+    averagePrice: 0,
   });
 });
 

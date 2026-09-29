@@ -4,7 +4,7 @@ import {
   resolveTemplateLegs, reconcileLegFillDown, reconcileLegWithBroker, legPnl, basketTotalPnl, sortLegsForExit, findLegPosition,
   computeLegTrailingSL, computeStrategyMetrics, checkStrategyRisk, computeCalendarPayoffCurve, classifyBasketStructure, findSiblingLegCollisions,
   formatExpiryLabel, LEG_FILL_GRACE_MS, claimableLegQty, executionBroker, applyOrderOutcomes, normalizeOrderRow, PENDING_ORDER_TTL_MS, legBrokerMismatch, classifyDhanOrder, type NormalizedOrder, legAvgPrice, legExitPrice, legQtyUnits, legPnlPct, legOtmPct, scaleBasketMultiplier,
-  legQtyWarningsFor, recordOutsideReduction, findUntrackedPositions, legFromUntracked, contractHintFromRow,
+  legQtyWarningsFor, recordOutsideReduction, findUntrackedPositions, legFromUntracked, contractHintFromRow, legCountsToday,
   type StrategyMetrics, type MultiLegLeg, type MultiLegBasket,
 } from './multiLegFocus.ts';
 import type { StrategyTemplate } from './basketStrategies.ts';
@@ -1006,4 +1006,61 @@ test('findUntrackedPositions reports only the qty no live leg tracks', () => {
   // Symbol-keyed brokers match on the trading symbol.
   const z = findUntrackedPositions('zerodha', [{ tradingSymbol: 'NIFTY2692224600CE', netQty: 65, buyAvg: 50 }], [], hint)[0];
   assert.deepStrictEqual(legFromUntracked(z, { option: 'CE', strike: 24600, expiry: '2026-09-22' }, 65, 50, 65).orderRef, { symbol: 'NIFTY2692224600CE' });
+});
+
+// 2026-09-29: exits recorded on ACK with LTP-or-entry never learned the real fill
+// (22600 PE bought back at 170.675 booked ₹0 because exit == entry).
+test('applyOrderOutcomes replaces an ACK-time exit price with the traded average', () => {
+  const closed: MultiLegLeg = {
+    id: 'x', side: 'S', option: 'PE', strike: 22600, lots: 4, type: 'MARKET', status: 'CLOSED',
+    fill: { qty: 0, avgPrice: 31.45 }, closedFill: { qty: 260, exitPrice: 31.45 },
+    pendingOrders: [{ id: 'o1', kind: 'exit', qty: 260, at: 0, price: 31.45 }],
+  };
+  const orders = ob([{ orderId: 'o1', orderStatus: 'TRADED', filledQty: 260, averageTradedPrice: 170.675 }]);
+  const { leg } = applyOrderOutcomes(closed, orders, 65, 1);
+  assert.strictEqual(leg.closedFill?.exitPrice, 170.675);
+  assert.strictEqual(leg.pendingOrders, undefined);
+  assert.ok(Math.abs(legPnl(leg, 0) - (31.45 - 170.675) * 260) < 1e-6);
+  // Legacy pending entry without a recorded price: still exact when it covers the whole close.
+  const legacy = { ...closed, pendingOrders: [{ id: 'o1', kind: 'exit' as const, qty: 260, at: 0 }] };
+  assert.strictEqual(applyOrderOutcomes(legacy, orders, 65, 1).leg.closedFill?.exitPrice, 170.675);
+  // No traded average in the row: leave the ledger alone.
+  const noAvg = ob([{ orderId: 'o1', orderStatus: 'TRADED', filledQty: 260 }]);
+  assert.strictEqual(applyOrderOutcomes(closed, noAvg, 65, 1).leg.closedFill?.exitPrice, 31.45);
+});
+
+test('applyOrderOutcomes corrects a grow order\'s ACK price into the weighted average', () => {
+  // 65 @ 100 already held, +65 recorded at LTP 110 (avg 105); actually filled at 120 -> avg 110.
+  const leg: MultiLegLeg = {
+    id: 'g', side: 'B', option: 'CE', strike: 23000, lots: 2, type: 'MARKET', status: 'OPEN',
+    fill: { qty: 130, avgPrice: 105 }, price: 105,
+    pendingOrders: [{ id: 'o2', kind: 'grow', qty: 65, at: 0, price: 110 }],
+  };
+  const out = applyOrderOutcomes(leg, ob([{ order_id: 'o2', status: 'COMPLETE', average_price: 120 }]), 65, 1).leg;
+  assert.strictEqual(out.fill?.avgPrice, 110);
+  assert.strictEqual(out.price, 110);
+  assert.strictEqual(normalizeOrderRow({ nOrdNo: 'k', ordSt: 'complete', avgPrc: '101.5' })?.avgPrice, 101.5);
+});
+
+test('legCountsToday: live legs always, closed legs only when closed on the same IST day', () => {
+  const now = Date.parse('2026-09-29T15:30:00Z'); // 21:00 IST
+  const base: MultiLegLeg = { id: 't', side: 'S', option: 'CE', strike: 23400, lots: 1, type: 'MARKET', status: 'OPEN', fill: { qty: 65, avgPrice: 90 } };
+  assert.strictEqual(legCountsToday(base, now), true);
+  const closed = (iso?: string): MultiLegLeg => ({ ...base, status: 'CLOSED', closedAt: iso ? Date.parse(iso) : undefined });
+  assert.strictEqual(legCountsToday(closed('2026-09-29T03:50:00Z'), now), true);   // 09:20 IST today
+  assert.strictEqual(legCountsToday(closed('2026-09-28T18:40:00Z'), now), true);   // 00:10 IST today (UTC date is yesterday)
+  assert.strictEqual(legCountsToday(closed('2026-09-28T09:50:00Z'), now), false);  // yesterday
+  assert.strictEqual(legCountsToday(closed(), now), false);                         // closed before closedAt existed
+});
+
+test('closing paths stamp closedAt; a reopened exit clears it', () => {
+  const open: MultiLegLeg = { id: 'c', side: 'S', option: 'PE', strike: 22000, lots: 2, type: 'MARKET', status: 'OPEN', fill: { qty: 130, avgPrice: 81.45 }, orderRef: { securityId: '51309' } };
+  const flat = reconcileLegWithBroker(open, { kind: 'flat', row: { securityId: '51309', netQty: 0, buyQty: 130, sellQty: 130, buyAvg: 84.15, sellAvg: 81.45 } }, null, 65, 5_000);
+  assert.strictEqual(flat.status, 'CLOSED');
+  assert.strictEqual(flat.closedAt, 5_000);
+  assert.strictEqual(recordOutsideReduction(open, 130, 84.15, 65, 7_000)[0].closedAt, 7_000);
+  const exited: MultiLegLeg = { ...flat, pendingOrders: [{ id: 'e', kind: 'exit', qty: 130, at: 0 }] };
+  const reopened = applyOrderOutcomes(exited, ob([{ orderId: 'e', orderStatus: 'REJECTED', filledQty: 0 }]), 65, 9_000).leg;
+  assert.strictEqual(reopened.status, 'OPEN');
+  assert.strictEqual(reopened.closedAt, undefined);
 });
