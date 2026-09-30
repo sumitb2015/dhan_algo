@@ -350,7 +350,7 @@ function LtpStack({
   return (
     <div className={cn('flex flex-col min-w-[9.75rem]', compact ? 'gap-1' : 'gap-1.5')}>
       <div>
-        <div className="text-[9px] font-black uppercase tracking-[0.14em] text-zinc-500 leading-none mb-1">Prem</div>
+        <div className="text-[11px] font-black uppercase tracking-[0.14em] text-zinc-500 leading-none mb-1">Prem</div>
         <div
           title="Combined CE + PE premium right now"
           className={cn(
@@ -393,7 +393,7 @@ function LtpStack({
         Total ₹{fmtValue(totalValue)}
       </div>
       <div className="flex items-center justify-between text-[11px] font-mono leading-none py-1 border-t border-zinc-800/60">
-        <span className="text-[9px] font-black uppercase tracking-wider text-zinc-400">P&amp;L</span>
+        <span className="text-[11px] font-black uppercase tracking-wider text-zinc-400">P&amp;L</span>
         <span className={cn(
           'font-black tabular-nums',
           live.pnl > 0 ? 'text-emerald-400' : live.pnl < 0 ? 'text-rose-400' : 'text-zinc-400'
@@ -406,7 +406,7 @@ function LtpStack({
           className="flex-1 min-w-0 px-1.5 py-1 flex flex-col gap-0.5"
           title="Val PCR = PE ₹ value ÷ CE ₹ value at this row's strikes (falls back to PE premium ÷ CE premium if ₹ values are unresolved)"
         >
-          <span className="text-[9px] font-black tracking-widest text-amber-500 leading-none">VAL</span>
+          <span className="text-[11px] font-black tracking-widest text-amber-500 leading-none">VAL</span>
           <span className={cn(
             'font-mono font-bold text-amber-400 tabular-nums leading-none',
             compact ? 'text-[11px]' : 'text-xs',
@@ -418,7 +418,7 @@ function LtpStack({
           className="flex-1 min-w-0 px-1.5 py-1 flex flex-col gap-0.5"
           title={oiTitle}
         >
-          <span className="text-[9px] font-black tracking-widest text-zinc-400 leading-none">OI</span>
+          <span className="text-[11px] font-black tracking-widest text-zinc-400 leading-none">OI</span>
           <span className={cn(
             'font-mono font-bold text-sky-400 tabular-nums leading-none',
             compact ? 'text-[11px]' : 'text-xs',
@@ -1500,7 +1500,7 @@ function FocusHeader({
           <TrendingUp className="h-4 w-4 text-violet-400" />
         </div>
         <div>
-          <p className="text-[9px] font-bold text-violet-400 uppercase tracking-[0.18em] mb-0.5">
+          <p className="text-[11px] font-bold text-violet-400 uppercase tracking-[0.18em] mb-0.5">
             Options &middot; Straddles &amp; Strangles
           </p>
           <h1 className="text-sm font-bold text-white tracking-tight leading-none">Ultimate Scalper Terminal</h1>
@@ -1518,12 +1518,12 @@ function FocusHeader({
           return (
             <div key={u} className="flex flex-col items-center"
               title={`${FUT_LABELS[u]} last price and % change since previous close`}>
-              <span className="text-[9px] font-black text-zinc-500 uppercase tracking-widest">{FUT_LABELS[u]}</span>
+              <span className="text-[11px] font-black text-zinc-500 uppercase tracking-widest">{FUT_LABELS[u]}</span>
               <span className="text-sm font-mono font-black text-zinc-100 tabular-nums">
                 {q ? q.ltp.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : '\u2014'}
               </span>
               {chg != null && (
-                <span className={cn('text-[9px] font-mono font-bold', chg >= 0 ? 'text-emerald-400' : 'text-rose-400')}>
+                <span className={cn('text-[11px] font-mono font-bold', chg >= 0 ? 'text-emerald-400' : 'text-rose-400')}>
                   {chg >= 0 ? '+' : ''}{chg.toFixed(2)}%
                 </span>
               )}
@@ -1556,7 +1556,7 @@ function FocusHeader({
             <React.Fragment key={label}>
               {i > 0 && <div className="h-6 w-px bg-zinc-800 mx-2" />}
               <div className="flex flex-col items-end min-w-[72px]" title={hint}>
-                <span className="text-[8px] font-bold text-zinc-500 uppercase tracking-wider">{label}</span>
+                <span className="text-[10px] font-bold text-zinc-500 uppercase tracking-wider">{label}</span>
                 <span className="text-xs font-mono font-bold tabular-nums text-zinc-200">
                   {value != null ? fmtInr(value) : '—'}
                 </span>
@@ -1574,7 +1574,7 @@ function FocusHeader({
             <React.Fragment key={label}>
               {i > 0 && <div className="h-6 w-px bg-zinc-800 mx-2" />}
               <div className="flex flex-col items-end min-w-[72px]" title={hint}>
-                <span className="text-[8px] font-bold text-zinc-500 uppercase tracking-wider">{label}</span>
+                <span className="text-[10px] font-bold text-zinc-500 uppercase tracking-wider">{label}</span>
                 <span className={cn('text-xs font-mono font-bold tabular-nums', pnlClass(value))}>
                   {fmtInr(value, true)}
                 </span>
@@ -2486,10 +2486,10 @@ function FocusRowCardImpl({
             {row.underlying}
           </span>
           <RowModeToggle row={row} flat={flat} liveRealMoney={liveRealMoney} onUpdate={onUpdate} />
-          <span className="text-[10px] font-extrabold px-2 py-0.5 rounded-md bg-zinc-800/80 text-zinc-300 border border-zinc-700/60 font-mono">
+          <span className="text-[11px] font-extrabold px-2 py-0.5 rounded-md bg-zinc-800/80 text-zinc-300 border border-zinc-700/60 font-mono">
             {row.side}
           </span>
-          <span className="text-[10px] font-bold text-zinc-400 font-mono">
+          <span className="text-[11px] font-bold text-zinc-400 font-mono">
             {row.lots} Lot{row.lots > 1 ? 's' : ''}
           </span>
         </div>
@@ -2502,7 +2502,7 @@ function FocusRowCardImpl({
                 : 'bg-zinc-800 text-zinc-400 border-zinc-700')}>
             {live.pnl > 0 ? '+' : ''}₹{live.pnl.toFixed(0)}
           </span>
-          <span className={cn('text-[9px] font-black px-2 py-0.5 rounded-md border uppercase tracking-wider', STATUS_PILL[shownStatus(row, flat)])}>
+          <span className={cn('text-[11px] font-black px-2 py-0.5 rounded-md border uppercase tracking-wider', STATUS_PILL[shownStatus(row, flat)])}>
             {shownStatus(row, flat)}
           </span>
           <button
@@ -2522,13 +2522,13 @@ function FocusRowCardImpl({
       <div className="bg-zinc-950/40 border border-zinc-800/50 rounded-xl p-2 flex flex-col gap-1.5">
         <div className="grid grid-cols-2 gap-2 text-xs">
           <div className="flex items-center justify-between gap-1 bg-zinc-900/50 border border-zinc-800/50 rounded-lg px-2 py-1">
-            <span className="text-[8px] font-black text-zinc-500 uppercase tracking-wider flex items-center gap-1">
+            <span className="text-[10px] font-black text-zinc-500 uppercase tracking-wider flex items-center gap-1">
               <Clock className="h-2.5 w-2.5 text-zinc-500" /> ENTRY
             </span>
             <TimeInput value={row.entryTime} onChange={v => onUpdate({ entryTime: v })} />
           </div>
           <div className="flex items-center justify-between gap-1 bg-zinc-900/50 border border-zinc-800/50 rounded-lg px-2 py-1">
-            <span className="text-[8px] font-black text-zinc-500 uppercase tracking-wider flex items-center gap-1">
+            <span className="text-[10px] font-black text-zinc-500 uppercase tracking-wider flex items-center gap-1">
               <Clock className="h-2.5 w-2.5 text-zinc-500" /> EXIT
             </span>
             <TimeInput value={row.exitTime} onChange={v => onUpdate({ exitTime: v })} />
@@ -2537,7 +2537,7 @@ function FocusRowCardImpl({
 
         <div className="grid grid-cols-2 gap-2 items-center text-xs">
           <div className="flex items-center gap-1.5 bg-zinc-900/50 border border-zinc-800/50 rounded-lg px-2 py-1">
-            <span className="text-[8px] font-black text-zinc-500 uppercase tracking-wider flex items-center gap-1 shrink-0">
+            <span className="text-[10px] font-black text-zinc-500 uppercase tracking-wider flex items-center gap-1 shrink-0">
               <Calendar className="h-2.5 w-2.5 text-zinc-500" /> EXPY
             </span>
             <select
@@ -2547,13 +2547,13 @@ function FocusRowCardImpl({
               title={expiryLocked
                 ? 'Locked while a leg is open — exit it first, or use the shift chevrons to roll it'
                 : 'Which listed expiry this row trades'}
-              className="text-[9px] font-bold h-6 px-1.5 border border-zinc-700 rounded bg-zinc-900 text-zinc-200 focus:outline-none focus:border-violet-500 disabled:opacity-50 disabled:cursor-not-allowed w-full cursor-pointer"
+              className="text-[11px] font-bold h-6 px-1.5 border border-zinc-700 rounded bg-zinc-900 text-zinc-200 focus:outline-none focus:border-violet-500 disabled:opacity-50 disabled:cursor-not-allowed w-full cursor-pointer"
             >
               {expiries.map(e => <option key={e} value={e}>{e}</option>)}
             </select>
           </div>
           <div className="flex items-center justify-between gap-1 bg-zinc-900/50 border border-zinc-800/50 rounded-lg px-2 py-1">
-            <span className="text-[8px] font-black text-zinc-500 uppercase tracking-wider" title="Active only while trading the nearest expiry">DTE</span>
+            <span className="text-[10px] font-black text-zinc-500 uppercase tracking-wider" title="Active only while trading the nearest expiry">DTE</span>
             <div className="flex gap-0.5">
               {(['Any', '0', '1', '0+1'] as FocusDte[]).map(d => (
                 <button
@@ -2562,7 +2562,7 @@ function FocusRowCardImpl({
                   disabled={!onNearestExpiry}
                   title={!onNearestExpiry ? 'DTE only applies when trading the nearest expiry' : undefined}
                   className={cn(
-                    'text-[9px] font-extrabold px-1.5 py-0.5 rounded cursor-pointer transition-colors disabled:opacity-40 disabled:cursor-not-allowed',
+                    'text-[11px] font-extrabold px-1.5 py-0.5 rounded cursor-pointer transition-colors disabled:opacity-40 disabled:cursor-not-allowed',
                     row.dte === d ? 'bg-violet-600 text-oncolor' : 'bg-zinc-800 text-zinc-400 hover:bg-zinc-700 hover:text-zinc-200',
                     FOCUS_RING,
                   )}
@@ -2578,21 +2578,21 @@ function FocusRowCardImpl({
         {/* Top Row: Strike Pair + Combined Premium & VWAP */}
         <div className="flex items-center justify-between gap-2">
           <div className="flex flex-col">
-            <span className="text-[8px] font-black text-zinc-500 uppercase tracking-wider">Active Strikes</span>
+            <span className="text-[10px] font-black text-zinc-500 uppercase tracking-wider">Active Strikes</span>
             <div className="flex items-center gap-1.5 font-mono font-bold text-sm text-zinc-100 tabular-nums">
-              <span className="text-emerald-400">{live.ceStrike ?? '—'} <span className="text-[10px] text-emerald-500/70 font-sans">CE</span></span>
+              <span className="text-emerald-400">{live.ceStrike ?? '—'} <span className="text-[11px] text-emerald-500/70 font-sans">CE</span></span>
               <span className="text-zinc-600 font-normal">/</span>
-              <span className="text-rose-400">{live.peStrike ?? '—'} <span className="text-[10px] text-rose-500/70 font-sans">PE</span></span>
+              <span className="text-rose-400">{live.peStrike ?? '—'} <span className="text-[11px] text-rose-500/70 font-sans">PE</span></span>
             </div>
           </div>
           <div className="flex flex-col items-end">
             <div className="flex items-center gap-1">
-              <span className="text-[8px] font-black text-zinc-500 uppercase tracking-widest">Prem</span>
+              <span className="text-[10px] font-black text-zinc-500 uppercase tracking-widest">Prem</span>
               <span className="font-mono font-black text-base text-zinc-100 tabular-nums">
                 {combinedLtp > 0 ? `₹${combinedLtp.toFixed(2)}` : '—'}
               </span>
             </div>
-            <span className="text-[9px] font-mono font-semibold text-violet-400 tabular-nums">
+            <span className="text-[11px] font-mono font-semibold text-violet-400 tabular-nums">
               VWAP 1m {live.vwap1m != null ? live.vwap1m.toFixed(2) : '—'}
             </span>
           </div>
@@ -2602,14 +2602,14 @@ function FocusRowCardImpl({
         <div className="grid grid-cols-2 gap-2">
           <div className="bg-emerald-950/20 border border-emerald-500/20 rounded-lg px-2 py-1.5 flex items-center justify-between">
             <div className="flex flex-col">
-              <span className="text-[8px] font-black text-emerald-400 uppercase tracking-wider">CE Prem</span>
+              <span className="text-[10px] font-black text-emerald-400 uppercase tracking-wider">CE Prem</span>
               <span className="text-xs font-mono font-bold text-emerald-300 tabular-nums">
                 {live.ltpCe != null ? `₹${live.ltpCe.toFixed(2)}` : '—'}
               </span>
             </div>
             <div className="flex flex-col items-end">
-              <span className="text-[8px] font-bold text-zinc-500 uppercase">Val</span>
-              <span className="text-[10px] font-mono font-semibold text-zinc-300 tabular-nums">
+              <span className="text-[10px] font-bold text-zinc-500 uppercase">Val</span>
+              <span className="text-[11px] font-mono font-semibold text-zinc-300 tabular-nums">
                 ₹{fmtValue(ceValue)}
               </span>
             </div>
@@ -2617,14 +2617,14 @@ function FocusRowCardImpl({
 
           <div className="bg-rose-950/20 border border-rose-500/20 rounded-lg px-2 py-1.5 flex items-center justify-between">
             <div className="flex flex-col">
-              <span className="text-[8px] font-black text-rose-400 uppercase tracking-wider">PE Prem</span>
+              <span className="text-[10px] font-black text-rose-400 uppercase tracking-wider">PE Prem</span>
               <span className="text-xs font-mono font-bold text-rose-300 tabular-nums">
                 {live.ltpPe != null ? `₹${live.ltpPe.toFixed(2)}` : '—'}
               </span>
             </div>
             <div className="flex flex-col items-end">
-              <span className="text-[8px] font-bold text-zinc-500 uppercase">Val</span>
-              <span className="text-[10px] font-mono font-semibold text-zinc-300 tabular-nums">
+              <span className="text-[10px] font-bold text-zinc-500 uppercase">Val</span>
+              <span className="text-[11px] font-mono font-semibold text-zinc-300 tabular-nums">
                 ₹{fmtValue(peValue)}
               </span>
             </div>
@@ -2633,17 +2633,17 @@ function FocusRowCardImpl({
 
         {/* Bottom Row: Total Value + PCR Strips */}
         <div className="flex items-center justify-between gap-2 border-t border-zinc-800/60 pt-1.5">
-          <div className="flex items-center gap-1.5 text-[10px] font-mono">
-            <span className="text-[8px] font-black text-zinc-500 uppercase">Total ₹</span>
+          <div className="flex items-center gap-1.5 text-[11px] font-mono">
+            <span className="text-[10px] font-black text-zinc-500 uppercase">Total ₹</span>
             <span className="font-bold text-zinc-200 tabular-nums">₹{fmtValue(totalValue)}</span>
           </div>
           <div className="flex items-center gap-1.5">
-            <span className="inline-flex items-center gap-1 bg-amber-500/10 border border-amber-500/20 px-1.5 py-0.5 rounded text-[9px] font-mono"
+            <span className="inline-flex items-center gap-1 bg-amber-500/10 border border-amber-500/20 px-1.5 py-0.5 rounded text-[11px] font-mono"
               title="Val PCR = PE ₹ value ÷ CE ₹ value">
               <span className="font-black text-amber-500">VAL</span>
               <span className="font-bold text-amber-300 tabular-nums">{pcr != null ? pcr.toFixed(2) : '—'}</span>
             </span>
-            <span className="inline-flex items-center gap-1 bg-sky-500/10 border border-sky-500/20 px-1.5 py-0.5 rounded text-[9px] font-mono"
+            <span className="inline-flex items-center gap-1 bg-sky-500/10 border border-sky-500/20 px-1.5 py-0.5 rounded text-[11px] font-mono"
               title={live.peOi != null && live.ceOi != null
                 ? `OI PCR = PE OI ÷ CE OI (${live.peOi.toLocaleString('en-IN')} / ${live.ceOi.toLocaleString('en-IN')})`
                 : 'OI PCR = PE OI ÷ CE OI'}>
@@ -2665,14 +2665,14 @@ function FocusRowCardImpl({
         {/* CE Leg Row */}
         <div className="flex items-center justify-between gap-1.5 min-w-0">
           <div className="flex items-center gap-1.5 flex-wrap min-w-0">
-            <span className="text-[9px] font-black px-1.5 py-0.5 rounded bg-emerald-500/15 text-emerald-400 border border-emerald-500/30 shrink-0">CE</span>
+            <span className="text-[11px] font-black px-1.5 py-0.5 rounded bg-emerald-500/15 text-emerald-400 border border-emerald-500/30 shrink-0">CE</span>
             <span className="text-xs font-mono font-bold text-zinc-100 tabular-nums shrink-0">
               {live.ltpCe != null ? `₹${live.ltpCe.toFixed(2)}` : '—'}
             </span>
             <LegOpenBadge pos={rowOwnsLeg(row, 'CE') ? live.cePosition : null} />
             {cePnl != null && (
               <span className={cn(
-                'text-[10px] font-mono font-black px-1.5 py-0.5 rounded border tabular-nums',
+                'text-[11px] font-mono font-black px-1.5 py-0.5 rounded border tabular-nums',
                 cePnl > 0 ? 'bg-emerald-500/15 text-emerald-400 border-emerald-500/40 shadow-sm'
                   : cePnl < 0 ? 'bg-rose-500/15 text-rose-400 border-rose-500/40 shadow-sm'
                   : 'bg-zinc-800 text-zinc-400 border-zinc-700'
@@ -2683,15 +2683,15 @@ function FocusRowCardImpl({
             <LegSlLevels row={row} live={live} leg="CE" lotSize={lotSize} inline />
           </div>
           <div className="flex items-center gap-1 shrink-0">
-            <LegLotSelect value={ceQty} onChange={setCeQty} className="w-9 h-5 text-[9px]" title="Lots the CE +/- buttons act on" />
+            <LegLotSelect value={ceQty} onChange={setCeQty} className="w-9 h-5 text-[11px]" title="Lots the CE +/- buttons act on" />
             <button onClick={() => onAddLot('CE', ceQty)} disabled={!canTrade} title={canTrade ? `Add ${ceQty} CE lot(s)` : tradeBlockedWhy} aria-label={`Add ${ceQty} CE lot(s)`} className={cn('h-5 w-5 rounded bg-zinc-800 border border-zinc-700 text-zinc-200 font-bold flex items-center justify-center hover:bg-emerald-600 hover:border-emerald-600 hover:text-oncolor transition-colors disabled:opacity-30 disabled:cursor-not-allowed cursor-pointer', FOCUS_RING)}>+</button>
             <button onClick={() => onReduceLot('CE', ceQty)} disabled={!canTrade || ceFlat} title={ceFlat ? 'Nothing open on the CE leg' : canTrade ? `Reduce CE by ${ceQty} lot(s)` : tradeBlockedWhy} aria-label={`Reduce CE by ${ceQty} lot(s)`} className={cn('h-5 w-5 rounded bg-zinc-800 border border-zinc-700 text-zinc-200 font-bold flex items-center justify-center hover:bg-zinc-700 transition-colors disabled:opacity-30 disabled:cursor-not-allowed cursor-pointer', FOCUS_RING)}>-</button>
-            <button onClick={() => onExit('CE')} disabled={!canTrade || ceFlat} title={ceFlat ? 'Nothing open on the CE leg' : canTrade ? 'Exit CE leg' : tradeBlockedWhy} className={cn('text-[9px] font-bold px-2 py-0.5 rounded bg-rose-600 text-oncolor hover:bg-rose-500 transition-colors disabled:opacity-30 disabled:cursor-not-allowed cursor-pointer', FOCUS_RING)}>Exit</button>
+            <button onClick={() => onExit('CE')} disabled={!canTrade || ceFlat} title={ceFlat ? 'Nothing open on the CE leg' : canTrade ? 'Exit CE leg' : tradeBlockedWhy} className={cn('text-[11px] font-bold px-2 py-0.5 rounded bg-rose-600 text-oncolor hover:bg-rose-500 transition-colors disabled:opacity-30 disabled:cursor-not-allowed cursor-pointer', FOCUS_RING)}>Exit</button>
           </div>
         </div>
         {!ceFlat && (
-          <div className="flex items-center justify-end gap-1 font-mono text-[9px] pt-1 border-t border-zinc-800/40">
-            <span className="text-[8px] font-bold text-zinc-500 uppercase tracking-wider mr-1">Partial:</span>
+          <div className="flex items-center justify-end gap-1 font-mono text-[11px] pt-1 border-t border-zinc-800/40">
+            <span className="text-[10px] font-bold text-zinc-500 uppercase tracking-wider mr-1">Partial:</span>
             {ceChips.map(c => (
               <button key={c.pct} type="button" onClick={() => onExitPartial('CE', c.pct as 25 | 50 | 75)}
                 disabled={!canTrade || !c.enabled} title={canTrade ? c.title : tradeBlockedWhy}
@@ -2707,14 +2707,14 @@ function FocusRowCardImpl({
         {/* PE Leg Row */}
         <div className="flex items-center justify-between gap-1.5 min-w-0">
           <div className="flex items-center gap-1.5 flex-wrap min-w-0">
-            <span className="text-[9px] font-black px-1.5 py-0.5 rounded bg-rose-500/15 text-rose-400 border border-rose-500/30 shrink-0">PE</span>
+            <span className="text-[11px] font-black px-1.5 py-0.5 rounded bg-rose-500/15 text-rose-400 border border-rose-500/30 shrink-0">PE</span>
             <span className="text-xs font-mono font-bold text-zinc-100 tabular-nums shrink-0">
               {live.ltpPe != null ? `₹${live.ltpPe.toFixed(2)}` : '—'}
             </span>
             <LegOpenBadge pos={rowOwnsLeg(row, 'PE') ? live.pePosition : null} />
             {pePnl != null && (
               <span className={cn(
-                'text-[10px] font-mono font-black px-1.5 py-0.5 rounded border tabular-nums',
+                'text-[11px] font-mono font-black px-1.5 py-0.5 rounded border tabular-nums',
                 pePnl > 0 ? 'bg-emerald-500/15 text-emerald-400 border-emerald-500/40 shadow-sm'
                   : pePnl < 0 ? 'bg-rose-500/15 text-rose-400 border-rose-500/40 shadow-sm'
                   : 'bg-zinc-800 text-zinc-400 border-zinc-700'
@@ -2725,15 +2725,15 @@ function FocusRowCardImpl({
             <LegSlLevels row={row} live={live} leg="PE" lotSize={lotSize} inline />
           </div>
           <div className="flex items-center gap-1 shrink-0">
-            <LegLotSelect value={peQty} onChange={setPeQty} className="w-9 h-5 text-[9px]" title="Lots the PE +/- buttons act on" />
+            <LegLotSelect value={peQty} onChange={setPeQty} className="w-9 h-5 text-[11px]" title="Lots the PE +/- buttons act on" />
             <button onClick={() => onAddLot('PE', peQty)} disabled={!canTrade} title={canTrade ? `Add ${peQty} PE lot(s)` : tradeBlockedWhy} aria-label={`Add ${peQty} PE lot(s)`} className={cn('h-5 w-5 rounded bg-zinc-800 border border-zinc-700 text-zinc-200 font-bold flex items-center justify-center hover:bg-rose-600 hover:border-rose-600 hover:text-oncolor transition-colors disabled:opacity-30 disabled:cursor-not-allowed cursor-pointer', FOCUS_RING)}>+</button>
             <button onClick={() => onReduceLot('PE', peQty)} disabled={!canTrade || peFlat} title={peFlat ? 'Nothing open on the PE leg' : canTrade ? `Reduce PE by ${peQty} lot(s)` : tradeBlockedWhy} aria-label={`Reduce PE by ${peQty} lot(s)`} className={cn('h-5 w-5 rounded bg-zinc-800 border border-zinc-700 text-zinc-200 font-bold flex items-center justify-center hover:bg-zinc-700 transition-colors disabled:opacity-30 disabled:cursor-not-allowed cursor-pointer', FOCUS_RING)}>-</button>
-            <button onClick={() => onExit('PE')} disabled={!canTrade || peFlat} title={peFlat ? 'Nothing open on the PE leg' : canTrade ? 'Exit PE leg' : tradeBlockedWhy} className={cn('text-[9px] font-bold px-2 py-0.5 rounded bg-rose-600 text-oncolor hover:bg-rose-500 transition-colors disabled:opacity-30 disabled:cursor-not-allowed cursor-pointer', FOCUS_RING)}>Exit</button>
+            <button onClick={() => onExit('PE')} disabled={!canTrade || peFlat} title={peFlat ? 'Nothing open on the PE leg' : canTrade ? 'Exit PE leg' : tradeBlockedWhy} className={cn('text-[11px] font-bold px-2 py-0.5 rounded bg-rose-600 text-oncolor hover:bg-rose-500 transition-colors disabled:opacity-30 disabled:cursor-not-allowed cursor-pointer', FOCUS_RING)}>Exit</button>
           </div>
         </div>
         {!peFlat && (
-          <div className="flex items-center justify-end gap-1 font-mono text-[9px] pt-1 border-t border-zinc-800/40">
-            <span className="text-[8px] font-bold text-zinc-500 uppercase tracking-wider mr-1">Partial:</span>
+          <div className="flex items-center justify-end gap-1 font-mono text-[11px] pt-1 border-t border-zinc-800/40">
+            <span className="text-[10px] font-bold text-zinc-500 uppercase tracking-wider mr-1">Partial:</span>
             {peChips.map(c => (
               <button key={c.pct} type="button" onClick={() => onExitPartial('PE', c.pct as 25 | 50 | 75)}
                 disabled={!canTrade || !c.enabled} title={canTrade ? c.title : tradeBlockedWhy}
@@ -2748,54 +2748,54 @@ function FocusRowCardImpl({
       {/* ── Level Exits & Risk Rules ── */}
       <div className="bg-zinc-950/40 border border-zinc-800/60 rounded-xl p-2 flex flex-col gap-1.5">
         <div className="flex items-center justify-between border-b border-zinc-800/60 pb-1">
-          <span className="text-[9px] font-black text-zinc-400 uppercase tracking-wider flex items-center gap-1">
+          <span className="text-[11px] font-black text-zinc-400 uppercase tracking-wider flex items-center gap-1">
             <Shield className="h-3 w-3 text-violet-400" />
             Exit Rules &amp; Safeguards
           </span>
           <div className="flex items-center gap-1.5">
             <button
               onClick={() => onUpdate({ levelHigh: '', levelLow: '', levelVw: false, vwapInterval: '1', vwapBufferPct: '0.1', slRupees: '', slMultiplier: '1.2', ceSlMultiplier: '1.2', peSlMultiplier: '1.2', slRollStrikes: 0, slToCost: false, reSlMode: 'off', reTgtMode: 'off', ceTgtPct: '', peTgtPct: '', noReEntryAfter: '' })}
-              className={cn('text-[9px] text-zinc-500 hover:text-zinc-300 transition-colors cursor-pointer', FOCUS_RING)}
+              className={cn('text-[11px] text-zinc-500 hover:text-zinc-300 transition-colors cursor-pointer', FOCUS_RING)}
             >
               Clear
             </button>
           </div>
         </div>
 
-        <div className="grid grid-cols-2 gap-x-2 gap-y-1 text-[10px]">
+        <div className="grid grid-cols-2 gap-x-2 gap-y-1 text-[11px]">
           <div className="flex items-center gap-1.5 bg-zinc-900/50 border border-zinc-800/40 rounded-lg px-1.5 py-0.5">
-            <span className="text-rose-400 text-[9px] font-black w-7 shrink-0">H&uarr;</span>
+            <span className="text-rose-400 text-[11px] font-black w-9 shrink-0">H&uarr;</span>
             <RuleNumStepper
               value={row.levelHigh}
               onCommit={v => onUpdate({ levelHigh: v })}
               wrapperClassName="w-full flex-1 flex items-center gap-0.5"
-              className="w-full flex-1 min-w-0 h-5 text-center text-[10px]"
+              className="w-full flex-1 min-w-0 h-5 text-center text-[11px]"
             />
           </div>
           <div className="flex items-center gap-1.5 bg-zinc-900/50 border border-zinc-800/40 rounded-lg px-1.5 py-0.5">
-            <span className="text-emerald-400 text-[9px] font-black w-7 shrink-0">L&darr;</span>
+            <span className="text-emerald-400 text-[11px] font-black w-9 shrink-0">L&darr;</span>
             <RuleNumStepper
               value={row.levelLow}
               onCommit={v => onUpdate({ levelLow: v })}
               wrapperClassName="w-full flex-1 flex items-center gap-0.5"
-              className="w-full flex-1 min-w-0 h-5 text-center text-[10px]"
+              className="w-full flex-1 min-w-0 h-5 text-center text-[11px]"
             />
           </div>
           <div className="flex items-center gap-1.5 bg-zinc-900/50 border border-zinc-800/40 rounded-lg px-1.5 py-0.5">
-            <span className="text-amber-400 text-[9px] font-black w-7 shrink-0">SL ₹</span>
-            <RuleNumInput value={row.slRupees} onCommit={v => onUpdate({ slRupees: v })} className="w-full flex-1 min-w-0 h-5 text-center text-[10px]" />
+            <span className="text-amber-400 text-[11px] font-black w-9 shrink-0">SL ₹</span>
+            <RuleNumInput value={row.slRupees} onCommit={v => onUpdate({ slRupees: v })} className="w-full flex-1 min-w-0 h-5 text-center text-[11px]" />
           </div>
           <div className="flex items-center gap-1.5 bg-zinc-900/50 border border-zinc-800/40 rounded-lg px-1.5 py-0.5">
-            <span className="text-amber-500 text-[9px] font-black w-7 shrink-0">SL &times;</span>
-            <RuleNumInput value={row.slMultiplier} onCommit={v => onUpdate({ slMultiplier: v })} className="w-full flex-1 min-w-0 h-5 text-center text-[10px]" />
+            <span className="text-amber-500 text-[11px] font-black w-9 shrink-0">SL &times;</span>
+            <RuleNumInput value={row.slMultiplier} onCommit={v => onUpdate({ slMultiplier: v })} className="w-full flex-1 min-w-0 h-5 text-center text-[11px]" />
           </div>
           <div className="flex items-center gap-1.5 bg-zinc-900/50 border border-zinc-800/40 rounded-lg px-1.5 py-0.5">
-            <span className="text-emerald-400 text-[9px] font-black w-7 shrink-0" title="Exit CE alone on its own premium multiple, independent of PE and of SL × above">CE &times;</span>
-            <RuleNumInput value={row.ceSlMultiplier ?? '1.2'} onCommit={v => onUpdate({ ceSlMultiplier: v })} className="w-full flex-1 min-w-0 h-5 text-center text-[10px]" />
+            <span className="text-emerald-400 text-[11px] font-black w-9 shrink-0" title="Exit CE alone on its own premium multiple, independent of PE and of SL × above">CE &times;</span>
+            <RuleNumInput value={row.ceSlMultiplier ?? '1.2'} onCommit={v => onUpdate({ ceSlMultiplier: v })} className="w-full flex-1 min-w-0 h-5 text-center text-[11px]" />
           </div>
           <div className="flex items-center gap-1.5 bg-zinc-900/50 border border-zinc-800/40 rounded-lg px-1.5 py-0.5">
-            <span className="text-rose-400 text-[9px] font-black w-7 shrink-0" title="Exit PE alone on its own premium multiple, independent of CE and of SL × above">PE &times;</span>
-            <RuleNumInput value={row.peSlMultiplier ?? '1.2'} onCommit={v => onUpdate({ peSlMultiplier: v })} className="w-full flex-1 min-w-0 h-5 text-center text-[10px]" />
+            <span className="text-rose-400 text-[11px] font-black w-9 shrink-0" title="Exit PE alone on its own premium multiple, independent of CE and of SL × above">PE &times;</span>
+            <RuleNumInput value={row.peSlMultiplier ?? '1.2'} onCommit={v => onUpdate({ peSlMultiplier: v })} className="w-full flex-1 min-w-0 h-5 text-center text-[11px]" />
           </div>
         </div>
 
@@ -2812,17 +2812,17 @@ function FocusRowCardImpl({
                 value={row.vwapInterval || '1'}
                 title="Candle interval the session-open VWAP is computed from"
                 onChange={e => onUpdate({ vwapInterval: e.target.value })}
-                className="text-[9px] font-bold h-5 px-1 border border-zinc-700 rounded bg-zinc-900 text-zinc-200 focus:outline-none focus:border-violet-500"
+                className="text-[11px] font-bold h-5 px-1 border border-zinc-700 rounded bg-zinc-900 text-zinc-200 focus:outline-none focus:border-violet-500"
               >
                 <option value="1">1m</option>
                 <option value="5">5m</option>
               </select>
               <div className="flex items-center gap-0.5">
-                <span className="text-[8px] font-black text-zinc-500">buf%</span>
-                <RuleNumInput value={row.vwapBufferPct} onCommit={v => onUpdate({ vwapBufferPct: v })} className="w-9 h-5 text-center text-[10px]"
+                <span className="text-[10px] font-black text-zinc-500">buf%</span>
+                <RuleNumInput value={row.vwapBufferPct} onCommit={v => onUpdate({ vwapBufferPct: v })} className="w-9 h-5 text-center text-[11px]"
                   title="Require the closed candle to clear VWAP by more than this % before exiting — blank means no buffer" />
               </div>
-              <span className="text-[9px] font-mono font-bold text-zinc-400">
+              <span className="text-[11px] font-mono font-bold text-zinc-400">
                 {live.vwap != null ? `VWAP ${live.vwap.toFixed(2)}` : 'VWAP —'}
               </span>
             </div>
@@ -2846,7 +2846,7 @@ function FocusRowCardImpl({
             </button>
           )}
           {shownStatus(row, flat) === 'entered' && (
-            <span className="flex items-center gap-1.5 text-[10px] font-bold text-emerald-400 bg-emerald-500/10 border border-emerald-500/25 px-2.5 py-1 rounded-lg">
+            <span className="flex items-center gap-1.5 text-[11px] font-bold text-emerald-400 bg-emerald-500/10 border border-emerald-500/25 px-2.5 py-1 rounded-lg">
               <span className="h-1.5 w-1.5 rounded-full bg-emerald-400 animate-pulse" />
               Position Open
             </span>
@@ -5904,7 +5904,7 @@ export default function FocusTool() {
                       </div>
                     </div>
                   ) : (
-                    <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4 gap-4">
+                    <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 min-[2200px]:grid-cols-4 gap-4">
                       {rows.map(row => {
                         const { buildupWsActive, buildupExpiryHint } = rowBuildupWsFlags(
                           row, wsLive,
@@ -6033,19 +6033,19 @@ export default function FocusTool() {
         <div className="flex flex-col gap-4">
           <div className="grid grid-cols-2 gap-3">
             <div className="bg-zinc-950/40 border border-zinc-850 rounded-xl p-3 flex flex-col">
-              <span className="text-[9px] font-black text-zinc-500 uppercase tracking-widest">Realised P&L</span>
+              <span className="text-[11px] font-black text-zinc-500 uppercase tracking-widest">Realised P&L</span>
               <span className={cn("text-lg font-mono font-bold mt-1", pnlClass(realised))}>{fmtInr(realised, true)}</span>
             </div>
             <div className="bg-zinc-950/40 border border-zinc-850 rounded-xl p-3 flex flex-col">
-              <span className="text-[9px] font-black text-zinc-500 uppercase tracking-widest">Unrealised P&L</span>
+              <span className="text-[11px] font-black text-zinc-500 uppercase tracking-widest">Unrealised P&L</span>
               <span className={cn("text-lg font-mono font-bold mt-1", pnlClass(unrealised))}>{fmtInr(unrealised, true)}</span>
             </div>
             <div className="bg-zinc-950/40 border border-zinc-850 rounded-xl p-3 flex flex-col">
-              <span className="text-[9px] font-black text-zinc-500 uppercase tracking-widest">Total P&L</span>
+              <span className="text-[11px] font-black text-zinc-500 uppercase tracking-widest">Total P&L</span>
               <span className={cn("text-lg font-mono font-bold mt-1", pnlClass(total))}>{fmtInr(total, true)}</span>
             </div>
             <div className="bg-zinc-950/40 border border-zinc-850 rounded-xl p-3 flex flex-col">
-              <span className="text-[9px] font-black text-zinc-500 uppercase tracking-widest">This Tool&apos;s P&L</span>
+              <span className="text-[11px] font-black text-zinc-500 uppercase tracking-widest">This Tool&apos;s P&L</span>
               <span className={cn("text-lg font-mono font-bold mt-1", pnlClass(toolPnl))}>{fmtInr(toolPnl, true)}</span>
             </div>
           </div>
