@@ -214,7 +214,7 @@ function FanChart({ dates, stocks, leaderHovered, onHoverChange }: FanChartProps
       {yTicks.map((v) => (
         <line key={v}
           x1={M.left} x2={M.left + CW} y1={yS(v)} y2={yS(v)}
-          stroke={v === 0 ? '#71717a' : '#27272a'}
+          stroke={v === 0 ? 'var(--z-600)' : 'var(--z-800)'}
           strokeWidth={v === 0 ? 1.2 : 0.5}
           strokeDasharray={v === 0 ? undefined : '3,5'}
         />
@@ -237,13 +237,13 @@ function FanChart({ dates, stocks, leaderHovered, onHoverChange }: FanChartProps
           <line
             x1={crosshair.svgX} x2={crosshair.svgX}
             y1={M.top} y2={M.top + CH}
-            stroke="#ffffff" strokeWidth={0.6} strokeOpacity={0.2}
+            stroke="var(--z-400)" strokeWidth={0.6} strokeOpacity={0.5}
             strokeDasharray="4,4"
           />
           {/* Dot on the highlighted line */}
           <circle
             cx={crosshair.svgX} cy={yS(crosshair.valueAtDate)}
-            r={4} fill={crosshair.color} stroke="#18181b" strokeWidth={1.5}
+            r={4} fill={crosshair.color} stroke="var(--z-900)" strokeWidth={1.5}
           />
         </>
       )}
@@ -267,22 +267,22 @@ function FanChart({ dates, stocks, leaderHovered, onHoverChange }: FanChartProps
       })()}
 
       {/* ── Y-axis ── */}
-      <line x1={M.left} x2={M.left} y1={M.top} y2={M.top + CH} stroke="#3f3f46" strokeWidth={1} />
+      <line x1={M.left} x2={M.left} y1={M.top} y2={M.top + CH} stroke="var(--z-700)" strokeWidth={1} />
       {yTicks.map((v) => (
         <g key={v}>
-          <line x1={M.left - 4} x2={M.left} y1={yS(v)} y2={yS(v)} stroke="#52525b" strokeWidth={0.8} />
-          <text x={M.left - 8} y={yS(v) + 4} textAnchor="end" fontSize={10} fill={v === 0 ? 'rgba(255,255,255,0.60)' : 'rgba(255,255,255,0.40)'}>
+          <line x1={M.left - 4} x2={M.left} y1={yS(v)} y2={yS(v)} stroke="var(--z-700)" strokeWidth={0.8} />
+          <text x={M.left - 8} y={yS(v) + 4} textAnchor="end" fontSize={10} fill={v === 0 ? 'var(--z-300)' : 'var(--z-500)'}>
             {v > 0 ? '+' : ''}{v}%
           </text>
         </g>
       ))}
 
       {/* ── X-axis ── */}
-      <line x1={M.left} x2={M.left + CW} y1={M.top + CH} y2={M.top + CH} stroke="#3f3f46" strokeWidth={1} />
+      <line x1={M.left} x2={M.left + CW} y1={M.top + CH} y2={M.top + CH} stroke="var(--z-700)" strokeWidth={1} />
       {xLabels.map((i) => (
         <g key={i}>
-          <line x1={xS(i)} x2={xS(i)} y1={M.top + CH} y2={M.top + CH + 5} stroke="#52525b" strokeWidth={0.8} />
-          <text x={xS(i)} y={M.top + CH + 18} textAnchor="middle" fontSize={10} fill="rgba(255,255,255,0.40)">
+          <line x1={xS(i)} x2={xS(i)} y1={M.top + CH} y2={M.top + CH + 5} stroke="var(--z-700)" strokeWidth={0.8} />
+          <text x={xS(i)} y={M.top + CH + 18} textAnchor="middle" fontSize={10} fill="var(--z-500)">
             {fmtAxisDate(dates[i])}
           </text>
         </g>
@@ -297,12 +297,12 @@ function FanChart({ dates, stocks, leaderHovered, onHoverChange }: FanChartProps
           <g pointerEvents="none">
             <rect
               x={ttLeft} y={ttTop} width={tooltipW} height={tooltipH}
-              rx={5} fill="#18181b" stroke="#3f3f46" strokeWidth={0.8}
+              rx={5} fill="var(--z-900)" stroke="var(--z-700)" strokeWidth={0.8}
             />
             {/* Symbol */}
             <text
               x={ttLeft + 8} y={ttTop + 14}
-              fontSize={11} fontWeight="700" fill="rgba(255,255,255,0.85)"
+              fontSize={11} fontWeight="700" fill="var(--z-100)"
               fontFamily="ui-monospace,monospace"
             >
               {crosshair.symbol}
@@ -316,26 +316,26 @@ function FanChart({ dates, stocks, leaderHovered, onHoverChange }: FanChartProps
             <text
               x={ttLeft + tooltipW - 30} y={ttTop + 14.5}
               textAnchor="middle" fontSize={9.5} fontWeight="700"
-              fill={crosshair.valueAtDate >= 0 ? '#34d399' : '#f87171'}
+              fill={crosshair.valueAtDate >= 0 ? 'var(--chart-pos)' : 'var(--chart-neg)'}
             >
               {crosshair.valueAtDate >= 0 ? '+' : ''}{crosshair.valueAtDate.toFixed(2)}%
             </text>
             {/* Date · Sector */}
             <text
               x={ttLeft + 8} y={ttTop + 28}
-              fontSize={8.5} fill="rgba(255,255,255,0.45)"
+              fontSize={8.5} fill="var(--z-400)"
             >
               {fmtFullDate(dates[crosshair.dateIdx])}{sectorTrunc ? ` · ${sectorTrunc}` : ''}
             </text>
             {/* Total return */}
             <text
               x={ttLeft + 8} y={ttTop + 41}
-              fontSize={8.5} fill="rgba(255,255,255,0.40)"
+              fontSize={8.5} fill="var(--z-400)"
             >
               Total:{' '}
               <tspan
                 fontWeight="600"
-                fill={crosshair.finalReturn >= 0 ? '#34d399' : '#f87171'}
+                fill={crosshair.finalReturn >= 0 ? 'var(--chart-pos)' : 'var(--chart-neg)'}
               >
                 {crosshair.finalReturn >= 0 ? '+' : ''}{crosshair.finalReturn.toFixed(1)}%
               </tspan>
