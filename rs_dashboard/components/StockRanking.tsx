@@ -35,6 +35,7 @@ const FACTORS: FactorDef[] = [
   { id: '1w', label: '1 Week Change', short: '1W', category: 'Momentum', hint: '% move over 7 calendar days', defaultWeight: 10 },
   { id: '1m', label: '1 Month Change', short: '1M', category: 'Momentum', hint: '% move over ~1 month', defaultWeight: 15 },
   { id: '3m', label: '3 Month Change', short: '3M', category: 'Momentum', hint: '% move over ~3 months', defaultWeight: 15 },
+  { id: '6m', label: '6 Month Change', short: '6M', category: 'Momentum', hint: '% move over ~6 months', defaultWeight: 10 },
   { id: '1y', label: '1 Year Change', short: '1Y', category: 'Momentum', hint: '% move over 1 year — n/a for stocks listed less than a year', defaultWeight: 10 },
   { id: 'rsi', label: 'RSI (14)', short: 'RSI', category: 'Momentum', hint: 'Wilder 14-period RSI — higher reads more bullish', defaultWeight: 5 },
   { id: 'hi52', label: 'vs 52W High', short: '52W Hi', category: 'Strength', hint: '% below 52-week high — closer to 0 is stronger', defaultWeight: 10 },
@@ -48,7 +49,7 @@ const CATEGORY_ORDER: FactorCategory[] = ['Momentum', 'Trend', 'Strength', 'Part
 
 // A stock whose available factors carry less than this share of the total
 // weight is listed but not ranked: a score built from one or two factors
-// isn't comparable with one built from all eleven.
+// isn't comparable with one built from all twelve.
 const MIN_COVERAGE = 0.6;
 const TOP_N = 20;
 
@@ -66,18 +67,18 @@ const PRESETS: Record<string, Preset> = {
   },
   momentum: {
     label: 'Momentum Rally',
-    description: 'Overweights recent price acceleration over the last 1-3 months',
-    weights: { '1d': 5, '1w': 15, '1m': 20, '3m': 20, '1y': 15, rsi: 10, hi52: 5, lo52: 0, ma50: 5, ma200: 5, volr: 0 },
+    description: 'Overweights recent price acceleration over the last 1-6 months',
+    weights: { '1d': 5, '1w': 15, '1m': 20, '3m': 20, '6m': 15, '1y': 15, rsi: 10, hi52: 5, lo52: 0, ma50: 5, ma200: 5, volr: 0 },
   },
   trend: {
     label: 'Trend Strength',
     description: 'Overweights moving-average position and proximity to the 52-week range',
-    weights: { '1d': 0, '1w': 5, '1m': 5, '3m': 10, '1y': 10, rsi: 5, hi52: 20, lo52: 10, ma50: 15, ma200: 15, volr: 5 },
+    weights: { '1d': 0, '1w': 5, '1m': 5, '3m': 10, '6m': 10, '1y': 10, rsi: 5, hi52: 20, lo52: 10, ma50: 15, ma200: 15, volr: 5 },
   },
   shortterm: {
     label: 'Short-Term Movers',
     description: 'Overweights today and this week, confirmed by volume conviction',
-    weights: { '1d': 25, '1w': 25, '1m': 10, '3m': 5, '1y': 0, rsi: 10, hi52: 5, lo52: 0, ma50: 10, ma200: 5, volr: 15 },
+    weights: { '1d': 25, '1w': 25, '1m': 10, '3m': 5, '6m': 0, '1y': 0, rsi: 10, hi52: 5, lo52: 0, ma50: 10, ma200: 5, volr: 15 },
   },
 };
 

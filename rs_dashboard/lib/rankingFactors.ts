@@ -10,7 +10,7 @@
 import type { OHLCVRow } from '@/lib/rs';
 import { getSector, type Sector } from '@/lib/sectors';
 
-export type FactorId = '1d' | '1w' | '1m' | '3m' | '1y' | 'rsi' | 'hi52' | 'lo52' | 'ma50' | 'ma200' | 'volr';
+export type FactorId = '1d' | '1w' | '1m' | '3m' | '6m' | '1y' | 'rsi' | 'hi52' | 'lo52' | 'ma50' | 'ma200' | 'volr';
 export type FactorValues = Record<FactorId, number | null>;
 
 export interface CorporateAction {
@@ -180,6 +180,7 @@ export function computeRankingStock(symbol: string, rawRows: OHLCVRow[], todayIS
       '1w': rows.length >= 2 ? pctChangeSince(rows, 7) : null,
       '1m': rows.length >= 2 ? pctChangeSince(rows, 29) : null,
       '3m': rows.length >= 2 ? pctChangeSince(rows, 91) : null,
+      '6m': rows.length >= 2 ? pctChangeSince(rows, 182) : null,
       '1y': rows.length >= 2 ? pctChangeSince(rows, 364) : null,
       rsi: wilderRSI(rows.slice(-RSI_LOOKBACK).map(r => r.close)),
       hi52,
