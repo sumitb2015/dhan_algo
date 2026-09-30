@@ -8,8 +8,9 @@
 
 import React, { useState, useEffect, useCallback } from 'react';
 import Link from 'next/link';
-import { Download } from 'lucide-react';
+import { Combine, Download } from 'lucide-react';
 import NavBar from './NavBar';
+import DataChip, { toIsoDate } from './DataChip';
 import { cachedFetch } from '@/lib/clientCache';
 import { useScriptRefresh } from '@/lib/useScriptRefresh';
 import { useOptionsLiveBridge, type BridgeStatus } from '@/lib/useOptionsLiveBridge';
@@ -82,6 +83,9 @@ export default function OptionsCharts() {
 
   const bridge = useOptionsLiveBridge(UNDERLYING, { active: isBridgeTab, pollIntervalSec: pollInterval });
   const isLive = bridge.isLive;
+  // Session date of what the bridge views chart: the live snapshot's own
+  // timestamp, else the candle series' date (both from the payload).
+  const dataDate = isLive ? toIsoDate(bridge.quotes?.updated_at) : toIsoDate(candleMeta.date);
 
   const onDownloadDone = useCallback(() => setDataVersion(v => v + 1), []);
   const { status: dlStatus, start: startDownload } = useScriptRefresh('/api/options-refresh', onDownloadDone);
@@ -128,12 +132,16 @@ export default function OptionsCharts() {
     <div className="flex flex-col min-h-screen bg-zinc-950 text-white">
 
       {/* Header */}
-      <div className="sticky top-0 z-10 flex items-center justify-between gap-3 flex-wrap
+      <div className="sticky top-0 z-30 flex items-center justify-between gap-3 flex-wrap
                       px-6 py-3 border-b border-zinc-800 bg-zinc-950/95 backdrop-blur">
         <div className="flex items-center gap-3">
+          <div className="flex items-center justify-center w-8 h-8 rounded-lg shrink-0 bg-emerald-500/10 border border-emerald-500/25">
+            <Combine className="w-4 h-4 text-emerald-400" />
+          </div>
           <div>
-            <h1 className="text-sm font-bold text-white tracking-tight">Nifty Straddle Chart</h1>
-            <p className="text-[10px] text-zinc-400 font-medium">
+            <p className="text-[10px] font-bold uppercase tracking-[0.16em] text-emerald-400 mb-0.5">Options · NIFTY</p>
+            <h1 className="text-sm font-bold text-white tracking-tight leading-none">Nifty Straddle Chart</h1>
+            <p className="text-[10px] text-zinc-500 font-medium mt-1">
               {isLive
                 ? 'Live WebSocket · OI & Premium'
                 : candleMeta.date && !candleMeta.isToday
@@ -247,6 +255,8 @@ export default function OptionsCharts() {
           )}
 
           {isBridgeTab && <StatusBadge status={bridge.status.status} />}
+
+          <DataChip date={dataDate} lastSession={!isLive && !candleMeta.isToday} />
 
           <span className="w-px h-5 bg-zinc-800 mx-1 shrink-0" />
           <NavBar />

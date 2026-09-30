@@ -76,7 +76,6 @@ const NAV_GROUPS = [
     icon: LineChart,
     links: [
       { href: '/options-analytics', label: 'Positions Analytics', desc: 'Combined payoff, Greeks, P&L and Kelly sizing for your open NIFTY / SENSEX positions' },
-      { href: '/options/unusual-activity', label: 'Unusual Flow', desc: 'Real-time unusual options volume/OI spikes & institutional turnover flow' },
       { href: '/backtest', label: 'Options Backtester', desc: 'Historical simulation with dynamic ATM rolling, scalp floors & trailing SL' },
       { href: '/backtest-signals', label: 'VectorBT Options Backtester', desc: 'Same multi-leg options backtest run through VectorBT — Sharpe/Sortino/drawdown & OpenStatz tearsheet for comparing against the Options Backtester' },
       { href: '/options/analyzer', label: 'Option Analyzer', desc: 'Rank strikes based on technical indicators & OI change' },

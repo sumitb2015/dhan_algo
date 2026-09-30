@@ -2,6 +2,7 @@
 
 import React, { useEffect, useState, useCallback, useRef } from 'react';
 import NavBar from '@/components/NavBar';
+import DataChip, { toIsoDate } from '@/components/DataChip';
 import FuturesCandleChart from '@/components/FuturesCandleChart';
 import OIProfileChart from '@/components/OIProfileChart';
 import OIChangeProfileChart from '@/components/OIChangeProfileChart';
@@ -9,7 +10,7 @@ import type { NiftyOIProfileResponse } from '@/app/api/nifty-oi-profile/route';
 import {
   RefreshCw,
   Calendar,
-  BarChart2,
+  ChartBarBig,
   Table as TableIcon,
 } from 'lucide-react';
 import { isNseLive } from '@/lib/marketHours';
@@ -121,6 +122,8 @@ export default function NiftyOIProfilePage() {
   }, [autoRefresh, marketLive, fetchData]);
 
   const pcr = data?.summary?.pcr ?? 0;
+  // Session date of the newest futures candle — the payload's own date.
+  const dataDate = toIsoDate(data?.candles?.[data.candles.length - 1]?.time);
   const pcrSentiment =
     pcr >= 1.2
       ? { label: 'Bullish', color: 'text-emerald-400 bg-emerald-950/60 border-emerald-800' }
@@ -130,24 +133,17 @@ export default function NiftyOIProfilePage() {
 
   return (
     <div className="min-h-screen bg-zinc-950 text-zinc-100 flex flex-col font-sans">
-      <NavBar />
-
-      <main className="flex-1 p-4 mx-auto w-full flex flex-col gap-4">
-        {/* TOP CONTROL BAR & TITLE */}
-        <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-3 bg-zinc-900/70 border border-zinc-800 p-3.5 rounded-xl shadow-md">
+      <div className="sticky top-0 z-30 flex items-center justify-between gap-3 flex-wrap
+                      px-6 py-3 border-b border-zinc-800 bg-zinc-950/95 backdrop-blur">
           <div className="flex items-center gap-3">
-            <div className="p-2 rounded-lg bg-emerald-500/10 border border-emerald-500/30 text-emerald-400">
-              <BarChart2 className="w-5 h-5" />
+            <div className="flex items-center justify-center w-8 h-8 rounded-lg shrink-0 bg-emerald-500/10 border border-emerald-500/25">
+              <ChartBarBig className="w-4 h-4 text-emerald-400" />
             </div>
             <div>
-              <div className="flex items-center gap-2">
-                <h1 className="text-lg font-bold tracking-tight text-white">NIFTY OI Profile</h1>
-                <span className="text-xs px-2 py-0.5 rounded-full bg-emerald-950 text-emerald-400 border border-emerald-800 font-medium">
-                  Futures & Options Profile
-                </span>
-              </div>
-              <p className="text-xs text-zinc-400">
-                5-Min Futures Chart ({days} Days) with Strike-Aligned OI & Daily Positioning Ladders
+              <p className="text-[10px] font-bold uppercase tracking-[0.16em] text-emerald-400 mb-0.5">Futures &amp; Options · NIFTY</p>
+              <h1 className="text-sm font-bold text-white tracking-tight leading-none">NIFTY OI Profile</h1>
+              <p className="text-[10px] text-zinc-500 font-medium mt-1">
+                5-min futures chart ({days} days) with strike-aligned OI &amp; daily positioning ladders
               </p>
             </div>
           </div>
@@ -273,8 +269,14 @@ export default function NiftyOIProfilePage() {
               <RefreshCw className={`w-3.5 h-3.5 ${loading ? 'animate-spin' : ''}`} />
               <span>Refresh</span>
             </button>
+
+            <DataChip date={dataDate} />
+            <span className="w-px h-5 bg-zinc-800 shrink-0" />
+            <NavBar />
           </div>
-        </div>
+      </div>
+
+      <main className="flex-1 p-4 mx-auto w-full flex flex-col gap-4">
 
         {/* ERROR ALERT */}
         {error && (

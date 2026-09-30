@@ -19,7 +19,7 @@ Flags
   NAVBAR_BARE    NavBar is the first child of the page root with no title header around it (a bare row of
                  buttons: no page title, icon or sticky header)
   NO_TILE        header has no icon tile
-  NO_DATA_CHIP   file handles a data date but never renders `DATA:`
+  NO_DATA_CHIP   file handles a data date but never renders `DATA:` (directly or via <DataChip>)
   NO_METADATA    page.tsx exports no metadata/generateMetadata (browser tab title falls to the default)
   DUP_ICON       the same lucide icon heads 3+ pages
 """
@@ -114,7 +114,8 @@ def audit():
         if ic: row["icon"] = ic[0]; icons[ic[0]] += 1
         if re.search(r"text-(?:emerald|amber|sky|indigo|violet|cyan|blue|purple|rose|red|green)-(?:500|600)", blk):
             row["flags"].append("TEXT_500")
-        if re.search(r"dataDate|data_date|lastSession", src) and "DATA:" not in src:
+        # components/DataChip.tsx renders the `DATA:` pill for pages that use it.
+        if re.search(r"dataDate|data_date|lastSession", src) and "DATA:" not in src and "<DataChip" not in src:
             row["flags"].append("NO_DATA_CHIP")
         rows.append(row)
     for r in rows:

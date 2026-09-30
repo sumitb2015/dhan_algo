@@ -2,7 +2,8 @@
 
 import React, { useState, useEffect, useCallback } from 'react';
 import NavBar from '@/components/NavBar';
-import { Activity, RefreshCw, AlertCircle, Loader2, Download, ChevronDown, ChevronUp, CandlestickChart, BookOpen } from 'lucide-react';
+import DataChip from '@/components/DataChip';
+import { ChartSpline, RefreshCw, AlertCircle, Loader2, Download, ChevronDown, ChevronUp, CandlestickChart, BookOpen } from 'lucide-react';
 import {
   ComposedChart, Area, Line, XAxis, YAxis, CartesianGrid,
   Tooltip, Legend, ResponsiveContainer,
@@ -342,8 +343,8 @@ function SpotFutureChart({ points, name }: { points: ChartPoint[]; name: string 
   const chartData = points.map(p => ({ ...p, dateLabel: fmtDate(p.date) }));
   const hasSpot = points.some(p => p.spotClose !== null && (p.spotClose as number) > 0);
 
-  const gridProps = { strokeDasharray: '3 6', stroke: '#20202399', vertical: false as const };
-  const tickStyle = { fontSize: 10, fill: '#a1a1aa', fontWeight: 500 as const, fontFamily: 'var(--font-mono)' };
+  const gridProps = { strokeDasharray: '3 6', stroke: 'var(--chart-grid)', vertical: false as const };
+  const tickStyle = { fontSize: 10, fontWeight: 500 as const, fontFamily: 'var(--font-mono)' };
 
   return (
     <div className="relative bg-zinc-900/60 border border-zinc-800 rounded-2xl p-5 overflow-hidden">
@@ -376,7 +377,7 @@ function SpotFutureChart({ points, name }: { points: ChartPoint[]; name: string 
             </linearGradient>
           </defs>
           <CartesianGrid {...gridProps} />
-          <XAxis dataKey="dateLabel" tick={tickStyle} tickLine={false} axisLine={{ stroke: '#27272a' }}
+          <XAxis dataKey="dateLabel" tick={tickStyle} tickLine={false} axisLine={{ stroke: 'var(--chart-axis)' }}
             interval="preserveStartEnd" minTickGap={18} />
           <YAxis
             domain={['dataMin - 20', 'dataMax + 20']}
@@ -389,7 +390,7 @@ function SpotFutureChart({ points, name }: { points: ChartPoint[]; name: string 
           <Tooltip content={<SpotFutureTooltip />} cursor={{ stroke: 'var(--chart-cursor-line)', strokeWidth: 1, strokeDasharray: '4 4' }} />
           <Legend
             wrapperStyle={{ fontSize: 11, paddingTop: 8 }}
-            formatter={(v: string) => <span style={{ color: '#d4d4d8', fontWeight: 600 }}>{v}</span>}
+            formatter={(v: string) => <span style={{ fontWeight: 600 }}>{v}</span>}
           />
           <Area
             type="monotone"
@@ -399,7 +400,7 @@ function SpotFutureChart({ points, name }: { points: ChartPoint[]; name: string 
             strokeWidth={2.5}
             fill={`url(#fill-future-${name})`}
             dot={false}
-            activeDot={{ r: 5, fill: '#38bdf8', stroke: '#082f49', strokeWidth: 2 }}
+            activeDot={{ r: 5, fill: '#38bdf8', stroke: 'var(--z-900)', strokeWidth: 2 }}
             connectNulls
           />
           {hasSpot && (
@@ -467,8 +468,8 @@ function RolloverPanel({
   const latest = points[points.length - 1];
   const isRolloverWeek = daysToExpiry !== null && daysToExpiry >= 0 && daysToExpiry <= 5;
 
-  const gridProps = { strokeDasharray: '3 6', stroke: '#20202399', vertical: false as const };
-  const tickStyle = { fontSize: 10, fill: '#a1a1aa', fontWeight: 500 as const, fontFamily: 'var(--font-mono)' };
+  const gridProps = { strokeDasharray: '3 6', stroke: 'var(--chart-grid)', vertical: false as const };
+  const tickStyle = { fontSize: 10, fontWeight: 500 as const, fontFamily: 'var(--font-mono)' };
 
   return (
     <div className="relative bg-zinc-900/60 border border-zinc-800 rounded-2xl p-5 overflow-hidden">
@@ -501,7 +502,7 @@ function RolloverPanel({
             </linearGradient>
           </defs>
           <CartesianGrid {...gridProps} />
-          <XAxis dataKey="dateLabel" tick={tickStyle} tickLine={false} axisLine={{ stroke: '#27272a' }}
+          <XAxis dataKey="dateLabel" tick={tickStyle} tickLine={false} axisLine={{ stroke: 'var(--chart-axis)' }}
             interval="preserveStartEnd" minTickGap={18} />
           <YAxis
             domain={[0, 100]}
@@ -520,7 +521,7 @@ function RolloverPanel({
             strokeWidth={2.5}
             fill={`url(#fill-rollover-${name})`}
             dot={false}
-            activeDot={{ r: 5, fill: '#f59e0b', stroke: '#451a03', strokeWidth: 2 }}
+            activeDot={{ r: 5, fill: '#f59e0b', stroke: 'var(--z-900)', strokeWidth: 2 }}
           />
         </ComposedChart>
       </ResponsiveContainer>
@@ -685,20 +686,15 @@ export default function FuturesDashboard() {
     <div className="flex flex-col min-h-screen bg-black text-zinc-100">
 
       {/* Sticky header */}
-      <header className="sticky top-0 w-full border-b border-zinc-900 bg-zinc-950/60 backdrop-blur-md px-5 py-3 flex items-center justify-between gap-4 z-20 flex-wrap">
+      <header className="sticky top-0 w-full border-b border-zinc-800 bg-zinc-950/60 backdrop-blur-md px-5 py-3 flex items-center justify-between gap-4 z-30 flex-wrap">
         <div className="flex items-center gap-3 shrink-0">
           <div className="h-9 w-9 rounded-xl bg-gradient-to-tr from-sky-600 to-cyan-400 flex items-center justify-center shadow-lg shadow-sky-500/10">
-            <Activity className="h-4 w-4 text-white" />
+            <ChartSpline className="h-4 w-4 text-oncolor" />
           </div>
           <div>
             <h1 className="text-base font-bold tracking-tight bg-gradient-to-r from-white via-zinc-200 to-zinc-500 bg-clip-text text-transparent leading-none">
               Futures Monitor
             </h1>
-            {data?.dataDate && (
-              <p className="text-[10px] text-zinc-400 font-medium mt-0.5">
-                DATA: {data.dataDate}
-              </p>
-            )}
           </div>
         </div>
 
@@ -710,6 +706,8 @@ export default function FuturesDashboard() {
             <BookOpen className="h-3.5 w-3.5" />
             Trading Playbook
           </button>
+          <DataChip date={data?.dataDate} />
+          <span className="w-px h-5 bg-zinc-800 shrink-0" />
           <NavBar />
         </div>
       </header>

@@ -2,10 +2,11 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import NavBar from '@/components/NavBar';
+import DataChip, { toIsoDate } from '@/components/DataChip';
 import { TrendingOiTable } from '@/components/TrendingOiTable';
 import { TrendingOiChartModal } from '@/components/TrendingOiChartModal';
 import type { TrendingOiResponse } from '@/app/api/trending-oi/route';
-import { RefreshCw, TrendingUp, Search, ChevronDown, BarChart3 } from 'lucide-react';
+import { RefreshCw, ChartColumnStacked, Search, ChevronDown, BarChart3 } from 'lucide-react';
 import { isNseLive } from '@/lib/marketHours';
 
 const INTERVALS = ['1', '3', '5', '10', '15'] as const;
@@ -170,26 +171,27 @@ export default function TrendingOiPage() {
     return `${sorted[0]}, ${sorted[1]}`;
   }, [activeSelectedStrikes]);
 
+  // Session date of the newest bucket — the payload's own date (DD-MM-YYYY).
+  const dataDate = toIsoDate(rows[rows.length - 1]?.date);
+
   const extraStrikeCount = activeSelectedStrikes.length > 2 ? activeSelectedStrikes.length - 2 : 0;
   const filteredAvailableStrikes = availableStrikes.filter((stk) => stk.toString().includes(strikeSearch.trim()));
 
   return (
     <div className="min-h-screen bg-zinc-950 text-zinc-100 flex flex-col font-sans">
-      <NavBar />
-
-      <main className="flex-1 p-4 mx-auto w-full flex flex-col gap-4">
-        {/* TOP CONTROL BAR & TITLE */}
-        <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-3 bg-zinc-900/70 border border-zinc-800 p-3.5 rounded-xl shadow-md">
+      <div className="sticky top-0 z-30 flex items-center justify-between gap-3 flex-wrap
+                      px-6 py-3 border-b border-zinc-800 bg-zinc-950/95 backdrop-blur">
           <div className="flex items-center gap-3">
-            <div className="p-2 rounded-lg bg-emerald-500/10 border border-emerald-500/30 text-emerald-400">
-              <TrendingUp className="w-5 h-5" />
+            <div className="flex items-center justify-center w-8 h-8 rounded-lg shrink-0 bg-emerald-500/10 border border-emerald-500/25">
+              <ChartColumnStacked className="w-4 h-4 text-emerald-400" />
             </div>
             <div>
+              <p className="text-[10px] font-bold uppercase tracking-[0.16em] text-emerald-400 mb-0.5">Options · NIFTY</p>
               <div className="flex items-center gap-2">
-                <h1 className="text-lg font-bold tracking-tight text-white">Trending OI</h1>
+                <h1 className="text-sm font-bold text-white tracking-tight leading-none">Trending OI</h1>
                 {refreshing && <RefreshCw className="w-3.5 h-3.5 text-emerald-400 animate-spin" />}
               </div>
-              <p className="text-xs text-zinc-400">
+              <p className="text-[10px] text-zinc-500 font-medium mt-1">
                 Chain-wide OI/LTP totals bucketed by interval, diffed against the previous bucket
               </p>
             </div>
@@ -366,8 +368,14 @@ export default function TrendingOiPage() {
                 <span className="text-zinc-400">{marketLive ? 'live' : 'closed'}</span>
               </span>
             )}
+
+            <DataChip date={dataDate} lastSession={mode === 'live' && data != null && !data.is_live} />
+            <span className="w-px h-5 bg-zinc-800 shrink-0" />
+            <NavBar />
           </div>
-        </div>
+      </div>
+
+      <main className="flex-1 p-4 mx-auto w-full flex flex-col gap-4">
 
         {/* Selected Strikes chips */}
         <div className="flex flex-wrap items-center gap-2 text-xs px-1">

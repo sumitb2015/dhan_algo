@@ -7,6 +7,7 @@ import {
 } from 'recharts';
 import { cachedFetch } from '@/lib/clientCache';
 import NavBar from './NavBar';
+import DataChip from './DataChip';
 import { PulseStat, ChartHeader } from '@/components/QuantPanel';
 
 // ─── Palette ──────────────────────────────────────────────────────
@@ -15,8 +16,8 @@ import { PulseStat, ChartHeader } from '@/components/QuantPanel';
 const CE_COLOR   = '#3b82f6';
 const PE_COLOR   = '#c47f0a';
 const NEUTRAL    = '#0e9d6a';   // third slot: spot / straddle, never adjacent to CE/PE
-const AXIS       = '#a1a1aa';
-const GRID       = '#27272a';
+const AXIS       = 'var(--z-400)';     // muted label text (spot row, ATM label)
+const GRID       = 'var(--chart-grid)';
 
 // Sequential single-hue ramp (dim → bright) for the IV surface heatmap
 // (monotone L, ΔL >= 0.06 per step, lowest step still clears the zinc surface at 2.09:1)
@@ -132,7 +133,7 @@ function ToggleChip({
         on ? 'border-zinc-600 bg-zinc-800 text-white' : 'border-zinc-800 text-zinc-500'
       }`}
     >
-      <span className="w-2 h-2 rounded-sm" style={{ background: on ? color : '#52525b' }} />
+      <span className="w-2 h-2 rounded-sm" style={{ background: on ? color : 'var(--z-600)' }} />
       {label}
     </button>
   );
@@ -336,7 +337,7 @@ export default function IVChartsPage() {
     if (vals.length < 2) return null;
     const lo = quantile(vals, 0.03), hi = quantile(vals, 0.97);
     const color = (v: number | null) => {
-      if (v == null) return '#18181b';
+      if (v == null) return 'var(--z-800)';
       const t = Math.min(1, Math.max(0, (v - lo) / (hi - lo || 1)));
       return HEAT_RAMP[Math.round(t * (HEAT_RAMP.length - 1))];
     };
@@ -349,7 +350,7 @@ export default function IVChartsPage() {
     <div className="flex flex-col min-h-screen bg-zinc-950 text-white">
 
       {/* ── Header ─────────────────────────────────────────────── */}
-      <div className="sticky top-0 z-20 border-b border-zinc-800 bg-zinc-950/95 backdrop-blur px-6 py-3">
+      <div className="sticky top-0 z-30 border-b border-zinc-800 bg-zinc-950/95 backdrop-blur px-6 py-3">
         <div className="flex items-center justify-between gap-3 flex-wrap">
           <div className="flex items-center gap-3">
             <div className="flex items-center justify-center w-8 h-8 rounded-lg bg-blue-500/10 border border-blue-500/25 shrink-0">
@@ -358,7 +359,7 @@ export default function IVChartsPage() {
               </svg>
             </div>
             <div>
-              <p className="text-[9px] font-bold text-blue-500 uppercase tracking-[0.18em] mb-0.5">
+              <p className="text-[10px] font-bold text-blue-400 uppercase tracking-[0.16em] mb-0.5">
                 Options · NIFTY
               </p>
               <h1 className="text-sm font-bold text-white tracking-tight leading-none">Implied Volatility Terminal</h1>
@@ -375,6 +376,7 @@ export default function IVChartsPage() {
                 Updated {updatedAt}
               </span>
             )}
+            <DataChip date={res?.date} lastSession={res ? res.date !== res.today : false} />
             <span className="w-px h-5 bg-zinc-800 shrink-0" />
             <NavBar />
           </div>
@@ -547,12 +549,12 @@ export default function IVChartsPage() {
                         />
                         <Line yAxisId="iv" type="monotone" dataKey="ceIV" name="CE IV" stroke={CE_COLOR}
                           strokeWidth={2} dot={false} connectNulls
-                          activeDot={{ r: 4, fill: CE_COLOR, stroke: '#18181b', strokeWidth: 2 }} />
+                          activeDot={{ r: 4, fill: CE_COLOR, stroke: 'var(--z-900)', strokeWidth: 2 }} />
                         <Line yAxisId="premium" type="monotone" dataKey="ceLTP" name="CE Premium" stroke={NEUTRAL}
                           strokeWidth={1.5} strokeDasharray="4 3" dot={false} connectNulls
-                          activeDot={{ r: 3, fill: NEUTRAL, stroke: '#18181b', strokeWidth: 2 }} />
+                          activeDot={{ r: 3, fill: NEUTRAL, stroke: 'var(--z-900)', strokeWidth: 2 }} />
                         <Brush dataKey="time" height={22} travellerWidth={8}
-                          stroke="#52525b" fill="#09090b"
+                          stroke="var(--chart-axis)" fill="var(--z-950)"
                           tickFormatter={(t: string) => t} />
                       </LineChart>
                     </ResponsiveContainer>
@@ -586,12 +588,12 @@ export default function IVChartsPage() {
                         />
                         <Line yAxisId="iv" type="monotone" dataKey="peIV" name="PE IV" stroke={PE_COLOR}
                           strokeWidth={2} dot={false} connectNulls
-                          activeDot={{ r: 4, fill: PE_COLOR, stroke: '#18181b', strokeWidth: 2 }} />
+                          activeDot={{ r: 4, fill: PE_COLOR, stroke: 'var(--z-900)', strokeWidth: 2 }} />
                         <Line yAxisId="premium" type="monotone" dataKey="peLTP" name="PE Premium" stroke={NEUTRAL}
                           strokeWidth={1.5} strokeDasharray="4 3" dot={false} connectNulls
-                          activeDot={{ r: 3, fill: NEUTRAL, stroke: '#18181b', strokeWidth: 2 }} />
+                          activeDot={{ r: 3, fill: NEUTRAL, stroke: 'var(--z-900)', strokeWidth: 2 }} />
                         <Brush dataKey="time" height={22} travellerWidth={8}
-                          stroke="#52525b" fill="#09090b"
+                          stroke="var(--chart-axis)" fill="var(--z-950)"
                           tickFormatter={(t: string) => t} />
                       </LineChart>
                     </ResponsiveContainer>
@@ -613,7 +615,7 @@ export default function IVChartsPage() {
                         <XAxis {...xAxis} />
                         <YAxis {...yAxis} domain={['auto', 'auto']}
                           tickFormatter={(v: number) => v.toFixed(1)} />
-                        <ReferenceLine y={0} stroke="#52525b" strokeWidth={1} />
+                        <ReferenceLine y={0} stroke="var(--chart-axis)" strokeWidth={1} />
                         <Tooltip
                           content={chartTooltip([
                             { key: 'ivSpread', label: 'CE−PE', color: CE_COLOR, fmt: v => `${v >= 0 ? '+' : ''}${v.toFixed(2)} pts` },
@@ -680,7 +682,7 @@ export default function IVChartsPage() {
                     <YAxis {...yAxis} domain={skewDomain ?? ['auto', 'auto']}
                       tickFormatter={(v: number) => `${v.toFixed(1)}%`} />
                     {atm > 0 && (
-                      <ReferenceLine x={atm} stroke="#71717a" strokeDasharray="4 3"
+                      <ReferenceLine x={atm} stroke="var(--chart-axis)" strokeDasharray="4 3"
                         label={{ value: 'ATM', fill: AXIS, fontSize: 10, position: 'top' }} />
                     )}
                     <Tooltip
@@ -698,11 +700,11 @@ export default function IVChartsPage() {
                     <Line type="monotone" dataKey="peIVOpen" stroke={PE_COLOR} strokeWidth={1.5}
                       strokeDasharray="4 3" dot={false} connectNulls opacity={0.55} />
                     <Line type="monotone" dataKey="ceIV" stroke={CE_COLOR} strokeWidth={2}
-                      dot={{ r: 3, fill: CE_COLOR, stroke: '#18181b', strokeWidth: 1.5 }} connectNulls
-                      activeDot={{ r: 5, fill: CE_COLOR, stroke: '#18181b', strokeWidth: 2 }} />
+                      dot={{ r: 3, fill: CE_COLOR, stroke: 'var(--z-900)', strokeWidth: 1.5 }} connectNulls
+                      activeDot={{ r: 5, fill: CE_COLOR, stroke: 'var(--z-900)', strokeWidth: 2 }} />
                     <Line type="monotone" dataKey="peIV" stroke={PE_COLOR} strokeWidth={2}
-                      dot={{ r: 3, fill: PE_COLOR, stroke: '#18181b', strokeWidth: 1.5 }} connectNulls
-                      activeDot={{ r: 5, fill: PE_COLOR, stroke: '#18181b', strokeWidth: 2 }} />
+                      dot={{ r: 3, fill: PE_COLOR, stroke: 'var(--z-900)', strokeWidth: 1.5 }} connectNulls
+                      activeDot={{ r: 5, fill: PE_COLOR, stroke: 'var(--z-900)', strokeWidth: 2 }} />
                   </LineChart>
                 </ResponsiveContainer>
                 <p className="text-[10px] text-zinc-500 mt-2">

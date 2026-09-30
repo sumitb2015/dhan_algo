@@ -2,6 +2,7 @@
 
 import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import NavBar from '@/components/NavBar';
+import DataChip from '@/components/DataChip';
 import { isUnderlyingLive } from '@/lib/marketHours';
 import { fmtNum } from '@/lib/numberFormat';
 import {
@@ -48,6 +49,8 @@ interface FlowAlert {
 
 interface ScanData {
   success: boolean;
+  /** NSE session the chain snapshot belongs to (YYYY-MM-DD). */
+  session_date?: string;
   underlying: string;
   spot: number;
   lot_size: number;
@@ -186,13 +189,13 @@ export default function UnusualActivity() {
   return (
     <div className="h-screen flex flex-col bg-zinc-950 text-white">
       {/* ── Sticky Top Header ── */}
-      <div className="shrink-0 z-40 flex items-center justify-between gap-3 flex-wrap px-6 py-3 border-b border-zinc-800 bg-zinc-950/95 backdrop-blur">
+      <div className="sticky top-0 shrink-0 z-30 flex items-center justify-between gap-3 flex-wrap px-6 py-3 border-b border-zinc-800 bg-zinc-950/95 backdrop-blur">
         <div className="flex items-center gap-3">
           <div className="flex items-center justify-center w-8 h-8 rounded-lg bg-amber-500/10 border border-amber-500/25 shrink-0">
             <Flame className="w-4 h-4 text-amber-400" />
           </div>
           <div>
-            <p className="text-[9px] font-bold text-amber-500 uppercase tracking-[0.18em] mb-0.5">
+            <p className="text-[10px] font-bold text-amber-400 uppercase tracking-[0.16em] mb-0.5">
               Flow Intelligence · Unusual Options
             </p>
             <h1 className="text-sm font-bold text-white tracking-tight leading-none">
@@ -274,6 +277,7 @@ export default function UnusualActivity() {
             {showPlaybook ? <ChevronUp className="w-3 h-3" /> : <ChevronDown className="w-3 h-3" />}
           </button>
 
+          <DataChip date={data?.session_date} />
           <span className="w-px h-5 bg-zinc-800 shrink-0" />
           <NavBar />
         </div>

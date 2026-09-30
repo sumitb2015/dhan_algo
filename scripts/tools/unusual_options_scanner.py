@@ -12,6 +12,7 @@ import os
 import json
 import math
 import argparse
+from datetime import datetime, timedelta, timezone
 import pandas as pd
 import numpy as np
 
@@ -292,6 +293,7 @@ def scan_unusual_options(underlying: str = 'NIFTY', expiry: str = None, min_rati
 
     return {
         "success": True,
+        "session_date": nse_session_date(),
         "underlying": under_upper,
         "spot": round(spot, 2),
         "lot_size": lot_size,
@@ -314,6 +316,25 @@ def scan_unusual_options(underlying: str = 'NIFTY', expiry: str = None, min_rati
         "alerts": alerts[:50],  # top 50 alerts
         "flows": all_flows,
     }
+
+
+IST = timezone(timedelta(hours=5, minutes=30))
+
+
+def nse_session_date() -> str:
+    """NSE session the chain snapshot belongs to (YYYY-MM-DD), for the page's DATA chip.
+
+    Before the 09:15 open the chain still shows the previous session; weekends
+    roll back to Friday. Exchange holidays are not modelled (no holiday calendar
+    in this repo), so a scan on a holiday is labelled with that day's date.
+    """
+    now = datetime.now(IST)
+    d = now.date()
+    if (now.hour, now.minute) < (9, 15):
+        d -= timedelta(days=1)
+    while d.weekday() >= 5:
+        d -= timedelta(days=1)
+    return d.isoformat()
 
 
 def main():

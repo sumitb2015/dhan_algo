@@ -523,16 +523,16 @@ export default function OptionsStraddleWorkspace({
   // Shared chart axes config
   const xAxisProps = {
     dataKey: 'time' as const,
-    tick: { fontSize: 10, fill: '#a1a1aa', fontWeight: 500 as const },
+    tick: { fontSize: 10, fontWeight: 500 as const },
     tickLine: false,
-    axisLine: { stroke: '#27272a' },
+    axisLine: { stroke: 'var(--chart-axis)' },
     interval: xTickInterval,
   };
-  const gridProps = { strokeDasharray: '4 4', stroke: '#27272a', vertical: false };
-  const tooltipProps = { content: <ChartTooltip />, cursor: { stroke: '#3f3f46', strokeWidth: 1 } };
+  const gridProps = { strokeDasharray: '4 4', stroke: 'var(--chart-grid)', vertical: false };
+  const tooltipProps = { content: <ChartTooltip />, cursor: { stroke: 'var(--chart-cursor-line)', strokeWidth: 1 } };
   const legendProps = {
     wrapperStyle: { fontSize: 11, paddingTop: 12 },
-    formatter: (v: string) => <span style={{ color: '#d4d4d8', fontWeight: 600 }}>{v}</span>,
+    formatter: (v: string) => <span style={{ fontWeight: 600 }}>{v}</span>,
   };
   // Stable Y-axis domain for live data: 3% padding so small movements don't rescale wildly
   const liveDomain: [(v: number) => number, (v: number) => number] = [
@@ -723,7 +723,7 @@ export default function OptionsStraddleWorkspace({
                   </defs>
                   <CartesianGrid {...gridProps} />
                   <XAxis {...xAxisProps} />
-                  <YAxis tick={{ fontSize: 10, fill: '#a1a1aa', fontWeight: 500 }} tickLine={false}
+                  <YAxis tick={{ fontSize: 10, fontWeight: 500 }} tickLine={false}
                     axisLine={false} domain={['auto', 'auto']} width={52} tickFormatter={fmtOI} />
                   <Tooltip {...tooltipProps} />
                   <Legend {...legendProps} />
@@ -797,7 +797,7 @@ export default function OptionsStraddleWorkspace({
                   </defs>
                   <CartesianGrid {...gridProps} />
                   <XAxis {...xAxisProps} />
-                  <YAxis tick={{ fontSize: 10, fill: '#a1a1aa', fontWeight: 500 }} tickLine={false}
+                  <YAxis tick={{ fontSize: 10, fontWeight: 500 }} tickLine={false}
                     axisLine={false} domain={isLive ? liveDomain : ['auto', 'auto']} width={52}
                     tickFormatter={v => fmtNum(v, 0)} />
                   <Tooltip {...tooltipProps} />
@@ -875,7 +875,7 @@ export default function OptionsStraddleWorkspace({
                 <LineChart data={chartData} margin={{ top: 8, right: 16, left: 0, bottom: 0 }}>
                   <CartesianGrid {...gridProps} />
                   <XAxis {...xAxisProps} />
-                  <YAxis tick={{ fontSize: 10, fill: '#a1a1aa', fontWeight: 500 }} tickLine={false}
+                  <YAxis tick={{ fontSize: 10, fontWeight: 500 }} tickLine={false}
                     axisLine={false} domain={isLive ? liveDomain : ['auto', 'auto']} width={52}
                     tickFormatter={v => fmtNum(v, 0)} />
                   <Tooltip {...tooltipProps} />
@@ -920,10 +920,10 @@ export default function OptionsStraddleWorkspace({
                 <BarChart data={chartData} margin={{ top: 8, right: 16, left: 0, bottom: 0 }} barCategoryGap="15%">
                   <CartesianGrid {...gridProps} />
                   <XAxis {...xAxisProps} />
-                  <YAxis tick={{ fontSize: 10, fill: '#a1a1aa', fontWeight: 500 }} tickLine={false}
+                  <YAxis tick={{ fontSize: 10, fontWeight: 500 }} tickLine={false}
                     axisLine={false} domain={['auto', 'auto']} width={52} tickFormatter={fmtOI} />
                   <Tooltip {...tooltipProps} />
-                  <ReferenceLine y={0} stroke="#52525b" strokeWidth={1} strokeDasharray="4 4" />
+                  <ReferenceLine y={0} stroke="var(--chart-axis)" strokeWidth={1} strokeDasharray="4 4" />
                   <Bar dataKey="OI Diff" name="PE OI − CE OI" radius={[2, 2, 0, 0]}>
                     {chartData.map((entry, i) => (
                       <Cell key={i} fill={(entry['OI Diff'] ?? 0) >= 0 ? '#4ade80' : '#f87171'} fillOpacity={0.85} />
@@ -983,7 +983,7 @@ export default function OptionsStraddleWorkspace({
                 <CartesianGrid {...gridProps} />
                 <XAxis {...xAxisProps} />
                 <YAxis
-                  tick={{ fontSize: 10, fill: '#a1a1aa', fontWeight: 500 }}
+                  tick={{ fontSize: 10, fontWeight: 500 }}
                   tickLine={false}
                   axisLine={false}
                   domain={[0, 'auto']}
