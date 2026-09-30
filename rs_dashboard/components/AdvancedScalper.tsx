@@ -226,6 +226,14 @@ export default function AdvancedScalper() {
   const [confirmExitSelected, setConfirmExitSelected] = useState(false);
   const [exitingSelected, setExitingSelected] = useState(false);
 
+  // "Exit All Calls" / "Exit All Puts" confirm-arm. One side at a time: arming
+  // one disarms the other, and the armed leg list is frozen like the halve-all
+  // plan so the second click closes exactly what the first click previewed.
+  const [confirmExitSide, setConfirmExitSide] = useState<'CE' | 'PE' | null>(null);
+  const [exitingSide, setExitingSide] = useState<'CE' | 'PE' | null>(null);
+  const armedSideLegsRef = useRef<Record<string, unknown>[] | null>(null);
+  const sideDisarmTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
   // Bottom tabs
   const [activeTab, setActiveTab]       = useState<'positions' | 'orders' | 'trades' | 'funds' | 'mtm'>('positions');
   const [positionsData, setPositionsData] = useState<Record<string, unknown>[]>([]);
@@ -2098,6 +2106,75 @@ export default function AdvancedScalper() {
     }
   }, [exitSelectedLegs, exitingSelected, confirmExitSelected, closePosition, addToast, fetchTabData]);
 
+  // ─── Exit All Calls / Exit All Puts ───────────────────────────────
+
+  // Every open option leg on one side, across the whole F&O book (all
+  // underlyings/expiries, same scope as EXIT ALL's `scope: 'fno'`).
+  // optionSideOf gates on the F&O segment, so equity/CNC rows never qualify.
+  // Shorts sort first: buying back a short before selling its long hedge keeps
+  // the book margin-covered the whole way down.
+  const sideExitLegs = useMemo(() => {
+    const out: Record<'CE' | 'PE', Record<string, unknown>[]> = { CE: [], PE: [] };
+    for (const p of enrichedPositions) {
+      if (Number(p.netQty) === 0) continue;
+      const side = optionSideOf(p);
+      if (side) out[side].push(p);
+    }
+    const shortsFirst = (a: Record<string, unknown>, b: Record<string, unknown>) =>
+      Number(a.netQty) - Number(b.netQty);
+    out.CE.sort(shortsFirst);
+    out.PE.sort(shortsFirst);
+    return out;
+  }, [enrichedPositions, optionSideOf]);
+
+  // Sequential, same rationale as handleHalfAll.
+  const handleExitSide = useCallback(async (side: 'CE' | 'PE') => {
+    if (exitingSide) return;
+    const label = side === 'CE' ? 'call' : 'put';
+    if (confirmExitSide !== side) {
+      if (!sideExitLegs[side].length) return;
+      armedSideLegsRef.current = sideExitLegs[side];
+      setConfirmExitSide(side);
+      // Re-arming (either side) restarts the window; a stale timer from the
+      // other side must not disarm this one.
+      if (sideDisarmTimerRef.current) clearTimeout(sideDisarmTimerRef.current);
+      sideDisarmTimerRef.current = setTimeout(() => {
+        armedSideLegsRef.current = null;
+        setConfirmExitSide(null);
+      }, 3000);
+      return;
+    }
+    if (sideDisarmTimerRef.current) clearTimeout(sideDisarmTimerRef.current);
+    const legs = armedSideLegsRef.current ?? sideExitLegs[side];
+    armedSideLegsRef.current = null;
+    setConfirmExitSide(null);
+    setExitingSide(side);
+    let closed = 0;
+    let alreadyFlat = 0;
+    const failed: string[] = [];
+    try {
+      for (const pos of legs) {
+        const sym = String(pos.tradingSymbol ?? '');
+        const r = await closePosition(pos, `Exit All ${side}`);
+        if (!r.ok) failed.push(sym);
+        else if (r.closedUnits > 0) closed++;
+        else alreadyFlat++;
+      }
+      if (failed.length) {
+        addToast('error', `Exited ${closed} of ${legs.length} ${label} leg${legs.length === 1 ? '' : 's'}`,
+          `Failed: ${failed.join(', ')} — check manually`);
+      } else {
+        addToast('success', `Exited ${closed} ${label} leg${closed === 1 ? '' : 's'}`,
+          alreadyFlat > 0 ? `${alreadyFlat} already flat` : undefined);
+      }
+    } catch (e) {
+      addToast('error', `Exit All ${side} aborted`, String(e));
+    } finally {
+      setExitingSide(null);
+      setTimeout(fetchTabData, 1000);
+    }
+  }, [exitingSide, confirmExitSide, sideExitLegs, closePosition, addToast, fetchTabData]);
+
   // `posKey` is the composite (symbol, product) key from lib/positionProduct,
   // NOT a trading symbol — see the posGuards declaration.
   const handleGuardChange = useCallback((posKey: string, field: 'target' | 'sl', value: string) => {
@@ -2748,6 +2825,40 @@ export default function AdvancedScalper() {
                     ? `Confirm exit ${exitSelectedLegs.length}?`
                     : `Exit Selected${exitSelectedLegs.length ? ` (${exitSelectedLegs.length})` : ''}`}
                 </button>
+
+                {/* Exit every open call / put leg (per-leg market closes, shorts first) */}
+                {(['CE', 'PE'] as const).map(side => {
+                  const legs = sideExitLegs[side];
+                  const word = side === 'CE' ? 'Calls' : 'Puts';
+                  const busy = exitingSide === side;
+                  const armed = confirmExitSide === side;
+                  return (
+                    <button key={side} onClick={() => handleExitSide(side)}
+                      disabled={exitingSide !== null || legs.length === 0}
+                      aria-label={`Exit all ${word.toLowerCase()}`}
+                      className={cn(
+                        'flex items-center gap-1.5 px-3 py-1.5 rounded-lg', TXT_CAPTION, 'font-bold border transition-all active:scale-95 disabled:opacity-40 disabled:cursor-not-allowed shrink-0 whitespace-nowrap',
+                        busy
+                          ? 'bg-red-900/40 border-red-800 text-red-400'
+                          : armed
+                          ? 'bg-red-600 border-red-500 text-oncolor animate-pulse shadow-lg shadow-red-500/20'
+                          : 'bg-red-950/60 border-red-900/60 text-red-400 hover:bg-red-900/40 hover:border-red-700 hover:text-red-300',
+                        FOCUS_RING,
+                      )}
+                      title={
+                        legs.length === 0
+                          ? `No open ${side} positions`
+                          : `Market close every open ${side} leg (shorts first): ${legs.map(p => `${String(p.tradingSymbol ?? '')} ${Number(p.netQty)}`).join(', ')}`
+                      }>
+                      {busy ? <RefreshCw className="h-3 w-3 animate-spin" /> : <ShieldOff className="h-3 w-3" />}
+                      {busy
+                        ? 'Exiting…'
+                        : armed
+                        ? `Confirm exit ${legs.length} ${side}?`
+                        : `Exit All ${word}${legs.length ? ` (${legs.length})` : ''}`}
+                    </button>
+                  );
+                })}
 
                 {/* Exit ALL Positions (broker-level nuclear) */}
                 <button onClick={handleExitAll} disabled={exitingAll}
