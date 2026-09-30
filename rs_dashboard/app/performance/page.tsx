@@ -322,7 +322,7 @@ function BackfillPanel({ onComplete }: { onComplete: () => void }) {
 
 type StockColKey =
   | 'symbol' | 'sector' | 'price'
-  | '1d' | '1w' | '1m' | '3m' | '1y'
+  | '1d' | '1w' | '1m' | '3m' | '6m' | '1y'
   | 'rsi'
   | 'high52w' | 'low52w' | 'from52wH' | 'from52wL'
   | 'from50dma' | 'from200dma';
@@ -371,6 +371,11 @@ const STOCK_COLS: StockCol[] = [
     key: '3m', label: '3M %', align: 'right',
     render: row => <span className={pctColor(row.priceChange3M)}>{pctFmt(row.priceChange3M)}</span>,
     sortVal: row => row.priceChange3M,
+  },
+  {
+    key: '6m', label: '6M %', align: 'right',
+    render: row => <span className={pctColor(row.priceChange6M)}>{pctFmt(row.priceChange6M)}</span>,
+    sortVal: row => row.priceChange6M,
   },
   {
     key: '1y', label: '1Y %', align: 'right',
@@ -492,7 +497,7 @@ function StockTable({ rows, search }: { rows: MoverResult[]; search: string }) {
 
 // ─── Indices table ────────────────────────────────────────────────────────────
 
-type IdxColKey = 'label' | 'category' | 'price' | '1d' | '1w' | '1m' | '3m' | '1y' | 'rsi' | 'high52w' | 'low52w' | 'from52wH' | 'from52wL' | 'from50dma' | 'from200dma';
+type IdxColKey = 'label' | 'category' | 'price' | '1d' | '1w' | '1m' | '3m' | '6m' | '1y' | 'rsi' | 'high52w' | 'low52w' | 'from52wH' | 'from52wL' | 'from50dma' | 'from200dma';
 
 interface IdxCol {
   key: IdxColKey;
@@ -543,6 +548,11 @@ const IDX_COLS: IdxCol[] = [
     key: '3m', label: '3M %', align: 'right',
     render: row => <span className={pctColor(row.hasData ? row.priceChange3M : null)}>{row.hasData ? pctFmt(row.priceChange3M) : '—'}</span>,
     sortVal: row => row.priceChange3M,
+  },
+  {
+    key: '6m', label: '6M %', align: 'right',
+    render: row => <span className={pctColor(row.hasData ? row.priceChange6M : null)}>{row.hasData ? pctFmt(row.priceChange6M) : '—'}</span>,
+    sortVal: row => row.priceChange6M,
   },
   {
     key: '1y', label: '1Y %', align: 'right',

@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server';
 import fs from 'fs';
 import path from 'path';
 import { OHLCVRow } from '@/lib/rs';
+import { pctChange1D, pctChangeWindow } from '@/lib/priceReturns';
 
 // ─── Index catalogue ──────────────────────────────────────────────────────────
 
@@ -116,39 +117,6 @@ function wilderRSI(closes: number[], period = 14): number {
   return 100 - 100 / (1 + avgGain / avgLoss);
 }
 
-function findCloseOnOrBefore(rows: OHLCVRow[], targetDate: string): number | null {
-  for (let i = rows.length - 2; i >= 0; i--) {
-    if (rows[i].date <= targetDate) return rows[i].close;
-  }
-  return null;
-}
-
-function shiftDate(dateStr: string, days?: number, months?: number, years?: number): string {
-  const d = new Date(dateStr + 'T00:00:00Z');
-  if (days)   d.setUTCDate(d.getUTCDate() - days);
-  if (months) d.setUTCMonth(d.getUTCMonth() - months);
-  if (years)  d.setUTCFullYear(d.getUTCFullYear() - years);
-  return d.toISOString().slice(0, 10);
-}
-
-function pctChgByDate(rows: OHLCVRow[], targetDate: string): number {
-  if (rows.length < 2) return 0;
-  const latest = rows[rows.length - 1].close;
-  const base = findCloseOnOrBefore(rows, targetDate);
-  if (base === null || base === 0) return 0;
-  return ((latest - base) / base) * 100;
-}
-
-function pctChg1D(rows: OHLCVRow[]): number {
-  if (rows.length < 2) return 0;
-  const curr = rows[rows.length - 1];
-  const prev = rows[rows.length - 2];
-  if (prev.close === 0) return 0;
-  let currPrice = curr.close;
-  if (currPrice === prev.close && curr.open > 0) currPrice = curr.open;
-  return ((currPrice - prev.close) / prev.close) * 100;
-}
-
 // ─── Result type ──────────────────────────────────────────────────────────────
 
 export interface IndexResult {
@@ -161,6 +129,7 @@ export interface IndexResult {
   priceChange1W: number;
   priceChange1M: number;
   priceChange3M: number;
+  priceChange6M: number;
   priceChange1Y: number;
   high52W: number;
   low52W: number;
@@ -216,6 +185,7 @@ export async function GET(req: Request) {
         priceChange1W: 0,
         priceChange1M: 0,
         priceChange3M: 0,
+        priceChange6M: 0,
         priceChange1Y: 0,
         high52W: 0,
         low52W: 0,
@@ -248,11 +218,12 @@ export async function GET(req: Request) {
       category: meta.category,
       latestClose: latest.close,
       latestDate: latest.date,
-      priceChange1D: pctChg1D(rows),
-      priceChange1W: pctChgByDate(rows, shiftDate(latest.date, 7)),
-      priceChange1M: pctChgByDate(rows, shiftDate(latest.date, 29)),
-      priceChange3M: pctChgByDate(rows, shiftDate(latest.date, 91)),
-      priceChange1Y: pctChgByDate(rows, shiftDate(latest.date, 364)),
+      priceChange1D: pctChange1D(rows) ?? 0,
+      priceChange1W: pctChangeWindow(rows, '1w') ?? 0,
+      priceChange1M: pctChangeWindow(rows, '1m') ?? 0,
+      priceChange3M: pctChangeWindow(rows, '3m') ?? 0,
+      priceChange6M: pctChangeWindow(rows, '6m') ?? 0,
+      priceChange1Y: pctChangeWindow(rows, '1y') ?? 0,
       high52W,
       low52W,
       pctFrom52WHigh: high52W > 0 ? ((latest.close - high52W) / high52W) * 100 : 0,

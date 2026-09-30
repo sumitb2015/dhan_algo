@@ -3,6 +3,7 @@ import { readStockCSVAsync, readNifty500List, getTodayQuotesMeta, clearCache } f
 import { NIFTY50_SYMBOLS } from '@/lib/nifty50';
 import { getSector } from '@/lib/sectors';
 import { OHLCVRow } from '@/lib/rs';
+import { pctChange1D, pctChangeSince, pctChangeWindow } from '@/lib/priceReturns';
 
 export interface MoverResult {
   symbol: string;
@@ -16,6 +17,7 @@ export interface MoverResult {
   priceChange1W: number;     // %
   priceChange1M: number;     // %
   priceChange3M: number;     // % (~65 bars)
+  priceChange6M: number;     // % (~125 bars)
   priceChange5M: number;     // % (~108 bars)
   priceChange1Y: number;     // % (~252 bars)
   high52W: number;
@@ -94,56 +96,6 @@ function wilderRSI(closes: number[], period = 14): number {
   return 100 - 100 / (1 + rs);
 }
 
-function findCloseOnOrBefore(rows: OHLCVRow[], targetDate: string): number | null {
-  for (let i = rows.length - 2; i >= 0; i--) {
-    if (rows[i].date <= targetDate) return rows[i].close;
-  }
-  return null;
-}
-
-function shiftDate(dateStr: string, days?: number, months?: number, years?: number): string {
-  const d = new Date(dateStr + 'T00:00:00Z');
-  if (days)   d.setUTCDate(d.getUTCDate() - days);
-  if (months) d.setUTCMonth(d.getUTCMonth() - months);
-  if (years)  d.setUTCFullYear(d.getUTCFullYear() - years);
-  return d.toISOString().slice(0, 10);
-}
-
-function pctChgByDate(rows: OHLCVRow[], targetDate: string): number {
-  if (rows.length < 2) return 0;
-  const latest = rows[rows.length - 1].close;
-  const base = findCloseOnOrBefore(rows, targetDate);
-  if (base === null || base === 0) return 0;
-  return ((latest - base) / base) * 100;
-}
-
-/**
- * 1-day % change, robust to the Dhan API quirk where today's OHLCV candle
- * carries the PREVIOUS session's settlement price in the `close` field until
- * EOD processing runs.  When `curr.close === prev.close` we fall back to
- * `curr.open` (the actual opening price) as the current-price proxy, then to
- * the high/low midpoint, so the value is always meaningful intraday.
- */
-function pctChg1D(rows: OHLCVRow[]): number {
-  if (rows.length < 2) return 0;
-  const curr = rows[rows.length - 1];
-  const prev = rows[rows.length - 2];
-  if (prev.close === 0) return 0;
-
-  let currPrice = curr.close;
-  if (currPrice === prev.close) {
-    // close hasn't been updated yet — use open as intraday proxy
-    if (curr.open > 0) {
-      currPrice = curr.open;
-    } else if (curr.high > 0 && curr.low > 0) {
-      currPrice = (curr.high + curr.low) / 2;
-    } else {
-      return 0;
-    }
-  }
-  return ((currPrice - prev.close) / prev.close) * 100;
-}
-
 function computeMover(symbol: string, rows: OHLCVRow[]): MoverResult | null {
   if (rows.length < 22) return null;
 
@@ -207,12 +159,13 @@ function computeMover(symbol: string, rows: OHLCVRow[]): MoverResult | null {
     latestVolume,
     avgVolume20D,
     volumeRatio,
-    priceChange1D: pctChg1D(rows),
-    priceChange1W: pctChgByDate(rows, shiftDate(latest.date, 7)),
-    priceChange1M: pctChgByDate(rows, shiftDate(latest.date, 29)),
-    priceChange3M: pctChgByDate(rows, shiftDate(latest.date, 91)),
-    priceChange5M: pctChgByDate(rows, shiftDate(latest.date, 152)),
-    priceChange1Y: pctChgByDate(rows, shiftDate(latest.date, 364)),
+    priceChange1D: pctChange1D(rows) ?? 0,
+    priceChange1W: pctChangeWindow(rows, '1w') ?? 0,
+    priceChange1M: pctChangeWindow(rows, '1m') ?? 0,
+    priceChange3M: pctChangeWindow(rows, '3m') ?? 0,
+    priceChange6M: pctChangeWindow(rows, '6m') ?? 0,
+    priceChange5M: pctChangeSince(rows, 152) ?? 0,
+    priceChange1Y: pctChangeWindow(rows, '1y') ?? 0,
     high52W,
     low52W,
     pctFrom52WHigh,

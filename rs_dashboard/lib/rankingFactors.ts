@@ -9,6 +9,7 @@
 
 import type { OHLCVRow } from '@/lib/rs';
 import { getSector, type Sector } from '@/lib/sectors';
+import { shiftDays, pctChange1D, pctChangeWindow } from '@/lib/priceReturns';
 
 export type FactorId = '1d' | '1w' | '1m' | '3m' | '6m' | '1y' | 'rsi' | 'hi52' | 'lo52' | 'ma50' | 'ma200' | 'volr';
 export type FactorValues = Record<FactorId, number | null>;
@@ -59,41 +60,6 @@ function detectCorporateAction(rows: OHLCVRow[]): { index: number; action: Corpo
     }
   }
   return null;
-}
-
-function shiftDays(dateStr: string, days: number): string {
-  const d = new Date(dateStr + 'T00:00:00Z');
-  d.setUTCDate(d.getUTCDate() - days);
-  return d.toISOString().slice(0, 10);
-}
-
-function pctChangeSince(rows: OHLCVRow[], days: number): number | null {
-  const latest = rows[rows.length - 1];
-  const target = shiftDays(latest.date, days);
-  for (let i = rows.length - 2; i >= 0; i--) {
-    if (rows[i].date <= target) {
-      const base = rows[i].close;
-      return base > 0 ? ((latest.close - base) / base) * 100 : null;
-    }
-  }
-  return null;
-}
-
-// Mirrors /api/movers' pctChg1D so both pages agree on "today": Dhan can
-// report the previous settlement as today's close until EOD processing, in
-// which case the open (or the range midpoint) stands in for the current price.
-function pctChange1D(rows: OHLCVRow[]): number | null {
-  if (rows.length < 2) return null;
-  const curr = rows[rows.length - 1];
-  const prev = rows[rows.length - 2];
-  if (prev.close <= 0) return null;
-  let price = curr.close;
-  if (price === prev.close) {
-    if (curr.open > 0) price = curr.open;
-    else if (curr.high > 0 && curr.low > 0) price = (curr.high + curr.low) / 2;
-    else return null;
-  }
-  return ((price - prev.close) / prev.close) * 100;
 }
 
 function wilderRSI(closes: number[]): number | null {
@@ -177,11 +143,11 @@ export function computeRankingStock(symbol: string, rawRows: OHLCVRow[], todayIS
     sessions: rows.length,
     factors: {
       '1d': pctChange1D(rows),
-      '1w': rows.length >= 2 ? pctChangeSince(rows, 7) : null,
-      '1m': rows.length >= 2 ? pctChangeSince(rows, 29) : null,
-      '3m': rows.length >= 2 ? pctChangeSince(rows, 91) : null,
-      '6m': rows.length >= 2 ? pctChangeSince(rows, 182) : null,
-      '1y': rows.length >= 2 ? pctChangeSince(rows, 364) : null,
+      '1w': pctChangeWindow(rows, '1w'),
+      '1m': pctChangeWindow(rows, '1m'),
+      '3m': pctChangeWindow(rows, '3m'),
+      '6m': pctChangeWindow(rows, '6m'),
+      '1y': pctChangeWindow(rows, '1y'),
       rsi: wilderRSI(rows.slice(-RSI_LOOKBACK).map(r => r.close)),
       hi52,
       lo52,
