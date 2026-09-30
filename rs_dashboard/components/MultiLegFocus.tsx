@@ -1,7 +1,7 @@
 'use client';
 
 import React, { useState, useEffect, useMemo, useRef, useCallback } from 'react';
-import { Plus, RefreshCw, Layers, ClipboardList, ListTree, ChevronDown, ChevronRight, Download, History } from 'lucide-react';
+import { Plus, RefreshCw, Layers, ClipboardList, ListTree, ChevronDown, ChevronRight, Download, History, CircleHelp } from 'lucide-react';
 import Link from 'next/link';
 import NavBar from './NavBar';
 import { type Toast, FOCUS_RING } from './Scalper';
@@ -17,6 +17,7 @@ import OrdersTradesModal from './multiLegFocus/OrdersTradesModal';
 import ImportPositionsModal, { type ImportCandidate, type ImportRequest } from './multiLegFocus/ImportPositionsModal';
 import HistoryModal from './multiLegFocus/HistoryModal';
 import MultiLegOptionChainModal from './multiLegFocus/MultiLegOptionChainModal';
+import HelpModal from './HelpModal';
 import {
   resolveTemplateLegs, reconcileLegWithBroker, sortLegsForExit, findLegPosition, claimableLegQty, executionBroker,
   applyOrderOutcomes, normalizeOrderRow, withPendingOrder, LEG_FILL_GRACE_MS, legBrokerMismatch, classifyDhanOrder, type DhanOrderPhase, type NormalizedOrder,
@@ -83,6 +84,8 @@ export interface MultiLegFocusProps {
   activeUnderlyingProp?: Underlying;
   onUnderlyingChangeProp?: (u: Underlying) => void;
   expiriesMapProp?: Record<string, string[]>;
+  /** app/multi-leg-focus/README.md, read by the page; the How to use button shows only when set. */
+  helpMarkdown?: string;
 }
 
 export default function MultiLegFocus({
@@ -91,7 +94,9 @@ export default function MultiLegFocus({
   activeUnderlyingProp,
   onUnderlyingChangeProp,
   expiriesMapProp,
+  helpMarkdown,
 }: MultiLegFocusProps = {}) {
+  const [showHelp, setShowHelp] = useState(false);
   const { broker, setBroker, authenticatedBrokers, hasAuthenticatedBroker } = useBrokerSelector();
 
   // Multi-Basket State: list of all strategies
@@ -2993,6 +2998,18 @@ export default function MultiLegFocus({
               </span>
             )}
 
+            {/* How to use (the page's README) */}
+            {helpMarkdown && (
+              <button
+                type="button"
+                onClick={() => setShowHelp(true)}
+                className={`h-8 px-3 inline-flex items-center gap-1.5 text-xs font-bold rounded-lg border border-zinc-700 bg-zinc-900 hover:bg-zinc-800 text-zinc-200 hover:text-white transition-colors cursor-pointer ${FOCUS_RING}`}
+              >
+                <CircleHelp className="w-3.5 h-3.5 text-zinc-400" />
+                <span>How to use</span>
+              </button>
+            )}
+
             {/* Orders & Tradebook Button */}
             <button
               type="button"
@@ -3250,6 +3267,10 @@ export default function MultiLegFocus({
           })
         )}
       </div>
+
+      {showHelp && helpMarkdown && (
+        <HelpModal title="How to use Multi-Leg Focus" markdown={helpMarkdown} onClose={() => setShowHelp(false)} />
+      )}
 
       {/* Full-Width Orders & Tradebook Modal */}
       <OrdersTradesModal

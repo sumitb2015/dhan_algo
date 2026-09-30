@@ -5,7 +5,7 @@ import { ArrowDownUp, Binoculars, ChevronDown, ChevronRight, CircleHelp, Loader2
 import NavBar from '@/components/NavBar';
 import ResultsTable, { type SeenInfo } from '@/components/optionsScreener/ResultsTable';
 import ContractModal from '@/components/optionsScreener/ContractModal';
-import HelpModal from '@/components/optionsScreener/HelpModal';
+import HelpModal from '@/components/HelpModal';
 import { FOCUS_RING, fmtExpiry, fmtIstTime } from '@/components/optionsScreener/format';
 import {
   METRICS,
@@ -880,7 +880,7 @@ function ScreenerInner({ helpMarkdown }: { helpMarkdown: string }) {
         </p>
       </div>
 
-      {helpOpen && <HelpModal markdown={helpMarkdown} onClose={() => setHelpOpen(false)} />}
+      {helpOpen && <HelpModal title="How to use the Options Screener" markdown={helpMarkdown} onClose={() => setHelpOpen(false)} />}
 
       {selected && (
         <ContractModal
