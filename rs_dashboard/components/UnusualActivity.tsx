@@ -1,7 +1,8 @@
 'use client';
 
-import React, { useState, useEffect, useMemo, useCallback } from 'react';
+import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import NavBar from '@/components/NavBar';
+import { isUnderlyingLive } from '@/lib/marketHours';
 import {
   AlertTriangle,
   ArrowDownRight,
@@ -120,13 +121,24 @@ export default function UnusualActivity() {
   const [showPlaybook, setShowPlaybook] = useState(false);
   const [playbookTab, setPlaybookTab] = useState<'setups' | 'matrix' | 'metrics' | 'checklist'>('setups');
 
+  const [marketLive, setMarketLive] = useState(true);
+
+  // Monotonic request id. A scan takes several seconds; switching underlying
+  // mid-scan must not let the old response land last — it would show the old
+  // underlying's alerts and, for an expiry-less first scan, pin its expiry onto
+  // the new underlying.
+  const requestSeq = useRef(0);
+
   const fetchData = useCallback(async (und = underlying, exp = expiry) => {
+    const seq = ++requestSeq.current;
+    const isStale = () => seq !== requestSeq.current;
     setLoading(true);
     setError(null);
     try {
       const url = `/api/options/unusual-activity?underlying=${und}${exp ? `&expiry=${exp}` : ''}`;
       const res = await fetch(url);
       const json = await res.json();
+      if (isStale()) return;
       if (!res.ok || json.success === false) {
         throw new Error(json.error || 'Failed to scan options activity');
       }
@@ -135,9 +147,10 @@ export default function UnusualActivity() {
         setExpiry(json.expiry);
       }
     } catch (e) {
+      if (isStale()) return;
       setError(e instanceof Error ? e.message : String(e));
     } finally {
-      setLoading(false);
+      if (!isStale()) setLoading(false);
     }
   }, [underlying, expiry]);
 
@@ -146,12 +159,20 @@ export default function UnusualActivity() {
   }, [underlying, expiry, fetchData]);
 
   useEffect(() => {
-    if (!autoRefresh) return;
+    const update = () => setMarketLive(isUnderlyingLive(underlying, new Date()));
+    update();
+    const id = setInterval(update, 30_000);
+    return () => clearInterval(id);
+  }, [underlying]);
+
+  // Each poll spawns a Python chain scan — pointless once the session is closed.
+  useEffect(() => {
+    if (!autoRefresh || !marketLive) return;
     const interval = setInterval(() => {
       fetchData(underlying, expiry);
     }, 15_000);
     return () => clearInterval(interval);
-  }, [autoRefresh, underlying, expiry, fetchData]);
+  }, [autoRefresh, marketLive, underlying, expiry, fetchData]);
 
   const filteredAlerts = useMemo(() => {
     if (!data?.alerts) return [];
@@ -231,8 +252,8 @@ export default function UnusualActivity() {
                 : 'bg-zinc-900 text-zinc-400 border-zinc-700 hover:text-zinc-200'
             }`}
           >
-            <span className={`w-1.5 h-1.5 rounded-full ${autoRefresh ? 'bg-amber-400 animate-pulse' : 'bg-zinc-600'}`} />
-            Auto-15s
+            <span className={`w-1.5 h-1.5 rounded-full ${autoRefresh && marketLive ? 'bg-amber-400 animate-pulse' : autoRefresh ? 'bg-amber-400' : 'bg-zinc-600'}`} />
+            {autoRefresh && !marketLive ? 'Mkt Closed' : 'Auto-15s'}
           </button>
 
           {/* Manual Refresh Button */}

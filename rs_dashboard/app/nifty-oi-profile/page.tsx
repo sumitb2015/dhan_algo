@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useEffect, useState, useCallback } from 'react';
+import React, { useEffect, useState, useCallback, useRef } from 'react';
 import NavBar from '@/components/NavBar';
 import FuturesCandleChart from '@/components/FuturesCandleChart';
 import OIProfileChart from '@/components/OIProfileChart';
@@ -12,6 +12,7 @@ import {
   BarChart2,
   Table as TableIcon,
 } from 'lucide-react';
+import { isNseLive } from '@/lib/marketHours';
 
 /** Placeholder for a KPI value that has not arrived yet. Sized in `ch` so it
  *  occupies roughly the width of the number it replaces and the cards do not
@@ -59,6 +60,11 @@ export default function NiftyOIProfilePage() {
   const [range, setRange] = useState<number>(10);
   const [days, setDays] = useState<number>(3);
   const [autoRefresh, setAutoRefresh] = useState<boolean>(true);
+  const [marketLive, setMarketLive] = useState<boolean>(true);
+
+  // Monotonic request id: changing expiry/step/range/days while a fetch is in
+  // flight must not let the abandoned selection's response land last and win.
+  const requestSeq = useRef(0);
   const [viewTable, setViewTable] = useState<boolean>(false);
 
   // First paint has nothing to show, so it gets skeletons and a spinner. A refresh
@@ -69,22 +75,26 @@ export default function NiftyOIProfilePage() {
   const refreshing = loading && !!data;
 
   const fetchData = useCallback(async () => {
+    const seq = ++requestSeq.current;
+    const isStale = () => seq !== requestSeq.current;
     try {
       setError(null);
       const res = await fetch(
         `/api/nifty-oi-profile?expiry=${expiry}&step=${step}&range=${range}&days=${days}`
       );
       const json = await res.json();
+      if (isStale()) return;
       if (json.success && json.data) {
         setData(json.data);
       } else {
         setError(json.error ?? 'Failed to load Nifty OI Profile');
       }
     } catch (err: unknown) {
+      if (isStale()) return;
       const msg = err instanceof Error ? err.message : String(err);
       setError(msg);
     } finally {
-      setLoading(false);
+      if (!isStale()) setLoading(false);
     }
   }, [expiry, step, range, days]);
 
@@ -94,12 +104,21 @@ export default function NiftyOIProfilePage() {
   }, [fetchData]);
 
   useEffect(() => {
-    if (!autoRefresh) return;
+    const update = () => setMarketLive(isNseLive(new Date()));
+    update();
+    const id = setInterval(update, 30_000);
+    return () => clearInterval(id);
+  }, []);
+
+  // Outside NSE hours the OI and candles cannot change — don't re-spawn the
+  // backend every 10s all night.
+  useEffect(() => {
+    if (!autoRefresh || !marketLive) return;
     const timer = setInterval(() => {
       fetchData();
     }, 10_000);
     return () => clearInterval(timer);
-  }, [autoRefresh, fetchData]);
+  }, [autoRefresh, marketLive, fetchData]);
 
   const pcr = data?.summary?.pcr ?? 0;
   const pcrSentiment =
@@ -238,8 +257,8 @@ export default function NiftyOIProfilePage() {
                   : 'bg-zinc-950 text-zinc-500 border-zinc-800'
               }`}
             >
-              <span className={`w-2 h-2 rounded-full ${autoRefresh ? 'bg-emerald-400 animate-pulse' : 'bg-zinc-600'}`} />
-              <span>{autoRefresh ? '10s Auto' : 'Paused'}</span>
+              <span className={`w-2 h-2 rounded-full ${autoRefresh && marketLive ? 'bg-emerald-400 animate-pulse' : autoRefresh ? 'bg-emerald-400' : 'bg-zinc-600'}`} />
+              <span>{!autoRefresh ? 'Paused' : marketLive ? '10s Auto' : 'Mkt Closed'}</span>
             </button>
 
             {/* Manual Refresh Button */}

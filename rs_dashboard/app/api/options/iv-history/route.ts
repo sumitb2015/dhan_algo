@@ -2,11 +2,16 @@ import { NextRequest, NextResponse } from 'next/server';
 import path from 'path';
 import fs from 'fs';
 import { computeRegimeSeries, type RegimeInputPoint } from '@/lib/optionsRegime';
-
-import { execSync } from 'child_process';
-import { PROJECT_ROOT, PYTHON_EXE } from '@/lib/pyExec';
+import { PROJECT_ROOT, runPythonJson, dedupe } from '@/lib/pyExec';
 
 const DEBUG_DIR = path.join(PROJECT_ROOT, 'debug');
+const BUILD_SCRIPT = path.join(PROJECT_ROOT, 'scripts', 'tools', 'build_oi_snapshots.py');
+
+// A date with no data (holiday, weekend, pre-listing) makes the builder fail
+// every time. IV Charts polls every 30s, so without this each poll would spawn
+// another doomed build.
+const BUILD_FAIL_TTL_MS = 5 * 60_000;
+const buildFailedAt = new Map<string, number>();
 
 function todayIST(): string {
   const now = new Date(Date.now() + 5.5 * 60 * 60 * 1000);
@@ -111,6 +116,10 @@ export async function GET(request: NextRequest) {
   // has no file.
   const allowFallback = searchParams.get('fallback') === '1';
   const requested = searchParams.get('date') ?? todayIST();
+  // The date is interpolated into a debug/ file path — reject anything but YYYY-MM-DD.
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(requested)) {
+    return NextResponse.json({ success: false, error: `Invalid date: ${requested}` }, { status: 400 });
+  }
   const date      = availableDates.includes(requested) || !allowFallback
     ? requested
     : (availableDates[0] || requested);
@@ -118,18 +127,23 @@ export async function GET(request: NextRequest) {
 
   let csvPath = resolveCsvPath(underlying, date);
 
-  // If CSV does not exist for this underlying, attempt on-demand reconstruction via build_oi_snapshots.py
-  if (!csvPath) {
-    try {
-      const buildScript = path.join(PROJECT_ROOT, 'scripts', 'tools', 'build_oi_snapshots.py');
-      execSync(`"${PYTHON_EXE}" "${buildScript}" --underlying ${underlying} --date ${date} --wings ${wings}`, {
-        timeout: 25000,
-        encoding: 'utf8',
-        stdio: ['pipe', 'pipe', 'pipe'],
-      });
-      csvPath = resolveCsvPath(underlying, date);
-    } catch (buildErr) {
-      console.warn(`[iv-history] On-demand snapshot builder failed for ${underlying} on ${date}:`, buildErr);
+  // If CSV does not exist for this underlying, attempt on-demand reconstruction via build_oi_snapshots.py.
+  // Async + argv (no shell): execSync blocked the event loop for up to 25s and
+  // interpolated query-string values into a shell command.
+  if (!csvPath && Number.isFinite(wings)) {
+    const buildKey = `${underlying}:${date}:${wings}`;
+    const failedAt = buildFailedAt.get(buildKey);
+    if (!failedAt || Date.now() - failedAt > BUILD_FAIL_TTL_MS) {
+      try {
+        await dedupe(`iv-history-build:${buildKey}`, () =>
+          runPythonJson(BUILD_SCRIPT, ['--underlying', underlying, '--date', date, '--wings', String(wings)], 25_000));
+        csvPath = resolveCsvPath(underlying, date);
+        if (csvPath) buildFailedAt.delete(buildKey);
+        else buildFailedAt.set(buildKey, Date.now());
+      } catch (buildErr) {
+        buildFailedAt.set(buildKey, Date.now());
+        console.warn(`[iv-history] On-demand snapshot builder failed for ${underlying} on ${date}:`, buildErr);
+      }
     }
   }
 
