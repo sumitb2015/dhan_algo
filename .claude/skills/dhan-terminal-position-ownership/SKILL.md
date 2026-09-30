@@ -1,6 +1,6 @@
 ---
 name: dhan-terminal-position-ownership
-description: Use when a dashboard terminal (like FocusTool or MultiLegFocus) has multiple rows/legs or multiple execution engines (browser tab + server-side worker) that can each hold a position on the same underlying/strike, when sizing an exit or P&L off a broker position, when locking a strike selector because "a position is open", or when implementing a strike roll/shift that closes one leg and reopens another.
+description: Use when a dashboard terminal (like FocusTool or MultiLegFocus) has multiple rows/legs or multiple execution engines (browser tab + server-side worker) that can each hold a position on the same underlying/strike, when sizing an exit or P&L off a broker position, when locking a strike selector because "a position is open", or when implementing a strike roll/shift that closes one leg and reopens another, or an automatic re-entry after a leg stop/target.
 ---
 
 # Terminal Position Ownership & Strike Rolls
@@ -67,6 +67,11 @@ state for legs *it* opened. A leg with no ledger entry and no worker-hold is
 not owned, full stop, even if the broker shows an open position at that
 exact symbol.
 
+Ownership is **per leg**, and so is everything derived from it — the strike
+pin, the strike-selector lock, the open badge, partial-exit chips, Exit All.
+A row-level "is anything open" check leaks a closed leg's state into every one
+of those (Invariant 11).
+
 ```ts
 // lib/focusToolRules.ts — rowOwnsLeg()
 function rowOwnsLeg(row, leg, workerHold) {
@@ -97,6 +102,13 @@ window survives a tab reload, not just an in-memory ref. This exact
 protection was silently dropped when the worker was removed (`31fadcf`) and
 had to be restored (`1ea9d3d`, extracted+tested in `f8e9665`) — it's easy to
 lose by accident in any refactor that touches the fill-ledger update path.
+
+The same refactor also introduced the "exit accepted, never filled, ledger
+zeroed" failure this section warns about: `applyFill` dropped the whole leg
+(`-pageOwn`) on ANY Exit All that didn't confirm in full, even with 0 filled
+— leaving a live short no stop watched. Fixed in `50f4bca`: an unconfirmed
+close drops only what filled. See Invariant 11 for how the remainder is then
+retried safely.
 
 ### 3. Confirm every fill against the target symbol, not a cached position
 `ackId = await placeOrder(...)` means the broker *accepted* the order, not
@@ -283,6 +295,74 @@ and Options Monitor's expiry-switch re-anchoring, 2026-09-21.)
 - Risk-watcher writes (`bestPrice`) go through `patchLegs` (functional), never `updateBasket`
   with the render's `basket.legs` — that could revert a fill recorded by an in-flight order.
 
+### 11. Per-leg pins, unconfirmed orders, and auto re-entry (FocusTool, 2026-09-30)
+Lessons from adding leg-stop follow-ups (SL→OTM roll, SL→Cost, AlgoTest-style
+re-entry on SL/target) to `FocusTool.tsx` (`b04d0ce`, `66a8fe1`, `50f4bca`,
+`baa644f`). Pure rules live in `lib/focusToolRules.ts`
+(`legPinnedStrike`, `evaluateReentry`, `reentryWindowClosed`,
+`pendingReentryLevel`, `legTargetReason`, `costStopReason`, `legOwnEntry`).
+
+- **Pin strikes per leg, only while that leg is owned** (`legPinnedStrike`).
+  A row-wide pin ("any leg open → pin both") kept a stopped-out CE on its dead
+  strike (22750) while the PE stayed open: the CE selector couldn't follow ATM
+  and `+` would have sold the stale strike.
+- **Per-leg pins make "unowned leg" dangerous everywhere it used to be
+  harmless.** Before, a closed leg sat on its old strike, where the broker was
+  flat. Now it re-resolves to the live ATM, where another row or a manual trade
+  may hold a position. Every consumer of `live.cePosition`/`pePosition` must
+  gate on `rowOwnsLeg`: Exit All (manual AND auto — `placeLeg`'s no-ledger
+  fallback closes whatever the broker shows, unclamped), the 25/50/75% chips
+  (size off `legOwnContracts`, not `netQty`), the open badge, and the VWAP
+  series (`vwapSeriesFor` narrows a half-closed BOTH row to the leg it holds).
+- **An ACK is not a fill, and a missed confirmation window is not a
+  rejection.** Every order whose fill check comes back short is recorded as an
+  `UnconfirmedOrder` (close or open) and settled against broker truth — Dhan by
+  the order's own status (`/api/scalper/orders?orderId=`, 60s cap), Kotak/
+  Zerodha by a fresh book read with a 15s hold — by a 1s sweep.
+  - Close: while it is unsettled, no further close is sent on that leg, and
+    auto exits skip it. A retry sizes off a FRESH book, never the 2s poll —
+    resending against a stale book is how a short is closed twice and ends
+    up long.
+  - Open: a late fill of THAT order is credited to the ledger, clamped to its
+    own size. This is the one sanctioned upward ledger move — it is this
+    component's own order, identified by order id/size, not broker qty
+    adopted from elsewhere (Invariant 6 still holds for everything else).
+  - A late-confirmed close does NOT run that stop's follow-ups (re-entry,
+    SL→Cost) — no automatic trades on a delayed path. Say so in the toast.
+- **Concurrency: lock per row, but not across the two legs of one row.** Two
+  legs are independent contracts; making a PE stop wait behind the CE's
+  close + re-entry (≈10s) was a real gap. `legExitsInFlightRef` refcounts leg
+  exits so they run together, the busy lock is released by the LAST one, and
+  only the last one may retire the row. A leg exit that did not actually start
+  (held, busy) must not suppress the row's pair/level rules that tick.
+- **Re-entry must respect every exit that could immediately undo it.** Before
+  an immediate re-sell: no pending whole-row exit (`rowExitWantedRef`, set
+  when a whole-row exit is blocked by the busy lock), ledger still present
+  (not re-armed/retired), leg is in the row's Side (a leftover leg keeps its
+  stop but is never re-sold), window open (exit time, 15:17, No-re-entry-after,
+  index started), cap not used. Count the attempt BEFORE the order so a
+  rejecting broker cannot loop.
+- **Waiting re-entries (cost / momentum) sit in a flat row, and flat rows are
+  invisible to every exit rule** — `openRows` filters them out. So the
+  waiting path must re-check what those rules would have: account budget and
+  Book Exit cancel them explicitly (`cancelPendingWhere`), and the row's own
+  H↑/L↓ and Book Exit levels are checked before firing (`pendingLevelBreach`).
+  A waiting re-entry keeps the row alive — never retire it on a flat ledger
+  while one exists. Fire at most one per row per scheduler tick
+  (`runRowAction`'s busy check reads render state, so two in one pass run
+  concurrently).
+- **Entry price is the row's own stamp, not the broker average.** After a
+  same-strike re-entry, a broker average that is day-level (Dhan `sellAvg` is
+  believed to be — unconfirmed, see the vault) blends in the closed trade:
+  SL ×1.2 on a 120 re-sell after a 100 trade fired at 132, not 144. Leg SL ×,
+  its displayed level, leg target, SL→Cost and the pair SL × entry all use
+  `legOwnEntry` (stamp first, broker avg only as fallback). A leg re-opened
+  from flat with no price gets NO entry, never the previous position's. A
+  `strikeOverride` open stamps the quote of the strike actually sold.
+- **`adjustFillQty` must spread the old fill** (`...f`) — rebuilding the
+  object field by field silently dropped every ledger field added later
+  (roll counters, cost-stop flags, pending re-entries).
+
 ## Before You Ship
 - Does every lock/exit/P&L decision route through an ownership check
   (ledger + worker-hold), not a raw broker position/netQty read?
@@ -302,3 +382,13 @@ and Options Monitor's expiry-switch re-anchoring, 2026-09-21.)
 - If this surface lets the user change the basket/page's expiry or underlying after legs
   exist, does the change handler explicitly decide each leg's fate (move DRAFT, re-anchor
   live, leave executed/deliberately-parked alone) instead of leaving it implicit?
+- Are strike pins, locks, badges, partial-exit chips and Exit All gated **per leg** on
+  ownership — never "the row holds something" and never raw `live.*Position`?
+- Does an order whose fill check came back short stay tracked (close: remainder kept and
+  resends held until settled; open: late fill credited, clamped to that order) instead of
+  being treated as filled or as rejected?
+- Does any automatic re-entry check pending whole-row exits, the window, the cap (counted
+  before the order), the row's Side, and — for waiting re-entries in a flat row — the
+  account budget, Book Exit and spot levels that flat rows never see?
+- Do stop/target/cost levels use the row's own stamped entry, not a broker average that
+  may blend in an earlier trade on the same contract?
