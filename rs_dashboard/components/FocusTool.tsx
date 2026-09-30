@@ -7,8 +7,21 @@ import NavBar from './NavBar';
 import {
   TrendingUp, Zap, ShieldOff, Shield, Activity,
   Clock, Plus, Layers, Target, Lock, RefreshCw, X, Trash2,
-  ChevronUp, ChevronDown, Grid3x3, Calendar,
+  ChevronUp, ChevronDown, Grid3x3, Calendar, Minus, Ellipsis, ArrowRight, LayoutList,
 } from 'lucide-react';
+import { Button } from '@/components/ui/button';
+import { Badge } from '@/components/ui/badge';
+import { Checkbox } from '@/components/ui/checkbox';
+import { Switch } from '@/components/ui/switch';
+import { Separator } from '@/components/ui/separator';
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
+import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group';
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
+import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible';
+import {
+  DropdownMenu, DropdownMenuContent, DropdownMenuGroup, DropdownMenuItem, DropdownMenuLabel,
+  DropdownMenuSeparator, DropdownMenuTrigger,
+} from '@/components/ui/dropdown-menu';
 import { TabTable, type SortState, BUILDUP_STYLES } from './Scalper';
 import { useBrokerSelector, scalperRoute, BROKER_LABELS, type Broker } from '@/hooks/useBrokerSelector';
 import { closeOrderProduct, positionProduct } from '@/lib/positionProduct';
@@ -41,6 +54,10 @@ import { computeRowPnl, mtmForQty, shiftMayReopen, canMarkMtm, shiftCloseConfirm
 
 const UNDERLYINGS: FocusUnderlying[] = ['NIFTY', 'BANKNIFTY', 'SENSEX'];
 const STRIKE_STEP: Record<FocusUnderlying, number> = { NIFTY: 50, BANKNIFTY: 100, SENSEX: 100 };
+
+/** Row layout: Pro (legs grid), Table (5-column) or Cards. */
+type FocusViewMode = 'pro' | 'table' | 'cards';
+const VIEW_MODE_KEY = 'focusTool.viewMode';
 
 // ATM-offset dropdown range for the strike editor: +-10 steps either side.
 const OFFSET_OPTIONS: number[] = Array.from({ length: 21 }, (_, i) => i - 10);
@@ -793,6 +810,35 @@ function LotStepper({ value, onChange }: { value: number; onChange: (v: number) 
  */
 const LEG_LOT_OPTIONS = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 15, 20] as const;
 
+/**
+ * A compact shadcn Select for this page's small fixed-choice pickers (lots,
+ * re-entry mode/max, OTM steps, momentum direction). Each pick is a complete
+ * choice, so it commits at once — free-typed values still go through
+ * RuleNumInput's commit-on-blur.
+ */
+function MiniSelect({ value, options, onChange, ariaLabel, title, className, disabled }: {
+  value: string;
+  options: readonly { value: string; label: string }[];
+  onChange: (v: string) => void;
+  ariaLabel: string;
+  title?: string;
+  className?: string;
+  disabled?: boolean;
+}) {
+  const labelOf = (v: string) => options.find(o => o.value === v)?.label ?? v;
+  return (
+    <Select value={value} disabled={disabled} onValueChange={v => { if (v != null) onChange(String(v)); }}>
+      <SelectTrigger size="sm" aria-label={ariaLabel} title={title}
+        className={cn('h-6 min-w-0 gap-1 px-1.5 text-[11px] font-bold bg-zinc-950/60 border-zinc-700 text-zinc-200', className)}>
+        <SelectValue>{(v: string) => labelOf(v)}</SelectValue>
+      </SelectTrigger>
+      <SelectContent>
+        {options.map(o => <SelectItem key={o.value} value={o.value} className="text-xs">{o.label}</SelectItem>)}
+      </SelectContent>
+    </Select>
+  );
+}
+
 function LegLotSelect({ value, onChange, className, title }: {
   value: number;
   onChange: (v: number) => void;
@@ -803,18 +849,9 @@ function LegLotSelect({ value, onChange, className, title }: {
     ? LEG_LOT_OPTIONS
     : [...LEG_LOT_OPTIONS, value].sort((a, b) => a - b);
   return (
-    <select
-      value={value}
-      title={title}
-      onChange={e => onChange(Math.max(1, Number(e.target.value) || 1))}
-      className={cn(
-        'text-[11px] font-bold h-6 px-0.5 border border-zinc-700 rounded bg-zinc-900 text-zinc-200',
-        'focus:outline-none focus:border-violet-500 cursor-pointer',
-        className,
-      )}
-    >
-      {opts.map(n => <option key={n} value={n}>{n}</option>)}
-    </select>
+    <MiniSelect value={String(value)} options={opts.map(n => ({ value: String(n), label: String(n) }))}
+      onChange={v => onChange(Math.max(1, Number(v) || 1))}
+      ariaLabel={title ?? 'Lots'} title={title} className={className} />
   );
 }
 
@@ -930,8 +967,7 @@ function LegReentryControls({ row, onUpdate, onCancelPending, legTargetsElsewher
   const sl = reentryConfig(row, 'sl');
   const tgt = reentryConfig(row, 'tgt');
   const txt = 'text-[11px]';
-  const sel = cn('font-bold h-6 px-1 border border-zinc-700 rounded bg-zinc-900 text-zinc-200 focus:outline-none focus:border-violet-500 cursor-pointer', txt);
-  const lbl = 'inline-flex items-center gap-1 font-black text-zinc-400';
+  const lbl = 'inline-flex items-center gap-1.5 font-bold text-zinc-400';
   const f = row.fill;
   const used = (t: 'sl' | 'tgt') => t === 'sl'
     ? `CE ${f?.ceRolls ?? 0} · PE ${f?.peRolls ?? 0}`
@@ -947,40 +983,25 @@ function LegReentryControls({ row, onUpdate, onCancelPending, legTargetsElsewher
       ? ['off', 'asap', 'otm', 'cost', 'momentum']
       : ['off', 'asap', 'cost', 'momentum'];
     return (
-      <label className={lbl} title={`${t === 'sl' ? 'After a leg SL × (CE × / PE ×)' : 'After a leg target (CE Tgt / PE Tgt)'}: ${REENTRY_HELP[c.mode]}`}>
+      <div className={lbl} title={`${t === 'sl' ? 'After a leg SL × (CE × / PE ×)' : 'After a leg target (CE Tgt / PE Tgt)'}: ${REENTRY_HELP[c.mode]}`}>
         {t === 'sl' ? 'RE on SL' : 'RE on Tgt'}
-        <select value={c.mode} aria-label={`Re-entry on ${t === 'sl' ? 'stop loss' : 'target'}`}
-          onChange={e => {
-            const mode = e.target.value as FocusReentryMode;
+        <MiniSelect value={c.mode} ariaLabel={`Re-entry on ${t === 'sl' ? 'stop loss' : 'target'}`}
+          options={modes.map(m => ({ value: m, label: REENTRY_LABEL[m] }))}
+          onChange={v => {
+            const mode = v as FocusReentryMode;
             const patch: Partial<FocusRow> = t === 'sl' ? { reSlMode: mode } : { reTgtMode: mode };
             // OTM needs a strike count; default to 1 when first chosen.
             if (mode === 'otm' && !(Number(row.slRollStrikes) > 0)) patch.slRollStrikes = 1;
             onUpdate(patch);
-          }} className={sel}>
-          {modes.map(m => <option key={m} value={m}>{REENTRY_LABEL[m]}</option>)}
-        </select>
+          }} className="w-24" />
         {c.mode !== 'off' && (
-          <select value={String(c.max)} aria-label={`Maximum re-entries on ${t === 'sl' ? 'stop loss' : 'target'}`}
+          <MiniSelect value={String(c.max)} ariaLabel={`Maximum re-entries on ${t === 'sl' ? 'stop loss' : 'target'}`}
             title={`Most re-entries per leg until the row exits or is re-armed. Used: ${used(t)}`}
-            onChange={e => onUpdate(t === 'sl' ? { reSlMax: Number(e.target.value) } : { reTgtMax: Number(e.target.value) })}
-            className={sel}>
-            {REENTRY_MAX_OPTIONS.map(n => <option key={n} value={n}>×{n}</option>)}
-          </select>
+            options={REENTRY_MAX_OPTIONS.map(n => ({ value: String(n), label: `×${n}` }))}
+            onChange={v => onUpdate(t === 'sl' ? { reSlMax: Number(v) } : { reTgtMax: Number(v) })}
+            className="w-14" />
         )}
-      </label>
-    );
-  };
-
-  const pendingChip = (leg: 'CE' | 'PE') => {
-    const p = leg === 'CE' ? f?.cePending : f?.pePending;
-    if (!p) return null;
-    return (
-      <span key={leg} className="inline-flex items-center gap-1 font-mono font-bold text-violet-300 bg-violet-500/10 border border-violet-500/30 rounded px-1.5 py-0.5"
-        title={`Waiting since ${new Date(p.since).toLocaleTimeString('en-IN', { timeZone: 'Asia/Kolkata' })} — re-sells ${p.lots} lot(s) ${awaitingMomentumQuote(p) ? `once the ${p.strike} ${leg} has a premium to measure the move from` : `when the ${p.strike} ${leg} premium ${p.dir === 'down' ? 'falls to' : 'rises to'} ${p.price.toFixed(2)}`}`}>
-        {leg} RE-{p.mode === 'cost' ? 'Cost' : 'Mom'} {p.strike} {awaitingMomentumQuote(p) ? 'awaiting quote' : `${p.dir === 'down' ? '≤' : '≥'} ${p.price.toFixed(2)}`}
-        <button type="button" onClick={() => onCancelPending(leg)} aria-label={`Cancel ${leg} re-entry`}
-          className={cn('text-zinc-400 hover:text-rose-400 cursor-pointer rounded', FOCUS_RING)}>&times;</button>
-      </span>
+      </div>
     );
   };
 
@@ -1002,33 +1023,28 @@ function LegReentryControls({ row, onUpdate, onCancelPending, legTargetsElsewher
           <RuleNumInput value={row.peTgtPct ?? ''} onCommit={v => onUpdate({ peTgtPct: v })} placeholder="off"
             className={cn('w-12 h-6 text-center', txt)} />
         </label>
-        <select value={row.legTgtUnit ?? 'pct'} aria-label="Leg target unit"
+        <MiniSelect value={row.legTgtUnit ?? 'pct'} ariaLabel="Leg target unit"
           title="Leg targets as a % of the leg's own entry, or as premium points below it (both legs)"
-          onChange={e => onUpdate({ legTgtUnit: e.target.value as 'pct' | 'pts' })} className={sel}>
-          <option value="pct">%</option>
-          <option value="pts">pts</option>
-        </select>
+          options={[{ value: 'pct', label: '%' }, { value: 'pts', label: 'pts' }]}
+          onChange={v => onUpdate({ legTgtUnit: v as 'pct' | 'pts' })} className="w-14" />
         </>)}
         {anyOtm && (
-          <label className={lbl} title="RE-OTM: strikes further OTM than the strike that closed (CE up, PE down)">
+          <div className={lbl} title="RE-OTM: strikes further OTM than the strike that closed (CE up, PE down)">
             OTM
-            <select value={String(Math.max(1, Math.trunc(Number(row.slRollStrikes) || 1)))} aria-label="Strikes OTM for RE-OTM"
-              onChange={e => onUpdate({ slRollStrikes: Number(e.target.value) })} className={sel}>
-              {[1, 2, 3].map(n => <option key={n} value={n}>{n}</option>)}
-            </select>
-          </label>
+            <MiniSelect value={String(Math.max(1, Math.trunc(Number(row.slRollStrikes) || 1)))} ariaLabel="Strikes OTM for RE-OTM"
+              options={[1, 2, 3].map(n => ({ value: String(n), label: String(n) }))}
+              onChange={v => onUpdate({ slRollStrikes: Number(v) })} className="w-12" />
+          </div>
         )}
         {anyMom && (
-          <label className={lbl} title="RE-Momentum: points the new strike's premium must move from its first premium after the leg closed. One direction and size for both SL and target re-entries; points only">
+          <div className={lbl} title="RE-Momentum: points the new strike's premium must move from its first premium after the leg closed. One direction and size for both SL and target re-entries; points only">
             Mom
-            <select value={row.reMomentumDir ?? 'down'} aria-label="Momentum direction"
-              onChange={e => onUpdate({ reMomentumDir: e.target.value as 'down' | 'up' })} className={sel}>
-              <option value="down">pts ↓</option>
-              <option value="up">pts ↑</option>
-            </select>
+            <MiniSelect value={row.reMomentumDir ?? 'down'} ariaLabel="Momentum direction"
+              options={[{ value: 'down', label: 'pts ↓' }, { value: 'up', label: 'pts ↑' }]}
+              onChange={v => onUpdate({ reMomentumDir: v as 'down' | 'up' })} className="w-16" />
             <RuleNumInput value={row.reMomentumPts ?? ''} onCommit={v => onUpdate({ reMomentumPts: v })} placeholder="pts"
               className={cn('w-12 h-6 text-center', txt)} />
-          </label>
+          </div>
         )}
         {anyOn && (
           <span className={lbl} title="A stop/target hit at or after this time takes no re-entry, and waiting re-entries are cancelled">
@@ -1040,15 +1056,40 @@ function LegReentryControls({ row, onUpdate, onCancelPending, legTargetsElsewher
             )}
           </span>
         )}
-        <SwitchToggle checked={!!row.slToCost} onChange={v => onUpdate({ slToCost: v })} label="SL→Cost"
-          title="When one leg's own SL × hits, move the other leg's stop to its entry premium (exit it if it returns to cost). An exit at cost never re-enters" />
+        <label className={cn(lbl, 'cursor-pointer text-zinc-300')}
+          title="When one leg's own SL × hits, move the other leg's stop to its entry premium (exit it if it returns to cost). An exit at cost never re-enters">
+          <Switch size="sm" checked={!!row.slToCost} onCheckedChange={c => onUpdate({ slToCost: !!c })} aria-label="SL to cost" />
+          SL→Cost
+        </label>
       </div>
-      {(f?.cePending || f?.pePending) && (
-        <div className="flex flex-wrap items-center gap-1.5">
-          {pendingChip('CE')}
-          {pendingChip('PE')}
-        </div>
-      )}
+      <LegReentryPendingChips row={row} onCancelPending={onCancelPending} />
+    </div>
+  );
+}
+
+/** Waiting cost / momentum re-entries as cancellable chips. Null when none. */
+function LegReentryPendingChips({ row, onCancelPending }: {
+  row: FocusRow;
+  onCancelPending: (leg: 'CE' | 'PE') => void;
+}) {
+  const f = row.fill;
+  if (!f?.cePending && !f?.pePending) return null;
+  const chip = (leg: 'CE' | 'PE') => {
+    const p = leg === 'CE' ? f.cePending : f.pePending;
+    if (!p) return null;
+    return (
+      <span key={leg} className="inline-flex items-center gap-1 text-[11px] font-mono font-bold text-violet-300 bg-violet-500/10 border border-violet-500/30 rounded px-1.5 py-0.5"
+        title={`Waiting since ${new Date(p.since).toLocaleTimeString('en-IN', { timeZone: 'Asia/Kolkata' })} — re-sells ${p.lots} lot(s) ${awaitingMomentumQuote(p) ? `once the ${p.strike} ${leg} has a premium to measure the move from` : `when the ${p.strike} ${leg} premium ${p.dir === 'down' ? 'falls to' : 'rises to'} ${p.price.toFixed(2)}`}`}>
+        {leg} RE-{p.mode === 'cost' ? 'Cost' : 'Mom'} {p.strike} {awaitingMomentumQuote(p) ? 'awaiting quote' : `${p.dir === 'down' ? '≤' : '≥'} ${p.price.toFixed(2)}`}
+        <button type="button" onClick={() => onCancelPending(leg)} aria-label={`Cancel ${leg} re-entry`}
+          className={cn('text-zinc-400 hover:text-rose-400 cursor-pointer rounded', FOCUS_RING)}>&times;</button>
+      </span>
+    );
+  };
+  return (
+    <div className="flex flex-wrap items-center gap-1.5">
+      {chip('CE')}
+      {chip('PE')}
     </div>
   );
 }
@@ -1333,24 +1374,17 @@ function StrikeLegSelector({
   );
 }
 
-/** The full CE/PE strike editor for one row: ATM±/₹ mode toggle, independent
- *  CE and PE selectors, a link checkbox to keep them mirrored, and reset to ATM. */
-function StrikeEditor({
-  row, live, step, onUpdate, onShift, shiftDisabled, onBlocked,
-  buildupWsActive, buildupExpiryHint,
-}: {
-  row: FocusRow;
-  live: RowLive;
-  step: number;
-  onUpdate: (patch: Partial<FocusRow>) => void;
-  onShift?: (leg: 'CE' | 'PE', direction: 'UP' | 'DOWN') => void;
-  shiftDisabled?: boolean;
-  onBlocked?: (message: string) => void;
-  /** Focus WS running and this row's expiry matches — show buildup / placeholder. */
-  buildupWsActive?: boolean;
-  /** When set, title explains why buildup is unavailable (usually far expiry). */
-  buildupExpiryHint?: string | null;
-}) {
+/**
+ * The strike-config edit rules every strike editor shares (table/cards
+ * StrikeEditor and the Pro view's legs grid): owned-leg locks, the link
+ * mirror, mode switch and reset. One copy, so a new layout can't quietly
+ * drop the lock that keeps an open position from being orphaned.
+ */
+function useStrikeEditing(
+  row: FocusRow, live: RowLive,
+  onUpdate: (patch: Partial<FocusRow>) => void,
+  onBlocked?: (message: string) => void,
+) {
   /**
    * A leg THIS ROW opened is LOCKED against strike-config edits.
    *
@@ -1408,6 +1442,43 @@ function StrikeEditor({
 
   const mode = row.strikeMode ?? 'ATM';
 
+  /** Switching mode re-resolves BOTH legs from a different rule, so an open
+   *  leg would move — same orphaning as a direct edit. */
+  function setMode(next: FocusStrikeMode) {
+    if (anyOpen) { onBlocked?.(blockedNote(legOpen.CE ? 'CE' : 'PE')); return; }
+    onUpdate({ strikeMode: next });
+  }
+
+  function resetStrikes() {
+    if (anyOpen) { onBlocked?.(blockedNote(legOpen.CE ? 'CE' : 'PE')); return; }
+    onUpdate({
+      strikeMode: 'ATM', linked: true, ceOffset: 0, peOffset: 0, cePremium: '', pePremium: '',
+    });
+  }
+
+  return { legOpen, anyOpen, mode, setLeg, setMode, resetStrikes };
+}
+
+/** The full CE/PE strike editor for one row: ATM±/₹ mode toggle, independent
+ *  CE and PE selectors, a link checkbox to keep them mirrored, and reset to ATM. */
+function StrikeEditor({
+  row, live, step, onUpdate, onShift, shiftDisabled, onBlocked,
+  buildupWsActive, buildupExpiryHint,
+}: {
+  row: FocusRow;
+  live: RowLive;
+  step: number;
+  onUpdate: (patch: Partial<FocusRow>) => void;
+  onShift?: (leg: 'CE' | 'PE', direction: 'UP' | 'DOWN') => void;
+  shiftDisabled?: boolean;
+  onBlocked?: (message: string) => void;
+  /** Focus WS running and this row's expiry matches — show buildup / placeholder. */
+  buildupWsActive?: boolean;
+  /** When set, title explains why buildup is unavailable (usually far expiry). */
+  buildupExpiryHint?: string | null;
+}) {
+  const { legOpen, anyOpen, mode, setLeg, setMode, resetStrikes } = useStrikeEditing(row, live, onUpdate, onBlocked);
+
   return (
     <div
       className="flex flex-col gap-1 min-w-[280px] w-full max-w-full"
@@ -1416,12 +1487,7 @@ function StrikeEditor({
       <div className="flex items-center justify-between">
         <SegPill options={['ATM±', '₹'] as const}
           value={mode === 'ATM' ? 'ATM±' : '₹'}
-          onChange={v => {
-            // Switching mode re-resolves BOTH legs from a different rule, so an
-            // open leg would move — same orphaning as a direct edit.
-            if (anyOpen) { onBlocked?.(blockedNote(legOpen.CE ? 'CE' : 'PE')); return; }
-            onUpdate({ strikeMode: v === 'ATM±' ? 'ATM' : 'PREMIUM' });
-          }}
+          onChange={v => setMode(v === 'ATM±' ? 'ATM' : 'PREMIUM')}
           title={anyOpen
             ? 'Locked while a leg is open — exit it first'
             : 'ATM± picks a strike by steps from ATM; ₹ picks the closest strike priced at or below a target premium'}
@@ -1435,12 +1501,7 @@ function StrikeEditor({
           </label>
           <button
             type="button"
-            onClick={() => {
-              if (anyOpen) { onBlocked?.(blockedNote(legOpen.CE ? 'CE' : 'PE')); return; }
-              onUpdate({
-                strikeMode: 'ATM', linked: true, ceOffset: 0, peOffset: 0, cePremium: '', pePremium: '',
-              });
-            }}
+            onClick={resetStrikes}
             title={anyOpen ? 'Locked while a leg is open — exit it first' : "Reset this row's strike settings to ATM"}
             className={cn('text-[11px] text-zinc-500 hover:text-zinc-300 transition-colors cursor-pointer', FOCUS_RING)}
           >
@@ -1656,7 +1717,7 @@ function ControlStrip({
   lockRupees, setLockRupees,
   totalPnl, peakMtm, lockMtm, simPnl, simRows,
   copyTrade,
-  onOpenRisk, onOpenOrders, onOpenOptionChain, onToggleViewMode, viewMode,
+  onOpenRisk, onOpenOrders, onOpenOptionChain, onSetViewMode, viewMode,
   onExitAll, confirmExitAll, exitingAll,
 }: {
   liveRealMoney: boolean; onToggleLive: () => void; broker: Broker;
@@ -1673,8 +1734,8 @@ function ControlStrip({
   onOpenRisk: () => void;
   onOpenOrders: () => void;
   onOpenOptionChain: () => void;
-  onToggleViewMode: () => void;
-  viewMode: 'table' | 'cards';
+  onSetViewMode: (mode: FocusViewMode) => void;
+  viewMode: FocusViewMode;
   onExitAll: () => void;
   confirmExitAll: boolean;
   exitingAll: boolean;
@@ -1747,29 +1808,27 @@ function ControlStrip({
           <Grid3x3 className="h-3.5 w-3.5 text-cyan-400" />
           Option Chain
         </GhostBtn>
-        <div className="flex items-center bg-zinc-900 border border-zinc-700/80 rounded-lg p-0.5" title="Switch view mode between Table and Cards">
-          <button
-            type="button"
-            onClick={() => viewMode !== 'table' && onToggleViewMode()}
-            className={cn(
-              'flex items-center gap-1.5 text-xs font-bold px-2.5 py-1 rounded-md transition-all cursor-pointer',
-              viewMode === 'table' ? 'bg-zinc-800 text-white shadow-sm' : 'text-zinc-400 hover:text-zinc-200'
-            )}
-          >
-            <Grid3x3 className="h-3.5 w-3.5" />
-            Table
-          </button>
-          <button
-            type="button"
-            onClick={() => viewMode !== 'cards' && onToggleViewMode()}
-            className={cn(
-              'flex items-center gap-1.5 text-xs font-bold px-2.5 py-1 rounded-md transition-all cursor-pointer',
-              viewMode === 'cards' ? 'bg-zinc-800 text-white shadow-sm' : 'text-zinc-400 hover:text-zinc-200'
-            )}
-          >
-            <Layers className="h-3.5 w-3.5" />
-            Cards
-          </button>
+        <div className="flex items-center bg-zinc-900 border border-zinc-700/80 rounded-lg p-0.5" title="Switch view: Pro, Table or Cards">
+          {([
+            ['pro', LayoutList, 'Pro'],
+            ['table', Grid3x3, 'Table'],
+            ['cards', Layers, 'Cards'],
+          ] as const).map(([mode, Icon, label]) => (
+            <button
+              key={mode}
+              type="button"
+              onClick={() => onSetViewMode(mode)}
+              aria-pressed={viewMode === mode}
+              className={cn(
+                'flex items-center gap-1.5 text-xs font-bold px-2.5 py-1 rounded-md transition-all cursor-pointer',
+                viewMode === mode ? 'bg-zinc-800 text-white shadow-sm' : 'text-zinc-400 hover:text-zinc-200',
+                FOCUS_RING,
+              )}
+            >
+              <Icon className="h-3.5 w-3.5" />
+              {label}
+            </button>
+          ))}
         </div>
       </div>
 
@@ -2412,6 +2471,444 @@ function FocusTableRowImpl({
 }
 const FocusTableRow = memo(FocusTableRowImpl, rowDataPropsEqual);
 
+// ── Pro view for a single row ─────────────────────────────────────────────────
+//
+// A tight, grid-aligned layout built from the shadcn/ui primitives: one header
+// bar for the row's schedule and command buttons, a legs grid (one line per
+// leg: strike → price → position → its own rules → orders), and a side panel
+// for row-wide stops and telemetry. Re-entry folds into a collapsible under
+// the grid with a one-line summary. Same props, callbacks and rule helpers as
+// the table/cards views — only the layout differs, so every guard (strike
+// locks via useStrikeEditing, ownership-sized chips, commit-on-blur inputs)
+// is shared, not re-implemented.
+
+type FocusRowViewProps = Parameters<typeof FocusTableRowImpl>[0];
+
+const PRO_LABEL = 'text-[11px] font-semibold uppercase tracking-wider text-zinc-500';
+const PRO_INPUT = 'h-7 text-xs text-center bg-zinc-950/60 border-zinc-700 rounded-md';
+
+/** A labelled control in the Pro header / side panel. */
+function ProField({ label, title, children, className }: {
+  label: string; title?: string; children: React.ReactNode; className?: string;
+}) {
+  return (
+    <div className={cn('flex items-center gap-1.5', className)} title={title}>
+      <span className={PRO_LABEL}>{label}</span>
+      {children}
+    </div>
+  );
+}
+
+const PRO_STATUS: Record<FocusRowStatus, { cls: string; bar: string }> = {
+  draft:   { cls: 'bg-zinc-800 text-zinc-300 border-zinc-700', bar: 'before:bg-zinc-700' },
+  armed:   { cls: 'bg-violet-500/15 text-violet-300 border-violet-500/40', bar: 'before:bg-violet-500' },
+  entered: { cls: 'bg-emerald-500/15 text-emerald-300 border-emerald-500/40', bar: 'before:bg-emerald-500' },
+  exited:  { cls: 'bg-zinc-800 text-zinc-400 border-zinc-700', bar: 'before:bg-zinc-600' },
+};
+
+/** One-line summary of the row's re-entry setup for the collapsed strip. */
+function reentrySummary(row: FocusRow): string {
+  const sl = reentryConfig(row, 'sl');
+  const tgt = reentryConfig(row, 'tgt');
+  const one = (c: typeof sl) => c.mode === 'off'
+    ? 'off'
+    : `${REENTRY_LABEL[c.mode]}${c.mode === 'otm' ? ` ${c.otmStrikes}` : ''} ×${c.max}`;
+  const parts = [`SL: ${one(sl)}`, `Tgt: ${one(tgt)}`];
+  if (row.noReEntryAfter) parts.push(`none after ${row.noReEntryAfter}`);
+  if (row.slToCost) parts.push('SL→Cost on');
+  return parts.join(' · ');
+}
+
+/** Whole-rupee signed P&L with Indian grouping: +₹1,729 / −₹1,245 / ₹0. */
+function fmtPnl0(n: number): string {
+  if (!Number.isFinite(n)) return '\u2014';
+  const r = Math.round(n);
+  const sign = r < 0 ? '\u2212' : r > 0 ? '+' : '';
+  return `${sign}\u20B9${Math.abs(r).toLocaleString('en-IN')}`;
+}
+
+function FocusProRowImpl({
+  row, live, lotSize, spot, liveRealMoney, busy,
+  expiries, buildupWsActive, buildupExpiryHint,
+  onUpdate, onDelete, onArm, onDisarm, onExit, onExitPartial, onAddLot, onReduceLot, onShift, onBlocked,
+  onCancelPending,
+}: FocusRowViewProps) {
+  const combinedLtp = (live.ltpCe ?? 0) + (live.ltpPe ?? 0);
+  const { ceValue, peValue, totalValue, pcr, pcrOi } = legValues(row, live, lotSize);
+  const canTrade = (isSimRow(row) || liveRealMoney) && !busy && (live.ceStrike != null || live.peStrike != null) && (lotSize ?? 0) > 0;
+  const flat = rowFlat(row);
+  const status = shownStatus(row, flat);
+  const tradeBlockedWhy = !isSimRow(row) && !liveRealMoney
+    ? 'REAL row — turn on LIVE · REAL MONEY to place orders, or switch the row to SIM'
+    : busy
+      ? 'An order for this row is already in flight'
+      : (lotSize ?? 0) <= 0
+        ? 'Lot size for this index has not resolved yet'
+        : 'Strike not resolved yet';
+  const step = STRIKE_STEP[row.underlying];
+  const [qty, setQty] = useState<Record<'CE' | 'PE', number>>({ CE: 1, PE: 1 });
+  const [reOpen, setReOpen] = useState(false);
+  const expiryLocked = rowOwnsLeg(row, 'CE') || rowOwnsLeg(row, 'PE');
+  const onNearestExpiry = !row.expiry || row.expiry === expiries[0];
+  const strikes = useStrikeEditing(row, live, onUpdate, onBlocked);
+  const traded = legsOf(row);
+
+  const clearRules = () => onUpdate({
+    levelHigh: '', levelLow: '', levelVw: false, vwapInterval: '1', vwapBufferPct: '0.1',
+    slRupees: '', slMultiplier: '1.2', ceSlMultiplier: '1.2', peSlMultiplier: '1.2',
+    slRollStrikes: 0, slToCost: false, reSlMode: 'off', reTgtMode: 'off',
+    ceTgtPct: '', peTgtPct: '', noReEntryAfter: '',
+  });
+
+  const legLine = (leg: 'CE' | 'PE') => {
+    const isCe = leg === 'CE';
+    const inSide = traded.includes(leg);
+    const owns = rowOwnsLeg(row, leg);
+    const legFlat = !owns;
+    const ltp = isCe ? live.ltpCe : live.ltpPe;
+    const strike = isCe ? live.ceStrike : live.peStrike;
+    const pos = isCe ? live.cePosition : live.pePosition;
+    const pnl = computeLegPnl(row, leg, live);
+    const chips = partialCloseChips(legOwnContracts(row, leg, live), lotSize ?? 0, [25, 50, 75]);
+    const buildup = isCe ? live.ceBuildup : live.peBuildup;
+    const buildupStyle = buildup ? BUILDUP_STYLES[buildup] : undefined;
+    const oiChg = isCe ? live.ceOiChgPct : live.peOiChgPct;
+    const locked = strikes.legOpen[leg];
+    const lockedTitle = `${leg} holds an open position — use the arrows to roll it, or exit the leg first`;
+    const q = qty[leg];
+    const tone = isCe ? 'text-emerald-400' : 'text-rose-400';
+    return (
+      <TableRow key={leg} className={cn('border-zinc-800/70 hover:bg-zinc-800/20', !inSide && !owns && 'opacity-50')}>
+        <TableCell className="py-1.5 pl-3 pr-1 w-10">
+          <span className={cn('inline-flex h-6 w-9 items-center justify-center rounded-md border text-xs font-black',
+            isCe ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30' : 'bg-rose-500/10 text-rose-400 border-rose-500/30')}>{leg}</span>
+        </TableCell>
+        {/* Strike: rule → resolved strike → roll arrows */}
+        <TableCell className="py-1.5 px-2">
+          <div className="flex items-center gap-1.5">
+            {strikes.mode === 'ATM' ? (
+              <Select value={String((isCe ? row.ceOffset : row.peOffset) ?? 0)} disabled={locked}
+                onValueChange={v => { if (v != null) strikes.setLeg(leg, isCe ? { ceOffset: Number(v) } : { peOffset: Number(v) }); }}>
+                <SelectTrigger size="sm" title={locked ? lockedTitle : `${leg} strike as a step offset from ATM`}
+                  className="h-7 w-36 text-xs font-semibold bg-zinc-950/60 border-zinc-700">
+                  <SelectValue>{(v: string) => offsetLabel(Number(v), step)}</SelectValue>
+                </SelectTrigger>
+                <SelectContent>
+                  {OFFSET_OPTIONS.map(n => <SelectItem key={n} value={String(n)}>{offsetLabel(n, step)}</SelectItem>)}
+                </SelectContent>
+              </Select>
+            ) : (
+              <RuleNumInput value={(isCe ? row.cePremium : row.pePremium) ?? ''} disabled={locked} placeholder="₹ target"
+                onCommit={v => strikes.setLeg(leg, isCe ? { cePremium: v } : { pePremium: v })}
+                title={locked ? lockedTitle : `Target premium for ${leg} — the closest strike priced at or below it`}
+                className={cn(PRO_INPUT, 'w-36')} />
+            )}
+            <span className="font-mono text-sm font-bold text-zinc-100 tabular-nums w-14 text-right">{strike ?? '—'}</span>
+            <div className="flex items-center">
+              <Button variant="ghost" size="icon" className="size-7 text-zinc-400 hover:text-emerald-400"
+                disabled={busy || strike == null} onClick={() => onShift(leg, 'UP')}
+                title={`Shift ${leg} strike up one step — closes and reopens any live position at the new strike`}
+                aria-label={`Shift ${leg} strike up one step`}><ChevronUp className="size-4" /></Button>
+              <Button variant="ghost" size="icon" className="size-7 text-zinc-400 hover:text-rose-400"
+                disabled={busy || strike == null} onClick={() => onShift(leg, 'DOWN')}
+                title={`Shift ${leg} strike down one step — closes and reopens any live position at the new strike`}
+                aria-label={`Shift ${leg} strike down one step`}><ChevronDown className="size-4" /></Button>
+            </div>
+            {buildupStyle ? (
+              <span className={cn('text-[11px] font-black px-1.5 py-0.5 rounded border leading-none', buildupStyle.cls)}
+                title={`${buildupStyle.text}${oiChg != null && oiChg !== 0 ? ` — OI ${oiChg > 0 ? '+' : ''}${oiChg.toFixed(1)}%` : ''}`}>
+                {buildup}{oiChg != null && oiChg !== 0 ? ` ${oiChg > 0 ? '+' : ''}${oiChg.toFixed(0)}%` : ''}
+              </span>
+            ) : buildupExpiryHint && strike != null ? (
+              <span className="text-[11px] font-semibold text-zinc-500" title={buildupExpiryHint}>OI n/a</span>
+            ) : null}
+          </div>
+        </TableCell>
+        <TableCell className={cn('py-1.5 px-2 text-right font-mono text-sm font-black tabular-nums', tone)}>
+          {ltp != null ? ltp.toFixed(2) : '—'}
+        </TableCell>
+        <TableCell className="py-1.5 px-2">
+          {owns && pos && Number(pos.netQty) !== 0
+            ? <LegOpenBadge pos={pos} />
+            : <span className="text-[11px] font-semibold uppercase tracking-wider text-zinc-500">{inSide ? 'Flat' : 'Not traded'}</span>}
+        </TableCell>
+        <TableCell className={cn('py-1.5 px-2 text-right font-mono text-sm font-bold tabular-nums', pnlClass(pnl))}>
+          {pnl != null ? fmtPnl0(pnl) : '—'}
+        </TableCell>
+        {/* This leg's own rules */}
+        <TableCell className="py-1.5 px-2">
+          <RuleNumInput value={(isCe ? row.ceSlMultiplier : row.peSlMultiplier) ?? '1.2'}
+            onCommit={v => onUpdate(isCe ? { ceSlMultiplier: v } : { peSlMultiplier: v })}
+            title={`Exit ${leg} alone when its premium reaches its own entry × this`}
+            className={cn(PRO_INPUT, 'w-14')} />
+        </TableCell>
+        <TableCell className="py-1.5 px-2">
+          <RuleNumInput value={(isCe ? row.ceTgtPct : row.peTgtPct) ?? ''} placeholder="off"
+            onCommit={v => onUpdate(isCe ? { ceTgtPct: v } : { peTgtPct: v })}
+            title={`Exit ${leg} alone once its premium has decayed this ${row.legTgtUnit === 'pts' ? 'many points' : '%'} from its own entry. Blank = off`}
+            className={cn(PRO_INPUT, 'w-14')} />
+        </TableCell>
+        <TableCell className="py-1.5 px-2">
+          <LegSlLevels row={row} live={live} leg={leg} lotSize={lotSize} inline />
+        </TableCell>
+        {/* Orders */}
+        <TableCell className="py-1.5 pl-2 pr-3">
+          <div className="flex items-center justify-end gap-1">
+            <LegLotSelect value={q} onChange={n => setQty(p => ({ ...p, [leg]: n }))} className="w-11 h-7 text-xs" title={`Lots the ${leg} + / − buttons act on`} />
+            <Button variant="outline" size="icon" className="size-7 border-zinc-700 bg-zinc-900 text-zinc-200"
+              disabled={!canTrade} onClick={() => onAddLot(leg, q)}
+              title={canTrade ? `Sell ${q} more lot(s) of ${leg}` : tradeBlockedWhy} aria-label={`Add ${q} ${leg} lots`}>
+              <Plus className="size-3.5" />
+            </Button>
+            <Button variant="outline" size="icon" className="size-7 border-zinc-700 bg-zinc-900 text-zinc-200"
+              disabled={!canTrade || legFlat} onClick={() => onReduceLot(leg, q)}
+              title={legFlat ? 'Nothing open' : canTrade ? `Buy back ${q} lot(s) of ${leg}` : tradeBlockedWhy} aria-label={`Reduce ${leg} by ${q} lots`}>
+              <Minus className="size-3.5" />
+            </Button>
+            <DropdownMenu>
+              <DropdownMenuTrigger
+                disabled={!canTrade || legFlat}
+                render={<Button variant="outline" size="icon" className="size-7 border-zinc-700 bg-zinc-900 text-zinc-300"
+                  aria-label={`Partial exit ${leg}`} title={legFlat ? 'Nothing open' : `Partial exit ${leg}`} />}
+              >
+                <Ellipsis className="size-3.5" />
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="end" className="w-44">
+                <DropdownMenuGroup>
+                  <DropdownMenuLabel>Exit part of {leg}</DropdownMenuLabel>
+                  {chips.map(c => (
+                    <DropdownMenuItem key={c.pct} disabled={!canTrade || !c.enabled}
+                      onClick={() => onExitPartial(leg, c.pct as 25 | 50 | 75)}>
+                      {c.pct}%<span className="ml-auto text-xs text-zinc-500">{c.title}</span>
+                    </DropdownMenuItem>
+                  ))}
+                </DropdownMenuGroup>
+              </DropdownMenuContent>
+            </DropdownMenu>
+            <Button size="sm" className="h-7 px-3 bg-rose-600 text-oncolor hover:bg-rose-500 font-bold"
+              disabled={!canTrade || legFlat} onClick={() => onExit(leg)}
+              title={legFlat ? 'Nothing open' : canTrade ? `Exit the ${leg} leg` : tradeBlockedWhy}>
+              Exit
+            </Button>
+          </div>
+        </TableCell>
+      </TableRow>
+    );
+  };
+
+  return (
+    <div className={cn(
+      'relative overflow-hidden rounded-xl border border-zinc-800 bg-zinc-900/50 shadow-sm',
+      "before:absolute before:inset-y-0 before:left-0 before:w-1 before:content-['']", PRO_STATUS[status].bar,
+    )}>
+      {/* ── Header: identity · schedule · command ── */}
+      <div className="flex flex-wrap items-center gap-x-4 gap-y-2 pl-4 pr-3 py-2 border-b border-zinc-800 bg-zinc-900/60">
+        <div className="flex items-center gap-2">
+          <Badge variant="outline" className={cn('h-6 px-2 text-[11px] font-bold uppercase tracking-wider', PRO_STATUS[status].cls)}>
+            {status === 'entered' && <span className="mr-1 size-1.5 rounded-full bg-emerald-400 animate-pulse" />}
+            {status}
+          </Badge>
+          <span className={cn('inline-flex h-6 items-center gap-1.5 rounded-md border px-2 text-xs font-black', UNDERLYING_CHIP[row.underlying])}>
+            <span className={cn('size-1.5 rounded-full', UNDERLYING_DOT[row.underlying])} />
+            {row.underlying}
+          </span>
+          <RowModeToggle row={row} flat={flat} liveRealMoney={liveRealMoney} onUpdate={onUpdate} />
+        </div>
+
+        <Separator orientation="vertical" className="h-6 bg-zinc-800" />
+
+        <ToggleGroup value={[row.side]} variant="outline" size="sm" spacing={0}
+          onValueChange={(v: unknown[]) => { const s = v[v.length - 1] as FocusSide | undefined; if (s) onUpdate({ side: s }); }}
+          aria-label="Legs this row trades" title="Trade the call, the put, or both">
+          {(['CE', 'BOTH', 'PE'] as const).map(s => (
+            <ToggleGroupItem key={s} value={s} className="h-7 px-2.5 text-xs font-bold aria-pressed:bg-violet-600 aria-pressed:text-oncolor">{s}</ToggleGroupItem>
+          ))}
+        </ToggleGroup>
+        <ProField label="Lots"><LotStepper value={row.lots} onChange={v => onUpdate({ lots: v })} /></ProField>
+        <ProField label="Window" title="Entry time → exit time (IST)">
+          <div className="w-[5.5rem]"><TimeInput value={row.entryTime} onChange={v => onUpdate({ entryTime: v })} /></div>
+          <ArrowRight className="size-3.5 text-zinc-500" />
+          <div className="w-[5.5rem]"><TimeInput value={row.exitTime} onChange={v => onUpdate({ exitTime: v })} /></div>
+        </ProField>
+        <ProField label="Expiry">
+          <Select value={row.expiry || expiries[0] || ''} disabled={expiryLocked || expiries.length === 0}
+            onValueChange={v => { if (v) onUpdate({ expiry: v }); }}>
+            <SelectTrigger size="sm" title={expiryLocked ? 'Locked while a leg is open' : 'Contract expiry'}
+              className="h-7 w-32 font-mono text-xs bg-zinc-950/60 border-zinc-700">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              {expiries.map(e => <SelectItem key={e} value={e} className="font-mono text-xs">{e}</SelectItem>)}
+            </SelectContent>
+          </Select>
+          <ToggleGroup value={[row.dte]} variant="outline" size="sm" spacing={0} disabled={!onNearestExpiry}
+            onValueChange={(v: unknown[]) => { const d = v[v.length - 1] as FocusDte | undefined; if (d) onUpdate({ dte: d }); }}
+            aria-label="Days to expiry filter"
+            title={onNearestExpiry ? 'Only enter on this many days to the nearest expiry' : 'DTE filter applies to the nearest expiry only'}>
+            {(['Any', '0', '1', '0+1'] as FocusDte[]).map(d => (
+              <ToggleGroupItem key={d} value={d} className="h-7 px-2 font-mono text-xs aria-pressed:bg-violet-600 aria-pressed:text-oncolor">{d}</ToggleGroupItem>
+            ))}
+          </ToggleGroup>
+        </ProField>
+
+        <div className="ml-auto flex items-center gap-2">
+          <div className="flex flex-col items-end leading-none" title="Row total P&L (realized + open mark-to-market)">
+            <span className={PRO_LABEL}>P&amp;L</span>
+            <span className={cn('font-mono text-lg font-black tabular-nums', pnlClass(live.pnl))}>
+              {fmtPnl0(live.pnl)}
+            </span>
+          </div>
+          {(status === 'draft' || status === 'exited') && (
+            <Button size="sm" className="h-8 px-4 bg-violet-600 text-oncolor hover:bg-violet-500 font-bold" onClick={onArm}>
+              <Zap className="size-3.5" /> Arm
+            </Button>
+          )}
+          {row.status === 'armed' && (
+            <Button size="sm" variant="outline" className="h-8 px-4 border-zinc-700 bg-zinc-900 font-bold" onClick={onDisarm}>
+              <ShieldOff className="size-3.5" /> Disarm
+            </Button>
+          )}
+          <Button size="sm" className="h-8 px-4 bg-rose-600 text-oncolor hover:bg-rose-500 font-bold"
+            disabled={flat || !canTrade} onClick={() => onExit('ALL')}
+            title={flat ? 'Nothing open' : canTrade ? 'Exit every leg this row holds' : tradeBlockedWhy}>
+            <ShieldOff className="size-3.5" /> Exit all
+          </Button>
+          <DropdownMenu>
+            <DropdownMenuTrigger render={<Button variant="ghost" size="icon" className="size-8 text-zinc-400" aria-label="Row actions" />}>
+              <Ellipsis className="size-4" />
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="end" className="w-48">
+              <DropdownMenuItem onClick={clearRules}><X className="size-4" /> Clear rules</DropdownMenuItem>
+              <DropdownMenuItem onClick={strikes.resetStrikes} disabled={strikes.anyOpen}><RefreshCw className="size-4" /> Reset strikes to ATM</DropdownMenuItem>
+              <DropdownMenuSeparator />
+              <DropdownMenuItem variant="destructive" disabled={!flat} onClick={onDelete}>
+                <Trash2 className="size-4" /> {flat ? 'Delete row' : 'Delete (exit first)'}
+              </DropdownMenuItem>
+            </DropdownMenuContent>
+          </DropdownMenu>
+        </div>
+      </div>
+
+      <div className="grid grid-cols-1 xl:grid-cols-[minmax(0,1fr)_17rem]">
+        {/* ── Legs grid ── */}
+        <div className="min-w-0">
+          <Table className="min-w-[980px]">
+            <TableHeader>
+              <TableRow className="bg-zinc-800 hover:bg-zinc-800 border-zinc-700">
+                {[
+                  ['', 'pl-3'], ['Strike', ''], ['LTP', 'text-right'], ['Position', ''], ['P&L', 'text-right'],
+                  ['SL ×', ''], [`Tgt ${row.legTgtUnit === 'pts' ? 'pts' : '%'}`, ''], ['Stop · target at', ''], ['Orders', 'text-right pr-3'],
+                ].map(([h, c], i) => (
+                  <TableHead key={i} className={cn('h-8 px-2 text-xs font-bold text-white', c)}>{h}</TableHead>
+                ))}
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {legLine('CE')}
+              {legLine('PE')}
+            </TableBody>
+          </Table>
+
+          {/* Row rules: how strikes are picked, then the row-wide stops */}
+          <div className="flex flex-wrap items-center gap-x-4 gap-y-2 px-3 py-2 border-t border-zinc-800 bg-zinc-950/30">
+            <ProField label="Strike by" title="ATM± picks by steps from ATM; ₹ picks the closest strike priced at or below a target premium">
+              <ToggleGroup value={[strikes.mode]} variant="outline" size="sm" spacing={0} disabled={strikes.anyOpen}
+                onValueChange={(v: unknown[]) => { const m = v[v.length - 1] as FocusStrikeMode | undefined; if (m) strikes.setMode(m); }}>
+                <ToggleGroupItem value="ATM" className="h-7 px-2.5 text-xs font-bold aria-pressed:bg-violet-600 aria-pressed:text-oncolor">ATM ±</ToggleGroupItem>
+                <ToggleGroupItem value="PREMIUM" className="h-7 px-2.5 text-xs font-bold aria-pressed:bg-violet-600 aria-pressed:text-oncolor">₹ premium</ToggleGroupItem>
+              </ToggleGroup>
+            </ProField>
+            <label className="flex items-center gap-2 text-xs font-semibold text-zinc-300 cursor-pointer" title="Keep CE and PE moving together">
+              <Checkbox checked={row.linked ?? true} onCheckedChange={c => onUpdate({ linked: !!c })} />
+              Link legs
+            </label>
+            <ProField label="Tgt unit" title="Leg targets as a % of the leg's own entry, or as premium points below it (both legs)">
+              <ToggleGroup value={[row.legTgtUnit ?? 'pct']} variant="outline" size="sm" spacing={0}
+                onValueChange={(v: unknown[]) => { const u2 = v[v.length - 1] as 'pct' | 'pts' | undefined; if (u2) onUpdate({ legTgtUnit: u2 }); }}>
+                <ToggleGroupItem value="pct" className="h-7 px-2.5 text-xs font-bold aria-pressed:bg-violet-600 aria-pressed:text-oncolor">%</ToggleGroupItem>
+                <ToggleGroupItem value="pts" className="h-7 px-2.5 text-xs font-bold aria-pressed:bg-violet-600 aria-pressed:text-oncolor">pts</ToggleGroupItem>
+              </ToggleGroup>
+            </ProField>
+
+            <Separator orientation="vertical" className="h-6 bg-zinc-800" />
+
+            <span className={PRO_LABEL}>Row stops</span>
+            <ProField label="SL ₹" title="Row stop loss in ₹ across both legs">
+              <RuleNumInput value={row.slRupees} placeholder="off" onCommit={v => onUpdate({ slRupees: v })} className={cn(PRO_INPUT, 'w-20')} />
+            </ProField>
+            <ProField label="Pair ×" title="Pair stop: exit both legs when their combined premium reaches entry × this">
+              <RuleNumInput value={row.slMultiplier} onCommit={v => onUpdate({ slMultiplier: v })} className={cn(PRO_INPUT, 'w-14')} />
+            </ProField>
+            <ProField label="Spot H ↑" title="Exit the row when spot reaches this high">
+              <RuleNumStepper value={row.levelHigh} onCommit={v => onUpdate({ levelHigh: v })}
+                wrapperClassName="flex items-center gap-0.5" className={cn(PRO_INPUT, 'w-20')} />
+            </ProField>
+            <ProField label="Spot L ↓" title="Exit the row when spot falls to this low">
+              <RuleNumStepper value={row.levelLow} onCommit={v => onUpdate({ levelLow: v })}
+                wrapperClassName="flex items-center gap-0.5" className={cn(PRO_INPUT, 'w-20')} />
+            </ProField>
+            <div className="flex items-center gap-2 text-xs">
+              <label className="flex items-center gap-2 font-semibold text-zinc-300 cursor-pointer" title="Exit when the combined premium crosses its session-open VWAP against you">
+                <Switch size="sm" checked={row.levelVw} onCheckedChange={c => onUpdate({ levelVw: !!c })} />
+                VWAP exit
+              </label>
+              {row.levelVw && (
+                <>
+                  <Select value={row.vwapInterval || '1'} onValueChange={v => { if (v) onUpdate({ vwapInterval: v }); }}>
+                    <SelectTrigger size="sm" className="h-7 w-16 text-xs bg-zinc-950/60 border-zinc-700" aria-label="VWAP candle interval"><SelectValue /></SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="1">1m</SelectItem>
+                      <SelectItem value="5">5m</SelectItem>
+                    </SelectContent>
+                  </Select>
+                  <RuleNumInput value={row.vwapBufferPct} onCommit={v => onUpdate({ vwapBufferPct: v })} title="Buffer %" className={cn(PRO_INPUT, 'w-14')} />
+                  <span className="font-mono text-zinc-400">{live.vwap != null ? live.vwap.toFixed(2) : '—'}</span>
+                </>
+              )}
+            </div>
+          </div>
+
+          {/* Re-entry: one summary line, expands to the full controls */}
+          <Collapsible open={reOpen} onOpenChange={setReOpen}>
+            <div className="flex flex-wrap items-center gap-2 px-3 py-1.5 border-t border-zinc-800 bg-zinc-950/30">
+              <CollapsibleTrigger render={
+                <button type="button" className={cn('flex items-center gap-2 rounded-md px-1.5 py-1 text-xs text-zinc-300 hover:bg-zinc-800/60 cursor-pointer', FOCUS_RING)} />
+              }>
+                <ChevronDown className={cn('size-4 text-zinc-500 transition-transform', !reOpen && '-rotate-90')} />
+                <span className={PRO_LABEL}>Re-entry</span>
+                <span className="font-mono text-zinc-300">{reentrySummary(row)}</span>
+              </CollapsibleTrigger>
+              {/* Waiting re-entries stay visible (and cancellable) while collapsed. */}
+              {!reOpen && <LegReentryPendingChips row={row} onCancelPending={onCancelPending} />}
+            </div>
+            <CollapsibleContent>
+              <div className="px-3 pb-2.5 pt-1 bg-zinc-950/30">
+                <LegReentryControls row={row} onUpdate={onUpdate} onCancelPending={onCancelPending} legTargetsElsewhere />
+              </div>
+            </CollapsibleContent>
+          </Collapsible>
+        </div>
+
+        {/* ── Side panel: telemetry ── */}
+        <aside className="flex flex-col gap-1.5 border-t xl:border-t-0 xl:border-l border-zinc-800 p-3 bg-zinc-950/20">
+          <div className="flex items-center justify-between">
+            <span className={PRO_LABEL}>Telemetry</span>
+            <span className="font-mono text-[11px] text-zinc-500">spot {spot > 0 ? spot.toFixed(2) : '—'}</span>
+          </div>
+          <LtpStack combinedLtp={combinedLtp} live={live} ceValue={ceValue} peValue={peValue}
+            totalValue={totalValue} pcr={pcr} pcrOi={pcrOi} compact />
+        </aside>
+      </div>
+    </div>
+  );
+}
+const FocusProRow = memo(FocusProRowImpl, rowDataPropsEqual);
+
+/** Row views, exported for the layout preview (app/focus-tool/preview), which
+ *  renders them with sample data and no-op order callbacks. Rendering these
+ *  does NOT start the scheduler — only the default FocusTool does. */
+export { FocusProRow, FocusTableRow, type FocusRowViewProps };
+
 // ── Card view for a single row ────────────────────────────────────────────────
 
 function FocusRowCardImpl({
@@ -3029,7 +3526,19 @@ export default function FocusTool() {
   const lockFloorRef = useRef<number | null>(null);
 
   const [activeModal, setActiveModal] = useState<'risk' | 'orderbook' | 'optionchain' | null>(null);
-  const [viewMode, setViewMode] = useState<'table' | 'cards'>('table');
+  // Remembered per browser: a display preference only, never trading state.
+  const [viewMode, setViewModeState] = useState<FocusViewMode>('table');
+  useEffect(() => {
+    try {
+      const v = localStorage.getItem(VIEW_MODE_KEY);
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- one-time restore of a stored display preference
+      if (v === 'pro' || v === 'table' || v === 'cards') setViewModeState(v);
+    } catch { /* storage blocked — keep the default */ }
+  }, []);
+  const setViewMode = useCallback((v: FocusViewMode) => {
+    setViewModeState(v);
+    try { localStorage.setItem(VIEW_MODE_KEY, v); } catch { /* storage blocked */ }
+  }, []);
   const [orders, setOrders] = useState<Record<string, unknown>[]>([]);
   const [ordersLoading, setOrdersLoading] = useState(false);
   const [ordersError, setOrdersError] = useState<string | null>(null);
@@ -5866,7 +6375,7 @@ export default function FocusTool() {
         onOpenRisk={() => setActiveModal('risk')}
         onOpenOrders={() => setActiveModal('orderbook')}
         onOpenOptionChain={() => setActiveModal('optionchain')}
-        onToggleViewMode={() => setViewMode(v => v === 'cards' ? 'table' : 'cards')}
+        onSetViewMode={setViewMode}
         viewMode={viewMode}
         onExitAll={handleExitAll} confirmExitAll={confirmExitAll} exitingAll={exitingAll}
       />
@@ -5891,8 +6400,51 @@ export default function FocusTool() {
                 lot={lotSizes[u]} dte={dteFor(expiries[u]?.[0] ?? '')} wsLive={wsLive}
               />
 
-              <div className={cn("bg-zinc-900/40 border border-zinc-800/80 rounded-2xl overflow-hidden shadow-sm", viewMode === 'cards' ? 'p-4' : '')}>
-                {viewMode === 'cards' ? (
+              <div className={cn("bg-zinc-900/40 border border-zinc-800/80 rounded-2xl overflow-hidden shadow-sm", viewMode === 'cards' ? 'p-4' : viewMode === 'pro' ? 'p-3' : '')}>
+                {viewMode === 'pro' ? (
+                  rows.length === 0 ? (
+                    <div className="py-12 text-center flex flex-col items-center gap-1">
+                      <span className="text-sm font-bold text-zinc-300">No trading rows configured</span>
+                      <span className="text-xs text-zinc-500">Click &ldquo;Add Row&rdquo; to schedule a straddle or strangle entry.</span>
+                    </div>
+                  ) : (
+                    <div className="flex flex-col gap-3">
+                      {rows.map(row => {
+                        const { buildupWsActive, buildupExpiryHint } = rowBuildupWsFlags(
+                          row, wsLive,
+                          (focusWsQuotes?.[u]?.books
+                            ? Object.keys(focusWsQuotes[u]!.books!).join(',')
+                            : undefined)
+                            ?? focusWsQuotes?.[u]?.expiry
+                            ?? focusWsStatus.expiries?.[u],
+                        );
+                        return (
+                        <FocusProRow
+                          key={row.id} row={row} rowIndex={0}
+                          live={rowLive[row.id] ?? EMPTY_ROW_LIVE}
+                          lotSize={lotSizes[u]} spot={spots[u] ?? 0}
+                          liveRealMoney={liveRealMoney} broker={broker}
+                          busy={busyRows.has(row.id)}
+                          expiries={expiries[u] ?? []}
+                          buildupWsActive={buildupWsActive}
+                          buildupExpiryHint={buildupExpiryHint}
+                          onUpdate={patch => updateRow(row.id, patch)}
+                          onDelete={() => deleteRow(row.id)}
+                          onArm={() => armRow(row.id)}
+                          onDisarm={() => updateRow(row.id, { status: 'draft' })}
+                          onExit={leg => handleManualExit(row, leg)}
+                          onExitPartial={(leg, pct) => handleManualExitPartial(row, leg, pct)}
+                          onAddLot={(leg, lots) => runRowAction(row.id, () => placeLeg(row, leg, { reduce: false, lots }))}
+                          onReduceLot={(leg, lots) => runRowAction(row.id, () => placeLeg(row, leg, { reduce: true, lots }))}
+                          onShift={(leg, dir) => handleShiftStrike(row, leg, dir)}
+                          onBlocked={msg => addToast('error', 'Strike locked', msg)}
+                          onCancelPending={leg => cancelPendingReentry(row.id, leg)}
+                        />
+                        );
+                      })}
+                    </div>
+                  )
+                ) : viewMode === 'cards' ? (
                   rows.length === 0 ? (
                     <div className="py-14 text-center flex flex-col items-center justify-center gap-3">
                       <div className="w-12 h-12 rounded-2xl bg-zinc-800/60 border border-zinc-700/50 flex items-center justify-center text-zinc-500 shadow-sm">
