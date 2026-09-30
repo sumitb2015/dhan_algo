@@ -465,6 +465,62 @@ function expKey(underlying: FocusUnderlying, expiry: string): string {
  *  exit at the wrong premium. Interval is part of the key so two rows on the
  *  same strangle at different intervals don't clobber each other's cached
  *  value. */
+/**
+ * A closing order this page sent that its fill check could not confirm in
+ * full (a rejection, or — Kotak/Zerodha have no fill socket — a book that
+ * lagged past the check window). The ledger keeps the unconfirmed remainder,
+ * so the row keeps watching the leg; this record stops a retry from sending
+ * a SECOND close while the first may still be landing, which on a stale book
+ * would flip the short into a long.
+ */
+interface UnconfirmedClose {
+  rowId: string;
+  leg: 'CE' | 'PE';
+  orderId: string | null;
+  securityId: string | null;
+  symbol: string | null;
+  product: string;
+  /** Broker net before the close went out. */
+  netBefore: number;
+  requested: number;
+  /** Qty already credited to the ledger (confirmed at send time or since). */
+  filled: number;
+  side: 'BUY' | 'SELL';
+  /** For banking P&L on a late-credited slice. */
+  snap: { netQty: number; buyAvg: number; sellAvg: number; ltp: number };
+  ts: number;
+  lastCheck: number;
+  lastToast: number;
+}
+
+/** How long a close with no broker verdict blocks a resend (book-based brokers). */
+const UNCONFIRMED_CLOSE_HOLD_MS = 15_000;
+
+/**
+ * The legs a row's VWAP series should cover, and the strikes to key it on.
+ *
+ * A BOTH row with only one leg still open is judged on that leg alone — the
+ * same rule sidePremium/entryPremium follow. Before per-leg pins, a closed
+ * leg's old strike kept feeding the combined series; with them, the closed
+ * leg re-resolves to the live ATM, so the series would even change as spot
+ * moved. The unused strike is set to the used one so the fetch key (and
+ * cache) stays put while the phantom leg's strike wanders.
+ */
+function vwapSeriesFor(
+  row: FocusRow, ceStrike: number, peStrike: number,
+): { side: FocusSide; ce: number; pe: number } {
+  let side: FocusSide = row.side;
+  if (side === 'BOTH') {
+    const ce = rowOwnsLeg(row, 'CE');
+    const pe = rowOwnsLeg(row, 'PE');
+    if (ce && !pe) side = 'CE';
+    else if (pe && !ce) side = 'PE';
+  }
+  if (side === 'CE') return { side, ce: ceStrike, pe: ceStrike };
+  if (side === 'PE') return { side, ce: peStrike, pe: peStrike };
+  return { side, ce: ceStrike, pe: peStrike };
+}
+
 function vwapKey(
   underlying: FocusUnderlying, expiry: string, ceStrike: number, peStrike: number, side: FocusSide,
   interval: string,
@@ -1958,8 +2014,11 @@ function FocusTableRowImpl({
   const ceFlat = !rowOwnsLeg(row, 'CE');
   const peFlat = !rowOwnsLeg(row, 'PE');
   // Quick partial-exit chips, same lot-aware rounding as Scalper/AdvancedScalper.
-  const ceChips = partialCloseChips(Number(live.cePosition?.netQty ?? 0), lotSize ?? 0, [25, 50, 75]);
-  const peChips = partialCloseChips(Number(live.pePosition?.netQty ?? 0), lotSize ?? 0, [25, 50, 75]);
+  // Sized off THIS row's own contracts, not the broker net: a closed leg
+  // re-resolves to the live strike, where the book may hold another row's
+  // (or a manual) position — chips must not offer to close that.
+  const ceChips = partialCloseChips(legOwnContracts(row, 'CE', live), lotSize ?? 0, [25, 50, 75]);
+  const peChips = partialCloseChips(legOwnContracts(row, 'PE', live), lotSize ?? 0, [25, 50, 75]);
   // Why the leg buttons are greyed out.
   const tradeBlockedWhy = !isSimRow(row) && !liveRealMoney
     ? 'REAL row — turn on LIVE · REAL MONEY to place orders, or switch the row to SIM'
@@ -2122,7 +2181,7 @@ function FocusTableRowImpl({
                   {live.ltpCe != null ? `₹${live.ltpCe.toFixed(2)}` : '—'}
                 </span>
                 {live.cePosition && Number(live.cePosition.netQty) !== 0 ? (
-                  <LegOpenBadge pos={live.cePosition} />
+                  <LegOpenBadge pos={rowOwnsLeg(row, 'CE') ? live.cePosition : null} />
                 ) : (
                   <span className="text-[8px] font-mono font-bold text-zinc-500 uppercase tracking-widest px-1">Flat</span>
                 )}
@@ -2168,7 +2227,7 @@ function FocusTableRowImpl({
                   {live.ltpPe != null ? `₹${live.ltpPe.toFixed(2)}` : '—'}
                 </span>
                 {live.pePosition && Number(live.pePosition.netQty) !== 0 ? (
-                  <LegOpenBadge pos={live.pePosition} />
+                  <LegOpenBadge pos={rowOwnsLeg(row, 'PE') ? live.pePosition : null} />
                 ) : (
                   <span className="text-[8px] font-mono font-bold text-zinc-500 uppercase tracking-widest px-1">Flat</span>
                 )}
@@ -2361,8 +2420,11 @@ function FocusRowCardImpl({
   const ceFlat = !rowOwnsLeg(row, 'CE');
   const peFlat = !rowOwnsLeg(row, 'PE');
   // Quick partial-exit chips, same lot-aware rounding as Scalper/AdvancedScalper.
-  const ceChips = partialCloseChips(Number(live.cePosition?.netQty ?? 0), lotSize ?? 0, [25, 50, 75]);
-  const peChips = partialCloseChips(Number(live.pePosition?.netQty ?? 0), lotSize ?? 0, [25, 50, 75]);
+  // Sized off THIS row's own contracts, not the broker net: a closed leg
+  // re-resolves to the live strike, where the book may hold another row's
+  // (or a manual) position — chips must not offer to close that.
+  const ceChips = partialCloseChips(legOwnContracts(row, 'CE', live), lotSize ?? 0, [25, 50, 75]);
+  const peChips = partialCloseChips(legOwnContracts(row, 'PE', live), lotSize ?? 0, [25, 50, 75]);
   // Why the leg buttons are greyed out.
   const tradeBlockedWhy = !isSimRow(row) && !liveRealMoney
     ? 'REAL row — turn on LIVE · REAL MONEY to place orders, or switch the row to SIM'
@@ -2581,7 +2643,7 @@ function FocusRowCardImpl({
             <span className="text-xs font-mono font-bold text-zinc-100 tabular-nums shrink-0">
               {live.ltpCe != null ? `₹${live.ltpCe.toFixed(2)}` : '—'}
             </span>
-            <LegOpenBadge pos={live.cePosition} />
+            <LegOpenBadge pos={rowOwnsLeg(row, 'CE') ? live.cePosition : null} />
             {cePnl != null && (
               <span className={cn(
                 'text-[10px] font-mono font-black px-1.5 py-0.5 rounded border tabular-nums',
@@ -2623,7 +2685,7 @@ function FocusRowCardImpl({
             <span className="text-xs font-mono font-bold text-zinc-100 tabular-nums shrink-0">
               {live.ltpPe != null ? `₹${live.ltpPe.toFixed(2)}` : '—'}
             </span>
-            <LegOpenBadge pos={live.pePosition} />
+            <LegOpenBadge pos={rowOwnsLeg(row, 'PE') ? live.pePosition : null} />
             {pePnl != null && (
               <span className={cn(
                 'text-[10px] font-mono font-black px-1.5 py-0.5 rounded border tabular-nums',
@@ -2919,6 +2981,9 @@ export default function FocusTool() {
   const rowExitWantedRef = useRef<Map<string, number>>(new Map());
   // Waiting re-entries whose order is being placed right now (row:leg).
   const pendingFiringRef = useRef<Set<string>>(new Set());
+  // Closing orders sent but not confirmed filled in full, keyed row:leg —
+  // see reconcileUnconfirmedClose.
+  const unconfirmedCloseRef = useRef<Map<string, UnconfirmedClose>>(new Map());
   // Rows the scheduler has already auto-entered. Same reasoning, plus: the
   // entry window stays open for the rest of the session, so without this a
   // row would re-enter on every 5s tick.
@@ -3617,8 +3682,9 @@ export default function FocusTool() {
         liveLegs,
       );
 
-      const vwapEntry = row.levelVw && ceStrike != null && peStrike != null && rowExpiry
-        ? rowVwap[vwapKey(u, rowExpiry, ceStrike, peStrike, row.side, row.vwapInterval || '1')]
+      const vs = ceStrike != null && peStrike != null ? vwapSeriesFor(row, ceStrike, peStrike) : null;
+      const vwapEntry = row.levelVw && vs && rowExpiry
+        ? rowVwap[vwapKey(u, rowExpiry, vs.ce, vs.pe, vs.side, row.vwapInterval || '1')]
         : undefined;
       const vwap = vwapEntry?.vwap ?? null;
       const vwapClose = vwapEntry?.close ?? null;
@@ -3627,8 +3693,8 @@ export default function FocusTool() {
       // of the row's own VW exit rule (which may be off, or set to a
       // different interval). Shares vwapWantedKey's fetch below with the
       // exit-rule VWAP when a row's own interval already happens to be '1'.
-      const vwap1mEntry = ceStrike != null && peStrike != null && rowExpiry
-        ? rowVwap[vwapKey(u, rowExpiry, ceStrike, peStrike, row.side, '1')]
+      const vwap1mEntry = vs && rowExpiry
+        ? rowVwap[vwapKey(u, rowExpiry, vs.ce, vs.pe, vs.side, '1')]
         : undefined;
       const vwap1m = vwap1mEntry?.vwap ?? null;
       const vwapClose1m = vwap1mEntry?.close ?? null;
@@ -3699,10 +3765,11 @@ export default function FocusTool() {
       if (!live || live.ceStrike == null || live.peStrike == null) continue;
       const expiry = row.expiry || expiries[row.underlying]?.[0] || '';
       if (!expiry) continue;
+      const vs = vwapSeriesFor(row, live.ceStrike, live.peStrike);
       if (row.levelVw) {
-        keys.add(vwapKey(row.underlying, expiry, live.ceStrike, live.peStrike, row.side, row.vwapInterval || '1'));
+        keys.add(vwapKey(row.underlying, expiry, vs.ce, vs.pe, vs.side, row.vwapInterval || '1'));
       }
-      keys.add(vwapKey(row.underlying, expiry, live.ceStrike, live.peStrike, row.side, '1'));
+      keys.add(vwapKey(row.underlying, expiry, vs.ce, vs.pe, vs.side, '1'));
     }
     return Array.from(keys).sort().join('|');
   }, [config.rows, rowLive, expiries]);
@@ -4103,6 +4170,96 @@ export default function FocusTool() {
    * a reducing order is clamped to the quantity the broker actually shows on
    * that leg — never more.
    */
+  /**
+   * Settle an unconfirmed close (see UnconfirmedClose) against broker truth
+   * and credit any late fill to the ledger (reducing it — never growing it).
+   *
+   *  - Dhan: the order itself (TRADED → filledQty; REJECTED/CANCELLED/
+   *    EXPIRED → whatever filled before it died). Order status is
+   *    authoritative, so no guessing from the book.
+   *  - Kotak/Zerodha: a fresh position read, movement since the order went
+   *    out, clamped to what is still unconfirmed (a sibling row trading the
+   *    same contract can't be credited past this order's size). Unresolved
+   *    after UNCONFIRMED_CLOSE_HOLD_MS → treated as dead: a MARKET close not
+   *    in the book by then did not fill.
+   *
+   * 'resolved' = safe to size a new close off a fresh book. Anything else =
+   * do not resend yet. Throttled to one broker read per 1.5s per record.
+   */
+  async function reconcileUnconfirmedClose(key: string): Promise<{ state: 'resolved' | 'pending'; credited: number }> {
+    const rec = unconfirmedCloseRef.current.get(key);
+    if (!rec) return { state: 'resolved', credited: 0 };
+    const now = Date.now();
+    if (now - rec.lastCheck < 1_500) return { state: 'pending', credited: 0 };
+    rec.lastCheck = now;
+    const remaining = rec.requested - rec.filled;
+    let filledNow: number | null = null;   // total filled on this order, if known
+    let dead = false;
+    if (broker === 'dhan' && rec.orderId) {
+      try {
+        const res = await fetch(`/api/scalper/orders?orderId=${encodeURIComponent(rec.orderId)}`);
+        const j = await res.json() as { success?: boolean; data?: { orderStatus?: string; filledQty?: number } };
+        if (j.success && j.data) {
+          const st = String(j.data.orderStatus ?? '').toUpperCase();
+          const fq = Math.min(rec.requested, Math.max(0, Number(j.data.filledQty) || 0));
+          if (st === 'TRADED') filledNow = rec.requested;
+          else if (st === 'REJECTED' || st === 'CANCELLED' || st === 'CANCELED' || st === 'EXPIRED') {
+            filledNow = fq; dead = true;
+          } else if (fq > rec.filled) {
+            filledNow = fq;   // part-traded, still working
+          }
+        }
+      } catch { /* unknown — stays pending */ }
+      // A MARKET close with no final status after a minute is abnormal; don't
+      // let it block this leg's stops forever. Say so — the user should look.
+      if (!dead && (filledNow ?? rec.filled) < rec.requested && now - rec.ts >= 60_000) {
+        dead = true;
+        addToast('error', `${rec.leg} close order ${rec.orderId} still not final after 60s`,
+          'Releasing the hold so the row\'s rules can act again — check this order in the order book');
+      }
+    } else {
+      const rows = await fetchPositionsNow();
+      if (rows) {
+        const cands = broker === 'dhan'
+          ? rows.filter(p => String(p.securityId) === String(rec.securityId))
+          : rows.filter(p => String(p.tradingSymbol) === String(rec.symbol));
+        const pos = rec.product
+          ? cands.find(p => positionProduct(p as unknown as Record<string, unknown>) === rec.product)
+          : (cands.length === 1 ? cands[0] : undefined);
+        const netNow = Number(pos?.netQty ?? 0);
+        const observed = rec.side === 'BUY' ? netNow - rec.netBefore : rec.netBefore - netNow;
+        filledNow = Math.min(rec.requested, Math.max(rec.filled, observed));
+      }
+      if (now - rec.ts >= UNCONFIRMED_CLOSE_HOLD_MS && (filledNow ?? rec.filled) < rec.requested) dead = true;
+    }
+    const late = filledNow != null ? Math.max(0, Math.min(remaining, filledNow - rec.filled)) : 0;
+    if (late > 0) {
+      const mark = { ...rec.snap, qty: late };
+      const booked = canMarkMtm(mark) ? mtmForQty(mark) : 0;
+      adjustFillQty(rec.rowId, rec.leg, -late, undefined, booked);
+      rec.filled += late;
+      addToast('success', `${rec.leg} close confirmed late`,
+        `${late} of ${rec.requested} filled after the check window — ledger updated. `
+        + 'Re-entry / SL→Cost for that stop were NOT applied (they only follow a close confirmed in time).');
+    }
+    if (rec.filled >= rec.requested || dead) {
+      unconfirmedCloseRef.current.delete(key);
+      if (dead && rec.filled < rec.requested) {
+        addToast('error', `${rec.leg} close did not fill`,
+          `${rec.requested - rec.filled} still open and still tracked — the row's rules will retry`);
+      }
+      return { state: 'resolved', credited: late };
+    }
+    return { state: 'pending', credited: late };
+  }
+
+  /** The 1s scheduler's pass: settle unconfirmed closes even if no rule retries. */
+  function sweepUnconfirmedCloses() {
+    for (const key of Array.from(unconfirmedCloseRef.current.keys())) {
+      void reconcileUnconfirmedClose(key);
+    }
+  }
+
   async function placeLeg(
     row: FocusRow,
     leg: 'CE' | 'PE',
@@ -4154,10 +4311,36 @@ export default function FocusTool() {
     // audit for the exact mechanism.
     const group = config.groups.find(g => g.underlying === u);
     const wantProduct = PRODUCT_ALIAS[group?.product ?? 'INTRADAY'][broker];
-    const pos = findPositionForRef(positions, broker, ref, leg, wantProduct);
+
+    // A previous close on this leg is still unconfirmed: settle it first and
+    // size off a FRESH book, never the 2s-poll state — resending against a
+    // stale book is how a short gets closed twice and ends up long.
+    let bookRows: PosRow[] = positions;
+    let credited = 0;
+    const closeKey = `${row.id}:${leg}`;
+    if (opts.reduce && unconfirmedCloseRef.current.has(closeKey)) {
+      const r = await reconcileUnconfirmedClose(closeKey);
+      if (r.state !== 'resolved') {
+        const rec = unconfirmedCloseRef.current.get(closeKey);
+        if (rec && Date.now() - rec.lastToast > 5_000) {
+          rec.lastToast = Date.now();
+          addToast('error', `${what}: close on hold`,
+            'The previous closing order is not confirmed yet — not sending another until the broker settles it');
+        }
+        return false;
+      }
+      credited = r.credited;
+      const fresh = await fetchPositionsNow();
+      if (!fresh) {
+        addToast('error', `${what} order not sent`, 'Position book unreadable after an unconfirmed close — retrying');
+        return false;
+      }
+      bookRows = fresh;
+    }
+    const pos = findPositionForRef(bookRows, broker, ref, leg, wantProduct);
     const netQty = Number(pos?.netQty ?? 0);
 
-    const pageOwn = Number(leg === 'CE' ? row.fill?.ceQty : row.fill?.peQty) || 0;
+    const pageOwn = Math.max(0, (Number(leg === 'CE' ? row.fill?.ceQty : row.fill?.peQty) || 0) - credited);
     const ownQty = pageOwn > 0 ? pageOwn : undefined;
 
     let quantity: number;
@@ -4287,9 +4470,29 @@ export default function FocusTool() {
               markOk = false;
             }
           }
-          const delta = (opts.reduce && opts.all && pageOwn > filled)
-            ? -pageOwn
-            : (opts.reduce ? -filled : filled);
+          // Exit All that FULLY filled also drops any ledger drift above what
+          // the broker held (quantity was clamped to the book). One that did
+          // not must only drop what filled: zeroing the whole leg on a
+          // rejected/unconfirmed close left a live short untracked, with no
+          // stop watching it.
+          const delta = opts.reduce
+            ? (opts.all && filled >= quantity ? -pageOwn : -filled)
+            : filled;
+          if (opts.reduce && filled < quantity) {
+            unconfirmedCloseRef.current.set(`${row.id}:${leg}`, {
+              rowId: row.id, leg,
+              orderId: j.order_id ? String(j.order_id) : null,
+              securityId: securityId ? String(securityId) : null,
+              symbol: symbol ? String(symbol) : null,
+              product: rawProduct,
+              netBefore: netQty,
+              requested: quantity,
+              filled,
+              side,
+              snap: bookedSnap ?? { netQty, buyAvg: 0, sellAvg: 0, ltp: 0 },
+              ts: Date.now(), lastCheck: Date.now(), lastToast: Date.now(),
+            });
+          }
           adjustFillQty(row.id, leg, delta,
             opts.reduce ? undefined : Number(strike), bookedDelta, openEntryPx);
           return filled >= quantity && markOk;
@@ -4476,7 +4679,11 @@ export default function FocusTool() {
    */
   function handleManualExit(row: FocusRow, leg: 'CE' | 'PE' | 'ALL') {
     return runRowAction(row.id, async () => {
-      const legs = leg === 'ALL' ? legsOf(row) : [leg];
+      // Exit All closes only legs this row holds. A leg it already closed
+      // re-resolves to the live strike, and placeLeg's no-ledger fallback
+      // would close whatever the broker shows there — another row's or a
+      // manual position — unclamped.
+      const legs = leg === 'ALL' ? legsOf(row).filter(l => rowOwnsLeg(row, l)) : [leg];
       // A single-leg Exit on the row's LAST open leg flattens the row — retire
       // it like Exit All does, or it stays 'entered' with a stale pin. Decided
       // up front: after the close, the ledger update lands asynchronously.
@@ -4518,11 +4725,12 @@ export default function FocusTool() {
     return runRowAction(row.id, async () => {
       const u = row.underlying;
       const live = rowLive[row.id];
-      const pos = leg === 'CE' ? live?.cePosition : live?.pePosition;
-      const netQty = Number(pos?.netQty ?? 0);
       const lotSize = lotSizes[u];
-      if (!lotSize) return;
-      const chip = partialCloseChips(netQty, lotSize, [pct]).find(c => c.pct === pct);
+      if (!lotSize || !live) return;
+      // Own contracts only — see the chips' own comment in the row views.
+      const own = legOwnContracts(row, leg, live);
+      if (!(own > 0)) return;
+      const chip = partialCloseChips(own, lotSize, [pct]).find(c => c.pct === pct);
       if (!chip?.enabled) return;
       await placeLeg(row, leg, { reduce: true, lots: chip.lots, awaitFill: true });
     });
@@ -4753,7 +4961,9 @@ export default function FocusTool() {
    */
   function autoExitRow(row: FocusRow, reason: string) {
     if (autoExitingRef.current.has(row.id)) return;
-    if (busyRows.has(row.id) || (legExitsInFlightRef.current.get(row.id) ?? 0) > 0) {
+    const closeUnsettled = unconfirmedCloseRef.current.has(`${row.id}:CE`)
+      || unconfirmedCloseRef.current.has(`${row.id}:PE`);
+    if (busyRows.has(row.id) || (legExitsInFlightRef.current.get(row.id) ?? 0) > 0 || closeUnsettled) {
       // Something else holds the row (a leg exit/roll, a manual order). The
       // rules re-fire this every tick while the breach lasts, so it runs once
       // the row frees up — but record it, so an SL roll finishing in the
@@ -4771,7 +4981,9 @@ export default function FocusTool() {
     addToast('error', `${isSimRow(row) ? 'SIM ' : ''}Auto-exit: ${row.underlying} ${row.id.slice(-4)}`, reason);
     // awaitFill so the ledger is confirmed-updated by the time waitRowFlat
     // reads it below.
-    Promise.all(legsOf(row).map(leg => placeLeg(row, leg, { reduce: true, all: true, awaitFill: true })))
+    // Owned legs only — same reason as handleManualExit's Exit All.
+    Promise.all(legsOf(row).filter(l => rowOwnsLeg(row, l))
+      .map(leg => placeLeg(row, leg, { reduce: true, all: true, awaitFill: true })))
       .then(async accepted => {
         // Only call the row exited once the broker's own book agrees every
         // leg is flat. Marking it exited off the order ACKs alone would
@@ -4867,6 +5079,9 @@ export default function FocusTool() {
     if (!row) return 'skipped';
     const cfg = reentryConfig(row, trigger);
     if (cfg.mode === 'off') return 'skipped';
+    // A leftover leg the row's Side no longer trades still gets its own stop
+    // (legStopReason ignores Side on purpose) — but must never be re-sold.
+    if (!legsOf(row).includes(leg)) return 'skipped';
     const u = row.underlying;
     const tag = `${isSimRow(row) ? 'SIM ' : ''}${u} ${leg}`;
     const what = trigger === 'sl' ? 'SL' : 'target';
@@ -4996,6 +5211,7 @@ export default function FocusTool() {
           if (why) addToast('error', `${tag} re-entry cancelled`, why);
         };
         if (rowOwnsLeg(row, leg)) { clear(); continue; }
+        if (!legsOf(row).includes(leg)) { clear(`Row no longer trades ${leg}`); continue; }
         const cfg = reentryConfig(row, p.trigger);
         if (cfg.mode !== p.mode) { clear('Re-entry setting changed'); continue; }
         const done = Number(p.trigger === 'sl'
@@ -5111,6 +5327,10 @@ export default function FocusTool() {
   function autoExitLeg(row: FocusRow, leg: 'CE' | 'PE', reason: string, kind: 'sl' | 'tgt' | 'cost' = 'sl') {
     const key = `${row.id}:${leg}`;
     if (autoExitingLegRef.current.has(key) || autoExitingRef.current.has(row.id)) return;
+    // A previous close on this leg is still unconfirmed — the scheduler's
+    // sweep settles it; retrying now would only be refused (and toast on
+    // every tick). The rule fires again once it is settled, if still needed.
+    if (unconfirmedCloseRef.current.has(key)) return;
     const inFlight = legExitsInFlightRef.current.get(row.id) ?? 0;
     // Busy for any reason other than the OTHER leg's auto exit (a manual
     // order, a shift, a firing re-entry) → wait for it. Busy only because the
@@ -5332,8 +5552,8 @@ export default function FocusTool() {
   // versions — and with them a stale `lookups`/`lotSizes`/`rowLive` inside
   // placeLeg, which resolves the contract an order is actually sent for.
   // Going through a ref that every render refreshes keeps orders on current data.
-  const actionsRef = useRef({ autoEnterRow, autoExitRow, placeLeg, simQuote, checkPendingReentries });
-  actionsRef.current = { autoEnterRow, autoExitRow, placeLeg, simQuote, checkPendingReentries };
+  const actionsRef = useRef({ autoEnterRow, autoExitRow, placeLeg, simQuote, checkPendingReentries, sweepUnconfirmedCloses });
+  actionsRef.current = { autoEnterRow, autoExitRow, placeLeg, simQuote, checkPendingReentries, sweepUnconfirmedCloses };
 
   /**
    * The scheduler: everything time- or account-level driven, on a 1s tick.
@@ -5373,7 +5593,8 @@ export default function FocusTool() {
         }
       }
 
-      // ── 2. Waiting cost / momentum re-entries ──
+      // ── 2. Settle unconfirmed closes; then waiting re-entries ──
+      actionsRef.current.sweepUnconfirmedCloses();
       actionsRef.current.checkPendingReentries();
 
       // ── 3. Auto-entry for armed rows ──
