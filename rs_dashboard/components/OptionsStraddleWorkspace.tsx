@@ -14,6 +14,7 @@
 import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import Link from 'next/link';
 import dynamic from 'next/dynamic';
+import TabLoading from './TabLoading';
 import {
   AreaChart, Area, LineChart, Line, BarChart, Bar, Cell, XAxis, YAxis, CartesianGrid,
   Tooltip, Legend, ResponsiveContainer, ReferenceLine,
@@ -22,9 +23,6 @@ import { cachedFetch } from '@/lib/clientCache';
 import { fmtNum } from '@/lib/numberFormat';
 import type { HistoryPoint, LiveQuotes } from '@/lib/useOptionsLiveBridge';
 
-const TabLoading = () => (
-  <div className="h-72 bg-zinc-900/60 border border-zinc-800/60 rounded-xl animate-pulse" />
-);
 const OptionsMultiStrikeTab  = dynamic(() => import('./OptionsMultiStrikeTab'), { ssr: false, loading: TabLoading });
 const OptionsPCDiffTab       = dynamic(() => import('./OptionsPCDiffTab'), { ssr: false, loading: TabLoading });
 
@@ -230,6 +228,10 @@ export default function OptionsStraddleWorkspace({
   const fetchChain = useCallback((exp: string) => {
     setChainStrikes([]);
     setChainOc({});
+    // Drop the previous expiry's series up front: if this chain fails, the
+    // charts must show the empty/retry state, not old-expiry candles under the
+    // new expiry's label.
+    setCandleData([]);
     setChainLoading(true);
 
     cachedFetch<{

@@ -13,15 +13,13 @@ import NavBar from './NavBar';
 import DataChip, { toIsoDate } from './DataChip';
 import { cachedFetch } from '@/lib/clientCache';
 import { useScriptRefresh } from '@/lib/useScriptRefresh';
-import { useOptionsLiveBridge, type BridgeStatus } from '@/lib/useOptionsLiveBridge';
+import { useOptionsLiveBridge, type BridgeStatus, type LiveQuotes } from '@/lib/useOptionsLiveBridge';
 import dynamic from 'next/dynamic';
+import TabLoading from './TabLoading';
 import type { CandleMeta, StraddleView } from './OptionsStraddleWorkspace';
 
 // Lazy-load tab components so only the active tab's code (recharts-heavy)
 // is compiled and shipped; other tabs load on first click.
-const TabLoading = () => (
-  <div className="h-72 bg-zinc-900/60 border border-zinc-800/60 rounded-xl animate-pulse" />
-);
 const OptionsSkewTab         = dynamic(() => import('./OptionsSkewTab'), { ssr: false, loading: TabLoading });
 const OptionsOITab           = dynamic(() => import('./OptionsOITab'), { ssr: false, loading: TabLoading });
 const OptionsCumulativeOITab = dynamic(() => import('./OptionsCumulativeOITab'), { ssr: false, loading: TabLoading });
@@ -81,7 +79,13 @@ export default function OptionsCharts() {
   const [candleMeta, setCandleMeta] = useState<CandleMeta>({ date: null, isToday: true });
   const [dataVersion, setDataVersion] = useState(0);
 
-  const bridge = useOptionsLiveBridge(UNDERLYING, { active: isBridgeTab, pollIntervalSec: pollInterval });
+  // While live, default the charted strike to the bridge's ATM (as the chain
+  // does when stopped), so the seed and — after Stop — the candle fetch have a
+  // strike even if the chain failed to load.
+  const onLiveQuotes = useCallback((q: LiveQuotes) => {
+    if (q.atm) setSelectedStrike(prev => prev ?? q.atm);
+  }, []);
+  const bridge = useOptionsLiveBridge(UNDERLYING, { active: isBridgeTab, pollIntervalSec: pollInterval, onLiveQuotes });
   const isLive = bridge.isLive;
   // Session date of what the bridge views chart: the live snapshot's own
   // timestamp, else the candle series' date (both from the payload).

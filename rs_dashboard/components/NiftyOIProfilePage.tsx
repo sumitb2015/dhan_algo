@@ -13,7 +13,7 @@ import {
   ChartBarBig,
   Table as TableIcon,
 } from 'lucide-react';
-import { isNseLive } from '@/lib/marketHours';
+import { useMarketLive } from '@/lib/useMarketLive';
 
 /** Placeholder for a KPI value that has not arrived yet. Sized in `ch` so it
  *  occupies roughly the width of the number it replaces and the cards do not
@@ -61,7 +61,7 @@ export default function NiftyOIProfilePage() {
   const [range, setRange] = useState<number>(10);
   const [days, setDays] = useState<number>(3);
   const [autoRefresh, setAutoRefresh] = useState<boolean>(true);
-  const [marketLive, setMarketLive] = useState<boolean>(true);
+  const marketLive = useMarketLive('NIFTY');
 
   // Monotonic request id: changing expiry/step/range/days while a fetch is in
   // flight must not let the abandoned selection's response land last and win.
@@ -103,13 +103,6 @@ export default function NiftyOIProfilePage() {
     setLoading(true);
     fetchData();
   }, [fetchData]);
-
-  useEffect(() => {
-    const update = () => setMarketLive(isNseLive(new Date()));
-    update();
-    const id = setInterval(update, 30_000);
-    return () => clearInterval(id);
-  }, []);
 
   // Outside NSE hours the OI and candles cannot change — don't re-spawn the
   // backend every 10s all night.

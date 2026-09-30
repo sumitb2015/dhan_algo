@@ -32,16 +32,44 @@ type Broker = 'dhan' | 'zerodha';
 // runs its own independent bridge process (see filesFor below), so a NIFTY
 // page's heartbeat must never keep a CRUDEOIL bridge alive (or cancel its
 // stop) just because they share a broker.
+//
+// Heartbeats are also kept per viewer. A caller may send `viewer=<id>` on GET
+// and `viewer` on stop; a stop is then cancelled only by heartbeats from OTHER
+// viewers, so a page that keeps polling after its own explicit Stop (the
+// Options page's badge) no longer cancels the stop it asked for. Callers that
+// send no id share the anonymous slot, which always counts as "another
+// viewer" — the guard's original behaviour, unchanged for them.
 const STOP_GRACE_MS = 7000;
-const lastSeenByKey: Record<string, number> = {};
+const ANON_VIEWER = '';
+const VIEWER_TTL_MS = 60_000; // a heartbeat older than this can't affect a 7s grace window
+const seenByKey: Record<string, Map<string, number>> = {};
 const pendingStopByKey: Record<string, ReturnType<typeof setTimeout>> = {};
 
 function bridgeKey(broker: Broker, underlying: string): string {
   return `${broker}:${underlying}`;
 }
 
-function markSeen(broker: Broker, underlying: string): void {
-  lastSeenByKey[bridgeKey(broker, underlying)] = Date.now();
+function normalizeViewer(value: unknown): string {
+  return typeof value === 'string' ? value.slice(0, 64) : ANON_VIEWER;
+}
+
+function markSeen(broker: Broker, underlying: string, viewer: string = ANON_VIEWER): void {
+  const key = bridgeKey(broker, underlying);
+  const seen = (seenByKey[key] ??= new Map());
+  const now = Date.now();
+  seen.set(viewer, now);
+  for (const [v, t] of seen) if (now - t > VIEWER_TTL_MS) seen.delete(v);
+}
+
+/** True if a viewer other than `requester` polled this bridge after `since`.
+ *  Anonymous heartbeats always count, whoever asked for the stop. */
+function seenByOtherViewerSince(key: string, since: number, requester: string): boolean {
+  const seen = seenByKey[key];
+  if (!seen) return false;
+  for (const [v, t] of seen) {
+    if (t > since && (v === ANON_VIEWER || v !== requester)) return true;
+  }
+  return false;
 }
 
 function cancelPendingStop(broker: Broker, underlying: string): void {
@@ -55,14 +83,13 @@ function cancelPendingStop(broker: Broker, underlying: string): void {
 
 /** Schedules the stop-trigger write instead of performing it inline, so a
  *  heartbeat from another still-mounted viewer (see above) can cancel it. */
-function scheduleStop(broker: Broker, underlying: string): void {
+function scheduleStop(broker: Broker, underlying: string, requester: string = ANON_VIEWER): void {
   cancelPendingStop(broker, underlying);
   const key = bridgeKey(broker, underlying);
   const requestedAt = Date.now();
   pendingStopByKey[key] = setTimeout(() => {
     delete pendingStopByKey[key];
-    const lastSeen = lastSeenByKey[key] ?? 0;
-    if (lastSeen > requestedAt) return; // another viewer polled since — stay up
+    if (seenByOtherViewerSince(key, requestedAt, requester)) return; // another viewer polled since — stay up
     try { fs.writeFileSync(filesFor(broker, underlying).stop, ''); } catch { /* best effort */ }
   }, STOP_GRACE_MS);
 }
@@ -181,7 +208,8 @@ export async function GET(request: NextRequest) {
   const underlying     = normalizeUnderlying(request.nextUrl.searchParams.get('underlying'));
   const includeHistory = request.nextUrl.searchParams.get('history') === '1';
   const checkPid       = request.nextUrl.searchParams.get('checkPid') === '1';
-  markSeen(broker, underlying); // any GET is a live viewer — see the stop-guard block above
+  // Any GET is a live viewer — see the stop-guard block above.
+  markSeen(broker, underlying, normalizeViewer(request.nextUrl.searchParams.get('viewer') ?? undefined));
   const files = filesFor(broker, underlying);
 
   const quotes  = readJson(files.quotes)  as Record<string, unknown> | null;
@@ -222,8 +250,9 @@ export async function POST(request: NextRequest) {
     const brokers: Broker[] = Array.isArray(body.brokers)
       ? (body.brokers as unknown[]).map(normalizeBroker)
       : [normalizeBroker(body.broker)];
+    const viewer = normalizeViewer(body.viewer);
     for (const broker of brokers) {
-      scheduleStop(broker, underlying);
+      scheduleStop(broker, underlying, viewer);
     }
     return NextResponse.json({ success: true, message: 'Stop scheduled', brokers, underlying });
   }
@@ -244,7 +273,7 @@ export async function POST(request: NextRequest) {
     // cleanup — cancel it outright rather than waiting for a heartbeat to
     // race it, and mark this (broker, underlying) seen immediately.
     cancelPendingStop(broker, underlying);
-    markSeen(broker, underlying);
+    markSeen(broker, underlying, normalizeViewer(body.viewer));
 
     // Everything below is a check-then-act on the status file, and a freshly
     // spawned bridge needs a second or two before it writes one. Concurrent starts

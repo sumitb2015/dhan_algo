@@ -7,7 +7,7 @@ import { TrendingOiTable } from '@/components/TrendingOiTable';
 import { TrendingOiChartModal } from '@/components/TrendingOiChartModal';
 import type { TrendingOiResponse } from '@/app/api/trending-oi/route';
 import { RefreshCw, ChartColumnStacked, Search, ChevronDown, BarChart3 } from 'lucide-react';
-import { isNseLive } from '@/lib/marketHours';
+import { useMarketLive } from '@/lib/useMarketLive';
 
 const INTERVALS = ['1', '3', '5', '10', '15'] as const;
 type Mode = 'live' | 'historical';
@@ -30,7 +30,7 @@ export default function TrendingOiPage() {
   const [interval_, setInterval_] = useState<string>('3');
   const [mode, setMode] = useState<Mode>('live');
   const [historicalDate, setHistoricalDate] = useState<string>(yesterdayIso);
-  const [marketLive, setMarketLive] = useState(false);
+  const marketLive = useMarketLive('NIFTY', false);
 
   // null = "let the server pick the ATM band". Adopting the server's band into state instead
   // would change the query key on first response and re-spawn the whole ~25s backend run.
@@ -47,13 +47,6 @@ export default function TrendingOiPage() {
 
   const initialLoading = loading && !data;
   const refreshing = loading && !!data;
-
-  useEffect(() => {
-    const update = () => setMarketLive(isNseLive(new Date()));
-    update();
-    const id = setInterval(update, 30_000);
-    return () => clearInterval(id);
-  }, []);
 
   useEffect(() => {
     function handleClickOutside(e: MouseEvent) {
@@ -172,7 +165,8 @@ export default function TrendingOiPage() {
   }, [activeSelectedStrikes]);
 
   // Session date of the newest bucket — the payload's own date (DD-MM-YYYY).
-  const dataDate = toIsoDate(rows[rows.length - 1]?.date);
+  // trending_oi_fetch.py returns rows newest-first (rows.reverse()).
+  const dataDate = toIsoDate(rows[0]?.date);
 
   const extraStrikeCount = activeSelectedStrikes.length > 2 ? activeSelectedStrikes.length - 2 : 0;
   const filteredAvailableStrikes = availableStrikes.filter((stk) => stk.toString().includes(strikeSearch.trim()));

@@ -50,33 +50,45 @@ export interface BridgeStatus {
 }
 
 const INACTIVE_POLL_MS = 30_000;
-// The route only honours a stop if no GET for that bridge lands within its
-// STOP_GRACE_MS (7s) — any GET counts as "another viewer still reading" (see the
-// multi-viewer stop guard in app/api/options/live/route.ts). So after Stop this
-// page must stay silent for longer than that, or its own status poll cancels
-// the stop it just asked for. If another page really is reading the bridge, its
-// heartbeat keeps it up and the badge honestly stays RUNNING.
-const STOP_QUIET_MS = 8_500;
+// The route carries out a stop only after its 7s multi-viewer grace window
+// (app/api/options/live/route.ts). This page identifies itself with a viewer id
+// on every GET and on stop, so its own status polls never cancel its own Stop;
+// only another page still reading the bridge keeps it up. This delay is just
+// when to refresh the badge after Stop — past the grace window plus exit time.
+const STOP_SETTLE_MS = 8_500;
+
+function makeViewerId(): string {
+  return typeof crypto !== 'undefined' && 'randomUUID' in crypto
+    ? crypto.randomUUID()
+    : `v-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+}
 
 export function useOptionsLiveBridge(
   underlying: string,
-  { active, pollIntervalSec }: { active: boolean; pollIntervalSec: number },
+  { active, pollIntervalSec, onLiveQuotes }: {
+    active: boolean;
+    pollIntervalSec: number;
+    /** Called with each snapshot read while the bridge is RUNNING. */
+    onLiveQuotes?: (quotes: LiveQuotes) => void;
+  },
 ) {
   const [status, setStatus]   = useState<BridgeStatus>({ status: 'STOPPED' });
   const [quotes, setQuotes]   = useState<LiveQuotes | null>(null);
   const [history, setHistory] = useState<HistoryPoint[]>([]);
   const [busy, setBusy]       = useState(false);
+  const [viewer] = useState(makeViewerId);
+
+  const onLiveQuotesRef = useRef(onLiveQuotes);
+  useEffect(() => { onLiveQuotesRef.current = onLiveQuotes; });
 
   // Monotonic request id: a slow ?history=1 read must not land after a newer
   // status-only read (or after a stop) and resurrect old state.
   const seq = useRef(0);
-  const quietUntil = useRef(0);
 
   const poll = useCallback(async (withHistory: boolean) => {
-    if (Date.now() < quietUntil.current) return; // see STOP_QUIET_MS
     const id = ++seq.current;
     try {
-      const qs = `checkPid=1&underlying=${underlying}${withHistory ? '&history=1' : ''}`;
+      const qs = `checkPid=1&underlying=${underlying}&viewer=${encodeURIComponent(viewer)}${withHistory ? '&history=1' : ''}`;
       const res = await fetch(`/api/options/live?${qs}`, { cache: 'no-store' });
       const j = (await res.json()) as {
         success: boolean;
@@ -86,10 +98,13 @@ export function useOptionsLiveBridge(
       };
       if (id !== seq.current || !j.success) return;
       setStatus(j.status);
-      if (j.quotes?.strikes && Object.keys(j.quotes.strikes).length) setQuotes(j.quotes);
+      if (j.quotes?.strikes && Object.keys(j.quotes.strikes).length) {
+        setQuotes(j.quotes);
+        if (j.status?.status === 'RUNNING') onLiveQuotesRef.current?.(j.quotes);
+      }
       if (withHistory && j.history?.history?.length) setHistory(j.history.history);
     } catch { /* transient — next tick retries */ }
-  }, [underlying]);
+  }, [underlying, viewer]);
 
   const activeRef = useRef(active);
   useEffect(() => { activeRef.current = active; }, [active]);
@@ -117,15 +132,14 @@ export function useOptionsLiveBridge(
       await fetch('/api/options/live', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ action: 'start', underlying, expiry }),
+        body: JSON.stringify({ action: 'start', underlying, expiry, viewer }),
       });
-      quietUntil.current = 0;
       setHistory([]);
       setTimeout(() => poll(activeRef.current), 800);
     } finally {
       setBusy(false);
     }
-  }, [underlying, poll]);
+  }, [underlying, viewer, poll]);
 
   const stop = useCallback(async () => {
     setBusy(true);
@@ -133,14 +147,13 @@ export function useOptionsLiveBridge(
       await fetch('/api/options/live', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ action: 'stop', underlying }),
+        body: JSON.stringify({ action: 'stop', underlying, viewer }),
       });
-      quietUntil.current = Date.now() + STOP_QUIET_MS;
-      setTimeout(() => poll(activeRef.current), STOP_QUIET_MS + 200);
+      setTimeout(() => poll(activeRef.current), STOP_SETTLE_MS);
     } finally {
       setBusy(false);
     }
-  }, [underlying, poll]);
+  }, [underlying, viewer, poll]);
 
   return { status, quotes, history, busy, isLive: status.status === 'RUNNING', start, stop };
 }

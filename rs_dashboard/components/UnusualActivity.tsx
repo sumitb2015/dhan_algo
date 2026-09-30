@@ -3,7 +3,7 @@
 import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import NavBar from '@/components/NavBar';
 import DataChip from '@/components/DataChip';
-import { isUnderlyingLive } from '@/lib/marketHours';
+import { useMarketLive } from '@/lib/useMarketLive';
 import { fmtNum } from '@/lib/numberFormat';
 import {
   AlertTriangle,
@@ -118,7 +118,7 @@ export default function UnusualActivity() {
   const [showPlaybook, setShowPlaybook] = useState(false);
   const [playbookTab, setPlaybookTab] = useState<'setups' | 'matrix' | 'metrics' | 'checklist'>('setups');
 
-  const [marketLive, setMarketLive] = useState(true);
+  const marketLive = useMarketLive(underlying);
 
   // Monotonic request id. A scan takes several seconds; switching underlying
   // mid-scan must not let the old response land last — it would show the old
@@ -154,13 +154,6 @@ export default function UnusualActivity() {
   useEffect(() => {
     fetchData(underlying, expiry);
   }, [underlying, expiry, fetchData]);
-
-  useEffect(() => {
-    const update = () => setMarketLive(isUnderlyingLive(underlying, new Date()));
-    update();
-    const id = setInterval(update, 30_000);
-    return () => clearInterval(id);
-  }, [underlying]);
 
   // Each poll spawns a Python chain scan — pointless once the session is closed.
   useEffect(() => {

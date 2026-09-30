@@ -7,11 +7,25 @@ import { PROJECT_ROOT, runPythonJson, dedupe } from '@/lib/pyExec';
 const DEBUG_DIR = path.join(PROJECT_ROOT, 'debug');
 const BUILD_SCRIPT = path.join(PROJECT_ROOT, 'scripts', 'tools', 'build_oi_snapshots.py');
 
+// build_oi_snapshots.py's own CONFIGS keys — never spawn it for anything else
+// (the query string is caller-controlled; argparse would reject it anyway, but
+// only after a process spawn per distinct value).
+const BUILDABLE_UNDERLYINGS = new Set(['NIFTY', 'BANKNIFTY', 'SENSEX', 'CRUDEOIL', 'CRUDEOILM']);
+const MAX_BUILD_WINGS = 50;
+
 // A date with no data (holiday, weekend, pre-listing) makes the builder fail
 // every time. IV Charts polls every 30s, so without this each poll would spawn
-// another doomed build.
-const BUILD_FAIL_TTL_MS = 5 * 60_000;
-const buildFailedAt = new Map<string, number>();
+// another doomed build. Today's date gets a short TTL: its failure is more
+// likely transient (Dhan 429, expired token, timeout) and its data can appear.
+const BUILD_FAIL_TTL_PAST_MS  = 5 * 60_000;
+const BUILD_FAIL_TTL_TODAY_MS = 60_000;
+const buildFailedAt = new Map<string, { at: number; ttl: number }>();
+
+function recordBuildFailure(key: string, ttl: number): void {
+  const now = Date.now();
+  for (const [k, v] of buildFailedAt) if (now - v.at > v.ttl) buildFailedAt.delete(k);
+  buildFailedAt.set(key, { at: now, ttl });
+}
 
 function todayIST(): string {
   const now = new Date(Date.now() + 5.5 * 60 * 60 * 1000);
@@ -130,20 +144,23 @@ export async function GET(request: NextRequest) {
   // If CSV does not exist for this underlying, attempt on-demand reconstruction via build_oi_snapshots.py.
   // Async + argv (no shell): execSync blocked the event loop for up to 25s and
   // interpolated query-string values into a shell command.
-  if (!csvPath && Number.isFinite(wings)) {
+  if (!csvPath && BUILDABLE_UNDERLYINGS.has(underlying)
+      && Number.isInteger(wings) && wings >= 1 && wings <= MAX_BUILD_WINGS) {
     const buildKey = `${underlying}:${date}:${wings}`;
-    const failedAt = buildFailedAt.get(buildKey);
-    if (!failedAt || Date.now() - failedAt > BUILD_FAIL_TTL_MS) {
+    const failTtl = date === todayIST() ? BUILD_FAIL_TTL_TODAY_MS : BUILD_FAIL_TTL_PAST_MS;
+    const failed = buildFailedAt.get(buildKey);
+    if (!failed || Date.now() - failed.at > failed.ttl) {
       try {
         await dedupe(`iv-history-build:${buildKey}`, () =>
           runPythonJson(BUILD_SCRIPT, ['--underlying', underlying, '--date', date, '--wings', String(wings)], 25_000));
-        csvPath = resolveCsvPath(underlying, date);
-        if (csvPath) buildFailedAt.delete(buildKey);
-        else buildFailedAt.set(buildKey, Date.now());
       } catch (buildErr) {
-        buildFailedAt.set(buildKey, Date.now());
         console.warn(`[iv-history] On-demand snapshot builder failed for ${underlying} on ${date}:`, buildErr);
       }
+      // Re-check the disk either way: a run can write the CSV and still
+      // "fail" here (non-zero exit, or a non-JSON last stdout line).
+      csvPath = resolveCsvPath(underlying, date);
+      if (csvPath) buildFailedAt.delete(buildKey);
+      else recordBuildFailure(buildKey, failTtl);
     }
   }
 
