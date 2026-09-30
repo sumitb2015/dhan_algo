@@ -1,10 +1,11 @@
 'use client';
 
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
-import { ArrowDownUp, Binoculars, ChevronDown, ChevronRight, Loader2, Play, Plus, Save, Square, X } from 'lucide-react';
+import { ArrowDownUp, Binoculars, ChevronDown, ChevronRight, CircleHelp, Loader2, Play, Plus, Save, Square, X } from 'lucide-react';
 import NavBar from '@/components/NavBar';
 import ResultsTable, { type SeenInfo } from '@/components/optionsScreener/ResultsTable';
 import ContractModal from '@/components/optionsScreener/ContractModal';
+import HelpModal from '@/components/optionsScreener/HelpModal';
 import { FOCUS_RING, fmtExpiry, fmtIstTime } from '@/components/optionsScreener/format';
 import {
   METRICS,
@@ -181,7 +182,7 @@ interface CollectorStatus {
 // page
 // ---------------------------------------------------------------------------
 
-export default function OptionsScreener() {
+export default function OptionsScreener({ helpMarkdown = '' }: { helpMarkdown?: string }) {
   const mounted = useMounted();
   if (!mounted) {
     return (
@@ -192,10 +193,11 @@ export default function OptionsScreener() {
       </div>
     );
   }
-  return <ScreenerInner />;
+  return <ScreenerInner helpMarkdown={helpMarkdown} />;
 }
 
-function ScreenerInner() {
+function ScreenerInner({ helpMarkdown }: { helpMarkdown: string }) {
+  const [helpOpen, setHelpOpen] = useState(false);
   const [prefs, setPrefsState] = useState<Prefs>(loadPrefs);
   const setPrefs = useCallback((patch: Partial<Prefs>) => {
     setPrefsState((prev) => {
@@ -537,6 +539,10 @@ function ScreenerInner() {
             {collectorBusy ? <Loader2 className="w-3 h-3 animate-spin" /> : collectorRunning ? <Square className="w-3 h-3" /> : <Play className="w-3 h-3" />}
             {collectorRunning ? 'Stop' : 'Start'}
           </button>
+          <button type="button" onClick={() => setHelpOpen(true)}
+            className={`flex items-center gap-1 px-2 py-1 rounded-md text-[11px] font-semibold border border-zinc-700 text-zinc-300 hover:border-zinc-500 hover:text-zinc-100 ${FOCUS_RING}`}>
+            <CircleHelp className="w-3 h-3" /> How to use
+          </button>
           <span className="text-[10px] font-mono font-bold uppercase tracking-wider text-amber-300 px-1.5 py-0.5 rounded bg-amber-500/10 border border-amber-500/20">
             DATA: {data?.dataDate ?? '—'}
           </span>
@@ -873,6 +879,8 @@ function ScreenerInner() {
           (Black-Scholes; Black-76 for MCX). Click any row for all look-back windows and a Dhan order ticket — orders are real.
         </p>
       </div>
+
+      {helpOpen && <HelpModal markdown={helpMarkdown} onClose={() => setHelpOpen(false)} />}
 
       {selected && (
         <ContractModal
