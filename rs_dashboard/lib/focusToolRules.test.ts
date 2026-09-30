@@ -20,7 +20,7 @@ import {
   nextOpenedTs, isGhostDropProtected, GHOST_DROP_GRACE_MS,
   isSimRow, simLegPosition,
   legPinnedStrike, slRollStrike, evaluateReentry, costStopReason, legOwnEntry, DEFAULT_SL_ROLL_MAX,
-  reentryWindowClosed, pendingReentryLevel, pendingReentryHit, legTargetReason, costReentryBasis, awaitingMomentumQuote,
+  reentryWindowClosed, pendingReentryLevel, pendingReentryHit, legTargetReason, costReentryBasis, awaitingMomentumQuote, legTargetLevel,
   type RowLive, type PosRow, type WorkerHold,
 } from './focusToolRules.ts';
 import type { FocusRow } from './focusToolRows.ts';
@@ -582,4 +582,21 @@ test('awaitingMomentumQuote: only a momentum re-entry with no reference premium 
   assert.equal(awaitingMomentumQuote({ mode: 'cost', price: 0 }), false);
   // A price-0 pending never fires on its own.
   assert.equal(pendingReentryHit({ price: 0, dir: 'down' }, 150), false);
+});
+
+test('legTargetLevel / legTargetReason in points', () => {
+  assert.equal(legTargetLevel(100, '30', 'pts'), 70);
+  assert.equal(legTargetLevel(100, '30', 'pct'), 70);
+  assert.equal(legTargetLevel(100, '30', undefined), 70);       // missing unit = %
+  assert.equal(legTargetLevel(200, '30', 'pct'), 140);
+  assert.equal(legTargetLevel(200, '30', 'pts'), 170);
+  // Off: blank, 0, no entry, or a level at/below zero.
+  assert.equal(legTargetLevel(100, '', 'pts'), null);
+  assert.equal(legTargetLevel(0, '30', 'pts'), null);
+  assert.equal(legTargetLevel(100, '100', 'pts'), null);
+  assert.equal(legTargetLevel(100, '100', 'pct'), null);
+  const c = { ceLtp: 170, peLtp: 0, ceQty: -75, peQty: 0, ceEntry: 200, peEntry: 0 };
+  const r = row({ ceTgtPct: '30', legTgtUnit: 'pts', fill: { ceStrike: 24000, peStrike: null, ceQty: 75, peQty: 0, ceEntry: 200, ts: '' } });
+  assert.match(legTargetReason(r, 'CE', live(c)) ?? '', /CE target 30 pts hit/);
+  assert.equal(legTargetReason(r, 'CE', live({ ...c, ceLtp: 171 })), null);
 });

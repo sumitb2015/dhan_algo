@@ -236,12 +236,15 @@ export interface FocusRow {
    */
   noReEntryAfter?: string;
   /**
-   * Leg-wise target, % of this leg's own entry premium: the leg exits when
-   * its premium has decayed by this much (entry × (1 − pct/100)). Blank / 0
-   * = off.
+   * Leg-wise target: the leg exits once its premium has decayed by this much
+   * from its own entry — a % (entry × (1 − v/100)) or points (entry − v), per
+   * legTgtUnit. Blank / 0 = off. (Named for the original %-only version;
+   * holds points when legTgtUnit is 'pts'.)
    */
   ceTgtPct?: string;
   peTgtPct?: string;
+  /** Unit of ceTgtPct / peTgtPct, for both legs. Missing = '%'. */
+  legTgtUnit?: 'pct' | 'pts';
   /**
    * SL to cost: when one leg's own SL × hits, the leg still open gets a stop
    * at its own entry premium (break-even on that leg). Missing = off.

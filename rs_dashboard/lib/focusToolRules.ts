@@ -561,24 +561,40 @@ export function pendingReentryLevel(
 }
 
 /**
- * This leg's own target breach, or null: premium decayed to
- * entry × (1 − pct/100), entry being this row's own (legOwnEntry). Only while
- * this row owns an open leg; blank / 0 / ≥100 means off.
+ * The premium a leg target fires at: entry × (1 − v/100) in '%' mode, or
+ * entry − v in 'pts' mode. Null when off (blank / 0), when there is no entry,
+ * or when the target would need the premium at or below zero (% ≥ 100, or
+ * points ≥ entry). Shared by legTargetReason and the level display.
+ */
+export function legTargetLevel(
+  entry: number, value: string | number | undefined, unit: FocusRow['legTgtUnit'],
+): number | null {
+  const v = Number(value);
+  if (!(v > 0) || !(entry > 0)) return null;
+  const level = unit === 'pts' ? entry - v : entry * (1 - v / 100);
+  return level > 0 ? level : null;
+}
+
+/**
+ * This leg's own target breach, or null: premium decayed to legTargetLevel,
+ * entry being this row's own (legOwnEntry). Only while this row owns an open
+ * leg.
  */
 export function legTargetReason(
-  row: Pick<FocusRow, 'ceTgtPct' | 'peTgtPct' | 'fill'>,
+  row: Pick<FocusRow, 'ceTgtPct' | 'peTgtPct' | 'legTgtUnit' | 'fill'>,
   leg: 'CE' | 'PE',
   live: RowLive,
   workerHold?: WorkerHold,
 ): string | null {
   if (legOwnContracts(row, leg, live, workerHold) <= 0) return null;
-  const pct = Number(leg === 'CE' ? row.ceTgtPct : row.peTgtPct);
-  if (!(pct > 0) || pct >= 100) return null;
+  const value = leg === 'CE' ? row.ceTgtPct : row.peTgtPct;
   const entry = legOwnEntry(row, leg, live);
+  const level = legTargetLevel(entry, value, row.legTgtUnit);
+  if (level == null) return null;
   const now = (leg === 'CE' ? live.ltpCe : live.ltpPe) ?? 0;
-  const level = entry * (1 - pct / 100);
-  if (entry > 0 && now > 0 && now <= level) {
-    return `${leg} target ${pct}% hit (premium ${now.toFixed(2)} ≤ ${level.toFixed(2)}, entry ${entry.toFixed(2)})`;
+  if (now > 0 && now <= level) {
+    const what = row.legTgtUnit === 'pts' ? `${Number(value)} pts` : `${Number(value)}%`;
+    return `${leg} target ${what} hit (premium ${now.toFixed(2)} ≤ ${level.toFixed(2)}, entry ${entry.toFixed(2)})`;
   }
   return null;
 }

@@ -32,7 +32,7 @@ import {
   isSimRow, simLegPosition,
   legPinnedStrike, costStopReason, legOwnEntry, slRollStrike, DEFAULT_SL_ROLL_MAX,
   reentryConfig, evaluateReentry, reentryWindowClosed, pendingReentryLevel, pendingReentryHit, legTargetReason, costReentryBasis,
-  awaitingMomentumQuote, MOMENTUM_QUOTE_WAIT_MS,
+  awaitingMomentumQuote, MOMENTUM_QUOTE_WAIT_MS, legTargetLevel,
   type PosRow, type RowLive,
 } from '@/lib/focusToolRules';
 import { computeRowPnl, mtmForQty, shiftMayReopen, canMarkMtm, shiftCloseConfirmed, rowDisplayBookedPnl, putCallRatio, valuePutCallRatio, pickOpenInterest } from '@/lib/focusToolPnl';
@@ -905,14 +905,16 @@ const REENTRY_HELP: Record<FocusReentryMode, string> = {
   off: 'Leg stays closed',
   asap: 'Re-sell at once at the strike the row resolves to now (ATM ± offset / ₹ target)',
   otm: 'Re-sell at once, N strikes further OTM than the strike that closed',
-  cost: 'Wait on the same strike until its premium returns to the closed leg\'s entry, then re-sell',
-  momentum: 'Pick the current strike, then re-sell once its premium moves the set points',
+  cost: 'Wait on the same strike until its premium returns to that strike\'s initial entry this cycle, then re-sell',
+  momentum: 'Pick the strike the row resolves to when the leg closes, then re-sell once its premium moves the set '
+    + 'points (Mom ↓/↑, shared by SL and target re-entries). Points only, set here — unlike AlgoTest it does not '
+    + 'reuse an entry momentum setting. If that strike has no premium yet it waits up to 15s for one, then cancels',
 };
 const REENTRY_MAX_OPTIONS = [1, 2, 3, 4, 5, 10, 20];
 
 /**
  * Leg exits and what follows them — AlgoTest-style "Re-Entry on SL / Tgt"
- * (sell side only), No re-entry after, leg target %, and SL → cost.
+ * (sell side only), No re-entry after, leg target (% or points), and SL → cost.
  *
  * Mode/max/direction are selects and toggles: each click is a complete
  * choice and commits at once. Target % and momentum points are free-typed,
@@ -937,6 +939,7 @@ function LegReentryControls({ row, onUpdate, onCancelPending, compact = false }:
   const anyOtm = sl.mode === 'otm';
   const anyMom = sl.mode === 'momentum' || tgt.mode === 'momentum';
   const anyOn = sl.mode !== 'off' || tgt.mode !== 'off';
+  const tgtUnitWord = row.legTgtUnit === 'pts' ? 'many points' : '%';
 
   const modeSelect = (t: 'sl' | 'tgt') => {
     const c = t === 'sl' ? sl : tgt;
@@ -944,7 +947,7 @@ function LegReentryControls({ row, onUpdate, onCancelPending, compact = false }:
       ? ['off', 'asap', 'otm', 'cost', 'momentum']
       : ['off', 'asap', 'cost', 'momentum'];
     return (
-      <label className={lbl} title={`${t === 'sl' ? 'After a leg SL × (CE × / PE ×)' : 'After a leg target %'}: ${REENTRY_HELP[c.mode]}`}>
+      <label className={lbl} title={`${t === 'sl' ? 'After a leg SL × (CE × / PE ×)' : 'After a leg target (CE Tgt / PE Tgt)'}: ${REENTRY_HELP[c.mode]}`}>
         {t === 'sl' ? 'RE on SL' : 'RE on Tgt'}
         <select value={c.mode} aria-label={`Re-entry on ${t === 'sl' ? 'stop loss' : 'target'}`}
           onChange={e => {
@@ -988,16 +991,22 @@ function LegReentryControls({ row, onUpdate, onCancelPending, compact = false }:
         {modeSelect('tgt')}
       </div>
       <div className="flex flex-wrap items-center gap-2">
-        <label className={lbl} title="CE leg target: exit CE alone once its premium has decayed this % from its own entry. Blank = off">
-          CE Tgt%
+        <label className={lbl} title={`CE leg target: exit CE alone once its premium has decayed this ${tgtUnitWord} from its own entry. Blank = off`}>
+          CE Tgt
           <RuleNumInput value={row.ceTgtPct ?? ''} onCommit={v => onUpdate({ ceTgtPct: v })} placeholder="off"
             className={cn('w-9 h-5 text-center', txt)} />
         </label>
-        <label className={lbl} title="PE leg target: exit PE alone once its premium has decayed this % from its own entry. Blank = off">
-          PE Tgt%
+        <label className={lbl} title={`PE leg target: exit PE alone once its premium has decayed this ${tgtUnitWord} from its own entry. Blank = off`}>
+          PE Tgt
           <RuleNumInput value={row.peTgtPct ?? ''} onCommit={v => onUpdate({ peTgtPct: v })} placeholder="off"
             className={cn('w-9 h-5 text-center', txt)} />
         </label>
+        <select value={row.legTgtUnit ?? 'pct'} aria-label="Leg target unit"
+          title="Leg targets as a % of the leg's own entry, or as premium points below it (both legs)"
+          onChange={e => onUpdate({ legTgtUnit: e.target.value as 'pct' | 'pts' })} className={sel}>
+          <option value="pct">%</option>
+          <option value="pts">pts</option>
+        </select>
         {anyOtm && (
           <label className={lbl} title="RE-OTM: strikes further OTM than the strike that closed (CE up, PE down)">
             OTM
@@ -1008,7 +1017,7 @@ function LegReentryControls({ row, onUpdate, onCancelPending, compact = false }:
           </label>
         )}
         {anyMom && (
-          <label className={lbl} title="RE-Momentum: points the new strike's premium must move from where it was when the leg closed">
+          <label className={lbl} title="RE-Momentum: points the new strike's premium must move from its first premium after the leg closed. One direction and size for both SL and target re-entries; points only">
             Mom
             <select value={row.reMomentumDir ?? 'down'} aria-label="Momentum direction"
               onChange={e => onUpdate({ reMomentumDir: e.target.value as 'down' | 'up' })} className={sel}>
@@ -1030,7 +1039,7 @@ function LegReentryControls({ row, onUpdate, onCancelPending, compact = false }:
           </span>
         )}
         <SwitchToggle checked={!!row.slToCost} onChange={v => onUpdate({ slToCost: v })} label="SL→Cost"
-          title="When one leg's own SL × hits, move the other leg's stop to its entry premium (exit it if it returns to cost)" />
+          title="When one leg's own SL × hits, move the other leg's stop to its entry premium (exit it if it returns to cost). An exit at cost never re-enters" />
       </div>
       {(f?.cePending || f?.pePending) && (
         <div className="flex flex-wrap items-center gap-1.5">
@@ -1059,9 +1068,10 @@ function LegSlLevels({
     && rowOwnsLeg(row, leg);
   const costLevel = costArmed ? legOwnEntry(row, leg, live) : 0;
   // Leg target level (display-only; legTargetReason is the authority).
-  const tgtPct = Number(leg === 'CE' ? row.ceTgtPct : row.peTgtPct);
-  const tgtEntry = tgtPct > 0 && tgtPct < 100 && legOwnContracts(row, leg, live) > 0 ? legOwnEntry(row, leg, live) : 0;
-  const tgtLevel = tgtEntry > 0 ? tgtEntry * (1 - tgtPct / 100) : 0;
+  const tgtValue = Number(leg === 'CE' ? row.ceTgtPct : row.peTgtPct);
+  const tgtEntry = legOwnContracts(row, leg, live) > 0 ? legOwnEntry(row, leg, live) : 0;
+  const tgtLevel = legTargetLevel(tgtEntry, tgtValue, row.legTgtUnit) ?? 0;
+  const tgtWhat = row.legTgtUnit === 'pts' ? `${tgtValue} pts` : `${tgtValue}%`;
   if (legLevel == null && pairLevel == null && !(costLevel > 0) && !(tgtLevel > 0)) return null;
   const nowLeg = (leg === 'CE' ? live.ltpCe : live.ltpPe) ?? null;
   const nowPair = live.entryPremium > 0
@@ -1097,7 +1107,7 @@ function LegSlLevels({
       {tgtLevel > 0 && (
         <span
           className="text-[9px] font-mono font-bold tabular-nums text-sky-300"
-          title={`${leg} target: exits when this leg's premium decays to ${tgtLevel.toFixed(2)} (entry ${tgtEntry.toFixed(2)} − ${tgtPct}%)`}
+          title={`${leg} target: exits when this leg's premium decays to ${tgtLevel.toFixed(2)} (entry ${tgtEntry.toFixed(2)} − ${tgtWhat})`}
         >
           {leg} tgt {tgtLevel.toFixed(2)}
         </span>
@@ -5385,7 +5395,7 @@ export default function FocusTool() {
    *  - 'sl'   — the leg's own SL ×. Once the close is confirmed: arms
    *             SL-to-cost on the other leg (row.slToCost), then runs the
    *             SL re-entry (row.reSlMode). Both opt-in.
-   *  - 'tgt'  — the leg's own target %. Runs the target re-entry
+   *  - 'tgt'  — the leg's own target (% or points). Runs the target re-entry
    *             (row.reTgtMode); never arms SL-to-cost.
    *  - 'cost' — the SL-to-cost stop itself. Just closes; never re-enters or
    *             arms anything, so the features can't feed each other.
