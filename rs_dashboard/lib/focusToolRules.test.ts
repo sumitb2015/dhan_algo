@@ -19,6 +19,7 @@ import {
   stopPremium, legStopPremium, pairStopPremium, legOwnContracts,
   nextOpenedTs, isGhostDropProtected, GHOST_DROP_GRACE_MS,
   isSimRow, simLegPosition,
+  legPinnedStrike, slRollStrike, evaluateSlRoll, costStopReason, legOwnEntry, DEFAULT_SL_ROLL_MAX,
   type RowLive, type PosRow, type WorkerHold,
 } from './focusToolRules.ts';
 import type { FocusRow } from './focusToolRows.ts';
@@ -430,4 +431,65 @@ test('a sim leg reads as this row\'s own short to the P&L and exit rules', () =>
   const live = { cePosition: pos, pePosition: null } as RowLive;
   assert.equal(legOwnContracts(row, 'CE', live), 65);
   assert.equal(legsFlat(live), false);
+});
+
+// ── Leg SL follow-ups (TS-only: the retired Python worker never had these) ────
+
+test('legPinnedStrike: a closed leg releases its pin while the other stays open', () => {
+  // The straddle incident: CE stopped out at 22750, PE still open.
+  const r = row({ fill: { ceStrike: 22750, peStrike: 22750, ceQty: 0, peQty: 75, ts: '' } });
+  assert.equal(legPinnedStrike(r, 'CE'), null);
+  assert.equal(legPinnedStrike(r, 'PE'), 22750);
+  assert.equal(legPinnedStrike(row({}), 'CE'), null);
+});
+
+test('slRollStrike: OTM is up for CE, down for PE', () => {
+  assert.equal(slRollStrike('CE', 22750, 1, 50), 22800);
+  assert.equal(slRollStrike('PE', 22750, 1, 50), 22700);
+  assert.equal(slRollStrike('CE', 50000, 2, 100), 50200);
+});
+
+test('evaluateSlRoll gates', () => {
+  const ctx = { nowHm: '10:00', product: 'INTRADAY' as const, groupEnabled: true, rollsDone: 0 };
+  assert.equal(evaluateSlRoll(row({ slRollStrikes: 0 }), ctx).enter, false);
+  assert.equal(evaluateSlRoll(row({ slRollStrikes: 1 }), ctx).enter, true);
+  // Default cap is DEFAULT_SL_ROLL_MAX.
+  assert.equal(evaluateSlRoll(row({ slRollStrikes: 1 }), { ...ctx, rollsDone: DEFAULT_SL_ROLL_MAX }).enter, false);
+  assert.equal(evaluateSlRoll(row({ slRollStrikes: 1, slRollMax: 3 }), { ...ctx, rollsDone: 2 }).enter, true);
+  assert.equal(evaluateSlRoll(row({ slRollStrikes: 1 }), { ...ctx, groupEnabled: false }).enter, false);
+  assert.equal(evaluateSlRoll(row({ slRollStrikes: 1, exitTime: '09:59' }), ctx).enter, false);
+  assert.equal(evaluateSlRoll(row({ slRollStrikes: 1 }), { ...ctx, nowHm: '15:17' }).enter, false);
+  assert.equal(evaluateSlRoll(row({ slRollStrikes: 1 }), { ...ctx, nowHm: '15:17', product: 'MARGIN' }).enter, true);
+});
+
+test('costStopReason: only once armed, and only at/above entry', () => {
+  const c = { ceLtp: 0, peLtp: 100, ceQty: 0, peQty: -75, ceEntry: 0, peEntry: 100 };
+  const fill = { ceStrike: null, peStrike: 24000, ceQty: 0, peQty: 75, ts: '' };
+  // Not armed (sibling SL never fired) → nothing, even at cost.
+  assert.equal(costStopReason(row({ slToCost: true, fill }), 'PE', live(c)), null);
+  // Armed but the option is off → nothing.
+  assert.equal(costStopReason(row({ slToCost: false, fill: { ...fill, peCostStop: true } }), 'PE', live(c)), null);
+  const armed = row({ slToCost: true, fill: { ...fill, peCostStop: true } });
+  assert.match(costStopReason(armed, 'PE', live(c)) ?? '', /PE SL to cost hit/);
+  assert.equal(costStopReason(armed, 'PE', live({ ...c, peLtp: 99.5 })), null);
+  // Leg no longer owned → nothing.
+  assert.equal(costStopReason(row({ slToCost: true, fill: { ...fill, peQty: 0, peCostStop: true } }), 'PE', live(c)), null);
+});
+
+test('legOwnEntry: own stamped entry first, broker avg only as fallback', () => {
+  // Broker sellAvg 110 is a day blend (e.g. an earlier trade on this strike).
+  const c = { ceLtp: 0, peLtp: 100, ceQty: 0, peQty: -150, ceEntry: 0, peEntry: 110 };
+  const stamped = row({ fill: { ceStrike: null, peStrike: 24000, ceQty: 0, peQty: 150, peEntry: 105, ts: '' } });
+  assert.equal(legOwnEntry(stamped, 'PE', live(c)), 105);
+  const legacy = row({ fill: { ceStrike: null, peStrike: 24000, ceQty: 0, peQty: 150, ts: '' } });
+  assert.equal(legOwnEntry(legacy, 'PE', live(c)), 110);
+});
+
+test('costStopReason: uses own entry, not a blended broker avg', () => {
+  // Broker day-avg 90 (old trade blended in), own entry 100, LTP 95:
+  // cost has NOT been reached, even though LTP is above the broker avg.
+  const c = { ceLtp: 0, peLtp: 95, ceQty: 0, peQty: -75, ceEntry: 0, peEntry: 90 };
+  const r = row({ slToCost: true, fill: { ceStrike: null, peStrike: 24000, ceQty: 0, peQty: 75, peEntry: 100, peCostStop: true, ts: '' } });
+  assert.equal(costStopReason(r, 'PE', live(c)), null);
+  assert.match(costStopReason(r, 'PE', live({ ...c, peLtp: 100 })) ?? '', /SL to cost hit/);
 });

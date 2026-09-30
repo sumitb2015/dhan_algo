@@ -29,6 +29,7 @@ import {
   dteMatches, dteForExpiry, evaluateRowExit, evaluateEntry, evaluateGlobalRisk,
   legStopPremium, pairStopPremium, nextOpenedTs, isGhostDropProtected,
   isSimRow, simLegPosition,
+  legPinnedStrike, costStopReason, legOwnEntry, evaluateSlRoll, slRollStrike, DEFAULT_SL_ROLL_MAX,
   type PosRow, type RowLive,
 } from '@/lib/focusToolRules';
 import { computeRowPnl, mtmForQty, shiftMayReopen, canMarkMtm, shiftCloseConfirmed, rowDisplayBookedPnl, putCallRatio, valuePutCallRatio, pickOpenInterest } from '@/lib/focusToolPnl';
@@ -505,6 +506,9 @@ const makeRow = (underlying: FocusUnderlying): FocusRow => ({
   slMultiplier: '1.2',
   ceSlMultiplier: '1.2',
   peSlMultiplier: '1.2',
+  slRollStrikes: 0,
+  slRollMax: DEFAULT_SL_ROLL_MAX,
+  slToCost: false,
   createdAt: new Date().toISOString(),
   updatedAt: new Date().toISOString(),
 });
@@ -822,6 +826,55 @@ function slTone(now: number | null, stop: number | null, idle: string): string {
   return idle;
 }
 
+/**
+ * What happens after a leg's own SL × fires — both opt-in, both discrete
+ * controls (selects/toggle), so each click is a complete choice and commits
+ * immediately.
+ *
+ *  - Roll OTM: re-sell the stopped leg N strikes further OTM, at most `max`
+ *    times per cycle.
+ *  - SL → cost: the leg still open gets a stop at its own entry premium.
+ */
+function LegStopFollowUp({ row, onUpdate, compact = false }: {
+  row: FocusRow;
+  onUpdate: (patch: Partial<FocusRow>) => void;
+  compact?: boolean;
+}) {
+  const strikes = Math.trunc(Number(row.slRollStrikes) || 0);
+  const max = row.slRollMax ?? DEFAULT_SL_ROLL_MAX;
+  const rolls = `CE ${row.fill?.ceRolls ?? 0} · PE ${row.fill?.peRolls ?? 0}`;
+  const sel = cn('font-bold h-5 px-1 border border-zinc-700 rounded bg-zinc-900 text-zinc-200 focus:outline-none focus:border-violet-500 cursor-pointer',
+    compact ? 'text-[8.5px]' : 'text-[9px]');
+  return (
+    <div className={cn('flex flex-wrap items-center gap-2', compact ? 'text-[8.5px]' : 'text-[9px]')}>
+      <label className="inline-flex items-center gap-1 font-black text-zinc-400"
+        title="When a leg's own SL × (CE × / PE ×) hits, re-sell the same lots this many strikes further OTM than the stopped strike (CE up, PE down)">
+        SL→OTM
+        <select value={String(strikes)} aria-label="Strikes to roll OTM after a leg SL"
+          onChange={e => onUpdate({ slRollStrikes: Number(e.target.value) })} className={sel}>
+          <option value="0">Off</option>
+          <option value="1">1 strike</option>
+          <option value="2">2 strikes</option>
+          <option value="3">3 strikes</option>
+        </select>
+      </label>
+      {strikes > 0 && (
+        <label className="inline-flex items-center gap-1 font-black text-zinc-400"
+          title={`Most rolls per leg until the row exits or is re-armed. Used this cycle: ${rolls}`}>
+          max
+          <select value={String(max)} aria-label="Maximum SL rolls per leg"
+            onChange={e => onUpdate({ slRollMax: Number(e.target.value) })} className={sel}>
+            {[1, 2, 3, 4, 5].map(n => <option key={n} value={n}>{n}</option>)}
+          </select>
+          {row.fill && <span className="font-mono text-zinc-500">{rolls}</span>}
+        </label>
+      )}
+      <SwitchToggle checked={!!row.slToCost} onChange={v => onUpdate({ slToCost: v })} label="SL→Cost"
+        title="When one leg's own SL × hits, move the other leg's stop to its entry premium (exit it if it returns to cost)" />
+    </div>
+  );
+}
+
 /** Calculated SL × premiums under a CE/PE position cell. */
 function LegSlLevels({
   row, live, leg, lotSize, align = 'center', inline = false,
@@ -835,7 +888,10 @@ function LegSlLevels({
 }) {
   const legLevel = legStopPremium(row, leg, live);
   const pairLevel = pairStopPremium(row, live, undefined, lotSize);
-  if (legLevel == null && pairLevel == null) return null;
+  const costArmed = !!row.slToCost && !!(leg === 'CE' ? row.fill?.ceCostStop : row.fill?.peCostStop)
+    && rowOwnsLeg(row, leg);
+  const costLevel = costArmed ? legOwnEntry(row, leg, live) : 0;
+  if (legLevel == null && pairLevel == null && !(costLevel > 0)) return null;
   const nowLeg = (leg === 'CE' ? live.ltpCe : live.ltpPe) ?? null;
   const nowPair = live.entryPremium > 0
     ? sidePremium(row, live, undefined, lotSize)
@@ -857,6 +913,14 @@ function LegSlLevels({
           title={`${leg} SL × fires when this leg's premium reaches ${legLevel.toFixed(2)} (entry × ${leg === 'CE' ? row.ceSlMultiplier : row.peSlMultiplier})`}
         >
           {leg} × {legLevel.toFixed(2)}
+        </span>
+      )}
+      {costLevel > 0 && (
+        <span
+          className={cn('text-[9px] font-mono font-bold tabular-nums', slTone(nowLeg, costLevel, 'text-violet-300'))}
+          title={`SL moved to cost: the other leg stopped out, so ${leg} exits if its premium returns to its entry ${costLevel.toFixed(2)}`}
+        >
+          {leg} cost {costLevel.toFixed(2)}
         </span>
       )}
       {pairLevel != null && (
@@ -2054,7 +2118,8 @@ function FocusTableRowImpl({
               <button
                 onClick={() => onUpdate({
                   levelHigh: '', levelLow: '', levelVw: false, vwapInterval: '1', vwapBufferPct: '0.1',
-                  slRupees: '', slMultiplier: '1.2', ceSlMultiplier: '1.2', peSlMultiplier: '1.2'
+                  slRupees: '', slMultiplier: '1.2', ceSlMultiplier: '1.2', peSlMultiplier: '1.2',
+                  slRollStrikes: 0, slToCost: false,
                 })}
                 title="Clear rules"
                 className={cn('text-[8.5px] text-zinc-500 hover:text-zinc-300 transition-colors cursor-pointer', FOCUS_RING)}
@@ -2113,6 +2178,9 @@ function FocusTableRowImpl({
               </div>
             )}
           </div>
+
+          {/* After a leg SL × hit */}
+          <LegStopFollowUp row={row} onUpdate={onUpdate} compact />
 
           {/* Actions: Arm & Exit All */}
           <div className="flex items-center gap-2 pt-1 border-t border-zinc-800/60">
@@ -2480,7 +2548,7 @@ function FocusRowCardImpl({
           </span>
           <div className="flex items-center gap-1.5">
             <button
-              onClick={() => onUpdate({ levelHigh: '', levelLow: '', levelVw: false, vwapInterval: '1', vwapBufferPct: '0.1', slRupees: '', slMultiplier: '1.2', ceSlMultiplier: '1.2', peSlMultiplier: '1.2' })}
+              onClick={() => onUpdate({ levelHigh: '', levelLow: '', levelVw: false, vwapInterval: '1', vwapBufferPct: '0.1', slRupees: '', slMultiplier: '1.2', ceSlMultiplier: '1.2', peSlMultiplier: '1.2', slRollStrikes: 0, slToCost: false })}
               className={cn('text-[9px] text-zinc-500 hover:text-zinc-300 transition-colors cursor-pointer', FOCUS_RING)}
             >
               Clear
@@ -2523,6 +2591,10 @@ function FocusRowCardImpl({
             <span className="text-rose-400 text-[9px] font-black w-7 shrink-0" title="Exit PE alone on its own premium multiple, independent of CE and of SL × above">PE &times;</span>
             <RuleNumInput value={row.peSlMultiplier ?? '1.2'} onCommit={v => onUpdate({ peSlMultiplier: v })} className="w-full flex-1 min-w-0 h-5 text-center text-[10px]" />
           </div>
+        </div>
+
+        <div className="border-t border-zinc-800/50 pt-1">
+          <LegStopFollowUp row={row} onUpdate={onUpdate} />
         </div>
 
         <div className="flex flex-wrap items-center gap-2 border-t border-zinc-800/50 pt-1">
@@ -2719,6 +2791,14 @@ export default function FocusTool() {
   // — a leg exit must not be deduped by row id alone, or a CE breach on a row
   // could suppress an independent PE breach on the same row.
   const autoExitingLegRef = useRef<Set<string>>(new Set());
+  // Auto leg exits (and their SL rolls) in flight per row. The two legs are
+  // independent contracts, so a PE stop must not wait behind the CE's close +
+  // roll (easily 10s) — they may run together, and the row's busy lock is only
+  // released when the LAST of them finishes.
+  const legExitsInFlightRef = useRef<Map<string, number>>(new Map());
+  // A whole-row exit that fired while the row was busy (ms timestamp). Blocks
+  // an SL roll from re-selling into a row the rules are about to flatten.
+  const rowExitWantedRef = useRef<Map<string, number>>(new Map());
   // Rows the scheduler has already auto-entered. Same reasoning, plus: the
   // entry window stays open for the rest of the session, so without this a
   // row would re-enter on every 5s tick.
@@ -3289,15 +3369,15 @@ export default function FocusTool() {
       // holds: P&L blanks, legsFlat() goes true, and every exit rule silently
       // stops being evaluated against a position that is still very much open.
       //
-      // Only while the row still holds something, though: once both legs'
-      // own qty is back to 0 the pin describes a closed position, and keeping
-      // it left a flat row showing the old strike (22750 with spot at 22685)
-      // until a full-row exit or re-arm happened to clear it.
-      const hasPin = !!row.fill && (row.fill.ceStrike != null || row.fill.peStrike != null)
-        && !rowFlat(row);
-      const pin = hasPin ? row.fill : undefined;
-      const ceStrike = pin ? (pin.ceStrike ?? null) : resolvedCe;
-      const peStrike = pin ? (pin.peStrike ?? null) : resolvedPe;
+      // Pinned PER LEG, and only while the row still owns that leg: once a
+      // leg's own qty is back to 0 its pin describes a closed position. A
+      // row-wide pin kept a stopped-out CE on its old strike (22750) for as
+      // long as the PE stayed open, so a fresh CE sold at the dead strike and
+      // the CE selector could not follow the ATM. See legPinnedStrike.
+      const cePin = legPinnedStrike(row, 'CE');
+      const pePin = legPinnedStrike(row, 'PE');
+      const ceStrike = cePin ?? resolvedCe;
+      const peStrike = pePin ?? resolvedPe;
 
       if (ceStrike == null && peStrike == null) { out[row.id] = EMPTY_ROW_LIVE; continue; }
 
@@ -3723,6 +3803,7 @@ export default function FocusTool() {
    *  again — otherwise re-arming would look accepted but never fire. */
   function armRow(id: string) {
     autoEnteringRef.current.delete(id);
+    rowExitWantedRef.current.delete(id);
     // Drop any stale fill pin — arming means this row resolves its strikes
     // fresh at the next entry, so a pin from the previous cycle would make it
     // look its new position up at last time's strikes.
@@ -3787,10 +3868,12 @@ export default function FocusTool() {
         // reduce (delta < 0) never touches the stored entry, only the
         // remaining qty still carries it. No price for this fill (e.g. LTP
         // unavailable) leaves the existing entry untouched rather than
-        // diluting it toward 0.
+        // diluting it toward 0. A leg re-opening from flat with no price has
+        // NO entry — the previous position's price describes a closed trade
+        // (possibly another strike), and SL to cost would measure against it.
         const nextEntry = delta > 0 && Number(entryPrice) > 0
           ? ((Number(prevEntry) || 0) * prevQty + Number(entryPrice) * delta) / (prevQty + delta)
-          : prevEntry;
+          : (delta > 0 && prevQty <= 0 ? null : prevEntry);
         const nextCeQty = leg === 'CE' ? Math.max(0, (f?.ceQty ?? 0) + delta) : (f?.ceQty ?? 0);
         const nextPeQty = leg === 'PE' ? Math.max(0, (f?.peQty ?? 0) + delta) : (f?.peQty ?? 0);
         // Stamp the moment a leg goes from flat to held (persisted, not just
@@ -3805,6 +3888,10 @@ export default function FocusTool() {
           ? nextOpenedTs(prevQty, nextPeQty, f?.peOpenedTs, now)
           : (f?.peOpenedTs ?? null);
         const nextFill: FocusRowFill = {
+          // Carry every field this function doesn't own (roll counters,
+          // cost-stop flags) — rebuilding the object field-by-field dropped
+          // anything added later.
+          ...f,
           ceStrike: leg === 'CE' && strike != null ? strike : (f?.ceStrike ?? null),
           peStrike: leg === 'PE' && strike != null ? strike : (f?.peStrike ?? null),
           ceQty: nextCeQty,
@@ -3813,6 +3900,10 @@ export default function FocusTool() {
           peEntry: leg === 'PE' ? nextEntry : (f?.peEntry ?? null),
           ceOpenedTs,
           peOpenedTs,
+          // SL-to-cost belongs to the position it was armed on: a leg that
+          // goes flat drops it, so a later re-open starts without it.
+          ceCostStop: nextCeQty > 0 ? f?.ceCostStop : undefined,
+          peCostStop: nextPeQty > 0 ? f?.peCostStop : undefined,
           bookedPnl: (f?.bookedPnl ?? 0) + (Number(bookedDelta) || 0),
           ts: f?.ts ?? new Date().toISOString(),
         };
@@ -4052,7 +4143,12 @@ export default function FocusTool() {
         // own entry-price estimate — stamped into fill.ceEntry/peEntry so a
         // shared-strike row's SL × entry side has a cost basis scoped to
         // only what THIS row itself opened (see FocusRowFill.ceEntry).
-        const openEntryPx = !opts.reduce ? Number(leg === 'CE' ? live?.ltpCe : live?.ltpPe) || 0 : 0;
+        // A strikeOverride open (shift / SL roll) targets a different strike
+        // than rowLive's LTP describes, so quote the strike actually sold.
+        const openEntryPx = opts.reduce ? 0
+          : opts.strikeOverride != null
+            ? simQuote(u, expiry, Number(strike), leg)
+            : Number(leg === 'CE' ? live?.ltpCe : live?.ltpPe) || 0;
         const applyFill = (filled: number) => {
           if (filled < quantity) {
             addToast('error', `${what}: partial fill`,
@@ -4528,7 +4624,16 @@ export default function FocusTool() {
    * cannot fire a second time while the first exit is still in flight.
    */
   function autoExitRow(row: FocusRow, reason: string) {
-    if (autoExitingRef.current.has(row.id) || busyRows.has(row.id)) return;
+    if (autoExitingRef.current.has(row.id)) return;
+    if (busyRows.has(row.id) || (legExitsInFlightRef.current.get(row.id) ?? 0) > 0) {
+      // Something else holds the row (a leg exit/roll, a manual order). The
+      // rules re-fire this every tick while the breach lasts, so it runs once
+      // the row frees up — but record it, so an SL roll finishing in the
+      // meantime doesn't sell a fresh leg into a row about to be flattened.
+      rowExitWantedRef.current.set(row.id, Date.now());
+      return;
+    }
+    rowExitWantedRef.current.delete(row.id);
     autoExitingRef.current.add(row.id);
     // Also hold the manual busy lock: the row's own Exit All / +/- buttons go
     // through runRowAction, and without a shared lock a click landing while
@@ -4563,36 +4668,164 @@ export default function FocusTool() {
   }
 
   /**
-   * Close just one leg on its own SL x breach, leaving the other leg exactly
-   * as it was. If the OTHER leg is already flat this was the row's last leg,
-   * though — same as autoExitRow, retire it (status 'exited', pin dropped)
-   * once the broker book confirms both strikes are flat, or a row this
-   * worker-off tab flattens leg-by-leg is stuck at 'entered' forever with no
-   * Arm button (see the STATUS/ACTIONS cell: Arm only shows for
-   * draft/exited). When the other leg is genuinely still open, waitRowFlat
-   * below simply times out seeing its live quantity and this is a no-op,
-   * same as today.
+   * Functional patch of a row's fill ledger — same composition guarantee as
+   * adjustFillQty (a burst of writes can't clobber each other), for the
+   * fields adjustFillQty doesn't own: roll counters and cost-stop flags.
+   * A no-op when the row holds no ledger.
    */
-  function autoExitLeg(row: FocusRow, leg: 'CE' | 'PE', reason: string) {
+  function patchFill(rowId: string, patch: (f: FocusRowFill) => Partial<FocusRowFill>) {
+    setConfig(prev => {
+      let changed = false;
+      const nextRows = prev.rows.map(r => {
+        if (r.id !== rowId || !r.fill) return r;
+        changed = true;
+        return { ...r, fill: { ...r.fill, ...patch(r.fill) }, updatedAt: new Date().toISOString() };
+      });
+      if (!changed) return prev;
+      const nextConfig = { ...prev, rows: nextRows };
+      saveConfig(nextConfig);
+      return nextConfig;
+    });
+  }
+
+  /**
+   * SL → roll OTM: after a leg's own SL × close has CONFIRMED, sell the same
+   * whole lots again `slRollStrikes` strikes further OTM than the strike that
+   * was stopped. Returns true once a new leg was placed.
+   *
+   * The attempt is counted BEFORE the order goes out, so a reopen that fails,
+   * part-fills or is rejected still uses up one roll — a broken contract or a
+   * rejecting broker can't turn this into a retry loop. Reads the row, config
+   * and order function fresh (schedulerRef / actionsRef): this runs after the
+   * close's awaits, and the render that started it is stale by then.
+   */
+  async function rollLegAfterStop(
+    rowId: string, leg: 'CE' | 'PE', stoppedStrike: number | null, closedQty: number,
+  ): Promise<'rolled' | 'skipped' | 'unconfirmed'> {
+    const snap = schedulerRef.current;
+    const row = snap.config.rows.find(r => r.id === rowId);
+    if (!row || !(Number(row.slRollStrikes) > 0)) return 'skipped';
+    const tagEarly = `${isSimRow(row) ? 'SIM ' : ''}${row.underlying} ${leg}`;
+    // A whole-row exit (account stop/target/trail, book exit, exit time) fired
+    // while this leg was closing and is waiting for the row to free up —
+    // re-selling now would only open a leg to be flattened a moment later.
+    const wantedAt = rowExitWantedRef.current.get(rowId);
+    if (wantedAt != null && Date.now() - wantedAt < 5_000) {
+      addToast('error', `${tagEarly} not rolled`, 'A whole-row exit is pending');
+      return 'skipped';
+    }
+    // Ledger dropped while the close was in flight (re-armed, or retired by
+    // another path) — this cycle is over, don't start a new leg in it.
+    if (!row.fill) return 'skipped';
+    const u = row.underlying;
+    const group = snap.config.groups.find(g => g.underlying === u);
+    const rollsDone = Number(leg === 'CE' ? row.fill?.ceRolls : row.fill?.peRolls) || 0;
+    const decision = evaluateSlRoll(row, {
+      nowHm: istHm(),
+      product: group?.product ?? 'INTRADAY',
+      groupEnabled: !!group?.enabled,
+      rollsDone,
+    });
+    const tag = `${isSimRow(row) ? 'SIM ' : ''}${u} ${leg}`;
+    if (!decision.enter) {
+      addToast('error', `${tag} not rolled`, decision.reason);
+      return 'skipped';
+    }
+    if (!rowMayTrade(row, snap.liveRealMoney)) {
+      addToast('error', `${tag} not rolled`, 'LIVE · REAL MONEY is off');
+      return 'skipped';
+    }
+    const lotSize = lotSizes[u] ?? 0;
+    const lots = lotSize > 0 ? Math.floor(closedQty / lotSize) : 0;
+    if (stoppedStrike == null || !(lots > 0)) {
+      addToast('error', `${tag} not rolled`, 'Stopped strike or lot size unknown — leg left closed');
+      return 'skipped';
+    }
+    const newStrike = slRollStrike(leg, stoppedStrike, Number(row.slRollStrikes), STRIKE_STEP[u]);
+    patchFill(rowId, () => (leg === 'CE' ? { ceRolls: rollsDone + 1 } : { peRolls: rollsDone + 1 }));
+    const ok = await actionsRef.current.placeLeg(row, leg, {
+      reduce: false, lots, strikeOverride: newStrike, awaitFill: true,
+    });
+    if (!ok) {
+      addToast('error', `${tag} roll not confirmed`,
+        `Stopped at ${stoppedStrike}; the ${newStrike} ${leg} re-entry was rejected or not confirmed filled in time. `
+        + 'Check the position book — a late fill is NOT tracked by this row beyond what was confirmed.');
+      return 'unconfirmed';
+    }
+    addToast('success', `${tag} rolled OTM`,
+      `SL at ${stoppedStrike} → re-sold ${lots} lot(s) at ${newStrike} (roll ${rollsDone + 1})`);
+    return 'rolled';
+  }
+
+  /**
+   * Close just one leg on its own stop, leaving the other leg exactly as it
+   * was. `kind` says which stop fired:
+   *
+   *  - 'sl'   — the leg's own SL ×. Once the close is confirmed this arms
+   *             SL-to-cost on the other leg (row.slToCost) and re-sells the
+   *             stopped leg further OTM (row.slRollStrikes). Both are opt-in.
+   *  - 'cost' — the SL-to-cost stop itself. Just closes; never rolls or arms
+   *             anything, so the two features can't feed each other.
+   *
+   * If nothing is left open afterwards this was the row's last leg — same as
+   * autoExitRow, retire it (status 'exited', pin dropped) once the ledger
+   * confirms flat, or it would sit at 'entered' with no Arm button. When the
+   * other leg is genuinely still open waitRowFlat simply times out.
+   */
+  function autoExitLeg(row: FocusRow, leg: 'CE' | 'PE', reason: string, kind: 'sl' | 'cost' = 'sl') {
     const key = `${row.id}:${leg}`;
-    if (autoExitingLegRef.current.has(key) || busyRows.has(row.id)) return;
+    if (autoExitingLegRef.current.has(key) || autoExitingRef.current.has(row.id)) return;
+    const inFlight = legExitsInFlightRef.current.get(row.id) ?? 0;
+    // Busy for any reason other than the OTHER leg's auto exit (a manual
+    // order, a shift) → wait for it. Busy only because the other leg is
+    // exiting → go ahead: different contract, and this leg is breached now.
+    if (busyRows.has(row.id) && inFlight === 0) return;
     autoExitingLegRef.current.add(key);
+    legExitsInFlightRef.current.set(row.id, inFlight + 1);
     // Also hold the manual busy lock (see autoExitRow above) — without it a
     // click on this row's own Exit/Add/Reduce buttons while this leg's close
-    // is in flight sends a second concurrent order against the same leg.
+    // (or its roll) is in flight sends a second concurrent order.
     setBusyRows(prev => new Set(prev).add(row.id));
     addToast('error', `${isSimRow(row) ? 'SIM ' : ''}Auto-exit ${leg}: ${row.underlying} ${row.id.slice(-4)}`, reason);
+    // Captured before the close: afterwards the ledger is 0 and the pin gone.
+    const live = rowLive[row.id] ?? EMPTY_ROW_LIVE;
+    const stoppedStrike = leg === 'CE' ? live.ceStrike : live.peStrike;
+    const closingQty = legOwnContracts(row, leg, live);
+    const other: 'CE' | 'PE' = leg === 'CE' ? 'PE' : 'CE';
     // awaitFill so the ledger is confirmed-updated by the time waitRowFlat
-    // reads it below.
+    // reads it below — and so a roll never reopens on an unconfirmed close.
     placeLeg(row, leg, { reduce: true, all: true, awaitFill: true })
       .then(async accepted => {
         if (!accepted) return;
+        if (kind === 'sl') {
+          const fresh = schedulerRef.current.config.rows.find(r => r.id === row.id);
+          if (fresh?.slToCost && rowOwnsLeg(fresh, other)) {
+            patchFill(row.id, () => (other === 'CE' ? { ceCostStop: true } : { peCostStop: true }));
+            addToast('success', `${row.underlying} ${other} SL moved to cost`,
+              `${leg} stopped out — ${other} now exits if its premium returns to its entry`);
+          }
+          const roll = await rollLegAfterStop(row.id, leg, stoppedStrike, closingQty);
+          if (roll === 'rolled') return;
+          // A re-entry order went out but did not confirm: it may still fill
+          // late. Keep the row (and its ledger) rather than retiring it on a
+          // momentarily-flat ledger — the user has been told to check.
+          if (roll === 'unconfirmed') return;
+        }
+        // The other leg may be mid-close too (both legs can exit at once) —
+        // retire only when this is the last in-flight leg exit.
+        if ((legExitsInFlightRef.current.get(row.id) ?? 0) > 1) return;
         if (await waitRowFlat(row.id)) {
           updateRow(row.id, { status: 'exited', fill: undefined });
         }
       })
       .finally(() => {
         autoExitingLegRef.current.delete(key);
+        const left = (legExitsInFlightRef.current.get(row.id) ?? 1) - 1;
+        if (left > 0) {
+          legExitsInFlightRef.current.set(row.id, left);
+          return;
+        }
+        legExitsInFlightRef.current.delete(row.id);
         setBusyRows(prev => { const next = new Set(prev); next.delete(row.id); return next; });
       });
   }
@@ -4666,10 +4899,22 @@ export default function FocusTool() {
       // than, the pair-level rules below. Skip the whole-row check this tick
       // once a leg exit has been sent — the position book it would be
       // evaluated against is about to change.
-      const ceReason = legStopReason(row, 'CE', live);
-      if (ceReason) { autoExitLeg(row, 'CE', ceReason); continue; }
-      const peReason = legStopReason(row, 'PE', live);
-      if (peReason) { autoExitLeg(row, 'PE', peReason); continue; }
+      // Each leg is judged on its own every tick — a CE close still in
+      // flight (its ledger only drops once the fill confirms) must not hide a
+      // PE breach behind a `continue`. SL × first, then SL to cost (only armed
+      // once the sibling leg's own SL × has fired).
+      let legAction = false;
+      for (const leg of ['CE', 'PE'] as const) {
+        // Already exiting: nothing new to fire on this leg. The pair rules
+        // below still run, so a whole-row breach during the close/roll gets
+        // recorded (rowExitWantedRef) and stops the roll re-selling.
+        if (autoExitingLegRef.current.has(`${row.id}:${leg}`)) continue;
+        const slReason = legStopReason(row, leg, live);
+        if (slReason) { autoExitLeg(row, leg, slReason); legAction = true; continue; }
+        const costReason = costStopReason(row, leg, live);
+        if (costReason) { autoExitLeg(row, leg, costReason, 'cost'); legAction = true; }
+      }
+      if (legAction) continue;
 
       const reason = evaluateRowExit(
         row, live, spots[row.underlying] ?? 0, undefined, live.lotSize,
@@ -4739,8 +4984,8 @@ export default function FocusTool() {
   // versions — and with them a stale `lookups`/`lotSizes`/`rowLive` inside
   // placeLeg, which resolves the contract an order is actually sent for.
   // Going through a ref that every render refreshes keeps orders on current data.
-  const actionsRef = useRef({ autoEnterRow, autoExitRow });
-  actionsRef.current = { autoEnterRow, autoExitRow };
+  const actionsRef = useRef({ autoEnterRow, autoExitRow, placeLeg });
+  actionsRef.current = { autoEnterRow, autoExitRow, placeLeg };
 
   /**
    * The scheduler: everything time- or account-level driven, on a 1s tick.

@@ -352,6 +352,115 @@ export function legStopReason(
 }
 
 /**
+ * The strike a leg is pinned to, or null when it should resolve live.
+ *
+ * Pinned PER LEG, only while this row still owns that leg. The pin used to be
+ * row-wide — any open leg kept BOTH legs on their fill strikes — so after a
+ * straddle's CE stopped out with PE still open, the closed CE stayed stuck on
+ * its old strike (22750 with spot far away): a fresh CE (+ lots, or an auto
+ * roll) would have been sold at that stale strike, and the CE strike selector
+ * showed the old strike instead of the current ATM ± offset.
+ */
+export function legPinnedStrike(
+  row: Pick<FocusRow, 'fill'>, leg: 'CE' | 'PE', workerHold?: WorkerHold,
+): number | null {
+  if (!rowOwnsLeg(row, leg, workerHold)) return null;
+  const s = leg === 'CE' ? row.fill?.ceStrike : row.fill?.peStrike;
+  return s ?? null;
+}
+
+/**
+ * This row's own entry premium on a leg — the "cost" the SL-to-cost stop is
+ * measured against.
+ *
+ * The row's own stamped entry first (fill.ceEntry/peEntry: LTP at order time,
+ * blended across this row's adds, reset when the leg re-opens from flat). The
+ * broker average is only the fallback: it blends in anyone else sharing the
+ * strike, and Dhan's sellAvg is the DAY's average of every sell on that
+ * security — re-selling a strike this row already traded and closed earlier
+ * (a re-entry, or a roll back onto an old strike) would put "cost" at a blend
+ * of the old and new trades.
+ */
+export function legOwnEntry(
+  row: Pick<FocusRow, 'fill'>, leg: 'CE' | 'PE', live: RowLive,
+): number {
+  const stored = Number(leg === 'CE' ? row.fill?.ceEntry : row.fill?.peEntry) || 0;
+  if (stored > 0) return stored;
+  const pos = leg === 'CE' ? live.cePosition : live.pePosition;
+  const q = Number(pos?.netQty) || 0;
+  return q < 0 ? Number(pos?.sellAvg) || 0 : Number(pos?.buyAvg) || 0;
+}
+
+/**
+ * The SL-to-cost breach on a leg, or null.
+ *
+ * Only live once the sibling leg's own SL × has fired (fill.ceCostStop /
+ * peCostStop) — arming it at entry would stop a fresh straddle out on its
+ * first uptick. Short leg: exits when the premium climbs back to entry.
+ */
+export function costStopReason(
+  row: Pick<FocusRow, 'fill' | 'slToCost'>, leg: 'CE' | 'PE', live: RowLive, workerHold?: WorkerHold,
+): string | null {
+  // Switching the option off disarms a flag that is already set, too.
+  if (!row.slToCost) return null;
+  const armed = leg === 'CE' ? row.fill?.ceCostStop : row.fill?.peCostStop;
+  if (!armed) return null;
+  if (legOwnContracts(row, leg, live, workerHold) <= 0) return null;
+  const entry = legOwnEntry(row, leg, live);
+  const now = (leg === 'CE' ? live.ltpCe : live.ltpPe) ?? 0;
+  if (entry > 0 && now > 0 && now >= entry) {
+    return `${leg} SL to cost hit (premium ${now.toFixed(2)} vs entry ${entry.toFixed(2)})`;
+  }
+  return null;
+}
+
+/** Default cap on auto-rolls per leg per cycle when FocusRow.slRollMax is unset. */
+export const DEFAULT_SL_ROLL_MAX = 2;
+
+/**
+ * The strike to re-sell a stopped leg at: `strikes` steps further OTM than
+ * the strike that was stopped — up for a CE, down for a PE.
+ */
+export function slRollStrike(leg: 'CE' | 'PE', stoppedStrike: number, strikes: number, step: number): number {
+  const n = Math.max(0, Math.trunc(Number(strikes) || 0));
+  return leg === 'CE' ? stoppedStrike + n * step : stoppedStrike - n * step;
+}
+
+export interface SlRollContext {
+  nowHm: string;
+  product: 'INTRADAY' | 'MARGIN';
+  groupEnabled: boolean;
+  /** Rolls already done on this leg this cycle (fill.ceRolls / peRolls). */
+  rollsDone: number;
+}
+
+/**
+ * Should a leg that just stopped out on its own SL × be re-sold further OTM?
+ *
+ * Refuses when the option is off, the per-cycle cap is used up, the index has
+ * been stopped, or the row's own window (its exit time, or the 15:17 intraday
+ * backstop) has closed — the same "never open into a closed window" rule
+ * evaluateEntry applies to a fresh entry.
+ */
+export function evaluateSlRoll(
+  row: Pick<FocusRow, 'slRollStrikes' | 'slRollMax' | 'exitTime'>,
+  ctx: SlRollContext,
+): EntryDecision {
+  const strikes = Math.trunc(Number(row.slRollStrikes) || 0);
+  if (!(strikes > 0)) return { enter: false, reason: 'SL roll off' };
+  const max = row.slRollMax == null ? DEFAULT_SL_ROLL_MAX : Math.trunc(Number(row.slRollMax) || 0);
+  if (ctx.rollsDone >= max) return { enter: false, reason: `SL roll limit ${max} reached` };
+  if (!ctx.groupEnabled) return { enter: false, reason: 'index not started' };
+  if (row.exitTime && ctx.nowHm >= row.exitTime) {
+    return { enter: false, reason: `past its own exit time ${row.exitTime}` };
+  }
+  if (ctx.product === 'INTRADAY' && ctx.nowHm >= INTRADAY_BACKSTOP_HM) {
+    return { enter: false, reason: 'past 15:17 intraday cutoff' };
+  }
+  return { enter: true, reason: `roll ${strikes} strike${strikes > 1 ? 's' : ''} OTM` };
+}
+
+/**
  * Premium level a stop-multiple fires at: entry × multiplier.
  * Null when the multiple is off (blank / ≤1) or there is no entry to scale.
  * Display-only — evaluateRowExit / legStopReason remain the authority on

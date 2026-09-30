@@ -92,6 +92,22 @@ export interface FocusRowFill {
    */
   ceOpenedTs?: number | null;
   peOpenedTs?: number | null;
+  /**
+   * How many times this leg has been auto-rolled OTM after its own SL × hit
+   * during the current cycle (see FocusRow.slRollStrikes). Capped by
+   * FocusRow.slRollMax so a trending market can't chain rolls all day. Reset
+   * with the rest of the ledger on Arm / full-row exit.
+   */
+  ceRolls?: number;
+  peRolls?: number;
+  /**
+   * The SL-to-cost stop is live on this leg: the OTHER leg's own SL × fired
+   * while this one was open and the row has FocusRow.slToCost on. Exits this
+   * leg if its premium climbs back to its own entry. Cleared when the leg
+   * goes flat (a later re-open starts without it).
+   */
+  ceCostStop?: boolean;
+  peCostStop?: boolean;
   ts: string;
 }
 
@@ -137,6 +153,20 @@ export interface FocusRow {
   // means off, same convention as slMultiplier.
   ceSlMultiplier: string;
   peSlMultiplier: string;
+  /**
+   * Re-enter after a leg SL × hit: once the stopped leg's close confirms,
+   * sell the same lots again this many strikes further OTM than the strike
+   * that was stopped (CE up, PE down). 0 / missing = off — the leg just stays
+   * closed, as before this option existed.
+   */
+  slRollStrikes?: number;
+  /** Max auto-rolls per leg per cycle (Arm → exit). Missing = 2. */
+  slRollMax?: number;
+  /**
+   * SL to cost: when one leg's own SL × hits, the leg still open gets a stop
+   * at its own entry premium (break-even on that leg). Missing = off.
+   */
+  slToCost?: boolean;
   /**
    * 'real' sends broker orders (still gated by the daily LIVE · REAL MONEY
    * arm); 'sim' forward-tests the same rules with paper fills at LTP and never
