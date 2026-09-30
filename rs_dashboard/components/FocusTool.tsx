@@ -32,6 +32,7 @@ import {
   isSimRow, simLegPosition,
   legPinnedStrike, costStopReason, legOwnEntry, slRollStrike, DEFAULT_SL_ROLL_MAX,
   reentryConfig, evaluateReentry, reentryWindowClosed, pendingReentryLevel, pendingReentryHit, legTargetReason, costReentryBasis,
+  awaitingMomentumQuote, MOMENTUM_QUOTE_WAIT_MS,
   type PosRow, type RowLive,
 } from '@/lib/focusToolRules';
 import { computeRowPnl, mtmForQty, shiftMayReopen, canMarkMtm, shiftCloseConfirmed, rowDisplayBookedPnl, putCallRatio, valuePutCallRatio, pickOpenInterest } from '@/lib/focusToolPnl';
@@ -972,8 +973,8 @@ function LegReentryControls({ row, onUpdate, onCancelPending, compact = false }:
     if (!p) return null;
     return (
       <span key={leg} className="inline-flex items-center gap-1 font-mono font-bold text-violet-300 bg-violet-500/10 border border-violet-500/30 rounded px-1.5 py-0.5"
-        title={`Waiting since ${new Date(p.since).toLocaleTimeString('en-IN', { timeZone: 'Asia/Kolkata' })} — re-sells ${p.lots} lot(s) when the ${p.strike} ${leg} premium ${p.dir === 'down' ? 'falls to' : 'rises to'} ${p.price.toFixed(2)}`}>
-        {leg} RE-{p.mode === 'cost' ? 'Cost' : 'Mom'} {p.strike} {p.dir === 'down' ? '≤' : '≥'} {p.price.toFixed(2)}
+        title={`Waiting since ${new Date(p.since).toLocaleTimeString('en-IN', { timeZone: 'Asia/Kolkata' })} — re-sells ${p.lots} lot(s) ${awaitingMomentumQuote(p) ? `once the ${p.strike} ${leg} has a premium to measure the move from` : `when the ${p.strike} ${leg} premium ${p.dir === 'down' ? 'falls to' : 'rises to'} ${p.price.toFixed(2)}`}`}>
+        {leg} RE-{p.mode === 'cost' ? 'Cost' : 'Mom'} {p.strike} {awaitingMomentumQuote(p) ? 'awaiting quote' : `${p.dir === 'down' ? '≤' : '≥'} ${p.price.toFixed(2)}`}
         <button type="button" onClick={() => onCancelPending(leg)} aria-label={`Cancel ${leg} re-entry`}
           className={cn('text-zinc-400 hover:text-rose-400 cursor-pointer rounded', FOCUS_RING)}>&times;</button>
       </span>
@@ -5170,15 +5171,25 @@ export default function FocusTool() {
           return 'skipped';
         }
         strike = s2;
+        if (!(Number(row.reMomentumPts) > 0)) {
+          addToast('error', `${tag} no re-entry`, 'Momentum points not set');
+          return 'skipped';
+        }
         quoteNow = actionsRef.current.simQuote(u, expiry, strike, leg);
       }
-      const level = pendingReentryLevel(cfg.mode, trigger, {
-        entry: basis?.price ?? closedEntry, quoteNow, momentumPts: row.reMomentumPts, momentumDir: row.reMomentumDir,
-      });
+      // A momentum strike the feed isn't carrying yet has no premium: arm it
+      // with price 0 and let checkPendingReentries take the reference from
+      // the first quote (cancelled after MOMENTUM_QUOTE_WAIT_MS).
+      const awaitQuote = cfg.mode === 'momentum' && !(quoteNow > 0);
+      const level = awaitQuote
+        ? { price: 0, dir: row.reMomentumDir === 'up' ? 'up' as const : 'down' as const }
+        : pendingReentryLevel(cfg.mode, trigger, {
+          entry: basis?.price ?? closedEntry, quoteNow, momentumPts: row.reMomentumPts, momentumDir: row.reMomentumDir,
+        });
       if (!level) {
         addToast('error', `${tag} no re-entry`, cfg.mode === 'cost'
           ? 'No entry price recorded for the closed leg'
-          : 'Momentum points not set, or no live premium for the new strike');
+          : 'The new strike\'s premium is too small for the momentum points');
         return 'skipped';
       }
       const pending: FocusPendingReentry = {
@@ -5187,8 +5198,9 @@ export default function FocusTool() {
       patchFill(rowId, () => (leg === 'CE'
         ? { cePending: pending, ...(basis ? { ceCostBasis: basis } : {}) }
         : { pePending: pending, ...(basis ? { peCostBasis: basis } : {}) }));
-      addToast('success', `${tag} re-entry armed`,
-        `RE-${cfg.mode.toUpperCase()} after ${what}: sell ${lots} lot(s) ${strike} ${leg} when premium ${level.dir === 'down' ? '≤' : '≥'} ${level.price.toFixed(2)}`);
+      addToast('success', `${tag} re-entry armed`, awaitQuote
+        ? `RE-MOMENTUM after ${what}: waiting for a premium on ${strike} ${leg} to measure the move from`
+        : `RE-${cfg.mode.toUpperCase()} after ${what}: sell ${lots} lot(s) ${strike} ${leg} when premium ${level.dir === 'down' ? '≤' : '≥'} ${level.price.toFixed(2)}`);
       return 'pending';
     }
 
@@ -5263,11 +5275,33 @@ export default function FocusTool() {
         if (wantedAt != null && Date.now() - wantedAt < 5_000) { clear('A whole-row exit is pending'); continue; }
         const breach = pendingLevelBreach(row, snap.spots[row.underlying] ?? 0);
         if (breach) { clear(breach); continue; }
+        const expiry = row.expiry || expiries[row.underlying]?.[0] || '';
+        const ltp = simQuote(row.underlying, expiry, p.strike, leg);
+        // Momentum armed before its strike had a premium: the first quote is
+        // the reference (taken even while LIVE is off or the row is busy, so
+        // it stays close to the stop/target). Never fires on the tick that
+        // sets it.
+        if (awaitingMomentumQuote(p)) {
+          const level = ltp > 0
+            ? pendingReentryLevel('momentum', p.trigger, {
+              quoteNow: ltp, momentumPts: row.reMomentumPts, momentumDir: row.reMomentumDir,
+            })
+            : null;
+          if (level) {
+            const next: FocusPendingReentry = { ...p, price: level.price, dir: level.dir };
+            patchFill(row.id, () => (leg === 'CE' ? { cePending: next } : { pePending: next }));
+            addToast('success', `${tag} re-entry armed`,
+              `RE-MOMENTUM: sell ${p.lots} lot(s) ${p.strike} ${leg} when premium ${level.dir === 'down' ? '≤' : '≥'} ${level.price.toFixed(2)}`);
+          } else if (ltp > 0) {
+            clear('Momentum points not set, or the new strike\'s premium is too small for them');
+          } else if (Date.now() - p.since > MOMENTUM_QUOTE_WAIT_MS) {
+            clear(`No premium for ${p.strike} ${leg} within ${MOMENTUM_QUOTE_WAIT_MS / 1000}s`);
+          }
+          continue;
+        }
         if (!rowMayTrade(row, snap.liveRealMoney)) continue;
         if (busyRows.has(row.id) || autoExitingRef.current.has(row.id)
           || (legExitsInFlightRef.current.get(row.id) ?? 0) > 0) continue;
-        const expiry = row.expiry || expiries[row.underlying]?.[0] || '';
-        const ltp = simQuote(row.underlying, expiry, p.strike, leg);
         if (!pendingReentryHit(p, ltp)) continue;
 
         pendingFiringRef.current.add(key);

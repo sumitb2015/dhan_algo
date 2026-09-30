@@ -20,7 +20,7 @@ import {
   nextOpenedTs, isGhostDropProtected, GHOST_DROP_GRACE_MS,
   isSimRow, simLegPosition,
   legPinnedStrike, slRollStrike, evaluateReentry, costStopReason, legOwnEntry, DEFAULT_SL_ROLL_MAX,
-  reentryWindowClosed, pendingReentryLevel, pendingReentryHit, legTargetReason, costReentryBasis,
+  reentryWindowClosed, pendingReentryLevel, pendingReentryHit, legTargetReason, costReentryBasis, awaitingMomentumQuote,
   type RowLive, type PosRow, type WorkerHold,
 } from './focusToolRules.ts';
 import type { FocusRow } from './focusToolRows.ts';
@@ -573,4 +573,13 @@ test('costReentryBasis: RE-Cost keeps the strike\'s initial entry across re-entr
   assert.deepEqual(costReentryBasis(first, 22650, 180), { strike: 22650, price: 180 });
   assert.equal(costReentryBasis(null, 22600, 0), null);
   assert.deepEqual(costReentryBasis({ strike: 22600, price: 0 }, 22600, 190), { strike: 22600, price: 190 });
+});
+
+test('awaitingMomentumQuote: only a momentum re-entry with no reference premium yet', () => {
+  assert.equal(awaitingMomentumQuote({ mode: 'momentum', price: 0 }), true);
+  assert.equal(awaitingMomentumQuote({ mode: 'momentum', price: 160 }), false);
+  // Cost always has a price (the entry); 0 there is not "awaiting".
+  assert.equal(awaitingMomentumQuote({ mode: 'cost', price: 0 }), false);
+  // A price-0 pending never fires on its own.
+  assert.equal(pendingReentryHit({ price: 0, dir: 'down' }, 150), false);
 });

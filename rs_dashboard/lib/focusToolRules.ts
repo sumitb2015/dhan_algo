@@ -497,6 +497,20 @@ export function evaluateReentry(
   return { enter: true, mode, reason: `re-entry ${mode} after ${what}` };
 }
 
+/**
+ * How long a momentum re-entry may wait for its new strike's first premium.
+ * The strike is picked when the leg closes, often a strike the quote feed
+ * was not carrying yet; without a premium there is no reference to measure
+ * the move from. Past this it is cancelled rather than measured from a
+ * premium seen long after the stop/target.
+ */
+export const MOMENTUM_QUOTE_WAIT_MS = 15_000;
+
+/** A momentum re-entry armed before its strike had a premium (price 0). */
+export function awaitingMomentumQuote(p: Pick<FocusPendingReentry, 'mode' | 'price'>): boolean {
+  return p.mode === 'momentum' && !(p.price > 0);
+}
+
 /** Has a waiting cost / momentum re-entry's price been reached? */
 export function pendingReentryHit(p: Pick<FocusPendingReentry, 'price' | 'dir'>, ltp: number): boolean {
   if (!(ltp > 0) || !(p.price > 0)) return false;
