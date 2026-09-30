@@ -619,19 +619,18 @@ const DEFAULT_CONFIG: FocusToolConfig = {
  *  `focus`) keeps mouse clicks silent, matching the inputs' own behaviour. */
 const FOCUS_RING = 'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500/60 focus-visible:ring-offset-1 focus-visible:ring-offset-zinc-950';
 
-/** Micro-type scale for dense control/label text. FocusTool runs almost
- *  entirely below Tailwind's text-xs (12px) floor — these are the four sizes
- *  already in use throughout the file, named once so new UI picks one of
- *  four instead of a fifth arbitrary value. */
-const TXT_MICRO   = 'text-[8px]';  // stat labels (SPOT/ATM/LOT/DTE), column footnotes
-const TXT_LABEL   = 'text-[9px]';  // field labels, badges, uppercase tags — default micro size
-const TXT_VALUE   = 'text-[10px]'; // secondary readouts: VWAP, PCR, timing text
-const TXT_CAPTION = 'text-[11px]'; // switch labels, primary compact inputs
+/** Type scale for dense control/label text, named once so new UI picks one
+ *  of four instead of a fifth arbitrary value. Raised one step (2026-09-30)
+ *  after 8–9px labels proved unreadable: nothing new should go below 10px. */
+const TXT_MICRO   = 'text-[10px]'; // stat labels (SPOT/ATM/LOT/DTE), column footnotes
+const TXT_LABEL   = 'text-[11px]'; // field labels, badges, uppercase tags — default micro size
+const TXT_VALUE   = 'text-xs';     // secondary readouts: VWAP, PCR, timing text
+const TXT_CAPTION = 'text-[13px]'; // switch labels, primary compact inputs
 
 function LivePulse({ active }: { active: boolean }) {
   return (
     <span title={active ? 'Live tick feed connected' : 'Live tick feed not running'} className={cn(
-      'inline-flex items-center gap-1.5 text-[9px] font-black px-2 py-0.5 rounded-full uppercase tracking-wider border',
+      'inline-flex items-center gap-1.5 text-[11px] font-black px-2 py-0.5 rounded-full uppercase tracking-wider border',
       active
         ? 'bg-rose-500/15 text-rose-400 border-rose-500/30'
         : 'bg-zinc-800 text-zinc-500 border-zinc-700',
@@ -735,7 +734,7 @@ function RuleNumStepper({ value, onCommit, className, title, disabled, wrapperCl
         disabled={disabled}
         title="Decrease by 1"
         aria-label="Decrease by 1"
-        className={cn('h-5 w-4 shrink-0 rounded bg-zinc-800 border border-zinc-700 text-zinc-300 text-[10px] font-bold flex items-center justify-center hover:bg-zinc-700 cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed transition-colors', FOCUS_RING)}
+        className={cn('h-5 w-4 shrink-0 rounded bg-zinc-800 border border-zinc-700 text-zinc-300 text-[11px] font-bold flex items-center justify-center hover:bg-zinc-700 cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed transition-colors', FOCUS_RING)}
       >
         -
       </button>
@@ -746,7 +745,7 @@ function RuleNumStepper({ value, onCommit, className, title, disabled, wrapperCl
         disabled={disabled}
         title="Increase by 1"
         aria-label="Increase by 1"
-        className={cn('h-5 w-4 shrink-0 rounded bg-zinc-800 border border-zinc-700 text-zinc-300 text-[10px] font-bold flex items-center justify-center hover:bg-violet-600 hover:border-violet-600 hover:text-oncolor cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed transition-colors', FOCUS_RING)}
+        className={cn('h-5 w-4 shrink-0 rounded bg-zinc-800 border border-zinc-700 text-zinc-300 text-[11px] font-bold flex items-center justify-center hover:bg-violet-600 hover:border-violet-600 hover:text-oncolor cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed transition-colors', FOCUS_RING)}
       >
         +
       </button>
@@ -809,7 +808,7 @@ function LegLotSelect({ value, onChange, className, title }: {
       title={title}
       onChange={e => onChange(Math.max(1, Number(e.target.value) || 1))}
       className={cn(
-        'text-[10px] font-bold h-6 px-0.5 border border-zinc-700 rounded bg-zinc-900 text-zinc-200',
+        'text-[11px] font-bold h-6 px-0.5 border border-zinc-700 rounded bg-zinc-900 text-zinc-200',
         'focus:outline-none focus:border-violet-500 cursor-pointer',
         className,
       )}
@@ -832,7 +831,7 @@ function LegOpenBadge({ pos }: { pos: PosRow | null }) {
     <span
       title={`${pos?.productType === 'SIM' ? 'Paper position' : 'Broker position'}: ${qty > 0 ? 'long' : 'short'} ${Math.abs(qty)} @ avg ${avg.toFixed(2)}`}
       className={cn(
-        'text-[9px] font-black px-1 py-0.5 rounded border uppercase tracking-wide whitespace-nowrap',
+        'text-[11px] font-black px-1 py-0.5 rounded border uppercase tracking-wide whitespace-nowrap',
         qty < 0
           ? 'bg-rose-500/15 text-rose-400 border-rose-500/30'
           : 'bg-emerald-500/15 text-emerald-400 border-emerald-500/30',
@@ -921,16 +920,17 @@ const REENTRY_MAX_OPTIONS = [1, 2, 3, 4, 5, 10, 20];
  * so they go through RuleNumInput (commit on blur/Enter — a half-typed "5"
  * on the way to "50" must never reach the rule engine).
  */
-function LegReentryControls({ row, onUpdate, onCancelPending, compact = false }: {
+function LegReentryControls({ row, onUpdate, onCancelPending, legTargetsElsewhere = false }: {
   row: FocusRow;
   onUpdate: (patch: Partial<FocusRow>) => void;
   onCancelPending: (leg: 'CE' | 'PE') => void;
-  compact?: boolean;
+  /** The CE/PE target inputs are rendered with each leg (table view) — don't repeat them here. */
+  legTargetsElsewhere?: boolean;
 }) {
   const sl = reentryConfig(row, 'sl');
   const tgt = reentryConfig(row, 'tgt');
-  const txt = compact ? 'text-[8.5px]' : 'text-[9px]';
-  const sel = cn('font-bold h-5 px-1 border border-zinc-700 rounded bg-zinc-900 text-zinc-200 focus:outline-none focus:border-violet-500 cursor-pointer', txt);
+  const txt = 'text-[11px]';
+  const sel = cn('font-bold h-6 px-1 border border-zinc-700 rounded bg-zinc-900 text-zinc-200 focus:outline-none focus:border-violet-500 cursor-pointer', txt);
   const lbl = 'inline-flex items-center gap-1 font-black text-zinc-400';
   const f = row.fill;
   const used = (t: 'sl' | 'tgt') => t === 'sl'
@@ -991,15 +991,16 @@ function LegReentryControls({ row, onUpdate, onCancelPending, compact = false }:
         {modeSelect('tgt')}
       </div>
       <div className="flex flex-wrap items-center gap-2">
+        {!legTargetsElsewhere && (<>
         <label className={lbl} title={`CE leg target: exit CE alone once its premium has decayed this ${tgtUnitWord} from its own entry. Blank = off`}>
           CE Tgt
           <RuleNumInput value={row.ceTgtPct ?? ''} onCommit={v => onUpdate({ ceTgtPct: v })} placeholder="off"
-            className={cn('w-9 h-5 text-center', txt)} />
+            className={cn('w-12 h-6 text-center', txt)} />
         </label>
         <label className={lbl} title={`PE leg target: exit PE alone once its premium has decayed this ${tgtUnitWord} from its own entry. Blank = off`}>
           PE Tgt
           <RuleNumInput value={row.peTgtPct ?? ''} onCommit={v => onUpdate({ peTgtPct: v })} placeholder="off"
-            className={cn('w-9 h-5 text-center', txt)} />
+            className={cn('w-12 h-6 text-center', txt)} />
         </label>
         <select value={row.legTgtUnit ?? 'pct'} aria-label="Leg target unit"
           title="Leg targets as a % of the leg's own entry, or as premium points below it (both legs)"
@@ -1007,6 +1008,7 @@ function LegReentryControls({ row, onUpdate, onCancelPending, compact = false }:
           <option value="pct">%</option>
           <option value="pts">pts</option>
         </select>
+        </>)}
         {anyOtm && (
           <label className={lbl} title="RE-OTM: strikes further OTM than the strike that closed (CE up, PE down)">
             OTM
@@ -1025,7 +1027,7 @@ function LegReentryControls({ row, onUpdate, onCancelPending, compact = false }:
               <option value="up">pts ↑</option>
             </select>
             <RuleNumInput value={row.reMomentumPts ?? ''} onCommit={v => onUpdate({ reMomentumPts: v })} placeholder="pts"
-              className={cn('w-9 h-5 text-center', txt)} />
+              className={cn('w-12 h-6 text-center', txt)} />
           </label>
         )}
         {anyOn && (
@@ -1090,7 +1092,7 @@ function LegSlLevels({
     )}>
       {legLevel != null && (
         <span
-          className={cn('text-[9px] font-mono font-bold tabular-nums', slTone(nowLeg, legLevel, leg === 'CE' ? 'text-emerald-400' : 'text-rose-400'))}
+          className={cn('text-[11px] font-mono font-bold tabular-nums', slTone(nowLeg, legLevel, leg === 'CE' ? 'text-emerald-400' : 'text-rose-400'))}
           title={`${leg} SL × fires when this leg's premium reaches ${legLevel.toFixed(2)} (entry × ${leg === 'CE' ? row.ceSlMultiplier : row.peSlMultiplier})`}
         >
           {leg} × {legLevel.toFixed(2)}
@@ -1098,7 +1100,7 @@ function LegSlLevels({
       )}
       {costLevel > 0 && (
         <span
-          className={cn('text-[9px] font-mono font-bold tabular-nums', slTone(nowLeg, costLevel, 'text-violet-300'))}
+          className={cn('text-[11px] font-mono font-bold tabular-nums', slTone(nowLeg, costLevel, 'text-violet-300'))}
           title={`SL moved to cost: the other leg stopped out, so ${leg} exits if its premium returns to its entry ${costLevel.toFixed(2)}`}
         >
           {leg} cost {costLevel.toFixed(2)}
@@ -1106,7 +1108,7 @@ function LegSlLevels({
       )}
       {tgtLevel > 0 && (
         <span
-          className="text-[9px] font-mono font-bold tabular-nums text-sky-300"
+          className="text-[11px] font-mono font-bold tabular-nums text-sky-300"
           title={`${leg} target: exits when this leg's premium decays to ${tgtLevel.toFixed(2)} (entry ${tgtEntry.toFixed(2)} − ${tgtWhat})`}
         >
           {leg} tgt {tgtLevel.toFixed(2)}
@@ -1114,7 +1116,7 @@ function LegSlLevels({
       )}
       {pairLevel != null && (
         <span
-          className={cn('text-[9px] font-mono font-bold tabular-nums', slTone(nowPair, pairLevel, 'text-amber-500'))}
+          className={cn('text-[11px] font-mono font-bold tabular-nums', slTone(nowPair, pairLevel, 'text-amber-500'))}
           title={`Pair SL × fires when combined lots×premium of this row's open legs reaches ${pairLevel.toFixed(2)} (combined entry × ${row.slMultiplier})`}
         >
           SL × {pairLevel.toFixed(2)}
@@ -1177,7 +1179,7 @@ function SegPill<T extends string>({
           key={o}
           onClick={() => onChange(o)}
           className={cn(
-            'text-[10px] font-bold px-2.5 py-0.5 rounded-md cursor-pointer transition-colors',
+            'text-[11px] font-bold px-2.5 py-0.5 rounded-md cursor-pointer transition-colors',
             value === o ? 'bg-violet-600 text-oncolor' : 'text-zinc-400 hover:text-zinc-200',
             FOCUS_RING,
           )}
@@ -1231,14 +1233,14 @@ function StrikeLegSelector({
   return (
     <div className="flex flex-col gap-0.5">
       <div className="flex items-center gap-1.5">
-        <span className={cn('text-[9px] font-black w-5', leg === 'CE' ? 'text-emerald-400' : 'text-rose-400')}>{leg}</span>
+        <span className={cn('text-[11px] font-black w-5', leg === 'CE' ? 'text-emerald-400' : 'text-rose-400')}>{leg}</span>
         {mode === 'ATM' ? (
           <select
             value={offset}
             disabled={locked}
             title={locked ? lockedTitle : `${leg} strike as a step offset from ATM`}
             onChange={e => onOffsetChange(Number(e.target.value))}
-            className="text-[10px] font-bold h-6 px-1 border border-zinc-700 rounded bg-zinc-900 text-zinc-200 focus:outline-none focus:border-violet-500 w-24 disabled:opacity-50 disabled:cursor-not-allowed"
+            className="text-[11px] font-bold h-6 px-1 border border-zinc-700 rounded bg-zinc-900 text-zinc-200 focus:outline-none focus:border-violet-500 w-28 disabled:opacity-50 disabled:cursor-not-allowed"
           >
             {OFFSET_OPTIONS.map(n => (
               <option key={n} value={n}>{offsetLabel(n, step)}</option>
@@ -1252,7 +1254,7 @@ function StrikeLegSelector({
           {resolvedStrike ?? '—'}
         </span>
         <span
-          className="text-[10px] font-mono font-semibold text-zinc-500 min-w-[38px] text-right"
+          className="text-[11px] font-mono font-semibold text-zinc-500 min-w-[38px] text-right"
           title={`Live ${leg} premium at this strike — the reference entry price`}
         >
           {resolvedStrike != null && ltp != null && ltp > 0 ? `@${ltp.toFixed(2)}` : '—'}
@@ -1294,21 +1296,21 @@ function StrikeLegSelector({
         <div className="flex items-center gap-1 pl-6">
           {buildupStyle ? (
             <span
-              className={cn('text-[8px] font-black px-1 py-0.5 rounded border leading-none', buildupStyle.cls)}
+              className={cn('text-[10px] font-black px-1 py-0.5 rounded border leading-none', buildupStyle.cls)}
               title={`${buildupStyle.text}${oiChgPct != null && oiChgPct !== 0 ? ` — OI ${oiChgPct > 0 ? '+' : ''}${oiChgPct.toFixed(1)}%` : ''}`}
             >
               {buildup}
             </span>
           ) : buildupExpiryHint ? (
             <span
-              className="text-[8px] font-bold text-zinc-500 leading-none px-1 py-0.5 rounded border border-zinc-700"
+              className="text-[10px] font-bold text-zinc-500 leading-none px-1 py-0.5 rounded border border-zinc-700"
               title={buildupExpiryHint}
             >
               OI n/a
             </span>
           ) : (
             <span
-              className="text-[8px] font-bold text-zinc-600 leading-none"
+              className="text-[10px] font-bold text-zinc-600 leading-none"
               title="OI buildup not classified yet (inside dead-band or waiting for prev-day baseline)"
             >
               —
@@ -1317,7 +1319,7 @@ function StrikeLegSelector({
           {buildupStyle && oiChgPct != null && oiChgPct !== 0 && (
             <span
               className={cn(
-                'text-[8px] font-mono font-semibold tabular-nums leading-none',
+                'text-[10px] font-mono font-semibold tabular-nums leading-none',
                 oiChgPct > 0 ? 'text-emerald-500' : 'text-rose-500',
               )}
               title={`OI change vs previous day: ${oiChgPct > 0 ? '+' : ''}${oiChgPct.toFixed(1)}%`}
@@ -1425,7 +1427,7 @@ function StrikeEditor({
             : 'ATM± picks a strike by steps from ATM; ₹ picks the closest strike priced at or below a target premium'}
         />
         <div className="flex items-center gap-2">
-          <label title="Keep CE and PE moving together" className="inline-flex items-center gap-1.5 text-[9px] font-bold text-zinc-400 hover:text-zinc-200 cursor-pointer select-none">
+          <label title="Keep CE and PE moving together" className="inline-flex items-center gap-1.5 text-[11px] font-bold text-zinc-400 hover:text-zinc-200 cursor-pointer select-none">
             <input type="checkbox" checked={row.linked ?? true}
               onChange={e => onUpdate({ linked: e.target.checked })}
               className="h-3 w-3 rounded-sm border-zinc-700 bg-zinc-900 accent-violet-500 cursor-pointer" />
@@ -1440,7 +1442,7 @@ function StrikeEditor({
               });
             }}
             title={anyOpen ? 'Locked while a leg is open — exit it first' : "Reset this row's strike settings to ATM"}
-            className={cn('text-[9px] text-zinc-500 hover:text-zinc-300 transition-colors cursor-pointer', FOCUS_RING)}
+            className={cn('text-[11px] text-zinc-500 hover:text-zinc-300 transition-colors cursor-pointer', FOCUS_RING)}
           >
             &times; reset
           </button>
@@ -1863,7 +1865,7 @@ function IndexGroupBar({
         </button>
 
         {group.enabled && (
-          <span className="flex items-center gap-1.5 text-[10px] font-bold px-2.5 py-0.5 rounded-full bg-emerald-500/10 text-emerald-400 border border-emerald-500/25">
+          <span className="flex items-center gap-1.5 text-[11px] font-bold px-2.5 py-0.5 rounded-full bg-emerald-500/10 text-emerald-400 border border-emerald-500/25">
             <span className="h-1.5 w-1.5 rounded-full bg-emerald-400 animate-pulse" />
             Running
           </span>
@@ -1873,14 +1875,14 @@ function IndexGroupBar({
 
         {/* ATM BY */}
         <div className="flex items-center gap-1.5">
-          <span className="text-[9px] font-black text-zinc-500 uppercase tracking-widest">ATM BY</span>
+          <span className="text-[11px] font-black text-zinc-500 uppercase tracking-widest">ATM BY</span>
           <SegPill options={['Spot', 'Fut'] as const} value={group.atmBy} onChange={v => onChange({ atmBy: v })}
             title="Pick the ATM strike off the index spot or off the future" />
         </div>
 
         {/* PRODUCT */}
         <div className="flex items-center gap-1.5">
-          <span className="text-[9px] font-black text-zinc-500 uppercase tracking-widest">PRODUCT</span>
+          <span className="text-[11px] font-black text-zinc-500 uppercase tracking-widest">PRODUCT</span>
           <select
             value={group.product}
             title="MIS is intraday and auto-squares off; NRML carries overnight"
@@ -1894,7 +1896,7 @@ function IndexGroupBar({
 
         {/* STRIKES Â± */}
         <div className="flex items-center gap-1.5">
-          <span className="text-[9px] font-black text-zinc-500 uppercase tracking-widest">STRIKES &plusmn;</span>
+          <span className="text-[11px] font-black text-zinc-500 uppercase tracking-widest">STRIKES &plusmn;</span>
           <select
             value={group.strikesOffset}
             title="Strikes away from ATM: 0 is a straddle, plus/minus n a strangle n steps wide"
@@ -1914,12 +1916,12 @@ function IndexGroupBar({
         {group.bookExit && (
           <div className="flex items-center gap-3">
             <div className="flex items-center gap-1.5">
-              <span className="text-[9px] font-black text-rose-400 uppercase">Spot H&uarr;</span>
+              <span className="text-[11px] font-black text-rose-400 uppercase">Spot H&uarr;</span>
               <RuleNumInput value={group.spotHigh} onCommit={v => onChange({ spotHigh: v })} className="w-16"
                 title="Book out when spot trades at or above this level. Applies when you leave the field, not while typing." />
             </div>
             <div className="flex items-center gap-1.5">
-              <span className="text-[9px] font-black text-emerald-400 uppercase">Spot L&darr;</span>
+              <span className="text-[11px] font-black text-emerald-400 uppercase">Spot L&darr;</span>
               <RuleNumInput value={group.spotLow} onCommit={v => onChange({ spotLow: v })} className="w-16"
                 title="Book out when spot trades at or below this level. Applies when you leave the field, not while typing." />
             </div>
@@ -1941,7 +1943,7 @@ function IndexGroupBar({
           </div>
         ))}
         {wsLive && (
-          <span className="text-[9px] font-black px-2 py-0.5 rounded-full bg-rose-500/15 text-rose-400 border border-rose-500/25 uppercase tracking-wider">
+          <span className="text-[11px] font-black px-2 py-0.5 rounded-full bg-rose-500/15 text-rose-400 border border-rose-500/25 uppercase tracking-wider">
             LIVE
           </span>
         )}
@@ -2062,6 +2064,99 @@ function FocusTableRowImpl({
   // day to day, so the filter is disabled rather than silently inert.
   const onNearestExpiry = !row.expiry || row.expiry === expiries[0];
 
+  /**
+   * One leg's pod: live premium, position and P&L with its order buttons on
+   * top; its OWN rules (leg SL ×, target) and their levels underneath, next
+   * to the partial-exit chips. Leg rules sit with the leg they act on.
+   */
+  const legPod = (leg: 'CE' | 'PE') => {
+    const isCe = leg === 'CE';
+    const ltp = isCe ? live.ltpCe : live.ltpPe;
+    const pos = isCe ? live.cePosition : live.pePosition;
+    const legFlat = isCe ? ceFlat : peFlat;
+    const pnl = isCe ? cePnl : pePnl;
+    const qty = isCe ? ceQty : peQty;
+    const setQty = isCe ? setCeQty : setPeQty;
+    const chips = isCe ? ceChips : peChips;
+    const tone = isCe ? 'text-emerald-400' : 'text-rose-400';
+    const btn = 'h-7 w-7 rounded bg-zinc-800 border border-zinc-700 text-zinc-200 font-bold flex items-center justify-center transition-colors disabled:opacity-30 disabled:cursor-not-allowed cursor-pointer text-sm';
+    return (
+      <div className="bg-zinc-950/40 border border-zinc-800/60 rounded-xl px-2.5 py-2 flex flex-col gap-1.5">
+        <div className="flex items-center justify-between gap-2">
+          <div className="flex items-center gap-2 min-w-0">
+            <span className={cn('text-[11px] font-black px-1.5 py-0.5 rounded border',
+              isCe ? 'bg-emerald-500/15 text-emerald-400 border-emerald-500/30' : 'bg-rose-500/15 text-rose-400 border-rose-500/30')}>{leg}</span>
+            <span className={cn('text-base font-mono font-black tabular-nums', tone)}>
+              {ltp != null ? `₹${ltp.toFixed(2)}` : '—'}
+            </span>
+            {rowOwnsLeg(row, leg) && pos && Number(pos.netQty) !== 0 ? (
+              <LegOpenBadge pos={pos} />
+            ) : (
+              <span className="text-[11px] font-mono font-bold text-zinc-500 uppercase tracking-widest px-1">Flat</span>
+            )}
+            {pnl != null && (
+              <span className={cn(
+                'text-xs font-mono font-black px-1.5 py-0.5 rounded border tabular-nums',
+                pnl > 0 ? 'bg-emerald-500/15 text-emerald-400 border-emerald-500/40 shadow-sm'
+                  : pnl < 0 ? 'bg-rose-500/15 text-rose-400 border-rose-500/40 shadow-sm'
+                  : 'bg-zinc-800 text-zinc-400 border-zinc-700'
+              )} title={`${leg} leg mark-to-market P&L`}>
+                {pnl > 0 ? '+' : ''}₹{pnl.toFixed(0)}
+              </span>
+            )}
+          </div>
+          <div className="flex items-center gap-1 shrink-0">
+            <LegLotSelect value={qty} onChange={setQty} className="w-10 h-7 text-xs" title={`Lots the ${leg} +/- buttons act on`} />
+            <button onClick={() => onAddLot(leg, qty)} disabled={!canTrade} title={canTrade ? `Add ${qty} lot(s) to ${leg}` : tradeBlockedWhy} aria-label={`Add ${qty} ${leg} lots`}
+              className={cn(btn, isCe ? 'hover:bg-emerald-600 hover:border-emerald-600 hover:text-oncolor' : 'hover:bg-rose-600 hover:border-rose-600 hover:text-oncolor', FOCUS_RING)}>+</button>
+            <button onClick={() => onReduceLot(leg, qty)} disabled={!canTrade || legFlat} title={legFlat ? 'Nothing open' : canTrade ? `Reduce ${leg} by ${qty} lot(s)` : tradeBlockedWhy} aria-label={`Reduce ${leg} by ${qty} lots`}
+              className={cn(btn, 'hover:bg-zinc-700', FOCUS_RING)}>-</button>
+            <button onClick={() => onExit(leg)} disabled={!canTrade || legFlat} title={legFlat ? 'Nothing open' : canTrade ? `Exit ${leg} leg` : tradeBlockedWhy}
+              className={cn('text-xs font-black uppercase tracking-wider px-2.5 h-7 rounded bg-rose-600 text-oncolor hover:bg-rose-500 transition-colors disabled:opacity-30 disabled:cursor-not-allowed cursor-pointer', FOCUS_RING)}>Exit</button>
+          </div>
+        </div>
+        <div className="flex items-center justify-between gap-2 flex-wrap pt-1.5 border-t border-zinc-800/40">
+          <div className="flex items-center gap-2 flex-wrap">
+            <label className="inline-flex items-center gap-1 text-[11px] font-black text-zinc-400"
+              title={`Exit ${leg} alone when its premium reaches its own entry × this — independent of the other leg and of the pair stop`}>
+              SL ×
+              <RuleNumInput value={(isCe ? row.ceSlMultiplier : row.peSlMultiplier) ?? '1.2'}
+                onCommit={v => onUpdate(isCe ? { ceSlMultiplier: v } : { peSlMultiplier: v })}
+                className="w-12 h-6 text-center text-[11px]" />
+            </label>
+            <label className="inline-flex items-center gap-1 text-[11px] font-black text-zinc-400"
+              title={`${leg} target: exit ${leg} alone once its premium has decayed this ${row.legTgtUnit === 'pts' ? 'many points' : '%'} from its own entry. Blank = off`}>
+              Tgt
+              <RuleNumInput value={(isCe ? row.ceTgtPct : row.peTgtPct) ?? ''}
+                onCommit={v => onUpdate(isCe ? { ceTgtPct: v } : { peTgtPct: v })}
+                placeholder="off" className="w-12 h-6 text-center text-[11px]" />
+              <select value={row.legTgtUnit ?? 'pct'} aria-label="Leg target unit (both legs)"
+                title="Leg targets as a % of the leg's own entry, or as premium points below it (applies to both legs)"
+                onChange={e => onUpdate({ legTgtUnit: e.target.value as 'pct' | 'pts' })}
+                className="text-[11px] font-bold h-6 px-0.5 border border-zinc-700 rounded bg-zinc-900 text-zinc-200 focus:outline-none focus:border-violet-500 cursor-pointer">
+                <option value="pct">%</option>
+                <option value="pts">pts</option>
+              </select>
+            </label>
+            <LegSlLevels row={row} live={live} leg={leg} lotSize={lotSize} inline />
+          </div>
+          {!legFlat && (
+            <div className="flex items-center gap-1 font-mono text-[11px]">
+              <span className="text-[11px] font-bold text-zinc-500 uppercase tracking-wider mr-0.5">Partial</span>
+              {chips.map(c => (
+                <button key={c.pct} type="button" onClick={() => onExitPartial(leg, c.pct as 25 | 50 | 75)}
+                  disabled={!canTrade || !c.enabled} title={canTrade ? c.title : tradeBlockedWhy}
+                  className={cn('px-1.5 py-0.5 rounded bg-rose-950/60 border border-rose-800/50 text-rose-300 hover:bg-rose-800 hover:text-oncolor transition-all disabled:opacity-30 disabled:cursor-not-allowed cursor-pointer', FOCUS_RING)}>
+                  {c.pct}%
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
+      </div>
+    );
+  };
+
   return (
     <tr className={cn(
       'border-b border-zinc-800/80 transition-colors',
@@ -2082,7 +2177,7 @@ function FocusTableRowImpl({
           {/* Top Line: Underlying chip + Side Selector + Lots + Delete */}
           <div className="flex items-center justify-between gap-1.5 pb-1.5 border-b border-zinc-800/60">
             <div className="flex items-center gap-1.5">
-              <span className={cn('inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[9px] font-black border', UNDERLYING_CHIP[row.underlying])}>
+              <span className={cn('inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[11px] font-black border', UNDERLYING_CHIP[row.underlying])}>
                 <span className={cn('h-1.5 w-1.5 rounded-full', UNDERLYING_DOT[row.underlying])} />
                 {row.underlying}
               </span>
@@ -2096,7 +2191,7 @@ function FocusTableRowImpl({
             </div>
             <div className="flex items-center gap-1.5">
               <div className="flex items-center gap-1">
-                <span className="text-[8.5px] font-bold text-zinc-500 uppercase">Lots</span>
+                <span className="text-[10px] font-bold text-zinc-500 uppercase">Lots</span>
                 <LotStepper value={row.lots} onChange={v => onUpdate({ lots: v })} />
               </div>
               <button
@@ -2121,13 +2216,13 @@ function FocusTableRowImpl({
           {/* Middle: Entry & Exit Timing */}
           <div className="grid grid-cols-2 gap-2">
             <div className="flex items-center justify-between gap-1 bg-zinc-900/60 border border-zinc-800/60 rounded-lg px-2 py-1">
-              <span className="text-[8px] font-black text-zinc-400 uppercase tracking-wider flex items-center gap-1">
+              <span className="text-[10px] font-black text-zinc-400 uppercase tracking-wider flex items-center gap-1">
                 <Clock className="h-2.5 w-2.5 text-zinc-500" /> ENTRY
               </span>
               <TimeInput value={row.entryTime} onChange={v => onUpdate({ entryTime: v })} />
             </div>
             <div className="flex items-center justify-between gap-1 bg-zinc-900/60 border border-zinc-800/60 rounded-lg px-2 py-1">
-              <span className="text-[8px] font-black text-zinc-400 uppercase tracking-wider flex items-center gap-1">
+              <span className="text-[10px] font-black text-zinc-400 uppercase tracking-wider flex items-center gap-1">
                 <Clock className="h-2.5 w-2.5 text-zinc-500" /> EXIT
               </span>
               <TimeInput value={row.exitTime} onChange={v => onUpdate({ exitTime: v })} />
@@ -2137,7 +2232,7 @@ function FocusTableRowImpl({
           {/* Bottom: Expiry + DTE */}
           <div className="flex items-center justify-between gap-1 pt-1 border-t border-zinc-800/60">
             <div className="flex items-center gap-1 flex-1 min-w-0">
-              <span className="text-[8px] font-black text-zinc-500 uppercase shrink-0 flex items-center gap-0.5">
+              <span className="text-[10px] font-black text-zinc-500 uppercase shrink-0 flex items-center gap-0.5">
                 <Calendar className="h-2.5 w-2.5 text-zinc-500" /> EXPY
               </span>
               <select
@@ -2145,7 +2240,7 @@ function FocusTableRowImpl({
                 disabled={expiryLocked || expiries.length === 0}
                 onChange={e => onUpdate({ expiry: e.target.value })}
                 title={expiryLocked ? 'Locked while leg open' : 'Contract Expiry'}
-                className="text-[9px] font-mono font-bold h-6 px-1.5 border border-zinc-700/80 rounded bg-zinc-900 text-zinc-200 focus:outline-none focus:border-violet-500 disabled:opacity-50 disabled:cursor-not-allowed w-full cursor-pointer"
+                className="text-[11px] font-mono font-bold h-6 px-1.5 border border-zinc-700/80 rounded bg-zinc-900 text-zinc-200 focus:outline-none focus:border-violet-500 disabled:opacity-50 disabled:cursor-not-allowed w-full cursor-pointer"
               >
                 {expiries.map(e => <option key={e} value={e}>{e}</option>)}
               </select>
@@ -2158,7 +2253,7 @@ function FocusTableRowImpl({
                   onClick={() => onUpdate({ dte: d })}
                   disabled={!onNearestExpiry}
                   className={cn(
-                    'text-[8.5px] font-mono font-extrabold px-1.5 py-0.5 rounded cursor-pointer transition-colors disabled:opacity-30 disabled:cursor-not-allowed',
+                    'text-[10px] font-mono font-extrabold px-1.5 py-0.5 rounded cursor-pointer transition-colors disabled:opacity-30 disabled:cursor-not-allowed',
                     row.dte === d ? 'bg-violet-600 text-oncolor' : 'text-zinc-400 hover:text-zinc-200',
                     FOCUS_RING,
                   )}
@@ -2191,123 +2286,35 @@ function FocusTableRowImpl({
         </div>
       </td>
 
-      {/* 4. CALL & PUT LEG TRADING PODS */}
-      <td className="p-3 align-top min-w-[360px] border-r border-zinc-700/60">
+      {/* 4. CE / PE LEGS — each leg's orders, own SL × / target and levels, then re-entry */}
+      <td className="p-3 align-top min-w-[480px] border-r border-zinc-700/60">
         <div className="flex flex-col gap-2">
-          {/* CE Leg Strip */}
-          <div className="bg-zinc-950/40 border border-zinc-800/60 rounded-xl p-2 flex flex-col gap-1.5">
-            <div className="flex items-center justify-between gap-1.5">
-              <div className="flex items-center gap-1.5">
-                <span className="text-[9px] font-black px-1.5 py-0.5 rounded bg-emerald-500/15 text-emerald-400 border border-emerald-500/30">CE</span>
-                <span className="text-[13px] font-mono font-black text-emerald-400 tabular-nums">
-                  {live.ltpCe != null ? `₹${live.ltpCe.toFixed(2)}` : '—'}
-                </span>
-                {rowOwnsLeg(row, 'CE') && live.cePosition && Number(live.cePosition.netQty) !== 0 ? (
-                  <LegOpenBadge pos={live.cePosition} />
-                ) : (
-                  <span className="text-[8px] font-mono font-bold text-zinc-500 uppercase tracking-widest px-1">Flat</span>
-                )}
-                {cePnl != null && (
-                  <span className={cn(
-                    'text-[10px] font-mono font-black px-1.5 py-0.5 rounded border tabular-nums',
-                    cePnl > 0 ? 'bg-emerald-500/15 text-emerald-400 border-emerald-500/40 shadow-sm'
-                      : cePnl < 0 ? 'bg-rose-500/15 text-rose-400 border-rose-500/40 shadow-sm'
-                      : 'bg-zinc-800 text-zinc-400 border-zinc-700'
-                  )} title="CE leg mark-to-market P&L">
-                    {cePnl > 0 ? '+' : ''}₹{cePnl.toFixed(0)}
-                  </span>
-                )}
-                <LegSlLevels row={row} live={live} leg="CE" lotSize={lotSize} inline />
-              </div>
-              <div className="flex items-center gap-1">
-                <LegLotSelect value={ceQty} onChange={setCeQty} className="w-8 h-6 text-[10px]" title="Lots CE +/- buttons act on" />
-                <button onClick={() => onAddLot('CE', ceQty)} disabled={!canTrade} title={canTrade ? `Add ${ceQty} lot(s) to CE` : tradeBlockedWhy} aria-label={`Add ${ceQty} CE lots`} className={cn('h-6 w-6 rounded bg-zinc-800 border border-zinc-700 text-zinc-200 font-bold flex items-center justify-center hover:bg-emerald-600 hover:border-emerald-600 hover:text-oncolor transition-colors disabled:opacity-30 disabled:cursor-not-allowed cursor-pointer text-xs', FOCUS_RING)}>+</button>
-                <button onClick={() => onReduceLot('CE', ceQty)} disabled={!canTrade || ceFlat} title={ceFlat ? 'Nothing open' : canTrade ? `Reduce CE by ${ceQty} lot(s)` : tradeBlockedWhy} aria-label={`Reduce CE by ${ceQty} lots`} className={cn('h-6 w-6 rounded bg-zinc-800 border border-zinc-700 text-zinc-200 font-bold flex items-center justify-center hover:bg-zinc-700 transition-colors disabled:opacity-30 disabled:cursor-not-allowed cursor-pointer text-xs', FOCUS_RING)}>-</button>
-                <button onClick={() => onExit('CE')} disabled={!canTrade || ceFlat} title={ceFlat ? 'Nothing open' : canTrade ? 'Exit CE leg' : tradeBlockedWhy} className={cn('text-[10px] font-black uppercase tracking-wider px-2 h-6 rounded bg-rose-600 text-oncolor hover:bg-rose-500 transition-colors disabled:opacity-30 disabled:cursor-not-allowed cursor-pointer', FOCUS_RING)}>Exit</button>
-              </div>
-            </div>
-            {!ceFlat && (
-              <div className="flex items-center justify-end gap-1 font-mono text-[9px] pt-1 border-t border-zinc-800/40">
-                <span className="text-[8px] font-bold text-zinc-500 uppercase tracking-wider mr-1">Partial:</span>
-                {ceChips.map(c => (
-                  <button key={c.pct} type="button" onClick={() => onExitPartial('CE', c.pct as 25 | 50 | 75)}
-                    disabled={!canTrade || !c.enabled} title={canTrade ? c.title : tradeBlockedWhy}
-                    className={cn('px-1.5 py-0.5 rounded bg-rose-950/60 border border-rose-800/50 text-rose-300 hover:bg-rose-800 hover:text-oncolor transition-all disabled:opacity-30 disabled:cursor-not-allowed cursor-pointer', FOCUS_RING)}>
-                    {c.pct}%
-                  </button>
-                ))}
-              </div>
-            )}
-          </div>
-
-          {/* PE Leg Strip */}
-          <div className="bg-zinc-950/40 border border-zinc-800/60 rounded-xl p-2 flex flex-col gap-1.5">
-            <div className="flex items-center justify-between gap-1.5">
-              <div className="flex items-center gap-1.5">
-                <span className="text-[9px] font-black px-1.5 py-0.5 rounded bg-rose-500/15 text-rose-400 border border-rose-500/30">PE</span>
-                <span className="text-[13px] font-mono font-black text-rose-400 tabular-nums">
-                  {live.ltpPe != null ? `₹${live.ltpPe.toFixed(2)}` : '—'}
-                </span>
-                {rowOwnsLeg(row, 'PE') && live.pePosition && Number(live.pePosition.netQty) !== 0 ? (
-                  <LegOpenBadge pos={live.pePosition} />
-                ) : (
-                  <span className="text-[8px] font-mono font-bold text-zinc-500 uppercase tracking-widest px-1">Flat</span>
-                )}
-                {pePnl != null && (
-                  <span className={cn(
-                    'text-[10px] font-mono font-black px-1.5 py-0.5 rounded border tabular-nums',
-                    pePnl > 0 ? 'bg-emerald-500/15 text-emerald-400 border-emerald-500/40 shadow-sm'
-                      : pePnl < 0 ? 'bg-rose-500/15 text-rose-400 border-rose-500/40 shadow-sm'
-                      : 'bg-zinc-800 text-zinc-400 border-zinc-700'
-                  )} title="PE leg mark-to-market P&L">
-                    {pePnl > 0 ? '+' : ''}₹{pePnl.toFixed(0)}
-                  </span>
-                )}
-                <LegSlLevels row={row} live={live} leg="PE" lotSize={lotSize} inline />
-              </div>
-              <div className="flex items-center gap-1">
-                <LegLotSelect value={peQty} onChange={setPeQty} className="w-8 h-6 text-[10px]" title="Lots PE +/- buttons act on" />
-                <button onClick={() => onAddLot('PE', peQty)} disabled={!canTrade} title={canTrade ? `Add ${peQty} lot(s) to PE` : tradeBlockedWhy} aria-label={`Add ${peQty} PE lots`} className={cn('h-6 w-6 rounded bg-zinc-800 border border-zinc-700 text-zinc-200 font-bold flex items-center justify-center hover:bg-rose-600 hover:border-rose-600 hover:text-oncolor transition-colors disabled:opacity-30 disabled:cursor-not-allowed cursor-pointer text-xs', FOCUS_RING)}>+</button>
-                <button onClick={() => onReduceLot('PE', peQty)} disabled={!canTrade || peFlat} title={peFlat ? 'Nothing open' : canTrade ? `Reduce PE by ${peQty} lot(s)` : tradeBlockedWhy} aria-label={`Reduce PE by ${peQty} lots`} className={cn('h-6 w-6 rounded bg-zinc-800 border border-zinc-700 text-zinc-200 font-bold flex items-center justify-center hover:bg-zinc-700 transition-colors disabled:opacity-30 disabled:cursor-not-allowed cursor-pointer text-xs', FOCUS_RING)}>-</button>
-                <button onClick={() => onExit('PE')} disabled={!canTrade || peFlat} title={peFlat ? 'Nothing open' : canTrade ? 'Exit PE leg' : tradeBlockedWhy} className={cn('text-[10px] font-black uppercase tracking-wider px-2 h-6 rounded bg-rose-600 text-oncolor hover:bg-rose-500 transition-colors disabled:opacity-30 disabled:cursor-not-allowed cursor-pointer', FOCUS_RING)}>Exit</button>
-              </div>
-            </div>
-            {!peFlat && (
-              <div className="flex items-center justify-end gap-1 font-mono text-[9px] pt-1 border-t border-zinc-800/40">
-                <span className="text-[8px] font-bold text-zinc-500 uppercase tracking-wider mr-1">Partial:</span>
-                {peChips.map(c => (
-                  <button key={c.pct} type="button" onClick={() => onExitPartial('PE', c.pct as 25 | 50 | 75)}
-                    disabled={!canTrade || !c.enabled} title={canTrade ? c.title : tradeBlockedWhy}
-                    className={cn('px-1.5 py-0.5 rounded bg-rose-950/60 border border-rose-800/50 text-rose-300 hover:bg-rose-800 hover:text-oncolor transition-all disabled:opacity-30 disabled:cursor-not-allowed cursor-pointer', FOCUS_RING)}>
-                    {c.pct}%
-                  </button>
-                ))}
-              </div>
-            )}
+          {legPod('CE')}
+          {legPod('PE')}
+          <div className="bg-zinc-950/40 border border-zinc-800/60 rounded-xl px-2.5 py-2 flex flex-col gap-1">
+            <span className="text-[11px] font-black uppercase tracking-wider text-zinc-500">Re-entry after a leg SL × / target</span>
+            <LegReentryControls row={row} onUpdate={onUpdate} onCancelPending={onCancelPending} legTargetsElsewhere />
           </div>
         </div>
       </td>
 
-      {/* 5. SAFEGUARDS & COMMAND DESK */}
-      <td className="p-3 align-top min-w-[320px]">
-        <div className="flex flex-col gap-2 bg-zinc-950/40 border border-zinc-800/60 rounded-xl p-2.5">
-          {/* Header: Status Pill + Realised/Unrealised P&L */}
-          <div className="flex items-center justify-between border-b border-zinc-800/60 pb-1.5">
-            <div className="flex items-center gap-1.5">
-              <span className={cn('text-[9px] font-black uppercase tracking-wider px-2 py-0.5 rounded-full border', STATUS_PILL[shownStatus(row, flat)])}>
+      {/* 5. SAFEGUARDS & COMMAND DESK — row-wide rules only */}
+      <td className="p-3 align-top min-w-[300px]">
+        <div className="flex flex-col gap-2.5 bg-zinc-950/40 border border-zinc-800/60 rounded-xl p-2.5">
+          {/* Header: Status Pill + row P&L */}
+          <div className="flex items-center justify-between border-b border-zinc-800/60 pb-2">
+            <div className="flex items-center gap-2">
+              <span className={cn('text-[11px] font-black uppercase tracking-wider px-2 py-0.5 rounded-full border', STATUS_PILL[shownStatus(row, flat)])}>
                 {shownStatus(row, flat)}
               </span>
-              <div className="flex items-center gap-1">
-                <span className="text-[9px] font-black uppercase tracking-wider text-zinc-400">P&amp;L:</span>
-                <span className={cn(
-                  'text-xs font-mono font-black px-2 py-0.5 rounded border tabular-nums',
-                  live.pnl > 0 ? 'bg-emerald-500/15 text-emerald-400 border-emerald-500/40 shadow-sm shadow-emerald-500/10'
-                    : live.pnl < 0 ? 'bg-rose-500/15 text-rose-400 border-rose-500/40 shadow-sm shadow-rose-500/10'
-                    : 'bg-zinc-900 border-zinc-700/60 text-zinc-400'
-                )} title="Row total P&L (realized + open mark-to-market)">
-                  {live.pnl > 0 ? '+' : ''}₹{live.pnl.toFixed(0)}
-                </span>
-              </div>
+              <span className={cn(
+                'text-sm font-mono font-black px-2 py-0.5 rounded border tabular-nums',
+                live.pnl > 0 ? 'bg-emerald-500/15 text-emerald-400 border-emerald-500/40 shadow-sm shadow-emerald-500/10'
+                  : live.pnl < 0 ? 'bg-rose-500/15 text-rose-400 border-rose-500/40 shadow-sm shadow-rose-500/10'
+                  : 'bg-zinc-900 border-zinc-700/60 text-zinc-400'
+              )} title="Row total P&L (realized + open mark-to-market)">
+                {live.pnl > 0 ? '+' : ''}₹{live.pnl.toFixed(0)}
+              </span>
             </div>
 
             <div className="flex items-center gap-1.5">
@@ -2319,7 +2326,7 @@ function FocusTableRowImpl({
                   ceTgtPct: '', peTgtPct: '', noReEntryAfter: '',
                 })}
                 title="Clear rules"
-                className={cn('text-[8.5px] text-zinc-500 hover:text-zinc-300 transition-colors cursor-pointer', FOCUS_RING)}
+                className={cn('text-[11px] text-zinc-500 hover:text-zinc-300 transition-colors cursor-pointer', FOCUS_RING)}
               >
                 &times; clear
               </button>
@@ -2337,68 +2344,65 @@ function FocusTableRowImpl({
                   FOCUS_RING,
                 )}
               >
-                <Trash2 className="h-3.5 w-3.5" />
+                <Trash2 className="h-4 w-4" />
               </button>
             </div>
           </div>
 
-          {/* Quick Rules Grid */}
-          <div className="grid grid-cols-2 gap-1.5 text-[9px]">
-            <div className="flex items-center gap-1 bg-zinc-900/60 border border-zinc-800/60 rounded px-1.5 py-0.5">
-              <span className="text-amber-400 text-[8.5px] font-black w-6 shrink-0">SL ₹</span>
-              <RuleNumInput value={row.slRupees} onCommit={v => onUpdate({ slRupees: v })} className="w-full flex-1 min-w-0 h-5 text-center text-[9px]" title="Rupee Stop Loss" />
+          {/* Row-wide rules: ₹ stop, pair premium multiple, spot levels */}
+          <div className="grid grid-cols-2 gap-1.5">
+            <label className="flex items-center gap-1.5 bg-zinc-900/60 border border-zinc-800/60 rounded-lg px-2 py-1" title="Row stop loss in ₹ (both legs together)">
+              <span className="text-amber-400 text-[11px] font-black w-12 shrink-0">SL ₹</span>
+              <RuleNumInput value={row.slRupees} onCommit={v => onUpdate({ slRupees: v })} placeholder="off" className="w-full flex-1 min-w-0 h-7 text-center text-xs" />
+            </label>
+            <label className="flex items-center gap-1.5 bg-zinc-900/60 border border-zinc-800/60 rounded-lg px-2 py-1" title="Pair stop: exit both legs when their combined premium reaches entry × this">
+              <span className="text-amber-400 text-[11px] font-black w-12 shrink-0">Pair ×</span>
+              <RuleNumInput value={row.slMultiplier} onCommit={v => onUpdate({ slMultiplier: v })} className="w-full flex-1 min-w-0 h-7 text-center text-xs" />
+            </label>
+            <div className="flex items-center gap-1.5 bg-zinc-900/60 border border-zinc-800/60 rounded-lg px-2 py-1">
+              <span className="text-rose-400 text-[11px] font-black w-12 shrink-0">Spot H&uarr;</span>
+              <RuleNumStepper value={row.levelHigh} onCommit={v => onUpdate({ levelHigh: v })} wrapperClassName="w-full flex-1 flex items-center gap-0.5" className="w-full flex-1 min-w-0 h-7 text-center text-xs" title="Exit the row when spot reaches this high" />
             </div>
-            <div className="flex items-center gap-1 bg-zinc-900/60 border border-zinc-800/60 rounded px-1.5 py-0.5">
-              <span className="text-amber-500 text-[8.5px] font-black w-6 shrink-0">SL &times;</span>
-              <RuleNumInput value={row.slMultiplier} onCommit={v => onUpdate({ slMultiplier: v })} className="w-full flex-1 min-w-0 h-5 text-center text-[9px]" title="Pair Multiplier Stop Loss" />
-            </div>
-            <div className="flex items-center gap-1 bg-zinc-900/60 border border-zinc-800/60 rounded px-1.5 py-0.5">
-              <span className="text-rose-400 text-[8.5px] font-black w-6 shrink-0">H&uarr;</span>
-              <RuleNumStepper value={row.levelHigh} onCommit={v => onUpdate({ levelHigh: v })} wrapperClassName="w-full flex-1 flex items-center gap-0.5" className="w-full flex-1 min-w-0 h-5 text-center text-[9px]" title="Spot High Exit" />
-            </div>
-            <div className="flex items-center gap-1 bg-zinc-900/60 border border-zinc-800/60 rounded px-1.5 py-0.5">
-              <span className="text-emerald-400 text-[8.5px] font-black w-6 shrink-0">L&darr;</span>
-              <RuleNumStepper value={row.levelLow} onCommit={v => onUpdate({ levelLow: v })} wrapperClassName="w-full flex-1 flex items-center gap-0.5" className="w-full flex-1 min-w-0 h-5 text-center text-[9px]" title="Spot Low Exit" />
+            <div className="flex items-center gap-1.5 bg-zinc-900/60 border border-zinc-800/60 rounded-lg px-2 py-1">
+              <span className="text-emerald-400 text-[11px] font-black w-12 shrink-0">Spot L&darr;</span>
+              <RuleNumStepper value={row.levelLow} onCommit={v => onUpdate({ levelLow: v })} wrapperClassName="w-full flex-1 flex items-center gap-0.5" className="w-full flex-1 min-w-0 h-7 text-center text-xs" title="Exit the row when spot falls to this low" />
             </div>
           </div>
 
-          {/* VWAP sub-bar */}
-          <div className="flex items-center justify-between gap-1 text-[8.5px]">
-            <SwitchToggle checked={row.levelVw} onChange={v => onUpdate({ levelVw: v })} label="VWAP" title="VWAP Exit Rule" />
+          {/* VWAP exit */}
+          <div className="flex items-center justify-between gap-1.5 text-[11px]">
+            <SwitchToggle checked={row.levelVw} onChange={v => onUpdate({ levelVw: v })} label="VWAP exit" title="Exit when the combined premium crosses its session-open VWAP against you" />
             {row.levelVw && (
-              <div className="flex items-center gap-1">
-                <select value={row.vwapInterval || '1'} onChange={e => onUpdate({ vwapInterval: e.target.value })} className="text-[8.5px] font-bold h-5 px-1 border border-zinc-700 rounded bg-zinc-900 text-zinc-300">
+              <div className="flex items-center gap-1.5">
+                <select value={row.vwapInterval || '1'} onChange={e => onUpdate({ vwapInterval: e.target.value })} aria-label="VWAP candle interval" className="text-[11px] font-bold h-6 px-1 border border-zinc-700 rounded bg-zinc-900 text-zinc-300">
                   <option value="1">1m</option><option value="5">5m</option>
                 </select>
-                <RuleNumInput value={row.vwapBufferPct} onCommit={v => onUpdate({ vwapBufferPct: v })} className="w-8 h-5 text-center text-[8.5px]" title="Buffer %" />
-                <span className="font-mono text-zinc-400">{live.vwap != null ? `VWAP ${live.vwap.toFixed(2)}` : 'VWAP —'}</span>
+                <RuleNumInput value={row.vwapBufferPct} onCommit={v => onUpdate({ vwapBufferPct: v })} className="w-12 h-6 text-center text-[11px]" title="Buffer %" />
+                <span className="font-mono text-zinc-300">{live.vwap != null ? `VWAP ${live.vwap.toFixed(2)}` : 'VWAP —'}</span>
               </div>
             )}
           </div>
 
-          {/* After a leg SL × hit */}
-          <LegReentryControls row={row} onUpdate={onUpdate} onCancelPending={onCancelPending} compact />
-
           {/* Actions: Arm & Exit All */}
-          <div className="flex items-center gap-2 pt-1 border-t border-zinc-800/60">
+          <div className="flex items-center gap-2 pt-2 border-t border-zinc-800/60">
             {(shownStatus(row, flat) === 'draft' || shownStatus(row, flat) === 'exited') && (
-              <button onClick={onArm} className={cn('flex-1 flex items-center justify-center gap-1 text-[11px] font-black py-1 rounded-lg bg-violet-600 text-oncolor hover:bg-violet-500 cursor-pointer shadow-sm transition-all', FOCUS_RING)}>
-                <Zap className="h-3 w-3" /> Arm
+              <button onClick={onArm} className={cn('flex-1 flex items-center justify-center gap-1.5 text-xs font-black py-1.5 rounded-lg bg-violet-600 text-oncolor hover:bg-violet-500 cursor-pointer shadow-sm transition-all', FOCUS_RING)}>
+                <Zap className="h-3.5 w-3.5" /> Arm
               </button>
             )}
             {row.status === 'armed' && (
-              <button onClick={onDisarm} className={cn('flex-1 flex items-center justify-center gap-1 text-[11px] font-bold py-1 rounded-lg bg-zinc-800 border border-zinc-700 text-zinc-300 hover:bg-zinc-700 cursor-pointer transition-all', FOCUS_RING)}>
-                <ShieldOff className="h-3 w-3" /> Disarm
+              <button onClick={onDisarm} className={cn('flex-1 flex items-center justify-center gap-1.5 text-xs font-bold py-1.5 rounded-lg bg-zinc-800 border border-zinc-700 text-zinc-300 hover:bg-zinc-700 cursor-pointer transition-all', FOCUS_RING)}>
+                <ShieldOff className="h-3.5 w-3.5" /> Disarm
               </button>
             )}
             {shownStatus(row, flat) === 'entered' && (
-              <div className="flex-1 flex items-center justify-center gap-1 py-1 text-[9px] font-bold text-emerald-400 bg-emerald-500/10 border border-emerald-500/20 rounded-lg">
+              <div className="flex-1 flex items-center justify-center gap-1.5 py-1.5 text-xs font-bold text-emerald-400 bg-emerald-500/10 border border-emerald-500/20 rounded-lg">
                 <span className="h-1.5 w-1.5 rounded-full bg-emerald-400 animate-pulse" /> Active
               </div>
             )}
             <button onClick={() => onExit('ALL')} disabled={flat || !canTrade}
-              className={cn('flex-1 flex items-center justify-center gap-1 text-[11px] font-black py-1 rounded-lg bg-rose-600 text-oncolor hover:bg-rose-500 disabled:opacity-30 disabled:cursor-not-allowed cursor-pointer shadow-sm transition-all', FOCUS_RING)}>
-              <ShieldOff className="h-3 w-3" /> Exit All
+              className={cn('flex-1 flex items-center justify-center gap-1.5 text-xs font-black py-1.5 rounded-lg bg-rose-600 text-oncolor hover:bg-rose-500 disabled:opacity-30 disabled:cursor-not-allowed cursor-pointer shadow-sm transition-all', FOCUS_RING)}>
+              <ShieldOff className="h-3.5 w-3.5" /> Exit All
             </button>
           </div>
         </div>
@@ -5945,14 +5949,14 @@ export default function FocusTool() {
                      wrapper above and the Level Exits column was simply
                      clipped: no scrollbar, no way to reach it. */
                   <div className="overflow-x-auto">
-                  <table className="w-full border-collapse text-left min-w-[1360px]">
+                  <table className="w-full border-collapse text-left min-w-[1500px]">
                     <thead>
-                      <tr className="bg-zinc-800/90 border-b border-zinc-700/80 text-[10px] font-extrabold text-zinc-300 uppercase tracking-wider">
+                      <tr className="bg-zinc-800 border-b border-zinc-700/80 text-xs font-bold text-white uppercase tracking-wider">
                         <th className="py-2 px-3 border-r border-zinc-700/60" title="Underlying, timing, side, lots, and expiry">Strategy &amp; Setup</th>
                         <th className="py-2 px-3 border-r border-zinc-700/60" title="CE and PE strikes, picked by ATM offset or target premium">Strikes &amp; Selection</th>
                         <th className="py-2 px-3 border-r border-zinc-700/60" title="Combined premium, CE/PE breakdown, ₹ value and Val/OI PCR">Market Telemetry</th>
-                        <th className="py-2 px-3 border-r border-zinc-700/60" title="Call (CE) and Put (PE) trading controls, sizes, and quick exits">Call (CE) &amp; Put (PE) Orders</th>
-                        <th className="py-2 px-3" title="Status, P&L, stop loss, spot level exits, arm, and exit all">Safeguards &amp; Command</th>
+                        <th className="py-2 px-3 border-r border-zinc-700/60" title="Each leg's orders, its own SL × and target, and re-entry after a leg stop or target">CE / PE Legs &amp; Re-entry</th>
+                        <th className="py-2 px-3" title="Status, row P&L, row-wide stops (₹, pair ×, spot levels, VWAP), arm and exit all">Safeguards &amp; Command</th>
                       </tr>
                     </thead>
                     <tbody>

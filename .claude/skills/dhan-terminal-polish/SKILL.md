@@ -41,11 +41,17 @@ small, consistent set used inconsistently, not truly random:
 
 ```ts
 // Name the scale that's already there instead of inventing a fifth value.
-const TXT_MICRO   = 'text-[8px]';  // stat labels, column footnotes
-const TXT_LABEL   = 'text-[9px]';  // field labels, badges — default micro size
-const TXT_VALUE   = 'text-[10px]'; // secondary readouts
-const TXT_CAPTION = 'text-[11px]'; // switch labels, primary compact inputs
+const TXT_MICRO   = 'text-[10px]'; // stat labels, column footnotes
+const TXT_LABEL   = 'text-[11px]'; // field labels, badges — default micro size
+const TXT_VALUE   = 'text-xs';     // secondary readouts
+const TXT_CAPTION = 'text-[13px]'; // switch labels, primary compact inputs
 ```
+
+**Floor: 10px.** FocusTool originally ran this scale at 8/9/10/11px; on a
+1865px-wide screen the 8–9px labels were unreadable, so it was raised one step
+(2026-09-30). Don't add new text below 10px on an operational page — if a row
+doesn't fit, rebalance the columns (move leg-level controls next to the leg
+they act on, keep row-wide rules together) instead of shrinking the type.
 
 Migrate existing lines to the constants only where a section is already being
 touched for another reason — a mechanical file-wide find/replace on a
