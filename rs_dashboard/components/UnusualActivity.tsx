@@ -3,6 +3,7 @@
 import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import NavBar from '@/components/NavBar';
 import { isUnderlyingLive } from '@/lib/marketHours';
+import { fmtNum } from '@/lib/numberFormat';
 import {
   AlertTriangle,
   ArrowDownRight,
@@ -82,13 +83,6 @@ const UNDERLYING_OPTIONS = [
   { label: 'ICICIBANK', value: 'ICICIBANK' },
   { label: 'TCS', value: 'TCS' },
 ];
-
-function fmtNum(n: number, dec = 0): string {
-  return n.toLocaleString('en-IN', {
-    maximumFractionDigits: dec,
-    minimumFractionDigits: dec,
-  });
-}
 
 function fmtCr(n: number): string {
   return `₹${n.toLocaleString('en-IN', { maximumFractionDigits: 1, minimumFractionDigits: 1 })} Cr`;

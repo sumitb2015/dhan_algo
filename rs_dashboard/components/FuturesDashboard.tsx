@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState, useEffect, useCallback, useRef } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import NavBar from '@/components/NavBar';
 import { Activity, RefreshCw, AlertCircle, Loader2, Download, ChevronDown, ChevronUp, CandlestickChart, BookOpen } from 'lucide-react';
 import {
@@ -9,7 +9,6 @@ import {
 } from 'recharts';
 import type { ContractStats, ChartPoint, RolloverPoint, FuturesResponse } from '@/app/api/futures/route';
 import type { OIBuildupResponse } from '@/app/api/futures-oi/route';
-import type { FuturesRefreshStatus } from '@/app/api/futures-refresh/route';
 import type { CandleData } from '@/app/api/nifty-oi-profile/route';
 import OIBuildupDashboard from '@/components/OIBuildupDashboard';
 import FuturesBasketCards from '@/components/FuturesBasketCards';
@@ -18,6 +17,8 @@ import FuturesActionDesk from '@/components/FuturesActionDesk';
 import FuturesPlaybookModal from '@/components/FuturesPlaybookModal';
 import FuturesOrderModal, { type FuturesOrderInitialState } from '@/components/FuturesOrderModal';
 import { fmtPrice, fmtLakh } from '@/lib/futuresFormatters';
+import { useScriptRefresh, type ScriptRefreshStatus } from '@/lib/useScriptRefresh';
+import { PulseStat, ChartHeader } from '@/components/QuantPanel';
 
 // ─── Formatters ───────────────────────────────────────────────────────────────
 
@@ -60,35 +61,6 @@ function dteChipClass(days: number): string {
   if (days <= 5) return 'bg-red-500/10 text-red-400 border-red-500/20';
   if (days <= 15) return 'bg-amber-500/10 text-amber-400 border-amber-500/20';
   return 'bg-zinc-800 text-zinc-400 border-zinc-700';
-}
-
-// ─── Shared quant-terminal primitives ──────────────────────────────────────────
-
-function PulseStat({
-  label, value, sub, color = 'text-white', size = 'text-lg',
-}: { label: string; value: string; sub?: React.ReactNode; color?: string; size?: string }) {
-  return (
-    <div className="flex flex-col min-w-0">
-      <span className="text-[9px] font-bold text-zinc-500 uppercase tracking-[0.14em] mb-0.5">{label}</span>
-      <span className={`${size} font-mono font-bold tabular-nums leading-none ${color}`}>{value}</span>
-      {sub && <span className="text-[10px] text-zinc-500 mt-1 font-medium">{sub}</span>}
-    </div>
-  );
-}
-
-function ChartHeader({
-  eyebrow, title, sub, legend,
-}: { eyebrow: string; title: string; sub: string; legend?: React.ReactNode }) {
-  return (
-    <div className="flex items-center justify-between mb-4 flex-wrap gap-3">
-      <div>
-        <p className="text-[9px] font-bold text-zinc-500 uppercase tracking-[0.16em] mb-1">{eyebrow}</p>
-        <p className="text-sm font-bold text-white tracking-tight">{title}</p>
-        <p className="text-[10px] text-zinc-500 mt-0.5">{sub}</p>
-      </div>
-      {legend && <div className="flex items-center gap-3 text-[10px] font-semibold">{legend}</div>}
-    </div>
-  );
 }
 
 // ─── Market pulse ribbon ────────────────────────────────────────────────────────
@@ -149,7 +121,7 @@ function MarketPulseRibbon({
   data, dlStatus, loading, onDownload, onReload, onOpenPlaybook,
 }: {
   data: FuturesResponse;
-  dlStatus: FuturesRefreshStatus | null;
+  dlStatus: ScriptRefreshStatus | null;
   loading: boolean;
   onDownload: () => void;
   onReload: () => void;
@@ -665,12 +637,10 @@ export default function FuturesDashboard() {
   const [oiData, setOiData]             = useState<OIBuildupResponse | null>(null);
   const [loading, setLoading]           = useState(true);
   const [error, setError]               = useState<string | null>(null);
-  const [dlStatus, setDlStatus]         = useState<FuturesRefreshStatus | null>(null);
   const [refreshKey, setRefreshKey]     = useState(0);
   const [showPlaybook, setShowPlaybook] = useState(false);
   const [orderModalOpen, setOrderModalOpen] = useState(false);
   const [activeOrderInitial, setActiveOrderInitial] = useState<FuturesOrderInitialState | null>(null);
-  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const handleOpenOrder = useCallback((initial: FuturesOrderInitialState) => {
     setActiveOrderInitial(initial);
@@ -701,37 +671,15 @@ export default function FuturesDashboard() {
     }
   }, []);
 
-  const pollDownload = useCallback(async () => {
-    try {
-      const res  = await fetch('/api/futures-refresh');
-      const json: FuturesRefreshStatus = await res.json();
-      setDlStatus(json);
-      // Only trigger an automatic refresh if we were actively polling a running download:
-      if (!json.running && json.done && pollRef.current) {
-        clearInterval(pollRef.current);
-        pollRef.current = null;
-        fetchData();
-        setRefreshKey(k => k + 1);
-      }
-    } catch { /* ignore */ }
+  const onDownloadDone = useCallback(() => {
+    fetchData();
+    setRefreshKey(k => k + 1);
   }, [fetchData]);
-
-  const startDownload = useCallback(async () => {
-    try {
-      const res = await fetch('/api/futures-refresh', { method: 'POST' });
-      if (!res.ok) return;
-      setDlStatus({ running: true, done: false, message: 'Starting…', error: null });
-      if (pollRef.current) clearInterval(pollRef.current);
-      pollRef.current = setInterval(pollDownload, 2000);
-    } catch { /* ignore */ }
-  }, [pollDownload]);
+  const { status: dlStatus, start: startDownload } = useScriptRefresh('/api/futures-refresh', onDownloadDone);
 
   useEffect(() => {
     fetchData();
-    pollDownload();
-  }, [fetchData, pollDownload]);
-
-  useEffect(() => () => { if (pollRef.current) clearInterval(pollRef.current); }, []);
+  }, [fetchData]);
 
   return (
     <div className="flex flex-col min-h-screen bg-black text-zinc-100">

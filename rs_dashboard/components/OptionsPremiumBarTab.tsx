@@ -5,7 +5,7 @@ import {
   ComposedChart, Bar, Line, Area, XAxis, YAxis, CartesianGrid,
   Tooltip, Legend, ResponsiveContainer, ReferenceLine, ReferenceDot, Cell,
 } from 'recharts';
-import AnimatedNumber from './AnimatedNumber';
+import { PulseStat, ChartHeader } from '@/components/QuantPanel';
 
 // ─── Types ────────────────────────────────────────────────────────
 
@@ -126,44 +126,6 @@ const SmileTooltip = ({ active, payload, label }: Record<string, unknown>) => {
     </div>
   );
 };
-
-// ─── Sub-components ───────────────────────────────────────────────
-
-function PulseStat({
-  label, value, animate, sub, color = 'text-white', size = 'text-lg',
-}: {
-  label: string;
-  value: string;
-  animate?: { raw: number; format: (v: number) => string };
-  sub?: string;
-  color?: string;
-  size?: string;
-}) {
-  return (
-    <div className="flex flex-col min-w-0">
-      <span className="text-[9px] font-bold text-zinc-500 uppercase tracking-[0.14em] mb-0.5">{label}</span>
-      <span className={`${size} font-mono font-bold tabular-nums leading-none ${color}`}>
-        {animate ? <AnimatedNumber value={animate.raw} format={animate.format} /> : value}
-      </span>
-      {sub && <span className="text-[10px] text-zinc-500 mt-1 font-medium">{sub}</span>}
-    </div>
-  );
-}
-
-function ChartHeader({
-  eyebrow, title, sub, legend,
-}: { eyebrow: string; title: string; sub: string; legend: React.ReactNode }) {
-  return (
-    <div className="flex items-center justify-between mb-4 flex-wrap gap-3">
-      <div>
-        <p className="text-[9px] font-bold text-zinc-500 uppercase tracking-[0.16em] mb-1">{eyebrow}</p>
-        <p className="text-sm font-bold text-white tracking-tight">{title}</p>
-        <p className="text-[10px] text-zinc-500 mt-0.5">{sub}</p>
-      </div>
-      <div className="flex items-center gap-3 text-[10px] font-semibold">{legend}</div>
-    </div>
-  );
-}
 
 // ─── Main ─────────────────────────────────────────────────────────
 

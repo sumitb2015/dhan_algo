@@ -5,6 +5,8 @@ import Link from 'next/link';
 import { Download } from 'lucide-react';
 import NavBar from './NavBar';
 import { cachedFetch } from '@/lib/clientCache';
+import { useScriptRefresh } from '@/lib/useScriptRefresh';
+import { fmtNum } from '@/lib/numberFormat';
 import {
   AreaChart, Area, LineChart, Line, BarChart, Bar, Cell, XAxis, YAxis, CartesianGrid,
   Tooltip, Legend, ResponsiveContainer, ReferenceLine,
@@ -93,13 +95,6 @@ function fmtTime(iso: string): string {
   } catch {
     return iso.slice(11, 19);
   }
-}
-
-function fmtNum(n: number, dec = 0): string {
-  return n.toLocaleString('en-IN', {
-    maximumFractionDigits: dec,
-    minimumFractionDigits: dec,
-  });
 }
 
 function fmtOI(n: number): string {
@@ -221,14 +216,6 @@ export default function OptionsCharts() {
   const [vixData, setVixData] = useState<VixDataState | null>(null);
   const [vixCandles, setVixCandles] = useState<any[]>([]);
 
-  interface OptionsRefreshStatus {
-    running: boolean;
-    done: boolean;
-    message: string;
-    error: string | null;
-  }
-  const [dlStatus, setDlStatus] = useState<OptionsRefreshStatus | null>(null);
-  const dlPollRef = useRef<NodeJS.Timeout | null>(null);
 
   const [expiriesLoading, setExpiriesLoading] = useState(false);
   const [error, setError] = useState('');
@@ -404,39 +391,10 @@ export default function OptionsCharts() {
       });
   }, []);
 
-  const pollDownload = useCallback(async () => {
-    try {
-      const res = await fetch('/api/options-refresh');
-      const json: OptionsRefreshStatus = await res.json();
-      setDlStatus(json);
-      if (!json.running && json.done) {
-        if (dlPollRef.current) {
-          clearInterval(dlPollRef.current);
-          dlPollRef.current = null;
-        }
-        if (selectedStrike && expiry) {
-          fetchCandles(selectedStrike, expiry, candleInterval);
-        }
-      }
-    } catch { /* ignore */ }
+  const onDownloadDone = useCallback(() => {
+    if (selectedStrike && expiry) fetchCandles(selectedStrike, expiry, candleInterval);
   }, [selectedStrike, expiry, candleInterval, fetchCandles]);
-
-  const startDownload = useCallback(async () => {
-    try {
-      const res = await fetch('/api/options-refresh', { method: 'POST' });
-      if (!res.ok) return;
-      setDlStatus({ running: true, done: false, message: 'Starting…', error: null });
-      if (dlPollRef.current) clearInterval(dlPollRef.current);
-      dlPollRef.current = setInterval(pollDownload, 2000);
-    } catch { /* ignore */ }
-  }, [pollDownload]);
-
-  useEffect(() => {
-    pollDownload();
-    return () => {
-      if (dlPollRef.current) clearInterval(dlPollRef.current);
-    };
-  }, [pollDownload]);
+  const { status: dlStatus, start: startDownload } = useScriptRefresh('/api/options-refresh', onDownloadDone);
 
   // Trigger candle fetch whenever strike, expiry, or interval changes and bridge is not live
   useEffect(() => {

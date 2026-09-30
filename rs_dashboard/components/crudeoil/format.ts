@@ -1,13 +1,9 @@
 // Formatters and pure chain maths for the Crude Oil options terminal.
 
 import type { OptionSide, RawChainEntry } from './types';
+import { fmtNum } from '@/lib/numberFormat';
 
-export function fmtNum(n: number, dec = 0): string {
-  return n.toLocaleString('en-IN', {
-    maximumFractionDigits: dec,
-    minimumFractionDigits: dec,
-  });
-}
+export { fmtNum };
 
 export function fmtOI(n: number): string {
   if (n === 0) return '—';

@@ -7,6 +7,7 @@ import {
 } from 'recharts';
 import { cachedFetch } from '@/lib/clientCache';
 import NavBar from './NavBar';
+import { PulseStat, ChartHeader } from '@/components/QuantPanel';
 
 // ─── Palette ──────────────────────────────────────────────────────
 // Categorical pair validated for dark surfaces (OKLCH L in 0.48–0.67,
@@ -96,41 +97,6 @@ function paddedDomain(values: number[]): [number, number] | undefined {
 function quantile(sorted: number[], q: number): number {
   const i = Math.min(sorted.length - 1, Math.max(0, Math.round((sorted.length - 1) * q)));
   return sorted[i];
-}
-
-// ─── Quant-terminal primitives ─────────────────────────────────────
-
-function PulseStat({
-  label, value, sub, color = 'text-white', size = 'text-lg',
-}: { label: string; value: string; sub?: string; color?: string; size?: string }) {
-  const isHex = color.startsWith('#');
-  return (
-    <div className="flex flex-col min-w-0">
-      <span className="text-[9px] font-bold text-zinc-500 uppercase tracking-[0.14em] mb-0.5">{label}</span>
-      <span
-        className={`${size} font-mono font-bold tabular-nums leading-none ${isHex ? '' : color}`}
-        style={isHex ? { color } : undefined}
-      >
-        {value}
-      </span>
-      {sub && <span className="text-[10px] text-zinc-500 mt-1 font-medium">{sub}</span>}
-    </div>
-  );
-}
-
-function ChartHeader({
-  eyebrow, title, sub, legend,
-}: { eyebrow: string; title: string; sub: string; legend?: React.ReactNode }) {
-  return (
-    <div className="flex items-center justify-between mb-4 flex-wrap gap-3">
-      <div>
-        <p className="text-[9px] font-bold text-zinc-500 uppercase tracking-[0.16em] mb-1">{eyebrow}</p>
-        <p className="text-sm font-bold text-white tracking-tight">{title}</p>
-        <p className="text-[10px] text-zinc-500 mt-0.5 max-w-xl">{sub}</p>
-      </div>
-      {legend && <div className="flex items-center gap-3 text-[10px] font-semibold flex-wrap">{legend}</div>}
-    </div>
-  );
 }
 
 function Section({
