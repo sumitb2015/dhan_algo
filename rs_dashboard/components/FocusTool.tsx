@@ -1699,6 +1699,18 @@ function IndexGroupBar({
 
 // ── Table Row ─────────────────────────────────────────────────────────────────
 
+/**
+ * The status to SHOW (and to offer Arm on). A row still saved as 'entered'
+ * whose own ledger holds nothing was closed by a path that doesn't retire the
+ * row — a single-leg Exit, − lots, or a leg the broker already shows flat —
+ * and without this it sat at 'entered' with no Arm button, re-armable only
+ * by editing the JSON. Display-only: the scheduler never enters an 'entered'
+ * row, and Arm itself resets it through armRow as usual.
+ */
+function shownStatus(row: FocusRow, flat: boolean): FocusRowStatus {
+  return row.status === 'entered' && flat ? 'exited' : row.status;
+}
+
 const STATUS_PILL: Record<FocusRowStatus, string> = {
   draft:   'bg-zinc-800 text-zinc-400 border-zinc-700',
   armed:   'bg-violet-500/15 text-violet-300 border-violet-500/30',
@@ -2022,8 +2034,8 @@ function FocusTableRowImpl({
           {/* Header: Status Pill + Realised/Unrealised P&L */}
           <div className="flex items-center justify-between border-b border-zinc-800/60 pb-1.5">
             <div className="flex items-center gap-1.5">
-              <span className={cn('text-[9px] font-black uppercase tracking-wider px-2 py-0.5 rounded-full border', STATUS_PILL[row.status])}>
-                {row.status}
+              <span className={cn('text-[9px] font-black uppercase tracking-wider px-2 py-0.5 rounded-full border', STATUS_PILL[shownStatus(row, flat)])}>
+                {shownStatus(row, flat)}
               </span>
               <div className="flex items-center gap-1">
                 <span className="text-[9px] font-black uppercase tracking-wider text-zinc-400">P&amp;L:</span>
@@ -2104,7 +2116,7 @@ function FocusTableRowImpl({
 
           {/* Actions: Arm & Exit All */}
           <div className="flex items-center gap-2 pt-1 border-t border-zinc-800/60">
-            {(row.status === 'draft' || row.status === 'exited') && (
+            {(shownStatus(row, flat) === 'draft' || shownStatus(row, flat) === 'exited') && (
               <button onClick={onArm} className={cn('flex-1 flex items-center justify-center gap-1 text-[11px] font-black py-1 rounded-lg bg-violet-600 text-oncolor hover:bg-violet-500 cursor-pointer shadow-sm transition-all', FOCUS_RING)}>
                 <Zap className="h-3 w-3" /> Arm
               </button>
@@ -2114,7 +2126,7 @@ function FocusTableRowImpl({
                 <ShieldOff className="h-3 w-3" /> Disarm
               </button>
             )}
-            {row.status === 'entered' && (
+            {shownStatus(row, flat) === 'entered' && (
               <div className="flex-1 flex items-center justify-center gap-1 py-1 text-[9px] font-bold text-emerald-400 bg-emerald-500/10 border border-emerald-500/20 rounded-lg">
                 <span className="h-1.5 w-1.5 rounded-full bg-emerald-400 animate-pulse" /> Active
               </div>
@@ -2216,8 +2228,8 @@ function FocusRowCardImpl({
                 : 'bg-zinc-800 text-zinc-400 border-zinc-700')}>
             {live.pnl > 0 ? '+' : ''}₹{live.pnl.toFixed(0)}
           </span>
-          <span className={cn('text-[9px] font-black px-2 py-0.5 rounded-md border uppercase tracking-wider', STATUS_PILL[row.status])}>
-            {row.status}
+          <span className={cn('text-[9px] font-black px-2 py-0.5 rounded-md border uppercase tracking-wider', STATUS_PILL[shownStatus(row, flat)])}>
+            {shownStatus(row, flat)}
           </span>
           <button
             type="button"
@@ -2543,7 +2555,7 @@ function FocusRowCardImpl({
       {/* ── Row Control Actions Footer ── */}
       <div className="flex items-center justify-between gap-2 border-t border-zinc-800/80 pt-2.5 mt-auto">
         <div className="flex items-center gap-1.5">
-          {(row.status === 'draft' || row.status === 'exited') && (
+          {(shownStatus(row, flat) === 'draft' || shownStatus(row, flat) === 'exited') && (
             <button onClick={onArm} className={cn('flex items-center gap-1 text-xs font-bold px-3 py-1.5 rounded-lg bg-violet-600 text-oncolor hover:bg-violet-500 shadow-md shadow-violet-600/20 transition-all cursor-pointer', FOCUS_RING)}>
               <Zap className="h-3 w-3" />
               Arm Row
@@ -2555,7 +2567,7 @@ function FocusRowCardImpl({
               Disarm
             </button>
           )}
-          {row.status === 'entered' && (
+          {shownStatus(row, flat) === 'entered' && (
             <span className="flex items-center gap-1.5 text-[10px] font-bold text-emerald-400 bg-emerald-500/10 border border-emerald-500/25 px-2.5 py-1 rounded-lg">
               <span className="h-1.5 w-1.5 rounded-full bg-emerald-400 animate-pulse" />
               Position Open
@@ -3276,7 +3288,13 @@ export default function FocusTool() {
       // that re-resolved would look its own position up at a strike nobody
       // holds: P&L blanks, legsFlat() goes true, and every exit rule silently
       // stops being evaluated against a position that is still very much open.
-      const hasPin = !!row.fill && (row.fill.ceStrike != null || row.fill.peStrike != null);
+      //
+      // Only while the row still holds something, though: once both legs'
+      // own qty is back to 0 the pin describes a closed position, and keeping
+      // it left a flat row showing the old strike (22750 with spot at 22685)
+      // until a full-row exit or re-arm happened to clear it.
+      const hasPin = !!row.fill && (row.fill.ceStrike != null || row.fill.peStrike != null)
+        && !rowFlat(row);
       const pin = hasPin ? row.fill : undefined;
       const ceStrike = pin ? (pin.ceStrike ?? null) : resolvedCe;
       const peStrike = pin ? (pin.peStrike ?? null) : resolvedPe;
@@ -4241,6 +4259,10 @@ export default function FocusTool() {
   function handleManualExit(row: FocusRow, leg: 'CE' | 'PE' | 'ALL') {
     return runRowAction(row.id, async () => {
       const legs = leg === 'ALL' ? legsOf(row) : [leg];
+      // A single-leg Exit on the row's LAST open leg flattens the row — retire
+      // it like Exit All does, or it stays 'entered' with a stale pin. Decided
+      // up front: after the close, the ledger update lands asynchronously.
+      const lastLeg = leg !== 'ALL' && !rowOwnsLeg(row, leg === 'CE' ? 'PE' : 'CE');
       // Concurrently, not one after the other. This is the panic button: legs
       // are independent orders against different contracts, and serialising
       // them made a straddle's second leg wait out the first's full round trip
@@ -4256,7 +4278,7 @@ export default function FocusTool() {
         addToast('error', 'Exit incomplete', `${row.underlying}: a leg was rejected — still open, check the position book`);
         return;
       }
-      if (leg === 'ALL' && await waitRowFlat(row.id)) {
+      if ((leg === 'ALL' || (lastLeg && accepted[0])) && await waitRowFlat(row.id)) {
         updateRow(row.id, { status: 'exited', fill: undefined });
       }
     });
