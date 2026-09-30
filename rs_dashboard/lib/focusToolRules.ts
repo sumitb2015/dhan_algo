@@ -75,6 +75,46 @@ export function isGhostDropProtected(
   return pageOwn > 0 && openedTs != null && now - openedTs < graceMs;
 }
 
+// ── Sim (paper) rows ─────────────────────────────────────────────────────────
+
+/**
+ * Whether a row forward-tests on paper instead of trading real money.
+ *
+ * Only an explicit 'sim' counts. A row with no `mode` predates the field and
+ * has always traded real money — reading it as sim would stop this page from
+ * tracking a position that is genuinely open at the broker.
+ */
+export function isSimRow(row: Pick<FocusRow, 'mode'>): boolean {
+  return row.mode === 'sim';
+}
+
+/**
+ * The position-book row a sim leg would have, built from its paper ledger.
+ *
+ * Every exit rule, P&L calc and partial-exit chip reads `rowLive.cePosition`/
+ * `pePosition`, so a sim row hands them this instead of a broker row and the
+ * rules run unchanged. Always short — this tool only ever opens by selling.
+ * `unrealizedProfit` is 0: the P&L code marks against the live tick whenever
+ * one exists, so the snapshot value is only a fallback, and leaving it out
+ * keeps the object stable across ticks.
+ */
+export function simLegPosition(
+  leg: 'CE' | 'PE', qty: number, entry: number | null | undefined,
+): PosRow | null {
+  if (!(qty > 0)) return null;
+  return {
+    tradingSymbol: `SIM-${leg}`,
+    securityId: '',
+    exchangeSegment: '',
+    productType: 'SIM',
+    netQty: -qty,
+    buyAvg: 0,
+    sellAvg: Number(entry) || 0,
+    realizedProfit: 0,
+    unrealizedProfit: 0,
+  };
+}
+
 // ── Position / row views ─────────────────────────────────────────────────────
 
 /** One leg of a broker position book row, as this page reads it. */

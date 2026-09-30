@@ -18,6 +18,7 @@ import {
   dteForExpiry, dteMatches, sidePremium, legsOf, legsFlat, rowOwnsLeg,
   stopPremium, legStopPremium, pairStopPremium, legOwnContracts,
   nextOpenedTs, isGhostDropProtected, GHOST_DROP_GRACE_MS,
+  isSimRow, simLegPosition,
   type RowLive, type PosRow, type WorkerHold,
 } from './focusToolRules.ts';
 import type { FocusRow } from './focusToolRows.ts';
@@ -409,4 +410,24 @@ test('a full exit-then-reentry gets a fresh grace window, not the old one', () =
   ts = nextOpenedTs(0, 75, ts, reenteredAt);
   assert.equal(ts, reenteredAt);
   assert.equal(isGhostDropProtected(75, ts, reenteredAt + 5_000), true);
+});
+
+// ── Sim rows ─────────────────────────────────────────────────────────────────
+
+test('only an explicit sim mode is paper — a row saved before the field is real', () => {
+  assert.equal(isSimRow({ mode: 'sim' }), true);
+  assert.equal(isSimRow({ mode: 'real' }), false);
+  // Legacy rows on disk have no mode and have always traded real money.
+  assert.equal(isSimRow({}), false);
+});
+
+test('a sim leg reads as this row\'s own short to the P&L and exit rules', () => {
+  assert.equal(simLegPosition('CE', 0, 100), null);
+  const pos = simLegPosition('CE', 65, 173.5)!;
+  assert.equal(pos.netQty, -65);
+  assert.equal(pos.sellAvg, 173.5);
+  const row = { fill: { ceStrike: 22750, peStrike: null, ceQty: 65, peQty: 0, ts: '' } } as Pick<FocusRow, 'fill'>;
+  const live = { cePosition: pos, pePosition: null } as RowLive;
+  assert.equal(legOwnContracts(row, 'CE', live), 65);
+  assert.equal(legsFlat(live), false);
 });

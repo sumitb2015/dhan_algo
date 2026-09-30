@@ -28,6 +28,7 @@ import {
   legsOf, rowFlat, rowOwnsLeg, sidePremium, legStopReason, legOwnContracts,
   dteMatches, dteForExpiry, evaluateRowExit, evaluateEntry, evaluateGlobalRisk,
   legStopPremium, pairStopPremium, nextOpenedTs, isGhostDropProtected,
+  isSimRow, simLegPosition,
   type PosRow, type RowLive,
 } from '@/lib/focusToolRules';
 import { computeRowPnl, mtmForQty, shiftMayReopen, canMarkMtm, shiftCloseConfirmed, rowDisplayBookedPnl, putCallRatio, valuePutCallRatio, pickOpenInterest } from '@/lib/focusToolPnl';
@@ -493,6 +494,8 @@ const makeRow = (underlying: FocusUnderlying): FocusRow => ({
   lots: 1,
   side: 'BOTH',
   status: 'draft',
+  // New rows paper-trade until the user deliberately flips them to REAL.
+  mode: 'sim',
   levelHigh: '',
   levelLow: '',
   levelVw: false,
@@ -751,7 +754,7 @@ function LegOpenBadge({ pos }: { pos: PosRow | null }) {
   const avg = qty < 0 ? Number(pos?.sellAvg) || 0 : Number(pos?.buyAvg) || 0;
   return (
     <span
-      title={`Broker position: ${qty > 0 ? 'long' : 'short'} ${Math.abs(qty)} @ avg ${avg.toFixed(2)}`}
+      title={`${pos?.productType === 'SIM' ? 'Paper position' : 'Broker position'}: ${qty > 0 ? 'long' : 'short'} ${Math.abs(qty)} @ avg ${avg.toFixed(2)}`}
       className={cn(
         'text-[9px] font-black px-1 py-0.5 rounded border uppercase tracking-wide whitespace-nowrap',
         qty < 0
@@ -761,6 +764,54 @@ function LegOpenBadge({ pos }: { pos: PosRow | null }) {
     >
       {qty < 0 ? 'S' : 'L'} {Math.abs(qty)} @ {avg.toFixed(2)}
     </span>
+  );
+}
+
+/**
+ * The row's REAL / SIM switch, plus a warning when a REAL row is armed but
+ * cannot enter because LIVE · REAL MONEY is off for today — the silent
+ * "armed but nothing happened" case. Locked while the row holds a position or
+ * is armed; updateRow enforces the same rule on the state side.
+ */
+function RowModeToggle({ row, flat, liveRealMoney, onUpdate }: {
+  row: FocusRow; flat: boolean; liveRealMoney: boolean;
+  onUpdate: (patch: Partial<FocusRow>) => void;
+}) {
+  const sim = isSimRow(row);
+  const locked = !flat || row.status === 'armed';
+  const title = locked
+    ? `${sim ? 'SIM' : 'REAL'} row — ${!flat ? 'exit its legs' : 'disarm it'} to switch modes`
+    : sim
+      ? 'SIM: paper fills at LTP, no broker orders. Click to make this row trade REAL money.'
+      : 'REAL: places broker orders while LIVE · REAL MONEY is on. Click to forward-test on paper instead.';
+  return (
+    <>
+      <button
+        type="button"
+        onClick={() => onUpdate({ mode: sim ? 'real' : 'sim' })}
+        disabled={locked}
+        title={title}
+        aria-label={sim ? 'Row mode: simulated. Switch to real money' : 'Row mode: real money. Switch to simulated'}
+        className={cn(
+          'px-1.5 py-0.5 rounded border font-black uppercase tracking-wider cursor-pointer disabled:cursor-not-allowed',
+          TXT_LABEL, FOCUS_RING,
+          sim
+            ? 'bg-amber-500/15 text-amber-300 border-amber-500/40 hover:bg-amber-500/25'
+            : 'bg-rose-500/15 text-rose-300 border-rose-500/40 hover:bg-rose-500/25',
+          locked && 'opacity-70 hover:bg-transparent',
+        )}
+      >
+        {sim ? 'SIM' : 'REAL'}
+      </button>
+      {!sim && row.status === 'armed' && !liveRealMoney && (
+        <span
+          title="This REAL row is armed but will not enter: LIVE · REAL MONEY is off for today. Turn it on, or disarm and switch the row to SIM."
+          className={cn(TXT_LABEL, 'font-black px-1.5 py-0.5 rounded border uppercase tracking-wide whitespace-nowrap bg-rose-500/10 text-rose-400 border-rose-500/30')}
+        >
+          LIVE off
+        </span>
+      )}
+    </>
   );
 }
 
@@ -1348,7 +1399,7 @@ function ControlStrip({
   trailEnabled, onToggleTrail,
   triggerRupees, setTriggerRupees,
   lockRupees, setLockRupees,
-  totalPnl, peakMtm, lockMtm,
+  totalPnl, peakMtm, lockMtm, simPnl, simRows,
   copyTrade,
   onOpenRisk, onOpenOrders, onOpenOptionChain, onToggleViewMode, viewMode,
   onExitAll, confirmExitAll, exitingAll,
@@ -1361,6 +1412,8 @@ function ControlStrip({
   triggerRupees: string; setTriggerRupees: (v: string) => void;
   lockRupees: string; setLockRupees: (v: string) => void;
   totalPnl: number; peakMtm: number; lockMtm: number | null;
+  /** Paper P&L across SIM rows, and how many SIM rows exist. */
+  simPnl: number; simRows: number;
   copyTrade: CopyTradeApi;
   onOpenRisk: () => void;
   onOpenOrders: () => void;
@@ -1379,8 +1432,8 @@ function ControlStrip({
         <button
           onClick={onToggleLive}
           title={liveRealMoney
-            ? 'Live: armed rows place real orders. Click to return to dry run.'
-            : 'Dry run: no orders are sent. Click to go live with real money.'}
+            ? 'Live: rows set to REAL place real orders. Click to disarm them — SIM rows keep paper trading.'
+            : 'REAL rows are idle: no broker orders are sent. Click to arm them for today. SIM rows paper trade either way.'}
           className={cn(
             'flex items-center gap-1.5 text-xs font-extrabold px-3 py-1 rounded-full text-oncolor transition-colors cursor-pointer',
             liveRealMoney ? 'bg-rose-600 hover:bg-rose-500' : 'bg-zinc-700 hover:bg-zinc-600',
@@ -1392,8 +1445,8 @@ function ControlStrip({
         </button>
         <span
           title={liveRealMoney
-            ? 'In-tab execution engine is active — watching scheduled entries, level exits, and stop losses'
-            : 'Paper / dry-run mode — rules are simulated while this tab is open'}
+            ? 'In-tab engine active for REAL and SIM rows — scheduled entries, level exits, stop losses'
+            : 'In-tab engine active for SIM rows only — REAL rows wait for LIVE · REAL MONEY'}
           className={cn(
             'flex items-center gap-1.5 text-xs font-bold px-3 py-1.5 rounded-lg border transition-colors select-none',
             liveRealMoney
@@ -1402,8 +1455,16 @@ function ControlStrip({
           )}
         >
           <Activity className={cn('h-3.5 w-3.5', liveRealMoney && 'animate-pulse text-emerald-400')} />
-          {liveRealMoney ? 'Auto Rules Active' : 'Rules Idle'}
+          {liveRealMoney ? 'Real + Sim Rules' : 'Sim Rules Only'}
         </span>
+        {simRows > 0 && (
+          <span
+            title="Paper P&L across SIM rows (open legs marked at LTP + closed legs booked). Kept out of the real-money budget; every paper fill is logged to debug/focus_tool_sim_trades.jsonl."
+            className="flex items-center gap-1.5 text-xs font-bold px-2.5 py-1.5 rounded-lg border border-amber-500/40 bg-amber-500/10 text-amber-300 whitespace-nowrap"
+          >
+            SIM <span className={cn('font-mono tabular-nums', pnlClass(simPnl))}>{fmtInr(simPnl, true)}</span>
+          </span>
+        )}
         <button
           onClick={onExitAll}
           disabled={exitingAll}
@@ -1700,7 +1761,7 @@ function FocusTableRowImpl({
   const { ceValue, peValue, totalValue, pcr, pcrOi } = legValues(row, live, lotSize);
   // Orders are only sendable once at least one leg's contract and the lot size
   // are known — placeLeg re-checks the specific leg it is about to trade.
-  const canTrade = liveRealMoney && !busy && (live.ceStrike != null || live.peStrike != null) && (lotSize ?? 0) > 0;
+  const canTrade = (isSimRow(row) || liveRealMoney) && !busy && (live.ceStrike != null || live.peStrike != null) && (lotSize ?? 0) > 0;
   // Ownership, not raw broker qty: checked against this row's own fill ledger.
   const flat = rowFlat(row);
   const ceFlat = !rowOwnsLeg(row, 'CE');
@@ -1709,8 +1770,8 @@ function FocusTableRowImpl({
   const ceChips = partialCloseChips(Number(live.cePosition?.netQty ?? 0), lotSize ?? 0, [25, 50, 75]);
   const peChips = partialCloseChips(Number(live.pePosition?.netQty ?? 0), lotSize ?? 0, [25, 50, 75]);
   // Why the leg buttons are greyed out.
-  const tradeBlockedWhy = !liveRealMoney
-    ? 'Dry run — turn on LIVE · REAL MONEY to place orders'
+  const tradeBlockedWhy = !isSimRow(row) && !liveRealMoney
+    ? 'REAL row — turn on LIVE · REAL MONEY to place orders, or switch the row to SIM'
     : busy
       ? 'An order for this row is already in flight'
       : (lotSize ?? 0) <= 0
@@ -1753,6 +1814,7 @@ function FocusTableRowImpl({
                 <span className={cn('h-1.5 w-1.5 rounded-full', UNDERLYING_DOT[row.underlying])} />
                 {row.underlying}
               </span>
+              <RowModeToggle row={row} flat={flat} liveRealMoney={liveRealMoney} onUpdate={onUpdate} />
               <SegPill
                 options={['CE', 'BOTH', 'PE'] as const}
                 value={row.side as 'CE' | 'BOTH' | 'PE'}
@@ -2095,7 +2157,7 @@ function FocusRowCardImpl({
 }) {
   const combinedLtp = (live.ltpCe ?? 0) + (live.ltpPe ?? 0);
   const { ceValue, peValue, totalValue, pcr, pcrOi } = legValues(row, live, lotSize);
-  const canTrade = liveRealMoney && !busy && (live.ceStrike != null || live.peStrike != null) && (lotSize ?? 0) > 0;
+  const canTrade = (isSimRow(row) || liveRealMoney) && !busy && (live.ceStrike != null || live.peStrike != null) && (lotSize ?? 0) > 0;
   // Ownership, not raw broker qty: checked against this row's own fill ledger.
   const flat = rowFlat(row);
   const ceFlat = !rowOwnsLeg(row, 'CE');
@@ -2104,8 +2166,8 @@ function FocusRowCardImpl({
   const ceChips = partialCloseChips(Number(live.cePosition?.netQty ?? 0), lotSize ?? 0, [25, 50, 75]);
   const peChips = partialCloseChips(Number(live.pePosition?.netQty ?? 0), lotSize ?? 0, [25, 50, 75]);
   // Why the leg buttons are greyed out.
-  const tradeBlockedWhy = !liveRealMoney
-    ? 'Dry run — turn on LIVE · REAL MONEY to place orders'
+  const tradeBlockedWhy = !isSimRow(row) && !liveRealMoney
+    ? 'REAL row — turn on LIVE · REAL MONEY to place orders, or switch the row to SIM'
     : busy
       ? 'An order for this row is already in flight'
       : (lotSize ?? 0) <= 0
@@ -2137,6 +2199,7 @@ function FocusRowCardImpl({
             <span className={cn('h-2 w-2 rounded-full', UNDERLYING_DOT[row.underlying])} />
             {row.underlying}
           </span>
+          <RowModeToggle row={row} flat={flat} liveRealMoney={liveRealMoney} onUpdate={onUpdate} />
           <span className="text-[10px] font-extrabold px-2 py-0.5 rounded-md bg-zinc-800/80 text-zinc-300 border border-zinc-700/60 font-mono">
             {row.side}
           </span>
@@ -2685,8 +2748,10 @@ export default function FocusTool() {
 
   // ── In-Tab Execution Engine ──────────────────────────────────────
   // Rules (scheduled entries, stop losses, profit targets, level exits)
-  // execute directly within the browser session when LIVE · REAL MONEY is enabled.
-  const tabMayTrade = liveRealMoney;
+  // execute directly within the browser session. The loops always run: a SIM
+  // row trades on paper at any time, a REAL row only while LIVE · REAL MONEY
+  // is armed for today. Per row, not per page — see rowMayTrade.
+  const rowMayTrade = (row: Pick<FocusRow, 'mode'>, live: boolean) => isSimRow(row) || live;
 
   // Standalone bridge (scripts/tools/focus_tool_ws.py) — all three underlyings
   // over one WebSocket connection, independent of AdvancedScalper's
@@ -3154,6 +3219,19 @@ export default function FocusTool() {
    * to re-render too (see the FocusTableRow/FocusRowCard memo comparators).
    */
   const rowLivePrevRef = useRef<Record<string, RowLive>>({});
+  // Same object back for an unchanged paper leg, so rowLiveEqual's identity
+  // check on cePosition/pePosition holds for sim rows exactly as it does for
+  // broker rows (whose objects only change on a positions poll).
+  const simPosCacheRef = useRef<Record<string, { qty: number; entry: number; pos: PosRow | null }>>({});
+  const simPositionFor = (rowId: string, leg: 'CE' | 'PE', qty: number, entry: number | null | undefined) => {
+    const key = `${rowId}:${leg}`;
+    const e = Number(entry) || 0;
+    const hit = simPosCacheRef.current[key];
+    if (hit && hit.qty === qty && hit.entry === e) return hit.pos;
+    const pos = simLegPosition(leg, qty, e);
+    simPosCacheRef.current[key] = { qty, entry: e, pos };
+    return pos;
+  };
   const rowLiveEqual = (a: RowLive, b: RowLive) =>
     a.ceStrike === b.ceStrike && a.peStrike === b.peStrike
     && a.ltpCe === b.ltpCe && a.ltpPe === b.ltpPe
@@ -3226,8 +3304,16 @@ export default function FocusTool() {
       // back to a symbol/id-only match when it is unambiguous — see
       // findPositionForRef's own doc comment.
       const wantProduct = PRODUCT_ALIAS[group?.product ?? 'INTRADAY'][broker];
-      const cePosition = findPositionForRef(positions, broker, ceRef, 'CE', wantProduct);
-      const pePosition = findPositionForRef(positions, broker, peRef, 'PE', wantProduct);
+      // A sim row's "position" is its own paper ledger, never the broker book —
+      // a real position at the same strike (another row, a manual trade) is
+      // not this paper row's, and the paper fill is nowhere in the broker's.
+      const sim = isSimRow(row);
+      const cePosition = sim
+        ? simPositionFor(row.id, 'CE', row.fill?.ceQty ?? 0, row.fill?.ceEntry)
+        : findPositionForRef(positions, broker, ceRef, 'CE', wantProduct);
+      const pePosition = sim
+        ? simPositionFor(row.id, 'PE', row.fill?.peQty ?? 0, row.fill?.peEntry)
+        : findPositionForRef(positions, broker, peRef, 'PE', wantProduct);
 
       const ltpCe = pick(ceWs?.ce?.ltp, ceCh?.ce);
       const ltpPe = pick(peWs?.pe?.ltp, peCh?.pe);
@@ -3352,15 +3438,32 @@ export default function FocusTool() {
    * the budget watches meant the same Stop ₹ behaved differently depending on
    * whether the tab or the worker happened to be driving.
    */
-  const toolPnl = useMemo(() => {
-    let sum = 0;
-    for (const row of config.rows) sum += rowLive[row.id]?.pnl ?? 0;
-    return sum;
+  //
+  // Real and sim rows are two separate books. Paper P&L never reaches the
+  // real-money budget (a paper drawdown must not flatten real positions, and
+  // a paper profit must not arm a real trail); sim rows get the same TARGET/
+  // STOP/trail rules applied to their own total instead, so a forward test
+  // behaves the way the real config would.
+  const { toolPnl, simPnl } = useMemo(() => {
+    let real = 0;
+    let paper = 0;
+    for (const row of config.rows) {
+      const p = rowLive[row.id]?.pnl ?? 0;
+      if (isSimRow(row)) paper += p; else real += p;
+    }
+    return { toolPnl: real, simPnl: paper };
   }, [config.rows, rowLive]);
 
   useEffect(() => {
     if (toolPnl > 0) setPeakMtm(prev => Math.max(prev, toolPnl));
   }, [toolPnl]);
+  // The sim book's own peak and ratcheted floor — refs, not state: nothing on
+  // screen shows them, they only feed the sim budget check.
+  const simPeakRef = useRef(0);
+  const simLockFloorRef = useRef<number | null>(null);
+  useEffect(() => {
+    if (simPnl > simPeakRef.current) simPeakRef.current = simPnl;
+  }, [simPnl]);
 
   // Distinct strike pairs that need a VWAP: every row's own VW-rule interval
   // when that rule is on, PLUS a fixed 1m interval for every row with
@@ -3500,9 +3603,11 @@ export default function FocusTool() {
       addToast('error', 'Network error calling exit-all API.', String(e));
     } finally {
       // Retire every active Focus row so the tab scheduler cannot re-enter into a book we just nuked.
+      // Sim rows are untouched: the broker exit didn't close their paper
+      // legs, and wiping their ledger would silently drop the forward test.
       setConfig(prev => {
         const nextRows = prev.rows.map(r => {
-          if (r.status === 'draft') return r;
+          if (r.status === 'draft' || isSimRow(r)) return r;
           return {
             ...r,
             status: 'exited' as FocusRow['status'],
@@ -3546,6 +3651,21 @@ export default function FocusTool() {
     // whose level spot has since travelled past is not blocked (that row has
     // already exited on it anyway), and neither is an unrelated Timing save.
     const current = config.rows.find(r => r.id === id);
+    // REAL ↔ SIM only on a flat, unarmed row. Flipping an open row would
+    // either orphan a real broker position (page stops tracking it) or hand a
+    // paper ledger to the real-order path (exits sized off a position that
+    // doesn't exist). Flipping an ARMED sim row to real would fire a real entry
+    // on the next tick if its entry time has already passed.
+    if (current && 'mode' in patch && patch.mode !== current.mode) {
+      if (!rowFlat(current)) {
+        addToast('error', 'Mode not changed', 'Exit this row’s legs before switching between REAL and SIM');
+        return;
+      }
+      if (current.status === 'armed') {
+        addToast('error', 'Mode not changed', 'Disarm the row before switching between REAL and SIM');
+        return;
+      }
+    }
     const levelChanged =
       ('levelHigh' in patch && patch.levelHigh !== current?.levelHigh) ||
       ('levelLow'  in patch && patch.levelLow  !== current?.levelLow);
@@ -3761,6 +3881,10 @@ export default function FocusTool() {
     const expiry = row.expiry || expiries[u]?.[0] || '';
     const what = `${u} ${leg}`;
 
+    // A sim row never reaches the broker — and so needs neither the daily
+    // LIVE arm nor a logged-in broker.
+    if (isSimRow(row)) return placeSimLeg(row, leg, opts);
+
     if (!liveRealMoney) {
       addToast('error', 'Dry run', 'Enable LIVE · REAL MONEY to place orders');
       return false;
@@ -3956,6 +4080,82 @@ export default function FocusTool() {
     }
   }
 
+  /** A strike's live premium for paper fills — the WS tick when it is on this
+   *  expiry, else the chain. The same precedence rowLive's LTP uses, but for
+   *  ANY strike, so a sim strike-shift can fill the new strike too. 0 = none. */
+  function simQuote(u: FocusUnderlying, expiry: string, strike: number, leg: 'CE' | 'PE'): number {
+    const ws = focusWsBookForExpiry(focusWsQuotes?.[u], expiry)?.strikes?.[strikeKey(strike)];
+    const fromWs = Number(leg === 'CE' ? ws?.ce?.ltp : ws?.pe?.ltp);
+    if (fromWs > 0) return fromWs;
+    const ch = chains[expKey(u, expiry)]?.oc?.[strikeKey(strike)];
+    const fromChain = Number(leg === 'CE' ? ch?.ce : ch?.pe);
+    return fromChain > 0 ? fromChain : 0;
+  }
+
+  /**
+   * placeLeg for a SIM row: a paper fill at the leg's live LTP, written
+   * straight into the row's own fill ledger. No broker call and no fill
+   * confirmation — there is no book to confirm against, so the ledger IS the
+   * position. Sized exactly like a real order (opens are lots × lot size,
+   * reduces clamp to what this row holds), so the forward test reflects what
+   * the real config would have done — minus slippage: LTP, not bid/ask.
+   * Every fill is appended to the sim journal, which outlives the ledger.
+   */
+  function placeSimLeg(
+    row: FocusRow,
+    leg: 'CE' | 'PE',
+    opts: { reduce: boolean; lots?: number; all?: boolean; strikeOverride?: number },
+  ): boolean {
+    const u = row.underlying;
+    const expiry = row.expiry || expiries[u]?.[0] || '';
+    const what = `SIM ${u} ${leg}`;
+    // The freshest ledger, not the caller's snapshot: two quick reduces must
+    // not both close the same paper quantity.
+    const current = schedulerRef.current.config.rows.find(r => r.id === row.id) ?? row;
+    const live = rowLive[row.id];
+    const strike = opts.strikeOverride ?? (leg === 'CE' ? live?.ceStrike : live?.peStrike);
+    const lotSize = lotSizes[u];
+    if (!strike || !lotSize) {
+      addToast('error', `${what} not filled`, 'Strike or lot size not resolved yet');
+      return false;
+    }
+    const px = simQuote(u, expiry, strike, leg);
+    if (!(px > 0)) {
+      addToast('error', `${what} not filled`, `No live premium for ${strike} ${leg} yet`);
+      return false;
+    }
+    const own = Number(leg === 'CE' ? current.fill?.ceQty : current.fill?.peQty) || 0;
+
+    const journal = (side: 'BUY' | 'SELL', qty: number, booked: number) => {
+      fetch('/api/focus-tool/sim-trades', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ rowId: row.id, underlying: u, expiry, leg, strike, side, qty, price: px, booked }),
+      }).catch(() => {});
+    };
+
+    if (opts.reduce) {
+      if (own <= 0) {
+        if (opts.all) return true;
+        addToast('error', `${what} already flat`, 'Nothing to reduce');
+        return false;
+      }
+      const qty = opts.all ? own : Math.min((opts.lots ?? 1) * lotSize, own);
+      const entry = Number(leg === 'CE' ? current.fill?.ceEntry : current.fill?.peEntry) || 0;
+      // Short leg: bought back at px against the paper entry.
+      const booked = entry > 0 ? (entry - px) * qty : 0;
+      adjustFillQty(row.id, leg, -qty, undefined, booked);
+      journal('BUY', qty, booked);
+      addToast('success', `SIM BUY ${qty} ${strike} ${leg} @ ${px.toFixed(2)}`,
+        `Booked ${booked >= 0 ? '+' : ''}₹${booked.toFixed(0)}`);
+      return true;
+    }
+    const qty = (opts.lots ?? 1) * lotSize;
+    adjustFillQty(row.id, leg, qty, Number(strike), 0, px);
+    journal('SELL', qty, 0);
+    addToast('success', `SIM SELL ${qty} ${strike} ${leg} @ ${px.toFixed(2)}`);
+    return true;
+  }
+
   /**
    * Poll until this row's close at `strike` has fully landed.
    *
@@ -4107,7 +4307,8 @@ export default function FocusTool() {
     const newRef = lookups[expKey(u, expiry)]?.strikes?.[strikeKey(newStrike)];
     const hasContract = broker === 'dhan' ? !!(leg === 'CE' ? newRef?.ceId : newRef?.peId)
                                            : !!(leg === 'CE' ? newRef?.ceSymbol : newRef?.peSymbol);
-    if (!hasContract) {
+    // A sim row trades no contract — it only needs a premium to fill at.
+    if (!isSimRow(row) && !hasContract) {
       addToast('error', 'Cannot shift', `No ${broker} contract for ${newStrike} ${leg}`);
       return;
     }
@@ -4119,7 +4320,30 @@ export default function FocusTool() {
       // Only roll a position this row opened. A coincidental book at the
       // resolved strike is someone else's — moving THIS row's offset must
       // not close and reopen it.
-      if (netQty !== 0 && owns) {
+      if (isSimRow(row) && netQty !== 0 && owns) {
+        // Paper roll: same close-then-reopen, same lots, but there is no book
+        // to verify against — the ledger is the position. Check the new
+        // strike has a premium BEFORE closing, so a roll can't strand the
+        // row flat on a strike it then fails to reopen.
+        const lotSize = lotSizes[u];
+        const ledgerQty = (leg === 'CE' ? row.fill?.ceQty : row.fill?.peQty) ?? 0;
+        if (!lotSize || !(ledgerQty > 0) || ledgerQty % lotSize !== 0) {
+          addToast('error', 'Cannot shift', `${currStrike} ${leg} paper qty ${ledgerQty} is not a whole-lot multiple`);
+          return;
+        }
+        if (!(simQuote(u, expiry, newStrike, leg) > 0)) {
+          addToast('error', 'Cannot shift', `No live premium for ${newStrike} ${leg} yet`);
+          return;
+        }
+        if (!await placeLeg(row, leg, { reduce: true, all: true })) {
+          addToast('error', 'Shift aborted', `${currStrike} ${leg} paper close failed — left on this strike`);
+          return;
+        }
+        if (!await placeLeg(row, leg, { reduce: false, lots: ledgerQty / lotSize, strikeOverride: newStrike })) {
+          addToast('error', 'Shift incomplete', `Closed ${currStrike} ${leg} but the ${newStrike} ${leg} paper fill failed — reopen manually`);
+          return;
+        }
+      } else if (netQty !== 0 && owns) {
         const lotSize = lotSizes[u];
         if (!lotSize) {
           addToast('error', 'Cannot shift', `Lot size for ${u} not resolved yet`);
@@ -4268,7 +4492,7 @@ export default function FocusTool() {
   // toggles Risk on expects it to be watching straight away rather than only
   // after a separate Save.
   const schedulerSnapshot = {
-    config, rowLive, spots, toolPnl, lockMtm, peakMtm,
+    config, rowLive, spots, toolPnl, lockMtm, peakMtm, liveRealMoney,
     riskEnabled, targetRupees, stopRupees, trailEnabled, triggerRupees, lockRupees,
   };
   const schedulerRef = useRef(schedulerSnapshot);
@@ -4289,7 +4513,7 @@ export default function FocusTool() {
     // this exit is in flight sends a SECOND full-size closing order and flips
     // the position the other way.
     setBusyRows(prev => new Set(prev).add(row.id));
-    addToast('error', `Auto-exit: ${row.underlying} ${row.id.slice(-4)}`, reason);
+    addToast('error', `${isSimRow(row) ? 'SIM ' : ''}Auto-exit: ${row.underlying} ${row.id.slice(-4)}`, reason);
     // awaitFill so the ledger is confirmed-updated by the time waitRowFlat
     // reads it below.
     Promise.all(legsOf(row).map(leg => placeLeg(row, leg, { reduce: true, all: true, awaitFill: true })))
@@ -4335,7 +4559,7 @@ export default function FocusTool() {
     // click on this row's own Exit/Add/Reduce buttons while this leg's close
     // is in flight sends a second concurrent order against the same leg.
     setBusyRows(prev => new Set(prev).add(row.id));
-    addToast('error', `Auto-exit ${leg}: ${row.underlying} ${row.id.slice(-4)}`, reason);
+    addToast('error', `${isSimRow(row) ? 'SIM ' : ''}Auto-exit ${leg}: ${row.underlying} ${row.id.slice(-4)}`, reason);
     // awaitFill so the ledger is confirmed-updated by the time waitRowFlat
     // reads it below.
     placeLeg(row, leg, { reduce: true, all: true, awaitFill: true })
@@ -4352,12 +4576,12 @@ export default function FocusTool() {
   }
 
   useEffect(() => {
-    if (!tabMayTrade) return;
-
+    // Real rows are only watched while LIVE is armed (a dry run must not spam
+    // exit toasts for breaches it can never act on); sim rows always are.
     const openRows = config.rows.filter(r => {
       const l = rowLive[r.id];
       if (!l) return false;
-      return !rowFlat(r);
+      return !rowFlat(r) && rowMayTrade(r, liveRealMoney);
     });
     if (!openRows.length) return;
 
@@ -4366,15 +4590,27 @@ export default function FocusTool() {
     // overshot — or a stop breached — by up to five seconds of movement while
     // the numbers driving it (spot, premiums) were already on screen. It is a
     // pure function of data that arrives with the ticks, so it belongs here.
-    const risk = evaluateGlobalRisk(
-      { riskEnabled, targetRupees, stopRupees, trailEnabled, triggerRupees, lockRupees },
-      { totalPnl: toolPnl, peakPnl: peakMtm, lockFloor: lockFloorRef.current },
-    );
-    lockFloorRef.current = risk.lockFloor;
-    if (risk.exitAll) {
-      for (const row of openRows) autoExitRow(row, risk.reason);
-      return;   // nothing else runs on a tick that just flattened the book
+    //
+    // Evaluated twice, once per book, with the same thresholds: the real book
+    // against real P&L, the sim book against paper P&L, each with its own
+    // peak and trail floor. A breach in one flattens only that book.
+    const riskCfg = { riskEnabled, targetRupees, stopRupees, trailEnabled, triggerRupees, lockRupees };
+    const realOpen = openRows.filter(r => !isSimRow(r));
+    const simOpen = openRows.filter(r => isSimRow(r));
+    const risk = evaluateGlobalRisk(riskCfg,
+      { totalPnl: toolPnl, peakPnl: peakMtm, lockFloor: lockFloorRef.current });
+    const simRisk = evaluateGlobalRisk(riskCfg,
+      { totalPnl: simPnl, peakPnl: simPeakRef.current, lockFloor: simLockFloorRef.current });
+    if (realOpen.length) lockFloorRef.current = risk.lockFloor;
+    if (simOpen.length) simLockFloorRef.current = simRisk.lockFloor;
+    const flattened = new Set<string>();
+    if (risk.exitAll && realOpen.length) {
+      for (const row of realOpen) { autoExitRow(row, risk.reason); flattened.add(row.id); }
     }
+    if (simRisk.exitAll && simOpen.length) {
+      for (const row of simOpen) { autoExitRow(row, `SIM book: ${simRisk.reason}`); flattened.add(row.id); }
+    }
+    if (flattened.size === openRows.length) return;   // whole book just flattened
 
     // ── Book Exit, on every tick ──
     // A spot LEVEL against a spot that moves continuously. Checking it five
@@ -4392,7 +4628,7 @@ export default function FocusTool() {
         reason = `${g.underlying} book exit: spot ${spot.toFixed(2)} ≤ ${lo}`;
       }
       if (reason) {
-        for (const row of openRows.filter(r => r.underlying === g.underlying)) {
+        for (const row of openRows.filter(r => r.underlying === g.underlying && !flattened.has(r.id))) {
           autoExitRow(row, reason);
         }
       }
@@ -4400,6 +4636,7 @@ export default function FocusTool() {
 
     // ── Per-row level exits ──
     for (const row of openRows) {
+      if (flattened.has(row.id)) continue;
       const live = rowLive[row.id];
       if (!live) continue;
 
@@ -4418,7 +4655,7 @@ export default function FocusTool() {
       if (reason) autoExitRow(row, reason);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [rowLive, spots, tabMayTrade, toolPnl, riskEnabled, targetRupees, stopRupees,
+  }, [rowLive, spots, liveRealMoney, toolPnl, simPnl, riskEnabled, targetRupees, stopRupees,
       trailEnabled, triggerRupees, lockRupees, peakMtm, lockMtm]);
 
   /**
@@ -4431,7 +4668,7 @@ export default function FocusTool() {
   function autoEnterRow(row: FocusRow, reason: string) {
     if (autoEnteringRef.current.has(row.id) || autoExitingRef.current.has(row.id)) return;
     autoEnteringRef.current.add(row.id);
-    addToast('success', `Auto-entry: ${row.underlying} ${row.id.slice(-4)}`, reason);
+    addToast('success', `${isSimRow(row) ? 'SIM ' : ''}Auto-entry: ${row.underlying} ${row.id.slice(-4)}`, reason);
     (async () => {
       // Each accepted leg stamps its own strike and quantity onto the row's
       // fill ledger from inside placeLeg, so the row stops re-resolving off the
@@ -4475,7 +4712,7 @@ export default function FocusTool() {
     })().catch(() => autoEnteringRef.current.delete(row.id));
   }
 
-  // The scheduler's interval closure is created once per liveRealMoney flip,
+  // The scheduler's interval closure is created once, on mount,
   // so calling autoEnterRow/autoExitRow directly would pin that render's
   // versions — and with them a stale `lookups`/`lotSizes`/`rowLive` inside
   // placeLeg, which resolves the contract an order is actually sent for.
@@ -4493,21 +4730,20 @@ export default function FocusTool() {
    * so a stop-out is never immediately followed by a fresh entry on the same
    * tick.
    *
-   * Entirely gated on LIVE · REAL MONEY, and — like everything else on this
-   * page — only runs while the tab is open.
+   * Always ticking; each row is gated on its own mode — a REAL row only acts
+   * while LIVE · REAL MONEY is armed, a SIM row always (rowMayTrade). Like
+   * everything else on this page, it only runs while the tab is open.
    */
   useEffect(() => {
-    if (!tabMayTrade) return;
-
     const tick = () => {
-      const { config: cfg, rowLive: live } = schedulerRef.current;
+      const { config: cfg, rowLive: live, liveRealMoney: liveArmed } = schedulerRef.current;
       // Display mirror of the authoritative floor — see lockFloorRef. The
       // identity return makes an unchanged floor a no-op rather than a render.
       setLockMtm(prev => (prev === lockFloorRef.current ? prev : lockFloorRef.current));
       const nowHm = istHm();
       const openRows = cfg.rows.filter(r => {
         const l = live[r.id];
-        return l && !rowFlat(r);
+        return l && !rowFlat(r) && rowMayTrade(r, liveArmed);
       });
 
       // ── 1. Per-row time exit, plus the repo-wide 15:17 intraday backstop ──
@@ -4524,6 +4760,7 @@ export default function FocusTool() {
 
       // ── 2. Auto-entry for armed rows ──
       for (const row of cfg.rows) {
+        if (!rowMayTrade(row, liveArmed)) continue;
         const l = live[row.id] ?? EMPTY_ROW_LIVE;
         const group = cfg.groups.find(g => g.underlying === row.underlying);
         const decision = evaluateEntry(row, {
@@ -4542,7 +4779,7 @@ export default function FocusTool() {
     const t = setInterval(tick, 1000);
     return () => clearInterval(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [tabMayTrade]);
+  }, []);
 
   /**
    * Start/Stop, ATM BY, Product, Strikes±, and the Book Exit on/off toggle are
@@ -4696,6 +4933,8 @@ export default function FocusTool() {
         totalPnl={toolPnl}
         peakMtm={peakMtm}
         lockMtm={lockMtm}
+        simPnl={simPnl}
+        simRows={config.rows.filter(isSimRow).length}
         copyTrade={copyTrade}
         onOpenRisk={() => setActiveModal('risk')}
         onOpenOrders={() => setActiveModal('orderbook')}

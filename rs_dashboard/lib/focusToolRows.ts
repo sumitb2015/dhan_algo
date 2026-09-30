@@ -10,6 +10,7 @@ export type FocusUnderlying = 'NIFTY' | 'BANKNIFTY' | 'SENSEX';
 export type FocusDte = 'Any' | '0' | '1' | '0+1';
 export type FocusRowStatus = 'draft' | 'armed' | 'entered' | 'exited';
 export type FocusSide = 'CE' | 'PE' | 'BOTH';
+export type FocusRowMode = 'real' | 'sim';
 
 export interface FocusIndexGroup {
   underlying: FocusUnderlying;
@@ -136,7 +137,16 @@ export interface FocusRow {
   // means off, same convention as slMultiplier.
   ceSlMultiplier: string;
   peSlMultiplier: string;
+  /**
+   * 'real' sends broker orders (still gated by the daily LIVE · REAL MONEY
+   * arm); 'sim' forward-tests the same rules with paper fills at LTP and never
+   * touches the broker. Missing on disk means 'real' — every row saved before
+   * this field existed traded real money, and reading one as sim would orphan
+   * a live position. New rows start as 'sim'. See isSimRow().
+   */
+  mode?: FocusRowMode;
   // What this row actually holds — see FocusRowFill. Absent until it enters.
+  // For a sim row this is the paper ledger itself, not a broker-backed record.
   fill?: FocusRowFill;
   // Audit
   createdAt: string;
