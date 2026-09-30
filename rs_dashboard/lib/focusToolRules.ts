@@ -21,7 +21,9 @@
  * clock itself cannot be tested at 15:17.
  */
 
-import type { FocusRow, FocusDte, FocusRowStatus } from '@/lib/focusToolRows';
+import type {
+  FocusRow, FocusDte, FocusRowStatus, FocusReentryMode, FocusReentryTrigger, FocusPendingReentry,
+} from '@/lib/focusToolRows';
 
 // ── Constants ────────────────────────────────────────────────────────────────
 
@@ -342,8 +344,12 @@ export function legStopReason(
   const mult = Number(leg === 'CE' ? row.ceSlMultiplier : row.peSlMultiplier);
   if (!(mult > 1)) return null;
   // Short: hurt by this leg's own premium expanding through a multiple of what
-  // it was sold for (this tool only ever opens with a SELL).
-  const entry = qty < 0 ? Number(pos?.sellAvg) || 0 : Number(pos?.buyAvg) || 0;
+  // it was sold for (this tool only ever opens with a SELL). This row's own
+  // entry first (legOwnEntry): re-entering a strike already traded today
+  // (RE-Cost always does; RE-ASAP often lands back on the same ATM) would
+  // otherwise measure the stop from a broker average that blends in the
+  // earlier, closed trade on that security.
+  const entry = legOwnEntry(row, leg, live);
   const now = (leg === 'CE' ? live.ltpCe : live.ltpPe) ?? 0;
   if (entry > 0 && now > 0 && now >= entry * mult) {
     return `${leg} SL ×${mult} hit (premium ${now.toFixed(2)} vs entry ${entry.toFixed(2)})`;
@@ -426,38 +432,127 @@ export function slRollStrike(leg: 'CE' | 'PE', stoppedStrike: number, strikes: n
   return leg === 'CE' ? stoppedStrike + n * step : stoppedStrike - n * step;
 }
 
-export interface SlRollContext {
+export interface ReentryContext {
+  /** Wall-clock 'HH:MM' IST — when the stop/target hit, or now for a waiting re-entry. */
   nowHm: string;
   product: 'INTRADAY' | 'MARGIN';
   groupEnabled: boolean;
-  /** Rolls already done on this leg this cycle (fill.ceRolls / peRolls). */
-  rollsDone: number;
+  /** Re-entries of this trigger already taken on this leg this cycle. */
+  done: number;
+}
+
+/** The re-entry settings that apply to one trigger, with legacy fallbacks. */
+export function reentryConfig(
+  row: Pick<FocusRow, 'reSlMode' | 'reSlMax' | 'reTgtMode' | 'reTgtMax' | 'slRollStrikes' | 'slRollMax'>,
+  trigger: FocusReentryTrigger,
+): { mode: FocusReentryMode; max: number; otmStrikes: number } {
+  const otmStrikes = Math.max(1, Math.trunc(Number(row.slRollStrikes) || 0));
+  if (trigger === 'sl') {
+    // Rows saved before re-entry modes existed only had the OTM roll.
+    const mode = row.reSlMode ?? (Number(row.slRollStrikes) > 0 ? 'otm' : 'off');
+    const max = row.reSlMax ?? row.slRollMax ?? DEFAULT_SL_ROLL_MAX;
+    return { mode, max: Math.trunc(Number(max) || 0), otmStrikes };
+  }
+  const max = row.reTgtMax ?? DEFAULT_SL_ROLL_MAX;
+  return { mode: row.reTgtMode ?? 'off', max: Math.trunc(Number(max) || 0), otmStrikes };
 }
 
 /**
- * Should a leg that just stopped out on its own SL × be re-sold further OTM?
+ * The time gates every re-entry shares — at trigger time and again while a
+ * cost / momentum re-entry waits. Null = still inside the window.
  *
- * Refuses when the option is off, the per-cycle cap is used up, the index has
- * been stopped, or the row's own window (its exit time, or the 15:17 intraday
- * backstop) has closed — the same "never open into a closed window" rule
- * evaluateEntry applies to a fresh entry.
+ * Never re-open into a window that has closed: the row's own exit time, the
+ * 15:17 intraday backstop, "No re-entry after", or a stopped index.
  */
-export function evaluateSlRoll(
-  row: Pick<FocusRow, 'slRollStrikes' | 'slRollMax' | 'exitTime'>,
-  ctx: SlRollContext,
-): EntryDecision {
-  const strikes = Math.trunc(Number(row.slRollStrikes) || 0);
-  if (!(strikes > 0)) return { enter: false, reason: 'SL roll off' };
-  const max = row.slRollMax == null ? DEFAULT_SL_ROLL_MAX : Math.trunc(Number(row.slRollMax) || 0);
-  if (ctx.rollsDone >= max) return { enter: false, reason: `SL roll limit ${max} reached` };
-  if (!ctx.groupEnabled) return { enter: false, reason: 'index not started' };
-  if (row.exitTime && ctx.nowHm >= row.exitTime) {
-    return { enter: false, reason: `past its own exit time ${row.exitTime}` };
+export function reentryWindowClosed(
+  row: Pick<FocusRow, 'exitTime' | 'noReEntryAfter'>,
+  ctx: Pick<ReentryContext, 'nowHm' | 'product' | 'groupEnabled'>,
+): string | null {
+  if (!ctx.groupEnabled) return 'index not started';
+  if (row.noReEntryAfter && ctx.nowHm >= row.noReEntryAfter) {
+    return `no re-entry after ${row.noReEntryAfter}`;
   }
-  if (ctx.product === 'INTRADAY' && ctx.nowHm >= INTRADAY_BACKSTOP_HM) {
-    return { enter: false, reason: 'past 15:17 intraday cutoff' };
+  if (row.exitTime && ctx.nowHm >= row.exitTime) return `past its own exit time ${row.exitTime}`;
+  if (ctx.product === 'INTRADAY' && ctx.nowHm >= INTRADAY_BACKSTOP_HM) return 'past 15:17 intraday cutoff';
+  return null;
+}
+
+/**
+ * Should a leg that a stop/target just closed be re-entered, and how?
+ * Refuses when the mode is off, the per-cycle cap is used up, or the window
+ * has closed (see reentryWindowClosed).
+ */
+export function evaluateReentry(
+  row: Pick<FocusRow, 'reSlMode' | 'reSlMax' | 'reTgtMode' | 'reTgtMax' | 'slRollStrikes' | 'slRollMax'
+    | 'exitTime' | 'noReEntryAfter'>,
+  trigger: FocusReentryTrigger,
+  ctx: ReentryContext,
+): EntryDecision & { mode: FocusReentryMode } {
+  const { mode, max } = reentryConfig(row, trigger);
+  const what = trigger === 'sl' ? 'SL' : 'target';
+  if (mode === 'off') return { enter: false, mode, reason: `re-entry on ${what} off` };
+  if (ctx.done >= max) return { enter: false, mode, reason: `re-entry limit ${max} on ${what} reached` };
+  const closed = reentryWindowClosed(row, ctx);
+  if (closed) return { enter: false, mode, reason: closed };
+  return { enter: true, mode, reason: `re-entry ${mode} after ${what}` };
+}
+
+/** Has a waiting cost / momentum re-entry's price been reached? */
+export function pendingReentryHit(p: Pick<FocusPendingReentry, 'price' | 'dir'>, ltp: number): boolean {
+  if (!(ltp > 0) || !(p.price > 0)) return false;
+  return p.dir === 'down' ? ltp <= p.price : ltp >= p.price;
+}
+
+/**
+ * The trigger level for a waiting re-entry.
+ *
+ * cost: the closed leg's own entry. After an SL (premium ran UP through the
+ * stop) it waits for the premium to fall back to entry; after a target (it
+ * decayed DOWN) it waits for it to climb back to entry.
+ *
+ * momentum: the new strike's premium now, ± the configured points.
+ *
+ * Null when there is nothing sane to wait for (no entry, no quote, no points).
+ */
+export function pendingReentryLevel(
+  mode: 'cost' | 'momentum',
+  trigger: FocusReentryTrigger,
+  ref: { entry?: number; quoteNow?: number; momentumPts?: string | number; momentumDir?: 'down' | 'up' },
+): { price: number; dir: 'down' | 'up' } | null {
+  if (mode === 'cost') {
+    const e = Number(ref.entry) || 0;
+    if (!(e > 0)) return null;
+    return { price: e, dir: trigger === 'sl' ? 'down' : 'up' };
   }
-  return { enter: true, reason: `roll ${strikes} strike${strikes > 1 ? 's' : ''} OTM` };
+  const q = Number(ref.quoteNow) || 0;
+  const pts = Number(ref.momentumPts) || 0;
+  if (!(q > 0) || !(pts > 0)) return null;
+  const dir = ref.momentumDir === 'up' ? 'up' : 'down';
+  const price = dir === 'down' ? q - pts : q + pts;
+  return price > 0 ? { price, dir } : null;
+}
+
+/**
+ * This leg's own target breach, or null: premium decayed to
+ * entry × (1 − pct/100), entry being this row's own (legOwnEntry). Only while
+ * this row owns an open leg; blank / 0 / ≥100 means off.
+ */
+export function legTargetReason(
+  row: Pick<FocusRow, 'ceTgtPct' | 'peTgtPct' | 'fill'>,
+  leg: 'CE' | 'PE',
+  live: RowLive,
+  workerHold?: WorkerHold,
+): string | null {
+  if (legOwnContracts(row, leg, live, workerHold) <= 0) return null;
+  const pct = Number(leg === 'CE' ? row.ceTgtPct : row.peTgtPct);
+  if (!(pct > 0) || pct >= 100) return null;
+  const entry = legOwnEntry(row, leg, live);
+  const now = (leg === 'CE' ? live.ltpCe : live.ltpPe) ?? 0;
+  const level = entry * (1 - pct / 100);
+  if (entry > 0 && now > 0 && now <= level) {
+    return `${leg} target ${pct}% hit (premium ${now.toFixed(2)} ≤ ${level.toFixed(2)}, entry ${entry.toFixed(2)})`;
+  }
+  return null;
 }
 
 /**
@@ -501,9 +596,8 @@ export function legStopPremium(
   const qty = Number(pos?.netQty ?? 0);
   const ltp = (leg === 'CE' ? live.ltpCe : live.ltpPe) ?? 0;
   const owned = rowOwnsLeg(row, leg, workerHold) && qty !== 0;
-  const entry = owned
-    ? (qty < 0 ? Number(pos?.sellAvg) || 0 : Number(pos?.buyAvg) || 0)
-    : ltp;
+  // Same entry legStopReason fires on — display must not disagree with it.
+  const entry = owned ? legOwnEntry(row, leg, live) : ltp;
   return stopPremium(entry, leg === 'CE' ? row.ceSlMultiplier : row.peSlMultiplier);
 }
 

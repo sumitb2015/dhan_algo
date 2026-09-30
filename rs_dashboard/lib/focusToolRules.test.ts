@@ -19,7 +19,8 @@ import {
   stopPremium, legStopPremium, pairStopPremium, legOwnContracts,
   nextOpenedTs, isGhostDropProtected, GHOST_DROP_GRACE_MS,
   isSimRow, simLegPosition,
-  legPinnedStrike, slRollStrike, evaluateSlRoll, costStopReason, legOwnEntry, DEFAULT_SL_ROLL_MAX,
+  legPinnedStrike, slRollStrike, evaluateReentry, costStopReason, legOwnEntry, DEFAULT_SL_ROLL_MAX,
+  reentryWindowClosed, pendingReentryLevel, pendingReentryHit, legTargetReason,
   type RowLive, type PosRow, type WorkerHold,
 } from './focusToolRules.ts';
 import type { FocusRow } from './focusToolRows.ts';
@@ -449,17 +450,72 @@ test('slRollStrike: OTM is up for CE, down for PE', () => {
   assert.equal(slRollStrike('CE', 50000, 2, 100), 50200);
 });
 
-test('evaluateSlRoll gates', () => {
-  const ctx = { nowHm: '10:00', product: 'INTRADAY' as const, groupEnabled: true, rollsDone: 0 };
-  assert.equal(evaluateSlRoll(row({ slRollStrikes: 0 }), ctx).enter, false);
-  assert.equal(evaluateSlRoll(row({ slRollStrikes: 1 }), ctx).enter, true);
-  // Default cap is DEFAULT_SL_ROLL_MAX.
-  assert.equal(evaluateSlRoll(row({ slRollStrikes: 1 }), { ...ctx, rollsDone: DEFAULT_SL_ROLL_MAX }).enter, false);
-  assert.equal(evaluateSlRoll(row({ slRollStrikes: 1, slRollMax: 3 }), { ...ctx, rollsDone: 2 }).enter, true);
-  assert.equal(evaluateSlRoll(row({ slRollStrikes: 1 }), { ...ctx, groupEnabled: false }).enter, false);
-  assert.equal(evaluateSlRoll(row({ slRollStrikes: 1, exitTime: '09:59' }), ctx).enter, false);
-  assert.equal(evaluateSlRoll(row({ slRollStrikes: 1 }), { ...ctx, nowHm: '15:17' }).enter, false);
-  assert.equal(evaluateSlRoll(row({ slRollStrikes: 1 }), { ...ctx, nowHm: '15:17', product: 'MARGIN' }).enter, true);
+test('evaluateReentry gates (SL, legacy OTM roll fields)', () => {
+  const ctx = { nowHm: '10:00', product: 'INTRADAY' as const, groupEnabled: true, done: 0 };
+  assert.equal(evaluateReentry(row({ slRollStrikes: 0 }), 'sl', ctx).enter, false);
+  // A row saved before re-entry modes existed: slRollStrikes > 0 means OTM.
+  const legacy = evaluateReentry(row({ slRollStrikes: 1 }), 'sl', ctx);
+  assert.equal(legacy.enter, true);
+  assert.equal(legacy.mode, 'otm');
+  assert.equal(evaluateReentry(row({ slRollStrikes: 1 }), 'sl', { ...ctx, done: DEFAULT_SL_ROLL_MAX }).enter, false);
+  assert.equal(evaluateReentry(row({ slRollStrikes: 1, slRollMax: 3 }), 'sl', { ...ctx, done: 2 }).enter, true);
+  assert.equal(evaluateReentry(row({ slRollStrikes: 1 }), 'sl', { ...ctx, groupEnabled: false }).enter, false);
+  assert.equal(evaluateReentry(row({ slRollStrikes: 1, exitTime: '09:59' }), 'sl', ctx).enter, false);
+  assert.equal(evaluateReentry(row({ slRollStrikes: 1 }), 'sl', { ...ctx, nowHm: '15:17' }).enter, false);
+  assert.equal(evaluateReentry(row({ slRollStrikes: 1 }), 'sl', { ...ctx, nowHm: '15:17', product: 'MARGIN' }).enter, true);
+  // An explicit mode wins over the legacy field, and 'off' switches it off.
+  assert.equal(evaluateReentry(row({ slRollStrikes: 1, reSlMode: 'off' }), 'sl', ctx).enter, false);
+  assert.equal(evaluateReentry(row({ reSlMode: 'cost' }), 'sl', ctx).mode, 'cost');
+  // reSlMax wins over slRollMax.
+  assert.equal(evaluateReentry(row({ reSlMode: 'asap', reSlMax: 5, slRollMax: 1 }), 'sl', { ...ctx, done: 4 }).enter, true);
+});
+
+test('evaluateReentry: target trigger and No re-entry after', () => {
+  const ctx = { nowHm: '11:00', product: 'INTRADAY' as const, groupEnabled: true, done: 0 };
+  assert.equal(evaluateReentry(row({}), 'tgt', ctx).enter, false);           // off by default
+  assert.equal(evaluateReentry(row({ reTgtMode: 'asap' }), 'tgt', ctx).enter, true);
+  // SL settings don't leak into target.
+  assert.equal(evaluateReentry(row({ reSlMode: 'asap' }), 'tgt', ctx).enter, false);
+  assert.equal(evaluateReentry(row({ reTgtMode: 'asap', noReEntryAfter: '11:00' }), 'tgt', ctx).enter, false);
+  assert.equal(evaluateReentry(row({ reTgtMode: 'asap', noReEntryAfter: '11:01' }), 'tgt', ctx).enter, true);
+  assert.equal(evaluateReentry(row({ reTgtMode: 'asap', reTgtMax: 1 }), 'tgt', { ...ctx, done: 1 }).enter, false);
+});
+
+test('reentryWindowClosed', () => {
+  const ctx = { nowHm: '10:00', product: 'INTRADAY' as const, groupEnabled: true };
+  assert.equal(reentryWindowClosed(row({}), ctx), null);
+  assert.match(reentryWindowClosed(row({ noReEntryAfter: '09:30' }), ctx) ?? '', /no re-entry after/);
+});
+
+test('pendingReentryLevel + pendingReentryHit', () => {
+  // Cost after SL: wait for the premium to FALL back to entry.
+  const costSl = pendingReentryLevel('cost', 'sl', { entry: 200 });
+  assert.deepEqual(costSl, { price: 200, dir: 'down' });
+  assert.equal(pendingReentryHit(costSl!, 201), false);
+  assert.equal(pendingReentryHit(costSl!, 200), true);
+  // Cost after target: wait for it to CLIMB back to entry.
+  assert.deepEqual(pendingReentryLevel('cost', 'tgt', { entry: 200 }), { price: 200, dir: 'up' });
+  assert.equal(pendingReentryLevel('cost', 'sl', { entry: 0 }), null);
+  // Momentum: new strike at 180, 20 pts down → fires at 160; up → 200.
+  assert.deepEqual(pendingReentryLevel('momentum', 'sl', { quoteNow: 180, momentumPts: '20' }), { price: 160, dir: 'down' });
+  assert.deepEqual(pendingReentryLevel('momentum', 'sl', { quoteNow: 180, momentumPts: 20, momentumDir: 'up' }), { price: 200, dir: 'up' });
+  assert.equal(pendingReentryLevel('momentum', 'sl', { quoteNow: 180, momentumPts: '' }), null);
+  assert.equal(pendingReentryLevel('momentum', 'sl', { quoteNow: 10, momentumPts: 20 }), null);
+  // A missing quote (0) never fires.
+  assert.equal(pendingReentryHit({ price: 200, dir: 'down' }, 0), false);
+});
+
+test('legTargetReason', () => {
+  const c = { ceLtp: 50, peLtp: 0, ceQty: -75, peQty: 0, ceEntry: 100, peEntry: 0 };
+  const r = (pct: string) => row({ ceTgtPct: pct, fill: { ceStrike: 24000, peStrike: null, ceQty: 75, peQty: 0, ceEntry: 100, ts: '' } });
+  // 50% of entry 100 → fires at 50.
+  assert.match(legTargetReason(r('50'), 'CE', live(c)) ?? '', /CE target 50% hit/);
+  assert.equal(legTargetReason(r('50'), 'CE', live({ ...c, ceLtp: 51 })), null);
+  // Off: blank, 0, ≥100.
+  assert.equal(legTargetReason(r(''), 'CE', live(c)), null);
+  assert.equal(legTargetReason(r('100'), 'CE', live(c)), null);
+  // Not owned → nothing.
+  assert.equal(legTargetReason(row({ ceTgtPct: '50' }), 'CE', live(c)), null);
 });
 
 test('costStopReason: only once armed, and only at/above entry', () => {
@@ -492,4 +548,17 @@ test('costStopReason: uses own entry, not a blended broker avg', () => {
   const r = row({ slToCost: true, fill: { ceStrike: null, peStrike: 24000, ceQty: 0, peQty: 75, peEntry: 100, peCostStop: true, ts: '' } });
   assert.equal(costStopReason(r, 'PE', live(c)), null);
   assert.match(costStopReason(r, 'PE', live({ ...c, peLtp: 100 })) ?? '', /SL to cost hit/);
+});
+
+test('legStopReason / legStopPremium: own entry beats a day-blended broker avg', () => {
+  // Re-sold the same strike at 120 after an earlier trade at 100: the broker
+  // shows a blended sellAvg of 110. SL ×1.2 must be 144 (off 120), not 132.
+  const c = { ceLtp: 135, peLtp: 0, ceQty: -75, peQty: 0, ceEntry: 110, peEntry: 0 };
+  const r = row({ ceSlMultiplier: '1.2', fill: { ceStrike: 24000, peStrike: null, ceQty: 75, peQty: 0, ceEntry: 120, ts: '' } });
+  assert.equal(legStopReason(r, 'CE', live(c)), null);
+  assert.ok(Math.abs((legStopPremium(r, 'CE', live(c)) ?? 0) - 144) < 1e-9);
+  assert.match(legStopReason(r, 'CE', live({ ...c, ceLtp: 144 })) ?? '', /CE SL ×1.2 hit/);
+  // No stamped entry (legacy ledger) → broker avg, as before.
+  const legacy = row({ ceSlMultiplier: '1.2', fill: { ceStrike: 24000, peStrike: null, ceQty: 75, peQty: 0, ts: '' } });
+  assert.match(legStopReason(legacy, 'CE', live(c)) ?? '', /CE SL ×1.2 hit/);
 });

@@ -12,6 +12,43 @@ export type FocusRowStatus = 'draft' | 'armed' | 'entered' | 'exited';
 export type FocusSide = 'CE' | 'PE' | 'BOTH';
 export type FocusRowMode = 'real' | 'sim';
 
+/**
+ * What a leg does after its own SL × or target closes it (AlgoTest's
+ * "Re-Entry on SL / Tgt", minus the Reverse variants — this tool only ever
+ * opens with a SELL):
+ *  - off      — stays closed.
+ *  - asap     — re-sell at once at the strike the row resolves to NOW
+ *               (ATM ± offset, or the ₹ premium target).
+ *  - otm      — re-sell at once, FocusRow.slRollStrikes further OTM than the
+ *               strike that just closed (CE up, PE down).
+ *  - cost     — wait on the SAME strike until its premium returns to the
+ *               closed leg's own entry, then re-sell there.
+ *  - momentum — pick the strike the row resolves to now, note its premium,
+ *               and re-sell once it has moved FocusRow.reMomentumPts points
+ *               in FocusRow.reMomentumDir.
+ */
+export type FocusReentryMode = 'off' | 'asap' | 'otm' | 'cost' | 'momentum';
+export type FocusReentryTrigger = 'sl' | 'tgt';
+
+/**
+ * A re-entry armed on a leg and waiting for its price (cost / momentum).
+ * Persisted in the fill ledger so it survives a reload and dies with the
+ * cycle (Arm, whole-row exit) like everything else in the ledger.
+ */
+export interface FocusPendingReentry {
+  trigger: FocusReentryTrigger;
+  mode: 'cost' | 'momentum';
+  strike: number;
+  /** Whole lots to re-sell — what the closed leg held. */
+  lots: number;
+  /** Premium level that fires it. */
+  price: number;
+  /** 'down' fires at LTP ≤ price, 'up' at LTP ≥ price. */
+  dir: 'down' | 'up';
+  /** Unix ms armed. */
+  since: number;
+}
+
 export interface FocusIndexGroup {
   underlying: FocusUnderlying;
   enabled: boolean;
@@ -108,6 +145,12 @@ export interface FocusRowFill {
    */
   ceCostStop?: boolean;
   peCostStop?: boolean;
+  /** Re-entries taken after a leg TARGET this cycle (SL ones are ceRolls/peRolls). */
+  ceTgtReentries?: number;
+  peTgtReentries?: number;
+  /** A cost / momentum re-entry waiting for its price. See FocusPendingReentry. */
+  cePending?: FocusPendingReentry | null;
+  pePending?: FocusPendingReentry | null;
   ts: string;
 }
 
@@ -162,6 +205,34 @@ export interface FocusRow {
   slRollStrikes?: number;
   /** Max auto-rolls per leg per cycle (Arm → exit). Missing = 2. */
   slRollMax?: number;
+  /**
+   * Re-entry after a leg SL × close. Missing = 'otm' when slRollStrikes > 0
+   * (rows saved before re-entry modes existed), else 'off'. Strikes for
+   * 'otm' come from slRollStrikes. Max per leg per cycle from reSlMax, else
+   * slRollMax.
+   */
+  reSlMode?: FocusReentryMode;
+  reSlMax?: number;
+  /** Re-entry after a leg TARGET close — same modes. Missing = 'off'. */
+  reTgtMode?: FocusReentryMode;
+  reTgtMax?: number;
+  /** Momentum re-entry: points the new strike's premium must move. */
+  reMomentumPts?: string;
+  /** Momentum direction. Missing = 'down' (premium decaying — a seller's confirmation). */
+  reMomentumDir?: 'down' | 'up';
+  /**
+   * 'HH:MM' IST. A stop/target hit at or after this time takes no re-entry,
+   * and waiting (cost / momentum) re-entries are dropped. Blank = no cutoff
+   * beyond the row's own exit time and the 15:17 backstop.
+   */
+  noReEntryAfter?: string;
+  /**
+   * Leg-wise target, % of this leg's own entry premium: the leg exits when
+   * its premium has decayed by this much (entry × (1 − pct/100)). Blank / 0
+   * = off.
+   */
+  ceTgtPct?: string;
+  peTgtPct?: string;
   /**
    * SL to cost: when one leg's own SL × hits, the leg still open gets a stop
    * at its own entry premium (break-even on that leg). Missing = off.
