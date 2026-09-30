@@ -195,16 +195,22 @@ Non-obvious route behaviors:
   formats with import-precedence and P&L-column-semantics traps — see
   [docs/API_GOTCHAS.md](docs/API_GOTCHAS.md) before touching either parser.
 - `exit-all/`, `pnl-exit/`, `quiktrade/`, `crudeoil/kotak-order/` — square off positions / place quick trades: real-money endpoints.
-- `multi-leg-focus/` — N-leg options basket builder (`components/MultiLegFocus.tsx`,
-  `lib/multiLegFocus.ts`): two-phase order placement (BUY hedges concurrently, then SELL legs concurrently) with rollback, fail-closed margin gate (composition-matched margin + fresh funds + one placement at a time via the `placeBasket` lock wrapper; a hedge-then-recheck before the sells when funds are tight), exits shorts before longs and never sells hedges while a short is still open, `api/multi-leg-focus/baskets/`
-  persists the basket JSON, `api/multi-leg-focus/margin/` polls broker margin on its own
-  interval decoupled from price ticks. Real-money endpoint. Read `dhan-terminal-position-ownership`
-  (ledger/reconciliation) and `dhan-polling-guards` (poller/stale-closure pitfalls) before touching it.
+- `multi-leg-focus/` — N-leg options basket builder (`components/MultiLegFocus.tsx`, `lib/multiLegFocus.ts`;
+  basket JSON via `api/multi-leg-focus/baskets/`, broker margin polled by `api/multi-leg-focus/margin/` on its own
+  interval). Real-money endpoint: two-phase concurrent placement with rollback, fail-closed margin gate, shorts exit
+  before hedges — the rules are in `dhan-terminal-position-ownership` (Invariants 6, 9, 10); also read `dhan-polling-guards`.
+- `focus-tool/` — scheduled straddle/strangle terminal (`components/FocusTool.tsx`; pure rules in
+  `lib/focusToolRules.ts`, kept in parity with `tests/test_focus_tool_parity.py` via `lib/focusToolRules.cases.json`;
+  rows + fill ledger in `debug/focus_tool_rows.json` via `api/focus-tool/rows/`). Executes **only in the open browser
+  tab** (the server worker was retired in `31fadcf`). Per-row REAL/SIM mode — REAL rows also need the daily
+  LIVE · REAL MONEY arm. Leg SL × / target %, SL→Cost and AlgoTest-style re-entry (ASAP/OTM/Cost/Momentum; waiting
+  re-entries persist in the ledger). Real-money endpoint: pins, locks, Exit All and chips are per leg and
+  ledger-owned, and unconfirmed orders are held/credited — read `dhan-terminal-position-ownership` (Invariant 11) first.
 - `options-screener/` — "what changed in the last 1-30 min" across index/stock/MCX options (`components/OptionsScreener.tsx`, engine in `lib/optionsScreener.ts`). `collector/` starts/stops `scripts/tools/options_screener_collector.py` (O_EXCL start lock; stop via `debug/options_screener_stop.trigger`), which batches ATM±10 × 2 expiries through `/marketfeed/quote` every minute and writes `debug/options_screener_snapshot.json` (OI/volume in lots, IV solved locally). It scans **only the underlyings open tabs are showing**: `scan/` records each tab's segment/symbols in `debug/options_screener_scope.json` (union of tabs polled in the last 2 min, else the last selection; "All" with no symbols = everything; `--all` overrides). Quote calls go through the cross-process quote lane `lib/dhan_quote_lane.py` ↔ `rs_dashboard/lib/dhanQuoteLaneFile.ts` (shared 1.1 s slots in `debug/dhan_quote_lane.json`, gap doubles on a 429 for every participant — `lib/dhanQuotePacer.ts` joins it; strategies via DhanHelper do not). `scan/` evaluates custom + preset scans over the snapshot; `order/` is a **real-money** single-leg Dhan order that takes only the contract id — security id, segment, lot and tick come from the snapshot, lots capped at 25.
 - `csp-scan/` — spawns `scripts/tools/csp_scanner.py` (screening only, no orders); `csp-tracked/sell` and `csp-watchlist/exit` place and exit **real** cash-secured-put orders via `scripts/tools/csp_watchlist.py`, then track fills/strike-rolls in `lib/cspTracked.ts`'s JSON store — reconciled against broker truth by `csp-tracked/reconcile` and `csp-tracked/sync`.
 - `margin-allocator/` — capital-deployment desk (`components/MarginAllocator.tsx`): classifies live Dhan/Kotak option positions into structures (straddle/strangle/spread/condor/naked), reads India VIX percentile + per-underlying trend (`margin-allocator/trend/`), and ranks/sizes Baskets credit-strategy templates against a risk budget. Read-only/planning — it doesn't place orders itself. See `dhan-margin-allocator`.
 - `update-repo/` — the NavBar "Update App" button: fetches origin, auto-stashes dirty local state, fast-forwards or merges, and reports whether the running process needs a rebuild/restart. See `dhan-app-self-update` before changing restart-detection or merge logic.
-- `cyber-scalper/` — third order-placing terminal (`components/CyberScalper/`, ~3.8K lines: `CyberScalperTerminal.tsx`, `CyberOrderPad.tsx`, `CyberPositionsPanel.tsx`, `CyberChart.tsx`, `CyberOrderBook.tsx`, `CyberBiasRadar.tsx`, `CyberStrategyIntelligence.tsx`; feed at `api/cyber-scalper/feed/`), alongside Scalper/AdvancedScalper — multi-broker (Dhan/Zerodha/Kotak), Nifty options + NIFTY/CRUDEOIL/CRUDEOILM futures, EMA9/20+VWAP bias panel. MCX symbols default to Futures mode because their options chain never resolves (`get_expiries()` fails for MCX underlyings — see [docs/API_GOTCHAS.md](docs/API_GOTCHAS.md)). Real-money endpoint; same P&L/position-identity/exit-sizing invariants as the other scalpers apply — see `dhan-broker-positions`.
+- `cyber-scalper/` — third order-placing terminal (`components/CyberScalper/`; feed at `api/cyber-scalper/feed/`), alongside Scalper/AdvancedScalper — multi-broker (Dhan/Zerodha/Kotak), Nifty options + NIFTY/CRUDEOIL/CRUDEOILM futures, EMA9/20+VWAP bias panel. MCX symbols default to Futures mode because their options chain never resolves (`get_expiries()` fails for MCX underlyings — see [docs/API_GOTCHAS.md](docs/API_GOTCHAS.md)). Real-money endpoint; same P&L/position-identity/exit-sizing invariants as the other scalpers apply — see `dhan-broker-positions`.
 
 **lib/ files** (`rs_dashboard/lib/`) — the ones with non-obvious behavior:
 - `pyExec.ts` — `runPythonJson()` (async venv-Python spawn, parses last stdout line as JSON) + `dedupe()` in-flight dedup + `PROJECT_ROOT`/`PYTHON_EXE`. Use this from API routes; don't hand-roll `spawnSync` (blocks the Node event loop)
@@ -258,6 +264,9 @@ code stays inside the token system — a new themed surface must also get a
 **Skills for recurring work** — read the matching skill before starting, each is
 distilled from 7-10 repeat bug-fix commits:
 `dhan-broker-positions` (scalper terminals, broker payloads, P&L, MTM history, close/exit orders),
+`dhan-terminal-position-ownership` (who owns a position in multi-row/multi-leg terminals — FocusTool,
+MultiLegFocus: ledger-not-broker ownership, down-only reconcile, per-leg pins, unconfirmed-order holds,
+strike rolls and automatic re-entry),
 `dhan-order-tickets` (order modals and trade routes: server-side lot cap, MCX/BSE contract resolution, margin estimates, draft inputs),
 `dhan-page-theme` (per-page header, icon, accent, DATA chip, z-index scale, shared components and page states; ships an audit script),
 `dhan-terminal-polish` (density/readability of order-placing terminals) and `dhan-a11y-controls` (focus ring, icon-button aria-labels),
@@ -265,8 +274,10 @@ distilled from 7-10 repeat bug-fix commits:
 `dhan-broker-cache` (the shared positions/funds cache in `lib/brokerPositionsCache.ts` — when a route may share it vs. must stay live),
 `dhan-options-analytics-page` (Positions/Straddle/Strangle Analysis: draft legs, margin/ROI, validity modals),
 `dhan-live-chart` (lightweight-charts canvas charts and polled series),
+`dhan-recharts-charting` (recharts component mechanics: tooltips, ResponsiveContainer sizing, animation replay on live ticks),
 `dhan-plotly-3d-scene` (Option Cube / Plotly gl3d: camera ownership, fullscreen panel, expiry-keyed chain state),
 `dhan-backtest-data` (override for the installed VectorBT skills: Dhan-only data loader, session filter, costs, lot sizes — read before any backtest),
+`dhan-stockmock-validation` (StockMock API backtests validated side by side against `backtest_short_straddle.py`),
 `dhan-indicators` (indicator sources, the six Supertrend copies, TA-Lib host dependence, closed-candle rules),
 `dhan-api-errors` (DH-9xx / 8xx codes, `last_api_error`, silent-failure symptom table),
 `dhan-polling-guards` (poll loops, caches, JSON read-modify-write, process spawns),
