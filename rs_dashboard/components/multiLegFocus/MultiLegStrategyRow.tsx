@@ -212,7 +212,8 @@ export default function MultiLegStrategyRow({
   // Legs-table view state: purely presentational (never written back to the
   // basket). Sorting is opt-in — with no sort key the legs keep their stored
   // order, so a draft leg being edited doesn't jump rows as its strike changes.
-  const [legFilter, setLegFilter] = useState<'all' | 'open' | 'closed'>('all');
+  // null = the user hasn't picked a chip yet, so the default below applies.
+  const [legFilterChoice, setLegFilter] = useState<'all' | 'open' | 'closed' | null>(null);
   const [legSort, setLegSort] = useState<{ key: LegSortKey; dir: 'asc' | 'desc' } | null>(null);
   const toggleLegSort = useCallback((key: LegSortKey) => {
     setLegSort(prev => (!prev || prev.key !== key) ? { key, dir: 'asc' } : prev.dir === 'asc' ? { key, dir: 'desc' } : null);
@@ -233,6 +234,12 @@ export default function MultiLegStrategyRow({
     for (const l of basket.legs) if (l.status === 'CLOSED') closed++;
     return { all: basket.legs.length, closed, open: basket.legs.length - closed };
   }, [basket.legs]);
+
+  // A strategy still holding open legs keeps its closed legs (they carry the realized P&L),
+  // so it only retires to the archive once fully flat. Until then, default to the Open chip
+  // once any leg was closed on an earlier day; if every close is from today, show All.
+  const hasEarlierDayClosed = useMemo(() => basket.legs.some(l => !legCountsToday(l)), [basket.legs]);
+  const legFilter = legFilterChoice ?? (hasEarlierDayClosed && legCounts.open > 0 ? 'open' : 'all');
 
   const crudeMult = broker === 'dhan'
     ? (basket.underlying === 'CRUDEOIL' ? 100 : basket.underlying === 'CRUDEOILM' ? 10 : 1)
