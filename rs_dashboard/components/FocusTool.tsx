@@ -31,7 +31,7 @@ import {
   legStopPremium, pairStopPremium, nextOpenedTs, isGhostDropProtected,
   isSimRow, simLegPosition,
   legPinnedStrike, costStopReason, legOwnEntry, slRollStrike, DEFAULT_SL_ROLL_MAX,
-  reentryConfig, evaluateReentry, reentryWindowClosed, pendingReentryLevel, pendingReentryHit, legTargetReason,
+  reentryConfig, evaluateReentry, reentryWindowClosed, pendingReentryLevel, pendingReentryHit, legTargetReason, costReentryBasis,
   type PosRow, type RowLive,
 } from '@/lib/focusToolRules';
 import { computeRowPnl, mtmForQty, shiftMayReopen, canMarkMtm, shiftCloseConfirmed, rowDisplayBookedPnl, putCallRatio, valuePutCallRatio, pickOpenInterest } from '@/lib/focusToolPnl';
@@ -5159,6 +5159,10 @@ export default function FocusTool() {
     if (cfg.mode === 'cost' || cfg.mode === 'momentum') {
       let strike = closedStrike;
       let quoteNow = 0;
+      // RE-Cost waits for the strike's INITIAL entry, not the last cost fill.
+      const basis = cfg.mode === 'cost'
+        ? costReentryBasis(leg === 'CE' ? row.fill.ceCostBasis : row.fill.peCostBasis, closedStrike, closedEntry)
+        : null;
       if (cfg.mode === 'momentum') {
         const s2 = await resolvedStrikeAfterClose(rowId, leg);
         if (s2 == null) {
@@ -5169,7 +5173,7 @@ export default function FocusTool() {
         quoteNow = actionsRef.current.simQuote(u, expiry, strike, leg);
       }
       const level = pendingReentryLevel(cfg.mode, trigger, {
-        entry: closedEntry, quoteNow, momentumPts: row.reMomentumPts, momentumDir: row.reMomentumDir,
+        entry: basis?.price ?? closedEntry, quoteNow, momentumPts: row.reMomentumPts, momentumDir: row.reMomentumDir,
       });
       if (!level) {
         addToast('error', `${tag} no re-entry`, cfg.mode === 'cost'
@@ -5180,7 +5184,9 @@ export default function FocusTool() {
       const pending: FocusPendingReentry = {
         trigger, mode: cfg.mode, strike, lots, price: level.price, dir: level.dir, since: Date.now(),
       };
-      patchFill(rowId, () => (leg === 'CE' ? { cePending: pending } : { pePending: pending }));
+      patchFill(rowId, () => (leg === 'CE'
+        ? { cePending: pending, ...(basis ? { ceCostBasis: basis } : {}) }
+        : { pePending: pending, ...(basis ? { peCostBasis: basis } : {}) }));
       addToast('success', `${tag} re-entry armed`,
         `RE-${cfg.mode.toUpperCase()} after ${what}: sell ${lots} lot(s) ${strike} ${leg} when premium ${level.dir === 'down' ? '≤' : '≥'} ${level.price.toFixed(2)}`);
       return 'pending';
@@ -5202,7 +5208,7 @@ export default function FocusTool() {
     if (!ok) {
       addToast('error', `${tag} re-entry not confirmed`,
         `Closed at ${closedStrike}; the ${newStrike} ${leg} re-entry was rejected or not confirmed filled in time. `
-        + 'Check the position book — a late fill is NOT tracked by this row beyond what was confirmed.');
+        + 'It may still fill late — this row will pick that up, so do NOT reopen it by hand.');
       return 'unconfirmed';
     }
     addToast('success', `${tag} re-entered (${cfg.mode.toUpperCase()})`,

@@ -504,9 +504,23 @@ export function pendingReentryHit(p: Pick<FocusPendingReentry, 'price' | 'dir'>,
 }
 
 /**
+ * The entry RE-Cost waits for: the recorded basis while the closed strike is
+ * the one it was recorded on, else (first cost re-entry on this strike this
+ * cycle) the closed leg's own entry. Null when neither is known.
+ */
+export function costReentryBasis(
+  basis: { strike: number; price: number } | null | undefined,
+  closedStrike: number,
+  closedEntry: number,
+): { strike: number; price: number } | null {
+  if (basis && basis.strike === closedStrike && basis.price > 0) return basis;
+  return closedEntry > 0 ? { strike: closedStrike, price: closedEntry } : null;
+}
+
+/**
  * The trigger level for a waiting re-entry.
  *
- * cost: the closed leg's own entry. After an SL (premium ran UP through the
+ * cost: the leg's initial entry (costReentryBasis). After an SL (premium ran UP through the
  * stop) it waits for the premium to fall back to entry; after a target (it
  * decayed DOWN) it waits for it to climb back to entry.
  *

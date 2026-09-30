@@ -151,6 +151,15 @@ export interface FocusRowFill {
   /** A cost / momentum re-entry waiting for its price. See FocusPendingReentry. */
   cePending?: FocusPendingReentry | null;
   pePending?: FocusPendingReentry | null;
+  /**
+   * RE-Cost's price: the INITIAL entry of the strike cost re-entries cycle
+   * on (AlgoTest re-enters "at initial entry price"). Recorded the first time
+   * a cost re-entry is armed on that strike this cycle and reused while later
+   * ones stay on it — the closed leg's own entry would be the previous cost
+   * fill, drifting the level lower with every re-entry. See costReentryBasis.
+   */
+  ceCostBasis?: { strike: number; price: number } | null;
+  peCostBasis?: { strike: number; price: number } | null;
   ts: string;
 }
 

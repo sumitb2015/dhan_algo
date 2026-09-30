@@ -20,7 +20,7 @@ import {
   nextOpenedTs, isGhostDropProtected, GHOST_DROP_GRACE_MS,
   isSimRow, simLegPosition,
   legPinnedStrike, slRollStrike, evaluateReentry, costStopReason, legOwnEntry, DEFAULT_SL_ROLL_MAX,
-  reentryWindowClosed, pendingReentryLevel, pendingReentryHit, legTargetReason,
+  reentryWindowClosed, pendingReentryLevel, pendingReentryHit, legTargetReason, costReentryBasis,
   type RowLive, type PosRow, type WorkerHold,
 } from './focusToolRules.ts';
 import type { FocusRow } from './focusToolRows.ts';
@@ -561,4 +561,16 @@ test('legStopReason / legStopPremium: own entry beats a day-blended broker avg',
   // No stamped entry (legacy ledger) → broker avg, as before.
   const legacy = row({ ceSlMultiplier: '1.2', fill: { ceStrike: 24000, peStrike: null, ceQty: 75, peQty: 0, ts: '' } });
   assert.match(legStopReason(legacy, 'CE', live(c)) ?? '', /CE SL ×1.2 hit/);
+});
+
+test('costReentryBasis: RE-Cost keeps the strike\'s initial entry across re-entries', () => {
+  // First cost re-entry on 22600: the closed leg's own entry becomes the basis.
+  const first = costReentryBasis(null, 22600, 200);
+  assert.deepEqual(first, { strike: 22600, price: 200 });
+  // Re-sold at 198 and stopped again on the same strike: still waits for 200.
+  assert.deepEqual(costReentryBasis(first, 22600, 198), { strike: 22600, price: 200 });
+  // A different strike (e.g. after an ASAP/OTM re-entry) starts its own basis.
+  assert.deepEqual(costReentryBasis(first, 22650, 180), { strike: 22650, price: 180 });
+  assert.equal(costReentryBasis(null, 22600, 0), null);
+  assert.deepEqual(costReentryBasis({ strike: 22600, price: 0 }, 22600, 190), { strike: 22600, price: 190 });
 });
