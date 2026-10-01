@@ -12,7 +12,7 @@ type SortKey = 'symbol' | 'close' | 'change1D' | 'rs' | 'rsi' | 'distPct' | 'day
 const DEFAULT_PERIOD = DEFAULT_PARAMS.period;
 const TTL_MS = 5 * 60 * 1000;
 const RSI_MIN = DEFAULT_PARAMS.rsiMin; // bullish condition: RSI(14) above 50
-const STRONG_RS_PCT = 10; // StockEdge's "strongly outperforming": RS above 0.1
+const STRONG_RS = 0.1; // StockEdge's "strongly outperforming": RS above 0.1
 
 const BADGE: Record<RsSignal, string> = {
   BUY: 'bg-emerald-500/10 border-emerald-500/25 text-emerald-400',
@@ -26,9 +26,9 @@ const fmt = (n: number, d = 2) => n.toLocaleString('en-IN', { minimumFractionDig
 const signed = (n: number) => `${n > 0 ? '+' : ''}${fmt(n)}`;
 const tone = (n: number) => (n > 0 ? 'text-emerald-400' : n < 0 ? 'text-red-400' : 'text-zinc-400');
 
-/** RS drawn around a centre zero line, mirroring the indicator's zero line. Saturates at ±100%. */
+/** RS drawn around a centre zero line, mirroring the indicator's zero line. Saturates at ±1.0. */
 function RsBar({ value }: { value: number }) {
-  const w = Math.min(Math.abs(value), 100) / 2; // % of the full track on one side
+  const w = (Math.min(Math.abs(value), 1) / 2) * 100; // % of the full track on one side
   return (
     <div className="relative h-1.5 w-28 rounded-full bg-zinc-800" aria-hidden="true">
       <span className="absolute left-1/2 top-[-2px] bottom-[-2px] w-px bg-zinc-500" />
@@ -107,7 +107,7 @@ export default function RsStrategyPage() {
     const q = query.trim().toLowerCase();
     const list = data.stocks.filter(
       (s) => (tab === 'ALL' || s.signal === tab) &&
-        (!strongOnly || s.rs >= STRONG_RS_PCT) &&
+        (!strongOnly || s.rs >= STRONG_RS) &&
         (!risingOnly || s.rsRising) &&
         (!weeklyOnly || s.weekly === 'BUY' || s.weekly === 'HOLD') &&
         (!q || s.symbol.toLowerCase().includes(q)),
@@ -224,7 +224,7 @@ export default function RsStrategyPage() {
           <div className="flex items-center gap-2 flex-wrap">
           {([
             ['RSI > 50', rsiOn, setRsiOn, 'Require RSI(14) above 50 for a buy'],
-            ['RS ≥ 10%', strongOnly, setStrongOnly, 'Only stocks outperforming Nifty by 10% or more'],
+            ['RS ≥ 0.10', strongOnly, setStrongOnly, 'Only stocks with RS of 0.10 or more (outperforming Nifty by 10 points)'],
             ['RS rising 3d', risingOnly, setRisingOnly, 'Only stocks whose RS rose three sessions in a row'],
             ['Weekly long', weeklyOnly, setWeeklyOnly, 'Weekly chart (same RS and Supertrend rules) is also Buy or Hold. Needs about 70 weeks of history'],
           ] as [string, boolean, (v: boolean) => void, string][]).map(([label, on, set, tip]) => (
@@ -261,7 +261,7 @@ export default function RsStrategyPage() {
                   {th('symbol', 'Symbol', 'text-left')}
                   {th('close', 'Close')}
                   {th('change1D', '1D %')}
-                  {th('rs', `RS-${period} %`)}
+                  {th('rs', `RS-${period}`)}
                   <th className="px-4 py-3 text-left">RS vs zero</th>
                   <th className="px-4 py-3 text-right">Supertrend</th>
                   {th('rsi', 'RSI')}

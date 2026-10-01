@@ -22,7 +22,7 @@ export interface RsStrategyStock {
   symbol: string;
   close: number;
   change1D: number;
-  rs: number; // percent: (stock/stock[n]) / (nifty/nifty[n]) - 1, x100
+  rs: number; // ratio as TradingView/StockEdge show it: (stock/stock[n]) / (nifty/nifty[n]) - 1 (0.46 = +46%)
   supertrend: number;
   distPct: number; // (close - supertrend) / close, percent
   stDir: 1 | -1;
@@ -143,7 +143,7 @@ function evaluateSeries(symbol: string, stockRows: Bar[], indexRows: Bar[], p: R
     symbol,
     close: row.close,
     change1D: prev > 0 ? ((row.close - prev) / prev) * 100 : 0,
-    rs: rs * 100,
+    rs,
     supertrend: line,
     distPct: row.close > 0 ? ((row.close - line) / row.close) * 100 : 0,
     stDir: st[lastIdx].dir as 1 | -1,

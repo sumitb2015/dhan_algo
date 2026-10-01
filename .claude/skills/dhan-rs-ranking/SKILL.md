@@ -1,11 +1,11 @@
 ---
 name: dhan-rs-ranking
-description: Use when working on the shared Relative Strength (RS) primitives — lib/rs.ts's computeRSLine, computeCurrentRS, effectiveLookback, assignRSScores, buildRSResult — and their direct consumers (RS Scanner / Leaderboard at /rs-scanner). Covers the degraded-lookback fallback for recent listings, the percentile/A-B-C-D rating, the Stage-2 gate, and — critically — that this is ONE of four independent RS formulas in the codebase (RRG, Scanner, and Python's momentum_investing each compute their own). Not for RRG's own JdK-style math (dhan-rrg), Scanner's own rolling variant (dhan-equity-technical-screener), or Sector Breadth's own Mansfield-vs-Nifty50 variant (dhan-sector-breadth) — read this skill's "Four RS formulas" section before touching any of those four files to avoid unifying formulas that are deliberately different.
+description: Use when working on the shared Relative Strength (RS) primitives — lib/rs.ts's computeRSLine, computeCurrentRS, effectiveLookback, assignRSScores, buildRSResult — and their direct consumers (RS Scanner / Leaderboard at /rs-scanner). Covers the degraded-lookback fallback for recent listings, the percentile/A-B-C-D rating, the Stage-2 gate, and — critically — that this is ONE of six independent RS formulas in the codebase (RRG, Scanner, Sector Breadth, the /rs-strategy scanner and Python's momentum_investing each compute their own). Not for RRG's own JdK-style math (dhan-rrg), Scanner's own rolling variant (dhan-equity-technical-screener), or Sector Breadth's own Mansfield-vs-Nifty50 variant (dhan-sector-breadth) — read this skill's "Six independent RS formulas" table before touching any of those files to avoid unifying formulas that are deliberately different.
 ---
 
 # RS Ranking (`lib/rs.ts` — the shared primitives)
 
-## Four independent RS formulas exist in this codebase — read this before changing any of them
+## Six independent RS formulas exist in this codebase — read this before changing any of them
 
 | Where | Formula shape | Purpose | Skill |
 |---|---|---|---|
@@ -14,6 +14,7 @@ description: Use when working on the shared Relative Strength (RS) primitives �
 | `app/api/scanner/route.ts` | Own rolling RS-ratio series → `rsRising20`/`rsAboveMA` boolean gates | Scanner filter/screen | `dhan-equity-technical-screener` |
 | `lib/sectorBreadth.ts` | Mansfield-vs-Nifty-50-specifically, 50-bar window vs its own 20-bar average | Sector Breadth's per-stock RS | `dhan-sector-breadth` |
 | `lib/momentum.py` `composite_rs` | Weighted multi-lookback sum, `Σ w_n*[(S_t/S_{t-n})/(I_t/I_{t-n})-1]`, weights `[(10,.10),(21,.20),(63,.40),(126,.30)]` | `momentum_investing` strategy's portfolio ranking (Python, not TS) | — (see `dhan-new-strategy`) |
+| `lib/rsStrategyCore.ts` `evaluateSeries` | Rolling single-lookback, n=55 bars, signed around 0: `(S_t/S_{t-55})/(I_t/I_{t-55}) - 1`, fed into a Buy/Hold/Sell/Wait state machine with Supertrend(10,2) + RSI | `/rs-strategy` scanner (read-only) | `dhan-rs-strategy` |
 
 These are **deliberately different tools for different jobs** — a single-index RS score, a
 rotation-momentum chart coordinate, a boolean screener gate, and a portfolio-ranking composite

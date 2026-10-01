@@ -48,12 +48,12 @@ test('rsRising is true for 3 consecutive rising RS readings, false when RS is fa
   assert.equal(evaluateStock('X', fade, idx, DEFAULT_PARAMS)!.rsRising, false);
 });
 
-test('RS formula: stock doubling vs flat index over 55 bars = +100%', () => {
+test('RS formula: stock doubling vs flat index over 55 bars = RS 1.0 (a ratio, not a percent)', () => {
   const n = 100;
   const idx = mk(Array(n).fill(100));
   const stock = mk(Array.from({ length: n }, (_, i) => (i < n - 55 ? 50 : 50 + ((i - (n - 56)) / 55) * 50)));
   const r = evaluateStock('X', stock, idx, DEFAULT_PARAMS)!;
-  assert.ok(Math.abs(r.rs - 100) < 1e-6, `rs=${r.rs}`);
+  assert.ok(Math.abs(r.rs - 1) < 1e-9, `rs=${r.rs}`);
   assert.equal(r.signal, 'BUY');
   assert.ok(r.close > r.supertrend);
 });
