@@ -4,7 +4,7 @@ import {
   resolveTemplateLegs, reconcileLegFillDown, reconcileLegWithBroker, legPnl, basketTotalPnl, sortLegsForExit, findLegPosition,
   computeLegTrailingSL, computeStrategyMetrics, checkStrategyRisk, computeCalendarPayoffCurve, classifyBasketStructure, findSiblingLegCollisions,
   formatExpiryLabel, LEG_FILL_GRACE_MS, claimableLegQty, executionBroker, applyOrderOutcomes, normalizeOrderRow, PENDING_ORDER_TTL_MS, legBrokerMismatch, classifyDhanOrder, type NormalizedOrder, legAvgPrice, legExitPrice, legQtyUnits, legPnlPct, legOtmPct, scaleBasketMultiplier,
-  legQtyWarningsFor, recordOutsideReduction, findUntrackedPositions, legFromUntracked, contractHintFromRow, legCountsToday, closedFillFromRow,
+  legQtyWarningsFor, recordOutsideReduction, findUntrackedPositions, legFromUntracked, contractHintFromRow, legCountsToday, closedFillFromRow, mergeImportedLegs,
   type StrategyMetrics, type MultiLegLeg, type MultiLegBasket,
 } from './multiLegFocus.ts';
 import type { StrategyTemplate } from './basketStrategies.ts';
@@ -1077,4 +1077,35 @@ test('closedFillFromRow sizes the close off the leg, not the pooled broker round
   };
   const closed = reconcileLegWithBroker(leg, { kind: 'flat', row }, null, 65, 1e15);
   assert.strictEqual(closed.closedFill?.qty, 130);
+});
+
+test('mergeImportedLegs folds an import into the open leg on the same contract', () => {
+  const own: MultiLegLeg = {
+    id: 'own', side: 'S', option: 'PE', strike: 22300, expiry: '2026-10-27', lots: 6, type: 'MARKET', status: 'OPEN',
+    fill: { qty: 390, avgPrice: 62 }, orderRef: { securityId: '51321' },
+  };
+  const ce: MultiLegLeg = { ...own, id: 'ce', option: 'CE', orderRef: { securityId: '51320' } };
+  const imp: MultiLegLeg = { ...own, id: 'imp', lots: 3, fill: { qty: 195, avgPrice: 251 } };
+
+  const { legs, merged } = mergeImportedLegs([own, ce], [imp], 1234);
+  assert.strictEqual(merged, 1);
+  assert.strictEqual(legs.length, 2);
+  assert.strictEqual(legs[0].id, 'own');
+  assert.strictEqual(legs[0].lots, 9);
+  assert.strictEqual(legs[0].fill?.qty, 585);
+  assert.ok(Math.abs((legs[0].fill?.avgPrice ?? 0) - (390 * 62 + 195 * 251) / 585) < 1e-9);
+  assert.strictEqual(legs[0].filledAt, 1234);
+  assert.strictEqual(legs[1], ce);
+
+  // Not merged: opposite side, closed leg, other expiry, or an unsettled order on the leg.
+  for (const other of [
+    { ...own, side: 'B' as const },
+    { ...own, status: 'CLOSED' as const, fill: { qty: 0, avgPrice: 62 } },
+    { ...own, expiry: '2026-11-24' },
+    { ...own, pendingOrders: [{ id: 'o1', kind: 'grow' as const, qty: 65, at: 1 }] as MultiLegLeg['pendingOrders'] },
+  ]) {
+    const r = mergeImportedLegs([other], [imp]);
+    assert.strictEqual(r.merged, 0);
+    assert.deepStrictEqual(r.legs.map(l => l.id), ['own', 'imp']);
+  }
 });

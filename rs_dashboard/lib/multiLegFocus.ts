@@ -1186,6 +1186,46 @@ export function legFromUntracked(
   };
 }
 
+/**
+ * Adds imported legs to a basket, folding each into an OPEN leg already on the
+ * same contract (same side, option, strike, expiry and broker identity) instead
+ * of appending a second row for one position (2026-10-01: a 195 import landed
+ * beside the strangle's own 390 on 22300 PE). Qty adds, avg is qty-weighted, and
+ * `filledAt` is stamped as on every ledger-growing path. A leg with unsettled
+ * pendingOrders is left alone (its order outcome is still being applied), so the
+ * import is appended as before. Returns the new legs and how many were merged.
+ */
+export function mergeImportedLegs(
+  legs: MultiLegLeg[],
+  imported: MultiLegLeg[],
+  now: number = Date.now(),
+): { legs: MultiLegLeg[]; merged: number } {
+  const ident = (l: MultiLegLeg) => l.orderRef?.securityId || l.orderRef?.symbol || '';
+  let out = legs;
+  let merged = 0;
+  for (const imp of imported) {
+    const impQty = imp.fill?.qty ?? 0;
+    const idx = impQty > 0 ? out.findIndex(l =>
+      l.status === 'OPEN' && !l.pendingOrders?.length && (l.fill?.qty ?? 0) > 0
+      && l.side === imp.side && l.option === imp.option && l.strike === imp.strike
+      && l.expiry === imp.expiry && ident(l) !== '' && ident(l) === ident(imp),
+    ) : -1;
+    if (idx < 0) {
+      out = [...out, imp];
+      continue;
+    }
+    const cur = out[idx];
+    const curQty = cur.fill!.qty;
+    const qty = curQty + impQty;
+    const avgPrice = (curQty * (cur.fill!.avgPrice ?? 0) + impQty * (imp.fill!.avgPrice ?? 0)) / qty;
+    out = out.map((l, i) => (i === idx
+      ? { ...l, lots: l.lots + imp.lots, fill: { ...l.fill, qty, avgPrice }, filledAt: now }
+      : l));
+    merged++;
+  }
+  return { legs: out, merged };
+}
+
 // ─── Execution broker ────────────────────────────────────────────────────
 
 /** A basket trades on the broker stamped on it at creation (`basket.broker`,

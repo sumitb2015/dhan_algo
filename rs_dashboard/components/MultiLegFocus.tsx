@@ -25,7 +25,7 @@ import {
   positionProduct, computeBasketStatus, closedFillFromRow,
   findSiblingLegCollisions, describeSiblingCollisions,
   legQtyWarningsFor, recordOutsideReduction, legCountsToday, type LegQtyWarning,
-  findUntrackedPositions, contractHintFromRow, legFromUntracked,
+  findUntrackedPositions, contractHintFromRow, legFromUntracked, mergeImportedLegs,
   type MultiLegLeg, type MultiLegBasket, type StrategyRiskConfig, type MultiLegStatus,
 } from '@/lib/multiLegFocus';
 import { closeOrderProduct } from '@/lib/positionProduct';
@@ -2060,8 +2060,13 @@ export default function MultiLegFocus({
         addToast('error', 'Import refused', 'That strategy is on a different broker or underlying');
         return false;
       }
-      patchLegs(basketId, cur => [...cur, ...legs]);
-      addToast('success', `Imported ${legs.length} position(s) into ${target.name || 'strategy'}`, 'No orders placed');
+      // Folding into an existing leg is decided inside patchLegs, against the
+      // legs as they are at write time (not a pre-await snapshot); the setState
+      // updater runs later, so the toast's count is read off the current ref.
+      const merged = mergeImportedLegs(target.legs, legs).merged;
+      patchLegs(basketId, cur => mergeImportedLegs(cur, legs).legs);
+      addToast('success', `Imported ${legs.length} position(s) into ${target.name || 'strategy'}`,
+        merged > 0 ? `${merged} added to an existing leg on the same contract · no orders placed` : 'No orders placed');
     } else {
       const expiry = legs.map(l => l.expiry!).sort()[0];
       const nowIso = new Date().toISOString();
