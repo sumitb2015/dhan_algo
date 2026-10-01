@@ -1144,8 +1144,55 @@ export interface UntrackedPosition {
   brokerQty: number;
   trackedQty: number;
   untrackedQty: number;
-  /** The broker's pooled entry average for this side — exact only when nothing else is tracked on it. */
+  /** Entry average of the untracked qty: the broker's pooled average less lots already tracked or closed today (residualBrokerAvg). */
   brokerAvg: number;
+}
+
+/**
+ * Entry average of the broker qty NOT already accounted for by this basket
+ * store. Dhan's buyAvg/sellAvg pool every lot traded on the contract today,
+ * including lots a CLOSED slice has since bought back (2026-10-01, 22300 PE:
+ * pooled 180.23 over 1105 sold, of which 585 were closed at an own-lot entry
+ * of 125.13 — importing the pooled average for the remaining 520 counted the
+ * cheap carried lots twice and overstated the loss by ~32k; the residual is
+ * 242.2). Subtracts slices closed today on the same contract and side, and —
+ * when `subtractOpen` — the live legs already tracked on it. Falls back to the
+ * pooled average whenever the row lacks the pooled qty or the residual is not
+ * a sane positive price, so a contract with no closed slices is unchanged.
+ */
+export function residualBrokerAvg(
+  broker: string,
+  row: Record<string, unknown>,
+  side: 'B' | 'S',
+  baskets: MultiLegBasket[],
+  subtractOpen: boolean,
+  now: number = Date.now(),
+): number {
+  const pooledAvg = Number((side === 'B' ? row.buyAvg : row.sellAvg) || row.costPrice || 0);
+  const pooledQty = Number(side === 'B' ? row.buyQty : row.sellQty) || 0;
+  if (!(pooledAvg > 0) || !(pooledQty > 0)) return pooledAvg;
+  const ident = broker === 'dhan' ? String(row.securityId ?? '') : String(row.tradingSymbol ?? '');
+  if (!ident) return pooledAvg;
+  let value = pooledAvg * pooledQty;
+  let qty = pooledQty;
+  for (const b of baskets) {
+    if (b.broker !== broker) continue;
+    for (const l of b.legs) {
+      if (l.side !== side) continue;
+      const lid = broker === 'dhan' ? l.orderRef?.securityId : l.orderRef?.symbol;
+      if (lid !== ident || !(l.fill?.avgPrice && l.fill.avgPrice > 0)) continue;
+      if (l.status === 'CLOSED') {
+        if (l.closedAt == null || istDay(l.closedAt) !== istDay(now) || !(l.closedFill?.qty && l.closedFill.qty > 0)) continue;
+        value -= l.fill.avgPrice * l.closedFill.qty;
+        qty -= l.closedFill.qty;
+      } else if (subtractOpen && (l.status === 'OPEN' || l.status === 'CLOSING' || l.status === 'PLACING') && l.fill.qty > 0) {
+        value -= l.fill.avgPrice * l.fill.qty;
+        qty -= l.fill.qty;
+      }
+    }
+  }
+  const avg = qty > 0 ? value / qty : 0;
+  return avg > 0 ? avg : pooledAvg;
 }
 
 /**
@@ -1191,7 +1238,7 @@ export function findUntrackedPositions(
       brokerQty: Math.abs(net),
       trackedQty: Math.abs(tracked),
       untrackedQty: Math.abs(rest),
-      brokerAvg: Number((side === 'B' ? row.buyAvg : row.sellAvg) || row.costPrice || 0),
+      brokerAvg: residualBrokerAvg(broker, row, side, baskets, true),
     });
   }
   return out;

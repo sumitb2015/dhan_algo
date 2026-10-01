@@ -4,7 +4,7 @@ import {
   resolveTemplateLegs, reconcileLegFillDown, reconcileLegWithBroker, legPnl, basketTotalPnl, sortLegsForExit, findLegPosition,
   computeLegTrailingSL, computeStrategyMetrics, checkStrategyRisk, computeCalendarPayoffCurve, classifyBasketStructure, findSiblingLegCollisions,
   formatExpiryLabel, LEG_FILL_GRACE_MS, claimableLegQty, executionBroker, applyOrderOutcomes, normalizeOrderRow, PENDING_ORDER_TTL_MS, legBrokerMismatch, classifyDhanOrder, type NormalizedOrder, legAvgPrice, legExitPrice, legQtyUnits, legPnlPct, legOtmPct, scaleBasketMultiplier,
-  legQtyWarningsFor, recordOutsideReduction, findUntrackedPositions, legFromUntracked, contractHintFromRow, legCountsToday, closedFillFromRow, mergeImportedLegs, brokerClampSlice,
+  legQtyWarningsFor, recordOutsideReduction, findUntrackedPositions, residualBrokerAvg, legFromUntracked, contractHintFromRow, legCountsToday, closedFillFromRow, mergeImportedLegs, brokerClampSlice,
   normalizeTradeRow, ownOrderIds, matchOutsideTrades, repriceEstimatedCloses, MLF_ORDER_SOURCE,
   type StrategyMetrics, type MultiLegLeg, type MultiLegBasket,
 } from './multiLegFocus.ts';
@@ -1228,4 +1228,24 @@ test('matchOutsideTrades ignores trades from before the position opened', () => 
   const trades = [t('old', 1_000_000), t('new', 9_000_000)];
   assert.deepStrictEqual(matchOutsideTrades(trades, '51321', 'B', 130, 10_000_000, new Set(), new Set(), 5_000_000)?.keys, ['new']);
   assert.strictEqual(matchOutsideTrades([t('old', 1_000_000)], '51321', 'B', 130, 10_000_000, new Set(), new Set(), 5_000_000), null);
+});
+
+// 2026-10-01: the pooled broker average (180.23 over 1105 sold) was imported for the 520
+// still open, double-counting the 585 already closed at an own-lot entry of 125.13.
+test('residualBrokerAvg strips slices closed today out of the broker pooled average', () => {
+  const now = Date.UTC(2026, 9, 1, 8, 0, 0);
+  const row = { securityId: '51321', tradingSymbol: 'NIFTY-Oct2026-22300-PE', netQty: -520, sellQty: 1105, sellAvg: 180.22647, buyQty: 585, buyAvg: 241.45555,
+    drvOptionType: 'PUT', drvStrikePrice: 22300, drvExpiryDate: '2026-10-27 14:30:00' };
+  const closed: MultiLegLeg = { ...shortCe('c', 585), option: 'PE', strike: 22300, status: 'CLOSED', fill: { qty: 0, avgPrice: 125.12778 },
+    closedFill: { qty: 585, exitPrice: 241.45555 }, closedAt: now - 3_600_000, orderRef: { securityId: '51321' } };
+  const baskets = [alloc('strangle', [closed])];
+  assert.ok(Math.abs(residualBrokerAvg('dhan', row, 'S', baskets, true, now) - 242.21) < 0.05);
+  // A slice closed on an earlier day is not in today's pooled row — ignored.
+  const old = [alloc('strangle', [{ ...closed, closedAt: now - 2 * 86_400_000 }])];
+  assert.strictEqual(residualBrokerAvg('dhan', row, 'S', old, true, now), 180.22647);
+  // No closed slices, or no pooled qty on the row: the broker average is returned unchanged.
+  assert.strictEqual(residualBrokerAvg('dhan', row, 'S', [], true, now), 180.22647);
+  assert.strictEqual(residualBrokerAvg('dhan', { ...row, sellQty: undefined }, 'S', baskets, true, now), 180.22647);
+  const [u] = findUntrackedPositions('dhan', [row], baskets, r => contractHintFromRow(r, ['NIFTY']));
+  assert.ok(Math.abs(u.brokerAvg - 242.21) < 0.05);
 });

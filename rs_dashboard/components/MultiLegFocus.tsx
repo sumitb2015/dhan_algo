@@ -27,7 +27,7 @@ import {
   positionProduct, computeBasketStatus, closedFillFromRow,
   findSiblingLegCollisions, describeSiblingCollisions,
   legQtyWarningsFor, recordOutsideReduction, legCountsToday, type LegQtyWarning,
-  findUntrackedPositions, contractHintFromRow, legFromUntracked, mergeImportedLegs, brokerClampSlice,
+  findUntrackedPositions, residualBrokerAvg, contractHintFromRow, legFromUntracked, mergeImportedLegs, brokerClampSlice,
   normalizeTradeRow, ownOrderIds, repriceEstimatedCloses, MLF_ORDER_SOURCE, type NormalizedTrade,
   type MultiLegLeg, type MultiLegBasket, type StrategyRiskConfig, type MultiLegStatus,
 } from '@/lib/multiLegFocus';
@@ -1931,7 +1931,8 @@ export default function MultiLegFocus({
         + `.\n\nSet this leg to ${claimQty} qty (${claimQty / lotSize} lots)? Exits will then close the full ${claimQty}.`
         + '\n\nOnly do this if the extra quantity was placed for THIS leg (not a manual trade meant to stay separate).',
       )) return;
-      const brokerAvg = Number(match.row.sellAvg || match.row.buyAvg || match.row.costPrice || 0);
+      // Pooled broker avg less slices already closed today on this contract (residualBrokerAvg).
+      const brokerAvg = residualBrokerAvg(basket.broker, match.row, cur.side, latest, false);
       patchLegs(basketId, legs => legs.map(l => {
         if (l.id !== legId) return l;
         const oldAvg = l.fill?.avgPrice ?? 0;
