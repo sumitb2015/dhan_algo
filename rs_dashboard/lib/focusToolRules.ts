@@ -22,7 +22,7 @@
  */
 
 import type {
-  FocusRow, FocusDte, FocusRowStatus, FocusReentryMode, FocusReentryTrigger, FocusPendingReentry,
+  FocusRow, FocusDte, FocusRowStatus, FocusReentryMode, FocusReentryTrigger, FocusPendingReentry, FocusLegSimpleMom,
 } from '@/lib/focusToolRows';
 
 // ── Constants ────────────────────────────────────────────────────────────────
@@ -820,6 +820,15 @@ export function evaluateEntry(
 
 // ── Overall Momentum (entry gate) ───────────────────────────────────────────
 
+/**
+ * The level a momentum move releases at: `start` ± v points, or ± v % of
+ * `start` (200, 10 → 210 / 190 in points; 220 / 180 in percent).
+ */
+export function momentumTrigger(start: number, dir: 'up' | 'down', unit: 'pts' | 'pct', v: number): number {
+  const move = unit === 'pct' ? start * v / 100 : v;
+  return dir === 'up' ? start + move : start - move;
+}
+
 export interface EntryMomentumDecision {
   /** True when the gate is off, or the combined premium has moved enough. */
   ready: boolean;
@@ -858,8 +867,7 @@ export function evaluateEntryMomentum(
     if (start == null) return { ready: false, ref: null, trigger: null, reason: 'momentum: waiting for a start premium' };
   }
   const up = row.entryMomDir !== 'down';
-  const move = row.entryMomUnit === 'pct' ? start * v / 100 : v;
-  const trigger = up ? start + move : start - move;
+  const trigger = momentumTrigger(start, up ? 'up' : 'down', row.entryMomUnit === 'pct' ? 'pct' : 'pts', v);
   const unit = row.entryMomUnit === 'pct' ? `${v}%` : `${v} pts`;
   if (!(premium != null && premium > 0)) {
     return { ready: false, ref: start, trigger, reason: `momentum: waiting for a premium (start ${start.toFixed(2)})` };
@@ -868,6 +876,31 @@ export function evaluateEntryMomentum(
   return hit
     ? { ready: true, ref: start, trigger, reason: `combined premium ${premium.toFixed(2)} ${up ? '≥' : '≤'} ${trigger.toFixed(2)} (${up ? '+' : '−'}${unit} from ${start.toFixed(2)})` }
     : { ready: false, ref: start, trigger, reason: `momentum: premium ${premium.toFixed(2)}, needs ${up ? '≥' : '≤'} ${trigger.toFixed(2)} (${up ? '+' : '−'}${unit} from ${start.toFixed(2)})` };
+}
+
+
+// ── Simple Momentum (per-leg entry gate) ────────────────────────────────────
+
+export function simpleMomOn(m: FocusLegSimpleMom | null | undefined): m is FocusLegSimpleMom {
+  return !!m && Number(m.value) > 0;
+}
+
+/**
+ * Where a leg's Simple Momentum releases, from the `start` value (this leg's
+ * premium or the spot, depending on `m.src`) seen at the entry time. Null when
+ * off, there is no start, or a down move would reach zero or below.
+ */
+export function simpleMomLevel(m: FocusLegSimpleMom | null | undefined, start: number): number | null {
+  if (!simpleMomOn(m) || !(start > 0)) return null;
+  const level = momentumTrigger(start, m.dir, m.unit, Number(m.value));
+  return level > 0 ? level : null;
+}
+
+/** Has `now` (premium or spot, matching `m.src`) reached the level? */
+export function simpleMomHit(m: FocusLegSimpleMom | null | undefined, start: number, now: number): boolean {
+  const level = simpleMomLevel(m, start);
+  if (level == null || !(now > 0)) return false;
+  return m!.dir === 'down' ? now <= level : now >= level;
 }
 
 // ── Account budget ───────────────────────────────────────────────────────────

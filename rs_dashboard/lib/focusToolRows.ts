@@ -163,6 +163,20 @@ export interface FocusRowFill {
   ts: string;
 }
 
+/**
+ * AlgoTest "Simple Momentum" on one leg: after the entry time, take the leg
+ * only once its own premium — or the underlying — has moved `value` points / %
+ * from where it stood at the entry time. The strike is picked at the entry
+ * time and kept. Blank / 0 = off (the leg enters at the entry time).
+ */
+export interface FocusLegSimpleMom {
+  value: string;
+  /** What moves: this leg's premium, or the index spot. */
+  src: 'premium' | 'underlying';
+  unit: 'pts' | 'pct';
+  dir: 'up' | 'down';
+}
+
 export interface FocusRow {
   id: string;
   underlying: FocusUnderlying;
@@ -248,6 +262,9 @@ export interface FocusRow {
   entryMomUnit?: 'pts' | 'pct';
   /** 'ltp' = live combined premium, 'candle' = last closed 1-min candle's. Missing = 'ltp'. */
   entryMomEval?: 'ltp' | 'candle';
+  /** Per-leg Simple Momentum. Ignored while Overall Momentum is on (as on AlgoTest). */
+  ceSimpleMom?: FocusLegSimpleMom;
+  peSimpleMom?: FocusLegSimpleMom;
   /**
    * Leg-wise target: the leg exits once its premium has decayed by this much
    * from its own entry — a % (entry × (1 − v/100)) or points (entry − v), per

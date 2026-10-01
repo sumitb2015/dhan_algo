@@ -33,7 +33,7 @@ import { partialCloseChips } from '@/lib/partialQty';
 import { cn } from '@/lib/utils';
 import type {
   FocusToolConfig, FocusRow, FocusRowFill, FocusIndexGroup,
-  FocusReentryMode, FocusReentryTrigger, FocusPendingReentry,
+  FocusReentryMode, FocusReentryTrigger, FocusPendingReentry, FocusLegSimpleMom,
   FocusUnderlying, FocusDte, FocusSide, FocusRowStatus, FocusStrikeMode,
 } from '@/lib/focusToolRows';
 // The pure rule engine for entry and exit decisions.
@@ -46,7 +46,7 @@ import {
   legPinnedStrike, costStopReason, legOwnEntry, slRollStrike, DEFAULT_SL_ROLL_MAX,
   reentryConfig, evaluateReentry, reentryWindowClosed, pendingReentryLevel, pendingReentryHit, legTargetReason, costReentryBasis,
   awaitingMomentumQuote, MOMENTUM_QUOTE_WAIT_MS, legTargetLevel,
-  evaluateEntryMomentum, entryMomentumOn,
+  evaluateEntryMomentum, entryMomentumOn, simpleMomOn, simpleMomLevel, simpleMomHit,
   type PosRow, type RowLive,
 } from '@/lib/focusToolRules';
 import { computeRowPnl, mtmForQty, shiftMayReopen, canMarkMtm, shiftCloseConfirmed, rowDisplayBookedPnl, putCallRatio, valuePutCallRatio, pickOpenInterest } from '@/lib/focusToolPnl';
@@ -980,6 +980,45 @@ function EntryMomentumControl({ row, onUpdate }: { row: FocusRow; onUpdate: (pat
           onChange={v => onUpdate({ entryMomEval: v as 'ltp' | 'candle' })} className="w-28" />
       </div>
       {on && status && <span className="text-[11px] font-semibold text-amber-400" title={status}>{status}</span>}
+      {legsOf(row).map(leg => (
+        <LegSimpleMomControl key={leg} row={row} leg={leg} onUpdate={onUpdate} disabled={on} />
+      ))}
+    </div>
+  );
+}
+
+const SIMPLE_MOM_OPTIONS = (['premium', 'underlying'] as const).flatMap(src =>
+  (['pts', 'pct'] as const).flatMap(unit => (['up', 'down'] as const).map(dir => ({
+    value: `${src}:${unit}:${dir}`,
+    label: `${src === 'underlying' ? 'Underlying ' : ''}${unit === 'pts' ? 'Pts' : '%'} ${dir === 'up' ? '↑' : '↓'}`,
+  }))));
+
+/**
+ * AlgoTest Simple Momentum for one leg: after the entry time, open the leg only
+ * once its premium (or the underlying) has moved N points / % from where it
+ * stood at the entry time. Off while Overall Momentum is on, as on AlgoTest.
+ */
+function LegSimpleMomControl({ row, leg, onUpdate, disabled }: {
+  row: FocusRow; leg: 'CE' | 'PE'; onUpdate: (patch: Partial<FocusRow>) => void; disabled: boolean;
+}) {
+  const status = useContext(EntryMomContext)[`${row.id}:${leg}`];
+  const cur = (leg === 'CE' ? row.ceSimpleMom : row.peSimpleMom) ?? { value: '', src: 'premium', unit: 'pts', dir: 'up' } as FocusLegSimpleMom;
+  const set = (patch: Partial<FocusLegSimpleMom>) => {
+    const next = { ...cur, ...patch };
+    onUpdate(leg === 'CE' ? { ceSimpleMom: next } : { peSimpleMom: next });
+  };
+  return (
+    <div className={cn('inline-flex items-center gap-1.5 font-bold text-zinc-400', disabled && 'opacity-50')}
+      title={disabled ? 'Simple Momentum is disabled while Overall Momentum is on'
+        : `${leg} Simple Momentum: after the entry time, open this leg only once its premium (or the underlying) has moved this much from where it was at the entry time. The strike is picked at the entry time. Blank = open at the entry time`}>
+      {leg} Mom
+      <MiniSelect value={`${cur.src}:${cur.unit}:${cur.dir}`} ariaLabel={`${leg} simple momentum type`}
+        options={SIMPLE_MOM_OPTIONS}
+        onChange={v => { const [src, unit, dir] = v.split(':'); set({ src: src as FocusLegSimpleMom['src'], unit: unit as FocusLegSimpleMom['unit'], dir: dir as FocusLegSimpleMom['dir'] }); }}
+        className="w-36" />
+      <RuleNumInput value={cur.value} onCommit={v => set({ value: v })} placeholder="off"
+        className="w-12 h-6 text-center text-[11px]" />
+      {!disabled && simpleMomOn(cur) && status && <span className="text-[11px] font-semibold text-amber-400">{status}</span>}
     </div>
   );
 }
@@ -2419,7 +2458,7 @@ function FocusTableRowImpl({
                   levelHigh: '', levelLow: '', levelVw: false, vwapInterval: '1', vwapBufferPct: '0.1',
                   slRupees: '', slMultiplier: '1.2', ceSlMultiplier: '1.2', peSlMultiplier: '1.2',
                   slRollStrikes: 0, slToCost: false, reSlMode: 'off', reTgtMode: 'off',
-                  ceTgtPct: '', peTgtPct: '', noReEntryAfter: '', entryMomValue: '',
+                  ceTgtPct: '', peTgtPct: '', noReEntryAfter: '', entryMomValue: '', ceSimpleMom: undefined, peSimpleMom: undefined,
                 })}
                 title="Clear rules"
                 className={cn('text-[11px] text-zinc-500 hover:text-zinc-300 transition-colors cursor-pointer', FOCUS_RING)}
@@ -2594,7 +2633,7 @@ function FocusProRowImpl({
     levelHigh: '', levelLow: '', levelVw: false, vwapInterval: '1', vwapBufferPct: '0.1',
     slRupees: '', slMultiplier: '1.2', ceSlMultiplier: '1.2', peSlMultiplier: '1.2',
     slRollStrikes: 0, slToCost: false, reSlMode: 'off', reTgtMode: 'off',
-    ceTgtPct: '', peTgtPct: '', noReEntryAfter: '', entryMomValue: '',
+    ceTgtPct: '', peTgtPct: '', noReEntryAfter: '', entryMomValue: '', ceSimpleMom: undefined, peSimpleMom: undefined,
   });
 
   const legLine = (leg: 'CE' | 'PE') => {
@@ -3288,7 +3327,7 @@ function FocusRowCardImpl({
           </span>
           <div className="flex items-center gap-1.5">
             <button
-              onClick={() => onUpdate({ levelHigh: '', levelLow: '', levelVw: false, vwapInterval: '1', vwapBufferPct: '0.1', slRupees: '', slMultiplier: '1.2', ceSlMultiplier: '1.2', peSlMultiplier: '1.2', slRollStrikes: 0, slToCost: false, reSlMode: 'off', reTgtMode: 'off', ceTgtPct: '', peTgtPct: '', noReEntryAfter: '', entryMomValue: '' })}
+              onClick={() => onUpdate({ levelHigh: '', levelLow: '', levelVw: false, vwapInterval: '1', vwapBufferPct: '0.1', slRupees: '', slMultiplier: '1.2', ceSlMultiplier: '1.2', peSlMultiplier: '1.2', slRollStrikes: 0, slToCost: false, reSlMode: 'off', reTgtMode: 'off', ceTgtPct: '', peTgtPct: '', noReEntryAfter: '', entryMomValue: '', ceSimpleMom: undefined, peSimpleMom: undefined })}
               className={cn('text-[11px] text-zinc-500 hover:text-zinc-300 transition-colors cursor-pointer', FOCUS_RING)}
             >
               Clear
@@ -3551,6 +3590,11 @@ export default function FocusTool() {
   // Overall Momentum: each row's start premium, stamped with its day (in memory — a reload re-captures it).
   const entryMomRef = useRef<Record<string, { day: string; ref: number }>>({});
   const [entryMomStatus, setEntryMomStatus] = useState<Record<string, string>>({});
+  // Simple Momentum, per `rowId:leg`: the strike picked and the start price (premium or spot)
+  // seen at the entry time. start 0 = this leg has no momentum and enters at once.
+  // `failed` = the order was rejected: never resent on its own.
+  const simMomRef = useRef<Record<string, { day: string; strike: number; start: number; failed?: boolean }>>({});
+  const simMomFiringRef = useRef<Set<string>>(new Set());
   const [peakMtm, setPeakMtm] = useState(0);
   const [lockMtm, setLockMtm] = useState<number | null>(null);
   /**
@@ -6184,13 +6228,126 @@ export default function FocusTool() {
     })().catch(() => autoEnteringRef.current.delete(row.id));
   }
 
+  /** Show (or clear, with '') one waiting-for-momentum status line. */
+  function putMomStatus(key: string, text: string) {
+    setEntryMomStatus(prev => {
+      if ((prev[key] ?? '') === text) return prev;
+      const next = { ...prev };
+      if (text) next[key] = text; else delete next[key];
+      return next;
+    });
+  }
+
+  function rowHasSimpleMom(row: FocusRow): boolean {
+    return !entryMomentumOn(row) && legsOf(row).some(l => simpleMomOn(l === 'CE' ? row.ceSimpleMom : row.peSimpleMom));
+  }
+
+  /**
+   * AlgoTest Simple Momentum, leg by leg. Once the row may enter (`enterOk`),
+   * each leg picks its strike and notes its start price (its own premium, or
+   * the spot); a leg with momentum then waits until that price has moved the
+   * set amount, a leg without it opens at once. Legs are independent, so a
+   * straddle can open one side now and the other later.
+   *
+   * The row stays 'armed' until its first leg is away, then turns 'entered'
+   * (the same hand-off autoEnterRow makes). Waiting legs are dropped — never
+   * fired — once the row is disarmed/retired, its index is stopped, its exit
+   * time or the 15:17 backstop passes, or Overall Momentum is switched on.
+   * A rejected order is NOT retried: the leg is parked as failed so a bad
+   * order can't repeat every second.
+   */
+  function driveSimpleMomentum(row: FocusRow, enterOk: boolean, nowHm: string) {
+    const snap = schedulerRef.current;
+    const u = row.underlying;
+    const today = istToday();
+    const expiry = row.expiry || expiries[u]?.[0] || '';
+    const group = snap.config.groups.find(g => g.underlying === u);
+    const live = snap.rowLive[row.id] ?? EMPTY_ROW_LIVE;
+    const spot = snap.spots[u] ?? 0;
+    const closedReason = (row.status !== 'armed' && row.status !== 'entered') ? `row is ${row.status}`
+      : !group?.enabled ? 'index stopped'
+      : entryMomentumOn(row) ? 'Overall Momentum turned on'
+      : (row.exitTime && nowHm >= row.exitTime) ? `past its exit time ${row.exitTime}`
+      : ((group?.product ?? 'INTRADAY') === 'INTRADAY' && nowHm >= INTRADAY_BACKSTOP_HM) ? 'past 15:17 intraday cutoff'
+      : null;
+    let fired = false;   // one order per row per tick — busyRows reads this render's state
+
+    for (const leg of legsOf(row)) {
+      const key = `${row.id}:${leg}`;
+      const m = leg === 'CE' ? row.ceSimpleMom : row.peSimpleMom;
+      const tag = `${isSimRow(row) ? 'SIM ' : ''}${u} ${leg}`;
+      const drop = (why?: string) => {
+        delete simMomRef.current[key];
+        putMomStatus(key, '');
+        if (why) addToast('error', `${tag} momentum entry cancelled`, why);
+      };
+      let st: (typeof simMomRef.current)[string] | undefined = simMomRef.current[key];
+      if (st && (st.day !== today || rowOwnsLeg(row, leg))) { drop(); st = undefined; }
+      if (st && closedReason) { drop(closedReason); continue; }
+      // The leg's momentum setting was edited while waiting: start over.
+      if (st && (st.start > 0) !== simpleMomOn(m)) { drop(); st = undefined; }
+
+      if (!st) {
+        if (!(row.status === 'armed' && enterOk) || rowOwnsLeg(row, leg)) continue;
+        const strike = leg === 'CE' ? live.ceStrike : live.peStrike;
+        if (!strike) continue;
+        let start = 0;
+        if (simpleMomOn(m)) {
+          start = m.src === 'underlying' ? spot : simQuote(u, expiry, strike, leg);
+          if (!(start > 0)) { putMomStatus(key, `waiting for a start ${m.src === 'underlying' ? 'spot' : 'premium'}`); continue; }
+        }
+        st = { day: today, strike, start };
+        simMomRef.current[key] = st;
+      }
+
+      if (st.failed) { putMomStatus(key, `${st.strike} ${leg}: entry order failed — not retried`); continue; }
+
+      let now = 1;
+      if (st.start > 0 && simpleMomOn(m)) {
+        now = m.src === 'underlying' ? spot : simQuote(u, expiry, st.strike, leg);
+        if (!simpleMomHit(m, st.start, now)) {
+          const level = simpleMomLevel(m, st.start);
+          putMomStatus(key, level == null
+            ? `${st.strike} ${leg}: momentum level unreachable`
+            : `${st.strike} ${leg}: ${m.src === 'underlying' ? 'spot' : 'premium'} ${now > 0 ? now.toFixed(2) : '—'} needs ${m.dir === 'down' ? '≤' : '≥'} ${level.toFixed(2)} (start ${st.start.toFixed(2)})`);
+          continue;
+        }
+      }
+      putMomStatus(key, '');
+      if (fired || busyRows.has(row.id) || autoExitingRef.current.has(row.id) || simMomFiringRef.current.has(key)) continue;
+
+      simMomFiringRef.current.add(key);
+      fired = true;
+      const armed = st;
+      runRowAction(row.id, async () => {
+        const fresh = schedulerRef.current.config.rows.find(r => r.id === row.id) ?? row;
+        addToast('success', `${tag} entry`, armed.start > 0 && simpleMomOn(m)
+          ? `Simple Momentum hit: ${m.src === 'underlying' ? 'spot' : 'premium'} ${now.toFixed(2)} from ${armed.start.toFixed(2)} — selling ${row.lots} lot(s) ${armed.strike} ${leg}`
+          : `Entry time reached — selling ${row.lots} lot(s) ${armed.strike} ${leg}`);
+        const ok = await placeLeg(fresh, leg, { reduce: false, lots: row.lots, strikeOverride: armed.strike });
+        if (ok) {
+          delete simMomRef.current[key];
+          const cur = schedulerRef.current.config.rows.find(r => r.id === row.id);
+          if (cur?.status === 'armed') updateRow(row.id, { status: 'entered' });
+        } else {
+          armed.failed = true;
+          const other: 'CE' | 'PE' = leg === 'CE' ? 'PE' : 'CE';
+          addToast('error', `${tag} entry failed`, legsOf(row).includes(other) && rowOwnsLeg(fresh, other)
+            ? `${other} is open but ${leg} was rejected — this row is one-sided. Place ${leg} manually if you want it.`
+            : `${leg} was rejected — not retried. Disarm and re-arm the row to try again.`);
+        }
+        await fetchPositionsNow();
+      }).finally(() => simMomFiringRef.current.delete(key));
+    }
+  }
+
   // The scheduler's interval closure is created once, on mount,
   // so calling autoEnterRow/autoExitRow directly would pin that render's
   // versions — and with them a stale `lookups`/`lotSizes`/`rowLive` inside
   // placeLeg, which resolves the contract an order is actually sent for.
   // Going through a ref that every render refreshes keeps orders on current data.
-  const actionsRef = useRef({ autoEnterRow, autoExitRow, placeLeg, simQuote, checkPendingReentries, sweepUnconfirmedOrders });
-  actionsRef.current = { autoEnterRow, autoExitRow, placeLeg, simQuote, checkPendingReentries, sweepUnconfirmedOrders };
+  const actionsRef = useRef({ autoEnterRow, autoExitRow, placeLeg, simQuote, checkPendingReentries, sweepUnconfirmedOrders, driveSimpleMomentum, rowHasSimpleMom });
+  actionsRef.current = { autoEnterRow, autoExitRow, placeLeg, simQuote, checkPendingReentries, sweepUnconfirmedOrders, driveSimpleMomentum, rowHasSimpleMom };
 
   /**
    * The scheduler: everything time- or account-level driven, on a 1s tick.
@@ -6247,6 +6404,12 @@ export default function FocusTool() {
           strikesReady: l.ceStrike != null || l.peStrike != null,
           flat: rowFlat(row),
         });
+        // Per-leg Simple Momentum replaces the all-legs-at-once entry for this row.
+        const simKeys = [`${row.id}:CE`, `${row.id}:PE`];
+        if (actionsRef.current.rowHasSimpleMom(row) || simKeys.some(k => simMomRef.current[k])) {
+          actionsRef.current.driveSimpleMomentum(row, decision.enter, nowHm);
+          continue;
+        }
         let enter = decision.enter;
         let reason = decision.reason;
         let momStatus = '';
@@ -6266,12 +6429,7 @@ export default function FocusTool() {
         // The start premium only lives while the row is waiting to enter: any
         // loss of eligibility (disarmed, index stopped, …) or the entry itself drops it.
         if (enter || !decision.enter) delete entryMomRef.current[row.id];
-        setEntryMomStatus(prev => {
-          if ((prev[row.id] ?? '') === momStatus) return prev;
-          const next = { ...prev };
-          if (momStatus) next[row.id] = momStatus; else delete next[row.id];
-          return next;
-        });
+        putMomStatus(row.id, momStatus);
         if (enter) actionsRef.current.autoEnterRow(row, reason);
       }
     };

@@ -14,7 +14,7 @@ import { readFileSync } from 'node:fs';
 import path from 'node:path';
 
 import {
-  evaluateEntry, evaluateEntryMomentum, evaluateGlobalRisk, evaluateRowExit, legStopReason,
+  evaluateEntry, evaluateEntryMomentum, simpleMomOn, simpleMomLevel, simpleMomHit, evaluateGlobalRisk, evaluateRowExit, legStopReason,
   dteForExpiry, dteMatches, sidePremium, legsOf, legsFlat, rowOwnsLeg,
   stopPremium, legStopPremium, pairStopPremium, legOwnContracts,
   nextOpenedTs, isGhostDropProtected, GHOST_DROP_GRACE_MS,
@@ -615,4 +615,23 @@ test('overall momentum entry gate', () => {
   assert.equal(evaluateEntryMomentum(m({ entryMomValue: '10', entryMomUnit: 'pct', entryMomDir: 'down' }), 200, 180).ready, true);
   const d1 = evaluateEntryMomentum(m({ entryMomValue: '10' }), null, null, 200);
   assert.equal(d1.ready, false); assert.equal(d1.ref, 200);
+});
+
+test('simple momentum per leg', () => {
+  const pts = (dir: 'up' | 'down', value = '15') => ({ value, src: 'premium' as const, unit: 'pts' as const, dir });
+  assert.equal(simpleMomOn(undefined), false);
+  assert.equal(simpleMomOn({ ...pts('up'), value: '' }), false);
+  // AlgoTest doc: premium 200, +15 pts → 215; 15% → 230 up, 170 down
+  assert.equal(simpleMomLevel(pts('up'), 200), 215);
+  assert.equal(simpleMomLevel({ ...pts('up'), unit: 'pct' }, 200), 230);
+  assert.equal(simpleMomLevel({ ...pts('down'), unit: 'pct' }, 200), 170);
+  // underlying: spot 18000, 0.5% up → 18090; 18520 −15 pts → 18505
+  assert.equal(simpleMomLevel({ value: '0.5', src: 'underlying', unit: 'pct', dir: 'up' }, 18000), 18090);
+  assert.equal(simpleMomLevel({ value: '15', src: 'underlying', unit: 'pts', dir: 'down' }, 18520), 18505);
+  assert.equal(simpleMomHit(pts('up'), 200, 214.9), false);
+  assert.equal(simpleMomHit(pts('up'), 200, 215), true);
+  assert.equal(simpleMomHit(pts('down'), 200, 185), true);
+  assert.equal(simpleMomHit(pts('down'), 200, 185.1), false);
+  assert.equal(simpleMomHit(pts('up'), 200, 0), false);      // no quote
+  assert.equal(simpleMomLevel(pts('down', '250'), 200), null); // would reach ≤ 0
 });
