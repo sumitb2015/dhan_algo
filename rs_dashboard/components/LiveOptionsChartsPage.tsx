@@ -72,7 +72,8 @@ export default function LiveOptionsChartsPage() {
         action: l.action,
         productType: l.productType,
         qty: l.qty,
-        entryOrderIds: orderIds,
+        // The leg's own order; the whole basket's ids only if the route didn't map it.
+        entryOrderIds: l.orderId ? [l.orderId] : orderIds,
         exitOrderIds: [],
         lastOrderAt: Date.now(),
       })),

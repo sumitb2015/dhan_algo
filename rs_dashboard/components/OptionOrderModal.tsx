@@ -49,6 +49,8 @@ export interface PlacedOptionLeg {
   action: 'BUY' | 'SELL';
   qty: number;
   productType: 'INTRADAY' | 'MARGIN';
+  /** This leg's own order id (the route returns one per leg, in leg order). */
+  orderId?: string;
 }
 
 interface OptionOrderModalProps {
@@ -392,7 +394,14 @@ export default function OptionOrderModal({
         throw new Error(json.error || 'Failed to place spread options order');
       }
 
-      const orderIds: string[] = (json.data || []).map((d: { orderId: string }) => d.orderId).filter(Boolean);
+      const results: { orderId?: string; securityId?: string }[] = Array.isArray(json.data) ? json.data : [];
+      const orderIds: string[] = results.map((d) => d.orderId ?? '').filter(Boolean);
+      // Each leg's own order — results come back in leg order (Promise.all),
+      // checked against the securityId so a mismatch never mis-assigns one.
+      placedLegs.forEach((leg, i) => {
+        const r = results[i];
+        if (r?.orderId && String(r.securityId) === leg.securityId) leg.orderId = String(r.orderId);
+      });
       const summary = `${displayTitle} · ${lotsMultiplier}x (${lotsMultiplier * lotSize} qty) · ${productType} · ${ORDER_TYPE_LABELS[orderType]}`;
 
       setSuccessResult({

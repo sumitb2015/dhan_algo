@@ -21,8 +21,14 @@ export interface LedgerLeg {
   /** Quantity (in underlying units, already lot-size multiplied) this basket itself opened,
    *  minus whatever it has since exited. Never adjusted upward from a broker read. */
   qty: number;
+  /** THIS leg's own entry order(s) — one per leg since 2026-10-01 (it used to
+   *  hold every order of the basket, so no leg knew its own fills). */
   entryOrderIds: string[];
   exitOrderIds: string[];
+  /** Average fill price of this leg's own entry orders, from the trade book
+   *  (stampOwnEntries). The broker's buyAvg/sellAvg is pooled across every
+   *  basket and trade on the contract, so it is only a fallback. */
+  entryPrice?: number;
   /** Timestamp of the most recent order placed against this leg (entry or exit). Used to
    *  hold off reconciliation for a grace window after each order - see reconcileBasket. */
   lastOrderAt: number;
@@ -83,10 +89,11 @@ export function liveLegQty(row: BrokerPositionRow | null, leg: LedgerLeg): numbe
   return Math.min(leg.qty, Math.abs(netQty));
 }
 
-/** This leg's entry price - the broker's buyAvg for a BUY-entry leg, sellAvg for a SELL-entry
- *  leg. Read directly off the row rather than scaled by ownQty (unlike P&L, an average price
- *  isn't diluted by how much of the broker's net qty this ledger leg still owns). */
+/** This leg's entry price: its own fills (`entryPrice`) when the trade book has
+ *  them, else the broker's buyAvg (BUY-entry) / sellAvg (SELL-entry) — pooled
+ *  across everything on the contract, so only a fallback (see legEntryIsOwn). */
 export function legEntryPrice(row: BrokerPositionRow | null, leg: LedgerLeg): number {
+  if (leg.entryPrice != null && leg.entryPrice > 0) return leg.entryPrice;
   if (!row) return 0;
   const isBuy = leg.action === 'BUY';
   const avg = Number(isBuy ? (row.buyAvg ?? row.buy_avg) : (row.sellAvg ?? row.sell_avg));
@@ -126,4 +133,75 @@ export function reconcileBasket(basket: LedgerBasket, rows: BrokerPositionRow[],
 
 export function basketIsFlat(basket: LedgerBasket): boolean {
   return basket.legs.every((l) => l.qty <= 0);
+}
+
+/** True when legEntryPrice is this leg's own fill price, not the contract average. */
+export function legEntryIsOwn(leg: LedgerLeg): boolean {
+  return leg.entryPrice != null && leg.entryPrice > 0;
+}
+
+/** Trade-book row fields used to price a leg's own entry. */
+export interface LedgerTrade { orderId: string; tradedQuantity: number; tradedPrice: number }
+
+/** Average fill of this leg's own entry orders, or null when none are in the trade book yet. */
+export function ownEntryFromTrades(leg: LedgerLeg, trades: LedgerTrade[]): number | null {
+  const ids = new Set(leg.entryOrderIds);
+  let qty = 0;
+  let value = 0;
+  for (const t of trades) {
+    if (!ids.has(t.orderId) || !(t.tradedQuantity > 0) || !(t.tradedPrice > 0)) continue;
+    qty += t.tradedQuantity;
+    value += t.tradedQuantity * t.tradedPrice;
+  }
+  return qty > 0 ? value / qty : null;
+}
+
+/** Stamps each leg's own entry price from the trade book. Returns `baskets`
+ *  itself when nothing changed. */
+export function stampOwnEntries(baskets: LedgerBasket[], trades: LedgerTrade[]): LedgerBasket[] {
+  let changed = false;
+  const next = baskets.map((b) => {
+    let bChanged = false;
+    const legs = b.legs.map((leg) => {
+      const px = ownEntryFromTrades(leg, trades);
+      if (px == null || px === leg.entryPrice) return leg;
+      bChanged = true;
+      return { ...leg, entryPrice: px };
+    });
+    if (!bChanged) return b;
+    changed = true;
+    return { ...b, legs };
+  });
+  return changed ? next : baskets;
+}
+
+/** Key of a ledger leg: `${basketId}:${index in basket.legs}`. */
+export function ledgerLegKey(basketId: string, legIdx: number): string {
+  return `${basketId}:${legIdx}`;
+}
+
+/**
+ * How much of the broker's position each ledger leg still owns, sharing one
+ * contract's (security + product) position out across every basket holding it,
+ * oldest basket first. liveLegQty clamps each leg against the WHOLE position
+ * on its own, so two baskets on one contract both claimed it and the desk
+ * counted its P&L twice (2026-10-01 audit). Keyed by ledgerLegKey.
+ */
+export function allocateLiveQty(baskets: LedgerBasket[], rows: BrokerPositionRow[]): Map<string, number> {
+  const out = new Map<string, number>();
+  const remaining = new Map<string, number>();
+  const ordered = [...baskets].sort((a, b) => a.createdAt - b.createdAt);
+  for (const b of ordered) {
+    b.legs.forEach((leg, i) => {
+      const key = ledgerLegKey(b.id, i);
+      if (leg.qty <= 0) { out.set(key, 0); return; }
+      const row = findBrokerRow(rows, leg);
+      const contract = `${leg.securityId}|${leg.productType.toUpperCase()}|${leg.action}`;
+      const pool = remaining.has(contract) ? remaining.get(contract)! : liveLegQty(row, { ...leg, qty: Number.MAX_SAFE_INTEGER });
+      const take = Math.min(leg.qty, pool);
+      remaining.set(contract, pool - take);
+      out.set(key, take);
+    });
+  }
+  return out;
 }

@@ -10,9 +10,12 @@ import {
   type LedgerBasket,
   type BrokerPositionRow,
   findBrokerRow,
-  liveLegQty,
   legUnrealizedPnl,
   legEntryPrice,
+  legEntryIsOwn,
+  stampOwnEntries,
+  allocateLiveQty,
+  ledgerLegKey,
   reconcileBasket,
   basketIsFlat,
 } from '@/lib/liveChartsLedger';
@@ -204,8 +207,17 @@ export default function LiveTradingDesk({ baskets, onBasketsChange, open, onTogg
             ...basketsRef.current.flatMap((b) => b.legs.map((l) => String(l.securityId))),
             ...bookSecIdsRef.current,
           ]);
-          const rows: TradeRow[] = (json.data as Record<string, unknown>[])
-            .filter((t) => trackedSecIds.has(String(t.securityId)))
+          const relevant = (json.data as Record<string, unknown>[])
+            .filter((t) => trackedSecIds.has(String(t.securityId)));
+          // Each ledger leg's own entry price from its own orders' fills — the
+          // positions row's average is pooled across every basket on the contract.
+          const stamped = stampOwnEntries(basketsRef.current, relevant.map((t) => ({
+            orderId: String(t.orderId ?? ''),
+            tradedQuantity: Number(t.tradedQuantity ?? 0),
+            tradedPrice: Number(t.tradedPrice ?? 0),
+          })));
+          if (stamped !== basketsRef.current) onBasketsChange(stamped);
+          const rows: TradeRow[] = relevant
             .map((t) => ({
               securityId: String(t.securityId ?? ''),
               tradingSymbol: String(t.tradingSymbol ?? ''),
@@ -242,19 +254,19 @@ export default function LiveTradingDesk({ baskets, onBasketsChange, open, onTogg
         // a stale snapshot that's since shrunk would place too large an order and flip the
         // leg to the opposite side instead of just closing it, since these are plain orders
         // with no reduce-only flag.
-        let freshRow: BrokerPositionRow | null = null;
+        let freshRows: BrokerPositionRow[] | null = null;
         try {
           const posRes = await fetch('/api/scalper/positions');
           const posJson = await posRes.json();
           if (posJson.success && Array.isArray(posJson.data)) {
-            const scaled = (posJson.data as BrokerPositionRow[]).map((r) => scaleBrokerPnl(r, contractMultiplier(r)));
-            freshRow = findBrokerRow(scaled, leg);
+            freshRows = (posJson.data as BrokerPositionRow[]).map((r) => scaleBrokerPnl(r, contractMultiplier(r)));
           }
         } catch {
           // Fall back to the last polled snapshot below rather than refusing to exit outright.
         }
-        const row = freshRow ?? findBrokerRow(positions, leg);
-        const exitQty = liveLegQty(row, leg);
+        // This leg's share of the contract's position — shared out across every
+        // basket on it, so two baskets can't each exit the whole position.
+        const exitQty = allocateLiveQty(basketsRef.current, freshRows ?? positions).get(ledgerLegKey(basket.id, legIdx)) ?? 0;
         if (exitQty <= 0) return;
 
         const res = await fetch('/api/options/order', {
@@ -461,13 +473,14 @@ export default function LiveTradingDesk({ baskets, onBasketsChange, open, onTogg
       .sort((a, b) => a.title.localeCompare(b.title));
   }, [unledgeredLegs]);
 
+  const allocated = allocateLiveQty(baskets, positions);
   let totalPnl = 0;
   for (const basket of activeBaskets) {
-    for (const leg of basket.legs) {
-      if (leg.qty <= 0) continue;
+    basket.legs.forEach((leg, legIdx) => {
+      if (leg.qty <= 0) return;
       const row = findBrokerRow(positions, leg);
-      totalPnl += legUnrealizedPnl(row, liveLegQty(row, leg));
-    }
+      totalPnl += legUnrealizedPnl(row, allocated.get(ledgerLegKey(basket.id, legIdx)) ?? 0);
+    });
   }
   for (const leg of unledgeredLegs) totalPnl += leg.display.unrealizedProfit;
 
@@ -578,7 +591,7 @@ export default function LiveTradingDesk({ baskets, onBasketsChange, open, onTogg
                     return liveLegs.map((leg, i) => {
                       const legIdx = basket.legs.indexOf(leg);
                       const row = findBrokerRow(positions, leg);
-                      const ownQty = liveLegQty(row, leg);
+                      const ownQty = allocated.get(ledgerLegKey(basket.id, legIdx)) ?? 0;
                       const pnl = legUnrealizedPnl(row, ownQty);
                       const key = `${basket.id}:${legIdx}`;
                       const isExiting = exitingLegKey === key;
@@ -604,7 +617,12 @@ export default function LiveTradingDesk({ baskets, onBasketsChange, open, onTogg
                             </span>{' '}
                             {leg.strike} {leg.optionType}
                           </td>
-                          <td className="text-right tabular-nums">{fmtPrice(legEntryPrice(row, leg))}</td>
+                          <td
+                            className="text-right tabular-nums"
+                            title={legEntryIsOwn(leg) ? 'This leg\'s own fill price' : 'Contract average from the broker (own fill not in the trade book yet) — includes anything else on this strike'}
+                          >
+                            {fmtPrice(legEntryPrice(row, leg))}{!legEntryIsOwn(leg) && legEntryPrice(row, leg) > 0 ? '*' : ''}
+                          </td>
                           <td className="text-right tabular-nums">{ownQty}</td>
                           <td className={`text-right tabular-nums font-bold ${pnl >= 0 ? 'ltd-text-pos' : 'ltd-text-neg'}`}>
                             {fmtRupee(pnl)}
