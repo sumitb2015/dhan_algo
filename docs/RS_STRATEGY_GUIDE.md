@@ -73,8 +73,14 @@ leave only when the Sell rule is true.* So **In Trend can reflect a buy from mon
   market is open.
 
 ### Tabs
-**Buy · In Trend · Sell · All**, each with a count. The default sort inside a tab is strongest RS first for Buy and In Trend, weakest
+**Buy · In Trend · Sell · All**, each with a count. **The counts follow your filters**: pick Nifty Bank and the tabs show how many Bank stocks are in each state, not the whole market. The default sort inside a tab is strongest RS first for Buy and In Trend, weakest
 first for Sell. Click any column heading to sort (click again to reverse). An arrow shows the active sort.
+
+### Index and price filters
+- **Index** (dropdown, default *All Nifty 500*): show only the stocks in one NSE index, such as **Nifty Bank**, **Nifty IT**, Nifty 50, Nifty Next 50, Midcap 100/150, Smallcap 100/250, Pharma, Auto, FMCG, Metal, Energy, Realty and more (24 lists). The numbers in brackets are how many of that index's stocks are on this page. Because the page scans the **Nifty 500**, an index that reaches outside it shows `(5 of 10)`; the others cannot appear here. The lists are NSE's official files (hover the dropdown for the download date).
+- **Price ₹ [min] to [max]** (default: both empty = **all prices**): filters on the latest close. Fill both for a range, or just one for "at least" or "at most". Type a number and press **Enter** (or click away); a reversed pair is swapped; **×** clears it.
+
+These combine with each other and with the chips below, so you can ask for example for *Nifty Bank stocks priced under ₹1,000 that are In Trend*.
 
 ### Filter chips (they combine)
 
@@ -188,6 +194,8 @@ The **Held** column refreshes after an order, and every minute while the page is
 | Counts changed after turning **RSI > 50** or **Above EMA 200** off | Expected. Without those rules more stocks qualify as Buy. |
 | A stock that looks strong is **Wait**, not Buy | Check the **EMA 200** column. Red means it is still under the 200-day average, so a new buy is not allowed yet. |
 | A stock was **In Trend** and became **Wait** after the EMA rule | It only ever met the Buy rule while under its EMA 200, so with the rule on it was never bought. |
+| The **Index** dropdown shows `(5 of 10)` | Only the Nifty 500 stocks are scanned, so the rest of that index cannot appear. |
+| The index list looks out of date | NSE reconstitutes indices in March and September. Refresh the lists with `venv/bin/python scripts/download_index_constituents.py`. |
 | A stock shows **–** in Weekly | Under about 70 weeks of price history (recent listings). |
 | **Held** is empty or shows a notice | Dhan holdings could not be read. Orders still re-check ownership on the server before any sale. |
 | Numbers differ from TradingView | Check the symbol, the RS period and that the chart's RS uses the **close** vs **NIFTY** with the same length. Data here is Dhan-sourced daily closes. The values match TradingView for the same inputs. |

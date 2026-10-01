@@ -95,6 +95,10 @@ temp_data/
 # Data and Binary Files
 *.csv
 !debug/backtests/**/*.csv
+# NSE index constituent lists are small reference data the RS Strategy index filter needs on every machine
+!index_constituents/*.csv
+# NSE's Nifty 500 constituent list (the dashboard's stock universe); without it a fresh clone falls back to the first 500 data files
+!ind_nifty500list.csv
 *.xlsx
 *.zip
 !stocks_indices_data.zip

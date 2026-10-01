@@ -7,6 +7,8 @@ import EquityOrderModal from './EquityOrderModal';
 import RsStrategyGuide from './RsStrategyGuide';
 import { cachedFetch, setCached } from '@/lib/clientCache';
 import type { EquityHolding } from '@/lib/dhanEquityPortfolio';
+import type { IndexInfo } from '@/lib/indexConstituents';
+import { inRange, normalizeRange, parseBound, type PriceRange } from '@/lib/priceRange';
 import type { Side } from '@/lib/equityOrder';
 import { DEFAULT_PARAMS, type RsStrategyResponse, type RsStrategyStock, type RsSignal } from '@/lib/rsStrategyCore';
 
@@ -97,6 +99,57 @@ function ThresholdChip({ label, unit, tip, on, onToggle, value, onCommit, min, m
   );
 }
 
+/**
+ * Price range: two optional boxes (empty = no limit on that side, so both empty = all prices).
+ * Values commit on blur/Enter, never per keystroke; a reversed pair is swapped; Esc reverts.
+ */
+function PriceRangeChip({ value, onCommit }: { value: PriceRange; onCommit: (r: PriceRange) => void }) {
+  const show = (n: number | null) => (n === null ? '' : String(n));
+  const [min, setMin] = useState(show(value.min));
+  const [max, setMax] = useState(show(value.max));
+  const [prev, setPrev] = useState(value);
+  if (prev !== value) { setPrev(value); setMin(show(value.min)); setMax(show(value.max)); } // follow an external change
+  const active = value.min !== null || value.max !== null;
+  const commit = (rawMin: string, rawMax: string) => {
+    const r = normalizeRange(parseBound(rawMin), parseBound(rawMax));
+    setMin(show(r.min)); setMax(show(r.max));
+    onCommit(r);
+  };
+  const box = (label: string, v: string, set: (x: string) => void, committed: number | null) => (
+    <input
+      type="number"
+      aria-label={label}
+      placeholder={label === 'Minimum price' ? 'min' : 'max'}
+      value={v}
+      min={0}
+      inputMode="decimal"
+      onChange={(e) => set(e.target.value)}
+      onBlur={(e) => commit(label === 'Minimum price' ? e.currentTarget.value : min, label === 'Maximum price' ? e.currentTarget.value : max)}
+      onKeyDown={(e) => {
+        if (e.key === 'Enter') (e.target as HTMLInputElement).blur();
+        if (e.key === 'Escape') set(show(committed));
+      }}
+      className="w-20 my-1 px-1 rounded bg-zinc-950 border border-zinc-800 text-center font-mono text-zinc-100 placeholder:text-zinc-500 focus:outline-none"
+    />
+  );
+  return (
+    <div
+      title="Filter by latest price in ₹. Leave both boxes empty for all prices; fill one for 'at least' or 'at most'."
+      className={`flex items-center gap-1.5 pl-2.5 pr-1.5 rounded-md border text-xs font-bold focus-within:ring-2 focus-within:ring-emerald-500/50 ${
+        active ? 'bg-emerald-500/10 border-emerald-500/25 text-emerald-400' : 'bg-zinc-900 border-zinc-800 text-zinc-400'
+      }`}
+    >
+      <span>Price ₹</span>
+      {box('Minimum price', min, setMin, value.min)}
+      <span className="font-normal text-zinc-500">to</span>
+      {box('Maximum price', max, setMax, value.max)}
+      {active && (
+        <button type="button" aria-label="Clear price filter" onClick={() => onCommit({ min: null, max: null })} className="px-1 text-zinc-400 hover:text-white focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500/50 rounded">×</button>
+      )}
+    </div>
+  );
+}
+
 /** True when the account owns any of the stock: a delivery holding or a long position today. */
 function ownsAny(h: EquityHolding | undefined): boolean {
   return !!h && (h.totalQty > 0 || h.positions.some((p) => p.netQty > 0));
@@ -139,6 +192,10 @@ export default function RsStrategyPage({ guide = '' }: { guide?: string }) {
   const [heldOnly, setHeldOnly] = useState(false);
   const [order, setOrder] = useState<{ symbol: string; side: Side } | null>(null);
   const [guideOpen, setGuideOpen] = useState(false);
+  const [indices, setIndices] = useState<IndexInfo[] | null>(null);
+  const [indicesError, setIndicesError] = useState<string | null>(null);
+  const [indexKey, setIndexKey] = useState(''); // '' = all Nifty 500
+  const [price, setPrice] = useState<PriceRange>({ min: null, max: null }); // null bound = no limit
   const [tab, setTab] = useState<Tab>('BUY');
   const [query, setQuery] = useState('');
   const [sortKey, setSortKey] = useState<SortKey>('rs');
@@ -193,6 +250,28 @@ export default function RsStrategyPage({ guide = '' }: { guide?: string }) {
     return () => { cancelled = true; clearInterval(id); };
   }, [holdingsTick]);
 
+  // NSE index membership: static reference data, read once per session.
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const json = await cachedFetch<{ success: boolean; data?: { indices: IndexInfo[] }; error?: string }>('/api/index-constituents', 60 * 60 * 1000);
+        if (cancelled) return;
+        if (!json.success || !json.data) throw new Error(json.error || 'Index lists unavailable');
+        setIndices(json.data.indices);
+      } catch (e) {
+        if (!cancelled) setIndicesError(e instanceof Error ? e.message : 'Index lists unavailable');
+      }
+    })();
+    return () => { cancelled = true; };
+  }, []);
+
+  const indexMembers = useMemo(() => {
+    const m = new Map<string, Set<string>>();
+    for (const i of indices ?? []) m.set(i.key, new Set(i.symbols));
+    return m;
+  }, [indices]);
+
   // A fill can take a moment to show in Dhan's holdings/positions: read now, then again shortly after.
   const afterOrder = useCallback(() => {
     setHoldingsTick((t) => t + 1);
@@ -218,17 +297,30 @@ export default function RsStrategyPage({ guide = '' }: { guide?: string }) {
     else { setSortKey(k); setSortAsc(k === 'symbol'); }
   };
 
-  const rows = useMemo(() => {
+  // Everything except the tab: the tab counts are computed from this, so they follow the filters.
+  const filtered = useMemo(() => {
     if (!data) return [];
     const q = query.trim().toLowerCase();
-    const list = data.stocks.filter(
-      (s) => (tab === 'ALL' || s.signal === tab) &&
+    const members = indexKey ? indexMembers.get(indexKey) ?? null : null; // an unknown key behaves as "all" (the select shows no match)
+    return data.stocks.filter(
+      (s) => (!members || members.has(s.symbol)) &&
+        inRange(s.close, price) &&
         (!strongOnly || s.rs >= strongMin) &&
         (!risingOnly || s.rsRisingDays >= risingDays) &&
         (!weeklyOnly || s.weekly === 'BUY' || s.weekly === 'HOLD') &&
         (!heldOnly || (holdings?.[s.symbol]?.totalQty ?? 0) > 0 || (holdings?.[s.symbol]?.positions.length ?? 0) > 0) &&
         (!q || s.symbol.toLowerCase().includes(q)),
     );
+  }, [data, query, indexKey, indexMembers, price, strongOnly, strongMin, risingOnly, risingDays, weeklyOnly, heldOnly, holdings]);
+
+  const tabCounts = useMemo(() => {
+    const c = { BUY: 0, HOLD: 0, SELL: 0, ALL: filtered.length };
+    for (const s of filtered) if (s.signal in c) c[s.signal as 'BUY' | 'HOLD' | 'SELL']++;
+    return c;
+  }, [filtered]);
+
+  const rows = useMemo(() => {
+    const list = filtered.filter((s) => tab === 'ALL' || s.signal === tab);
     const dir = sortAsc ? 1 : -1;
     const value = (s: RsStrategyStock): number | string | null => {
       switch (sortKey) {
@@ -245,14 +337,13 @@ export default function RsStrategyPage({ guide = '' }: { guide?: string }) {
       const c = typeof x === 'string' ? x.localeCompare(y as string) : (x as number) - (y as number);
       return c !== 0 ? c * dir : a.symbol.localeCompare(b.symbol); // stable, predictable ties
     });
-  }, [data, tab, query, sortKey, sortAsc, strongOnly, strongMin, risingOnly, risingDays, weeklyOnly, heldOnly, holdings]);
+  }, [filtered, tab, sortKey, sortAsc, holdings]);
 
-  const counts = data?.counts;
   const tabs: { id: Tab; label: string; n?: number }[] = [
-    { id: 'BUY', label: 'Buy', n: counts?.buy },
-    { id: 'HOLD', label: LABEL.HOLD, n: counts?.hold },
-    { id: 'SELL', label: 'Sell', n: counts?.sell },
-    { id: 'ALL', label: 'All', n: data?.totalScanned },
+    { id: 'BUY', label: 'Buy', n: data ? tabCounts.BUY : undefined },
+    { id: 'HOLD', label: LABEL.HOLD, n: data ? tabCounts.HOLD : undefined },
+    { id: 'SELL', label: 'Sell', n: data ? tabCounts.SELL : undefined },
+    { id: 'ALL', label: 'All', n: data ? tabCounts.ALL : undefined },
   ];
 
   const th = (k: SortKey, label: string, align = 'text-right') => (
@@ -366,6 +457,22 @@ export default function RsStrategyPage({ guide = '' }: { guide?: string }) {
             ))}
           </div>
           <div className="flex items-center gap-2 flex-wrap">
+          <select
+            aria-label="Index"
+            value={indexKey}
+            onChange={(e) => setIndexKey(e.target.value)}
+            disabled={indices === null}
+            title={indicesError ? `Index lists unavailable: ${indicesError}` : indexKey ? `NSE list downloaded ${indices?.find((i) => i.key === indexKey)?.downloaded}` : 'Show only the stocks in one NSE index'}
+            className={`px-2.5 py-1.5 rounded-md border text-xs font-bold focus:outline-none focus:ring-2 focus:ring-emerald-500/50 disabled:opacity-50 ${
+              indexKey ? 'bg-emerald-500/10 border-emerald-500/25 text-emerald-400' : 'bg-zinc-900 border-zinc-800 text-zinc-300'
+            }`}
+          >
+            <option value="">All Nifty 500</option>
+            {(indices ?? []).map((i) => (
+              <option key={i.key} value={i.key}>{i.label} ({i.count}{i.count < i.total ? ` of ${i.total}` : ''})</option>
+            ))}
+          </select>
+          <PriceRangeChip value={price} onCommit={(r) => setPrice(r)} />
           {([
             ['RSI > 50', rsiOn, setRsiOn, 'Require RSI(14) above 50 for a buy'],
             ['Above EMA 200', emaOn, setEmaOn, 'Require price above the 200-day EMA for a buy. Entry only: a stock you already hold is not sold for dipping under it'],
@@ -445,19 +552,7 @@ export default function RsStrategyPage({ guide = '' }: { guide?: string }) {
                 </tr>
               </thead>
               <tbody className="divide-y divide-zinc-800/80 bg-zinc-950/60">
-                {loading && !data ? (
-                  <tr><td colSpan={14} className="px-4 py-10 text-center text-zinc-400">
-                    <Activity className="w-4 h-4 inline mr-2 animate-spin text-emerald-400" aria-hidden="true" />
-                    Scanning Nifty 500…
-                  </td></tr>
-                ) : rows.length === 0 ? (
-                  <tr><td colSpan={14} className="px-4 py-10 text-center text-zinc-400">
-                    {data
-                      ? query ? `No ${tab === 'ALL' ? '' : LABEL[tab] + ' '}symbols match “${query}”.` : strongOnly || risingOnly || weeklyOnly || heldOnly ? 'No stocks match these filters. Turn one off to widen the list.' : `No stocks are in the ${tab === 'ALL' ? 'selected' : LABEL[tab]} state today.`
-                      : 'No scan results yet. Recalculate to run the scan.'}
-                  </td></tr>
-                ) : (
-                  rows.map((s: RsStrategyStock) => (
+                {rows.map((s: RsStrategyStock) => (
                     <tr key={s.symbol} className="group hover:bg-zinc-900/70">
                       <td className="px-3 py-2.5 font-bold text-zinc-100">{s.symbol}</td>
                       <HeldCell h={holdings ? holdings[s.symbol] : undefined} loaded={holdings !== null} />
@@ -502,11 +597,24 @@ export default function RsStrategyPage({ guide = '' }: { guide?: string }) {
                         </div>
                       </td>
                     </tr>
-                  ))
-                )}
+                ))}
               </tbody>
             </table>
           </div>
+          {/* Outside the scrolling table so the message is never pushed off-screen on a narrow window. */}
+          {loading && !data ? (
+            <p role="status" className="px-4 py-10 text-center text-sm text-zinc-400">
+              <Activity className="w-4 h-4 inline mr-2 animate-spin text-emerald-400" aria-hidden="true" />
+              Scanning Nifty 500…
+            </p>
+          ) : rows.length === 0 ? (
+            <p role="status" className="px-4 py-10 text-center text-sm text-zinc-400">
+              {data
+                ? tab !== 'ALL' && filtered.length > 0 ? `None of the ${filtered.length} matching stock${filtered.length === 1 ? ' is' : 's are'} in the ${LABEL[tab]} state. Try another tab.`
+                : query ? `No ${tab === 'ALL' ? '' : LABEL[tab] + ' '}symbols match “${query}”.` : strongOnly || risingOnly || weeklyOnly || heldOnly || indexKey || price.min !== null || price.max !== null ? 'No stocks match these filters. Turn one off to widen the list.' : `No stocks are in the ${tab === 'ALL' ? 'selected' : LABEL[tab]} state today.`
+                : 'No scan results yet. Recalculate to run the scan.'}
+            </p>
+          ) : null}
         </section>
       </main>
 

@@ -711,7 +711,7 @@ export function readNifty500List(): string[] {
 // wrong value into it, and anything that isn't ticker-shaped is dropped.
 // DUMMY<parent> rows are NSE's placeholders for a spun-off business during a
 // demerger (DUMMYHEG in 2026-09); they have no price history.
-function parseConstituentSymbols(content: string): string[] {
+export function parseConstituentSymbols(content: string): string[] {
   const lines = content.split(/\r?\n/).filter(Boolean);
   if (lines.length < 2) return [];
   const header = lines[0].split(',').map(h => h.trim().toUpperCase());

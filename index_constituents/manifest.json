@@ -1,0 +1,174 @@
+{
+  "indices": {
+    "nifty50": {
+      "label": "Nifty 50",
+      "file": "nifty50.csv",
+      "count": 50,
+      "downloaded": "2026-10-01"
+    },
+    "niftynext50": {
+      "label": "Nifty Next 50",
+      "file": "niftynext50.csv",
+      "count": 50,
+      "downloaded": "2026-10-01"
+    },
+    "nifty100": {
+      "label": "Nifty 100",
+      "file": "nifty100.csv",
+      "count": 100,
+      "downloaded": "2026-10-01"
+    },
+    "nifty200": {
+      "label": "Nifty 200",
+      "file": "nifty200.csv",
+      "count": 200,
+      "downloaded": "2026-10-01"
+    },
+    "niftymidcap100": {
+      "label": "Nifty Midcap 100",
+      "file": "niftymidcap100.csv",
+      "count": 100,
+      "downloaded": "2026-10-01"
+    },
+    "niftymidcap150": {
+      "label": "Nifty Midcap 150",
+      "file": "niftymidcap150.csv",
+      "count": 150,
+      "downloaded": "2026-10-01"
+    },
+    "niftysmallcap100": {
+      "label": "Nifty Smallcap 100",
+      "file": "niftysmallcap100.csv",
+      "count": 100,
+      "downloaded": "2026-10-01"
+    },
+    "niftysmallcap250": {
+      "label": "Nifty Smallcap 250",
+      "file": "niftysmallcap250.csv",
+      "count": 250,
+      "downloaded": "2026-10-01"
+    },
+    "niftybank": {
+      "label": "Nifty Bank",
+      "file": "niftybank.csv",
+      "count": 14,
+      "downloaded": "2026-10-01"
+    },
+    "niftypsubank": {
+      "label": "Nifty PSU Bank",
+      "file": "niftypsubank.csv",
+      "count": 12,
+      "downloaded": "2026-10-01"
+    },
+    "niftyfinance": {
+      "label": "Nifty Financial Services",
+      "file": "niftyfinance.csv",
+      "count": 20,
+      "downloaded": "2026-10-01"
+    },
+    "niftyfinsrv2550": {
+      "label": "Nifty Fin Services 25/50",
+      "file": "niftyfinsrv2550.csv",
+      "count": 20,
+      "downloaded": "2026-10-01"
+    },
+    "niftyit": {
+      "label": "Nifty IT",
+      "file": "niftyit.csv",
+      "count": 10,
+      "downloaded": "2026-10-01"
+    },
+    "niftyauto": {
+      "label": "Nifty Auto",
+      "file": "niftyauto.csv",
+      "count": 15,
+      "downloaded": "2026-10-01"
+    },
+    "niftypharma": {
+      "label": "Nifty Pharma",
+      "file": "niftypharma.csv",
+      "count": 20,
+      "downloaded": "2026-10-01"
+    },
+    "niftyhealthcare": {
+      "label": "Nifty Healthcare",
+      "file": "niftyhealthcare.csv",
+      "count": 20,
+      "downloaded": "2026-10-01"
+    },
+    "niftyfmcg": {
+      "label": "Nifty FMCG",
+      "file": "niftyfmcg.csv",
+      "count": 15,
+      "downloaded": "2026-10-01"
+    },
+    "niftymetal": {
+      "label": "Nifty Metal",
+      "file": "niftymetal.csv",
+      "count": 15,
+      "downloaded": "2026-10-01"
+    },
+    "niftyenergy": {
+      "label": "Nifty Energy",
+      "file": "niftyenergy.csv",
+      "count": 40,
+      "downloaded": "2026-10-01"
+    },
+    "niftyoilgas": {
+      "label": "Nifty Oil & Gas",
+      "file": "niftyoilgas.csv",
+      "count": 15,
+      "downloaded": "2026-10-01"
+    },
+    "niftyrealty": {
+      "label": "Nifty Realty",
+      "file": "niftyrealty.csv",
+      "count": 10,
+      "downloaded": "2026-10-01"
+    },
+    "niftymedia": {
+      "label": "Nifty Media",
+      "file": "niftymedia.csv",
+      "count": 10,
+      "downloaded": "2026-10-01"
+    },
+    "niftyconsumerdurables": {
+      "label": "Nifty Consumer Durables",
+      "file": "niftyconsumerdurables.csv",
+      "count": 14,
+      "downloaded": "2026-10-01"
+    },
+    "niftyinfra": {
+      "label": "Nifty Infrastructure",
+      "file": "niftyinfra.csv",
+      "count": 30,
+      "downloaded": "2026-10-01"
+    }
+  },
+  "order": [
+    "nifty50",
+    "niftynext50",
+    "nifty100",
+    "nifty200",
+    "niftymidcap100",
+    "niftymidcap150",
+    "niftysmallcap100",
+    "niftysmallcap250",
+    "niftybank",
+    "niftypsubank",
+    "niftyfinance",
+    "niftyfinsrv2550",
+    "niftyit",
+    "niftyauto",
+    "niftypharma",
+    "niftyhealthcare",
+    "niftyfmcg",
+    "niftymetal",
+    "niftyenergy",
+    "niftyoilgas",
+    "niftyrealty",
+    "niftymedia",
+    "niftyconsumerdurables",
+    "niftyinfra"
+  ]
+}
