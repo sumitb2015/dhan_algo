@@ -3,11 +3,17 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ChartNoAxesCombined, RefreshCw, Search, Activity } from 'lucide-react';
 import NavBar from './NavBar';
+import EquityOrderModal from './EquityOrderModal';
 import { cachedFetch, setCached } from '@/lib/clientCache';
+import type { EquityHolding } from '@/lib/dhanEquityPortfolio';
+import type { Side } from '@/lib/equityOrder';
 import { DEFAULT_PARAMS, type RsStrategyResponse, type RsStrategyStock, type RsSignal } from '@/lib/rsStrategyCore';
 
 type Tab = 'BUY' | 'HOLD' | 'SELL' | 'ALL';
-type SortKey = 'symbol' | 'close' | 'change1D' | 'rs' | 'rsi' | 'distPct' | 'daysInSignal';
+type SortKey = 'symbol' | 'held' | 'close' | 'change1D' | 'rs' | 'supertrend' | 'rsi' | 'distPct' | 'signal' | 'weekly' | 'daysInSignal';
+
+// Strongest state first when sorting descending; a stock with no weekly signal sorts below everything.
+const SIGNAL_RANK: Record<RsSignal, number> = { BUY: 3, HOLD: 2, WAIT: 1, SELL: 0 };
 
 const DEFAULT_PERIOD = DEFAULT_PARAMS.period;
 const TTL_MS = 5 * 60 * 1000;
@@ -40,6 +46,28 @@ function RsBar({ value }: { value: number }) {
   );
 }
 
+/** True when the account owns any of the stock: a delivery holding or a long position today. */
+function ownsAny(h: EquityHolding | undefined): boolean {
+  return !!h && (h.totalQty > 0 || h.positions.some((p) => p.netQty > 0));
+}
+
+/** Delivery holding plus today's positions for one symbol. Quantities are shown separately, never summed. */
+function HeldCell({ h, loaded }: { h: EquityHolding | undefined; loaded: boolean }) {
+  if (!loaded) return <td className="px-4 py-2.5 text-right text-zinc-500">…</td>;
+  const has = h && (h.totalQty > 0 || h.positions.length > 0);
+  if (!h || !has) return <td className="px-4 py-2.5 text-right text-zinc-500">–</td>;
+  return (
+    <td className="px-4 py-2.5 text-right" title={h.totalQty > 0 && h.avgCost > 0 ? `Avg cost ₹${fmt(h.avgCost)}` : undefined}>
+      {h.totalQty > 0 && <span className="text-zinc-100 font-bold">{h.totalQty.toLocaleString('en-IN')}</span>}
+      {h.positions.map((p) => (
+        <span key={p.product} className={`block text-[10px] ${p.netQty > 0 ? 'text-emerald-400' : 'text-red-400'}`}>
+          {p.product === 'INTRADAY' ? 'MIS' : p.product} {p.netQty > 0 ? '+' : ''}{p.netQty}
+        </span>
+      ))}
+    </td>
+  );
+}
+
 export default function RsStrategyPage() {
   const [period, setPeriod] = useState(DEFAULT_PERIOD);
   const [periodDraft, setPeriodDraft] = useState(String(DEFAULT_PERIOD));
@@ -50,6 +78,12 @@ export default function RsStrategyPage() {
   const [strongOnly, setStrongOnly] = useState(false); // RS >= 10%
   const [risingOnly, setRisingOnly] = useState(false); // RS up 3 sessions in a row
   const [weeklyOnly, setWeeklyOnly] = useState(false); // weekly chart is also long (Buy or Hold)
+  // What the account already holds (Dhan holdings + today's NSE equity positions), keyed by symbol.
+  const [holdings, setHoldings] = useState<Record<string, EquityHolding> | null>(null);
+  const [holdingsError, setHoldingsError] = useState<string | null>(null);
+  const [holdingsTick, setHoldingsTick] = useState(0); // bump to force a fresh read (after an order)
+  const [heldOnly, setHeldOnly] = useState(false);
+  const [order, setOrder] = useState<{ symbol: string; side: Side } | null>(null);
   const [tab, setTab] = useState<Tab>('BUY');
   const [query, setQuery] = useState('');
   const [sortKey, setSortKey] = useState<SortKey>('rs');
@@ -83,6 +117,33 @@ export default function RsStrategyPage() {
 
   useEffect(() => { load(period, rsiOn ? RSI_MIN : 0); }, [period, rsiOn, load]);
 
+  // Holdings: read on mount, every 60 s while the tab is visible, and on demand after an order.
+  // `cancelled` drops a reply that lands after a newer read started (polling-guards §4).
+  useEffect(() => {
+    let cancelled = false;
+    const read = async (fresh: boolean) => {
+      try {
+        const res = await fetch(`/api/equity-order/holdings${fresh ? '?refresh=true' : ''}`);
+        const json = await res.json();
+        if (cancelled) return;
+        if (!json.success) throw new Error(json.error || 'Holdings unavailable');
+        setHoldings(json.data as Record<string, EquityHolding>);
+        setHoldingsError(null);
+      } catch (e) {
+        if (!cancelled) setHoldingsError(e instanceof Error ? e.message : 'Holdings unavailable');
+      }
+    };
+    void read(holdingsTick > 0);
+    const id = setInterval(() => { if (!document.hidden) void read(false); }, 60_000);
+    return () => { cancelled = true; clearInterval(id); };
+  }, [holdingsTick]);
+
+  // A fill can take a moment to show in Dhan's holdings/positions: read now, then again shortly after.
+  const afterOrder = useCallback(() => {
+    setHoldingsTick((t) => t + 1);
+    setTimeout(() => setHoldingsTick((t) => t + 1), 4_000);
+  }, []);
+
   // Commit the period on blur/Enter only, never per keystroke.
   const commitPeriod = () => {
     const n = parseInt(periodDraft, 10);
@@ -110,13 +171,26 @@ export default function RsStrategyPage() {
         (!strongOnly || s.rs >= STRONG_RS) &&
         (!risingOnly || s.rsRising) &&
         (!weeklyOnly || s.weekly === 'BUY' || s.weekly === 'HOLD') &&
+        (!heldOnly || (holdings?.[s.symbol]?.totalQty ?? 0) > 0 || (holdings?.[s.symbol]?.positions.length ?? 0) > 0) &&
         (!q || s.symbol.toLowerCase().includes(q)),
     );
     const dir = sortAsc ? 1 : -1;
-    return list.sort((a, b) =>
-      sortKey === 'symbol' ? a.symbol.localeCompare(b.symbol) * dir : (a[sortKey] - b[sortKey]) * dir,
-    );
-  }, [data, tab, query, sortKey, sortAsc, strongOnly, risingOnly, weeklyOnly]);
+    const value = (s: RsStrategyStock): number | string | null => {
+      switch (sortKey) {
+        case 'symbol': return s.symbol;
+        case 'held': return holdings?.[s.symbol]?.totalQty ?? 0;
+        case 'signal': return SIGNAL_RANK[s.signal];
+        case 'weekly': return s.weekly ? SIGNAL_RANK[s.weekly] : null;
+        default: return s[sortKey];
+      }
+    };
+    return list.sort((a, b) => {
+      const x = value(a), y = value(b);
+      if (x === null || y === null) return x === y ? a.symbol.localeCompare(b.symbol) : x === null ? 1 : -1; // nulls always last
+      const c = typeof x === 'string' ? x.localeCompare(y as string) : (x as number) - (y as number);
+      return c !== 0 ? c * dir : a.symbol.localeCompare(b.symbol); // stable, predictable ties
+    });
+  }, [data, tab, query, sortKey, sortAsc, strongOnly, risingOnly, weeklyOnly, heldOnly, holdings]);
 
   const counts = data?.counts;
   const tabs: { id: Tab; label: string; n?: number }[] = [
@@ -135,7 +209,7 @@ export default function RsStrategyPage() {
         onClick={() => handleSort(k)}
         className="font-bold hover:text-emerald-300 focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500/50 rounded"
       >
-        {label}{sortKey === k ? (sortAsc ? ' ↑' : ' ↓') : ''}
+        {label}{sortKey === k ? (sortAsc ? ' ↑' : ' ↓') : <span className="text-zinc-500" aria-hidden="true"> ↕</span>}
       </button>
     </th>
   );
@@ -195,6 +269,12 @@ export default function RsStrategyPage() {
           Signals use the latest daily close.
         </p>
 
+        {holdingsError && (
+          <p role="status" className="text-[11px] text-amber-300">
+            Holdings unavailable ({holdingsError}). The Held column may be empty; the order window re-checks before any delivery sell.
+          </p>
+        )}
+
         {error && (
           <div role="alert" className="p-3.5 rounded-xl border border-red-800/60 bg-red-950/40 text-red-300 text-xs flex items-center justify-between gap-3">
             <span>{error}. Check that the dashboard data is synced, then recalculate.</span>
@@ -226,6 +306,7 @@ export default function RsStrategyPage() {
             ['RSI > 50', rsiOn, setRsiOn, 'Require RSI(14) above 50 for a buy'],
             ['RS ≥ 0.10', strongOnly, setStrongOnly, 'Only stocks with RS of 0.10 or more (outperforming Nifty by 10 points)'],
             ['RS rising 3d', risingOnly, setRisingOnly, 'Only stocks whose RS rose three sessions in a row'],
+            ['In portfolio', heldOnly, setHeldOnly, 'Only stocks you already hold or have a position in today'],
             ['Weekly long', weeklyOnly, setWeeklyOnly, 'Weekly chart (same RS and Supertrend rules) is also Buy or Hold. Needs about 70 weeks of history'],
           ] as [string, boolean, (v: boolean) => void, string][]).map(([label, on, set, tip]) => (
             <button
@@ -259,34 +340,37 @@ export default function RsStrategyPage() {
               <thead className="bg-zinc-800 text-xs font-bold text-white">
                 <tr>
                   {th('symbol', 'Symbol', 'text-left')}
+                  {th('held', 'Held')}
                   {th('close', 'Close')}
                   {th('change1D', '1D %')}
                   {th('rs', `RS-${period}`)}
-                  <th className="px-4 py-3 text-left">RS vs zero</th>
-                  <th className="px-4 py-3 text-right">Supertrend</th>
+                  {th('rs', 'RS vs zero', 'text-left')}
+                  {th('supertrend', 'Supertrend')}
                   {th('rsi', 'RSI')}
                   {th('distPct', 'From ST %')}
-                  <th className="px-4 py-3 text-center">Signal</th>
-                  <th className="px-4 py-3 text-center">Weekly</th>
+                  {th('signal', 'Signal', 'text-center')}
+                  {th('weekly', 'Weekly', 'text-center')}
                   {th('daysInSignal', 'Bars in state')}
+                  <th className="px-4 py-3 text-center">Trade</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-zinc-800/80 bg-zinc-950/60">
                 {loading && !data ? (
-                  <tr><td colSpan={11} className="px-4 py-10 text-center text-zinc-400">
+                  <tr><td colSpan={13} className="px-4 py-10 text-center text-zinc-400">
                     <Activity className="w-4 h-4 inline mr-2 animate-spin text-emerald-400" aria-hidden="true" />
                     Scanning Nifty 500…
                   </td></tr>
                 ) : rows.length === 0 ? (
-                  <tr><td colSpan={11} className="px-4 py-10 text-center text-zinc-400">
+                  <tr><td colSpan={13} className="px-4 py-10 text-center text-zinc-400">
                     {data
-                      ? query ? `No ${tab === 'ALL' ? '' : tab.toLowerCase() + ' '}symbols match “${query}”.` : strongOnly || risingOnly || weeklyOnly ? 'No stocks match these filters. Turn one off to widen the list.' : `No stocks are in the ${tab.toLowerCase()} state today.`
+                      ? query ? `No ${tab === 'ALL' ? '' : tab.toLowerCase() + ' '}symbols match “${query}”.` : strongOnly || risingOnly || weeklyOnly || heldOnly ? 'No stocks match these filters. Turn one off to widen the list.' : `No stocks are in the ${tab.toLowerCase()} state today.`
                       : 'No scan results yet. Recalculate to run the scan.'}
                   </td></tr>
                 ) : (
                   rows.map((s: RsStrategyStock) => (
                     <tr key={s.symbol} className="hover:bg-zinc-900/70">
                       <td className="px-4 py-2.5 font-bold text-zinc-100">{s.symbol}</td>
+                      <HeldCell h={holdings ? holdings[s.symbol] : undefined} loaded={holdings !== null} />
                       <td className="px-4 py-2.5 text-right text-zinc-200">{fmt(s.close)}</td>
                       <td className={`px-4 py-2.5 text-right ${tone(s.change1D)}`}>{signed(s.change1D)}</td>
                       <td className={`px-4 py-2.5 text-right font-bold ${tone(s.rs)}`}>{signed(s.rs)}</td>
@@ -307,6 +391,22 @@ export default function RsStrategyPage() {
                         )}
                       </td>
                       <td className="px-4 py-2.5 text-right text-zinc-300">{s.daysInSignal}</td>
+                      <td className="px-4 py-2.5">
+                        <div className="flex items-center justify-center gap-1">
+                          <button
+                            onClick={() => setOrder({ symbol: s.symbol, side: 'BUY' })}
+                            aria-label={`Buy ${s.symbol}`}
+                            className="px-2.5 py-1 rounded-md bg-emerald-600 hover:bg-emerald-500 text-oncolor text-[11px] font-bold focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500/50"
+                          >Buy</button>
+                          <button
+                            onClick={() => setOrder({ symbol: s.symbol, side: 'SELL' })}
+                            disabled={holdings !== null && !ownsAny(holdings[s.symbol])}
+                            title={holdings !== null && !ownsAny(holdings[s.symbol]) ? `You hold no ${s.symbol}, so there is nothing to sell` : undefined}
+                            aria-label={`Sell ${s.symbol}`}
+                            className="px-2.5 py-1 rounded-md bg-red-600 hover:bg-red-500 text-oncolor text-[11px] font-bold focus:outline-none focus-visible:ring-2 focus-visible:ring-red-500/50 disabled:opacity-30 disabled:cursor-not-allowed disabled:hover:bg-red-600"
+                          >Sell</button>
+                        </div>
+                      </td>
                     </tr>
                   ))
                 )}
@@ -315,6 +415,16 @@ export default function RsStrategyPage() {
           </div>
         </section>
       </main>
+
+      {order && (
+        <EquityOrderModal
+          key={`${order.symbol}:${order.side}`}
+          symbol={order.symbol}
+          side={order.side}
+          onClose={() => setOrder(null)}
+          onPlaced={afterOrder}
+        />
+      )}
     </div>
   );
 }

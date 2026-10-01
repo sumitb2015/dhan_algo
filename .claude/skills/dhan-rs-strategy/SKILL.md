@@ -5,7 +5,7 @@ description: Use when touching the RS Strategy scanner (/rs-strategy) — rs_das
 
 # RS Strategy (`/rs-strategy`) — Nifty 500 RS-55 + Supertrend(10,2)
 
-A **read-only scanner**: it places no orders and has no Python strategy behind it. It is a port of
+A **scanner with a manual Buy/Sell ticket**: the signals themselves place nothing and there is no Python strategy behind it; orders happen only when a person clicks Buy/Sell and confirms in the ticket (see "Buy / Sell tickets" below). It is a port of
 the bharatTrader "Relative Strength" TradingView indicator (Learn2Trade session 31, Vivek Bajaj /
 StockEdge) combined with a Supertrend and RSI gate. Vault notes (history, reasoning, rejected
 options, open follow-ups) are in `wiki/strategies/rs-55-supertrend.md` of the Dhan Algo Brain vault
@@ -79,3 +79,26 @@ Browser check: the dashboard needs a session cookie (`proxy.ts`). For local test
 (see CLAUDE.md on 307/401). Verified 2026-10-01 in dark/light/beige. Known cosmetic issue, not specific to
 this page: at 390 px the shared NavBar buttons overflow the header (Stage Screener is worse).
 Reference counts on 2026-09-30 data: Buy 55 · Hold 145 · Sell 229 · Wait 70 (499 scanned; 87 Buy with RSI off; weekly long ≈ 253). Chart cross-check 2026-10-01: ENGINERSIN RS-55 `0.4581` = TradingView's `0.46`, base bar 2026-07-15 (the indicator's "RS-55 reference" label), Supertrend 288.72, RSI 69.43 — all match.
+
+## Buy / Sell tickets (REAL MONEY)
+
+Each row has Buy and Sell buttons that open `components/EquityOrderModal.tsx`; a **Held** column and an
+**In portfolio** chip show what the account already owns. Dhan only (no Zerodha/Kotak). Read
+`dhan-order-tickets` before changing any of it.
+
+| Piece | Where |
+|---|---|
+| Pure rules (caps, tick rounding, limit band, delivery-sell check) | `lib/equityOrder.ts` + `lib/equityOrder.test.ts` — explicit `.ts` imports, no fs/fetch, so `node --test` loads it |
+| Symbol → NSE security id, tick (paise ÷ 100), series | `lib/equityMaster.ts` (parses `master_list.csv`, cached per mtime). The browser never sends a security id |
+| Holdings + today's NSE_EQ positions | `lib/dhanEquityPortfolio.ts` (`readEquityPortfolio` for display, `fetchHoldingsLive` for order gating) |
+| Live price | `lib/dhanEquityQuote.ts` via the shared quote lane (`pacedQuoteCall`) |
+| Routes | `app/api/equity-order/route.ts` (GET = ticket context, POST = place) and `app/api/equity-order/holdings/route.ts` (table read, 10 s cache) |
+
+**Server-side limits** (re-checked on POST, the modal only mirrors them): quantity ≤ 10,000, order value ≤ ₹5,00,000 (limit price, or live price for MARKET), LIMIT price within ±20% of the live price and rounded to the tick, **no short-selling: a SELL may only close what the account owns** — CNC sell ≤ sellable holdings (fresh `/holdings` read), INTRADAY sell ≤ today's open long MIS position (fresh `/positions` read). Holdings never authorise an MIS sell and an MIS position never authorises a CNC sell. Shares already committed to **open sell orders** (`pendingSellQty`: unfilled remainder of TRANSIT/PENDING/PART_TRADED/CONFIRM orders, same product) are subtracted, and sells of one security run one at a time (`withSellLock`) so two quick sells cannot both pass against the same untouched position and become a short. If any read fails, nothing is sold. The row's Sell button is also disabled when the Held data shows nothing owned (UI convenience only; the server is the guard). Products: `CNC` (Delivery) and `INTRADAY` (MIS); order types MARKET/LIMIT; optional AMO (`afterMarketOrder` + `amoTime: OPEN`). No stop-loss/bracket orders. Fails **closed**: no live price or unreadable holdings ⇒ nothing is ordered.
+
+Gotchas:
+1. **Idempotency**: the client mints one `clientKey` per ticket; the server keeps the in-flight/booked result for 2 min so a double click or retry returns the first result instead of a second order. Plain rejections are forgotten and the client mints a fresh key, so a corrected retry works. a non-JSON reply (gateway page) is also treated as `unknown`, never as a rejection; an accepted order Dhan reports as REJECTED/CANCELLED/EXPIRED is shown as a warning, not a success; `unknown` outcomes (timeout / 5xx) are reconciled by `correlationId` via `GET /orders/external/{id}`; if still unknown the modal locks and tells the user to check the order book — never auto-retry.
+2. **Dhan spells it `availabelBalance`** in `/fundlimit`; holdings `tradingSymbol` may carry a `-EQ` suffix, so rows are matched by `securityId`.
+3. **Held shows holdings and today's positions separately, never summed.** Dhan can list a same-day CNC buy as a position before it reaches holdings (T+1), so a delivery SELL of a stock bought today is blocked by the sellable-holdings rule until it settles.
+4. Every column header sorts (Held, Signal and Weekly by rank, a stock with no weekly signal always last, ties by symbol). Typed qty/price commit on blur/Enter, Escape reverts an uncommitted edit and a second Escape closes the window, and Submit stays disabled while a draft is uncommitted (`dhan-commit-on-blur`). The ticket fetch uses a `cancelled` flag as its out-of-order guard; the page polls holdings every 60 s while visible and re-reads (now and +4 s) after an order.
+5. **Testing without risk**: never click Confirm against a live account to "see it work". Reject-path POSTs (bad qty, far limit, over cap, delivery sell of nothing) are safe and exercise the server rules; for the success/unknown/rejected UI states mock `/api/equity-order` in the browser. Verified that way on 2026-10-01 — **no real order has been placed through this ticket yet**; do a 1-share far-below-market LIMIT (or AMO) first.
