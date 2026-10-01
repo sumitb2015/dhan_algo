@@ -60,6 +60,13 @@ export interface MultiLegLeg {
    *  against the order book and undoes the ledger effect of a rejected or
    *  cancelled one — see applyOrderOutcomes. */
   pendingOrders?: PendingLegOrder[];
+  /** Ids of this tool's own orders on this leg once they settle (pendingOrders
+   *  drops them), so a trade-book row can always be told apart from an
+   *  outside trade on the same contract — see ownOrderIds. */
+  orderIds?: string[];
+  /** Trade-book keys of the outside trades that priced this leg's close
+   *  (repriceEstimatedCloses), so one trade is never used for two closes. */
+  outsideTradeKeys?: string[];
   status: MultiLegStatus;
 
   // ── Leg-wise Stop Loss, Take Profit, and Trailing SL ─────────────
@@ -542,7 +549,7 @@ export function closedFillFromRow(
   row: Record<string, unknown> | undefined,
   isBuy: boolean,
   ownQty?: number | null,
-): { qty: number; exitPrice: number } | undefined {
+): { qty: number; exitPrice: number; estimated: true } | undefined {
   if (!row) return undefined;
   const buyQty = Number(row.buyQty) || 0;
   const sellQty = Number(row.sellQty) || 0;
@@ -555,7 +562,9 @@ export function closedFillFromRow(
   const qty = ownQty != null && ownQty > 0 ? ownQty : roundTrip;
   const exitPrice = Number(isBuy ? row.sellAvg : row.buyAvg) || 0;
   if (exitPrice <= 0) return undefined;
-  return { qty, exitPrice };
+  // Pooled too, so only an estimate until repriceEstimatedCloses finds the
+  // outside trade(s) that actually closed it in the trade book.
+  return { qty, exitPrice, estimated: true };
 }
 
 /**
@@ -665,8 +674,14 @@ function reconcileLegWithBrokerRaw(
   if (match.kind === 'match') {
     const brokerQty = Math.abs(Number(match.row.netQty) || 0);
     if (brokerQty > 0) {
+      // The broker average is pooled across every leg and trade on this
+      // contract (22300 PE: two legs both read 125.13; 22500 CE: a leg's entry
+      // blended with another basket's sell, 2026-10-01). A leg's own average —
+      // its fill price, settled to the order's traded average by
+      // applyOrderOutcomes — wins; the broker's only fills a leg that has none.
       const brokerAvg = Number(match.row.sellAvg || match.row.buyAvg || match.row.costPrice || 0);
-      const avgPrice = brokerAvg > 0 ? brokerAvg : (leg.fill?.avgPrice ?? 0);
+      const ownAvg = leg.fill?.avgPrice ?? 0;
+      const avgPrice = ownAvg > 0 ? ownAvg : brokerAvg;
 
       const ownQty = (leg.fill?.qty && leg.fill.qty > 0) ? leg.fill.qty : (ownQtyHint ?? brokerQty);
       const qty = Math.min(ownQty, brokerQty);
@@ -1377,7 +1392,11 @@ export function applyOrderOutcomes(
     }
   }
   if (keep.length === pending.length && notes.length === 0) return { leg, notes };
-  return { leg: { ...next, pendingOrders: keep.length ? keep : undefined }, notes };
+  // Settled (or expired) orders leave pendingOrders but stay this leg's own:
+  // ownOrderIds needs them to tell its trades apart from outside ones.
+  const settled = pending.filter(p => !keep.includes(p)).map(p => p.id);
+  const orderIds = settled.length ? Array.from(new Set([...(next.orderIds ?? []), ...settled])) : next.orderIds;
+  return { leg: { ...next, pendingOrders: keep.length ? keep : undefined, ...(orderIds ? { orderIds } : {}) }, notes };
 }
 
 /**
@@ -1440,4 +1459,140 @@ export function classifyDhanOrder(status: string, orderType: 'MARKET' | 'LIMIT')
   if (s === 'REJECTED' || s === 'CANCELLED' || s === 'CANCELED' || s === 'EXPIRED') return 'dead';
   if (orderType === 'LIMIT' && (s === 'PENDING' || s === 'PART_TRADED')) return 'working';
   return 'pending';
+}
+
+// ─── Outside closes priced from the trade book ───────────────────────────
+
+/** correlationId prefix on every Dhan order this page places (fast-order's
+ *  `source`), so its orders stay recognisable in the order book after they
+ *  settle and drop out of a leg's pendingOrders. */
+export const MLF_ORDER_SOURCE = 'mlf';
+
+export interface NormalizedTrade {
+  /** Unique per fill: order id + exchange trade id (else time/qty/price). */
+  key: string;
+  orderId: string;
+  /** Dhan securityId, else the trading symbol — what findLegPosition matches on. */
+  ident: string;
+  side: LegSide;
+  qty: number;
+  price: number;
+  /** Epoch ms; 0 when the row's time can't be parsed. */
+  at: number;
+}
+
+function tradeTime(raw: unknown): number {
+  const s = String(raw ?? '').trim();
+  if (!s) return 0;
+  // Dhan / Zerodha send IST wall-clock "YYYY-MM-DD HH:MM:SS" with no zone;
+  // Kotak's fill time can be the bare "HH:MM:SS" of today (IST).
+  const today = new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
+  const full = /^\d{2}:\d{2}(:\d{2})?$/.test(s) ? `${today} ${s}` : s;
+  const ist = /^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}(:\d{2})?$/.test(full) ? `${full.replace(' ', 'T')}+05:30` : full;
+  const t = Date.parse(ist);
+  return Number.isFinite(t) ? t : 0;
+}
+
+/** Dhan (raw) and Zerodha/Kotak (shaped) trade-book rows -> one shape. */
+export function normalizeTradeRow(row: Record<string, unknown>): NormalizedTrade | null {
+  const orderId = String(row.orderId ?? row.order_id ?? '');
+  const ident = String(row.securityId ?? '') || String(row.tradingSymbol ?? row.tradingsymbol ?? '');
+  const tx = String(row.transactionType ?? '').toUpperCase();
+  const qty = Number(row.tradedQuantity) || 0;
+  const price = Number(row.tradedPrice) || 0;
+  if (!ident || qty <= 0 || price <= 0 || (tx !== 'BUY' && tx !== 'SELL')) return null;
+  const rawTime = row.exchangeTime ?? row.createTime ?? row.updateTime;
+  const tradeId = String(row.exchangeTradeId ?? row.tradeId ?? '');
+  const key = `${orderId}:${tradeId || `${String(rawTime ?? '')}:${qty}:${price}`}`;
+  return { key, orderId, ident, side: tx === 'BUY' ? 'B' : 'S', qty, price, at: tradeTime(rawTime) };
+}
+
+/** Every order id this tool placed: settled (orderIds), in flight
+ *  (pendingOrders), the last recorded fill, and any order-book row carrying
+ *  MLF_ORDER_SOURCE's correlationId prefix. */
+export function ownOrderIds(baskets: MultiLegBasket[], orderRows: Record<string, unknown>[] = []): Set<string> {
+  const ids = new Set<string>();
+  for (const b of baskets) {
+    for (const l of b.legs) {
+      for (const id of l.orderIds ?? []) ids.add(id);
+      for (const p of l.pendingOrders ?? []) ids.add(p.id);
+      if (l.fill?.orderId) ids.add(String(l.fill.orderId));
+    }
+  }
+  for (const r of orderRows) {
+    if (String(r.correlationId ?? '').startsWith(MLF_ORDER_SOURCE)) {
+      const id = String(r.orderId ?? '');
+      if (id) ids.add(id);
+    }
+  }
+  return ids;
+}
+
+/** Trades on `ident` this tool did not place that close `qty` on `closeSide`
+ *  at or before `before` (+60s clock skew), and no other close has claimed.
+ *  Tries each run of consecutive trades, newest first, and takes the first
+ *  that adds up to exactly `qty`; anything else is ambiguous -> null. */
+export function matchOutsideTrades(
+  trades: NormalizedTrade[],
+  ident: string,
+  closeSide: LegSide,
+  qty: number,
+  before: number,
+  own: Set<string>,
+  used: Set<string>,
+): { exitPrice: number; keys: string[] } | null {
+  if (qty <= 0) return null;
+  const cands = trades
+    .filter(t => t.ident === ident && t.side === closeSide && !own.has(t.orderId) && !used.has(t.key)
+      && t.at > 0 && t.at <= before + 60_000)
+    .sort((a, b) => b.at - a.at);
+  for (let i = 0; i < cands.length; i++) {
+    let sum = 0;
+    let value = 0;
+    for (let j = i; j < cands.length && sum < qty; j++) {
+      sum += cands[j].qty;
+      value += cands[j].qty * cands[j].price;
+      if (sum === qty) return { exitPrice: value / qty, keys: cands.slice(i, j + 1).map(t => t.key) };
+    }
+  }
+  return null;
+}
+
+/**
+ * Replaces the estimated exit price of every leg closed outside this tool
+ * (reconcile's flat/pooled-row close, brokerClampSlice) with the actual
+ * outside trade(s) from the broker's trade book, once they are there. Only an
+ * exact qty match counts; until then the leg keeps its estimate and "est."
+ * mark. `tradesByBroker` holds only brokers whose trade book was read this
+ * tick — a missing book changes nothing. Returns the input array when nothing
+ * was repriced.
+ */
+export function repriceEstimatedCloses(
+  baskets: MultiLegBasket[],
+  tradesByBroker: Partial<Record<string, NormalizedTrade[]>>,
+  own: Set<string>,
+): MultiLegBasket[] {
+  const used = new Set<string>();
+  for (const b of baskets) for (const l of b.legs) for (const k of l.outsideTradeKeys ?? []) used.add(k);
+  let changed = false;
+  const next = baskets.map(b => {
+    const trades = tradesByBroker[b.broker];
+    if (!trades?.length) return b;
+    let bChanged = false;
+    const legs = b.legs.map(l => {
+      const cf = l.closedFill;
+      if (l.status !== 'CLOSED' || !cf?.estimated || l.outsideTradeKeys?.length) return l;
+      const ident = l.orderRef?.securityId || l.orderRef?.symbol;
+      if (!ident) return l;
+      const m = matchOutsideTrades(trades, ident, l.side === 'B' ? 'S' : 'B', cf.qty, l.closedAt ?? Date.now(), own, used);
+      if (!m) return l;
+      for (const k of m.keys) used.add(k);
+      bChanged = true;
+      return { ...l, closedFill: { qty: cf.qty, exitPrice: m.exitPrice }, outsideTradeKeys: m.keys };
+    });
+    if (!bChanged) return b;
+    changed = true;
+    return { ...b, legs, updatedAt: new Date().toISOString() };
+  });
+  return changed ? next : baskets;
 }

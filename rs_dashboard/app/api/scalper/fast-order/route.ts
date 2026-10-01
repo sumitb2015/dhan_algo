@@ -77,6 +77,9 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     price?: number;
     exchangeSegment?: string;
     productType?: string;
+    /** Short lowercase tag prefixed to the correlationId so a caller can tell
+     *  its own orders apart in the order book (MultiLegFocus sends 'mlf'). */
+    source?: string;
   };
 
   const { securityId, quantity, side, orderType = 'MARKET', price = 0, exchangeSegment = 'NSE_FNO', productType: productTypeRaw } = body;
@@ -114,7 +117,8 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     return NextResponse.json({ success: false, error: `Invalid price for LIMIT order: ${price}` }, { status: 400 });
   }
 
-  const correlationId = `wr${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
+  const prefix = typeof body.source === 'string' && /^[a-z]{2,4}$/.test(body.source) ? body.source : 'wr';
+  const correlationId = `${prefix}${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
 
   // Resolved outside the reconcile-on-failure try/catch below: a credentials
   // failure (missing/expired access_token.json — routine, since the token

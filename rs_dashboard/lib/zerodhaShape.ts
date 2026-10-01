@@ -41,6 +41,9 @@ export interface ScalperTrade {
   tradedQuantity: number;
   tradedPrice: number;
   createTime: string;
+  /** Broker order / fill ids — let MultiLegFocus tell its own trades from outside ones. */
+  orderId?: string;
+  tradeId?: string;
 }
 
 export function shapeZerodhaPosition(p: Record<string, any>): ScalperPosition {
@@ -102,5 +105,7 @@ export function shapeZerodhaTrade(t: Record<string, any>): ScalperTrade {
     tradedQuantity: Number(t.quantity) || 0,
     tradedPrice: Number(t.average_price) || 0,
     createTime: String(t.fill_timestamp ?? ''),
+    ...(t.order_id != null ? { orderId: String(t.order_id) } : {}),
+    ...(t.trade_id != null ? { tradeId: String(t.trade_id) } : {}),
   };
 }

@@ -114,6 +114,8 @@ export function shapeKotakTrade(t: Record<string, any>): ScalperTrade {
     tradedQuantity: Number(t.fldQty ?? t.qty) || 0,
     tradedPrice: Number(t.avgPrc ?? t.prc) || 0,
     createTime: String(t.flTm ?? t.exTm ?? t.trdTm ?? t.ordEntTm ?? t.ordDtTm ?? t.createTime ?? ''),
+    ...(t.nOrdNo != null ? { orderId: String(t.nOrdNo) } : {}),
+    ...(t.flId != null ? { tradeId: String(t.flId) } : {}),
   };
 }
 

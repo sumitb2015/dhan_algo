@@ -26,6 +26,7 @@ import {
   findSiblingLegCollisions, describeSiblingCollisions,
   legQtyWarningsFor, recordOutsideReduction, legCountsToday, type LegQtyWarning,
   findUntrackedPositions, contractHintFromRow, legFromUntracked, mergeImportedLegs, brokerClampSlice,
+  normalizeTradeRow, ownOrderIds, repriceEstimatedCloses, MLF_ORDER_SOURCE, type NormalizedTrade,
   type MultiLegLeg, type MultiLegBasket, type StrategyRiskConfig, type MultiLegStatus,
 } from '@/lib/multiLegFocus';
 import { closeOrderProduct } from '@/lib/positionProduct';
@@ -1290,7 +1291,7 @@ export default function MultiLegFocus({
           side: p.side === 'B' ? 'S' : 'B', option: p.option, strike: p.strike, qty: p.qty, type: 'MARKET',
           underlying: basket.underlying as Underlying, productType: 'MARGIN',
           securityId: p.securityId, tradingsymbol: p.symbol,
-        }, strikeMapFor(p.expiry));
+        }, strikeMapFor(p.expiry), MLF_ORDER_SOURCE);
         if (!reverseReq) {
           addToast('error', `Could not auto-reverse ${p.label}`, 'No order identifier — close manually from Orders/Positions');
           continue;
@@ -1331,7 +1332,7 @@ export default function MultiLegFocus({
         price: leg.type === 'LIMIT' ? leg.price : undefined,
         underlying: basket.underlying as Underlying,
         productType: 'MARGIN',
-      }, strikeMapFor(leg.expiry || basket.expiry));
+      }, strikeMapFor(leg.expiry || basket.expiry), MLF_ORDER_SOURCE);
 
       if (!req) {
         addToast('error', `${label} — no order identifier resolved`, 'Strike lookup not ready yet — strategy stopped');
@@ -1623,7 +1624,7 @@ export default function MultiLegFocus({
 
       const orderUrl = bk === 'dhan' ? '/api/scalper/fast-order' : scalperRoute(bk, 'order');
       const body = bk === 'dhan'
-        ? { securityId, quantity: qty, side, orderType: 'MARKET', exchangeSegment: match.row.exchangeSegment ?? defaultSegDhan, ...productPayload.fields }
+        ? { securityId, quantity: qty, side, orderType: 'MARKET', exchangeSegment: match.row.exchangeSegment ?? defaultSegDhan, ...productPayload.fields, source: MLF_ORDER_SOURCE }
         : {
             tradingsymbol: leg.orderRef?.symbol
               ?? (match.row.tradingSymbol as string | undefined)
@@ -1772,7 +1773,7 @@ export default function MultiLegFocus({
       productType: 'MARGIN',
       securityId: leg.orderRef?.securityId,
       tradingsymbol: leg.orderRef?.symbol,
-    }, strikeMap);
+    }, strikeMap, MLF_ORDER_SOURCE);
 
     if (!req) {
       addToast('error', `Order failed for ${label}`, 'Could not resolve security identifier');
@@ -2148,7 +2149,7 @@ export default function MultiLegFocus({
       price: params.orderType === 'LIMIT' ? params.limitPrice : undefined,
       underlying: basket.underlying as Underlying,
       productType: 'MARGIN',
-    }, strikeMap);
+    }, strikeMap, MLF_ORDER_SOURCE);
 
     if (!req) {
       addToast('error', `Order failed for ${label}`, 'Could not resolve security identifier');
@@ -2320,7 +2321,7 @@ export default function MultiLegFocus({
           productType: 'MARGIN',
           securityId: leg.orderRef?.securityId,
           tradingsymbol: leg.orderRef?.symbol,
-        }, strikeMap);
+        }, strikeMap, MLF_ORDER_SOURCE);
 
         if (!req) throw new Error(`Could not resolve security for ${leg.strike} ${leg.option}`);
 
@@ -2631,6 +2632,16 @@ export default function MultiLegFocus({
           // than once, e.g. under Strict Mode) so the toast side-effect below
           // fires exactly once per real poll tick, not once per updater call.
           const brokerNetByLeg = new Map<string, number>();
+          // Trade books read this tick, for pricing legs closed outside this
+          // tool off their actual trades (repriceEstimatedCloses).
+          const tradesByBroker: Partial<Record<Broker, NormalizedTrade[]>> = {};
+          const allOrderRows: Record<string, unknown>[] = [];
+          for (const r of results) {
+            if (Array.isArray(r.j?.orders)) allOrderRows.push(...r.j!.orders!);
+            if (Array.isArray(r.j?.trades)) {
+              tradesByBroker[r.broker] = r.j!.trades!.map(normalizeTradeRow).filter((t): t is NormalizedTrade => t != null);
+            }
+          }
           // Rejected/cancelled orders found this tick — toasted once, outside the updater.
           const orderOutcomeToasts = new Map<string, { label: string; kind: 'grow' | 'exit'; status: string; unfilled: number; unknownFill?: boolean }>();
 
@@ -2711,7 +2722,13 @@ export default function MultiLegFocus({
               return basket;
             });
 
-            return anyChange ? nextBaskets : prevBaskets;
+            const base = anyChange ? nextBaskets : prevBaskets;
+            const repriced = repriceEstimatedCloses(base, tradesByBroker, ownOrderIds(base, allOrderRows));
+            if (repriced !== base) {
+              repriced.forEach((b, i) => { if (b !== base[i]) persistBasket(b); });
+              return repriced;
+            }
+            return base;
           });
 
           // A fresh Map every tick, so legQtyWarnings re-evaluates as fill-grace windows expire.

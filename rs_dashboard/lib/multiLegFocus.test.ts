@@ -5,6 +5,7 @@ import {
   computeLegTrailingSL, computeStrategyMetrics, checkStrategyRisk, computeCalendarPayoffCurve, classifyBasketStructure, findSiblingLegCollisions,
   formatExpiryLabel, LEG_FILL_GRACE_MS, claimableLegQty, executionBroker, applyOrderOutcomes, normalizeOrderRow, PENDING_ORDER_TTL_MS, legBrokerMismatch, classifyDhanOrder, type NormalizedOrder, legAvgPrice, legExitPrice, legQtyUnits, legPnlPct, legOtmPct, scaleBasketMultiplier,
   legQtyWarningsFor, recordOutsideReduction, findUntrackedPositions, legFromUntracked, contractHintFromRow, legCountsToday, closedFillFromRow, mergeImportedLegs, brokerClampSlice,
+  normalizeTradeRow, ownOrderIds, matchOutsideTrades, repriceEstimatedCloses, MLF_ORDER_SOURCE,
   type StrategyMetrics, type MultiLegLeg, type MultiLegBasket,
 } from './multiLegFocus.ts';
 import type { StrategyTemplate } from './basketStrategies.ts';
@@ -289,7 +290,12 @@ test('reconcileLegWithBroker never inflates qty upward to match a broker positio
   assert.strictEqual(reconciled.status, 'OPEN');
   assert.strictEqual(reconciled.fill?.qty, 65);   // stays this leg's own qty, not the pooled 130
   assert.strictEqual(reconciled.lots, 1);           // lots stays put too
-  assert.strictEqual(reconciled.fill?.avgPrice, 108.5); // broker's avg price is still trusted (not ownership-sensitive)
+  // The broker avg is pooled across every leg on the contract too (2026-10-01:
+  // two 22300 PE legs both read the pooled 125.13), so the leg's own avg wins.
+  assert.strictEqual(reconciled.fill?.avgPrice, 110);
+  // ...and the broker's is used only for a leg that has no avg of its own.
+  const noAvg = reconcileLegWithBroker({ ...leg, fill: { qty: 65, avgPrice: 0 } }, match, 65, 65);
+  assert.strictEqual(noAvg.fill?.avgPrice, 108.5);
 });
 
 test('reconcileLegWithBroker clamps this leg\'s own qty DOWN when the shared broker position shrinks below it', () => {
@@ -473,7 +479,7 @@ test('reconcileLegWithBroker captures closedFill from a flat row (SELL leg exits
   assert.strictEqual(reconciled.status, 'CLOSED');
   assert.strictEqual(reconciled.fill?.qty, 0);
   assert.strictEqual(reconciled.fill?.avgPrice, 72.05); // entry preserved
-  assert.deepStrictEqual(reconciled.closedFill, { qty: 65, exitPrice: 60.1 }); // bought back to cover
+  assert.deepStrictEqual(reconciled.closedFill, { qty: 65, exitPrice: 60.1, estimated: true }); // bought back to cover (pooled row avg: estimate)
 });
 
 test('reconcileLegWithBroker captures closedFill from a match row that just went flat (BUY leg exits at sellAvg)', () => {
@@ -481,7 +487,7 @@ test('reconcileLegWithBroker captures closedFill from a match row that just went
   const match = { kind: 'match' as const, row: { securityId: '47331', netQty: 0, buyQty: 65, sellQty: 65, buyAvg: 50, sellAvg: 58 } };
   const reconciled = reconcileLegWithBroker(leg, match);
   assert.strictEqual(reconciled.status, 'CLOSED');
-  assert.deepStrictEqual(reconciled.closedFill, { qty: 65, exitPrice: 58 }); // sold to close
+  assert.deepStrictEqual(reconciled.closedFill, { qty: 65, exitPrice: 58, estimated: true }); // sold to close (pooled row avg: estimate)
 });
 
 test('reconcileLegWithBroker leaves closedFill undefined when the flat row carries no buy/sell qty (non-Dhan brokers that drop flat rows)', () => {
@@ -1068,9 +1074,9 @@ test('closing paths stamp closedAt; a reopened exit clears it', () => {
 test('closedFillFromRow sizes the close off the leg, not the pooled broker round trip', () => {
   // Two 2-lot legs on one contract closed together: the row shows 260 each way.
   const row = { buyQty: 260, sellQty: 260, buyAvg: 140.95, sellAvg: 165.375, netQty: 0 };
-  assert.deepStrictEqual(closedFillFromRow(row, false, 130), { qty: 130, exitPrice: 140.95 });
+  assert.deepStrictEqual(closedFillFromRow(row, false, 130), { qty: 130, exitPrice: 140.95, estimated: true });
   // No ledger qty (legacy leg) still falls back to the row.
-  assert.deepStrictEqual(closedFillFromRow(row, false), { qty: 260, exitPrice: 140.95 });
+  assert.deepStrictEqual(closedFillFromRow(row, false), { qty: 260, exitPrice: 140.95, estimated: true });
   const leg: MultiLegLeg = {
     id: 'a', side: 'S', option: 'CE', strike: 22900, lots: 2, type: 'MARKET', status: 'OPEN',
     fill: { qty: 130, avgPrice: 165.375 }, orderRef: { securityId: '51348' },
@@ -1134,4 +1140,85 @@ test('brokerClampSlice keeps the P&L of qty a clamp removed', () => {
   // Nothing clamped, or a full close (recorded on the leg itself): no slice.
   assert.strictEqual(brokerClampSlice(leg, leg, row, 65), null);
   assert.strictEqual(brokerClampSlice(leg, { ...next, status: 'CLOSED' }, row, 65), null);
+});
+
+test('normalizeTradeRow reads Dhan raw and Zerodha/Kotak shaped trade rows', () => {
+  const dhan = normalizeTradeRow({
+    orderId: '5226', exchangeTradeId: '9001', securityId: '51368', transactionType: 'BUY',
+    tradedQuantity: 130, tradedPrice: 64, exchangeTime: '2026-10-01 09:31:12',
+  });
+  assert.deepStrictEqual(dhan, {
+    key: '5226:9001', orderId: '5226', ident: '51368', side: 'B', qty: 130, price: 64,
+    at: Date.parse('2026-10-01T09:31:12+05:30'),
+  });
+  const kotak = normalizeTradeRow({ tradingSymbol: 'NIFTY28AUG24250CE', transactionType: 'SELL', tradedQuantity: 65, tradedPrice: 104.3, createTime: '10:16:05', orderId: '77' });
+  assert.strictEqual(kotak?.ident, 'NIFTY28AUG24250CE');
+  assert.strictEqual(kotak?.side, 'S');
+  assert.ok((kotak?.at ?? 0) > 0);
+  assert.strictEqual(normalizeTradeRow({ securityId: '1', transactionType: 'BUY', tradedQuantity: 0, tradedPrice: 5 }), null);
+});
+
+test('ownOrderIds covers settled, pending, last fill and mlf-tagged order-book rows', () => {
+  const leg: MultiLegLeg = {
+    id: 'a', side: 'S', option: 'CE', strike: 23400, lots: 1, type: 'MARKET', status: 'OPEN',
+    fill: { qty: 65, avgPrice: 90, orderId: 'f1' }, orderIds: ['s1'],
+    pendingOrders: [{ id: 'p1', kind: 'grow', qty: 65, at: 1 }],
+  };
+  const basket = { id: 'b', broker: 'dhan', legs: [leg] } as unknown as MultiLegBasket;
+  const ids = ownOrderIds([basket], [
+    { orderId: 'c1', correlationId: `${MLF_ORDER_SOURCE}abc123` },
+    { orderId: 'w1', correlationId: 'wrabc123' },
+  ]);
+  assert.deepStrictEqual([...ids].sort(), ['c1', 'f1', 'p1', 's1']);
+});
+
+test('applyOrderOutcomes keeps a settled order id on the leg', () => {
+  const leg: MultiLegLeg = {
+    id: 'a', side: 'S', option: 'CE', strike: 23400, lots: 1, type: 'MARKET', status: 'OPEN',
+    fill: { qty: 65, avgPrice: 90 }, pendingOrders: [{ id: 'o9', kind: 'grow', qty: 65, at: 1, price: 90 }],
+  };
+  const orders = new Map([['o9', { id: 'o9', status: 'TRADED', filled: 65, avgPrice: 91 }]]);
+  const { leg: out } = applyOrderOutcomes(leg, orders, 65, 2);
+  assert.strictEqual(out.pendingOrders, undefined);
+  assert.deepStrictEqual(out.orderIds, ['o9']);
+});
+
+test('matchOutsideTrades takes the newest exact run of outside trades', () => {
+  const t = (key: string, orderId: string, qty: number, price: number, at: number, side: 'B' | 'S' = 'B') =>
+    ({ key, orderId, ident: '51368', side, qty, price, at });
+  const trades = [
+    t('k1', 'x1', 65, 60, 1000),
+    t('k2', 'x2', 65, 68, 2000),
+    t('k3', 'own', 130, 50, 3000),        // this tool's own order
+    t('k4', 'x4', 65, 99, 4000, 'S'),     // wrong side
+    t('k5', 'x5', 65, 70, 9_000_000),     // after the close (+60s)
+  ];
+  const own = new Set(['own']);
+  assert.deepStrictEqual(matchOutsideTrades(trades, '51368', 'B', 130, 5000, own, new Set()), { exitPrice: 64, keys: ['k2', 'k1'] });
+  assert.deepStrictEqual(matchOutsideTrades(trades, '51368', 'B', 65, 5000, own, new Set(['k2'])), { exitPrice: 60, keys: ['k1'] });
+  assert.strictEqual(matchOutsideTrades(trades, '51368', 'B', 100, 5000, own, new Set()), null);
+});
+
+test('repriceEstimatedCloses swaps a pooled estimate for the actual outside trade', () => {
+  // 2026-10-01: 130 of the strangle's 23400 CE bought back outside the tool @ 64.
+  const slice: MultiLegLeg = {
+    id: 's', side: 'S', option: 'CE', strike: 23400, lots: 2, type: 'MARKET', status: 'CLOSED',
+    closedAt: Date.parse('2026-10-01T09:31:15+05:30'), orderRef: { securityId: '51368' },
+    fill: { qty: 0, avgPrice: 96.85 }, closedFill: { qty: 130, exitPrice: 61.2, estimated: true },
+  };
+  const basket = { id: 'b', broker: 'dhan', legs: [slice] } as unknown as MultiLegBasket;
+  const trades = [normalizeTradeRow({
+    orderId: 'x', exchangeTradeId: '1', securityId: '51368', transactionType: 'BUY',
+    tradedQuantity: 130, tradedPrice: 64, exchangeTime: '2026-10-01 09:31:12',
+  })!];
+  const out = repriceEstimatedCloses([basket], { dhan: trades }, new Set());
+  assert.notStrictEqual(out, [basket]);
+  assert.deepStrictEqual(out[0].legs[0].closedFill, { qty: 130, exitPrice: 64 });
+  assert.deepStrictEqual(out[0].legs[0].outsideTradeKeys, ['x:1']);
+  assert.ok(Math.abs(legPnl(out[0].legs[0], 0) - 4270.5) < 1e-6);
+  // Already priced, or no trade book this tick: unchanged (same array).
+  assert.strictEqual(repriceEstimatedCloses(out, { dhan: trades }, new Set()), out);
+  assert.strictEqual(repriceEstimatedCloses([basket], {}, new Set()).length, 1);
+  const none = [basket];
+  assert.strictEqual(repriceEstimatedCloses(none, {}, new Set()), none);
 });

@@ -18,6 +18,8 @@ test('resolveOrderRequest builds a Dhan fast-order request from a CE leg', () =>
     broker: 'dhan', url: '/api/scalper/fast-order',
     body: { securityId: '12345', quantity: 75, side: 'SELL', orderType: 'MARKET', exchangeSegment: 'NSE_FNO', productType: 'INTRADAY' },
   });
+  // A caller's source tag rides along for fast-order's correlationId prefix.
+  assert.strictEqual(resolveOrderRequest('dhan', leg, strikeMap, 'mlf')?.body.source, 'mlf');
 });
 
 test('resolveOrderRequest builds a Zerodha order request from a PE leg, snapping a limit price to the 0.05 tick', () => {

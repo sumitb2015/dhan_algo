@@ -41,6 +41,8 @@ export function resolveOrderRequest(
   broker: Broker,
   leg: OrderLeg,
   strikeMap: Record<string, StrikeIdentifier>,
+  /** Dhan only: correlationId prefix tagging the order as this caller's (see fast-order). */
+  source?: string,
 ): ResolvedOrder | null {
   const ident = strikeMap[String(leg.strike)];
   const side = leg.side === 'B' ? 'BUY' : 'SELL';
@@ -62,6 +64,7 @@ export function resolveOrderRequest(
         exchangeSegment,
         productType: leg.productType,
         ...(limitPrice != null ? { price: limitPrice } : {}),
+        ...(source ? { source } : {}),
       },
     };
   }
