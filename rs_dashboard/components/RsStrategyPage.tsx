@@ -104,11 +104,11 @@ function ownsAny(h: EquityHolding | undefined): boolean {
 
 /** Delivery holding plus today's positions for one symbol. Quantities are shown separately, never summed. */
 function HeldCell({ h, loaded }: { h: EquityHolding | undefined; loaded: boolean }) {
-  if (!loaded) return <td className="px-4 py-2.5 text-right text-zinc-500">…</td>;
+  if (!loaded) return <td className="px-3 py-2.5 text-right text-zinc-500">…</td>;
   const has = h && (h.totalQty > 0 || h.positions.length > 0);
-  if (!h || !has) return <td className="px-4 py-2.5 text-right text-zinc-500">–</td>;
+  if (!h || !has) return <td className="px-3 py-2.5 text-right text-zinc-500">–</td>;
   return (
-    <td className="px-4 py-2.5 text-right" title={h.totalQty > 0 && h.avgCost > 0 ? `Avg cost ₹${fmt(h.avgCost)}` : undefined}>
+    <td className="px-3 py-2.5 text-right" title={h.totalQty > 0 && h.avgCost > 0 ? `Avg cost ₹${fmt(h.avgCost)}` : undefined}>
       {h.totalQty > 0 && <span className="text-zinc-100 font-bold">{h.totalQty.toLocaleString('en-IN')}</span>}
       {h.positions.map((p) => (
         <span key={p.product} className={`block text-[10px] ${p.netQty > 0 ? 'text-emerald-400' : 'text-red-400'}`}>
@@ -257,7 +257,7 @@ export default function RsStrategyPage({ guide = '' }: { guide?: string }) {
 
   const th = (k: SortKey, label: string, align = 'text-right') => (
     <th
-      className={`px-4 py-3 ${align} whitespace-nowrap`}
+      className={`px-3 py-3 ${align} whitespace-nowrap`}
       aria-sort={sortKey === k ? (sortAsc ? 'ascending' : 'descending') : 'none'}
     >
       <button
@@ -441,7 +441,7 @@ export default function RsStrategyPage({ guide = '' }: { guide?: string }) {
                   {th('signal', 'Signal', 'text-center')}
                   {th('weekly', 'Weekly', 'text-center')}
                   {th('daysInSignal', 'Bars in state')}
-                  <th className="px-4 py-3 text-center">Trade</th>
+                  <th className="px-3 py-3 text-center sticky right-0 z-10 bg-zinc-800 border-l border-zinc-700">Trade</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-zinc-800/80 bg-zinc-950/60">
@@ -458,34 +458,34 @@ export default function RsStrategyPage({ guide = '' }: { guide?: string }) {
                   </td></tr>
                 ) : (
                   rows.map((s: RsStrategyStock) => (
-                    <tr key={s.symbol} className="hover:bg-zinc-900/70">
-                      <td className="px-4 py-2.5 font-bold text-zinc-100">{s.symbol}</td>
+                    <tr key={s.symbol} className="group hover:bg-zinc-900/70">
+                      <td className="px-3 py-2.5 font-bold text-zinc-100">{s.symbol}</td>
                       <HeldCell h={holdings ? holdings[s.symbol] : undefined} loaded={holdings !== null} />
-                      <td className="px-4 py-2.5 text-right text-zinc-200">{fmt(s.close)}</td>
-                      <td className={`px-4 py-2.5 text-right ${tone(s.change1D)}`}>{signed(s.change1D)}</td>
-                      <td className={`px-4 py-2.5 text-right font-bold ${tone(s.rs)}`}>{signed(s.rs)}</td>
-                      <td className="px-4 py-2.5"><RsBar value={s.rs} /></td>
-                      <td className="px-4 py-2.5 text-right text-zinc-300">{fmt(s.supertrend)}</td>
+                      <td className="px-3 py-2.5 text-right text-zinc-200">{fmt(s.close)}</td>
+                      <td className={`px-3 py-2.5 text-right ${tone(s.change1D)}`}>{signed(s.change1D)}</td>
+                      <td className={`px-3 py-2.5 text-right font-bold ${tone(s.rs)}`}>{signed(s.rs)}</td>
+                      <td className="px-3 py-2.5"><RsBar value={s.rs} /></td>
+                      <td className="px-3 py-2.5 text-right text-zinc-300">{fmt(s.supertrend)}</td>
                       <td
-                        className={`px-4 py-2.5 text-right ${s.ema === null ? 'text-zinc-500' : s.close > s.ema ? 'text-emerald-400' : 'text-red-400'}`}
+                        className={`px-3 py-2.5 text-right ${s.ema === null ? 'text-zinc-500' : s.close > s.ema ? 'text-emerald-400' : 'text-red-400'}`}
                         title={s.ema === null ? 'Fewer than 200 days of history' : s.close > s.ema ? 'Price is above the 200 EMA' : 'Price is below the 200 EMA'}
                       >{s.ema === null ? '–' : fmt(s.ema)}</td>
-                      <td className={`px-4 py-2.5 text-right ${s.rsi > 50 ? 'text-zinc-200' : 'text-zinc-400'}`}>{fmt(s.rsi, 0)}</td>
-                      <td className={`px-4 py-2.5 text-right ${tone(s.distPct)}`}>{signed(s.distPct)}</td>
-                      <td className="px-4 py-2.5 text-center">
+                      <td className={`px-3 py-2.5 text-right ${s.rsi > 50 ? 'text-zinc-200' : 'text-zinc-400'}`}>{fmt(s.rsi, 0)}</td>
+                      <td className={`px-3 py-2.5 text-right ${tone(s.distPct)}`}>{signed(s.distPct)}</td>
+                      <td className="px-3 py-2.5 text-center">
                         <span className={`inline-block px-2 py-0.5 rounded border text-[10px] font-bold ${BADGE[s.signal]}`}>
                           {LABEL[s.signal]}
                         </span>
                       </td>
-                      <td className="px-4 py-2.5 text-center">
+                      <td className="px-3 py-2.5 text-center">
                         {s.weekly ? (
                           <span className={`inline-block px-2 py-0.5 rounded border text-[10px] font-bold ${BADGE[s.weekly]}`}>{LABEL[s.weekly]}</span>
                         ) : (
                           <span className="text-zinc-500" title="Not enough weekly history">–</span>
                         )}
                       </td>
-                      <td className="px-4 py-2.5 text-right text-zinc-300">{s.daysInSignal}</td>
-                      <td className="px-4 py-2.5">
+                      <td className="px-3 py-2.5 text-right text-zinc-300">{s.daysInSignal}</td>
+                      <td className="px-3 py-2.5 sticky right-0 bg-zinc-950 group-hover:bg-zinc-900 border-l border-zinc-800">
                         <div className="flex items-center justify-center gap-1">
                           <button
                             onClick={() => setOrder({ symbol: s.symbol, side: 'BUY' })}

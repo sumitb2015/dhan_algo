@@ -110,7 +110,7 @@ Type part of a symbol to narrow the list.
 | **Signal** | The state on the **daily** chart: Buy, In Trend, Sell or Wait. |
 | **Weekly** | The **same state on weekly candles**: the bigger-picture check (see below). `–` means under about 70 weeks of history, so there is no weekly signal. |
 | **Bars in state** | How many daily bars the stock has been in its current phase. Buy and In Trend count together (the time since the buy). Sell and Wait count together. |
-| **Trade** | **Buy** and **Sell** buttons (see section 6). |
+| **Trade** | **Buy** and **Sell** buttons (see section 6). This column stays pinned to the right edge, so it is always in view even when the table scrolls sideways on a smaller screen. |
 
 ### Reading Signal together with Weekly
 - **Buy + Weekly Buy** — both timeframes agree. The cleanest setup.
