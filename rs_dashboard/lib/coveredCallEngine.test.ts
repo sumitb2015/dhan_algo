@@ -2,7 +2,8 @@ import { test } from 'node:test';
 import assert from 'node:assert';
 import {
   reconstructCallLedger, reconcileCallsDown, beesNiftyUnits, computeBook, suggestCoveredCall,
-  type CallTrade,
+  fillIncrement, reservedBuyUnits,
+  type CallTrade, type PendingOrder,
 } from './coveredCallEngine.ts';
 
 const open = (id: string, ts: number, units: number, price: number, sid = '111', strike = 23500): CallTrade => ({
@@ -83,4 +84,38 @@ test('suggestCoveredCall picks the OTM strike nearest the target delta and floor
   assert.strictEqual(s.strike, 23200);
   assert.strictEqual(s.coveredLots, 0);
   assert.strictEqual(s.nearestLots, 1);
+});
+
+test('fillIncrement books only the new slice, at its own price, never at 0', () => {
+  // 130 units: 65 filled @ 100 first, then the order's cumulative avg is 99 over 130.
+  assert.deepStrictEqual(fillIncrement(0, 0, 65, 100), { units: 65, price: 100 });
+  const inc = fillIncrement(65, 6500, 130, 99);
+  assert.strictEqual(inc?.units, 65);
+  assert.ok(Math.abs(inc!.price - 98) < 1e-9);
+  assert.strictEqual(fillIncrement(65, 6500, 65, 100), null); // nothing new
+  assert.strictEqual(fillIncrement(0, 0, 65, 0), null);       // Dhan has no avg yet
+});
+
+test('reservedBuyUnits counts only unbooked buy-backs of that leg', () => {
+  const p = (id: string, side: 'BUY' | 'SELL', leg: string | undefined, units: number, booked: number): PendingOrder => ({
+    id, orderId: id, side, securityId: '111', strike: 23500, expiry: '2026-10-27', tradingSymbol: 'x',
+    units, openLegId: leg, bookedUnits: booked, bookedValue: 0, createdAt: 0,
+  });
+  const pending = [p('1', 'BUY', 'a', 130, 65), p('2', 'BUY', 'b', 65, 0), p('3', 'SELL', undefined, 65, 0)];
+  assert.strictEqual(reservedBuyUnits(pending, 'a'), 65);
+  assert.strictEqual(reservedBuyUnits(pending, 'c'), 0);
+});
+
+test('computeBook keeps the P&L of units the broker clamp removed', () => {
+  const [leg] = reconstructCallLedger([open('a', 1, 130, 100)]).open;
+  const r = reconcileCallsDown([leg], { '111': 65 }, 1_000_000);
+  const book = computeBook({
+    beesQty: 4500, beesAvg: 263, beesLtp: 265, spot: 23000,
+    calls: r.legs, marks: { a: { ltp: 40, dte: 20 } }, callsRealized: 0,
+  });
+  assert.strictEqual(book.shortCallUnits, 65);
+  assert.strictEqual(book.unsyncedUnits, 65);
+  assert.strictEqual(book.callsUnsyncedPnl, 3900);
+  assert.strictEqual(book.callsOpenPnl, 3900);
+  assert.strictEqual(book.totalPnl, 9000 + 3900 + 3900);
 });

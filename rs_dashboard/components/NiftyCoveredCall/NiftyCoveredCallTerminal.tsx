@@ -21,6 +21,7 @@ import {
   type CallTrade,
   type CallMark,
   type OpenCall,
+  type PendingOrder,
 } from '@/lib/coveredCallEngine';
 import type { CoveredCallBookResponse } from '@/app/api/nifty-covered-call/book/route';
 import type { CoveredCallOrderResult } from '@/app/api/nifty-covered-call/order/route';
@@ -91,6 +92,7 @@ export default function NiftyCoveredCallTerminal() {
 
   // ── Own call ledger ─────────────────────────────────────────────────────
   const [trades, setTrades] = useState<CallTrade[]>([]);
+  const [pending, setPending] = useState<PendingOrder[]>([]);
   const [busy, setBusy] = useState(false);
   const busyRef = useRef(false);
   const [now, setNow] = useState(() => Date.now());
@@ -133,23 +135,40 @@ export default function NiftyCoveredCallTerminal() {
   }, [optionExpiry]);
 
   // ── Ledger ──────────────────────────────────────────────────────────────
+  const applyLedger = useCallback((j: { trades?: CallTrade[]; pending?: PendingOrder[] }) => {
+    if (Array.isArray(j.trades)) setTrades(j.trades);
+    if (Array.isArray(j.pending)) setPending(j.pending);
+  }, []);
   const reloadLedger = useCallback(async () => {
     try {
       const j = await (await fetch('/api/nifty-covered-call/state')).json();
-      if (j.success && Array.isArray(j.trades)) setTrades(j.trades);
+      if (j.success) applyLedger(j);
     } catch {}
-  }, []);
+  }, [applyLedger]);
   useEffect(() => { reloadLedger(); }, [reloadLedger]);
 
-  const logTrade = useCallback(async (row: Omit<CallTrade, 'id' | 'ts'>) => {
+  /** Ledger-only actions (sync / adopt / sweep) — all booking happens server-side. */
+  const ledgerAction = useCallback(async (payload: Record<string, unknown>) => {
     const j = await (await fetch('/api/nifty-covered-call/state', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ trade: row }),
+      body: JSON.stringify(payload),
     })).json();
-    if (j.success && Array.isArray(j.trades)) setTrades(j.trades);
-    else throw new Error(j.error || 'Ledger write failed');
-  }, []);
+    if (j.success) { applyLedger(j); await reloadLedger(); }
+    return j as { success: boolean; error?: string; needsPrice?: boolean; gap?: number };
+  }, [applyLedger, reloadLedger]);
+
+  // Orders still working at the broker (e.g. a LIMIT that didn't fill within
+  // the order route's ~5 s): sweep them every book poll so a late fill is
+  // booked at that order's own average price.
+  const pendingRef = useRef(pending);
+  useEffect(() => { pendingRef.current = pending; }, [pending]);
+  const sweepInFlight = useRef(false);
+  const sweepPending = useCallback(async () => {
+    if (sweepInFlight.current || pendingRef.current.length === 0) return;
+    sweepInFlight.current = true;
+    try { await ledgerAction({ action: 'sweep' }); } catch {} finally { sweepInFlight.current = false; }
+  }, [ledgerAction]);
 
   const ledger = useMemo(() => reconstructCallLedger(trades), [trades]);
   const legExpiries = useMemo(() => [...new Set(ledger.open.map((o) => o.expiry))], [ledger.open]);
@@ -212,9 +231,9 @@ export default function NiftyCoveredCallTerminal() {
   }, []);
   useEffect(() => {
     fetchBook();
-    const id = setInterval(() => { fetchBook(); setNow(Date.now()); }, BOOK_POLL_MS);
+    const id = setInterval(() => { fetchBook(); sweepPending(); setNow(Date.now()); }, BOOK_POLL_MS);
     return () => clearInterval(id);
-  }, [fetchBook]);
+  }, [fetchBook, sweepPending]);
 
   // ── Derived market values ───────────────────────────────────────────────
   const spot = liveQuotes?.spot && liveQuotes.spot > 0 ? liveQuotes.spot : restSpot;
@@ -298,14 +317,20 @@ export default function NiftyCoveredCallTerminal() {
   }, [writeKey, writeLtp]);
 
   // ── Order helpers ───────────────────────────────────────────────────────
-  const placeOrder = useCallback(async (req: { side: 'BUY' | 'SELL'; securityId: string; units: number; orderType: 'MARKET' | 'LIMIT'; price?: number }) => {
+  const placeOrder = useCallback(async (req: {
+    side: 'BUY' | 'SELL'; securityId: string; units: number; orderType: 'MARKET' | 'LIMIT'; price?: number;
+    strike?: number; expiry?: string; tradingSymbol?: string; openLegId?: string; note?: string;
+  }) => {
     const res = await fetch('/api/nifty-covered-call/order', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(req),
     });
-    return (await res.json()) as CoveredCallOrderResult;
-  }, []);
+    const r = (await res.json()) as CoveredCallOrderResult;
+    // The route booked the fill into the ledger itself; pick it up.
+    await reloadLedger();
+    return r;
+  }, [reloadLedger]);
 
   const withBusy = useCallback(async (fn: () => Promise<void>) => {
     if (busyRef.current) return;
@@ -318,45 +343,32 @@ export default function NiftyCoveredCallTerminal() {
     }
   }, [fetchBook]);
 
-  /** Sell `units` of a call; books only what the broker confirms filled. Returns filled units. */
+  const pendingNote = (r: CoveredCallOrderResult, units: number) =>
+    `Order ${r.orderId} is ${r.status}: ${r.filledUnits ?? 0}/${r.units ?? units} units filled and booked so far.\n` +
+    'The desk keeps watching it — any later fill is booked automatically at this order\'s own price.';
+
+  /** Sell `units` of a call. The route books the confirmed fill. Returns filled units. */
   const sellCall = useCallback(async (strike: number, expiry: string, units: number, type: 'MARKET' | 'LIMIT', price: number | undefined, note?: string) => {
     const oc = chains[expiry];
     const ce = oc ? lookupChainLegData(oc, strike, 'CE') : undefined;
     if (!ce?.security_id) throw new Error(`No security id for ${strike} CE ${expiry} — chain not loaded`);
-    const securityId = String(ce.security_id);
-    const r = await placeOrder({ side: 'SELL', securityId, units, orderType: type, price });
+    const r = await placeOrder({
+      side: 'SELL', securityId: String(ce.security_id), units, orderType: type, price,
+      strike, expiry, tradingSymbol: `NIFTY-${expiry}-${strike}-CE`, note,
+    });
     if (!r.success) throw new Error(`Sell ${strike} CE failed: ${r.error ?? r.status}`);
-    const filled = r.filledUnits ?? 0;
-    if (filled > 0) {
-      await logTrade({
-        action: 'SELL_OPEN', strike, expiry, units: filled, price: r.avgPrice || price || ce.last_price,
-        securityId, tradingSymbol: `NIFTY-${expiry}-${strike}-CE`, orderId: r.orderId, note,
-      });
-    }
-    if (filled < (r.units ?? units)) {
-      alert(`Order ${r.orderId} is ${r.status}: ${filled}/${r.units ?? units} units confirmed filled so far.\n` +
-        'Only the filled part was booked. If the rest fills later, add it with ADOPT in the Broker Shorts panel.');
-    }
-    return filled;
-  }, [chains, placeOrder, logTrade]);
+    if (r.pending) alert(pendingNote(r, units));
+    return r.filledUnits ?? 0;
+  }, [chains, placeOrder]);
 
-  /** Buy back up to `units` of an open leg; books the confirmed fill. Returns filled units. */
+  /** Buy back up to `units` of an open leg. The route caps it at the leg's own open units and books the fill. Returns filled units. */
   const buyBack = useCallback(async (leg: OpenCall, units: number, note: string) => {
-    const r = await placeOrder({ side: 'BUY', securityId: leg.securityId, units, orderType: 'MARKET' });
+    const r = await placeOrder({ side: 'BUY', securityId: leg.securityId, units, orderType: 'MARKET', openLegId: leg.id, note });
     if (!r.success) throw new Error(`Buy-back of ${leg.strike} CE failed: ${r.error ?? r.status}`);
-    const filled = r.filledUnits ?? 0;
-    if (filled > 0) {
-      const px = r.avgPrice || callLtp(leg.strike, leg.expiry) || 0;
-      await logTrade({
-        action: 'BUY_CLOSE', strike: leg.strike, expiry: leg.expiry, units: filled, price: px,
-        securityId: leg.securityId, tradingSymbol: leg.tradingSymbol, orderId: r.orderId,
-        openLegId: leg.id, realizedPnl: (leg.entryPrice - px) * filled, note,
-      });
-    }
-    if (r.clampedFrom) alert(`Buy-back clamped from ${r.clampedFrom} to ${r.units} units — the broker shows only that much short.`);
-    if (filled < (r.units ?? units)) alert(`Buy-back order ${r.orderId} is ${r.status}: only ${filled} units confirmed filled.`);
-    return filled;
-  }, [placeOrder, logTrade, callLtp]);
+    if (r.clampedFrom) alert(`Buy-back clamped from ${r.clampedFrom} to ${r.units} units — that is all this leg (or the broker) still has short.`);
+    if (r.pending) alert(pendingNote(r, units));
+    return r.filledUnits ?? 0;
+  }, [placeOrder]);
 
   const legById = useCallback((id: string) => reconciled.legs.find((l) => l.id === id), [reconciled.legs]);
 
@@ -390,46 +402,75 @@ export default function NiftyCoveredCallTerminal() {
   });
 
   // The broker shows less short than the ledger (closed elsewhere / expired):
-  // write the ledger down to match, at the current LTP (or 0 when expired worthless).
+  // close the gap at the actual outside BUY from Dhan's trade book. Only when
+  // there is none (closed on an earlier day, expired) does the user type the price.
   const handleSync = (row: OpenCallRow) => withBusy(async () => {
     const leg = legById(row.id);
     if (!leg) return;
     const gap = leg.ledgerUnits - leg.units;
     if (gap <= 0) return;
-    const px = callLtp(leg.strike, leg.expiry) ?? 0;
-    if (!confirm(`Ledger-only (no order): mark ${gap} units of ${leg.strike} CE ${leg.expiry} as closed outside this desk at ₹${px.toFixed(2)}?`)) return;
-    await logTrade({
-      action: 'BUY_CLOSE', strike: leg.strike, expiry: leg.expiry, units: gap, price: px,
-      securityId: leg.securityId, tradingSymbol: leg.tradingSymbol, openLegId: leg.id,
-      realizedPnl: (leg.entryPrice - px) * gap, note: 'Reconciled: closed outside desk / expired (price estimated)',
-    });
+    if (!confirm(`Ledger-only (no order): close ${gap} units of ${leg.strike} CE ${leg.expiry} that the broker no longer shows short, at the price of the BUY trade in today's trade book?`)) return;
+    const j = await ledgerAction({ action: 'sync', legId: leg.id });
+    if (j.success) return;
+    if (!j.needsPrice) throw new Error(j.error || 'Sync failed');
+    const typed = prompt(`${j.error}\n\nEnter the price ${j.gap ?? gap} units were actually closed at (0 if it expired worthless), or Cancel to leave the leg as is:`);
+    if (typed == null || typed.trim() === '') return;
+    const px = Number(typed);
+    if (!(px >= 0)) throw new Error(`Not a price: ${typed}`);
+    const m = await ledgerAction({ action: 'sync', legId: leg.id, manualPrice: px });
+    if (!m.success) throw new Error(m.error || 'Sync failed');
   });
 
   // ── Broker CE shorts not owned by this ledger (Adopt) ───────────────────
   const ledgerUnitsBySid = useMemo(() => {
     const m: Record<string, number> = {};
     for (const l of ledger.open) m[l.securityId] = (m[l.securityId] ?? 0) + l.units;
+    for (const p of pending) if (p.side === 'SELL') m[p.securityId] = (m[p.securityId] ?? 0) + p.units - p.bookedUnits;
     return m;
-  }, [ledger.open]);
+  }, [ledger.open, pending]);
   const adoptable = useMemo(() => (book?.brokerCalls ?? [])
     .map((c) => ({ ...c, unowned: c.shortUnits - (ledgerUnitsBySid[c.securityId] ?? 0) }))
     .filter((c) => c.unowned > 0), [book?.brokerCalls, ledgerUnitsBySid]);
 
+  // Adopt prices the leg from the sell ORDER's own trades — never the broker's
+  // sellAvg, which is pooled over every trade on the contract, other
+  // strategies' included. A short carried from an earlier day isn't in
+  // today's trade book, so it needs a typed price.
   const handleAdopt = (c: (typeof adoptable)[number]) => withBusy(async () => {
     const lots = adoptLots[c.securityId] ?? (lotSize > 0 ? Math.floor(c.unowned / lotSize) : 0);
-    const units = Math.min(c.unowned, lots * lotSize);
-    if (!(units > 0)) throw new Error('Choose at least one lot to adopt');
-    if (!confirm(`Ledger-only (no order): adopt ${units} units of ${c.tradingSymbol} short @ ₹${c.sellAvg.toFixed(2)} (broker avg) as a covered call of this desk?`)) return;
-    await logTrade({
-      action: 'ADOPT', strike: c.strike, expiry: c.expiry, units, price: c.sellAvg,
-      securityId: c.securityId, tradingSymbol: c.tradingSymbol, note: 'Adopted existing broker short',
-    });
+    const cj = await (await fetch(`/api/nifty-covered-call/state?candidates=${c.securityId}`)).json() as {
+      success: boolean; error?: string; candidates?: { orderId: string; units: number; price: number; at: number }[];
+    };
+    if (!cj.success) throw new Error(cj.error || 'Trade book unavailable');
+    const cands = cj.candidates ?? [];
+    const list = cands.map((o, i) =>
+      `${i + 1}) order ${o.orderId} · SELL ${o.units}u @ ₹${o.price.toFixed(2)} · ${new Date(o.at).toLocaleTimeString('en-IN', { hour12: false })}`).join('\n');
+    const typed = prompt(
+      `Adopt ${c.tradingSymbol} (ledger only, no order).\n\n` +
+      (cands.length ? `Today's sells on this contract not in the desk:\n${list}\n\nType the number of the order you wrote against NIFTYBEES` : 'No sells on this contract in today\'s trade book (carried from an earlier day?).\n\nType') +
+      ` — or p<price> (e.g. p98.5) to adopt ${lots * lotSize} units at a price you enter.`,
+    );
+    if (typed == null || typed.trim() === '') return;
+    const t = typed.trim().toLowerCase();
+    let j;
+    if (t.startsWith('p')) {
+      const px = Number(t.slice(1));
+      const units = Math.min(c.unowned, lots * lotSize);
+      if (!(px > 0)) throw new Error(`Not a price: ${typed}`);
+      if (!(units > 0)) throw new Error('Choose at least one lot to adopt');
+      j = await ledgerAction({ action: 'adopt', securityId: c.securityId, manualPrice: px, units });
+    } else {
+      const o = cands[Number(t) - 1];
+      if (!o) throw new Error(`No order #${typed}`);
+      j = await ledgerAction({ action: 'adopt', securityId: c.securityId, orderId: o.orderId });
+    }
+    if (!j.success) throw new Error(j.error || 'Adopt failed');
   });
 
   // ── Headline numbers ────────────────────────────────────────────────────
   const totalPnl = snapshot?.totalPnl ?? null;
   const effCost = bees && beesQty > 0 && snapshot
-    ? bees.avgCost - (snapshot.callsRealized + snapshot.callsOpenPnl) / beesQty
+    ? bees.avgCost - (snapshot.callsRealized + snapshot.callsOpenPnl + snapshot.callsUnsyncedPnl) / beesQty
     : null;
   const inputCls = cn(TXT_CAPTION, 'w-full bg-zinc-800 border border-zinc-700 rounded px-2 py-1 text-zinc-100 font-mono');
 
@@ -508,7 +549,13 @@ export default function NiftyCoveredCallTerminal() {
           value={snapshot ? snapshot.callsOpenPnl : null}
           sub={`${rows.filter((r) => r.units > 0).length} open leg(s)`}
         />
-        <StatTile label="Calls realized" value={ledger.realized} sub={`₹${fmtInt(ledger.premiumSold)} premium sold to date`} />
+        <StatTile
+          label="Calls realized"
+          value={ledger.realized + (snapshot?.callsUnsyncedPnl ?? 0)}
+          sub={snapshot && snapshot.unsyncedUnits > 0
+            ? `incl. ~₹${fmtInt(snapshot.callsUnsyncedPnl)} est. on ${snapshot.unsyncedUnits}u closed outside — SYNC to book`
+            : `₹${fmtInt(ledger.premiumSold)} premium sold to date`}
+        />
         <StatTile label="Total P&L" value={totalPnl} sub="holding + calls" emphasis />
         <StatTile
           label="Effective cost / BEES"
@@ -598,8 +645,9 @@ export default function NiftyCoveredCallTerminal() {
             SELL {writeLots} × {writeStrike ?? '—'} CE
           </Button>
           <div className={cn(TXT_LABEL, 'text-zinc-500')}>
-            NRML (carried to expiry). Only the broker-confirmed fill is booked. LIMIT orders that don&apos;t fill within ~5 s stay
-            open at the broker — adopt them below once filled.
+            NRML (carried to expiry). Only broker-confirmed fills are booked, at the order&apos;s own price. A LIMIT that
+            doesn&apos;t fill at once stays open at the broker and is booked automatically when it fills.
+            {pending.length > 0 && <span className="text-amber-300"> {pending.length} order(s) still working.</span>}
           </div>
         </div>
 

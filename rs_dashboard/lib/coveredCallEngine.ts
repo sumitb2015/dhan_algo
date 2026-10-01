@@ -37,6 +37,77 @@ export interface CallTrade {
   /** BUY_CLOSE only: (open price − close price) × units. */
   realizedPnl?: number | null;
   note?: string;
+  /** Where `price` came from: this order's own fill, the matching trade-book
+   *  rows (SYNC/ADOPT), or a price the user typed. Never an LTP guess or the
+   *  position's pooled average. Absent on rows written before 2026-10-01. */
+  priceSource?: 'fill' | 'tradebook' | 'manual';
+  /** Trade-book fills this row consumed, so one fill is never booked twice. */
+  tradeKeys?: string[];
+}
+
+/**
+ * An order this desk placed whose fill is not fully booked yet. Written BEFORE
+ * the order goes out (orderId null until Dhan answers), so a second tab sees
+ * the reservation, and swept until the order is terminal and every filled
+ * unit is in the ledger — a LIMIT that fills an hour later is still booked at
+ * its own average price.
+ */
+export interface PendingOrder {
+  id: string;
+  orderId: string | null;
+  side: 'BUY' | 'SELL';
+  securityId: string;
+  strike: number;
+  expiry: string;
+  tradingSymbol: string;
+  units: number;
+  /** BUY only: the ledger leg this buy-back closes. */
+  openLegId?: string;
+  note?: string;
+  bookedUnits: number;
+  /** Σ price × units already booked (to price the next increment). */
+  bookedValue: number;
+  createdAt: number;
+}
+
+export const TERMINAL_ORDER_STATUSES = ['TRADED', 'REJECTED', 'CANCELLED', 'EXPIRED'];
+
+/**
+ * The not-yet-booked slice of an order fill. Dhan reports the order's
+ * cumulative filled qty and average, so the increment's price is
+ * (avg × filled − already booked value) / new units. Null when nothing new
+ * filled, or Dhan has no average yet (never book a fill at 0).
+ */
+export function fillIncrement(
+  bookedUnits: number,
+  bookedValue: number,
+  filled: number,
+  avg: number,
+): { units: number; price: number } | null {
+  const units = filled - bookedUnits;
+  if (!(units > 0) || !(avg > 0)) return null;
+  const price = (avg * filled - bookedValue) / units;
+  return price > 0 ? { units, price } : null;
+}
+
+/** Units of `legId` already promised to buy-backs still in flight. */
+export function reservedBuyUnits(pending: PendingOrder[], legId: string): number {
+  return pending
+    .filter((p) => p.side === 'BUY' && p.openLegId === legId)
+    .reduce((s, p) => s + Math.max(0, p.units - p.bookedUnits), 0);
+}
+
+/** Every order id this desk placed or adopted — trade-book rows with these ids are not "outside" trades. */
+export function deskOrderIds(trades: CallTrade[], pending: PendingOrder[]): Set<string> {
+  const ids = new Set<string>();
+  for (const t of trades) if (t.orderId) ids.add(String(t.orderId));
+  for (const p of pending) if (p.orderId) ids.add(String(p.orderId));
+  return ids;
+}
+
+/** Trade-book fill keys already consumed by a SYNC/ADOPT row. */
+export function usedTradeKeys(trades: CallTrade[]): Set<string> {
+  return new Set(trades.flatMap((t) => t.tradeKeys ?? []));
 }
 
 export interface OpenCall {
@@ -145,6 +216,11 @@ export interface BookSnapshot {
   beesPnl: number | null;     // unrealized on the holding
   callsOpenPnl: number;       // MTM of the open short calls (priced legs only)
   callsRealized: number;
+  /** P&L of units the broker no longer shows short but the ledger hasn't
+   *  closed yet (closed outside the desk, awaiting SYNC). Estimated at the LTP
+   *  (0 when unpriced) so the reconcile clamp never makes P&L vanish. */
+  callsUnsyncedPnl: number;
+  unsyncedUnits: number;
   totalPnl: number | null;
   shortCallUnits: number;
   coverage: number | null;    // shortCallUnits / beesUnits
@@ -161,7 +237,8 @@ export function computeBook(params: {
   beesAvg: number;
   beesLtp: number;
   spot: number;
-  calls: OpenCall[];
+  /** `ledgerUnits` (from reconcileCallsDown) > `units` means the broker clamp cut the leg. */
+  calls: (OpenCall & { ledgerUnits?: number })[];
   marks: Record<string, CallMark>;
   callsRealized: number;
 }): BookSnapshot {
@@ -174,9 +251,17 @@ export function computeBook(params: {
   let shortCallUnits = 0;
   let missingCount = 0;
   let unpricedCount = 0;
+  let callsUnsyncedPnl = 0;
+  let unsyncedUnits = 0;
   const legs: BookLegGreeks[] = [];
 
   for (const c of calls) {
+    const gap = (c.ledgerUnits ?? c.units) - c.units;
+    if (gap > 0) {
+      const ltp = marks[c.id]?.ltp;
+      unsyncedUnits += gap;
+      callsUnsyncedPnl += ltp != null && ltp > 0 ? (c.entryPrice - ltp) * gap : 0;
+    }
     if (c.units <= 0) continue;
     shortCallUnits += c.units;
     const m = marks[c.id];
@@ -221,7 +306,9 @@ export function computeBook(params: {
     beesPnl,
     callsOpenPnl,
     callsRealized,
-    totalPnl: beesPnl == null ? null : beesPnl + callsOpenPnl + callsRealized,
+    callsUnsyncedPnl,
+    unsyncedUnits,
+    totalPnl: beesPnl == null ? null : beesPnl + callsOpenPnl + callsRealized + callsUnsyncedPnl,
     shortCallUnits,
     coverage,
     uncoveredUnits: Math.max(0, shortCallUnits - beesUnits),
