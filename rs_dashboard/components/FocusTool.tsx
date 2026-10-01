@@ -33,7 +33,7 @@ import { partialCloseChips } from '@/lib/partialQty';
 import { cn } from '@/lib/utils';
 import type {
   FocusToolConfig, FocusRow, FocusRowFill, FocusIndexGroup,
-  FocusReentryMode, FocusReentryTrigger, FocusPendingReentry, FocusLegSimpleMom, FocusLazyLeg,
+  FocusReentryMode, FocusReentryTrigger, FocusPendingReentry, FocusLegSimpleMom, FocusLazyLeg, FocusLegRangeBreakout,
   FocusUnderlying, FocusDte, FocusSide, FocusRowStatus, FocusStrikeMode,
 } from '@/lib/focusToolRows';
 // The pure rule engine for entry and exit decisions.
@@ -46,7 +46,7 @@ import {
   legPinnedStrike, costStopReason, legOwnEntry, slRollStrike, DEFAULT_SL_ROLL_MAX,
   reentryConfig, evaluateReentry, reentryWindowClosed, pendingReentryLevel, pendingReentryHit, legTargetReason, costReentryBasis,
   awaitingMomentumQuote, MOMENTUM_QUOTE_WAIT_MS, legTargetLevel,
-  evaluateEntryMomentum, entryMomentumOn, costStopApplies, MAX_LAZY_LEGS, legSlMultiplier, legTarget, nextLazyLegId, lazyLegStrike, runningLazyLeg, simpleMomOn, simpleMomLevel, simpleMomHit,
+  evaluateEntryMomentum, entryMomentumOn, rangeBreakoutOn, rangePhase, rangeBreakoutHit, costStopApplies, MAX_LAZY_LEGS, legSlMultiplier, legTarget, nextLazyLegId, lazyLegStrike, runningLazyLeg, simpleMomOn, simpleMomLevel, simpleMomHit,
   type PosRow, type RowLive,
 } from '@/lib/focusToolRules';
 import { computeRowPnl, mtmForQty, shiftMayReopen, canMarkMtm, shiftCloseConfirmed, rowDisplayBookedPnl, putCallRatio, valuePutCallRatio, pickOpenInterest } from '@/lib/focusToolPnl';
@@ -991,8 +991,61 @@ function EntryMomentumControl({ row, onUpdate }: { row: FocusRow; onUpdate: (pat
         {enabled && status && <span className="text-[11px] font-semibold text-amber-400" title={status}>{status}</span>}
       </div>
       {legsOf(row).map(leg => (
-        <LegSimpleMomControl key={leg} row={row} leg={leg} onUpdate={onUpdate} disabled={enabled} />
+        <React.Fragment key={leg}>
+          <LegSimpleMomControl row={row} leg={leg} onUpdate={onUpdate}
+            disabled={enabled} exclusiveNote={(leg === 'CE' ? row.ceRangeBreakout : row.peRangeBreakout)?.enabled ? 'Range Breakout' : undefined} />
+          <LegRangeBreakoutControl row={row} leg={leg} onUpdate={onUpdate}
+            disabled={enabled} exclusiveNote={(leg === 'CE' ? row.ceSimpleMom : row.peSimpleMom)?.enabled ? 'Simple Momentum' : undefined} />
+        </React.Fragment>
       ))}
+    </div>
+  );
+}
+
+/**
+ * AlgoTest "Range Breakout" switch on one leg: track the high / low between the
+ * row's entry time and the range End, on the leg's strike or (Underlying) on
+ * the index, and open the leg when the price reaches the High (or Low). The
+ * strike is picked at the entry time. Does not work with Simple Momentum, and is
+ * disabled while Overall Momentum is on.
+ */
+function LegRangeBreakoutControl({ row, leg, onUpdate, disabled, exclusiveNote }: {
+  row: FocusRow; leg: 'CE' | 'PE'; onUpdate: (patch: Partial<FocusRow>) => void; disabled: boolean; exclusiveNote?: string;
+}) {
+  const status = useContext(EntryMomContext)[`${row.id}:${leg}`];
+  const cur: FocusLegRangeBreakout = (leg === 'CE' ? row.ceRangeBreakout : row.peRangeBreakout)
+    ?? { enabled: false, end: '', side: 'high', on: 'instrument' };
+  const set = (patch: Partial<FocusLegRangeBreakout>) => {
+    const next = { ...cur, ...patch };
+    onUpdate(leg === 'CE' ? { ceRangeBreakout: next } : { peRangeBreakout: next });
+  };
+  const blocked = disabled || !!exclusiveNote;
+  const off = blocked || !cur.enabled;
+  const invalid = cur.enabled && !rangeBreakoutOn(cur, row.entryTime);
+  return (
+    <div className={cn('flex flex-wrap items-center gap-2 font-bold text-zinc-400', blocked && 'opacity-50')}
+      title={exclusiveNote ? `Range Breakout does not work with ${exclusiveNote}`
+        : disabled ? 'Range Breakout is disabled while Overall Momentum is on'
+        : `${leg} Range Breakout: track the high / low from the entry time (${row.entryTime || '—'}) to the range End, then open this leg when the price reaches that high / low. If it never does, there is no entry. The strike is picked at the entry time`}>
+      <label className="inline-flex items-center gap-1.5 cursor-pointer text-zinc-300">
+        <Switch size="sm" checked={cur.enabled} disabled={blocked} onCheckedChange={c => set({ enabled: !!c })}
+          aria-label={`${leg} Range Breakout`} />
+        {leg} Range Breakout
+      </label>
+      <label className="inline-flex items-center gap-1.5" title="Range end — the last tracked second is one second before it">End
+        <TimeInput value={cur.end} onChange={v => set({ end: v })} className="w-16" />
+      </label>
+      <MiniSelect value={cur.side} ariaLabel={`${leg} Range Breakout side`} disabled={off}
+        options={[{ value: 'high', label: 'High' }, { value: 'low', label: 'Low' }]}
+        onChange={v => set({ side: v as 'high' | 'low' })} className="w-20" />
+      <label className="inline-flex items-center gap-1.5 text-zinc-300 cursor-pointer"
+        title="On: the range is the index's high / low. Off: the range is this leg's own strike (picked at the entry time)">
+        <Switch size="sm" checked={cur.on === 'underlying'} disabled={off}
+          onCheckedChange={c => set({ on: c ? 'underlying' : 'instrument' })} aria-label={`${leg} Range Breakout on underlying`} />
+        Underlying
+      </label>
+      {invalid && !blocked && <span className="text-[11px] font-semibold text-rose-400">End must be after the entry time {row.entryTime}</span>}
+      {!off && !invalid && status && <span className="text-[11px] font-semibold text-amber-400">{status}</span>}
     </div>
   );
 }
@@ -1011,8 +1064,10 @@ const SIMPLE_MOM_OPTIONS = (['premium', 'underlying'] as const).flatMap(src =>
  * from where it stood at the entry time; the strike is picked at the entry time.
  * Disabled while Overall Momentum is on, as on AlgoTest.
  */
-function LegSimpleMomControl({ row, leg, onUpdate, disabled }: {
+function LegSimpleMomControl({ row, leg, onUpdate, disabled, exclusiveNote }: {
   row: FocusRow; leg: 'CE' | 'PE'; onUpdate: (patch: Partial<FocusRow>) => void; disabled: boolean;
+  /** The other entry gate that is on for this leg (they don't combine). */
+  exclusiveNote?: string;
 }) {
   const status = useContext(EntryMomContext)[`${row.id}:${leg}`];
   const cur: FocusLegSimpleMom = (leg === 'CE' ? row.ceSimpleMom : row.peSimpleMom)
@@ -1021,13 +1076,14 @@ function LegSimpleMomControl({ row, leg, onUpdate, disabled }: {
     const next = { ...cur, ...patch };
     onUpdate(leg === 'CE' ? { ceSimpleMom: next } : { peSimpleMom: next });
   };
-  const off = disabled || !cur.enabled;
+  const blocked = disabled || !!exclusiveNote;
+  const off = blocked || !cur.enabled;
   return (
-    <div className={cn('flex flex-wrap items-center gap-2 font-bold text-zinc-400', disabled && 'opacity-50')}
-      title={disabled ? 'Simple Momentum is disabled while Overall Momentum is on'
+    <div className={cn('flex flex-wrap items-center gap-2 font-bold text-zinc-400', blocked && 'opacity-50')}
+      title={exclusiveNote ? `Simple Momentum does not work with ${exclusiveNote}` : disabled ? 'Simple Momentum is disabled while Overall Momentum is on'
         : `${leg} Simple Momentum: after the entry time, open this leg only once its premium (or the underlying) has moved this much from where it was at the entry time. The strike is picked at the entry time`}>
       <label className="inline-flex items-center gap-1.5 cursor-pointer text-zinc-300">
-        <Switch size="sm" checked={cur.enabled} disabled={disabled} onCheckedChange={c => set({ enabled: !!c })}
+        <Switch size="sm" checked={cur.enabled} disabled={blocked} onCheckedChange={c => set({ enabled: !!c })}
           aria-label={`${leg} Simple Momentum`} />
         {leg} Simple Momentum
       </label>
@@ -2206,6 +2262,17 @@ function IndexGroupBar({
  * by editing the JSON. Display-only: the scheduler never enters an 'entered'
  * row, and Arm itself resets it through armRow as usual.
  */
+/** The strike a Range Breakout leg picked at the entry time, kept across a reload (per row-leg and day). */
+function loadRangeStrike(key: string, day: string): number | null {
+  try {
+    const v = JSON.parse(localStorage.getItem(`focus-range-strike:${key}`) ?? 'null') as { day?: string; strike?: number } | null;
+    return v && v.day === day && Number(v.strike) > 0 ? Number(v.strike) : null;
+  } catch { return null; }
+}
+function saveRangeStrike(key: string, day: string, strike: number) {
+  try { localStorage.setItem(`focus-range-strike:${key}`, JSON.stringify({ day, strike })); } catch { /* private mode */ }
+}
+
 function lazyLotsOf(l: Pick<FocusLazyLeg, 'lots'>): number {
   return Math.max(0, Math.trunc(Number(l.lots)) || 0);
 }
@@ -2571,7 +2638,7 @@ function FocusTableRowImpl({
                   levelHigh: '', levelLow: '', levelVw: false, vwapInterval: '1', vwapBufferPct: '0.1',
                   slRupees: '', slMultiplier: '1.2', ceSlMultiplier: '1.2', peSlMultiplier: '1.2',
                   slRollStrikes: 0, slToCost: false, slToCostScope: undefined, squareOff: undefined, reSlMode: 'off', reTgtMode: 'off',
-                  ceTgtPct: '', peTgtPct: '', noReEntryAfter: '', entryMomEnabled: false, entryMomValue: '', ceSimpleMom: undefined, peSimpleMom: undefined, lazyLegs: undefined, reSlLazyId: undefined, reTgtLazyId: undefined,
+                  ceTgtPct: '', peTgtPct: '', noReEntryAfter: '', entryMomEnabled: false, entryMomValue: '', ceSimpleMom: undefined, peSimpleMom: undefined, ceRangeBreakout: undefined, peRangeBreakout: undefined, lazyLegs: undefined, reSlLazyId: undefined, reTgtLazyId: undefined,
                 })}
                 title="Clear rules"
                 className={cn('text-[11px] text-zinc-500 hover:text-zinc-300 transition-colors cursor-pointer', FOCUS_RING)}
@@ -2747,7 +2814,7 @@ function FocusProRowImpl({
     levelHigh: '', levelLow: '', levelVw: false, vwapInterval: '1', vwapBufferPct: '0.1',
     slRupees: '', slMultiplier: '1.2', ceSlMultiplier: '1.2', peSlMultiplier: '1.2',
     slRollStrikes: 0, slToCost: false, slToCostScope: undefined, squareOff: undefined, reSlMode: 'off', reTgtMode: 'off',
-    ceTgtPct: '', peTgtPct: '', noReEntryAfter: '', entryMomEnabled: false, entryMomValue: '', ceSimpleMom: undefined, peSimpleMom: undefined, lazyLegs: undefined, reSlLazyId: undefined, reTgtLazyId: undefined,
+    ceTgtPct: '', peTgtPct: '', noReEntryAfter: '', entryMomEnabled: false, entryMomValue: '', ceSimpleMom: undefined, peSimpleMom: undefined, ceRangeBreakout: undefined, peRangeBreakout: undefined, lazyLegs: undefined, reSlLazyId: undefined, reTgtLazyId: undefined,
   });
 
   const legLine = (leg: 'CE' | 'PE') => {
@@ -3441,7 +3508,7 @@ function FocusRowCardImpl({
           </span>
           <div className="flex items-center gap-1.5">
             <button
-              onClick={() => onUpdate({ levelHigh: '', levelLow: '', levelVw: false, vwapInterval: '1', vwapBufferPct: '0.1', slRupees: '', slMultiplier: '1.2', ceSlMultiplier: '1.2', peSlMultiplier: '1.2', slRollStrikes: 0, slToCost: false, slToCostScope: undefined, squareOff: undefined, reSlMode: 'off', reTgtMode: 'off', ceTgtPct: '', peTgtPct: '', noReEntryAfter: '', entryMomEnabled: false, entryMomValue: '', ceSimpleMom: undefined, peSimpleMom: undefined, lazyLegs: undefined, reSlLazyId: undefined, reTgtLazyId: undefined })}
+              onClick={() => onUpdate({ levelHigh: '', levelLow: '', levelVw: false, vwapInterval: '1', vwapBufferPct: '0.1', slRupees: '', slMultiplier: '1.2', ceSlMultiplier: '1.2', peSlMultiplier: '1.2', slRollStrikes: 0, slToCost: false, slToCostScope: undefined, squareOff: undefined, reSlMode: 'off', reTgtMode: 'off', ceTgtPct: '', peTgtPct: '', noReEntryAfter: '', entryMomEnabled: false, entryMomValue: '', ceSimpleMom: undefined, peSimpleMom: undefined, ceRangeBreakout: undefined, peRangeBreakout: undefined, lazyLegs: undefined, reSlLazyId: undefined, reTgtLazyId: undefined })}
               className={cn('text-[11px] text-zinc-500 hover:text-zinc-300 transition-colors cursor-pointer', FOCUS_RING)}
             >
               Clear
@@ -3707,7 +3774,10 @@ export default function FocusTool() {
   // Simple Momentum, per `rowId:leg`: the strike picked and the start price (premium or spot)
   // seen at the entry time. start 0 = this leg has no momentum and enters at once.
   // `failed` = the order was rejected: never resent on its own.
-  const simMomRef = useRef<Record<string, { day: string; strike: number; start: number; failed?: boolean }>>({});
+  const simMomRef = useRef<Record<string, {
+    day: string; kind: 'range' | 'momentum' | 'now'; strike: number; start: number; failed?: boolean;
+    range?: { high: number; low: number }; rangeSince?: number; rangeNextTry?: number; rangeFetching?: boolean; rangeFailed?: boolean;
+  }>>({});
   const simMomFiringRef = useRef<Set<string>>(new Set());
   const [peakMtm, setPeakMtm] = useState(0);
   const [lockMtm, setLockMtm] = useState<number | null>(null);
@@ -6450,16 +6520,28 @@ export default function FocusTool() {
     });
   }
 
-  function rowHasSimpleMom(row: FocusRow): boolean {
-    return !entryMomentumOn(row) && legsOf(row).some(l => simpleMomOn(l === 'CE' ? row.ceSimpleMom : row.peSimpleMom));
+  /** The entry gate a leg is set up with: Range Breakout, Simple Momentum, or neither (opens at the entry time). */
+  function legEntryKind(row: FocusRow, leg: 'CE' | 'PE'): 'range' | 'momentum' | 'now' {
+    if (entryMomentumOn(row)) return 'now';
+    if (rangeBreakoutOn(leg === 'CE' ? row.ceRangeBreakout : row.peRangeBreakout, row.entryTime)) return 'range';
+    return simpleMomOn(leg === 'CE' ? row.ceSimpleMom : row.peSimpleMom) ? 'momentum' : 'now';
+  }
+
+  function rowHasLegEntryGate(row: FocusRow): boolean {
+    return legsOf(row).some(l => legEntryKind(row, l) !== 'now');
   }
 
   /**
-   * AlgoTest Simple Momentum, leg by leg. Once the row may enter (`enterOk`),
-   * each leg picks its strike and notes its start price (its own premium, or
-   * the spot); a leg with momentum then waits until that price has moved the
-   * set amount, a leg without it opens at once. Legs are independent, so a
-   * straddle can open one side now and the other later.
+   * Leg-by-leg entry gates — AlgoTest Simple Momentum and Range Breakout. Once
+   * the row may enter (`enterOk`), each leg picks its strike at the entry time
+   * and then:
+   *  - momentum: notes its start price (its own premium, or the spot) and waits
+   *    until that has moved the set amount;
+   *  - range: tracks the high / low of [entry time, range end) on its strike or
+   *    the index (read from 1-minute bars once the range has ended — see
+   *    /api/focus-tool/range) and opens when the price reaches the high / low;
+   *  - neither: opens at once.
+   * Legs are independent, so a straddle can open one side now and the other later.
    *
    * The row stays 'armed' until its first leg is away, then turns 'entered'
    * (the same hand-off autoEnterRow makes). Waiting legs are dropped — never
@@ -6467,8 +6549,13 @@ export default function FocusTool() {
    * time or the 15:17 backstop passes, or Overall Momentum is switched on.
    * A rejected order is NOT retried: the leg is parked as failed so a bad
    * order can't repeat every second.
+   *
+   * A range is only trusted when its strike was picked inside the range
+   * window: the strike is remembered across a reload (localStorage), but a tab
+   * opened after the range ended with no remembered strike cannot know which
+   * strike was ATM at the entry time, so that leg is skipped, not guessed.
    */
-  function driveSimpleMomentum(row: FocusRow, enterOk: boolean, nowHm: string) {
+  function driveLegEntries(row: FocusRow, enterOk: boolean, nowHm: string) {
     const snap = schedulerRef.current;
     const u = row.underlying;
     const today = istToday();
@@ -6486,36 +6573,57 @@ export default function FocusTool() {
 
     for (const leg of legsOf(row)) {
       const key = `${row.id}:${leg}`;
+      const kind = legEntryKind(row, leg);
       const m = leg === 'CE' ? row.ceSimpleMom : row.peSimpleMom;
+      const rb = leg === 'CE' ? row.ceRangeBreakout : row.peRangeBreakout;
       const tag = `${isSimRow(row) ? 'SIM ' : ''}${u} ${leg}`;
       const drop = (why?: string) => {
         delete simMomRef.current[key];
         putMomStatus(key, '');
-        if (why) addToast('error', `${tag} momentum entry cancelled`, why);
+        if (why) addToast('error', `${tag} entry cancelled`, why);
       };
       let st: (typeof simMomRef.current)[string] | undefined = simMomRef.current[key];
       if (st && (st.day !== today || rowOwnsLeg(row, leg))) { drop(); st = undefined; }
       if (st && closedReason) { drop(closedReason); continue; }
-      // The leg's momentum setting was edited while waiting: start over.
-      if (st && (st.start > 0) !== simpleMomOn(m)) { drop(); st = undefined; }
+      // The leg's gate was edited while waiting: start over.
+      if (st && st.kind !== kind) { drop(); st = undefined; }
 
       if (!st) {
         if (!(row.status === 'armed' && enterOk) || rowOwnsLeg(row, leg)) continue;
-        const strike = leg === 'CE' ? live.ceStrike : live.peStrike;
-        if (!strike) continue;
+        let strike: number | null = leg === 'CE' ? live.ceStrike : live.peStrike;
         let start = 0;
-        if (simpleMomOn(m)) {
+        if (kind === 'range' && rb) {
+          // The strike belongs to the entry time. Inside the window it is the
+          // live ATM (and remembered); after it, only a remembered one will do.
+          const remembered = loadRangeStrike(key, today);
+          if (nowHm >= rb.end || (remembered != null && nowHm > row.entryTime)) {
+            strike = remembered;
+            if (strike == null) {
+              simMomRef.current[key] = { day: today, kind, strike: 0, start: 0, failed: true };
+              putMomStatus(key, `range missed: the tab was not open at ${row.entryTime} to pick the ${leg} strike`);
+              continue;
+            }
+          } else if (strike) {
+            saveRangeStrike(key, today, strike);
+          }
+        }
+        if (!strike) continue;
+        if (kind === 'momentum' && m) {
           start = m.src === 'underlying' ? spot : simQuote(u, expiry, strike, leg);
           if (!(start > 0)) { putMomStatus(key, `waiting for a start ${m.src === 'underlying' ? 'spot' : 'premium'}`); continue; }
         }
-        st = { day: today, strike, start };
+        st = { day: today, kind, strike, start };
         simMomRef.current[key] = st;
       }
 
-      if (st.failed) { putMomStatus(key, `${st.strike} ${leg}: entry order failed — not retried`); continue; }
+      if (st.failed) {
+        if (st.strike > 0) putMomStatus(key, `${st.strike} ${leg}: entry did not go through — not retried`);
+        continue;
+      }
 
       let now = 1;
-      if (st.start > 0 && simpleMomOn(m)) {
+      let trigger = '';
+      if (kind === 'momentum' && m) {
         now = m.src === 'underlying' ? spot : simQuote(u, expiry, st.strike, leg);
         if (!simpleMomHit(m, st.start, now)) {
           const level = simpleMomLevel(m, st.start);
@@ -6524,6 +6632,25 @@ export default function FocusTool() {
             : `${st.strike} ${leg}: ${m.src === 'underlying' ? 'spot' : 'premium'} ${now > 0 ? now.toFixed(2) : '—'} needs ${m.dir === 'down' ? '≤' : '≥'} ${level.toFixed(2)} (start ${st.start.toFixed(2)})`);
           continue;
         }
+        trigger = `Simple Momentum hit: ${m.src === 'underlying' ? 'spot' : 'premium'} ${now.toFixed(2)} from ${st.start.toFixed(2)}`;
+      } else if (kind === 'range' && rb) {
+        const what = `${rb.side === 'high' ? 'high' : 'low'} of ${row.entryTime}–${rb.end} on ${rb.on === 'underlying' ? 'the index' : `${st.strike} ${leg}`}`;
+        if (rangePhase(row.entryTime, rb.end, nowHm) !== 'ended') {
+          putMomStatus(key, `${st.strike} ${leg}: tracking the range ${row.entryTime}–${rb.end}`);
+          continue;
+        }
+        if (!st.range) {
+          if (st.rangeFailed) { putMomStatus(key, `${st.strike} ${leg}: range data unavailable — no entry`); continue; }
+          putMomStatus(key, `${st.strike} ${leg}: reading the ${row.entryTime}–${rb.end} range`);
+          fetchLegRange(st, row, leg, rb, expiry);
+          continue;
+        }
+        now = rb.on === 'underlying' ? spot : simQuote(u, expiry, st.strike, leg);
+        if (!rangeBreakoutHit(rb, st.range, now)) {
+          putMomStatus(key, `${st.strike} ${leg}: ${what} = ${(rb.side === 'high' ? st.range.high : st.range.low).toFixed(2)}; now ${now > 0 ? now.toFixed(2) : '—'}, waiting for it to reach the ${rb.side}`);
+          continue;
+        }
+        trigger = `Range breakout: ${rb.on === 'underlying' ? 'spot' : 'premium'} ${now.toFixed(2)} reached the ${what} (${(rb.side === 'high' ? st.range.high : st.range.low).toFixed(2)})`;
       }
       putMomStatus(key, '');
       if (fired || busyRows.has(row.id) || autoExitingRef.current.has(row.id) || simMomFiringRef.current.has(key)) continue;
@@ -6533,8 +6660,8 @@ export default function FocusTool() {
       const armed = st;
       runRowAction(row.id, async () => {
         const fresh = schedulerRef.current.config.rows.find(r => r.id === row.id) ?? row;
-        addToast('success', `${tag} entry`, armed.start > 0 && simpleMomOn(m)
-          ? `Simple Momentum hit: ${m.src === 'underlying' ? 'spot' : 'premium'} ${now.toFixed(2)} from ${armed.start.toFixed(2)} — selling ${row.lots} lot(s) ${armed.strike} ${leg}`
+        addToast('success', `${tag} entry`, trigger
+          ? `${trigger} — selling ${row.lots} lot(s) ${armed.strike} ${leg}`
           : `Entry time reached — selling ${row.lots} lot(s) ${armed.strike} ${leg}`);
         const ok = await placeLeg(fresh, leg, { reduce: false, lots: row.lots, strikeOverride: armed.strike });
         if (ok) {
@@ -6553,13 +6680,39 @@ export default function FocusTool() {
     }
   }
 
+  /**
+   * Read a leg's finished range (high / low) from 1-minute bars. Polled every
+   * 10s until the server says the range is complete; gives up after 5 minutes
+   * so a leg can't wait forever on data that is not coming.
+   */
+  function fetchLegRange(
+    st: NonNullable<(typeof simMomRef.current)[string]>, row: FocusRow, leg: 'CE' | 'PE',
+    rb: FocusLegRangeBreakout, expiry: string,
+  ) {
+    const nowMs = Date.now();
+    st.rangeSince ??= nowMs;
+    if (st.rangeFetching || nowMs < (st.rangeNextTry ?? 0)) return;
+    if (nowMs - st.rangeSince > 5 * 60_000) { st.rangeFailed = true; return; }
+    st.rangeFetching = true;
+    const q = new URLSearchParams({ underlying: row.underlying, on: rb.on, start: row.entryTime, end: rb.end });
+    if (rb.on === 'instrument') { q.set('expiry', expiry); q.set('strike', String(st.strike)); q.set('leg', leg); }
+    fetch(`/api/focus-tool/range?${q}`)
+      .then(r => r.json())
+      .then((j: { complete?: boolean; high?: number | null; low?: number | null }) => {
+        if (j.complete && typeof j.high === 'number' && typeof j.low === 'number') st.range = { high: j.high, low: j.low };
+        else st.rangeNextTry = Date.now() + 10_000;
+      })
+      .catch(() => { st.rangeNextTry = Date.now() + 10_000; })
+      .finally(() => { st.rangeFetching = false; });
+  }
+
   // The scheduler's interval closure is created once, on mount,
   // so calling autoEnterRow/autoExitRow directly would pin that render's
   // versions — and with them a stale `lookups`/`lotSizes`/`rowLive` inside
   // placeLeg, which resolves the contract an order is actually sent for.
   // Going through a ref that every render refreshes keeps orders on current data.
-  const actionsRef = useRef({ autoEnterRow, autoExitRow, placeLeg, simQuote, checkPendingReentries, sweepUnconfirmedOrders, driveSimpleMomentum, rowHasSimpleMom });
-  actionsRef.current = { autoEnterRow, autoExitRow, placeLeg, simQuote, checkPendingReentries, sweepUnconfirmedOrders, driveSimpleMomentum, rowHasSimpleMom };
+  const actionsRef = useRef({ autoEnterRow, autoExitRow, placeLeg, simQuote, checkPendingReentries, sweepUnconfirmedOrders, driveLegEntries, rowHasLegEntryGate });
+  actionsRef.current = { autoEnterRow, autoExitRow, placeLeg, simQuote, checkPendingReentries, sweepUnconfirmedOrders, driveLegEntries, rowHasLegEntryGate };
 
   /**
    * The scheduler: everything time- or account-level driven, on a 1s tick.
@@ -6618,8 +6771,8 @@ export default function FocusTool() {
         });
         // Per-leg Simple Momentum replaces the all-legs-at-once entry for this row.
         const simKeys = [`${row.id}:CE`, `${row.id}:PE`];
-        if (actionsRef.current.rowHasSimpleMom(row) || simKeys.some(k => simMomRef.current[k])) {
-          actionsRef.current.driveSimpleMomentum(row, decision.enter, nowHm);
+        if (actionsRef.current.rowHasLegEntryGate(row) || simKeys.some(k => simMomRef.current[k])) {
+          actionsRef.current.driveLegEntries(row, decision.enter, nowHm);
           continue;
         }
         let enter = decision.enter;

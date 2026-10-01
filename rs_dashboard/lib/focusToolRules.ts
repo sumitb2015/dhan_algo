@@ -22,7 +22,7 @@
  */
 
 import type {
-  FocusRow, FocusDte, FocusRowStatus, FocusReentryMode, FocusReentryTrigger, FocusPendingReentry, FocusLegSimpleMom, FocusLazyLeg,
+  FocusRow, FocusDte, FocusRowStatus, FocusReentryMode, FocusReentryTrigger, FocusPendingReentry, FocusLegSimpleMom, FocusLazyLeg, FocusLegRangeBreakout,
 } from '@/lib/focusToolRows';
 
 // ── Constants ────────────────────────────────────────────────────────────────
@@ -916,6 +916,35 @@ export function simpleMomHit(m: FocusLegSimpleMom | null | undefined, start: num
   const level = simpleMomLevel(m, start);
   if (level == null || !(now > 0)) return false;
   return m!.dir === 'down' ? now <= level : now >= level;
+}
+
+// ── Range Breakout (per-leg entry gate) ─────────────────────────────────────
+
+const HM_RE = /^([01]\d|2[0-3]):[0-5]\d$/;
+
+/** On, and its range is valid: an 'HH:MM' end strictly after the row's entry time. */
+export function rangeBreakoutOn(
+  rb: FocusLegRangeBreakout | null | undefined, entryTime: string,
+): rb is FocusLegRangeBreakout {
+  return !!rb && rb.enabled && HM_RE.test(rb.end) && HM_RE.test(entryTime) && rb.end > entryTime;
+}
+
+/** Where the clock stands against the range: before it starts, being tracked, or over. */
+export function rangePhase(entryTime: string, end: string, nowHm: string): 'before' | 'tracking' | 'ended' {
+  if (nowHm < entryTime) return 'before';
+  return nowHm < end ? 'tracking' : 'ended';
+}
+
+/**
+ * Has `price` reached the range's high ('high') or low ('low')? AlgoTest: after
+ * the range, "whenever the strike reaches" that level the leg is taken — a touch
+ * counts, and so does a price already beyond it when the range ends.
+ */
+export function rangeBreakoutHit(
+  rb: Pick<FocusLegRangeBreakout, 'side'>, range: { high: number; low: number }, price: number,
+): boolean {
+  if (!(price > 0)) return false;
+  return rb.side === 'low' ? price <= range.low : price >= range.high;
 }
 
 // ── Lazy legs ───────────────────────────────────────────────────────────────

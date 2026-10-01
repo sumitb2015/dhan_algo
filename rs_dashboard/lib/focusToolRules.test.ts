@@ -14,7 +14,7 @@ import { readFileSync } from 'node:fs';
 import path from 'node:path';
 
 import {
-  evaluateEntry, evaluateEntryMomentum, costStopApplies, runningLazyLeg, legSlMultiplier, legTarget, nextLazyLegId, lazyLegStrike, legHasOwnSl, simpleMomOn, simpleMomLevel, simpleMomHit, evaluateGlobalRisk, evaluateRowExit, legStopReason,
+  evaluateEntry, evaluateEntryMomentum, rangeBreakoutOn, rangePhase, rangeBreakoutHit, costStopApplies, runningLazyLeg, legSlMultiplier, legTarget, nextLazyLegId, lazyLegStrike, legHasOwnSl, simpleMomOn, simpleMomLevel, simpleMomHit, evaluateGlobalRisk, evaluateRowExit, legStopReason,
   dteForExpiry, dteMatches, sidePremium, legsOf, legsFlat, rowOwnsLeg,
   stopPremium, legStopPremium, pairStopPremium, legOwnContracts,
   nextOpenedTs, isGhostDropProtected, GHOST_DROP_GRACE_MS,
@@ -691,4 +691,26 @@ test('lazy leg: chain and strike', () => {
   assert.equal(lazyLegStrike({ leg: 'CE', otmSteps: 2 }, 18450, 50), 18550);
   assert.equal(lazyLegStrike({ leg: 'PE', otmSteps: 2 }, 18450, 50), 18350);
   assert.equal(lazyLegStrike({ leg: 'CE', otmSteps: -1 }, 18450, 50), 18400);
+});
+
+test('range breakout rules', () => {
+  const rb = (o: object = {}) => ({ enabled: true, end: '09:30', side: 'high' as const, on: 'instrument' as const, ...o });
+  assert.equal(rangeBreakoutOn(rb(), '09:16'), true);
+  assert.equal(rangeBreakoutOn(rb({ enabled: false }), '09:16'), false);
+  assert.equal(rangeBreakoutOn(rb({ end: '09:16' }), '09:16'), false);   // empty range
+  assert.equal(rangeBreakoutOn(rb({ end: '9:30' }), '09:16'), false);
+  assert.equal(rangeBreakoutOn(undefined, '09:16'), false);
+  assert.equal(rangePhase('09:16', '09:30', '09:15'), 'before');
+  assert.equal(rangePhase('09:16', '09:30', '09:16'), 'tracking');
+  assert.equal(rangePhase('09:16', '09:30', '09:29'), 'tracking');
+  assert.equal(rangePhase('09:16', '09:30', '09:30'), 'ended');
+  // AlgoTest: after the range, "whenever the strike reaches" the high / low, take it
+  const range = { high: 257.95, low: 180 };
+  assert.equal(rangeBreakoutHit(rb(), range, 257.9), false);
+  assert.equal(rangeBreakoutHit(rb(), range, 257.95), true);    // a touch counts
+  assert.equal(rangeBreakoutHit(rb(), range, 260), true);
+  assert.equal(rangeBreakoutHit(rb({ side: 'low' }), range, 180.05), false);
+  assert.equal(rangeBreakoutHit(rb({ side: 'low' }), range, 180), true);
+  assert.equal(rangeBreakoutHit(rb({ side: 'low' }), range, 170), true);
+  assert.equal(rangeBreakoutHit(rb(), range, 0), false);                 // no quote
 });

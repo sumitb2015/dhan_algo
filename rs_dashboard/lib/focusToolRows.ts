@@ -209,6 +209,22 @@ export interface FocusLazyLeg {
   onTgt: string;
 }
 
+/**
+ * AlgoTest "Range Breakout" on one leg: track the high / low of a time range —
+ * from the row's entry time up to `end` (the last tracked second is end − 1s)
+ * — on the leg's strike (`instrument`) or the index (`underlying`), then open
+ * the leg when the price reaches the range high (or low). Never reached, no entry.
+ * The strike is picked at the entry time. Not combined with Simple Momentum.
+ */
+export interface FocusLegRangeBreakout {
+  enabled: boolean;
+  /** 'HH:MM' IST — range end (exclusive). */
+  end: string;
+  /** Enter when the price breaks the range's high, or its low. */
+  side: 'high' | 'low';
+  on: 'instrument' | 'underlying';
+}
+
 export interface FocusRow {
   id: string;
   underlying: FocusUnderlying;
@@ -299,6 +315,9 @@ export interface FocusRow {
   /** Per-leg Simple Momentum. Ignored while Overall Momentum is on (as on AlgoTest). */
   ceSimpleMom?: FocusLegSimpleMom;
   peSimpleMom?: FocusLegSimpleMom;
+  /** Per-leg Range Breakout. Mutually exclusive with Simple Momentum; ignored while Overall Momentum is on. */
+  ceRangeBreakout?: FocusLegRangeBreakout;
+  peRangeBreakout?: FocusLegRangeBreakout;
   /**
    * Leg-wise target: the leg exits once its premium has decayed by this much
    * from its own entry — a % (entry × (1 − v/100)) or points (entry − v), per
