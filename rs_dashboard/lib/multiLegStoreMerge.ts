@@ -1,4 +1,5 @@
 import type { MultiLegBasket, MultiLegLeg } from './multiLegFocus.ts';
+import { canon } from './revMerge.ts';
 
 /**
  * Server-side merge of one basket save into the stored copy, so a tab holding
@@ -19,16 +20,6 @@ import type { MultiLegBasket, MultiLegLeg } from './multiLegFocus.ts';
  */
 
 type Revved = { rev?: number };
-
-/** JSON with sorted keys and undefined dropped, so key order can't fake a change. */
-function canon(v: unknown): string {
-  if (Array.isArray(v)) return `[${v.map(canon).join(',')}]`;
-  if (v && typeof v === 'object') {
-    const o = v as Record<string, unknown>;
-    return `{${Object.keys(o).filter(k => o[k] !== undefined).sort().map(k => `${JSON.stringify(k)}:${canon(o[k])}`).join(',')}}`;
-  }
-  return JSON.stringify(v) ?? 'null';
-}
 
 /** Content of a leg or basket for change detection: no rev, no updatedAt. */
 export function stableBody(x: (MultiLegLeg | MultiLegBasket) & Revved, withLegs = true): string {

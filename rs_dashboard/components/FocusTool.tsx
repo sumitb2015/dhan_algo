@@ -54,6 +54,9 @@ import {
   type PosRow, type RowLive,
 } from '@/lib/focusToolRules';
 import { computeRowPnl, mtmForQty, shiftMayReopen, canMarkMtm, shiftCloseConfirmed, rowDisplayBookedPnl, putCallRatio, valuePutCallRatio, pickOpenInterest } from '@/lib/focusToolPnl';
+import { stampItems, noteItems, adoptItems, canon, type RevBook } from '@/lib/revMerge';
+import { useTabLeader } from '@/hooks/useTabLeader';
+import type { FocusConfigWrite } from '@/lib/focusToolRowsMerge';
 
 // â”€â”€ Constants â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
@@ -4252,6 +4255,10 @@ export default function FocusTool() {
   // Orders sent but not confirmed filled in full, keyed row:leg — see
   // UnconfirmedOrder / reconcileUnconfirmedOrder.
   const unconfirmedOrderRef = useRef<Map<string, UnconfirmedOrder>>(new Map());
+  // Only one tab runs the automatic rules (scheduler, stops, targets,
+  // re-entries) — a second tab is a second execution engine. Manual buttons
+  // and settling this tab's own unconfirmed orders run in every tab.
+  const { isLeader, leaderRef } = useTabLeader('focus-tool');
   // Rows the scheduler has already auto-entered. Same reasoning, plus: the
   // entry window stays open for the rest of the session, so without this a
   // row would re-enter on every 5s tick.
@@ -4390,8 +4397,17 @@ export default function FocusTool() {
   }, [bridgeDown, niftyBridgeExpiry, bankniftyBridgeExpiry, sensexBridgeExpiry]);
 
   /** Adopt a server-authoritative config: state plus the risk-bar mirrors. */
-  const applyServerConfig = useCallback((d: FocusToolConfig) => {
-    setConfig(d);
+  // Last saved rev + content per row — see doSaveConfig and lib/revMerge.ts.
+  const rowRevBookRef = useRef<RevBook>(new Map());
+  // Saves queued or sent and not yet answered. The periodic re-read below only
+  // runs while this is 0, when the server copy already holds every local change.
+  const savesInFlightRef = useRef(0);
+  const applyServerConfig = useCallback((d: FocusToolConfig, sentRows?: FocusRow[]) => {
+    // After a save, take the server's copy only of rows this tab hasn't
+    // changed since sending — a change made while the save was in flight goes
+    // out with its own save and must not be reverted here.
+    if (sentRows) setConfig(prev => ({ ...d, rows: adoptItems(prev.rows, sentRows, d.rows) }));
+    else setConfig(d);
     setRiskEnabled(d.riskEnabled);
     setTargetRupees(d.targetRupees);
     setStopRupees(d.stopRupees);
@@ -4409,9 +4425,31 @@ export default function FocusTool() {
     fetch('/api/focus-tool/rows')
       .then(r => r.json())
       .then((j: { success: boolean; data?: FocusToolConfig }) => {
-        if (j.success && j.data) applyServerConfig(j.data);
+        if (j.success && j.data) {
+          noteItems(rowRevBookRef.current, 'r:', j.data.rows);
+          applyServerConfig(j.data);
+        }
       })
       .catch(() => {});
+  }, [applyServerConfig]);
+
+  // Re-read the saved config every few seconds so this tab sees what another
+  // tab saved — a leader that never saw a leg the other tab opened would not
+  // watch its stop. Skipped while this tab has saves in flight.
+  useEffect(() => {
+    let cancelled = false;
+    const t = setInterval(() => {
+      if (savesInFlightRef.current !== 0) return;
+      fetch('/api/focus-tool/rows')
+        .then(r => r.json())
+        .then((j: { success: boolean; data?: FocusToolConfig }) => {
+          if (cancelled || !j.success || !j.data || savesInFlightRef.current !== 0) return;
+          noteItems(rowRevBookRef.current, 'r:', j.data.rows);
+          if (canon(j.data) !== canon(schedulerRef.current.config)) applyServerConfig(j.data);
+        })
+        .catch(() => {});
+    }, 3000);
+    return () => { cancelled = true; clearInterval(t); };
   }, [applyServerConfig]);
 
   useEffect(() => {
@@ -5106,31 +5144,43 @@ export default function FocusTool() {
     return () => { cancelled = true; clearInterval(t); };
   }, [vwapWantedKey]);
 
-  async function saveConfig(patch?: Partial<FocusToolConfig>) {
+  async function saveConfig(patch?: FocusConfigWrite) {
     // Queued rather than fired directly — see saveQueueRef's doc comment.
     // Each save waits for every save already queued ahead of it to land
     // first, so two saves fired close together apply in order.
-    const run = saveQueueRef.current.then(() => doSaveConfig(patch));
+    savesInFlightRef.current += 1;
+    const run = saveQueueRef.current.then(() => doSaveConfig(patch)).finally(() => { savesInFlightRef.current -= 1; });
     // Swallow here so one failed save doesn't wedge the queue for whatever
     // saves come after it — doSaveConfig already reports the failure itself.
     saveQueueRef.current = run.catch(() => {});
     return run;
   }
 
-  async function doSaveConfig(patch?: Partial<FocusToolConfig>) {
+  async function doSaveConfig(patch?: FocusConfigWrite) {
     try {
-      const body = patch ?? {
+      const raw = patch ?? {
         riskEnabled, targetRupees, stopRupees, trailEnabled, triggerRupees, lockRupees, liveRealMoney,
         trailKind: trailX.kind, trailEvery: trailX.every, trailBy: trailX.by,
         groups: config.groups,
-        rows: config.rows,
       };
+      // Rows carry a rev bumped only for rows this tab changed (lib/revMerge.ts);
+      // the server keeps the newer copy of each row, so this save can't roll
+      // back a row another tab (or this tab's own later save) moved on.
+      const sentRows = raw.rows ? stampItems(rowRevBookRef.current, 'r:', raw.rows) : undefined;
+      const body = sentRows ? { ...raw, rows: sentRows } : raw;
       const res = await fetch('/api/focus-tool/rows', {
         method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
       });
-      const j = await res.json();
+      const j = await res.json() as { success: boolean; data?: FocusToolConfig; error?: string; conflicts?: string[]; refusedDeletes?: string[] };
       if (j.success && j.data) {
-        applyServerConfig(j.data);
+        noteItems(rowRevBookRef.current, 'r:', j.data.rows);
+        applyServerConfig(j.data, sentRows);
+        if (j.conflicts?.length) {
+          addToast('error', 'Row changed elsewhere', `Kept the saved version of ${j.conflicts.length} row(s): another tab changed them first. Check those rows.`);
+        }
+        if (j.refusedDeletes?.length) {
+          addToast('error', 'Row not deleted', 'It still holds a position on the server — exit it first.');
+        }
       } else if (j.error) {
         addToast('error', 'Failed to save config', j.error);
       }
@@ -5308,7 +5358,9 @@ export default function FocusTool() {
     setConfig(prev => {
       const nextRows = prev.rows.filter(r => r.id !== id);
       const nextConfig = { ...prev, rows: nextRows };
-      saveConfig(nextConfig);
+      // Explicit: the server keeps any row a save leaves out, and remembers
+      // this id so a stale tab's save can't bring the row back.
+      saveConfig({ ...nextConfig, deleteRowIds: [id] });
       return nextConfig;
     });
     addToast('success', 'Row deleted');
@@ -7149,6 +7201,7 @@ export default function FocusTool() {
   }
 
   useEffect(() => {
+    if (isLeader !== true) return; // another tab runs the automatic rules
     // Real rows are only watched while LIVE is armed (a dry run must not spam
     // exit toasts for breaches it can never act on); sim rows always are.
     const openRows = config.rows.filter(r => {
@@ -7270,7 +7323,7 @@ export default function FocusTool() {
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [rowLive, spots, liveRealMoney, toolPnl, simPnl, riskEnabled, targetRupees, stopRupees,
-      trailEnabled, triggerRupees, lockRupees, trailX, peakMtm, lockMtm]);
+      trailEnabled, triggerRupees, lockRupees, trailX, peakMtm, lockMtm, isLeader]);
 
   /**
    * Open every leg this row trades, at its configured lot size.
@@ -7665,8 +7718,11 @@ export default function FocusTool() {
         return l && !rowFlat(r) && rowMayTrade(r, liveArmed);
       });
 
+      // Only the leader tab acts; a follower still settles its own unconfirmed orders.
+      const lead = leaderRef.current;
+
       // ── 1. Per-row time exit, plus the repo-wide 15:17 intraday backstop ──
-      for (const row of openRows) {
+      for (const row of lead ? openRows : []) {
         if (row.exitTime && nowHm >= row.exitTime) {
           actionsRef.current.autoExitRow(row, `Exit time ${row.exitTime} reached`);
           continue;
@@ -7679,6 +7735,7 @@ export default function FocusTool() {
 
       // ── 2. Settle unconfirmed orders; then waiting re-entries ──
       actionsRef.current.sweepUnconfirmedOrders();
+      if (!lead) return;
       actionsRef.current.checkPendingReentries();
 
       // ── 3. Auto-entry for armed rows ──
@@ -7823,8 +7880,8 @@ export default function FocusTool() {
       riskEnabled, targetRupees, stopRupees, trailEnabled, triggerRupees, lockRupees, liveRealMoney,
       trailKind: trailX.kind, trailEvery: trailX.every, trailBy: trailX.by,
       ...partial,
-      groups: config.groups,
-      rows: config.rows,
+      // No rows/groups: this render's `config` can be stale, and a stale row
+      // would be stamped as a newer change. The server keeps what it has.
     });
   }
   function toggleRiskEnabled() {
@@ -7944,6 +8001,15 @@ export default function FocusTool() {
         <div className="z-20 bg-amber-900/95 border-b border-amber-500/40 px-4 py-2 text-center">
           <p className="text-xs font-bold text-amber-200">
             No broker logged in — log in to Dhan, Zerodha or Kotak to place orders.
+          </p>
+        </div>
+      )}
+
+      {isLeader === false && (
+        <div role="status" className="z-20 bg-amber-900/95 border-b border-amber-500/40 px-4 py-2 text-center">
+          <p className="text-xs font-bold text-amber-200">
+            Focus Tool is open in another tab, and that tab runs the automatic rules (entries, exits, stops, re-entries).
+            This tab won&apos;t fire them; manual buttons still work. Close the other tab to make this one take over.
           </p>
         </div>
       )}

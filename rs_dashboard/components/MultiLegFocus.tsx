@@ -15,7 +15,8 @@ import StrategyCardGrid from './basket/StrategyCardGrid';
 import MultiLegStrategyRow from './multiLegFocus/MultiLegStrategyRow';
 import OrdersTradesModal from './multiLegFocus/OrdersTradesModal';
 import ImportPositionsModal, { type ImportCandidate, type ImportRequest } from './multiLegFocus/ImportPositionsModal';
-import { withRevs, noteSaved, adoptServerBasket, type RevBook } from '@/lib/multiLegStoreMerge';
+import { withRevs, noteSaved, adoptServerBasket, stableBody, type RevBook } from '@/lib/multiLegStoreMerge';
+import { useTabLeader } from '@/hooks/useTabLeader';
 import HistoryModal from './multiLegFocus/HistoryModal';
 import MultiLegOptionChainModal from './multiLegFocus/MultiLegOptionChainModal';
 import HelpModal from './HelpModal';
@@ -777,8 +778,13 @@ export default function MultiLegFocus({
   // a save stamps changed items rev+1, and the server keeps whichever copy of
   // each leg is newer, so an old tab can't save its stale basket over newer data.
   const revBookRef = useRef<RevBook>(new Map());
+  // Saves/deletes this tab has sent and not yet heard back from. The poll only
+  // re-reads the server's copy while this is 0, so it can't revert a change
+  // that hasn't landed yet.
+  const savesInFlightRef = useRef(0);
   const persistBasket = useCallback((basket: MultiLegBasket) => {
     const sent = withRevs(revBookRef.current, basket);
+    savesInFlightRef.current += 1;
     fetch('/api/multi-leg-focus/baskets', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -806,8 +812,13 @@ export default function MultiLegFocus({
           addToast('error', `${server.name || 'Strategy'} changed elsewhere`, `Kept the saved version of ${names}: another tab or a repair changed it first. Check those legs.`);
         }
       })
-      .catch(() => {});
+      .catch(() => {})
+      .finally(() => { savesInFlightRef.current -= 1; });
   }, [addToast]);
+  // Only one tab runs reconciliation and the automatic stops/targets — two
+  // tabs were two execution engines, and both reconciling would each split
+  // off a closed slice for the same clamp (realized P&L counted twice).
+  const { isLeader, leaderRef } = useTabLeader('multi-leg-focus');
 
   const updateBasket = useCallback((basketId: string, patch: Partial<MultiLegBasket>) => {
     setBaskets(prev => {
@@ -946,11 +957,12 @@ export default function MultiLegFocus({
       return next;
     });
     delete lastFetchedMarginSignatureRef.current[basketId];
+    savesInFlightRef.current += 1;
     fetch('/api/multi-leg-focus/baskets', {
       method: 'DELETE',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ id: basketId }),
-    }).catch(() => {});
+    }).catch(() => {}).finally(() => { savesInFlightRef.current -= 1; });
   }, [addToast]);
 
   // ── Add Strategy (from template or blank) ──────────────────────────
@@ -2601,6 +2613,28 @@ export default function MultiLegFocus({
       // below needs to run even when this tool has zero baskets, so it can
       // discover a straddle/strangle opened from Scalper (or another broker
       // session) that this tool has never seen before.
+      // Pick up what other tabs (or the leader's reconcile) saved. Only while
+      // none of this tab's own saves are in flight — then the server copy
+      // already holds every local change.
+      if (basketsLoadedRef.current && savesInFlightRef.current === 0) {
+        try {
+          const jb = await fetch('/api/multi-leg-focus/baskets').then(r => r.json()) as { success: boolean; data?: MultiLegBasket[] };
+          if (!cancelled && jb.success && Array.isArray(jb.data) && savesInFlightRef.current === 0) {
+            const book = revBookRef.current;
+            const serverIds = new Set(jb.data.map(b => b.id));
+            for (const b of jb.data) noteSaved(book, b);
+            setBaskets(prev => {
+              // A basket the server has never seen (the unsaved default draft)
+              // stays; one it had and no longer has was deleted elsewhere.
+              const server = [...jb.data!, ...prev.filter(b => !serverIds.has(b.id) && !book.has(`b:${b.id}`))];
+              const same = prev.length === server.length && prev.every((b, i) => b.id === server[i].id && stableBody(b) === stableBody(server[i]));
+              if (same) return prev;
+              basketsRef.current = server;
+              return server;
+            });
+          }
+        } catch { /* keep the local copy */ }
+      }
       const anyPlaced = basketsRef.current.some(b => b.legs.some(l => l.orderRef != null));
 
       type PollJson = {
@@ -2657,7 +2691,7 @@ export default function MultiLegFocus({
           if (Array.isArray(selectedResult.j.trades)) setTradesData(selectedResult.j.trades);
         }
 
-        if (anyPlaced) {
+        if (anyPlaced && leaderRef.current) {
           // Collected outside setBaskets's updater (which React can invoke more
           // than once, e.g. under Strict Mode) so the toast side-effect below
           // fires exactly once per real poll tick, not once per updater call.
@@ -2798,6 +2832,7 @@ export default function MultiLegFocus({
   };
 
   useEffect(() => {
+    if (isLeader !== true) return; // another tab runs the automatic stops/targets
     for (const basket of baskets) {
       const openLegs = basket.legs.filter(l => l.status === 'OPEN' && l.fill);
       if (openLegs.length === 0) {
@@ -2863,7 +2898,7 @@ export default function MultiLegFocus({
         }));
       }
     }
-  }, [baskets, ltpFor, exitingMap, exitBasket, exitOneLeg, patchLegs, addToast]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [baskets, ltpFor, exitingMap, exitBasket, exitOneLeg, patchLegs, addToast, isLeader]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Open/draft/placing rows stay put; fully-exited (every leg CLOSED) rows sink
   // to the bottom so a long-running page doesn't bury active positions under
@@ -2900,6 +2935,15 @@ export default function MultiLegFocus({
       {!hasAuthenticatedBroker && (
         <div className="z-20 bg-amber-900/95 border-b border-amber-500/40 px-4 py-2 text-center">
           <p className="text-xs font-bold text-amber-200">No broker logged in — log in to fetch live data and place orders.</p>
+        </div>
+      )}
+
+      {isLeader === false && (
+        <div role="status" className="z-20 bg-amber-900/95 border-b border-amber-500/40 px-4 py-2 text-center">
+          <p className="text-xs font-bold text-amber-200">
+            Multi-Leg Focus is open in another tab, and that tab tracks fills and runs the automatic stops and targets.
+            This tab shows its saved data and won&apos;t fire them; manual buttons still work. Close the other tab to make this one take over.
+          </p>
         </div>
       )}
 

@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { readFocusConfig, writeFocusConfig, newFocusRowId, type FocusRow, type FocusToolConfig } from '@/lib/focusToolRows';
+import { readFocusConfig, writeFocusConfig, newFocusRowId, type FocusRow } from '@/lib/focusToolRows';
+import { mergeFocusConfigWrite, type FocusConfigWrite } from '@/lib/focusToolRowsMerge';
 
 export async function GET(): Promise<NextResponse> {
   try {
@@ -13,40 +14,35 @@ export async function GET(): Promise<NextResponse> {
 
 export async function POST(req: NextRequest): Promise<NextResponse> {
   try {
-    const body = await req.json() as Partial<FocusToolConfig> & { row?: Partial<FocusRow> };
-    const config = readFocusConfig();
+    const body = await req.json() as FocusConfigWrite & { row?: Partial<FocusRow> };
+    let config = readFocusConfig();
+    let conflicts: string[] = [];
+    let refusedDeletes: string[] = [];
 
-    // Plain last-write-wins — this is a single-user local tool, and an
-    // optimistic-concurrency reject here caused more harm than it prevented:
-    // this page saves from many independent places (Arm/Disarm, leg Exit
-    // buttons, the scheduler, strike shifts), and even with those calls
-    // serialized client-side, rejecting a save just discards a real user
-    // action (e.g. Arm) in favour of a stale server snapshot. The actual risk
-    // this guarded against — two browser tabs open at once, both saving — is
-    // rare enough here that last-write-wins is the better trade.
+    // Rows merge per row by rev (lib/focusToolRowsMerge.ts): a second or
+    // stale tab can no longer roll back other rows' fill ledgers, and a save
+    // is never rejected wholesale — at worst one row's same-rev change loses
+    // to the stored one and comes back in `conflicts`. Other fields stay
+    // last-write-wins, and only when the save carries them.
     if (body.row) {
       // Upsert a single row
       const incoming = body.row;
       const now = new Date().toISOString();
       if (incoming.id) {
-        const idx = config.rows.findIndex(r => r.id === incoming.id);
-        if (idx >= 0) {
-          config.rows[idx] = { ...config.rows[idx], ...incoming, updatedAt: now };
-        } else {
-          config.rows.push({ ...incoming, id: incoming.id, createdAt: now, updatedAt: now } as FocusRow);
-        }
+        ({ config, conflicts } = mergeFocusConfigWrite(config, {
+          rows: [{ ...(config.rows.find(r => r.id === incoming.id) ?? { createdAt: now }), ...incoming, updatedAt: now } as FocusRow],
+        }));
       } else {
-        const id = newFocusRowId();
-        config.rows.push({ ...incoming, id, createdAt: now, updatedAt: now } as FocusRow);
+        config.rows.push({ ...incoming, id: newFocusRowId(), createdAt: now, updatedAt: now } as FocusRow);
       }
     } else {
-      // Full config update (groups, risk bar, liveRealMoney)
       const { row: _row, ...rest } = body;
-      Object.assign(config, rest);
+      void _row;
+      ({ config, conflicts, refusedDeletes } = mergeFocusConfigWrite(config, rest));
     }
 
     writeFocusConfig(config);
-    return NextResponse.json({ success: true, data: config });
+    return NextResponse.json({ success: true, data: config, conflicts, refusedDeletes });
   } catch (err) {
     console.error('[/api/focus-tool/rows POST]', err);
     return NextResponse.json({ success: false, error: String(err) }, { status: 500 });
@@ -58,9 +54,12 @@ export async function DELETE(req: NextRequest): Promise<NextResponse> {
     const { id } = await req.json() as { id: string };
     if (!id) return NextResponse.json({ success: false, error: 'id required' }, { status: 400 });
     const config = readFocusConfig();
-    config.rows = config.rows.filter(r => r.id !== id);
-    writeFocusConfig(config);
-    return NextResponse.json({ success: true, data: config });
+    const { config: next, refusedDeletes } = mergeFocusConfigWrite(config, { deleteRowIds: [id] });
+    if (refusedDeletes.length) {
+      return NextResponse.json({ success: false, error: 'Row still holds a position — exit it first' }, { status: 409 });
+    }
+    writeFocusConfig(next);
+    return NextResponse.json({ success: true, data: next });
   } catch (err) {
     console.error('[/api/focus-tool/rows DELETE]', err);
     return NextResponse.json({ success: false, error: String(err) }, { status: 500 });

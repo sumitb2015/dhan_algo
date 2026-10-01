@@ -604,6 +604,8 @@ export interface FocusRow {
   // Audit
   createdAt: string;
   updatedAt: string;
+  /** Save revision — see lib/revMerge.ts. */
+  rev?: number;
 }
 
 export interface FocusToolConfig {
@@ -639,6 +641,8 @@ export interface FocusToolConfig {
    */
   liveArmedOn: string;
   updatedAt: string;
+  /** Ids of rows deleted from the page — a stale tab's save can't bring them back (lib/focusToolRowsMerge.ts). */
+  deletedRowIds?: string[];
 }
 
 // ── Defaults ──────────────────────────────────────────────────────────────────
