@@ -1,237 +1,324 @@
-// Nifty Futures Covered Call desk — pure functions, no React import.
+// NIFTYBEES Covered Call desk — pure functions, no React import.
 //
-// Strategy shape: short NIFTY futures (the core directional leg) plus one or
-// more short OTM calls written against it, premium-financed and sized/rolled
-// by cumulative delta. This mirrors the style of lib/positionGreeks.ts and
-// lib/strangleMath.ts — synchronous, chain-fetching stays in the caller.
+// Strategy shape: a long NIFTYBEES holding (the underlying, read from the
+// broker's holdings + today's CNC position — never ordered from this page)
+// with short NIFTY index calls written against it. The call legs are owned by
+// this page's own fill ledger (dhan-terminal-position-ownership): the Dhan
+// account also carries NIFTY CE shorts from other strategies, so a broker CE
+// short is never treated as "a covered call" unless this page sold it or the
+// user explicitly adopted it.
+//
+// Units: every quantity here is in CONTRACT UNITS (e.g. 65 for one NIFTY lot),
+// never lots, so the chain-supplied per-unit Greeks sum straight into
+// Nifty-unit exposure (dhan-position-greeks: posSign × units, no lot multiply).
 
 import type { ChainOc, ChainLegData } from './optionsStrategy';
+import { lookupChainLegData } from './optionsStrategy.ts';
 import { estimatePopAndDelta } from './ultimateScannerEngine.ts';
-import { computeNetGreeks, type NetGreeks } from './positionGreeks';
-import type { PositionLeg } from './positionLegs';
 
-// ── Strike/lot suggestion ───────────────────────────────────────────────────
+// ── Ledger ─────────────────────────────────────────────────────────────────
 
-export interface ShortCallSuggestion {
+export type CallTradeAction = 'SELL_OPEN' | 'BUY_CLOSE' | 'ADOPT';
+
+export interface CallTrade {
+  id: string;
+  ts: number;
+  action: CallTradeAction;
   strike: number;
-  callLots: number;
-  /** |delta| of the suggested strike, from the chain or the BS fallback. */
-  strikeDelta: number;
-  /**
-   * Net "hedge-engine" delta at `callLots`, using this desk's own sizing
-   * convention (see the note above `suggestShortCallStrike`) — NOT the same
-   * sign convention as `computeCoveredCallGreeks()` below, which reports the
-   * standard signed per-contract Greek sum. Compare like-for-like: feed this
-   * value only into `evaluateRollNeed` calls that were themselves seeded from
-   * a `suggestShortCallStrike` result, never mixed with a `computeNetGreeks`
-   * delta.
-   */
-  netDelta: number;
+  expiry: string;
+  /** Contract units (lots × lot size). */
+  units: number;
+  price: number;
+  securityId: string;
+  tradingSymbol?: string;
+  orderId?: string;
+  /** BUY_CLOSE only: the SELL_OPEN/ADOPT row this close draws down. */
+  openLegId?: string;
+  /** BUY_CLOSE only: (open price − close price) × units. */
+  realizedPnl?: number | null;
+  note?: string;
+}
+
+export interface OpenCall {
+  id: string;
+  ts: number;
+  strike: number;
+  expiry: string;
+  units: number;
+  entryPrice: number;
+  securityId: string;
+  tradingSymbol: string;
 }
 
 /**
- * Suggest the OTM call strike closest to `targetDelta` (a magnitude, e.g.
- * 0.30) and the number of call lots needed to bring net position delta near
- * `opts.targetNetDelta` (default 0 — "fully hedged"; a caller wanting the
- * book to stay net short can pass a negative target instead).
- *
- * Sizing convention (this function and `evaluateRollNeed` only): the futures
- * leg contributes `+1.0 * futuresLots` and each short call leg contributes
- * `-|delta| * callLots` to "net delta" — a desk-specific hedge-ratio score,
- * not the textbook signed option delta. It lets `targetNetDelta = 0` mean
- * "call premium fully offsets the futures leg's notional delta exposure" and
- * a more negative target mean "stay net short by that much." See
- * `computeCoveredCallGreeks` for the standard signed-Greeks readout used
- * elsewhere on the page.
- *
- * Returns null when the chain has no priced OTM call above `futuresLtp`.
+ * Replay the ledger into open short-call legs + realized P&L. A BUY_CLOSE draws
+ * down only the leg named by `openLegId` (partial closes keep the remainder).
  */
-export function suggestShortCallStrike(
+export function reconstructCallLedger(trades: CallTrade[]): { open: OpenCall[]; realized: number; premiumSold: number } {
+  const open: OpenCall[] = [];
+  let realized = 0;
+  let premiumSold = 0;
+  for (const t of [...trades].sort((a, b) => a.ts - b.ts)) {
+    if (t.action === 'SELL_OPEN' || t.action === 'ADOPT') {
+      open.push({
+        id: t.id, ts: t.ts, strike: t.strike, expiry: t.expiry, units: t.units, entryPrice: t.price,
+        securityId: t.securityId, tradingSymbol: t.tradingSymbol || `NIFTY-${t.expiry}-${t.strike}-CE`,
+      });
+      premiumSold += t.price * t.units;
+    } else if (t.action === 'BUY_CLOSE') {
+      realized += t.realizedPnl ?? 0;
+      const idx = open.findIndex((o) => o.id === t.openLegId);
+      if (idx < 0) continue;
+      const left = open[idx].units - t.units;
+      if (left > 0) open[idx] = { ...open[idx], units: left };
+      else open.splice(idx, 1);
+    }
+  }
+  return { open, realized, premiumSold };
+}
+
+/**
+ * Down-only reconcile against the broker (dhan-terminal-position-ownership
+ * Invariant 2): per security id, the ledger may claim at most what the broker
+ * still shows short. Shrinks the NEWEST legs first; never grows a leg. Legs
+ * younger than `graceMs` are exempt — the position book lags a fresh fill.
+ * `brokerShortUnits === null` means the positions call failed: unknown, leave
+ * the ledger alone.
+ */
+export function reconcileCallsDown(
+  open: OpenCall[],
+  brokerShortUnits: Record<string, number> | null,
+  now: number,
+  graceMs = 20_000,
+): { legs: (OpenCall & { ledgerUnits: number })[]; clamped: boolean } {
+  const legs = open.map((o) => ({ ...o, ledgerUnits: o.units }));
+  if (!brokerShortUnits) return { legs, clamped: false };
+  let clamped = false;
+  const bySid = new Map<string, typeof legs>();
+  for (const l of legs) bySid.set(l.securityId, [...(bySid.get(l.securityId) ?? []), l]);
+  for (const [sid, group] of bySid) {
+    if (group.some((l) => now - l.ts < graceMs)) continue;
+    let budget = Math.max(0, brokerShortUnits[sid] ?? 0);
+    // Oldest legs keep their claim first; the newest absorb any shortfall.
+    for (const l of [...group].sort((a, b) => a.ts - b.ts)) {
+      const keep = Math.min(l.units, budget);
+      if (keep < l.units) clamped = true;
+      l.units = keep;
+      budget -= keep;
+    }
+  }
+  return { legs, clamped };
+}
+
+// ── NIFTYBEES ↔ NIFTY equivalence ──────────────────────────────────────────
+
+/**
+ * NIFTYBEES is priced at roughly NIFTY/90 (the ratio drifts with tracking and
+ * expense), so the holding's Nifty exposure is measured live by value:
+ * qty × beesLtp / spot Nifty units. That is its delta in the same units the
+ * short calls' chain Greeks sum to.
+ */
+export function beesNiftyUnits(beesQty: number, beesLtp: number, spot: number): number {
+  if (!(beesQty > 0) || !(beesLtp > 0) || !(spot > 0)) return 0;
+  return (beesQty * beesLtp) / spot;
+}
+
+// ── Book P&L + Greeks ──────────────────────────────────────────────────────
+
+export interface CallMark {
+  ltp: number | null;
+  chainLeg?: ChainLegData;
+  /** Calendar days to the leg's own expiry (for the BS delta fallback). */
+  dte: number;
+}
+
+export interface BookLegGreeks {
+  id: string;
+  delta: number | null; gamma: number | null; theta: number | null; vega: number | null;
+  /** True when delta came from the Black-Scholes fallback, not Dhan's chain. */
+  deltaEstimated: boolean;
+  missing: boolean;
+}
+
+export interface BookSnapshot {
+  beesUnits: number;          // NIFTY-equivalent units the holding represents
+  beesPnl: number | null;     // unrealized on the holding
+  callsOpenPnl: number;       // MTM of the open short calls (priced legs only)
+  callsRealized: number;
+  totalPnl: number | null;
+  shortCallUnits: number;
+  coverage: number | null;    // shortCallUnits / beesUnits
+  uncoveredUnits: number;     // short call units beyond the holding (naked)
+  net: { delta: number; gamma: number; theta: number; vega: number };
+  callDelta: number;
+  legs: BookLegGreeks[];
+  missingCount: number;
+  unpricedCount: number;
+}
+
+export function computeBook(params: {
+  beesQty: number;
+  beesAvg: number;
+  beesLtp: number;
+  spot: number;
+  calls: OpenCall[];
+  marks: Record<string, CallMark>;
+  callsRealized: number;
+}): BookSnapshot {
+  const { beesQty, beesAvg, beesLtp, spot, calls, marks, callsRealized } = params;
+  const beesUnits = beesNiftyUnits(beesQty, beesLtp, spot);
+  const beesPnl = beesQty > 0 && beesLtp > 0 && beesAvg > 0 ? (beesLtp - beesAvg) * beesQty : beesQty > 0 ? null : 0;
+
+  let callsOpenPnl = 0;
+  let callDelta = 0, gamma = 0, theta = 0, vega = 0;
+  let shortCallUnits = 0;
+  let missingCount = 0;
+  let unpricedCount = 0;
+  const legs: BookLegGreeks[] = [];
+
+  for (const c of calls) {
+    if (c.units <= 0) continue;
+    shortCallUnits += c.units;
+    const m = marks[c.id];
+    if (m?.ltp != null && m.ltp > 0) callsOpenPnl += (c.entryPrice - m.ltp) * c.units;
+    else unpricedCount++;
+
+    const g = m?.chainLeg?.greeks;
+    const zeroOrNull = (v: number | null | undefined) => v === null || v === undefined || v === 0;
+    let d: number | null = g?.delta ?? null;
+    let deltaEstimated = false;
+    const chainMissing = !g || (zeroOrNull(g.delta) && zeroOrNull(g.gamma) && zeroOrNull(g.theta) && zeroOrNull(g.vega));
+    if (chainMissing && spot > 0) {
+      // Delta drives the coverage/net-delta readout, so fall back to BS rather
+      // than silently dropping the leg. Gamma/theta/vega stay excluded.
+      const iv = m?.chainLeg?.implied_volatility && m.chainLeg.implied_volatility > 0 ? m.chainLeg.implied_volatility : 12;
+      d = estimatePopAndDelta(spot, c.strike, Math.max(m?.dte ?? 1, 0.25), iv, true).delta;
+      deltaEstimated = true;
+    }
+    const k = -c.units; // short
+    if (d != null) callDelta += d * k;
+    if (!chainMissing) {
+      gamma += (g!.gamma ?? 0) * k;
+      theta += (g!.theta ?? 0) * k;
+      vega += (g!.vega ?? 0) * k;
+    } else {
+      missingCount++;
+    }
+    legs.push({
+      id: c.id,
+      delta: d != null ? d * k : null,
+      gamma: chainMissing ? null : (g!.gamma ?? 0) * k,
+      theta: chainMissing ? null : (g!.theta ?? 0) * k,
+      vega: chainMissing ? null : (g!.vega ?? 0) * k,
+      deltaEstimated,
+      missing: chainMissing,
+    });
+  }
+
+  const coverage = beesUnits > 0 ? shortCallUnits / beesUnits : null;
+  return {
+    beesUnits,
+    beesPnl,
+    callsOpenPnl,
+    callsRealized,
+    totalPnl: beesPnl == null ? null : beesPnl + callsOpenPnl + callsRealized,
+    shortCallUnits,
+    coverage,
+    uncoveredUnits: Math.max(0, shortCallUnits - beesUnits),
+    net: { delta: beesUnits + callDelta, gamma, theta, vega },
+    callDelta,
+    legs,
+    missingCount,
+    unpricedCount,
+  };
+}
+
+// ── Strike suggestion ──────────────────────────────────────────────────────
+
+export interface CoveredCallSuggestion {
+  strike: number;
+  strikeDelta: number;
+  deltaEstimated: boolean;
+  premium: number;
+  /** Lots the holding fully covers (floor) — 0 when the holding is under one lot. */
+  coveredLots: number;
+  /** Lots to the nearest whole cover (round) — may slightly over-write. */
+  nearestLots: number;
+}
+
+/**
+ * The OTM call (strike > spot) whose |delta| is closest to `targetDelta`, plus
+ * how many lots the holding covers. Returns null with no priced OTM call.
+ */
+export function suggestCoveredCall(
   oc: ChainOc,
-  futuresLtp: number,
-  futuresLots: number,
+  spot: number,
+  beesUnits: number,
+  lotSize: number,
   targetDelta: number,
-  opts: { targetNetDelta?: number; dte?: number; ivFallback?: number; maxCallLots?: number } = {},
-): ShortCallSuggestion | null {
-  const targetNetDelta = opts.targetNetDelta ?? 0;
-  const dte = opts.dte ?? 1;
-  const ivFallback = opts.ivFallback ?? 12;
-  const maxCallLots = opts.maxCallLots ?? Math.max(futuresLots * 4, 20);
-
-  if (!(futuresLtp > 0) || !(futuresLots > 0)) return null;
-
-  const candidates: { strike: number; delta: number }[] = [];
-  for (const [strikeKey, row] of Object.entries(oc ?? {})) {
-    const strike = parseFloat(strikeKey);
-    if (!(strike > futuresLtp)) continue; // OTM call only
-    const ce: ChainLegData | undefined = row?.ce;
-    if (!ce || typeof ce.last_price !== 'number' || ce.last_price <= 0.05) continue;
-
+  dte: number,
+): CoveredCallSuggestion | null {
+  if (!(spot > 0)) return null;
+  let best: { strike: number; delta: number; est: boolean; premium: number } | null = null;
+  for (const key of Object.keys(oc ?? {})) {
+    const strike = parseFloat(key);
+    if (!(strike > spot)) continue;
+    const ce = lookupChainLegData(oc, strike, 'CE');
+    if (!ce || !(ce.last_price > 0.05)) continue;
     let delta = ce.greeks?.delta;
-    if (delta === undefined || delta === null || Math.abs(delta) === 0) {
-      const iv = ce.implied_volatility && ce.implied_volatility > 0 ? ce.implied_volatility : ivFallback;
-      delta = estimatePopAndDelta(futuresLtp, strike, dte, iv, true).delta;
+    let est = false;
+    if (delta == null || delta === 0) {
+      const iv = ce.implied_volatility && ce.implied_volatility > 0 ? ce.implied_volatility : 12;
+      delta = estimatePopAndDelta(spot, strike, Math.max(dte, 0.25), iv, true).delta;
+      est = true;
     }
-    candidates.push({ strike, delta: Math.abs(delta) });
-  }
-  if (!candidates.length) return null;
-
-  candidates.sort((a, b) => Math.abs(a.delta - targetDelta) - Math.abs(b.delta - targetDelta));
-  const best = candidates[0];
-
-  let bestLots = 0;
-  let bestErr = Infinity;
-  for (let lots = 0; lots <= maxCallLots; lots++) {
-    const net = futuresLots * 1.0 - best.delta * lots;
-    const err = Math.abs(net - targetNetDelta);
-    if (err < bestErr) {
-      bestErr = err;
-      bestLots = lots;
+    const d = Math.abs(delta);
+    if (!best || Math.abs(d - targetDelta) < Math.abs(best.delta - targetDelta)) {
+      best = { strike, delta: d, est, premium: ce.last_price };
     }
   }
-
+  if (!best) return null;
+  const ratio = lotSize > 0 ? beesUnits / lotSize : 0;
   return {
     strike: best.strike,
-    callLots: bestLots,
     strikeDelta: Math.round(best.delta * 1000) / 1000,
-    netDelta: Math.round((futuresLots * 1.0 - best.delta * bestLots) * 1000) / 1000,
+    deltaEstimated: best.est,
+    premium: best.premium,
+    coveredLots: Math.floor(ratio + 1e-9),
+    nearestLots: Math.max(0, Math.round(ratio)),
   };
-}
-
-// ── Roll-need evaluation ────────────────────────────────────────────────────
-
-export interface RollBand {
-  targetDelta: number;
-  bandWidth: number;
-}
-
-export interface RollNeedResult {
-  needsRoll: boolean;
-  reason?: string;
 }
 
 /**
- * Pure drift check: has `currentNetDelta` wandered outside
- * `[targetDelta - bandWidth, targetDelta + bandWidth]`? Caller re-invokes
- * `suggestShortCallStrike` for the replacement strike/lots when this returns
- * `needsRoll: true` — this function never fetches a chain or places an order,
- * and the banner it drives is informational only (no auto-roll).
+ * Covered-call return metrics for writing `units` of a call at `premium`
+ * against `beesUnits` of Nifty exposure worth `holdingValue` rupees.
+ * Static = premium only; if-called = premium + the covered portion's upside to
+ * the strike; protection = how far Nifty can fall before the premium is used up.
  */
-export function evaluateRollNeed(currentNetDelta: number, band: RollBand): RollNeedResult {
-  const lo = band.targetDelta - band.bandWidth;
-  const hi = band.targetDelta + band.bandWidth;
-  if (currentNetDelta < lo) {
-    return {
-      needsRoll: true,
-      reason: `Net delta ${currentNetDelta.toFixed(2)} has drifted below the band floor ${lo.toFixed(2)} — consider rolling the short call closer/adding lots.`,
-    };
-  }
-  if (currentNetDelta > hi) {
-    return {
-      needsRoll: true,
-      reason: `Net delta ${currentNetDelta.toFixed(2)} has drifted above the band ceiling ${hi.toFixed(2)} — consider rolling the short call further/trimming lots.`,
-    };
-  }
-  return { needsRoll: false };
-}
-
-// ── Net Greeks (standard signed convention) ─────────────────────────────────
-
-export type { NetGreeks };
-
-/**
- * Synthesize a futures leg into `PositionLeg` shape so it can flow through
- * `computeNetGreeks` alongside the short call leg(s). A future has no option
- * greeks of its own — gamma/theta/vega are 0 and delta is the textbook 1.0
- * per lot, signed by `computeNetGreeks`'s own side convention (SELL flips it
- * negative), which is the standard reading: a short future is -1 delta/lot.
- * `strike`/`type` are placeholders `computeNetGreeks` never reads.
- */
-export function buildFuturesLeg(params: {
-  side: 'BUY' | 'SELL';
-  qtyLots: number;
-  price: number;
-  securityId: string | null;
-  expiry: string | null;
-  tradingSymbol?: string;
-  ltp?: number | null;
-}): PositionLeg {
+export function coveredCallReturns(params: {
+  premium: number; units: number; strike: number; spot: number; beesUnits: number; holdingValue: number; dte: number;
+}) {
+  const { premium, units, strike, spot, beesUnits, holdingValue, dte } = params;
+  if (!(holdingValue > 0) || !(spot > 0) || !(units > 0)) return null;
+  const credit = premium * units;
+  const coveredUnits = Math.min(units, beesUnits);
+  const upside = Math.max(0, strike - spot) * coveredUnits;
+  const staticPct = (credit / holdingValue) * 100;
+  const ifCalledPct = ((credit + upside) / holdingValue) * 100;
+  const days = Math.max(dte, 1);
   return {
-    strike: 0,
-    type: 'CE',
-    side: params.side,
-    qtyLots: params.qtyLots,
-    price: params.price,
-    delta: 1,
-    iv: null,
-    vega: 0,
-    gamma: 0,
-    theta: 0,
-    securityId: params.securityId,
-    expiry: params.expiry,
-    display: {
-      tradingSymbol: params.tradingSymbol ?? 'NIFTY-FUT',
-      productType: 'INTRADAY',
-      netQty: params.side === 'SELL' ? -params.qtyLots : params.qtyLots,
-      entryAvg: params.price,
-      ltp: params.ltp ?? null,
-      realizedProfit: 0,
-      unrealizedProfit: 0,
-      trustBrokerUnrealized: false,
-      expiry: params.expiry,
-    },
+    credit,
+    staticPct,
+    staticAnnualPct: (staticPct * 365) / days,
+    ifCalledPct,
+    protectionPts: beesUnits > 0 ? credit / beesUnits : 0,
+    protectionPct: beesUnits > 0 ? (credit / beesUnits / spot) * 100 : 0,
   };
 }
 
-/** Synthesize a short (or long) call leg into `PositionLeg` shape from a chain row. */
-export function buildCallLeg(params: {
-  strike: number;
-  side: 'BUY' | 'SELL';
-  qtyLots: number;
-  price: number;
-  chainLeg?: ChainLegData;
-  securityId?: string | null;
-  expiry: string | null;
-  tradingSymbol?: string;
-  ltp?: number | null;
-  dte?: number;
-  spot?: number;
-}): PositionLeg {
-  const chainLeg = params.chainLeg;
-  let delta = chainLeg?.greeks?.delta ?? null;
-  if ((delta === null || delta === undefined || Math.abs(delta) === 0) && params.spot) {
-    const iv = chainLeg?.implied_volatility && chainLeg.implied_volatility > 0 ? chainLeg.implied_volatility : 12;
-    delta = estimatePopAndDelta(params.spot, params.strike, params.dte ?? 1, iv, true).delta;
-  }
-  return {
-    strike: params.strike,
-    type: 'CE',
-    side: params.side,
-    qtyLots: params.qtyLots,
-    price: params.price,
-    delta: delta ?? null,
-    iv: typeof chainLeg?.implied_volatility === 'number' ? chainLeg.implied_volatility / 100 : null,
-    vega: chainLeg?.greeks?.vega ?? null,
-    gamma: chainLeg?.greeks?.gamma ?? null,
-    theta: chainLeg?.greeks?.theta ?? null,
-    securityId: params.securityId ?? (chainLeg?.security_id ? String(chainLeg.security_id) : null),
-    expiry: params.expiry,
-    display: {
-      tradingSymbol: params.tradingSymbol ?? `NIFTY-${params.strike}-CE`,
-      productType: 'INTRADAY',
-      netQty: params.side === 'SELL' ? -params.qtyLots : params.qtyLots,
-      entryAvg: params.price,
-      ltp: params.ltp ?? (chainLeg && chainLeg.last_price > 0 ? chainLeg.last_price : null),
-      realizedProfit: 0,
-      unrealizedProfit: 0,
-      trustBrokerUnrealized: false,
-      expiry: params.expiry,
-    },
-  };
-}
-
-/** Thin re-export wrapper — the live cumulative delta/gamma/theta/vega readout
- *  across the futures + call leg(s), standard signed-Greeks convention. */
-export function computeCoveredCallGreeks(legs: PositionLeg[]): NetGreeks {
-  return computeNetGreeks(legs);
+/** Calendar days from today (IST) to an expiry date "YYYY-MM-DD" (fractional is fine). */
+export function daysToExpiry(expiry: string, now = Date.now()): number {
+  const d = new Date(`${expiry.slice(0, 10)}T15:30:00+05:30`).getTime();
+  if (Number.isNaN(d)) return 1;
+  return Math.max(0, (d - now) / 86_400_000);
 }
