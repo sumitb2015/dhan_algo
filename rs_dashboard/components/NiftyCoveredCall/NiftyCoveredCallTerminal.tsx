@@ -7,6 +7,7 @@ import { cn } from '@/lib/utils';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import DeltaPanel from './DeltaPanel';
+import HowToUse from './HowToUse';
 import TradeSheet, { type OpenCallRow } from './TradeSheet';
 import { useLiveOptionsWS } from '@/lib/useLiveOptionsWS';
 import { lookupChainLegData, type ChainOc } from '@/lib/optionsStrategy';
@@ -536,6 +537,8 @@ export default function NiftyCoveredCallTerminal() {
           {bookError && <div>Broker book: {bookError}</div>}
         </div>
       )}
+
+      <HowToUse />
 
       {/* P&L STRIP */}
       <div className="grid grid-cols-2 md:grid-cols-5 gap-3 px-4 pt-4">
