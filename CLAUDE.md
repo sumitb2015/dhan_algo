@@ -133,6 +133,7 @@ docs/
   STRATEGY_GUIDELINES.md       # How to structure a new strategy
   OPTION_CHAIN_QUICK_REF.md    # Option chain response shape cheat sheet
   PIVOT_DETECTION.md           # lib/pivots.py — swing high/low detection + confirmation lag
+  RS_STRATEGY_GUIDE.md         # User guide for /rs-strategy: rules, filters, every column, Buy/Sell ticket safety rules
 scripts/
   downloader/               # Historical data downloaders + refresh_dashboard_data.py / fetch_today_quotes.py
   analysis/                 # Backtests (backtest_nifty50_rs*.py suite, backtest_short_straddle.py),

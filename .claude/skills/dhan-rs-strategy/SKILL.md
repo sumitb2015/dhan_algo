@@ -80,6 +80,15 @@ Browser check: the dashboard needs a session cookie (`proxy.ts`). For local test
 this page: at 390 px the shared NavBar buttons overflow the header (Stage Screener is worse).
 Reference counts on 2026-09-30 data: Buy 55 · Hold 145 · Sell 229 · Wait 70 (499 scanned; 87 Buy with RSI off; weekly long ≈ 253). Chart cross-check 2026-10-01: ENGINERSIN RS-55 `0.4581` = TradingView's `0.46`, base bar 2026-07-15 (the indicator's "RS-55 reference" label), Supertrend 288.72, RSI 69.43 — all match.
 
+## In-page guide
+
+The header **Guide** button opens `components/RsStrategyGuide.tsx`, which renders `docs/RS_STRATEGY_GUIDE.md`
+(read per request by `app/rs-strategy/page.tsx` and passed in as text), so the repo doc and the in-app help are one
+source. Rendering uses `lib/miniMarkdown.ts` — a small parser to a data structure (never raw HTML) that supports only
+headings, paragraphs, `-` lists, `>` quotes, tables, `---` and `**bold**`/`*italic*`/`` `code` ``. If you use other markdown
+(links, numbered lists, images) in the guide, extend the parser and its test first; `lib/miniMarkdown.test.ts` parses the real
+guide and fails on an unrecognised table or leftover `**`. **When you change a column, filter, rule or order limit, update the guide.**
+
 ## Buy / Sell tickets (REAL MONEY)
 
 Each row has Buy and Sell buttons that open `components/EquityOrderModal.tsx`; a **Held** column and an

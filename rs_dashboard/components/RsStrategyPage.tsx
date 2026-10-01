@@ -1,9 +1,10 @@
 'use client';
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { ChartNoAxesCombined, RefreshCw, Search, Activity } from 'lucide-react';
+import { ChartNoAxesCombined, RefreshCw, Search, Activity, BookOpen } from 'lucide-react';
 import NavBar from './NavBar';
 import EquityOrderModal from './EquityOrderModal';
+import RsStrategyGuide from './RsStrategyGuide';
 import { cachedFetch, setCached } from '@/lib/clientCache';
 import type { EquityHolding } from '@/lib/dhanEquityPortfolio';
 import type { Side } from '@/lib/equityOrder';
@@ -68,7 +69,7 @@ function HeldCell({ h, loaded }: { h: EquityHolding | undefined; loaded: boolean
   );
 }
 
-export default function RsStrategyPage() {
+export default function RsStrategyPage({ guide = '' }: { guide?: string }) {
   const [period, setPeriod] = useState(DEFAULT_PERIOD);
   const [periodDraft, setPeriodDraft] = useState(String(DEFAULT_PERIOD));
   const [data, setData] = useState<RsStrategyResponse | null>(null);
@@ -84,6 +85,7 @@ export default function RsStrategyPage() {
   const [holdingsTick, setHoldingsTick] = useState(0); // bump to force a fresh read (after an order)
   const [heldOnly, setHeldOnly] = useState(false);
   const [order, setOrder] = useState<{ symbol: string; side: Side } | null>(null);
+  const [guideOpen, setGuideOpen] = useState(false);
   const [tab, setTab] = useState<Tab>('BUY');
   const [query, setQuery] = useState('');
   const [sortKey, setSortKey] = useState<SortKey>('rs');
@@ -243,6 +245,15 @@ export default function RsStrategyPage() {
               className="w-16 px-2 py-1 rounded-md bg-zinc-900 border border-zinc-800 text-xs font-mono text-zinc-100 focus:outline-none focus:ring-2 focus:ring-emerald-500/50"
             />
           </label>
+          {guide && (
+            <button
+              onClick={() => setGuideOpen(true)}
+              className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-md border border-zinc-800 bg-zinc-900 text-xs font-bold text-zinc-200 hover:bg-zinc-800 focus:outline-none focus:ring-2 focus:ring-emerald-500/50"
+            >
+              <BookOpen className="w-3.5 h-3.5" aria-hidden="true" />
+              Guide
+            </button>
+          )}
           <button
             onClick={() => load(period, rsiOn ? RSI_MIN : 0, true)}
             disabled={loading}
@@ -415,6 +426,8 @@ export default function RsStrategyPage() {
           </div>
         </section>
       </main>
+
+      {guide && <RsStrategyGuide open={guideOpen} onClose={() => setGuideOpen(false)} markdown={guide} />}
 
       {order && (
         <EquityOrderModal
