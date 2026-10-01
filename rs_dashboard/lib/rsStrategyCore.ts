@@ -32,6 +32,8 @@ export interface RsStrategyStock {
   ema: number | null; // EMA(emaPeriod) of the close; null until emaPeriod bars exist
   rsRisingDays: number; // consecutive sessions RS has risen, ending on the last bar (0 = RS did not rise on the last bar)
   signal: RsSignal;
+  /** Date the current buy triggered (YYYY-MM-DD); null unless the stock is Buy or In Trend (i.e. a buy is still active). */
+  entryDate: string | null;
   daysInSignal: number; // consecutive bars the current signal has held
   date: string;
   /** Same rules run on weekly bars (resampled from daily). null = not enough weekly history. */
@@ -127,6 +129,7 @@ function evaluateSeries(symbol: string, stockRows: Bar[], indexRows: Bar[], p: R
   let lastRs = 0;
   let risingDays = 0;
   let lastIdx = -1;
+  let entryDate: string | null = null; // bar on which the current long phase began
   let signal: RsSignal = 'WAIT';
   for (let i = 0; i < n; i++) {
     const rs = rsByDate.get(stockRows[i].date);
@@ -144,6 +147,8 @@ function evaluateSeries(symbol: string, stockRows: Bar[], indexRows: Bar[], p: R
     const wasLong = long;
     if (buy) long = true;
     else if (sell) long = false;
+    if (long && !wasLong) entryDate = stockRows[i].date; // a new buy starts a new phase
+    if (!long) entryDate = null;
     days = valid > 1 && long === wasLong ? days + 1 : 1;
     signal = long ? (buy ? 'BUY' : 'HOLD') : sell ? 'SELL' : 'WAIT';
     lastIdx = i;
@@ -166,6 +171,7 @@ function evaluateSeries(symbol: string, stockRows: Bar[], indexRows: Bar[], p: R
     ema: ema ? ema[lastIdx] : null,
     rsRisingDays: risingDays,
     signal,
+    entryDate: signal === 'BUY' || signal === 'HOLD' ? entryDate : null,
     daysInSignal: days,
     date: row.date,
   };

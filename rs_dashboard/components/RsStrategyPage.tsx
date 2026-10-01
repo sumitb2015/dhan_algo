@@ -13,7 +13,7 @@ import type { Side } from '@/lib/equityOrder';
 import { DEFAULT_PARAMS, type RsStrategyResponse, type RsStrategyStock, type RsSignal } from '@/lib/rsStrategyCore';
 
 type Tab = 'BUY' | 'HOLD' | 'SELL' | 'ALL';
-type SortKey = 'symbol' | 'held' | 'close' | 'change1D' | 'rs' | 'supertrend' | 'ema' | 'rsi' | 'distPct' | 'signal' | 'weekly' | 'daysInSignal';
+type SortKey = 'symbol' | 'held' | 'close' | 'change1D' | 'rs' | 'supertrend' | 'ema' | 'rsi' | 'distPct' | 'signal' | 'entryDate' | 'weekly' | 'daysInSignal';
 
 // Strongest state first when sorting descending; a stock with no weekly signal sorts below everything.
 const SIGNAL_RANK: Record<RsSignal, number> = { BUY: 3, HOLD: 2, WAIT: 1, SELL: 0 };
@@ -41,7 +41,7 @@ const tone = (n: number) => (n > 0 ? 'text-emerald-400' : n < 0 ? 'text-red-400'
 function RsBar({ value }: { value: number }) {
   const w = (Math.min(Math.abs(value), 1) / 2) * 100; // % of the full track on one side
   return (
-    <div className="relative h-1.5 w-28 rounded-full bg-zinc-800" aria-hidden="true">
+    <div className="relative h-1.5 w-20 rounded-full bg-zinc-800" aria-hidden="true">
       <span className="absolute left-1/2 top-[-2px] bottom-[-2px] w-px bg-zinc-500" />
       <span
         className={`absolute top-0 bottom-0 rounded-full ${value >= 0 ? 'bg-emerald-400' : 'bg-red-400'}`}
@@ -328,6 +328,7 @@ export default function RsStrategyPage({ guide = '' }: { guide?: string }) {
         case 'held': return holdings?.[s.symbol]?.totalQty ?? 0;
         case 'signal': return SIGNAL_RANK[s.signal];
         case 'weekly': return s.weekly ? SIGNAL_RANK[s.weekly] : null;
+        case 'entryDate': return s.entryDate; // YYYY-MM-DD sorts as text; "-" (null) stays last
         default: return s[sortKey];
       }
     };
@@ -346,13 +347,14 @@ export default function RsStrategyPage({ guide = '' }: { guide?: string }) {
     { id: 'ALL', label: 'All', n: data ? tabCounts.ALL : undefined },
   ];
 
-  const th = (k: SortKey, label: string, align = 'text-right') => (
+  const th = (k: SortKey, label: string, align = 'text-right', title?: string) => (
     <th
       className={`px-3 py-3 ${align} whitespace-nowrap`}
       aria-sort={sortKey === k ? (sortAsc ? 'ascending' : 'descending') : 'none'}
     >
       <button
         onClick={() => handleSort(k)}
+        title={title}
         className="font-bold hover:text-emerald-300 focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500/50 rounded"
       >
         {label}{sortKey === k ? (sortAsc ? ' ↑' : ' ↓') : <span className="text-zinc-500" aria-hidden="true"> ↕</span>}
@@ -540,14 +542,15 @@ export default function RsStrategyPage({ guide = '' }: { guide?: string }) {
                   {th('close', 'Close')}
                   {th('change1D', '1D %')}
                   {th('rs', `RS-${period}`)}
-                  {th('rs', 'RS vs zero', 'text-left')}
+                  {th('rs', 'RS vs 0', 'text-left', 'RS drawn around the zero line: right of the line is outperforming Nifty, left is lagging')}
                   {th('supertrend', 'Supertrend')}
                   {th('ema', `EMA ${data?.params.emaPeriod ?? 200}`)}
                   {th('rsi', 'RSI')}
                   {th('distPct', 'From ST %')}
                   {th('signal', 'Signal', 'text-center')}
+                  {th('entryDate', 'Buy date', 'text-center')}
                   {th('weekly', 'Weekly', 'text-center')}
-                  {th('daysInSignal', 'Bars in state')}
+                  {th('daysInSignal', 'Bars', 'text-right', 'Daily bars the stock has been in its current state (a Buy and the In Trend that follows count together)')}
                   <th className="px-3 py-3 text-center sticky right-0 z-10 bg-zinc-800 border-l border-zinc-700">Trade</th>
                 </tr>
               </thead>
@@ -568,13 +571,17 @@ export default function RsStrategyPage({ guide = '' }: { guide?: string }) {
                       <td className={`px-3 py-2.5 text-right ${s.rsi > 50 ? 'text-zinc-200' : 'text-zinc-400'}`}>{fmt(s.rsi, 0)}</td>
                       <td className={`px-3 py-2.5 text-right ${tone(s.distPct)}`}>{signed(s.distPct)}</td>
                       <td className="px-3 py-2.5 text-center">
-                        <span className={`inline-block px-2 py-0.5 rounded border text-[10px] font-bold ${BADGE[s.signal]}`}>
+                        <span className={`inline-block whitespace-nowrap px-2 py-0.5 rounded border text-[10px] font-bold ${BADGE[s.signal]}`}>
                           {LABEL[s.signal]}
                         </span>
                       </td>
+                      <td
+                        className={`px-3 py-2.5 text-center whitespace-nowrap ${s.entryDate ? 'text-zinc-200' : 'text-zinc-500'}`}
+                        title={s.entryDate ? `The current buy triggered on ${s.entryDate}` : 'No active buy (Wait or Sell)'}
+                      >{s.entryDate ?? '-'}</td>
                       <td className="px-3 py-2.5 text-center">
                         {s.weekly ? (
-                          <span className={`inline-block px-2 py-0.5 rounded border text-[10px] font-bold ${BADGE[s.weekly]}`}>{LABEL[s.weekly]}</span>
+                          <span className={`inline-block whitespace-nowrap px-2 py-0.5 rounded border text-[10px] font-bold ${BADGE[s.weekly]}`}>{LABEL[s.weekly]}</span>
                         ) : (
                           <span className="text-zinc-500" title="Not enough weekly history">–</span>
                         )}

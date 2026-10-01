@@ -58,7 +58,7 @@ A stock with **fewer than 200 days of history** has no EMA 200, so it cannot bec
 
 The states are worked out by walking through the stock's whole history day by day: *buy when the Buy rule is true,
 leave only when the Sell rule is true.* So **In Trend can reflect a buy from months ago**. Check the
-**Bars in state** column to see how long.
+**Buy date** and **Bars** columns to see when it started and how long ago.
 
 ---
 
@@ -108,14 +108,15 @@ Type part of a symbol to narrow the list.
 | **Close** | Latest closing price (live price during market hours). |
 | **1D %** | Change since the previous close. |
 | **RS-55** | The relative-strength ratio described above (the number in the header changes if you change the period). Green = beating Nifty, red = lagging. |
-| **RS vs zero** | A small bar around a centre line. Right of the line (green) = RS above 0, left (red) = below. Longer = stronger, capped at ±1.0. |
+| **RS vs 0** | A small bar around a centre line. Right of the line (green) = RS above 0, left (red) = below. Longer = stronger, capped at ±1.0. |
 | **Supertrend** | The Supertrend price level. Price above it = bullish. |
 | **EMA 200** | The 200-day EMA price level. **Green** = price is above it, **red** = price is below it, `–` = fewer than 200 days of history. Hover for the same note. |
 | **RSI** | RSI(14). Brighter when above 50. |
 | **From ST %** | How far the price is from the Supertrend line: `(price − line) ÷ price`. A large positive number means the stock is **extended** above its trend line, so a fall back to it would be big. Small means it is close to the line, which is a tighter stop. |
 | **Signal** | The state on the **daily** chart: Buy, In Trend, Sell or Wait. |
+| **Buy date** | The date the **current buy triggered**, for stocks that are in **Buy** or **In Trend** (a buy is still active). It stays the same while a Buy turns into In Trend, and moves to a new date only after a Sell followed by a fresh Buy. **Wait** and **Sell** show `-` because there is no active buy. Click the heading to sort newest first, which is a quick way to find **fresh signals**. The date comes from replaying the rules over the stock's history, so a stock that has been strong for years shows when the rules first bought it once the indicators had enough data (the 200 EMA needs 200 days). |
 | **Weekly** | The **same state on weekly candles**: the bigger-picture check (see below). `–` means under about 70 weeks of history, so there is no weekly signal. |
-| **Bars in state** | How many daily bars the stock has been in its current phase. Buy and In Trend count together (the time since the buy). Sell and Wait count together. |
+| **Bars** | How many daily bars the stock has been in its current phase. Buy and In Trend count together (the time since the buy). Sell and Wait count together. |
 | **Trade** | **Buy** and **Sell** buttons (see section 6). This column stays pinned to the right edge, so it is always in view even when the table scrolls sideways on a smaller screen. |
 
 ### Reading Signal together with Weekly

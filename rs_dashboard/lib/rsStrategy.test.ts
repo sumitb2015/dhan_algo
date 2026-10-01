@@ -201,3 +201,57 @@ test('rsRisingDays is the exact length of the current run, so any N can be filte
   const dip = [...closes, closes[closes.length - 1] - 4];
   assert.equal(evaluateStock('X', mk(dip), flatIdx(dip.length), DEFAULT_PARAMS)!.rsRisingDays, 0);
 });
+
+// ---- entryDate: when the active buy triggered ----
+const dateAt = (i: number) => new Date(Date.UTC(2024, 0, 1 + i)).toISOString().slice(0, 10);
+
+test('entryDate: Buy has the date its buy triggered; Sell and Wait have none', () => {
+  const up = Array.from({ length: 100 }, (_, i) => 50 * Math.exp(i / 60));
+  const r = evaluateStock('X', mk(up), flatIdx(100), DEFAULT_PARAMS)!;
+  assert.equal(r.signal, 'BUY');
+  assert.match(r.entryDate ?? '', /^\d{4}-\d{2}-\d{2}$/);
+  assert.ok(r.entryDate! <= r.date, 'entry cannot be after the last bar');
+  // The buy triggers on the first bar all of RS, Supertrend and RSI exist and agree: not before RS has 55 bars of history.
+  assert.ok(r.entryDate! >= dateAt(55), `entry ${r.entryDate} is before RS can exist`);
+
+  const fall = Array.from({ length: 100 }, (_, i) => 100 - i * 0.5);
+  const s = evaluateStock('X', mk(fall), flatIdx(100), DEFAULT_PARAMS)!;
+  assert.equal(s.signal, 'SELL');
+  assert.equal(s.entryDate, null);
+
+  const wait = evaluateStock('X', mk(Array.from({ length: 100 }, (_, i) => 100 - i * 0.15)), mk(Array.from({ length: 100 }, (_, i) => 100 - i * 0.5)), DEFAULT_PARAMS)!;
+  assert.equal(wait.signal, 'WAIT');
+  assert.equal(wait.entryDate, null);
+});
+
+test('entryDate stays the same while the stock goes from Buy to In Trend', () => {
+  // Falls, rebounds above the 200 EMA (a buy), then dips back under it: BUY at the end of the rebound, IN TREND after the dip.
+  const base = [
+    ...Array.from({ length: 200 }, (_, i) => 300 - i * 0.75),
+    ...Array.from({ length: 40 }, (_, i) => 150 + (i / 39) * (260 - 150)),
+  ];
+  const full = [...base, ...Array.from({ length: 25 }, (_, i) => 260 - ((i + 1) / 25) * (260 - 215))];
+  const at = evaluateStock('X', mk(base), flatIdx(base.length), { ...DEFAULTS, emaGate: true })!;
+  const later = evaluateStock('X', mk(full), flatIdx(full.length), { ...DEFAULTS, emaGate: true })!;
+  assert.equal(at.signal, 'BUY');
+  assert.equal(later.signal, 'HOLD');
+  assert.ok(at.entryDate && at.entryDate >= dateAt(200), 'bought during the rebound, after the 200 bars the EMA needs');
+  assert.equal(later.entryDate, at.entryDate, 'In Trend keeps the original buy date');
+  assert.ok(later.daysInSignal > at.daysInSignal, 'and the bars-in-state keep counting from it');
+});
+
+test('entryDate moves to a new date after a sell and a fresh buy', () => {
+  const up1 = Array.from({ length: 90 }, (_, i) => 50 * Math.exp(i / 60));
+  const down = Array.from({ length: 70 }, (_, i) => up1[89] * Math.exp(-i / 18));
+  const up2 = Array.from({ length: 80 }, (_, i) => down[69] * Math.exp((i + 1) / 40));
+  const first = evaluateStock('X', mk(up1), flatIdx(up1.length), DEFAULT_PARAMS)!;
+  const mid = [...up1, ...down];
+  const sold = evaluateStock('X', mk(mid), flatIdx(mid.length), DEFAULT_PARAMS)!;
+  const all = [...mid, ...up2];
+  const again = evaluateStock('X', mk(all), flatIdx(all.length), DEFAULT_PARAMS)!;
+  assert.equal(sold.signal, 'SELL');
+  assert.equal(sold.entryDate, null, 'after the exit there is no active buy');
+  assert.equal(again.signal, 'BUY');
+  assert.ok(first.entryDate && again.entryDate && again.entryDate > dateAt(mid.length - 1), `new buy ${again.entryDate} should be after the sell phase`);
+  assert.notEqual(again.entryDate, first.entryDate);
+});
