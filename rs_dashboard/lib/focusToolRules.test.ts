@@ -14,7 +14,7 @@ import { readFileSync } from 'node:fs';
 import path from 'node:path';
 
 import {
-  evaluateEntry, evaluateEntryMomentum, rangeBreakoutOn, rangePhase, rangeBreakoutHit, costStopApplies, runningLazyLeg, legSlMultiplier, legTarget, nextLazyLegId, lazyLegStrike, legHasOwnSl, simpleMomOn, simpleMomLevel, simpleMomHit, evaluateGlobalRisk, evaluateRowExit, legStopReason,
+  evaluateEntry, evaluateEntryMomentum, overallSlConfig, nextOverallPeak, evaluateOverallExit, overallExitKind, evaluateOverallReentry, rangeBreakoutOn, rangePhase, rangeBreakoutHit, costStopApplies, runningLazyLeg, legSlMultiplier, legTarget, nextLazyLegId, lazyLegStrike, legHasOwnSl, simpleMomOn, simpleMomLevel, simpleMomHit, evaluateGlobalRisk, evaluateRowExit, legStopReason,
   dteForExpiry, dteMatches, sidePremium, legsOf, legsFlat, rowOwnsLeg,
   stopPremium, legStopPremium, pairStopPremium, legOwnContracts,
   nextOpenedTs, isGhostDropProtected, GHOST_DROP_GRACE_MS,
@@ -713,4 +713,94 @@ test('range breakout rules', () => {
   assert.equal(rangeBreakoutHit(rb({ side: 'low' }), range, 180), true);
   assert.equal(rangeBreakoutHit(rb({ side: 'low' }), range, 170), true);
   assert.equal(rangeBreakoutHit(rb(), range, 0), false);                 // no quote
+});
+
+// ── Overall Strategy Settings ──
+const OV_LIVE = (o: object = {}) => ({
+  ceStrike: 24000, peStrike: 24000, ltpCe: 170, ltpPe: 130,
+  cePosition: { netQty: -75, sellAvg: 170 }, pePosition: { netQty: -75, sellAvg: 130 },
+  pnl: 0, entryPremium: 300, lotSize: 75, vwap: null, vwapClose: null, ...o,
+}) as never;
+const OV_ROW = (o: object = {}) => ({
+  side: 'BOTH', slRupees: '', slMultiplier: '',
+  fill: { ceQty: 75, peQty: 75, ceStrike: 24000, peStrike: 24000, ts: '' },
+  ...o,
+}) as never;
+const tgt = (mode: string, value: string) => ({ overallTarget: { enabled: true, mode, value } });
+const trail = (o: object) => ({ overallTrail: { enabled: true, kind: 'lock', reach: '', lock: '', every: '', by: '', ...o } });
+
+test('overall SL config reads the row\'s SL ₹ / SL ×', () => {
+  assert.deepEqual(overallSlConfig({ slRupees: '5000', slMultiplier: '1.3' } as never), { mode: 'mtm', value: 5000 });
+  const pct = overallSlConfig({ slRupees: '', slMultiplier: '1.3' } as never);
+  assert.equal(pct?.mode, 'premiumPct'); assert.ok(Math.abs((pct?.value ?? 0) - 30) < 1e-9);
+  assert.equal(overallSlConfig({ slRupees: '', slMultiplier: '1' } as never), null);
+});
+
+test('overall target: MTM and % of premium', () => {
+  assert.equal(evaluateOverallExit(OV_ROW(tgt('mtm', '5000')), OV_LIVE({ pnl: 4999 }), { pnl: 4999, pts: 0 }), null);
+  const hit = evaluateOverallExit(OV_ROW(tgt('mtm', '5000')), OV_LIVE({ pnl: 5000 }), { pnl: 5000, pts: 0 });
+  assert.equal(hit?.kind, 'target');
+  // doc: 30% of combined 300 = 90 points. premium 300 → 210 is a 90-point profit
+  const live = (now: number) => OV_LIVE({ ltpCe: now * 170 / 300, ltpPe: now * 130 / 300 });
+  assert.equal(evaluateOverallExit(OV_ROW(tgt('premiumPct', '30')), live(211), { pnl: 0, pts: 89 }), null);
+  assert.equal(evaluateOverallExit(OV_ROW(tgt('premiumPct', '30')), live(210), { pnl: 0, pts: 90 })?.kind, 'target');
+});
+
+test('lock and lock-and-trail (doc numbers)', () => {
+  // Lock: reach 10000, lock 5000
+  const lock = OV_ROW(trail({ kind: 'lock', reach: '10000', lock: '5000' }));
+  assert.equal(evaluateOverallExit(lock, OV_LIVE({ pnl: 4000 }), { pnl: 9000, pts: 0 }), null);          // never reached
+  assert.equal(evaluateOverallExit(lock, OV_LIVE({ pnl: 5500 }), { pnl: 10000, pts: 0 }), null);          // above the lock
+  assert.equal(evaluateOverallExit(lock, OV_LIVE({ pnl: 5000 }), { pnl: 10000, pts: 0 })?.kind, 'sl');
+  // Lock and trail: 10000 → lock 5000, every 2000 trail 1000
+  const lt = OV_ROW(trail({ kind: 'lockTrail', reach: '10000', lock: '5000', every: '2000', by: '1000' }));
+  assert.equal(evaluateOverallExit(lt, OV_LIVE({ pnl: 6500 }), { pnl: 12000, pts: 0 }), null);            // floor now 6000
+  assert.equal(evaluateOverallExit(lt, OV_LIVE({ pnl: 6000 }), { pnl: 12000, pts: 0 })?.kind, 'sl');
+  assert.equal(evaluateOverallExit(lt, OV_LIVE({ pnl: 7000 }), { pnl: 14000, pts: 0 })?.kind, 'sl');      // floor 7000
+  assert.equal(evaluateOverallExit(lt, OV_LIVE({ pnl: 7100 }), { pnl: 14000, pts: 0 }), null);
+});
+
+test('overall trail SL (doc numbers) — MTM and % of premium', () => {
+  // SL 5000, trail every 3000 by 1500: profit 3000 → SL 3500; 6000 → 2000; 9000 → 500
+  const t = (extra = {}) => OV_ROW({ slRupees: '5000', ...trail({ kind: 'trailSl', every: '3000', by: '1500' }), ...extra });
+  assert.equal(evaluateOverallExit(t(), OV_LIVE({ pnl: -3500 }), { pnl: 0, pts: 0 }), null);             // untrailed: legacy SL's job
+  assert.equal(evaluateOverallExit(t(), OV_LIVE({ pnl: -3500 }), { pnl: 3000, pts: 0 })?.kind, 'sl');
+  assert.equal(evaluateOverallExit(t(), OV_LIVE({ pnl: -3400 }), { pnl: 3000, pts: 0 }), null);
+  assert.equal(evaluateOverallExit(t(), OV_LIVE({ pnl: -2000 }), { pnl: 6000, pts: 0 })?.kind, 'sl');
+  assert.equal(evaluateOverallExit(t(), OV_LIVE({ pnl: -500 }), { pnl: 9000, pts: 0 })?.kind, 'sl');
+  assert.equal(evaluateOverallExit(t(), OV_LIVE({ pnl: -400 }), { pnl: 9000, pts: 0 }), null);
+  // no SL → nothing to trail
+  assert.equal(evaluateOverallExit(t({ slRupees: '' }), OV_LIVE({ pnl: -9999 }), { pnl: 3000, pts: 0 }), null);
+  // %: SL 30% of 300 = 90 pts, trail 5% / 2% = every 15 pts by 6: peak 15 → SL 84; 45 → 72
+  const pct = OV_ROW({ slMultiplier: '1.3', ...trail({ kind: 'trailSl', every: '5', by: '2' }) });
+  const live = (pts: number) => OV_LIVE({ ltpCe: (300 - pts) * 170 / 300, ltpPe: (300 - pts) * 130 / 300 });
+  assert.equal(evaluateOverallExit(pct, live(-84), { pnl: 0, pts: 15 })?.kind, 'sl');
+  assert.equal(evaluateOverallExit(pct, live(-83), { pnl: 0, pts: 15 }), null);
+  assert.equal(evaluateOverallExit(pct, live(-72), { pnl: 0, pts: 45 })?.kind, 'sl');
+  assert.equal(evaluateOverallExit(pct, live(-71), { pnl: 0, pts: 45 }), null);
+});
+
+test('overall peak ratchets and never goes below zero', () => {
+  assert.deepEqual(nextOverallPeak(undefined, { pnl: -50, pts: null }), { pnl: 0, pts: 0 });
+  assert.deepEqual(nextOverallPeak({ pnl: 300, pts: 20 }, { pnl: 100, pts: 30 }), { pnl: 300, pts: 30 });
+});
+
+test('overall exit kind and re-entry decision', () => {
+  assert.equal(overallExitKind('SL ₹5000 hit (P&L ₹-5001)'), 'sl');
+  assert.equal(overallExitKind('SL ×1.3 hit (premium 391 vs entry 300)'), 'sl');
+  assert.equal(overallExitKind('Overall Target ₹5000 reached (P&L ₹5000)'), 'target');
+  assert.equal(overallExitKind('Overall Lock ₹5000 hit'), 'sl');
+  assert.equal(overallExitKind('CE SL ×1.2 hit (premium 1 vs entry 1)'), null);   // a leg's own stop
+  assert.equal(overallExitKind('Exit time 15:15 reached'), null);
+  const ctx = { nowHm: '10:00', product: 'INTRADAY' as const, groupEnabled: true };
+  const re = (o: object) => ({ slRupees: '5000', exitTime: '15:15', overallReSl: { enabled: true, mode: 'asap', max: 2 }, ...o }) as never;
+  assert.equal(evaluateOverallReentry(re({}), 'sl', ctx).enter, true);
+  assert.equal(evaluateOverallReentry(re({ overallReSl: { enabled: false, mode: 'asap', max: 2 } }), 'sl', ctx).enter, false);
+  assert.equal(evaluateOverallReentry(re({ overallReSlCount: 2 }), 'sl', ctx).enter, false);          // max reached
+  assert.equal(evaluateOverallReentry(re({ overallReSl: { enabled: true, mode: 'asap', max: 9 }, overallReSlCount: 5 }), 'sl', ctx).enter, false);  // capped at 5
+  assert.equal(evaluateOverallReentry(re({ slRupees: '' }), 'sl', ctx).enter, false);                  // no overall SL set
+  assert.equal(evaluateOverallReentry(re({ noReEntryAfter: '09:30' }), 'sl', ctx).enter, false);
+  // target needs its own switch and target
+  assert.equal(evaluateOverallReentry(re({ overallReTgt: { enabled: true, mode: 'momentum', max: 1 }, ...tgt('mtm', '9000') }), 'target', ctx).mode, 'momentum');
+  assert.equal(evaluateOverallReentry(re({ overallReTgt: { enabled: true, mode: 'asap', max: 1 } }), 'target', ctx).enter, false);
 });

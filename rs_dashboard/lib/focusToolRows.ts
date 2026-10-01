@@ -151,6 +151,9 @@ export interface FocusRowFill {
   /** The Lazy Leg (FocusLazyLeg.id) currently running in this slot; its SL / target replace the row's. */
   ceLazyId?: string | null;
   peLazyId?: string | null;
+  /** Highest P&L (₹) and premium profit (points) this cycle — what the trails ratchet on. */
+  peakPnl?: number;
+  peakPts?: number;
   /** Lazy legs already opened this cycle — each fires at most once, so a chain can't loop. */
   lazyUsed?: string[];
   /** Re-entries taken after a leg TARGET this cycle (SL ones are ceRolls/peRolls). */
@@ -223,6 +226,48 @@ export interface FocusLegRangeBreakout {
   /** Enter when the price breaks the range's high, or its low. */
   side: 'high' | 'low';
   on: 'instrument' | 'underlying';
+}
+
+/**
+ * AlgoTest "Overall Strategy Settings", per row (a row is one strategy).
+ * `mode` is the unit of `value`: 'mtm' = rupees of P&L, 'premiumPct' = % of the
+ * combined entry premium (points of premium, lots ignored — 30% of 170 + 130 is
+ * 90 points).
+ */
+export type FocusOverallMode = 'mtm' | 'premiumPct';
+
+export interface FocusOverallTarget {
+  enabled: boolean;
+  mode: FocusOverallMode;
+  value: string;
+}
+
+/**
+ * Trailing Options:
+ *  - lock      — profit reaches `reach` → lock `lock`; exit if profit falls back to it. MTM.
+ *  - lockTrail — as lock, then for every `every` more profit raise the lock by `by`. MTM.
+ *  - trailSl   — for every `every` profit, tighten the Overall SL by `by` (in the SL's own
+ *                unit; needs an Overall SL).
+ */
+export interface FocusOverallTrail {
+  enabled: boolean;
+  kind: 'lock' | 'lockTrail' | 'trailSl';
+  reach: string;
+  lock: string;
+  every: string;
+  by: string;
+}
+
+/**
+ * Re-entry after an Overall SL / Target exit (AlgoTest, sell side only — no
+ * reverse variants): 'asap' re-opens the row's legs at once at fresh strikes;
+ * 'momentum' re-opens them through each leg's Simple Momentum (legs without it
+ * open at once). At most 5 (MAX_OVERALL_REENTRIES) per trigger.
+ */
+export interface FocusOverallReentry {
+  enabled: boolean;
+  mode: 'asap' | 'momentum';
+  max: number;
 }
 
 export interface FocusRow {
@@ -318,6 +363,20 @@ export interface FocusRow {
   /** Per-leg Range Breakout. Mutually exclusive with Simple Momentum; ignored while Overall Momentum is on. */
   ceRangeBreakout?: FocusLegRangeBreakout;
   peRangeBreakout?: FocusLegRangeBreakout;
+  /**
+   * Overall SL is the row's own SL ₹ (slRupees = MTM) / SL × (slMultiplier =
+   * Total Premium %: ×1.3 is 30%). These add Overall Target, the trailing
+   * options and re-entry on both.
+   */
+  overallTarget?: FocusOverallTarget;
+  overallTrail?: FocusOverallTrail;
+  overallReSl?: FocusOverallReentry;
+  overallReTgt?: FocusOverallReentry;
+  /** Overall re-entries taken so far (reset when the row is armed by hand). */
+  overallReSlCount?: number;
+  overallReTgtCount?: number;
+  /** Set while a re-entry cycle is opening the row: how its legs enter. */
+  overallReMode?: 'asap' | 'momentum';
   /**
    * Leg-wise target: the leg exits once its premium has decayed by this much
    * from its own entry — a % (entry × (1 − v/100)) or points (entry − v), per

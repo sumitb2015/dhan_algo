@@ -33,7 +33,7 @@ import { partialCloseChips } from '@/lib/partialQty';
 import { cn } from '@/lib/utils';
 import type {
   FocusToolConfig, FocusRow, FocusRowFill, FocusIndexGroup,
-  FocusReentryMode, FocusReentryTrigger, FocusPendingReentry, FocusLegSimpleMom, FocusLazyLeg, FocusLegRangeBreakout,
+  FocusReentryMode, FocusReentryTrigger, FocusPendingReentry, FocusLegSimpleMom, FocusLazyLeg, FocusLegRangeBreakout, FocusOverallMode,
   FocusUnderlying, FocusDte, FocusSide, FocusRowStatus, FocusStrikeMode,
 } from '@/lib/focusToolRows';
 // The pure rule engine for entry and exit decisions.
@@ -46,7 +46,7 @@ import {
   legPinnedStrike, costStopReason, legOwnEntry, slRollStrike, DEFAULT_SL_ROLL_MAX,
   reentryConfig, evaluateReentry, reentryWindowClosed, pendingReentryLevel, pendingReentryHit, legTargetReason, costReentryBasis,
   awaitingMomentumQuote, MOMENTUM_QUOTE_WAIT_MS, legTargetLevel,
-  evaluateEntryMomentum, entryMomentumOn, rangeBreakoutOn, rangePhase, rangeBreakoutHit, costStopApplies, MAX_LAZY_LEGS, legSlMultiplier, legTarget, nextLazyLegId, lazyLegStrike, runningLazyLeg, simpleMomOn, simpleMomLevel, simpleMomHit,
+  evaluateEntryMomentum, entryMomentumOn, overallSlConfig, overallProgress, nextOverallPeak, evaluateOverallExit, overallExitKind, evaluateOverallReentry, MAX_OVERALL_REENTRIES, rangeBreakoutOn, rangePhase, rangeBreakoutHit, costStopApplies, MAX_LAZY_LEGS, legSlMultiplier, legTarget, nextLazyLegId, lazyLegStrike, runningLazyLeg, simpleMomOn, simpleMomLevel, simpleMomHit,
   type PosRow, type RowLive,
 } from '@/lib/focusToolRules';
 import { computeRowPnl, mtmForQty, shiftMayReopen, canMarkMtm, shiftCloseConfirmed, rowDisplayBookedPnl, putCallRatio, valuePutCallRatio, pickOpenInterest } from '@/lib/focusToolPnl';
@@ -1179,6 +1179,120 @@ function LazyLegsEditor({ row, onUpdate }: { row: FocusRow; onUpdate: (patch: Pa
   );
 }
 
+const OVERALL_MODE_OPTIONS = [
+  { value: 'mtm', label: 'MTM' },
+  { value: 'premiumPct', label: 'Total Premium %' },
+];
+const OVERALL_TRAIL_OPTIONS = [
+  { value: 'lock', label: 'Lock' },
+  { value: 'lockTrail', label: 'Lock and Trail' },
+  { value: 'trailSl', label: 'Overall Trail SL' },
+];
+const OVERALL_RE_OPTIONS = [
+  { value: 'asap', label: 'RE ASAP' },
+  { value: 'momentum', label: 'RE MOMENTUM' },
+];
+
+/**
+ * AlgoTest "Overall Strategy Settings" for one row: Overall SL, Overall Target,
+ * Trailing Options and Re-entry on both. Overall SL is the row's own SL ₹ (MTM)
+ * and SL × (Total Premium % — ×1.3 is 30%), so the two editors share one value.
+ * Amounts are free-typed → RuleNumInput (commit on blur/Enter). Re-entry is sell
+ * side only: AlgoTest's ↩ reverse variants are not offered.
+ */
+function OverallSettingsControls({ row, onUpdate }: { row: FocusRow; onUpdate: (patch: Partial<FocusRow>) => void }) {
+  const lbl = 'inline-flex items-center gap-1.5 font-bold text-zinc-400';
+  const num = 'w-16 h-6 text-center text-[11px]';
+  const sw = (checked: boolean, onChange: (c: boolean) => void, label: string) => (
+    <label className={cn(lbl, 'cursor-pointer text-zinc-300')}>
+      <Switch size="sm" checked={checked} onCheckedChange={c => onChange(!!c)} aria-label={label} />
+      {label}
+    </label>
+  );
+
+  // ── Overall SL: the row's SL ₹ / SL × ──
+  const sl = overallSlConfig(row);
+  const slMode: FocusOverallMode = sl?.mode ?? 'premiumPct';
+  const slValue = sl ? String(Math.round(sl.value * 1e6) / 1e6) : '';
+  const setSl = (mode: FocusOverallMode, v: string) => {
+    const n = Number(v);
+    onUpdate(mode === 'mtm'
+      ? { slRupees: n > 0 ? v : '', slMultiplier: '' }
+      : { slRupees: '', slMultiplier: n > 0 ? String(Math.round((1 + n / 100) * 1e6) / 1e6) : '' });
+  };
+
+  // ── Overall Target ──
+  const tgt = row.overallTarget ?? { enabled: false, mode: 'mtm' as const, value: '' };
+  const setTgt = (patch: Partial<typeof tgt>) => onUpdate({ overallTarget: { ...tgt, ...patch } });
+
+  // ── Trailing Options ──
+  const tr = row.overallTrail ?? { enabled: false, kind: 'lock' as const, reach: '', lock: '', every: '', by: '' };
+  const setTr = (patch: Partial<typeof tr>) => onUpdate({ overallTrail: { ...tr, ...patch } });
+  const trUnit = tr.kind === 'trailSl' ? (slMode === 'mtm' ? '₹' : '% prem') : '₹';
+
+  // ── Re-entry ──
+  const reRow = (kind: 'sl' | 'tgt') => {
+    const cur = (kind === 'sl' ? row.overallReSl : row.overallReTgt) ?? { enabled: false, mode: 'asap' as const, max: 1 };
+    const set = (patch: Partial<typeof cur>) => onUpdate(kind === 'sl' ? { overallReSl: { ...cur, ...patch } } : { overallReTgt: { ...cur, ...patch } });
+    const used = (kind === 'sl' ? row.overallReSlCount : row.overallReTgtCount) ?? 0;
+    return (
+      <div className="flex flex-wrap items-center gap-2">
+        {sw(cur.enabled, c => set({ enabled: c }), `Re-entry on Overall ${kind === 'sl' ? 'SL' : 'Target'}`)}
+        <MiniSelect value={cur.mode} ariaLabel={`Overall ${kind === 'sl' ? 'SL' : 'target'} re-entry type`} disabled={!cur.enabled}
+          options={OVERALL_RE_OPTIONS} onChange={v => set({ mode: v as 'asap' | 'momentum' })} className="w-32"
+          title="RE ASAP: reopen every leg at once at the current ATM. RE MOMENTUM: reopen through each leg's Simple Momentum (legs without it open at once)" />
+        <MiniSelect value={String(Math.min(MAX_OVERALL_REENTRIES, Math.max(1, cur.max)))} ariaLabel="Overall re-entries" disabled={!cur.enabled}
+          title={`Most re-entries (AlgoTest allows ${MAX_OVERALL_REENTRIES}). Used: ${used}`}
+          options={Array.from({ length: MAX_OVERALL_REENTRIES }, (_, i) => ({ value: String(i + 1), label: `×${i + 1}` }))}
+          onChange={v => set({ max: Number(v) })} className="w-14" />
+      </div>
+    );
+  };
+
+  return (
+    <div className="flex flex-col gap-1">
+      <div className="flex flex-wrap items-center gap-2">
+        {sw(!!sl, c => (c ? onUpdate({ slMultiplier: '1.2', slRupees: '' }) : onUpdate({ slRupees: '', slMultiplier: '' })), 'Overall SL')}
+        <MiniSelect value={slMode} ariaLabel="Overall SL type" disabled={!sl} options={OVERALL_MODE_OPTIONS}
+          onChange={v => setSl(v as FocusOverallMode, slValue)} className="w-36" />
+        <RuleNumInput value={slValue} onCommit={v => setSl(slMode, v)} placeholder="0" disabled={!sl} className={num} />
+      </div>
+      {sl && reRow('sl')}
+      <div className="flex flex-wrap items-center gap-2">
+        {sw(tgt.enabled, c => setTgt({ enabled: c }), 'Overall Target')}
+        <MiniSelect value={tgt.mode} ariaLabel="Overall target type" disabled={!tgt.enabled} options={OVERALL_MODE_OPTIONS}
+          onChange={v => setTgt({ mode: v as FocusOverallMode })} className="w-36" />
+        <RuleNumInput value={tgt.value} onCommit={v => setTgt({ value: v })} placeholder="0" disabled={!tgt.enabled} className={num} />
+      </div>
+      {tgt.enabled && reRow('tgt')}
+      <div className="flex flex-wrap items-center gap-2">
+        {sw(tr.enabled, c => setTr({ enabled: c }), 'Trailing Options')}
+        <MiniSelect value={tr.kind} ariaLabel="Trailing option" disabled={!tr.enabled} options={OVERALL_TRAIL_OPTIONS}
+          onChange={v => setTr({ kind: v as typeof tr.kind })} className="w-40" />
+        {tr.kind !== 'trailSl' && (<>
+          <label className={lbl} title="When the overall profit reaches this …">If profit reaches {trUnit}
+            <RuleNumInput value={tr.reach} onCommit={v => setTr({ reach: v })} placeholder="0" disabled={!tr.enabled} className={num} />
+          </label>
+          <label className={lbl} title="… lock this much profit: the row exits if profit falls back to it">Lock {trUnit}
+            <RuleNumInput value={tr.lock} onCommit={v => setTr({ lock: v })} placeholder="0" disabled={!tr.enabled} className={num} />
+          </label>
+        </>)}
+        {tr.kind !== 'lock' && (<>
+          <label className={lbl} title={tr.kind === 'trailSl' ? 'For every this much overall profit …' : 'For every increase in profit by this much …'}>
+            {tr.kind === 'trailSl' ? 'For every profit' : 'For every increase'} {trUnit}
+            <RuleNumInput value={tr.every} onCommit={v => setTr({ every: v })} placeholder="0" disabled={!tr.enabled} className={num} />
+          </label>
+          <label className={lbl} title={tr.kind === 'trailSl' ? '… tighten the Overall SL by this much (needs an Overall SL, same unit as it)' : '… raise the locked profit by this much'}>
+            {tr.kind === 'trailSl' ? 'Trail SL by' : 'Trail profit by'} {trUnit}
+            <RuleNumInput value={tr.by} onCommit={v => setTr({ by: v })} placeholder="0" disabled={!tr.enabled} className={num} />
+          </label>
+        </>)}
+        {tr.enabled && tr.kind === 'trailSl' && !sl && <span className="text-[11px] font-semibold text-rose-400">Overall Trail SL needs an Overall SL</span>}
+      </div>
+    </div>
+  );
+}
+
 /**
  * Leg exits and what follows them — AlgoTest-style "Re-Entry on SL / Tgt"
  * (sell side only), No re-entry after, leg target (% or points), and SL → cost.
@@ -1249,6 +1363,7 @@ function LegReentryControls({ row, onUpdate, onCancelPending, legTargetsElsewher
         {modeSelect('tgt')}
       </div>
       <LazyLegsEditor row={row} onUpdate={onUpdate} />
+      <OverallSettingsControls row={row} onUpdate={onUpdate} />
       <div className="flex flex-wrap items-center gap-2">
         {!legTargetsElsewhere && (<>
         <label className={lbl} title={`CE leg target: exit CE alone once its premium has decayed this ${tgtUnitWord} from its own entry. Blank = off`}>
@@ -2638,7 +2753,7 @@ function FocusTableRowImpl({
                   levelHigh: '', levelLow: '', levelVw: false, vwapInterval: '1', vwapBufferPct: '0.1',
                   slRupees: '', slMultiplier: '1.2', ceSlMultiplier: '1.2', peSlMultiplier: '1.2',
                   slRollStrikes: 0, slToCost: false, slToCostScope: undefined, squareOff: undefined, reSlMode: 'off', reTgtMode: 'off',
-                  ceTgtPct: '', peTgtPct: '', noReEntryAfter: '', entryMomEnabled: false, entryMomValue: '', ceSimpleMom: undefined, peSimpleMom: undefined, ceRangeBreakout: undefined, peRangeBreakout: undefined, lazyLegs: undefined, reSlLazyId: undefined, reTgtLazyId: undefined,
+                  ceTgtPct: '', peTgtPct: '', noReEntryAfter: '', entryMomEnabled: false, entryMomValue: '', ceSimpleMom: undefined, peSimpleMom: undefined, ceRangeBreakout: undefined, peRangeBreakout: undefined, lazyLegs: undefined, reSlLazyId: undefined, reTgtLazyId: undefined, overallTarget: undefined, overallTrail: undefined, overallReSl: undefined, overallReTgt: undefined,
                 })}
                 title="Clear rules"
                 className={cn('text-[11px] text-zinc-500 hover:text-zinc-300 transition-colors cursor-pointer', FOCUS_RING)}
@@ -2814,7 +2929,7 @@ function FocusProRowImpl({
     levelHigh: '', levelLow: '', levelVw: false, vwapInterval: '1', vwapBufferPct: '0.1',
     slRupees: '', slMultiplier: '1.2', ceSlMultiplier: '1.2', peSlMultiplier: '1.2',
     slRollStrikes: 0, slToCost: false, slToCostScope: undefined, squareOff: undefined, reSlMode: 'off', reTgtMode: 'off',
-    ceTgtPct: '', peTgtPct: '', noReEntryAfter: '', entryMomEnabled: false, entryMomValue: '', ceSimpleMom: undefined, peSimpleMom: undefined, ceRangeBreakout: undefined, peRangeBreakout: undefined, lazyLegs: undefined, reSlLazyId: undefined, reTgtLazyId: undefined,
+    ceTgtPct: '', peTgtPct: '', noReEntryAfter: '', entryMomEnabled: false, entryMomValue: '', ceSimpleMom: undefined, peSimpleMom: undefined, ceRangeBreakout: undefined, peRangeBreakout: undefined, lazyLegs: undefined, reSlLazyId: undefined, reTgtLazyId: undefined, overallTarget: undefined, overallTrail: undefined, overallReSl: undefined, overallReTgt: undefined,
   });
 
   const legLine = (leg: 'CE' | 'PE') => {
@@ -3508,7 +3623,7 @@ function FocusRowCardImpl({
           </span>
           <div className="flex items-center gap-1.5">
             <button
-              onClick={() => onUpdate({ levelHigh: '', levelLow: '', levelVw: false, vwapInterval: '1', vwapBufferPct: '0.1', slRupees: '', slMultiplier: '1.2', ceSlMultiplier: '1.2', peSlMultiplier: '1.2', slRollStrikes: 0, slToCost: false, slToCostScope: undefined, squareOff: undefined, reSlMode: 'off', reTgtMode: 'off', ceTgtPct: '', peTgtPct: '', noReEntryAfter: '', entryMomEnabled: false, entryMomValue: '', ceSimpleMom: undefined, peSimpleMom: undefined, ceRangeBreakout: undefined, peRangeBreakout: undefined, lazyLegs: undefined, reSlLazyId: undefined, reTgtLazyId: undefined })}
+              onClick={() => onUpdate({ levelHigh: '', levelLow: '', levelVw: false, vwapInterval: '1', vwapBufferPct: '0.1', slRupees: '', slMultiplier: '1.2', ceSlMultiplier: '1.2', peSlMultiplier: '1.2', slRollStrikes: 0, slToCost: false, slToCostScope: undefined, squareOff: undefined, reSlMode: 'off', reTgtMode: 'off', ceTgtPct: '', peTgtPct: '', noReEntryAfter: '', entryMomEnabled: false, entryMomValue: '', ceSimpleMom: undefined, peSimpleMom: undefined, ceRangeBreakout: undefined, peRangeBreakout: undefined, lazyLegs: undefined, reSlLazyId: undefined, reTgtLazyId: undefined, overallTarget: undefined, overallTrail: undefined, overallReSl: undefined, overallReTgt: undefined })}
               className={cn('text-[11px] text-zinc-500 hover:text-zinc-300 transition-colors cursor-pointer', FOCUS_RING)}
             >
               Clear
@@ -3779,6 +3894,7 @@ export default function FocusTool() {
     range?: { high: number; low: number }; rangeSince?: number; rangeNextTry?: number; rangeFetching?: boolean; rangeFailed?: boolean;
   }>>({});
   const simMomFiringRef = useRef<Set<string>>(new Set());
+  const overallPeakRef = useRef<Record<string, { pnl?: number; pts?: number; wrote: number }>>({});
   const [peakMtm, setPeakMtm] = useState(0);
   const [lockMtm, setLockMtm] = useState<number | null>(null);
   /**
@@ -4799,7 +4915,7 @@ export default function FocusTool() {
     // Drop any stale fill pin — arming means this row resolves its strikes
     // fresh at the next entry, so a pin from the previous cycle would make it
     // look its new position up at last time's strikes.
-    updateRow(id, { status: 'armed', fill: undefined });
+    updateRow(id, { status: 'armed', fill: undefined, overallReSlCount: 0, overallReTgtCount: 0, overallReMode: undefined });
   }
 
   function deleteRow(id: string) {
@@ -5780,6 +5896,65 @@ export default function FocusTool() {
   expiriesRef.current = expiries;
 
   /**
+   * The row's running peak P&L / premium profit this cycle — what the trailing
+   * options ratchet on. Cached per ledger (a new cycle starts a new ledger, so a
+   * new peak) and saved to the ledger at most every 5s, so a reload resumes from
+   * it instead of re-arming a lock the market has already passed.
+   */
+  function trackOverallPeak(row: FocusRow, live: RowLive): { pnl: number; pts: number } {
+    if (!row.overallTarget?.enabled && !row.overallTrail?.enabled) return { pnl: 0, pts: 0 };
+    const key = `${row.id}:${row.fill?.ts ?? ''}`;
+    const hit = overallPeakRef.current[key];
+    const prev = hit ?? { pnl: row.fill?.peakPnl, pts: row.fill?.peakPts, wrote: 0 };
+    const next = nextOverallPeak(prev, overallProgress(row, live, undefined, live.lotSize));
+    const entry = { ...next, wrote: hit?.wrote ?? 0 };
+    // Compared with what is SAVED, not with the cache: a peak made inside the
+    // 5s window must still be written once it has passed, even if it never rises again.
+    const unsaved = next.pnl !== (row.fill?.peakPnl ?? 0) || next.pts !== (row.fill?.peakPts ?? 0);
+    if (row.fill && unsaved && Date.now() - entry.wrote > 5_000) {
+      entry.wrote = Date.now();
+      patchFill(row.id, () => ({ peakPnl: next.pnl, peakPts: next.pts }));
+    }
+    overallPeakRef.current[key] = entry;
+    return next;
+  }
+
+  /**
+   * AlgoTest "Re-entry on Overall SL / Target": once the row is confirmed flat
+   * after an overall exit, start a new cycle — re-arm it with a fresh ledger (so
+   * strikes resolve at the current ATM and the peak and baselines restart),
+   * counted against its max of 5. `overallReMode` tells the entry how: ASAP opens
+   * every leg at once, MOMENTUM goes through each leg's Simple Momentum. Returns
+   * false when the row should just retire.
+   */
+  function reenterAfterOverall(row: FocusRow, reason: string): boolean {
+    const kind = overallExitKind(reason);
+    if (!kind) return false;
+    const snap = schedulerRef.current;
+    const fresh = snap.config.rows.find(r => r.id === row.id) ?? row;
+    const group = snap.config.groups.find(g => g.underlying === fresh.underlying);
+    const d = evaluateOverallReentry(fresh, kind, {
+      nowHm: istHm(), product: group?.product ?? 'INTRADAY', groupEnabled: !!group?.enabled,
+    });
+    const tag = `${isSimRow(fresh) ? 'SIM ' : ''}${fresh.underlying}`;
+    if (!d.enter) {
+      if ((kind === 'sl' ? fresh.overallReSl : fresh.overallReTgt)?.enabled) addToast('error', `${tag} no re-entry`, d.reason);
+      return false;
+    }
+    const wantedAt = rowExitWantedRef.current.get(row.id);
+    if (wantedAt != null && Date.now() - wantedAt < 5_000) return false;
+    autoEnteringRef.current.delete(row.id);
+    for (const leg of ['CE', 'PE']) { delete simMomRef.current[`${row.id}:${leg}`]; putMomStatus(`${row.id}:${leg}`, ''); }
+    const countKey = kind === 'sl' ? 'overallReSlCount' : 'overallReTgtCount';
+    const count = ((kind === 'sl' ? fresh.overallReSlCount : fresh.overallReTgtCount) ?? 0) + 1;
+    const cfg = kind === 'sl' ? fresh.overallReSl : fresh.overallReTgt;
+    updateRow(row.id, { status: 'armed', fill: undefined, overallReMode: d.mode, [countKey]: count });
+    addToast('success', `${tag} re-entry ${count}/${cfg?.max}`,
+      `RE ${d.mode.toUpperCase()} after overall ${kind === 'sl' ? 'SL' : 'target'}: re-opening at the current ATM`);
+    return true;
+  }
+
+  /**
    * Square off every leg of one row at market and mark it exited. Deduped by
    * `autoExitingRef` so a rule that stays breached across ticks (they all do)
    * cannot fire a second time while the first exit is still in flight.
@@ -5819,8 +5994,9 @@ export default function FocusTool() {
           return;
         }
         if (await waitRowFlat(row.id)) {
-          // Flat and confirmed — retire the row and drop its strike pin.
-          updateRow(row.id, { status: 'exited', fill: undefined });
+          // Flat and confirmed. An overall SL / target exit may start a new cycle;
+          // otherwise retire the row and drop its strike pin.
+          if (!reenterAfterOverall(row, reason)) updateRow(row.id, { status: 'exited', fill: undefined });
         } else {
           addToast('error', 'Auto-exit unconfirmed',
             `${row.underlying}: orders were accepted but the book still shows quantity — left open so the rules keep watching it. Check the position book.`);
@@ -6447,9 +6623,11 @@ export default function FocusTool() {
       }
       if (legAction) continue;
 
+      // Levels, VW, SL ₹ / SL × first; then Overall Target and the trailing options.
+      const peak = trackOverallPeak(row, live);
       const reason = evaluateRowExit(
         row, live, spots[row.underlying] ?? 0, undefined, live.lotSize,
-      );
+      ) ?? evaluateOverallExit(row, live, peak, undefined, live.lotSize)?.reason ?? null;
       if (reason) autoExitRow(row, reason);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -6522,6 +6700,12 @@ export default function FocusTool() {
 
   /** The entry gate a leg is set up with: Range Breakout, Simple Momentum, or neither (opens at the entry time). */
   function legEntryKind(row: FocusRow, leg: 'CE' | 'PE'): 'range' | 'momentum' | 'now' {
+    // A re-entry cycle after an overall SL / target: ASAP opens at once; MOMENTUM
+    // goes through each leg's Simple Momentum (a leg without it opens at once).
+    // The first-entry gates (Overall Momentum, Range Breakout) do not apply.
+    if (row.overallReMode) {
+      return row.overallReMode === 'momentum' && simpleMomOn(leg === 'CE' ? row.ceSimpleMom : row.peSimpleMom) ? 'momentum' : 'now';
+    }
     if (entryMomentumOn(row)) return 'now';
     if (rangeBreakoutOn(leg === 'CE' ? row.ceRangeBreakout : row.peRangeBreakout, row.entryTime)) return 'range';
     return simpleMomOn(leg === 'CE' ? row.ceSimpleMom : row.peSimpleMom) ? 'momentum' : 'now';
@@ -6565,7 +6749,7 @@ export default function FocusTool() {
     const spot = snap.spots[u] ?? 0;
     const closedReason = (row.status !== 'armed' && row.status !== 'entered') ? `row is ${row.status}`
       : !group?.enabled ? 'index stopped'
-      : entryMomentumOn(row) ? 'Overall Momentum turned on'
+      : (entryMomentumOn(row) && !row.overallReMode) ? 'Overall Momentum turned on'
       : (row.exitTime && nowHm >= row.exitTime) ? `past its exit time ${row.exitTime}`
       : ((group?.product ?? 'INTRADAY') === 'INTRADAY' && nowHm >= INTRADAY_BACKSTOP_HM) ? 'past 15:17 intraday cutoff'
       : null;
@@ -6778,7 +6962,7 @@ export default function FocusTool() {
         let enter = decision.enter;
         let reason = decision.reason;
         let momStatus = '';
-        if (enter && entryMomentumOn(row)) {
+        if (enter && entryMomentumOn(row) && !row.overallReMode) {
           // Combined premium of the legs this row trades; any missing quote → no premium yet.
           const legs = legsOf(row);
           const quotes = legs.map(leg => (leg === 'CE' ? l.ltpCe : l.ltpPe) ?? 0);

@@ -22,7 +22,7 @@
  */
 
 import type {
-  FocusRow, FocusDte, FocusRowStatus, FocusReentryMode, FocusReentryTrigger, FocusPendingReentry, FocusLegSimpleMom, FocusLazyLeg, FocusLegRangeBreakout,
+  FocusRow, FocusDte, FocusRowStatus, FocusReentryMode, FocusReentryTrigger, FocusPendingReentry, FocusLegSimpleMom, FocusLazyLeg, FocusLegRangeBreakout, FocusOverallMode,
 } from '@/lib/focusToolRows';
 
 // ── Constants ────────────────────────────────────────────────────────────────
@@ -1006,6 +1006,144 @@ export function nextLazyLegId(
 export function lazyLegStrike(lazy: Pick<FocusLazyLeg, 'leg' | 'otmSteps'>, atm: number, step: number): number {
   const n = Math.trunc(Number(lazy.otmSteps) || 0);
   return lazy.leg === 'CE' ? atm + n * step : atm - n * step;
+}
+
+// ── Overall Strategy Settings (per row) ─────────────────────────────────────
+
+/** AlgoTest's cap on re-entries after an overall SL / target. */
+export const MAX_OVERALL_REENTRIES = 5;
+
+/** The row's Overall SL: SL ₹ (MTM) first, else SL × read as a % of premium. Null = none. */
+export function overallSlConfig(
+  row: Pick<FocusRow, 'slRupees' | 'slMultiplier'>,
+): { mode: FocusOverallMode; value: number } | null {
+  const rs = Number(row.slRupees);
+  if (row.slRupees && Number.isFinite(rs) && rs > 0) return { mode: 'mtm', value: rs };
+  const mult = Number(row.slMultiplier);
+  if (row.slMultiplier && Number.isFinite(mult) && mult > 1) return { mode: 'premiumPct', value: (mult - 1) * 100 };
+  return null;
+}
+
+/** P&L (₹) and premium profit (points) now, and the combined entry premium points. Points null while unquoted. */
+export function overallProgress(
+  row: Pick<FocusRow, 'side' | 'fill'>, live: RowLive, workerHold?: WorkerHold, lotSize?: number | null,
+): { pnl: number; pts: number | null; entryPts: number } {
+  const entryPts = live.entryPremium;
+  const now = sidePremium(row, live, workerHold, lotSize ?? live.lotSize);
+  return { pnl: live.pnl, pts: entryPts > 0 && now > 0 ? entryPts - now : null, entryPts };
+}
+
+/** The running peak, never below zero: the trails count profit from the start. */
+export function nextOverallPeak(
+  prev: { pnl?: number; pts?: number } | undefined, now: { pnl: number; pts: number | null },
+): { pnl: number; pts: number } {
+  return {
+    pnl: Math.max(prev?.pnl ?? 0, now.pnl, 0),
+    pts: Math.max(prev?.pts ?? 0, now.pts ?? 0, 0),
+  };
+}
+
+/** Float slack for the % maths (1.3 − 1 is 0.30000000000000004), well below a paisa. */
+const OVERALL_EPS = 1e-6;
+
+export interface OverallExit { kind: 'sl' | 'target'; reason: string }
+
+/**
+ * Overall Target and the trailing options. (A plain Overall SL stays in
+ * evaluateRowExit — this only adds what a trail changes about it.)
+ *
+ *  - Target: MTM → P&L ≥ ₹v; Total Premium % → premium profit ≥ v% of the
+ *    combined entry premium (30% of 170 + 130 = 90 points).
+ *  - Overall Trail SL: with n = floor(peak / every), the SL tightens by n × by:
+ *    exit when profit ≤ −(SL − n × by). It may pass zero, which is a locked
+ *    profit. Same unit as the SL; needs an Overall SL.
+ *  - Lock (MTM): once the peak reached Y, exit if P&L falls to X.
+ *  - Lock and Trail (MTM): as Lock, the floor then rising by `by` for every
+ *    `every` more peak profit.
+ * Trail and lock exits count as 'sl' for re-entry.
+ */
+export function evaluateOverallExit(
+  row: Pick<FocusRow, 'overallTarget' | 'overallTrail' | 'slRupees' | 'slMultiplier' | 'side' | 'fill'>,
+  live: RowLive,
+  peak: { pnl: number; pts: number },
+  workerHold?: WorkerHold,
+  lotSize?: number | null,
+): OverallExit | null {
+  const p = overallProgress(row, live, workerHold, lotSize);
+  const unitVal = (mode: FocusOverallMode, v: number) => (mode === 'mtm' ? v : v / 100 * p.entryPts);
+  const profit = (mode: FocusOverallMode) => (mode === 'mtm' ? p.pnl : p.pts);
+  const peakIn = (mode: FocusOverallMode) => (mode === 'mtm' ? peak.pnl : peak.pts);
+
+  const t = row.overallTarget;
+  const tv = Number(t?.value);
+  if (t?.enabled && tv > 0) {
+    const have = profit(t.mode);
+    if (have != null && have >= unitVal(t.mode, tv) - OVERALL_EPS) {
+      return { kind: 'target', reason: t.mode === 'mtm'
+        ? `Overall Target ₹${tv} reached (P&L ₹${p.pnl.toFixed(0)})`
+        : `Overall Target ${tv}% of premium reached (${have.toFixed(2)} pts)` };
+    }
+  }
+
+  const tr = row.overallTrail;
+  if (!tr?.enabled) return null;
+  const every = Number(tr.every);
+  const by = Number(tr.by);
+  if (tr.kind === 'trailSl') {
+    const sl = overallSlConfig(row);
+    if (!sl || !(every > 0) || !(by > 0)) return null;
+    const n = Math.floor(peakIn(sl.mode) / unitVal(sl.mode, every));
+    if (!(n > 0)) return null;
+    const limit = unitVal(sl.mode, sl.value) - n * unitVal(sl.mode, by);
+    const have = profit(sl.mode);
+    if (have != null && have <= -limit + OVERALL_EPS) {
+      return { kind: 'sl', reason: sl.mode === 'mtm'
+        ? `Overall Trail SL ₹${(-limit).toFixed(0)} hit (P&L ₹${p.pnl.toFixed(0)})`
+        : `Overall Trail SL ${(-limit).toFixed(2)} pts hit (${have.toFixed(2)} pts)` };
+    }
+    return null;
+  }
+  const reach = Number(tr.reach);
+  const lock = Number(tr.lock);
+  if (!(reach > 0) || !(lock >= 0) || lock >= reach || !(peak.pnl >= reach)) return null;
+  const floor = lock + (tr.kind === 'lockTrail' && every > 0 && by > 0 ? Math.floor((peak.pnl - reach) / every) * by : 0);
+  if (p.pnl <= floor + OVERALL_EPS) {
+    return { kind: 'sl', reason: `Overall ${tr.kind === 'lockTrail' ? 'Lock and Trail' : 'Lock'} ₹${floor.toFixed(0)} hit (P&L ₹${p.pnl.toFixed(0)}, peak ₹${peak.pnl.toFixed(0)})` };
+  }
+  return null;
+}
+
+/** Which overall rule a whole-row exit reason came from, or null (levels, VW, exit time, account risk…). */
+export function overallExitKind(reason: string): 'sl' | 'target' | null {
+  if (reason.startsWith('Overall Target')) return 'target';
+  if (reason.startsWith('SL ₹') || reason.startsWith('SL ×')
+    || reason.startsWith('Overall Trail SL') || reason.startsWith('Overall Lock')) return 'sl';
+  return null;
+}
+
+/**
+ * Should the row start a new cycle after an overall SL / target exit? Needs the
+ * switch on, the matching overall rule set, re-entries left (max 5 each), and
+ * the re-entry window open (reentryWindowClosed).
+ */
+export function evaluateOverallReentry(
+  row: Pick<FocusRow, 'overallReSl' | 'overallReTgt' | 'overallReSlCount' | 'overallReTgtCount'
+    | 'overallTarget' | 'slRupees' | 'slMultiplier' | 'exitTime' | 'noReEntryAfter'>,
+  kind: 'sl' | 'target',
+  ctx: Pick<ReentryContext, 'nowHm' | 'product' | 'groupEnabled'>,
+): EntryDecision & { mode: 'asap' | 'momentum' } {
+  const cfg = kind === 'sl' ? row.overallReSl : row.overallReTgt;
+  const mode = cfg?.mode ?? 'asap';
+  const what = kind === 'sl' ? 'overall SL' : 'overall target';
+  if (!cfg?.enabled) return { enter: false, mode, reason: `re-entry on ${what} off` };
+  const armed = kind === 'sl' ? overallSlConfig(row) != null : !!row.overallTarget?.enabled && Number(row.overallTarget.value) > 0;
+  if (!armed) return { enter: false, mode, reason: `${what} is not set` };
+  const max = Math.min(MAX_OVERALL_REENTRIES, Math.max(0, Math.trunc(Number(cfg.max) || 0)));
+  const done = (kind === 'sl' ? row.overallReSlCount : row.overallReTgtCount) ?? 0;
+  if (done >= max) return { enter: false, mode, reason: `re-entry limit ${max} on ${what} reached` };
+  const closed = reentryWindowClosed(row, ctx);
+  if (closed) return { enter: false, mode, reason: closed };
+  return { enter: true, mode, reason: `re-entry ${mode} after ${what}` };
 }
 
 // ── Account budget ───────────────────────────────────────────────────────────
