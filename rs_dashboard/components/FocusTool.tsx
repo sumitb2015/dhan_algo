@@ -46,7 +46,7 @@ import {
   legPinnedStrike, costStopReason, legOwnEntry, slRollStrike, DEFAULT_SL_ROLL_MAX,
   reentryConfig, evaluateReentry, reentryWindowClosed, pendingReentryLevel, pendingReentryHit, legTargetReason, costReentryBasis,
   awaitingMomentumQuote, MOMENTUM_QUOTE_WAIT_MS, legTargetLevel,
-  evaluateEntryMomentum, entryMomentumOn, overallSlConfig, overallProgress, nextOverallPeak, evaluateOverallExit, overallExitKind, evaluateOverallReentry, MAX_OVERALL_REENTRIES, rangeBreakoutOn, rangePhase, rangeBreakoutHit, costStopApplies, MAX_LAZY_LEGS, legSlMultiplier, legTarget, nextLazyLegId, lazyLegStrike, runningLazyLeg, simpleMomOn, simpleMomLevel, simpleMomHit,
+  evaluateEntryMomentum, reRangeWindow, entryMomentumOn, overallSlConfig, overallProgress, nextOverallPeak, evaluateOverallExit, overallExitKind, evaluateOverallReentry, MAX_OVERALL_REENTRIES, rangeBreakoutOn, rangePhase, rangeBreakoutHit, costStopApplies, MAX_LAZY_LEGS, legSlMultiplier, legTarget, nextLazyLegId, lazyLegStrike, runningLazyLeg, simpleMomOn, simpleMomLevel, simpleMomHit,
   type PosRow, type RowLive,
 } from '@/lib/focusToolRules';
 import { computeRowPnl, mtmForQty, shiftMayReopen, canMarkMtm, shiftCloseConfirmed, rowDisplayBookedPnl, putCallRatio, valuePutCallRatio, pickOpenInterest } from '@/lib/focusToolPnl';
@@ -945,7 +945,8 @@ const REENTRY_HELP: Record<FocusReentryMode, string> = {
   cost: 'Wait on the same strike until its premium returns to that strike\'s initial entry this cycle, then re-sell',
   momentum: 'Pick the strike the row resolves to when the leg closes, then re-sell once it has moved as far as this '
     + 'leg\'s Simple Momentum says (premium or underlying, points or %). Needs Simple Momentum switched on for the leg. '
-    + 'If that strike has no premium yet it waits up to 15s for one, then cancels',
+    + 'If that strike has no premium yet it waits up to 15s for one, then cancels. On a leg with Range Breakout it instead '
+    + 'tracks a NEW range of the same length, starting when the leg closed, and re-sells when its high / low is reached',
   lazy: 'Open a Lazy Leg (defined below) in the place of the leg that closed. The leg slot must be free when it fires',
 };
 const REENTRY_MAX_OPTIONS = [1, 2, 3, 4, 5, 10, 20];
@@ -1434,8 +1435,8 @@ function LegReentryPendingChips({ row, onCancelPending }: {
     if (!p) return null;
     return (
       <span key={leg} className="inline-flex items-center gap-1 text-[11px] font-mono font-bold text-violet-300 bg-violet-500/10 border border-violet-500/30 rounded px-1.5 py-0.5"
-        title={`Waiting since ${new Date(p.since).toLocaleTimeString('en-IN', { timeZone: 'Asia/Kolkata' })} — re-sells ${p.lots} lot(s) ${awaitingMomentumQuote(p) ? `once the ${p.strike} ${leg} has a premium to measure the move from` : `when the ${p.strike} ${leg} premium ${p.dir === 'down' ? 'falls to' : 'rises to'} ${p.price.toFixed(2)}`}`}>
-        {leg} RE-{p.mode === 'cost' ? 'Cost' : 'Mom'} {p.strike} {awaitingMomentumQuote(p) ? 'awaiting quote' : `${p.dir === 'down' ? '≤' : '≥'} ${p.price.toFixed(2)}`}
+        title={`Waiting since ${new Date(p.since).toLocaleTimeString('en-IN', { timeZone: 'Asia/Kolkata' })} — re-sells ${p.lots} lot(s) ${p.mode === 'range' && p.range ? `once the ${p.strike} ${leg} ${p.range.on === 'underlying' ? '(index) ' : ''}reaches the ${p.range.side} of ${p.range.start}–${p.range.end}` : awaitingMomentumQuote(p) ? `once the ${p.strike} ${leg} has a premium to measure the move from` : `when the ${p.strike} ${leg} premium ${p.dir === 'down' ? 'falls to' : 'rises to'} ${p.price.toFixed(2)}`}`}>
+        {leg} RE-{p.mode === 'cost' ? 'Cost' : 'Mom'} {p.strike} {p.mode === 'range' && p.range ? `range ${p.range.start}–${p.range.end} ${p.range.side}` : awaitingMomentumQuote(p) ? 'awaiting quote' : `${p.dir === 'down' ? '≤' : '≥'} ${p.price.toFixed(2)}`}
         <button type="button" onClick={() => onCancelPending(leg)} aria-label={`Cancel ${leg} re-entry`}
           className={cn('text-zinc-400 hover:text-rose-400 cursor-pointer rounded', FOCUS_RING)}>&times;</button>
       </span>
@@ -3894,6 +3895,7 @@ export default function FocusTool() {
     range?: { high: number; low: number }; rangeSince?: number; rangeNextTry?: number; rangeFetching?: boolean; rangeFailed?: boolean;
   }>>({});
   const simMomFiringRef = useRef<Set<string>>(new Set());
+  const pendingRangeFetchRef = useRef<Record<string, { since: number; nextTry: number; fetching: boolean }>>({});
   const overallPeakRef = useRef<Record<string, { pnl?: number; pts?: number; wrote: number }>>({});
   const [peakMtm, setPeakMtm] = useState(0);
   const [lockMtm, setLockMtm] = useState<number | null>(null);
@@ -6194,6 +6196,26 @@ export default function FocusTool() {
       ? (leg === 'CE' ? { ceRolls: n } : { peRolls: n })
       : (leg === 'CE' ? { ceTgtReentries: n } : { peTgtReentries: n });
 
+    // ── RE MOMENTUM on a Range Breakout leg: a NEW range of the same length ──
+    // (AlgoTest: 09:20–10:20 closed at 10:45 → 10:45–11:45, on a strike picked now.)
+    const rb = leg === 'CE' ? row.ceRangeBreakout : row.peRangeBreakout;
+    if (cfg.mode === 'momentum' && rangeBreakoutOn(rb, row.entryTime)) {
+      const win = reRangeWindow(row.entryTime, rb.end, istHm());
+      const rangeStrike = win ? await resolvedStrikeAfterClose(rowId, leg) : null;
+      if (!win || rangeStrike == null) {
+        addToast('error', `${tag} no re-entry`, win ? 'Could not resolve the current strike for the new range' : 'No room for a new range today');
+        return 'skipped';
+      }
+      const pending: FocusPendingReentry = {
+        trigger, mode: 'range', strike: rangeStrike, lots, price: 0, dir: rb.side === 'low' ? 'down' : 'up', since: Date.now(),
+        range: { start: win.start, end: win.end, side: rb.side, on: rb.on },
+      };
+      patchFill(rowId, () => (leg === 'CE' ? { cePending: pending } : { pePending: pending }));
+      addToast('success', `${tag} re-entry armed`,
+        `RE MOMENTUM after ${what}: new range ${win.start}–${win.end} on ${rb.on === 'underlying' ? 'the index' : `${rangeStrike} ${leg}`}; sell ${lots} lot(s) when the ${rb.side} is reached`);
+      return 'pending';
+    }
+
     // ── Waiting modes: arm, don't trade ──
     if (cfg.mode === 'cost' || cfg.mode === 'momentum') {
       let strike = closedStrike;
@@ -6273,6 +6295,41 @@ export default function FocusTool() {
   }
 
   /**
+   * Read a waiting re-entry's new range (high / low) once it has ended and save
+   * it onto the pending. Polled every 10s until the server says it is complete;
+   * the pending is dropped after 5 minutes without data.
+   */
+  function fetchPendingRange(
+    row: FocusRow, leg: 'CE' | 'PE', p: FocusPendingReentry, expiry: string, drop: (why?: string) => void,
+  ) {
+    const r = p.range;
+    if (!r) return;
+    const key = `${row.id}:${leg}:${p.since}`;
+    const st = (pendingRangeFetchRef.current[key] ??= { since: Date.now(), nextTry: 0, fetching: false });
+    if (st.fetching || Date.now() < st.nextTry) return;
+    if (Date.now() - st.since > 5 * 60_000) { delete pendingRangeFetchRef.current[key]; drop('Range data unavailable — no re-entry'); return; }
+    st.fetching = true;
+    const q = new URLSearchParams({ underlying: row.underlying, on: r.on, start: r.start, end: r.end });
+    if (r.on === 'instrument') { q.set('expiry', expiry); q.set('strike', String(p.strike)); q.set('leg', leg); }
+    fetch(`/api/focus-tool/range?${q}`)
+      .then(res => res.json())
+      .then((j: { complete?: boolean; high?: number | null; low?: number | null }) => {
+        if (j.complete && typeof j.high === 'number' && typeof j.low === 'number') {
+          const { high, low } = j;
+          patchFill(row.id, f => {
+            const cur = leg === 'CE' ? f.cePending : f.pePending;
+            if (!cur || cur.since !== p.since || !cur.range) return {};
+            const next = { ...cur, range: { ...cur.range, high, low } };
+            return leg === 'CE' ? { cePending: next } : { pePending: next };
+          });
+          delete pendingRangeFetchRef.current[key];
+        } else st.nextTry = Date.now() + 10_000;
+      })
+      .catch(() => { st.nextTry = Date.now() + 10_000; })
+      .finally(() => { st.fetching = false; });
+  }
+
+  /**
    * The 1s scheduler's pass over waiting cost / momentum re-entries.
    *
    * Dropped (never fired) when: the leg is open again (the user re-sold it by
@@ -6305,7 +6362,7 @@ export default function FocusTool() {
         if (rowOwnsLeg(row, leg)) { clear(); continue; }
         if (!legsOf(row).includes(leg)) { clear(`Row no longer trades ${leg}`); continue; }
         const cfg = reentryConfig(row, p.trigger);
-        if (cfg.mode !== p.mode) { clear('Re-entry setting changed'); continue; }
+        if (cfg.mode !== (p.mode === 'range' ? 'momentum' : p.mode)) { clear('Re-entry setting changed'); continue; }
         const done = Number(p.trigger === 'sl'
           ? (leg === 'CE' ? row.fill?.ceRolls : row.fill?.peRolls)
           : (leg === 'CE' ? row.fill?.ceTgtReentries : row.fill?.peTgtReentries)) || 0;
@@ -6325,6 +6382,15 @@ export default function FocusTool() {
         // the reference (taken even while LIVE is off or the row is busy, so
         // it stays close to the stop/target). Never fires on the tick that
         // sets it.
+        // A new range after RE MOMENTUM on a Range Breakout leg: wait for it to end,
+        // read it, then wait for the price to reach its high / low.
+        let rangeHit = false;
+        if (p.mode === 'range' && p.range) {
+          const r = p.range;
+          if (istHm() < r.end) continue;
+          if (r.high == null || r.low == null) { fetchPendingRange(row, leg, p, expiry, clear); continue; }
+          rangeHit = rangeBreakoutHit(r, { high: r.high, low: r.low }, r.on === 'underlying' ? (snap.spots[row.underlying] ?? 0) : ltp);
+        }
         if (awaitingMomentumQuote(p)) {
           const level = ltp > 0
             ? pendingReentryLevel('momentum', p.trigger, {
@@ -6348,7 +6414,7 @@ export default function FocusTool() {
           || (legExitsInFlightRef.current.get(row.id) ?? 0) > 0) continue;
         // An underlying-momentum re-entry is measured on the spot, not the strike.
         const watched = p.src === 'underlying' ? (snap.spots[row.underlying] ?? 0) : ltp;
-        if (!pendingReentryHit(p, watched)) continue;
+        if (p.mode === 'range' ? !rangeHit : !pendingReentryHit(p, watched)) continue;
 
         pendingFiringRef.current.add(key);
         firedThisRow = true;
@@ -6363,7 +6429,9 @@ export default function FocusTool() {
             [countKey]: done + 1,
           }));
           addToast('success', `${tag} RE-${p.mode.toUpperCase()} triggered`,
-            `${p.src === 'underlying' ? 'Spot' : 'Premium'} ${watched.toFixed(2)} ${p.dir === 'down' ? '≤' : '≥'} ${p.price.toFixed(2)} — selling ${p.lots} lot(s) ${p.strike} ${leg}`);
+            p.mode === 'range' && p.range
+              ? `New range ${p.range.start}–${p.range.end}: ${p.range.on === 'underlying' ? 'spot' : 'premium'} reached the ${p.range.side} (${(p.range.side === 'high' ? p.range.high : p.range.low)?.toFixed(2)}) — selling ${p.lots} lot(s) ${p.strike} ${leg}`
+              : `${p.src === 'underlying' ? 'Spot' : 'Premium'} ${watched.toFixed(2)} ${p.dir === 'down' ? '≤' : '≥'} ${p.price.toFixed(2)} — selling ${p.lots} lot(s) ${p.strike} ${leg}`);
           const fresh = schedulerRef.current.config.rows.find(r => r.id === row.id) ?? row;
           const ok = await placeLeg(fresh, leg, {
             reduce: false, lots: p.lots, strikeOverride: p.strike, awaitFill: true,

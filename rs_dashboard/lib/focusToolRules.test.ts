@@ -14,7 +14,7 @@ import { readFileSync } from 'node:fs';
 import path from 'node:path';
 
 import {
-  evaluateEntry, evaluateEntryMomentum, overallSlConfig, nextOverallPeak, evaluateOverallExit, overallExitKind, evaluateOverallReentry, rangeBreakoutOn, rangePhase, rangeBreakoutHit, costStopApplies, runningLazyLeg, legSlMultiplier, legTarget, nextLazyLegId, lazyLegStrike, legHasOwnSl, simpleMomOn, simpleMomLevel, simpleMomHit, evaluateGlobalRisk, evaluateRowExit, legStopReason,
+  evaluateEntry, evaluateEntryMomentum, reRangeWindow, overallSlConfig, nextOverallPeak, evaluateOverallExit, overallExitKind, evaluateOverallReentry, rangeBreakoutOn, rangePhase, rangeBreakoutHit, costStopApplies, runningLazyLeg, legSlMultiplier, legTarget, nextLazyLegId, lazyLegStrike, legHasOwnSl, simpleMomOn, simpleMomLevel, simpleMomHit, evaluateGlobalRisk, evaluateRowExit, legStopReason,
   dteForExpiry, dteMatches, sidePremium, legsOf, legsFlat, rowOwnsLeg,
   stopPremium, legStopPremium, pairStopPremium, legOwnContracts,
   nextOpenedTs, isGhostDropProtected, GHOST_DROP_GRACE_MS,
@@ -803,4 +803,13 @@ test('overall exit kind and re-entry decision', () => {
   // target needs its own switch and target
   assert.equal(evaluateOverallReentry(re({ overallReTgt: { enabled: true, mode: 'momentum', max: 1 }, ...tgt('mtm', '9000') }), 'target', ctx).mode, 'momentum');
   assert.equal(evaluateOverallReentry(re({ overallReTgt: { enabled: true, mode: 'asap', max: 1 } }), 'target', ctx).enter, false);
+});
+
+test('re-range window after a stop / target (AlgoTest)', () => {
+  // original 09:20–10:20 (1h), closed at 10:45 → 10:45–11:45
+  assert.deepEqual(reRangeWindow('09:20', '10:20', '10:45'), { start: '10:45', end: '11:45' });
+  assert.deepEqual(reRangeWindow('09:16', '09:30', '09:55'), { start: '09:55', end: '10:09' });
+  assert.equal(reRangeWindow('09:30', '09:30', '10:00'), null);     // empty original
+  assert.equal(reRangeWindow('09:20', '10:20', '23:30'), null);     // would run past midnight
+  assert.equal(reRangeWindow('9:20', '10:20', '10:45'), null);
 });

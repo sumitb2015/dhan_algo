@@ -40,7 +40,7 @@ export interface FocusPendingReentry {
   trigger: FocusReentryTrigger;
   /** What the level is measured on. Missing = the strike's premium. */
   src?: 'premium' | 'underlying';
-  mode: 'cost' | 'momentum';
+  mode: 'cost' | 'momentum' | 'range';
   strike: number;
   /** Whole lots to re-sell — what the closed leg held. */
   lots: number;
@@ -50,6 +50,15 @@ export interface FocusPendingReentry {
   dir: 'down' | 'up';
   /** Unix ms armed. */
   since: number;
+  /**
+   * mode 'range' — RE MOMENTUM on a leg with Range Breakout: a NEW range of the
+   * original length, tracked from when the leg closed, on the new strike or the
+   * index. `high` / `low` are filled in once the range has ended and been read.
+   */
+  range?: {
+    start: string; end: string; side: 'high' | 'low'; on: 'instrument' | 'underlying';
+    high?: number; low?: number;
+  };
 }
 
 export interface FocusIndexGroup {

@@ -947,6 +947,24 @@ export function rangeBreakoutHit(
   return rb.side === 'low' ? price <= range.low : price >= range.high;
 }
 
+/**
+ * The new range a Range Breakout leg tracks after its SL / target closed it
+ * (AlgoTest RE MOMENTUM with Range Breakout): the same length as the original
+ * (entry time → End), starting now — 09:20–10:20 closed at 10:45 gives
+ * 10:45–11:45. Null if the original range is invalid or the new one would run
+ * past midnight.
+ */
+export function reRangeWindow(
+  entryTime: string, end: string, nowHm: string,
+): { start: string; end: string } | null {
+  if (!HM_RE.test(entryTime) || !HM_RE.test(end) || !HM_RE.test(nowHm) || end <= entryTime) return null;
+  const min = (hm: string) => Number(hm.slice(0, 2)) * 60 + Number(hm.slice(3));
+  const endMin = min(nowHm) + (min(end) - min(entryTime));
+  if (endMin >= 24 * 60) return null;
+  const hm = (m: number) => `${String(Math.floor(m / 60)).padStart(2, '0')}:${String(m % 60).padStart(2, '0')}`;
+  return { start: nowHm, end: hm(endMin) };
+}
+
 // ── Lazy legs ───────────────────────────────────────────────────────────────
 
 /** The Lazy Leg running in a leg slot right now (only while the row owns that leg). */
