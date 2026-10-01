@@ -64,12 +64,17 @@ live broker state and repairs all three:
   `reconcile/route.ts:70-76`), the row is **deliberately not auto-closed** — with no captured
   fill price and no exit timestamp, any P&L booked here would be invented. It's flagged with
   `reconcileNote` for a human to close or delete instead.
-- `qty`/`avgPrice`/`productType` are overwritten from the broker's own figures
-  (`reconcile/route.ts:78-89`) — the local values were always provisional.
-- A `broker.avgPrice > 0` is what actually clears `needsReconcile`
-  (`reconcile/route.ts:93`) — a broker-reported average of exactly `0` means the broker
-  doesn't have a settled price either yet, so the row stays flagged rather than being marked
-  resolved with a wrong zero price.
+- The broker's position figures are POOLED across everything on the contract, so they never
+  overwrite a row directly (rules in `lib/cspReconcile.ts`, since 2026-10-01). An unconfirmed
+  row is settled from its OWN order (`orderId` → filled qty + traded average, looked up by
+  `csp_watchlist.py reconcile` only for `needsReconcile` rows). Quantity only comes down: a lone
+  row on a contract is cut to the broker's qty; several rows are flagged, because which one was
+  closed is the user's call; more at the broker is reported, never adopted. A row keeps its own
+  average — the broker's prices only a row with none that is the contract's sole holder. Before
+  this, reconcile set qty upward too and the strike shift sold that inflated `row.qty`.
+- Only a positive average (the order's own, else the sole-holder broker average) clears
+  `needsReconcile` — a zero means no settled price yet, so the row stays flagged rather than
+  being marked resolved with a wrong zero price.
 - Between building the reconcile payload and writing results back, the route **re-reads
   `readTracked()` fresh** (`reconcile/route.ts:62`) rather than reusing the snapshot it
   started with, because the broker round-trip is long enough (up to 60s timeout) for a

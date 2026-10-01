@@ -442,7 +442,7 @@ def cmd_exit(helper: DhanHelper, args) -> dict:
 
 def cmd_reconcile(helper: DhanHelper, args) -> dict:
     """Broker truth for tracked rows. `--positions` is a JSON array of
-    {id, securityId}.
+    {id, securityId, orderId?, needOrder?}.
 
     Returns the live net quantity and entry average for each tracked row, plus
     any short option position the dashboard is not tracking at all — an order
@@ -463,13 +463,26 @@ def cmd_reconcile(helper: DhanHelper, args) -> dict:
         pos = positions.get(security_id) if security_id else None
         if pos:
             claimed.add(security_id)
-        rows.append({
+        row = {
             "id": t.get('id'),
             "found": bool(pos),
             "netQty": int(pos['netQty']) if pos else 0,
             "avgPrice": pos['avgPrice'] if pos else 0.0,
             "productType": pos['productType'] if pos else '',
-        })
+        }
+        # An unconfirmed row is settled from its OWN order (filled qty, traded
+        # average): the position's figures are pooled across everything on the
+        # contract. None = the lookup failed or found nothing ({}), so the route
+        # leaves the row alone.
+        order_id = str(t.get('orderId', '') or '')
+        if t.get('needOrder') and order_id:
+            o = helper.get_order_by_id(order_id)
+            row["order"] = None if not o else {
+                "status": str(o.get('orderStatus', '') or ''),
+                "filledQty": int(o.get('filledQty', 0) or 0),
+                "avgPrice": float(o.get('averageTradedPrice', 0) or 0),
+            }
+        rows.append(row)
 
     # Only shorts are adoptable: a long option was never a cash-secured put.
     untracked = []
