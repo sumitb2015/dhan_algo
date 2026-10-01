@@ -1195,6 +1195,76 @@ export function residualBrokerAvg(
   return avg > 0 ? avg : pooledAvg;
 }
 
+export interface ContractDrift {
+  ident: string;
+  tradingSymbol: string;
+  side: 'B' | 'S';
+  brokerQty: number;
+  basketQty: number;
+  brokerValue: number;
+  basketValue: number;
+}
+
+/** Rupee slack for avg-price rounding before a basket-vs-broker value gap is reported. */
+export const CONTRACT_DRIFT_TOLERANCE = 50;
+
+/**
+ * Per-contract audit of the basket store against the broker's own day totals.
+ * For every contract a basket leg points at, the broker row's pooled
+ * buyQty*buyAvg / sellQty*sellAvg (carried lots at their entry price) must equal
+ * what the baskets record for that side: entry lots of legs on that side (open
+ * ones plus ones closed today) plus the exit fills of legs on the opposite side
+ * closed today. A gap means a close the baskets never recorded, a wrong entry
+ * average (the pooled-average import bug, 2026-10-01) or an estimated exit
+ * price. Quantity/value-based on purpose: lot-matching differences between the
+ * tool and Dhan's pooled P&L split never trip it. Only Dhan rows carry
+ * buyQty/sellQty; others are skipped, as are contracts no leg tracks (Import
+ * handles those).
+ */
+export function findContractDrift(
+  broker: string,
+  rows: Record<string, unknown>[],
+  baskets: MultiLegBasket[],
+  now: number = Date.now(),
+): ContractDrift[] {
+  const today = istDay(now);
+  const legsByIdent = new Map<string, MultiLegLeg[]>();
+  for (const b of baskets) {
+    if (b.broker !== broker) continue;
+    for (const l of b.legs) {
+      const id = broker === 'dhan' ? l.orderRef?.securityId : l.orderRef?.symbol;
+      if (!id) continue;
+      legsByIdent.set(id, [...(legsByIdent.get(id) ?? []), l]);
+    }
+  }
+  const out: ContractDrift[] = [];
+  for (const row of rows) {
+    const ident = broker === 'dhan' ? String(row.securityId ?? '') : String(row.tradingSymbol ?? '');
+    const legs = legsByIdent.get(ident);
+    if (!legs || row.buyQty == null || row.sellQty == null) continue;
+    for (const side of ['B', 'S'] as const) {
+      const brokerQty = Number(side === 'B' ? row.buyQty : row.sellQty) || 0;
+      const brokerValue = brokerQty * (Number(side === 'B' ? row.buyAvg : row.sellAvg) || 0);
+      let basketQty = 0;
+      let basketValue = 0;
+      for (const l of legs) {
+        const fill = l.fill?.avgPrice ?? 0;
+        if (l.status === 'CLOSED') {
+          if (l.closedAt == null || istDay(l.closedAt) !== today || !l.closedFill) continue;
+          const q = l.closedFill.qty;
+          if (l.side === side) { basketQty += q; basketValue += q * fill; }
+          else { basketQty += q; basketValue += q * l.closedFill.exitPrice; }
+        } else if (l.status === 'OPEN' || l.status === 'CLOSING' || l.status === 'PLACING') {
+          if (l.side === side && (l.fill?.qty ?? 0) > 0) { basketQty += l.fill!.qty; basketValue += l.fill!.qty * fill; }
+        }
+      }
+      if (basketQty === brokerQty && Math.abs(basketValue - brokerValue) <= CONTRACT_DRIFT_TOLERANCE) continue;
+      out.push({ ident, tradingSymbol: String(row.tradingSymbol ?? ident), side, brokerQty, basketQty, brokerValue, basketValue });
+    }
+  }
+  return out;
+}
+
 /**
  * Broker option positions whose net qty is not fully covered by live legs.
  * Legs are matched by the same identity findLegPosition uses (Dhan securityId,

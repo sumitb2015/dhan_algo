@@ -27,7 +27,7 @@ import {
   positionProduct, computeBasketStatus, closedFillFromRow,
   findSiblingLegCollisions, describeSiblingCollisions,
   legQtyWarningsFor, recordOutsideReduction, legCountsToday, type LegQtyWarning,
-  findUntrackedPositions, residualBrokerAvg, contractHintFromRow, legFromUntracked, mergeImportedLegs, brokerClampSlice,
+  findUntrackedPositions, residualBrokerAvg, findContractDrift, type ContractDrift, contractHintFromRow, legFromUntracked, mergeImportedLegs, brokerClampSlice,
   normalizeTradeRow, ownOrderIds, repriceEstimatedCloses, MLF_ORDER_SOURCE, type NormalizedTrade,
   type MultiLegLeg, type MultiLegBasket, type StrategyRiskConfig, type MultiLegStatus,
 } from '@/lib/multiLegFocus';
@@ -1107,6 +1107,14 @@ export default function MultiLegFocus({
   const legQtyWarnings = useMemo<Record<string, LegQtyWarning>>(
     () => legQtyWarningsFor(baskets, brokerNetByLeg),
     [baskets, brokerNetByLeg],
+  );
+  // Last positions poll's rows per broker, audited against the basket store by
+  // findContractDrift: unrecorded closes / wrong entry averages / estimated exits.
+  const [brokerRows, setBrokerRows] = useState<Partial<Record<Broker, Record<string, unknown>[]>>>({});
+  const contractDrift = useMemo<ContractDrift[]>(
+    () => (Object.entries(brokerRows) as [Broker, Record<string, unknown>[]][])
+      .flatMap(([br, rows]) => findContractDrift(br, rows, baskets, pnlNow)),
+    [brokerRows, baskets, pnlNow],
   );
 
   // ── Far-expiry strike rule + bid/ask spread guards ───────────────────
@@ -2702,6 +2710,7 @@ export default function MultiLegFocus({
           }
         }
 
+        setBrokerRows(rowsByBroker);
         const selectedResult = results.find(r => r.broker === broker);
         setOrdersError(selectedResult?.error ?? null);
         if (selectedResult?.j) {
@@ -3092,6 +3101,20 @@ export default function MultiLegFocus({
             >
               Today: {overallTodayPnl >= 0 ? '+' : ''}{fmtMoney(overallTodayPnl)}
             </span>
+            {contractDrift.length > 0 && (
+              <span
+                className="h-8 flex items-center px-2.5 rounded-lg text-xs font-bold border text-amber-400 border-amber-500/30 bg-amber-500/5"
+                title={`Baskets do not add up to the broker's day totals — a close not recorded here, a wrong entry average, or an estimated exit price. Today's P&L above may be off.\n${
+                  contractDrift.map(d => {
+                    const dq = d.basketQty - d.brokerQty;
+                    const dv = d.basketValue - d.brokerValue;
+                    return `${d.tradingSymbol} ${d.side === 'S' ? 'sell' : 'buy'} side: qty ${d.basketQty} vs broker ${d.brokerQty}${dq !== 0 ? ` (${dq > 0 ? '+' : ''}${dq})` : ''}, value ${dv >= 0 ? '+' : '−'}${fmtMoney(Math.abs(dv))}`;
+                  }).join('\n')
+                }`}
+              >
+                Recon ⚠ {new Set(contractDrift.map(d => d.ident)).size}
+              </span>
+            )}
             {([
               ['Realized', todayRealized, 'Legs closed today, frozen at their exit fill.'],
               ['Unrealized', todayUnrealized, 'Live legs marked to market from entry (a carried position counts from its entry price, not yesterday\'s close).'],

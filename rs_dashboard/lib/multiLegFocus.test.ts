@@ -4,7 +4,7 @@ import {
   resolveTemplateLegs, reconcileLegFillDown, reconcileLegWithBroker, legPnl, basketTotalPnl, sortLegsForExit, findLegPosition,
   computeLegTrailingSL, computeStrategyMetrics, checkStrategyRisk, computeCalendarPayoffCurve, classifyBasketStructure, findSiblingLegCollisions,
   formatExpiryLabel, LEG_FILL_GRACE_MS, claimableLegQty, executionBroker, applyOrderOutcomes, normalizeOrderRow, PENDING_ORDER_TTL_MS, legBrokerMismatch, classifyDhanOrder, type NormalizedOrder, legAvgPrice, legExitPrice, legQtyUnits, legPnlPct, legOtmPct, scaleBasketMultiplier,
-  legQtyWarningsFor, recordOutsideReduction, findUntrackedPositions, residualBrokerAvg, legFromUntracked, contractHintFromRow, legCountsToday, closedFillFromRow, mergeImportedLegs, brokerClampSlice,
+  legQtyWarningsFor, recordOutsideReduction, findUntrackedPositions, residualBrokerAvg, findContractDrift, legFromUntracked, contractHintFromRow, legCountsToday, closedFillFromRow, mergeImportedLegs, brokerClampSlice,
   normalizeTradeRow, ownOrderIds, matchOutsideTrades, repriceEstimatedCloses, MLF_ORDER_SOURCE,
   type StrategyMetrics, type MultiLegLeg, type MultiLegBasket,
 } from './multiLegFocus.ts';
@@ -1248,4 +1248,31 @@ test('residualBrokerAvg strips slices closed today out of the broker pooled aver
   assert.strictEqual(residualBrokerAvg('dhan', { ...row, sellQty: undefined }, 'S', baskets, true, now), 180.22647);
   const [u] = findUntrackedPositions('dhan', [row], baskets, r => contractHintFromRow(r, ['NIFTY']));
   assert.ok(Math.abs(u.brokerAvg - 242.21) < 0.05);
+});
+
+// Audit of the basket store against Dhan's own pooled day totals (22300 PE, 2026-10-01).
+test('findContractDrift flags a wrong open avg, an unrecorded close and an estimated exit, and passes a consistent contract', () => {
+  const now = Date.UTC(2026, 9, 1, 8, 0, 0);
+  const row = { securityId: '51321', tradingSymbol: 'NIFTY-Oct2026-22300-PE', netQty: -520, buyQty: 585, buyAvg: 241.45555, sellQty: 1105, sellAvg: 180.22647 };
+  const closed: MultiLegLeg = { ...shortCe('c', 585), option: 'PE', strike: 22300, status: 'CLOSED', fill: { qty: 0, avgPrice: 125.12778 },
+    closedFill: { qty: 585, exitPrice: 241.45555 }, closedAt: now - 3_600_000, orderRef: { securityId: '51321' } };
+  const open = (avgPrice: number): MultiLegLeg => ({ ...shortCe('o', 520), option: 'PE', strike: 22300, fill: { qty: 520, avgPrice }, orderRef: { securityId: '51321' } });
+  // Consistent: closed slice at its own lots + open leg at the residual average.
+  assert.deepStrictEqual(findContractDrift('dhan', [row], [alloc('b', [closed, open(242.21)])], now), []);
+  // The pooled-average import bug: open leg carrying 180.23 under-states the sell side by ~32k.
+  const bad = findContractDrift('dhan', [row], [alloc('b', [closed, open(180.22647)])], now);
+  assert.strictEqual(bad.length, 1);
+  assert.strictEqual(bad[0].side, 'S');
+  assert.ok(Math.abs(bad[0].basketValue - bad[0].brokerValue + 32_233) < 5);
+  // A close the baskets never recorded: quantity short on both sides.
+  const missing = findContractDrift('dhan', [row], [alloc('b', [{ ...closed, closedFill: { qty: 520, exitPrice: 241.45555 } }, open(242.21)])], now);
+  assert.deepStrictEqual(missing.map(d => [d.side, d.brokerQty - d.basketQty]), [['B', 65], ['S', 65]]);
+  // An estimated exit price off the real fill shows up on the buy side only.
+  const est = findContractDrift('dhan', [row], [alloc('b', [{ ...closed, closedFill: { qty: 585, exitPrice: 250, estimated: true } }, open(242.21)])], now);
+  assert.deepStrictEqual(est.map(d => d.side), ['B']);
+  // Slices closed on an earlier day are not in today's row; untracked contracts and rows with no qty fields are skipped.
+  assert.strictEqual(findContractDrift('dhan', [row], [alloc('b', [{ ...closed, closedAt: now - 2 * 86_400_000 }, open(242.21)])], now).length, 2);
+  assert.deepStrictEqual(findContractDrift('dhan', [{ ...row, securityId: '999' }], [alloc('b', [closed])], now), []);
+  assert.deepStrictEqual(findContractDrift('dhan', [{ ...row, buyQty: undefined, sellQty: undefined }], [alloc('b', [closed])], now), []);
+  assert.deepStrictEqual(findContractDrift('kotak', [row], [alloc('b', [closed])], now), []);
 });
