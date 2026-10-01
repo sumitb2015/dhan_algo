@@ -193,7 +193,15 @@ export default function MultiLegLegRow({
         <td className={`${numCell} text-zinc-300`} title="Average entry price">{avgPrice != null ? avgPrice.toFixed(2) : dash}</td>
       )}
       {showExit && (
-        <td className={`${numCell} text-zinc-300`} title="Closing fill price">{exitPrice != null ? exitPrice.toFixed(2) : dash}</td>
+        <td
+          className={`${numCell} text-zinc-300`}
+          title={leg.closedFill?.estimated
+            ? 'Estimated: closed outside this tool. Dhan\'s day average for the contract, not this slice\'s own fill'
+            : 'Closing fill price'}
+        >
+          {exitPrice != null ? exitPrice.toFixed(2) : dash}
+          {exitPrice != null && leg.closedFill?.estimated && <span className="ml-1 text-[10px] text-amber-400">est.</span>}
+        </td>
       )}
       {/* SL Column */}
       <td className="px-2 py-1.5">

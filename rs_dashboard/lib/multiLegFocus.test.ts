@@ -4,7 +4,7 @@ import {
   resolveTemplateLegs, reconcileLegFillDown, reconcileLegWithBroker, legPnl, basketTotalPnl, sortLegsForExit, findLegPosition,
   computeLegTrailingSL, computeStrategyMetrics, checkStrategyRisk, computeCalendarPayoffCurve, classifyBasketStructure, findSiblingLegCollisions,
   formatExpiryLabel, LEG_FILL_GRACE_MS, claimableLegQty, executionBroker, applyOrderOutcomes, normalizeOrderRow, PENDING_ORDER_TTL_MS, legBrokerMismatch, classifyDhanOrder, type NormalizedOrder, legAvgPrice, legExitPrice, legQtyUnits, legPnlPct, legOtmPct, scaleBasketMultiplier,
-  legQtyWarningsFor, recordOutsideReduction, findUntrackedPositions, legFromUntracked, contractHintFromRow, legCountsToday, closedFillFromRow, mergeImportedLegs,
+  legQtyWarningsFor, recordOutsideReduction, findUntrackedPositions, legFromUntracked, contractHintFromRow, legCountsToday, closedFillFromRow, mergeImportedLegs, brokerClampSlice,
   type StrategyMetrics, type MultiLegLeg, type MultiLegBasket,
 } from './multiLegFocus.ts';
 import type { StrategyTemplate } from './basketStrategies.ts';
@@ -1108,4 +1108,30 @@ test('mergeImportedLegs folds an import into the open leg on the same contract',
     assert.strictEqual(r.merged, 0);
     assert.deepStrictEqual(r.legs.map(l => l.id), ['own', 'imp']);
   }
+});
+
+test('brokerClampSlice keeps the P&L of qty a clamp removed', () => {
+  // 2026-10-01: strangle short 390 of 23400 CE; 130 bought back outside the tool @ 64.
+  const leg: MultiLegLeg = {
+    id: 'a', side: 'S', option: 'CE', strike: 23400, expiry: '2026-10-27', lots: 6, type: 'MARKET', status: 'OPEN',
+    fill: { qty: 390, avgPrice: 96.85 }, orderRef: { securityId: '51368' },
+  };
+  const row = { netQty: -260, buyQty: 130, sellQty: 0, buyAvg: 64, sellAvg: 0 };
+  const next = reconcileLegWithBroker(leg, { kind: 'match', row }, null, 65, 1e15);
+  assert.strictEqual(next.fill?.qty, 260);
+  assert.strictEqual(next.lots, 4);
+  const slice = brokerClampSlice(leg, next, row, 65, 1e15);
+  assert.ok(slice);
+  assert.strictEqual(slice.status, 'CLOSED');
+  assert.strictEqual(slice.lots, 2);
+  assert.strictEqual(slice.closedAt, 1e15);
+  assert.deepStrictEqual(slice.closedFill, { qty: 130, exitPrice: 64, estimated: true });
+  assert.strictEqual(slice.fill?.avgPrice, 96.85);
+  assert.ok(Math.abs(legPnl(slice, 0) - 4270.5) < 1e-6);
+
+  // No row price: exit at entry (0 P&L), still flagged.
+  assert.deepStrictEqual(brokerClampSlice(leg, next, { netQty: -260 }, 65)?.closedFill, { qty: 130, exitPrice: 96.85, estimated: true });
+  // Nothing clamped, or a full close (recorded on the leg itself): no slice.
+  assert.strictEqual(brokerClampSlice(leg, leg, row, 65), null);
+  assert.strictEqual(brokerClampSlice(leg, { ...next, status: 'CLOSED' }, row, 65), null);
 });

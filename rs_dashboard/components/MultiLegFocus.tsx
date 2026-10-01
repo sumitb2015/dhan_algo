@@ -25,7 +25,7 @@ import {
   positionProduct, computeBasketStatus, closedFillFromRow,
   findSiblingLegCollisions, describeSiblingCollisions,
   legQtyWarningsFor, recordOutsideReduction, legCountsToday, type LegQtyWarning,
-  findUntrackedPositions, contractHintFromRow, legFromUntracked, mergeImportedLegs,
+  findUntrackedPositions, contractHintFromRow, legFromUntracked, mergeImportedLegs, brokerClampSlice,
   type MultiLegLeg, type MultiLegBasket, type StrategyRiskConfig, type MultiLegStatus,
 } from '@/lib/multiLegFocus';
 import { closeOrderProduct } from '@/lib/positionProduct';
@@ -2642,7 +2642,7 @@ export default function MultiLegFocus({
               const basketRows = rowsByBroker[basket.broker as Broker];
               const basketOrders = ordersByBroker[basket.broker as Broker];
 
-              const nextLegs = basket.legs.map(origLeg => {
+              const nextLegs = basket.legs.flatMap((origLeg): MultiLegLeg[] => {
                 // 1. Settle orders the broker ACKed but later rejected/cancelled.
                 let leg = origLeg;
                 if (basketOrders && leg.pendingOrders?.length) {
@@ -2656,7 +2656,7 @@ export default function MultiLegFocus({
                 }
                 if (!leg.orderRef || !basketRows || legBrokerMismatch(leg, basket.broker)) {
                   if (leg !== origLeg) { basketChange = true; anyChange = true; }
-                  return leg;
+                  return [leg];
                 }
                 const fallbackSecId = (basket.broker === 'dhan' && !leg.orderRef.securityId)
                   ? resolveDhanSecurityId(basket, leg)
@@ -2695,9 +2695,12 @@ export default function MultiLegFocus({
                 ) {
                   basketChange = true;
                   anyChange = true;
-                  return reconciled;
+                  // A clamp below the leg's own qty = closed outside this tool;
+                  // keep that qty's realized P&L as an estimated CLOSED slice.
+                  const slice = match.kind === 'match' ? brokerClampSlice(leg, reconciled, match.row, lotSize) : null;
+                  return slice ? [reconciled, slice] : [reconciled];
                 }
-                return origLeg;
+                return [origLeg];
               });
 
               if (basketChange) {

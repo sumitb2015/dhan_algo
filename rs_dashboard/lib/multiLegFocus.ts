@@ -36,8 +36,11 @@ export interface MultiLegLeg {
    *  average price (buyAvg/sellAvg) and the matched qty on that round trip.
    *  `fill.qty` zeroes on close (it sizes further exits), so P&L math for a
    *  CLOSED leg reads this instead of drifting off live LTP against a
-   *  zeroed quantity — see reconcileLegWithBroker and legPnl. */
-  closedFill?: { qty: number; exitPrice: number };
+   *  zeroed quantity — see reconcileLegWithBroker and legPnl. `estimated`:
+   *  exitPrice is the broker row's pooled day average for the contract (or the
+   *  entry when the row has none), not this slice's own fill — set on a slice
+   *  split off by brokerClampSlice; the row marks it "est.". */
+  closedFill?: { qty: number; exitPrice: number; estimated?: boolean };
   /** Epoch ms the leg went CLOSED — splits today's realized P&L from earlier days' (legTodayCounts). */
   closedAt?: number;
   /** Captured from the order response at placement time; used to match this
@@ -616,6 +619,38 @@ export function reconcileLegWithBroker(
     if (shrinks) return leg;
   }
   return next;
+}
+
+/**
+ * The CLOSED slice for qty reconcileLegWithBroker just clamped off an OPEN leg
+ * (broker holds less than the leg tracked: something closed it outside this
+ * tool). Without it the clamp only shrank `fill.qty`, and that qty's realized
+ * P&L vanished — 2026-10-01: 130 of a 390 23400 CE short bought back @ 64
+ * dropped ₹4,270 from the page. Same shape as recordOutsideReduction's slice,
+ * but automatic, so the exit price is only an estimate: the broker row's
+ * closing-side average is pooled across the day's trades on the contract.
+ * Returns null when nothing was clamped (including a full close, which
+ * reconcileLegWithBroker already records on the leg itself).
+ */
+export function brokerClampSlice(
+  prev: MultiLegLeg,
+  next: MultiLegLeg,
+  row: Record<string, unknown>,
+  lotSize: number,
+  now: number = Date.now(),
+): MultiLegLeg | null {
+  if (prev.status !== 'OPEN' || next.status !== 'OPEN') return null;
+  const cut = (prev.fill?.qty ?? 0) - (next.fill?.qty ?? 0);
+  if (cut <= 0) return null;
+  const entry = prev.fill?.avgPrice ?? 0;
+  const rowPrice = Number(prev.side === 'B' ? row.sellAvg : row.buyAvg) || 0;
+  return {
+    id: newLegId(), side: prev.side, option: prev.option, strike: prev.strike, expiry: prev.expiry,
+    lots: lotSize > 0 ? Math.max(1, Math.round(cut / lotSize)) : 1,
+    type: prev.type, price: prev.price, orderRef: prev.orderRef,
+    status: 'CLOSED', closedAt: now, fill: { qty: 0, avgPrice: entry },
+    closedFill: { qty: cut, exitPrice: rowPrice > 0 ? rowPrice : entry, estimated: true },
+  };
 }
 
 function reconcileLegWithBrokerRaw(
