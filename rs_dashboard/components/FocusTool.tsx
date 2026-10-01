@@ -952,36 +952,45 @@ const REENTRY_MAX_OPTIONS = [1, 2, 3, 4, 5, 10, 20];
 /** rowId → one-line "waiting on entry momentum" status, written by the scheduler. */
 const EntryMomContext = createContext<Record<string, string>>({});
 
+/** AlgoTest's momentum select labels. */
+const MOM_TYPE_LABEL: Record<string, string> = {
+  'pts:up': 'Points (Pts) ↑', 'pts:down': 'Points (Pts) ↓',
+  'pct:up': 'Percentage (%) ↑', 'pct:down': 'Percentage (%) ↓',
+};
+const OVERALL_MOM_OPTIONS = Object.entries(MOM_TYPE_LABEL).map(([value, label]) => ({ value, label }));
+
 /**
- * Overall Momentum (AlgoTest): hold the entry until the row's combined premium
- * moves N points / % up or down from its start premium, judged on the live LTP
- * or the last closed 1-min candle. Blank = enter at the entry time as before.
+ * Overall Momentum (AlgoTest): enter only when the combined premium of the legs
+ * moves by the set points / % up or down from its start premium, judged on the
+ * live LTP or at the candle close. Switch off = enter at the entry time.
  * Free-typed amount → RuleNumInput (commit on blur/Enter).
  */
 function EntryMomentumControl({ row, onUpdate }: { row: FocusRow; onUpdate: (patch: Partial<FocusRow>) => void }) {
   const status = useContext(EntryMomContext)[row.id];
-  const on = entryMomentumOn(row);
+  const enabled = !!row.entryMomEnabled;
   const lbl = 'inline-flex items-center gap-1.5 font-bold text-zinc-400';
   return (
-    <div className="flex flex-wrap items-center gap-2">
-      <div className={lbl} title="Overall Momentum: after the entry time, wait until this row's combined premium (1 lot per leg) has moved this many points / % from its start premium, then enter. Blank = enter at the entry time">
-        Entry Mom
-        <MiniSelect value={row.entryMomDir ?? 'up'} ariaLabel="Entry momentum direction"
-          options={[{ value: 'up', label: '↑ up' }, { value: 'down', label: '↓ down' }]}
-          onChange={v => onUpdate({ entryMomDir: v as 'up' | 'down' })} className="w-16" />
-        <RuleNumInput value={row.entryMomValue ?? ''} onCommit={v => onUpdate({ entryMomValue: v })} placeholder="off"
-          className="w-12 h-6 text-center text-[11px]" />
-        <MiniSelect value={row.entryMomUnit ?? 'pts'} ariaLabel="Entry momentum unit"
-          options={[{ value: 'pts', label: 'pts' }, { value: 'pct', label: '%' }]}
-          onChange={v => onUpdate({ entryMomUnit: v as 'pts' | 'pct' })} className="w-14" />
-        <MiniSelect value={row.entryMomEval ?? 'ltp'} ariaLabel="Entry momentum evaluation"
-          title="Live LTP checks every tick; Candle close checks the last closed 1-minute candle's combined premium"
-          options={[{ value: 'ltp', label: 'Live LTP' }, { value: 'candle', label: 'Candle close' }]}
+    <div className="flex flex-col gap-1">
+      <div className="flex flex-wrap items-center gap-2">
+        <label className={cn(lbl, 'cursor-pointer text-zinc-300')}
+          title="Overall Momentum: enter the trade only when the combined premium of the legs (1 lot each) moves by this much, up or down, from its start premium">
+          <Switch size="sm" checked={enabled} onCheckedChange={c => onUpdate({ entryMomEnabled: !!c })} aria-label="Overall Momentum" />
+          Overall Momentum
+        </label>
+        <MiniSelect value={`${row.entryMomUnit ?? 'pts'}:${row.entryMomDir ?? 'up'}`} ariaLabel="Overall momentum type"
+          options={OVERALL_MOM_OPTIONS} disabled={!enabled}
+          onChange={v => { const [unit, dir] = v.split(':'); onUpdate({ entryMomUnit: unit as 'pts' | 'pct', entryMomDir: dir as 'up' | 'down' }); }}
+          className="w-36" />
+        <RuleNumInput value={row.entryMomValue ?? ''} onCommit={v => onUpdate({ entryMomValue: v })} placeholder="0"
+          disabled={!enabled} className="w-12 h-6 text-center text-[11px]" />
+        <MiniSelect value={row.entryMomEval ?? 'ltp'} ariaLabel="Overall momentum evaluation"
+          title="Live LTP checks every tick; Candle Close checks the last closed 1-minute candle's combined premium"
+          options={[{ value: 'ltp', label: 'Live LTP' }, { value: 'candle', label: 'Candle Close' }]} disabled={!enabled}
           onChange={v => onUpdate({ entryMomEval: v as 'ltp' | 'candle' })} className="w-28" />
+        {enabled && status && <span className="text-[11px] font-semibold text-amber-400" title={status}>{status}</span>}
       </div>
-      {on && status && <span className="text-[11px] font-semibold text-amber-400" title={status}>{status}</span>}
       {legsOf(row).map(leg => (
-        <LegSimpleMomControl key={leg} row={row} leg={leg} onUpdate={onUpdate} disabled={on} />
+        <LegSimpleMomControl key={leg} row={row} leg={leg} onUpdate={onUpdate} disabled={enabled} />
       ))}
     </div>
   );
@@ -990,35 +999,44 @@ function EntryMomentumControl({ row, onUpdate }: { row: FocusRow; onUpdate: (pat
 const SIMPLE_MOM_OPTIONS = (['premium', 'underlying'] as const).flatMap(src =>
   (['pts', 'pct'] as const).flatMap(unit => (['up', 'down'] as const).map(dir => ({
     value: `${src}:${unit}:${dir}`,
-    label: `${src === 'underlying' ? 'Underlying ' : ''}${unit === 'pts' ? 'Pts' : '%'} ${dir === 'up' ? '↑' : '↓'}`,
+    label: src === 'underlying'
+      ? `Underlying ${unit === 'pts' ? 'Pts' : '%'} ${dir === 'up' ? '↑' : '↓'}`
+      : MOM_TYPE_LABEL[`${unit}:${dir}`],
   }))));
 
 /**
- * AlgoTest Simple Momentum for one leg: after the entry time, open the leg only
- * once its premium (or the underlying) has moved N points / % from where it
- * stood at the entry time. Off while Overall Momentum is on, as on AlgoTest.
+ * AlgoTest "Simple Momentum" switch on one leg: after the entry time, open the
+ * leg only once its premium (or the underlying) has moved by the chosen amount
+ * from where it stood at the entry time; the strike is picked at the entry time.
+ * Disabled while Overall Momentum is on, as on AlgoTest.
  */
 function LegSimpleMomControl({ row, leg, onUpdate, disabled }: {
   row: FocusRow; leg: 'CE' | 'PE'; onUpdate: (patch: Partial<FocusRow>) => void; disabled: boolean;
 }) {
   const status = useContext(EntryMomContext)[`${row.id}:${leg}`];
-  const cur = (leg === 'CE' ? row.ceSimpleMom : row.peSimpleMom) ?? { value: '', src: 'premium', unit: 'pts', dir: 'up' } as FocusLegSimpleMom;
+  const cur: FocusLegSimpleMom = (leg === 'CE' ? row.ceSimpleMom : row.peSimpleMom)
+    ?? { enabled: false, value: '', src: 'premium', unit: 'pts', dir: 'up' };
   const set = (patch: Partial<FocusLegSimpleMom>) => {
     const next = { ...cur, ...patch };
     onUpdate(leg === 'CE' ? { ceSimpleMom: next } : { peSimpleMom: next });
   };
+  const off = disabled || !cur.enabled;
   return (
-    <div className={cn('inline-flex items-center gap-1.5 font-bold text-zinc-400', disabled && 'opacity-50')}
+    <div className={cn('flex flex-wrap items-center gap-2 font-bold text-zinc-400', disabled && 'opacity-50')}
       title={disabled ? 'Simple Momentum is disabled while Overall Momentum is on'
-        : `${leg} Simple Momentum: after the entry time, open this leg only once its premium (or the underlying) has moved this much from where it was at the entry time. The strike is picked at the entry time. Blank = open at the entry time`}>
-      {leg} Mom
-      <MiniSelect value={`${cur.src}:${cur.unit}:${cur.dir}`} ariaLabel={`${leg} simple momentum type`}
-        options={SIMPLE_MOM_OPTIONS}
+        : `${leg} Simple Momentum: after the entry time, open this leg only once its premium (or the underlying) has moved this much from where it was at the entry time. The strike is picked at the entry time`}>
+      <label className="inline-flex items-center gap-1.5 cursor-pointer text-zinc-300">
+        <Switch size="sm" checked={cur.enabled} disabled={disabled} onCheckedChange={c => set({ enabled: !!c })}
+          aria-label={`${leg} Simple Momentum`} />
+        {leg} Simple Momentum
+      </label>
+      <MiniSelect value={`${cur.src}:${cur.unit}:${cur.dir}`} ariaLabel={`${leg} Simple Momentum type`}
+        options={SIMPLE_MOM_OPTIONS} disabled={off}
         onChange={v => { const [src, unit, dir] = v.split(':'); set({ src: src as FocusLegSimpleMom['src'], unit: unit as FocusLegSimpleMom['unit'], dir: dir as FocusLegSimpleMom['dir'] }); }}
-        className="w-36" />
-      <RuleNumInput value={cur.value} onCommit={v => set({ value: v })} placeholder="off"
+        className="w-40" />
+      <RuleNumInput value={cur.value} onCommit={v => set({ value: v })} placeholder="0" disabled={off}
         className="w-12 h-6 text-center text-[11px]" />
-      {!disabled && simpleMomOn(cur) && status && <span className="text-[11px] font-semibold text-amber-400">{status}</span>}
+      {!off && simpleMomOn(cur) && status && <span className="text-[11px] font-semibold text-amber-400">{status}</span>}
     </div>
   );
 }
@@ -2458,7 +2476,7 @@ function FocusTableRowImpl({
                   levelHigh: '', levelLow: '', levelVw: false, vwapInterval: '1', vwapBufferPct: '0.1',
                   slRupees: '', slMultiplier: '1.2', ceSlMultiplier: '1.2', peSlMultiplier: '1.2',
                   slRollStrikes: 0, slToCost: false, reSlMode: 'off', reTgtMode: 'off',
-                  ceTgtPct: '', peTgtPct: '', noReEntryAfter: '', entryMomValue: '', ceSimpleMom: undefined, peSimpleMom: undefined,
+                  ceTgtPct: '', peTgtPct: '', noReEntryAfter: '', entryMomEnabled: false, entryMomValue: '', ceSimpleMom: undefined, peSimpleMom: undefined,
                 })}
                 title="Clear rules"
                 className={cn('text-[11px] text-zinc-500 hover:text-zinc-300 transition-colors cursor-pointer', FOCUS_RING)}
@@ -2633,7 +2651,7 @@ function FocusProRowImpl({
     levelHigh: '', levelLow: '', levelVw: false, vwapInterval: '1', vwapBufferPct: '0.1',
     slRupees: '', slMultiplier: '1.2', ceSlMultiplier: '1.2', peSlMultiplier: '1.2',
     slRollStrikes: 0, slToCost: false, reSlMode: 'off', reTgtMode: 'off',
-    ceTgtPct: '', peTgtPct: '', noReEntryAfter: '', entryMomValue: '', ceSimpleMom: undefined, peSimpleMom: undefined,
+    ceTgtPct: '', peTgtPct: '', noReEntryAfter: '', entryMomEnabled: false, entryMomValue: '', ceSimpleMom: undefined, peSimpleMom: undefined,
   });
 
   const legLine = (leg: 'CE' | 'PE') => {
@@ -3327,7 +3345,7 @@ function FocusRowCardImpl({
           </span>
           <div className="flex items-center gap-1.5">
             <button
-              onClick={() => onUpdate({ levelHigh: '', levelLow: '', levelVw: false, vwapInterval: '1', vwapBufferPct: '0.1', slRupees: '', slMultiplier: '1.2', ceSlMultiplier: '1.2', peSlMultiplier: '1.2', slRollStrikes: 0, slToCost: false, reSlMode: 'off', reTgtMode: 'off', ceTgtPct: '', peTgtPct: '', noReEntryAfter: '', entryMomValue: '', ceSimpleMom: undefined, peSimpleMom: undefined })}
+              onClick={() => onUpdate({ levelHigh: '', levelLow: '', levelVw: false, vwapInterval: '1', vwapBufferPct: '0.1', slRupees: '', slMultiplier: '1.2', ceSlMultiplier: '1.2', peSlMultiplier: '1.2', slRollStrikes: 0, slToCost: false, reSlMode: 'off', reTgtMode: 'off', ceTgtPct: '', peTgtPct: '', noReEntryAfter: '', entryMomEnabled: false, entryMomValue: '', ceSimpleMom: undefined, peSimpleMom: undefined })}
               className={cn('text-[11px] text-zinc-500 hover:text-zinc-300 transition-colors cursor-pointer', FOCUS_RING)}
             >
               Clear

@@ -170,6 +170,8 @@ export interface FocusRowFill {
  * time and kept. Blank / 0 = off (the leg enters at the entry time).
  */
 export interface FocusLegSimpleMom {
+  /** The leg's "Simple Momentum" switch. */
+  enabled: boolean;
   value: string;
   /** What moves: this leg's premium, or the index spot. */
   src: 'premium' | 'underlying';
@@ -253,8 +255,9 @@ export interface FocusRow {
    * Overall Momentum (AlgoTest): hold the entry until the row's combined
    * premium (CE+PE of the legs it trades, 1 lot each) has moved this many
    * points / % from its start premium — the first premium seen once the entry
-   * time is reached. Blank / 0 = off (enter at the entry time as before).
+   * time is reached. Off (switch, or a blank / 0 amount) = enter at the entry time.
    */
+  entryMomEnabled?: boolean;
   entryMomValue?: string;
   /** Missing = 'up'. */
   entryMomDir?: 'up' | 'down';

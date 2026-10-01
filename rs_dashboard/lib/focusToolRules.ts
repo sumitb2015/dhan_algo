@@ -839,8 +839,8 @@ export interface EntryMomentumDecision {
   reason: string;
 }
 
-export function entryMomentumOn(row: Pick<FocusRow, 'entryMomValue'>): boolean {
-  return Number(row.entryMomValue) > 0;
+export function entryMomentumOn(row: Pick<FocusRow, 'entryMomEnabled' | 'entryMomValue'>): boolean {
+  return !!row.entryMomEnabled && Number(row.entryMomValue) > 0;
 }
 
 /**
@@ -854,7 +854,7 @@ export function entryMomentumOn(row: Pick<FocusRow, 'entryMomValue'>): boolean {
  * candle); null/0 = no quote yet, so wait.
  */
 export function evaluateEntryMomentum(
-  row: Pick<FocusRow, 'entryMomValue' | 'entryMomDir' | 'entryMomUnit'>,
+  row: Pick<FocusRow, 'entryMomEnabled' | 'entryMomValue' | 'entryMomDir' | 'entryMomUnit'>,
   ref: number | null,
   premium: number | null,
   liveNow: number | null = premium,
@@ -882,7 +882,7 @@ export function evaluateEntryMomentum(
 // ── Simple Momentum (per-leg entry gate) ────────────────────────────────────
 
 export function simpleMomOn(m: FocusLegSimpleMom | null | undefined): m is FocusLegSimpleMom {
-  return !!m && Number(m.value) > 0;
+  return !!m && m.enabled && Number(m.value) > 0;
 }
 
 /**

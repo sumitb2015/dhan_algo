@@ -604,30 +604,32 @@ test('legTargetLevel / legTargetReason in points', () => {
 test('overall momentum entry gate', () => {
   const m = (o: object) => o as never;
   assert.equal(evaluateEntryMomentum(m({}), null, null).ready, true);
-  const d0 = evaluateEntryMomentum(m({ entryMomValue: '10' }), null, 200);
+  assert.equal(evaluateEntryMomentum(m({ entryMomValue: '10' }), 200, 200).ready, true);   // switch off
+  const d0 = evaluateEntryMomentum(m({ entryMomEnabled: true, entryMomValue: '10' }), null, 200);
   assert.equal(d0.ready, false); assert.equal(d0.ref, 200); assert.equal(d0.trigger, 210);
-  assert.equal(evaluateEntryMomentum(m({ entryMomValue: '10' }), 200, 209.9).ready, false);
-  assert.equal(evaluateEntryMomentum(m({ entryMomValue: '10' }), 200, 210).ready, true);
-  assert.equal(evaluateEntryMomentum(m({ entryMomValue: '10', entryMomDir: 'down' }), 200, 190).ready, true);
-  assert.equal(evaluateEntryMomentum(m({ entryMomValue: '10', entryMomDir: 'down' }), 200, 190.5).ready, false);
-  assert.equal(evaluateEntryMomentum(m({ entryMomValue: '10', entryMomUnit: 'pct' }), 200, 219).ready, false);
-  assert.equal(evaluateEntryMomentum(m({ entryMomValue: '10', entryMomUnit: 'pct' }), 200, 220).ready, true);
-  assert.equal(evaluateEntryMomentum(m({ entryMomValue: '10', entryMomUnit: 'pct', entryMomDir: 'down' }), 200, 180).ready, true);
-  const d1 = evaluateEntryMomentum(m({ entryMomValue: '10' }), null, null, 200);
+  assert.equal(evaluateEntryMomentum(m({ entryMomEnabled: true, entryMomValue: '10' }), 200, 209.9).ready, false);
+  assert.equal(evaluateEntryMomentum(m({ entryMomEnabled: true, entryMomValue: '10' }), 200, 210).ready, true);
+  assert.equal(evaluateEntryMomentum(m({ entryMomEnabled: true, entryMomValue: '10', entryMomDir: 'down' }), 200, 190).ready, true);
+  assert.equal(evaluateEntryMomentum(m({ entryMomEnabled: true, entryMomValue: '10', entryMomDir: 'down' }), 200, 190.5).ready, false);
+  assert.equal(evaluateEntryMomentum(m({ entryMomEnabled: true, entryMomValue: '10', entryMomUnit: 'pct' }), 200, 219).ready, false);
+  assert.equal(evaluateEntryMomentum(m({ entryMomEnabled: true, entryMomValue: '10', entryMomUnit: 'pct' }), 200, 220).ready, true);
+  assert.equal(evaluateEntryMomentum(m({ entryMomEnabled: true, entryMomValue: '10', entryMomUnit: 'pct', entryMomDir: 'down' }), 200, 180).ready, true);
+  const d1 = evaluateEntryMomentum(m({ entryMomEnabled: true, entryMomValue: '10' }), null, null, 200);
   assert.equal(d1.ready, false); assert.equal(d1.ref, 200);
 });
 
 test('simple momentum per leg', () => {
-  const pts = (dir: 'up' | 'down', value = '15') => ({ value, src: 'premium' as const, unit: 'pts' as const, dir });
+  const pts = (dir: 'up' | 'down', value = '15') => ({ enabled: true, value, src: 'premium' as const, unit: 'pts' as const, dir });
   assert.equal(simpleMomOn(undefined), false);
   assert.equal(simpleMomOn({ ...pts('up'), value: '' }), false);
+  assert.equal(simpleMomOn({ ...pts('up'), enabled: false }), false);
   // AlgoTest doc: premium 200, +15 pts → 215; 15% → 230 up, 170 down
   assert.equal(simpleMomLevel(pts('up'), 200), 215);
   assert.equal(simpleMomLevel({ ...pts('up'), unit: 'pct' }, 200), 230);
   assert.equal(simpleMomLevel({ ...pts('down'), unit: 'pct' }, 200), 170);
   // underlying: spot 18000, 0.5% up → 18090; 18520 −15 pts → 18505
-  assert.equal(simpleMomLevel({ value: '0.5', src: 'underlying', unit: 'pct', dir: 'up' }, 18000), 18090);
-  assert.equal(simpleMomLevel({ value: '15', src: 'underlying', unit: 'pts', dir: 'down' }, 18520), 18505);
+  assert.equal(simpleMomLevel({ enabled: true, value: '0.5', src: 'underlying', unit: 'pct', dir: 'up' }, 18000), 18090);
+  assert.equal(simpleMomLevel({ enabled: true, value: '15', src: 'underlying', unit: 'pts', dir: 'down' }, 18520), 18505);
   assert.equal(simpleMomHit(pts('up'), 200, 214.9), false);
   assert.equal(simpleMomHit(pts('up'), 200, 215), true);
   assert.equal(simpleMomHit(pts('down'), 200, 185), true);
