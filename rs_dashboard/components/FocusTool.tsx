@@ -4403,12 +4403,28 @@ export default function FocusTool() {
   // Saves queued or sent and not yet answered. The periodic re-read below only
   // runs while this is 0, when the server copy already holds every local change.
   const savesInFlightRef = useRef(0);
-  const applyServerConfig = useCallback((d: FocusToolConfig, sentRows?: FocusRow[]) => {
+  // Bumped by every save. The re-read checks it did not move between sending
+  // the GET and applying it: a save that starts AND lands during the GET
+  // leaves the in-flight count at 0 but makes the response stale.
+  const saveGenRef = useRef(0);
+  // Outside trades already used to price a flat leg's close (outsideCloseExit),
+  // so two rows on one strike can't both book the same trade.
+  const usedOutsideTradeKeysRef = useRef<Set<string>>(new Set());
+  const applyServerConfig = useCallback((d: FocusToolConfig, sentRows?: FocusRow[], stillFresh?: () => boolean) => {
     // After a save, take the server's copy only of rows this tab hasn't
     // changed since sending — a change made while the save was in flight goes
     // out with its own save and must not be reverted here.
     if (sentRows) setConfig(prev => ({ ...d, rows: adoptItems(prev.rows, sentRows, d.rows) }));
-    else setConfig(d);
+    else if (stillFresh) {
+      // A periodic re-read: checked again inside the updater, after any local
+      // edit queued in the same render has run (and saved).
+      setConfig(prev => {
+        if (!stillFresh()) return prev;
+        noteItems(rowRevBookRef.current, 'r:', d.rows);
+        return d;
+      });
+      if (!stillFresh()) return;
+    } else setConfig(d);
     setRiskEnabled(d.riskEnabled);
     setTargetRupees(d.targetRupees);
     setStopRupees(d.stopRupees);
@@ -4441,12 +4457,14 @@ export default function FocusTool() {
     let cancelled = false;
     const t = setInterval(() => {
       if (savesInFlightRef.current !== 0) return;
+      const gen = saveGenRef.current;
+      const fresh = () => savesInFlightRef.current === 0 && saveGenRef.current === gen;
       fetch('/api/focus-tool/rows')
         .then(r => r.json())
         .then((j: { success: boolean; data?: FocusToolConfig }) => {
-          if (cancelled || !j.success || !j.data || savesInFlightRef.current !== 0) return;
-          noteItems(rowRevBookRef.current, 'r:', j.data.rows);
-          if (canon(j.data) !== canon(schedulerRef.current.config)) applyServerConfig(j.data);
+          if (cancelled || !j.success || !j.data || !fresh()) return;
+          if (canon(j.data) === canon(schedulerRef.current.config)) return;
+          applyServerConfig(j.data, undefined, fresh);
         })
         .catch(() => {});
     }, 3000);
@@ -5150,6 +5168,7 @@ export default function FocusTool() {
     // Each save waits for every save already queued ahead of it to land
     // first, so two saves fired close together apply in order.
     savesInFlightRef.current += 1;
+    saveGenRef.current += 1;
     const run = saveQueueRef.current.then(() => doSaveConfig(patch)).finally(() => { savesInFlightRef.current -= 1; });
     // Swallow here so one failed save doesn't wedge the queue for whatever
     // saves come after it — doSaveConfig already reports the failure itself.
@@ -5771,8 +5790,11 @@ export default function FocusTool() {
           // otherwise book nothing and say so, rather than invent a price
           // (dropping it silently lost the slice's P&L — 2026-10-01 audit).
           const entry = live ? legOwnEntry(row, leg, live) : (Number(leg === 'CE' ? row.fill?.ceEntry : row.fill?.peEntry) || 0);
-          const exit = broker === 'dhan' && securityId ? await outsideCloseExit(String(securityId), pageOwn) : null;
+          const openedAt = Number(leg === 'CE' ? row.fill?.ceOpenedTs : row.fill?.peOpenedTs) || 0;
+          const match = broker === 'dhan' && securityId ? await outsideCloseExit(String(securityId), pageOwn, openedAt) : null;
+          const exit = match?.exitPrice ?? null;
           const booked = exit != null ? closedSliceBooked(true, entry, exit, pageOwn) : 0;
+          if (booked !== 0 && match) for (const k of match.keys) usedOutsideTradeKeysRef.current.add(k);
           adjustFillQty(row.id, leg, -pageOwn, undefined, booked);
           if (exit == null || booked === 0) {
             addToast('error', `${what} closed outside the tool`,
@@ -5959,9 +5981,10 @@ export default function FocusTool() {
    */
   /** Average price of the outside BUY trade(s) that closed `qty` of this
    *  contract: today's Dhan trade book, minus the Focus Tool's own orders
-   *  (FTS_ORDER_SOURCE correlationIds). Null unless a run of trades adds up
-   *  to exactly `qty` (matchOutsideTrades). */
-  async function outsideCloseExit(securityId: string, qty: number): Promise<number | null> {
+   *  (FTS_ORDER_SOURCE correlationIds), since the leg opened, not already used
+   *  for another row. Null unless a run of trades adds up to exactly `qty`
+   *  (matchOutsideTrades). */
+  async function outsideCloseExit(securityId: string, qty: number, openedAt: number): Promise<{ exitPrice: number; keys: string[] } | null> {
     try {
       const r = await fetch('/api/scalper/poll');
       const j = await r.json() as { success?: boolean; orders?: Record<string, unknown>[]; trades?: Record<string, unknown>[] };
@@ -5970,7 +5993,10 @@ export default function FocusTool() {
         .filter(o => String(o.correlationId ?? '').startsWith(FTS_ORDER_SOURCE))
         .map(o => String(o.orderId ?? '')));
       const trades = j.trades.map(normalizeTradeRow).filter((t): t is NormalizedTrade => t != null);
-      return matchOutsideTrades(trades, securityId, 'B', qty, Date.now(), own, new Set())?.exitPrice ?? null;
+      // Only trades since this leg opened can be its close (that also skips the
+      // tool's own untagged closes of earlier cycles), and a trade already
+      // used to price another row's close is not used again.
+      return matchOutsideTrades(trades, securityId, 'B', qty, Date.now(), own, usedOutsideTradeKeysRef.current, openedAt);
     } catch {
       return null;
     }

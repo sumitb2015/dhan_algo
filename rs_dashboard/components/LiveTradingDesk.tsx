@@ -213,6 +213,7 @@ export default function LiveTradingDesk({ baskets, onBasketsChange, open, onTogg
           // positions row's average is pooled across every basket on the contract.
           const stamped = stampOwnEntries(basketsRef.current, relevant.map((t) => ({
             orderId: String(t.orderId ?? ''),
+            securityId: String(t.securityId ?? ''),
             tradedQuantity: Number(t.tradedQuantity ?? 0),
             tradedPrice: Number(t.tradedPrice ?? 0),
           })));

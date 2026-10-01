@@ -1533,7 +1533,8 @@ export function ownOrderIds(baskets: MultiLegBasket[], orderRows: Record<string,
 }
 
 /** Trades on `ident` this tool did not place that close `qty` on `closeSide`
- *  at or before `before` (+60s clock skew), and no other close has claimed.
+ *  at or before `before` and not before `after` (±60s clock skew), and no
+ *  other close has claimed.
  *  Tries each run of consecutive trades, newest first, and takes the first
  *  that adds up to exactly `qty`; anything else is ambiguous -> null. */
 export function matchOutsideTrades(
@@ -1544,11 +1545,13 @@ export function matchOutsideTrades(
   before: number,
   own: Set<string>,
   used: Set<string>,
+  /** Epoch ms the position being closed was opened; earlier trades can't be its close (0 = no bound). */
+  after = 0,
 ): { exitPrice: number; keys: string[] } | null {
   if (qty <= 0) return null;
   const cands = trades
     .filter(t => t.ident === ident && t.side === closeSide && !own.has(t.orderId) && !used.has(t.key)
-      && t.at > 0 && t.at <= before + 60_000)
+      && t.at > 0 && t.at <= before + 60_000 && (after <= 0 || t.at >= after - 60_000))
     .sort((a, b) => b.at - a.at);
   for (let i = 0; i < cands.length; i++) {
     let sum = 0;

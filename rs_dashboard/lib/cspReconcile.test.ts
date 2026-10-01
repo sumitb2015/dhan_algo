@@ -74,3 +74,17 @@ test('broker flat: flagged, never auto-closed', () => {
   assert.strictEqual(rows[0].status, 'OPEN');
   assert.match(rows[0].reconcileNote ?? '', /no open short/);
 });
+
+test('a part-filled order still working is not settled, and its contract is left alone', () => {
+  const rows = [row('a', { qty: 2250, avgPrice: 0, needsReconcile: true })];
+  reconcileCspRows(rows, [brk('a', { netQty: -750, order: { status: 'PART_TRADED', filledQty: 750, avgPrice: 8.5 } })], 'now');
+  assert.strictEqual(rows[0].qty, 2250);
+  assert.strictEqual(rows[0].needsReconcile, true);
+  assert.match(rows[0].reconcileNote ?? '', /still PART_TRADED \(750 of 2250 filled\)/);
+  // Once it completes, the next reconcile settles it.
+  reconcileCspRows(rows, [brk('a', { netQty: -2250, order: { status: 'TRADED', filledQty: 2250, avgPrice: 8.6 } })], 'now');
+  assert.strictEqual(rows[0].qty, 2250);
+  assert.strictEqual(rows[0].avgPrice, 8.6);
+  assert.strictEqual(rows[0].needsReconcile, undefined);
+  assert.strictEqual(rows[0].reconcileNote, undefined);
+});

@@ -782,9 +782,14 @@ export default function MultiLegFocus({
   // re-reads the server's copy while this is 0, so it can't revert a change
   // that hasn't landed yet.
   const savesInFlightRef = useRef(0);
+  // Bumped by every save/delete. The re-read checks it did not move between
+  // sending the GET and applying it: a save that starts AND lands during the
+  // GET leaves the in-flight count at 0 but makes the response stale.
+  const saveGenRef = useRef(0);
   const persistBasket = useCallback((basket: MultiLegBasket) => {
     const sent = withRevs(revBookRef.current, basket);
     savesInFlightRef.current += 1;
+    saveGenRef.current += 1;
     fetch('/api/multi-leg-focus/baskets', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -958,6 +963,7 @@ export default function MultiLegFocus({
     });
     delete lastFetchedMarginSignatureRef.current[basketId];
     savesInFlightRef.current += 1;
+    saveGenRef.current += 1;
     fetch('/api/multi-leg-focus/baskets', {
       method: 'DELETE',
       headers: { 'Content-Type': 'application/json' },
@@ -2618,12 +2624,17 @@ export default function MultiLegFocus({
       // already holds every local change.
       if (basketsLoadedRef.current && savesInFlightRef.current === 0) {
         try {
+          const gen = saveGenRef.current;
           const jb = await fetch('/api/multi-leg-focus/baskets').then(r => r.json()) as { success: boolean; data?: MultiLegBasket[] };
-          if (!cancelled && jb.success && Array.isArray(jb.data) && savesInFlightRef.current === 0) {
+          const fresh = () => savesInFlightRef.current === 0 && saveGenRef.current === gen;
+          if (!cancelled && jb.success && Array.isArray(jb.data) && fresh()) {
             const book = revBookRef.current;
             const serverIds = new Set(jb.data.map(b => b.id));
-            for (const b of jb.data) noteSaved(book, b);
             setBaskets(prev => {
+              // Checked again here: a local edit queued in this same render
+              // runs its updater (and its save) before this one.
+              if (!fresh()) return prev;
+              for (const b of jb.data!) noteSaved(book, b);
               // A basket the server has never seen (the unsaved default draft)
               // stays; one it had and no longer has was deleted elsewhere.
               const server = [...jb.data!, ...prev.filter(b => !serverIds.has(b.id) && !book.has(`b:${b.id}`))];

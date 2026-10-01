@@ -34,9 +34,9 @@ test('allocation still clamps to the broker and ignores the opposite direction',
 test('a leg\'s entry is its own fills, the pooled average only as a marked fallback', () => {
   const l = leg({ entryOrderIds: ['o1'] });
   const trades = [
-    { orderId: 'o1', tradedQuantity: 65, tradedPrice: 60 },
-    { orderId: 'o1', tradedQuantity: 65, tradedPrice: 64 },
-    { orderId: 'other', tradedQuantity: 130, tradedPrice: 190 },
+    { orderId: 'o1', securityId: '51321', tradedQuantity: 65, tradedPrice: 60 },
+    { orderId: 'o1', securityId: '51321', tradedQuantity: 65, tradedPrice: 64 },
+    { orderId: 'other', securityId: '51321', tradedQuantity: 130, tradedPrice: 190 },
   ];
   assert.equal(ownEntryFromTrades(l, trades), 62);
   assert.equal(legEntryPrice(row, l), 125.13);
@@ -48,4 +48,14 @@ test('a leg\'s entry is its own fills, the pooled average only as a marked fallb
   // Nothing new: same array back.
   const same = [b];
   assert.equal(stampOwnEntries(same, trades), same);
+});
+
+test('a leg holding the whole basket\'s order ids only averages its own contract', () => {
+  // Legacy leg: entryOrderIds has both legs' orders; CE filled at 100, PE at 80.
+  const pe = leg({ entryOrderIds: ['oCE', 'oPE'] });
+  const trades = [
+    { orderId: 'oCE', securityId: '51320', tradedQuantity: 130, tradedPrice: 100 },
+    { orderId: 'oPE', securityId: '51321', tradedQuantity: 130, tradedPrice: 80 },
+  ];
+  assert.equal(ownEntryFromTrades(pe, trades), 80);
 });

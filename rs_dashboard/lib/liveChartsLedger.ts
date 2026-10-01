@@ -141,15 +141,19 @@ export function legEntryIsOwn(leg: LedgerLeg): boolean {
 }
 
 /** Trade-book row fields used to price a leg's own entry. */
-export interface LedgerTrade { orderId: string; tradedQuantity: number; tradedPrice: number }
+export interface LedgerTrade { orderId: string; securityId: string; tradedQuantity: number; tradedPrice: number }
 
-/** Average fill of this leg's own entry orders, or null when none are in the trade book yet. */
+/** Average fill of this leg's own entry orders, or null when none are in the
+ *  trade book yet. Matched on the contract as well as the order id: legs from
+ *  before 2026-10-01 (or an unmapped one) hold every order id of their basket,
+ *  and a CE at 100 and a PE at 80 would otherwise both read 90. */
 export function ownEntryFromTrades(leg: LedgerLeg, trades: LedgerTrade[]): number | null {
   const ids = new Set(leg.entryOrderIds);
   let qty = 0;
   let value = 0;
   for (const t of trades) {
-    if (!ids.has(t.orderId) || !(t.tradedQuantity > 0) || !(t.tradedPrice > 0)) continue;
+    if (!ids.has(t.orderId) || String(t.securityId) !== String(leg.securityId)) continue;
+    if (!(t.tradedQuantity > 0) || !(t.tradedPrice > 0)) continue;
     qty += t.tradedQuantity;
     value += t.tradedQuantity * t.tradedPrice;
   }

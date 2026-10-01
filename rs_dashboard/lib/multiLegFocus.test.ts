@@ -1222,3 +1222,10 @@ test('repriceEstimatedCloses swaps a pooled estimate for the actual outside trad
   const none = [basket];
   assert.strictEqual(repriceEstimatedCloses(none, {}, new Set()), none);
 });
+
+test('matchOutsideTrades ignores trades from before the position opened', () => {
+  const t = (key: string, at: number) => ({ key, orderId: key, ident: '51321', side: 'B' as const, qty: 130, price: 50, at });
+  const trades = [t('old', 1_000_000), t('new', 9_000_000)];
+  assert.deepStrictEqual(matchOutsideTrades(trades, '51321', 'B', 130, 10_000_000, new Set(), new Set(), 5_000_000)?.keys, ['new']);
+  assert.strictEqual(matchOutsideTrades([t('old', 1_000_000)], '51321', 'B', 130, 10_000_000, new Set(), new Set(), 5_000_000), null);
+});
