@@ -13,7 +13,7 @@ import assert from 'node:assert/strict';
 import {
   computeRowPnl, mtmForQty, ownShare, shiftMayReopen,
   canMarkMtm, shiftCloseConfirmed, rowDisplayBookedPnl, putCallRatio,
-  valuePutCallRatio, pickOpenInterest,
+  valuePutCallRatio, pickOpenInterest, closeRebaseDelta, closedSliceBooked,
 } from './focusToolPnl.ts';
 
 test('mtmForQty: short leg profits when premium falls', () => {
@@ -177,4 +177,27 @@ test('valuePutCallRatio prefers ₹ values, falls back to premiums', () => {
   assert.equal(valuePutCallRatio(110, 100, 25, 50), 1.1);
   assert.equal(valuePutCallRatio(null, null, 25.35, 37.55), 25.35 / 37.55);
   assert.equal(valuePutCallRatio(null, null, 25, 0), null);
+});
+
+test('a reduce books against the row\'s own entry, not the pooled broker average', () => {
+  // Row sold 130 @ 100 (its own stamp); the broker's sellAvg is 125.13 because
+  // another row sold the same strike higher. placeLeg puts the own entry in both
+  // slots of the snapshot, so mtmForQty books (100 - 80) x 130.
+  const snap = { netQty: -260, buyAvg: 100, sellAvg: 100, ltp: 80 };
+  assert.equal(mtmForQty({ ...snap, qty: 130 }), 2600);
+});
+
+test('closeRebaseDelta moves booked P&L to the traded exit', () => {
+  // Booked at LTP 80; the buy-back actually filled at 82 -> 2 x 130 less profit.
+  assert.equal(closeRebaseDelta(true, 80, 82, 130), -260);
+  assert.equal(closeRebaseDelta(false, 80, 82, 130), 260);
+  assert.equal(closeRebaseDelta(true, 0, 82, 130), 0);
+  assert.equal(closeRebaseDelta(true, 80, 0, 130), 0);
+});
+
+test('closedSliceBooked prices an outside close against the own entry', () => {
+  // 2026-10-01 shape: 130 short @ 96.85 bought back outside @ 64.
+  assert.ok(Math.abs(closedSliceBooked(true, 96.85, 64, 130) - 4270.5) < 1e-9);
+  assert.equal(closedSliceBooked(true, 0, 64, 130), 0);
+  assert.equal(closedSliceBooked(true, 96.85, 0, 130), 0);
 });

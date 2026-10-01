@@ -53,7 +53,8 @@ import {
   evaluateEntryMomentum, reRangeWindow, entryMomentumOn, overallSlConfig, overallProgress, nextOverallPeak, evaluateOverallExit, overallExitKind, evaluateOverallReentry, MAX_OVERALL_REENTRIES, rangeBreakoutOn, rangeBreakoutHit, costStopApplies, MAX_LAZY_LEGS, legSlMultiplier, legTarget, nextLazyLegId, lazyLegStrike, runningLazyLeg, simpleMomOn, simpleMomLevel, simpleMomHit,
   type PosRow, type RowLive,
 } from '@/lib/focusToolRules';
-import { computeRowPnl, mtmForQty, shiftMayReopen, canMarkMtm, shiftCloseConfirmed, rowDisplayBookedPnl, putCallRatio, valuePutCallRatio, pickOpenInterest } from '@/lib/focusToolPnl';
+import { computeRowPnl, mtmForQty, shiftMayReopen, canMarkMtm, shiftCloseConfirmed, rowDisplayBookedPnl, putCallRatio, valuePutCallRatio, pickOpenInterest, closeRebaseDelta, closedSliceBooked, FTS_ORDER_SOURCE } from '@/lib/focusToolPnl';
+import { normalizeTradeRow, matchOutsideTrades, type NormalizedTrade } from '@/lib/multiLegFocus';
 import { stampItems, noteItems, adoptItems, canon, type RevBook } from '@/lib/revMerge';
 import { useTabLeader } from '@/hooks/useTabLeader';
 import type { FocusConfigWrite } from '@/lib/focusToolRowsMerge';
@@ -5765,7 +5766,18 @@ export default function FocusTool() {
           return false;
         }
         if (pageOwn > 0) {
-          adjustFillQty(row.id, leg, -pageOwn);
+          // Closed outside this tool. Book its P&L from the actual outside
+          // trade(s) when Dhan's trade book explains the whole qty exactly;
+          // otherwise book nothing and say so, rather than invent a price
+          // (dropping it silently lost the slice's P&L — 2026-10-01 audit).
+          const entry = live ? legOwnEntry(row, leg, live) : (Number(leg === 'CE' ? row.fill?.ceEntry : row.fill?.peEntry) || 0);
+          const exit = broker === 'dhan' && securityId ? await outsideCloseExit(String(securityId), pageOwn) : null;
+          const booked = exit != null ? closedSliceBooked(true, entry, exit, pageOwn) : 0;
+          adjustFillQty(row.id, leg, -pageOwn, undefined, booked);
+          if (exit == null || booked === 0) {
+            addToast('error', `${what} closed outside the tool`,
+              `${pageOwn} qty was already flat at the broker. Its P&L could not be priced from the trade book and was not booked into this row.`);
+          }
         }
         // Exit All walks every Side leg; an already-flat unowned leg is a no-op
         // success so one ghost PE clear is not reported as "Exit incomplete".
@@ -5816,7 +5828,7 @@ export default function FocusTool() {
     const exchange = orderExchange(broker, u);
     const url = broker === 'dhan' ? '/api/scalper/fast-order' : scalperRoute(broker, 'order');
     const body = broker === 'dhan'
-      ? { securityId, quantity, side, orderType: 'MARKET', exchangeSegment: exchange, ...product.fields }
+      ? { securityId, quantity, side, orderType: 'MARKET', exchangeSegment: exchange, ...product.fields, source: FTS_ORDER_SOURCE }
       : { tradingsymbol: symbol, quantity, side, orderType: 'MARKET', exchange, ...product.fields };
 
     try {
@@ -5836,12 +5848,17 @@ export default function FocusTool() {
         // min(ownQty, brokerQty) clamp already protects against over-closing
         // in the meantime, since it never trusts the ledger past what the
         // broker book actually shows.
-        // Snapshot entry avg + LTP now so a reduce can bank the closed slice's
+        // Snapshot entry + LTP now so a reduce can bank the closed slice's
         // MTM into fill.bookedPnl (the pin moves off this strike on a roll).
+        // The entry is this row's OWN (legOwnEntry: its stamp, the broker
+        // average only for a legacy row with none) — the broker's buyAvg /
+        // sellAvg is pooled across every row and trade on the contract
+        // (2026-10-01 audit). Both slots carry it; mtmForQty picks by netQty.
+        const ownEntry = live ? legOwnEntry(row, leg, live) : (Number(leg === 'CE' ? row.fill?.ceEntry : row.fill?.peEntry) || 0);
         const bookedSnap = opts.reduce ? {
           netQty,
-          buyAvg: Number(pos?.buyAvg) || 0,
-          sellAvg: Number(pos?.sellAvg) || 0,
+          buyAvg: ownEntry,
+          sellAvg: ownEntry,
           ltp: Number(leg === 'CE' ? live?.ltpCe : live?.ltpPe) || 0,
         } : null;
         // Opening: the LTP right before this order went out is this fill's
@@ -5899,6 +5916,11 @@ export default function FocusTool() {
           }
           adjustFillQty(row.id, leg, delta,
             opts.reduce ? undefined : Number(strike), bookedDelta, openEntryPx, opts.reduce ? undefined : opts.orb);
+          // The close booked at the LTP snapshot; swap in the order's traded
+          // average once Dhan reports it.
+          if (opts.reduce && filled > 0 && bookedDelta !== 0 && bookedSnap && broker === 'dhan' && j.order_id) {
+            void rebaseBookedOnTradedPrice(row.id, String(j.order_id), bookedSnap.netQty < 0, bookedSnap.ltp, filled);
+          }
           // AlgoTest "Tgt/SL Ref Price: Traded Price" — re-base this fill's
           // share of the entry on what the broker actually filled at.
           if (!opts.reduce && filled > 0 && row.refPrice === 'traded' && broker === 'dhan' && j.order_id) {
@@ -5935,6 +5957,43 @@ export default function FocusTool() {
    * place when the price never comes back (a missed read is not a reason to
    * guess). Stops and targets measure from the new entry on the next tick.
    */
+  /** Average price of the outside BUY trade(s) that closed `qty` of this
+   *  contract: today's Dhan trade book, minus the Focus Tool's own orders
+   *  (FTS_ORDER_SOURCE correlationIds). Null unless a run of trades adds up
+   *  to exactly `qty` (matchOutsideTrades). */
+  async function outsideCloseExit(securityId: string, qty: number): Promise<number | null> {
+    try {
+      const r = await fetch('/api/scalper/poll');
+      const j = await r.json() as { success?: boolean; orders?: Record<string, unknown>[]; trades?: Record<string, unknown>[] };
+      if (!j.success || !Array.isArray(j.trades)) return null;
+      const own = new Set((j.orders ?? [])
+        .filter(o => String(o.correlationId ?? '').startsWith(FTS_ORDER_SOURCE))
+        .map(o => String(o.orderId ?? '')));
+      const trades = j.trades.map(normalizeTradeRow).filter((t): t is NormalizedTrade => t != null);
+      return matchOutsideTrades(trades, securityId, 'B', qty, Date.now(), own, new Set())?.exitPrice ?? null;
+    } catch {
+      return null;
+    }
+  }
+
+  /** The close side of rebaseEntryOnTradedPrice: moves bookedPnl by the gap
+   *  between the LTP the close was booked at and the order's traded average. */
+  async function rebaseBookedOnTradedPrice(rowId: string, orderId: string, isShort: boolean, estimate: number, filled: number) {
+    for (let i = 0; i < 4; i++) {
+      try {
+        const r = await fetch(`/api/scalper/orders?orderId=${encodeURIComponent(orderId)}`);
+        const j = await r.json() as { success?: boolean; data?: { averageTradedPrice?: number } };
+        const atp = Number(j.data?.averageTradedPrice) || 0;
+        if (j.success && atp > 0) {
+          const delta = closeRebaseDelta(isShort, estimate, atp, filled);
+          if (delta !== 0) patchFill(rowId, f => ({ bookedPnl: (f.bookedPnl ?? 0) + delta }));
+          return;
+        }
+      } catch { /* retry */ }
+      await new Promise(res => setTimeout(res, 1000));
+    }
+  }
+
   async function rebaseEntryOnTradedPrice(rowId: string, leg: 'CE' | 'PE', orderId: string, estimate: number, filled: number) {
     for (let i = 0; i < 4; i++) {
       try {

@@ -199,3 +199,24 @@ export function valuePutCallRatio(
 ): number | null {
   return putCallRatio(peValue, ceValue) ?? putCallRatio(peLtp, ceLtp);
 }
+
+/**
+ * Correction to `bookedPnl` once a close's traded average is known. A close
+ * books at the LTP snapshot taken when the order went out (an estimate);
+ * swapping in the traded price moves the booked P&L by the price gap times
+ * the closed qty — up for a short bought back cheaper than estimated.
+ */
+export function closeRebaseDelta(isShort: boolean, estimateExit: number, tradedExit: number, qty: number): number {
+  if (!(estimateExit > 0) || !(tradedExit > 0) || !(qty > 0)) return 0;
+  return (isShort ? estimateExit - tradedExit : tradedExit - estimateExit) * qty;
+}
+
+/** Realized P&L of `qty` closed at `exit` against this row's own `entry` (0 when either is unknown). */
+export function closedSliceBooked(isShort: boolean, entry: number, exit: number, qty: number): number {
+  if (!(entry > 0) || !(exit > 0) || !(qty > 0)) return 0;
+  return (isShort ? entry - exit : exit - entry) * qty;
+}
+
+/** correlationId prefix on every Dhan order the Focus Tool places (fast-order
+ *  `source`), so its own trades can be told apart from an outside close. */
+export const FTS_ORDER_SOURCE = 'fts';
