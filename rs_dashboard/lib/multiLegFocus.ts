@@ -67,6 +67,8 @@ export interface MultiLegLeg {
   /** Trade-book keys of the outside trades that priced this leg's close
    *  (repriceEstimatedCloses), so one trade is never used for two closes. */
   outsideTradeKeys?: string[];
+  /** Save revision — see lib/multiLegStoreMerge.ts. */
+  rev?: number;
   status: MultiLegStatus;
 
   // ── Leg-wise Stop Loss, Take Profit, and Trailing SL ─────────────
@@ -115,6 +117,8 @@ export interface MultiLegBasket {
   riskConfig?: StrategyRiskConfig;
   createdAt: string;
   updatedAt: string;
+  /** Save revision — see lib/multiLegStoreMerge.ts. */
+  rev?: number;
 }
 
 let _legSeq = 0;

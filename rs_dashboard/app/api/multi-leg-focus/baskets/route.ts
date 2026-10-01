@@ -17,8 +17,8 @@ export async function GET(): Promise<NextResponse> {
 export async function POST(req: NextRequest): Promise<NextResponse> {
   try {
     const body = await req.json() as Partial<MultiLegBasket> & { id?: string };
-    const baskets = upsertBasket(body);
-    return NextResponse.json({ success: true, data: baskets });
+    const { baskets, basket, conflicts } = upsertBasket(body);
+    return NextResponse.json({ success: true, data: baskets, basket, conflicts });
   } catch (err) {
     console.error('[/api/multi-leg-focus/baskets POST]', err);
     return NextResponse.json({ success: false, error: String(err) }, { status: 500 });

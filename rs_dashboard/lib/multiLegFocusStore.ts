@@ -4,6 +4,7 @@ import { PROJECT_ROOT } from '@/lib/pyExec';
 
 import type { MultiLegBasket } from './multiLegFocus';
 import { appendToArchive, splitStaleClosed, type ArchivedBasket } from './multiLegArchive';
+import { mergeBasketWrite } from './multiLegStoreMerge';
 
 const STORE_FILE = path.join(PROJECT_ROOT, 'debug', 'multi_leg_baskets.json');
 const ARCHIVE_FILE = path.join(PROJECT_ROOT, 'debug', 'multi_leg_baskets_archive.json');
@@ -53,17 +54,26 @@ function archiveBaskets(retired: MultiLegBasket[]): void {
 }
 
 /** Upsert one basket — full-basket save or a smaller patch merged onto the
- *  existing record. Last-write-wins, matching focusToolRows.ts's rationale:
- *  this is a single-user local tool saving from many independent places
- *  (place, exit-leg, exit-basket), and an optimistic-concurrency reject would
- *  discard a real user action more often than it would prevent a real
- *  collision. */
-export function upsertBasket(basket: Partial<MultiLegBasket> & { id?: string }): MultiLegBasket[] {
+ *  existing record. A full save (with `legs`) is merged per leg by revision
+ *  (mergeBasketWrite), never rejected: a stale tab's copy can no longer
+ *  overwrite newer legs, and no real action is thrown away wholesale — at
+ *  worst one leg's same-rev change loses to the stored one and is reported
+ *  back in `conflicts`. A patch without legs is shallow-merged as before. */
+export function upsertBasket(
+  basket: Partial<MultiLegBasket> & { id?: string },
+): { baskets: MultiLegBasket[]; basket?: MultiLegBasket; conflicts: string[] } {
   const baskets = readBaskets();
   const now = new Date().toISOString();
   const idx = basket.id ? baskets.findIndex(b => b.id === basket.id) : -1;
+  let conflicts: string[] = [];
   if (idx >= 0) {
-    baskets[idx] = { ...baskets[idx], ...basket, updatedAt: now } as MultiLegBasket;
+    if (Array.isArray(basket.legs)) {
+      const merged = mergeBasketWrite(baskets[idx], { ...baskets[idx], ...basket } as MultiLegBasket);
+      baskets[idx] = { ...merged.basket, updatedAt: now };
+      conflicts = merged.conflicts;
+    } else {
+      baskets[idx] = { ...baskets[idx], ...basket, updatedAt: now } as MultiLegBasket;
+    }
   } else {
     baskets.push({
       ...basket,
@@ -77,7 +87,8 @@ export function upsertBasket(basket: Partial<MultiLegBasket> & { id?: string }):
     } as MultiLegBasket);
   }
   writeBaskets(baskets);
-  return baskets;
+  const saved = basket.id ? baskets.find(b => b.id === basket.id) : baskets[baskets.length - 1];
+  return { baskets, basket: saved, conflicts };
 }
 
 /** Removes a basket from the live store; one with trade history is archived first. */

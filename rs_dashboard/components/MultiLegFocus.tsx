@@ -15,6 +15,7 @@ import StrategyCardGrid from './basket/StrategyCardGrid';
 import MultiLegStrategyRow from './multiLegFocus/MultiLegStrategyRow';
 import OrdersTradesModal from './multiLegFocus/OrdersTradesModal';
 import ImportPositionsModal, { type ImportCandidate, type ImportRequest } from './multiLegFocus/ImportPositionsModal';
+import { withRevs, noteSaved, adoptServerBasket, type RevBook } from '@/lib/multiLegStoreMerge';
 import HistoryModal from './multiLegFocus/HistoryModal';
 import MultiLegOptionChainModal from './multiLegFocus/MultiLegOptionChainModal';
 import HelpModal from './HelpModal';
@@ -575,6 +576,7 @@ export default function MultiLegFocus({
       .then(r => r.json())
       .then((j: { success: boolean; data?: MultiLegBasket[] }) => {
         if (j.success && Array.isArray(j.data) && j.data.length > 0) {
+          for (const b of j.data) noteSaved(revBookRef.current, b);
           setBaskets(j.data);
         } else {
           // If no baskets stored yet, create a default Short Strangle draft row
@@ -771,13 +773,41 @@ export default function MultiLegFocus({
   }, [basketsCompositionSignature, lookupCache, fetchMarginsForBaskets]);
 
   // ── Persist Basket Helper ─────────────────────────────────────────
+  // Last saved rev + content of every basket/leg (lib/multiLegStoreMerge.ts):
+  // a save stamps changed items rev+1, and the server keeps whichever copy of
+  // each leg is newer, so an old tab can't save its stale basket over newer data.
+  const revBookRef = useRef<RevBook>(new Map());
   const persistBasket = useCallback((basket: MultiLegBasket) => {
+    const sent = withRevs(revBookRef.current, basket);
     fetch('/api/multi-leg-focus/baskets', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(basket),
-    }).catch(() => {});
-  }, []);
+      body: JSON.stringify(sent),
+    })
+      .then(r => r.json())
+      .then((j: { success: boolean; basket?: MultiLegBasket; conflicts?: string[] }) => {
+        if (!j.success || !j.basket) return;
+        const server = j.basket;
+        noteSaved(revBookRef.current, server);
+        setBaskets(prev => {
+          let hit = false;
+          const next = prev.map(b => {
+            if (b.id !== server.id) return b;
+            const adopted = adoptServerBasket(b, sent, server);
+            if (adopted !== b) hit = true;
+            return adopted;
+          });
+          if (!hit) return prev;
+          basketsRef.current = next;
+          return next;
+        });
+        if (j.conflicts?.length) {
+          const names = server.legs.filter(l => j.conflicts!.includes(l.id)).map(l => `${l.strike} ${l.option}`).join(', ');
+          addToast('error', `${server.name || 'Strategy'} changed elsewhere`, `Kept the saved version of ${names}: another tab or a repair changed it first. Check those legs.`);
+        }
+      })
+      .catch(() => {});
+  }, [addToast]);
 
   const updateBasket = useCallback((basketId: string, patch: Partial<MultiLegBasket>) => {
     setBaskets(prev => {
