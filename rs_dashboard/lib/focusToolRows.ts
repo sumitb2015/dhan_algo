@@ -38,8 +38,13 @@ export type FocusReentryTrigger = 'sl' | 'tgt';
  */
 export interface FocusPendingReentry {
   trigger: FocusReentryTrigger;
-  /** What the level is measured on. Missing = the strike's premium. */
-  src?: 'premium' | 'underlying';
+  /**
+   * What the level is measured on. Missing = the strike's premium.
+   * 'combined' — RE MOMENTUM while Overall Momentum is on (AlgoTest: momentum
+   * re-entry re-checks the combined premium): the row's combined premium, this
+   * leg priced at the new strike, the other leg at its own current strike.
+   */
+  src?: 'premium' | 'underlying' | 'combined';
   mode: 'cost' | 'momentum' | 'range';
   strike: number;
   /** Whole lots to re-sell — what the closed leg held. */
@@ -180,6 +185,26 @@ export interface FocusRowFill {
    */
   ceCostBasis?: { strike: number; price: number } | null;
   peCostBasis?: { strike: number; price: number } | null;
+  /**
+   * Index spot when the leg opened from flat — the base for the Underlying
+   * Points / Underlying % stop loss and target (AlgoTest leg SL / Target
+   * "Underlying" types). Cleared when the leg goes flat.
+   */
+  ceSpotEntry?: number | null;
+  peSpotEntry?: number | null;
+  /**
+   * Trail SL steps already taken on this leg (FocusLegTrailSl): how many times
+   * the premium has fallen another `every` below entry. Only ever rises while
+   * the leg is held, so the stop never loosens. Cleared when the leg goes flat.
+   */
+  ceTrailSteps?: number;
+  peTrailSteps?: number;
+  /**
+   * The range a Range Breakout leg entered on, stamped when it opened — the base
+   * of its ORB-based stop loss (FocusLegOrbSl). Cleared when the leg goes flat.
+   */
+  ceOrb?: FocusOrbStamp | null;
+  peOrb?: FocusOrbStamp | null;
   ts: string;
 }
 
@@ -235,6 +260,54 @@ export interface FocusLegRangeBreakout {
   /** Enter when the price breaks the range's high, or its low. */
   side: 'high' | 'low';
   on: 'instrument' | 'underlying';
+}
+
+/** The range a Range Breakout leg broke out of — see FocusRowFill.ceOrb. */
+export interface FocusOrbStamp {
+  high: number;
+  low: number;
+  side: 'high' | 'low';
+  on: 'instrument' | 'underlying';
+}
+
+/**
+ * A leg's stop loss on a basis other than the row's SL × (which is AlgoTest's
+ * "Percentage" type: ×1.3 = 30%). When `enabled`, it REPLACES the leg's SL ×.
+ *  - pts  — premium points above the leg's own entry (entry 200, 30 → 230 on a short)
+ *  - uPts — index points against the position from the spot at entry (short CE:
+ *           spot up; short PE: spot down)
+ *  - uPct — the same in % of that spot
+ */
+export interface FocusLegSlRule {
+  enabled: boolean;
+  basis: 'pts' | 'uPts' | 'uPct';
+  value: string;
+}
+
+/**
+ * AlgoTest leg "Trail SL" (`X-Y`): every time the premium moves `every` in the
+ * position's favour (down, on a short), move the stop `by` in the same
+ * direction. Points, or % of the leg's entry price (fixed at entry). Works on a
+ * premium stop (SL × or a Points stop); a stop on the underlying is not trailed.
+ */
+export interface FocusLegTrailSl {
+  enabled: boolean;
+  unit: 'pts' | 'pct';
+  every: string;
+  by: string;
+}
+
+/**
+ * AlgoTest "Stop-loss based on Range Breakout" (ORB Range): the stop distance
+ * is the entry range's size (high − low) `sign` `value` points or % of the
+ * range, measured from the level the leg broke out at, against the position.
+ * Only on a leg with Range Breakout; when on it replaces the leg's other stop.
+ */
+export interface FocusLegOrbSl {
+  enabled: boolean;
+  sign: '+' | '-';
+  value: string;
+  unit: 'pts' | 'pctRange';
 }
 
 /**
@@ -347,11 +420,28 @@ export interface FocusRow {
   /** AlgoTest Lazy Legs: up to 10 (MAX_LAZY_LEGS in focusToolRules), chainable through onSl / onTgt. */
   lazyLegs?: FocusLazyLeg[];
   /**
-   * 'HH:MM' IST. A stop/target hit at or after this time takes no re-entry,
-   * and waiting (cost / momentum) re-entries are dropped. Blank = no cutoff
+   * 'HH:MM' IST. A stop/target hit at or after this time takes no re-entry.
+   * What counts is when the stop / target HIT (AlgoTest): a cost / momentum
+   * re-entry armed before the cutoff still fires after it. Blank = no cutoff
    * beyond the row's own exit time and the 15:17 backstop.
    */
   noReEntryAfter?: string;
+  /**
+   * AlgoTest "Stop Monitoring After", 'HH:MM' IST: from this time the row stops
+   * every rule — entries, re-entries, leg and overall SL / target / trail,
+   * levels — and leaves any open position to its exit time (or the 15:17
+   * backstop). Blank = monitor until the exit time.
+   */
+  stopMonitoringAfter?: string;
+  /** Leg SL on another basis (replaces SL × for that leg when enabled). */
+  ceSlRule?: FocusLegSlRule;
+  peSlRule?: FocusLegSlRule;
+  /** Leg Trail SL. */
+  ceTrailSl?: FocusLegTrailSl;
+  peTrailSl?: FocusLegTrailSl;
+  /** Stop loss based on the entry range (Range Breakout legs only). */
+  ceOrbSl?: FocusLegOrbSl;
+  peOrbSl?: FocusLegOrbSl;
   /**
    * Overall Momentum (AlgoTest): hold the entry until the row's combined
    * premium (CE+PE of the legs it trades, 1 lot each) has moved this many
@@ -394,8 +484,12 @@ export interface FocusRow {
    */
   ceTgtPct?: string;
   peTgtPct?: string;
-  /** Unit of ceTgtPct / peTgtPct, for both legs. Missing = '%'. */
-  legTgtUnit?: 'pct' | 'pts';
+  /**
+   * Unit of ceTgtPct / peTgtPct, for both legs. Missing = '%'. 'uPts' / 'uPct'
+   * are AlgoTest's Underlying Points / Underlying %: the index moving that far
+   * in the position's favour from the spot at entry (short CE: down; short PE: up).
+   */
+  legTgtUnit?: 'pct' | 'pts' | 'uPts' | 'uPct';
   /**
    * SL to cost: when one leg's own SL × hits, the leg still open gets a stop
    * at its own entry premium (break-even on that leg). Missing = off.

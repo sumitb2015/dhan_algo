@@ -21,6 +21,7 @@ import {
   isSimRow, simLegPosition,
   legPinnedStrike, slRollStrike, evaluateReentry, costStopReason, legOwnEntry, DEFAULT_SL_ROLL_MAX,
   reentryWindowClosed, pendingReentryLevel, pendingReentryHit, legTargetReason, costReentryBasis, awaitingMomentumQuote, legTargetLevel,
+  monitoringStopped, momentumReentryKind, legTrailSteps, legStopLevel, orbStopDistance, legTargetSpotLevel, MAX_LEG_REENTRIES,
   type RowLive, type PosRow, type WorkerHold,
 } from './focusToolRules.ts';
 import type { FocusRow } from './focusToolRows.ts';
@@ -812,4 +813,129 @@ test('re-range window after a stop / target (AlgoTest)', () => {
   assert.equal(reRangeWindow('09:30', '09:30', '10:00'), null);     // empty original
   assert.equal(reRangeWindow('09:20', '10:20', '23:30'), null);     // would run past midnight
   assert.equal(reRangeWindow('9:20', '10:20', '10:45'), null);
+});
+
+// ── AlgoTest parity review (2026-10-01) ─────────────────────────────────────
+
+test('No Re-entry After: judged when the stop / target hit, not when the re-entry fires (AlgoTest)', () => {
+  const r = { exitTime: '15:10', noReEntryAfter: '13:00' } as never;
+  const ctx = { nowHm: '13:20', product: 'INTRADAY' as const, groupEnabled: true };
+  // A stop at 13:20 (after the cutoff) takes no re-entry …
+  assert.match(reentryWindowClosed(r, ctx) ?? '', /no re-entry after 13:00/);
+  // … but a RE COST armed at 12:20 still fires when the price returns at 13:20.
+  assert.equal(reentryWindowClosed(r, ctx, true), null);
+  // The exit time and 15:17 still close a waiting one.
+  assert.match(reentryWindowClosed(r, { ...ctx, nowHm: '15:10' }, true) ?? '', /exit time/);
+});
+
+test('Stop Monitoring After closes the re-entry window and is off when blank', () => {
+  assert.equal(monitoringStopped({ stopMonitoringAfter: '14:00' }, '13:59'), false);
+  assert.equal(monitoringStopped({ stopMonitoringAfter: '14:00' }, '14:00'), true);
+  assert.equal(monitoringStopped({ stopMonitoringAfter: '' }, '15:00'), false);
+  assert.equal(monitoringStopped({ stopMonitoringAfter: '9:5' }, '15:00'), false);
+  const ctx = { nowHm: '14:30', product: 'MARGIN' as const, groupEnabled: true };
+  assert.match(reentryWindowClosed({ exitTime: '', noReEntryAfter: '', stopMonitoringAfter: '14:00' } as never, ctx, true) ?? '', /monitoring stopped/);
+});
+
+test('RE MOMENTUM: combined with Overall Momentum, range, simple — else behaves like RE ASAP (glossary)', () => {
+  const sm = { enabled: true, value: '20', src: 'premium', unit: 'pts', dir: 'up' };
+  const rb = { enabled: true, end: '09:45', side: 'high', on: 'instrument' };
+  const base = { entryTime: '09:20' };
+  assert.equal(momentumReentryKind({ ...base } as never, 'CE'), 'asap');
+  assert.equal(momentumReentryKind({ ...base, ceSimpleMom: sm } as never, 'CE'), 'simple');
+  assert.equal(momentumReentryKind({ ...base, ceSimpleMom: sm } as never, 'PE'), 'asap');
+  assert.equal(momentumReentryKind({ ...base, ceRangeBreakout: rb } as never, 'CE'), 'range');
+  assert.equal(momentumReentryKind({ ...base, ceSimpleMom: sm, entryMomEnabled: true, entryMomValue: '10' } as never, 'CE'), 'combined');
+  assert.equal(MAX_LEG_REENTRIES, 20);
+});
+
+const held = (o: object = {}) => ({
+  ceSlMultiplier: '1.3', peSlMultiplier: '1.3',
+  fill: { ceStrike: 18500, peStrike: 18500, ceQty: 75, peQty: 75, ceEntry: 200, peEntry: 200, ceSpotEntry: 43700, peSpotEntry: 43700, ts: '' },
+  ...o,
+}) as never;
+const liveAt = (ce: number, pe = 200) => live({ ceLtp: ce, peLtp: pe, ceQty: -75, peQty: -75, ceEntry: 200, peEntry: 200 });
+
+test('leg SL types: Points, Underlying Pts and Underlying % (doc numbers, sell side)', () => {
+  // Points: entry 200, 30 points → a short stops at 230.
+  const pts = held({ ceSlRule: { enabled: true, basis: 'pts', value: '30' } });
+  assert.equal(legStopLevel(pts, 'CE', liveAt(229))?.level, 230);
+  assert.equal(legStopReason(pts, 'CE', liveAt(229)), null);
+  assert.match(legStopReason(pts, 'CE', liveAt(230)) ?? '', /CE SL 30 pts hit/);
+  // SL × still in force on the other leg.
+  assert.match(legStopReason(pts, 'PE', liveAt(200, 260)) ?? '', /PE SL ×1.3 hit/);
+  // Underlying Points: BankNifty 43700, 80 points. Short CE loses as the index rises → 43780; short PE → 43620.
+  const up = held({ ceSlRule: { enabled: true, basis: 'uPts', value: '80' }, peSlRule: { enabled: true, basis: 'uPts', value: '80' } });
+  assert.equal(legStopReason(up, 'CE', liveAt(500), undefined, 43779), null);   // premium alone never fires it
+  assert.match(legStopReason(up, 'CE', liveAt(150), undefined, 43780) ?? '', /CE SL 80 pts on the index hit/);
+  assert.match(legStopReason(up, 'PE', liveAt(200, 150), undefined, 43620) ?? '', /PE SL 80 pts on the index hit/);
+  assert.equal(legStopReason(up, 'PE', liveAt(200, 150), undefined, 0), null);  // no spot, no stop
+  // Underlying %: 1% of 43700 = 437 → 44137 / 43263.
+  const upct = held({ ceSlRule: { enabled: true, basis: 'uPct', value: '1' }, peSlRule: { enabled: true, basis: 'uPct', value: '1' } });
+  assert.ok(Math.abs((legStopLevel(upct, 'CE', liveAt(200))?.level ?? 0) - 44137) < 1e-9);
+  assert.ok(Math.abs((legStopLevel(upct, 'PE', liveAt(200))?.level ?? 0) - 43263) < 1e-9);
+  // No spot recorded at entry (opened before it was stamped) → falls back to SL ×.
+  const noSpot = held({ ceSlRule: { enabled: true, basis: 'uPts', value: '80' }, fill: { ceStrike: 1, peStrike: 1, ceQty: 75, peQty: 0, ceEntry: 200, ts: '' } });
+  assert.equal(legStopLevel(noSpot, 'CE', liveAt(200))?.kind, 'mult');
+});
+
+test('leg target types: Underlying Pts / % in the short leg\'s favour (doc numbers)', () => {
+  // BankNifty 43700, 50 points: short CE profits as the index falls → 43650; short PE as it rises → 43750.
+  assert.equal(legTargetSpotLevel('CE', 43700, '50', 'uPts'), 43650);
+  assert.equal(legTargetSpotLevel('PE', 43700, '50', 'uPts'), 43750);
+  assert.ok(Math.abs((legTargetSpotLevel('PE', 43700, '1', 'uPct') ?? 0) - 44137) < 1e-9);
+  assert.equal(legTargetSpotLevel('CE', 43700, '50', 'pts'), null);
+  assert.equal(legTargetLevel(200, '50', 'uPts'), null);   // never a premium level
+  const r = held({ ceTgtPct: '50', peTgtPct: '50', legTgtUnit: 'uPts' });
+  assert.equal(legTargetReason(r, 'CE', liveAt(10), undefined, 43651), null);
+  assert.match(legTargetReason(r, 'CE', liveAt(10), undefined, 43650) ?? '', /CE target 50 pts on the index hit/);
+  assert.match(legTargetReason(r, 'PE', liveAt(200, 10), undefined, 43750) ?? '', /PE target 50 pts on the index hit/);
+});
+
+test('leg Trail SL "X - Y" (points doc example, mirrored for a short)', () => {
+  // Doc (buy): entry 200, SL 175, trail 20-10 → 240 moves SL to 195, 280 to 215.
+  // Short mirror: entry 200, SL 225 (25 pts), premium 160 → 215, 120 → 205.
+  const t = { enabled: true, unit: 'pts' as const, every: '20', by: '10' };
+  assert.equal(legTrailSteps(t, 200, 181), 0);
+  assert.equal(legTrailSteps(t, 200, 180), 1);
+  assert.equal(legTrailSteps(t, 200, 160), 2);
+  assert.equal(legTrailSteps(t, 200, 120), 4);
+  const r = held({ ceSlRule: { enabled: true, basis: 'pts', value: '25' }, ceTrailSl: t });
+  assert.equal(legStopLevel(r, 'CE', liveAt(160), 160)?.level, 205);
+  // The saved steps keep the stop down after the premium bounces back.
+  const saved = held({ ceSlRule: { enabled: true, basis: 'pts', value: '25' }, ceTrailSl: t,
+    fill: { ceStrike: 1, peStrike: 1, ceQty: 75, peQty: 0, ceEntry: 200, ceTrailSteps: 2, ts: '' } });
+  assert.equal(legStopLevel(saved, 'CE', liveAt(199), 199)?.level, 205);
+  assert.match(legStopReason(saved, 'CE', liveAt(205)) ?? '', /SL 25 pts trailed 2× hit/);
+  // Percentage: "20% - 10%" of a 200 entry is "40 - 20".
+  const pct = { enabled: true, unit: 'pct' as const, every: '20', by: '10' };
+  assert.equal(legTrailSteps(pct, 200, 161), 0);
+  assert.equal(legTrailSteps(pct, 200, 160), 1);
+  // On SL × too: 200 × 1.3 = 260, one 40-point step → 240.
+  const mult = held({ ceTrailSl: pct });
+  assert.equal(legStopLevel(mult, 'CE', liveAt(160), 160)?.level, 240);
+  // A stop on the index is not trailed.
+  const idx = held({ ceSlRule: { enabled: true, basis: 'uPts', value: '80' }, ceTrailSl: t });
+  assert.equal(legStopLevel(idx, 'CE', liveAt(100), 100)?.trailed, 0);
+});
+
+test('ORB Range stop loss (doc numbers)', () => {
+  const range = { high: 18760, low: 18710 };
+  assert.equal(orbStopDistance(range, { enabled: true, sign: '+', value: '20', unit: 'pts' }), 70);
+  assert.equal(orbStopDistance(range, { enabled: true, sign: '-', value: '20', unit: 'pctRange' }), 40);
+  assert.equal(orbStopDistance(range, { enabled: false, sign: '+', value: '20', unit: 'pts' }), null);
+  assert.equal(orbStopDistance(range, { enabled: true, sign: '-', value: '100', unit: 'pctRange' }), null);
+  // On the index, high breakout: short CE stops 70 above the high, short PE 70 below it.
+  const orbSl = { enabled: true, sign: '+', value: '20', unit: 'pts' };
+  const r = held({ ceOrbSl: orbSl, peOrbSl: orbSl, fill: {
+    ceStrike: 1, peStrike: 1, ceQty: 75, peQty: 75, ceEntry: 200, peEntry: 200, ts: '',
+    ceOrb: { ...range, side: 'high', on: 'underlying' }, peOrb: { ...range, side: 'high', on: 'underlying' },
+  } });
+  assert.equal(legStopLevel(r, 'CE', liveAt(200))?.level, 18830);
+  assert.equal(legStopLevel(r, 'PE', liveAt(200))?.level, 18690);
+  assert.match(legStopReason(r, 'PE', liveAt(200), undefined, 18690) ?? '', /PE ORB SL 70.00 from the range high \(index\) hit/);
+  // On the leg's own premium: always above the breakout level for a short.
+  const inst = held({ ceOrbSl: orbSl, fill: { ceStrike: 1, peStrike: 1, ceQty: 75, peQty: 0, ceEntry: 258, ts: '',
+    ceOrb: { high: 257.95, low: 220, side: 'high', on: 'instrument' } } });
+  assert.ok(Math.abs((legStopLevel(inst, 'CE', liveAt(258))?.level ?? 0) - (257.95 + 37.95 + 20)) < 1e-9);
 });

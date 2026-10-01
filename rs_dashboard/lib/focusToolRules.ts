@@ -23,6 +23,7 @@
 
 import type {
   FocusRow, FocusDte, FocusRowStatus, FocusReentryMode, FocusReentryTrigger, FocusPendingReentry, FocusLegSimpleMom, FocusLazyLeg, FocusLegRangeBreakout, FocusOverallMode,
+  FocusLegSlRule, FocusLegTrailSl, FocusLegOrbSl, FocusOrbStamp,
 } from '@/lib/focusToolRows';
 
 // ── Constants ────────────────────────────────────────────────────────────────
@@ -332,29 +333,177 @@ export function entryPremiumWeighted(
  * flat leg has no premium to measure a multiple against.
  */
 export function legStopReason(
-  row: Pick<FocusRow, 'ceSlMultiplier' | 'peSlMultiplier' | 'fill' | 'lazyLegs'>,
+  row: LegStopRow,
   leg: 'CE' | 'PE',
   live: RowLive,
   workerHold?: WorkerHold,
+  spot = 0,
 ): string | null {
   if (!rowOwnsLeg(row, leg, workerHold)) return null;
   const pos = leg === 'CE' ? live.cePosition : live.pePosition;
   const qty = Number(pos?.netQty ?? 0);
   if (qty === 0) return null;
-  const mult = Number(legSlMultiplier(row, leg));
-  if (!(mult > 1)) return null;
-  // Short: hurt by this leg's own premium expanding through a multiple of what
-  // it was sold for (this tool only ever opens with a SELL). This row's own
-  // entry first (legOwnEntry): re-entering a strike already traded today
-  // (RE-Cost always does; RE-ASAP often lands back on the same ATM) would
-  // otherwise measure the stop from a broker average that blends in the
-  // earlier, closed trade on that security.
-  const entry = legOwnEntry(row, leg, live);
-  const now = (leg === 'CE' ? live.ltpCe : live.ltpPe) ?? 0;
-  if (entry > 0 && now > 0 && now >= entry * mult) {
-    return `${leg} SL ×${mult} hit (premium ${now.toFixed(2)} vs entry ${entry.toFixed(2)})`;
+  // Short: hurt by this leg's own premium expanding (this tool only ever opens
+  // with a SELL), or by the index moving against it. This row's own entry
+  // first (legOwnEntry): re-entering a strike already traded today (RE-Cost
+  // always does; RE-ASAP often lands back on the same ATM) would otherwise
+  // measure the stop from a broker average that blends in the earlier, closed
+  // trade on that security.
+  const ltp = (leg === 'CE' ? live.ltpCe : live.ltpPe) ?? 0;
+  const stop = legStopLevel(row, leg, live, ltp);
+  if (!stop) return null;
+  const now = stop.on === 'spot' ? spot : ltp;
+  if (!(now > 0)) return null;
+  const hit = stop.dir === 'up' ? now >= stop.level : now <= stop.level;
+  if (!hit) return null;
+  if ((stop.kind === 'mult' || stop.kind === 'lazy') && !stop.trailed) {
+    return `${leg} SL ×${stop.mult} hit (premium ${now.toFixed(2)} vs entry ${stop.entry.toFixed(2)})`;
   }
-  return null;
+  return `${leg} ${stop.label} hit (${stop.on === 'spot' ? 'spot' : 'premium'} ${now.toFixed(2)} ${stop.dir === 'up' ? '≥' : '≤'} ${stop.level.toFixed(2)})`;
+}
+
+/** Row fields every leg-stop rule reads. */
+export type LegStopRow = Pick<FocusRow, 'ceSlMultiplier' | 'peSlMultiplier' | 'fill' | 'lazyLegs'>
+  & Partial<Pick<FocusRow, 'ceSlRule' | 'peSlRule' | 'ceTrailSl' | 'peTrailSl' | 'ceOrbSl' | 'peOrbSl'
+    | 'ceRangeBreakout' | 'peRangeBreakout'>>;
+
+export interface LegStopLevel {
+  /** Which stop is in force. */
+  kind: 'mult' | 'lazy' | 'pts' | 'uPts' | 'uPct' | 'orb';
+  /** What the level is compared with: the leg's premium or the index spot. */
+  on: 'premium' | 'spot';
+  level: number;
+  /** 'up' fires at now ≥ level, 'down' at now ≤ level. */
+  dir: 'up' | 'down';
+  /** The leg's own entry premium the stop was built from. */
+  entry: number;
+  /** SL × multiple, for kind 'mult' / 'lazy'. */
+  mult?: number;
+  /** Trail SL steps applied (0 = none). */
+  trailed: number;
+  /** Short human label, e.g. "SL 30 pts", "SL ×1.3 trailed 2×". */
+  label: string;
+}
+
+/** A leg's alternative SL basis, when it is switched on with a value. */
+export function legSlRuleOn(rule: FocusLegSlRule | null | undefined): rule is FocusLegSlRule {
+  return !!rule && rule.enabled && Number(rule.value) > 0
+    && (rule.basis === 'pts' || rule.basis === 'uPts' || rule.basis === 'uPct');
+}
+
+/** A leg's Trail SL, when it is switched on with both amounts. */
+export function legTrailOn(t: FocusLegTrailSl | null | undefined): t is FocusLegTrailSl {
+  return !!t && t.enabled && Number(t.every) > 0 && Number(t.by) > 0;
+}
+
+/**
+ * Trail SL steps the premium has earned: one per `every` it has fallen below
+ * the entry (a short profits as the premium falls). Points, or % of the entry
+ * price — the step stays fixed at what the % of the ENTRY is (AlgoTest: "20% -
+ * 10%" on 200 is "40 - 20"). 0 when off or not in profit.
+ */
+export function legTrailSteps(t: FocusLegTrailSl | null | undefined, entry: number, ltp: number): number {
+  if (!legTrailOn(t) || !(entry > 0) || !(ltp > 0)) return 0;
+  const every = t.unit === 'pct' ? entry * Number(t.every) / 100 : Number(t.every);
+  if (!(every > 0)) return 0;
+  return Math.max(0, Math.floor((entry - ltp) / every + 1e-9));
+}
+
+/** How far one Trail SL step moves the stop, in premium points. */
+export function legTrailStepSize(t: FocusLegTrailSl, entry: number): number {
+  return t.unit === 'pct' ? entry * Number(t.by) / 100 : Number(t.by);
+}
+
+/**
+ * ORB Range stop distance: the range size (high − low) plus or minus `value`
+ * points, or `value` % of the range. Range 50, "+ 20 points" → 70; "− 20 % of
+ * range" → 40. Null when off, or the distance is not above zero.
+ */
+export function orbStopDistance(
+  range: { high: number; low: number }, cfg: FocusLegOrbSl | null | undefined,
+): number | null {
+  if (!cfg?.enabled) return null;
+  const size = Number(range.high) - Number(range.low);
+  const v = Number(cfg.value) || 0;
+  if (!(size >= 0) || v < 0) return null;
+  const adj = cfg.unit === 'pctRange' ? size * v / 100 : v;
+  const d = cfg.sign === '-' ? size - adj : size + adj;
+  return d > 0 ? d : null;
+}
+
+/**
+ * The stop level in force on a leg, or null when it has none. Priority: an ORB
+ * Range stop (Range Breakout legs), a running Lazy Leg's SL %, the leg's other
+ * SL basis (FocusLegSlRule), else its SL ×. A Trail SL lowers a PREMIUM stop by
+ * one step per `every` the premium has fallen below entry — `ltp` counts too,
+ * so a step earned on this very tick is not missed while the saved count
+ * (fill.ceTrailSteps) catches up. Underlying stops fall back to SL × when the
+ * spot at entry was never recorded (a leg opened before it was stamped).
+ *
+ * Display and the exit rule both read this, so they can never disagree.
+ */
+export function legStopLevel(row: LegStopRow, leg: 'CE' | 'PE', live: RowLive, ltp = 0): LegStopLevel | null {
+  const entry = legOwnEntry(row, leg, live);
+  const f = row.fill;
+  const lazy = runningLazyLeg(row, leg);
+
+  const orbCfg = leg === 'CE' ? row.ceOrbSl : row.peOrbSl;
+  const orb = leg === 'CE' ? f?.ceOrb : f?.peOrb;
+  if (!lazy && orb && orbCfg?.enabled) {
+    const d = orbStopDistance(orb, orbCfg);
+    if (d != null) return orbStopLevel(leg, orb, d, entry);
+  }
+
+  let base: LegStopLevel | null = null;
+  const rule = leg === 'CE' ? row.ceSlRule : row.peSlRule;
+  if (!lazy && legSlRuleOn(rule)) {
+    const v = Number(rule.value);
+    if (rule.basis === 'pts') {
+      if (entry > 0) base = { kind: 'pts', on: 'premium', level: entry + v, dir: 'up', entry, trailed: 0, label: `SL ${v} pts` };
+    } else {
+      const se = Number(leg === 'CE' ? f?.ceSpotEntry : f?.peSpotEntry) || 0;
+      if (se > 0) {
+        const move = rule.basis === 'uPct' ? se * v / 100 : v;
+        // Short CE loses as the index rises, short PE as it falls.
+        base = {
+          kind: rule.basis, on: 'spot', level: leg === 'CE' ? se + move : se - move, dir: leg === 'CE' ? 'up' : 'down',
+          entry, trailed: 0, label: `SL ${v}${rule.basis === 'uPct' ? '%' : ' pts'} on the index`,
+        };
+      }
+    }
+  }
+  if (!base) {
+    const mult = Number(legSlMultiplier(row, leg));
+    if (!(mult > 1) || !(entry > 0)) return null;
+    base = { kind: lazy ? 'lazy' : 'mult', on: 'premium', level: entry * mult, dir: 'up', entry, mult, trailed: 0, label: `SL ×${mult}` };
+  }
+
+  const trail = leg === 'CE' ? row.ceTrailSl : row.peTrailSl;
+  if (!lazy && base.on === 'premium' && legTrailOn(trail)) {
+    const saved = Number(leg === 'CE' ? f?.ceTrailSteps : f?.peTrailSteps) || 0;
+    const steps = Math.max(saved, legTrailSteps(trail, entry, ltp));
+    if (steps > 0) {
+      base = { ...base, level: base.level - steps * legTrailStepSize(trail, entry), trailed: steps, label: `${base.label} trailed ${steps}×` };
+    }
+  }
+  return base;
+}
+
+/**
+ * ORB Range stop, `d` away from the level the leg broke out at, against the
+ * position. On the leg's own premium a short always loses as it rises. On the
+ * index: a short CE loses as it rises, a short PE as it falls. (AlgoTest's only
+ * example is a BUY CE on a high breakout, stop below the high; this is the
+ * same rule — the stop sits on the losing side of the breakout level.)
+ */
+function orbStopLevel(leg: 'CE' | 'PE', orb: FocusOrbStamp, d: number, entry: number): LegStopLevel {
+  const from = orb.side === 'low' ? orb.low : orb.high;
+  const up = orb.on === 'instrument' || leg === 'CE';
+  return {
+    kind: 'orb', on: orb.on === 'underlying' ? 'spot' : 'premium', level: up ? from + d : from - d,
+    dir: up ? 'up' : 'down', entry, trailed: 0,
+    label: `ORB SL ${d.toFixed(2)} from the range ${orb.side}${orb.on === 'underlying' ? ' (index)' : ''}`,
+  };
 }
 
 /**
@@ -397,9 +546,13 @@ export function legOwnEntry(
   return q < 0 ? Number(pos?.sellAvg) || 0 : Number(pos?.buyAvg) || 0;
 }
 
-/** Does this leg carry its own SL × (a multiple above 1)? */
-export function legHasOwnSl(row: Pick<FocusRow, 'ceSlMultiplier' | 'peSlMultiplier' | 'fill' | 'lazyLegs'>, leg: 'CE' | 'PE'): boolean {
-  return Number(legSlMultiplier(row, leg)) > 1;
+/** Does this leg carry a stop loss of its own (SL ×, another SL basis, or an ORB Range stop)? */
+export function legHasOwnSl(row: LegStopRow, leg: 'CE' | 'PE'): boolean {
+  if (Number(legSlMultiplier(row, leg)) > 1) return true;
+  if (runningLazyLeg(row, leg)) return false;
+  if (legSlRuleOn(leg === 'CE' ? row.ceSlRule : row.peSlRule)) return true;
+  return !!(leg === 'CE' ? row.ceOrbSl : row.peOrbSl)?.enabled
+    && !!(leg === 'CE' ? row.ceRangeBreakout : row.peRangeBreakout)?.enabled;
 }
 
 /**
@@ -408,7 +561,7 @@ export function legHasOwnSl(row: Pick<FocusRow, 'ceSlMultiplier' | 'peSlMultipli
  * open leg (the default).
  */
 export function costStopApplies(
-  row: Pick<FocusRow, 'slToCost' | 'slToCostScope' | 'ceSlMultiplier' | 'peSlMultiplier' | 'fill' | 'lazyLegs'>, other: 'CE' | 'PE',
+  row: Pick<FocusRow, 'slToCost' | 'slToCostScope'> & LegStopRow, other: 'CE' | 'PE',
 ): boolean {
   if (!row.slToCost) return false;
   return row.slToCostScope === 'sl' ? legHasOwnSl(row, other) : true;
@@ -439,6 +592,9 @@ export function costStopReason(
 
 /** Default cap on auto-rolls per leg per cycle when FocusRow.slRollMax is unset. */
 export const DEFAULT_SL_ROLL_MAX = 2;
+
+/** AlgoTest's cap on re-entries per leg, for the SL and for the target each. */
+export const MAX_LEG_REENTRIES = 20;
 
 /**
  * The strike to re-sell a stopped leg at: `strikes` steps further OTM than
@@ -482,16 +638,53 @@ export function reentryConfig(
  * 15:17 intraday backstop, "No re-entry after", or a stopped index.
  */
 export function reentryWindowClosed(
-  row: Pick<FocusRow, 'exitTime' | 'noReEntryAfter'>,
+  row: Pick<FocusRow, 'exitTime' | 'noReEntryAfter'> & Partial<Pick<FocusRow, 'stopMonitoringAfter'>>,
   ctx: Pick<ReentryContext, 'nowHm' | 'product' | 'groupEnabled'>,
+  /**
+   * True for a cost / momentum / range re-entry that is already WAITING. AlgoTest
+   * "No Re-entry After" only looks at when the stop / target hit: one that hit
+   * at 12:20 with a 13:00 cutoff still re-enters when its price comes back at
+   * 13:20. So a waiting re-entry ignores the cutoff; everything else still applies.
+   */
+  waiting = false,
 ): string | null {
   if (!ctx.groupEnabled) return 'index not started';
-  if (row.noReEntryAfter && ctx.nowHm >= row.noReEntryAfter) {
+  if (monitoringStopped(row, ctx.nowHm)) return `monitoring stopped at ${row.stopMonitoringAfter}`;
+  if (!waiting && row.noReEntryAfter && ctx.nowHm >= row.noReEntryAfter) {
     return `no re-entry after ${row.noReEntryAfter}`;
   }
   if (row.exitTime && ctx.nowHm >= row.exitTime) return `past its own exit time ${row.exitTime}`;
   if (ctx.product === 'INTRADAY' && ctx.nowHm >= INTRADAY_BACKSTOP_HM) return 'past 15:17 intraday cutoff';
   return null;
+}
+
+/**
+ * AlgoTest "Stop Monitoring After": past this 'HH:MM' the row runs no rule at
+ * all — no entry, re-entry, stop, target or trail — and an open position is
+ * left to the exit time. Blank / malformed = never.
+ */
+export function monitoringStopped(
+  row: Partial<Pick<FocusRow, 'stopMonitoringAfter'>>, nowHm: string,
+): boolean {
+  const t = row.stopMonitoringAfter;
+  return !!t && /^([01]\d|2[0-3]):[0-5]\d$/.test(t) && nowHm >= t;
+}
+
+/**
+ * How RE MOMENTUM re-enters a leg (AlgoTest):
+ *  - 'combined' — Overall Momentum is on: Simple Momentum and Range Breakout are
+ *    disabled, and a momentum re-entry re-checks the COMBINED premium instead;
+ *  - 'range'    — the leg has Range Breakout: a new range of the same length;
+ *  - 'simple'   — the leg's own Simple Momentum, from the new strike;
+ *  - 'asap'     — none of those: "behaves exactly like RE ASAP" (glossary).
+ */
+export function momentumReentryKind(
+  row: Pick<FocusRow, 'entryTime' | 'entryMomEnabled' | 'entryMomValue' | 'ceSimpleMom' | 'peSimpleMom' | 'ceRangeBreakout' | 'peRangeBreakout'>,
+  leg: 'CE' | 'PE',
+): 'combined' | 'range' | 'simple' | 'asap' {
+  if (entryMomentumOn(row)) return 'combined';
+  if (rangeBreakoutOn(leg === 'CE' ? row.ceRangeBreakout : row.peRangeBreakout, row.entryTime)) return 'range';
+  return simpleMomOn(leg === 'CE' ? row.ceSimpleMom : row.peSimpleMom) ? 'simple' : 'asap';
 }
 
 /**
@@ -586,23 +779,54 @@ export function legTargetLevel(
 ): number | null {
   const v = Number(value);
   if (!(v > 0) || !(entry > 0)) return null;
+  if (unit === 'uPts' || unit === 'uPct') return null;   // on the index — legTargetSpotLevel
   const level = unit === 'pts' ? entry - v : entry * (1 - v / 100);
   return level > 0 ? level : null;
 }
 
 /**
+ * AlgoTest Underlying Points / Underlying % target: the index level a short leg
+ * takes profit at — the spot at entry moved `value` points / % in its favour
+ * (short CE: down; short PE: up). Null when the unit is not on the index, the
+ * value is off, or the spot at entry is unknown.
+ */
+export function legTargetSpotLevel(
+  leg: 'CE' | 'PE', spotEntry: number | null | undefined, value: string | number | undefined, unit: FocusRow['legTgtUnit'],
+): number | null {
+  const v = Number(value);
+  const se = Number(spotEntry) || 0;
+  if (!(v > 0) || !(se > 0) || (unit !== 'uPts' && unit !== 'uPct')) return null;
+  const move = unit === 'uPct' ? se * v / 100 : v;
+  return leg === 'CE' ? se - move : se + move;
+}
+
+/** Short label for a leg target unit. */
+export function legTgtUnitLabel(unit: FocusRow['legTgtUnit']): string {
+  return unit === 'pts' ? 'pts' : unit === 'uPts' ? 'idx pts' : unit === 'uPct' ? 'idx %' : '%';
+}
+
+/**
  * This leg's own target breach, or null: premium decayed to legTargetLevel,
- * entry being this row's own (legOwnEntry). Only while this row owns an open
- * leg.
+ * entry being this row's own (legOwnEntry) — or, on the Underlying units, the
+ * index reached legTargetSpotLevel. Only while this row owns an open leg.
  */
 export function legTargetReason(
   row: Pick<FocusRow, 'ceTgtPct' | 'peTgtPct' | 'legTgtUnit' | 'fill' | 'lazyLegs'>,
   leg: 'CE' | 'PE',
   live: RowLive,
   workerHold?: WorkerHold,
+  spot = 0,
 ): string | null {
   if (legOwnContracts(row, leg, live, workerHold) <= 0) return null;
   const { value, unit } = legTarget(row, leg);
+  if (unit === 'uPts' || unit === 'uPct') {
+    const lvl = legTargetSpotLevel(leg, leg === 'CE' ? row.fill?.ceSpotEntry : row.fill?.peSpotEntry, value, unit);
+    if (lvl == null || !(spot > 0)) return null;
+    const hit = leg === 'CE' ? spot <= lvl : spot >= lvl;
+    return hit
+      ? `${leg} target ${Number(value)}${unit === 'uPct' ? '%' : ' pts'} on the index hit (spot ${spot.toFixed(2)} ${leg === 'CE' ? '≤' : '≥'} ${lvl.toFixed(2)})`
+      : null;
+  }
   const entry = legOwnEntry(row, leg, live);
   const level = legTargetLevel(entry, value, unit);
   if (level == null) return null;
@@ -646,7 +870,7 @@ function previewCombinedPremium(
 
 /** This leg's SL × level. Uses sell/buy avg while owned and open, else live LTP (preview). */
 export function legStopPremium(
-  row: Pick<FocusRow, 'ceSlMultiplier' | 'peSlMultiplier' | 'fill' | 'lazyLegs'>,
+  row: LegStopRow,
   leg: 'CE' | 'PE',
   live: RowLive,
   workerHold?: WorkerHold,
@@ -655,9 +879,13 @@ export function legStopPremium(
   const qty = Number(pos?.netQty ?? 0);
   const ltp = (leg === 'CE' ? live.ltpCe : live.ltpPe) ?? 0;
   const owned = rowOwnsLeg(row, leg, workerHold) && qty !== 0;
-  // Same entry legStopReason fires on — display must not disagree with it.
-  const entry = owned ? legOwnEntry(row, leg, live) : ltp;
-  return stopPremium(entry, legSlMultiplier(row, leg));
+  // While held: the same level legStopReason fires on — display must not
+  // disagree with it. A stop on the index is not a premium; null here.
+  if (owned) {
+    const s = legStopLevel(row, leg, live, ltp);
+    return s && s.on === 'premium' ? s.level : null;
+  }
+  return stopPremium(ltp, legSlMultiplier(row, leg));
 }
 
 /** Pair SL × level. Uses combined (lots × premium) entry while open, else preview. */
