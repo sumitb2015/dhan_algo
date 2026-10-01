@@ -46,7 +46,7 @@ import {
   legPinnedStrike, costStopReason, legOwnEntry, slRollStrike, DEFAULT_SL_ROLL_MAX,
   reentryConfig, evaluateReentry, reentryWindowClosed, pendingReentryLevel, pendingReentryHit, legTargetReason, costReentryBasis,
   awaitingMomentumQuote, MOMENTUM_QUOTE_WAIT_MS, legTargetLevel,
-  evaluateEntryMomentum, entryMomentumOn, simpleMomOn, simpleMomLevel, simpleMomHit,
+  evaluateEntryMomentum, entryMomentumOn, costStopApplies, simpleMomOn, simpleMomLevel, simpleMomHit,
   type PosRow, type RowLive,
 } from '@/lib/focusToolRules';
 import { computeRowPnl, mtmForQty, shiftMayReopen, canMarkMtm, shiftCloseConfirmed, rowDisplayBookedPnl, putCallRatio, valuePutCallRatio, pickOpenInterest } from '@/lib/focusToolPnl';
@@ -1150,11 +1150,23 @@ function LegReentryControls({ row, onUpdate, onCancelPending, legTargetsElsewher
             )}
           </span>
         )}
+        <div className={lbl} title="Square Off: Partial — a leg's SL / target closes only that leg. Complete — it closes every leg of the row">
+          Square Off
+          <MiniSelect value={row.squareOff ?? 'partial'} ariaLabel="Square off"
+            options={[{ value: 'partial', label: 'Partial' }, { value: 'complete', label: 'Complete' }]}
+            onChange={v => onUpdate({ squareOff: v as 'partial' | 'complete' })} className="w-24" />
+        </div>
         <label className={cn(lbl, 'cursor-pointer text-zinc-300')}
-          title="When one leg's own SL × hits, move the other leg's stop to its entry premium (exit it if it returns to cost). An exit at cost never re-enters">
-          <Switch size="sm" checked={!!row.slToCost} onCheckedChange={c => onUpdate({ slToCost: !!c })} aria-label="SL to cost" />
-          SL→Cost
+          title="Trail SL to Break-even price: when one leg's own SL × hits, move the other leg's stop to its entry premium (exit it if it returns to cost). An exit at cost never re-enters">
+          <Switch size="sm" checked={!!row.slToCost} onCheckedChange={c => onUpdate({ slToCost: !!c })} aria-label="Trail SL to Break-even price" />
+          Trail SL to Break-even price
         </label>
+        {row.slToCost && (
+          <MiniSelect value={row.slToCostScope ?? 'all'} ariaLabel="Trail SL to break-even scope"
+            title="SL Legs: only legs that have their own SL ×. All Legs: every open leg, even one with no SL"
+            options={[{ value: 'sl', label: 'SL Legs' }, { value: 'all', label: 'All Legs' }]}
+            onChange={v => onUpdate({ slToCostScope: v as 'sl' | 'all' })} className="w-24" />
+        )}
       </div>
       <LegReentryPendingChips row={row} onCancelPending={onCancelPending} />
     </div>
@@ -2475,7 +2487,7 @@ function FocusTableRowImpl({
                 onClick={() => onUpdate({
                   levelHigh: '', levelLow: '', levelVw: false, vwapInterval: '1', vwapBufferPct: '0.1',
                   slRupees: '', slMultiplier: '1.2', ceSlMultiplier: '1.2', peSlMultiplier: '1.2',
-                  slRollStrikes: 0, slToCost: false, reSlMode: 'off', reTgtMode: 'off',
+                  slRollStrikes: 0, slToCost: false, slToCostScope: undefined, squareOff: undefined, reSlMode: 'off', reTgtMode: 'off',
                   ceTgtPct: '', peTgtPct: '', noReEntryAfter: '', entryMomEnabled: false, entryMomValue: '', ceSimpleMom: undefined, peSimpleMom: undefined,
                 })}
                 title="Clear rules"
@@ -2609,7 +2621,8 @@ function reentrySummary(row: FocusRow): string {
     : `${REENTRY_LABEL[c.mode]}${c.mode === 'otm' ? ` ${c.otmStrikes}` : ''} ×${c.max}`;
   const parts = [`SL: ${one(sl)}`, `Tgt: ${one(tgt)}`];
   if (row.noReEntryAfter) parts.push(`none after ${row.noReEntryAfter}`);
-  if (row.slToCost) parts.push('SL→Cost on');
+  if (row.squareOff === 'complete') parts.push('Square off complete');
+  if (row.slToCost) parts.push(`Trail SL to BE (${row.slToCostScope === 'sl' ? 'SL legs' : 'all legs'})`);
   return parts.join(' · ');
 }
 
@@ -2650,7 +2663,7 @@ function FocusProRowImpl({
   const clearRules = () => onUpdate({
     levelHigh: '', levelLow: '', levelVw: false, vwapInterval: '1', vwapBufferPct: '0.1',
     slRupees: '', slMultiplier: '1.2', ceSlMultiplier: '1.2', peSlMultiplier: '1.2',
-    slRollStrikes: 0, slToCost: false, reSlMode: 'off', reTgtMode: 'off',
+    slRollStrikes: 0, slToCost: false, slToCostScope: undefined, squareOff: undefined, reSlMode: 'off', reTgtMode: 'off',
     ceTgtPct: '', peTgtPct: '', noReEntryAfter: '', entryMomEnabled: false, entryMomValue: '', ceSimpleMom: undefined, peSimpleMom: undefined,
   });
 
@@ -3345,7 +3358,7 @@ function FocusRowCardImpl({
           </span>
           <div className="flex items-center gap-1.5">
             <button
-              onClick={() => onUpdate({ levelHigh: '', levelLow: '', levelVw: false, vwapInterval: '1', vwapBufferPct: '0.1', slRupees: '', slMultiplier: '1.2', ceSlMultiplier: '1.2', peSlMultiplier: '1.2', slRollStrikes: 0, slToCost: false, reSlMode: 'off', reTgtMode: 'off', ceTgtPct: '', peTgtPct: '', noReEntryAfter: '', entryMomEnabled: false, entryMomValue: '', ceSimpleMom: undefined, peSimpleMom: undefined })}
+              onClick={() => onUpdate({ levelHigh: '', levelLow: '', levelVw: false, vwapInterval: '1', vwapBufferPct: '0.1', slRupees: '', slMultiplier: '1.2', ceSlMultiplier: '1.2', peSlMultiplier: '1.2', slRollStrikes: 0, slToCost: false, slToCostScope: undefined, squareOff: undefined, reSlMode: 'off', reTgtMode: 'off', ceTgtPct: '', peTgtPct: '', noReEntryAfter: '', entryMomEnabled: false, entryMomValue: '', ceSimpleMom: undefined, peSimpleMom: undefined })}
               className={cn('text-[11px] text-zinc-500 hover:text-zinc-300 transition-colors cursor-pointer', FOCUS_RING)}
             >
               Clear
@@ -6050,15 +6063,33 @@ export default function FocusTool() {
     placeLeg(row, leg, { reduce: true, all: true, awaitFill: true })
       .then(async accepted => {
         if (!accepted) return;
-        if (kind === 'sl') {
+        // AlgoTest legwise Square Off → Complete: a leg's SL / target closes
+        // every other leg of the row too. The strategy is over, so no
+        // SL-to-cost and no re-entry — straight to the flat check below.
+        const latest = schedulerRef.current.config.rows.find(r => r.id === row.id);
+        let squaredOff = false;
+        if ((kind === 'sl' || kind === 'tgt') && latest?.squareOff === 'complete') {
+          squaredOff = true;
+          patchFill(row.id, () => ({ cePending: null, pePending: null }));
+          const rest = (['CE', 'PE'] as const).filter(l => l !== leg && rowOwnsLeg(latest, l));
+          if (rest.length) {
+            addToast('error', `${row.underlying} Square Off Complete`, `${leg} ${kind === 'sl' ? 'SL' : 'target'} hit — closing ${rest.join(' + ')} too`);
+            const closed = await Promise.all(rest.map(l => placeLeg(latest, l, { reduce: true, all: true, awaitFill: true })));
+            if (!closed.every(Boolean)) {
+              addToast('error', 'Square Off incomplete', `${row.underlying}: a leg was rejected — still open, check the position book`);
+              return;
+            }
+          }
+        }
+        if (!squaredOff && kind === 'sl') {
           const fresh = schedulerRef.current.config.rows.find(r => r.id === row.id);
-          if (fresh?.slToCost && rowOwnsLeg(fresh, other)) {
+          if (fresh && rowOwnsLeg(fresh, other) && costStopApplies(fresh, other)) {
             patchFill(row.id, () => (other === 'CE' ? { ceCostStop: true } : { peCostStop: true }));
             addToast('success', `${row.underlying} ${other} SL moved to cost`,
               `${leg} stopped out — ${other} now exits if its premium returns to its entry`);
           }
         }
-        if (kind === 'sl' || kind === 'tgt') {
+        if (!squaredOff && (kind === 'sl' || kind === 'tgt')) {
           const re = await reenterLegAfterExit(row.id, leg, kind, closedStrike, closingQty, closedEntry);
           // 'unconfirmed': an order went out but didn't confirm — it may fill
           // late, so don't retire on a momentarily-flat ledger. 'pending':

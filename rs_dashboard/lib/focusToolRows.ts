@@ -284,6 +284,17 @@ export interface FocusRow {
    */
   slToCost?: boolean;
   /**
+   * AlgoTest "Trail SL to Break-even price": which legs get the cost stop when
+   * a leg's SL hits — 'sl' only legs with their own SL × set, 'all' every open
+   * leg. Missing = 'all' (what SL to cost did before this setting existed).
+   */
+  slToCostScope?: 'sl' | 'all';
+  /**
+   * AlgoTest legwise "Square Off": 'partial' = a leg's SL/target closes only
+   * that leg; 'complete' = it closes every leg of the row. Missing = 'partial'.
+   */
+  squareOff?: 'partial' | 'complete';
+  /**
    * 'real' sends broker orders (still gated by the daily LIVE · REAL MONEY
    * arm); 'sim' forward-tests the same rules with paper fills at LTP and never
    * touches the broker. Missing on disk means 'real' — every row saved before

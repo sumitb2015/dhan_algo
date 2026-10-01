@@ -14,7 +14,7 @@ import { readFileSync } from 'node:fs';
 import path from 'node:path';
 
 import {
-  evaluateEntry, evaluateEntryMomentum, simpleMomOn, simpleMomLevel, simpleMomHit, evaluateGlobalRisk, evaluateRowExit, legStopReason,
+  evaluateEntry, evaluateEntryMomentum, costStopApplies, legHasOwnSl, simpleMomOn, simpleMomLevel, simpleMomHit, evaluateGlobalRisk, evaluateRowExit, legStopReason,
   dteForExpiry, dteMatches, sidePremium, legsOf, legsFlat, rowOwnsLeg,
   stopPremium, legStopPremium, pairStopPremium, legOwnContracts,
   nextOpenedTs, isGhostDropProtected, GHOST_DROP_GRACE_MS,
@@ -636,4 +636,17 @@ test('simple momentum per leg', () => {
   assert.equal(simpleMomHit(pts('down'), 200, 185.1), false);
   assert.equal(simpleMomHit(pts('up'), 200, 0), false);      // no quote
   assert.equal(simpleMomLevel(pts('down', '250'), 200), null); // would reach ≤ 0
+});
+
+test('trail SL to breakeven scope', () => {
+  const r = (o: object) => o as never;
+  assert.equal(legHasOwnSl(r({ ceSlMultiplier: '1.2', peSlMultiplier: '1' }), 'CE'), true);
+  assert.equal(legHasOwnSl(r({ ceSlMultiplier: '1.2', peSlMultiplier: '1' }), 'PE'), false);
+  assert.equal(costStopApplies(r({ slToCost: false }), 'PE'), false);
+  // default / 'all': any leg, even one with no SL
+  assert.equal(costStopApplies(r({ slToCost: true, peSlMultiplier: '1' }), 'PE'), true);
+  assert.equal(costStopApplies(r({ slToCost: true, slToCostScope: 'all', peSlMultiplier: '1' }), 'PE'), true);
+  // 'sl': only legs that have their own SL
+  assert.equal(costStopApplies(r({ slToCost: true, slToCostScope: 'sl', peSlMultiplier: '1' }), 'PE'), false);
+  assert.equal(costStopApplies(r({ slToCost: true, slToCostScope: 'sl', peSlMultiplier: '1.5' }), 'PE'), true);
 });

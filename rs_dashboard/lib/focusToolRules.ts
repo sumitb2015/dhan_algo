@@ -397,6 +397,23 @@ export function legOwnEntry(
   return q < 0 ? Number(pos?.sellAvg) || 0 : Number(pos?.buyAvg) || 0;
 }
 
+/** Does this leg carry its own SL × (a multiple above 1)? */
+export function legHasOwnSl(row: Pick<FocusRow, 'ceSlMultiplier' | 'peSlMultiplier'>, leg: 'CE' | 'PE'): boolean {
+  return Number(leg === 'CE' ? row.ceSlMultiplier : row.peSlMultiplier) > 1;
+}
+
+/**
+ * Should a leg's SL hit move `other`'s stop to cost? AlgoTest "Trail SL to
+ * Break-even price": 'sl' → only if `other` has an SL of its own, 'all' → any
+ * open leg (the default).
+ */
+export function costStopApplies(
+  row: Pick<FocusRow, 'slToCost' | 'slToCostScope' | 'ceSlMultiplier' | 'peSlMultiplier'>, other: 'CE' | 'PE',
+): boolean {
+  if (!row.slToCost) return false;
+  return row.slToCostScope === 'sl' ? legHasOwnSl(row, other) : true;
+}
+
 /**
  * The SL-to-cost breach on a leg, or null.
  *
