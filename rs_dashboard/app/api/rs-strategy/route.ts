@@ -11,8 +11,9 @@ export async function GET(req: NextRequest) {
     const sp = req.nextUrl.searchParams;
     const period = intParam(sp.get('period'), DEFAULT_PARAMS.period, 5, 250);
     const rsiMin = intParam(sp.get('rsiMin'), DEFAULT_PARAMS.rsiMin, 0, 90);
+    const emaGate = sp.get('emaGate') !== 'false'; // default on
     const forceRefresh = sp.get('refresh') === 'true';
-    const data = await runRsStrategy({ period, rsiMin }, forceRefresh);
+    const data = await runRsStrategy({ period, rsiMin, emaGate }, forceRefresh);
     return NextResponse.json({ success: true, data });
   } catch (error) {
     console.error('Failed to run RS strategy scan:', error);

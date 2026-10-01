@@ -1,5 +1,5 @@
 import { alignByDate } from './rs.ts';
-import { supertrendSeries, rsiArray } from './indicators.ts';
+import { supertrendSeries, rsiArray, emaSmaSeeded } from './indicators.ts';
 import type { OHLCVRow } from './rs.ts';
 
 /**
@@ -14,9 +14,11 @@ export interface RsStrategyParams {
   stMult: number;
   rsiPeriod: number;
   rsiMin: number; // BUY also requires RSI > rsiMin; 0 disables the filter
+  emaPeriod: number; // the EMA shown in the table; 0 = not computed (weekly series)
+  emaGate: boolean; // BUY also requires close > EMA(emaPeriod). Entry only: never affects Hold or Sell
 }
 
-export const DEFAULT_PARAMS: RsStrategyParams = { period: 55, stPeriod: 10, stMult: 2, rsiPeriod: 14, rsiMin: 50 };
+export const DEFAULT_PARAMS: RsStrategyParams = { period: 55, stPeriod: 10, stMult: 2, rsiPeriod: 14, rsiMin: 50, emaPeriod: 200, emaGate: true };
 
 export interface RsStrategyStock {
   symbol: string;
@@ -27,6 +29,7 @@ export interface RsStrategyStock {
   distPct: number; // (close - supertrend) / close, percent
   stDir: 1 | -1;
   rsi: number;
+  ema: number | null; // EMA(emaPeriod) of the close; null until emaPeriod bars exist
   rsRising: boolean; // RS strictly rising for 3 consecutive sessions
   signal: RsSignal;
   daysInSignal: number; // consecutive bars the current signal has held
@@ -43,8 +46,13 @@ export interface RsStrategyResponse {
   stocks: RsStrategyStock[];
 }
 
-export function isBuy(rs: number, stDir: 1 | -1, rsi: number, rsiMin: number): boolean {
-  return rs > 0 && stDir === 1 && (rsiMin <= 0 || rsi > rsiMin);
+/**
+ * Entry rule. `aboveEma` is true when the EMA gate is off or close > EMA; with the gate on and no
+ * EMA yet (a short history) the caller passes false, so such a stock cannot be bought.
+ * The exit rule (isSell) deliberately has no EMA term.
+ */
+export function isBuy(rs: number, stDir: 1 | -1, rsi: number, rsiMin: number, aboveEma = true): boolean {
+  return rs > 0 && stDir === 1 && (rsiMin <= 0 || rsi > rsiMin) && aboveEma;
 }
 export function isSell(rs: number, stDir: 1 | -1): boolean {
   return rs < 0 && stDir === -1;
@@ -107,7 +115,9 @@ function evaluateSeries(symbol: string, stockRows: Bar[], indexRows: Bar[], p: R
   }
 
   const st = supertrendSeries(stockRows, p.stPeriod, p.stMult);
-  const rsi = rsiArray(stockRows.map((r) => r.close), p.rsiPeriod);
+  const closes = stockRows.map((r) => r.close);
+  const rsi = rsiArray(closes, p.rsiPeriod);
+  const ema = p.emaPeriod > 0 ? emaSmaSeeded(closes, p.emaPeriod) : null;
 
   // State machine: enter on BUY, leave only on SELL (RS and Supertrend both negative).
   let long = false;
@@ -124,7 +134,9 @@ function evaluateSeries(symbol: string, stockRows: Bar[], indexRows: Bar[], p: R
     if (rsHist.length === 4) rsHist.shift();
     rsHist.push(rs);
     valid++;
-    const buy = isBuy(rs, dir, rsiV, p.rsiMin);
+    const emaV = ema ? ema[i] : null;
+    const aboveEma = !p.emaGate || (emaV !== null && stockRows[i].close > emaV);
+    const buy = isBuy(rs, dir, rsiV, p.rsiMin, aboveEma);
     const sell = isSell(rs, dir);
     const wasLong = long;
     if (buy) long = true;
@@ -148,6 +160,7 @@ function evaluateSeries(symbol: string, stockRows: Bar[], indexRows: Bar[], p: R
     distPct: row.close > 0 ? ((row.close - line) / row.close) * 100 : 0,
     stDir: st[lastIdx].dir as 1 | -1,
     rsi: rsi[lastIdx] as number,
+    ema: ema ? ema[lastIdx] : null,
     rsRising: rsHist.length === 4 && rsHist[3] > rsHist[2] && rsHist[2] > rsHist[1] && rsHist[1] > rsHist[0],
     signal,
     daysInSignal: days,
@@ -168,6 +181,7 @@ export function evaluateStock(
 ): RsStrategyStock | null {
   const daily = evaluateSeries(symbol, stockRows, indexRows, p);
   if (!daily) return null;
-  const weekly = evaluateSeries(symbol, resampleWeekly(stockRows), weeklyIndexRows, p);
+  // The EMA gate is a daily-chart entry filter; a 200-week EMA would need ~4 years of history.
+  const weekly = evaluateSeries(symbol, resampleWeekly(stockRows), weeklyIndexRows, { ...p, emaPeriod: 0, emaGate: false });
   return { ...daily, weekly: weekly ? weekly.signal : null };
 }

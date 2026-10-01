@@ -3,7 +3,7 @@
 Dashboard page: **Trading → RS Strategy** (`/rs-strategy`).
 
 Scans every Nifty 500 stock for **relative strength against Nifty** and shows which ones are in a
-buy, hold, sell or wait state, with a weekly-chart check and Buy/Sell buttons.
+buy, in-trend, sell or wait state, with a weekly-chart check and Buy/Sell buttons.
 
 > **Read this first.** The rules come from a teaching video (Learn2Trade session 31, Vivek Bajaj) and the
 > bharatTrader "Relative Strength" TradingView indicator. **They have not been backtested.** The page is a
@@ -15,10 +15,11 @@ buy, hold, sell or wait state, with a weekly-chart check and Buy/Sell buttons.
 ## 1. The idea in one minute
 
 A stock is **strong** when it has gained more than Nifty over the same period. The page measures that over
-the last **55 trading days** (about 3 months), then asks two more questions: is the price above its
-**Supertrend** line, and is **RSI** above 50?
+the last **55 trading days** (about 3 months), then asks three more questions: is the price above its
+**Supertrend** line, is **RSI** above 50, and is the price above its **200-day EMA**?
 
-- **Buy** when all three agree the stock is strong.
+- **Buy** when all of them agree the stock is strong.
+- The 200 EMA is a **long-term trend filter for entries only**. It never forces an exit.
 - **Stay in** while it stays strong. A single warning sign is not an exit.
 - **Sell** only when both RS and Supertrend turn negative together.
 
@@ -31,6 +32,7 @@ the last **55 trading days** (about 3 months), then asks two more questions: is 
 | **RS** (relative strength) | 55 days vs Nifty 50 | `(stock price now ÷ stock price 55 days ago) ÷ (Nifty now ÷ Nifty 55 days ago) − 1`. Above 0 = beating Nifty. Below 0 = lagging. |
 | **Supertrend** | period 10, multiplier 2 | A trailing line that sits **below** the price in an uptrend and **above** it in a downtrend. Price above the line = bullish. |
 | **RSI** | period 14 | Momentum from 0 to 100. Above 50 = buyers are in control. |
+| **EMA 200** | 200 days | A slow-moving average of the closing price (about 10 months). Price above it = the long-term trend is up. Used only to decide whether a **new** buy is allowed. |
 
 RS is shown as a **plain ratio**, exactly as TradingView and StockEdge show it: **0.46 means the stock
 beat Nifty by 46 percentage points** over the period. `0.10` or more is what StockEdge calls "strongly outperforming".
@@ -39,15 +41,23 @@ beat Nifty by 46 percentage points** over the period. `0.10` or more is what Sto
 
 ## 3. The four states
 
+> **"In Trend" does not mean you own the stock.** All four states describe the stock's trend, worked out from price history only. The page never looks at your portfolio to decide them. Check the **Held** column for what you actually own.
+
 | State | Rule | What it means |
 |---|---|---|
-| **Buy** | RS > 0 **and** price above Supertrend **and** RSI > 50 | All signals agree. The entry condition is met now. |
-| **Hold** | It was a Buy earlier, one signal has weakened, but RS and Supertrend are **not both negative** | Do not exit yet. A pullback in a strong stock is not a sell. |
+| **Buy** | RS > 0 **and** price above Supertrend **and** RSI > 50 **and** price above EMA 200 | All signals agree. The entry condition is met now. |
+| **In Trend** | It was a Buy earlier, the Buy rule no longer holds (a signal weakened, **or the price slipped under the EMA 200**), but RS and Supertrend are **not both negative** | Do not exit yet. A pullback in a strong stock is not a sell. |
 | **Sell** | RS < 0 **and** price below Supertrend | Both signals are negative. This is the exit. |
-| **Wait** | It has never met the Buy rule | Nothing to hold and nothing to buy yet. |
+| **Wait** | It has never met the Buy rule | No trend to ride and nothing to buy yet. This includes a stock that is otherwise strong but still **below its EMA 200**. |
+
+**The EMA 200 applies to entry only.** Buying needs price above it; selling and staying In Trend ignore it. A stock you
+already own is **not** sold for dipping under the 200 EMA, and Sell still means just "RS below 0 and price below Supertrend".
+A stock with **fewer than 200 days of history** has no EMA 200, so it cannot become a Buy until it has enough history.
+
+**If you own a stock that shows Wait or In Trend,** the exit rule has not fired, so the rules say stay in. The only exit signal is **Sell**.
 
 The states are worked out by walking through the stock's whole history day by day: *buy when the Buy rule is true,
-leave only when the Sell rule is true.* So **Hold can reflect a buy from months ago**. Check the
+leave only when the Sell rule is true.* So **In Trend can reflect a buy from months ago**. Check the
 **Bars in state** column to see how long.
 
 ---
@@ -63,17 +73,18 @@ leave only when the Sell rule is true.* So **Hold can reflect a buy from months 
   market is open.
 
 ### Tabs
-**Buy · Hold · Sell · All**, each with a count. The default sort inside a tab is strongest RS first for Buy and Hold, weakest
+**Buy · In Trend · Sell · All**, each with a count. The default sort inside a tab is strongest RS first for Buy and In Trend, weakest
 first for Sell. Click any column heading to sort (click again to reverse). An arrow shows the active sort.
 
 ### Filter chips (they combine)
 | Chip | Keeps only stocks that… |
 |---|---|
-| **RSI > 50** | (on by default) need RSI above 50 to count as a Buy. Turning it off re-runs the scan, so you will see more Buys and fewer Holds. |
+| **RSI > 50** | (on by default) need RSI above 50 to count as a Buy. Turning it off re-runs the scan, so you will see more Buys and fewer In Trend stocks. |
+| **Above EMA 200** | (on by default) need the price above the 200-day EMA to count as a Buy. Turning it off re-runs the scan and brings back the stocks that meet every other rule but sit under the EMA. Exits are never affected. |
 | **RS ≥ 0.10** | outperform Nifty by 10 points or more |
 | **RS rising 3d** | have had a higher RS on each of the last 3 sessions |
 | **In portfolio** | you already hold, or have a position in today |
-| **Weekly long** | are Buy or Hold on the **weekly** chart too |
+| **Weekly long** | are Buy or In Trend on the **weekly** chart too |
 
 ### Search
 Type part of a symbol to narrow the list.
@@ -91,11 +102,12 @@ Type part of a symbol to narrow the list.
 | **RS-55** | The relative-strength ratio described above (the number in the header changes if you change the period). Green = beating Nifty, red = lagging. |
 | **RS vs zero** | A small bar around a centre line. Right of the line (green) = RS above 0, left (red) = below. Longer = stronger, capped at ±1.0. |
 | **Supertrend** | The Supertrend price level. Price above it = bullish. |
+| **EMA 200** | The 200-day EMA price level. **Green** = price is above it, **red** = price is below it, `–` = fewer than 200 days of history. Hover for the same note. |
 | **RSI** | RSI(14). Brighter when above 50. |
 | **From ST %** | How far the price is from the Supertrend line: `(price − line) ÷ price`. A large positive number means the stock is **extended** above its trend line, so a fall back to it would be big. Small means it is close to the line, which is a tighter stop. |
-| **Signal** | The state on the **daily** chart: Buy, Hold, Sell or Wait. |
+| **Signal** | The state on the **daily** chart: Buy, In Trend, Sell or Wait. |
 | **Weekly** | The **same state on weekly candles**: the bigger-picture check (see below). `–` means under about 70 weeks of history, so there is no weekly signal. |
-| **Bars in state** | How many daily bars the stock has been in its current phase. Buy and Hold count together (the time since the buy). Sell and Wait count together. |
+| **Bars in state** | How many daily bars the stock has been in its current phase. Buy and In Trend count together (the time since the buy). Sell and Wait count together. |
 | **Trade** | **Buy** and **Sell** buttons (see section 6). |
 
 ### Reading Signal together with Weekly
@@ -105,7 +117,8 @@ Type part of a symbol to narrow the list.
   buying opportunity when the stock is strong.
 
 The weekly chart is built from the daily data: RS compares the last **55 weeks** with Nifty (about a year), and
-Supertrend and RSI are also computed on weekly candles. The **current week counts as an unfinished bar**, so a
+Supertrend and RSI are also computed on weekly candles. The **EMA 200 rule is not applied to the weekly state**
+(a 200-week average would need about four years of history). The **current week counts as an unfinished bar**, so a
 weekly state can still change before Friday.
 
 ---
@@ -170,7 +183,9 @@ The **Held** column refreshes after an order, and every minute while the page is
 
 | Situation | Explanation |
 |---|---|
-| Counts changed after turning **RSI > 50** off | Expected. Without the RSI rule more stocks qualify as Buy. |
+| Counts changed after turning **RSI > 50** or **Above EMA 200** off | Expected. Without those rules more stocks qualify as Buy. |
+| A stock that looks strong is **Wait**, not Buy | Check the **EMA 200** column. Red means it is still under the 200-day average, so a new buy is not allowed yet. |
+| A stock was **In Trend** and became **Wait** after the EMA rule | It only ever met the Buy rule while under its EMA 200, so with the rule on it was never bought. |
 | A stock shows **–** in Weekly | Under about 70 weeks of price history (recent listings). |
 | **Held** is empty or shows a notice | Dhan holdings could not be read. Orders still re-check ownership on the server before any sale. |
 | Numbers differ from TradingView | Check the symbol, the RS period and that the chart's RS uses the **close** vs **NIFTY** with the same length. Data here is Dhan-sourced daily closes. The values match TradingView for the same inputs. |

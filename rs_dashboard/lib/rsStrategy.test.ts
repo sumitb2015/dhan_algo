@@ -1,6 +1,10 @@
 import { test } from 'node:test';
 import assert from 'node:assert';
-import { isBuy, isSell, evaluateStock, resampleWeekly, DEFAULT_PARAMS } from './rsStrategyCore.ts';
+import { isBuy, isSell, evaluateStock, resampleWeekly, DEFAULT_PARAMS as DEFAULTS } from './rsStrategyCore.ts';
+import { emaSmaSeeded } from './indicators.ts';
+
+// Most tests use short synthetic series on which a 200-bar EMA cannot exist, so they run with the gate off.
+const DEFAULT_PARAMS = { ...DEFAULTS, emaGate: false };
 import { supertrendSeries } from './indicators.ts';
 
 function mk(closes: number[], start = 0) {
@@ -116,4 +120,73 @@ test('weekly signal: null on short history, BUY on a long steady outperformer', 
   assert.equal(r.weekly, 'BUY');
   const down = mk(Array.from({ length: n }, (_, i) => 200 * Math.exp(-i / 300)));
   assert.equal(evaluateStock('X', down, idx, DEFAULT_PARAMS)!.weekly, 'SELL');
+});
+
+test('emaSmaSeeded matches TradingView ta.ema: SMA seed, null warm-up, then the standard recursion', () => {
+  const e = emaSmaSeeded([1, 2, 3, 4, 5, 6], 3);
+  assert.deepEqual(e.slice(0, 2), [null, null]);
+  assert.equal(e[2], 2); // SMA(1,2,3)
+  assert.equal(e[3], 4 * 0.5 + 2 * 0.5); // k = 2/(3+1) = 0.5
+  assert.equal(e[4], 5 * 0.5 + 3 * 0.5);
+  assert.deepEqual(emaSmaSeeded([1, 2], 3), [null, null]);
+});
+
+test('isBuy: the EMA term only ever blocks an entry', () => {
+  assert.equal(isBuy(0.1, 1, 60, 50, true), true);
+  assert.equal(isBuy(0.1, 1, 60, 50, false), false);
+  assert.equal(isBuy(0.1, 1, 60, 50), true); // default = gate not applied
+});
+
+// 260 bars: a long steady climb (stock far above its 200 EMA), then a fall that carries price back under it.
+const climb = Array.from({ length: 220 }, (_, i) => 50 * Math.exp(i / 150));
+const flatIdx = (n: number) => mk(Array(n).fill(100));
+
+test('EMA gate: a stock under its 200 EMA cannot be bought even when RS, Supertrend and RSI all pass', () => {
+  // Falls hard then rebounds for 25 bars: RS>0 (vs a flat index it is up over 55 bars), price above its
+  // short Supertrend, RSI high — yet still below the 200 EMA built from the earlier, higher prices.
+  const closes = [...Array.from({ length: 200 }, (_, i) => 300 - i * 0.2), ...Array.from({ length: 60 }, (_, i) => 150 + i * 1.5)];
+  const idx = flatIdx(closes.length);
+  const gated = evaluateStock('X', mk(closes), idx, { ...DEFAULTS, emaGate: true })!;
+  const open = evaluateStock('X', mk(closes), idx, { ...DEFAULTS, emaGate: false })!;
+  assert.ok(gated.ema !== null && gated.close < gated.ema, `close ${gated.close} ema ${gated.ema}`);
+  assert.equal(open.signal, 'BUY');
+  assert.equal(gated.signal, 'WAIT'); // never bought, so not Hold either
+});
+
+test('EMA gate: a held stock that slips under its 200 EMA stays HOLD, because the gate is entry-only', () => {
+  // Falls for 200 bars (EMA ends high), rebounds above the EMA for 40 bars (a buy), then dips back under it
+  // while still well above its price 55 bars ago (RS > 0) — so neither RS nor price has hit the sell rule.
+  const closes = [
+    ...Array.from({ length: 200 }, (_, i) => 300 - i * 0.75),
+    ...Array.from({ length: 40 }, (_, i) => 150 + (i / 39) * (260 - 150)),
+    ...Array.from({ length: 25 }, (_, i) => 260 - ((i + 1) / 25) * (260 - 215)),
+  ];
+  const r = evaluateStock('X', mk(closes), flatIdx(closes.length), { ...DEFAULTS, emaGate: true })!;
+  assert.ok(r.ema !== null && r.close < r.ema, 'precondition: price is under the 200 EMA');
+  assert.ok(r.rs > 0, 'precondition: RS still positive');
+  assert.equal(r.signal, 'HOLD');
+});
+
+test('EMA gate never blocks an exit: below the EMA with RS and Supertrend both negative is SELL either way', () => {
+  const closes = [...climb, ...Array.from({ length: 80 }, (_, i) => climb[219] * Math.exp(-i / 25))];
+  const idx = flatIdx(closes.length);
+  const gated = evaluateStock('X', mk(closes), idx, { ...DEFAULTS, emaGate: true })!;
+  const open = evaluateStock('X', mk(closes), idx, { ...DEFAULTS, emaGate: false })!;
+  assert.equal(gated.signal, 'SELL');
+  assert.equal(open.signal, 'SELL');
+});
+
+test('EMA gate: fewer than 200 bars means no EMA and no Buy; the EMA column is null, not 0', () => {
+  const closes = Array.from({ length: 150 }, (_, i) => 50 + i);
+  const r = evaluateStock('X', mk(closes), flatIdx(150), { ...DEFAULTS, emaGate: true })!;
+  assert.equal(r.ema, null);
+  assert.notEqual(r.signal, 'BUY');
+  assert.equal(evaluateStock('X', mk(closes), flatIdx(150), { ...DEFAULTS, emaGate: false })!.signal, 'BUY');
+});
+
+test('weekly state ignores the EMA gate (a 200-week EMA would need ~4 years of history)', () => {
+  const n = 700;
+  const up = mk(Array.from({ length: n }, (_, i) => 50 * Math.exp(i / 300)));
+  const r = evaluateStock('X', up, flatIdx(n), { ...DEFAULTS, emaGate: true })!;
+  assert.equal(r.weekly, 'BUY');
 });

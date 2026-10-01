@@ -30,6 +30,27 @@ export function emaArray(values: number[], period: number): number[] {
 }
 
 /**
+ * EMA seeded with the SMA of the first `period` values, null before that — TradingView `ta.ema`
+ * semantics, so a value here equals the chart's. (`emaArray` above seeds from the first value
+ * instead; the two converge but differ on short histories.)
+ */
+export function emaSmaSeeded(values: number[], period: number): (number | null)[] {
+  const n = values.length;
+  const out: (number | null)[] = new Array(n).fill(null);
+  if (period < 1 || n < period) return out;
+  const k = 2 / (period + 1);
+  let sum = 0;
+  for (let i = 0; i < period; i++) sum += values[i];
+  let prev = sum / period;
+  out[period - 1] = prev;
+  for (let i = period; i < n; i++) {
+    prev = values[i] * k + prev * (1 - k);
+    out[i] = prev;
+  }
+  return out;
+}
+
+/**
  * Wilder's RSI — null before (period) bars.
  * First valid value at index `period` (needs period+1 closes).
  */

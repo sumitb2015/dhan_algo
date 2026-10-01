@@ -11,7 +11,7 @@ import type { Side } from '@/lib/equityOrder';
 import { DEFAULT_PARAMS, type RsStrategyResponse, type RsStrategyStock, type RsSignal } from '@/lib/rsStrategyCore';
 
 type Tab = 'BUY' | 'HOLD' | 'SELL' | 'ALL';
-type SortKey = 'symbol' | 'held' | 'close' | 'change1D' | 'rs' | 'supertrend' | 'rsi' | 'distPct' | 'signal' | 'weekly' | 'daysInSignal';
+type SortKey = 'symbol' | 'held' | 'close' | 'change1D' | 'rs' | 'supertrend' | 'ema' | 'rsi' | 'distPct' | 'signal' | 'weekly' | 'daysInSignal';
 
 // Strongest state first when sorting descending; a stock with no weekly signal sorts below everything.
 const SIGNAL_RANK: Record<RsSignal, number> = { BUY: 3, HOLD: 2, WAIT: 1, SELL: 0 };
@@ -27,7 +27,8 @@ const BADGE: Record<RsSignal, string> = {
   SELL: 'bg-red-500/10 border-red-500/25 text-red-400',
   WAIT: 'bg-zinc-800 border-zinc-700 text-zinc-400',
 };
-const LABEL: Record<RsSignal, string> = { BUY: 'Buy', HOLD: 'Hold', SELL: 'Sell', WAIT: 'Wait' };
+// HOLD is the internal/API value; the UI says "In Trend" because it describes the stock's trend state, not what the account owns.
+const LABEL: Record<RsSignal, string> = { BUY: 'Buy', HOLD: 'In Trend', SELL: 'Sell', WAIT: 'Wait' };
 
 const fmt = (n: number, d = 2) => n.toLocaleString('en-IN', { minimumFractionDigits: d, maximumFractionDigits: d });
 const signed = (n: number) => `${n > 0 ? '+' : ''}${fmt(n)}`;
@@ -76,9 +77,10 @@ export default function RsStrategyPage({ guide = '' }: { guide?: string }) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [rsiOn, setRsiOn] = useState(true); // BUY also needs RSI(14) > 50
+  const [emaOn, setEmaOn] = useState(true); // BUY also needs close > EMA 200 (entry only; never blocks In Trend/Sell)
   const [strongOnly, setStrongOnly] = useState(false); // RS >= 10%
   const [risingOnly, setRisingOnly] = useState(false); // RS up 3 sessions in a row
-  const [weeklyOnly, setWeeklyOnly] = useState(false); // weekly chart is also long (Buy or Hold)
+  const [weeklyOnly, setWeeklyOnly] = useState(false); // weekly chart is also long (Buy or In Trend)
   // What the account already holds (Dhan holdings + today's NSE equity positions), keyed by symbol.
   const [holdings, setHoldings] = useState<Record<string, EquityHolding> | null>(null);
   const [holdingsError, setHoldingsError] = useState<string | null>(null);
@@ -93,12 +95,12 @@ export default function RsStrategyPage({ guide = '' }: { guide?: string }) {
 
   // Monotonic sequence so a slow earlier response cannot overwrite a newer one (toggle RSI, change period).
   const seq = useRef(0);
-  const load = useCallback(async (p: number, rsiMin: number, refresh = false) => {
+  const load = useCallback(async (p: number, rsiMin: number, emaGate: boolean, refresh = false) => {
     const mine = ++seq.current;
     setLoading(true);
     setError(null);
     try {
-      const base = `/api/rs-strategy?period=${p}&rsiMin=${rsiMin}`;
+      const base = `/api/rs-strategy?period=${p}&rsiMin=${rsiMin}&emaGate=${emaGate}`;
       type Resp = { success: boolean; data?: RsStrategyResponse; error?: string };
       let json: Resp;
       if (refresh) {
@@ -117,7 +119,7 @@ export default function RsStrategyPage({ guide = '' }: { guide?: string }) {
     }
   }, []);
 
-  useEffect(() => { load(period, rsiOn ? RSI_MIN : 0); }, [period, rsiOn, load]);
+  useEffect(() => { load(period, rsiOn ? RSI_MIN : 0, emaOn); }, [period, rsiOn, emaOn, load]);
 
   // Holdings: read on mount, every 60 s while the tab is visible, and on demand after an order.
   // `cancelled` drops a reply that lands after a newer read started (polling-guards §4).
@@ -197,7 +199,7 @@ export default function RsStrategyPage({ guide = '' }: { guide?: string }) {
   const counts = data?.counts;
   const tabs: { id: Tab; label: string; n?: number }[] = [
     { id: 'BUY', label: 'Buy', n: counts?.buy },
-    { id: 'HOLD', label: 'Hold', n: counts?.hold },
+    { id: 'HOLD', label: LABEL.HOLD, n: counts?.hold },
     { id: 'SELL', label: 'Sell', n: counts?.sell },
     { id: 'ALL', label: 'All', n: data?.totalScanned },
   ];
@@ -255,7 +257,7 @@ export default function RsStrategyPage({ guide = '' }: { guide?: string }) {
             </button>
           )}
           <button
-            onClick={() => load(period, rsiOn ? RSI_MIN : 0, true)}
+            onClick={() => load(period, rsiOn ? RSI_MIN : 0, emaOn, true)}
             disabled={loading}
             aria-label="Recalculate scan"
             className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-md border border-zinc-800 bg-zinc-900 text-xs font-bold text-zinc-200 hover:bg-zinc-800 disabled:opacity-50 focus:outline-none focus:ring-2 focus:ring-emerald-500/50"
@@ -274,7 +276,7 @@ export default function RsStrategyPage({ guide = '' }: { guide?: string }) {
       <main className="flex-1 flex flex-col gap-4 px-6 py-5 max-w-[1680px] w-full mx-auto">
         <p className="text-xs text-zinc-400 max-w-3xl leading-relaxed">
           <span className="text-emerald-400 font-bold">Buy</span> when RS is above zero, price is above the Supertrend
-          {rsiOn ? ' and RSI(14) is above 50' : ''}. <span className="text-sky-400 font-bold">Hold</span> while a buy has
+          {rsiOn ? ', RSI(14) is above 50' : ''}{emaOn ? ' and price is above the 200 EMA (entry only)' : ''}. <span className="text-sky-400 font-bold">In Trend</span> while a buy has
           weakened but not yet turned negative on both. <span className="text-red-400 font-bold">Sell</span> only when RS is
           below zero and price is below the Supertrend. <span className="font-bold text-zinc-300">Wait</span> means no buy yet.
           Signals use the latest daily close.
@@ -289,7 +291,7 @@ export default function RsStrategyPage({ guide = '' }: { guide?: string }) {
         {error && (
           <div role="alert" className="p-3.5 rounded-xl border border-red-800/60 bg-red-950/40 text-red-300 text-xs flex items-center justify-between gap-3">
             <span>{error}. Check that the dashboard data is synced, then recalculate.</span>
-            <button onClick={() => load(period, rsiOn ? RSI_MIN : 0, true)} className="font-bold underline">Retry</button>
+            <button onClick={() => load(period, rsiOn ? RSI_MIN : 0, emaOn, true)} className="font-bold underline">Retry</button>
           </div>
         )}
 
@@ -315,10 +317,11 @@ export default function RsStrategyPage({ guide = '' }: { guide?: string }) {
           <div className="flex items-center gap-2 flex-wrap">
           {([
             ['RSI > 50', rsiOn, setRsiOn, 'Require RSI(14) above 50 for a buy'],
+            ['Above EMA 200', emaOn, setEmaOn, 'Require price above the 200-day EMA for a buy. Entry only: a stock you already hold is not sold for dipping under it'],
             ['RS ≥ 0.10', strongOnly, setStrongOnly, 'Only stocks with RS of 0.10 or more (outperforming Nifty by 10 points)'],
             ['RS rising 3d', risingOnly, setRisingOnly, 'Only stocks whose RS rose three sessions in a row'],
             ['In portfolio', heldOnly, setHeldOnly, 'Only stocks you already hold or have a position in today'],
-            ['Weekly long', weeklyOnly, setWeeklyOnly, 'Weekly chart (same RS and Supertrend rules) is also Buy or Hold. Needs about 70 weeks of history'],
+            ['Weekly long', weeklyOnly, setWeeklyOnly, 'Weekly chart (same RS and Supertrend rules) is also Buy or In Trend. Needs about 70 weeks of history'],
           ] as [string, boolean, (v: boolean) => void, string][]).map(([label, on, set, tip]) => (
             <button
               key={label}
@@ -357,6 +360,7 @@ export default function RsStrategyPage({ guide = '' }: { guide?: string }) {
                   {th('rs', `RS-${period}`)}
                   {th('rs', 'RS vs zero', 'text-left')}
                   {th('supertrend', 'Supertrend')}
+                  {th('ema', `EMA ${data?.params.emaPeriod ?? 200}`)}
                   {th('rsi', 'RSI')}
                   {th('distPct', 'From ST %')}
                   {th('signal', 'Signal', 'text-center')}
@@ -367,14 +371,14 @@ export default function RsStrategyPage({ guide = '' }: { guide?: string }) {
               </thead>
               <tbody className="divide-y divide-zinc-800/80 bg-zinc-950/60">
                 {loading && !data ? (
-                  <tr><td colSpan={13} className="px-4 py-10 text-center text-zinc-400">
+                  <tr><td colSpan={14} className="px-4 py-10 text-center text-zinc-400">
                     <Activity className="w-4 h-4 inline mr-2 animate-spin text-emerald-400" aria-hidden="true" />
                     Scanning Nifty 500…
                   </td></tr>
                 ) : rows.length === 0 ? (
-                  <tr><td colSpan={13} className="px-4 py-10 text-center text-zinc-400">
+                  <tr><td colSpan={14} className="px-4 py-10 text-center text-zinc-400">
                     {data
-                      ? query ? `No ${tab === 'ALL' ? '' : tab.toLowerCase() + ' '}symbols match “${query}”.` : strongOnly || risingOnly || weeklyOnly || heldOnly ? 'No stocks match these filters. Turn one off to widen the list.' : `No stocks are in the ${tab.toLowerCase()} state today.`
+                      ? query ? `No ${tab === 'ALL' ? '' : LABEL[tab] + ' '}symbols match “${query}”.` : strongOnly || risingOnly || weeklyOnly || heldOnly ? 'No stocks match these filters. Turn one off to widen the list.' : `No stocks are in the ${tab === 'ALL' ? 'selected' : LABEL[tab]} state today.`
                       : 'No scan results yet. Recalculate to run the scan.'}
                   </td></tr>
                 ) : (
@@ -387,6 +391,10 @@ export default function RsStrategyPage({ guide = '' }: { guide?: string }) {
                       <td className={`px-4 py-2.5 text-right font-bold ${tone(s.rs)}`}>{signed(s.rs)}</td>
                       <td className="px-4 py-2.5"><RsBar value={s.rs} /></td>
                       <td className="px-4 py-2.5 text-right text-zinc-300">{fmt(s.supertrend)}</td>
+                      <td
+                        className={`px-4 py-2.5 text-right ${s.ema === null ? 'text-zinc-500' : s.close > s.ema ? 'text-emerald-400' : 'text-red-400'}`}
+                        title={s.ema === null ? 'Fewer than 200 days of history' : s.close > s.ema ? 'Price is above the 200 EMA' : 'Price is below the 200 EMA'}
+                      >{s.ema === null ? '–' : fmt(s.ema)}</td>
                       <td className={`px-4 py-2.5 text-right ${s.rsi > 50 ? 'text-zinc-200' : 'text-zinc-400'}`}>{fmt(s.rsi, 0)}</td>
                       <td className={`px-4 py-2.5 text-right ${tone(s.distPct)}`}>{signed(s.distPct)}</td>
                       <td className="px-4 py-2.5 text-center">
