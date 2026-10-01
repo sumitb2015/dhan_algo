@@ -5897,6 +5897,9 @@ export default function FocusTool() {
     if (!row) return 'skipped';
     const lazyId = nextLazyLegId(row, closedLazyId, trigger);
     if (lazyId) return openLazyLeg(row, lazyId, trigger);
+    // A Lazy Leg with nothing chained after it ends the line: the row's own
+    // re-entry setting belongs to the root leg, not to a lazy one.
+    if (closedLazyId) return 'skipped';
     const cfg = reentryConfig(row, trigger);
     if (cfg.mode === 'off' || cfg.mode === 'lazy') return 'skipped';
     // A leftover leg the row's Side no longer trades still gets its own stop
