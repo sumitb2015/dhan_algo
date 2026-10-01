@@ -1061,12 +1061,18 @@ export default function MultiLegFocus({
     const t = setInterval(load, 10 * 60_000);
     return () => { alive = false; clearInterval(t); };
   }, []);
-  const overallTodayPnl = useMemo(() => {
-    let today = 0;
+  // Realized = legs closed today (frozen at their exit fill); Unrealized = live legs
+  // marked to market from entry. Today = Realized + Unrealized.
+  const { overallTodayPnl, todayRealized, todayUnrealized } = useMemo(() => {
+    let realized = 0;
+    let unrealized = 0;
     for (const b of baskets) {
-      today += computeStrategyMetrics(b.legs.filter(l => legCountsToday(l, pnlNow)), l => ltpFor(b, l), pnlMultiplier(b)).totalPnlRupees;
+      const mult = pnlMultiplier(b);
+      const legs = b.legs.filter(l => legCountsToday(l, pnlNow));
+      realized += computeStrategyMetrics(legs.filter(l => l.status === 'CLOSED'), l => ltpFor(b, l), mult).totalPnlRupees;
+      unrealized += computeStrategyMetrics(legs.filter(l => l.status !== 'CLOSED'), l => ltpFor(b, l), mult).totalPnlRupees;
     }
-    return today;
+    return { overallTodayPnl: realized + unrealized, todayRealized: realized, todayUnrealized: unrealized };
   }, [baskets, ltpFor, pnlNow]);
   const prevDaysPnl = useMemo(() => {
     if (!tradeHistory) return null;
@@ -3085,6 +3091,21 @@ export default function MultiLegFocus({
             >
               Today: {overallTodayPnl >= 0 ? '+' : ''}{fmtMoney(overallTodayPnl)}
             </span>
+            {([
+              ['Realized', todayRealized, 'Legs closed today, frozen at their exit fill.'],
+              ['Unrealized', todayUnrealized, 'Live legs marked to market from entry (a carried position counts from its entry price, not yesterday\'s close).'],
+            ] as const).map(([label, value, tip]) => (
+              <span
+                key={label}
+                className={`h-8 flex items-center gap-1.5 px-2.5 rounded-lg text-xs font-bold font-mono tabular-nums border ${
+                  value >= 0 ? 'text-emerald-400 border-emerald-500/30 bg-emerald-500/5' : 'text-rose-400 border-rose-500/30 bg-rose-500/5'
+                }`}
+                title={tip}
+              >
+                <span className="text-zinc-400 font-medium text-[11px]">{label}:</span>
+                {value >= 0 ? '+' : ''}{fmtMoney(value)}
+              </span>
+            ))}
             {prevDaysPnl ? (
               <Link
                 href="/portfolio/diary"
