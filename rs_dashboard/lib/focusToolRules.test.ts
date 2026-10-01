@@ -14,7 +14,7 @@ import { readFileSync } from 'node:fs';
 import path from 'node:path';
 
 import {
-  evaluateEntry, evaluateEntryMomentum, costStopApplies, legHasOwnSl, simpleMomOn, simpleMomLevel, simpleMomHit, evaluateGlobalRisk, evaluateRowExit, legStopReason,
+  evaluateEntry, evaluateEntryMomentum, costStopApplies, runningLazyLeg, legSlMultiplier, legTarget, nextLazyLegId, lazyLegStrike, legHasOwnSl, simpleMomOn, simpleMomLevel, simpleMomHit, evaluateGlobalRisk, evaluateRowExit, legStopReason,
   dteForExpiry, dteMatches, sidePremium, legsOf, legsFlat, rowOwnsLeg,
   stopPremium, legStopPremium, pairStopPremium, legOwnContracts,
   nextOpenedTs, isGhostDropProtected, GHOST_DROP_GRACE_MS,
@@ -497,10 +497,14 @@ test('pendingReentryLevel + pendingReentryHit', () => {
   assert.deepEqual(pendingReentryLevel('cost', 'tgt', { entry: 200 }), { price: 200, dir: 'up' });
   assert.equal(pendingReentryLevel('cost', 'sl', { entry: 0 }), null);
   // Momentum: new strike at 180, 20 pts down → fires at 160; up → 200.
-  assert.deepEqual(pendingReentryLevel('momentum', 'sl', { quoteNow: 180, momentumPts: '20' }), { price: 160, dir: 'down' });
-  assert.deepEqual(pendingReentryLevel('momentum', 'sl', { quoteNow: 180, momentumPts: 20, momentumDir: 'up' }), { price: 200, dir: 'up' });
-  assert.equal(pendingReentryLevel('momentum', 'sl', { quoteNow: 180, momentumPts: '' }), null);
-  assert.equal(pendingReentryLevel('momentum', 'sl', { quoteNow: 10, momentumPts: 20 }), null);
+  const sm = (dir: 'up' | 'down', value = '20') => ({ enabled: true, value, src: 'premium' as const, unit: 'pts' as const, dir });
+  // RE-Momentum follows the leg's Simple Momentum (AlgoTest: 180 + 20 pts up → 200)
+  assert.deepEqual(pendingReentryLevel('momentum', 'sl', { start: 180, simple: sm('down') }), { price: 160, dir: 'down' });
+  assert.deepEqual(pendingReentryLevel('momentum', 'sl', { start: 180, simple: sm('up') }), { price: 200, dir: 'up' });
+  assert.deepEqual(pendingReentryLevel('momentum', 'sl', { start: 18000, simple: { enabled: true, value: '0.5', src: 'underlying', unit: 'pct', dir: 'up' } }), { price: 18090, dir: 'up' });
+  assert.equal(pendingReentryLevel('momentum', 'sl', { start: 180, simple: { ...sm('up'), enabled: false } }), null);
+  assert.equal(pendingReentryLevel('momentum', 'sl', { start: 180 }), null);
+  assert.equal(pendingReentryLevel('momentum', 'sl', { start: 10, simple: sm('down') }), null);
   // A missing quote (0) never fires.
   assert.equal(pendingReentryHit({ price: 200, dir: 'down' }, 0), false);
 });
@@ -649,4 +653,42 @@ test('trail SL to breakeven scope', () => {
   // 'sl': only legs that have their own SL
   assert.equal(costStopApplies(r({ slToCost: true, slToCostScope: 'sl', peSlMultiplier: '1' }), 'PE'), false);
   assert.equal(costStopApplies(r({ slToCost: true, slToCostScope: 'sl', peSlMultiplier: '1.5' }), 'PE'), true);
+});
+
+const LAZY = (o: object) => ({ id: 'L1', leg: 'CE', otmSteps: 2, lots: 1, slPct: '20', tgtPct: '40', onSl: '', onTgt: '', ...o });
+const lazyRow = (o: object = {}) => ({
+  ceSlMultiplier: '1.5', peSlMultiplier: '1.5', ceTgtPct: '10', peTgtPct: '10', legTgtUnit: 'pts',
+  lazyLegs: [LAZY({}), LAZY({ id: 'L2', slPct: '', tgtPct: '' })],
+  fill: { ceQty: 75, ceStrike: 24000, ceLazyId: 'L1', peQty: 75, peStrike: 24000, ts: '' },
+  ...o,
+}) as never;
+
+test('lazy leg: its own SL / target replace the row\'s while it runs', () => {
+  // running lazy leg → 1 + 20% and 40% target
+  assert.equal(legSlMultiplier(lazyRow(), 'CE'), 1.2);
+  assert.deepEqual(legTarget(lazyRow(), 'CE'), { value: '40', unit: 'pct' });
+  // the other (root) slot keeps the row's values
+  assert.equal(legSlMultiplier(lazyRow(), 'PE'), '1.5');
+  assert.deepEqual(legTarget(lazyRow(), 'PE'), { value: '10', unit: 'pts' });
+  // a lazy leg with no SL has none — not the row's
+  assert.equal(Number(legSlMultiplier(lazyRow({ fill: { ceQty: 75, ceStrike: 24000, ceLazyId: 'L2', ts: '' } }), 'CE')) > 1, false);
+  // no longer owned → no lazy leg
+  assert.equal(runningLazyLeg(lazyRow({ fill: { ceQty: 0, ceLazyId: 'L1', ts: '' } }), 'CE'), null);
+});
+
+test('lazy leg: chain and strike', () => {
+  const cfg = (o: object) => lazyRow({ reSlMode: 'lazy', reSlLazyId: 'L1', reTgtMode: 'off', ...o });
+  // root leg uses the row's pick, only when the mode is lazy
+  assert.equal(nextLazyLegId(cfg({}), null, 'sl'), 'L1');
+  assert.equal(nextLazyLegId(cfg({ reSlMode: 'asap' }), null, 'sl'), null);
+  assert.equal(nextLazyLegId(cfg({}), null, 'tgt'), null);
+  // a lazy leg chains through its own onSl / onTgt, whatever the row's mode
+  const chain = cfg({ reSlMode: 'off', lazyLegs: [LAZY({ onSl: 'L2', onTgt: '' }), LAZY({ id: 'L2' })] });
+  assert.equal(nextLazyLegId(chain, 'L1', 'sl'), 'L2');
+  assert.equal(nextLazyLegId(chain, 'L1', 'tgt'), null);
+  assert.equal(nextLazyLegId(cfg({ reSlLazyId: 'gone' }), null, 'sl'), null);
+  // AlgoTest example: spot 18465 → ATM 18450, OTM2 CE = 18550
+  assert.equal(lazyLegStrike({ leg: 'CE', otmSteps: 2 }, 18450, 50), 18550);
+  assert.equal(lazyLegStrike({ leg: 'PE', otmSteps: 2 }, 18450, 50), 18350);
+  assert.equal(lazyLegStrike({ leg: 'CE', otmSteps: -1 }, 18450, 50), 18400);
 });

@@ -33,7 +33,7 @@ import { partialCloseChips } from '@/lib/partialQty';
 import { cn } from '@/lib/utils';
 import type {
   FocusToolConfig, FocusRow, FocusRowFill, FocusIndexGroup,
-  FocusReentryMode, FocusReentryTrigger, FocusPendingReentry, FocusLegSimpleMom,
+  FocusReentryMode, FocusReentryTrigger, FocusPendingReentry, FocusLegSimpleMom, FocusLazyLeg,
   FocusUnderlying, FocusDte, FocusSide, FocusRowStatus, FocusStrikeMode,
 } from '@/lib/focusToolRows';
 // The pure rule engine for entry and exit decisions.
@@ -46,7 +46,7 @@ import {
   legPinnedStrike, costStopReason, legOwnEntry, slRollStrike, DEFAULT_SL_ROLL_MAX,
   reentryConfig, evaluateReentry, reentryWindowClosed, pendingReentryLevel, pendingReentryHit, legTargetReason, costReentryBasis,
   awaitingMomentumQuote, MOMENTUM_QUOTE_WAIT_MS, legTargetLevel,
-  evaluateEntryMomentum, entryMomentumOn, costStopApplies, simpleMomOn, simpleMomLevel, simpleMomHit,
+  evaluateEntryMomentum, entryMomentumOn, costStopApplies, MAX_LAZY_LEGS, legSlMultiplier, legTarget, nextLazyLegId, lazyLegStrike, runningLazyLeg, simpleMomOn, simpleMomLevel, simpleMomHit,
   type PosRow, type RowLive,
 } from '@/lib/focusToolRules';
 import { computeRowPnl, mtmForQty, shiftMayReopen, canMarkMtm, shiftCloseConfirmed, rowDisplayBookedPnl, putCallRatio, valuePutCallRatio, pickOpenInterest } from '@/lib/focusToolPnl';
@@ -936,16 +936,17 @@ function slTone(now: number | null, stop: number | null, idle: string): string {
 }
 
 const REENTRY_LABEL: Record<FocusReentryMode, string> = {
-  off: 'Off', asap: 'RE-ASAP', otm: 'RE-OTM', cost: 'RE-Cost', momentum: 'RE-Mom',
+  off: 'Off', asap: 'RE ASAP', otm: 'RE OTM', cost: 'RE COST', momentum: 'RE MOMENTUM', lazy: 'Lazy Leg',
 };
 const REENTRY_HELP: Record<FocusReentryMode, string> = {
   off: 'Leg stays closed',
   asap: 'Re-sell at once at the strike the row resolves to now (ATM ± offset / ₹ target)',
   otm: 'Re-sell at once, N strikes further OTM than the strike that closed',
   cost: 'Wait on the same strike until its premium returns to that strike\'s initial entry this cycle, then re-sell',
-  momentum: 'Pick the strike the row resolves to when the leg closes, then re-sell once its premium moves the set '
-    + 'points (Mom ↓/↑, shared by SL and target re-entries). Points only, set here — unlike AlgoTest it does not '
-    + 'reuse an entry momentum setting. If that strike has no premium yet it waits up to 15s for one, then cancels',
+  momentum: 'Pick the strike the row resolves to when the leg closes, then re-sell once it has moved as far as this '
+    + 'leg\'s Simple Momentum says (premium or underlying, points or %). Needs Simple Momentum switched on for the leg. '
+    + 'If that strike has no premium yet it waits up to 15s for one, then cancels',
+  lazy: 'Open a Lazy Leg (defined below) in the place of the leg that closed. The leg slot must be free when it fires',
 };
 const REENTRY_MAX_OPTIONS = [1, 2, 3, 4, 5, 10, 20];
 
@@ -1041,6 +1042,87 @@ function LegSimpleMomControl({ row, leg, onUpdate, disabled }: {
   );
 }
 
+const LAZY_STRIKE_OPTIONS = [
+  ...[5, 4, 3, 2, 1].map(n => ({ value: String(-n), label: `ITM${n}` })),
+  { value: '0', label: 'ATM' },
+  ...[1, 2, 3, 4, 5].map(n => ({ value: String(n), label: `OTM${n}` })),
+];
+
+/**
+ * AlgoTest Lazy Legs: legs that stay dormant until a leg's SL / target closes
+ * it, then open in its place with their own strike, lots, SL % and target %.
+ * A lazy leg's own SL / target can open the next one (up to 10 in all). Sell
+ * side only. Lots / SL / target are free-typed → RuleNumInput (commit on blur).
+ */
+function LazyLegsEditor({ row, onUpdate }: { row: FocusRow; onUpdate: (patch: Partial<FocusRow>) => void }) {
+  const [open, setOpen] = useState(false);
+  const legs = row.lazyLegs ?? [];
+  const lbl = 'inline-flex items-center gap-1.5 font-bold text-zinc-400';
+  const setLeg = (id: string, patch: Partial<FocusLazyLeg>) =>
+    onUpdate({ lazyLegs: legs.map(l => l.id === id ? { ...l, ...patch } : l) });
+  const add = () => {
+    if (legs.length >= MAX_LAZY_LEGS) return;
+    const n = legs.reduce((m, l) => Math.max(m, Number(l.id.slice(1)) || 0), 0) + 1;
+    onUpdate({
+      lazyLegs: [...legs, { id: `L${n}`, leg: 'CE', otmSteps: 0, lots: row.lots || 1, slPct: '', tgtPct: '', onSl: '', onTgt: '' }],
+    });
+    setOpen(true);
+  };
+  const remove = (id: string) => onUpdate({
+    lazyLegs: legs.filter(l => l.id !== id).map(l => ({ ...l, onSl: l.onSl === id ? '' : l.onSl, onTgt: l.onTgt === id ? '' : l.onTgt })),
+    reSlLazyId: row.reSlLazyId === id ? '' : row.reSlLazyId,
+    reTgtLazyId: row.reTgtLazyId === id ? '' : row.reTgtLazyId,
+  });
+  const nameOf = (id: string) => `Lazy ${legs.findIndex(l => l.id === id) + 1}`;
+  return (
+    <div className="flex flex-col gap-1">
+      <div className="flex flex-wrap items-center gap-2">
+        <button type="button" onClick={() => setOpen(o => !o)} aria-expanded={open}
+          className={cn(lbl, 'cursor-pointer hover:text-zinc-200 rounded', FOCUS_RING)}
+          title="Lazy Legs: legs opened when another leg's SL / target closes it, each with its own SL and target (up to 10)">
+          Lazy Legs ({legs.length}) {open ? '▾' : '▸'}
+        </button>
+        <button type="button" onClick={add} disabled={legs.length >= MAX_LAZY_LEGS}
+          className={cn('text-[11px] font-bold text-sky-300 hover:text-sky-200 disabled:text-zinc-600 cursor-pointer rounded', FOCUS_RING)}>
+          + Add Lazy Leg
+        </button>
+      </div>
+      {open && legs.map((l, i) => (
+        <div key={l.id} className="flex flex-wrap items-center gap-2 pl-3 border-l border-zinc-700 text-[11px]">
+          <span className="font-black text-zinc-300 w-12">Lazy {i + 1}</span>
+          <MiniSelect value={l.leg} ariaLabel={`Lazy ${i + 1} option type`}
+            options={[{ value: 'CE', label: 'CE' }, { value: 'PE', label: 'PE' }]}
+            onChange={v => setLeg(l.id, { leg: v as 'CE' | 'PE' })} className="w-16" />
+          <MiniSelect value={String(l.otmSteps)} ariaLabel={`Lazy ${i + 1} strike`}
+            options={LAZY_STRIKE_OPTIONS} onChange={v => setLeg(l.id, { otmSteps: Number(v) })} className="w-20" />
+          <label className={lbl}>Lots
+            <RuleNumInput value={String(l.lots)} onCommit={v => setLeg(l.id, { lots: Math.max(1, Math.trunc(Number(v)) || 1) })}
+              className="w-12 h-6 text-center text-[11px]" />
+          </label>
+          <label className={lbl} title="Stop loss as % premium rise over this leg's entry. Blank = none">SL %
+            <RuleNumInput value={l.slPct} onCommit={v => setLeg(l.id, { slPct: v })} placeholder="off" className="w-12 h-6 text-center text-[11px]" />
+          </label>
+          <label className={lbl} title="Target as % premium decay from this leg's entry. Blank = none">Tgt %
+            <RuleNumInput value={l.tgtPct} onCommit={v => setLeg(l.id, { tgtPct: v })} placeholder="off" className="w-12 h-6 text-center text-[11px]" />
+          </label>
+          <label className={lbl} title="Lazy Leg to open when this one's SL closes it">On SL
+            <MiniSelect value={l.onSl} ariaLabel={`Lazy ${i + 1} on stop loss`}
+              options={[{ value: '', label: 'None' }, ...legs.filter(x => x.id !== l.id).map(x => ({ value: x.id, label: nameOf(x.id) }))]}
+              onChange={v => setLeg(l.id, { onSl: v })} className="w-20" />
+          </label>
+          <label className={lbl} title="Lazy Leg to open when this one's target closes it">On Tgt
+            <MiniSelect value={l.onTgt} ariaLabel={`Lazy ${i + 1} on target`}
+              options={[{ value: '', label: 'None' }, ...legs.filter(x => x.id !== l.id).map(x => ({ value: x.id, label: nameOf(x.id) }))]}
+              onChange={v => setLeg(l.id, { onTgt: v })} className="w-20" />
+          </label>
+          <button type="button" onClick={() => remove(l.id)} aria-label={`Remove Lazy ${i + 1}`}
+            className={cn('text-zinc-500 hover:text-rose-400 cursor-pointer rounded', FOCUS_RING)}>&times;</button>
+        </div>
+      ))}
+    </div>
+  );
+}
+
 /**
  * Leg exits and what follows them — AlgoTest-style "Re-Entry on SL / Tgt"
  * (sell side only), No re-entry after, leg target (% or points), and SL → cost.
@@ -1066,15 +1148,14 @@ function LegReentryControls({ row, onUpdate, onCancelPending, legTargetsElsewher
     ? `CE ${f?.ceRolls ?? 0} · PE ${f?.peRolls ?? 0}`
     : `CE ${f?.ceTgtReentries ?? 0} · PE ${f?.peTgtReentries ?? 0}`;
   const anyOtm = sl.mode === 'otm';
-  const anyMom = sl.mode === 'momentum' || tgt.mode === 'momentum';
   const anyOn = sl.mode !== 'off' || tgt.mode !== 'off';
   const tgtUnitWord = row.legTgtUnit === 'pts' ? 'many points' : '%';
 
   const modeSelect = (t: 'sl' | 'tgt') => {
     const c = t === 'sl' ? sl : tgt;
     const modes: FocusReentryMode[] = t === 'sl'
-      ? ['off', 'asap', 'otm', 'cost', 'momentum']
-      : ['off', 'asap', 'cost', 'momentum'];
+      ? ['off', 'asap', 'otm', 'cost', 'momentum', 'lazy']
+      : ['off', 'asap', 'cost', 'momentum', 'lazy'];
     return (
       <div className={lbl} title={`${t === 'sl' ? 'After a leg SL × (CE × / PE ×)' : 'After a leg target (CE Tgt / PE Tgt)'}: ${REENTRY_HELP[c.mode]}`}>
         {t === 'sl' ? 'RE on SL' : 'RE on Tgt'}
@@ -1087,12 +1168,18 @@ function LegReentryControls({ row, onUpdate, onCancelPending, legTargetsElsewher
             if (mode === 'otm' && !(Number(row.slRollStrikes) > 0)) patch.slRollStrikes = 1;
             onUpdate(patch);
           }} className="w-24" />
-        {c.mode !== 'off' && (
+        {c.mode !== 'off' && c.mode !== 'lazy' && (
           <MiniSelect value={String(c.max)} ariaLabel={`Maximum re-entries on ${t === 'sl' ? 'stop loss' : 'target'}`}
             title={`Most re-entries per leg until the row exits or is re-armed. Used: ${used(t)}`}
             options={REENTRY_MAX_OPTIONS.map(n => ({ value: String(n), label: `×${n}` }))}
             onChange={v => onUpdate(t === 'sl' ? { reSlMax: Number(v) } : { reTgtMax: Number(v) })}
             className="w-14" />
+        )}
+        {c.mode === 'lazy' && (
+          <MiniSelect value={(t === 'sl' ? row.reSlLazyId : row.reTgtLazyId) ?? ''} ariaLabel={`Lazy leg on ${t === 'sl' ? 'stop loss' : 'target'}`}
+            title="Which Lazy Leg opens when the leg's SL / target closes it"
+            options={[{ value: '', label: 'Pick…' }, ...(row.lazyLegs ?? []).map((l, i) => ({ value: l.id, label: `Lazy ${i + 1}` }))]}
+            onChange={v => onUpdate(t === 'sl' ? { reSlLazyId: v } : { reTgtLazyId: v })} className="w-20" />
         )}
       </div>
     );
@@ -1105,6 +1192,7 @@ function LegReentryControls({ row, onUpdate, onCancelPending, legTargetsElsewher
         {modeSelect('sl')}
         {modeSelect('tgt')}
       </div>
+      <LazyLegsEditor row={row} onUpdate={onUpdate} />
       <div className="flex flex-wrap items-center gap-2">
         {!legTargetsElsewhere && (<>
         <label className={lbl} title={`CE leg target: exit CE alone once its premium has decayed this ${tgtUnitWord} from its own entry. Blank = off`}>
@@ -1128,16 +1216,6 @@ function LegReentryControls({ row, onUpdate, onCancelPending, legTargetsElsewher
             <MiniSelect value={String(Math.max(1, Math.trunc(Number(row.slRollStrikes) || 1)))} ariaLabel="Strikes OTM for RE-OTM"
               options={[1, 2, 3].map(n => ({ value: String(n), label: String(n) }))}
               onChange={v => onUpdate({ slRollStrikes: Number(v) })} className="w-12" />
-          </div>
-        )}
-        {anyMom && (
-          <div className={lbl} title="RE-Momentum: points the new strike's premium must move from its first premium after the leg closed. One direction and size for both SL and target re-entries; points only">
-            Mom
-            <MiniSelect value={row.reMomentumDir ?? 'down'} ariaLabel="Momentum direction"
-              options={[{ value: 'down', label: 'pts ↓' }, { value: 'up', label: 'pts ↑' }]}
-              onChange={v => onUpdate({ reMomentumDir: v as 'down' | 'up' })} className="w-16" />
-            <RuleNumInput value={row.reMomentumPts ?? ''} onCommit={v => onUpdate({ reMomentumPts: v })} placeholder="pts"
-              className={cn('w-12 h-6 text-center', txt)} />
           </div>
         )}
         {anyOn && (
@@ -1217,10 +1295,11 @@ function LegSlLevels({
     && rowOwnsLeg(row, leg);
   const costLevel = costArmed ? legOwnEntry(row, leg, live) : 0;
   // Leg target level (display-only; legTargetReason is the authority).
-  const tgtValue = Number(leg === 'CE' ? row.ceTgtPct : row.peTgtPct);
+  const lazyTgt = legTarget(row, leg);
+  const tgtValue = Number(lazyTgt.value);
   const tgtEntry = legOwnContracts(row, leg, live) > 0 ? legOwnEntry(row, leg, live) : 0;
-  const tgtLevel = legTargetLevel(tgtEntry, tgtValue, row.legTgtUnit) ?? 0;
-  const tgtWhat = row.legTgtUnit === 'pts' ? `${tgtValue} pts` : `${tgtValue}%`;
+  const tgtLevel = legTargetLevel(tgtEntry, tgtValue, lazyTgt.unit) ?? 0;
+  const tgtWhat = lazyTgt.unit === 'pts' ? `${tgtValue} pts` : `${tgtValue}%`;
   if (legLevel == null && pairLevel == null && !(costLevel > 0) && !(tgtLevel > 0)) return null;
   const nowLeg = (leg === 'CE' ? live.ltpCe : live.ltpPe) ?? null;
   const nowPair = live.entryPremium > 0
@@ -1240,7 +1319,7 @@ function LegSlLevels({
       {legLevel != null && (
         <span
           className={cn('text-[11px] font-mono font-bold tabular-nums', slTone(nowLeg, legLevel, leg === 'CE' ? 'text-emerald-400' : 'text-rose-400'))}
-          title={`${leg} SL × fires when this leg's premium reaches ${legLevel.toFixed(2)} (entry × ${leg === 'CE' ? row.ceSlMultiplier : row.peSlMultiplier})`}
+          title={`${leg} SL × fires when this leg's premium reaches ${legLevel.toFixed(2)} (entry × ${legSlMultiplier(row, leg)})`}
         >
           {leg} × {legLevel.toFixed(2)}
         </span>
@@ -2127,6 +2206,10 @@ function IndexGroupBar({
  * by editing the JSON. Display-only: the scheduler never enters an 'entered'
  * row, and Arm itself resets it through armRow as usual.
  */
+function lazyLotsOf(l: Pick<FocusLazyLeg, 'lots'>): number {
+  return Math.max(0, Math.trunc(Number(l.lots)) || 0);
+}
+
 function shownStatus(row: FocusRow, flat: boolean): FocusRowStatus {
   // A flat row still waiting on a cost / momentum re-entry is live, not done.
   const waiting = !!(row.fill?.cePending || row.fill?.pePending);
@@ -2488,7 +2571,7 @@ function FocusTableRowImpl({
                   levelHigh: '', levelLow: '', levelVw: false, vwapInterval: '1', vwapBufferPct: '0.1',
                   slRupees: '', slMultiplier: '1.2', ceSlMultiplier: '1.2', peSlMultiplier: '1.2',
                   slRollStrikes: 0, slToCost: false, slToCostScope: undefined, squareOff: undefined, reSlMode: 'off', reTgtMode: 'off',
-                  ceTgtPct: '', peTgtPct: '', noReEntryAfter: '', entryMomEnabled: false, entryMomValue: '', ceSimpleMom: undefined, peSimpleMom: undefined,
+                  ceTgtPct: '', peTgtPct: '', noReEntryAfter: '', entryMomEnabled: false, entryMomValue: '', ceSimpleMom: undefined, peSimpleMom: undefined, lazyLegs: undefined, reSlLazyId: undefined, reTgtLazyId: undefined,
                 })}
                 title="Clear rules"
                 className={cn('text-[11px] text-zinc-500 hover:text-zinc-300 transition-colors cursor-pointer', FOCUS_RING)}
@@ -2664,7 +2747,7 @@ function FocusProRowImpl({
     levelHigh: '', levelLow: '', levelVw: false, vwapInterval: '1', vwapBufferPct: '0.1',
     slRupees: '', slMultiplier: '1.2', ceSlMultiplier: '1.2', peSlMultiplier: '1.2',
     slRollStrikes: 0, slToCost: false, slToCostScope: undefined, squareOff: undefined, reSlMode: 'off', reTgtMode: 'off',
-    ceTgtPct: '', peTgtPct: '', noReEntryAfter: '', entryMomEnabled: false, entryMomValue: '', ceSimpleMom: undefined, peSimpleMom: undefined,
+    ceTgtPct: '', peTgtPct: '', noReEntryAfter: '', entryMomEnabled: false, entryMomValue: '', ceSimpleMom: undefined, peSimpleMom: undefined, lazyLegs: undefined, reSlLazyId: undefined, reTgtLazyId: undefined,
   });
 
   const legLine = (leg: 'CE' | 'PE') => {
@@ -3358,7 +3441,7 @@ function FocusRowCardImpl({
           </span>
           <div className="flex items-center gap-1.5">
             <button
-              onClick={() => onUpdate({ levelHigh: '', levelLow: '', levelVw: false, vwapInterval: '1', vwapBufferPct: '0.1', slRupees: '', slMultiplier: '1.2', ceSlMultiplier: '1.2', peSlMultiplier: '1.2', slRollStrikes: 0, slToCost: false, slToCostScope: undefined, squareOff: undefined, reSlMode: 'off', reTgtMode: 'off', ceTgtPct: '', peTgtPct: '', noReEntryAfter: '', entryMomEnabled: false, entryMomValue: '', ceSimpleMom: undefined, peSimpleMom: undefined })}
+              onClick={() => onUpdate({ levelHigh: '', levelLow: '', levelVw: false, vwapInterval: '1', vwapBufferPct: '0.1', slRupees: '', slMultiplier: '1.2', ceSlMultiplier: '1.2', peSlMultiplier: '1.2', slRollStrikes: 0, slToCost: false, slToCostScope: undefined, squareOff: undefined, reSlMode: 'off', reTgtMode: 'off', ceTgtPct: '', peTgtPct: '', noReEntryAfter: '', entryMomEnabled: false, entryMomValue: '', ceSimpleMom: undefined, peSimpleMom: undefined, lazyLegs: undefined, reSlLazyId: undefined, reTgtLazyId: undefined })}
               className={cn('text-[11px] text-zinc-500 hover:text-zinc-300 transition-colors cursor-pointer', FOCUS_RING)}
             >
               Clear
@@ -4743,6 +4826,9 @@ export default function FocusTool() {
           // goes flat drops it, so a later re-open starts without it.
           ceCostStop: nextCeQty > 0 ? f?.ceCostStop : undefined,
           peCostStop: nextPeQty > 0 ? f?.peCostStop : undefined,
+          // Likewise the Lazy Leg whose SL / target a slot is running on.
+          ceLazyId: nextCeQty > 0 ? f?.ceLazyId : undefined,
+          peLazyId: nextPeQty > 0 ? f?.peLazyId : undefined,
           bookedPnl: (f?.bookedPnl ?? 0) + (Number(bookedDelta) || 0),
           ts: f?.ts ?? new Date().toISOString(),
         };
@@ -5726,6 +5812,69 @@ export default function FocusTool() {
   }
 
   /**
+   * Open a Lazy Leg after a leg's SL / target closed it (AlgoTest "Lazy Leg").
+   *
+   * It takes over the CE/PE slot of its own type, so that slot must be free —
+   * the leg that just closed frees it when the types match; a different type
+   * whose leg is still open is refused (the ledger holds one position per
+   * slot). It opens at ATM ± its own steps, is stamped with its id so its own
+   * SL % / target % replace the row's, and is counted BEFORE the order so a
+   * rejection can't loop; each lazy leg fires at most once per cycle, which
+   * also keeps a chain from cycling.
+   */
+  async function openLazyLeg(
+    row: FocusRow, lazyId: string, trigger: FocusReentryTrigger,
+  ): Promise<'reentered' | 'skipped' | 'unconfirmed'> {
+    const snap = schedulerRef.current;
+    const lazy = row.lazyLegs?.find(l => l.id === lazyId);
+    if (!lazy) return 'skipped';
+    const u = row.underlying;
+    const leg = lazy.leg;
+    const name = `Lazy ${(row.lazyLegs ?? []).findIndex(l => l.id === lazyId) + 1}`;
+    const tag = `${isSimRow(row) ? 'SIM ' : ''}${u} ${name}`;
+    const refuse = (why: string): 'skipped' => { addToast('error', `${tag} not opened`, why); return 'skipped'; };
+    const wantedAt = rowExitWantedRef.current.get(row.id);
+    if (wantedAt != null && Date.now() - wantedAt < 5_000) return refuse('A whole-row exit is pending');
+    if (!row.fill) return 'skipped';
+    if (!legsOf(row).includes(leg)) return refuse(`This row does not trade ${leg}`);
+    if (row.fill.lazyUsed?.includes(lazy.id)) return refuse('Already opened once this cycle');
+    const group = snap.config.groups.find(g => g.underlying === u);
+    const closed = reentryWindowClosed(row, { nowHm: istHm(), product: group?.product ?? 'INTRADAY', groupEnabled: !!group?.enabled });
+    if (closed) return refuse(closed);
+    if (!rowMayTrade(row, snap.liveRealMoney)) return refuse('LIVE · REAL MONEY is off');
+    if (rowOwnsLeg(row, leg)) return refuse(`The ${leg} leg is still open — a Lazy Leg needs its slot free`);
+    if (!(lazyLotsOf(lazy) > 0)) return refuse('Lots must be above 0');
+
+    const base = await resolvedStrikeAfterClose(row.id, leg);
+    if (base == null) return refuse('Could not resolve the current strike');
+    const step = STRIKE_STEP[u];
+    const atm = row.strikeMode === 'ATM'
+      ? base - ((leg === 'CE' ? row.ceOffset : row.peOffset) ?? 0) * step
+      : Math.round((snap.spots[u] ?? 0) / step) * step;
+    if (!(atm > 0)) return refuse('ATM is not available');
+    const strike = lazyLegStrike(lazy, atm, step);
+
+    patchFill(row.id, f => ({
+      lazyUsed: [...(f.lazyUsed ?? []), lazy.id],
+      ...(leg === 'CE' ? { ceLazyId: lazy.id } : { peLazyId: lazy.id }),
+    }));
+    const fresh = schedulerRef.current.config.rows.find(r => r.id === row.id) ?? row;
+    const ok = await actionsRef.current.placeLeg(fresh, leg, {
+      reduce: false, lots: lazyLotsOf(lazy), strikeOverride: strike, awaitFill: true,
+    });
+    if (!ok) {
+      patchFill(row.id, () => (leg === 'CE' ? { ceLazyId: undefined } : { peLazyId: undefined }));
+      addToast('error', `${tag} not confirmed`,
+        `The ${strike} ${leg} order was rejected or not confirmed filled in time. It may still fill late (then it runs on the row's own SL / target) — do NOT reopen it by hand.`);
+      return 'unconfirmed';
+    }
+    addToast('success', `${tag} opened`,
+      `After ${trigger === 'sl' ? 'SL' : 'target'}: sold ${lazyLotsOf(lazy)} lot(s) ${strike} ${leg}`
+      + `${Number(lazy.slPct) > 0 ? `, SL ${lazy.slPct}%` : ''}${Number(lazy.tgtPct) > 0 ? `, target ${lazy.tgtPct}%` : ''}`);
+    return 'reentered';
+  }
+
+  /**
    * Re-entry after a leg's own SL × or target close has CONFIRMED (AlgoTest's
    * "Re-Entry on SL / Tgt", sell side only — see FocusReentryMode).
    *
@@ -5741,13 +5890,15 @@ export default function FocusTool() {
    */
   async function reenterLegAfterExit(
     rowId: string, leg: 'CE' | 'PE', trigger: FocusReentryTrigger,
-    closedStrike: number | null, closedQty: number, closedEntry: number,
+    closedStrike: number | null, closedQty: number, closedEntry: number, closedLazyId: string | null = null,
   ): Promise<'reentered' | 'pending' | 'skipped' | 'unconfirmed'> {
     const snap = schedulerRef.current;
     const row = snap.config.rows.find(r => r.id === rowId);
     if (!row) return 'skipped';
+    const lazyId = nextLazyLegId(row, closedLazyId, trigger);
+    if (lazyId) return openLazyLeg(row, lazyId, trigger);
     const cfg = reentryConfig(row, trigger);
-    if (cfg.mode === 'off') return 'skipped';
+    if (cfg.mode === 'off' || cfg.mode === 'lazy') return 'skipped';
     // A leftover leg the row's Side no longer trades still gets its own stop
     // (legStopReason ignores Side on purpose) — but must never be re-sold.
     if (!legsOf(row).includes(leg)) return 'skipped';
@@ -5802,43 +5953,49 @@ export default function FocusTool() {
       const basis = cfg.mode === 'cost'
         ? costReentryBasis(leg === 'CE' ? row.fill.ceCostBasis : row.fill.peCostBasis, closedStrike, closedEntry)
         : null;
+      // RE-Momentum follows the leg's own Simple Momentum — AlgoTest: it only
+      // works with Simple Momentum switched on.
+      const simple = leg === 'CE' ? row.ceSimpleMom : row.peSimpleMom;
       if (cfg.mode === 'momentum') {
+        if (!simpleMomOn(simple)) {
+          addToast('error', `${tag} no re-entry`, `RE MOMENTUM needs Simple Momentum switched on for the ${leg} leg`);
+          return 'skipped';
+        }
         const s2 = await resolvedStrikeAfterClose(rowId, leg);
         if (s2 == null) {
           addToast('error', `${tag} no re-entry`, 'Could not resolve the current strike for momentum re-entry');
           return 'skipped';
         }
         strike = s2;
-        if (!(Number(row.reMomentumPts) > 0)) {
-          addToast('error', `${tag} no re-entry`, 'Momentum points not set');
-          return 'skipped';
-        }
-        quoteNow = actionsRef.current.simQuote(u, expiry, strike, leg);
+        quoteNow = simple.src === 'underlying'
+          ? (schedulerRef.current.spots[u] ?? 0)
+          : actionsRef.current.simQuote(u, expiry, strike, leg);
       }
       // A momentum strike the feed isn't carrying yet has no premium: arm it
       // with price 0 and let checkPendingReentries take the reference from
       // the first quote (cancelled after MOMENTUM_QUOTE_WAIT_MS).
       const awaitQuote = cfg.mode === 'momentum' && !(quoteNow > 0);
       const level = awaitQuote
-        ? { price: 0, dir: row.reMomentumDir === 'up' ? 'up' as const : 'down' as const }
+        ? { price: 0, dir: simple?.dir ?? 'down' }
         : pendingReentryLevel(cfg.mode, trigger, {
-          entry: basis?.price ?? closedEntry, quoteNow, momentumPts: row.reMomentumPts, momentumDir: row.reMomentumDir,
+          entry: basis?.price ?? closedEntry, start: quoteNow, simple,
         });
       if (!level) {
         addToast('error', `${tag} no re-entry`, cfg.mode === 'cost'
           ? 'No entry price recorded for the closed leg'
-          : 'The new strike\'s premium is too small for the momentum points');
+          : 'The momentum level is not reachable from the current price');
         return 'skipped';
       }
       const pending: FocusPendingReentry = {
         trigger, mode: cfg.mode, strike, lots, price: level.price, dir: level.dir, since: Date.now(),
+        ...(cfg.mode === 'momentum' && simple?.src === 'underlying' ? { src: 'underlying' as const } : {}),
       };
       patchFill(rowId, () => (leg === 'CE'
         ? { cePending: pending, ...(basis ? { ceCostBasis: basis } : {}) }
         : { pePending: pending, ...(basis ? { peCostBasis: basis } : {}) }));
       addToast('success', `${tag} re-entry armed`, awaitQuote
-        ? `RE-MOMENTUM after ${what}: waiting for a premium on ${strike} ${leg} to measure the move from`
-        : `RE-${cfg.mode.toUpperCase()} after ${what}: sell ${lots} lot(s) ${strike} ${leg} when premium ${level.dir === 'down' ? '≤' : '≥'} ${level.price.toFixed(2)}`);
+        ? `RE MOMENTUM after ${what}: waiting for a premium on ${strike} ${leg} to measure the move from`
+        : `RE ${cfg.mode.toUpperCase()} after ${what}: sell ${lots} lot(s) ${strike} ${leg} when ${simple?.src === 'underlying' && cfg.mode === 'momentum' ? 'spot' : 'premium'} ${level.dir === 'down' ? '≤' : '≥'} ${level.price.toFixed(2)}`);
       return 'pending';
     }
 
@@ -5922,16 +6079,16 @@ export default function FocusTool() {
         if (awaitingMomentumQuote(p)) {
           const level = ltp > 0
             ? pendingReentryLevel('momentum', p.trigger, {
-              quoteNow: ltp, momentumPts: row.reMomentumPts, momentumDir: row.reMomentumDir,
+              start: ltp, simple: leg === 'CE' ? row.ceSimpleMom : row.peSimpleMom,
             })
             : null;
           if (level) {
             const next: FocusPendingReentry = { ...p, price: level.price, dir: level.dir };
             patchFill(row.id, () => (leg === 'CE' ? { cePending: next } : { pePending: next }));
             addToast('success', `${tag} re-entry armed`,
-              `RE-MOMENTUM: sell ${p.lots} lot(s) ${p.strike} ${leg} when premium ${level.dir === 'down' ? '≤' : '≥'} ${level.price.toFixed(2)}`);
+              `RE MOMENTUM: sell ${p.lots} lot(s) ${p.strike} ${leg} when premium ${level.dir === 'down' ? '≤' : '≥'} ${level.price.toFixed(2)}`);
           } else if (ltp > 0) {
-            clear('Momentum points not set, or the new strike\'s premium is too small for them');
+            clear('Simple Momentum is off for this leg, or its level is not reachable from the new strike\'s premium');
           } else if (Date.now() - p.since > MOMENTUM_QUOTE_WAIT_MS) {
             clear(`No premium for ${p.strike} ${leg} within ${MOMENTUM_QUOTE_WAIT_MS / 1000}s`);
           }
@@ -5940,7 +6097,9 @@ export default function FocusTool() {
         if (!rowMayTrade(row, snap.liveRealMoney)) continue;
         if (busyRows.has(row.id) || autoExitingRef.current.has(row.id)
           || (legExitsInFlightRef.current.get(row.id) ?? 0) > 0) continue;
-        if (!pendingReentryHit(p, ltp)) continue;
+        // An underlying-momentum re-entry is measured on the spot, not the strike.
+        const watched = p.src === 'underlying' ? (snap.spots[row.underlying] ?? 0) : ltp;
+        if (!pendingReentryHit(p, watched)) continue;
 
         pendingFiringRef.current.add(key);
         firedThisRow = true;
@@ -5955,7 +6114,7 @@ export default function FocusTool() {
             [countKey]: done + 1,
           }));
           addToast('success', `${tag} RE-${p.mode.toUpperCase()} triggered`,
-            `Premium ${ltp.toFixed(2)} ${p.dir === 'down' ? '≤' : '≥'} ${p.price.toFixed(2)} — selling ${p.lots} lot(s) ${p.strike} ${leg}`);
+            `${p.src === 'underlying' ? 'Spot' : 'Premium'} ${watched.toFixed(2)} ${p.dir === 'down' ? '≤' : '≥'} ${p.price.toFixed(2)} — selling ${p.lots} lot(s) ${p.strike} ${leg}`);
           const fresh = schedulerRef.current.config.rows.find(r => r.id === row.id) ?? row;
           const ok = await placeLeg(fresh, leg, {
             reduce: false, lots: p.lots, strikeOverride: p.strike, awaitFill: true,
@@ -6057,6 +6216,7 @@ export default function FocusTool() {
     const closedStrike = leg === 'CE' ? live.ceStrike : live.peStrike;
     const closingQty = legOwnContracts(row, leg, live);
     const closedEntry = legOwnEntry(row, leg, live);
+    const closedLazyId = runningLazyLeg(row, leg)?.id ?? null;
     const other: 'CE' | 'PE' = leg === 'CE' ? 'PE' : 'CE';
     // awaitFill so the ledger is confirmed-updated by the time waitRowFlat
     // reads it below — and so a re-entry never opens on an unconfirmed close.
@@ -6090,7 +6250,7 @@ export default function FocusTool() {
           }
         }
         if (!squaredOff && (kind === 'sl' || kind === 'tgt')) {
-          const re = await reenterLegAfterExit(row.id, leg, kind, closedStrike, closingQty, closedEntry);
+          const re = await reenterLegAfterExit(row.id, leg, kind, closedStrike, closingQty, closedEntry, closedLazyId);
           // 'unconfirmed': an order went out but didn't confirm — it may fill
           // late, so don't retire on a momentarily-flat ledger. 'pending':
           // the row must stay alive to fire it.

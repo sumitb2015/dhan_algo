@@ -61,7 +61,7 @@ const SAMPLES: { title: string; row: FocusRow; live: RowLive }[] = [
     title: 'SIM row, CE stopped out — momentum re-entry waiting',
     row: baseRow('preview-pending', {
       mode: 'sim', status: 'entered', ceOffset: 2, peOffset: -2,
-      reSlMode: 'momentum', reMomentumPts: '10', reSlMax: 2, noReEntryAfter: '14:30', slToCost: true,
+      reSlMode: 'momentum', reSlMax: 2, noReEntryAfter: '14:30', slToCost: true,
       fill: {
         ceStrike: 22700, peStrike: 22500, ceQty: 0, peQty: 130, peEntry: 96, peCostStop: true,
         ceRolls: 0, ts: NOW,

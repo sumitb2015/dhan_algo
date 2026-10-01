@@ -22,7 +22,7 @@
  */
 
 import type {
-  FocusRow, FocusDte, FocusRowStatus, FocusReentryMode, FocusReentryTrigger, FocusPendingReentry, FocusLegSimpleMom,
+  FocusRow, FocusDte, FocusRowStatus, FocusReentryMode, FocusReentryTrigger, FocusPendingReentry, FocusLegSimpleMom, FocusLazyLeg,
 } from '@/lib/focusToolRows';
 
 // ── Constants ────────────────────────────────────────────────────────────────
@@ -332,7 +332,7 @@ export function entryPremiumWeighted(
  * flat leg has no premium to measure a multiple against.
  */
 export function legStopReason(
-  row: Pick<FocusRow, 'ceSlMultiplier' | 'peSlMultiplier' | 'fill'>,
+  row: Pick<FocusRow, 'ceSlMultiplier' | 'peSlMultiplier' | 'fill' | 'lazyLegs'>,
   leg: 'CE' | 'PE',
   live: RowLive,
   workerHold?: WorkerHold,
@@ -341,7 +341,7 @@ export function legStopReason(
   const pos = leg === 'CE' ? live.cePosition : live.pePosition;
   const qty = Number(pos?.netQty ?? 0);
   if (qty === 0) return null;
-  const mult = Number(leg === 'CE' ? row.ceSlMultiplier : row.peSlMultiplier);
+  const mult = Number(legSlMultiplier(row, leg));
   if (!(mult > 1)) return null;
   // Short: hurt by this leg's own premium expanding through a multiple of what
   // it was sold for (this tool only ever opens with a SELL). This row's own
@@ -398,8 +398,8 @@ export function legOwnEntry(
 }
 
 /** Does this leg carry its own SL × (a multiple above 1)? */
-export function legHasOwnSl(row: Pick<FocusRow, 'ceSlMultiplier' | 'peSlMultiplier'>, leg: 'CE' | 'PE'): boolean {
-  return Number(leg === 'CE' ? row.ceSlMultiplier : row.peSlMultiplier) > 1;
+export function legHasOwnSl(row: Pick<FocusRow, 'ceSlMultiplier' | 'peSlMultiplier' | 'fill' | 'lazyLegs'>, leg: 'CE' | 'PE'): boolean {
+  return Number(legSlMultiplier(row, leg)) > 1;
 }
 
 /**
@@ -408,7 +408,7 @@ export function legHasOwnSl(row: Pick<FocusRow, 'ceSlMultiplier' | 'peSlMultipli
  * open leg (the default).
  */
 export function costStopApplies(
-  row: Pick<FocusRow, 'slToCost' | 'slToCostScope' | 'ceSlMultiplier' | 'peSlMultiplier'>, other: 'CE' | 'PE',
+  row: Pick<FocusRow, 'slToCost' | 'slToCostScope' | 'ceSlMultiplier' | 'peSlMultiplier' | 'fill' | 'lazyLegs'>, other: 'CE' | 'PE',
 ): boolean {
   if (!row.slToCost) return false;
   return row.slToCostScope === 'sl' ? legHasOwnSl(row, other) : true;
@@ -555,26 +555,24 @@ export function costReentryBasis(
  * stop) it waits for the premium to fall back to entry; after a target (it
  * decayed DOWN) it waits for it to climb back to entry.
  *
- * momentum: the new strike's premium now, ± the configured points.
+ * momentum: the start (new strike's premium, or spot) moved by the leg's Simple Momentum.
  *
  * Null when there is nothing sane to wait for (no entry, no quote, no points).
  */
 export function pendingReentryLevel(
   mode: 'cost' | 'momentum',
   trigger: FocusReentryTrigger,
-  ref: { entry?: number; quoteNow?: number; momentumPts?: string | number; momentumDir?: 'down' | 'up' },
+  ref: { entry?: number; start?: number; simple?: FocusLegSimpleMom | null },
 ): { price: number; dir: 'down' | 'up' } | null {
   if (mode === 'cost') {
     const e = Number(ref.entry) || 0;
     if (!(e > 0)) return null;
     return { price: e, dir: trigger === 'sl' ? 'down' : 'up' };
   }
-  const q = Number(ref.quoteNow) || 0;
-  const pts = Number(ref.momentumPts) || 0;
-  if (!(q > 0) || !(pts > 0)) return null;
-  const dir = ref.momentumDir === 'up' ? 'up' : 'down';
-  const price = dir === 'down' ? q - pts : q + pts;
-  return price > 0 ? { price, dir } : null;
+  // momentum: the leg's own Simple Momentum, measured from `start` (the new
+  // strike's premium, or the spot when the setting is on the underlying).
+  const price = simpleMomLevel(ref.simple, Number(ref.start) || 0);
+  return price != null && ref.simple ? { price, dir: ref.simple.dir } : null;
 }
 
 /**
@@ -598,19 +596,19 @@ export function legTargetLevel(
  * leg.
  */
 export function legTargetReason(
-  row: Pick<FocusRow, 'ceTgtPct' | 'peTgtPct' | 'legTgtUnit' | 'fill'>,
+  row: Pick<FocusRow, 'ceTgtPct' | 'peTgtPct' | 'legTgtUnit' | 'fill' | 'lazyLegs'>,
   leg: 'CE' | 'PE',
   live: RowLive,
   workerHold?: WorkerHold,
 ): string | null {
   if (legOwnContracts(row, leg, live, workerHold) <= 0) return null;
-  const value = leg === 'CE' ? row.ceTgtPct : row.peTgtPct;
+  const { value, unit } = legTarget(row, leg);
   const entry = legOwnEntry(row, leg, live);
-  const level = legTargetLevel(entry, value, row.legTgtUnit);
+  const level = legTargetLevel(entry, value, unit);
   if (level == null) return null;
   const now = (leg === 'CE' ? live.ltpCe : live.ltpPe) ?? 0;
   if (now > 0 && now <= level) {
-    const what = row.legTgtUnit === 'pts' ? `${Number(value)} pts` : `${Number(value)}%`;
+    const what = unit === 'pts' ? `${Number(value)} pts` : `${Number(value)}%`;
     return `${leg} target ${what} hit (premium ${now.toFixed(2)} ≤ ${level.toFixed(2)}, entry ${entry.toFixed(2)})`;
   }
   return null;
@@ -648,7 +646,7 @@ function previewCombinedPremium(
 
 /** This leg's SL × level. Uses sell/buy avg while owned and open, else live LTP (preview). */
 export function legStopPremium(
-  row: Pick<FocusRow, 'ceSlMultiplier' | 'peSlMultiplier' | 'fill'>,
+  row: Pick<FocusRow, 'ceSlMultiplier' | 'peSlMultiplier' | 'fill' | 'lazyLegs'>,
   leg: 'CE' | 'PE',
   live: RowLive,
   workerHold?: WorkerHold,
@@ -659,7 +657,7 @@ export function legStopPremium(
   const owned = rowOwnsLeg(row, leg, workerHold) && qty !== 0;
   // Same entry legStopReason fires on — display must not disagree with it.
   const entry = owned ? legOwnEntry(row, leg, live) : ltp;
-  return stopPremium(entry, leg === 'CE' ? row.ceSlMultiplier : row.peSlMultiplier);
+  return stopPremium(entry, legSlMultiplier(row, leg));
 }
 
 /** Pair SL × level. Uses combined (lots × premium) entry while open, else preview. */
@@ -918,6 +916,67 @@ export function simpleMomHit(m: FocusLegSimpleMom | null | undefined, start: num
   const level = simpleMomLevel(m, start);
   if (level == null || !(now > 0)) return false;
   return m!.dir === 'down' ? now <= level : now >= level;
+}
+
+// ── Lazy legs ───────────────────────────────────────────────────────────────
+
+/** The Lazy Leg running in a leg slot right now (only while the row owns that leg). */
+/** Most Lazy Legs one row can define (AlgoTest's limit). */
+export const MAX_LAZY_LEGS = 10;
+
+export function runningLazyLeg(
+  row: Pick<FocusRow, 'fill' | 'lazyLegs'>, leg: 'CE' | 'PE',
+): FocusLazyLeg | null {
+  if (!rowOwnsLeg(row, leg)) return null;
+  const id = leg === 'CE' ? row.fill?.ceLazyId : row.fill?.peLazyId;
+  return id ? (row.lazyLegs ?? []).find(l => l.id === id) ?? null : null;
+}
+
+/** SL multiple in force on a leg: the running Lazy Leg's (1 + SL %), else the row's. */
+export function legSlMultiplier(
+  row: Pick<FocusRow, 'ceSlMultiplier' | 'peSlMultiplier' | 'fill' | 'lazyLegs'>, leg: 'CE' | 'PE',
+): string | number | undefined {
+  const lazy = runningLazyLeg(row, leg);
+  if (lazy) return Number(lazy.slPct) > 0 ? 1 + Number(lazy.slPct) / 100 : undefined;
+  return leg === 'CE' ? row.ceSlMultiplier : row.peSlMultiplier;
+}
+
+/** Target in force on a leg: the running Lazy Leg's (always %), else the row's. */
+export function legTarget(
+  row: Pick<FocusRow, 'ceTgtPct' | 'peTgtPct' | 'legTgtUnit' | 'fill' | 'lazyLegs'>, leg: 'CE' | 'PE',
+): { value: string | undefined; unit: FocusRow['legTgtUnit'] } {
+  const lazy = runningLazyLeg(row, leg);
+  if (lazy) return { value: lazy.tgtPct, unit: 'pct' };
+  return { value: leg === 'CE' ? row.ceTgtPct : row.peTgtPct, unit: row.legTgtUnit };
+}
+
+/**
+ * Which Lazy Leg should open after a leg's SL / target closed it, or null.
+ * `closedLazyId` is the Lazy Leg that was running in the slot (captured
+ * before the close): a lazy leg chains through its own onSl / onTgt. A root leg
+ * uses the row's "Re-entry on SL / Tgt: Lazy Leg" pick. Null for an id that no
+ * longer exists.
+ */
+export function nextLazyLegId(
+  row: Pick<FocusRow, 'lazyLegs' | 'reSlMode' | 'reTgtMode' | 'reSlLazyId' | 'reTgtLazyId'>,
+  closedLazyId: string | null | undefined,
+  trigger: FocusReentryTrigger,
+): string | null {
+  const legs = row.lazyLegs ?? [];
+  let id = '';
+  if (closedLazyId) {
+    const cur = legs.find(l => l.id === closedLazyId);
+    id = (trigger === 'sl' ? cur?.onSl : cur?.onTgt) ?? '';
+  } else if (trigger === 'sl' ? row.reSlMode === 'lazy' : row.reTgtMode === 'lazy') {
+    id = (trigger === 'sl' ? row.reSlLazyId : row.reTgtLazyId) ?? '';
+  }
+  return id && legs.some(l => l.id === id) ? id : null;
+}
+
+/** Strike a Lazy Leg opens at, from the current ATM. CE: +steps = higher; PE: +steps = lower. */
+export function lazyLegStrike(lazy: Pick<FocusLazyLeg, 'leg' | 'otmSteps'>, atm: number, step: number): number {
+  const n = Math.trunc(Number(lazy.otmSteps) || 0);
+  return lazy.leg === 'CE' ? atm + n * step : atm - n * step;
 }
 
 // ── Account budget ───────────────────────────────────────────────────────────

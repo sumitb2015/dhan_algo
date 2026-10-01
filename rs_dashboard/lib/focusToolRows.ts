@@ -23,11 +23,12 @@ export type FocusRowMode = 'real' | 'sim';
  *               strike that just closed (CE up, PE down).
  *  - cost     — wait on the SAME strike until its premium returns to the
  *               closed leg's own entry, then re-sell there.
- *  - momentum — pick the strike the row resolves to now, note its premium,
- *               and re-sell once it has moved FocusRow.reMomentumPts points
- *               in FocusRow.reMomentumDir.
+ *  - momentum — pick the strike the row resolves to now, note its premium (or
+ *               the spot), and re-sell once it has moved as far as the LEG'S
+ *               Simple Momentum setting says (AlgoTest: needs it switched on).
+ *  - lazy     — open a Lazy Leg (FocusRow.lazyLegs) in the closed leg's place.
  */
-export type FocusReentryMode = 'off' | 'asap' | 'otm' | 'cost' | 'momentum';
+export type FocusReentryMode = 'off' | 'asap' | 'otm' | 'cost' | 'momentum' | 'lazy';
 export type FocusReentryTrigger = 'sl' | 'tgt';
 
 /**
@@ -37,6 +38,8 @@ export type FocusReentryTrigger = 'sl' | 'tgt';
  */
 export interface FocusPendingReentry {
   trigger: FocusReentryTrigger;
+  /** What the level is measured on. Missing = the strike's premium. */
+  src?: 'premium' | 'underlying';
   mode: 'cost' | 'momentum';
   strike: number;
   /** Whole lots to re-sell — what the closed leg held. */
@@ -145,6 +148,11 @@ export interface FocusRowFill {
    */
   ceCostStop?: boolean;
   peCostStop?: boolean;
+  /** The Lazy Leg (FocusLazyLeg.id) currently running in this slot; its SL / target replace the row's. */
+  ceLazyId?: string | null;
+  peLazyId?: string | null;
+  /** Lazy legs already opened this cycle — each fires at most once, so a chain can't loop. */
+  lazyUsed?: string[];
   /** Re-entries taken after a leg TARGET this cycle (SL ones are ceRolls/peRolls). */
   ceTgtReentries?: number;
   peTgtReentries?: number;
@@ -177,6 +185,28 @@ export interface FocusLegSimpleMom {
   src: 'premium' | 'underlying';
   unit: 'pts' | 'pct';
   dir: 'up' | 'down';
+}
+
+/**
+ * AlgoTest "Lazy Leg": a leg that stays dormant until another leg's SL or
+ * target closes it, then opens in that leg's place with its own strike, size,
+ * SL and target. Its own SL / target can in turn open the next lazy leg. Sell
+ * side only. It takes over the CE or PE slot, so that slot must be free when it
+ * fires (the leg that just closed frees it when the types match).
+ */
+export interface FocusLazyLeg {
+  id: string;
+  leg: 'CE' | 'PE';
+  /** Strikes from ATM: + OTM, − ITM, 0 ATM. */
+  otmSteps: number;
+  lots: number;
+  /** SL as % premium rise over entry (20 → exit at entry × 1.2). '' = none. */
+  slPct: string;
+  /** Target as % premium decay from entry. '' = none. */
+  tgtPct: string;
+  /** Lazy leg to open when this one's SL / target closes it. '' = none. */
+  onSl: string;
+  onTgt: string;
 }
 
 export interface FocusRow {
@@ -241,10 +271,11 @@ export interface FocusRow {
   /** Re-entry after a leg TARGET close — same modes. Missing = 'off'. */
   reTgtMode?: FocusReentryMode;
   reTgtMax?: number;
-  /** Momentum re-entry: points the new strike's premium must move. */
-  reMomentumPts?: string;
-  /** Momentum direction. Missing = 'down' (premium decaying — a seller's confirmation). */
-  reMomentumDir?: 'down' | 'up';
+  /** Lazy Leg to open when the leg's SL / target closes it (reSlMode / reTgtMode = 'lazy'). */
+  reSlLazyId?: string;
+  reTgtLazyId?: string;
+  /** AlgoTest Lazy Legs: up to 10 (MAX_LAZY_LEGS in focusToolRules), chainable through onSl / onTgt. */
+  lazyLegs?: FocusLazyLeg[];
   /**
    * 'HH:MM' IST. A stop/target hit at or after this time takes no re-entry,
    * and waiting (cost / momentum) re-entries are dropped. Blank = no cutoff
