@@ -14,7 +14,7 @@ import { readFileSync } from 'node:fs';
 import path from 'node:path';
 
 import {
-  evaluateEntry, evaluateEntryMomentum, reRangeWindow, overallSlConfig, nextOverallPeak, evaluateOverallExit, overallExitKind, evaluateOverallReentry, rangeBreakoutOn, rangePhase, rangeBreakoutHit, costStopApplies, runningLazyLeg, legSlMultiplier, legTarget, nextLazyLegId, lazyLegStrike, legHasOwnSl, simpleMomOn, simpleMomLevel, simpleMomHit, evaluateGlobalRisk, evaluateRowExit, legStopReason,
+  evaluateEntry, evaluateEntryMomentum, reRangeWindow, overallSlConfig, nextOverallPeak, evaluateOverallExit, overallExitKind, evaluateOverallReentry, rangeBreakoutOn, rangeBreakoutHit, costStopApplies, runningLazyLeg, legSlMultiplier, legTarget, nextLazyLegId, lazyLegStrike, legHasOwnSl, simpleMomOn, simpleMomLevel, simpleMomHit, evaluateGlobalRisk, evaluateRowExit, legStopReason,
   dteForExpiry, dteMatches, sidePremium, legsOf, legsFlat, rowOwnsLeg,
   stopPremium, legStopPremium, pairStopPremium, legOwnContracts,
   nextOpenedTs, isGhostDropProtected, GHOST_DROP_GRACE_MS,
@@ -22,6 +22,8 @@ import {
   legPinnedStrike, slRollStrike, evaluateReentry, costStopReason, legOwnEntry, DEFAULT_SL_ROLL_MAX,
   reentryWindowClosed, pendingReentryLevel, pendingReentryHit, legTargetReason, costReentryBasis, awaitingMomentumQuote, legTargetLevel,
   monitoringStopped, momentumReentryKind, legTrailSteps, legStopLevel, orbStopDistance, legTargetSpotLevel, MAX_LEG_REENTRIES,
+  resolveCriteriaStrike, closestPremiumStrike, absDelta100, legTargetDeltaLevel, ownedLegStop, legStopHit, rowQtyMultiplier, multipliedLots,
+  tradingDaysBack, tradingDte, dateForDte, rangeWindow, rangeWindowPhase, candleBucket, addMinutesHm,
   type RowLive, type PosRow, type WorkerHold,
 } from './focusToolRules.ts';
 import type { FocusRow } from './focusToolRows.ts';
@@ -701,10 +703,11 @@ test('range breakout rules', () => {
   assert.equal(rangeBreakoutOn(rb({ end: '09:16' }), '09:16'), false);   // empty range
   assert.equal(rangeBreakoutOn(rb({ end: '9:30' }), '09:16'), false);
   assert.equal(rangeBreakoutOn(undefined, '09:16'), false);
-  assert.equal(rangePhase('09:16', '09:30', '09:15'), 'before');
-  assert.equal(rangePhase('09:16', '09:30', '09:16'), 'tracking');
-  assert.equal(rangePhase('09:16', '09:30', '09:29'), 'tracking');
-  assert.equal(rangePhase('09:16', '09:30', '09:30'), 'ended');
+  const today = { startDate: '2026-10-01', start: '09:16', endDate: '2026-10-01', end: '09:30' };
+  assert.equal(rangeWindowPhase(today, '2026-10-01', '09:15'), 'before');
+  assert.equal(rangeWindowPhase(today, '2026-10-01', '09:16'), 'tracking');
+  assert.equal(rangeWindowPhase(today, '2026-10-01', '09:29'), 'tracking');
+  assert.equal(rangeWindowPhase(today, '2026-10-01', '09:30'), 'ended');
   // AlgoTest: after the range, "whenever the strike reaches" the high / low, take it
   const range = { high: 257.95, low: 180 };
   assert.equal(rangeBreakoutHit(rb(), range, 257.9), false);
@@ -938,4 +941,179 @@ test('ORB Range stop loss (doc numbers)', () => {
   const inst = held({ ceOrbSl: orbSl, fill: { ceStrike: 1, peStrike: 1, ceQty: 75, peQty: 0, ceEntry: 258, ts: '',
     ceOrb: { high: 257.95, low: 220, side: 'high', on: 'instrument' } } });
   assert.ok(Math.abs((legStopLevel(inst, 'CE', liveAt(258))?.level ?? 0) - (257.95 + 37.95 + 20)) < 1e-9);
+});
+
+// ── Remaining AlgoTest gaps (2026-10-01, second pass) ───────────────────────
+
+test('strike criteria — the docs\' worked examples', () => {
+  const oc = {
+    '19800': { ce: 190, pe: 30, ceDelta: 74, peDelta: 26 },
+    '19900': { ce: 120, pe: 52, ceDelta: 62, peDelta: 38 },
+    '20000': { ce: 100, pe: 100, ceDelta: 50, peDelta: 50 },
+    '20100': { ce: 49, pe: 150, ceDelta: 36, peDelta: 64 },
+    '20200': { ce: 40, pe: 210, ceDelta: 28, peDelta: 72 },
+    '20300': { ce: 22, pe: 290, ceDelta: 22, peDelta: 78 },
+  };
+  const ctx = { atm: 20000, step: 100, oc };
+  // Closest Premium: target 50 between 49 and 52 → the nearer one; a tie goes to the higher premium.
+  assert.equal(closestPremiumStrike({ a: { ce: 49, pe: 0 }, b: { ce: 52, pe: 0 } } as never, 'CE', 50), null); // non-numeric keys skipped
+  assert.equal(closestPremiumStrike({ '1': { ce: 49, pe: 0 }, '2': { ce: 52, pe: 0 } }, 'CE', 50), 1);
+  assert.equal(closestPremiumStrike({ '1': { ce: 48, pe: 0 }, '2': { ce: 52, pe: 0 } }, 'CE', 50), 2);
+  // Premium >= 50 between 49 and 52 → 52 (the 19900 PE).
+  assert.equal(resolveCriteriaStrike('PREM_GTE', 'PE', { a: '50', b: '' }, ctx), 19900);
+  // Premium Range 40–80: 40 and 49 qualify; a sell takes the highest → 49 (the 20100 CE).
+  assert.equal(resolveCriteriaStrike('PREM_RANGE', 'CE', { a: '40', b: '80' }, ctx), 20100);
+  // Straddle Width: ATM 20000, straddle 200, +0.5 → 20100; −1 → 19800.
+  assert.equal(resolveCriteriaStrike('STRADDLE_WIDTH', 'CE', { a: '0.5', b: '' }, ctx), 20100);
+  assert.equal(resolveCriteriaStrike('STRADDLE_WIDTH', 'PE', { a: '-1', b: '' }, ctx), 19800);
+  // % of ATM: −1 → 19800, +1 → 20200.
+  assert.equal(resolveCriteriaStrike('PCT_ATM', 'PE', { a: '-1', b: '' }, ctx), 19800);
+  assert.equal(resolveCriteriaStrike('PCT_ATM', 'CE', { a: '1', b: '' }, ctx), 20200);
+  // ATM Straddle Premium %: 20% of 200 = 40 → the 20200 CE.
+  assert.equal(resolveCriteriaStrike('ATM_PREM_PCT', 'CE', { a: '20', b: '' }, ctx), 20200);
+  // Closest Delta 50 → ATM; Delta Range 20–40 sell → highest inside (36 → 20100 CE); 45–55 with none → skipped.
+  assert.equal(resolveCriteriaStrike('DELTA', 'CE', { a: '30', b: '' }, ctx), 20200);
+  assert.equal(resolveCriteriaStrike('DELTA_RANGE', 'CE', { a: '20', b: '40' }, ctx), 20100);
+  assert.equal(resolveCriteriaStrike('DELTA_RANGE', 'CE', { a: '40', b: '45' }, ctx), null);
+  // Synthetic Future = ATM + CE − PE = 20000 at ATM here; +1 step → 20100.
+  assert.equal(resolveCriteriaStrike('SYNTH_FUT', 'CE', { a: '1', b: '' }, ctx), 20100);
+  assert.equal(resolveCriteriaStrike('EXACT', 'PE', { a: '20100', b: '' }, ctx), 20100);
+  // Only strikes the chain lists: an Exact Strike it does not carry, or no chain, resolves to nothing
+  // (never a contract that does not exist — that made the entry retry every second).
+  assert.equal(resolveCriteriaStrike('EXACT', 'PE', { a: '23450', b: '' }, ctx), null);
+  assert.equal(resolveCriteriaStrike('PCT_ATM', 'CE', { a: '1', b: '' }, { ...ctx, oc: undefined }), null);
+  // Arithmetic rules snap only to a listed strike within one step: ATM + 5% = 21000 is beyond the
+  // chain (it ends at 20300), so nothing — never the edge strike.
+  assert.equal(resolveCriteriaStrike('PCT_ATM', 'CE', { a: '5', b: '' }, ctx), null);
+  assert.equal(resolveCriteriaStrike('PCT_ATM', 'CE', { a: '1.5', b: '' }, ctx), 20300);   // 20300 itself
+  // Round Strikes: NIFTY ATM 24150, interval 100 → OTM1/2/3 CE = 24200 / 24300 / 24400; PE OTM1 = 24100.
+  const listed = Object.fromEntries([24000, 24050, 24100, 24150, 24200, 24250, 24300, 24350, 24400].map(k => [String(k), { ce: 1, pe: 1 }]));
+  const r = { atm: 24150, step: 50, oc: listed, roundInterval: 100 };
+  assert.equal(resolveCriteriaStrike('ROUND', 'CE', { a: '4', b: '' }, r), null);   // 24500 is not listed
+  assert.equal(resolveCriteriaStrike('ROUND', 'CE', { a: '1', b: '' }, r), 24200);
+  assert.equal(resolveCriteriaStrike('ROUND', 'CE', { a: '3', b: '' }, r), 24400);
+  assert.equal(resolveCriteriaStrike('ROUND', 'PE', { a: '1', b: '' }, r), 24100);
+  assert.equal(resolveCriteriaStrike('ROUND', 'CE', { a: '-1', b: '' }, r), 24100);
+  assert.equal(resolveCriteriaStrike('ROUND', 'CE', { a: '0', b: '' }, r), 24150);
+  // Premium <= (Focus Tool's old ₹ rule) keeps the target as a ceiling.
+  assert.equal(resolveCriteriaStrike('PREM_LTE', 'CE', { a: '50', b: '' }, ctx), 20100);
+});
+
+test('chain delta → AlgoTest absolute 0–100', () => {
+  assert.equal(absDelta100(0.25), 25);
+  assert.equal(absDelta100(-0.4), 40);
+  assert.equal(absDelta100(0), null);
+  assert.equal(absDelta100(undefined), null);
+});
+
+test('delta SL / target / trail (doc numbers, sell side)', () => {
+  const liveD = (d: number) => ({ ...live({ ceLtp: 100, peLtp: 100, ceQty: -75, peQty: -75, ceEntry: 100, peEntry: 100 }), ceDelta: d, peDelta: d });
+  const t = { enabled: true, unit: 'delta' as const, every: '5', by: '5' };
+  const r = held({ ceSlRule: { enabled: true, basis: 'delta', value: '15' }, ceTrailSl: t,
+    fill: { ceStrike: 1, peStrike: 1, ceQty: 75, peQty: 0, ceEntry: 100, ceDeltaEntry: 25, ts: '' } });
+  // Entry delta 25, SL 15 → stop at 40; trail 5-5: delta 20 → 35, 15 → 30, 10 → 25.
+  assert.equal(legStopLevel(r, 'CE', liveD(25))?.level, 40);
+  assert.equal(legStopLevel(r, 'CE', liveD(20))?.level, 35);
+  assert.equal(legStopLevel(r, 'CE', liveD(15))?.level, 30);
+  assert.equal(legStopLevel(r, 'CE', liveD(10))?.level, 25);
+  assert.equal(ownedLegStop(r, 'CE', liveD(10))?.trailed, 3);
+  assert.match(legStopReason(r, 'CE', liveD(40)) ?? '', /CE SL 15 delta hit \(delta 40.00/);
+  // Target: entry delta 25, 15 → 10.
+  assert.equal(legTargetDeltaLevel(25, '15'), 10);
+  const tr = held({ ceTgtPct: '15', legTgtUnit: 'delta', fill: { ceStrike: 1, peStrike: 1, ceQty: 75, peQty: 0, ceEntry: 100, ceDeltaEntry: 25, ts: '' } });
+  assert.equal(legTargetReason(tr, 'CE', liveD(11)), null);
+  assert.match(legTargetReason(tr, 'CE', liveD(10)) ?? '', /CE target 15 delta hit/);
+  // No delta in the chain → no delta stop (falls back to SL ×).
+  const nod = held({ ceSlRule: { enabled: true, basis: 'delta', value: '15' }, fill: { ceStrike: 1, peStrike: 1, ceQty: 75, peQty: 0, ceEntry: 100, ts: '' } });
+  assert.equal(legStopLevel(nod, 'CE', liveD(30))?.kind, 'mult');
+});
+
+test('lazy leg: its own SL type replaces the row\'s', () => {
+  const lazyRowPts = lazyRow({ lazyLegs: [LAZY({ slBasis: 'pts', slPct: '30', tgtUnit: 'pts', tgtPct: '20' })],
+    fill: { ceQty: 75, ceStrike: 24000, ceLazyId: 'L1', ceEntry: 100, ts: '' } });
+  const lv = live({ ceLtp: 129, peLtp: 0, ceQty: -75, peQty: 0, ceEntry: 100, peEntry: 0 });
+  assert.equal(legStopLevel(lazyRowPts, 'CE', lv)?.level, 130);
+  assert.equal(Number(legSlMultiplier(lazyRowPts, 'CE')) > 1, false);
+  assert.match(legTargetReason(lazyRowPts, 'CE', live({ ceLtp: 80, peLtp: 0, ceQty: -75, peQty: 0, ceEntry: 100, peEntry: 0 })) ?? '', /CE target 20 pts hit/);
+});
+
+test('quantity multiplier scales lots and MTM limits, not % ones', () => {
+  assert.equal(rowQtyMultiplier({}), 1);
+  assert.equal(rowQtyMultiplier({ qtyMultiplier: 3 }), 3);
+  assert.equal(rowQtyMultiplier({ qtyMultiplier: 0 }), 1);
+  assert.equal(multipliedLots({ qtyMultiplier: 3 }, 2), 6);
+  const c = { ceLtp: 100, peLtp: 100, ceQty: -75, peQty: -75, ceEntry: 100, peEntry: 100 };
+  const base = { side: 'BOTH', slRupees: '5000', fill: { ceStrike: 1, peStrike: 1, ceQty: 75, peQty: 75, ts: '' } };
+  assert.match(evaluateRowExit(base as never, { ...live(c), pnl: -5000 }, 0) ?? '', /SL ₹5000 hit/);
+  assert.equal(evaluateRowExit({ ...base, qtyMultiplier: 2 } as never, { ...live(c), pnl: -5000 }, 0), null);
+  assert.match(evaluateRowExit({ ...base, qtyMultiplier: 2 } as never, { ...live(c), pnl: -10000 }, 0) ?? '', /SL ₹10000 hit/);
+  // Overall Target MTM 5000 × 2.
+  const tgt = { ...base, slRupees: '', overallTarget: { enabled: true, mode: 'mtm', value: '5000' }, qtyMultiplier: 2 };
+  assert.equal(evaluateOverallExit(tgt as never, { ...live(c), pnl: 6000 }, { pnl: 6000, pts: 0 }), null);
+  assert.equal(evaluateOverallExit(tgt as never, { ...live(c), pnl: 10000 }, { pnl: 10000, pts: 0 })?.kind, 'target');
+});
+
+test('broker-level trailing kinds (doc numbers)', () => {
+  const cfg = { riskEnabled: false, targetRupees: '', stopRupees: '5000', trailEnabled: true, triggerRupees: '10000', lockRupees: '5000' };
+  const ctx = (pnl: number, peak: number) => ({ totalPnl: pnl, peakPnl: peak, lockFloor: null });
+  // Trail SL 5000, 500 per 500: profit 1500 → SL 3500; exit at −3500.
+  const ts = { ...cfg, trailKind: 'trailSl' as const, trailEvery: '500', trailBy: '500' };
+  assert.equal(evaluateGlobalRisk(ts, ctx(-3400, 1500)).exitAll, false);
+  assert.equal(evaluateGlobalRisk(ts, ctx(-3500, 1500)).exitAll, true);
+  // Lock: reach 10000 lock 5000.
+  const lk = { ...cfg, trailKind: 'lock' as const };
+  assert.equal(evaluateGlobalRisk(lk, ctx(5000, 9000)).exitAll, false);   // never reached
+  assert.equal(evaluateGlobalRisk(lk, ctx(5000, 10000)).exitAll, true);
+  // Lock and Trail: +500 per 500 → at 11000 the lock is 6000.
+  const lt = { ...cfg, trailKind: 'lockTrail' as const, trailEvery: '500', trailBy: '500' };
+  assert.equal(evaluateGlobalRisk(lt, ctx(6100, 11000)).exitAll, false);
+  assert.equal(evaluateGlobalRisk(lt, ctx(6000, 11000)).lockFloor, 6000);
+  assert.equal(evaluateGlobalRisk(lt, ctx(6000, 11000)).exitAll, true);
+});
+
+test('BTST / Positional range windows (trading days, weekdays only)', () => {
+  // 2026-10-01 is a Thursday; the previous trading day is Wednesday 2026-09-30, Monday's is the Friday before.
+  assert.equal(tradingDaysBack('2026-10-01', 1), '2026-09-30');
+  assert.equal(tradingDaysBack('2026-10-05', 1), '2026-10-02');
+  assert.equal(tradingDte('2026-10-01', '2026-10-06'), 3);   // Thu → Tue: Fri, Mon, Tue
+  assert.equal(tradingDte('2026-10-06', '2026-10-06'), 0);
+  assert.equal(dateForDte('2026-10-06', 1), '2026-10-05');
+  // BTST: start 10:30 yesterday, End "Tomorrow" 09:30 = today.
+  const btst = rangeWindow({ enabled: true, end: '09:30', side: 'high', on: 'underlying', kind: 'btst' }, '10:30', '2026-10-01', '2026-10-06');
+  assert.deepEqual(btst, { startDate: '2026-09-30', start: '10:30', endDate: '2026-10-01', end: '09:30' });
+  assert.equal(rangeWindowPhase(btst!, '2026-10-01', '09:29'), 'tracking');
+  assert.equal(rangeWindowPhase(btst!, '2026-10-01', '09:30'), 'ended');
+  // Positional: Entry DTE 1 10:35 → End DTE 0 09:35.
+  const pos = rangeWindow({ enabled: true, end: '09:35', side: 'high', on: 'underlying', kind: 'positional', startDte: 1, endDte: 0 }, '10:35', '2026-10-05', '2026-10-06');
+  assert.deepEqual(pos, { startDate: '2026-10-05', start: '10:35', endDate: '2026-10-06', end: '09:35' });
+  assert.equal(rangeWindowPhase(pos!, '2026-10-05', '10:00'), 'before');
+  assert.equal(rangeWindowPhase(pos!, '2026-10-05', '11:00'), 'tracking');
+  assert.equal(rangeWindowPhase(pos!, '2026-10-07', '11:00'), 'over');
+  // Intraday is unchanged; a bad positional order is refused.
+  assert.deepEqual(rangeWindow({ enabled: true, end: '09:30', side: 'high', on: 'instrument' }, '09:16', '2026-10-01', ''),
+    { startDate: '2026-10-01', start: '09:16', endDate: '2026-10-01', end: '09:30' });
+  assert.equal(rangeWindow({ enabled: true, end: '09:35', side: 'high', on: 'underlying', kind: 'positional', startDte: 0, endDte: 1 }, '10:35', '2026-10-05', '2026-10-06'), null);
+  assert.equal(rangeBreakoutOn({ enabled: true, end: '09:30', side: 'high', on: 'underlying', kind: 'btst' }, '10:30'), true);
+});
+
+test('addMinutesHm', () => {
+  assert.equal(addMinutesHm('09:20', 60), '10:20');
+  assert.equal(addMinutesHm('23:59', 2), null);
+  assert.equal(addMinutesHm('9:5', 1), null);
+});
+
+test('candle bucket for Overall Momentum Candle Close', () => {
+  assert.equal(candleBucket('09:37', 5), '09:35');
+  assert.equal(candleBucket('09:37', 1), '09:37');
+  assert.equal(candleBucket('10:59', 15), '10:45');
+});
+
+test('review fixes: one stop object per leg; ORB stop comes from the stamp the open wrote', () => {
+  // ownedLegStop + legStopHit = legStopReason, computed once.
+  const r = held({ ceSlRule: { enabled: true, basis: 'pts', value: '30' } });
+  const lv = liveAt(230);
+  assert.equal(legStopHit(ownedLegStop(r, 'CE', lv), 'CE', lv), legStopReason(r, 'CE', lv));
+  assert.match(legStopHit(ownedLegStop(r, 'CE', lv), 'CE', lv) ?? '', /CE SL 30 pts hit/);
+  // Not owned → no stop at all.
+  assert.equal(ownedLegStop(held({ fill: { ceStrike: 1, peStrike: 1, ceQty: 0, peQty: 0, ts: '' } }), 'CE', lv), null);
 });

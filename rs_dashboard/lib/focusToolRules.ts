@@ -23,7 +23,7 @@
 
 import type {
   FocusRow, FocusDte, FocusRowStatus, FocusReentryMode, FocusReentryTrigger, FocusPendingReentry, FocusLegSimpleMom, FocusLazyLeg, FocusLegRangeBreakout, FocusOverallMode,
-  FocusLegSlRule, FocusLegTrailSl, FocusLegOrbSl, FocusOrbStamp,
+  FocusLegSlRule, FocusLegTrailSl, FocusLegOrbSl, FocusOrbStamp, FocusStrikeCriteria, FocusLegCrit,
 } from '@/lib/focusToolRows';
 
 // ── Constants ────────────────────────────────────────────────────────────────
@@ -176,6 +176,9 @@ export interface RowLive {
    *  until fetched. */
   vwap1m: number | null;
   vwapClose1m: number | null;
+  /** |Delta| × 100 of the row's CE / PE strike from the polled chain; null when the chain has none. */
+  ceDelta?: number | null;
+  peDelta?: number | null;
 }
 
 export const EMPTY_ROW_LIVE: RowLive = {
@@ -350,16 +353,46 @@ export function legStopReason(
   // measure the stop from a broker average that blends in the earlier, closed
   // trade on that security.
   const ltp = (leg === 'CE' ? live.ltpCe : live.ltpPe) ?? 0;
-  const stop = legStopLevel(row, leg, live, ltp);
+  return legStopHit(legStopLevel(row, leg, live, ltp), leg, live, spot);
+}
+
+/**
+ * The stop level in force on a leg this row owns and holds, or null. The one
+ * call the exit watcher makes per leg per tick: it both persists `trailed` and
+ * passes the same object to legStopHit, so the level is computed once.
+ */
+export function ownedLegStop(row: LegStopRow, leg: 'CE' | 'PE', live: RowLive, workerHold?: WorkerHold): LegStopLevel | null {
+  if (!rowOwnsLeg(row, leg, workerHold)) return null;
+  const pos = leg === 'CE' ? live.cePosition : live.pePosition;
+  if (Number(pos?.netQty ?? 0) === 0) return null;
+  return legStopLevel(row, leg, live, (leg === 'CE' ? live.ltpCe : live.ltpPe) ?? 0);
+}
+
+/** Has this stop been hit? The breach reason, or null. Spot / delta / premium as the stop says. */
+export function legStopHit(stop: LegStopLevel | null, leg: 'CE' | 'PE', live: RowLive, spot = 0): string | null {
   if (!stop) return null;
-  const now = stop.on === 'spot' ? spot : ltp;
+  const ltp = (leg === 'CE' ? live.ltpCe : live.ltpPe) ?? 0;
+  const now = stop.on === 'spot' ? spot : stop.on === 'delta' ? (legDeltaNow(leg, live) ?? 0) : ltp;
   if (!(now > 0)) return null;
   const hit = stop.dir === 'up' ? now >= stop.level : now <= stop.level;
   if (!hit) return null;
   if ((stop.kind === 'mult' || stop.kind === 'lazy') && !stop.trailed) {
     return `${leg} SL ×${stop.mult} hit (premium ${now.toFixed(2)} vs entry ${stop.entry.toFixed(2)})`;
   }
-  return `${leg} ${stop.label} hit (${stop.on === 'spot' ? 'spot' : 'premium'} ${now.toFixed(2)} ${stop.dir === 'up' ? '≥' : '≤'} ${stop.level.toFixed(2)})`;
+  return `${leg} ${stop.label} hit (${stop.on === 'spot' ? 'spot' : stop.on === 'delta' ? 'delta' : 'premium'} ${now.toFixed(2)} ${stop.dir === 'up' ? '≥' : '≤'} ${stop.level.toFixed(2)})`;
+}
+
+/** |Delta| × 100 of the leg's strike right now, or null when the chain carried none. */
+export function legDeltaNow(leg: 'CE' | 'PE', live: RowLive): number | null {
+  const d = leg === 'CE' ? live.ceDelta : live.peDelta;
+  return d != null && Number.isFinite(d) && d > 0 ? d : null;
+}
+
+/** Dhan chain delta (−1..1, or 0 when it has none) → AlgoTest's absolute 0–100; null when missing. */
+export function absDelta100(raw: unknown): number | null {
+  const d = Math.abs(Number(raw));
+  if (!Number.isFinite(d) || !(d > 0)) return null;
+  return Math.round(d * 100 * 100) / 100;
 }
 
 /** Row fields every leg-stop rule reads. */
@@ -369,9 +402,9 @@ export type LegStopRow = Pick<FocusRow, 'ceSlMultiplier' | 'peSlMultiplier' | 'f
 
 export interface LegStopLevel {
   /** Which stop is in force. */
-  kind: 'mult' | 'lazy' | 'pts' | 'uPts' | 'uPct' | 'orb';
-  /** What the level is compared with: the leg's premium or the index spot. */
-  on: 'premium' | 'spot';
+  kind: 'mult' | 'lazy' | 'pts' | 'uPts' | 'uPct' | 'delta' | 'orb';
+  /** What the level is compared with: the leg's premium, the index spot, or its |delta| × 100. */
+  on: 'premium' | 'spot' | 'delta';
   level: number;
   /** 'up' fires at now ≥ level, 'down' at now ≤ level. */
   dir: 'up' | 'down';
@@ -388,7 +421,15 @@ export interface LegStopLevel {
 /** A leg's alternative SL basis, when it is switched on with a value. */
 export function legSlRuleOn(rule: FocusLegSlRule | null | undefined): rule is FocusLegSlRule {
   return !!rule && rule.enabled && Number(rule.value) > 0
-    && (rule.basis === 'pts' || rule.basis === 'uPts' || rule.basis === 'uPct');
+    && (rule.basis === 'pts' || rule.basis === 'uPts' || rule.basis === 'uPct' || rule.basis === 'delta');
+}
+
+/** The SL basis a running Lazy Leg uses, as a rule; null for its plain % stop (handled as SL ×). */
+function lazySlRule(lazy: FocusLazyLeg): FocusLegSlRule | null {
+  const b = lazy.slBasis ?? 'pct';
+  if (b === 'pct') return null;
+  const r: FocusLegSlRule = { enabled: true, basis: b, value: lazy.slPct };
+  return legSlRuleOn(r) ? r : null;
 }
 
 /** A leg's Trail SL, when it is switched on with both amounts. */
@@ -404,6 +445,7 @@ export function legTrailOn(t: FocusLegTrailSl | null | undefined): t is FocusLeg
  */
 export function legTrailSteps(t: FocusLegTrailSl | null | undefined, entry: number, ltp: number): number {
   if (!legTrailOn(t) || !(entry > 0) || !(ltp > 0)) return 0;
+  // 'delta': entry / ltp are the leg's |delta| × 100 at entry and now.
   const every = t.unit === 'pct' ? entry * Number(t.every) / 100 : Number(t.every);
   if (!(every > 0)) return 0;
   return Math.max(0, Math.floor((entry - ltp) / every + 1e-9));
@@ -455,11 +497,18 @@ export function legStopLevel(row: LegStopRow, leg: 'CE' | 'PE', live: RowLive, l
   }
 
   let base: LegStopLevel | null = null;
-  const rule = leg === 'CE' ? row.ceSlRule : row.peSlRule;
-  if (!lazy && legSlRuleOn(rule)) {
+  // A running Lazy Leg's own SL type replaces the row's.
+  const rule = lazy ? lazySlRule(lazy) : (leg === 'CE' ? row.ceSlRule : row.peSlRule);
+  if (legSlRuleOn(rule)) {
     const v = Number(rule.value);
     if (rule.basis === 'pts') {
       if (entry > 0) base = { kind: 'pts', on: 'premium', level: entry + v, dir: 'up', entry, trailed: 0, label: `SL ${v} pts` };
+    } else if (rule.basis === 'delta') {
+      // AlgoTest Delta stop on a SELL: entry delta 25, SL 15 → exit at delta 40.
+      const de = Number(leg === 'CE' ? f?.ceDeltaEntry : f?.peDeltaEntry) || 0;
+      if (de > 0) {
+        base = { kind: 'delta', on: 'delta', level: Math.min(100, de + v), dir: 'up', entry, trailed: 0, label: `SL ${v} delta` };
+      }
     } else {
       const se = Number(leg === 'CE' ? f?.ceSpotEntry : f?.peSpotEntry) || 0;
       if (se > 0) {
@@ -479,11 +528,20 @@ export function legStopLevel(row: LegStopRow, leg: 'CE' | 'PE', live: RowLive, l
   }
 
   const trail = leg === 'CE' ? row.ceTrailSl : row.peTrailSl;
-  if (!lazy && base.on === 'premium' && legTrailOn(trail)) {
+  if (!lazy && legTrailOn(trail)) {
     const saved = Number(leg === 'CE' ? f?.ceTrailSteps : f?.peTrailSteps) || 0;
-    const steps = Math.max(saved, legTrailSteps(trail, entry, ltp));
-    if (steps > 0) {
-      base = { ...base, level: base.level - steps * legTrailStepSize(trail, entry), trailed: steps, label: `${base.label} trailed ${steps}×` };
+    if (base.on === 'premium' && trail.unit !== 'delta') {
+      const steps = Math.max(saved, legTrailSteps(trail, entry, ltp));
+      if (steps > 0) {
+        base = { ...base, level: base.level - steps * legTrailStepSize(trail, entry), trailed: steps, label: `${base.label} trailed ${steps}×` };
+      }
+    } else if (base.on === 'delta' && trail.unit === 'delta') {
+      // AlgoTest (sell): entry delta 25, stop 40, trail 5-5 → delta 20 moves it to 35.
+      const de = Number(leg === 'CE' ? f?.ceDeltaEntry : f?.peDeltaEntry) || 0;
+      const steps = Math.max(saved, legTrailSteps(trail, de, legDeltaNow(leg, live) ?? 0));
+      if (steps > 0) {
+        base = { ...base, level: base.level - steps * Number(trail.by), trailed: steps, label: `${base.label} trailed ${steps}×` };
+      }
     }
   }
   return base;
@@ -549,7 +607,8 @@ export function legOwnEntry(
 /** Does this leg carry a stop loss of its own (SL ×, another SL basis, or an ORB Range stop)? */
 export function legHasOwnSl(row: LegStopRow, leg: 'CE' | 'PE'): boolean {
   if (Number(legSlMultiplier(row, leg)) > 1) return true;
-  if (runningLazyLeg(row, leg)) return false;
+  const lazy = runningLazyLeg(row, leg);
+  if (lazy) return lazySlRule(lazy) != null;
   if (legSlRuleOn(leg === 'CE' ? row.ceSlRule : row.peSlRule)) return true;
   return !!(leg === 'CE' ? row.ceOrbSl : row.peOrbSl)?.enabled
     && !!(leg === 'CE' ? row.ceRangeBreakout : row.peRangeBreakout)?.enabled;
@@ -779,7 +838,7 @@ export function legTargetLevel(
 ): number | null {
   const v = Number(value);
   if (!(v > 0) || !(entry > 0)) return null;
-  if (unit === 'uPts' || unit === 'uPct') return null;   // on the index — legTargetSpotLevel
+  if (unit === 'uPts' || unit === 'uPct' || unit === 'delta') return null;   // index / delta — not a premium level
   const level = unit === 'pts' ? entry - v : entry * (1 - v / 100);
   return level > 0 ? level : null;
 }
@@ -802,7 +861,16 @@ export function legTargetSpotLevel(
 
 /** Short label for a leg target unit. */
 export function legTgtUnitLabel(unit: FocusRow['legTgtUnit']): string {
-  return unit === 'pts' ? 'pts' : unit === 'uPts' ? 'idx pts' : unit === 'uPct' ? 'idx %' : '%';
+  return unit === 'pts' ? 'pts' : unit === 'uPts' ? 'idx pts' : unit === 'uPct' ? 'idx %' : unit === 'delta' ? 'Δ' : '%';
+}
+
+/** AlgoTest Delta target on a SELL: entry delta 25, target 15 → exit at delta 10. Null when off or unknown. */
+export function legTargetDeltaLevel(deltaEntry: number | null | undefined, value: string | number | undefined): number | null {
+  const v = Number(value);
+  const de = Number(deltaEntry) || 0;
+  if (!(v > 0) || !(de > 0)) return null;
+  const lvl = de - v;
+  return lvl > 0 ? lvl : null;
 }
 
 /**
@@ -819,6 +887,12 @@ export function legTargetReason(
 ): string | null {
   if (legOwnContracts(row, leg, live, workerHold) <= 0) return null;
   const { value, unit } = legTarget(row, leg);
+  if (unit === 'delta') {
+    const lvl = legTargetDeltaLevel(leg === 'CE' ? row.fill?.ceDeltaEntry : row.fill?.peDeltaEntry, value);
+    const d = legDeltaNow(leg, live);
+    if (lvl == null || d == null) return null;
+    return d <= lvl ? `${leg} target ${Number(value)} delta hit (delta ${d.toFixed(2)} ≤ ${lvl.toFixed(2)})` : null;
+  }
   if (unit === 'uPts' || unit === 'uPct') {
     const lvl = legTargetSpotLevel(leg, leg === 'CE' ? row.fill?.ceSpotEntry : row.fill?.peSpotEntry, value, unit);
     if (lvl == null || !(spot > 0)) return null;
@@ -991,7 +1065,8 @@ export function evaluateRowExit(
     }
   }
 
-  const slRs = Number(row.slRupees);
+  // MTM limits scale with the Quantity Multiplier (AlgoTest execution setting).
+  const slRs = Number(row.slRupees) * rowQtyMultiplier(row);
   if (row.slRupees && Number.isFinite(slRs) && slRs > 0 && live.pnl <= -slRs) {
     return `SL ₹${slRs} hit (P&L ₹${live.pnl.toFixed(0)})`;
   }
@@ -1150,17 +1225,28 @@ export function simpleMomHit(m: FocusLegSimpleMom | null | undefined, start: num
 
 const HM_RE = /^([01]\d|2[0-3]):[0-5]\d$/;
 
-/** On, and its range is valid: an 'HH:MM' end strictly after the row's entry time. */
+/** On, and its range is valid: an 'HH:MM' end strictly after the row's entry time (intraday). */
 export function rangeBreakoutOn(
   rb: FocusLegRangeBreakout | null | undefined, entryTime: string,
 ): rb is FocusLegRangeBreakout {
-  return !!rb && rb.enabled && HM_RE.test(rb.end) && HM_RE.test(entryTime) && rb.end > entryTime;
+  if (!rb || !rb.enabled || !HM_RE.test(rb.end) || !HM_RE.test(entryTime)) return false;
+  const kind = rb.kind ?? 'intraday';
+  // BTST ends on the next trading day, so its End may be before the entry time.
+  if (kind === 'btst') return true;
+  if (kind === 'positional') {
+    const sd = Math.trunc(Number(rb.startDte));
+    const ed = Math.trunc(Number(rb.endDte));
+    return sd >= 0 && ed >= 0 && ed <= sd && (sd > ed || rb.end > entryTime);
+  }
+  return rb.end > entryTime;
 }
 
-/** Where the clock stands against the range: before it starts, being tracked, or over. */
-export function rangePhase(entryTime: string, end: string, nowHm: string): 'before' | 'tracking' | 'ended' {
-  if (nowHm < entryTime) return 'before';
-  return nowHm < end ? 'tracking' : 'ended';
+/** 'HH:MM' plus `minutes`, as 'HH:MM' — null when malformed or it would pass midnight. */
+export function addMinutesHm(hm: string, minutes: number): string | null {
+  if (!HM_RE.test(hm) || !Number.isFinite(minutes)) return null;
+  const t = Number(hm.slice(0, 2)) * 60 + Number(hm.slice(3)) + Math.trunc(minutes);
+  if (t < 0 || t >= 24 * 60) return null;
+  return `${String(Math.floor(t / 60)).padStart(2, '0')}:${String(t % 60).padStart(2, '0')}`;
 }
 
 /**
@@ -1187,10 +1273,8 @@ export function reRangeWindow(
 ): { start: string; end: string } | null {
   if (!HM_RE.test(entryTime) || !HM_RE.test(end) || !HM_RE.test(nowHm) || end <= entryTime) return null;
   const min = (hm: string) => Number(hm.slice(0, 2)) * 60 + Number(hm.slice(3));
-  const endMin = min(nowHm) + (min(end) - min(entryTime));
-  if (endMin >= 24 * 60) return null;
-  const hm = (m: number) => `${String(Math.floor(m / 60)).padStart(2, '0')}:${String(m % 60).padStart(2, '0')}`;
-  return { start: nowHm, end: hm(endMin) };
+  const newEnd = addMinutesHm(nowHm, min(end) - min(entryTime));
+  return newEnd ? { start: nowHm, end: newEnd } : null;
 }
 
 // ── Lazy legs ───────────────────────────────────────────────────────────────
@@ -1212,7 +1296,7 @@ export function legSlMultiplier(
   row: Pick<FocusRow, 'ceSlMultiplier' | 'peSlMultiplier' | 'fill' | 'lazyLegs'>, leg: 'CE' | 'PE',
 ): string | number | undefined {
   const lazy = runningLazyLeg(row, leg);
-  if (lazy) return Number(lazy.slPct) > 0 ? 1 + Number(lazy.slPct) / 100 : undefined;
+  if (lazy) return (lazy.slBasis ?? 'pct') === 'pct' && Number(lazy.slPct) > 0 ? 1 + Number(lazy.slPct) / 100 : undefined;
   return leg === 'CE' ? row.ceSlMultiplier : row.peSlMultiplier;
 }
 
@@ -1221,7 +1305,7 @@ export function legTarget(
   row: Pick<FocusRow, 'ceTgtPct' | 'peTgtPct' | 'legTgtUnit' | 'fill' | 'lazyLegs'>, leg: 'CE' | 'PE',
 ): { value: string | undefined; unit: FocusRow['legTgtUnit'] } {
   const lazy = runningLazyLeg(row, leg);
-  if (lazy) return { value: lazy.tgtPct, unit: 'pct' };
+  if (lazy) return { value: lazy.tgtPct, unit: lazy.tgtUnit ?? 'pct' };
   return { value: leg === 'CE' ? row.ceTgtPct : row.peTgtPct, unit: row.legTgtUnit };
 }
 
@@ -1309,14 +1393,16 @@ export interface OverallExit { kind: 'sl' | 'target'; reason: string }
  * Trail and lock exits count as 'sl' for re-entry.
  */
 export function evaluateOverallExit(
-  row: Pick<FocusRow, 'overallTarget' | 'overallTrail' | 'slRupees' | 'slMultiplier' | 'side' | 'fill'>,
+  row: Pick<FocusRow, 'overallTarget' | 'overallTrail' | 'slRupees' | 'slMultiplier' | 'side' | 'fill'> & Partial<Pick<FocusRow, 'qtyMultiplier'>>,
   live: RowLive,
   peak: { pnl: number; pts: number },
   workerHold?: WorkerHold,
   lotSize?: number | null,
 ): OverallExit | null {
   const p = overallProgress(row, live, workerHold, lotSize);
-  const unitVal = (mode: FocusOverallMode, v: number) => (mode === 'mtm' ? v : v / 100 * p.entryPts);
+  // MTM amounts scale with the Quantity Multiplier; % of premium does not.
+  const qm = rowQtyMultiplier(row);
+  const unitVal = (mode: FocusOverallMode, v: number) => (mode === 'mtm' ? v * qm : v / 100 * p.entryPts);
   const profit = (mode: FocusOverallMode) => (mode === 'mtm' ? p.pnl : p.pts);
   const peakIn = (mode: FocusOverallMode) => (mode === 'mtm' ? peak.pnl : peak.pts);
 
@@ -1326,7 +1412,7 @@ export function evaluateOverallExit(
     const have = profit(t.mode);
     if (have != null && have >= unitVal(t.mode, tv) - OVERALL_EPS) {
       return { kind: 'target', reason: t.mode === 'mtm'
-        ? `Overall Target ₹${tv} reached (P&L ₹${p.pnl.toFixed(0)})`
+        ? `Overall Target ₹${tv * qm} reached (P&L ₹${p.pnl.toFixed(0)})`
         : `Overall Target ${tv}% of premium reached (${have.toFixed(2)} pts)` };
     }
   }
@@ -1349,10 +1435,10 @@ export function evaluateOverallExit(
     }
     return null;
   }
-  const reach = Number(tr.reach);
-  const lock = Number(tr.lock);
+  const reach = Number(tr.reach) * qm;
+  const lock = Number(tr.lock) * qm;
   if (!(reach > 0) || !(lock >= 0) || lock >= reach || !(peak.pnl >= reach)) return null;
-  const floor = lock + (tr.kind === 'lockTrail' && every > 0 && by > 0 ? Math.floor((peak.pnl - reach) / every) * by : 0);
+  const floor = lock + (tr.kind === 'lockTrail' && every > 0 && by > 0 ? Math.floor((peak.pnl - reach) / (every * qm)) * by * qm : 0);
   if (p.pnl <= floor + OVERALL_EPS) {
     return { kind: 'sl', reason: `Overall ${tr.kind === 'lockTrail' ? 'Lock and Trail' : 'Lock'} ₹${floor.toFixed(0)} hit (P&L ₹${p.pnl.toFixed(0)}, peak ₹${peak.pnl.toFixed(0)})` };
   }
@@ -1403,6 +1489,10 @@ export interface RiskConfig {
   trailEnabled: boolean;
   triggerRupees: string;
   lockRupees: string;
+  /** See FocusToolConfig.trailKind. Missing = 'peakGap'. */
+  trailKind?: 'peakGap' | 'lock' | 'lockTrail' | 'trailSl';
+  trailEvery?: string;
+  trailBy?: string;
 }
 
 export interface GlobalRiskContext {
@@ -1457,6 +1547,36 @@ export function evaluateGlobalRisk(cfg: RiskConfig, ctx: GlobalRiskContext): Glo
     }
   }
 
+  const kind = cfg.trailKind ?? 'peakGap';
+  if (cfg.trailEnabled && kind !== 'peakGap') {
+    // AlgoTest broker-level trailing options — the same rules as the per-row
+    // Overall trails, on the whole book's P&L.
+    const every = num(cfg.trailEvery) ?? 0;
+    const by = num(cfg.trailBy) ?? 0;
+    if (kind === 'trailSl') {
+      const stop = num(cfg.stopRupees);
+      if (stop == null || !(stop > 0) || !(every > 0) || !(by > 0)) return { exitAll: false, reason: '', lockFloor, trailState: 'INACTIVE' };
+      const n = Math.floor(Math.max(0, ctx.peakPnl) / every);
+      if (!(n > 0)) return { exitAll: false, reason: '', lockFloor, trailState: 'DORMANT' };
+      const floor = -(stop - n * by);
+      if (ctx.totalPnl <= floor) {
+        return { exitAll: true, reason: `Trail SL ₹${floor.toFixed(0)} hit (₹${ctx.totalPnl.toFixed(0)}, peak ₹${ctx.peakPnl.toFixed(0)})`, lockFloor: floor, trailState: 'ARMED' };
+      }
+      return { exitAll: false, reason: '', lockFloor: floor, trailState: 'ARMED' };
+    }
+    const reach = num(cfg.triggerRupees);
+    const lock = num(cfg.lockRupees);
+    if (reach == null || !(reach > 0) || lock == null || lock < 0 || lock >= reach) {
+      return { exitAll: false, reason: '', lockFloor, trailState: 'INACTIVE' };
+    }
+    if (!(ctx.peakPnl >= reach)) return { exitAll: false, reason: '', lockFloor, trailState: 'DORMANT' };
+    const floor = lock + (kind === 'lockTrail' && every > 0 && by > 0 ? Math.floor((ctx.peakPnl - reach) / every) * by : 0);
+    if (ctx.totalPnl <= floor) {
+      return { exitAll: true, reason: `${kind === 'lockTrail' ? 'Lock and Trail' : 'Lock'} ₹${floor.toFixed(0)} hit (₹${ctx.totalPnl.toFixed(0)}, peak ₹${ctx.peakPnl.toFixed(0)})`, lockFloor: floor, trailState: 'ARMED' };
+    }
+    return { exitAll: false, reason: '', lockFloor: floor, trailState: 'ARMED' };
+  }
+
   const trigger = num(cfg.triggerRupees);
   if (cfg.trailEnabled && trigger != null && trigger > 0) {
     const gap = Math.max(num(cfg.lockRupees) ?? 0, 0);
@@ -1486,4 +1606,266 @@ export function evaluateGlobalRisk(cfg: RiskConfig, ctx: GlobalRiskContext): Glo
   }
 
   return { exitAll: false, reason: '', lockFloor, trailState: trailState.v };
+}
+
+
+// ── Quantity Multiplier (AlgoTest execution setting) ────────────────────────
+
+/** The row's Quantity Multiplier: a whole number ≥ 1. Missing / bad = 1. */
+export function rowQtyMultiplier(row: Partial<Pick<FocusRow, 'qtyMultiplier'>>): number {
+  const m = Math.trunc(Number(row.qtyMultiplier));
+  return m >= 1 ? m : 1;
+}
+
+/** Lots an entry of `lots` actually sends once the multiplier is applied. */
+export function multipliedLots(row: Partial<Pick<FocusRow, 'qtyMultiplier'>>, lots: number): number {
+  return Math.max(0, Math.trunc(Number(lots) || 0)) * rowQtyMultiplier(row);
+}
+
+// ── Strike criteria (AlgoTest Select Strike Criteria) ───────────────────────
+
+/** One strike of the polled chain: premiums and |delta| × 100 (null when the chain has none). */
+export interface ChainQuote { ce: number; pe: number; ceDelta?: number | null; peDelta?: number | null }
+
+export interface StrikeCtx {
+  /** The ATM strike (spot or futures based, per the group's ATM BY). */
+  atm: number;
+  step: number;
+  /** Chain keyed by strike (any string form of the number). */
+  oc: Record<string, ChainQuote> | undefined;
+  /** ROUND's strike interval. */
+  roundInterval?: number;
+}
+
+function chainRows(oc: StrikeCtx['oc'], leg: 'CE' | 'PE'): { strike: number; px: number; delta: number | null }[] {
+  if (!oc) return [];
+  const out: { strike: number; px: number; delta: number | null }[] = [];
+  for (const [k, v] of Object.entries(oc)) {
+    const strike = Number(k);
+    if (!Number.isFinite(strike)) continue;
+    const px = Number(leg === 'CE' ? v.ce : v.pe) || 0;
+    const d = leg === 'CE' ? v.ceDelta : v.peDelta;
+    out.push({ strike, px, delta: d != null && d > 0 ? d : null });
+  }
+  return out;
+}
+
+/**
+ * AlgoTest "Closest Premium": the strike whose premium is nearest the target,
+ * either side (target 50, strikes at 49 and 52 → 49). A tie goes to the
+ * higher premium (this tool sells). Null without a chain or a target.
+ */
+export function closestPremiumStrike(oc: StrikeCtx['oc'], leg: 'CE' | 'PE', target: number): number | null {
+  if (!(target > 0)) return null;
+  let best: { strike: number; px: number } | null = null;
+  for (const r of chainRows(oc, leg)) {
+    if (!(r.px > 0)) continue;
+    const d = Math.abs(r.px - target);
+    const bd = best ? Math.abs(best.px - target) : Infinity;
+    if (d < bd - 1e-9 || (Math.abs(d - bd) <= 1e-9 && best && r.px > best.px)) best = r;
+  }
+  return best?.strike ?? null;
+}
+
+/** Straddle premium (CE + PE) at a strike, or 0 when either side is unquoted. */
+function straddleAt(oc: StrikeCtx['oc'], strike: number): number {
+  if (!oc) return 0;
+  const v = oc[String(strike)] ?? Object.entries(oc).find(([k]) => Number(k) === strike)?.[1];
+  const ce = Number(v?.ce) || 0;
+  const pe = Number(v?.pe) || 0;
+  return ce > 0 && pe > 0 ? ce + pe : 0;
+}
+
+const roundTo = (x: number, step: number) => Math.round(x / step) * step;
+
+/**
+ * The listed strike nearest `x`, if one is within a strike step of it (the
+ * chain's own strikes) — else null. Arithmetic criteria (Straddle Width, % of
+ * ATM, Synthetic Future) snap to it so they never name a contract that does not
+ * exist, and never slide to the chain's edge when the target is beyond it.
+ */
+function nearestListed(oc: StrikeCtx['oc'], x: number, step: number): number | null {
+  if (!oc || !Number.isFinite(x)) return null;
+  let best: number | null = null;
+  for (const k of Object.keys(oc)) {
+    const n = Number(k);
+    if (Number.isFinite(n) && (best == null || Math.abs(n - x) < Math.abs(best - x))) best = n;
+  }
+  return best != null && Math.abs(best - x) <= step ? best : null;
+}
+
+/** `x` when the chain lists it, else null — for rules that name one exact strike. */
+function listedOrNull(oc: StrikeCtx['oc'], x: number): number | null {
+  if (!oc || !Number.isFinite(x)) return null;
+  return Object.keys(oc).some(k => Number(k) === x) ? x : null;
+}
+
+/**
+ * The strike a leg resolves to under an AlgoTest strike criterion, or null when
+ * it cannot (no chain / quote / delta, a strike the chain does not list, or
+ * nothing qualifies — a Delta Range
+ * with no strike inside means the leg is SKIPPED, as on AlgoTest). Sell side:
+ * Premium Range and Delta Range take the highest qualifying value.
+ *
+ * Synthetic Future = ATM strike + ATM CE − ATM PE (the glossary formula; the
+ * docs' worked example adds the spot instead — see the vault's open question).
+ */
+export function resolveCriteriaStrike(
+  kind: FocusStrikeCriteria, leg: 'CE' | 'PE', crit: FocusLegCrit | null | undefined, ctx: StrikeCtx,
+): number | null {
+  const a = Number(crit?.a);
+  const b = Number(crit?.b);
+  const { atm, step, oc } = ctx;
+  if (!(atm > 0) || !(step > 0)) return null;
+  const rows = () => chainRows(oc, leg);
+  switch (kind) {
+    case 'ROUND': {
+      const iv = Number(ctx.roundInterval) > 0 ? Number(ctx.roundInterval) : 100;
+      const n = Math.trunc(Number.isFinite(a) ? a : 0);
+      if (n === 0) return listedOrNull(oc, atm);
+      // OTM is above ATM for a CE, below for a PE; ITM the other way. ATM itself is never counted.
+      const up = (leg === 'CE') === (n > 0);
+      const k = Math.abs(n);
+      const first = up ? Math.floor(atm / iv) * iv + iv : Math.ceil(atm / iv) * iv - iv;
+      return listedOrNull(oc, up ? first + (k - 1) * iv : first - (k - 1) * iv);
+    }
+    case 'PREM_GTE': {
+      if (!(a > 0)) return null;
+      let best: { strike: number; px: number } | null = null;
+      for (const r of rows()) if (r.px >= a && (!best || r.px < best.px)) best = r;
+      return best?.strike ?? null;
+    }
+    case 'PREM_LTE': {
+      if (!(a > 0)) return null;
+      let best: { strike: number; px: number } | null = null;
+      for (const r of rows()) if (r.px > 0 && r.px <= a && (!best || r.px > best.px)) best = r;
+      return best?.strike ?? null;
+    }
+    case 'PREM_RANGE': {
+      if (!(a >= 0) || !(b > 0) || b < a) return null;
+      let best: { strike: number; px: number } | null = null;
+      for (const r of rows()) if (r.px > 0 && r.px >= a && r.px <= b && (!best || r.px > best.px)) best = r;
+      return best?.strike ?? null;
+    }
+    case 'STRADDLE_WIDTH': {
+      const st = straddleAt(oc, atm);
+      if (!(st > 0) || !Number.isFinite(a)) return null;
+      return nearestListed(oc, roundTo(atm + a * st, step), step);
+    }
+    case 'PCT_ATM':
+      return Number.isFinite(a) ? nearestListed(oc, roundTo(atm * (1 + a / 100), step), step) : null;
+    case 'SYNTH_FUT': {
+      const v = oc ? (oc[String(atm)] ?? Object.entries(oc).find(([k]) => Number(k) === atm)?.[1]) : undefined;
+      const ce = Number(v?.ce) || 0;
+      const pe = Number(v?.pe) || 0;
+      if (!(ce > 0) || !(pe > 0)) return null;
+      const synth = roundTo(atm + ce - pe, step);
+      return listedOrNull(oc, synth + Math.trunc(Number.isFinite(a) ? a : 0) * step);
+    }
+    case 'ATM_PREM_PCT': {
+      const st = straddleAt(oc, atm);
+      if (!(st > 0) || !(a > 0)) return null;
+      return closestPremiumStrike(oc, leg, st * a / 100);
+    }
+    case 'DELTA': {
+      if (!(a > 0)) return null;
+      let best: { strike: number; delta: number } | null = null;
+      for (const r of rows()) {
+        if (r.delta == null) continue;
+        if (!best || Math.abs(r.delta - a) < Math.abs(best.delta - a) - 1e-9) best = { strike: r.strike, delta: r.delta };
+      }
+      return best?.strike ?? null;
+    }
+    case 'DELTA_RANGE': {
+      if (!(a >= 0) || !(b > 0) || b < a) return null;
+      let best: { strike: number; delta: number } | null = null;
+      for (const r of rows()) {
+        if (r.delta == null || r.delta < a || r.delta > b) continue;
+        if (!best || r.delta > best.delta) best = { strike: r.strike, delta: r.delta };
+      }
+      return best?.strike ?? null;
+    }
+    case 'EXACT':
+      return a > 0 ? listedOrNull(oc, a) : null;
+  }
+  return null;
+}
+
+// ── Multi-day Range Breakout (BTST / Positional ORB) ────────────────────────
+
+const dayMs = 86_400_000;
+const isWeekday = (iso: string) => { const d = new Date(`${iso}T00:00:00Z`).getUTCDay(); return d !== 0 && d !== 6; };
+const addDays = (iso: string, n: number) => new Date(Date.parse(`${iso}T00:00:00Z`) + n * dayMs).toISOString().slice(0, 10);
+
+/** The trading day `n` weekdays before `iso` (n = 1 → previous weekday). Exchange holidays are NOT known here. */
+export function tradingDaysBack(iso: string, n: number): string {
+  let d = iso;
+  let left = Math.max(0, Math.trunc(n));
+  while (left > 0) { d = addDays(d, -1); if (isWeekday(d)) left--; }
+  return d;
+}
+
+/** Trading days (weekdays) from `today` to `expiry`: 0 on expiry day. Null when past or unparseable. */
+export function tradingDte(today: string, expiry: string): number | null {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(today) || !/^\d{4}-\d{2}-\d{2}$/.test(expiry) || expiry < today) return null;
+  let n = 0;
+  for (let d = today; d < expiry; d = addDays(d, 1)) if (isWeekday(addDays(d, 1))) n++;
+  return n;
+}
+
+/** The weekday `dte` trading days before `expiry`. */
+export function dateForDte(expiry: string, dte: number): string {
+  let d = expiry;
+  while (!isWeekday(d)) d = addDays(d, -1);
+  return tradingDaysBack(d, dte);
+}
+
+export interface RangeWindow { startDate: string; start: string; endDate: string; end: string }
+
+/**
+ * The range a Range Breakout leg tracks, as dates and times:
+ *  - intraday: today, entry time → End (End after the entry time);
+ *  - btst: the previous trading day at the entry time → today at End;
+ *  - positional: the day `startDte` trading days before expiry at the entry time
+ *    → the day `endDte` before expiry at End.
+ * Null when the settings are invalid. Holidays are not known: a weekday holiday
+ * counts as a trading day.
+ */
+export function rangeWindow(
+  rb: FocusLegRangeBreakout, entryTime: string, today: string, expiry: string,
+): RangeWindow | null {
+  if (!HM_RE.test(rb.end) || !HM_RE.test(entryTime)) return null;
+  const kind = rb.kind ?? 'intraday';
+  if (kind === 'intraday') return rb.end > entryTime ? { startDate: today, start: entryTime, endDate: today, end: rb.end } : null;
+  if (kind === 'btst') return { startDate: tradingDaysBack(today, 1), start: entryTime, endDate: today, end: rb.end };
+  const sd = Math.trunc(Number(rb.startDte));
+  const ed = Math.trunc(Number(rb.endDte));
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(expiry) || !(sd >= 0) || !(ed >= 0) || ed > sd) return null;
+  if (sd === ed && !(rb.end > entryTime)) return null;
+  return { startDate: dateForDte(expiry, sd), start: entryTime, endDate: dateForDte(expiry, ed), end: rb.end };
+}
+
+/** Where today / now stands against a (possibly multi-day) range. 'over' = its end day has passed. */
+export function rangeWindowPhase(w: RangeWindow, today: string, nowHm: string): 'before' | 'tracking' | 'ended' | 'over' {
+  if (today > w.endDate) return 'over';
+  if (today < w.startDate || (today === w.startDate && nowHm < w.start)) return 'before';
+  if (today < w.endDate || nowHm < w.end) return 'tracking';
+  return 'ended';
+}
+
+/** Does the row have a BTST / Positional range leg (its entry happens on the range's end day, after End)? */
+export function rowHasMultiDayRange(row: Pick<FocusRow, 'side' | 'ceRangeBreakout' | 'peRangeBreakout'>): FocusLegRangeBreakout | null {
+  for (const leg of legsOf(row)) {
+    const rb = leg === 'CE' ? row.ceRangeBreakout : row.peRangeBreakout;
+    if (rb?.enabled && (rb.kind === 'btst' || rb.kind === 'positional')) return rb;
+  }
+  return null;
+}
+
+/** 'HH:MM' → the start of its `minutes`-long candle ('09:37', 5 → '09:35'). */
+export function candleBucket(hm: string, minutes: number): string {
+  const m = Math.max(1, Math.trunc(Number(minutes) || 1));
+  const t = Number(hm.slice(0, 2)) * 60 + Number(hm.slice(3, 5));
+  const b = Math.floor(t / m) * m;
+  return `${String(Math.floor(b / 60)).padStart(2, '0')}:${String(b % 60).padStart(2, '0')}`;
 }

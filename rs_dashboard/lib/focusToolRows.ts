@@ -64,6 +64,8 @@ export interface FocusPendingReentry {
     start: string; end: string; side: 'high' | 'low'; on: 'instrument' | 'underlying';
     high?: number; low?: number;
   };
+  /** A Lazy Leg waiting on its own momentum / range: opens as this lazy leg (its SL / target). */
+  lazyId?: string;
 }
 
 export interface FocusIndexGroup {
@@ -78,6 +80,31 @@ export interface FocusIndexGroup {
 }
 
 export type FocusStrikeMode = 'ATM' | 'PREMIUM';
+
+/**
+ * AlgoTest "Select Strike Criteria" beyond ATM ± steps and the ₹ premium
+ * target (FocusStrikeMode). When set on a row it decides both legs' strikes,
+ * each leg with its own values in FocusRow.ceCrit / peCrit:
+ *  - ROUND          a = OTM count (− ITM) on round strikes of `roundInterval`
+ *  - PREM_GTE       a = premium; the cheapest strike at or above it
+ *  - PREM_LTE       a = premium; the richest strike at or below it (not an
+ *                   AlgoTest rule — the ₹ premium mode's behaviour before it
+ *                   became AlgoTest's Closest Premium, kept for sellers who
+ *                   treat the target as a ceiling)
+ *  - PREM_RANGE     a..b premium; a sell takes the highest premium inside
+ *  - STRADDLE_WIDTH a = signed multiple of the ATM straddle added to ATM
+ *  - PCT_ATM        a = signed % of the ATM strike added to ATM
+ *  - SYNTH_FUT      a = steps from the synthetic-future ATM (same sign as ATM ±)
+ *  - ATM_PREM_PCT   a = % of the ATM straddle premium; the closest premium
+ *  - DELTA          a = delta 0–100; the closest |delta|
+ *  - DELTA_RANGE    a..b delta 0–100; a sell takes the highest; none = leg skipped
+ *  - EXACT          a = the strike itself
+ */
+export type FocusStrikeCriteria =
+  | 'ROUND' | 'PREM_GTE' | 'PREM_LTE' | 'PREM_RANGE' | 'STRADDLE_WIDTH' | 'PCT_ATM' | 'SYNTH_FUT'
+  | 'ATM_PREM_PCT' | 'DELTA' | 'DELTA_RANGE' | 'EXACT';
+
+export interface FocusLegCrit { a: string; b: string }
 
 /**
  * What a row actually holds — this page's own fill ledger, the counterpart of
@@ -205,6 +232,12 @@ export interface FocusRowFill {
    */
   ceOrb?: FocusOrbStamp | null;
   peOrb?: FocusOrbStamp | null;
+  /**
+   * |Delta| × 100 when the leg opened from flat — the base of a Delta stop,
+   * target or trail. Null when the chain carried no delta then.
+   */
+  ceDeltaEntry?: number | null;
+  peDeltaEntry?: number | null;
   ts: string;
 }
 
@@ -237,13 +270,27 @@ export interface FocusLazyLeg {
   /** Strikes from ATM: + OTM, − ITM, 0 ATM. */
   otmSteps: number;
   lots: number;
-  /** SL as % premium rise over entry (20 → exit at entry × 1.2). '' = none. */
+  /**
+   * SL amount in `slBasis` units (missing basis = % premium rise: 20 → entry ×
+   * 1.2). '' = none. Named for the original %-only version and kept so saved
+   * rows load unchanged — same convention as FocusRow.ceTgtPct.
+   */
   slPct: string;
-  /** Target as % premium decay from entry. '' = none. */
+  /** SL type. Missing = 'pct'. */
+  slBasis?: 'pct' | 'pts' | 'uPts' | 'uPct' | 'delta';
+  /** Target amount in `tgtUnit` units (missing = % decay from entry). '' = none. Name kept as for slPct. */
   tgtPct: string;
+  tgtUnit?: 'pct' | 'pts' | 'uPts' | 'uPct' | 'delta';
   /** Lazy leg to open when this one's SL / target closes it. '' = none. */
   onSl: string;
   onTgt: string;
+  /**
+   * The lazy leg's own entry gate (AlgoTest: lazy legs keep their own Simple
+   * Momentum or ORB). Momentum is measured from the moment it activates; the
+   * ORB range runs `rangeMinutes` from then. Neither = opens at once.
+   */
+  simpleMom?: FocusLegSimpleMom;
+  rangeBreakout?: { enabled: boolean; minutes: string; side: 'high' | 'low'; on: 'instrument' | 'underlying' };
 }
 
 /**
@@ -260,6 +307,18 @@ export interface FocusLegRangeBreakout {
   /** Enter when the price breaks the range's high, or its low. */
   side: 'high' | 'low';
   on: 'instrument' | 'underlying';
+  /**
+   * Missing / 'intraday' — the row's entry time to `end`, today.
+   * 'btst' — AlgoTest Range Breakout BTST with End "Tomorrow": from the previous
+   *          trading day's entry time to today's `end`; the leg can enter today
+   *          after `end`.
+   * 'positional' — from the trading day `startDte` days before expiry at the
+   *          entry time to the day `endDte` days before expiry at `end`; the leg
+   *          can enter on that end day after `end`.
+   */
+  kind?: 'intraday' | 'btst' | 'positional';
+  startDte?: number;
+  endDte?: number;
 }
 
 /** The range a Range Breakout leg broke out of — see FocusRowFill.ceOrb. */
@@ -280,7 +339,8 @@ export interface FocusOrbStamp {
  */
 export interface FocusLegSlRule {
   enabled: boolean;
-  basis: 'pts' | 'uPts' | 'uPct';
+  /** 'delta' — |delta| × 100 rising `value` above its value at entry (a short: 25, 15 → 40). */
+  basis: 'pts' | 'uPts' | 'uPct' | 'delta';
   value: string;
 }
 
@@ -292,7 +352,8 @@ export interface FocusLegSlRule {
  */
 export interface FocusLegTrailSl {
   enabled: boolean;
-  unit: 'pts' | 'pct';
+  /** 'delta' trails a Delta stop: every `every` the delta falls, lower the stop `by`. */
+  unit: 'pts' | 'pct' | 'delta';
   every: string;
   by: string;
 }
@@ -436,6 +497,27 @@ export interface FocusRow {
   /** Leg SL on another basis (replaces SL × for that leg when enabled). */
   ceSlRule?: FocusLegSlRule;
   peSlRule?: FocusLegSlRule;
+  /** AlgoTest strike criteria; missing = the row's strikeMode (ATM ± / ₹ premium). */
+  strikeCriteria?: FocusStrikeCriteria;
+  ceCrit?: FocusLegCrit;
+  peCrit?: FocusLegCrit;
+  /** Strike interval for ROUND (100, 200, 500). Missing = 100. */
+  roundInterval?: number;
+  /**
+   * AlgoTest execution "Quantity Multiplier": every entry's lots (row lots,
+   * re-entries, lazy legs) × this, and the MTM-based Overall SL / Target /
+   * trails scaled with it (percentage ones are not). Missing = 1.
+   */
+  qtyMultiplier?: number;
+  /**
+   * AlgoTest "Tgt/SL Ref Price": 'trigger' — stops and targets measure from the
+   * LTP when the order went out (the default); 'traded' — from the broker's
+   * average traded price of that order once it is known (Dhan only; other
+   * brokers keep the trigger price).
+   */
+  refPrice?: 'trigger' | 'traded';
+  /** Overall Momentum Candle Close interval in minutes (1, 3, 5, 15). Missing = 1. */
+  entryMomCandleMin?: number;
   /** Leg Trail SL. */
   ceTrailSl?: FocusLegTrailSl;
   peTrailSl?: FocusLegTrailSl;
@@ -488,8 +570,10 @@ export interface FocusRow {
    * Unit of ceTgtPct / peTgtPct, for both legs. Missing = '%'. 'uPts' / 'uPct'
    * are AlgoTest's Underlying Points / Underlying %: the index moving that far
    * in the position's favour from the spot at entry (short CE: down; short PE: up).
+   * 'delta' is AlgoTest's Delta target: |delta| × 100 falling this far below its
+   * value at entry (a short: 25, 15 → exit at 10).
    */
-  legTgtUnit?: 'pct' | 'pts' | 'uPts' | 'uPct';
+  legTgtUnit?: 'pct' | 'pts' | 'uPts' | 'uPct' | 'delta';
   /**
    * SL to cost: when one leg's own SL × hits, the leg still open gets a stop
    * at its own entry premium (break-even on that leg). Missing = off.
@@ -531,6 +615,17 @@ export interface FocusToolConfig {
   trailEnabled: boolean;
   triggerRupees: string;
   lockRupees: string;
+  /**
+   * Account-level (AlgoTest "broker-level") trailing kind:
+   *  - 'peakGap'   — the original Focus Tool trail: once P&L reaches TRIGGER, a
+   *                  floor that follows the peak by LOCK (missing = this)
+   *  - 'lock'      — reach TRIGGER → lock LOCK; exit if P&L falls back to it
+   *  - 'lockTrail' — as lock, then +trailBy to the lock per trailEvery more profit
+   *  - 'trailSl'   — for every trailEvery of profit, tighten STOP by trailBy
+   */
+  trailKind?: 'peakGap' | 'lock' | 'lockTrail' | 'trailSl';
+  trailEvery?: string;
+  trailBy?: string;
   liveRealMoney: boolean;
   /**
    * IST date (YYYY-MM-DD) on which LIVE · REAL MONEY was last switched on.

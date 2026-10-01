@@ -11,7 +11,7 @@ import { PROJECT_ROOT, dedupe, spaced, runPythonJson } from '@/lib/pyExec';
 
 const SCRIPT = path.join(PROJECT_ROOT, 'scripts', 'tools', 'focus_tool_range.py');
 
-interface RangeResult { high: number | null; low: number | null; bars?: number; complete?: boolean; error?: string }
+interface RangeResult { high: number | null; low: number | null; open?: number | null; bars?: number; complete?: boolean; error?: string }
 
 const cache = new Map<string, RangeResult>();
 const HM = /^([01]\d|2[0-3]):[0-5]\d$/;
@@ -25,6 +25,13 @@ export async function GET(request: NextRequest) {
   const leg = (q.get('leg') ?? '').toUpperCase();
   const start = q.get('start') ?? '';
   const end = q.get('end') ?? '';
+  // Optional, for BTST / Positional ranges that span days.
+  const startDate = q.get('startDate') ?? '';
+  const endDate = q.get('endDate') ?? '';
+  const ISO = /^\d{4}-\d{2}-\d{2}$/;
+  if ((startDate && !ISO.test(startDate)) || (endDate && !ISO.test(endDate))) {
+    return NextResponse.json({ success: false, error: 'startDate / endDate must be YYYY-MM-DD' }, { status: 400 });
+  }
 
   if (!['NIFTY', 'BANKNIFTY', 'SENSEX'].includes(underlying) || !HM.test(start) || !HM.test(end)) {
     return NextResponse.json({ success: false, error: 'underlying, start and end (HH:MM) required' }, { status: 400 });
@@ -34,11 +41,13 @@ export async function GET(request: NextRequest) {
   }
 
   const today = new Date().toISOString().slice(0, 10);
-  const key = `${today}:${underlying}:${on}:${on === 'instrument' ? `${expiry}:${strike}:${leg}` : ''}:${start}:${end}`;
+  const key = `${today}:${underlying}:${on}:${on === 'instrument' ? `${expiry}:${strike}:${leg}` : ''}:${startDate}${start}:${endDate}${end}`;
   const hit = cache.get(key);
   if (hit) return NextResponse.json({ success: true, ...hit });
 
   const args = ['--underlying', underlying, '--start', start, '--end', end];
+  if (startDate) args.push('--start-date', startDate);
+  if (endDate) args.push('--end-date', endDate);
   if (on === 'underlying') args.push('--index');
   else args.push('--expiry', expiry, '--strike', strike, '--leg', leg);
 
