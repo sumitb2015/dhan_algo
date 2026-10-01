@@ -30,6 +30,8 @@ export interface RsStrategyStock {
   stDir: 1 | -1;
   rsi: number;
   ema: number | null; // EMA(emaPeriod) of the close; null until emaPeriod bars exist
+  /** Bullish EMA stack on the last bar: close > EMA 20 > EMA 50 > EMA 100 > EMA 200. False until 200 bars exist. A display filter only; not part of the signal. */
+  emaStack: boolean;
   rsRisingDays: number; // consecutive sessions RS has risen, ending on the last bar (0 = RS did not rise on the last bar)
   signal: RsSignal;
   /** Date the current buy triggered (YYYY-MM-DD); null unless the stock is Buy or In Trend (i.e. a buy is still active). */
@@ -53,6 +55,20 @@ export interface RsStrategyResponse {
  * EMA yet (a short history) the caller passes false, so such a stock cannot be bought.
  * The exit rule (isSell) deliberately has no EMA term.
  */
+export const EMA_STACK_PERIODS = [20, 50, 100, 200] as const;
+
+/** close > EMA20 > EMA50 > EMA100 > EMA200 on the last bar (SMA-seeded EMAs, as TradingView). False when any EMA is missing. */
+export function isEmaStacked(closes: number[]): boolean {
+  if (closes.length === 0) return false;
+  let prev = closes[closes.length - 1];
+  for (const period of EMA_STACK_PERIODS) {
+    const v = emaSmaSeeded(closes, period)[closes.length - 1];
+    if (v === null || !(prev > v)) return false;
+    prev = v;
+  }
+  return true;
+}
+
 export function isBuy(rs: number, stDir: 1 | -1, rsi: number, rsiMin: number, aboveEma = true): boolean {
   return rs > 0 && stDir === 1 && (rsiMin <= 0 || rsi > rsiMin) && aboveEma;
 }
@@ -169,6 +185,7 @@ function evaluateSeries(symbol: string, stockRows: Bar[], indexRows: Bar[], p: R
     stDir: st[lastIdx].dir as 1 | -1,
     rsi: rsi[lastIdx] as number,
     ema: ema ? ema[lastIdx] : null,
+    emaStack: p.emaPeriod > 0 && isEmaStacked(closes.slice(0, lastIdx + 1)), // the daily series only; the weekly run does not use it
     rsRisingDays: risingDays,
     signal,
     entryDate: signal === 'BUY' || signal === 'HOLD' ? entryDate : null,

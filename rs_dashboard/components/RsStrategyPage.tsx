@@ -184,6 +184,7 @@ export default function RsStrategyPage({ guide = '' }: { guide?: string }) {
   const [strongMin, setStrongMin] = useState(DEFAULT_STRONG_RS);
   const [risingOnly, setRisingOnly] = useState(false); // RS up for risingDays sessions in a row
   const [risingDays, setRisingDays] = useState(DEFAULT_RISING_DAYS);
+  const [stackOnly, setStackOnly] = useState(false); // close > EMA20 > EMA50 > EMA100 > EMA200
   const [weeklyOnly, setWeeklyOnly] = useState(false); // weekly chart is also long (Buy or In Trend)
   // What the account already holds (Dhan holdings + today's NSE equity positions), keyed by symbol.
   const [holdings, setHoldings] = useState<Record<string, EquityHolding> | null>(null);
@@ -307,11 +308,12 @@ export default function RsStrategyPage({ guide = '' }: { guide?: string }) {
         inRange(s.close, price) &&
         (!strongOnly || s.rs >= strongMin) &&
         (!risingOnly || s.rsRisingDays >= risingDays) &&
+        (!stackOnly || s.emaStack) &&
         (!weeklyOnly || s.weekly === 'BUY' || s.weekly === 'HOLD') &&
         (!heldOnly || (holdings?.[s.symbol]?.totalQty ?? 0) > 0 || (holdings?.[s.symbol]?.positions.length ?? 0) > 0) &&
         (!q || s.symbol.toLowerCase().includes(q)),
     );
-  }, [data, query, indexKey, indexMembers, price, strongOnly, strongMin, risingOnly, risingDays, weeklyOnly, heldOnly, holdings]);
+  }, [data, query, indexKey, indexMembers, price, strongOnly, strongMin, risingOnly, risingDays, stackOnly, weeklyOnly, heldOnly, holdings]);
 
   const tabCounts = useMemo(() => {
     const c = { BUY: 0, HOLD: 0, SELL: 0, ALL: filtered.length };
@@ -504,6 +506,7 @@ export default function RsStrategyPage({ guide = '' }: { guide?: string }) {
             min={1} max={30} step={1} decimals={0}
           />
           {([
+            ['EMA stack', stackOnly, setStackOnly, 'A clean uptrend: price above EMA 20, which is above EMA 50, which is above EMA 100, which is above EMA 200. Needs 200 days of history.'],
             ['In portfolio', heldOnly, setHeldOnly, 'Only stocks you already hold or have a position in today'],
             ['Weekly long', weeklyOnly, setWeeklyOnly, 'Weekly chart (same RS and Supertrend rules) is also Buy or In Trend. Needs about 70 weeks of history'],
           ] as [string, boolean, (v: boolean) => void, string][]).map(([label, on, set, tip]) => (
@@ -618,7 +621,7 @@ export default function RsStrategyPage({ guide = '' }: { guide?: string }) {
             <p role="status" className="px-4 py-10 text-center text-sm text-zinc-400">
               {data
                 ? tab !== 'ALL' && filtered.length > 0 ? `None of the ${filtered.length} matching stock${filtered.length === 1 ? ' is' : 's are'} in the ${LABEL[tab]} state. Try another tab.`
-                : query ? `No ${tab === 'ALL' ? '' : LABEL[tab] + ' '}symbols match “${query}”.` : strongOnly || risingOnly || weeklyOnly || heldOnly || indexKey || price.min !== null || price.max !== null ? 'No stocks match these filters. Turn one off to widen the list.' : `No stocks are in the ${tab === 'ALL' ? 'selected' : LABEL[tab]} state today.`
+                : query ? `No ${tab === 'ALL' ? '' : LABEL[tab] + ' '}symbols match “${query}”.` : strongOnly || risingOnly || stackOnly || weeklyOnly || heldOnly || indexKey || price.min !== null || price.max !== null ? 'No stocks match these filters. Turn one off to widen the list.' : `No stocks are in the ${tab === 'ALL' ? 'selected' : LABEL[tab]} state today.`
                 : 'No scan results yet. Recalculate to run the scan.'}
             </p>
           ) : null}

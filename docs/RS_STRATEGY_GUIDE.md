@@ -91,6 +91,7 @@ Click a chip's name to switch it on or off. **RS ≥** and **RS rising** also ha
 | **Above EMA 200** | (on by default) need the price above the 200-day EMA to count as a Buy. Turning it off re-runs the scan and brings back the stocks that meet every other rule but sit under the EMA. Exits are never affected. |
 | **RS ≥ [0.10]** | have an RS of at least the number in the box. **Edit the number** to change it (default 0.10 = outperforming Nifty by 10 points, StockEdge's "strongly outperforming"). Allowed range −1 to 10. |
 | **RS rising [3] days** | have had a higher RS on each of the last N sessions, counting back from today. **Edit the number** to change N (default 3 = StockEdge's "increasing RS"). Allowed range 1 to 30 whole days. Today, runs longer than about 5 days are rare. |
+| **EMA stack** | are in a clean uptrend on the moving averages: **price > EMA 20 > EMA 50 > EMA 100 > EMA 200**, every step strictly higher. Needs 200 days of history. This is a quick way to find stocks trending up on every timeframe at once. It is only a filter: it does not change the Buy / In Trend / Sell states. |
 | **In portfolio** | you already hold, or have a position in today |
 | **Weekly long** | are Buy or In Trend on the **weekly** chart too |
 

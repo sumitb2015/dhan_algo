@@ -255,3 +255,31 @@ test('entryDate moves to a new date after a sell and a fresh buy', () => {
   assert.ok(first.entryDate && again.entryDate && again.entryDate > dateAt(mid.length - 1), `new buy ${again.entryDate} should be after the sell phase`);
   assert.notEqual(again.entryDate, first.entryDate);
 });
+
+// ---- EMA stack: close > EMA20 > EMA50 > EMA100 > EMA200 ----
+import { isEmaStacked } from './rsStrategyCore.ts';
+
+test('isEmaStacked: a long steady climb is stacked, a long decline is not', () => {
+  assert.equal(isEmaStacked(Array.from({ length: 300 }, (_, i) => 50 * Math.exp(i / 150))), true);
+  assert.equal(isEmaStacked(Array.from({ length: 300 }, (_, i) => 400 * Math.exp(-i / 150))), false);
+});
+
+test('isEmaStacked: every link in the chain is required, strictly', () => {
+  const climb = Array.from({ length: 300 }, (_, i) => 50 * Math.exp(i / 150));
+  // Price dips under its EMA 20 on the last bar: the first link breaks.
+  assert.equal(isEmaStacked([...climb.slice(0, -1), climb[climb.length - 2] * 0.9]), false);
+  // Rally after a long fall: price is above the fast EMAs but the slow ones are still above the faster ones.
+  const rebound = [...Array.from({ length: 250 }, (_, i) => 300 - i * 0.6), ...Array.from({ length: 30 }, (_, i) => 150 + i * 3)];
+  assert.equal(isEmaStacked(rebound), false);
+  // Flat: nothing is strictly greater than anything.
+  assert.equal(isEmaStacked(Array(300).fill(100)), false);
+});
+
+test('isEmaStacked needs 200 bars, and evaluateStock exposes it on the daily result only', () => {
+  assert.equal(isEmaStacked(Array.from({ length: 150 }, (_, i) => 50 + i)), false); // no EMA 200 yet
+  assert.equal(isEmaStacked([]), false);
+  const up = Array.from({ length: 300 }, (_, i) => 50 * Math.exp(i / 150));
+  const r = evaluateStock('X', mk(up), flatIdx(up.length), { ...DEFAULTS, emaGate: true })!;
+  assert.equal(r.emaStack, true);
+  assert.equal(evaluateStock('X', mk(up.slice(0, 150)), flatIdx(150), DEFAULT_PARAMS)!.emaStack, false);
+});
