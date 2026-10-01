@@ -44,12 +44,13 @@ test('WAIT: RS>0 but price below a bearish Supertrend, never bought, is WAIT (no
   assert.equal(r.signal, 'WAIT');
 });
 
-test('rsRising is true for 3 consecutive rising RS readings, false when RS is falling', () => {
+test('rsRisingDays counts consecutive sessions of rising RS, and is 0 when RS fell on the last bar', () => {
   const idx = mk(Array(100).fill(100));
   const accel = mk(Array.from({ length: 100 }, (_, i) => 50 * Math.exp((i * i) / 2000)));
-  assert.equal(evaluateStock('X', accel, idx, DEFAULT_PARAMS)!.rsRising, true);
+  const up = evaluateStock('X', accel, idx, DEFAULT_PARAMS)!.rsRisingDays;
+  assert.ok(up >= 3, `streak ${up}`);
   const fade = mk(Array.from({ length: 100 }, (_, i) => 100 - i * 0.5));
-  assert.equal(evaluateStock('X', fade, idx, DEFAULT_PARAMS)!.rsRising, false);
+  assert.equal(evaluateStock('X', fade, idx, DEFAULT_PARAMS)!.rsRisingDays, 0);
 });
 
 test('RS formula: stock doubling vs flat index over 55 bars = RS 1.0 (a ratio, not a percent)', () => {
@@ -189,4 +190,14 @@ test('weekly state ignores the EMA gate (a 200-week EMA would need ~4 years of h
   const up = mk(Array.from({ length: n }, (_, i) => 50 * Math.exp(i / 300)));
   const r = evaluateStock('X', up, flatIdx(n), { ...DEFAULTS, emaGate: true })!;
   assert.equal(r.weekly, 'BUY');
+});
+
+test('rsRisingDays is the exact length of the current run, so any N can be filtered client-side', () => {
+  // Flat index; stock RS rises for exactly 5 bars at the end (a fresh climb after a long fall), so streak = 5.
+  const closes = [...Array.from({ length: 120 }, (_, i) => 200 - i * 0.5), ...Array.from({ length: 5 }, (_, i) => 140 + (i + 1) * 3)];
+  const r = evaluateStock('X', mk(closes), flatIdx(closes.length), DEFAULT_PARAMS)!;
+  assert.equal(r.rsRisingDays, 5);
+  // One down day resets the run.
+  const dip = [...closes, closes[closes.length - 1] - 4];
+  assert.equal(evaluateStock('X', mk(dip), flatIdx(dip.length), DEFAULT_PARAMS)!.rsRisingDays, 0);
 });

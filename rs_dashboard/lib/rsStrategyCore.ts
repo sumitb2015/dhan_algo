@@ -30,7 +30,7 @@ export interface RsStrategyStock {
   stDir: 1 | -1;
   rsi: number;
   ema: number | null; // EMA(emaPeriod) of the close; null until emaPeriod bars exist
-  rsRising: boolean; // RS strictly rising for 3 consecutive sessions
+  rsRisingDays: number; // consecutive sessions RS has risen, ending on the last bar (0 = RS did not rise on the last bar)
   signal: RsSignal;
   daysInSignal: number; // consecutive bars the current signal has held
   date: string;
@@ -123,7 +123,9 @@ function evaluateSeries(symbol: string, stockRows: Bar[], indexRows: Bar[], p: R
   let long = false;
   let days = 0;
   let valid = 0;
-  const rsHist: number[] = []; // last 4 RS readings, for the "rising 3 sessions" test
+  let prevRs: number | null = null;
+  let lastRs = 0;
+  let risingDays = 0;
   let lastIdx = -1;
   let signal: RsSignal = 'WAIT';
   for (let i = 0; i < n; i++) {
@@ -131,8 +133,9 @@ function evaluateSeries(symbol: string, stockRows: Bar[], indexRows: Bar[], p: R
     const dir = st[i].dir;
     const rsiV = rsi[i];
     if (rs === undefined || dir === null || rsiV === null) continue;
-    if (rsHist.length === 4) rsHist.shift();
-    rsHist.push(rs);
+    risingDays = prevRs !== null && rs > prevRs ? risingDays + 1 : 0;
+    prevRs = rs;
+    lastRs = rs;
     valid++;
     const emaV = ema ? ema[i] : null;
     const aboveEma = !p.emaGate || (emaV !== null && stockRows[i].close > emaV);
@@ -148,7 +151,7 @@ function evaluateSeries(symbol: string, stockRows: Bar[], indexRows: Bar[], p: R
   if (lastIdx < 0) return null;
 
   const row = stockRows[lastIdx];
-  const rs = rsHist[rsHist.length - 1];
+  const rs = lastRs;
   const line = st[lastIdx].line as number;
   const prev = lastIdx > 0 ? stockRows[lastIdx - 1].close : row.close;
   return {
@@ -161,7 +164,7 @@ function evaluateSeries(symbol: string, stockRows: Bar[], indexRows: Bar[], p: R
     stDir: st[lastIdx].dir as 1 | -1,
     rsi: rsi[lastIdx] as number,
     ema: ema ? ema[lastIdx] : null,
-    rsRising: rsHist.length === 4 && rsHist[3] > rsHist[2] && rsHist[2] > rsHist[1] && rsHist[1] > rsHist[0],
+    rsRisingDays: risingDays,
     signal,
     daysInSignal: days,
     date: row.date,

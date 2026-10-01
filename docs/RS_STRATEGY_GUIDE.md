@@ -77,12 +77,14 @@ leave only when the Sell rule is true.* So **In Trend can reflect a buy from mon
 first for Sell. Click any column heading to sort (click again to reverse). An arrow shows the active sort.
 
 ### Filter chips (they combine)
+
+Click a chip's name to switch it on or off. **RS ≥** and **RS rising** also have a number box: type a new value and press **Enter** (or click away). The change applies only then, an out-of-range value is corrected to the nearest allowed one, **Esc** undoes an edit that is still being typed, and entering a value switches that filter on. The two number filters work on the data already on the page, so they apply instantly with no re-scan.
 | Chip | Keeps only stocks that… |
 |---|---|
 | **RSI > 50** | (on by default) need RSI above 50 to count as a Buy. Turning it off re-runs the scan, so you will see more Buys and fewer In Trend stocks. |
 | **Above EMA 200** | (on by default) need the price above the 200-day EMA to count as a Buy. Turning it off re-runs the scan and brings back the stocks that meet every other rule but sit under the EMA. Exits are never affected. |
-| **RS ≥ 0.10** | outperform Nifty by 10 points or more |
-| **RS rising 3d** | have had a higher RS on each of the last 3 sessions |
+| **RS ≥ [0.10]** | have an RS of at least the number in the box. **Edit the number** to change it (default 0.10 = outperforming Nifty by 10 points, StockEdge's "strongly outperforming"). Allowed range −1 to 10. |
+| **RS rising [3] days** | have had a higher RS on each of the last N sessions, counting back from today. **Edit the number** to change N (default 3 = StockEdge's "increasing RS"). Allowed range 1 to 30 whole days. Today, runs longer than about 5 days are rare. |
 | **In portfolio** | you already hold, or have a position in today |
 | **Weekly long** | are Buy or In Trend on the **weekly** chart too |
 

@@ -19,7 +19,8 @@ const SIGNAL_RANK: Record<RsSignal, number> = { BUY: 3, HOLD: 2, WAIT: 1, SELL: 
 const DEFAULT_PERIOD = DEFAULT_PARAMS.period;
 const TTL_MS = 5 * 60 * 1000;
 const RSI_MIN = DEFAULT_PARAMS.rsiMin; // bullish condition: RSI(14) above 50
-const STRONG_RS = 0.1; // StockEdge's "strongly outperforming": RS above 0.1
+const DEFAULT_STRONG_RS = 0.1; // StockEdge's "strongly outperforming": RS above 0.1 (user-editable)
+const DEFAULT_RISING_DAYS = 3; // StockEdge's "increasing RS": up for the last 3 sessions (user-editable)
 
 const BADGE: Record<RsSignal, string> = {
   BUY: 'bg-emerald-500/10 border-emerald-500/25 text-emerald-400',
@@ -44,6 +45,54 @@ function RsBar({ value }: { value: number }) {
         className={`absolute top-0 bottom-0 rounded-full ${value >= 0 ? 'bg-emerald-400' : 'bg-red-400'}`}
         style={value >= 0 ? { left: '50%', width: `${w}%` } : { right: '50%', width: `${w}%` }}
       />
+    </div>
+  );
+}
+
+/**
+ * A filter chip with an editable number: click the label to switch the filter on/off, type in the box
+ * to change the threshold. The value commits on blur/Enter (never per keystroke), Escape reverts an
+ * uncommitted edit, and committing a value switches the filter on.
+ */
+function ThresholdChip({ label, unit, tip, on, onToggle, value, onCommit, min, max, step, decimals }: {
+  label: string; unit?: string; tip: string; on: boolean; onToggle: () => void;
+  value: number; onCommit: (v: number) => void; min: number; max: number; step: number; decimals: number;
+}) {
+  const [draft, setDraft] = useState(value.toFixed(decimals));
+  const [prev, setPrev] = useState(value);
+  if (prev !== value) { setPrev(value); setDraft(value.toFixed(decimals)); } // follow an external change (derive during render, not in an effect)
+  const commit = (raw: string) => {
+    const n = parseFloat(raw);
+    if (!Number.isFinite(n)) { setDraft(value.toFixed(decimals)); return; }
+    const c = Math.min(max, Math.max(min, decimals === 0 ? Math.round(n) : n));
+    setDraft(c.toFixed(decimals));
+    onCommit(c);
+  };
+  return (
+    <div
+      title={tip}
+      className={`flex items-stretch rounded-md border text-xs font-bold overflow-hidden focus-within:ring-2 focus-within:ring-emerald-500/50 ${
+        on ? 'bg-emerald-500/10 border-emerald-500/25 text-emerald-400' : 'bg-zinc-900 border-zinc-800 text-zinc-400'
+      }`}
+    >
+      <button type="button" onClick={onToggle} aria-pressed={on} className="pl-2.5 pr-1.5 py-1.5 hover:text-zinc-100 focus:outline-none focus-visible:underline">
+        {label}
+      </button>
+      <input
+        type="number"
+        aria-label={`${label} value`}
+        value={draft}
+        min={min} max={max} step={step}
+        inputMode="decimal"
+        onChange={(e) => setDraft(e.target.value)}
+        onBlur={(e) => commit(e.currentTarget.value)}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter') (e.target as HTMLInputElement).blur();
+          if (e.key === 'Escape') setDraft(value.toFixed(decimals));
+        }}
+        className="w-14 my-1 mr-1 px-1 rounded bg-zinc-950 border border-zinc-800 text-center font-mono text-zinc-100 focus:outline-none"
+      />
+      {unit && <span className="pr-2.5 py-1.5 text-zinc-500 font-normal">{unit}</span>}
     </div>
   );
 }
@@ -78,8 +127,10 @@ export default function RsStrategyPage({ guide = '' }: { guide?: string }) {
   const [error, setError] = useState<string | null>(null);
   const [rsiOn, setRsiOn] = useState(true); // BUY also needs RSI(14) > 50
   const [emaOn, setEmaOn] = useState(true); // BUY also needs close > EMA 200 (entry only; never blocks In Trend/Sell)
-  const [strongOnly, setStrongOnly] = useState(false); // RS >= 10%
-  const [risingOnly, setRisingOnly] = useState(false); // RS up 3 sessions in a row
+  const [strongOnly, setStrongOnly] = useState(false); // RS >= strongMin
+  const [strongMin, setStrongMin] = useState(DEFAULT_STRONG_RS);
+  const [risingOnly, setRisingOnly] = useState(false); // RS up for risingDays sessions in a row
+  const [risingDays, setRisingDays] = useState(DEFAULT_RISING_DAYS);
   const [weeklyOnly, setWeeklyOnly] = useState(false); // weekly chart is also long (Buy or In Trend)
   // What the account already holds (Dhan holdings + today's NSE equity positions), keyed by symbol.
   const [holdings, setHoldings] = useState<Record<string, EquityHolding> | null>(null);
@@ -172,8 +223,8 @@ export default function RsStrategyPage({ guide = '' }: { guide?: string }) {
     const q = query.trim().toLowerCase();
     const list = data.stocks.filter(
       (s) => (tab === 'ALL' || s.signal === tab) &&
-        (!strongOnly || s.rs >= STRONG_RS) &&
-        (!risingOnly || s.rsRising) &&
+        (!strongOnly || s.rs >= strongMin) &&
+        (!risingOnly || s.rsRisingDays >= risingDays) &&
         (!weeklyOnly || s.weekly === 'BUY' || s.weekly === 'HOLD') &&
         (!heldOnly || (holdings?.[s.symbol]?.totalQty ?? 0) > 0 || (holdings?.[s.symbol]?.positions.length ?? 0) > 0) &&
         (!q || s.symbol.toLowerCase().includes(q)),
@@ -194,7 +245,7 @@ export default function RsStrategyPage({ guide = '' }: { guide?: string }) {
       const c = typeof x === 'string' ? x.localeCompare(y as string) : (x as number) - (y as number);
       return c !== 0 ? c * dir : a.symbol.localeCompare(b.symbol); // stable, predictable ties
     });
-  }, [data, tab, query, sortKey, sortAsc, strongOnly, risingOnly, weeklyOnly, heldOnly, holdings]);
+  }, [data, tab, query, sortKey, sortAsc, strongOnly, strongMin, risingOnly, risingDays, weeklyOnly, heldOnly, holdings]);
 
   const counts = data?.counts;
   const tabs: { id: Tab; label: string; n?: number }[] = [
@@ -318,8 +369,32 @@ export default function RsStrategyPage({ guide = '' }: { guide?: string }) {
           {([
             ['RSI > 50', rsiOn, setRsiOn, 'Require RSI(14) above 50 for a buy'],
             ['Above EMA 200', emaOn, setEmaOn, 'Require price above the 200-day EMA for a buy. Entry only: a stock you already hold is not sold for dipping under it'],
-            ['RS ≥ 0.10', strongOnly, setStrongOnly, 'Only stocks with RS of 0.10 or more (outperforming Nifty by 10 points)'],
-            ['RS rising 3d', risingOnly, setRisingOnly, 'Only stocks whose RS rose three sessions in a row'],
+          ] as [string, boolean, (v: boolean) => void, string][]).map(([label, on, set, tip]) => (
+            <button
+              key={label}
+              onClick={() => set(!on)}
+              aria-pressed={on}
+              title={tip}
+              className={`px-2.5 py-1.5 rounded-md border text-xs font-bold focus:outline-none focus:ring-2 focus:ring-emerald-500/50 ${
+                on ? 'bg-emerald-500/10 border-emerald-500/25 text-emerald-400' : 'bg-zinc-900 border-zinc-800 text-zinc-400 hover:text-zinc-200'
+              }`}
+            >
+              {label}
+            </button>
+          ))}
+          <ThresholdChip
+            label="RS ≥" tip="Only stocks whose RS is at least this value. 0.10 = outperforming Nifty by 10 points (StockEdge's 'strongly outperforming'). Edit the number to change it."
+            on={strongOnly} onToggle={() => setStrongOnly(!strongOnly)}
+            value={strongMin} onCommit={(v) => { setStrongMin(v); setStrongOnly(true); }}
+            min={-1} max={10} step={0.05} decimals={2}
+          />
+          <ThresholdChip
+            label="RS rising" unit="days" tip="Only stocks whose RS has risen for this many sessions in a row, ending today. 3 matches StockEdge's 'increasing RS'. Edit the number to change it."
+            on={risingOnly} onToggle={() => setRisingOnly(!risingOnly)}
+            value={risingDays} onCommit={(v) => { setRisingDays(v); setRisingOnly(true); }}
+            min={1} max={30} step={1} decimals={0}
+          />
+          {([
             ['In portfolio', heldOnly, setHeldOnly, 'Only stocks you already hold or have a position in today'],
             ['Weekly long', weeklyOnly, setWeeklyOnly, 'Weekly chart (same RS and Supertrend rules) is also Buy or In Trend. Needs about 70 weeks of history'],
           ] as [string, boolean, (v: boolean) => void, string][]).map(([label, on, set, tip]) => (
