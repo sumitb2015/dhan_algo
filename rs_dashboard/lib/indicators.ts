@@ -144,3 +144,52 @@ export function smoothArray(values: number[], period = 9): (number | null)[] {
   }
   return result;
 }
+
+/**
+ * Supertrend with Wilder (RMA) ATR seeded by the SMA of the first `period`
+ * true ranges — TradingView `ta.supertrend(mult, period)` semantics, same
+ * algorithm as the boolean-only copy in app/api/scanner/route.ts (see the
+ * dhan-indicators skill; this is not an independent algorithm).
+ * `dir` is 1 (bullish, line below price) or -1 (bearish); null during warmup.
+ */
+export function supertrendSeries(
+  rows: { high: number; low: number; close: number }[],
+  period = 10,
+  mult = 3,
+): { line: number | null; dir: 1 | -1 | null }[] {
+  const n = rows.length;
+  const out: { line: number | null; dir: 1 | -1 | null }[] = Array.from({ length: n }, () => ({ line: null, dir: null }));
+  if (n < period + 1) return out;
+
+  const tr = new Array<number>(n).fill(0);
+  for (let i = 1; i < n; i++) {
+    tr[i] = Math.max(
+      rows[i].high - rows[i].low,
+      Math.abs(rows[i].high - rows[i - 1].close),
+      Math.abs(rows[i].low - rows[i - 1].close),
+    );
+  }
+  let atr = 0;
+  for (let i = 1; i <= period; i++) atr += tr[i];
+  atr /= period;
+
+  let upper = 0, lower = 0, dir: 1 | -1 = 1;
+  for (let i = period; i < n; i++) {
+    if (i > period) atr = (atr * (period - 1) + tr[i]) / period;
+    const hl2 = (rows[i].high + rows[i].low) / 2;
+    const bu = hl2 + mult * atr;
+    const bl = hl2 - mult * atr;
+    if (i === period) {
+      upper = bu;
+      lower = bl;
+    } else {
+      const pc = rows[i - 1].close;
+      upper = bu < upper || pc > upper ? bu : upper;
+      lower = bl > lower || pc < lower ? bl : lower;
+    }
+    if (rows[i].close > upper) dir = 1;
+    else if (rows[i].close < lower) dir = -1;
+    out[i] = { line: dir === 1 ? lower : upper, dir };
+  }
+  return out;
+}
