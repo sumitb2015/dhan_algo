@@ -1566,7 +1566,7 @@ export default function MultiLegFocus({
       }
 
       if (match.kind === 'flat') {
-        const closedFill = closedFillFromRow(match.row, leg.side === 'B') ?? leg.closedFill;
+        const closedFill = closedFillFromRow(match.row, leg.side === 'B', latestLeg.fill?.qty) ?? latestLeg.closedFill;
         patchLegs(basketId, legs => legs.map(l => (l.id === leg.id ? { ...l, status: 'CLOSED' as const, closedAt: Date.now(), fill: { qty: 0, avgPrice: l.fill?.avgPrice ?? 0 }, closedFill } : l)));
         addToast('success', `${label} already flat at broker`, 'Updated status to CLOSED');
         closed = true;

@@ -538,12 +538,18 @@ export type MultiLegMatch =
 export function closedFillFromRow(
   row: Record<string, unknown> | undefined,
   isBuy: boolean,
+  ownQty?: number | null,
 ): { qty: number; exitPrice: number } | undefined {
   if (!row) return undefined;
   const buyQty = Number(row.buyQty) || 0;
   const sellQty = Number(row.sellQty) || 0;
-  const qty = Math.min(buyQty, sellQty);
-  if (qty <= 0) return undefined;
+  const roundTrip = Math.min(buyQty, sellQty);
+  if (roundTrip <= 0) return undefined;
+  // The row's round trip is POOLED across every leg (and outside trade) on this
+  // securityId. Sizing a leg's realized P&L off it credited each of two 2-lot
+  // legs on one contract with all 4 lots, and a 2-lot leg with an 8-lot day
+  // round trip (2026-10-01). The leg's own ledger qty is what it closed.
+  const qty = ownQty != null && ownQty > 0 ? ownQty : roundTrip;
   const exitPrice = Number(isBuy ? row.sellAvg : row.buyAvg) || 0;
   if (exitPrice <= 0) return undefined;
   return { qty, exitPrice };
@@ -642,7 +648,7 @@ function reconcileLegWithBrokerRaw(
       status: 'CLOSED',
       closedAt: now,
       fill: { qty: 0, avgPrice: leg.fill?.avgPrice ?? 0 },
-      closedFill: closedFillFromRow(match.row, leg.side === 'B') ?? leg.closedFill,
+      closedFill: closedFillFromRow(match.row, leg.side === 'B', leg.fill?.qty) ?? leg.closedFill,
     };
   }
 
@@ -652,7 +658,7 @@ function reconcileLegWithBrokerRaw(
       status: 'CLOSED',
       closedAt: now,
       fill: { qty: 0, avgPrice: leg.fill?.avgPrice ?? 0 },
-      closedFill: closedFillFromRow(match.row, leg.side === 'B') ?? leg.closedFill,
+      closedFill: closedFillFromRow(match.row, leg.side === 'B', leg.fill?.qty) ?? leg.closedFill,
     };
   }
 

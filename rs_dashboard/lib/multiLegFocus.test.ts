@@ -4,7 +4,7 @@ import {
   resolveTemplateLegs, reconcileLegFillDown, reconcileLegWithBroker, legPnl, basketTotalPnl, sortLegsForExit, findLegPosition,
   computeLegTrailingSL, computeStrategyMetrics, checkStrategyRisk, computeCalendarPayoffCurve, classifyBasketStructure, findSiblingLegCollisions,
   formatExpiryLabel, LEG_FILL_GRACE_MS, claimableLegQty, executionBroker, applyOrderOutcomes, normalizeOrderRow, PENDING_ORDER_TTL_MS, legBrokerMismatch, classifyDhanOrder, type NormalizedOrder, legAvgPrice, legExitPrice, legQtyUnits, legPnlPct, legOtmPct, scaleBasketMultiplier,
-  legQtyWarningsFor, recordOutsideReduction, findUntrackedPositions, legFromUntracked, contractHintFromRow, legCountsToday,
+  legQtyWarningsFor, recordOutsideReduction, findUntrackedPositions, legFromUntracked, contractHintFromRow, legCountsToday, closedFillFromRow,
   type StrategyMetrics, type MultiLegLeg, type MultiLegBasket,
 } from './multiLegFocus.ts';
 import type { StrategyTemplate } from './basketStrategies.ts';
@@ -1063,4 +1063,18 @@ test('closing paths stamp closedAt; a reopened exit clears it', () => {
   const reopened = applyOrderOutcomes(exited, ob([{ orderId: 'e', orderStatus: 'REJECTED', filledQty: 0 }]), 65, 9_000).leg;
   assert.strictEqual(reopened.status, 'OPEN');
   assert.strictEqual(reopened.closedAt, undefined);
+});
+
+test('closedFillFromRow sizes the close off the leg, not the pooled broker round trip', () => {
+  // Two 2-lot legs on one contract closed together: the row shows 260 each way.
+  const row = { buyQty: 260, sellQty: 260, buyAvg: 140.95, sellAvg: 165.375, netQty: 0 };
+  assert.deepStrictEqual(closedFillFromRow(row, false, 130), { qty: 130, exitPrice: 140.95 });
+  // No ledger qty (legacy leg) still falls back to the row.
+  assert.deepStrictEqual(closedFillFromRow(row, false), { qty: 260, exitPrice: 140.95 });
+  const leg: MultiLegLeg = {
+    id: 'a', side: 'S', option: 'CE', strike: 22900, lots: 2, type: 'MARKET', status: 'OPEN',
+    fill: { qty: 130, avgPrice: 165.375 }, orderRef: { securityId: '51348' },
+  };
+  const closed = reconcileLegWithBroker(leg, { kind: 'flat', row }, null, 65, 1e15);
+  assert.strictEqual(closed.closedFill?.qty, 130);
 });
