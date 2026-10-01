@@ -1,7 +1,7 @@
 'use client';
 
 import React, {
-  useState, useEffect, useCallback, useMemo, useRef, memo,
+  useState, useEffect, useCallback, useMemo, useRef, memo, createContext, useContext,
 } from 'react';
 import NavBar from './NavBar';
 import {
@@ -46,6 +46,7 @@ import {
   legPinnedStrike, costStopReason, legOwnEntry, slRollStrike, DEFAULT_SL_ROLL_MAX,
   reentryConfig, evaluateReentry, reentryWindowClosed, pendingReentryLevel, pendingReentryHit, legTargetReason, costReentryBasis,
   awaitingMomentumQuote, MOMENTUM_QUOTE_WAIT_MS, legTargetLevel,
+  evaluateEntryMomentum, entryMomentumOn,
   type PosRow, type RowLive,
 } from '@/lib/focusToolRules';
 import { computeRowPnl, mtmForQty, shiftMayReopen, canMarkMtm, shiftCloseConfirmed, rowDisplayBookedPnl, putCallRatio, valuePutCallRatio, pickOpenInterest } from '@/lib/focusToolPnl';
@@ -948,6 +949,41 @@ const REENTRY_HELP: Record<FocusReentryMode, string> = {
 };
 const REENTRY_MAX_OPTIONS = [1, 2, 3, 4, 5, 10, 20];
 
+/** rowId → one-line "waiting on entry momentum" status, written by the scheduler. */
+const EntryMomContext = createContext<Record<string, string>>({});
+
+/**
+ * Overall Momentum (AlgoTest): hold the entry until the row's combined premium
+ * moves N points / % up or down from its start premium, judged on the live LTP
+ * or the last closed 1-min candle. Blank = enter at the entry time as before.
+ * Free-typed amount → RuleNumInput (commit on blur/Enter).
+ */
+function EntryMomentumControl({ row, onUpdate }: { row: FocusRow; onUpdate: (patch: Partial<FocusRow>) => void }) {
+  const status = useContext(EntryMomContext)[row.id];
+  const on = entryMomentumOn(row);
+  const lbl = 'inline-flex items-center gap-1.5 font-bold text-zinc-400';
+  return (
+    <div className="flex flex-wrap items-center gap-2">
+      <div className={lbl} title="Overall Momentum: after the entry time, wait until this row's combined premium (1 lot per leg) has moved this many points / % from its start premium, then enter. Blank = enter at the entry time">
+        Entry Mom
+        <MiniSelect value={row.entryMomDir ?? 'up'} ariaLabel="Entry momentum direction"
+          options={[{ value: 'up', label: '↑ up' }, { value: 'down', label: '↓ down' }]}
+          onChange={v => onUpdate({ entryMomDir: v as 'up' | 'down' })} className="w-16" />
+        <RuleNumInput value={row.entryMomValue ?? ''} onCommit={v => onUpdate({ entryMomValue: v })} placeholder="off"
+          className="w-12 h-6 text-center text-[11px]" />
+        <MiniSelect value={row.entryMomUnit ?? 'pts'} ariaLabel="Entry momentum unit"
+          options={[{ value: 'pts', label: 'pts' }, { value: 'pct', label: '%' }]}
+          onChange={v => onUpdate({ entryMomUnit: v as 'pts' | 'pct' })} className="w-14" />
+        <MiniSelect value={row.entryMomEval ?? 'ltp'} ariaLabel="Entry momentum evaluation"
+          title="Live LTP checks every tick; Candle close checks the last closed 1-minute candle's combined premium"
+          options={[{ value: 'ltp', label: 'Live LTP' }, { value: 'candle', label: 'Candle close' }]}
+          onChange={v => onUpdate({ entryMomEval: v as 'ltp' | 'candle' })} className="w-28" />
+      </div>
+      {on && status && <span className="text-[11px] font-semibold text-amber-400" title={status}>{status}</span>}
+    </div>
+  );
+}
+
 /**
  * Leg exits and what follows them — AlgoTest-style "Re-Entry on SL / Tgt"
  * (sell side only), No re-entry after, leg target (% or points), and SL → cost.
@@ -1007,6 +1043,7 @@ function LegReentryControls({ row, onUpdate, onCancelPending, legTargetsElsewher
 
   return (
     <div className={cn('flex flex-col gap-1', txt)}>
+      <EntryMomentumControl row={row} onUpdate={onUpdate} />
       <div className="flex flex-wrap items-center gap-2">
         {modeSelect('sl')}
         {modeSelect('tgt')}
@@ -2382,7 +2419,7 @@ function FocusTableRowImpl({
                   levelHigh: '', levelLow: '', levelVw: false, vwapInterval: '1', vwapBufferPct: '0.1',
                   slRupees: '', slMultiplier: '1.2', ceSlMultiplier: '1.2', peSlMultiplier: '1.2',
                   slRollStrikes: 0, slToCost: false, reSlMode: 'off', reTgtMode: 'off',
-                  ceTgtPct: '', peTgtPct: '', noReEntryAfter: '',
+                  ceTgtPct: '', peTgtPct: '', noReEntryAfter: '', entryMomValue: '',
                 })}
                 title="Clear rules"
                 className={cn('text-[11px] text-zinc-500 hover:text-zinc-300 transition-colors cursor-pointer', FOCUS_RING)}
@@ -2557,7 +2594,7 @@ function FocusProRowImpl({
     levelHigh: '', levelLow: '', levelVw: false, vwapInterval: '1', vwapBufferPct: '0.1',
     slRupees: '', slMultiplier: '1.2', ceSlMultiplier: '1.2', peSlMultiplier: '1.2',
     slRollStrikes: 0, slToCost: false, reSlMode: 'off', reTgtMode: 'off',
-    ceTgtPct: '', peTgtPct: '', noReEntryAfter: '',
+    ceTgtPct: '', peTgtPct: '', noReEntryAfter: '', entryMomValue: '',
   });
 
   const legLine = (leg: 'CE' | 'PE') => {
@@ -3251,7 +3288,7 @@ function FocusRowCardImpl({
           </span>
           <div className="flex items-center gap-1.5">
             <button
-              onClick={() => onUpdate({ levelHigh: '', levelLow: '', levelVw: false, vwapInterval: '1', vwapBufferPct: '0.1', slRupees: '', slMultiplier: '1.2', ceSlMultiplier: '1.2', peSlMultiplier: '1.2', slRollStrikes: 0, slToCost: false, reSlMode: 'off', reTgtMode: 'off', ceTgtPct: '', peTgtPct: '', noReEntryAfter: '' })}
+              onClick={() => onUpdate({ levelHigh: '', levelLow: '', levelVw: false, vwapInterval: '1', vwapBufferPct: '0.1', slRupees: '', slMultiplier: '1.2', ceSlMultiplier: '1.2', peSlMultiplier: '1.2', slRollStrikes: 0, slToCost: false, reSlMode: 'off', reTgtMode: 'off', ceTgtPct: '', peTgtPct: '', noReEntryAfter: '', entryMomValue: '' })}
               className={cn('text-[11px] text-zinc-500 hover:text-zinc-300 transition-colors cursor-pointer', FOCUS_RING)}
             >
               Clear
@@ -3511,6 +3548,9 @@ export default function FocusTool() {
   // entry window stays open for the rest of the session, so without this a
   // row would re-enter on every 5s tick.
   const autoEnteringRef = useRef<Set<string>>(new Set());
+  // Overall Momentum: each row's start premium, stamped with its day (in memory — a reload re-captures it).
+  const entryMomRef = useRef<Record<string, { day: string; ref: number }>>({});
+  const [entryMomStatus, setEntryMomStatus] = useState<Record<string, string>>({});
   const [peakMtm, setPeakMtm] = useState(0);
   const [lockMtm, setLockMtm] = useState<number | null>(null);
   /**
@@ -6207,7 +6247,32 @@ export default function FocusTool() {
           strikesReady: l.ceStrike != null || l.peStrike != null,
           flat: rowFlat(row),
         });
-        if (decision.enter) actionsRef.current.autoEnterRow(row, decision.reason);
+        let enter = decision.enter;
+        let reason = decision.reason;
+        let momStatus = '';
+        if (enter && entryMomentumOn(row)) {
+          // Combined premium of the legs this row trades; any missing quote → no premium yet.
+          const legs = legsOf(row);
+          const quotes = legs.map(leg => (leg === 'CE' ? l.ltpCe : l.ltpPe) ?? 0);
+          const liveNow = quotes.every(q => q > 0) ? quotes.reduce((a, b) => a + b, 0) : null;
+          const watched = row.entryMomEval === 'candle' ? (l.vwapClose1m ?? null) : liveNow;
+          const saved = entryMomRef.current[row.id];
+          const today = istToday();
+          const md = evaluateEntryMomentum(row, saved?.day === today ? saved.ref : null, watched, liveNow);
+          if (md.ref != null) entryMomRef.current[row.id] = { day: today, ref: md.ref };
+          if (md.ready) reason = `${decision.reason}; ${md.reason}`;
+          else { enter = false; momStatus = md.reason; }
+        }
+        // The start premium only lives while the row is waiting to enter: any
+        // loss of eligibility (disarmed, index stopped, …) or the entry itself drops it.
+        if (enter || !decision.enter) delete entryMomRef.current[row.id];
+        setEntryMomStatus(prev => {
+          if ((prev[row.id] ?? '') === momStatus) return prev;
+          const next = { ...prev };
+          if (momStatus) next[row.id] = momStatus; else delete next[row.id];
+          return next;
+        });
+        if (enter) actionsRef.current.autoEnterRow(row, reason);
       }
     };
 
@@ -6317,6 +6382,7 @@ export default function FocusTool() {
   }, [config.rows]);
 
   return (
+    <EntryMomContext.Provider value={entryMomStatus}>
     <div className="min-h-screen bg-zinc-950 text-white flex flex-col font-sans relative">
       {/* Fixed toast overlay */}
       <div className="fixed top-4 right-4 z-50 flex flex-col gap-2 pointer-events-none">
@@ -6758,6 +6824,7 @@ export default function FocusTool() {
         broker={broker}
       />
     </div>
+    </EntryMomContext.Provider>
   );
 }
 

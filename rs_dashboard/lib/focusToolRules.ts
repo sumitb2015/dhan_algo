@@ -818,6 +818,58 @@ export function evaluateEntry(
   return { enter: true, reason: `entry time ${row.entryTime} reached` };
 }
 
+// ── Overall Momentum (entry gate) ───────────────────────────────────────────
+
+export interface EntryMomentumDecision {
+  /** True when the gate is off, or the combined premium has moved enough. */
+  ready: boolean;
+  /** Start premium to remember for the next tick (null until one is seen). */
+  ref: number | null;
+  /** Premium that releases the entry; null while there is no start premium or the gate is off. */
+  trigger: number | null;
+  reason: string;
+}
+
+export function entryMomentumOn(row: Pick<FocusRow, 'entryMomValue'>): boolean {
+  return Number(row.entryMomValue) > 0;
+}
+
+/**
+ * AlgoTest "Overall Momentum": enter only once the combined premium has moved
+ * `value` points / % from the start premium. Up releases at ref + move, down at
+ * ref − move (200 ±10 pts → 210 / 190; ±10% → 220 / 180).
+ *
+ * `ref` is the start premium (first valid live premium once the entry time was
+ * reached); pass null before it is known and keep the returned `ref`.
+ * `premium` is what the row's evaluation mode watches (live or last closed
+ * candle); null/0 = no quote yet, so wait.
+ */
+export function evaluateEntryMomentum(
+  row: Pick<FocusRow, 'entryMomValue' | 'entryMomDir' | 'entryMomUnit'>,
+  ref: number | null,
+  premium: number | null,
+  liveNow: number | null = premium,
+): EntryMomentumDecision {
+  if (!entryMomentumOn(row)) return { ready: true, ref, trigger: null, reason: '' };
+  const v = Number(row.entryMomValue);
+  let start = ref;
+  if (!(start != null && start > 0)) {
+    start = liveNow != null && liveNow > 0 ? liveNow : null;
+    if (start == null) return { ready: false, ref: null, trigger: null, reason: 'momentum: waiting for a start premium' };
+  }
+  const up = row.entryMomDir !== 'down';
+  const move = row.entryMomUnit === 'pct' ? start * v / 100 : v;
+  const trigger = up ? start + move : start - move;
+  const unit = row.entryMomUnit === 'pct' ? `${v}%` : `${v} pts`;
+  if (!(premium != null && premium > 0)) {
+    return { ready: false, ref: start, trigger, reason: `momentum: waiting for a premium (start ${start.toFixed(2)})` };
+  }
+  const hit = up ? premium >= trigger : premium <= trigger;
+  return hit
+    ? { ready: true, ref: start, trigger, reason: `combined premium ${premium.toFixed(2)} ${up ? '≥' : '≤'} ${trigger.toFixed(2)} (${up ? '+' : '−'}${unit} from ${start.toFixed(2)})` }
+    : { ready: false, ref: start, trigger, reason: `momentum: premium ${premium.toFixed(2)}, needs ${up ? '≥' : '≤'} ${trigger.toFixed(2)} (${up ? '+' : '−'}${unit} from ${start.toFixed(2)})` };
+}
+
 // ── Account budget ───────────────────────────────────────────────────────────
 
 export type TrailState = 'INACTIVE' | 'DORMANT' | 'ARMED';

@@ -14,7 +14,7 @@ import { readFileSync } from 'node:fs';
 import path from 'node:path';
 
 import {
-  evaluateEntry, evaluateGlobalRisk, evaluateRowExit, legStopReason,
+  evaluateEntry, evaluateEntryMomentum, evaluateGlobalRisk, evaluateRowExit, legStopReason,
   dteForExpiry, dteMatches, sidePremium, legsOf, legsFlat, rowOwnsLeg,
   stopPremium, legStopPremium, pairStopPremium, legOwnContracts,
   nextOpenedTs, isGhostDropProtected, GHOST_DROP_GRACE_MS,
@@ -599,4 +599,20 @@ test('legTargetLevel / legTargetReason in points', () => {
   const r = row({ ceTgtPct: '30', legTgtUnit: 'pts', fill: { ceStrike: 24000, peStrike: null, ceQty: 75, peQty: 0, ceEntry: 200, ts: '' } });
   assert.match(legTargetReason(r, 'CE', live(c)) ?? '', /CE target 30 pts hit/);
   assert.equal(legTargetReason(r, 'CE', live({ ...c, ceLtp: 171 })), null);
+});
+
+test('overall momentum entry gate', () => {
+  const m = (o: object) => o as never;
+  assert.equal(evaluateEntryMomentum(m({}), null, null).ready, true);
+  const d0 = evaluateEntryMomentum(m({ entryMomValue: '10' }), null, 200);
+  assert.equal(d0.ready, false); assert.equal(d0.ref, 200); assert.equal(d0.trigger, 210);
+  assert.equal(evaluateEntryMomentum(m({ entryMomValue: '10' }), 200, 209.9).ready, false);
+  assert.equal(evaluateEntryMomentum(m({ entryMomValue: '10' }), 200, 210).ready, true);
+  assert.equal(evaluateEntryMomentum(m({ entryMomValue: '10', entryMomDir: 'down' }), 200, 190).ready, true);
+  assert.equal(evaluateEntryMomentum(m({ entryMomValue: '10', entryMomDir: 'down' }), 200, 190.5).ready, false);
+  assert.equal(evaluateEntryMomentum(m({ entryMomValue: '10', entryMomUnit: 'pct' }), 200, 219).ready, false);
+  assert.equal(evaluateEntryMomentum(m({ entryMomValue: '10', entryMomUnit: 'pct' }), 200, 220).ready, true);
+  assert.equal(evaluateEntryMomentum(m({ entryMomValue: '10', entryMomUnit: 'pct', entryMomDir: 'down' }), 200, 180).ready, true);
+  const d1 = evaluateEntryMomentum(m({ entryMomValue: '10' }), null, null, 200);
+  assert.equal(d1.ready, false); assert.equal(d1.ref, 200);
 });

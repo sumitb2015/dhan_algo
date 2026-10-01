@@ -236,6 +236,19 @@ export interface FocusRow {
    */
   noReEntryAfter?: string;
   /**
+   * Overall Momentum (AlgoTest): hold the entry until the row's combined
+   * premium (CE+PE of the legs it trades, 1 lot each) has moved this many
+   * points / % from its start premium — the first premium seen once the entry
+   * time is reached. Blank / 0 = off (enter at the entry time as before).
+   */
+  entryMomValue?: string;
+  /** Missing = 'up'. */
+  entryMomDir?: 'up' | 'down';
+  /** Missing = 'pts'. */
+  entryMomUnit?: 'pts' | 'pct';
+  /** 'ltp' = live combined premium, 'candle' = last closed 1-min candle's. Missing = 'ltp'. */
+  entryMomEval?: 'ltp' | 'candle';
+  /**
    * Leg-wise target: the leg exits once its premium has decayed by this much
    * from its own entry — a % (entry × (1 − v/100)) or points (entry − v), per
    * legTgtUnit. Blank / 0 = off. (Named for the original %-only version;
