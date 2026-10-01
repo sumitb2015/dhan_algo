@@ -39,16 +39,25 @@ export function useTabLeader(name: string): { isLeader: boolean | null; leaderRe
     const lockName = `dhan-engine:${name}`;
     const abort = new AbortController();
     let release: (() => void) | null = null;
-    const hold = () => new Promise<void>(resolve => { release = resolve; lead(); });
+    // A grant that arrives after this effect was cleaned up (React Strict Mode
+    // mounts, unmounts and remounts every effect in dev; Fast Refresh re-runs
+    // them) must hand the lock straight back — holding it forever left the
+    // live mount waiting behind a dead one, so a single tab never led.
+    const hold = () => (disposed
+      ? Promise.resolve()
+      : new Promise<void>(resolve => { release = resolve; lead(); }));
     locks
+      // No `signal` here: the Web Locks spec rejects signal + ifAvailable
+      // (NotSupportedError). A grant after cleanup is handed back by hold().
       .request(lockName, { ifAvailable: true }, lock => {
         if (lock) return hold();
-        if (!disposed) setIsLeader(false);
+        if (disposed) return undefined;
+        setIsLeader(false);
         // Queue behind the leader; take over when its tab closes.
         locks.request(lockName, { signal: abort.signal }, hold).catch(() => { /* aborted on unmount */ });
         return undefined;
       })
-      .catch(() => { /* lock manager unavailable */ });
+      .catch(() => { /* no lock manager */ });
     return () => {
       disposed = true;
       abort.abort();
