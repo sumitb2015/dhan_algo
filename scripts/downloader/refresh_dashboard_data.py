@@ -1050,8 +1050,9 @@ def run_yahoo_backup(target: str):
             download_yahoo_index("nifty50", period="1y")
         if target in ("all", "nifty500-index"):
             download_yahoo_index("nifty500-index", period="1y")
-        if target in ("all", "dxy"):
-            download_yahoo_index("dxy", period="1y")
+        for gkey in ("dxy", "us10y", "us30y"):
+            if target in ("all", gkey):
+                download_yahoo_index(gkey, period="1y")
         if target in ("all", "stocks"):
             symbols = get_nifty500_symbols()
             download_yahoo_stocks(symbols, period="1y", sync_to_fresh=True)
@@ -1083,7 +1084,7 @@ def run_yahoo_backup(target: str):
 def main():
     parser = argparse.ArgumentParser(description="Refresh RS dashboard data (incremental)")
     parser.add_argument("--target", default="all",
-                        choices=["all", "nifty50", "nifty500-index", "indices", "stocks", "quotes", "dxy"])
+                        choices=["all", "nifty50", "nifty500-index", "indices", "stocks", "quotes", "dxy", "us10y", "us30y"])
     parser.add_argument("--source", default="yahoo", choices=["yahoo", "dhan"],
                         help="Data source: yahoo (default, fast/resilient) or dhan (primary broker)")
     parser.add_argument("--fallback-yahoo", action=argparse.BooleanOptionalAction, default=True,

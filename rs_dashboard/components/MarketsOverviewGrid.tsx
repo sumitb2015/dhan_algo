@@ -19,7 +19,8 @@ import { useLiveTickerPoll, isStale, ageOf, ageLabel } from '@/lib/useLiveTicker
 import { fmtPrice } from './LiveTickerPanel';
 import { startLiveIndicesBridge } from '@/lib/startLiveIndicesBridge';
 import { geistDisplay } from '@/lib/fonts';
-import { useDxyQuote } from '@/lib/useDxyQuote';
+import { useGlobalQuotes } from '@/lib/useGlobalQuotes';
+import { GLOBAL_MARKETS, GLOBAL_BY_KEY } from '@/lib/globalMarkets';
 
 interface IndexQuote {
   ltp: number;
@@ -55,7 +56,7 @@ export default function MarketsOverviewGrid() {
 
   const { data, flash, now } = useLiveTickerPoll<IndicesResponse>('/api/scalper/top-indices', pickLtps);
 
-  const dxy = useDxyQuote();
+  const globalQuotes = useGlobalQuotes();
 
   const tickMs = data?.updated_at ? new Date(data.updated_at).getTime() : NaN;
   const stale = isStale(tickMs, now);
@@ -65,9 +66,11 @@ export default function MarketsOverviewGrid() {
     const order = data?.order ?? [];
     const quotes = data?.quotes ?? {};
     const base = order.map(o => ({ ...o, quote: (quotes[o.key] ?? null) as IndexQuote | null }));
-    // DXY is EOD from the Yahoo sync, not part of the live Dhan feed.
-    return dxy ? [...base, { key: 'DXY', label: 'US Dollar Index (DXY)', quote: dxy as IndexQuote }] : base;
-  }, [data, dxy]);
+    // DXY / US yields come from Yahoo, not the Dhan feed above.
+    const global = GLOBAL_MARKETS.filter(m => globalQuotes[m.key])
+      .map(m => ({ key: m.key, label: m.label, quote: globalQuotes[m.key] as IndexQuote }));
+    return [...base, ...global];
+  }, [data, globalQuotes]);
 
   const missing = data ? data.order.length - data.count : 0;
   const empty = !!data && data.count === 0;
@@ -138,7 +141,8 @@ export default function MarketsOverviewGrid() {
             const up = pct !== null && pct > 0;
             const down = pct !== null && pct < 0;
             const isMcx = MCX_KEYS.has(r.key);
-            const isEod = r.key === 'DXY';
+            const isGlobal = r.key in GLOBAL_BY_KEY;
+            const unit = GLOBAL_BY_KEY[r.key]?.unit ?? '';
             const Icon = isMcx ? Fuel : LineChart;
             const DirIcon = pct === null ? Minus : up ? TrendingUp : down ? TrendingDown : Minus;
             const toneClass = up ? 'text-emerald-400' : down ? 'text-red-400' : 'text-zinc-400';
@@ -157,7 +161,7 @@ export default function MarketsOverviewGrid() {
                   <div className="flex items-center justify-between mb-2.5">
                     <span className="flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-[0.15em] text-zinc-500">
                       <Icon className={cn('h-3 w-3', isMcx ? 'text-amber-400' : 'text-sky-400')} />
-                      {isMcx ? 'MCX' : isEod ? (dxy?.source === 'yahoo-live' ? 'Global · Live' : 'Global · EOD') : 'Index'}
+                      {isMcx ? 'MCX' : isGlobal ? (globalQuotes[r.key]?.source === 'yahoo-live' ? 'Global · Live' : 'Global · EOD') : 'Index'}
                     </span>
                     <DirIcon className={cn('h-3.5 w-3.5', toneClass)} />
                   </div>
@@ -169,7 +173,7 @@ export default function MarketsOverviewGrid() {
                   <div className="flex items-end justify-between gap-2">
                     <span className={cn('font-mono text-lg font-bold leading-none tabular-nums transition-colors',
                       f === 'up' ? 'text-emerald-300' : f === 'down' ? 'text-red-300' : 'text-zinc-100')}>
-                      {r.quote && r.quote.ltp > 0 ? fmtPrice(r.quote.ltp) : '—'}
+                      {r.quote && r.quote.ltp > 0 ? `${fmtPrice(r.quote.ltp)}${unit}` : '—'}
                     </span>
                     <span className={cn('inline-flex items-center px-1.5 py-0.5 rounded text-[11px] font-bold tabular-nums font-mono border',
                       pct === null ? 'bg-zinc-800 border-zinc-700 text-zinc-500'

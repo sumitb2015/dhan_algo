@@ -19,7 +19,8 @@ import { useLiveTickerPoll, isStale, ageOf, ageLabel } from '@/lib/useLiveTicker
 import { fmtPrice } from './LiveTickerPanel';
 import { startLiveIndicesBridge } from '@/lib/startLiveIndicesBridge';
 import { geistDisplay } from '@/lib/fonts';
-import { useDxyQuote } from '@/lib/useDxyQuote';
+import { useGlobalQuotes } from '@/lib/useGlobalQuotes';
+import { GLOBAL_BY_KEY } from '@/lib/globalMarkets';
 
 // Chrome/Edge-only API, not yet in lib.dom.d.ts.
 declare global {
@@ -125,10 +126,12 @@ export default function MarketDetail({ marketKey }: { marketKey: string }) {
   const stale = isStale(tickMs, now);
   const ageMs = ageOf(tickMs, now);
 
-  const dxy = useDxyQuote();
-  const isDxy = marketKey === 'DXY';
-  const row = isDxy ? { key: 'DXY', label: 'US Dollar Index (DXY)' } : data?.order.find(o => o.key === marketKey) ?? null;
-  const quote = (isDxy ? dxy : data?.quotes?.[marketKey] ?? null) as IndexQuote | null;
+  const globalQuotes = useGlobalQuotes();
+  const globalMarket = GLOBAL_BY_KEY[marketKey] ?? null;
+  const unit = globalMarket?.unit ?? '';
+  const dxy = globalMarket ? globalQuotes[marketKey] ?? null : null;
+  const row = globalMarket ? { key: globalMarket.key, label: globalMarket.label } : data?.order.find(o => o.key === marketKey) ?? null;
+  const quote = (globalMarket ? dxy : data?.quotes?.[marketKey] ?? null) as IndexQuote | null;
   const f = flash[marketKey];
 
   const pct = quote?.change_pct ?? null;
@@ -140,7 +143,7 @@ export default function MarketDetail({ marketKey }: { marketKey: string }) {
   const toneClass = up ? 'text-emerald-400' : down ? 'text-red-400' : 'text-zinc-400';
 
   const notFound = data && !row;
-  const dxyDate = isDxy && dxy?.source !== 'yahoo-live' ? dxy?.date : null;
+  const dxyDate = globalMarket && dxy?.source !== 'yahoo-live' ? dxy?.date : null;
 
   return (
     <div className="relative isolate flex flex-col min-h-screen bg-zinc-950 text-white overflow-hidden">
@@ -210,6 +213,7 @@ export default function MarketDetail({ marketKey }: { marketKey: string }) {
         <PipContent
           label={row?.label ?? marketKey}
           isMcx={isMcx}
+          unit={unit}
           quote={quote}
           pct={pct}
           up={up}
@@ -234,7 +238,7 @@ export default function MarketDetail({ marketKey }: { marketKey: string }) {
             <div className="flex flex-col items-center text-center w-full">
               <div className={cn('font-mono font-bold tabular-nums leading-none transition-colors text-5xl sm:text-7xl md:text-9xl lg:text-[11rem]',
                 f === 'up' ? 'text-emerald-300' : f === 'down' ? 'text-red-300' : 'text-zinc-100')}>
-                {quote && quote.ltp > 0 ? fmtPrice(quote.ltp) : '—'}
+                {quote && quote.ltp > 0 ? `${fmtPrice(quote.ltp)}${unit}` : '—'}
               </div>
               <div className="flex items-center flex-wrap justify-center gap-2 sm:gap-3 md:gap-4 mt-4 sm:mt-6 md:mt-8">
                 <DirIcon className={cn('h-5 w-5 sm:h-8 sm:w-8 md:h-12 md:w-12', toneClass)} />
@@ -245,7 +249,7 @@ export default function MarketDetail({ marketKey }: { marketKey: string }) {
                     : 'bg-zinc-800 border-zinc-700 text-zinc-500')}>
                   {pct === null ? 'N/A' : `${pct > 0 ? '+' : ''}${pct.toFixed(2)}%`}
                 </span>
-                <span className="text-zinc-500 text-xs sm:text-lg md:text-2xl">{dxyDate ? `vs prior close · EOD ${dxyDate}` : isDxy ? 'vs previous close · Yahoo live' : "vs yesterday's close"}</span>
+                <span className="text-zinc-500 text-xs sm:text-lg md:text-2xl">{dxyDate ? `vs prior close · EOD ${dxyDate}`   : globalMarket ? 'vs previous close · Yahoo live' : "vs yesterday's close"}</span>
               </div>
             </div>
 
@@ -267,10 +271,11 @@ export default function MarketDetail({ marketKey }: { marketKey: string }) {
 }
 
 function PipContent({
-  label, isMcx, quote, pct, up, down, flash, stale, hasData, ageMs,
+  label, isMcx, unit, quote, pct, up, down, flash, stale, hasData, ageMs,
 }: {
   label: string;
   isMcx: boolean;
+  unit: string;
   quote: IndexQuote | null;
   pct: number | null;
   up: boolean;
@@ -299,7 +304,7 @@ function PipContent({
       <div className="flex items-center justify-between gap-2">
         <div className={cn('font-mono font-bold tabular-nums leading-none text-2xl transition-colors truncate',
           flash === 'up' ? 'text-emerald-300' : flash === 'down' ? 'text-red-300' : 'text-zinc-100')}>
-          {quote && quote.ltp > 0 ? fmtPrice(quote.ltp) : '—'}
+          {quote && quote.ltp > 0 ? `${fmtPrice(quote.ltp)}${unit}` : '—'}
         </div>
         <div className="flex items-center gap-1 shrink-0">
           <DirIcon className={cn('h-3 w-3', toneClass)} />
