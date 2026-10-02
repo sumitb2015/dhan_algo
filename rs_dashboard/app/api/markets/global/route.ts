@@ -12,7 +12,7 @@ const LIVE_SCRIPT = path.join(PROJECT_ROOT, 'scripts', 'tools', 'yahoo_live_quot
 const TTL_MS = 15_000;
 let cache: { at: number; body: unknown } | null = null;
 
-interface Live { ltp: number; prev_close: number; day_high: number; day_low: number; ts: number }
+interface Live { ltp: number; prev_close: number; day_high: number; day_low: number; ts: number; closed?: boolean }
 
 function eodQuote(csv: string) {
   const rows = fs.readFileSync(path.join(PROJECT_ROOT, 'Historical Data', csv), 'utf8').trim().split('\n').slice(1)

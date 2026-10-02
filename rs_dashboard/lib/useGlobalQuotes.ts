@@ -3,7 +3,7 @@ import { useEffect, useState } from 'react';
 
 export interface GlobalQuote {
   ltp: number; prev_close: number; change_pct: number | null;
-  day_high: number | null; day_low: number | null; source: string; date: string; ts?: number;
+  day_high: number | null; day_low: number | null; source: string; date: string; ts?: number; closed?: boolean;
 }
 
 // DXY + US yields: live (Yahoo 1-min) with EOD-CSV fallback; the route caches 15 s.

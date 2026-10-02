@@ -19,7 +19,26 @@ TICKERS = {
 }
 
 
-def quote(ticker: str) -> dict:
+# Local regular-session close (HH:MM, exchange time) per key. Yahoo's index bars lag
+# 15-20 min, so "last bar is old" can't tell a trading market from a closed one;
+# a last bar at/after the close means the session is over. 24h/unknown keys omitted.
+SESSION_CLOSE = {
+    "N225": "15:30", "HSI": "16:00", "SSEC": "15:00", "KS11": "15:30", "AXJO": "16:00",
+    "FTSE": "16:30", "GDAXI": "17:30", "FCHI": "17:30", "STOXX50E": "17:30",
+    "DJI": "16:00", "NASDAQ": "16:00", "SPX": "16:00",
+}
+
+
+def session_over(key: str, last_bar) -> bool:
+    close = SESSION_CLOSE.get(key)
+    if not close:
+        return False
+    hh, mm = map(int, close.split(":"))
+    # last_bar is tz-aware in the exchange's own zone, so .hour/.minute are local.
+    return last_bar.hour * 60 + last_bar.minute >= hh * 60 + mm - 3
+
+
+def quote(ticker: str, key: str = "") -> dict:
     t = yf.Ticker(ticker)
     h = t.history(period="1d", interval="1m")
     h = h[h["Close"] > 0]
@@ -43,13 +62,14 @@ def quote(ticker: str) -> dict:
         "day_high": round(float(h["High"].max()), 3),
         "day_low": round(float(h["Low"].min()), 3),
         "ts": int(h.index[-1].timestamp() * 1000),
+        "closed": session_over(key, h.index[-1]),
     }
 
 
 def main():
     def safe(item):
         try:
-            return item[0], quote(item[1])
+            return item[0], quote(item[1], item[0])
         except Exception:
             return item[0], None
 

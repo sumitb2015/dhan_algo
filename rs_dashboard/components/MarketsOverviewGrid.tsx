@@ -288,7 +288,7 @@ const STATE_UI: Record<MarketState, { label: string; dot: string; text: string }
 };
 
 function MarketsTable({ rows, globalQuotes, loaded, now, feedStale }: {
-  rows: TableRow[]; globalQuotes: Record<string, { source: string; ts?: number }>; loaded: boolean;
+  rows: TableRow[]; globalQuotes: Record<string, { source: string; ts?: number; closed?: boolean }>; loaded: boolean;
   now: number; feedStale: boolean;
 }) {
   const [sort, setSort] = useState<{ key: SortKey; dir: SortDir } | null>(null);
@@ -319,7 +319,7 @@ function MarketsTable({ rows, globalQuotes, loaded, now, feedStale }: {
     let state: MarketState; let age: string | null = null;
     if (g) {
       const gq = globalQuotes[r.key];
-      state = globalMarketState(now, gq?.ts, gq?.source === 'yahoo-live');
+      state = globalMarketState(now, gq?.ts, gq?.source === 'yahoo-live', gq?.closed);
       if (gq?.ts) age = fmtAge(now, gq.ts);
     } else {
       state = indianMarketState(now, MCX_KEYS.has(r.key), feedStale);
@@ -441,7 +441,7 @@ function MarketsTable({ rows, globalQuotes, loaded, now, feedStale }: {
                 <div title={`${r.feed}${r.age ? ` · last tick ${r.age}` : ''}`} className="flex items-center gap-1.5">
                   <span className={cn('h-1.5 w-1.5 rounded-full shrink-0', ui.dot)} />
                   <span className={cn('text-[11px] font-bold', ui.text)}>{ui.label}</span>
-                  {r.age && r.state !== 'live' && <span className="text-[11px] text-zinc-500">{r.age}</span>}
+                  {r.age && <span className="text-[11px] text-zinc-500">{r.age}</span>}
                 </div>
               </TD>
             </tr>

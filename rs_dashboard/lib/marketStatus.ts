@@ -17,10 +17,16 @@ export function indianMarketState(nowMs: number, isMcx: boolean, feedStale: bool
   return feedStale ? 'stale' : 'live';
 }
 
-/** Yahoo rows: "live" only while the newest 1-min bar is recent. */
-export function globalMarketState(nowMs: number, ts: number | undefined, isLiveSource: boolean): MarketState {
-  if (!isLiveSource || !ts) return 'closed';
-  return nowMs - ts <= 20 * 60_000 ? 'live' : 'closed';
+/**
+ * Yahoo rows. Its index bars run 15-21 min behind the exchange, so a trading
+ * market always shows a bar that old; the cutoff sits well above that lag.
+ * `closed` is the script's verdict that the last bar is at/after the session close.
+ */
+export const YAHOO_LAG_CUTOFF_MS = 40 * 60_000;
+
+export function globalMarketState(nowMs: number, ts: number | undefined, isLiveSource: boolean, closed?: boolean): MarketState {
+  if (!isLiveSource || !ts || closed) return 'closed';
+  return nowMs - ts <= YAHOO_LAG_CUTOFF_MS ? 'live' : 'closed';
 }
 
 export function fmtAge(nowMs: number, ts: number): string {
