@@ -157,7 +157,7 @@ export default function MarketsOverviewGrid() {
                   <div className="flex items-center justify-between mb-2.5">
                     <span className="flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-[0.15em] text-zinc-500">
                       <Icon className={cn('h-3 w-3', isMcx ? 'text-amber-400' : 'text-sky-400')} />
-                      {isMcx ? 'MCX' : isEod ? 'Global · EOD' : 'Index'}
+                      {isMcx ? 'MCX' : isEod ? (dxy?.source === 'yahoo-live' ? 'Global · Live' : 'Global · EOD') : 'Index'}
                     </span>
                     <DirIcon className={cn('h-3.5 w-3.5', toneClass)} />
                   </div>

@@ -140,7 +140,7 @@ export default function MarketDetail({ marketKey }: { marketKey: string }) {
   const toneClass = up ? 'text-emerald-400' : down ? 'text-red-400' : 'text-zinc-400';
 
   const notFound = data && !row;
-  const dxyDate = isDxy ? dxy?.date : null;
+  const dxyDate = isDxy && dxy?.source !== 'yahoo-live' ? dxy?.date : null;
 
   return (
     <div className="relative isolate flex flex-col min-h-screen bg-zinc-950 text-white overflow-hidden">
@@ -245,7 +245,7 @@ export default function MarketDetail({ marketKey }: { marketKey: string }) {
                     : 'bg-zinc-800 border-zinc-700 text-zinc-500')}>
                   {pct === null ? 'N/A' : `${pct > 0 ? '+' : ''}${pct.toFixed(2)}%`}
                 </span>
-                <span className="text-zinc-500 text-xs sm:text-lg md:text-2xl">{dxyDate ? `vs prior close · EOD ${dxyDate}` : "vs yesterday's close"}</span>
+                <span className="text-zinc-500 text-xs sm:text-lg md:text-2xl">{dxyDate ? `vs prior close · EOD ${dxyDate}` : isDxy ? 'vs previous close · Yahoo live' : "vs yesterday's close"}</span>
               </div>
             </div>
 

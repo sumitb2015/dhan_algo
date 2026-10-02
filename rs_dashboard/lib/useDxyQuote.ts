@@ -3,10 +3,10 @@ import { useEffect, useState } from 'react';
 
 export interface DxyQuote {
   ltp: number; prev_close: number; change_pct: number | null;
-  day_high: number | null; day_low: number | null; source: string; date: string;
+  day_high: number | null; day_low: number | null; source: string; date: string; ts?: number;
 }
 
-// EOD series — refetch rarely; the file only changes when the data sync runs.
+// Live (Yahoo 1-min) with EOD-CSV fallback; the route caches 15 s.
 export function useDxyQuote(): DxyQuote | null {
   const [q, setQ] = useState<DxyQuote | null>(null);
   useEffect(() => {
@@ -14,7 +14,7 @@ export function useDxyQuote(): DxyQuote | null {
     const load = () => fetch('/api/markets/dxy').then(r => r.json())
       .then(d => { if (alive && d?.success) setQ(d); }).catch(() => {});
     load();
-    const t = setInterval(load, 300_000);
+    const t = setInterval(load, 15_000);
     return () => { alive = false; clearInterval(t); };
   }, []);
   return q;
