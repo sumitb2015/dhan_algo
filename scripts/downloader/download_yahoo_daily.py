@@ -47,6 +47,7 @@ GLOBAL_STOP  = os.path.join(DEBUG_DIR, "refresh_stop.trigger")
 N500_LIST    = NIFTY500_LIST
 NIFTY50_CSV  = os.path.join(HIST_DIR, "NIFTY_50_Daily_5Y.csv")
 N500IDX_CSV  = os.path.join(HIST_DIR, "NIFTY_500_Daily.csv")
+DXY_CSV      = os.path.join(HIST_DIR, "US_DOLLAR_INDEX_Daily.csv")
 
 os.makedirs(DEBUG_DIR, exist_ok=True)
 os.makedirs(HIST_DIR, exist_ok=True)
@@ -279,6 +280,7 @@ def download_yahoo_index(target: str, period: str = "1y", out_csv: str = None):
     name_map = {
         "nifty50": ("^NSEI", NIFTY50_CSV, "Nifty 50"),
         "nifty500-index": ("^CRSLDX", N500IDX_CSV, "Nifty 500"),
+        "dxy": ("DX-Y.NYB", DXY_CSV, "US Dollar Index (DXY)"),
     }
     if target not in name_map:
         return False
@@ -321,7 +323,7 @@ def download_yahoo_index(target: str, period: str = "1y", out_csv: str = None):
 # ── Main Entrypoint ───────────────────────────────────────────────────────────
 def main():
     parser = argparse.ArgumentParser(description="Yahoo Finance EOD Data Downloader & Backup Engine")
-    parser.add_argument("--target", choices=["stocks", "nifty50", "nifty500-index", "all"], default="stocks",
+    parser.add_argument("--target", choices=["stocks", "nifty50", "nifty500-index", "dxy", "all"], default="stocks",
                         help="Target dataset to download")
     parser.add_argument("--period", default="1y", help="Historical period: 1mo, 3mo, 6mo, 1y, 2y, max")
     parser.add_argument("--batch-size", type=int, default=50, help="Batch download chunk size (default: 50)")
@@ -341,6 +343,9 @@ def main():
 
     if args.target in ("nifty500-index", "all"):
         download_yahoo_index("nifty500-index", period=args.period)
+
+    if args.target in ("dxy", "all"):
+        download_yahoo_index("dxy", period=args.period)
 
     if args.target in ("stocks", "all"):
         symbols = get_nifty500_symbols()

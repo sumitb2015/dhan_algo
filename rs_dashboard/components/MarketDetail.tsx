@@ -19,6 +19,7 @@ import { useLiveTickerPoll, isStale, ageOf, ageLabel } from '@/lib/useLiveTicker
 import { fmtPrice } from './LiveTickerPanel';
 import { startLiveIndicesBridge } from '@/lib/startLiveIndicesBridge';
 import { geistDisplay } from '@/lib/fonts';
+import { useDxyQuote } from '@/lib/useDxyQuote';
 
 // Chrome/Edge-only API, not yet in lib.dom.d.ts.
 declare global {
@@ -124,8 +125,10 @@ export default function MarketDetail({ marketKey }: { marketKey: string }) {
   const stale = isStale(tickMs, now);
   const ageMs = ageOf(tickMs, now);
 
-  const row = data?.order.find(o => o.key === marketKey) ?? null;
-  const quote = data?.quotes?.[marketKey] ?? null;
+  const dxy = useDxyQuote();
+  const isDxy = marketKey === 'DXY';
+  const row = isDxy ? { key: 'DXY', label: 'US Dollar Index (DXY)' } : data?.order.find(o => o.key === marketKey) ?? null;
+  const quote = (isDxy ? dxy : data?.quotes?.[marketKey] ?? null) as IndexQuote | null;
   const f = flash[marketKey];
 
   const pct = quote?.change_pct ?? null;
@@ -137,6 +140,7 @@ export default function MarketDetail({ marketKey }: { marketKey: string }) {
   const toneClass = up ? 'text-emerald-400' : down ? 'text-red-400' : 'text-zinc-400';
 
   const notFound = data && !row;
+  const dxyDate = isDxy ? dxy?.date : null;
 
   return (
     <div className="relative isolate flex flex-col min-h-screen bg-zinc-950 text-white overflow-hidden">
@@ -241,7 +245,7 @@ export default function MarketDetail({ marketKey }: { marketKey: string }) {
                     : 'bg-zinc-800 border-zinc-700 text-zinc-500')}>
                   {pct === null ? 'N/A' : `${pct > 0 ? '+' : ''}${pct.toFixed(2)}%`}
                 </span>
-                <span className="text-zinc-500 text-xs sm:text-lg md:text-2xl">vs yesterday&apos;s close</span>
+                <span className="text-zinc-500 text-xs sm:text-lg md:text-2xl">{dxyDate ? `vs prior close · EOD ${dxyDate}` : "vs yesterday's close"}</span>
               </div>
             </div>
 

@@ -19,6 +19,7 @@ import { useLiveTickerPoll, isStale, ageOf, ageLabel } from '@/lib/useLiveTicker
 import { fmtPrice } from './LiveTickerPanel';
 import { startLiveIndicesBridge } from '@/lib/startLiveIndicesBridge';
 import { geistDisplay } from '@/lib/fonts';
+import { useDxyQuote } from '@/lib/useDxyQuote';
 
 interface IndexQuote {
   ltp: number;
@@ -54,6 +55,8 @@ export default function MarketsOverviewGrid() {
 
   const { data, flash, now } = useLiveTickerPoll<IndicesResponse>('/api/scalper/top-indices', pickLtps);
 
+  const dxy = useDxyQuote();
+
   const tickMs = data?.updated_at ? new Date(data.updated_at).getTime() : NaN;
   const stale = isStale(tickMs, now);
   const ageMs = ageOf(tickMs, now);
@@ -61,8 +64,10 @@ export default function MarketsOverviewGrid() {
   const rows = useMemo(() => {
     const order = data?.order ?? [];
     const quotes = data?.quotes ?? {};
-    return order.map(o => ({ ...o, quote: quotes[o.key] ?? null }));
-  }, [data]);
+    const base = order.map(o => ({ ...o, quote: (quotes[o.key] ?? null) as IndexQuote | null }));
+    // DXY is EOD from the Yahoo sync, not part of the live Dhan feed.
+    return dxy ? [...base, { key: 'DXY', label: 'US Dollar Index (DXY)', quote: dxy as IndexQuote }] : base;
+  }, [data, dxy]);
 
   const missing = data ? data.order.length - data.count : 0;
   const empty = !!data && data.count === 0;
@@ -133,6 +138,7 @@ export default function MarketsOverviewGrid() {
             const up = pct !== null && pct > 0;
             const down = pct !== null && pct < 0;
             const isMcx = MCX_KEYS.has(r.key);
+            const isEod = r.key === 'DXY';
             const Icon = isMcx ? Fuel : LineChart;
             const DirIcon = pct === null ? Minus : up ? TrendingUp : down ? TrendingDown : Minus;
             const toneClass = up ? 'text-emerald-400' : down ? 'text-red-400' : 'text-zinc-400';
@@ -151,7 +157,7 @@ export default function MarketsOverviewGrid() {
                   <div className="flex items-center justify-between mb-2.5">
                     <span className="flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-[0.15em] text-zinc-500">
                       <Icon className={cn('h-3 w-3', isMcx ? 'text-amber-400' : 'text-sky-400')} />
-                      {isMcx ? 'MCX' : 'Index'}
+                      {isMcx ? 'MCX' : isEod ? 'Global · EOD' : 'Index'}
                     </span>
                     <DirIcon className={cn('h-3.5 w-3.5', toneClass)} />
                   </div>
