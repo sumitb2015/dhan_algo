@@ -249,6 +249,11 @@ function sectionOf(key: string): SectionId {
 
 const COLS = 14;
 
+// Fixed column widths (px) so every numeric column is the same width and the
+// layout doesn't shift as live values change length. Order = header order.
+const COL_WIDTHS = [150, 82, 98, 98, 98, 98, 98, 98, 140, 78, 78, 78, 150, 128];
+const TABLE_MIN_W = COL_WIDTHS.reduce((a, b) => a + b, 0);
+
 // Direction arrow for the table's change columns; flat/unknown renders nothing
 // but keeps the column width so numbers stay aligned.
 function DirArrow({ v }: { v: number | null }) {
@@ -365,7 +370,10 @@ function MarketsTable({ rows, globalQuotes, loaded, now, feedStale }: {
 
   return (
     <div className="rounded-2xl border border-white/10 bg-zinc-900/40 backdrop-blur-xl shadow-lg shadow-black/20 overflow-x-auto">
-      <table className="w-full border-collapse">
+      <table className="w-full table-fixed border-collapse" style={{ minWidth: TABLE_MIN_W }}>
+        <colgroup>
+          {COL_WIDTHS.map((w, i) => <col key={i} style={{ width: w }} />)}
+        </colgroup>
         <thead>
           <tr>
             <TH onClick={() => clickSort('label')} sortDir={dirOf('label')} className={hd}>Market</TH>
@@ -404,16 +412,16 @@ function MarketsTable({ rows, globalQuotes, loaded, now, feedStale }: {
               <TD className="px-3 py-2 text-zinc-400 font-sans">{r.group}</TD>
               <TD right className="px-3 py-2 font-bold text-zinc-100 tabular-nums">{fmtUnit(r.ltp, r.unit)}</TD>
               <TD right className={cn('px-3 py-2 tabular-nums', toneOf(r.chg))}>
-                <span className="inline-flex items-center gap-1">
+                <div className="flex items-center justify-end gap-1">
                   <DirArrow v={r.chg} />
-                  {r.chg === null ? '—' : r.isYield ? `${signed(r.chg, 1)} bp` : signed(r.chg)}
-                </span>
+                  <span>{r.chg === null ? '—' : r.isYield ? `${signed(r.chg, 1)} bp` : signed(r.chg)}</span>
+                </div>
               </TD>
               <TD right className="px-3 py-2">
-                <span className="inline-flex items-center gap-1">
+                <div className="flex items-center justify-end gap-1">
                   <DirArrow v={r.pct} />
                   <PctPill v={r.pct} />
-                </span>
+                </div>
               </TD>
               <TD right className="px-3 py-2 text-zinc-300 tabular-nums">{fmtUnit(r.prev, r.unit)}</TD>
               <TD right className="px-3 py-2 text-emerald-400 tabular-nums">{fmtUnit(r.hi, r.unit)}</TD>
@@ -456,7 +464,7 @@ function RangeBar({ pct, label, title }: { pct: number | null; label?: string; t
   if (pct === null) return <span className="text-zinc-600">—</span>;
   return (
     <div className="flex items-center gap-2" title={title}>
-      <div className="relative h-1.5 w-24 rounded-full bg-zinc-700">
+      <div className="relative h-1.5 w-16 shrink-0 rounded-full bg-zinc-700">
         <span className="absolute top-1/2 h-2.5 w-1 -translate-y-1/2 rounded-sm bg-sky-400" style={{ left: `calc(${Math.min(100, Math.max(0, pct))}% - 2px)` }} />
       </div>
       <span className="text-[11px] text-zinc-400 tabular-nums w-11">{label ?? `${pct.toFixed(0)}%`}</span>
