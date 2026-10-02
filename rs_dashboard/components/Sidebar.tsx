@@ -114,7 +114,7 @@ const NAV_GROUPS = [
       { href: '/csp-screener', label: 'CSP Screener', desc: 'Scan Nifty 500 F&O stocks for cash-secured-put candidates, track & roll positions' },
       { href: '/cash-secured-puts', label: 'Cash Secured Puts', desc: 'Track underlyings, sell PUTs, monitor active orders & trades' },
       { href: '/options/delta', label: 'Net Delta', desc: 'Track live delta risk and net delta exposure of active positions' },
-      { href: '/nifty-covered-call', label: 'Nifty Covered Call', desc: 'Short NIFTY futures + delta-sized short OTM call overwrite desk with roll suggestions & target/SL/trailing-SL' },
+      { href: '/nifty-covered-call', label: 'Nifty Covered Call', desc: 'Short NIFTY calls written against your NIFTYBEES holding — combined P&L, net Greeks, coverage, roll/buy-back' },
       { href: '/rs-strategy', label: 'RS Strategy', desc: 'Nifty 500 RS-55 vs Nifty + Supertrend(10,2) — buy when both are positive, sell when both turn negative' },
     ],
   },

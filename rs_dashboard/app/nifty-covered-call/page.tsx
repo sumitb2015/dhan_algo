@@ -1,8 +1,8 @@
 import NiftyCoveredCallTerminal from '@/components/NiftyCoveredCall/NiftyCoveredCallTerminal';
 
 export const metadata = {
-  title: 'Nifty Covered Call | Futures + Short Call Desk',
-  description: 'Short NIFTY futures + delta-sized short OTM call overwrite desk with target/SL/trailing-SL and a live fill ledger',
+  title: 'Nifty Covered Call | NIFTYBEES + Short Call Desk',
+  description: 'Covered calls written against the NIFTYBEES holding: combined P&L, net Greeks, coverage and a call fill ledger',
 };
 
 export default function NiftyCoveredCallPage() {

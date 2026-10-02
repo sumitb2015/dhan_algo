@@ -1,104 +1,68 @@
 'use client';
 
 import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
-import { Shield, RefreshCw, TrendingDown } from 'lucide-react';
+import { Shield, RefreshCw, PenLine, Wallet, Link2 } from 'lucide-react';
 import NavBar from '@/components/NavBar';
 import { cn } from '@/lib/utils';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import DeltaPanel from './DeltaPanel';
-import TradeSheet, { type LiveLegRow } from './TradeSheet';
+import HowToUse from './HowToUse';
+import TradeSheet, { type OpenCallRow } from './TradeSheet';
 import { useLiveOptionsWS } from '@/lib/useLiveOptionsWS';
+import { lookupChainLegData, type ChainOc } from '@/lib/optionsStrategy';
 import {
-  suggestShortCallStrike,
-  evaluateRollNeed,
-  buildFuturesLeg,
-  buildCallLeg,
-  computeCoveredCallGreeks,
-  type ShortCallSuggestion,
+  reconstructCallLedger,
+  reconcileCallsDown,
+  computeBook,
+  suggestCoveredCall,
+  coveredCallReturns,
+  beesNiftyUnits,
+  daysToExpiry,
+  type CallTrade,
+  type CallMark,
+  type OpenCall,
+  type PendingOrder,
 } from '@/lib/coveredCallEngine';
-import type { ChainOc } from '@/lib/optionsStrategy';
-import type { CoveredCallTradeRow } from '@/app/api/nifty-covered-call/state/route';
+import type { CoveredCallBookResponse } from '@/app/api/nifty-covered-call/book/route';
+import type { CoveredCallOrderResult } from '@/app/api/nifty-covered-call/order/route';
 
-// ── Dhan-only, real-money terminal. See components/CyberScalper/CyberScalperTerminal.tsx
-// for the futures/options resolution + sticky-header conventions this mirrors, and
-// components/SyntheticFuturesScalper.tsx for the target/SL/trailing-SL watcher this
-// adapts inline (single consumer — no shared hook per the approved plan).
+// ── NIFTYBEES Covered Call desk — Dhan-only, REAL MONEY (calls only).
+//
+// The long leg is the NIFTYBEES holding, read from Dhan holdings + today's CNC
+// position by /api/nifty-covered-call/book; this page never orders NIFTYBEES.
+// The short legs are NIFTY index calls owned by this page's own ledger
+// (/api/nifty-covered-call/state) — the account carries CE shorts from other
+// strategies, so a broker short is only part of this book once sold here or
+// explicitly adopted (dhan-terminal-position-ownership). The ledger is
+// reconciled DOWN against the broker every poll, never up.
 
-// ── Local type scale (mirrors components/FocusTool.tsx's TXT_* constants) ──
-const TXT_MICRO = 'text-[8px]'; // badge glyphs, column footnotes
-const TXT_LABEL = 'text-[9px]'; // field labels, badges, uppercase tags — default micro size
-const TXT_VALUE = 'text-[10px]'; // secondary readouts: open-lot summaries, timing text
-const TXT_CAPTION = 'text-[11px]'; // primary compact inputs (selects, RuleNumInput)
+const TXT_LABEL = 'text-[9px]';
+const TXT_VALUE = 'text-[10px]';
+const TXT_CAPTION = 'text-[11px]';
 
-type SlMode = 'POINTS' | 'RUPEES';
-
-interface FuturesContract {
-  securityId: string;
-  tradingSymbol: string;
-  expiry: string;
-  lotSize: number;
-  exchange: string;
-  exchangeSegment: string;
-  ltp: number;
-  tickSize: number;
-}
-
-interface OpenLeg {
-  id: string;
-  leg: 'FUTURE' | 'CALL';
-  strike?: number;
-  side: 'BUY' | 'SELL';
-  quantity: number; // lots
-  entryPrice: number;
-  securityId: string;
-  tradingSymbol: string;
-  expiry: string;
-  exchangeSegment: string;
-  productType: 'INTRADAY' | 'MARGIN';
-  orderId?: string;
-}
+const CHAIN_POLL_MS = 3_000;
+const BOOK_POLL_MS = 5_000;
 
 function todayIST(): string {
   return new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Kolkata' }).format(new Date());
 }
+const fmtInt = (v: number) => Math.round(v).toLocaleString('en-IN');
+const signed = (v: number) => `${v >= 0 ? '+' : '−'}₹${fmtInt(Math.abs(v))}`;
 
-/** "2026-09-29" -> "SEP" for the compact expiry-switcher pills (copied locally
- *  from components/CyberScalper/CyberOrderPad.tsx, same as that file declares it). */
-function formatExpiryMonth(dateStr: string): string {
-  const dt = new Date(dateStr);
-  if (Number.isNaN(dt.getTime())) return dateStr;
-  return dt.toLocaleDateString('en-IN', { month: 'short' }).toUpperCase();
-}
-
-// ── Commit-on-blur numeric input (dhan-commit-on-blur skill; RuleNumInput
-// pattern from components/FocusTool.tsx). Single consumer — declared locally. ──
-function RuleNumInput({
-  value,
-  onCommit,
-  placeholder,
-  className,
-}: {
-  value: string;
-  onCommit: (v: string) => void;
-  placeholder?: string;
-  className?: string;
+// ── Commit-on-blur numeric input (dhan-commit-on-blur) ──
+function RuleNumInput({ value, onCommit, placeholder, className, ariaLabel }: {
+  value: string; onCommit: (v: string) => void; placeholder?: string; className?: string; ariaLabel?: string;
 }) {
   const [draft, setDraft] = useState(value);
   const focusedRef = useRef(false);
-
-  useEffect(() => {
-    if (!focusedRef.current) setDraft(value);
-  }, [value]);
-
-  const commit = (next: string) => {
-    if (next !== value) onCommit(next);
-  };
-
+  useEffect(() => { if (!focusedRef.current) setDraft(value); }, [value]);
+  const commit = (next: string) => { if (next !== value) onCommit(next); };
   return (
     <input
       type="text"
       inputMode="decimal"
+      aria-label={ariaLabel}
       value={draft}
       placeholder={placeholder}
       className={className}
@@ -106,132 +70,46 @@ function RuleNumInput({
       onChange={(e) => setDraft(e.target.value)}
       onBlur={(e) => { focusedRef.current = false; commit(e.currentTarget.value); }}
       onKeyDown={(e) => {
-        if (e.key === 'Enter') {
-          commit((e.target as HTMLInputElement).value);
-          (e.target as HTMLInputElement).blur();
-        }
-        if (e.key === 'Escape') {
-          setDraft(value);
-          (e.target as HTMLInputElement).blur();
-        }
+        if (e.key === 'Enter') { commit((e.target as HTMLInputElement).value); (e.target as HTMLInputElement).blur(); }
+        if (e.key === 'Escape') { setDraft(value); (e.target as HTMLInputElement).blur(); }
       }}
     />
   );
 }
 
-// Rebuild this terminal's own fill ledger from its trade log — never from a
-// raw broker position query (dhan-terminal-position-ownership).
-function reconstructLedger(trades: CoveredCallTradeRow[]): { future: OpenLeg | null; calls: OpenLeg[] } {
-  let future: OpenLeg | null = null;
-  const calls: OpenLeg[] = [];
-  const sorted = [...trades].sort((a, b) => a.ts - b.ts);
-
-  for (const t of sorted) {
-    if (t.leg === 'FUTURE') {
-      if (t.action === 'ENTRY') {
-        future = {
-          id: t.id,
-          leg: 'FUTURE',
-          side: t.side,
-          quantity: t.quantity,
-          entryPrice: t.price,
-          securityId: t.securityId || '',
-          tradingSymbol: t.tradingSymbol || 'NIFTY-FUT',
-          expiry: t.expiry || '',
-          exchangeSegment: 'NSE_FNO',
-          productType: 'INTRADAY',
-          orderId: t.orderId,
-        };
-      } else if (t.action === 'EXIT') {
-        future = null;
-      }
-    } else {
-      if (t.action === 'ENTRY' || t.action === 'ROLL_OPEN') {
-        calls.push({
-          id: t.id,
-          leg: 'CALL',
-          strike: t.strike,
-          side: t.side,
-          quantity: t.quantity,
-          entryPrice: t.price,
-          securityId: t.securityId || '',
-          tradingSymbol: t.tradingSymbol || '',
-          expiry: t.expiry || '',
-          exchangeSegment: 'NSE_FNO',
-          productType: 'INTRADAY',
-          orderId: t.orderId,
-        });
-      } else if (t.action === 'EXIT' || t.action === 'ROLL_CLOSE') {
-        // Prefer matching the exact leg that was closed (openLegId). Only
-        // fall back to strike+side for older rows logged before that field
-        // existed — ambiguous when two legs share a strike and side.
-        const idx = t.openLegId
-          ? calls.findIndex((c) => c.id === t.openLegId)
-          : calls.findIndex((c) => c.strike === t.strike && c.side === t.side);
-        if (idx >= 0) calls.splice(idx, 1);
-      }
-    }
-  }
-  return { future, calls };
-}
-
 export default function NiftyCoveredCallTerminal() {
-  // ── Contract resolution ─────────────────────────────────────────────────
+  // ── Contracts / market data ─────────────────────────────────────────────
   const [expiries, setExpiries] = useState<string[]>([]);
   const [optionExpiry, setOptionExpiry] = useState<string | null>(null);
-  const [futureExpiries, setFutureExpiries] = useState<string[]>([]);
-  const [futureExpiry, setFutureExpiry] = useState<string | null>(null);
-  const [futuresContract, setFuturesContract] = useState<FuturesContract | null>(null);
-  const [optionLotSize, setOptionLotSize] = useState<number>(75);
-
-  const [chainOc, setChainOc] = useState<ChainOc | null>(null);
-  const [spot, setSpot] = useState(0);
-  const [futuresLtp, setFuturesLtp] = useState(0);
-  const [isLoading, setIsLoading] = useState(true);
+  const [lotSize, setLotSize] = useState<number>(0);
+  const [chains, setChains] = useState<Record<string, ChainOc>>({});
+  const [restSpot, setRestSpot] = useState(0);
   const [feedError, setFeedError] = useState<string | null>(null);
+  const [isLoading, setIsLoading] = useState(true);
 
-  // ── Own fill ledger (dhan-terminal-position-ownership) ──────────────────
-  const [futureLeg, setFutureLeg] = useState<OpenLeg | null>(null);
-  const [callLegs, setCallLegs] = useState<OpenLeg[]>([]);
-  const [history, setHistory] = useState<CoveredCallTradeRow[]>([]);
-  const [isBusy, setIsBusy] = useState(false);
+  // ── Broker book (NIFTYBEES + broker CE shorts) ──────────────────────────
+  const [book, setBook] = useState<CoveredCallBookResponse | null>(null);
+  const [bookError, setBookError] = useState<string | null>(null);
 
-  // ── Order pad inputs ─────────────────────────────────────────────────────
-  const [futureLots, setFutureLots] = useState(1);
-  const [callLots, setCallLots] = useState(1);
-  const [manualStrike, setManualStrike] = useState<number | null>(null);
+  // ── Own call ledger ─────────────────────────────────────────────────────
+  const [trades, setTrades] = useState<CallTrade[]>([]);
+  const [pending, setPending] = useState<PendingOrder[]>([]);
+  const [busy, setBusy] = useState(false);
+  const busyRef = useRef(false);
+  const [now, setNow] = useState(() => Date.now());
 
-  // ── Hedge/roll engine inputs (commit-on-blur — feed live suggestions) ───
-  const [targetDeltaStr, setTargetDeltaStr] = useState('0.30');
-  const [targetNetDeltaStr, setTargetNetDeltaStr] = useState('0');
-  const [bandWidthStr, setBandWidthStr] = useState('0.25');
-  const targetDelta = parseFloat(targetDeltaStr) || 0;
-  const targetNetDelta = parseFloat(targetNetDeltaStr) || 0;
-  const bandWidth = parseFloat(bandWidthStr) || 0.25;
+  // ── Write-call inputs (commit-on-blur) ──────────────────────────────────
+  const [targetDeltaStr, setTargetDeltaStr] = useState('0.25');
+  const [manualStrikeStr, setManualStrikeStr] = useState('');
+  const [writeLots, setWriteLots] = useState(1);
+  const [orderType, setOrderType] = useState<'MARKET' | 'LIMIT'>('LIMIT');
+  const [limitStr, setLimitStr] = useState('');
+  const [adoptLots, setAdoptLots] = useState<Record<string, number>>({});
 
-  // ── Target / SL / trailing-SL (book-level, mirrors SyntheticFuturesScalper) ─
-  const [slMode, setSlMode] = useState<SlMode>('POINTS');
-  const [targetStr, setTargetStr] = useState('0');
-  const [stopLossStr, setStopLossStr] = useState('0');
-  const [trailingEnabled, setTrailingEnabled] = useState(false);
-  const [trailTriggerStr, setTrailTriggerStr] = useState('0');
-  const [trailStepStr, setTrailStepStr] = useState('0');
-  const peakRef = useRef<{ points: number; pnl: number }>({ points: -Infinity, pnl: -Infinity });
-  const flattenInFlightRef = useRef(false);
-  const flattenCooldownUntilRef = useRef(0);
-
-  // ── Live tick bridge (dhan-live-chart / lib/useLiveOptionsWS.ts). Carries
-  // spot + call LTPs live, and the *nearest-month* future's LTP only — the
-  // Python bridge never tracks a further-out contract (see caveat below). ──
-  const { liveQuotes, bridgeStatus, transport } = useLiveOptionsWS(
-    optionExpiry ?? '',
-    'dhan',
-    ['dhan'],
-    'NIFTY',
-  );
+  const { liveQuotes, bridgeStatus, transport } = useLiveOptionsWS(optionExpiry ?? '', 'dhan', ['dhan'], 'NIFTY');
   const wsLive = transport === 'ws' && bridgeStatus.status === 'RUNNING';
 
-  // ── Load contracts / chain ──────────────────────────────────────────────
+  // ── Bootstrap ───────────────────────────────────────────────────────────
   useEffect(() => {
     fetch('/api/options/expiries?underlying=NIFTY')
       .then((r) => r.json())
@@ -244,25 +122,10 @@ export default function NiftyCoveredCallTerminal() {
       .catch(() => {});
     fetch('/api/lotsize?symbol=NIFTY')
       .then((r) => r.json())
-      .then((j) => { if (j.lot_size) setOptionLotSize(j.lot_size); })
-      .catch(() => {});
-    // Futures trade 3 monthly contracts at once (current + next 2), independent
-    // of the options weekly expiry used for the short call leg — see Bug 1.
-    fetch('/api/futures/expiries?symbol=NIFTY')
-      .then((r) => r.json())
-      .then((j) => {
-        if (j.success && Array.isArray(j.data?.expiries) && j.data.expiries.length) {
-          setFutureExpiries(j.data.expiries);
-          setFutureExpiry((prev) => prev ?? j.data.expiries[0]);
-        }
-      })
+      .then((j) => { if (j.lot_size > 0) setLotSize(j.lot_size); })
       .catch(() => {});
   }, []);
 
-  // Ensure the Options Live Bridge is active for the selected weekly expiry
-  // (copied from components/SyntheticFuturesScalper.tsx's "Ensure Options Live
-  // Bridge is active" effect). Keyed on optionExpiry, not futureExpiry — the
-  // bridge tracks the options chain + nearest future, not a user-picked month.
   useEffect(() => {
     if (!optionExpiry) return;
     fetch('/api/options/live', {
@@ -270,433 +133,347 @@ export default function NiftyCoveredCallTerminal() {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ action: 'start', underlying: 'NIFTY', expiry: optionExpiry, broker: 'dhan' }),
     }).catch(() => {});
-
-    return () => {
-      fetch('/api/options/live', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ action: 'stop', brokers: ['dhan'], underlying: 'NIFTY' }),
-      }).catch(() => {});
-    };
   }, [optionExpiry]);
 
-  const fetchFutures = useCallback(async () => {
-    if (!futureExpiry) return;
+  // ── Ledger ──────────────────────────────────────────────────────────────
+  const applyLedger = useCallback((j: { trades?: CallTrade[]; pending?: PendingOrder[] }) => {
+    if (Array.isArray(j.trades)) setTrades(j.trades);
+    if (Array.isArray(j.pending)) setPending(j.pending);
+  }, []);
+  const reloadLedger = useCallback(async () => {
     try {
-      const res = await fetch(`/api/futures/order?symbol=NIFTY&expiry=${futureExpiry}`);
-      const json = await res.json();
-      if (json.success && json.data) setFuturesContract(json.data);
+      const j = await (await fetch('/api/nifty-covered-call/state')).json();
+      if (j.success) applyLedger(j);
     } catch {}
-  }, [futureExpiry]);
+  }, [applyLedger]);
+  useEffect(() => { reloadLedger(); }, [reloadLedger]);
 
+  /** Ledger-only actions (sync / adopt / sweep) — all booking happens server-side. */
+  const ledgerAction = useCallback(async (payload: Record<string, unknown>) => {
+    const j = await (await fetch('/api/nifty-covered-call/state', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    })).json();
+    if (j.success) { applyLedger(j); await reloadLedger(); }
+    return j as { success: boolean; error?: string; needsPrice?: boolean; gap?: number };
+  }, [applyLedger, reloadLedger]);
+
+  // Orders still working at the broker (e.g. a LIMIT that didn't fill within
+  // the order route's ~5 s): sweep them every book poll so a late fill is
+  // booked at that order's own average price.
+  const pendingRef = useRef(pending);
+  useEffect(() => { pendingRef.current = pending; }, [pending]);
+  const sweepInFlight = useRef(false);
+  const sweepPending = useCallback(async () => {
+    if (sweepInFlight.current || pendingRef.current.length === 0) return;
+    sweepInFlight.current = true;
+    try { await ledgerAction({ action: 'sweep' }); } catch {} finally { sweepInFlight.current = false; }
+  }, [ledgerAction]);
+
+  const ledger = useMemo(() => reconstructCallLedger(trades), [trades]);
+  const legExpiries = useMemo(() => [...new Set(ledger.open.map((o) => o.expiry))], [ledger.open]);
+
+  // ── Chain polling: the selected expiry every tick, plus each open leg's own
+  // expiry in rotation (a leg's Greeks must come from its own expiry's chain).
   const chainInFlight = useRef(false);
-  const fetchChain = useCallback(async () => {
-    if (!optionExpiry || chainInFlight.current) return;
+  const tickRef = useRef(0);
+  const fetchChain = useCallback(async (expiry: string) => {
+    if (chainInFlight.current) return;
     chainInFlight.current = true;
     try {
-      const res = await fetch(`/api/options/chain?underlying=NIFTY&expiry=${optionExpiry}`);
-      const json = await res.json();
-      if (json.success && json.data) {
-        setChainOc((json.data.chain?.oc as ChainOc) ?? null);
-        setSpot(json.data.spot ?? 0);
-        if (json.data.future_price) setFuturesLtp(json.data.future_price);
+      const j = await (await fetch(`/api/options/chain?underlying=NIFTY&expiry=${expiry}`)).json();
+      if (j.success && j.data) {
+        const oc = (j.data.chain?.oc as ChainOc) ?? null;
+        if (oc) setChains((prev) => ({ ...prev, [expiry]: oc }));
+        if (j.data.spot) setRestSpot(j.data.spot);
         setFeedError(null);
       } else {
-        setFeedError(json.error || 'Failed to load option chain');
+        setFeedError(j.error || 'Failed to load option chain');
       }
-    } catch (err: unknown) {
+    } catch (err) {
       setFeedError(String((err as Error).message ?? err));
     } finally {
       setIsLoading(false);
       chainInFlight.current = false;
     }
-  }, [optionExpiry]);
-
-  useEffect(() => { fetchFutures(); }, [fetchFutures]);
-  useEffect(() => { fetchChain(); }, [fetchChain]);
-
-  useEffect(() => {
-    const t = setInterval(() => { fetchChain(); fetchFutures(); }, 3000);
-    return () => clearInterval(t);
-  }, [fetchChain, fetchFutures]);
-
-  // Futures LTP fallback when the chain response hasn't carried one yet.
-  useEffect(() => {
-    if (!futuresLtp && futuresContract?.ltp) setFuturesLtp(futuresContract.ltp);
-  }, [futuresContract, futuresLtp]);
-
-  // ── Live-value overlays: prefer the WS tick, fall back to the REST poll. ──
-  // Spot + call premiums are live regardless of which future month is picked.
-  const effectiveSpot = liveQuotes?.spot && liveQuotes.spot > 0 ? liveQuotes.spot : spot;
-
-  // The bridge only ever tracks the nearest-month future. Only trust its LTP
-  // when the user's selected futureExpiry IS that nearest month.
-  const nearestFutureExpiry = futureExpiries[0] ?? null;
-  const futuresIsNearestMonth = !!futureExpiry && futureExpiry === nearestFutureExpiry;
-  const wsFuturesLtp = futuresIsNearestMonth ? liveQuotes?.future?.ltp : undefined;
-  const futuresLive = wsLive && futuresIsNearestMonth && typeof wsFuturesLtp === 'number' && wsFuturesLtp > 0;
-  // REST fallback must be the SELECTED contract's own LTP (futuresContract.ltp,
-  // fetched per futureExpiry by fetchFutures), never the chain-derived `futuresLtp`
-  // — that's always the nearest month's price regardless of which expiry pill is
-  // active, so it silently mispriced a non-nearest-month position.
-  const effectiveFuturesLtp = futuresLive && typeof wsFuturesLtp === 'number'
-    ? wsFuturesLtp
-    : (futuresContract?.ltp || futuresLtp);
-
-  // ── Load / reload the trade log ledger ──────────────────────────────────
-  const reloadLedger = useCallback(async () => {
-    try {
-      const res = await fetch('/api/nifty-covered-call/state');
-      const json = await res.json();
-      if (json.success && Array.isArray(json.trades)) {
-        setHistory(json.trades);
-        const { future, calls } = reconstructLedger(json.trades);
-        setFutureLeg(future);
-        setCallLegs(calls);
-      }
-    } catch {}
   }, []);
 
-  useEffect(() => { reloadLedger(); }, [reloadLedger]);
+  const pollChains = useCallback(() => {
+    if (!optionExpiry) return;
+    const others = legExpiries.filter((e) => e !== optionExpiry);
+    const t = tickRef.current++;
+    const target = others.length && t % 2 === 1 ? others[Math.floor(t / 2) % others.length] : optionExpiry;
+    fetchChain(target);
+  }, [optionExpiry, legExpiries, fetchChain]);
 
-  const logTrade = useCallback(async (row: Omit<CoveredCallTradeRow, 'id' | 'ts'>) => {
+  useEffect(() => {
+    if (optionExpiry) fetchChain(optionExpiry);
+  }, [optionExpiry, fetchChain]);
+  useEffect(() => {
+    const id = setInterval(pollChains, CHAIN_POLL_MS);
+    return () => clearInterval(id);
+  }, [pollChains]);
+
+  // ── Book polling ────────────────────────────────────────────────────────
+  const bookInFlight = useRef(false);
+  const fetchBook = useCallback(async () => {
+    if (bookInFlight.current) return;
+    bookInFlight.current = true;
     try {
-      const res = await fetch('/api/nifty-covered-call/state', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ trade: row }),
-      });
-      const json = await res.json();
-      if (json.success && Array.isArray(json.trades)) setHistory(json.trades);
-    } catch {}
+      const j = (await (await fetch('/api/nifty-covered-call/book')).json()) as CoveredCallBookResponse & { error?: string };
+      if (j.ts) setBook(j);
+      setBookError(j.success ? null : j.error || j.beesError || j.positionsError || 'Broker book unavailable');
+    } catch (err) {
+      setBookError(String((err as Error).message ?? err));
+    } finally {
+      bookInFlight.current = false;
+    }
   }, []);
+  useEffect(() => {
+    fetchBook();
+    const id = setInterval(() => { fetchBook(); sweepPending(); setNow(Date.now()); }, BOOK_POLL_MS);
+    return () => clearInterval(id);
+  }, [fetchBook, sweepPending]);
 
-  // ── Order placement helpers ──────────────────────────────────────────────
-  const placeLeg = useCallback(async (leg: {
-    role: 'FUTURE' | 'CALL';
-    side: 'BUY' | 'SELL';
-    quantity: number;
-    securityId: string;
-    tradingSymbol: string;
-    exchangeSegment: string;
+  // ── Derived market values ───────────────────────────────────────────────
+  const spot = liveQuotes?.spot && liveQuotes.spot > 0 ? liveQuotes.spot : restSpot;
+  const bees = book?.bees ?? null;
+  const beesQty = bees?.qty ?? 0;
+  const beesLtp = bees?.ltp ?? 0;
+  const beesUnits = beesNiftyUnits(beesQty, beesLtp, spot);
+  const holdingValue = beesQty * beesLtp;
+
+  /** Call LTP for a strike on a given expiry: WS tick for the bridged expiry, else REST chain. */
+  const callLtp = useCallback((strike: number, expiry: string): number | null => {
+    if (expiry === optionExpiry) {
+      const ws = liveQuotes?.strikes?.[String(strike)]?.ce?.ltp;
+      if (typeof ws === 'number' && ws > 0) return ws;
+    }
+    const oc = chains[expiry];
+    const ce = oc ? lookupChainLegData(oc, strike, 'CE') : undefined;
+    return ce && ce.last_price > 0 ? ce.last_price : null;
+  }, [liveQuotes, chains, optionExpiry]);
+
+  // ── Reconcile + book snapshot ───────────────────────────────────────────
+  const reconciled = useMemo(
+    () => reconcileCallsDown(ledger.open, book?.brokerShortUnits ?? null, now),
+    [ledger.open, book?.brokerShortUnits, now],
+  );
+
+  const marks = useMemo(() => {
+    const m: Record<string, CallMark> = {};
+    for (const l of reconciled.legs) {
+      const oc = chains[l.expiry];
+      m[l.id] = { ltp: callLtp(l.strike, l.expiry), chainLeg: oc ? lookupChainLegData(oc, l.strike, 'CE') : undefined, dte: daysToExpiry(l.expiry, now) };
+    }
+    return m;
+  }, [reconciled.legs, chains, callLtp, now]);
+
+  const snapshot = useMemo(() => {
+    if (!bees && reconciled.legs.length === 0) return null;
+    return computeBook({
+      beesQty, beesAvg: bees?.avgCost ?? 0, beesLtp, spot,
+      calls: reconciled.legs, marks, callsRealized: ledger.realized,
+    });
+  }, [bees, beesQty, beesLtp, spot, reconciled.legs, marks, ledger.realized]);
+
+  const rows: OpenCallRow[] = useMemo(() => reconciled.legs.map((l) => {
+    const g = snapshot?.legs.find((x) => x.id === l.id);
+    const ltp = marks[l.id]?.ltp ?? null;
+    return {
+      id: l.id, strike: l.strike, expiry: l.expiry, dte: marks[l.id]?.dte ?? 0,
+      units: l.units, ledgerUnits: l.ledgerUnits, entryPrice: l.entryPrice, ltp,
+      mtm: ltp != null ? (l.entryPrice - ltp) * l.units : null,
+      delta: g?.delta ?? null, theta: g?.theta ?? null, deltaEstimated: g?.deltaEstimated ?? false,
+    };
+  }), [reconciled.legs, snapshot, marks]);
+
+  // ── Write-call suggestion ───────────────────────────────────────────────
+  const targetDelta = parseFloat(targetDeltaStr) || 0.25;
+  const selDte = optionExpiry ? daysToExpiry(optionExpiry, now) : 1;
+  const selChain = optionExpiry ? chains[optionExpiry] : undefined;
+  const suggestion = useMemo(
+    () => (selChain && spot > 0 ? suggestCoveredCall(selChain, spot, beesUnits, lotSize, targetDelta, selDte) : null),
+    [selChain, spot, beesUnits, lotSize, targetDelta, selDte],
+  );
+  const manualStrike = parseFloat(manualStrikeStr) || null;
+  const writeStrike = manualStrike ?? suggestion?.strike ?? null;
+  const writeLeg = writeStrike && selChain ? lookupChainLegData(selChain, writeStrike, 'CE') : undefined;
+  const writeLtp = writeStrike && optionExpiry ? callLtp(writeStrike, optionExpiry) : null;
+  const writeUnits = writeLots * lotSize;
+  const writeReturns = writeStrike && writeLtp
+    ? coveredCallReturns({ premium: writeLtp, units: writeUnits, strike: writeStrike, spot, beesUnits, holdingValue, dte: selDte })
+    : null;
+  const coverageAfter = beesUnits > 0 ? ((snapshot?.shortCallUnits ?? 0) + writeUnits) / beesUnits : null;
+
+  // Seed the limit price from the live LTP whenever the contract changes.
+  const writeKey = `${optionExpiry}:${writeStrike}`;
+  const seededKey = useRef('');
+  useEffect(() => {
+    if (writeLtp && seededKey.current !== writeKey) {
+      seededKey.current = writeKey;
+      setLimitStr(writeLtp.toFixed(2));
+    }
+  }, [writeKey, writeLtp]);
+
+  // ── Order helpers ───────────────────────────────────────────────────────
+  const placeOrder = useCallback(async (req: {
+    side: 'BUY' | 'SELL'; securityId: string; units: number; orderType: 'MARKET' | 'LIMIT'; price?: number;
+    strike?: number; expiry?: string; tradingSymbol?: string; openLegId?: string; note?: string;
   }) => {
     const res = await fetch('/api/nifty-covered-call/order', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        leg: {
-          role: leg.role,
-          side: leg.side,
-          quantity: leg.quantity,
-          securityId: leg.securityId,
-          tradingSymbol: leg.tradingSymbol,
-          orderType: 'MARKET',
-          productType: 'INTRADAY',
-          exchangeSegment: leg.exchangeSegment,
-        },
-      }),
+      body: JSON.stringify(req),
     });
-    return res.json();
-  }, []);
+    const r = (await res.json()) as CoveredCallOrderResult;
+    // The route booked the fill into the ledger itself; pick it up.
+    await reloadLedger();
+    return r;
+  }, [reloadLedger]);
 
-  const handleEnterFuture = useCallback(async () => {
-    if (!futuresContract || isBusy) return;
-    setIsBusy(true);
-    try {
-      const unitQty = futureLots * futuresContract.lotSize;
-      const json = await placeLeg({
-        role: 'FUTURE',
-        side: 'SELL',
-        quantity: unitQty,
-        securityId: futuresContract.securityId,
-        tradingSymbol: futuresContract.tradingSymbol,
-        exchangeSegment: futuresContract.exchangeSegment,
-      });
-      if (json.success) {
-        await logTrade({
-          leg: 'FUTURE', action: 'ENTRY', side: 'SELL', quantity: futureLots,
-          price: effectiveFuturesLtp || futuresContract.ltp, expiry: futuresContract.expiry,
-          orderId: json.orderId, securityId: futuresContract.securityId,
-          tradingSymbol: futuresContract.tradingSymbol,
-        });
-        await reloadLedger();
-        peakRef.current = { points: -Infinity, pnl: -Infinity };
-      } else {
-        alert(`Futures order failed: ${json.error}`);
-      }
-    } finally {
-      setIsBusy(false);
+  const withBusy = useCallback(async (fn: () => Promise<void>) => {
+    if (busyRef.current) return;
+    busyRef.current = true;
+    setBusy(true);
+    try { await fn(); } catch (err) { alert(String((err as Error).message ?? err)); } finally {
+      busyRef.current = false;
+      setBusy(false);
+      fetchBook();
     }
-  }, [futuresContract, futureLots, effectiveFuturesLtp, isBusy, placeLeg, logTrade, reloadLedger]);
+  }, [fetchBook]);
 
-  const handleExitFuture = useCallback(async (reason: string) => {
-    if (!futureLeg || !futuresContract) return false;
-    const unitQty = futureLeg.quantity * futuresContract.lotSize;
-    const json = await placeLeg({
-      role: 'FUTURE', side: 'BUY', quantity: unitQty,
-      securityId: futureLeg.securityId, tradingSymbol: futureLeg.tradingSymbol,
-      exchangeSegment: futureLeg.exchangeSegment,
+  const pendingNote = (r: CoveredCallOrderResult, units: number) =>
+    `Order ${r.orderId} is ${r.status}: ${r.filledUnits ?? 0}/${r.units ?? units} units filled and booked so far.\n` +
+    'The desk keeps watching it — any later fill is booked automatically at this order\'s own price.';
+
+  /** Sell `units` of a call. The route books the confirmed fill. Returns filled units. */
+  const sellCall = useCallback(async (strike: number, expiry: string, units: number, type: 'MARKET' | 'LIMIT', price: number | undefined, note?: string) => {
+    const oc = chains[expiry];
+    const ce = oc ? lookupChainLegData(oc, strike, 'CE') : undefined;
+    if (!ce?.security_id) throw new Error(`No security id for ${strike} CE ${expiry} — chain not loaded`);
+    const r = await placeOrder({
+      side: 'SELL', securityId: String(ce.security_id), units, orderType: type, price,
+      strike, expiry, tradingSymbol: `NIFTY-${expiry}-${strike}-CE`, note,
     });
-    if (json.success) {
-      const exitPrice = effectiveFuturesLtp || futuresContract.ltp;
-      const realizedPnl = (futureLeg.entryPrice - exitPrice) * unitQty;
-      await logTrade({
-        leg: 'FUTURE', action: 'EXIT', side: 'BUY', quantity: futureLeg.quantity,
-        price: exitPrice, expiry: futureLeg.expiry, orderId: json.orderId,
-        securityId: futureLeg.securityId, tradingSymbol: futureLeg.tradingSymbol,
-        realizedPnl, note: reason,
-      });
-      await reloadLedger();
-      return true;
+    if (!r.success) throw new Error(`Sell ${strike} CE failed: ${r.error ?? r.status}`);
+    if (r.pending) alert(pendingNote(r, units));
+    return r.filledUnits ?? 0;
+  }, [chains, placeOrder]);
+
+  /** Buy back up to `units` of an open leg. The route caps it at the leg's own open units and books the fill. Returns filled units. */
+  const buyBack = useCallback(async (leg: OpenCall, units: number, note: string) => {
+    const r = await placeOrder({ side: 'BUY', securityId: leg.securityId, units, orderType: 'MARKET', openLegId: leg.id, note });
+    if (!r.success) throw new Error(`Buy-back of ${leg.strike} CE failed: ${r.error ?? r.status}`);
+    if (r.clampedFrom) alert(`Buy-back clamped from ${r.clampedFrom} to ${r.units} units — that is all this leg (or the broker) still has short.`);
+    if (r.pending) alert(pendingNote(r, units));
+    return r.filledUnits ?? 0;
+  }, [placeOrder]);
+
+  const legById = useCallback((id: string) => reconciled.legs.find((l) => l.id === id), [reconciled.legs]);
+
+  const handleWrite = () => withBusy(async () => {
+    if (!writeStrike || !optionExpiry || !(writeUnits > 0)) throw new Error('Pick a strike, expiry and lots first');
+    const price = orderType === 'LIMIT' ? parseFloat(limitStr) : undefined;
+    if (orderType === 'LIMIT' && !(price! > 0)) throw new Error('Enter a limit price');
+    const covMsg = coverageAfter != null && coverageAfter > 1.0001
+      ? `\n\n⚠ This takes calls written to ${(coverageAfter * 100).toFixed(0)}% of your NIFTYBEES — ${(((snapshot?.shortCallUnits ?? 0) + writeUnits) - beesUnits).toFixed(1)} Nifty units would be a NAKED short call.`
+      : '';
+    if (!confirm(`REAL ORDER: SELL ${writeLots} lot(s) (${writeUnits} units) NIFTY ${writeStrike} CE ${optionExpiry} @ ${orderType === 'LIMIT' ? price : 'MARKET'} (NRML).${covMsg}`)) return;
+    await sellCall(writeStrike, optionExpiry, writeUnits, orderType, price, 'Covered call write');
+  });
+
+  const handleBuyBack = (row: OpenCallRow) => withBusy(async () => {
+    const leg = legById(row.id);
+    if (!leg || leg.units <= 0) return;
+    if (!confirm(`REAL ORDER: BUY BACK ${leg.units} units NIFTY ${leg.strike} CE ${leg.expiry} at MARKET?`)) return;
+    await buyBack(leg, leg.units, 'Manual buy-back');
+  });
+
+  // Roll = full close, then reopen the same units (Invariant 4: never reopen a
+  // shortfall — a partial close aborts the reopen).
+  const handleRoll = (row: OpenCallRow) => withBusy(async () => {
+    const leg = legById(row.id);
+    if (!leg || !writeStrike || !optionExpiry) return;
+    if (!confirm(`REAL ORDERS — ROLL ${leg.units} units:\n1) BUY BACK ${leg.strike} CE ${leg.expiry} at MARKET\n2) SELL ${writeStrike} CE ${optionExpiry} at MARKET\n\nStep 2 only runs if step 1 fully fills.`)) return;
+    const closed = await buyBack(leg, leg.units, `Roll → ${writeStrike} ${optionExpiry}`);
+    if (closed < leg.units) throw new Error(`Roll stopped: buy-back filled ${closed}/${leg.units}. No new call was written.`);
+    await sellCall(writeStrike, optionExpiry, closed, 'MARKET', undefined, `Roll from ${leg.strike} ${leg.expiry}`);
+  });
+
+  // The broker shows less short than the ledger (closed elsewhere / expired):
+  // close the gap at the actual outside BUY from Dhan's trade book. Only when
+  // there is none (closed on an earlier day, expired) does the user type the price.
+  const handleSync = (row: OpenCallRow) => withBusy(async () => {
+    const leg = legById(row.id);
+    if (!leg) return;
+    const gap = leg.ledgerUnits - leg.units;
+    if (gap <= 0) return;
+    if (!confirm(`Ledger-only (no order): close ${gap} units of ${leg.strike} CE ${leg.expiry} that the broker no longer shows short, at the price of the BUY trade in today's trade book?`)) return;
+    const j = await ledgerAction({ action: 'sync', legId: leg.id });
+    if (j.success) return;
+    if (!j.needsPrice) throw new Error(j.error || 'Sync failed');
+    const typed = prompt(`${j.error}\n\nEnter the price ${j.gap ?? gap} units were actually closed at (0 if it expired worthless), or Cancel to leave the leg as is:`);
+    if (typed == null || typed.trim() === '') return;
+    const px = Number(typed);
+    if (!(px >= 0)) throw new Error(`Not a price: ${typed}`);
+    const m = await ledgerAction({ action: 'sync', legId: leg.id, manualPrice: px });
+    if (!m.success) throw new Error(m.error || 'Sync failed');
+  });
+
+  // ── Broker CE shorts not owned by this ledger (Adopt) ───────────────────
+  const ledgerUnitsBySid = useMemo(() => {
+    const m: Record<string, number> = {};
+    for (const l of ledger.open) m[l.securityId] = (m[l.securityId] ?? 0) + l.units;
+    for (const p of pending) if (p.side === 'SELL') m[p.securityId] = (m[p.securityId] ?? 0) + p.units - p.bookedUnits;
+    return m;
+  }, [ledger.open, pending]);
+  const adoptable = useMemo(() => (book?.brokerCalls ?? [])
+    .map((c) => ({ ...c, unowned: c.shortUnits - (ledgerUnitsBySid[c.securityId] ?? 0) }))
+    .filter((c) => c.unowned > 0), [book?.brokerCalls, ledgerUnitsBySid]);
+
+  // Adopt prices the leg from the sell ORDER's own trades — never the broker's
+  // sellAvg, which is pooled over every trade on the contract, other
+  // strategies' included. A short carried from an earlier day isn't in
+  // today's trade book, so it needs a typed price.
+  const handleAdopt = (c: (typeof adoptable)[number]) => withBusy(async () => {
+    const lots = adoptLots[c.securityId] ?? (lotSize > 0 ? Math.floor(c.unowned / lotSize) : 0);
+    const cj = await (await fetch(`/api/nifty-covered-call/state?candidates=${c.securityId}`)).json() as {
+      success: boolean; error?: string; candidates?: { orderId: string; units: number; price: number; at: number }[];
+    };
+    if (!cj.success) throw new Error(cj.error || 'Trade book unavailable');
+    const cands = cj.candidates ?? [];
+    const list = cands.map((o, i) =>
+      `${i + 1}) order ${o.orderId} · SELL ${o.units}u @ ₹${o.price.toFixed(2)} · ${new Date(o.at).toLocaleTimeString('en-IN', { hour12: false })}`).join('\n');
+    const typed = prompt(
+      `Adopt ${c.tradingSymbol} (ledger only, no order).\n\n` +
+      (cands.length ? `Today's sells on this contract not in the desk:\n${list}\n\nType the number of the order you wrote against NIFTYBEES` : 'No sells on this contract in today\'s trade book (carried from an earlier day?).\n\nType') +
+      ` — or p<price> (e.g. p98.5) to adopt ${lots * lotSize} units at a price you enter.`,
+    );
+    if (typed == null || typed.trim() === '') return;
+    const t = typed.trim().toLowerCase();
+    let j;
+    if (t.startsWith('p')) {
+      const px = Number(t.slice(1));
+      const units = Math.min(c.unowned, lots * lotSize);
+      if (!(px > 0)) throw new Error(`Not a price: ${typed}`);
+      if (!(units > 0)) throw new Error('Choose at least one lot to adopt');
+      j = await ledgerAction({ action: 'adopt', securityId: c.securityId, manualPrice: px, units });
+    } else {
+      const o = cands[Number(t) - 1];
+      if (!o) throw new Error(`No order #${typed}`);
+      j = await ledgerAction({ action: 'adopt', securityId: c.securityId, orderId: o.orderId });
     }
-    return false;
-  }, [futureLeg, futuresContract, effectiveFuturesLtp, placeLeg, logTrade, reloadLedger]);
+    if (!j.success) throw new Error(j.error || 'Adopt failed');
+  });
 
-  // Effective call premium: prefer the WS tick (no greeks), fall back to the
-  // REST-polled chain's last_price. The same value is used for display and
-  // for the price logged at order-placement time — never two divergent sources.
-  const callLtp = useCallback((strike: number): number | null => {
-    const wsLtp = liveQuotes?.strikes?.[String(strike)]?.ce?.ltp;
-    if (typeof wsLtp === 'number' && wsLtp > 0) return wsLtp;
-    if (!chainOc) return null;
-    const row = chainOc[String(strike)];
-    return row?.ce && row.ce.last_price > 0 ? row.ce.last_price : null;
-  }, [liveQuotes, chainOc]);
-
-  const handleEnterCall = useCallback(async (strike: number, lots: number) => {
-    if (!chainOc || isBusy) return;
-    const row = chainOc[String(strike)];
-    const ce = row?.ce;
-    if (!ce || !ce.security_id) { alert('No security ID for this strike/chain not loaded'); return; }
-    setIsBusy(true);
-    try {
-      const unitQty = lots * optionLotSize;
-      const effectivePrice = callLtp(strike) ?? ce.last_price;
-      const json = await placeLeg({
-        role: 'CALL', side: 'SELL', quantity: unitQty,
-        securityId: String(ce.security_id), tradingSymbol: `NIFTY-${optionExpiry}-${strike}-CE`,
-        exchangeSegment: 'NSE_FNO',
-      });
-      if (json.success) {
-        await logTrade({
-          leg: 'CALL', action: 'ENTRY', side: 'SELL', quantity: lots, strike,
-          price: effectivePrice, expiry: optionExpiry || undefined, orderId: json.orderId,
-          securityId: String(ce.security_id), tradingSymbol: `NIFTY-${optionExpiry}-${strike}-CE`,
-        });
-        await reloadLedger();
-      } else {
-        alert(`Call order failed: ${json.error}`);
-      }
-    } finally {
-      setIsBusy(false);
-    }
-  }, [chainOc, optionExpiry, optionLotSize, isBusy, placeLeg, logTrade, reloadLedger, callLtp]);
-
-  const handleExitCall = useCallback(async (leg: OpenLeg, action: 'EXIT' | 'ROLL_CLOSE', reason?: string) => {
-    const ltp = leg.strike != null ? callLtp(leg.strike) : null;
-    const exitPrice = ltp ?? leg.entryPrice;
-    const unitQty = leg.quantity * optionLotSize;
-    const json = await placeLeg({
-      role: 'CALL', side: 'BUY', quantity: unitQty,
-      securityId: leg.securityId, tradingSymbol: leg.tradingSymbol, exchangeSegment: leg.exchangeSegment,
-    });
-    if (json.success) {
-      const realizedPnl = (leg.entryPrice - exitPrice) * unitQty;
-      await logTrade({
-        leg: 'CALL', action, side: 'BUY', quantity: leg.quantity, strike: leg.strike,
-        price: exitPrice, expiry: leg.expiry, orderId: json.orderId,
-        securityId: leg.securityId, tradingSymbol: leg.tradingSymbol, realizedPnl, note: reason,
-        openLegId: leg.id,
-      });
-      await reloadLedger();
-      return true;
-    }
-    return false;
-  }, [callLtp, optionLotSize, placeLeg, logTrade, reloadLedger]);
-
-  const handleRollCall = useCallback(async (oldLeg: OpenLeg, suggestion: ShortCallSuggestion) => {
-    if (isBusy) return;
-    setIsBusy(true);
-    try {
-      const closedOk = await handleExitCall(oldLeg, 'ROLL_CLOSE', 'Delta-drift roll');
-      if (!closedOk) { alert('Roll aborted: could not close the existing call leg'); return; }
-      const row = chainOc?.[String(suggestion.strike)];
-      const ce = row?.ce;
-      if (!ce || !ce.security_id) { alert('Roll aborted: new strike has no security ID'); return; }
-      const unitQty = suggestion.callLots * optionLotSize;
-      if (unitQty <= 0) {
-        alert('Roll closed the old call, but the new target needs 0 call lots — the book is now a naked short future. Sell a new call manually to re-hedge.');
-        return;
-      }
-      const effectivePrice = callLtp(suggestion.strike) ?? ce.last_price;
-      const json = await placeLeg({
-        role: 'CALL', side: 'SELL', quantity: unitQty,
-        securityId: String(ce.security_id), tradingSymbol: `NIFTY-${optionExpiry}-${suggestion.strike}-CE`,
-        exchangeSegment: 'NSE_FNO',
-      });
-      if (json.success) {
-        await logTrade({
-          leg: 'CALL', action: 'ROLL_OPEN', side: 'SELL', quantity: suggestion.callLots, strike: suggestion.strike,
-          price: effectivePrice, expiry: optionExpiry || undefined, orderId: json.orderId,
-          securityId: String(ce.security_id), tradingSymbol: `NIFTY-${optionExpiry}-${suggestion.strike}-CE`,
-          note: 'Delta-drift roll',
-        });
-        await reloadLedger();
-      } else {
-        alert(`Roll re-open failed: ${json.error}`);
-      }
-    } finally {
-      setIsBusy(false);
-    }
-  }, [isBusy, handleExitCall, chainOc, optionExpiry, optionLotSize, placeLeg, logTrade, reloadLedger, callLtp]);
-
-  const handleFlattenAll = useCallback(async (reason: string) => {
-    if (flattenInFlightRef.current) return;
-    flattenInFlightRef.current = true;
-    try {
-      let ok = true;
-      for (const leg of callLegs) {
-        const r = await handleExitCall(leg, 'EXIT', reason);
-        ok = ok && r;
-      }
-      if (futureLeg) {
-        const r = await handleExitFuture(reason);
-        ok = ok && r;
-      }
-      if (!ok) flattenCooldownUntilRef.current = Date.now() + 15000;
-      return ok;
-    } finally {
-      flattenInFlightRef.current = false;
-    }
-  }, [callLegs, futureLeg, handleExitCall, handleExitFuture]);
-
-  // ── Live greeks / hedge engine ───────────────────────────────────────────
-  const netGreeks = useMemo(() => {
-    if (!futureLeg && callLegs.length === 0) return null;
-    const legs = [];
-    if (futureLeg) {
-      legs.push(buildFuturesLeg({
-        side: futureLeg.side, qtyLots: futureLeg.quantity, price: futureLeg.entryPrice,
-        securityId: futureLeg.securityId, expiry: futureLeg.expiry, tradingSymbol: futureLeg.tradingSymbol,
-        ltp: effectiveFuturesLtp || null,
-      }));
-    }
-    for (const c of callLegs) {
-      const row = c.strike != null ? chainOc?.[String(c.strike)] : undefined;
-      legs.push(buildCallLeg({
-        strike: c.strike ?? 0, side: c.side, qtyLots: c.quantity, price: c.entryPrice,
-        chainLeg: row?.ce, securityId: c.securityId, expiry: c.expiry, tradingSymbol: c.tradingSymbol,
-        ltp: c.strike != null ? callLtp(c.strike) : null, spot: effectiveSpot,
-      }));
-    }
-    return computeCoveredCallGreeks(legs);
-  }, [futureLeg, callLegs, chainOc, effectiveFuturesLtp, effectiveSpot, callLtp]);
-
-  const suggestion = useMemo(() => {
-    if (!chainOc || !effectiveFuturesLtp || !futureLeg) return null;
-    return suggestShortCallStrike(chainOc, effectiveFuturesLtp, futureLeg.quantity, targetDelta, { targetNetDelta });
-  }, [chainOc, effectiveFuturesLtp, futureLeg, targetDelta, targetNetDelta]);
-
-  const engineNetDelta = suggestion?.netDelta ?? targetNetDelta;
-  const rollCheck = useMemo(
-    () => evaluateRollNeed(engineNetDelta, { targetDelta: targetNetDelta, bandWidth }),
-    [engineNetDelta, targetNetDelta, bandWidth],
-  );
-
-  // ── Target / SL / trailing watcher (adapted from SyntheticFuturesScalper) ─
-  const capturedPoints = futureLeg
-    ? (futureLeg.side === 'SELL' ? futureLeg.entryPrice - effectiveFuturesLtp : effectiveFuturesLtp - futureLeg.entryPrice)
-    : 0;
-  const currentPnl = useMemo(() => {
-    let pnl = 0;
-    if (futureLeg && futuresContract) {
-      const unitQty = futureLeg.quantity * futuresContract.lotSize;
-      pnl += (futureLeg.entryPrice - effectiveFuturesLtp) * unitQty;
-    }
-    for (const c of callLegs) {
-      const ltp = c.strike != null ? callLtp(c.strike) : null;
-      if (ltp === null) continue;
-      pnl += (c.entryPrice - ltp) * c.quantity * optionLotSize;
-    }
-    return pnl;
-  }, [futureLeg, futuresContract, effectiveFuturesLtp, callLegs, callLtp, optionLotSize]);
-
-  useEffect(() => {
-    if (!futureLeg && callLegs.length === 0) {
-      peakRef.current = { points: -Infinity, pnl: -Infinity };
-      return;
-    }
-    peakRef.current.points = Math.max(peakRef.current.points, capturedPoints);
-    peakRef.current.pnl = Math.max(peakRef.current.pnl, currentPnl);
-  }, [futureLeg, callLegs.length, capturedPoints, currentPnl]);
-
-  const trailingStatus = useMemo(() => {
-    if (!trailingEnabled) return { armed: false, label: 'OFF', detail: 'Trailing SL disabled' };
-    const trigVal = parseFloat(trailTriggerStr) || 0;
-    const stepVal = parseFloat(trailStepStr) || 0;
-    if (trigVal <= 0 || stepVal <= 0) return { armed: false, label: 'INACTIVE', detail: 'Trigger/step <= 0' };
-    if (!futureLeg && callLegs.length === 0) return { armed: false, label: 'STANDBY', detail: `Arms @ +${trigVal} ${slMode === 'POINTS' ? 'pts' : '₹'}` };
-    const peak = slMode === 'POINTS' ? peakRef.current.points : peakRef.current.pnl;
-    const isArmed = peak >= trigVal;
-    if (!isArmed) return { armed: false, label: 'STANDBY', detail: `Arms @ +${trigVal} ${slMode === 'POINTS' ? 'pts' : '₹'}` };
-    const stepsBeyond = Math.floor((peak - trigVal) / stepVal);
-    const locked = stepsBeyond * stepVal;
-    return { armed: true, label: 'ARMED & LOCKING', detail: `Locked floor: ${slMode === 'POINTS' ? `+${locked} pts` : `+₹${locked}`}` };
-  }, [trailingEnabled, trailTriggerStr, trailStepStr, futureLeg, callLegs.length, slMode]);
-
-  useEffect(() => {
-    if (!futureLeg && callLegs.length === 0) return;
-    if (Date.now() < flattenCooldownUntilRef.current) return;
-
-    const slVal = parseFloat(stopLossStr) || 0;
-    const tgtVal = parseFloat(targetStr) || 0;
-    const trigVal = parseFloat(trailTriggerStr) || 0;
-    const stepVal = parseFloat(trailStepStr) || 0;
-
-    if (slVal > 0) {
-      if (slMode === 'POINTS' && capturedPoints <= -slVal) { handleFlattenAll(`Stop loss hit (-${slVal} pts)`); return; }
-      if (slMode === 'RUPEES' && currentPnl <= -slVal) { handleFlattenAll(`Stop loss hit (-₹${slVal})`); return; }
-    }
-    if (tgtVal > 0) {
-      if (slMode === 'POINTS' && capturedPoints >= tgtVal) { handleFlattenAll(`Target reached (+${tgtVal} pts)`); return; }
-      if (slMode === 'RUPEES' && currentPnl >= tgtVal) { handleFlattenAll(`Target reached (+₹${tgtVal})`); return; }
-    }
-    if (trailingEnabled && trigVal > 0 && stepVal > 0) {
-      const peak = slMode === 'POINTS' ? peakRef.current.points : peakRef.current.pnl;
-      const cur = slMode === 'POINTS' ? capturedPoints : currentPnl;
-      if (peak >= trigVal) {
-        const stepsBeyond = Math.floor((peak - trigVal) / stepVal);
-        const floor = stepsBeyond * stepVal;
-        if (cur <= floor) { handleFlattenAll(`Trailing SL hit (locked ${slMode === 'POINTS' ? `${floor} pts` : `₹${floor}`})`); return; }
-      }
-    }
-  }, [futureLeg, callLegs.length, capturedPoints, currentPnl, stopLossStr, targetStr, trailTriggerStr, trailStepStr, trailingEnabled, slMode, handleFlattenAll]);
-
-  // ── Live legs for the trade sheet ────────────────────────────────────────
-  const liveLegRows: LiveLegRow[] = useMemo(() => {
-    const rows: LiveLegRow[] = [];
-    if (futureLeg && futuresContract) {
-      const unitQty = futureLeg.quantity * futuresContract.lotSize;
-      rows.push({
-        id: futureLeg.id, leg: 'FUTURE', side: futureLeg.side, quantity: unitQty,
-        entryPrice: futureLeg.entryPrice, ltp: effectiveFuturesLtp || null,
-        target: null, stopLoss: null, trailingSlFloor: trailingStatus.armed ? peakRef.current.points : null,
-        livePnl: (futureLeg.entryPrice - effectiveFuturesLtp) * unitQty,
-      });
-    }
-    for (const c of callLegs) {
-      const ltp = c.strike != null ? callLtp(c.strike) : null;
-      const unitQty = c.quantity * optionLotSize;
-      rows.push({
-        id: c.id, leg: 'CALL', strike: c.strike, side: c.side, quantity: unitQty,
-        entryPrice: c.entryPrice, ltp, target: null, stopLoss: null, trailingSlFloor: null,
-        livePnl: ltp !== null ? (c.entryPrice - ltp) * unitQty : 0,
-      });
-    }
-    return rows;
-  }, [futureLeg, futuresContract, effectiveFuturesLtp, callLegs, callLtp, optionLotSize, trailingStatus.armed]);
-
-  const openMtm = liveLegRows.reduce((s, r) => s + r.livePnl, 0);
+  // ── Headline numbers ────────────────────────────────────────────────────
+  const totalPnl = snapshot?.totalPnl ?? null;
+  const effCost = bees && beesQty > 0 && snapshot
+    ? bees.avgCost - (snapshot.callsRealized + snapshot.callsOpenPnl + snapshot.callsUnsyncedPnl) / beesQty
+    : null;
+  const inputCls = cn(TXT_CAPTION, 'w-full bg-zinc-800 border border-zinc-700 rounded px-2 py-1 text-zinc-100 font-mono');
 
   return (
     <div className="flex flex-col min-h-screen bg-zinc-950 text-white">
@@ -708,59 +485,34 @@ export default function NiftyCoveredCallTerminal() {
           </div>
           <div>
             <div className="flex items-center gap-1.5">
-              <span className={cn(TXT_LABEL, 'font-bold text-emerald-500 uppercase tracking-[0.18em]')}>
-                NIFTY COVERED CALL
-              </span>
-              <span className={cn(TXT_LABEL, 'font-mono px-1.5 py-0.2 rounded bg-zinc-800 border border-zinc-700 text-zinc-300 font-bold')}>
-                DATA: {todayIST()}
-              </span>
+              <span className={cn(TXT_LABEL, 'font-bold text-emerald-400 uppercase tracking-[0.18em]')}>NIFTYBEES COVERED CALL</span>
+              <span className={cn(TXT_LABEL, 'font-mono px-1.5 rounded bg-zinc-800 border border-zinc-700 text-zinc-300 font-bold')}>DATA: {todayIST()}</span>
             </div>
             <h1 className="text-sm font-bold text-white tracking-tight flex items-center gap-1.5 mt-0.5 flex-wrap">
-              <span className="font-mono font-bold">NIFTY</span>
-              <span className={cn(TXT_CAPTION, 'font-mono font-bold text-zinc-200')}>₹{effectiveSpot.toFixed(2)}</span>
+              <span className="font-mono">NIFTY</span>
+              <span className={cn(TXT_CAPTION, 'font-mono font-bold text-zinc-200')}>{spot > 0 ? spot.toFixed(2) : '—'}</span>
               <LiveBadge live={wsLive} />
               <span className="text-zinc-600 font-normal">|</span>
-              <span className={cn(TXT_VALUE, 'font-mono text-zinc-500')}>FUT</span>
-              <span className={cn(TXT_CAPTION, 'font-mono font-bold text-zinc-200')}>
-                ₹{effectiveFuturesLtp ? effectiveFuturesLtp.toFixed(2) : '—'} ({futuresContract?.expiry || '—'})
-              </span>
-              <LiveBadge live={futuresLive} />
-              {futureExpiries.length > 1 && (
-                <div className="flex items-center bg-zinc-900 border border-zinc-800 rounded p-0.5">
-                  {futureExpiries.map((exp) => (
-                    <button
-                      key={exp}
-                      onClick={() => setFutureExpiry(exp)}
-                      className={cn(
-                        TXT_LABEL,
-                        'px-1.5 py-0.5 rounded font-mono font-bold transition-all',
-                        futureExpiry === exp ? 'bg-purple-500/20 text-purple-300 border border-purple-500/40' : 'text-zinc-400 hover:text-white',
-                      )}
-                      title={exp}
-                    >
-                      {formatExpiryMonth(exp)}
-                    </button>
-                  ))}
-                </div>
-              )}
+              <span className={cn(TXT_VALUE, 'font-mono text-zinc-500')}>NIFTYBEES</span>
+              <span className={cn(TXT_CAPTION, 'font-mono font-bold text-zinc-200')}>{beesLtp > 0 ? `₹${beesLtp.toFixed(2)}` : '—'}</span>
+              {bees?.ltpSource === 'holdings' && <span className={cn(TXT_LABEL, 'text-amber-300')} title="Quote lane busy — using the holdings row's LTP">HOLDINGS LTP</span>}
               <span className="text-zinc-600 font-normal">|</span>
-              <span className={cn(TXT_VALUE, 'font-mono text-zinc-500')}>MTM</span>
-              <span className={cn(TXT_CAPTION, 'font-mono font-bold', openMtm >= 0 ? 'text-emerald-400' : 'text-rose-400')}>
-                {openMtm >= 0 ? '+' : ''}₹{openMtm.toFixed(0)}
+              <span className={cn(TXT_VALUE, 'font-mono text-zinc-500')}>TOTAL P&amp;L</span>
+              <span className={cn(TXT_CAPTION, 'font-mono font-bold', totalPnl == null ? 'text-zinc-600' : totalPnl >= 0 ? 'text-emerald-400' : 'text-rose-400')}>
+                {totalPnl == null ? '—' : signed(totalPnl)}
               </span>
             </h1>
           </div>
         </div>
-
         <div className="flex items-center gap-2 flex-wrap">
-          <div className="flex items-center bg-zinc-900 border border-zinc-800 rounded-lg p-0.5">
-            {expiries.slice(0, 6).map((e) => (
+          <div className="flex items-center bg-zinc-900 border border-zinc-800 rounded-lg p-0.5 flex-wrap">
+            {expiries.slice(0, 8).map((e) => (
               <button
                 key={e}
                 onClick={() => setOptionExpiry(e)}
                 className={cn(
                   'px-2 py-1 rounded text-xs font-mono font-bold transition-all',
-                  optionExpiry === e ? 'bg-purple-500/20 text-purple-300 border border-purple-500/40' : 'text-zinc-400 hover:text-white',
+                  optionExpiry === e ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/40' : 'text-zinc-400 hover:text-white',
                 )}
               >
                 {e}
@@ -768,8 +520,9 @@ export default function NiftyCoveredCallTerminal() {
             ))}
           </div>
           <button
-            onClick={() => { fetchChain(); fetchFutures(); }}
+            onClick={() => { if (optionExpiry) fetchChain(optionExpiry); fetchBook(); }}
             className="p-1.5 rounded-lg bg-zinc-900 border border-zinc-800 text-zinc-400 hover:text-cyan-400 transition-colors"
+            aria-label="Refresh"
             title="Refresh"
           >
             <RefreshCw className={cn('w-4 h-4', isLoading && 'animate-spin text-cyan-400')} />
@@ -778,220 +531,243 @@ export default function NiftyCoveredCallTerminal() {
         </div>
       </div>
 
-      {feedError && (
-        <div className="mx-4 mt-2 px-3 py-2 rounded-lg bg-rose-500/10 border border-rose-500/40 text-xs text-rose-300">
-          {feedError}
+      {(feedError || bookError) && (
+        <div className="mx-4 mt-2 px-3 py-2 rounded-lg bg-rose-500/10 border border-rose-500/40 text-xs text-rose-300 space-y-0.5">
+          {feedError && <div>Option chain: {feedError}</div>}
+          {bookError && <div>Broker book: {bookError}</div>}
         </div>
       )}
 
-      <div className="flex-1 grid grid-cols-1 lg:grid-cols-3 gap-3 p-4">
-        {/* ── ORDER PAD ── */}
-        <div className="bg-zinc-950/40 border border-zinc-800/60 rounded-xl p-3 space-y-4">
+      <HowToUse />
+
+      {/* P&L STRIP */}
+      <div className="grid grid-cols-2 md:grid-cols-5 gap-3 px-4 pt-4">
+        <StatTile
+          label="NIFTYBEES unrealized"
+          value={snapshot?.beesPnl ?? null}
+          sub={bees ? `${fmtInt(beesQty)} @ ₹${bees.avgCost.toFixed(2)} avg` : 'loading holdings…'}
+        />
+        <StatTile
+          label="Calls open MTM"
+          value={snapshot ? snapshot.callsOpenPnl : null}
+          sub={`${rows.filter((r) => r.units > 0).length} open leg(s)`}
+        />
+        <StatTile
+          label="Calls realized"
+          value={ledger.realized + (snapshot?.callsUnsyncedPnl ?? 0)}
+          sub={snapshot && snapshot.unsyncedUnits > 0
+            ? `incl. ~₹${fmtInt(snapshot.callsUnsyncedPnl)} est. on ${snapshot.unsyncedUnits}u closed outside — SYNC to book`
+            : `₹${fmtInt(ledger.premiumSold)} premium sold to date`}
+        />
+        <StatTile label="Total P&L" value={totalPnl} sub="holding + calls" emphasis />
+        <StatTile
+          label="Effective cost / BEES"
+          value={effCost}
+          raw
+          sub={bees && effCost != null ? `avg ₹${bees.avgCost.toFixed(2)} less call P&L` : undefined}
+        />
+      </div>
+
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-3 p-4">
+        {/* WRITE CALL */}
+        <div className="bg-zinc-950/40 border border-zinc-800/60 rounded-xl p-3 space-y-3">
           <div className="text-xs font-bold text-zinc-100 uppercase tracking-wide flex items-center gap-1.5">
-            <TrendingDown className="w-3.5 h-3.5 text-rose-400" /> Order Pad
+            <PenLine className="w-3.5 h-3.5 text-rose-400" /> Write Call
+            <span className={cn(TXT_LABEL, 'ml-auto font-mono text-zinc-400')}>{optionExpiry ?? '—'} · {selDte.toFixed(1)} DTE</span>
+          </div>
+          <div className="grid grid-cols-3 gap-2">
+            <label className="block">
+              <span className={cn(TXT_LABEL, 'text-zinc-500')}>Target Δ</span>
+              <RuleNumInput value={targetDeltaStr} onCommit={setTargetDeltaStr} className={cn(inputCls, 'mt-0.5')} ariaLabel="Target delta" />
+            </label>
+            <label className="block">
+              <span className={cn(TXT_LABEL, 'text-zinc-500')}>Strike</span>
+              <RuleNumInput
+                value={manualStrikeStr}
+                onCommit={setManualStrikeStr}
+                placeholder={suggestion ? String(suggestion.strike) : 'auto'}
+                className={cn(inputCls, 'mt-0.5')}
+                ariaLabel="Strike (blank = suggested)"
+              />
+            </label>
+            <label className="block">
+              <span className={cn(TXT_LABEL, 'text-zinc-500')}>Lots</span>
+              <select value={writeLots} onChange={(e) => setWriteLots(Number(e.target.value))} className={cn(inputCls, 'mt-0.5')}>
+                {Array.from({ length: 10 }, (_, i) => i + 1).map((n) => <option key={n} value={n}>{n}</option>)}
+              </select>
+            </label>
           </div>
 
-          {/* Futures leg */}
-          <div className="bg-zinc-900/60 rounded-lg p-2.5 space-y-2">
-            <div className={cn(TXT_VALUE, 'text-zinc-500 uppercase font-bold')}>Futures Leg (Short)</div>
-            <div className="flex items-center gap-2">
-              <select
-                value={futureLots}
-                onChange={(e) => setFutureLots(Number(e.target.value))}
-                className={cn(TXT_CAPTION, 'bg-zinc-800 border border-zinc-700 rounded px-2 py-1 text-zinc-100')}
-              >
-                {[1, 2, 3, 5, 10].map((n) => <option key={n} value={n}>{n} lot{n > 1 ? 's' : ''}</option>)}
-              </select>
-              {!futureLeg ? (
-                <Button
-                  size="sm"
-                  variant="outline"
-                  disabled={isBusy || !futuresContract}
-                  onClick={handleEnterFuture}
-                  className="flex-1 bg-rose-500/20 border-rose-500/40 text-rose-300 font-bold hover:bg-rose-500/30 hover:text-rose-200"
-                >
-                  SELL FUTURES
-                </Button>
-              ) : (
-                <Button
-                  size="sm"
-                  variant="outline"
-                  disabled={isBusy}
-                  onClick={() => handleExitFuture('Manual exit')}
-                  className="flex-1 bg-emerald-500/20 border-emerald-500/40 text-emerald-300 font-bold hover:bg-emerald-500/30 hover:text-emerald-200"
-                >
-                  BUY TO COVER
-                </Button>
+          {suggestion && (
+            <div className={cn(TXT_VALUE, 'text-zinc-400')}>
+              Suggested <span className="font-bold text-emerald-400">{suggestion.strike} CE</span> (Δ {suggestion.strikeDelta.toFixed(2)}
+              {suggestion.deltaEstimated && <span className="text-amber-300"> est.</span>}). Holding covers{' '}
+              <span className="font-bold text-zinc-200">{lotSize > 0 ? (beesUnits / lotSize).toFixed(2) : '—'}</span> lots
+              {suggestion.coveredLots === 0 && beesUnits > 0 && <span className="text-amber-300"> — less than one full lot</span>}.
+              {manualStrike && (
+                <button className="ml-1 underline text-zinc-300" onClick={() => setManualStrikeStr('')}>use suggested</button>
               )}
             </div>
-            {futureLeg && (
-              <div className={cn(TXT_VALUE, 'text-zinc-400')}>
-                Open: {futureLeg.quantity} lot(s) @ {futureLeg.entryPrice.toFixed(2)}
-              </div>
-            )}
+          )}
+
+          <div className="rounded-lg bg-zinc-900/60 p-2.5 grid grid-cols-2 gap-x-3 gap-y-1">
+            <Kv label="Premium (LTP)" value={writeLtp != null ? `₹${writeLtp.toFixed(2)}` : '—'} />
+            <Kv label="Δ / IV" value={writeLeg ? `${writeLeg.greeks?.delta?.toFixed(2) ?? '—'} / ${writeLeg.implied_volatility?.toFixed(1) ?? '—'}%` : '—'} />
+            <Kv label="Credit" value={writeReturns ? `₹${fmtInt(writeReturns.credit)}` : '—'} />
+            <Kv label="OTM by" value={writeStrike && spot > 0 ? `${(writeStrike - spot).toFixed(0)} pts (${(((writeStrike - spot) / spot) * 100).toFixed(1)}%)` : '—'} />
+            <Kv label="Static yield" value={writeReturns ? `${writeReturns.staticPct.toFixed(2)}% (${writeReturns.staticAnnualPct.toFixed(0)}% ann.)` : '—'} />
+            <Kv label="If called" value={writeReturns ? `${writeReturns.ifCalledPct.toFixed(2)}%` : '—'} />
+            <Kv label="Downside cushion" value={writeReturns ? `${writeReturns.protectionPts.toFixed(0)} pts (${writeReturns.protectionPct.toFixed(2)}%)` : '—'} />
+            <Kv
+              label="Written after"
+              value={coverageAfter != null ? `${(coverageAfter * 100).toFixed(0)}%` : '—'}
+              tone={coverageAfter != null && coverageAfter > 1.0001 ? 'warn' : 'ok'}
+            />
           </div>
 
-          {/* Call leg */}
-          <div className="bg-zinc-900/60 rounded-lg p-2.5 space-y-2">
-            <div className={cn(TXT_VALUE, 'text-zinc-500 uppercase font-bold')}>Short Call Leg</div>
-            <div className="flex items-center gap-2">
-              <RuleNumInput
-                value={manualStrike != null ? String(manualStrike) : ''}
-                onCommit={(v) => setManualStrike(v ? Number(v) : null)}
-                placeholder={suggestion ? String(suggestion.strike) : 'Strike'}
-                className={cn(TXT_CAPTION, 'w-24 bg-zinc-800 border border-zinc-700 rounded px-2 py-1 text-zinc-100')}
-              />
-              <select
-                value={callLots}
-                onChange={(e) => setCallLots(Number(e.target.value))}
-                className={cn(TXT_CAPTION, 'bg-zinc-800 border border-zinc-700 rounded px-2 py-1 text-zinc-100')}
-              >
-                {[1, 2, 3, 5, 10].map((n) => <option key={n} value={n}>{n} lot{n > 1 ? 's' : ''}</option>)}
-              </select>
+          <div className="flex items-center gap-2">
+            <div className="flex bg-zinc-800 rounded p-0.5">
+              {(['LIMIT', 'MARKET'] as const).map((t) => (
+                <button key={t} onClick={() => setOrderType(t)}
+                  className={cn(TXT_VALUE, 'px-2 py-0.5 rounded font-bold', orderType === t ? 'bg-zinc-700 text-zinc-100' : 'text-zinc-400')}>
+                  {t}
+                </button>
+              ))}
             </div>
-            <Button
-              size="sm"
-              variant="outline"
-              disabled={isBusy || (!manualStrike && !suggestion)}
-              onClick={() => handleEnterCall(manualStrike ?? suggestion!.strike, callLots)}
-              className="w-full bg-rose-500/20 border-rose-500/40 text-rose-300 font-bold hover:bg-rose-500/30 hover:text-rose-200"
-            >
-              SELL CALL
-            </Button>
-            {callLegs.length > 0 && (
-              <div className="space-y-1 pt-1 border-t border-zinc-800/60">
-                {callLegs.map((c) => (
-                  <div key={c.id} className={cn(TXT_VALUE, 'flex items-center justify-between text-zinc-400')}>
-                    <span>{c.strike} CE × {c.quantity} @ {c.entryPrice.toFixed(2)}</span>
-                    <div className="flex gap-1">
-                      {suggestion && suggestion.strike !== c.strike && (
-                        <Button
-                          size="xs"
-                          variant="outline"
-                          disabled={isBusy}
-                          onClick={() => handleRollCall(c, suggestion)}
-                          className="bg-amber-500/20 border-amber-500/40 text-amber-300 font-bold hover:bg-amber-500/30 hover:text-amber-200"
-                        >
-                          ROLL → {suggestion.strike}
-                        </Button>
-                      )}
-                      <Button
-                        size="xs"
-                        variant="outline"
-                        disabled={isBusy}
-                        onClick={() => handleExitCall(c, 'EXIT', 'Manual exit')}
-                        className="bg-emerald-500/20 border-emerald-500/40 text-emerald-300 font-bold hover:bg-emerald-500/30 hover:text-emerald-200"
+            {orderType === 'LIMIT' && (
+              <RuleNumInput value={limitStr} onCommit={setLimitStr} className={cn(inputCls, 'w-24')} ariaLabel="Limit price" />
+            )}
+          </div>
+          <Button
+            size="sm"
+            variant="outline"
+            disabled={busy || !writeStrike || !writeLeg?.security_id || !(lotSize > 0)}
+            onClick={handleWrite}
+            className="w-full bg-rose-500/20 border-rose-500/40 text-rose-300 font-bold hover:bg-rose-500/30 hover:text-rose-200"
+          >
+            SELL {writeLots} × {writeStrike ?? '—'} CE
+          </Button>
+          <div className={cn(TXT_LABEL, 'text-zinc-500')}>
+            NRML (carried to expiry). Only broker-confirmed fills are booked, at the order&apos;s own price. A LIMIT that
+            doesn&apos;t fill at once stays open at the broker and is booked automatically when it fills.
+            {pending.length > 0 && <span className="text-amber-300"> {pending.length} order(s) still working.</span>}
+          </div>
+        </div>
+
+        {/* GREEKS */}
+        <DeltaPanel book={snapshot} spot={spot} beesLtp={beesLtp} lotSize={lotSize} />
+
+        {/* HOLDING + BROKER SHORTS */}
+        <div className="space-y-3">
+          <div className="bg-zinc-950/40 border border-zinc-800/60 rounded-xl p-3 space-y-2">
+            <div className="text-xs font-bold text-zinc-100 uppercase tracking-wide flex items-center gap-1.5">
+              <Wallet className="w-3.5 h-3.5 text-emerald-400" /> NIFTYBEES Holding
+            </div>
+            {bees ? (
+              <div className="grid grid-cols-2 gap-x-3 gap-y-1">
+                <Kv label="Total qty" value={fmtInt(bees.qty)} />
+                <Kv label="Value" value={`₹${fmtInt(holdingValue)}`} />
+                <Kv label="Demat (DP)" value={fmtInt(bees.dpQty)} />
+                <Kv label="T1 (settling)" value={fmtInt(bees.t1Qty)} />
+                <Kv label="Bought today" value={fmtInt(bees.todayQty)} />
+                <Kv label="Avg cost" value={`₹${bees.avgCost.toFixed(2)}`} />
+                <Kv label="Nifty-equivalent" value={`${beesUnits.toFixed(1)} units`} />
+                <Kv label="= lots" value={lotSize > 0 ? (beesUnits / lotSize).toFixed(2) : '—'} />
+                <Kv label="BEES per Nifty pt" value={beesLtp > 0 && spot > 0 ? `1 : ${(spot / beesLtp).toFixed(1)}` : '—'} />
+              </div>
+            ) : (
+              <div className={cn(TXT_CAPTION, 'text-zinc-500')}>{book?.beesError ?? 'Loading holdings…'}</div>
+            )}
+            <div className={cn(TXT_LABEL, 'text-zinc-500')}>
+              Holdings (DP + T1) + today&apos;s CNC position, refreshed every 5 s. Read-only — this desk never trades NIFTYBEES.
+            </div>
+          </div>
+
+          <div className="bg-zinc-950/40 border border-zinc-800/60 rounded-xl p-3 space-y-2">
+            <div className="text-xs font-bold text-zinc-100 uppercase tracking-wide flex items-center gap-1.5">
+              <Link2 className="w-3.5 h-3.5 text-sky-400" /> Broker NIFTY CE Shorts (not in this book)
+            </div>
+            {adoptable.length === 0 ? (
+              <div className={cn(TXT_VALUE, 'text-zinc-500')}>
+                {book?.brokerShortUnits == null ? 'Positions unavailable.' : 'Every NIFTY CE short at the broker is already in this book (or there are none).'}
+              </div>
+            ) : (
+              <div className="space-y-1.5">
+                {adoptable.map((c) => {
+                  const maxLots = lotSize > 0 ? Math.floor(c.unowned / lotSize) : 0;
+                  const lots = Math.min(adoptLots[c.securityId] ?? maxLots, maxLots);
+                  return (
+                    <div key={c.securityId} className={cn(TXT_VALUE, 'flex items-center gap-2 text-zinc-300')}>
+                      <span className="font-mono flex-1 truncate" title={c.tradingSymbol}>
+                        {c.strike} CE {c.expiry} · {c.unowned}u @ {c.sellAvg.toFixed(1)}
+                      </span>
+                      <select
+                        value={lots}
+                        aria-label={`Lots to adopt for ${c.tradingSymbol}`}
+                        onChange={(e) => setAdoptLots((p) => ({ ...p, [c.securityId]: Number(e.target.value) }))}
+                        className={cn(TXT_VALUE, 'bg-zinc-800 border border-zinc-700 rounded px-1 py-0.5 text-zinc-100')}
                       >
-                        BUY BACK
+                        {Array.from({ length: maxLots + 1 }, (_, i) => i).map((n) => <option key={n} value={n}>{n}L</option>)}
+                      </select>
+                      <Button size="xs" variant="outline" disabled={busy || lots <= 0} onClick={() => handleAdopt(c)}
+                        className="bg-sky-500/20 border-sky-500/40 text-sky-300 font-bold hover:bg-sky-500/30 hover:text-sky-200">
+                        ADOPT
                       </Button>
                     </div>
-                  </div>
-                ))}
+                  );
+                })}
+                <div className={cn(TXT_LABEL, 'text-zinc-500')}>
+                  Other strategies on this account short NIFTY calls too — adopt only the ones you wrote against NIFTYBEES.
+                </div>
               </div>
             )}
-          </div>
-
-          {/* Hedge engine inputs */}
-          <div className="bg-zinc-900/60 rounded-lg p-2.5 space-y-2">
-            <div className={cn(TXT_VALUE, 'text-zinc-500 uppercase font-bold')}>Hedge Engine</div>
-            <div className="grid grid-cols-3 gap-2">
-              <LabeledInput label="Strike Δ" value={targetDeltaStr} onCommit={setTargetDeltaStr} />
-              <LabeledInput label="Net Δ Target" value={targetNetDeltaStr} onCommit={setTargetNetDeltaStr} />
-              <LabeledInput label="Band ±" value={bandWidthStr} onCommit={setBandWidthStr} />
-            </div>
-          </div>
-
-          {/* Target / SL / Trailing */}
-          <div className="bg-zinc-900/60 rounded-lg p-2.5 space-y-2">
-            <div className="flex items-center justify-between">
-              <div className={cn(TXT_VALUE, 'text-zinc-500 uppercase font-bold')}>Target / SL</div>
-              <div className="flex bg-zinc-800 rounded p-0.5">
-                {(['POINTS', 'RUPEES'] as SlMode[]).map((m) => (
-                  <button
-                    key={m}
-                    onClick={() => setSlMode(m)}
-                    className={cn(TXT_VALUE, 'px-2 py-0.5 rounded font-bold', slMode === m ? 'bg-zinc-700 text-zinc-100' : 'text-zinc-400')}
-                  >
-                    {m === 'POINTS' ? 'Pts' : '₹'}
-                  </button>
-                ))}
-              </div>
-            </div>
-            <div className="grid grid-cols-2 gap-2">
-              <LabeledInput label={`Target (${slMode === 'POINTS' ? 'pts' : '₹'})`} value={targetStr} onCommit={setTargetStr} />
-              <LabeledInput label={`Stop (${slMode === 'POINTS' ? 'pts' : '₹'})`} value={stopLossStr} onCommit={setStopLossStr} />
-            </div>
-            <label className={cn(TXT_VALUE, 'flex items-center gap-2 text-zinc-400')}>
-              <input type="checkbox" checked={trailingEnabled} onChange={(e) => setTrailingEnabled(e.target.checked)} />
-              Trailing SL
-            </label>
-            {trailingEnabled && (
-              <div className="grid grid-cols-2 gap-2">
-                <LabeledInput label="Arm Trigger" value={trailTriggerStr} onCommit={setTrailTriggerStr} />
-                <LabeledInput label="Trail Step" value={trailStepStr} onCommit={setTrailStepStr} />
-              </div>
-            )}
-            <div className={cn(TXT_VALUE, 'text-zinc-500')}>{trailingStatus.label}: {trailingStatus.detail}</div>
-            <Button
-              size="sm"
-              variant="outline"
-              disabled={isBusy || (!futureLeg && callLegs.length === 0)}
-              onClick={() => handleFlattenAll('Manual flatten')}
-              className="w-full bg-zinc-800 border-zinc-700 text-zinc-200 font-bold hover:bg-zinc-700"
-            >
-              FLATTEN ALL
-            </Button>
           </div>
         </div>
 
-        {/* ── DELTA PANEL ── */}
-        <div className="space-y-3">
-          <DeltaPanel
-            greeks={netGreeks}
-            suggestion={suggestion}
-            rollNeeded={rollCheck.needsRoll}
-            rollReason={rollCheck.reason}
-            targetNetDelta={targetNetDelta}
-            bandWidth={bandWidth}
+        <div className="lg:col-span-3">
+          <TradeSheet
+            rows={rows}
+            history={trades}
+            lotSize={lotSize}
+            busy={busy}
+            rollTarget={writeStrike && optionExpiry ? { strike: writeStrike, expiry: optionExpiry } : null}
+            onBuyBack={handleBuyBack}
+            onRoll={handleRoll}
+            onSyncLedger={handleSync}
           />
-        </div>
-
-        {/* ── TRADE SHEET ── */}
-        <div className="lg:col-span-1">
-          <TradeSheet liveLegs={liveLegRows} history={history} />
         </div>
       </div>
     </div>
   );
 }
 
-// Compact LIVE/POLL status pill (Bug 2) — emerald when the WS bridge is
-// feeding this value, amber "POLL" when falling back to the REST poll.
 function LiveBadge({ live }: { live: boolean }) {
   return (
-    <Badge
-      className={cn(
-        TXT_MICRO,
-        'h-4 px-1 rounded font-bold border',
-        live
-          ? 'bg-emerald-500/20 text-emerald-300 border-emerald-500/40'
-          : 'bg-amber-500/20 text-amber-300 border-amber-500/40',
-      )}
-    >
+    <Badge className={cn('text-[8px] h-4 px-1 rounded font-bold border',
+      live ? 'bg-emerald-500/20 text-emerald-300 border-emerald-500/40' : 'bg-amber-500/20 text-amber-300 border-amber-500/40')}>
       {live ? 'LIVE' : 'POLL'}
     </Badge>
   );
 }
 
-function LabeledInput({ label, value, onCommit }: { label: string; value: string; onCommit: (v: string) => void }) {
+function StatTile({ label, value, sub, emphasis, raw }: { label: string; value: number | null; sub?: string; emphasis?: boolean; raw?: boolean }) {
+  const tone = raw ? 'text-zinc-100' : value == null ? 'text-zinc-600' : value > 0 ? 'text-emerald-400' : value < 0 ? 'text-rose-400' : 'text-zinc-200';
   return (
-    <label className="block">
-      <span className={cn(TXT_LABEL, 'text-zinc-500')}>{label}</span>
-      <RuleNumInput
-        value={value}
-        onCommit={onCommit}
-        className={cn(TXT_CAPTION, 'w-full mt-0.5 bg-zinc-800 border border-zinc-700 rounded px-2 py-1 text-zinc-100')}
-      />
-    </label>
+    <div className={cn('rounded-xl border px-3 py-2', emphasis ? 'border-emerald-500/30 bg-emerald-500/5' : 'border-zinc-800/60 bg-zinc-950/40')}>
+      <div className={cn(TXT_LABEL, 'text-zinc-500 uppercase font-bold tracking-wide')}>{label}</div>
+      <div className={cn(emphasis ? 'text-lg' : 'text-base', 'font-bold font-mono tabular-nums', tone)}>
+        {value == null ? '—' : raw ? `₹${value.toFixed(2)}` : signed(value)}
+      </div>
+      {sub && <div className={cn(TXT_VALUE, 'text-zinc-500 truncate')} title={sub}>{sub}</div>}
+    </div>
+  );
+}
+
+function Kv({ label, value, tone }: { label: string; value: string; tone?: 'ok' | 'warn' }) {
+  return (
+    <div className={cn(TXT_VALUE, 'flex justify-between gap-2 font-mono')}>
+      <span className="text-zinc-500">{label}</span>
+      <span className={tone === 'warn' ? 'text-amber-300 font-bold' : 'text-zinc-200'}>{value}</span>
+    </div>
   );
 }
