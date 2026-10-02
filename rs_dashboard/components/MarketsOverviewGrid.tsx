@@ -229,6 +229,21 @@ function groupOf(key: string): string {
   return key in GLOBAL_BY_KEY ? GLOBAL_BY_KEY[key].group : MCX_KEYS.has(key) ? 'MCX' : 'Index';
 }
 
+// Table sections, in display order. Sorting reorders rows within a section only,
+// so the borders/headers never move.
+const SECTIONS = [
+  { id: 'india',  title: 'Indian Markets',   sub: 'NSE indices, India VIX, MCX crude' },
+  { id: 'global', title: 'Global Indices',   sub: 'US, Asia, Europe' },
+  { id: 'bonds',  title: 'Bonds & Currency', sub: 'US Treasury yields, Dollar Index' },
+] as const;
+type SectionId = typeof SECTIONS[number]['id'];
+
+function sectionOf(key: string): SectionId {
+  const g = GLOBAL_BY_KEY[key];
+  if (!g) return 'india';
+  return g.group === 'Bond yield' || g.group === 'Currency' ? 'bonds' : 'global';
+}
+
 function MarketsTable({ rows, globalQuotes, loaded }: {
   rows: TableRow[]; globalQuotes: Record<string, { source: string }>; loaded: boolean;
 }) {
@@ -249,7 +264,7 @@ function MarketsTable({ rows, globalQuotes, loaded }: {
       live: r.key in GLOBAL_BY_KEY ? globalQuotes[r.key]?.source === 'yahoo-live' : true };
   }), [rows, globalQuotes]);
 
-  const sorted = useMemo(() => {
+  const sortedAll = useMemo(() => {
     if (!sort) return enriched;
     const val = (r: typeof enriched[number]): number | string | null =>
       sort.key === 'label' ? r.label : sort.key === 'group' ? r.group : sort.key === 'ltp' ? r.ltp
@@ -264,6 +279,12 @@ function MarketsTable({ rows, globalQuotes, loaded }: {
       return (typeof x === 'string' ? x.localeCompare(y as string) : x - (y as number)) * m;
     });
   }, [enriched, sort]);
+
+  const sections = useMemo(
+    () => SECTIONS.map(sec => ({ ...sec, rows: sortedAll.filter(r => sectionOf(r.key) === sec.id) }))
+      .filter(sec => sec.rows.length > 0),
+    [sortedAll],
+  );
 
   const fmtUnit = (n: number | null, unit: string) => (n === null ? '—' : `${fmtPrice(n)}${unit}`);
   const tone = (n: number | null) => (n === null || n === 0 ? 'text-zinc-400' : n > 0 ? 'text-emerald-400' : 'text-red-400');
@@ -285,8 +306,17 @@ function MarketsTable({ rows, globalQuotes, loaded }: {
             <TH className="px-3 py-2.5">Feed</TH>
           </tr>
         </thead>
-        <tbody>
-          {sorted.map(r => (
+        {sections.map(sec => (
+        <tbody key={sec.id} className="border-t-2 border-zinc-600">
+          <tr>
+            <th colSpan={10} scope="colgroup" className="px-3 py-2 text-left bg-zinc-800/70">
+              <span className="text-xs font-bold uppercase tracking-[0.15em] text-zinc-100">{sec.title}</span>
+              <span className="ml-2 text-[11px] font-medium normal-case tracking-normal text-zinc-400">
+                {sec.sub} · {sec.rows.length}
+              </span>
+            </th>
+          </tr>
+          {sec.rows.map(r => (
             <tr key={r.key} className="border-t border-white/5 hover:bg-zinc-800/40 transition-colors">
               <TD className="px-3 py-2 font-sans font-semibold text-zinc-100">
                 <Link href={`/markets/${r.key}`} className="hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-500 rounded">{r.label}</Link>
@@ -317,10 +347,13 @@ function MarketsTable({ rows, globalQuotes, loaded }: {
               </TD>
             </tr>
           ))}
-          {!loaded && (
-            <tr><td colSpan={10} className="px-3 py-6 text-center text-sm text-zinc-500">Loading…</td></tr>
-          )}
         </tbody>
+        ))}
+        {!loaded && (
+          <tbody>
+            <tr><td colSpan={10} className="px-3 py-6 text-center text-sm text-zinc-500">Loading…</td></tr>
+          </tbody>
+        )}
       </table>
     </div>
   );
