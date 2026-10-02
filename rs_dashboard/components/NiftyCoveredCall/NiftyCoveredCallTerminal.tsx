@@ -11,6 +11,8 @@ import DeltaPanel from './DeltaPanel';
 import HowToUseModal from './HowToUse';
 import TradeSheet, { type OpenCallRow } from './TradeSheet';
 import { useLiveOptionsWS } from '@/lib/useLiveOptionsWS';
+import { useLiveTickerPoll } from '@/lib/useLiveTickerPoll';
+import { PctPill } from '@/components/LiveTickerPanel';
 import { lookupChainLegData, type ChainOc } from '@/lib/optionsStrategy';
 import {
   reconstructCallLedger,
@@ -42,6 +44,26 @@ function todayIST(): string {
 }
 const fmtInt = (v: number) => Math.round(v).toLocaleString('en-IN');
 const signed = (v: number) => `${v >= 0 ? '+' : '−'}₹${fmtInt(Math.abs(v))}`;
+
+interface IndexQuote {
+  ltp: number;
+  prev_close: number;
+  change_pct: number | null;
+  source: string;
+}
+
+interface IndicesResponse {
+  success: boolean;
+  updated_at: string;
+  quotes: Record<string, IndexQuote>;
+}
+
+function pickIndexLtps(d: IndicesResponse): Record<string, number> {
+  const out: Record<string, number> = {};
+  if (typeof d?.quotes?.NIFTY?.ltp === 'number') out.NIFTY = d.quotes.NIFTY.ltp;
+  if (typeof d?.quotes?.VIX?.ltp === 'number') out.VIX = d.quotes.VIX.ltp;
+  return out;
+}
 
 // ── Commit-on-blur numeric input (dhan-commit-on-blur) ──
 function RuleNumInput({ value, onCommit, placeholder, className, ariaLabel }: {
@@ -227,8 +249,18 @@ export default function NiftyCoveredCallTerminal() {
     return () => clearInterval(id);
   }, [fetchBook, sweepPending]);
 
+  // ── Live NIFTY & INDIA VIX ticker poll (/api/scalper/top-indices) ───────
+  const { data: indicesData } = useLiveTickerPoll<IndicesResponse>('/api/scalper/top-indices', pickIndexLtps);
+  const niftyQuote = indicesData?.quotes?.NIFTY;
+  const vixQuote = indicesData?.quotes?.VIX;
+
   // ── Derived market values ───────────────────────────────────────────────
   const spot = liveQuotes?.spot && liveQuotes.spot > 0 ? liveQuotes.spot : restSpot;
+  const displayNiftyLtp = (niftyQuote?.ltp && niftyQuote.ltp > 0) ? niftyQuote.ltp : spot;
+  const niftyPct = niftyQuote?.change_pct ?? null;
+  const vixLtp = vixQuote?.ltp ?? null;
+  const vixPct = vixQuote?.change_pct ?? null;
+
   const bees = book?.bees ?? null;
   const beesQty = bees?.qty ?? 0;
   const beesLtp = bees?.ltp ?? 0;
@@ -476,15 +508,42 @@ export default function NiftyCoveredCallTerminal() {
               <span className={cn(TXT_LABEL, 'font-bold text-emerald-400 uppercase tracking-[0.18em]')}>NIFTYBEES COVERED CALL</span>
               <span className={cn(TXT_LABEL, 'font-mono px-1.5 rounded bg-zinc-800 border border-zinc-700 text-zinc-300 font-bold')}>DATA: {todayIST()}</span>
             </div>
-            <h1 className="text-sm font-bold text-white tracking-tight flex items-center gap-1.5 mt-0.5 flex-wrap">
-              <span className="font-mono text-zinc-400">NIFTY</span>
-              <span className={cn(TXT_CAPTION, 'font-mono font-bold text-white')}>{spot > 0 ? spot.toFixed(2) : '—'}</span>
-              <LiveBadge live={wsLive} />
-              <span className="text-zinc-600 font-normal">|</span>
-              <span className={cn(TXT_VALUE, 'font-mono text-zinc-400')}>NIFTYBEES</span>
-              <span className={cn(TXT_CAPTION, 'font-mono font-bold text-emerald-400')}>{beesLtp > 0 ? `₹${beesLtp.toFixed(2)}` : '—'}</span>
-              {bees?.ltpSource === 'holdings' && <span className={cn(TXT_LABEL, 'text-amber-300')} title="Holdings quote used">HOLDINGS</span>}
-            </h1>
+            <div className="flex items-center gap-2 mt-1 flex-wrap">
+              {/* NIFTY Ticker */}
+              <div className="flex items-center gap-1.5 font-mono px-2 py-0.5 rounded-md bg-zinc-900 border border-zinc-800">
+                <span className="text-[10px] font-bold text-zinc-400">NIFTY</span>
+                <span className={cn(TXT_CAPTION, 'font-bold text-white')}>
+                  {displayNiftyLtp > 0 ? displayNiftyLtp.toFixed(2) : '—'}
+                </span>
+                <PctPill v={niftyPct} />
+                <LiveBadge live={wsLive} />
+              </div>
+
+              {/* INDIA VIX Ticker */}
+              <div
+                className="flex items-center gap-1.5 font-mono px-2 py-0.5 rounded-md bg-zinc-900 border border-zinc-800"
+                title="India VIX: Measures expected 30-day market volatility"
+              >
+                <span className="text-[10px] font-bold text-amber-400/90">INDIA VIX</span>
+                <span className={cn(TXT_CAPTION, 'font-bold text-amber-300')}>
+                  {vixLtp != null && vixLtp > 0 ? vixLtp.toFixed(2) : '—'}
+                </span>
+                <PctPill v={vixPct} />
+              </div>
+
+              {/* NIFTYBEES Holding Ticker */}
+              <div className="flex items-center gap-1.5 font-mono px-2 py-0.5 rounded-md bg-zinc-900 border border-zinc-800">
+                <span className={cn(TXT_VALUE, 'font-bold text-emerald-400/90')}>NIFTYBEES</span>
+                <span className={cn(TXT_CAPTION, 'font-bold text-emerald-400')}>
+                  {beesLtp > 0 ? `₹${beesLtp.toFixed(2)}` : '—'}
+                </span>
+                {bees?.ltpSource === 'holdings' && (
+                  <span className={cn(TXT_LABEL, 'text-amber-300 font-bold')} title="Holdings quote used">
+                    HOLDINGS
+                  </span>
+                )}
+              </div>
+            </div>
           </div>
         </div>
 
