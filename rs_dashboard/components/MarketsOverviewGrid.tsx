@@ -11,7 +11,7 @@
 
 import React, { useEffect, useMemo, useState } from 'react';
 import Link from 'next/link';
-import { TrendingUp, TrendingDown, Minus, Fuel, LineChart, LayoutGrid, Table2 } from 'lucide-react';
+import { TrendingUp, TrendingDown, Minus, ArrowUp, ArrowDown, Fuel, LineChart, LayoutGrid, Table2 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { Card } from '@/components/ui/card';
 import NavBar from './NavBar';
@@ -244,6 +244,14 @@ function sectionOf(key: string): SectionId {
   return g.group === 'Bond yield' || g.group === 'Currency' ? 'bonds' : 'global';
 }
 
+// Direction arrow for the table's change columns; flat/unknown renders nothing
+// but keeps the column width so numbers stay aligned.
+function DirArrow({ v }: { v: number | null }) {
+  if (v === null || v === 0) return <span aria-hidden className="inline-block w-3.5" />;
+  const Icon = v > 0 ? ArrowUp : ArrowDown;
+  return <Icon aria-label={v > 0 ? 'Up' : 'Down'} role="img" className={cn('inline-block h-3.5 w-3.5 shrink-0', v > 0 ? 'text-emerald-400' : 'text-red-400')} />;
+}
+
 function MarketsTable({ rows, globalQuotes, loaded }: {
   rows: TableRow[]; globalQuotes: Record<string, { source: string }>; loaded: boolean;
 }) {
@@ -324,9 +332,17 @@ function MarketsTable({ rows, globalQuotes, loaded }: {
               <TD className="px-3 py-2 text-zinc-400 font-sans">{r.group}</TD>
               <TD right className="px-3 py-2 font-bold text-zinc-100 tabular-nums">{fmtUnit(r.ltp, r.unit)}</TD>
               <TD right className={cn('px-3 py-2 tabular-nums', tone(r.chg))}>
-                {r.chg === null ? '—' : `${r.chg > 0 ? '+' : ''}${fmtPrice(r.chg)}${r.unit}`}
+                <span className="inline-flex items-center gap-1">
+                  <DirArrow v={r.chg} />
+                  {r.chg === null ? '—' : `${r.chg > 0 ? '+' : ''}${fmtPrice(r.chg)}${r.unit}`}
+                </span>
               </TD>
-              <TD right className="px-3 py-2"><PctPill v={r.pct} /></TD>
+              <TD right className="px-3 py-2">
+                <span className="inline-flex items-center gap-1">
+                  <DirArrow v={r.pct} />
+                  <PctPill v={r.pct} />
+                </span>
+              </TD>
               <TD right className="px-3 py-2 text-zinc-300 tabular-nums">{fmtUnit(r.prev, r.unit)}</TD>
               <TD right className="px-3 py-2 text-emerald-400 tabular-nums">{fmtUnit(r.hi, r.unit)}</TD>
               <TD right className="px-3 py-2 text-red-400 tabular-nums">{fmtUnit(r.lo, r.unit)}</TD>
