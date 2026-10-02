@@ -297,6 +297,12 @@ export default function NiftyCoveredCallTerminal() {
     : null;
   const coverageAfter = beesUnits > 0 ? ((snapshot?.shortCallUnits ?? 0) + writeUnits) / beesUnits : null;
 
+  // Active Trader Net Delta calculation
+  const writeDeltaPerUnit = writeLeg?.greeks?.delta ? Math.abs(writeLeg.greeks.delta) : (suggestion?.strikeDelta ?? targetDelta);
+  const currentNetDelta = snapshot?.net.delta ?? beesUnits;
+  const netDeltaAfter = currentNetDelta - (writeDeltaPerUnit * writeUnits);
+  const atmDeltaAfter = currentNetDelta - (0.50 * writeUnits);
+
   // Seed limit price from live LTP whenever contract changes
   const writeKey = `${optionExpiry}:${writeStrike}`;
   const seededKey = useRef('');
@@ -365,9 +371,10 @@ export default function NiftyCoveredCallTerminal() {
     const price = orderType === 'LIMIT' ? parseFloat(limitStr) : undefined;
     if (orderType === 'LIMIT' && !(price! > 0)) throw new Error('Enter a valid limit price');
     const covMsg = coverageAfter != null && coverageAfter > 1.0001
-      ? `\n\n⚠ WARNING: This takes calls written to ${(coverageAfter * 100).toFixed(0)}% of your NIFTYBEES — ${(((snapshot?.shortCallUnits ?? 0) + writeUnits) - beesUnits).toFixed(1)} Nifty units would be a NAKED short call.`
+      ? `\n\n⚠ Deliverable Coverage: ${(coverageAfter * 100).toFixed(0)}% (${(((snapshot?.shortCallUnits ?? 0) + writeUnits) - beesUnits).toFixed(1)} Nifty units deliverable naked).`
       : '';
-    if (!confirm(`REAL ORDER: SELL ${writeLots} lot(s) (${writeUnits} units) NIFTY ${writeStrike} CE ${optionExpiry} @ ${orderType === 'LIMIT' ? price : 'MARKET'} (NRML).${covMsg}`)) return;
+    const deltaMsg = `\nActive Net Δ: ${netDeltaAfter >= 0 ? '+' : ''}${netDeltaAfter.toFixed(1)} Δ (at ATM: ${atmDeltaAfter >= 0 ? '+' : ''}${atmDeltaAfter.toFixed(1)} Δ).`;
+    if (!confirm(`REAL ORDER: SELL ${writeLots} lot(s) (${writeUnits} units) NIFTY ${writeStrike} CE ${optionExpiry} @ ${orderType === 'LIMIT' ? price : 'MARKET'} (NRML).${covMsg}${deltaMsg}`)) return;
     await sellCall(writeStrike, optionExpiry, writeUnits, orderType, price, 'Covered call write');
   });
 
@@ -759,10 +766,28 @@ export default function NiftyCoveredCallTerminal() {
                 <div className="flex justify-between items-center">
                   <MetricTooltip
                     label="Coverage After:"
-                    text="Projected total coverage if this trade is executed. Keeps your position ≤100% covered to prevent naked short call risk."
+                    text="Deliverable Unit Coverage: Ratio of short call units sold vs your NIFTYBEES capacity. >100% means more units are sold than shares held (deliverable naked)."
                   />
                   <span className={cn('font-bold', coverageAfter != null && coverageAfter > 1.0001 ? 'text-amber-400' : 'text-emerald-400')}>
                     {coverageAfter != null ? `${(coverageAfter * 100).toFixed(0)}% ${coverageAfter > 1.0001 ? '⚠ Naked' : '✓ Safe'}` : '—'}
+                  </span>
+                </div>
+                <div className="flex justify-between items-center">
+                  <MetricTooltip
+                    label="Net Δ After:"
+                    text="Active Delta Overlay: Net directional exposure after this trade (NIFTYBEES delta minus short call delta). ~0 Δ indicates delta-neutral balance. An active trader manages this dynamically."
+                  />
+                  <span className={cn('font-mono font-bold', Math.abs(netDeltaAfter) <= 10 ? 'text-emerald-400' : netDeltaAfter > 0 ? 'text-sky-300' : 'text-amber-400')}>
+                    {netDeltaAfter != null ? `${netDeltaAfter >= 0 ? '+' : ''}${netDeltaAfter.toFixed(1)} Δ ${Math.abs(netDeltaAfter) <= 5 ? '(Neutral)' : netDeltaAfter > 0 ? '(Long)' : '(Short)'}` : '—'}
+                  </span>
+                </div>
+                <div className="flex justify-between items-center">
+                  <MetricTooltip
+                    label="Net Δ if ATM:"
+                    text="Convexity & Gamma Risk: If NIFTY rallies to this strike, call delta rises to ~0.50. Net delta flips negative unless actively rolled or hedged as the spot approaches."
+                  />
+                  <span className={cn('font-mono', atmDeltaAfter < -20 ? 'text-amber-400/90' : 'text-zinc-300')}>
+                    {atmDeltaAfter != null ? `${atmDeltaAfter >= 0 ? '+' : ''}${atmDeltaAfter.toFixed(1)} Δ` : '—'}
                   </span>
                 </div>
               </div>
@@ -994,13 +1019,14 @@ function CoverageTile({
   const shortUnits = book?.shortCallUnits ?? 0;
   const shortLots = lotSize > 0 ? (shortUnits / lotSize) : 0;
   const totalLots = lotSize > 0 ? (beesUnits / lotSize) : 0;
+  const netDelta = book?.net.delta ?? beesUnits;
 
   return (
     <div className="rounded-xl border border-zinc-800/60 bg-zinc-950/40 px-3 py-2 flex flex-col justify-between">
       <div className="flex items-center justify-between">
         <MetricTooltip
-          label={<span className={cn(TXT_LABEL, 'text-zinc-500 uppercase font-bold tracking-wide')}>Coverage</span>}
-          text="Ratio of short call units sold vs your NIFTYBEES capacity. ≤100% is safe (backed by stock). >100% means extra calls are naked short options with unlimited upside risk."
+          label={<span className={cn(TXT_LABEL, 'text-zinc-500 uppercase font-bold tracking-wide')}>Coverage & Delta</span>}
+          text="Deliverable coverage (short calls vs stock capacity) and current Net Directional Delta (NIFTYBEES delta minus short call delta)."
         />
         {covPct != null && (
           <span className={cn('text-[9px] font-bold px-1.5 py-0.2 rounded-full font-mono', isOver ? 'bg-amber-500/20 text-amber-300' : 'bg-emerald-500/20 text-emerald-300')}>
@@ -1010,8 +1036,13 @@ function CoverageTile({
       </div>
 
       <div className="my-0.5">
-        <div className={cn('text-base font-bold font-mono tabular-nums', covPct == null ? 'text-zinc-600' : isOver ? 'text-amber-400' : 'text-emerald-400')}>
-          {covPct == null ? '—' : `${covPct}% Covered`}
+        <div className="flex items-baseline justify-between">
+          <div className={cn('text-base font-bold font-mono tabular-nums', covPct == null ? 'text-zinc-600' : isOver ? 'text-amber-400' : 'text-emerald-400')}>
+            {covPct == null ? '—' : `${covPct}% Covered`}
+          </div>
+          <div className="text-xs font-bold font-mono text-zinc-300" title="Net Portfolio Delta">
+            {beesUnits > 0 ? `${netDelta >= 0 ? '+' : ''}${netDelta.toFixed(1)} Δ` : '—'}
+          </div>
         </div>
 
         {/* Mini progress bar */}
@@ -1023,8 +1054,9 @@ function CoverageTile({
         </div>
       </div>
 
-      <div className={cn(TXT_VALUE, 'text-zinc-400 truncate font-mono')}>
-        {shortLots.toFixed(shortUnits % lotSize ? 1 : 0)} of {totalLots.toFixed(1)} lots sold
+      <div className={cn(TXT_VALUE, 'text-zinc-400 truncate font-mono flex justify-between')}>
+        <span>{shortLots.toFixed(shortUnits % lotSize ? 1 : 0)} of {totalLots.toFixed(1)} lots</span>
+        <span className="text-zinc-500">{Math.abs(netDelta) <= 5 ? 'Neutral' : netDelta > 0 ? 'Net Long' : 'Net Short'}</span>
       </div>
     </div>
   );
