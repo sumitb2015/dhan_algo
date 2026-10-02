@@ -47,9 +47,26 @@ GLOBAL_STOP  = os.path.join(DEBUG_DIR, "refresh_stop.trigger")
 N500_LIST    = NIFTY500_LIST
 NIFTY50_CSV  = os.path.join(HIST_DIR, "NIFTY_50_Daily_5Y.csv")
 N500IDX_CSV  = os.path.join(HIST_DIR, "NIFTY_500_Daily.csv")
-DXY_CSV      = os.path.join(HIST_DIR, "US_DOLLAR_INDEX_Daily.csv")
-US10Y_CSV    = os.path.join(HIST_DIR, "US_10Y_YIELD_Daily.csv")
-US30Y_CSV    = os.path.join(HIST_DIR, "US_30Y_YIELD_Daily.csv")
+# Non-Indian markets shown on /markets: target -> (Yahoo ticker, CSV name, label).
+# Keep in sync with rs_dashboard/lib/globalMarkets.ts and scripts/tools/yahoo_live_quote.py.
+GLOBAL_MARKETS = {
+    "dxy":        ("DX-Y.NYB",  "US_DOLLAR_INDEX_Daily.csv", "US Dollar Index (DXY)"),
+    "us10y":      ("^TNX",      "US_10Y_YIELD_Daily.csv",    "US 10Y Treasury Yield"),
+    "us30y":      ("^TYX",      "US_30Y_YIELD_Daily.csv",    "US 30Y Treasury Yield"),
+    "dow":        ("^DJI",      "US_DOW_JONES_Daily.csv",    "Dow Jones"),
+    "nasdaq":     ("^IXIC",     "US_NASDAQ_Daily.csv",       "Nasdaq Composite"),
+    "sp500":      ("^GSPC",     "US_SP500_Daily.csv",        "S&P 500"),
+    "nikkei":     ("^N225",     "JP_NIKKEI_225_Daily.csv",   "Nikkei 225"),
+    "hangseng":   ("^HSI",      "HK_HANG_SENG_Daily.csv",    "Hang Seng"),
+    "shanghai":   ("000001.SS", "CN_SHANGHAI_Daily.csv",     "Shanghai Composite"),
+    "kospi":      ("^KS11",     "KR_KOSPI_Daily.csv",        "KOSPI"),
+    "asx200":     ("^AXJO",     "AU_ASX_200_Daily.csv",      "ASX 200"),
+    "ftse":       ("^FTSE",     "UK_FTSE_100_Daily.csv",     "FTSE 100"),
+    "dax":        ("^GDAXI",    "DE_DAX_Daily.csv",          "DAX"),
+    "cac":        ("^FCHI",     "FR_CAC_40_Daily.csv",       "CAC 40"),
+    "eurostoxx":  ("^STOXX50E", "EU_EURO_STOXX_50_Daily.csv", "Euro Stoxx 50"),
+}
+GLOBAL_TARGETS = tuple(GLOBAL_MARKETS)
 
 os.makedirs(DEBUG_DIR, exist_ok=True)
 os.makedirs(HIST_DIR, exist_ok=True)
@@ -282,9 +299,7 @@ def download_yahoo_index(target: str, period: str = "1y", out_csv: str = None):
     name_map = {
         "nifty50": ("^NSEI", NIFTY50_CSV, "Nifty 50"),
         "nifty500-index": ("^CRSLDX", N500IDX_CSV, "Nifty 500"),
-        "dxy": ("DX-Y.NYB", DXY_CSV, "US Dollar Index (DXY)"),
-        "us10y": ("^TNX", US10Y_CSV, "US 10Y Treasury Yield"),
-        "us30y": ("^TYX", US30Y_CSV, "US 30Y Treasury Yield"),
+        **{k: (t, os.path.join(HIST_DIR, c), lbl) for k, (t, c, lbl) in GLOBAL_MARKETS.items()},
     }
     if target not in name_map:
         return False
@@ -327,7 +342,7 @@ def download_yahoo_index(target: str, period: str = "1y", out_csv: str = None):
 # ── Main Entrypoint ───────────────────────────────────────────────────────────
 def main():
     parser = argparse.ArgumentParser(description="Yahoo Finance EOD Data Downloader & Backup Engine")
-    parser.add_argument("--target", choices=["stocks", "nifty50", "nifty500-index", "dxy", "us10y", "us30y", "all"], default="stocks",
+    parser.add_argument("--target", choices=["stocks", "nifty50", "nifty500-index", *GLOBAL_TARGETS, "all"], default="stocks",
                         help="Target dataset to download")
     parser.add_argument("--period", default="1y", help="Historical period: 1mo, 3mo, 6mo, 1y, 2y, max")
     parser.add_argument("--batch-size", type=int, default=50, help="Batch download chunk size (default: 50)")
@@ -348,7 +363,7 @@ def main():
     if args.target in ("nifty500-index", "all"):
         download_yahoo_index("nifty500-index", period=args.period)
 
-    for gkey in ("dxy", "us10y", "us30y"):
+    for gkey in GLOBAL_TARGETS:
         if args.target in (gkey, "all"):
             download_yahoo_index(gkey, period=args.period)
 

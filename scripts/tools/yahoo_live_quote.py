@@ -1,4 +1,4 @@
-"""Live global-market quotes from Yahoo Finance (1-min bars): DXY, US 10Y / 30Y yields.
+"""Live global-market quotes from Yahoo Finance (1-min bars): DXY, US 10Y / 30Y yields, US, Asia and Europe equity indices.
 
 Prints one JSON line: {KEY: {ltp, prev_close, day_high, day_low, ts}, ...}
 (ts = last bar, epoch ms); keys that fail are omitted. Yields are in percent.
@@ -6,11 +6,17 @@ Called by rs_dashboard/app/api/markets/global/route.ts.
 """
 import json
 import warnings
+from concurrent.futures import ThreadPoolExecutor
 
 warnings.filterwarnings("ignore")
 import yfinance as yf
 
-TICKERS = {"DXY": "DX-Y.NYB", "US10Y": "^TNX", "US30Y": "^TYX"}
+TICKERS = {
+    "DXY": "DX-Y.NYB", "US10Y": "^TNX", "US30Y": "^TYX",
+    "DJI": "^DJI", "NASDAQ": "^IXIC", "SPX": "^GSPC",
+    "N225": "^N225", "HSI": "^HSI", "SSEC": "000001.SS", "KS11": "^KS11", "AXJO": "^AXJO",
+    "FTSE": "^FTSE", "GDAXI": "^GDAXI", "FCHI": "^FCHI", "STOXX50E": "^STOXX50E",
+}
 
 
 def quote(ticker: str) -> dict:
@@ -41,12 +47,14 @@ def quote(ticker: str) -> dict:
 
 
 def main():
-    out = {}
-    for key, ticker in TICKERS.items():
+    def safe(item):
         try:
-            out[key] = quote(ticker)
+            return item[0], quote(item[1])
         except Exception:
-            pass
+            return item[0], None
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        out = {k: q for k, q in pool.map(safe, TICKERS.items()) if q}
     print(json.dumps(out))
 
 

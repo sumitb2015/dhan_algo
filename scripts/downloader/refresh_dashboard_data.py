@@ -1044,13 +1044,13 @@ def run_yahoo_backup(target: str):
     write_status("yahoo", f"▶ Running data refresh (stocks/benchmark: Yahoo Finance, sector indices: Dhan API, target={target})...")
     try:
         from scripts.downloader.download_yahoo_daily import (
-            download_yahoo_stocks, download_yahoo_index, get_nifty500_symbols
+            download_yahoo_stocks, download_yahoo_index, get_nifty500_symbols, GLOBAL_TARGETS
         )
         if target in ("all", "nifty50"):
             download_yahoo_index("nifty50", period="1y")
         if target in ("all", "nifty500-index"):
             download_yahoo_index("nifty500-index", period="1y")
-        for gkey in ("dxy", "us10y", "us30y"):
+        for gkey in GLOBAL_TARGETS:
             if target in ("all", gkey):
                 download_yahoo_index(gkey, period="1y")
         if target in ("all", "stocks"):
@@ -1084,7 +1084,8 @@ def run_yahoo_backup(target: str):
 def main():
     parser = argparse.ArgumentParser(description="Refresh RS dashboard data (incremental)")
     parser.add_argument("--target", default="all",
-                        choices=["all", "nifty50", "nifty500-index", "indices", "stocks", "quotes", "dxy", "us10y", "us30y"])
+                        choices=["all", "nifty50", "nifty500-index", "indices", "stocks", "quotes", "dxy", "us10y", "us30y", "dow", "nasdaq", "sp500",
+                                 "nikkei", "hangseng", "shanghai", "kospi", "asx200", "ftse", "dax", "cac", "eurostoxx"])
     parser.add_argument("--source", default="yahoo", choices=["yahoo", "dhan"],
                         help="Data source: yahoo (default, fast/resilient) or dhan (primary broker)")
     parser.add_argument("--fallback-yahoo", action=argparse.BooleanOptionalAction, default=True,

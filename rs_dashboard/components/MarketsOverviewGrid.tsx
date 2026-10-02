@@ -9,14 +9,14 @@
 // 15:30 close-flip trap, pre-market "yesterday vs day before" fallback — so
 // this page just renders it; see dhan-prevclose-pct-change skill for why.
 
-import React, { useEffect, useMemo } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import Link from 'next/link';
-import { TrendingUp, TrendingDown, Minus, Fuel, LineChart } from 'lucide-react';
+import { TrendingUp, TrendingDown, Minus, Fuel, LineChart, LayoutGrid, Table2 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { Card } from '@/components/ui/card';
 import NavBar from './NavBar';
 import { useLiveTickerPoll, isStale, ageOf, ageLabel } from '@/lib/useLiveTickerPoll';
-import { fmtPrice } from './LiveTickerPanel';
+import { fmtPrice, TH, TD, PctPill, type SortDir } from './LiveTickerPanel';
 import { startLiveIndicesBridge } from '@/lib/startLiveIndicesBridge';
 import { geistDisplay } from '@/lib/fonts';
 import { useGlobalQuotes } from '@/lib/useGlobalQuotes';
@@ -27,6 +27,8 @@ interface IndexQuote {
   prev_close: number;
   change_pct: number | null;
   source: string;
+  day_high?: number | null;
+  day_low?: number | null;
 }
 
 interface IndicesResponse {
@@ -57,6 +59,15 @@ export default function MarketsOverviewGrid() {
   const { data, flash, now } = useLiveTickerPoll<IndicesResponse>('/api/scalper/top-indices', pickLtps);
 
   const globalQuotes = useGlobalQuotes();
+
+  const [view, setViewState] = useState<'grid' | 'table'>('grid');
+  useEffect(() => {
+    try { if (localStorage.getItem('markets_view') === 'table') setViewState('table'); } catch { /* storage blocked */ }
+  }, []);
+  const setView = (v: 'grid' | 'table') => {
+    setViewState(v);
+    try { localStorage.setItem('markets_view', v); } catch { /* storage blocked */ }
+  };
 
   const tickMs = data?.updated_at ? new Date(data.updated_at).getTime() : NaN;
   const stale = isStale(tickMs, now);
@@ -116,6 +127,16 @@ export default function MarketsOverviewGrid() {
           </div>
         </div>
         <div className="flex items-center gap-3">
+          <div role="group" aria-label="View" className="flex items-center rounded-lg border border-white/10 bg-zinc-900/60 p-0.5">
+            {([['grid', LayoutGrid, 'Grid view'], ['table', Table2, 'Table view']] as const).map(([v, VIcon, lbl]) => (
+              <button key={v} type="button" onClick={() => setView(v)} aria-pressed={view === v} aria-label={lbl} title={lbl}
+                className={cn('flex items-center gap-1 px-2 py-1 rounded-md text-[11px] font-bold transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-500',
+                  view === v ? 'bg-sky-500/15 text-sky-400' : 'text-zinc-500 hover:text-zinc-300')}>
+                <VIcon className="h-3.5 w-3.5" />{v === 'grid' ? 'Grid' : 'Table'}
+              </button>
+            ))}
+          </div>
+          <span className="w-px h-5 bg-zinc-800 shrink-0" />
           <div className="flex items-center gap-1.5" title={data?.errors?.length ? data.errors.join(' | ') : undefined}>
             <span className={cn('w-2 h-2 rounded-full',
               liveState === 'live' ? 'bg-emerald-400 animate-pulse'
@@ -134,6 +155,9 @@ export default function MarketsOverviewGrid() {
       </div>
 
       <div className="relative z-10 flex-1 px-6 py-5">
+        {view === 'table' ? (
+          <MarketsTable rows={rows} globalQuotes={globalQuotes} loaded={!!data} />
+        ) : (
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-3.5">
           {rows.map(r => {
             const f = flash[r.key];
@@ -192,7 +216,112 @@ export default function MarketsOverviewGrid() {
             <div key={i} className="rounded-2xl border border-white/10 bg-zinc-900/30 backdrop-blur-xl h-[104px] animate-pulse" />
           ))}
         </div>
+        )}
       </div>
+    </div>
+  );
+}
+
+type TableRow = { key: string; label: string; quote: IndexQuote | null };
+type SortKey = 'label' | 'group' | 'ltp' | 'chg' | 'pct' | 'prev' | 'high' | 'low' | 'range';
+
+function groupOf(key: string): string {
+  return key in GLOBAL_BY_KEY ? GLOBAL_BY_KEY[key].group : MCX_KEYS.has(key) ? 'MCX' : 'Index';
+}
+
+function MarketsTable({ rows, globalQuotes, loaded }: {
+  rows: TableRow[]; globalQuotes: Record<string, { source: string }>; loaded: boolean;
+}) {
+  const [sort, setSort] = useState<{ key: SortKey; dir: SortDir } | null>(null);
+  const clickSort = (key: SortKey) =>
+    setSort(prev => (prev?.key === key ? (prev.dir === 'desc' ? { key, dir: 'asc' } : null) : { key, dir: 'desc' }));
+  const dirOf = (key: SortKey) => (sort?.key === key ? sort.dir : null);
+
+  const enriched = useMemo(() => rows.map(r => {
+    const q = r.quote && r.quote.ltp > 0 ? r.quote : null;
+    const chg = q && q.prev_close > 0 ? q.ltp - q.prev_close : null;
+    const hi = q?.day_high ?? null;
+    const lo = q?.day_low ?? null;
+    // Where LTP sits inside today's range: 0 = at the low, 100 = at the high.
+    const range = q && hi !== null && lo !== null && hi > lo ? ((q.ltp - lo) / (hi - lo)) * 100 : null;
+    return { ...r, q, group: groupOf(r.key), unit: GLOBAL_BY_KEY[r.key]?.unit ?? '', chg, hi, lo, range,
+      pct: q?.change_pct ?? null, prev: q && q.prev_close > 0 ? q.prev_close : null, ltp: q?.ltp ?? null,
+      live: r.key in GLOBAL_BY_KEY ? globalQuotes[r.key]?.source === 'yahoo-live' : true };
+  }), [rows, globalQuotes]);
+
+  const sorted = useMemo(() => {
+    if (!sort) return enriched;
+    const val = (r: typeof enriched[number]): number | string | null =>
+      sort.key === 'label' ? r.label : sort.key === 'group' ? r.group : sort.key === 'ltp' ? r.ltp
+        : sort.key === 'chg' ? r.chg : sort.key === 'pct' ? r.pct : sort.key === 'prev' ? r.prev
+        : sort.key === 'high' ? r.hi : sort.key === 'low' ? r.lo : r.range;
+    const m = sort.dir === 'asc' ? 1 : -1;
+    return [...enriched].sort((a, b) => {
+      const x = val(a), y = val(b);
+      if (x === null && y === null) return 0;
+      if (x === null) return 1;   // missing values always last
+      if (y === null) return -1;
+      return (typeof x === 'string' ? x.localeCompare(y as string) : x - (y as number)) * m;
+    });
+  }, [enriched, sort]);
+
+  const fmtUnit = (n: number | null, unit: string) => (n === null ? '—' : `${fmtPrice(n)}${unit}`);
+  const tone = (n: number | null) => (n === null || n === 0 ? 'text-zinc-400' : n > 0 ? 'text-emerald-400' : 'text-red-400');
+
+  return (
+    <div className="rounded-2xl border border-white/10 bg-zinc-900/40 backdrop-blur-xl shadow-lg shadow-black/20 overflow-x-auto">
+      <table className="w-full border-collapse">
+        <thead>
+          <tr>
+            <TH onClick={() => clickSort('label')} sortDir={dirOf('label')} className="px-3 py-2.5">Market</TH>
+            <TH onClick={() => clickSort('group')} sortDir={dirOf('group')} className="px-3 py-2.5">Type</TH>
+            <TH right onClick={() => clickSort('ltp')} sortDir={dirOf('ltp')} className="px-3 py-2.5">LTP</TH>
+            <TH right onClick={() => clickSort('chg')} sortDir={dirOf('chg')} className="px-3 py-2.5">Chg</TH>
+            <TH right onClick={() => clickSort('pct')} sortDir={dirOf('pct')} className="px-3 py-2.5">Chg %</TH>
+            <TH right onClick={() => clickSort('prev')} sortDir={dirOf('prev')} className="px-3 py-2.5">Prev Close</TH>
+            <TH right onClick={() => clickSort('high')} sortDir={dirOf('high')} className="px-3 py-2.5">Day High</TH>
+            <TH right onClick={() => clickSort('low')} sortDir={dirOf('low')} className="px-3 py-2.5">Day Low</TH>
+            <TH onClick={() => clickSort('range')} sortDir={dirOf('range')} className="px-3 py-2.5">Day Range</TH>
+            <TH className="px-3 py-2.5">Feed</TH>
+          </tr>
+        </thead>
+        <tbody>
+          {sorted.map(r => (
+            <tr key={r.key} className="border-t border-white/5 hover:bg-zinc-800/40 transition-colors">
+              <TD className="px-3 py-2 font-sans font-semibold text-zinc-100">
+                <Link href={`/markets/${r.key}`} className="hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-500 rounded">{r.label}</Link>
+              </TD>
+              <TD className="px-3 py-2 text-zinc-400 font-sans">{r.group}</TD>
+              <TD right className="px-3 py-2 font-bold text-zinc-100 tabular-nums">{fmtUnit(r.ltp, r.unit)}</TD>
+              <TD right className={cn('px-3 py-2 tabular-nums', tone(r.chg))}>
+                {r.chg === null ? '—' : `${r.chg > 0 ? '+' : ''}${fmtPrice(r.chg)}${r.unit}`}
+              </TD>
+              <TD right className="px-3 py-2"><PctPill v={r.pct} /></TD>
+              <TD right className="px-3 py-2 text-zinc-300 tabular-nums">{fmtUnit(r.prev, r.unit)}</TD>
+              <TD right className="px-3 py-2 text-emerald-400 tabular-nums">{fmtUnit(r.hi, r.unit)}</TD>
+              <TD right className="px-3 py-2 text-red-400 tabular-nums">{fmtUnit(r.lo, r.unit)}</TD>
+              <TD className="px-3 py-2">
+                {r.range === null ? <span className="text-zinc-600">—</span> : (
+                  <div className="flex items-center gap-2" title={`${r.range.toFixed(0)}% of today's range`}>
+                    <div className="relative h-1.5 w-24 rounded-full bg-zinc-700">
+                      <span className="absolute top-1/2 h-2.5 w-1 -translate-y-1/2 rounded-sm bg-sky-400" style={{ left: `calc(${r.range}% - 2px)` }} />
+                    </div>
+                    <span className="text-[11px] text-zinc-400 tabular-nums w-8">{r.range.toFixed(0)}%</span>
+                  </div>
+                )}
+              </TD>
+              <TD className="px-3 py-2 text-[11px] font-sans">
+                {r.key in GLOBAL_BY_KEY
+                  ? <span className={r.live ? 'text-emerald-400' : 'text-amber-400'}>{r.live ? 'Yahoo · live' : 'Yahoo · EOD'}</span>
+                  : <span className="text-zinc-500">Dhan · live</span>}
+              </TD>
+            </tr>
+          ))}
+          {!loaded && (
+            <tr><td colSpan={10} className="px-3 py-6 text-center text-sm text-zinc-500">Loading…</td></tr>
+          )}
+        </tbody>
+      </table>
     </div>
   );
 }
