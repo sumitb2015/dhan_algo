@@ -4,8 +4,8 @@ export interface GlobalMarket { key: string; label: string; csv: string; unit: s
 
 export const GLOBAL_MARKETS: GlobalMarket[] = [
   { key: 'DXY',   label: 'US Dollar Index (DXY)',  csv: 'US_DOLLAR_INDEX_Daily.csv', unit: '', group: 'Currency' },
-  { key: 'US10Y', label: 'US 10Y Treasury Yield',  csv: 'US_10Y_YIELD_Daily.csv',    unit: '%', group: 'Bond yield' },
-  { key: 'US30Y', label: 'US 30Y Treasury Yield',  csv: 'US_30Y_YIELD_Daily.csv',    unit: '%', group: 'Bond yield' },
+  { key: 'US10Y', label: 'US 10Y Yield',  csv: 'US_10Y_YIELD_Daily.csv',    unit: '%', group: 'Bond yield' },
+  { key: 'US30Y', label: 'US 30Y Yield',  csv: 'US_30Y_YIELD_Daily.csv',    unit: '%', group: 'Bond yield' },
   { key: 'DJI',    label: 'Dow Jones',              csv: 'US_DOW_JONES_Daily.csv',    unit: '', group: 'US equity' },
   { key: 'NASDAQ', label: 'Nasdaq Composite',       csv: 'US_NASDAQ_Daily.csv',       unit: '', group: 'US equity' },
   { key: 'SPX',    label: 'S&P 500',                csv: 'US_SP500_Daily.csv',        unit: '', group: 'US equity' },

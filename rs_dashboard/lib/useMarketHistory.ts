@@ -1,7 +1,10 @@
 'use client';
 import { useEffect, useState } from 'react';
 
+export interface RsiState { ag: number; al: number; c: number }
+
 export interface MarketHistory {
+  rsi: { n: RsiState; n1: RsiState } | null;
   last_date: string;
   c1w: number | null; c1m: number | null; cytd: number | null;
   hi52: number | null; lo52: number | null;

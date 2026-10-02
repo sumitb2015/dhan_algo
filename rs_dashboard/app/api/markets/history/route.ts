@@ -38,6 +38,30 @@ function readBars(rel: string): Bar[] {
   return out.sort((a, b) => (a.d < b.d ? -1 : a.d > b.d ? 1 : 0));
 }
 
+// Wilder RSI(14) smoothing state after each bar. Returns the state after the last
+// bar (n) and the one before it (n1): the client replays ONE more step with the
+// live price, from whichever of the two precedes the current session.
+const RSI_N = 14;
+interface RsiState { ag: number; al: number; c: number }
+
+function rsiStates(closes: number[]): { n: RsiState; n1: RsiState } | null {
+  if (closes.length < RSI_N + 2) return null;
+  let ag = 0, al = 0;
+  for (let i = 1; i <= RSI_N; i++) {
+    const d = closes[i] - closes[i - 1];
+    if (d > 0) ag += d; else al -= d;
+  }
+  ag /= RSI_N; al /= RSI_N;
+  let prev: RsiState = { ag, al, c: closes[RSI_N] };
+  let cur = prev;
+  for (let i = RSI_N + 1; i < closes.length; i++) {
+    const d = closes[i] - closes[i - 1];
+    prev = cur;
+    cur = { ag: (cur.ag * (RSI_N - 1) + Math.max(d, 0)) / RSI_N, al: (cur.al * (RSI_N - 1) + Math.max(-d, 0)) / RSI_N, c: closes[i] };
+  }
+  return { n: cur, n1: prev };
+}
+
 const iso = (d: Date) => d.toISOString().slice(0, 10);
 
 function summarize(bars: Bar[]) {
@@ -59,6 +83,7 @@ function summarize(bars: Bar[]) {
     cytd: refClose(`${today.getFullYear() - 1}-12-31`),
     hi52: win.length ? Math.max(...win.map(b => b.h)) : null,
     lo52: win.length ? Math.min(...win.map(b => b.l)) : null,
+    rsi: rsiStates(bars.map(b => b.c)),
   };
 }
 

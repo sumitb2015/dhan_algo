@@ -21,7 +21,7 @@ import { startLiveIndicesBridge } from '@/lib/startLiveIndicesBridge';
 import { geistDisplay } from '@/lib/fonts';
 import { useGlobalQuotes } from '@/lib/useGlobalQuotes';
 import { GLOBAL_MARKETS, GLOBAL_BY_KEY } from '@/lib/globalMarkets';
-import { useMarketHistory, type MarketHistory } from '@/lib/useMarketHistory';
+import { useMarketHistory, type MarketHistory, type RsiState } from '@/lib/useMarketHistory';
 import { indianMarketState, globalMarketState, fmtAge, type MarketState } from '@/lib/marketStatus';
 
 interface IndexQuote {
@@ -226,7 +226,7 @@ export default function MarketsOverviewGrid() {
 
 type TableRow = { key: string; label: string; quote: IndexQuote | null };
 type SortKey = 'label' | 'group' | 'ltp' | 'chg' | 'pct' | 'prev' | 'high' | 'low' | 'range'
-  | 'w1' | 'm1' | 'ytd' | 'w52';
+  | 'w1' | 'm1' | 'ytd' | 'w52' | 'rsi';
 
 function groupOf(key: string): string {
   return key in GLOBAL_BY_KEY ? GLOBAL_BY_KEY[key].group : MCX_KEYS.has(key) ? 'MCX' : 'Index';
@@ -247,11 +247,11 @@ function sectionOf(key: string): SectionId {
   return g.group === 'Bond yield' || g.group === 'Currency' ? 'bonds' : 'global';
 }
 
-const COLS = 14;
+const COLS = 15;
 
 // Fixed column widths (px) so every numeric column is the same width and the
 // layout doesn't shift as live values change length. Order = header order.
-const COL_WIDTHS = [150, 82, 98, 98, 98, 98, 98, 98, 140, 78, 78, 78, 150, 128];
+const COL_WIDTHS = [140, 72, 94, 100, 94, 104, 94, 94, 136, 74, 74, 74, 146, 74, 114];
 const TABLE_MIN_W = COL_WIDTHS.reduce((a, b) => a + b, 0);
 
 // Direction arrow for the table's change columns; flat/unknown renders nothing
@@ -265,6 +265,32 @@ function DirArrow({ v }: { v: number | null }) {
 const toneOf = (n: number | null) => (n === null || n === 0 ? 'text-zinc-400' : n > 0 ? 'text-emerald-400' : 'text-red-400');
 const signed = (n: number, d = 2) => `${n > 0 ? '+' : ''}${n.toFixed(d)}`;
 
+/**
+ * Daily RSI(14) with the live price as today's close. The server sends Wilder
+ * state after the last two CSV bars; pick whichever precedes the current session
+ * (the one the feed's previous close matches) and replay one step with `ltp`.
+ */
+function liveRsi(h: MarketHistory | undefined, ltp: number | null, prevClose: number | null): number | null {
+  if (!h?.rsi || ltp === null) return null;
+  const { n, n1 } = h.rsi;
+  const base: RsiState = prevClose !== null && Math.abs(prevClose - n.c) > Math.abs(prevClose - n1.c) ? n1 : n;
+  const d = ltp - base.c;
+  const ag = (base.ag * 13 + Math.max(d, 0)) / 14;
+  const al = (base.al * 13 + Math.max(-d, 0)) / 14;
+  return al === 0 ? 100 : 100 - 100 / (1 + ag / al);
+}
+
+function RsiCell({ v }: { v: number | null }) {
+  if (v === null) return <span className="text-zinc-600">—</span>;
+  const hot = v >= 70, cold = v <= 30;
+  return (
+    <span className={cn('tabular-nums', hot ? 'text-amber-400 font-bold' : cold ? 'text-sky-400 font-bold' : 'text-zinc-300')}
+      title={hot ? 'Overbought (RSI ≥ 70)' : cold ? 'Oversold (RSI ≤ 30)' : 'Daily RSI(14)'}>
+      {v.toFixed(1)}
+    </span>
+  );
+}
+
 /** Move since a reference close: % for prices, basis points for yields (quoted in %). */
 function sinceRef(ltp: number | null, ref: number | null | undefined, isYield: boolean): number | null {
   if (ltp === null || !ref || ref <= 0) return null;
@@ -275,7 +301,7 @@ function PerfCell({ v, isYield }: { v: number | null; isYield: boolean }) {
   if (v === null) return <span className="text-zinc-600">—</span>;
   return (
     <span className={cn('tabular-nums', toneOf(v))}>
-      {isYield ? `${signed(v, 1)} bp` : `${signed(v)}%`}
+      {isYield ? `${signed(v, Math.abs(v) >= 100 ? 0 : 1)} bp` : `${signed(v)}%`}
     </span>
   );
 }
@@ -325,7 +351,7 @@ function MarketsTable({ rows, globalQuotes, loaded, now, feedStale }: {
       state = indianMarketState(now, MCX_KEYS.has(r.key), feedStale);
     }
     return { ...r, q, group: groupOf(r.key), unit: g?.unit ?? '', isYield, chg, hi, lo, range,
-      pct: q?.change_pct ?? null, prev, ltp, pos52, fromHigh, state, age,
+      pct: q?.change_pct ?? null, prev, ltp, pos52, fromHigh, state, age, rsi: liveRsi(h, ltp, prev),
       w1: sinceRef(ltp, h?.c1w, isYield), m1: sinceRef(ltp, h?.c1m, isYield), ytd: sinceRef(ltp, h?.cytd, isYield),
       feed: g ? (globalQuotes[r.key]?.source === 'yahoo-live' ? 'Yahoo · live' : 'Yahoo · EOD') : 'Dhan' };
   }), [rows, globalQuotes, history, now, feedStale]);
@@ -347,6 +373,7 @@ function MarketsTable({ rows, globalQuotes, loaded, now, feedStale }: {
         case 'm1': return r.m1;
         case 'ytd': return r.ytd;
         case 'w52': return r.fromHigh;
+        case 'rsi': return r.rsi;
       }
     };
     const m = sort.dir === 'asc' ? 1 : -1;
@@ -389,6 +416,7 @@ function MarketsTable({ rows, globalQuotes, loaded, now, feedStale }: {
             <TH right onClick={() => clickSort('m1')} sortDir={dirOf('m1')} className={hd}>1M</TH>
             <TH right onClick={() => clickSort('ytd')} sortDir={dirOf('ytd')} className={hd}>YTD</TH>
             <TH onClick={() => clickSort('w52')} sortDir={dirOf('w52')} className={hd}>52W Range</TH>
+            <TH right onClick={() => clickSort('rsi')} sortDir={dirOf('rsi')} className={hd}>RSI</TH>
             <TH className={hd}>Status</TH>
           </tr>
         </thead>
@@ -437,6 +465,7 @@ function MarketsTable({ rows, globalQuotes, loaded, now, feedStale }: {
                   label={r.fromHigh === null ? undefined : `${r.fromHigh.toFixed(1)}%`}
                   title={r.pos52 === null ? undefined : `${r.fromHigh?.toFixed(1)}% from 52-week high · ${r.pos52.toFixed(0)}% of 52-week range`} />
               </TD>
+              <TD right className="px-3 py-2"><RsiCell v={r.rsi} /></TD>
               <TD className="px-3 py-2 font-sans" >
                 <div title={`${r.feed}${r.age ? ` · last tick ${r.age}` : ''}`} className="flex items-center gap-1.5">
                   <span className={cn('h-1.5 w-1.5 rounded-full shrink-0', ui.dot)} />
