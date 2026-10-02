@@ -8,12 +8,12 @@
 import React, { useMemo, useState } from 'react';
 import { AlertTriangle } from 'lucide-react';
 import { cn } from '@/lib/utils';
-import { buildHeatmapGrid } from '@/lib/optionsStrategy';
-import { legExpiries, type PositionLeg } from '@/lib/positionLegs';
+import { buildHeatmapGrid, type ResolvedLeg } from '@/lib/optionsStrategy';
 import { fmtExpiryShort } from '@/components/crudeoil/format';
 
 interface Props {
-  legs: PositionLeg[];
+  /** Any priced legs — Positions Analysis' PositionLegs and Multi-Leg Focus baskets both qualify. */
+  legs: ResolvedLeg[];
   spot: number;
   strikeStep: number;
   /** The expiry the grid runs out to — the latest expiry in the book. */
@@ -54,7 +54,10 @@ export default function PnlTableTab({ legs, spot, strikeStep, expiry }: Props) {
   // too late and keep time value alive on it too long. Rather than silently
   // mispricing, refuse to build the grid and say why; the expiry filter chips
   // already let the user narrow to one expiry to see this view.
-  const distinctExpiries = useMemo(() => legExpiries(legs), [legs]);
+  const distinctExpiries = useMemo(
+    () => [...new Set(legs.map((l) => l.expiry).filter((e): e is string => !!e))].sort(),
+    [legs],
+  );
   const multiExpiry = distinctExpiries.length > 1;
 
   const grid = useMemo(() => {

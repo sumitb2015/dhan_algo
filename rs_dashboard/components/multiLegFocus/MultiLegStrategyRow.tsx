@@ -2,11 +2,12 @@
 
 import React, { useState, useMemo, useCallback } from 'react';
 import {
-  ChevronDown, ChevronUp, Trash2, Plus, Minus, X, Check, Layers, Sigma, Loader2, RefreshCw,
+  ChevronDown, ChevronUp, Trash2, Plus, Minus, X, Check, Layers, Sigma, Loader2, RefreshCw, Table2,
 } from 'lucide-react';
 import MultiLegLegRow from './MultiLegLegRow';
 import RuleNumInput from './RuleNumInput';
 import AddLotsModal from './AddLotsModal';
+import PnlTableModal from './PnlTableModal';
 import AddNewLegModal from './AddNewLegModal';
 import LegColumnsMenu from './LegColumnsMenu';
 import { DEFAULT_LEG_COLUMNS, type LegColumns } from '@/lib/legColumns';
@@ -184,6 +185,7 @@ export default function MultiLegStrategyRow({
   // front of every row's legs table on load. Collapsed by default; the user
   // opens it only when they actually want to look at the curve.
   const [showPayoffChart, setShowPayoffChart] = useState(false);
+  const [showPnlTable, setShowPnlTable] = useState(false);
   const [simTargetDays, setSimTargetDays] = useState<number>(0);
   const [simIvShift, setSimIvShift] = useState<number>(0);
   const [confirmPlace, setConfirmPlace] = useState(false);
@@ -1620,14 +1622,37 @@ export default function MultiLegStrategyRow({
              correct for a payoff-AT-EXPIRY chart — see dhan-payoff-diagrams. */}
           {basket.legs.length > 0 && (
             <div className="rounded-lg border border-zinc-800/80 bg-zinc-950/40">
-              <button
-                type="button"
-                onClick={() => setShowPayoffChart(v => !v)}
-                className={`w-full flex items-center justify-between gap-2 px-3 py-2 text-xs font-bold text-zinc-300 hover:text-white transition-colors ${FOCUS_RING}`}
-              >
-                <span className="uppercase tracking-wider">Payoff Diagram</span>
-                {showPayoffChart ? <ChevronUp className="w-3.5 h-3.5" /> : <ChevronDown className="w-3.5 h-3.5" />}
-              </button>
+              <div className="flex items-center">
+                <button
+                  type="button"
+                  onClick={() => setShowPayoffChart(v => !v)}
+                  className={`flex-1 flex items-center justify-between gap-2 px-3 py-2 text-xs font-bold text-zinc-300 hover:text-white transition-colors ${FOCUS_RING}`}
+                >
+                  <span className="uppercase tracking-wider">Payoff Diagram</span>
+                  {showPayoffChart ? <ChevronUp className="w-3.5 h-3.5" /> : <ChevronDown className="w-3.5 h-3.5" />}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setShowPnlTable(true)}
+                  title="P&L table: spot × date, priced with Black-Scholes at live IV"
+                  className={`mr-2 inline-flex items-center gap-1.5 rounded-md border border-zinc-700 bg-zinc-900 px-2.5 py-1 text-[11px] font-bold text-zinc-300 hover:border-zinc-600 hover:text-white transition-colors ${FOCUS_RING}`}
+                >
+                  <Table2 className="w-3.5 h-3.5" /> P&amp;L Table
+                </button>
+              </div>
+              <PnlTableModal
+                isOpen={showPnlTable}
+                onClose={() => setShowPnlTable(false)}
+                title={strategyLabel}
+                legs={basket.legs}
+                basketExpiry={basket.expiry}
+                spot={spot ?? 0}
+                step={step || 50}
+                lotSize={defaultLotSize}
+                qtyMultiplier={crudeMult}
+                ltpFor={ltpFor}
+                ivForStrike={ivForStrike}
+              />
 
               {showPayoffChart && (
                 <div className="px-3 pb-3">
