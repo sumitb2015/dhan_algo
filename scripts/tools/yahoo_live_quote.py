@@ -1,4 +1,4 @@
-"""Live global-market quotes from Yahoo Finance (1-min bars): DXY, US 10Y / 30Y yields, US, Asia and Europe equity indices.
+"""Live global-market quotes from Yahoo Finance (1-min bars): DXY, US 10Y / 30Y yields, US, Asia and Europe equity indices, WTI / Brent crude.
 
 Prints one JSON line: {KEY: {ltp, prev_close, day_high, day_low, ts}, ...}
 (ts = last bar, epoch ms); keys that fail are omitted. Yields are in percent.
@@ -16,6 +16,7 @@ TICKERS = {
     "DJI": "^DJI", "NASDAQ": "^IXIC", "SPX": "^GSPC",
     "N225": "^N225", "HSI": "^HSI", "SSEC": "000001.SS", "KS11": "^KS11", "AXJO": "^AXJO",
     "FTSE": "^FTSE", "GDAXI": "^GDAXI", "FCHI": "^FCHI", "STOXX50E": "^STOXX50E",
+    "WTI": "CL=F", "BRENT": "BZ=F",
 }
 
 
@@ -44,18 +45,21 @@ def quote(ticker: str, key: str = "") -> dict:
     h = h[h["Close"] > 0]
     if h.empty:
         raise RuntimeError("no 1m bars")
+    # Previous close = last completed daily bar before the session holding the latest
+    # tick. Taken from the daily series (the same one the history columns use), not
+    # fast_info["previous_close"], which flips between values for futures.
     prev = None
-    try:
-        prev = float(t.fast_info["previous_close"])
-    except Exception:
-        pass
-    if not prev or prev != prev:
-        # Last completed daily close: the bar before the one holding the latest tick.
-        d = t.history(period="5d", interval="1d")
-        d = d[d["Close"] > 0]
-        last_day = h.index[-1].date()
-        before = d[[i.date() < last_day for i in d.index]]
-        prev = float(before["Close"].iloc[-1] if not before.empty else d["Close"].iloc[-2])
+    d = t.history(period="10d", interval="1d")
+    d = d[d["Close"] > 0]
+    last_day = h.index[-1].date()
+    before = d[[i.date() < last_day for i in d.index]]
+    if not before.empty:
+        prev = float(before["Close"].iloc[-1])
+    if not prev:
+        try:
+            prev = float(t.fast_info["previous_close"])
+        except Exception:
+            raise RuntimeError("no previous close")
     return {
         "ltp": round(float(h["Close"].iloc[-1]), 3),
         "prev_close": round(prev, 3),

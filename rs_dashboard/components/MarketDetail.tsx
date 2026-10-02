@@ -138,7 +138,8 @@ export default function MarketDetail({ marketKey }: { marketKey: string }) {
   const up = pct !== null && pct > 0;
   const down = pct !== null && pct < 0;
   const isMcx = MCX_KEYS.has(marketKey);
-  const Icon = isMcx ? Fuel : LineChart;
+  const isFuel = isMcx || globalMarket?.group === 'Commodity';
+  const Icon = isFuel ? Fuel : LineChart;
   const DirIcon = pct === null ? Minus : up ? TrendingUp : down ? TrendingDown : Minus;
   const toneClass = up ? 'text-emerald-400' : down ? 'text-red-400' : 'text-zinc-400';
 
@@ -165,11 +166,11 @@ export default function MarketDetail({ marketKey }: { marketKey: string }) {
           </Link>
           <div className="flex items-center justify-center w-8 h-8 rounded-lg
                           bg-sky-500/10 border border-sky-500/25 shrink-0 backdrop-blur-sm">
-            <Icon className={cn('h-4 w-4', isMcx ? 'text-amber-400' : 'text-sky-400')} />
+            <Icon className={cn('h-4 w-4', isFuel ? 'text-amber-400' : 'text-sky-400')} />
           </div>
           <div className="min-w-0">
             <p className="text-[9px] font-bold text-sky-400 uppercase tracking-[0.18em] mb-0.5">
-              {isMcx ? 'MCX' : 'Index'}
+              {isMcx ? 'MCX' : globalMarket?.group === 'Commodity' ? 'Commodity' : 'Index'}
             </p>
             <h1 className={cn(geistDisplay.className, 'text-sm font-bold text-white tracking-tight leading-none truncate')}>
               {row?.label ?? marketKey}
@@ -212,7 +213,7 @@ export default function MarketDetail({ marketKey }: { marketKey: string }) {
       {pipWindow && createPortal(
         <PipContent
           label={row?.label ?? marketKey}
-          isMcx={isMcx}
+          isMcx={isFuel}
           unit={unit}
           quote={quote}
           pct={pct}

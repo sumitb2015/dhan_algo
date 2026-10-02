@@ -65,6 +65,8 @@ GLOBAL_MARKETS = {
     "dax":        ("^GDAXI",    "DE_DAX_Daily.csv",          "DAX"),
     "cac":        ("^FCHI",     "FR_CAC_40_Daily.csv",       "CAC 40"),
     "eurostoxx":  ("^STOXX50E", "EU_EURO_STOXX_50_Daily.csv", "Euro Stoxx 50"),
+    "wti":        ("CL=F",      "US_WTI_CRUDE_Daily.csv",    "WTI Crude Oil"),
+    "brent":      ("BZ=F",      "UK_BRENT_CRUDE_Daily.csv",  "Brent Crude Oil"),
 }
 GLOBAL_TARGETS = tuple(GLOBAL_MARKETS)
 

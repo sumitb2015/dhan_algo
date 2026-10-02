@@ -1,6 +1,6 @@
 // Non-Indian markets on /markets, sourced from Yahoo Finance (not Dhan).
 // `unit` is appended to displayed levels — yields are quoted in percent.
-export interface GlobalMarket { key: string; label: string; csv: string; unit: string; group: 'Currency' | 'Bond yield' | 'US equity' | 'Asia' | 'Europe' }
+export interface GlobalMarket { key: string; label: string; csv: string; unit: string; group: 'Currency' | 'Bond yield' | 'US equity' | 'Asia' | 'Europe' | 'Commodity' }
 
 export const GLOBAL_MARKETS: GlobalMarket[] = [
   { key: 'DXY',   label: 'US Dollar Index (DXY)',  csv: 'US_DOLLAR_INDEX_Daily.csv', unit: '', group: 'Currency' },
@@ -18,6 +18,8 @@ export const GLOBAL_MARKETS: GlobalMarket[] = [
   { key: 'GDAXI',    label: 'DAX',                csv: 'DE_DAX_Daily.csv',           unit: '', group: 'Europe' },
   { key: 'FCHI',     label: 'CAC 40',             csv: 'FR_CAC_40_Daily.csv',        unit: '', group: 'Europe' },
   { key: 'STOXX50E', label: 'Euro Stoxx 50',      csv: 'EU_EURO_STOXX_50_Daily.csv', unit: '', group: 'Europe' },
+  { key: 'WTI',      label: 'WTI Crude Oil',      csv: 'US_WTI_CRUDE_Daily.csv',     unit: '', group: 'Commodity' },
+  { key: 'BRENT',    label: 'Brent Crude Oil',    csv: 'UK_BRENT_CRUDE_Daily.csv',   unit: '', group: 'Commodity' },
 ];
 
 export const GLOBAL_BY_KEY: Record<string, GlobalMarket> =

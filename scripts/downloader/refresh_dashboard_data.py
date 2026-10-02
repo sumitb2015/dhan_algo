@@ -1085,7 +1085,7 @@ def main():
     parser = argparse.ArgumentParser(description="Refresh RS dashboard data (incremental)")
     parser.add_argument("--target", default="all",
                         choices=["all", "nifty50", "nifty500-index", "indices", "stocks", "quotes", "dxy", "us10y", "us30y", "dow", "nasdaq", "sp500",
-                                 "nikkei", "hangseng", "shanghai", "kospi", "asx200", "ftse", "dax", "cac", "eurostoxx"])
+                                 "nikkei", "hangseng", "shanghai", "kospi", "asx200", "ftse", "dax", "cac", "eurostoxx", "wti", "brent"])
     parser.add_argument("--source", default="yahoo", choices=["yahoo", "dhan"],
                         help="Data source: yahoo (default, fast/resilient) or dhan (primary broker)")
     parser.add_argument("--fallback-yahoo", action=argparse.BooleanOptionalAction, default=True,

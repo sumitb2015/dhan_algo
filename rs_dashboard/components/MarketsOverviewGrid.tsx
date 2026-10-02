@@ -169,7 +169,8 @@ export default function MarketsOverviewGrid() {
             const isMcx = MCX_KEYS.has(r.key);
             const isGlobal = r.key in GLOBAL_BY_KEY;
             const unit = GLOBAL_BY_KEY[r.key]?.unit ?? '';
-            const Icon = isMcx ? Fuel : LineChart;
+            const isFuel = isMcx || GLOBAL_BY_KEY[r.key]?.group === 'Commodity';
+            const Icon = isFuel ? Fuel : LineChart;
             const DirIcon = pct === null ? Minus : up ? TrendingUp : down ? TrendingDown : Minus;
             const toneClass = up ? 'text-emerald-400' : down ? 'text-red-400' : 'text-zinc-400';
             const glowClass = up ? 'group-hover:shadow-emerald-500/10' : down ? 'group-hover:shadow-red-500/10' : 'group-hover:shadow-white/5';
@@ -186,7 +187,7 @@ export default function MarketsOverviewGrid() {
                 )}>
                   <div className="flex items-center justify-between mb-2.5">
                     <span className="flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-[0.15em] text-zinc-500">
-                      <Icon className={cn('h-3 w-3', isMcx ? 'text-amber-400' : 'text-sky-400')} />
+                      <Icon className={cn('h-3 w-3', isFuel ? 'text-amber-400' : 'text-sky-400')} />
                       {isMcx ? 'MCX' : isGlobal ? (globalQuotes[r.key]?.source === 'yahoo-live' ? 'Global · Live' : 'Global · EOD') : 'Index'}
                     </span>
                     <DirIcon className={cn('h-3.5 w-3.5', toneClass)} />
@@ -229,7 +230,7 @@ type SortKey = 'label' | 'group' | 'ltp' | 'chg' | 'pct' | 'prev' | 'high' | 'lo
   | 'w1' | 'm1' | 'ytd' | 'w52' | 'rsi';
 
 function groupOf(key: string): string {
-  return key in GLOBAL_BY_KEY ? GLOBAL_BY_KEY[key].group : MCX_KEYS.has(key) ? 'MCX' : 'Index';
+  return key in GLOBAL_BY_KEY ? (GLOBAL_BY_KEY[key].group === 'Commodity' ? 'Futures' : GLOBAL_BY_KEY[key].group) : MCX_KEYS.has(key) ? 'MCX' : 'Index';
 }
 
 // Table sections, in display order. Sorting reorders rows within a section only,
@@ -237,6 +238,7 @@ function groupOf(key: string): string {
 const SECTIONS = [
   { id: 'india',  title: 'Indian Markets',   sub: 'NSE indices, India VIX, MCX crude' },
   { id: 'global', title: 'Global Indices',   sub: 'US, Asia, Europe' },
+  { id: 'commodities', title: 'Global Commodities', sub: 'WTI and Brent crude (futures, USD/bbl)' },
   { id: 'bonds',  title: 'Bonds & Currency', sub: 'US Treasury yields, Dollar Index' },
 ] as const;
 type SectionId = typeof SECTIONS[number]['id'];
@@ -244,6 +246,7 @@ type SectionId = typeof SECTIONS[number]['id'];
 function sectionOf(key: string): SectionId {
   const g = GLOBAL_BY_KEY[key];
   if (!g) return 'india';
+  if (g.group === 'Commodity') return 'commodities';
   return g.group === 'Bond yield' || g.group === 'Currency' ? 'bonds' : 'global';
 }
 
