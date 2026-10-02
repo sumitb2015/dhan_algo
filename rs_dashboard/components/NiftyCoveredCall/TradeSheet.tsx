@@ -4,6 +4,7 @@ import React, { useState } from 'react';
 import { cn } from '@/lib/utils';
 import { Button } from '@/components/ui/button';
 import { Layers, History, ArrowRightLeft, CheckCircle2 } from 'lucide-react';
+import { Tooltip, TooltipTrigger, TooltipContent } from '@/components/ui/tooltip';
 import type { CallTrade } from '@/lib/coveredCallEngine';
 
 export interface OpenCallRow {
@@ -28,6 +29,23 @@ function pnlClass(v: number | null | undefined) {
 const fmt0 = (v: number | null | undefined) => (v == null ? '—' : Math.round(v).toLocaleString('en-IN'));
 
 const TH = 'px-3 py-2 text-xs font-bold text-white';
+
+function HeaderTip({ label, tip, align = 'left' }: { label: string; tip: string; align?: 'left' | 'right' | 'center' }) {
+  return (
+    <Tooltip>
+      <TooltipTrigger
+        render={
+          <span className={cn('cursor-help inline-flex items-center gap-0.5 border-b border-dotted border-zinc-600 hover:border-zinc-300 transition-colors', align === 'right' && 'justify-end')}>
+            {label}
+          </span>
+        }
+      />
+      <TooltipContent className="max-w-xs text-xs p-2 bg-zinc-900 border border-zinc-700 text-zinc-200 shadow-xl rounded-lg leading-relaxed z-50">
+        {tip}
+      </TooltipContent>
+    </Tooltip>
+  );
+}
 
 export default function TradeSheet({
   rows,
@@ -104,14 +122,14 @@ export default function TradeSheet({
           <table className="w-full text-xs">
             <thead>
               <tr className="bg-zinc-800">
-                <th className={cn(TH, 'text-left')}>Contract</th>
-                <th className={cn(TH, 'text-right')}>DTE</th>
-                <th className={cn(TH, 'text-right')}>Lots / Units</th>
-                <th className={cn(TH, 'text-right')}>Sold @</th>
-                <th className={cn(TH, 'text-right')}>Current LTP</th>
-                <th className={cn(TH, 'text-center')}>Decay Progress</th>
-                <th className={cn(TH, 'text-right')}>MTM P&amp;L</th>
-                <th className={cn(TH, 'text-right')}>Net Δ / Θ</th>
+                <th className={cn(TH, 'text-left')}><HeaderTip label="Contract" tip="NIFTY Call option strike and expiry date." /></th>
+                <th className={cn(TH, 'text-right')}><HeaderTip label="DTE" tip="Calendar days remaining until contract expiry." align="right" /></th>
+                <th className={cn(TH, 'text-right')}><HeaderTip label="Lots / Units" tip="Number of lots and total option units short in this contract." align="right" /></th>
+                <th className={cn(TH, 'text-right')}><HeaderTip label="Sold @" tip="Average execution price at which you wrote/sold the call." align="right" /></th>
+                <th className={cn(TH, 'text-right')}><HeaderTip label="Current LTP" tip="Last traded price of the call in the market right now." align="right" /></th>
+                <th className={cn(TH, 'text-center')}><HeaderTip label="Decay Progress" tip="Percentage of initial premium collected that has decayed into profit. Best practice is to Buy Back or Roll when decay reaches 70%–80%." align="center" /></th>
+                <th className={cn(TH, 'text-right')}><HeaderTip label="MTM P&amp;L" tip="Unrealized profit/loss on this specific call leg: (Sold Price − Current LTP) × Units." align="right" /></th>
+                <th className={cn(TH, 'text-right')}><HeaderTip label="Net Δ / Θ" tip="Delta (exposure to 1-pt Nifty move) and Daily Theta (time decay earned per day in ₹)." align="right" /></th>
                 <th className={cn(TH, 'text-right')}>Actions</th>
               </tr>
             </thead>

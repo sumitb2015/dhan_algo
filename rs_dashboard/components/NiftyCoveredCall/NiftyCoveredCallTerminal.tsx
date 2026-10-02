@@ -6,6 +6,7 @@ import NavBar from '@/components/NavBar';
 import { cn } from '@/lib/utils';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
+import { Tooltip, TooltipTrigger, TooltipContent } from '@/components/ui/tooltip';
 import DeltaPanel from './DeltaPanel';
 import HowToUseModal from './HowToUse';
 import TradeSheet, { type OpenCallRow } from './TradeSheet';
@@ -533,6 +534,7 @@ export default function NiftyCoveredCallTerminal() {
         {/* Card 1: NIFTYBEES Holding */}
         <StatTile
           label="NIFTYBEES Holding"
+          tooltip="Total NIFTYBEES shares in your Dhan account (Demat DP + T1 settling + today's delivery buys), converted to cash value and Nifty index-equivalent capacity."
           value={holdingValue}
           raw
           sub={bees ? `${fmtInt(beesQty)} shares @ ₹${bees.avgCost.toFixed(2)}` : 'Loading holdings…'}
@@ -549,6 +551,7 @@ export default function NiftyCoveredCallTerminal() {
         {/* Card 3: Option Income */}
         <StatTile
           label="Calls Open MTM"
+          tooltip="Current mark-to-market profit/loss on active short calls. As the calls decay towards 0, this profit increases."
           value={snapshot ? snapshot.callsOpenPnl : null}
           sub={`${rows.filter((r) => r.units > 0).length} open · ₹${fmtInt(ledger.realized)} realized`}
         />
@@ -556,6 +559,7 @@ export default function NiftyCoveredCallTerminal() {
         {/* Card 4: Total Strategy P&L */}
         <StatTile
           label="Total Strategy P&L"
+          tooltip="Combined net profit/loss: NIFTYBEES unrealized capital gain/loss + all option premiums collected (both open MTM and closed realized)."
           value={totalPnl}
           emphasis
           sub={snapshot ? `Holding ${signed(snapshot.beesPnl ?? 0)} · Calls ${signed(snapshot.callsOpenPnl + ledger.realized)}` : 'Holding + Calls'}
@@ -564,6 +568,7 @@ export default function NiftyCoveredCallTerminal() {
         {/* Card 5: Effective Cost */}
         <StatTile
           label="Effective Cost / BEES"
+          tooltip="Your reduced purchase cost per share: Original Avg Cost minus option premium profits per share. Shows how much option income has discounted your stock."
           value={effCost}
           raw
           sub={bees && effCost != null ? `Subsidized by ₹${(bees.avgCost - effCost).toFixed(2)}/unit (-${(((bees.avgCost - effCost) / bees.avgCost) * 100).toFixed(1)}%)` : undefined}
@@ -608,7 +613,10 @@ export default function NiftyCoveredCallTerminal() {
             {/* Quick Delta Preset Pills */}
             <div>
               <div className="flex items-center justify-between text-[10px] text-zinc-500 uppercase font-bold mb-1.5">
-                <span>Select Target Delta (Probability)</span>
+                <MetricTooltip
+                  label="Target Delta (Probability)"
+                  text="Roughly represents the probability of the call expiring in-the-money. 0.25 Delta means ~75% chance of expiring worthless (optimal income vs risk of being called away)."
+                />
                 {manualStrike && (
                   <button onClick={() => setManualStrikeStr('')} className="text-emerald-400 hover:underline">
                     Reset to Auto
@@ -643,7 +651,10 @@ export default function NiftyCoveredCallTerminal() {
             <div className="grid grid-cols-2 gap-2.5">
               <div>
                 <label className="block text-[10px] font-bold text-zinc-400 uppercase mb-1">
-                  Strike Price
+                  <MetricTooltip
+                    label="Strike Price"
+                    text="The price above which your stock upside is capped and you may have to buy back or roll the call."
+                  />
                 </label>
                 <div className="relative">
                   <RuleNumInput
@@ -663,7 +674,10 @@ export default function NiftyCoveredCallTerminal() {
 
               <div>
                 <label className="block text-[10px] font-bold text-zinc-400 uppercase mb-1">
-                  Quantity (Lots)
+                  <MetricTooltip
+                    label="Quantity (Lots)"
+                    text="Number of NIFTY option contracts to sell (1 lot = 65 units). Ensure your NIFTYBEES holding can cover this quantity to avoid naked risk."
+                  />
                 </label>
                 <select
                   value={writeLots}
@@ -686,46 +700,67 @@ export default function NiftyCoveredCallTerminal() {
             {/* Projected Income & Metrics Box */}
             <div className="rounded-xl bg-zinc-900/70 border border-zinc-800/80 p-3 space-y-2">
               <div className="flex items-center justify-between border-b border-zinc-800/60 pb-1.5">
-                <span className="text-[11px] text-zinc-400 font-bold">Contract Premium (LTP)</span>
+                <MetricTooltip
+                  label="Contract Premium (LTP)"
+                  text="Current market price per unit of this option contract. You receive this amount upfront as an option seller."
+                />
                 <span className="text-sm font-bold font-mono text-emerald-400">
                   {writeLtp != null ? `₹${writeLtp.toFixed(2)}` : '—'}
                 </span>
               </div>
 
               <div className="grid grid-cols-2 gap-x-3 gap-y-1.5 pt-0.5 text-xs font-mono">
-                <div className="flex justify-between">
-                  <span className="text-zinc-500">Upfront Credit:</span>
+                <div className="flex justify-between items-center">
+                  <MetricTooltip
+                    label="Upfront Credit:"
+                    text="Total immediate cash credited to your account upon selling the call (Premium × Lots × Lot Size)."
+                  />
                   <span className="font-bold text-white">
                     {writeReturns ? `+₹${fmtInt(writeReturns.credit)}` : '—'}
                   </span>
                 </div>
-                <div className="flex justify-between">
-                  <span className="text-zinc-500">Static Yield:</span>
+                <div className="flex justify-between items-center">
+                  <MetricTooltip
+                    label="Static Yield:"
+                    text="Immediate cash return on your total NIFTYBEES holding value if NIFTY stays flat or below the strike until expiry. Annualized based on DTE."
+                  />
                   <span className="font-bold text-emerald-400">
                     {writeReturns ? `${writeReturns.staticPct.toFixed(2)}%` : '—'}
-                    {writeReturns && <span className="text-[10px] text-zinc-500 ml-1">({writeReturns.staticAnnualPct.toFixed(0)}% a)</span>}
+                    {writeReturns && <span className="text-[10px] text-zinc-500 ml-1 font-sans">({writeReturns.staticAnnualPct.toFixed(0)}% a)</span>}
                   </span>
                 </div>
-                <div className="flex justify-between">
-                  <span className="text-zinc-500">OTM Distance:</span>
+                <div className="flex justify-between items-center">
+                  <MetricTooltip
+                    label="OTM Distance:"
+                    text="How many points and percentage NIFTY spot must rise before reaching this strike price."
+                  />
                   <span className="text-zinc-300">
                     {writeStrike && spot > 0 ? `+${(writeStrike - spot).toFixed(0)} pts (${(((writeStrike - spot) / spot) * 100).toFixed(1)}%)` : '—'}
                   </span>
                 </div>
-                <div className="flex justify-between">
-                  <span className="text-zinc-500">Downside Cushion:</span>
+                <div className="flex justify-between items-center">
+                  <MetricTooltip
+                    label="Downside Cushion:"
+                    text="How many index points NIFTY can drop before your net strategy enters a loss. The option premium buffers your stock against market dips."
+                  />
                   <span className="text-sky-300">
                     {writeReturns ? `${writeReturns.protectionPts.toFixed(0)} pts (${writeReturns.protectionPct.toFixed(2)}%)` : '—'}
                   </span>
                 </div>
-                <div className="flex justify-between">
-                  <span className="text-zinc-500">If Called Max:</span>
+                <div className="flex justify-between items-center">
+                  <MetricTooltip
+                    label="If Called Max:"
+                    text="Maximum potential profit if NIFTY rallies to or beyond the strike price (Upfront premium cash + stock capital gain up to strike)."
+                  />
                   <span className="text-zinc-300">
                     {writeReturns ? `${writeReturns.ifCalledPct.toFixed(2)}%` : '—'}
                   </span>
                 </div>
-                <div className="flex justify-between">
-                  <span className="text-zinc-500">Coverage After:</span>
+                <div className="flex justify-between items-center">
+                  <MetricTooltip
+                    label="Coverage After:"
+                    text="Projected total coverage if this trade is executed. Keeps your position ≤100% covered to prevent naked short call risk."
+                  />
                   <span className={cn('font-bold', coverageAfter != null && coverageAfter > 1.0001 ? 'text-amber-400' : 'text-emerald-400')}>
                     {coverageAfter != null ? `${(coverageAfter * 100).toFixed(0)}% ${coverageAfter > 1.0001 ? '⚠ Naked' : '✓ Safe'}` : '—'}
                   </span>
@@ -879,8 +914,34 @@ function LiveBadge({ live }: { live: boolean }) {
   );
 }
 
+function MetricTooltip({
+  label,
+  text,
+  className,
+}: {
+  label: React.ReactNode;
+  text: string;
+  className?: string;
+}) {
+  return (
+    <Tooltip>
+      <TooltipTrigger
+        render={
+          <span className={cn('cursor-help inline-flex items-center gap-0.5 border-b border-dotted border-zinc-600 hover:border-zinc-300 transition-colors', className)}>
+            {label}
+          </span>
+        }
+      />
+      <TooltipContent className="max-w-xs text-xs p-2.5 bg-zinc-900 border border-zinc-700 text-zinc-200 shadow-xl rounded-lg leading-relaxed z-50">
+        {text}
+      </TooltipContent>
+    </Tooltip>
+  );
+}
+
 function StatTile({
   label,
+  tooltip,
   value,
   sub,
   emphasis,
@@ -888,6 +949,7 @@ function StatTile({
   badge,
 }: {
   label: string;
+  tooltip?: string;
   value: number | null;
   sub?: string;
   emphasis?: boolean;
@@ -898,7 +960,11 @@ function StatTile({
   return (
     <div className={cn('rounded-xl border px-3 py-2 flex flex-col justify-between', emphasis ? 'border-emerald-500/30 bg-emerald-500/5' : 'border-zinc-800/60 bg-zinc-950/40')}>
       <div className="flex items-center justify-between">
-        <span className={cn(TXT_LABEL, 'text-zinc-500 uppercase font-bold tracking-wide')}>{label}</span>
+        {tooltip ? (
+          <MetricTooltip label={<span className={cn(TXT_LABEL, 'text-zinc-500 uppercase font-bold tracking-wide')}>{label}</span>} text={tooltip} />
+        ) : (
+          <span className={cn(TXT_LABEL, 'text-zinc-500 uppercase font-bold tracking-wide')}>{label}</span>
+        )}
         {badge && (
           <span className="text-[9px] font-mono font-bold px-1.5 py-0.2 rounded bg-zinc-800 border border-zinc-700 text-zinc-300">
             {badge}
@@ -932,7 +998,10 @@ function CoverageTile({
   return (
     <div className="rounded-xl border border-zinc-800/60 bg-zinc-950/40 px-3 py-2 flex flex-col justify-between">
       <div className="flex items-center justify-between">
-        <span className={cn(TXT_LABEL, 'text-zinc-500 uppercase font-bold tracking-wide')}>Coverage</span>
+        <MetricTooltip
+          label={<span className={cn(TXT_LABEL, 'text-zinc-500 uppercase font-bold tracking-wide')}>Coverage</span>}
+          text="Ratio of short call units sold vs your NIFTYBEES capacity. ≤100% is safe (backed by stock). >100% means extra calls are naked short options with unlimited upside risk."
+        />
         {covPct != null && (
           <span className={cn('text-[9px] font-bold px-1.5 py-0.2 rounded-full font-mono', isOver ? 'bg-amber-500/20 text-amber-300' : 'bg-emerald-500/20 text-emerald-300')}>
             {isOver ? '⚠ OVER' : '✓ SAFE'}
