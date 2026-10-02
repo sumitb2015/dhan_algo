@@ -1,13 +1,13 @@
 'use client';
 
 import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
-import { Shield, RefreshCw, PenLine, Wallet, Link2 } from 'lucide-react';
+import { Shield, RefreshCw, PenLine, Wallet, Link2, BookOpen, ChevronDown, SlidersHorizontal } from 'lucide-react';
 import NavBar from '@/components/NavBar';
 import { cn } from '@/lib/utils';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import DeltaPanel from './DeltaPanel';
-import HowToUse from './HowToUse';
+import HowToUseModal from './HowToUse';
 import TradeSheet, { type OpenCallRow } from './TradeSheet';
 import { useLiveOptionsWS } from '@/lib/useLiveOptionsWS';
 import { lookupChainLegData, type ChainOc } from '@/lib/optionsStrategy';
@@ -28,14 +28,6 @@ import type { CoveredCallBookResponse } from '@/app/api/nifty-covered-call/book/
 import type { CoveredCallOrderResult } from '@/app/api/nifty-covered-call/order/route';
 
 // ── NIFTYBEES Covered Call desk — Dhan-only, REAL MONEY (calls only).
-//
-// The long leg is the NIFTYBEES holding, read from Dhan holdings + today's CNC
-// position by /api/nifty-covered-call/book; this page never orders NIFTYBEES.
-// The short legs are NIFTY index calls owned by this page's own ledger
-// (/api/nifty-covered-call/state) — the account carries CE shorts from other
-// strategies, so a broker short is only part of this book once sold here or
-// explicitly adopted (dhan-terminal-position-ownership). The ledger is
-// reconciled DOWN against the broker every poll, never up.
 
 const TXT_LABEL = 'text-[9px]';
 const TXT_VALUE = 'text-[10px]';
@@ -86,6 +78,9 @@ export default function NiftyCoveredCallTerminal() {
   const [restSpot, setRestSpot] = useState(0);
   const [feedError, setFeedError] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(true);
+
+  // ── Guide Modal ─────────────────────────────────────────────────────────
+  const [showGuide, setShowGuide] = useState(false);
 
   // ── Broker book (NIFTYBEES + broker CE shorts) ──────────────────────────
   const [book, setBook] = useState<CoveredCallBookResponse | null>(null);
@@ -148,7 +143,6 @@ export default function NiftyCoveredCallTerminal() {
   }, [applyLedger]);
   useEffect(() => { reloadLedger(); }, [reloadLedger]);
 
-  /** Ledger-only actions (sync / adopt / sweep) — all booking happens server-side. */
   const ledgerAction = useCallback(async (payload: Record<string, unknown>) => {
     const j = await (await fetch('/api/nifty-covered-call/state', {
       method: 'POST',
@@ -159,9 +153,6 @@ export default function NiftyCoveredCallTerminal() {
     return j as { success: boolean; error?: string; needsPrice?: boolean; gap?: number };
   }, [applyLedger, reloadLedger]);
 
-  // Orders still working at the broker (e.g. a LIMIT that didn't fill within
-  // the order route's ~5 s): sweep them every book poll so a late fill is
-  // booked at that order's own average price.
   const pendingRef = useRef(pending);
   useEffect(() => { pendingRef.current = pending; }, [pending]);
   const sweepInFlight = useRef(false);
@@ -174,8 +165,7 @@ export default function NiftyCoveredCallTerminal() {
   const ledger = useMemo(() => reconstructCallLedger(trades), [trades]);
   const legExpiries = useMemo(() => [...new Set(ledger.open.map((o) => o.expiry))], [ledger.open]);
 
-  // ── Chain polling: the selected expiry every tick, plus each open leg's own
-  // expiry in rotation (a leg's Greeks must come from its own expiry's chain).
+  // ── Chain polling ───────────────────────────────────────────────────────
   const chainInFlight = useRef(false);
   const tickRef = useRef(0);
   const fetchChain = useCallback(async (expiry: string) => {
@@ -244,7 +234,6 @@ export default function NiftyCoveredCallTerminal() {
   const beesUnits = beesNiftyUnits(beesQty, beesLtp, spot);
   const holdingValue = beesQty * beesLtp;
 
-  /** Call LTP for a strike on a given expiry: WS tick for the bridged expiry, else REST chain. */
   const callLtp = useCallback((strike: number, expiry: string): number | null => {
     if (expiry === optionExpiry) {
       const ws = liveQuotes?.strikes?.[String(strike)]?.ce?.ltp;
@@ -307,7 +296,7 @@ export default function NiftyCoveredCallTerminal() {
     : null;
   const coverageAfter = beesUnits > 0 ? ((snapshot?.shortCallUnits ?? 0) + writeUnits) / beesUnits : null;
 
-  // Seed the limit price from the live LTP whenever the contract changes.
+  // Seed limit price from live LTP whenever contract changes
   const writeKey = `${optionExpiry}:${writeStrike}`;
   const seededKey = useRef('');
   useEffect(() => {
@@ -317,7 +306,7 @@ export default function NiftyCoveredCallTerminal() {
     }
   }, [writeKey, writeLtp]);
 
-  // ── Order helpers ───────────────────────────────────────────────────────
+  // ── Order execution ─────────────────────────────────────────────────────
   const placeOrder = useCallback(async (req: {
     side: 'BUY' | 'SELL'; securityId: string; units: number; orderType: 'MARKET' | 'LIMIT'; price?: number;
     strike?: number; expiry?: string; tradingSymbol?: string; openLegId?: string; note?: string;
@@ -328,7 +317,6 @@ export default function NiftyCoveredCallTerminal() {
       body: JSON.stringify(req),
     });
     const r = (await res.json()) as CoveredCallOrderResult;
-    // The route booked the fill into the ledger itself; pick it up.
     await reloadLedger();
     return r;
   }, [reloadLedger]);
@@ -346,9 +334,8 @@ export default function NiftyCoveredCallTerminal() {
 
   const pendingNote = (r: CoveredCallOrderResult, units: number) =>
     `Order ${r.orderId} is ${r.status}: ${r.filledUnits ?? 0}/${r.units ?? units} units filled and booked so far.\n` +
-    'The desk keeps watching it — any later fill is booked automatically at this order\'s own price.';
+    'The desk keeps watching it — any later fill is booked automatically.';
 
-  /** Sell `units` of a call. The route books the confirmed fill. Returns filled units. */
   const sellCall = useCallback(async (strike: number, expiry: string, units: number, type: 'MARKET' | 'LIMIT', price: number | undefined, note?: string) => {
     const oc = chains[expiry];
     const ce = oc ? lookupChainLegData(oc, strike, 'CE') : undefined;
@@ -362,11 +349,10 @@ export default function NiftyCoveredCallTerminal() {
     return r.filledUnits ?? 0;
   }, [chains, placeOrder]);
 
-  /** Buy back up to `units` of an open leg. The route caps it at the leg's own open units and books the fill. Returns filled units. */
   const buyBack = useCallback(async (leg: OpenCall, units: number, note: string) => {
     const r = await placeOrder({ side: 'BUY', securityId: leg.securityId, units, orderType: 'MARKET', openLegId: leg.id, note });
     if (!r.success) throw new Error(`Buy-back of ${leg.strike} CE failed: ${r.error ?? r.status}`);
-    if (r.clampedFrom) alert(`Buy-back clamped from ${r.clampedFrom} to ${r.units} units — that is all this leg (or the broker) still has short.`);
+    if (r.clampedFrom) alert(`Buy-back clamped from ${r.clampedFrom} to ${r.units} units — all that this leg still has short.`);
     if (r.pending) alert(pendingNote(r, units));
     return r.filledUnits ?? 0;
   }, [placeOrder]);
@@ -376,9 +362,9 @@ export default function NiftyCoveredCallTerminal() {
   const handleWrite = () => withBusy(async () => {
     if (!writeStrike || !optionExpiry || !(writeUnits > 0)) throw new Error('Pick a strike, expiry and lots first');
     const price = orderType === 'LIMIT' ? parseFloat(limitStr) : undefined;
-    if (orderType === 'LIMIT' && !(price! > 0)) throw new Error('Enter a limit price');
+    if (orderType === 'LIMIT' && !(price! > 0)) throw new Error('Enter a valid limit price');
     const covMsg = coverageAfter != null && coverageAfter > 1.0001
-      ? `\n\n⚠ This takes calls written to ${(coverageAfter * 100).toFixed(0)}% of your NIFTYBEES — ${(((snapshot?.shortCallUnits ?? 0) + writeUnits) - beesUnits).toFixed(1)} Nifty units would be a NAKED short call.`
+      ? `\n\n⚠ WARNING: This takes calls written to ${(coverageAfter * 100).toFixed(0)}% of your NIFTYBEES — ${(((snapshot?.shortCallUnits ?? 0) + writeUnits) - beesUnits).toFixed(1)} Nifty units would be a NAKED short call.`
       : '';
     if (!confirm(`REAL ORDER: SELL ${writeLots} lot(s) (${writeUnits} units) NIFTY ${writeStrike} CE ${optionExpiry} @ ${orderType === 'LIMIT' ? price : 'MARKET'} (NRML).${covMsg}`)) return;
     await sellCall(writeStrike, optionExpiry, writeUnits, orderType, price, 'Covered call write');
@@ -391,8 +377,6 @@ export default function NiftyCoveredCallTerminal() {
     await buyBack(leg, leg.units, 'Manual buy-back');
   });
 
-  // Roll = full close, then reopen the same units (Invariant 4: never reopen a
-  // shortfall — a partial close aborts the reopen).
   const handleRoll = (row: OpenCallRow) => withBusy(async () => {
     const leg = legById(row.id);
     if (!leg || !writeStrike || !optionExpiry) return;
@@ -402,19 +386,16 @@ export default function NiftyCoveredCallTerminal() {
     await sellCall(writeStrike, optionExpiry, closed, 'MARKET', undefined, `Roll from ${leg.strike} ${leg.expiry}`);
   });
 
-  // The broker shows less short than the ledger (closed elsewhere / expired):
-  // close the gap at the actual outside BUY from Dhan's trade book. Only when
-  // there is none (closed on an earlier day, expired) does the user type the price.
   const handleSync = (row: OpenCallRow) => withBusy(async () => {
     const leg = legById(row.id);
     if (!leg) return;
     const gap = leg.ledgerUnits - leg.units;
     if (gap <= 0) return;
-    if (!confirm(`Ledger-only (no order): close ${gap} units of ${leg.strike} CE ${leg.expiry} that the broker no longer shows short, at the price of the BUY trade in today's trade book?`)) return;
+    if (!confirm(`Ledger-only (no order): close ${gap} units of ${leg.strike} CE ${leg.expiry} that the broker no longer shows short?`)) return;
     const j = await ledgerAction({ action: 'sync', legId: leg.id });
     if (j.success) return;
     if (!j.needsPrice) throw new Error(j.error || 'Sync failed');
-    const typed = prompt(`${j.error}\n\nEnter the price ${j.gap ?? gap} units were actually closed at (0 if it expired worthless), or Cancel to leave the leg as is:`);
+    const typed = prompt(`${j.error}\n\nEnter the price ${j.gap ?? gap} units were actually closed at (0 if it expired worthless), or Cancel:`);
     if (typed == null || typed.trim() === '') return;
     const px = Number(typed);
     if (!(px >= 0)) throw new Error(`Not a price: ${typed}`);
@@ -433,10 +414,6 @@ export default function NiftyCoveredCallTerminal() {
     .map((c) => ({ ...c, unowned: c.shortUnits - (ledgerUnitsBySid[c.securityId] ?? 0) }))
     .filter((c) => c.unowned > 0), [book?.brokerCalls, ledgerUnitsBySid]);
 
-  // Adopt prices the leg from the sell ORDER's own trades — never the broker's
-  // sellAvg, which is pooled over every trade on the contract, other
-  // strategies' included. A short carried from an earlier day isn't in
-  // today's trade book, so it needs a typed price.
   const handleAdopt = (c: (typeof adoptable)[number]) => withBusy(async () => {
     const lots = adoptLots[c.securityId] ?? (lotSize > 0 ? Math.floor(c.unowned / lotSize) : 0);
     const cj = await (await fetch(`/api/nifty-covered-call/state?candidates=${c.securityId}`)).json() as {
@@ -448,7 +425,7 @@ export default function NiftyCoveredCallTerminal() {
       `${i + 1}) order ${o.orderId} · SELL ${o.units}u @ ₹${o.price.toFixed(2)} · ${new Date(o.at).toLocaleTimeString('en-IN', { hour12: false })}`).join('\n');
     const typed = prompt(
       `Adopt ${c.tradingSymbol} (ledger only, no order).\n\n` +
-      (cands.length ? `Today's sells on this contract not in the desk:\n${list}\n\nType the number of the order you wrote against NIFTYBEES` : 'No sells on this contract in today\'s trade book (carried from an earlier day?).\n\nType') +
+      (cands.length ? `Today's sells on this contract not in the desk:\n${list}\n\nType the number of the order you wrote against NIFTYBEES` : 'No sells on this contract in today\'s trade book.\n\nType') +
       ` — or p<price> (e.g. p98.5) to adopt ${lots * lotSize} units at a price you enter.`,
     );
     if (typed == null || typed.trim() === '') return;
@@ -477,6 +454,9 @@ export default function NiftyCoveredCallTerminal() {
 
   return (
     <div className="flex flex-col min-h-screen bg-zinc-950 text-white">
+      {/* GUIDE MODAL */}
+      <HowToUseModal isOpen={showGuide} onClose={() => setShowGuide(false)} />
+
       {/* STICKY HEADER */}
       <div className="sticky top-0 z-30 flex items-center justify-between gap-3 flex-wrap px-4 lg:px-6 py-2 border-b border-zinc-800 bg-zinc-950/95 backdrop-blur-md">
         <div className="flex items-center gap-2.5">
@@ -489,36 +469,45 @@ export default function NiftyCoveredCallTerminal() {
               <span className={cn(TXT_LABEL, 'font-mono px-1.5 rounded bg-zinc-800 border border-zinc-700 text-zinc-300 font-bold')}>DATA: {todayIST()}</span>
             </div>
             <h1 className="text-sm font-bold text-white tracking-tight flex items-center gap-1.5 mt-0.5 flex-wrap">
-              <span className="font-mono">NIFTY</span>
-              <span className={cn(TXT_CAPTION, 'font-mono font-bold text-zinc-200')}>{spot > 0 ? spot.toFixed(2) : '—'}</span>
+              <span className="font-mono text-zinc-400">NIFTY</span>
+              <span className={cn(TXT_CAPTION, 'font-mono font-bold text-white')}>{spot > 0 ? spot.toFixed(2) : '—'}</span>
               <LiveBadge live={wsLive} />
               <span className="text-zinc-600 font-normal">|</span>
-              <span className={cn(TXT_VALUE, 'font-mono text-zinc-500')}>NIFTYBEES</span>
-              <span className={cn(TXT_CAPTION, 'font-mono font-bold text-zinc-200')}>{beesLtp > 0 ? `₹${beesLtp.toFixed(2)}` : '—'}</span>
-              {bees?.ltpSource === 'holdings' && <span className={cn(TXT_LABEL, 'text-amber-300')} title="Quote lane busy — using the holdings row's LTP">HOLDINGS LTP</span>}
-              <span className="text-zinc-600 font-normal">|</span>
-              <span className={cn(TXT_VALUE, 'font-mono text-zinc-500')}>TOTAL P&amp;L</span>
-              <span className={cn(TXT_CAPTION, 'font-mono font-bold', totalPnl == null ? 'text-zinc-600' : totalPnl >= 0 ? 'text-emerald-400' : 'text-rose-400')}>
-                {totalPnl == null ? '—' : signed(totalPnl)}
-              </span>
+              <span className={cn(TXT_VALUE, 'font-mono text-zinc-400')}>NIFTYBEES</span>
+              <span className={cn(TXT_CAPTION, 'font-mono font-bold text-emerald-400')}>{beesLtp > 0 ? `₹${beesLtp.toFixed(2)}` : '—'}</span>
+              {bees?.ltpSource === 'holdings' && <span className={cn(TXT_LABEL, 'text-amber-300')} title="Holdings quote used">HOLDINGS</span>}
             </h1>
           </div>
         </div>
+
         <div className="flex items-center gap-2 flex-wrap">
+          {/* Expiry Selector Pills */}
           <div className="flex items-center bg-zinc-900 border border-zinc-800 rounded-lg p-0.5 flex-wrap">
-            {expiries.slice(0, 8).map((e) => (
+            {expiries.slice(0, 6).map((e) => (
               <button
                 key={e}
                 onClick={() => setOptionExpiry(e)}
                 className={cn(
-                  'px-2 py-1 rounded text-xs font-mono font-bold transition-all',
-                  optionExpiry === e ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/40' : 'text-zinc-400 hover:text-white',
+                  'px-2.5 py-1 rounded text-xs font-mono font-bold transition-all',
+                  optionExpiry === e ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 shadow-sm' : 'text-zinc-400 hover:text-white',
                 )}
               >
                 {e}
               </button>
             ))}
           </div>
+
+          {/* Guide Button */}
+          <button
+            onClick={() => setShowGuide(true)}
+            className="flex items-center gap-1 px-2.5 py-1 rounded-lg bg-zinc-900 border border-zinc-800 text-xs font-bold text-zinc-300 hover:text-emerald-400 hover:border-emerald-500/40 transition-colors"
+            title="How to use this desk"
+          >
+            <BookOpen className="w-3.5 h-3.5 text-emerald-400" />
+            <span className="hidden sm:inline">Guide</span>
+          </button>
+
+          {/* Refresh */}
           <button
             onClick={() => { if (optionExpiry) fetchChain(optionExpiry); fetchBook(); }}
             className="p-1.5 rounded-lg bg-zinc-900 border border-zinc-800 text-zinc-400 hover:text-cyan-400 transition-colors"
@@ -527,6 +516,7 @@ export default function NiftyCoveredCallTerminal() {
           >
             <RefreshCw className={cn('w-4 h-4', isLoading && 'animate-spin text-cyan-400')} />
           </button>
+
           <NavBar />
         </div>
       </div>
@@ -538,193 +528,52 @@ export default function NiftyCoveredCallTerminal() {
         </div>
       )}
 
-      <HowToUse />
+      {/* TOP 5 EXECUTIVE KPI CARDS */}
+      <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3 px-4 pt-4">
+        {/* Card 1: NIFTYBEES Holding */}
+        <StatTile
+          label="NIFTYBEES Holding"
+          value={holdingValue}
+          raw
+          sub={bees ? `${fmtInt(beesQty)} shares @ ₹${bees.avgCost.toFixed(2)}` : 'Loading holdings…'}
+          badge={lotSize > 0 ? `${(beesUnits / lotSize).toFixed(1)} L Capacity` : undefined}
+        />
 
-      {/* P&L STRIP */}
-      <div className="grid grid-cols-2 md:grid-cols-5 gap-3 px-4 pt-4">
-        <StatTile
-          label="NIFTYBEES unrealized"
-          value={snapshot?.beesPnl ?? null}
-          sub={bees ? `${fmtInt(beesQty)} @ ₹${bees.avgCost.toFixed(2)} avg` : 'loading holdings…'}
+        {/* Card 2: Coverage Status */}
+        <CoverageTile
+          book={snapshot}
+          lotSize={lotSize}
+          beesUnits={beesUnits}
         />
+
+        {/* Card 3: Option Income */}
         <StatTile
-          label="Calls open MTM"
+          label="Calls Open MTM"
           value={snapshot ? snapshot.callsOpenPnl : null}
-          sub={`${rows.filter((r) => r.units > 0).length} open leg(s)`}
+          sub={`${rows.filter((r) => r.units > 0).length} open · ₹${fmtInt(ledger.realized)} realized`}
         />
+
+        {/* Card 4: Total Strategy P&L */}
         <StatTile
-          label="Calls realized"
-          value={ledger.realized + (snapshot?.callsUnsyncedPnl ?? 0)}
-          sub={snapshot && snapshot.unsyncedUnits > 0
-            ? `incl. ~₹${fmtInt(snapshot.callsUnsyncedPnl)} est. on ${snapshot.unsyncedUnits}u closed outside — SYNC to book`
-            : `₹${fmtInt(ledger.premiumSold)} premium sold to date`}
+          label="Total Strategy P&L"
+          value={totalPnl}
+          emphasis
+          sub={snapshot ? `Holding ${signed(snapshot.beesPnl ?? 0)} · Calls ${signed(snapshot.callsOpenPnl + ledger.realized)}` : 'Holding + Calls'}
         />
-        <StatTile label="Total P&L" value={totalPnl} sub="holding + calls" emphasis />
+
+        {/* Card 5: Effective Cost */}
         <StatTile
-          label="Effective cost / BEES"
+          label="Effective Cost / BEES"
           value={effCost}
           raw
-          sub={bees && effCost != null ? `avg ₹${bees.avgCost.toFixed(2)} less call P&L` : undefined}
+          sub={bees && effCost != null ? `Subsidized by ₹${(bees.avgCost - effCost).toFixed(2)}/unit (-${(((bees.avgCost - effCost) / bees.avgCost) * 100).toFixed(1)}%)` : undefined}
         />
       </div>
 
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-3 p-4">
-        {/* WRITE CALL */}
-        <div className="bg-zinc-950/40 border border-zinc-800/60 rounded-xl p-3 space-y-3">
-          <div className="text-xs font-bold text-zinc-100 uppercase tracking-wide flex items-center gap-1.5">
-            <PenLine className="w-3.5 h-3.5 text-rose-400" /> Write Call
-            <span className={cn(TXT_LABEL, 'ml-auto font-mono text-zinc-400')}>{optionExpiry ?? '—'} · {selDte.toFixed(1)} DTE</span>
-          </div>
-          <div className="grid grid-cols-3 gap-2">
-            <label className="block">
-              <span className={cn(TXT_LABEL, 'text-zinc-500')}>Target Δ</span>
-              <RuleNumInput value={targetDeltaStr} onCommit={setTargetDeltaStr} className={cn(inputCls, 'mt-0.5')} ariaLabel="Target delta" />
-            </label>
-            <label className="block">
-              <span className={cn(TXT_LABEL, 'text-zinc-500')}>Strike</span>
-              <RuleNumInput
-                value={manualStrikeStr}
-                onCommit={setManualStrikeStr}
-                placeholder={suggestion ? String(suggestion.strike) : 'auto'}
-                className={cn(inputCls, 'mt-0.5')}
-                ariaLabel="Strike (blank = suggested)"
-              />
-            </label>
-            <label className="block">
-              <span className={cn(TXT_LABEL, 'text-zinc-500')}>Lots</span>
-              <select value={writeLots} onChange={(e) => setWriteLots(Number(e.target.value))} className={cn(inputCls, 'mt-0.5')}>
-                {Array.from({ length: 10 }, (_, i) => i + 1).map((n) => <option key={n} value={n}>{n}</option>)}
-              </select>
-            </label>
-          </div>
-
-          {suggestion && (
-            <div className={cn(TXT_VALUE, 'text-zinc-400')}>
-              Suggested <span className="font-bold text-emerald-400">{suggestion.strike} CE</span> (Δ {suggestion.strikeDelta.toFixed(2)}
-              {suggestion.deltaEstimated && <span className="text-amber-300"> est.</span>}). Holding covers{' '}
-              <span className="font-bold text-zinc-200">{lotSize > 0 ? (beesUnits / lotSize).toFixed(2) : '—'}</span> lots
-              {suggestion.coveredLots === 0 && beesUnits > 0 && <span className="text-amber-300"> — less than one full lot</span>}.
-              {manualStrike && (
-                <button className="ml-1 underline text-zinc-300" onClick={() => setManualStrikeStr('')}>use suggested</button>
-              )}
-            </div>
-          )}
-
-          <div className="rounded-lg bg-zinc-900/60 p-2.5 grid grid-cols-2 gap-x-3 gap-y-1">
-            <Kv label="Premium (LTP)" value={writeLtp != null ? `₹${writeLtp.toFixed(2)}` : '—'} />
-            <Kv label="Δ / IV" value={writeLeg ? `${writeLeg.greeks?.delta?.toFixed(2) ?? '—'} / ${writeLeg.implied_volatility?.toFixed(1) ?? '—'}%` : '—'} />
-            <Kv label="Credit" value={writeReturns ? `₹${fmtInt(writeReturns.credit)}` : '—'} />
-            <Kv label="OTM by" value={writeStrike && spot > 0 ? `${(writeStrike - spot).toFixed(0)} pts (${(((writeStrike - spot) / spot) * 100).toFixed(1)}%)` : '—'} />
-            <Kv label="Static yield" value={writeReturns ? `${writeReturns.staticPct.toFixed(2)}% (${writeReturns.staticAnnualPct.toFixed(0)}% ann.)` : '—'} />
-            <Kv label="If called" value={writeReturns ? `${writeReturns.ifCalledPct.toFixed(2)}%` : '—'} />
-            <Kv label="Downside cushion" value={writeReturns ? `${writeReturns.protectionPts.toFixed(0)} pts (${writeReturns.protectionPct.toFixed(2)}%)` : '—'} />
-            <Kv
-              label="Written after"
-              value={coverageAfter != null ? `${(coverageAfter * 100).toFixed(0)}%` : '—'}
-              tone={coverageAfter != null && coverageAfter > 1.0001 ? 'warn' : 'ok'}
-            />
-          </div>
-
-          <div className="flex items-center gap-2">
-            <div className="flex bg-zinc-800 rounded p-0.5">
-              {(['LIMIT', 'MARKET'] as const).map((t) => (
-                <button key={t} onClick={() => setOrderType(t)}
-                  className={cn(TXT_VALUE, 'px-2 py-0.5 rounded font-bold', orderType === t ? 'bg-zinc-700 text-zinc-100' : 'text-zinc-400')}>
-                  {t}
-                </button>
-              ))}
-            </div>
-            {orderType === 'LIMIT' && (
-              <RuleNumInput value={limitStr} onCommit={setLimitStr} className={cn(inputCls, 'w-24')} ariaLabel="Limit price" />
-            )}
-          </div>
-          <Button
-            size="sm"
-            variant="outline"
-            disabled={busy || !writeStrike || !writeLeg?.security_id || !(lotSize > 0)}
-            onClick={handleWrite}
-            className="w-full bg-rose-500/20 border-rose-500/40 text-rose-300 font-bold hover:bg-rose-500/30 hover:text-rose-200"
-          >
-            SELL {writeLots} × {writeStrike ?? '—'} CE
-          </Button>
-          <div className={cn(TXT_LABEL, 'text-zinc-500')}>
-            NRML (carried to expiry). Only broker-confirmed fills are booked, at the order&apos;s own price. A LIMIT that
-            doesn&apos;t fill at once stays open at the broker and is booked automatically when it fills.
-            {pending.length > 0 && <span className="text-amber-300"> {pending.length} order(s) still working.</span>}
-          </div>
-        </div>
-
-        {/* GREEKS */}
-        <DeltaPanel book={snapshot} spot={spot} beesLtp={beesLtp} lotSize={lotSize} />
-
-        {/* HOLDING + BROKER SHORTS */}
-        <div className="space-y-3">
-          <div className="bg-zinc-950/40 border border-zinc-800/60 rounded-xl p-3 space-y-2">
-            <div className="text-xs font-bold text-zinc-100 uppercase tracking-wide flex items-center gap-1.5">
-              <Wallet className="w-3.5 h-3.5 text-emerald-400" /> NIFTYBEES Holding
-            </div>
-            {bees ? (
-              <div className="grid grid-cols-2 gap-x-3 gap-y-1">
-                <Kv label="Total qty" value={fmtInt(bees.qty)} />
-                <Kv label="Value" value={`₹${fmtInt(holdingValue)}`} />
-                <Kv label="Demat (DP)" value={fmtInt(bees.dpQty)} />
-                <Kv label="T1 (settling)" value={fmtInt(bees.t1Qty)} />
-                <Kv label="Bought today" value={fmtInt(bees.todayQty)} />
-                <Kv label="Avg cost" value={`₹${bees.avgCost.toFixed(2)}`} />
-                <Kv label="Nifty-equivalent" value={`${beesUnits.toFixed(1)} units`} />
-                <Kv label="= lots" value={lotSize > 0 ? (beesUnits / lotSize).toFixed(2) : '—'} />
-                <Kv label="BEES per Nifty pt" value={beesLtp > 0 && spot > 0 ? `1 : ${(spot / beesLtp).toFixed(1)}` : '—'} />
-              </div>
-            ) : (
-              <div className={cn(TXT_CAPTION, 'text-zinc-500')}>{book?.beesError ?? 'Loading holdings…'}</div>
-            )}
-            <div className={cn(TXT_LABEL, 'text-zinc-500')}>
-              Holdings (DP + T1) + today&apos;s CNC position, refreshed every 5 s. Read-only — this desk never trades NIFTYBEES.
-            </div>
-          </div>
-
-          <div className="bg-zinc-950/40 border border-zinc-800/60 rounded-xl p-3 space-y-2">
-            <div className="text-xs font-bold text-zinc-100 uppercase tracking-wide flex items-center gap-1.5">
-              <Link2 className="w-3.5 h-3.5 text-sky-400" /> Broker NIFTY CE Shorts (not in this book)
-            </div>
-            {adoptable.length === 0 ? (
-              <div className={cn(TXT_VALUE, 'text-zinc-500')}>
-                {book?.brokerShortUnits == null ? 'Positions unavailable.' : 'Every NIFTY CE short at the broker is already in this book (or there are none).'}
-              </div>
-            ) : (
-              <div className="space-y-1.5">
-                {adoptable.map((c) => {
-                  const maxLots = lotSize > 0 ? Math.floor(c.unowned / lotSize) : 0;
-                  const lots = Math.min(adoptLots[c.securityId] ?? maxLots, maxLots);
-                  return (
-                    <div key={c.securityId} className={cn(TXT_VALUE, 'flex items-center gap-2 text-zinc-300')}>
-                      <span className="font-mono flex-1 truncate" title={c.tradingSymbol}>
-                        {c.strike} CE {c.expiry} · {c.unowned}u @ {c.sellAvg.toFixed(1)}
-                      </span>
-                      <select
-                        value={lots}
-                        aria-label={`Lots to adopt for ${c.tradingSymbol}`}
-                        onChange={(e) => setAdoptLots((p) => ({ ...p, [c.securityId]: Number(e.target.value) }))}
-                        className={cn(TXT_VALUE, 'bg-zinc-800 border border-zinc-700 rounded px-1 py-0.5 text-zinc-100')}
-                      >
-                        {Array.from({ length: maxLots + 1 }, (_, i) => i).map((n) => <option key={n} value={n}>{n}L</option>)}
-                      </select>
-                      <Button size="xs" variant="outline" disabled={busy || lots <= 0} onClick={() => handleAdopt(c)}
-                        className="bg-sky-500/20 border-sky-500/40 text-sky-300 font-bold hover:bg-sky-500/30 hover:text-sky-200">
-                        ADOPT
-                      </Button>
-                    </div>
-                  );
-                })}
-                <div className={cn(TXT_LABEL, 'text-zinc-500')}>
-                  Other strategies on this account short NIFTY calls too — adopt only the ones you wrote against NIFTYBEES.
-                </div>
-              </div>
-            )}
-          </div>
-        </div>
-
-        <div className="lg:col-span-3">
+      {/* MAIN 2-COLUMN WORKSPACE */}
+      <div className="grid grid-cols-1 lg:grid-cols-12 gap-4 p-4">
+        {/* LEFT COLUMN: ACTIVE COVERED CALLS (7 cols) */}
+        <div className="lg:col-span-7 space-y-4">
           <TradeSheet
             rows={rows}
             history={trades}
@@ -736,6 +585,286 @@ export default function NiftyCoveredCallTerminal() {
             onSyncLedger={handleSync}
           />
         </div>
+
+        {/* RIGHT COLUMN: WRITE COVERED CALL (5 cols) */}
+        <div className="lg:col-span-5 space-y-3">
+          <div className="bg-zinc-950/40 border border-zinc-800/60 rounded-xl p-4 space-y-3 shadow-sm">
+            <div className="flex items-center justify-between border-b border-zinc-800 pb-2.5">
+              <div className="flex items-center gap-2">
+                <div className="w-6 h-6 rounded bg-rose-500/10 flex items-center justify-center">
+                  <PenLine className="w-3.5 h-3.5 text-rose-400" />
+                </div>
+                <div>
+                  <h3 className="text-xs font-bold text-zinc-100 uppercase tracking-wide">Write Covered Call</h3>
+                  <div className="text-[10px] text-zinc-500">Sell OTM NIFTY call against NIFTYBEES</div>
+                </div>
+              </div>
+              <div className="text-right font-mono">
+                <span className="text-xs font-bold text-zinc-200">{optionExpiry ?? '—'}</span>
+                <span className="text-[10px] text-zinc-500 ml-1.5 font-sans">({selDte.toFixed(0)}d DTE)</span>
+              </div>
+            </div>
+
+            {/* Quick Delta Preset Pills */}
+            <div>
+              <div className="flex items-center justify-between text-[10px] text-zinc-500 uppercase font-bold mb-1.5">
+                <span>Select Target Delta (Probability)</span>
+                {manualStrike && (
+                  <button onClick={() => setManualStrikeStr('')} className="text-emerald-400 hover:underline">
+                    Reset to Auto
+                  </button>
+                )}
+              </div>
+              <div className="grid grid-cols-3 gap-1.5">
+                {[
+                  { label: '0.15 Δ Safe', val: '0.15', desc: '~85% OTM' },
+                  { label: '0.25 Δ Sweet', val: '0.25', desc: '~75% OTM' },
+                  { label: '0.35 Δ Aggressive', val: '0.35', desc: '~65% OTM' },
+                ].map((p) => (
+                  <button
+                    key={p.val}
+                    type="button"
+                    onClick={() => { setTargetDeltaStr(p.val); setManualStrikeStr(''); }}
+                    className={cn(
+                      'px-2 py-1.5 rounded-lg border text-left transition-all',
+                      targetDeltaStr === p.val && !manualStrike
+                        ? 'bg-emerald-500/15 border-emerald-500/40 text-emerald-300'
+                        : 'bg-zinc-900 border-zinc-800 text-zinc-400 hover:text-zinc-200 hover:border-zinc-700'
+                    )}
+                  >
+                    <div className="text-[11px] font-bold font-mono">{p.label}</div>
+                    <div className="text-[9px] text-zinc-500">{p.desc}</div>
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {/* Strike & Lots Pickers */}
+            <div className="grid grid-cols-2 gap-2.5">
+              <div>
+                <label className="block text-[10px] font-bold text-zinc-400 uppercase mb-1">
+                  Strike Price
+                </label>
+                <div className="relative">
+                  <RuleNumInput
+                    value={manualStrikeStr}
+                    onCommit={setManualStrikeStr}
+                    placeholder={suggestion ? String(suggestion.strike) : 'Auto strike'}
+                    className={cn(inputCls, 'h-9 px-3 text-sm')}
+                    ariaLabel="Strike (blank = suggested)"
+                  />
+                  {suggestion && !manualStrike && (
+                    <span className="absolute right-2 top-2 text-[10px] px-1.5 py-0.2 rounded bg-emerald-500/20 text-emerald-400 font-bold">
+                      AUTO
+                    </span>
+                  )}
+                </div>
+              </div>
+
+              <div>
+                <label className="block text-[10px] font-bold text-zinc-400 uppercase mb-1">
+                  Quantity (Lots)
+                </label>
+                <select
+                  value={writeLots}
+                  onChange={(e) => setWriteLots(Number(e.target.value))}
+                  className={cn(inputCls, 'h-9 px-3 text-sm')}
+                >
+                  {Array.from({ length: 10 }, (_, i) => i + 1).map((n) => {
+                    const coveredMax = suggestion?.coveredLots ?? 1;
+                    const isExceeding = n > coveredMax;
+                    return (
+                      <option key={n} value={n}>
+                        {n} Lot{n > 1 ? 's' : ''} ({n * lotSize}u) {isExceeding ? '⚠ Uncovered' : '✓ Covered'}
+                      </option>
+                    );
+                  })}
+                </select>
+              </div>
+            </div>
+
+            {/* Projected Income & Metrics Box */}
+            <div className="rounded-xl bg-zinc-900/70 border border-zinc-800/80 p-3 space-y-2">
+              <div className="flex items-center justify-between border-b border-zinc-800/60 pb-1.5">
+                <span className="text-[11px] text-zinc-400 font-bold">Contract Premium (LTP)</span>
+                <span className="text-sm font-bold font-mono text-emerald-400">
+                  {writeLtp != null ? `₹${writeLtp.toFixed(2)}` : '—'}
+                </span>
+              </div>
+
+              <div className="grid grid-cols-2 gap-x-3 gap-y-1.5 pt-0.5 text-xs font-mono">
+                <div className="flex justify-between">
+                  <span className="text-zinc-500">Upfront Credit:</span>
+                  <span className="font-bold text-white">
+                    {writeReturns ? `+₹${fmtInt(writeReturns.credit)}` : '—'}
+                  </span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-zinc-500">Static Yield:</span>
+                  <span className="font-bold text-emerald-400">
+                    {writeReturns ? `${writeReturns.staticPct.toFixed(2)}%` : '—'}
+                    {writeReturns && <span className="text-[10px] text-zinc-500 ml-1">({writeReturns.staticAnnualPct.toFixed(0)}% a)</span>}
+                  </span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-zinc-500">OTM Distance:</span>
+                  <span className="text-zinc-300">
+                    {writeStrike && spot > 0 ? `+${(writeStrike - spot).toFixed(0)} pts (${(((writeStrike - spot) / spot) * 100).toFixed(1)}%)` : '—'}
+                  </span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-zinc-500">Downside Cushion:</span>
+                  <span className="text-sky-300">
+                    {writeReturns ? `${writeReturns.protectionPts.toFixed(0)} pts (${writeReturns.protectionPct.toFixed(2)}%)` : '—'}
+                  </span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-zinc-500">If Called Max:</span>
+                  <span className="text-zinc-300">
+                    {writeReturns ? `${writeReturns.ifCalledPct.toFixed(2)}%` : '—'}
+                  </span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-zinc-500">Coverage After:</span>
+                  <span className={cn('font-bold', coverageAfter != null && coverageAfter > 1.0001 ? 'text-amber-400' : 'text-emerald-400')}>
+                    {coverageAfter != null ? `${(coverageAfter * 100).toFixed(0)}% ${coverageAfter > 1.0001 ? '⚠ Naked' : '✓ Safe'}` : '—'}
+                  </span>
+                </div>
+              </div>
+            </div>
+
+            {/* Order Type Toggle + Limit Input */}
+            <div className="flex items-center gap-2 pt-1">
+              <div className="flex bg-zinc-900 border border-zinc-800 rounded-lg p-0.5">
+                {(['LIMIT', 'MARKET'] as const).map((t) => (
+                  <button
+                    key={t}
+                    type="button"
+                    onClick={() => setOrderType(t)}
+                    className={cn(
+                      'px-2.5 py-1 rounded text-xs font-bold transition-all',
+                      orderType === t ? 'bg-zinc-800 text-white shadow-sm' : 'text-zinc-400 hover:text-zinc-200'
+                    )}
+                  >
+                    {t}
+                  </button>
+                ))}
+              </div>
+              {orderType === 'LIMIT' && (
+                <div className="flex-1 relative">
+                  <span className="absolute left-2 top-1.5 text-xs text-zinc-500">₹</span>
+                  <RuleNumInput
+                    value={limitStr}
+                    onCommit={setLimitStr}
+                    className={cn(inputCls, 'pl-5 h-8 text-xs font-bold')}
+                    ariaLabel="Limit price"
+                    placeholder="Limit Price"
+                  />
+                </div>
+              )}
+            </div>
+
+            {/* Execute Button */}
+            <Button
+              size="lg"
+              variant="outline"
+              disabled={busy || !writeStrike || !writeLeg?.security_id || !(lotSize > 0)}
+              onClick={handleWrite}
+              className="w-full h-11 bg-rose-500/20 border-rose-500/40 text-rose-300 font-bold hover:bg-rose-500/30 hover:text-rose-100 text-sm shadow-sm transition-all"
+            >
+              SELL {writeLots} × {writeStrike ?? '—'} CE · COLLECT ₹{writeReturns ? fmtInt(writeReturns.credit) : '—'}
+            </Button>
+
+            <div className="text-[10px] text-zinc-500 text-center">
+              NRML order · Carried to expiry · Real fills booked automatically
+              {pending.length > 0 && <span className="text-amber-300 block">⚠ {pending.length} order(s) still working</span>}
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {/* COLLAPSIBLE ADVANCED DETAILS & GREEKS */}
+      <div className="px-4 pb-8">
+        <details className="group bg-zinc-950/40 border border-zinc-800/60 rounded-xl overflow-hidden">
+          <summary className="flex items-center justify-between px-4 py-2.5 cursor-pointer select-none text-xs font-bold text-zinc-300 uppercase tracking-wide hover:bg-zinc-900/40 transition-colors">
+            <span className="flex items-center gap-2">
+              <SlidersHorizontal className="w-4 h-4 text-emerald-400" />
+              Advanced Portfolio Breakdown, Greeks &amp; Unlinked Broker Shorts
+            </span>
+            <ChevronDown className="w-4 h-4 text-zinc-400 transition-transform group-open:rotate-180" />
+          </summary>
+
+          <div className="p-4 grid grid-cols-1 md:grid-cols-3 gap-4 border-t border-zinc-800/60">
+            {/* Greeks */}
+            <DeltaPanel book={snapshot} spot={spot} beesLtp={beesLtp} lotSize={lotSize} />
+
+            {/* Holding Breakdown */}
+            <div className="bg-zinc-900/40 border border-zinc-800/60 rounded-xl p-3 space-y-2">
+              <div className="text-xs font-bold text-zinc-200 uppercase tracking-wide flex items-center gap-1.5">
+                <Wallet className="w-3.5 h-3.5 text-emerald-400" /> NIFTYBEES Holding Breakdown
+              </div>
+              {bees ? (
+                <div className="space-y-1.5 text-xs font-mono">
+                  <Kv label="Demat (DP)" value={`${fmtInt(bees.dpQty)} shares`} />
+                  <Kv label="T1 (settling)" value={`${fmtInt(bees.t1Qty)} shares`} />
+                  <Kv label="Bought today" value={`${fmtInt(bees.todayQty)} shares`} />
+                  <Kv label="Avg purchase cost" value={`₹${bees.avgCost.toFixed(2)}`} />
+                  <Kv label="Holding Value" value={`₹${fmtInt(holdingValue)}`} />
+                  <Kv label="Nifty-equivalent" value={`${beesUnits.toFixed(1)} units`} />
+                  <Kv label="= Lots capacity" value={lotSize > 0 ? (beesUnits / lotSize).toFixed(2) : '—'} />
+                  <Kv label="BEES per Nifty pt" value={beesLtp > 0 && spot > 0 ? `1 : ${(spot / beesLtp).toFixed(1)}` : '—'} />
+                </div>
+              ) : (
+                <div className="text-xs text-zinc-500">{book?.beesError ?? 'Loading holdings…'}</div>
+              )}
+            </div>
+
+            {/* Adoptable Broker Shorts */}
+            <div className="bg-zinc-900/40 border border-zinc-800/60 rounded-xl p-3 space-y-2">
+              <div className="text-xs font-bold text-zinc-200 uppercase tracking-wide flex items-center gap-1.5">
+                <Link2 className="w-3.5 h-3.5 text-sky-400" /> Broker Shorts (Outside This Desk)
+              </div>
+              {adoptable.length === 0 ? (
+                <div className="text-xs text-zinc-500 py-2">
+                  {book?.brokerShortUnits == null ? 'Positions unavailable.' : 'Every NIFTY CE short at the broker is already in this book (or there are none).'}
+                </div>
+              ) : (
+                <div className="space-y-2">
+                  <div className="text-[11px] text-zinc-400">
+                    Calls sold outside this desk that you want to track against NIFTYBEES:
+                  </div>
+                  {adoptable.map((c) => {
+                    const maxLots = lotSize > 0 ? Math.floor(c.unowned / lotSize) : 0;
+                    const lots = Math.min(adoptLots[c.securityId] ?? maxLots, maxLots);
+                    return (
+                      <div key={c.securityId} className="flex items-center justify-between gap-2 p-2 rounded bg-zinc-950/60 border border-zinc-800 text-xs">
+                        <div className="font-mono">
+                          <span className="font-bold text-zinc-200">{c.strike} CE</span>
+                          <span className="text-zinc-500 ml-1">{c.expiry}</span>
+                          <div className="text-[10px] text-zinc-400">{c.unowned}u @ ₹{c.sellAvg.toFixed(1)}</div>
+                        </div>
+                        <div className="flex items-center gap-1.5">
+                          <select
+                            value={lots}
+                            aria-label={`Lots to adopt for ${c.tradingSymbol}`}
+                            onChange={(e) => setAdoptLots((p) => ({ ...p, [c.securityId]: Number(e.target.value) }))}
+                            className="bg-zinc-800 border border-zinc-700 rounded px-1.5 py-0.5 text-xs text-zinc-100 font-mono"
+                          >
+                            {Array.from({ length: maxLots + 1 }, (_, i) => i).map((n) => <option key={n} value={n}>{n}L</option>)}
+                          </select>
+                          <Button size="xs" variant="outline" disabled={busy || lots <= 0} onClick={() => handleAdopt(c)}
+                            className="bg-sky-500/20 border-sky-500/40 text-sky-300 font-bold hover:bg-sky-500/30">
+                            ADOPT
+                          </Button>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+          </div>
+        </details>
       </div>
     </div>
   );
@@ -750,15 +879,84 @@ function LiveBadge({ live }: { live: boolean }) {
   );
 }
 
-function StatTile({ label, value, sub, emphasis, raw }: { label: string; value: number | null; sub?: string; emphasis?: boolean; raw?: boolean }) {
+function StatTile({
+  label,
+  value,
+  sub,
+  emphasis,
+  raw,
+  badge,
+}: {
+  label: string;
+  value: number | null;
+  sub?: string;
+  emphasis?: boolean;
+  raw?: boolean;
+  badge?: string;
+}) {
   const tone = raw ? 'text-zinc-100' : value == null ? 'text-zinc-600' : value > 0 ? 'text-emerald-400' : value < 0 ? 'text-rose-400' : 'text-zinc-200';
   return (
-    <div className={cn('rounded-xl border px-3 py-2', emphasis ? 'border-emerald-500/30 bg-emerald-500/5' : 'border-zinc-800/60 bg-zinc-950/40')}>
-      <div className={cn(TXT_LABEL, 'text-zinc-500 uppercase font-bold tracking-wide')}>{label}</div>
-      <div className={cn(emphasis ? 'text-lg' : 'text-base', 'font-bold font-mono tabular-nums', tone)}>
-        {value == null ? '—' : raw ? `₹${value.toFixed(2)}` : signed(value)}
+    <div className={cn('rounded-xl border px-3 py-2 flex flex-col justify-between', emphasis ? 'border-emerald-500/30 bg-emerald-500/5' : 'border-zinc-800/60 bg-zinc-950/40')}>
+      <div className="flex items-center justify-between">
+        <span className={cn(TXT_LABEL, 'text-zinc-500 uppercase font-bold tracking-wide')}>{label}</span>
+        {badge && (
+          <span className="text-[9px] font-mono font-bold px-1.5 py-0.2 rounded bg-zinc-800 border border-zinc-700 text-zinc-300">
+            {badge}
+          </span>
+        )}
+      </div>
+      <div className={cn(emphasis ? 'text-lg' : 'text-base', 'font-bold font-mono tabular-nums my-0.5', tone)}>
+        {value == null ? '—' : raw ? `₹${fmtInt(value)}` : signed(value)}
       </div>
       {sub && <div className={cn(TXT_VALUE, 'text-zinc-500 truncate')} title={sub}>{sub}</div>}
+    </div>
+  );
+}
+
+function CoverageTile({
+  book,
+  lotSize,
+  beesUnits,
+}: {
+  book: import('@/lib/coveredCallEngine').BookSnapshot | null;
+  lotSize: number;
+  beesUnits: number;
+}) {
+  const cov = book?.coverage ?? null;
+  const covPct = cov != null ? Math.round(cov * 100) : null;
+  const isOver = cov != null && cov > 1.0001;
+  const shortUnits = book?.shortCallUnits ?? 0;
+  const shortLots = lotSize > 0 ? (shortUnits / lotSize) : 0;
+  const totalLots = lotSize > 0 ? (beesUnits / lotSize) : 0;
+
+  return (
+    <div className="rounded-xl border border-zinc-800/60 bg-zinc-950/40 px-3 py-2 flex flex-col justify-between">
+      <div className="flex items-center justify-between">
+        <span className={cn(TXT_LABEL, 'text-zinc-500 uppercase font-bold tracking-wide')}>Coverage</span>
+        {covPct != null && (
+          <span className={cn('text-[9px] font-bold px-1.5 py-0.2 rounded-full font-mono', isOver ? 'bg-amber-500/20 text-amber-300' : 'bg-emerald-500/20 text-emerald-300')}>
+            {isOver ? '⚠ OVER' : '✓ SAFE'}
+          </span>
+        )}
+      </div>
+
+      <div className="my-0.5">
+        <div className={cn('text-base font-bold font-mono tabular-nums', covPct == null ? 'text-zinc-600' : isOver ? 'text-amber-400' : 'text-emerald-400')}>
+          {covPct == null ? '—' : `${covPct}% Covered`}
+        </div>
+
+        {/* Mini progress bar */}
+        <div className="h-1.5 w-full rounded-full bg-zinc-800 overflow-hidden mt-1 relative">
+          <div
+            className={cn('h-full rounded-full transition-all', isOver ? 'bg-amber-400' : 'bg-emerald-400')}
+            style={{ width: `${Math.min(100, covPct ?? 0)}%` }}
+          />
+        </div>
+      </div>
+
+      <div className={cn(TXT_VALUE, 'text-zinc-400 truncate font-mono')}>
+        {shortLots.toFixed(shortUnits % lotSize ? 1 : 0)} of {totalLots.toFixed(1)} lots sold
+      </div>
     </div>
   );
 }

@@ -1,114 +1,123 @@
 'use client';
 
 import React from 'react';
-import { BookOpen, ChevronDown } from 'lucide-react';
+import { BookOpen, X, ShieldCheck, CheckCircle2, AlertTriangle } from 'lucide-react';
+import { Button } from '@/components/ui/button';
 
-// In-page README for the NIFTYBEES Covered Call desk. Collapsed by default so
-// it doesn't push the live numbers down once you know the desk.
+// Modal guide for the NIFTYBEES Covered Call desk
+export default function HowToUseModal({
+  isOpen,
+  onClose,
+}: {
+  isOpen: boolean;
+  onClose: () => void;
+}) {
+  if (!isOpen) return null;
 
-function Section({ title, children }: { title: string; children: React.ReactNode }) {
   return (
-    <div className="space-y-1">
-      <div className="text-xs font-bold text-zinc-100">{title}</div>
-      <div className="text-[11px] leading-relaxed text-zinc-300 space-y-1">{children}</div>
-    </div>
-  );
-}
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-oncolor-dark/70 backdrop-blur-sm animate-in fade-in duration-150">
+      <div
+        className="relative w-full max-w-3xl max-h-[85vh] flex flex-col bg-zinc-900 border border-zinc-700 rounded-2xl shadow-2xl overflow-hidden"
+        onClick={(e) => e.stopPropagation()}
+      >
+        {/* Header */}
+        <div className="flex items-center justify-between px-6 py-4 border-b border-zinc-800 bg-zinc-950/80">
+          <div className="flex items-center gap-2.5">
+            <div className="flex items-center justify-center w-8 h-8 rounded-lg bg-emerald-500/10 border border-emerald-500/25">
+              <BookOpen className="w-4 h-4 text-emerald-400" />
+            </div>
+            <div>
+              <h2 className="text-sm font-bold text-white uppercase tracking-wider">How to Use NIFTYBEES Covered Call Desk</h2>
+              <p className="text-xs text-zinc-400">Strategy overview, coverage rules, and order safety</p>
+            </div>
+          </div>
+          <button
+            onClick={onClose}
+            className="p-1.5 rounded-lg text-zinc-400 hover:text-white hover:bg-zinc-800 transition-colors"
+            aria-label="Close guide"
+          >
+            <X className="w-5 h-5" />
+          </button>
+        </div>
 
-export default function HowToUse() {
-  return (
-    <details className="group mx-4 mt-4 bg-zinc-950/40 border border-zinc-800/60 rounded-xl">
-      <summary className="flex items-center gap-1.5 px-3 py-2 cursor-pointer select-none list-none text-xs font-bold text-zinc-100 uppercase tracking-wide focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-400/60 rounded-xl">
-        <BookOpen className="w-3.5 h-3.5 text-emerald-400" />
-        How to use this desk
-        <ChevronDown className="w-3.5 h-3.5 ml-auto text-zinc-400 transition-transform group-open:rotate-180" />
-      </summary>
+        {/* Content */}
+        <div className="overflow-y-auto p-6 space-y-5 text-xs text-zinc-300 leading-relaxed">
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <div className="p-4 rounded-xl bg-zinc-950/60 border border-zinc-800/80 space-y-2">
+              <div className="flex items-center gap-2 font-bold text-zinc-100 text-sm">
+                <ShieldCheck className="w-4 h-4 text-emerald-400" />
+                1. Strategy Concept
+              </div>
+              <p>
+                You hold <b>NIFTYBEES</b> shares in your Dhan demat account and sell out-of-the-money (OTM) <b>NIFTY index calls</b> against them.
+              </p>
+              <p>
+                The premium you collect reduces your <b>effective cost per BEES unit</b>. If Nifty stays below the strike, you keep 100% of the premium as pure cash flow.
+              </p>
+            </div>
 
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-4 px-3 pb-3 pt-1">
-        <Section title="1. What the strategy is">
-          <p>
-            You hold NIFTYBEES (the long side) and sell out-of-the-money NIFTY calls against it to collect premium.
-            If Nifty stays below the strike, the call decays and you keep the premium, which lowers your effective cost
-            per NIFTYBEES unit. If Nifty rallies past the strike, the call loses money while the holding gains, so your
-            upside is capped near the strike for the covered part.
-          </p>
-          <p>
-            This page never buys or sells NIFTYBEES. It reads your holding from Dhan (demat + T1 + today&apos;s delivery
-            buys) and only trades NIFTY calls, as NRML, held to expiry unless you buy them back.
-          </p>
-        </Section>
+            <div className="p-4 rounded-xl bg-zinc-950/60 border border-zinc-800/80 space-y-2">
+              <div className="flex items-center gap-2 font-bold text-zinc-100 text-sm">
+                <CheckCircle2 className="w-4 h-4 text-sky-400" />
+                2. Measuring Coverage
+              </div>
+              <p>
+                NIFTYBEES value is converted to Nifty units: <code>(BEES Qty × BEES LTP) ÷ Nifty Spot</code>.
+              </p>
+              <p>
+                <b>1 NIFTY lot = 65 units</b>. If your holding is worth 65 units, you can safely write 1 lot. The desk displays your exact covered capacity.
+              </p>
+            </div>
 
-        <Section title="2. Check your coverage first">
-          <p>
-            NIFTYBEES trades at roughly 1/87 of Nifty, so your holding is worth a number of <b>Nifty units</b> (shown as
-            &quot;Nifty-equivalent&quot; in the holding panel). One NIFTY lot is 65 units.
-          </p>
-          <p>
-            The coverage gauge shows written calls ÷ holding. Up to 100% is covered. <b>Above 100% the extra calls are
-            naked short calls</b> with unlimited upside risk — the desk warns you and asks for confirmation before such an
-            order. If your holding is less than one lot, any call you sell is partly naked.
-          </p>
-        </Section>
+            <div className="p-4 rounded-xl bg-zinc-950/60 border border-zinc-800/80 space-y-2">
+              <div className="flex items-center gap-2 font-bold text-zinc-100 text-sm">
+                <span className="text-emerald-400 font-mono">03</span>
+                Writing a Call
+              </div>
+              <ol className="list-decimal pl-4 space-y-1">
+                <li>Choose a monthly or weekly expiry.</li>
+                <li>Pick the <b>Recommended Strike</b> (around 0.25 Delta) for optimal risk-reward (~80% probability of expiring OTM).</li>
+                <li>Review the upfront cash credit, yield, and downside cushion points.</li>
+                <li>Click <b>Sell Call</b> to place your NRML order.</li>
+              </ol>
+            </div>
 
-        <Section title="3. Write a call">
-          <ol className="list-decimal pl-4 space-y-0.5">
-            <li>Pick an expiry in the header (monthly expiries suit a covered call best).</li>
-            <li>Set <b>Target Δ</b> (0.20–0.30 is typical): the desk suggests the OTM strike closest to it, or type your own strike.</li>
-            <li>Check premium, yield, annualised yield, return if called away and downside cushion.</li>
-            <li>Choose lots and LIMIT (recommended, seeded from LTP) or MARKET, then press <b>SELL</b> and confirm.</li>
-          </ol>
-          <p>
-            Only fills Dhan confirms are recorded, at the order&apos;s own average price. A LIMIT that doesn&apos;t fill at
-            once stays open at the broker and is recorded automatically when it fills.
-          </p>
-        </Section>
+            <div className="p-4 rounded-xl bg-zinc-950/60 border border-zinc-800/80 space-y-2">
+              <div className="flex items-center gap-2 font-bold text-zinc-100 text-sm">
+                <span className="text-emerald-400 font-mono">04</span>
+                Managing &amp; Rolling
+              </div>
+              <ul className="list-disc pl-4 space-y-1">
+                <li><b>Take Profit:</b> When decay reaches <b>70%–80%</b>, click <b>Buy Back</b> to lock in gains and free your holding.</li>
+                <li><b>Roll:</b> If Nifty rallies toward the strike, use <b>Roll</b> to buy back the current call and write a further OTM call.</li>
+              </ul>
+            </div>
+          </div>
 
-        <Section title="4. Manage open calls">
-          <p>
-            The <b>Calls Written</b> table shows decay %, MTM, delta and theta per call. Common rules of thumb (not
-            automated here — buy-backs are manual):
-          </p>
-          <ul className="list-disc pl-4 space-y-0.5">
-            <li><b>Buy Back</b> when most of the premium has decayed (e.g. 75–80%) to free the holding for a new call.</li>
-            <li><b>Roll</b> when Nifty threatens the strike or expiry is near: pick the new strike/expiry in Write Call,
-              then press ROLL on the old call. The new call is sold only after the buy-back fully fills.</li>
-            <li>Watch net delta in the Greeks panel: it falls as calls go in the money, i.e. the holding&apos;s upside is being given away.</li>
-          </ul>
-        </Section>
+          <div className="p-4 rounded-xl bg-amber-500/10 border border-amber-500/30 text-amber-200 space-y-1.5">
+            <div className="flex items-center gap-2 font-bold text-amber-300 text-sm">
+              <AlertTriangle className="w-4 h-4 text-amber-400" />
+              Safety &amp; Execution Guards
+            </div>
+            <p>
+              • <b>No Automatic BEES Trading:</b> This desk only places NIFTY option orders. It never buys or sells your NIFTYBEES shares.
+            </p>
+            <p>
+              • <b>Naked Call Protection:</b> If you attempt to write more lots than your NIFTYBEES holding covers, the desk flags it in amber and prompts for explicit confirmation.
+            </p>
+            <p>
+              • <b>Real-time Confirmation:</b> Only Dhan-confirmed fills are recorded into your covered call ledger.
+            </p>
+          </div>
+        </div>
 
-        <Section title="5. Calls the desk doesn't own (ADOPT)">
-          <p>
-            Other strategies on this account also short NIFTY calls, so the desk only counts calls it sold or that you
-            adopt. <b>ADOPT</b> records an existing short (no order is placed): pick the sell order from today&apos;s list
-            so it is recorded at that order&apos;s own price, or type <code>p&lt;price&gt;</code> for a call carried
-            from an earlier day. Adopt only calls you actually wrote against NIFTYBEES.
-          </p>
-        </Section>
-
-        <Section title="6. When the broker shows less (SYNC)">
-          <p>
-            If a call is bought back elsewhere or expires, the row shows ⚠ and a <b>SYNC</b> button. Until you sync, its
-            P&amp;L is counted at an estimate. SYNC records the close at the real buy trade from today&apos;s trade book;
-            if none matches, it asks for the price (0 for a call that expired worthless).
-          </p>
-        </Section>
-
-        <Section title="Reading the numbers">
-          <ul className="list-disc pl-4 space-y-0.5">
-            <li><b>Effective cost / BEES</b>: your average cost minus all call P&amp;L per unit — the real cost basis after premium.</li>
-            <li><b>Total P&amp;L</b>: holding unrealized + open calls + realized calls (+ any unsynced estimate).</li>
-            <li>Greeks are in Nifty units and ₹; a * on delta means Dhan&apos;s chain had no Greeks and it was estimated.</li>
-          </ul>
-        </Section>
-
-        <Section title="Safety">
-          <ul className="list-disc pl-4 space-y-0.5">
-            <li>Every order is real money and asks for confirmation. Max 20 lots per order; whole lots only.</li>
-            <li>A buy-back is capped at that call&apos;s own open units and at what Dhan still shows short, so it can&apos;t close another strategy&apos;s position or leave you long.</li>
-            <li>Selling NIFTYBEES while calls are open turns them into naked calls — buy the calls back first.</li>
-          </ul>
-        </Section>
+        {/* Footer */}
+        <div className="flex justify-end px-6 py-3 border-t border-zinc-800 bg-zinc-950/80">
+          <Button onClick={onClose} className="bg-emerald-600 hover:bg-emerald-500 text-white font-bold px-5">
+            Got it
+          </Button>
+        </div>
       </div>
-    </details>
+    </div>
   );
 }

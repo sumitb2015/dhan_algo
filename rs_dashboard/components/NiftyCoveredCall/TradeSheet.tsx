@@ -1,8 +1,9 @@
 'use client';
 
-import React from 'react';
+import React, { useState } from 'react';
 import { cn } from '@/lib/utils';
 import { Button } from '@/components/ui/button';
+import { Layers, History, ArrowRightLeft, CheckCircle2 } from 'lucide-react';
 import type { CallTrade } from '@/lib/coveredCallEngine';
 
 export interface OpenCallRow {
@@ -26,7 +27,7 @@ function pnlClass(v: number | null | undefined) {
 }
 const fmt0 = (v: number | null | undefined) => (v == null ? '—' : Math.round(v).toLocaleString('en-IN'));
 
-const TH = 'px-2 py-1.5 text-xs font-bold text-white';
+const TH = 'px-3 py-2 text-xs font-bold text-white';
 
 export default function TradeSheet({
   rows,
@@ -47,131 +48,219 @@ export default function TradeSheet({
   onRoll: (row: OpenCallRow) => void;
   onSyncLedger: (row: OpenCallRow) => void;
 }) {
+  const [activeTab, setActiveTab] = useState<'open' | 'history'>('open');
+
   return (
-    <div className="bg-zinc-950/40 border border-zinc-800/60 rounded-xl overflow-hidden">
-      <div className="px-3 py-2 text-xs font-bold text-zinc-100 uppercase tracking-wide border-b border-zinc-800/60">
-        Calls Written
-      </div>
-      <div className="overflow-x-auto">
-        <table className="w-full text-xs">
-          <thead>
-            <tr className="bg-zinc-800">
-              <th className={cn(TH, 'text-left')}>Contract</th>
-              <th className={cn(TH, 'text-right')}>DTE</th>
-              <th className={cn(TH, 'text-right')}>Units</th>
-              <th className={cn(TH, 'text-right')}>Sold @</th>
-              <th className={cn(TH, 'text-right')}>LTP</th>
-              <th className={cn(TH, 'text-right')}>Decay</th>
-              <th className={cn(TH, 'text-right')}>MTM ₹</th>
-              <th className={cn(TH, 'text-right')}>Δ</th>
-              <th className={cn(TH, 'text-right')}>Θ ₹/day</th>
-              <th className={cn(TH, 'text-right')}>Actions</th>
-            </tr>
-          </thead>
-          <tbody>
-            {rows.length === 0 && (
-              <tr>
-                <td colSpan={10} className="px-2 py-4 text-center text-zinc-500">
-                  No calls written from this desk — use Write Call, or Adopt an existing short below.
-                </td>
-              </tr>
+    <div className="bg-zinc-950/40 border border-zinc-800/60 rounded-xl overflow-hidden shadow-sm">
+      {/* Tab Header */}
+      <div className="flex items-center justify-between px-3 py-2 border-b border-zinc-800 bg-zinc-900/40">
+        <div className="flex items-center gap-1.5">
+          <button
+            onClick={() => setActiveTab('open')}
+            className={cn(
+              'flex items-center gap-1.5 px-3 py-1 rounded-lg text-xs font-bold transition-all',
+              activeTab === 'open'
+                ? 'bg-zinc-800 text-white shadow-sm border border-zinc-700'
+                : 'text-zinc-400 hover:text-zinc-200'
             )}
-            {rows.map((r, i) => {
-              const decay = r.ltp != null && r.entryPrice > 0 ? (1 - r.ltp / r.entryPrice) * 100 : null;
-              const drift = r.units < r.ledgerUnits;
-              return (
-                <tr key={r.id} className={cn('border-t border-zinc-800/60', i % 2 === 1 && 'bg-zinc-900/20')}>
-                  <td className="px-2 py-1.5 text-zinc-200 font-mono whitespace-nowrap">
-                    {r.strike} CE <span className="text-zinc-500">{r.expiry}</span>
-                  </td>
-                  <td className="px-2 py-1.5 text-right tabular-nums text-zinc-300">{r.dte.toFixed(1)}</td>
-                  <td className="px-2 py-1.5 text-right tabular-nums text-zinc-300 whitespace-nowrap">
-                    {r.units}
-                    {lotSize > 0 && <span className="text-zinc-500"> ({(r.units / lotSize).toFixed(r.units % lotSize ? 2 : 0)}L)</span>}
-                    {drift && (
-                      <span className="ml-1 text-amber-300" title={`Ledger holds ${r.ledgerUnits}; broker shows only ${r.units} short`}>
-                        ⚠ {r.ledgerUnits}
-                      </span>
-                    )}
-                  </td>
-                  <td className="px-2 py-1.5 text-right tabular-nums text-zinc-300">{r.entryPrice.toFixed(2)}</td>
-                  <td className="px-2 py-1.5 text-right tabular-nums text-zinc-300">{r.ltp?.toFixed(2) ?? '—'}</td>
-                  <td className={cn('px-2 py-1.5 text-right tabular-nums', pnlClass(decay))}>{decay == null ? '—' : `${decay.toFixed(0)}%`}</td>
-                  <td className={cn('px-2 py-1.5 text-right tabular-nums font-bold', pnlClass(r.mtm))}>{fmt0(r.mtm)}</td>
-                  <td className="px-2 py-1.5 text-right tabular-nums text-zinc-300" title={r.deltaEstimated ? 'Black-Scholes estimate — chain had no Greeks' : undefined}>
-                    {r.delta == null ? '—' : r.delta.toFixed(2)}{r.deltaEstimated && <span className="text-amber-300">*</span>}
-                  </td>
-                  <td className={cn('px-2 py-1.5 text-right tabular-nums', pnlClass(r.theta))}>{fmt0(r.theta)}</td>
-                  <td className="px-2 py-1.5 text-right whitespace-nowrap">
-                    <div className="inline-flex gap-1">
-                      {drift && (
-                        <Button size="xs" variant="outline" disabled={busy} onClick={() => onSyncLedger(r)}
-                          className="bg-amber-500/20 border-amber-500/40 text-amber-300 font-bold hover:bg-amber-500/30 hover:text-amber-200">
-                          SYNC
-                        </Button>
-                      )}
-                      {rollTarget && r.units > 0 && (rollTarget.strike !== r.strike || rollTarget.expiry !== r.expiry) && (
-                        <Button size="xs" variant="outline" disabled={busy} onClick={() => onRoll(r)}
-                          title="Buy this call back, then write the Write Call panel's strike/expiry for the same units"
-                          className="bg-sky-500/20 border-sky-500/40 text-sky-300 font-bold hover:bg-sky-500/30 hover:text-sky-200">
-                          ROLL → {rollTarget.strike}
-                        </Button>
-                      )}
-                      {r.units > 0 && (
-                        <Button size="xs" variant="outline" disabled={busy} onClick={() => onBuyBack(r)}
-                          className="bg-emerald-500/20 border-emerald-500/40 text-emerald-300 font-bold hover:bg-emerald-500/30 hover:text-emerald-200">
-                          BUY BACK
-                        </Button>
-                      )}
+          >
+            <Layers className="w-3.5 h-3.5 text-emerald-400" />
+            Active Covered Calls
+            <span className={cn(
+              'px-1.5 py-0.2 rounded-full text-[10px] font-mono',
+              rows.length > 0 ? 'bg-emerald-500/20 text-emerald-300' : 'bg-zinc-800 text-zinc-500'
+            )}>
+              {rows.length}
+            </span>
+          </button>
+
+          <button
+            onClick={() => setActiveTab('history')}
+            className={cn(
+              'flex items-center gap-1.5 px-3 py-1 rounded-lg text-xs font-bold transition-all',
+              activeTab === 'history'
+                ? 'bg-zinc-800 text-white shadow-sm border border-zinc-700'
+                : 'text-zinc-400 hover:text-zinc-200'
+            )}
+          >
+            <History className="w-3.5 h-3.5 text-zinc-400" />
+            Trade History &amp; Fills
+            <span className="px-1.5 py-0.2 rounded-full text-[10px] font-mono bg-zinc-800 text-zinc-400">
+              {history.length}
+            </span>
+          </button>
+        </div>
+
+        {activeTab === 'open' && rows.length > 0 && (
+          <span className="text-[11px] text-zinc-500 hidden sm:inline">
+            Rule of thumb: buy back or roll when decay reaches ~75%–80%
+          </span>
+        )}
+      </div>
+
+      {/* Tab: Open Calls */}
+      {activeTab === 'open' && (
+        <div className="overflow-x-auto">
+          <table className="w-full text-xs">
+            <thead>
+              <tr className="bg-zinc-800">
+                <th className={cn(TH, 'text-left')}>Contract</th>
+                <th className={cn(TH, 'text-right')}>DTE</th>
+                <th className={cn(TH, 'text-right')}>Lots / Units</th>
+                <th className={cn(TH, 'text-right')}>Sold @</th>
+                <th className={cn(TH, 'text-right')}>Current LTP</th>
+                <th className={cn(TH, 'text-center')}>Decay Progress</th>
+                <th className={cn(TH, 'text-right')}>MTM P&amp;L</th>
+                <th className={cn(TH, 'text-right')}>Net Δ / Θ</th>
+                <th className={cn(TH, 'text-right')}>Actions</th>
+              </tr>
+            </thead>
+            <tbody>
+              {rows.length === 0 && (
+                <tr>
+                  <td colSpan={9} className="px-4 py-8 text-center text-zinc-500">
+                    <div className="flex flex-col items-center justify-center gap-2 max-w-sm mx-auto">
+                      <div className="w-8 h-8 rounded-full bg-zinc-900 flex items-center justify-center text-zinc-600">
+                        <Layers className="w-4 h-4" />
+                      </div>
+                      <div className="text-zinc-300 font-bold">No Active Covered Calls</div>
+                      <div className="text-[11px] text-zinc-500">
+                        Select a recommended strike on the right and click <b>Sell Call</b> to earn upfront premium against your NIFTYBEES.
+                      </div>
                     </div>
                   </td>
                 </tr>
-              );
-            })}
-          </tbody>
-        </table>
-      </div>
+              )}
+              {rows.map((r, i) => {
+                const decay = r.ltp != null && r.entryPrice > 0 ? (1 - r.ltp / r.entryPrice) * 100 : null;
+                const drift = r.units < r.ledgerUnits;
+                const lotsCount = lotSize > 0 ? (r.units / lotSize) : 0;
+                const isHighDecay = decay != null && decay >= 75;
 
-      <div className="px-3 py-2 text-xs font-bold text-zinc-100 uppercase tracking-wide border-t border-zinc-800/60">
-        Call Ledger
-      </div>
-      <div className="overflow-x-auto max-h-64 overflow-y-auto">
-        <table className="w-full text-xs">
-          <thead>
-            <tr className="bg-zinc-800 sticky top-0">
-              <th className={cn(TH, 'text-left')}>Time</th>
-              <th className={cn(TH, 'text-left')}>Contract</th>
-              <th className={cn(TH, 'text-left')}>Action</th>
-              <th className={cn(TH, 'text-right')}>Units</th>
-              <th className={cn(TH, 'text-right')}>Price</th>
-              <th className={cn(TH, 'text-right')}>Realized ₹</th>
-              <th className={cn(TH, 'text-left')}>Note</th>
-            </tr>
-          </thead>
-          <tbody>
-            {history.length === 0 && (
-              <tr>
-                <td colSpan={7} className="px-2 py-4 text-center text-zinc-500">No call trades logged yet</td>
+                return (
+                  <tr key={r.id} className={cn('border-t border-zinc-800/60 transition-colors hover:bg-zinc-900/30', i % 2 === 1 && 'bg-zinc-900/15')}>
+                    <td className="px-3 py-2.5 text-zinc-100 font-mono whitespace-nowrap">
+                      <div className="font-bold text-sm text-emerald-400">{r.strike} CE</div>
+                      <div className="text-[10px] text-zinc-500">{r.expiry}</div>
+                    </td>
+                    <td className="px-3 py-2.5 text-right tabular-nums text-zinc-300 font-mono">
+                      {r.dte.toFixed(1)} <span className="text-[10px] text-zinc-500">days</span>
+                    </td>
+                    <td className="px-3 py-2.5 text-right tabular-nums text-zinc-200 whitespace-nowrap font-mono">
+                      <span className="font-bold text-zinc-100">{lotsCount.toFixed(r.units % lotSize ? 2 : 0)} L</span>
+                      <span className="text-zinc-500 text-[10px] ml-1">({r.units}u)</span>
+                      {drift && (
+                        <span className="ml-1 text-amber-300" title={`Ledger holds ${r.ledgerUnits}; broker shows only ${r.units} short`}>
+                          ⚠ {r.ledgerUnits}
+                        </span>
+                      )}
+                    </td>
+                    <td className="px-3 py-2.5 text-right tabular-nums text-zinc-300 font-mono">₹{r.entryPrice.toFixed(2)}</td>
+                    <td className="px-3 py-2.5 text-right tabular-nums font-bold text-zinc-100 font-mono">{r.ltp != null ? `₹${r.ltp.toFixed(2)}` : '—'}</td>
+                    <td className="px-3 py-2.5 text-center">
+                      {decay == null ? (
+                        <span className="text-zinc-600">—</span>
+                      ) : (
+                        <div className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-[11px] font-mono font-bold"
+                          style={{
+                            backgroundColor: decay >= 75 ? 'rgba(16, 185, 129, 0.15)' : decay >= 40 ? 'rgba(16, 185, 129, 0.08)' : 'rgba(244, 63, 94, 0.1)',
+                            color: decay >= 75 ? '#34d399' : decay >= 40 ? '#10b981' : '#f87171',
+                          }}
+                        >
+                          {isHighDecay && <CheckCircle2 className="w-3 h-3 text-emerald-400" />}
+                          {decay >= 0 ? `${decay.toFixed(0)}% Decayed` : `${Math.abs(decay).toFixed(0)}% Expanded`}
+                        </div>
+                      )}
+                    </td>
+                    <td className={cn('px-3 py-2.5 text-right tabular-nums font-mono font-bold text-sm', pnlClass(r.mtm))}>
+                      {r.mtm != null ? `${r.mtm >= 0 ? '+' : '−'}₹${fmt0(Math.abs(r.mtm))}` : '—'}
+                    </td>
+                    <td className="px-3 py-2.5 text-right tabular-nums text-zinc-400 font-mono text-[11px]">
+                      <div>Δ {r.delta == null ? '—' : r.delta.toFixed(2)}{r.deltaEstimated && <span className="text-amber-300">*</span>}</div>
+                      <div className="text-emerald-400">+{fmt0(r.theta)}/d</div>
+                    </td>
+                    <td className="px-3 py-2.5 text-right whitespace-nowrap">
+                      <div className="inline-flex gap-1.5">
+                        {drift && (
+                          <Button size="xs" variant="outline" disabled={busy} onClick={() => onSyncLedger(r)}
+                            className="bg-amber-500/20 border-amber-500/40 text-amber-300 font-bold hover:bg-amber-500/30">
+                            SYNC
+                          </Button>
+                        )}
+                        {rollTarget && r.units > 0 && (rollTarget.strike !== r.strike || rollTarget.expiry !== r.expiry) && (
+                          <Button size="xs" variant="outline" disabled={busy} onClick={() => onRoll(r)}
+                            title="Buy this call back, then write the selected strike/expiry"
+                            className="bg-sky-500/20 border-sky-500/40 text-sky-300 font-bold hover:bg-sky-500/30">
+                            <ArrowRightLeft className="w-3 h-3 mr-1" /> ROLL → {rollTarget.strike}
+                          </Button>
+                        )}
+                        {r.units > 0 && (
+                          <Button size="xs" variant="outline" disabled={busy} onClick={() => onBuyBack(r)}
+                            className="bg-emerald-500/20 border-emerald-500/40 text-emerald-300 font-bold hover:bg-emerald-500/30 hover:text-emerald-100">
+                            BUY BACK
+                          </Button>
+                        )}
+                      </div>
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      {/* Tab: History */}
+      {activeTab === 'history' && (
+        <div className="overflow-x-auto max-h-80 overflow-y-auto">
+          <table className="w-full text-xs">
+            <thead>
+              <tr className="bg-zinc-800 sticky top-0">
+                <th className={cn(TH, 'text-left')}>Timestamp</th>
+                <th className={cn(TH, 'text-left')}>Contract</th>
+                <th className={cn(TH, 'text-left')}>Action</th>
+                <th className={cn(TH, 'text-right')}>Units</th>
+                <th className={cn(TH, 'text-right')}>Price</th>
+                <th className={cn(TH, 'text-right')}>Realized P&amp;L</th>
+                <th className={cn(TH, 'text-left')}>Notes</th>
               </tr>
-            )}
-            {[...history].reverse().map((t, i) => (
-              <tr key={t.id} className={cn('border-t border-zinc-800/60', i % 2 === 1 && 'bg-zinc-900/20')}>
-                <td className="px-2 py-1.5 text-zinc-400 whitespace-nowrap">
-                  {new Date(t.ts).toLocaleString('en-IN', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit', hour12: false })}
-                </td>
-                <td className="px-2 py-1.5 text-zinc-200 font-mono whitespace-nowrap">{t.strike} CE <span className="text-zinc-500">{t.expiry}</span></td>
-                <td className={cn('px-2 py-1.5 font-bold', t.action === 'BUY_CLOSE' ? 'text-emerald-400' : 'text-rose-400')}>
-                  {t.action === 'SELL_OPEN' ? 'SELL' : t.action === 'BUY_CLOSE' ? 'BUY BACK' : 'ADOPT'}
-                </td>
-                <td className="px-2 py-1.5 text-right tabular-nums text-zinc-300">{t.units}</td>
-                <td className="px-2 py-1.5 text-right tabular-nums text-zinc-300">{t.price.toFixed(2)}</td>
-                <td className={cn('px-2 py-1.5 text-right tabular-nums font-bold', pnlClass(t.realizedPnl))}>{fmt0(t.realizedPnl)}</td>
-                <td className="px-2 py-1.5 text-zinc-500 truncate max-w-[220px]" title={t.note}>{t.note ?? ''}</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
+            </thead>
+            <tbody>
+              {history.length === 0 && (
+                <tr>
+                  <td colSpan={7} className="px-4 py-8 text-center text-zinc-500">
+                    No closed call trades logged yet
+                  </td>
+                </tr>
+              )}
+              {[...history].reverse().map((t, i) => (
+                <tr key={t.id} className={cn('border-t border-zinc-800/60 font-mono', i % 2 === 1 && 'bg-zinc-900/20')}>
+                  <td className="px-3 py-2 text-zinc-400 whitespace-nowrap">
+                    {new Date(t.ts).toLocaleString('en-IN', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit', hour12: false })}
+                  </td>
+                  <td className="px-3 py-2 text-zinc-200 whitespace-nowrap font-bold">
+                    {t.strike} CE <span className="text-zinc-500 text-[10px] font-normal">{t.expiry}</span>
+                  </td>
+                  <td className="px-3 py-2 font-bold">
+                    <span className={cn(
+                      'px-1.5 py-0.5 rounded text-[10px]',
+                      t.action === 'BUY_CLOSE' ? 'bg-emerald-500/15 text-emerald-400' : 'bg-rose-500/15 text-rose-400'
+                    )}>
+                      {t.action === 'SELL_OPEN' ? 'SELL' : t.action === 'BUY_CLOSE' ? 'BUY BACK' : 'ADOPT'}
+                    </span>
+                  </td>
+                  <td className="px-3 py-2 text-right tabular-nums text-zinc-300">{t.units}</td>
+                  <td className="px-3 py-2 text-right tabular-nums text-zinc-300">₹{t.price.toFixed(2)}</td>
+                  <td className={cn('px-3 py-2 text-right tabular-nums font-bold', pnlClass(t.realizedPnl))}>
+                    {t.realizedPnl != null ? `${t.realizedPnl >= 0 ? '+' : '−'}₹${fmt0(Math.abs(t.realizedPnl))}` : '—'}
+                  </td>
+                  <td className="px-3 py-2 text-zinc-500 truncate max-w-[200px]" title={t.note}>{t.note ?? '—'}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
     </div>
   );
 }
