@@ -15,13 +15,14 @@ buy, in-trend, sell or wait state, with a weekly-chart check and Buy/Sell button
 ## 1. The idea in one minute
 
 A stock is **strong** when it has gained more than Nifty over the same period. The page measures that over
-the last **55 trading days** (about 3 months), then asks three more questions: is the price above its
-**Supertrend** line, is **RSI** above 50, and is the price above its **200-day EMA**?
+the last **55 trading days** (about 3 months), then evaluates three key indicators: is the price above its
+**Supertrend** line, is **RSI(14)** above 50, and is the price above its **200 EMA**?
 
-- **Buy** when all of them agree the stock is strong.
-- The 200 EMA is a **long-term trend filter for entries only**. It never forces an exit.
-- **Stay in** while it stays strong. A single warning sign is not an exit.
-- **Sell** only when both RS and Supertrend turn negative together.
+- **Buy**: when RS is above zero, price is above the Supertrend, RSI(14) is above 50 and price is above the 200 EMA (entry only).
+- **In Trend**: while a buy has weakened but not yet turned negative on both.
+- **Sell**: only when RS is below zero and price is below the Supertrend.
+- **Wait**: means no buy yet.
+- **Signals use the latest daily close.**
 
 ---
 
@@ -41,14 +42,14 @@ beat Nifty by 46 percentage points** over the period. `0.10` or more is what Sto
 
 ## 3. The four states
 
-> **"In Trend" does not mean you own the stock.** All four states describe the stock's trend, worked out from price history only. The page never looks at your portfolio to decide them. Check the **Held** column for what you actually own.
+> **"In Trend" does not mean you own the stock.** All four states describe the stock's trend, worked out from price history only. The page never looks at your portfolio to decide them. Check the **Held** column for what you actually own. Signals use the latest daily close.
 
 | State | Rule | What it means |
 |---|---|---|
-| **Buy** | RS > 0 **and** price above Supertrend **and** RSI > 50 **and** price above EMA 200 | All signals agree. The entry condition is met now. |
-| **In Trend** | It was a Buy earlier, the Buy rule no longer holds (a signal weakened, **or the price slipped under the EMA 200**), but RS and Supertrend are **not both negative** | Do not exit yet. A pullback in a strong stock is not a sell. |
-| **Sell** | RS < 0 **and** price below Supertrend | Both signals are negative. This is the exit. |
-| **Wait** | It has never met the Buy rule | No trend to ride and nothing to buy yet. This includes a stock that is otherwise strong but still **below its EMA 200**. |
+| **Buy** | RS is above zero **and** price is above the Supertrend **and** RSI(14) is above 50 **and** price is above the 200 EMA (entry only) | All signals agree. The entry condition is met now on the latest daily close. |
+| **In Trend** | A buy has weakened but not yet turned negative on both | Do not exit yet. A pullback in a strong stock is not a sell. |
+| **Sell** | RS is below zero **and** price is below the Supertrend | Both signals are negative together. This is the only exit signal. |
+| **Wait** | Means no buy yet | No trend to ride and nothing to buy yet. This includes a stock that is otherwise strong but still below its 200 EMA. |
 
 **The EMA 200 applies to entry only.** Buying needs price above it; selling and staying In Trend ignore it. A stock you
 already own is **not** sold for dipping under the 200 EMA, and Sell still means just "RS below 0 and price below Supertrend".

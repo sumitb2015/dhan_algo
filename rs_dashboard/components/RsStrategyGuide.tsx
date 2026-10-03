@@ -66,26 +66,58 @@ export default function RsStrategyGuide({ open, onClose, markdown }: { open: boo
       <SheetContent
         side="right"
         showCloseButton={false}
-        className="w-[720px] sm:max-w-[720px] max-w-[100vw] p-0 flex flex-col bg-zinc-950 border-l border-zinc-800 gap-0"
+        className="w-full data-[side=right]:w-full sm:max-w-none data-[side=right]:sm:max-w-none max-w-none inset-x-0 data-[side=right]:inset-x-0 p-0 flex flex-col bg-zinc-950 border-0 gap-0 shadow-2xl"
       >
-        <SheetHeader className="flex-none px-5 py-4 border-b border-zinc-800 flex-row items-center justify-between gap-3">
-          <div className="flex items-center gap-3">
-            <div className="flex items-center justify-center w-8 h-8 rounded-lg border bg-emerald-500/10 border-emerald-500/25">
-              <BookOpen className="w-4 h-4 text-emerald-400" aria-hidden="true" />
+        <SheetHeader className="flex-none px-6 lg:px-10 py-4 border-b border-zinc-800 bg-zinc-950/90 backdrop-blur">
+          <div className="max-w-6xl mx-auto w-full flex items-center justify-between gap-3">
+            <div className="flex items-center gap-3">
+              <div className="flex items-center justify-center w-8 h-8 rounded-lg border bg-emerald-500/10 border-emerald-500/25">
+                <BookOpen className="w-4 h-4 text-emerald-400" aria-hidden="true" />
+              </div>
+              <div>
+                <SheetTitle className="text-base font-bold text-white">RS Strategy Guide</SheetTitle>
+                <SheetDescription className="text-xs text-zinc-400">Complete strategy rules, indicators, signal states, and order mechanics</SheetDescription>
+              </div>
             </div>
-            <div>
-              <SheetTitle className="text-sm font-bold text-white">RS Strategy guide</SheetTitle>
-              <SheetDescription className="text-[10px] text-zinc-500">How the page works and what every column means</SheetDescription>
+            <button
+              onClick={onClose}
+              aria-label="Close guide"
+              className="px-3 py-1.5 rounded-lg text-sm font-bold text-zinc-400 hover:text-white hover:bg-zinc-800 transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500/50 flex items-center gap-1.5"
+            >
+              <span>Close</span>
+              <span className="text-base leading-none">×</span>
+            </button>
+          </div>
+        </SheetHeader>
+
+        {/* Core Strategy Rules Callout */}
+        <div className="flex-none px-6 lg:px-10 py-3.5 border-b border-zinc-800 bg-zinc-900/60 text-xs text-zinc-300 leading-relaxed">
+          <div className="max-w-6xl mx-auto w-full space-y-1.5">
+            <div className="text-[10px] uppercase font-bold text-zinc-400 tracking-wider">Strategy Signals Summary</div>
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-x-6 gap-y-1">
+              <div>
+                <strong className="text-emerald-400 font-bold">Buy</strong>: when RS is above zero, price is above the Supertrend, RSI(14) is above 50 and price is above the 200 EMA (entry only).
+              </div>
+              <div>
+                <strong className="text-sky-400 font-bold">In Trend</strong>: while a buy has weakened but not yet turned negative on both.
+              </div>
+              <div>
+                <strong className="text-red-400 font-bold">Sell</strong>: only when RS is below zero and price is below the Supertrend.
+              </div>
+              <div>
+                <strong className="text-zinc-200 font-bold">Wait</strong>: means no buy yet.
+              </div>
+            </div>
+            <div className="text-[11px] font-mono text-zinc-400 pt-0.5">
+              Signals use the latest daily close.
             </div>
           </div>
-          <button
-            onClick={onClose}
-            aria-label="Close guide"
-            className="shrink-0 px-2 py-1 rounded-md text-zinc-400 hover:text-white hover:bg-zinc-800 focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500/50"
-          >×</button>
-        </SheetHeader>
-        <div className="flex-1 min-h-0 overflow-y-auto px-5 pb-8 pt-1">
-          {blocks.map((b, i) => <BlockView key={i} b={b} />)}
+        </div>
+
+        <div className="flex-1 min-h-0 overflow-y-auto px-6 lg:px-10 pb-12 pt-3">
+          <div className="max-w-6xl mx-auto w-full">
+            {blocks.map((b, i) => <BlockView key={i} b={b} />)}
+          </div>
         </div>
       </SheetContent>
     </Sheet>

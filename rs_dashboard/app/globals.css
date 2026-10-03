@@ -863,4 +863,63 @@ body {
   :is([class^="bg-blue-900"], [class*=" bg-blue-900"]) * {
     color: #075985 !important;
   }
+
+  /* Ensure trade action buttons in tables always retain exact high-contrast colors */
+  button.rs-buy-btn {
+    background-color: #059669 !important;
+    color: #ffffff !important;
+  }
+  button.rs-buy-btn:hover {
+    background-color: #10b981 !important;
+    color: #ffffff !important;
+  }
+  button.rs-sell-btn:not(:disabled) {
+    background-color: #dc2626 !important;
+    color: #ffffff !important;
+  }
+  button.rs-sell-btn:not(:disabled):hover {
+    background-color: #ef4444 !important;
+    color: #ffffff !important;
+  }
+  button.rs-sell-btn:disabled {
+    background-color: var(--z-800) !important;
+    color: var(--z-500) !important;
+    border-color: var(--z-700) !important;
+    opacity: 0.7 !important;
+  }
+}
+
+/* Row highlights for RS Strategy without triggering descendant text-color overrides */
+.rs-row-watchlisted {
+  background-color: rgba(245, 158, 11, 0.05);
+}
+.rs-row-selected {
+  background-color: rgba(16, 185, 129, 0.08);
+}
+.dark .rs-row-watchlisted {
+  background-color: rgba(245, 158, 11, 0.07);
+}
+.dark .rs-row-selected {
+  background-color: rgba(16, 185, 129, 0.10);
+}
+
+button.rs-buy-btn {
+  background-color: #059669;
+  color: #ffffff !important;
+}
+button.rs-buy-btn:hover {
+  background-color: #10b981;
+}
+button.rs-sell-btn:not(:disabled) {
+  background-color: #dc2626;
+  color: #ffffff !important;
+}
+button.rs-sell-btn:not(:disabled):hover {
+  background-color: #ef4444;
+}
+button.rs-sell-btn:disabled {
+  background-color: var(--z-800);
+  color: var(--z-500) !important;
+  border-color: var(--z-700);
+  opacity: 0.7;
 }
