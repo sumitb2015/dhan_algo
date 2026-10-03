@@ -1,7 +1,7 @@
 'use client';
 
 import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
-import { Shield, RefreshCw, PenLine, Wallet, Link2, BookOpen, ChevronDown, SlidersHorizontal } from 'lucide-react';
+import { Shield, RefreshCw, PenLine, Wallet, Link2, BookOpen, ChevronDown, SlidersHorizontal, Table2 } from 'lucide-react';
 import NavBar from '@/components/NavBar';
 import { cn } from '@/lib/utils';
 import { Button } from '@/components/ui/button';
@@ -9,6 +9,7 @@ import { Badge } from '@/components/ui/badge';
 import { Tooltip, TooltipTrigger, TooltipContent } from '@/components/ui/tooltip';
 import DeltaPanel from './DeltaPanel';
 import HowToUseModal from './HowToUse';
+import CoveredCallOptionChainModal from './CoveredCallOptionChainModal';
 import TradeSheet, { type OpenCallRow } from './TradeSheet';
 import { useLiveOptionsWS } from '@/lib/useLiveOptionsWS';
 import { useLiveTickerPoll } from '@/lib/useLiveTickerPoll';
@@ -102,8 +103,9 @@ export default function NiftyCoveredCallTerminal() {
   const [feedError, setFeedError] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(true);
 
-  // ── Guide Modal ─────────────────────────────────────────────────────────
+  // ── Guide & Option Chain Modals ─────────────────────────────────────────
   const [showGuide, setShowGuide] = useState(false);
+  const [showChainModal, setShowChainModal] = useState(false);
 
   // ── Broker book (NIFTYBEES + broker CE shorts) ──────────────────────────
   const [book, setBook] = useState<CoveredCallBookResponse | null>(null);
@@ -312,7 +314,10 @@ export default function NiftyCoveredCallTerminal() {
   }), [reconciled.legs, snapshot, marks]);
 
   // ── Write-call suggestion ───────────────────────────────────────────────
-  const targetDelta = parseFloat(targetDeltaStr) || 0.25;
+  const parsedDelta = parseFloat(targetDeltaStr);
+  const targetDelta = !isNaN(parsedDelta) && parsedDelta > 0
+    ? (parsedDelta > 1 && parsedDelta <= 100 ? parsedDelta / 100 : Math.min(0.99, parsedDelta))
+    : 0.25;
   const selDte = optionExpiry ? daysToExpiry(optionExpiry, now) : 1;
   const selChain = optionExpiry ? chains[optionExpiry] : undefined;
   const suggestion = useMemo(
@@ -497,6 +502,31 @@ export default function NiftyCoveredCallTerminal() {
       {/* GUIDE MODAL */}
       <HowToUseModal isOpen={showGuide} onClose={() => setShowGuide(false)} />
 
+      {/* OPTION CHAIN MODAL */}
+      <CoveredCallOptionChainModal
+        isOpen={showChainModal}
+        onClose={() => setShowChainModal(false)}
+        spot={displayNiftyLtp}
+        expiries={expiries}
+        currentExpiry={optionExpiry}
+        onSelectExpiry={(exp) => {
+          setOptionExpiry(exp);
+          fetchChain(exp);
+        }}
+        chains={chains}
+        selectedStrike={writeStrike}
+        onSelectStrike={(strike, delta) => {
+          setManualStrikeStr(String(strike));
+          if (delta && delta > 0) {
+            setTargetDeltaStr(delta.toFixed(2));
+          }
+        }}
+        lotSize={lotSize}
+        onRefresh={() => {
+          if (optionExpiry) fetchChain(optionExpiry);
+        }}
+      />
+
       {/* STICKY HEADER */}
       <div className="sticky top-0 z-30 flex items-center justify-between gap-3 flex-wrap px-4 lg:px-6 py-2 border-b border-zinc-800 bg-zinc-950/95 backdrop-blur-md">
         <div className="flex items-center gap-2.5">
@@ -563,6 +593,16 @@ export default function NiftyCoveredCallTerminal() {
               </button>
             ))}
           </div>
+
+          {/* Option Chain Button */}
+          <button
+            onClick={() => setShowChainModal(true)}
+            className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-zinc-900 border border-zinc-800 text-xs font-bold text-zinc-300 hover:text-emerald-400 hover:border-emerald-500/40 transition-colors"
+            title="Open NIFTY Option Chain Table"
+          >
+            <Table2 className="w-3.5 h-3.5 text-emerald-400" />
+            <span className="hidden sm:inline">Option Chain</span>
+          </button>
 
           {/* Guide Button */}
           <button
@@ -676,52 +716,147 @@ export default function NiftyCoveredCallTerminal() {
               </div>
             </div>
 
-            {/* Quick Delta Preset Pills */}
-            <div>
-              <div className="flex items-center justify-between text-[10px] text-zinc-500 uppercase font-bold mb-1.5">
+            {/* Quick Delta Preset Pills + Custom Delta Input */}
+            <div className="space-y-2">
+              <div className="flex items-center justify-between text-[10px] text-zinc-500 uppercase font-bold mb-1">
                 <MetricTooltip
                   label="Target Delta (Probability)"
-                  text="Roughly represents the probability of the call expiring in-the-money. 0.25 Delta means ~75% chance of expiring worthless (optimal income vs risk of being called away)."
+                  text="Roughly represents the probability of the call expiring in-the-money. Lower delta means further OTM (higher probability of expiring worthless, safer). Higher delta yields more upfront cash credit."
                 />
-                {manualStrike && (
-                  <button onClick={() => setManualStrikeStr('')} className="text-emerald-400 hover:underline">
-                    Reset to Auto
-                  </button>
-                )}
+                <div className="flex items-center gap-2">
+                  {manualStrike ? (
+                    <button onClick={() => setManualStrikeStr('')} className="text-emerald-400 hover:underline">
+                      Reset to Auto Strike
+                    </button>
+                  ) : suggestion ? (
+                    <span className="text-[10px] font-mono text-zinc-400 lowercase">
+                      matched <span className="text-emerald-400 font-bold">{suggestion.strikeDelta} Δ</span> ({suggestion.strike} CE)
+                    </span>
+                  ) : null}
+                </div>
               </div>
+
+              {/* 3 Quick Presets */}
               <div className="grid grid-cols-3 gap-1.5">
                 {[
                   { label: '0.15 Δ Safe', val: '0.15', desc: '~85% OTM' },
                   { label: '0.25 Δ Sweet', val: '0.25', desc: '~75% OTM' },
                   { label: '0.35 Δ Aggressive', val: '0.35', desc: '~65% OTM' },
-                ].map((p) => (
+                ].map((p) => {
+                  const isSelected = Math.abs(targetDelta - parseFloat(p.val)) < 0.005 && !manualStrike;
+                  return (
+                    <button
+                      key={p.val}
+                      type="button"
+                      onClick={() => { setTargetDeltaStr(p.val); setManualStrikeStr(''); }}
+                      className={cn(
+                        'px-2 py-1.5 rounded-lg border text-left transition-all',
+                        isSelected
+                          ? 'bg-emerald-500/15 border-emerald-500/40 text-emerald-300'
+                          : 'bg-zinc-900 border-zinc-800 text-zinc-400 hover:text-zinc-200 hover:border-zinc-700'
+                      )}
+                    >
+                      <div className="text-[11px] font-bold font-mono">{p.label}</div>
+                      <div className="text-[9px] text-zinc-500">{p.desc}</div>
+                    </button>
+                  );
+                })}
+              </div>
+
+              {/* Custom Delta Scrub / Stepper / Free Input Bar */}
+              <div className="flex items-center gap-2 rounded-lg bg-zinc-900/80 border border-zinc-800/80 px-2.5 py-1.5">
+                <span className="text-[10px] font-bold text-zinc-400 uppercase tracking-wide whitespace-nowrap">
+                  Custom Δ
+                </span>
+
+                {/* Slider */}
+                <input
+                  type="range"
+                  min="0.05"
+                  max="0.50"
+                  step="0.01"
+                  value={Math.min(0.50, Math.max(0.05, targetDelta))}
+                  onChange={(e) => {
+                    setTargetDeltaStr(Number(e.target.value).toFixed(2));
+                    setManualStrikeStr('');
+                  }}
+                  className="flex-1 h-1.5 bg-zinc-800 rounded-lg appearance-none cursor-pointer accent-emerald-500"
+                  aria-label="Target Delta slider"
+                />
+
+                {/* Steppers */}
+                <div className="flex items-center gap-0.5">
                   <button
-                    key={p.val}
                     type="button"
-                    onClick={() => { setTargetDeltaStr(p.val); setManualStrikeStr(''); }}
-                    className={cn(
-                      'px-2 py-1.5 rounded-lg border text-left transition-all',
-                      targetDeltaStr === p.val && !manualStrike
-                        ? 'bg-emerald-500/15 border-emerald-500/40 text-emerald-300'
-                        : 'bg-zinc-900 border-zinc-800 text-zinc-400 hover:text-zinc-200 hover:border-zinc-700'
-                    )}
+                    title="Decrease delta by 0.01"
+                    onClick={() => {
+                      const next = Math.max(0.02, Math.round((targetDelta - 0.01) * 100) / 100);
+                      setTargetDeltaStr(next.toFixed(2));
+                      setManualStrikeStr('');
+                    }}
+                    className="w-5 h-6 flex items-center justify-center rounded bg-zinc-800 hover:bg-zinc-700 text-zinc-300 hover:text-white text-xs font-bold transition-colors"
                   >
-                    <div className="text-[11px] font-bold font-mono">{p.label}</div>
-                    <div className="text-[9px] text-zinc-500">{p.desc}</div>
+                    −
                   </button>
-                ))}
+                  <button
+                    type="button"
+                    title="Increase delta by 0.01"
+                    onClick={() => {
+                      const next = Math.min(0.90, Math.round((targetDelta + 0.01) * 100) / 100);
+                      setTargetDeltaStr(next.toFixed(2));
+                      setManualStrikeStr('');
+                    }}
+                    className="w-5 h-6 flex items-center justify-center rounded bg-zinc-800 hover:bg-zinc-700 text-zinc-300 hover:text-white text-xs font-bold transition-colors"
+                  >
+                    +
+                  </button>
+                </div>
+
+                {/* Exact Numeric Input (Commit-on-blur) */}
+                <div className="w-16 relative">
+                  <RuleNumInput
+                    value={targetDeltaStr}
+                    onCommit={(val) => {
+                      let n = parseFloat(val);
+                      if (isNaN(n) || n <= 0) return;
+                      if (n > 1 && n <= 100) n = n / 100;
+                      n = Math.min(0.99, Math.max(0.01, Math.round(n * 1000) / 1000));
+                      setTargetDeltaStr(String(n));
+                      setManualStrikeStr('');
+                    }}
+                    placeholder="0.25"
+                    className={cn(inputCls, 'h-6 px-1.5 text-xs font-mono text-center font-bold text-emerald-400')}
+                    ariaLabel="Desired Target Delta input"
+                  />
+                </div>
+
+                {/* Estimated OTM % indicator */}
+                <span className="text-[10px] font-mono text-zinc-400 whitespace-nowrap">
+                  ~{Math.round((1 - Math.min(0.99, targetDelta)) * 100)}% OTM
+                </span>
               </div>
             </div>
 
             {/* Strike & Lots Pickers */}
             <div className="grid grid-cols-2 gap-2.5">
               <div>
-                <label className="block text-[10px] font-bold text-zinc-400 uppercase mb-1">
-                  <MetricTooltip
-                    label="Strike Price"
-                    text="The price above which your stock upside is capped and you may have to buy back or roll the call."
-                  />
-                </label>
+                <div className="flex items-center justify-between mb-1">
+                  <label className="block text-[10px] font-bold text-zinc-400 uppercase">
+                    <MetricTooltip
+                      label="Strike Price"
+                      text="The price above which your stock upside is capped and you may have to buy back or roll the call."
+                    />
+                  </label>
+                  <button
+                    type="button"
+                    onClick={() => setShowChainModal(true)}
+                    className="text-[10px] text-emerald-400 hover:text-emerald-300 font-bold hover:underline flex items-center gap-1 font-mono"
+                    title="Open Option Chain Table"
+                  >
+                    <Table2 className="w-3 h-3" />
+                    Chain Table ↗
+                  </button>
+                </div>
                 <div className="relative">
                   <RuleNumInput
                     value={manualStrikeStr}

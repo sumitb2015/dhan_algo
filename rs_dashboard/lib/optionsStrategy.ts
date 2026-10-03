@@ -157,7 +157,9 @@ export function computeAtm(spot: number, strikeStep: number = STRIKE_STEP): numb
 
 export interface ChainLegData {
   last_price: number;
+  previous_close_price?: number;
   oi?: number;
+  volume?: number;
   implied_volatility?: number;
   security_id?: number;
   greeks?: { delta?: number; theta?: number; gamma?: number; vega?: number };
