@@ -6,8 +6,8 @@
  * buildHeatmapGrid from lib/optionsStrategy.ts, the Option Strats engine) so the
  * numbers cannot drift from the Option Strats / Positions Analysis grids.
  *
- * Legs are priced off each leg's own entry (fill avg, else live LTP) with live
- * chain IV; the grid is Black-Scholes on every date before expiry and intrinsic
+ * Legs are priced off each leg's own entry (fill avg, else live LTP) with IV solved
+ * from the live premium (chain IV only as a fallback); the grid is Black-Scholes on every date before expiry and intrinsic
  * on expiry day. A basket spanning two expiries is refused by PnlTableTab with
  * an explanation rather than mispriced.
  */
@@ -51,8 +51,11 @@ export default function PnlTableModal({
         const entry = l.fill?.avgPrice && l.fill.avgPrice > 0 ? l.fill.avgPrice : (ltp > 0 ? ltp : (l.price ?? 0));
         const units = ((l.fill?.qty && l.fill.qty > 0) ? l.fill.qty : l.lots * lotSize) * qtyMultiplier;
         const t = calculateTimeToExpiryYears(legExpiry);
-        const iv = ivForStrike?.(l.strike, l.option, legExpiry)
-          || (spot > 0 && ltp > 0 ? impliedVolFromPrice(l.option, spot, l.strike, t, ltp) : null)
+        // Solve IV from the live premium with the SAME Black-Scholes the grid uses, so the first column at
+        // the current spot reproduces the live P&L. The chain's own IV comes from a different model/forward
+        // (it misprices our BS by tens of rupees per unit: calls low, puts high), so it is only a fallback.
+        const iv = (spot > 0 && ltp > 0 ? impliedVolFromPrice(l.option, spot, l.strike, t, ltp) : null)
+          || ivForStrike?.(l.strike, l.option, legExpiry)
           || FALLBACK_IV;
         return {
           strike: l.strike,
@@ -66,17 +69,18 @@ export default function PnlTableModal({
       });
   }, [isOpen, legs, basketExpiry, spot, lotSize, qtyMultiplier, ltpFor, ivForStrike]);
 
-  const unpriced = resolved.some(l => !(l.price > 0));
+  // Without a live spot the grid has no price axis (span = 0, one row at spot 0), so refuse it.
+  const unpriced = resolved.some(l => !(l.price > 0)) || !(spot > 0);
 
   return (
-    <FocusModal isOpen={isOpen} onClose={onClose} title={`${title} — P&L by date`} variant="center">
+    <FocusModal isOpen={isOpen} onClose={onClose} title={`${title} — P&L by date`} variant="center" wide>
       <div className="min-h-0 flex-1 overflow-auto">
         {unpriced ? (
           <p className="py-10 text-center text-xs text-zinc-500">
-            Some legs have no entry or live price yet — wait for quotes (or place the legs) to build the grid.
+            Needs a live spot and a price for every leg. Wait for quotes (or place the legs) to build the grid.
           </p>
         ) : (
-          <PnlTableTab legs={resolved} spot={spot} strikeStep={step} expiry={basketExpiry} />
+          <PnlTableTab legs={resolved} spot={spot} strikeStep={step} expiry={basketExpiry} large />
         )}
       </div>
     </FocusModal>

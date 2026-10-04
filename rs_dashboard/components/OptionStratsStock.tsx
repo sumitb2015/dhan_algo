@@ -744,8 +744,8 @@ export default function OptionStratsStock() {
                   <thead>
                     <tr className="bg-zinc-800">
                       <th className="sticky left-0 z-10 bg-zinc-800 px-3 py-2 text-left font-bold text-white">Spot</th>
-                      {heatmap.dates.map((d) => (
-                        <th key={d} className="whitespace-nowrap px-2 py-2 text-right font-bold text-white">{fmtDate(d)}</th>
+                      {heatmap.dates.map((d, di) => (
+                        <th key={di} className="whitespace-nowrap px-2 py-2 text-right font-bold text-white">{heatmap.labels?.[di] ?? fmtDate(d)}</th>
                       ))}
                     </tr>
                   </thead>

@@ -718,6 +718,8 @@ export function legsMissingIv(legs: ResolvedLeg[], targetDate: string): Resolved
 
 export interface HeatmapGrid {
   dates: string[]; // ISO YYYY-MM-DD, ascending, today..expiryDate inclusive
+  /** Header text overriding the date, set only on expiry day (two columns share today's date: "Now", "Expiry"). */
+  labels?: string[];
   rows: number[];  // hypothetical underlying spot levels, descending
   cells: number[][]; // cells[rowIndex][colIndex] = net P&L (rupees)
 }
@@ -751,10 +753,26 @@ export function buildHeatmapGrid(
   today.setHours(0, 0, 0, 0);
   const totalDays = daysToExpiryFrom(expiryDate);
 
+  // Time convention. Leg IVs are solved against the REAL time left to the 15:40 IST expiry, so the
+  // grid must price with that same clock or "today" will not reproduce the live P&L (on expiry day it
+  // would wipe out all remaining time value). Column 0 is "now"; each later column is the same clock
+  // time on a later date; the expiry date settles intrinsically. Mirrors calculateTimeToExpiryYears.
+  const [ey, em, ed] = expiryDate.split('-').map(Number);
+  const expiryMs = Date.UTC(ey, em - 1, ed, 10, 10, 0);
+  const liveDays = Math.max(0.25, (expiryMs - Date.now()) / 86_400_000);
+  const expiryDay = totalDays === 0;
+
   const dates: string[] = [];
   for (let d = 0; d <= totalDays; d++) {
     dates.push(toLocalIsoDate(new Date(today.getTime() + d * 86_400_000)));
   }
+  // On expiry day there is only one date but two meaningful moments: now, and settlement.
+  let labels: string[] | undefined;
+  if (expiryDay) {
+    dates.push(dates[0]);
+    labels = ['Now', 'Expiry'];
+  }
+  const lastIdx = dates.length - 1;
 
   const span = spot * rangePct;
   const lo = Math.floor((spot - span) / strikeStep) * strikeStep;
@@ -763,8 +781,7 @@ export function buildHeatmapGrid(
   for (let s = hi; s >= lo; s -= strikeStep) rows.push(s);
 
   const cells = rows.map((rowSpot) => dates.map((_, colIdx) => {
-    const daysToExpiry = totalDays - colIdx;
-    const t = daysToExpiry / 365;
+    const t = colIdx === lastIdx ? 0 : Math.max(liveDays - colIdx, 0) / 365;
     return legs.reduce((sum, leg) => {
       const iv = (leg.iv ?? 0) * ivMultiplier;
       const price = (t > 0 && iv > 0)
@@ -775,5 +792,5 @@ export function buildHeatmapGrid(
     }, 0) * lotSize;
   }));
 
-  return { dates, rows, cells };
+  return { dates, labels, rows, cells };
 }

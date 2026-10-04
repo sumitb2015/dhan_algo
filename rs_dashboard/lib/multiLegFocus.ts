@@ -93,6 +93,13 @@ export function fallbackLotSize(underlying: string, broker: string): number {
   return underlying === 'CRUDEOIL' ? 100 : 10;
 }
 
+/** Dhan reports MCX crude quantity in lots-of-barrels differently per contract: CRUDEOIL x100,
+ *  CRUDEOILM x10. Every other underlying/broker is 1. Single source for ledger-qty -> P&L scaling. */
+export function crudeQtyMultiplier(underlying: string, broker: string): number {
+  if (broker !== 'dhan') return 1;
+  return underlying === 'CRUDEOIL' ? 100 : underlying === 'CRUDEOILM' ? 10 : 1;
+}
+
 export interface StrategyRiskConfig {
   targetValue?: number;
   targetUnit: 'pts' | 'pct';   // Points or Percentage

@@ -2,18 +2,19 @@
 
 import React, { useState, useMemo, useCallback } from 'react';
 import {
-  ChevronDown, ChevronUp, Trash2, Plus, Minus, X, Check, Layers, Sigma, Loader2, RefreshCw, Table2,
+  ChevronDown, ChevronUp, Trash2, Plus, Minus, X, Check, Layers, Sigma, Loader2, RefreshCw, Table2, BarChart3,
 } from 'lucide-react';
 import MultiLegLegRow from './MultiLegLegRow';
 import RuleNumInput from './RuleNumInput';
 import AddLotsModal from './AddLotsModal';
 import PnlTableModal from './PnlTableModal';
+import PositionVisualizerModal from './PositionVisualizerModal';
 import AddNewLegModal from './AddNewLegModal';
 import LegColumnsMenu from './LegColumnsMenu';
 import { DEFAULT_LEG_COLUMNS, type LegColumns } from '@/lib/legColumns';
 import {
   computeLegTrailingSL, computeStrategyMetrics, checkStrategyRisk, computeBasketStatus, computeCalendarPayoffCurve,
-  classifyBasketStructure, legCountsToday, legPnl, legAvgPrice, legPnlPct, legQtyUnits,
+  classifyBasketStructure, legCountsToday, legPnl, legAvgPrice, legPnlPct, legQtyUnits, crudeQtyMultiplier,
   findSiblingLegCollisions, type SiblingLegCollision, scaleBasketMultiplier,
   type MultiLegBasket, type MultiLegLeg, type StrategyRiskConfig, type LegQtyWarning,
 } from '@/lib/multiLegFocus';
@@ -186,6 +187,7 @@ export default function MultiLegStrategyRow({
   // opens it only when they actually want to look at the curve.
   const [showPayoffChart, setShowPayoffChart] = useState(false);
   const [showPnlTable, setShowPnlTable] = useState(false);
+  const [showPositionVisualizer, setShowPositionVisualizer] = useState(false);
   const [simTargetDays, setSimTargetDays] = useState<number>(0);
   const [simIvShift, setSimIvShift] = useState<number>(0);
   const [confirmPlace, setConfirmPlace] = useState(false);
@@ -243,9 +245,7 @@ export default function MultiLegStrategyRow({
   const hasEarlierDayClosed = useMemo(() => basket.legs.some(l => !legCountsToday(l)), [basket.legs]);
   const legFilter = legFilterChoice ?? (hasEarlierDayClosed && legCounts.open > 0 ? 'open' : 'all');
 
-  const crudeMult = broker === 'dhan'
-    ? (basket.underlying === 'CRUDEOIL' ? 100 : basket.underlying === 'CRUDEOILM' ? 10 : 1)
-    : 1;
+  const crudeMult = crudeQtyMultiplier(basket.underlying, broker);
 
   const visibleLegs = useMemo(() => {
     // No closed legs → chips are hidden, so a stale 'open'/'closed' filter must not linger.
@@ -1079,6 +1079,16 @@ export default function MultiLegStrategyRow({
             Greeks
           </button>
 
+          <button
+            type="button"
+            onClick={() => setShowPositionVisualizer(true)}
+            title="Position Map: horizontal strike line, vertical position bars, CE/PE annotations, and live spot"
+            className={`h-7 px-2.5 inline-flex items-center gap-1 text-[11px] font-bold rounded-lg border border-indigo-500/40 bg-indigo-500/10 text-indigo-300 hover:bg-indigo-500/20 ${FOCUS_RING}`}
+          >
+            <BarChart3 className="w-3 h-3 text-indigo-400" />
+            Position Map
+          </button>
+
           {/* Draft Actions */}
           {!hasPlacedLeg && (
             <>
@@ -1765,6 +1775,24 @@ export default function MultiLegStrategyRow({
           onAddLeg={onAddNewLeg}
         />
       )}
+
+      {/* Mounted at the row root (not inside the expanded section) so the header's Position Map
+         button works while the row is collapsed. */}
+      <PositionVisualizerModal
+        isOpen={showPositionVisualizer}
+        onClose={() => setShowPositionVisualizer(false)}
+        title={strategyLabel}
+        basketId={basket.id}
+        underlying={basket.underlying}
+        legs={basket.legs}
+        basketExpiry={basket.expiry}
+        spot={spot ?? 0}
+        step={step || 50}
+        lotSize={defaultLotSize}
+        qtyMultiplier={crudeMult}
+        ltpFor={ltpFor}
+        ivForStrike={ivForStrike}
+      />
     </div>
   );
 }

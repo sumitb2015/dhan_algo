@@ -18,6 +18,8 @@ interface Props {
   strikeStep: number;
   /** The expiry the grid runs out to — the latest expiry in the book. */
   expiry: string;
+  /** Fill a wide modal: larger type, roomier cells, and a table that grows with the viewport. */
+  large?: boolean;
 }
 
 const RANGE_OPTIONS = [0.02, 0.04, 0.06] as const;
@@ -43,7 +45,7 @@ function fmtCell(n: number): string {
   return `${sign}${abs.toFixed(0)}`;
 }
 
-export default function PnlTableTab({ legs, spot, strikeStep, expiry }: Props) {
+export default function PnlTableTab({ legs, spot, strikeStep, expiry, large = false }: Props) {
   const [rangePct, setRangePct] = useState<number>(0.04);
   const [ivMultiplier, setIvMultiplier] = useState<number>(1);
 
@@ -119,18 +121,18 @@ export default function PnlTableTab({ legs, spot, strikeStep, expiry }: Props) {
           ))}
         </div>
         <span className="text-[10.5px] text-zinc-400">
-          Priced to <strong className="text-zinc-200">{fmtExpiryShort(expiry)}</strong>. Final column settles intrinsically; earlier columns use live IV{ivMultiplier !== 1 ? ` (${ivMultiplier}×)` : ''}.
+          Priced to <strong className="text-zinc-200">{fmtExpiryShort(expiry)}</strong>. The first column is priced at the live time to expiry; the final column settles intrinsically; earlier columns use live IV{ivMultiplier !== 1 ? ` (${ivMultiplier}×)` : ''}.
         </span>
       </div>
 
-      <div className="max-h-[520px] overflow-auto rounded-xl border border-zinc-800/80 bg-zinc-950/40 shadow-inner">
+      <div className={cn(large ? 'max-h-[calc(90vh-14rem)]' : 'max-h-[520px]', 'overflow-auto rounded-xl border border-zinc-800/80 bg-zinc-950/40 shadow-inner')}>
         <table className="w-full border-collapse">
           <thead className="sticky top-0 z-10">
             <tr className="border-b border-zinc-800">
-              <th className="sticky left-0 z-20 bg-zinc-800 px-3 py-2 text-[10px] font-bold uppercase tracking-wider text-white">Spot</th>
-              {grid.dates.map((d) => (
-                <th key={d} className="bg-zinc-800 px-2.5 py-2 text-[10px] font-bold uppercase tracking-wider text-white whitespace-nowrap text-center">
-                  {fmtExpiryShort(d)}
+              <th className={cn('sticky left-0 z-20 bg-zinc-800 px-3 py-2 font-bold uppercase tracking-wider text-white', large ? 'text-xs' : 'text-[10px]')}>Spot</th>
+              {grid.dates.map((d, di) => (
+                <th key={di} className={cn('bg-zinc-800 py-2 font-bold uppercase tracking-wider text-white whitespace-nowrap text-center', large ? 'px-4 text-xs' : 'px-2.5 text-[10px]')}>
+                  {grid.labels?.[di] ?? fmtExpiryShort(d)}
                 </th>
               ))}
             </tr>
@@ -141,7 +143,8 @@ export default function PnlTableTab({ legs, spot, strikeStep, expiry }: Props) {
               return (
                 <tr key={rowSpot} className="transition-colors hover:bg-zinc-800/30">
                   <td className={cn(
-                    'sticky left-0 z-10 border-r border-zinc-800/80 px-3 py-1 font-mono text-xs font-bold tabular-nums',
+                    'sticky left-0 z-10 border-r border-zinc-800/80 px-3 font-mono font-bold tabular-nums',
+                    large ? 'py-1.5 text-sm' : 'py-1 text-xs',
                     isNearSpot ? 'bg-sky-950 text-sky-300 border-l-2 border-l-sky-400' : 'bg-zinc-900 text-zinc-300',
                   )}>
                     {rowSpot.toLocaleString('en-IN')}
@@ -150,7 +153,8 @@ export default function PnlTableTab({ legs, spot, strikeStep, expiry }: Props) {
                     <td key={ci}
                       style={{ backgroundColor: cellColor(pnl, maxAbs) }}
                       className={cn(
-                        'px-2 py-1 text-center font-mono text-[10.5px] font-medium tabular-nums',
+                        'text-center font-mono font-medium tabular-nums',
+                        large ? 'px-4 py-1.5 text-sm' : 'px-2 py-1 text-[10.5px]',
                         pnl >= 0 ? 'text-emerald-200' : 'text-red-200',
                       )}>
                       {fmtCell(pnl)}

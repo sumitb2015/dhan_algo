@@ -4114,11 +4114,14 @@ export function FocusModal({
   title,
   children,
   variant = 'drawer',
+  wide = false,
 }: {
   isOpen: boolean;
   onClose: () => void;
   title: string;
   children: React.ReactNode;
+  /** 'center' only: use almost the whole viewport (for wide grids such as the P&L-by-date table). */
+  wide?: boolean;
   /** 'drawer' (default): right-side sliding panel, for compact detail views.
    *  'center': full-width centered dialog, for data-table-heavy content like
    *  the order/trade book that needs every column visible without scrolling. */
@@ -4128,7 +4131,7 @@ export function FocusModal({
   if (variant === 'center') {
     return (
       <div className="fixed inset-0 z-50 flex items-center justify-center p-6 bg-oncolor-dark/70 backdrop-blur-sm transition-opacity">
-        <div className="w-full max-w-6xl max-h-[90vh] bg-zinc-900 border border-zinc-800 rounded-2xl p-6 flex flex-col gap-4 shadow-2xl text-white overflow-hidden">
+        <div className={cn('w-full max-h-[90vh] bg-zinc-900 border border-zinc-800 rounded-2xl p-6 flex flex-col gap-4 shadow-2xl text-white overflow-hidden', wide ? 'max-w-[96vw] h-[90vh]' : 'max-w-6xl')}>
           <div className="flex items-center justify-between border-b border-zinc-800 pb-3 shrink-0">
             <h2 className="text-sm font-bold uppercase tracking-wider text-zinc-100">{title}</h2>
             <button
