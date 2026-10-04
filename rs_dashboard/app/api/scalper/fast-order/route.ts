@@ -85,9 +85,18 @@ export async function POST(req: NextRequest): Promise<Response> {
   if (prior) return (await prior.result).clone();
   const result = placeOrderOnce(raw as never);
   idempotent.set(key, { at: now, result });
-  const res = await result;
-  // Only a booked order is replayed; a failure may be retried with the same key.
-  if (res.status >= 400 || !(await res.clone().json() as { success?: boolean }).success) idempotent.delete(key);
+  let res: Response;
+  try {
+    res = await result;
+  } catch (err) {
+    idempotent.delete(key); // nothing was sent; let the caller retry
+    throw err;
+  }
+  // Keep the entry for a booked order AND for a 504 "status unknown" — that order
+  // may exist, so a replay must return the same answer, never place a second one.
+  // Any other failure was rejected before booking and may be retried with the key.
+  const booked = res.status < 400 && (await res.clone().json() as { success?: boolean }).success === true;
+  if (!booked && res.status !== 504) idempotent.delete(key);
   return res.clone();
 }
 

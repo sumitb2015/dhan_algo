@@ -1481,6 +1481,10 @@ export default function AdvancedScalper() {
     reason: string,
     opts?: {
       verifyFlat?: boolean;
+      /** Automatic SL/target close: exempt from the post-close cooldown so a
+       *  stop-loss is never refused (the in-flight check still stops a true
+       *  double-fire). */
+      guard?: boolean;
       /**
        * Absolute units to close. Omitted (or ≥ the live netQty) ⇒ full close.
        * Always clamped against the freshly re-fetched live quantity below, so a
@@ -1517,7 +1521,7 @@ export default function AdvancedScalper() {
     // fill, so an immediate second close would size off the pre-close quantity
     // and open a reverse position.
     const lastClose = lastCloseAtRef.current[key];
-    if (lastClose && Date.now() - lastClose < CLOSE_COOLDOWN_MS) {
+    if (!opts?.guard && lastClose && Date.now() - lastClose < CLOSE_COOLDOWN_MS) {
       addToast('error', `Close of ${sym} ignored`, 'A close was just sent — wait for the book to refresh');
       return { ok: false, qty: 0, closedUnits: 0, partial: false };
     }
@@ -2261,7 +2265,7 @@ export default function AdvancedScalper() {
         const targetNum = parseFloat(guard.target);
         if (!isNaN(targetNum) && targetNum > 0) {
           if ((isLong && ltp >= targetNum) || (!isLong && ltp <= targetNum)) {
-            closePosition(pos, 'Target hit');
+            closePosition(pos, 'Target hit', { guard: true });
             continue;
           }
         }
@@ -2288,11 +2292,11 @@ export default function AdvancedScalper() {
                 const trailActive = isLong ? trailSLPrice > slNum : trailSLPrice < slNum;
                 if (trailActive) {
                   if ((isLong && ltp <= trailSLPrice) || (!isLong && ltp >= trailSLPrice)) {
-                    closePosition(pos, 'Trail SL hit');
+                    closePosition(pos, 'Trail SL hit', { guard: true });
                     continue;
                   }
                 } else if ((isLong && ltp <= slNum) || (!isLong && ltp >= slNum)) {
-                  closePosition(pos, 'SL hit');
+                  closePosition(pos, 'SL hit', { guard: true });
                   continue;
                 }
               }
@@ -2302,7 +2306,7 @@ export default function AdvancedScalper() {
           const slNum = parseFloat(guard.sl);
           if (!isNaN(slNum) && slNum > 0) {
             if ((isLong && ltp <= slNum) || (!isLong && ltp >= slNum)) {
-              closePosition(pos, 'SL hit');
+              closePosition(pos, 'SL hit', { guard: true });
               continue;
             }
           }
