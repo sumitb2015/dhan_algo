@@ -338,6 +338,7 @@ class FakeHelper:
         self.cancelled = []
         self.late_fill_on_cancel = late_fill_on_cancel
         self.ltp = 100.0
+        self.vix = 14.0
         self._master_list = pd.DataFrame()
 
     def get_lot_size(self, _):
@@ -365,8 +366,8 @@ class FakeHelper:
     def get_order_by_id(self, _):
         return None
 
-    def get_ltp(self, *_a, **_k):
-        return self.ltp
+    def get_ltp(self, sec_id, *_a, **_k):
+        return self.vix if str(sec_id) == "21" else self.ltp
 
     def get_expiries(self, _):
         return [(date.today() + timedelta(days=90)).strftime("%Y-%m-%d")]
@@ -459,7 +460,7 @@ class TestDiagonalFailurePaths(unittest.TestCase):
     def test_entry_timeout_cancels_and_does_not_hold_long(self):
         s = self.make()
         s.select_long_call = lambda spot: dict(LONG)
-        s.select_short_call = lambda spot, ld: dict(SHORT)
+        s.select_short_call = lambda spot, ld, long_leg=None: dict(SHORT)
         self.broker.fill = False
         self.assertFalse(s.enter_cycle(24500.0))
         self.assertEqual(self.broker.calls, [("BUY", 24000, 195)])
@@ -470,7 +471,7 @@ class TestDiagonalFailurePaths(unittest.TestCase):
     def test_entry_late_fill_after_cancel_is_adopted_not_rebought(self):
         s = self.make(late_fill_on_cancel=True)
         s.select_long_call = lambda spot: dict(LONG)
-        s.select_short_call = lambda spot, ld: dict(SHORT)
+        s.select_short_call = lambda spot, ld, long_leg=None: dict(SHORT)
         self.broker.fill = False
         # long order fills only when cancelled-race resolves; short then also times out
         s.enter_cycle(24500.0)
@@ -506,6 +507,169 @@ class TestDiagonalFailurePaths(unittest.TestCase):
         s._publish_state(24500.0)
         s._publish_state(0.0)
         self.assertEqual(s.last_spot, 24500.0)
+
+
+
+class _FixedDate(date):
+    @classmethod
+    def today(cls):
+        return cls(2026, 10, 5)
+
+
+MONTHLIES = ["2026-10-27", "2026-11-24", "2026-12-29", "2027-01-26"]
+WEEKLIES = ["2026-10-13", "2026-11-03", "2026-11-10"]
+
+
+class TestDiagonalSelectionAndAdjustments(TestDiagonalFailurePaths):
+    def setUp(self):
+        super().setUp()
+        p = mock.patch.object(dc, "date", _FixedDate)
+        p.start()
+        self.addCleanup(p.stop)
+
+    def make_with_chain(self):
+        s = self.make()
+        rows = [
+            {"UNDERLYING_SYMBOL": "NIFTY", "SM_EXPIRY_DATE": e, "OPTION_TYPE": "CE",
+             "STRIKE_PRICE": float(k), "SECURITY_ID": int(f"{i}{k}")}
+            for i, e in enumerate(MONTHLIES + WEEKLIES) for k in range(23000, 28001, 50)
+        ]
+        s.helper._master_list = pd.DataFrame(rows)
+        s.helper.get_expiries = lambda _u: sorted(MONTHLIES + WEEKLIES)
+        return s
+
+    def long_leg(self, expiry="2026-12-29"):
+        return dict(LONG, expiry=expiry, dte=85, strike=24000)
+
+    def test_is_monthly_expiry(self):
+        for e in MONTHLIES:
+            self.assertTrue(dc.is_monthly_expiry(e), e)
+        for e in WEEKLIES:
+            self.assertFalse(dc.is_monthly_expiry(e), e)
+
+    def test_long_call_uses_monthly_only(self):
+        s = self.make_with_chain()
+        leg = s.select_long_call(24500.0)
+        self.assertEqual(leg["expiry"], "2026-12-29")
+
+    def test_short_call_monthly_before_long_near_target_delta(self):
+        s = self.make_with_chain()
+        sh = s.select_short_call(24500.0, 117.0, long_leg=self.long_leg())
+        self.assertEqual(sh["expiry"], "2026-11-24")        # 50 DTE: window widened, weekly 2026-11-03 skipped
+        self.assertTrue(dc.is_monthly_expiry(sh["expiry"]))
+        self.assertLess(abs(sh["delta"] - 0.18), 0.035)     # not drifted to the 0.22 edge
+        self.assertGreaterEqual(sh["delta"], 0.15 - 0.005)
+
+    def test_short_call_never_outlives_long(self):
+        s = self.make_with_chain()
+        self.assertIsNone(s.select_short_call(24500.0, 117.0, long_leg=self.long_leg("2026-11-10")))
+
+    def test_short_call_refuses_low_iv(self):
+        s = self.make_with_chain()
+        s.helper.vix = 8.0
+        self.assertIsNone(s.select_short_call(24500.0, 117.0, long_leg=self.long_leg()))
+
+    def test_short_call_not_sold_out_of_band(self):
+        s = self.make_with_chain()
+        s.helper._master_list = s.helper._master_list[s.helper._master_list["STRIKE_PRICE"] < 24600]
+        self.assertIsNone(s.select_short_call(24500.0, 117.0, long_leg=self.long_leg()))
+
+    def test_short_roll_keeps_old_short_when_no_replacement(self):
+        s = self.make()
+        self.open_position(s)
+        s.select_short_call = lambda *a, **k: None
+        s.roll_short_leg(24500.0, "TEST")
+        self.assertEqual(self.broker.calls, [])
+        self.assertEqual(s.short_leg["strike"], 25500)
+
+    def test_short_roll_selects_before_closing(self):
+        s = self.make()
+        self.open_position(s)
+        order = []
+        new = dict(SHORT, strike=25800, expiry="2098-12-29", security_id="5")
+        s.select_short_call = lambda *a, **k: (order.append("select"), dict(new))[1]
+        orig_buy = self.broker.buy
+        self.broker.buy = lambda **k: (order.append("buy"), orig_buy(**k))[1]
+        s.roll_short_leg(24500.0, "DTE_THRESHOLD test")
+        self.assertEqual(order[0], "select")
+        self.assertEqual([c[0] for c in self.broker.calls], ["BUY", "SELL"])
+        self.assertEqual(s.short_leg["strike"], 25800)
+
+    def test_adjust_roll_sets_cooldown(self):
+        s = self.make()
+        self.open_position(s)
+        s.select_short_call = lambda *a, **k: dict(SHORT, strike=25800, expiry="2098-12-29")
+        s.roll_short_leg(24500.0, "GAMMA_LIMIT_BREACH (x)")
+        self.assertGreater(s.adjust_cooldown_until, 0)
+
+    def test_add_short_lots_noop_at_cap(self):
+        s = self.make()
+        self.open_position(s)
+        s.short_leg["lots"] = s.max_short_lots
+        self.assertFalse(s.add_short_lots(24500.0))
+        self.assertEqual(self.broker.calls, [])
+
+    def test_add_short_lots_adds_and_averages_entry(self):
+        s = self.make()
+        self.open_position(s)
+        s.short_leg["lots"] = 2
+        self.broker.net[(25500, "2098-12-01")] = -2 * 65
+        s.short_leg["current_ltp"] = 40.0
+        self.assertTrue(s.add_short_lots(24500.0))
+        self.assertGreater(s.short_leg["lots"], 2)
+        self.assertEqual(self.broker.calls[0][0], "SELL")
+        self.assertLess(s.short_leg["entry_price"], 60.0)   # averaged with the cheaper fill
+
+    def test_restore_short_leg_when_long_only(self):
+        s = self.make()
+        self.open_position(s)
+        s.short_leg = None
+        self.broker.net[(25500, "2098-12-01")] = 0
+        s.select_short_call = lambda *a, **k: dict(SHORT)
+        s.restore_short_leg(24500.0)
+        self.assertEqual(s.short_leg["strike"], 25500)
+        self.assertEqual(self.broker.calls[0][0], "SELL")
+
+    def test_lcr_free_regime_has_hysteresis(self):
+        s = self.make()
+        s.initial_long_debit = 100000.0
+        s.long_leg = dict(LONG)
+        s.cumulative_short_premium = 105000.0
+        self.assertTrue(s.compute_lcr()[2])
+        s.cumulative_short_premium = 95000.0
+        self.assertTrue(s.compute_lcr()[2])                 # 95% stays free
+        s.cumulative_short_premium = 85000.0
+        self.assertFalse(s.compute_lcr()[2])
+
+    def test_long_roll_realized_loss_raises_lcr_denominator(self):
+        s = self.make()
+        self.open_position(s)
+        s.initial_long_debit = 175500.0
+        s.long_leg["current_ltp"] = 800.0                   # old long sold at a loss vs 900 entry
+        s.select_long_call = lambda spot: dict(LONG, strike=24500, expiry="2099-03-01", entry_price=850.0)
+        s.roll_long_leg(24500.0, "TEST")
+        self.assertGreater(s.initial_long_debit, 175500.0)
+
+    def test_reconcile_missing_long_queues_unwind(self):
+        s = self.make()
+        s.long_leg, s.short_leg = dict(LONG), dict(SHORT)
+        self.broker.net[(25500, "2098-12-01")] = -4 * 65     # short present, long absent
+        s._reconcile_broker()
+        self.assertEqual(s.pending_exit_reason, "RECONCILE_LONG_MISSING")
+
+    def test_broker_net_lookup_failure_raises_instead_of_returning_zero(self):
+        s = self.make()
+        s.broker.get_owned_net_qty = mock.Mock(side_effect=ConnectionError("down"))
+        with self.assertRaises(RuntimeError):
+            s._get_broker_net(24000, "2099-01-01")
+
+    def test_live_requires_unvalidated_ack_and_targets_default_off(self):
+        with mock.patch.object(sys, "argv", ["x", "--live"]):
+            with self.assertRaises(SystemExit):
+                dc.parse_args()
+        with mock.patch.object(sys, "argv", ["x", "--live", "--i-understand-this-is-unvalidated"]):
+            a = dc.parse_args()
+        self.assertEqual((a.target_profit, a.stop_loss), ("", ""))
 
 
 if __name__ == "__main__":

@@ -13,8 +13,9 @@ default, never forward-tested (see the backtest caveat below). Positional (`MARG
 
 ## The rules in one screen
 - Long: buy CE, 60-120 DTE, delta 0.55-0.65 (prefer 0.60), `--long-lots` default 3. **Entered first.**
-- Short: sell CE, 25-45 DTE (never weekly), delta 0.15-0.22, strike chosen by max `Theta / |Gamma|`.
-  IV floor `--min-iv`.
+- Short: sell CE, monthly expiry only (`is_monthly_expiry`), 25-45 DTE (+14d if no monthly fits), expiring before the long, delta 0.15-0.22.
+  Strike = closest to target delta; `Theta/|Gamma|` is only a tie-break (it is ~0.5*sigma^2*S^2 for every strike, so as primary key it picked the
+  0.22 edge). Nothing sold out of band. IV floor `--min-iv`. New shorts are trimmed to 75% of the gamma floor.
 - Sizing: `short_lots = round((long_delta - target_net_delta) / (short_delta * lot_size))`, then clamped by
   **both** `--max-short-ratio` (1.25 x long delta) **and** `--max-short-lots` (default 6, hard margin ceiling,
   added in `7fb4a8d` after sizing alone could ask for more lots than margin allowed).
@@ -37,6 +38,13 @@ Both sides use their own Black-Scholes Greeks (the TS side defaults IV 0.15 when
 and `lib/diagonalStrikeAdvisor.test.ts` pin the sizing; extend both when a constant changes.
 
 ## Bugs already paid for
+- **Unsafe unwind / retry paths (review of `f54b31c`).** `exit_all` must never sell the long while a short is open
+  (it retries via `pending_exit_reason`, also after restart); long roll buys the new long *before* selling the old;
+  a timed-out order is cancelled and the broker position re-read (`_confirm_fill_or_cancel`) before any retry;
+  entry has backoff/halt; there are no synthetic prices; the daily loss limit latches. `tests/test_diagonal_call.py`
+  (`TestDiagonalFailurePaths`, `TestDiagonalSelectionAndAdjustments`) pins each — keep them green.
+- **TS advisor not yet aligned.** `diagonalStrikeAdvisor.ts` still ranks by Theta/|Gamma|, does not filter weeklies
+  and has no gamma-budget trim; it is an advisor only, but update it if the live selection rules change again.
 - **Phantom-leg exit side (`43cded8`).** `detect_phantom_leg_broker(..., side=)` takes the **closing** side of
   the leg being checked: long leg -> `"SELL"`, short leg -> `"BUY"`. It was passing `"BUY"` for the long leg, so
   a missing long call was never detected. A vanished **long** with a live short = naked risk -> `exit_all`; a

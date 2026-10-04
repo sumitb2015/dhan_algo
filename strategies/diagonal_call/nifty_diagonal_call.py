@@ -22,7 +22,7 @@ import math
 import os
 import sys
 import time
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from typing import Any, Dict, List, Optional, Tuple
 
 
@@ -56,7 +56,10 @@ try:
     from lib.strategy_risk import resolve_exit_qty_broker, detect_phantom_leg_broker
     from lib.execution_broker import ExecutionBroker, ExecutionBrokerError
     from lib.telegram_alert import notify
-except ImportError:
+except ImportError as _import_exc:
+    # Stubs exist only so the pure functions stay importable for unit tests; a real run must not
+    # trade on them (exit sizing would return 0, shutdown trigger would be a no-op).
+    _IMPORT_ERROR = _import_exc
     get_dhan_client = None
     DhanHelper = None
     check_shutdown_trigger = lambda *a, **k: False
@@ -71,6 +74,8 @@ except ImportError:
     ExecutionBrokerError = Exception
     notify = lambda *a, **k: None
 
+_IMPORT_ERROR = globals().get("_IMPORT_ERROR")
+
 STRATEGY_KEY_DEFAULT = "nifty_diagonal_call"
 LOG_FOLDER = "diagonal_call"
 UNDERLYING = "NIFTY"
@@ -84,6 +89,26 @@ EXIT_RETRY_SEC = 5              # pause between retries of an incomplete exit
 # Short-roll reasons that stay allowed after the daily loss halt: they are maintenance /
 # safety rolls (expiry proximity, runaway delta), not discretionary adjustments.
 HALT_ALLOWED_ROLL_PREFIXES = ("DTE_THRESHOLD", "CRITICAL_SHORT_DELTA")
+# Portfolio-level rolls: a roll re-sizes into the gamma budget, so repeating it back to back is churn.
+ADJUST_ROLL_PREFIXES = ("GAMMA_LIMIT_BREACH", "PORTFOLIO_DELTA_DEFENSIVE", "SCHEDULED_REBALANCE")
+ADJUST_COOLDOWN_SEC = 1800
+FREE_LCR_ENTER_PCT = 100.0      # "Free Long Call" regime starts here ...
+FREE_LCR_EXIT_PCT = 90.0        # ... and only ends below this (hysteresis: unrealized gains evaporate)
+GAMMA_FIT_FRACTION = 0.75       # size new shorts to <= 75% of the gamma floor so they do not re-breach it
+SHORT_WINDOW_EXTENSION_DAYS = 14   # used only when no monthly expiry fits the short DTE window
+FREE_SHORT_TARGET_DELTA = 0.115  # midpoint of the 0.08-0.15 band used in the Free Long Call regime
+
+
+def is_monthly_expiry(expiry_str: str) -> bool:
+    """True when the expiry is the last occurrence of its weekday in its month (the monthly series).
+
+    Weekly expiries are excluded from every leg: strategy.md forbids weekly options.
+    """
+    try:
+        d = datetime.strptime(expiry_str, "%Y-%m-%d").date()
+    except Exception:
+        return False
+    return (d + timedelta(days=7)).month != d.month
 
 debug_dir = os.path.join(project_root, "debug")
 log_dir = os.path.join(debug_dir, "logs", LOG_FOLDER)
@@ -370,13 +395,14 @@ class NiftyDiagonalCallStrategy:
         daily_loss_pct: float = 1.5,
         drawdown_halve_pct: float = 5.0,
         drawdown_exit_pct: float = 8.0,
-        target_profit: str = "10%",
-        stop_loss: str = "8%",
+        target_profit: str = "",
+        stop_loss: str = "",
         start_time: str = "09:30",
         rebalance_times: str = "10:00,12:00,14:00",
         max_short_ratio: float = 1.25,
         max_short_lots: int = 6,
         min_gamma_limit: float = -0.20,
+        min_iv: float = 0.10,
         helper: Optional[Any] = None,
     ):
         self.live = live
@@ -413,6 +439,7 @@ class NiftyDiagonalCallStrategy:
         self.max_short_ratio = max_short_ratio
         self.max_short_lots = max(1, max_short_lots)
         self.min_gamma_limit = min_gamma_limit
+        self.min_iv = min_iv
 
         self.status = "WAITING"
         self.position_open = False
@@ -433,6 +460,8 @@ class NiftyDiagonalCallStrategy:
         self.next_entry_at = 0.0
         self.entry_halted = False
         self.roll_cooldown_until = 0.0
+        self.adjust_cooldown_until = 0.0
+        self.short_resell_blocked = False    # set when a short vanished at the broker; do not fight a manual exit
 
         # Long Cost Recovery (LCR) & Free Long Call Engine
         self.initial_long_debit: float = 0.0
@@ -444,7 +473,7 @@ class NiftyDiagonalCallStrategy:
         if helper is not None:
             self.helper = helper
             self.dhan = getattr(helper, "dhan", None)
-            self.broker = ExecutionBroker.create("dhan", self.helper, underlying=UNDERLYING, log=logger.info) if ExecutionBroker else None
+            self.broker = ExecutionBroker.create("dhan", self.helper, underlying=UNDERLYING, log=logger.info) if ExecutionBroker else None  # test injection: never opens a Zerodha/Kotak session
         else:
             if get_dhan_client is None:
                 raise RuntimeError("Dhan SDK / login module not found.")
@@ -466,7 +495,8 @@ class NiftyDiagonalCallStrategy:
         logger.info(
             f"Initialized {self.state_key} | Mode: {'LIVE' if self.live else 'DRY RUN'} | "
             f"Broker: {self.broker_name} | Lot Size: {self.lot_size} | "
-            f"Target Profit: ₹{self.target_profit_rs:,.2f} | Stop Loss: ₹{self.stop_loss_rs:,.2f}"
+            f"Target Profit: {f'₹{self.target_profit_rs:,.2f}' if self.target_profit_rs else 'off'} | "
+            f"Stop Loss: {f'₹{self.stop_loss_rs:,.2f}' if self.stop_loss_rs else 'off'}"
         )
 
         # Start WebSocket feed for Nifty spot
@@ -523,7 +553,7 @@ class NiftyDiagonalCallStrategy:
 
         total_short_premium = self.cumulative_short_premium + unrealized_short
         lcr_pct = (total_short_premium / self.initial_long_debit) * 100.0
-        is_free = lcr_pct >= 100.0
+        is_free = lcr_pct >= FREE_LCR_ENTER_PCT or (self.is_free_long_call and lcr_pct >= FREE_LCR_EXIT_PCT)
         self.lcr_pct = round(lcr_pct, 1)
         self.is_free_long_call = is_free
         return self.lcr_pct, round(total_short_premium, 2), is_free
@@ -632,7 +662,12 @@ class NiftyDiagonalCallStrategy:
         self._reconcile_broker()
 
     def _reconcile_broker(self):
-        """Cross-checks loaded legs with broker truth. Dry-run skips reconciliation."""
+        """Cross-checks loaded legs with broker truth. Dry-run skips reconciliation.
+
+        Only the dangerous mismatch is acted on: a short with no long behind it is unwound.
+        A missing short is left to the periodic phantom check (an unresolvable contract also
+        reads as 0, so dropping a short here could hide a real one).
+        """
         if self.dry_run:
             return
         logger.info(f"Reconciling open position against {self.broker_name} broker...")
@@ -642,19 +677,27 @@ class NiftyDiagonalCallStrategy:
                 expected_qty = leg["lots"] * self.lot_size * (1 if name == "Long" else -1)
                 logger.info(f"Broker check {name} Leg ({leg['strike']} CE {leg['expiry']}): Expected {expected_qty}, Broker shows {net_qty}")
                 if name == "Long" and net_qty <= 0:
-                    logger.error(f"FATAL: Long call leg missing at broker on restart (net {net_qty})! Manual intervention needed.")
+                    logger.error(f"FATAL: Long call leg missing at broker on restart (net {net_qty})!")
+                    if self.short_leg:
+                        logger.error("Short is uncovered - queueing an immediate unwind.")
+                        notify(f"[{self.state_key}] Long leg missing at broker on restart; unwinding the short.")
+                        self.pending_exit_reason = "RECONCILE_LONG_MISSING"
+                elif name == "Short" and net_qty >= 0:
+                    logger.error("Short leg not visible at broker on restart; leaving it to the phantom check. Verify manually.")
+                    notify(f"[{self.state_key}] Short leg not visible at broker on restart - verify manually.")
 
     # ── MULTI-BROKER ORDER & FILL HELPERS ───────────────────────────────────────
 
     def _get_broker_net(self, strike: float, expiry: str, opt_type: str = "CE") -> int:
-        """Returns the broker's current net quantity for this contract (0 in dry run / on lookup failure)."""
+        """Returns the broker's current net quantity for this contract (0 in dry run; raises on lookup failure)."""
         if self.dry_run:
             return 0
         try:
             return int(self.broker.get_owned_net_qty(strike, expiry, opt_type))
         except Exception as e:
-            logger.warning(f"Broker net-qty lookup failed for {opt_type} {strike} {expiry}: {e}")
-            return 0
+            # A fake 0 would corrupt the fill check against sibling positions. Raising here is safe:
+            # every caller reads this BEFORE placing its order, and run() retries on the next tick.
+            raise RuntimeError(f"Broker net-qty lookup failed for {opt_type} {strike} {expiry}: {e}") from e
 
     def _wait_for_fill(
         self,
@@ -812,29 +855,33 @@ class NiftyDiagonalCallStrategy:
         except Exception:
             return 30.0
 
-    def select_long_call(self, spot: float) -> Optional[Dict]:
-        """Selects ATM / slightly ITM call with 60–120 DTE and target delta ~0.55–0.65."""
-        expiries = self._get_sorted_expiries()
-        candidate_expiries = [
-            e for e in expiries if self.long_min_dte <= self._compute_dte(e) <= self.long_max_dte
+    def _monthly_expiries_in_window(self, min_dte: int, max_dte: int) -> List[str]:
+        """Monthly (non-weekly) expiries whose DTE lies inside [min_dte, max_dte]. No out-of-range fallback."""
+        return [
+            e for e in self._get_sorted_expiries()
+            if is_monthly_expiry(e) and min_dte <= self._compute_dte(e) <= max_dte
         ]
+
+    def _ce_rows(self, expiry: str):
+        df = self.helper._master_list
+        return df[
+            (df["UNDERLYING_SYMBOL"] == UNDERLYING)
+            & (df["SM_EXPIRY_DATE"] == expiry)
+            & (df["OPTION_TYPE"] == "CE")
+        ]
+
+    def select_long_call(self, spot: float) -> Optional[Dict]:
+        """Selects an ATM / slightly ITM call on a monthly expiry, 60-120 DTE, delta nearest the target."""
+        candidate_expiries = self._monthly_expiries_in_window(self.long_min_dte, self.long_max_dte)
         if not candidate_expiries:
-            # Fallback: closest expiry with DTE >= 45
-            candidate_expiries = [e for e in expiries if self._compute_dte(e) >= 45]
-            if not candidate_expiries:
-                logger.error("No valid long-call expiries found in target range 60–120 DTE.")
-                return None
+            logger.error(f"No monthly expiry in the {self.long_min_dte}-{self.long_max_dte} DTE window for the long call.")
+            return None
 
         # Choose the candidate expiry closest to mid-range (~90 DTE)
         best_expiry = min(candidate_expiries, key=lambda e: abs(self._compute_dte(e) - 90))
         dte = self._compute_dte(best_expiry)
 
-        df = self.helper._master_list
-        matches = df[
-            (df["UNDERLYING_SYMBOL"] == UNDERLYING)
-            & (df["SM_EXPIRY_DATE"] == best_expiry)
-            & (df["OPTION_TYPE"] == "CE")
-        ]
+        matches = self._ce_rows(best_expiry)
         if matches.empty:
             logger.error(f"No CE options found in master list for expiry {best_expiry}")
             return None
@@ -878,86 +925,99 @@ class NiftyDiagonalCallStrategy:
             "iv": iv,
         }
 
-    def select_short_call(self, spot: float, long_delta_shares: float) -> Optional[Dict]:
-        """Selects 25–45 DTE call with 0.15–0.22 delta that MAXIMIZES Score = Theta / |Gamma|."""
-        expiries = self._get_sorted_expiries()
-        candidate_expiries = [
-            e for e in expiries if self.short_min_dte <= self._compute_dte(e) <= self.short_max_dte
-        ]
-        if not candidate_expiries:
-            candidate_expiries = [e for e in expiries if self._compute_dte(e) >= 20]
-            if not candidate_expiries:
-                logger.error("No valid short-call expiries found in target range 25–45 DTE.")
-                return None
+    def _effective_max_short_ratio(self) -> float:
+        return min(self.max_short_ratio, 0.60) if self.is_free_long_call else self.max_short_ratio
 
-        best_expiry = candidate_expiries[0]
-        dte = self._compute_dte(best_expiry)
+    def _fit_lots_to_gamma(self, long_leg: Optional[Dict], short_proto: Dict, spot: float, lots: int) -> int:
+        """Reduce short lots until projected portfolio gamma is back inside the gamma budget.
 
-        df = self.helper._master_list
-        matches = df[
-            (df["UNDERLYING_SYMBOL"] == UNDERLYING)
-            & (df["SM_EXPIRY_DATE"] == best_expiry)
-            & (df["OPTION_TYPE"] == "CE")
-        ]
-        if matches.empty:
-            logger.error(f"No CE options found in master list for expiry {best_expiry}")
+        Budget = GAMMA_FIT_FRACTION x the emergency floor (-0.15 at the default -0.20): a new short
+        sized exactly at the floor would re-trigger the gamma roll on the very next tick.
+        """
+        if not long_leg:
+            return lots
+        budget = self.min_gamma_limit * GAMMA_FIT_FRACTION
+        while lots > 1:
+            proj = calculate_portfolio_greeks(
+                long_leg, dict(short_proto, lots=lots), spot, self.lot_size
+            )["portfolio_gamma"]
+            if proj >= budget:
+                break
+            lots -= 1
+        return lots
+
+    def select_short_call(
+        self, spot: float, long_delta_shares: float, long_leg: Optional[Dict] = None
+    ) -> Optional[Dict]:
+        """Selects the short call: monthly expiry, 25-45 DTE, delta in band, expiring before the long.
+
+        Ranking: closest delta to the regime target (0.18, or 0.115 in the Free Long Call regime);
+        Theta/|Gamma| only breaks ties within 0.02 delta. Theta/|Gamma| is ~0.5*sigma^2*S^2 for every
+        strike, so as the primary key it always drifted to the highest-delta edge of the band.
+        Returns None (never an out-of-band strike) when nothing qualifies.
+        """
+        iv = self._get_current_iv()
+        if iv < self.min_iv:
+            logger.warning(f"IV {iv:.1%} below --min-iv {self.min_iv:.1%}; not selling a short call now.")
             return None
 
-        iv = self._get_current_iv()
+        long_expiry = (long_leg or self.long_leg or {}).get("expiry")
+        def _short_expiries(max_dte: int) -> List[str]:
+            return [
+                e for e in self._monthly_expiries_in_window(self.short_min_dte, max_dte)
+                if not long_expiry or e < long_expiry
+            ]
+
+        candidate_expiries = _short_expiries(self.short_max_dte)
+        if not candidate_expiries:
+            # Monthlies are 4-5 weeks apart, so a 25-45 DTE window can legitimately hold none. Widen the
+            # upper bound (never to a weekly) rather than sit long-only for days.
+            candidate_expiries = _short_expiries(self.short_max_dte + SHORT_WINDOW_EXTENSION_DAYS)
+            if candidate_expiries:
+                logger.warning(f"No monthly expiry within {self.short_max_dte} DTE; using the nearest monthly up to {self.short_max_dte + SHORT_WINDOW_EXTENSION_DAYS} DTE.")
+        if not candidate_expiries:
+            logger.error(
+                f"No monthly expiry in the {self.short_min_dte}-{self.short_max_dte} DTE window "
+                f"that expires before the long ({long_expiry})."
+            )
+            return None
+
         lcr_pct, total_short_px, is_free = self.compute_lcr()
         if is_free:
             logger.info(
-                f"*** FREE LONG CALL REGIME ACTIVE (LCR: {lcr_pct:.1f}% >= 100%) *** "
+                f"*** FREE LONG CALL REGIME ACTIVE (LCR: {lcr_pct:.1f}% >= {FREE_LCR_ENTER_PCT:.0f}%) *** "
                 "Defensive posture: targeting low-delta short calls (0.08–0.15) and capping short lots to reduce short gamma."
             )
-            min_target_delta = 0.08
-            max_target_delta = 0.15
-            effective_max_short_ratio = min(self.max_short_ratio, 0.60)
+            min_target_delta, max_target_delta = 0.08, 0.15
+            target_delta = FREE_SHORT_TARGET_DELTA
         else:
-            min_target_delta = 0.14
-            max_target_delta = 0.23
-            effective_max_short_ratio = self.max_short_ratio
+            min_target_delta, max_target_delta = 0.15, 0.22
+            target_delta = self.short_target_delta
 
-        scored_candidates = []
-        for _, row in matches.iterrows():
-            k = float(row["STRIKE_PRICE"])
-            sec_id = str(row["SECURITY_ID"])
-            g = compute_bs_greeks(spot, k, dte, iv=iv, r=0.07, opt_type="CE")
-            delta = g["delta"]
-            if min_target_delta <= delta <= max_target_delta:
-                score = score_short_call(g["theta_day"], g["gamma"])
-                scored_candidates.append({
-                    "security_id": sec_id,
-                    "strike": int(k),
-                    "expiry": best_expiry,
-                    "dte": dte,
-                    "delta": delta,
-                    "gamma": g["gamma"],
-                    "theta_day": g["theta_day"],
-                    "score": score,
-                })
-
-        if not scored_candidates:
+        candidates = []
+        for expiry in candidate_expiries:
+            dte = self._compute_dte(expiry)
+            matches = self._ce_rows(expiry)
             for _, row in matches.iterrows():
                 k = float(row["STRIKE_PRICE"])
-                sec_id = str(row["SECURITY_ID"])
                 g = compute_bs_greeks(spot, k, dte, iv=iv, r=0.07, opt_type="CE")
-                scored_candidates.append({
-                    "security_id": sec_id,
-                    "strike": int(k),
-                    "expiry": best_expiry,
-                    "dte": dte,
-                    "delta": g["delta"],
-                    "gamma": g["gamma"],
-                    "theta_day": g["theta_day"],
-                    "score": score_short_call(g["theta_day"], g["gamma"]),
-                    "diff": abs(g["delta"] - self.short_target_delta),
-                })
-            scored_candidates.sort(key=lambda x: x.get("diff", 999.0))
-            best = scored_candidates[0]
-        else:
-            scored_candidates.sort(key=lambda x: x["score"], reverse=True)
-            best = scored_candidates[0]
+                if min_target_delta <= g["delta"] <= max_target_delta:
+                    candidates.append({
+                        "security_id": str(row["SECURITY_ID"]),
+                        "strike": int(k),
+                        "expiry": expiry,
+                        "dte": dte,
+                        "delta": g["delta"],
+                        "diff": abs(g["delta"] - target_delta),
+                        "score": score_short_call(g["theta_day"], g["gamma"]),
+                    })
+
+        if not candidates:
+            logger.error(f"No short call with delta in {min_target_delta:.2f}-{max_target_delta:.2f}; not selling out of band.")
+            return None
+
+        closest = min(c["diff"] for c in candidates)
+        best = max((c for c in candidates if c["diff"] <= closest + 0.02), key=lambda c: c["score"])
 
         short_delta = best["delta"]
         short_lots = calculate_required_short_lots(
@@ -965,26 +1025,31 @@ class NiftyDiagonalCallStrategy:
             target_net_delta_shares=self.target_net_delta,
             short_call_delta=short_delta,
             lot_size=self.lot_size,
-            max_short_ratio=effective_max_short_ratio,
+            max_short_ratio=self._effective_max_short_ratio(),
             max_short_lots=self.max_short_lots,
+        )
+        if self.drawdown_halved:
+            short_lots = max(1, short_lots // 2)
+        short_lots = self._fit_lots_to_gamma(
+            long_leg or self.long_leg, {"strike": best["strike"], "dte": best["dte"], "iv": iv}, spot, short_lots
         )
 
         ltp = self.helper.get_ltp(best["security_id"], exchange="NSE_FNO", instrument="OPTIDX")
         if ltp <= 0.0:
-            logger.warning(f"No live quote for short {best['strike']} CE ({best_expiry}); skipping selection (no synthetic prices).")
+            logger.warning(f"No live quote for short {best['strike']} CE ({best['expiry']}); skipping selection (no synthetic prices).")
             return None
 
         logger.info(
-            f"Selected Short Call: {best['strike']} CE | Expiry: {best_expiry} ({dte:.0f} DTE) | "
-            f"Delta: {short_delta:.2f} | Score (Theta/|Gamma|): {best['score']:.1f} | Sized Lots: {short_lots} "
-            f"(Regime: {'FREE LONG CALL' if is_free else 'NORMAL RECOVERY'})"
+            f"Selected Short Call: {best['strike']} CE | Expiry: {best['expiry']} ({best['dte']:.0f} DTE) | "
+            f"Delta: {short_delta:.2f} (target {target_delta:.2f}) | Score (Theta/|Gamma|): {best['score']:.1f} | "
+            f"Sized Lots: {short_lots} (Regime: {'FREE LONG CALL' if is_free else 'NORMAL RECOVERY'})"
         )
 
         return {
             "security_id": best["security_id"],
             "strike": best["strike"],
-            "expiry": best_expiry,
-            "dte": dte,
+            "expiry": best["expiry"],
+            "dte": best["dte"],
             "delta": round(short_delta, 2),
             "opt_type": "CE",
             "side": "SELL",
@@ -1013,7 +1078,7 @@ class NiftyDiagonalCallStrategy:
         long_delta_shares = long_qty * long_candidate["delta"]
 
         # Pre-validate candidate short leg before submitting live long order
-        short_candidate = self.select_short_call(spot, long_delta_shares)
+        short_candidate = self.select_short_call(spot, long_delta_shares, long_leg=long_candidate)
         if not short_candidate:
             logger.error("Could not find suitable short call contract. Aborting entry before buying long leg.")
             return False
@@ -1140,12 +1205,76 @@ class NiftyDiagonalCallStrategy:
 
     # ── ROLLS & DEFENSIVE ADJUSTMENTS ─────────────────────────────────────────
 
+    def _long_delta_shares(self) -> float:
+        if not self.long_leg:
+            return 0.0
+        return self.long_leg["lots"] * self.lot_size * self.long_leg["delta"]
+
+    def _open_new_short(self, spot: float, new_short: Dict) -> bool:
+        """Sells `new_short` (already selected) and tracks it. On failure leaves short_leg None."""
+        new_qty = new_short["lots"] * self.lot_size
+        logger.info(f"Opening fresh short leg: {new_short['strike']} CE ({new_short['expiry']}) x {new_qty} units")
+
+        if self.live:
+            net_before = self._get_broker_net(new_short["strike"], new_short["expiry"], "CE")
+            oid = self.broker.sell(
+                strike=new_short["strike"], expiry=new_short["expiry"], opt_type="CE", qty=new_qty, product=PRODUCT
+            )
+            if not oid:
+                logger.error("Short sell order was not placed. Staying long-only; will retry after cooldown.")
+                self.short_leg = None
+                self.roll_cooldown_until = time.time() + ROLL_COOLDOWN_SEC
+                self.save_position()
+                return False
+            status, moved = self._confirm_fill_or_cancel(
+                oid, new_short["strike"], new_short["expiry"], "CE", -new_qty, net_before
+            )
+            if status == "PARTIAL":
+                filled_lots = abs(moved) // self.lot_size if moved else 0
+                if filled_lots >= 1:
+                    new_short["lots"] = filled_lots  # track what really sold
+                    status = "FILLED"
+                else:
+                    self.short_resell_blocked = True
+                    self.short_leg = None
+                    logger.error(f"FATAL: short sell ended partial/unknown (moved {moved}). Auto re-sell disabled; verify the broker.")
+                    notify(f"[{self.state_key}] Short sell ended PARTIAL/UNKNOWN (moved {moved}). Verify broker manually.")
+                    self.save_position()
+                    return False
+            if status != "FILLED":
+                logger.error("Short sell not filled (cancelled). Staying long-only; will retry after cooldown.")
+                self.short_leg = None
+                self.roll_cooldown_until = time.time() + ROLL_COOLDOWN_SEC
+                self.save_position()
+                return False
+            new_short["entry_price"] = self._get_fill_price(oid, fallback_ltp=new_short["entry_price"])
+
+        self.short_leg = new_short
+        try:
+            self.helper.subscribe_instruments([("NSE_FNO", str(new_short["security_id"]), 15)])
+        except Exception:
+            pass
+        self.compute_lcr()
+        self.save_position()
+        self._publish_state(spot)
+        return True
+
     def roll_short_leg(self, spot: float, reason: str):
-        """Buys back current short call and rolls into a new 25–45 DTE call with optimal Theta/|Gamma|."""
+        """Rolls the short: select the replacement FIRST, then buy back, then sell the new one.
+
+        Selecting first means a failed selection keeps the existing short instead of leaving the
+        position long-only.
+        """
         if not self.short_leg or not self.position_open:
             return
 
         logger.info(f"=== Rolling Short Call Leg | Reason: {reason} ===")
+        new_short = self.select_short_call(spot, self._long_delta_shares())
+        if not new_short:
+            logger.error("Could not select a replacement short; keeping the current short (cooldown).")
+            self.roll_cooldown_until = time.time() + ROLL_COOLDOWN_SEC
+            return
+
         old_leg = self.short_leg
         closed, fill_px, done_qty = self._close_leg(old_leg, "BUY")
         closed_pnl = (old_leg["entry_price"] - fill_px) * done_qty
@@ -1164,50 +1293,88 @@ class NiftyDiagonalCallStrategy:
             f"Cumulative Net Short Premium: ₹{self.cumulative_short_premium:,.2f} | LCR: {lcr_pct:.1f}% "
             f"({'FREE LONG CALL' if is_free else 'RECOVERY IN PROGRESS'})"
         )
+        # The regime may have flipped on the buyback; the selection above used the pre-close LCR, so
+        # re-selecting is only needed if it changed.
+        if is_free != bool(new_short.get("is_free_long_call")):
+            reselected = self.select_short_call(spot, self._long_delta_shares())
+            if reselected:
+                new_short = reselected
 
-        # Sizing and entering new short leg
-        long_delta_shares = (self.long_leg["lots"] * self.lot_size * self.long_leg["delta"]) if self.long_leg else 0.0
-        new_short = self.select_short_call(spot, long_delta_shares)
-        if not new_short:
-            logger.error("Could not select fresh short leg contract. Remaining in Long-Only position.")
-            self.short_leg = None
-            self.save_position()
+        self.short_leg = None
+        if not self._open_new_short(spot, new_short):
             return
-
-        new_qty = new_short["lots"] * self.lot_size
-        logger.info(f"Opening fresh short leg: {new_short['strike']} CE ({new_short['expiry']}) x {new_qty} units")
-
-        if self.live:
-            net_before = self._get_broker_net(new_short["strike"], new_short["expiry"], "CE")
-            oid = self.broker.sell(
-                strike=new_short["strike"],
-                expiry=new_short["expiry"],
-                opt_type="CE",
-                qty=new_qty,
-                product=PRODUCT,
-            )
-            if oid and self._wait_for_fill(oid, new_short["strike"], new_short["expiry"], "CE", -new_qty, net_before, timeout=15):
-                new_fill = self._get_fill_price(oid, fallback_ltp=new_short["entry_price"])
-                new_short["entry_price"] = new_fill
-            else:
-                logger.error("Failed to place or confirm fresh short sell order. Remaining in Long-Only mode.")
-                self.short_leg = None
-                self.save_position()
-                return
-
-        self.short_leg = new_short
-        try:
-            self.helper.subscribe_instruments([("NSE_FNO", str(new_short["security_id"]), 15)])
-        except Exception:
-            pass
-
-        self.compute_lcr()
-        self.save_position()
-        self._publish_state(spot)
+        if reason.startswith(ADJUST_ROLL_PREFIXES):
+            self.adjust_cooldown_until = time.time() + ADJUST_COOLDOWN_SEC
         notify(
             f"[{self.state_key}] Short Leg Rolled: {new_short['strike']} CE ({new_short['lots']}L). "
             f"LCR: {self.lcr_pct:.1f}% ({'FREE LONG CALL' if self.is_free_long_call else 'FINANCING'})"
         )
+
+    def restore_short_leg(self, spot: float):
+        """Re-sells a short when the position is long-only (after a failed roll, halving, etc.)."""
+        if self.short_leg or not self.long_leg or not self.position_open:
+            return
+        new_short = self.select_short_call(spot, self._long_delta_shares())
+        if not new_short:
+            self.roll_cooldown_until = time.time() + ROLL_COOLDOWN_SEC
+            return
+        logger.info("Long-only position: re-establishing the short leg.")
+        if self._open_new_short(spot, new_short):
+            notify(f"[{self.state_key}] Short leg re-established: {new_short['strike']} CE ({new_short['lots']}L).")
+
+    def add_short_lots(self, spot: float) -> bool:
+        """Net delta too bullish: sell ADDITIONAL lots of the existing short up to the sizing target.
+
+        Does nothing when the lot ceiling / ratio cap / gamma budget leave no room, so a position pinned
+        at its ceiling is not rolled over and over (rolling cannot add lots the caps forbid).
+        """
+        sl, ll = self.short_leg, self.long_leg
+        if not sl or not ll:
+            return False
+        target = calculate_required_short_lots(
+            long_delta_shares=self._long_delta_shares(),
+            target_net_delta_shares=self.target_net_delta,
+            short_call_delta=max(0.001, float(sl.get("delta", 0.18))),
+            lot_size=self.lot_size,
+            max_short_ratio=self._effective_max_short_ratio(),
+            max_short_lots=self.max_short_lots,
+        )
+        if self.drawdown_halved:
+            target = max(1, target // 2)
+        target = self._fit_lots_to_gamma(ll, sl, spot, target)
+        extra = target - sl["lots"]
+        if extra < 1:
+            logger.info(f"Delta above band but short already at its cap ({sl['lots']} lots, target {target}); nothing to add.")
+            return False
+
+        qty = extra * self.lot_size
+        fill_px = sl.get("current_ltp", sl["entry_price"])
+        added_qty = qty
+        if self.live:
+            net_before = self._get_broker_net(sl["strike"], sl["expiry"], "CE")
+            oid = self.broker.sell(strike=sl["strike"], expiry=sl["expiry"], opt_type="CE", qty=qty, product=PRODUCT)
+            if not oid:
+                self.roll_cooldown_until = time.time() + ROLL_COOLDOWN_SEC
+                return False
+            status, moved = self._confirm_fill_or_cancel(oid, sl["strike"], sl["expiry"], "CE", -qty, net_before)
+            if status == "PARTIAL":
+                added_qty = abs(moved) if moved else 0
+                if added_qty < self.lot_size:
+                    self.roll_cooldown_until = float("inf")
+                    notify(f"[{self.state_key}] Add-short ended PARTIAL/UNKNOWN (moved {moved}). Verify broker manually.")
+                    return False
+            elif status != "FILLED":
+                self.roll_cooldown_until = time.time() + ROLL_COOLDOWN_SEC
+                return False
+            fill_px = self._get_fill_price(oid, fallback_ltp=fill_px)
+        added_lots = added_qty // self.lot_size
+        new_total = sl["lots"] + added_lots
+        sl["entry_price"] = round((sl["entry_price"] * sl["lots"] + fill_px * added_lots) / new_total, 2)
+        sl["lots"] = new_total
+        logger.info(f"Added {added_lots} short lot(s) @ ₹{fill_px:.2f}; short now {new_total} lots (avg ₹{sl['entry_price']:.2f}).")
+        self.compute_lcr()
+        self.save_position()
+        return True
 
     def roll_long_leg(self, spot: float, reason: str):
         """Rolls the long call: buy the NEW long first, only then sell the old one.
@@ -1257,6 +1424,8 @@ class NiftyDiagonalCallStrategy:
         closed, fill_px, done_qty = self._close_leg(old_leg, "SELL")
         closed_pnl = (fill_px - old_leg["entry_price"]) * done_qty
         self.realized_pnl += closed_pnl
+        # A realised loss on the old long is part of what the shorts must recover (a gain reduces it).
+        self.initial_long_debit = max(1.0, self.initial_long_debit - closed_pnl)
         if closed:
             logger.info(f"Closed old long {old_leg['strike']} CE @ ₹{fill_px:.2f} | Leg P&L: ₹{closed_pnl:+.2f}")
         else:
@@ -1418,7 +1587,9 @@ class NiftyDiagonalCallStrategy:
 
     def run(self):
         logger.info(f"=== Starting Engine: {self.state_key} | Positional Diagonal Covered Call ===")
-        exit_if_market_closed(self.helper, self.dry_run)
+        if not self.position_open:
+            # A restored open position must be manageable (and exit-able) even when restarted off-hours.
+            exit_if_market_closed(self.helper, self.dry_run)
 
         while True:
             try:
@@ -1462,6 +1633,9 @@ class NiftyDiagonalCallStrategy:
                             break
                         time.sleep(1)
                     continue
+
+                if self.position_open and self.status not in ("RUNNING", "EXIT_PENDING"):
+                    self.status = "RUNNING"  # leaves HOLDING OVERNIGHT / ENTERING once the session is live
 
                 # 3. Fetch Nifty Spot
                 spot = self.helper.get_ltp(UNDERLYING, instrument="INDEX", exchange="IDX_I")
@@ -1551,8 +1725,9 @@ class NiftyDiagonalCallStrategy:
                             log=logger,
                         )
                         if is_short_phantom:
-                            logger.warning("Short call leg vanished at broker (closed elsewhere). Marking short leg flat.")
+                            logger.warning("Short call leg vanished at broker (closed elsewhere). Marking short leg flat; auto re-sell disabled.")
                             self.short_leg = None
+                            self.short_resell_blocked = True
                             self.compute_lcr()
                             self.save_position()
 
@@ -1595,6 +1770,9 @@ class NiftyDiagonalCallStrategy:
                 # Check 5% Drawdown Halving
                 if drawdown_pct >= self.drawdown_halve_pct and not self.drawdown_halved and time.time() >= self.roll_cooldown_until:
                     self.halve_short_position(spot, reason=f"DRAWDOWN_{drawdown_pct:.1f}%")
+                elif self.drawdown_halved and drawdown_pct < self.drawdown_halve_pct / 2.0:
+                    self.drawdown_halved = False  # recovered: new shorts may be sized normally again
+                    self.save_position()
 
                 # Daily Loss Limit Check
                 daily_pnl = total_pnl - self.daily_start_pnl
@@ -1624,9 +1802,19 @@ class NiftyDiagonalCallStrategy:
                     )
                     if should_roll and adjustments_suspended and not roll_reason.startswith(HALT_ALLOWED_ROLL_PREFIXES):
                         should_roll = False  # discretionary roll held back by the daily loss halt
+                    if should_roll and roll_reason.startswith(ADJUST_ROLL_PREFIXES) and time.time() < self.adjust_cooldown_until:
+                        should_roll = False  # a portfolio-level roll just happened; let it settle
                     if should_roll and roll_allowed:
                         self.roll_short_leg(spot, reason=roll_reason)
                         continue
+                elif (
+                    self.long_leg
+                    and not self.short_resell_blocked
+                    and not adjustments_suspended
+                    and roll_allowed
+                    and self.status == "RUNNING"
+                ):
+                    self.restore_short_leg(spot)
 
                 # 11. Long Leg Roll Evaluation
                 if self.long_leg:
@@ -1648,8 +1836,8 @@ class NiftyDiagonalCallStrategy:
                     if greeks["delta_zone"] == "DEFENSIVE":
                         self.roll_short_leg(spot, reason=f"SCHEDULED_REBALANCE_DEFENSIVE (Delta {greeks['net_delta_shares']:.1f})")
                     elif greeks["delta_zone"] == "TOO_BULLISH" and greeks["portfolio_gamma"] > self.min_gamma_limit:
-                        logger.info("Delta is too bullish (> +30). Rebalancing short exposure to target.")
-                        self.roll_short_leg(spot, reason="SCHEDULED_REBALANCE_BULLISH_EXPOSURE")
+                        logger.info("Delta is too bullish (> +30). Adding short lots toward the sizing target.")
+                        self.add_short_lots(spot)
 
                 self._publish_state(spot)
                 time.sleep(1.5)
@@ -1680,6 +1868,9 @@ Examples:
 """,
     )
     parser.add_argument("--live", action="store_true", default=False, help="Place real broker orders (default: dry run paper).")
+    parser.add_argument("--i-understand-this-is-unvalidated", action="store_true", default=False,
+                        help="Required alongside --live: this strategy has never been forward-tested and its backtest is a "
+                             "premium-harvest accounting model, not a validated edge.")
     parser.add_argument("--broker", type=str, default="dhan", choices=["dhan", "zerodha", "kotak"], help="Execution broker (default: dhan).")
     parser.add_argument("--instance-id", type=str, default="", help="Unique instance ID for multi-process isolation.")
     parser.add_argument("--long-lots", type=int, default=3, help="Core long call lots (default: 3, range 2-4).")
@@ -1698,12 +1889,13 @@ Examples:
     parser.add_argument("--daily-loss-pct", type=float, default=1.5, help="Daily loss halt limit as %% of capital (default: 1.5%%).")
     parser.add_argument("--drawdown-halve-pct", type=float, default=5.0, help="Halve short lots at this %% drawdown (default: 5.0%%).")
     parser.add_argument("--drawdown-exit-pct", type=float, default=8.0, help="Hard exit strategy at this %% drawdown (default: 8.0%%).")
-    parser.add_argument("--target-profit", type=str, default="10%", help="Target profit in INR or %% (default: 10%%).")
-    parser.add_argument("--stop-loss", type=str, default="8%", help="Stop loss in INR or %% (default: 8%%).")
+    parser.add_argument("--target-profit", type=str, default="", help="Optional cumulative target profit in INR or %% of capital (default: off).")
+    parser.add_argument("--stop-loss", type=str, default="", help="Optional cumulative stop loss in INR or %% of capital (default: off; --drawdown-exit-pct is the standing stop).")
     parser.add_argument("--start-time", type=str, default="09:30", help="Session start time in HH:MM IST (default: 09:30).")
     parser.add_argument("--rebalance-times", type=str, default="10:00,12:00,14:00", help="Comma-separated rebalance times (default: 10:00,12:00,14:00).")
     parser.add_argument("--max-short-ratio", type=float, default=1.25, help="Max ratio of short delta to long delta (default: 1.25).")
     parser.add_argument("--max-short-lots", type=int, default=6, help="Hard ceiling on short call lots for margin safety (default: 6).")
+    parser.add_argument("--min-iv", type=float, default=0.10, help="Do not sell shorts when India VIX / 100 is below this (default: 0.10).")
     parser.add_argument("--min-gamma-limit", type=float, default=-0.20, help="Emergency negative gamma floor (default: -0.20).")
     args = parser.parse_args()
 
@@ -1723,6 +1915,10 @@ Examples:
         _errors.append(f"--daily-loss-pct ({args.daily_loss_pct}) must be greater than 0.")
     if args.drawdown_halve_pct >= args.drawdown_exit_pct:
         _errors.append(f"--drawdown-halve-pct ({args.drawdown_halve_pct}) must be less than --drawdown-exit-pct ({args.drawdown_exit_pct}).")
+    if args.live and not args.i_understand_this_is_unvalidated:
+        _errors.append("--live requires --i-understand-this-is-unvalidated: this strategy has never been forward-tested.")
+    if not 0.0 <= args.min_iv < 1.0:
+        _errors.append(f"--min-iv ({args.min_iv}) must be a fraction between 0 and 1 (e.g. 0.10).")
     if args.min_gamma_limit >= 0:
         _errors.append(f"--min-gamma-limit ({args.min_gamma_limit}) must be negative (e.g. -0.20).")
 
@@ -1735,6 +1931,8 @@ Examples:
 
 
 if __name__ == "__main__":
+    if _IMPORT_ERROR is not None:
+        raise SystemExit(f"Cannot start: required project modules failed to import ({_IMPORT_ERROR}).")
     args = parse_args()
     strategy = NiftyDiagonalCallStrategy(
         live=args.live,
@@ -1763,5 +1961,6 @@ if __name__ == "__main__":
         max_short_ratio=args.max_short_ratio,
         max_short_lots=args.max_short_lots,
         min_gamma_limit=args.min_gamma_limit,
+        min_iv=args.min_iv,
     )
     strategy.run()

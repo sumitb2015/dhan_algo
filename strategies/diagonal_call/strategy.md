@@ -64,16 +64,18 @@ Once $\text{LCR} \ge 100\%$, the strategy achieves a "Free Long Call". At this j
 - **Structure**: Sell OTM Calls (`CE`).
 - **DTE**: **25–45 days** (medium-dated monthly/bi-weekly; **never** weekly options).
 - **Target Delta**: **0.15–0.22** (prefer ~0.18–0.20 delta).
-- **Selection Optimization Score**:
+- **Expiry**: **monthly series only** (last-weekday-of-month expiries; weeklies are never used), 25–45 DTE, and strictly **before the long's expiry**. Monthlies are 4–5 weeks apart, so if none falls in the window the upper bound widens by 14 days (still never a weekly).
+- **Strike ranking**: among strikes with $0.15 \le \Delta \le 0.22$ (0.08–0.15 in the Free Long Call regime) the strike **closest to the target delta** (0.18; 0.115 in the free regime) wins; the efficiency score
   $$\text{Score} = \frac{\text{Theta Decay per Day (₹)}}{|\text{Gamma}|}$$
-  Among candidate strikes satisfying $0.15 \le \Delta \le 0.22$ and $25 \le \text{DTE} \le 45$, the strike with the highest Score is selected.
-- **IV Filter**: Rejects strikes if IV is depressed below `--min-iv` (default: 10% / IV Rank > 30).
+  only breaks ties within 0.02 delta. (Theta/|Gamma| is ≈ ½σ²S² for every strike, so used as the primary key it always drifted to the highest-delta edge of the band.) If no strike is in band, **nothing is sold** — there is no out-of-band fallback.
+- **IV Filter**: no short is sold when India VIX/100 is below `--min-iv` (default 0.10).
 
 ### C. Dynamic Position Sizing Formula
 1. $\text{Long Delta} = \sum (\text{Long Quantity (shares)} \times \Delta_{\text{long}})$
 2. $\text{Target Short Delta} = \text{Long Delta} - \text{Target Net Delta}$ (where Target Net Delta defaults to $+10$ to $+20$ delta units).
 3. $\text{Required Short Lots} = \text{round}\left(\frac{\text{Target Short Delta}}{\Delta_{\text{short}} \times \text{lot\_size}}\right)$
-4. **Max Exposure Guard**: Total Short Delta cannot exceed **1.25 × Total Long Delta**:
+4. **Gamma budget**: new shorts are trimmed until projected portfolio gamma is within 75% of the emergency floor (−0.15 at the default −0.20), so a fresh short cannot re-breach the floor on the next tick. If drawdown halving is active, sized lots are halved.
+5. **Max Exposure Guard**: Total Short Delta cannot exceed **1.25 × Total Long Delta**:
    $$\text{Short Lots} = \min\left(\text{Required Short Lots}, \left\lfloor\frac{1.25 \times \text{Long Delta}}{\Delta_{\text{short}} \times \text{lot\_size}}\right\rfloor\right)$$
 
 ---
@@ -86,7 +88,7 @@ Once $\text{LCR} \ge 100\%$, the strategy achieves a "Free Long Call". At this j
 | 🟢 **Normal Zone** | `0` to `+20` | **Hold**: Do nothing. Let theta work. |
 | 🟡 **Slightly Bearish** | `-20` to `-40` | **Monitor**: Do not add short calls. Wait for next scheduled rebalance window. |
 | 🔴 **Defensive** | `< -40` | **Mandatory defensive adjustment**: Reduce short-call delta by rolling higher (lower delta) or buying back lots. **Never add shorts when Delta < -40.** |
-| 🟡 **Too Bullish** | `> +30` | **Increase short exposure**: Sell additional 0.15–0.20 delta calls only if gamma limit is acceptable, returning net delta to `+10` to `+20`. |
+| 🟡 **Too Bullish** | `> +30` | **Increase short exposure**: at a scheduled window, sell *additional lots of the existing short* up to the sizing target — only if gamma is acceptable. If the lot ceiling/ratio cap/gamma budget leave no room, nothing is done (the default 6-lot ceiling sits above the normal band for 3 long lots; that is the margin guard working, not a fault). |
 
 ### Gamma Rules
 | Portfolio Gamma | Rating | Strategy Action |
@@ -116,10 +118,11 @@ Short calls are closed and rolled into a fresh 25–45 DTE call ($0.15 \le \Delt
 
 ## 6. Risk Limits & Capital Preservation
 
-- **Daily Loss Limit**: 1.0–1.5% of strategy capital (`--daily-loss-pct 1.5`, default ₹7,500 on ₹5L capital). Halts adjustments for the remainder of the session.
+- **Daily Loss Limit**: 1.0–1.5% of strategy capital (`--daily-loss-pct 1.5`, default ₹7,500 on ₹5L capital), measured on total P&L (realized + unrealized) against the previous close. Latches for the session and halts discretionary adjustments (see failure table).
 - **Drawdown Halving**: If portfolio drawdown reaches **5.0%** (`--drawdown-halve-pct 5.0`), halve the short position size immediately.
 - **Max Strategy Drawdown / Hard Exit**: If portfolio drawdown reaches **8.0%** (`--drawdown-exit-pct 8.0`), close all positions and shut down.
-- **Target Profit**: Optional global target profit in INR or `%` (`--target-profit 10%`).
+- **Target Profit / Stop Loss**: both **off by default** (`--target-profit`, `--stop-loss` in INR or %); they act on cumulative realized + unrealized P&L. `--drawdown-exit-pct` is the standing stop.
+- **Live gate**: `--live` also requires `--i-understand-this-is-unvalidated` (never forward-tested).
 
 ---
 
@@ -142,6 +145,9 @@ Short calls are closed and rolled into a fresh 25–45 DTE call ($0.15 \le \Delt
 | Event | Tracking State | Action |
 |---|---|---|
 | Long Leg Entry Fails | `WAITING` | Abort entry, do not place short leg. |
+| Long-only position | `RUNNING` | After a failed roll/halving the short is re-sold automatically (after a cooldown) unless it vanished at the broker (then auto re-sell stays off). Short rolls select the replacement *before* buying the old short back. |
+| Portfolio roll just done | `RUNNING` | Gamma / net-delta / scheduled rolls are rate-limited to one per 30 min. |
+| Restart with long missing at broker | `EXIT_PENDING` | Reconcile queues an immediate unwind of the uncovered short. |
 | Short Leg Entry Fails | `UNWINDING` | Immediately close long leg and return to `FLAT`. |
 | Short Roll Close Fails | `ROLLING_SHORT` | Retry close until confirmed; do not sell new leg while old short is open. |
 | Quote Unavailable / 0.0 | `RUNNING` | Skip tick, log warning, do not act on zero prices. |
