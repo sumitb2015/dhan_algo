@@ -249,6 +249,7 @@ def calculate_required_short_lots(
     short_call_delta: float,
     lot_size: int,
     max_short_ratio: float = 1.25,
+    max_short_lots: int = 6,
 ) -> int:
     """Calculates required short call lots based on delta:
 
@@ -256,6 +257,7 @@ def calculate_required_short_lots(
       Target Short Delta = Long Delta - Target Net Delta
       Short Lots = Target Short Delta / (short_call_delta * lot_size)
       Clamped by: Total Short Delta <= max_short_ratio * Long Delta
+      AND clamped by: Short Lots <= max_short_lots (hard margin risk ceiling)
     """
     if short_call_delta <= 0.001 or lot_size <= 0:
         return 0
@@ -265,9 +267,11 @@ def calculate_required_short_lots(
 
     # Hard risk limit: Total short delta <= max_short_ratio * total long delta
     max_short_delta = long_delta_shares * max_short_ratio
-    max_lots = max(1, int(max_short_delta / (short_call_delta * lot_size)))
+    delta_capped_lots = max(1, int(max_short_delta / (short_call_delta * lot_size)))
 
-    short_lots = max(1, min(raw_lots, max_lots))
+    # Hard margin ceiling: clamp to max_short_lots
+    ceiling = max(1, max_short_lots)
+    short_lots = max(1, min(raw_lots, delta_capped_lots, ceiling))
     return short_lots
 
 
@@ -363,6 +367,7 @@ class NiftyDiagonalCallStrategy:
         start_time: str = "09:30",
         rebalance_times: str = "10:00,12:00,14:00",
         max_short_ratio: float = 1.25,
+        max_short_lots: int = 6,
         min_gamma_limit: float = -0.20,
         helper: Optional[Any] = None,
     ):
@@ -398,6 +403,7 @@ class NiftyDiagonalCallStrategy:
         self.start_time = start_time
         self.rebalance_times = [t.strip() for t in rebalance_times.split(",") if t.strip()]
         self.max_short_ratio = max_short_ratio
+        self.max_short_lots = max(1, max_short_lots)
         self.min_gamma_limit = min_gamma_limit
 
         self.status = "WAITING"
@@ -875,6 +881,7 @@ class NiftyDiagonalCallStrategy:
             short_call_delta=short_delta,
             lot_size=self.lot_size,
             max_short_ratio=effective_max_short_ratio,
+            max_short_lots=self.max_short_lots,
         )
 
         ltp = self.helper.get_ltp(best["security_id"], exchange="NSE_FNO", instrument="OPTIDX")
@@ -1571,6 +1578,7 @@ Examples:
     parser.add_argument("--start-time", type=str, default="09:30", help="Session start time in HH:MM IST (default: 09:30).")
     parser.add_argument("--rebalance-times", type=str, default="10:00,12:00,14:00", help="Comma-separated rebalance times (default: 10:00,12:00,14:00).")
     parser.add_argument("--max-short-ratio", type=float, default=1.25, help="Max ratio of short delta to long delta (default: 1.25).")
+    parser.add_argument("--max-short-lots", type=int, default=6, help="Hard ceiling on short call lots for margin safety (default: 6).")
     parser.add_argument("--min-gamma-limit", type=float, default=-0.20, help="Emergency negative gamma floor (default: -0.20).")
     args = parser.parse_args()
 
@@ -1578,6 +1586,8 @@ Examples:
     _errors = []
     if args.long_lots < 2 or args.long_lots > 4:
         _errors.append(f"--long-lots ({args.long_lots}) must be between 2 and 4.")
+    if args.max_short_lots < 1:
+        _errors.append(f"--max-short-lots ({args.max_short_lots}) must be at least 1.")
     if args.long_min_dte >= args.long_max_dte:
         _errors.append(f"--long-min-dte ({args.long_min_dte}) must be less than --long-max-dte ({args.long_max_dte}).")
     if args.short_min_dte >= args.short_max_dte:
@@ -1626,6 +1636,7 @@ if __name__ == "__main__":
         start_time=args.start_time,
         rebalance_times=args.rebalance_times,
         max_short_ratio=args.max_short_ratio,
+        max_short_lots=args.max_short_lots,
         min_gamma_limit=args.min_gamma_limit,
     )
     strategy.run()

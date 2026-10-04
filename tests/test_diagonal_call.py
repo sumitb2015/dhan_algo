@@ -66,8 +66,20 @@ class TestDiagonalCallCalculations(unittest.TestCase):
             short_call_delta=0.20,
             lot_size=65,
             max_short_ratio=1.25,
+            max_short_lots=10,
         )
         self.assertEqual(lots, 8)
+
+        # Clamped by default max_short_lots=6
+        lots_capped = calculate_required_short_lots(
+            long_delta_shares=long_delta_shares,
+            target_net_delta_shares=target_net_delta_shares,
+            short_call_delta=0.20,
+            lot_size=65,
+            max_short_ratio=1.25,
+            max_short_lots=6,
+        )
+        self.assertEqual(lots_capped, 6)
 
     def test_calculate_required_short_lots_clamped(self):
         # Max exposure rule: short delta cannot exceed 1.25 x long delta
@@ -79,10 +91,22 @@ class TestDiagonalCallCalculations(unittest.TestCase):
             short_call_delta=0.10,
             lot_size=65,
             max_short_ratio=1.25,
+            max_short_lots=25,
         )
         max_allowed_delta = 100.0 * 1.25  # 125
         max_allowed_lots = int(125 / (0.10 * 65))  # 19 lots
         self.assertEqual(lots, max_allowed_lots)
+
+        # Hard ceiling clamps down even if delta formula allows 19 lots
+        lots_clamped_ceiling = calculate_required_short_lots(
+            long_delta_shares=long_delta_shares,
+            target_net_delta_shares=-200.0,
+            short_call_delta=0.10,
+            lot_size=65,
+            max_short_ratio=1.25,
+            max_short_lots=6,
+        )
+        self.assertEqual(lots_clamped_ceiling, 6)
 
     def test_calculate_portfolio_greeks(self):
         long_leg = {"lots": 3, "strike": 22000, "dte": 90, "iv": 0.14}
