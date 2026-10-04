@@ -1095,6 +1095,7 @@ export default function Baskets() {
             farExpiry={farExpiry}
             farDte={farExpiry ? (daysToExpiry(farExpiry) ?? 85) : undefined}
             allStrikes={allStrikes}
+            listedExpiries={expiries}
             autoPremium={autoPremium}
             chainOc={chainOc}
             atmIv={atmIv}

@@ -290,7 +290,7 @@ class TestDiagonalCallCalculations(unittest.TestCase):
 # ── Failure-path tests (order confirmation, exit ordering, entry retry) ─────────
 
 import tempfile
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from unittest import mock
 
 import pandas as pd
@@ -379,7 +379,9 @@ SHORT = {"security_id": "2", "strike": 25500, "expiry": "2098-12-01", "dte": 30,
          "opt_type": "CE", "side": "SELL", "lots": 4, "entry_price": 60.0, "iv": 0.14}
 
 
-class TestDiagonalFailurePaths(unittest.TestCase):
+class _DiagBase(unittest.TestCase):
+    """Shared fixtures (no tests of its own, so subclasses are not re-run by inheritance)."""
+
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         patches = [
@@ -408,6 +410,7 @@ class TestDiagonalFailurePaths(unittest.TestCase):
         self.broker.net[(24000, "2099-01-01")] = 3 * 65
         self.broker.net[(25500, "2098-12-01")] = -4 * 65
 
+class TestDiagonalFailurePaths(_DiagBase):
     def test_exit_all_never_sells_long_while_short_open(self):
         s = self.make()
         self.open_position(s)
@@ -520,7 +523,7 @@ MONTHLIES = ["2026-10-27", "2026-11-24", "2026-12-29", "2027-01-26"]
 WEEKLIES = ["2026-10-13", "2026-11-03", "2026-11-10"]
 
 
-class TestDiagonalSelectionAndAdjustments(TestDiagonalFailurePaths):
+class _SelBase(_DiagBase):
     def setUp(self):
         super().setUp()
         p = mock.patch.object(dc, "date", _FixedDate)
@@ -541,6 +544,7 @@ class TestDiagonalSelectionAndAdjustments(TestDiagonalFailurePaths):
     def long_leg(self, expiry="2026-12-29"):
         return dict(LONG, expiry=expiry, dte=85, strike=24000)
 
+class TestDiagonalSelectionAndAdjustments(_SelBase):
     def test_is_monthly_expiry(self):
         for e in MONTHLIES:
             self.assertTrue(dc.is_monthly_expiry(e), e)
@@ -670,6 +674,180 @@ class TestDiagonalSelectionAndAdjustments(TestDiagonalFailurePaths):
         with mock.patch.object(sys, "argv", ["x", "--live", "--i-understand-this-is-unvalidated"]):
             a = dc.parse_args()
         self.assertEqual((a.target_profit, a.stop_loss), ("", ""))
+
+
+
+class TestDiagonalReviewFixes(_SelBase):
+    def make_nondhan(self):
+        helper = FakeHelper(self.broker)
+        s = dc.NiftyDiagonalCallStrategy(live=True, broker="zerodha", helper=helper, instance_id="unittest_nd")
+        s.broker = self.broker
+        # the real poll loop is deadline-based and spins for its full timeout once sleep() is patched out
+        s._wait_for_fill = lambda oid, strike, expiry, opt, signed, before, timeout=15: (
+            self.broker.get_owned_net_qty(strike, expiry, opt) - before == signed
+        )
+        return s
+
+    def run_with_clock(self, s, hh, mm, trig, ticks_after=None):
+        class FDT(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return cls(2026, 10, 5, hh, mm, 0)
+        with mock.patch.object(dc, "datetime", FDT), mock.patch.object(dc, "check_shutdown_trigger", trig), \
+                mock.patch.object(dc, "exit_if_market_closed", lambda *a, **k: None):
+            s.run()
+
+    # -- monthly detection ---------------------------------------------------
+    def test_monthly_expiries_survive_holiday_shift(self):
+        listed = ["2026-08-04", "2026-08-18", "2026-08-24", "2026-09-29"]
+        self.assertEqual(dc.monthly_expiries(listed), {"2026-08-24", "2026-09-29"})
+        self.assertFalse(dc.is_monthly_expiry("2026-08-24"))   # the heuristic alone would drop it
+
+    def test_shifted_monthly_is_selectable_for_the_short(self):
+        s = self.make_with_chain()
+        shifted = "2026-11-23"   # monthly moved to Monday; Mon 2026-11-30 exists so the heuristic says weekly
+        self.assertFalse(dc.is_monthly_expiry(shifted))
+        rows = s.helper._master_list
+        extra = rows[rows["SM_EXPIRY_DATE"] == "2026-11-24"].copy()
+        extra["SM_EXPIRY_DATE"] = shifted
+        s.helper._master_list = pd.concat([rows[rows["SM_EXPIRY_DATE"] != "2026-11-24"], extra])
+        s.helper.get_expiries = lambda _u: sorted([e for e in MONTHLIES + WEEKLIES if e != "2026-11-24"] + [shifted])
+        sh = s.select_short_call(24500.0, 117.0, long_leg=self.long_leg())
+        self.assertEqual(sh["expiry"], shifted)
+
+    # -- non-Dhan orders cannot be cancelled ------------------------------------
+    def test_nondhan_timeout_is_unknown_not_retried(self):
+        s = self.make_nondhan()
+        s.select_long_call = lambda spot: dict(LONG)
+        s.select_short_call = lambda spot, ld, long_leg=None: dict(SHORT)
+        self.broker.fill = False
+        self.assertFalse(s.enter_cycle(24500.0))
+        self.assertTrue(s.entry_halted)                      # halted, not backoff-retried
+        self.assertEqual(self.broker.calls, [("BUY", 24000, 195)])
+        self.assertEqual(s.helper.cancelled, [])             # nothing cancellable
+
+    def test_nondhan_late_fill_inside_grace_is_adopted(self):
+        s = self.make_nondhan()
+        reads = {"n": 0}
+        real = self.broker.get_owned_net_qty
+
+        def lagging(strike, expiry, opt_type):
+            reads["n"] += 1
+            if reads["n"] > 5:                               # position shows up after a few polls
+                self.broker.net[(strike, expiry)] = 195
+            return real(strike, expiry, opt_type)
+        self.broker.get_owned_net_qty = lagging
+        self.broker.fill = False
+        status, moved = s._confirm_fill_or_cancel("1", 24000, "2099-01-01", "CE", 195, 0)
+        self.assertEqual((status, moved), ("FILLED", 195))
+
+    def test_unknown_exit_outcome_slows_retry(self):
+        s = self.make_nondhan()
+        self.open_position(s)
+        self.broker.fill = False
+        self.assertFalse(s.exit_all("TEST"))
+        self.assertEqual(s.exit_retry_sleep, dc.UNKNOWN_EXIT_RETRY_SEC)
+        self.assertEqual([c[0] for c in self.broker.calls], ["BUY"])   # long untouched
+
+    # -- notifications -------------------------------------------------------
+    def test_incomplete_exit_notifies_once_then_rate_limits(self):
+        s = self.make()
+        self.open_position(s)
+        self.broker.fill = False
+        with mock.patch.object(dc, "notify") as n:
+            for _ in range(4):
+                s.exit_all("TEST")
+            self.assertEqual(n.call_count, 1)
+            self.broker.fill = True
+            self.assertTrue(s.exit_all("TEST"))
+            self.assertEqual(n.call_count, 2)                 # completion always notifies
+
+    # -- phantom P&L -----------------------------------------------------------
+    def test_leg_already_flat_books_no_pnl(self):
+        s = self.make()
+        self.open_position(s)
+        self.broker.net[(25500, "2098-12-01")] = 0            # short already closed elsewhere
+        s.short_leg["current_ltp"] = 10.0
+        closed, _, done = s._close_leg(s.short_leg, "BUY")
+        self.assertEqual((closed, done), (True, 0))
+        self.broker.net[(24000, "2099-01-01")] = 3 * 65
+        self.assertTrue(s.exit_all("TEST"))
+        self.assertEqual(s.cumulative_short_premium, 0.0)              # no short P&L booked for a leg closed elsewhere
+
+    def test_partial_broker_quantity_is_flat_after_one_close(self):
+        s = self.make()
+        self.open_position(s)
+        self.broker.net[(25500, "2098-12-01")] = -2 * 65      # broker shows 2 of the 4 tracked lots
+        closed, _, done = s._close_leg(s.short_leg, "BUY")
+        self.assertEqual((closed, done), (True, 2 * 65))
+
+    # -- persistence & display -------------------------------------------------
+    def test_resell_block_persists(self):
+        s = self.make()
+        self.open_position(s)
+        s.short_resell_blocked = True
+        s.save_position()
+        s2 = self.make()
+        self.assertTrue(s2.short_resell_blocked)
+
+    def test_lcr_display_is_capped(self):
+        s = self.make()
+        s.initial_long_debit = 1000.0
+        s.long_leg = dict(LONG)
+        s.cumulative_short_premium = 5_000_000.0
+        self.assertEqual(s.compute_lcr()[0], dc.LCR_DISPLAY_CAP_PCT)
+
+    # -- run loop ----------------------------------------------------------------
+    def test_stop_while_flat_exits_even_off_hours(self):
+        s = self.make()
+        s.pending_exit_reason = "DASHBOARD_SHUTDOWN_TRIGGER"
+        self.run_with_clock(s, 22, 0, lambda k: False)
+        self.assertEqual(s.status, "STOPPED")
+
+    def test_pending_exit_with_legs_waits_for_session(self):
+        s = self.make()
+        self.open_position(s)
+        s.pending_exit_reason = "TEST"
+        n = {"i": 0}
+
+        def trig(_k):
+            n["i"] += 1
+            if n["i"] > 2:
+                raise KeyboardInterrupt
+            return False
+        s.exit_all = mock.Mock(return_value=True)
+        self.run_with_clock(s, 22, 0, trig)
+        # off-hours with legs: only the KeyboardInterrupt path exits (once)
+        self.assertEqual(s.exit_all.call_count, 1)
+        self.assertEqual(s.exit_all.call_args.kwargs["reason"], "KEYBOARD_INTERRUPT")
+
+    def test_keyboard_interrupt_exit_failure_does_not_crash(self):
+        s = self.make()
+        self.open_position(s)
+
+        def trig(_k):
+            raise KeyboardInterrupt
+        s.exit_all = mock.Mock(side_effect=RuntimeError("lookup failed"))
+        self.run_with_clock(s, 11, 0, trig)                    # must return, not raise
+
+    def test_restore_short_waits_for_start_time(self):
+        s = self.make()
+        self.open_position(s)
+        s.short_leg = None
+        self.broker.net[(25500, "2098-12-01")] = 0
+        s.status = "RUNNING"
+        s.restore_short_leg = mock.Mock()
+        n = {"i": 0}
+
+        def trig(_k):
+            n["i"] += 1
+            if n["i"] > 3:
+                raise KeyboardInterrupt
+            return False
+        s.exit_all = mock.Mock(return_value=True)
+        s.helper.get_ltp = lambda sid, *a, **k: 24500.0 if str(sid) == "NIFTY" else (14.0 if str(sid) == "21" else 100.0)
+        self.run_with_clock(s, 9, 20, trig)                    # 09:20 < --start-time 09:30
+        s.restore_short_leg.assert_not_called()
 
 
 if __name__ == "__main__":

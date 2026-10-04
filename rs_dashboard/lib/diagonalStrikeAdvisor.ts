@@ -57,12 +57,26 @@ export const SHORT_TARGET_DELTA = 0.18;
 export const GAMMA_FIT_FRACTION = 0.75;
 export const TIE_BREAK_DELTA_BAND = 0.02;
 
-/** True when the expiry is the last occurrence of its weekday in its month (the monthly series). */
+/** Weekday heuristic fallback: last occurrence of its weekday in its month. Misreads a holiday-shifted monthly. */
 export function isMonthlyExpiry(expiry: string): boolean {
   const d = new Date(`${expiry}T00:00:00Z`);
   if (Number.isNaN(d.getTime())) return false;
   const next = new Date(d.getTime() + 7 * 86400000);
   return next.getUTCMonth() !== d.getUTCMonth();
+}
+
+/**
+ * The monthly series = the latest listed expiry in each calendar month. Preferred over the weekday
+ * heuristic because it survives holiday-shifted expiries. Mirrors monthly_expiries() in the Python strategy.
+ */
+export function monthlyExpiries(expiries: string[]): Set<string> {
+  const last = new Map<string, string>();
+  for (const e of expiries) {
+    const key = e.slice(0, 7);
+    const cur = last.get(key);
+    if (!cur || e > cur) last.set(key, e);
+  }
+  return new Set(last.values());
 }
 
 export interface DiagonalAdvisorRecommendation {
@@ -296,6 +310,8 @@ export function recommendDiagonalStrikes(params: {
   maxShortRatio?: number;
   maxShortLots?: number;
   minGammaLimit?: number;
+  /** All listed expiries for the underlying; when given, "monthly" is judged against this list. */
+  listedExpiries?: string[];
 }): DiagonalAdvisorRecommendation {
   const spot = params.spot;
   const lotSize = params.lotSize ?? 65;
@@ -413,7 +429,10 @@ export function recommendDiagonalStrikes(params: {
   });
 
   const warnings: string[] = [];
-  if (!isMonthlyExpiry(params.frontExpiry)) {
+  const frontIsMonthly = params.listedExpiries?.length
+    ? monthlyExpiries(params.listedExpiries).has(params.frontExpiry)
+    : isMonthlyExpiry(params.frontExpiry);
+  if (!frontIsMonthly) {
     warnings.push(`Front expiry ${params.frontExpiry} is a weekly; the strategy only sells monthly expiries.`);
   }
   if (params.frontExpiry >= longLeg.expiry) {

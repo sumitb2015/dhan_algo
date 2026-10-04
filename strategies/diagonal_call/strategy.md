@@ -64,7 +64,7 @@ Once $\text{LCR} \ge 100\%$, the strategy achieves a "Free Long Call". At this j
 - **Structure**: Sell OTM Calls (`CE`).
 - **DTE**: **25–45 days** (medium-dated monthly/bi-weekly; **never** weekly options).
 - **Target Delta**: **0.15–0.22** (prefer ~0.18–0.20 delta).
-- **Expiry**: **monthly series only** (last-weekday-of-month expiries; weeklies are never used), 25–45 DTE, and strictly **before the long's expiry**. Monthlies are 4–5 weeks apart, so if none falls in the window the upper bound widens by 14 days (still never a weekly).
+- **Expiry**: **monthly series only** (the latest listed expiry in each calendar month, so a holiday-shifted monthly still counts; weeklies are never used), 25–45 DTE, and strictly **before the long's expiry**. Monthlies are 4–5 weeks apart, so if none falls in the window the upper bound widens by 14 days (still never a weekly).
 - **Strike ranking**: among strikes with $0.15 \le \Delta \le 0.22$ (0.08–0.15 in the Free Long Call regime) the strike **closest to the target delta** (0.18; 0.115 in the free regime) wins; the efficiency score
   $$\text{Score} = \frac{\text{Theta Decay per Day (₹)}}{|\text{Gamma}|}$$
   only breaks ties within 0.02 delta. (Theta/|Gamma| is ≈ ½σ²S² for every strike, so used as the primary key it always drifted to the highest-delta edge of the band.) If no strike is in band, **nothing is sold** — there is no out-of-band fallback.
@@ -91,6 +91,7 @@ Once $\text{LCR} \ge 100\%$, the strategy achieves a "Free Long Call". At this j
 | 🟡 **Too Bullish** | `> +30` | **Increase short exposure**: at a scheduled window, sell *additional lots of the existing short* up to the sizing target — only if gamma is acceptable. If the lot ceiling/ratio cap/gamma budget leave no room, nothing is done (the default 6-lot ceiling sits above the normal band for 3 long lots; that is the margin guard working, not a fault). |
 
 ### Gamma Rules
+> **Units note**: gamma is Σ(qty × per-share gamma). At the default size (3 long lots, ≤6 short lots) it sits around −0.045, so the −0.15 budget / −0.20 breach roll are effectively dormant guards; the delta rules do the work. The strategy logs this once. Re-scale the thresholds (e.g. delta change per 1% index move: −0.045 ≈ −11 shares/1%) only after a decision, in Python **and** `diagonalStrikeAdvisor.ts`.
 | Portfolio Gamma | Rating | Strategy Action |
 |---|---|---|
 | `> -0.10` | **Excellent** | Optimal risk-return. |
@@ -145,7 +146,7 @@ Short calls are closed and rolled into a fresh 25–45 DTE call ($0.15 \le \Delt
 | Event | Tracking State | Action |
 |---|---|---|
 | Long Leg Entry Fails | `WAITING` | Abort entry, do not place short leg. |
-| Long-only position | `RUNNING` | After a failed roll/halving the short is re-sold automatically (after a cooldown) unless it vanished at the broker (then auto re-sell stays off). Short rolls select the replacement *before* buying the old short back. |
+| Long-only position | `RUNNING` | After a failed roll/halving the short is re-sold automatically (after a cooldown, between `--start-time` and 15:15) unless it vanished at the broker (then auto re-sell stays off, persisted across restarts). Short rolls select the replacement *before* buying the old short back. |
 | Portfolio roll just done | `RUNNING` | Gamma / net-delta / scheduled rolls are rate-limited to one per 30 min. |
 | Restart with long missing at broker | `EXIT_PENDING` | Reconcile queues an immediate unwind of the uncovered short. |
 | Short Leg Entry Fails | `UNWINDING` | Immediately close long leg and return to `FLAT`. |
@@ -154,7 +155,9 @@ Short calls are closed and rolled into a fresh 25–45 DTE call ($0.15 \le \Delt
 | Process Killed Mid-Session | `RESTARTING` | Atomic `_position.json` reloads legs, resubscribes WebSocket feeds, and reconciles with broker. |
 | Stop Trigger Written | `STOPPED` | Gracefully closes all open legs via `resolve_exit_qty_broker()`. |
 | Exit not confirmed | `EXIT_PENDING` | Short is closed first; the long is **never** sold while a short is open. Unclosed legs stay in state and the exit is retried every 5s (and resumed after a restart). |
-| Order timeout | — | The order is cancelled and the broker position re-read before anything is retried; a late fill is adopted, a partial/unknown result halts entries (`ENTRY_HALTED`) for manual review. |
+| Order timeout (Dhan) | — | The order is cancelled and the broker position re-read before anything is retried; a late fill is adopted, a partial/unknown result halts entries (`ENTRY_HALTED`) for manual review. |
+| Order timeout (Zerodha/Kotak) | — | These orders cannot be cancelled from here, so the position is polled for 30s; if it still has not moved the outcome is **UNKNOWN**: entries halt, rolls disable, and an exit retries only every 60s so a late fill is never doubled. |
+| Exit retry alerts | — | An incomplete exit alerts at most every 5 minutes. A stop while holding no legs exits immediately, even off-hours. |
 | Entry fails repeatedly | `ENTRY_HALTED` | Backoff 60s/120s/240s…, halts after 5 consecutive failed attempts. |
 | Daily loss limit hit | — | Latched for the session: scheduled rebalances, profit-take and gamma/net-delta rolls are suspended; only DTE and critical-delta (≥0.50) rolls, long rolls and drawdown exits still run. |
 | Long roll | — | New long is bought **before** the old one is sold, so the short stays covered. |

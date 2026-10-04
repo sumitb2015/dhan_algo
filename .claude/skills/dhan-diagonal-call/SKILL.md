@@ -13,7 +13,7 @@ default, never forward-tested (see the backtest caveat below). Positional (`MARG
 
 ## The rules in one screen
 - Long: buy CE, 60-120 DTE, delta 0.55-0.65 (prefer 0.60), `--long-lots` default 3. **Entered first.**
-- Short: sell CE, monthly expiry only (`is_monthly_expiry`), 25-45 DTE (+14d if no monthly fits), expiring before the long, delta 0.15-0.22.
+- Short: sell CE, monthly expiry only (`monthly_expiries()` = latest listed expiry per month; `is_monthly_expiry` weekday heuristic is a fallback that misreads holiday-shifted monthlies), 25-45 DTE (+14d if no monthly fits), expiring before the long, delta 0.15-0.22.
   Strike = closest to target delta; `Theta/|Gamma|` is only a tie-break (it is ~0.5*sigma^2*S^2 for every strike, so as primary key it picked the
   0.22 edge). Nothing sold out of band. IV floor `--min-iv`. New shorts are trimmed to 75% of the gamma floor.
 - Sizing: `short_lots = round((long_delta - target_net_delta) / (short_delta * lot_size))`, then clamped by
@@ -43,6 +43,10 @@ and `lib/diagonalStrikeAdvisor.test.ts` pin the sizing; extend both when a const
   a timed-out order is cancelled and the broker position re-read (`_confirm_fill_or_cancel`) before any retry;
   entry has backoff/halt; there are no synthetic prices; the daily loss limit latches. `tests/test_diagonal_call.py`
   (`TestDiagonalFailurePaths`, `TestDiagonalSelectionAndAdjustments`) pins each — keep them green.
+- **Dashboard ack flag.** `--live` needs `--i-understand-this-is-unvalidated`; `StrategyCard.tsx` and `StrategyRowWide.tsx`
+  must push it for `nifty_diagonal_call` (they did not at first, which made dashboard live-start fail with a CONFIG ERROR).
+- **Uncancellable brokers.** Zerodha/Kotak timeouts are UNKNOWN, never "not filled": a retry would double the position.
+- **Gamma units.** At <=6 lots portfolio gamma is ~-0.045, so the -0.15/-0.20 guards are dormant (see strategy.md note).
 - **TS advisor mirrors the live selection** (`recommendDiagonalStrikes`): closest-to-0.18Δ ranking with Theta/|Gamma| as a
   0.02Δ tie-break, gamma-budget lot trim (75% of the floor), and `summary.warnings` for a weekly front expiry or a short that
   would outlive the long (shown in `DiagonalStrikeAdvisorCard`). It cannot filter expiries itself — the caller picks the

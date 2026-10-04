@@ -16,6 +16,7 @@ interface DiagonalStrikeAdvisorCardProps {
   farExpiry?: string;
   farDte?: number;
   allStrikes: number[];
+  listedExpiries?: string[];
   autoPremium: (strike: number, option: 'CE' | 'PE', expiry?: string) => number;
   chainOc?: Record<string, any>;
   atmIv?: number;
@@ -32,6 +33,7 @@ export default function DiagonalStrikeAdvisorCard({
   farExpiry,
   farDte,
   allStrikes,
+  listedExpiries,
   autoPremium,
   chainOc,
   atmIv,
@@ -70,8 +72,9 @@ export default function DiagonalStrikeAdvisorCard({
       strikes: allStrikes,
       quotes: quoteData,
       longLeg: longLegParam,
+      listedExpiries,
     });
-  }, [spot, lotSize, frontExpiry, frontDte, farExpiry, farDte, allStrikes, quoteData, currentLongLeg, chainOc, atmIv]);
+  }, [spot, lotSize, frontExpiry, frontDte, farExpiry, farDte, allStrikes, listedExpiries, quoteData, currentLongLeg, chainOc, atmIv]);
 
   const candidates = advisorData.candidates.slice(0, 5);
   const best = advisorData.bestCandidate;

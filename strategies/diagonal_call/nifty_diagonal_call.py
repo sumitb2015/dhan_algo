@@ -81,10 +81,13 @@ LOG_FOLDER = "diagonal_call"
 UNDERLYING = "NIFTY"
 INDEX_ID = "13"
 PRODUCT = "MARGIN"  # carry-forward positional hold
+NON_DHAN_GRACE_POLLS = 30       # 1s polls waiting for an uncancellable (Zerodha/Kotak) order to show up
+UNKNOWN_EXIT_RETRY_SEC = 60     # exit retry spacing after an UNKNOWN close, so a late fill cannot be doubled
 ROLL_COOLDOWN_SEC = 120         # pause before retrying a roll whose order failed (stops per-tick order spam)
 ENTRY_MAX_ATTEMPTS = 5          # consecutive failed entries before entries halt (needs manual restart)
 ENTRY_BACKOFF_BASE_SEC = 60     # 60s, 120s, 240s ... capped at ENTRY_BACKOFF_MAX_SEC
 ENTRY_BACKOFF_MAX_SEC = 900
+EXIT_NOTIFY_MIN_GAP_SEC = 300   # an incomplete exit alerts at most this often (the retry loop runs every few seconds)
 EXIT_RETRY_SEC = 5              # pause between retries of an incomplete exit
 # Short-roll reasons that stay allowed after the daily loss halt: they are maintenance /
 # safety rolls (expiry proximity, runaway delta), not discretionary adjustments.
@@ -92,6 +95,7 @@ HALT_ALLOWED_ROLL_PREFIXES = ("DTE_THRESHOLD", "CRITICAL_SHORT_DELTA")
 # Portfolio-level rolls: a roll re-sizes into the gamma budget, so repeating it back to back is churn.
 ADJUST_ROLL_PREFIXES = ("GAMMA_LIMIT_BREACH", "PORTFOLIO_DELTA_DEFENSIVE", "SCHEDULED_REBALANCE")
 ADJUST_COOLDOWN_SEC = 1800
+LCR_DISPLAY_CAP_PCT = 999.9     # a long rolled at a big profit shrinks the debit; keep the displayed LCR sane
 FREE_LCR_ENTER_PCT = 100.0      # "Free Long Call" regime starts here ...
 FREE_LCR_EXIT_PCT = 90.0        # ... and only ends below this (hysteresis: unrealized gains evaporate)
 GAMMA_FIT_FRACTION = 0.75       # size new shorts to <= 75% of the gamma floor so they do not re-breach it
@@ -99,10 +103,25 @@ SHORT_WINDOW_EXTENSION_DAYS = 14   # used only when no monthly expiry fits the s
 FREE_SHORT_TARGET_DELTA = 0.115  # midpoint of the 0.08-0.15 band used in the Free Long Call regime
 
 
-def is_monthly_expiry(expiry_str: str) -> bool:
-    """True when the expiry is the last occurrence of its weekday in its month (the monthly series).
+def monthly_expiries(expiries: List[str]) -> set:
+    """The monthly series = the latest listed expiry in each calendar month.
 
-    Weekly expiries are excluded from every leg: strategy.md forbids weekly options.
+    Preferred over the weekday heuristic below because it survives holiday-shifted expiries
+    (a monthly moved off the last Tuesday is still the month's last listed expiry).
+    """
+    last: Dict[Tuple[str, str], str] = {}
+    for e in expiries:
+        key = (e[:4], e[5:7])
+        if key not in last or e > last[key]:
+            last[key] = e
+    return set(last.values())
+
+
+def is_monthly_expiry(expiry_str: str) -> bool:
+    """Weekday heuristic: True when the expiry is the last occurrence of its weekday in its month.
+
+    Fallback only (needs no expiry list); it misreads a holiday-shifted monthly, so the strategy
+    uses monthly_expiries() on the listed expiries instead.
     """
     try:
         d = datetime.strptime(expiry_str, "%Y-%m-%d").date()
@@ -460,6 +479,10 @@ class NiftyDiagonalCallStrategy:
         self.next_entry_at = 0.0
         self.entry_halted = False
         self.roll_cooldown_until = 0.0
+        self._expiry_cache: Tuple[float, List[str]] = (0.0, [])
+        self.last_exit_notify = 0.0
+        self.exit_retry_sleep = float(EXIT_RETRY_SEC)
+        self._gamma_dormant_logged = False
         self.adjust_cooldown_until = 0.0
         self.short_resell_blocked = False    # set when a short vanished at the broker; do not fight a manual exit
 
@@ -552,7 +575,7 @@ class NiftyDiagonalCallStrategy:
             )
 
         total_short_premium = self.cumulative_short_premium + unrealized_short
-        lcr_pct = (total_short_premium / self.initial_long_debit) * 100.0
+        lcr_pct = min(LCR_DISPLAY_CAP_PCT, (total_short_premium / self.initial_long_debit) * 100.0)
         is_free = lcr_pct >= FREE_LCR_ENTER_PCT or (self.is_free_long_call and lcr_pct >= FREE_LCR_EXIT_PCT)
         self.lcr_pct = round(lcr_pct, 1)
         self.is_free_long_call = is_free
@@ -575,6 +598,7 @@ class NiftyDiagonalCallStrategy:
             "drawdown_halved": self.drawdown_halved,
             "last_total_pnl": round(self.last_total_pnl, 2),
             "daily_halt_date": self.daily_halt_date,
+            "short_resell_blocked": self.short_resell_blocked,
             "initial_long_debit": round(self.initial_long_debit, 2),
             "cumulative_short_premium": round(self.cumulative_short_premium, 2),
             "lcr_pct": self.lcr_pct,
@@ -624,6 +648,7 @@ class NiftyDiagonalCallStrategy:
         self.drawdown_halved = bool(data.get("drawdown_halved", False))
         self.last_total_pnl = float(data.get("last_total_pnl", self.realized_pnl))
         self.daily_halt_date = str(data.get("daily_halt_date", ""))
+        self.short_resell_blocked = bool(data.get("short_resell_blocked", False))
         if self.status == "EXIT_PENDING":
             # Process died mid-exit: finish unwinding whatever legs are still recorded.
             self.pending_exit_reason = "RESTART_RESUME_EXIT"
@@ -757,16 +782,30 @@ class NiftyDiagonalCallStrategy:
                 self.helper.cancel_order(str(oid))
             except Exception as e:
                 logger.warning(f"Could not cancel unconfirmed order {oid}: {e}")
-        time.sleep(1.0)
-        try:
-            moved = int(self.broker.get_owned_net_qty(strike, expiry, opt_type)) - net_before
-        except Exception as e:
-            logger.error(f"Could not re-read broker position after unconfirmed order {oid}: {e}")
-            return "PARTIAL", None
-        if moved == signed_qty:
-            return "FILLED", moved
+            time.sleep(1.0)
+            grace = 1
+        else:
+            # Zerodha/Kotak orders cannot be cancelled from here, so "no position change yet" does NOT mean
+            # "not filled": the market order may still land. Give it a long grace window, and if the position
+            # still has not moved report the outcome as UNKNOWN (PARTIAL with moved=None) so the caller halts
+            # instead of retrying into a duplicate.
+            grace = NON_DHAN_GRACE_POLLS
+        moved: Optional[int] = None
+        for i in range(grace):
+            try:
+                moved = int(self.broker.get_owned_net_qty(strike, expiry, opt_type)) - net_before
+            except Exception as e:
+                logger.error(f"Could not re-read broker position after unconfirmed order {oid}: {e}")
+                return "PARTIAL", None
+            if moved == signed_qty:
+                return "FILLED", moved
+            if i < grace - 1:
+                time.sleep(1.0)
         if moved == 0:
-            return "NOT_FILLED", 0
+            if self.broker_name == "dhan":
+                return "NOT_FILLED", 0
+            logger.error(f"{self.broker_name} order {oid} unconfirmed after {grace}s and cannot be cancelled: outcome UNKNOWN.")
+            return "PARTIAL", None
         return "PARTIAL", moved
 
     def _close_leg(self, leg: Dict, closing_side: str) -> Tuple[bool, float, int]:
@@ -783,7 +822,7 @@ class NiftyDiagonalCallStrategy:
         strike, expiry = leg["strike"], leg["expiry"]
         safe_qty, _ = resolve_exit_qty_broker(self.broker, strike, expiry, "CE", qty, side=closing_side, log=logger)
         if safe_qty <= 0:
-            return True, ltp, qty  # broker already shows the leg flat
+            return True, ltp, 0  # broker already shows the leg flat (closed elsewhere): nothing to book
         signed = safe_qty if closing_side == "BUY" else -safe_qty
         net_before = self._get_broker_net(strike, expiry, "CE")
         place = self.broker.buy if closing_side == "BUY" else self.broker.sell
@@ -793,7 +832,10 @@ class NiftyDiagonalCallStrategy:
             return False, ltp, 0
         status, moved = self._confirm_fill_or_cancel(oid, strike, expiry, "CE", signed, net_before)
         if status == "FILLED":
-            return safe_qty >= qty, self._get_fill_price(oid, fallback_ltp=ltp), safe_qty
+            # safe_qty < qty means the remainder was already closed elsewhere: the leg is flat either way.
+            return True, self._get_fill_price(oid, fallback_ltp=ltp), safe_qty
+        if moved is None:
+            self.exit_retry_sleep = float(UNKNOWN_EXIT_RETRY_SEC)  # outcome unknown: wait before any retry
         done = abs(moved) if moved else 0
         logger.error(f"{closing_side} close of {strike} CE {expiry} {status}: {done} of {safe_qty} units traded.")
         return False, ltp, done
@@ -837,12 +879,16 @@ class NiftyDiagonalCallStrategy:
     # ── OPTION SELECTION LOGIC ────────────────────────────────────────────────
 
     def _get_sorted_expiries(self) -> List[str]:
-        """Fetches and sorts available NIFTY option expiries."""
+        """Fetches and sorts available NIFTY option expiries (cached for 60s: one selection reads it several times)."""
+        today_str = date.today().strftime("%Y-%m-%d")
+        cached_at, cached = self._expiry_cache
+        if cached and time.time() - cached_at < 60.0 and cached[0] >= today_str:
+            return cached
         try:
             expiries = self.helper.get_expiries(UNDERLYING)
-            today_str = date.today().strftime("%Y-%m-%d")
-            valid = [e for e in expiries if e >= today_str]
-            return sorted(valid)
+            valid = sorted(e for e in expiries if e >= today_str)
+            self._expiry_cache = (time.time(), valid)
+            return valid
         except Exception as e:
             logger.error(f"Error fetching expiries: {e}")
             return []
@@ -857,10 +903,9 @@ class NiftyDiagonalCallStrategy:
 
     def _monthly_expiries_in_window(self, min_dte: int, max_dte: int) -> List[str]:
         """Monthly (non-weekly) expiries whose DTE lies inside [min_dte, max_dte]. No out-of-range fallback."""
-        return [
-            e for e in self._get_sorted_expiries()
-            if is_monthly_expiry(e) and min_dte <= self._compute_dte(e) <= max_dte
-        ]
+        expiries = self._get_sorted_expiries()
+        monthlies = monthly_expiries(expiries)
+        return [e for e in expiries if e in monthlies and min_dte <= self._compute_dte(e) <= max_dte]
 
     def _ce_rows(self, expiry: str):
         df = self.helper._master_list
@@ -944,6 +989,15 @@ class NiftyDiagonalCallStrategy:
             if proj >= budget:
                 break
             lots -= 1
+        if not self._gamma_dormant_logged:
+            proj = calculate_portfolio_greeks(long_leg, dict(short_proto, lots=lots), spot, self.lot_size)["portfolio_gamma"]
+            if proj > budget / 2.0:
+                self._gamma_dormant_logged = True
+                logger.info(
+                    f"Gamma guard note: {lots} short lots project portfolio gamma {proj:.4f}, well inside the "
+                    f"{budget:.2f} budget. At this size (max {self.max_short_lots} lots) the gamma trim and the "
+                    f"{self.min_gamma_limit:.2f} breach roll are effectively dormant; the delta rules do the work."
+                )
         return lots
 
     def select_short_call(
@@ -1425,7 +1479,7 @@ class NiftyDiagonalCallStrategy:
         closed_pnl = (fill_px - old_leg["entry_price"]) * done_qty
         self.realized_pnl += closed_pnl
         # A realised loss on the old long is part of what the shorts must recover (a gain reduces it).
-        self.initial_long_debit = max(1.0, self.initial_long_debit - closed_pnl)
+        self.initial_long_debit = max(0.01 * self.initial_long_debit, self.initial_long_debit - closed_pnl)
         if closed:
             logger.info(f"Closed old long {old_leg['strike']} CE @ ₹{fill_px:.2f} | Leg P&L: ₹{closed_pnl:+.2f}")
         else:
@@ -1508,10 +1562,14 @@ class NiftyDiagonalCallStrategy:
             self.status = "EXIT_PENDING"
         self.save_position()
         self._publish_state(self.last_spot)
-        notify(
-            f"[{self.state_key}] Square-off {'complete' if complete else 'INCOMPLETE - retrying'}: {reason}. "
-            f"Status: {self.status}. Total Realized P&L: ₹{self.realized_pnl:+.2f} | Final LCR: {self.lcr_pct:.1f}%"
-        )
+        if complete or time.time() - self.last_exit_notify >= EXIT_NOTIFY_MIN_GAP_SEC:
+            self.last_exit_notify = time.time()
+            notify(
+                f"[{self.state_key}] Square-off {'complete' if complete else 'INCOMPLETE - retrying'}: {reason}. "
+                f"Status: {self.status}. Total Realized P&L: ₹{self.realized_pnl:+.2f} | Final LCR: {self.lcr_pct:.1f}%"
+            )
+        if complete:
+            self.exit_retry_sleep = float(EXIT_RETRY_SEC)
         return complete
 
     # ── STATE PUBLISHING ──────────────────────────────────────────────────────
@@ -1612,10 +1670,11 @@ class NiftyDiagonalCallStrategy:
 
                 # 1b. Pending exit (dashboard stop, risk exit, or an earlier incomplete unwind): retry until
                 # every leg is confirmed closed. Never `break` on an incomplete exit.
-                if self.pending_exit_reason and (in_session or self.dry_run):
+                holds_legs = bool(self.long_leg or self.short_leg)
+                if self.pending_exit_reason and (in_session or self.dry_run or not holds_legs):
                     if self.exit_all(reason=self.pending_exit_reason):
                         break
-                    time.sleep(EXIT_RETRY_SEC)
+                    time.sleep(self.exit_retry_sleep)
                     continue
 
                 # 2. Overnight Handling: After 15:25 IST, transition to HOLDING OVERNIGHT
@@ -1813,6 +1872,7 @@ class NiftyDiagonalCallStrategy:
                     and not adjustments_suspended
                     and roll_allowed
                     and self.status == "RUNNING"
+                    and self.start_time <= now_str < "15:15"
                 ):
                     self.restore_short_leg(spot)
 
@@ -1844,8 +1904,11 @@ class NiftyDiagonalCallStrategy:
 
             except KeyboardInterrupt:
                 logger.info("Keyboard interrupt received. Squaring off and exiting.")
-                if not self.exit_all(reason="KEYBOARD_INTERRUPT"):
-                    logger.error("Exit INCOMPLETE on interrupt - legs remain open. Verify the broker position manually.")
+                try:
+                    if not self.exit_all(reason="KEYBOARD_INTERRUPT"):
+                        logger.error("Exit INCOMPLETE on interrupt - legs remain open. Verify the broker position manually.")
+                except Exception as exit_err:
+                    logger.error(f"Exit FAILED on interrupt ({exit_err}) - legs may remain open. Verify the broker position manually.")
                 break
             except Exception as e:
                 logger.error(f"Error in strategy loop: {e}", exc_info=True)

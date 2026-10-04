@@ -7,6 +7,7 @@ import {
   calculatePortfolioGreeks,
   recommendDiagonalStrikes,
   isMonthlyExpiry,
+  monthlyExpiries,
 } from './diagonalStrikeAdvisor.ts';
 
 test('computeBsGreeks: computes accurate Call Delta, Gamma, Theta, and Vega', () => {
@@ -133,4 +134,24 @@ test('recommendDiagonalStrikes: lots are trimmed so projected gamma stays inside
   for (const c of rec.candidates) {
     assert.ok(c.recommendedLots === 1 || c.resultingNetGamma >= -0.15, `${c.strike}: ${c.recommendedLots} lots gamma ${c.resultingNetGamma}`);
   }
+});
+
+test('monthlyExpiries: latest listed expiry per month, robust to holiday-shifted monthlies', () => {
+  // 2026-08: last Tuesday would be the 25th; holiday moves the monthly to Monday the 24th while Monday the 31st exists.
+  const listed = ['2026-08-04', '2026-08-11', '2026-08-18', '2026-08-24', '2026-09-29'];
+  const m = monthlyExpiries(listed);
+  assert.equal(m.has('2026-08-24'), true);
+  assert.equal(m.has('2026-08-18'), false);
+  assert.equal(m.has('2026-09-29'), true);
+  assert.equal(isMonthlyExpiry('2026-08-24'), false); // the heuristic gets this wrong; the list-based rule does not
+});
+
+test('recommendDiagonalStrikes: listedExpiries removes the false weekly warning on a shifted monthly', () => {
+  const base = {
+    spot: 22421.95, frontExpiry: '2026-08-24', frontDte: 40, strikes: [23200, 23300],
+    longLeg: { strike: 23000, expiry: '2026-12-29', dte: 85, lots: 3, iv: 0.14 },
+  };
+  assert.equal(recommendDiagonalStrikes(base).summary.warnings.length, 1);
+  const withList = recommendDiagonalStrikes({ ...base, listedExpiries: ['2026-08-18', '2026-08-24', '2026-09-29'] });
+  assert.equal(withList.summary.warnings.length, 0);
 });

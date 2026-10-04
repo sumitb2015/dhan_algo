@@ -678,6 +678,9 @@ function StrategyRowWide({ meta, state, onRefresh, instanceId, onAddInstance, on
         args.push('--short-roll-dte', String(dcShortRollDte));
         args.push('--long-roll-dte', String(dcLongRollDte));
         args.push('--capital', String(dcCapital));
+        if (isLive) {
+          args.push('--i-understand-this-is-unvalidated');
+        }
       }
 
       const payload: any = { action: 'start', strategy: meta.key, args, instanceId };
