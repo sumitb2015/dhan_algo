@@ -3522,7 +3522,7 @@ export default function OptionsBacktester({
           </div>
 
           {/* Year-wise Returns Matrix */}
-          {Object.keys(result.monthly_pnl).length > 0 && (
+          {result.monthly_pnl && Object.keys(result.monthly_pnl).length > 0 && (
             <div className="bg-zinc-900 border border-zinc-800 rounded-xl overflow-hidden shadow-xs mb-6">
               <div className="px-4 py-3 border-b border-zinc-800 bg-zinc-850/60 flex items-center justify-between">
                 <h3 className="text-xs font-bold text-zinc-200 uppercase tracking-wider">Year-wise &amp; Month-wise Returns</h3>

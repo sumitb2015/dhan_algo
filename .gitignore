@@ -1,5 +1,6 @@
 # Virtual Environment
 venv/
+.python312/
 
 # Sensitive Credentials
 .env
@@ -47,6 +48,8 @@ debug/*.trigger
 debug/*.tmp
 debug/*.md
 debug/*.jsonl
+debug/*.png
+debug/*.js
 debug/*.bak_*
 debug/backups/
 debug/screenshots/

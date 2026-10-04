@@ -205,7 +205,23 @@ export async function POST(req: NextRequest) {
   const legs = body.legs != null ? JSON.stringify(body.legs) : DEFAULT_LEGS;
   const strategyType = String(body.strategy_type ?? 'intraday');
 
-  const args = [
+  const isCondorRatio = strategyType === 'options_condor_ratio' ||
+                        strategyType === 'condor_to_ratio' ||
+                        String(body.adjustment_mode) === 'condor_to_ratio' ||
+                        String(body.strategy_name || '').toLowerCase().includes('condor');
+
+  const CONDOR_RATIO_SCRIPT = path.join(PROJECT_ROOT, 'scripts', 'analysis', 'backtest_condor_to_ratio.py');
+
+  const args = isCondorRatio ? [
+    CONDOR_RATIO_SCRIPT,
+    '--start-date',          String(body.start_date          ?? '2026-07-01'),
+    '--end-date',            String(body.end_date            ?? '2026-09-30'),
+    '--lots',                String(body.lots                ?? 1),
+    '--lot-size',            String(body.lot_size            ?? 65),
+    '--target-profit',       String(body.profit_target_val ? `${body.profit_target_val}%` : '15%'),
+    '--stop-loss',           String(body.overall_sl_val ? `${body.overall_sl_val}%` : '15%'),
+    '--status-file',         STATUS_FILE,
+  ] : [
     SCRIPT_PATH,
     '--start-date',          String(body.start_date          ?? '2021-01-01'),
     '--end-date',            String(body.end_date            ?? '2026-06-30'),

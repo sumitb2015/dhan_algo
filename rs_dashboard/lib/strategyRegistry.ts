@@ -302,6 +302,30 @@ export const STRATEGIES_METADATA: Record<string, {
     readmePath: readmePath('put_condor', 'nifty_put_condor'),
     execBrokerEligible: true,
   },
+  // UNVALIDATED (see strategies/condor_to_ratio/strategy.md): Starts with a neutral monthly Iron Condor
+  // (0.30/0.10 deltas) and switches structure to a directional Ratio Spread (0.50 long, 2x 0.40 short,
+  // 0.10 hedge) when a short leg decays to <= 0.10 delta. Shifts on trend continuation, reverses on
+  // turnaround. --live requires --i-understand-this-is-unvalidated.
+  nifty_condor_ratio: {
+    name: 'Nifty Condor to Ratio Spread',
+    underlying: 'NIFTY',
+    logicGroup: 'rotation',
+    timeframe: 'positional',
+    path: path.join(PROJECT_ROOT, 'strategies', 'condor_to_ratio', 'nifty_condor_ratio.py'),
+    readmePath: readmePath('condor_to_ratio', 'nifty_condor_ratio'),
+    execBrokerEligible: true,
+  },
+  // Nifty Bi-Weekly Adaptive Strangle: Far-OTM bi-weekly strangle (~0.10 delta) with conditional
+  // Greek hedging (Delta threat >= 0.22, Vega surge >= 20%) and optional directional trend conversion.
+  nifty_adaptive_strangle: {
+    name: 'Nifty Adaptive Strangle',
+    underlying: 'NIFTY',
+    logicGroup: 'volatility',
+    timeframe: 'positional',
+    path: path.join(PROJECT_ROOT, 'strategies', 'adaptive_strangle', 'nifty_adaptive_strangle.py'),
+    readmePath: readmePath('adaptive_strangle', 'nifty_adaptive_strangle'),
+    execBrokerEligible: true,
+  },
 };
 
 // Python's save_strategy_state() rewrites the whole <key>_state.json every cycle with only

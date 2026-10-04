@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "dashboard-preview-dev",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": ["--prefix", "rs_dashboard", "run", "dev", "--", "-p", "3001"],
+      "port": 3001
+    }
+  ]
+}

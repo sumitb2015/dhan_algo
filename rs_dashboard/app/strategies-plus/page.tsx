@@ -6,6 +6,7 @@ import {
   Power, ShieldOff, Activity, Zap, LayoutList, ChevronDown, ChevronRight, Shield,
   Repeat, CheckCircle2, XCircle, Play, Square, ChevronsDownUp, ChevronsUpDown,
   Sprout, Flame, Rocket, Boxes, ListTree, Moon, Clock, Calendar, Sun, Mountain,
+  Search, X,
 } from 'lucide-react';
 import StrategyRowWide from '@/components/StrategyRowWide';
 import NavBar from '@/components/NavBar';
@@ -161,6 +162,7 @@ export default function StrategiesPlusPage() {
   const [viewMode, setViewMode] = useState<'active' | 'all'>('active');
   const [groupMode, setGroupMode] = useState<GroupMode>('timeframe');
   const [horizonFilter, setHorizonFilter] = useState<HorizonFilter>('all');
+  const [searchQuery, setSearchQuery] = useState('');
 
   const groups = useGroupCollapse();
 
@@ -576,8 +578,21 @@ export default function StrategiesPlusPage() {
     return instanceRows.filter(r => (r.meta?.timeframe || 'intraday') === horizonFilter);
   }, [instanceRows, horizonFilter]);
 
-  const activeList = horizonFilteredRows.filter(row => row.state?.status !== 'STOPPED');
-  const displayList = viewMode === 'active' ? activeList : horizonFilteredRows;
+  // Filter by Search Query (name, underlying, logicGroup, description)
+  const filteredRows = useMemo(() => {
+    const q = searchQuery.trim().toLowerCase();
+    if (!q) return horizonFilteredRows;
+    return horizonFilteredRows.filter(r => {
+      const name = (r.meta?.name || r.key).toLowerCase();
+      const underlying = (r.meta?.underlying || '').toLowerCase();
+      const logic = (r.meta?.logicGroup || '').toLowerCase();
+      const desc = (r.meta?.description || '').toLowerCase();
+      return name.includes(q) || underlying.includes(q) || logic.includes(q) || desc.includes(q);
+    });
+  }, [horizonFilteredRows, searchQuery]);
+
+  const activeList = filteredRows.filter(row => row.state?.status !== 'STOPPED');
+  const displayList = (viewMode === 'active' && !searchQuery.trim()) ? activeList : filteredRows;
 
   // Group by Timeframe (Intraday vs Positional)
   const groupedByTimeframeList = groupByUnderlying<InstanceRow>(
@@ -651,8 +666,6 @@ export default function StrategiesPlusPage() {
           </div>
         </div>
 
-        <NavBar />
-
         <div className="flex items-center gap-3 shrink-0">
           <BrokerSelector
             broker={broker}
@@ -698,28 +711,32 @@ export default function StrategiesPlusPage() {
             />
             <TooltipContent>Refresh strategy status</TooltipContent>
           </Tooltip>
+
+          <Separator orientation="vertical" className="h-5 bg-zinc-800 shrink-0 mx-0.5" />
+
+          <NavBar />
         </div>
       </header>
 
       {/* ── Executive Book Strip (Hero P&L & Safety Console) ── */}
-      <div className="w-full border-b border-zinc-800 bg-zinc-900/40 px-5 py-3 flex items-center justify-between gap-4 flex-wrap">
+      <div className="w-full border-b border-zinc-800 bg-zinc-900/40 px-5 py-2.5 flex items-center justify-between gap-4 flex-wrap">
         {/* Left: Financial Status Cluster */}
-        <div className="flex items-center gap-4 flex-wrap bg-zinc-900/80 border border-zinc-800 rounded-2xl px-4 py-2.5 shadow-sm">
-          <div className="flex items-center gap-3">
-            <div className={`w-8 h-8 rounded-xl flex items-center justify-center border ${
+        <div className="flex items-center gap-3.5 flex-wrap bg-zinc-900/80 border border-zinc-800 rounded-2xl px-3.5 py-2 shadow-sm">
+          <div className="flex items-center gap-2.5">
+            <div className={`w-7 h-7 rounded-lg flex items-center justify-center border ${
               pnlPositive ? 'bg-emerald-500/10 border-emerald-500/30 text-emerald-400' : 'bg-rose-500/10 border-rose-500/30 text-rose-400'
             }`}>
               {portfolioLoading && !portfolio ? (
-                <RefreshCw className="h-4 w-4 text-zinc-500 animate-spin" />
+                <RefreshCw className="h-3.5 w-3.5 text-zinc-500 animate-spin" />
               ) : pnlPositive ? (
-                <TrendingUp className="h-4 w-4 text-emerald-400" />
+                <TrendingUp className="h-3.5 w-3.5 text-emerald-400" />
               ) : (
-                <TrendingDown className="h-4 w-4 text-rose-400" />
+                <TrendingDown className="h-3.5 w-3.5 text-rose-400" />
               )}
             </div>
             <div className="flex flex-col">
               <span className={`${TXT_EYEBROW} text-zinc-400 leading-none`}>Combined P&amp;L</span>
-              <span className={`text-lg font-mono font-extrabold tabular-nums tracking-tight ${
+              <span className={`text-base font-mono font-extrabold tabular-nums tracking-tight ${
                 portfolio ? (pnlPositive ? 'text-emerald-400' : 'text-rose-400') : 'text-zinc-500'
               }`}>
                 {portfolio
@@ -731,28 +748,28 @@ export default function StrategiesPlusPage() {
 
           {portfolio?.success && (
             <>
-              <Separator orientation="vertical" className="h-8 bg-zinc-800" />
+              <Separator orientation="vertical" className="h-7 bg-zinc-800" />
               <div className="flex flex-col">
                 <span className={`${TXT_EYEBROW} text-zinc-400 leading-none`}>Realized</span>
                 <span className={`text-xs font-mono font-bold tabular-nums ${portfolio.total_realized_pnl >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
                   {portfolio.total_realized_pnl >= 0 ? '+' : ''}₹{portfolio.total_realized_pnl.toLocaleString('en-IN', { minimumFractionDigits: 0 })}
                 </span>
               </div>
-              <Separator orientation="vertical" className="h-8 bg-zinc-800" />
+              <Separator orientation="vertical" className="h-7 bg-zinc-800" />
               <div className="flex flex-col">
                 <span className={`${TXT_EYEBROW} text-zinc-400 leading-none`}>Unrealized</span>
                 <span className={`text-xs font-mono font-bold tabular-nums ${portfolio.total_unrealized_pnl >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
                   {portfolio.total_unrealized_pnl >= 0 ? '+' : ''}₹{portfolio.total_unrealized_pnl.toLocaleString('en-IN', { minimumFractionDigits: 0 })}
                 </span>
               </div>
-              <Separator orientation="vertical" className="h-8 bg-zinc-800" />
+              <Separator orientation="vertical" className="h-7 bg-zinc-800" />
               <div className="flex flex-col">
                 <span className={`${TXT_EYEBROW} text-zinc-400 leading-none`}>Margin Avail</span>
                 <span className="text-xs font-mono font-bold text-white tabular-nums">
                   ₹{portfolio.available_funds.toLocaleString('en-IN', { minimumFractionDigits: 0 })}
                 </span>
               </div>
-              <Separator orientation="vertical" className="h-8 bg-zinc-800" />
+              <Separator orientation="vertical" className="h-7 bg-zinc-800" />
               <div className="flex flex-col">
                 <span className={`${TXT_EYEBROW} text-zinc-400 leading-none`}>Positions</span>
                 <span className="text-xs font-mono font-bold text-sky-300 tabular-nums">{portfolio.positions.length}</span>
@@ -768,7 +785,7 @@ export default function StrategiesPlusPage() {
                   disabled={portfolioLoading}
                   className="p-1 rounded text-zinc-500 hover:text-zinc-200 transition-colors disabled:opacity-40"
                 >
-                  <RefreshCw className={`h-3.5 w-3.5 ${portfolioLoading ? 'animate-spin' : ''}`} />
+                  <RefreshCw className={`h-3 w-3 ${portfolioLoading ? 'animate-spin' : ''}`} />
                 </button>
               }
             />
@@ -786,13 +803,13 @@ export default function StrategiesPlusPage() {
         </div>
 
         {/* Right: Operational Controls & Safety Dock */}
-        <div className="flex items-center gap-2.5 shrink-0 flex-wrap">
+        <div className="flex items-center gap-2 shrink-0 flex-wrap">
           {/* P&L Guard Drawer Toggle */}
           <Button
             variant="outline"
             size="sm"
             onClick={() => setShowPnlGuard(v => !v)}
-            className={`gap-1.5 text-xs font-bold rounded-xl transition-all ${
+            className={`gap-1.5 text-xs font-bold rounded-xl transition-all h-8 ${
               showPnlGuard
                 ? 'bg-amber-500/20 border-amber-500/40 text-amber-300'
                 : 'bg-zinc-900 border-zinc-800 text-zinc-400 hover:text-zinc-200'
@@ -811,7 +828,7 @@ export default function StrategiesPlusPage() {
             variant="outline"
             size="sm"
             onClick={() => setShowCopyTrade(v => !v)}
-            className={`gap-1.5 text-xs font-bold rounded-xl transition-all ${
+            className={`gap-1.5 text-xs font-bold rounded-xl transition-all h-8 ${
               showCopyTrade
                 ? 'bg-sky-500/20 border-sky-500/40 text-sky-300'
                 : 'bg-zinc-900 border-zinc-800 text-zinc-400 hover:text-zinc-200'
@@ -825,10 +842,115 @@ export default function StrategiesPlusPage() {
             <ChevronDown className={`h-3 w-3 transition-transform duration-200 ${showCopyTrade ? 'rotate-180' : ''}`} />
           </Button>
 
-          {/* View Filter (Active vs All) */}
+          <Separator orientation="vertical" className="h-6 bg-zinc-800 mx-1" />
+
+          {/* Stop All Button */}
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={handleStopAll}
+            disabled={stoppingAll || runningCount === 0}
+            className={`gap-1.5 text-xs font-bold font-mono rounded-xl h-8 ${
+              confirmStopAll
+                ? 'bg-amber-500/20 border-amber-500 text-amber-300 animate-pulse'
+                : stoppingAll
+                ? 'bg-zinc-900 border-zinc-800 text-zinc-500'
+                : 'bg-zinc-900 border-zinc-800 text-zinc-400 hover:text-zinc-200'
+            }`}
+            title="Gracefully stop all running strategies (write shutdown triggers)"
+          >
+            {stoppingAll ? <RefreshCw className="h-3 w-3 animate-spin" /> : <Power className="h-3 w-3" />}
+            {stoppingAll ? 'Stopping…' : confirmStopAll ? 'Confirm Stop All?' : 'Stop All'}
+          </Button>
+
+          {/* EXIT ALL Button */}
+          <Button
+            variant="destructive"
+            size="sm"
+            onClick={handleExitAll}
+            disabled={exitingAll}
+            className={`gap-1.5 text-xs font-bold font-mono rounded-xl h-8 border ${
+              exitingAll
+                ? 'bg-rose-900/40 border-rose-800 text-rose-400'
+                : confirmExitAll
+                ? 'bg-rose-600 border-rose-500 text-white animate-pulse shadow-lg shadow-rose-500/30'
+                : 'bg-rose-950/70 border-rose-900 text-rose-400 hover:bg-rose-900/50 hover:text-rose-200'
+            }`}
+            title="Emergency flatten: close ALL active positions at broker level"
+          >
+            {exitingAll ? <RefreshCw className="h-3 w-3 animate-spin" /> : <ShieldOff className="h-3 w-3" />}
+            {exitingAll ? 'Exiting…' : confirmExitAll ? 'Confirm EXIT ALL?' : 'EXIT ALL Positions'}
+          </Button>
+        </div>
+      </div>
+
+      {/* ── Sub-Filter & Navigation Command Strip (Search, Horizons, View & Grouping) ── */}
+      <div className="w-full border-b border-zinc-800 bg-zinc-950/70 px-5 py-2 flex items-center justify-between gap-3 flex-wrap">
+        {/* Left: Instant Search & Horizon Filter */}
+        <div className="flex items-center gap-3 flex-wrap flex-1 min-w-[320px]">
+          {/* Search Bar */}
+          <div className="relative flex items-center w-64 max-w-xs">
+            <Search className="absolute left-2.5 h-3.5 w-3.5 text-zinc-500 pointer-events-none" />
+            <Input
+              type="text"
+              value={searchQuery}
+              onChange={e => setSearchQuery(e.target.value)}
+              placeholder="Search strategies, tags..."
+              className="h-8 pl-8 pr-7 bg-zinc-900/90 border-zinc-800 focus:border-zinc-700 text-white text-xs placeholder:text-zinc-500 rounded-xl"
+            />
+            {searchQuery && (
+              <button
+                type="button"
+                onClick={() => setSearchQuery('')}
+                className="absolute right-2 text-zinc-500 hover:text-zinc-300 p-0.5 rounded transition-colors"
+                title="Clear search filter"
+              >
+                <X className="h-3 w-3" />
+              </button>
+            )}
+          </div>
+
+          {/* Horizon Pills */}
+          <div className="flex items-center gap-1.5 p-0.5 bg-zinc-900/90 border border-zinc-800 rounded-xl">
+            {(
+              [
+                { key: 'all', label: 'All Horizons', count: instanceRows.length, running: runningCount },
+                { key: 'intraday', label: '⚡ Intraday', count: intradayTotal, running: intradayRunning },
+                { key: 'positional', label: '🌙 Positional', count: positionalTotal, running: positionalRunning },
+              ] as const
+            ).map(({ key, label, count, running }) => (
+              <button
+                key={key}
+                onClick={() => setHorizonFilter(key)}
+                className={`flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-mono font-bold transition-all ${
+                  horizonFilter === key
+                    ? key === 'intraday'
+                      ? 'bg-amber-500/20 text-amber-300 border border-amber-500/30'
+                      : key === 'positional'
+                      ? 'bg-violet-500/20 text-violet-300 border border-violet-500/30'
+                      : 'bg-zinc-800 text-white border border-zinc-700'
+                    : 'text-zinc-400 hover:text-zinc-200'
+                }`}
+              >
+                <span>{label}</span>
+                <span className="text-[10px] text-zinc-500 font-normal">({count})</span>
+                {running > 0 && (
+                  <span className="inline-flex items-center gap-1 text-[10px] text-emerald-400 font-bold bg-emerald-500/10 px-1 py-0 rounded">
+                    <span className="h-1.5 w-1.5 rounded-full bg-emerald-400 animate-pulse" />
+                    {running}
+                  </span>
+                )}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        {/* Right: View Mode, Grouping Mode & Collapse Controls */}
+        <div className="flex items-center gap-2 shrink-0 flex-wrap">
+          {/* Active vs All View Mode */}
           <Tabs value={viewMode} onValueChange={(v) => setViewMode(v as 'active' | 'all')}>
-            <TabsList className="bg-zinc-900 border border-zinc-800 p-1 rounded-xl h-auto">
-              <TabsTrigger value="active" className="gap-1.5 text-xs font-bold font-mono px-3 py-1 rounded-lg">
+            <TabsList className="bg-zinc-900 border border-zinc-800 p-0.5 rounded-xl h-8">
+              <TabsTrigger value="active" className="gap-1.5 text-xs font-bold font-mono px-2.5 py-1 rounded-lg h-7">
                 <Zap className="h-3 w-3" />
                 Active
                 {runningCount > 0 && (
@@ -837,7 +959,7 @@ export default function StrategiesPlusPage() {
                   </Badge>
                 )}
               </TabsTrigger>
-              <TabsTrigger value="all" className="gap-1.5 text-xs font-bold font-mono px-3 py-1 rounded-lg">
+              <TabsTrigger value="all" className="gap-1.5 text-xs font-bold font-mono px-2.5 py-1 rounded-lg h-7">
                 <LayoutList className="h-3 w-3" />
                 All
                 <Badge variant="secondary" className="h-4 px-1.5 bg-zinc-800 text-zinc-400 border-0 text-[10px] font-mono font-bold">
@@ -847,13 +969,13 @@ export default function StrategiesPlusPage() {
             </TabsList>
           </Tabs>
 
-          {/* Grouping Dimension: Timeframe (Intraday/Positional), Underlying, or Type */}
+          {/* Grouping Dimension: Timeframe (Horizon), Underlying, or Type */}
           <Tabs value={groupMode} onValueChange={(v) => setGroupMode(v as GroupMode)}>
-            <TabsList className="bg-zinc-900 border border-zinc-800 p-1 rounded-xl h-auto">
+            <TabsList className="bg-zinc-900 border border-zinc-800 p-0.5 rounded-xl h-8">
               <Tooltip>
                 <TooltipTrigger
                   render={
-                    <TabsTrigger value="timeframe" className="gap-1.5 text-xs font-bold font-mono px-2.5 py-1 rounded-lg">
+                    <TabsTrigger value="timeframe" className="gap-1.5 text-xs font-bold font-mono px-2 py-1 rounded-lg h-7">
                       <Clock className="h-3 w-3 text-amber-400" />
                       Horizon
                     </TabsTrigger>
@@ -864,7 +986,7 @@ export default function StrategiesPlusPage() {
               <Tooltip>
                 <TooltipTrigger
                   render={
-                    <TabsTrigger value="underlying" className="gap-1.5 text-xs font-bold font-mono px-2.5 py-1 rounded-lg">
+                    <TabsTrigger value="underlying" className="gap-1.5 text-xs font-bold font-mono px-2 py-1 rounded-lg h-7">
                       <ListTree className="h-3 w-3 text-sky-400" />
                       Underlying
                     </TabsTrigger>
@@ -875,7 +997,7 @@ export default function StrategiesPlusPage() {
               <Tooltip>
                 <TooltipTrigger
                   render={
-                    <TabsTrigger value="type" className="gap-1.5 text-xs font-bold font-mono px-2.5 py-1 rounded-lg">
+                    <TabsTrigger value="type" className="gap-1.5 text-xs font-bold font-mono px-2 py-1 rounded-lg h-7">
                       <Boxes className="h-3 w-3 text-violet-400" />
                       Type
                     </TabsTrigger>
@@ -887,7 +1009,7 @@ export default function StrategiesPlusPage() {
           </Tabs>
 
           {/* Expand / Collapse Toggle */}
-          <ToggleGroup variant="outline" size="sm" className="bg-zinc-900 border border-zinc-800 rounded-xl p-0.5">
+          <ToggleGroup variant="outline" size="sm" className="bg-zinc-900 border border-zinc-800 rounded-xl p-0.5 h-8">
             <Tooltip>
               <TooltipTrigger
                 render={
@@ -918,89 +1040,13 @@ export default function StrategiesPlusPage() {
             </Tooltip>
           </ToggleGroup>
 
-          {/* Safety Action Dock */}
-          <div className="flex items-center gap-1.5 rounded-xl border border-rose-950/80 bg-rose-950/20 px-2 py-1">
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={handleStopAll}
-              disabled={stoppingAll || runningCount === 0}
-              className={`gap-1.5 text-xs font-bold font-mono rounded-xl ${
-                confirmStopAll
-                  ? 'bg-amber-500/20 border-amber-500 text-amber-300 animate-pulse'
-                  : stoppingAll
-                  ? 'bg-zinc-900 border-zinc-800 text-zinc-500'
-                  : 'bg-zinc-900 border-zinc-800 text-zinc-400 hover:text-zinc-200'
-              }`}
-              title="Gracefully stop all running strategies (write shutdown triggers)"
-            >
-              {stoppingAll ? <RefreshCw className="h-3 w-3 animate-spin" /> : <Power className="h-3 w-3" />}
-              {stoppingAll ? 'Stopping…' : confirmStopAll ? 'Confirm Stop All?' : 'Stop All'}
-            </Button>
-
-            <Button
-              variant="destructive"
-              size="sm"
-              onClick={handleExitAll}
-              disabled={exitingAll}
-              className={`gap-1.5 text-xs font-bold font-mono rounded-xl border ${
-                exitingAll
-                  ? 'bg-rose-900/40 border-rose-800 text-rose-400'
-                  : confirmExitAll
-                  ? 'bg-rose-600 border-rose-500 text-white animate-pulse shadow-lg shadow-rose-500/30'
-                  : 'bg-rose-950/70 border-rose-900 text-rose-400 hover:bg-rose-900/50 hover:text-rose-200'
-              }`}
-              title="Emergency flatten: close ALL active positions at broker level"
-            >
-              {exitingAll ? <RefreshCw className="h-3 w-3 animate-spin" /> : <ShieldOff className="h-3 w-3" />}
-              {exitingAll ? 'Exiting…' : confirmExitAll ? 'Confirm EXIT ALL?' : 'EXIT ALL Positions'}
-            </Button>
+          {/* Active Count Capsule */}
+          <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-xl bg-zinc-900 border border-zinc-800 text-xs font-mono text-zinc-400 h-8">
+            <Activity className={`h-3.5 w-3.5 ${runningCount > 0 ? 'text-emerald-400' : 'text-zinc-600'}`} />
+            <span>
+              <strong className="text-white">{runningCount}</strong>/{instanceRows.length} live
+            </span>
           </div>
-        </div>
-      </div>
-
-      {/* ── Sub-Filter Ribbon (Horizon Pills: All / Intraday / Positional) ── */}
-      <div className="w-full border-b border-zinc-800/80 bg-zinc-950/60 px-5 py-2 flex items-center justify-between gap-4 flex-wrap">
-        <div className="flex items-center gap-2 flex-wrap">
-          <span className="text-[10px] font-bold text-zinc-400 uppercase tracking-widest mr-1">Filter Horizon:</span>
-          {(
-            [
-              { key: 'all', label: 'All Horizons', count: instanceRows.length, running: runningCount, icon: Layers },
-              { key: 'intraday', label: '⚡ Intraday Only', count: intradayTotal, running: intradayRunning, icon: Clock },
-              { key: 'positional', label: '🌙 Positional & Multi-Day', count: positionalTotal, running: positionalRunning, icon: Calendar },
-            ] as const
-          ).map(({ key, label, count, running, icon: Icon }) => (
-            <button
-              key={key}
-              onClick={() => setHorizonFilter(key)}
-              className={`flex items-center gap-2 px-3 py-1 rounded-xl text-xs font-mono font-bold transition-all ${
-                horizonFilter === key
-                  ? key === 'intraday'
-                    ? 'bg-amber-500/15 text-amber-300 border border-amber-500/30'
-                    : key === 'positional'
-                    ? 'bg-violet-500/15 text-violet-300 border border-violet-500/30'
-                    : 'bg-emerald-500/15 text-emerald-300 border border-emerald-500/30'
-                  : 'bg-zinc-900/60 text-zinc-400 border border-zinc-800 hover:text-zinc-200'
-              }`}
-            >
-              <Icon className="h-3.5 w-3.5" />
-              <span>{label}</span>
-              <span className="text-[10px] text-zinc-400 font-normal">({count})</span>
-              {running > 0 && (
-                <span className="inline-flex items-center gap-1 text-[10px] text-emerald-400 font-bold bg-emerald-500/10 px-1.5 py-0.2 rounded">
-                  <span className="h-1.5 w-1.5 rounded-full bg-emerald-400 animate-pulse" />
-                  {running}
-                </span>
-              )}
-            </button>
-          ))}
-        </div>
-
-        <div className="flex items-center gap-2 text-xs font-mono text-zinc-400">
-          <Activity className={`h-3.5 w-3.5 ${runningCount > 0 ? 'text-emerald-400' : 'text-zinc-600'}`} />
-          <span>
-            <strong className="text-white">{runningCount}</strong> / {instanceRows.length} active process{runningCount === 1 ? '' : 'es'}
-          </span>
         </div>
       </div>
 
@@ -1284,6 +1330,27 @@ export default function StrategiesPlusPage() {
             <p className="text-sm font-bold text-rose-400 font-mono">Connection Failed</p>
             <p className="text-xs text-zinc-400 mt-1">{error}</p>
           </div>
+        ) : searchQuery && displayList.length === 0 ? (
+          <div className="flex flex-col items-center justify-center p-14 text-center min-h-[260px] bg-zinc-900/30 border border-zinc-800 rounded-2xl gap-3">
+            <div className="h-10 w-10 rounded-xl bg-zinc-900 border border-zinc-800 flex items-center justify-center text-zinc-500">
+              <Search className="h-5 w-5" />
+            </div>
+            <div>
+              <p className="text-sm font-bold text-zinc-300">No matching strategies found</p>
+              <p className="text-xs text-zinc-500 mt-1 max-w-sm">
+                No algorithms match your search query <code className="text-emerald-400 font-mono font-bold bg-zinc-900 px-1.5 py-0.5 rounded border border-zinc-800">&quot;{searchQuery}&quot;</code>.
+              </p>
+            </div>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => setSearchQuery('')}
+              className="mt-1 gap-1.5 rounded-xl border-zinc-700 bg-zinc-900 text-zinc-300 hover:text-white text-xs font-bold font-mono"
+            >
+              <X className="h-3.5 w-3.5" />
+              Clear Search Query
+            </Button>
+          </div>
         ) : viewMode === 'active' && activeList.length === 0 ? (
           <div className="flex flex-col items-center justify-center p-16 min-h-[320px] gap-3 bg-zinc-900/30 border border-zinc-800 rounded-2xl text-center">
             <div className="h-12 w-12 rounded-2xl bg-zinc-900 border border-zinc-800 flex items-center justify-center text-zinc-500">
@@ -1304,75 +1371,21 @@ export default function StrategiesPlusPage() {
           </div>
         ) : (
           <div className="w-full space-y-4">
-            {/* ── Time Horizon Hub Overview (Visible in Horizon group mode) ── */}
-            {groupMode === 'timeframe' && (
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-3.5 mb-4">
-                {activeGroupedList.map(({ underlying: groupKey, items: rows, runningCount: groupRunning, pnl: groupPnl }) => {
-                  const info = TIMEFRAME_GROUPS[groupKey] ?? OTHER_TIMEFRAME_GROUP;
-                  const a = ACCENT_CLASSES[info.accent] ?? ACCENT_CLASSES.zinc;
-                  const Icon = info.icon;
-                  const open = groups.isOpen(groupKey, groupRunning > 0);
-                  return (
-                    <button
-                      key={groupKey}
-                      type="button"
-                      onClick={() => groups.toggle(groupKey, open)}
-                      aria-expanded={open}
-                      className={`group relative flex items-start gap-3.5 rounded-2xl border border-zinc-800 bg-zinc-900/60 p-4 text-left transition-all duration-200 overflow-hidden ${a.ring}`}
-                    >
-                      <div className={`flex items-center justify-center w-10 h-10 rounded-xl ${a.iconBg} border ${a.iconBorder} shrink-0 mt-0.5`}>
-                        <Icon className={`h-5 w-5 ${a.icon}`} />
-                      </div>
-                      <div className="flex-1 min-w-0">
-                        <div className="flex items-center justify-between gap-2 mb-1">
-                          <span className={`text-[9px] font-mono font-bold px-2 py-0.5 rounded border ${a.badge}`}>
-                            {info.badge}
-                          </span>
-                          <span className="text-xs font-mono font-bold text-zinc-400">
-                            {rows.length} strateg{rows.length === 1 ? 'y' : 'ies'}
-                          </span>
-                        </div>
-                        <h3 className="text-sm font-bold text-white tracking-tight">{info.title}</h3>
-                        <p className="text-[11px] text-zinc-400 font-medium leading-snug mt-0.5 line-clamp-2">
-                          {info.tagline}
-                        </p>
-                        <div className="flex items-center gap-3 mt-2 font-mono text-xs">
-                          {groupRunning > 0 ? (
-                            <span className="flex items-center gap-1.5 text-emerald-400 font-bold">
-                              <span className="h-2 w-2 rounded-full bg-emerald-400 animate-pulse" />
-                              {groupRunning} Live
-                            </span>
-                          ) : (
-                            <span className="text-zinc-500 font-medium">0 running</span>
-                          )}
-                          {groupRunning > 0 && groupPnl !== 0 && (
-                            <span className={`font-bold tabular-nums ${groupPnl >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
-                              P&amp;L: {signedInr(groupPnl)}
-                            </span>
-                          )}
-                        </div>
-                      </div>
-                    </button>
-                  );
-                })}
-              </div>
-            )}
-
             {/* ── Table Column Header Bar ── */}
             <div className="flex items-center gap-0 px-4 py-2 border border-zinc-800 bg-zinc-800 rounded-xl">
-              <div className="w-[90px] shrink-0 text-xs font-bold text-white font-sans">Status</div>
-              <div className="w-[250px] shrink-0 text-xs font-bold text-white font-sans">Strategy &amp; Mode</div>
+              <div className="w-[95px] shrink-0 text-xs font-bold text-white font-sans">Status</div>
+              <div className="w-[280px] shrink-0 text-xs font-bold text-white font-sans">Strategy &amp; Mode</div>
               <div className="w-px mx-2" />
               <div className="flex-1 text-xs font-bold text-white font-sans">Live Position &amp; Parameters</div>
-              <div className="shrink-0 w-[90px] text-right text-xs font-bold text-white font-sans">Session P&amp;L</div>
+              <div className="shrink-0 w-[100px] text-right text-xs font-bold text-white font-sans">Session P&amp;L</div>
               <div className="w-px mx-3" />
-              <div className="shrink-0 w-[170px] text-xs font-bold text-white font-sans text-right pr-2">Execution Actions</div>
+              <div className="shrink-0 w-[190px] text-xs font-bold text-white font-sans text-right pr-2">Execution Actions</div>
             </div>
 
             {/* ── Strategy Grouped Sections ── */}
             <div className="space-y-4">
               {activeGroupedList.map(({ underlying: groupKey, items: rows, runningCount: groupRunning, pnl: groupPnl }) => {
-                const open = groups.isOpen(groupKey, groupRunning > 0);
+                const open = searchQuery.trim() ? true : groups.isOpen(groupKey, groupRunning > 0);
                 const isTimeframe = groupMode === 'timeframe';
                 const tfInfo = isTimeframe ? (TIMEFRAME_GROUPS[groupKey] ?? OTHER_TIMEFRAME_GROUP) : null;
                 const typeInfo = groupMode === 'type' ? (LOGIC_GROUPS[groupKey] ?? OTHER_LOGIC_GROUP) : null;

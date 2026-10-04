@@ -1,7 +1,7 @@
 'use client';
 
 import React, { useState, useEffect } from 'react';
-import { Play, Square, Settings, ShieldAlert, Loader2, ChevronDown, ChevronUp, Terminal, RotateCcw, BookOpen } from 'lucide-react';
+import { Play, Square, Settings, ShieldAlert, Loader2, ChevronDown, ChevronUp, Terminal, RotateCcw, BookOpen, SlidersHorizontal } from 'lucide-react';
 import LogConsole from './LogConsole';
 import StrategyReadmeModal from './StrategyReadmeModal';
 import { Button } from '@/components/ui/button';
@@ -19,6 +19,8 @@ interface StrategyMeta {
   key: string;
   name: string;
   underlying?: string;
+  timeframe?: string;
+  logicGroup?: string;
   execBrokerEligible?: boolean;
 }
 
@@ -87,6 +89,14 @@ interface StrategyState {
   roll_type?: 'points' | 'percentage'; roll_buffer?: number; roll_trigger_pct?: number; ref_spot?: number; max_rolls?: number; roll_count?: number;
   current_atm?: number | null; upper_bound?: number | null; lower_bound?: number | null;
   broker?: string;
+  // Iron Condor to Ratio Spread
+  stage?: string;
+  position_open?: boolean;
+  legs?: Record<string, { symbol?: string; strike?: number; option_type?: string; side?: string; lots?: number; qty?: number; entry_price?: number; current_ltp?: number; delta?: number }>;
+  shifts_count?: number;
+  reversals_count?: number;
+  target_rs?: number;
+  stop_rs?: number;
 }
 
 interface Props {
@@ -273,6 +283,49 @@ function StrategyRowWide({ meta, state, onRefresh, instanceId, onAddInstance, on
   const [dsHardSlMultiple, setDsHardSlMultiple] = useState(3.0);
   const [dsNoHardSl, setDsNoHardSl] = useState(false);
 
+  // Iron Condor to Ratio Spread (Monthly)
+  const [crTargetProfit, setCrTargetProfit] = useState('15%');
+  const [crStopLoss, setCrStopLoss] = useState('15%');
+  const [crCondorShortDelta, setCrCondorShortDelta] = useState(0.30);
+  const [crCondorHedgeDelta, setCrCondorHedgeDelta] = useState(0.10);
+  const [crCondorExitDelta, setCrCondorExitDelta] = useState(0.10);
+  const [crRatioLongDelta, setCrRatioLongDelta] = useState(0.50);
+  const [crRatioShortDelta, setCrRatioShortDelta] = useState(0.40);
+  const [crRatioHedgeDelta, setCrRatioHedgeDelta] = useState(0.10);
+  const [crRatioShiftDelta, setCrRatioShiftDelta] = useState(0.10);
+  const [crRatioReversalDelta, setCrRatioReversalDelta] = useState(0.60);
+  const [crShiftLongDelta, setCrShiftLongDelta] = useState(0.40);
+  const [crShiftShortDelta, setCrShiftShortDelta] = useState(0.30);
+  const [crShiftHedgeDelta, setCrShiftHedgeDelta] = useState(0.08);
+  const [crMaxShifts, setCrMaxShifts] = useState(5);
+  const [crMaxReversals, setCrMaxReversals] = useState(3);
+  const [crTrailStartRs, setCrTrailStartRs] = useState(5000);
+  const [crTrailGapRs, setCrTrailGapRs] = useState(2500);
+  const [crExpiryType, setCrExpiryType] = useState<'monthly' | 'nearest'>('monthly');
+  const [crMinDte, setCrMinDte] = useState(15);
+  const [crMaxDte, setCrMaxDte] = useState(45);
+  const [crStartTime, setCrStartTime] = useState('09:20');
+  const [crEntryEnd, setCrEntryEnd] = useState('15:00');
+  const [crEodExitTime, setCrEodExitTime] = useState('15:15');
+  const [crProduct, setCrProduct] = useState<'MARGIN' | 'INTRADAY'>('MARGIN');
+
+  // Nifty Bi-Weekly Adaptive Strangle
+  const [asTargetProfit, setAsTargetProfit] = useState('5%');
+  const [asStopLoss, setAsStopLoss] = useState('4%');
+  const [asEntryDelta, setAsEntryDelta] = useState(0.10);
+  const [asHedgeDeltaTrigger, setAsHedgeDeltaTrigger] = useState(0.22);
+  const [asHedgeTargetDelta, setAsHedgeTargetDelta] = useState(0.08);
+  const [asVegaSurgePct, setAsVegaSurgePct] = useState(20.0);
+  const [asEnableDirectionalConversion, setAsEnableDirectionalConversion] = useState(false);
+  const [asConversionDeltaTrigger, setAsConversionDeltaTrigger] = useState(0.30);
+  const [asConversionStyle, setAsConversionStyle] = useState<'spread' | 'ratio'>('spread');
+  const [asTrailStartRs, setAsTrailStartRs] = useState(0);
+  const [asTrailGapRs, setAsTrailGapRs] = useState(0);
+  const [asEntryTime, setAsEntryTime] = useState('09:20');
+  const [asEntryEnd, setAsEntryEnd] = useState('15:00');
+  const [asEodExitTime, setAsEodExitTime] = useState('15:15');
+  const [asProduct, setAsProduct] = useState<'MARGIN' | 'INTRADAY'>('MARGIN');
+
   const spreadTrendNoIndicators = meta.key === 'nifty_spread_trend' && !useEma && !useSupertrend;
 
   // reentry_straddle rejects a non-default --max-lots (it never scales lots), so the flag is
@@ -290,7 +343,8 @@ function StrategyRowWide({ meta, state, onRefresh, instanceId, onAddInstance, on
   // the strategy has not noticed.
   const hasTrackedPosition = Boolean(
     (state.direction && state.direction !== 'NONE') ||
-    state.in_position || state.ce_strike || state.pe_strike || state.active_spread || state.sold_strike
+    state.in_position || state.ce_strike || state.pe_strike || state.active_spread || state.sold_strike ||
+    state.position_open || (state.stage && state.stage !== 'FLAT')
   );
 
   useEffect(() => {
@@ -358,6 +412,14 @@ function StrategyRowWide({ meta, state, onRefresh, instanceId, onAddInstance, on
       } else if (meta.key === 'nifty_delta_strangle') {
         args.push('--target-capital', String(dsTargetCapital));
         if (!dsAutoLots) args.push('--lots', String(dsLots));
+      } else if (meta.key === 'nifty_condor_ratio') {
+        args.push('--lots', String(lots));
+        args.push('--target-profit', crTargetProfit.trim());
+        args.push('--stop-loss', crStopLoss.trim());
+      } else if (meta.key === 'nifty_adaptive_strangle') {
+        args.push('--lots', String(lots));
+        args.push('--target-profit', asTargetProfit.trim());
+        args.push('--stop-loss', asStopLoss.trim());
       } else {
         args.push('--lots', String(lots));
         args.push('--target-profit', profitTarget.trim());
@@ -543,6 +605,48 @@ function StrategyRowWide({ meta, state, onRefresh, instanceId, onAddInstance, on
         args.push('--poll-interval', String(dsPollInterval));
         args.push('--hard-sl-multiple', String(dsHardSlMultiple));
         if (dsNoHardSl) args.push('--no-hard-sl');
+      } else if (meta.key === 'nifty_condor_ratio') {
+        args.push('--condor-short-delta', String(crCondorShortDelta));
+        args.push('--condor-hedge-delta', String(crCondorHedgeDelta));
+        args.push('--condor-exit-delta', String(crCondorExitDelta));
+        args.push('--ratio-long-delta', String(crRatioLongDelta));
+        args.push('--ratio-short-delta', String(crRatioShortDelta));
+        args.push('--ratio-hedge-delta', String(crRatioHedgeDelta));
+        args.push('--ratio-shift-delta', String(crRatioShiftDelta));
+        args.push('--ratio-reversal-delta', String(crRatioReversalDelta));
+        args.push('--shift-long-delta', String(crShiftLongDelta));
+        args.push('--shift-short-delta', String(crShiftShortDelta));
+        args.push('--shift-hedge-delta', String(crShiftHedgeDelta));
+        args.push('--max-shifts', String(crMaxShifts));
+        args.push('--max-reversals', String(crMaxReversals));
+        args.push('--trail-start-rs', String(crTrailStartRs));
+        args.push('--trail-gap-rs', String(crTrailGapRs));
+        args.push('--expiry-type', crExpiryType);
+        args.push('--min-dte', String(crMinDte));
+        args.push('--max-dte', String(crMaxDte));
+        args.push('--start-time', crStartTime);
+        args.push('--entry-end', crEntryEnd);
+        args.push('--eod-exit-time', crEodExitTime);
+        args.push('--product', crProduct);
+        if (isLive) {
+          args.push('--i-understand-this-is-unvalidated');
+        }
+      } else if (meta.key === 'nifty_adaptive_strangle') {
+        args.push('--entry-delta', String(asEntryDelta));
+        args.push('--hedge-delta-trigger', String(asHedgeDeltaTrigger));
+        args.push('--hedge-target-delta', String(asHedgeTargetDelta));
+        args.push('--vega-surge-pct', String(asVegaSurgePct));
+        if (asEnableDirectionalConversion) {
+          args.push('--enable-directional-conversion');
+          args.push('--conversion-delta-trigger', String(asConversionDeltaTrigger));
+          args.push('--conversion-style', asConversionStyle);
+        }
+        if (asTrailStartRs > 0) args.push('--trail-start-rs', String(asTrailStartRs));
+        if (asTrailGapRs > 0) args.push('--trail-gap-rs', String(asTrailGapRs));
+        args.push('--entry-time', asEntryTime);
+        args.push('--entry-end', asEntryEnd);
+        args.push('--eod-exit-time', asEodExitTime);
+        args.push('--product', asProduct);
       }
 
       const payload: any = { action: 'start', strategy: meta.key, args, instanceId };
@@ -619,6 +723,121 @@ function StrategyRowWide({ meta, state, onRefresh, instanceId, onAddInstance, on
     }
   };
 
+  const getStrategyProfile = (metaKey: string): { summary: string; tags: string[] } => {
+    switch (metaKey) {
+      case 'nifty_adaptive_strangle':
+        return {
+          summary: 'Bi-Weekly ~0.10Δ far-OTM strangle · Greek-gated wings (0.22Δ / 20% Vega) · Directional trend conversion',
+          tags: ['Bi-Weekly 0.10Δ', 'Delta & Vega Wings', 'Trend Shift', 'Positional'],
+        };
+      case 'nifty_condor_ratio':
+        return {
+          summary: 'Monthly 0.30Δ Iron Condor · Transitions into directional Ratio Spread on breakout · Trend shifting & reversals',
+          tags: ['Monthly IC', 'Ratio Spread', 'Breakout Shift', 'Positional'],
+        };
+      case 'nifty_flyagonal':
+        return {
+          summary: 'Call Broken-Wing Butterfly + Put Diagonal · Positional defined-risk volatility harvest',
+          tags: ['Call BWB', 'Put Diagonal', 'Defined Risk', 'Positional'],
+        };
+      case 'nifty_volcano_calendar':
+        return {
+          summary: 'Put Butterfly + Call Calendar combo · Monthly hold with 2%/2% margin target & stop',
+          tags: ['Put Fly', 'Call Calendar', '2%/2% Target/Stop', 'Positional'],
+        };
+      case 'nifty_put_condor':
+        return {
+          summary: 'Double Bear Put Spread (BUY/SELL/SELL/BUY) · Monthly hold with partial profit booking',
+          tags: ['Double Bear Put', 'Puts Only', 'Partial Exit', 'Positional'],
+        };
+      case 'nifty_delta_strangle':
+        return {
+          summary: 'Weekly dynamic strangle · Auto-sized by capital · Symmetric delta rebalance and rolling',
+          tags: ['Weekly Strangle', 'Delta Roll', 'Capital Sized', 'Positional'],
+        };
+      case 'nifty_overnight_fly':
+        return {
+          summary: 'Overnight hedged short straddle · Expiry-day theta decay capture with automated roll protection',
+          tags: ['Hedged Straddle', 'Overnight', 'Expiry Theta', 'Positional'],
+        };
+      case 'nifty500_momentum':
+        return {
+          summary: 'Nifty 500 relative-strength equity momentum · 200-SMA regime filter · Weekly top-rank rotation',
+          tags: ['Nifty 500', 'CNC Delivery', '200-SMA Filter', 'Positional'],
+        };
+      case 'nifty50_vwap_rs':
+        return {
+          summary: 'Nifty 50 intraday equity auto-trader · Multi-symbol VWAP pullback + RS index momentum',
+          tags: ['Nifty 50 Basket', 'Intraday VWAP', 'RS Momentum', 'SIM Mode'],
+        };
+      case 'nifty_advanced_imbalance':
+        return {
+          summary: 'Advanced value imbalance straddle/strangle · Winner-roll ATM & loser-OTM adjustments · Scalp floor locks',
+          tags: ['ATM Straddle/Strangle', 'Winner Roll', 'Scalp Locks', 'Intraday'],
+        };
+      case 'nifty_spread_trend':
+        return {
+          summary: 'Trend-following Bear Call / Bull Put vertical spread · Supertrend + EMA20 directional filter',
+          tags: ['Vertical Spread', 'Supertrend', 'EMA20', 'Intraday'],
+        };
+      case 'nifty_st_oi_bearcall':
+        return {
+          summary: 'Dual Supertrend (index + option) · Open Interest short buildup bear call spread',
+          tags: ['Bear Call', 'Dual Supertrend', 'OI Buildup', 'Intraday'],
+        };
+      case 'nifty_rolling_straddle':
+        return {
+          summary: 'Rolling ATM short straddle · Continuous roll-buffer strike shifts · Imbalance rebalancing',
+          tags: ['Rolling Straddle', 'Roll Buffer', 'Theta Harvest', 'Intraday'],
+        };
+      case 'nifty_winner_roll_straddle':
+        return {
+          summary: 'Winner-roll short straddle · Continuous winner leg re-centering · OTM loser protection',
+          tags: ['Winner Roll', 'ATM Straddle', 'Theta Harvest', 'Intraday'],
+        };
+      case 'nifty_value_imbalance_straddle':
+        return {
+          summary: 'Classic value imbalance ATM straddle · Premium disparity lot additions & strike shifts',
+          tags: ['Classic Straddle', 'Value Balance', 'Strike Shift', 'Intraday'],
+        };
+      case 'nifty_value_imbalance_strangle':
+        return {
+          summary: 'Classic value imbalance OTM strangle · Configurable strike offset & trailing stop-loss',
+          tags: ['OTM Strangle', 'Value Balance', 'Trailing SL', 'Intraday'],
+        };
+      case 'crudeoilm_supertrend':
+        return {
+          summary: 'MCX CRUDEOILM futures · Supertrend 7/3.0 trend follower · Cumulative ₹ target & stop',
+          tags: ['MCX Crude', 'Supertrend', 'Target/Stop ₹', 'Intraday'],
+        };
+      case 'crudeoilm_renko_sar':
+        return {
+          summary: 'MCX CRUDEOILM futures · Brick-based Renko stop-and-reverse continuous momentum',
+          tags: ['MCX Crude', 'Renko SAR', 'Continuous Trend', 'Intraday'],
+        };
+      case 'crudeoilm_vwap_supertrend':
+        return {
+          summary: 'MCX CRUDEOILM futures · VWAP pullback entry with Supertrend momentum confirmation',
+          tags: ['MCX Crude', 'VWAP Pullback', 'Supertrend', 'Intraday'],
+        };
+      case 'crudeoilm_orb':
+        return {
+          summary: 'MCX CRUDEOILM futures · Opening Range Breakout with daily pivot filter & stop-loss',
+          tags: ['MCX Crude', 'ORB Breakout', 'Pivot Filter', 'Intraday'],
+        };
+      case 'crudeoilm_ema_supertrend':
+        return {
+          summary: 'MCX CRUDEOILM futures · Dual EMA + Supertrend trend alignment filter',
+          tags: ['MCX Crude', 'Dual EMA', 'Supertrend', 'Intraday'],
+        };
+      default:
+        return {
+          summary: `${meta.underlying || 'Index'} ${meta.timeframe === 'positional' ? 'Positional' : 'Intraday'} quantitative execution strategy`,
+          tags: [meta.underlying || 'NIFTY', meta.timeframe === 'positional' ? 'Positional' : 'Intraday'],
+        };
+    }
+  };
+
   const STATUS_MAP: Record<string, { dot: string; text: string; badge: string }> = {
     RUNNING:      { dot: 'bg-emerald-400', text: 'text-emerald-400', badge: 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20' },
     MONITORING:   { dot: 'bg-sky-400',     text: 'text-sky-400',     badge: 'bg-sky-500/10 text-sky-400 border-sky-500/20' },
@@ -631,24 +850,127 @@ function StrategyRowWide({ meta, state, onRefresh, instanceId, onAddInstance, on
     ? { dot: 'bg-amber-400', text: 'text-amber-400', badge: 'bg-amber-500/10 text-amber-400 border-amber-500/20' }
     : STATUS_MAP[state.status];
 
-  const lbl = 'text-[9px] text-zinc-300 uppercase tracking-wider font-semibold leading-none mb-0.5';
+  const lbl = 'text-[10px] text-zinc-400 uppercase tracking-wider font-semibold leading-none mb-1';
   const val = 'font-mono font-bold text-xs text-white leading-tight';
-  const fieldCls = 'flex flex-col gap-1';
-  const inputCls = 'bg-zinc-900/80 border-zinc-800 text-white font-mono h-7 text-xs';
+  const fieldCls = 'flex flex-col gap-1 min-w-[76px]';
+  const inputCls = 'bg-zinc-900 border border-zinc-800 focus:border-zinc-600 focus:outline-none focus:ring-1 focus:ring-zinc-600 text-white font-mono h-8 text-xs rounded-lg px-2.5 shadow-inner transition-colors';
 
   const FieldLabel = ({ text, tip, className }: { text: string; tip: string; className?: string }) => (
     <Tooltip>
       <TooltipTrigger
-        className={`${className ?? lbl} cursor-help underline decoration-dotted decoration-zinc-600 underline-offset-2 text-left w-fit`}
+        className={`${className ?? 'text-[10px] text-zinc-400 uppercase tracking-wider font-bold leading-none mb-0.5'} cursor-help hover:text-zinc-200 transition-colors text-left w-fit select-none`}
       >
         {text}
       </TooltipTrigger>
-      <TooltipContent>{tip}</TooltipContent>
+      <TooltipContent className="bg-zinc-900 border-zinc-800 text-zinc-200 text-xs shadow-xl">{tip}</TooltipContent>
     </Tooltip>
   );
 
   /* ── LIVE STATS CELLS ─────────────────────────────────────── */
   const liveStats = () => {
+    if (meta.key === 'nifty_condor_ratio') {
+      const legs = (state as any).legs || {};
+      const stage = (state as any).stage || (state.position_open ? 'ACTIVE' : 'FLAT');
+      const direction = state.direction || 'NONE';
+      const isCondor = stage === 'CONDOR';
+      const isRatio = stage === 'RATIO';
+
+      return (
+        <div className="flex items-stretch divide-x divide-zinc-800/60">
+          {state.spot != null && state.spot > 0 && (
+            <div className="px-3 flex flex-col justify-center shrink-0">
+              <div className={lbl}>Spot</div>
+              <div className={val}>{state.spot.toFixed(1)}</div>
+              {(state as any).expiry && (
+                <div className="text-[9px] text-zinc-500 font-mono">{(state as any).expiry}</div>
+              )}
+            </div>
+          )}
+          <div className="px-3 flex flex-col justify-center shrink-0">
+            <div className={lbl}>Stage / Direction</div>
+            <div className="flex items-center gap-1.5">
+              <span className={`font-mono font-bold text-xs ${
+                isRatio ? (direction === 'CALL' ? 'text-amber-400' : 'text-purple-400') :
+                isCondor ? 'text-sky-400' : 'text-zinc-500'
+              }`}>
+                {stage}
+              </span>
+              {direction !== 'NONE' && (
+                <span className={`text-[9px] font-bold px-1 rounded ${
+                  direction === 'CALL' ? 'bg-amber-500/20 text-amber-300' : 'bg-purple-500/20 text-purple-300'
+                }`}>
+                  {direction}
+                </span>
+              )}
+            </div>
+            <div className="text-[9px] text-zinc-400 font-mono">
+              Shifts {(state as any).shifts_count ?? 0} · Flips {(state as any).reversals_count ?? 0}
+            </div>
+          </div>
+
+          <div className="px-3 flex flex-col justify-center min-w-[140px]">
+            <div className={lbl}>{isCondor ? 'Condor Strikes (Δ)' : isRatio ? 'Ratio Strikes (Δ)' : 'Position'}</div>
+            {state.position_open ? (
+              isCondor ? (
+                <div className="text-[10px] font-mono leading-tight space-y-0.5">
+                  <div className="text-emerald-400">
+                    CE -{legs.short_ce?.strike ?? '—'} (Δ{legs.short_ce?.delta?.toFixed(2) ?? '—'}) · +{legs.hedge_ce?.strike ?? '—'}
+                  </div>
+                  <div className="text-rose-400">
+                    PE -{legs.short_pe?.strike ?? '—'} (Δ{legs.short_pe?.delta?.toFixed(2) ?? '—'}) · +{legs.hedge_pe?.strike ?? '—'}
+                  </div>
+                </div>
+              ) : isRatio ? (
+                <div className="text-[10px] font-mono leading-tight space-y-0.5">
+                  <div className="text-zinc-200">
+                    +1x {legs.long_opt?.strike ?? '—'} (Δ{legs.long_opt?.delta?.toFixed(2) ?? '—'})
+                  </div>
+                  <div className="text-amber-400">
+                    -2x {legs.short_opt?.strike ?? '—'} (Δ{legs.short_opt?.delta?.toFixed(2) ?? '—'}) · +1x {legs.hedge_opt?.strike ?? '—'}
+                  </div>
+                </div>
+              ) : (
+                <div className="text-xs font-mono text-zinc-300">ACTIVE</div>
+              )
+            ) : (
+              <div className="text-xs font-mono text-zinc-600">FLAT (Waiting Entry)</div>
+            )}
+          </div>
+
+          <div className="px-3 flex flex-col justify-center shrink-0">
+            <div className={lbl}>Tgt / SL</div>
+            <div className="text-[10px] font-mono whitespace-nowrap text-zinc-300">
+              Tgt: <span className="text-emerald-400">{(state as any).target_rs != null ? `₹${Math.round((state as any).target_rs)}` : '—'}</span>
+            </div>
+            <div className="text-[9px] font-mono whitespace-nowrap text-zinc-400">
+              SL: <span className="text-rose-400">{(state as any).stop_rs != null ? `₹${Math.round((state as any).stop_rs)}` : '—'}</span>
+            </div>
+          </div>
+
+          {(state as any).trail_active != null && (
+            <div className="px-3 flex flex-col justify-center shrink-0">
+              <div className={lbl}>Trail SL</div>
+              {(state as any).trail_active ? (
+                <>
+                  <div className="font-mono font-bold text-[10px] text-amber-400">ACTIVE</div>
+                  <div className="text-[9px] text-zinc-300 font-mono whitespace-nowrap">
+                    best ₹{Math.round((state as any).best_pnl ?? 0)}
+                  </div>
+                </>
+              ) : (
+                <>
+                  <div className="font-mono text-[10px] text-zinc-500">ARMED</div>
+                  <div className="text-[9px] text-zinc-500 font-mono whitespace-nowrap">
+                    peak ₹{Math.round((state as any).best_pnl ?? 0)}
+                  </div>
+                </>
+              )}
+            </div>
+          )}
+        </div>
+      );
+    }
+
     if (meta.key === 'nifty_rolling_straddle') {
       return (
         <div className="flex items-stretch divide-x divide-zinc-800/60">
@@ -1198,8 +1520,32 @@ function StrategyRowWide({ meta, state, onRefresh, instanceId, onAddInstance, on
 
   /* ── CONFIG PANEL ─────────────────────────────────────────── */
   const configPanel = (
-    <div className="border-t border-zinc-800/60 px-4 py-3 bg-zinc-950/60">
-      <div className="flex flex-wrap gap-2.5 text-xs">
+    <div className="border-t border-zinc-800/80 bg-zinc-950/80 px-5 py-4">
+      {/* Drawer Header */}
+      <div className="flex items-center justify-between gap-3 mb-3.5 pb-2.5 border-b border-zinc-800/60 flex-wrap">
+        <div className="flex items-center gap-2">
+          <SlidersHorizontal className="h-3.5 w-3.5 text-emerald-400" />
+          <span className="text-xs font-bold text-white tracking-wide uppercase font-mono">
+            {meta.name} Configuration &amp; Risk Parameters
+          </span>
+          {instanceId && (
+            <Badge variant="outline" className="text-[10px] font-mono border-zinc-700 text-zinc-400">
+              Run #{instanceId}
+            </Badge>
+          )}
+        </div>
+        <div className="flex items-center gap-2">
+          <span className={`text-[10px] font-mono font-bold px-2 py-0.5 rounded border ${
+            isLive
+              ? 'bg-rose-500/10 border-rose-500/30 text-rose-300 animate-pulse'
+              : 'bg-zinc-800/60 border-zinc-700/60 text-zinc-400'
+          }`}>
+            {isLive ? '⚠️ LIVE BROKER TRADING' : 'SIMULATION MODE (NO REAL ORDERS)'}
+          </span>
+        </div>
+      </div>
+
+      <div className="flex flex-wrap items-end gap-3 text-xs">
         <div className={fieldCls}>
           <FieldLabel text="Execution" tip="Dry run (default) only simulates/logs orders. LIVE places real broker orders." />
           <div className="flex items-center gap-2 h-7">
@@ -1436,7 +1782,7 @@ function StrategyRowWide({ meta, state, onRefresh, instanceId, onAddInstance, on
           </>
         )}
 
-        {meta.key !== 'nifty_spread_trend' && meta.key !== 'crudeoilm_supertrend' && meta.key !== 'crudeoilm_renko_sar' && meta.key !== 'crudeoilm_vwap_supertrend' && meta.key !== 'crudeoilm_ema_supertrend' && meta.key !== 'nifty_st_oi_bearcall' && meta.key !== 'nifty500_momentum' && meta.key !== 'nifty_delta_strangle' && meta.key !== 'nifty_flyagonal' && meta.key !== 'nifty_volcano_calendar' && meta.key !== 'nifty_put_condor' && (
+        {meta.key !== 'nifty_spread_trend' && meta.key !== 'crudeoilm_supertrend' && meta.key !== 'crudeoilm_renko_sar' && meta.key !== 'crudeoilm_vwap_supertrend' && meta.key !== 'crudeoilm_ema_supertrend' && meta.key !== 'nifty_st_oi_bearcall' && meta.key !== 'nifty500_momentum' && meta.key !== 'nifty_delta_strangle' && meta.key !== 'nifty_flyagonal' && meta.key !== 'nifty_volcano_calendar' && meta.key !== 'nifty_put_condor' && meta.key !== 'nifty_condor_ratio' && meta.key !== 'nifty_adaptive_strangle' && (
           <div className={fieldCls}>
             <FieldLabel text="Start Time" tip="Time (HH:MM IST) the strategy begins monitoring for entries." />
             <Input type="text" value={startTime} onChange={e => setStartTime(e.target.value)} placeholder="09:20" className={inputCls} style={{ width: 72 }} />
@@ -1485,7 +1831,7 @@ function StrategyRowWide({ meta, state, onRefresh, instanceId, onAddInstance, on
           </>
         )}
 
-        {meta.key !== 'crudeoilm_renko_sar' && meta.key !== 'crudeoilm_supertrend' && meta.key !== 'crudeoilm_vwap_supertrend' && meta.key !== 'crudeoilm_ema_supertrend' && meta.key !== 'nifty500_momentum' && meta.key !== 'nifty_delta_strangle' && meta.key !== 'nifty_flyagonal' && (
+        {meta.key !== 'crudeoilm_renko_sar' && meta.key !== 'crudeoilm_supertrend' && meta.key !== 'crudeoilm_vwap_supertrend' && meta.key !== 'crudeoilm_ema_supertrend' && meta.key !== 'nifty500_momentum' && meta.key !== 'nifty_delta_strangle' && meta.key !== 'nifty_flyagonal' && meta.key !== 'nifty_condor_ratio' && meta.key !== 'nifty_adaptive_strangle' && (
           <>
             <div className={fieldCls}>
               <FieldLabel text="Target ₹" tip="Daily cumulative profit target in INR, or a percentage of entry premium collected e.g. '25%'; strategy squares off and stops once reached." />
@@ -2015,49 +2361,283 @@ function StrategyRowWide({ meta, state, onRefresh, instanceId, onAddInstance, on
           </>
         )}
 
-        {/* Launch button inline in config */}
-        <div className="flex items-end">
-          <Button onClick={handleStart} disabled={submitting || spreadTrendNoIndicators || reentryLotsTooHigh}
-            className="h-7 px-4 gap-1.5 bg-gradient-to-tr from-emerald-600 to-teal-500 text-oncolor font-bold rounded-lg shadow-md shadow-emerald-500/10 hover:from-emerald-500 hover:to-teal-400 active:scale-[0.98] transition-all text-xs border-0 disabled:opacity-50 disabled:cursor-not-allowed">
-            {submitting ? <Loader2 className="h-3 w-3 animate-spin" /> : <Play className="h-3 w-3 fill-white" />}
-            {submitting ? 'Launching…' : 'Launch'}
+        {meta.key === 'nifty_condor_ratio' && (
+          <>
+            {/* Risk / Targets */}
+            <div className={fieldCls}>
+              <FieldLabel text="Target % or ₹" tip="Cycle profit target in % of margin (e.g. '15%') or fixed INR (e.g. '5000')." />
+              <Input type="text" value={crTargetProfit} onChange={e => setCrTargetProfit(e.target.value)} className={inputCls} style={{ width: 80 }} />
+            </div>
+            <div className={fieldCls}>
+              <FieldLabel text="Stop Loss % or ₹" tip="Cycle stop loss in % of margin (e.g. '15%') or fixed INR (e.g. '5000')." />
+              <Input type="text" value={crStopLoss} onChange={e => setCrStopLoss(e.target.value)} className={inputCls} style={{ width: 80 }} />
+            </div>
+            <div className={fieldCls}>
+              <FieldLabel text="Trail Start ₹" tip="Rupee profit level at which trailing stop activates (default: ₹5,000)." />
+              <Input type="number" value={crTrailStartRs} onChange={e => setCrTrailStartRs(parseFloat(e.target.value) || 5000)} className={inputCls} style={{ width: 75 }} />
+            </div>
+            <div className={fieldCls}>
+              <FieldLabel text="Trail Gap ₹" tip="Max giveback from peak profit once trailing stop is armed (default: ₹2,500)." />
+              <Input type="number" value={crTrailGapRs} onChange={e => setCrTrailGapRs(parseFloat(e.target.value) || 2500)} className={inputCls} style={{ width: 75 }} />
+            </div>
+
+            {/* Phase 1: Iron Condor */}
+            <div className={fieldCls}>
+              <FieldLabel text="Condor Short Δ" tip="Delta target for sold legs of initial neutral Iron Condor (default: 0.30)." />
+              <Input type="number" step="0.01" value={crCondorShortDelta} onChange={e => setCrCondorShortDelta(parseFloat(e.target.value) || 0.30)} className={inputCls} style={{ width: 64 }} />
+            </div>
+            <div className={fieldCls}>
+              <FieldLabel text="Condor Hedge Δ" tip="Delta target for protective wing buys of initial Iron Condor (default: 0.10)." />
+              <Input type="number" step="0.01" value={crCondorHedgeDelta} onChange={e => setCrCondorHedgeDelta(parseFloat(e.target.value) || 0.10)} className={inputCls} style={{ width: 64 }} />
+            </div>
+            <div className={fieldCls}>
+              <FieldLabel text="Condor Exit Δ" tip="Delta threshold on short leg to exit Iron Condor and deploy directional Ratio Spread (default: 0.10)." />
+              <Input type="number" step="0.01" value={crCondorExitDelta} onChange={e => setCrCondorExitDelta(parseFloat(e.target.value) || 0.10)} className={inputCls} style={{ width: 64 }} />
+            </div>
+
+            {/* Phase 2: Ratio Spread */}
+            <div className={fieldCls}>
+              <FieldLabel text="Ratio Long Δ" tip="Delta target for +1x ATM long leg of Ratio Spread (default: 0.50)." />
+              <Input type="number" step="0.01" value={crRatioLongDelta} onChange={e => setCrRatioLongDelta(parseFloat(e.target.value) || 0.50)} className={inputCls} style={{ width: 64 }} />
+            </div>
+            <div className={fieldCls}>
+              <FieldLabel text="Ratio Short Δ" tip="Delta target for -2x OTM sold legs of Ratio Spread (default: 0.40)." />
+              <Input type="number" step="0.01" value={crRatioShortDelta} onChange={e => setCrRatioShortDelta(parseFloat(e.target.value) || 0.40)} className={inputCls} style={{ width: 64 }} />
+            </div>
+            <div className={fieldCls}>
+              <FieldLabel text="Ratio Hedge Δ" tip="Delta target for +1x far-OTM protective tail hedge leg (default: 0.10)." />
+              <Input type="number" step="0.01" value={crRatioHedgeDelta} onChange={e => setCrRatioHedgeDelta(parseFloat(e.target.value) || 0.10)} className={inputCls} style={{ width: 64 }} />
+            </div>
+
+            {/* Shift & Reversal Rules */}
+            <div className={fieldCls}>
+              <FieldLabel text="Shift Decay Δ" tip="Short leg single-delta threshold (<=0.10, or <=0.20 combined) triggering continuation roll (default: 0.10)." />
+              <Input type="number" step="0.01" value={crRatioShiftDelta} onChange={e => setCrRatioShiftDelta(parseFloat(e.target.value) || 0.10)} className={inputCls} style={{ width: 64 }} />
+            </div>
+            <div className={fieldCls}>
+              <FieldLabel text="Reversal Δ" tip="Short leg single-delta threshold (>=0.60, or >=1.20 combined) triggering reversal flip (default: 0.60)." />
+              <Input type="number" step="0.01" value={crRatioReversalDelta} onChange={e => setCrRatioReversalDelta(parseFloat(e.target.value) || 0.60)} className={inputCls} style={{ width: 64 }} />
+            </div>
+            <div className={fieldCls}>
+              <FieldLabel text="Shift Long Δ" tip="Delta for shifted +1x long leg (default: 0.40)." />
+              <Input type="number" step="0.01" value={crShiftLongDelta} onChange={e => setCrShiftLongDelta(parseFloat(e.target.value) || 0.40)} className={inputCls} style={{ width: 64 }} />
+            </div>
+            <div className={fieldCls}>
+              <FieldLabel text="Shift Short Δ" tip="Delta for shifted -2x short legs (default: 0.30)." />
+              <Input type="number" step="0.01" value={crShiftShortDelta} onChange={e => setCrShiftShortDelta(parseFloat(e.target.value) || 0.30)} className={inputCls} style={{ width: 64 }} />
+            </div>
+            <div className={fieldCls}>
+              <FieldLabel text="Shift Hedge Δ" tip="Delta for shifted +1x tail hedge leg (default: 0.08)." />
+              <Input type="number" step="0.01" value={crShiftHedgeDelta} onChange={e => setCrShiftHedgeDelta(parseFloat(e.target.value) || 0.08)} className={inputCls} style={{ width: 64 }} />
+            </div>
+
+            {/* Limits */}
+            <div className={fieldCls}>
+              <FieldLabel text="Max Shifts" tip="Max continuation rolls allowed per cycle (default: 5)." />
+              <Input type="number" value={crMaxShifts} onChange={e => setCrMaxShifts(parseInt(e.target.value) || 5)} min={1} max={10} className={inputCls} style={{ width: 55 }} />
+            </div>
+            <div className={fieldCls}>
+              <FieldLabel text="Max Flips" tip="Max reversal flips allowed per cycle (default: 3)." />
+              <Input type="number" value={crMaxReversals} onChange={e => setCrMaxReversals(parseInt(e.target.value) || 3)} min={1} max={10} className={inputCls} style={{ width: 55 }} />
+            </div>
+
+            {/* Expiry & Timing */}
+            <div className={fieldCls}>
+              <FieldLabel text="Expiry Type" tip="Monthly (recommended for condors & ratios) or Nearest weekly." />
+              <Select value={crExpiryType} onValueChange={v => v && setCrExpiryType(v as 'monthly' | 'nearest')}>
+                <SelectTrigger className={inputCls} style={{ width: 90 }}><SelectValue /></SelectTrigger>
+                <SelectContent className="bg-zinc-900 border-zinc-800 text-zinc-100">
+                  <SelectItem value="monthly">Monthly</SelectItem>
+                  <SelectItem value="nearest">Nearest</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+            <div className={fieldCls}>
+              <FieldLabel text="Min DTE" tip="Minimum days to expiry at cycle entry (default: 15)." />
+              <Input type="number" value={crMinDte} onChange={e => setCrMinDte(parseInt(e.target.value) || 15)} min={1} className={inputCls} style={{ width: 55 }} />
+            </div>
+            <div className={fieldCls}>
+              <FieldLabel text="Max DTE" tip="Maximum days to expiry at cycle entry (default: 45)." />
+              <Input type="number" value={crMaxDte} onChange={e => setCrMaxDte(parseInt(e.target.value) || 45)} min={5} className={inputCls} style={{ width: 55 }} />
+            </div>
+            <div className={fieldCls}>
+              <FieldLabel text="Start Time" tip="Earliest entry time of day (default: 09:20)." />
+              <Input type="text" value={crStartTime} onChange={e => setCrStartTime(e.target.value)} placeholder="09:20" className={inputCls} style={{ width: 68 }} />
+            </div>
+            <div className={fieldCls}>
+              <FieldLabel text="Entry End" tip="Latest entry time of day (default: 15:00)." />
+              <Input type="text" value={crEntryEnd} onChange={e => setCrEntryEnd(e.target.value)} placeholder="15:00" className={inputCls} style={{ width: 68 }} />
+            </div>
+            <div className={fieldCls}>
+              <FieldLabel text="EOD Exit" tip="Auto square-off time on expiry date (default: 15:15)." />
+              <Input type="text" value={crEodExitTime} onChange={e => setCrEodExitTime(e.target.value)} placeholder="15:15" className={inputCls} style={{ width: 68 }} />
+            </div>
+            <div className={fieldCls}>
+              <FieldLabel text="Product" tip="MARGIN (positional multi-day) or INTRADAY." />
+              <Select value={crProduct} onValueChange={v => v && setCrProduct(v as 'MARGIN' | 'INTRADAY')}>
+                <SelectTrigger className={inputCls} style={{ width: 95 }}><SelectValue /></SelectTrigger>
+                <SelectContent className="bg-zinc-900 border-zinc-800 text-zinc-100">
+                  <SelectItem value="MARGIN">MARGIN</SelectItem>
+                  <SelectItem value="INTRADAY">INTRADAY</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+          </>
+        )}
+
+        {meta.key === 'nifty_adaptive_strangle' && (
+          <>
+            {/* Risk / Targets */}
+            <div className={fieldCls}>
+              <FieldLabel text="Target % or ₹" tip="Cycle profit target in % of margin (e.g. '5%') or fixed INR (default: '5%')." />
+              <Input type="text" value={asTargetProfit} onChange={e => setAsTargetProfit(e.target.value)} className={inputCls} style={{ width: 80 }} />
+            </div>
+            <div className={fieldCls}>
+              <FieldLabel text="Stop Loss % or ₹" tip="Cycle stop loss in % of margin (e.g. '4%') or fixed INR (default: '4%')." />
+              <Input type="text" value={asStopLoss} onChange={e => setAsStopLoss(e.target.value)} className={inputCls} style={{ width: 80 }} />
+            </div>
+            <div className={fieldCls}>
+              <FieldLabel text="Trail Start ₹" tip="Rupee profit level at which trailing stop activates (0 to disable)." />
+              <Input type="number" value={asTrailStartRs} onChange={e => setAsTrailStartRs(parseFloat(e.target.value) || 0)} className={inputCls} style={{ width: 75 }} />
+            </div>
+            <div className={fieldCls}>
+              <FieldLabel text="Trail Gap ₹" tip="Max giveback from peak profit once trailing stop is armed." />
+              <Input type="number" value={asTrailGapRs} onChange={e => setAsTrailGapRs(parseFloat(e.target.value) || 0)} className={inputCls} style={{ width: 75 }} />
+            </div>
+
+            {/* Entry Strangle Greeks */}
+            <div className={fieldCls}>
+              <FieldLabel text="Entry Delta Δ" tip="Target delta for initial far-OTM strangle short legs (default: 0.10)." />
+              <Input type="number" step="0.01" value={asEntryDelta} onChange={e => setAsEntryDelta(parseFloat(e.target.value) || 0.10)} className={inputCls} style={{ width: 80 }} />
+            </div>
+            <div className={fieldCls}>
+              <FieldLabel text="Hedge Trigger Δ" tip="Short leg delta threshold triggering conditional protective wing purchase (default: 0.22)." />
+              <Input type="number" step="0.01" value={asHedgeDeltaTrigger} onChange={e => setAsHedgeDeltaTrigger(parseFloat(e.target.value) || 0.22)} className={inputCls} style={{ width: 80 }} />
+            </div>
+            <div className={fieldCls}>
+              <FieldLabel text="Hedge Wing Δ" tip="Target delta for bought protective wing (default: 0.08)." />
+              <Input type="number" step="0.01" value={asHedgeTargetDelta} onChange={e => setAsHedgeTargetDelta(parseFloat(e.target.value) || 0.08)} className={inputCls} style={{ width: 80 }} />
+            </div>
+            <div className={fieldCls}>
+              <FieldLabel text="Vega Surge %" tip="IV expansion % threshold triggering dual protective wing purchases (default: 20%)." />
+              <Input type="number" step="1" value={asVegaSurgePct} onChange={e => setAsVegaSurgePct(parseFloat(e.target.value) || 20.0)} className={inputCls} style={{ width: 80 }} />
+            </div>
+
+            {/* Directional Trend Conversion */}
+            <div className={`${fieldCls} flex flex-col justify-end`}>
+              <label className="flex items-center gap-1.5 cursor-pointer text-[10px] text-zinc-300 select-none pb-1">
+                <input type="checkbox" checked={asEnableDirectionalConversion} onChange={e => setAsEnableDirectionalConversion(e.target.checked)} className="rounded border-zinc-700 bg-zinc-900 text-teal-500" />
+                <span>Directional Conv.</span>
+              </label>
+            </div>
+            {asEnableDirectionalConversion && (
+              <>
+                <div className={fieldCls}>
+                  <FieldLabel text="Conv. Trigger Δ" tip="Short leg delta threshold for directional conversion (default: 0.30)." />
+                  <Input type="number" step="0.01" value={asConversionDeltaTrigger} onChange={e => setAsConversionDeltaTrigger(parseFloat(e.target.value) || 0.30)} className={inputCls} style={{ width: 80 }} />
+                </div>
+                <div className={fieldCls}>
+                  <FieldLabel text="Conv. Style" tip="spread (Bull/Bear Spread) or ratio (1x2 Ratio Spread)." />
+                  <Select value={asConversionStyle} onValueChange={v => v && setAsConversionStyle(v as 'spread' | 'ratio')}>
+                    <SelectTrigger className={inputCls} style={{ width: 90 }}><SelectValue /></SelectTrigger>
+                    <SelectContent className="bg-zinc-900 border-zinc-800 text-zinc-100">
+                      <SelectItem value="spread">spread</SelectItem>
+                      <SelectItem value="ratio">ratio</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+              </>
+            )}
+
+            {/* Timing & Product */}
+            <div className={fieldCls}>
+              <FieldLabel text="Entry Start" tip="Earliest entry time HH:MM (default: 09:20)." />
+              <Input type="text" value={asEntryTime} onChange={e => setAsEntryTime(e.target.value)} placeholder="09:20" className={inputCls} style={{ width: 75 }} />
+            </div>
+            <div className={fieldCls}>
+              <FieldLabel text="Entry End" tip="Latest entry time HH:MM (default: 15:00)." />
+              <Input type="text" value={asEntryEnd} onChange={e => setAsEntryEnd(e.target.value)} placeholder="15:00" className={inputCls} style={{ width: 75 }} />
+            </div>
+            <div className={fieldCls}>
+              <FieldLabel text="EOD Exit" tip="Auto square-off time on expiry date (default: 15:15)." />
+              <Input type="text" value={asEodExitTime} onChange={e => setAsEodExitTime(e.target.value)} placeholder="15:15" className={inputCls} style={{ width: 75 }} />
+            </div>
+            <div className={fieldCls}>
+              <FieldLabel text="Product" tip="MARGIN (positional bi-weekly carry) or INTRADAY." />
+              <Select value={asProduct} onValueChange={v => v && setAsProduct(v as 'MARGIN' | 'INTRADAY')}>
+                <SelectTrigger className={inputCls} style={{ width: 95 }}><SelectValue /></SelectTrigger>
+                <SelectContent className="bg-zinc-900 border-zinc-800 text-zinc-100">
+                  <SelectItem value="MARGIN">MARGIN</SelectItem>
+                  <SelectItem value="INTRADAY">INTRADAY</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+          </>
+        )}
+      </div>
+
+      {/* Action Footer */}
+      <div className="mt-4 pt-3 border-t border-zinc-800/60 flex items-center justify-between gap-3 flex-wrap">
+        <div className="text-[11px] text-zinc-500">
+          Parameters are verified against exchange and broker risk rules prior to launch.
+        </div>
+        <div className="flex items-center gap-2">
+          <button
+            type="button"
+            onClick={() => setShowConfig(false)}
+            className="h-8 px-3 rounded-lg text-xs font-semibold border border-zinc-800 bg-zinc-900/60 text-zinc-400 hover:text-white hover:border-zinc-700 transition-colors"
+          >
+            Cancel
+          </button>
+          <Button
+            onClick={handleStart}
+            disabled={submitting || spreadTrendNoIndicators || reentryLotsTooHigh}
+            className="h-8 px-4 gap-1.5 bg-gradient-to-tr from-emerald-600 to-teal-500 text-oncolor font-bold rounded-lg shadow-md shadow-emerald-500/20 hover:from-emerald-500 hover:to-teal-400 active:scale-[0.98] transition-all text-xs border-0 disabled:opacity-50 disabled:cursor-not-allowed"
+          >
+            {submitting ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Play className="h-3 w-3 fill-white" />}
+            {submitting ? 'Launching…' : 'Launch Strategy'}
           </Button>
         </div>
       </div>
 
       {startError && (
-        <div className="mt-2 flex items-center justify-between gap-2 px-2.5 py-1.5 rounded-lg bg-rose-950/30 border border-rose-500/20 text-xs text-rose-400">
+        <div className="mt-3 flex items-center justify-between gap-2 px-3 py-2 rounded-xl bg-rose-950/40 border border-rose-500/30 text-xs text-rose-300">
           <span className="truncate">{startError}</span>
-          <button onClick={() => setStartError(null)} className="text-rose-500 hover:text-rose-300 font-bold shrink-0">×</button>
+          <button onClick={() => setStartError(null)} className="text-rose-400 hover:text-rose-200 font-bold shrink-0">×</button>
         </div>
       )}
     </div>
   );
 
+  const profile = getStrategyProfile(meta.key);
+
   return (
-    <div className={`border-b border-zinc-800/50 last:border-b-0 ${isRunning ? 'border-l-2 border-l-emerald-500/30 bg-emerald-950/5' : ''}`}>
+    <div
+      data-strategy-row={meta.key}
+      className={`border-b border-zinc-800/50 last:border-b-0 transition-colors ${isRunning ? 'border-l-2 border-l-emerald-500 bg-emerald-950/10' : 'hover:bg-zinc-900/30'}`}
+    >
       {/* ── Main row ─────────────────────────────────────────────── */}
-      <div className="flex items-center gap-0 min-h-[52px] px-4">
+      <div className="flex items-center gap-0 min-h-[56px] px-4">
 
         {/* Status indicator */}
-        <div className="w-[90px] shrink-0 flex items-center gap-1.5">
+        <div className="w-[95px] shrink-0 flex items-center gap-1.5">
           {statusCfg ? (
-            <Badge className={`gap-1 font-bold uppercase text-[9px] tracking-wide h-5 px-1.5 ${statusCfg.badge}`}>
-              <span className={`h-1.5 w-1.5 rounded-full bg-current animate-pulse`} />
+            <Badge className={`gap-1.5 font-bold uppercase text-[9px] tracking-wide h-5 px-2 ${statusCfg.badge}`}>
+              <span className="h-1.5 w-1.5 rounded-full bg-current animate-pulse" />
               {state.status === 'INITIALIZING' ? 'Init' : state.status.charAt(0) + state.status.slice(1).toLowerCase()}
             </Badge>
           ) : (
-            <Badge className="gap-1 font-bold uppercase text-[9px] tracking-wide h-5 px-1.5 bg-zinc-800/80 text-zinc-600 border-zinc-700/50">
-              <span className="h-1.5 w-1.5 rounded-full bg-zinc-700" />
+            <Badge variant="outline" className="gap-1.5 font-bold uppercase text-[9px] tracking-wide h-5 px-2 bg-zinc-900/60 text-zinc-500 border-zinc-800">
+              <span className="h-1.5 w-1.5 rounded-full bg-zinc-600" />
               Stopped
             </Badge>
           )}
         </div>
 
         {/* Name + mode/type tags */}
-        <div className="w-[240px] shrink-0 flex flex-col gap-0.5">
+        <div className="w-[280px] shrink-0 flex flex-col gap-1 pr-3">
           <div className="flex items-center gap-1.5 min-w-0">
-            <span className="text-sm font-bold text-white truncate">{meta.name}{instanceId ? ` #${instanceId}` : ''}</span>
+            <span className="text-sm font-bold text-white hover:text-emerald-300 transition-colors">{meta.name}{instanceId ? ` #${instanceId}` : ''}</span>
             <button
               onClick={() => setShowReadme(true)}
               title="Read strategy summary: entry, exit, target &amp; stop-loss rules"
@@ -2067,69 +2647,85 @@ function StrategyRowWide({ meta, state, onRefresh, instanceId, onAddInstance, on
               <BookOpen className="h-3.5 w-3.5" />
             </button>
           </div>
-          {isRunning && (
-            <div className="flex items-center gap-1 flex-wrap">
-              {state.mode && (
-                <span className="text-[9px] font-mono text-indigo-400 bg-indigo-500/10 border border-indigo-500/20 px-1 rounded">
-                  {state.mode.replace(/_/g, '-')}
-                </span>
-              )}
-              {state.entry_type && (
-                <span className="text-[9px] font-mono text-zinc-500 bg-zinc-800/60 border border-zinc-700/40 px-1 rounded capitalize">
-                  {state.entry_type}
-                </span>
-              )}
-              {isRunning && (
-                <span className={`px-1 py-0.5 rounded text-[8px] font-bold font-mono uppercase ${
+
+          <div className="flex items-center gap-1.5 flex-wrap">
+            {meta.underlying && (
+              <span className="text-[9px] font-mono font-bold text-zinc-400 bg-zinc-900 border border-zinc-800 px-1.5 py-0.2 rounded">
+                {meta.underlying}
+              </span>
+            )}
+            {meta.timeframe === 'positional' ? (
+              <span className="text-[9px] font-mono font-bold text-violet-400 bg-violet-500/10 border border-violet-500/20 px-1.5 py-0.2 rounded flex items-center gap-0.5">
+                🌙 Positional
+              </span>
+            ) : (
+              <span className="text-[9px] font-mono font-bold text-amber-400 bg-amber-500/10 border border-amber-500/20 px-1.5 py-0.2 rounded flex items-center gap-0.5">
+                ⚡ Intraday
+              </span>
+            )}
+            {isRunning && (
+              <>
+                {state.mode && (
+                  <span className="text-[9px] font-mono text-indigo-400 bg-indigo-500/10 border border-indigo-500/20 px-1 rounded">
+                    {state.mode.replace(/_/g, '-')}
+                  </span>
+                )}
+                <span className={`px-1.5 py-0.2 rounded text-[8px] font-bold font-mono uppercase ${
                   state.broker === 'zerodha' ? 'bg-sky-500/10 text-sky-400 border border-sky-500/20' :
                   state.broker === 'kotak' ? 'bg-amber-500/10 text-amber-400 border border-amber-500/20' :
                   'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20'
                 }`}>
                   {state.broker || 'dhan'}
                 </span>
-              )}
-              {state.dry_run && (
-                <span className="text-[9px] font-bold text-amber-400 bg-amber-500/10 border border-amber-500/20 px-1 rounded flex items-center gap-0.5">
-                  <ShieldAlert className="h-2.5 w-2.5" />SIM
-                </span>
-              )}
-              {state.pid && (
-                <span className="text-[9px] text-zinc-500 font-mono">·{state.pid}</span>
-              )}
-            </div>
-          )}
+                {state.dry_run && (
+                  <span className="text-[9px] font-bold text-amber-400 bg-amber-500/10 border border-amber-500/20 px-1.5 py-0.2 rounded flex items-center gap-0.5">
+                    <ShieldAlert className="h-2.5 w-2.5" />SIM
+                  </span>
+                )}
+                {state.pid && (
+                  <span className="text-[9px] text-zinc-500 font-mono">·{state.pid}</span>
+                )}
+              </>
+            )}
+          </div>
         </div>
 
         {/* Divider */}
         <div className="h-8 w-px bg-zinc-800/60 mx-2 shrink-0" />
 
-        {/* Live stats OR placeholder */}
-        <div className="flex-1 min-w-0 overflow-x-auto">
+        {/* Live stats OR Strategy Specification Snapshot */}
+        <div className="flex-1 min-w-0 overflow-x-auto py-1">
           {isRunning ? (
             liveStats()
           ) : (
-            <span className="text-xs text-zinc-500 italic px-2">not running</span>
+            <div className="flex items-center gap-2 text-xs py-1">
+              <span className="text-zinc-400 text-xs font-medium leading-relaxed">
+                {profile.summary}
+              </span>
+            </div>
           )}
         </div>
 
         {/* P&L */}
-        {isRunning && (
-          <>
-            <div className="h-8 w-px bg-zinc-800/60 mx-2 shrink-0" />
-            <div className="shrink-0 flex flex-col items-end min-w-[80px]">
-              <span className={`font-mono font-bold text-base leading-tight tabular-nums ${isPnlPositive ? 'text-emerald-400' : 'text-rose-400'}`}>
+        <div className="h-8 w-px bg-zinc-800/60 mx-2 shrink-0" />
+        <div className="shrink-0 flex flex-col items-end w-[100px]">
+          {isRunning ? (
+            <>
+              <span className={`font-mono font-extrabold text-sm leading-tight tabular-nums ${isPnlPositive ? 'text-emerald-400' : 'text-rose-400'}`}>
                 {isPnlPositive ? '+' : ''}₹{pnl.toFixed(0)}
               </span>
               {state.realized_pnl !== undefined && state.realized_pnl !== 0 && (
                 <span className="text-[9px] text-zinc-400 font-mono tabular-nums">real ₹{state.realized_pnl.toFixed(0)}</span>
               )}
-            </div>
-          </>
-        )}
+            </>
+          ) : (
+            <span className="text-xs font-mono text-zinc-600">—</span>
+          )}
+        </div>
 
         {/* Action buttons */}
         <div className="h-8 w-px bg-zinc-800/60 mx-3 shrink-0" />
-        <div className="flex items-center gap-1.5 shrink-0">
+        <div className="min-w-[190px] flex items-center justify-end gap-1.5 shrink-0">
           {isRunning ? (
             <>
               <button onClick={handleStop} disabled={submitting}
@@ -2215,6 +2811,59 @@ function StrategyRowWide({ meta, state, onRefresh, instanceId, onAddInstance, on
 
       {isRunning && meta.key === 'nifty_flyagonal' && (state as any).legs && (
         <div className="border-t border-zinc-800/60 p-3"><FlyagonalPayoff state={state as any} /></div>
+      )}
+
+      {isRunning && meta.key === 'nifty_condor_ratio' && (state as any).legs && Object.keys((state as any).legs).length > 0 && (
+        <div className="border-t border-zinc-800/60 px-4 py-2.5 bg-zinc-950/40">
+          <div className="flex items-center justify-between text-[11px] font-semibold text-zinc-300 mb-1.5">
+            <span>Active Position Legs ({(state as any).stage})</span>
+            <span className="text-[10px] text-zinc-400">Shifts: {(state as any).shifts_count ?? 0} · Flips: {(state as any).reversals_count ?? 0}</span>
+          </div>
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
+            {Object.entries((state as any).legs as Record<string, any>).map(([key, leg]) => (
+              <div key={key} className="bg-zinc-900/70 border border-zinc-800/80 rounded px-2.5 py-1.5 text-xs font-mono">
+                <div className="flex items-center justify-between">
+                  <span className={`font-bold ${leg.side === 'BUY' ? 'text-emerald-400' : 'text-rose-400'}`}>
+                    {leg.side} {leg.lots}L ({leg.strike} {leg.option_type})
+                  </span>
+                  <span className="text-[10px] text-zinc-400">Δ {leg.delta != null ? leg.delta.toFixed(2) : '—'}</span>
+                </div>
+                <div className="flex items-center justify-between text-[10px] text-zinc-400 mt-0.5">
+                  <span>avg ₹{leg.entry_price?.toFixed(1) ?? '—'}</span>
+                  <span>ltp ₹{leg.current_ltp?.toFixed(1) ?? '—'}</span>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {isRunning && meta.key === 'nifty_adaptive_strangle' && (state as any).legs && Object.keys((state as any).legs).length > 0 && (
+        <div className="border-t border-zinc-800/60 px-4 py-2.5 bg-zinc-950/40">
+          <div className="flex items-center justify-between text-[11px] font-semibold text-zinc-300 mb-1.5">
+            <span>Active Position Legs ({(state as any).stage ?? 'STRANGLE'})</span>
+            <span className="text-[10px] text-zinc-400">
+              {(state as any).directional_direction ? `Direction: ${(state as any).directional_direction} · ` : ''}
+              Expiry: {(state as any).active_expiry ?? '—'}
+            </span>
+          </div>
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
+            {Object.entries((state as any).legs as Record<string, any>).map(([key, leg]) => (
+              <div key={key} className="bg-zinc-900/70 border border-zinc-800/80 rounded px-2.5 py-1.5 text-xs font-mono">
+                <div className="flex items-center justify-between">
+                  <span className={`font-bold ${leg.side === 'BUY' ? 'text-emerald-400' : 'text-rose-400'}`}>
+                    {leg.side} {leg.qty} ({leg.strike} {leg.opt_type})
+                  </span>
+                  <span className="text-[10px] text-zinc-400">Δ {leg.delta != null ? Number(leg.delta).toFixed(2) : '—'}</span>
+                </div>
+                <div className="flex items-center justify-between text-[10px] text-zinc-400 mt-0.5">
+                  <span>avg ₹{leg.avg_price?.toFixed(1) ?? '—'}</span>
+                  <span>ltp ₹{leg.ltp?.toFixed(1) ?? '—'}</span>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
       )}
 
       {isRunning && showLogs && (

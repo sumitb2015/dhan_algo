@@ -1,0 +1,23 @@
+{
+  "id": "condor_to_ratio_20261003_174758",
+  "name": "Nifty Condor to Ratio Spread (2026-07-01 to 2026-09-30)",
+  "timestamp": "2026-10-03T17:47:58.711916",
+  "strategy_type": "options_condor_ratio",
+  "start_date": "2026-07-01",
+  "end_date": "2026-09-30",
+  "trades": 13,
+  "win_rate": 84.62,
+  "total_pnl": 22418.41,
+  "max_drawdown": 6259.48,
+  "has_tearsheet": false,
+  "has_trades_csv": true,
+  "has_scans_summary": false,
+  "has_report": false,
+  "tags": [
+    "condor",
+    "ratio_spread",
+    "dynamic_hedging",
+    "monthly",
+    "weekly"
+  ]
+}

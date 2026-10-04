@@ -177,6 +177,7 @@ Full CLI references, parameter explanations, and examples live in each strategy 
 | `strategies/crudeoil/` | [`strategy.md`](strategies/crudeoil/strategy.md) — CRUDEOILM Supertrend, Renko stop-and-reverse, VWAP+Supertrend, EMA+Supertrend, and pivot-gated ORB futures |
 | `strategies/intraday_equity/` | [`strategy.md`](strategies/intraday_equity/strategy.md) — Nifty-50 cash VWAP+RS auto-trader (NOT VALIDATED, dry-run only) |
 | `strategies/momentum_investing/` | [`strategy.md`](strategies/momentum_investing/strategy.md) — Nifty-500 positional (CNC) relative-strength momentum portfolio |
+| `strategies/adaptive_strangle/` | [`strategy.md`](strategies/adaptive_strangle/strategy.md) — Bi-weekly far-OTM strangle with conditional Delta/Vega hedging & directional conversion |
 
 ### Quick-start
 
@@ -211,6 +212,33 @@ python strategies/put_condor/nifty_put_condor.py [--live --i-understand-this-is-
     [--fallback-margin-per-lot INR] [--min-dte DAYS] [--max-dte DAYS]
     [--entry-time HH:MM] [--entry-end HH:MM] [--eod-exit-time HH:MM]
     [--max-consecutive-stops N] [--instance-id ID] [--broker {dhan,zerodha,kotak}]
+```
+
+**Nifty Iron Condor to Ratio Spread** (`strategies/condor_to_ratio/nifty_condor_ratio.py`, UNVALIDATED — dry-run default; `--live` requires `--i-understand-this-is-unvalidated`). Starts with a neutral monthly Iron Condor (sell 0.30 delta CE & PE, buy 0.10 delta CE & PE hedges). When a short leg decays to `<= 0.10` delta, transitions directly into a directional Ratio Spread: Call Ratio Spread if downward move (buy 0.50 delta call, sell 2x 0.40 delta calls, buy 0.10 delta call hedge) or Put Ratio Spread if upward move (buy 0.50 delta put, sell 2x 0.40 delta puts, buy 0.10 delta put hedge). If trend continues, shifts to less aggressive strikes (buy 0.40, sell 2x 0.30, buy 0.08 hedge) when sold leg delta drops to `<= 0.20` combined. If market sharply reverses, flips to opposite side when sold leg delta expands to `>= 1.20` combined. Product `MARGIN`. Full flag list and defaults in `strategies/condor_to_ratio/strategy.md`.
+
+```
+python strategies/condor_to_ratio/nifty_condor_ratio.py [--live --i-understand-this-is-unvalidated]
+    [--lots N] [--condor-short-delta D] [--condor-hedge-delta D] [--condor-exit-delta D]
+    [--ratio-long-delta D] [--ratio-short-delta D] [--ratio-hedge-delta D]
+    [--ratio-shift-delta D] [--ratio-reversal-delta D]
+    [--shift-long-delta D] [--shift-short-delta D] [--shift-hedge-delta D]
+    [--max-shifts N] [--max-reversals N]
+    [--target-profit INR|%] [--stop-loss INR|%] [--trail-start-rs INR] [--trail-gap-rs INR]
+    [--expiry-type {monthly,nearest}] [--min-dte DAYS] [--max-dte DAYS]
+    [--start-time HH:MM] [--entry-end HH:MM] [--eod-exit-time HH:MM]
+    [--product {MARGIN,INTRADAY}] [--instance-id ID] [--broker {dhan,zerodha,kotak}]
+```
+
+**Nifty Bi-Weekly Adaptive Strangle** (`strategies/adaptive_strangle/nifty_adaptive_strangle.py`, dry-run default; `--live` places real orders). Sells far-OTM Nifty strangles on the 2nd weekly expiry (~8–15 DTE) at low delta (~0.10) with zero upfront hedge drag. Dynamically buys protective OTM wings on Greek threat triggers (short leg delta reaches `>= 0.22` or IV/Vega surge `>= 20%`). Optionally converts into a directional vehicle (`--enable-directional-conversion`) on confirmed Nifty index trends (`delta >= 0.30` + trend filter), harvesting winning decayed credit to fund the directional spread. Product `MARGIN`. Full flag list and defaults in `strategies/adaptive_strangle/strategy.md`.
+
+```
+python strategies/adaptive_strangle/nifty_adaptive_strangle.py [--live]
+    [--lots N] [--entry-delta D] [--hedge-delta-trigger D] [--hedge-target-delta D]
+    [--vega-surge-pct PCT] [--enable-directional-conversion]
+    [--conversion-delta-trigger D] [--conversion-style {spread,ratio}]
+    [--target-profit INR|%] [--stop-loss INR|%] [--trail-start-rs INR] [--trail-gap-rs INR]
+    [--entry-time HH:MM] [--entry-end HH:MM] [--eod-exit-time HH:MM]
+    [--product {MARGIN,INTRADAY}] [--instance-id ID] [--broker {dhan,zerodha,kotak}]
 ```
 
 See the per-folder `strategy.md` files linked in the table above. Each file contains full CLI flag tables, parameter tuning guidance, dry-run and live examples, and worked trade scenarios.
