@@ -41,6 +41,22 @@ function renderMarkdown(md: string): React.ReactNode {
   while (i < lines.length) {
     const line = lines[i];
 
+    if (line.trim().startsWith('```')) {
+      const codeLines: string[] = [];
+      i++; // skip opening ```
+      while (i < lines.length && !lines[i].trim().startsWith('```')) {
+        codeLines.push(lines[i]);
+        i++;
+      }
+      if (i < lines.length) i++; // skip closing ```
+      blocks.push(
+        <div key={key++} className="my-3 overflow-x-auto rounded-md border border-zinc-800 bg-zinc-900/90 p-3.5 font-mono text-xs sm:text-[13px] text-zinc-200 shadow-inner">
+          <pre className="leading-relaxed">{codeLines.join('\n')}</pre>
+        </div>
+      );
+      continue;
+    }
+
     if (line.startsWith('## ')) {
       blocks.push(
         <h3 key={key++} className="text-xs sm:text-sm font-bold uppercase tracking-wider text-amber-400 mt-6 mb-2.5 first:mt-0 flex items-center gap-2">
