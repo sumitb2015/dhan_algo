@@ -62,9 +62,9 @@ Once $\text{LCR} \ge 100\%$, the strategy achieves a "Free Long Call". At this j
 
 ### B. Short Leg (Theta Engine)
 - **Structure**: Sell OTM Calls (`CE`).
-- **DTE**: **25–45 days** (medium-dated monthly/bi-weekly; **never** weekly options).
+- **DTE**: **25–45 days** (medium-dated; weekly **or** monthly expiries are allowed for the short).
 - **Target Delta**: **0.15–0.22** (prefer ~0.18–0.20 delta).
-- **Expiry**: **monthly series only** (the latest listed expiry in each calendar month, so a holiday-shifted monthly still counts; weeklies are never used), 25–45 DTE, and strictly **before the long's expiry**. Monthlies are 4–5 weeks apart, so if none falls in the window the upper bound widens by 14 days (still never a weekly).
+- **Expiry**: **any listed expiry, weekly or monthly**, 25–45 DTE, and strictly **before the long's expiry**. Only the **long** is restricted to the monthly series (the latest listed expiry in each calendar month, so a holiday-shifted monthly still counts) because the far leg needs the monthly's liquidity.
 - **Strike ranking**: among strikes with $0.15 \le \Delta \le 0.22$ (0.08–0.15 in the Free Long Call regime) the strike **closest to the target delta** (0.18; 0.115 in the free regime) wins; the efficiency score
   $$\text{Score} = \frac{\text{Theta Decay per Day (₹)}}{|\text{Gamma}|}$$
   only breaks ties within 0.02 delta. (Theta/|Gamma| is ≈ ½σ²S² for every strike, so used as the primary key it always drifted to the highest-delta edge of the band.) If no strike is in band, **nothing is sold** — there is no out-of-band fallback.

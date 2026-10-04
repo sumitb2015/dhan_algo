@@ -340,6 +340,18 @@ class FakeHelper:
         self.ltp = 100.0
         self.vix = 14.0
         self._master_list = pd.DataFrame()
+        self.quote_overrides = {}   # {(expiry, strike): (bid, ask)}; everything else quotes a tight 1% spread
+
+    def get_option_chain_df(self, _symbol, expiry, exchange_segment=None):
+        ml = self._master_list
+        if ml is None or ml.empty:
+            return pd.DataFrame()
+        rows = ml[(ml["SM_EXPIRY_DATE"] == expiry) & (ml["OPTION_TYPE"] == "CE")]
+        out = []
+        for _, r in rows.iterrows():
+            bid, ask = self.quote_overrides.get((expiry, int(r["STRIKE_PRICE"])), (99.5, 100.5))
+            out.append({"Strike": float(r["STRIKE_PRICE"]), "ce_top_bid_price": bid, "ce_top_ask_price": ask})
+        return pd.DataFrame(out)
 
     def get_lot_size(self, _):
         return 65
@@ -556,17 +568,49 @@ class TestDiagonalSelectionAndAdjustments(_SelBase):
         leg = s.select_long_call(24500.0)
         self.assertEqual(leg["expiry"], "2026-12-29")
 
-    def test_short_call_monthly_before_long_near_target_delta(self):
+    def test_short_call_weekly_or_monthly_before_long_near_target_delta(self):
         s = self.make_with_chain()
         sh = s.select_short_call(24500.0, 117.0, long_leg=self.long_leg())
-        self.assertEqual(sh["expiry"], "2026-11-24")        # 50 DTE: window widened, weekly 2026-11-03 skipped
-        self.assertTrue(dc.is_monthly_expiry(sh["expiry"]))
+        self.assertIn(sh["expiry"], MONTHLIES + WEEKLIES)
+        self.assertGreaterEqual(sh["dte"], s.short_min_dte)  # inside 25-45 DTE
+        self.assertLessEqual(sh["dte"], s.short_max_dte)
+        self.assertLess(sh["expiry"], "2026-12-29")          # expires before the long
         self.assertLess(abs(sh["delta"] - 0.18), 0.035)     # not drifted to the 0.22 edge
         self.assertGreaterEqual(sh["delta"], 0.15 - 0.005)
 
+    def test_spread_helpers_fail_closed(self):
+        s = self.make_with_chain()
+        self.assertTrue(s._is_liquid((99.5, 100.5)))          # 1.0%
+        self.assertFalse(s._is_liquid((90.0, 110.0)))         # 20%
+        self.assertFalse(s._is_liquid((0.0, 100.0)))          # no bid
+        self.assertFalse(s._is_liquid((100.0, 0.0)))          # no ask
+        self.assertFalse(s._is_liquid((101.0, 100.0)))        # crossed
+        self.assertFalse(s._is_liquid(None))                  # strike absent from the chain
+
+    def test_short_call_skips_wide_spread_strike(self):
+        s = self.make_with_chain()
+        first = s.select_short_call(24500.0, 117.0, long_leg=self.long_leg())
+        s.helper.quote_overrides[(first["expiry"], first["strike"])] = (60.0, 140.0)
+        second = s.select_short_call(24500.0, 117.0, long_leg=self.long_leg())
+        self.assertIsNotNone(second)
+        self.assertNotEqual((second["expiry"], second["strike"]), (first["expiry"], first["strike"]))
+
+    def test_short_call_none_when_no_strike_is_liquid(self):
+        s = self.make_with_chain()
+        s._ce_quotes = lambda expiry: {}                      # chain with no quotes at all
+        self.assertIsNone(s.select_short_call(24500.0, 117.0, long_leg=self.long_leg()))
+
+    def test_long_call_skips_wide_spread_strike(self):
+        s = self.make_with_chain()
+        first = s.select_long_call(24500.0)
+        s.helper.quote_overrides[(first["expiry"], first["strike"])] = (10.0, 190.0)
+        second = s.select_long_call(24500.0)
+        self.assertIsNotNone(second)
+        self.assertNotEqual(second["strike"], first["strike"])
+
     def test_short_call_never_outlives_long(self):
         s = self.make_with_chain()
-        self.assertIsNone(s.select_short_call(24500.0, 117.0, long_leg=self.long_leg("2026-11-10")))
+        self.assertIsNone(s.select_short_call(24500.0, 117.0, long_leg=self.long_leg("2026-10-27")))
 
     def test_short_call_refuses_low_iv(self):
         s = self.make_with_chain()
@@ -703,17 +747,9 @@ class TestDiagonalReviewFixes(_SelBase):
         self.assertEqual(dc.monthly_expiries(listed), {"2026-08-24", "2026-09-29"})
         self.assertFalse(dc.is_monthly_expiry("2026-08-24"))   # the heuristic alone would drop it
 
-    def test_shifted_monthly_is_selectable_for_the_short(self):
+    def test_long_call_never_a_weekly(self):
         s = self.make_with_chain()
-        shifted = "2026-11-23"   # monthly moved to Monday; Mon 2026-11-30 exists so the heuristic says weekly
-        self.assertFalse(dc.is_monthly_expiry(shifted))
-        rows = s.helper._master_list
-        extra = rows[rows["SM_EXPIRY_DATE"] == "2026-11-24"].copy()
-        extra["SM_EXPIRY_DATE"] = shifted
-        s.helper._master_list = pd.concat([rows[rows["SM_EXPIRY_DATE"] != "2026-11-24"], extra])
-        s.helper.get_expiries = lambda _u: sorted([e for e in MONTHLIES + WEEKLIES if e != "2026-11-24"] + [shifted])
-        sh = s.select_short_call(24500.0, 117.0, long_leg=self.long_leg())
-        self.assertEqual(sh["expiry"], shifted)
+        self.assertIn(s.select_long_call(24500.0)["expiry"], MONTHLIES)
 
     # -- non-Dhan orders cannot be cancelled ------------------------------------
     def test_nondhan_timeout_is_unknown_not_retried(self):

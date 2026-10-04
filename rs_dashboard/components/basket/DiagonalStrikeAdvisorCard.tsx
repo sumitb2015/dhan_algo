@@ -1,6 +1,7 @@
 'use client';
 
 import React, { useMemo } from 'react';
+import { lookupChainLegData, type ChainOc } from '@/lib/optionsStrategy';
 import { Target, Zap, ShieldCheck, AlertTriangle, ArrowRight, Sparkles } from 'lucide-react';
 import {
   recommendDiagonalStrikes,
@@ -19,6 +20,8 @@ interface DiagonalStrikeAdvisorCardProps {
   listedExpiries?: string[];
   autoPremium: (strike: number, option: 'CE' | 'PE', expiry?: string) => number;
   chainOc?: Record<string, any>;
+  /** Far-expiry chain (for the long leg's bid/ask check). */
+  farChainOc?: Record<string, any>;
   atmIv?: number;
   currentShortLeg?: { strike: number; lots: number };
   currentLongLeg?: { strike: number; lots: number };
@@ -36,21 +39,28 @@ export default function DiagonalStrikeAdvisorCard({
   listedExpiries,
   autoPremium,
   chainOc,
+  farChainOc,
   atmIv,
   currentShortLeg,
   currentLongLeg,
   onApplyCandidate,
 }: DiagonalStrikeAdvisorCardProps) {
   const quoteData = useMemo(() => {
-    const q: Record<number, { ceLtp?: number; ceIv?: number }> = {};
+    const q: Record<number, { ceLtp?: number; ceIv?: number; ceBid?: number; ceAsk?: number }> = {};
     for (const s of allStrikes) {
       const price = autoPremium(s, 'CE', frontExpiry);
       const ivRaw = chainOc?.[s]?.ce?.implied_volatility ?? chainOc?.[s]?.ce?.iv ?? chainOc?.[String(s)]?.ce?.implied_volatility;
       const iv = typeof ivRaw === 'number' && ivRaw > 0 ? (ivRaw > 1 ? ivRaw / 100 : ivRaw) : (atmIv ? atmIv / 100 : 0.14);
-      q[s] = { ceLtp: price, ceIv: iv };
+      const leg = lookupChainLegData(chainOc as ChainOc, s, 'CE');
+      q[s] = { ceLtp: price, ceIv: iv, ceBid: leg?.top_bid_price, ceAsk: leg?.top_ask_price };
     }
     return q;
   }, [allStrikes, autoPremium, chainOc, frontExpiry, atmIv]);
+
+  const longQuote = useMemo(
+    () => (currentLongLeg && farChainOc ? lookupChainLegData(farChainOc as ChainOc, currentLongLeg.strike, 'CE') : undefined),
+    [currentLongLeg, farChainOc],
+  );
 
   const advisorData: DiagonalAdvisorRecommendation = useMemo(() => {
     const longIvRaw = currentLongLeg ? (chainOc?.[currentLongLeg.strike]?.ce?.implied_volatility ?? chainOc?.[String(currentLongLeg.strike)]?.ce?.implied_volatility) : undefined;
@@ -62,6 +72,8 @@ export default function DiagonalStrikeAdvisorCard({
       dte: farDte ?? 85,
       lots: currentLongLeg.lots,
       iv: longIv,
+      bid: longQuote?.top_bid_price,
+      ask: longQuote?.top_ask_price,
     } : undefined;
 
     return recommendDiagonalStrikes({
@@ -74,7 +86,7 @@ export default function DiagonalStrikeAdvisorCard({
       longLeg: longLegParam,
       listedExpiries,
     });
-  }, [spot, lotSize, frontExpiry, frontDte, farExpiry, farDte, allStrikes, listedExpiries, quoteData, currentLongLeg, chainOc, atmIv]);
+  }, [spot, lotSize, frontExpiry, frontDte, farExpiry, farDte, allStrikes, listedExpiries, quoteData, currentLongLeg, longQuote, chainOc, atmIv]);
 
   const candidates = advisorData.candidates.slice(0, 5);
   const best = advisorData.bestCandidate;
@@ -150,6 +162,7 @@ export default function DiagonalStrikeAdvisorCard({
             <tr>
               <th className="px-2.5 py-1.5">STRIKE</th>
               <th className="px-2 py-1.5">LTP</th>
+              <th className="px-2 py-1.5">BID / ASK</th>
               <th className="px-2 py-1.5">DELTA (Δ)</th>
               <th className="px-2 py-1.5">GAMMA (Γ)</th>
               <th className="px-2 py-1.5">EFFICIENCY SCORE</th>
@@ -168,7 +181,7 @@ export default function DiagonalStrikeAdvisorCard({
                   key={c.strike}
                   className={`hover:bg-zinc-900/60 transition-colors ${
                     isSelected ? 'bg-indigo-500/10' : isTopPick ? 'bg-emerald-500/5' : ''
-                  }`}
+                  } ${c.liquid ? '' : 'opacity-60'}`}
                 >
                   <td className="px-2.5 py-2 font-bold text-white flex items-center gap-1.5">
                     <span>{c.strike} CE</span>
@@ -185,6 +198,18 @@ export default function DiagonalStrikeAdvisorCard({
                   </td>
                   <td className="px-2 py-2 text-zinc-300">
                     {c.ltp > 0 ? `₹${c.ltp.toFixed(2)}` : '—'}
+                  </td>
+                  <td className="px-2 py-2 text-[11px]" title={c.liquid ? 'Liquid' : 'Illiquid - excluded from the recommendation'}>
+                    {c.bid != null && c.ask != null ? (
+                      <>
+                        <span className="text-zinc-300">{c.bid.toFixed(2)} / {c.ask.toFixed(2)}</span>
+                        <span className={`ml-1 font-bold ${c.liquid ? 'text-emerald-400' : 'text-red-400'}`}>
+                          {c.spreadPct != null ? `${c.spreadPct.toFixed(1)}%` : ''}
+                        </span>
+                      </>
+                    ) : (
+                      <span className="text-red-400 font-bold">no quote</span>
+                    )}
                   </td>
                   <td className="px-2 py-2 font-bold text-amber-400">
                     {c.delta.toFixed(3)}

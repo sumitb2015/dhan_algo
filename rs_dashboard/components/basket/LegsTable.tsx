@@ -96,6 +96,13 @@ interface LegsTableProps {
   farExpiry: string;
 }
 
+const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+/** "2026-12-29" -> "29 Dec 2026" (exact date under the FRONT/FAR chip). Unparseable input is shown as-is. */
+function formatLegExpiry(expiry: string): string {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(expiry);
+  return m ? `${Number(m[3])} ${MONTHS[Number(m[2]) - 1] ?? m[2]} ${m[1]}` : expiry;
+}
+
 export default function LegsTable({
   legs, atmStrike, autoPremium, onUpdateLeg, onStepStrike, onAddLeg, onRemoveLeg, onClearAll,
   frontExpiry, farExpiry,
@@ -292,6 +299,9 @@ export default function LegsTable({
                       >
                         {isFar ? 'FAR' : 'FRONT'}
                       </button>
+                      {leg.expiry && (
+                        <div className="mt-0.5 font-mono text-[10px] text-zinc-400 whitespace-nowrap">{formatLegExpiry(leg.expiry)}</div>
+                      )}
                     </td>
 
                     {/* Remove Action */}

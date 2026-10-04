@@ -8,7 +8,11 @@ import {
   recommendDiagonalStrikes,
   isMonthlyExpiry,
   monthlyExpiries,
+  bidAskSpreadPct,
 } from './diagonalStrikeAdvisor.ts';
+
+/** Two-sided 1% quotes for every strike, so a test is about its own rule and not about liquidity. */
+const tight = (strikes: number[]) => Object.fromEntries(strikes.map(k => [k, { ceBid: 99.5, ceAsk: 100.5 }]));
 
 test('computeBsGreeks: computes accurate Call Delta, Gamma, Theta, and Vega', () => {
   const spot = 22421.95;
@@ -74,6 +78,7 @@ test('recommendDiagonalStrikes: identifies optimal strike and ranks candidates',
     frontExpiry: '2026-10-27',
     frontDte: 23,
     strikes,
+    quotes: tight(strikes),
     longLeg: {
       strike: 23000,
       expiry: '2026-12-29',
@@ -103,6 +108,7 @@ test('recommendDiagonalStrikes: ranks by closeness to 0.18 delta, not the high-d
     frontExpiry: '2026-11-24',
     frontDte: 40,
     strikes,
+    quotes: tight(strikes),
     longLeg: { strike: 23000, expiry: '2026-12-29', dte: 85, lots: 3, iv: 0.14 },
   });
   assert.ok(rec.bestCandidate);
@@ -110,15 +116,16 @@ test('recommendDiagonalStrikes: ranks by closeness to 0.18 delta, not the high-d
   assert.deepEqual(rec.summary.warnings, []);
 });
 
-test('recommendDiagonalStrikes: warns on weekly front expiry and short outliving the long', () => {
+test('recommendDiagonalStrikes: warns on a short outliving the long', () => {
   const rec = recommendDiagonalStrikes({
     spot: 22421.95,
     frontExpiry: '2027-01-05',
     frontDte: 40,
     strikes: [23200, 23300],
+    quotes: tight([23200, 23300]),
     longLeg: { strike: 23000, expiry: '2026-12-29', dte: 85, lots: 3, iv: 0.14 },
   });
-  assert.equal(rec.summary.warnings.length, 2);
+  assert.equal(rec.summary.warnings.length, 1);
 });
 
 test('recommendDiagonalStrikes: lots are trimmed so projected gamma stays inside the budget', () => {
@@ -127,6 +134,7 @@ test('recommendDiagonalStrikes: lots are trimmed so projected gamma stays inside
     frontExpiry: '2026-11-24',
     frontDte: 40,
     strikes: [22600, 22700, 22800],
+    quotes: tight([22600, 22700, 22800]),
     longLeg: { strike: 23000, expiry: '2026-12-29', dte: 85, lots: 3, iv: 0.14 },
     maxShortLots: 25,
     maxShortRatio: 5,
@@ -146,12 +154,56 @@ test('monthlyExpiries: latest listed expiry per month, robust to holiday-shifted
   assert.equal(isMonthlyExpiry('2026-08-24'), false); // the heuristic gets this wrong; the list-based rule does not
 });
 
-test('recommendDiagonalStrikes: listedExpiries removes the false weekly warning on a shifted monthly', () => {
+test('recommendDiagonalStrikes: a weekly front expiry raises no warning', () => {
   const base = {
-    spot: 22421.95, frontExpiry: '2026-08-24', frontDte: 40, strikes: [23200, 23300],
+    spot: 22421.95, frontExpiry: '2026-08-24', frontDte: 40, strikes: [23200, 23300], quotes: tight([23200, 23300]),
     longLeg: { strike: 23000, expiry: '2026-12-29', dte: 85, lots: 3, iv: 0.14 },
   };
-  assert.equal(recommendDiagonalStrikes(base).summary.warnings.length, 1);
-  const withList = recommendDiagonalStrikes({ ...base, listedExpiries: ['2026-08-18', '2026-08-24', '2026-09-29'] });
-  assert.equal(withList.summary.warnings.length, 0);
+  assert.equal(recommendDiagonalStrikes(base).summary.warnings.length, 0);
+});
+
+test('bidAskSpreadPct: percent of mid, null without a two-sided or sane quote', () => {
+  assert.ok(Math.abs(bidAskSpreadPct(99.5, 100.5)! - 1.0) < 1e-9);
+  for (const [b, a] of [[0, 100], [100, 0], [101, 100], [undefined, 100], [100, undefined]] as const) {
+    assert.equal(bidAskSpreadPct(b, a), null, `${b}/${a}`);
+  }
+});
+
+test('recommendDiagonalStrikes: a wide-spread strike is flagged illiquid and never recommended', () => {
+  const strikes = [23100, 23150, 23200, 23250, 23300];
+  const base = {
+    spot: 22421.95, frontExpiry: '2026-11-24', frontDte: 40, strikes,
+    longLeg: { strike: 23000, expiry: '2026-12-29', dte: 85, lots: 3, iv: 0.14 },
+  };
+  const clean = recommendDiagonalStrikes({ ...base, quotes: tight(strikes) });
+  const top = clean.bestCandidate!;
+  assert.ok(top.liquid && top.spreadPct !== null && top.spreadPct < 5);
+
+  const quotes = { ...tight(strikes), [top.strike]: { ceBid: 60, ceAsk: 140 } };   // 80% of mid
+  const rec = recommendDiagonalStrikes({ ...base, quotes });
+  const bad = rec.candidates.find(c => c.strike === top.strike)!;
+  assert.equal(bad.liquid, false);
+  assert.match(bad.reason, /illiquid/);
+  assert.notEqual(rec.bestCandidate?.strike, top.strike);
+  assert.ok(rec.bestCandidate?.liquid);
+  assert.equal(rec.candidates[rec.candidates.length - 1].liquid, false);   // illiquid sorts after every liquid strike
+});
+
+test('recommendDiagonalStrikes: no quote at all fails closed and warns', () => {
+  const rec = recommendDiagonalStrikes({
+    spot: 22421.95, frontExpiry: '2026-11-24', frontDte: 40, strikes: [23100, 23200],
+    longLeg: { strike: 23000, expiry: '2026-12-29', dte: 85, lots: 3, iv: 0.14 },
+  });
+  assert.equal(rec.bestCandidate, null);
+  assert.ok(rec.candidates.every(c => !c.liquid && c.spreadPct === null));
+  assert.ok(rec.summary.warnings.some(w => /two-sided quote/.test(w)));
+});
+
+test('recommendDiagonalStrikes: warns when the long leg itself has a wide spread', () => {
+  const strikes = [23100, 23200];
+  const rec = recommendDiagonalStrikes({
+    spot: 22421.95, frontExpiry: '2026-11-24', frontDte: 40, strikes, quotes: tight(strikes),
+    longLeg: { strike: 23000, expiry: '2026-12-29', dte: 85, lots: 3, iv: 0.14, bid: 100, ask: 130 },
+  });
+  assert.ok(rec.summary.warnings.some(w => /Long 23000 CE bid\/ask spread/.test(w)));
 });

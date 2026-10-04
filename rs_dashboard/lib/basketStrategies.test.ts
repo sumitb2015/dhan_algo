@@ -294,4 +294,5 @@ test('low-gamma-diagonal-call template: long far ATM (ratio 3) + short front OTM
   assert.strictEqual(shortLeg.ratio, 4);
   assert.strictEqual(shortLeg.offset, 15);
   assert.deepStrictEqual(tpl!.dte, { front: [25, 45], far: [60, 120] });
+  assert.strictEqual(tpl!.farMonthlyOnly, true);
 });

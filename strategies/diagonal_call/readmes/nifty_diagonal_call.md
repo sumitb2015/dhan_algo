@@ -6,7 +6,7 @@ Positional (`MARGIN`), delta-controlled diagonal covered call on Nifty. Buys far
 
 - **Timing**: Market open after `--start-time` (default **09:30 AM IST**), evaluated during rebalance windows (**10:00, 12:00, 14:00**).
 - **Long Leg (First)**: Buys 60–120 DTE Call (`CE`), 0.55–0.65 delta (preferred ~0.60). Sized at `--long-lots` (default **3** lots). Long leg is confirmed before short leg is sold.
-- **Short Leg (Second)**: Sells 25–45 DTE OTM Call (`CE`), 0.15–0.22 delta (preferred ~0.18–0.20), choosing the strike closest to the target delta (theta/gamma only breaks ties), on a monthly expiry that ends before the long. Weekly options are excluded and nothing is sold out of the delta band.
+- **Short Leg (Second)**: Sells 25–45 DTE OTM Call (`CE`), 0.15–0.22 delta (preferred ~0.18–0.20), choosing the strike closest to the target delta (theta/gamma only breaks ties), on a weekly or monthly expiry that ends before the long (only the long call is restricted to monthlies). Nothing is sold out of the delta band.
 - **Dynamic Sizing**: Short lots are sized so net portfolio delta targets `--target-net-delta` (default **+13** units), capped at `--max-short-lots` (default **6** lots) and `--max-short-ratio` (default **1.25×** long delta).
 - **Execution**: Long-dated call is placed first to ensure hedge margin benefits before selling the short call.
 

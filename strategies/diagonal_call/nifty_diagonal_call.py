@@ -99,7 +99,7 @@ LCR_DISPLAY_CAP_PCT = 999.9     # a long rolled at a big profit shrinks the debi
 FREE_LCR_ENTER_PCT = 100.0      # "Free Long Call" regime starts here ...
 FREE_LCR_EXIT_PCT = 90.0        # ... and only ends below this (hysteresis: unrealized gains evaporate)
 GAMMA_FIT_FRACTION = 0.75       # size new shorts to <= 75% of the gamma floor so they do not re-breach it
-SHORT_WINDOW_EXTENSION_DAYS = 14   # used only when no monthly expiry fits the short DTE window
+MAX_SPREAD_PCT_DEFAULT = 5.0    # a strike is liquid only if (ask - bid) / mid <= this many percent
 FREE_SHORT_TARGET_DELTA = 0.115  # midpoint of the 0.08-0.15 band used in the Free Long Call regime
 
 
@@ -408,6 +408,7 @@ class NiftyDiagonalCallStrategy:
         short_min_dte: int = 25,
         short_max_dte: int = 45,
         short_roll_dte: int = 14,
+        max_spread_pct: float = MAX_SPREAD_PCT_DEFAULT,
         short_roll_delta: float = 0.35,
         short_profit_pct: float = 65.0,
         capital: float = 500000.0,
@@ -441,6 +442,7 @@ class NiftyDiagonalCallStrategy:
         self.short_min_dte = short_min_dte
         self.short_max_dte = short_max_dte
         self.short_roll_dte = short_roll_dte
+        self.max_spread_pct = max_spread_pct
         self.short_roll_delta = short_roll_delta
         self.short_profit_pct = short_profit_pct
 
@@ -907,6 +909,41 @@ class NiftyDiagonalCallStrategy:
         monthlies = monthly_expiries(expiries)
         return [e for e in expiries if e in monthlies and min_dte <= self._compute_dte(e) <= max_dte]
 
+    def _expiries_in_window(self, min_dte: int, max_dte: int) -> List[str]:
+        """Any listed expiry (weekly or monthly) whose DTE lies inside [min_dte, max_dte]."""
+        return [e for e in self._get_sorted_expiries() if min_dte <= self._compute_dte(e) <= max_dte]
+
+    def _ce_quotes(self, expiry: str) -> Dict[int, Tuple[float, float]]:
+        """{strike: (best_bid, best_ask)} for the CE side of one expiry's option chain ({} if unavailable)."""
+        try:
+            df = self.helper.get_option_chain_df(UNDERLYING, expiry)
+        except Exception as exc:
+            logger.warning(f"Option chain for {expiry} unavailable for the bid/ask check: {exc}")
+            return {}
+        if df is None or df.empty or "ce_top_bid_price" not in df.columns or "ce_top_ask_price" not in df.columns:
+            return {}
+        quotes: Dict[int, Tuple[float, float]] = {}
+        for _, r in df.iterrows():
+            try:
+                quotes[int(round(float(r["Strike"])))] = (float(r["ce_top_bid_price"] or 0), float(r["ce_top_ask_price"] or 0))
+            except (TypeError, ValueError):
+                continue
+        return quotes
+
+    def _spread_pct(self, quote: Optional[Tuple[float, float]]) -> Optional[float]:
+        """(ask - bid) / mid in percent, or None when there is no two-sided quote (bid or ask <= 0, or crossed)."""
+        if not quote:
+            return None
+        bid, ask = quote
+        if bid <= 0 or ask <= 0 or ask < bid:
+            return None
+        return (ask - bid) / ((ask + bid) / 2.0) * 100.0
+
+    def _is_liquid(self, quote: Optional[Tuple[float, float]]) -> bool:
+        """Fail closed: no two-sided quote, or a spread wider than --max-spread-pct, is illiquid."""
+        pct = self._spread_pct(quote)
+        return pct is not None and pct <= self.max_spread_pct
+
     def _ce_rows(self, expiry: str):
         df = self.helper._master_list
         return df[
@@ -931,25 +968,28 @@ class NiftyDiagonalCallStrategy:
             logger.error(f"No CE options found in master list for expiry {best_expiry}")
             return None
 
-        best_diff = 999.0
-        best_strike = None
-        best_sec_id = None
-        best_delta = 0.60
-
         iv = self._get_current_iv()
+        ranked = []
         for _, row in matches.iterrows():
             k = float(row["STRIKE_PRICE"])
-            sec_id = str(row["SECURITY_ID"])
             greeks = compute_bs_greeks(spot, k, dte, iv=iv, r=0.07, opt_type="CE")
-            delta = greeks["delta"]
-            diff = abs(delta - self.long_target_delta)
-            if diff < best_diff:
-                best_diff = diff
-                best_strike = int(k)
-                best_sec_id = sec_id
-                best_delta = delta
+            ranked.append((abs(greeks["delta"] - self.long_target_delta), int(k), str(row["SECURITY_ID"]), greeks["delta"]))
+        ranked.sort(key=lambda t: t[0])
+        if not ranked:
+            return None
 
-        if not best_strike:
+        # Closest to the target delta that also has a tight bid/ask (the long is the leg we cannot cheaply exit).
+        quotes = self._ce_quotes(best_expiry)
+        best_strike = best_sec_id = None
+        best_delta = 0.60
+        for _diff, k, sec_id, delta in ranked:
+            if self._is_liquid(quotes.get(k)):
+                best_strike, best_sec_id, best_delta = k, sec_id, delta
+                break
+            pct = self._spread_pct(quotes.get(k))
+            logger.info(f"Long {k} CE ({best_expiry}) skipped: " + (f"bid/ask spread {pct:.1f}% > {self.max_spread_pct:.1f}%." if pct is not None else "no two-sided quote."))
+        if best_strike is None:
+            logger.error(f"No liquid long call strike (bid/ask spread <= {self.max_spread_pct:.1f}%) on {best_expiry}; not entering.")
             return None
 
         ltp = self.helper.get_ltp(best_sec_id, exchange="NSE_FNO", instrument="OPTIDX")
@@ -1003,7 +1043,7 @@ class NiftyDiagonalCallStrategy:
     def select_short_call(
         self, spot: float, long_delta_shares: float, long_leg: Optional[Dict] = None
     ) -> Optional[Dict]:
-        """Selects the short call: monthly expiry, 25-45 DTE, delta in band, expiring before the long.
+        """Selects the short call: weekly or monthly expiry, 25-45 DTE, delta in band, expiring before the long.
 
         Ranking: closest delta to the regime target (0.18, or 0.115 in the Free Long Call regime);
         Theta/|Gamma| only breaks ties within 0.02 delta. Theta/|Gamma| is ~0.5*sigma^2*S^2 for every
@@ -1016,22 +1056,14 @@ class NiftyDiagonalCallStrategy:
             return None
 
         long_expiry = (long_leg or self.long_leg or {}).get("expiry")
-        def _short_expiries(max_dte: int) -> List[str]:
-            return [
-                e for e in self._monthly_expiries_in_window(self.short_min_dte, max_dte)
-                if not long_expiry or e < long_expiry
-            ]
-
-        candidate_expiries = _short_expiries(self.short_max_dte)
-        if not candidate_expiries:
-            # Monthlies are 4-5 weeks apart, so a 25-45 DTE window can legitimately hold none. Widen the
-            # upper bound (never to a weekly) rather than sit long-only for days.
-            candidate_expiries = _short_expiries(self.short_max_dte + SHORT_WINDOW_EXTENSION_DAYS)
-            if candidate_expiries:
-                logger.warning(f"No monthly expiry within {self.short_max_dte} DTE; using the nearest monthly up to {self.short_max_dte + SHORT_WINDOW_EXTENSION_DAYS} DTE.")
+        # The short may sit on a weekly or a monthly (only the long must be a monthly, for liquidity).
+        candidate_expiries = [
+            e for e in self._expiries_in_window(self.short_min_dte, self.short_max_dte)
+            if not long_expiry or e < long_expiry
+        ]
         if not candidate_expiries:
             logger.error(
-                f"No monthly expiry in the {self.short_min_dte}-{self.short_max_dte} DTE window "
+                f"No expiry in the {self.short_min_dte}-{self.short_max_dte} DTE window "
                 f"that expires before the long ({long_expiry})."
             )
             return None
@@ -1049,13 +1081,18 @@ class NiftyDiagonalCallStrategy:
             target_delta = self.short_target_delta
 
         candidates = []
+        illiquid = 0
         for expiry in candidate_expiries:
             dte = self._compute_dte(expiry)
             matches = self._ce_rows(expiry)
+            quotes = self._ce_quotes(expiry)
             for _, row in matches.iterrows():
                 k = float(row["STRIKE_PRICE"])
                 g = compute_bs_greeks(spot, k, dte, iv=iv, r=0.07, opt_type="CE")
                 if min_target_delta <= g["delta"] <= max_target_delta:
+                    if not self._is_liquid(quotes.get(int(k))):
+                        illiquid += 1
+                        continue
                     candidates.append({
                         "security_id": str(row["SECURITY_ID"]),
                         "strike": int(k),
@@ -1067,7 +1104,13 @@ class NiftyDiagonalCallStrategy:
                     })
 
         if not candidates:
-            logger.error(f"No short call with delta in {min_target_delta:.2f}-{max_target_delta:.2f}; not selling out of band.")
+            if illiquid:
+                logger.error(
+                    f"{illiquid} short call strike(s) in delta {min_target_delta:.2f}-{max_target_delta:.2f} were skipped: "
+                    f"no two-sided quote or bid/ask spread > {self.max_spread_pct:.1f}%. Not selling an illiquid strike."
+                )
+            else:
+                logger.error(f"No short call with delta in {min_target_delta:.2f}-{max_target_delta:.2f}; not selling out of band.")
             return None
 
         closest = min(c["diff"] for c in candidates)
@@ -1945,6 +1988,7 @@ Examples:
     parser.add_argument("--short-target-delta", type=float, default=0.18, help="Target delta for short calls (default: 0.18, range 0.15-0.22).")
     parser.add_argument("--short-min-dte", type=int, default=25, help="Minimum DTE for short calls (default: 25).")
     parser.add_argument("--short-max-dte", type=int, default=45, help="Maximum DTE for short calls (default: 45).")
+    parser.add_argument("--max-spread-pct", type=float, default=MAX_SPREAD_PCT_DEFAULT, help="Skip strikes whose bid/ask spread exceeds this %% of mid (default: 5.0).")
     parser.add_argument("--short-roll-dte", type=int, default=14, help="Roll short call when DTE falls below this (default: 14).")
     parser.add_argument("--short-roll-delta", type=float, default=0.35, help="Roll short call when its delta exceeds this (default: 0.35).")
     parser.add_argument("--short-profit-pct", type=float, default=65.0, help="Book profit on short call when decay reaches this %% (default: 65.0).")
@@ -2011,6 +2055,7 @@ if __name__ == "__main__":
         short_min_dte=args.short_min_dte,
         short_max_dte=args.short_max_dte,
         short_roll_dte=args.short_roll_dte,
+        max_spread_pct=args.max_spread_pct,
         short_roll_delta=args.short_roll_delta,
         short_profit_pct=args.short_profit_pct,
         capital=args.capital,

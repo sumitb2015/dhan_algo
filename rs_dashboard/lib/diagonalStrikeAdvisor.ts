@@ -6,7 +6,7 @@
  * 
  * Rules:
  *  - Long leg: 60-120 DTE, ATM/ITM (Delta ~0.55 - 0.65).
- *  - Short leg: monthly expiry only, 25-45 DTE, expiring before the long, OTM (Delta ~0.15 - 0.22).
+ *  - Short leg: weekly or monthly expiry, 25-45 DTE, expiring before the long, OTM (Delta ~0.15 - 0.22).
  *    Ranked by closeness to the 0.18 target delta; Theta/|Gamma| only breaks ties within 0.02 delta
  *    (it is ~0.5*sigma^2*S^2 for every strike, so as the primary key it always picked the highest-delta edge).
  *    Mirrors strategies/diagonal_call/nifty_diagonal_call.py::select_short_call.
@@ -51,11 +51,25 @@ export interface CandidateStrike {
   resultingNetThetaRs: number;
   classification: 'optimal' | 'conservative' | 'aggressive' | 'out_of_bounds';
   reason: string;
+  bid: number | null;
+  ask: number | null;
+  /** (ask - bid) / mid in percent; null when there is no two-sided quote. */
+  spreadPct: number | null;
+  /** Fail closed, as in the live strategy: true only when a two-sided quote's spread is within the limit. */
+  liquid: boolean;
 }
 
 export const SHORT_TARGET_DELTA = 0.18;
 export const GAMMA_FIT_FRACTION = 0.75;
 export const TIE_BREAK_DELTA_BAND = 0.02;
+/** A strike is liquid only if (ask - bid) / mid <= this many percent. Mirrors MAX_SPREAD_PCT_DEFAULT in the Python strategy. */
+export const MAX_SPREAD_PCT = 5;
+
+/** (ask - bid) / mid in percent, or null when bid/ask are missing, non-positive or crossed. */
+export function bidAskSpreadPct(bid: number | null | undefined, ask: number | null | undefined): number | null {
+  if (typeof bid !== 'number' || typeof ask !== 'number' || !(bid > 0) || !(ask > 0) || ask < bid) return null;
+  return ((ask - bid) / ((ask + bid) / 2)) * 100;
+}
 
 /** Weekday heuristic fallback: last occurrence of its weekday in its month. Misreads a holiday-shifted monthly. */
 export function isMonthlyExpiry(expiry: string): boolean {
@@ -96,7 +110,7 @@ export interface DiagonalAdvisorRecommendation {
     targetNetDelta: number;
     maxShortRatio: number;
     regime: string;
-    /** Rule violations in the chosen front expiry (weekly, or not before the long). Empty when clean. */
+    /** Rule violations in the chosen front expiry (not before the long). Empty when clean. */
     warnings: string[];
   };
 }
@@ -304,8 +318,10 @@ export function recommendDiagonalStrikes(params: {
   frontExpiry: string;
   frontDte: number;
   strikes: number[];
-  quotes?: Record<number, { ceLtp?: number; ceIv?: number }>;
-  longLeg?: { strike: number; expiry: string; dte: number; lots: number; iv?: number };
+  quotes?: Record<number, { ceLtp?: number; ceIv?: number; ceBid?: number; ceAsk?: number }>;
+  longLeg?: { strike: number; expiry: string; dte: number; lots: number; iv?: number; bid?: number; ask?: number };
+  /** Max bid/ask spread (% of mid) for a strike to count as liquid. Default MAX_SPREAD_PCT. */
+  maxSpreadPct?: number;
   targetNetDelta?: number;
   maxShortRatio?: number;
   maxShortLots?: number;
@@ -319,6 +335,7 @@ export function recommendDiagonalStrikes(params: {
   const maxShortRatio = params.maxShortRatio ?? 1.25;
   const maxShortLots = params.maxShortLots ?? 6;
   const minGammaLimit = params.minGammaLimit ?? -0.20;
+  const maxSpreadPct = params.maxSpreadPct ?? MAX_SPREAD_PCT;
 
   // Default long leg if none provided (ATM 90 DTE, 3 lots)
   const defaultLongStrike = Math.round(spot / 50) * 50;
@@ -392,7 +409,16 @@ export function recommendDiagonalStrikes(params: {
       reason = delta < 0.12 ? 'Delta too low (<0.12); insufficient premium.' : 'Delta too high (>0.28); high gamma danger.';
     }
 
+    const bid = quote?.ceBid && quote.ceBid > 0 ? quote.ceBid : null;
+    const ask = quote?.ceAsk && quote.ceAsk > 0 ? quote.ceAsk : null;
+    const spreadPct = bidAskSpreadPct(bid, ask);
+    const liquid = spreadPct != null && spreadPct <= maxSpreadPct;
+    if (!liquid) {
+      reason = (spreadPct == null ? 'No two-sided quote - not tradable.' : `Bid/ask spread ${spreadPct.toFixed(1)}% > ${maxSpreadPct}% - illiquid.`) + ' ' + reason;
+    }
+
     candidates.push({
+      bid, ask, spreadPct: spreadPct == null ? null : Number(spreadPct.toFixed(2)), liquid,
       strike,
       expiry: params.frontExpiry,
       dte: params.frontDte,
@@ -415,12 +441,13 @@ export function recommendDiagonalStrikes(params: {
   // Theta/|Gamma| only orders strikes within TIE_BREAK_DELTA_BAND of the closest one.
   const diffOf = (c: CandidateStrike) => Math.abs(c.delta - SHORT_TARGET_DELTA);
   const closestOptimal = Math.min(
-    ...candidates.filter((c) => c.classification === 'optimal').map(diffOf),
+    ...candidates.filter((c) => c.liquid && c.classification === 'optimal').map(diffOf),
     Infinity,
   );
   const tier = (c: CandidateStrike) =>
     c.classification === 'optimal' && diffOf(c) <= closestOptimal + TIE_BREAK_DELTA_BAND ? 0 : 1;
   candidates.sort((a, b) => {
+    if (a.liquid !== b.liquid) return a.liquid ? -1 : 1;   // illiquid strikes are never ranked above a liquid one
     if (a.classification === 'optimal' && b.classification !== 'optimal') return -1;
     if (b.classification === 'optimal' && a.classification !== 'optimal') return 1;
     if (tier(a) !== tier(b)) return tier(a) - tier(b);
@@ -429,17 +456,19 @@ export function recommendDiagonalStrikes(params: {
   });
 
   const warnings: string[] = [];
-  const frontIsMonthly = params.listedExpiries?.length
-    ? monthlyExpiries(params.listedExpiries).has(params.frontExpiry)
-    : isMonthlyExpiry(params.frontExpiry);
-  if (!frontIsMonthly) {
-    warnings.push(`Front expiry ${params.frontExpiry} is a weekly; the strategy only sells monthly expiries.`);
-  }
   if (params.frontExpiry >= longLeg.expiry) {
     warnings.push(`Front expiry ${params.frontExpiry} is not before the long expiry ${longLeg.expiry}; the short would outlive the long.`);
   }
 
-  const bestCandidate = candidates.length > 0 ? candidates[0] : null;
+  const longSpread = bidAskSpreadPct(longLeg.bid, longLeg.ask);
+  if (params.longLeg && longSpread != null && longSpread > maxSpreadPct) {
+    warnings.push(`Long ${longLeg.strike} CE bid/ask spread is ${longSpread.toFixed(1)}% (> ${maxSpreadPct}%) - exiting or rolling it will cost slippage.`);
+  }
+  if (candidates.length > 0 && !candidates.some(c => c.liquid)) {
+    warnings.push(`No short strike has a two-sided quote within a ${maxSpreadPct}% bid/ask spread.`);
+  }
+
+  const bestCandidate = candidates.length > 0 && candidates[0].liquid ? candidates[0] : null;
 
   return {
     spot,

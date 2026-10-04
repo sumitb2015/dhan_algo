@@ -20,6 +20,9 @@ export interface StrategyTemplate {
   /** Calendar-day windows the template's expiries should come from. When present, applying the
    *  template re-picks the front / far expiry itself (far = closest to 2x the front DTE). */
   dte?: { front: [number, number]; far?: [number, number] };
+  /** The far (long) leg must come from the monthly series (last listed expiry of each month) -
+   *  weeklies are too illiquid to hold a long call in. The front (short) leg may be a weekly or a monthly. */
+  farMonthlyOnly?: boolean;
 }
 
 export type StrategyCategory = 'Bullish' | 'Bearish' | 'Range Bound' | 'Big Move' | 'Ratio Spreads' | 'Lizard' | 'Calendar';
@@ -157,7 +160,7 @@ export const STRATEGY_CATEGORIES: Record<StrategyCategory, StrategyTemplate[]> =
     // Buy 3x far-dated call (60-120 DTE, ~0.60 delta) for convexity & margin shield on far expiry.
     // Sell 4x medium-dated OTM call (25-45 DTE, ~0.18 delta) on front expiry to harvest steady theta decay.
     // Dynamic delta sizing (+10 to +20 units) closest-to-0.18Δ strike selection (Theta/|Gamma| only breaks ties), monthly expiries only.
-    { key: 'low-gamma-diagonal-call', name: 'Low-Gamma Diagonal Call', dte: { front: [25, 45], far: [60, 120] }, legs: [
+    { key: 'low-gamma-diagonal-call', name: 'Low-Gamma Diagonal Call', dte: { front: [25, 45], far: [60, 120] }, farMonthlyOnly: true, legs: [
       { side: 'B', option: 'CE', offset: 0, ratio: 3, expiryRole: 'far' },
       { side: 'S', option: 'CE', offset: 15, ratio: 4, expiryRole: 'front' },
     ] },

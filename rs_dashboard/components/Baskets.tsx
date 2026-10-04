@@ -40,7 +40,8 @@ import LegsTable from './basket/LegsTable';
 import SavedBasketsPanel from './basket/SavedBasketsPanel';
 import BasketActivityTabs from './basket/BasketActivityTabs';
 import DiagonalStrikeAdvisorCard from './basket/DiagonalStrikeAdvisorCard';
-import type { CandidateStrike } from '@/lib/diagonalStrikeAdvisor';
+import BasketGreeksPanel from './basket/BasketGreeksPanel';
+import { monthlyExpiries, type CandidateStrike } from '@/lib/diagonalStrikeAdvisor';
 
 const UNDERLYINGS = ['NIFTY', 'BANKNIFTY', 'SENSEX'] as const;
 type Underlying = typeof UNDERLYINGS[number];
@@ -196,6 +197,9 @@ export default function Baskets() {
   const [futureExpiry, setFutureExpiry] = useState<string | null>(null);
   const [atmIv, setAtmIv]               = useState<number>(13.13); // Sensibull ATM IV baseline (13.13%)
   const [chainOc, setChainOc]           = useState<Record<string, any>>({});
+  // Chains of the off-selected-expiry (far/calendar) legs, keyed by expiry. Fallback price source for
+  // when the live-tick bridge has no quote for that contract (market closed, contract not yet subscribed).
+  const [farChains, setFarChains]       = useState<Record<string, Record<string, any>>>({});
 
   const { liveQuotes, bridgeStatus, lastUpdated, transport } = useLiveOptionsWS(expiry, broker, authenticatedBrokers, underlying);
 
@@ -312,6 +316,13 @@ export default function Baskets() {
       })
       .catch(() => {});
   }, [broker, underlying]);
+
+  // Far-monthly templates (low-gamma diagonal) can't have the long leg pointed at an illiquid weekly by hand either.
+  const selectableFarExpiries = useMemo(() => {
+    if (!Object.values(STRATEGY_CATEGORIES).flat().find(t => t.key === strategy)?.farMonthlyOnly) return expiries;
+    const monthly = monthlyExpiries(expiries);
+    return expiries.filter(e => monthly.has(e));
+  }, [expiries, strategy]);
 
   useEffect(() => {
     if (!expiries.length) return;
@@ -431,13 +442,45 @@ export default function Baskets() {
     }).catch(() => {});
   }, [legs, expiry, underlying]);
 
+  const offExpiryKey = useMemo(
+    () => Array.from(new Set(legs.map(l => l.expiry).filter((e): e is string => !!e && e !== expiry))).sort().join(','),
+    [legs, expiry],
+  );
+  useEffect(() => {
+    setFarChains({});
+  }, [underlying, broker]);
+  useEffect(() => {
+    if (!offExpiryKey) return;
+    let cancelled = false;
+    for (const ex of offExpiryKey.split(',')) {
+      fetch(`/api/options/chain?underlying=${underlying}&expiry=${ex}&broker=${broker}`)
+        .then(r => r.json())
+        .then((j: { success: boolean; data?: { chain: { oc?: Record<string, any> } } }) => {
+          const oc = j.success ? j.data?.chain?.oc : undefined;
+          if (cancelled || !oc) return;
+          // Chain keys arrive as "22400.000000"; normalise to "22400" so leg lookups by strike hit.
+          const byStrike: Record<string, any> = {};
+          for (const [sk, entry] of Object.entries(oc)) byStrike[String(Number(sk))] = entry;
+          setFarChains(prev => ({ ...prev, [ex]: byStrike }));
+        })
+        .catch(() => {});
+    }
+    return () => { cancelled = true; };
+  }, [offExpiryKey, underlying, broker]);
+
   const autoPremium = useCallback((strike: number, option: OptionType, legExpiry?: string): number => {
     const key = String(strike);
     const side = option === 'CE' ? 'ce' : 'pe';
     if (legExpiry != null && legExpiry !== expiry) {
       const extraTick = liveQuotes?.extra?.[legExpiry]?.[key]?.[side] ?? liveQuotes?.extra?.[legExpiry]?.[strike]?.[side];
       const extraLtp = extraTick?.ltp ?? 0;
-      return extraLtp > 0 ? extraLtp : 0;
+      if (extraLtp > 0) return extraLtp;
+      // No live tick: fall back to the far chain's last traded price, then previous close.
+      const farEntry = farChains[legExpiry]?.[key]?.[side];
+      const farLtp = farEntry?.last_price;
+      if (typeof farLtp === 'number' && farLtp > 0) return farLtp;
+      const farPrev = farEntry?.previous_close_price ?? farEntry?.previous_close;
+      return typeof farPrev === 'number' && farPrev > 0 ? farPrev : 0;
     }
 
     // 1. Check live WebSocket tick quote (both numeric and string keys)
@@ -455,7 +498,7 @@ export default function Baskets() {
     if (typeof chainPrev === 'number' && chainPrev > 0) return chainPrev;
 
     return 0;
-  }, [liveQuotes, chainOc, prevClose, expiry]);
+  }, [liveQuotes, chainOc, farChains, prevClose, expiry]);
 
   const effectivePremium = useCallback((leg: BasketLeg): number => {
     const manual = Number(leg.price);
@@ -478,6 +521,8 @@ export default function Baskets() {
     let frontExp = expiry, farExp = farExpiry;
     if (tpl.dte) {
       const dte = (e: string) => daysToExpiry(e);
+      const monthly = tpl.farMonthlyOnly ? monthlyExpiries(expiries) : null;
+      const farEligible = monthly ? expiries.filter(e => monthly.has(e)) : expiries;
       const [fLo, fHi] = tpl.dte.front;
       const front = expiries.find(e => { const d = dte(e); return d != null && d >= fLo && d <= fHi; });
       if (!front) {
@@ -488,10 +533,10 @@ export default function Baskets() {
       if (tpl.dte.far) {
         const [aLo, aHi] = tpl.dte.far;
         const fd = dte(front) ?? fLo;
-        const cands = expiries.filter(e => { const d = dte(e); return d != null && d > fd && d >= aLo && d <= aHi; });
+        const cands = farEligible.filter(e => { const d = dte(e); return d != null && d > fd && d >= aLo && d <= aHi; });
         cands.sort((a, b) => Math.abs((dte(a) ?? 0) - 2 * fd) - Math.abs((dte(b) ?? 0) - 2 * fd));
         if (!cands.length) {
-          addToast('error', `No expiry ${aLo}-${aHi} days out for the long leg`, expiries.join(', '));
+          addToast('error', `No ${monthly ? 'monthly ' : ''}expiry ${aLo}-${aHi} days out for the long leg`, farEligible.join(', '));
           return;
         }
         farExp = cands[0];
@@ -1013,7 +1058,7 @@ export default function Baskets() {
                 onChange={e => setFarExpiry(e.target.value)}
                 className="bg-transparent text-zinc-100 text-xs font-mono font-bold rounded focus:outline-none cursor-pointer"
               >
-                {expiries.filter(ex => ex !== expiry).map(ex => (
+                {selectableFarExpiries.filter(ex => ex !== expiry).map(ex => (
                   <option key={ex} value={ex} className="bg-zinc-900 text-zinc-100">{ex}</option>
                 ))}
               </select>
@@ -1098,6 +1143,7 @@ export default function Baskets() {
             listedExpiries={expiries}
             autoPremium={autoPremium}
             chainOc={chainOc}
+            farChainOc={farExpiry ? farChains[farExpiry] : undefined}
             atmIv={atmIv}
             currentShortLeg={legs.find(l => l.side === 'S' && l.option === 'CE')}
             currentLongLeg={legs.find(l => l.side === 'B' && l.option === 'CE')}
@@ -1134,6 +1180,15 @@ export default function Baskets() {
                 onAddLeg={addLeg}
                 onRemoveLeg={removeLeg}
                 onClearAll={() => { setLegs([]); setStrategy(null); }}
+              />
+
+              <BasketGreeksPanel
+                legs={legs}
+                frontExpiry={expiry}
+                frontChain={chainOc}
+                farChains={farChains}
+                unitsPerLot={effectiveLotSize}
+                multiplier={multiplier}
               />
 
               {/* Saved Presets Dock */}

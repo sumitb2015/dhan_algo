@@ -174,6 +174,8 @@ export interface ChainLegData {
   volume?: number;
   implied_volatility?: number;
   security_id?: number;
+  top_bid_price?: number;
+  top_ask_price?: number;
   greeks?: { delta?: number; theta?: number; gamma?: number; vega?: number };
 }
 export interface ChainOc {
