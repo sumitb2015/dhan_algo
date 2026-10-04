@@ -20,6 +20,8 @@ interface Props {
   expiry: string;
   /** Fill a wide modal: larger type, roomier cells, and a table that grows with the viewport. */
   large?: boolean;
+  /** Realised P&L of closed legs, added to every cell so the grid reads as the whole strategy's P&L. */
+  fixedPnl?: number;
 }
 
 const RANGE_OPTIONS = [0.02, 0.04, 0.06] as const;
@@ -45,7 +47,7 @@ function fmtCell(n: number): string {
   return `${sign}${abs.toFixed(0)}`;
 }
 
-export default function PnlTableTab({ legs, spot, strikeStep, expiry, large = false }: Props) {
+export default function PnlTableTab({ legs, spot, strikeStep, expiry, large = false, fixedPnl = 0 }: Props) {
   const [rangePct, setRangePct] = useState<number>(0.04);
   const [ivMultiplier, setIvMultiplier] = useState<number>(1);
 
@@ -65,8 +67,8 @@ export default function PnlTableTab({ legs, spot, strikeStep, expiry, large = fa
   const grid = useMemo(() => {
     if (!legs.length || !expiry || multiExpiry) return null;
     // lotSize is 1: quantities are already absolute contracts (see lib/positionLegs.ts).
-    return buildHeatmapGrid(legs, spot, 1, expiry, rangePct, ivMultiplier, strikeStep);
-  }, [legs, spot, expiry, rangePct, ivMultiplier, strikeStep, multiExpiry]);
+    return buildHeatmapGrid(legs, spot, 1, expiry, rangePct, ivMultiplier, strikeStep, fixedPnl);
+  }, [legs, spot, expiry, rangePct, ivMultiplier, strikeStep, multiExpiry, fixedPnl]);
 
   const maxAbs = useMemo(
     () => (grid ? Math.max(...grid.cells.flat().map(Math.abs), 1) : 1),
@@ -121,7 +123,7 @@ export default function PnlTableTab({ legs, spot, strikeStep, expiry, large = fa
           ))}
         </div>
         <span className="text-[10.5px] text-zinc-400">
-          Priced to <strong className="text-zinc-200">{fmtExpiryShort(expiry)}</strong>. The first column is priced at the live time to expiry; the final column settles intrinsically; earlier columns use live IV{ivMultiplier !== 1 ? ` (${ivMultiplier}×)` : ''}.
+          Priced to <strong className="text-zinc-200">{fmtExpiryShort(expiry)}</strong>. The first column is priced at the live time to expiry; the final column settles intrinsically; each strike keeps its current IV across spot and dates{ivMultiplier !== 1 ? ` (${ivMultiplier}×)` : ''}.{fixedPnl !== 0 ? ` Includes ${fixedPnl < 0 ? '-' : '+'}₹${Math.abs(Math.round(fixedPnl)).toLocaleString('en-IN')} realised from closed legs.` : ''}
         </span>
       </div>
 

@@ -748,6 +748,8 @@ export function buildHeatmapGrid(
   rangePct: number,
   ivMultiplier: number,
   strikeStep: number = STRIKE_STEP,
+  /** Spot- and date-independent P&L added to every cell (e.g. realised P&L of legs already closed). */
+  fixedPnl: number = 0,
 ): HeatmapGrid {
   const today = new Date();
   today.setHours(0, 0, 0, 0);
@@ -789,7 +791,7 @@ export function buildHeatmapGrid(
         : (leg.type === 'CE' ? Math.max(rowSpot - leg.strike, 0) : Math.max(leg.strike - rowSpot, 0));
       const perUnit = leg.side === 'SELL' ? (leg.price - price) : (price - leg.price);
       return sum + perUnit * leg.qtyLots;
-    }, 0) * lotSize;
+    }, 0) * lotSize + fixedPnl;
   }));
 
   return { dates, labels, rows, cells };

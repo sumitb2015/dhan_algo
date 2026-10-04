@@ -93,6 +93,54 @@ export function fallbackLotSize(underlying: string, broker: string): number {
   return underlying === 'CRUDEOIL' ? 100 : 10;
 }
 
+export interface ScalePlan {
+  currentMultiplier: number;
+  newMultiplier: number;
+  /** Largest +N that keeps the strategy within the 50x multiplier cap. */
+  maxDelta: number;
+  legs: { leg: MultiLegLeg; baseRatio: number; addLots: number; newLots: number }[];
+  /** True when every open leg's lots equal ratio x multiplier, so bumping the multiplier stays truthful. */
+  inStep: boolean;
+  totalLots: number;
+  addTotalLots: number;
+}
+
+/** Stable fingerprint of a plan (leg ids and lots added). The dialog hands it to the handler so a basket that
+ *  changed while the dialog was open (a leg stopped out, lots edited) is refused instead of scaled differently
+ *  from what the user approved. */
+export function scalePlanSignature(plan: ScalePlan): string {
+  return `${plan.currentMultiplier}|${plan.legs.map(p => `${p.leg.id}:${p.leg.lots}+${p.addLots}`).join(',')}`;
+}
+
+/** What "Scale +N" would do to a placed strategy: each OPEN leg grows by its base ratio x N lots.
+ *  The modal previews this and scaleStrategy executes it, so they cannot disagree. */
+export function planScale(basket: MultiLegBasket, delta: number): ScalePlan {
+  const cur = Math.max(1, basket.multiplier && !isNaN(basket.multiplier) ? basket.multiplier : 1);
+  const legs = basket.legs.filter(l => l.status === 'OPEN').map(leg => {
+    const baseRatio = leg.ratio ?? Math.max(1, Math.round(leg.lots / cur));
+    const addLots = baseRatio * delta;
+    return { leg, baseRatio, addLots, newLots: leg.lots + addLots };
+  });
+  return {
+    currentMultiplier: cur,
+    newMultiplier: cur + delta,
+    maxDelta: Math.max(0, 50 - cur),
+    legs,
+    inStep: legs.every(p => p.baseRatio * cur === p.leg.lots),
+    totalLots: legs.reduce((n, p) => n + p.leg.lots, 0),
+    addTotalLots: legs.reduce((n, p) => n + p.addLots, 0),
+  };
+}
+
+/** The name a strategy row shows: the structure its live legs form (a strangle plus wings reads as an
+ *  iron condor), else the saved name, else the preset key. Multi-expiry baskets skip classification. */
+export function basketLabel(basket: MultiLegBasket, fallback = 'Strategy'): string {
+  const mixed = basket.legs.some(l => l.status !== 'CLOSED' && l.expiry && l.expiry !== basket.expiry);
+  return (mixed ? null : classifyBasketStructure(basket.legs))?.structure
+    ?? basket.name
+    ?? (basket.presetKey ? basket.presetKey.replace(/-/g, ' ') : fallback);
+}
+
 /** Dhan reports MCX crude quantity in lots-of-barrels differently per contract: CRUDEOIL x100,
  *  CRUDEOILM x10. Every other underlying/broker is 1. Single source for ledger-qty -> P&L scaling. */
 export function crudeQtyMultiplier(underlying: string, broker: string): number {

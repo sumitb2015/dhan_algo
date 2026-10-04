@@ -9,12 +9,13 @@ import RuleNumInput from './RuleNumInput';
 import AddLotsModal from './AddLotsModal';
 import PnlTableModal from './PnlTableModal';
 import PositionVisualizerModal from './PositionVisualizerModal';
+import ScaleStrategyModal from './ScaleStrategyModal';
 import AddNewLegModal from './AddNewLegModal';
 import LegColumnsMenu from './LegColumnsMenu';
 import { DEFAULT_LEG_COLUMNS, type LegColumns } from '@/lib/legColumns';
 import {
   computeLegTrailingSL, computeStrategyMetrics, checkStrategyRisk, computeBasketStatus, computeCalendarPayoffCurve,
-  classifyBasketStructure, legCountsToday, legPnl, legAvgPrice, legPnlPct, legQtyUnits, crudeQtyMultiplier,
+  classifyBasketStructure, legCountsToday, legPnl, legAvgPrice, legPnlPct, legQtyUnits, crudeQtyMultiplier, basketLabel,
   findSiblingLegCollisions, type SiblingLegCollision, scaleBasketMultiplier,
   type MultiLegBasket, type MultiLegLeg, type StrategyRiskConfig, type LegQtyWarning,
 } from '@/lib/multiLegFocus';
@@ -113,7 +114,7 @@ export interface MultiLegStrategyRowProps {
     limitPrice?: number;
   }) => Promise<void>;
   /** Scale all open legs of this strategy by adding N multiplier units (BUYs first, then SELLs). */
-  onScaleStrategy?: (multiplierDelta: number) => Promise<void>;
+  onScaleStrategy?: (multiplierDelta: number, expectedSignature?: string) => Promise<void>;
   scaling?: boolean;
   placing: boolean;
   exiting: boolean;
@@ -191,7 +192,7 @@ export default function MultiLegStrategyRow({
   const [simTargetDays, setSimTargetDays] = useState<number>(0);
   const [simIvShift, setSimIvShift] = useState<number>(0);
   const [confirmPlace, setConfirmPlace] = useState(false);
-  const [confirmScale, setConfirmScale] = useState(false);
+  const [showScale, setShowScale] = useState(false);
   const [shiftSteps, setShiftSteps] = useState(1);   // per-strategy Steps stepper (UI only, not persisted)
   const [shifting, setShifting] = useState(false);
   const runShift = useCallback(async (legIds: string[], direction: 'UP' | 'DOWN') => {
@@ -200,16 +201,6 @@ export default function MultiLegStrategyRow({
     try { await onShiftLegs(legIds, direction, shiftSteps); } finally { setShifting(false); }
   }, [onShiftLegs, shiftSteps]);
 
-  const handleScaleStrategy = useCallback(async () => {
-    if (!onScaleStrategy) return;
-    if (!confirmScale) {
-      setConfirmScale(true);
-      setTimeout(() => setConfirmScale(false), 4000);
-      return;
-    }
-    setConfirmScale(false);
-    await onScaleStrategy(1);
-  }, [onScaleStrategy, confirmScale]);
   const [selectedLegForAddLots, setSelectedLegForAddLots] = useState<MultiLegLeg | null>(null);
   const [isAddNewLegModalOpen, setIsAddNewLegModalOpen] = useState<boolean>(false);
 
@@ -394,8 +385,7 @@ export default function MultiLegStrategyRow({
     [basket.legs, hasMixedExpiry],
   );
   const strategyLabel = derivedStructure?.structure
-    ?? basket.name
-    ?? (basket.presetKey ? basket.presetKey.replace(/-/g, ' ') : `Strategy #${index + 1}`);
+    ?? basketLabel(basket, `Strategy #${index + 1}`);
 
   // The Calendar/Diagonal spread's actual payoff shape: strategy value AS OF
   // THE NEAR (front) LEG'S EXPIRY, where the front leg is pure intrinsic and
@@ -1185,17 +1175,13 @@ export default function MultiLegStrategyRow({
               {onScaleStrategy && (
                 <button
                   type="button"
-                  onClick={handleScaleStrategy}
+                  onClick={() => setShowScale(true)}
                   disabled={scaling || shifting || exiting || exitingLegs.size > 0}
-                  title="Scale this active strategy by adding +1× lots to all open legs (BUYs first, then SELLs)"
-                  className={`h-7 px-2.5 inline-flex items-center gap-1 text-[11px] font-bold rounded-lg border transition-all disabled:opacity-50 disabled:cursor-not-allowed ${
-                    confirmScale
-                      ? 'bg-amber-500/20 border-amber-500/50 text-amber-200'
-                      : 'border-amber-500/40 bg-amber-500/10 text-amber-300 hover:bg-amber-500/20'
-                  } ${FOCUS_RING}`}
+                  title="Add more copies of this strategy: preview the lots and margin, then place hedges first and shorts second"
+                  className={`h-7 px-2.5 inline-flex items-center gap-1 text-[11px] font-bold rounded-lg border border-amber-500/40 bg-amber-500/10 text-amber-300 hover:bg-amber-500/20 transition-all disabled:opacity-50 disabled:cursor-not-allowed ${FOCUS_RING}`}
                 >
                   {scaling ? <Loader2 className="w-3 h-3 animate-spin" /> : <Plus className="w-3 h-3" />}
-                  {scaling ? 'Scaling…' : confirmScale ? 'Confirm Scale (+1×)?' : 'Scale (+1×)'}
+                  {scaling ? 'Scaling…' : 'Scale…'}
                 </button>
               )}
               {onAddNewLeg && (
@@ -1778,6 +1764,19 @@ export default function MultiLegStrategyRow({
 
       {/* Mounted at the row root (not inside the expanded section) so the header's Position Map
          button works while the row is collapsed. */}
+      {onScaleStrategy && (
+        <ScaleStrategyModal
+          key={showScale ? 'open' : 'closed'} /* remount per opening: N starts at 1, never the last session's value */
+          isOpen={showScale}
+          onClose={() => setShowScale(false)}
+          basket={basket}
+          title={strategyLabel}
+          currentMargin={basketMargin ?? null}
+          marginSource={basketMarginSource}
+          availableFunds={availableFunds ?? null}
+          onConfirm={onScaleStrategy}
+        />
+      )}
       <PositionVisualizerModal
         isOpen={showPositionVisualizer}
         onClose={() => setShowPositionVisualizer(false)}

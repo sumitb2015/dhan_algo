@@ -10,7 +10,7 @@ import { useLiveOptionsWS } from '@/lib/useLiveOptionsWS';
 import { useBrokerSelector } from '@/hooks/useBrokerSelector';
 import PositionVisualizer from './PositionVisualizer';
 import {
-  type MultiLegBasket, type MultiLegLeg, fallbackLotSize, crudeQtyMultiplier,
+  type MultiLegBasket, type MultiLegLeg, fallbackLotSize, crudeQtyMultiplier, basketLabel,
 } from '@/lib/multiLegFocus';
 import { cn } from '@/lib/utils';
 
@@ -186,7 +186,7 @@ export default function PositionVisualizerPage() {
   }, [chainQuotes, activeExpiry]);
 
   const strategyTitle = activeBasket
-    ? (activeBasket.name || activeBasket.presetKey || 'Strategy')
+    ? basketLabel(activeBasket)
     : `All strategies (${underlyingBaskets.length})`;
 
   return (
@@ -257,7 +257,7 @@ export default function PositionVisualizerPage() {
           </button>
           {underlyingBaskets.map(b => (
             <button key={b.id} type="button" onClick={() => setSelectedBasketId(b.id)} className={pill(selectedBasketId === b.id)}>
-              <span className="max-w-[180px] truncate">{b.name || b.presetKey || 'Strategy'}</span>
+              <span className="max-w-[180px] truncate">{basketLabel(b)}</span>
               <span className="font-mono text-zinc-500">{b.legs.length}</span>
             </button>
           ))}

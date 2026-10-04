@@ -23,7 +23,7 @@ import HelpModal from './HelpModal';
 import {
   resolveTemplateLegs, reconcileLegWithBroker, sortLegsForExit, findLegPosition, claimableLegQty, executionBroker,
   applyOrderOutcomes, normalizeOrderRow, withPendingOrder, LEG_FILL_GRACE_MS, legBrokerMismatch, classifyDhanOrder, type DhanOrderPhase, type NormalizedOrder,
-  computeLegTrailingSL, computeStrategyMetrics, checkStrategyRisk, fallbackLotSize,
+  computeLegTrailingSL, computeStrategyMetrics, checkStrategyRisk, fallbackLotSize, planScale, scalePlanSignature,
   positionProduct, computeBasketStatus, closedFillFromRow,
   findSiblingLegCollisions, describeSiblingCollisions,
   legQtyWarningsFor, recordOutsideReduction, legCountsToday, type LegQtyWarning,
@@ -2348,15 +2348,37 @@ export default function MultiLegFocus({
 
   const [scalingMap, setScalingMap] = useState<Record<string, boolean>>({});
 
-  const scaleStrategy = useCallback(async (basketId: string, multiplierDelta: number = 1) => {
-    if (scalingMap[basketId]) return;
+  // Synchronous re-entrancy guard: scalingMap is React state, so it cannot stop a second call that arrives
+  // while the (awaited) funds read below is still running. The ref flips immediately.
+  const scalingRef = useRef<Set<string>>(new Set());
+
+  const scaleStrategy = useCallback(async (basketId: string, multiplierDelta: number = 1, expectedSig?: string) => {
+    if (scalingRef.current.has(basketId) || scalingMap[basketId]) return;
     // Scaling only ever ADDS; a reduction would need exit sizing (resolveOrderRequest has no sign guard).
-    if (!(multiplierDelta >= 1)) return;
+    if (!Number.isInteger(multiplierDelta) || multiplierDelta < 1) return;
     const basket = basketsRef.current.find(b => b.id === basketId);
     if (!basket) return;
+    if (placingMap[basketId] || exitingMap[basketId]) {
+      addToast('error', 'Cannot scale', 'This strategy is placing or exiting orders right now. Try again when it finishes.');
+      return;
+    }
 
-    const openLegs = basket.legs.filter(l => l.status === 'OPEN');
+    const plan = planScale(basket, multiplierDelta);
+    const openLegs = plan.legs.map(p => p.leg);
     if (!openLegs.length) return;
+    if (expectedSig && expectedSig !== scalePlanSignature(plan)) {
+      addToast('error', 'Strategy changed — scale cancelled', 'The legs changed while the confirmation was open. Reopen Scale to review the new plan.');
+      return;
+    }
+    // A leg that would add nothing (ratio 0, bad lots) would send a zero-quantity order after its hedges filled.
+    if (plan.legs.some(p => !(p.addLots >= 1) || !Number.isFinite(p.addLots))) {
+      addToast('error', 'Cannot scale', 'One of the legs has no valid lot ratio to scale from. Add lots to that leg directly instead.');
+      return;
+    }
+    if (multiplierDelta > plan.maxDelta) {
+      addToast('error', 'Cannot scale', `This strategy is at ${plan.currentMultiplier}×; the limit is 50×.`);
+      return;
+    }
     if (openLegs.some(l => legBrokerMismatch(l, executionBroker(basket, broker)))) {
       addToast('error', 'Cannot scale', "Some legs were placed on a different broker than this strategy's badge — scale them from that broker.");
       return;
@@ -2367,12 +2389,42 @@ export default function MultiLegFocus({
       return;
     }
 
+    // Pre-trade margin gate, same fail-closed rule as initial placement: margin for the CURRENT legs is
+    // scaled by the lots being added. Unverified margin or insufficient funds blocks the whole scale
+    // before any order is sent (a mid-way margin reject would leave hedges without their shorts).
+    const gateBk = executionBroker(basket, broker) as Broker;
+    const marginEntry = basketMargins[basketId];
+    const currentMargin = marginEntry?.basketMargin;
+    if (currentMargin == null || marginCompRef.current[basketId] !== `${gateBk}|${basketCompKey(basket)}`) {
+      addToast('error', 'Margin not verified — scale blocked', 'Required margin is not calculated for the current legs yet. Wait a moment and retry.');
+      return;
+    }
+    if (marginEntry.basketMarginSource === 'estimate'
+        && !window.confirm('Required margin is only an ESTIMATE (broker calculator unavailable). Scale anyway?')) return;
+    const extraMargin = plan.totalLots > 0 ? currentMargin * (plan.addTotalLots / plan.totalLots) : 0;
+    scalingRef.current.add(basketId);
+    let availableFunds: number | null = null;
+    try {
+      const fr = await fetch(scalperRoute(gateBk, 'funds'));
+      const fj = await fr.json() as { success: boolean; data?: Record<string, unknown> };
+      if (fj.success && fj.data) availableFunds = Number(fj.data.availabelBalance ?? fj.data.availableBalance ?? 0);
+    } catch { /* fail closed below */ }
+    if (availableFunds == null) {
+      scalingRef.current.delete(basketId);
+      addToast('error', 'Funds unavailable — scale blocked', 'Could not read available margin from the broker. Retry once funds load.');
+      return;
+    }
+    if (extraMargin > availableFunds) {
+      scalingRef.current.delete(basketId);
+      addToast('error', 'Insufficient margin — scale blocked', `Adding +${multiplierDelta}× needs ~${fmtMoney(extraMargin)} but only ${fmtMoney(availableFunds)} is available.`);
+      return;
+    }
+
     setScalingMap(prev => ({ ...prev, [basketId]: true }));
     const bk = executionBroker(basket, broker) as Broker;
 
     try {
-      const currentMult = basket.multiplier || 1;
-      const newMult = currentMult + multiplierDelta;
+      const newMult = plan.newMultiplier;
 
       // Sibling collisions check
       const collisions = findSiblingLegCollisions(
@@ -2390,8 +2442,7 @@ export default function MultiLegFocus({
         const lookup = lookupCache[lkKey(bk, basket.underlying, legExpiry)];
         const strikeMap = lookup?.strikes ?? {};
         const lotSize = lookup?.lotSize ?? fallbackLotSize(basket.underlying as Underlying, bk);
-        const baseRatio = leg.ratio ?? Math.max(1, Math.round(leg.lots / currentMult));
-        const addLots = baseRatio * multiplierDelta;
+        const addLots = plan.legs.find(p => p.leg.id === leg.id)?.addLots ?? 0;
         const qty = addLots * lotSize;
 
         const req = resolveOrderRequest(bk, {
@@ -2448,27 +2499,41 @@ export default function MultiLegFocus({
 
       // Phase 1: BUY legs concurrently. allSettled, not all: a rejected hedge must
       // stop the sells, but its siblings' fills are already on the ledger.
+      const legName = (l: MultiLegLeg) => `${l.side === 'B' ? 'Buy' : 'Sell'} ${l.strike} ${l.option}`;
+      const summarize = (legs: MultiLegLeg[], results: PromiseSettledResult<void>[]) => {
+        const ok = legs.filter((_, i) => results[i].status === 'fulfilled').map(legName);
+        const bad = legs.flatMap((l, i) => { const r = results[i]; return r.status === 'rejected' ? [`${legName(l)} (${String(r.reason).replace(/^Error: /, '')})`] : []; });
+        return { ok, bad };
+      };
       const buyResults = await Promise.allSettled(buyLegs.map(placeScaleLeg));
-      const buyFail = buyResults.find((r): r is PromiseRejectedResult => r.status === 'rejected');
-      if (buyFail) throw new Error(`Hedge leg failed — SELL legs NOT scaled: ${String(buyFail.reason)}`);
+      const buySum = summarize(buyLegs, buyResults);
+      if (buySum.bad.length) {
+        throw new Error(`Hedge leg failed, SELL legs NOT scaled. Failed: ${buySum.bad.join('; ')}.${buySum.ok.length ? ` Hedges already added: ${buySum.ok.join(', ')} — you now hold extra hedges; check the legs table.` : ''}`);
+      }
 
       // Phase 2: SELL legs concurrently (only if all BUYs succeeded)
       const sellResults = await Promise.allSettled(sellLegs.map(placeScaleLeg));
-      const sellFail = sellResults.find((r): r is PromiseRejectedResult => r.status === 'rejected');
-      if (sellFail) throw new Error(`Some SELL legs did not scale (the rest did — check the legs table): ${String(sellFail.reason)}`);
+      const sellSum = summarize(sellLegs, sellResults);
+      if (sellSum.bad.length) {
+        throw new Error(`Some SELL legs did not scale. Failed: ${sellSum.bad.join('; ')}. Scaled: ${[...buySum.ok, ...sellSum.ok].join(', ') || 'none'}. The hedges are larger than the shorts until you fix this.`);
+      }
 
-      // Legs were already written per order above; only the multiplier is left.
-      updateBasket(basketId, { multiplier: newMult });
+      // Legs were already written per order above. Only bump the multiplier when it still describes the
+      // legs (lots == ratio x multiplier on every leg); on uneven legs it would claim a size they don't have.
+      if (plan.inStep) updateBasket(basketId, { multiplier: newMult });
 
-      addToast('success', `Scaled ${basket.name || basket.underlying} to ${newMult}×`, `Added +${multiplierDelta}× to all ${openLegs.length} open legs`);
+      addToast('success',
+        plan.inStep ? `Scaled ${basket.name || basket.underlying} to ${newMult}×` : `Scaled ${basket.name || basket.underlying}`,
+        `Added ${plan.addTotalLots} lots across ${openLegs.length} open legs${plan.inStep ? '' : ' (uneven legs: multiplier badge unchanged)'}`);
       pollFunds();
       fetchMarginsForBaskets();
     } catch (e) {
       addToast('error', 'Scale strategy failed', String(e));
     } finally {
+      scalingRef.current.delete(basketId);
       setScalingMap(prev => ({ ...prev, [basketId]: false }));
     }
-  }, [hasAuthenticatedBroker, broker, lookupCache, ltpFor, updateBasket, patchLegs, addToast, confirmDhanOrder, pollFunds, fetchMarginsForBaskets]);
+  }, [hasAuthenticatedBroker, broker, lookupCache, ltpFor, updateBasket, patchLegs, addToast, confirmDhanOrder, pollFunds, fetchMarginsForBaskets, basketMargins, scalingMap, placingMap, exitingMap]);
 
 
   // ── Shift legs N strikes (roll: close old leg, reopen at strike ± N) ──
@@ -3432,7 +3497,7 @@ export default function MultiLegFocus({
                 onReduceOutsideQty={legId => reduceOutsideQty(basket.id, legId)}
                 pnlNow={pnlNow}
                 onAddNewLeg={params => addNewLegToBasket(basket.id, params)}
-                onScaleStrategy={multiplierDelta => scaleStrategy(basket.id, multiplierDelta)}
+                onScaleStrategy={(multiplierDelta, sig) => scaleStrategy(basket.id, multiplierDelta, sig)}
                 scaling={!!scalingMap[basket.id]}
                 placing={!!placingMap[basket.id]}
                 exiting={!!exitingMap[basket.id]}

@@ -17,7 +17,7 @@ import { FocusModal } from '../FocusTool';
 import PnlTableTab from '../analytics/PnlTableTab';
 import { impliedVolFromPrice, type ResolvedLeg } from '@/lib/optionsStrategy';
 import { calculateTimeToExpiryYears } from '@/lib/optionsMonitorMath';
-import type { MultiLegLeg } from '@/lib/multiLegFocus';
+import { legPnl, type MultiLegLeg } from '@/lib/multiLegFocus';
 
 const FALLBACK_IV = 0.15;
 
@@ -69,6 +69,12 @@ export default function PnlTableModal({
       });
   }, [isOpen, legs, basketExpiry, spot, lotSize, qtyMultiplier, ltpFor, ivForStrike]);
 
+  // Closed legs no longer move with spot, but their banked P&L is part of the strategy's result.
+  const realized = useMemo(
+    () => (isOpen ? legs.filter(l => l.status === 'CLOSED').reduce((sum, l) => sum + legPnl(l, 0, qtyMultiplier), 0) : 0),
+    [isOpen, legs, qtyMultiplier],
+  );
+
   // Without a live spot the grid has no price axis (span = 0, one row at spot 0), so refuse it.
   const unpriced = resolved.some(l => !(l.price > 0)) || !(spot > 0);
 
@@ -80,7 +86,7 @@ export default function PnlTableModal({
             Needs a live spot and a price for every leg. Wait for quotes (or place the legs) to build the grid.
           </p>
         ) : (
-          <PnlTableTab legs={resolved} spot={spot} strikeStep={step} expiry={basketExpiry} large />
+          <PnlTableTab legs={resolved} spot={spot} strikeStep={step} expiry={basketExpiry} large fixedPnl={realized} />
         )}
       </div>
     </FocusModal>

@@ -15,6 +15,7 @@
 import React, { useMemo, useState } from 'react';
 import { cn } from '@/lib/utils';
 import { computeBsGreeks, calculateTimeToExpiryYears } from '@/lib/optionsMonitorMath';
+import { impliedVolFromPrice } from '@/lib/optionsStrategy';
 import { legPnl, type MultiLegLeg } from '@/lib/multiLegFocus';
 
 export type LadderLayout = 'vertical' | 'horizontal';
@@ -53,6 +54,8 @@ interface Row {
   status: string;
   expiry: string;
   iv: number;
+  /** True when neither the live premium nor the chain gave an IV, so FLAT_IV was assumed. */
+  ivAssumed: boolean;
   delta: number;
   theta: number;
   vega: number;
@@ -293,10 +296,15 @@ export default function PositionVisualizer({
         // legPnl owns the ledger rules (closed uses the exit fill, unfilled is 0); we only null the unfilled case.
         const pnl = planned || (!closed && (!filled || ltp <= 0)) ? null : legPnl(l, ltp, qtyMultiplier);
 
-        const iv = ivForStrike?.(l.strike, l.option, expiry) || FLAT_IV;
+        // IV solved from the live premium so Greeks agree with the P&L table's model; chain IV is only a
+        // fallback (it comes from a different model/forward), then a flat assumption.
+        const tYears = calculateTimeToExpiryYears(expiry);
+        const solved = spot > 0 && ltp > 0 ? impliedVolFromPrice(l.option, spot, l.strike, tYears, ltp) : null;
+        const chainIv = ivForStrike?.(l.strike, l.option, expiry) || 0;
+        const iv = solved || chainIv || FLAT_IV;
         let delta = 0, theta = 0, vega = 0;
         if (!planned && !closed && spot > 0 && l.strike > 0) {
-          const g = computeBsGreeks(l.option, spot, l.strike, calculateTimeToExpiryYears(expiry), iv, lotSize);
+          const g = computeBsGreeks(l.option, spot, l.strike, tYears, iv, lotSize);
           const sign = l.side === 'B' ? 1 : -1;
           delta = g.delta * units * sign;
           theta = g.theta * units * sign;
@@ -304,7 +312,7 @@ export default function PositionVisualizer({
         }
         return {
           id: l.id, strike: l.strike, option: l.option, side: l.side, lots: l.lots, units, entry, ltp,
-          pnl, planned, closed, status: l.status, expiry, iv, delta, theta, vega,
+          pnl, planned, closed, status: l.status, expiry, iv, ivAssumed: !solved && !chainIv, delta, theta, vega,
           distPts: spot > 0 ? l.strike - spot : 0,
         };
       });
@@ -351,7 +359,7 @@ export default function PositionVisualizer({
   const atm = spot > 0 ? Math.round(spot / step) * step : 0;
 
   const inspected = rows.find(r => r.id === (hoverId ?? pinId)) ?? null;
-  const flatIvNote = !ivForStrike;
+  const flatIvNote = live.some(r => r.ivAssumed);
 
   return (
     <div className="flex flex-col gap-4 text-white">
@@ -472,7 +480,7 @@ export default function PositionVisualizer({
                 <dt className="text-zinc-500">Delta</dt><dd className="text-right text-zinc-200">{fmtSigned(inspected.delta, 2)}</dd>
                 <dt className="text-zinc-500">Theta / day</dt><dd className="text-right text-zinc-200">{fmtCompact(inspected.theta)}</dd>
                 <dt className="text-zinc-500">Vega</dt><dd className="text-right text-zinc-200">{fmtCompact(inspected.vega)}</dd>
-                <dt className="text-zinc-500">IV</dt><dd className="text-right text-zinc-200">{(inspected.iv * 100).toFixed(1)}%{flatIvNote ? ' (assumed)' : ''}</dd>
+                <dt className="text-zinc-500">IV</dt><dd className="text-right text-zinc-200">{(inspected.iv * 100).toFixed(1)}%{inspected.ivAssumed ? ' (assumed)' : ''}</dd>
               </dl>
             </>
           ) : (
@@ -483,7 +491,7 @@ export default function PositionVisualizer({
               </p>
               {flatIvNote && (
                 <p className="mt-3 text-xs leading-relaxed text-zinc-500">
-                  Greeks are estimates at {FLAT_IV * 100}% IV. Open this from a strategy row to use live chain IV.
+                  Some legs have no live price, so their Greeks assume {FLAT_IV * 100}% IV.
                 </p>
               )}
             </div>
