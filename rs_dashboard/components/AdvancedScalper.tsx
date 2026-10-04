@@ -1059,9 +1059,16 @@ export default function AdvancedScalper() {
 
   // ─── useEffect 4: Poll positions/orders/trades every 5s ──────────
 
+  // Monotonic request counter shared by fetchTabData and pollTabData: a slower,
+  // older response must never overwrite a newer one (it would show pre-fill or
+  // pre-close quantities, which the guards and close sizing then act on).
+  const tabReqSeqRef = useRef(0);
+  const tabAppliedSeqRef = useRef(0);
+
   const fetchTabData = useCallback(() => {
     setTabLoading(true);
     const requestedBroker = broker;
+    const seq = ++tabReqSeqRef.current;
     fetch(scalperRoute(broker, 'all'))
       .then(r => r.json())
       .then((j: { success: boolean; positions?: Record<string, unknown>[]; positionsError?: string | null; orders?: Record<string, unknown>[]; trades?: Record<string, unknown>[]; funds?: Record<string, any>; pnl_guard?: any }) => {
@@ -1070,9 +1077,13 @@ export default function AdvancedScalper() {
         // applying this response now would repopulate it with the old
         // broker's rows. See brokerRef's declaration.
         if (requestedBroker !== brokerRef.current) return;
+        if (seq < tabAppliedSeqRef.current) return;
         if (j.success) {
-          setPositionsData(j.positions ?? []);
+          tabAppliedSeqRef.current = seq;
           setPositionsError(j.positionsError ?? null);
+          // A failed positions fetch comes back as an empty list — keep the last
+          // good snapshot so the guards keep protecting open legs.
+          if (!(j.positionsError && !j.positions?.length)) setPositionsData(j.positions ?? []);
           setOrdersData(j.orders ?? []);
           setTradesData(j.trades ?? []);
           setFundsData(j.funds ?? null);
@@ -1085,13 +1096,16 @@ export default function AdvancedScalper() {
 
   const pollTabData = useCallback(() => {
     const requestedBroker = broker;
+    const seq = ++tabReqSeqRef.current;
     fetch(scalperRoute(broker, 'poll'))
       .then(r => r.json())
       .then((j: { success: boolean; positions?: Record<string, unknown>[]; positionsError?: string | null; orders?: Record<string, unknown>[]; trades?: Record<string, unknown>[] }) => {
         if (requestedBroker !== brokerRef.current) return;
+        if (seq < tabAppliedSeqRef.current) return;
         if (j.success) {
-          setPositionsData(j.positions ?? []);
+          tabAppliedSeqRef.current = seq;
           setPositionsError(j.positionsError ?? null);
+          if (!(j.positionsError && !j.positions?.length)) setPositionsData(j.positions ?? []);
           setOrdersData(j.orders ?? []);
           setTradesData(j.trades ?? []);
         }
@@ -1293,6 +1307,7 @@ export default function AdvancedScalper() {
               orderType: mode,
               exchangeSegment: underlying === 'SENSEX' ? 'BSE_FNO' : 'NSE_FNO',
               productType: legProductType,
+              idempotencyKey: crypto.randomUUID(),
               ...(mode === 'LIMIT' ? { price: limitPrice } : {}),
             }),
           });
@@ -1376,8 +1391,12 @@ export default function AdvancedScalper() {
   // Confirm handler for the Add Lots modal (see openAddLotsModal/addLotsTarget
   // above) — places the order via the same submitLegOrder the order boxes use,
   // just targeting the resolved leg directly instead of a box.
+  const addLotsInFlightRef = useRef(false);
   const handleConfirmAddLots = useCallback(async (params: SubmitLegOrderParams) => {
-    const j = await submitLegOrder(params);
+    if (addLotsInFlightRef.current) return;
+    addLotsInFlightRef.current = true;
+    let j: LegOrderResult;
+    try { j = await submitLegOrder(params); } finally { addLotsInFlightRef.current = false; }
     if (j.success) {
       addToast('success', `${params.side} ${params.optionSide} added`, `ID: ${j.order_id}`);
       setTimeout(fetchTabData, 1000);
@@ -1447,6 +1466,9 @@ export default function AdvancedScalper() {
 
   // ─── Per-position close ───────────────────────────────────────────
 
+  const lastCloseAtRef = useRef<Record<string, number>>({});
+  const CLOSE_COOLDOWN_MS = 2000;
+
   // ok=false means the close could not be confirmed (order failed / errored) —
   // callers that chain further actions (e.g. strike shift) MUST NOT proceed as
   // if the position were closed. qty is the signed live netQty seen right
@@ -1491,6 +1513,14 @@ export default function AdvancedScalper() {
 
     // Prevent double-fire while order is in flight
     if (closingInFlightRef.current.has(key)) return { ok: false, qty: 0, closedUnits: 0, partial: false };
+    // Cooldown after an accepted close: the book (and positionsRef) can lag the
+    // fill, so an immediate second close would size off the pre-close quantity
+    // and open a reverse position.
+    const lastClose = lastCloseAtRef.current[key];
+    if (lastClose && Date.now() - lastClose < CLOSE_COOLDOWN_MS) {
+      addToast('error', `Close of ${sym} ignored`, 'A close was just sent — wait for the book to refresh');
+      return { ok: false, qty: 0, closedUnits: 0, partial: false };
+    }
     closingInFlightRef.current.add(key);
     setPosGuards(prev => prev[key] ? { ...prev, [key]: { ...prev[key], triggered: true } } : prev);
     setClosingPositions(prev => new Set([...prev, key]));
@@ -1510,7 +1540,17 @@ export default function AdvancedScalper() {
       // through untouched), so this no longer costs a network round trip on
       // the order-send path. A close is real money moving; every millisecond
       // between click and the order actually leaving matters here.
-      const found = findLivePosition(positionsRef.current, pos);
+      // Re-fetch the live book for sizing: positionsRef is up to ~5s old, and a
+      // close sized off it can double-close or flip a position that a previous
+      // close/partial already reduced. Fall back to the snapshot only if the
+      // fetch fails or times out, so a slow API never blocks a stop-loss.
+      let liveRows: Record<string, unknown>[] = positionsRef.current;
+      try {
+        const lr = await fetch(scalperRoute(broker, 'positions'), { signal: AbortSignal.timeout(2500) });
+        const lj = await lr.json() as { success: boolean; data?: Record<string, unknown>[] };
+        if (lj.success && Array.isArray(lj.data)) liveRows = lj.data;
+      } catch { /* use snapshot */ }
+      const found = findLivePosition(liveRows, pos);
       if (found.kind === 'ambiguous') {
         // `triggered` is deliberately left set: a guard that cannot identify
         // its own row cannot close it either, and re-entering here every
@@ -1548,11 +1588,12 @@ export default function AdvancedScalper() {
           // position's own product so it reduces rather than opens.
           broker !== 'dhan'
             ? { tradingsymbol: sym, quantity: qty, side, orderType: 'MARKET', exchange: liveExchange, ...productPayload.fields }
-            : { securityId: liveSecId, quantity: qty, side, orderType: 'MARKET', exchangeSegment: liveExchange, ...productPayload.fields },
+            : { securityId: liveSecId, quantity: qty, side, orderType: 'MARKET', exchangeSegment: liveExchange, idempotencyKey: crypto.randomUUID(), ...productPayload.fields },
         ),
       });
       const j = await res.json() as { success: boolean; order_id?: string; error?: string };
       if (j.success) {
+        lastCloseAtRef.current[key] = Date.now();
         // A MARKET order accepted by the broker isn't necessarily filled — for
         // callers that chain a follow-up open (strike shift), poll live
         // positions briefly to confirm the size actually came off before

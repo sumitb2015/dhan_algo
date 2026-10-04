@@ -64,12 +64,34 @@ async function reconcileByCorrelationId(correlationId: string, clientId: string,
   return null;
 }
 
+// Opt-in idempotency: a request carrying `idempotencyKey` that repeats within the
+// TTL (duplicate HTTP delivery, client retry) gets the first request's result
+// instead of booking a second order. Callers that omit the key are unaffected.
+const IDEMPOTENCY_TTL_MS = 60_000;
+const idempotent = new Map<string, { at: number; result: Promise<Response> }>();
+
 export async function GET(): Promise<NextResponse> {
   return NextResponse.json({ ready: true });
 }
 
-export async function POST(req: NextRequest): Promise<NextResponse> {
-  const body = await req.json() as {
+export async function POST(req: NextRequest): Promise<Response> {
+  const raw = await req.json() as { idempotencyKey?: unknown };
+  const key = typeof raw.idempotencyKey === 'string' && raw.idempotencyKey.length >= 8 && raw.idempotencyKey.length <= 64
+    ? raw.idempotencyKey : null;
+  if (!key) return placeOrderOnce(raw as never);
+  const now = Date.now();
+  for (const [k, v] of idempotent) if (now - v.at > IDEMPOTENCY_TTL_MS) idempotent.delete(k);
+  const prior = idempotent.get(key);
+  if (prior) return (await prior.result).clone();
+  const result = placeOrderOnce(raw as never);
+  idempotent.set(key, { at: now, result });
+  const res = await result;
+  // Only a booked order is replayed; a failure may be retried with the same key.
+  if (res.status >= 400 || !(await res.clone().json() as { success?: boolean }).success) idempotent.delete(key);
+  return res.clone();
+}
+
+async function placeOrderOnce(body: {
     securityId: string;
     quantity: number;
     side: string;
@@ -80,7 +102,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     /** Short lowercase tag prefixed to the correlationId so a caller can tell
      *  its own orders apart in the order book (MultiLegFocus sends 'mlf'). */
     source?: string;
-  };
+  }): Promise<NextResponse> {
 
   const { securityId, quantity, side, orderType = 'MARKET', price = 0, exchangeSegment = 'NSE_FNO', productType: productTypeRaw } = body;
 
