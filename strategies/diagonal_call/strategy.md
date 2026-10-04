@@ -147,6 +147,11 @@ Short calls are closed and rolled into a fresh 25–45 DTE call ($0.15 \le \Delt
 | Quote Unavailable / 0.0 | `RUNNING` | Skip tick, log warning, do not act on zero prices. |
 | Process Killed Mid-Session | `RESTARTING` | Atomic `_position.json` reloads legs, resubscribes WebSocket feeds, and reconciles with broker. |
 | Stop Trigger Written | `STOPPED` | Gracefully closes all open legs via `resolve_exit_qty_broker()`. |
+| Exit not confirmed | `EXIT_PENDING` | Short is closed first; the long is **never** sold while a short is open. Unclosed legs stay in state and the exit is retried every 5s (and resumed after a restart). |
+| Order timeout | — | The order is cancelled and the broker position re-read before anything is retried; a late fill is adopted, a partial/unknown result halts entries (`ENTRY_HALTED`) for manual review. |
+| Entry fails repeatedly | `ENTRY_HALTED` | Backoff 60s/120s/240s…, halts after 5 consecutive failed attempts. |
+| Daily loss limit hit | — | Latched for the session: scheduled rebalances, profit-take and gamma/net-delta rolls are suspended; only DTE and critical-delta (≥0.50) rolls, long rolls and drawdown exits still run. |
+| Long roll | — | New long is bought **before** the old one is sold, so the short stays covered. |
 
 ---
 

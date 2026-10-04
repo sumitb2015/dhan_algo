@@ -284,7 +284,229 @@ class TestDiagonalCallCalculations(unittest.TestCase):
         self.assertTrue(is_phantom)
 
 
+
+
+
+# ── Failure-path tests (order confirmation, exit ordering, entry retry) ─────────
+
+import tempfile
+from datetime import date, timedelta
+from unittest import mock
+
+import pandas as pd
+
+import strategies.diagonal_call.nifty_diagonal_call as dc
+
+
+class FakeBroker:
+    """Dhan-style execution broker whose fills are controlled by `fill`."""
+
+    def __init__(self):
+        self.net = {}
+        self.calls = []        # (side, strike, qty) in placement order
+        self.fill = True
+        self.fills_by_oid = {}
+        self._oid = 0
+        self.pending = {}      # oid -> (key, signed) for a late fill applied on cancel
+
+    def _place(self, side, strike, expiry, opt_type, qty, product):
+        self._oid += 1
+        oid = str(self._oid)
+        self.calls.append((side, strike, qty))
+        signed = qty if side == "BUY" else -qty
+        key = (strike, expiry)
+        self.fills_by_oid[oid] = self.fill
+        if self.fill:
+            self.net[key] = self.net.get(key, 0) + signed
+        else:
+            self.pending[oid] = (key, signed)
+        return oid
+
+    def buy(self, strike, expiry, opt_type, qty, product="INTRADAY"):
+        return self._place("BUY", strike, expiry, opt_type, qty, product)
+
+    def sell(self, strike, expiry, opt_type, qty, product="INTRADAY"):
+        return self._place("SELL", strike, expiry, opt_type, qty, product)
+
+    def get_owned_net_qty(self, strike, expiry, opt_type):
+        return self.net.get((strike, expiry), 0)
+
+
+class FakeHelper:
+    def __init__(self, broker, late_fill_on_cancel=False):
+        self.broker = broker
+        self.cancelled = []
+        self.late_fill_on_cancel = late_fill_on_cancel
+        self.ltp = 100.0
+        self._master_list = pd.DataFrame()
+
+    def get_lot_size(self, _):
+        return 65
+
+    def start_websocket(self, *_a, **_k):
+        pass
+
+    def subscribe_instruments(self, *_a, **_k):
+        pass
+
+    def wait_for_fill(self, oid, timeout=15):
+        return self.broker.fills_by_oid.get(str(oid), False)
+
+    def cancel_order(self, oid):
+        self.cancelled.append(str(oid))
+        if self.late_fill_on_cancel and str(oid) in self.broker.pending:
+            key, signed = self.broker.pending.pop(str(oid))
+            self.broker.net[key] = self.broker.net.get(key, 0) + signed
+        return True
+
+    def get_order_update(self, _):
+        return None
+
+    def get_order_by_id(self, _):
+        return None
+
+    def get_ltp(self, *_a, **_k):
+        return self.ltp
+
+    def get_expiries(self, _):
+        return [(date.today() + timedelta(days=90)).strftime("%Y-%m-%d")]
+
+
+LONG = {"security_id": "1", "strike": 24000, "expiry": "2099-01-01", "dte": 90, "delta": 0.6,
+        "opt_type": "CE", "side": "BUY", "lots": 3, "entry_price": 900.0, "iv": 0.14}
+SHORT = {"security_id": "2", "strike": 25500, "expiry": "2098-12-01", "dte": 30, "delta": 0.18,
+         "opt_type": "CE", "side": "SELL", "lots": 4, "entry_price": 60.0, "iv": 0.14}
+
+
+class TestDiagonalFailurePaths(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        patches = [
+            mock.patch.object(dc, "debug_dir", self.tmp.name),
+            mock.patch.object(dc, "save_strategy_state", lambda *a, **k: None),
+            mock.patch.object(dc, "notify", lambda *a, **k: None),
+            mock.patch.object(dc.time, "sleep", lambda *_: None),
+            mock.patch.object(dc.ExecutionBroker, "create", lambda *a, **k: self.broker),
+        ]
+        for p in patches:
+            p.start()
+            self.addCleanup(p.stop)
+        self.addCleanup(self.tmp.cleanup)
+        self.broker = FakeBroker()
+
+    def make(self, late_fill_on_cancel=False):
+        helper = FakeHelper(self.broker, late_fill_on_cancel)
+        s = dc.NiftyDiagonalCallStrategy(live=True, helper=helper, instance_id="unittest")
+        s.broker = self.broker
+        return s
+
+    def open_position(self, s):
+        s.long_leg = dict(LONG)
+        s.short_leg = dict(SHORT)
+        s.position_open = True
+        self.broker.net[(24000, "2099-01-01")] = 3 * 65
+        self.broker.net[(25500, "2098-12-01")] = -4 * 65
+
+    def test_exit_all_never_sells_long_while_short_open(self):
+        s = self.make()
+        self.open_position(s)
+        self.broker.fill = False                       # short buyback will not fill
+        self.assertFalse(s.exit_all("TEST"))
+        sides = [c[0] for c in self.broker.calls]
+        self.assertEqual(sides, ["BUY"])                # only the short buyback was attempted
+        self.assertIsNotNone(s.short_leg)
+        self.assertIsNotNone(s.long_leg)
+        self.assertTrue(s.position_open)
+        self.assertEqual(s.pending_exit_reason, "TEST")
+        self.assertEqual(s.status, "EXIT_PENDING")
+
+        self.broker.fill = True                         # retry succeeds: short first, then long
+        self.assertTrue(s.exit_all("TEST"))
+        self.assertEqual([c[0] for c in self.broker.calls][-2:], ["BUY", "SELL"])
+        self.assertFalse(s.position_open)
+        self.assertIsNone(s.pending_exit_reason)
+
+    def test_exit_pending_survives_restart(self):
+        s = self.make()
+        self.open_position(s)
+        self.broker.fill = False
+        s.exit_all("TEST")
+        s2 = self.make()
+        self.assertEqual(s2.pending_exit_reason, "RESTART_RESUME_EXIT")
+        self.assertIsNotNone(s2.short_leg)
+
+    def test_long_roll_buys_new_before_selling_old(self):
+        s = self.make()
+        self.open_position(s)
+        new_long = dict(LONG, strike=24500, expiry="2099-03-01", security_id="9")
+        s.select_long_call = lambda spot: dict(new_long)
+        s.roll_long_leg(24500.0, "TEST")
+        self.assertEqual([c[0] for c in self.broker.calls], ["BUY", "SELL"])
+        self.assertEqual(self.broker.calls[0][1], 24500)
+        self.assertEqual(s.long_leg["strike"], 24500)
+        self.assertIsNotNone(s.short_leg)
+
+    def test_long_roll_failed_buy_keeps_old_long(self):
+        s = self.make()
+        self.open_position(s)
+        s.select_long_call = lambda spot: dict(LONG, strike=24500, expiry="2099-03-01")
+        self.broker.fill = False
+        s.roll_long_leg(24500.0, "TEST")
+        self.assertEqual([c[0] for c in self.broker.calls], ["BUY"])   # old long never sold
+        self.assertEqual(s.long_leg["strike"], 24000)
+        self.assertGreater(s.roll_cooldown_until, 0)
+
+    def test_entry_timeout_cancels_and_does_not_hold_long(self):
+        s = self.make()
+        s.select_long_call = lambda spot: dict(LONG)
+        s.select_short_call = lambda spot, ld: dict(SHORT)
+        self.broker.fill = False
+        self.assertFalse(s.enter_cycle(24500.0))
+        self.assertEqual(self.broker.calls, [("BUY", 24000, 195)])
+        self.assertEqual(s.helper.cancelled, ["1"])
+        self.assertIsNone(s.long_leg)
+        self.assertFalse(s.position_open)
+
+    def test_entry_late_fill_after_cancel_is_adopted_not_rebought(self):
+        s = self.make(late_fill_on_cancel=True)
+        s.select_long_call = lambda spot: dict(LONG)
+        s.select_short_call = lambda spot, ld: dict(SHORT)
+        self.broker.fill = False
+        # long order fills only when cancelled-race resolves; short then also times out
+        s.enter_cycle(24500.0)
+        buys = [c for c in self.broker.calls if c[0] == "BUY" and c[1] == 24000]
+        self.assertEqual(len(buys), 1)                  # long bought exactly once
+
+    def test_no_synthetic_prices_when_quote_missing(self):
+        s = self.make()
+        exp = (date.today() + timedelta(days=90)).strftime("%Y-%m-%d")
+        s.helper._master_list = pd.DataFrame([{
+            "UNDERLYING_SYMBOL": "NIFTY", "SM_EXPIRY_DATE": exp, "OPTION_TYPE": "CE",
+            "STRIKE_PRICE": 24000.0, "SECURITY_ID": 77,
+        }])
+        s.helper.ltp = 0.0
+        self.assertIsNone(s.select_long_call(24500.0))
+
+    def test_halve_does_not_change_state_when_buyback_fails(self):
+        s = self.make()
+        self.open_position(s)
+        self.broker.fill = False
+        s.halve_short_position(24500.0, "TEST")
+        self.assertEqual(s.short_leg["lots"], 4)
+        self.assertFalse(s.drawdown_halved)
+        self.broker.fill = True
+        s.roll_cooldown_until = 0.0
+        s.halve_short_position(24500.0, "TEST")
+        self.assertEqual(s.short_leg["lots"], 2)
+        self.assertTrue(s.drawdown_halved)
+
+    def test_publish_state_keeps_last_spot_for_greeks(self):
+        s = self.make()
+        self.open_position(s)
+        s._publish_state(24500.0)
+        s._publish_state(0.0)
+        self.assertEqual(s.last_spot, 24500.0)
+
+
 if __name__ == "__main__":
     unittest.main()
-
-

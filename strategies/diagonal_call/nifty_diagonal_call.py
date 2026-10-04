@@ -76,6 +76,14 @@ LOG_FOLDER = "diagonal_call"
 UNDERLYING = "NIFTY"
 INDEX_ID = "13"
 PRODUCT = "MARGIN"  # carry-forward positional hold
+ROLL_COOLDOWN_SEC = 120         # pause before retrying a roll whose order failed (stops per-tick order spam)
+ENTRY_MAX_ATTEMPTS = 5          # consecutive failed entries before entries halt (needs manual restart)
+ENTRY_BACKOFF_BASE_SEC = 60     # 60s, 120s, 240s ... capped at ENTRY_BACKOFF_MAX_SEC
+ENTRY_BACKOFF_MAX_SEC = 900
+EXIT_RETRY_SEC = 5              # pause between retries of an incomplete exit
+# Short-roll reasons that stay allowed after the daily loss halt: they are maintenance /
+# safety rolls (expiry proximity, runaway delta), not discretionary adjustments.
+HALT_ALLOWED_ROLL_PREFIXES = ("DTE_THRESHOLD", "CRITICAL_SHORT_DELTA")
 
 debug_dir = os.path.join(project_root, "debug")
 log_dir = os.path.join(debug_dir, "logs", LOG_FOLDER)
@@ -417,6 +425,14 @@ class NiftyDiagonalCallStrategy:
         self.drawdown_halved = False
         self.session_date = date.today().isoformat()
         self.last_phantom_check = 0.0
+        self.last_spot = 0.0
+        self.last_total_pnl = 0.0
+        self.daily_halt_date = ""            # session date on which the daily loss limit latched
+        self.pending_exit_reason: Optional[str] = None   # set while an exit is incomplete; retried by run()
+        self.entry_attempts = 0
+        self.next_entry_at = 0.0
+        self.entry_halted = False
+        self.roll_cooldown_until = 0.0
 
         # Long Cost Recovery (LCR) & Free Long Call Engine
         self.initial_long_debit: float = 0.0
@@ -527,6 +543,8 @@ class NiftyDiagonalCallStrategy:
             "daily_start_pnl": self.daily_start_pnl,
             "session_date": self.session_date,
             "drawdown_halved": self.drawdown_halved,
+            "last_total_pnl": round(self.last_total_pnl, 2),
+            "daily_halt_date": self.daily_halt_date,
             "initial_long_debit": round(self.initial_long_debit, 2),
             "cumulative_short_premium": round(self.cumulative_short_premium, 2),
             "lcr_pct": self.lcr_pct,
@@ -574,6 +592,11 @@ class NiftyDiagonalCallStrategy:
         self.daily_start_pnl = float(data.get("daily_start_pnl", 0.0))
         self.session_date = data.get("session_date", date.today().isoformat())
         self.drawdown_halved = bool(data.get("drawdown_halved", False))
+        self.last_total_pnl = float(data.get("last_total_pnl", self.realized_pnl))
+        self.daily_halt_date = str(data.get("daily_halt_date", ""))
+        if self.status == "EXIT_PENDING":
+            # Process died mid-exit: finish unwinding whatever legs are still recorded.
+            self.pending_exit_reason = "RESTART_RESUME_EXIT"
         self.initial_long_debit = float(data.get("initial_long_debit", 0.0))
         self.cumulative_short_premium = float(data.get("cumulative_short_premium", 0.0))
         self.lcr_pct = float(data.get("lcr_pct", 0.0))
@@ -624,12 +647,13 @@ class NiftyDiagonalCallStrategy:
     # ── MULTI-BROKER ORDER & FILL HELPERS ───────────────────────────────────────
 
     def _get_broker_net(self, strike: float, expiry: str, opt_type: str = "CE") -> int:
-        """Returns the broker's current net quantity for this contract (non-Dhan brokers)."""
-        if self.dry_run or self.broker_name == "dhan":
+        """Returns the broker's current net quantity for this contract (0 in dry run / on lookup failure)."""
+        if self.dry_run:
             return 0
         try:
             return int(self.broker.get_owned_net_qty(strike, expiry, opt_type))
-        except Exception:
+        except Exception as e:
+            logger.warning(f"Broker net-qty lookup failed for {opt_type} {strike} {expiry}: {e}")
             return 0
 
     def _wait_for_fill(
@@ -670,6 +694,66 @@ class NiftyDiagonalCallStrategy:
             f"expected net {expected}, timed out after {timeout}s"
         )
         return False
+
+    def _confirm_fill_or_cancel(
+        self, oid, strike, expiry, opt_type, signed_qty, net_before, timeout: int = 15
+    ) -> Tuple[str, Optional[int]]:
+        """Confirm an order filled; on timeout cancel it and re-read the broker position.
+
+        Returns (status, moved_qty): status is FILLED, NOT_FILLED or PARTIAL (partial or unknown),
+        moved_qty is the signed qty the broker position actually moved (None if unreadable).
+        A timeout alone never proves the order is dead, so the caller must not retry on NOT_FILLED
+        without this cancel+re-read — otherwise a late fill is bought twice.
+        """
+        if self._wait_for_fill(oid, strike, expiry, opt_type, signed_qty, net_before, timeout=timeout):
+            return "FILLED", signed_qty
+        if self.dry_run:
+            return "NOT_FILLED", 0
+        if self.broker_name == "dhan":
+            try:
+                self.helper.cancel_order(str(oid))
+            except Exception as e:
+                logger.warning(f"Could not cancel unconfirmed order {oid}: {e}")
+        time.sleep(1.0)
+        try:
+            moved = int(self.broker.get_owned_net_qty(strike, expiry, opt_type)) - net_before
+        except Exception as e:
+            logger.error(f"Could not re-read broker position after unconfirmed order {oid}: {e}")
+            return "PARTIAL", None
+        if moved == signed_qty:
+            return "FILLED", moved
+        if moved == 0:
+            return "NOT_FILLED", 0
+        return "PARTIAL", moved
+
+    def _close_leg(self, leg: Dict, closing_side: str) -> Tuple[bool, float, int]:
+        """Closes one leg using own-quantity sizing. closing_side: 'BUY' for a short, 'SELL' for a long.
+
+        Returns (closed, fill_px, done_qty). closed is True only when the broker confirms the leg
+        flat (or it is already flat / dry run). On a partial or unconfirmed close, done_qty is the
+        quantity that did trade so the caller can book it and shrink the leg.
+        """
+        qty = leg["lots"] * self.lot_size
+        ltp = leg.get("current_ltp", leg["entry_price"])
+        if not self.live:
+            return True, ltp, qty
+        strike, expiry = leg["strike"], leg["expiry"]
+        safe_qty, _ = resolve_exit_qty_broker(self.broker, strike, expiry, "CE", qty, side=closing_side, log=logger)
+        if safe_qty <= 0:
+            return True, ltp, qty  # broker already shows the leg flat
+        signed = safe_qty if closing_side == "BUY" else -safe_qty
+        net_before = self._get_broker_net(strike, expiry, "CE")
+        place = self.broker.buy if closing_side == "BUY" else self.broker.sell
+        oid = place(strike=strike, expiry=expiry, opt_type="CE", qty=safe_qty, product=PRODUCT)
+        if not oid:
+            logger.error(f"{closing_side} order for {strike} CE {expiry} was not placed.")
+            return False, ltp, 0
+        status, moved = self._confirm_fill_or_cancel(oid, strike, expiry, "CE", signed, net_before)
+        if status == "FILLED":
+            return safe_qty >= qty, self._get_fill_price(oid, fallback_ltp=ltp), safe_qty
+        done = abs(moved) if moved else 0
+        logger.error(f"{closing_side} close of {strike} CE {expiry} {status}: {done} of {safe_qty} units traded.")
+        return False, ltp, done
 
     def _get_fill_price(self, order_id: Optional[str], fallback_ltp: float = 0.0) -> float:
         """Safely retrieves the filled average execution price of an order.
@@ -778,7 +862,8 @@ class NiftyDiagonalCallStrategy:
 
         ltp = self.helper.get_ltp(best_sec_id, exchange="NSE_FNO", instrument="OPTIDX")
         if ltp <= 0.0:
-            ltp = max(50.0, spot - best_strike + 150.0)
+            logger.warning(f"No live quote for long {best_strike} CE ({best_expiry}); skipping selection (no synthetic prices).")
+            return None
 
         return {
             "security_id": best_sec_id,
@@ -886,7 +971,8 @@ class NiftyDiagonalCallStrategy:
 
         ltp = self.helper.get_ltp(best["security_id"], exchange="NSE_FNO", instrument="OPTIDX")
         if ltp <= 0.0:
-            ltp = max(10.0, 50.0 - abs(spot - best["strike"]) * 0.05)
+            logger.warning(f"No live quote for short {best['strike']} CE ({best_expiry}); skipping selection (no synthetic prices).")
+            return None
 
         logger.info(
             f"Selected Short Call: {best['strike']} CE | Expiry: {best_expiry} ({dte:.0f} DTE) | "
@@ -911,13 +997,17 @@ class NiftyDiagonalCallStrategy:
 
     # ── POSITION ENTRY & ORDER EXECUTION ──────────────────────────────────────
 
-    def enter_cycle(self, spot: float):
-        """Enters the diagonal covered call: long leg is bought FIRST, then short leg is sized and sold."""
+    def enter_cycle(self, spot: float) -> bool:
+        """Enters the diagonal covered call: long leg is bought FIRST, then short leg is sized and sold.
+
+        Returns True when both legs are open. Any False return is counted by run() as a failed
+        attempt (backoff, then halt), so a stuck entry cannot hammer the broker.
+        """
         logger.info(f"--- Initiating New Diagonal Covered Call Entry at Spot {spot:.2f} ---")
         long_candidate = self.select_long_call(spot)
         if not long_candidate:
             logger.error("Could not find suitable long call contract. Aborting entry.")
-            return
+            return False
 
         long_qty = long_candidate["lots"] * self.lot_size
         long_delta_shares = long_qty * long_candidate["delta"]
@@ -926,13 +1016,13 @@ class NiftyDiagonalCallStrategy:
         short_candidate = self.select_short_call(spot, long_delta_shares)
         if not short_candidate:
             logger.error("Could not find suitable short call contract. Aborting entry before buying long leg.")
-            return
+            return False
 
         if short_candidate["strike"] <= long_candidate["strike"]:
             logger.error(
                 f"Inverted strike selection: short {short_candidate['strike']} <= long {long_candidate['strike']}. Aborting entry."
             )
-            return
+            return False
 
         logger.info(
             f"1. Entering Long Leg: {long_candidate['strike']} CE ({long_candidate['expiry']}) x {long_qty} units"
@@ -950,10 +1040,18 @@ class NiftyDiagonalCallStrategy:
             )
             if not oid:
                 logger.error("Failed to place long buy order. Aborting.")
-                return
-            if not self._wait_for_fill(oid, long_candidate["strike"], long_candidate["expiry"], "CE", +long_qty, net_before, timeout=15):
-                logger.error("Long buy order not confirmed filled within timeout. Aborting entry.")
-                return
+                return False
+            status, moved = self._confirm_fill_or_cancel(
+                oid, long_candidate["strike"], long_candidate["expiry"], "CE", +long_qty, net_before
+            )
+            if status == "NOT_FILLED":
+                logger.error("Long buy not filled; order cancelled and broker position unchanged. Aborting entry.")
+                return False
+            if status == "PARTIAL":
+                self.entry_halted = True
+                logger.error(f"FATAL: long buy ended partial/unknown (moved {moved}). Entries halted - verify the broker position manually.")
+                notify(f"[{self.state_key}] Long entry ended PARTIAL/UNKNOWN (moved {moved}). Entries halted - verify broker manually.")
+                return False
             fill_px = self._get_fill_price(oid, fallback_ltp=long_candidate["entry_price"])
             long_candidate["entry_price"] = fill_px
 
@@ -965,6 +1063,11 @@ class NiftyDiagonalCallStrategy:
                 f"Initial Long Call Debit Established: ₹{self.initial_long_debit:,.2f} "
                 f"({self.long_leg['lots']} lots @ ₹{self.long_leg['entry_price']:.2f})"
             )
+
+        # Persist the long immediately so a crash before the short fills cannot orphan it.
+        self.position_open = True
+        self.status = "ENTERING"
+        self.save_position()
 
         try:
             self.helper.subscribe_instruments([("NSE_FNO", str(long_candidate["security_id"]), 15)])
@@ -991,11 +1094,27 @@ class NiftyDiagonalCallStrategy:
             if not oid:
                 logger.error("Failed to place short sell order. Unwinding long leg.")
                 self.exit_all(reason="SHORT_SELL_ORDER_FAILED")
-                return
-            if not self._wait_for_fill(oid, short_candidate["strike"], short_candidate["expiry"], "CE", -short_qty, net_before, timeout=15):
-                logger.error("Short sell order not confirmed filled within timeout. Unwinding long leg.")
+                return False
+            status, moved = self._confirm_fill_or_cancel(
+                oid, short_candidate["strike"], short_candidate["expiry"], "CE", -short_qty, net_before
+            )
+            if status == "NOT_FILLED":
+                logger.error("Short sell not filled; order cancelled. Unwinding long leg.")
                 self.exit_all(reason="SHORT_FILL_TIMEOUT")
-                return
+                return False
+            if status == "PARTIAL":
+                self.entry_halted = True
+                filled_lots = abs(moved) // self.lot_size if moved else 0
+                if filled_lots >= 1:
+                    # Record what actually sold so exit_all buys it back BEFORE touching the long.
+                    short_candidate["lots"] = filled_lots
+                    self.short_leg = short_candidate
+                    logger.error(f"Short entry PARTIAL ({filled_lots} lots sold). Unwinding everything.")
+                    self.exit_all(reason="SHORT_PARTIAL_FILL")
+                else:
+                    logger.error("FATAL: short entry state unknown. Not touching the long; verify the broker manually.")
+                notify(f"[{self.state_key}] Short entry ended PARTIAL/UNKNOWN (moved {moved}). Entries halted - verify broker.")
+                return False
             fill_px = self._get_fill_price(oid, fallback_ltp=short_candidate["entry_price"])
             short_candidate["entry_price"] = fill_px
 
@@ -1017,6 +1136,7 @@ class NiftyDiagonalCallStrategy:
             f"Short: {self.short_leg['strike']} CE ({self.short_leg['lots']}L) @ ₹{self.short_leg['entry_price']:.1f}\n"
             f"Initial LCR: {self.lcr_pct:.1f}%"
         )
+        return True
 
     # ── ROLLS & DEFENSIVE ADJUSTMENTS ─────────────────────────────────────────
 
@@ -1027,35 +1147,17 @@ class NiftyDiagonalCallStrategy:
 
         logger.info(f"=== Rolling Short Call Leg | Reason: {reason} ===")
         old_leg = self.short_leg
-        close_qty = old_leg["lots"] * self.lot_size
-
-        # Resolve safe broker exit quantity
-        if self.live:
-            safe_qty, _ = resolve_exit_qty_broker(
-                self.broker, old_leg["strike"], old_leg["expiry"], "CE", close_qty, side="BUY", log=logger
-            )
-            if safe_qty > 0:
-                net_before = self._get_broker_net(old_leg["strike"], old_leg["expiry"], "CE")
-                oid = self.broker.buy(
-                    strike=old_leg["strike"],
-                    expiry=old_leg["expiry"],
-                    opt_type="CE",
-                    qty=safe_qty,
-                    product=PRODUCT,
-                )
-                if oid and self._wait_for_fill(oid, old_leg["strike"], old_leg["expiry"], "CE", +safe_qty, net_before, timeout=15):
-                    fill_px = self._get_fill_price(oid, fallback_ltp=old_leg.get("current_ltp", old_leg["entry_price"]))
-                else:
-                    logger.error("Could not place or confirm buyback order for short leg roll.")
-                    return
-            else:
-                fill_px = old_leg.get("current_ltp", old_leg["entry_price"])
-        else:
-            fill_px = old_leg.get("current_ltp", old_leg["entry_price"])
-
-        closed_pnl = (old_leg["entry_price"] - fill_px) * close_qty
+        closed, fill_px, done_qty = self._close_leg(old_leg, "BUY")
+        closed_pnl = (old_leg["entry_price"] - fill_px) * done_qty
         self.realized_pnl += closed_pnl
         self.cumulative_short_premium += closed_pnl
+        if not closed:
+            # Never sell a new short while the old one may still be open.
+            old_leg["lots"] -= done_qty // self.lot_size
+            self.roll_cooldown_until = time.time() + ROLL_COOLDOWN_SEC
+            self.save_position()
+            logger.error("Could not confirm buyback of the old short; roll aborted (cooldown).")
+            return
         lcr_pct, total_short_px, is_free = self.compute_lcr()
         logger.info(
             f"Closed old short {old_leg['strike']} CE @ ₹{fill_px:.2f} | Leg P&L: ₹{closed_pnl:+.2f} | "
@@ -1108,67 +1210,60 @@ class NiftyDiagonalCallStrategy:
         )
 
     def roll_long_leg(self, spot: float, reason: str):
-        """Sells current long call and rolls into a new 60–120 DTE call with 0.55–0.65 delta."""
+        """Rolls the long call: buy the NEW long first, only then sell the old one.
+
+        Buying first keeps the short covered at every instant; the reverse order left it naked
+        between the two orders (and permanently so if the new buy failed).
+        """
         if not self.long_leg or not self.position_open:
             return
 
         logger.info(f"=== Rolling Long Call Leg | Reason: {reason} ===")
-        # Pre-validate candidate long call before closing existing long
         new_long = self.select_long_call(spot)
         if not new_long:
             logger.error("Could not find candidate long call for roll. Retaining current long position.")
+            self.roll_cooldown_until = time.time() + ROLL_COOLDOWN_SEC
             return
 
         old_leg = self.long_leg
-        close_qty = old_leg["lots"] * self.lot_size
-
-        if self.live:
-            safe_qty, _ = resolve_exit_qty_broker(
-                self.broker, old_leg["strike"], old_leg["expiry"], "CE", close_qty, side="SELL", log=logger
-            )
-            if safe_qty > 0:
-                net_before = self._get_broker_net(old_leg["strike"], old_leg["expiry"], "CE")
-                oid = self.broker.sell(
-                    strike=old_leg["strike"],
-                    expiry=old_leg["expiry"],
-                    opt_type="CE",
-                    qty=safe_qty,
-                    product=PRODUCT,
-                )
-                if oid and self._wait_for_fill(oid, old_leg["strike"], old_leg["expiry"], "CE", -safe_qty, net_before, timeout=15):
-                    fill_px = self._get_fill_price(oid, fallback_ltp=old_leg.get("current_ltp", old_leg["entry_price"]))
-                else:
-                    logger.error("Could not place or confirm sell order for long leg roll.")
-                    return
-            else:
-                fill_px = old_leg.get("current_ltp", old_leg["entry_price"])
-        else:
-            fill_px = old_leg.get("current_ltp", old_leg["entry_price"])
-
-        closed_pnl = (fill_px - old_leg["entry_price"]) * close_qty
-        self.realized_pnl += closed_pnl
-        logger.info(f"Closed old long {old_leg['strike']} CE @ ₹{fill_px:.2f} | Leg P&L: ₹{closed_pnl:+.2f}")
-
-        # Enter fresh long call
         new_qty = new_long["lots"] * self.lot_size
+
+        # 1. Buy the replacement long
         if self.live:
             net_before = self._get_broker_net(new_long["strike"], new_long["expiry"], "CE")
             oid = self.broker.buy(
-                strike=new_long["strike"],
-                expiry=new_long["expiry"],
-                opt_type="CE",
-                qty=new_qty,
-                product=PRODUCT,
+                strike=new_long["strike"], expiry=new_long["expiry"], opt_type="CE", qty=new_qty, product=PRODUCT
             )
-            if oid and self._wait_for_fill(oid, new_long["strike"], new_long["expiry"], "CE", +new_qty, net_before, timeout=15):
-                new_fill = self._get_fill_price(oid, fallback_ltp=new_long["entry_price"])
-                new_long["entry_price"] = new_fill
-            else:
-                logger.error("Failed to buy new long call during roll. Unwinding short leg for safety.")
-                self.exit_all(reason="NEW_LONG_ENTRY_FAILED_POST_ROLL")
+            if not oid:
+                logger.error("Could not place buy for the new long. Retaining current long (cooldown).")
+                self.roll_cooldown_until = time.time() + ROLL_COOLDOWN_SEC
                 return
+            status, moved = self._confirm_fill_or_cancel(
+                oid, new_long["strike"], new_long["expiry"], "CE", +new_qty, net_before
+            )
+            if status == "NOT_FILLED":
+                logger.error("New long not filled; cancelled. Retaining current long (cooldown).")
+                self.roll_cooldown_until = time.time() + ROLL_COOLDOWN_SEC
+                return
+            if status == "PARTIAL":
+                self.roll_cooldown_until = float("inf")
+                logger.error(f"FATAL: new long ended partial/unknown (moved {moved}); long rolls disabled until restart.")
+                notify(f"[{self.state_key}] Long roll ended PARTIAL/UNKNOWN (moved {moved}). Old long kept; verify broker manually.")
+                return
+            new_long["entry_price"] = self._get_fill_price(oid, fallback_ltp=new_long["entry_price"])
 
+        # 2. Sell the old long. Track the new one first so state is right even if this fails.
         self.long_leg = new_long
+        closed, fill_px, done_qty = self._close_leg(old_leg, "SELL")
+        closed_pnl = (fill_px - old_leg["entry_price"]) * done_qty
+        self.realized_pnl += closed_pnl
+        if closed:
+            logger.info(f"Closed old long {old_leg['strike']} CE @ ₹{fill_px:.2f} | Leg P&L: ₹{closed_pnl:+.2f}")
+        else:
+            # Extra long exposure is not naked risk, but it must not be forgotten.
+            logger.error("Old long close not confirmed; holding BOTH longs. Close the old one manually.")
+            notify(f"[{self.state_key}] Long roll: old long {old_leg['strike']} CE close unconfirmed - verify broker manually.")
+
         try:
             self.helper.subscribe_instruments([("NSE_FNO", str(new_long["security_id"]), 15)])
         except Exception:
@@ -1180,94 +1275,84 @@ class NiftyDiagonalCallStrategy:
         notify(f"[{self.state_key}] Long Leg Rolled: {new_long['strike']} CE ({new_long['lots']}L).")
 
     def halve_short_position(self, spot: float, reason: str):
-        """Halves short lots when drawdown reaches 5%."""
+        """Halves short lots when drawdown reaches 5%. State only changes for lots that really closed."""
         if not self.short_leg or self.short_leg["lots"] <= 1 or self.drawdown_halved:
             return
         logger.info(f"--- Drawdown Protection: Halving Short Position ({reason}) ---")
         reduce_lots = max(1, self.short_leg["lots"] // 2)
-        reduce_qty = reduce_lots * self.lot_size
-        strike = self.short_leg["strike"]
-        expiry = self.short_leg["expiry"]
-
-        if self.live:
-            safe_qty, _ = resolve_exit_qty_broker(
-                self.broker, strike, expiry, "CE", reduce_qty, side="BUY", log=logger
-            )
-            if safe_qty > 0:
-                net_before = self._get_broker_net(strike, expiry, "CE")
-                oid = self.broker.buy(strike=strike, expiry=expiry, opt_type="CE", qty=safe_qty, product=PRODUCT)
-                if oid and self._wait_for_fill(oid, strike, expiry, "CE", +safe_qty, net_before, timeout=15):
-                    fill_px = self._get_fill_price(oid, fallback_ltp=self.short_leg.get("current_ltp", self.short_leg["entry_price"]))
-                    closed_pnl = (self.short_leg["entry_price"] - fill_px) * safe_qty
-                    self.realized_pnl += closed_pnl
-                    self.cumulative_short_premium += closed_pnl
-
-        self.short_leg["lots"] -= reduce_lots
-        self.drawdown_halved = True
+        part = dict(self.short_leg, lots=reduce_lots)
+        closed, fill_px, done_qty = self._close_leg(part, "BUY")
+        if done_qty <= 0:
+            self.roll_cooldown_until = time.time() + ROLL_COOLDOWN_SEC
+            logger.error("Halving buyback not confirmed; short position unchanged (cooldown).")
+            return
+        closed_pnl = (self.short_leg["entry_price"] - fill_px) * done_qty
+        self.realized_pnl += closed_pnl
+        self.cumulative_short_premium += closed_pnl
+        self.short_leg["lots"] -= done_qty // self.lot_size
+        self.drawdown_halved = closed
         self.compute_lcr()
         self.save_position()
-        logger.info(f"Short position halved to {self.short_leg['lots']} lots. LCR: {self.lcr_pct:.1f}%")
+        logger.info(f"Short position now {self.short_leg['lots']} lots (halving {'complete' if closed else 'partial'}). LCR: {self.lcr_pct:.1f}%")
 
-    def exit_all(self, reason: str = "MANUAL_STOP"):
-        """Gracefully closes all legs (short leg first, then long leg) using safe exit sizing."""
+    def exit_all(self, reason: str = "MANUAL_STOP") -> bool:
+        """Closes all legs, short first. Returns True only when every leg is confirmed closed.
+
+        The long is never sold while a short is still open: a naked short is the one state this
+        strategy must not reach. An incomplete exit keeps the unclosed legs in state, leaves
+        position_open=True and sets pending_exit_reason so run() retries (also across restarts).
+        """
         logger.info(f"=== SQUARING OFF ALL POSITIONS ({reason}) ===")
         self.status = "UNWINDING"
-        exit_incomplete = False
 
-        # 1. Close Short Leg First
         if self.short_leg and self.short_leg.get("lots", 0) > 0:
-            qty = self.short_leg["lots"] * self.lot_size
-            strike = self.short_leg["strike"]
-            expiry = self.short_leg["expiry"]
-            ltp = self.short_leg.get("current_ltp", self.short_leg["entry_price"])
-            if self.live:
-                safe_qty, _ = resolve_exit_qty_broker(self.broker, strike, expiry, "CE", qty, side="BUY", log=logger)
-                if safe_qty > 0:
-                    net_before = self._get_broker_net(strike, expiry, "CE")
-                    oid = self.broker.buy(strike=strike, expiry=expiry, opt_type="CE", qty=safe_qty, product=PRODUCT)
-                    if oid and self._wait_for_fill(oid, strike, expiry, "CE", +safe_qty, net_before, timeout=15):
-                        ltp = self._get_fill_price(oid, fallback_ltp=ltp)
-                    else:
-                        logger.error("Could not confirm short leg close order.")
-                        exit_incomplete = True
-            closed_short_pnl = (self.short_leg["entry_price"] - ltp) * qty
-            self.realized_pnl += closed_short_pnl
-            self.cumulative_short_premium += closed_short_pnl
-            self.short_leg = None
+            closed, fill_px, done_qty = self._close_leg(self.short_leg, "BUY")
+            closed_pnl = (self.short_leg["entry_price"] - fill_px) * done_qty
+            self.realized_pnl += closed_pnl
+            self.cumulative_short_premium += closed_pnl
+            if closed:
+                self.short_leg = None
+            else:
+                self.short_leg["lots"] -= done_qty // self.lot_size
 
-        # 2. Close Long Leg Second
-        if self.long_leg and self.long_leg.get("lots", 0) > 0:
-            qty = self.long_leg["lots"] * self.lot_size
-            strike = self.long_leg["strike"]
-            expiry = self.long_leg["expiry"]
-            ltp = self.long_leg.get("current_ltp", self.long_leg["entry_price"])
-            if self.live:
-                safe_qty, _ = resolve_exit_qty_broker(self.broker, strike, expiry, "CE", qty, side="SELL", log=logger)
-                if safe_qty > 0:
-                    net_before = self._get_broker_net(strike, expiry, "CE")
-                    oid = self.broker.sell(strike=strike, expiry=expiry, opt_type="CE", qty=safe_qty, product=PRODUCT)
-                    if oid and self._wait_for_fill(oid, strike, expiry, "CE", -safe_qty, net_before, timeout=15):
-                        ltp = self._get_fill_price(oid, fallback_ltp=ltp)
-                    else:
-                        logger.error("Could not confirm long leg close order.")
-                        exit_incomplete = True
-            self.realized_pnl += (ltp - self.long_leg["entry_price"]) * qty
-            self.long_leg = None
+        if self.short_leg and self.short_leg.get("lots", 0) > 0:
+            logger.error("Short leg still open - NOT selling the long (would leave a naked short). Will retry.")
+        elif self.long_leg and self.long_leg.get("lots", 0) > 0:
+            closed, fill_px, done_qty = self._close_leg(self.long_leg, "SELL")
+            self.realized_pnl += (fill_px - self.long_leg["entry_price"]) * done_qty
+            if closed:
+                self.long_leg = None
+            else:
+                self.long_leg["lots"] -= done_qty // self.lot_size
 
-        self.position_open = False
-        self.status = "STOPPED (EXIT INCOMPLETE - VERIFY MANUALLY)" if exit_incomplete else "STOPPED"
-        self.compute_lcr()
-        self.save_position()
-        self._publish_state(0.0)
-        notify(
-            f"[{self.state_key}] Position Squared Off: {reason}. Status: {self.status}. "
-            f"Total Realized P&L: ₹{self.realized_pnl:+.2f} | Final LCR: {self.lcr_pct:.1f}%"
+        complete = not (self.short_leg and self.short_leg.get("lots", 0) > 0) and not (
+            self.long_leg and self.long_leg.get("lots", 0) > 0
         )
+        self.compute_lcr()
+        if complete:
+            self.position_open = False
+            self.pending_exit_reason = None
+            self.status = "STOPPED"
+        else:
+            self.position_open = True
+            self.pending_exit_reason = reason
+            self.status = "EXIT_PENDING"
+        self.save_position()
+        self._publish_state(self.last_spot)
+        notify(
+            f"[{self.state_key}] Square-off {'complete' if complete else 'INCOMPLETE - retrying'}: {reason}. "
+            f"Status: {self.status}. Total Realized P&L: ₹{self.realized_pnl:+.2f} | Final LCR: {self.lcr_pct:.1f}%"
+        )
+        return complete
 
     # ── STATE PUBLISHING ──────────────────────────────────────────────────────
 
     def _publish_state(self, spot: float):
         """Publishes the state file for Next.js dashboard visibility."""
+        if spot > 0:
+            self.last_spot = spot
+        else:
+            spot = self.last_spot  # overnight / exit: reuse the last spot so Greeks are not all zero
         unrealized = 0.0
         if self.long_leg and "current_ltp" in self.long_leg:
             unrealized += (self.long_leg["current_ltp"] - self.long_leg["entry_price"]) * (
@@ -1340,19 +1425,27 @@ class NiftyDiagonalCallStrategy:
                 # 1. Check Graceful Dashboard Shutdown Trigger
                 if check_shutdown_trigger(self.state_key):
                     logger.info("Shutdown trigger detected from dashboard. Closing positions and exiting.")
-                    self.exit_all(reason="DASHBOARD_SHUTDOWN_TRIGGER")
-                    break
+                    self.pending_exit_reason = "DASHBOARD_SHUTDOWN_TRIGGER"
 
                 now = datetime.now()
                 now_str = now.strftime("%H:%M")
                 today_str = date.today().isoformat()
+                in_session = "09:15" <= now_str < "15:25"
 
-                # Session rollover check for daily loss baseline
+                # Session rollover check for daily loss baseline (baseline = total P&L, incl. unrealized carry)
                 if today_str != self.session_date:
                     logger.info(f"New session date: {today_str}. Rolling over daily P&L baseline.")
                     self.session_date = today_str
-                    self.daily_start_pnl = self.realized_pnl
+                    self.daily_start_pnl = self.last_total_pnl
                     self.save_position()
+
+                # 1b. Pending exit (dashboard stop, risk exit, or an earlier incomplete unwind): retry until
+                # every leg is confirmed closed. Never `break` on an incomplete exit.
+                if self.pending_exit_reason and (in_session or self.dry_run):
+                    if self.exit_all(reason=self.pending_exit_reason):
+                        break
+                    time.sleep(EXIT_RETRY_SEC)
+                    continue
 
                 # 2. Overnight Handling: After 15:25 IST, transition to HOLDING OVERNIGHT
                 if now_str >= "15:25" or now_str < "09:15":
@@ -1364,9 +1457,9 @@ class NiftyDiagonalCallStrategy:
                     # Sleep through post-market with responsive shutdown check
                     for _ in range(30):
                         if check_shutdown_trigger(self.state_key):
-                            logger.info("Shutdown trigger detected during overnight hold. Squaring off and exiting.")
-                            self.exit_all(reason="DASHBOARD_SHUTDOWN_TRIGGER")
-                            return
+                            logger.info("Shutdown trigger detected outside market hours. Exit queued for the next session open.")
+                            self.pending_exit_reason = "DASHBOARD_SHUTDOWN_TRIGGER"
+                            break
                         time.sleep(1)
                     continue
 
@@ -1383,8 +1476,26 @@ class NiftyDiagonalCallStrategy:
                         self._publish_state(spot)
                         time.sleep(2)
                         continue
+                    if self.entry_halted or self.entry_attempts >= ENTRY_MAX_ATTEMPTS:
+                        if not self.entry_halted:
+                            self.entry_halted = True
+                            logger.error(f"Entry halted after {self.entry_attempts} failed attempts. Restart to retry.")
+                            notify(f"[{self.state_key}] Entry halted after {self.entry_attempts} failed attempts.")
+                        self.status = "ENTRY_HALTED"
+                        self._publish_state(spot)
+                        time.sleep(5)
+                        continue
+                    if time.time() < self.next_entry_at:
+                        time.sleep(2)
+                        continue
                     # Enter fresh cycle
-                    self.enter_cycle(spot)
+                    if self.enter_cycle(spot):
+                        self.entry_attempts = 0
+                    else:
+                        self.entry_attempts += 1
+                        backoff = min(ENTRY_BACKOFF_MAX_SEC, ENTRY_BACKOFF_BASE_SEC * 2 ** (self.entry_attempts - 1))
+                        self.next_entry_at = time.time() + backoff
+                        logger.warning(f"Entry attempt {self.entry_attempts}/{ENTRY_MAX_ATTEMPTS} failed. Next try in {backoff}s.")
                     time.sleep(2)
                     continue
 
@@ -1427,8 +1538,8 @@ class NiftyDiagonalCallStrategy:
                         )
                         if is_phantom:
                             logger.error("FATAL: Long call leg vanished at broker! Emergency flattening short call to prevent naked risk.")
-                            self.exit_all(reason="PHANTOM_LONG_LEG_DETECTED")
-                            break
+                            self.pending_exit_reason = "PHANTOM_LONG_LEG_DETECTED"
+                            continue
                     if self.short_leg:
                         is_short_phantom = detect_phantom_leg_broker(
                             self.broker,
@@ -1458,17 +1569,18 @@ class NiftyDiagonalCallStrategy:
                     )
                 total_pnl = self.realized_pnl + unrealized
                 self.peak_pnl = max(self.peak_pnl, total_pnl)
+                self.last_total_pnl = total_pnl
 
                 # 8. Check Target Profit & Stop Loss
                 if self.target_profit_rs and total_pnl >= self.target_profit_rs:
                     logger.info(f"Target Profit Reached: ₹{total_pnl:,.2f} >= ₹{self.target_profit_rs:,.2f}. Exiting.")
-                    self.exit_all(reason="TARGET_PROFIT_REACHED")
-                    break
+                    self.pending_exit_reason = "TARGET_PROFIT_REACHED"
+                    continue
 
                 if self.stop_loss_rs and total_pnl <= -abs(self.stop_loss_rs):
                     logger.warning(f"Stop Loss Hit: ₹{total_pnl:,.2f} <= -₹{abs(self.stop_loss_rs):,.2f}. Exiting.")
-                    self.exit_all(reason="STOP_LOSS_HIT")
-                    break
+                    self.pending_exit_reason = "STOP_LOSS_HIT"
+                    continue
 
                 # 9. Portfolio Risk Checks & Strategy Drawdowns
                 drawdown_rs = self.peak_pnl - total_pnl
@@ -1477,18 +1589,23 @@ class NiftyDiagonalCallStrategy:
                 # Check Max Strategy Drawdown (8% hard exit)
                 if drawdown_pct >= self.drawdown_exit_pct:
                     logger.warning(f"Strategy Max Drawdown Breached: {drawdown_pct:.1f}% >= {self.drawdown_exit_pct}%. Halting.")
-                    self.exit_all(reason=f"MAX_DRAWDOWN_EXIT ({drawdown_pct:.1f}%)")
-                    break
+                    self.pending_exit_reason = f"MAX_DRAWDOWN_EXIT ({drawdown_pct:.1f}%)"
+                    continue
 
                 # Check 5% Drawdown Halving
-                if drawdown_pct >= self.drawdown_halve_pct and not self.drawdown_halved:
+                if drawdown_pct >= self.drawdown_halve_pct and not self.drawdown_halved and time.time() >= self.roll_cooldown_until:
                     self.halve_short_position(spot, reason=f"DRAWDOWN_{drawdown_pct:.1f}%")
 
                 # Daily Loss Limit Check
                 daily_pnl = total_pnl - self.daily_start_pnl
                 max_daily_loss = -(self.daily_loss_pct / 100.0) * self.capital
-                if daily_pnl <= max_daily_loss:
-                    logger.warning(f"Daily loss limit hit: ₹{daily_pnl:.2f} <= ₹{max_daily_loss:.2f}. Suspending adjustments.")
+                if daily_pnl <= max_daily_loss and self.daily_halt_date != today_str:
+                    self.daily_halt_date = today_str  # latched for the rest of the session
+                    self.save_position()
+                    logger.warning(f"Daily loss limit hit: ₹{daily_pnl:.2f} <= ₹{max_daily_loss:.2f}. Suspending discretionary adjustments for the session.")
+                    notify(f"[{self.state_key}] Daily loss limit hit (₹{daily_pnl:,.0f}). Discretionary adjustments suspended today.")
+                adjustments_suspended = self.daily_halt_date == today_str
+                roll_allowed = time.time() >= self.roll_cooldown_until
 
                 # 10. Emergency Triggers Evaluation (Evaluated on every tick)
                 if self.short_leg:
@@ -1505,20 +1622,27 @@ class NiftyDiagonalCallStrategy:
                         short_profit_pct=self.short_profit_pct,
                         min_gamma_limit=self.min_gamma_limit,
                     )
-                    if should_roll:
+                    if should_roll and adjustments_suspended and not roll_reason.startswith(HALT_ALLOWED_ROLL_PREFIXES):
+                        should_roll = False  # discretionary roll held back by the daily loss halt
+                    if should_roll and roll_allowed:
                         self.roll_short_leg(spot, reason=roll_reason)
                         continue
 
                 # 11. Long Leg Roll Evaluation
                 if self.long_leg:
                     should_roll_long, long_reason = check_long_roll_triggers(self.long_leg, self.long_roll_dte)
-                    if should_roll_long:
+                    if should_roll_long and roll_allowed:
                         self.roll_long_leg(spot, reason=long_reason)
                         continue
 
                 # 12. Scheduled Rebalance Windows (10:00, 12:00, 14:00)
                 current_hm = now.strftime("%H:%M")
-                if current_hm in self.rebalance_times and current_hm != self.last_rebalance_minute:
+                if (
+                    current_hm in self.rebalance_times
+                    and current_hm != self.last_rebalance_minute
+                    and not adjustments_suspended
+                    and roll_allowed
+                ):
                     self.last_rebalance_minute = current_hm
                     logger.info(f"--- Rebalance Window Check at {current_hm} | Net Delta: {greeks['net_delta_shares']:.1f} ({greeks['delta_zone']}) ---")
                     if greeks["delta_zone"] == "DEFENSIVE":
@@ -1532,7 +1656,8 @@ class NiftyDiagonalCallStrategy:
 
             except KeyboardInterrupt:
                 logger.info("Keyboard interrupt received. Squaring off and exiting.")
-                self.exit_all(reason="KEYBOARD_INTERRUPT")
+                if not self.exit_all(reason="KEYBOARD_INTERRUPT"):
+                    logger.error("Exit INCOMPLETE on interrupt - legs remain open. Verify the broker position manually.")
                 break
             except Exception as e:
                 logger.error(f"Error in strategy loop: {e}", exc_info=True)
