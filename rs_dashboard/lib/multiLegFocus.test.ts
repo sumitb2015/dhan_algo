@@ -1246,7 +1246,7 @@ test('residualBrokerAvg strips slices closed today out of the broker pooled aver
   // No closed slices, or no pooled qty on the row: the broker average is returned unchanged.
   assert.strictEqual(residualBrokerAvg('dhan', row, 'S', [], true, now), 180.22647);
   assert.strictEqual(residualBrokerAvg('dhan', { ...row, sellQty: undefined }, 'S', baskets, true, now), 180.22647);
-  const [u] = findUntrackedPositions('dhan', [row], baskets, r => contractHintFromRow(r, ['NIFTY']));
+  const [u] = findUntrackedPositions('dhan', [row], baskets, r => contractHintFromRow(r, ['NIFTY']), now);
   assert.ok(Math.abs(u.brokerAvg - 242.21) < 0.05);
 });
 

@@ -39,6 +39,8 @@ import StrategyCardGrid from './basket/StrategyCardGrid';
 import LegsTable from './basket/LegsTable';
 import SavedBasketsPanel from './basket/SavedBasketsPanel';
 import BasketActivityTabs from './basket/BasketActivityTabs';
+import DiagonalStrikeAdvisorCard from './basket/DiagonalStrikeAdvisorCard';
+import type { CandidateStrike } from '@/lib/diagonalStrikeAdvisor';
 
 const UNDERLYINGS = ['NIFTY', 'BANKNIFTY', 'SENSEX'] as const;
 type Underlying = typeof UNDERLYINGS[number];
@@ -489,7 +491,7 @@ export default function Baskets() {
         const cands = expiries.filter(e => { const d = dte(e); return d != null && d > fd && d >= aLo && d <= aHi; });
         cands.sort((a, b) => Math.abs((dte(a) ?? 0) - 2 * fd) - Math.abs((dte(b) ?? 0) - 2 * fd));
         if (!cands.length) {
-          addToast('error', `No expiry ${aLo}-${aHi} days out for the long put`, expiries.join(', '));
+          addToast('error', `No expiry ${aLo}-${aHi} days out for the long leg`, expiries.join(', '));
           return;
         }
         farExp = cands[0];
@@ -531,6 +533,27 @@ export default function Baskets() {
   const updateLeg = useCallback((id: string, patch: Partial<BasketLeg>) => {
     setLegs(prev => prev.map(l => (l.id === id ? { ...l, ...patch } : l)));
   }, []);
+
+  const handleApplyDiagonalCandidate = useCallback((candidate: CandidateStrike) => {
+    setLegs(prev => {
+      const shortLegIndex = prev.findIndex(l => l.side === 'S' && l.option === 'CE');
+      if (shortLegIndex === -1) return prev;
+      const updated = [...prev];
+      updated[shortLegIndex] = {
+        ...updated[shortLegIndex],
+        strike: candidate.strike,
+        lots: candidate.recommendedLots,
+        price: candidate.ltp > 0 ? String(candidate.ltp) : updated[shortLegIndex].price,
+        expiry: candidate.expiry || updated[shortLegIndex].expiry,
+      };
+      return updated;
+    });
+    addToast(
+      'success',
+      `Applied ${candidate.strike} CE (${candidate.recommendedLots} Lots)`,
+      `Score: ${candidate.score} · Target Net Δ: +${candidate.resultingNetDeltaShares}`
+    );
+  }, [addToast]);
 
   const nextAvailableStrike = useCallback((
     fromStrike: number, dir: 1 | -1, option: OptionType, side: BasketLeg['side'], excludeId: string | null, currentLegs: BasketLeg[],
@@ -1061,6 +1084,25 @@ export default function Baskets() {
             />
           </div>
         </TerminalPanel>
+
+        {/* Diagonal Covered Call Strike & Greek Advisor */}
+        {strategy === 'low-gamma-diagonal-call' && (
+          <DiagonalStrikeAdvisorCard
+            spot={spot}
+            lotSize={effectiveLotSize}
+            frontExpiry={expiry}
+            frontDte={daysToExpiry(expiry) ?? 25}
+            farExpiry={farExpiry}
+            farDte={farExpiry ? (daysToExpiry(farExpiry) ?? 85) : undefined}
+            allStrikes={allStrikes}
+            autoPremium={autoPremium}
+            chainOc={chainOc}
+            atmIv={atmIv}
+            currentShortLeg={legs.find(l => l.side === 'S' && l.option === 'CE')}
+            currentLongLeg={legs.find(l => l.side === 'B' && l.option === 'CE')}
+            onApplyCandidate={handleApplyDiagonalCandidate}
+          />
+        )}
 
         {/* Panel 2 & 3: Two-Column Workspace (Legs Builder + Payoff Analytics) */}
         <div className="grid grid-cols-1 xl:grid-cols-12 gap-4 items-start">

@@ -8,7 +8,7 @@ import { type Toast, FOCUS_RING } from './Scalper';
 import { useLiveOptionsWS } from '@/lib/useLiveOptionsWS';
 import { useBrokerSelector, scalperRoute, BROKER_LABELS, BROKERS, type Broker } from '@/hooks/useBrokerSelector';
 import {
-  STRATEGY_CATEGORIES, type StrategyCategory, type StrategyTemplate, type OptionType, nearestStrike, strikeStep,
+  STRATEGY_CATEGORIES, type StrategyCategory, type StrategyTemplate, type OptionType, nearestStrike, strikeStep, daysToExpiry,
 } from '@/lib/basketStrategies';
 import { sortLegsForPlacement, resolveOrderRequest, type StrikeIdentifier } from '@/lib/basketOrders';
 import StrategyCardGrid from './basket/StrategyCardGrid';
@@ -987,13 +987,9 @@ export default function MultiLegFocus({
 
   const addStrategy = useCallback((template?: StrategyTemplate, targetUnderlying?: Underlying) => {
     const u: Underlying = targetUnderlying ?? selectedUnderlying ?? 'NIFTY';
-    const exp = expiriesMap[u]?.[0] ?? '';
-    const farExp = expiriesMap[u]?.[1] ?? '';
-    const pair = `${u}:${exp}`;
-    const strikes = chainData[pair]?.strikes?.length ? chainData[pair].strikes : [];
-    const spot = chainData[pair]?.spot ?? DEFAULT_INDEX_SPOT[u];
-    const step = DEFAULT_INDEX_STEP[u];
-    const atm = nearestStrike(strikes, spot) ?? (Math.round(spot / step) * step);
+    const allExps = expiriesMap[u] ?? [];
+    let exp = allExps[0] ?? '';
+    let farExp = allExps[1] ?? '';
 
     const tpl = template ?? {
       key: 'custom',
@@ -1003,6 +999,30 @@ export default function MultiLegFocus({
         { side: 'S' as const, option: 'PE' as const, offset: -2, ratio: 1 },
       ],
     };
+
+    if (tpl.dte) {
+      const dte = (e: string) => daysToExpiry(e);
+      const [fLo, fHi] = tpl.dte.front;
+      const front = allExps.find(e => { const d = dte(e); return d != null && d >= fLo && d <= fHi; });
+      if (front) {
+        exp = front;
+      }
+      if (tpl.dte.far) {
+        const [aLo, aHi] = tpl.dte.far;
+        const fd = dte(exp) ?? fLo;
+        const cands = allExps.filter(e => { const d = dte(e); return d != null && d > fd && d >= aLo && d <= aHi; });
+        cands.sort((a, b) => Math.abs((dte(a) ?? 0) - 2 * fd) - Math.abs((dte(b) ?? 0) - 2 * fd));
+        if (cands.length > 0) {
+          farExp = cands[0];
+        }
+      }
+    }
+
+    const pair = `${u}:${exp}`;
+    const strikes = chainData[pair]?.strikes?.length ? chainData[pair].strikes : [];
+    const spot = chainData[pair]?.spot ?? DEFAULT_INDEX_SPOT[u];
+    const step = DEFAULT_INDEX_STEP[u];
+    const atm = nearestStrike(strikes, spot) ?? (Math.round(spot / step) * step);
 
     if (tpl.legs.some(l => l.expiryRole === 'far') && !farExp) {
       addToast('error', 'Secondary expiry required', `${u} needs a second listed expiry to build a Calendar/Diagonal strategy`);

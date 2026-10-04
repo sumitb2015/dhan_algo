@@ -112,6 +112,15 @@ export const STRATEGY_PRESETS: StrategyPreset[] = [
       { option_type: 'CE', action: 'BUY', atmOffset: 2, lots: 1 },
     ],
   },
+  {
+    id: 'low_gamma_diagonal_call',
+    label: 'Low-Gamma Diagonal Call',
+    category: 'neutral',
+    legs: [
+      { option_type: 'CE', action: 'BUY', atmOffset: 0, lots: 3 },
+      { option_type: 'CE', action: 'SELL', atmOffset: 15, lots: 4 },
+    ],
+  },
 ];
 
 /** Resolves a preset's atmOffset-based leg templates to real strikes given a sorted strike

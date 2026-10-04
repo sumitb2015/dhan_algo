@@ -137,6 +137,18 @@ export const STRATEGY_TEMPLATES: StrategyTemplate[] = [
       { offsetStrikes: -(p.N + 2 * p.W1 + p.W2), type: 'PE', side: 'BUY', qtyRatio: 1 },
     ],
   },
+  {
+    id: 'low_gamma_diagonal_call', name: 'Low-Gamma Diagonal Call', undefinedRisk: false,
+    params: [
+      { key: 'N', label: 'Short OTM offset (strikes)', default: 15, min: 10, max: 25, step: 1 },
+      { key: 'LR', label: 'Long lots', default: 3, min: 1, max: 10, step: 1 },
+      { key: 'SR', label: 'Short lots', default: 4, min: 1, max: 10, step: 1 },
+    ],
+    legs: (p) => [
+      { offsetStrikes: 0, type: 'CE', side: 'BUY', qtyRatio: p.LR || 3 },
+      { offsetStrikes: +p.N, type: 'CE', side: 'SELL', qtyRatio: p.SR || 4 },
+    ],
+  },
 ];
 
 export function getTemplate(id: string): StrategyTemplate | undefined {

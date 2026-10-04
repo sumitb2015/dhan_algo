@@ -153,14 +153,13 @@ export const STRATEGY_CATEGORIES: Record<StrategyCategory, StrategyTemplate[]> =
       { side: 'S', option: 'PE', offset: -14, ratio: 1, expiryRole: 'front' },
       { side: 'B', option: 'PE', offset: -15, ratio: 1, expiryRole: 'far' },
     ] },
-    // Double calendar: a put calendar below spot plus a call calendar above it, same two expiries,
-    // net long vega, max loss = the debit. Initial offset 300 pts each side = 6 steps on a 50-pt step
-    // (NIFTY); offsets are in strike STEPS, so BANKNIFTY/SENSEX (100-pt step) land at 600 pts.
-    { key: 'double-calendar',      name: 'Double Calendar',      legs: [
-      { side: 'S', option: 'PE', offset: -6, ratio: 1, expiryRole: 'front' },
-      { side: 'B', option: 'PE', offset: -6, ratio: 1, expiryRole: 'far' },
-      { side: 'S', option: 'CE', offset: 6, ratio: 1, expiryRole: 'front' },
-      { side: 'B', option: 'CE', offset: 6, ratio: 1, expiryRole: 'far' },
+    // Low-Gamma Diagonal Covered Call (Delta-Controlled):
+    // Buy 3x far-dated call (60-120 DTE, ~0.60 delta) for convexity & margin shield on far expiry.
+    // Sell 4x medium-dated OTM call (25-45 DTE, ~0.18 delta) on front expiry to harvest steady theta decay.
+    // Dynamic delta sizing (+10 to +20 units) and Theta/|Gamma| score strike selection.
+    { key: 'low-gamma-diagonal-call', name: 'Low-Gamma Diagonal Call', dte: { front: [25, 45], far: [60, 120] }, legs: [
+      { side: 'B', option: 'CE', offset: 0, ratio: 3, expiryRole: 'far' },
+      { side: 'S', option: 'CE', offset: 15, ratio: 4, expiryRole: 'front' },
     ] },
   ],
 };

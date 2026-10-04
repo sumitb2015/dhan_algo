@@ -279,3 +279,19 @@ test('double-calendar template: short front / long far at ATM ±300 pts on a 50-
     assert.strictEqual(front.offset * 50, sign * 300);     // 300 pts either side of ATM
   }
 });
+
+test('low-gamma-diagonal-call template: long far ATM (ratio 3) + short front OTM (ratio 4)', () => {
+  const tpl = STRATEGY_CATEGORIES.Calendar.find(t => t.key === 'low-gamma-diagonal-call');
+  assert.ok(tpl, 'low-gamma-diagonal-call template must exist under Calendar');
+  assert.strictEqual(tpl!.legs.length, 2);
+  const longLeg = tpl!.legs.find(l => l.expiryRole === 'far');
+  const shortLeg = tpl!.legs.find(l => l.expiryRole === 'front');
+  assert.ok(longLeg && shortLeg);
+  assert.strictEqual(longLeg.side, 'B');
+  assert.strictEqual(longLeg.ratio, 3);
+  assert.strictEqual(longLeg.offset, 0);
+  assert.strictEqual(shortLeg.side, 'S');
+  assert.strictEqual(shortLeg.ratio, 4);
+  assert.strictEqual(shortLeg.offset, 15);
+  assert.deepStrictEqual(tpl!.dte, { front: [25, 45], far: [60, 120] });
+});

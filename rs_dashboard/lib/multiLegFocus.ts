@@ -1277,6 +1277,7 @@ export function findUntrackedPositions(
   rows: Record<string, unknown>[],
   baskets: MultiLegBasket[],
   hintFor: (row: Record<string, unknown>) => ContractHint | null,
+  now = Date.now(),
 ): UntrackedPosition[] {
   const trackedSigned = new Map<string, number>();
   for (const b of baskets) {
@@ -1308,7 +1309,7 @@ export function findUntrackedPositions(
       brokerQty: Math.abs(net),
       trackedQty: Math.abs(tracked),
       untrackedQty: Math.abs(rest),
-      brokerAvg: residualBrokerAvg(broker, row, side, baskets, true),
+      brokerAvg: residualBrokerAvg(broker, row, side, baskets, true, now),
     });
   }
   return out;
