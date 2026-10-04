@@ -25,11 +25,11 @@ function renderMarkdown(md: string): React.ReactNode {
     const parts = text.split(/(\*\*[^*]+\*\*|`[^`]+`)/g);
     return parts.map((part, idx) => {
       if (part.startsWith('**') && part.endsWith('**')) {
-        return <strong key={idx} className="font-bold text-zinc-100">{part.slice(2, -2)}</strong>;
+        return <strong key={idx} className="font-semibold text-white">{part.slice(2, -2)}</strong>;
       }
       if (part.startsWith('`') && part.endsWith('`')) {
         return (
-          <code key={idx} className="rounded-sm bg-zinc-900 px-1 py-0.5 font-mono text-[11px] text-sky-300">
+          <code key={idx} className="rounded bg-zinc-900 border border-zinc-800 px-1.5 py-0.5 font-mono text-xs text-sky-300">
             {part.slice(1, -1)}
           </code>
         );
@@ -43,7 +43,8 @@ function renderMarkdown(md: string): React.ReactNode {
 
     if (line.startsWith('## ')) {
       blocks.push(
-        <h3 key={key++} className="text-[11px] font-bold uppercase tracking-wider text-amber-400 mt-5 first:mt-0">
+        <h3 key={key++} className="text-xs sm:text-sm font-bold uppercase tracking-wider text-amber-400 mt-6 mb-2.5 first:mt-0 flex items-center gap-2">
+          <span className="h-1.5 w-1.5 rounded-full bg-amber-400 shrink-0" />
           {line.slice(3)}
         </h3>
       );
@@ -52,7 +53,7 @@ function renderMarkdown(md: string): React.ReactNode {
     }
     if (line.startsWith('# ')) {
       blocks.push(
-        <h2 key={key++} className="text-sm font-bold text-zinc-100 mt-2">
+        <h2 key={key++} className="text-base sm:text-lg font-bold text-white mt-5 mb-2 pb-1 border-b border-zinc-800">
           {line.slice(2)}
         </h2>
       );
@@ -66,11 +67,11 @@ function renderMarkdown(md: string): React.ReactNode {
         i++;
       }
       blocks.push(
-        <ul key={key++} className="flex flex-col gap-1.5 mt-1.5">
+        <ul key={key++} className="flex flex-col gap-2.5 mt-2">
           {items.map((it, idx) => (
-            <li key={idx} className="flex gap-2 text-[12px] leading-relaxed text-zinc-300">
-              <span className="text-zinc-600 shrink-0">•</span>
-              <span>{renderInline(it)}</span>
+            <li key={idx} className="flex items-start gap-2.5 text-sm sm:text-[15px] leading-relaxed text-zinc-200">
+              <span className="text-amber-400/80 shrink-0 font-bold select-none">•</span>
+              <span className="flex-1">{renderInline(it)}</span>
             </li>
           ))}
         </ul>
@@ -84,11 +85,11 @@ function renderMarkdown(md: string): React.ReactNode {
         i++;
       }
       blocks.push(
-        <ol key={key++} className="flex flex-col gap-1.5 mt-1.5">
+        <ol key={key++} className="flex flex-col gap-2.5 mt-2">
           {items.map((it, idx) => (
-            <li key={idx} className="flex gap-2 text-[12px] leading-relaxed text-zinc-300">
-              <span className="text-zinc-500 shrink-0 font-mono">{idx + 1}.</span>
-              <span>{renderInline(it)}</span>
+            <li key={idx} className="flex items-start gap-2.5 text-sm sm:text-[15px] leading-relaxed text-zinc-200">
+              <span className="text-zinc-400 shrink-0 font-mono font-medium select-none">{idx + 1}.</span>
+              <span className="flex-1">{renderInline(it)}</span>
             </li>
           ))}
         </ol>
@@ -109,7 +110,7 @@ function renderMarkdown(md: string): React.ReactNode {
       i++;
     }
     blocks.push(
-      <p key={key++} className="text-[12px] leading-relaxed text-zinc-300 mt-1.5">
+      <p key={key++} className="text-sm sm:text-[15px] leading-relaxed text-zinc-200 mt-2">
         {renderInline(paraLines.join(' '))}
       </p>
     );
@@ -152,37 +153,43 @@ export default function StrategyReadmeModal({ strategyKey, fallbackName, onClose
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-oncolor-dark/70 p-4 backdrop-blur-sm"
+      className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-oncolor-dark/70 p-4 sm:p-6 backdrop-blur-sm"
       onClick={onClose}
     >
       <div
-        className="my-8 w-full max-w-2xl rounded-md border border-zinc-800 bg-zinc-950 shadow-2xl"
+        className="my-6 sm:my-8 w-full max-w-4xl xl:max-w-5xl rounded-lg border border-zinc-800 bg-zinc-950 shadow-2xl"
         onClick={(e) => e.stopPropagation()}
       >
-        <div className="sticky top-0 flex items-start justify-between border-b border-zinc-800 bg-zinc-950 px-4 py-3 rounded-t-md">
-          <div className="flex items-center gap-2">
-            <BookOpen className="h-4 w-4 text-amber-400" />
+        <div className="sticky top-0 z-10 flex items-start justify-between border-b border-zinc-800 bg-zinc-950/95 px-6 py-4 rounded-t-lg backdrop-blur-sm">
+          <div className="flex items-center gap-3">
+            <div className="rounded-md bg-amber-500/10 p-2 text-amber-400 border border-amber-500/20">
+              <BookOpen className="h-5 w-5" />
+            </div>
             <div>
-              <h2 className="text-[15px] font-bold text-zinc-100">{name}</h2>
-              <p className="mt-0.5 font-mono text-[11px] text-zinc-500">
-                Strategy readme — entry, exit, target &amp; stop-loss rules
+              <h2 className="text-base sm:text-lg font-bold text-white">{name}</h2>
+              <p className="mt-0.5 font-mono text-xs text-zinc-400">
+                Strategy Documentation &amp; Execution Specification
               </p>
             </div>
           </div>
-          <button onClick={onClose} className="text-zinc-600 hover:text-zinc-300" aria-label="Close">
-            <X className="h-4 w-4" />
+          <button
+            onClick={onClose}
+            className="rounded-md p-1.5 text-zinc-400 hover:bg-zinc-800 hover:text-zinc-100 transition-colors"
+            aria-label="Close"
+          >
+            <X className="h-5 w-5" />
           </button>
         </div>
 
-        <div className="px-4 py-4">
+        <div className="px-6 py-6 sm:px-8 sm:py-7 max-h-[calc(88vh-80px)] overflow-y-auto">
           {loading ? (
-            <div className="flex items-center gap-2 text-zinc-500 text-xs font-mono py-6 justify-center">
-              <RefreshCw className="h-3.5 w-3.5 animate-spin" />
-              Loading readme…
+            <div className="flex items-center gap-2 text-zinc-400 text-sm font-mono py-12 justify-center">
+              <RefreshCw className="h-4 w-4 animate-spin text-amber-400" />
+              Loading strategy documentation…
             </div>
           ) : error ? (
-            <div className="flex items-center gap-2 text-amber-300 text-xs font-mono py-6 justify-center">
-              <AlertTriangle className="h-3.5 w-3.5" />
+            <div className="flex items-center gap-2 text-amber-300 text-sm font-mono py-12 justify-center">
+              <AlertTriangle className="h-4 w-4" />
               {error}
             </div>
           ) : (
