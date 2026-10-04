@@ -5,6 +5,7 @@ import { execSync } from 'child_process';
 import { getDhanCredentials } from '@/lib/dhanToken';
 import { DEBUG_DIR, allStateKeys, isStrategyRunning } from '@/lib/strategyRegistry';
 import { runPythonJson, PROJECT_ROOT } from '@/lib/pyExec';
+import { capCloseQty } from '@/lib/intradayCap';
 import { invalidateBrokerCache } from '@/lib/brokerPositionsCache';
 
 const DHAN_POSITIONS = 'https://api.dhan.co/v2/positions';
@@ -46,8 +47,19 @@ async function exitFnoOnly(clientId: string, token: string): Promise<{ ok: boole
       const positions: Record<string, unknown>[] = Array.isArray(posJson) ? posJson : (Array.isArray((posJson as any)?.data) ? (posJson as any).data : []);
       const openFno = positions.filter(p => Number(p.netQty ?? 0) !== 0 && isFnoSegment(p.exchangeSegment));
 
+      // Today's trades, to cap INTRADAY closes at the book's own net (see
+      // lib/intradayCap.ts). A failed fetch just disables the cap.
+      let trades: Record<string, unknown>[] | null = null;
+      try {
+        const trRes = await fetch('https://api.dhan.co/v2/trades', { headers, signal: AbortSignal.timeout(8_000) });
+        const trJson = await trRes.json().catch(() => null);
+        if (trRes.ok && Array.isArray(trJson)) trades = trJson;
+      } catch { /* no cap */ }
+
       for (const pos of openFno) {
         const netQty = Number(pos.netQty ?? 0);
+        const cap = capCloseQty(pos, trades, Math.abs(netQty));
+        if (cap.capped) console.warn(`[exit-all] ${pos.tradingSymbol ?? pos.securityId}: INTRADAY qty reduced ${Math.abs(netQty)} -> ${cap.qty} per trades`);
         const payload = {
           dhanClientId: clientId,
           transactionType: netQty > 0 ? 'SELL' : 'BUY',
@@ -56,7 +68,7 @@ async function exitFnoOnly(clientId: string, token: string): Promise<{ ok: boole
           orderType: 'MARKET',
           validity: 'DAY',
           securityId: String(pos.securityId),
-          quantity: Math.abs(netQty),
+          quantity: cap.qty,
           disclosedQuantity: 0,
           price: 0,
           afterMarketOrder: false,

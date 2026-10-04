@@ -26,6 +26,7 @@ import { useLiveTickerPoll, isStale } from '@/lib/useLiveTickerPoll';
 import MtmChart, { useMtmHistory } from './MtmChart';
 import ScalperGreeksModal from './analytics/ScalperGreeksModal';
 import AdvancedScalperOptionChainModal from './AdvancedScalperOptionChainModal';
+import { capCloseQty } from '@/lib/intradayCap';
 import AdvancedScalperAddLotsModal, { type SubmitLegOrderParams } from './AdvancedScalperAddLotsModal';
 
 // ─── Types ────────────────────────────────────────────────────────
@@ -1549,6 +1550,13 @@ export default function AdvancedScalper() {
       // close/partial already reduced. Fall back to the snapshot only if the
       // fetch fails or times out, so a slow API never blocks a stop-loss.
       let liveRows: Record<string, unknown>[] = positionsRef.current;
+      // Started now so it overlaps the positions fetch instead of adding latency.
+      const tradesPromise: Promise<Record<string, unknown>[] | null> = broker !== 'dhan'
+        ? Promise.resolve(null)
+        : fetch(scalperRoute(broker, 'trades'), { signal: AbortSignal.timeout(2500) })
+            .then(r => r.json() as Promise<{ success: boolean; data?: Record<string, unknown>[] }>)
+            .then(j => (j.success && Array.isArray(j.data) ? j.data : null))
+            .catch(() => null);
       try {
         const lr = await fetch(scalperRoute(broker, 'positions'), { signal: AbortSignal.timeout(2500) });
         const lj = await lr.json() as { success: boolean; data?: Record<string, unknown>[] };
@@ -1579,7 +1587,21 @@ export default function AdvancedScalper() {
       const side = liveNetQty > 0 ? 'SELL' : 'BUY';
       const liveAbs = Math.abs(liveNetQty);
       const reqUnits = Math.floor(Number(opts?.closeUnits ?? liveAbs));
-      const qty = Math.max(1, Math.min(liveAbs, reqUnits > 0 ? reqUnits : liveAbs));
+      let qty = Math.max(1, Math.min(liveAbs, reqUnits > 0 ? reqUnits : liveAbs));
+      // Dhan INTRADAY books can be reported with another product's quantity folded
+      // in (2026-09-25: a 260 close of a 130 INTRADAY short flipped it long). Cap at
+      // what today's trades say this book holds. Dhan only; fetch failure = no cap.
+      if (broker === 'dhan' && found.kind === 'match') {
+        const trades = await tradesPromise;
+        const cap = capCloseQty(found.row, trades, qty);
+        if (cap.capped) {
+          addToast('error', `${sym} close reduced ${qty} → ${cap.qty}`,
+            `INTRADAY book holds ${cap.qty} per today's trades; the position row over-reported it`);
+          qty = cap.qty;
+        } else if (cap.mismatch) {
+          console.warn('[AdvancedScalper] INTRADAY close: trades net', cap.tradedNet, 'vs position', liveNetQty, sym);
+        }
+      }
       const isPartial = qty < liveAbs;
 
       const orderUrl = broker === 'dhan' ? '/api/scalper/fast-order' : scalperRoute(broker, 'order');
