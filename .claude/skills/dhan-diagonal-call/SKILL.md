@@ -43,8 +43,10 @@ and `lib/diagonalStrikeAdvisor.test.ts` pin the sizing; extend both when a const
   a timed-out order is cancelled and the broker position re-read (`_confirm_fill_or_cancel`) before any retry;
   entry has backoff/halt; there are no synthetic prices; the daily loss limit latches. `tests/test_diagonal_call.py`
   (`TestDiagonalFailurePaths`, `TestDiagonalSelectionAndAdjustments`) pins each — keep them green.
-- **TS advisor not yet aligned.** `diagonalStrikeAdvisor.ts` still ranks by Theta/|Gamma|, does not filter weeklies
-  and has no gamma-budget trim; it is an advisor only, but update it if the live selection rules change again.
+- **TS advisor mirrors the live selection** (`recommendDiagonalStrikes`): closest-to-0.18Δ ranking with Theta/|Gamma| as a
+  0.02Δ tie-break, gamma-budget lot trim (75% of the floor), and `summary.warnings` for a weekly front expiry or a short that
+  would outlive the long (shown in `DiagonalStrikeAdvisorCard`). It cannot filter expiries itself — the caller picks the
+  expiry — so it warns instead. Change the Python selector and this together.
 - **Phantom-leg exit side (`43cded8`).** `detect_phantom_leg_broker(..., side=)` takes the **closing** side of
   the leg being checked: long leg -> `"SELL"`, short leg -> `"BUY"`. It was passing `"BUY"` for the long leg, so
   a missing long call was never detected. A vanished **long** with a live short = naked risk -> `exit_all`; a

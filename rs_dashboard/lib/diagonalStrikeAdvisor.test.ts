@@ -6,6 +6,7 @@ import {
   calculateRequiredShortLots,
   calculatePortfolioGreeks,
   recommendDiagonalStrikes,
+  isMonthlyExpiry,
 } from './diagonalStrikeAdvisor.ts';
 
 test('computeBsGreeks: computes accurate Call Delta, Gamma, Theta, and Vega', () => {
@@ -85,4 +86,51 @@ test('recommendDiagonalStrikes: identifies optimal strike and ranks candidates',
   assert.equal(rec.bestCandidate?.classification, 'optimal');
   assert.ok(rec.bestCandidate.delta >= 0.15 && rec.bestCandidate.delta <= 0.22);
   assert.ok(rec.bestCandidate.score > 0);
+});
+
+test('isMonthlyExpiry: last weekday of month is monthly, others are weekly', () => {
+  for (const e of ['2026-10-27', '2026-11-24', '2026-12-29']) assert.equal(isMonthlyExpiry(e), true, e);
+  for (const e of ['2026-10-13', '2026-11-03', '2026-11-10']) assert.equal(isMonthlyExpiry(e), false, e);
+});
+
+test('recommendDiagonalStrikes: ranks by closeness to 0.18 delta, not the high-delta band edge', () => {
+  const spot = 22421.95;
+  const strikes: number[] = [];
+  for (let k = 22800; k <= 24200; k += 50) strikes.push(k);
+  const rec = recommendDiagonalStrikes({
+    spot,
+    frontExpiry: '2026-11-24',
+    frontDte: 40,
+    strikes,
+    longLeg: { strike: 23000, expiry: '2026-12-29', dte: 85, lots: 3, iv: 0.14 },
+  });
+  assert.ok(rec.bestCandidate);
+  assert.ok(Math.abs(rec.bestCandidate.delta - 0.18) <= 0.035, `best delta ${rec.bestCandidate.delta}`);
+  assert.deepEqual(rec.summary.warnings, []);
+});
+
+test('recommendDiagonalStrikes: warns on weekly front expiry and short outliving the long', () => {
+  const rec = recommendDiagonalStrikes({
+    spot: 22421.95,
+    frontExpiry: '2027-01-05',
+    frontDte: 40,
+    strikes: [23200, 23300],
+    longLeg: { strike: 23000, expiry: '2026-12-29', dte: 85, lots: 3, iv: 0.14 },
+  });
+  assert.equal(rec.summary.warnings.length, 2);
+});
+
+test('recommendDiagonalStrikes: lots are trimmed so projected gamma stays inside the budget', () => {
+  const rec = recommendDiagonalStrikes({
+    spot: 22421.95,
+    frontExpiry: '2026-11-24',
+    frontDte: 40,
+    strikes: [22600, 22700, 22800],
+    longLeg: { strike: 23000, expiry: '2026-12-29', dte: 85, lots: 3, iv: 0.14 },
+    maxShortLots: 25,
+    maxShortRatio: 5,
+  });
+  for (const c of rec.candidates) {
+    assert.ok(c.recommendedLots === 1 || c.resultingNetGamma >= -0.15, `${c.strike}: ${c.recommendedLots} lots gamma ${c.resultingNetGamma}`);
+  }
 });

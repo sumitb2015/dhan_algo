@@ -225,6 +225,13 @@ export default function DiagonalStrikeAdvisorCard({
         </table>
       </div>
 
+      {advisorData.summary.warnings.length > 0 && (
+        <div className="flex items-start gap-1.5 text-[11px] text-amber-400">
+          <AlertTriangle className="h-3.5 w-3.5 shrink-0 mt-0.5" />
+          <span>{advisorData.summary.warnings.join(' ')}</span>
+        </div>
+      )}
+
       {/* Rules & Risk Guard Footer */}
       <div className="flex flex-wrap items-center justify-between gap-3 text-[11px] text-zinc-400 pt-1">
         <div className="flex items-center gap-1.5">
@@ -235,7 +242,7 @@ export default function DiagonalStrikeAdvisorCard({
         </div>
         <div className="flex items-center gap-1.5">
           <AlertTriangle className="h-3.5 w-3.5 text-amber-400 shrink-0" />
-          <span>Roll Triggers: Short Delta &ge; 0.35, DTE &le; 10, or Net Gamma &lt; -0.20</span>
+          <span>Roll Triggers: Short Delta &ge; 0.35, DTE &le; 14, or Net Gamma &lt; -0.20</span>
         </div>
       </div>
     </div>

@@ -156,7 +156,7 @@ export const STRATEGY_CATEGORIES: Record<StrategyCategory, StrategyTemplate[]> =
     // Low-Gamma Diagonal Covered Call (Delta-Controlled):
     // Buy 3x far-dated call (60-120 DTE, ~0.60 delta) for convexity & margin shield on far expiry.
     // Sell 4x medium-dated OTM call (25-45 DTE, ~0.18 delta) on front expiry to harvest steady theta decay.
-    // Dynamic delta sizing (+10 to +20 units) and Theta/|Gamma| score strike selection.
+    // Dynamic delta sizing (+10 to +20 units) closest-to-0.18Δ strike selection (Theta/|Gamma| only breaks ties), monthly expiries only.
     { key: 'low-gamma-diagonal-call', name: 'Low-Gamma Diagonal Call', dte: { front: [25, 45], far: [60, 120] }, legs: [
       { side: 'B', option: 'CE', offset: 0, ratio: 3, expiryRole: 'far' },
       { side: 'S', option: 'CE', offset: 15, ratio: 4, expiryRole: 'front' },

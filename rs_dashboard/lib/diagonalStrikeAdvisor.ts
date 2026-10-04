@@ -6,10 +6,14 @@
  * 
  * Rules:
  *  - Long leg: 60-120 DTE, ATM/ITM (Delta ~0.55 - 0.65).
- *  - Short leg: 25-45 DTE, OTM (Delta ~0.15 - 0.22), selected by maximizing Score = Theta / |Gamma|.
+ *  - Short leg: monthly expiry only, 25-45 DTE, expiring before the long, OTM (Delta ~0.15 - 0.22).
+ *    Ranked by closeness to the 0.18 target delta; Theta/|Gamma| only breaks ties within 0.02 delta
+ *    (it is ~0.5*sigma^2*S^2 for every strike, so as the primary key it always picked the highest-delta edge).
+ *    Mirrors strategies/diagonal_call/nifty_diagonal_call.py::select_short_call.
  *  - Target Net Delta: +10 to +20 units (or +30 to +45 units for 3 lots long).
  *  - Net Gamma Floor: > -0.15 (emergency halt at -0.20).
- *  - Dynamic Sizing: Sized from long delta and target net delta, clamped by max-short-ratio (1.25).
+ *  - Dynamic Sizing: Sized from long delta and target net delta, clamped by max-short-ratio (1.25),
+ *    then trimmed until projected gamma is within 75% of the emergency floor (same as Python).
  */
 
 export interface BsGreeks {
@@ -49,6 +53,18 @@ export interface CandidateStrike {
   reason: string;
 }
 
+export const SHORT_TARGET_DELTA = 0.18;
+export const GAMMA_FIT_FRACTION = 0.75;
+export const TIE_BREAK_DELTA_BAND = 0.02;
+
+/** True when the expiry is the last occurrence of its weekday in its month (the monthly series). */
+export function isMonthlyExpiry(expiry: string): boolean {
+  const d = new Date(`${expiry}T00:00:00Z`);
+  if (Number.isNaN(d.getTime())) return false;
+  const next = new Date(d.getTime() + 7 * 86400000);
+  return next.getUTCMonth() !== d.getUTCMonth();
+}
+
 export interface DiagonalAdvisorRecommendation {
   spot: number;
   lotSize: number;
@@ -66,6 +82,8 @@ export interface DiagonalAdvisorRecommendation {
     targetNetDelta: number;
     maxShortRatio: number;
     regime: string;
+    /** Rule violations in the chosen front expiry (weekly, or not before the long). Empty when clean. */
+    warnings: string[];
   };
 }
 
@@ -277,12 +295,14 @@ export function recommendDiagonalStrikes(params: {
   targetNetDelta?: number;
   maxShortRatio?: number;
   maxShortLots?: number;
+  minGammaLimit?: number;
 }): DiagonalAdvisorRecommendation {
   const spot = params.spot;
   const lotSize = params.lotSize ?? 65;
   const targetNetDelta = params.targetNetDelta ?? 13 * (params.longLeg?.lots ?? 3) / 3;
   const maxShortRatio = params.maxShortRatio ?? 1.25;
   const maxShortLots = params.maxShortLots ?? 6;
+  const minGammaLimit = params.minGammaLimit ?? -0.20;
 
   // Default long leg if none provided (ATM 90 DTE, 3 lots)
   const defaultLongStrike = Math.round(spot / 50) * 50;
@@ -313,7 +333,7 @@ export function recommendDiagonalStrikes(params: {
     if (delta < 0.05 || delta > 0.40) continue;
 
     const score = scoreShortCall(greeks.thetaDay, greeks.gamma);
-    const recommendedLots = calculateRequiredShortLots(
+    let recommendedLots = calculateRequiredShortLots(
       totalLongDeltaShares,
       targetNetDelta,
       delta,
@@ -321,6 +341,15 @@ export function recommendDiagonalStrikes(params: {
       maxShortRatio,
       maxShortLots,
     );
+    // Gamma budget: trim until projected gamma sits inside 75% of the emergency floor.
+    const gammaBudget = minGammaLimit * GAMMA_FIT_FRACTION;
+    while (
+      recommendedLots > 1 &&
+      calculatePortfolioGreeks(longLeg, { strike, dte: params.frontDte, lots: recommendedLots, iv }, spot, lotSize)
+        .portfolioGamma < gammaBudget
+    ) {
+      recommendedLots -= 1;
+    }
 
     // Simulated resulting position Greeks
     const simPort = calculatePortfolioGreeks(
@@ -335,7 +364,7 @@ export function recommendDiagonalStrikes(params: {
 
     if (delta >= 0.15 && delta <= 0.22) {
       classification = 'optimal';
-      reason = `Target 0.15-0.22Δ sweet spot. Score ${score.toFixed(0)} maximizes decay per unit gamma.`;
+      reason = `Target 0.15-0.22Δ band. Ranked by closeness to ${SHORT_TARGET_DELTA}Δ; score ${score.toFixed(0)} (theta/|gamma|) breaks ties.`;
     } else if (delta >= 0.12 && delta < 0.15) {
       classification = 'conservative';
       reason = 'Safer upside buffer, lower gamma risk, but collects less premium/theta.';
@@ -366,12 +395,30 @@ export function recommendDiagonalStrikes(params: {
     });
   }
 
-  // Sort candidates: optimal first ordered by score descending, then by delta proximity
+  // Rank like the live strategy: optimal first; within a class, closest to the target delta wins and
+  // Theta/|Gamma| only orders strikes within TIE_BREAK_DELTA_BAND of the closest one.
+  const diffOf = (c: CandidateStrike) => Math.abs(c.delta - SHORT_TARGET_DELTA);
+  const closestOptimal = Math.min(
+    ...candidates.filter((c) => c.classification === 'optimal').map(diffOf),
+    Infinity,
+  );
+  const tier = (c: CandidateStrike) =>
+    c.classification === 'optimal' && diffOf(c) <= closestOptimal + TIE_BREAK_DELTA_BAND ? 0 : 1;
   candidates.sort((a, b) => {
     if (a.classification === 'optimal' && b.classification !== 'optimal') return -1;
     if (b.classification === 'optimal' && a.classification !== 'optimal') return 1;
-    return b.score - a.score;
+    if (tier(a) !== tier(b)) return tier(a) - tier(b);
+    if (tier(a) === 0) return b.score - a.score;
+    return diffOf(a) - diffOf(b);
   });
+
+  const warnings: string[] = [];
+  if (!isMonthlyExpiry(params.frontExpiry)) {
+    warnings.push(`Front expiry ${params.frontExpiry} is a weekly; the strategy only sells monthly expiries.`);
+  }
+  if (params.frontExpiry >= longLeg.expiry) {
+    warnings.push(`Front expiry ${params.frontExpiry} is not before the long expiry ${longLeg.expiry}; the short would outlive the long.`);
+  }
 
   const bestCandidate = candidates.length > 0 ? candidates[0] : null;
 
@@ -392,6 +439,7 @@ export function recommendDiagonalStrikes(params: {
       targetNetDelta,
       maxShortRatio,
       regime: totalLongDeltaShares > 0 ? 'ACTIVE_DIAGONAL' : 'INITIAL_SETUP',
+      warnings,
     },
   };
 }
