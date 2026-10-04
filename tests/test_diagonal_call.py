@@ -233,6 +233,32 @@ class TestDiagonalCallCalculations(unittest.TestCase):
         self.assertTrue(is_free)
         self.assertTrue(strat.is_free_long_call)
 
+    def test_phantom_leg_detection_sides(self):
+        from lib.strategy_risk import detect_phantom_leg_broker
+        from unittest.mock import MagicMock
+
+        mock_broker = MagicMock()
+
+        # Case 1: Long leg is active at broker (net_qty = +195). Side to close is SELL.
+        mock_broker.get_owned_net_qty.return_value = 195
+        is_phantom = detect_phantom_leg_broker(mock_broker, 24000, "2026-10-27", "CE", 195, side="SELL")
+        self.assertFalse(is_phantom)
+
+        # Case 2: Long leg vanished at broker (net_qty = 0). Side to close is SELL.
+        mock_broker.get_owned_net_qty.return_value = 0
+        is_phantom = detect_phantom_leg_broker(mock_broker, 24000, "2026-10-27", "CE", 195, side="SELL")
+        self.assertTrue(is_phantom)
+
+        # Case 3: Short leg is active at broker (net_qty = -195). Side to close is BUY.
+        mock_broker.get_owned_net_qty.return_value = -195
+        is_phantom = detect_phantom_leg_broker(mock_broker, 24500, "2026-10-27", "CE", 195, side="BUY")
+        self.assertFalse(is_phantom)
+
+        # Case 4: Short leg vanished at broker (net_qty = 0). Side to close is BUY.
+        mock_broker.get_owned_net_qty.return_value = 0
+        is_phantom = detect_phantom_leg_broker(mock_broker, 24500, "2026-10-27", "CE", 195, side="BUY")
+        self.assertTrue(is_phantom)
+
 
 if __name__ == "__main__":
     unittest.main()

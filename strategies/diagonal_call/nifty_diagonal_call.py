@@ -1415,13 +1415,28 @@ class NiftyDiagonalCallStrategy:
                             self.long_leg["expiry"],
                             "CE",
                             self.long_leg["lots"] * self.lot_size,
-                            side="BUY",
+                            side="SELL",
                             log=logger,
                         )
                         if is_phantom:
                             logger.error("FATAL: Long call leg vanished at broker! Emergency flattening short call to prevent naked risk.")
                             self.exit_all(reason="PHANTOM_LONG_LEG_DETECTED")
                             break
+                    if self.short_leg:
+                        is_short_phantom = detect_phantom_leg_broker(
+                            self.broker,
+                            self.short_leg["strike"],
+                            self.short_leg["expiry"],
+                            "CE",
+                            self.short_leg["lots"] * self.lot_size,
+                            side="BUY",
+                            log=logger,
+                        )
+                        if is_short_phantom:
+                            logger.warning("Short call leg vanished at broker (closed elsewhere). Marking short leg flat.")
+                            self.short_leg = None
+                            self.compute_lcr()
+                            self.save_position()
 
                 # 7. Aggregate portfolio Greeks & P&L
                 greeks = calculate_portfolio_greeks(self.long_leg, self.short_leg, spot, self.lot_size)
