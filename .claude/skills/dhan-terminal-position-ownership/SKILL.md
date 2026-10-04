@@ -392,3 +392,31 @@ re-entry on SL/target) to `FocusTool.tsx` (`b04d0ce`, `66a8fe1`, `50f4bca`,
   account budget, Book Exit and spot levels that flat rows never see?
 - Do stop/target/cost levels use the row's own stamped entry, not a broker average that
   may blend in an earlier trade on the same contract?
+
+---
+
+## Scaling a Placed Strategy ("Scale +N") — Preview Equals Execution
+
+*Added 2026-10-04 (commit `de7d10d`).* Scale adds N more copies of an already-placed Multi-Leg Focus strategy:
+every OPEN leg grows by `baseRatio × N` lots, as **real market orders**. The flow is
+`ScaleStrategyModal` (preview) → `MultiLegFocus.scaleStrategy` (execute). Rules that keep it safe:
+
+- **One planner for both sides.** `planScale(basket, delta)` in `lib/multiLegFocus.ts` computes lots
+  now / adding / after per leg, `maxDelta` (50× multiplier cap) and `inStep`. The dialog previews it and
+  `scaleStrategy` executes it; never re-derive lots in either place or they will disagree.
+- **Refuse a plan the user did not see.** The dialog passes `scalePlanSignature(plan)` to the handler; the
+  handler recomputes it and aborts on mismatch (a leg stopped out or lots were edited while the dialog was open).
+- **Margin fails closed, twice.** The dialog blocks confirm on unverified margin, unreadable funds, insufficient
+  funds or the 50× cap (its estimate is current margin × lots added ÷ total lots). The handler then re-checks
+  margin live with the same rule as placement; the dialog is a preview, the handler is the authority.
+- **Synchronous re-entrancy guard.** `scalingRef` (a `Set` of basket ids) is checked and filled before any
+  `await`; `scalingMap` state alone is too late — a double click gets two scales through. Also refuse while the
+  row is placing or exiting.
+- **Only bump the `multiplier` badge when legs are `inStep`** (`lots === ratio × multiplier` for every open leg).
+  An uneven basket still scales but leaves the badge alone and says so in the toast.
+- **Partial failure reports exactly which legs filled and which failed**, per leg, and keeps the ledger to the
+  filled ones — shorts exit/enter before hedges per Invariant 6/9; do not "retry the whole scale".
+- **A leg with no valid ratio (`addLots < 1`) blocks the scale** — add lots to that leg directly.
+- Shared helpers instead of copies: `basketLabel()` (row name: the live-leg structure, e.g. a strangle plus wings
+  reads as an iron condor, else saved name, else preset key; multi-expiry baskets skip classification) and
+  `crudeQtyMultiplier()`.

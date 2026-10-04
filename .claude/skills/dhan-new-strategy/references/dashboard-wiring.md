@@ -68,6 +68,14 @@ For a new strategy:
 
 ## 6. Docs
 - `strategy.md` per family (spec template in SKILL.md).
+- **Strategy readme (Strategies+ "readme" button)** — `strategies/<group>/readmes/<key>.md`, fixed shape:
+  `## Summary`, `## Entry`, `## Exit`, `## Target`, `## Stop Loss` (commit `571b294` standardised it; no
+  essays — the long rationale stays in `strategy.md`). Register it with `readmePath('<group>', '<key>')` in
+  `rs_dashboard/lib/strategyRegistry.ts`. `app/api/strategies/readme/route.ts` falls back to the group's
+  `strategy.md` when the readme file is missing, so a new strategy never shows a broken modal.
+  `StrategyReadmeModal.tsx` renders fenced code blocks; it does **not** render LaTeX — write formulas inside a
+  fenced block (`e57acc3`). Show strategy params in both `StrategyCard.tsx` and `StrategyRowWide.tsx`
+  (they are parallel and drift — change both).
 - `GEMINI.md`: add the flag reference; project `CLAUDE.md` maps each family in one line, so extend its
   "Per-strategy trading logic" sentence when adding a family.
 

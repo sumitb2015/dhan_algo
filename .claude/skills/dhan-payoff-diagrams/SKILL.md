@@ -471,3 +471,38 @@ flag as an error).
 - Re-read the whole touched function (not just the diff hunk) when the change was described as a
   replacement — a duplicate `return`/object key is syntactically valid and silently keeps the old
   behavior while `git diff` and `tsc` both stay quiet.
+
+---
+
+## P&L-by-Date Grid (`buildHeatmapGrid`) — Time Clock, Solved IV, Closed Legs
+
+*Added 2026-10-04 (commits `09d3c96`, `de7d10d`).* The spot × date P&L table is one function,
+`buildHeatmapGrid` in `lib/optionsStrategy.ts`, rendered by `components/analytics/PnlTableTab.tsx`. It is
+shared by Option Strats, Option Strats Stock, Positions Analysis and Multi-Leg Focus's `PnlTableModal`, so a
+fix to one is a fix to all — and a regression shows up on all.
+
+- **Price time from the real expiry clock, not whole days.** Leg IVs are solved against the real time left
+  to the 15:40 IST expiry (`Date.UTC(y, m-1, d, 10, 10)`). The grid must use that same clock
+  (`liveDays`) or column 0 ("today") will not reproduce the live P&L — the old `daysToExpiry/365` overstated
+  short-premium profit on short-dated books and, on expiry day, wiped out all remaining time value. Column 0 is
+  *now*, each later column is the same clock time on a later date, and only the last column settles
+  intrinsically (`t = 0`). Mirrors `calculateTimeToExpiryYears`.
+- **Expiry day has one date but two moments.** `dates` gets a duplicate of today and `labels = ['Now',
+  'Expiry']` overrides the header (`grid.labels?.[i] ?? fmtExpiryShort(d)`). Never key the `<th>`/cells on the
+  date string — it repeats; key on the index.
+- **`fixedPnl` is a spot- and date-independent constant added to every cell** — the realised P&L of legs already
+  closed. Without it a strategy that booked a leg shows a table that disagrees with the header P&L.
+  Multi-Leg Focus passes the closed legs' booked P&L; do not also fold closed legs into `legs`.
+- **Solve IV from the live premium; chain IV is the fallback only.** `PnlTableModal` and the Position Map
+  Greeks invert the grid's own Black-Scholes against the live leg price. Dhan's chain IV mis-prices the grid
+  (calls read low, puts high), so a table built on chain IV disagrees with the live P&L before any spot move.
+  Use `legsMissingIv()` to find legs that still need a fallback, and **refuse to build the grid without a live
+  spot** rather than defaulting one.
+- **Position Map pricing** (`components/multiLegFocus/PositionVisualizer*.tsx`, page
+  `/multi-leg-focus/visualization`): leg prices come from live ticks, then the REST option chain — **never the
+  entry price**. An unpriced leg renders `-`, not a fake 0 or a flat P&L. The combined view is per-expiry.
+  `crudeQtyMultiplier()` (CRUDEOIL ×100, CRUDEOILM ×10, else 1) is the single source for ledger-qty → P&L
+  scaling; do not re-derive it per component.
+- **Checks after touching the grid:** (1) the first column at the live spot equals the live P&L within
+  rounding; (2) on expiry day the `Expiry` column equals intrinsic payoff; (3) a book with a closed leg shows
+  the same total as the header; (4) the `large` prop (wide `FocusModal`) still scrolls at `90vh-14rem`.
