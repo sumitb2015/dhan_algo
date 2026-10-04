@@ -31,6 +31,10 @@ export function StraddlePanel({
   onUnderlyingChange,
   onTradeOptions,
   openBaskets,
+  atmOffset,
+  onAtmOffsetChange,
+  fixedExpiry,
+  fixedInterval,
 }: {
   underlying: ChartUnderlying;
   onUnderlyingChange: (u: ChartUnderlying) => void;
@@ -39,8 +43,16 @@ export function StraddlePanel({
    *  live quantity at the strike on screen so the Day P&L chip can show real rupees instead of
    *  raw premium points - never to size or originate an order. */
   openBaskets?: LedgerBasket[];
+  /** ATM-offset mode (Triple Straddle page): the strike tracks `ATM + atmOffset` points instead
+   *  of being an absolute pick. `undefined` keeps the classic absolute-strike selector. */
+  atmOffset?: number;
+  /** Present only on panels whose offset the user may change; omitted = fixed offset label. */
+  onAtmOffsetChange?: (offset: number) => void;
+  /** Page owns expiry/interval so every panel on it stays in sync; hides the panel's own. */
+  fixedExpiry?: string;
+  fixedInterval?: string;
 }) {
-  const [interval_, setInterval_] = useState('1');
+  const [intervalState, setInterval_] = useState('1');
   const [expiry, setExpiry] = useState('');
   const [expiries, setExpiries] = useState<string[]>([]);
   const [strikesData, setStrikesData] = useState<StraddleStrikesResponse | null>(null);
@@ -52,6 +64,7 @@ export function StraddlePanel({
   const [marketLive, setMarketLive] = useState(false);
   const [chart, setChart] = useState<StraddleChartResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const interval_ = fixedInterval ?? intervalState;
   const [loadedKey, setLoadedKey] = useState('');
 
   useEffect(() => {
@@ -62,12 +75,13 @@ export function StraddlePanel({
   }, [underlying]);
 
   useEffect(() => {
+    if (fixedExpiry !== undefined) return;
     optionsChartApi.expiries(underlying).then((r) => setExpiries(r.expiries)).catch(() => {});
-  }, [underlying]);
+  }, [underlying, fixedExpiry]);
 
   // Derived, not synced via setState-in-effect: falls back to the first fetched expiry until
   // the user picks one explicitly.
-  const effectiveExpiry = expiry || expiries[0] || '';
+  const effectiveExpiry = fixedExpiry ?? (expiry || expiries[0] || '');
 
   useEffect(() => {
     if (!effectiveExpiry) return;
@@ -96,14 +110,39 @@ export function StraddlePanel({
 
   // Falls back to ATM whenever the user hasn't picked a strike, or their prior pick fell off
   // the chain after an expiry swap - derived each render instead of synced via an effect.
+  const strikeGap = useMemo(() => {
+    const xs = (strikesData?.strikes ?? []).map((s) => s.strike).sort((a, b) => a - b);
+    let gap = Infinity;
+    for (let i = 1; i < xs.length; i++) gap = Math.min(gap, xs[i] - xs[i - 1]);
+    return Number.isFinite(gap) && gap > 0 ? gap : null;
+  }, [strikesData]);
+
   const effectiveStrike = useMemo(() => {
+    if (atmOffset !== undefined) {
+      // Offset mode: nearest listed strike to ATM + offset, re-derived as ATM moves.
+      if (atmStrike === null || !strikesData) return null;
+      const target = atmStrike + atmOffset;
+      let best: number | null = null;
+      for (const s of strikesData.strikes) {
+        if (best === null || Math.abs(s.strike - target) < Math.abs(best - target)) best = s.strike;
+      }
+      return best;
+    }
     if (
       strike !== null &&
       (!strikesData || strikesData.strikes.some((s) => s.strike === strike))
     )
       return strike;
     return atmStrike;
-  }, [strike, strikesData, atmStrike]);
+  }, [strike, strikesData, atmStrike, atmOffset]);
+
+  const offsetChoices = useMemo(() => {
+    const gap = strikeGap ?? 50;
+    const out: number[] = [];
+    for (let i = -6; i <= 6; i++) out.push(i * gap);
+    if (atmOffset !== undefined && !out.includes(atmOffset)) out.push(atmOffset);
+    return out.sort((a, b) => a - b);
+  }, [strikeGap, atmOffset]);
 
   // Identity of the contract on screen. `loading` is derived from it rather than toggled in
   // the poll loop, so the status pill only spins until the first response for a NEW selection
@@ -195,51 +234,81 @@ export function StraddlePanel({
         <div className="lc-toolbar-group">
           <span className="lc-group-label">SYMBOL</span>
           <div className="lc-group-row">
-            <select
-              value={underlying}
-              onChange={(e) => onUnderlyingChange(e.target.value as ChartUnderlying)}
-              className="lc-select lc-select--accent"
-            >
-              {CHART_UNDERLYINGS.map((u) => (
-                <option key={u} value={u}>
-                  {u}
-                </option>
-              ))}
-            </select>
-            <select
-              value={effectiveExpiry}
-              onChange={(e) => setExpiry(e.target.value)}
-              className="lc-select"
-            >
-              {expiries.map((e) => (
-                <option key={e} value={e}>
-                  {e}
-                </option>
-              ))}
-            </select>
-            <select
-              value={effectiveStrike ?? ''}
-              onChange={(e) => setStrike(Number(e.target.value))}
-              className="lc-select lc-select--mono"
-            >
-              {(strikesData?.strikes ?? []).map((s) => (
-                <option key={s.strike} value={s.strike}>
-                  {s.strike}
-                  {s.is_atm ? ' ◉' : ''}
-                </option>
-              ))}
-            </select>
-            <select
-              value={interval_}
-              onChange={(e) => setInterval_(e.target.value)}
-              className="lc-select lc-select--narrow"
-            >
-              {VALID_INTERVALS.map((i) => (
-                <option key={i} value={i}>
-                  {i}m
-                </option>
-              ))}
-            </select>
+            {fixedExpiry === undefined && (
+              <>
+                <select
+                  value={underlying}
+                  onChange={(e) => onUnderlyingChange(e.target.value as ChartUnderlying)}
+                  className="lc-select lc-select--accent"
+                >
+                  {CHART_UNDERLYINGS.map((u) => (
+                    <option key={u} value={u}>
+                      {u}
+                    </option>
+                  ))}
+                </select>
+                <select
+                  value={effectiveExpiry}
+                  onChange={(e) => setExpiry(e.target.value)}
+                  className="lc-select"
+                >
+                  {expiries.map((e) => (
+                    <option key={e} value={e}>
+                      {e}
+                    </option>
+                  ))}
+                </select>
+              </>
+            )}
+            {atmOffset !== undefined ? (
+              <>
+                {onAtmOffsetChange ? (
+                  <select
+                    value={atmOffset}
+                    onChange={(e) => onAtmOffsetChange(Number(e.target.value))}
+                    className="lc-select lc-select--mono"
+                    aria-label="Strike offset from ATM"
+                  >
+                    {offsetChoices.map((o) => (
+                      <option key={o} value={o}>
+                        {o === 0 ? 'ATM' : `ATM${o > 0 ? '+' : '−'}${Math.abs(o)}`}
+                      </option>
+                    ))}
+                  </select>
+                ) : (
+                  <span className="lc-select lc-select--mono">ATM</span>
+                )}
+                <span className="lc-select lc-select--mono" title="Strike on screen">
+                  {effectiveStrike ?? '—'}
+                </span>
+              </>
+            ) : (
+              <select
+                value={effectiveStrike ?? ''}
+                onChange={(e) => setStrike(Number(e.target.value))}
+                className="lc-select lc-select--mono"
+              >
+                {(strikesData?.strikes ?? []).map((s) => (
+                  <option key={s.strike} value={s.strike}>
+                    {s.strike}
+                    {s.is_atm ? ' ◉' : ''}
+                  </option>
+                ))}
+              </select>
+            )}
+            {fixedInterval === undefined && (
+              <select
+                value={interval_}
+                onChange={(e) => setInterval_(e.target.value)}
+                className="lc-select lc-select--narrow"
+              >
+                {VALID_INTERVALS.map((i) => (
+                  <option key={i} value={i}>
+                    {i}m
+                  </option>
+                ))}
+              </select>
+            )}
           </div>
         </div>
 
@@ -269,14 +338,17 @@ export function StraddlePanel({
                 {t.label}
               </button>
             ))}
-            <button
-              type="button"
-              onClick={() => setShowSpot((v) => !v)}
-              title={`Overlay ${underlying} ${spotLabel(underlying).toLowerCase()} as a dashed line on its own left-hand axis`}
-              className={`lc-view-btn${showSpot ? ' lc-view-btn--active' : ''}`}
-            >
-              {spotLabel(underlying)}
-            </button>
+            {/* The spot overlay toggle is dropped in ATM-offset mode (Triple Straddle) */}
+            {atmOffset === undefined && (
+              <button
+                type="button"
+                onClick={() => setShowSpot((v) => !v)}
+                title={`Overlay ${underlying} ${spotLabel(underlying).toLowerCase()} as a dashed line on its own left-hand axis`}
+                className={`lc-view-btn${showSpot ? ' lc-view-btn--active' : ''}`}
+              >
+                {spotLabel(underlying)}
+              </button>
+            )}
             {onTradeOptions && effectiveStrike !== null && effectiveExpiry && (
               <button
                 type="button"

@@ -26,6 +26,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import pickle
 import sys
 import time
 from datetime import datetime, timedelta
@@ -165,14 +166,32 @@ def _is_mcx(underlying: str) -> bool:
 # --- Option chain (cached per underlying+expiry, mirrors straddle_data.get_chain_df) ---
 
 
-def get_chain_df(helper: DhanHelper, underlying: str, expiry: str) -> tuple[pd.DataFrame, float]:
-    cache_key = f"{underlying.upper()}|{expiry}"
-    cached = _option_chain_cache.get(cache_key)
-    if cached is not None and (time.time() - cached["fetched_at"]) < _CHAIN_CACHE_TTL_SECONDS:
-        return cached["df"], cached["spot"]
+_CHAIN_DISK_TTL_SECONDS = 8.0
+_CHAIN_LOCK_STALE_SECONDS = 30.0
+_CHAIN_LOCK_WAIT_SECONDS = 25.0
+_CHAIN_CACHE_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "debug", "option_chain_cache")
 
+
+def _chain_disk_paths(cache_key: str) -> tuple[str, str]:
+    safe = "".join(c if c.isalnum() else "_" for c in cache_key)
+    base = os.path.join(_CHAIN_CACHE_DIR, safe)
+    return base + ".pkl", base + ".lock"
+
+
+def _read_chain_disk(pkl_path: str):
+    """Fresh cross-process cache entry, or None. Never raises - a torn/corrupt file is a miss."""
+    try:
+        if time.time() - os.path.getmtime(pkl_path) >= _CHAIN_DISK_TTL_SECONDS:
+            return None
+        with open(pkl_path, "rb") as fh:
+            entry = pickle.load(fh)
+        return entry if isinstance(entry, dict) and not entry["df"].empty else None
+    except Exception:
+        return None
+
+
+def _fetch_chain_remote(helper: DhanHelper, underlying: str, expiry: str) -> tuple[pd.DataFrame, float]:
     chain_symbol, chain_seg = _chain_target(helper, underlying)
-
     df = None
     for backoff in (0, 3.5, 5.0):
         if backoff:
@@ -180,15 +199,88 @@ def get_chain_df(helper: DhanHelper, underlying: str, expiry: str) -> tuple[pd.D
         df = helper.get_option_chain_df(chain_symbol, expiry, exchange_segment=chain_seg)
         if not df.empty:
             break
-
     if df is None or df.empty:
-        if cached is not None:
-            return cached["df"], cached["spot"]
         return pd.DataFrame(), 0.0
+    return df, float(df.attrs.get("underlying_ltp", 0) or 0.0)
 
-    spot = float(df.attrs.get("underlying_ltp", 0) or 0.0)
-    _option_chain_cache[cache_key] = {"df": df, "spot": spot, "fetched_at": time.time()}
-    return df, spot
+
+def get_chain_df(helper: DhanHelper, underlying: str, expiry: str) -> tuple[pd.DataFrame, float]:
+    """Option chain for underlying+expiry.
+
+    The dashboard spawns one process per chart request, and Dhan's option-chain endpoint allows
+    one call per ~3s. Several charts on one page (Triple Straddle) therefore raced: the losers got
+    an empty chain and surfaced it as a bogus "Strike N not found". So the chain is cached on disk
+    and fetched under a cross-process O_EXCL lock - the first process fetches, the rest wait and
+    read its result.
+    """
+    cache_key = f"{underlying.upper()}|{expiry}"
+    cached = _option_chain_cache.get(cache_key)
+    if cached is not None and (time.time() - cached["fetched_at"]) < _CHAIN_CACHE_TTL_SECONDS:
+        return cached["df"], cached["spot"]
+
+    pkl_path, lock_path = _chain_disk_paths(cache_key)
+    try:
+        os.makedirs(_CHAIN_CACHE_DIR, exist_ok=True)
+    except OSError:
+        pkl_path = lock_path = ""
+
+    def remember(df: pd.DataFrame, spot: float) -> tuple[pd.DataFrame, float]:
+        _option_chain_cache[cache_key] = {"df": df, "spot": spot, "fetched_at": time.time()}
+        return df, spot
+
+    hit = _read_chain_disk(pkl_path) if pkl_path else None
+    if hit is not None:
+        return remember(hit["df"], hit["spot"])
+
+    have_lock = False
+    if lock_path:
+        deadline = time.time() + _CHAIN_LOCK_WAIT_SECONDS
+        while True:
+            try:
+                os.close(os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY))
+                have_lock = True
+                break
+            except FileExistsError:
+                try:
+                    if time.time() - os.path.getmtime(lock_path) > _CHAIN_LOCK_STALE_SECONDS:
+                        os.remove(lock_path)
+                        continue
+                except OSError:
+                    pass
+            except OSError:
+                break
+            hit = _read_chain_disk(pkl_path)
+            if hit is not None:
+                return remember(hit["df"], hit["spot"])
+            if time.time() > deadline:
+                break
+            time.sleep(0.25)
+
+    try:
+        if have_lock:
+            hit = _read_chain_disk(pkl_path)
+            if hit is not None:
+                return remember(hit["df"], hit["spot"])
+        df, spot = _fetch_chain_remote(helper, underlying, expiry)
+        if df.empty:
+            if cached is not None:
+                return cached["df"], cached["spot"]
+            return pd.DataFrame(), 0.0
+        if have_lock:
+            try:
+                tmp = pkl_path + f".{os.getpid()}.tmp"
+                with open(tmp, "wb") as fh:
+                    pickle.dump({"df": df, "spot": spot}, fh)
+                os.replace(tmp, pkl_path)
+            except OSError:
+                pass
+        return remember(df, spot)
+    finally:
+        if have_lock:
+            try:
+                os.remove(lock_path)
+            except OSError:
+                pass
 
 
 def _has_leg_ids(row) -> bool:
@@ -232,7 +324,76 @@ def _calendar_days_for(days: int) -> int:
 # --- Intraday fetch (paced by DhanHelper's own 429 backoff — no extra pacing needed here) ---
 
 
-_last_intraday_call = 0.0
+# Cross-process pacing for intraday_minute_data. One process per chart request means the old
+# per-process "0.35s since MY last call" gate let N concurrent charts burst N x 3 calls/s into
+# Dhan's data-API limit (DH-904 on every Triple Straddle load). Slots are booked in a shared file
+# instead, same O_EXCL-lock pattern as lib/dhan_quote_lane.py (a separate file: the quote bucket
+# is a different limit with a 1.1s gap and must not be slowed by chart traffic).
+_INTRADAY_LANE_FILE = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "debug", "option_chart_intraday_lane.json")
+_INTRADAY_BASE_GAP = 0.35
+_INTRADAY_MAX_GAP = 5.0
+
+
+def _intraday_lane(update) -> float:
+    """Run update(state) under the lane lock; returns its result. Any failure -> plain 0.35s."""
+    lock = _INTRADAY_LANE_FILE + ".lock"
+    try:
+        os.makedirs(os.path.dirname(lock), exist_ok=True)
+        deadline = time.monotonic() + 2.0
+        while True:
+            try:
+                os.close(os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY))
+                break
+            except FileExistsError:
+                try:
+                    if time.time() - os.path.getmtime(lock) > 3.0:
+                        os.remove(lock)
+                        continue
+                except OSError:
+                    pass
+                if time.monotonic() > deadline:
+                    return _INTRADAY_BASE_GAP
+                time.sleep(0.02)
+        try:
+            try:
+                with open(_INTRADAY_LANE_FILE, "r", encoding="utf-8") as fh:
+                    st = json.load(fh)
+                st = {"next_at": float(st.get("next_at", 0)), "gap": float(st.get("gap", _INTRADAY_BASE_GAP))}
+            except (OSError, ValueError, TypeError, AttributeError):
+                st = {"next_at": 0.0, "gap": _INTRADAY_BASE_GAP}
+            out = update(st)
+            tmp = f"{_INTRADAY_LANE_FILE}.{os.getpid()}.tmp"
+            with open(tmp, "w", encoding="utf-8") as fh:
+                json.dump(st, fh)
+            os.replace(tmp, _INTRADAY_LANE_FILE)
+            return out
+        finally:
+            try:
+                os.remove(lock)
+            except OSError:
+                pass
+    except OSError:
+        return _INTRADAY_BASE_GAP
+
+
+def _reserve_intraday_slot() -> float:
+    def book(st):
+        now = time.time()
+        slot = max(now, st["next_at"])
+        st["next_at"] = slot + max(_INTRADAY_BASE_GAP, st["gap"])
+        return slot - now
+    return _intraday_lane(book)
+
+
+def _report_intraday(rate_limited: bool) -> None:
+    def feed(st):
+        if rate_limited:
+            st["gap"] = min(_INTRADAY_MAX_GAP, max(_INTRADAY_BASE_GAP, st["gap"]) * 2)
+            st["next_at"] = max(st["next_at"], time.time() + st["gap"])
+        else:
+            st["gap"] = max(_INTRADAY_BASE_GAP, st["gap"] * 0.7)
+        return 0.0
+    _intraday_lane(feed)
 
 
 def _fetch_intraday(helper: DhanHelper, security_id, exchange_segment: str, instrument_type: str, to_dt: datetime, calendar_days: int) -> pd.DataFrame:
@@ -247,13 +408,7 @@ def _fetch_intraday(helper: DhanHelper, security_id, exchange_segment: str, inst
     # complete with zero DH-904s, while <0.1s apart reliably trips it after ~5 calls. 0.35s
     # keeps a safety margin over the observed floor without the ~3x latency hit an earlier,
     # over-cautious 1.2s gate cost every leg fetch.
-    global _last_intraday_call
-    elapsed = time.time() - _last_intraday_call
-    if elapsed < 0.35:
-        time.sleep(0.35 - elapsed)
-    _last_intraday_call = time.time()
-
-    df = helper.get_intraday_minute_data(
+    kwargs = dict(
         security_id=security_id,
         exchange_segment=exchange_segment,
         instrument_type=instrument_type,
@@ -261,17 +416,16 @@ def _fetch_intraday(helper: DhanHelper, security_id, exchange_segment: str, inst
         from_date=from_dt.strftime("%Y-%m-%d"),
         to_date=to_dt.strftime("%Y-%m-%d"),
     )
-    if df.empty and helper.last_api_error and "904" in str(helper.last_api_error.get("code", "")) + str(helper.last_api_error.get("message", "")):
-        time.sleep(1.0)
-        _last_intraday_call = time.time()
-        df = helper.get_intraday_minute_data(
-            security_id=security_id,
-            exchange_segment=exchange_segment,
-            instrument_type=instrument_type,
-            interval="1",
-            from_date=from_dt.strftime("%Y-%m-%d"),
-            to_date=to_dt.strftime("%Y-%m-%d"),
-        )
+    # Up to 3 retries on DH-904, each one re-booking a slot in the shared lane (whose gap the
+    # 904 just doubled) so every concurrent chart process backs off together.
+    for attempt in range(4):
+        time.sleep(_reserve_intraday_slot())
+        df = helper.get_intraday_minute_data(**kwargs)
+        err = helper.last_api_error
+        limited = df.empty and err and "904" in str(err.get("code", "")) + str(err.get("message", ""))
+        _report_intraday(bool(limited))
+        if not limited:
+            break
     if df.empty or "timestamp" not in df.columns:
         return pd.DataFrame(columns=["time", "open", "high", "low", "close", "volume"])
     out = pd.DataFrame(
@@ -495,8 +649,14 @@ def _fetch_leg_intraday(helper: DhanHelper, underlying: str, security_id, to_dt:
     return _fetch_intraday(helper, security_id, seg, itype, to_dt, calendar_days)
 
 
+def _require_strikes(strikes_info: dict, underlying: str, expiry: str) -> None:
+    if not strikes_info["strikes"]:
+        raise ValueError(f"Option chain unavailable for {underlying} expiry {expiry} (rate-limited or empty) - retrying on next refresh.")
+
+
 def get_straddle_chart(helper: DhanHelper, underlying: str, expiry: str, strike: float, interval: str = "1", indicators: list[dict] | None = None, days: int = 2, include_spot: bool = False) -> dict:
     strikes_info = list_strikes(helper, underlying, expiry)
+    _require_strikes(strikes_info, underlying, expiry)
     match = next((s for s in strikes_info["strikes"] if s["strike"] == strike), None)
     if match is None:
         raise ValueError(f"Strike {strike} not found for {underlying} expiry {expiry}.")
@@ -758,6 +918,7 @@ def get_strangle_chart(helper: DhanHelper, underlying: str, expiry: str, ce_stri
     _validate_lots("pe_lots", pe_lots)
 
     strikes_info = list_strikes(helper, underlying, expiry)
+    _require_strikes(strikes_info, underlying, expiry)
     ce_match = next((s for s in strikes_info["strikes"] if s["strike"] == ce_strike), None)
     if ce_match is None:
         raise ValueError(f"CE strike {ce_strike} not found for {underlying} expiry {expiry}.")
@@ -830,6 +991,7 @@ def get_strategy_chart(helper: DhanHelper, underlying: str, expiry: str, legs: l
         _validate_leg(i, leg)
 
     strikes_info = list_strikes(helper, underlying, expiry)
+    _require_strikes(strikes_info, underlying, expiry)
 
     def resolve_security_id(strike: float, option_type: str) -> str:
         match = next((s for s in strikes_info["strikes"] if s["strike"] == strike), None)

@@ -83,6 +83,7 @@ const NAV_GROUPS = [
       { href: '/options/volatility-surface', label: '3D Volatility Surface', desc: 'Interactive 3D implied volatility surface across strikes and expiries — smile, skew and calendar term structure' },
       { href: '/options/premium-bar', label: 'Premium Bar Chart', desc: 'CE vs PE premium bar charts & straddle curve across strikes' },
       { href: '/options/live-charts', label: 'Live Options Charts', desc: 'Live straddle, rolling straddle, strangle & custom strategy premium charts' },
+      { href: '/options/triple-straddle', label: 'Triple Straddle', desc: 'ATM, ATM-offset low and high straddle charts side by side' },
       { href: '/straddle-analysis', label: 'Straddle Analysis', desc: 'ATM straddle premium patterns by weekday, DTE & regime' },
       { href: '/strangle-analysis', label: 'Strangle Analysis', desc: 'OTM strangle premium patterns by offset, weekday, DTE & regime' },
       { href: '/straddle-matrix', label: 'ATM Straddle Matrix', desc: 'Live ATM short straddle entry stats across timestamps & leg-wise SL%' },

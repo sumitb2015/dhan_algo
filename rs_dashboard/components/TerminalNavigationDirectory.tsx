@@ -189,6 +189,11 @@ export const TERMINAL_PILLARS: TerminalPillarGroup[] = [
         desc: 'Lightweight candlestick charts with real-time Open Interest overlays',
       },
       {
+        name: 'Triple Straddle',
+        href: '/options/triple-straddle',
+        desc: 'ATM straddle plus selectable lower/higher offset straddles in parallel',
+      },
+      {
         name: 'Implied Volatility (IV) Surface',
         href: '/iv-charts',
         desc: 'Historical IV percentiles, IV rank, and volatility smile comparison',

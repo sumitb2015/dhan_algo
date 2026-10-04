@@ -40,6 +40,7 @@ agent.md
 REORGANIZATION_SUMMARY.md
 
 # Runtime debug artifacts
+debug/option_chain_cache/
 debug/*.txt
 debug/*.pid
 debug/*.json
