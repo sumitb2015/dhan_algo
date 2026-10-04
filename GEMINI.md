@@ -178,6 +178,7 @@ Full CLI references, parameter explanations, and examples live in each strategy 
 | `strategies/intraday_equity/` | [`strategy.md`](strategies/intraday_equity/strategy.md) — Nifty-50 cash VWAP+RS auto-trader (NOT VALIDATED, dry-run only) |
 | `strategies/momentum_investing/` | [`strategy.md`](strategies/momentum_investing/strategy.md) — Nifty-500 positional (CNC) relative-strength momentum portfolio |
 | `strategies/adaptive_strangle/` | [`strategy.md`](strategies/adaptive_strangle/strategy.md) — Bi-weekly far-OTM strangle with conditional Delta/Vega hedging & directional conversion |
+| `strategies/diagonal_call/` | [`strategy.md`](strategies/diagonal_call/strategy.md) — Delta-controlled, low-gamma diagonal covered call (60-120 DTE long CE + 25-45 DTE short CE) |
 
 ### Quick-start
 
@@ -239,6 +240,20 @@ python strategies/adaptive_strangle/nifty_adaptive_strangle.py [--live]
     [--target-profit INR|%] [--stop-loss INR|%] [--trail-start-rs INR] [--trail-gap-rs INR]
     [--entry-time HH:MM] [--entry-end HH:MM] [--eod-exit-time HH:MM]
     [--product {MARGIN,INTRADAY}] [--instance-id ID] [--broker {dhan,zerodha,kotak}]
+```
+
+**Nifty Low-Gamma Diagonal Covered Call** (`strategies/diagonal_call/nifty_diagonal_call.py`, dry-run default; `--live` places real orders). Long-dated calls (60–120 DTE, 0.55–0.65 delta) provide convexity + vega. Medium-dated calls (25–45 DTE, 0.15–0.22 delta) provide theta. Sized dynamically from delta; short options selected by maximizing `Score = Theta / |Gamma|`. Normal delta zone: 0 to +20; defensive: < -40; gamma target: > -0.15; emergency halt: < -0.20. Product `MARGIN`. Full flag list and defaults in `strategies/diagonal_call/strategy.md`.
+
+```
+python strategies/diagonal_call/nifty_diagonal_call.py [--live]
+    [--long-lots N] [--target-net-delta UNITS] [--long-target-delta D]
+    [--long-min-dte DAYS] [--long-max-dte DAYS] [--long-roll-dte DAYS]
+    [--short-target-delta D] [--short-min-dte DAYS] [--short-max-dte DAYS]
+    [--short-roll-dte DAYS] [--short-roll-delta D] [--short-profit-pct PCT]
+    [--capital INR] [--daily-loss-pct PCT] [--drawdown-halve-pct PCT] [--drawdown-exit-pct PCT]
+    [--target-profit INR|%] [--stop-loss INR|%] [--start-time HH:MM]
+    [--rebalance-times "10:00,12:00,14:00"] [--max-short-ratio RATIO] [--min-gamma-limit G]
+    [--instance-id ID] [--broker {dhan,zerodha,kotak}]
 ```
 
 See the per-folder `strategy.md` files linked in the table above. Each file contains full CLI flag tables, parameter tuning guidance, dry-run and live examples, and worked trade scenarios.

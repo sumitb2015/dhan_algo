@@ -326,6 +326,15 @@ function StrategyRowWide({ meta, state, onRefresh, instanceId, onAddInstance, on
   const [asEodExitTime, setAsEodExitTime] = useState('15:15');
   const [asProduct, setAsProduct] = useState<'MARGIN' | 'INTRADAY'>('MARGIN');
 
+  // Nifty Low-Gamma Diagonal Covered Call
+  const [dcTargetProfit, setDcTargetProfit] = useState('10%');
+  const [dcStopLoss, setDcStopLoss] = useState('8%');
+  const [dcTargetNetDelta, setDcTargetNetDelta] = useState(13.0);
+  const [dcLongTargetDelta, setDcLongTargetDelta] = useState(0.60);
+  const [dcShortTargetDelta, setDcShortTargetDelta] = useState(0.18);
+  const [dcShortProfitPct, setDcShortProfitPct] = useState(65.0);
+  const [dcCapital, setDcCapital] = useState(500000);
+
   const spreadTrendNoIndicators = meta.key === 'nifty_spread_trend' && !useEma && !useSupertrend;
 
   // reentry_straddle rejects a non-default --max-lots (it never scales lots), so the flag is
@@ -420,6 +429,10 @@ function StrategyRowWide({ meta, state, onRefresh, instanceId, onAddInstance, on
         args.push('--lots', String(lots));
         args.push('--target-profit', asTargetProfit.trim());
         args.push('--stop-loss', asStopLoss.trim());
+      } else if (meta.key === 'nifty_diagonal_call') {
+        args.push('--long-lots', String(lots));
+        args.push('--target-profit', dcTargetProfit.trim() || '10%');
+        args.push('--stop-loss', dcStopLoss.trim() || '8%');
       } else {
         args.push('--lots', String(lots));
         args.push('--target-profit', profitTarget.trim());
@@ -647,6 +660,12 @@ function StrategyRowWide({ meta, state, onRefresh, instanceId, onAddInstance, on
         args.push('--entry-end', asEntryEnd);
         args.push('--eod-exit-time', asEodExitTime);
         args.push('--product', asProduct);
+      } else if (meta.key === 'nifty_diagonal_call') {
+        args.push('--target-net-delta', String(dcTargetNetDelta));
+        args.push('--long-target-delta', String(dcLongTargetDelta));
+        args.push('--short-target-delta', String(dcShortTargetDelta));
+        args.push('--short-profit-pct', String(dcShortProfitPct));
+        args.push('--capital', String(dcCapital));
       }
 
       const payload: any = { action: 'start', strategy: meta.key, args, instanceId };
@@ -725,6 +744,11 @@ function StrategyRowWide({ meta, state, onRefresh, instanceId, onAddInstance, on
 
   const getStrategyProfile = (metaKey: string): { summary: string; tags: string[] } => {
     switch (metaKey) {
+      case 'nifty_diagonal_call':
+        return {
+          summary: '60–120 DTE long call (0.55–0.65Δ) + 25–45 DTE short call (0.15–0.22Δ) · Dynamic delta-sized lots · Maximize Theta/|Gamma|',
+          tags: ['Long Convexity', 'Low Gamma', 'Theta / |Gamma|', 'Positional'],
+        };
       case 'nifty_adaptive_strangle':
         return {
           summary: 'Bi-Weekly ~0.10Δ far-OTM strangle · Greek-gated wings (0.22Δ / 20% Vega) · Directional trend conversion',
@@ -1782,7 +1806,7 @@ function StrategyRowWide({ meta, state, onRefresh, instanceId, onAddInstance, on
           </>
         )}
 
-        {meta.key !== 'nifty_spread_trend' && meta.key !== 'crudeoilm_supertrend' && meta.key !== 'crudeoilm_renko_sar' && meta.key !== 'crudeoilm_vwap_supertrend' && meta.key !== 'crudeoilm_ema_supertrend' && meta.key !== 'nifty_st_oi_bearcall' && meta.key !== 'nifty500_momentum' && meta.key !== 'nifty_delta_strangle' && meta.key !== 'nifty_flyagonal' && meta.key !== 'nifty_volcano_calendar' && meta.key !== 'nifty_put_condor' && meta.key !== 'nifty_condor_ratio' && meta.key !== 'nifty_adaptive_strangle' && (
+        {meta.key !== 'nifty_spread_trend' && meta.key !== 'crudeoilm_supertrend' && meta.key !== 'crudeoilm_renko_sar' && meta.key !== 'crudeoilm_vwap_supertrend' && meta.key !== 'crudeoilm_ema_supertrend' && meta.key !== 'nifty_st_oi_bearcall' && meta.key !== 'nifty500_momentum' && meta.key !== 'nifty_delta_strangle' && meta.key !== 'nifty_flyagonal' && meta.key !== 'nifty_volcano_calendar' && meta.key !== 'nifty_put_condor' && meta.key !== 'nifty_condor_ratio' && meta.key !== 'nifty_adaptive_strangle' && meta.key !== 'nifty_diagonal_call' && (
           <div className={fieldCls}>
             <FieldLabel text="Start Time" tip="Time (HH:MM IST) the strategy begins monitoring for entries." />
             <Input type="text" value={startTime} onChange={e => setStartTime(e.target.value)} placeholder="09:20" className={inputCls} style={{ width: 72 }} />
@@ -1831,7 +1855,7 @@ function StrategyRowWide({ meta, state, onRefresh, instanceId, onAddInstance, on
           </>
         )}
 
-        {meta.key !== 'crudeoilm_renko_sar' && meta.key !== 'crudeoilm_supertrend' && meta.key !== 'crudeoilm_vwap_supertrend' && meta.key !== 'crudeoilm_ema_supertrend' && meta.key !== 'nifty500_momentum' && meta.key !== 'nifty_delta_strangle' && meta.key !== 'nifty_flyagonal' && meta.key !== 'nifty_condor_ratio' && meta.key !== 'nifty_adaptive_strangle' && (
+        {meta.key !== 'crudeoilm_renko_sar' && meta.key !== 'crudeoilm_supertrend' && meta.key !== 'crudeoilm_vwap_supertrend' && meta.key !== 'crudeoilm_ema_supertrend' && meta.key !== 'nifty500_momentum' && meta.key !== 'nifty_delta_strangle' && meta.key !== 'nifty_flyagonal' && meta.key !== 'nifty_condor_ratio' && meta.key !== 'nifty_adaptive_strangle' && meta.key !== 'nifty_diagonal_call' && (
           <>
             <div className={fieldCls}>
               <FieldLabel text="Target ₹" tip="Daily cumulative profit target in INR, or a percentage of entry premium collected e.g. '25%'; strategy squares off and stops once reached." />
@@ -2574,6 +2598,39 @@ function StrategyRowWide({ meta, state, onRefresh, instanceId, onAddInstance, on
             </div>
           </>
         )}
+
+        {meta.key === 'nifty_diagonal_call' && (
+          <>
+            <div className={fieldCls}>
+              <FieldLabel text="Target Profit" tip="Cycle target profit in % of capital or fixed ₹ (default: 10%)." />
+              <Input type="text" value={dcTargetProfit} onChange={e => setDcTargetProfit(e.target.value)} className={inputCls} style={{ width: 80 }} />
+            </div>
+            <div className={fieldCls}>
+              <FieldLabel text="Stop Loss" tip="Cycle stop loss in % of capital or fixed ₹ (default: 8%)." />
+              <Input type="text" value={dcStopLoss} onChange={e => setDcStopLoss(e.target.value)} className={inputCls} style={{ width: 80 }} />
+            </div>
+            <div className={fieldCls}>
+              <FieldLabel text="Net Delta Δ" tip="Target net portfolio delta in shares/units (+10 to +20, default: 13.0)." />
+              <Input type="number" step="0.5" value={dcTargetNetDelta} onChange={e => setDcTargetNetDelta(parseFloat(e.target.value) || 13.0)} className={inputCls} style={{ width: 75 }} />
+            </div>
+            <div className={fieldCls}>
+              <FieldLabel text="Long Call Δ" tip="Target delta for 60–120 DTE long calls (default: 0.60)." />
+              <Input type="number" step="0.01" value={dcLongTargetDelta} onChange={e => setDcLongTargetDelta(parseFloat(e.target.value) || 0.60)} className={inputCls} style={{ width: 75 }} />
+            </div>
+            <div className={fieldCls}>
+              <FieldLabel text="Short Call Δ" tip="Target delta for 25–45 DTE short calls (default: 0.18)." />
+              <Input type="number" step="0.01" value={dcShortTargetDelta} onChange={e => setDcShortTargetDelta(parseFloat(e.target.value) || 0.18)} className={inputCls} style={{ width: 75 }} />
+            </div>
+            <div className={fieldCls}>
+              <FieldLabel text="Short Profit %" tip="Decay captured % on short call to book profit and roll (default: 65%)." />
+              <Input type="number" step="1" value={dcShortProfitPct} onChange={e => setDcShortProfitPct(parseFloat(e.target.value) || 65.0)} className={inputCls} style={{ width: 75 }} />
+            </div>
+            <div className={fieldCls}>
+              <FieldLabel text="Capital ₹" tip="Strategy capital allocation in INR (default: 500,000)." />
+              <Input type="number" step="10000" value={dcCapital} onChange={e => setDcCapital(parseFloat(e.target.value) || 500000)} className={inputCls} style={{ width: 95 }} />
+            </div>
+          </>
+        )}
       </div>
 
       {/* Action Footer */}
@@ -2858,6 +2915,33 @@ function StrategyRowWide({ meta, state, onRefresh, instanceId, onAddInstance, on
                 </div>
                 <div className="flex items-center justify-between text-[10px] text-zinc-400 mt-0.5">
                   <span>avg ₹{leg.avg_price?.toFixed(1) ?? '—'}</span>
+                  <span>ltp ₹{leg.ltp?.toFixed(1) ?? '—'}</span>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {isRunning && meta.key === 'nifty_diagonal_call' && (state as any).legs && Object.keys((state as any).legs).length > 0 && (
+        <div className="border-t border-zinc-800/60 px-4 py-2.5 bg-zinc-950/40">
+          <div className="flex items-center justify-between text-[11px] font-semibold text-zinc-300 mb-1.5">
+            <span>Diagonal Legs (Net Δ {(state as any).greeks?.net_delta_shares ?? '—'} · {(state as any).greeks?.delta_zone ?? '—'})</span>
+            <span className="text-[10px] text-zinc-400">
+              Γ: {(state as any).greeks?.portfolio_gamma ?? '—'} ({(state as any).greeks?.gamma_status ?? '—'}) · Θ: +₹{(state as any).greeks?.portfolio_theta_day ?? '—'}/d · Vega: ₹{(state as any).greeks?.portfolio_vega ?? '—'}
+            </span>
+          </div>
+          <div className="grid grid-cols-2 gap-2">
+            {Object.entries((state as any).legs as Record<string, any>).map(([key, leg]) => (
+              <div key={key} className="bg-zinc-900/70 border border-zinc-800/80 rounded px-2.5 py-1.5 text-xs font-mono">
+                <div className="flex items-center justify-between">
+                  <span className={`font-bold ${leg.side === 'BUY' ? 'text-emerald-400' : 'text-rose-400'}`}>
+                    {leg.side} {leg.lots}L {leg.strike} CE
+                  </span>
+                  <span className="text-[10px] text-zinc-400">Δ {leg.delta != null ? Number(leg.delta).toFixed(2) : '—'} ({leg.dte}d)</span>
+                </div>
+                <div className="flex items-center justify-between text-[10px] text-zinc-400 mt-0.5">
+                  <span>avg ₹{leg.entry_price?.toFixed(1) ?? '—'}</span>
                   <span>ltp ₹{leg.ltp?.toFixed(1) ?? '—'}</span>
                 </div>
               </div>

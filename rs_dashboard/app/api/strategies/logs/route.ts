@@ -39,6 +39,7 @@ const STRATEGY_LOG_DIRS: Record<string, string> = {
   nifty_put_condor:              'put_condor',
   nifty_condor_ratio:            'condor_ratio',
   nifty_adaptive_strangle:       'adaptive_strangle',
+  nifty_diagonal_call:           'diagonal_call',
 };
 
 // Duplicated instances write `<YYYYMMDD>_<instanceId>.log` alongside the primary's

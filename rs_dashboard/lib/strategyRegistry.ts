@@ -326,6 +326,17 @@ export const STRATEGIES_METADATA: Record<string, {
     readmePath: readmePath('adaptive_strangle', 'nifty_adaptive_strangle'),
     execBrokerEligible: true,
   },
+  // Nifty Delta-Controlled, Low-Gamma Diagonal Covered Call: 60-120 DTE long CE (0.55-0.65 delta)
+  // + 25-45 DTE short CE (0.15-0.22 delta sized from delta). Maximize Theta / |Gamma|.
+  nifty_diagonal_call: {
+    name: 'Nifty Low-Gamma Diagonal Covered Call',
+    underlying: 'NIFTY',
+    logicGroup: 'harvest',
+    timeframe: 'positional',
+    path: path.join(PROJECT_ROOT, 'strategies', 'diagonal_call', 'nifty_diagonal_call.py'),
+    readmePath: readmePath('diagonal_call', 'nifty_diagonal_call'),
+    execBrokerEligible: true,
+  },
 };
 
 // Python's save_strategy_state() rewrites the whole <key>_state.json every cycle with only
