@@ -1,7 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { dhanPost, dhanPut, dhanDelete } from '@/lib/dhanToken';
+import { dhanGet, dhanPost, dhanPut, dhanDelete } from '@/lib/dhanToken';
 import { findEquity } from '@/lib/equityMaster';
 import { invalidateBrokerCache } from '@/lib/brokerPositionsCache';
+import { fetchHoldingsLive, fetchIntradayLongQty, fetchPendingSellQty, sellableQty } from '@/lib/dhanEquityPortfolio';
 
 const MAX_EQUITY_QTY = 10_000;
 
@@ -47,9 +48,31 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    const limitPrice = Number(price);
-    if (!(limitPrice > 0)) {
+    const rawPrice = Number(price);
+    if (!(rawPrice > 0)) {
       return NextResponse.json({ success: false, error: 'Price must be greater than 0' }, { status: 400 });
+    }
+
+    // UI presets/steppers can land off-tick (e.g. -3% of 1035 = 1003.95); snap to the nearest tick.
+    const snap = (v: number) => (eq.tick > 0 ? Number((Math.round(v / eq.tick) * eq.tick).toFixed(2)) : v);
+    const limitPrice = snap(rawPrice);
+
+    // No shorting: a sell must be covered by owned shares (same rule as /api/equity-order).
+    if (side === 'SELL') {
+      const prod = orderKind === 'REGULAR' && productType === 'INTRADAY' ? 'INTRADAY' : 'CNC';
+      let avail: number;
+      if (prod === 'INTRADAY') {
+        avail = await fetchIntradayLongQty(eq.securityId);
+      } else {
+        avail = sellableQty(await fetchHoldingsLive(), eq.securityId).availableQty;
+      }
+      if (orderKind === 'REGULAR') avail -= await fetchPendingSellQty(eq.securityId, prod);
+      if (qty > avail) {
+        return NextResponse.json(
+          { success: false, error: `Cannot sell ${qty} ${eq.symbol}: only ${Math.max(0, avail)} available (${prod}). Shorting is not allowed.` },
+          { status: 400 }
+        );
+      }
     }
 
     if (orderKind === 'REGULAR') {
@@ -71,7 +94,30 @@ export async function POST(req: NextRequest) {
         afterMarketOrder: false,
       };
 
-      const res = (await dhanPost('/orders', payload)) as Record<string, unknown>;
+      let res: Record<string, unknown>;
+      try {
+        res = (await dhanPost('/orders', payload)) as Record<string, unknown>;
+      } catch (err) {
+        // Timeout / network drop: the order may still have reached Dhan. Reconcile by
+        // correlationId before reporting failure, so a retry cannot double-place.
+        const e = err as Error & { status?: number };
+        if (e.status !== undefined) throw err; // an HTTP rejection is a definite failure
+        let found: Record<string, unknown> | null = null;
+        for (const delay of [0, 1500]) {
+          if (delay) await new Promise((r) => setTimeout(r, delay));
+          try {
+            const r = (await dhanGet(`/orders/external/${correlationId}`)) as Record<string, unknown>;
+            if (r && r.orderId) { found = r; break; }
+          } catch { /* not found yet */ }
+        }
+        if (!found) {
+          return NextResponse.json({
+            success: false,
+            error: 'Dhan did not respond and the order could not be confirmed. Check the Orders book before retrying.',
+          }, { status: 504 });
+        }
+        res = found;
+      }
       invalidateBrokerCache('dhan');
       const orderId = String(res.orderId ?? (res.data as Record<string, unknown> | undefined)?.orderId ?? '');
       return NextResponse.json({
@@ -84,7 +130,7 @@ export async function POST(req: NextRequest) {
     }
 
     // Forever (GTT) Limit Order
-    const trigPrice = Number(triggerPrice);
+    const trigPrice = snap(Number(triggerPrice));
     if (!(trigPrice > 0)) {
       return NextResponse.json({ success: false, error: 'Trigger price must be greater than 0 for Forever orders' }, { status: 400 });
     }
@@ -103,6 +149,10 @@ export async function POST(req: NextRequest) {
       disclosedQuantity: 0,
       price: limitPrice,
       triggerPrice: trigPrice,
+      // The SDK always sent the second leg (zeros for SINGLE); keep the payload identical.
+      price1: 0,
+      triggerPrice1: 0,
+      quantity1: 0,
     };
 
     if (flag === 'OCO') {

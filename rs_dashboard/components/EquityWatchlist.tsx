@@ -29,6 +29,9 @@ import { cn } from '@/lib/utils';
 import NavBar from './NavBar';
 
 // ─── Types ──────────────────────────────────────────────────────────────────
+// Forever-order statuses that mean the order is no longer resting on Dhan.
+const TERMINAL_STATUSES = new Set(['CANCELLED', 'EXPIRED', 'TRADED', 'REJECTED']);
+
 interface ForeverOrderRow {
   orderId: string;
   orderFlag: string;
@@ -460,7 +463,9 @@ export default function EquityWatchlist() {
           body: JSON.stringify({ symbol }),
         });
         const json = await res.json();
-        if (json.success) {
+        if (!json.success) {
+          addToast('error', `Cannot remove ${symbol}`, json.error ?? 'Request failed');
+        } else {
           addToast('info', `Removed ${symbol} from Watchlist`);
           setRows((prev) => prev.filter((r) => r.symbol !== symbol));
           fetchData(false);
@@ -1042,8 +1047,13 @@ export default function EquityWatchlist() {
                       <TD right>
                         <button
                           onClick={() => handleRemoveSymbol(r.symbol)}
-                          title={`Remove ${r.symbol} from watchlist`}
-                          className="h-7 w-7 flex items-center justify-center rounded-md text-zinc-500 hover:text-rose-400 hover:bg-rose-500/10 transition-colors"
+                          disabled={r.foreverOrders.some((o) => !TERMINAL_STATUSES.has(o.status.toUpperCase()))}
+                          title={
+                            r.foreverOrders.some((o) => !TERMINAL_STATUSES.has(o.status.toUpperCase()))
+                              ? `Cancel ${r.symbol}'s active orders before removing it`
+                              : `Remove ${r.symbol} from watchlist`
+                          }
+                          className="h-7 w-7 flex items-center justify-center rounded-md text-zinc-500 hover:text-rose-400 hover:bg-rose-500/10 transition-colors disabled:opacity-30 disabled:cursor-not-allowed disabled:hover:text-zinc-500 disabled:hover:bg-transparent"
                         >
                           <X className="h-3.5 w-3.5" />
                         </button>
