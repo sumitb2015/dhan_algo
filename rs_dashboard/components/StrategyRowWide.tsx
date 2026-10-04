@@ -333,6 +333,12 @@ function StrategyRowWide({ meta, state, onRefresh, instanceId, onAddInstance, on
   const [dcLongTargetDelta, setDcLongTargetDelta] = useState(0.60);
   const [dcShortTargetDelta, setDcShortTargetDelta] = useState(0.18);
   const [dcShortProfitPct, setDcShortProfitPct] = useState(65.0);
+  const [dcMaxShortLots, setDcMaxShortLots] = useState(6);
+  const [dcMaxShortRatio, setDcMaxShortRatio] = useState(1.25);
+  const [dcMinGammaLimit, setDcMinGammaLimit] = useState(-0.20);
+  const [dcShortRollDelta, setDcShortRollDelta] = useState(0.35);
+  const [dcShortRollDte, setDcShortRollDte] = useState(14);
+  const [dcLongRollDte, setDcLongRollDte] = useState(35);
   const [dcCapital, setDcCapital] = useState(500000);
 
   const spreadTrendNoIndicators = meta.key === 'nifty_spread_trend' && !useEma && !useSupertrend;
@@ -665,6 +671,12 @@ function StrategyRowWide({ meta, state, onRefresh, instanceId, onAddInstance, on
         args.push('--long-target-delta', String(dcLongTargetDelta));
         args.push('--short-target-delta', String(dcShortTargetDelta));
         args.push('--short-profit-pct', String(dcShortProfitPct));
+        args.push('--max-short-lots', String(dcMaxShortLots));
+        args.push('--max-short-ratio', String(dcMaxShortRatio));
+        args.push('--min-gamma-limit', String(dcMinGammaLimit));
+        args.push('--short-roll-delta', String(dcShortRollDelta));
+        args.push('--short-roll-dte', String(dcShortRollDte));
+        args.push('--long-roll-dte', String(dcLongRollDte));
         args.push('--capital', String(dcCapital));
       }
 
@@ -2624,6 +2636,30 @@ function StrategyRowWide({ meta, state, onRefresh, instanceId, onAddInstance, on
             <div className={fieldCls}>
               <FieldLabel text="Short Profit %" tip="Decay captured % on short call to book profit and roll (default: 65%)." />
               <Input type="number" step="1" value={dcShortProfitPct} onChange={e => setDcShortProfitPct(parseFloat(e.target.value) || 65.0)} className={inputCls} style={{ width: 75 }} />
+            </div>
+            <div className={fieldCls}>
+              <FieldLabel text="Max Short Lots" tip="Hard ceiling on short call lots for margin safety (default: 6 lots)." />
+              <Input type="number" step="1" min={1} max={12} value={dcMaxShortLots} onChange={e => setDcMaxShortLots(parseInt(e.target.value) || 6)} className={inputCls} style={{ width: 75 }} />
+            </div>
+            <div className={fieldCls}>
+              <FieldLabel text="Max Short Ratio" tip="Maximum ratio of total short delta to long delta (default: 1.25)." />
+              <Input type="number" step="0.05" value={dcMaxShortRatio} onChange={e => setDcMaxShortRatio(parseFloat(e.target.value) || 1.25)} className={inputCls} style={{ width: 75 }} />
+            </div>
+            <div className={fieldCls}>
+              <FieldLabel text="Gamma Limit" tip="Emergency negative portfolio gamma floor (default: -0.20)." />
+              <Input type="number" step="0.01" value={dcMinGammaLimit} onChange={e => setDcMinGammaLimit(parseFloat(e.target.value) || -0.20)} className={inputCls} style={{ width: 75 }} />
+            </div>
+            <div className={fieldCls}>
+              <FieldLabel text="Short Roll Δ" tip="Roll short call when its delta expands to this (default: 0.35)." />
+              <Input type="number" step="0.01" value={dcShortRollDelta} onChange={e => setDcShortRollDelta(parseFloat(e.target.value) || 0.35)} className={inputCls} style={{ width: 75 }} />
+            </div>
+            <div className={fieldCls}>
+              <FieldLabel text="Short Roll DTE" tip="Roll short call when remaining DTE drops below this (default: 14 days)." />
+              <Input type="number" step="1" value={dcShortRollDte} onChange={e => setDcShortRollDte(parseInt(e.target.value) || 14)} className={inputCls} style={{ width: 70 }} />
+            </div>
+            <div className={fieldCls}>
+              <FieldLabel text="Long Roll DTE" tip="Roll long call when remaining DTE drops below this (default: 35 days)." />
+              <Input type="number" step="1" value={dcLongRollDte} onChange={e => setDcLongRollDte(parseInt(e.target.value) || 35)} className={inputCls} style={{ width: 70 }} />
             </div>
             <div className={fieldCls}>
               <FieldLabel text="Capital ₹" tip="Strategy capital allocation in INR (default: 500,000)." />

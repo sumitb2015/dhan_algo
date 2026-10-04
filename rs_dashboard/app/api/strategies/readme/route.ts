@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import fs from 'fs';
+import path from 'path';
 import { STRATEGIES_METADATA } from '@/lib/strategyRegistry';
 
 export async function GET(req: NextRequest) {
@@ -10,7 +11,14 @@ export async function GET(req: NextRequest) {
   }
 
   try {
-    const content = fs.readFileSync(meta.readmePath, 'utf-8');
+    let filePath = meta.readmePath;
+    if (!fs.existsSync(filePath)) {
+      const dirFallback = path.join(path.dirname(meta.path), 'strategy.md');
+      if (fs.existsSync(dirFallback)) {
+        filePath = dirFallback;
+      }
+    }
+    const content = fs.readFileSync(filePath, 'utf-8');
     return NextResponse.json({ success: true, name: meta.name, content });
   } catch {
     return NextResponse.json({ success: false, error: 'Readme not found for this strategy yet.' }, { status: 404 });
