@@ -412,6 +412,12 @@ class NiftyDiagonalCallStrategy:
         self.session_date = date.today().isoformat()
         self.last_phantom_check = 0.0
 
+        # Long Cost Recovery (LCR) & Free Long Call Engine
+        self.initial_long_debit: float = 0.0
+        self.cumulative_short_premium: float = 0.0
+        self.lcr_pct: float = 0.0
+        self.is_free_long_call: bool = False
+
         # Initialize Dhan client and helper (or use injected helper for testing)
         if helper is not None:
             self.helper = helper
@@ -464,8 +470,45 @@ class NiftyDiagonalCallStrategy:
 
     # ── PERSISTENCE & BROKER RECONCILIATION ────────────────────────────────────
 
+    def compute_lcr(self) -> Tuple[float, float, bool]:
+        """Computes Long Cost Recovery (LCR) metric:
+
+        LCR = (Cumulative Net Short Premium / Initial Long Option Debit) * 100%
+
+        Stages:
+          0–25%: Early stage
+          25–50%: Good progress
+          50–75%: Significant cost recovered
+          75–100%: Long option mostly funded
+          >=100%: 'FREE LONG CALL' achieved! Long option completely funded by short decay.
+
+        Returns:
+            Tuple of (lcr_pct, total_net_short_premium, is_free_long_call)
+        """
+        if self.initial_long_debit <= 0.0:
+            if self.long_leg and self.long_leg.get("entry_price", 0.0) > 0:
+                self.initial_long_debit = float(self.long_leg["entry_price"]) * (
+                    self.long_leg.get("lots", self.long_lots) * self.lot_size
+                )
+        if self.initial_long_debit <= 0.0:
+            return 0.0, 0.0, False
+
+        unrealized_short = 0.0
+        if self.short_leg and "current_ltp" in self.short_leg:
+            unrealized_short = (self.short_leg["entry_price"] - self.short_leg["current_ltp"]) * (
+                self.short_leg["lots"] * self.lot_size
+            )
+
+        total_short_premium = self.cumulative_short_premium + unrealized_short
+        lcr_pct = (total_short_premium / self.initial_long_debit) * 100.0
+        is_free = lcr_pct >= 100.0
+        self.lcr_pct = round(lcr_pct, 1)
+        self.is_free_long_call = is_free
+        return self.lcr_pct, round(total_short_premium, 2), is_free
+
     def save_position(self):
         """Atomic write of the active portfolio state to prevent torn file corruption."""
+        self.compute_lcr()
         payload = {
             "version": 1,
             "dry_run": self.dry_run,
@@ -478,6 +521,10 @@ class NiftyDiagonalCallStrategy:
             "daily_start_pnl": self.daily_start_pnl,
             "session_date": self.session_date,
             "drawdown_halved": self.drawdown_halved,
+            "initial_long_debit": round(self.initial_long_debit, 2),
+            "cumulative_short_premium": round(self.cumulative_short_premium, 2),
+            "lcr_pct": self.lcr_pct,
+            "is_free_long_call": self.is_free_long_call,
             "updated_at": datetime.now().isoformat(timespec="seconds"),
         }
         os.makedirs(debug_dir, exist_ok=True)
@@ -501,6 +548,8 @@ class NiftyDiagonalCallStrategy:
 
         if not data.get("position_open", False):
             self.realized_pnl = float(data.get("realized_pnl", 0.0))
+            self.cumulative_short_premium = float(data.get("cumulative_short_premium", 0.0))
+            self.initial_long_debit = float(data.get("initial_long_debit", 0.0))
             return
 
         if bool(data.get("dry_run")) != self.dry_run:
@@ -519,13 +568,25 @@ class NiftyDiagonalCallStrategy:
         self.daily_start_pnl = float(data.get("daily_start_pnl", 0.0))
         self.session_date = data.get("session_date", date.today().isoformat())
         self.drawdown_halved = bool(data.get("drawdown_halved", False))
+        self.initial_long_debit = float(data.get("initial_long_debit", 0.0))
+        self.cumulative_short_premium = float(data.get("cumulative_short_premium", 0.0))
+        self.lcr_pct = float(data.get("lcr_pct", 0.0))
+        self.is_free_long_call = bool(data.get("is_free_long_call", False))
+
+        if self.initial_long_debit <= 0.0 and self.long_leg and self.long_leg.get("entry_price", 0.0) > 0:
+            self.initial_long_debit = float(self.long_leg["entry_price"]) * (
+                self.long_leg.get("lots", self.long_lots) * self.lot_size
+            )
+
+        self.compute_lcr()
 
         logger.info(
             f"Restored open position: Long={self.long_leg.get('strike') if self.long_leg else None} CE "
             f"({self.long_leg.get('lots') if self.long_leg else 0} lots) | "
             f"Short={self.short_leg.get('strike') if self.short_leg else None} CE "
             f"({self.short_leg.get('lots') if self.short_leg else 0} lots) | "
-            f"Realized P&L: ₹{self.realized_pnl:+.2f}"
+            f"Realized P&L: ₹{self.realized_pnl:+.2f} | Long Cost Recovery (LCR): {self.lcr_pct:.1f}% "
+            f"({'FREE LONG CALL' if self.is_free_long_call else 'RECOVERY IN PROGRESS'})"
         )
 
         # Resubscribe live market feed for recovered legs
@@ -752,13 +813,27 @@ class NiftyDiagonalCallStrategy:
             return None
 
         iv = self._get_current_iv()
+        lcr_pct, total_short_px, is_free = self.compute_lcr()
+        if is_free:
+            logger.info(
+                f"*** FREE LONG CALL REGIME ACTIVE (LCR: {lcr_pct:.1f}% >= 100%) *** "
+                "Defensive posture: targeting low-delta short calls (0.08–0.15) and capping short lots to reduce short gamma."
+            )
+            min_target_delta = 0.08
+            max_target_delta = 0.15
+            effective_max_short_ratio = min(self.max_short_ratio, 0.60)
+        else:
+            min_target_delta = 0.14
+            max_target_delta = 0.23
+            effective_max_short_ratio = self.max_short_ratio
+
         scored_candidates = []
         for _, row in matches.iterrows():
             k = float(row["STRIKE_PRICE"])
             sec_id = str(row["SECURITY_ID"])
             g = compute_bs_greeks(spot, k, dte, iv=iv, r=0.07, opt_type="CE")
             delta = g["delta"]
-            if 0.14 <= delta <= 0.23:
+            if min_target_delta <= delta <= max_target_delta:
                 score = score_short_call(g["theta_day"], g["gamma"])
                 scored_candidates.append({
                     "security_id": sec_id,
@@ -799,7 +874,7 @@ class NiftyDiagonalCallStrategy:
             target_net_delta_shares=self.target_net_delta,
             short_call_delta=short_delta,
             lot_size=self.lot_size,
-            max_short_ratio=self.max_short_ratio,
+            max_short_ratio=effective_max_short_ratio,
         )
 
         ltp = self.helper.get_ltp(best["security_id"], exchange="NSE_FNO", instrument="OPTIDX")
@@ -808,7 +883,8 @@ class NiftyDiagonalCallStrategy:
 
         logger.info(
             f"Selected Short Call: {best['strike']} CE | Expiry: {best_expiry} ({dte:.0f} DTE) | "
-            f"Delta: {short_delta:.2f} | Score (Theta/|Gamma|): {best['score']:.1f} | Sized Lots: {short_lots}"
+            f"Delta: {short_delta:.2f} | Score (Theta/|Gamma|): {best['score']:.1f} | Sized Lots: {short_lots} "
+            f"(Regime: {'FREE LONG CALL' if is_free else 'NORMAL RECOVERY'})"
         )
 
         return {
@@ -823,6 +899,7 @@ class NiftyDiagonalCallStrategy:
             "entry_price": round(ltp, 2),
             "iv": iv,
             "score": round(best["score"], 1),
+            "is_free_long_call": is_free,
         }
 
     # ── POSITION ENTRY & ORDER EXECUTION ──────────────────────────────────────
@@ -874,6 +951,14 @@ class NiftyDiagonalCallStrategy:
             long_candidate["entry_price"] = fill_px
 
         self.long_leg = long_candidate
+        long_cost = self.long_leg["entry_price"] * long_qty
+        if self.initial_long_debit <= 0.0:
+            self.initial_long_debit = long_cost
+            logger.info(
+                f"Initial Long Call Debit Established: ₹{self.initial_long_debit:,.2f} "
+                f"({self.long_leg['lots']} lots @ ₹{self.long_leg['entry_price']:.2f})"
+            )
+
         try:
             self.helper.subscribe_instruments([("NSE_FNO", str(long_candidate["security_id"]), 15)])
         except Exception as e:
@@ -915,13 +1000,15 @@ class NiftyDiagonalCallStrategy:
 
         self.position_open = True
         self.status = "RUNNING"
+        self.compute_lcr()
         self.save_position()
         self._publish_state(spot)
 
         notify(
             f"[{self.state_key}] Position Entered:\n"
-            f"Long: {self.long_leg['strike']} CE ({self.long_leg['lots']}L) @ ₹{self.long_leg['entry_price']:.1f}\n"
-            f"Short: {self.short_leg['strike']} CE ({self.short_leg['lots']}L) @ ₹{self.short_leg['entry_price']:.1f}"
+            f"Long: {self.long_leg['strike']} CE ({self.long_leg['lots']}L) @ ₹{self.long_leg['entry_price']:.1f} [Cost: ₹{self.initial_long_debit:,.0f}]\n"
+            f"Short: {self.short_leg['strike']} CE ({self.short_leg['lots']}L) @ ₹{self.short_leg['entry_price']:.1f}\n"
+            f"Initial LCR: {self.lcr_pct:.1f}%"
         )
 
     # ── ROLLS & DEFENSIVE ADJUSTMENTS ─────────────────────────────────────────
@@ -961,7 +1048,13 @@ class NiftyDiagonalCallStrategy:
 
         closed_pnl = (old_leg["entry_price"] - fill_px) * close_qty
         self.realized_pnl += closed_pnl
-        logger.info(f"Closed old short {old_leg['strike']} CE @ ₹{fill_px:.2f} | Leg P&L: ₹{closed_pnl:+.2f} | Cumulative Realized: ₹{self.realized_pnl:+.2f}")
+        self.cumulative_short_premium += closed_pnl
+        lcr_pct, total_short_px, is_free = self.compute_lcr()
+        logger.info(
+            f"Closed old short {old_leg['strike']} CE @ ₹{fill_px:.2f} | Leg P&L: ₹{closed_pnl:+.2f} | "
+            f"Cumulative Net Short Premium: ₹{self.cumulative_short_premium:,.2f} | LCR: {lcr_pct:.1f}% "
+            f"({'FREE LONG CALL' if is_free else 'RECOVERY IN PROGRESS'})"
+        )
 
         # Sizing and entering new short leg
         long_delta_shares = (self.long_leg["lots"] * self.lot_size * self.long_leg["delta"]) if self.long_leg else 0.0
@@ -999,9 +1092,13 @@ class NiftyDiagonalCallStrategy:
         except Exception:
             pass
 
+        self.compute_lcr()
         self.save_position()
         self._publish_state(spot)
-        notify(f"[{self.state_key}] Short Leg Rolled: {new_short['strike']} CE ({new_short['lots']}L). Realized: ₹{self.realized_pnl:+.2f}")
+        notify(
+            f"[{self.state_key}] Short Leg Rolled: {new_short['strike']} CE ({new_short['lots']}L). "
+            f"LCR: {self.lcr_pct:.1f}% ({'FREE LONG CALL' if self.is_free_long_call else 'FINANCING'})"
+        )
 
     def roll_long_leg(self, spot: float, reason: str):
         """Sells current long call and rolls into a new 60–120 DTE call with 0.55–0.65 delta."""
@@ -1070,6 +1167,7 @@ class NiftyDiagonalCallStrategy:
         except Exception:
             pass
 
+        self.compute_lcr()
         self.save_position()
         self._publish_state(spot)
         notify(f"[{self.state_key}] Long Leg Rolled: {new_long['strike']} CE ({new_long['lots']}L).")
@@ -1093,12 +1191,15 @@ class NiftyDiagonalCallStrategy:
                 oid = self.broker.buy(strike=strike, expiry=expiry, opt_type="CE", qty=safe_qty, product=PRODUCT)
                 if oid and self._wait_for_fill(oid, strike, expiry, "CE", +safe_qty, net_before, timeout=15):
                     fill_px = self._get_fill_price(oid, fallback_ltp=self.short_leg.get("current_ltp", self.short_leg["entry_price"]))
-                    self.realized_pnl += (self.short_leg["entry_price"] - fill_px) * safe_qty
+                    closed_pnl = (self.short_leg["entry_price"] - fill_px) * safe_qty
+                    self.realized_pnl += closed_pnl
+                    self.cumulative_short_premium += closed_pnl
 
         self.short_leg["lots"] -= reduce_lots
         self.drawdown_halved = True
+        self.compute_lcr()
         self.save_position()
-        logger.info(f"Short position halved to {self.short_leg['lots']} lots.")
+        logger.info(f"Short position halved to {self.short_leg['lots']} lots. LCR: {self.lcr_pct:.1f}%")
 
     def exit_all(self, reason: str = "MANUAL_STOP"):
         """Gracefully closes all legs (short leg first, then long leg) using safe exit sizing."""
@@ -1122,7 +1223,9 @@ class NiftyDiagonalCallStrategy:
                     else:
                         logger.error("Could not confirm short leg close order.")
                         exit_incomplete = True
-            self.realized_pnl += (self.short_leg["entry_price"] - ltp) * qty
+            closed_short_pnl = (self.short_leg["entry_price"] - ltp) * qty
+            self.realized_pnl += closed_short_pnl
+            self.cumulative_short_premium += closed_short_pnl
             self.short_leg = None
 
         # 2. Close Long Leg Second
@@ -1146,9 +1249,13 @@ class NiftyDiagonalCallStrategy:
 
         self.position_open = False
         self.status = "STOPPED (EXIT INCOMPLETE - VERIFY MANUALLY)" if exit_incomplete else "STOPPED"
+        self.compute_lcr()
         self.save_position()
         self._publish_state(0.0)
-        notify(f"[{self.state_key}] Position Squared Off: {reason}. Status: {self.status}. Total Realized P&L: ₹{self.realized_pnl:+.2f}")
+        notify(
+            f"[{self.state_key}] Position Squared Off: {reason}. Status: {self.status}. "
+            f"Total Realized P&L: ₹{self.realized_pnl:+.2f} | Final LCR: {self.lcr_pct:.1f}%"
+        )
 
     # ── STATE PUBLISHING ──────────────────────────────────────────────────────
 
@@ -1166,6 +1273,7 @@ class NiftyDiagonalCallStrategy:
 
         total_pnl = self.realized_pnl + unrealized
         greeks = calculate_portfolio_greeks(self.long_leg, self.short_leg, spot, self.lot_size)
+        lcr_pct, total_short_premium, is_free = self.compute_lcr()
 
         legs_data = {}
         if self.long_leg:
@@ -1200,6 +1308,10 @@ class NiftyDiagonalCallStrategy:
             "total_pnl": round(total_pnl, 2),
             "realized_pnl": round(self.realized_pnl, 2),
             "unrealized_pnl": round(unrealized, 2),
+            "initial_long_debit": round(self.initial_long_debit, 2),
+            "cumulative_short_premium": round(total_short_premium, 2),
+            "lcr_pct": lcr_pct,
+            "is_free_long_call": is_free,
             "lots": self.long_lots,
             "lot_size": self.lot_size,
             "greeks": greeks,

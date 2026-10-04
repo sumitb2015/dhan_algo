@@ -10,6 +10,31 @@ when the underlying rallies, short call gamma expands rapidly, flipping the port
 
 Instead of hard-coding a static number of short lots (e.g. "always sell 5 lots"), this strategy sizes the short position dynamically from option delta, targets an initial net delta buffer of **+0.10 to +0.20 Nifty-lot equivalent** (+6.5 to +13 delta units per 65-unit lot), and selects short strikes by maximizing the **Theta / |Gamma|** efficiency ratio among 25–45 DTE options.
 
+### The Economics: A Long-Call Financing Strategy
+A fundamental insight of this strategy is that **the long calls do NOT have to recover to their initial entry price for the strategy to be profitable**:
+- The long call is an **insurance, convexity, and margin-reduction asset**.
+- The short calls are the **financing engine**.
+- If Nifty remains below the long strike and the long call expires at ₹0, the strategy still breaks even or makes money if cumulative net short premium exceeds the initial long debit plus friction.
+
+### Long Cost Recovery (LCR) Metric
+The strategy tracks **Cumulative Net Short Premium** against the initial long debit:
+$$\text{LCR} = \frac{\text{Cumulative Net Short Premium}}{\text{Initial Long Option Debit}} \times 100\%$$
+
+| LCR Range | Stage / Meaning | Strategy Posture |
+|---:|---|---|
+| **0–25%** | Early Stage | Active financing; normal dynamic delta balancing. |
+| **25–50%** | Good Progress | Capital recovery underway. |
+| **50–75%** | Substantial Recovery | Cost basis reduced by more than half. |
+| **75–100%** | Mostly Funded | Long option almost free. |
+| **$\ge 100\%$** | **"FREE LONG CALL"** | **Long call completely funded by short premium.** |
+| **$> 120\%$** | Profit Buffer | Permanent profit buffer created. |
+
+### The "Free Long Call" Regime Shift
+Once $\text{LCR} \ge 100\%$, the strategy achieves a "Free Long Call". At this juncture, the algo **does NOT continue selling aggressively**:
+- **Defensive Gamma Posture**: Short candidate delta shifts from $0.15\text{--}0.22$ down to $0.08\text{--}0.15$ (far OTM).
+- **Reduced Short Exposure**: The maximum short lots ratio is clamped down to $\le 0.60\times$ long delta (instead of $1.25\times$).
+- **Upside Asymmetry**: This cuts negative gamma to near zero, protects accumulated profits from sharp rally spikes, and allows the fully-funded long call to participate uninhibited in large market moves.
+
 ### Validation Status
 - **Empirical Greek Architecture**: Designed around Black-Scholes Greeks with live chain feeds, dynamic delta balancing, and strict negative gamma ceilings ($>-0.15$ target, $>-0.20$ hard emergency guard).
 - **Default Mode**: `--live` disabled by default (safe dry-run paper trading). Live execution requires `--live`.

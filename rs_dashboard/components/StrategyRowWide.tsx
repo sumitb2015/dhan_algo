@@ -2926,11 +2926,39 @@ function StrategyRowWide({ meta, state, onRefresh, instanceId, onAddInstance, on
       {isRunning && meta.key === 'nifty_diagonal_call' && (state as any).legs && Object.keys((state as any).legs).length > 0 && (
         <div className="border-t border-zinc-800/60 px-4 py-2.5 bg-zinc-950/40">
           <div className="flex items-center justify-between text-[11px] font-semibold text-zinc-300 mb-1.5">
-            <span>Diagonal Legs (Net Δ {(state as any).greeks?.net_delta_shares ?? '—'} · {(state as any).greeks?.delta_zone ?? '—'})</span>
+            <div className="flex items-center gap-2">
+              <span>Diagonal Legs (Net Δ {(state as any).greeks?.net_delta_shares ?? '—'} · {(state as any).greeks?.delta_zone ?? '—'})</span>
+              {(state as any).is_free_long_call ? (
+                <span className="px-1.5 py-0.5 rounded text-[10px] font-bold bg-emerald-500/20 text-emerald-400 border border-emerald-500/30">
+                  FREE LONG CALL
+                </span>
+              ) : (state as any).lcr_pct != null && (
+                <span className="px-1.5 py-0.5 rounded text-[10px] font-mono bg-zinc-800 text-zinc-300 border border-zinc-700">
+                  LCR {(state as any).lcr_pct}%
+                </span>
+              )}
+            </div>
             <span className="text-[10px] text-zinc-400">
               Γ: {(state as any).greeks?.portfolio_gamma ?? '—'} ({(state as any).greeks?.gamma_status ?? '—'}) · Θ: +₹{(state as any).greeks?.portfolio_theta_day ?? '—'}/d · Vega: ₹{(state as any).greeks?.portfolio_vega ?? '—'}
             </span>
           </div>
+
+          {/* Long Cost Recovery (LCR) Progress Bar */}
+          {(state as any).initial_long_debit > 0 && (
+            <div className="mb-2 p-2 rounded bg-zinc-900/60 border border-zinc-800/70 text-xs">
+              <div className="flex justify-between items-center text-zinc-400 mb-1.5">
+                <span>Long Cost Recovery: <strong className="text-zinc-100 font-mono">{(state as any).lcr_pct ?? 0}%</strong></span>
+                <span className="font-mono text-[11px]">Collected ₹{((state as any).cumulative_short_premium ?? 0).toLocaleString('en-IN', { maximumFractionDigits: 0 })} / Initial Long Debit ₹{((state as any).initial_long_debit ?? 0).toLocaleString('en-IN', { maximumFractionDigits: 0 })}</span>
+              </div>
+              <div className="w-full bg-zinc-800 h-2 rounded-full overflow-hidden">
+                <div
+                  className={`h-full transition-all duration-500 ${(state as any).is_free_long_call ? 'bg-emerald-400' : 'bg-cyan-400'}`}
+                  style={{ width: `${Math.min(100, Math.max(0, (state as any).lcr_pct ?? 0))}%` }}
+                />
+              </div>
+            </div>
+          )}
+
           <div className="grid grid-cols-2 gap-2">
             {Object.entries((state as any).legs as Record<string, any>).map(([key, leg]) => (
               <div key={key} className="bg-zinc-900/70 border border-zinc-800/80 rounded px-2.5 py-1.5 text-xs font-mono">

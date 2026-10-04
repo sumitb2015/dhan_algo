@@ -206,7 +206,35 @@ class TestDiagonalCallCalculations(unittest.TestCase):
         filled = strat_zero._wait_for_fill("2410040001", 24000, "2026-10-27", "CE", +65, 65, timeout=2)
         self.assertTrue(filled)
 
+    def test_long_cost_recovery_and_free_long_call(self):
+        from unittest.mock import MagicMock
+        from strategies.diagonal_call.nifty_diagonal_call import NiftyDiagonalCallStrategy
+
+        mock_helper = MagicMock()
+        mock_helper.get_lot_size.return_value = 65
+        strat = NiftyDiagonalCallStrategy(helper=mock_helper, live=False)
+
+        # Example from user prompt:
+        # Long: 3 x 65 = 195 units @ Rs 804.16 -> Initial Debit = Rs 1,56,811.20
+        strat.long_leg = {"strike": 23000, "lots": 3, "entry_price": 804.16}
+        strat.initial_long_debit = 804.16 * 195  # 156,811.20
+
+        # Stage 1: Collected Rs 42,000 from short calls
+        strat.cumulative_short_premium = 42000.0
+        lcr_pct, total_short, is_free = strat.compute_lcr()
+        # 42000 / 156811.20 = 26.78% -> 26.8%
+        self.assertAlmostEqual(lcr_pct, 26.8, places=1)
+        self.assertFalse(is_free)
+
+        # Stage 2: Short calls accumulate Rs 1,60,000 -> LCR > 100% -> Free Long Call!
+        strat.cumulative_short_premium = 160000.0
+        lcr_pct, total_short, is_free = strat.compute_lcr()
+        self.assertGreaterEqual(lcr_pct, 100.0)
+        self.assertTrue(is_free)
+        self.assertTrue(strat.is_free_long_call)
+
 
 if __name__ == "__main__":
     unittest.main()
+
 
