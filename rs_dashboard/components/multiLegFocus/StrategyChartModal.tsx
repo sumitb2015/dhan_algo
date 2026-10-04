@@ -64,7 +64,7 @@ export default function StrategyChartModal({ isOpen, onClose, title, underlying,
   const [chartType, setChartType] = useState<StrategyChartType>('line');
   const [showSpot, setShowSpot] = useState(false);
   const [chart, setChart] = useState<CustomStrategyChartResponse | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  const [errorState, setErrorState] = useState<{ key: string; msg: string } | null>(null);
   const [loadedKey, setLoadedKey] = useState('');
   const [lastOkAt, setLastOkAt] = useState<number | null>(null);
 
@@ -72,6 +72,8 @@ export default function StrategyChartModal({ isOpen, onClose, title, underlying,
   const legsKey = useMemo(() => JSON.stringify(chartLegs), [chartLegs]);
   const selectionKey = `${underlying}|${expiry}|${legsKey}|${interval_}|${showSpot}`;
   const loading = loadedKey !== selectionKey;
+  // An error belongs to the selection that raised it; a new selection must not inherit it.
+  const error = errorState && errorState.key === selectionKey ? errorState.msg : null;
   const seqRef = useRef(0);
 
   useEffect(() => {
@@ -92,13 +94,13 @@ export default function StrategyChartModal({ isOpen, onClose, title, underlying,
         .then((r) => {
           if (cancelled || seq !== seqRef.current) return;
           setChart(r);
-          setError(null);
+          setErrorState(null);
           setLastOkAt(Date.now());
           setLoadedKey(selectionKey);
         })
         .catch((e) => {
           if (cancelled || isAbortError(e) || seq !== seqRef.current) return;
-          setError(e instanceof Error ? e.message : 'Failed to load strategy chart.');
+          setErrorState({ key: selectionKey, msg: e instanceof Error ? e.message : 'Failed to load strategy chart.' });
           setLoadedKey(selectionKey);
         });
     }

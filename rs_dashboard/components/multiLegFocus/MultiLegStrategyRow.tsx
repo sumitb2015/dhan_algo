@@ -712,11 +712,11 @@ export default function MultiLegStrategyRow({
     return (payoffResult.maxProfit / basketMargin) * 100;
   }, [payoffResult, basketMargin]);
 
-  // Current P&L as a % of margin blocked (Return on Margin / Capital)
+  // Displayed MTM (broker scope) as a % of margin blocked (Return on Margin / Capital)
   const pnlPctOfMargin = useMemo(() => {
     if (!basketMargin || basketMargin <= 0) return null;
-    return (totalPnl / basketMargin) * 100;
-  }, [totalPnl, basketMargin]);
+    return (todayPnl / basketMargin) * 100;
+  }, [todayPnl, basketMargin]);
 
   const maxLossDisplay = useMemo(() => {
     if (!payoffResult) return '—';
@@ -1041,30 +1041,18 @@ export default function MultiLegStrategyRow({
             </div>
           )}
 
-          {/* Strategy P&L: today (broker MTM scope), then lifetime */}
-          <span
-            className={`h-7 flex items-center gap-1 px-2.5 rounded-lg text-xs font-bold font-mono tabular-nums border ${
-              todayPnl >= 0 ? 'text-emerald-400 border-emerald-500/30 bg-emerald-500/5' : 'text-rose-400 border-rose-500/30 bg-rose-500/5'
-            }`}
-            title="Today: open legs (MTM from entry) plus legs closed today, the broker's positions P&L scope"
-          >
-            <span className="text-[10px] font-bold text-zinc-400">Today</span>
-            {todayPnl >= 0 ? '+' : ''}{fmtMoney(todayPnl)}
-          </span>
+          {/* Strategy MTM: broker positions scope (open legs + legs closed today) - matches the broker's P&L */}
           <span
             className={`h-7 flex items-center px-2.5 rounded-lg text-xs font-bold font-mono tabular-nums border ${
-              totalPnl >= 0 ? 'text-emerald-400 border-emerald-500/30 bg-emerald-500/5' : 'text-rose-400 border-rose-500/30 bg-rose-500/5'
+              todayPnl >= 0 ? 'text-emerald-400 border-emerald-500/30 bg-emerald-500/5' : 'text-rose-400 border-rose-500/30 bg-rose-500/5'
             }`}
-            title={`Strategy P&L since it started (incl. legs closed on earlier days): ${totalPnl >= 0 ? '+' : ''}${fmtMoney(totalPnl)}${
-              stratMetrics.combinedEntryPts > 0 ? ` (${stratMetrics.pnlPct >= 0 ? '+' : ''}${stratMetrics.pnlPct.toFixed(1)}% of premium)` : ''
-            }${pnlPctOfMargin != null ? ` · ${pnlPctOfMargin >= 0 ? '+' : ''}${pnlPctOfMargin.toFixed(2)}% of margin` : ''}`}
+            title={`MTM: open legs (from entry) plus legs closed today, the broker's positions P&L scope${
+              pnlPctOfMargin != null ? ` · ${pnlPctOfMargin >= 0 ? '+' : ''}${pnlPctOfMargin.toFixed(2)}% of margin` : ''
+            }${
+              hasEarlierDayClosed ? ` · Lifetime incl. earlier days' closed legs: ${totalPnl >= 0 ? '+' : ''}${fmtMoney(totalPnl)}` : ''
+            }`}
           >
-            {totalPnl >= 0 ? '+' : ''}{fmtMoney(totalPnl)}
-            {stratMetrics.combinedEntryPts > 0 && (
-              <span className="ml-1.5 text-[10px] opacity-80">
-                ({stratMetrics.pnlPct >= 0 ? '+' : ''}{stratMetrics.pnlPct.toFixed(1)}%)
-              </span>
-            )}
+            {todayPnl >= 0 ? '+' : ''}{fmtMoney(todayPnl)}
           </span>
 
           <button
