@@ -2,13 +2,14 @@
 
 import React, { useState, useMemo, useCallback } from 'react';
 import {
-  ChevronDown, ChevronUp, Trash2, Plus, Minus, X, Check, Layers, Sigma, Loader2, RefreshCw, Table2, BarChart3,
+  ChevronDown, ChevronUp, Trash2, Plus, Minus, X, Check, Layers, Sigma, Loader2, RefreshCw, Table2, BarChart3, LineChart,
 } from 'lucide-react';
 import MultiLegLegRow from './MultiLegLegRow';
 import RuleNumInput from './RuleNumInput';
 import AddLotsModal from './AddLotsModal';
 import PnlTableModal from './PnlTableModal';
 import PositionVisualizerModal from './PositionVisualizerModal';
+import StrategyChartModal, { chartLegsFor, isChartableUnderlying } from './StrategyChartModal';
 import ScaleStrategyModal from './ScaleStrategyModal';
 import AddNewLegModal from './AddNewLegModal';
 import LegColumnsMenu from './LegColumnsMenu';
@@ -189,6 +190,7 @@ export default function MultiLegStrategyRow({
   const [showPayoffChart, setShowPayoffChart] = useState(false);
   const [showPnlTable, setShowPnlTable] = useState(false);
   const [showPositionVisualizer, setShowPositionVisualizer] = useState(false);
+  const [showStrategyChart, setShowStrategyChart] = useState(false);
   const [simTargetDays, setSimTargetDays] = useState<number>(0);
   const [simIvShift, setSimIvShift] = useState<number>(0);
   const [confirmPlace, setConfirmPlace] = useState(false);
@@ -384,6 +386,13 @@ export default function MultiLegStrategyRow({
     () => (hasMixedExpiry ? null : classifyBasketStructure(basket.legs)),
     [basket.legs, hasMixedExpiry],
   );
+  const chartDisabledReason = hasMixedExpiry
+    ? 'Strategy chart supports a single expiry only (Calendar/Diagonal not supported)'
+    : !isChartableUnderlying(basket.underlying)
+      ? `No chart data for ${basket.underlying}`
+      : chartLegsFor(basket.legs).length === 0
+        ? 'No live legs to plot'
+        : null;
   const strategyLabel = derivedStructure?.structure
     ?? basketLabel(basket, `Strategy #${index + 1}`);
 
@@ -1077,6 +1086,17 @@ export default function MultiLegStrategyRow({
           >
             <BarChart3 className="w-3 h-3 text-indigo-400" />
             Position Map
+          </button>
+
+          <button
+            type="button"
+            onClick={() => setShowStrategyChart(true)}
+            disabled={chartDisabledReason !== null}
+            title={chartDisabledReason ?? 'Strategy chart: live combined premium of this strategy, plotted from its current legs'}
+            className={`h-7 px-2.5 inline-flex items-center gap-1 text-[11px] font-bold rounded-lg border border-emerald-500/40 bg-emerald-500/10 text-emerald-300 hover:bg-emerald-500/20 disabled:opacity-50 disabled:cursor-not-allowed ${FOCUS_RING}`}
+          >
+            <LineChart className="w-3 h-3" />
+            Strategy Chart
           </button>
 
           {/* Draft Actions */}
@@ -1775,6 +1795,17 @@ export default function MultiLegStrategyRow({
           marginSource={basketMarginSource}
           availableFunds={availableFunds ?? null}
           onConfirm={onScaleStrategy}
+        />
+      )}
+      {showStrategyChart && (
+        <StrategyChartModal
+          isOpen
+          onClose={() => setShowStrategyChart(false)}
+          title={strategyLabel}
+          underlying={basket.underlying}
+          expiry={basket.expiry}
+          legs={basket.legs}
+          lotSize={crudeMult === 1 ? defaultLotSize : undefined}
         />
       )}
       <PositionVisualizerModal
