@@ -1,6 +1,7 @@
 import sys
 import os
 import unittest
+import unittest.mock
 import pandas as pd
 from unittest.mock import MagicMock, patch
 
@@ -132,74 +133,75 @@ class TestPremiumStrikeSelection(unittest.TestCase):
         self.assertIsNone(ce_strike)
         self.assertIsNone(pe_strike)
 
+    EXPIRY = "2026-10-06"
+
+    def _use_fake_broker(self, strat, ce_net, pe_net):
+        """Give a strategy a fake ExecutionBroker; returns the mutable {opt: net} map the
+        broker reports as owned (orders go through ExecutionBroker, not helper.buy)."""
+        nets = {"CE": ce_net, "PE": pe_net}
+        strat.ce_strike, strat.pe_strike, strat.expiry = 24100, 23900, self.EXPIRY
+        strat.broker = MagicMock()
+        strat.broker.get_owned_net_qty.side_effect = lambda strike, expiry, opt: nets[opt]
+        strat.helper.wait_for_fill.return_value = False   # no fill lookup: price falls back to 0.0
+        # exit books P&L off live marks when no fill price came back
+        strat.helper.get_ltps.return_value = {str(strat.ce_id): 50.0, str(strat.pe_id): 50.0, "13": 24000.0}
+        return nets
+
+    def _assert_bought(self, strat, ce_qty=None, pe_qty=None):
+        """Exactly the buy-to-close orders given (None = no order for that leg)."""
+        expected = []
+        if ce_qty: expected.append(unittest.mock.call(24100, self.EXPIRY, "CE", ce_qty))
+        if pe_qty: expected.append(unittest.mock.call(23900, self.EXPIRY, "PE", pe_qty))
+        self.assertEqual(strat.broker.buy.call_args_list, expected)
+
     def test_strangle_exit_all_positions_with_sync(self):
-        # Strangle strategy exit_all_positions with mock quantities
-        strat = ValueImbalanceStrangle(
-            strike_selection="distance"
-        )
-        # Mock class fields
-        strat.ce_id = 12345
-        strat.pe_id = 67890
-        strat.dry_run = False # Make it run live orders code path
+        strat = ValueImbalanceStrangle(strike_selection="distance")
+        strat.ce_id, strat.pe_id = 12345, 67890
+        strat.dry_run = False  # Make it run live orders code path
         strat.nifty_lot_size = 75
-        strat.ce_lots = 1
-        strat.pe_lots = 1
+        strat.ce_lots = strat.pe_lots = 1
 
         # Scenario 1: Both legs are open short (net_qty is negative)
-        strat.helper.get_net_quantity.side_effect = lambda sid: -75 if sid in ["12345", "67890"] else 0
-        strat.helper.buy.reset_mock()
+        nets = self._use_fake_broker(strat, -75, -75)
         strat.exit_all_positions("Normal exit")
+        self._assert_bought(strat, ce_qty=75, pe_qty=75)
 
-        # Verify it attempts to buy back exactly 75 qty for both
-        strat.helper.buy.assert_any_call("12345", 75)
-        strat.helper.buy.assert_any_call("67890", 75)
-        self.assertEqual(strat.helper.buy.call_count, 2)
-
-        # Scenario 2: PE is already flat (net_qty is 0)
-        strat.helper.get_net_quantity.side_effect = lambda sid: -75 if sid == "12345" else 0
-        strat.helper.buy.reset_mock()
+        # Scenario 2: PE is already flat (net_qty is 0) -> only CE is bought
+        nets["PE"] = 0
+        strat.broker.buy.reset_mock()
+        strat.ce_lots = strat.pe_lots = 1   # the first exit zeroed the tracked lots
         strat.exit_all_positions("PE flat exit")
-
-        # Verify it only buys CE
-        strat.helper.buy.assert_called_once_with("12345", 75)
+        self._assert_bought(strat, ce_qty=75)
 
     def test_exit_never_exceeds_own_quantity(self):
         """Regression for 2026-07-30: a sibling instance short of the same strike
         inflates the broker net, and the first strategy to exit flattened both legs."""
         strat = ValueImbalanceStrangle(strike_selection="distance")
-        strat.ce_id = 12345
-        strat.pe_id = 67890
+        strat.ce_id, strat.pe_id = 12345, 67890
         strat.dry_run = False
         strat.nifty_lot_size = 65
-        strat.ce_lots = 2   # this strategy owns 130 qty per leg
-        strat.pe_lots = 2
+        strat.ce_lots = strat.pe_lots = 2   # this strategy owns 130 qty per leg
 
         # Broker shows -260 on CE (another instance is short 2 more lots) and -195 on PE.
-        strat.helper.get_net_quantity.side_effect = lambda sid: -260 if sid == "12345" else -195
-        strat.helper.buy.reset_mock()
+        self._use_fake_broker(strat, -260, -195)
         strat.exit_all_positions("Contaminated net")
 
         # Must close only its own 130, leaving the sibling's position untouched.
-        strat.helper.buy.assert_any_call("12345", 130)
-        strat.helper.buy.assert_any_call("67890", 130)
-        self.assertEqual(strat.helper.buy.call_count, 2)
+        self._assert_bought(strat, ce_qty=130, pe_qty=130)
 
     def test_exit_clamps_to_broker_when_partially_closed(self):
         """If someone else already closed part of the leg, never over-buy into a long."""
         strat = ValueImbalanceStrangle(strike_selection="distance")
-        strat.ce_id = 12345
-        strat.pe_id = 67890
+        strat.ce_id, strat.pe_id = 12345, 67890
         strat.dry_run = False
         strat.nifty_lot_size = 65
-        strat.ce_lots = 2   # thinks it owns 130
-        strat.pe_lots = 2
+        strat.ce_lots = strat.pe_lots = 2   # thinks it owns 130
 
         # Broker only shows -65 left on CE; PE is fully flat already.
-        strat.helper.get_net_quantity.side_effect = lambda sid: -65 if sid == "12345" else 0
-        strat.helper.buy.reset_mock()
+        self._use_fake_broker(strat, -65, 0)
         strat.exit_all_positions("Partially closed elsewhere")
 
-        strat.helper.buy.assert_called_once_with("12345", 65)
+        self._assert_bought(strat, ce_qty=65)
 
     def _advanced_with_fake_broker(self, nets, lot_size=75):
         """NiftyAdvancedImbalance live-mode with a fake ExecutionBroker whose owned net
@@ -316,29 +318,21 @@ class TestPremiumStrikeSelection(unittest.TestCase):
         from strategies.value_imbalance.nifty_value_imbalance_straddle import ValueImbalanceStrategy
         
         strat = ValueImbalanceStrategy(dry_run=False, initial_lots=1)
-        strat.ce_id = 999
-        strat.pe_id = 888
+        strat.ce_id, strat.pe_id = 999, 888
         strat.nifty_lot_size = 25
-        strat.ce_lots = 1
-        strat.pe_lots = 1
+        strat.ce_lots = strat.pe_lots = 1
 
         # Scenario 1: Both legs are open short (-25)
-        strat.helper.get_net_quantity.side_effect = lambda sid: -25 if sid in ["999", "888"] else 0
-        strat.helper.buy.reset_mock()
-        
+        nets = self._use_fake_broker(strat, -25, -25)
         strat.exit_all_positions("Normal target exit")
-        
-        strat.helper.buy.assert_any_call("999", 25)
-        strat.helper.buy.assert_any_call("888", 25)
-        self.assertEqual(strat.helper.buy.call_count, 2)
-        
+        self._assert_bought(strat, ce_qty=25, pe_qty=25)
+
         # Scenario 2: CE is already flat (0)
-        strat.helper.get_net_quantity.side_effect = lambda sid: 0 if sid == "999" else -25
-        strat.helper.buy.reset_mock()
-        
+        nets["CE"] = 0
+        strat.broker.buy.reset_mock()
+        strat.ce_lots = strat.pe_lots = 1   # the first exit zeroed the tracked lots
         strat.exit_all_positions("CE flat exit")
-        
-        strat.helper.buy.assert_called_once_with("888", 25)
+        self._assert_bought(strat, pe_qty=25)
 
     def test_trail_arms_and_exits_on_rupee_mtm(self):
         """The trail runs on total_pnl, so it arms at an absolute rupee profit and
