@@ -35,6 +35,10 @@ import sqlite3
 
 import pandas as pd
 
+import os, sys
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+from lib.nse_holidays import is_regular_session  # NSE holidays + Muhurat: one shared calendar
+
 DEFAULT_DB = r"C:\dhan_algo\dhan_algo\Options Data\nifty_options.db"
 
 # ── Regime math — ported 1:1 from rs_dashboard/lib/optionsRegime.ts ──────────
@@ -234,7 +238,7 @@ def get_trading_days(con, start, end):
             q += " AND datetime <= ?"
             params.append(end + " 23:59:59")
     q += " ORDER BY 1"
-    return [r[0] for r in con.execute(q, params).fetchall()]
+    return [r[0] for r in con.execute(q, params).fetchall() if is_regular_session(r[0])]
 
 
 def load_day(con, day, wings):

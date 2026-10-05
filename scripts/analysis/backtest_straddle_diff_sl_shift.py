@@ -29,6 +29,9 @@ import numpy as np
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 DB_PATH = os.path.join(PROJECT_ROOT, "Options Data", "nifty_options.db")
 
+sys.path.insert(0, PROJECT_ROOT)
+from lib.nse_holidays import is_regular_session, effective_expiry_date  # NSE holidays + Muhurat: one shared calendar
+
 LOT_SIZE = 65
 
 def calc_dhan_cost(txn_type: str, qty: int, price: float) -> float:
@@ -73,7 +76,7 @@ def run_backtest(start_date="2025-09-22", end_date="2026-09-22",
         ORDER BY dt
     """, (f"{start_date} 00:00:00", f"{end_date} 23:59:59"))
     
-    dates = [r[0] for r in cur.fetchall()]
+    dates = [r[0] for r in cur.fetchall() if is_regular_session(r[0])]
     print(f"Loaded {len(dates)} trading days between {start_date} and {end_date}.")
 
     trades = []
@@ -97,7 +100,7 @@ def run_backtest(start_date="2025-09-22", end_date="2026-09-22",
 
         # Calculate true DTE
         day_date = datetime.strptime(day, "%Y-%m-%d").date()
-        exp_date = datetime.strptime(expiry, "%Y-%m-%d").date()
+        exp_date = effective_expiry_date(datetime.strptime(expiry, "%Y-%m-%d").date())  # holiday label -> real expiry session
         dte = (exp_date - day_date).days
         is_expiry_day = (dte == 0)
 

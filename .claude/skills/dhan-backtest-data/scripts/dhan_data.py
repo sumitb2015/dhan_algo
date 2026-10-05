@@ -110,11 +110,16 @@ SESSION = ("09:15", "15:29")
 
 
 def load_ohlcv(symbol: str, interval: str = "D", start: Optional[str] = None,
-               end: Optional[str] = None, session: Optional[tuple] = SESSION) -> pd.DataFrame:
+               end: Optional[str] = None, session: Optional[tuple] = SESSION,
+               regular_sessions_only: bool = True) -> pd.DataFrame:
     """Load OHLCV for `symbol` at `interval`, lower-case columns, sorted, de-duplicated, optionally sliced.
 
     `session=("09:15","15:29")` drops out-of-session 1-minute bars BEFORE resampling; pass `session=None` for the
     raw file. It does nothing for daily data.
+
+    `regular_sessions_only=True` (default) also drops every bar dated on a weekend, an NSE holiday or a Diwali
+    Muhurat session (lib/nse_holidays.py): the daily/1-minute files carry the 2025-10-21 Muhurat hour as if it were
+    a full day, and the stock files hold flat zero-volume placeholder bars on holidays. Pass False to inspect the raw file.
 
     Intraday bars above 1 minute are built with lib.intraday_signals.resample_tf so a backtest sees the same
     09:15-aligned bars the live strategies do. 60-minute bars inherit that function's documented caveat: the
@@ -133,6 +138,11 @@ def load_ohlcv(symbol: str, interval: str = "D", start: Optional[str] = None,
             from lib.intraday_signals import resample_tf
             df = resample_tf(df, minutes)
     df = df[~df.index.duplicated(keep="last")].sort_index()
+    if regular_sessions_only:
+        if ROOT not in sys.path:
+            sys.path.insert(0, ROOT)
+        from lib.nse_holidays import drop_non_regular_sessions
+        df = drop_non_regular_sessions(df)
     if start:
         df = df.loc[pd.Timestamp(start):]
     if end:

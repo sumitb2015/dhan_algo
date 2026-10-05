@@ -13,6 +13,7 @@ import pandas as pd
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, ROOT)
+from lib.nse_holidays import is_regular_session, effective_expiry_date  # NSE holidays + Muhurat: one shared calendar
 from lib.rolling_straddle_rules import trail_lock_pct, is_balanced, straddle_sl_hit, leg_sl_hit, roll_reason
 
 DB = os.path.join(ROOT, "Options Data", "nifty_options.db")
@@ -47,11 +48,13 @@ def run_day(conn, day, a):
                            "WHERE datetime >= ? AND datetime <= ? AND expiry = ?", conn, params=(d0, d1, exp))
     if df.empty:
         return None
-    is_expiry = exp == day
+    # A holiday-labelled expiry (2023-06-29, 2024-04-11) really expires the session before.
+    exp_eff = effective_expiry_date(exp).isoformat()
+    is_expiry = exp_eff == day
     start = a.expiry_start if is_expiry else a.start
     px = {(r.datetime[11:16], r.strike, r.option_type): (r.close, r.iv) for r in df.itertuples()}
     spot = {t[11:16]: s for t, s in df.groupby("datetime")["spot"].first().items()}
-    exp_end = pd.Timestamp(f"{exp} 15:30:00")
+    exp_end = pd.Timestamp(f"{exp_eff} 15:30:00")
     qty = a.lots * a.lot_size
     slip = a.slippage
     day_stop = a.capital * a.day_stop_pct / 100.0
@@ -211,6 +214,8 @@ def main():
     conn = sqlite3.connect(f"file:{DB}?mode=ro", uri=True)
     rows = []
     for d in pd.date_range(a.start_date, a.end_date, freq="B"):
+        if not is_regular_session(d):
+            continue
         day = d.strftime("%Y-%m-%d")
         out = run_day(conn, day, a)
         if not out:

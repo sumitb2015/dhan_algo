@@ -17,6 +17,8 @@ import numpy as np
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 DB_PATH = os.path.join(PROJECT_ROOT, "Options Data", "nifty_options.db")
+sys.path.insert(0, PROJECT_ROOT)
+from lib.nse_holidays import is_regular_session  # NSE holidays + Muhurat: one shared calendar
 
 def floor_to_50(val):
     return math.floor(float(val) / 50.0) * 50.0
@@ -39,8 +41,8 @@ def run_backtest(start_date="2023-01-01", end_date="2026-06-30", roll_type="poin
     # Generate trading dates instantly in memory
     print(f"Generating trading dates from {start_date} to {end_date}...")
     dt_range = pd.date_range(start=start_date, end=end_date, freq='B')
-    dates = [d.strftime('%Y-%m-%d') for d in dt_range]
-    print(f"Generated {len(dates)} business days to process.")
+    dates = [d.strftime('%Y-%m-%d') for d in dt_range if is_regular_session(d)]
+    print(f"Generated {len(dates)} regular NSE sessions to process (weekends, holidays and Muhurat hours skipped).")
 
     daily_results = []
 

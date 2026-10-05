@@ -73,6 +73,13 @@ fetch from a second provider to fill a gap.
   - **MCX Crude Oil Futures / Options** (`strategies/crudeoil/`): No historical 1-minute MCX candle dataset exists.
 
 ## Traps found in the repo's own data
+- **Holiday and Muhurat sessions**: the daily/1-min files and the options DB carry the Diwali Muhurat hour as if it
+  were a full day (2021-11-04, 2022-10-24, 2024-11-01, 2025-10-21; 60 bars each in 1-min). Traded as a regular
+  session it shifts "N days before expiry" offsets and fakes a trade day. `load_ohlcv` drops weekends, NSE holidays
+  and Muhurat days by default (`regular_sessions_only=True`); in any hand-written date loop use
+  `lib.nse_holidays.is_regular_session` / `drop_non_regular_sessions`. The calendar is
+  `rs_dashboard/lib/nseHolidays.json`, pulled from NSE's API (`docs/NSE_HOLIDAYS_2026.md`); never hand-copy a list.
+  The NIFTY daily CSV also lacks sessions 2021-01-01, 2023-08-29 and 2024-08-29 (real trading days).
 - **NIFTY 1-min contains out-of-session bars**: 26,187 pre-open bars (09:00 to 09:14) and 36,811 post-close bars
   (15:30 to 23:59, nearly all zero-volume, mostly 2021-22, on 218 of 1249 days). Unfiltered, every resample gets
   partial 09:00/09:05/09:10 bins. `load_ohlcv` drops them by default (`session=("09:15","15:29")`) and yields exactly

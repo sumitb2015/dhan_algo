@@ -29,6 +29,9 @@ PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(_
 DATA_ROOT = os.path.join(PROJECT_ROOT, "Options Data", "NIFTY")
 VIX_PATH = os.path.join(PROJECT_ROOT, "Historical Data", "Indices", "INDIA_VIX.csv")
 
+sys.path.insert(0, PROJECT_ROOT)
+from lib.nse_holidays import is_regular_session, effective_expiry_date  # NSE holidays + Muhurat: one shared calendar
+
 MONTH_NAMES = ["Jan", "Feb", "Mar", "Apr", "May", "Jun",
                "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
 
@@ -185,7 +188,8 @@ def fetch_multi_leg_cycles(start_date: str, end_date: str,
                     pass
 
             try:
-                expiry_dt = _parse_date(expiry)
+                # The session the contract really expires on (a holiday label moves to the day before).
+                expiry_dt = effective_expiry_date(_parse_date(expiry))
             except ValueError:
                 continue
                 
@@ -385,7 +389,7 @@ def fetch_multi_leg_cycles(start_date: str, end_date: str,
             ]
             bars.append(MultiLegBar(dt=ts.to_pydatetime(), spot=spot, legs=legs_bars))
 
-        is_complete = any(b.dt.date() == expiry_dt for b in bars)
+        is_complete = any(b.dt.date() == effective_expiry_date(expiry_dt) for b in bars)
         gap_reason = f"only {len(bars)} bars" if len(bars) < 10 else None
         cycles.append(ExpiryCycle(expiry, bars, is_complete, gap_reason, strike_lookup))
 
@@ -1713,12 +1717,14 @@ def run_backtest(leg_configs: List[LegConfig], cycles: List[ExpiryCycle],
     # Count all unique trading dates up front for accurate progress %
     all_trade_candidates = []
     for cycle in cycles:
-        exp_dt = _parse_date(cycle.expiry_date)
+        exp_dt = effective_expiry_date(_parse_date(cycle.expiry_date))
         if len(cycle.bars) < 5:
             continue
         dg = {}
         for b in cycle.bars:
             dg.setdefault(b.dt.date(), []).append(b)
+        # Drop weekends / NSE holidays / Muhurat hours: they would shift the "N days before expiry" offset.
+        dg = {d: v for d, v in dg.items() if is_regular_session(d)}
         s_dates = sorted(dg.keys())
         if strategy_type == "expiry_day":
             tds = [exp_dt] if exp_dt in dg else []
@@ -1754,7 +1760,7 @@ def run_backtest(leg_configs: List[LegConfig], cycles: List[ExpiryCycle],
             pass
 
     for cycle in cycles:
-        expiry_dt = _parse_date(cycle.expiry_date)
+        expiry_dt = effective_expiry_date(_parse_date(cycle.expiry_date))
 
         if len(cycle.bars) < 5:
             bar_dates = {b.dt.date() for b in cycle.bars}
@@ -1771,6 +1777,8 @@ def run_backtest(leg_configs: List[LegConfig], cycles: List[ExpiryCycle],
         for bar in cycle.bars:
             d = bar.dt.date()
             day_groups.setdefault(d, []).append(bar)
+        # Same calendar as the live tools: only regular sessions count as trading days (and as DTE offsets).
+        day_groups = {d: v for d, v in day_groups.items() if is_regular_session(d)}
 
         # Decide which dates to trade
         sorted_dates = sorted(day_groups.keys())

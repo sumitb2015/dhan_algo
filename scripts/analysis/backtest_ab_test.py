@@ -18,6 +18,8 @@ import numpy as np
 import pandas as pd
 
 ROOT     = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+import sys; sys.path.insert(0, ROOT)
+from lib.nse_holidays import drop_non_regular_sessions  # NSE holidays + Muhurat: one shared calendar
 DATA_DIR = os.path.join(ROOT, "Daily_Historical_Data_Fresh")
 IDX_PATH = os.path.join(ROOT, "Historical Data", "NIFTY_50_Daily_5Y.csv")
 
@@ -72,7 +74,7 @@ CONFIGS = [
 # ── shared data loading ────────────────────────────────────────────────────────
 
 def load_index():
-    df = pd.read_csv(IDX_PATH, parse_dates=["Datetime"])
+    df = drop_non_regular_sessions(pd.read_csv(IDX_PATH, parse_dates=["Datetime"]), "Datetime")
     df = df.rename(columns={"Datetime": "date", "Close": "close"})
     df["date"] = df["date"].dt.date
     return df.sort_values("date").reset_index(drop=True)[["date", "close"]]
@@ -82,7 +84,7 @@ def load_stock(sym):
     path = os.path.join(DATA_DIR, f"{sym}_Daily_2Y.csv")
     if not os.path.exists(path):
         return None
-    df = pd.read_csv(path, parse_dates=["Datetime"])
+    df = drop_non_regular_sessions(pd.read_csv(path, parse_dates=["Datetime"]), "Datetime")
     col_map = {"Datetime": "date", "Open": "open", "High": "high",
                "Low": "low", "Close": "close"}
     if "Volume" in df.columns:
