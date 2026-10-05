@@ -79,7 +79,7 @@ venv\Scripts\python.exe tests/test_04_option_chain.py
 
 Each test module exposes a `run(helper)` function. The orchestrator in `tests/run_all_tests.py` initialises a single `DhanHelper` and passes it to each module.
 
-**⚠️ The suite has real side effects — do not run it casually against a live account.** `test_06_orders.py` places a real AMO limit order (deep below LTP, then cancels), and `test_11_maintenance.py` / `test_13_advanced_logic.py` call `cancel_all_orders()`, which kills any pending orders from live strategies. Run individual read-only modules (e.g. `test_04_option_chain.py`) when you just need to verify data plumbing. The Dhan quote API is rate-limited to ~1 req/s — expect 429 backoff during the suite.
+**⚠️ The suite has real side effects — do not run it casually against a live account.** Never loop over `tests/test_*.py`: the numbered tests (01-19) and several others use the real session. `test_11_maintenance.py` also overwrites `master_list.csv` with NSE-only data (MCX and BSE lookups then fail until `fetch_security_list()` is re-run with its default segments). Run only the stubbed suites listed in [docs/ALGO_KIT.md](docs/ALGO_KIT.md#running-the-tests-safely). `test_06_orders.py` places a real AMO limit order (deep below LTP, then cancels), and `test_11_maintenance.py` / `test_13_advanced_logic.py` call `cancel_all_orders()`, which kills any pending orders from live strategies. Run individual read-only modules (e.g. `test_04_option_chain.py`) when you just need to verify data plumbing. The Dhan quote API is rate-limited to ~1 req/s — expect 429 backoff during the suite.
 
 ### Dashboard (Next.js)
 
@@ -116,6 +116,7 @@ lib/
   execution_broker.py       # ExecutionBroker front (dhan/zerodha/kotak) for option strategies
   strategy_risk.py          # resolve_exit_qty / resolve_exit_qty_broker safe exit sizing
   strategy_state_helper.py  # save_strategy_state() / check_shutdown_trigger()
+  algo_kit/                 # Plug-and-play strategy parts: PositionStore, confirmed_fill_price, TrailingStop, TargetSpec, quote helpers, CLI flag groups — docs/ALGO_KIT.md
   zerodha/                  # Kite session + margin/basket-margin helpers
   kotak/                    # Kotak Neo session (TOTP+MPIN), response unwrapping, margin/positions
 strategies/
