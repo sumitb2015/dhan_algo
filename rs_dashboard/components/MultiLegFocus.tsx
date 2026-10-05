@@ -26,14 +26,13 @@ import {
   computeLegTrailingSL, computeStrategyMetrics, checkStrategyRisk, fallbackLotSize, planScale, scalePlanSignature,
   positionProduct, computeBasketStatus, closedFillFromRow,
   findSiblingLegCollisions, describeSiblingCollisions,
-  legQtyWarningsFor, recordOutsideReduction, legCountsToday, type LegQtyWarning,
+  legQtyWarningsFor, recordOutsideReduction, type LegQtyWarning,
   findUntrackedPositions, residualBrokerAvg, findContractDrift, type ContractDrift, contractHintFromRow, legFromUntracked, mergeImportedLegs, brokerClampSlice,
   normalizeTradeRow, ownOrderIds, repriceEstimatedCloses, MLF_ORDER_SOURCE, type NormalizedTrade,
   type MultiLegLeg, type MultiLegBasket, type StrategyRiskConfig, type MultiLegStatus,
 } from '@/lib/multiLegFocus';
 import { closeOrderProduct } from '@/lib/positionProduct';
 import { planLegShifts, clampShiftSteps } from '@/lib/strikeShift';
-import { pnlMultiplier } from '@/lib/multiLegArchive';
 import { previousDaysPnl, type TradeHistoryResponse } from '@/lib/portfolioDailyPnl';
 import { DEFAULT_LEG_COLUMNS, loadLegColumns, saveLegColumns, type LegColumns } from '@/lib/legColumns';
 import { strikeAllowed, strikeRuleApplies, allowedStrikes, snapToAllowed, assessSpread } from '@/lib/farExpiryRules';
@@ -1081,19 +1080,6 @@ export default function MultiLegFocus({
     const t = setInterval(load, 10 * 60_000);
     return () => { alive = false; clearInterval(t); };
   }, []);
-  // Realized = legs closed today (frozen at their exit fill); Unrealized = live legs
-  // marked to market from entry. Today = Realized + Unrealized.
-  const { overallTodayPnl, todayRealized, todayUnrealized } = useMemo(() => {
-    let realized = 0;
-    let unrealized = 0;
-    for (const b of baskets) {
-      const mult = pnlMultiplier(b);
-      const legs = b.legs.filter(l => legCountsToday(l, pnlNow));
-      realized += computeStrategyMetrics(legs.filter(l => l.status === 'CLOSED'), l => ltpFor(b, l), mult).totalPnlRupees;
-      unrealized += computeStrategyMetrics(legs.filter(l => l.status !== 'CLOSED'), l => ltpFor(b, l), mult).totalPnlRupees;
-    }
-    return { overallTodayPnl: realized + unrealized, todayRealized: realized, todayUnrealized: unrealized };
-  }, [baskets, ltpFor, pnlNow]);
   const prevDaysPnl = useMemo(() => {
     if (!tradeHistory) return null;
     const todayIst = new Date(pnlNow).toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
@@ -1131,6 +1117,17 @@ export default function MultiLegFocus({
   // Last positions poll's rows per broker, audited against the basket store by
   // findContractDrift: unrecorded closes / wrong entry averages / estimated exits.
   const [brokerRows, setBrokerRows] = useState<Partial<Record<Broker, Record<string, unknown>[]>>>({});
+  // Today's P&L exactly as the brokers report it: realized + unrealized summed over
+  // every polled broker's positions rows (all three shapers emit both fields).
+  const overallTodayPnl = useMemo(() => {
+    let total = 0;
+    for (const rows of Object.values(brokerRows)) {
+      for (const r of rows ?? []) {
+        total += (Number(r.realizedProfit) || 0) + (Number(r.unrealizedProfit) || 0);
+      }
+    }
+    return total;
+  }, [brokerRows]);
   const contractDrift = useMemo<ContractDrift[]>(
     () => (Object.entries(brokerRows) as [Broker, Record<string, unknown>[]][])
       .flatMap(([br, rows]) => findContractDrift(br, rows, baskets, pnlNow)),
@@ -3182,7 +3179,7 @@ export default function MultiLegFocus({
               className={`h-8 flex items-center px-3 rounded-lg text-xs font-bold font-mono tabular-nums border ${
                 overallTodayPnl >= 0 ? 'text-emerald-400 border-emerald-500/30 bg-emerald-500/5' : 'text-rose-400 border-rose-500/30 bg-rose-500/5'
               }`}
-              title="Open legs (MTM from entry) plus legs closed today: the same scope as the broker's positions P&L. Positions no strategy tracks are not included."
+              title="Today's P&L as reported by the brokers (realized + unrealized across all positions)."
             >
               Today: {overallTodayPnl >= 0 ? '+' : ''}{fmtMoney(overallTodayPnl)}
             </span>
@@ -3200,21 +3197,6 @@ export default function MultiLegFocus({
                 Recon ⚠ {new Set(contractDrift.map(d => d.ident)).size}
               </span>
             )}
-            {([
-              ['Realized', todayRealized, 'Legs closed today, frozen at their exit fill.'],
-              ['Unrealized', todayUnrealized, 'Live legs marked to market from entry (a carried position counts from its entry price, not yesterday\'s close).'],
-            ] as const).map(([label, value, tip]) => (
-              <span
-                key={label}
-                className={`h-8 flex items-center gap-1.5 px-2.5 rounded-lg text-xs font-bold font-mono tabular-nums border ${
-                  value >= 0 ? 'text-emerald-400 border-emerald-500/30 bg-emerald-500/5' : 'text-rose-400 border-rose-500/30 bg-rose-500/5'
-                }`}
-                title={tip}
-              >
-                <span className="text-zinc-400 font-medium text-[11px]">{label}:</span>
-                {value >= 0 ? '+' : ''}{fmtMoney(value)}
-              </span>
-            ))}
             {prevDaysPnl ? (
               <Link
                 href="/portfolio/diary"
