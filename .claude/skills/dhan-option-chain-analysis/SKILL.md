@@ -126,6 +126,9 @@ owns the pacing.
   spot fetch. This is the chain's own reference price at fetch time, which for MCX is the
   futures price, not a spot index.
 
+## A chain row's `last_price` can be stale — check it against the book before solving IV from it
+On a thin strike the last traded price can be hours old. An IV solved from it skews every delta built on it, and Dhan's own delta did not have that failure mode. The chain row also carries `top_bid_price` / `top_ask_price`: use `trustedMark(last, bid, ask)` (`lib/optionsPricing.ts`) — a last price inside the book is kept, one outside it is replaced by the mid, a one-sided book returns null (use the chain IV instead), no quotes at all keeps the last price. A live WebSocket tick is fresh and needs no check. Unconfirmed in practice: how often `last_price` falls outside the book on liquid strikes (see the vault note on this).
+
 ## Finding ATM / building a strike window
 
 `helper.get_atm_strike(df, underlying_ltp=None)` and `get_atm_row(df, underlying_ltp=None)`

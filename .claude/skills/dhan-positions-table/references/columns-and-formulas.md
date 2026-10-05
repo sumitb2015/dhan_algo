@@ -27,7 +27,7 @@ Amber on OTM % when a SHORT leg is in the money (`text-amber-400`; colour steps 
 
 ## Helpers (pure, in `lib/multiLegFocus.ts`, tested in `lib/multiLegFocus.test.ts`)
 `legAvgPrice`, `legExitPrice`, `legQtyUnits`, `legPnlPct`, `legOtmPct`, `formatExpiryLabel`, plus the older
-`legPnl`, `basketTotalPnl`, `classifyBasketStructure`, `computeCalendarPayoffCurve`, `findSiblingLegCollisions`.
+`legPnl`, `basketTotalPnl`, `classifyBasketStructure`, `findSiblingLegCollisions` (the calendar payoff is `buildPayoffModel` in `lib/optionsPayoff.ts`; `computeCalendarPayoffCurve` was deleted 2026-10-05).
 Rules: return `number | null`; never coerce missing to 0; the ratio helpers use the same qty and multiplier as
 `legPnl` so the percentage always agrees with the rupee figure; parse dates by hand (no `new Date`) so the day never
 shifts with the time zone. Test at least: short vs long, CE vs PE, CLOSED vs OPEN, zero avg/qty/spot/ltp, crude multiplier.

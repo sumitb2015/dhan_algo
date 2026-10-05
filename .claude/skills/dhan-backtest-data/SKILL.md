@@ -43,6 +43,8 @@ Same shape the vendor templates expect from OpenAlgo, so their strategy/portfoli
 fetch step. Intervals: `D`, `1m`, `3m`, `5m`, `15m`, `60m`... Bars above 1 m go through `lib.intraday_signals.resample_tf`,
 so backtest bars equal the live strategies' bars. `python dhan_data.py` runs a self-check.
 
+**Option pricing in a backtest:** import `lib/options_pricing.py` (`greeks_from_days`, `price_option`, `implied_vol`); never write a private Black-Scholes, normal CDF or rate in a backtest script. It uses the same 6.5% rate and 365-day year as the live strategy and the dashboard, so a backtest sizes off the Greeks the strategy trades on. A result recorded at an older rate is reproducible with an explicit rate argument (`backtest_short_straddle.py --rate 0.06`).
+
 ## What data exists (verified 2026-09-26; run `describe()` for the truth)
 | Data | Location | Coverage |
 |---|---|---|

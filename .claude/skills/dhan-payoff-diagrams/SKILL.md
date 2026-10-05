@@ -52,7 +52,9 @@ Piecewise-linear payoff curves only kink at strikes:
 - The window only decides what is *drawn*. Never derive stats from it (next section).
 
 ### 3. Breakevens and Bounded Extremes: Exact, Not Sampled
-`exactExpiryProfile(legs, lotSize)` evaluates the payoff at every strike, at spot 0, and along the straight tail beyond the highest strike, so results do not depend on the sampled range:
+> **Implementation note (2026-10-05):** `exactExpiryProfile`, `zeroCrossings` and `findBreakevens` were deleted; `buildPayoffModel` (lib/optionsPayoff.ts) now solves break-evens by bisection (rounded to 2 dp) and takes extremes from the kink values. The rules below still hold.
+
+The solver evaluates the payoff at every strike, at spot 0, and along the straight tail beyond the highest strike, so results do not depend on the sampled range:
 - **Breakevens** = every sign change of that point list (`zeroCrossings`), linearly interpolated. A run of exact zeros counts once and only if the sign really flips; a curve that only touches zero, or sits flat on it, has no breakeven. `findBreakevens(curve)` uses the same walk for callers that only have a sampled curve.
 - **Bounded max profit / max loss** come from the same kink values (a long put's best point is at spot 0: strike − premium), never from `Math.max/min` of the drawn samples. Those window figures survive only as `maxProfitInRange` / `maxLossInRange`, which must be shown with `rangeLo`/`rangeHi`.
 - Failure this replaced (NISM example, spot 6100): a long strangle 6200 CE + 6000 PE returned no breakevens (real: 5715 and 6485) and a long put showed a window value as "maximum profit". Regression tests: `lib/optionsStrategy.test.ts` ("exact expiry profile" block).
@@ -89,7 +91,7 @@ A single "both legs at intrinsic value at expiration" curve is not economically 
   const effectiveFarExpiry = basket.farExpiry
     || basket.legs.find(l => l.status !== 'CLOSED' && l.expiry && l.expiry !== basket.expiry)?.expiry;
   ```
-  If `hasMixedExpiry` is true, suppress the naive single-expiry `computePayoff` and route through `computeCalendarPayoffCurve(legs, spot, basket.expiry, effectiveFarExpiry, step)`.
+  If `hasMixedExpiry` is true, suppress the naive single-expiry `computePayoff` and use `buildPayoffModel` / `computeMultiExpiryStats`: the book is valued as of the NEAREST expiry, later legs keep their time value (`computeCalendarPayoffCurve` was deleted).
 - **Return on Margin**: Calculate and surface max profit as a percentage of margin (`(calendarCurve.maxPnl / basketMargin) * 100`) so capital efficiency is clearly visible alongside single-expiry strategies.
 
 ---
@@ -249,7 +251,7 @@ Semantics every page now shares (each was a real divergence):
 - **Focus Tool and Covered Call (2026-10-05):** strike selection and delta rules now use the model delta too. Focus Tool: the chain is mapped to quotes in one place (`FocusTool.tsx` chain fetch) through `modelAbsDelta100` in `lib/focusToolRules.ts`
   (central recipe; Dhan's delta only when the model cannot price the strike, so a delta stop never silently falls back to SL ×); the pure rules and the Python parity fixtures are untouched. Covered Call: `chainLegGreeks` in `lib/coveredCallEngine.ts`
   drives `computeBook` (book Greeks, no longer summed from the chain), `suggestCoveredCall`, the write-call delta and the chain modal; the terminal keeps the chain response's future for the forward.
-- **Python side (2026-10-05):** `lib/options_pricing.py` is a line-for-line port of `optionsPricing.ts` (same Abramowitz-Stegun normal CDF, so the two agree to ~1e-9). The diagonal-call, adaptive-strangle and condor-to-ratio strategies, `live_options_tracker`,
+- **Python side (2026-10-05):** `lib/options_pricing.py` is a line-for-line port of `optionsPricing.ts` (the same Hart normal-CDF algorithm, so the two agree to ~1e-9). The diagonal-call, adaptive-strangle and condor-to-ratio strategies, `live_options_tracker`,
   the CSP scanner/watchlist, the options-screener collector (vectorised `implied_vols`) and the four options backtests all price through it; their private Black-Scholes/IV/normal-CDF copies are deleted. Every strategy now uses 6.5% (it was 7%, 6% or none in
   different files). `tests/test_options_pricing_parity.py` checks the port against `optionsPricing.parity.json`, which the TypeScript test generates (`UPDATE_PARITY=1 node --test lib/optionsPricing.test.ts`) and verifies on every run, so changing a formula in one language
   fails the other's test. Remaining non-library clock: the screener collector's MCX expiry close (exchange-specific data, not a formula).
@@ -291,15 +293,11 @@ from `py_vollib` 1.0.12 + `blackscholes` 0.2.2. It fails on the old buggy formul
 a test pass. The rate, 365-day year, 15:40 close and "futures as the forward" are choices no reference can prove.
 
 **Deliberately NOT on the library (do not "fix" these in passing):**
-- `lib/optionsStrategy.ts` date-based machinery (`buildMultiExpiryCurve`, `buildHeatmapGrid`, `PositionsAnalysis`, `useUnderlyingPayoff`, `positionSnapshot`,
-  `FlyagonalPayoff`): P&L-by-date columns use whole calendar days from a chosen date (`daysBetweenDates`), not the intraday clock. They share the pricing
-  core (`bsPrice` / `impliedVolFromPrice` are the library's) but not `calculateTimeToExpiryYears`. Unifying the clock would move Sensibull-parity numbers; do it
-  as its own change with its own comparison.
-- `lib/diagonalStrikeAdvisor.ts` keeps its own spot Black-Scholes at r = 0.07 for Python/TS sizing parity with `strategies/diagonal_call` (see `dhan-diagonal-call`).
-- Python strategies and backtests (`strategies/*`, `scripts/analysis/*`, `csp_*`, `live_options_tracker.py`) have their own Python maths. The dashboard's
-  Portfolio Greeks script no longer does (it returns market data only).
-- `app/options-monitor/page.tsx` still calls the rounded `computeBsGreeks` in ~20 places for price *estimates* (₹0.05 tick is right there); its per-leg Greeks
-  feed `computePortfolioMetrics` sums — migrate those to `computeBsGreeksExact` if its net Greeks ever need to be exact.
+- `buildHeatmapGrid` columns are whole calendar days from a chosen date (`daysBetweenDates`); only the PRICING is the library's (`payoffGrid`), not a new intraday clock per column.
+- `computePayoff` in `basketStrategies.ts`: pure intrinsic payoff, no pricing, so it cannot disagree with a Greek.
+- The screener collector's MCX expiry-close time (exchange hours, not a formula).
+- Dhan's chain Greeks as PER-STRIKE DISPLAY values (option-chain tables, Skew, SmartChain) and the Focus Tool's last-resort delta fallback.
+Everything else, in either language, prices through `lib/optionsPricing.ts` / `lib/options_pricing.py`.
 
 ### `computeBsGreeks`: four Greeks corrected 2026-10-05, guarded by finite-difference tests
 Decision (see the vault note on following Sensibull vs correctness): formulas and units are verified against the price itself,
@@ -630,7 +628,7 @@ fix to one is a fix to all — and a regression shows up on all.
 - **Solve IV from the live premium; chain IV is the fallback only.** `PnlTableModal` and the Position Map
   Greeks invert the grid's own Black-Scholes against the live leg price. Dhan's chain IV mis-prices the grid
   (calls read low, puts high), so a table built on chain IV disagrees with the live P&L before any spot move.
-  Use `legsMissingIv()` to find legs that still need a fallback, and **refuse to build the grid without a live
+  Use the model's `ivAssumedIdx` / `positionPayoff(...).missingIv` to find legs that still need a fallback (`legsMissingIv()` was deleted), and **refuse to build the grid without a live
   spot** rather than defaulting one.
 - **Position Map pricing** (`components/multiLegFocus/PositionVisualizer*.tsx`, page
   `/multi-leg-focus/visualization`): leg prices come from live ticks, then the REST option chain — **never the

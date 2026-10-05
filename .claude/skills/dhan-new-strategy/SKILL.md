@@ -181,6 +181,8 @@ Write it first; keep it at the depth of `strategies/overnight_fly/strategy.md`. 
 - [ ] Simulate each row of the failure-mode table (make `broker.buy` return `None`) and confirm the
       tracked state matches reality afterwards (adapt `assets/smoke_test_skeleton.py`).
 - [ ] A paper position file cannot be picked up by a live run (persist `dry_run`; refuse a mismatch).
+- [ ] Any victim-side `detect_phantom_leg(_broker)` call passes `dry_run=self.dry_run`: a paper book is not at the broker, so without it the first check zeroes every paper leg (this wiped paper positions in 12 strategies until 2026-10-05).
+- [ ] Greeks, IV and option prices come from `lib/options_pricing.py` (`greeks_from_days`, `greeks_for_leg`, `implied_vol`); no private Black-Scholes, normal CDF or rate. Pure functions import it OUTSIDE the broker-SDK `try/except ImportError` so they stay usable (and unit-testable) when the SDK is missing.
 - [ ] Unit tests for the pure decision functions and for any new exit-sizing path.
 - [ ] Run `dhan-strategy-auditor` on the file; fix its findings.
 - [ ] First live session: 1 lot, watched in the broker app.

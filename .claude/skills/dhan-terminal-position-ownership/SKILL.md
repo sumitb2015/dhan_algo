@@ -362,6 +362,9 @@ re-entry on SL/target) to `FocusTool.tsx` (`b04d0ce`, `66a8fe1`, `50f4bca`,
 - **`adjustFillQty` must spread the old fill** (`...f`) — rebuilding the
   object field by field silently dropped every ledger field added later
   (roll counters, cost-stop flags, pending re-entries).
+- **A stamped entry value carries its basis (delta).** `ceDeltaEntry`/`peDeltaEntry` are |delta| × 100 at open, the base of a Delta SL / target / trail. When the source of that number changes (Dhan's chain delta -> the model delta, 2026-10-05), legs already open keep the old basis:
+  `ceDeltaModel`/`peDeltaModel` mark a model-basis entry, and `legDeltaBasis(fill, leg)` picks the matching LIVE delta (`RowLive.ceDelta` model vs `ceDeltaDhan`). A new stamped field that is later compared with a live value needs the same
+  marker, never a silent re-baseline of persisted state. Adds to a running leg keep the leg's existing basis.
 
 ## Before You Ship
 - Does every lock/exit/P&L decision route through an ownership check

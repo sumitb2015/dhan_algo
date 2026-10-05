@@ -40,7 +40,7 @@ Run it in parallel with the margin/funds checks in `placeBasket`; for a shift, c
 
 ## Calendar and diagonal
 Two expiries in one basket; a leg on the second expiry is highlighted in the Expiry cell. The at-expiry payoff is
-meaningless (legs do not share an expiry), so `computeCalendarPayoffCurve` values the strategy at the near expiry with
+meaningless (legs do not share an expiry), so `buildPayoffModel` (formerly `computeCalendarPayoffCurve`) values the strategy at the near expiry with
 the near leg at intrinsic and the far leg priced by Black-76. Adding a calendar template needs a real second expiry
 (refuse otherwise). Changing the basket's expiry moves DRAFT legs on the old front expiry with it; placed legs and legs
 deliberately parked on the far expiry stay put (`dhan-terminal-position-ownership` invariant 8).

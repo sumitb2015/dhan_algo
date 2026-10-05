@@ -33,9 +33,10 @@ default, never forward-tested (see the backtest caveat below). Positional (`MARG
 | lots sizing + caps | `calculate_required_short_lots` | `calculateRequiredShortLots` in `diagonalStrikeAdvisor.ts` (same `maxShortRatio=1.25`, `maxShortLots=6`) |
 | portfolio Greeks / gamma zones | `calculate_portfolio_greeks` | `calculatePortfolioGreeks` (zones at -0.10/-0.15/-0.20) |
 | Baskets template | — | `basketStrategies.ts` `low-gamma-diagonal-call` (front 25-45 / far 60-120 DTE), `strategyPresets.ts`, `optionsStrategy.ts` |
-Both sides use their own Black-Scholes Greeks (the TS side defaults IV 0.15 when a leg has none) — they are an
-*advisor*, not the broker's chain Greeks, so they will not match `dhan-position-greeks` output. `tests/test_diagonal_call.py`
-and `lib/diagonalStrikeAdvisor.test.ts` pin the sizing; extend both when a constant changes.
+Both sides price through the central library (spot Black-Scholes, 6.5%, 0.25-day floor): Python `lib/options_pricing.py` (`greeks_from_days`), TypeScript `computeBsGreeksExact` (the TS side defaults IV 0.15 when a leg has none). The strategy and the
+backtest carry no Black-Scholes of their own; they are an *advisor*, not the broker's chain Greeks, so they will not match `dhan-position-greeks` output. `tests/test_diagonal_call.py`, `lib/diagonalStrikeAdvisor.test.ts` (which also fails if
+`MIN_DTE_DAYS` or the library rate drift) and `tests/test_options_pricing_parity.py` pin the sizing and the maths; extend them when a constant changes.
+**Rate history:** the strategy, advisor and backtest used 7% until 2026-10-05; at 6.5% the backtest moved +43.3% -> +42.7% ROI (all 290 cycles identical to the old code at the same rate).
 
 ## Bugs already paid for
 - **Unsafe unwind / retry paths (review of `f54b31c`).** `exit_all` must never sell the long while a short is open
@@ -55,7 +56,7 @@ and `lib/diagonalStrikeAdvisor.test.ts` pin the sizing; extend both when a const
   the leg being checked: long leg -> `"SELL"`, short leg -> `"BUY"`. It was passing `"BUY"` for the long leg, so
   a missing long call was never detected. A vanished **long** with a live short = naked risk -> `exit_all`; a
   vanished **short** just means it was closed elsewhere -> mark it flat, recompute LCR, save position. Keep the
-  asymmetry; the test `test_phantom_leg_detection_sides` covers both directions.
+  asymmetry; the test `test_phantom_leg_detection_sides` covers both directions. The call also passes `dry_run=self.dry_run` (a paper book is not at the broker, see `dhan-new-strategy`).
 - **Margin cap (`7fb4a8d`).** Never size shorts from delta alone; the lots ceiling is a margin guard.
 - Short-entry failure after the long filled -> `UNWINDING` (close the long, return to `FLAT`); long-entry failure
   -> abort without selling. A short roll close must be *confirmed* before a new short is sold.

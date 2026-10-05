@@ -1,6 +1,6 @@
 ---
 name: dhan-position-greeks
-description: Use when computing, aggregating, joining, or displaying option Greeks (Delta/Gamma/Theta/Vega) for a live position book — the chain-supplied per-contract Greeks pipeline behind Positions Analysis' Greeks tab, ScalperGreeksModal, DeltaPanel and margin-allocator (lib/positionGreeks.ts, lib/positionLegs.ts, components/analytics/GreeksTab.tsx, components/analytics/ScalperGreeksModal.tsx). Covers the position-scaling multiplier every one of the four Greeks must share, the chain-join and IV-normalization quirks, and the units convention for Dhan's own chain Greeks. Also covers the Portfolio Greeks page (/options/delta), the one place Greeks are computed server-side from live premiums (scripts/tools/positions_delta_data.py, lib/deltaDesk.ts, components/deltaDesk/) and the three weighting bases (index units / per lot / the broker analyzer's 1-lot-per-leg). Not for self-computed Black-76/Black-Scholes Greeks used in target-date "what-if" simulation or the payoff curve itself (Options Monitor, T+0 curve, SD bands) — that engine and its own unit conventions are dhan-payoff-diagrams; the two pipelines use different units and must never be mixed.
+description: Use when computing, aggregating, joining, or displaying option Greeks (Delta/Gamma/Theta/Vega) for a live position book, and for what is left of Dhan's chain-supplied per-contract Greeks. Every book total (Positions Analysis' Greeks tab, ScalperGreeksModal, position snapshot, Baskets panel, Multi-Leg Focus, Portfolio Greeks, Covered Call book) is now COMPUTED by the central pricing library from each leg's live premium (lib/optionsPricing.ts, lib/positionPayoff.ts, lib/multiLegGreeks.ts, lib/deltaDesk.ts; Python: lib/options_pricing.py); the chain-supplied pipeline sections below are historical context for per-strike display and the Focus Tool delta fallback. Covers the position-scaling multiplier every Greek must share, the chain-join and IV-normalization quirks, the units convention, the Portfolio Greeks page (/options/delta) and its three weighting bases (index units / per lot / the broker analyzer's 1-lot-per-leg). Not for self-computed Black-76/Black-Scholes what-if simulation or the payoff curve itself — that is dhan-payoff-diagrams (same library, same units).
 ---
 
 # Position-Level Option Greeks
@@ -44,7 +44,7 @@ already "₹ per 1 vol point," not "₹ per 100% vol."
 
 ---
 
-## The pipeline, file by file
+## The pipeline, file by file (HISTORICAL — `lib/positionGreeks.ts` was deleted 2026-10-05; kept to explain per-strike chain Greeks)
 
 1. **`lib/optionsStrategy.ts`** — `lookupChainLegData(oc, strike, type)` finds one strike's
    chain row; `ChainLegData.greeks` is Dhan's raw per-unit `{delta, gamma, theta, vega}`.
@@ -115,7 +115,7 @@ leg silently vanish from the total with no indication the number is incomplete.
 
 ---
 
-## Units convention for chain-supplied Greeks (Pipeline 1) — already final, no rescaling
+## Units convention for chain-supplied Greeks (Pipeline 1, historical) — already final, no rescaling
 
 | Greek | Per-unit value straight from Dhan's chain | After `× posSign(leg)` and summing across legs |
 |---|---|---|

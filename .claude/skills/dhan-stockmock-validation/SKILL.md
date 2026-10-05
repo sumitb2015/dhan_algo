@@ -80,6 +80,8 @@ venv/bin/python .claude/skills/dhan-stockmock-validation/scripts/stockmock_clien
 
 ---
 
+> **Rate when validating (2026-10-05):** the local engine now prices through `lib/options_pricing.py` (6.5%). The runs it was validated against StockMock with used 6%, so validate with `backtest_short_straddle.py --rate 0.06` to reproduce them; the rate only matters for delta-selected legs (an ATM straddle is identical at either rate; a 25-delta strangle moved ₹103,144 -> ₹102,435 over 2025-01..2026-06). A re-validation at the library rate has NOT been run (it needs the user's StockMock login).
+
 ## 3. StockMock Serialization Reference & Quirks
 
 When constructing custom payloads for StockMock, note these reverse-engineered rules:
