@@ -176,6 +176,35 @@ class LegExecutor:
         ex = self.close_all(tracked)
         return OpenResult(failed=failed, unwound=ex.closed, stuck=ex.remaining)
 
+    # ── restart ─────────────────────────────────────────────────────────────────────────────────────
+
+    def reconcile(self, legs: Dict[str, dict], shortfall_only: bool = True) -> List[str]:
+        """Cross-check tracked legs against the broker after a restart. Returns the mismatches (empty = ok).
+
+        Diagnostic only: it never sizes an exit (close_leg does that off broker truth). With
+        shortfall_only=True a mismatch is only "the broker holds LESS than we track", because a sibling
+        instance on the same strike legitimately adds to the broker's net; shortfall_only=False demands an
+        exact match. A leg whose position cannot be read is skipped, not called a mismatch. Skip reconcile
+        while the book is UNWINDING/FLATTENING: a tracked leg may never have been placed, and close_leg
+        already calls a missing leg flat.
+        """
+        if self.dry_run:
+            return []
+        problems = []
+        for name, leg in legs.items():
+            if not leg:
+                continue
+            expected = -leg["qty"] if leg["side"] == SELL else leg["qty"]
+            try:
+                net = int(self.broker.get_owned_net_qty(leg["strike"], leg["expiry"], leg["opt_type"]))
+            except Exception as e:
+                self.log.warning(f"Reconcile: could not read {name} {leg['opt_type']} {leg['strike']}: {e}")
+                continue
+            short = (net > expected) if leg["side"] == SELL else (net < expected)
+            if (shortfall_only and short) or (not shortfall_only and net != expected):
+                problems.append(f"{name} {leg['opt_type']} {leg['strike']}: tracked {expected}, broker {net}")
+        return problems
+
     # ── exit ────────────────────────────────────────────────────────────────────────────────────────
 
     def close_leg(self, leg: dict, qty: Optional[int] = None, name: str = "") -> CloseResult:

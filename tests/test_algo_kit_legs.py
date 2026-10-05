@@ -276,3 +276,36 @@ def test_close_all_reports_partial_progress():
 def test_leg_pnl_sign():
     assert leg_pnl("SELL", 100, 70, 75) == 2250 and leg_pnl("BUY", 100, 130, 75) == 2250
     assert leg_pnl("SELL", 100, 130, 75) == -2250
+
+
+# ── reconcile ───────────────────────────────────────────────────────────────────────────────────────────────
+
+def test_reconcile_matches_a_clean_book():
+    ex, b, h = mk("dhan")
+    b.net.update({(26050, "PE"): 75, (25850, "PE"): -75})
+    legs = {"long_up": held("BUY", 26050), "short_up": held("SELL", 25850)}
+    assert ex.reconcile(legs) == [] and ex.reconcile(legs, shortfall_only=False) == []
+
+
+def test_reconcile_flags_a_shortfall_in_either_direction():
+    ex, b, h = mk("dhan")
+    b.net.update({(26050, "PE"): 0, (25850, "PE"): 0})               # broker holds neither leg
+    legs = {"long_up": held("BUY", 26050), "short_up": held("SELL", 25850)}
+    out = ex.reconcile(legs)
+    assert len(out) == 2 and "long_up" in out[0] and "short_up" in out[1]
+
+
+def test_reconcile_tolerates_a_sibling_on_the_same_strike_unless_exact():
+    ex, b, h = mk("dhan")
+    b.net[(25850, "PE")] = -150                                      # a sibling added 75 more short
+    legs = {"short_up": held("SELL", 25850)}
+    assert ex.reconcile(legs) == []                                  # we still hold ours: fine
+    assert len(ex.reconcile(legs, shortfall_only=False)) == 1        # exact mode: a mismatch
+
+
+def test_reconcile_skips_unreadable_legs_and_paper_books():
+    ex, b, h = mk("dhan")
+    b.read_error = True
+    assert ex.reconcile({"short_up": held("SELL", 25850)}) == []
+    exp, *_ = mk(dry=True)
+    assert exp.reconcile({"short_up": held("SELL", 25850)}) == []
