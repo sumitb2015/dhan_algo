@@ -25,6 +25,7 @@ import {
   resolveCriteriaStrike, closestPremiumStrike, absDelta100, legTargetDeltaLevel, ownedLegStop, legStopHit, rowQtyMultiplier, multipliedLots,
   tradingDaysBack, tradingDte, dateForDte, rangeWindow, rangeWindowPhase, candleBucket, addMinutesHm,
   type RowLive, type PosRow, type WorkerHold,
+  clampHm, ENTRY_TIME_MIN, ENTRY_TIME_MAX, EXIT_TIME_MIN, EXIT_TIME_MAX,
 } from './focusToolRules.ts';
 import type { FocusRow } from './focusToolRows.ts';
 
@@ -975,6 +976,14 @@ test('strike criteria — the docs\' worked examples', () => {
   assert.equal(resolveCriteriaStrike('DELTA', 'CE', { a: '30', b: '' }, ctx), 20200);
   assert.equal(resolveCriteriaStrike('DELTA_RANGE', 'CE', { a: '20', b: '40' }, ctx), 20100);
   assert.equal(resolveCriteriaStrike('DELTA_RANGE', 'CE', { a: '40', b: '45' }, ctx), null);
+  // Closest Delta accepts 0–100 inclusive, but a blank box is "not set", never delta 0.
+  assert.equal(resolveCriteriaStrike('DELTA', 'CE', { a: '', b: '' }, ctx), null);
+  assert.notEqual(resolveCriteriaStrike('DELTA', 'CE', { a: '0', b: '' }, ctx), null);
+  assert.notEqual(resolveCriteriaStrike('DELTA', 'CE', { a: '100', b: '' }, ctx), null);
+  assert.equal(resolveCriteriaStrike('DELTA', 'CE', { a: '101', b: '' }, ctx), null);
+  assert.equal(resolveCriteriaStrike('DELTA_RANGE', 'CE', { a: '', b: '40' }, ctx), null);
+  assert.equal(resolveCriteriaStrike('DELTA_RANGE', 'CE', { a: '20', b: '' }, ctx), null);
+  assert.equal(resolveCriteriaStrike('DELTA_RANGE', 'CE', { a: '0', b: '100' }, ctx) != null, true);
   // Synthetic Future = ATM + CE − PE = 20000 at ATM here; +1 step → 20100.
   assert.equal(resolveCriteriaStrike('SYNTH_FUT', 'CE', { a: '1', b: '' }, ctx), 20100);
   assert.equal(resolveCriteriaStrike('EXACT', 'PE', { a: '20100', b: '' }, ctx), 20100);
@@ -994,7 +1003,10 @@ test('strike criteria — the docs\' worked examples', () => {
   assert.equal(resolveCriteriaStrike('ROUND', 'CE', { a: '3', b: '' }, r), 24400);
   assert.equal(resolveCriteriaStrike('ROUND', 'PE', { a: '1', b: '' }, r), 24100);
   assert.equal(resolveCriteriaStrike('ROUND', 'CE', { a: '-1', b: '' }, r), 24100);
-  assert.equal(resolveCriteriaStrike('ROUND', 'CE', { a: '0', b: '' }, r), 24150);
+  // ATM reference = the eligible ROUND strike nearest ATM (a tie goes up), not the raw ATM 24150.
+  assert.equal(resolveCriteriaStrike('ROUND', 'CE', { a: '0', b: '' }, r), 24200);
+  assert.equal(resolveCriteriaStrike('ROUND', 'PE', { a: '0', b: '' }, { ...r, atm: 24100 }), 24100);
+  assert.equal(resolveCriteriaStrike('ROUND', 'PE', { a: '0', b: '' }, { ...r, atm: 24050 }), 24100);   // 24050 is a tie → up
   // Premium <= (Focus Tool's old ₹ rule) keeps the target as a ceiling.
   assert.equal(resolveCriteriaStrike('PREM_LTE', 'CE', { a: '50', b: '' }, ctx), 20100);
 });
@@ -1071,11 +1083,15 @@ test('broker-level trailing kinds (doc numbers)', () => {
   assert.equal(evaluateGlobalRisk(lt, ctx(6000, 11000)).exitAll, true);
 });
 
-test('BTST / Positional range windows (trading days, weekdays only)', () => {
+test('BTST / Positional range windows (trading days, skipping weekends and NSE holidays)', () => {
   // 2026-10-01 is a Thursday; the previous trading day is Wednesday 2026-09-30, Monday's is the Friday before.
   assert.equal(tradingDaysBack('2026-10-01', 1), '2026-09-30');
-  assert.equal(tradingDaysBack('2026-10-05', 1), '2026-10-02');
-  assert.equal(tradingDte('2026-10-01', '2026-10-06'), 3);   // Thu → Tue: Fri, Mon, Tue
+  // 2026-10-02 (Gandhi Jayanti) is an NSE holiday: Monday's previous trading day is Thursday.
+  assert.equal(tradingDaysBack('2026-10-05', 1), '2026-10-01');
+  assert.equal(tradingDte('2026-10-01', '2026-10-06'), 2);   // Thu → Tue: Fri is a holiday, so Mon, Tue
+  assert.equal(tradingDte('2026-10-19', '2026-10-21'), 1);   // Tue 20th (Dussehra) is a holiday
+  assert.equal(dateForDte('2026-10-21', 1), '2026-10-19');
+  assert.equal(dateForDte('2026-10-20', 0), '2026-10-19');   // expiry on a holiday moves to the day before
   assert.equal(tradingDte('2026-10-06', '2026-10-06'), 0);
   assert.equal(dateForDte('2026-10-06', 1), '2026-10-05');
   // BTST: start 10:30 yesterday, End "Tomorrow" 09:30 = today.
@@ -1116,4 +1132,13 @@ test('review fixes: one stop object per leg; ORB stop comes from the stamp the o
   assert.match(legStopHit(ownedLegStop(r, 'CE', lv), 'CE', lv) ?? '', /CE SL 30 pts hit/);
   // Not owned → no stop at all.
   assert.equal(ownedLegStop(held({ fill: { ceStrike: 1, peStrike: 1, ceQty: 0, peQty: 0, ts: '' } }), 'CE', lv), null);
+});
+
+test('Entry / Exit Time are clamped to AlgoTest windows', () => {
+  assert.equal(clampHm('09:10', ENTRY_TIME_MIN, ENTRY_TIME_MAX), '09:16');
+  assert.equal(clampHm('15:40', ENTRY_TIME_MIN, ENTRY_TIME_MAX), '15:28');
+  assert.equal(clampHm('09:35', ENTRY_TIME_MIN, ENTRY_TIME_MAX), '09:35');
+  assert.equal(clampHm('09:16', EXIT_TIME_MIN, EXIT_TIME_MAX), '09:17');
+  assert.equal(clampHm('15:30', EXIT_TIME_MIN, EXIT_TIME_MAX), '15:29');
+  assert.equal(clampHm('', EXIT_TIME_MIN, EXIT_TIME_MAX), '');
 });

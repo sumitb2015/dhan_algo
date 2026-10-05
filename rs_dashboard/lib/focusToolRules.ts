@@ -21,6 +21,7 @@
  * clock itself cannot be tested at 15:17.
  */
 
+import { NSE_HOLIDAYS } from './nseHolidays';
 import type {
   FocusRow, FocusDte, FocusRowStatus, FocusReentryMode, FocusReentryTrigger, FocusPendingReentry, FocusLegSimpleMom, FocusLazyLeg, FocusLegRangeBreakout, FocusOverallMode,
   FocusLegSlRule, FocusLegTrailSl, FocusLegOrbSl, FocusOrbStamp, FocusStrikeCriteria, FocusLegCrit,
@@ -1241,6 +1242,18 @@ export function rangeBreakoutOn(
   return rb.end > entryTime;
 }
 
+/** AlgoTest's allowed windows: Entry Time 09:16–15:28, Exit Time 09:17–15:29. */
+export const ENTRY_TIME_MIN = '09:16';
+export const ENTRY_TIME_MAX = '15:28';
+export const EXIT_TIME_MIN = '09:17';
+export const EXIT_TIME_MAX = '15:29';
+
+/** Clamp an 'HH:MM' into [min, max]; anything malformed is returned as is (the time input already guards the format). */
+export function clampHm(hm: string, min: string, max: string): string {
+  if (!HM_RE.test(hm)) return hm;
+  return hm < min ? min : hm > max ? max : hm;
+}
+
 /** 'HH:MM' plus `minutes`, as 'HH:MM' — null when malformed or it would pass midnight. */
 export function addMinutesHm(hm: string, minutes: number): string | null {
   if (!HM_RE.test(hm) || !Number.isFinite(minutes)) return null;
@@ -1722,7 +1735,8 @@ export function resolveCriteriaStrike(
     case 'ROUND': {
       const iv = Number(ctx.roundInterval) > 0 ? Number(ctx.roundInterval) : 100;
       const n = Math.trunc(Number.isFinite(a) ? a : 0);
-      if (n === 0) return listedOrNull(oc, atm);
+      // ATM reference: the eligible round strike nearest ATM (a tie goes up), not the raw ATM.
+      if (n === 0) return listedOrNull(oc, Math.floor(atm / iv + 0.5) * iv);
       // OTM is above ATM for a CE, below for a PE; ITM the other way. ATM itself is never counted.
       const up = (leg === 'CE') === (n > 0);
       const k = Math.abs(n);
@@ -1768,7 +1782,8 @@ export function resolveCriteriaStrike(
       return closestPremiumStrike(oc, leg, st * a / 100);
     }
     case 'DELTA': {
-      if (!(a > 0)) return null;
+      // 0–100 inclusive; a blank box is "not set", not delta 0.
+      if (String(crit?.a ?? '').trim() === '' || !(a >= 0 && a <= 100)) return null;
       let best: { strike: number; delta: number } | null = null;
       for (const r of rows()) {
         if (r.delta == null) continue;
@@ -1777,7 +1792,8 @@ export function resolveCriteriaStrike(
       return best?.strike ?? null;
     }
     case 'DELTA_RANGE': {
-      if (!(a >= 0) || !(b > 0) || b < a) return null;
+      if (String(crit?.a ?? '').trim() === '' || String(crit?.b ?? '').trim() === '') return null;
+      if (!(a >= 0) || !(b <= 100) || b < a) return null;
       let best: { strike: number; delta: number } | null = null;
       for (const r of rows()) {
         if (r.delta == null || r.delta < a || r.delta > b) continue;
@@ -1795,28 +1811,30 @@ export function resolveCriteriaStrike(
 
 const dayMs = 86_400_000;
 const isWeekday = (iso: string) => { const d = new Date(`${iso}T00:00:00Z`).getUTCDay(); return d !== 0 && d !== 6; };
+/** A weekday the exchange is open (NSE_HOLIDAYS covers the years it lists; others are weekdays-only). */
+const isTradingDay = (iso: string) => isWeekday(iso) && !NSE_HOLIDAYS.has(iso);
 const addDays = (iso: string, n: number) => new Date(Date.parse(`${iso}T00:00:00Z`) + n * dayMs).toISOString().slice(0, 10);
 
-/** The trading day `n` weekdays before `iso` (n = 1 → previous weekday). Exchange holidays are NOT known here. */
+/** The trading day `n` trading days before `iso` (n = 1 → previous trading day), skipping weekends and NSE holidays. */
 export function tradingDaysBack(iso: string, n: number): string {
   let d = iso;
   let left = Math.max(0, Math.trunc(n));
-  while (left > 0) { d = addDays(d, -1); if (isWeekday(d)) left--; }
+  while (left > 0) { d = addDays(d, -1); if (isTradingDay(d)) left--; }
   return d;
 }
 
-/** Trading days (weekdays) from `today` to `expiry`: 0 on expiry day. Null when past or unparseable. */
+/** Trading days from `today` to `expiry`: 0 on expiry day. Null when past or unparseable. */
 export function tradingDte(today: string, expiry: string): number | null {
   if (!/^\d{4}-\d{2}-\d{2}$/.test(today) || !/^\d{4}-\d{2}-\d{2}$/.test(expiry) || expiry < today) return null;
   let n = 0;
-  for (let d = today; d < expiry; d = addDays(d, 1)) if (isWeekday(addDays(d, 1))) n++;
+  for (let d = today; d < expiry; d = addDays(d, 1)) if (isTradingDay(addDays(d, 1))) n++;
   return n;
 }
 
-/** The weekday `dte` trading days before `expiry`. */
+/** The trading day `dte` trading days before `expiry` (an expiry on a holiday moves to the day before, as NSE does). */
 export function dateForDte(expiry: string, dte: number): string {
   let d = expiry;
-  while (!isWeekday(d)) d = addDays(d, -1);
+  while (!isTradingDay(d)) d = addDays(d, -1);
   return tradingDaysBack(d, dte);
 }
 
@@ -1828,8 +1846,8 @@ export interface RangeWindow { startDate: string; start: string; endDate: string
  *  - btst: the previous trading day at the entry time → today at End;
  *  - positional: the day `startDte` trading days before expiry at the entry time
  *    → the day `endDte` before expiry at End.
- * Null when the settings are invalid. Holidays are not known: a weekday holiday
- * counts as a trading day.
+ * Null when the settings are invalid. Weekends and NSE holidays (NSE_HOLIDAYS)
+ * are skipped; a year that list lacks counts weekdays only.
  */
 export function rangeWindow(
   rb: FocusLegRangeBreakout, entryTime: string, today: string, expiry: string,

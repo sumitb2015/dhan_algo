@@ -47,7 +47,7 @@ import {
   legPinnedStrike, costStopReason, legOwnEntry, slRollStrike, DEFAULT_SL_ROLL_MAX,
   reentryConfig, evaluateReentry, reentryWindowClosed, monitoringStopped, momentumReentryKind, momentumTrigger,
   absDelta100, addMinutesHm, resolveCriteriaStrike, closestPremiumStrike, ownedLegStop, legStopHit, legDeltaNow, legTargetDeltaLevel,
-  multipliedLots, rangeWindow, rangeWindowPhase, rowHasMultiDayRange, candleBucket, tradingDte,
+  multipliedLots, clampHm, ENTRY_TIME_MIN, ENTRY_TIME_MAX, EXIT_TIME_MIN, EXIT_TIME_MAX, rangeWindow, rangeWindowPhase, rowHasMultiDayRange, candleBucket, tradingDte,
   legSlRuleOn, legStopLevel, legTargetSpotLevel, legTgtUnitLabel, MAX_LEG_REENTRIES, pendingReentryLevel, pendingReentryHit, legTargetReason, costReentryBasis,
   awaitingMomentumQuote, MOMENTUM_QUOTE_WAIT_MS, legTargetLevel,
   evaluateEntryMomentum, reRangeWindow, entryMomentumOn, overallSlConfig, overallProgress, nextOverallPeak, evaluateOverallExit, overallExitKind, evaluateOverallReentry, MAX_OVERALL_REENTRIES, rangeBreakoutOn, rangeBreakoutHit, costStopApplies, MAX_LAZY_LEGS, legSlMultiplier, legTarget, nextLazyLegId, lazyLegStrike, runningLazyLeg, simpleMomOn, simpleMomLevel, simpleMomHit,
@@ -68,8 +68,8 @@ const STRIKE_STEP: Record<FocusUnderlying, number> = { NIFTY: 50, BANKNIFTY: 100
 type FocusViewMode = 'pro' | 'table' | 'cards';
 const VIEW_MODE_KEY = 'focusTool.viewMode';
 
-// ATM-offset dropdown range for the strike editor: +-10 steps either side.
-const OFFSET_OPTIONS: number[] = Array.from({ length: 21 }, (_, i) => i - 10);
+// ATM-offset dropdown range for the strike editor: +-30 steps either side (AlgoTest offers 30 OTM).
+const OFFSET_OPTIONS: number[] = Array.from({ length: 61 }, (_, i) => i - 30);
 
 function offsetLabel(n: number, step: number): string {
   if (n === 0) return 'ATM';
@@ -1330,9 +1330,9 @@ function LegSimpleMomControl({ row, leg, onUpdate, disabled, exclusiveNote }: {
 }
 
 const LAZY_STRIKE_OPTIONS = [
-  ...[5, 4, 3, 2, 1].map(n => ({ value: String(-n), label: `ITM${n}` })),
+  ...Array.from({ length: 30 }, (_, i) => 30 - i).map(n => ({ value: String(-n), label: `ITM${n}` })),
   { value: '0', label: 'ATM' },
-  ...[1, 2, 3, 4, 5].map(n => ({ value: String(n), label: `OTM${n}` })),
+  ...Array.from({ length: 30 }, (_, i) => i + 1).map(n => ({ value: String(n), label: `OTM${n}` })),
 ];
 
 /**
@@ -3045,13 +3045,13 @@ function FocusTableRowImpl({
               <span className="text-[10px] font-black text-zinc-400 uppercase tracking-wider flex items-center gap-1">
                 <Clock className="h-2.5 w-2.5 text-zinc-500" /> ENTRY
               </span>
-              <TimeInput value={row.entryTime} onChange={v => onUpdate({ entryTime: v })} />
+              <TimeInput value={row.entryTime} onChange={v => onUpdate({ entryTime: clampHm(v, ENTRY_TIME_MIN, ENTRY_TIME_MAX) })} />
             </div>
             <div className="flex items-center justify-between gap-1 bg-zinc-900/60 border border-zinc-800/60 rounded-lg px-2 py-1">
               <span className="text-[10px] font-black text-zinc-400 uppercase tracking-wider flex items-center gap-1">
                 <Clock className="h-2.5 w-2.5 text-zinc-500" /> EXIT
               </span>
-              <TimeInput value={row.exitTime} onChange={v => onUpdate({ exitTime: v })} />
+              <TimeInput value={row.exitTime} onChange={v => onUpdate({ exitTime: clampHm(v, EXIT_TIME_MIN, EXIT_TIME_MAX) })} />
             </div>
           </div>
 
@@ -3494,9 +3494,9 @@ function FocusProRowImpl({
         </ToggleGroup>
         <ProField label="Lots"><LotStepper value={row.lots} onChange={v => onUpdate({ lots: v })} /></ProField>
         <ProField label="Window" title="Entry time → exit time (IST)">
-          <div className="w-[5.5rem]"><TimeInput value={row.entryTime} onChange={v => onUpdate({ entryTime: v })} /></div>
+          <div className="w-[5.5rem]"><TimeInput value={row.entryTime} onChange={v => onUpdate({ entryTime: clampHm(v, ENTRY_TIME_MIN, ENTRY_TIME_MAX) })} /></div>
           <ArrowRight className="size-3.5 text-zinc-500" />
-          <div className="w-[5.5rem]"><TimeInput value={row.exitTime} onChange={v => onUpdate({ exitTime: v })} /></div>
+          <div className="w-[5.5rem]"><TimeInput value={row.exitTime} onChange={v => onUpdate({ exitTime: clampHm(v, EXIT_TIME_MIN, EXIT_TIME_MAX) })} /></div>
         </ProField>
         <ProField label="Expiry">
           <Select value={row.expiry || expiries[0] || ''} disabled={expiryLocked || expiries.length === 0}
@@ -3791,13 +3791,13 @@ function FocusRowCardImpl({
             <span className="text-[10px] font-black text-zinc-500 uppercase tracking-wider flex items-center gap-1">
               <Clock className="h-2.5 w-2.5 text-zinc-500" /> ENTRY
             </span>
-            <TimeInput value={row.entryTime} onChange={v => onUpdate({ entryTime: v })} />
+            <TimeInput value={row.entryTime} onChange={v => onUpdate({ entryTime: clampHm(v, ENTRY_TIME_MIN, ENTRY_TIME_MAX) })} />
           </div>
           <div className="flex items-center justify-between gap-1 bg-zinc-900/50 border border-zinc-800/50 rounded-lg px-2 py-1">
             <span className="text-[10px] font-black text-zinc-500 uppercase tracking-wider flex items-center gap-1">
               <Clock className="h-2.5 w-2.5 text-zinc-500" /> EXIT
             </span>
-            <TimeInput value={row.exitTime} onChange={v => onUpdate({ exitTime: v })} />
+            <TimeInput value={row.exitTime} onChange={v => onUpdate({ exitTime: clampHm(v, EXIT_TIME_MIN, EXIT_TIME_MAX) })} />
           </div>
         </div>
 
