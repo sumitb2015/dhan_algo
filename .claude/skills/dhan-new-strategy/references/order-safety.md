@@ -120,3 +120,10 @@ nothing. Keep paper and live in one code path (`if not self.dry_run:` around the
 | `entry_combined_pts` set once at entry | trail dead after a roll | trail on `total_pnl` |
 | `sys.exit(1)` without `save_state` | dashboard shows RUNNING for a dead process | save first |
 | Comparing `total_pnl` to a target that may be `None` | TypeError on first flat tick | guard `is not None` |
+
+
+## Confirming a fill on a non-Dhan broker
+`helper.wait_for_fill()` polls Dhan order status, so it cannot confirm a Zerodha/Kotak order id: it times out and
+reports "not filled", and the strategy keeps tracking a leg that already closed. Use
+`lib/algo_kit.confirm_order_fill(...)`, which waits on Dhan status for `--broker dhan` and on the broker's own net
+position (read `net_before` first; `resolve_exit_qty_broker` returns it) for the others. See `docs/ALGO_KIT.md`.

@@ -12,8 +12,6 @@ references/state-and-recovery.md; for delivery use "CNC".
 """
 
 import argparse
-import json
-import logging
 import os
 import sys
 import time
@@ -43,6 +41,10 @@ from lib.strategy_state_helper import (  # noqa: E402
 from lib.strategy_risk import resolve_exit_qty_broker  # noqa: E402
 from lib.execution_broker import ExecutionBroker, ExecutionBrokerError  # noqa: E402
 from lib.telegram_alert import notify  # noqa: E402
+# Plumbing comes from lib/algo_kit (docs/ALGO_KIT.md): import only the parts the strategy needs.
+from lib.algo_kit import (  # noqa: E402
+    PositionStore, cli, confirmed_fill_price, in_window, setup_strategy_logging, update_trail,
+)
 
 STRATEGY_KEY_DEFAULT = "nifty_my_strategy"     # TODO(strategy): must match strategyRegistry.ts
 LOG_FOLDER = "my_strategy"                     # TODO(strategy): must match STRATEGY_LOG_DIRS
@@ -52,32 +54,10 @@ STRIKE_STEP = 50
 INDEX_ID = "13"                                # index id for spot; option chain underlying is 26000
 
 debug_dir = os.path.join(project_root, "debug")
-log_dir = os.path.join(debug_dir, "logs", LOG_FOLDER)
-os.makedirs(log_dir, exist_ok=True)
-
-
-class FlushingFileHandler(logging.FileHandler):
-    def emit(self, record):
-        super().emit(record)
-        self.flush()
-
-
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - %(levelname)s - %(message)s",
-    handlers=[
-        FlushingFileHandler(os.path.join(log_dir, f"{datetime.now().strftime('%Y%m%d')}{instance_log_suffix()}.log")),
-        logging.StreamHandler(),
-    ],
-)
-logger = logging.getLogger(__name__)
+logger = setup_strategy_logging(project_root, LOG_FOLDER, instance_log_suffix(), name=__name__)
 
 
 # ── Pure decision logic: no broker, no clock, no I/O. Unit-test these. ──────────────────────────
-
-def in_entry_window(now_hhmm: str, start_time: str, eod_time: str) -> bool:
-    return start_time <= now_hhmm < eod_time
-
 
 def atm_strike(spot: float, step: int = STRIKE_STEP) -> int:
     return int(round(spot / step) * step)
@@ -92,18 +72,6 @@ def choose_strikes(spot: float) -> tuple:
 def leg_sl_level(entry_price: float, sl_pct: float) -> float:
     """Short-leg stop: premium rising to entry * (1 + sl_pct) is a loss."""
     return entry_price * (1.0 + sl_pct)
-
-
-def update_trail(total_pnl: float, best_pnl: float, active: bool, start_rs: float, gap_rs: float) -> tuple:
-    """Rupee-MTM trailing stop. Returns (active, best_pnl, exit_now). Reads total_pnl, which already
-    folds in realized P&L, so it is continuous across rolls."""
-    if not active and total_pnl >= start_rs:
-        active, best_pnl = True, total_pnl
-    if active:
-        best_pnl = max(best_pnl, total_pnl)
-        if total_pnl < best_pnl - gap_rs:
-            return active, best_pnl, True
-    return active, best_pnl, False
 
 
 def inverted(ce_strike: int, pe_strike: int) -> bool:
@@ -160,41 +128,25 @@ class Strategy:
     def position_path(self) -> str:
         return os.path.join(debug_dir, f"{self.state_key}_position.json")
 
+    def _position_store(self) -> PositionStore:
+        return PositionStore(self.position_path, self.dry_run, log=logger)
+
     def save_position(self):
-        """Atomic write. A torn file is what could lose a live leg."""
-        data = {
-            "version": 1, "dry_run": self.dry_run, "position_open": self.position_open,
+        """Atomic write (PositionStore). A torn file is what could lose a live leg."""
+        self._position_store().save({
+            "position_open": self.position_open,
             "status": self.status, "expiry": self.expiry, "lots": self.lots, "lot_size": self.lot_size,
             "legs": self.legs, "realized_pnl": self.realized_pnl,
             "trail_active": self.trail_active, "best_pnl": self.best_pnl,
             "target_rs": self.target_rs, "stop_rs": self.stop_rs,
-            "updated_at": datetime.now().isoformat(timespec="seconds"),
-        }
-        os.makedirs(debug_dir, exist_ok=True)
-        tmp = self.position_path + ".tmp"
-        with open(tmp, "w") as f:
-            json.dump(data, f, indent=2)
-        os.replace(tmp, self.position_path)
+        })
 
     def load_position(self):
-        path = self.position_path
-        if not os.path.exists(path):
-            logger.info(f"No existing position at {path}; starting flat.")
+        # PositionStore raises PositionFileError on an unreadable file, a paper/live mismatch, or an open
+        # LIVE position whose expiry has passed. Let it propagate: never trade blind.
+        data = self._position_store().load(expiry_field="expiry")
+        if data is None or not data.get("position_open"):
             return
-        try:
-            with open(path) as f:
-                data = json.load(f)
-        except Exception as e:
-            logger.error(f"FATAL: position file {path} is unreadable ({e}). Refusing to trade blind.")
-            raise
-        if not data.get("position_open"):
-            return
-        if bool(data.get("dry_run")) != self.dry_run:
-            logger.error(
-                f"FATAL: {path} holds a {'PAPER' if data.get('dry_run') else 'LIVE'} position but this run is "
-                f"{'DRY' if self.dry_run else 'LIVE'}. Move the file aside after checking the broker."
-            )
-            sys.exit(1)
         self.position_open = True
         self.status = data.get("status", "RUNNING")
         self.expiry = data.get("expiry")
@@ -244,15 +196,9 @@ class Strategy:
         return (int(q["CONTRACT_INFO"]["SECURITY_ID"]), price) if price > 0 else (None, 0.0)
 
     def _fill_price(self, order_id, fallback):
-        """wait_for_fill() returns a bool, not a price; read the price off the order."""
-        if not order_id or order_id == "PAPER":
-            return fallback
-        if self.helper.wait_for_fill(order_id, timeout=5):
-            o = self.helper.get_order_by_id(order_id) or {}
-            px = float(o.get("averageTradedPrice", 0.0) or o.get("avgFilledPrice", 0.0) or o.get("price", 0.0))
-            if px > 0:
-                return px
-        return fallback
+        """wait_for_fill() returns a bool, not a price; the kit reads the price off the order.
+        Dhan order ids only: for Zerodha/Kotak confirm by that broker's net position instead."""
+        return confirmed_fill_price(self.helper, order_id, fallback, log=logger)
 
     def _ltp(self, leg):
         return self.helper.get_ltp(str(leg["id"]), exchange="NSE_FNO", instrument="OPTIDX")
@@ -432,7 +378,7 @@ class Strategy:
                 continue
 
             if not self.position_open:
-                if in_entry_window(now_hhmm, self.start_time, self.eod_time) and time.time() >= self.pause_until:
+                if in_window(now_hhmm, self.start_time, self.eod_time) and time.time() >= self.pause_until:
                     self.enter_position(spot)                # TODO(strategy): add your entry gate here
                 self.save_state(spot=spot)
                 time.sleep(5)
@@ -476,65 +422,31 @@ Examples:
   # Live, 2 lots, on Zerodha
   python strategies/<family>/<name>.py --live --lots 2 --broker zerodha
 """)
-    p.add_argument("--live", action="store_true", default=False, help="Place real orders. Default: dry run.")
-    p.add_argument("--lots", type=int, default=1, metavar="N", help="Lots per leg (default: 1).")
-    p.add_argument("--target-profit", type=str, default="4000", metavar="INR|%",
-                   help="Profit target in rupees or a percent of entry value, e.g. 4000 or 25%% (default: 4000).")
-    p.add_argument("--stop-loss", type=str, default="4000", metavar="INR|%",
-                   help="Max loss in rupees or a percent of entry value (default: 4000).")
+    cli.add_execution_args(p)      # --live --lots --instance-id --broker
+    cli.add_exit_args(p)           # --target-profit --stop-loss --trail-start-rs --trail-gap-rs
+    cli.add_window_args(p)         # --start-time --eod-time
+    # Strategy-specific flags stay here. Every flag has a unit and a default in its help text.
     p.add_argument("--leg-sl-pct", type=float, default=0.5, metavar="FRAC",
                    help="Per-leg stop as a fraction of entry premium (default: 0.5 = 50%%).")
-    p.add_argument("--trail-start-rs", type=float, default=2000.0, metavar="INR",
-                   help="Arm the trailing stop at this MTM profit (default: 2000).")
-    p.add_argument("--trail-gap-rs", type=float, default=1000.0, metavar="INR",
-                   help="Exit on this giveback from the best MTM (default: 1000).")
-    p.add_argument("--start-time", type=str, default="09:20", metavar="HH:MM", help="Entry not before (default: 09:20).")
-    p.add_argument("--eod-time", type=str, default="15:17", metavar="HH:MM", help="Square-off time (default: 15:17).")
     p.add_argument("--cooldown-minutes", type=int, default=5, metavar="MIN",
                    help="Pause new entries after an emergency/SL exit (default: 5).")
-    p.add_argument("--instance-id", type=str, default="", metavar="ID",
-                   help="Suffix for state/log files to run a second concurrent copy of this strategy.")
-    p.add_argument("--broker", choices=["dhan", "zerodha", "kotak"], default="dhan",
-                   help="Execution broker. Market data always comes from Dhan. Zerodha/Kotak stops are "
-                        "software-managed only (no resting broker-side stop order).")
     return p
 
 
 def validate(args):
-    errors = []
-    if args.lots < 1:
-        errors.append(f"--lots must be >= 1, got {args.lots}.")
+    errors = cli.validate_execution(args) + cli.validate_exit(args) + cli.validate_window(args)
     if not 0 < args.leg_sl_pct < 5:
         errors.append(f"--leg-sl-pct must be in (0, 5), got {args.leg_sl_pct}.")
-    if args.trail_gap_rs <= 0:
-        errors.append(f"--trail-gap-rs must be > 0, got {args.trail_gap_rs}.")
-    if args.trail_start_rs < 0:
-        errors.append(f"--trail-start-rs must be >= 0, got {args.trail_start_rs}.")
     if args.cooldown_minutes < 0:
         errors.append(f"--cooldown-minutes must be >= 0, got {args.cooldown_minutes}.")
-    for flag in ("start_time", "eod_time"):
-        try:
-            datetime.strptime(getattr(args, flag), "%H:%M")
-        except ValueError:
-            errors.append(f"--{flag.replace('_', '-')} must be HH:MM, got {getattr(args, flag)!r}.")
-    if not errors and args.start_time >= args.eod_time:
-        errors.append("--start-time must be earlier than --eod-time.")
     return errors
 
 
 def main():
     args = build_parser().parse_args()
-    state_key = f"{STRATEGY_KEY_DEFAULT}_{args.instance_id}" if args.instance_id else STRATEGY_KEY_DEFAULT
-    errors = validate(args)
-    try:
-        target, stop = parse_target_spec(args.target_profit), parse_target_spec(args.stop_loss)
-    except ValueError as e:
-        errors.append(str(e))
-    if errors:
-        for e in errors:
-            logger.error(f"[CONFIG ERROR] {e}")
-        logger.error("Aborting: fix the configuration errors above and retry.")
-        sys.exit(1)
+    state_key = cli.build_state_key(STRATEGY_KEY_DEFAULT, args.instance_id)
+    cli.exit_on_errors(validate(args), logger)      # logs every problem, exits once
+    target, stop = parse_target_spec(args.target_profit), parse_target_spec(args.stop_loss)
 
     strat = Strategy(dry_run=not args.live, lots=args.lots, target=target, stop=stop,
                      leg_sl_pct=args.leg_sl_pct, trail_start_rs=args.trail_start_rs,

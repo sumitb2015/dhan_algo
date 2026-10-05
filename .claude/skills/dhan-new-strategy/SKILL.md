@@ -22,6 +22,10 @@ read. This skill is the standard kit that closes those holes, and the workflow f
 3. **Put decision logic in pure functions** (signal, strike choice, stop levels) that take plain values
    and return plain values, so they can be unit-tested without a broker. Keep I/O in the class.
 4. **Copy `assets/strategy_skeleton.py`**, fill in the `TODO(strategy)` hooks, and keep its plumbing intact.
+   The skeleton already composes `lib/algo_kit/` (`docs/ALGO_KIT.md`: `PositionStore`, `confirmed_fill_price`,
+   `update_trail`, `in_window`, CLI flag groups, logging setup). Extend it with more kit parts
+   (`TrailingStop`, `TargetSpec`, `interruptible_sleep`, quote helpers) rather than pasting a fresh private
+   copy of `save_position`/`load_position`/`_fill_price` into the new file.
 5. **Wire the dashboard** (`references/dashboard-wiring.md`): several registries, all must agree.
 6. **Verify dry-run** end to end (checklist at the bottom), then have the read-only
    `dhan-strategy-auditor` agent review the file before any `--live` run.
@@ -66,7 +70,7 @@ the state/trigger filenames and the logs registry. Files a strategy owns:
 | `debug/logs/<folder>/YYYYMMDD[_<id>].log` | logging | flushed per record, `instance_log_suffix()` in the name |
 
 Logging is configured at import time, before `argparse` runs, so the log filename uses
-`instance_log_suffix()` (it sniffs `sys.argv`). Use a `FlushingFileHandler` so a crash doesn't lose
+`instance_log_suffix()` (it sniffs `sys.argv`). Use `setup_strategy_logging()` (it installs a `FlushingFileHandler`) so a crash doesn't lose
 the last lines. Log via `logger`, never `print`, so the dashboard log viewer sees it.
 
 ### 4. Startup sequence (order matters)

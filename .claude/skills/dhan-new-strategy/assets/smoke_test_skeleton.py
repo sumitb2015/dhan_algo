@@ -12,6 +12,7 @@ account: no network, no orders. What it proves, per the standard kit:
 Run from the project root:  venv/bin/python <this file> [path/to/strategy.py]
 """
 import importlib.util, os, sys, types, glob
+from datetime import date, timedelta
 
 def _root(d=os.path.dirname(os.path.abspath(__file__))):
     while not os.path.exists(os.path.join(d, "login.py")):
@@ -32,7 +33,7 @@ class FakeHelper:
         self.n = 0
     def start_websocket(self, *a, **k): pass
     def get_lot_size(self, s): return 75
-    def get_nearest_expiry(self, s): return "2026-09-29"
+    def get_nearest_expiry(self, s): return (date.today() + timedelta(days=7)).strftime("%Y-%m-%d")   # always in the future
     def option(self, u, strike, t):
         sid = strike * 10 + (1 if t == "CE" else 2)
         self.prices.setdefault(str(sid), 100.0)
@@ -143,7 +144,7 @@ check("reconcile mismatch refuses to start", refused)
 # 8 paper file cannot be loaded by live run
 clean(); H.__init__(); p = new(True); p.enter_position(25000.0)
 try: new(False); refused = False
-except SystemExit: refused = True
+except (SystemExit, Exception): refused = True      # PositionFileError (kit) or SystemExit (reconcile)
 check("paper position refused by live run", refused)
 clean()
 
@@ -152,6 +153,19 @@ open(f"{ROOT}/debug/{KEY}_position.json", "w").write("{not json")
 try: new(True); refused = False
 except Exception: refused = True
 check("corrupt position file refuses to start", refused)
+clean()
+
+# 10 an expired LIVE position refuses (the contracts have settled); an expired PAPER one is discarded
+import json
+def write_pos(dry, expiry):
+    json.dump({"version": 1, "dry_run": dry, "position_open": True, "status": "RUNNING", "expiry": expiry,
+               "legs": {"CE": None, "PE": None}, "realized_pnl": 0.0}, open(f"{ROOT}/debug/{KEY}_position.json", "w"))
+write_pos(False, "2020-01-01")
+try: new(False); refused = False
+except Exception: refused = True
+check("expired LIVE position refuses to start", refused)
+write_pos(True, "2020-01-01")
+check("expired PAPER position is discarded, starts flat", not new(True).position_open)
 clean()
 print(f"\n{ok} passed, {fail} failed")
 sys.exit(1 if fail else 0)
