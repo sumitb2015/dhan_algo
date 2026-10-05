@@ -50,7 +50,6 @@ import time
 import sys
 import argparse
 import os
-import logging
 import pandas as pd
 from datetime import datetime, timedelta
 from typing import Optional, Tuple
@@ -61,13 +60,11 @@ from login import get_dhan_client
 from lib.dhan_helper import DhanHelper
 from lib.execution_broker import ExecutionBroker, ExecutionBrokerError
 from lib.strategy_state_helper import save_strategy_state, check_shutdown_trigger, exit_if_market_closed, parse_target_spec, instance_log_suffix, reset_pnl_on_new_day
+from lib.algo_kit import confirmed_fill_price, setup_strategy_logging  # noqa: E402
 
 # ── Logging setup ────────────────────────────────────────────────────────────
 project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 debug_dir = os.path.join(project_root, "debug")
-log_dir = os.path.join(debug_dir, "logs", "vix_straddle")
-os.makedirs(log_dir, exist_ok=True)
-
 STRATEGY_KEY = "nifty_vix_straddle"
 
 VIX_SECURITY_ID = "21"  # India VIX, NSE_IDX segment
@@ -79,25 +76,7 @@ API_ERROR_ALERT_STREAK = 5
 EXIT_RETRY_ATTEMPTS = 3
 
 
-class FlushingFileHandler(logging.FileHandler):
-    def emit(self, record):
-        super().emit(record)
-        self.flush()
-
-
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - %(levelname)s - %(message)s",
-    handlers=[
-        logging.StreamHandler(),
-        FlushingFileHandler(
-            os.path.join(log_dir, f"{datetime.now().strftime('%Y%m%d')}{instance_log_suffix()}.log"),
-            encoding='utf-8',
-        ),
-    ],
-    force=True,
-)
-logger = logging.getLogger(__name__)
+logger = setup_strategy_logging(project_root, "vix_straddle", instance_log_suffix(), name=__name__, force=True)
 
 
 # ── Strategy ─────────────────────────────────────────────────────────────────
@@ -835,19 +814,7 @@ class NiftyVixStraddle:
         return True
 
     def _get_fill_price(self, order_id: str, fallback: float) -> float:
-        if not order_id:
-            return fallback
-        if self.helper.wait_for_fill(order_id, timeout=5):
-            detail = self.helper.get_order_by_id(order_id)
-            if detail:
-                price = float(
-                    detail.get("averageTradedPrice", 0)
-                    or detail.get("avgFilledPrice", 0)
-                    or detail.get("price", 0)
-                )
-                if price > 0:
-                    return price
-        return fallback
+        return confirmed_fill_price(self.helper, order_id, fallback, log=logger, raise_errors=True, paper_id=None)
 
     # ── ATM cycle setup ──────────────────────────────────────────────────────
 

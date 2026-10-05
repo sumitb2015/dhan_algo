@@ -2,7 +2,6 @@ import time
 import sys
 import argparse
 import os
-import logging
 import pandas as pd
 from datetime import datetime
 
@@ -15,35 +14,12 @@ from lib.execution_broker import ExecutionBroker, ExecutionBrokerError
 from lib.strategy_state_helper import save_strategy_state, check_shutdown_trigger, exit_if_market_closed, parse_target_spec, instance_log_suffix
 from lib.rolling_straddle_rules import trail_lock_pct, is_balanced, straddle_sl_hit, leg_sl_hit, roll_reason
 from lib.strategy_risk import resolve_exit_qty_broker, detect_phantom_leg_broker, PHANTOM_CHECK_INTERVAL_SEC
+from lib.algo_kit import confirmed_fill_price, extract_flat_chain_fields, extract_quote_fields, interruptible_sleep, setup_strategy_logging  # noqa: E402
 
 # Setup Logging
 project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 debug_dir = os.path.join(project_root, "debug")
-log_dir = os.path.join(debug_dir, "logs", "rolling_straddle")
-os.makedirs(log_dir, exist_ok=True)
-
-class FlushingFileHandler(logging.FileHandler):
-    def emit(self, record):
-        super().emit(record)
-        self.flush()
-
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.StreamHandler(),
-        # encoding: FileHandler otherwise opens with the system ANSI codepage
-        # (cp1252 on Windows) and silently DROPS any log line containing a
-        # non-ANSI glyph (INR sign, arrows, dashes) while still writing the
-        # ASCII lines around it -- the log looks intact but loses those lines.
-        FlushingFileHandler(
-            os.path.join(log_dir, f"{datetime.now().strftime('%Y%m%d')}{instance_log_suffix()}.log"),
-            encoding="utf-8",
-        )
-    ],
-    force=True
-)
-logger = logging.getLogger(__name__)
+logger = setup_strategy_logging(project_root, "rolling_straddle", instance_log_suffix(), name=__name__, force=True)
 
 class RollingStraddleStrategy:
     def __init__(self, dry_run=True, initial_lots=1, roll_buffer=35.0, max_rolls=5,
@@ -167,12 +143,10 @@ class RollingStraddleStrategy:
 
     def sleep_cooldown(self, seconds):
         """Shutdown-aware sleep for cooldowns and delays."""
-        for _ in range(seconds):
-            if check_shutdown_trigger(self.state_key):
-                logger.info("UI Shutdown Request during cooldown sleep. Exiting.")
-                self.save_state(0, 0, 0, 0, status="STOPPED")
-                sys.exit(0)
-            time.sleep(1)
+        if not interruptible_sleep(seconds, lambda: check_shutdown_trigger(self.state_key)):
+            logger.info("UI Shutdown Request during cooldown sleep. Exiting.")
+            self.save_state(0, 0, 0, 0, status="STOPPED")
+            sys.exit(0)
 
     def _fetch_ltps_for(self, ce_id, pe_id):
         """Batched CE/PE/spot LTP fetch for an explicit pair of contracts.
@@ -292,34 +266,14 @@ class RollingStraddleStrategy:
         NOTE: helper.wait_for_fill() returns a BOOL, not a price — it must never be
         used as the fill price directly.
         """
-        if not order_id:
-            return fallback_price
-        if self.helper.wait_for_fill(order_id, timeout=5):
-            order_details = self.helper.get_order_by_id(order_id)
-            if order_details:
-                fill_price = float(
-                    order_details.get('averageTradedPrice', 0.0)
-                    or order_details.get('avgFilledPrice', 0.0)
-                    or order_details.get('price', 0.0)
-                )
-                if fill_price > 0:
-                    logger.info(f"Order {order_id} execution price confirmed: {fill_price:.2f}")
-                    return fill_price
-        return fallback_price
+        return confirmed_fill_price(self.helper, order_id, fallback_price, log=logger, raise_errors=True, paper_id=None)
 
     def _extract_quote_fields(self, quote, strike, option_type):
         if not quote:
-            return None, None, None, None, None
-        if isinstance(quote, dict) and 'CONTRACT_INFO' in quote:
-            ci = quote['CONTRACT_INFO']
-            return (
-                int(ci['SECURITY_ID']),
-                float(quote.get('last_price', 0.0) or quote.get('LTP', 0.0)),
-                ci.get('SM_EXPIRY_DATE') or self.expiry,
-                int(ci.get('LOT_SIZE', self.nifty_lot_size)),
-                ci.get('SYMBOL_NAME', f"NIFTY-{self.expiry}-{strike}-{option_type}")
-            )
-        return None, None, None, None, None
+            return (None, None, None, None, None)
+        f = extract_quote_fields(quote, self.nifty_lot_size, self.expiry,
+                                 f"NIFTY-{self.expiry}-{strike}-{option_type}")
+        return tuple(f) if f.security_id is not None else (None, None, None, None, None)
 
     def exit_all_positions(self, reason):
         """Buys back any live CE/PE legs. Returns True only once every leg that was open

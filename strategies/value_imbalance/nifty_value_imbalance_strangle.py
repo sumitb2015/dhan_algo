@@ -2,7 +2,6 @@ import time
 import sys
 import argparse
 import os
-import logging
 import pandas as pd
 from datetime import datetime
 
@@ -15,35 +14,12 @@ from lib.strategy_state_helper import save_strategy_state, check_shutdown_trigge
 from lib.strategy_risk import resolve_exit_qty_broker, detect_phantom_leg_broker, PHANTOM_CHECK_INTERVAL_SEC
 from lib.execution_broker import ExecutionBroker, ExecutionBrokerError
 from lib.telegram_alert import notify
+from lib.algo_kit import confirmed_fill_price, extract_flat_chain_fields, extract_quote_fields, fetch_named_ltps, interruptible_sleep, is_quote_invalid, setup_strategy_logging  # noqa: E402
 
 # Setup Logging
 project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 debug_dir = os.path.join(project_root, "debug")
-log_dir = os.path.join(debug_dir, "logs", "strangle")
-os.makedirs(log_dir, exist_ok=True)
-
-class FlushingFileHandler(logging.FileHandler):
-    def emit(self, record):
-        super().emit(record)
-        self.flush()
-
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.StreamHandler(),
-        # encoding: FileHandler otherwise opens with the system ANSI codepage
-        # (cp1252 on Windows) and silently DROPS any log line containing a
-        # non-ANSI glyph (INR sign, arrows, dashes) while still writing the
-        # ASCII lines around it -- the log looks intact but loses those lines.
-        FlushingFileHandler(
-            os.path.join(log_dir, f"{datetime.now().strftime('%Y%m%d')}{instance_log_suffix()}.log"),
-            encoding="utf-8",
-        )
-    ],
-    force=True
-)
-logger = logging.getLogger(__name__)
+logger = setup_strategy_logging(project_root, "strangle", instance_log_suffix(), name=__name__, force=True)
 
 class ValueImbalanceStrangle:
     def __init__(self, dry_run=True, initial_lots=1, max_lots=4,
@@ -134,12 +110,10 @@ class ValueImbalanceStrangle:
 
     def sleep_cooldown(self, seconds):
         """Shutdown-aware sleep for cooldowns and delays."""
-        for _ in range(seconds):
-            if check_shutdown_trigger(self.state_key):
-                logger.info("UI Shutdown Request during cooldown sleep. Exiting.")
-                self.save_state(0, 0, 0, 0, status="STOPPED")
-                sys.exit(0)
-            time.sleep(1)
+        if not interruptible_sleep(seconds, lambda: check_shutdown_trigger(self.state_key)):
+            logger.info("UI Shutdown Request during cooldown sleep. Exiting.")
+            self.save_state(0, 0, 0, 0, status="STOPPED")
+            sys.exit(0)
 
     def save_state(self, nifty_spot, ce_ltp, pe_ltp, total_pnl, status="RUNNING"):
         if status == "STOPPED" and not getattr(self, "_stopped_notified", False):
@@ -176,63 +150,23 @@ class ValueImbalanceStrangle:
 
     def get_execution_price(self, order_id: str, fallback_price: float) -> float:
         """Wait for fill and get the average execution price, or return fallback."""
-        if not order_id:
-            return fallback_price
-        # Wait for fill (up to 5 seconds for immediate execution on market order)
-        if self.helper.wait_for_fill(order_id, timeout=5):
-            order_details = self.helper.get_order_by_id(order_id)
-            if order_details:
-                fill_price = float(order_details.get('averageTradedPrice', 0.0) or order_details.get('avgFilledPrice', 0.0) or order_details.get('price', 0.0))
-                if fill_price > 0:
-                    logger.info(f"Order {order_id} execution price confirmed: {fill_price:.2f}")
-                    return fill_price
-        return fallback_price
+        return confirmed_fill_price(self.helper, order_id, fallback_price, log=logger, raise_errors=True, paper_id=None)
 
     def is_quote_invalid(self, q):
-        if not q: return True
-        if isinstance(q, dict) and 'CONTRACT_INFO' in q:
-            return float(q.get('last_price', 0) or q.get('LTP', 0)) == 0
-        return False
+        return is_quote_invalid(q)
 
     def _extract_quote_fields(self, quote, strike, option_type):
         """Extract needed fields from either helper.option() or chain fallback format."""
         if not quote:
-            return None, None, None, None, None
-        
-        # Format 1: helper.option() result (standard library format)
-        if isinstance(quote, dict) and 'CONTRACT_INFO' in quote:
-            ci = quote['CONTRACT_INFO']
-            return (
-                int(ci['SECURITY_ID']),
-                float(quote.get('last_price', 0.0) or quote.get('LTP', 0.0)),
-                ci.get('SM_EXPIRY_DATE') or self.expiry,
-                int(ci.get('LOT_SIZE', self.nifty_lot_size)),
-                ci.get('SYMBOL_NAME', f"NIFTY-{self.expiry}-{strike}-{option_type}")
-            )
-        
-        # Format 2: Flat chain format (Series.to_dict() or construction)
-        ot = option_type.lower()
-        sid = quote.get(f'{ot}_security_id') or quote.get('security_id')
-        price = quote.get(f'{ot}_last_price') or quote.get('last_price', 0.0)
-        
-        if sid:
-            # Try to resolve lot size from master list dynamically
-            lot_size = self.nifty_lot_size
-            try:
-                sec = self.helper.get_security_id(symbol=str(int(sid)))
-                if sec:
-                    lot_size = int(sec.get('LOT_SIZE', self.nifty_lot_size))
-            except Exception:
-                pass
-            return (
-                int(sid),
-                float(price),
-                self.expiry,
-                lot_size,
-                f"NIFTY-{self.expiry}-{strike}-{option_type}"
-            )
-            
-        return None, None, None, None, None
+            return (None, None, None, None, None)
+        symbol = f"NIFTY-{self.expiry}-{strike}-{option_type}"
+        f = extract_quote_fields(quote, self.nifty_lot_size, self.expiry, symbol)
+        if f.security_id is not None:
+            return tuple(f)
+        # flat option-chain row (Series.to_dict()): lot size refined from the master list when it resolves
+        flat = extract_flat_chain_fields(quote, option_type, self.nifty_lot_size, self.expiry, symbol,
+                                         lambda s: self.helper.get_security_id(symbol=s))
+        return tuple(flat) if flat else (None, None, None, None, None)
 
     def _calculate_pnl(self, ce_ltp, pe_ltp):
         ce_unrealized = (self.ce_avg_price - ce_ltp) * (self.ce_lots * self.nifty_lot_size)
@@ -255,16 +189,12 @@ class ValueImbalanceStrangle:
 
     def fetch_ltps(self):
         """Batched CE/PE/spot LTP fetch — at most one REST call when the WebSocket misses."""
-        ltps = self.helper.get_ltps([
-            ("NSE_FNO", self.ce_id),
-            ("NSE_FNO", self.pe_id),
-            ("IDX_I", self.NIFTY_SPOT_SID),
-        ])
-        return (
-            ltps.get(str(self.ce_id), 0.0),
-            ltps.get(str(self.pe_id), 0.0),
-            ltps.get(str(self.NIFTY_SPOT_SID), 0.0),
-        )
+        px = fetch_named_ltps(self.helper, {
+            "a": ("NSE_FNO", self.ce_id),
+            "b": ("NSE_FNO", self.pe_id),
+            "c": ("IDX_I", self.NIFTY_SPOT_SID),
+        })
+        return px["a"], px["b"], px["c"]
 
     def update_baseline_imbalance(self):
         """Update baseline imbalance (entry_diff_pct) after an adjustment using new LTPs."""
