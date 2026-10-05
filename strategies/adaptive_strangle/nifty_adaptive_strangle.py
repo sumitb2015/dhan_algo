@@ -16,7 +16,6 @@ Standard Feature Kit (dhan-new-strategy):
 
 import argparse
 import json
-import logging
 import math
 import os
 import sys
@@ -42,6 +41,7 @@ if project_root not in sys.path:
 
 # Pure stdlib (no broker SDK): imported outside the guarded block so the pure functions work even when the SDK imports below fail.
 from lib.options_pricing import greeks_from_days  # noqa: E402
+from lib.algo_kit import setup_strategy_logging  # noqa: E402
 
 try:
     import pandas as pd
@@ -85,29 +85,7 @@ STAGE_HEDGED = "HEDGED_STRANGLE"
 STAGE_DIRECTIONAL = "DIRECTIONAL"
 
 debug_dir = os.path.join(project_root, "debug")
-log_dir = os.path.join(debug_dir, "logs", LOG_FOLDER)
-os.makedirs(log_dir, exist_ok=True)
-
-
-class FlushingFileHandler(logging.FileHandler):
-    def emit(self, record):
-        super().emit(record)
-        self.flush()
-
-
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - %(levelname)s - %(message)s",
-    handlers=[
-        FlushingFileHandler(
-            os.path.join(log_dir, f"{datetime.now().strftime('%Y%m%d')}{instance_log_suffix()}.log"),
-            encoding="utf-8",
-        ),
-        logging.StreamHandler(),
-    ],
-    force=True,
-)
-logger = logging.getLogger(__name__)
+logger = setup_strategy_logging(project_root, LOG_FOLDER, instance_log_suffix(), name=__name__, force=True)
 
 
 # ── PURE CALCULATION & GREEK FUNCTIONS ───────────────────────────────────────

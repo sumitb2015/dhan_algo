@@ -2,7 +2,6 @@ import time
 import sys
 import argparse
 import os
-import logging
 import pandas as pd
 from datetime import datetime, timedelta
 from typing import Tuple, Dict, Optional, List
@@ -14,36 +13,12 @@ from login import get_dhan_client
 from lib.dhan_helper import DhanHelper
 from lib.execution_broker import ExecutionBroker, ExecutionBrokerError
 from lib.strategy_state_helper import save_strategy_state, check_shutdown_trigger, exit_if_market_closed, parse_target_spec, instance_log_suffix
+from lib.algo_kit import confirmed_fill_price, extract_flat_chain_fields, extract_quote_fields, fetch_named_ltps, is_quote_invalid, setup_strategy_logging  # noqa: E402
 
 # Configure Logging
 project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 debug_dir = os.path.join(project_root, "debug")
-log_dir = os.path.join(debug_dir, "logs", "spread_trend")
-os.makedirs(log_dir, exist_ok=True)
-
-class FlushingFileHandler(logging.FileHandler):
-    def emit(self, record):
-        super().emit(record)
-        self.flush()
-
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.StreamHandler(),
-        # encoding is REQUIRED: this file logs P&L with the ₹ glyph, and FileHandler
-        # otherwise opens with the system ANSI codepage (cp1252 on Windows). Every line
-        # containing ₹ then fails to encode and is silently dropped from the log while
-        # the ASCII lines around it are written — so the log looks intact but the P&L
-        # lines are missing exactly when you need them.
-        FlushingFileHandler(
-            os.path.join(log_dir, f"{datetime.now().strftime('%Y%m%d')}{instance_log_suffix()}.log"),
-            encoding="utf-8",
-        )
-    ],
-    force=True
-)
-logger = logging.getLogger(__name__)
+logger = setup_strategy_logging(project_root, "spread_trend", instance_log_suffix(), name=__name__, force=True)
 
 class NiftySpreadTrendStrategy:
     def __init__(self, dry_run=True, symbol="NIFTY", interval="5",
@@ -234,16 +209,12 @@ class NiftySpreadTrendStrategy:
 
     def fetch_ltps(self):
         """Batched short-leg/long-leg/spot LTP fetch — at most one REST call on WebSocket miss."""
-        ltps = self.helper.get_ltps([
-            ("NSE_FNO", self.short_id),
-            ("NSE_FNO", self.long_id),
-            (self.index_segment, self.index_security_id),
-        ])
-        return (
-            ltps.get(str(self.short_id), 0.0),
-            ltps.get(str(self.long_id), 0.0),
-            ltps.get(str(self.index_security_id), 0.0),
-        )
+        px = fetch_named_ltps(self.helper, {
+            "a": ("NSE_FNO", self.short_id),
+            "b": ("NSE_FNO", self.long_id),
+            "c": (self.index_segment, self.index_security_id),
+        })
+        return px["a"], px["b"], px["c"]
 
     def save_state(self, nifty_spot, short_ltp, long_ltp, total_pnl, status="RUNNING"):
         state_dict = {
@@ -360,37 +331,14 @@ class NiftySpreadTrendStrategy:
 
     def get_execution_price(self, order_id: str, fallback_price: float) -> float:
         """Wait for fill and get the average execution price, or return fallback."""
-        if not order_id:
-            return fallback_price
-        if self.helper.wait_for_fill(order_id, timeout=5):
-            order_details = self.helper.get_order_by_id(order_id)
-            if order_details:
-                fill_price = float(order_details.get('averageTradedPrice', 0.0) or order_details.get('avgFilledPrice', 0.0) or order_details.get('price', 0.0))
-                if fill_price > 0:
-                    logger.info(f"Order {order_id} execution price confirmed: {fill_price:.2f}")
-                    return fill_price
-        return fallback_price
+        return confirmed_fill_price(self.helper, order_id, fallback_price, log=logger, raise_errors=True, paper_id=None)
 
     def is_quote_invalid(self, q):
-        if not q: return True
-        if isinstance(q, dict) and 'CONTRACT_INFO' in q:
-            return float(q.get('last_price', 0) or q.get('LTP', 0)) == 0
-        return False
+        return is_quote_invalid(q)
 
     def _extract_quote_fields(self, quote, strike, option_type):
-        if not quote:
-            return None, 0.0, None, self.lot_size, None
-        
-        if isinstance(quote, dict) and 'CONTRACT_INFO' in quote:
-            ci = quote['CONTRACT_INFO']
-            return (
-                int(ci['SECURITY_ID']),
-                float(quote.get('last_price', 0.0) or quote.get('LTP', 0.0)),
-                ci.get('SM_EXPIRY_DATE') or self.expiry,
-                int(ci.get('LOT_SIZE', self.lot_size)),
-                ci.get('SYMBOL_NAME', f"{self.symbol}-{strike}-{option_type}")
-            )
-        return None, 0.0, None, self.lot_size, None
+        return tuple(extract_quote_fields(quote, default_lot_size=self.lot_size, default_expiry=self.expiry,
+                                          default_symbol=f"{self.symbol}-{strike}-{option_type}"))
 
     def enter_spread(self, spot: float, option_type: str):
         """

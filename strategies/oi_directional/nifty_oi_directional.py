@@ -36,7 +36,6 @@ import time
 import sys
 import argparse
 import os
-import logging
 import threading
 from datetime import datetime
 from collections import deque
@@ -48,37 +47,17 @@ from lib.dhan_helper import DhanHelper
 from lib.execution_broker import ExecutionBroker, ExecutionBrokerError
 from lib.strategy_state_helper import save_strategy_state, check_shutdown_trigger, exit_if_market_closed, parse_target_spec, instance_log_suffix
 from lib.strategy_risk import resolve_exit_qty_broker, detect_phantom_leg_broker, PHANTOM_CHECK_INTERVAL_SEC
+from lib.algo_kit import setup_strategy_logging  # noqa: E402
 
 # ── Logging setup ────────────────────────────────────────────────────────────
 project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 debug_dir = os.path.join(project_root, "debug")
-log_dir = os.path.join(debug_dir, "logs", "oi_directional")
-os.makedirs(log_dir, exist_ok=True)
-
 STRATEGY_KEY = "nifty_oi_directional"
 NIFTY_STRIKE_STEP = 50
 STRIKES_EACH_SIDE = 5
 
 
-class FlushingFileHandler(logging.FileHandler):
-    def emit(self, record):
-        super().emit(record)
-        self.flush()
-
-
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - %(levelname)s - %(message)s",
-    handlers=[
-        logging.StreamHandler(),
-        FlushingFileHandler(
-            os.path.join(log_dir, f"{datetime.now().strftime('%Y%m%d')}{instance_log_suffix()}.log"),
-            encoding='utf-8',
-        ),
-    ],
-    force=True,
-)
-logger = logging.getLogger(__name__)
+logger = setup_strategy_logging(project_root, "oi_directional", instance_log_suffix(), name=__name__, force=True)
 
 
 class NiftyOIDirectional:

@@ -53,6 +53,7 @@ from lib.execution_broker import ExecutionBroker, ExecutionBrokerError  # noqa: 
 from lib.strategy_risk import (                                        # noqa: E402
     resolve_exit_qty_broker, detect_phantom_leg_broker, PHANTOM_CHECK_INTERVAL_SEC,
 )
+from lib.algo_kit import confirmed_fill_price, read_order_fill_price, setup_strategy_logging  # noqa: E402
 from lib.strategy_state_helper import (                                # noqa: E402
     save_strategy_state, check_shutdown_trigger, instance_log_suffix, parse_target_spec,
 )
@@ -64,31 +65,7 @@ except Exception:                                                      # never b
 
 # ── logging ──────────────────────────────────────────────────────────────────
 DEBUG_DIR = os.path.join(PROJECT_ROOT, "debug")
-LOG_DIR = os.path.join(DEBUG_DIR, "logs", "flyagonal")
-os.makedirs(LOG_DIR, exist_ok=True)
-
-
-class FlushingFileHandler(logging.FileHandler):
-    """Flush on every record so the dashboard's log tail is live, not buffered."""
-
-    def emit(self, record):
-        super().emit(record)
-        self.flush()
-
-
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - %(levelname)s - %(message)s",
-    handlers=[
-        logging.StreamHandler(),
-        FlushingFileHandler(
-            os.path.join(LOG_DIR, f"{datetime.now().strftime('%Y%m%d')}{instance_log_suffix()}.log"),
-            encoding="utf-8",
-        ),
-    ],
-    force=True,
-)
-logger = logging.getLogger(__name__)
+logger = setup_strategy_logging(PROJECT_ROOT, "flyagonal", instance_log_suffix(), name=__name__, force=True)
 
 STRATEGY_KEY_DEFAULT = "nifty_flyagonal"
 PORTFOLIO_VERSION = 1
@@ -434,15 +411,7 @@ class NiftyFlyagonal:
         """Actual fill price (Dhan), else the pre-order mark. wait_for_fill returns a bool, not a price."""
         if self.dry_run or self.broker_name != "dhan" or not oid:
             return fallback
-        try:
-            order = self.helper.get_order_by_id(oid) or {}
-            for key in ("averageTradedPrice", "avgFilledPrice", "price"):
-                v = float(order.get(key) or 0)
-                if v > 0:
-                    return v
-        except Exception as e:
-            logger.warning(f"Could not read fill price for {oid}: {e}")
-        return fallback
+        return read_order_fill_price(self.helper, oid, fallback, log=logger, paper_id=None)
 
     def _close_leg(self, leg) -> tuple:
         """Buy-to-close a short / sell-to-close a long, sized off broker truth. Returns
