@@ -1,5 +1,6 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync, writeFileSync } from 'node:fs';
 import {
   computeBsGreeks,
   computeBsGreeksExact,
@@ -13,6 +14,8 @@ import {
   calculateTimeToExpiryYears,
   riskNeutralProbAbove,
   greeksForLeg,
+  trustedMark,
+  normCdf as normCdfLib,
   futureQuote,
   isIsoDate,
 } from './optionsPricing.ts';
@@ -21,7 +24,7 @@ import {
 // results to fixed values from two independent libraries; see the headers of the blocks below.
 
 describe('computeBsGreeks Greeks match finite differences of its own price', () => {
-  // High-precision normal CDF (Taylor series for erf), so second differences are not swamped by the A&S approximation's 1e-7 error.
+  // An independent high-precision normal CDF (Taylor series for erf), so second differences are checked against something other than the library's own.
   const N = (x: number) => {
     const ax = Math.abs(x) / Math.SQRT2;
     if (ax > 6) return x > 0 ? 1 : 0;
@@ -130,7 +133,7 @@ describe('computeBsGreeks vs independent library reference values', () => {
 });
 
 describe('computeBsGreeksExact: unrounded engine', () => {
-  // Same independent reference table as above, at tight tolerance (the only error left is the A&S normal CDF's ~1.5e-7).
+  // Same independent reference table as above, at tight tolerance (the library's normal CDF is accurate to ~1e-16).
   for (const [futures, type, K, T, iv, X, price, delta, gamma, theta, vega] of fixtures) {
     it(`matches the library ${futures ? 'Black-76' : 'Black-Scholes'} ${type} K${K} ${Math.round(T * 365)}d`, () => {
       const g = computeBsGreeksExact(type, X, K, T, iv, 0.065, futures);
@@ -310,6 +313,122 @@ describe('greeksForLeg: the one per-leg Greeks recipe', () => {
     assert.equal(futureQuote(22600, '15 Sep'), null);
     assert.equal(futureQuote(0, '2026-10-27'), null);
     assert.deepEqual(futureQuote(22600, '2026-10-27'), { price: 22600, expiry: '2026-10-27' });
+  });
+});
+
+// ── Cross-language parity with lib/options_pricing.py ────────────────────────
+// The fixture is GENERATED from this library. `UPDATE_PARITY=1 node --test lib/optionsPricing.test.ts` rewrites it after an intentional
+// formula change; tests/test_options_pricing_parity.py then holds the Python port to the same numbers.
+describe('parity fixture for the Python port', () => {
+  const PARITY = new URL('./optionsPricing.parity.json', import.meta.url);
+  const NOW = Date.parse('2026-10-05T06:00:00Z');
+
+  function build() {
+    const greeks: unknown[] = [];
+    for (const type of ['CE', 'PE'] as const) for (const isFutures of [false, true]) {
+      for (const [U, K, t, iv] of [
+        [22555.75, 22500, 22 / 365, 0.14], [22555.75, 23200, 22 / 365, 0.138], [22555.75, 21800, 5 / 365, 0.2],
+        [22640, 22650, 1 / 365, 0.17], [22640, 22200, 0.25 / 365, 0.12], [22555.75, 22555.75, 90 / 365, 0.15],
+        [22555.75, 24500, 60 / 365, 0.11], [22555.75, 19000, 120 / 365, 0.22], [0, 22500, 22 / 365, 0.14], [22555.75, 0, 22 / 365, 0.14],
+      ] as const) {
+        const g = computeBsGreeksExact(type, U, K, t, iv, 0.065, isFutures);
+        greeks.push({ type, U, K, t, iv, r: 0.065, isFutures, out: g });
+      }
+    }
+    const ivs: unknown[] = [];
+    for (const [type, U, K, t, price, isFutures] of [
+      ['CE', 22640, 22650, 1 / 365, 40, true], ['PE', 22640, 22450, 1 / 365, 30, true], ['CE', 22555.75, 23200, 22 / 365, 28, false],
+      ['PE', 22555.75, 21800, 22 / 365, 31, false], ['PE', 22555.75, 24500, 60 / 365, 1900, false], ['CE', 22640, 22650, 1 / 365, 0, true],
+    ] as const) {
+      ivs.push({ type, U, K, t, price, isFutures, out: impliedVol(type, U, K, t, price, { r: 0.065, isFutures }) });
+    }
+    const clock = ['2026-10-06', '2026-10-27', '2026-10-05', '2026-09-01', '', 'not-a-date', '27 Oct'].map((e) => ({ expiry: e, now: NOW, out: calculateTimeToExpiryYears(e, NOW) }));
+    const roll = [{ F: 22623.7, from: '2026-10-27', to: '2026-10-06', now: NOW, out: rollForward(22623.7, '2026-10-27', '2026-10-06', undefined, NOW) }];
+    const legs: unknown[] = [];
+    for (const l of [
+      { type: 'CE', strike: 22650, expiry: '2026-10-06', mark: 40 }, { type: 'PE', strike: 22450, expiry: '2026-10-06', mark: 30 },
+      { type: 'CE', strike: 23200, expiry: '2026-10-27', mark: 28, chainIv: 0.9 }, { type: 'PE', strike: 22450, expiry: '2026-10-06', chainIv: 0.14 },
+      { type: 'PE', strike: 22450, expiry: '2026-10-06', fallbackIv: 0.15 },
+    ] as const) for (const future of [null, { price: 22623.7, expiry: '2026-10-27' }]) {
+      const out = greeksForLeg(l as never, { spot: 22555.75, future }, { now: NOW });
+      legs.push({ ...l, spot: 22555.75, future, now: NOW, out: out && { ...out } });
+    }
+    const prob = ([[22555.75, 22000, 22 / 365, 0.14], [22555.75, 23200, 22 / 365, 0.138], [100, 100, 0, 0.2], [0, 100, 1 / 365, 0.2], [100, 0, 1 / 365, 0.2]] as const)
+      .map(([S, K, t, iv]) => ({ S, K, t, iv, out: riskNeutralProbAbove(S, K, t, iv, 0.065) }));
+    return JSON.parse(JSON.stringify({ greeks, ivs, clock, roll, legs, prob }));
+  }
+
+  it('matches the committed fixture the Python tests read', () => {
+    const built = build();
+    if (process.env.UPDATE_PARITY) writeFileSync(PARITY, JSON.stringify(built, null, 1) + '\n');
+    // Tolerance, not exact equality: Math.exp/log may differ by an ulp between V8 versions or platforms.
+    const close = (a: unknown, b: unknown, path: string): void => {
+      if (typeof a === 'number' && typeof b === 'number') {
+        assert.ok(Math.abs(a - b) <= 1e-9 * Math.max(1, Math.abs(b)), `${path}: ${a} vs ${b} (run UPDATE_PARITY=1 node --test lib/optionsPricing.test.ts, then the Python parity test)`);
+      } else if (a && b && typeof a === 'object' && typeof b === 'object') {
+        assert.deepEqual(Object.keys(a as object).sort(), Object.keys(b as object).sort(), `${path}: keys`);
+        for (const k of Object.keys(a as object)) close((a as Record<string, unknown>)[k], (b as Record<string, unknown>)[k], `${path}.${k}`);
+      } else {
+        assert.equal(a, b, path);
+      }
+    };
+    close(built, JSON.parse(readFileSync(PARITY, 'utf8')), 'fixture');
+  });
+});
+
+describe('non-positive inputs never produce NaN', () => {
+  it('computeBsGreeksExact returns zeros and priceOption returns intrinsic for a non-positive underlying or strike', () => {
+    for (const g of [computeBsGreeksExact('CE', 0, 22500, 0.05, 0.14), computeBsGreeksExact('PE', 22500, 0, 0.05, 0.14)]) {
+      for (const v of Object.values(g)) assert.equal(v, 0);
+    }
+    assert.equal(priceOption('CE', 0, 22500, 0.05, 0.14), 0);
+    assert.equal(priceOption('PE', 22000, 0, 0.05, 0.14), 0);
+    assert.equal(riskNeutralProbAbove(0, 22500, 0.05, 0.14), 0);
+    assert.ok(Number.isFinite(priceOption('CE', 22600, 22500, 0.05, 0.14)));
+  });
+});
+
+describe('trustedMark: a stale last price must not set the IV', () => {
+  it('keeps a last price inside the quoted book, replaces one outside it with the mid', () => {
+    assert.equal(trustedMark(30, 29, 31), 30);
+    assert.equal(trustedMark(29, 29, 31), 29);          // on the bid is inside
+    assert.equal(trustedMark(20, 29, 31), 30);          // stale last, far below the bid: the mid
+    assert.equal(trustedMark(45, 29, 31), 30);
+    assert.equal(trustedMark(0, 29, 31), 30);           // no last print at all, but a market: the mid
+  });
+  it('refuses to infer a vol from a one-sided book, and trusts the last price only when there are no quotes at all', () => {
+    assert.equal(trustedMark(12, 0, 14), null);         // no bid
+    assert.equal(trustedMark(12, 10, 0), null);         // no ask
+    assert.equal(trustedMark(12, undefined, undefined), 12);
+    assert.equal(trustedMark(0, undefined, undefined), null);
+    assert.equal(trustedMark(12, 15, 14), 12);         // crossed book is not a market: the last price stands
+  });
+  it('the delta a stale print would have produced is not the delta used: a 3-hour-old 5.0 on a strike now quoted 11-12', () => {
+    const NOW = Date.parse('2026-10-05T06:00:00Z');
+    const market = { spot: 22555.75, future: { price: 22623.7, expiry: '2026-10-27' } };
+    const leg = { type: 'CE' as const, strike: 22900, expiry: '2026-10-13' };
+    const stale = greeksForLeg({ ...leg, mark: 5 }, market, { now: NOW })!;
+    const trusted = greeksForLeg({ ...leg, mark: trustedMark(5, 11, 12) }, market, { now: NOW })!;
+    assert.ok(trusted.delta > stale.delta * 1.5, `stale ${stale.delta} vs trusted ${trusted.delta}`);
+    assert.ok(Math.abs(trusted.price - 11.5) < 0.01);
+  });
+});
+
+describe('normCdf is accurate to double precision', () => {
+  // Reference: N(x) = (1 + erf(x/sqrt2))/2 via the alternating Taylor series, which is exact to ~1e-16 for |x| <= 4 (it cancels badly beyond that).
+  const erf = (x: number) => { let sum = 0, term = x; for (let n = 0; n < 200; n++) { sum += term / (2 * n + 1); term = (-term * x * x) / (n + 1); } return (2 / Math.sqrt(Math.PI)) * sum; };
+  const ref = (x: number) => 0.5 * (1 + erf(x / Math.SQRT2));
+  it('is exactly 0.5 at 0, symmetric, and within 1e-14 of the reference for |x| <= 4, and right in the far tails', () => {
+    assert.equal(normCdfLib(0), 0.5);
+    for (let x = -4; x <= 4; x += 0.05) {
+      assert.ok(Math.abs(normCdfLib(x) - ref(x)) < 1e-14, `x=${x}: ${normCdfLib(x)} vs ${ref(x)}`);
+      assert.ok(Math.abs(normCdfLib(x) + normCdfLib(-x) - 1) < 1e-15, `symmetry at ${x}`);
+    }
+    // Far tails against published constants: N(-6) = 9.865876450376946e-10, N(-8) = 6.220960574271786e-16.
+    assert.ok(Math.abs(normCdfLib(-6) / 9.865876450376946e-10 - 1) < 1e-7);
+    assert.ok(Math.abs(normCdfLib(-8) / 6.220960574271786e-16 - 1) < 1e-5);
+    assert.equal(normCdfLib(40), 1);
+    assert.equal(normCdfLib(-40), 0);
   });
 });
 

@@ -32,14 +32,43 @@ export const CALENDAR_DAYS_PER_YEAR = 365;
 
 // ── Normal distribution ──────────────────────────────────────────────────────
 
-/** Standard normal CDF, Abramowitz-Stegun 7.1.26 (|error| < 1.5e-7). The only copy in the dashboard. */
+/**
+ * Standard normal CDF to double precision (|error| < 3e-16 against erfc; exactly 0.5 at 0). Hart's rational approximation (Algorithm 5666 in
+ * West's 2005 form). The only copy in the dashboard; lib/options_pricing.py uses the same algorithm so the two languages agree to ~1e-15.
+ */
 export function normCdf(x: number): number {
-  const sign = x < 0 ? -1 : 1;
-  const ax = Math.abs(x) / Math.SQRT2;
-  const a1 = 0.254829592, a2 = -0.284496736, a3 = 1.421413741, a4 = -1.453152027, a5 = 1.061405429, p = 0.3275911;
-  const t = 1 / (1 + p * ax);
-  const y = 1 - (((((a5 * t + a4) * t) + a3) * t + a2) * t + a1) * t * Math.exp(-ax * ax);
-  return 0.5 * (1 + sign * y);
+  const ax = Math.abs(x);
+  let cum: number;
+  if (ax > 37) {
+    cum = 0;
+  } else {
+    const e = Math.exp((-ax * ax) / 2);
+    if (ax < 7.07106781186547) {
+      let b = 3.52624965998911e-2 * ax + 0.700383064443688;
+      b = b * ax + 6.37396220353165;
+      b = b * ax + 33.912866078383;
+      b = b * ax + 112.079291497871;
+      b = b * ax + 221.213596169931;
+      b = b * ax + 220.206867912376;
+      cum = e * b;
+      b = 8.83883476483184e-2 * ax + 1.75566716318264;
+      b = b * ax + 16.064177579207;
+      b = b * ax + 86.7807322029461;
+      b = b * ax + 296.564248779674;
+      b = b * ax + 637.333633378831;
+      b = b * ax + 793.826512519948;
+      b = b * ax + 440.413735824752;
+      cum = cum / b;
+    } else {
+      let b = ax + 0.65;
+      b = ax + 4 / b;
+      b = ax + 3 / b;
+      b = ax + 2 / b;
+      b = ax + 1 / b;
+      cum = e / b / 2.506628274631;
+    }
+  }
+  return x > 0 ? 1 - cum : cum;
 }
 
 export function normPdf(x: number): number {
@@ -67,6 +96,7 @@ export function calculateTimeToExpiryYears(expiryDateStr: string, now: number = 
   if (!expiryDateStr) return 2 / CALENDAR_DAYS_PER_YEAR;
   try {
     const diffMs = expiryEpochMs(expiryDateStr) - now;
+    if (!Number.isFinite(diffMs)) return 2 / CALENDAR_DAYS_PER_YEAR; // malformed date: the same documented default as a missing one (mirrored in options_pricing.py)
     if (diffMs <= 0) return 0.25 / CALENDAR_DAYS_PER_YEAR; // at least a few hours on expiry day
     return Math.max(0.25 / CALENDAR_DAYS_PER_YEAR, diffMs / (CALENDAR_DAYS_PER_YEAR * 24 * 3600 * 1000));
   } catch {
@@ -175,6 +205,8 @@ export function computeBsGreeksExact(
   r = RISK_FREE_RATE,
   isFutures = false,
 ): BsGreeksExact {
+  // A non-positive underlying or strike has no price: zeros, never NaN (mirrored in lib/options_pricing.py).
+  if (!(spotOrFuture > 0) || !(strike > 0)) return { price: 0, delta: 0, gamma: 0, theta: 0, vega: 0, rho: 0, vanna: 0, vomma: 0, charm: 0 };
   return blackCore(type, spotOrFuture, strike, Math.max(timeYears, 0.0001), Math.max(iv, 0.01), r, isFutures);
 }
 
@@ -223,9 +255,9 @@ export function computeGreeksTickPrice(
   return { price: Math.max(0.05, Math.round(g.price * 20) / 20), delta: g.delta, gamma: g.gamma, theta: g.theta, vega: g.vega };
 }
 
-/** Unrounded, unclamped price; intrinsic when t ≤ 0 or iv ≤ 0. */
+/** Unrounded, unclamped price; intrinsic when t ≤ 0, iv ≤ 0 or the underlying/strike is non-positive (mirrored in lib/options_pricing.py). */
 export function priceOption(type: OptType, U: number, K: number, t: number, iv: number, r = RISK_FREE_RATE, isFutures = false): number {
-  if (!(t > 0) || !(iv > 0)) return type === 'CE' ? Math.max(U - K, 0) : Math.max(K - U, 0);
+  if (!(t > 0) || !(iv > 0) || !(U > 0) || !(K > 0)) return type === 'CE' ? Math.max(U - K, 0) : Math.max(K - U, 0);
   return blackCore(type, U, K, t, iv, r, isFutures).price;
 }
 
@@ -236,7 +268,7 @@ export function bsPrice(type: OptType, S: number, K: number, t: number, iv: numb
 
 /** Risk-neutral P(S_T > K) under lognormal GBM — the same N(d2) term the Black-Scholes call price uses. */
 export function riskNeutralProbAbove(S: number, K: number, t: number, iv: number, r = RISK_FREE_RATE): number {
-  if (t <= 0 || iv <= 0) return S > K ? 1 : 0;
+  if (t <= 0 || iv <= 0 || !(S > 0) || !(K > 0)) return S > K ? 1 : 0;
   const d2 = (Math.log(S / K) + (r - (iv * iv) / 2) * t) / (iv * Math.sqrt(t));
   return normCdf(d2);
 }
@@ -327,6 +359,28 @@ export const isIsoDate = (d: unknown): d is string => typeof d === 'string' && /
 /** Normalise a (price, expiry-label) pair from page state into a usable FutureQuote, or null. */
 export function futureQuote(price: number | null | undefined, expiry: unknown): FutureQuote | null {
   return typeof price === 'number' && price > 0 && isIsoDate(expiry) ? { price, expiry } : null;
+}
+
+/**
+ * Which premium to solve IV from when the only price on hand is a chain row's LAST traded price. On a thin strike that print can be hours
+ * old, and an IV solved from a stale price skews every delta built on it (Dhan's own delta did not have this failure mode). Dhan's chain
+ * also carries the best bid/ask, which says whether the last print is still inside the market:
+ *   - two-sided book, last inside [bid, ask]  -> the last price (it is current)
+ *   - two-sided book, last outside it          -> the mid (the last print is stale)
+ *   - one side missing (no bid, or no ask)     -> null: the market is too thin to infer a vol from; use the chain IV instead
+ *   - no quotes at all, or a crossed book      -> the last price (off-hours/no depth data: nothing better exists)
+ * A live tick (WebSocket LTP) is fresh by construction and needs no check.
+ */
+export function trustedMark(last: number | null | undefined, bid: number | null | undefined, ask: number | null | undefined): number | null {
+  const hasBid = typeof bid === 'number' && bid > 0;
+  const hasAsk = typeof ask === 'number' && ask > 0;
+  const hasLast = typeof last === 'number' && last > 0;
+  if (hasBid && hasAsk && (ask as number) >= (bid as number)) {
+    if (hasLast && (last as number) >= (bid as number) && (last as number) <= (ask as number)) return last as number;
+    return ((bid as number) + (ask as number)) / 2;
+  }
+  if (hasBid !== hasAsk) return null;
+  return hasLast ? (last as number) : null;
 }
 
 export interface LegGreeksInput {
