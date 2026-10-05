@@ -2,32 +2,24 @@
 
 import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import {
-  Layers, RefreshCw, TrendingUp, TrendingDown, AlertTriangle,
-  Power, ShieldOff, Activity, Zap, LayoutList, ChevronDown, ChevronRight, Shield,
-  Repeat, CheckCircle2, XCircle, Play, Square, ChevronsDownUp, ChevronsUpDown,
-  Sprout, Flame, Rocket, Boxes, ListTree, Moon, Clock, Calendar, Sun, Mountain,
+  Layers, RefreshCw, AlertTriangle, Power, ShieldOff, LayoutList, ChevronDown, ChevronRight,
+  Shield, Repeat, CheckCircle2, XCircle, Play, Square, ChevronsDownUp, ChevronsUpDown,
+  Sprout, Flame, Rocket, Boxes, Moon, Clock, Calendar, Mountain, Activity, TrendingUp,
   Search, X,
 } from 'lucide-react';
+import DeskFigure, { deskTone } from '@/components/DeskFigure';
 import StrategyRowWide from '@/components/StrategyRowWide';
 import NavBar from '@/components/NavBar';
 import BrokerSelector from '@/components/BrokerSelector';
 import { usePortfolio } from '@/lib/usePortfolio';
 import { useBrokerSelector } from '@/hooks/useBrokerSelector';
 import { useGroupCollapse, groupByUnderlying, signedInr, inr } from '@/lib/useStrategyGroups';
-import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Checkbox } from '@/components/ui/checkbox';
-import { Separator } from '@/components/ui/separator';
 import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group';
 import { Tooltip, TooltipTrigger, TooltipContent } from '@/components/ui/tooltip';
-
-// Named typography tokens
-const TXT_EYEBROW = 'text-[9px] font-bold uppercase tracking-[0.16em]';
-const TXT_LABEL = 'text-[10px] font-semibold uppercase tracking-wider';
-const TXT_CAPTION = 'text-[11px] font-semibold';
-const TXT_STAT = 'text-sm font-bold font-mono tabular-nums leading-tight';
 
 type GroupMode = 'timeframe' | 'underlying' | 'type';
 type HorizonFilter = 'all' | 'intraday' | 'positional';
@@ -52,14 +44,14 @@ const TIMEFRAME_GROUPS: Record<string, { title: string; tagline: string; icon: R
     tagline: 'F&O & MCX futures with mandatory intraday square-off (15:17 IST / 23:25 MCX)',
     icon: Clock,
     accent: 'amber',
-    badge: '⚡ INTRADAY',
+    badge: 'Intraday',
   },
   positional: {
     title: 'Positional & Multi-Day',
     tagline: 'Multi-day CNC momentum portfolio, overnight hedged straddles, and weekly delta management',
     icon: Calendar,
     accent: 'violet',
-    badge: '🌙 POSITIONAL',
+    badge: 'Positional',
   },
 };
 const OTHER_TIMEFRAME_GROUP = {
@@ -68,18 +60,6 @@ const OTHER_TIMEFRAME_GROUP = {
   icon: Boxes,
   accent: 'zinc',
   badge: 'OTHER',
-};
-
-const ACCENT_CLASSES: Record<string, { icon: string; iconBg: string; iconBorder: string; ring: string; badge: string }> = {
-  emerald: { icon: 'text-emerald-400', iconBg: 'bg-emerald-500/10', iconBorder: 'border-emerald-500/25', ring: 'hover:border-emerald-700/60', badge: 'bg-emerald-500/15 text-emerald-300 border-emerald-500/30' },
-  sky:     { icon: 'text-sky-400',     iconBg: 'bg-sky-500/10',     iconBorder: 'border-sky-500/25',     ring: 'hover:border-sky-700/60',     badge: 'bg-sky-500/15 text-sky-300 border-sky-500/30' },
-  violet:  { icon: 'text-violet-400',  iconBg: 'bg-violet-500/10',  iconBorder: 'border-violet-500/25',  ring: 'hover:border-violet-700/60',  badge: 'bg-violet-500/15 text-violet-300 border-violet-500/30' },
-  amber:   { icon: 'text-amber-400',   iconBg: 'bg-amber-500/10',   iconBorder: 'border-amber-500/25',   ring: 'hover:border-amber-700/60',   badge: 'bg-amber-500/15 text-amber-300 border-amber-500/30' },
-  orange:  { icon: 'text-orange-400',  iconBg: 'bg-orange-500/10',  iconBorder: 'border-orange-500/25',  ring: 'hover:border-orange-700/60',  badge: 'bg-orange-500/15 text-orange-300 border-orange-500/30' },
-  fuchsia: { icon: 'text-fuchsia-400', iconBg: 'bg-fuchsia-500/10', iconBorder: 'border-fuchsia-500/25', ring: 'hover:border-fuchsia-700/60', badge: 'bg-fuchsia-500/15 text-fuchsia-300 border-fuchsia-500/30' },
-  zinc:    { icon: 'text-zinc-400',    iconBg: 'bg-zinc-500/10',    iconBorder: 'border-zinc-500/25',    ring: 'hover:border-zinc-700/60',    badge: 'bg-zinc-500/15 text-zinc-300 border-zinc-500/30' },
-  cyan:    { icon: 'text-cyan-400',    iconBg: 'bg-cyan-500/10',    iconBorder: 'border-cyan-500/25',    ring: 'hover:border-cyan-700/60',    badge: 'bg-cyan-500/15 text-cyan-300 border-cyan-500/30' },
-  rose:    { icon: 'text-rose-400',    iconBg: 'bg-rose-500/10',    iconBorder: 'border-rose-500/25',    ring: 'hover:border-rose-700/60',    badge: 'bg-rose-500/15 text-rose-300 border-rose-500/30' },
 };
 
 interface IndexQuote { ltp: number; prevClose: number }
@@ -290,7 +270,6 @@ export default function StrategiesPlusPage() {
   const runningCount = Object.values(strategies).reduce((n: number, s: any) =>
     n + Object.values(s.instances || {}).filter((st: any) => st?.status !== 'STOPPED').length, 0);
   const pnl = portfolio?.total_pnl ?? 0;
-  const pnlPositive = pnl >= 0;
 
   /* ── Stop All (graceful shutdown) ── */
   const handleStopAll = async () => {
@@ -634,64 +613,59 @@ export default function StrategiesPlusPage() {
   const intradayRunning = instanceRows.filter(r => (r.meta?.timeframe || 'intraday') === 'intraday' && r.state?.status !== 'STOPPED').length;
   const positionalRunning = instanceRows.filter(r => r.meta?.timeframe === 'positional' && r.state?.status !== 'STOPPED').length;
 
+  const stopLabel = stoppingAll ? 'Stopping…' : confirmStopAll ? `Click again to stop ${runningCount}` : 'Stop all';
+  const exitLabel = exitingAll ? 'Exiting…' : confirmExitAll ? 'Click again to flatten' : 'Exit all positions';
+  const ok = portfolio?.success;
+  const field = 'bg-zinc-900 border-zinc-700 text-white h-8 text-xs tabular-nums rounded-lg';
+  const drawerBtn = (active: boolean, accent: 'amber' | 'sky') =>
+    `gap-1.5 text-xs font-semibold rounded-lg h-8 ${
+      active
+        ? accent === 'amber' ? 'bg-amber-500/15 border-amber-500/40 text-amber-400' : 'bg-sky-500/15 border-sky-500/40 text-sky-400'
+        : 'border-zinc-800 text-zinc-400 hover:text-zinc-200'
+    }`;
+
   return (
     <div className="flex flex-col flex-1 w-full bg-zinc-950 min-h-screen text-zinc-300">
       {/* ── Toast stack ── */}
-      <div className="fixed top-4 right-4 z-50 flex flex-col gap-2 pointer-events-none">
+      <div className="fixed top-4 right-4 z-50 flex flex-col gap-2 pointer-events-none" role="status" aria-live="polite">
         {toasts.map(t => (
-          <div key={t.id} className={`px-4 py-2.5 rounded-xl border text-xs font-semibold shadow-2xl backdrop-blur-md animate-in fade-in slide-in-from-right-4 duration-300 ${toastColor[t.type]}`}>
+          <div key={t.id} className={`px-4 py-2.5 rounded-lg border text-xs font-semibold shadow-2xl backdrop-blur-md ${toastColor[t.type]}`}>
             {t.message}
           </div>
         ))}
       </div>
 
-      {/* ── Sticky Navigation & Control Header ── */}
-      <header className="sticky top-0 z-30 w-full border-b border-zinc-800 bg-zinc-950/95 backdrop-blur px-5 py-2.5 flex items-center justify-between gap-4 flex-wrap">
-        <div className="flex items-center gap-3 shrink-0">
-          <div className="flex items-center justify-center w-8 h-8 rounded-lg bg-emerald-500/10 border border-emerald-500/25 shrink-0">
+      {/* ── Header ── */}
+      <header className="sticky top-0 z-30 flex items-center justify-between gap-3 flex-wrap px-6 py-3 border-b border-zinc-800 bg-zinc-950/95 backdrop-blur">
+        <div className="flex items-center gap-3">
+          <div className="flex items-center justify-center w-8 h-8 rounded-lg shrink-0 bg-emerald-500/10 border border-emerald-500/25">
             <Layers className="h-4 w-4 text-emerald-400" />
           </div>
           <div>
-            <div className="flex items-center gap-2">
-              <p className="text-[9px] font-bold text-emerald-400 uppercase tracking-[0.18em]">
-                Algo Execution · Control Center
-              </p>
-              <span className="text-[9px] font-mono font-bold bg-emerald-500/10 text-emerald-400 border border-emerald-500/25 px-1.5 py-0.2 rounded">
-                HUB
-              </span>
-            </div>
-            <h1 className="text-sm font-bold tracking-tight text-white leading-none mt-0.5">
-              Strategies+ Manager
-            </h1>
+            <h1 className="text-sm font-bold text-white tracking-tight leading-none">Algo Desk Plus</h1>
+            <p className="text-[11px] text-zinc-500 font-medium mt-1">Run several copies of a strategy, guard the day&apos;s P&amp;L, mirror fills to other brokers</p>
           </div>
         </div>
 
-        <div className="flex items-center gap-3 shrink-0">
-          <BrokerSelector
-            broker={broker}
-            setBroker={setBroker}
-            authenticatedBrokers={authenticatedBrokers}
-          />
-          {/* Live NIFTY + India VIX ticker capsules */}
+        <div className="flex items-center gap-2 flex-wrap">
+          <BrokerSelector broker={broker} setBroker={setBroker} authenticatedBrokers={authenticatedBrokers} />
           {([
-            { key: 'NIFTY', q: indexTicker?.nifty, decimals: 2 },
-            { key: 'VIX', q: indexTicker?.vix, decimals: 2 },
-          ] as const).map(({ key, q, decimals }) => {
+            { key: 'NIFTY', q: indexTicker?.nifty },
+            { key: 'VIX', q: indexTicker?.vix },
+          ] as const).map(({ key, q }) => {
             if (!q) return null;
             const chg = q.prevClose > 0 ? q.ltp - q.prevClose : 0;
             const chgPct = q.prevClose > 0 ? (chg / q.prevClose) * 100 : 0;
             const isUp = chg >= 0;
             return (
-              <div key={key} className="flex items-baseline gap-2 bg-zinc-900 border border-zinc-800 rounded-xl px-3 py-1 text-xs">
-                <span className="text-[10px] font-bold text-zinc-400 uppercase tracking-wider">{key}</span>
-                <span className="font-mono font-bold text-white tabular-nums">
-                  {q.ltp.toLocaleString('en-IN', { minimumFractionDigits: decimals, maximumFractionDigits: decimals })}
+              <div key={key} className="flex items-baseline gap-2 px-1 text-xs tabular-nums">
+                <span className="font-semibold text-zinc-400">{key}</span>
+                <span className="font-bold text-white">
+                  {q.ltp.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
                 </span>
                 {q.prevClose > 0 && (
-                  <span className={`flex items-baseline gap-1 text-[11px] font-mono tabular-nums ${isUp ? 'text-emerald-400' : 'text-rose-400'}`}>
-                    <span>{isUp ? '▲' : '▼'}</span>
-                    <span>{Math.abs(chg).toFixed(2)}</span>
-                    <span className="text-zinc-500 font-normal">({isUp ? '+' : ''}{chgPct.toFixed(2)}%)</span>
+                  <span className={isUp ? 'text-emerald-400' : 'text-red-400'}>
+                    {isUp ? '+' : '-'}{Math.abs(chgPct).toFixed(2)}%
                   </span>
                 )}
               </div>
@@ -703,241 +677,126 @@ export default function StrategiesPlusPage() {
               render={
                 <button
                   onClick={() => fetchStrategies(true)}
-                  className="p-2 border border-zinc-800 rounded-xl bg-zinc-900 text-zinc-400 hover:text-white hover:border-zinc-700 transition-all active:scale-95"
+                  aria-label="Refresh strategies"
+                  className="p-1.5 border border-zinc-800 rounded-lg text-zinc-500 hover:text-white hover:border-zinc-700 focus-visible:outline-2 focus-visible:outline-emerald-400"
                 >
                   <RefreshCw className="h-3.5 w-3.5" />
                 </button>
               }
             />
-            <TooltipContent>Refresh strategy status</TooltipContent>
+            <TooltipContent>Refresh strategies</TooltipContent>
           </Tooltip>
 
-          <Separator orientation="vertical" className="h-5 bg-zinc-800 shrink-0 mx-0.5" />
-
+          <span className="w-px h-5 bg-zinc-800 shrink-0" />
           <NavBar />
         </div>
       </header>
 
-      {/* ── Executive Book Strip (Hero P&L & Safety Console) ── */}
-      <div className="w-full border-b border-zinc-800 bg-zinc-900/40 px-5 py-2.5 flex items-center justify-between gap-4 flex-wrap">
-        {/* Left: Financial Status Cluster */}
-        <div className="flex items-center gap-3.5 flex-wrap bg-zinc-900/80 border border-zinc-800 rounded-2xl px-3.5 py-2 shadow-sm">
-          <div className="flex items-center gap-2.5">
-            <div className={`w-7 h-7 rounded-lg flex items-center justify-center border ${
-              pnlPositive ? 'bg-emerald-500/10 border-emerald-500/30 text-emerald-400' : 'bg-rose-500/10 border-rose-500/30 text-rose-400'
-            }`}>
-              {portfolioLoading && !portfolio ? (
-                <RefreshCw className="h-3.5 w-3.5 text-zinc-500 animate-spin" />
-              ) : pnlPositive ? (
-                <TrendingUp className="h-3.5 w-3.5 text-emerald-400" />
-              ) : (
-                <TrendingDown className="h-3.5 w-3.5 text-rose-400" />
+      {/* ── Command strip: figures left, safety controls right ── */}
+      <section aria-label="Account totals and safety controls" className="border-b border-zinc-800 bg-zinc-900">
+        <div className="flex items-stretch flex-wrap px-6">
+          <DeskFigure label="Day P&L" big tone={ok ? deskTone(pnl) : 'neutral'}
+            value={ok ? signedInr(pnl) : portfolioLoading ? 'Loading' : '—'} />
+          <DeskFigure label="Realized" tone={ok ? deskTone(portfolio.total_realized_pnl) : 'neutral'}
+            value={ok ? signedInr(portfolio.total_realized_pnl) : '—'} />
+          <DeskFigure label="Unrealized" tone={ok ? deskTone(portfolio.total_unrealized_pnl) : 'neutral'}
+            value={ok ? signedInr(portfolio.total_unrealized_pnl) : '—'} />
+          <DeskFigure label="Margin free" value={ok ? inr(portfolio.available_funds) : '—'} />
+          <DeskFigure label="Open positions" value={ok ? String(portfolio.positions.length) : '—'} />
+          <DeskFigure label="Strategies live" value={`${runningCount} of ${instanceRows.length}`} />
+
+          <div className="ml-auto flex items-center gap-2 py-3 flex-wrap">
+            <Button variant="outline" size="sm" onClick={() => setShowPnlGuard(v => !v)}
+              aria-expanded={showPnlGuard} className={drawerBtn(showPnlGuard, 'amber')}>
+              <Shield className="h-3.5 w-3.5" />
+              P&amp;L guard
+              {pnlGuardStatus?.pnlExitStatus === 'ACTIVE' && (
+                <span className="h-1.5 w-1.5 rounded-full bg-emerald-400 shrink-0" title="Guard active" />
               )}
-            </div>
-            <div className="flex flex-col">
-              <span className={`${TXT_EYEBROW} text-zinc-400 leading-none`}>Combined P&amp;L</span>
-              <span className={`text-base font-mono font-extrabold tabular-nums tracking-tight ${
-                portfolio ? (pnlPositive ? 'text-emerald-400' : 'text-rose-400') : 'text-zinc-500'
+              <ChevronDown className={`h-3 w-3 ${showPnlGuard ? 'rotate-180' : ''}`} />
+            </Button>
+            <Button variant="outline" size="sm" onClick={() => setShowCopyTrade(v => !v)}
+              aria-expanded={showCopyTrade} className={drawerBtn(showCopyTrade, 'sky')}>
+              <Repeat className="h-3.5 w-3.5" />
+              Replication
+              {copyTradeConfig.armed && (
+                <span className="h-1.5 w-1.5 rounded-full bg-red-400 shrink-0" title="Armed: live orders are being copied" />
+              )}
+              <ChevronDown className={`h-3 w-3 ${showCopyTrade ? 'rotate-180' : ''}`} />
+            </Button>
+
+            <span className="w-px h-5 bg-zinc-800 shrink-0 mx-1" />
+
+            <Button variant="outline" size="sm" onClick={handleStopAll} disabled={stoppingAll || runningCount === 0}
+              title="Stop every running strategy gracefully (writes shutdown triggers; positions stay open)"
+              className={`gap-1.5 text-xs font-semibold rounded-lg h-8 ${
+                confirmStopAll ? 'bg-amber-500/20 border-amber-500 text-amber-400' : 'border-zinc-700 text-zinc-300 hover:text-white'
               }`}>
-                {portfolio
-                  ? `${pnlPositive ? '+' : ''}₹${pnl.toLocaleString('en-IN', { minimumFractionDigits: 0, maximumFractionDigits: 0 })}`
-                  : '—'}
-              </span>
-            </div>
+              {stoppingAll ? <RefreshCw className="h-3.5 w-3.5 animate-spin" /> : <Power className="h-3.5 w-3.5" />}
+              {stopLabel}
+            </Button>
+            <Button variant="destructive" size="sm" onClick={handleExitAll} disabled={exitingAll}
+              title="Emergency: close every open position at the broker"
+              className={`gap-1.5 text-xs font-bold rounded-lg h-8 border ${
+                confirmExitAll
+                  ? 'bg-red-600 border-red-500 text-oncolor'
+                  : 'bg-red-500/10 border-red-500/30 text-red-400 hover:bg-red-500/20'
+              }`}>
+              {exitingAll ? <RefreshCw className="h-3.5 w-3.5 animate-spin" /> : <ShieldOff className="h-3.5 w-3.5" />}
+              {exitLabel}
+            </Button>
           </div>
-
-          {portfolio?.success && (
-            <>
-              <Separator orientation="vertical" className="h-7 bg-zinc-800" />
-              <div className="flex flex-col">
-                <span className={`${TXT_EYEBROW} text-zinc-400 leading-none`}>Realized</span>
-                <span className={`text-xs font-mono font-bold tabular-nums ${portfolio.total_realized_pnl >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
-                  {portfolio.total_realized_pnl >= 0 ? '+' : ''}₹{portfolio.total_realized_pnl.toLocaleString('en-IN', { minimumFractionDigits: 0 })}
-                </span>
-              </div>
-              <Separator orientation="vertical" className="h-7 bg-zinc-800" />
-              <div className="flex flex-col">
-                <span className={`${TXT_EYEBROW} text-zinc-400 leading-none`}>Unrealized</span>
-                <span className={`text-xs font-mono font-bold tabular-nums ${portfolio.total_unrealized_pnl >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
-                  {portfolio.total_unrealized_pnl >= 0 ? '+' : ''}₹{portfolio.total_unrealized_pnl.toLocaleString('en-IN', { minimumFractionDigits: 0 })}
-                </span>
-              </div>
-              <Separator orientation="vertical" className="h-7 bg-zinc-800" />
-              <div className="flex flex-col">
-                <span className={`${TXT_EYEBROW} text-zinc-400 leading-none`}>Margin Avail</span>
-                <span className="text-xs font-mono font-bold text-white tabular-nums">
-                  ₹{portfolio.available_funds.toLocaleString('en-IN', { minimumFractionDigits: 0 })}
-                </span>
-              </div>
-              <Separator orientation="vertical" className="h-7 bg-zinc-800" />
-              <div className="flex flex-col">
-                <span className={`${TXT_EYEBROW} text-zinc-400 leading-none`}>Positions</span>
-                <span className="text-xs font-mono font-bold text-sky-300 tabular-nums">{portfolio.positions.length}</span>
-              </div>
-            </>
-          )}
-
-          <Tooltip>
-            <TooltipTrigger
-              render={
-                <button
-                  onClick={fetchPortfolio}
-                  disabled={portfolioLoading}
-                  className="p-1 rounded text-zinc-500 hover:text-zinc-200 transition-colors disabled:opacity-40"
-                >
-                  <RefreshCw className={`h-3 w-3 ${portfolioLoading ? 'animate-spin' : ''}`} />
-                </button>
-              }
-            />
-            <TooltipContent>Refresh Broker Balance &amp; P&amp;L</TooltipContent>
-          </Tooltip>
-
-          {portfolio && !portfolio.success && (
-            <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-amber-500/10 border border-amber-500/30">
-              <AlertTriangle className="h-3 w-3 text-amber-400 shrink-0" />
-              <span className="text-[11px] font-mono text-amber-300">
-                Token expired — run <code className="bg-amber-500/15 px-1 py-0.2 rounded font-bold">login.py</code>
-              </span>
-            </div>
-          )}
         </div>
+        {portfolio && !portfolio.success && (
+          <div className="flex items-center gap-2 px-6 py-1.5 border-t border-amber-500/20 bg-amber-500/10 text-xs text-amber-400">
+            <AlertTriangle className="h-3.5 w-3.5 shrink-0" />
+            Dhan session expired, so broker figures are hidden. Run <code className="font-mono">login.py</code> to sign in again.
+            <button onClick={fetchPortfolio} className="ml-auto underline hover:text-amber-300">Retry</button>
+          </div>
+        )}
+      </section>
 
-        {/* Right: Operational Controls & Safety Dock */}
-        <div className="flex items-center gap-2 shrink-0 flex-wrap">
-          {/* P&L Guard Drawer Toggle */}
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={() => setShowPnlGuard(v => !v)}
-            className={`gap-1.5 text-xs font-bold rounded-xl transition-all h-8 ${
-              showPnlGuard
-                ? 'bg-amber-500/20 border-amber-500/40 text-amber-300'
-                : 'bg-zinc-900 border-zinc-800 text-zinc-400 hover:text-zinc-200'
-            }`}
-          >
-            <Shield className="h-3.5 w-3.5" />
-            P&amp;L Guard
-            {pnlGuardStatus?.pnlExitStatus === 'ACTIVE' && (
-              <span className="h-1.5 w-1.5 rounded-full bg-emerald-400 shrink-0 animate-pulse" />
-            )}
-            <ChevronDown className={`h-3 w-3 transition-transform duration-200 ${showPnlGuard ? 'rotate-180' : ''}`} />
-          </Button>
-
-          {/* Trade Replication Drawer Toggle */}
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={() => setShowCopyTrade(v => !v)}
-            className={`gap-1.5 text-xs font-bold rounded-xl transition-all h-8 ${
-              showCopyTrade
-                ? 'bg-sky-500/20 border-sky-500/40 text-sky-300'
-                : 'bg-zinc-900 border-zinc-800 text-zinc-400 hover:text-zinc-200'
-            }`}
-          >
-            <Repeat className="h-3.5 w-3.5" />
-            Replication
-            {copyTradeConfig.armed && (
-              <span className="h-1.5 w-1.5 rounded-full bg-red-400 animate-pulse shrink-0" title="Armed — live orders active" />
-            )}
-            <ChevronDown className={`h-3 w-3 transition-transform duration-200 ${showCopyTrade ? 'rotate-180' : ''}`} />
-          </Button>
-
-          <Separator orientation="vertical" className="h-6 bg-zinc-800 mx-1" />
-
-          {/* Stop All Button */}
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={handleStopAll}
-            disabled={stoppingAll || runningCount === 0}
-            className={`gap-1.5 text-xs font-bold font-mono rounded-xl h-8 ${
-              confirmStopAll
-                ? 'bg-amber-500/20 border-amber-500 text-amber-300 animate-pulse'
-                : stoppingAll
-                ? 'bg-zinc-900 border-zinc-800 text-zinc-500'
-                : 'bg-zinc-900 border-zinc-800 text-zinc-400 hover:text-zinc-200'
-            }`}
-            title="Gracefully stop all running strategies (write shutdown triggers)"
-          >
-            {stoppingAll ? <RefreshCw className="h-3 w-3 animate-spin" /> : <Power className="h-3 w-3" />}
-            {stoppingAll ? 'Stopping…' : confirmStopAll ? 'Confirm Stop All?' : 'Stop All'}
-          </Button>
-
-          {/* EXIT ALL Button */}
-          <Button
-            variant="destructive"
-            size="sm"
-            onClick={handleExitAll}
-            disabled={exitingAll}
-            className={`gap-1.5 text-xs font-bold font-mono rounded-xl h-8 border ${
-              exitingAll
-                ? 'bg-rose-900/40 border-rose-800 text-rose-400'
-                : confirmExitAll
-                ? 'bg-rose-600 border-rose-500 text-white animate-pulse shadow-lg shadow-rose-500/30'
-                : 'bg-rose-950/70 border-rose-900 text-rose-400 hover:bg-rose-900/50 hover:text-rose-200'
-            }`}
-            title="Emergency flatten: close ALL active positions at broker level"
-          >
-            {exitingAll ? <RefreshCw className="h-3 w-3 animate-spin" /> : <ShieldOff className="h-3 w-3" />}
-            {exitingAll ? 'Exiting…' : confirmExitAll ? 'Confirm EXIT ALL?' : 'EXIT ALL Positions'}
-          </Button>
-        </div>
-      </div>
-
-      {/* ── Sub-Filter & Navigation Command Strip (Search, Horizons, View & Grouping) ── */}
-      <div className="w-full border-b border-zinc-800 bg-zinc-950/70 px-5 py-2 flex items-center justify-between gap-3 flex-wrap">
-        {/* Left: Instant Search & Horizon Filter */}
-        <div className="flex items-center gap-3 flex-wrap flex-1 min-w-[320px]">
-          {/* Search Bar */}
-          <div className="relative flex items-center w-64 max-w-xs">
+      {/* ── Toolbar: search, horizon, view, grouping ── */}
+      <div className="sticky top-[57px] z-20 flex items-center justify-between gap-3 flex-wrap px-6 py-2 border-b border-zinc-800 bg-zinc-950/95 backdrop-blur">
+        <div className="flex items-center gap-3 flex-wrap">
+          <div className="relative flex items-center w-60">
             <Search className="absolute left-2.5 h-3.5 w-3.5 text-zinc-500 pointer-events-none" />
             <Input
               type="text"
               value={searchQuery}
               onChange={e => setSearchQuery(e.target.value)}
-              placeholder="Search strategies, tags..."
-              className="h-8 pl-8 pr-7 bg-zinc-900/90 border-zinc-800 focus:border-zinc-700 text-white text-xs placeholder:text-zinc-500 rounded-xl"
+              placeholder="Search strategies"
+              aria-label="Search strategies"
+              className="h-8 pl-8 pr-7 bg-zinc-900 border-zinc-800 text-white text-xs placeholder:text-zinc-500 rounded-lg"
             />
             {searchQuery && (
-              <button
-                type="button"
-                onClick={() => setSearchQuery('')}
-                className="absolute right-2 text-zinc-500 hover:text-zinc-300 p-0.5 rounded transition-colors"
-                title="Clear search filter"
-              >
+              <button type="button" onClick={() => setSearchQuery('')} aria-label="Clear search"
+                className="absolute right-2 text-zinc-500 hover:text-zinc-200">
                 <X className="h-3 w-3" />
               </button>
             )}
           </div>
 
-          {/* Horizon Pills */}
-          <div className="flex items-center gap-1.5 p-0.5 bg-zinc-900/90 border border-zinc-800 rounded-xl">
-            {(
-              [
-                { key: 'all', label: 'All Horizons', count: instanceRows.length, running: runningCount },
-                { key: 'intraday', label: '⚡ Intraday', count: intradayTotal, running: intradayRunning },
-                { key: 'positional', label: '🌙 Positional', count: positionalTotal, running: positionalRunning },
-              ] as const
-            ).map(({ key, label, count, running }) => (
+          <div role="tablist" aria-label="Time horizon" className="flex items-center rounded-lg border border-zinc-800 p-0.5 gap-0.5">
+            {([
+              { key: 'all', label: 'All', count: instanceRows.length, running: runningCount },
+              { key: 'intraday', label: 'Intraday', count: intradayTotal, running: intradayRunning },
+              { key: 'positional', label: 'Positional', count: positionalTotal, running: positionalRunning },
+            ] as const).map(({ key, label, count, running }) => (
               <button
                 key={key}
+                role="tab"
+                aria-selected={horizonFilter === key}
                 onClick={() => setHorizonFilter(key)}
-                className={`flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-mono font-bold transition-all ${
-                  horizonFilter === key
-                    ? key === 'intraday'
-                      ? 'bg-amber-500/20 text-amber-300 border border-amber-500/30'
-                      : key === 'positional'
-                      ? 'bg-violet-500/20 text-violet-300 border border-violet-500/30'
-                      : 'bg-zinc-800 text-white border border-zinc-700'
-                    : 'text-zinc-400 hover:text-zinc-200'
+                className={`flex items-center gap-1.5 px-2.5 py-1 rounded-md text-xs font-semibold transition-colors ${
+                  horizonFilter === key ? 'bg-zinc-800 text-white' : 'text-zinc-400 hover:text-zinc-200'
                 }`}
               >
-                <span>{label}</span>
-                <span className="text-[10px] text-zinc-500 font-normal">({count})</span>
+                {label}
+                <span className="tabular-nums text-zinc-500">{count}</span>
                 {running > 0 && (
-                  <span className="inline-flex items-center gap-1 text-[10px] text-emerald-400 font-bold bg-emerald-500/10 px-1 py-0 rounded">
-                    <span className="h-1.5 w-1.5 rounded-full bg-emerald-400 animate-pulse" />
-                    {running}
+                  <span className="flex items-center gap-1 tabular-nums text-emerald-400">
+                    <span className="h-1.5 w-1.5 rounded-full bg-emerald-400" />{running}
                   </span>
                 )}
               </button>
@@ -945,170 +804,73 @@ export default function StrategiesPlusPage() {
           </div>
         </div>
 
-        {/* Right: View Mode, Grouping Mode & Collapse Controls */}
-        <div className="flex items-center gap-2 shrink-0 flex-wrap">
-          {/* Active vs All View Mode */}
+        <div className="flex items-center gap-2 flex-wrap">
           <Tabs value={viewMode} onValueChange={(v) => setViewMode(v as 'active' | 'all')}>
-            <TabsList className="bg-zinc-900 border border-zinc-800 p-0.5 rounded-xl h-8">
-              <TabsTrigger value="active" className="gap-1.5 text-xs font-bold font-mono px-2.5 py-1 rounded-lg h-7">
-                <Zap className="h-3 w-3" />
-                Active
-                {runningCount > 0 && (
-                  <Badge variant="secondary" className="h-4 px-1.5 bg-emerald-500/20 text-emerald-300 border-0 text-[10px] font-mono font-bold">
-                    {runningCount}
-                  </Badge>
-                )}
+            <TabsList className="bg-transparent border border-zinc-800 p-0.5 rounded-lg h-8">
+              <TabsTrigger value="active" className="gap-1.5 text-xs font-semibold px-2.5 rounded-md h-7">
+                Running
+                {runningCount > 0 && <span className="tabular-nums text-emerald-400">{runningCount}</span>}
               </TabsTrigger>
-              <TabsTrigger value="all" className="gap-1.5 text-xs font-bold font-mono px-2.5 py-1 rounded-lg h-7">
-                <LayoutList className="h-3 w-3" />
-                All
-                <Badge variant="secondary" className="h-4 px-1.5 bg-zinc-800 text-zinc-400 border-0 text-[10px] font-mono font-bold">
-                  {instanceRows.length}
-                </Badge>
+              <TabsTrigger value="all" className="gap-1.5 text-xs font-semibold px-2.5 rounded-md h-7">
+                Everything
+                <span className="tabular-nums text-zinc-500">{instanceRows.length}</span>
               </TabsTrigger>
             </TabsList>
           </Tabs>
 
-          {/* Grouping Dimension: Timeframe (Horizon), Underlying, or Type */}
           <Tabs value={groupMode} onValueChange={(v) => setGroupMode(v as GroupMode)}>
-            <TabsList className="bg-zinc-900 border border-zinc-800 p-0.5 rounded-xl h-8">
-              <Tooltip>
-                <TooltipTrigger
-                  render={
-                    <TabsTrigger value="timeframe" className="gap-1.5 text-xs font-bold font-mono px-2 py-1 rounded-lg h-7">
-                      <Clock className="h-3 w-3 text-amber-400" />
-                      Horizon
-                    </TabsTrigger>
-                  }
-                />
-                <TooltipContent>Group by Time Horizon (⚡ Intraday vs 🌙 Positional)</TooltipContent>
-              </Tooltip>
-              <Tooltip>
-                <TooltipTrigger
-                  render={
-                    <TabsTrigger value="underlying" className="gap-1.5 text-xs font-bold font-mono px-2 py-1 rounded-lg h-7">
-                      <ListTree className="h-3 w-3 text-sky-400" />
-                      Underlying
-                    </TabsTrigger>
-                  }
-                />
-                <TooltipContent>Group by Underlying Exposure (NIFTY, CRUDEOILM, NIFTY 500)</TooltipContent>
-              </Tooltip>
-              <Tooltip>
-                <TooltipTrigger
-                  render={
-                    <TabsTrigger value="type" className="gap-1.5 text-xs font-bold font-mono px-2 py-1 rounded-lg h-7">
-                      <Boxes className="h-3 w-3 text-violet-400" />
-                      Type
-                    </TabsTrigger>
-                  }
-                />
-                <TooltipContent>Group by Trading Logic Category</TooltipContent>
-              </Tooltip>
+            <TabsList aria-label="Group by" className="bg-transparent border border-zinc-800 p-0.5 rounded-lg h-8">
+              <TabsTrigger value="timeframe" title="Group by time horizon" className="text-xs font-semibold px-2.5 rounded-md h-7">Horizon</TabsTrigger>
+              <TabsTrigger value="underlying" title="Group by underlying (NIFTY, CRUDEOILM, NIFTY 500)" className="text-xs font-semibold px-2.5 rounded-md h-7">Underlying</TabsTrigger>
+              <TabsTrigger value="type" title="Group by trading logic" className="text-xs font-semibold px-2.5 rounded-md h-7">Logic</TabsTrigger>
             </TabsList>
           </Tabs>
 
-          {/* Expand / Collapse Toggle */}
-          <ToggleGroup variant="outline" size="sm" className="bg-zinc-900 border border-zinc-800 rounded-xl p-0.5 h-8">
-            <Tooltip>
-              <TooltipTrigger
-                render={
-                  <ToggleGroupItem
-                    value="expand"
-                    onClick={() => groups.setAll(activeGroupedList.map(g => g.underlying), true)}
-                    className="text-zinc-400 hover:text-white data-checked:bg-transparent h-7 w-7 p-0"
-                  >
-                    <ChevronsUpDown className="h-3.5 w-3.5" />
-                  </ToggleGroupItem>
-                }
-              />
-              <TooltipContent>Expand all sections</TooltipContent>
-            </Tooltip>
-            <Tooltip>
-              <TooltipTrigger
-                render={
-                  <ToggleGroupItem
-                    value="collapse"
-                    onClick={() => groups.setAll(activeGroupedList.map(g => g.underlying), false)}
-                    className="text-zinc-400 hover:text-white data-checked:bg-transparent h-7 w-7 p-0"
-                  >
-                    <ChevronsDownUp className="h-3.5 w-3.5" />
-                  </ToggleGroupItem>
-                }
-              />
-              <TooltipContent>Collapse all sections</TooltipContent>
-            </Tooltip>
-          </ToggleGroup>
-
-          {/* Active Count Capsule */}
-          <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-xl bg-zinc-900 border border-zinc-800 text-xs font-mono text-zinc-400 h-8">
-            <Activity className={`h-3.5 w-3.5 ${runningCount > 0 ? 'text-emerald-400' : 'text-zinc-600'}`} />
-            <span>
-              <strong className="text-white">{runningCount}</strong>/{instanceRows.length} live
-            </span>
-          </div>
+          <button onClick={() => groups.setAll(activeGroupedList.map(g => g.underlying), true)} title="Expand every section"
+            className="flex items-center gap-1.5 px-2 py-1.5 rounded-lg text-xs font-semibold text-zinc-400 hover:text-white hover:bg-zinc-800">
+            <ChevronsUpDown className="h-3.5 w-3.5" />Expand all
+          </button>
+          <button onClick={() => groups.setAll(activeGroupedList.map(g => g.underlying), false)} title="Collapse every section"
+            className="flex items-center gap-1.5 px-2 py-1.5 rounded-lg text-xs font-semibold text-zinc-400 hover:text-white hover:bg-zinc-800">
+            <ChevronsDownUp className="h-3.5 w-3.5" />Collapse all
+          </button>
         </div>
       </div>
 
-      {/* ── P&L Guard Drawer Panel ── */}
+      {/* ── P&L guard drawer ── */}
       {showPnlGuard && (
-        <div className="w-full border-b border-zinc-800 bg-zinc-900/60 px-5 py-3.5 animate-in fade-in slide-in-from-top-2 duration-200">
-          <div className="flex items-center gap-4 flex-wrap rounded-2xl border border-zinc-800 bg-zinc-950/80 px-4 py-3 shadow-inner">
-            <div className="flex items-center gap-2 shrink-0">
+        <div className="border-b border-zinc-800 bg-zinc-900 px-6 py-3">
+          <div className="flex items-center gap-x-5 gap-y-3 flex-wrap">
+            <div className="shrink-0 text-xs font-semibold">
               {pnlGuardLoading ? (
                 <RefreshCw className="h-3.5 w-3.5 text-zinc-500 animate-spin" />
               ) : pnlGuardStatus?.pnlExitStatus === 'ACTIVE' ? (
-                <Badge className="gap-1.5 text-xs font-mono font-bold bg-emerald-500/15 border border-emerald-500/30 text-emerald-400 rounded-xl px-2.5 py-1">
-                  <span className="h-2 w-2 rounded-full bg-emerald-400 shrink-0 animate-pulse" />
-                  GUARD ACTIVE
-                  {pnlGuardStatus.profit ? ` · Target +₹${pnlGuardStatus.profit.toLocaleString('en-IN')}` : ''}
-                  {pnlGuardStatus.loss ? ` · Stop -₹${pnlGuardStatus.loss.toLocaleString('en-IN')}` : ''}
-                </Badge>
+                <span className="flex items-center gap-1.5 text-emerald-400">
+                  <span className="h-2 w-2 rounded-full bg-emerald-400" />
+                  Guard active
+                  {pnlGuardStatus.profit ? `, target +₹${pnlGuardStatus.profit.toLocaleString('en-IN')}` : ''}
+                  {pnlGuardStatus.loss ? `, stop -₹${pnlGuardStatus.loss.toLocaleString('en-IN')}` : ''}
+                </span>
               ) : pnlGuardStatus ? (
-                <Badge variant="outline" className="text-xs font-mono font-bold bg-zinc-800 border-zinc-700 text-zinc-400 rounded-xl px-2.5 py-1">
-                  GUARD INACTIVE
-                </Badge>
+                <span className="text-zinc-400">Guard off</span>
               ) : (
-                <span className="text-xs text-zinc-500 font-mono">—</span>
+                <span className="text-zinc-500">—</span>
               )}
             </div>
 
-            <Separator orientation="vertical" className="h-6 bg-zinc-800 shrink-0" />
+            <label className="flex items-center gap-2 text-xs text-zinc-400">
+              Profit target ₹
+              <Input type="number" min="0" value={profitValue} onChange={e => setProfitValue(e.target.value)}
+                placeholder="5000" className={`${field} w-24`} />
+            </label>
+            <label className="flex items-center gap-2 text-xs text-zinc-400">
+              Loss limit ₹
+              <Input type="number" min="0" value={lossValue} onChange={e => setLossValue(e.target.value)}
+                placeholder="3000" className={`${field} w-24`} />
+            </label>
 
-            <div className="flex items-center gap-2 shrink-0">
-              <span className="text-xs font-bold text-zinc-400 font-mono uppercase">Profit Target</span>
-              <div className="flex items-center gap-1">
-                <span className="text-xs text-zinc-400 font-mono">₹</span>
-                <Input
-                  type="number"
-                  min="0"
-                  value={profitValue}
-                  onChange={e => setProfitValue(e.target.value)}
-                  placeholder="e.g. 5000"
-                  className="bg-zinc-900 border-zinc-700 text-white h-8 w-24 text-xs font-mono tabular-nums rounded-lg"
-                />
-              </div>
-            </div>
-
-            <div className="flex items-center gap-2 shrink-0">
-              <span className="text-xs font-bold text-zinc-400 font-mono uppercase">Loss Limit</span>
-              <div className="flex items-center gap-1">
-                <span className="text-xs text-zinc-400 font-mono">₹</span>
-                <Input
-                  type="number"
-                  min="0"
-                  value={lossValue}
-                  onChange={e => setLossValue(e.target.value)}
-                  placeholder="e.g. 3000"
-                  className="bg-zinc-900 border-zinc-700 text-white h-8 w-24 text-xs font-mono tabular-nums rounded-lg"
-                />
-              </div>
-            </div>
-
-            <Separator orientation="vertical" className="h-6 bg-zinc-800 shrink-0" />
-
-            <div className="flex items-center gap-2 shrink-0">
-              <span className="text-xs font-bold text-zinc-400 font-mono uppercase">Product</span>
+            <div className="flex items-center gap-2 text-xs text-zinc-400">
+              Product
               <ToggleGroup
                 variant="outline"
                 size="sm"
@@ -1120,195 +882,149 @@ export default function StrategiesPlusPage() {
                 }}
               >
                 {(['INTRADAY', 'DELIVERY'] as const).map(pt => (
-                  <ToggleGroupItem
-                    key={pt}
-                    value={pt}
-                    className="text-xs font-mono font-bold px-2.5 data-checked:bg-zinc-700 data-checked:text-white data-checked:border-zinc-500 text-zinc-400 border-zinc-800"
-                  >
-                    {pt}
+                  <ToggleGroupItem key={pt} value={pt}
+                    className="text-xs font-semibold px-2.5 data-checked:bg-zinc-700 data-checked:text-white data-checked:border-zinc-500 text-zinc-400 border-zinc-800">
+                    {pt === 'INTRADAY' ? 'Intraday' : 'Delivery'}
                   </ToggleGroupItem>
                 ))}
               </ToggleGroup>
             </div>
 
-            <Separator orientation="vertical" className="h-6 bg-zinc-800 shrink-0" />
-
-            <label className="flex items-center gap-2 cursor-pointer shrink-0">
-              <Checkbox
-                checked={enableKillSwitch}
-                onCheckedChange={(v) => setEnableKillSwitch(v === true)}
-                className="data-checked:bg-rose-600 data-checked:border-rose-500 border-zinc-600 rounded"
-              />
-              <span className="text-xs font-semibold text-zinc-300">Kill switch on trigger</span>
+            <label className="flex items-center gap-2 cursor-pointer text-xs text-zinc-300">
+              <Checkbox checked={enableKillSwitch} onCheckedChange={(v) => setEnableKillSwitch(v === true)}
+                className="data-checked:bg-red-600 data-checked:border-red-500 border-zinc-600 rounded" />
+              Kill switch on trigger
             </label>
 
-            <Separator orientation="vertical" className="h-6 bg-zinc-800 shrink-0" />
-
-            <Button
-              size="sm"
-              onClick={handleSetPnl}
-              disabled={settingPnl}
-              className="gap-1.5 text-xs font-mono font-bold rounded-xl bg-emerald-500/15 hover:bg-emerald-500/25 border border-emerald-500/30 text-emerald-300"
-            >
-              {settingPnl ? <RefreshCw className="h-3 w-3 animate-spin" /> : <Shield className="h-3 w-3" />}
-              {settingPnl ? 'Setting…' : 'Set Guard'}
-            </Button>
-
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={handleClearPnl}
-              disabled={clearingPnl}
-              className={`gap-1.5 text-xs font-mono font-bold rounded-xl ${
-                confirmClear
-                  ? 'bg-rose-600 border-rose-500 text-white animate-pulse'
-                  : 'bg-zinc-900 border-zinc-800 text-zinc-400 hover:text-rose-400'
-              }`}
-            >
-              {clearingPnl ? <RefreshCw className="h-3 w-3 animate-spin" /> : null}
-              {clearingPnl ? 'Clearing…' : confirmClear ? 'Confirm Clear?' : 'Clear'}
-            </Button>
+            <div className="flex items-center gap-2 ml-auto">
+              <Button size="sm" onClick={handleSetPnl} disabled={settingPnl}
+                className="gap-1.5 text-xs font-semibold rounded-lg bg-emerald-500/15 hover:bg-emerald-500/25 border border-emerald-500/30 text-emerald-400">
+                {settingPnl ? <RefreshCw className="h-3 w-3 animate-spin" /> : <Shield className="h-3 w-3" />}
+                {settingPnl ? 'Setting…' : 'Set guard'}
+              </Button>
+              <Button variant="outline" size="sm" onClick={handleClearPnl} disabled={clearingPnl}
+                className={`gap-1.5 text-xs font-semibold rounded-lg ${
+                  confirmClear ? 'bg-red-600 border-red-500 text-oncolor' : 'border-zinc-700 text-zinc-400 hover:text-red-400'
+                }`}>
+                {clearingPnl ? <RefreshCw className="h-3 w-3 animate-spin" /> : null}
+                {clearingPnl ? 'Clearing…' : confirmClear ? 'Click again to clear' : 'Clear guard'}
+              </Button>
+            </div>
           </div>
         </div>
       )}
 
-      {/* ── Trade Replication Drawer Panel ── */}
+      {/* ── Replication drawer ── */}
       {showCopyTrade && (
-        <div className="w-full border-b border-zinc-800 bg-zinc-900/60 px-5 py-3.5 flex flex-col gap-3 animate-in fade-in slide-in-from-top-2 duration-200">
+        <div className="border-b border-zinc-800 bg-zinc-900 px-6 py-3 flex flex-col gap-3">
           {copyTradeConfig.armed && copyTradeStatus?.status !== 'RUNNING' && (
-            <div className="flex items-center gap-2 px-3 py-2 rounded-xl bg-rose-950/70 border border-rose-800/60">
-              <AlertTriangle className="h-4 w-4 text-rose-400 shrink-0" />
-              <span className="text-xs text-rose-300 font-medium">
-                Armed but replication bridge is STOPPED — child accounts are NOT receiving copy fills. Start bridge or disarm.
+            <div role="alert" className="flex items-center gap-2 px-3 py-2 rounded-lg bg-red-500/10 border border-red-500/30">
+              <AlertTriangle className="h-4 w-4 text-red-400 shrink-0" />
+              <span className="text-xs text-red-400 font-medium">
+                Replication is armed but the bridge is stopped, so child accounts are not receiving fills. Start the bridge or disarm.
               </span>
             </div>
           )}
 
-          <div className="flex items-center gap-4 flex-wrap rounded-2xl border border-zinc-800 bg-zinc-950/80 px-4 py-3 shadow-inner">
-            <div className="flex items-center gap-2 shrink-0">
-              {copyTradeStatus?.status === 'RUNNING' ? (
-                <Badge className="gap-1.5 text-xs font-mono font-bold bg-emerald-500/15 border border-emerald-500/30 text-emerald-400 rounded-xl px-2.5 py-1">
-                  <span className="h-2 w-2 rounded-full bg-emerald-400 shrink-0 animate-pulse" />
-                  BRIDGE LISTENING
-                </Badge>
-              ) : copyTradeStatus?.status === 'STARTING' ? (
-                <Badge className="gap-1.5 text-xs font-mono font-bold bg-amber-500/15 border border-amber-500/30 text-amber-400 rounded-xl px-2.5 py-1">
-                  <RefreshCw className="h-3 w-3 animate-spin" />
-                  STARTING
-                </Badge>
-              ) : (
-                <Badge variant="outline" className="text-xs font-mono font-bold bg-zinc-800 border-zinc-700 text-zinc-400 rounded-xl px-2.5 py-1">
-                  BRIDGE STOPPED
-                </Badge>
-              )}
-            </div>
+          <div className="flex items-center gap-x-5 gap-y-3 flex-wrap">
+            <span className={`flex items-center gap-1.5 text-xs font-semibold ${
+              copyTradeStatus?.status === 'RUNNING' ? 'text-emerald-400'
+                : copyTradeStatus?.status === 'STARTING' ? 'text-amber-400' : 'text-zinc-400'
+            }`}>
+              {copyTradeStatus?.status === 'STARTING'
+                ? <RefreshCw className="h-3 w-3 animate-spin" />
+                : <span className={`h-2 w-2 rounded-full ${copyTradeStatus?.status === 'RUNNING' ? 'bg-emerald-400' : 'bg-zinc-600'}`} />}
+              {copyTradeStatus?.status === 'RUNNING' ? 'Bridge listening'
+                : copyTradeStatus?.status === 'STARTING' ? 'Bridge starting' : 'Bridge stopped'}
+            </span>
 
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={handleToggleCopyTradeBridge}
-              disabled={togglingBridge}
-              className="gap-1.5 text-xs font-mono font-bold rounded-xl bg-zinc-900 border-zinc-700 text-zinc-300 hover:text-white"
-            >
+            <Button variant="outline" size="sm" onClick={handleToggleCopyTradeBridge} disabled={togglingBridge}
+              className="gap-1.5 text-xs font-semibold rounded-lg border-zinc-700 text-zinc-300 hover:text-white">
               {copyTradeBridgeRunning ? <Square className="h-3 w-3" /> : <Play className="h-3 w-3" />}
-              {copyTradeBridgeRunning ? 'Stop Bridge' : 'Start Bridge'}
+              {copyTradeBridgeRunning ? 'Stop bridge' : 'Start bridge'}
             </Button>
 
-            <Separator orientation="vertical" className="h-6 bg-zinc-800 shrink-0" />
+            <span className="w-px h-5 bg-zinc-800 shrink-0" />
 
-            <span className="text-xs font-bold text-zinc-400 font-mono uppercase">Child Accounts</span>
             {withAllBrokers(copyTradeConfig.children).map(child => {
               const failure = copyTradeStatus?.broker_failures?.[child.broker];
               return (
-                <div key={child.broker} className="flex items-center gap-2 shrink-0 bg-zinc-900 border border-zinc-800 rounded-xl px-3 py-1">
-                  <span className="text-xs font-bold font-mono text-white">
-                    {CHILD_BROKER_LABELS[child.broker]}{failure ? ' (DOWN)' : ''}
+                <div key={child.broker} className="flex items-center gap-2 shrink-0 text-xs">
+                  <span className={`font-semibold ${failure ? 'text-red-400' : 'text-white'}`}>
+                    {CHILD_BROKER_LABELS[child.broker]}{failure ? ' (down)' : ''}
                   </span>
-                  <div className="flex items-center gap-1">
-                    <Input
-                      type="number"
-                      min="1"
-                      step="1"
-                      value={child.multiplier}
-                      onChange={e => {
-                        const n = parseInt(e.target.value, 10);
-                        if (Number.isInteger(n) && n > 0) updateCopyTradeChild(child.broker, { multiplier: n });
-                      }}
-                      className="bg-zinc-950 border-zinc-700 text-white h-7 w-12 text-xs font-mono tabular-nums px-1 rounded"
-                    />
-                    <span className="text-xs text-zinc-400 font-mono">x</span>
-                  </div>
-                  <div
+                  <Input
+                    type="number"
+                    min="1"
+                    step="1"
+                    value={child.multiplier}
+                    aria-label={`${CHILD_BROKER_LABELS[child.broker]} lot multiplier`}
+                    onChange={e => {
+                      const n = parseInt(e.target.value, 10);
+                      if (Number.isInteger(n) && n > 0) updateCopyTradeChild(child.broker, { multiplier: n });
+                    }}
+                    className="bg-zinc-950 border-zinc-700 text-white h-7 w-12 text-xs tabular-nums px-1 rounded"
+                  />
+                  <span className="text-zinc-500">×</span>
+                  <button
+                    type="button"
+                    role="switch"
+                    aria-checked={child.enabled}
+                    aria-label={`Copy fills to ${CHILD_BROKER_LABELS[child.broker]}`}
                     onClick={() => updateCopyTradeChild(child.broker, { enabled: !child.enabled })}
-                    className={`relative w-8 h-4 rounded-full transition-colors cursor-pointer ${
+                    className={`relative w-8 h-4 rounded-full transition-colors focus-visible:outline-2 focus-visible:outline-sky-400 ${
                       child.enabled ? 'bg-sky-500' : 'bg-zinc-700'
                     }`}
                   >
-                    <div className={`absolute top-0.5 h-3 w-3 rounded-full bg-white shadow transition-transform ${
+                    <span className={`absolute top-0.5 h-3 w-3 rounded-full bg-oncolor shadow transition-transform ${
                       child.enabled ? 'translate-x-4' : 'translate-x-0.5'
                     }`} />
-                  </div>
+                  </button>
                 </div>
               );
             })}
 
-            <Separator orientation="vertical" className="h-6 bg-zinc-800 shrink-0" />
-
-            {copyTradeConfig.armed ? (
-              <Button
-                variant="destructive"
-                size="sm"
-                onClick={handleDisarmReplication}
-                className="gap-1.5 text-xs font-mono font-bold rounded-xl bg-rose-950/80 border border-rose-800 text-rose-400 hover:bg-rose-900/60 hover:text-rose-200"
-              >
-                <ShieldOff className="h-3 w-3" />
-                DISARM REPLICATION
-              </Button>
-            ) : (
-              <Button
-                size="sm"
-                onClick={handleArmReplication}
-                disabled={arming || !copyTradeConfig.children.some(c => c.enabled)}
-                className={`gap-1.5 text-xs font-mono font-bold rounded-xl ${
-                  confirmArm
-                    ? 'bg-rose-600 border border-rose-500 text-white animate-pulse shadow-lg shadow-rose-500/20'
-                    : 'bg-emerald-500/15 hover:bg-emerald-500/25 border border-emerald-500/30 text-emerald-300'
-                }`}
-              >
-                {arming ? <RefreshCw className="h-3 w-3 animate-spin" /> : <Repeat className="h-3 w-3" />}
-                {arming ? 'Arming…' : confirmArm ? 'Confirm ARM?' : 'ARM Replication'}
-              </Button>
-            )}
+            <div className="ml-auto">
+              {copyTradeConfig.armed ? (
+                <Button variant="destructive" size="sm" onClick={handleDisarmReplication}
+                  className="gap-1.5 text-xs font-semibold rounded-lg bg-red-500/10 border border-red-500/30 text-red-400 hover:bg-red-500/20">
+                  <ShieldOff className="h-3 w-3" />
+                  Disarm replication
+                </Button>
+              ) : (
+                <Button size="sm" onClick={handleArmReplication}
+                  disabled={arming || !copyTradeConfig.children.some(c => c.enabled)}
+                  className={`gap-1.5 text-xs font-semibold rounded-lg ${
+                    confirmArm
+                      ? 'bg-red-600 border border-red-500 text-oncolor'
+                      : 'bg-emerald-500/15 hover:bg-emerald-500/25 border border-emerald-500/30 text-emerald-400'
+                  }`}>
+                  {arming ? <RefreshCw className="h-3 w-3 animate-spin" /> : <Repeat className="h-3 w-3" />}
+                  {arming ? 'Arming…' : confirmArm ? 'Click again to arm' : 'Arm replication'}
+                </Button>
+              )}
+            </div>
           </div>
 
-          {/* Activity Feed */}
-          <div className="border border-zinc-800 rounded-xl bg-zinc-950/80 max-h-36 overflow-y-auto font-mono text-xs">
+          <div className="border border-zinc-800 rounded-lg bg-zinc-950 max-h-36 overflow-y-auto text-xs">
             {copyTradeLog.length === 0 ? (
-              <div className="px-4 py-2.5 text-zinc-500 font-sans text-xs">No replication events recorded.</div>
+              <div className="px-4 py-2.5 text-zinc-500">No copied orders yet. Fills appear here once replication is armed.</div>
             ) : (
-              <div className="divide-y divide-zinc-800/60">
+              <div className="divide-y divide-zinc-800">
                 {[...copyTradeLog].reverse().slice(0, 20).map((entry, i) => (
                   <div key={`${entry.order_no}-${entry.ts}-${i}`} className="flex items-center gap-2.5 px-4 py-1.5">
                     {entry.result === 'success' || entry.result === 'safety_exit' ? (
                       <CheckCircle2 className="h-3.5 w-3.5 text-emerald-400 shrink-0" />
                     ) : (
-                      <XCircle className="h-3.5 w-3.5 text-rose-400 shrink-0" />
+                      <XCircle className="h-3.5 w-3.5 text-red-400 shrink-0" />
                     )}
-                    <span className="text-zinc-500 tabular-nums">
-                      {new Date(entry.ts).toLocaleTimeString('en-IN')}
-                    </span>
-                    {entry.broker && (
-                      <span className="px-1.5 py-0.2 rounded bg-zinc-800 text-zinc-300 text-[10px] font-bold uppercase">
-                        {entry.broker}
-                      </span>
-                    )}
+                    <span className="text-zinc-500 tabular-nums">{new Date(entry.ts).toLocaleTimeString('en-IN')}</span>
+                    {entry.broker && <span className="text-zinc-400 font-semibold">{entry.broker}</span>}
                     <span className="text-zinc-200 font-semibold truncate">
                       {entry.side} {entry.child_qty ?? entry.parent_qty} {entry.child_symbol ?? entry.parent_symbol}
                     </span>
-                    <span className={`ml-auto text-[11px] ${
-                      entry.result === 'success' ? 'text-emerald-400 font-bold' : 'text-zinc-400'
-                    }`}>
-                      {entry.result}
+                    <span className={`ml-auto ${entry.result === 'success' ? 'text-emerald-400 font-semibold' : 'text-zinc-400'}`}>
+                      {entry.result.replace(/_/g, ' ')}
                     </span>
                   </div>
                 ))}
@@ -1318,165 +1034,107 @@ export default function StrategiesPlusPage() {
         </div>
       )}
 
-      {/* ── Main Strategy Matrix ── */}
-      <main className="flex-1 w-full max-w-[1720px] mx-auto px-5 py-4">
+      {/* ── Strategy ledger ── */}
+      <main className="flex-1 w-full max-w-[1720px] mx-auto px-6 py-5">
         {loading && strategyList.length === 0 ? (
           <div className="flex flex-col items-center justify-center p-16 min-h-[300px] gap-3">
-            <RefreshCw className="h-8 w-8 text-emerald-400 animate-spin" />
-            <span className="text-zinc-400 text-xs font-mono">Syncing algorithmic strategy states…</span>
+            <RefreshCw className="h-5 w-5 text-emerald-400 animate-spin" />
+            <span className="text-zinc-500 text-xs">Loading strategies…</span>
           </div>
         ) : error ? (
-          <div className="flex flex-col items-center justify-center p-12 text-center min-h-[300px] bg-zinc-900/40 border border-zinc-800 rounded-2xl">
-            <p className="text-sm font-bold text-rose-400 font-mono">Connection Failed</p>
+          <div role="alert" className="flex flex-col items-center justify-center p-12 text-center min-h-[300px] rounded-xl border border-red-500/20 bg-red-500/10">
+            <p className="text-sm font-semibold text-red-400">Can&apos;t reach the strategy API</p>
             <p className="text-xs text-zinc-400 mt-1">{error}</p>
+            <Button variant="outline" size="sm" onClick={() => fetchStrategies(true)}
+              className="mt-3 rounded-lg border-zinc-700 text-xs font-semibold text-zinc-300">Try again</Button>
           </div>
         ) : searchQuery && displayList.length === 0 ? (
-          <div className="flex flex-col items-center justify-center p-14 text-center min-h-[260px] bg-zinc-900/30 border border-zinc-800 rounded-2xl gap-3">
-            <div className="h-10 w-10 rounded-xl bg-zinc-900 border border-zinc-800 flex items-center justify-center text-zinc-500">
-              <Search className="h-5 w-5" />
-            </div>
-            <div>
-              <p className="text-sm font-bold text-zinc-300">No matching strategies found</p>
-              <p className="text-xs text-zinc-500 mt-1 max-w-sm">
-                No algorithms match your search query <code className="text-emerald-400 font-mono font-bold bg-zinc-900 px-1.5 py-0.5 rounded border border-zinc-800">&quot;{searchQuery}&quot;</code>.
-              </p>
-            </div>
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={() => setSearchQuery('')}
-              className="mt-1 gap-1.5 rounded-xl border-zinc-700 bg-zinc-900 text-zinc-300 hover:text-white text-xs font-bold font-mono"
-            >
-              <X className="h-3.5 w-3.5" />
-              Clear Search Query
+          <div className="flex flex-col items-center justify-center p-14 text-center min-h-[260px] gap-2">
+            <p className="text-sm font-semibold text-zinc-300">No strategies match &quot;{searchQuery}&quot;</p>
+            <p className="text-xs text-zinc-500">Try a strategy name, an underlying, or a logic type.</p>
+            <Button variant="outline" size="sm" onClick={() => setSearchQuery('')}
+              className="mt-2 gap-1.5 rounded-lg border-zinc-700 text-zinc-300 hover:text-white text-xs font-semibold">
+              <X className="h-3.5 w-3.5" />Clear search
             </Button>
           </div>
         ) : viewMode === 'active' && activeList.length === 0 ? (
-          <div className="flex flex-col items-center justify-center p-16 min-h-[320px] gap-3 bg-zinc-900/30 border border-zinc-800 rounded-2xl text-center">
-            <div className="h-12 w-12 rounded-2xl bg-zinc-900 border border-zinc-800 flex items-center justify-center text-zinc-500">
-              <Activity className="h-6 w-6" />
-            </div>
-            <p className="text-sm font-bold text-zinc-300">No Active Strategy Processes</p>
-            <p className="text-xs text-zinc-400 max-w-sm">
-              There are currently no live trading processes running. Switch to <strong className="text-white font-mono">All</strong> view to launch or configure a strategy.
-            </p>
-            <Button
-              variant="outline"
-              onClick={() => setViewMode('all')}
-              className="mt-2 gap-2 rounded-xl border-zinc-700 bg-zinc-900 text-zinc-300 hover:text-white text-xs font-bold font-mono"
-            >
+          <div className="flex flex-col items-center justify-center p-16 min-h-[320px] gap-2 text-center">
+            <p className="text-sm font-semibold text-zinc-300">Nothing is running</p>
+            <p className="text-xs text-zinc-500 max-w-sm">Show everything to launch or configure a strategy.</p>
+            <Button variant="outline" onClick={() => setViewMode('all')}
+              className="mt-2 gap-2 rounded-lg border-zinc-700 text-zinc-300 hover:text-white text-xs font-semibold">
               <LayoutList className="h-3.5 w-3.5" />
-              View All Available Strategies
+              Show everything
             </Button>
           </div>
         ) : (
-          <div className="w-full space-y-4">
-            {/* ── Table Column Header Bar ── */}
-            <div className="flex items-center gap-0 px-4 py-2 border border-zinc-800 bg-zinc-800 rounded-xl">
-              <div className="w-[95px] shrink-0 text-xs font-bold text-white font-sans">Status</div>
-              <div className="w-[280px] shrink-0 text-xs font-bold text-white font-sans">Strategy &amp; Mode</div>
+          <div className="w-full flex flex-col gap-5">
+            {/* Column heads, once for the whole ledger */}
+            <div className="flex items-center px-4 py-2 rounded-lg bg-zinc-800">
+              <div className="w-[95px] shrink-0 text-xs font-bold text-white">Status</div>
+              <div className="w-[280px] shrink-0 text-xs font-bold text-white">Strategy and mode</div>
               <div className="w-px mx-2" />
-              <div className="flex-1 text-xs font-bold text-white font-sans">Live Position &amp; Parameters</div>
-              <div className="shrink-0 w-[100px] text-right text-xs font-bold text-white font-sans">Session P&amp;L</div>
+              <div className="flex-1 text-xs font-bold text-white">Live position and parameters</div>
+              <div className="shrink-0 w-[100px] text-right text-xs font-bold text-white">Session P&amp;L</div>
               <div className="w-px mx-3" />
-              <div className="shrink-0 w-[190px] text-xs font-bold text-white font-sans text-right pr-2">Execution Actions</div>
+              <div className="shrink-0 w-[190px] text-xs font-bold text-white text-right pr-2">Actions</div>
             </div>
 
-            {/* ── Strategy Grouped Sections ── */}
-            <div className="space-y-4">
-              {activeGroupedList.map(({ underlying: groupKey, items: rows, runningCount: groupRunning, pnl: groupPnl }) => {
-                const open = searchQuery.trim() ? true : groups.isOpen(groupKey, groupRunning > 0);
-                const isTimeframe = groupMode === 'timeframe';
-                const tfInfo = isTimeframe ? (TIMEFRAME_GROUPS[groupKey] ?? OTHER_TIMEFRAME_GROUP) : null;
-                const typeInfo = groupMode === 'type' ? (LOGIC_GROUPS[groupKey] ?? OTHER_LOGIC_GROUP) : null;
+            {activeGroupedList.map(({ underlying: groupKey, items: rows, runningCount: groupRunning, pnl: groupPnl }) => {
+              const open = searchQuery.trim() ? true : groups.isOpen(groupKey, groupRunning > 0);
+              const tfInfo = groupMode === 'timeframe' ? (TIMEFRAME_GROUPS[groupKey] ?? OTHER_TIMEFRAME_GROUP) : null;
+              const typeInfo = groupMode === 'type' ? (LOGIC_GROUPS[groupKey] ?? OTHER_LOGIC_GROUP) : null;
+              const displayTitle = tfInfo ? tfInfo.title : typeInfo ? typeInfo.title : groupKey;
+              const displayTagline = tfInfo ? tfInfo.tagline : typeInfo ? typeInfo.tagline : null;
 
-                const displayTitle = tfInfo ? tfInfo.title : typeInfo ? typeInfo.title : groupKey;
-                const displayTagline = tfInfo ? tfInfo.tagline : typeInfo ? typeInfo.tagline : null;
-                const accent = tfInfo?.accent ?? typeInfo?.accent ?? 'sky';
-                const a = ACCENT_CLASSES[accent] ?? ACCENT_CLASSES.zinc;
-
-                return (
-                  <div key={groupKey} className="rounded-2xl border border-zinc-800 bg-zinc-900/40 overflow-hidden shadow-sm">
-                    {/* Section Header Button */}
-                    <button
-                      type="button"
-                      onClick={() => groups.toggle(groupKey, open)}
-                      aria-expanded={open}
-                      className="w-full flex items-center justify-between gap-3 px-4 py-2.5 bg-zinc-900/90 hover:bg-zinc-800/80 border-b border-zinc-800 transition-colors text-left"
-                    >
-                      <div className="flex items-center gap-2.5 min-w-0">
-                        {open ? (
-                          <ChevronDown className="h-4 w-4 text-zinc-400 shrink-0" />
-                        ) : (
-                          <ChevronRight className="h-4 w-4 text-zinc-400 shrink-0" />
-                        )}
-                        <span className="text-xs font-bold text-white tracking-wide font-mono uppercase">
-                          {displayTitle}
-                        </span>
-                        {displayTagline && (
-                          <span className="text-[11px] text-zinc-400 font-sans hidden md:inline truncate">
-                            · {displayTagline}
-                          </span>
-                        )}
-                      </div>
-
-                      <div className="flex items-center gap-3 shrink-0 font-mono text-xs">
-                        <span className="text-zinc-400 font-semibold">
-                          {rows.length} strateg{rows.length === 1 ? 'y' : 'ies'}
-                        </span>
-                        {groupRunning > 0 && (
-                          <span className="flex items-center gap-1.5 text-emerald-400 font-bold bg-emerald-500/10 border border-emerald-500/25 px-2 py-0.5 rounded-lg">
-                            <span className="h-1.5 w-1.5 rounded-full bg-emerald-400 animate-pulse" />
-                            {groupRunning} Live
-                          </span>
-                        )}
-                        {groupRunning > 0 && groupPnl !== 0 && (
-                          <span className={`font-bold tabular-nums ${groupPnl >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
-                            {signedInr(groupPnl)}
-                          </span>
-                        )}
-                      </div>
-                    </button>
-
-                    {/* Section Strategy Rows */}
-                    {open && (
-                      <div className="divide-y divide-zinc-800/50 bg-zinc-950/60">
-                        {rows.map(({ key, instanceId, meta, state }) => (
-                          <StrategyRowWide
-                            key={`${key}:${instanceId}`}
-                            meta={meta}
-                            state={state}
-                            onRefresh={fetchStrategies}
-                            instanceId={instanceId || undefined}
-                            onAddInstance={instanceId === '' ? addInstance : undefined}
-                            onRemoveInstance={instanceId === '' ? undefined : removeInstance}
-                            selectedBroker={broker}
-                          />
-                        ))}
-                      </div>
+              return (
+                <section key={groupKey} aria-label={displayTitle}>
+                  <button
+                    type="button"
+                    onClick={() => groups.toggle(groupKey, open)}
+                    aria-expanded={open}
+                    className="w-full flex items-center gap-3 pb-2 border-b border-zinc-800 text-left focus-visible:outline-2 focus-visible:outline-emerald-400"
+                  >
+                    {open ? <ChevronDown className="h-4 w-4 text-zinc-500 shrink-0" /> : <ChevronRight className="h-4 w-4 text-zinc-500 shrink-0" />}
+                    <span className="text-sm font-bold text-white tracking-tight">{displayTitle}</span>
+                    <span className="text-xs text-zinc-500 tabular-nums">
+                      {rows.length} strateg{rows.length === 1 ? 'y' : 'ies'}
+                    </span>
+                    {groupRunning > 0 && (
+                      <span className="flex items-center gap-1.5 text-xs font-semibold text-emerald-400">
+                        <span className="h-1.5 w-1.5 rounded-full bg-emerald-500 animate-pulse motion-reduce:animate-none" />
+                        {groupRunning} running
+                      </span>
                     )}
-                  </div>
-                );
-              })}
-            </div>
+                    {groupRunning > 0 && groupPnl !== 0 && (
+                      <span className={`text-xs font-bold tabular-nums ${groupPnl >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
+                        {signedInr(groupPnl)}
+                      </span>
+                    )}
+                    {displayTagline && (
+                      <span className="ml-auto text-xs text-zinc-500 hidden lg:inline truncate max-w-[50%]">{displayTagline}</span>
+                    )}
+                  </button>
 
-            {/* Hint in "All" view */}
-            {viewMode === 'all' && runningCount > 0 && (
-              <div className="px-4 py-3 border border-zinc-800/80 rounded-2xl bg-zinc-900/30 flex items-center justify-between gap-3 text-xs font-mono">
-                <div className="flex items-center gap-2 text-zinc-400">
-                  <span className="h-2 w-2 rounded-full bg-emerald-400 animate-pulse shrink-0" />
-                  <span>
-                    <strong className="text-white">{runningCount}</strong> strateg{runningCount === 1 ? 'y' : 'ies'} actively executing in the market.
-                  </span>
-                </div>
-                <button
-                  onClick={() => setViewMode('active')}
-                  className="text-emerald-400 hover:text-emerald-300 font-bold underline underline-offset-4"
-                >
-                  Switch to Active View →
-                </button>
-              </div>
-            )}
+                  {open && (
+                    <div className="mt-2 rounded-lg border border-zinc-800 divide-y divide-zinc-800 overflow-hidden">
+                      {rows.map(({ key, instanceId, meta, state }) => (
+                        <StrategyRowWide
+                          key={`${key}:${instanceId}`}
+                          meta={meta}
+                          state={state}
+                          onRefresh={fetchStrategies}
+                          instanceId={instanceId || undefined}
+                          onAddInstance={instanceId === '' ? addInstance : undefined}
+                          onRemoveInstance={instanceId === '' ? undefined : removeInstance}
+                          selectedBroker={broker}
+                        />
+                      ))}
+                    </div>
+                  )}
+                </section>
+              );
+            })}
           </div>
         )}
       </main>
