@@ -16,7 +16,23 @@ sys.path.insert(0, ROOT)
 from login import get_dhan_client
 from lib.dhan_helper import DhanHelper
 
-RISK_FREE_RATE = 0.07  # 7% standard risk-free rate for Indian market
+RISK_FREE_RATE = 0.065  # matches rs_dashboard/lib/optionsMonitorMath.ts (computeBsGreeks default)
+
+
+def time_to_expiry_years(expiry_str, now=None):
+    """Mirror of calculateTimeToExpiryYears() in rs_dashboard/lib/optionsMonitorMath.ts.
+
+    Years (calendar/365) to 15:40 IST on the expiry date (10:10 UTC; SEBI's close auction moved the F&O close),
+    floored at 0.25 day. Keep the two in step: the page reprices with the TS version, and an IV solved here
+    with a different clock would stop reproducing each leg's own LTP.
+    """
+    try:
+        y, m, d = [int(x) for x in str(expiry_str)[:10].split('-')]
+        exp = datetime(y, m, d, 10, 10, 0, tzinfo=timezone.utc)
+    except Exception:
+        return 2.0 / 365.0
+    now = now or datetime.now(timezone.utc)
+    return max(0.25 / 365.0, (exp - now).total_seconds() / (365.0 * 86400.0))
 
 # Standard normal distribution functions for Black-Scholes fallback
 def _norm_pdf(x: float) -> float:
@@ -85,7 +101,7 @@ def b76_greeks_from_price(F, K, T, r, price, opt_type):
             'delta': delta,
             'gamma': df * _norm_pdf(d1) / (F * sigma * sq),
             'vega': vega_raw / 100.0,
-            'theta': _b76_price(F, K, T1, r, sigma, opt_type) - price,
+            'theta': (-(F * df * _norm_pdf(d1) * sigma) / (2.0 * sq) + r * price) / 365.0,
             'rho': -T * price / 100.0,                       # per +1% rate
             'vanna': -df * _norm_pdf(d1) * d2 / sigma / 100.0,  # delta change per +1 vol pt
             'vomma': vega_raw * d1 * d2 / sigma / 10000.0,      # vega change per +1 vol pt
@@ -232,7 +248,7 @@ def main():
             fexp = datetime.strptime(f['SM_EXPIRY_DATE'], "%Y-%m-%d").date()
             fpx = float(helper.get_future_ltp(under, f['SM_EXPIRY_DATE']) or 0.0)
             if fpx > 0:
-                futs_cache[under] = {'price': fpx, 'T': max(0.5, float((fexp - today_date).days)) / 365.0}
+                futs_cache[under] = {'price': fpx, 'T': time_to_expiry_years(f['SM_EXPIRY_DATE'])}
         except Exception as e:
             print(f"WARN: no futures forward for {under}: {e}", file=sys.stderr)
 
@@ -271,6 +287,17 @@ def main():
         leg['spot'] = round(spot, 2)
 
         oc = chains_cache.get((under, exp), {})
+
+        # ATM implied vol of this leg's expiry (SD bands use ATM IV, not VIX and not the leg's own strike IV)
+        try:
+            atm_k = min((k for k in oc if float(k) > 0), key=lambda k: abs(float(k) - spot), default=None)
+            if atm_k is not None:
+                ivs = [float((oc[atm_k].get(side) or {}).get('implied_volatility') or 0.0) for side in ('ce', 'pe')]
+                ivs = [v for v in ivs if v > 0]
+                if ivs:
+                    leg['atmIv'] = round(sum(ivs) / len(ivs), 3)
+        except Exception:
+            pass
         
         # Look up strike in option chain
         matched_strike_data = None
@@ -302,7 +329,7 @@ def main():
         # broker's Position Analyzer); keep the chain delta if that can't be solved.
         try:
             exp_dt = datetime.strptime(exp, "%Y-%m-%d").date()
-            T_leg = max(0.5, float((exp_dt - today_date).days)) / 365.0
+            T_leg = time_to_expiry_years(exp)
             fut = futs_cache.get(under)
             if fut and leg['ltp'] > 0:
                 F = fut['price'] * math.exp(-RISK_FREE_RATE * (fut['T'] - T_leg))
@@ -328,7 +355,7 @@ def main():
                 leg[gk] = float(cg.get(gk) or 0.0)
             leg['iv'] = iv
             leg['forward'] = round(spot, 2)
-            leg['tYears'] = max(0.5, float((datetime.strptime(exp, "%Y-%m-%d").date() - today_date).days)) / 365.0
+            leg['tYears'] = time_to_expiry_years(exp)
             leg['greeksSource'] = 'chain'
 
         # 6. Apply Black-Scholes fallback if delta is 0 but we have a valid spot price
@@ -336,7 +363,7 @@ def main():
             try:
                 exp_dt = datetime.strptime(exp, "%Y-%m-%d").date()
                 days_diff = (exp_dt - today_date).days
-                T = max(0.5, float(days_diff)) / 365.0
+                T = time_to_expiry_years(exp)
                 delta = bs_delta(
                     S=spot,
                     K=strike_val,

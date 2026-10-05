@@ -54,8 +54,16 @@ export default function PayoffPanel({ legs, spot, spotEstimated }: { legs: DeskL
       <div className="flex flex-wrap items-end justify-between gap-x-8 gap-y-3">
         <div className="flex flex-wrap gap-x-8 gap-y-2">
           <Stat label="P&L if nothing moves, at the chosen date" value={fmtInr(nowPnl, true)} tone={nowPnl >= 0 ? 'good' : 'bad'} />
-          <Stat label="Best at expiry, within ±8%" value={fmtInr(res.best, true)} tone={res.best > 0 ? 'good' : undefined} />
-          <Stat label="Worst at expiry, within ±8%" value={fmtInr(res.worst, true)} tone={res.worst < 0 ? 'bad' : undefined} />
+          <Stat
+            label={res.unlimitedGainUp ? 'Best at expiry: unlimited upside' : 'Best at expiry, within ±8%'}
+            value={res.unlimitedGainUp ? 'Unlimited' : fmtInr(res.best, true)}
+            tone={res.best > 0 ? 'good' : undefined}
+          />
+          <Stat
+            label={res.unlimitedLossUp || res.unlimitedLossDown ? `Worst at expiry: unlimited ${res.unlimitedLossUp ? 'upside' : 'downside'} risk (${fmtInr(res.worst, true)} within ±8%)` : 'Worst at expiry, within ±8%'}
+            value={res.unlimitedLossUp || res.unlimitedLossDown ? 'Unlimited' : fmtInr(res.worst, true)}
+            tone={res.worst < 0 ? 'bad' : undefined}
+          />
           <Stat
             label={`Break-even at expiry (${frontDays}d)`}
             value={res.breakevens.length ? res.breakevens.map(b => Math.round(b).toLocaleString('en-IN')).join('  ·  ') : 'None in range'}
@@ -136,7 +144,7 @@ export default function PayoffPanel({ legs, spot, spotEstimated }: { legs: DeskL
       <div className="flex flex-wrap items-center gap-x-5 gap-y-1 text-xs text-zinc-400">
         <span className="flex items-center gap-1.5"><span className="h-0.5 w-4 bg-sky-400" />{days === 0 ? 'Today, repriced at each leg\'s own IV' : `In ${days} days, IV held flat`}</span>
         <span className="flex items-center gap-1.5"><span className="h-0.5 w-4 bg-zinc-300" />At the nearest expiry ({frontDays}d); later legs keep time value</span>
-        <span className="flex items-center gap-1.5"><span className="h-3 w-3 rounded-sm bg-sky-400/20" />Expected 1σ range to that expiry</span>
+        <span className="flex items-center gap-1.5"><span className="h-3 w-3 rounded-sm bg-sky-400/20" />Expected 1σ range to that expiry{res.oneSigmaIv ? ` (ATM IV ${res.oneSigmaIv.toFixed(1)}%)` : ''}</span>
         {spotEstimated && <span className="text-amber-400">Index level is estimated from the futures price (live quote was rate-limited)</span>}
         {res.skipped > 0 && <span className="text-amber-400">{res.skipped} leg(s) without a live price are left out of the curve</span>}
       </div>

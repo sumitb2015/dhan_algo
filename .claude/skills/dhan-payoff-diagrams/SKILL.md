@@ -187,6 +187,49 @@ Option traders analyze Greeks both per-contract and position-wide:
 
 ---
 
+## Portfolio Greeks page: a fifth payoff surface (`components/deltaDesk/PayoffPanel.tsx`, `lib/deltaDesk.ts`)
+
+Added 2026-10-05 and audited against this skill. It has its own small engine (`payoff()`, `ladder()`, `b76()` in
+`lib/deltaDesk.ts`) because it prices from **unrounded** Black-76 with IV solved per leg from the live premium —
+`computeBsGreeks` rounds price to ₹0.05 and delta to 2 dp, which is fine for a curve but not for solving IV or summing
+13 lots of Greeks. Parity is enforced by `lib/deltaDesk.test.ts` (prices/deltas vs `computeBsGreeks` with `isFutures`,
+put-call parity, exact breakevens, strike sampling, net-signed-qty unlimited flags, T+0 reproducing each mark).
+
+What it shares with the rules above: Black-76 on the futures forward; 365-day calendar; `r = 0.065`; time via
+`calculateTimeToExpiryYears`; each leg priced at its **own** expiry and IV; far legs keep residual time value at the front
+expiry (floored at 0.25 day); T+0 on the same x-samples as the expiry curve with every strike force-added; breakevens exact
+(bisection on the model, not interpolated between samples); "unlimited" from net signed CE/PE quantity, with the drawn-window
+figure shown beside it; SD band = spot × **ATM IV** × √t.
+
+Deliberate differences: the what-if forward is `leg.forward + (s − spot)` (additive basis, per leg's own expiry);
+IV is solved per leg rather than read from the chain; POP is not shown.
+
+Design tokens not yet matched (cosmetic, not computation): zero line is `var(--color-zinc-500)` rather than `--chart-axis` 1.5;
+no `ReferenceDot` breakeven markers (dashed verticals instead); T+0 is `sky-400` rather than `PAYOFF_TODAY` `#2d7ff9`.
+
+### `computeBsGreeks`: four Greeks corrected 2026-10-05, guarded by finite-difference tests
+Decision (see the vault note on following Sensibull vs correctness): formulas and units are verified against the price itself,
+never against a vendor; vendor differences are conventions to document, not numbers to copy.
+- **Theta, futures branch:** the carry term was subtracted. Correct: `(−Fσe^{−rt}n(d1)/(2√t) + rC)/365` (call), `+rP` (put). Old error
+  0.5–1.2% near the money, 6.6% (90-day ATM put) to ~44–60% (180-day deep ITM). Confirmed by finite difference, the `blackscholes`
+  package's published Black-76 theta, and this skill's formula.
+- **Theta, spot branch:** the volatility term was multiplied by `e^{−rt}`; plain Black-Scholes has none.
+- **Gamma and vega, spot branch:** same stray `e^{−rt}` (`φ(d1)/(Sσ√t)` and `Sφ(d1)√t` are undiscounted). Black-76 keeps it.
+- **Delta, futures branch:** now `e^{−rt}N(d1)` (call) and `−e^{−rt}N(−d1)` (put), the true derivative with respect to the futures price
+  and the one that sizes a futures hedge. Vendors that print the undiscounted forward delta `N(d1)` read ~0.4% higher at 22 days; that is a
+  convention difference, not an error on either side.
+- **Guard:** `lib/optionsMonitorMath.test.ts` ("Greeks match finite differences of its own price") differences an unrounded
+  high-precision reference price for delta, gamma, vega and theta, for futures and spot, over ten cases including long-dated, deep-ITM,
+  and "unit" cases (underlying 100, 0.5–1y) chosen so the old 3–6% discount errors exceed the output's 2 dp / 4 dp rounding. Against the old
+  code 20 of the 32 cases fail. Add a case there for any new Greek rather than asserting a number.
+- **External reference:** the same file also holds 20 fixed library values ("vs independent library reference values"), produced by
+  `py_vollib` 1.0.12 and `blackscholes` 0.2.2 (which agree with each other to 1e-6) at r = 0.065, so the formulas are pinned to something outside the
+  repo. Theta is per calendar day (library per-year ÷ 365), vega per 1% (library per 1.00 × 0.01). Tolerance is half the output's rounding step.
+  Regenerate by rerunning both libraries on the inputs listed there; do not edit expected values to make a failing test pass.
+  Not covered by any reference: the *inputs* (6.5% rate, 365-day year, 15:40 IST close, futures as forward, IV solved from the premium) are choices.
+
+---
+
 ## The Rendering Layer
 
 ### Hand-Rolled SVG Family (`BasketPayoffChart.tsx`, `PayoffDiagram.tsx`, etc.)

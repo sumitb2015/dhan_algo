@@ -144,6 +144,13 @@ cross-check the live page:
 
 ## Portfolio Greeks page (`/options/delta`): computed, not chain-supplied
 
+**Conventions (aligned to dhan-payoff-diagrams on 2026-10-05, locked by `lib/deltaDesk.test.ts`):** rate `0.065`
+(`computeBsGreeks` default, not 7%); time = `calculateTimeToExpiryYears` (to 15:40 IST, intraday, 0.25-day floor, /365) —
+the script mirrors it in `time_to_expiry_years()` so a solved IV still reproduces each leg's LTP; theta is the analytic
+calendar-day value `(−Fσe^{−rt}n(d1)/(2√t) + rC)/365`, not a 1-day finite difference; SD bands use **ATM IV** from the leg's
+expiry chain (`atmIv`), never the average of the legs' own strike IVs; what-if forward is **additive**
+(`forward + (s − spot)`), matching the canonical `spot + basis`.
+
 **Data flow.** `api/options/positions-delta/route.ts` → `scripts/tools/positions_delta_data.py` returns **per-unit**
 Greeks per leg; the browser (`lib/deltaDesk.ts`) weights and aggregates them and reprices what-ifs with the same
 Black-76. Components live in `components/deltaDesk/` (PayoffPanel, ExposurePanel, GreeksMatrix, LadderAndTrail).
