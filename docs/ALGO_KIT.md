@@ -19,6 +19,7 @@ from lib.algo_kit import (
 | `files` | `setup_strategy_logging(root, LOG_FOLDER, instance_log_suffix(), name=__name__)`, `atomic_write_json`, `FlushingFileHandler` (UTF-8, so rupee lines are not dropped on Windows), `find_project_root`; `force=True` replaces handlers a library already installed; `log_file=` overrides the whole path for a legacy log location | the 15-line logging block and `FlushingFileHandler` pasted into every strategy |
 | `position_store` | `PositionStore(path, dry_run, version=N, enforce_mode=True)` `.save(payload)` / `.load()`; `load_today_state(state_path)` for daily caps | per-strategy `save_position` / `load_position` / `_restore_daily_pnl` |
 | `confirm` | `confirm_order_fill(helper, broker, broker_name, oid, strike, expiry, opt_type, signed_qty, net_before)`: Dhan order status, or the broker's own net position for Zerodha/Kotak | bare `helper.wait_for_fill()` on a non-Dhan order id |
+| `legs` | `LegExecutor(broker, helper, broker_name, product, dry_run, ltp_fn)` `.open_all(specs, checkpoint=)` / `.close_all(legs, on_closed=)` / `.close_leg(leg)`: confirmed entry, rollback of a partly built book, shorts-before-hedges close sized by `resolve_exit_qty_broker` | the entry/unwind/exit blocks copied into each multi-leg strategy |
 | `fills` | `confirmed_fill_price(helper, order_id, fallback)` (wait, then read); `read_order_fill_price(...)` (read only, fill already confirmed); both take `raise_errors` and `paper_id`. Dhan order ids only | `get_execution_price` / `_fill_price` |
 | `quotes` | `is_quote_invalid(q, strict=)`, `extract_quote_fields(q, lot, expiry, symbol)`, `extract_flat_chain_fields(row, ce_or_pe, ...)`, `fetch_named_ltps(helper, {"ce": (seg, id), ...})` | `is_quote_invalid`, `_extract_quote_fields`, `fetch_ltps` |
 | `waits` | `interruptible_sleep(seconds, shutdown_check, on_tick)` returns False on shutdown | `sleep_cooldown` |
@@ -56,6 +57,14 @@ class Strategy:
 ```
 
 ## Contracts worth knowing
+
+- **`LegExecutor` never reports a leg closed it did not confirm.** `open_all` calls your `checkpoint(tracked_legs)`
+  BEFORE each order (a crash mid-entry then leaves a tracked, restartable book), confirms every fill (Dhan status, or
+  the broker's own net for Zerodha/Kotak), cancels an unconfirmed Dhan order (only a REJECTED one is known unfilled),
+  and on a failure closes what it placed. Read `result.stuck`: anything in it is still live at the broker and must
+  stay tracked (status UNWINDING). `close_all` closes shorts first and holds a hedge while any short is open, sizes
+  each close with `resolve_exit_qty_broker`, and keeps a leg tracked if the lookup fails or the close is unconfirmed.
+  It does not book P&L or unsubscribe: use `on_closed(name, leg, exit_price, qty_closed)` to do that per leg.
 
 - **`PositionStore.load()` raises `PositionFileError`** for an unreadable file, an open position saved
   by the other mode (paper vs live), and an open LIVE position whose `expiry_field` has passed. Let it
