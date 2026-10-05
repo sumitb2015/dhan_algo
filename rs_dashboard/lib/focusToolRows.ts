@@ -238,6 +238,13 @@ export interface FocusRowFill {
    */
   ceDeltaEntry?: number | null;
   peDeltaEntry?: number | null;
+  /**
+   * True when that leg's entry delta was captured from the MODEL delta (central pricing recipe). A fill without it was opened before the
+   * model delta existed and holds DHAN's chain delta, so its Delta stop / target / trail must be measured against Dhan's live delta too
+   * (`legDeltaBasis`): mixing the two puts a stop a few delta points off.
+   */
+  ceDeltaModel?: boolean;
+  peDeltaModel?: boolean;
   ts: string;
 }
 

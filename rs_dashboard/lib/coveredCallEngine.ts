@@ -17,14 +17,15 @@
 import type { ChainOc, ChainLegData } from './optionsStrategy';
 import { lookupChainLegData } from './optionsStrategy.ts';
 import { estimatePopAndDelta } from './ultimateScannerEngine.ts';
-import { greeksForLeg, type FutureQuote, type OptType } from './optionsPricing.ts';
+import { greeksForLeg, trustedMark, type FutureQuote, type OptType } from './optionsPricing.ts';
 
 /** Per-unit Greeks of one chain strike from the central recipe; null when it cannot be priced (no spot/future, no premium, no IV). */
 export function chainLegGreeks(
   type: OptType, strike: number, expiry: string, leg: ChainLegData | undefined, ltp: number | null | undefined,
   market: { spot: number; future?: FutureQuote | null }, now?: number,
 ) {
-  const mark = ltp != null && ltp > 0 ? ltp : leg?.last_price;
+  // A live tick is fresh; a chain row's last print is only trusted while it sits inside the quoted book (see trustedMark).
+  const mark = ltp != null && ltp > 0 ? ltp : trustedMark(leg?.last_price, leg?.top_bid_price, leg?.top_ask_price);
   const chainIv = leg?.implied_volatility && leg.implied_volatility > 0 ? leg.implied_volatility / 100 : null;
   return greeksForLeg({ type, strike, expiry, mark, chainIv }, market, { now });
 }

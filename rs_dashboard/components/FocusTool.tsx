@@ -46,7 +46,7 @@ import {
   isSimRow, simLegPosition,
   legPinnedStrike, costStopReason, legOwnEntry, slRollStrike, DEFAULT_SL_ROLL_MAX,
   reentryConfig, evaluateReentry, reentryWindowClosed, monitoringStopped, momentumReentryKind, momentumTrigger,
-  absDelta100, modelAbsDelta100, addMinutesHm, resolveCriteriaStrike, closestPremiumStrike, ownedLegStop, legStopHit, legDeltaNow, legTargetDeltaLevel,
+  absDelta100, modelAbsDelta100, addMinutesHm, resolveCriteriaStrike, closestPremiumStrike, ownedLegStop, legStopHit, legDeltaNow, legDeltaBasis, legTargetDeltaLevel,
   multipliedLots, clampHm, ENTRY_TIME_MIN, ENTRY_TIME_MAX, EXIT_TIME_MIN, EXIT_TIME_MAX, rangeWindow, rangeWindowPhase, rowHasMultiDayRange, candleBucket, tradingDte,
   legSlRuleOn, legStopLevel, legTargetSpotLevel, legTgtUnitLabel, MAX_LEG_REENTRIES, pendingReentryLevel, pendingReentryHit, legTargetReason, costReentryBasis,
   awaitingMomentumQuote, MOMENTUM_QUOTE_WAIT_MS, legTargetLevel,
@@ -475,7 +475,7 @@ interface LookupData { lotSize: number; strikes: Record<string, StrikeRef> }
  *  different expiry than this row (bridge stays on nearest). */
 interface ChainData {
   spot: number;
-  oc: Record<string, { ce: number; pe: number; ceOi?: number | null; peOi?: number | null; ceDelta?: number | null; peDelta?: number | null }>;
+  oc: Record<string, { ce: number; pe: number; ceOi?: number | null; peOi?: number | null; ceDelta?: number | null; peDelta?: number | null; ceDeltaDhan?: number | null; peDeltaDhan?: number | null }>;
 }
 
 /** Cache key for `lookups`/`chains` — a row can trade any listed expiry, not
@@ -1789,7 +1789,7 @@ function LegSlLevels({
   const tgtDelta = held && lazyTgt.unit === 'delta'
     ? legTargetDeltaLevel(leg === 'CE' ? row.fill?.ceDeltaEntry : row.fill?.peDeltaEntry, lazyTgt.value)
     : null;
-  const deltaNow = legDeltaNow(leg, live);
+  const deltaNow = legDeltaNow(leg, live, legDeltaBasis(row.fill, leg));
   // The stop type asked for could not be built (no delta / spot recorded at
   // entry): the leg is on its SL × fallback — or, with SL × off, on NO stop.
   // Never silent: say which.
@@ -4664,8 +4664,8 @@ export default function FocusTool() {
           .then((j: {
             success?: boolean;
             data?: { future_price?: number; future_expiry?: string; chain?: { last_price?: number; oc?: Record<string, {
-              ce?: { last_price?: number; oi?: number; implied_volatility?: number; greeks?: { delta?: number } };
-              pe?: { last_price?: number; oi?: number; implied_volatility?: number; greeks?: { delta?: number } };
+              ce?: { last_price?: number; oi?: number; implied_volatility?: number; top_bid_price?: number; top_ask_price?: number; greeks?: { delta?: number } };
+              pe?: { last_price?: number; oi?: number; implied_volatility?: number; top_bid_price?: number; top_ask_price?: number; greeks?: { delta?: number } };
             }> } };
           }) => {
             if (seq !== chainSeq.current) return;
@@ -4688,8 +4688,11 @@ export default function FocusTool() {
                 // |delta| × 100 for AlgoTest's delta strike / SL / target / trail rules, from the central
                 // pricing recipe so it matches every other page; Dhan's own delta only when the model
                 // cannot price the strike (it sends 0 when it has none — read as missing).
-                ceDelta: modelAbsDelta100('CE', Number(k), expiry, v.ce?.last_price, v.ce?.implied_volatility, v.ce?.greeks?.delta, market),
-                peDelta: modelAbsDelta100('PE', Number(k), expiry, v.pe?.last_price, v.pe?.implied_volatility, v.pe?.greeks?.delta, market),
+                ceDelta: modelAbsDelta100('CE', Number(k), expiry, v.ce?.last_price, v.ce?.implied_volatility, v.ce?.greeks?.delta, market, { bid: v.ce?.top_bid_price, ask: v.ce?.top_ask_price }),
+                peDelta: modelAbsDelta100('PE', Number(k), expiry, v.pe?.last_price, v.pe?.implied_volatility, v.pe?.greeks?.delta, market, { bid: v.pe?.top_bid_price, ask: v.pe?.top_ask_price }),
+                // Dhan's own delta, kept for legs whose entry delta was recorded before the model delta (see legDeltaBasis).
+                ceDeltaDhan: absDelta100(v.ce?.greeks?.delta),
+                peDeltaDhan: absDelta100(v.pe?.greeks?.delta),
               };
             }
             setChains(prev => ({ ...prev, [expKey(u, expiry)]: { spot: Number(j.data?.chain?.last_price ?? 0), oc: flat } }));
@@ -4894,7 +4897,8 @@ export default function FocusTool() {
     && a.ceOiChgPct === b.ceOiChgPct && a.peOiChgPct === b.peOiChgPct
     && a.ceOi === b.ceOi && a.peOi === b.peOi
     && a.vwap1m === b.vwap1m && a.vwapClose1m === b.vwapClose1m
-    && a.ceDelta === b.ceDelta && a.peDelta === b.peDelta;
+    && a.ceDelta === b.ceDelta && a.peDelta === b.peDelta
+    && a.ceDeltaDhan === b.ceDeltaDhan && a.peDeltaDhan === b.peDeltaDhan;
   const rowLive = useMemo<Record<string, RowLive>>(() => {
     const out: Record<string, RowLive> = {};
     const prevOut = rowLivePrevRef.current;
@@ -5085,13 +5089,15 @@ export default function FocusTool() {
 
       const ceDelta = ceStrike != null ? (oc?.[strikeKey(ceStrike)]?.ceDelta ?? null) : null;
       const peDelta = peStrike != null ? (oc?.[strikeKey(peStrike)]?.peDelta ?? null) : null;
+      const ceDeltaDhan = ceStrike != null ? (oc?.[strikeKey(ceStrike)]?.ceDeltaDhan ?? null) : null;
+      const peDeltaDhan = peStrike != null ? (oc?.[strikeKey(peStrike)]?.peDeltaDhan ?? null) : null;
       const computed: RowLive = {
         ceStrike, peStrike,
         ltpCe, ltpPe,
         cePosition, pePosition,
         pnl, entryPremium, lotSize: lotSize > 0 ? lotSize : 0, vwap, vwapClose,
         ceBuildup, peBuildup, ceOiChgPct, peOiChgPct, ceOi, peOi,
-        vwap1m, vwapClose1m, ceDelta, peDelta,
+        vwap1m, vwapClose1m, ceDelta, peDelta, ceDeltaDhan, peDeltaDhan,
       };
       const prevLive = prevOut[row.id];
       out[row.id] = prevLive && rowLiveEqual(prevLive, computed) ? prevLive : computed;
@@ -5525,6 +5531,9 @@ export default function FocusTool() {
           peSpotEntry: legSpotEntry('PE', nextPeQty, f?.peSpotEntry, r.underlying),
           ceDeltaEntry: legDeltaEntry('CE', nextCeQty, f?.ceDeltaEntry, r),
           peDeltaEntry: legDeltaEntry('PE', nextPeQty, f?.peDeltaEntry, r),
+          // A leg opening from flat records the MODEL delta, so mark it; an add on a running leg keeps whatever basis it already had.
+          ceDeltaModel: nextCeQty <= 0 ? undefined : (leg === 'CE' && prevQty <= 0 ? true : f?.ceDeltaModel),
+          peDeltaModel: nextPeQty <= 0 ? undefined : (leg === 'PE' && prevQty <= 0 ? true : f?.peDeltaModel),
           ceTrailSteps: nextCeQty > 0 && !(leg === 'CE' && prevQty <= 0) ? f?.ceTrailSteps : undefined,
           peTrailSteps: nextPeQty > 0 && !(leg === 'PE' && prevQty <= 0) ? f?.peTrailSteps : undefined,
           ceOrb: nextCeQty <= 0 ? undefined : (leg === 'CE' && prevQty <= 0 ? (orb ?? undefined) : f?.ceOrb),

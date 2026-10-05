@@ -22,7 +22,7 @@ import {
   legPinnedStrike, slRollStrike, evaluateReentry, costStopReason, legOwnEntry, DEFAULT_SL_ROLL_MAX,
   reentryWindowClosed, pendingReentryLevel, pendingReentryHit, legTargetReason, costReentryBasis, awaitingMomentumQuote, legTargetLevel,
   monitoringStopped, momentumReentryKind, legTrailSteps, legStopLevel, orbStopDistance, legTargetSpotLevel, MAX_LEG_REENTRIES,
-  resolveCriteriaStrike, closestPremiumStrike, absDelta100, modelAbsDelta100, legTargetDeltaLevel, ownedLegStop, legStopHit, rowQtyMultiplier, multipliedLots,
+  resolveCriteriaStrike, closestPremiumStrike, absDelta100, modelAbsDelta100, legDeltaBasis, legDeltaNow, legTargetDeltaLevel, ownedLegStop, legStopHit, rowQtyMultiplier, multipliedLots,
   tradingDaysBack, tradingDte, dateForDte, rangeWindow, rangeWindowPhase, candleBucket, addMinutesHm,
   type RowLive, type PosRow, type WorkerHold,
   clampHm, ENTRY_TIME_MIN, ENTRY_TIME_MAX, EXIT_TIME_MIN, EXIT_TIME_MAX,
@@ -1018,11 +1018,11 @@ test('chain delta → AlgoTest absolute 0–100', () => {
   assert.equal(absDelta100(undefined), null);
 });
 
-test('delta SL / target / trail (doc numbers, sell side)', () => {
+test('delta SL / target / trail (doc numbers, sell side, model-basis fills)', () => {
   const liveD = (d: number) => ({ ...live({ ceLtp: 100, peLtp: 100, ceQty: -75, peQty: -75, ceEntry: 100, peEntry: 100 }), ceDelta: d, peDelta: d });
   const t = { enabled: true, unit: 'delta' as const, every: '5', by: '5' };
   const r = held({ ceSlRule: { enabled: true, basis: 'delta', value: '15' }, ceTrailSl: t,
-    fill: { ceStrike: 1, peStrike: 1, ceQty: 75, peQty: 0, ceEntry: 100, ceDeltaEntry: 25, ts: '' } });
+    fill: { ceStrike: 1, peStrike: 1, ceQty: 75, peQty: 0, ceEntry: 100, ceDeltaEntry: 25, ceDeltaModel: true, ts: '' } });
   // Entry delta 25, SL 15 → stop at 40; trail 5-5: delta 20 → 35, 15 → 30, 10 → 25.
   assert.equal(legStopLevel(r, 'CE', liveD(25))?.level, 40);
   assert.equal(legStopLevel(r, 'CE', liveD(20))?.level, 35);
@@ -1032,12 +1032,34 @@ test('delta SL / target / trail (doc numbers, sell side)', () => {
   assert.match(legStopReason(r, 'CE', liveD(40)) ?? '', /CE SL 15 delta hit \(delta 40.00/);
   // Target: entry delta 25, 15 → 10.
   assert.equal(legTargetDeltaLevel(25, '15'), 10);
-  const tr = held({ ceTgtPct: '15', legTgtUnit: 'delta', fill: { ceStrike: 1, peStrike: 1, ceQty: 75, peQty: 0, ceEntry: 100, ceDeltaEntry: 25, ts: '' } });
+  const tr = held({ ceTgtPct: '15', legTgtUnit: 'delta', fill: { ceStrike: 1, peStrike: 1, ceQty: 75, peQty: 0, ceEntry: 100, ceDeltaEntry: 25, ceDeltaModel: true, ts: '' } });
   assert.equal(legTargetReason(tr, 'CE', liveD(11)), null);
   assert.match(legTargetReason(tr, 'CE', liveD(10)) ?? '', /CE target 15 delta hit/);
   // No delta in the chain → no delta stop (falls back to SL ×).
   const nod = held({ ceSlRule: { enabled: true, basis: 'delta', value: '15' }, fill: { ceStrike: 1, peStrike: 1, ceQty: 75, peQty: 0, ceEntry: 100, ts: '' } });
   assert.equal(legStopLevel(nod, 'CE', liveD(30))?.kind, 'mult');
+});
+
+test('a fill opened before the model delta keeps being measured against Dhan\'s delta (no basis marker)', () => {
+  // Entry 25 was Dhan's delta. Live: Dhan says 30, the model says 38 for the same strike. The stop (25 + 15 = 40) must read Dhan's 30.
+  const liveBoth = (model: number, dhan: number) => ({ ...live({ ceLtp: 100, peLtp: 100, ceQty: -75, peQty: -75, ceEntry: 100, peEntry: 100 }), ceDelta: model, peDelta: model, ceDeltaDhan: dhan, peDeltaDhan: dhan });
+  const legacy = held({ ceSlRule: { enabled: true, basis: 'delta', value: '15' },
+    fill: { ceStrike: 1, peStrike: 1, ceQty: 75, peQty: 0, ceEntry: 100, ceDeltaEntry: 25, ts: '' } });
+  assert.equal(legDeltaBasis({ ceDeltaEntry: 25 } as { ceDeltaModel?: boolean }, 'CE'), 'dhan');
+  assert.equal(legStopLevel(legacy, 'CE', liveBoth(38, 30))?.deltaBasis, 'dhan');
+  assert.equal(legStopReason(legacy, 'CE', liveBoth(41, 30)), null);                       // model would have fired at 41; Dhan's 30 has not
+  assert.match(legStopReason(legacy, 'CE', liveBoth(30, 40)) ?? '', /CE SL 15 delta hit \(delta 40.00/);
+  assert.equal(legDeltaNow('CE', liveBoth(38, 30), 'dhan'), 30);
+  assert.equal(legDeltaNow('CE', liveBoth(38, 30)), 38);
+  // The same row marked as model-basis reads the model's delta instead.
+  const modelRow = held({ ceSlRule: { enabled: true, basis: 'delta', value: '15' },
+    fill: { ceStrike: 1, peStrike: 1, ceQty: 75, peQty: 0, ceEntry: 100, ceDeltaEntry: 25, ceDeltaModel: true, ts: '' } });
+  assert.equal(legDeltaBasis({ ceDeltaModel: true }, 'CE'), 'model');
+  assert.match(legStopReason(modelRow, 'CE', liveBoth(41, 30)) ?? '', /CE SL 15 delta hit \(delta 41.00/);
+  // Target uses the same basis rule.
+  const legacyTgt = held({ ceTgtPct: '15', legTgtUnit: 'delta', fill: { ceStrike: 1, peStrike: 1, ceQty: 75, peQty: 0, ceEntry: 100, ceDeltaEntry: 25, ts: '' } });
+  assert.equal(legTargetReason(legacyTgt, 'CE', liveBoth(10, 30)), null);                 // model 10 would hit, Dhan's 30 has not
+  assert.match(legTargetReason(legacyTgt, 'CE', liveBoth(30, 10)) ?? '', /CE target 15 delta hit/);
 });
 
 test('lazy leg: its own SL type replaces the row\'s', () => {
@@ -1157,5 +1179,20 @@ test('modelAbsDelta100: delta comes from the central recipe, Dhan\'s only when t
   // No spot yet, no premium, no IV: fall back to Dhan's delta; with none of that, null (read as missing).
   assert.equal(modelAbsDelta100('CE', 22900, exp, 0, 0, 0.27, { spot: 0 }), 27);
   assert.equal(modelAbsDelta100('CE', 22900, exp, 0, 0, 0, { spot: 0 }), null);
+});
+
+test('modelAbsDelta100: a stale last print outside the quoted book is not used to solve IV', () => {
+  const day = (n: number) => new Date(Date.now() + n * 86_400_000).toISOString().slice(0, 10);
+  const market = { spot: 22555.75, future: { price: 22623.7, expiry: day(22) } };
+  const exp = day(8);
+  const stale = modelAbsDelta100('CE', 22900, exp, 5, 14, 0.9, market)!;                         // no book given: the 5.0 print is trusted
+  const guarded = modelAbsDelta100('CE', 22900, exp, 5, 14, 0.9, market, { bid: 11, ask: 12 })!;  // market is 11-12: the mid prices it
+  assert.ok(guarded > stale * 1.5, `stale ${stale} vs guarded ${guarded}`);
+  // One-sided book (no bid): the last price is not trusted at all, so the chain IV (14%) sets the delta.
+  const oneSided = modelAbsDelta100('CE', 22900, exp, 5, 14, 0.9, market, { bid: 0, ask: 12 })!;
+  const viaIv = modelAbsDelta100('CE', 22900, exp, 0, 14, 0.9, market)!;
+  assert.equal(oneSided, viaIv);
+  // A print inside the book is kept.
+  assert.equal(modelAbsDelta100('CE', 22900, exp, 11.5, 14, 0.9, market, { bid: 11, ask: 12 }), modelAbsDelta100('CE', 22900, exp, 11.5, 14, 0.9, market));
 });
 

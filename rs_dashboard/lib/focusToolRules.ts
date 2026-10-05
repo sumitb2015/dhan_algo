@@ -22,7 +22,7 @@
  */
 
 import { NSE_HOLIDAYS } from './nseHolidays.ts';
-import { greeksForLeg, type FutureQuote } from './optionsPricing.ts';
+import { greeksForLeg, trustedMark, type FutureQuote } from './optionsPricing.ts';
 import type {
   FocusRow, FocusDte, FocusRowStatus, FocusReentryMode, FocusReentryTrigger, FocusPendingReentry, FocusLegSimpleMom, FocusLazyLeg, FocusLegRangeBreakout, FocusOverallMode,
   FocusLegSlRule, FocusLegTrailSl, FocusLegOrbSl, FocusOrbStamp, FocusStrikeCriteria, FocusLegCrit,
@@ -181,6 +181,9 @@ export interface RowLive {
   /** |Delta| × 100 of the row's CE / PE strike from the polled chain; null when the chain has none. */
   ceDelta?: number | null;
   peDelta?: number | null;
+  /** The same strikes' |delta| × 100 as Dhan's chain reports it: the live side for legs whose entry delta is Dhan's (opened before the model delta). */
+  ceDeltaDhan?: number | null;
+  peDeltaDhan?: number | null;
 }
 
 export const EMPTY_ROW_LIVE: RowLive = {
@@ -374,7 +377,7 @@ export function ownedLegStop(row: LegStopRow, leg: 'CE' | 'PE', live: RowLive, w
 export function legStopHit(stop: LegStopLevel | null, leg: 'CE' | 'PE', live: RowLive, spot = 0): string | null {
   if (!stop) return null;
   const ltp = (leg === 'CE' ? live.ltpCe : live.ltpPe) ?? 0;
-  const now = stop.on === 'spot' ? spot : stop.on === 'delta' ? (legDeltaNow(leg, live) ?? 0) : ltp;
+  const now = stop.on === 'spot' ? spot : stop.on === 'delta' ? (legDeltaNow(leg, live, stop.deltaBasis) ?? 0) : ltp;
   if (!(now > 0)) return null;
   const hit = stop.dir === 'up' ? now >= stop.level : now <= stop.level;
   if (!hit) return null;
@@ -384,9 +387,19 @@ export function legStopHit(stop: LegStopLevel | null, leg: 'CE' | 'PE', live: Ro
   return `${leg} ${stop.label} hit (${stop.on === 'spot' ? 'spot' : stop.on === 'delta' ? 'delta' : 'premium'} ${now.toFixed(2)} ${stop.dir === 'up' ? '≥' : '≤'} ${stop.level.toFixed(2)})`;
 }
 
-/** |Delta| × 100 of the leg's strike right now, or null when the chain carried none. */
-export function legDeltaNow(leg: 'CE' | 'PE', live: RowLive): number | null {
-  const d = leg === 'CE' ? live.ceDelta : live.peDelta;
+/** Which delta a leg's entry was recorded in: 'model' for fills opened with the model delta, 'dhan' for older ones (no marker). */
+export type DeltaBasis = 'model' | 'dhan';
+
+export function legDeltaBasis(fill: { ceDeltaModel?: boolean; peDeltaModel?: boolean } | null | undefined, leg: 'CE' | 'PE'): DeltaBasis {
+  return (leg === 'CE' ? fill?.ceDeltaModel : fill?.peDeltaModel) ? 'model' : 'dhan';
+}
+
+/**
+ * |Delta| × 100 of the leg's strike right now, or null when the chain carried none. `basis` must match the basis the leg's ENTRY
+ * delta was recorded in (see `legDeltaBasis`), so a stop built from Dhan's entry delta is never compared with the model's live one.
+ */
+export function legDeltaNow(leg: 'CE' | 'PE', live: RowLive, basis: DeltaBasis = 'model'): number | null {
+  const d = basis === 'dhan' ? (leg === 'CE' ? live.ceDeltaDhan : live.peDeltaDhan) : (leg === 'CE' ? live.ceDelta : live.peDelta);
   return d != null && Number.isFinite(d) && d > 0 ? d : null;
 }
 
@@ -407,9 +420,11 @@ export function modelAbsDelta100(
   type: 'CE' | 'PE', strike: number, expiry: string, mark: number | null | undefined,
   chainIvPct: number | null | undefined, chainDelta: unknown,
   market: { spot: number; future?: FutureQuote | null },
+  /** The strike's best bid/ask: a last price outside them (or a one-sided book) is not trusted to solve IV from (see trustedMark). */
+  book?: { bid?: number | null; ask?: number | null },
 ): number | null {
   const g = greeksForLeg(
-    { type, strike, expiry, mark, chainIv: chainIvPct && chainIvPct > 0 ? chainIvPct / 100 : null },
+    { type, strike, expiry, mark: book ? trustedMark(mark, book.bid, book.ask) : mark, chainIv: chainIvPct && chainIvPct > 0 ? chainIvPct / 100 : null },
     market,
   );
   return g ? absDelta100(g.delta) ?? absDelta100(chainDelta) : absDelta100(chainDelta);
@@ -436,6 +451,8 @@ export interface LegStopLevel {
   trailed: number;
   /** Short human label, e.g. "SL 30 pts", "SL ×1.3 trailed 2×". */
   label: string;
+  /** For a delta stop: the basis its entry delta was recorded in, so the live side is read in the same one. */
+  deltaBasis?: DeltaBasis;
 }
 
 /** A leg's alternative SL basis, when it is switched on with a value. */
@@ -527,7 +544,7 @@ export function legStopLevel(row: LegStopRow, leg: 'CE' | 'PE', live: RowLive, l
       // AlgoTest Delta stop on a SELL: entry delta 25, SL 15 → exit at delta 40.
       const de = Number(leg === 'CE' ? f?.ceDeltaEntry : f?.peDeltaEntry) || 0;
       if (de > 0) {
-        base = { kind: 'delta', on: 'delta', level: Math.min(100, de + v), dir: 'up', entry, trailed: 0, label: `SL ${v} delta` };
+        base = { kind: 'delta', on: 'delta', level: Math.min(100, de + v), dir: 'up', entry, trailed: 0, label: `SL ${v} delta`, deltaBasis: legDeltaBasis(f, leg) };
       }
     } else {
       const se = Number(leg === 'CE' ? f?.ceSpotEntry : f?.peSpotEntry) || 0;
@@ -558,7 +575,7 @@ export function legStopLevel(row: LegStopRow, leg: 'CE' | 'PE', live: RowLive, l
     } else if (base.on === 'delta' && trail.unit === 'delta') {
       // AlgoTest (sell): entry delta 25, stop 40, trail 5-5 → delta 20 moves it to 35.
       const de = Number(leg === 'CE' ? f?.ceDeltaEntry : f?.peDeltaEntry) || 0;
-      const steps = Math.max(saved, legTrailSteps(trail, de, legDeltaNow(leg, live) ?? 0));
+      const steps = Math.max(saved, legTrailSteps(trail, de, legDeltaNow(leg, live, legDeltaBasis(f, leg)) ?? 0));
       if (steps > 0) {
         base = { ...base, level: base.level - steps * Number(trail.by), trailed: steps, label: `${base.label} trailed ${steps}×` };
       }
@@ -909,7 +926,7 @@ export function legTargetReason(
   const { value, unit } = legTarget(row, leg);
   if (unit === 'delta') {
     const lvl = legTargetDeltaLevel(leg === 'CE' ? row.fill?.ceDeltaEntry : row.fill?.peDeltaEntry, value);
-    const d = legDeltaNow(leg, live);
+    const d = legDeltaNow(leg, live, legDeltaBasis(row.fill, leg));
     if (lvl == null || d == null) return null;
     return d <= lvl ? `${leg} target ${Number(value)} delta hit (delta ${d.toFixed(2)} ≤ ${lvl.toFixed(2)})` : null;
   }

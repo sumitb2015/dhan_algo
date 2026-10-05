@@ -23,14 +23,16 @@ import {
   calculateTimeToExpiryYears,
   extractChainStrikes,
 } from '@/lib/optionsMonitorMath';
-import { greeksForLeg, futureQuote } from '@/lib/optionsPricing';
+import { greeksForLeg, futureQuote, trustedMark } from '@/lib/optionsPricing';
 
 /** Model Greeks + tick-rounded theoretical price for one leg, from the central per-leg recipe (greeksForLeg). Zeros when no spot/future yet. */
 function modelLeg(
   type: OptType, strike: number, expiry: string, mark: number | null | undefined, chainIv: number | null | undefined, fallbackIv: number,
   spot: number, futurePrice: number | null | undefined, futureExpiry: string | null | undefined,
+  /** Pass the chain row's bid/ask when `mark` is a chain last price (not a live tick): a stale print is then not trusted to solve IV (trustedMark). */
+  book?: { bid?: number | null; ask?: number | null } | null,
 ) {
-  const g = greeksForLeg({ type, strike, expiry, mark, chainIv, fallbackIv }, { spot, future: futureQuote(futurePrice, futureExpiry) });
+  const g = greeksForLeg({ type, strike, expiry, mark: book ? trustedMark(mark, book.bid, book.ask) : mark, chainIv, fallbackIv }, { spot, future: futureQuote(futurePrice, futureExpiry) });
   if (!g) return { delta: 0, gamma: 0, theta: 0, vega: 0, iv: chainIv && chainIv > 0 ? chainIv : fallbackIv, price: mark && mark > 0 ? mark : 0 };
   return { delta: g.delta, gamma: g.gamma, theta: g.theta, vega: g.vega, iv: g.iv, price: Math.max(0.05, Math.round(g.price * 20) / 20) };
 }
@@ -514,9 +516,11 @@ export default function OptionsMonitorPage() {
 
       // Central per-leg recipe: forward rolled to this leg's expiry, IV solved from the live premium (chain IV, then the leg's own, as fallbacks).
       const chainIv = chainSide?.implied_volatility;
+      // A live tick is fresh; a chain print is only trusted while it sits inside the quoted book (else the chain IV is used).
+      const ivMark = (typeof wsLtp === 'number' && wsLtp > 0) ? wsLtp : trustedMark(chainLtp ?? chainPrev, chainSide?.top_bid_price, chainSide?.top_ask_price) ?? undefined;
       const g = greeksForLeg(
         {
-          type: leg.type, strike: leg.strike, expiry: leg.expiry || selectedExpiry, mark: currentLtp,
+          type: leg.type, strike: leg.strike, expiry: leg.expiry || selectedExpiry, mark: ivMark,
           chainIv: typeof chainIv === 'number' && chainIv > 0 ? chainIv / 100 : leg.iv || null,
           fallbackIv: ivPct / 100,
         },
@@ -747,7 +751,8 @@ export default function OptionsMonitorPage() {
       : (typeof chainPrice === 'number' && chainPrice > 0)
       ? chainPrice
       : newLegData.entryPrice;
-    const g = modelLeg(newLegData.type, newLegData.strike, selectedExpiry, legLtp, typeof chainIv === 'number' && chainIv > 0 ? chainIv / 100 : null, ivPct / 100, spot, futurePrice, futureExpiry);
+    const g = modelLeg(newLegData.type, newLegData.strike, selectedExpiry, legLtp, typeof chainIv === 'number' && chainIv > 0 ? chainIv / 100 : null, ivPct / 100, spot, futurePrice, futureExpiry,
+      typeof wsPrice === 'number' && wsPrice > 0 ? null : { bid: chainSide?.top_bid_price, ask: chainSide?.top_ask_price });
     const legIv = g.iv;
 
     return {
@@ -842,7 +847,8 @@ export default function OptionsMonitorPage() {
 
         const chainIv = chainSide?.implied_volatility;
         const mark = (typeof wsPrice === 'number' && wsPrice > 0) ? wsPrice : (typeof chainPrice === 'number' && chainPrice > 0) ? chainPrice : null;
-        const g = modelLeg(l.type, newStrike, l.expiry || selectedExpiry, mark, typeof chainIv === 'number' && chainIv > 0 ? chainIv / 100 : l.iv || null, ivPct / 100, spot, futurePrice, futureExpiry);
+        const g = modelLeg(l.type, newStrike, l.expiry || selectedExpiry, mark, typeof chainIv === 'number' && chainIv > 0 ? chainIv / 100 : l.iv || null, ivPct / 100, spot, futurePrice, futureExpiry,
+          typeof wsPrice === 'number' && wsPrice > 0 ? null : { bid: chainSide?.top_bid_price, ask: chainSide?.top_ask_price });
         const effectiveIv = g.iv;
         const currentPrice = mark ?? g.price;
 
@@ -904,7 +910,8 @@ export default function OptionsMonitorPage() {
       const mark = (typeof wsPrice === 'number' && wsPrice > 0) ? wsPrice : (typeof chainP === 'number' && chainP > 0) ? chainP : null;
 
       // Central per-leg recipe; with no live price the theoretical price (tick-rounded) stands in.
-      const m = modelLeg(type.toUpperCase() as OptType, strike, selectedExpiry, mark, chainIvFrac, ivPct / 100, spot, futurePrice, futureExpiry);
+      const m = modelLeg(type.toUpperCase() as OptType, strike, selectedExpiry, mark, chainIvFrac, ivPct / 100, spot, futurePrice, futureExpiry,
+        typeof wsPrice === 'number' && wsPrice > 0 ? null : { bid: chainSide?.top_bid_price, ask: chainSide?.top_ask_price });
       return { price: mark ?? m.price, iv: m.iv, delta: m.delta, gamma: m.gamma, theta: m.theta, vega: m.vega };
     };
 
@@ -1310,8 +1317,8 @@ export default function OptionsMonitorPage() {
     const peIvChain = peChainEntry?.implied_volatility ? peChainEntry.implied_volatility / 100 : null;
     const ceMark = typeof ceChainP === 'number' && ceChainP > 0 ? ceChainP : null;
     const peMark = typeof peChainP === 'number' && peChainP > 0 ? peChainP : null;
-    const gCe = modelLeg('CE', wingCeStrike, selectedExpiry, ceMark, ceIvChain, ivPct / 100, spot, futurePrice, futureExpiry);
-    const gPe = modelLeg('PE', wingPeStrike, selectedExpiry, peMark, peIvChain, ivPct / 100, spot, futurePrice, futureExpiry);
+    const gCe = modelLeg('CE', wingCeStrike, selectedExpiry, ceMark, ceIvChain, ivPct / 100, spot, futurePrice, futureExpiry, { bid: ceChainEntry?.top_bid_price, ask: ceChainEntry?.top_ask_price });
+    const gPe = modelLeg('PE', wingPeStrike, selectedExpiry, peMark, peIvChain, ivPct / 100, spot, futurePrice, futureExpiry, { bid: peChainEntry?.top_bid_price, ask: peChainEntry?.top_ask_price });
 
     const ceWing: OptionLegModel = {
       id: `wing_ce_${Date.now()}`,
