@@ -4,7 +4,6 @@ import argparse
 import json
 import os
 import re
-import logging
 import threading
 from datetime import datetime
 from typing import Any, Dict, NamedTuple, Optional, Tuple
@@ -18,6 +17,7 @@ from login import get_dhan_client
 from lib.dhan_helper import DhanHelper
 from lib.strategy_state_helper import save_strategy_state, check_shutdown_trigger, instance_log_suffix
 from lib.trade_stops import ratchet_stop, stop_hit
+from lib.algo_kit import load_today_state, setup_strategy_logging  # noqa: E402
 
 # --- Constants ---
 STRATEGY_KEY = "crudeoilm_ema_supertrend"
@@ -29,33 +29,7 @@ SEGMENT = "MCX_COMM"    # get_ltp() / websocket segment
 # --- Logging Setup ---
 project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 debug_dir = os.path.join(project_root, "debug")
-log_dir = os.path.join(debug_dir, "logs", "crudeoil_ema")
-os.makedirs(log_dir, exist_ok=True)
-
-
-class FlushingFileHandler(logging.FileHandler):
-    def emit(self, record):
-        super().emit(record)
-        self.flush()
-
-
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - %(levelname)s - %(message)s",
-    handlers=[
-        logging.StreamHandler(),
-        # encoding: FileHandler otherwise opens with the system ANSI codepage
-        # (cp1252 on Windows) and silently DROPS any log line containing a
-        # non-ANSI glyph (INR sign, arrows, dashes) while still writing the
-        # ASCII lines around it -- the log looks intact but loses those lines.
-        FlushingFileHandler(
-            os.path.join(log_dir, f"{datetime.now().strftime('%Y%m%d')}{instance_log_suffix()}.log"),
-            encoding="utf-8",
-        ),
-    ],
-    force=True,
-)
-logger = logging.getLogger(__name__)
+logger = setup_strategy_logging(project_root, "crudeoil_ema", instance_log_suffix(), name=__name__, force=True)
 
 
 # ---------------------------------------------------------------------------
@@ -740,15 +714,10 @@ class CrudeOilMEmaSupertrendStrategy:
 
     def _restore_daily_pnl(self) -> None:
         """Restore today's realized P&L and trade count from the state file on restart."""
-        state_file = os.path.join(debug_dir, f"{STRATEGY_KEY}_state.json")
+        saved = load_today_state(os.path.join(debug_dir, f"{STRATEGY_KEY}_state.json"), log=logger)
+        if not saved:                       # no file, a stale (not-today) file, or unreadable
+            return
         try:
-            if not os.path.exists(state_file):
-                return
-            mtime = datetime.fromtimestamp(os.path.getmtime(state_file))
-            if mtime.date() != datetime.now().date():
-                return
-            with open(state_file) as f:
-                saved = json.load(f)
             restored = float(saved.get("daily_pnl", 0.0))
             if restored != 0.0:
                 self.cumulative_pnl = restored
