@@ -52,8 +52,6 @@ Usage (dry run by default — no real orders without --live):
 """
 
 import argparse
-import json
-import logging
 import math
 import os
 import sys
@@ -70,37 +68,14 @@ from lib.execution_broker import ExecutionBroker, ExecutionBrokerError  # noqa: 
 from lib.strategy_risk import (                                        # noqa: E402
     resolve_exit_qty_broker, detect_phantom_leg_broker, PHANTOM_CHECK_INTERVAL_SEC,
 )
+from lib.algo_kit import PositionStore, setup_strategy_logging  # noqa: E402
 from lib.strategy_state_helper import (                                # noqa: E402
     save_strategy_state, check_shutdown_trigger, instance_log_suffix,
 )
 
 # ── logging ──────────────────────────────────────────────────────────────────
 DEBUG_DIR = os.path.join(PROJECT_ROOT, "debug")
-LOG_DIR = os.path.join(DEBUG_DIR, "logs", "delta_strangle")
-os.makedirs(LOG_DIR, exist_ok=True)
-
-
-class FlushingFileHandler(logging.FileHandler):
-    """Flush on every record so the dashboard's log tail is live, not buffered."""
-
-    def emit(self, record):
-        super().emit(record)
-        self.flush()
-
-
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - %(levelname)s - %(message)s",
-    handlers=[
-        logging.StreamHandler(),
-        FlushingFileHandler(
-            os.path.join(LOG_DIR, f"{datetime.now().strftime('%Y%m%d')}{instance_log_suffix()}.log"),
-            encoding="utf-8",
-        ),
-    ],
-    force=True,
-)
-logger = logging.getLogger(__name__)
+logger = setup_strategy_logging(PROJECT_ROOT, "delta_strangle", instance_log_suffix(), name=__name__, force=True)
 
 PORTFOLIO_VERSION = 1
 
@@ -202,18 +177,11 @@ class NiftyDeltaStrangle:
         return os.path.join(DEBUG_DIR, f"{self.state_key}_portfolio.json")
 
     def load_portfolio(self) -> None:
-        path = self.portfolio_path
-        if not os.path.exists(path):
-            logger.info(f"No existing portfolio at {path} — starting flat (IDLE)")
+        # PositionStore raises PositionFileError (never trade blind) on an unreadable file. This strategy
+        # has never refused a paper/live mismatch, so enforce_mode=False (see docs/ALGO_KIT.md).
+        data = self._position_store().load(expiry_field=None)
+        if data is None:
             return
-        try:
-            with open(path, "r") as f:
-                data = json.load(f)
-        except Exception as e:
-            logger.error(f"FATAL: portfolio file {path} is unreadable ({e}). "
-                         f"Fix or move it before restarting; refusing to trade blind.")
-            raise
-
         self.status = data.get("status", "IDLE")
         self.expiry = data.get("expiry")
         self.lots = int(data.get("lots", 0) or 0)
@@ -238,11 +206,12 @@ class NiftyDeltaStrangle:
         if self.status in ("ENTERED", "UNWINDING", "FLATTENING") and not self.dry_run:
             self._reconcile_against_broker()
 
+    def _position_store(self) -> PositionStore:
+        return PositionStore(self.portfolio_path, self.dry_run, log=logger, version=PORTFOLIO_VERSION, enforce_mode=False)
+
     def save_portfolio(self) -> None:
-        data = {
-            "version": PORTFOLIO_VERSION,
+        self._position_store().save({
             "state_key": self.state_key,
-            "dry_run": self.dry_run,
             "status": self.status,
             "expiry": self.expiry,
             "lots": self.lots,
@@ -250,13 +219,7 @@ class NiftyDeltaStrangle:
             "entry_date": self.entry_date,
             "legs": self.legs,
             "roll_count": self.roll_count,
-            "updated_at": datetime.now().isoformat(timespec="seconds"),
-        }
-        os.makedirs(DEBUG_DIR, exist_ok=True)
-        tmp = self.portfolio_path + ".tmp"
-        with open(tmp, "w") as f:
-            json.dump(data, f, indent=2)
-        os.replace(tmp, self.portfolio_path)
+        })
 
     def _reconcile_against_broker(self) -> None:
         """Diagnostic-only cross-check of reloaded legs against broker truth.

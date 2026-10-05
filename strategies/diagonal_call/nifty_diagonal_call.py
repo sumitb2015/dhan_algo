@@ -16,8 +16,6 @@ Standard Feature Kit (dhan-new-strategy):
 """
 
 import argparse
-import json
-import logging
 import math
 import os
 import sys
@@ -43,6 +41,7 @@ if project_root not in sys.path:
 
 # Pure stdlib (no broker SDK): imported outside the guarded block so the pure functions work even when the SDK imports below fail.
 from lib.options_pricing import RISK_FREE_RATE, greeks_from_days  # noqa: E402
+from lib.algo_kit import PositionStore, setup_strategy_logging  # noqa: E402
 
 try:
     import pandas as pd
@@ -133,29 +132,7 @@ def is_monthly_expiry(expiry_str: str) -> bool:
     return (d + timedelta(days=7)).month != d.month
 
 debug_dir = os.path.join(project_root, "debug")
-log_dir = os.path.join(debug_dir, "logs", LOG_FOLDER)
-os.makedirs(log_dir, exist_ok=True)
-
-
-class FlushingFileHandler(logging.FileHandler):
-    def emit(self, record):
-        super().emit(record)
-        self.flush()
-
-
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - %(levelname)s - %(message)s",
-    handlers=[
-        FlushingFileHandler(
-            os.path.join(log_dir, f"{datetime.now().strftime('%Y%m%d')}{instance_log_suffix()}.log"),
-            encoding="utf-8",
-        ),
-        logging.StreamHandler(),
-    ],
-    force=True,
-)
-logger = logging.getLogger(__name__)
+logger = setup_strategy_logging(project_root, LOG_FOLDER, instance_log_suffix(), name=__name__, force=True)
 
 # Greeks come from lib/options_pricing.py (the port of the dashboard's optionsPricing.ts, parity-tested). MIN_DTE_DAYS must equal the
 # dashboard advisor's (rs_dashboard/lib/diagonalStrikeAdvisor.test.ts fails if they drift).
@@ -542,12 +519,13 @@ class NiftyDiagonalCallStrategy:
         self.is_free_long_call = is_free
         return self.lcr_pct, round(total_short_premium, 2), is_free
 
+    def _position_store(self) -> PositionStore:
+        return PositionStore(self.position_path, self.dry_run, log=logger)
+
     def save_position(self):
-        """Atomic write of the active portfolio state to prevent torn file corruption."""
+        """Atomic write of the active portfolio state to prevent torn file corruption (PositionStore)."""
         self.compute_lcr()
-        payload = {
-            "version": 1,
-            "dry_run": self.dry_run,
+        self._position_store().save({
             "position_open": self.position_open,
             "status": self.status,
             "long_leg": self.long_leg,
@@ -564,40 +542,21 @@ class NiftyDiagonalCallStrategy:
             "cumulative_short_premium": round(self.cumulative_short_premium, 2),
             "lcr_pct": self.lcr_pct,
             "is_free_long_call": self.is_free_long_call,
-            "updated_at": datetime.now().isoformat(timespec="seconds"),
-        }
-        os.makedirs(debug_dir, exist_ok=True)
-        tmp = self.position_path + ".tmp"
-        with open(tmp, "w") as f:
-            json.dump(payload, f, indent=2)
-        os.replace(tmp, self.position_path)
+        })
 
     def load_position(self):
         """Restores position truth across script restarts and reconciles with broker."""
-        if not os.path.exists(self.position_path):
-            logger.info("No prior position state found on disk. Starting flat.")
+        # PositionStore raises PositionFileError (never trade blind) on an unreadable file or an open
+        # position saved by the other mode (paper vs live). Legs carry their own expiries, so no expiry guard.
+        data = self._position_store().load(expiry_field=None)
+        if data is None:
             return
-
-        try:
-            with open(self.position_path, "r") as f:
-                data = json.load(f)
-        except Exception as e:
-            logger.error(f"FATAL: Could not parse position file {self.position_path}: {e}")
-            raise
 
         if not data.get("position_open", False):
             self.realized_pnl = float(data.get("realized_pnl", 0.0))
             self.cumulative_short_premium = float(data.get("cumulative_short_premium", 0.0))
             self.initial_long_debit = float(data.get("initial_long_debit", 0.0))
             return
-
-        if bool(data.get("dry_run")) != self.dry_run:
-            logger.error(
-                f"FATAL: {self.position_path} holds a {'PAPER' if data.get('dry_run') else 'LIVE'} position "
-                f"but this run is {'DRY' if self.dry_run else 'LIVE'}. Move the file aside after checking broker."
-            )
-            sys.exit(1)
-
         self.position_open = True
         self.status = data.get("status", "RUNNING")
         self.long_leg = data.get("long_leg")

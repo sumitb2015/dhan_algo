@@ -24,8 +24,6 @@ Implements the standard kit from the dhan-new-strategy skill:
 """
 
 import argparse
-import json
-import logging
 import math
 import os
 import sys
@@ -59,6 +57,7 @@ from lib.strategy_state_helper import (  # noqa: E402
 from lib.strategy_risk import resolve_exit_qty_broker  # noqa: E402
 from lib.execution_broker import ExecutionBroker, ExecutionBrokerError  # noqa: E402
 from lib.telegram_alert import notify  # noqa: E402
+from lib.algo_kit import PositionStore, confirmed_fill_price, setup_strategy_logging, update_trail  # noqa: E402
 
 STRATEGY_KEY_DEFAULT = "nifty_condor_ratio"
 LOG_FOLDER = "condor_ratio"
@@ -72,29 +71,7 @@ STAGE_CONDOR = "CONDOR"
 STAGE_RATIO = "RATIO"
 
 debug_dir = os.path.join(project_root, "debug")
-log_dir = os.path.join(debug_dir, "logs", LOG_FOLDER)
-os.makedirs(log_dir, exist_ok=True)
-
-
-class FlushingFileHandler(logging.FileHandler):
-    def emit(self, record):
-        super().emit(record)
-        self.flush()
-
-
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - %(levelname)s - %(message)s",
-    handlers=[
-        FlushingFileHandler(
-            os.path.join(log_dir, f"{datetime.now().strftime('%Y%m%d')}{instance_log_suffix()}.log"),
-            encoding="utf-8",
-        ),
-        logging.StreamHandler(),
-    ],
-    force=True,
-)
-logger = logging.getLogger(__name__)
+logger = setup_strategy_logging(project_root, LOG_FOLDER, instance_log_suffix(), name=__name__, force=True)
 
 
 # ── Pure decision logic: no broker, no clock, no I/O. Unit-test these. ──────────────────────────
@@ -280,17 +257,6 @@ def check_ratio_reversal_trigger(short_delta_per_lot: float, trigger_delta: floa
     return abs(short_delta_per_lot) >= trigger_delta
 
 
-def update_trail(total_pnl: float, best_pnl: float, active: bool, start_rs: float, gap_rs: float) -> tuple:
-    """Rupee-MTM trailing stop. Returns (active, best_pnl, exit_now)."""
-    if not active and total_pnl >= start_rs:
-        active, best_pnl = True, total_pnl
-    if active:
-        best_pnl = max(best_pnl, total_pnl)
-        if total_pnl < best_pnl - gap_rs:
-            return active, best_pnl, True
-    return active, best_pnl, False
-
-
 def monthly_expiries(expiries: list) -> list:
     """Last listed expiry in each calendar month (the monthly contract). No weekday assumed."""
     by_month = defaultdict(list)
@@ -436,11 +402,12 @@ class NiftyCondorToRatioStrategy:
     def position_path(self) -> str:
         return os.path.join(debug_dir, f"{self.state_key}_position.json")
 
+    def _position_store(self) -> PositionStore:
+        return PositionStore(self.position_path, self.dry_run, log=logger)
+
     def save_position(self):
-        """Atomically persist state for crash recovery."""
-        data = {
-            "version": 1,
-            "dry_run": self.dry_run,
+        """Atomically persist state for crash recovery (PositionStore)."""
+        self._position_store().save({
             "position_open": self.position_open,
             "stage": self.stage,
             "direction": self.direction,
@@ -459,37 +426,18 @@ class NiftyCondorToRatioStrategy:
             "shifts_count": self.shifts_count,
             "reversals_count": self.reversals_count,
             "last_cycle_expiry": self.last_cycle_expiry,
-            "updated_at": datetime.now().isoformat(timespec="seconds"),
-        }
-        os.makedirs(debug_dir, exist_ok=True)
-        tmp = self.position_path + ".tmp"
-        with open(tmp, "w") as f:
-            json.dump(data, f, indent=2)
-        os.replace(tmp, self.position_path)
+        })
 
     def load_position(self):
-        path = self.position_path
-        if not os.path.exists(path):
-            logger.info(f"No existing position file at {path}; starting flat.")
+        # PositionStore raises PositionFileError (never trade blind) on an unreadable file or an open
+        # position saved by the other mode (paper vs live). This strategy has no expiry field to guard on.
+        data = self._position_store().load(expiry_field=None)
+        if data is None:
             return
-        try:
-            with open(path) as f:
-                data = json.load(f)
-        except Exception as e:
-            logger.error(f"FATAL: position file {path} unreadable ({e}). Refusing to trade blind.")
-            raise
 
         if not data.get("position_open"):
             self.last_cycle_expiry = data.get("last_cycle_expiry")
             return
-
-        if bool(data.get("dry_run")) != self.dry_run:
-            logger.error(
-                f"FATAL: {path} holds a {'PAPER' if data.get('dry_run') else 'LIVE'} position "
-                f"but current mode is {'DRY' if self.dry_run else 'LIVE'}."
-            )
-            sys.exit(1)
-
         self.position_open = True
         self.stage = data.get("stage", STAGE_CONDOR)
         self.direction = data.get("direction")
@@ -555,14 +503,7 @@ class NiftyCondorToRatioStrategy:
         return (int(q["CONTRACT_INFO"]["SECURITY_ID"]), price) if price > 0 else (None, 0.0)
 
     def _fill_price(self, order_id: str, fallback: float) -> float:
-        if not order_id or order_id == "PAPER":
-            return fallback
-        if self.helper.wait_for_fill(order_id, timeout=8):
-            o = self.helper.get_order_by_id(order_id) or {}
-            px = float(o.get("averageTradedPrice", 0.0) or o.get("avgFilledPrice", 0.0) or o.get("price", 0.0))
-            if px > 0:
-                return px
-        return fallback
+        return confirmed_fill_price(self.helper, order_id, fallback, timeout=8, log=logger, raise_errors=True)
 
     def _ltp(self, leg: dict) -> float:
         if not leg or not leg.get("id"):

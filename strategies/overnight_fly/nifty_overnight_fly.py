@@ -37,8 +37,6 @@ Adjustment logic (v1, deliberately bounded):
 """
 
 import argparse
-import json
-import logging
 import os
 import sys
 import time
@@ -56,6 +54,7 @@ from lib.strategy_state_helper import (
 )
 from lib.strategy_risk import resolve_exit_qty_broker, detect_phantom_leg_broker, PHANTOM_CHECK_INTERVAL_SEC
 from lib.execution_broker import ExecutionBroker, ExecutionBrokerError
+from lib.algo_kit import PositionStore, confirmed_fill_price, setup_strategy_logging
 
 STRIKE_STEP = 50
 # Carry-forward product — see the module docstring. NEVER "INTRADAY" in this file.
@@ -66,15 +65,10 @@ project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(_
 debug_dir = os.path.join(project_root, "debug")
 os.makedirs(debug_dir, exist_ok=True)
 
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.FileHandler(os.path.join(debug_dir, f"nifty_overnight_fly{instance_log_suffix()}.log")),
-        logging.StreamHandler(),
-    ],
-)
-logger = logging.getLogger(__name__)
+# Legacy location (debug/nifty_overnight_fly[_id].log, not debug/logs/<folder>/): kept as is. The kit
+# handler adds UTF-8 and per-record flush; this strategy previously had neither.
+logger = setup_strategy_logging(project_root, "", instance_log_suffix(), name=__name__,
+                                log_file=os.path.join("debug", f"nifty_overnight_fly{instance_log_suffix()}.log"))
 
 
 class NiftyOvernightFly:
@@ -136,12 +130,16 @@ class NiftyOvernightFly:
     def position_path(self) -> str:
         return os.path.join(debug_dir, f"{self.state_key}_position.json")
 
+    def _position_store(self) -> PositionStore:
+        # enforce_mode=False: this strategy has never refused a paper/live mismatch, and files written
+        # before `dry_run` was recorded have no such key. The mode is now recorded; enabling the
+        # refusal is a separate decision (see docs/ALGO_KIT.md, Known gaps).
+        return PositionStore(self.position_path, self.dry_run, log=logger, enforce_mode=False)
+
     def save_position(self):
-        """Atomic write — same pattern as nifty500_momentum.py's portfolio file.
-        A torn position file is the one thing that could lose track of a live
-        overnight hedge."""
-        data = {
-            'version': 1,
+        """Atomic write (PositionStore). A torn position file is the one thing that could lose track of
+        a live overnight hedge."""
+        self._position_store().save({
             'position_open': self.position_open,
             'expiry': self.expiry,
             'entry_date': self.entry_date,
@@ -154,33 +152,16 @@ class NiftyOvernightFly:
             'pe_hedge': self.pe_hedge,
             'lots': self.lots,
             'nifty_lot_size': self.nifty_lot_size,
-            'updated_at': datetime.now().isoformat(timespec='seconds'),
-        }
-        os.makedirs(debug_dir, exist_ok=True)
-        tmp = self.position_path + '.tmp'
-        with open(tmp, 'w') as f:
-            json.dump(data, f, indent=2)
-        os.replace(tmp, self.position_path)
+        })
 
     def load_position(self):
         """Restore an open overnight position after a process restart. Refuses to
         trade blind on a corrupt file rather than silently starting flat — that
         would either re-enter a second straddle on top of the live one, or lose
         track of the hedge that makes this strategy defined-risk at all."""
-        path = self.position_path
-        if not os.path.exists(path):
-            logger.info(f"No existing position at {path} — starting flat.")
+        data = self._position_store().load(expiry_field=None)
+        if data is None:
             return
-        try:
-            with open(path) as f:
-                data = json.load(f)
-        except Exception as e:
-            logger.error(
-                f"FATAL: position file {path} is unreadable ({e}). "
-                f"Fix or move it before restarting; refusing to trade blind."
-            )
-            raise
-
         self.position_open = bool(data.get('position_open'))
         self.expiry = data.get('expiry')
         self.entry_date = data.get('entry_date')
@@ -224,19 +205,7 @@ class NiftyOvernightFly:
 
     def get_execution_price(self, order_id, fallback_price):
         """Wait for fill and get the average execution price, or return fallback."""
-        if not order_id:
-            return fallback_price
-        if self.helper.wait_for_fill(order_id, timeout=5):
-            order_details = self.helper.get_order_by_id(order_id)
-            if order_details:
-                fill_price = float(
-                    order_details.get('averageTradedPrice', 0.0)
-                    or order_details.get('avgFilledPrice', 0.0)
-                    or order_details.get('price', 0.0)
-                )
-                if fill_price > 0:
-                    return fill_price
-        return fallback_price
+        return confirmed_fill_price(self.helper, order_id, fallback_price, log=logger, raise_errors=True, paper_id=None)
 
     # ── P&L ──────────────────────────────────────────────────────────────
 
