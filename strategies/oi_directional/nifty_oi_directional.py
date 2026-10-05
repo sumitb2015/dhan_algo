@@ -243,6 +243,20 @@ class NiftyOIDirectional:
                 sys.exit(0)
             time.sleep(1)
 
+    def _wait_out_session_end(self):
+        """Dry-run only: hold until the clock is past midnight once the 15:17 session has ended.
+
+        Live mode needs nothing here: wait_for_market_open() really waits for the next session. Dry-run
+        bypasses that wait, so the outer loop used to restart at once, hit the 15:17 check again and spin
+        at full CPU writing about 6,000 log lines a second (tens of GB an hour) for the rest of the day.
+        """
+        if not self.dry_run:
+            return
+        logger.info("[DRY RUN] Session over; waiting for the clock to pass midnight before simulating the next one.")
+        while datetime.now().strftime("%H:%M") >= "15:17":
+            self._save_state(0, 0, "", 0, "WAITING")        # heartbeat: the dashboard sees it is alive
+            self._sleep_shutdown_aware(5)
+
     def _subscribe_position(self, security_id: str):
         try:
             self.helper.subscribe_instruments([("NSE_FNO", security_id, 15)])
@@ -595,6 +609,7 @@ class NiftyOIDirectional:
                     logger.info("Session ended at 15:17.")
                     self._reset_position()
                     self.diff_history.clear()
+                    self._wait_out_session_end()
                     break
 
                 # Get spot
