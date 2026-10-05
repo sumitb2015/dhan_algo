@@ -109,7 +109,7 @@ The advanced script introduces selectable adjustment logic modes to optimize mar
     *   The flat leg **re-enters** (fresh sell at the initial lot size) once its LTP drops back to `<=` its original entry premium.
 *   **Constraint**: Requires `--entry-type straddle` — the strategy errors out at startup if used with `--entry-type strangle`.
 *   **`--max-lots` has no effect** in this mode (always re-enters at the initial lot size; no lot scaling), and the strategy errors if a non-default value is passed.
-*   Global `--target-profit` / `--stop-loss` and the trailing SL (`--trail-start-pct` / `--trail-gap-pts`) still apply on top, computed from combined CE+PE LTP regardless of each leg's active/flat state. The straddle-shift cycle-reset (§2 Phase 5) also still applies.
+*   Global `--target-profit` / `--stop-loss` and the rupee-MTM trailing SL (`--trail-start-rs` / `--trail-gap-rs`) still apply on top, computed from total cycle P&L (realized + open) regardless of each leg's active/flat state. The straddle-shift cycle-reset (§2 Phase 5) also still applies.
 *   **Benefit**: Turns a directional move against one leg into an independent, repeatable per-leg SL/re-entry cycle instead of averaging down or rolling strikes — useful for choppy/range-bound days where a leg may get stopped and re-triggered multiple times.
 
 ---
@@ -126,12 +126,12 @@ The advanced script introduces selectable adjustment logic modes to optimize mar
 | **`--threshold-lot PCT`** | `25.0` | *(winner_roll_atm only, applies while below `--max-lots`)* Base premium imbalance % — added to the post-entry/post-roll `entry_diff_pct` baseline — that triggers a winner-roll adjustment. |
 | **`--threshold-strike PCT`** | `40.0` | *(applies once `--max-lots` is reached)* Premium imbalance % that triggers a strike shift. Must be > `--threshold-lot`. |
 | **`--scalp-floor-pct PCT`** | `0.0` | Combined premium decay % that triggers an immediate Scalp Lock profit exit (e.g. `30.0` = 30% decay captured). Default `0.0` (disabled). |
-| **`--multi-cycle`** | *Flag* | Auto-restarts a fresh ATM cycle after a Scalp Lock or profit target exit (enabling continuous intraday scalping). |
+| **`--multi-cycle`** | *Flag* | Auto-restarts a fresh cycle after a Scalp Lock exit (without it, a Scalp Lock ends the day). Reaching the day profit target always ends the day. |
 | **`--cycle-cooldown SEC`** | `300` | Cooldown period in seconds between scalp cycles before placing the next entry. |
 | **`--loser-ratio-lots N`** | `1` | Number of lots to increment during a loser ratio roll adjustment. |
 | **`--leg-sl-pct PCT`** | `0.20` | *(reentry_straddle only)* Per-leg SL as a fraction of entry premium (e.g. `0.20` = SL at 120% of entry price). |
-| **`--trail-start-pct PCT`** | `5.0` | Arms the trailing stop-loss once profit reaches this % of the entry combined premium. |
-| **`--trail-gap-pts PTS`** | `15.0` | Once armed, exits if the combined premium rises this many points above its best (lowest) level since arming. |
+| **`--trail-start-rs INR`** | `500` | Arms the trailing stop once cycle MTM profit (realized + open, continuous across rolls) reaches this many rupees. |
+| **`--trail-gap-rs INR`** | `300` | Once armed, exits if MTM gives back this many rupees from its best level. |
 | **`--entry-type TYPE`** | `straddle` | Entry position type (`straddle`, `strangle`). |
 | **`--delta`** | *Flag* | Use delta-based strike selection for strangle. |
 | **`--target-delta D`** | `0.20` | Target absolute delta in delta strangle mode. |
@@ -139,8 +139,8 @@ The advanced script introduces selectable adjustment logic modes to optimize mar
 | **`--target-premium PREM`** | `50.0` | Target premium in premium strangle mode. |
 | **`--ce-offset PTS`** | `200` | Points above spot for CE strike in distance strangle. |
 | **`--pe-offset PTS`** | `200` | Points below spot for PE strike in distance strangle. |
-| **`--target-profit AMT`** | `4000.0` | Global daily profit target in ₹. |
-| **`--stop-loss AMT`** | `4000.0` | Global daily stop loss in ₹. |
+| **`--target-profit AMT`** | `25%` | Global daily profit target — ₹ amount, or `%` of the entry premium collected (re-resolved each cycle). |
+| **`--stop-loss AMT`** | `25%` | Global daily stop loss — ₹ amount, or `%` of the entry premium collected. |
 | **`--start-time TIME`** | `09:20` | Market start monitoring time (HH:MM IST). |
 
 ### B. Nifty Value-Imbalance Straddle Strategy (`nifty_value_imbalance_straddle.py`)

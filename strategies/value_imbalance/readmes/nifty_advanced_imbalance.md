@@ -8,7 +8,7 @@ margin efficiency against tail-risk hedging. Intraday only — no overnight carr
 
 ## Entry
 
-- Waits for CE and PE premiums to balance within a threshold before selling (mode-dependent; the underlying framework uses **15%** for straddle / **25%** for strangle balance checks).
+- Waits for CE and PE premiums to balance within a threshold before selling (CE/PE premium gap must be under **10%** for a straddle / **25%** for a strangle).
 - **Straddle** (`--entry-type straddle`, default): sells ATM CE + ATM PE, **1** lot each (`--lots`).
 - **Strangle** (`--entry-type strangle`): sells OTM CE/PE chosen by distance (`--ce-offset`/`--pe-offset`, default **200** pts each), delta (`--target-delta`, default **0.20**), or premium (`--target-premium`, default **50.0**).
 - Monitoring starts at `--start-time` (default **09:20** IST).
@@ -21,15 +21,16 @@ margin efficiency against tail-risk hedging. Intraday only — no overnight carr
 - **`reentry_straddle`** (straddle only): each leg gets its own SL at `--leg-sl-pct` (**20%**) above entry; a stopped leg re-enters once its price drops back to the original entry premium. `--max-lots` has no effect in this mode.
 - **Inversion guard**: `CE strike > PE strike` is enforced at entry and after every roll (all modes except `reentry_straddle`'s independent legs) — a violation forces an emergency exit, 5-minute pause, and fresh cycle.
 - **Cycle reset**: straddle ATM shift ≥100 pts from entry, or strangle spot breach of either strike, exits everything, pauses 5 minutes, and restarts.
+- Any other cycle exit (trail, deadlock, a leg already at `--max-lots`, a failed roll order) also pauses 5 minutes before a fresh cycle. Every cycle's P&L is banked into the day total, which resets when the calendar date rolls.
 - Hard intraday square-off at **15:17 IST**.
 
 ## Target
 
-- Global daily profit target `--target-profit`, default **₹4,000**.
-- Optional **Scalp Lock**: `--scalp-floor-pct` (default **0.0**, disabled) exits immediately once combined premium decays this % from entry; `--multi-cycle` auto-restarts a fresh cycle after a Scalp Lock/target exit, with `--cycle-cooldown` (default **300s**) between cycles.
+- Global daily profit target `--target-profit`, default **25%** of the entry premium collected (or a ₹ amount). Reaching it ends the day.
+- Optional **Scalp Lock**: `--scalp-floor-pct` (default **0.0**, disabled) exits immediately once cycle profit reaches this % of the entry premium value; without `--multi-cycle` that ends the day, with it a fresh cycle starts after `--cycle-cooldown` (default **300s**).
 
 ## Stop Loss
 
-- Global daily stop loss `--stop-loss`, default **₹4,000**.
-- Trailing SL on combined premium: arms once profit reaches `--trail-start-pct` (**5.0%**) of entry premium, then exits if combined premium rises `--trail-gap-pts` (**15.0** pts) above its best (lowest) level since arming.
+- Global daily stop loss `--stop-loss`, default **25%** of the entry premium collected (or a ₹ amount). Reaching it ends the day.
+- Trailing SL on rupee MTM (realized + open, so it survives rolls): arms once cycle profit reaches `--trail-start-rs` (**₹500**), then exits if MTM gives back `--trail-gap-rs` (**₹300**) from its best.
 - `reentry_straddle` mode additionally stops each leg independently at `--leg-sl-pct` (**20%**) above its own entry price.

@@ -201,54 +201,48 @@ class TestPremiumStrikeSelection(unittest.TestCase):
 
         strat.helper.buy.assert_called_once_with("12345", 65)
 
+    def _advanced_with_fake_broker(self, nets, lot_size=75):
+        """NiftyAdvancedImbalance live-mode with a fake ExecutionBroker whose owned net
+        quantity per (strike, opt_type) comes from `nets` (default flat)."""
+        strat = NiftyAdvancedImbalance(entry_type="strangle")
+        strat.dry_run = False
+        strat.nifty_lot_size = lot_size
+        strat.ce_id, strat.pe_id = 111, 222
+        strat.ce_strike, strat.pe_strike = 24100, 23900
+        strat.expiry = "2026-10-06"
+        strat.ce_lots = strat.pe_lots = 1
+        strat.broker = MagicMock()
+        strat.broker.get_owned_net_qty.side_effect = lambda strike, expiry, opt: nets.get((strike, opt), 0)
+        return strat
+
     def test_advanced_exit_all_positions_with_sync(self):
-        # Advanced strategy exit_all_positions with wings
-        strat = NiftyAdvancedImbalance(
-            entry_type="strangle"
-        )
-        strat.ce_id = 111
-        strat.pe_id = 222
+        strat = self._advanced_with_fake_broker({
+            (24100, "CE"): -75, (23900, "PE"): -75,   # shorts open
+            (24200, "CE"): 75,                         # CE wing open
+            # PE wing (23800) already flat
+        })
         strat.ce_wings = [{'id': 333, 'strike': 24200, 'lots': 1}]
         strat.pe_wings = [{'id': 444, 'strike': 23800, 'lots': 1}]
-        strat.dry_run = False
-        strat.nifty_lot_size = 75
-        strat.ce_lots = 1
-        strat.pe_lots = 1
-
-        # Scenario: Shorts are open (-75), Wing 333 is open (+75), Wing 444 is already flat (0)
-        strat.helper.get_net_quantity.side_effect = lambda sid: -75 if sid in ["111", "222"] else (75 if sid == "333" else 0)
-        strat.helper.buy.reset_mock()
-        strat.helper.sell.reset_mock()
 
         strat.exit_all_positions("Advanced exit check")
 
-        # Shorts should be bought back
-        strat.helper.buy.assert_any_call("111", 75)
-        strat.helper.buy.assert_any_call("222", 75)
-        self.assertEqual(strat.helper.buy.call_count, 2)
-
-        # Wing 333 (long) should be sold back
-        strat.helper.sell.assert_called_once_with("333", 75)
+        strat.broker.buy.assert_any_call(24100, "2026-10-06", "CE", 75)
+        strat.broker.buy.assert_any_call(23900, "2026-10-06", "PE", 75)
+        self.assertEqual(strat.broker.buy.call_count, 2)
+        strat.broker.sell.assert_called_once_with(24200, "2026-10-06", "CE", 75)
 
     def test_advanced_wing_exit_uses_own_lots(self):
         """Wings were the worst case — they sold the entire account long quantity."""
-        strat = NiftyAdvancedImbalance(entry_type="strangle")
-        strat.ce_id = 111
-        strat.pe_id = 222
+        strat = self._advanced_with_fake_broker({
+            (24100, "CE"): -65, (23900, "PE"): -65,
+            (24200, "CE"): 260,   # account long 260 (other strategies hold it too)
+        }, lot_size=65)
         strat.ce_wings = [{'id': 333, 'strike': 24200, 'lots': 1}]
         strat.pe_wings = []
-        strat.dry_run = False
-        strat.nifty_lot_size = 65
-        strat.ce_lots = 1
-        strat.pe_lots = 1
-
-        # Account is long 260 of the wing strike (other strategies hold it too).
-        strat.helper.get_net_quantity.side_effect = lambda sid: 260 if sid == "333" else -65
-        strat.helper.sell.reset_mock()
 
         strat.exit_all_positions("Wing exit check")
 
-        strat.helper.sell.assert_called_once_with("333", 65)
+        strat.broker.sell.assert_called_once_with(24200, "2026-10-06", "CE", 65)
 
     @patch('strategies.Archives.nifty_short_straddle.get_dhan_client')
     @patch('strategies.Archives.nifty_short_straddle.DhanHelper')
