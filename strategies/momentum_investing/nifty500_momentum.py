@@ -32,7 +32,6 @@ Usage (dry run by default — no real orders without --live):
 
 import argparse
 import json
-import logging
 import os
 import sys
 import time
@@ -48,6 +47,7 @@ from lib.nse_holidays import is_nse_trading_day                          # noqa:
 from lib.strategy_state_helper import (                                  # noqa: E402
     save_strategy_state, check_shutdown_trigger, instance_log_suffix,
 )
+from lib.algo_kit import setup_strategy_logging  # noqa: E402
 from lib.momentum import (                                               # noqa: E402
     MomentumConfig, Position,
     build_regime_weekly, build_rs_matrix, build_tables,
@@ -57,35 +57,7 @@ from lib.momentum import (                                               # noqa:
 )
 
 # ── logging ───────────────────────────────────────────────────────────────────
-LOG_DIR = os.path.join(PROJECT_ROOT, "debug", "logs", "momentum_investing")
-os.makedirs(LOG_DIR, exist_ok=True)
-
-
-class FlushingFileHandler(logging.FileHandler):
-    """Flush on every record so the dashboard's log tail is live, not buffered."""
-
-    def emit(self, record):
-        super().emit(record)
-        self.flush()
-
-
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - %(levelname)s - %(message)s",
-    handlers=[
-        logging.StreamHandler(),
-        # encoding: FileHandler otherwise opens with the system ANSI codepage
-        # (cp1252 on Windows) and silently DROPS any log line containing a
-        # non-ANSI glyph (INR sign, arrows, dashes) while still writing the
-        # ASCII lines around it -- the log looks intact but loses those lines.
-        FlushingFileHandler(
-            os.path.join(LOG_DIR, f"{datetime.now().strftime('%Y%m%d')}{instance_log_suffix()}.log"),
-            encoding="utf-8",
-        ),
-    ],
-    force=True,
-)
-logger = logging.getLogger(__name__)
+logger = setup_strategy_logging(PROJECT_ROOT, "momentum_investing", instance_log_suffix(), name=__name__, force=True)
 
 DEBUG_DIR = os.path.join(PROJECT_ROOT, "debug")
 PORTFOLIO_VERSION = 1

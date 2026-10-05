@@ -47,7 +47,6 @@ Stop from the dashboard, or by writing debug/nifty50_vwap_rs_shutdown.trigger.
 
 import argparse
 import json
-import logging
 import os
 import sys
 import threading
@@ -62,6 +61,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspa
 from login import get_dhan_client                                    # noqa: E402
 from lib.dhan_helper import DhanHelper                               # noqa: E402
 from lib.strategy_risk import resolve_exit_qty, detect_phantom_leg, PHANTOM_CHECK_INTERVAL_SEC  # noqa: E402
+from lib.algo_kit import load_today_state, setup_strategy_logging  # noqa: E402
 from lib.strategy_state_helper import (                              # noqa: E402
     save_strategy_state, check_shutdown_trigger, instance_log_suffix, flush_state,
 )
@@ -80,31 +80,10 @@ NIFTY_INDEX_SID = "13"  # Nifty 50 index (spot). NOT 26000, which is the options
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 DEBUG_DIR = os.path.join(PROJECT_ROOT, "debug")
-LOG_DIR = os.path.join(DEBUG_DIR, "logs", "intraday_equity")
 BARS_DIR = os.path.join(DEBUG_DIR, "intraday_bars")
-os.makedirs(LOG_DIR, exist_ok=True)
 
 
-class FlushingFileHandler(logging.FileHandler):
-    def emit(self, record):
-        super().emit(record)
-        self.flush()
-
-
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - %(levelname)s - %(message)s",
-    handlers=[
-        logging.StreamHandler(),
-        # encoding: FileHandler otherwise opens with the system ANSI codepage and
-        # silently DROPS any line containing a non-ANSI glyph.
-        FlushingFileHandler(
-            os.path.join(LOG_DIR, f"{datetime.now().strftime('%Y%m%d')}{instance_log_suffix()}.log"),
-            encoding="utf-8"),
-    ],
-    force=True,
-)
-logger = logging.getLogger(__name__)
+logger = setup_strategy_logging(PROJECT_ROOT, "intraday_equity", instance_log_suffix(), name=__name__, force=True)
 
 
 def _now_hhmm() -> str:
@@ -255,14 +234,10 @@ class IntradayEquityStrategy:
     def _restore_daily_pnl(self):
         """Carry today's realized P&L across a restart, so a mid-day restart does
         not reset the daily stop and allow a second full loss."""
-        path = os.path.join(DEBUG_DIR, f"{self.state_key}_state.json")
-        if not os.path.exists(path):
+        data = load_today_state(os.path.join(DEBUG_DIR, f"{self.state_key}_state.json"), log=logger)
+        if not data:                        # no file, a stale (not-today) file, or unreadable
             return
         try:
-            if datetime.fromtimestamp(os.path.getmtime(path)).date() != datetime.now().date():
-                return
-            with open(path) as f:
-                data = json.load(f)
             self.realized_pnl = float(data.get("pnl", {}).get("realized", 0.0) or 0.0)
             self.trades_today = int(data.get("risk", {}).get("trades_today", 0) or 0)
             if self.realized_pnl or self.trades_today:
