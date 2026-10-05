@@ -38,12 +38,11 @@ from lib.strategy_state_helper import (  # noqa: E402
     check_shutdown_trigger, exit_if_market_closed, flush_state,
     instance_log_suffix, parse_target_spec, save_strategy_state,
 )
-from lib.strategy_risk import resolve_exit_qty_broker  # noqa: E402
 from lib.execution_broker import ExecutionBroker, ExecutionBrokerError  # noqa: E402
 from lib.telegram_alert import notify  # noqa: E402
 # Plumbing comes from lib/algo_kit (docs/ALGO_KIT.md): import only the parts the strategy needs.
 from lib.algo_kit import (  # noqa: E402
-    PositionStore, cli, confirmed_fill_price, in_window, setup_strategy_logging, update_trail,
+    LegExecutor, PositionStore, cli, in_window, leg_pnl, setup_strategy_logging, update_trail,
 )
 
 STRATEGY_KEY_DEFAULT = "nifty_my_strategy"     # TODO(strategy): must match strategyRegistry.ts
@@ -107,6 +106,10 @@ class Strategy:
         self.helper.start_websocket([("IDX_I", INDEX_ID, 15)])
         time.sleep(2)
         self.lot_size = self.helper.get_lot_size(UNDERLYING)
+        # Entry, rollback and close come from the kit: every order checked, every fill confirmed, a leg
+        # only cleared once its close is confirmed (docs/ALGO_KIT.md, LegExecutor).
+        self.exec = LegExecutor(self.broker, self.helper, broker, PRODUCT, dry_run=dry_run,
+                                ltp_fn=self._ltp, log=logger)
 
         self._reset_position_state()
         self.load_position()
@@ -163,7 +166,12 @@ class Strategy:
                     self.helper.subscribe_instruments([("NSE_FNO", str(leg["id"]), 15)])
                 except Exception as e:
                     logger.error(f"Resubscribe failed for {leg['id']}: {e}")
-        self._reconcile_against_broker()
+        if self.status in ("UNWINDING", "FLATTENING"):
+            # Mid-entry/mid-exit crash: a tracked leg may not exist at the broker at all. The close path sizes
+            # every exit off broker truth (and calls a missing leg flat), so reconciling here would only block it.
+            logger.warning(f"Resuming {self.status}: will flatten the tracked legs against broker truth.")
+        else:
+            self._reconcile_against_broker()
 
     def _reconcile_against_broker(self):
         """Diagnostic only; never used to size an exit. Refuses to start on a mismatch."""
@@ -185,7 +193,7 @@ class Strategy:
             logger.error("Position does not match the broker. Fix it manually, then restart. Refusing to start.")
             sys.exit(1)
 
-    # ── quotes, fills ───────────────────────────────────────────────────────────────────────────
+    # ── quotes ──────────────────────────────────────────────────────────────────────────────────
 
     def _get_quote(self, strike, opt_type):
         """(security_id, last_price) or (None, 0.0). A zero or missing quote means skip the tick."""
@@ -195,44 +203,8 @@ class Strategy:
         price = float(q.get("last_price", 0.0) or q.get("LTP", 0.0))
         return (int(q["CONTRACT_INFO"]["SECURITY_ID"]), price) if price > 0 else (None, 0.0)
 
-    def _fill_price(self, order_id, fallback):
-        """wait_for_fill() returns a bool, not a price; the kit reads the price off the order.
-        Dhan order ids only: for Zerodha/Kotak confirm by that broker's net position instead."""
-        return confirmed_fill_price(self.helper, order_id, fallback, log=logger)
-
     def _ltp(self, leg):
         return self.helper.get_ltp(str(leg["id"]), exchange="NSE_FNO", instrument="OPTIDX")
-
-    # ── orders (every call checked, every fill confirmed) ───────────────────────────────────────
-
-    def _sell_leg(self, strike, opt_type, qty, quote_price):
-        """Return the fill price, or None if the order failed (caller must undo)."""
-        if self.dry_run:
-            return quote_price
-        oid = self.broker.sell(strike, self.expiry, opt_type, qty, product=PRODUCT)
-        return self._fill_price(oid, quote_price) if oid else None
-
-    def _buy_to_close(self, opt_type, leg):
-        """Returns (closed: bool, exit_price). A leg is only closed if the broker confirms it."""
-        ltp = self._ltp(leg)
-        if self.dry_run:
-            return True, ltp
-        try:
-            qty, net = resolve_exit_qty_broker(self.broker, leg["strike"], self.expiry, opt_type,
-                                               leg["qty"], "BUY", logger)
-            if qty <= 0:
-                return True, ltp                     # broker already flat: nothing to close
-            oid = self.broker.buy(leg["strike"], self.expiry, opt_type, qty, product=PRODUCT)
-            if not oid:
-                logger.critical(f"{opt_type} {leg['strike']} close order FAILED; leg stays tracked.")
-                return False, ltp
-            if not self.helper.wait_for_fill(oid, timeout=5):
-                logger.critical(f"{opt_type} {leg['strike']} close NOT confirmed; leg stays tracked.")
-                return False, ltp
-            return True, self._fill_price(oid, ltp)
-        except Exception as e:
-            logger.error(f"Close {opt_type} {leg['strike']} error: {e}")
-            return False, ltp
 
     def enter_position(self, spot):
         """All-or-nothing. Resolve everything first, commit to self only once the legs are real."""
@@ -251,28 +223,33 @@ class Strategy:
             return
 
         qty = self.lots * self.lot_size
-        ce_fill = self._sell_leg(ce_strike, "CE", qty, ce_px)
-        if ce_fill is None:
-            logger.error("CE sell failed; nothing placed. Staying flat.")
-            return
-        pe_fill = self._sell_leg(pe_strike, "PE", qty, pe_px)
-        if pe_fill is None:
-            logger.critical("PE sell failed; rolling back the CE leg.")
-            leg = {"id": ce_id, "strike": ce_strike, "avg_price": ce_fill, "qty": qty}
-            closed, _ = self._buy_to_close("CE", leg)
-            if not closed:                           # naked short is live: track it and retry
-                self.legs["CE"] = {**leg, "sl": leg_sl_level(ce_fill, self.leg_sl_pct)}
+        specs = [   # buy protective legs first when there are any; this example is two short legs
+            {"name": "CE", "side": "SELL", "opt_type": "CE", "strike": ce_strike, "expiry": self.expiry,
+             "qty": qty, "avg_price": ce_px, "id": ce_id},
+            {"name": "PE", "side": "SELL", "opt_type": "PE", "strike": pe_strike, "expiry": self.expiry,
+             "qty": qty, "avg_price": pe_px, "id": pe_id},
+        ]
+        res = self.exec.open_all(specs, checkpoint=self._checkpoint_entry)
+        if not res.ok:
+            for _name, leg, px, closed_qty in res.unwound:       # book what the rollback had to close
+                self.realized_pnl += leg_pnl(leg["side"], leg["avg_price"], px, closed_qty)
+            self.legs = {"CE": res.stuck.get("CE"), "PE": res.stuck.get("PE")}
+            if res.stuck:                                        # a leg could not be closed: it is LIVE
                 self.position_open, self.status = True, "UNWINDING"
-                self.save_position()
+                logger.critical(f"Entry failed at {res.failed} and {sorted(res.stuck)} could not be closed; "
+                                "tracked as UNWINDING and retried by exit_all.")
+            else:
+                self.position_open, self.status = False, "WAITING"
+                logger.error(f"Entry failed at {res.failed}; everything placed was closed. Staying flat.")
+            self.save_position()
             return
 
         # Commit in one block, and mark open as soon as any short leg exists.
-        self.legs["CE"] = {"id": ce_id, "strike": ce_strike, "avg_price": ce_fill, "qty": qty,
-                           "sl": leg_sl_level(ce_fill, self.leg_sl_pct)}
-        self.legs["PE"] = {"id": pe_id, "strike": pe_strike, "avg_price": pe_fill, "qty": qty,
-                           "sl": leg_sl_level(pe_fill, self.leg_sl_pct)}
+        ce, pe = res.opened["CE"], res.opened["PE"]
+        ce["sl"], pe["sl"] = leg_sl_level(ce["avg_price"], self.leg_sl_pct), leg_sl_level(pe["avg_price"], self.leg_sl_pct)
+        self.legs = {"CE": ce, "PE": pe}
         self.position_open, self.status = True, "RUNNING"
-        entry_value = (ce_fill + pe_fill) * qty
+        entry_value = (ce["avg_price"] + pe["avg_price"]) * qty
         if self.target_is_pct and self.target_rs is None:          # resolve % once, on the first entry
             self.target_rs = entry_value * self.target_val / 100.0
         if self.stop_is_pct and self.stop_rs is None:
@@ -280,28 +257,31 @@ class Strategy:
         for leg in self.legs.values():
             self.helper.subscribe_instruments([("NSE_FNO", str(leg["id"]), 15)])
         self.save_position()
-        logger.info(f"ENTERED CE {ce_strike}@{ce_fill:.2f} PE {pe_strike}@{pe_fill:.2f} qty={qty}")
+        logger.info(f"ENTERED CE {ce_strike}@{ce['avg_price']:.2f} PE {pe_strike}@{pe['avg_price']:.2f} qty={qty}")
         notify(f"[{self.state_key}] Entered CE {ce_strike} / PE {pe_strike} x{qty}")
+
+    def _checkpoint_entry(self, tracked):
+        """Called by LegExecutor BEFORE each order: a crash mid-entry then leaves a tracked UNWINDING book that
+        a restart flattens, never live legs with no record."""
+        self.legs = {"CE": tracked.get("CE"), "PE": tracked.get("PE")}
+        self.position_open, self.status = True, "UNWINDING"
+        self.save_position()
 
     def exit_all(self, reason) -> bool:
         """True only if every leg is confirmed closed. A leg is cleared only after its close is
         confirmed; on False the caller keeps a retry status and calls this again next tick."""
         logger.warning(f"!!! EXITING: {reason} !!!")
-        all_closed = True
-        for opt_type in ("CE", "PE"):
-            leg = self.legs[opt_type]
-            if not leg:
-                continue
-            closed, exit_px = self._buy_to_close(opt_type, leg)
-            if closed:
-                self.realized_pnl += (leg["avg_price"] - exit_px) * leg["qty"]    # book once, at fill
-                try:
-                    self.helper.unsubscribe_instruments([("NSE_FNO", str(leg["id"]), 15)])
-                except Exception:
-                    pass
-                self.legs[opt_type] = None
-            else:
-                all_closed = False
+
+        def book(name, leg, exit_px, closed_qty):                # runs right after each CONFIRMED close
+            self.realized_pnl += leg_pnl(leg["side"], leg["avg_price"], exit_px, closed_qty)   # book once, at fill
+            try:
+                self.helper.unsubscribe_instruments([("NSE_FNO", str(leg["id"]), 15)])
+            except Exception:
+                pass
+            self.legs[name] = None
+            self.save_position()
+
+        all_closed = self.exec.close_all({n: l for n, l in self.legs.items() if l}, on_closed=book).all_closed
         if all_closed:
             self.position_open, self.status = False, "WAITING"
             self.trail_active, self.best_pnl = False, 0.0

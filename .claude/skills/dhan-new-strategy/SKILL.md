@@ -22,8 +22,8 @@ read. This skill is the standard kit that closes those holes, and the workflow f
 3. **Put decision logic in pure functions** (signal, strike choice, stop levels) that take plain values
    and return plain values, so they can be unit-tested without a broker. Keep I/O in the class.
 4. **Copy `assets/strategy_skeleton.py`**, fill in the `TODO(strategy)` hooks, and keep its plumbing intact.
-   The skeleton already composes `lib/algo_kit/` (`docs/ALGO_KIT.md`: `PositionStore`, `confirmed_fill_price`,
-   `update_trail`, `in_window`, CLI flag groups, logging setup). Extend it with more kit parts
+   The skeleton already composes `lib/algo_kit/` (`docs/ALGO_KIT.md`: `LegExecutor` for entry/rollback/close,
+   `PositionStore`, `update_trail`, `in_window`, CLI flag groups, logging setup). Extend it with more kit parts
    (`TrailingStop`, `TargetSpec`, `interruptible_sleep`, quote helpers) rather than pasting a fresh private
    copy of `save_position`/`load_position`/`_fill_price` into the new file.
 5. **Wire the dashboard** (`references/dashboard-wiring.md`): several registries, all must agree.

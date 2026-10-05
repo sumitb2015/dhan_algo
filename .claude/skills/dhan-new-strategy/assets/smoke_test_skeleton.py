@@ -167,5 +167,38 @@ check("expired LIVE position refuses to start", refused)
 write_pos(True, "2020-01-01")
 check("expired PAPER position is discarded, starts flat", not new(True).position_open)
 clean()
+
+# 9 a crash BETWEEN legs leaves a tracked, restartable book (LegExecutor checkpoints before each order)
+class Crash(BaseException): pass
+H.__init__(); s = new(False)
+real_sell = H.sell
+def sell_then_crash(sid, qty, price=None, product="INTRADAY"):
+    if str(sid) == str(pe_id): raise Crash()           # process dies right before the PE order
+    return real_sell(sid, qty, price, product)
+H.sell = sell_then_crash
+try: s.enter_position(25000.0); crashed = False
+except Crash: crashed = True
+H.sell = real_sell
+check("a crash before the PE order propagates (simulated process death)", crashed)
+s3 = new(False)
+check("restart finds the CE short tracked as UNWINDING (no live leg without a record)",
+      s3.status == "UNWINDING" and s3.position_open and s3.legs["CE"] is not None)
+check("restart flattens it: CE bought back, the never-placed PE read flat, nothing re-sold",
+      s3.exit_all("restart") and not s3.position_open and [o[0] for o in H.orders] == ["SELL", "BUY"])
+clean()
+
+# 10 the realised P&L of a rollback is booked (the old skeleton dropped it)
+H.__init__(); s = new(False)
+real_sell = H.sell
+def sell_pe_fails_after_ce_moves(sid, qty, price=None, product="INTRADAY"):
+    if str(sid) == str(pe_id):
+        H.prices[str(ce_id)] = 130.0                   # the CE premium jumps while the PE order fails
+        return None
+    return real_sell(sid, qty, price, product)
+H.sell = sell_pe_fails_after_ce_moves
+s.enter_position(25000.0)
+H.sell = real_sell
+check("rollback booked: CE sold at 100, bought back at 130 -> -2250", abs(s.realized_pnl - (-2250.0)) < 1e-6)
+clean()
 print(f"\n{ok} passed, {fail} failed")
 sys.exit(1 if fail else 0)
