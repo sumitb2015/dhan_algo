@@ -154,6 +154,11 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# Kept equal to RISK_FREE_RATE in rs_dashboard/lib/optionsPricing.ts and MIN_DTE_DAYS in lib/diagonalStrikeAdvisor.ts
+# (rs_dashboard/lib/diagonalStrikeAdvisor.test.ts fails if they drift): the dashboard advisor and this strategy must size off the same Greeks.
+RISK_FREE_RATE = 0.065
+MIN_DTE_DAYS = 0.25
+
 
 # ── PURE CALCULATION & GREEK FUNCTIONS (Unit Testable) ─────────────────────────
 
@@ -162,7 +167,7 @@ def compute_bs_greeks(
     strike: float,
     dte_days: float,
     iv: float = 0.15,
-    r: float = 0.07,
+    r: float = RISK_FREE_RATE,
     opt_type: str = "CE",
 ) -> Dict[str, float]:
     """Standard Black-Scholes Greeks calculator using math.erf (zero external dependencies).
@@ -176,7 +181,7 @@ def compute_bs_greeks(
     if spot <= 0 or strike <= 0:
         return {"delta": 0.0, "gamma": 0.0, "theta_day": 0.0, "vega": 0.0}
 
-    t = max(dte_days, 0.25) / 365.0
+    t = max(dte_days, MIN_DTE_DAYS) / 365.0
     vol = max(iv, 0.05)
     sqrt_t = math.sqrt(t)
 
@@ -222,7 +227,7 @@ def calculate_portfolio_greeks(
     short_leg: Optional[Dict],
     spot: float,
     lot_size: int,
-    r: float = 0.07,
+    r: float = RISK_FREE_RATE,
 ) -> Dict[str, float]:
     """Aggregates portfolio Greeks across active long and short option legs.
 
@@ -972,7 +977,7 @@ class NiftyDiagonalCallStrategy:
         ranked = []
         for _, row in matches.iterrows():
             k = float(row["STRIKE_PRICE"])
-            greeks = compute_bs_greeks(spot, k, dte, iv=iv, r=0.07, opt_type="CE")
+            greeks = compute_bs_greeks(spot, k, dte, iv=iv, r=RISK_FREE_RATE, opt_type="CE")
             ranked.append((abs(greeks["delta"] - self.long_target_delta), int(k), str(row["SECURITY_ID"]), greeks["delta"]))
         ranked.sort(key=lambda t: t[0])
         if not ranked:
@@ -1088,7 +1093,7 @@ class NiftyDiagonalCallStrategy:
             quotes = self._ce_quotes(expiry)
             for _, row in matches.iterrows():
                 k = float(row["STRIKE_PRICE"])
-                g = compute_bs_greeks(spot, k, dte, iv=iv, r=0.07, opt_type="CE")
+                g = compute_bs_greeks(spot, k, dte, iv=iv, r=RISK_FREE_RATE, opt_type="CE")
                 if min_target_delta <= g["delta"] <= max_target_delta:
                     if not self._is_liquid(quotes.get(int(k))):
                         illiquid += 1
@@ -1785,7 +1790,7 @@ class NiftyDiagonalCallStrategy:
                     dte = self._compute_dte(self.long_leg["expiry"])
                     self.long_leg["dte"] = dte
                     self.long_leg["iv"] = curr_iv
-                    g = compute_bs_greeks(spot, float(self.long_leg["strike"]), dte, iv=curr_iv, r=0.07, opt_type="CE")
+                    g = compute_bs_greeks(spot, float(self.long_leg["strike"]), dte, iv=curr_iv, r=RISK_FREE_RATE, opt_type="CE")
                     self.long_leg["delta"] = round(g["delta"], 2)
 
                 if self.short_leg:
@@ -1796,7 +1801,7 @@ class NiftyDiagonalCallStrategy:
                     dte = self._compute_dte(self.short_leg["expiry"])
                     self.short_leg["dte"] = dte
                     self.short_leg["iv"] = curr_iv
-                    g = compute_bs_greeks(spot, float(self.short_leg["strike"]), dte, iv=curr_iv, r=0.07, opt_type="CE")
+                    g = compute_bs_greeks(spot, float(self.short_leg["strike"]), dte, iv=curr_iv, r=RISK_FREE_RATE, opt_type="CE")
                     self.short_leg["delta"] = round(g["delta"], 2)
 
                 # 6. Phantom Leg Detection (Incident 2026-07-30 prevention)

@@ -28,13 +28,13 @@ import {
   type OptionLegModel,
   type Side,
   type OptType,
-  computeBsGreeksExact,
   computePortfolioMetrics,
   formatShortExpiry,
   calculateTimeToExpiryYears,
   UNDERLYINGS as UNDERLYING_CONFIGS,
   computeMultiExpiryStats,
 } from '@/lib/optionsMonitorMath';
+import { greeksForLeg, futureQuote } from '@/lib/optionsPricing';
 import StrategyCardGrid from './basket/StrategyCardGrid';
 import LegsTable from './basket/LegsTable';
 import SavedBasketsPanel from './basket/SavedBasketsPanel';
@@ -692,7 +692,6 @@ export default function Baskets() {
 
   const monitorLegs = useMemo<OptionLegModel[]>(() => {
     const activeLotSize = effectiveLotSize;
-    const tYears = calculateTimeToExpiryYears(expiry);
     const baseIv = atmIv > 0 ? atmIv / 100 : 0.1313;
     return legs.map((l) => {
       const prem = effectivePremium(l);
@@ -703,9 +702,13 @@ export default function Baskets() {
       const qty = l.lots * multiplier * activeLotSize;
       const chainEntry = chainOc[String(l.strike)] || chainOc[l.strike];
       const legIvRaw = isCall ? chainEntry?.ce?.implied_volatility : chainEntry?.pe?.implied_volatility;
-      const legIv = typeof legIvRaw === 'number' && legIvRaw > 0 ? legIvRaw / 100 : baseIv;
-      // Exact Greeks: these feed per-leg values that computePortfolioMetrics multiplies by lots and sums.
-      const g = computeBsGreeksExact(type, effectiveFuturePrice, l.strike, tYears, legIv, 0.065, true);
+      const legExpiry = l.expiry || expiry;
+      // Per-leg recipe from the central library: forward rolled to THIS leg's expiry, IV solved from its premium (chain IV, then ATM IV, as fallbacks).
+      const g = greeksForLeg(
+        { type, strike: l.strike, expiry: legExpiry, mark: prem, chainIv: typeof legIvRaw === 'number' && legIvRaw > 0 ? legIvRaw / 100 : null, fallbackIv: baseIv },
+        { spot, future: futureQuote(effectiveFuturePrice, futureExpiry) },
+      ) ?? { delta: 0, gamma: 0, theta: 0, vega: 0, iv: baseIv };
+      const legIv = g.iv;
       return {
         id: l.id,
         type,
@@ -723,20 +726,20 @@ export default function Baskets() {
         expiry: l.expiry || expiry,
       };
     });
-  }, [legs, effectiveLotSize, multiplier, effectivePremium, daysLeft, chainOc, atmIv, effectiveFuturePrice, expiry]);
+  }, [legs, effectiveLotSize, multiplier, effectivePremium, daysLeft, chainOc, atmIv, effectiveFuturePrice, futureExpiry, spot, expiry]);
 
   const payoff = useMemo(() => {
     if (!payoffLegs.length || payoffLegs.some(l => l.premium <= 0)) return null;
     if (hasMixedExpiry) {
       // Different expiries: no single intrinsic payoff exists, so measure on the front-expiry curve.
-      return monitorLegs.length && spot > 0 ? computeMultiExpiryStats(monitorLegs, spot, effectiveLotSize) : null;
+      return monitorLegs.length && spot > 0 ? computeMultiExpiryStats(monitorLegs, spot, effectiveLotSize, futureQuote(effectiveFuturePrice, futureExpiry)) : null;
     }
     const strikes = payoffLegs.map(l => l.strike);
     const center = spot > 0 ? spot : (Math.min(...strikes) + Math.max(...strikes)) / 2;
     const lo = Math.min(Math.min(...strikes) - 6 * step, center * 0.94);
     const hi = Math.max(Math.max(...strikes) + 6 * step, center * 1.06);
     return computePayoff(payoffLegs, lo, hi);
-  }, [payoffLegs, spot, step, hasMixedExpiry, monitorLegs, effectiveLotSize]);
+  }, [payoffLegs, spot, step, hasMixedExpiry, monitorLegs, effectiveLotSize, effectiveFuturePrice, futureExpiry]);
 
   const riskReward = useMemo(() => {
     if (!payoff || payoff.maxProfitUnlimited || payoff.maxLossUnlimited || payoff.maxLoss >= 0) return null;

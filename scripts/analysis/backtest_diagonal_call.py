@@ -58,12 +58,17 @@ def _norm_pdf(x: float) -> float:
     return (1.0 / math.sqrt(2.0 * math.pi)) * math.exp(-0.5 * x * x)
 
 
+# Same rate as the live strategy (strategies/diagonal_call/nifty_diagonal_call.py RISK_FREE_RATE) and the dashboard (lib/optionsPricing.ts):
+# a backtest must size off the Greeks the strategy actually trades on.
+RISK_FREE_RATE = 0.065
+
+
 def compute_bs_greeks(
     spot: float,
     strike: float,
     dte_days: float,
     iv: float = 0.14,
-    r: float = 0.07,
+    r: float = RISK_FREE_RATE,
     opt_type: str = "CE",
 ) -> Dict[str, float]:
     """Standard Black-Scholes Greeks calculator using math.erf."""
@@ -104,7 +109,7 @@ def compute_bs_price(
     strike: float,
     dte_days: float,
     iv: float = 0.14,
-    r: float = 0.07,
+    r: float = RISK_FREE_RATE,
     opt_type: str = "CE",
 ) -> float:
     """Computes theoretical Black-Scholes price."""
@@ -236,10 +241,10 @@ def run_diagonal_call_backtest(
 
     # Calculate initial long call price via Black-Scholes using prevailing IV (~13.5%)
     initial_iv = 0.135
-    initial_long_price = compute_bs_price(initial_spot, long_strike, long_dte_initial, iv=initial_iv, r=0.07, opt_type="CE")
+    initial_long_price = compute_bs_price(initial_spot, long_strike, long_dte_initial, iv=initial_iv, r=RISK_FREE_RATE, opt_type="CE")
     long_qty = long_lots * lot_size
     initial_long_debit = initial_long_price * long_qty
-    initial_long_greeks = compute_bs_greeks(initial_spot, long_strike, long_dte_initial, iv=initial_iv, r=0.07, opt_type="CE")
+    initial_long_greeks = compute_bs_greeks(initial_spot, long_strike, long_dte_initial, iv=initial_iv, r=RISK_FREE_RATE, opt_type="CE")
     initial_long_delta_shares = long_qty * initial_long_greeks["delta"]
 
     print(f"  [LONG LEG INITIAL ENTRY - {initial_dt_str}]")
@@ -339,7 +344,7 @@ def run_diagonal_call_backtest(
             for stk, (cls, spt, iv) in bars_by_dt[entry_dt_str].items():
                 if stk <= entry_spt:  # only OTM calls
                     continue
-                g = compute_bs_greeks(spt, stk, dte_weekly, iv=iv, r=0.07, opt_type="CE")
+                g = compute_bs_greeks(spt, stk, dte_weekly, iv=iv, r=RISK_FREE_RATE, opt_type="CE")
                 d = g["delta"]
                 score = score_short_call(g["theta_day"], g["gamma"])
                 diff = abs(d - target_d)
@@ -378,7 +383,7 @@ def run_diagonal_call_backtest(
 
             # Size short lots from Delta
             # Long delta approximation at this spot
-            cur_long_greeks = compute_bs_greeks(entry_spt, long_strike, 60.0, iv=0.14, r=0.07, opt_type="CE")
+            cur_long_greeks = compute_bs_greeks(entry_spt, long_strike, 60.0, iv=0.14, r=RISK_FREE_RATE, opt_type="CE")
             cur_long_delta_shares = long_qty * cur_long_greeks["delta"]
 
             short_lots = calculate_required_short_lots(
@@ -409,11 +414,11 @@ def run_diagonal_call_backtest(
                 # Check if short strike price is present
                 if short_strike in bars_by_dt[bar_dt_str]:
                     cur_cls, _, cur_iv = bars_by_dt[bar_dt_str][short_strike]
-                    cur_greeks = compute_bs_greeks(bar_spt, short_strike, dte_now, iv=cur_iv, r=0.07, opt_type="CE")
+                    cur_greeks = compute_bs_greeks(bar_spt, short_strike, dte_now, iv=cur_iv, r=RISK_FREE_RATE, opt_type="CE")
                     cur_delta = cur_greeks["delta"]
                 else:
-                    cur_cls = compute_bs_price(bar_spt, short_strike, dte_now, iv=0.14, r=0.07, opt_type="CE")
-                    cur_delta = compute_bs_greeks(bar_spt, short_strike, dte_now, iv=0.14, r=0.07, opt_type="CE")["delta"]
+                    cur_cls = compute_bs_price(bar_spt, short_strike, dte_now, iv=0.14, r=RISK_FREE_RATE, opt_type="CE")
+                    cur_delta = compute_bs_greeks(bar_spt, short_strike, dte_now, iv=0.14, r=RISK_FREE_RATE, opt_type="CE")["delta"]
 
                 # 1. Profit Target Check: captured >= 65% decay
                 decay_pct = ((short_entry_price - cur_cls) / short_entry_price) * 100.0

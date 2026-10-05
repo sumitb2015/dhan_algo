@@ -235,10 +235,12 @@ test('Sensibull & Options Monitor Parity: Baskets Short Strangle generates ident
     assert.strictEqual(ptBasket.pnlToday, ptOM.pnlToday, `T+0 Blue line PnL mismatch at spot ${ptOM.spot}`);
   }
 
-  // Exact projected PnL at spot: -260 (matches user screenshot)
+  // The expiry P&L at spot is pure intrinsic and convention-free. T+0 is NOT pinned to a number any more: it used to be -260 (a Sensibull
+  // screenshot), which only held with the monthly future as every leg's forward. Legs now price off the forward for their own expiry, so
+  // the invariant is that a strangle entered at its own mark shows a T+0 P&L near zero, not a vendor's figure.
   const spotPt = basketCurve.points.find(p => p.spot === Math.round(spot));
   assert.ok(spotPt);
-  assert.strictEqual(spotPt.pnlToday, -260);
+  assert.ok(Math.abs(spotPt.pnlToday) < 400, `T+0 at spot for a just-entered strangle should be near zero, got ${spotPt.pnlToday}`);
   assert.strictEqual(spotPt.pnlExpiry, 7595);
 });
 

@@ -27,7 +27,7 @@ class TestDiagonalCallCalculations(unittest.TestCase):
     def test_compute_bs_greeks(self):
         spot = 22400.0
         # ITM call (e.g. 22000 CE, 90 DTE)
-        g_long = compute_bs_greeks(spot, 22000.0, 90, iv=0.14, r=0.07, opt_type="CE")
+        g_long = compute_bs_greeks(spot, 22000.0, 90, iv=0.14, opt_type="CE")
         self.assertGreater(g_long["delta"], 0.55)
         self.assertLess(g_long["delta"], 0.85)
         self.assertGreater(g_long["gamma"], 0.0)
@@ -35,7 +35,7 @@ class TestDiagonalCallCalculations(unittest.TestCase):
         self.assertGreater(g_long["vega"], 0.0)
 
         # OTM call (e.g. 23000 CE, 30 DTE)
-        g_short = compute_bs_greeks(spot, 23000.0, 30, iv=0.13, r=0.07, opt_type="CE")
+        g_short = compute_bs_greeks(spot, 23000.0, 30, iv=0.13, opt_type="CE")
         self.assertGreater(g_short["delta"], 0.10)
         self.assertLess(g_short["delta"], 0.30)
         self.assertGreater(g_short["gamma"], 0.0)

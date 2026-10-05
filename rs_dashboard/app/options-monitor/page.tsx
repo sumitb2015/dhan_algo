@@ -18,12 +18,23 @@ import {
   OptType,
   Side,
   PositionGuard,
-  computeGreeksTickPrice,
   generatePayoffCurve,
   computePortfolioMetrics,
   calculateTimeToExpiryYears,
   extractChainStrikes,
 } from '@/lib/optionsMonitorMath';
+import { greeksForLeg, futureQuote } from '@/lib/optionsPricing';
+
+/** Model Greeks + tick-rounded theoretical price for one leg, from the central per-leg recipe (greeksForLeg). Zeros when no spot/future yet. */
+function modelLeg(
+  type: OptType, strike: number, expiry: string, mark: number | null | undefined, chainIv: number | null | undefined, fallbackIv: number,
+  spot: number, futurePrice: number | null | undefined, futureExpiry: string | null | undefined,
+) {
+  const g = greeksForLeg({ type, strike, expiry, mark, chainIv, fallbackIv }, { spot, future: futureQuote(futurePrice, futureExpiry) });
+  if (!g) return { delta: 0, gamma: 0, theta: 0, vega: 0, iv: chainIv && chainIv > 0 ? chainIv : fallbackIv, price: mark && mark > 0 ? mark : 0 };
+  return { delta: g.delta, gamma: g.gamma, theta: g.theta, vega: g.vega, iv: g.iv, price: Math.max(0.05, Math.round(g.price * 20) / 20) };
+}
+
 
 export default function OptionsMonitorPage() {
   // Underlying configuration
@@ -400,15 +411,6 @@ export default function OptionsMonitorPage() {
     const ceIv = (ceChain?.implied_volatility ? ceChain.implied_volatility / 100 : 0.095);
     const peIv = (peChain?.implied_volatility ? peChain.implied_volatility / 100 : 0.11);
 
-    const isFut = typeof futurePrice === 'number' && futurePrice > 0;
-    const evalUnderlying = isFut ? (futurePrice as number) : spot;
-    // Real remaining time to expiry, never the user's target-date slider — the initial
-    // auto-populated legs must price off "today", not whatever days-to-target was last set.
-    const effectiveTime = calculateTimeToExpiryYears(selectedExpiry);
-
-    const gCe = computeGreeksTickPrice('CE', evalUnderlying, ceStrike, effectiveTime, ceIv, uConfig.lotSize, 0.065, isFut);
-    const gPe = computeGreeksTickPrice('PE', evalUnderlying, peStrike, effectiveTime, peIv, uConfig.lotSize, 0.065, isFut);
-
     const cePrice = (typeof ceTick?.ce?.ltp === 'number' && ceTick.ce.ltp > 0)
       ? ceTick.ce.ltp
       : (ceChain?.last_price || ceChain?.previous_close_price || 75.65);
@@ -416,6 +418,12 @@ export default function OptionsMonitorPage() {
     const pePrice = (typeof peTick?.pe?.ltp === 'number' && peTick.pe.ltp > 0)
       ? peTick.pe.ltp
       : (peChain?.last_price || peChain?.previous_close_price || 44.65);
+
+    // The initial legs price "today", off the central per-leg recipe (forward rolled to the expiry, IV solved from the premium).
+    const market = { spot, future: futureQuote(futurePrice, futureExpiry) };
+    const gCe = greeksForLeg({ type: 'CE', strike: ceStrike, expiry: selectedExpiry, mark: cePrice, chainIv: ceIv, fallbackIv: 0.095 }, market);
+    const gPe = greeksForLeg({ type: 'PE', strike: peStrike, expiry: selectedExpiry, mark: pePrice, chainIv: peIv, fallbackIv: 0.11 }, market);
+    if (!gCe || !gPe) return; // no spot/future yet: wait for the next tick rather than seed legs with invented Greeks
 
     setActiveLegs([
       {
@@ -431,7 +439,7 @@ export default function OptionsMonitorPage() {
         gamma: gCe.gamma,
         theta: gCe.theta,
         vega: gCe.vega,
-        iv: ceIv,
+        iv: gCe.iv,
         expiry: selectedExpiry,
       },
       {
@@ -447,11 +455,11 @@ export default function OptionsMonitorPage() {
         gamma: gPe.gamma,
         theta: gPe.theta,
         vega: gPe.vega,
-        iv: peIv,
+        iv: gPe.iv,
         expiry: selectedExpiry,
       },
     ]);
-  }, [chainStrikes, normalizedChain, spot, futurePrice, uConfig.strikeStep, uConfig.lotSize, ivPct, selectedExpiry, liveQuotes, activeLegs.length]);
+  }, [chainStrikes, normalizedChain, spot, futurePrice, futureExpiry, uConfig.strikeStep, uConfig.lotSize, ivPct, selectedExpiry, liveQuotes, activeLegs.length]);
 
   // ── 5. REALTIME MERGED LEGS WITH SUB-SECOND WS TICKS ────────────────────────
   // Real remaining time on the selected expiry — the target-date slider (targetDays) can never
@@ -475,22 +483,15 @@ export default function OptionsMonitorPage() {
       // (same strike, different contract) nor use the active expiry's time to expiry. Keep its own
       // captured ltp/iv and recompute greeks over its own remaining time.
       if ((leg.expiry && leg.expiry !== selectedExpiry) || (leg.underlying && leg.underlying !== selectedUnderlying)) {
-        const legIv = leg.iv || ivPct / 100;
-        const isFut = typeof futurePrice === 'number' && futurePrice > 0;
         const extraTick = leg.expiry ? (liveQuotes as any)?.extra?.[leg.expiry]?.[String(leg.strike)] : undefined;
         const extraLtp = leg.type === 'CE' ? extraTick?.ce?.ltp : extraTick?.pe?.ltp;
         const offLtp = (typeof extraLtp === 'number' && extraLtp > 0) ? extraLtp : leg.ltp;
-        const gOff = computeGreeksTickPrice(
-          leg.type,
-          isFut ? (futurePrice as number) : spot,
-          leg.strike,
-          Math.max(0.0001, calculateTimeToExpiryYears(leg.expiry || selectedExpiry)),
-          legIv,
-          uConfig.lotSize,
-          0.065,
-          isFut
+        const gOff = greeksForLeg(
+          { type: leg.type, strike: leg.strike, expiry: leg.expiry || selectedExpiry, mark: offLtp, chainIv: leg.iv, fallbackIv: ivPct / 100 },
+          { spot, future: futureQuote(futurePrice, futureExpiry) },
         );
-        return { ...leg, ltp: offLtp, delta: gOff.delta, gamma: gOff.gamma, theta: gOff.theta, vega: gOff.vega, iv: legIv };
+        if (!gOff) return { ...leg, ltp: offLtp };
+        return { ...leg, ltp: offLtp, delta: gOff.delta, gamma: gOff.gamma, theta: gOff.theta, vega: gOff.vega, iv: gOff.iv };
       }
 
       // 1. Look up live WebSocket tick quote
@@ -511,25 +512,18 @@ export default function OptionsMonitorPage() {
         ? chainPrev
         : leg.ltp;
 
-      // Implied Volatility
+      // Central per-leg recipe: forward rolled to this leg's expiry, IV solved from the live premium (chain IV, then the leg's own, as fallbacks).
       const chainIv = chainSide?.implied_volatility;
-      const effectiveIv = (typeof chainIv === 'number' && chainIv > 0)
-        ? chainIv / 100
-        : leg.iv || ivPct / 100;
-
-      // Recompute Greeks via Black-76 on futures price
-      const isFutures = typeof futurePrice === 'number' && futurePrice > 0;
-      const evalUnderlying = isFutures ? (futurePrice as number) : spot;
-      const g = computeGreeksTickPrice(
-        leg.type,
-        evalUnderlying,
-        leg.strike,
-        effectiveTimeToExpiryYears,
-        effectiveIv,
-        uConfig.lotSize,
-        0.065,
-        isFutures
+      const g = greeksForLeg(
+        {
+          type: leg.type, strike: leg.strike, expiry: leg.expiry || selectedExpiry, mark: currentLtp,
+          chainIv: typeof chainIv === 'number' && chainIv > 0 ? chainIv / 100 : leg.iv || null,
+          fallbackIv: ivPct / 100,
+        },
+        { spot, future: futureQuote(futurePrice, futureExpiry) },
       );
+      if (!g) return { ...leg, expiry: leg.expiry || selectedExpiry, ltp: currentLtp };
+      const effectiveIv = g.iv;
 
       return {
         ...leg,
@@ -542,7 +536,7 @@ export default function OptionsMonitorPage() {
         iv: effectiveIv,
       };
     });
-  }, [activeLegsBase, liveQuotes, normalizedChain, selectedExpiry, selectedUnderlying, spot, futurePrice, effectiveTimeToExpiryYears, ivPct, uConfig.lotSize]);
+  }, [activeLegsBase, liveQuotes, normalizedChain, selectedExpiry, selectedUnderlying, spot, futurePrice, futureExpiry, effectiveTimeToExpiryYears, ivPct, uConfig.lotSize]);
 
   // Compute 2D payoff curve, breakevens & 1SD/2SD expected-move bands
   const { points: payoffPoints, breakevens, sdLevels } = useMemo(() => {
@@ -554,9 +548,10 @@ export default function OptionsMonitorPage() {
       ivPct / 100,
       uConfig.strikeStep,
       futurePrice ?? undefined,
-      effectiveTimeToExpiryYears
+      effectiveTimeToExpiryYears,
+      futureExpiry,
     );
-  }, [legs, spot, uConfig.lotSize, effectiveTimeToExpiryYears, ivPct, uConfig.strikeStep, futurePrice]);
+  }, [legs, spot, uConfig.lotSize, effectiveTimeToExpiryYears, ivPct, uConfig.strikeStep, futurePrice, futureExpiry]);
 
   // Compute portfolio metrics (Total MTM, Net Delta, Net Gamma, Net Theta, Margin, POP)
   const portfolioGreeks = useMemo(() => {
@@ -747,28 +742,13 @@ export default function OptionsMonitorPage() {
     const chainPrice = chainSide?.last_price || chainSide?.previous_close_price;
 
     const chainIv = chainSide?.implied_volatility;
-    const legIv = (typeof chainIv === 'number' && chainIv > 0)
-      ? chainIv / 100
-      : ivPct / 100;
-
-    const isFutures = typeof futurePrice === 'number' && futurePrice > 0;
-    const evalUnderlying = isFutures ? (futurePrice as number) : spot;
-    const g = computeGreeksTickPrice(
-      newLegData.type,
-      evalUnderlying,
-      newLegData.strike,
-      effectiveTimeToExpiryYears,
-      legIv,
-      uConfig.lotSize,
-      0.065,
-      isFutures
-    );
-
     const legLtp = (typeof wsPrice === 'number' && wsPrice > 0)
       ? wsPrice
       : (typeof chainPrice === 'number' && chainPrice > 0)
       ? chainPrice
       : newLegData.entryPrice;
+    const g = modelLeg(newLegData.type, newLegData.strike, selectedExpiry, legLtp, typeof chainIv === 'number' && chainIv > 0 ? chainIv / 100 : null, ivPct / 100, spot, futurePrice, futureExpiry);
+    const legIv = g.iv;
 
     return {
       id: `leg_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
@@ -788,7 +768,7 @@ export default function OptionsMonitorPage() {
       underlying: selectedUnderlying,
       securityId: chainSide?.security_id != null ? String(chainSide.security_id) : undefined,
     };
-  }, [selectedExpiry, selectedUnderlying, liveQuotes, normalizedChain, ivPct, spot, futurePrice, effectiveTimeToExpiryYears, uConfig.lotSize]);
+  }, [selectedExpiry, selectedUnderlying, liveQuotes, normalizedChain, ivPct, spot, futurePrice, futureExpiry, uConfig.lotSize]);
 
   // Add custom leg (open for all strikes across the chain)
   const handleAddLeg = (newLegData: {
@@ -848,10 +828,6 @@ export default function OptionsMonitorPage() {
       return false;
     }
 
-    const isFut = typeof futurePrice === 'number' && futurePrice > 0;
-    const evalUnderlying = isFut ? (futurePrice as number) : spot;
-    const timeYears = effectiveTimeToExpiryYears;
-
     setActiveLegs((prev) =>
       prev.map((l) => {
         if (l.id !== id) return l;
@@ -865,29 +841,20 @@ export default function OptionsMonitorPage() {
         const chainPrice = chainSide?.last_price || chainSide?.previous_close_price;
 
         const chainIv = chainSide?.implied_volatility;
-        const effectiveIv = (typeof chainIv === 'number' && chainIv > 0)
-          ? chainIv / 100
-          : l.iv || ivPct / 100;
-
-        const dhanGreeks = chainSide?.greeks;
-        const hasDhanGreeks = dhanGreeks && dhanGreeks.delta != null && dhanGreeks.gamma != null;
-        const g = computeGreeksTickPrice(l.type, evalUnderlying, newStrike, timeYears, effectiveIv, uConfig.lotSize, 0.065, isFut);
-
-        const currentPrice = (typeof wsPrice === 'number' && wsPrice > 0)
-          ? wsPrice
-          : (typeof chainPrice === 'number' && chainPrice > 0)
-          ? chainPrice
-          : g.price;
+        const mark = (typeof wsPrice === 'number' && wsPrice > 0) ? wsPrice : (typeof chainPrice === 'number' && chainPrice > 0) ? chainPrice : null;
+        const g = modelLeg(l.type, newStrike, l.expiry || selectedExpiry, mark, typeof chainIv === 'number' && chainIv > 0 ? chainIv / 100 : l.iv || null, ivPct / 100, spot, futurePrice, futureExpiry);
+        const effectiveIv = g.iv;
+        const currentPrice = mark ?? g.price;
 
         return {
           ...l,
           strike: newStrike,
           entryPrice: currentPrice,
           ltp: currentPrice,
-          delta: hasDhanGreeks ? dhanGreeks.delta : g.delta,
-          gamma: hasDhanGreeks ? dhanGreeks.gamma : g.gamma,
-          theta: hasDhanGreeks ? dhanGreeks.theta : g.theta,
-          vega: hasDhanGreeks ? dhanGreeks.vega : g.vega,
+          delta: g.delta,
+          gamma: g.gamma,
+          theta: g.theta,
+          vega: g.vega,
           iv: effectiveIv,
           securityId: chainSide?.security_id != null ? String(chainSide.security_id) : undefined,
         };
@@ -914,9 +881,6 @@ export default function OptionsMonitorPage() {
   // Load Strategy Preset Templates using real option chain market prices!
   const handleSelectStrategyPreset = (presetId: string) => {
     const atm = Math.round(spot / uConfig.strikeStep) * uConfig.strikeStep;
-    const isFut = typeof futurePrice === 'number' && futurePrice > 0;
-    const evalUnderlying = isFut ? (futurePrice as number) : spot;
-    const t = effectiveTimeToExpiryYears;
 
     if (presetId === 'clear') {
       setActiveLegs([]);
@@ -936,26 +900,12 @@ export default function OptionsMonitorPage() {
       const entry = normalizedChain[strike];
       const chainSide = entry?.[type];
       const chainP = chainSide?.last_price || chainSide?.previous_close_price;
-      const iv = chainSide?.implied_volatility ? chainSide.implied_volatility / 100 : ivPct / 100;
-      const dhanGreeks = chainSide?.greeks;
-      const hasDhanGreeks = dhanGreeks && dhanGreeks.delta != null && dhanGreeks.gamma != null;
+      const chainIvFrac = chainSide?.implied_volatility ? chainSide.implied_volatility / 100 : null;
+      const mark = (typeof wsPrice === 'number' && wsPrice > 0) ? wsPrice : (typeof chainP === 'number' && chainP > 0) ? chainP : null;
 
-      // 3. Fallback to Black-76 theoretical price on futures for this specific strike & type
-      const fallbackGreeks = computeGreeksTickPrice(type.toUpperCase() as OptType, evalUnderlying, strike, t, iv, uConfig.lotSize, 0.065, isFut);
-      const price = (typeof wsPrice === 'number' && wsPrice > 0)
-        ? wsPrice
-        : (typeof chainP === 'number' && chainP > 0)
-        ? chainP
-        : fallbackGreeks.price;
-
-      return {
-        price,
-        iv,
-        delta: hasDhanGreeks ? dhanGreeks.delta : fallbackGreeks.delta,
-        gamma: hasDhanGreeks ? dhanGreeks.gamma : fallbackGreeks.gamma,
-        theta: hasDhanGreeks ? dhanGreeks.theta : fallbackGreeks.theta,
-        vega: hasDhanGreeks ? dhanGreeks.vega : fallbackGreeks.vega,
-      };
+      // Central per-leg recipe; with no live price the theoretical price (tick-rounded) stands in.
+      const m = modelLeg(type.toUpperCase() as OptType, strike, selectedExpiry, mark, chainIvFrac, ivPct / 100, spot, futurePrice, futureExpiry);
+      return { price: mark ?? m.price, iv: m.iv, delta: m.delta, gamma: m.gamma, theta: m.theta, vega: m.vega };
     };
 
     if (presetId === 'short_strangle') {
@@ -964,8 +914,8 @@ export default function OptionsMonitorPage() {
       const peS = atm - uConfig.strikeStep * 2;
       const ceQ = getRealQuote(ceS, 'ce');
       const peQ = getRealQuote(peS, 'pe');
-      const gCe = computeGreeksTickPrice('CE', evalUnderlying, ceS, t, ceQ.iv, uConfig.lotSize, 0.065, isFut);
-      const gPe = computeGreeksTickPrice('PE', evalUnderlying, peS, t, peQ.iv, uConfig.lotSize, 0.065, isFut);
+      const gCe = ceQ;
+      const gPe = peQ;
 
       setActiveLegs([
         {
@@ -1006,8 +956,8 @@ export default function OptionsMonitorPage() {
       setStrategyName('Short Straddle');
       const ceQ = getRealQuote(atm, 'ce');
       const peQ = getRealQuote(atm, 'pe');
-      const gCe = computeGreeksTickPrice('CE', evalUnderlying, atm, t, ceQ.iv, uConfig.lotSize, 0.065, isFut);
-      const gPe = computeGreeksTickPrice('PE', evalUnderlying, atm, t, peQ.iv, uConfig.lotSize, 0.065, isFut);
+      const gCe = ceQ;
+      const gPe = peQ;
 
       setActiveLegs([
         {
@@ -1056,10 +1006,10 @@ export default function OptionsMonitorPage() {
       const ceLq = getRealQuote(ceLong, 'ce');
       const peLq = getRealQuote(peLong, 'pe');
 
-      const gCeS = computeGreeksTickPrice('CE', evalUnderlying, ceShort, t, ceSq.iv, uConfig.lotSize, 0.065, isFut);
-      const gPeS = computeGreeksTickPrice('PE', evalUnderlying, peShort, t, peSq.iv, uConfig.lotSize, 0.065, isFut);
-      const gCeL = computeGreeksTickPrice('CE', evalUnderlying, ceLong, t, ceLq.iv, uConfig.lotSize, 0.065, isFut);
-      const gPeL = computeGreeksTickPrice('PE', evalUnderlying, peLong, t, peLq.iv, uConfig.lotSize, 0.065, isFut);
+      const gCeS = ceSq;
+      const gPeS = peSq;
+      const gCeL = ceLq;
+      const gPeL = peLq;
 
       setActiveLegs([
         {
@@ -1134,8 +1084,8 @@ export default function OptionsMonitorPage() {
       const peLong = atm - uConfig.strikeStep * 3;
       const peSq = getRealQuote(peShort, 'pe');
       const peLq = getRealQuote(peLong, 'pe');
-      const gPeS = computeGreeksTickPrice('PE', evalUnderlying, peShort, t, peSq.iv, uConfig.lotSize, 0.065, isFut);
-      const gPeL = computeGreeksTickPrice('PE', evalUnderlying, peLong, t, peLq.iv, uConfig.lotSize, 0.065, isFut);
+      const gPeS = peSq;
+      const gPeL = peLq;
 
       setActiveLegs([
         {
@@ -1178,8 +1128,8 @@ export default function OptionsMonitorPage() {
       const ceLong = atm + uConfig.strikeStep * 3;
       const ceSq = getRealQuote(ceShort, 'ce');
       const ceLq = getRealQuote(ceLong, 'ce');
-      const gCeS = computeGreeksTickPrice('CE', evalUnderlying, ceShort, t, ceSq.iv, uConfig.lotSize, 0.065, isFut);
-      const gCeL = computeGreeksTickPrice('CE', evalUnderlying, ceLong, t, ceLq.iv, uConfig.lotSize, 0.065, isFut);
+      const gCeS = ceSq;
+      const gCeL = ceLq;
 
       setActiveLegs([
         {
@@ -1351,20 +1301,17 @@ export default function OptionsMonitorPage() {
 
     const wingCeStrike = ceLeg.strike + uConfig.strikeStep * 3;
     const wingPeStrike = peLeg.strike - uConfig.strikeStep * 3;
-    const t = calculateTimeToExpiryYears(selectedExpiry);
-
     const ceChainEntry = normalizedChain[wingCeStrike]?.ce;
     const peChainEntry = normalizedChain[wingPeStrike]?.pe;
     const ceChainP = ceChainEntry?.last_price || ceChainEntry?.previous_close_price;
     const peChainP = peChainEntry?.last_price || peChainEntry?.previous_close_price;
 
-    const ceDhanGreeks = ceChainEntry?.greeks;
-    const peDhanGreeks = peChainEntry?.greeks;
-    const hasCeDhan = ceDhanGreeks && ceDhanGreeks.delta != null && ceDhanGreeks.gamma != null;
-    const hasPeDhan = peDhanGreeks && peDhanGreeks.delta != null && peDhanGreeks.gamma != null;
-
-    const gCe = computeGreeksTickPrice('CE', spot, wingCeStrike, t, ivPct / 100, uConfig.lotSize);
-    const gPe = computeGreeksTickPrice('PE', spot, wingPeStrike, t, ivPct / 100, uConfig.lotSize);
+    const ceIvChain = ceChainEntry?.implied_volatility ? ceChainEntry.implied_volatility / 100 : null;
+    const peIvChain = peChainEntry?.implied_volatility ? peChainEntry.implied_volatility / 100 : null;
+    const ceMark = typeof ceChainP === 'number' && ceChainP > 0 ? ceChainP : null;
+    const peMark = typeof peChainP === 'number' && peChainP > 0 ? peChainP : null;
+    const gCe = modelLeg('CE', wingCeStrike, selectedExpiry, ceMark, ceIvChain, ivPct / 100, spot, futurePrice, futureExpiry);
+    const gPe = modelLeg('PE', wingPeStrike, selectedExpiry, peMark, peIvChain, ivPct / 100, spot, futurePrice, futureExpiry);
 
     const ceWing: OptionLegModel = {
       id: `wing_ce_${Date.now()}`,
@@ -1373,13 +1320,14 @@ export default function OptionsMonitorPage() {
       strike: wingCeStrike,
       lots: ceLeg.lots,
       qty: ceLeg.lots * uConfig.lotSize,
-      entryPrice: typeof ceChainP === 'number' && ceChainP > 0 ? ceChainP : gCe.price,
-      ltp: typeof ceChainP === 'number' && ceChainP > 0 ? ceChainP : gCe.price,
-      delta: hasCeDhan ? ceDhanGreeks.delta : gCe.delta,
-      gamma: hasCeDhan ? ceDhanGreeks.gamma : gCe.gamma,
-      theta: hasCeDhan ? ceDhanGreeks.theta : gCe.theta,
-      vega: hasCeDhan ? ceDhanGreeks.vega : gCe.vega,
-      iv: ivPct / 100,
+      entryPrice: ceMark ?? gCe.price,
+      ltp: ceMark ?? gCe.price,
+      delta: gCe.delta,
+      gamma: gCe.gamma,
+      theta: gCe.theta,
+      vega: gCe.vega,
+      iv: gCe.iv,
+      expiry: selectedExpiry,
     };
 
     const peWing: OptionLegModel = {
@@ -1389,19 +1337,20 @@ export default function OptionsMonitorPage() {
       strike: wingPeStrike,
       lots: peLeg.lots,
       qty: peLeg.lots * uConfig.lotSize,
-      entryPrice: typeof peChainP === 'number' && peChainP > 0 ? peChainP : gPe.price,
-      ltp: typeof peChainP === 'number' && peChainP > 0 ? peChainP : gPe.price,
-      delta: hasPeDhan ? peDhanGreeks.delta : gPe.delta,
-      gamma: hasPeDhan ? peDhanGreeks.gamma : gPe.gamma,
-      theta: hasPeDhan ? peDhanGreeks.theta : gPe.theta,
-      vega: hasPeDhan ? peDhanGreeks.vega : gPe.vega,
-      iv: ivPct / 100,
+      entryPrice: peMark ?? gPe.price,
+      ltp: peMark ?? gPe.price,
+      delta: gPe.delta,
+      gamma: gPe.gamma,
+      theta: gPe.theta,
+      vega: gPe.vega,
+      iv: gPe.iv,
+      expiry: selectedExpiry,
     };
 
     setActiveLegs((prev) => [...prev, ceWing, peWing]);
     setStrategyName('Iron Condor (Wings Added)');
     notifyAction(`[HOTKEY W] Wings Added: Bought ${wingPeStrike} PE & ${wingCeStrike} CE`);
-  }, [activeLegs, spot, ivPct, uConfig.strikeStep, uConfig.lotSize, normalizedChain, selectedExpiry]);
+  }, [activeLegs, spot, ivPct, futurePrice, futureExpiry, uConfig.strikeStep, uConfig.lotSize, normalizedChain, selectedExpiry]);
 
   // Hotkey [X]: Trim 50%
   const handleTrim50 = useCallback(() => {
@@ -1610,11 +1559,10 @@ export default function OptionsMonitorPage() {
     // those are missing, so an approximate spot for a non-page underlying is an acceptable trade-off.
     const legSpot = legUnderlying === selectedUnderlying ? spot : (legUConfig.defaultSpot ?? spot);
 
-    const timeRemaining = calculateTimeToExpiryYears(leg.expiry || selectedExpiry);
-    const legIv = leg.iv ?? ivPct / 100;
-    const g = computeGreeksTickPrice(leg.type, legSpot, leg.strike, timeRemaining, legIv, legUConfig.lotSize);
-
-    const hasDhanDelta = typeof leg.delta === 'number';
+    // Central per-leg recipe. The page's future belongs to the page's underlying only.
+    const onPage = legUnderlying === selectedUnderlying;
+    const g = modelLeg(leg.type, leg.strike, leg.expiry || selectedExpiry, leg.ltp, leg.iv && leg.iv > 0 ? leg.iv : null, ivPct / 100, legSpot, onPage ? futurePrice : null, onPage ? futureExpiry : null);
+    const legIv = g.iv;
 
     const newLeg: OptionLegModel = {
       id: `leg_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
@@ -1625,7 +1573,7 @@ export default function OptionsMonitorPage() {
       qty: (leg.lots ?? 1) * legUConfig.lotSize,
       entryPrice: leg.ltp,
       ltp: leg.ltp,
-      delta: hasDhanDelta ? leg.delta! : g.delta,
+      delta: g.delta,
       gamma: g.gamma,
       theta: g.theta,
       vega: g.vega,
@@ -1637,7 +1585,7 @@ export default function OptionsMonitorPage() {
 
     setActiveLegs((prev) => [...prev, newLeg]);
     notifyAction(`Added ${leg.side} ${leg.strike} ${leg.type} (${legUnderlying}) to strategy from Option Chain.`);
-  }, [selectedUnderlying, selectedExpiry, ivPct, spot, uConfig, notifyAction]);
+  }, [selectedUnderlying, selectedExpiry, ivPct, spot, futurePrice, futureExpiry, uConfig, notifyAction]);
 
   // ── 8. GLOBAL KEYBOARD SHORTCUTS ──────────────────────────────────────────
   useEffect(() => {

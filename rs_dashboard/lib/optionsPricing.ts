@@ -317,3 +317,62 @@ export function greeksFromMark(input: MarkInput, opts: { r?: number; timeYears?:
   const g = computeBsGreeksExact(input.type, input.underlying, input.strike, timeYears, iv, r, input.isFutures);
   return { ...g, iv, ivSource: solved !== null ? 'mark' : 'fallback', timeYears };
 }
+
+/** The nearest monthly future and ITS expiry date (ISO). */
+export interface FutureQuote { price: number; expiry: string }
+
+/** True for a YYYY-MM-DD string: a page's display label such as "15 Sep" must never reach the clock. */
+export const isIsoDate = (d: unknown): d is string => typeof d === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(d);
+
+/** Normalise a (price, expiry-label) pair from page state into a usable FutureQuote, or null. */
+export function futureQuote(price: number | null | undefined, expiry: unknown): FutureQuote | null {
+  return typeof price === 'number' && price > 0 && isIsoDate(expiry) ? { price, expiry } : null;
+}
+
+export interface LegGreeksInput {
+  type: OptType;
+  strike: number;
+  expiry: string;
+  /** The leg's live premium. Its IV is solved from this first. */
+  mark?: number | null;
+  /** The chain's own IV as a FRACTION (0.13). Used only when the mark cannot be inverted. */
+  chainIv?: number | null;
+  /** IV of last resort, as a fraction. Without one, a leg with neither mark nor chain IV returns null. */
+  fallbackIv?: number;
+}
+
+export interface LegGreeks extends BsGreeksExact {
+  iv: number;
+  ivSource: 'mark' | 'chain' | 'assumed';
+  /** The forward the leg was priced against (its own expiry's, not the monthly future's). */
+  forward: number;
+  timeYears: number;
+}
+
+/**
+ * THE per-leg Greeks recipe for a position book, used by every monitor/basket surface so none carries its own convention:
+ * Black-76 against the forward for THIS leg's expiry (the monthly future rolled to it; spot·e^{rT} when there is no future),
+ * IV solved from the leg's live mark (chain IV, then `fallbackIv`, only when that fails), the library's rate and clock.
+ * Rolling matters: pricing a one-day option off the monthly future overstates its forward by the whole carry (~64 pts on Nifty)
+ * and distorts the solved IV and delta. Returns null when no spot/future is available or no IV can be found.
+ */
+export function greeksForLeg(
+  leg: LegGreeksInput,
+  market: { spot: number; future?: FutureQuote | null },
+  opts: { now?: number; r?: number } = {},
+): LegGreeks | null {
+  const now = opts.now ?? Date.now();
+  const r = opts.r ?? RISK_FREE_RATE;
+  const T = calculateTimeToExpiryYears(leg.expiry, now);
+  const fut = market.future && market.future.price > 0 ? market.future : null;
+  const forward = fut ? rollForward(fut.price, fut.expiry, leg.expiry, r, now) : market.spot > 0 ? market.spot * Math.exp(r * T) : 0;
+  if (!(forward > 0)) return null;
+  const solved = leg.mark && leg.mark > 0 ? impliedVol(leg.type, forward, leg.strike, T, leg.mark, { r, isFutures: true }) : null;
+  let iv: number, ivSource: LegGreeks['ivSource'];
+  if (solved) { iv = solved; ivSource = 'mark'; }
+  else if (leg.chainIv && leg.chainIv > 0) { iv = leg.chainIv; ivSource = 'chain'; }
+  else if (leg.fallbackIv && leg.fallbackIv > 0) { iv = leg.fallbackIv; ivSource = 'assumed'; }
+  else return null;
+  return { ...computeBsGreeksExact(leg.type, forward, leg.strike, T, iv, r, true), iv, ivSource, forward, timeYears: T };
+}
+

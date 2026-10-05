@@ -41,6 +41,7 @@ export default function BasketPayoffChart({
   currentExpiry = '',
   futurePrice = null,
   futureBasis = null,
+  futureExpiry = null,
   baseIv = 0.1313,
   underlying = 'NIFTY',
   emptyReason,
@@ -59,14 +60,14 @@ export default function BasketPayoffChart({
   const { points, breakevens, sdLevels } = useMemo(() => {
     if (legs.length > 0 && spot > 0) {
       const evalTimeYears = Math.max(0.0001, effectiveTargetDays / 365);
-      return generatePayoffCurve(legs, spot, lotSize, evalTimeYears, baseIv, strikeStep, futurePrice ?? undefined, evalTimeYears);
+      return generatePayoffCurve(legs, spot, lotSize, evalTimeYears, baseIv, strikeStep, futurePrice ?? undefined, evalTimeYears, futureExpiry ?? undefined);
     }
     if (legacyPoints && legacyPoints.length > 1) {
       const pts: PayoffPoint[] = legacyPoints.map((p) => ({ spot: p.x, pnlExpiry: Math.round(p.y), pnlToday: Math.round(p.y) }));
       return { points: pts, minPnl: 0, maxPnl: 0, breakevens: legacyBreakevens ?? [], sdLevels: null };
     }
     return { points: [] as PayoffPoint[], minPnl: 0, maxPnl: 0, breakevens: [] as number[], sdLevels: null };
-  }, [legs, spot, lotSize, baseIv, strikeStep, futurePrice, effectiveTargetDays, legacyPoints, legacyBreakevens]);
+  }, [legs, spot, lotSize, baseIv, strikeStep, futurePrice, futureExpiry, effectiveTargetDays, legacyPoints, legacyBreakevens]);
 
   return (
     <PayoffWorkbench

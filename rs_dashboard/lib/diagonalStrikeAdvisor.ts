@@ -16,6 +16,8 @@
  *    then trimmed until projected gamma is within 75% of the emergency floor (same as Python).
  */
 
+import { CALENDAR_DAYS_PER_YEAR, RISK_FREE_RATE, computeBsGreeksExact } from './optionsPricing.ts';
+
 export interface BsGreeks {
   delta: number;
   gamma: number;
@@ -128,74 +130,34 @@ export interface AdjustmentAction {
   urgency: 'HIGH' | 'MEDIUM' | 'LOW';
 }
 
-/** Error function approximation for normal CDF */
-function erf(x: number): number {
-  const a1 = 0.254829592;
-  const a2 = -0.284496736;
-  const a3 = 1.421413741;
-  const a4 = -1.453152027;
-  const a5 = 1.061405429;
-  const p = 0.3275911;
-
-  const sign = x < 0 ? -1 : 1;
-  const absX = Math.abs(x);
-  const t = 1.0 / (1.0 + p * absX);
-  const y = 1.0 - (((((a5 * t + a4) * t + a3) * t + a2) * t + a1) * t * Math.exp(-absX * absX));
-  return sign * y;
-}
-
-/** Cumulative standard normal distribution function */
-export function normalCdf(x: number): number {
-  return 0.5 * (1.0 + erf(x / Math.SQRT2));
-}
-
-/** Standard normal probability density function */
-export function normalPdf(x: number): number {
-  return (1.0 / Math.sqrt(2.0 * Math.PI)) * Math.exp(-0.5 * x * x);
-}
-
 /**
- * Computes Black-Scholes Greeks for European/Indian index options.
+ * Spot Black-Scholes Greeks for a Nifty option, from the central pricing library (lib/optionsPricing.ts: one formula, one rate,
+ * one convention). Mirrors strategies/diagonal_call/nifty_diagonal_call.py::compute_bs_greeks, which uses the same rate and floors
+ * (a test pins the two rates together).
  *
  * @param spot Current spot underlying price
  * @param strike Strike price
- * @param dte Days to expiry (minimum 0.1)
+ * @param dte Days to expiry (floored at MIN_DTE_DAYS)
  * @param iv Implied volatility as a decimal (e.g. 0.15 for 15%)
- * @param r Risk-free interest rate (default 0.07 / 7% annual)
+ * @param r Risk-free rate; defaults to the library's RISK_FREE_RATE
  * @param optType 'CE' or 'PE'
+ * Returns per-unit values: thetaDay in ₹/day, vega in ₹ per 1% IV, gamma per index point.
  */
+export const MIN_DTE_DAYS = 0.25;
 export function computeBsGreeks(
   spot: number,
   strike: number,
   dte: number,
   iv: number = 0.15,
-  r: number = 0.07,
+  r: number = RISK_FREE_RATE,
   optType: 'CE' | 'PE' = 'CE',
 ): BsGreeks {
   if (spot <= 0 || strike <= 0) {
     return { delta: 0, gamma: 0, thetaDay: 0, vega: 0 };
   }
-
-  const vol = Math.max(0.01, iv > 1 ? iv / 100 : iv);
-  const t = Math.max(0.1, dte) / 365.0;
-  const sqrtT = Math.sqrt(t);
-
-  const d1 = (Math.log(spot / strike) + (r + 0.5 * vol * vol) * t) / (vol * sqrtT);
-  const d2 = d1 - vol * sqrtT;
-
-  const nd1 = normalCdf(d1);
-  const npD1 = normalPdf(d1);
-  const nd2 = normalCdf(d2);
-
-  const isCall = optType.toUpperCase() === 'CE';
-  const delta = isCall ? nd1 : nd1 - 1.0;
-  const gamma = npD1 / (spot * vol * sqrtT);
-
-  const thetaAnnual = -(spot * npD1 * vol) / (2.0 * sqrtT) - r * strike * Math.exp(-r * t) * (isCall ? nd2 : 1.0 - nd2);
-  const thetaDay = thetaAnnual / 365.0;
-  const vega = (spot * sqrtT * npD1) / 100.0;
-
-  return { delta, gamma, thetaDay, vega };
+  const vol = iv > 1 ? iv / 100 : iv;
+  const g = computeBsGreeksExact(optType, spot, strike, Math.max(MIN_DTE_DAYS, dte) / CALENDAR_DAYS_PER_YEAR, vol, r, false);
+  return { delta: g.delta, gamma: g.gamma, thetaDay: g.theta, vega: g.vega };
 }
 
 /**
@@ -241,7 +203,7 @@ export function calculatePortfolioGreeks(
   shortLeg: { strike: number; dte: number; lots: number; iv?: number } | null,
   spot: number,
   lotSize: number,
-  r: number = 0.07,
+  r: number = RISK_FREE_RATE,
 ): PortfolioGreeksResult {
   let longDeltaShares = 0;
   let shortDeltaShares = 0;
@@ -347,7 +309,7 @@ export function recommendDiagonalStrikes(params: {
     iv: 0.15,
   };
 
-  const longGreeks = computeBsGreeks(spot, longLeg.strike, longLeg.dte, longLeg.iv ?? 0.15, 0.07, 'CE');
+  const longGreeks = computeBsGreeks(spot, longLeg.strike, longLeg.dte, longLeg.iv ?? 0.15, RISK_FREE_RATE, 'CE');
   const totalLongDeltaShares = longLeg.lots * lotSize * longGreeks.delta;
 
   const candidates: CandidateStrike[] = [];
@@ -359,7 +321,7 @@ export function recommendDiagonalStrikes(params: {
     const ltp = quote?.ceLtp ?? 0;
     const iv = (quote?.ceIv && quote.ceIv > 0) ? quote.ceIv : 0.14;
 
-    const greeks = computeBsGreeks(spot, strike, params.frontDte, iv, 0.07, 'CE');
+    const greeks = computeBsGreeks(spot, strike, params.frontDte, iv, RISK_FREE_RATE, 'CE');
     const delta = greeks.delta;
 
     // Filter out extreme delta

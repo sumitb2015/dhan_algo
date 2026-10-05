@@ -14,10 +14,14 @@ import {
   computeBsGreeks,
   computeBsGreeksExact,
   computeGreeksTickPrice,
+  rollForward,
+  futureQuote,
+  isIsoDate,
+  type FutureQuote,
 } from './optionsPricing.ts';
 
 // The pricing core lives in optionsPricing.ts. Re-exported so existing imports from this module keep working.
-export { computeBsGreeks, computeBsGreeksExact, computeGreeksTickPrice, calculateTimeToExpiryYears };
+export { computeBsGreeks, computeBsGreeksExact, computeGreeksTickPrice, calculateTimeToExpiryYears, type FutureQuote };
 export type { OptType, BsGreeksExact } from './optionsPricing.ts';
 
 
@@ -180,7 +184,9 @@ export function generatePayoffCurve(
   baseIv: number = 0.145,
   strikeStep: number = 50,
   futurePrice?: number,
-  targetTimeRemainingYears?: number
+  targetTimeRemainingYears?: number,
+  /** ISO expiry of `futurePrice`. Each leg's forward is the future rolled to ITS expiry; without it the legs price off spot·e^{rT}. */
+  futureExpiry?: string,
 ): { points: PayoffPoint[]; minPnl: number; maxPnl: number; breakevens: number[]; sdLevels: SdLevels | null } {
   if (legs.length === 0) {
     return { points: [], minPnl: 0, maxPnl: 0, breakevens: [], sdLevels: null };
@@ -239,7 +245,7 @@ export function generatePayoffCurve(
 
   const sortedSpots = Array.from(sampleSpots).sort((a, b) => a - b);
 
-  const hasFutures = typeof futurePrice === 'number' && futurePrice > 0;
+  const future = futureQuote(futurePrice, futureExpiry);
   const evalTime = typeof targetTimeRemainingYears === 'number' ? targetTimeRemainingYears : timeRemainingYears;
   const frontYears = Math.max(timeRemainingYears, 0.0001);
 
@@ -248,7 +254,7 @@ export function generatePayoffCurve(
   const model = buildPayoffModel({
     spot,
     samples: sortedSpots,
-    legs: toLibraryLegs(legs, lotSize, baseIv, frontYears, hasFutures ? (futurePrice as number) : undefined),
+    legs: toLibraryLegs(legs, lotSize, baseIv, frontYears, future),
     daysForward: Math.max(0, (frontYears - Math.max(evalTime, 0.0001)) * CALENDAR_DAYS_PER_YEAR),
     atmIv: baseIv,
     fallbackIv: baseIv,
@@ -274,7 +280,7 @@ export function generatePayoffCurve(
  * Option legs → the central payoff library's input. `years` is the time to the FRONT expiry (when known); a later leg gets its residual
  * from `legExtraYears`, so the book is valued as of the front expiry exactly as the library does everywhere else.
  */
-function toLibraryLegs(legs: OptionLegModel[], lotSize: number, baseIv: number, frontYears: number, futurePrice?: number) {
+function toLibraryLegs(legs: OptionLegModel[], lotSize: number, baseIv: number, frontYears: number, future?: FutureQuote | null) {
   const extra = legExtraYears(legs);
   return legs.map((leg, li) => ({
     type: leg.type,
@@ -284,7 +290,7 @@ function toLibraryLegs(legs: OptionLegModel[], lotSize: number, baseIv: number, 
     entryPrice: Math.max(leg.entryPrice, 1e-9),
     iv: leg.iv || baseIv,
     years: Math.max(frontYears, 0.0001) + extra[li],
-    forward: futurePrice && futurePrice > 0 ? futurePrice : undefined,
+    forward: future && leg.expiry && isIsoDate(leg.expiry) ? rollForward(future.price, future.expiry, leg.expiry) : undefined,
   }));
 }
 
@@ -292,9 +298,9 @@ function toLibraryLegs(legs: OptionLegModel[], lotSize: number, baseIv: number, 
  * P&L of the whole leg set at a single spot on the front expiry: intrinsic value, plus residual
  * time value for any leg that expires later (see legExtraYears).
  */
-export function computeExpiryPnlAtSpot(legs: OptionLegModel[], spot: number, lotSize: number): number {
+export function computeExpiryPnlAtSpot(legs: OptionLegModel[], spot: number, lotSize: number, future?: FutureQuote | null): number {
   if (legs.length === 0 || !(spot > 0)) return 0;
-  return payoffAt({ spot, legs: toLibraryLegs(legs, lotSize, 0.15, 0.01), fallbackIv: 0.15 }, [spot], 'expiry')[0];
+  return payoffAt({ spot, legs: toLibraryLegs(legs, lotSize, 0.15, 0.01, future), fallbackIv: 0.15 }, [spot], 'expiry')[0];
 }
 
 /**
@@ -304,7 +310,7 @@ export function computeExpiryPnlAtSpot(legs: OptionLegModel[], spot: number, lot
  * come from a dense grid, not just the strikes. "Unlimited" is a position fact (net signed qty).
  * The pricing is the central payoff library's.
  */
-export function computeMultiExpiryStats(legs: OptionLegModel[], spot: number, lotSize: number) {
+export function computeMultiExpiryStats(legs: OptionLegModel[], spot: number, lotSize: number, future?: FutureQuote | null) {
   const strikes = legs.map((l) => l.strike);
   const centre = spot > 0 ? spot : (Math.min(...strikes) + Math.max(...strikes)) / 2;
   const lo = Math.min(centre * 0.6, Math.min(...strikes) * 0.9);
@@ -313,7 +319,7 @@ export function computeMultiExpiryStats(legs: OptionLegModel[], spot: number, lo
   const n = 1200;
   for (let i = 0; i <= n; i++) xs.add(lo + ((hi - lo) * i) / n);
   const grid = [...xs].sort((a, b) => a - b);
-  const ys0 = payoffAt({ spot: centre, legs: toLibraryLegs(legs, lotSize, 0.15, 0.01), fallbackIv: 0.15 }, grid, 'expiry');
+  const ys0 = payoffAt({ spot: centre, legs: toLibraryLegs(legs, lotSize, 0.15, 0.01, future), fallbackIv: 0.15 }, grid, 'expiry');
   const points = grid.map((x, i) => ({ x, y: ys0[i] }));
 
   const breakevens: number[] = [];

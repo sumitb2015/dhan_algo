@@ -4,7 +4,9 @@ import { positionPayoff, positionNetGreeks, withSolvedIv, toPayoffLegs, type Pos
 import { buildPayoffModel } from './optionsPayoff.ts';
 import { priceOption, calculateTimeToExpiryYears, RISK_FREE_RATE } from './optionsPricing.ts';
 
-const day = (n: number) => new Date(Date.now() + n * 86_400_000).toISOString().slice(0, 10);
+// One pinned clock for the file: two calls that each read Date.now() differ by a millisecond and that flips rounded values.
+const NOW = Date.now();
+const day = (n: number) => new Date(NOW + n * 86_400_000).toISOString().slice(0, 10);
 const NEAR = day(14);
 const FAR = day(22);
 const SPOT = 22555.75;
@@ -18,7 +20,7 @@ const book = [
   mk({ strike: 22200, type: 'PE', expiry: FAR, qtyLots: 390, price: 150.73, display: { ltp: 158.2 } }),
   mk({}),
 ];
-const opts = { strikeStep: 50, spanPct: 0.08, defaultExpiry: null as string | null };
+const opts = { strikeStep: 50, spanPct: 0.08, defaultExpiry: null as string | null, now: NOW };
 
 describe('positionPayoff: position book through the central library', () => {
   it('values a mixed-expiry book as of the NEAREST expiry, from each leg\'s own expiry', () => {
@@ -88,7 +90,7 @@ describe('positionPayoff: position book through the central library', () => {
   });
 
   it('matches buildPayoffModel called directly (the adapter adds no maths)', () => {
-    const now = Date.now();
+    const now = NOW;
     const r = positionPayoff(book, SPOT, { ...opts, targetDays: 0, now })!;
     const direct = buildPayoffModel({ spot: SPOT, now, legs: toPayoffLegs(book, SPOT, { now }), rangePct: 0.08, strikeStep: 50, daysForward: 0, fallbackIv: 0 })!;
     assert.deepEqual(r.model.breakevens, direct.breakevens);

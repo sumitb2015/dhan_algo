@@ -12,6 +12,9 @@ import {
   spotFromFutures,
   calculateTimeToExpiryYears,
   riskNeutralProbAbove,
+  greeksForLeg,
+  futureQuote,
+  isIsoDate,
 } from './optionsPricing.ts';
 
 // Tests for lib/optionsPricing.ts — the single options-maths library. Formula tests difference the price itself and pin the
@@ -266,3 +269,47 @@ describe('optionsPricing: charm and risk-neutral probability', () => {
     assert.ok(Math.abs(riskNeutralProbAbove(S, K, T, s, r) - -dCdK * Math.exp(r * T)) < 1e-5);
   });
 });
+
+describe('greeksForLeg: the one per-leg Greeks recipe', () => {
+  const NOW = Date.parse('2026-10-05T06:00:00Z');
+  const FUT = { price: 22623.7, expiry: '2026-10-27' };
+  const spot = 22555.75;
+
+  it('rolls the monthly future to the leg\'s own expiry instead of using it as the forward', () => {
+    const g = greeksForLeg({ type: 'CE', strike: 22650, expiry: '2026-10-06', mark: 40 }, { spot, future: FUT }, { now: NOW })!;
+    assert.ok(Math.abs(g.forward - rollForward(FUT.price, FUT.expiry, '2026-10-06', undefined, NOW)) < 1e-9);
+    assert.ok(g.forward < FUT.price - 50, `forward ${g.forward} must sit well below the monthly future`);
+  });
+
+  it('solves IV from the mark so the model reproduces the premium; chain IV and fallback are only fallbacks', () => {
+    const base = { type: 'PE' as const, strike: 22450, expiry: '2026-10-06' };
+    const m = greeksForLeg({ ...base, mark: 30, chainIv: 0.9 }, { spot, future: FUT }, { now: NOW })!;
+    assert.equal(m.ivSource, 'mark');
+    assert.ok(Math.abs(m.price - 30) < 0.01);
+    assert.equal(greeksForLeg({ ...base, mark: 0, chainIv: 0.14 }, { spot, future: FUT }, { now: NOW })!.ivSource, 'chain');
+    assert.equal(greeksForLeg({ ...base, fallbackIv: 0.15 }, { spot, future: FUT }, { now: NOW })!.ivSource, 'assumed');
+    assert.equal(greeksForLeg(base, { spot, future: FUT }, { now: NOW }), null);
+  });
+
+  it('with no future it uses spot·e^{rT}; with neither it returns null', () => {
+    const leg = { type: 'CE' as const, strike: 22600, expiry: '2026-10-27', mark: 200 };
+    const g = greeksForLeg(leg, { spot }, { now: NOW })!;
+    assert.ok(Math.abs(g.forward - spot * Math.exp(0.065 * g.timeYears)) < 1e-6);
+    assert.equal(greeksForLeg(leg, { spot: 0 }, { now: NOW }), null);
+  });
+
+  it('a symmetric short strangle one day out is priced evenly (the monthly-forward bug made it 11% vs 23%)', () => {
+    const ce = greeksForLeg({ type: 'CE', strike: 22650, expiry: '2026-10-06', mark: 62 }, { spot, future: FUT }, { now: NOW })!;
+    const pe = greeksForLeg({ type: 'PE', strike: 22450, expiry: '2026-10-06', mark: 62 }, { spot, future: FUT }, { now: NOW })!;
+    assert.ok(Math.abs(ce.iv - pe.iv) < 0.06, `${ce.iv} vs ${pe.iv}`);
+  });
+
+  it('futureQuote/isIsoDate reject display labels like "15 Sep" so they never reach the clock', () => {
+    assert.equal(isIsoDate('2026-10-27'), true);
+    assert.equal(isIsoDate('15 Sep'), false);
+    assert.equal(futureQuote(22600, '15 Sep'), null);
+    assert.equal(futureQuote(0, '2026-10-27'), null);
+    assert.deepEqual(futureQuote(22600, '2026-10-27'), { price: 22600, expiry: '2026-10-27' });
+  });
+});
+

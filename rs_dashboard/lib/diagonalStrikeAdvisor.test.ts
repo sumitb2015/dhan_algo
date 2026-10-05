@@ -1,7 +1,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import { RISK_FREE_RATE, computeBsGreeksExact } from './optionsPricing.ts';
 import {
-  computeBsGreeks,
+  computeBsGreeks, MIN_DTE_DAYS,
   scoreShortCall,
   calculateRequiredShortLots,
   calculatePortfolioGreeks,
@@ -19,7 +21,7 @@ test('computeBsGreeks: computes accurate Call Delta, Gamma, Theta, and Vega', ()
   const strike = 23200;
   const dte = 23;
   const iv = 0.138;
-  const greeks = computeBsGreeks(spot, strike, dte, iv, 0.07, 'CE');
+  const greeks = computeBsGreeks(spot, strike, dte, iv, undefined, 'CE');
 
   assert.ok(greeks.delta > 0.15 && greeks.delta < 0.22, `Delta should be in target range 0.15-0.22, got ${greeks.delta}`);
   assert.ok(greeks.gamma > 0 && greeks.gamma < 0.001, `Gamma should be positive, got ${greeks.gamma}`);
@@ -207,3 +209,19 @@ test('recommendDiagonalStrikes: warns when the long leg itself has a wide spread
   });
   assert.ok(rec.summary.warnings.some(w => /Long 23000 CE bid\/ask spread/.test(w)));
 });
+
+test('computeBsGreeks is the central library, not a private formula', () => {
+  const a = computeBsGreeks(22421.95, 23200, 23, 0.138);
+  const g = computeBsGreeksExact('CE', 22421.95, 23200, 23 / 365, 0.138, RISK_FREE_RATE, false);
+  assert.equal(a.delta, g.delta);
+  assert.equal(a.gamma, g.gamma);
+  assert.equal(a.thetaDay, g.theta);
+  assert.equal(a.vega, g.vega);
+});
+
+test('the Python strategy uses the same risk-free rate and expiry floor as the dashboard', () => {
+  const py = readFileSync(new URL('../../strategies/diagonal_call/nifty_diagonal_call.py', import.meta.url), 'utf8');
+  assert.match(py, new RegExp(`^RISK_FREE_RATE\\s*=\\s*${RISK_FREE_RATE}\\b`, 'm'), 'update RISK_FREE_RATE in nifty_diagonal_call.py to match lib/optionsPricing.ts');
+  assert.match(py, new RegExp(`MIN_DTE_DAYS\\s*=\\s*${MIN_DTE_DAYS}\\b`), 'update MIN_DTE_DAYS in nifty_diagonal_call.py');
+});
+
