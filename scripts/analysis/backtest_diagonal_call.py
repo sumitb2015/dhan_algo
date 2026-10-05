@@ -32,6 +32,8 @@ PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(_
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
+from lib.options_pricing import greeks_from_days, price_option, years_from_days  # noqa: E402
+
 DB_PATH = os.path.join(PROJECT_ROOT, "Options Data", "nifty_options.db")
 BACKTESTS_DIR = os.path.join(PROJECT_ROOT, "debug", "backtests", "options")
 LOT_SIZE_DEFAULT = 65
@@ -50,81 +52,11 @@ def calc_dhan_cost(txn_type: str, qty: int, price: float) -> float:
     return brokerage + gst_brokerage + exch_charge + gst_exch + stt + stamp + sebi
 
 
-def _norm_cdf(x: float) -> float:
-    return 0.5 * (1.0 + math.erf(x / math.sqrt(2.0)))
-
-
-def _norm_pdf(x: float) -> float:
-    return (1.0 / math.sqrt(2.0 * math.pi)) * math.exp(-0.5 * x * x)
-
-
-# Same rate as the live strategy (strategies/diagonal_call/nifty_diagonal_call.py RISK_FREE_RATE) and the dashboard (lib/optionsPricing.ts):
-# a backtest must size off the Greeks the strategy actually trades on.
-RISK_FREE_RATE = 0.065
-
-
-def compute_bs_greeks(
-    spot: float,
-    strike: float,
-    dte_days: float,
-    iv: float = 0.14,
-    r: float = RISK_FREE_RATE,
-    opt_type: str = "CE",
-) -> Dict[str, float]:
-    """Standard Black-Scholes Greeks calculator using math.erf."""
-    if spot <= 0 or strike <= 0:
-        return {"delta": 0.0, "gamma": 0.0, "theta_day": 0.0, "vega": 0.0}
-
-    t = max(dte_days, 0.25) / 365.0
-    vol = max(iv, 0.05)
-    sqrt_t = math.sqrt(t)
-
-    d1 = (math.log(spot / strike) + (r + 0.5 * vol * vol) * t) / (vol * sqrt_t)
-    d2 = d1 - vol * sqrt_t
-
-    nd1 = _norm_cdf(d1)
-    np_d1 = _norm_pdf(d1)
-    nd2 = _norm_cdf(d2)
-
-    is_call = opt_type.upper() == "CE"
-    delta = nd1 if is_call else (nd1 - 1.0)
-    gamma = np_d1 / (spot * vol * sqrt_t)
-
-    theta_annual = -(spot * np_d1 * vol) / (2.0 * sqrt_t) - r * strike * math.exp(-r * t) * (
-        nd2 if is_call else (1.0 - nd2)
-    )
-    theta_day = theta_annual / 365.0
-    vega = (spot * sqrt_t * np_d1) / 100.0
-
-    return {
-        "delta": float(delta),
-        "gamma": float(gamma),
-        "theta_day": float(theta_day),
-        "vega": float(vega),
-    }
-
-
-def compute_bs_price(
-    spot: float,
-    strike: float,
-    dte_days: float,
-    iv: float = 0.14,
-    r: float = RISK_FREE_RATE,
-    opt_type: str = "CE",
-) -> float:
-    """Computes theoretical Black-Scholes price."""
-    if spot <= 0 or strike <= 0:
-        return 0.05
-    t = max(dte_days, 0.001) / 365.0
-    vol = max(iv, 0.05)
-    sqrt_t = math.sqrt(t)
-    d1 = (math.log(spot / strike) + (r + 0.5 * vol * vol) * t) / (vol * sqrt_t)
-    d2 = d1 - vol * sqrt_t
-    if opt_type.upper() == "CE":
-        px = spot * _norm_cdf(d1) - strike * math.exp(-r * t) * _norm_cdf(d2)
-    else:
-        px = strike * math.exp(-r * t) * _norm_cdf(-d2) - spot * _norm_cdf(-d1)
-    return max(0.05, float(px))
+# Pricing and Greeks come from lib/options_pricing.py — the same library (and rate) the live strategy and the dashboard use, so the
+# backtest sizes off the Greeks the strategy actually trades on.
+def bs_price_floor(spot: float, strike: float, dte_days: float, iv: float, opt_type: str = "CE") -> float:
+    """Theoretical premium, floored at one tick (0.05) so a worthless leg still has a price to exit at."""
+    return max(0.05, price_option(opt_type, spot, strike, years_from_days(dte_days, 0.001), max(iv, 0.05)))
 
 
 def score_short_call(theta_day: float, gamma: float) -> float:
@@ -241,15 +173,15 @@ def run_diagonal_call_backtest(
 
     # Calculate initial long call price via Black-Scholes using prevailing IV (~13.5%)
     initial_iv = 0.135
-    initial_long_price = compute_bs_price(initial_spot, long_strike, long_dte_initial, iv=initial_iv, r=RISK_FREE_RATE, opt_type="CE")
+    initial_long_price = bs_price_floor(initial_spot, long_strike, long_dte_initial, initial_iv)
     long_qty = long_lots * lot_size
     initial_long_debit = initial_long_price * long_qty
-    initial_long_greeks = compute_bs_greeks(initial_spot, long_strike, long_dte_initial, iv=initial_iv, r=RISK_FREE_RATE, opt_type="CE")
-    initial_long_delta_shares = long_qty * initial_long_greeks["delta"]
+    initial_long_greeks = greeks_from_days("CE", initial_spot, long_strike, long_dte_initial, initial_iv)
+    initial_long_delta_shares = long_qty * initial_long_greeks.delta
 
     print(f"  [LONG LEG INITIAL ENTRY - {initial_dt_str}]")
     print(f"  Spot:                   Rs {initial_spot:,.2f}")
-    print(f"  Long Strike:            {long_strike:.0f} CE (ATM/ITM, Delta: {initial_long_greeks['delta']:.2f})")
+    print(f"  Long Strike:            {long_strike:.0f} CE (ATM/ITM, Delta: {initial_long_greeks.delta:.2f})")
     print(f"  Estimated Entry Price:  Rs {initial_long_price:.2f}")
     print(f"  Total Long Debit:       Rs {initial_long_debit:,.2f} ({long_lots} lots / {long_qty} units)")
     print(f"  Initial Long Delta:     +{initial_long_delta_shares:.1f} shares")
@@ -344,16 +276,16 @@ def run_diagonal_call_backtest(
             for stk, (cls, spt, iv) in bars_by_dt[entry_dt_str].items():
                 if stk <= entry_spt:  # only OTM calls
                     continue
-                g = compute_bs_greeks(spt, stk, dte_weekly, iv=iv, r=RISK_FREE_RATE, opt_type="CE")
-                d = g["delta"]
-                score = score_short_call(g["theta_day"], g["gamma"])
+                g = greeks_from_days("CE", spt, stk, dte_weekly, iv)
+                d = g.delta
+                score = score_short_call(g.theta, g.gamma)
                 diff = abs(d - target_d)
                 candidates.append({
                     "strike": stk,
                     "price": cls,
                     "delta": d,
-                    "gamma": g["gamma"],
-                    "theta_day": g["theta_day"],
+                    "gamma": g.gamma,
+                    "theta_day": g.theta,
                     "score": score,
                     "diff": diff,
                 })
@@ -383,8 +315,8 @@ def run_diagonal_call_backtest(
 
             # Size short lots from Delta
             # Long delta approximation at this spot
-            cur_long_greeks = compute_bs_greeks(entry_spt, long_strike, 60.0, iv=0.14, r=RISK_FREE_RATE, opt_type="CE")
-            cur_long_delta_shares = long_qty * cur_long_greeks["delta"]
+            cur_long_greeks = greeks_from_days("CE", entry_spt, long_strike, 60.0, 0.14)
+            cur_long_delta_shares = long_qty * cur_long_greeks.delta
 
             short_lots = calculate_required_short_lots(
                 long_delta_shares=cur_long_delta_shares,
@@ -414,11 +346,11 @@ def run_diagonal_call_backtest(
                 # Check if short strike price is present
                 if short_strike in bars_by_dt[bar_dt_str]:
                     cur_cls, _, cur_iv = bars_by_dt[bar_dt_str][short_strike]
-                    cur_greeks = compute_bs_greeks(bar_spt, short_strike, dte_now, iv=cur_iv, r=RISK_FREE_RATE, opt_type="CE")
-                    cur_delta = cur_greeks["delta"]
+                    cur_greeks = greeks_from_days("CE", bar_spt, short_strike, dte_now, cur_iv)
+                    cur_delta = cur_greeks.delta
                 else:
-                    cur_cls = compute_bs_price(bar_spt, short_strike, dte_now, iv=0.14, r=RISK_FREE_RATE, opt_type="CE")
-                    cur_delta = compute_bs_greeks(bar_spt, short_strike, dte_now, iv=0.14, r=RISK_FREE_RATE, opt_type="CE")["delta"]
+                    cur_cls = bs_price_floor(bar_spt, short_strike, dte_now, 0.14)
+                    cur_delta = greeks_from_days("CE", bar_spt, short_strike, dte_now, 0.14).delta
 
                 # 1. Profit Target Check: captured >= 65% decay
                 decay_pct = ((short_entry_price - cur_cls) / short_entry_price) * 100.0

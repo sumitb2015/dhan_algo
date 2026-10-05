@@ -14,7 +14,6 @@ if project_root not in sys.path:
     sys.path.insert(0, project_root)
 
 from strategies.diagonal_call.nifty_diagonal_call import (
-    compute_bs_greeks,
     score_short_call,
     calculate_portfolio_greeks,
     calculate_required_short_lots,
@@ -23,23 +22,26 @@ from strategies.diagonal_call.nifty_diagonal_call import (
 )
 
 
+from lib.options_pricing import greeks_from_days  # noqa: E402
+
+
 class TestDiagonalCallCalculations(unittest.TestCase):
     def test_compute_bs_greeks(self):
         spot = 22400.0
         # ITM call (e.g. 22000 CE, 90 DTE)
-        g_long = compute_bs_greeks(spot, 22000.0, 90, iv=0.14, opt_type="CE")
-        self.assertGreater(g_long["delta"], 0.55)
-        self.assertLess(g_long["delta"], 0.85)
-        self.assertGreater(g_long["gamma"], 0.0)
-        self.assertLess(g_long["theta_day"], 0.0)  # negative price decay for long
-        self.assertGreater(g_long["vega"], 0.0)
+        g_long = greeks_from_days("CE", spot, 22000.0, 90, 0.14)
+        self.assertGreater(g_long.delta, 0.55)
+        self.assertLess(g_long.delta, 0.85)
+        self.assertGreater(g_long.gamma, 0.0)
+        self.assertLess(g_long.theta, 0.0)  # negative price decay for long
+        self.assertGreater(g_long.vega, 0.0)
 
         # OTM call (e.g. 23000 CE, 30 DTE)
-        g_short = compute_bs_greeks(spot, 23000.0, 30, iv=0.13, opt_type="CE")
-        self.assertGreater(g_short["delta"], 0.10)
-        self.assertLess(g_short["delta"], 0.30)
-        self.assertGreater(g_short["gamma"], 0.0)
-        self.assertLess(g_short["theta_day"], 0.0)
+        g_short = greeks_from_days("CE", spot, 23000.0, 30, 0.13)
+        self.assertGreater(g_short.delta, 0.10)
+        self.assertLess(g_short.delta, 0.30)
+        self.assertGreater(g_short.gamma, 0.0)
+        self.assertLess(g_short.theta, 0.0)
 
     def test_score_short_call(self):
         # theta_day is negative, score = (-theta_day) / gamma

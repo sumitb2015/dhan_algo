@@ -51,6 +51,7 @@ sys.path.insert(0, project_root)
 
 from login import get_dhan_client  # noqa: E402
 from lib.dhan_helper import DhanHelper  # noqa: E402
+from lib.options_pricing import greeks_from_days  # noqa: E402
 from lib.strategy_state_helper import (  # noqa: E402
     check_shutdown_trigger, exit_if_market_closed, flush_state,
     instance_log_suffix, parse_target_spec, save_strategy_state,
@@ -98,21 +99,10 @@ logger = logging.getLogger(__name__)
 
 # ── Pure decision logic: no broker, no clock, no I/O. Unit-test these. ──────────────────────────
 
-def compute_bs_delta(spot: float, strike: float, dte_days: float, iv: float = 0.15, r: float = 0.07, opt_type: str = "CE") -> float:
-    """Standard Black-Scholes delta calculator with zero external dependencies (uses math.erf).
-    Returns signed delta: positive for CE (0.0 to 1.0), negative for PE (-1.0 to 0.0)."""
-    if spot <= 0 or strike <= 0:
-        return 0.0
-    t = max(dte_days, 0.5) / 365.0
-    vol = max(iv, 0.05)
-    sqrt_t = math.sqrt(t)
-    d1 = (math.log(spot / strike) + (r + 0.5 * vol * vol) * t) / (vol * sqrt_t)
-    # Standard normal CDF: 0.5 * (1 + erf(x / sqrt(2)))
-    norm_cdf_d1 = 0.5 * (1.0 + math.erf(d1 / math.sqrt(2.0)))
-    if opt_type.upper() == "CE":
-        return norm_cdf_d1
-    else:
-        return norm_cdf_d1 - 1.0
+# Greeks come from lib/options_pricing.py (parity-tested port of the dashboard's optionsPricing.ts); this strategy only picks its own
+# expiry floor and the IV used when a chain row carries none.
+MIN_DTE_DAYS = 0.5
+DEFAULT_IV = 0.15
 
 
 def pick_leg_by_delta(chain_df: pd.DataFrame, spot: float, dte_days: float, opt_type: str,
@@ -155,7 +145,7 @@ def pick_leg_by_delta(chain_df: pd.DataFrame, spot: float, dte_days: float, opt_
         if k <= 0:
             continue
         # For CE, target delta is positive; for PE, magnitude |delta|
-        d = compute_bs_delta(spot, k, dte_days, opt_type=opt_type)
+        d = greeks_from_days(opt_type, spot, k, dte_days, DEFAULT_IV, min_days=MIN_DTE_DAYS).delta
         diff = abs(abs(d) - target_delta)
         if diff < best_diff:
             best_diff = diff
@@ -263,7 +253,7 @@ def get_live_or_bs_delta(chain_df: pd.DataFrame, spot: float, strike: float, dte
                     return float(val)
             except Exception:
                 pass
-    return compute_bs_delta(spot, strike, dte_days, opt_type=opt_type)
+    return greeks_from_days(opt_type, spot, strike, dte_days, DEFAULT_IV, min_days=MIN_DTE_DAYS).delta
 
 
 def check_condor_trigger(ce_short_delta: float, pe_short_delta: float, trigger_delta: float = 0.10) -> str:

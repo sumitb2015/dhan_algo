@@ -16,6 +16,8 @@ from datetime import date, datetime
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 
+from lib.options_pricing import greeks_from_days  # noqa: E402
+
 SPOT = 25000.0
 EXPIRIES = ["2026-10-27", "2026-11-23", "2026-12-29"]
 
@@ -114,15 +116,15 @@ def run_tests():
     print("=== Testing Pure Decision Functions ===")
 
     # 1. Black-Scholes Delta Checks
-    ce_atm_d = cr.compute_bs_delta(25000, 25000, 30, iv=0.15, opt_type="CE")
-    pe_atm_d = cr.compute_bs_delta(25000, 25000, 30, iv=0.15, opt_type="PE")
+    ce_atm_d = greeks_from_days("CE", 25000, 25000, 30, 0.15, min_days=0.5).delta
+    pe_atm_d = greeks_from_days("PE", 25000, 25000, 30, 0.15, min_days=0.5).delta
     check("ATM CE Delta approx 0.50", 0.45 <= ce_atm_d <= 0.58)
     check("ATM PE Delta approx -0.50", -0.55 <= pe_atm_d <= -0.42)
 
-    ce_itm_d = cr.compute_bs_delta(25000, 24000, 30, iv=0.15, opt_type="CE")
+    ce_itm_d = greeks_from_days("CE", 25000, 24000, 30, 0.15, min_days=0.5).delta
     check("Deep ITM CE Delta near 1.0", ce_itm_d > 0.85)
 
-    ce_otm_d = cr.compute_bs_delta(25000, 27000, 30, iv=0.15, opt_type="CE")
+    ce_otm_d = greeks_from_days("CE", 25000, 27000, 30, 0.15, min_days=0.5).delta
     check("Deep OTM CE Delta near 0.0", ce_otm_d < 0.10)
 
     # 2. Iron Condor Strikes Selection

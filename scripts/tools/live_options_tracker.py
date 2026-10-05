@@ -33,6 +33,7 @@ from dhanhq.marketfeed import MarketFeed
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 from login import get_dhan_client
 from lib.dhan_helper import DhanHelper
+from lib.options_pricing import RISK_FREE_RATE, implied_vol, compute_bs_greeks_exact, years_from_days
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -77,70 +78,14 @@ def _f(val, default: float = 0.0) -> float:
         return default
 
 
-def _norm_cdf(x: float) -> float:
-    return (1.0 + math.erf(x / math.sqrt(2.0))) / 2.0
-
-def _norm_pdf(x: float) -> float:
-    return math.exp(-0.5 * x * x) / math.sqrt(2.0 * math.pi)
-
-def calc_iv(S: float, K: float, T: float, r: float,
-            market_price: float, opt_type: str = "CE") -> float:
-    """
-    Newton-Raphson implied-volatility solver.
-    Returns IV as a percentage (e.g. 18.5 means 18.5%).
-    Returns 0 if it cannot converge.
-    """
-    if T <= 0 or market_price <= 0 or S <= 0 or K <= 0:
-        return 0.0
-    sigma = 0.30  # initial guess
-    for _ in range(200):
-        try:
-            d1 = (math.log(S / K) + (r + 0.5 * sigma ** 2) * T) / (sigma * math.sqrt(T))
-            d2 = d1 - sigma * math.sqrt(T)
-            if opt_type.upper() == "CE":
-                price = S * _norm_cdf(d1) - K * math.exp(-r * T) * _norm_cdf(d2)
-            else:
-                price = K * math.exp(-r * T) * _norm_cdf(-d2) - S * _norm_cdf(-d1)
-            vega = S * _norm_pdf(d1) * math.sqrt(T)
-            if vega < 1e-10:
-                break
-            diff = price - market_price
-            sigma -= diff / vega
-            if sigma <= 0:
-                sigma = 1e-4
-            if abs(diff) < 0.01:
-                break
-        except Exception:
-            break
-    return round(sigma * 100.0, 2)
-
-
-def bs_greeks(S: float, K: float, T: float, r: float,
-              sigma_pct: float, opt_type: str = "CE"):
-    """
-    Compute Black-Scholes Greeks.
-    sigma_pct: IV as a percentage (e.g. 18.5)
-    Returns: (delta, gamma, theta_per_day, vega_per_1pct)
-    """
-    sigma = sigma_pct / 100.0
-    if T <= 0 or sigma <= 0 or S <= 0 or K <= 0:
-        return 0.0, 0.0, 0.0, 0.0
-    try:
-        d1 = (math.log(S / K) + (r + 0.5 * sigma ** 2) * T) / (sigma * math.sqrt(T))
-        d2 = d1 - sigma * math.sqrt(T)
-        gamma = _norm_pdf(d1) / (S * sigma * math.sqrt(T))
-        vega  = S * _norm_pdf(d1) * math.sqrt(T) / 100.0   # per 1% IV move
-        if opt_type.upper() == "CE":
-            delta = _norm_cdf(d1)
-            theta = (-(S * _norm_pdf(d1) * sigma) / (2.0 * math.sqrt(T))
-                     - r * K * math.exp(-r * T) * _norm_cdf(d2)) / 365.0
-        else:
-            delta = _norm_cdf(d1) - 1.0
-            theta = (-(S * _norm_pdf(d1) * sigma) / (2.0 * math.sqrt(T))
-                     + r * K * math.exp(-r * T) * _norm_cdf(-d2)) / 365.0
-        return round(delta, 4), round(gamma, 6), round(theta, 2), round(vega, 2)
-    except Exception:
-        return 0.0, 0.0, 0.0, 0.0
+def iv_and_greeks(S: float, K: float, T: float, r: float, market_price: float, opt_type: str = "CE"):
+    """Implied vol (as a PERCENT, 18.5 = 18.5%) and (delta, gamma, theta/day, vega per 1%) from lib/options_pricing.py.
+    (0.0, 0.0, 0.0, 0.0, 0.0) when the premium cannot be inverted."""
+    iv = implied_vol(opt_type.upper(), S, K, T, market_price, r) if market_price > 0 else None
+    if not iv:
+        return 0.0, 0.0, 0.0, 0.0, 0.0
+    g = compute_bs_greeks_exact(opt_type.upper(), S, K, T, iv, r)
+    return round(iv * 100.0, 2), round(g.delta, 4), round(g.gamma, 6), round(g.theta, 2), round(g.vega, 2)
 
 
 def get_valid_expiries(helper, underlying: str = "NIFTY") -> list:
@@ -531,7 +476,6 @@ def run_live_tracker():
 
     DATA_ROW   = HDR_ROW + 1   # first data row in Sheet 1
     MAX_ROWS   = 20             # max option legs to track
-    RISK_FREE  = 0.065          # India ~6.5% risk-free rate
 
     # ── 3. Internal state ─────────────────────────────────────────────────────
     row_to_sid:     dict = {}   # row_idx → security_id str
@@ -820,12 +764,8 @@ def run_live_tracker():
                     delta = gamma = theta = vega = 0.0
                     if nifty_spot > 0 and str_val > 0 and ltp > 0:
                         try:
-                            T = max(dte_val, 0.5) / 365.0
-                            iv_pct = calc_iv(nifty_spot, str_val, T, RISK_FREE, ltp, o_type)
-                            if iv_pct > 0:
-                                delta, gamma, theta, vega = bs_greeks(
-                                    nifty_spot, str_val, T, RISK_FREE, iv_pct, o_type
-                                )
+                            T = years_from_days(dte_val, 0.5)
+                            iv_pct, delta, gamma, theta, vega = iv_and_greeks(nifty_spot, str_val, T, RISK_FREE_RATE, ltp, o_type)
                         except Exception:
                             pass
 
@@ -961,7 +901,7 @@ def run_live_tracker():
                                 days_left = (exp_date_obj - date.today()).days
                             except Exception:
                                 days_left = 7
-                            T_chain = max(days_left, 0.5) / 365.0
+                            T_chain = years_from_days(days_left, 0.5)
 
                             strikes = [atm_strike + i * 50 for i in range(-10, 11)]  # 21 rows
 
@@ -1011,10 +951,8 @@ def run_live_tracker():
                                 ce_vol = int(ce_d.get("volume", 0) or 0)
                                 pe_vol = int(pe_d.get("volume", 0) or 0)
 
-                                ce_iv  = calc_iv(nifty_spot, sk, T_chain, RISK_FREE, ce_ltp, "CE") if ce_ltp > 0 else 0
-                                pe_iv  = calc_iv(nifty_spot, sk, T_chain, RISK_FREE, pe_ltp, "PE") if pe_ltp > 0 else 0
-                                ce_del = bs_greeks(nifty_spot, sk, T_chain, RISK_FREE, ce_iv, "CE")[0] if ce_iv > 0 else 0
-                                pe_del = bs_greeks(nifty_spot, sk, T_chain, RISK_FREE, pe_iv, "PE")[0] if pe_iv > 0 else 0
+                                ce_iv, ce_del = iv_and_greeks(nifty_spot, sk, T_chain, RISK_FREE_RATE, ce_ltp, "CE")[:2]
+                                pe_iv, pe_del = iv_and_greeks(nifty_spot, sk, T_chain, RISK_FREE_RATE, pe_ltp, "PE")[:2]
 
                                 ce_prev = _f(ce_d.get("prev_close")) or _f((ce_d.get("ohlc") or {}).get("close")) or ce_ltp
                                 pe_prev = _f(pe_d.get("prev_close")) or _f((pe_d.get("ohlc") or {}).get("close")) or pe_ltp

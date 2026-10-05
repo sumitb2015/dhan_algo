@@ -25,6 +25,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspa
 
 from login import get_dhan_client
 from lib.dhan_helper import DhanHelper
+from lib.options_pricing import risk_neutral_prob_above
 
 # Orders in these statuses are still working and can be cancelled/modified.
 ACTIVE_ORDER_STATUSES = {"TRANSIT", "PENDING", "TRIGGER_PENDING", "MODIFIED", "PART_TRADED"}
@@ -58,16 +59,6 @@ def _get_helper() -> DhanHelper:
     if not dhan:
         raise RuntimeError("Failed to authenticate with Dhan")
     return DhanHelper(dhan)
-
-
-def prob_above(spot: float, strike: float, years: float, iv: float, r: float = 0.065) -> float:
-    """Risk-neutral probability spot finishes above strike — the sold PUT expiring
-    worthless. Same formula as riskNeutralProbAbove() in lib/optionsStrategy.ts
-    and prob_above() in csp_scanner.py."""
-    if years <= 0 or iv <= 0 or spot <= 0 or strike <= 0:
-        return 1.0 if spot > strike else 0.0
-    d2 = (math.log(spot / strike) + (r - (iv * iv) / 2) * years) / (iv * math.sqrt(years))
-    return 0.5 * (1.0 + math.erf(d2 / math.sqrt(2.0)))
 
 
 def _underlying_of(trading_symbol: str) -> str:
@@ -245,7 +236,7 @@ def cmd_chain(helper: DhanHelper, args) -> dict:
             "ltp": float(row.get('pe_last_price', 0) or 0),
             "oi": int(row.get('pe_oi', 0) or 0),
             "iv": iv,
-            "noHitProb": round(prob_above(spot, strike, years, iv / 100.0) * 100, 1),
+            "noHitProb": round(risk_neutral_prob_above(spot, strike, years, iv / 100.0) * 100, 1),
         })
     return {"success": True, "strikes": strikes, "spot": round(spot, 2), "dte": dte}
 
@@ -317,7 +308,7 @@ def cmd_sync(helper: DhanHelper, args) -> dict:
         # would render as "100% no-hit" exactly when the mark is unknown, so the
         # probability is omitted instead of being fabricated.
         if iv > 0 and spot > 0:
-            entry["noHitProb"] = round(prob_above(spot, strike, max(dte, 1) / 365.0, iv / 100.0) * 100, 1)
+            entry["noHitProb"] = round(risk_neutral_prob_above(spot, strike, max(dte, 1) / 365.0, iv / 100.0) * 100, 1)
         out.append(entry)
 
     return {"success": True, "asOf": datetime.now(timezone.utc).isoformat(), "rows": out}

@@ -219,9 +219,10 @@ test('computeBsGreeks is the central library, not a private formula', () => {
   assert.equal(a.vega, g.vega);
 });
 
-test('the Python strategy uses the same risk-free rate and expiry floor as the dashboard', () => {
+test('the Python library and the diagonal strategy match the dashboard: same rate, same expiry floor', () => {
+  const lib = readFileSync(new URL('../../lib/options_pricing.py', import.meta.url), 'utf8');
+  assert.match(lib, new RegExp(`^RISK_FREE_RATE\\s*=\\s*${RISK_FREE_RATE}\\b`, 'm'), 'update RISK_FREE_RATE in lib/options_pricing.py to match lib/optionsPricing.ts');
   const py = readFileSync(new URL('../../strategies/diagonal_call/nifty_diagonal_call.py', import.meta.url), 'utf8');
-  assert.match(py, new RegExp(`^RISK_FREE_RATE\\s*=\\s*${RISK_FREE_RATE}\\b`, 'm'), 'update RISK_FREE_RATE in nifty_diagonal_call.py to match lib/optionsPricing.ts');
   assert.match(py, new RegExp(`MIN_DTE_DAYS\\s*=\\s*${MIN_DTE_DAYS}\\b`), 'update MIN_DTE_DAYS in nifty_diagonal_call.py');
+  assert.doesNotMatch(py, /def compute_bs_greeks|math\.erf/, 'the strategy must price through lib/options_pricing.py, not its own formula');
 });
-

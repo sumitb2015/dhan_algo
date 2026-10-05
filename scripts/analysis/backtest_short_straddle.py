@@ -30,6 +30,12 @@ DATA_ROOT = os.path.join(PROJECT_ROOT, "Options Data", "NIFTY")
 VIX_PATH = os.path.join(PROJECT_ROOT, "Historical Data", "Indices", "INDIA_VIX.csv")
 
 sys.path.insert(0, PROJECT_ROOT)
+
+from lib.options_pricing import RISK_FREE_RATE, compute_bs_greeks_exact, implied_vol, price_option  # noqa: E402
+
+# Rate used to re-price strikes and pick by delta. Defaults to the library's; `--rate 0.06` reproduces the runs this engine was validated
+# against StockMock with (it priced at 6% before it moved onto lib/options_pricing.py), so those comparisons stay reproducible.
+RATE = RISK_FREE_RATE
 from lib.nse_holidays import is_regular_session, effective_expiry_date  # NSE holidays + Muhurat: one shared calendar
 
 MONTH_NAMES = ["Jan", "Feb", "Mar", "Apr", "May", "Jun",
@@ -434,56 +440,15 @@ class LegState:
         return self.is_entered and (self.struck_sl or self.struck_target) and not self.waiting_reentry_cost
 
 
-def _norm_cdf(x: float) -> float:
-    return 0.5 * (1.0 + math.erf(x / math.sqrt(2.0)))
-
-
-def _bs_price(S: float, K: float, T: float, r: float, sigma: float, option_type: str) -> float:
-    """Black-Scholes European option price."""
-    if T <= 0 or S <= 0 or K <= 0:
-        return max(S - K, 0.0) if option_type == 'CE' else max(K - S, 0.0)
-    try:
-        sqrt_T = math.sqrt(T)
-        d1 = (math.log(S / K) + (r + 0.5 * sigma ** 2) * T) / (sigma * sqrt_T)
-        d2 = d1 - sigma * sqrt_T
-        if option_type == 'CE':
-            return S * _norm_cdf(d1) - K * math.exp(-r * T) * _norm_cdf(d2)
-        else:
-            return K * math.exp(-r * T) * _norm_cdf(-d2) - S * _norm_cdf(-d1)
-    except (ValueError, ZeroDivisionError):
-        return max(S - K, 0.0) if option_type == 'CE' else max(K - S, 0.0)
-
-
-def _implied_vol(market_price: float, S: float, K: float, T: float,
-                 r: float, option_type: str) -> float:
-    """Bisection IV solver. Returns annualised volatility as a decimal."""
-    if T <= 0 or market_price <= 0:
-        return 0.15  # fallback
-    lo, hi = 0.001, 10.0
-    if _bs_price(S, K, T, r, hi, option_type) < market_price:
-        return hi
-    for _ in range(80):
-        mid = (lo + hi) / 2.0
-        price = _bs_price(S, K, T, r, mid, option_type)
-        if abs(price - market_price) < 0.001:
-            return mid
-        if price > market_price:
-            hi = mid
-        else:
-            lo = mid
-    return (lo + hi) / 2.0
-
-
 def _price_at_strike(atm_close: float, atm_strike: float,
                      entry_strike: float, option_type: str,
-                     spot: float, days_to_expiry: float,
-                     r: float = 0.06) -> float:
+                     spot: float, days_to_expiry: float) -> float:
     """
     Price the entry_strike option given the current ATM option's close.
     - No drift: return atm_close directly.
-    - Drift present: back-calculate IV from the ATM price via Black-Scholes,
-      then reprice the original entry strike with that IV.
-      For 0DTE (days_to_expiry ≤ 0) use intrinsic only.
+    - Drift present: back-calculate IV from the ATM price, then reprice the original entry strike with that IV
+      (both through lib/options_pricing.py, at the library's rate).
+      For 0DTE (days_to_expiry <= 0) use intrinsic only.
     """
     if atm_strike == entry_strike:
         return atm_close
@@ -491,27 +456,21 @@ def _price_at_strike(atm_close: float, atm_strike: float,
     if T <= 0 or atm_close < 0.5:
         # Near expiry or negligible premium: intrinsic only
         return max(spot - entry_strike, 0.0) if option_type == 'CE' else max(entry_strike - spot, 0.0)
-    iv = _implied_vol(atm_close, spot, atm_strike, T, r, option_type)
-    return max(_bs_price(spot, entry_strike, T, r, iv, option_type), 0.0)
+    iv = implied_vol(option_type, spot, atm_strike, T, atm_close, RATE) or FALLBACK_IV
+    return max(price_option(option_type, spot, entry_strike, T, iv, RATE), 0.0)
 
 
-def _calculate_delta(spot: float, K: float, T: float, r: float, sigma: float, option_type: str) -> float:
-    """Calculate option Delta (0 to 100) using Black-Scholes model."""
+# IV used when the ATM premium cannot be inverted (bad or sub-intrinsic data).
+FALLBACK_IV = 0.15
+
+
+def _delta_pct(spot: float, K: float, T: float, sigma: float, option_type: str) -> float:
+    """Option delta on a -100..100 scale from the central library; intrinsic (100/0) once there is no time or vol left."""
     if T <= 0 or sigma <= 0:
         if option_type == 'CE':
             return 100.0 if spot > K else 0.0
-        else:
-            return -100.0 if spot < K else 0.0
-    try:
-        sqrt_T = math.sqrt(T)
-        d1 = (math.log(spot / K) + (r + 0.5 * sigma ** 2) * T) / (sigma * sqrt_T)
-        n_d1 = _norm_cdf(d1)
-        if option_type == 'CE':
-            return n_d1 * 100.0
-        else:
-            return (n_d1 - 1.0) * 100.0
-    except Exception:
-        return 50.0 if option_type == 'CE' else -50.0
+        return -100.0 if spot < K else 0.0
+    return compute_bs_greeks_exact(option_type, spot, K, T, sigma, RATE).delta * 100.0
 
 
 def _get_leg_prices(
@@ -747,14 +706,13 @@ def _simulate_one_day(
             try:
                 target_delta = float(leg_cfg.strike)
                 T = max(days_to_exp, 0.0) / 365.0
-                r = 0.06
                 atm_price = _find_candidate_price(leg_cfg.option_type, atm_stk)
                 if atm_price <= 0 and leg_candidates:
                     atm_price = leg_candidates[0][1]
-                sigma = _implied_vol(atm_price, spot_val, atm_stk, T, r, leg_cfg.option_type)
+                sigma = implied_vol(leg_cfg.option_type, spot_val, atm_stk, T, atm_price, RATE) or FALLBACK_IV
                 delta_candidates = []
                 for stk, price in leg_candidates:
-                    delta = _calculate_delta(spot_val, stk, T, r, sigma, leg_cfg.option_type)
+                    delta = _delta_pct(spot_val, stk, T, sigma, leg_cfg.option_type)
                     delta_candidates.append((stk, abs(delta)))
                 delta_candidates.sort(key=lambda x: (abs(x[1] - target_delta), x[1]))
                 return delta_candidates[0][0] if delta_candidates else atm_stk
@@ -2138,7 +2096,10 @@ DEFAULT_LEGS = [
 
 
 def main():
+    global RATE
     parser = argparse.ArgumentParser()
+    parser.add_argument("--rate",               type=float, default=RISK_FREE_RATE,
+                        help="risk-free rate for IV / delta re-pricing (default: lib/options_pricing.py; 0.06 reproduces pre-library runs)")
     parser.add_argument("--start-date",         default="2021-01-01")
     parser.add_argument("--end-date",           default="2026-06-30")
     parser.add_argument("--lot-size",           type=int,   default=65)
@@ -2201,6 +2162,7 @@ def main():
     parser.add_argument("--strategy-name",      default="backtest",
                         help="Human-readable name for the archived result folder")
     args = parser.parse_args()
+    RATE = args.rate
 
     try:
         legs_raw = json.loads(args.legs)

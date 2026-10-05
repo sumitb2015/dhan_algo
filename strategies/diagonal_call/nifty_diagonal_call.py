@@ -41,6 +41,9 @@ project_root = _find_project_root(os.path.dirname(__file__))
 if project_root not in sys.path:
     sys.path.insert(0, project_root)
 
+# Pure stdlib (no broker SDK): imported outside the guarded block so the pure functions work even when the SDK imports below fail.
+from lib.options_pricing import RISK_FREE_RATE, greeks_from_days  # noqa: E402
+
 try:
     import pandas as pd
 except ImportError:
@@ -154,61 +157,12 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Kept equal to RISK_FREE_RATE in rs_dashboard/lib/optionsPricing.ts and MIN_DTE_DAYS in lib/diagonalStrikeAdvisor.ts
-# (rs_dashboard/lib/diagonalStrikeAdvisor.test.ts fails if they drift): the dashboard advisor and this strategy must size off the same Greeks.
-RISK_FREE_RATE = 0.065
+# Greeks come from lib/options_pricing.py (the port of the dashboard's optionsPricing.ts, parity-tested). MIN_DTE_DAYS must equal the
+# dashboard advisor's (rs_dashboard/lib/diagonalStrikeAdvisor.test.ts fails if they drift).
 MIN_DTE_DAYS = 0.25
 
 
 # ── PURE CALCULATION & GREEK FUNCTIONS (Unit Testable) ─────────────────────────
-
-def compute_bs_greeks(
-    spot: float,
-    strike: float,
-    dte_days: float,
-    iv: float = 0.15,
-    r: float = RISK_FREE_RATE,
-    opt_type: str = "CE",
-) -> Dict[str, float]:
-    """Standard Black-Scholes Greeks calculator using math.erf (zero external dependencies).
-
-    Returns:
-        delta: signed option delta (0.0 to 1.0 for CE, -1.0 to 0.0 for PE)
-        gamma: option gamma per underlying point move per share (> 0)
-        theta_day: option price decay in INR per calendar day (negative for long)
-        vega: 1% vega (INR change per 1 percentage point IV move)
-    """
-    if spot <= 0 or strike <= 0:
-        return {"delta": 0.0, "gamma": 0.0, "theta_day": 0.0, "vega": 0.0}
-
-    t = max(dte_days, MIN_DTE_DAYS) / 365.0
-    vol = max(iv, 0.05)
-    sqrt_t = math.sqrt(t)
-
-    d1 = (math.log(spot / strike) + (r + 0.5 * vol * vol) * t) / (vol * sqrt_t)
-    d2 = d1 - vol * sqrt_t
-
-    nd1 = 0.5 * (1.0 + math.erf(d1 / math.sqrt(2.0)))
-    np_d1 = (1.0 / math.sqrt(2.0 * math.pi)) * math.exp(-0.5 * d1 * d1)
-    nd2 = 0.5 * (1.0 + math.erf(d2 / math.sqrt(2.0)))
-
-    is_call = opt_type.upper() == "CE"
-    delta = nd1 if is_call else (nd1 - 1.0)
-    gamma = np_d1 / (spot * vol * sqrt_t)
-
-    theta_annual = -(spot * np_d1 * vol) / (2.0 * sqrt_t) - r * strike * math.exp(-r * t) * (
-        nd2 if is_call else (1.0 - nd2)
-    )
-    theta_day = theta_annual / 365.0
-    vega = (spot * sqrt_t * np_d1) / 100.0
-
-    return {
-        "delta": float(delta),
-        "gamma": float(gamma),
-        "theta_day": float(theta_day),
-        "vega": float(vega),
-    }
-
 
 def score_short_call(theta_day: float, gamma: float) -> float:
     """Computes the Short Call Efficiency Score = Theta Decay per Day / |Gamma|.
@@ -248,21 +202,21 @@ def calculate_portfolio_greeks(
         l_qty = long_leg["lots"] * lot_size
         l_dte = max(0.5, float(long_leg.get("dte", 60)))
         l_iv = float(long_leg.get("iv", 0.15))
-        g_l = compute_bs_greeks(spot, float(long_leg["strike"]), l_dte, iv=l_iv, r=r, opt_type="CE")
-        long_delta_shares = l_qty * g_l["delta"]
-        port_gamma += l_qty * g_l["gamma"]
-        port_theta_day += l_qty * g_l["theta_day"]  # long decay is cost
-        port_vega += l_qty * g_l["vega"]
+        g_l = greeks_from_days("CE", spot, float(long_leg["strike"]), l_dte, l_iv, r=r)
+        long_delta_shares = l_qty * g_l.delta
+        port_gamma += l_qty * g_l.gamma
+        port_theta_day += l_qty * g_l.theta  # long decay is cost
+        port_vega += l_qty * g_l.vega
 
     if short_leg and short_leg.get("lots", 0) > 0:
         s_qty = short_leg["lots"] * lot_size
         s_dte = max(0.5, float(short_leg.get("dte", 30)))
         s_iv = float(short_leg.get("iv", 0.15))
-        g_s = compute_bs_greeks(spot, float(short_leg["strike"]), s_dte, iv=s_iv, r=r, opt_type="CE")
-        short_delta_shares = s_qty * g_s["delta"]
-        port_gamma -= s_qty * g_s["gamma"]          # short gamma is negative
-        port_theta_day -= s_qty * g_s["theta_day"]  # short decay is income
-        port_vega -= s_qty * g_s["vega"]
+        g_s = greeks_from_days("CE", spot, float(short_leg["strike"]), s_dte, s_iv, r=r)
+        short_delta_shares = s_qty * g_s.delta
+        port_gamma -= s_qty * g_s.gamma          # short gamma is negative
+        port_theta_day -= s_qty * g_s.theta  # short decay is income
+        port_vega -= s_qty * g_s.vega
 
     net_delta_shares = long_delta_shares - short_delta_shares
     net_delta_lots = net_delta_shares / max(1, lot_size)
@@ -977,8 +931,8 @@ class NiftyDiagonalCallStrategy:
         ranked = []
         for _, row in matches.iterrows():
             k = float(row["STRIKE_PRICE"])
-            greeks = compute_bs_greeks(spot, k, dte, iv=iv, r=RISK_FREE_RATE, opt_type="CE")
-            ranked.append((abs(greeks["delta"] - self.long_target_delta), int(k), str(row["SECURITY_ID"]), greeks["delta"]))
+            greeks = greeks_from_days("CE", spot, k, dte, iv, r=RISK_FREE_RATE)
+            ranked.append((abs(greeks.delta - self.long_target_delta), int(k), str(row["SECURITY_ID"]), greeks.delta))
         ranked.sort(key=lambda t: t[0])
         if not ranked:
             return None
@@ -1093,8 +1047,8 @@ class NiftyDiagonalCallStrategy:
             quotes = self._ce_quotes(expiry)
             for _, row in matches.iterrows():
                 k = float(row["STRIKE_PRICE"])
-                g = compute_bs_greeks(spot, k, dte, iv=iv, r=RISK_FREE_RATE, opt_type="CE")
-                if min_target_delta <= g["delta"] <= max_target_delta:
+                g = greeks_from_days("CE", spot, k, dte, iv, r=RISK_FREE_RATE)
+                if min_target_delta <= g.delta <= max_target_delta:
                     if not self._is_liquid(quotes.get(int(k))):
                         illiquid += 1
                         continue
@@ -1103,9 +1057,9 @@ class NiftyDiagonalCallStrategy:
                         "strike": int(k),
                         "expiry": expiry,
                         "dte": dte,
-                        "delta": g["delta"],
-                        "diff": abs(g["delta"] - target_delta),
-                        "score": score_short_call(g["theta_day"], g["gamma"]),
+                        "delta": g.delta,
+                        "diff": abs(g.delta - target_delta),
+                        "score": score_short_call(g.theta, g.gamma),
                     })
 
         if not candidates:
@@ -1790,8 +1744,8 @@ class NiftyDiagonalCallStrategy:
                     dte = self._compute_dte(self.long_leg["expiry"])
                     self.long_leg["dte"] = dte
                     self.long_leg["iv"] = curr_iv
-                    g = compute_bs_greeks(spot, float(self.long_leg["strike"]), dte, iv=curr_iv, r=RISK_FREE_RATE, opt_type="CE")
-                    self.long_leg["delta"] = round(g["delta"], 2)
+                    g = greeks_from_days("CE", spot, float(self.long_leg["strike"]), dte, curr_iv, r=RISK_FREE_RATE)
+                    self.long_leg["delta"] = round(g.delta, 2)
 
                 if self.short_leg:
                     sec_id = str(self.short_leg["security_id"])
@@ -1801,8 +1755,8 @@ class NiftyDiagonalCallStrategy:
                     dte = self._compute_dte(self.short_leg["expiry"])
                     self.short_leg["dte"] = dte
                     self.short_leg["iv"] = curr_iv
-                    g = compute_bs_greeks(spot, float(self.short_leg["strike"]), dte, iv=curr_iv, r=RISK_FREE_RATE, opt_type="CE")
-                    self.short_leg["delta"] = round(g["delta"], 2)
+                    g = greeks_from_days("CE", spot, float(self.short_leg["strike"]), dte, curr_iv, r=RISK_FREE_RATE)
+                    self.short_leg["delta"] = round(g.delta, 2)
 
                 # 6. Phantom Leg Detection (Incident 2026-07-30 prevention)
                 if not self.dry_run and time.time() - self.last_phantom_check >= 30.0:
@@ -1815,7 +1769,7 @@ class NiftyDiagonalCallStrategy:
                             "CE",
                             self.long_leg["lots"] * self.lot_size,
                             side="SELL",
-                            log=logger,
+                            log=logger, dry_run=self.dry_run,
                         )
                         if is_phantom:
                             logger.error("FATAL: Long call leg vanished at broker! Emergency flattening short call to prevent naked risk.")
@@ -1829,7 +1783,7 @@ class NiftyDiagonalCallStrategy:
                             "CE",
                             self.short_leg["lots"] * self.lot_size,
                             side="BUY",
-                            log=logger,
+                            log=logger, dry_run=self.dry_run,
                         )
                         if is_short_phantom:
                             logger.warning("Short call leg vanished at broker (closed elsewhere). Marking short leg flat; auto re-sell disabled.")

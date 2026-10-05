@@ -13,6 +13,7 @@ import pandas as pd
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, ROOT)
+from lib.options_pricing import compute_bs_greeks_exact
 from lib.nse_holidays import is_regular_session, effective_expiry_date  # NSE holidays + Muhurat: one shared calendar
 from lib.rolling_straddle_rules import trail_lock_pct, is_balanced, straddle_sl_hit, leg_sl_hit, roll_reason
 
@@ -20,12 +21,10 @@ DB = os.path.join(ROOT, "Options Data", "nifty_options.db")
 
 
 def bs_delta(kind, spot, k, iv_pct, t_years):
+    """Signed delta from lib/options_pricing.py; None when the IV or time is unusable."""
     if iv_pct is None or iv_pct <= 0 or t_years <= 0:
         return None
-    s = iv_pct / 100.0 * math.sqrt(t_years)
-    d1 = (math.log(spot / k) + 0.5 * s * s) / s
-    cdf = 0.5 * (1 + math.erf(d1 / math.sqrt(2)))
-    return cdf if kind == "CE" else cdf - 1.0
+    return compute_bs_greeks_exact(kind, spot, k, t_years, iv_pct / 100.0).delta
 
 
 def order_cost(price, qty, side):

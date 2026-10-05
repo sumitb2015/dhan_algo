@@ -1,7 +1,6 @@
 """
 Unit tests for Nifty Bi-Weekly Adaptive Strangle Strategy pure functions:
-  - compute_bs_delta
-  - compute_bs_vega
+  - greeks_from_days (library delta/vega as this strategy calls them)
   - choose_strangle_strikes
   - evaluate_threat_and_hedging
   - evaluate_directional_conversion
@@ -17,9 +16,8 @@ PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
+from lib.options_pricing import greeks_from_days  # noqa: E402
 from strategies.adaptive_strangle.nifty_adaptive_strangle import (
-    compute_bs_delta,
-    compute_bs_vega,
     choose_strangle_strikes,
     evaluate_threat_and_hedging,
     evaluate_directional_conversion,
@@ -33,20 +31,20 @@ class TestAdaptiveStrangleMath(unittest.TestCase):
         dte = 10.0
 
         # ATM Call should be near ~0.50
-        atm_ce_d = compute_bs_delta(spot, 25000, dte, opt_type="CE")
+        atm_ce_d = greeks_from_days("CE", spot, 25000, dte, 0.15, min_days=0.5).delta
         self.assertAlmostEqual(atm_ce_d, 0.50, delta=0.10)
 
         # ATM Put should be near ~ -0.50
-        atm_pe_d = compute_bs_delta(spot, 25000, dte, opt_type="PE")
+        atm_pe_d = greeks_from_days("PE", spot, 25000, dte, 0.15, min_days=0.5).delta
         self.assertAlmostEqual(atm_pe_d, -0.50, delta=0.10)
 
         # Far OTM Call (25500) should have low positive delta ~ 0.08 - 0.15
-        otm_ce_d = compute_bs_delta(spot, 25500, dte, opt_type="CE")
+        otm_ce_d = greeks_from_days("CE", spot, 25500, dte, 0.15, min_days=0.5).delta
         self.assertGreater(otm_ce_d, 0.0)
         self.assertLess(otm_ce_d, 0.25)
 
         # Far OTM Put (24500) should have low negative delta ~ -0.08 - -0.15
-        otm_pe_d = compute_bs_delta(spot, 24500, dte, opt_type="PE")
+        otm_pe_d = greeks_from_days("PE", spot, 24500, dte, 0.15, min_days=0.5).delta
         self.assertLess(otm_pe_d, 0.0)
         self.assertGreater(otm_pe_d, -0.25)
 
@@ -58,16 +56,16 @@ class TestAdaptiveStrangleMath(unittest.TestCase):
         dte = 10.0
 
         # Vega must be positive
-        atm_vega = compute_bs_vega(spot, 25000, dte)
+        atm_vega = greeks_from_days("CE", spot, 25000, dte, 0.15, min_days=0.5).vega
         self.assertGreater(atm_vega, 0.0)
 
         # Vega peaks near ATM and decays far OTM
-        far_otm_vega = compute_bs_vega(spot, 26000, dte)
+        far_otm_vega = greeks_from_days("CE", spot, 26000, dte, 0.15, min_days=0.5).vega
         self.assertGreater(atm_vega, far_otm_vega)
 
         # Invalid spot or strike returns 0.0
-        self.assertEqual(compute_bs_vega(0, 25000, dte), 0.0)
-        self.assertEqual(compute_bs_vega(25000, 0, dte), 0.0)
+        self.assertEqual(greeks_from_days("CE", 0, 25000, dte, 0.15, min_days=0.5).vega, 0.0)
+        self.assertEqual(greeks_from_days("CE", 25000, 0, dte, 0.15, min_days=0.5).vega, 0.0)
 
     def test_choose_strangle_strikes(self):
         spot = 25000.0

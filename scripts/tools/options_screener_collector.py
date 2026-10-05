@@ -52,6 +52,7 @@ sys.path.insert(0, ROOT)
 
 from lib import dhan_quote_lane  # noqa: E402  (needs ROOT on sys.path)
 from lib.nse_holidays import is_nse_trading_day  # noqa: E402
+from lib.options_pricing import RISK_FREE_RATE, implied_vols  # noqa: E402
 
 DEBUG_DIR = os.path.join(ROOT, 'debug')
 TOKEN_FILE = os.path.join(ROOT, 'access_token.json')
@@ -81,7 +82,6 @@ WINDOWS = (1, 3, 5, 10, 15, 30)
 HISTORY_SEC = 35 * 60
 QUOTE_BATCH = 1000
 QUOTE_GAP_SEC = 1.1
-RISK_FREE = 0.065
 
 # Index option underlyings -> spot (IDX_I security id). Option rows key on a different
 # underlying id (NIFTY options = 26000), so spot is looked up here, not from the option row.
@@ -222,59 +222,6 @@ def read_scope(underlyings, force_all=False):
             if (seg == 'all' or m['kind'] == seg) and (not syms or u in syms):
                 picked.add(u)
     return picked, picked == everything
-
-
-# ---------------------------------------------------------------------------
-# IV — vectorised bisection (Black-Scholes / Black-76)
-# ---------------------------------------------------------------------------
-
-def _norm_cdf(x: np.ndarray) -> np.ndarray:
-    # Abramowitz-Stegun 7.1.26 erf, |error| < 1.5e-7 — plenty for an IV display.
-    z = np.abs(x) / math.sqrt(2.0)
-    t = 1.0 / (1.0 + 0.3275911 * z)
-    poly = t * (0.254829592 + t * (-0.284496736 + t * (1.421413741 + t * (-1.453152027 + t * 1.061405429))))
-    erf = 1.0 - poly * np.exp(-z * z)
-    return 0.5 * (1.0 + np.sign(x) * erf)
-
-
-def _price(S, K, T, sigma, is_call, black76):
-    """Vectorised premium; `black76` picks Black-76 (options on futures) per element."""
-    sq = sigma * np.sqrt(T)
-    disc = np.exp(-RISK_FREE * T)
-    with np.errstate(divide='ignore', invalid='ignore'):
-        # Black-76 on F is Black-Scholes on S = F*disc with the same strike and rate.
-        S_eff = np.where(black76, S * disc, S)
-        d1 = (np.log(S_eff / K) + (RISK_FREE + 0.5 * sigma * sigma) * T) / sq
-        d2 = d1 - sq
-        call = S_eff * _norm_cdf(d1) - K * disc * _norm_cdf(d2)
-        put = K * disc * _norm_cdf(-d2) - S_eff * _norm_cdf(-d1)
-    return np.where(is_call, call, put)
-
-
-def implied_vols(price, S, K, T, is_call, black76) -> np.ndarray:
-    """IV in percent, NaN where the premium sits outside no-arbitrage bounds."""
-    price = np.asarray(price, float)
-    S = np.asarray(S, float)
-    K = np.asarray(K, float)
-    T = np.asarray(T, float)
-    is_call = np.asarray(is_call, bool)
-    black76 = np.asarray(black76, bool)
-    n = len(price)
-    if n == 0:
-        return np.array([])
-    lo = np.full(n, 0.005)
-    hi = np.full(n, 5.0)
-    p_lo = _price(S, K, T, lo, is_call, black76)
-    p_hi = _price(S, K, T, hi, is_call, black76)
-    valid = (price > 0) & (S > 0) & (K > 0) & (T > 0) & (price > p_lo) & (price < p_hi)
-    for _ in range(48):
-        mid = 0.5 * (lo + hi)
-        pm = _price(S, K, T, mid, is_call, black76)
-        up = pm < price
-        lo = np.where(up, mid, lo)
-        hi = np.where(up, hi, mid)
-    iv = 0.5 * (lo + hi) * 100.0
-    return np.where(valid, iv, np.nan)
 
 
 # ---------------------------------------------------------------------------
@@ -638,7 +585,7 @@ class Collector:
             isc.append(r['typ'] == 'CE')
             b76.append(exch == 'MCX')
             P.append(r['ltp'])
-        ivs = implied_vols(P, S, K, T, isc, b76)
+        ivs = implied_vols(P, S, K, T, isc, b76, RISK_FREE_RATE) * 100.0  # library returns fractions; the snapshot stores percent
         for r, iv in zip(recs, ivs):
             r['iv'] = None if np.isnan(iv) else float(iv)
 

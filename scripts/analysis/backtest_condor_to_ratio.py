@@ -22,8 +22,13 @@ import pandas as pd
 import numpy as np
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+if PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, PROJECT_ROOT)
+
+from lib.options_pricing import compute_bs_greeks_exact, price_option, years_from_days  # noqa: E402
 DB_PATH = os.path.join(PROJECT_ROOT, "Options Data", "nifty_options.db")
 BACKTESTS_DIR = os.path.join(PROJECT_ROOT, "debug", "backtests", "options")
+DEBUG_DIR = os.path.join(PROJECT_ROOT, "debug")  # where the dashboard polls backtest_status.json / backtest_result.json
 
 FALLBACK_MARGIN_PER_LOT = 150000.0  # ~1.5L per lot capital base for 4-leg condor / 3-leg ratio
 LOT_SIZE_DEFAULT = 65
@@ -42,44 +47,24 @@ def calc_dhan_cost(txn_type: str, qty: int, price: float) -> float:
     return brokerage + gst_brokerage + exch_charge + gst_exch + stt + stamp + sebi
 
 
-def _norm_cdf(x: float) -> float:
-    return 0.5 * (1.0 + math.erf(x / math.sqrt(2.0)))
+# The maths is lib/options_pricing.py; these two functions only adapt this backtest's inputs (IV in percent with a 14% fallback,
+# calendar days to expiry) to it.
+def _opt(option_type: str) -> str:
+    return "CE" if option_type.upper() in ("CE", "CALL") else "PE"
 
 
-def calculate_bs_delta(spot: float, strike: float, dte_days: float, iv_pct: float, option_type: str, r: float = 0.07) -> float:
+def calculate_bs_delta(spot: float, strike: float, dte_days: float, iv_pct: float, option_type: str) -> float:
     if spot <= 0 or strike <= 0:
-        return 0.5 if option_type.upper() == "CE" else -0.5
-    iv = iv_pct if iv_pct > 1.0 else 14.0
-    T = max(dte_days, 0.001) / 365.0
-    sigma = iv / 100.0
-    denom = sigma * math.sqrt(T)
-    if denom <= 0:
-        return 0.5 if option_type.upper() == "CE" else -0.5
-    d1 = (math.log(spot / strike) + (r + 0.5 * sigma * sigma) * T) / denom
-    if option_type.upper() in ("CE", "CALL"):
-        return _norm_cdf(d1)
-    else:
-        return _norm_cdf(d1) - 1.0
+        return 0.5 if _opt(option_type) == "CE" else -0.5
+    iv = (iv_pct if iv_pct > 1.0 else 14.0) / 100.0
+    return compute_bs_greeks_exact(_opt(option_type), spot, strike, years_from_days(dte_days, 0.001), iv).delta
 
 
-def calculate_bs_price(spot: float, strike: float, dte_days: float, iv_pct: float, option_type: str, r: float = 0.07) -> float:
+def calculate_bs_price(spot: float, strike: float, dte_days: float, iv_pct: float, option_type: str) -> float:
     if spot <= 0 or strike <= 0:
         return 0.05
-    iv = iv_pct if iv_pct > 1.0 else 14.0
-    T = max(dte_days, 0.0001) / 365.0
-    sigma = iv / 100.0
-    denom = sigma * math.sqrt(T)
-    opt = option_type.upper()
-    if denom <= 0:
-        intrinsic = max(0.0, spot - strike) if opt in ("CE", "CALL") else max(0.0, strike - spot)
-        return max(0.05, intrinsic)
-    d1 = (math.log(spot / strike) + (r + 0.5 * sigma * sigma) * T) / denom
-    d2 = d1 - denom
-    if opt in ("CE", "CALL"):
-        price = spot * _norm_cdf(d1) - strike * math.exp(-r * T) * _norm_cdf(d2)
-    else:
-        price = strike * math.exp(-r * T) * _norm_cdf(-d2) - spot * _norm_cdf(-d1)
-    return max(0.05, price)
+    iv = (iv_pct if iv_pct > 1.0 else 14.0) / 100.0
+    return max(0.05, price_option(_opt(option_type), spot, strike, years_from_days(dte_days, 0.0001), iv))
 
 
 @dataclass

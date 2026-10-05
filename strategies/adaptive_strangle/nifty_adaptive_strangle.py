@@ -40,6 +40,9 @@ project_root = _find_project_root(os.path.dirname(__file__))
 if project_root not in sys.path:
     sys.path.insert(0, project_root)
 
+# Pure stdlib (no broker SDK): imported outside the guarded block so the pure functions work even when the SDK imports below fail.
+from lib.options_pricing import greeks_from_days  # noqa: E402
+
 try:
     import pandas as pd
 except ImportError:
@@ -109,34 +112,10 @@ logger = logging.getLogger(__name__)
 
 # ── PURE CALCULATION & GREEK FUNCTIONS ───────────────────────────────────────
 
-def compute_bs_delta(spot: float, strike: float, dte_days: float, iv: float = 0.15, r: float = 0.07, opt_type: str = "CE") -> float:
-    """Standard Black-Scholes delta calculator using math.erf (no external dependencies).
-    Returns signed delta: positive for CE (0.0 to 1.0), negative for PE (-1.0 to 0.0)."""
-    if spot <= 0 or strike <= 0:
-        return 0.0
-    t = max(dte_days, 0.5) / 365.0
-    vol = max(iv, 0.05)
-    sqrt_t = math.sqrt(t)
-    d1 = (math.log(spot / strike) + (r + 0.5 * vol * vol) * t) / (vol * sqrt_t)
-    norm_cdf_d1 = 0.5 * (1.0 + math.erf(d1 / math.sqrt(2.0)))
-    if opt_type.upper() == "CE":
-        return norm_cdf_d1
-    else:
-        return norm_cdf_d1 - 1.0
-
-
-def compute_bs_vega(spot: float, strike: float, dte_days: float, iv: float = 0.15, r: float = 0.07) -> float:
-    """Standard Black-Scholes Vega calculator.
-    Returns 1% Vega: rupee change in option price per 1 percentage point change in IV."""
-    if spot <= 0 or strike <= 0:
-        return 0.0
-    t = max(dte_days, 0.5) / 365.0
-    vol = max(iv, 0.05)
-    sqrt_t = math.sqrt(t)
-    d1 = (math.log(spot / strike) + (r + 0.5 * vol * vol) * t) / (vol * sqrt_t)
-    norm_pdf_d1 = (1.0 / math.sqrt(2.0 * math.pi)) * math.exp(-0.5 * d1 * d1)
-    vega_1pct = (spot * sqrt_t * norm_pdf_d1) / 100.0
-    return max(0.0, vega_1pct)
+# Greeks come from lib/options_pricing.py (parity-tested port of the dashboard's optionsPricing.ts); this strategy only picks its own
+# expiry floor and the IV used when a chain row carries none.
+MIN_DTE_DAYS = 0.5
+DEFAULT_IV = 0.15
 
 
 def pick_leg_by_delta(chain_df: Optional[pd.DataFrame], spot: float, dte_days: float, opt_type: str,
@@ -165,7 +144,7 @@ def pick_leg_by_delta(chain_df: Optional[pd.DataFrame], spot: float, dte_days: f
                 k = int(float(best.name))
                 px = float(best.get(price_col, 0.0))
                 d = float(best[delta_col])
-                vg = float(best.get(vega_col, compute_bs_vega(spot, k, dte_days)))
+                vg = float(best.get(vega_col, greeks_from_days("CE", spot, k, dte_days, DEFAULT_IV, min_days=MIN_DTE_DAYS).vega))
                 return k, px, d, vg
             except Exception:
                 pass
@@ -181,13 +160,13 @@ def pick_leg_by_delta(chain_df: Optional[pd.DataFrame], spot: float, dte_days: f
     for k in candidate_strikes:
         if k <= 0:
             continue
-        d = compute_bs_delta(spot, k, dte_days, opt_type=opt_type)
+        d = greeks_from_days(opt_type, spot, k, dte_days, DEFAULT_IV, min_days=MIN_DTE_DAYS).delta
         diff = abs(abs(d) - target_delta)
         if diff < best_diff:
             best_diff = diff
             best_strike = k
             best_delta = d
-            best_vega = compute_bs_vega(spot, k, dte_days)
+            best_vega = greeks_from_days("CE", spot, k, dte_days, DEFAULT_IV, min_days=MIN_DTE_DAYS).vega
 
     px = 0.0
     if chain_df is not None and not chain_df.empty and price_col in chain_df.columns:
@@ -786,8 +765,8 @@ class NiftyAdaptiveStrangle:
             # Compute current delta and vega
             opt_type = leg["opt_type"]
             k = leg["strike"]
-            d = compute_bs_delta(spot, k, dte_days, opt_type=opt_type)
-            vg = compute_bs_vega(spot, k, dte_days)
+            d = greeks_from_days(opt_type, spot, k, dte_days, DEFAULT_IV, min_days=MIN_DTE_DAYS).delta
+            vg = greeks_from_days("CE", spot, k, dte_days, DEFAULT_IV, min_days=MIN_DTE_DAYS).vega
             leg["delta"] = d
             leg["vega"] = vg
 

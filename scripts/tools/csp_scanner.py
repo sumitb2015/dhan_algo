@@ -29,6 +29,7 @@ sys.path.insert(0, PROJECT_ROOT)
 
 from login import get_dhan_client
 from lib.dhan_helper import DhanHelper
+from lib.options_pricing import RISK_FREE_RATE, norm_cdf, risk_neutral_prob_above
 from live_equity_ws import NIFTY50_SYMBOLS
 
 DEBUG_DIR    = os.path.join(PROJECT_ROOT, "debug")
@@ -38,7 +39,6 @@ STOP_FILE    = os.path.join(DEBUG_DIR, "csp_scan_stop.trigger")
 N500_LIST    = os.path.join(PROJECT_ROOT, "ind_nifty500list.csv")
 STOCKS_DIR   = os.path.join(PROJECT_ROOT, "Daily_Historical_Data_Fresh")
 
-RISK_FREE_RATE = 0.065
 MIN_DTE = 5
 IST = ZoneInfo("Asia/Kolkata")
 HISTORY_STALE_DAYS = 3
@@ -101,21 +101,6 @@ def write_status(message: str, current: int = 0, total: int = 0,
 
 def should_stop() -> bool:
     return os.path.exists(STOP_FILE)
-
-
-# ── Math ─────────────────────────────────────────────────────────────────────
-def norm_cdf(x: float) -> float:
-    return 0.5 * (1.0 + math.erf(x / math.sqrt(2.0)))
-
-
-def prob_above(spot: float, strike: float, years: float, iv: float,
-               r: float = RISK_FREE_RATE) -> float:
-    """Risk-neutral probability spot finishes above strike — i.e. the PUT
-    expires worthless. Mirrors riskNeutralProbAbove() in lib/optionsStrategy.ts."""
-    if years <= 0 or iv <= 0 or spot <= 0 or strike <= 0:
-        return 1.0 if spot > strike else 0.0
-    d2 = (math.log(spot / strike) + (r - (iv * iv) / 2) * years) / (iv * math.sqrt(years))
-    return norm_cdf(d2)
 
 
 # ── Universe ─────────────────────────────────────────────────────────────────
@@ -309,7 +294,7 @@ def scan_symbol(helper: DhanHelper, symbol: str, lot_size: int,
             "premium": premium,
             "iv": iv,
             "oi": oi,
-            "noHitProb": prob_above(spot, strike, years, iv),
+            "noHitProb": risk_neutral_prob_above(spot, strike, years, iv),
         })
 
     if not candidates:

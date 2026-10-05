@@ -132,8 +132,8 @@ export interface AdjustmentAction {
 
 /**
  * Spot Black-Scholes Greeks for a Nifty option, from the central pricing library (lib/optionsPricing.ts: one formula, one rate,
- * one convention). Mirrors strategies/diagonal_call/nifty_diagonal_call.py::compute_bs_greeks, which uses the same rate and floors
- * (a test pins the two rates together).
+ * one convention). The Python strategy prices through lib/options_pricing.py (greeks_from_days), the parity-tested port of that library, with the same
+ * rate and expiry floor (a test pins them together).
  *
  * @param spot Current spot underlying price
  * @param strike Strike price
