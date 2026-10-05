@@ -1558,6 +1558,16 @@ function OverallSettingsControls({ row, onUpdate }: { row: FocusRow; onUpdate: (
   );
 }
 
+/** A recessed, titled group for the row's settings (see dhan-terminal-polish). */
+function SettingsCard({ title, children }: { title: string; children: React.ReactNode }) {
+  return (
+    <section className="flex flex-col gap-1.5 rounded-xl border border-zinc-800/60 bg-zinc-950/40 px-3 py-2">
+      <h4 className="text-[10px] font-black uppercase tracking-wider text-zinc-500">{title}</h4>
+      {children}
+    </section>
+  );
+}
+
 /**
  * Leg exits and what follows them — AlgoTest-style "Re-Entry on SL / Tgt"
  * (sell side only), No re-entry after, leg target (% or points), and SL → cost.
@@ -1621,16 +1631,20 @@ function LegReentryControls({ row, onUpdate, onCancelPending, legTargetsElsewher
   };
 
   return (
-    <div className={cn('flex flex-col gap-1', txt)}>
-      <StrikeCriteriaControl row={row} onUpdate={onUpdate} />
-      <EntryMomentumControl row={row} onUpdate={onUpdate} />
+    <div className={cn('flex flex-col gap-2', txt)}>
+     <div className="grid grid-cols-1 lg:grid-cols-2 2xl:grid-cols-3 gap-2 items-start">
+      <SettingsCard title="Entry · Strike & sizing">
+        <StrikeCriteriaControl row={row} onUpdate={onUpdate} />
+      </SettingsCard>
+      <SettingsCard title="Entry · Momentum & range gates">
+        <EntryMomentumControl row={row} onUpdate={onUpdate} />
+      </SettingsCard>
+      <SettingsCard title="Leg exits & re-entry">
       <div className="flex flex-wrap items-center gap-2">
         {modeSelect('sl')}
         {modeSelect('tgt')}
       </div>
       <LegStopRulesControl row={row} onUpdate={onUpdate} />
-      <LazyLegsEditor row={row} onUpdate={onUpdate} />
-      <OverallSettingsControls row={row} onUpdate={onUpdate} />
       <div className="flex flex-wrap items-center gap-2">
         {!legTargetsElsewhere && (<>
         <label className={lbl} title={`CE leg target: exit CE alone once it has moved this many ${tgtUnitWord}. Blank = off`}>
@@ -1656,6 +1670,16 @@ function LegReentryControls({ row, onUpdate, onCancelPending, legTargetsElsewher
               onChange={v => onUpdate({ slRollStrikes: Number(v) })} className="w-12" />
           </div>
         )}
+      </div>
+      </SettingsCard>
+      <SettingsCard title="Lazy legs">
+        <LazyLegsEditor row={row} onUpdate={onUpdate} />
+      </SettingsCard>
+      <SettingsCard title="Overall strategy (SL · target · trail)">
+        <OverallSettingsControls row={row} onUpdate={onUpdate} />
+      </SettingsCard>
+      <SettingsCard title="Timing & square-off">
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
         {anyOn && (
           <span className={lbl} title="A stop / target hit at or after this time takes no re-entry. A cost / momentum re-entry armed before it still fires after it (AlgoTest counts when the stop / target hit)">
             No RE after
@@ -1692,6 +1716,8 @@ function LegReentryControls({ row, onUpdate, onCancelPending, legTargetsElsewher
             onChange={v => onUpdate({ slToCostScope: v as 'sl' | 'all' })} className="w-24" />
         )}
       </div>
+      </SettingsCard>
+     </div>
       <LegReentryPendingChips row={row} onCancelPending={onCancelPending} />
     </div>
   );
