@@ -1,21 +1,24 @@
 'use client';
 
 /**
- * Payoff-at-expiry chart for the strategy builder & multi-leg terminals.
+ * THE payoff chart. Every page that draws a strategy payoff renders this component, fed by lib/optionsPayoff.ts
+ * (`buildPayoffModel`), so the maths and the look cannot drift between pages.
  *
- * Hand-rolled SVG with clip-path-per-sign technique:
- * - Green fill/line above zeroY, red fill/line below zeroY.
- * - Today (T+0) live mark-to-market Black-Scholes curve (blue #2d7ff9).
- * - Optional What-If time decay target curve (amber dashed #f59e0b).
- * - Leg strike pins on X-axis (peaks & kinks linked to option legs).
- * - Expected move (±1SD) shaded zone based on ATM IV.
- * - Strategy metrics strip: Max Profit (+ ROM %), Max Loss, R:R, POP.
- * - Theme-token compliant: adapts seamlessly to Dark, White, and Beige themes.
+ * Draws: the nearest-expiry curve (neutral line, green/red fill by sign), today's mark-to-market curve (T+0, blue), the what-if
+ * curve (amber dashed, driven by the Time Decay / IV Shift sliders), the ±1 SD band, break-even markers, leg-strike pins and the
+ * live spot. Header: spot, break-evens, max profit (+ ROM), max loss, R:R, POP and net Greeks. Controls: What-If, zoom, full screen.
+ * Theme-token compliant (dark / white / beige): colours are tokens, never hex.
  */
 
-import React, { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { createPortal } from 'react-dom';
-import { Maximize2, Minimize2, ZoomIn, ZoomOut, RotateCcw, SlidersHorizontal } from 'lucide-react';
+import {
+  ComposedChart, Area, Line, XAxis, YAxis, CartesianGrid, Tooltip as RTooltip, ResponsiveContainer,
+  ReferenceLine, ReferenceArea, ReferenceDot,
+} from 'recharts';
+import { Maximize2, Minimize2, ZoomIn, ZoomOut, RotateCcw, SlidersHorizontal, AlertTriangle } from 'lucide-react';
+import { cn } from '@/lib/utils';
+import type { PayoffModel } from '@/lib/optionsPayoff';
 
 export interface StrikeMarker {
   strike: number;
@@ -35,63 +38,93 @@ export interface PayoffDiagramProps {
   curve: { spot: number; pnl: number }[];
   currentSpot: number;
   breakevens: number[];
-  /** Live mark-to-market curve — each leg priced today (Black-76/Black-Scholes
-   *  at current spot, IV and time-to-expiry) rather than at intrinsic value. */
+  /** Live mark-to-market curve: each leg priced today at its own IV and time to expiry. */
   todayCurve?: { spot: number; pnl: number }[];
 
-  /** Projected time-decay simulation curve at T+targetDays */
+  /** What-if curve at T+targetDays and an IV shift. */
   targetCurve?: { spot: number; pnl: number }[];
   targetDays?: number;
   maxDays?: number;
   onTargetDaysChange?: (days: number) => void;
 
-  /** IV Shift simulation (% change, e.g. -5 for -5% IV) */
+  /** IV shift in vol points (e.g. -5 = 5 points lower). */
   ivShift?: number;
   onIvShiftChange?: (shift: number) => void;
 
-  /** Key strategy metrics overlay (OpenAlgo institutional style) */
   maxProfit?: number | null;
   maxProfitUnlimited?: boolean;
   maxLoss?: number | null;
   maxLossUnlimited?: boolean;
-  rom?: number | null; // Return on margin %
-  pop?: number | null; // Probability of Profit %
+  rom?: number | null;
+  pop?: number | null;
   riskReward?: string | null;
 
-  /** Net strategy Greeks overlay */
   netGreeks?: NetGreeks | null;
 
-  /** Active leg strikes to pin on the X-axis */
+  /** Leg strikes to pin on the price axis. */
   strikes?: StrikeMarker[];
 
-  /** Expected move (±1SD band) */
-  expectedMove?: {
-    sd1Lo: number;
-    sd1Hi: number;
-  } | null;
+  /** ±1 SD band, and optionally the ±2 SD lines. */
+  expectedMove?: { sd1Lo: number; sd1Hi: number; sd2Lo?: number; sd2Hi?: number } | null;
+
+  /** What-if overlay: the book plus hypothetical draft legs, at expiry (violet dashed). */
+  draftCurve?: { spot: number; pnl: number }[] | null;
+
+  /** Open-interest histogram on its own right-hand axis (calls rose, puts green), toggled by the page. */
+  oiBars?: { strike: number; callOi: number; putOi: number }[];
+  showOi?: boolean;
+  onToggleOi?: () => void;
+
+  /** A target price the user is probing (slider): drawn as a marker with the P&L of each curve at that price. */
+  targetSpot?: number;
+
+  /** Legend names, e.g. { expiry: '28 Oct', today: '+3d' }. */
+  legendLabels?: { expiry?: string; today?: string; target?: string };
+
+  /** When the page owns the price window (it regenerates the curve for a span), zoom is delegated to it. */
+  externalZoom?: { onZoomIn: () => void; onZoomOut: () => void; canZoomIn: boolean; canZoomOut: boolean };
+
+  /** A warning strip above the chart (e.g. legs priced without IV). */
+  warning?: React.ReactNode;
+
+  /** Heading (default "Strategy payoff"; pass '' when the page already has a panel title), a note under the chart, and extra header controls (e.g. a P&L Table button). */
+  title?: string;
+  note?: React.ReactNode;
+  headerExtras?: React.ReactNode;
+  /** Chart height in px when not full screen (default 340). */
+  height?: number;
 }
 
-const TODAY_COLOR = '#2d7ff9'; // matches Options Monitor's PAYOFF_TODAY
-const TARGET_COLOR = '#f59e0b'; // amber dashed line for What-If time decay simulation
+/** Everything the chart reads from a payoff model, so a page spreads this instead of repeating a long prop list. */
+export function modelToDiagramProps(m: PayoffModel): Pick<
+  PayoffDiagramProps,
+  'curve' | 'todayCurve' | 'targetCurve' | 'breakevens' | 'maxProfit' | 'maxProfitUnlimited' | 'maxLoss' | 'maxLossUnlimited' |
+  'rom' | 'pop' | 'riskReward' | 'netGreeks' | 'strikes' | 'expectedMove'
+> {
+  return {
+    curve: m.points, todayCurve: m.today, targetCurve: m.target ?? undefined, breakevens: m.breakevens,
+    maxProfit: m.maxProfit, maxProfitUnlimited: m.maxProfitUnlimited, maxLoss: m.maxLoss, maxLossUnlimited: m.maxLossUnlimited,
+    rom: m.rom, pop: m.pop, riskReward: m.riskReward, netGreeks: m.netGreeks, strikes: m.strikes, expectedMove: m.expectedMove,
+  };
+}
 
 const STEP = 50;
-const H = 320;
-const PAD = { top: 24, right: 24, bottom: 38, left: 68 };
-
-// Zoom multipliers for X domain. 1 = default view scaled to breakevens/spot
 const MIN_ZOOM = 0.35;
 const MAX_ZOOM = 3;
 const ZOOM_STEP = 1.35;
 
-function fmtInr(v: number): string {
-  if (v === 0) return '0';
-  const abs = Math.abs(v);
-  const sign = v > 0 ? '+' : '-';
-  if (abs >= 1000) return `${sign}₹${(abs / 1000).toFixed(1).replace('.0', '')}k`;
-  return `${sign}₹${abs.toFixed(0)}`;
-}
+const axisInr = (v: number) => {
+  const a = Math.abs(v);
+  const s = a >= 1e7 ? `${(a / 1e7).toFixed(1)}Cr` : a >= 1e5 ? `${(a / 1e5).toFixed(a >= 1e6 ? 0 : 1)}L` : a >= 1e3 ? `${Math.round(a / 1e3)}k` : `${Math.round(a)}`;
+  return v < 0 ? `−${s}` : v > 0 ? s : '0';
+};
 
-/** "Nice" tick values covering [lo, hi] — same helper as PositionsPayoffChart. */
+const inr = (v: number, signed = false) => {
+  const s = `₹${Math.round(Math.abs(v)).toLocaleString('en-IN')}`;
+  return v < 0 ? `−${s}` : signed && v > 0 ? `+${s}` : s;
+};
+
+/** "Nice" tick values covering [lo, hi]. */
 function niceTicks(lo: number, hi: number, count: number): number[] {
   const span = hi - lo;
   if (span <= 0) return [lo];
@@ -119,85 +152,59 @@ export function pnlAt(curve: { spot: number; pnl: number }[], spot: number): num
   return a.pnl + ((spot - a.spot) / (b.spot - a.spot)) * (b.pnl - a.pnl);
 }
 
-export default function PayoffDiagram({
-  curve,
-  currentSpot,
-  breakevens,
-  todayCurve,
-  targetCurve,
-  targetDays,
-  maxDays,
-  onTargetDaysChange,
-  ivShift,
-  onIvShiftChange,
-  maxProfit,
-  maxProfitUnlimited,
-  maxLoss,
-  maxLossUnlimited,
-  rom,
-  pop,
-  riskReward,
-  netGreeks,
-  strikes,
-  expectedMove,
-}: PayoffDiagramProps) {
-  const uid = useId().replace(/[^a-zA-Z0-9_-]/g, '');
-  const profitClipId = `sb-clip-profit-${uid}`;
-  const lossClipId = `sb-clip-loss-${uid}`;
+function Stat({ label, value, tone, title }: { label: string; value: React.ReactNode; tone?: 'good' | 'bad' | 'warn' | 'info'; title?: string }) {
+  return (
+    <div className="min-w-0" title={title}>
+      <p className="text-xs text-zinc-500 font-medium">{label}</p>
+      <p className={cn(
+        'text-sm font-bold tabular-nums tracking-tight',
+        tone === 'good' ? 'text-emerald-400' : tone === 'bad' ? 'text-red-400' : tone === 'warn' ? 'text-amber-400'
+          : tone === 'info' ? 'text-sky-400' : 'text-zinc-100',
+      )}>
+        {value}
+      </p>
+    </div>
+  );
+}
 
-  const svgRef = useRef<SVGSVGElement | null>(null);
-  const [hoverSpot, setHoverSpot] = useState<number | null>(null);
-  const [boxW, setBoxW] = useState(900);
+interface Row { spot: number; expiry: number; expPos: number; expNeg: number; today: number | null; target: number | null; draft: number | null }
+
+export default function PayoffDiagram({
+  curve, currentSpot, breakevens, todayCurve, targetCurve, targetDays, maxDays, onTargetDaysChange, ivShift, onIvShiftChange,
+  maxProfit, maxProfitUnlimited, maxLoss, maxLossUnlimited, rom, pop, riskReward, netGreeks, strikes, expectedMove,
+  title = 'Strategy payoff', note, headerExtras, height = 340,
+  draftCurve, oiBars, showOi, onToggleOi, targetSpot, legendLabels, externalZoom, warning,
+}: PayoffDiagramProps) {
   const [full, setFull] = useState(false);
   const [zoom, setZoom] = useState(1);
   const [showSimulator, setShowSimulator] = useState(false);
-  const roRef = useRef<ResizeObserver | null>(null);
+  const [winH, setWinH] = useState(800);
 
-  const boxRef = useCallback((el: HTMLDivElement | null) => {
-    roRef.current?.disconnect();
-    roRef.current = null;
-    if (!el || typeof ResizeObserver === 'undefined') return;
-    const ro = new ResizeObserver(([entry]) => setBoxW(entry.contentRect.width));
-    ro.observe(el);
-    roRef.current = ro;
-    setBoxW(el.clientWidth);
+  useEffect(() => {
+    const on = () => setWinH(window.innerHeight);
+    on();
+    window.addEventListener('resize', on);
+    return () => window.removeEventListener('resize', on);
   }, []);
-
-  useEffect(() => () => roRef.current?.disconnect(), []);
 
   useEffect(() => {
     if (!full) return;
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') setFull(false);
-    };
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setFull(false); };
     window.addEventListener('keydown', onKey);
-    const origOverflow = document.body.style.overflow;
+    const orig = document.body.style.overflow;
     document.body.style.overflow = 'hidden';
-    return () => {
-      window.removeEventListener('keydown', onKey);
-      document.body.style.overflow = origOverflow;
-    };
+    return () => { window.removeEventListener('keydown', onKey); document.body.style.overflow = orig; };
   }, [full]);
 
-  const W = Math.max(480, Math.round(boxW));
-  const H_ = full ? Math.max(540, typeof window !== 'undefined' ? window.innerHeight - 150 : 540) : H;
-
   const model = useMemo(() => {
-    if (curve.length === 0) return null;
+    const hasDraftCurve = !!draftCurve && draftCurve.length >= 2;
+    // A draft curve is the book plus hypothetical legs, so its strike set (and x-range) is always at least the book's.
+    if (curve.length < 2 && !hasDraftCurve) return null;
+    const domainCurve = curve.length >= 2 ? curve : draftCurve!;
 
-    // --- Smart X domain: scaled to the breakevens & strikes ---
-    const allStrikes = [
-      ...curve
-        .filter((_, i) => i === 0 || i === curve.length - 1 ||
-          Math.abs(curve[i].pnl - curve[i - 1].pnl) > 0) // strike kinks
-        .map((c) => c.spot),
-      ...(strikes ? strikes.map((s) => s.strike) : []),
-    ];
-
-    const coreX = breakevens.length > 0 ? [...breakevens, currentSpot] : [currentSpot];
-    if (strikes && strikes.length > 0) {
-      coreX.push(...strikes.map((s) => s.strike));
-    }
+    // X domain: scaled to the break-evens, strikes and spot, widened by zoom.
+    const pinStrikes = strikes ? strikes.map(s => s.strike) : [];
+    const coreX = [...(breakevens.length > 0 ? breakevens : []), currentSpot, ...pinStrikes];
     const coreMin = Math.min(...coreX);
     const coreMax = Math.max(...coreX);
     const coreSpan = Math.max(coreMax - coreMin, STEP * 2);
@@ -205,727 +212,324 @@ export default function PayoffDiagram({
     const center = (coreMin + coreMax) / 2;
     const baseHalf = coreSpan / 2 + corePad;
 
-    const fullX = [...coreX, ...allStrikes];
-    if (expectedMove) {
-      fullX.push(expectedMove.sd1Lo, expectedMove.sd1Hi);
-    }
+    const dLo = hasDraftCurve ? Math.min(domainCurve[0].spot, draftCurve![0].spot) : domainCurve[0].spot;
+    const dHi = hasDraftCurve ? Math.max(domainCurve[domainCurve.length - 1].spot, draftCurve![draftCurve!.length - 1].spot) : domainCurve[domainCurve.length - 1].spot;
+    const fullX = [...coreX, dLo, dHi];
+    if (expectedMove) fullX.push(expectedMove.sd1Lo, expectedMove.sd1Hi);
     const fullMin = Math.min(...fullX);
     const fullMax = Math.max(...fullX);
     const fullPad = Math.max(STEP * 4, (fullMax - fullMin) * 0.12);
     const fullHalf = Math.max(fullMax - center, center - fullMin, baseHalf) + fullPad;
 
-    const clampedZoom = Math.min(Math.max(zoom, MIN_ZOOM), MAX_ZOOM);
-    const half = Math.min(Math.max(baseHalf * clampedZoom, STEP * 2), fullHalf * 1.15);
-    const curveMin = curve[0].spot;
-    const curveMax = curve[curve.length - 1].spot;
-    const xLo = Math.max(curveMin, center - half);
-    const xHi = Math.min(curveMax, center + half);
+    const z = Math.min(Math.max(zoom, MIN_ZOOM), MAX_ZOOM);
+    const half = Math.min(Math.max(baseHalf * z, STEP * 2), fullHalf * 1.15);
+    // When the page owns the price window it regenerates the curve for each span, so we show the curve's own extent.
+    const xLo = externalZoom ? dLo : Math.max(dLo, center - half);
+    const xHi = externalZoom ? dHi : Math.min(dHi, center + half);
     if (xHi - xLo < 1e-4) return null;
     const atMinZoom = half <= STEP * 2 + 1e-6;
     const atMaxZoom = half >= fullHalf * 1.15 - 1e-6;
 
-    // Exact edge interpolation so curves cleanly touch the left (xLo) and right (xHi) boundaries
-    const pnlAtLo = pnlAt(curve, xLo);
-    const pnlAtHi = pnlAt(curve, xHi);
-    const visiblePoints = curve.filter((c) => c.spot > xLo + 1e-4 && c.spot < xHi - 1e-4);
-    const visible = [
-      ...(pnlAtLo !== null ? [{ spot: xLo, pnl: pnlAtLo }] : []),
-      ...visiblePoints,
-      ...(pnlAtHi !== null ? [{ spot: xHi, pnl: pnlAtHi }] : []),
-    ];
-    if (visible.length < 2) return null;
+    // One row per sample inside the window, plus exact edge rows so every line touches both borders.
+    const xs = [xLo, ...domainCurve.map(c => c.spot).filter(x => x > xLo + 1e-4 && x < xHi - 1e-4), xHi];
+    const rows: Row[] = xs.map(x => {
+      const e = curve.length >= 2 ? (pnlAt(curve, x) ?? 0) : 0;
+      return {
+        spot: x, expiry: e, expPos: Math.max(e, 0), expNeg: Math.min(e, 0),
+        today: todayCurve ? pnlAt(todayCurve, x) : null,
+        target: targetCurve ? pnlAt(targetCurve, x) : null,
+        draft: hasDraftCurve ? pnlAt(draftCurve!, x) : null,
+      };
+    });
 
-    const visibleToday = todayCurve ? (() => {
-      const todayLo = pnlAt(todayCurve, xLo);
-      const todayHi = pnlAt(todayCurve, xHi);
-      const todayMid = todayCurve.filter((c) => c.spot > xLo + 1e-4 && c.spot < xHi - 1e-4);
-      return [
-        ...(todayLo !== null ? [{ spot: xLo, pnl: todayLo }] : []),
-        ...todayMid,
-        ...(todayHi !== null ? [{ spot: xHi, pnl: todayHi }] : []),
-      ];
-    })() : [];
+    // Y domain: clamp only an explicitly unlimited tail (never a defined-risk book), keep zero in view.
+    const pnls = rows.flatMap(r => [r.expiry, ...(r.today !== null ? [r.today] : []), ...(r.target !== null ? [r.target] : []), ...(r.draft !== null ? [r.draft] : [])]);
+    const rawMin = Math.min(...pnls);
+    const rawMax = Math.max(...pnls);
+    let yMin = rawMin;
+    if (maxLossUnlimited) yMin = rawMax > 0 ? Math.max(rawMin, -rawMax * 2.2) : rawMin * 1.1;
+    let yMax = rawMax;
+    if (maxProfitUnlimited) yMax = rawMin < 0 ? Math.min(rawMax, Math.abs(rawMin) * 2.2) : rawMax * 1.1;
+    const lo0 = Math.min(0, yMin);
+    const hi0 = Math.max(0, yMax);
+    const pad = (hi0 - lo0) * 0.08 || 1;
+    const yLo = lo0 - pad;
+    const yHi = hi0 + pad;
 
-    const visibleTarget = targetCurve ? (() => {
-      const targetLo = pnlAt(targetCurve, xLo);
-      const targetHi = pnlAt(targetCurve, xHi);
-      const targetMid = targetCurve.filter((c) => c.spot > xLo + 1e-4 && c.spot < xHi - 1e-4);
-      return [
-        ...(targetLo !== null ? [{ spot: xLo, pnl: targetLo }] : []),
-        ...targetMid,
-        ...(targetHi !== null ? [{ spot: xHi, pnl: targetHi }] : []),
-      ];
-    })() : [];
-
-    // --- Smart Y domain: clamp so zero-crossing is prominent ---
-    // Only clamp undefined-risk tails when risk/profit is explicitly unlimited (e.g. naked short or naked long).
-    // NEVER clamp defined-risk strategies (Iron Fly, Iron Condor, Spreads) where profit or loss is fixed.
-    const visiblePnls = [
-      ...visible.map((c) => c.pnl),
-      ...visibleToday.map((c) => c.pnl),
-      ...visibleTarget.map((c) => c.pnl),
-    ];
-    const rawYMin = Math.min(...visiblePnls);
-    const rawYMax = Math.max(...visiblePnls);
-    let clampedYMin = rawYMin;
-    if (maxLossUnlimited) {
-      clampedYMin = rawYMax > 0 ? Math.max(rawYMin, -rawYMax * 2.2) : rawYMin * 1.1;
-    }
-    let clampedYMax = rawYMax;
-    if (maxProfitUnlimited) {
-      clampedYMax = rawYMin < 0 ? Math.min(rawYMax, Math.abs(rawYMin) * 2.2) : rawYMax * 1.1;
-    }
-    const yMinWithZero = Math.min(0, clampedYMin);
-    const yMaxWithZero = Math.max(0, clampedYMax);
-    const yPad = (yMaxWithZero - yMinWithZero) * 0.08 || 1;
-    const yLo = yMinWithZero - yPad;
-    const yHi = yMaxWithZero + yPad;
-
-    const sx = (x: number) => PAD.left + ((x - xLo) / (xHi - xLo)) * (W - PAD.left - PAD.right);
-    const sy = (y: number) => PAD.top + ((yHi - y) / (yHi - yLo)) * (H_ - PAD.top - PAD.bottom);
-
-    const line = visible.map((p, i) => `${i ? 'L' : 'M'}${sx(p.spot).toFixed(1)},${sy(p.pnl).toFixed(1)}`).join('');
-    const area = `${line}L${sx(xHi).toFixed(1)},${sy(0).toFixed(1)}L${sx(xLo).toFixed(1)},${sy(0).toFixed(1)}Z`;
-    const todayLine = visibleToday.length >= 2
-      ? visibleToday.map((p, i) => `${i ? 'L' : 'M'}${sx(p.spot).toFixed(1)},${sy(p.pnl).toFixed(1)}`).join('')
-      : null;
-    const targetLine = visibleTarget.length >= 2
-      ? visibleTarget.map((p, i) => `${i ? 'L' : 'M'}${sx(p.spot).toFixed(1)},${sy(p.pnl).toFixed(1)}`).join('')
-      : null;
-
-    const visibleStrikes = strikes
-      ? strikes.filter((s) => s.strike >= xLo && s.strike <= xHi)
-      : [];
+    // OI bars share the price axis but get their own right-hand scale (max bar = ~42% of the plot height), so a 60-lakh OI never
+    // dictates the rupee axis the P&L is read against.
+    const visibleOi = (oiBars ?? []).filter(b => b.strike >= xLo && b.strike <= xHi);
+    const maxOi = visibleOi.length ? Math.max(...visibleOi.flatMap(b => [b.callOi, b.putOi])) : 0;
+    const gaps = visibleOi.slice(1).map((b, i) => b.strike - visibleOi[i].strike).filter(g => g > 0);
+    const strikeGap = gaps.length ? Math.min(...gaps) : 50;
 
     return {
-      xLo, xHi, yLo, yHi, sx, sy, line, area, todayLine, targetLine,
-      zeroY: sy(0),
-      xTicks: niceTicks(xLo, xHi, 6),
-      yTicks: niceTicks(yLo, yHi, 7),
-      visible,
-      visibleToday,
-      visibleTarget,
-      visibleStrikes,
-      atMinZoom,
-      atMaxZoom,
+      xLo, xHi, yLo, yHi, rows, atMinZoom, atMaxZoom,
+      xTicks: niceTicks(xLo, xHi, 7),
+      yTicks: niceTicks(yLo, yHi, 6),
+      pins: (strikes ?? []).filter(s => s.strike >= xLo && s.strike <= xHi),
+      visibleOi, maxOi, oiAxisMax: maxOi > 0 ? maxOi / 0.42 : 1, barHalf: Math.max(strikeGap * 0.17, 1),
     };
-  }, [curve, todayCurve, targetCurve, currentSpot, breakevens, strikes, expectedMove, W, H_, zoom]);
+  }, [curve, todayCurve, targetCurve, draftCurve, oiBars, currentSpot, breakevens, strikes, expectedMove, zoom, externalZoom, maxLossUnlimited, maxProfitUnlimited]);
+
+  const chartH = full ? Math.max(380, winH - 230) : height;
+  const hasToday = !!todayCurve && todayCurve.length >= 2;
+  const hasTarget = !!targetCurve && targetCurve.length >= 2;
+  const hasDraft = !!draftCurve && draftCurve.length >= 2;
+  const hasExpiry = curve.length >= 2;
+  const todayName = legendLabels?.today ?? 'Today';
+  const expiryName = legendLabels?.expiry ? `At expiry (${legendLabels.expiry})` : 'At expiry';
+  const targetName = legendLabels?.target ?? 'What-if';
+  const simActive = (targetDays !== undefined && targetDays > 0) || (ivShift !== undefined && ivShift !== 0);
+
+  // recharts' content prop is loosely typed (payload entries are unknown); the row shape is ours.
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const tooltipContent = useCallback(({ active, payload }: any) => {
+    if (!active || !payload?.length) return null;
+    const r = payload[0].payload as Row;
+    return (
+      <div className="rounded-lg border border-zinc-700 bg-zinc-900 px-3 py-2 text-xs shadow-lg">
+        <p className="font-semibold text-zinc-100 mb-1">Nifty {Math.round(r.spot).toLocaleString('en-IN')}</p>
+        {hasExpiry && <p className="tabular-nums text-zinc-300">{expiryName} <span className={cn('font-semibold', r.expiry >= 0 ? 'text-emerald-400' : 'text-red-400')}>{inr(r.expiry, true)}</span></p>}
+        {r.today !== null && <p className="tabular-nums text-zinc-300">{todayName} <span className="font-semibold text-sky-400">{inr(r.today, true)}</span></p>}
+        {r.target !== null && <p className="tabular-nums text-zinc-300">{targetName} <span className="font-semibold text-amber-400">{inr(r.target, true)}</span></p>}
+        {r.draft !== null && <p className="tabular-nums text-zinc-300">With draft <span className="font-semibold text-violet-400">{inr(r.draft, true)}</span></p>}
+      </div>
+    );
+  }, [hasExpiry, expiryName, todayName, targetName]);
 
   if (!model) return null;
 
-  const { sx, sy, xLo, xHi, zeroY } = model;
-
-  const readoutSpot = hoverSpot ?? currentSpot;
-  const readoutPnl = pnlAt(model.visible, readoutSpot);
-  const readoutPnlToday = model.visibleToday.length >= 2 ? pnlAt(model.visibleToday, readoutSpot) : null;
-  const readoutPnlTarget = model.visibleTarget.length >= 2 ? pnlAt(model.visibleTarget, readoutSpot) : null;
-
-  let tooltipRows = 2;
-  if (readoutPnlToday !== null) tooltipRows++;
-  if (readoutPnlTarget !== null) tooltipRows++;
-  const tooltipHeight = 16 + tooltipRows * 14;
-
-  const onMove = (e: React.MouseEvent<SVGSVGElement>) => {
-    const rect = svgRef.current?.getBoundingClientRect();
-    if (!rect) return;
-    const px = ((e.clientX - rect.left) / rect.width) * W;
-    const frac = (px - PAD.left) / (W - PAD.left - PAD.right);
-    if (frac < 0 || frac > 1) { setHoverSpot(null); return; }
-    setHoverSpot(xLo + frac * (xHi - xLo));
-  };
-
-  const tooltipLeft = sx(readoutSpot) > W * 0.6;
-
-  const chart = (
-    <div
-      ref={boxRef}
-      className={
-        full
-          ? 'fixed inset-0 z-50 overflow-auto bg-zinc-950 p-4 md:p-6 flex flex-col'
-          : 'w-full flex flex-col'
-      }
-    >
-      {/* Chart Header & Controls */}
-      <div className="flex items-center justify-between pb-2 px-0.5 border-b border-zinc-800/80 mb-2 shrink-0 flex-wrap gap-2">
-        <div className="flex items-center gap-2 flex-wrap">
-          <span className="text-xs font-bold uppercase tracking-wider text-zinc-300">
-            Strategy Payoff at Expiry
-          </span>
-          {currentSpot > 0 && (
-            <span className="text-[11px] font-mono px-2 py-0.5 rounded bg-zinc-850 border border-zinc-700 text-sky-400 font-semibold">
-              Spot: {currentSpot.toLocaleString('en-IN')}
-            </span>
-          )}
-          {breakevens.length > 0 && (
-            <span className="text-[11px] font-mono px-2 py-0.5 rounded bg-amber-500/10 border border-amber-500/20 text-amber-400 font-semibold">
-              BE: {breakevens.map((b) => b.toFixed(0)).join(', ')}
-            </span>
-          )}
-          {maxProfit !== undefined && maxProfit !== null && (
-            <span className="text-[11px] font-mono px-2 py-0.5 rounded bg-emerald-500/10 border border-emerald-500/20 text-emerald-400 font-semibold">
-              Max Profit: {maxProfitUnlimited ? 'Unlimited' : `+₹${Math.round(maxProfit).toLocaleString('en-IN')}`}
-              {rom ? ` (${rom.toFixed(1)}% ROM)` : ''}
-            </span>
-          )}
-          {maxLoss !== undefined && maxLoss !== null && (
-            <span className="text-[11px] font-mono px-2 py-0.5 rounded bg-rose-500/10 border border-rose-500/20 text-rose-400 font-semibold">
-              Max Loss: {maxLossUnlimited ? 'Unlimited' : `${maxLoss < 0 ? '-' : ''}₹${Math.round(Math.abs(maxLoss)).toLocaleString('en-IN')}`}
-            </span>
-          )}
-          {riskReward && (
-            <span className="text-[11px] font-mono px-2 py-0.5 rounded bg-zinc-850 border border-zinc-700 text-zinc-300">
-              R:R {riskReward}
-            </span>
-          )}
-          {pop !== undefined && pop !== null && (
-            <span className="text-[11px] font-mono px-2 py-0.5 rounded bg-indigo-500/10 border border-indigo-500/20 text-indigo-400 font-semibold">
-              POP {pop.toFixed(0)}%
-            </span>
-          )}
-          {netGreeks && (
-            <>
-              <span className="text-[11px] font-mono px-2 py-0.5 rounded bg-sky-500/10 border border-sky-500/20 text-sky-400 font-semibold" title="Net Strategy Delta">
-                Δ {netGreeks.delta >= 0 ? '+' : ''}{netGreeks.delta.toFixed(2)}
-              </span>
-              <span className={`text-[11px] font-mono px-2 py-0.5 rounded border font-semibold ${
-                netGreeks.theta >= 0
-                  ? 'bg-emerald-500/10 border-emerald-500/20 text-emerald-400'
-                  : 'bg-rose-500/10 border-rose-500/20 text-rose-400'
-              }`} title="Net Strategy Theta (₹ decay / day)">
-                θ {netGreeks.theta >= 0 ? '+' : ''}₹{Math.round(netGreeks.theta).toLocaleString('en-IN')}/d
-              </span>
-              <span className="text-[11px] font-mono px-2 py-0.5 rounded bg-purple-500/10 border border-purple-500/20 text-purple-300 font-semibold" title="Net Strategy Vega (₹ / 1% IV shift)">
-                ν {netGreeks.vega >= 0 ? '+' : ''}₹{Math.round(netGreeks.vega).toLocaleString('en-IN')}/%
-              </span>
-            </>
-          )}
-        </div>
-
-        <div className="flex items-center gap-1.5 ml-auto">
-          {/* Legend */}
-          <div className="hidden sm:flex items-center gap-2.5 text-[11px] font-mono text-zinc-400 mr-2">
-            <span className="flex items-center gap-1">
-              <span className="inline-block w-2.5 h-[2px]" style={{ backgroundColor: '#10b981' }} /> Expiry
-            </span>
-            {model.todayLine && (
-              <span className="flex items-center gap-1">
-                <span className="inline-block w-2.5 h-[2px]" style={{ backgroundColor: TODAY_COLOR }} /> Today
-              </span>
+  const body = (
+    <div className={cn(full ? 'fixed inset-0 z-50 overflow-auto bg-zinc-950 p-4 md:p-6 flex flex-col' : 'w-full flex flex-col')}>
+      <div className="flex flex-wrap items-start justify-between gap-x-6 gap-y-3 pb-3 border-b border-zinc-800 mb-3">
+        <div className="min-w-0">
+          {title && <h3 className="text-sm font-bold text-zinc-100 tracking-tight mb-2">{title}</h3>}
+          <div className="flex flex-wrap gap-x-6 gap-y-2">
+            {currentSpot > 0 && <Stat label="Spot" value={currentSpot.toLocaleString('en-IN', { maximumFractionDigits: 2 })} tone="info" />}
+            <Stat
+              label="Break-even"
+              value={breakevens.length
+                ? breakevens.map(b => `${Math.round(b).toLocaleString('en-IN')}${currentSpot > 0 ? ` (${((b - currentSpot) / currentSpot * 100).toFixed(1)}%)` : ''}`).join('  ·  ')
+                : 'None in range'}
+              tone="warn"
+            />
+            {maxProfit !== undefined && maxProfit !== null && (
+              <Stat
+                label={rom ? `Max profit (${rom.toFixed(1)}% on margin)` : 'Max profit'}
+                value={maxProfitUnlimited ? 'Unlimited' : inr(maxProfit, true)}
+                tone="good"
+              />
             )}
-            {model.targetLine && (
-              <span className="flex items-center gap-1">
-                <span className="inline-block w-2.5 h-[2px]" style={{ backgroundColor: TARGET_COLOR }} /> Sim
-              </span>
+            {maxLoss !== undefined && maxLoss !== null && (
+              <Stat label="Max loss" value={maxLossUnlimited ? 'Unlimited' : inr(maxLoss)} tone="bad" />
             )}
-            {expectedMove && (
-              <span className="flex items-center gap-1">
-                <span className="inline-block w-2 h-2 rounded-xs bg-sky-500/20 border border-sky-500/40" /> 1-SD
-              </span>
+            {riskReward && <Stat label="Risk : reward" value={riskReward} />}
+            {pop !== undefined && pop !== null && <Stat label="Chance of profit" value={`${pop.toFixed(0)}%`} tone="info" title="Probability of finishing above break-even, from the ATM implied volatility" />}
+            {targetSpot !== undefined && targetSpot > 0 && (() => {
+              const e = hasExpiry ? pnlAt(curve, targetSpot) : null;
+              const t = hasToday ? pnlAt(todayCurve!, targetSpot) : null;
+              const d = hasDraft ? pnlAt(draftCurve!, targetSpot) : null;
+              return (
+                <Stat
+                  label={`At target ${Math.round(targetSpot).toLocaleString('en-IN')}`}
+                  value={[
+                    t !== null ? `${todayName} ${inr(t, true)}` : null,
+                    e !== null ? `Expiry ${inr(e, true)}` : null,
+                    d !== null ? `Draft ${inr(d, true)}` : null,
+                  ].filter(Boolean).join('  ·  ') || '—'}
+                  tone="info"
+                  title="P&L of each curve at the target price"
+                />
+              );
+            })()}
+            {netGreeks && (
+              <>
+                <Stat label="Net delta" value={`${netGreeks.delta >= 0 ? '+' : '−'}${Math.abs(netGreeks.delta).toFixed(1)}`} title="Net delta in index units" />
+                <Stat label="Theta per day" value={inr(netGreeks.theta, true)} tone={netGreeks.theta >= 0 ? 'good' : 'bad'} title="Net theta, ₹ per calendar day" />
+                <Stat label="Vega per 1% IV" value={inr(netGreeks.vega, true)} title="Net vega, ₹ per 1 vol point" />
+              </>
             )}
           </div>
+        </div>
 
-          {/* What-If Simulation Toggle */}
+        <div className="flex flex-wrap items-center gap-2 ml-auto">
+          {headerExtras}
           {(onTargetDaysChange || onIvShiftChange) && (
             <button
               type="button"
-              onClick={() => setShowSimulator((s) => !s)}
-              className={`flex items-center gap-1 px-2 py-1 rounded-lg border text-xs font-semibold cursor-pointer transition-colors ${
-                showSimulator || (targetDays !== undefined && targetDays > 0) || (ivShift !== undefined && ivShift !== 0)
-                  ? 'border-amber-500/40 bg-amber-500/15 text-amber-300'
-                  : 'border-zinc-700 bg-zinc-850 text-zinc-300 hover:bg-zinc-750 hover:text-white'
-              }`}
-              title="Toggle What-If Time Decay and IV Shift Simulator"
+              onClick={() => setShowSimulator(s => !s)}
+              aria-pressed={showSimulator}
+              className={cn(
+                'flex items-center gap-1 px-2 py-1 rounded-lg border text-xs font-semibold transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-400',
+                showSimulator || simActive ? 'border-amber-500/40 bg-amber-500/15 text-amber-300' : 'border-zinc-700 bg-zinc-900 text-zinc-300 hover:bg-zinc-800',
+              )}
             >
-              <SlidersHorizontal className="h-3.5 w-3.5" />
-              <span>What-If</span>
+              <SlidersHorizontal className="h-3.5 w-3.5" />What-if
             </button>
           )}
-
-          {/* Zoom Buttons */}
-          <div className="flex items-center rounded-lg border border-zinc-700 bg-zinc-850 overflow-hidden">
+          {onToggleOi && (
             <button
               type="button"
-              onClick={() => setZoom((z) => Math.max(MIN_ZOOM, z / ZOOM_STEP))}
-              disabled={model.atMinZoom}
-              className="flex items-center px-2 py-1 text-zinc-300 hover:bg-zinc-750 hover:text-white transition-colors cursor-pointer disabled:opacity-30 disabled:cursor-not-allowed disabled:hover:bg-transparent"
-              title="Zoom in (narrow the price axis)"
-              aria-label="Zoom in"
+              onClick={onToggleOi}
+              aria-pressed={!!showOi}
+              className={cn(
+                'px-2.5 py-1 rounded-lg border text-xs font-semibold transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-400',
+                showOi ? 'border-violet-500/50 bg-violet-500/15 text-violet-300' : 'border-zinc-700 bg-zinc-900 text-zinc-300 hover:bg-zinc-800',
+              )}
             >
+              Open interest
+            </button>
+          )}
+          <div className="flex items-center rounded-lg border border-zinc-700 bg-zinc-900 overflow-hidden">
+            <button type="button" onClick={() => (externalZoom ? externalZoom.onZoomIn() : setZoom(z => Math.max(MIN_ZOOM, z / ZOOM_STEP)))} disabled={externalZoom ? !externalZoom.canZoomIn : model.atMinZoom}
+              aria-label="Zoom in" title="Zoom in (narrow the price axis)"
+              className="px-2 py-1 text-zinc-300 hover:bg-zinc-800 disabled:opacity-30 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-400">
               <ZoomIn className="h-3.5 w-3.5" />
             </button>
-            <button
-              type="button"
-              onClick={() => setZoom(1)}
-              disabled={zoom === 1}
-              className="flex items-center px-2 py-1 border-x border-zinc-700 text-zinc-300 hover:bg-zinc-750 hover:text-white transition-colors cursor-pointer disabled:opacity-30 disabled:cursor-not-allowed disabled:hover:bg-transparent"
-              title="Reset zoom"
-              aria-label="Reset zoom"
-            >
-              <RotateCcw className="h-3.5 w-3.5" />
-            </button>
-            <button
-              type="button"
-              onClick={() => setZoom((z) => Math.min(MAX_ZOOM, z * ZOOM_STEP))}
-              disabled={model.atMaxZoom}
-              className="flex items-center px-2 py-1 text-zinc-300 hover:bg-zinc-750 hover:text-white transition-colors cursor-pointer disabled:opacity-30 disabled:cursor-not-allowed disabled:hover:bg-transparent"
-              title="Zoom out (widen the price axis toward the farthest strike)"
-              aria-label="Zoom out"
-            >
+            {!externalZoom && (
+              <button type="button" onClick={() => setZoom(1)} disabled={zoom === 1}
+                aria-label="Reset zoom" title="Reset zoom"
+                className="px-2 py-1 border-x border-zinc-700 text-zinc-300 hover:bg-zinc-800 disabled:opacity-30 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-400">
+                <RotateCcw className="h-3.5 w-3.5" />
+              </button>
+            )}
+            <button type="button" onClick={() => (externalZoom ? externalZoom.onZoomOut() : setZoom(z => Math.min(MAX_ZOOM, z * ZOOM_STEP)))} disabled={externalZoom ? !externalZoom.canZoomOut : model.atMaxZoom}
+              aria-label="Zoom out" title="Zoom out (widen the price axis)"
+              className="px-2 py-1 text-zinc-300 hover:bg-zinc-800 disabled:opacity-30 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-400">
               <ZoomOut className="h-3.5 w-3.5" />
             </button>
           </div>
-
-          {/* Full Screen Button */}
           <button
             type="button"
-            onClick={() => setFull((f) => !f)}
-            className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg border border-zinc-700 bg-zinc-850 text-xs font-semibold text-zinc-300 hover:bg-zinc-750 hover:text-white transition-colors cursor-pointer"
-            title={full ? 'Exit full screen (Esc)' : 'Full screen'}
+            onClick={() => setFull(f => !f)}
             aria-label={full ? 'Exit full screen' : 'Full screen'}
+            title={full ? 'Exit full screen (Esc)' : 'Full screen'}
+            className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg border border-zinc-700 bg-zinc-900 text-xs font-semibold text-zinc-300 hover:bg-zinc-800 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-400"
           >
             {full ? <Minimize2 className="h-3.5 w-3.5" /> : <Maximize2 className="h-3.5 w-3.5" />}
-            <span className="hidden sm:inline">{full ? 'Exit Full Screen' : 'Full Screen'}</span>
+            <span className="hidden sm:inline">{full ? 'Exit full screen' : 'Full screen'}</span>
           </button>
         </div>
       </div>
 
-      {/* What-If Time Decay & IV Shift Simulation Bar */}
       {showSimulator && (onTargetDaysChange || onIvShiftChange) && (
-        <div className="flex flex-col gap-2 py-2 px-3 bg-zinc-900/90 rounded-lg border border-zinc-800 text-xs mb-2.5">
-          <div className="flex items-center gap-3 flex-wrap sm:flex-nowrap">
-            {onTargetDaysChange && (
-              <div className="flex items-center gap-2.5 flex-1 min-w-[280px]">
-                <div className="flex items-center gap-1.5 shrink-0">
-                  <SlidersHorizontal className="w-3.5 h-3.5 text-amber-400" />
-                  <span className="font-bold text-zinc-200">Time Decay (θ):</span>
-                </div>
-                <span className="text-amber-400 font-mono font-bold shrink-0 min-w-[85px] text-right">
-                  {targetDays && targetDays > 0 ? `+${targetDays.toFixed(1)}d fwd` : 'Today (T+0)'}
-                </span>
-                <input
-                  type="range"
-                  min={0}
-                  max={Math.max(1, maxDays ?? 7)}
-                  step={0.5}
-                  value={targetDays ?? 0}
-                  onChange={(e) => onTargetDaysChange(parseFloat(e.target.value))}
-                  className="w-full accent-amber-500 bg-zinc-800 h-1.5 rounded-lg cursor-pointer"
-                />
-                <span className="text-[10px] text-zinc-400 font-mono shrink-0">
-                  Exp ({maxDays ? maxDays.toFixed(1) : 0}d)
-                </span>
-              </div>
-            )}
-
-            {onIvShiftChange && (
-              <div className="flex items-center gap-2.5 flex-1 min-w-[260px] pl-0 sm:pl-3 border-t sm:border-t-0 sm:border-l border-zinc-800 pt-1.5 sm:pt-0">
-                <div className="flex items-center gap-1.5 shrink-0">
-                  <span className="font-bold text-zinc-200">IV Shift (ν):</span>
-                </div>
-                <span className={`font-mono font-bold shrink-0 min-w-[75px] text-right ${
-                  (ivShift || 0) > 0 ? 'text-purple-400' : (ivShift || 0) < 0 ? 'text-amber-400' : 'text-zinc-400'
-                }`}>
-                  {(ivShift || 0) > 0 ? `+${ivShift}%` : (ivShift || 0) < 0 ? `${ivShift}%` : 'Base IV'}
-                </span>
-                <input
-                  type="range"
-                  min={-15}
-                  max={15}
-                  step={1}
-                  value={ivShift ?? 0}
-                  onChange={(e) => onIvShiftChange(parseFloat(e.target.value))}
-                  className="w-full accent-purple-500 bg-zinc-800 h-1.5 rounded-lg cursor-pointer"
-                />
-                <span className="text-[10px] text-zinc-400 font-mono shrink-0">
-                  ±15%
-                </span>
-              </div>
-            )}
-
-            {((targetDays !== undefined && targetDays > 0) || (ivShift !== undefined && ivShift !== 0)) && (
-              <button
-                type="button"
-                onClick={() => {
-                  onTargetDaysChange?.(0);
-                  onIvShiftChange?.(0);
-                }}
-                className="text-[11px] text-sky-400 hover:text-sky-300 underline font-medium cursor-pointer shrink-0 ml-auto"
-              >
-                Reset All
-              </button>
-            )}
-          </div>
+        <div className="flex flex-wrap items-center gap-x-6 gap-y-2 py-2 px-3 bg-zinc-900 rounded-lg border border-zinc-800 text-xs mb-3">
+          {onTargetDaysChange && (
+            <label className="flex items-center gap-2.5 flex-1 min-w-[260px]">
+              <span className="font-semibold text-zinc-200 shrink-0">Days ahead</span>
+              <span className="text-amber-400 font-mono font-bold shrink-0 min-w-[84px] text-right">
+                {targetDays && targetDays > 0 ? `+${targetDays.toFixed(1)}d` : 'Today'}
+              </span>
+              <input type="range" min={0} max={Math.max(1, maxDays ?? 7)} step={0.5} value={targetDays ?? 0}
+                onChange={e => onTargetDaysChange(parseFloat(e.target.value))} className="w-full accent-amber-500" aria-label="Days ahead" />
+              <span className="text-zinc-400 font-mono shrink-0">expiry {maxDays ? maxDays.toFixed(1) : 0}d</span>
+            </label>
+          )}
+          {onIvShiftChange && (
+            <label className="flex items-center gap-2.5 flex-1 min-w-[240px]">
+              <span className="font-semibold text-zinc-200 shrink-0">IV shift</span>
+              <span className={cn('font-mono font-bold shrink-0 min-w-[72px] text-right', (ivShift || 0) > 0 ? 'text-purple-400' : (ivShift || 0) < 0 ? 'text-amber-400' : 'text-zinc-400')}>
+                {(ivShift || 0) > 0 ? `+${ivShift} pts` : (ivShift || 0) < 0 ? `${ivShift} pts` : 'Current'}
+              </span>
+              <input type="range" min={-15} max={15} step={1} value={ivShift ?? 0}
+                onChange={e => onIvShiftChange(parseFloat(e.target.value))} className="w-full accent-purple-500" aria-label="IV shift in vol points" />
+              <span className="text-zinc-400 font-mono shrink-0">±15 pts</span>
+            </label>
+          )}
+          {simActive && (
+            <button type="button" onClick={() => { onTargetDaysChange?.(0); onIvShiftChange?.(0); }}
+              className="text-sky-400 hover:text-sky-300 underline font-medium shrink-0 ml-auto focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-400">
+              Reset
+            </button>
+          )}
         </div>
       )}
 
-      <div className="flex-1 flex items-center justify-center min-h-0">
-        <svg
-          ref={svgRef}
-          viewBox={`0 0 ${W} ${H_}`}
-          width={W}
-          height={H_}
-          className="block max-w-full select-none"
-          role="img"
-          aria-label="Strategy payoff at expiry"
-          onMouseMove={onMove}
-          onMouseLeave={() => setHoverSpot(null)}
-        >
-          <defs>
-            <clipPath id={profitClipId}><rect x={0} y={0} width={W} height={zeroY} /></clipPath>
-            <clipPath id={lossClipId}><rect x={0} y={zeroY} width={W} height={H_ - zeroY} /></clipPath>
-          </defs>
+      {warning && (
+        <div className="mb-3 flex items-start gap-2 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-400">
+          <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+          <span>{warning}</span>
+        </div>
+      )}
 
-          {/* Expected Move (±1SD) Shaded Background Area */}
-          {expectedMove && (
-            <g pointerEvents="none">
-              <rect
-                x={Math.max(PAD.left, sx(expectedMove.sd1Lo))}
-                y={PAD.top}
-                width={Math.max(0, Math.min(W - PAD.right, sx(expectedMove.sd1Hi)) - Math.max(PAD.left, sx(expectedMove.sd1Lo)))}
-                height={H_ - PAD.top - PAD.bottom}
-                fill="#0ea5e9"
-                fillOpacity={0.045}
-              />
-              {expectedMove.sd1Lo >= xLo && expectedMove.sd1Lo <= xHi && (
-                <line
-                  x1={sx(expectedMove.sd1Lo)}
-                  x2={sx(expectedMove.sd1Lo)}
-                  y1={PAD.top}
-                  y2={H_ - PAD.bottom}
-                  stroke="#0ea5e9"
-                  strokeWidth={1}
-                  strokeDasharray="3 3"
-                  strokeOpacity={0.4}
-                />
-              )}
-              {expectedMove.sd1Hi >= xLo && expectedMove.sd1Hi <= xHi && (
-                <line
-                  x1={sx(expectedMove.sd1Hi)}
-                  x2={sx(expectedMove.sd1Hi)}
-                  y1={PAD.top}
-                  y2={H_ - PAD.bottom}
-                  stroke="#0ea5e9"
-                  strokeWidth={1}
-                  strokeDasharray="3 3"
-                  strokeOpacity={0.4}
-                />
-              )}
-              {expectedMove.sd1Lo >= xLo && expectedMove.sd1Lo <= xHi && (
-                <text
-                  x={sx(expectedMove.sd1Lo)}
-                  y={H_ - PAD.bottom - 4}
-                  textAnchor="middle"
-                  fontSize={8.5}
-                  fontWeight={600}
-                  fill="#38bdf8"
-                  fillOpacity={0.7}
-                  className="font-mono"
-                >
-                  -1SD
-                </text>
-              )}
-              {expectedMove.sd1Hi >= xLo && expectedMove.sd1Hi <= xHi && (
-                <text
-                  x={sx(expectedMove.sd1Hi)}
-                  y={H_ - PAD.bottom - 4}
-                  textAnchor="middle"
-                  fontSize={8.5}
-                  fontWeight={600}
-                  fill="#38bdf8"
-                  fillOpacity={0.7}
-                  className="font-mono"
-                >
-                  +1SD
-                </text>
-              )}
-            </g>
-          )}
+      <div style={{ height: chartH }} className="w-full" role="img" aria-label={`${title || 'Strategy payoff'}: P&L across index levels`}>
+        <ResponsiveContainer width="100%" height="100%">
+          <ComposedChart data={model.rows} margin={{ top: 22, right: 18, bottom: 6, left: 0 }}>
+            <CartesianGrid vertical={false} />
+            <XAxis dataKey="spot" type="number" domain={[model.xLo, model.xHi]} ticks={model.xTicks} allowDataOverflow
+              tickFormatter={(v: number) => Math.round(v).toLocaleString('en-IN')} tickMargin={8} />
+            <YAxis domain={[model.yLo, model.yHi]} ticks={model.yTicks} allowDataOverflow tickFormatter={axisInr} width={56} />
+            {model.maxOi > 0 && (
+              <YAxis yAxisId="oi" orientation="right" domain={[0, model.oiAxisMax]} hide allowDataOverflow />
+            )}
 
-          {/* Y grid + rupee axis */}
-          {model.yTicks.map((t) => (
-            <g key={`y${t}`}>
-              <line
-                x1={PAD.left}
-                x2={W - PAD.right}
-                y1={sy(t)}
-                y2={sy(t)}
-                stroke="var(--chart-grid)"
-                strokeWidth={1}
-                strokeDasharray={t === 0 ? undefined : '3 4'}
-              />
-              <text
-                x={PAD.left - 8}
-                y={sy(t) + 3.5}
-                textAnchor="end"
-                fontSize={10}
-                fontWeight={600}
-                fill="var(--chart-tick)"
-                className="font-mono"
-              >
-                {fmtInr(t)}
-              </text>
-            </g>
-          ))}
+            {expectedMove && (
+              <ReferenceArea x1={Math.max(expectedMove.sd1Lo, model.xLo)} x2={Math.min(expectedMove.sd1Hi, model.xHi)}
+                fill="var(--color-sky-400)" fillOpacity={0.07} stroke="none" />
+            )}
+            <ReferenceLine y={0} stroke="var(--color-zinc-500)" strokeWidth={1.5} />
 
-          {/* X axis ticks */}
-          {model.xTicks.map((t) => (
-            <text
-              key={`x${t}`}
-              x={sx(t)}
-              y={H_ - PAD.bottom + 17}
-              textAnchor="middle"
-              fontSize={10}
-              fontWeight={600}
-              fill="var(--chart-tick)"
-              className="font-mono"
-            >
-              {t.toFixed(0)}
-            </text>
-          ))}
+            {showOi && model.maxOi > 0 && model.visibleOi.map(b => (
+              <React.Fragment key={`oi-${b.strike}`}>
+                <ReferenceArea yAxisId="oi" x1={b.strike - model.barHalf * 2} x2={b.strike - model.barHalf * 0.15} y1={0} y2={b.callOi}
+                  fill="var(--color-red-400)" fillOpacity={0.4} stroke="none" ifOverflow="hidden" />
+                <ReferenceArea yAxisId="oi" x1={b.strike + model.barHalf * 0.15} x2={b.strike + model.barHalf * 2} y1={0} y2={b.putOi}
+                  fill="var(--color-emerald-400)" fillOpacity={0.4} stroke="none" ifOverflow="hidden" />
+              </React.Fragment>
+            ))}
+            {expectedMove?.sd2Lo !== undefined && expectedMove.sd2Hi !== undefined && [expectedMove.sd2Lo, expectedMove.sd2Hi].filter(v => v > model.xLo && v < model.xHi).map(v => (
+              <ReferenceLine key={`sd2-${v}`} x={v} stroke="var(--color-sky-400)" strokeOpacity={0.4} strokeDasharray="2 4"
+                label={{ value: '2σ', position: 'insideTop', fontSize: 10, fill: 'var(--color-sky-400)' }} />
+            ))}
+            {hasExpiry && <Area type="linear" dataKey="expPos" stroke="none" fill="var(--color-emerald-400)" fillOpacity={0.14} isAnimationActive={false} legendType="none" activeDot={false} />}
+            {hasExpiry && <Area type="linear" dataKey="expNeg" stroke="none" fill="var(--color-red-400)" fillOpacity={0.14} isAnimationActive={false} legendType="none" activeDot={false} />}
+            {hasExpiry && <Line type="linear" dataKey="expiry" name={expiryName} stroke="var(--color-zinc-300)" strokeWidth={2} dot={false} isAnimationActive={false} />}
+            {hasToday && <Line type="monotone" dataKey="today" name={todayName} stroke="var(--color-sky-400)" strokeWidth={2.5} dot={false} isAnimationActive={false} connectNulls />}
+            {hasTarget && <Line type="monotone" dataKey="target" name={targetName} stroke="var(--color-amber-400)" strokeWidth={2} strokeDasharray="5 4" dot={false} isAnimationActive={false} connectNulls />}
+            {hasDraft && <Line type="linear" dataKey="draft" name="With draft" stroke="var(--color-violet-400)" strokeWidth={2} strokeDasharray="5 3" dot={false} isAnimationActive={false} connectNulls />}
+            {targetSpot !== undefined && targetSpot > model.xLo && targetSpot < model.xHi && Math.abs(targetSpot - currentSpot) > 1e-6 && (
+              <ReferenceLine x={targetSpot} stroke="var(--color-sky-400)" strokeDasharray="4 3"
+                label={{ value: `Target ${Math.round(targetSpot).toLocaleString('en-IN')}`, position: 'insideTopLeft', fontSize: 10, fill: 'var(--color-sky-400)' }} />
+            )}
 
-          {/* Payoff curve: green above zero, red below */}
-          <g clipPath={`url(#${profitClipId})`}><path d={model.area} fill="#10b981" fillOpacity={0.18} /></g>
-          <g clipPath={`url(#${lossClipId})`}><path d={model.area} fill="#ef4444" fillOpacity={0.18} /></g>
-          <g clipPath={`url(#${profitClipId})`}><path d={model.line} fill="none" stroke="#10b981" strokeWidth={2} /></g>
-          <g clipPath={`url(#${lossClipId})`}><path d={model.line} fill="none" stroke="#ef4444" strokeWidth={2} /></g>
+            {model.pins.map((s, i) => (
+              <ReferenceLine key={`pin-${s.strike}-${s.option ?? ''}-${i}`} x={s.strike}
+                stroke={s.side === 'S' ? 'var(--color-red-400)' : s.side === 'B' ? 'var(--color-emerald-400)' : 'var(--color-zinc-500)'}
+                strokeOpacity={0.45} strokeDasharray="2 4"
+                label={{ value: `${s.strike}${s.option ? ` ${s.option}` : ''}`, position: 'insideBottom', fontSize: 10,
+                  fill: s.side === 'S' ? 'var(--color-red-400)' : s.side === 'B' ? 'var(--color-emerald-400)' : 'var(--color-zinc-400)', stroke: 'var(--color-zinc-950)', strokeWidth: 3, paintOrder: 'stroke' }} />
+            ))}
 
-          {/* T+0 curve: today's mark-to-market Black-Scholes curve */}
-          {model.todayLine && (
-            <path d={model.todayLine} fill="none" stroke={TODAY_COLOR} strokeWidth={2} strokeLinecap="round" />
-          )}
+            {breakevens.filter(b => b > model.xLo && b < model.xHi).map(b => (
+              <ReferenceDot key={`be-${b}`} x={b} y={0} r={5} fill="var(--color-zinc-900)" stroke="var(--color-amber-400)" strokeWidth={2} ifOverflow="visible"
+                label={{ value: `BE ${Math.round(b).toLocaleString('en-IN')}`, position: 'top', fontSize: 10, fill: 'var(--color-amber-400)', stroke: 'var(--color-zinc-950)', strokeWidth: 3, paintOrder: 'stroke' }} />
+            ))}
 
-          {/* Projected Target Curve at T+N days */}
-          {model.targetLine && (
-            <path d={model.targetLine} fill="none" stroke={TARGET_COLOR} strokeWidth={2} strokeDasharray="4 3" strokeLinecap="round" />
-          )}
+            {currentSpot >= model.xLo && currentSpot <= model.xHi && (
+              <ReferenceLine x={currentSpot} stroke="var(--color-amber-400)" strokeWidth={1.5}
+                label={{ value: `Spot ${Math.round(currentSpot).toLocaleString('en-IN')}`, position: 'top', fontSize: 11, fill: 'var(--color-amber-400)' }} />
+            )}
 
-          {/* Zero Axis Line */}
-          <line
-            x1={PAD.left}
-            x2={W - PAD.right}
-            y1={zeroY}
-            y2={zeroY}
-            stroke="var(--chart-axis)"
-            strokeWidth={1.5}
-          />
-
-          {/* Active Leg Strike Pins & Badges on X-Axis */}
-          {model.visibleStrikes.map((s, idx) => {
-            const legPnl = pnlAt(model.visible, s.strike);
-            const isBuy = s.side === 'B';
-            const color = isBuy ? '#38bdf8' : '#fb7185';
-            const borderCol = isBuy ? '#0284c7' : '#e11d48';
-            const label = `${s.strike} ${s.option ?? ''}`;
-            const badgeW = label.length * 5.8 + 8;
-            return (
-              <g key={`strike-${s.strike}-${s.option ?? ''}-${idx}`}>
-                <line
-                  x1={sx(s.strike)}
-                  x2={sx(s.strike)}
-                  y1={PAD.top}
-                  y2={H_ - PAD.bottom}
-                  stroke="var(--chart-grid)"
-                  strokeWidth={0.8}
-                  strokeDasharray="2 3"
-                  strokeOpacity={0.6}
-                />
-                {legPnl !== null && (
-                  <circle
-                    cx={sx(s.strike)}
-                    cy={sy(legPnl)}
-                    r={3}
-                    fill={color}
-                    stroke="var(--color-zinc-950)"
-                    strokeWidth={1.5}
-                  />
-                )}
-                <rect
-                  x={sx(s.strike) - badgeW / 2}
-                  y={H_ - PAD.bottom - 16}
-                  width={badgeW}
-                  height={14}
-                  rx={3}
-                  fill="var(--color-zinc-900)"
-                  stroke={borderCol}
-                  strokeWidth={0.9}
-                />
-                <text
-                  x={sx(s.strike)}
-                  y={H_ - PAD.bottom - 5.5}
-                  textAnchor="middle"
-                  fontSize={8.5}
-                  fontWeight={700}
-                  fill={color}
-                  className="font-mono"
-                >
-                  {label}
-                </text>
-              </g>
-            );
-          })}
-
-          {/* Breakevens (shielded in anti-collision badge pill) */}
-          {breakevens.filter((b) => b >= xLo && b <= xHi).map((be) => {
-            const pct = currentSpot > 0 ? ((be - currentSpot) / currentSpot) * 100 : null;
-            const pctStr = pct !== null ? ` (${pct >= 0 ? '+' : ''}${pct.toFixed(1)}%)` : '';
-            const labelText = `BE ${be.toFixed(0)}${pctStr}`;
-            const badgeW = labelText.length * 6.2 + 10;
-            return (
-              <g key={`be${be}`}>
-                <circle cx={sx(be)} cy={zeroY} r={4.5} fill="#f59e0b" stroke="var(--color-zinc-950)" strokeWidth={2} />
-                <rect
-                  x={sx(be) - badgeW / 2}
-                  y={zeroY - 24}
-                  width={badgeW}
-                  height={17}
-                  rx={4}
-                  fill="var(--color-zinc-900)"
-                  fillOpacity={0.92}
-                  stroke="#f59e0b"
-                  strokeWidth={1}
-                  strokeOpacity={0.5}
-                />
-                <text
-                  x={sx(be)}
-                  y={zeroY - 12}
-                  textAnchor="middle"
-                  fontSize={9.5}
-                  fontWeight={700}
-                  fill="#fbbf24"
-                  className="font-mono"
-                >
-                  {labelText}
-                </text>
-              </g>
-            );
-          })}
-
-          {/* Current spot marker with protected pill badge */}
-          {currentSpot >= xLo && currentSpot <= xHi && (
-            <g>
-              <line
-                x1={sx(currentSpot)}
-                x2={sx(currentSpot)}
-                y1={PAD.top}
-                y2={H_ - PAD.bottom}
-                stroke="#0ea5e9"
-                strokeWidth={1.25}
-                strokeDasharray="4 3"
-                strokeOpacity={0.8}
-              />
-              <rect
-                x={sx(currentSpot) - 24}
-                y={PAD.top - 18}
-                width={48}
-                height={16}
-                rx={3.5}
-                fill="var(--color-zinc-900)"
-                stroke="#0ea5e9"
-                strokeWidth={1}
-              />
-              <text
-                x={sx(currentSpot)}
-                y={PAD.top - 6}
-                textAnchor="middle"
-                fontSize={9.5}
-                fontWeight={700}
-                fill="#38bdf8"
-                className="font-mono"
-              >
-                {currentSpot.toFixed(0)}
-              </text>
-            </g>
-          )}
-
-          {/* Readout crosshair — follows cursor, parks on current spot otherwise */}
-          {readoutSpot >= xLo && readoutSpot <= xHi && readoutPnl !== null && (
-            <g pointerEvents="none">
-              <line
-                x1={sx(readoutSpot)}
-                x2={sx(readoutSpot)}
-                y1={PAD.top}
-                y2={H_ - PAD.bottom}
-                stroke="var(--chart-tick)"
-                strokeWidth={1}
-                strokeDasharray="2 3"
-                strokeOpacity={0.6}
-              />
-              <circle
-                cx={sx(readoutSpot)}
-                cy={sy(readoutPnl)}
-                r={4.5}
-                fill={readoutPnl >= 0 ? '#10b981' : '#ef4444'}
-                stroke="var(--color-zinc-950)"
-                strokeWidth={2}
-              />
-              {readoutPnlToday !== null && (
-                <circle
-                  cx={sx(readoutSpot)}
-                  cy={sy(readoutPnlToday)}
-                  r={4}
-                  fill={TODAY_COLOR}
-                  stroke="var(--color-zinc-950)"
-                  strokeWidth={2}
-                />
-              )}
-              {readoutPnlTarget !== null && (
-                <circle
-                  cx={sx(readoutSpot)}
-                  cy={sy(readoutPnlTarget)}
-                  r={4}
-                  fill={TARGET_COLOR}
-                  stroke="var(--color-zinc-950)"
-                  strokeWidth={2}
-                />
-              )}
-              <g transform={`translate(${tooltipLeft ? sx(readoutSpot) - 130 : sx(readoutSpot) + 12}, ${PAD.top + 4})`}>
-                <rect
-                  width={122}
-                  height={tooltipHeight}
-                  rx={6}
-                  fill="var(--color-zinc-900)"
-                  fillOpacity={0.95}
-                  stroke="var(--chart-axis)"
-                  strokeWidth={1}
-                />
-                <text x={8} y={14} fontSize={9.5} fill="var(--chart-tick)" className="font-mono">
-                  Spot {readoutSpot.toFixed(0)}
-                </text>
-                <text
-                  x={8}
-                  y={28}
-                  fontSize={10.5}
-                  fontWeight={700}
-                  className="font-mono"
-                  fill={readoutPnl >= 0 ? '#10b981' : '#ef4444'}
-                >
-                  Expiry {readoutPnl >= 0 ? '+' : ''}₹{readoutPnl.toLocaleString('en-IN', { maximumFractionDigits: 0 })}
-                </text>
-                {readoutPnlToday !== null && (
-                  <text x={8} y={42} fontSize={10} fontWeight={700} className="font-mono" fill={TODAY_COLOR}>
-                    T+0 {readoutPnlToday >= 0 ? '+' : ''}₹{readoutPnlToday.toLocaleString('en-IN', { maximumFractionDigits: 0 })}
-                  </text>
-                )}
-                {readoutPnlTarget !== null && (
-                  <text
-                    x={8}
-                    y={readoutPnlToday !== null ? 56 : 42}
-                    fontSize={10}
-                    fontWeight={700}
-                    className="font-mono"
-                    fill={TARGET_COLOR}
-                  >
-                    Sim {readoutPnlTarget >= 0 ? '+' : ''}₹{readoutPnlTarget.toLocaleString('en-IN', { maximumFractionDigits: 0 })}
-                  </text>
-                )}
-              </g>
-            </g>
-          )}
-        </svg>
+            <RTooltip cursor={{ stroke: 'var(--chart-cursor-line)' }} content={tooltipContent} isAnimationActive={false} />
+          </ComposedChart>
+        </ResponsiveContainer>
       </div>
+
+      <div className="flex flex-wrap items-center gap-x-5 gap-y-1 pt-2 text-xs text-zinc-400">
+        {hasExpiry && <span className="flex items-center gap-1.5"><span className="h-0.5 w-4 bg-zinc-300" />{expiryName}</span>}
+        {hasToday && <span className="flex items-center gap-1.5"><span className="h-0.5 w-4 bg-sky-400" />{todayName}</span>}
+        {hasTarget && <span className="flex items-center gap-1.5"><span className="h-0.5 w-4 bg-amber-400" />{targetName}</span>}
+        {hasDraft && <span className="flex items-center gap-1.5"><span className="h-0.5 w-4 bg-violet-400" />With draft</span>}
+        {showOi && model.maxOi > 0 && <span className="flex items-center gap-1.5"><span className="h-3 w-3 rounded-sm bg-red-400/40" />Call OI<span className="h-3 w-3 rounded-sm bg-emerald-400/40 ml-1" />Put OI</span>}
+        {expectedMove && <span className="flex items-center gap-1.5"><span className="h-3 w-3 rounded-sm bg-sky-400/20" />Expected 1σ range</span>}
+      </div>
+      {note && <div className="pt-1.5 text-xs text-zinc-500">{note}</div>}
     </div>
   );
 
-  if (full && typeof document !== 'undefined') return createPortal(chart, document.body);
-  return chart;
+  // A card ancestor with backdrop-blur (or any filter) is a containing block for `position: fixed`, which would trap the full-screen overlay
+  // inside that card. Portaling to <body> escapes it whatever the ancestor applies.
+  if (full && typeof document !== 'undefined') return createPortal(body, document.body);
+  return body;
 }

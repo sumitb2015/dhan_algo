@@ -3,7 +3,17 @@ name: dhan-position-greeks
 description: Use when computing, aggregating, joining, or displaying option Greeks (Delta/Gamma/Theta/Vega) for a live position book — the chain-supplied per-contract Greeks pipeline behind Positions Analysis' Greeks tab, ScalperGreeksModal, DeltaPanel and margin-allocator (lib/positionGreeks.ts, lib/positionLegs.ts, components/analytics/GreeksTab.tsx, components/analytics/ScalperGreeksModal.tsx). Covers the position-scaling multiplier every one of the four Greeks must share, the chain-join and IV-normalization quirks, and the units convention for Dhan's own chain Greeks. Also covers the Portfolio Greeks page (/options/delta), the one place Greeks are computed server-side from live premiums (scripts/tools/positions_delta_data.py, lib/deltaDesk.ts, components/deltaDesk/) and the three weighting bases (index units / per lot / the broker analyzer's 1-lot-per-leg). Not for self-computed Black-76/Black-Scholes Greeks used in target-date "what-if" simulation or the payoff curve itself (Options Monitor, T+0 curve, SD bands) — that engine and its own unit conventions are dhan-payoff-diagrams; the two pipelines use different units and must never be mixed.
 ---
 
-# Position-Level Option Greeks (Chain-Supplied Pipeline)
+# Position-Level Option Greeks
+
+> **Status (2026-10-05): every position-book Greeks surface is computed through the central library, not read from Dhan's chain.**
+> Positions Analysis' Greeks tab, the scalper Greeks modal, the position snapshot (`/api/options/analyze`), the Baskets Greeks panel,
+> Multi-Leg Focus, Portfolio Greeks and the payoff-chart header all call `lib/optionsPricing.ts` / `lib/optionsPayoff.ts`, solving IV from each
+> leg's live mark. Adapters: `positionNetGreeks` / `positionNetGreeksBy` (multi-underlying) in `lib/positionPayoff.ts`, `computeBasketGreeks`
+> in `lib/multiLegGreeks.ts`, `bookGreeks` in `lib/optionsPayoff.ts`. `lib/positionGreeks.ts` (`computeNetGreeks`, which summed chain Greeks) was
+> deleted. Dhan's chain Greeks are now only *displayed* per strike in the option-chain views (OptionChainModal, Skew, SmartChain) and used as an
+> input to strike selection (Focus Tool delta rules, Covered Call); they are not summed into a book total anywhere. The sections below that describe
+> the chain-supplied pipeline are historical context for those display and selection uses.
+> Why: on a live book Dhan's chain delta was −0.46 lots against the broker's −0.256 and its IV, price and Greeks were not mutually consistent.
 
 > **Third path (2026-10-05):** the Portfolio Greeks page (`/options/delta`) does not use pipeline 1. See
 > "Portfolio Greeks page" below — it solves Black-76 from each leg's live premium, because Dhan's chain
@@ -142,18 +152,23 @@ cross-check the live page:
 
 ---
 
+> **Multi-Leg Focus** also left the chain-supplied pipeline (2026-10-05): its on-demand Greeks panel calls `computeBasketGreeks(legs, {spot, markOf, chainIvOf})` in `lib/multiLegGreeks.ts`,
+> which goes through `bookGreeks` in `lib/optionsPayoff.ts` — IV solved from each leg's live mark, no chain fetch, same numbers as the payoff chart header. It returns `assumed` (legs priced on a
+> fallback IV) instead of `missing`.
+
 ## Portfolio Greeks page (`/options/delta`): computed, not chain-supplied
 
 **Conventions (aligned to dhan-payoff-diagrams on 2026-10-05, locked by `lib/deltaDesk.test.ts`):** rate `0.065`
 (`computeBsGreeks` default, not 7%); time = `calculateTimeToExpiryYears` (to 15:40 IST, intraday, 0.25-day floor, /365) —
-the script mirrors it in `time_to_expiry_years()` so a solved IV still reproduces each leg's LTP; theta is the analytic
+there is no Python copy any more; theta is the analytic
 calendar-day value `(−Fσe^{−rt}n(d1)/(2√t) + rC)/365`, not a 1-day finite difference; SD bands use **ATM IV** from the leg's
 expiry chain (`atmIv`), never the average of the legs' own strike IVs; what-if forward is **additive**
 (`forward + (s − spot)`), matching the canonical `spot + basis`.
 
-**Data flow.** `api/options/positions-delta/route.ts` → `scripts/tools/positions_delta_data.py` returns **per-unit**
-Greeks per leg; the browser (`lib/deltaDesk.ts`) weights and aggregates them and reprices what-ifs with the same
-Black-76. Components live in `components/deltaDesk/` (PayoffPanel, ExposurePanel, GreeksMatrix, LadderAndTrail).
+**Data flow.** `api/options/positions-delta/route.ts` → `scripts/tools/positions_delta_data.py` returns **market data only**
+(ltp, spot, ATM IV, nearest future price/expiry, Dhan's chain Greeks as a fallback — no maths). The browser turns it into
+Greeks with `enrichLegs()` in `lib/deltaDesk.ts`, which calls `lib/optionsPricing.ts` (`greeksFromMark`, `rollForward`,
+`spotFromFutures`); weighting, aggregation and what-ifs use the same library. One implementation, one place to debug. Components live in `components/deltaDesk/` (PayoffPanel, ExposurePanel, GreeksMatrix, LadderAndTrail).
 
 **What comes from Dhan vs what is computed.** From Dhan: positions (qty, `costPrice`, `unrealizedProfit`, strike,
 expiry), option `last_price` from the chain (else per-leg `get_ltp`), the nearest Nifty future, index spot. Computed:

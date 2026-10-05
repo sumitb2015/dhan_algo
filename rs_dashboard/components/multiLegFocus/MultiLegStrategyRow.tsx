@@ -15,24 +15,22 @@ import AddNewLegModal from './AddNewLegModal';
 import LegColumnsMenu from './LegColumnsMenu';
 import { DEFAULT_LEG_COLUMNS, type LegColumns } from '@/lib/legColumns';
 import {
-  computeLegTrailingSL, computeStrategyMetrics, checkStrategyRisk, computeBasketStatus, computeCalendarPayoffCurve,
+  computeLegTrailingSL, computeStrategyMetrics, checkStrategyRisk, computeBasketStatus,
   classifyBasketStructure, legCountsToday, legPnl, legAvgPrice, legPnlPct, legQtyUnits, crudeQtyMultiplier, basketLabel,
   findSiblingLegCollisions, type SiblingLegCollision, scaleBasketMultiplier,
   type MultiLegBasket, type MultiLegLeg, type StrategyRiskConfig, type LegQtyWarning,
 } from '@/lib/multiLegFocus';
-import { computePayoff, type PayoffLeg, type PayoffResult } from '@/lib/basketStrategies';
-import { computeBsGreeks, calculateTimeToExpiryYears } from '@/lib/optionsMonitorMath';
+import { calculateTimeToExpiryYears } from '@/lib/optionsPricing';
 import { FOCUS_RING } from '@/components/Scalper';
 import { clampShiftSteps, MAX_SHIFT_STEPS } from '@/lib/strikeShift';
 import { allowedStrikes, strikeAllowed, snapToAllowed } from '@/lib/farExpiryRules';
 import { BROKER_LABELS, type Broker } from '@/hooks/useBrokerSelector';
-import PayoffDiagram, { pnlAt } from '@/components/strategy/PayoffDiagram';
+import PayoffDiagram, { modelToDiagramProps } from '@/components/strategy/PayoffDiagram';
+import { buildPayoffModel, type PayoffModel } from '@/lib/optionsPayoff';
 import { StatChip } from '@/components/analytics/PayoffMetricStrip';
 import { basketToGreekLegs, computeBasketGreeks } from '@/lib/multiLegGreeks';
-import { type ChainOc, riskNeutralProbAbove, impliedVolFromPrice } from '@/lib/optionsStrategy';
 
 /** Dhan's option-chain API is rate limited (~1 call / 3.5 s per underlying). */
-const GREEKS_CHAIN_SPACING_MS = 3_800;
 
 /** Placeholder IV used only when no live chain IV is available yet for a leg's
  *  strike — same role as the `atmIv > 0 ? atmIv / 100 : 0.1313`-style fallback
@@ -312,48 +310,29 @@ export default function MultiLegStrategyRow({
     return broker === 'dhan' ? 1 : (basket.underlying === 'CRUDEOIL' ? 100 : 10);
   }, [lotSize, basket.underlying, broker]);
 
-  // On-demand Greeks: nothing is fetched until the user clicks the button.
+  // On-demand Greeks panel. Computed through the central payoff library from each leg's live mark — the same numbers as the payoff
+  // chart and the header strips — so there is no chain fetch and nothing to wait for.
   const [greeks, setGreeks] = useState<{
-    result: ReturnType<typeof computeBasketGreeks>; at: Date; errors: string[];
-    collisions: SiblingLegCollision[];
+    result: ReturnType<typeof computeBasketGreeks>; at: Date; collisions: SiblingLegCollision[];
   } | null>(null);
-  const [greeksLoading, setGreeksLoading] = useState(false);
   const [greeksOpen, setGreeksOpen] = useState(false);
-  const greeksReq = React.useRef(0);
-  const runGreeks = useCallback(async () => {
+  const runGreeks = useCallback(() => {
     const legs = basketToGreekLegs(basket, defaultLotSize, crudeMult);
     setGreeksOpen(true);
-    if (!legs.length) { setGreeks({ result: computeBasketGreeks([], {}), at: new Date(), errors: [], collisions: [] }); return; }
-    const req = ++greeksReq.current;
-    setGreeksLoading(true);
-    const expiriesNeeded = [...new Set(legs.map(l => l.expiry))];
-    const chains: Record<string, ChainOc | undefined> = {};
-    const errors: string[] = [];
-    for (let i = 0; i < expiriesNeeded.length; i++) {
-      if (i > 0) await new Promise(r => setTimeout(r, GREEKS_CHAIN_SPACING_MS));
-      const ex = expiriesNeeded[i];
-      try {
-        // No `broker` param — greeks always come from Dhan's chain.
-        const res = await fetch(`/api/options/chain?underlying=${basket.underlying}&expiry=${ex}`);
-        const json = await res.json();
-        if (!json?.success || !json.data?.chain?.oc) errors.push(`${ex}: ${json?.error ?? 'chain unavailable'}`);
-        else chains[ex] = json.data.chain.oc as ChainOc;
-      } catch (e) {
-        errors.push(`${ex}: ${String((e as Error).message ?? e)}`);
-      }
-    }
-    if (req !== greeksReq.current) return; // superseded by a newer click
-    // Sibling baskets holding the same contract share one netted broker row,
-    // so this basket's own ledger quantity may not match the broker's.
+    const byId = new Map(basket.legs.map(l => [l.id, l]));
+    const result = computeBasketGreeks(legs, {
+      spot: spot ?? 0,
+      markOf: gl => { const l = byId.get(gl.legId); const v = l ? ltpFor(l) : 0; return v > 0 ? v : undefined; },
+      chainIvOf: gl => ivForStrike?.(gl.strike, gl.option, gl.expiry) || undefined,
+      fallbackIv: FALLBACK_IV,
+    });
+    // Sibling baskets holding the same contract share one netted broker row, so this basket's own ledger quantity may not
+    // match the broker's.
     const collisions = allBaskets
       ? findSiblingLegCollisions(allBaskets, basket.id, legs.map(l => ({ side: l.side, option: l.option, strike: l.strike, expiry: l.expiry })))
       : [];
-    setGreeks({ result: computeBasketGreeks(legs, chains), at: new Date(), errors, collisions });
-    setGreeksLoading(false);
-  }, [basket, allBaskets, defaultLotSize, crudeMult]);
-
-
-
+    setGreeks({ result, at: new Date(), collisions });
+  }, [basket, allBaskets, defaultLotSize, crudeMult, spot, ltpFor, ivForStrike]);
 
   // Calendar/Diagonal strategies stage legs on two different expiries — a
   // single "payoff at expiry, both legs at intrinsic value" curve/BE/max-P&L
@@ -396,233 +375,56 @@ export default function MultiLegStrategyRow({
   const strategyLabel = derivedStructure?.structure
     ?? basketLabel(basket, `Strategy #${index + 1}`);
 
-  // The Calendar/Diagonal spread's actual payoff shape: strategy value AS OF
-  // THE NEAR (front) LEG'S EXPIRY, where the front leg is pure intrinsic and
-  // the far leg still carries residual Black-76/Black-Scholes time value —
-  // see computeCalendarPayoffCurve's own doc comment for why this (not a
-  // same-day-both-legs-at-intrinsic curve) is the economically meaningful one.
-  const calendarCurve = useMemo(() => {
-    if (!hasMixedExpiry || !effectiveFarExpiry || !spot || spot <= 0) return null;
-    const activeLegs = basket.legs.filter(l => l.status !== 'CLOSED');
-    if (activeLegs.length === 0) return null;
+  // ── Payoff: ONE call into the central payoff library (lib/optionsPayoff.ts) ───────────────────────────────
+  // It prices every leg at its OWN expiry and IV (Black-76, IV solved from the leg's live mark so T+0 shows the real open P&L),
+  // values the book as of the NEAREST expiry (later legs keep their time value), finds exact break-evens, and returns the
+  // header numbers, curves, SD band, POP and net Greeks the chart and the stats strips below all read. No curve is built here.
+  // Collapsed rows only need the header numbers, so they ask for the `light` model (no curves).
+  const payoffMultiplier = (broker === 'dhan' && (basket.underlying === 'CRUDEOIL' || basket.underlying === 'CRUDEOILM')) ? crudeMult : 1;
 
-    const legs = activeLegs.map(l => {
+  const payoffLegInputs = basket.legs
+    .filter(l => l.status !== 'CLOSED')
+    .map(l => {
       const legExpiry = l.expiry || basket.expiry;
-      const isFar = legExpiry !== basket.expiry;
-      const entryPrice = (l.fill?.avgPrice && l.fill.avgPrice > 0)
-        ? l.fill.avgPrice
-        : (ltpFor(l) > 0 ? ltpFor(l) : (l.price || 0));
-      const qty = ((l.fill?.qty && l.fill.qty > 0) ? l.fill.qty : (l.lots * defaultLotSize)) * crudeMult;
-      const iv = isFar ? (ivForStrike?.(l.strike, l.option, legExpiry) || FALLBACK_IV) : FALLBACK_IV;
-      return { side: l.side, option: l.option, strike: l.strike, qty, entryPrice, iv, expiry: legExpiry };
-    });
-
-    if (legs.some(l => l.entryPrice <= 0)) return null;
-
-    try {
-      return computeCalendarPayoffCurve(legs, spot, basket.expiry, effectiveFarExpiry, step || 50);
-    } catch {
-      return null;
-    }
-  }, [hasMixedExpiry, effectiveFarExpiry, basket.expiry, basket.legs, spot, step, defaultLotSize, crudeMult, ltpFor, ivForStrike]);
-
-  // ── Payoff: Breakevens, Max Profit, Max Loss ───────────────────────
-  const payoffResult: PayoffResult | null = useMemo(() => {
-    if (hasMixedExpiry) return null;
-    if (!basket.legs || basket.legs.length === 0) return null;
-    const activeLegs = basket.legs.filter(l => l.status !== 'CLOSED');
-    if (activeLegs.length === 0) return null;
-
-    const payoffMultiplier = (broker === 'dhan' && (basket.underlying === 'CRUDEOIL' || basket.underlying === 'CRUDEOILM')) ? crudeMult : 1;
-
-    const payoffLegs: PayoffLeg[] = activeLegs.map(l => {
-      const currentLtp = ltpFor(l);
-      const premium = (l.fill?.avgPrice && l.fill.avgPrice > 0)
-        ? l.fill.avgPrice
-        : (currentLtp > 0 ? currentLtp : (l.price || 0));
-      const qty = ((l.fill?.qty && l.fill.qty > 0)
-        ? l.fill.qty
-        : (l.lots * defaultLotSize)) * payoffMultiplier;
+      const live = ltpFor(l);
+      const entry = (l.fill?.avgPrice && l.fill.avgPrice > 0) ? l.fill.avgPrice : (live > 0 ? live : (l.price || 0));
+      const units = ((l.fill?.qty && l.fill.qty > 0) ? l.fill.qty : (l.lots * defaultLotSize)) * payoffMultiplier;
       return {
-        side: l.side,
-        option: l.option,
-        strike: l.strike,
-        premium,
-        qty,
+        type: l.option, strike: l.strike, expiry: legExpiry, qty: l.side === 'S' ? -units : units,
+        entryPrice: entry, mark: live > 0 ? live : undefined,
+        chainIv: ivForStrike?.(l.strike, l.option, legExpiry) || undefined, lotSize: defaultLotSize,
       };
     });
 
-    const strikes = payoffLegs.map(l => l.strike);
-    if (strikes.length === 0) return null;
-    const minStrike = Math.min(...strikes);
-    const maxStrike = Math.max(...strikes);
-    const span = Math.max(Math.round(minStrike * 0.08), (maxStrike - minStrike) * 2, 1200);
-    const lo = Math.max(0, minStrike - span);
-    const hi = maxStrike + span;
+  // ATM IV of the near expiry (never VIX): the SD band and POP are built on it.
+  const atmIvFraction = (() => {
+    const ceIv = (atmStrike && ivForStrike?.(atmStrike, 'CE', basket.expiry)) || 0;
+    const peIv = (atmStrike && ivForStrike?.(atmStrike, 'PE', basket.expiry)) || 0;
+    return (ceIv > 0 && peIv > 0) ? (ceIv + peIv) / 2 : (ceIv > 0 ? ceIv : (peIv > 0 ? peIv : 0));
+  })();
 
+  // `ltpFor` is a fresh closure every parent render, so key the memo on the VALUES it produced, not its identity.
+  const payoffKey = JSON.stringify([payoffLegInputs, spot, basketMargin, atmIvFraction, simTargetDays, simIvShift, showPayoffChart, step]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  const payoffModel: PayoffModel | null = useMemo(() => {
+    if (!spot || spot <= 0 || payoffLegInputs.length === 0) return null;
     try {
-      return computePayoff(payoffLegs, lo, hi);
-    } catch {
-      return null;
-    }
-  }, [basket.legs, basket.underlying, defaultLotSize, broker, crudeMult, ltpFor, hasMixedExpiry]);
-
-  // ── T+0 live mark-to-market curve (dhan-payoff-diagrams: every payoff
-  // diagram must plot this alongside the at-expiry curve) ────────────────
-  // Reuses whichever expiry-side curve (calendarCurve or payoffResult) is
-  // active purely for its x-axis samples, so both lines share one x grid and
-  // can never visually drift apart — then prices each leg today via
-  // Black-76/Black-Scholes (computeBsGreeks) at that leg's OWN expiry and IV,
-  // not the basket's front expiry, so a calendar spread's far leg still
-  // carries its own residual time value in the T+0 curve too. Missing IV
-  // falls back to FALLBACK_IV same as the calendar curve above; a leg with
-  // no resolvable premium yet (nothing filled, no live LTP) makes the whole
-  // curve return null rather than drawing a partially-wrong line — the
-  // PayoffDiagram component treats a missing todayCurve as "nothing to show
-  // yet", not an error.
-  //
-  // Gated on `showPayoffChart`: unlike payoffResult/calendarCurve (which also
-  // feed the always-visible header stats), this curve is ONLY ever consumed
-  // by the collapsed-by-default chart below. `ltpFor` is a fresh closure every
-  // parent render, so without this gate every collapsed strategy row would
-  // re-run Black-Scholes over ~120-240 samples on every WebSocket tick for a
-  // chart nobody has opened.
-  const todayCurve = useMemo(() => {
-    if (!showPayoffChart) return null;
-    if (!spot || spot <= 0) return null;
-    const xs = hasMixedExpiry ? calendarCurve?.points.map(p => p.x) : payoffResult?.points.map(p => p.x);
-    if (!xs || xs.length === 0) return null;
-
-    const activeLegs = basket.legs.filter(l => l.status !== 'CLOSED');
-    if (activeLegs.length === 0) return null;
-
-    const payoffMultiplier = (broker === 'dhan' && (basket.underlying === 'CRUDEOIL' || basket.underlying === 'CRUDEOILM')) ? crudeMult : 1;
-
-    const legsForPricing = activeLegs.map(l => {
-      const legExpiry = l.expiry || basket.expiry;
-      const currentLtp = ltpFor(l);
-      const premium = (l.fill?.avgPrice && l.fill.avgPrice > 0)
-        ? l.fill.avgPrice
-        : (currentLtp > 0 ? currentLtp : (l.price || 0));
-      const qty = ((l.fill?.qty && l.fill.qty > 0) ? l.fill.qty : (l.lots * defaultLotSize)) * payoffMultiplier;
-      const chainIv = ivForStrike?.(l.strike, l.option, legExpiry) || FALLBACK_IV;
-      const timeYears = calculateTimeToExpiryYears(legExpiry);
-      // Calibrate implied vol to actual market price so the T+0 curve starts at 0 PnL
-      // at current spot and isn't distorted by skewed broker-reported IVs.
-      const solvedIv = (spot > 0 && premium > 0 && timeYears > 0)
-        ? impliedVolFromPrice(l.option, spot, l.strike, timeYears, premium)
-        : null;
-      const iv = solvedIv ?? chainIv;
-      return { side: l.side, option: l.option, strike: l.strike, premium, qty, iv, timeYears };
-    });
-
-    if (legsForPricing.some(l => l.premium <= 0)) return null;
-
-    try {
-      return xs.map(x => {
-        const pnl = legsForPricing.reduce((sum, l) => {
-          // isFutures=false: standard Black-Scholes on spot, which already
-          // embeds cost-of-carry via the r*t drift term — the documented
-          // fallback for when no live futures price is wired to this page.
-          const price = computeBsGreeks(l.option, x, l.strike, l.timeYears, l.iv, 1).price;
-          const perUnit = l.side === 'B' ? (price - l.premium) : (l.premium - price);
-          return sum + perUnit * l.qty;
-        }, 0);
-        return { spot: x, pnl };
+      return buildPayoffModel({
+        legs: payoffLegInputs, spot, margin: basketMargin || undefined, atmIv: atmIvFraction || undefined,
+        fallbackIv: FALLBACK_IV, strikeStep: step || 50,
+        sim: { days: simTargetDays || 0, ivShift: simIvShift || 0 },
+        light: !showPayoffChart,
       });
     } catch {
       return null;
     }
-  }, [showPayoffChart, spot, hasMixedExpiry, calendarCurve, payoffResult, basket.legs, basket.underlying, basket.expiry, broker, crudeMult, defaultLotSize, ltpFor, ivForStrike]);
+  }, [payoffKey]);
 
   // ── Max days to expiry for What-If time decay simulation ─────────────
   const maxDays = useMemo(() => {
     if (!basket.expiry) return 7;
     return Math.max(0.1, Math.round(calculateTimeToExpiryYears(basket.expiry) * 365 * 10) / 10);
   }, [basket.expiry]);
-
-  // ── Projected Target Curve at T+simTargetDays & IV shift ─────────────
-  const targetCurve = useMemo(() => {
-    const isSimActive = (simTargetDays && simTargetDays > 0) || (simIvShift && simIvShift !== 0);
-    if (!showPayoffChart || !isSimActive) return null;
-    if (!spot || spot <= 0) return null;
-    const xs = hasMixedExpiry ? calendarCurve?.points.map(p => p.x) : payoffResult?.points.map(p => p.x);
-    if (!xs || xs.length === 0) return null;
-
-    const activeLegs = basket.legs.filter(l => l.status !== 'CLOSED');
-    if (activeLegs.length === 0) return null;
-
-    const payoffMultiplier = (broker === 'dhan' && (basket.underlying === 'CRUDEOIL' || basket.underlying === 'CRUDEOILM')) ? crudeMult : 1;
-
-    const legsForPricing = activeLegs.map(l => {
-      const legExpiry = l.expiry || basket.expiry;
-      const currentLtp = ltpFor(l);
-      const premium = (l.fill?.avgPrice && l.fill.avgPrice > 0)
-        ? l.fill.avgPrice
-        : (currentLtp > 0 ? currentLtp : (l.price || 0));
-      const qty = ((l.fill?.qty && l.fill.qty > 0) ? l.fill.qty : (l.lots * defaultLotSize)) * payoffMultiplier;
-      const chainIv = ivForStrike?.(l.strike, l.option, legExpiry) || FALLBACK_IV;
-      const totalTimeYears = calculateTimeToExpiryYears(legExpiry);
-      const solvedIv = (spot > 0 && premium > 0 && totalTimeYears > 0)
-        ? impliedVolFromPrice(l.option, spot, l.strike, totalTimeYears, premium)
-        : null;
-      const baseIv = solvedIv ?? chainIv;
-      const shiftedIv = Math.max(0.01, baseIv + ((simIvShift || 0) / 100));
-      const remainingTimeYears = Math.max(0.0001, totalTimeYears - ((simTargetDays || 0) / 365));
-      return { side: l.side, option: l.option, strike: l.strike, premium, qty, iv: shiftedIv, timeYears: remainingTimeYears };
-    });
-
-    if (legsForPricing.some(l => l.premium <= 0)) return null;
-
-    try {
-      return xs.map(x => {
-        const pnl = legsForPricing.reduce((sum, l) => {
-          const price = computeBsGreeks(l.option, x, l.strike, l.timeYears, l.iv, 1).price;
-          const perUnit = l.side === 'B' ? (price - l.premium) : (l.premium - price);
-          return sum + perUnit * l.qty;
-        }, 0);
-        return { spot: x, pnl };
-      });
-    } catch {
-      return null;
-    }
-  }, [showPayoffChart, simTargetDays, simIvShift, spot, hasMixedExpiry, calendarCurve, payoffResult, basket.legs, basket.underlying, basket.expiry, broker, crudeMult, defaultLotSize, ltpFor, ivForStrike]);
-
-  // ── Net strategy Greeks for payoff diagram header ────────────────────
-  const netGreeks = useMemo(() => {
-    if (!showPayoffChart || !spot || spot <= 0) return null;
-    const activeLegs = basket.legs.filter(l => l.status !== 'CLOSED');
-    if (activeLegs.length === 0) return null;
-
-    const payoffMultiplier = (broker === 'dhan' && (basket.underlying === 'CRUDEOIL' || basket.underlying === 'CRUDEOILM')) ? crudeMult : 1;
-
-    let delta = 0;
-    let theta = 0;
-    let vega = 0;
-    let gamma = 0;
-
-    for (const l of activeLegs) {
-      const legExpiry = l.expiry || basket.expiry;
-      const qty = ((l.fill?.qty && l.fill.qty > 0) ? l.fill.qty : (l.lots * defaultLotSize)) * payoffMultiplier;
-      const currentLtp = ltpFor(l);
-      const premium = (l.fill?.avgPrice && l.fill.avgPrice > 0)
-        ? l.fill.avgPrice
-        : (currentLtp > 0 ? currentLtp : (l.price || 0));
-      const chainIv = ivForStrike?.(l.strike, l.option, legExpiry) || FALLBACK_IV;
-      const timeYears = calculateTimeToExpiryYears(legExpiry);
-      const solvedIv = (spot > 0 && premium > 0 && timeYears > 0)
-        ? impliedVolFromPrice(l.option, spot, l.strike, timeYears, premium)
-        : null;
-      const iv = solvedIv ?? chainIv;
-      const sign = l.side === 'B' ? 1 : -1;
-      const g = computeBsGreeks(l.option, spot, l.strike, timeYears, iv, 1);
-      delta += sign * g.delta * qty;
-      theta += sign * g.theta * qty;
-      vega += sign * g.vega * qty;
-      gamma += sign * g.gamma * qty;
-    }
-    return { delta, theta, vega, gamma };
-  }, [showPayoffChart, spot, basket.legs, basket.expiry, basket.underlying, broker, crudeMult, defaultLotSize, ltpFor, ivForStrike]);
 
   // ── Active leg strike markers for X-axis pins ────────────────────────
   const strategyStrikes = useMemo(() => {
@@ -635,121 +437,24 @@ export default function MultiLegStrategyRow({
     }));
   }, [basket.legs]);
 
-  // ── Standard Deviation expected move (±1SD) ──────────────────────────
-  const expectedMove = useMemo(() => {
-    if (!spot || spot <= 0 || !basket.expiry) return null;
-    const timeYears = calculateTimeToExpiryYears(basket.expiry);
-    if (timeYears <= 0) return null;
-    const ceIv = (atmStrike && ivForStrike?.(atmStrike, 'CE', basket.expiry)) || 0;
-    const peIv = (atmStrike && ivForStrike?.(atmStrike, 'PE', basket.expiry)) || 0;
-    const iv = (ceIv > 0 && peIv > 0) ? (ceIv + peIv) / 2 : (ceIv > 0 ? ceIv : (peIv > 0 ? peIv : FALLBACK_IV));
-    const sd1 = spot * iv * Math.sqrt(timeYears);
-    return {
-      sd1Lo: Math.round((spot - sd1) * 10) / 10,
-      sd1Hi: Math.round((spot + sd1) * 10) / 10,
-    };
-  }, [spot, basket.expiry, atmStrike, ivForStrike]);
-
-  // ── Probability of Profit (POP %) ────────────────────────────────────
-  const popPct = useMemo(() => {
-    if (!spot || spot <= 0 || !basket.expiry || !payoffResult) return null;
-    const be = payoffResult.breakevens;
-    if (!be || be.length === 0) return null;
-    const timeYears = calculateTimeToExpiryYears(basket.expiry);
-    if (timeYears <= 0) return null;
-    const ceIv = (atmStrike && ivForStrike?.(atmStrike, 'CE', basket.expiry)) || 0;
-    const peIv = (atmStrike && ivForStrike?.(atmStrike, 'PE', basket.expiry)) || 0;
-    const iv = (ceIv > 0 && peIv > 0) ? (ceIv + peIv) / 2 : (ceIv > 0 ? ceIv : (peIv > 0 ? peIv : FALLBACK_IV));
-    const sorted = [...be].sort((a, b) => a - b);
-    const offset = Math.max(step || 50, spot * 0.05);
-    let pop = 0;
-    for (let i = 0; i <= sorted.length; i++) {
-      const lo = i === 0 ? -Infinity : sorted[i - 1];
-      const hi = i === sorted.length ? Infinity : sorted[i];
-      const testSpot = lo === -Infinity && hi === Infinity ? spot
-        : lo === -Infinity ? hi - offset
-        : hi === Infinity ? lo + offset
-        : (lo + hi) / 2;
-      const pnl = pnlAt(payoffResult.points.map(p => ({ spot: p.x, pnl: p.y })), testSpot);
-      if (pnl === null || pnl <= 0) continue;
-      const probAboveLo = lo === -Infinity ? 1 : riskNeutralProbAbove(spot, lo, timeYears, iv);
-      const probAboveHi = hi === Infinity ? 0 : riskNeutralProbAbove(spot, hi, timeYears, iv);
-      pop += probAboveLo - probAboveHi;
-    }
-    return Math.round(Math.min(1, Math.max(0, pop)) * 100);
-  }, [spot, basket.expiry, payoffResult, atmStrike, ivForStrike, step]);
-
-  // ── Risk-to-Reward Ratio (e.g. 1 : 1.5) ───────────────────────────────
-  const riskRewardRatio = useMemo(() => {
-    if (!payoffResult || payoffResult.maxProfitUnlimited || payoffResult.maxLossUnlimited) return null;
-    if (payoffResult.maxLoss === 0) return null;
-    const ratio = Math.abs(payoffResult.maxProfit / payoffResult.maxLoss);
-    if (ratio >= 1) {
-      return `1 : ${ratio.toFixed(1)}`;
-    }
-    return `${(1 / ratio).toFixed(1)} : 1`;
-  }, [payoffResult]);
-
-  const breakevensDisplay = useMemo(() => {
-    if (!payoffResult || payoffResult.breakevens.length === 0) return 'None';
-    return payoffResult.breakevens.map(b => {
-      const pct = spot && spot > 0 ? ((b - spot) / spot) * 100 : null;
-      const pctStr = pct !== null ? ` (${pct >= 0 ? '+' : ''}${pct.toFixed(1)}%)` : '';
-      return `${Math.round(b).toLocaleString('en-IN')}${pctStr}`;
-    }).join(' — ');
-  }, [payoffResult, spot]);
-
-  const maxProfitDisplay = useMemo(() => {
-    if (!payoffResult) return '—';
-    if (payoffResult.maxProfitUnlimited) return 'Unlimited';
-    return payoffResult.maxProfit > 0 ? `+${fmtMoney(payoffResult.maxProfit)}` : fmtMoney(payoffResult.maxProfit);
-  }, [payoffResult]);
-
-  // Max profit as a % of margin blocked — a return-on-capital measure, since
-  // rupee P&L alone doesn't say whether a trade is worth the margin it ties up.
-  const maxProfitPctOfMargin = useMemo(() => {
-    if (!payoffResult || payoffResult.maxProfitUnlimited || !basketMargin || basketMargin <= 0) return null;
-    return (payoffResult.maxProfit / basketMargin) * 100;
-  }, [payoffResult, basketMargin]);
+  // Header strings, read straight from the model so the strips and the chart can never disagree.
+  const pctFromSpot = (b: number) => (spot && spot > 0 ? ` (${((b - spot) / spot) * 100 >= 0 ? '+' : ''}${(((b - spot) / spot) * 100).toFixed(1)}%)` : '');
+  const breakevensDisplay = !payoffModel ? '—'
+    : payoffModel.breakevens.length === 0 ? (hasMixedExpiry ? 'Undefined' : 'None')
+      : payoffModel.breakevens.map(b => `${Math.round(b).toLocaleString('en-IN')}${pctFromSpot(b)}`).join(' — ');
+  const maxProfitDisplay = !payoffModel ? '—'
+    : payoffModel.maxProfitUnlimited ? 'Unlimited'
+      : payoffModel.maxProfit > 0 ? `+${fmtMoney(payoffModel.maxProfit)}` : fmtMoney(payoffModel.maxProfit);
+  const maxLossDisplay = !payoffModel ? '—' : payoffModel.maxLossUnlimited ? 'Unlimited' : fmtMoney(payoffModel.maxLoss);
+  // Max profit as a % of margin blocked — a return-on-capital measure, since rupee P&L alone doesn't say whether a trade is
+  // worth the margin it ties up.
+  const maxProfitPctOfMargin = payoffModel?.rom ?? null;
 
   // Displayed MTM (broker scope) as a % of margin blocked (Return on Margin / Capital)
   const pnlPctOfMargin = useMemo(() => {
     if (!basketMargin || basketMargin <= 0) return null;
     return (todayPnl / basketMargin) * 100;
   }, [todayPnl, basketMargin]);
-
-  const maxLossDisplay = useMemo(() => {
-    if (!payoffResult) return '—';
-    if (payoffResult.maxLossUnlimited) return 'Unlimited';
-    return fmtMoney(payoffResult.maxLoss);
-  }, [payoffResult]);
-
-  // Same "None"/"Undefined" language brokers use for a calendar spread whose
-  // sampled window never crosses zero (a pure debit calendar's theoretical
-  // value curve is often entirely positive or entirely negative in-range).
-  const calendarBreakevensDisplay = useMemo(() => {
-    if (!calendarCurve || calendarCurve.breakevens.length === 0) return 'Undefined';
-    return calendarCurve.breakevens.map(b => {
-      const pct = spot && spot > 0 ? ((b - spot) / spot) * 100 : null;
-      const pctStr = pct !== null ? ` (${pct >= 0 ? '+' : ''}${pct.toFixed(1)}%)` : '';
-      return `${Math.round(b).toLocaleString('en-IN')}${pctStr}`;
-    }).join(' — ');
-  }, [calendarCurve, spot]);
-
-  const calendarMaxProfitDisplay = useMemo(() => {
-    if (!calendarCurve) return '—';
-    return calendarCurve.maxPnl > 0 ? `+${fmtMoney(calendarCurve.maxPnl)}` : fmtMoney(calendarCurve.maxPnl);
-  }, [calendarCurve]);
-
-  const calendarMaxProfitPctOfMargin = useMemo(() => {
-    if (!calendarCurve || !basketMargin || basketMargin <= 0) return null;
-    return (calendarCurve.maxPnl / basketMargin) * 100;
-  }, [calendarCurve, basketMargin]);
-
-  const calendarMaxLossDisplay = useMemo(() => {
-    if (!calendarCurve) return '—';
-    return fmtMoney(calendarCurve.minPnl);
-  }, [calendarCurve]);
 
   const strategyRisk: StrategyRiskConfig = useMemo(() => {
     return basket.riskConfig ?? {
@@ -1005,22 +710,22 @@ export default function MultiLegStrategyRow({
             >
               <div className="flex items-center gap-1">
                 <span className="text-fuchsia-400 text-[10px] uppercase font-semibold">BE:</span>
-                <span className="text-zinc-200 font-bold">{calendarBreakevensDisplay}</span>
+                <span className="text-zinc-200 font-bold">{breakevensDisplay}</span>
               </div>
               <span className="text-zinc-700">·</span>
               <div className="flex items-center gap-1">
                 <span className="text-fuchsia-400 text-[10px] uppercase font-semibold">Max P/L:</span>
                 <span className="text-emerald-400 font-bold">
-                  {calendarMaxProfitDisplay}
-                  {calendarMaxProfitPctOfMargin != null && (
-                    <span className="text-[10px] opacity-80"> ({calendarMaxProfitPctOfMargin >= 0 ? '+' : ''}{calendarMaxProfitPctOfMargin.toFixed(1)}% of margin)</span>
+                  {maxProfitDisplay}
+                  {maxProfitPctOfMargin != null && (
+                    <span className="text-[10px] opacity-80"> ({maxProfitPctOfMargin >= 0 ? '+' : ''}{maxProfitPctOfMargin.toFixed(1)}% of margin)</span>
                   )}
                 </span>
                 <span className="text-zinc-600">/</span>
-                <span className="text-rose-400 font-bold">{calendarMaxLossDisplay}</span>
+                <span className="text-rose-400 font-bold">{maxLossDisplay}</span>
               </div>
             </div>
-          ) : payoffResult && (
+          ) : payoffModel && (
             <div className="hidden md:flex items-center gap-2 px-2.5 py-1 rounded-lg bg-zinc-950 border border-zinc-800 text-xs font-mono" title="Strategy Payoff: Breakevens & Max Profit / Loss">
               <div className="flex items-center gap-1">
                 <span className="text-zinc-500 text-[10px] uppercase font-semibold">BE:</span>
@@ -1058,11 +763,10 @@ export default function MultiLegStrategyRow({
           <button
             type="button"
             onClick={runGreeks}
-            disabled={greeksLoading}
-            title="Compute Net Delta / Gamma / Theta / Vega for this strategy (fetches the option chain now)"
-            className={`h-7 px-2.5 inline-flex items-center gap-1 text-[11px] font-bold rounded-lg border border-violet-500/40 bg-violet-500/10 text-violet-300 hover:bg-violet-500/20 disabled:opacity-50 ${FOCUS_RING}`}
+            title="Net Delta / Gamma / Theta / Vega for this strategy, from each leg's live price"
+            className={`h-7 px-2.5 inline-flex items-center gap-1 text-[11px] font-bold rounded-lg border border-violet-500/40 bg-violet-500/10 text-violet-300 hover:bg-violet-500/20 ${FOCUS_RING}`}
           >
-            {greeksLoading ? <Loader2 className="w-3 h-3 animate-spin" /> : <Sigma className="w-3 h-3" />}
+            <Sigma className="w-3 h-3" />
             Greeks
           </button>
 
@@ -1236,11 +940,7 @@ export default function MultiLegStrategyRow({
 
       {greeksOpen && (
         <div className="px-4 py-2.5 border-t border-zinc-800/80 bg-zinc-950/40 flex flex-col gap-2">
-          {greeksLoading && !greeks ? (
-            <div className="flex items-center gap-2 text-xs text-zinc-300">
-              <Loader2 className="w-3.5 h-3.5 animate-spin text-violet-400" /> Loading option chain…
-            </div>
-          ) : greeks && (
+          {greeks && (
             <>
               <div className="flex items-center gap-2 flex-wrap">
                 <div className="flex flex-wrap items-center rounded-lg border border-zinc-800/80 bg-zinc-950/60 py-1.5">
@@ -1250,14 +950,14 @@ export default function MultiLegStrategyRow({
                     color={greeks.result.net.gamma < 0 ? 'text-rose-400' : 'text-zinc-100'} />
                   <StatChip label="Net Theta" value={`₹${greeks.result.net.theta.toLocaleString('en-IN', { maximumFractionDigits: 0 })}`}
                     sub="per day" color={greeks.result.net.theta > 0 ? 'text-emerald-400' : 'text-red-400'} />
-                  <StatChip label="Net Vega" value={greeks.result.net.vega.toFixed(2)} sub="per 1 vol pt"
+                  <StatChip label="Net Vega" value={greeks.result.net.vega.toFixed(2)} sub="per 1% IV"
                     color={greeks.result.net.vega < 0 ? 'text-rose-400' : 'text-zinc-100'} />
                   <StatChip label="Legs" value={String(greeks.result.legs.length)} />
                 </div>
                 <span className="text-[10px] text-zinc-500">as of {greeks.at.toLocaleTimeString('en-IN')}</span>
-                <button type="button" onClick={runGreeks} disabled={greeksLoading} aria-label="Recompute greeks"
-                  className={`h-6 px-2 inline-flex items-center gap-1 text-[10px] font-bold rounded-md border border-zinc-700 text-zinc-300 hover:bg-zinc-800 disabled:opacity-50 ${FOCUS_RING}`}>
-                  {greeksLoading ? <Loader2 className="w-3 h-3 animate-spin" /> : <RefreshCw className="w-3 h-3" />} Refresh
+                <button type="button" onClick={runGreeks} aria-label="Recompute greeks"
+                  className={`h-6 px-2 inline-flex items-center gap-1 text-[10px] font-bold rounded-md border border-zinc-700 text-zinc-300 hover:bg-zinc-800 ${FOCUS_RING}`}>
+                  <RefreshCw className="w-3 h-3" /> Refresh
                 </button>
                 <button type="button" onClick={() => setGreeksOpen(false)} aria-label="Close greeks"
                   className={`ml-auto h-6 w-6 inline-flex items-center justify-center rounded-md text-zinc-400 hover:bg-zinc-800 hover:text-white ${FOCUS_RING}`}>
@@ -1297,9 +997,9 @@ export default function MultiLegStrategyRow({
                   </tbody>
                 </table>
               )}
-              {greeks.result.missing.length > 0 && (
+              {greeks.result.assumed.length > 0 && (
                 <p className="text-[11px] text-amber-300">
-                  {greeks.result.missing.length} leg(s) had no greeks in the chain ({greeks.result.missing.map(l => `${l.strike} ${l.option}`).join(', ')}) — excluded from the net figures; real exposure is larger.
+                  {greeks.result.assumed.length} leg(s) have no live price or chain IV ({greeks.result.assumed.map(l => `${l.strike} ${l.option}`).join(', ')}) — priced on an assumed {(FALLBACK_IV * 100).toFixed(0)}% IV, so their Greeks are indicative.
                 </p>
               )}
               {greeks.collisions.length > 0 && (
@@ -1307,9 +1007,6 @@ export default function MultiLegStrategyRow({
                   Shares a contract with another strategy ({[...new Set(greeks.collisions.map(c => `${c.basketName}: ${c.strike} ${c.option}`))].join(', ')}).
                   These Greeks follow this strategy&apos;s own record, not the broker&apos;s netted position, so they may be off.
                 </p>
-              )}
-              {greeks.errors.length > 0 && (
-                <p className="text-[11px] text-zinc-400">Chain fetch failed for: {greeks.errors.join('; ')}</p>
               )}
             </>
           )}
@@ -1373,20 +1070,20 @@ export default function MultiLegStrategyRow({
                   <div className="h-4 w-px bg-zinc-800" />
                   <div className="flex items-center gap-1.5" title="Strategy value as of the near leg's expiry — see the payoff curve below">
                     <span className="text-fuchsia-400 text-[11px] font-semibold uppercase tracking-wider">Breakevens:</span>
-                    <span className="font-mono text-zinc-100 font-bold">{calendarBreakevensDisplay}</span>
+                    <span className="font-mono text-zinc-100 font-bold">{breakevensDisplay}</span>
                   </div>
                   <div className="h-4 w-px bg-zinc-800" />
                   <div className="flex items-center gap-1.5" title="Highest P&L observed across the charted price range">
                     <span className="text-fuchsia-400 text-[11px] font-semibold uppercase tracking-wider">Max Profit:</span>
-                    <span className="font-mono text-emerald-400 font-bold">{calendarMaxProfitDisplay}</span>
+                    <span className="font-mono text-emerald-400 font-bold">{maxProfitDisplay}</span>
                   </div>
                   <div className="h-4 w-px bg-zinc-800" />
                   <div className="flex items-center gap-1.5" title="Lowest P&L observed across the charted price range">
                     <span className="text-fuchsia-400 text-[11px] font-semibold uppercase tracking-wider">Max Loss:</span>
-                    <span className="font-mono text-rose-400 font-bold">{calendarMaxLossDisplay}</span>
+                    <span className="font-mono text-rose-400 font-bold">{maxLossDisplay}</span>
                   </div>
                 </>
-              ) : payoffResult && (
+              ) : payoffModel && (
                 <>
                   <div className="h-4 w-px bg-zinc-800" />
                   <div className="flex items-center gap-1.5" title="Strategy Breakeven Price Points at Expiry">
@@ -1660,76 +1357,29 @@ export default function MultiLegStrategyRow({
 
               {showPayoffChart && (
                 <div className="px-3 pb-3">
-                  {/* Calendar/Diagonal payoff curve — strategy value as of the
-                     near leg's expiry, not a same-day-at-intrinsic curve (see
-                     calendarCurve's own comment above). Only rendered once
-                     every active leg is priced (calendarCurve returns null
-                     otherwise). */}
-                  {hasMixedExpiry && calendarCurve && (
-                    <>
-                      <PayoffDiagram
-                        curve={calendarCurve.points.map(p => ({ spot: p.x, pnl: p.y }))}
-                        currentSpot={spot ?? 0}
-                        breakevens={calendarCurve.breakevens}
-                        todayCurve={todayCurve ?? undefined}
-                        targetCurve={targetCurve ?? undefined}
-                        targetDays={simTargetDays}
-                        maxDays={maxDays}
-                        onTargetDaysChange={setSimTargetDays}
-                        ivShift={simIvShift}
-                        onIvShiftChange={setSimIvShift}
-                        maxProfit={calendarCurve.maxPnl}
-                        maxProfitUnlimited={calendarCurve.maxProfitUnlimited}
-                        maxLoss={calendarCurve.minPnl}
-                        maxLossUnlimited={calendarCurve.maxLossUnlimited}
-                        rom={calendarCurve && basketMargin && basketMargin > 0 ? (calendarCurve.maxPnl / basketMargin) * 100 : null}
-                        netGreeks={greeks?.result?.net ?? netGreeks}
-                        strikes={strategyStrikes}
-                        expectedMove={expectedMove}
-                      />
-                      <p className="mt-1 text-[10px] text-zinc-500 font-mono">
-                        Value as of the near leg&apos;s expiry ({basket.expiry}) — the far leg
-                        ({effectiveFarExpiry}) still carries {calendarCurve.daysBetweenExpiries}d of theoretical time value, priced via Black-76/Black-Scholes.
-                      </p>
-                    </>
-                  )}
-                  {hasMixedExpiry && !calendarCurve && (
-                    <p className="text-xs text-zinc-500 text-center py-2">
-                      Waiting for live prices to draw the calendar spread&apos;s payoff curve…
-                    </p>
-                  )}
-
-                  {/* Single-expiry strategy payoff curve — the combined payoff
-                     of every active leg in this basket (Iron Condor, Short
-                     Strangle, etc.) at expiry, using the same computePayoff()
-                     result the BE/Max P&L stats above are already derived
-                     from, so the chart never disagrees with the numbers next
-                     to it. */}
-                  {!hasMixedExpiry && payoffResult && (
+                  {/* The shared chart, fed by the central payoff library: the same model the header strips above read. */}
+                  {payoffModel && payoffModel.points.length > 1 ? (
                     <PayoffDiagram
-                      curve={payoffResult.points.map(p => ({ spot: p.x, pnl: p.y }))}
+                      title="Strategy payoff"
+                      {...modelToDiagramProps(payoffModel)}
                       currentSpot={spot ?? 0}
-                      breakevens={payoffResult.breakevens}
-                      todayCurve={todayCurve ?? undefined}
-                      targetCurve={targetCurve ?? undefined}
                       targetDays={simTargetDays}
                       maxDays={maxDays}
                       onTargetDaysChange={setSimTargetDays}
                       ivShift={simIvShift}
                       onIvShiftChange={setSimIvShift}
-                      maxProfit={payoffResult.maxProfit}
-                      maxProfitUnlimited={payoffResult.maxProfitUnlimited}
-                      maxLoss={payoffResult.maxLoss}
-                      maxLossUnlimited={payoffResult.maxLossUnlimited}
-                      rom={maxProfitPctOfMargin}
-                      riskReward={riskRewardRatio}
-                      pop={popPct}
-                      netGreeks={greeks?.result?.net ?? netGreeks}
                       strikes={strategyStrikes}
-                      expectedMove={expectedMove}
+                      note={
+                        <span>
+                          Open P&amp;L at today&apos;s level <span className={payoffModel.nowPnl >= 0 ? 'text-emerald-400' : 'text-red-400'}>{fmtMoney(payoffModel.nowPnl)}</span>
+                          {payoffModel.laterExpiries.length > 0
+                            ? ` · value as of the near expiry (${payoffModel.frontExpiry}); later legs (${payoffModel.laterExpiries.join(', ')}) keep their time value, priced via Black-76`
+                            : ` · at expiry (${payoffModel.frontExpiry})`}
+                          {payoffModel.ivAssumed > 0 && <span className="text-amber-400"> · {payoffModel.ivAssumed} leg(s) priced on an assumed IV</span>}
+                        </span>
+                      }
                     />
-                  )}
-                  {!hasMixedExpiry && !payoffResult && (
+                  ) : (
                     <p className="text-xs text-zinc-500 text-center py-2">
                       Waiting for live prices to draw the payoff curve…
                     </p>

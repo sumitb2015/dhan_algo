@@ -5,7 +5,8 @@ import {
   ComposedChart, Line, XAxis, YAxis, CartesianGrid, Tooltip as RTooltip, ResponsiveContainer, ReferenceLine,
 } from 'recharts';
 import { cn } from '@/lib/utils';
-import { DeskLeg, ladder, fmtInr } from '@/lib/deltaDesk';
+import { DeskLeg, deskLegsToPayoffLegs, fmtInr } from '@/lib/deltaDesk';
+import { payoffLadder } from '@/lib/optionsPayoff';
 
 export interface TrailPoint {
   t: number;        // epoch ms
@@ -16,7 +17,7 @@ export interface TrailPoint {
 
 /** What a move in the index does to P&L and to net delta, repriced right now. */
 export function ScenarioLadder({ legs, spot }: { legs: DeskLeg[]; spot: number }) {
-  const rows = useMemo(() => ladder(legs, spot, 0), [legs, spot]);
+  const rows = useMemo(() => payoffLadder({ legs: deskLegsToPayoffLegs(legs), spot }), [legs, spot]);
   const worst = Math.min(...rows.map(r => r.pnlDelta));
   const best = Math.max(...rows.map(r => r.pnlDelta));
 

@@ -6,7 +6,11 @@
 
 export const STRIKE_STEP = 50; // NIFTY
 
-export type OptType = 'CE' | 'PE';
+import { type OptType, bsPrice, riskNeutralProbAbove, impliedVolFromPrice } from './optionsPricing.ts';
+import { payoffGrid, buildPayoffModel } from './optionsPayoff.ts';
+import { payoffStatsFromModel } from './positionPayoff.ts';
+export { bsPrice, riskNeutralProbAbove, impliedVolFromPrice };
+export type { OptType };
 export type Side = 'BUY' | 'SELL';
 
 export interface ParamDef {
@@ -319,17 +323,6 @@ export function classifyExpiries(dates: string[]): { date: string; kind: ExpiryK
 
 // ── Payoff engine ────────────────────────────────────────────────────────────
 
-/** Per-unit-of-lot payoff at a given expiry spot price (not yet scaled by lotSize). */
-export function legPayoffAtExpiry(spot: number, leg: ResolvedLeg): number {
-  const intrinsic = leg.type === 'CE' ? Math.max(spot - leg.strike, 0) : Math.max(leg.strike - spot, 0);
-  const perUnit = leg.side === 'SELL' ? (leg.price - intrinsic) : (intrinsic - leg.price);
-  return perUnit * leg.qtyLots;
-}
-
-function netPnlAtExpiry(legs: ResolvedLeg[], spot: number, lotSize: number): number {
-  return legs.reduce((sum, leg) => sum + legPayoffAtExpiry(spot, leg), 0) * lotSize;
-}
-
 /** Whole calendar days from local midnight today to local midnight on expiryDate (YYYY-MM-DD). */
 export function daysToExpiryFrom(expiryDate: string): number {
   const today = new Date();
@@ -340,119 +333,12 @@ export function daysToExpiryFrom(expiryDate: string): number {
 }
 
 /**
- * Zero crossings of a piecewise-linear point list, by linear interpolation between the
- * last non-zero point and the next one of opposite sign. A run of exact zeros counts once
- * (at its first point) and only if the sign really flips across it, so a curve that merely
- * touches zero, or sits flat on zero, reports no breakeven.
- */
-function zeroCrossings(pts: { spot: number; pnl: number }[]): number[] {
-  const out: number[] = [];
-  let last: { spot: number; pnl: number } | null = null;
-  let zeroStart: number | null = null;
-  for (const pt of pts) {
-    if (pt.pnl === 0) { if (zeroStart === null) zeroStart = pt.spot; continue; }
-    if (last && Math.sign(last.pnl) !== Math.sign(pt.pnl)) {
-      const be = zeroStart !== null
-        ? zeroStart
-        : last.spot + (0 - last.pnl) * (pt.spot - last.spot) / (pt.pnl - last.pnl);
-      out.push(Math.round(be * 100) / 100);
-    }
-    last = pt;
-    zeroStart = null;
-  }
-  return out;
-}
-
-/** Zero-crossings of a piecewise-linear {spot, pnl} curve, via linear interpolation between adjacent samples. */
-export function findBreakevens(curve: { spot: number; pnl: number }[]): number[] {
-  return zeroCrossings(curve);
-}
-
-export interface ExpiryProfile {
-  /** Every zero crossing of the expiry payoff, ascending. Independent of any sampled window. */
-  breakevens: number[];
-  /** Highest / lowest P&L over the finite part of the curve (kinks incl. spot = 0). Ignores an unbounded right tail. */
-  maxPnl: number;
-  minPnl: number;
-  /** P&L change per +1 of spot beyond the highest strike; > 0 unbounded profit, < 0 unbounded loss. */
-  rightSlope: number;
-}
-
-/**
- * Exact analysis of the expiry payoff. The curve is piecewise linear and only bends at the
- * strikes, so evaluating it at every strike, at spot = 0 (price cannot go lower), and along
- * the straight tail beyond the highest strike finds every breakeven and every bounded
- * extreme without sampling — so a wide straddle/strangle or a long put is never mis-reported
- * just because its breakeven or its best point lies outside the drawn window.
- */
-export function exactExpiryProfile(legs: ResolvedLeg[], lotSize: number = 1): ExpiryProfile {
-  const kinks = [...new Set([0, ...legs.map((l) => l.strike)])].sort((a, b) => a - b);
-  const pts = kinks.map((k) => ({ spot: k, pnl: netPnlAtExpiry(legs, k, lotSize) }));
-  const top = kinks[kinks.length - 1];
-  const rightSlope = netPnlAtExpiry(legs, top + 1, lotSize) - pts[pts.length - 1].pnl;
-  const FAR = 1e6; // the tail is a straight line, so any far point interpolates the crossing exactly
-  const withTail = rightSlope === 0 ? pts : [...pts, { spot: top + FAR, pnl: pts[pts.length - 1].pnl + rightSlope * FAR }];
-  const pnls = pts.map((p) => p.pnl);
-  return {
-    breakevens: zeroCrossings(withTail),
-    maxPnl: Math.max(...pnls),
-    minPnl: Math.min(...pnls),
-    rightSlope,
-  };
-}
-
-/**
  * Half-width of the sampled spot range, as a fraction of spot. The strategy
  * builder and baskets have always used 1.5%; the positions-analytics payoff
  * chart passes a larger value when zoomed out. Kept as the default so existing
  * callers are byte-identical.
  */
 export const DEFAULT_SPAN_PCT = 0.015;
-
-/**
- * Sample spot range for a payoff chart: at least +/- spanPct of spot (default 1.5%) and at
- * least strikeStep * 4 beyond the outermost strike, then widened, only when needed, to also cover every exact
- * breakeven (plus one strike step) so a wide straddle/strangle never draws without them.
- * Every leg's strike is forced in as an exact sample point (piecewise-linear kinks only
- * occur at strikes).
- */
-function buildSpotSamples(
-  legs: ResolvedLeg[], spot: number, strikeStep: number = STRIKE_STEP, spanPct: number = DEFAULT_SPAN_PCT,
-): number[] {
-  const pctSpan = spot * spanPct;
-  const strikes = legs.map((l) => l.strike);
-  const minStrike = strikes.length > 0 ? Math.min(...strikes) : spot;
-  const maxStrike = strikes.length > 0 ? Math.max(...strikes) : spot;
-
-  const pad = strikeStep * 4; // padding for wings
-  const bes = exactExpiryProfile(legs).breakevens;
-  const minBe = bes.length > 0 ? bes[0] : Infinity;
-  const maxBe = bes.length > 0 ? bes[bes.length - 1] : -Infinity;
-  // Only one strike step of margin past a breakeven: enough that it is never on the edge, small
-  // enough that a book whose breakevens already fit the base window is drawn exactly as before.
-  const lo = Math.min(spot - pctSpan, minStrike - pad, minBe - strikeStep);
-  const hi = Math.max(spot + pctSpan, maxStrike + pad, maxBe + strikeStep);
-
-  // Make bounds symmetric around spot (a price cannot go below zero)
-  const maxDiff = Math.max(spot - lo, hi - spot);
-  const symLo = Math.max(0, spot - maxDiff);
-  const symHi = spot + maxDiff;
-
-  const samples = new Set<number>();
-  const stepCount = 150;
-  for (let i = 0; i <= stepCount; i++) {
-    samples.add(Math.round((symLo + ((symHi - symLo) * i) / stepCount) * 100) / 100);
-  }
-  for (const leg of legs) samples.add(leg.strike);
-  return [...samples].sort((a, b) => a - b);
-}
-
-export function buildPayoffCurve(
-  legs: ResolvedLeg[], spot: number, lotSize: number, strikeStep: number = STRIKE_STEP,
-  spanPct: number = DEFAULT_SPAN_PCT,
-): { spot: number; pnl: number }[] {
-  return buildSpotSamples(legs, spot, strikeStep, spanPct).map((s) => ({ spot: s, pnl: netPnlAtExpiry(legs, s, lotSize) }));
-}
 
 export interface PayoffStats {
   maxProfit: number | 'Unlimited';
@@ -483,181 +369,34 @@ export function computePayoffStats(
   legs: ResolvedLeg[], spot: number, lotSize: number, expiryDate: string, strikeStep: number = STRIKE_STEP,
   spanPct: number = DEFAULT_SPAN_PCT,
 ): PayoffStats {
-  const curve = buildPayoffCurve(legs, spot, lotSize, strikeStep, spanPct);
-
-  // Net qty per side (signed lots): >0 means net SHORT that option type -> unbounded loss on that tail.
-  const netCallQty = legs.filter(l => l.type === 'CE').reduce((s, l) => s + (l.side === 'SELL' ? l.qtyLots : -l.qtyLots), 0);
-  const netPutQty  = legs.filter(l => l.type === 'PE').reduce((s, l) => s + (l.side === 'SELL' ? l.qtyLots : -l.qtyLots), 0);
-
-  const upsideUnlimitedLoss = netCallQty > 0;
-  const downsideUnlimitedLoss = netPutQty > 0;
-  // A net LONG call has no ceiling as spot -> infinity. A net long put's profit
-  // is bounded (spot cannot go below 0), so there is no equivalent downside case.
-  const upsideUnlimitedProfit = netCallQty < 0;
-
-  const pnls = curve.map(c => c.pnl);
-  const boundedMaxProfit = Math.max(...pnls); // best/worst inside the sampled window only (see *InRange)
-  const boundedMinLoss = Math.min(...pnls);
-  // Bounded extremes and breakevens come from the exact expiry profile, not the window:
-  // a long put's best point is at spot = 0 and a wide straddle's breakevens can sit
-  // outside the drawn range, and neither may be reported as a clamped window value.
-  const exact = exactExpiryProfile(legs, lotSize);
-  const maxLoss: number | 'Unlimited' = (upsideUnlimitedLoss || downsideUnlimitedLoss) ? 'Unlimited' : exact.minPnl;
-  const maxProfit: number | 'Unlimited' = upsideUnlimitedProfit ? 'Unlimited' : exact.maxPnl;
-
-  const rewardRisk = (maxLoss === 'Unlimited' || maxProfit === 'Unlimited' || maxLoss === 0) ? null : Math.abs(maxProfit / maxLoss);
-
-  const netPremium = legs.reduce((sum, leg) => sum + (leg.side === 'SELL' ? leg.price : -leg.price) * leg.qtyLots, 0);
-
-  let intrinsicValue = 0;
-  let timeValue = 0;
-  for (const leg of legs) {
-    const intrinsicNow = leg.type === 'CE' ? Math.max(spot - leg.strike, 0) : Math.max(leg.strike - spot, 0);
-    const sideSign = leg.side === 'SELL' ? 1 : -1;
-    intrinsicValue += sideSign * leg.qtyLots * intrinsicNow * lotSize;
-    timeValue += sideSign * leg.qtyLots * (leg.price - intrinsicNow) * lotSize;
+  // Computed by the central payoff library (lib/optionsPayoff.ts) through lib/positionPayoff.ts. Break-evens and bounded extremes are exact
+  // (evaluated at every strike, at spot 0 and along the tail); "Unlimited" comes from net signed CE/PE quantity; POP integrates the
+  // risk-neutral lognormal over each profitable zone using the ATM IV. A leg priced with no IV is valued at intrinsic only.
+  const priced = legs.filter((l) => l.price > 0);
+  const model = priced.length
+    ? buildPayoffModel({
+        spot,
+        legs: priced.map((l) => ({
+          type: l.type, strike: l.strike, expiry: l.expiry || expiryDate,
+          qty: (l.side === 'SELL' ? -1 : 1) * l.qtyLots * lotSize,
+          entryPrice: l.price, mark: l.price, chainIv: l.iv !== null && l.iv > 0 ? l.iv : undefined,
+        })),
+        rangePct: spanPct, strikeStep, fallbackIv: 0,
+      })
+    : null;
+  if (!model) {
+    return {
+      maxProfit: 0, maxLoss: 0, breakevensExpiry: [], rewardRisk: null, netPremium: 0, intrinsicValue: 0, timeValue: 0, popPct: null,
+      maxLossInRange: 0, maxLossAtSpot: spot, maxProfitInRange: 0, maxProfitAtSpot: spot, rangeLo: spot, rangeHi: spot,
+    };
   }
-
-  const breakevensExpiry = exact.breakevens;
-
-  // POP: probability the strategy finishes in a profit zone at expiry, computed by
-  // integrating the risk-neutral lognormal distribution (same N(d2) term used by
-  // bsPrice) over each zone bounded by the actual breakevens — not a delta-sum
-  // heuristic, which collapses to ~0% for ATM straddles (both legs' |delta| ~0.5
-  // sum to ~1.0) even though such positions plainly have a real chance of profit.
-  // Each zone's profit/loss sign is checked via the exact intrinsic payoff at a
-  // point safely inside it, not the discretely-sampled curve.
-  const ivs = legs.map((l) => l.iv).filter((iv): iv is number => iv !== null && iv > 0);
-  let popPct: number | null = null;
-  if (ivs.length > 0) {
-    const avgIv = ivs.reduce((s, iv) => s + iv, 0) / ivs.length;
-    const t = daysToExpiryFrom(expiryDate) / 365;
-    const sorted = [...breakevensExpiry].sort((a, b) => a - b);
-    const offset = Math.max(strikeStep, spot * 0.05);
-    let pop = 0;
-    for (let i = 0; i <= sorted.length; i++) {
-      const lo = i === 0 ? -Infinity : sorted[i - 1];
-      const hi = i === sorted.length ? Infinity : sorted[i];
-      const testSpot = lo === -Infinity && hi === Infinity ? spot
-        : lo === -Infinity ? hi - offset
-        : hi === Infinity ? lo + offset
-        : (lo + hi) / 2;
-      if (netPnlAtExpiry(legs, testSpot, lotSize) <= 0) continue;
-      const probAboveLo = lo === -Infinity ? 1 : riskNeutralProbAbove(spot, lo, t, avgIv);
-      const probAboveHi = hi === Infinity ? 0 : riskNeutralProbAbove(spot, hi, t, avgIv);
-      pop += probAboveLo - probAboveHi;
-    }
-    popPct = Math.round(Math.min(1, Math.max(0, pop)) * 100);
-  }
-
-  const worstIdx = pnls.reduce((best, p, i) => (p < pnls[best] ? i : best), 0);
-  const bestIdx = pnls.reduce((best, p, i) => (p > pnls[best] ? i : best), 0);
-
-  return {
-    maxProfit,
-    maxLoss,
-    breakevensExpiry,
-    rewardRisk,
-    netPremium,
-    intrinsicValue,
-    timeValue,
-    popPct,
-    maxLossInRange: boundedMinLoss,
-    maxLossAtSpot: curve[worstIdx]?.spot ?? spot,
-    maxProfitInRange: boundedMaxProfit,
-    maxProfitAtSpot: curve[bestIdx]?.spot ?? spot,
-    rangeLo: curve[0]?.spot ?? spot,
-    rangeHi: curve[curve.length - 1]?.spot ?? spot,
-  };
+  return payoffStatsFromModel(model, legs, spot, lotSize);
 }
 
 // ── Minimal Black-Scholes pricer for "Target" (pre-expiry) breakevens ──────────
 
-/** Standard normal CDF via the Abramowitz-Stegun 7.1.26 erf approximation (no external dependency). */
-function normCdf(x: number): number {
-  const sign = x < 0 ? -1 : 1;
-  const ax = Math.abs(x) / Math.SQRT2;
-  const a1=0.254829592, a2=-0.284496736, a3=1.421413741, a4=-1.453152027, a5=1.061405429, p=0.3275911;
-  const t = 1 / (1 + p * ax);
-  const y = 1 - (((((a5*t + a4)*t) + a3)*t + a2)*t + a1) * t * Math.exp(-ax*ax);
-  return 0.5 * (1 + sign * y);
-}
-
-/** Black-Scholes European option price. t in years, iv as a fraction (e.g. 0.13), r default 6.5%. */
-export function bsPrice(type: OptType, S: number, K: number, t: number, iv: number, r = 0.065): number {
-  if (t <= 0 || iv <= 0) {
-    return type === 'CE' ? Math.max(S - K, 0) : Math.max(K - S, 0);
-  }
-  const d1 = (Math.log(S / K) + (r + (iv * iv) / 2) * t) / (iv * Math.sqrt(t));
-  const d2 = d1 - iv * Math.sqrt(t);
-  if (type === 'CE') {
-    return S * normCdf(d1) - K * Math.exp(-r * t) * normCdf(d2);
-  }
-  return K * Math.exp(-r * t) * normCdf(-d2) - S * normCdf(-d1);
-}
-
-/** Risk-neutral P(S_T > K) under lognormal GBM — the same N(d2) term bsPrice() uses for a call. */
-export function riskNeutralProbAbove(S: number, K: number, t: number, iv: number, r = 0.065): number {
-  if (t <= 0 || iv <= 0) return S > K ? 1 : 0;
-  const d2 = (Math.log(S / K) + (r - (iv * iv) / 2) * t) / (iv * Math.sqrt(t));
-  return normCdf(d2);
-}
-
-/**
- * "Target" (pre-expiry, today) P&L curve using each leg's current IV and current DTE.
- * Falls back to intrinsic-only pricing for a leg with no IV (documented limitation,
- * surfaced by the caller via an InfoButton — see Task 8).
- */
-export function buildTargetPayoffCurve(
-  legs: ResolvedLeg[], spot: number, lotSize: number, daysToExpiry: number, strikeStep: number = STRIKE_STEP,
-  spanPct: number = DEFAULT_SPAN_PCT,
-): { spot: number; pnl: number }[] {
-  const t = Math.max(daysToExpiry, 0) / 365;
-  return buildSpotSamples(legs, spot, strikeStep, spanPct).map((s) => {
-    const pnl = legs.reduce((sum, leg) => {
-      const iv = leg.iv ?? 0;
-      const price = iv > 0 ? bsPrice(leg.type, s, leg.strike, t, iv) : (leg.type === 'CE' ? Math.max(s - leg.strike, 0) : Math.max(leg.strike - s, 0));
-      const perUnit = leg.side === 'SELL' ? (leg.price - price) : (price - leg.price);
-      return sum + perUnit * leg.qtyLots;
-    }, 0) * lotSize;
-    return { spot: s, pnl };
-  });
-}
-
-// ── Implied volatility from a traded price ────────────────────────────────────
-
-/**
- * Invert bsPrice() for sigma by bisection.
- *
- * Needed because Dhan's option chain frequently returns all-zero `greeks` and a
- * one-sided `implied_volatility` (populated for the CE but not the PE of the same
- * strike, or neither on deep OTM). Without this, a leg with no IV silently falls
- * back to intrinsic pricing in the target-date curve — which looks like a valid
- * blue line but is simply wrong.
- *
- * Returns null when no solution exists rather than a clamped bound: a price at or
- * below intrinsic has no positive-vol solution, and a price above the theoretical
- * ceiling is bad data. Callers must treat null as "IV unavailable" and say so.
- */
-export function impliedVolFromPrice(
-  type: OptType, S: number, K: number, t: number, price: number, r = 0.065,
-): number | null {
-  if (!(t > 0) || !(price > 0) || !(S > 0) || !(K > 0)) return null;
-
-  const intrinsic = type === 'CE' ? Math.max(S - K, 0) : Math.max(K - S, 0);
-  // A price at or under intrinsic carries no time value, so no sigma > 0 produces it.
-  if (price <= intrinsic + 1e-8) return null;
-
-  let lo = 1e-4, hi = 5;
-  if (bsPrice(type, S, K, t, hi, r) < price) return null; // beyond a 500% vol — bad mark
-
-  for (let i = 0; i < 100; i++) {
-    const mid = (lo + hi) / 2;
-    if (bsPrice(type, S, K, t, mid, r) < price) lo = mid; else hi = mid;
-    if (hi - lo < 1e-7) break;
-  }
-  return (lo + hi) / 2;
-}
+// bsPrice, riskNeutralProbAbove and impliedVolFromPrice live in optionsPricing.ts (the single options-maths library)
+// and are re-exported below so existing imports keep working.
 
 // ── Multi-expiry payoff (a positions book spanning several expiries) ──────────
 
@@ -666,54 +405,6 @@ export function daysBetweenDates(fromIso: string, toIso: string): number {
   const a = new Date(fromIso); a.setHours(0, 0, 0, 0);
   const b = new Date(toIso);   b.setHours(0, 0, 0, 0);
   return Math.max(0, Math.round((b.getTime() - a.getTime()) / 86_400_000));
-}
-
-/**
- * P&L curve for a book whose legs may expire on different dates, evaluated at
- * `targetDate`. A leg expiring on or before the target date prices intrinsically
- * (it is settled by then); a later leg still carries time value and prices with
- * bsPrice() at its own *residual* days-to-expiry.
- *
- * A leg with no `expiry` is treated as expiring on the target date — so a
- * single-expiry book evaluated at its own expiry reproduces buildPayoffCurve()
- * exactly (asserted in the tests).
- *
- * Legs with no usable IV fall back to intrinsic. Callers should surface that:
- * see `legsMissingIv()`.
- */
-export function buildMultiExpiryCurve(
-  legs: ResolvedLeg[], spot: number, lotSize: number, targetDate: string,
-  strikeStep: number = STRIKE_STEP, spanPct: number = DEFAULT_SPAN_PCT,
-): { spot: number; pnl: number }[] {
-  const residualYears = legs.map((leg) =>
-    leg.expiry ? daysBetweenDates(targetDate, leg.expiry) / 365 : 0,
-  );
-
-  return buildSpotSamples(legs, spot, strikeStep, spanPct).map((s) => {
-    const pnl = legs.reduce((sum, leg, i) => {
-      const t = residualYears[i];
-      const iv = leg.iv ?? 0;
-      const price = (t > 0 && iv > 0)
-        ? bsPrice(leg.type, s, leg.strike, t, iv)
-        : (leg.type === 'CE' ? Math.max(s - leg.strike, 0) : Math.max(leg.strike - s, 0));
-      const perUnit = leg.side === 'SELL' ? (leg.price - price) : (price - leg.price);
-      return sum + perUnit * leg.qtyLots;
-    }, 0) * lotSize;
-    return { spot: s, pnl };
-  });
-}
-
-/**
- * Legs that would price intrinsically in buildMultiExpiryCurve() at `targetDate`
- * purely because their IV is unknown — i.e. they still have time to run but no
- * volatility to price it with. The chart must disclose these rather than draw a
- * confidently wrong curve.
- */
-export function legsMissingIv(legs: ResolvedLeg[], targetDate: string): ResolvedLeg[] {
-  return legs.filter((leg) => {
-    const residual = leg.expiry ? daysBetweenDates(targetDate, leg.expiry) : 0;
-    return residual > 0 && !(leg.iv && leg.iv > 0);
-  });
 }
 
 // ── Strike × date P&L heatmap (Option Strats analyzer) ──────────────────────────
@@ -784,17 +475,30 @@ export function buildHeatmapGrid(
   const rows: number[] = [];
   for (let s = hi; s >= lo; s -= strikeStep) rows.push(s);
 
-  const cells = rows.map((rowSpot) => dates.map((_, colIdx) => {
-    const t = colIdx === lastIdx ? 0 : Math.max(liveDays - colIdx, 0) / 365;
-    return legs.reduce((sum, leg) => {
-      const iv = (leg.iv ?? 0) * ivMultiplier;
-      const price = (t > 0 && iv > 0)
-        ? bsPrice(leg.type, rowSpot, leg.strike, t, iv)
-        : (leg.type === 'CE' ? Math.max(rowSpot - leg.strike, 0) : Math.max(leg.strike - rowSpot, 0));
-      const perUnit = leg.side === 'SELL' ? (leg.price - price) : (price - leg.price);
-      return sum + perUnit * leg.qtyLots;
-    }, 0) * lotSize + fixedPnl;
-  }));
+  // The P&L itself is the central payoff library's (lib/optionsPayoff.ts payoffGrid): each leg at its own expiry and IV (scaled by the
+  // grid's IV control), column c = c days from now, the last column settling every leg at intrinsic value. A leg that expires before a
+  // column is already settled there, so a book with several expiries needs no special case.
+  // The last column is settlement: push it a hair past expiry so floating-point noise between two clock reads can never leave a sliver of
+  // time value on an at-the-money leg.
+  const days = dates.map((_, colIdx) => (colIdx === lastIdx ? Math.max(liveDays, 0) + 1e-6 : colIdx));
+  const grid = payoffGrid(
+    {
+      spot,
+      legs: legs
+        .filter((l) => l.price > 0)
+        .map((l) => ({
+          type: l.type, strike: l.strike, expiry: l.expiry || expiryDate,
+          qty: (l.side === 'SELL' ? -1 : 1) * l.qtyLots * lotSize,
+          entryPrice: l.price,
+          iv: l.iv !== null && l.iv > 0 ? l.iv : undefined,
+        })),
+      fallbackIv: 0, // a leg with no IV is priced at intrinsic value, never on a guessed volatility
+      ivScale: ivMultiplier,
+    },
+    rows,
+    days,
+  );
+  const cells = grid.map((row) => row.map((v) => v + fixedPnl));
 
   return { dates, labels, rows, cells };
 }

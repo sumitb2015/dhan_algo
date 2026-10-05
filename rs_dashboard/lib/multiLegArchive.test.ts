@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert';
-import { splitStaleClosed, appendToArchive, hasTradeHistory, summarizeArchived, type ArchivedBasket } from './multiLegArchive.ts';
+import { splitEarlierDayLegs, mergeHistoryRecord, splitStaleClosed, appendToArchive, hasTradeHistory, summarizeArchived, type ArchivedBasket } from './multiLegArchive.ts';
 import type { MultiLegBasket, MultiLegLeg } from './multiLegFocus.ts';
 
 const leg = (status: MultiLegLeg['status'], extra: Partial<MultiLegLeg> = {}): MultiLegLeg =>
@@ -54,3 +54,28 @@ test('summarizeArchived sums realized P&L, applies the Dhan MCX multiplier, and 
   assert.strictEqual(summarizeArchived(basket('u', '2026-09-28T10:00:00Z', [])).closedAt, Date.parse('2026-09-28T10:00:00Z'));
 });
 
+
+test('splitEarlierDayLegs sheds earlier-day closed legs of a live basket, keeps today\'s and open ones', () => {
+  const now = Date.parse('2026-10-05T08:00:00Z');
+  const earlier = leg('CLOSED', { ...traded, closedAt: Date.parse('2026-10-01T09:00:00Z') });
+  const noStamp = leg('CLOSED', traded);
+  const today = leg('CLOSED', { ...traded, closedAt: Date.parse('2026-10-05T04:00:00Z') });
+  const open = leg('OPEN', traded);
+  const b = basket('live', '2026-10-05T08:00:00Z', [earlier, noStamp, today, open]);
+  const { keep, retired } = splitEarlierDayLegs(b, now);
+  assert.deepStrictEqual(retired.map(l => l.id), [earlier.id, noStamp.id]);
+  assert.deepStrictEqual(keep.legs.map(l => l.id), [today.id, open.id]);
+  // Fully closed baskets are left to splitStaleClosed.
+  const allClosed = basket('done', '2026-10-05T08:00:00Z', [earlier]);
+  assert.strictEqual(splitEarlierDayLegs(allClosed, now).keep, allClosed);
+});
+
+test('mergeHistoryRecord creates then extends one history record, idempotent by leg id', () => {
+  const src = { ...basket('live', '2026-10-05T08:00:00Z', []), name: 'Short Strangle' };
+  const a = leg('CLOSED', traded), c = leg('CLOSED', traded);
+  const first = mergeHistoryRecord(undefined, src, [a], '2026-10-05T09:00:00Z');
+  assert.strictEqual(first.id, 'live__history');
+  assert.strictEqual(first.retiredFrom, 'live');
+  const second = mergeHistoryRecord(first, src, [a, c], '2026-10-06T09:00:00Z');
+  assert.deepStrictEqual(second.legs.map(l => l.id), [a.id, c.id]);
+});

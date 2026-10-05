@@ -14,7 +14,7 @@
 
 import React, { useMemo, useState } from 'react';
 import { cn } from '@/lib/utils';
-import { computeBsGreeks, calculateTimeToExpiryYears } from '@/lib/optionsMonitorMath';
+import { computeBsGreeksExact, calculateTimeToExpiryYears } from '@/lib/optionsMonitorMath';
 import { impliedVolFromPrice } from '@/lib/optionsStrategy';
 import { legPnl, type MultiLegLeg } from '@/lib/multiLegFocus';
 
@@ -304,7 +304,8 @@ export default function PositionVisualizer({
         const iv = solved || chainIv || FLAT_IV;
         let delta = 0, theta = 0, vega = 0;
         if (!planned && !closed && spot > 0 && l.strike > 0) {
-          const g = computeBsGreeks(l.option, spot, l.strike, tYears, iv, lotSize);
+          // Exact (unrounded): multiplied by the leg's units below, so a 2 dp delta would be off by up to ±0.005 x units.
+          const g = computeBsGreeksExact(l.option, spot, l.strike, tYears, iv);
           const sign = l.side === 'B' ? 1 : -1;
           delta = g.delta * units * sign;
           theta = g.theta * units * sign;

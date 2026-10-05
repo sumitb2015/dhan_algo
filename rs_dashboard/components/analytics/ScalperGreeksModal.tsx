@@ -24,7 +24,7 @@ import {
   type PositionLeg, type UnparseableLeg,
 } from '@/lib/positionLegs';
 import { lookupChainLegData, type ChainOc } from '@/lib/optionsStrategy';
-import { computeNetGreeks } from '@/lib/positionGreeks';
+import { positionNetGreeksBy, type FutureRef } from '@/lib/positionPayoff';
 import type { ScalperPosition } from '@/lib/zerodhaShape';
 import { StatChip } from './PayoffMetricStrip';
 
@@ -60,6 +60,8 @@ export default function ScalperGreeksModal({ open, onClose, rawPositions, broker
   const [chainErrors, setChainErrors] = useState<string[]>([]);
   const [truncated, setTruncated] = useState(0);
   const [scannedAt, setScannedAt] = useState<Date | null>(null);
+  // Spot and nearest future per underlying, from the same chain responses (the Greeks are computed here, not taken from the chain).
+  const [markets, setMarkets] = useState<Record<string, { spot: number; future: FutureRef | null }>>({});
 
   const runScan = useCallback(async () => {
     setScanning(true);
@@ -92,6 +94,7 @@ export default function ScalperGreeksModal({ open, onClose, rawPositions, broker
     setTruncated(Math.max(0, pairs.length - MAX_CHAIN_FETCHES));
 
     const chains = new Map<string, ChainOc>();
+    const mkts: Record<string, { spot: number; future: FutureRef | null }> = {};
     const errors: string[] = [];
     for (let i = 0; i < wanted.length; i++) {
       const { underlying, expiry } = wanted[i];
@@ -107,6 +110,10 @@ export default function ScalperGreeksModal({ open, onClose, rawPositions, broker
           continue;
         }
         chains.set(`${underlying}|${expiry}`, json.data.chain.oc as ChainOc);
+        if (!mkts[underlying] && typeof json.data.spot === 'number' && json.data.spot > 0) {
+          const fp = json.data.future_price, fe = json.data.future_expiry;
+          mkts[underlying] = { spot: json.data.spot, future: typeof fp === 'number' && fp > 0 && typeof fe === 'string' && fe ? { price: fp, expiry: fe } : null };
+        }
       } catch (err) {
         errors.push(`${underlying} ${expiry}: ${String((err as Error).message ?? err)}`);
       }
@@ -134,6 +141,7 @@ export default function ScalperGreeksModal({ open, onClose, rawPositions, broker
       };
     });
 
+    setMarkets(mkts);
     setLegs(priced);
     setScanning(false);
     setProgress('');
@@ -158,7 +166,8 @@ export default function ScalperGreeksModal({ open, onClose, rawPositions, broker
 
   if (!open) return null;
 
-  const net = computeNetGreeks(legs);
+  // Computed through the central pricing library from each leg's live mark, against its own underlying's spot.
+  const net = positionNetGreeksBy(legs, legUnderlying, (u) => markets[u]);
   const expiries = legExpiries(legs);
 
   return (
@@ -211,7 +220,7 @@ export default function ScalperGreeksModal({ open, onClose, rawPositions, broker
                   label="Net Delta"
                   value={net.delta.toFixed(2)}
                   color={net.delta > 0 ? 'text-emerald-400' : net.delta < 0 ? 'text-red-400' : 'text-zinc-100'}
-                  title="Sum of per-contract delta × signed quantity across every leg. Positive = net long the underlying(s)."
+                  title="Sum of per-unit delta × signed quantity across every leg, from each leg's live price. Positive = net long the underlying(s)."
                 />
                 <StatChip label="Net Gamma" value={net.gamma.toFixed(4)}
                   color={net.gamma < 0 ? 'text-rose-400' : 'text-zinc-100'}
@@ -220,19 +229,19 @@ export default function ScalperGreeksModal({ open, onClose, rawPositions, broker
                   sub="per day, per set"
                   color={net.theta > 0 ? 'text-emerald-400' : 'text-red-400'} />
                 <StatChip label="Net Vega" value={net.vega.toFixed(2)}
-                  sub="per 1 vol point"
+                  sub="per 1% IV"
                   color={net.vega < 0 ? 'text-rose-400' : 'text-zinc-100'} />
                 <StatChip label="Legs" value={String(legs.length)} />
                 <StatChip label="Expiries" value={expiries.length ? expiries.join(', ') : '—'} />
               </div>
 
-              {net.missing.length > 0 && (
+              {net.assumed.length > 0 && (
                 <div className="flex items-start gap-2 rounded-xl border border-amber-800/80 bg-amber-950/40 px-3.5 py-2.5 text-[11px] text-amber-300">
                   <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0 text-amber-400" />
                   <span>
-                    {net.missing.length} leg{net.missing.length > 1 ? 's' : ''} had no greeks in the option chain
-                    ({net.missing.map((l) => `${legUnderlying(l)} ${l.strike} ${l.type}`).join(', ')}) and{' '}
-                    {net.missing.length > 1 ? 'are' : 'is'} excluded from the net figures above — real exposure is larger.
+                    {net.assumed.length} leg{net.assumed.length > 1 ? 's' : ''} ({net.assumed.map((l) => `${legUnderlying(l)} ${l.strike} ${l.type}`).join(', ')}) could not be
+                    priced from a live market (no spot for the underlying, or no live price or IV) and {net.assumed.length > 1 ? 'are' : 'is'} left out
+                    or priced on an assumed IV — real exposure may be larger.
                   </span>
                 </div>
               )}
@@ -278,8 +287,9 @@ export default function ScalperGreeksModal({ open, onClose, rawPositions, broker
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-zinc-850/60">
-                      {legs.map((l) => {
+                      {legs.map((l, i) => {
                         const k = posSign(l);
+                        const g = net.perLeg[i];
                         return (
                           <tr key={`${l.display.tradingSymbol}|${l.display.productType}`} className="transition-colors even:bg-zinc-900/25 hover:bg-zinc-800/40">
                             <td className="px-3 py-2 font-mono text-xs tabular-nums text-zinc-200 whitespace-nowrap text-left">
@@ -297,14 +307,14 @@ export default function ScalperGreeksModal({ open, onClose, rawPositions, broker
                               <span className="ml-1 text-zinc-500">{l.expiry ?? ''}</span>
                             </td>
                             <td className="px-3 py-2 font-mono text-xs tabular-nums text-zinc-200 whitespace-nowrap text-center">{l.display.netQty.toLocaleString('en-IN')}</td>
-                            <td className="px-3 py-2 font-mono text-xs tabular-nums text-zinc-200 whitespace-nowrap text-center">{l.iv === null ? '—' : `${(l.iv * 100).toFixed(1)}%`}</td>
-                            <td className="px-3 py-2 font-mono text-xs tabular-nums text-zinc-200 whitespace-nowrap text-center">{fmt(l.delta, 4)}</td>
-                            <td className={cn('px-3 py-2 font-mono text-xs tabular-nums whitespace-nowrap text-center font-bold', l.delta === null ? 'text-zinc-500' : (l.delta * k) > 0 ? 'text-emerald-400' : 'text-red-400')}>
-                              {l.delta === null ? '—' : (l.delta * k).toFixed(2)}
+                            <td className="px-3 py-2 font-mono text-xs tabular-nums text-zinc-200 whitespace-nowrap text-center">{g ? `${(g.iv * 100).toFixed(1)}%` : '—'}</td>
+                            <td className="px-3 py-2 font-mono text-xs tabular-nums text-zinc-200 whitespace-nowrap text-center">{fmt(g ? g.delta : null, 4)}</td>
+                            <td className={cn('px-3 py-2 font-mono text-xs tabular-nums whitespace-nowrap text-center font-bold', !g ? 'text-zinc-500' : (g.delta * k) > 0 ? 'text-emerald-400' : 'text-red-400')}>
+                              {!g ? '—' : (g.delta * k).toFixed(2)}
                             </td>
-                            <td className="px-3 py-2 font-mono text-xs tabular-nums text-zinc-200 whitespace-nowrap text-center">{fmt(l.gamma === null ? null : l.gamma * k, 5)}</td>
-                            <td className="px-3 py-2 font-mono text-xs tabular-nums text-zinc-200 whitespace-nowrap text-center">{fmt(l.theta === null ? null : l.theta * k, 1)}</td>
-                            <td className="px-3 py-2 font-mono text-xs tabular-nums text-zinc-200 whitespace-nowrap text-center">{fmt(l.vega === null ? null : l.vega * k, 2)}</td>
+                            <td className="px-3 py-2 font-mono text-xs tabular-nums text-zinc-200 whitespace-nowrap text-center">{fmt(g ? g.gamma * k : null, 5)}</td>
+                            <td className="px-3 py-2 font-mono text-xs tabular-nums text-zinc-200 whitespace-nowrap text-center">{fmt(g ? g.theta * k : null, 1)}</td>
+                            <td className="px-3 py-2 font-mono text-xs tabular-nums text-zinc-200 whitespace-nowrap text-center">{fmt(g ? g.vega * k : null, 2)}</td>
                           </tr>
                         );
                       })}

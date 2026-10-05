@@ -1,9 +1,10 @@
 'use client';
 
 import { useEffect, useMemo, useState, useCallback, useRef } from 'react';
-import PayoffDiagram from '@/components/strategy/PayoffDiagram';
+import PayoffDiagram, { modelToDiagramProps } from '@/components/strategy/PayoffDiagram';
+import { buildPayoffModel, builderLegsToPayoffLegs } from '@/lib/optionsPayoff';
 import {
-  classifyExpiries, computeAtm, resolveFreeformLegs, computePayoffStats, buildPayoffCurve,
+  classifyExpiries, computeAtm, resolveFreeformLegs, computePayoffStats,
   buildHeatmapGrid, lookupChainLegData, STRIKE_STEP, OptType, Side, FreeformLegSpec, ChainOc, ResolvedLeg, PayoffStats,
 } from '@/lib/optionsStrategy';
 import {
@@ -475,10 +476,15 @@ export default function OptionStrats() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [legsSignature, missingStrikes.length, selectedExpiry]);
 
-  const curve = useMemo(() => {
-    if (resolvedLegs.length === 0) return [];
-    return buildPayoffCurve(resolvedLegs, spot, effectiveLotSize);
-  }, [resolvedLegs, spot, effectiveLotSize]);
+  // The chart's curves, break-evens and header numbers all come from the central payoff library, priced from each leg's live
+  // premium at its own expiry (so the T+0 line is drawn too).
+  const payoffModel = useMemo(() => {
+    if (resolvedLegs.length === 0 || spot <= 0 || !selectedExpiry) return null;
+    return buildPayoffModel({
+      spot, legs: builderLegsToPayoffLegs(resolvedLegs, effectiveLotSize, selectedExpiry),
+      margin: margin && margin.total_margin > 0 ? margin.total_margin : undefined,
+    });
+  }, [resolvedLegs, spot, effectiveLotSize, selectedExpiry, margin]);
 
   const heatmap = useMemo(() => {
     if (resolvedLegs.length === 0 || !selectedExpiry || spot <= 0) return null;
@@ -840,7 +846,7 @@ export default function OptionStrats() {
               <CardTitle className="text-xs font-bold uppercase tracking-wider text-white">Payoff at expiry</CardTitle>
             </CardHeader>
             <CardContent>
-              <PayoffDiagram curve={curve} currentSpot={spot} breakevens={stats.breakevensExpiry} />
+              {payoffModel && <PayoffDiagram {...modelToDiagramProps(payoffModel)} currentSpot={spot} />}
             </CardContent>
           </Card>
         )}

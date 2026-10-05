@@ -9,23 +9,14 @@ import {
   buildPositionLegs, buildInstrumentIndex, computeExposure, legExpiries,
   type InstrumentRow, type PositionLeg, type UnparseableLeg,
 } from './positionLegs.ts';
-import {
-  computePayoffStats, daysBetweenDates, impliedVolFromPrice, lookupChainLegData,
-  type ChainOc, type PayoffStats,
-} from './optionsStrategy.ts';
-import { computeNetGreeks, type NetGreeks } from './positionGreeks.ts';
+import { lookupChainLegData, type ChainOc, type PayoffStats } from './optionsStrategy.ts';
+import { positionNetGreeks, positionPayoff, withSolvedIv, type FutureRef } from './positionPayoff.ts';
 import { STRIKE_STEP, type AnalyticsUnderlying } from './analyticsUnderlyings.ts';
 import type { ScalperPosition } from './zerodhaShape.ts';
 
 // Mirrors components/PositionsAnalysis.tsx's DEFAULT_SPAN_INDEX (SPAN_STEPS[2]).
 const DEFAULT_SPAN_PCT = 0.04;
 const MAX_CHAIN_EXPIRIES = 4;
-
-function todayIso(): string {
-  const d = new Date();
-  const p = (n: number) => String(n).padStart(2, '0');
-  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
-}
 
 async function getJson(baseUrl: string, cookie: string, urlPath: string): Promise<any> {
   const res = await fetch(`${baseUrl}${urlPath}`, { headers: { Cookie: cookie } });
@@ -34,6 +25,12 @@ async function getJson(baseUrl: string, cookie: string, urlPath: string): Promis
     throw new Error(`${urlPath} -> ${res.status}: ${json?.error ?? 'request failed'}`);
   }
   return json;
+}
+
+/** Net Greeks (units / ₹ per day / ₹ per 1% IV) from the central pricing library; `missing` = legs priced on an assumed IV. */
+export interface NetGreeks {
+  delta: number; gamma: number; theta: number; vega: number;
+  missing: PositionLeg[];
 }
 
 export interface PositionSnapshot {
@@ -89,10 +86,15 @@ export async function buildPositionSnapshot(opts: {
   const bookExpiries = legExpiries(bareLegs).slice(0, MAX_CHAIN_EXPIRIES);
   const chains: Record<string, ChainOc> = {};
   let spot = 0;
+  let future: FutureRef | null = null;
   for (let i = 0; i < bookExpiries.length; i++) {
     const chainJson = await getJson(baseUrl, cookie, `/api/options/chain?underlying=${underlying}&expiry=${bookExpiries[i]}`);
     chains[bookExpiries[i]] = (chainJson.data?.chain?.oc ?? {}) as ChainOc;
-    if (i === 0) spot = chainJson.data?.spot ?? 0;
+    if (i === 0) {
+      spot = chainJson.data?.spot ?? 0;
+      const fp = chainJson.data?.future_price, fe = chainJson.data?.future_expiry;
+      if (typeof fp === 'number' && fp > 0 && typeof fe === 'string' && fe) future = { price: fp, expiry: fe };
+    }
   }
 
   // Join greeks/IV per leg from its own expiry's chain — same as PositionsAnalysis.tsx's `legs` memo.
@@ -112,20 +114,12 @@ export async function buildPositionSnapshot(opts: {
     };
   });
 
-  // Solve IV from the live mark where the chain omitted it — same fallback as
-  // PositionsAnalysis.tsx's `pricedLegs` memo.
   const finalExpiry = (() => {
     const es = legExpiries(joinedLegs);
     return es.length ? es[es.length - 1] : null;
   })();
-  const pricedLegs = (!spot || !finalExpiry) ? joinedLegs : joinedLegs.map((leg) => {
-    if (leg.iv && leg.iv > 0) return leg;
-    const mark = leg.display.ltp;
-    if (mark === null || !(mark > 0)) return leg;
-    const t = leg.expiry ? daysBetweenDates(todayIso(), leg.expiry) / 365 : 0;
-    const solved = impliedVolFromPrice(leg.type, spot, leg.strike, t, mark);
-    return solved ? { ...leg, iv: solved } : leg;
-  });
+  // IV from each leg's live mark through the central pricing library (same as PositionsAnalysis.tsx's `pricedLegs`).
+  const pricedLegs = (!spot || !finalExpiry) ? joinedLegs : withSolvedIv(joinedLegs, spot, { defaultExpiry: finalExpiry, future });
 
   // ── funds (for exposure %-of-capital) ───────────────────────────────────────
   let funds: number | null = null;
@@ -135,9 +129,11 @@ export async function buildPositionSnapshot(opts: {
     funds = typeof bal === 'number' ? bal : null;
   } catch { /* funds are advisory */ }
 
-  const netGreeks = computeNetGreeks(pricedLegs);
+  // Greeks and payoff stats from the central libraries, exactly as the page computes them.
+  const greeks = positionNetGreeks(pricedLegs, spot, { future, defaultExpiry: finalExpiry });
+  const netGreeks: NetGreeks = { delta: greeks.delta, gamma: greeks.gamma, theta: greeks.theta, vega: greeks.vega, missing: greeks.assumed };
   const payoffStats = (pricedLegs.length && spot && finalExpiry)
-    ? computePayoffStats(pricedLegs, spot, 1, finalExpiry, strikeStep, DEFAULT_SPAN_PCT)
+    ? positionPayoff(pricedLegs, spot, { strikeStep, spanPct: DEFAULT_SPAN_PCT, defaultExpiry: finalExpiry, future })?.stats ?? null
     : null;
   const exposure = computeExposure(pricedLegs, { capital: funds, nav: funds });
 

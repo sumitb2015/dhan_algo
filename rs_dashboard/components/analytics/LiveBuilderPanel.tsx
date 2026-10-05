@@ -10,10 +10,8 @@
 
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { cn } from '@/lib/utils';
-import {
-  buildMultiExpiryCurve, computePayoffStats, resolveFreeformLegs,
-  type ChainOc, type PayoffStats, type ResolvedLeg,
-} from '@/lib/optionsStrategy';
+import { resolveFreeformLegs, type ChainOc, type PayoffStats, type ResolvedLeg } from '@/lib/optionsStrategy';
+import { positionPayoff } from '@/lib/positionPayoff';
 import { fetchMarginSummary } from '@/lib/optionsMargin';
 import { STRIKE_STEP, lotSizeOverride, type AnalyticsUnderlying } from '@/lib/analyticsUnderlyings';
 import { fmtExpiryShort } from '@/components/crudeoil/format';
@@ -163,22 +161,16 @@ export default function LiveBuilderPanel({ underlying }: { underlying: Analytics
     return expiries.length ? expiries.sort().at(-1)! : null;
   }, [resolvedDraftLegs]);
 
-  // Resolved legs already carry contract-level qtyLots (lots * lotSize), so
-  // lotSize=1 here — same convention PositionsAnalysis.tsx uses to avoid
-  // double-scaling.
-  const payoffCurve = useMemo(
+  // Resolved legs already carry contract-level qtyLots (lots * lotSize), so lotSize=1 here. The payoff (curve, stats) comes from the
+  // central payoff library via lib/positionPayoff.ts; a draft leg has no live mark, so its quoted price is the mark.
+  const draftPayoff = useMemo(
     () => (hasResolvedDrafts && spot && finalExpiry
-      ? buildMultiExpiryCurve(resolvedDraftLegs, spot, 1, finalExpiry, strikeStep, spanPct)
-      : []),
-    [hasResolvedDrafts, resolvedDraftLegs, spot, finalExpiry, strikeStep, spanPct],
-  );
-
-  const stats = useMemo<PayoffStats | null>(
-    () => (hasResolvedDrafts && spot && finalExpiry
-      ? computePayoffStats(resolvedDraftLegs, spot, 1, finalExpiry, strikeStep, spanPct)
+      ? positionPayoff(resolvedDraftLegs, spot, { strikeStep, spanPct, defaultExpiry: finalExpiry, markFromPrice: true })
       : null),
     [hasResolvedDrafts, resolvedDraftLegs, spot, finalExpiry, strikeStep, spanPct],
   );
+  const payoffCurve = draftPayoff?.expiryCurve ?? [];
+  const stats: PayoffStats | null = draftPayoff?.stats ?? null;
 
   // Dhan's margin calculator takes ONE expiry per call. Sending every staged leg
   // tagged under whichever expiry is currently selected in the picker would

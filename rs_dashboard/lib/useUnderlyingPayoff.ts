@@ -15,12 +15,9 @@ import {
   buildPositionLegs, legExpiries,
   type PositionLeg, type UnparseableLeg, type InstrumentRow,
 } from '@/lib/positionLegs';
-import {
-  buildMultiExpiryCurve, computePayoffStats, daysBetweenDates,
-  impliedVolFromPrice, lookupChainLegData, type ChainOc, type PayoffStats,
-} from '@/lib/optionsStrategy';
+import { lookupChainLegData, type ChainOc, type PayoffStats } from '@/lib/optionsStrategy';
+import { positionPayoff, withSolvedIv, type FutureRef } from '@/lib/positionPayoff';
 import { STRIKE_STEP, lotSizeOverride, type AnalyticsUnderlying } from '@/lib/analyticsUnderlyings';
-import { todayIso } from '@/components/crudeoil/format';
 import type { ScalperPosition } from '@/lib/zerodhaShape';
 import type { OiBar } from '@/components/analytics/PositionsPayoffChart';
 import { legPnl } from '@/components/analytics/PositionsLegTable';
@@ -48,6 +45,8 @@ export interface UnderlyingPayoffData {
   stats: PayoffStats | null;
   oiBars: OiBar[];
   finalExpiry: string | null;
+  /** The nearest expiry in the book: what the at-expiry curve is valued as of. */
+  frontExpiry: string | null;
   bookExpiries: string[];
   rollup: { booked: number; unbooked: number; total: number; unknown: number };
 }
@@ -64,6 +63,7 @@ export function useUnderlyingPayoff(
   const [chains, setChains] = useState<Record<string, ChainOc>>({});
   const [spot, setSpot] = useState(0);
   const [spotChangePct, setSpotChangePct] = useState(0);
+  const [future, setFuture] = useState<FutureRef | null>(null);
   const [chainError, setChainError] = useState<string | null>(null);
   const [chainLoading, setChainLoading] = useState(false);
   const [fetchedLotSize, setFetchedLotSize] = useState<number | null>(null);
@@ -138,6 +138,9 @@ export function useUnderlyingPayoff(
           if (i === 0) {
             setSpot(json.data?.spot ?? 0);
             setSpotChangePct(json.data?.change_pct ?? 0);
+            const fp = json.data?.future_price;
+            const fe = json.data?.future_expiry;
+            if (typeof fp === 'number' && fp > 0 && typeof fe === 'string' && fe) setFuture({ price: fp, expiry: fe });
           }
           setChainError(null);
         } catch (err) {
@@ -157,41 +160,23 @@ export function useUnderlyingPayoff(
 
   const finalExpiry = useMemo(() => (bookExpiries.length ? bookExpiries[bookExpiries.length - 1] : null), [bookExpiries]);
 
-  // Fill in IV the chain omitted by inverting the leg's own live mark — see the
-  // long comment on the identical block in PositionsAnalysis.tsx for why this
-  // must use the live LTP and never the entry price.
-  const pricedLegs = useMemo<PositionLeg[]>(() => {
-    if (!spot || !finalExpiry) return legs;
-    return legs.map((leg) => {
-      if (leg.iv && leg.iv > 0) return leg;
-      const mark = leg.display.ltp;
-      if (mark === null || !(mark > 0)) return leg;
-      const t = leg.expiry ? daysBetweenDates(todayIso(), leg.expiry) / 365 : 0;
-      const solved = impliedVolFromPrice(leg.type, spot, leg.strike, t, mark);
-      return solved ? { ...leg, iv: solved } : leg;
-    });
-  }, [legs, spot, finalExpiry]);
-
-  const expiryCurve = useMemo(
-    () => (pricedLegs.length && spot && finalExpiry
-      ? buildMultiExpiryCurve(pricedLegs, spot, 1, finalExpiry, strikeStep, SPAN_PCT)
-      : []),
-    [pricedLegs, spot, finalExpiry, strikeStep],
+  // IV from each leg's live mark through the central pricing library (chain IV only when there is no mark to invert), then the whole
+  // payoff — curves, stats, warnings — from the central payoff library via lib/positionPayoff.ts. Nothing is priced in this hook.
+  const pricedLegs = useMemo<PositionLeg[]>(
+    () => (spot && finalExpiry ? withSolvedIv(legs, spot, { defaultExpiry: finalExpiry, future }) : legs),
+    [legs, spot, finalExpiry, future],
   );
 
-  const todayStr = todayIso();
-  const targetCurve = useMemo(() => {
-    if (!pricedLegs.length || !spot || !finalExpiry) return null;
-    if (todayStr >= finalExpiry) return null; // identical to the expiry curve
-    return buildMultiExpiryCurve(pricedLegs, spot, 1, todayStr, strikeStep, SPAN_PCT);
-  }, [pricedLegs, spot, finalExpiry, strikeStep, todayStr]);
-
-  const stats = useMemo<PayoffStats | null>(
+  const payoff = useMemo(
     () => (pricedLegs.length && spot && finalExpiry
-      ? computePayoffStats(pricedLegs, spot, 1, finalExpiry, strikeStep, SPAN_PCT)
+      ? positionPayoff(pricedLegs, spot, { strikeStep, spanPct: SPAN_PCT, targetDays: 0, defaultExpiry: finalExpiry, future })
       : null),
-    [pricedLegs, spot, finalExpiry, strikeStep],
+    [pricedLegs, spot, finalExpiry, strikeStep, future],
   );
+  const expiryCurve = payoff?.expiryCurve ?? [];
+  const targetCurve = payoff?.targetCurve ?? null;
+  const stats: PayoffStats | null = payoff?.stats ?? null;
+  const frontExpiry = payoff?.model.frontExpiry ?? null;
 
   const oiBars = useMemo<OiBar[]>(() => {
     const oc = finalExpiry ? chains[finalExpiry] ?? chains[bookExpiries[0]] : undefined;
@@ -214,6 +199,6 @@ export function useUnderlyingPayoff(
 
   return {
     legs, unparseable, spot, spotChangePct, chainLoading, chainError, lotSize,
-    expiryCurve, targetCurve, stats, oiBars, finalExpiry, bookExpiries, rollup,
+    expiryCurve, targetCurve, stats, oiBars, finalExpiry, frontExpiry, bookExpiries, rollup,
   };
 }

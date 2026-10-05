@@ -3,7 +3,7 @@ import fs from 'fs';
 import { PROJECT_ROOT } from '@/lib/pyExec';
 
 import type { MultiLegBasket } from './multiLegFocus';
-import { appendToArchive, splitStaleClosed, type ArchivedBasket } from './multiLegArchive';
+import { appendToArchive, historyIdFor, mergeHistoryRecord, splitEarlierDayLegs, splitStaleClosed, type ArchivedBasket } from './multiLegArchive';
 import { mergeBasketWrite } from './multiLegStoreMerge';
 
 const STORE_FILE = path.join(PROJECT_ROOT, 'debug', 'multi_leg_baskets.json');
@@ -46,6 +46,10 @@ export function readArchive(): ArchivedBasket[] {
   }
 }
 
+function readArchiveSafe(): ArchivedBasket[] {
+  try { return readArchive(); } catch { return []; }
+}
+
 /** Written BEFORE the live store drops these baskets — see appendToArchive. */
 function archiveBaskets(retired: MultiLegBasket[]): void {
   if (retired.length === 0) return;
@@ -86,6 +90,16 @@ export function upsertBasket(
       updatedAt: now,
     } as MultiLegBasket);
   }
+  // A stale tab still holds legs that were split into the history record; its full
+  // save would otherwise merge them straight back in.
+  if (basket.id && Array.isArray(basket.legs)) {
+    const hist = readArchiveSafe().find(a => a.id === historyIdFor(basket.id!));
+    const i = baskets.findIndex(b => b.id === basket.id);
+    if (hist && i >= 0) {
+      const gone = new Set(hist.legs.map(l => l.id));
+      baskets[i] = { ...baskets[i], legs: baskets[i].legs.filter(l => !gone.has(l.id)) };
+    }
+  }
   writeBaskets(baskets);
   const saved = basket.id ? baskets.find(b => b.id === basket.id) : baskets[baskets.length - 1];
   return { baskets, basket: saved, conflicts };
@@ -115,16 +129,30 @@ function istToday(): string {
 export function pruneStaleClosedBaskets(): MultiLegBasket[] {
   const baskets = readBaskets();
   const { keep, retire } = splitStaleClosed(baskets, istToday());
-  if (retire.length === 0) return baskets;
+  // Live baskets also shed their earlier-day closed legs (a converted strategy
+  // must not carry the old structure's trades) — into a per-basket history record.
+  const now = Date.now();
+  const splits = keep.map(b => splitEarlierDayLegs(b, now));
+  const anySplit = splits.some(s => s.retired.length > 0);
+  if (retire.length === 0 && !anySplit) return baskets;
   try {
     archiveBaskets(retire);
+    if (anySplit) {
+      const archive = readArchive();
+      const nowIso = new Date().toISOString();
+      const records = splits.flatMap((s, i) => s.retired.length === 0 ? []
+        : [mergeHistoryRecord(archive.find(a => a.id === historyIdFor(keep[i].id)), keep[i], s.retired, nowIso)]);
+      const ids = new Set(records.map(r => r.id));
+      writeJsonAtomic(ARCHIVE_FILE, { baskets: [...archive.filter(a => !ids.has(a.id)), ...records] });
+    }
   } catch (err) {
     // Keep them live rather than lose them; the page still loads.
     console.error('[multiLegFocusStore] archive failed, not pruning:', err);
     return baskets;
   }
-  writeBaskets(keep);
-  return keep;
+  const next = splits.map(s => s.keep);
+  writeBaskets(next);
+  return next;
 }
 
 let _basketSeq = 0;

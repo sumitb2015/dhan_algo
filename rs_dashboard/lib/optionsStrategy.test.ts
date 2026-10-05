@@ -1,9 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert';
 import {
-  buildPayoffCurve, buildMultiExpiryCurve, buildTargetPayoffCurve,
   computePayoffStats, bsPrice, impliedVolFromPrice, daysBetweenDates,
-  legsMissingIv, findBreakevens, DEFAULT_SPAN_PCT, STRATEGY_TEMPLATES,
+  DEFAULT_SPAN_PCT, STRATEGY_TEMPLATES, buildHeatmapGrid,
   type ResolvedLeg,
 } from './optionsStrategy.ts';
 
@@ -103,64 +102,11 @@ test('quantities are exact in contracts — a partial close is not rounded away'
   assert.strictEqual(stats.netPremium, 300 * 15);
 });
 
-test('DEFAULT_SPAN_PCT keeps the pre-existing callers byte-identical', () => {
-  const a = buildPayoffCurve(STRANGLE, SPOT, 1, SENSEX_STEP);
-  const b = buildPayoffCurve(STRANGLE, SPOT, 1, SENSEX_STEP, DEFAULT_SPAN_PCT);
-  assert.deepStrictEqual(a, b);
-});
-
-// ── multi-expiry ──────────────────────────────────────────────────────────────
-
 test('daysBetweenDates counts whole days and floors at zero', () => {
   assert.strictEqual(daysBetweenDates('2026-08-16', '2026-08-20'), 4);
   assert.strictEqual(daysBetweenDates('2026-08-20', '2026-08-20'), 0);
   assert.strictEqual(daysBetweenDates('2026-08-25', '2026-08-20'), 0); // past → 0, never negative
 });
-
-test('single-expiry book at its own expiry reproduces buildPayoffCurve exactly', () => {
-  const multi = buildMultiExpiryCurve(STRANGLE, SPOT, 1, EXPIRY, SENSEX_STEP);
-  const plain = buildPayoffCurve(STRANGLE, SPOT, 1, SENSEX_STEP);
-  assert.deepStrictEqual(multi, plain);
-});
-
-test('legs with no expiry are treated as expiring on the target date', () => {
-  const noExpiry = STRANGLE.map((l) => ({ ...l, expiry: null }));
-  assert.deepStrictEqual(
-    buildMultiExpiryCurve(noExpiry, SPOT, 1, EXPIRY, SENSEX_STEP),
-    buildPayoffCurve(noExpiry, SPOT, 1, SENSEX_STEP),
-  );
-});
-
-test('a far-dated leg still carries time value at the near expiry', () => {
-  const book: ResolvedLeg[] = [
-    leg({ strike: 78_000, type: 'PE', side: 'SELL', qtyLots: 20, price: 300, expiry: '2026-08-20' }),
-    leg({ strike: 78_000, type: 'PE', side: 'BUY', qtyLots: 20, price: 500, expiry: '2026-09-24' }),
-  ];
-  const atNear = buildMultiExpiryCurve(book, SPOT, 1, '2026-08-20', SENSEX_STEP, 0.05);
-  const bothIntrinsic = buildPayoffCurve(book, SPOT, 1, SENSEX_STEP, 0.05);
-  // If the September leg were wrongly settled at the August date, the two curves
-  // would coincide. They must not.
-  assert.notDeepStrictEqual(atNear, bothIntrinsic);
-
-  // Deep OTM for both legs: the near put is worthless, the far put still has value,
-  // so the calendar is worth more than the pure-intrinsic reading.
-  const far = atNear[atNear.length - 1];
-  const farFlat = bothIntrinsic[bothIntrinsic.length - 1];
-  assert.ok(far.pnl > farFlat.pnl);
-});
-
-test('legsMissingIv flags only legs that still have time to run but no IV', () => {
-  const book: ResolvedLeg[] = [
-    leg({ strike: 78_000, expiry: '2026-08-20', iv: null }), // settles at target → intrinsic is correct
-    leg({ strike: 78_500, expiry: '2026-09-24', iv: null }), // still running, no IV → must be flagged
-    leg({ strike: 79_000, expiry: '2026-09-24', iv: 0.13 }),
-  ];
-  const flagged = legsMissingIv(book, '2026-08-20');
-  assert.strictEqual(flagged.length, 1);
-  assert.strictEqual(flagged[0].strike, 78_500);
-});
-
-// ── implied volatility ────────────────────────────────────────────────────────
 
 test('impliedVolFromPrice inverts bsPrice to within a basis point', () => {
   for (const [type, K, iv] of [['CE', 78_000, 0.12], ['PE', 77_000, 0.185], ['CE', 79_500, 0.31]] as const) {
@@ -185,27 +131,6 @@ test('impliedVolFromPrice returns null instead of a clamped bound on impossible 
 });
 
 // ── target-date curve ─────────────────────────────────────────────────────────
-
-test('target-date curve converges on the expiry curve as days go to zero', () => {
-  const atExpiry = buildPayoffCurve(STRANGLE, SPOT, 1, SENSEX_STEP);
-  const atZeroDays = buildTargetPayoffCurve(STRANGLE, SPOT, 1, 0, SENSEX_STEP);
-  assert.deepStrictEqual(atZeroDays, atExpiry);
-});
-
-test('with time left, a short strangle is worth less than at expiry near the peak', () => {
-  const atExpiry = buildPayoffCurve(STRANGLE, SPOT, 1, SENSEX_STEP);
-  const inFour = buildTargetPayoffCurve(STRANGLE, SPOT, 1, 4, SENSEX_STEP);
-  const mid = Math.floor(atExpiry.length / 2);
-  assert.ok(inFour[mid].pnl < atExpiry[mid].pnl,
-    'undecayed short options must be worth less to the seller than fully decayed ones');
-});
-
-// ── breakeven finder ──────────────────────────────────────────────────────────
-
-test('findBreakevens interpolates zero crossings and ignores non-crossings', () => {
-  assert.deepStrictEqual(findBreakevens([{ spot: 10, pnl: -10 }, { spot: 20, pnl: 10 }]), [15]);
-  assert.deepStrictEqual(findBreakevens([{ spot: 10, pnl: 5 }, { spot: 20, pnl: 10 }]), []);
-});
 
 test('STRATEGY_TEMPLATES: batman template generates 4 legs with 1:2 ratio and undefined risk', () => {
   const batman = STRATEGY_TEMPLATES.find(t => t.id === 'batman');
@@ -263,8 +188,34 @@ test('NISM defined-risk structures: exact max profit, max loss and breakevens', 
   assert.deepStrictEqual([fly.maxProfit, fly.maxLoss, fly.breakevensExpiry], [70, -30, [6030, 6170]]);
 });
 
-test('findBreakevens: a touch or a flat-zero stretch is not a crossing; a crossing through a zero sample counts once', () => {
-  assert.deepStrictEqual(findBreakevens([{ spot: 1, pnl: 5 }, { spot: 2, pnl: 0 }, { spot: 3, pnl: 5 }]), []);
-  assert.deepStrictEqual(findBreakevens([{ spot: 1, pnl: -5 }, { spot: 2, pnl: 0 }, { spot: 3, pnl: 0 }, { spot: 4, pnl: 5 }]), [2]);
-  assert.deepStrictEqual(findBreakevens([{ spot: 1, pnl: -5 }, { spot: 2, pnl: 0 }]), []);
+test('buildHeatmapGrid: last column settles every leg at intrinsic value; IV scale moves earlier columns only', () => {
+  const exp = new Date(Date.now() + 10 * 86_400_000).toISOString().slice(0, 10);
+  const legs: ResolvedLeg[] = [
+    { strike: 22500, type: 'CE', side: 'SELL', qtyLots: 65, price: 100, delta: null, iv: 0.14, vega: null, securityId: null, expiry: exp },
+    { strike: 22300, type: 'PE', side: 'SELL', qtyLots: 65, price: 90, delta: null, iv: 0.15, vega: null, securityId: null, expiry: exp },
+  ];
+  const g1 = buildHeatmapGrid(legs, 22500, 1, exp, 0.02, 1, 50);
+  const g2 = buildHeatmapGrid(legs, 22500, 1, exp, 0.02, 1.2, 50);
+  const last = g1.dates.length - 1;
+  g1.rows.forEach((s, r) => {
+    const intrinsic = (100 - Math.max(s - 22500, 0)) * 65 + (90 - Math.max(22300 - s, 0)) * 65;
+    assert.ok(Math.abs(g1.cells[r][last] - intrinsic) < 1e-6, `${s}: ${g1.cells[r][last]} vs ${intrinsic}`);
+    assert.ok(Math.abs(g2.cells[r][last] - g1.cells[r][last]) < 1e-6);   // IV scale cannot change settlement
+  });
+  const mid = g1.rows.indexOf(22500);
+  assert.ok(g2.cells[mid][0] < g1.cells[mid][0]);                        // higher IV hurts a short book before expiry
 });
+
+test('buildHeatmapGrid: a book with legs on two expiries settles the earlier one when its date has passed', () => {
+  const near = new Date(Date.now() + 3 * 86_400_000).toISOString().slice(0, 10);
+  const far = new Date(Date.now() + 10 * 86_400_000).toISOString().slice(0, 10);
+  const mk = (expiry: string, side: 'BUY' | 'SELL', price: number): ResolvedLeg =>
+    ({ strike: 22500, type: 'CE', side, qtyLots: 65, price, delta: null, iv: 0.14, vega: null, securityId: null, expiry });
+  const g = buildHeatmapGrid([mk(near, 'SELL', 100), mk(far, 'BUY', 200)], 22500, 1, far, 0.02, 1, 50);
+  const row = g.rows.indexOf(22700);
+  const lastCol = g.dates.length - 1;
+  // at the final date both are intrinsic: (100 - 200) + (200 - 100)... = short call settles at 200, long call at 200 -> net -100*65 + 100*65... compute directly
+  const expected = (100 - 200) * 65 + (200 - 200) * 65;
+  assert.ok(Math.abs(g.cells[row][lastCol] - expected) < 1e-6, `${g.cells[row][lastCol]} vs ${expected}`);
+});
+

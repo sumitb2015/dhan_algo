@@ -3,6 +3,8 @@
 import React, { useMemo } from 'react';
 import type { BasketLeg } from '@/lib/basketStrategies';
 import { lookupChainLegData, type ChainOc } from '@/lib/optionsStrategy';
+import { bookGreeks } from '@/lib/optionsPayoff';
+import { rollForward } from '@/lib/optionsPricing';
 
 interface Props {
   legs: BasketLeg[];
@@ -13,6 +15,10 @@ interface Props {
   /** Units per lot x basket multiplier. */
   unitsPerLot: number;
   multiplier: number;
+  /** Live index level (Greeks are computed from each leg's live price, not read from the chain). */
+  spot: number;
+  /** The nearest monthly future and ITS expiry date: rolled to each leg's own expiry as the Black-76 forward. Omit to use spot·e^{rT}. */
+  future?: { price: number; expiry: string } | null;
 }
 
 interface Row {
@@ -32,26 +38,39 @@ const fmt = (v: number | null, d: number) =>
 const tone = (v: number | null) => (v == null || v === 0 ? 'text-zinc-400' : v > 0 ? 'text-emerald-400' : 'text-red-400');
 
 /**
- * Chain-supplied Greeks (Dhan's own per-contract values, already per-unit) scaled by signed position units.
- * Same convention as lib/positionGreeks.ts: one signed multiplier applied to all four Greeks, so the rows sum
- * to the net row. Legs the chain has no Greeks for show "—" and are left out of the net instead of counted as 0.
+ * Greeks of the staged basket, computed through the central payoff library (lib/optionsPayoff.ts bookGreeks): each leg at its own expiry,
+ * IV solved from the leg's live chain price (the chain's IV only if there is no live price), one signed multiplier on all four Greeks so
+ * the rows sum to the net row. A leg with neither a live price nor a chain IV shows "—" and is left out of the net instead of counted as 0.
  */
-export default function BasketGreeksPanel({ legs, frontExpiry, frontChain, farChains, unitsPerLot, multiplier }: Props) {
+export default function BasketGreeksPanel({ legs, frontExpiry, frontChain, farChains, unitsPerLot, multiplier, spot, future }: Props) {
   const { rows, net, missing } = useMemo(() => {
-    const rows: Row[] = legs.map(l => {
+    const info = legs.map(l => {
+      const expiry = l.expiry || frontExpiry;
       const oc = !l.expiry || l.expiry === frontExpiry ? frontChain : (farChains[l.expiry] ?? {});
       const c = lookupChainLegData(oc, l.strike, l.option);
-      const g = c?.greeks;
-      const populated = !!g && [g.delta, g.gamma, g.theta, g.vega].some(v => typeof v === 'number' && v !== 0);
       const units = l.lots * multiplier * unitsPerLot * (l.side === 'S' ? -1 : 1);
-      const scale = (v: number | undefined) => (populated && typeof v === 'number' ? v * units : null);
+      const mark = c && typeof c.last_price === 'number' && c.last_price > 0 ? c.last_price : undefined;
+      const chainIv = typeof c?.implied_volatility === 'number' && c.implied_volatility > 0 ? c.implied_volatility / 100 : undefined;
+      return { l, expiry, units, mark, chainIv };
+    });
+    const res = spot > 0 ? bookGreeks({
+      spot,
+      legs: info.map(i => ({
+        type: i.l.option, strike: i.l.strike, expiry: i.expiry, qty: i.units, entryPrice: 1, mark: i.mark, chainIv: i.chainIv,
+        forward: future && future.price > 0 ? rollForward(future.price, future.expiry, i.expiry) : undefined,
+      })),
+    }) : null;
+    const rows: Row[] = info.map((i, k) => {
+      const g = res?.legs[k];
+      const usable = !!g && g.ivSource !== 'assumed';
+      const scale = (v: number | undefined) => (usable && typeof v === 'number' ? v * i.units : null);
       return {
-        id: l.id,
-        label: `${l.side === 'B' ? 'BUY' : 'SELL'} ${l.strike} ${l.option}`,
-        expiry: l.expiry,
-        units,
-        iv: typeof c?.implied_volatility === 'number' && c.implied_volatility > 0 ? c.implied_volatility : null,
-        delta: scale(g?.delta), gamma: scale(g?.gamma), theta: scale(g?.theta), vega: scale(g?.vega),
+        id: i.l.id,
+        label: `${i.l.side === 'B' ? 'BUY' : 'SELL'} ${i.l.strike} ${i.l.option}`,
+        expiry: i.l.expiry,
+        units: i.units,
+        iv: usable ? g!.iv * 100 : null,
+        delta: scale(g?.unit.delta), gamma: scale(g?.unit.gamma), theta: scale(g?.unit.theta), vega: scale(g?.unit.vega),
       };
     });
     const sum = (k: 'delta' | 'gamma' | 'theta' | 'vega') => rows.reduce((a, r) => a + (r[k] ?? 0), 0);
@@ -60,7 +79,7 @@ export default function BasketGreeksPanel({ legs, frontExpiry, frontChain, farCh
       net: { delta: sum('delta'), gamma: sum('gamma'), theta: sum('theta'), vega: sum('vega') },
       missing: rows.filter(r => r.delta == null).length,
     };
-  }, [legs, frontExpiry, frontChain, farChains, unitsPerLot, multiplier]);
+  }, [legs, frontExpiry, frontChain, farChains, unitsPerLot, multiplier, spot, future]);
 
   if (!legs.length) return null;
   const allMissing = missing === rows.length;
@@ -69,7 +88,7 @@ export default function BasketGreeksPanel({ legs, frontExpiry, frontChain, farCh
     <div className="px-3.5 py-2.5 border-t border-zinc-800">
       <div className="flex items-center justify-between mb-1.5">
         <span className="text-xs font-bold text-zinc-300 uppercase tracking-wider">Position Greeks</span>
-        <span className="text-[10px] text-zinc-500 font-mono">Dhan chain · per position · Θ per day · Vega per 1 vol pt</span>
+        <span className="text-[10px] text-zinc-500 font-mono">from live prices · per position · Θ per day · Vega per 1% IV</span>
       </div>
       <div className="overflow-x-auto">
         <table className="w-full text-xs font-mono tabular-nums">
@@ -112,7 +131,7 @@ export default function BasketGreeksPanel({ legs, frontExpiry, frontChain, farCh
       </div>
       {missing > 0 && (
         <p className="mt-1 text-[10px] text-amber-400">
-          {missing} leg{missing > 1 ? 's' : ''} without chain Greeks (market closed or contract not loaded) — excluded from NET.
+          {missing} leg{missing > 1 ? 's' : ''} with no live price or IV (market closed or contract not loaded) — excluded from NET.
         </p>
       )}
     </div>

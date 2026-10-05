@@ -2,10 +2,17 @@
 // Per-unit Greeks come from scripts/tools/positions_delta_data.py (Black-76 backed out of live
 // premiums on the futures forward). Everything here is aggregation + what-if repricing.
 
-import { calculateTimeToExpiryYears } from './optionsMonitorMath.ts';
+import type { PayoffLegInput } from './optionsPayoff.ts';
+import {
+  RISK_FREE_RATE,
+  calculateTimeToExpiryYears,
+  computeBsGreeksExact,
+  greeksFromMark,
+  rollForward,
+  spotFromFutures,
+} from './optionsPricing.ts';
 
-/** Same default as computeBsGreeks() in optionsMonitorMath.ts, so every payoff surface prices alike. */
-export const RISK_FREE_RATE = 0.065;
+export { RISK_FREE_RATE };
 
 export interface DeskLeg {
   securityId: string;
@@ -33,8 +40,80 @@ export interface DeskLeg {
   iv?: number;           // percent, solved from the leg's own live premium
   atmIv?: number;        // percent, ATM IV of the leg's expiry (SD bands use this)
   forward?: number;
-  tYears?: number;
   greeksSource?: 'black76' | 'chain';
+  spotSource?: 'futures';
+}
+
+
+/** One leg exactly as scripts/tools/positions_delta_data.py returns it: market data only, no maths. */
+export interface RawLeg {
+  securityId: string;
+  symbol: string;
+  displayName: string;
+  underlying: string;
+  expiry: string;
+  strike: number;
+  type: 'CE' | 'PE';
+  side: 'BUY' | 'SELL';
+  netQty: number;
+  lotSize: number;
+  ltp: number;
+  entryPrice: number;
+  pnl: number;
+  spot: number;
+  atmIv?: number;
+  futPrice?: number;
+  futExpiry?: string;
+  chainGreeks?: { delta: number; gamma: number; theta: number; vega: number; iv: number };
+}
+
+/**
+ * Turn raw market data into legs with IV and the full Greeks profile, entirely through optionsPricing.ts:
+ *  - one spot per underlying (the script's, else estimated from the future — flagged `spotSource: 'futures'`);
+ *  - Black-76 forward = the nearest future rolled to each leg's expiry (or spot·e^{rT} when there is no future);
+ *  - IV solved from each leg's live premium, then exact Greeks at that IV;
+ *  - Dhan's chain Greeks only when a leg has no live price (second-order Greeks are then blank).
+ */
+export function enrichLegs(raw: RawLeg[], now: number = Date.now()): DeskLeg[] {
+  const spotOf = new Map<string, { spot: number; estimated: boolean }>();
+  for (const l of raw) {
+    if (spotOf.has(l.underlying)) continue;
+    const given = raw.find(x => x.underlying === l.underlying && x.spot > 0)?.spot ?? 0;
+    const fut = raw.find(x => x.underlying === l.underlying && x.futPrice && x.futExpiry);
+    if (given > 0) spotOf.set(l.underlying, { spot: given, estimated: false });
+    else if (fut) spotOf.set(l.underlying, { spot: spotFromFutures(fut.futPrice!, fut.futExpiry!, RISK_FREE_RATE, now), estimated: true });
+    else spotOf.set(l.underlying, { spot: 0, estimated: false });
+  }
+
+  return raw.map(l => {
+    const { spot, estimated } = spotOf.get(l.underlying)!;
+    const T = calculateTimeToExpiryYears(l.expiry, now);
+    const forward = l.futPrice && l.futExpiry
+      ? rollForward(l.futPrice, l.futExpiry, l.expiry, RISK_FREE_RATE, now)
+      : spot > 0 ? spot * Math.exp(RISK_FREE_RATE * T) : 0;
+
+    const base: DeskLeg = {
+      securityId: l.securityId, symbol: l.symbol, displayName: l.displayName, underlying: l.underlying,
+      expiry: l.expiry, strike: l.strike, type: l.type, side: l.side, netQty: l.netQty, lotSize: l.lotSize,
+      ltp: l.ltp, entryPrice: l.entryPrice, pnl: l.pnl, spot, delta: 0,
+      atmIv: l.atmIv, ...(estimated ? { spotSource: 'futures' as const } : {}),
+    };
+
+    const g = forward > 0 && l.ltp > 0
+      ? greeksFromMark({ type: l.type, strike: l.strike, expiry: l.expiry, mark: l.ltp, underlying: forward, isFutures: true }, { timeYears: T })
+      : null;
+    if (g) {
+      return {
+        ...base, delta: g.delta, gamma: g.gamma, theta: g.theta, vega: g.vega, rho: g.rho, vanna: g.vanna, charm: g.charm,
+        vomma: g.vomma, iv: g.iv * 100, forward, greeksSource: 'black76',
+      };
+    }
+    const c = l.chainGreeks;
+    if (c) {
+      return { ...base, delta: c.delta, gamma: c.gamma, theta: c.theta, vega: c.vega, iv: c.iv, forward: forward || undefined, greeksSource: 'chain' };
+    }
+    return base;
+  });
 }
 
 export type GreekKey = 'delta' | 'gamma' | 'theta' | 'vega' | 'rho' | 'vanna' | 'charm' | 'vomma';
@@ -122,183 +201,14 @@ export function groupBy(legs: DeskLeg[], by: (l: DeskLeg) => string, basis: Basi
     .sort((a, b) => a.key.localeCompare(b.key));
 }
 
-// ── Black-76 ────────────────────────────────────────────────────────
-
-function normPdf(x: number): number {
-  return Math.exp(-0.5 * x * x) / Math.sqrt(2 * Math.PI);
-}
-
-// Abramowitz-Stegun 7.1.26 erf: |error| < 1.5e-7, plenty for a what-if curve.
-function normCdf(x: number): number {
-  const z = Math.abs(x) / Math.SQRT2;
-  const t = 1 / (1 + 0.3275911 * z);
-  const poly = t * (0.254829592 + t * (-0.284496736 + t * (1.421413741 + t * (-1.453152027 + t * 1.061405429))));
-  const erf = 1 - poly * Math.exp(-z * z);
-  return x >= 0 ? 0.5 * (1 + erf) : 0.5 * (1 - erf);
-}
-
-export function b76(type: 'CE' | 'PE', F: number, K: number, T: number, sigmaPct: number, r = RISK_FREE_RATE) {
-  const df = Math.exp(-r * Math.max(T, 0));
-  const sigma = Math.max(sigmaPct, 0.5) / 100;
-  if (T <= 1e-6) {
-    const iv = type === 'CE' ? Math.max(F - K, 0) : Math.max(K - F, 0);
-    return { price: iv, delta: type === 'CE' ? (F > K ? 1 : 0) : (F < K ? -1 : 0) };
-  }
-  const sq = Math.sqrt(T);
-  const d1 = (Math.log(F / K) + 0.5 * sigma * sigma * T) / (sigma * sq);
-  const d2 = d1 - sigma * sq;
-  if (type === 'CE') return { price: df * (F * normCdf(d1) - K * normCdf(d2)), delta: df * normCdf(d1) };
-  return { price: df * (K * normCdf(-d2) - F * normCdf(-d1)), delta: df * (normCdf(d1) - 1) };
-}
-
-export { normPdf };
-
-function modelable(l: DeskLeg): l is DeskLeg & { iv: number; forward: number; expiry: string } {
-  return !!l.iv && l.iv > 0 && !!l.forward && l.forward > 0 && !!l.expiry;
-}
-
-/** One clock for every payoff surface: time to 15:40 IST on the expiry date (see optionsMonitorMath.ts). */
-const legYears = (l: DeskLeg) => calculateTimeToExpiryYears(l.expiry);
-
-/** Forward for a leg at a hypothetical index level: the leg's own forward moved by the index change (additive basis). */
-const forwardAt = (l: DeskLeg & { forward: number }, s: number) => l.forward + (s - (l.spot > 0 ? l.spot : s));
-
-export interface PayoffPoint {
-  spot: number;
-  expiry: number;
-  today: number;
-  expPos: number;
-  expNeg: number;
-}
-
-export interface PayoffResult {
-  points: PayoffPoint[];
-  breakevens: number[];
-  /** Best/worst of the drawn window only. Use `unlimited*` before presenting either as a limit. */
-  best: number;
-  worst: number;
-  unlimitedLossUp: boolean;
-  unlimitedLossDown: boolean;
-  unlimitedGainUp: boolean;
-  frontExpiryYears: number;
-  oneSigma: [number, number] | null;
-  oneSigmaIv: number | null;
-  skipped: number;
-}
-
-/**
- * P&L of the whole book across index levels.
- *  - today:  every leg repriced with Black-76 at its own IV and expiry, `daysForward` days from now.
- *  - expiry: at the nearest expiry; a later leg keeps residual time value (floored at 0.25 day, as in the
- *            calendar/diagonal rule in dhan-payoff-diagrams §6).
- * Samples always include every strike so kinks are not rounded off; breakevens are refined by bisection on the
- * model itself, so they do not depend on the sampling grid.
- */
-export function payoff(legs: DeskLeg[], spot: number, daysForward: number, rangePct = 0.08, steps = 161): PayoffResult {
-  const ok = legs.filter(modelable);
-  const skipped = legs.length - ok.length;
-  const years = ok.map(legYears);
-  const front = years.length ? Math.min(...years) : 0;
-  const lo = spot * (1 - rangePct);
-  const hi = spot * (1 + rangePct);
-
-  const pnlAt = (s: number, mode: 'expiry' | 'today') => {
-    let total = 0;
-    ok.forEach((l, i) => {
-      const F = forwardAt(l, s);
-      const t = mode === 'today'
-        ? Math.max(years[i] - daysForward / 365, 0)
-        : years[i] - front > 1e-9 ? Math.max(years[i] - front, 0.25 / 365) : 0;
-      total += (b76(l.type, F, l.strike, t, l.iv).price - l.entryPrice) * l.netQty;
-    });
-    return total;
-  };
-
-  const xs = new Set<number>();
-  for (let i = 0; i < steps; i++) xs.add(lo + ((hi - lo) * i) / (steps - 1));
-  ok.forEach(l => { if (l.strike > lo && l.strike < hi) xs.add(l.strike); });
-  const grid = [...xs].sort((a, b) => a - b);
-
-  const points: PayoffPoint[] = grid.map(s => {
-    const expiry = Math.round(pnlAt(s, 'expiry'));
-    return {
-      spot: Math.round(s * 100) / 100,
-      expiry,
-      today: Math.round(pnlAt(s, 'today')),
-      expPos: Math.max(expiry, 0),
-      expNeg: Math.min(expiry, 0),
-    };
-  });
-
-  const breakevens: number[] = [];
-  for (let i = 1; i < grid.length; i++) {
-    const a = pnlAt(grid[i - 1], 'expiry');
-    const b = pnlAt(grid[i], 'expiry');
-    if ((a < 0 && b > 0) || (a > 0 && b < 0)) {
-      let x0 = grid[i - 1], x1 = grid[i], f0 = a;
-      for (let k = 0; k < 40; k++) {
-        const mid = (x0 + x1) / 2;
-        const fm = pnlAt(mid, 'expiry');
-        if ((fm < 0) === (f0 < 0)) { x0 = mid; f0 = fm; } else { x1 = mid; }
-      }
-      breakevens.push((x0 + x1) / 2);
-    }
-  }
-
-  const netQty = (type: 'CE' | 'PE') => ok.filter(l => l.type === type).reduce((s, l) => s + l.netQty, 0);
-  const netCe = netQty('CE');
-  const netPe = netQty('PE');
-
-  // SD band: spot × ATM IV × √t (dhan-payoff-diagrams "Sensibull parity"); falls back to the IV of the leg
-  // nearest the money when the chain did not supply an ATM IV.
-  const frontLegs = ok.filter((_, i) => Math.abs(years[i] - front) < 1e-9);
-  const atm = frontLegs.find(l => l.atmIv && l.atmIv > 0)?.atmIv
-    ?? [...frontLegs].sort((a, b) => Math.abs(a.strike - spot) - Math.abs(b.strike - spot))[0]?.iv
-    ?? null;
-  const oneSigma: [number, number] | null = atm && front > 0
-    ? [spot * (1 - (atm / 100) * Math.sqrt(front)), spot * (1 + (atm / 100) * Math.sqrt(front))]
-    : null;
-
-  return {
-    points,
-    breakevens,
-    best: points.length ? Math.max(...points.map(p => p.expiry)) : 0,
-    worst: points.length ? Math.min(...points.map(p => p.expiry)) : 0,
-    unlimitedLossUp: netCe < 0,
-    unlimitedLossDown: netPe < 0,
-    unlimitedGainUp: netCe > 0,
-    frontExpiryYears: front,
-    oneSigma,
-    oneSigmaIv: atm,
-    skipped,
-  };
-}
-
-export interface LadderRow {
-  movePct: number;
-  spot: number;
-  pnlToday: number;     // P&L of the book if the move happens now
-  pnlDelta: number;     // change vs. current P&L
-  netLotDelta: number;  // lot-weighted net delta at that level
-}
-
-export const LADDER_MOVES = [-4, -2, -1, 0, 1, 2, 4];
-
-export function ladder(legs: DeskLeg[], spot: number, daysForward = 0): LadderRow[] {
-  const ok = legs.filter(modelable);
-  const base = ok.reduce((s, l) => s + (b76(l.type, l.forward, l.strike, legYears(l), l.iv).price - l.entryPrice) * l.netQty, 0);
-  return LADDER_MOVES.map(movePct => {
-    const s = spot * (1 + movePct / 100);
-    let pnl = 0;
-    let lotDelta = 0;
-    for (const l of ok) {
-      const t = Math.max(legYears(l) - daysForward / 365, 0);
-      const m = b76(l.type, forwardAt(l, s), l.strike, t, l.iv);
-      pnl += (m.price - l.entryPrice) * l.netQty;
-      lotDelta += (l.lotSize > 0 ? l.netQty / l.lotSize : 0) * m.delta;
-    }
-    return { movePct, spot: s, pnlToday: Math.round(pnl), pnlDelta: Math.round(pnl - base), netLotDelta: lotDelta };
-  });
+/** Adapter: the Portfolio Greeks legs → the central payoff library's input. IV is solved from each leg's live price there. */
+export function deskLegsToPayoffLegs(legs: DeskLeg[]): PayoffLegInput[] {
+  return legs
+    .filter(l => !!l.expiry && l.entryPrice > 0)
+    .map(l => ({
+      type: l.type, strike: l.strike, expiry: l.expiry, qty: l.netQty, entryPrice: l.entryPrice,
+      mark: l.ltp > 0 ? l.ltp : undefined, forward: l.forward, lotSize: l.lotSize,
+    }));
 }
 
 export type Posture = { label: string; tone: 'good' | 'bad' | 'flat' };

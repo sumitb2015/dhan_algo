@@ -18,7 +18,7 @@ import {
   OptType,
   Side,
   PositionGuard,
-  computeBsGreeks,
+  computeGreeksTickPrice,
   generatePayoffCurve,
   computePortfolioMetrics,
   calculateTimeToExpiryYears,
@@ -406,8 +406,8 @@ export default function OptionsMonitorPage() {
     // auto-populated legs must price off "today", not whatever days-to-target was last set.
     const effectiveTime = calculateTimeToExpiryYears(selectedExpiry);
 
-    const gCe = computeBsGreeks('CE', evalUnderlying, ceStrike, effectiveTime, ceIv, uConfig.lotSize, 0.065, isFut);
-    const gPe = computeBsGreeks('PE', evalUnderlying, peStrike, effectiveTime, peIv, uConfig.lotSize, 0.065, isFut);
+    const gCe = computeGreeksTickPrice('CE', evalUnderlying, ceStrike, effectiveTime, ceIv, uConfig.lotSize, 0.065, isFut);
+    const gPe = computeGreeksTickPrice('PE', evalUnderlying, peStrike, effectiveTime, peIv, uConfig.lotSize, 0.065, isFut);
 
     const cePrice = (typeof ceTick?.ce?.ltp === 'number' && ceTick.ce.ltp > 0)
       ? ceTick.ce.ltp
@@ -480,7 +480,7 @@ export default function OptionsMonitorPage() {
         const extraTick = leg.expiry ? (liveQuotes as any)?.extra?.[leg.expiry]?.[String(leg.strike)] : undefined;
         const extraLtp = leg.type === 'CE' ? extraTick?.ce?.ltp : extraTick?.pe?.ltp;
         const offLtp = (typeof extraLtp === 'number' && extraLtp > 0) ? extraLtp : leg.ltp;
-        const gOff = computeBsGreeks(
+        const gOff = computeGreeksTickPrice(
           leg.type,
           isFut ? (futurePrice as number) : spot,
           leg.strike,
@@ -520,7 +520,7 @@ export default function OptionsMonitorPage() {
       // Recompute Greeks via Black-76 on futures price
       const isFutures = typeof futurePrice === 'number' && futurePrice > 0;
       const evalUnderlying = isFutures ? (futurePrice as number) : spot;
-      const g = computeBsGreeks(
+      const g = computeGreeksTickPrice(
         leg.type,
         evalUnderlying,
         leg.strike,
@@ -753,7 +753,7 @@ export default function OptionsMonitorPage() {
 
     const isFutures = typeof futurePrice === 'number' && futurePrice > 0;
     const evalUnderlying = isFutures ? (futurePrice as number) : spot;
-    const g = computeBsGreeks(
+    const g = computeGreeksTickPrice(
       newLegData.type,
       evalUnderlying,
       newLegData.strike,
@@ -871,7 +871,7 @@ export default function OptionsMonitorPage() {
 
         const dhanGreeks = chainSide?.greeks;
         const hasDhanGreeks = dhanGreeks && dhanGreeks.delta != null && dhanGreeks.gamma != null;
-        const g = computeBsGreeks(l.type, evalUnderlying, newStrike, timeYears, effectiveIv, uConfig.lotSize, 0.065, isFut);
+        const g = computeGreeksTickPrice(l.type, evalUnderlying, newStrike, timeYears, effectiveIv, uConfig.lotSize, 0.065, isFut);
 
         const currentPrice = (typeof wsPrice === 'number' && wsPrice > 0)
           ? wsPrice
@@ -941,7 +941,7 @@ export default function OptionsMonitorPage() {
       const hasDhanGreeks = dhanGreeks && dhanGreeks.delta != null && dhanGreeks.gamma != null;
 
       // 3. Fallback to Black-76 theoretical price on futures for this specific strike & type
-      const fallbackGreeks = computeBsGreeks(type.toUpperCase() as OptType, evalUnderlying, strike, t, iv, uConfig.lotSize, 0.065, isFut);
+      const fallbackGreeks = computeGreeksTickPrice(type.toUpperCase() as OptType, evalUnderlying, strike, t, iv, uConfig.lotSize, 0.065, isFut);
       const price = (typeof wsPrice === 'number' && wsPrice > 0)
         ? wsPrice
         : (typeof chainP === 'number' && chainP > 0)
@@ -964,8 +964,8 @@ export default function OptionsMonitorPage() {
       const peS = atm - uConfig.strikeStep * 2;
       const ceQ = getRealQuote(ceS, 'ce');
       const peQ = getRealQuote(peS, 'pe');
-      const gCe = computeBsGreeks('CE', evalUnderlying, ceS, t, ceQ.iv, uConfig.lotSize, 0.065, isFut);
-      const gPe = computeBsGreeks('PE', evalUnderlying, peS, t, peQ.iv, uConfig.lotSize, 0.065, isFut);
+      const gCe = computeGreeksTickPrice('CE', evalUnderlying, ceS, t, ceQ.iv, uConfig.lotSize, 0.065, isFut);
+      const gPe = computeGreeksTickPrice('PE', evalUnderlying, peS, t, peQ.iv, uConfig.lotSize, 0.065, isFut);
 
       setActiveLegs([
         {
@@ -1006,8 +1006,8 @@ export default function OptionsMonitorPage() {
       setStrategyName('Short Straddle');
       const ceQ = getRealQuote(atm, 'ce');
       const peQ = getRealQuote(atm, 'pe');
-      const gCe = computeBsGreeks('CE', evalUnderlying, atm, t, ceQ.iv, uConfig.lotSize, 0.065, isFut);
-      const gPe = computeBsGreeks('PE', evalUnderlying, atm, t, peQ.iv, uConfig.lotSize, 0.065, isFut);
+      const gCe = computeGreeksTickPrice('CE', evalUnderlying, atm, t, ceQ.iv, uConfig.lotSize, 0.065, isFut);
+      const gPe = computeGreeksTickPrice('PE', evalUnderlying, atm, t, peQ.iv, uConfig.lotSize, 0.065, isFut);
 
       setActiveLegs([
         {
@@ -1056,10 +1056,10 @@ export default function OptionsMonitorPage() {
       const ceLq = getRealQuote(ceLong, 'ce');
       const peLq = getRealQuote(peLong, 'pe');
 
-      const gCeS = computeBsGreeks('CE', evalUnderlying, ceShort, t, ceSq.iv, uConfig.lotSize, 0.065, isFut);
-      const gPeS = computeBsGreeks('PE', evalUnderlying, peShort, t, peSq.iv, uConfig.lotSize, 0.065, isFut);
-      const gCeL = computeBsGreeks('CE', evalUnderlying, ceLong, t, ceLq.iv, uConfig.lotSize, 0.065, isFut);
-      const gPeL = computeBsGreeks('PE', evalUnderlying, peLong, t, peLq.iv, uConfig.lotSize, 0.065, isFut);
+      const gCeS = computeGreeksTickPrice('CE', evalUnderlying, ceShort, t, ceSq.iv, uConfig.lotSize, 0.065, isFut);
+      const gPeS = computeGreeksTickPrice('PE', evalUnderlying, peShort, t, peSq.iv, uConfig.lotSize, 0.065, isFut);
+      const gCeL = computeGreeksTickPrice('CE', evalUnderlying, ceLong, t, ceLq.iv, uConfig.lotSize, 0.065, isFut);
+      const gPeL = computeGreeksTickPrice('PE', evalUnderlying, peLong, t, peLq.iv, uConfig.lotSize, 0.065, isFut);
 
       setActiveLegs([
         {
@@ -1134,8 +1134,8 @@ export default function OptionsMonitorPage() {
       const peLong = atm - uConfig.strikeStep * 3;
       const peSq = getRealQuote(peShort, 'pe');
       const peLq = getRealQuote(peLong, 'pe');
-      const gPeS = computeBsGreeks('PE', evalUnderlying, peShort, t, peSq.iv, uConfig.lotSize, 0.065, isFut);
-      const gPeL = computeBsGreeks('PE', evalUnderlying, peLong, t, peLq.iv, uConfig.lotSize, 0.065, isFut);
+      const gPeS = computeGreeksTickPrice('PE', evalUnderlying, peShort, t, peSq.iv, uConfig.lotSize, 0.065, isFut);
+      const gPeL = computeGreeksTickPrice('PE', evalUnderlying, peLong, t, peLq.iv, uConfig.lotSize, 0.065, isFut);
 
       setActiveLegs([
         {
@@ -1178,8 +1178,8 @@ export default function OptionsMonitorPage() {
       const ceLong = atm + uConfig.strikeStep * 3;
       const ceSq = getRealQuote(ceShort, 'ce');
       const ceLq = getRealQuote(ceLong, 'ce');
-      const gCeS = computeBsGreeks('CE', evalUnderlying, ceShort, t, ceSq.iv, uConfig.lotSize, 0.065, isFut);
-      const gCeL = computeBsGreeks('CE', evalUnderlying, ceLong, t, ceLq.iv, uConfig.lotSize, 0.065, isFut);
+      const gCeS = computeGreeksTickPrice('CE', evalUnderlying, ceShort, t, ceSq.iv, uConfig.lotSize, 0.065, isFut);
+      const gCeL = computeGreeksTickPrice('CE', evalUnderlying, ceLong, t, ceLq.iv, uConfig.lotSize, 0.065, isFut);
 
       setActiveLegs([
         {
@@ -1363,8 +1363,8 @@ export default function OptionsMonitorPage() {
     const hasCeDhan = ceDhanGreeks && ceDhanGreeks.delta != null && ceDhanGreeks.gamma != null;
     const hasPeDhan = peDhanGreeks && peDhanGreeks.delta != null && peDhanGreeks.gamma != null;
 
-    const gCe = computeBsGreeks('CE', spot, wingCeStrike, t, ivPct / 100, uConfig.lotSize);
-    const gPe = computeBsGreeks('PE', spot, wingPeStrike, t, ivPct / 100, uConfig.lotSize);
+    const gCe = computeGreeksTickPrice('CE', spot, wingCeStrike, t, ivPct / 100, uConfig.lotSize);
+    const gPe = computeGreeksTickPrice('PE', spot, wingPeStrike, t, ivPct / 100, uConfig.lotSize);
 
     const ceWing: OptionLegModel = {
       id: `wing_ce_${Date.now()}`,
@@ -1612,7 +1612,7 @@ export default function OptionsMonitorPage() {
 
     const timeRemaining = calculateTimeToExpiryYears(leg.expiry || selectedExpiry);
     const legIv = leg.iv ?? ivPct / 100;
-    const g = computeBsGreeks(leg.type, legSpot, leg.strike, timeRemaining, legIv, legUConfig.lotSize);
+    const g = computeGreeksTickPrice(leg.type, legSpot, leg.strike, timeRemaining, legIv, legUConfig.lotSize);
 
     const hasDhanDelta = typeof leg.delta === 'number';
 

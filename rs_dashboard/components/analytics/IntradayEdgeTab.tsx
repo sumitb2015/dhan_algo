@@ -45,12 +45,8 @@ import { legExpiries, type PositionLeg } from '@/lib/positionLegs';
 import type { ClosePct } from '@/lib/partialQty';
 import type { AnalyticsUnderlying } from '@/lib/analyticsUnderlyings';
 import type { Broker } from '@/hooks/useBrokerSelector';
-import {
-  buildMultiExpiryCurve,
-  computePayoffStats,
-  type ChainOc,
-  type PayoffStats,
-} from '@/lib/optionsStrategy';
+import { type ChainOc, type PayoffStats } from '@/lib/optionsStrategy';
+import { positionPayoff } from '@/lib/positionPayoff';
 import { isIntradayProduct } from '@/lib/positionProduct';
 import PositionsLegTable from './PositionsLegTable';
 import AddStrikePicker from './AddStrikePicker';
@@ -220,15 +216,15 @@ export default function IntradayEdgeTab({
     return activeExpiries.length ? activeExpiries[0] : finalExpiry;
   }, [activeExpiries, finalExpiry]);
 
-  const activeCurve = useMemo(() => {
-    if (!activeLegs.length || !spot || !activeTargetExpiry) return intradayCurve;
-    return buildMultiExpiryCurve(activeLegs, spot, 1, activeTargetExpiry, strikeStep, 0.04);
-  }, [activeLegs, spot, activeTargetExpiry, strikeStep, intradayCurve]);
-
-  const activeStats = useMemo(() => {
-    if (!activeLegs.length || !spot || !activeTargetExpiry) return intradayStats;
-    return computePayoffStats(activeLegs, spot, 1, activeTargetExpiry, strikeStep, 0.04);
-  }, [activeLegs, spot, activeTargetExpiry, strikeStep, intradayStats]);
+  // The intraday scope's payoff, from the central payoff library via lib/positionPayoff.ts (valued as of the nearest expiry).
+  const activePayoff = useMemo(
+    () => (activeLegs.length && spot && activeTargetExpiry
+      ? positionPayoff(activeLegs, spot, { strikeStep, spanPct: 0.04, defaultExpiry: activeTargetExpiry })
+      : null),
+    [activeLegs, spot, activeTargetExpiry, strikeStep],
+  );
+  const activeCurve = activePayoff?.expiryCurve ?? intradayCurve;
+  const activeStats = activePayoff?.stats ?? intradayStats;
 
   // ── Poll Institutional Regime ─────────────────────────────────────────────
   const fetchRegime = useCallback(async () => {

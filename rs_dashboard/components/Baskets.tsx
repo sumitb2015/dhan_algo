@@ -28,7 +28,7 @@ import {
   type OptionLegModel,
   type Side,
   type OptType,
-  computeBsGreeks,
+  computeBsGreeksExact,
   computePortfolioMetrics,
   formatShortExpiry,
   calculateTimeToExpiryYears,
@@ -704,16 +704,8 @@ export default function Baskets() {
       const chainEntry = chainOc[String(l.strike)] || chainOc[l.strike];
       const legIvRaw = isCall ? chainEntry?.ce?.implied_volatility : chainEntry?.pe?.implied_volatility;
       const legIv = typeof legIvRaw === 'number' && legIvRaw > 0 ? legIvRaw / 100 : baseIv;
-      const g = computeBsGreeks(
-        type,
-        effectiveFuturePrice,
-        l.strike,
-        tYears,
-        legIv,
-        activeLotSize,
-        0.065,
-        true
-      );
+      // Exact Greeks: these feed per-leg values that computePortfolioMetrics multiplies by lots and sums.
+      const g = computeBsGreeksExact(type, effectiveFuturePrice, l.strike, tYears, legIv, 0.065, true);
       return {
         id: l.id,
         type,
@@ -1189,6 +1181,8 @@ export default function Baskets() {
                 farChains={farChains}
                 unitsPerLot={effectiveLotSize}
                 multiplier={multiplier}
+                spot={spot}
+                future={effectiveFuturePrice > 0 && futureExpiry && /^\d{4}-\d{2}-\d{2}$/.test(futureExpiry) ? { price: effectiveFuturePrice, expiry: futureExpiry } : null}
               />
 
               {/* Saved Presets Dock */}

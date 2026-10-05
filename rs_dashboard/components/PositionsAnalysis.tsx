@@ -21,10 +21,10 @@ import {
   type PositionLeg, type UnparseableLeg, type InstrumentRow,
 } from '@/lib/positionLegs';
 import {
-  buildMultiExpiryCurve, computePayoffStats, legsMissingIv, daysBetweenDates,
-  impliedVolFromPrice, lookupChainLegData, resolveFreeformLegs,
+  daysBetweenDates, lookupChainLegData, resolveFreeformLegs,
   type ChainOc, type PayoffStats, type ResolvedLeg,
 } from '@/lib/optionsStrategy';
+import { positionPayoff, withSolvedIv, type FutureRef } from '@/lib/positionPayoff';
 import { fetchMarginSummary } from '@/lib/optionsMargin';
 import { STRIKE_STEP, lotSizeOverride, type AnalyticsUnderlying } from '@/lib/analyticsUnderlyings';
 import { todayIso, fmtExpiryShort } from '@/components/crudeoil/format';
@@ -102,6 +102,7 @@ export default function PositionsAnalysis({ underlying }: { underlying: Analytic
 
   const [instruments, setInstruments] = useState<Map<string, InstrumentRow> | undefined>(undefined);
   const [chains, setChains] = useState<Record<string, ChainOc>>({});
+  const [future, setFuture] = useState<FutureRef | null>(null);
   const [spot, setSpot] = useState<number>(0);
   const [spotChangePct, setSpotChangePct] = useState<number>(0);
   const [chainError, setChainError] = useState<string | null>(null);
@@ -566,6 +567,9 @@ export default function PositionsAnalysis({ underlying }: { underlying: Analytic
           if (i === 0) {
             setSpot(json.data?.spot ?? 0);
             setSpotChangePct(json.data?.change_pct ?? 0);
+            const fp = json.data?.future_price;
+            const fe = json.data?.future_expiry;
+            if (typeof fp === 'number' && fp > 0 && typeof fe === 'string' && fe) setFuture({ price: fp, expiry: fe });
           }
           setChainError(null);
         } catch (err) {
@@ -623,31 +627,17 @@ export default function PositionsAnalysis({ underlying }: { underlying: Analytic
   );
   const spanPct = SPAN_STEPS[spanIndex];
 
-  // Fill in IV the chain omitted by inverting the leg's own CURRENT mark.
-  // Without this a leg silently prices intrinsically in the target-date curve.
-  //
-  // Must use the live LTP, never `leg.price` (the entry average) as a fallback:
-  // the entry price was struck against a different spot on a different day, so
-  // solving IV from it at today's spot produces a confident-looking but wrong
-  // number — and because the leg now has a non-null `iv`, legsMissingIv() stops
-  // flagging it, silently hiding the exact problem the warning exists to catch.
-  // A leg with no live mark stays unsolved and correctly still "missing IV".
-  const pricedLegs = useMemo<PositionLeg[]>(() => {
-    if (!spot || !finalExpiry) return visibleLegs;
-    return visibleLegs.map((leg) => {
-      if (leg.iv && leg.iv > 0) return leg;
-      const mark = leg.display.ltp;
-      if (mark === null || !(mark > 0)) return leg;
-      const t = leg.expiry ? daysBetweenDates(todayIso(), leg.expiry) / 365 : 0;
-      const solved = impliedVolFromPrice(leg.type, spot, leg.strike, t, mark);
-      return solved ? { ...leg, iv: solved } : leg;
-    });
-  }, [visibleLegs, spot, finalExpiry]);
+  // IV from each leg's live mark, through the central pricing library. The mark is always preferred over the chain's IV (which does not
+  // reproduce the mark); it must be the LIVE LTP, never `leg.price` (the entry average, struck against a different spot on a different
+  // day). A leg with no live mark keeps whatever IV the chain gave it, and with neither it is priced at intrinsic value and reported.
+  const pricedLegs = useMemo<PositionLeg[]>(
+    () => (spot && finalExpiry ? withSolvedIv(visibleLegs, spot, { defaultExpiry: finalExpiry, future }) : visibleLegs),
+    [visibleLegs, spot, finalExpiry, future],
+  );
 
   // ── Intraday (MIS) scope, for the dedicated tab ─────────────────────────────
-  // Its own final-expiry, NOT the page's `finalExpiry`: that is the latest
-  // expiry across every VISIBLE leg (which can be a far-dated positional one)
-  // and has nothing to do with what an intraday leg is actually pricing against.
+  // Its own legs, NOT the page's: the book's `finalExpiry` can be a far-dated positional one and has nothing to do with what an
+  // intraday leg is pricing against.
   const intradayLegs = useMemo(
     () => pricedLegs.filter((l) => isIntradayProduct(l.display.productType)),
     [pricedLegs],
@@ -656,46 +646,34 @@ export default function PositionsAnalysis({ underlying }: { underlying: Analytic
     const es = legExpiries(intradayLegs);
     return es.length ? es[es.length - 1] : null;
   }, [intradayLegs]);
-  const intradayCurve = useMemo(
+  const intradayPayoff = useMemo(
     () => (intradayLegs.length && spot && intradayFinalExpiry
-      ? buildMultiExpiryCurve(intradayLegs, spot, 1, intradayFinalExpiry, strikeStep, spanPct)
-      : []),
-    [intradayLegs, spot, intradayFinalExpiry, strikeStep, spanPct],
-  );
-  const intradayStats = useMemo<PayoffStats | null>(
-    () => (intradayLegs.length && spot && intradayFinalExpiry
-      ? computePayoffStats(intradayLegs, spot, 1, intradayFinalExpiry, strikeStep, spanPct)
+      ? positionPayoff(intradayLegs, spot, { strikeStep, spanPct, defaultExpiry: intradayFinalExpiry, future })
       : null),
-    [intradayLegs, spot, intradayFinalExpiry, strikeStep, spanPct],
+    [intradayLegs, spot, intradayFinalExpiry, strikeStep, spanPct, future],
   );
+  const intradayCurve = intradayPayoff?.expiryCurve ?? [];
+  const intradayStats: PayoffStats | null = intradayPayoff?.stats ?? null;
 
-  const expiryCurve = useMemo(
-    () => (pricedLegs.length && spot && finalExpiry
-      ? buildMultiExpiryCurve(pricedLegs, spot, 1, finalExpiry, strikeStep, spanPct)
-      : []),
-    [pricedLegs, spot, finalExpiry, strikeStep, spanPct],
-  );
-
-  // Clamped rather than stored: the book can shrink (a leg closes, the last
-  // expiry moves nearer) while the slider still holds a larger number, and a
-  // target date past the final expiry would price every leg at zero time value
-  // while still being drawn as a distinct "before expiry" curve.
+  // Clamped rather than stored: the book can shrink (a leg closes, the last expiry moves nearer) while the slider still holds a larger
+  // number, and a target date past the final expiry would price every leg at zero time value.
   const targetDays = Math.min(targetDaysRaw, maxTargetDays);
 
   const targetDate = useMemo(() => isoPlusDays(targetDays), [targetDays]);
 
-  const targetCurve = useMemo(() => {
-    if (!pricedLegs.length || !spot || !finalExpiry) return null;
-    if (targetDays >= maxTargetDays) return null; // identical to the expiry curve
-    return buildMultiExpiryCurve(pricedLegs, spot, 1, targetDate, strikeStep, spanPct);
-  }, [pricedLegs, spot, finalExpiry, targetDate, targetDays, maxTargetDays, strikeStep, spanPct]);
-
-  const stats = useMemo<PayoffStats | null>(
+  // The book's payoff — curves, stats, warnings — from the central payoff library (lib/optionsPayoff.ts) via lib/positionPayoff.ts.
+  // The at-expiry curve is valued as of the NEAREST expiry (as the broker's analyzer does); the target curve is the book `targetDays`
+  // from now, with any leg that expires before then already settled.
+  const payoff = useMemo(
     () => (pricedLegs.length && spot && finalExpiry
-      ? computePayoffStats(pricedLegs, spot, 1, finalExpiry, strikeStep, spanPct)
+      ? positionPayoff(pricedLegs, spot, { strikeStep, spanPct, targetDays, defaultExpiry: finalExpiry, future })
       : null),
-    [pricedLegs, spot, finalExpiry, strikeStep, spanPct],
+    [pricedLegs, spot, finalExpiry, strikeStep, spanPct, targetDays, future],
   );
+  const expiryCurve = payoff?.expiryCurve ?? [];
+  const targetCurve = payoff?.targetCurve ?? null;
+  const stats: PayoffStats | null = payoff?.stats ?? null;
+  const frontExpiry = payoff?.model.frontExpiry ?? null;
 
   // ── draft ("what-if") legs — client-only, resolved against the same chain
   // cache, never touching the broker until the user commits ──────────────────
@@ -745,26 +723,20 @@ export default function PositionsAnalysis({ underlying }: { underlying: Analytic
   // draw a misleading flat/unchanged curve.
   const hasResolvedDrafts = resolvedDraftLegs.length > 0;
 
-  const draftCurve = useMemo(
+  const draftPayoff = useMemo(
     () => (hasResolvedDrafts && spot && combinedFinalExpiry
-      ? buildMultiExpiryCurve(combinedLegs, spot, 1, combinedFinalExpiry, strikeStep, spanPct)
+      ? positionPayoff(combinedLegs, spot, { strikeStep, spanPct, defaultExpiry: combinedFinalExpiry, future })
       : null),
-    [hasResolvedDrafts, combinedLegs, spot, combinedFinalExpiry, strikeStep, spanPct],
+    [hasResolvedDrafts, combinedLegs, spot, combinedFinalExpiry, strikeStep, spanPct, future],
   );
-
-  const draftStats = useMemo<PayoffStats | null>(
-    () => (hasResolvedDrafts && spot && combinedFinalExpiry
-      ? computePayoffStats(combinedLegs, spot, 1, combinedFinalExpiry, strikeStep, spanPct)
-      : null),
-    [hasResolvedDrafts, combinedLegs, spot, combinedFinalExpiry, strikeStep, spanPct],
-  );
+  const draftCurve = draftPayoff?.expiryCurve ?? null;
+  const draftStats: PayoffStats | null = draftPayoff?.stats ?? null;
 
   const ivWarning = useMemo(() => {
-    if (!finalExpiry || targetDays >= maxTargetDays) return null;
-    const missing = legsMissingIv(pricedLegs, targetDate);
+    const missing = (payoff?.missingIv ?? []).map((i) => pricedLegs[i]).filter(Boolean);
     if (!missing.length) return null;
-    return `${missing.length} leg(s) (${missing.map((l) => `${l.strike} ${l.type}`).join(', ')}) have no implied volatility and could not be solved from their mark — they are priced at intrinsic value only, so the target-date curve understates their remaining time value.`;
-  }, [pricedLegs, targetDate, finalExpiry, targetDays, maxTargetDays]);
+    return `${missing.length} leg(s) (${missing.map((l) => `${l.strike} ${l.type}`).join(', ')}) have no live price or implied volatility to solve from — they are priced at intrinsic value only, so the curves understate their remaining time value.`;
+  }, [payoff, pricedLegs]);
 
   // ── OI histogram from the nearest expiry's chain ───────────────────────────
   const oiBars = useMemo<OiBar[]>(() => {
@@ -1178,7 +1150,7 @@ export default function PositionsAnalysis({ underlying }: { underlying: Analytic
                   breakevens={stats?.breakevensExpiry ?? []}
                   spot={spot}
                   targetSpot={effectiveTargetSpot}
-                  expiryLabel={finalExpiry ? fmtExpiryShort(finalExpiry) : '—'}
+                  expiryLabel={frontExpiry ? fmtExpiryShort(frontExpiry) : '—'}
                   targetLabel={targetDays === 0 ? 'Today' : `+${targetDays}d`}
                   oiBars={oiBars}
                   showOi={showOi}
@@ -1251,7 +1223,7 @@ export default function PositionsAnalysis({ underlying }: { underlying: Analytic
 
             {tab === 'greeks' && (
               <div className="rounded-2xl border border-zinc-800/80 bg-zinc-900/50 p-4 backdrop-blur-md shadow-sm">
-                <GreeksTab legs={pricedLegs} lotSize={lotSize ?? 0} spot={spot} />
+                <GreeksTab legs={pricedLegs} lotSize={lotSize ?? 0} spot={spot} future={future} />
               </div>
             )}
 

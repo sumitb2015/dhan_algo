@@ -10,11 +10,11 @@ import PayoffPanel from './deltaDesk/PayoffPanel';
 import ExposurePanel from './deltaDesk/ExposurePanel';
 import { GreeksMatrix, ExpiryBreakdown } from './deltaDesk/GreeksMatrix';
 import { ScenarioLadder, LiveTrail, TrailPoint } from './deltaDesk/LadderAndTrail';
-import { DeskLeg, Basis, BASIS_LABEL, GREEKS, aggregate, fmtInr } from '@/lib/deltaDesk';
+import { DeskLeg, RawLeg, Basis, BASIS_LABEL, GREEKS, aggregate, enrichLegs, fmtInr } from '@/lib/deltaDesk';
 
 interface ApiResponse {
   has_positions: boolean;
-  legs: DeskLeg[];
+  legs: RawLeg[];
   timestamp: string;
   error?: string;
 }
@@ -75,7 +75,8 @@ export default function OptionsDeltaPage() {
         setError(`The positions script failed (${data.error}). Check the dashboard terminal for details.`);
         return;
       }
-      const next = data.legs ?? [];
+      // The script returns market data only; IV and every Greek come from lib/optionsPricing.ts via enrichLegs().
+      const next = enrichLegs(data.legs ?? []);
       setLegs(next);
       setTimestamp(data.timestamp ?? new Date().toISOString());
       setError(null);
@@ -252,7 +253,7 @@ export default function OptionsDeltaPage() {
           <>
             <div className="grid gap-4 lg:grid-cols-12">
               <Panel title="Position payoff" note={`${activeUnder} · live level marked in amber`} className="lg:col-span-8">
-                <PayoffPanel legs={scoped} spot={spot} spotEstimated={(scoped[0] as DeskLeg & { spotSource?: string })?.spotSource === 'futures'} />
+                <PayoffPanel legs={scoped} spot={spot} spotEstimated={scoped[0]?.spotSource === 'futures'} />
               </Panel>
               <Panel title="Net exposure" note={`${BASIS_LABEL[basis]} basis`} className="lg:col-span-4">
                 <ExposurePanel legs={scoped} basis={basis} onBasis={setBasis} />

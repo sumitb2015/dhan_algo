@@ -189,10 +189,8 @@ Option traders analyze Greeks both per-contract and position-wide:
 
 ## Portfolio Greeks page: a fifth payoff surface (`components/deltaDesk/PayoffPanel.tsx`, `lib/deltaDesk.ts`)
 
-Added 2026-10-05 and audited against this skill. It has its own small engine (`payoff()`, `ladder()`, `b76()` in
-`lib/deltaDesk.ts`) because it prices from **unrounded** Black-76 with IV solved per leg from the live premium —
-`computeBsGreeks` rounds price to ₹0.05 and delta to 2 dp, which is fine for a curve but not for solving IV or summing
-13 lots of Greeks. Parity is enforced by `lib/deltaDesk.test.ts` (prices/deltas vs `computeBsGreeks` with `isFutures`,
+Added 2026-10-05 and audited against this skill. `lib/deltaDesk.ts` holds only the portfolio layer (`enrichLegs()`, `payoff()`, `ladder()`, aggregation
+bases); all pricing is `lib/optionsPricing.ts`, with IV solved per leg from the live premium on the futures forward. Parity is enforced by `lib/deltaDesk.test.ts` (prices/deltas vs `computeBsGreeks` with `isFutures`,
 put-call parity, exact breakevens, strike sampling, net-signed-qty unlimited flags, T+0 reproducing each mark).
 
 What it shares with the rules above: Black-76 on the futures forward; 365-day calendar; `r = 0.065`; time via
@@ -207,6 +205,85 @@ IV is solved per leg rather than read from the chain; POP is not shown.
 Design tokens not yet matched (cosmetic, not computation): zero line is `var(--color-zinc-500)` rather than `--chart-axis` 1.5;
 no `ReferenceDot` breakeven markers (dashed verticals instead); T+0 is `sky-400` rather than `PAYOFF_TODAY` `#2d7ff9`.
 
+### The payoff library and the one chart (2026-10-05) — read before touching any payoff diagram
+Two files do everything; a page supplies legs and a spot and must **not** build curves, break-evens, extremes, SD bands, POP or Greeks itself:
+- `lib/optionsPayoff.ts` — `buildPayoffModel({legs, spot, margin?, atmIv?, sim?, daysForward?, light?})` → expiry curve, T+0 curve, what-if curve, exact break-evens,
+  max profit/loss (+ `…Unlimited` flags), ROM, POP, risk:reward, ±1σ band, net Greeks, strike pins, nearest/later expiries, `nowPnl`, `ivAssumed`;
+  `payoffLadder` (scenario table); `bookGreeks` (per-leg and net Greeks, same pricing); `builderLegsToPayoffLegs` (strategy-builder leg shape).
+- `components/strategy/PayoffDiagram.tsx` — the single chart (recharts; zoom, full screen, What-If days/IV sliders, strike pins, BE markers, tooltip, header stats).
+  Feed it with `{...modelToDiagramProps(model)} currentSpot={spot}`; add `note`, `headerExtras` (e.g. a P&L Table button), `title=""` when the page has its own panel title.
+Semantics every page now shares (each was a real divergence):
+1. **T+0 is the real mark-to-market.** IV is solved from each leg's live `mark`, P&L is measured from `entryPrice`. Solving IV from the entry price (as Multi-Leg Focus did)
+   forces T+0 to ₹0 at spot and hides the open P&L.
+2. **The futures basis decays to zero at each leg's own expiry** (`forwardAt`). The expiry curve therefore measures intrinsic value against the index itself; carrying today's basis
+   (~68 pts on Nifty) into it shifted every break-even by ~40 points (ours 21,929/23,158 vs the broker's 21,969/23,195; now within 3 and 6 points).
+3. **"Expiry" = the nearest expiry among the legs**, taken from each leg's own `expiry`, never from basket metadata (a basket's `expiry`/`farExpiry` can be stale: one showed far = 29 Sep, before near = 27 Oct).
+4. Unlimited risk/profit from net signed CE/PE quantity; single-expiry extremes exact (kinks); mixed-expiry extremes are the drawn window. Break-evens by bisection on the model.
+5. `light: true` returns only the header numbers (no curves) — use it for collapsed rows; key the memo on the leg VALUES, not on a fresh `ltpFor` closure.
+**Every payoff chart in the dashboard is now `PayoffDiagram`** (2026-10-05). Where each page stands:
+| Page | Draws with | Computes curves with |
+|---|---|---|
+| Portfolio Greeks (`deltaDesk/PayoffPanel.tsx`) | `PayoffDiagram` | `buildPayoffModel` |
+| Multi-Leg Focus (`MultiLegStrategyRow`, incl. its Greeks panel via `bookGreeks`) | `PayoffDiagram` | `buildPayoffModel` |
+| Option Strats, Option Strats (Stocks), Flyagonal | `PayoffDiagram` | `buildPayoffModel` (via `builderLegsToPayoffLegs`) — they now draw T+0 too |
+| Baskets (`BasketPayoffChart`) and Options Monitor (`PositionsStrategyMonitor`) | `PayoffWorkbench` → `PayoffDiagram` | `generatePayoffCurve`, now a thin adapter over `buildPayoffModel` (same signature, grid and rounding; the Sensibull-parity tests still pass) |
+| Positions Analysis, Live Builder, Intraday Edge, `/options-analytics/live` (`PositionsPayoffChart`) | `PayoffDiagram` (wrapper) | `buildPayoffModel` via `lib/positionPayoff.ts` (`positionPayoff`, `withSolvedIv`, `positionNetGreeks`) |
+- `components/strategy/PayoffWorkbench.tsx` is the Sensibull-style panel Baskets and the Options Monitor share: the chart plus target-price / target-date controls, futures card, SD table, strike-clearance
+  card and expected-move line. Display only; the page supplies `payoffPoints`, `breakevens`, `sdLevels` and owns the target state.
+- `PayoffDiagram` extras added for those pages: `draftCurve` (what-if legs, violet dashed), `oiBars` + `showOi` + `onToggleOi` (OI histogram on its own axis), `targetSpot` (marker + per-curve readout),
+  `legendLabels`, `externalZoom` (the page owns the price window), `warning`, `expectedMove.sd2Lo/sd2Hi` (2σ lines). Full screen portals to `<body>` (a `backdrop-blur` ancestor traps `position: fixed`).
+- **Position pages (2026-10-05):** `lib/positionPayoff.ts` is the adapter for `ResolvedLeg` / `PositionLeg` books. `positionPayoff(legs, spot, {strikeStep, spanPct, targetDays, defaultExpiry, future})` returns the curves, the `PayoffStats` the
+  strips read and `missingIv`; `withSolvedIv` fills IV from each leg's live mark (chain IV only as a fallback, a leg with neither is priced at intrinsic and reported). The chain response's `future_price` / `future_expiry` are rolled to each leg's own expiry.
+  **Convention change:** the at-expiry curve is valued as of the NEAREST expiry (the broker analyzer's convention), not the final one. On the live Nifty book Positions Analysis' break-evens moved from 21,882 / 23,277 to 21,972 / 23,201
+  (broker 21,969 / 23,195) and max profit from ₹1,24,007 (everything settled at the final expiry) to ₹74,853 (broker ₹75,140); T+0 at spot equals the open P&L exactly. A target date past a leg's expiry still settles that leg.
+- **Adapters, not engines.** `computePayoffStats`, `buildHeatmapGrid` (`optionsStrategy.ts`), `generatePayoffCurve`, `computeMultiExpiryStats`, `computeExpiryPnlAtSpot` (`optionsMonitorMath.ts`) keep their signatures but price through the library
+  (`buildPayoffModel`, `payoffGrid`, `payoffAt`). The P&L-by-date grid now handles books with several expiries (the "narrow to one expiry" refusal is gone). Deleted as dead: `buildMultiExpiryCurve`, `buildTargetPayoffCurve`, `legsMissingIv`,
+  `buildPayoffCurve`, `exactExpiryProfile`, `findBreakevens`, `computeCalendarPayoffCurve` and their tests (the calendar-spread semantics are covered in `lib/optionsPayoff.test.ts`).
+- **Left alone on purpose:** `lib/diagonalStrikeAdvisor.ts` (r = 7% for parity with the Python strategy); `computePayoff` in `basketStrategies.ts` (pure intrinsic payoff, no pricing, used for Baskets stats and thumbnails);
+  Options Monitor / Baskets *monitor* legs, which use the chain IV with the **monthly future as the forward for every leg** (the Sensibull convention; it overstates a weekly leg's forward by the monthly carry, ~64 pts on Nifty, so do not solve IV
+  from a mark against it — the Baskets Greeks panel rolls the future to each leg's expiry instead); chain Greeks used for strike selection (Focus Tool, Covered Call).
+
+### The pricing library: `lib/optionsPricing.ts` — the ONE place option maths lives (2026-10-05)
+Every page prices options and computes Greeks through this file, so a number can only be wrong in one place. Do not write a private
+Black-Scholes, normal CDF, IV solver, expiry clock or Greek in a component, hook, API route or scanner — import from here.
+
+| Need | Call |
+|---|---|
+| Price + all Greeks, unrounded (anything multiplied by qty, summed across legs, or used in a curve) | `computeBsGreeksExact(type, S_or_F, K, T, iv, r?, isFutures?)` → price, delta, gamma, theta, vega, rho, vanna, vomma, charm |
+| One display cell (₹0.05 tick price, 2 dp / 4 dp) | `computeBsGreeks(...)` (the rounded view of the same numbers; never sum it) |
+| Price only, unclamped (curves, IV solving) | `priceOption(...)`; spot shortcut `bsPrice(...)` |
+| IV from a premium | `impliedVol(type, U, K, T, price, { isFutures })` (null if below the no-arbitrage floor or above 500% vol); spot shortcut `impliedVolFromPrice` |
+| "Solve IV from the mark, then Greeks at that IV" | `greeksFromMark({type, strike, expiry, mark, underlying, isFutures, fallbackIv?})` → Greeks + `iv` + `ivSource: 'mark' \| 'fallback'` |
+| Time to expiry | `calculateTimeToExpiryYears(expiry, now?)` (15:40 IST, /365, 0.25-day floor); `expiryEpochMs(expiry)` for a clock label |
+| Forward / spot | `rollForward(F, fromExpiry, toExpiry)`, `spotFromFutures(F, futExpiry)` (an estimate: flag it on screen) |
+| P(finish above K) | `riskNeutralProbAbove(S, K, t, iv)` |
+| Constants | `RISK_FREE_RATE` (6.5%), `CALENDAR_DAYS_PER_YEAR` (365), `FNO_CLOSE_UTC` |
+
+Units: delta per unit; gamma per index point; theta ₹/calendar day; vega ₹ per 1% IV; rho ₹ per 1% rate; vanna Δdelta per 1% IV; vomma Δvega
+per 1% IV; charm Δdelta per day. IV is always a fraction. Model: Black-76 when `isFutures`, else Black-Scholes on spot (the documented fallback
+when no futures price is wired in).
+
+`optionsMonitorMath.ts` and `optionsStrategy.ts` re-export `computeBsGreeks`, `computeBsGreeksExact`, `calculateTimeToExpiryYears`, `OptType`,
+`bsPrice`, `riskNeutralProbAbove` and `impliedVolFromPrice`, so old import paths still resolve to the same single implementation. Who calls
+what: Options Monitor, Baskets, Multi-Leg Focus (strategy-row curves and net Greeks, Position Map, calendar far leg), Portfolio Greeks
+(`lib/deltaDesk.ts` `enrichLegs()`/`b76()`), the Ultimate Scanner (delta and POP) and `BasketPayoffChart` (expiry clock) all go through it.
+
+**Adding or changing a Greek/formula:** edit `blackCore` in `optionsPricing.ts` and add a case to `lib/optionsPricing.test.ts`. That file differences
+the price itself (delta, gamma, vega, theta, rho, vanna, vomma, charm; futures and spot; Nifty-like and "unit" cases) and pins results to 20 fixed values
+from `py_vollib` 1.0.12 + `blackscholes` 0.2.2. It fails on the old buggy formulas (20 of 32 finite-difference cases). Do not edit expected values to make
+a test pass. The rate, 365-day year, 15:40 close and "futures as the forward" are choices no reference can prove.
+
+**Deliberately NOT on the library (do not "fix" these in passing):**
+- `lib/optionsStrategy.ts` date-based machinery (`buildMultiExpiryCurve`, `buildHeatmapGrid`, `PositionsAnalysis`, `useUnderlyingPayoff`, `positionSnapshot`,
+  `FlyagonalPayoff`): P&L-by-date columns use whole calendar days from a chosen date (`daysBetweenDates`), not the intraday clock. They share the pricing
+  core (`bsPrice` / `impliedVolFromPrice` are the library's) but not `calculateTimeToExpiryYears`. Unifying the clock would move Sensibull-parity numbers; do it
+  as its own change with its own comparison.
+- `lib/diagonalStrikeAdvisor.ts` keeps its own spot Black-Scholes at r = 0.07 for Python/TS sizing parity with `strategies/diagonal_call` (see `dhan-diagonal-call`).
+- Python strategies and backtests (`strategies/*`, `scripts/analysis/*`, `csp_*`, `live_options_tracker.py`) have their own Python maths. The dashboard's
+  Portfolio Greeks script no longer does (it returns market data only).
+- `app/options-monitor/page.tsx` still calls the rounded `computeBsGreeks` in ~20 places for price *estimates* (₹0.05 tick is right there); its per-leg Greeks
+  feed `computePortfolioMetrics` sums — migrate those to `computeBsGreeksExact` if its net Greeks ever need to be exact.
+
 ### `computeBsGreeks`: four Greeks corrected 2026-10-05, guarded by finite-difference tests
 Decision (see the vault note on following Sensibull vs correctness): formulas and units are verified against the price itself,
 never against a vendor; vendor differences are conventions to document, not numbers to copy.
@@ -218,7 +295,7 @@ never against a vendor; vendor differences are conventions to document, not numb
 - **Delta, futures branch:** now `e^{−rt}N(d1)` (call) and `−e^{−rt}N(−d1)` (put), the true derivative with respect to the futures price
   and the one that sizes a futures hedge. Vendors that print the undiscounted forward delta `N(d1)` read ~0.4% higher at 22 days; that is a
   convention difference, not an error on either side.
-- **Guard:** `lib/optionsMonitorMath.test.ts` ("Greeks match finite differences of its own price") differences an unrounded
+- **Guard:** `lib/optionsPricing.test.ts` ("Greeks match finite differences of its own price") differences an unrounded
   high-precision reference price for delta, gamma, vega and theta, for futures and spot, over ten cases including long-dated, deep-ITM,
   and "unit" cases (underlying 100, 0.5–1y) chosen so the old 3–6% discount errors exceed the output's 2 dp / 4 dp rounding. Against the old
   code 20 of the 32 cases fail. Add a case there for any new Greek rather than asserting a number.
@@ -352,11 +429,8 @@ any hand-rolled-SVG payoff surface:
    readout/tooltip for the expiry curve — extend it to show both values at once rather than
    adding a second disconnected tooltip.
 
-**Known gap, not yet retrofitted**: `components/BasketPayoffChart.tsx`,
-`components/analytics/PositionsPayoffChart.tsx`, and the other three callers of
-`components/strategy/PayoffDiagram.tsx` that predate the `todayCurve` prop
-(`OptionStrats.tsx`, `OptionStratsStock.tsx`, `FlyagonalPayoff.tsx`) still show expiry-only
-curves. Wiring T+0 into any of them is a straightforward application of the pattern above — do
+**Fixed 2026-10-05:** every payoff surface now draws through `PayoffDiagram`, and the builder pages draw T+0 (see "The payoff library and the one chart" above). The Positions Analysis family still computes
+its own curves; they do plot T+0 (the target-date curve). Wiring T+0 into any of them is a straightforward application of the pattern above — do
 it opportunistically when next touching one of those files, and update this list when you do.
 
 ---
@@ -366,7 +440,7 @@ it opportunistically when next touching one of those files, and update this list
 ### 1. Automated Math Test Suite
 Run the test suite directly with Node:
 ```bash
-node --test rs_dashboard/lib/optionsMonitorMath.test.ts
+node --test rs_dashboard/lib/optionsPricing.test.ts rs_dashboard/lib/optionsMonitorMath.test.ts
 ```
 The suite verifies:
 1. Black-76 pricing vs Black-Scholes.

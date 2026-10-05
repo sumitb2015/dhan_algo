@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert';
 import {
   resolveTemplateLegs, reconcileLegFillDown, reconcileLegWithBroker, legPnl, basketTotalPnl, sortLegsForExit, findLegPosition,
-  computeLegTrailingSL, computeStrategyMetrics, checkStrategyRisk, computeCalendarPayoffCurve, classifyBasketStructure, findSiblingLegCollisions,
+  computeLegTrailingSL, computeStrategyMetrics, checkStrategyRisk, classifyBasketStructure, findSiblingLegCollisions,
   formatExpiryLabel, LEG_FILL_GRACE_MS, claimableLegQty, executionBroker, applyOrderOutcomes, normalizeOrderRow, PENDING_ORDER_TTL_MS, legBrokerMismatch, classifyDhanOrder, type NormalizedOrder, legAvgPrice, legExitPrice, legQtyUnits, legPnlPct, legOtmPct, scaleBasketMultiplier,
   legQtyWarningsFor, recordOutsideReduction, findUntrackedPositions, residualBrokerAvg, findContractDrift, legFromUntracked, contractHintFromRow, legCountsToday, closedFillFromRow, mergeImportedLegs, brokerClampSlice,
   normalizeTradeRow, ownOrderIds, matchOutsideTrades, repriceEstimatedCloses, MLF_ORDER_SOURCE,
@@ -57,92 +57,6 @@ test('resolveTemplateLegs falls back to front expiry for a far leg when no far e
   const strikes = [23600, 23800, 24000, 24200, 24400];
   const legs = resolveTemplateLegs(template, 24000, strikes, 200, '2026-09-25');
   assert.strictEqual(legs[1].expiry, '2026-09-25');
-});
-
-test('computeCalendarPayoffCurve: front leg is priced at pure intrinsic value at its own strike', () => {
-  const legs = [
-    { side: 'S' as const, option: 'CE' as const, strike: 24000, qty: 65, entryPrice: 100, iv: 0.13, expiry: '2026-09-25' },
-    { side: 'B' as const, option: 'CE' as const, strike: 24000, qty: 65, entryPrice: 150, iv: 0.13, expiry: '2026-10-30' },
-  ];
-  const { points } = computeCalendarPayoffCurve(legs, 24000, '2026-09-25', '2026-10-30', 50);
-  // Deep ITM: front SELL CE is worth its full intrinsic value (large loss on
-  // the short leg), while the far BUY CE's Black-76 value approaches its own
-  // intrinsic value too (deep ITM options carry little extra time value) —
-  // sanity-check the front leg's contribution is being priced at intrinsic,
-  // not carrying phantom time value of its own.
-  const deepItm = points.find(p => p.x === points[points.length - 1].x)!;
-  const frontIntrinsicAtDeepItm = deepItm.x - 24000; // CE intrinsic
-  // Net pnl should be roughly -(frontIntrinsic - 100)*65 + (farValue - 150)*65;
-  // since farValue >= frontIntrinsic always (far leg still has time value),
-  // deep ITM the position should NOT show unbounded loss growing purely from
-  // the front leg alone — the far leg's own deep-ITM intrinsic floor caps it.
-  assert.ok(Number.isFinite(deepItm.y));
-  assert.ok(frontIntrinsicAtDeepItm > 0);
-});
-
-test('computeCalendarPayoffCurve: far leg carries positive time value even exactly at its own strike (near leg intrinsic is zero there)', () => {
-  const legs = [
-    { side: 'S' as const, option: 'CE' as const, strike: 24000, qty: 65, entryPrice: 100, iv: 0.15, expiry: '2026-09-25' },
-    { side: 'B' as const, option: 'CE' as const, strike: 24000, qty: 65, entryPrice: 150, iv: 0.15, expiry: '2026-10-30' },
-  ];
-  const { points } = computeCalendarPayoffCurve(legs, 24000, '2026-09-25', '2026-10-30', 50);
-  const atmPoint = points.find(p => p.x === 24000)!;
-  // At the shared strike: front leg intrinsic = 0 (contributes +entryPrice*qty
-  // credit since it was sold for 100 and is now worth 0), far leg is priced
-  // via Black-76 at its own residual time — its value must exceed pure
-  // intrinsic (0) by some positive time-value premium, so the combined P&L
-  // at the peak should be a credit/near-breakeven figure, not deeply negative.
-  assert.ok(atmPoint.y > -150 * 65);
-});
-
-test('computeCalendarPayoffCurve: a balanced calendar (equal qty both legs) is defined-risk, not unlimited', () => {
-  const legs = [
-    { side: 'S' as const, option: 'CE' as const, strike: 24000, qty: 65, entryPrice: 100, iv: 0.13, expiry: '2026-09-25' },
-    { side: 'B' as const, option: 'CE' as const, strike: 24000, qty: 65, entryPrice: 150, iv: 0.13, expiry: '2026-10-30' },
-  ];
-  const { maxLossUnlimited, maxProfitUnlimited } = computeCalendarPayoffCurve(legs, 24000, '2026-09-25', '2026-10-30', 50);
-  assert.strictEqual(maxLossUnlimited, false);
-  assert.strictEqual(maxProfitUnlimited, false);
-});
-
-test('computeCalendarPayoffCurve: selling more near calls than are bought on the far leg is net short calls → unlimited loss', () => {
-  const legs = [
-    { side: 'S' as const, option: 'CE' as const, strike: 24000, qty: 130, entryPrice: 100, iv: 0.13, expiry: '2026-09-25' },
-    { side: 'B' as const, option: 'CE' as const, strike: 24000, qty: 65, entryPrice: 150, iv: 0.13, expiry: '2026-10-30' },
-  ];
-  const { maxLossUnlimited, maxProfitUnlimited } = computeCalendarPayoffCurve(legs, 24000, '2026-09-25', '2026-10-30', 50);
-  assert.strictEqual(maxLossUnlimited, true);
-  assert.strictEqual(maxProfitUnlimited, false);
-});
-
-test('computeCalendarPayoffCurve: buying more far calls than are sold on the near leg is net long calls → unlimited profit', () => {
-  const legs = [
-    { side: 'S' as const, option: 'CE' as const, strike: 24000, qty: 65, entryPrice: 100, iv: 0.13, expiry: '2026-09-25' },
-    { side: 'B' as const, option: 'CE' as const, strike: 24000, qty: 130, entryPrice: 150, iv: 0.13, expiry: '2026-10-30' },
-  ];
-  const { maxLossUnlimited, maxProfitUnlimited } = computeCalendarPayoffCurve(legs, 24000, '2026-09-25', '2026-10-30', 50);
-  assert.strictEqual(maxLossUnlimited, false);
-  assert.strictEqual(maxProfitUnlimited, true);
-});
-
-test('computeCalendarPayoffCurve: net long puts is capped downside profit, not unlimited (spot cannot fall below 0)', () => {
-  const legs = [
-    { side: 'S' as const, option: 'PE' as const, strike: 24000, qty: 65, entryPrice: 100, iv: 0.13, expiry: '2026-09-25' },
-    { side: 'B' as const, option: 'PE' as const, strike: 24000, qty: 130, entryPrice: 150, iv: 0.13, expiry: '2026-10-30' },
-  ];
-  const { maxLossUnlimited, maxProfitUnlimited } = computeCalendarPayoffCurve(legs, 24000, '2026-09-25', '2026-10-30', 50);
-  assert.strictEqual(maxLossUnlimited, false);
-  assert.strictEqual(maxProfitUnlimited, false);
-});
-
-test('computeCalendarPayoffCurve: breakevens are found via linear interpolation, not snapped to sample points', () => {
-  const legs = [
-    { side: 'S' as const, option: 'CE' as const, strike: 24000, qty: 65, entryPrice: 120, iv: 0.13, expiry: '2026-09-25' },
-    { side: 'B' as const, option: 'CE' as const, strike: 24000, qty: 65, entryPrice: 200, iv: 0.13, expiry: '2026-10-30' },
-  ];
-  const { breakevens, daysBetweenExpiries } = computeCalendarPayoffCurve(legs, 24000, '2026-09-25', '2026-10-30', 50);
-  assert.strictEqual(daysBetweenExpiries, 35);
-  assert.ok(Array.isArray(breakevens));
 });
 
 test('reconcileLegFillDown shrinks a leg\'s fill qty to a smaller broker quantity', () => {

@@ -6,7 +6,6 @@
  */
 
 import React, { useMemo, useState } from 'react';
-import { AlertTriangle } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { buildHeatmapGrid, type ResolvedLeg } from '@/lib/optionsStrategy';
 import { fmtExpiryShort } from '@/components/crudeoil/format';
@@ -51,41 +50,18 @@ export default function PnlTableTab({ legs, spot, strikeStep, expiry, large = fa
   const [rangePct, setRangePct] = useState<number>(0.04);
   const [ivMultiplier, setIvMultiplier] = useState<number>(1);
 
-  // buildHeatmapGrid() settles EVERY leg intrinsically only on its single final
-  // `expiry` column and Black-Scholes-prices all of them identically on every
-  // earlier column — it has no notion of a leg's own expiry. For a book with
-  // legs on different dates that would settle an already-expired-by-then leg
-  // too late and keep time value alive on it too long. Rather than silently
-  // mispricing, refuse to build the grid and say why; the expiry filter chips
-  // already let the user narrow to one expiry to see this view.
-  const distinctExpiries = useMemo(
-    () => [...new Set(legs.map((l) => l.expiry).filter((e): e is string => !!e))].sort(),
-    [legs],
-  );
-  const multiExpiry = distinctExpiries.length > 1;
-
+  // buildHeatmapGrid() prices through the central payoff library: each leg at its own expiry, settled intrinsically once that date passes,
+  // so a book spanning several expiries is handled here without narrowing to one.
   const grid = useMemo(() => {
-    if (!legs.length || !expiry || multiExpiry) return null;
+    if (!legs.length || !expiry) return null;
     // lotSize is 1: quantities are already absolute contracts (see lib/positionLegs.ts).
     return buildHeatmapGrid(legs, spot, 1, expiry, rangePct, ivMultiplier, strikeStep, fixedPnl);
-  }, [legs, spot, expiry, rangePct, ivMultiplier, strikeStep, multiExpiry, fixedPnl]);
+  }, [legs, spot, expiry, rangePct, ivMultiplier, strikeStep, fixedPnl]);
 
   const maxAbs = useMemo(
     () => (grid ? Math.max(...grid.cells.flat().map(Math.abs), 1) : 1),
     [grid],
   );
-
-  if (multiExpiry) {
-    return (
-      <div className="flex items-start gap-2 rounded border border-amber-800 bg-amber-950 px-3 py-3 text-xs text-amber-300">
-        <AlertTriangle className="mt-px h-4 w-4 shrink-0" />
-        <span>
-          This book spans {distinctExpiries.length} expiries ({distinctExpiries.map(fmtExpiryShort).join(', ')}).
-          The P&amp;L grid prices a single expiry at a time — use the Expiry filter on the left to pick one.
-        </span>
-      </div>
-    );
-  }
 
   if (!grid) {
     return <p className="py-10 text-center text-xs text-zinc-500">No open legs to build a P&amp;L grid from.</p>;

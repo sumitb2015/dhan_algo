@@ -51,7 +51,7 @@ function UnderlyingCard({
   const [showOi, setShowOi] = useState(true);
 
   const data = useUnderlyingPayoff(underlying, positions, rawPositions, broker, instruments);
-  const { legs, spot, spotChangePct, chainLoading, chainError, expiryCurve, targetCurve, stats, oiBars, finalExpiry, rollup } = data;
+  const { legs, spot, spotChangePct, chainLoading, chainError, expiryCurve, targetCurve, stats, oiBars, frontExpiry, rollup } = data;
 
   const projected = expiryCurve.length ? pnlAt(expiryCurve, spot) : null;
 
@@ -126,7 +126,7 @@ function UnderlyingCard({
         breakevens={stats?.breakevensExpiry ?? []}
         spot={spot}
         targetSpot={spot}
-        expiryLabel={finalExpiry ? fmtExpiryShort(finalExpiry) : '—'}
+        expiryLabel={frontExpiry ? fmtExpiryShort(frontExpiry) : '—'}
         targetLabel="Today"
         oiBars={oiBars}
         showOi={showOi}

@@ -1,14 +1,24 @@
 """
-Fetch open F&O option positions and map them with live option chain Greeks (specifically delta).
-Returns JSON string with individual and net deltas.
+Fetch the raw inputs the Portfolio Greeks page (/options/delta) needs for the open NSE F&O option legs.
+
+DATA ONLY — no pricing maths lives here. Implied volatility, every Greek, the forward roll and the spot-from-futures
+estimate are computed in the browser by rs_dashboard/lib/optionsPricing.ts (the single options-maths library), so a
+number can only be wrong in one place.
+
+Prints one JSON line:
+  has_positions, timestamp, legs[]
+Each leg: securityId, symbol, displayName, underlying, expiry, strike, type (CE/PE), side, netQty, lotSize,
+  ltp (chain last_price, else get_ltp — Dhan's positions payload has no last price), entryPrice (costPrice), pnl,
+  spot (chain spot, else index quote after one retry, else 0 — the page then estimates it from futPrice),
+  atmIv (percent, ATM IV of this leg's expiry), futPrice / futExpiry (nearest monthly future, the Black-76 forward),
+  chainGreeks {delta,gamma,theta,vega,iv} (Dhan's own chain values; fallback only when a leg has no live price).
 """
 import sys
 import os
 import json
 import re
-import math
 import time
-from datetime import datetime, date, timezone
+from datetime import datetime, timezone
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, ROOT)
@@ -16,100 +26,21 @@ sys.path.insert(0, ROOT)
 from login import get_dhan_client
 from lib.dhan_helper import DhanHelper
 
-RISK_FREE_RATE = 0.065  # matches rs_dashboard/lib/optionsMonitorMath.ts (computeBsGreeks default)
+
+def _empty():
+    return {
+        'has_positions': False,
+        'legs': [],
+        'timestamp': datetime.now(timezone.utc).isoformat(),
+    }
 
 
-def time_to_expiry_years(expiry_str, now=None):
-    """Mirror of calculateTimeToExpiryYears() in rs_dashboard/lib/optionsMonitorMath.ts.
-
-    Years (calendar/365) to 15:40 IST on the expiry date (10:10 UTC; SEBI's close auction moved the F&O close),
-    floored at 0.25 day. Keep the two in step: the page reprices with the TS version, and an IV solved here
-    with a different clock would stop reproducing each leg's own LTP.
-    """
+def _num(v, default=0.0):
     try:
-        y, m, d = [int(x) for x in str(expiry_str)[:10].split('-')]
-        exp = datetime(y, m, d, 10, 10, 0, tzinfo=timezone.utc)
-    except Exception:
-        return 2.0 / 365.0
-    now = now or datetime.now(timezone.utc)
-    return max(0.25 / 365.0, (exp - now).total_seconds() / (365.0 * 86400.0))
+        return float(v) if v is not None else default
+    except (TypeError, ValueError):
+        return default
 
-# Standard normal distribution functions for Black-Scholes fallback
-def _norm_pdf(x: float) -> float:
-    return math.exp(-x**2 / 2.0) / math.sqrt(2.0 * math.pi)
-
-def _norm_cdf(x: float) -> float:
-    # Math.erf is available in Python 3.2+
-    return (1.0 + math.erf(x / math.sqrt(2.0))) / 2.0
-
-def bs_delta(S: float, K: float, T: float, r: float, sigma_pct: float, opt_type: str = "CE") -> float:
-    """
-    Calculate option delta using the Black-Scholes formula.
-    sigma_pct: Implied Volatility as a percentage (e.g. 15.4)
-    """
-    sigma = sigma_pct / 100.0
-    if T <= 0 or sigma <= 0 or S <= 0 or K <= 0:
-        return 0.5 if opt_type.upper() == "CE" else -0.5
-    try:
-        d1 = (math.log(S / K) + (r + 0.5 * sigma ** 2) * T) / (sigma * math.sqrt(T))
-        if opt_type.upper() == "CE":
-            return _norm_cdf(d1)
-        else:
-            return _norm_cdf(d1) - 1.0
-    except Exception:
-        return 0.5 if opt_type.upper() == "CE" else -0.5
-
-def _b76_price(F, K, T, r, sigma, opt_type):
-    d1 = (math.log(F / K) + 0.5 * sigma ** 2 * T) / (sigma * math.sqrt(T))
-    d2 = d1 - sigma * math.sqrt(T)
-    df = math.exp(-r * T)
-    if opt_type.upper() == "CE":
-        return df * (F * _norm_cdf(d1) - K * _norm_cdf(d2))
-    return df * (K * _norm_cdf(-d2) - F * _norm_cdf(-d1))
-
-def b76_greeks_from_price(F, K, T, r, price, opt_type):
-    """Black-76 Greeks with IV backed out of the live option price (bisection).
-
-    The broker's analyzer prices off the futures and the traded premium; Dhan's
-    chain-supplied delta drifted ~0.2 lots away from it on a 13-lot book.
-    Per-unit result: delta, gamma, vega (per 1 vol point), theta (price change
-    per calendar day), iv (%). None when the price is below intrinsic/unsolvable.
-    """
-    if F <= 0 or K <= 0 or T <= 0 or price <= 0:
-        return None
-    lo, hi = 0.01, 3.0
-    try:
-        if not (_b76_price(F, K, T, r, lo, opt_type) <= price <= _b76_price(F, K, T, r, hi, opt_type)):
-            return None
-        for _ in range(60):
-            mid = (lo + hi) / 2
-            if _b76_price(F, K, T, r, mid, opt_type) < price:
-                lo = mid
-            else:
-                hi = mid
-        sigma = (lo + hi) / 2
-        sq = math.sqrt(T)
-        d1 = (math.log(F / K) + 0.5 * sigma ** 2 * T) / (sigma * sq)
-        df = math.exp(-r * T)
-        delta = df * _norm_cdf(d1) if opt_type.upper() == "CE" else df * (_norm_cdf(d1) - 1.0)
-        T1 = max(T - 1.0 / 365.0, 1e-6)
-        d1b = (math.log(F / K) + 0.5 * sigma ** 2 * T1) / (sigma * math.sqrt(T1))
-        delta_next = df * _norm_cdf(d1b) if opt_type.upper() == "CE" else df * (_norm_cdf(d1b) - 1.0)
-        d2 = d1 - sigma * sq
-        vega_raw = df * F * _norm_pdf(d1) * sq
-        return {
-            'delta': delta,
-            'gamma': df * _norm_pdf(d1) / (F * sigma * sq),
-            'vega': vega_raw / 100.0,
-            'theta': (-(F * df * _norm_pdf(d1) * sigma) / (2.0 * sq) + r * price) / 365.0,
-            'rho': -T * price / 100.0,                       # per +1% rate
-            'vanna': -df * _norm_pdf(d1) * d2 / sigma / 100.0,  # delta change per +1 vol pt
-            'vomma': vega_raw * d1 * d2 / sigma / 10000.0,      # vega change per +1 vol pt
-            'charm': delta_next - delta,                      # delta change per calendar day
-            'iv': sigma * 100.0,
-        }
-    except Exception:
-        return None
 
 def main():
     dhan = get_dhan_client()
@@ -119,300 +50,152 @@ def main():
 
     helper = DhanHelper(dhan)
 
-    # 1. Fetch live positions
+    # 1. Live positions
     pos_df = helper.get_positions()
     if pos_df is None or pos_df.empty:
-        print(json.dumps({
-            'has_positions': False,
-            'net_delta': 0.0,
-            'net_lot_delta': 0.0,
-            'legs': [],
-            'timestamp': datetime.now(timezone.utc).isoformat()
-        }))
+        print(json.dumps(_empty()))
         return
 
-    # 2. Filter to open option positions (NSE_FNO segment and non-zero quantity)
+    # 2. Open NSE F&O option legs
     opt_rows = []
     for _, row in pos_df.iterrows():
         seg = str(row.get('exchangeSegment', '') or '')
         opt_type = str(row.get('drvOptionType', '') or '')
         sym = str(row.get('tradingSymbol', '') or '')
         qty = int(row.get('netQty', 0) or 0)
-        is_opt = seg == 'NSE_FNO' and (
-            opt_type in ('CALL', 'PUT') or bool(re.search(r'-(CE|PE)', sym, re.I))
-        )
+        is_opt = seg == 'NSE_FNO' and (opt_type in ('CALL', 'PUT') or bool(re.search(r'-(CE|PE)', sym, re.I)))
         if is_opt and qty != 0:
             opt_rows.append(row)
 
     if not opt_rows:
-        print(json.dumps({
-            'has_positions': False,
-            'net_delta': 0.0,
-            'net_lot_delta': 0.0,
-            'legs': [],
-            'timestamp': datetime.now(timezone.utc).isoformat()
-        }))
+        print(json.dumps(_empty()))
         return
 
-    # Fetch live VIX as a fallback for option IV
-    vix = 15.0
-    try:
-        vix_ltp = helper.get_ltp('INDIAVIX', exchange='IDX_I', instrument='INDEX')
-        if vix_ltp and vix_ltp > 0:
-            vix = float(vix_ltp)
-    except Exception:
-        pass
-
-    # 3. Resolve security details from master list for each leg
-    legs_data = []
-    # Store unique combinations of (underlying, expiry) to fetch chains
+    # 3. Contract details from the master list
+    legs = []
     chains_to_fetch = set()
-
     for row in opt_rows:
         sid = str(row.get('securityId', '') or '')
         qty = int(row.get('netQty', 0) or 0)
         sym = str(row.get('tradingSymbol', '') or '')
-        ltp = float(row.get('lastPrice', 0) or row.get('buyAvgPx', 0) or 0)
-        entry_price = float(row.get('costPrice', 0) or 0)
-        pnl = float(row.get('unrealizedProfit', 0) or 0)
-        side = 'SELL' if qty < 0 else 'BUY'
-
-        # Look up security details
-        sec_info = helper.get_security_id(symbol=sid, quiet=True)
-        if not sec_info:
-            # Simple parsing fallback if security ID not resolved (highly unlikely)
-            underlying = "NIFTY"
-            expiry = datetime.now().strftime("%Y-%m-%d")
-            strike = 24000.0
-            opt_type = "CE"
-            # Ask the library rather than carry a literal: delta exposure scales
-            # linearly with the lot size, and this file's old default of 50 has
-            # been wrong since the contract was revised (75, now 65).
-            lot_size = helper.get_lot_size(underlying) or 0
-            display_name = sym
-        else:
-            underlying = sec_info.get('UNDERLYING_SYMBOL', 'NIFTY')
-            expiry = sec_info.get('SM_EXPIRY_DATE')
-            strike = float(sec_info.get('STRIKE_PRICE') or 0.0)
-            opt_type = sec_info.get('OPTION_TYPE', 'CE')
-            lot_size = int(sec_info.get('LOT_SIZE') or 0) or (helper.get_lot_size(underlying) or 0)
-            display_name = sec_info.get('DISPLAY_NAME', sym)
-
-        legs_data.append({
+        sec = helper.get_security_id(symbol=sid, quiet=True)
+        if not sec:
+            # Unresolvable contract: skip rather than invent strike/expiry. The page shows fewer legs, not wrong ones.
+            print(f"WARN: security {sid} ({sym}) not in master list; skipped", file=sys.stderr)
+            continue
+        underlying = sec.get('UNDERLYING_SYMBOL', 'NIFTY')
+        expiry = sec.get('SM_EXPIRY_DATE')
+        legs.append({
             'securityId': sid,
             'symbol': sym,
-            'displayName': display_name,
+            'displayName': sec.get('DISPLAY_NAME', sym),
             'underlying': underlying,
             'expiry': expiry,
-            'strike': strike,
-            'type': opt_type,
-            'side': side,
+            'strike': _num(sec.get('STRIKE_PRICE')),
+            'type': sec.get('OPTION_TYPE', 'CE'),
+            'side': 'SELL' if qty < 0 else 'BUY',
             'netQty': qty,
-            'ltp': round(ltp, 2),
-            'entryPrice': round(entry_price, 2),
-            'pnl': round(pnl, 2),
-            'lotSize': lot_size,
+            'lotSize': int(sec.get('LOT_SIZE') or 0) or (helper.get_lot_size(underlying) or 0),
+            'ltp': 0.0,
+            'entryPrice': round(_num(row.get('costPrice')), 2),
+            'pnl': round(_num(row.get('unrealizedProfit')), 2),
         })
-
         if underlying and expiry:
             chains_to_fetch.add((underlying, expiry))
 
-    # 4. Fetch option chains for all unique (underlying, expiry) groups
-    chains_cache = {}
-    spots_cache = {}
-
+    # 4. One option chain per (underlying, expiry)
+    chains, chain_spots = {}, {}
     for under, exp in chains_to_fetch:
         try:
             chain = helper.get_option_chain(under, exp)
             if chain:
-                chains_cache[(under, exp)] = chain.get('oc', {})
-                spots_cache[(under, exp)] = chain.get('spot', 0.0)
+                chains[(under, exp)] = chain.get('oc', {}) or {}
+                chain_spots[(under, exp)] = _num(chain.get('spot'))
         except Exception as e:
-            print(f"WARN: Failed to fetch option chain for {under} {exp}: {e}", file=sys.stderr)
+            print(f"WARN: option chain failed for {under} {exp}: {e}", file=sys.stderr)
 
-    # 5. Compute delta for each leg and sum them
-    total_net_delta = 0.0
-    total_net_lot_delta = 0.0
-    net_greeks = {'gamma': 0.0, 'vega': 0.0, 'theta': 0.0}  # lot-weighted
-    net_greeks_units = {'gamma': 0.0, 'vega': 0.0, 'theta': 0.0}
-    # Broker Position Analyzer 'Decimals' basis: each leg counts as ONE lot (sign only).
-    one_lot = {'delta': 0.0, 'gamma': 0.0, 'vega': 0.0, 'theta': 0.0}
-
-    today_date = date.today()
-
-    # Nearest futures per underlying = the forward the broker prices options off
-    futs_cache = {}
-    for under in {l['underlying'] for l in legs_data}:
+    # 5. Nearest future per underlying = the Black-76 forward
+    futs = {}
+    for under in {l['underlying'] for l in legs}:
         try:
             f = helper.find_future(under)
-            fexp = datetime.strptime(f['SM_EXPIRY_DATE'], "%Y-%m-%d").date()
-            fpx = float(helper.get_future_ltp(under, f['SM_EXPIRY_DATE']) or 0.0)
-            if fpx > 0:
-                futs_cache[under] = {'price': fpx, 'T': time_to_expiry_years(f['SM_EXPIRY_DATE'])}
+            price = _num(helper.get_future_ltp(under, f['SM_EXPIRY_DATE']))
+            if price > 0:
+                futs[under] = {'price': price, 'expiry': f['SM_EXPIRY_DATE']}
         except Exception as e:
-            print(f"WARN: no futures forward for {under}: {e}", file=sys.stderr)
+            print(f"WARN: no future for {under}: {e}", file=sys.stderr)
 
-    under_spot, spot_src = {}, {}
-    for leg in legs_data:
-        under = leg['underlying']
-        exp = leg['expiry']
-        strike_val = leg['strike']
-        opt_type = leg['type']
-        qty = leg['netQty']
-        lot_size = leg['lotSize']
+    # 6. One spot per underlying (chain spot -> index quote, one retry past the ~1 req/s limit -> 0)
+    spots = {}
 
-        delta = 0.0
-        iv = vix
-        spot = under_spot.get(under)
-        if spot is None:
-            # One spot per underlying keeps every leg of the book on the same level:
-            # chain spot, else the index quote (one retry past the 1 req/s limit), else futures.
-            spot = next((v for (u, _e), v in spots_cache.items() if u == under and v and v > 0), 0.0)
-            for attempt in range(2):
-                if spot > 0:
+    def spot_for(under):
+        if under in spots:
+            return spots[under]
+        spot = next((v for (u, _e), v in chain_spots.items() if u == under and v > 0), 0.0)
+        for attempt in range(2):
+            if spot > 0:
+                break
+            try:
+                spot = _num(helper.get_ltp(under, exchange='IDX_I', instrument='INDEX'))
+            except Exception:
+                spot = 0.0
+            if spot <= 0 and attempt == 0:
+                time.sleep(1.2)
+        spots[under] = spot
+        return spot
+
+    # 7. Attach per-leg market data
+    for leg in legs:
+        under, exp, strike = leg['underlying'], leg['expiry'], leg['strike']
+        oc = chains.get((under, exp), {})
+        side_key = leg['type'].lower()
+
+        entry = None
+        for k, v in oc.items():
+            try:
+                if abs(float(k) - strike) < 0.1:
+                    entry = (v or {}).get(side_key) or {}
                     break
-                try:
-                    spot = float(helper.get_ltp(under, exchange='IDX_I', instrument='INDEX') or 0.0)
-                except Exception:
-                    spot = 0.0
-                if spot <= 0 and attempt == 0:
-                    time.sleep(1.2)
-            if spot <= 0 and futs_cache.get(under):
-                spot = futs_cache[under]['price'] * math.exp(-RISK_FREE_RATE * futs_cache[under]['T'])
-                spot_src[under] = 'futures'
-            under_spot[under] = spot
-        if spot_src.get(under):
-            leg['spotSource'] = spot_src[under]
+            except ValueError:
+                continue
 
-        leg['spot'] = round(spot, 2)
+        if entry:
+            leg['ltp'] = round(_num(entry.get('last_price')), 2)
+            g = entry.get('greeks') or {}
+            leg['chainGreeks'] = {
+                'delta': _num(g.get('delta')), 'gamma': _num(g.get('gamma')),
+                'theta': _num(g.get('theta')), 'vega': _num(g.get('vega')),
+                'iv': _num(entry.get('implied_volatility')),
+            }
+        if not leg['ltp']:
+            try:
+                leg['ltp'] = round(_num(helper.get_ltp(leg['securityId'], exchange='NSE_FNO', instrument='OPTIDX')), 2)
+            except Exception:
+                pass
 
-        oc = chains_cache.get((under, exp), {})
-
-        # ATM implied vol of this leg's expiry (SD bands use ATM IV, not VIX and not the leg's own strike IV)
+        # ATM IV of this expiry (SD bands use ATM IV, never VIX and never the leg's own strike IV)
         try:
-            atm_k = min((k for k in oc if float(k) > 0), key=lambda k: abs(float(k) - spot), default=None)
+            spot_ref = spot_for(under)
+            atm_k = min((k for k in oc if float(k) > 0), key=lambda k: abs(float(k) - spot_ref), default=None)
             if atm_k is not None:
-                ivs = [float((oc[atm_k].get(side) or {}).get('implied_volatility') or 0.0) for side in ('ce', 'pe')]
+                ivs = [_num((oc[atm_k].get(s) or {}).get('implied_volatility')) for s in ('ce', 'pe')]
                 ivs = [v for v in ivs if v > 0]
                 if ivs:
                     leg['atmIv'] = round(sum(ivs) / len(ivs), 3)
         except Exception:
             pass
-        
-        # Look up strike in option chain
-        matched_strike_data = None
-        # Try exact numeric matching
-        for oc_strike, strike_entry in oc.items():
-            try:
-                if abs(float(oc_strike) - strike_val) < 0.1:
-                    matched_strike_data = strike_entry
-                    break
-            except ValueError:
-                continue
 
-        if matched_strike_data:
-            side_entry = matched_strike_data.get(opt_type.lower(), {})
-            delta = float(side_entry.get('greeks', {}).get('delta') or 0.0)
-            iv = float(side_entry.get('implied_volatility') or side_entry.get('greeks', {}).get('iv') or 0.0)
-            # Dhan's positions payload carries no lastPrice, so leg LTP starts at 0.
-            if not leg['ltp']:
-                leg['ltp'] = round(float(side_entry.get('last_price') or 0.0), 2)
-
-        if not leg['ltp']:
-            try:
-                leg['ltp'] = round(float(helper.get_ltp(
-                    leg['securityId'], exchange='NSE_FNO', instrument='OPTIDX') or 0.0), 2)
-            except Exception:
-                pass
-
-        # Prefer a delta solved from the live premium on the futures (matches the
-        # broker's Position Analyzer); keep the chain delta if that can't be solved.
-        try:
-            exp_dt = datetime.strptime(exp, "%Y-%m-%d").date()
-            T_leg = time_to_expiry_years(exp)
-            fut = futs_cache.get(under)
-            if fut and leg['ltp'] > 0:
-                F = fut['price'] * math.exp(-RISK_FREE_RATE * (fut['T'] - T_leg))
-            else:
-                F = spot * math.exp(RISK_FREE_RATE * T_leg) if spot > 0 else 0.0
-            g76 = b76_greeks_from_price(F, strike_val, T_leg, RISK_FREE_RATE, leg['ltp'], opt_type)
-            if g76 is not None:
-                delta = g76['delta']
-                leg['gamma'] = g76['gamma']
-                leg['vega'] = g76['vega']
-                leg['theta'] = g76['theta']
-                for gk in ('rho', 'vanna', 'vomma', 'charm', 'iv'):
-                    leg[gk] = g76[gk]
-                leg['forward'] = round(F, 2)
-                leg['tYears'] = T_leg
-                leg['greeksSource'] = 'black76'
-        except Exception as e76:
-            print(f"WARN: Black-76 delta failed for {leg['symbol']}: {e76}", file=sys.stderr)
-
-        if 'gamma' not in leg and matched_strike_data:
-            cg = matched_strike_data.get(opt_type.lower(), {}).get('greeks', {}) or {}
-            for gk in ('gamma', 'vega', 'theta'):
-                leg[gk] = float(cg.get(gk) or 0.0)
-            leg['iv'] = iv
-            leg['forward'] = round(spot, 2)
-            leg['tYears'] = time_to_expiry_years(exp)
-            leg['greeksSource'] = 'chain'
-
-        # 6. Apply Black-Scholes fallback if delta is 0 but we have a valid spot price
-        if delta == 0.0 and spot > 0:
-            try:
-                exp_dt = datetime.strptime(exp, "%Y-%m-%d").date()
-                days_diff = (exp_dt - today_date).days
-                T = time_to_expiry_years(exp)
-                delta = bs_delta(
-                    S=spot,
-                    K=strike_val,
-                    T=T,
-                    r=RISK_FREE_RATE,
-                    sigma_pct=iv if iv > 0 else vix,
-                    opt_type=opt_type
-                )
-            except Exception as bs_err:
-                print(f"WARN: BS calculation failed for {leg['symbol']}: {bs_err}", file=sys.stderr)
-
-        # For CE, delta is positive (0 to 1). For PE, delta is negative (-1 to 0).
-        # Double check signs: CE buying increases delta (+), PE buying decreases delta (-)
-        # Selling options has the opposite effect: short CE delta is negative, short PE delta is positive
-        # positionDelta = netQty * delta
-        position_delta = qty * delta
-        lot_delta = (qty / lot_size) * delta
-
-        leg['delta'] = round(delta, 4)
-        leg['positionDelta'] = round(position_delta, 2)
-        leg['lotDelta'] = round(lot_delta, 4)
-
-        for gk in ('gamma', 'vega', 'theta'):
-            leg[gk] = round(float(leg.get(gk) or 0.0), 6)
-            net_greeks[gk] += (qty / lot_size) * leg[gk]
-            net_greeks_units[gk] += qty * leg[gk]
-
-        sgn = 1 if qty > 0 else -1
-        one_lot['delta'] += sgn * delta
-        for gk in ('gamma', 'vega', 'theta'):
-            one_lot[gk] += sgn * leg[gk]
-
-        total_net_delta += position_delta
-        total_net_lot_delta += lot_delta
+        leg['spot'] = round(spot_for(under), 2)
+        if under in futs:
+            leg['futPrice'] = futs[under]['price']
+            leg['futExpiry'] = futs[under]['expiry']
 
     print(json.dumps({
-        'has_positions': True,
-        'net_delta': round(total_net_delta, 2),
-        'net_lot_delta': round(total_net_lot_delta, 2),
-        'net_gamma': round(net_greeks['gamma'], 5),
-        'net_vega': round(net_greeks['vega'], 3),
-        'net_theta': round(net_greeks['theta'], 3),
-        'net_gamma_units': round(net_greeks_units['gamma'], 4),
-        'net_vega_units': round(net_greeks_units['vega'], 2),
-        'net_theta_units': round(net_greeks_units['theta'], 2),
-        'broker_basis': {k: round(v, 6) for k, v in one_lot.items()},
-        'legs': legs_data,
-        'timestamp': datetime.now(timezone.utc).isoformat()
+        'has_positions': bool(legs),
+        'legs': legs,
+        'timestamp': datetime.now(timezone.utc).isoformat(),
     }))
+
 
 if __name__ == '__main__':
     try:

@@ -1,3 +1,4 @@
+import { computeBsGreeksExact, riskNeutralProbAbove, RISK_FREE_RATE } from './optionsPricing.ts';
 import type {
   StrategyType,
   UnderlyingType,
@@ -130,28 +131,11 @@ export function estimatePopAndDelta(
     return { delta: otm ? 0.2 : 0.8, popOtm: otm ? 80 : 20 };
   }
 
-  const d1 = (Math.log(spot / strike) + (0.065 + 0.5 * iv * iv) * t) / sigmaRootT;
-  const d2 = d1 - sigmaRootT;
-
-  const normalCdf = (x: number) => {
-    const a1 = 0.254829592, a2 = -0.284496736, a3 = 1.421413741, a4 = -1.453152027, a5 = 1.061405429;
-    const p = 0.3275911;
-    const sign = x < 0 ? -1 : 1;
-    const z = Math.abs(x) / Math.SQRT2;
-    const tVal = 1.0 / (1.0 + p * z);
-    const y = 1.0 - (((((a5 * tVal + a4) * tVal) + a3) * tVal + a2) * tVal + a1) * tVal * Math.exp(-z * z);
-    return 0.5 * (1.0 + sign * y);
-  };
-
-  if (isCall) {
-    const delta = normalCdf(d1);
-    const popOtm = (1 - normalCdf(d2)) * 100;
-    return { delta, popOtm: Math.min(99, Math.max(1, popOtm)) };
-  } else {
-    const delta = normalCdf(d1) - 1;
-    const popOtm = normalCdf(d2) * 100;
-    return { delta, popOtm: Math.min(99, Math.max(1, popOtm)) };
-  }
+  // Spot Black-Scholes through the shared library (delta = N(d1) / N(d1)-1; P(finish OTM) from the same N(d2) the price uses).
+  const delta = computeBsGreeksExact(isCall ? 'CE' : 'PE', spot, strike, t, iv, RISK_FREE_RATE, false).delta;
+  const probAbove = riskNeutralProbAbove(spot, strike, t, iv, RISK_FREE_RATE); // P(S_T > K)
+  const popOtm = (isCall ? 1 - probAbove : probAbove) * 100;
+  return { delta, popOtm: Math.min(99, Math.max(1, popOtm)) };
 }
 
 /**

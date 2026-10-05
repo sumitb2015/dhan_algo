@@ -2,9 +2,10 @@
 // store into an archive — kept apart from multiLegFocusStore.ts (which does
 // the file I/O) so `node --test` can exercise them.
 
-import { legPnl, type MultiLegBasket } from './multiLegFocus.ts';
+import { legCountsToday, legPnl, type MultiLegBasket, type MultiLegLeg } from './multiLegFocus.ts';
 
-export type ArchivedBasket = MultiLegBasket & { archivedAt: string };
+/** `retiredFrom` marks a history record split off a still-live basket (see splitEarlierDayLegs). */
+export type ArchivedBasket = MultiLegBasket & { archivedAt: string; retiredFrom?: string };
 
 export function istDateOf(iso: string): string {
   return new Date(iso).toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
@@ -68,4 +69,49 @@ export function summarizeArchived(b: MultiLegBasket): ArchiveSummary {
     realized += legPnl(l, 0, mult);
   }
   return { closedAt: closedAt || Date.parse(b.updatedAt), realized, unpricedLegs };
+}
+
+/** Archive id of the history record that holds a live basket's earlier-day closed legs. */
+export function historyIdFor(basketId: string): string {
+  return `${basketId}__history`;
+}
+
+/**
+ * A live basket accumulates every roll and adjustment, so after a conversion
+ * (iron condor -> short straddle) its row would keep the old structure's legs
+ * and their P&L. Legs closed on an EARLIER IST day are split out; legs closed
+ * today stay (they are today's P&L, the conversion itself). Only baskets that
+ * still have a non-closed leg are split — a fully closed one retires whole via
+ * splitStaleClosed. A CLOSED leg without `closedAt` counts as earlier-day,
+ * the same rule as legCountsToday.
+ */
+export function splitEarlierDayLegs(
+  basket: MultiLegBasket,
+  now: number = Date.now(),
+): { keep: MultiLegBasket; retired: MultiLegLeg[] } {
+  const live = basket.legs.some(l => l.status !== 'CLOSED');
+  if (!live) return { keep: basket, retired: [] };
+  const retired = basket.legs.filter(l => l.status === 'CLOSED' && !legCountsToday(l, now));
+  if (retired.length === 0) return { keep: basket, retired };
+  const gone = new Set(retired.map(l => l.id));
+  return { keep: { ...basket, legs: basket.legs.filter(l => !gone.has(l.id)) }, retired };
+}
+
+/** Folds newly retired legs into the basket's history record (created on first use), idempotent by leg id. */
+export function mergeHistoryRecord(
+  existing: ArchivedBasket | undefined,
+  source: MultiLegBasket,
+  retired: MultiLegLeg[],
+  nowIso: string,
+): ArchivedBasket {
+  const have = new Set((existing?.legs ?? []).map(l => l.id));
+  const legs = [...(existing?.legs ?? []), ...retired.filter(l => !have.has(l.id))];
+  return {
+    ...(existing ?? source),
+    id: historyIdFor(source.id),
+    name: `${source.name ?? 'Strategy'} (earlier legs)`,
+    retiredFrom: source.id,
+    legs,
+    archivedAt: nowIso,
+  };
 }
