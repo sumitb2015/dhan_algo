@@ -894,7 +894,7 @@ class NiftyAdvancedImbalance:
         for side in SIDES:
             if self._leg_get(side, "active") and detect_phantom_leg_broker(
                 self.broker, self._leg_get(side, "strike"), self.expiry, side,
-                self._leg_get(side, "lots") * self.nifty_lot_size, "BUY", logger,
+                self._leg_get(side, "lots") * self.nifty_lot_size, "BUY", logger, dry_run=self.dry_run,
             ):
                 logger.warning(f"Phantom {side} leg detected ({self._leg_get(side, 'strike')}) — broker shows it "
                                f"already closed elsewhere. Correcting internal state, not placing an order.")

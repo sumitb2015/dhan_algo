@@ -644,7 +644,12 @@ class NiftyFlyagonal:
     def _check_phantom_legs(self) -> None:
         """Victim-side check (2026-07-30 incident follow-up): notice if a sibling
         instance's exit or a manual dashboard square-off already flattened a leg
-        we still think is open. Never places an order — only corrects state."""
+        we still think is open. Never places an order — only corrects state.
+
+        Not in a paper run: the paper book is not at the broker, so every leg would look "already closed elsewhere" and the first monitor
+        tick would wipe the whole position."""
+        if self.dry_run:
+            return
         if time.time() - self._last_phantom_check < PHANTOM_CHECK_INTERVAL_SEC:
             return
         self._last_phantom_check = time.time()

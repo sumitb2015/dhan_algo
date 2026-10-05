@@ -592,7 +592,7 @@ class NiftyDeltaStrangle:
                 leg = self.legs.get(side)
                 if leg and leg.get("strike") and detect_phantom_leg_broker(
                     self.broker, leg["strike"], self.expiry, side.upper(),
-                    self.lots * self.lot_size, "BUY", logger,
+                    self.lots * self.lot_size, "BUY", logger, dry_run=self.dry_run,
                 ):
                     logger.warning(f"Phantom {side.upper()} leg detected ({leg['strike']}) — broker shows it "
                                    f"already closed elsewhere. Correcting internal state, not placing an order.")

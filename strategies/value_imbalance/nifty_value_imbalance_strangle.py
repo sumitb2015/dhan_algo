@@ -698,14 +698,14 @@ class ValueImbalanceStrangle:
                     last_phantom_check = time.time()
                     if self.ce_id and self.ce_lots > 0 and detect_phantom_leg_broker(
                         self.broker, self.ce_strike, self.expiry, "CE",
-                        self.ce_lots * self.nifty_lot_size, "BUY", logger,
+                        self.ce_lots * self.nifty_lot_size, "BUY", logger, dry_run=self.dry_run,
                     ):
                         logger.warning(f"Phantom CE leg detected ({self.ce_strike}) — broker shows it "
                                        f"already closed elsewhere. Correcting internal state, not placing an order.")
                         self.ce_lots = 0
                     if self.pe_id and self.pe_lots > 0 and detect_phantom_leg_broker(
                         self.broker, self.pe_strike, self.expiry, "PE",
-                        self.pe_lots * self.nifty_lot_size, "BUY", logger,
+                        self.pe_lots * self.nifty_lot_size, "BUY", logger, dry_run=self.dry_run,
                     ):
                         logger.warning(f"Phantom PE leg detected ({self.pe_strike}) — broker shows it "
                                        f"already closed elsewhere. Correcting internal state, not placing an order.")

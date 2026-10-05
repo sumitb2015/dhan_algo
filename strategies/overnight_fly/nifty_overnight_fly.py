@@ -789,7 +789,7 @@ class NiftyOvernightFly:
                 ):
                     leg = getattr(self, attr)
                     if leg and detect_phantom_leg_broker(
-                        self.broker, leg["strike"], self.expiry, opt_type, leg["qty"], side, logger,
+                        self.broker, leg["strike"], self.expiry, opt_type, leg["qty"], side, logger, dry_run=self.dry_run,
                     ):
                         logger.warning(f"Phantom {attr} leg detected ({leg['strike']}) — broker shows it "
                                        f"already closed elsewhere. Correcting internal state, not placing an order.")

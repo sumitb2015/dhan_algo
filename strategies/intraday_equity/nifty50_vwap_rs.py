@@ -707,7 +707,7 @@ class IntradayEquityStrategy:
         (`_finalize`) that branch already takes — no new order is placed."""
         for pos in list(self.positions.values()):
             if detect_phantom_leg(self.helper, pos.security_id, pos.qty,
-                                   "SELL" if pos.side == "LONG" else "BUY", logger):
+                                   "SELL" if pos.side == "LONG" else "BUY", logger, dry_run=self.dry_run):
                 ltp = self.ltps.get(pos.symbol, pos.entry_price)
                 self.event("WARN", "PHANTOM", f"broker shows {pos.symbol} already closed elsewhere "
                                                f"— correcting internal state, not placing an order", pos.symbol)

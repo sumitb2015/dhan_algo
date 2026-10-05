@@ -632,7 +632,7 @@ class NiftyOIDirectional:
                     opt_type = "PE" if "PE" in self.position_type else "CE"
                     if detect_phantom_leg_broker(
                         self.broker, self.sold_strike, self.expiry, opt_type,
-                        self.lots * self.lot_size, "BUY", logger,
+                        self.lots * self.lot_size, "BUY", logger, dry_run=self.dry_run,
                     ):
                         logger.warning(f"Phantom {self.position_type} leg detected ({self.sold_strike}) — broker "
                                        f"shows it already closed elsewhere. Correcting internal state, not placing an order.")

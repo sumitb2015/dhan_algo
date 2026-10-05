@@ -6,6 +6,7 @@ execution (Task 1 onward).
 Run: venv\\Scripts\\python.exe -m pytest tests/test_strategy_risk.py -v
 """
 import os
+import types
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -94,6 +95,17 @@ def test_not_phantom_when_broker_still_shows_leg_open():
 def test_not_phantom_when_broker_shows_more_than_our_qty():
     helper = FakeHelper(net_qty=-260)  # sibling's leg is still there too — ours is fine
     assert detect_phantom_leg(helper, "12345", own_qty=130, side="BUY") is False
+
+
+def test_phantom_check_never_fires_in_a_paper_run():
+    """A paper run's legs are not at the broker, so the broker shows every one flat. Without dry_run the first check would wipe the whole
+    paper position as 'closed elsewhere' (flyagonal's paper stop/target tests caught this)."""
+    helper = FakeHelper(net_qty=0)
+    assert detect_phantom_leg(helper, "12345", own_qty=130, side="BUY") is True            # live: genuinely phantom
+    assert detect_phantom_leg(helper, "12345", own_qty=130, side="BUY", dry_run=True) is False
+    broker = types.SimpleNamespace(get_owned_net_qty=lambda strike, expiry, opt_type: 0)
+    assert detect_phantom_leg_broker(broker, 24000, "2026-10-27", "CE", 130, "BUY") is True
+    assert detect_phantom_leg_broker(broker, 24000, "2026-10-27", "CE", 130, "BUY", dry_run=True) is False
 
 
 def test_phantom_check_is_a_noop_when_own_qty_already_zero():

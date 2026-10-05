@@ -834,13 +834,13 @@ class NiftyVWAP1MinStraddle:
                     last_phantom_check = time.time()
                     qty = self.lots * self.lot_size
                     if not self.ce_closed and detect_phantom_leg_broker(
-                        self.broker, self.ce_strike, self.expiry, "CE", qty, "BUY", logger,
+                        self.broker, self.ce_strike, self.expiry, "CE", qty, "BUY", logger, dry_run=self.dry_run,
                     ):
                         logger.warning(f"Phantom CE leg detected ({self.ce_strike}) — broker shows it "
                                        f"already closed elsewhere. Correcting internal state, not placing an order.")
                         self.ce_closed = True
                     if not self.pe_closed and detect_phantom_leg_broker(
-                        self.broker, self.pe_strike, self.expiry, "PE", qty, "BUY", logger,
+                        self.broker, self.pe_strike, self.expiry, "PE", qty, "BUY", logger, dry_run=self.dry_run,
                     ):
                         logger.warning(f"Phantom PE leg detected ({self.pe_strike}) — broker shows it "
                                        f"already closed elsewhere. Correcting internal state, not placing an order.")

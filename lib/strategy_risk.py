@@ -133,7 +133,7 @@ def resolve_exit_qty_broker(broker, strike, expiry, opt_type, own_qty, side, log
     return qty, net_qty
 
 
-def detect_phantom_leg(helper, security_id, own_qty, side, log=None):
+def detect_phantom_leg(helper, security_id, own_qty, side, log=None, dry_run=False):
     """True if this strategy still believes it holds `own_qty` of `security_id` but
     the broker no longer shows it available in `side`'s direction — i.e. the leg was
     closed elsewhere (a sibling instance's exit or a manual dashboard square-off) and
@@ -145,8 +145,13 @@ def detect_phantom_leg(helper, security_id, own_qty, side, log=None):
     True result is only to correct its own state (mark the leg inactive, zero its
     tracked qty) so downstream logic already gated on that flag stops acting on a
     position that no longer exists.
+
+    ``dry_run=True`` always returns False: a paper run's legs are not at the broker, so the broker would show every one of them flat
+    and the first check would wipe the whole paper position as "closed elsewhere".
     """
     _log = log or logger
+    if dry_run:
+        return False
     if int(own_qty or 0) <= 0:
         return False
     side = str(side).upper()
@@ -162,10 +167,12 @@ def detect_phantom_leg(helper, security_id, own_qty, side, log=None):
     return available <= 0
 
 
-def detect_phantom_leg_broker(broker, strike, expiry, opt_type, own_qty, side, log=None):
+def detect_phantom_leg_broker(broker, strike, expiry, opt_type, own_qty, side, log=None, dry_run=False):
     """Like detect_phantom_leg(), sourced from an ExecutionBroker instead of
-    DhanHelper — for strategies wired for broker-selectable execution."""
+    DhanHelper — for strategies wired for broker-selectable execution. ``dry_run=True`` always returns False (see detect_phantom_leg)."""
     _log = log or logger
+    if dry_run:
+        return False
     if int(own_qty or 0) <= 0:
         return False
     side = str(side).upper()
