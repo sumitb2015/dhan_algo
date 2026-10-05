@@ -169,12 +169,14 @@ export function computeBsGreeks(
 
   if (isFutures) {
     // Black-76 Model (standard for NSE/BSE options that hedge against futures basis)
+    // Delta is the derivative with respect to the FUTURES price, so it carries e^{-rt}: Δc = e^{-rt}N(d1), Δp = -e^{-rt}N(-d1).
+    // (Some vendors print the undiscounted forward delta N(d1); the difference is ~0.4% at 22 days.)
     if (type === 'CE') {
       price = discount * (F * normCdf(d1) - strike * normCdf(d2));
-      delta = normCdf(d1);
+      delta = discount * normCdf(d1);
     } else {
       price = discount * (strike * normCdf(-d2) - F * normCdf(-d1));
-      delta = normCdf(d1) - 1;
+      delta = -discount * normCdf(-d1);
     }
   } else {
     // Standard Black-Scholes on spot
@@ -188,10 +190,12 @@ export function computeBsGreeks(
   }
 
   // Gamma
-  const gamma = (discount * normPdf(d1)) / (F * v * sqrtT);
+  // The e^{-rt} factor belongs to Black-76 only (discounted forward); plain Black-Scholes on spot has none.
+  const carry = isFutures ? discount : 1;
+  const gamma = (carry * normPdf(d1)) / (F * v * sqrtT);
 
   // Vega (derivative with respect to IV fraction; rupees per share per 1% IV change)
-  const rawVega = F * discount * sqrtT * normPdf(d1);
+  const rawVega = F * carry * sqrtT * normPdf(d1);
   const vegaPerPercent = rawVega * 0.01;
 
   // Theta (decay per day in rupees per share, negative)
@@ -199,19 +203,22 @@ export function computeBsGreeks(
   const term1 = -(F * discount * normPdf(d1) * v) / (2 * sqrtT);
   if (isFutures) {
     if (type === 'CE') {
+      // Black-76: Θ = -F·e^{-rt}·n(d1)·σ/(2√t) + r·C  (the carry term is ADDED; fixed 2026-10-05, was subtracted)
       const term2 = r * discount * (F * normCdf(d1) - strike * normCdf(d2));
-      rawTheta = (term1 - term2) / CALENDAR_DAYS_PER_YEAR;
+      rawTheta = (term1 + term2) / CALENDAR_DAYS_PER_YEAR;
     } else {
       const term2 = r * discount * (strike * normCdf(-d2) - F * normCdf(-d1));
-      rawTheta = (term1 - term2) / CALENDAR_DAYS_PER_YEAR;
+      rawTheta = (term1 + term2) / CALENDAR_DAYS_PER_YEAR;
     }
   } else {
+    // Black-Scholes on spot: the volatility term has NO discount factor (only Black-76's discounted forward does).
+    const spotTerm1 = -(F * normPdf(d1) * v) / (2 * sqrtT);
     if (type === 'CE') {
       const term2 = -r * strike * discount * normCdf(d2);
-      rawTheta = (term1 + term2) / CALENDAR_DAYS_PER_YEAR;
+      rawTheta = (spotTerm1 + term2) / CALENDAR_DAYS_PER_YEAR;
     } else {
       const term2 = r * strike * discount * normCdf(-d2);
-      rawTheta = (term1 + term2) / CALENDAR_DAYS_PER_YEAR;
+      rawTheta = (spotTerm1 + term2) / CALENDAR_DAYS_PER_YEAR;
     }
   }
   const thetaPerDay = rawTheta;
