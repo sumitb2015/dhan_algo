@@ -18,8 +18,6 @@ Product is MARGIN (carry-forward) — this holds ~1 month, never INTRADAY.
 
 import argparse
 import calendar as calendar_mod
-import json
-import logging
 import os
 import sys
 import time
@@ -50,6 +48,9 @@ from lib.strategy_state_helper import (  # noqa: E402
 from lib.strategy_risk import resolve_exit_qty_broker  # noqa: E402
 from lib.execution_broker import ExecutionBroker, ExecutionBrokerError  # noqa: E402
 from lib.telegram_alert import notify  # noqa: E402
+from lib.algo_kit import (  # noqa: E402
+    PositionStore, confirm_order_fill, confirmed_fill_price, setup_strategy_logging,
+)
 
 STRATEGY_KEY_DEFAULT = "nifty_volcano_calendar"   # must match strategyRegistry.ts
 LOG_FOLDER = "volcano_calendar"                   # must match STRATEGY_LOG_DIRS
@@ -58,25 +59,7 @@ PRODUCT = "MARGIN"                                # carry-forward: this holds ~1
 INDEX_ID = "13"                                   # index id for spot; option chain underlying is 26000
 
 debug_dir = os.path.join(project_root, "debug")
-log_dir = os.path.join(debug_dir, "logs", LOG_FOLDER)
-os.makedirs(log_dir, exist_ok=True)
-
-
-class FlushingFileHandler(logging.FileHandler):
-    def emit(self, record):
-        super().emit(record)
-        self.flush()
-
-
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - %(levelname)s - %(message)s",
-    handlers=[
-        FlushingFileHandler(os.path.join(log_dir, f"{datetime.now().strftime('%Y%m%d')}{instance_log_suffix()}.log")),
-        logging.StreamHandler(),
-    ],
-)
-logger = logging.getLogger(__name__)
+logger = setup_strategy_logging(project_root, LOG_FOLDER, instance_log_suffix(), name=__name__)
 
 
 # ── Leg spec: name -> (side, opt_type, expiry_key, lot_multiplier) ──────────────────────────────
@@ -237,45 +220,32 @@ class Strategy:
         return os.path.join(debug_dir, f"{self.state_key}_position.json")
 
     def save_position(self):
-        """Atomic write. A torn file is what could lose a live leg."""
-        data = {
-            "version": 1, "dry_run": self.dry_run, "position_open": self.position_open,
+        """Atomic write (PositionStore). A torn file is what could lose a live leg."""
+        self._position_store().save({
+            "position_open": self.position_open,
             "status": self.status, "entry_month": self.entry_month,
             "near_expiry": self.near_expiry, "far_expiry": self.far_expiry,
             "lots": self.lots, "lot_size": self.lot_size, "legs": self.legs,
             "realized_pnl": self.realized_pnl, "target_rs": self.target_rs, "stop_rs": self.stop_rs,
             "consecutive_stops": self.consecutive_stops,
-            "updated_at": datetime.now().isoformat(timespec="seconds"),
-        }
-        os.makedirs(debug_dir, exist_ok=True)
-        tmp = self.position_path + ".tmp"
-        with open(tmp, "w") as f:
-            json.dump(data, f, indent=2)
-        os.replace(tmp, self.position_path)
+        })
+
+    def _position_store(self) -> PositionStore:
+        return PositionStore(self.position_path, self.dry_run, log=logger)
 
     def load_position(self):
-        path = self.position_path
-        if not os.path.exists(path):
-            logger.info(f"No existing position/cycle memory at {path}; starting flat.")
+        # Raises PositionFileError (process exits non-zero, never trades blind) on an unreadable file,
+        # a paper/live mismatch, or an open LIVE position whose NEAR expiry has passed (the near legs
+        # have settled; an expired PAPER position is discarded, below).
+        data = self._position_store().load(expiry_field="near_expiry")
+        if data is None:
             return
-        try:
-            with open(path) as f:
-                data = json.load(f)
-        except Exception as e:
-            logger.error(f"FATAL: position file {path} is unreadable ({e}). Refusing to trade blind.")
-            raise
         # Cycle memory (entry_month, consecutive_stops) is restored regardless of position_open —
         # it is not money-at-risk, just "did we already try this month".
         self.entry_month = data.get("entry_month")
         self.consecutive_stops = int(data.get("consecutive_stops", 0))
         if not data.get("position_open"):
             return
-        if bool(data.get("dry_run")) != self.dry_run:
-            logger.error(
-                f"FATAL: {path} holds a {'PAPER' if data.get('dry_run') else 'LIVE'} position but this run is "
-                f"{'DRY' if self.dry_run else 'LIVE'}. Move the file aside after checking the broker."
-            )
-            sys.exit(1)
         self.position_open = True
         self.status = data.get("status", "RUNNING")
         self.near_expiry, self.far_expiry = data.get("near_expiry"), data.get("far_expiry")
@@ -326,15 +296,11 @@ class Strategy:
         return (sid, price) if price and price > 0 else (None, 0.0)
 
     def _fill_price(self, order_id, fallback):
-        """wait_for_fill() returns a bool, not a price; read the fill price off the order."""
-        if not order_id or order_id == "PAPER":
+        """wait_for_fill() returns a bool, not a price; the kit reads the fill price off the order.
+        Dhan order ids only: another broker's id is unknown to the Dhan helper, so use the LTP."""
+        if self.broker_name != "dhan":
             return fallback
-        if self.helper.wait_for_fill(order_id, timeout=5):
-            o = self.helper.get_order_by_id(order_id) or {}
-            px = float(o.get("averageTradedPrice", 0.0) or o.get("avgFilledPrice", 0.0) or o.get("price", 0.0))
-            if px > 0:
-                return px
-        return fallback
+        return confirmed_fill_price(self.helper, order_id, fallback, log=logger, raise_errors=True)
 
     def _ltp(self, leg):
         return self.helper.get_ltp(str(leg["id"]), exchange="NSE_FNO", instrument="OPTIDX")
@@ -357,8 +323,8 @@ class Strategy:
             return True, ltp
         close_side = "SELL" if leg["side"] == "BUY" else "BUY"
         try:
-            qty, _ = resolve_exit_qty_broker(self.broker, leg["strike"], leg["expiry"], leg["opt_type"],
-                                              leg["qty"], close_side, logger)
+            qty, net_before = resolve_exit_qty_broker(self.broker, leg["strike"], leg["expiry"], leg["opt_type"],
+                                                      leg["qty"], close_side, logger)
             if qty <= 0:
                 return True, ltp                     # broker already flat: nothing to close
             fn = self.broker.sell if close_side == "SELL" else self.broker.buy
@@ -366,7 +332,13 @@ class Strategy:
             if not oid:
                 logger.critical(f"{name} {leg['opt_type']} {leg['strike']} close order FAILED; leg stays tracked.")
                 return False, ltp
-            if not self.helper.wait_for_fill(oid, timeout=5):
+            # Broker-aware: Dhan order status, or the broker's own net position for Zerodha/Kotak. The
+            # Dhan helper cannot confirm another broker's order id, so a bare wait_for_fill() here
+            # reported every non-Dhan close as unconfirmed and the strategy never reached flat.
+            signed = qty if close_side == "BUY" else -qty
+            if not confirm_order_fill(self.helper, self.broker, self.broker_name, oid, leg["strike"],
+                                      leg["expiry"], leg["opt_type"], signed, net_before,
+                                      timeout=5, sleep=time.sleep, clock=time.time, log=logger):
                 logger.critical(f"{name} {leg['opt_type']} {leg['strike']} close NOT confirmed; leg stays tracked.")
                 return False, ltp
             return True, self._fill_price(oid, ltp)

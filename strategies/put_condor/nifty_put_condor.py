@@ -16,7 +16,6 @@ Product is MARGIN (carry-forward) — this holds ~1 month, never INTRADAY.
 """
 
 import argparse
-import json
 import logging
 import math
 import os
@@ -48,6 +47,9 @@ from lib.strategy_state_helper import (  # noqa: E402
 from lib.strategy_risk import resolve_exit_qty_broker  # noqa: E402
 from lib.execution_broker import ExecutionBroker, ExecutionBrokerError  # noqa: E402
 from lib.telegram_alert import notify  # noqa: E402
+from lib.algo_kit import (  # noqa: E402
+    PositionStore, confirm_order_fill, read_order_fill_price, setup_strategy_logging,
+)  # noqa: E402
 
 STRATEGY_KEY_DEFAULT = "nifty_put_condor"   # must match strategyRegistry.ts
 LOG_FOLDER = "put_condor"                   # must match STRATEGY_LOG_DIRS
@@ -58,25 +60,7 @@ MAX_ENTRY_ATTEMPTS = 3                      # per cycle, only for attempts where
 CONFIRM_TIMEOUT_SEC = 15
 
 debug_dir = os.path.join(project_root, "debug")
-log_dir = os.path.join(debug_dir, "logs", LOG_FOLDER)
-os.makedirs(log_dir, exist_ok=True)
-
-
-class FlushingFileHandler(logging.FileHandler):
-    def emit(self, record):
-        super().emit(record)
-        self.flush()
-
-
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - %(levelname)s - %(message)s",
-    handlers=[
-        FlushingFileHandler(os.path.join(log_dir, f"{datetime.now().strftime('%Y%m%d')}{instance_log_suffix()}.log")),
-        logging.StreamHandler(),
-    ],
-)
-logger = logging.getLogger(__name__)
+logger = setup_strategy_logging(project_root, LOG_FOLDER, instance_log_suffix(), name=__name__)
 
 
 LEG_SPECS = {
@@ -242,9 +226,13 @@ class Strategy:
     def position_path(self) -> str:
         return os.path.join(debug_dir, f"{self.state_key}_position.json")
 
+    def _position_store(self) -> PositionStore:
+        return PositionStore(self.position_path, self.dry_run, log=logger, version=2)
+
     def save_position(self):
-        data = {
-            "version": 2, "dry_run": self.dry_run, "position_open": self.position_open,
+        """Atomic write (PositionStore)."""
+        self._position_store().save({
+            "position_open": self.position_open,
             "status": self.status, "expiry": self.expiry, "last_cycle_expiry": self.last_cycle_expiry,
             "entry_attempts": self.entry_attempts, "entry_lots": self.entry_lots,
             "lot_size": self.lot_size, "legs": self.legs,
@@ -252,37 +240,21 @@ class Strategy:
             "partial_booked": self.partial_booked, "partial_rs": self.partial_rs,
             "target_rs": self.target_rs, "stop_rs": self.stop_rs, "margin": self.margin, "payoff": self.payoff,
             "exit_reason": self.exit_reason, "consecutive_stops": self.consecutive_stops,
-            "updated_at": datetime.now().isoformat(timespec="seconds"),
-        }
-        os.makedirs(debug_dir, exist_ok=True)
-        tmp = self.position_path + ".tmp"
-        with open(tmp, "w") as f:
-            json.dump(data, f, indent=2)
-        os.replace(tmp, self.position_path)
+        })
 
     def load_position(self):
-        path = self.position_path
-        if not os.path.exists(path):
-            logger.info(f"No existing position/cycle memory at {path}; starting flat.")
+        # PositionStore raises PositionFileError (process exits non-zero, never trades blind) on an
+        # unreadable file, a paper/live mismatch, or an open LIVE position whose expiry has passed.
+        data = self._position_store().load(expiry_field="expiry")
+        if data is None:
             return
-        try:
-            with open(path) as f:
-                data = json.load(f)
-        except Exception as e:
-            logger.error(f"FATAL: position file {path} is unreadable ({e}). Refusing to trade blind.")
-            raise
         self.last_cycle_expiry = data.get("last_cycle_expiry")
         self.entry_attempts = int(data.get("entry_attempts", 0))
         self.consecutive_stops = int(data.get("consecutive_stops", 0))
         self.lifetime_realized = float(data.get("lifetime_realized", 0.0))
-        if not data.get("position_open"):
+        discarded_expired = bool(data.get("discarded_expired"))
+        if not data.get("position_open") and not discarded_expired:
             return
-        if bool(data.get("dry_run")) != self.dry_run:
-            logger.error(
-                f"FATAL: {path} holds a {'PAPER' if data.get('dry_run') else 'LIVE'} position but this run is "
-                f"{'DRY' if self.dry_run else 'LIVE'}. Move the file aside after checking the broker."
-            )
-            sys.exit(1)
         self.position_open = True
         self.status = data.get("status", "RUNNING")
         self.expiry = data.get("expiry")
@@ -296,16 +268,11 @@ class Strategy:
         self.payoff = data.get("payoff")
         self.exit_reason = data.get("exit_reason")
 
-        if self.expiry and self.expiry < date.today().strftime("%Y-%m-%d"):
-            if self.dry_run:
-                logger.warning(f"Paper position for expiry {self.expiry} has already expired; discarding it.")
-                self.position_open, self.status = False, "WAITING"
-                self.legs = {name: None for name in LEG_SPECS}
-                self.save_position()
-                return
-            logger.error(f"FATAL: {path} holds a LIVE position whose expiry {self.expiry} has passed. The "
-                         "contracts have settled; verify the broker, then move the file aside.")
-            sys.exit(1)
+        if discarded_expired:       # an expired PAPER position: the store already logged and rewrote it
+            self.position_open, self.status = False, "WAITING"
+            self.legs = {name: None for name in LEG_SPECS}
+            self.save_position()
+            return
 
         logger.info(f"Restored open position: status={self.status} expiry={self.expiry} legs={self.legs} "
                     f"realized={self.realized_pnl:+.2f} partial_booked={self.partial_booked}")
@@ -369,36 +336,17 @@ class Strategy:
     def _confirm(self, leg, oid, signed_qty: int, net_before: int) -> bool:
         """True only when the order is confirmed filled. Dhan: order status. Zerodha/Kotak order ids
         are not Dhan ids, so there we wait for that broker's own net to move by signed_qty."""
-        if self.dry_run:
-            return True
-        if not oid:
-            return False
-        if self.broker_name == "dhan":
-            return bool(self.helper.wait_for_fill(oid, timeout=CONFIRM_TIMEOUT_SEC))
-        expected = net_before + signed_qty
-        deadline = time.time() + CONFIRM_TIMEOUT_SEC
-        while time.time() < deadline:
-            time.sleep(1)
-            try:
-                if self.broker.get_owned_net_qty(leg["strike"], leg["expiry"], leg["opt_type"]) == expected:
-                    return True
-            except Exception:
-                continue
-        return False
+        return confirm_order_fill(
+            self.helper, self.broker, self.broker_name, oid, leg["strike"], leg["expiry"], leg["opt_type"],
+            signed_qty, net_before, dry_run=self.dry_run, timeout=CONFIRM_TIMEOUT_SEC,
+            sleep=time.sleep, clock=time.time, log=logger)       # module-level time so tests can patch it
 
     def _fill_price(self, oid, fallback: float) -> float:
-        """Actual fill price (Dhan only), else fallback. wait_for_fill returns a bool, not a price."""
+        """Actual fill price (Dhan only), else fallback. The fill was already confirmed by _confirm,
+        so this only reads the order (read_order_fill_price never waits)."""
         if self.dry_run or self.broker_name != "dhan" or not oid:
             return fallback
-        try:
-            o = self.helper.get_order_by_id(oid) or {}
-            for key in ("averageTradedPrice", "avgFilledPrice", "price"):
-                v = float(o.get(key) or 0)
-                if v > 0:
-                    return v
-        except Exception as e:
-            logger.warning(f"Could not read fill price for {oid}: {e}")
-        return fallback
+        return read_order_fill_price(self.helper, oid, fallback, log=logger, paper_id=None)
 
     def _close_qty(self, name, leg, qty) -> tuple:
         """Close up to `qty` of this leg. Returns (confirmed, exit_price, qty_closed). qty_closed may be
