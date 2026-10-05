@@ -984,7 +984,8 @@ def load_1m(symbol: str, store_dir: Optional[str] = None) -> Optional[pd.DataFra
     df = pd.read_parquet(path)
     if not isinstance(df.index, pd.DatetimeIndex):
         df.index = pd.to_datetime(df.index)
-    return df.sort_index()
+    from lib.nse_holidays import drop_non_regular_sessions   # weekends, NSE holidays, Muhurat hours
+    return drop_non_regular_sessions(df.sort_index())
 
 
 def load_benchmark_1m(cfg: IntradayConfig,

@@ -27,6 +27,7 @@ warnings.filterwarnings("ignore")
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, PROJECT_ROOT)
 
+from lib.nse_holidays import NSE_HOLIDAYS  # noqa: E402
 from lib.market_data_hygiene import NIFTY500_LIST, drop_no_trade_bars, is_constituent_symbol  # noqa: E402
 
 HIST_DIR     = os.path.join(PROJECT_ROOT, "Historical Data")
@@ -205,12 +206,7 @@ def cool_off(i: int, total: int, consecutive_failures: int) -> bool:
 # ── Trading day helpers ───────────────────────────────────────────────────────
 # NSE market holidays. Historical data is published the following day,
 # so we never treat today as the reference — always work from yesterday back.
-_NSE_HOLIDAYS = {
-    "2026-01-15", "2026-01-26", "2026-03-03", "2026-03-26",
-    "2026-03-31", "2026-04-03", "2026-04-14", "2026-05-01",
-    "2026-05-28", "2026-06-26", "2026-09-14", "2026-10-02",
-    "2026-10-20", "2026-11-10", "2026-11-24", "2026-12-25",
-}
+_NSE_HOLIDAYS = NSE_HOLIDAYS  # shared list: rs_dashboard/lib/nseHolidays.json
 
 def get_last_trading_day() -> str:
     """Return the most recent COMPLETED trading day as YYYY-MM-DD (never includes today).

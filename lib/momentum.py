@@ -26,6 +26,8 @@ from typing import Dict, List, Optional, Sequence, Tuple
 import numpy as np
 import pandas as pd
 
+from lib.nse_holidays import drop_non_regular_sessions, is_nse_trading_day
+
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 STOCK_DIR = os.path.join(ROOT, "Daily_Historical_Data_Fresh")
 INDEX_DIR = os.path.join(ROOT, "Historical Data")
@@ -218,7 +220,9 @@ def _read_ohlcv(path: str) -> Optional[pd.DataFrame]:
     if df.empty:
         return None
 
-    df = df[df["Datetime"].dt.dayofweek < 5]                  # weekend rows do occur
+    df = drop_non_regular_sessions(df, "Datetime")             # weekend, NSE-holiday and Muhurat rows do occur
+    if df.empty:
+        return None
     df["date"] = df["Datetime"].dt.date
     df = df.drop_duplicates(subset=["date"], keep="last")
     df = df.sort_values("date").reset_index(drop=True)
@@ -377,8 +381,8 @@ class RegimeCalendar:
 
         Falls back to projecting forward when `d` is the newest bar we have, which is the
         normal case live — the calendar is built from history and so contains no future
-        trading days at all. Projection is weekday-only (it cannot know NSE holidays), so a
-        holiday Monday reports a review date that the live cycle will simply roll past.
+        trading days at all. Projection skips weekends and NSE holidays (lib/nse_holidays.py); a
+        year missing from that list degrades to weekdays-only.
         """
         known = next((x for x in self.trading_days if x > d and x in self.review_days), None)
         if known:
@@ -386,7 +390,7 @@ class RegimeCalendar:
         this_week = pd.Timestamp(d).isocalendar()[:2]
         probe = d + timedelta(days=1)
         for _ in range(14):
-            if probe.weekday() < 5 and tuple(pd.Timestamp(probe).isocalendar()[:2]) != tuple(this_week):
+            if is_nse_trading_day(probe) and tuple(pd.Timestamp(probe).isocalendar()[:2]) != tuple(this_week):
                 return probe
             probe += timedelta(days=1)
         return None

@@ -9,6 +9,7 @@ import { clearBreadthCache } from '@/app/api/breadth/route';
 import { clearTrendCache } from '@/app/api/margin-allocator/trend/route';
 import { isPidRunning } from '@/lib/processCheck';
 import { PYTHON_EXE } from '@/lib/pyExec';
+import { NSE_HOLIDAYS } from '@/lib/nseHolidays';
 
 const PROJECT_ROOT  = path.resolve(process.cwd(), '..');
 const DEBUG_DIR     = path.join(PROJECT_ROOT, 'debug');
@@ -17,15 +18,6 @@ const STATUS_FILE   = path.join(DEBUG_DIR, 'refresh_status.json');
 const STOP_FILE     = path.join(DEBUG_DIR, 'refresh_stop.trigger');
 
 const NIFTY50_CSV = path.join(PROJECT_ROOT, 'Historical Data', 'NIFTY_50_Daily_5Y.csv');
-
-// NSE market holidays. Historical data is published the following day,
-// so we never treat today as the reference â€” always work from yesterday back.
-const NSE_HOLIDAYS = new Set([
-  '2026-01-15', '2026-01-26', '2026-03-03', '2026-03-26',
-  '2026-03-31', '2026-04-03', '2026-04-14', '2026-05-01',
-  '2026-05-28', '2026-06-26', '2026-09-14', '2026-10-02',
-  '2026-10-20', '2026-11-10', '2026-11-24', '2026-12-25',
-]);
 
 /** Most recent completed trading day as YYYY-MM-DD.
  *  Starts from yesterday (Dhan historical API does not publish same-day data)

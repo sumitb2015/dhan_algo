@@ -44,6 +44,7 @@ sys.path.insert(0, PROJECT_ROOT)
 
 from login import get_dhan_client                                        # noqa: E402
 from lib.dhan_helper import DhanHelper                                   # noqa: E402
+from lib.nse_holidays import is_nse_trading_day                          # noqa: E402
 from lib.strategy_state_helper import (                                  # noqa: E402
     save_strategy_state, check_shutdown_trigger, instance_log_suffix,
 )
@@ -491,7 +492,7 @@ class MomentumPortfolioStrategy:
         target = now.replace(hour=hh, minute=mm, second=0, microsecond=0)
         if target <= now:
             target += timedelta(days=1)
-        while target.weekday() >= 5:                       # skip weekends
+        while not is_nse_trading_day(target):              # skip weekends and NSE holidays
             target += timedelta(days=1)
         return target
 

@@ -1,13 +1,13 @@
 import { isMcxUnderlying } from '@/lib/underlyings';
+import { isNseTradingDay, istDateIso } from '@/lib/nseHolidays';
 
-// NSE F&O session: 09:15-15:40 IST, Mon-Fri (SEBI's Close Auction Session pushed the F&O
+// NSE F&O session: 09:15-15:40 IST, Mon-Fri, except NSE holidays (SEBI's Close Auction Session pushed the F&O
 // close from 15:30 to 15:40; cash/equity's 15:30 close is separate and unaffected). Used
 // only to pick a poll cadence (10s live vs 60s off-hours) for the live options charts -
 // not a trading-hours source of truth elsewhere.
 export function isNseLive(now: Date): boolean {
   const ist = new Date(now.toLocaleString('en-US', { timeZone: 'Asia/Kolkata' }));
-  const day = ist.getDay();
-  if (day === 0 || day === 6) return false;
+  if (!isNseTradingDay(istDateIso(now))) return false;
   const minutes = ist.getHours() * 60 + ist.getMinutes();
   return minutes >= 9 * 60 + 15 && minutes <= 15 * 60 + 40;
 }

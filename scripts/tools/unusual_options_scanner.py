@@ -21,6 +21,7 @@ sys.path.insert(0, ROOT)
 
 from login import get_dhan_client
 from lib.dhan_helper import DhanHelper
+from lib.nse_holidays import is_nse_trading_day
 
 UNDERLYINGS_MAP = {
     'NIFTY':     {'chain_id': 13, 'chain_seg': 'IDX_I',   'spot_id': 13, 'spot_seg': 'IDX_I', 'name': 'NIFTY'},
@@ -332,7 +333,7 @@ def nse_session_date() -> str:
     d = now.date()
     if (now.hour, now.minute) < (9, 15):
         d -= timedelta(days=1)
-    while d.weekday() >= 5:
+    while not is_nse_trading_day(d):
         d -= timedelta(days=1)
     return d.isoformat()
 

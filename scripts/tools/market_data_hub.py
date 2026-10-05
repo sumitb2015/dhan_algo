@@ -47,6 +47,7 @@ sys.path.insert(0, ROOT)
 
 from login import get_dhan_client
 from lib.dhan_helper import DhanHelper
+from lib.nse_holidays import is_nse_trading_day
 from lib import market_hub_client as hub_client
 
 IST = ZoneInfo('Asia/Kolkata')
@@ -62,7 +63,7 @@ log = logging.getLogger('market_data_hub')
 
 
 def market_open(now_ist: datetime) -> bool:
-    if now_ist.weekday() >= 5:
+    if not is_nse_trading_day(now_ist):
         return False
     t = now_ist.time()
     return (9, 15) <= (t.hour, t.minute) <= (15, 30)

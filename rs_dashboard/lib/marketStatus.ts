@@ -1,15 +1,18 @@
 // Open/closed state and last-tick age for the /markets table's Status column.
 
+import { isNseTradingDay, istDateIso } from '@/lib/nseHolidays';
+
 export type MarketState = 'live' | 'pre' | 'stale' | 'closed';
 
 const IST_PARTS = new Intl.DateTimeFormat('en-GB', {
   timeZone: 'Asia/Kolkata', weekday: 'short', hour: '2-digit', minute: '2-digit', hour12: false,
 });
 
-/** Indian exchange hours (IST). Exchange holidays are not modelled. */
+/** Indian exchange hours (IST). NSE holidays close the NSE session; MCX has its own calendar, which is not modelled. */
 export function indianMarketState(nowMs: number, isMcx: boolean, feedStale: boolean): MarketState {
   const p = Object.fromEntries(IST_PARTS.formatToParts(new Date(nowMs)).map(x => [x.type, x.value]));
   if (p.weekday === 'Sat' || p.weekday === 'Sun') return 'closed';
+  if (!isMcx && !isNseTradingDay(istDateIso(nowMs))) return 'closed';
   const mins = Number(p.hour) * 60 + Number(p.minute);
   const [open, close] = isMcx ? [9 * 60, 23 * 60 + 30] : [9 * 60 + 15, 15 * 60 + 30];
   if (!isMcx && mins >= 9 * 60 && mins < open) return 'pre';

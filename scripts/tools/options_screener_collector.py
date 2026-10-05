@@ -51,6 +51,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)
 sys.path.insert(0, ROOT)
 
 from lib import dhan_quote_lane  # noqa: E402  (needs ROOT on sys.path)
+from lib.nse_holidays import is_nse_trading_day  # noqa: E402
 
 DEBUG_DIR = os.path.join(ROOT, 'debug')
 TOKEN_FILE = os.path.join(ROOT, 'access_token.json')
@@ -135,6 +136,9 @@ def today_ist() -> date:
 
 def session_open(exch: str, now: datetime) -> bool:
     if now.weekday() >= 5:
+        return False
+    # NSE holidays close NSE and BSE; MCX keeps its own calendar (not modelled).
+    if exch != 'MCX' and not is_nse_trading_day(now):
         return False
     (oh, om), (ch, cm) = SESSIONS[exch]
     mins = now.hour * 60 + now.minute

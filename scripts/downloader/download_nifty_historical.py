@@ -16,25 +16,14 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspa
 
 from login import get_dhan_client
 from lib.dhan_helper import DhanHelper
+from lib.nse_holidays import NSE_HOLIDAYS as _SHARED_NSE_HOLIDAYS
 
 # Setup logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
 # NSE Holidays (2024-2026) for expiry date calculations
-NSE_HOLIDAYS = {
-    # 2024
-    "2024-01-26", "2024-03-08", "2024-03-25", "2024-03-29", "2024-04-10", "2024-04-17",
-    "2024-05-01", "2024-06-17", "2024-07-17", "2024-08-15", "2024-10-02", "2024-11-01",
-    "2024-11-15", "2024-12-25",
-    # 2025
-    "2025-01-26", "2025-02-26", "2025-03-14", "2025-03-31", "2025-04-10", "2025-04-14", "2025-04-18",
-    "2025-05-01", "2025-08-15", "2025-08-27", "2025-10-02", "2025-10-21", "2025-12-25",
-    # 2026
-    "2026-01-26", "2026-03-03", "2026-03-26", "2026-03-31", "2026-04-03", "2026-04-14",
-    "2026-05-01", "2026-05-28", "2026-06-26", "2026-09-14", "2026-10-02", "2026-10-20",
-    "2026-11-10", "2026-11-24", "2026-12-25"
-}
+NSE_HOLIDAYS = _SHARED_NSE_HOLIDAYS  # shared list: rs_dashboard/lib/nseHolidays.json
 
 # --- FUTURES EXPIRED DATE UTILS ---
 
