@@ -200,3 +200,11 @@ existing sibling index end-to-end and mirror every hit.
   only as a rejection fallback (`dhan-plotly-3d-scene` #5).
 - `find rs_dashboard/app -maxdepth 1 -type d` for the current page list rather
   than trusting any doc's page table, since pages get added often.
+
+### Previewing a UI change: port 3000 may be a stale production build
+`next start` (the usual long-running server on :3000) serves the prebuilt `.next` output, so edits to
+components do not appear — the browser still shows the old page and the old `<title>`. Do not restart or rebuild the
+user's server to look. Run a throwaway dev server on another port (`npx next dev -p 3100`), mint a session cookie
+(HMAC-SHA256 of a uuid with `COOKIE_SECRET` in `lib/auth.ts`, hex, `dhan_session=<uuid>.<sig>`), screenshot, then stop
+it. Tell the user the production server needs `npm run build` and a restart to pick the change up.
+

@@ -296,7 +296,9 @@ animations that work on Windows but break on Linux), `dhan-payoff-diagrams`
 (payoff-curve math and the hand-rolled SVG chart family), `dhan-position-greeks`
 (aggregating a live book's Greeks from Dhan's own chain-supplied per-contract
 Delta/Gamma/Theta/Vega — the position-scaling multiplier, chain-join and
-missing-Greeks quirks; distinct from dhan-payoff-diagrams' self-computed
+missing-Greeks quirks; also the Portfolio Greeks page `/options/delta`, which solves
+Black-76 from live premiums and has three weighting bases incl. the broker
+analyzer's 1-lot-per-leg; distinct from dhan-payoff-diagrams' self-computed
 Black-76 Greeks), `dhan-margin-allocator`
 (capital-deployment desk: position-structure classification, VIX/trend sizing,
 credit-strategy ranking), `dhan-sidebar-nav` (the global collapsible sidebar's

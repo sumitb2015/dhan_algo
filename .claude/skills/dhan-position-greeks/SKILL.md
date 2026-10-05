@@ -1,9 +1,13 @@
 ---
 name: dhan-position-greeks
-description: Use when computing, aggregating, joining, or displaying option Greeks (Delta/Gamma/Theta/Vega) for a live position book — the chain-supplied per-contract Greeks pipeline behind Positions Analysis' Greeks tab, ScalperGreeksModal, DeltaPanel and margin-allocator (lib/positionGreeks.ts, lib/positionLegs.ts, components/analytics/GreeksTab.tsx, components/analytics/ScalperGreeksModal.tsx). Covers the position-scaling multiplier every one of the four Greeks must share, the chain-join and IV-normalization quirks, and the units convention for Dhan's own chain Greeks. Not for self-computed Black-76/Black-Scholes Greeks used in target-date "what-if" simulation or the payoff curve itself (Options Monitor, T+0 curve, SD bands) — that engine and its own unit conventions are dhan-payoff-diagrams; the two pipelines use different units and must never be mixed.
+description: Use when computing, aggregating, joining, or displaying option Greeks (Delta/Gamma/Theta/Vega) for a live position book — the chain-supplied per-contract Greeks pipeline behind Positions Analysis' Greeks tab, ScalperGreeksModal, DeltaPanel and margin-allocator (lib/positionGreeks.ts, lib/positionLegs.ts, components/analytics/GreeksTab.tsx, components/analytics/ScalperGreeksModal.tsx). Covers the position-scaling multiplier every one of the four Greeks must share, the chain-join and IV-normalization quirks, and the units convention for Dhan's own chain Greeks. Also covers the Portfolio Greeks page (/options/delta), the one place Greeks are computed server-side from live premiums (scripts/tools/positions_delta_data.py, lib/deltaDesk.ts, components/deltaDesk/) and the three weighting bases (index units / per lot / the broker analyzer's 1-lot-per-leg). Not for self-computed Black-76/Black-Scholes Greeks used in target-date "what-if" simulation or the payoff curve itself (Options Monitor, T+0 curve, SD bands) — that engine and its own unit conventions are dhan-payoff-diagrams; the two pipelines use different units and must never be mixed.
 ---
 
 # Position-Level Option Greeks (Chain-Supplied Pipeline)
+
+> **Third path (2026-10-05):** the Portfolio Greeks page (`/options/delta`) does not use pipeline 1. See
+> "Portfolio Greeks page" below — it solves Black-76 from each leg's live premium, because Dhan's chain
+> delta put a 13-lot book at −0.46 lots against the broker's −0.256.
 
 ## Two Greek pipelines in this codebase — know which one you're in
 
@@ -138,6 +142,55 @@ cross-check the live page:
 
 ---
 
+## Portfolio Greeks page (`/options/delta`): computed, not chain-supplied
+
+**Data flow.** `api/options/positions-delta/route.ts` → `scripts/tools/positions_delta_data.py` returns **per-unit**
+Greeks per leg; the browser (`lib/deltaDesk.ts`) weights and aggregates them and reprices what-ifs with the same
+Black-76. Components live in `components/deltaDesk/` (PayoffPanel, ExposurePanel, GreeksMatrix, LadderAndTrail).
+
+**What comes from Dhan vs what is computed.** From Dhan: positions (qty, `costPrice`, `unrealizedProfit`, strike,
+expiry), option `last_price` from the chain (else per-leg `get_ltp`), the nearest Nifty future, index spot. Computed:
+IV (bisection on the live premium), all eight Greeks (delta, gamma, theta, vega, rho, vanna, charm, vomma), every
+portfolio total, the payoff, ladder and expiry split. Chain Greeks are only the fallback (`greeksSource: 'chain'`,
+second-order blank) when a leg has no live price.
+
+**Rules learned (each one was a real defect):**
+1. **Dhan's positions payload has no `lastPrice`.** `row.get('lastPrice') or 0` silently showed ₹0 for every leg.
+   Take LTP from the chain's `last_price`, then `get_ltp`.
+2. **Do not sum chain deltas for the headline.** Chain gamma/theta/vega matched a Black-76 solve; chain delta did
+   not (−0.46 vs −0.23 lots; cause unconfirmed). Solve from the premium on the futures forward, rolled to each
+   leg's expiry: `F_leg = F_fut·exp(−r(T_fut − T_leg))`.
+3. **One spot per underlying, never 0.** Chain spot → index `get_ltp` (retry once after 1.2 s; the chain and index
+   share the ~1 req/s limit) → futures·exp(−rT) flagged `spotSource: 'futures'`. A 0 spot makes `s / spot`
+   repricing return garbage (a constant −₹85 lakh). The page shows an amber note when it is estimated.
+4. **A rate-limited chain call returns an empty payload with an all-`None` error dict**, not an HTTP error. Treat an
+   empty `oc` as "no chain", not "no data".
+5. **Units** (per unit, then × weight): gamma per index point; vega per +1 vol point; theta = price change per
+   calendar day (finite difference on 1/365); rho per +1% rate; vanna = Δdelta per vol point; charm = Δdelta per
+   day; vomma = Δvega per vol point.
+
+**Three weighting bases — name the basis wherever a number is shown:**
+
+| Basis | Weight per leg | Use |
+|---|---|---|
+| Index units | signed qty | real exposure; `Net Δ × spot` = rupee-equivalent |
+| Per lot | signed qty / lot size | what traders think in |
+| Broker view | ±1 | reproduces the broker analyzer's tab |
+
+The broker's Greeks tab ("Decimals") sums per-unit leg Greeks with **only a buy/sell sign — lot counts ignored**;
+its "Per Lot" toggle is Decimals × 65. On a 3/6/4-lot book its gamma/theta/vega read ~4.3× below real exposure
+(Delta looked close only because both were small). Measured 2026-10-05: broker Δ −0.256 / Γ −0.001296 / Θ +18.22 /
+ν −49.52 vs ours on the broker basis −0.2353 / −0.001264 / +17.32 / −49.43. If a user says "doesn't match the
+broker", ask for the broker's Per Lot toggle value and one expanded leg before changing any maths.
+
+**Verification recipe (do this before claiming a match).** (a) T+0 at the current spot must reproduce the book's
+`unrealizedProfit` (it does, to ~₹2, because IV is solved from each leg's own premium); (b) best-case profit and
+break-evens at expiry against the broker's Pay-Off tab; (c) `npx tsx` a small script over the live script output
+to print the ladder, so a bug like spot=0 shows up as an absurd constant instead of in a screenshot.
+
+**Not verified:** rho/vanna/charm/vomma have no broker figure to compare against; payoff/ladder hold each leg's IV
+flat, so they omit the volatility shock that usually accompanies a big move (the page says so).
+
 ## Incidents this skill was written from (2026-09-23)
 
 - **`GreeksTab.tsx`'s per-leg Gamma column rendered raw `l.gamma` with no `* k` multiplier**,
@@ -160,3 +213,5 @@ cross-check the live page:
 Full incident write-ups: vault `wiki/incidents/2026-09-23-greeks-tab-gamma-column-unscaled.md`
 and `wiki/incidents/2026-09-23-positions-analysis-unrealized-pnl-mismatch.md` (a related but
 distinct bug found the same session, in unbooked P&L rather than Greeks).
+
+Full write-up of the 2026-10-05 page rebuild: vault `wiki/incidents/2026-10-05-delta-page-zero-ltp-and-chain-delta-drift.md`, `wiki/decisions/2026-10-05-portfolio-greeks-black76-from-live-premium.md`, `wiki/concepts/position-greeks-bases-and-broker-analyzer.md`.
