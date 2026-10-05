@@ -161,6 +161,26 @@ def parse_target_spec(raw):
         raise ValueError(f"Invalid target/stop-loss value {raw!r} — expected a number or a percentage like '20%'")
 
 
+def reset_pnl_on_new_day(strategy, log=None):
+    """Zero `strategy.realized_pnl` when the calendar date has rolled since the last call.
+
+    Strategies whose target / stop-loss compare the run-cumulative `realized_pnl` wait for
+    the next session instead of exiting. Without a per-day reset a day-1 target/stop hit
+    makes the first tick of day 2 exit again, and a normal day's result leaks into the next
+    day's limits. Call right after the market-open wait, when positions are flat. The first
+    call only records the date, so no __init__ change is needed. Returns True if it reset.
+    """
+    today = datetime.now().date()
+    prev = getattr(strategy, "pnl_date", None)
+    strategy.pnl_date = today
+    if prev is None or prev == today:
+        return False
+    if log:
+        log.info(f"New trading day {today}: resetting session P&L (was {strategy.realized_pnl:+.0f}).")
+    strategy.realized_pnl = 0.0
+    return True
+
+
 def exit_if_market_closed(helper, dry_run=False):
     """Exit immediately if the NSE market is not currently open. No-op in dry_run mode."""
     if dry_run:
