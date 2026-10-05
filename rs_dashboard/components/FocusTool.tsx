@@ -46,13 +46,14 @@ import {
   isSimRow, simLegPosition,
   legPinnedStrike, costStopReason, legOwnEntry, slRollStrike, DEFAULT_SL_ROLL_MAX,
   reentryConfig, evaluateReentry, reentryWindowClosed, monitoringStopped, momentumReentryKind, momentumTrigger,
-  absDelta100, addMinutesHm, resolveCriteriaStrike, closestPremiumStrike, ownedLegStop, legStopHit, legDeltaNow, legTargetDeltaLevel,
+  absDelta100, modelAbsDelta100, addMinutesHm, resolveCriteriaStrike, closestPremiumStrike, ownedLegStop, legStopHit, legDeltaNow, legTargetDeltaLevel,
   multipliedLots, clampHm, ENTRY_TIME_MIN, ENTRY_TIME_MAX, EXIT_TIME_MIN, EXIT_TIME_MAX, rangeWindow, rangeWindowPhase, rowHasMultiDayRange, candleBucket, tradingDte,
   legSlRuleOn, legStopLevel, legTargetSpotLevel, legTgtUnitLabel, MAX_LEG_REENTRIES, pendingReentryLevel, pendingReentryHit, legTargetReason, costReentryBasis,
   awaitingMomentumQuote, MOMENTUM_QUOTE_WAIT_MS, legTargetLevel,
   evaluateEntryMomentum, reRangeWindow, entryMomentumOn, overallSlConfig, overallProgress, nextOverallPeak, evaluateOverallExit, overallExitKind, evaluateOverallReentry, MAX_OVERALL_REENTRIES, rangeBreakoutOn, rangeBreakoutHit, costStopApplies, MAX_LAZY_LEGS, legSlMultiplier, legTarget, nextLazyLegId, lazyLegStrike, runningLazyLeg, simpleMomOn, simpleMomLevel, simpleMomHit,
   type PosRow, type RowLive,
 } from '@/lib/focusToolRules';
+import { futureQuote } from '@/lib/optionsPricing';
 import { computeRowPnl, mtmForQty, shiftMayReopen, canMarkMtm, shiftCloseConfirmed, rowDisplayBookedPnl, putCallRatio, valuePutCallRatio, pickOpenInterest, closeRebaseDelta, closedSliceBooked, FTS_ORDER_SOURCE } from '@/lib/focusToolPnl';
 import { normalizeTradeRow, matchOutsideTrades, type NormalizedTrade } from '@/lib/multiLegFocus';
 import { stampItems, noteItems, adoptItems, canon, type RevBook } from '@/lib/revMerge';
@@ -4662,9 +4663,9 @@ export default function FocusTool() {
           .then(r => r.json())
           .then((j: {
             success?: boolean;
-            data?: { chain?: { last_price?: number; oc?: Record<string, {
-              ce?: { last_price?: number; oi?: number; greeks?: { delta?: number } };
-              pe?: { last_price?: number; oi?: number; greeks?: { delta?: number } };
+            data?: { future_price?: number; future_expiry?: string; chain?: { last_price?: number; oc?: Record<string, {
+              ce?: { last_price?: number; oi?: number; implied_volatility?: number; greeks?: { delta?: number } };
+              pe?: { last_price?: number; oi?: number; implied_volatility?: number; greeks?: { delta?: number } };
             }> } };
           }) => {
             if (seq !== chainSeq.current) return;
@@ -4673,6 +4674,7 @@ export default function FocusTool() {
             // last good chain beats blanking every premium on one 429.
             if (!j.success || !oc) return;
             const flat: ChainData['oc'] = {};
+            const market = { spot: Number(j.data?.chain?.last_price ?? 0), future: futureQuote(j.data?.future_price, j.data?.future_expiry) };
             for (const [k, v] of Object.entries(oc)) {
               const ceOiRaw = v.ce?.oi;
               const peOiRaw = v.pe?.oi;
@@ -4683,10 +4685,11 @@ export default function FocusTool() {
                 // show OI PCR — same chain that already backs their LTP.
                 ceOi: ceOiRaw != null && Number(ceOiRaw) >= 0 ? Number(ceOiRaw) : null,
                 peOi: peOiRaw != null && Number(peOiRaw) >= 0 ? Number(peOiRaw) : null,
-                // |delta| × 100 for AlgoTest's delta strike / SL / target / trail
-                // rules. Dhan sends 0 when it has none — read as missing.
-                ceDelta: absDelta100(v.ce?.greeks?.delta),
-                peDelta: absDelta100(v.pe?.greeks?.delta),
+                // |delta| × 100 for AlgoTest's delta strike / SL / target / trail rules, from the central
+                // pricing recipe so it matches every other page; Dhan's own delta only when the model
+                // cannot price the strike (it sends 0 when it has none — read as missing).
+                ceDelta: modelAbsDelta100('CE', Number(k), expiry, v.ce?.last_price, v.ce?.implied_volatility, v.ce?.greeks?.delta, market),
+                peDelta: modelAbsDelta100('PE', Number(k), expiry, v.pe?.last_price, v.pe?.implied_volatility, v.pe?.greeks?.delta, market),
               };
             }
             setChains(prev => ({ ...prev, [expKey(u, expiry)]: { spot: Number(j.data?.chain?.last_price ?? 0), oc: flat } }));

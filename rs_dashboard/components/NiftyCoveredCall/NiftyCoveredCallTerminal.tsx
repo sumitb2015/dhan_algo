@@ -19,6 +19,7 @@ import {
   reconstructCallLedger,
   reconcileCallsDown,
   computeBook,
+  chainLegGreeks,
   suggestCoveredCall,
   coveredCallReturns,
   beesNiftyUnits,
@@ -28,6 +29,7 @@ import {
   type OpenCall,
   type PendingOrder,
 } from '@/lib/coveredCallEngine';
+import { futureQuote, type FutureQuote } from '@/lib/optionsPricing';
 import type { CoveredCallBookResponse } from '@/app/api/nifty-covered-call/book/route';
 import type { CoveredCallOrderResult } from '@/app/api/nifty-covered-call/order/route';
 
@@ -99,6 +101,8 @@ export default function NiftyCoveredCallTerminal() {
   const [optionExpiry, setOptionExpiry] = useState<string | null>(null);
   const [lotSize, setLotSize] = useState<number>(0);
   const [chains, setChains] = useState<Record<string, ChainOc>>({});
+  // The monthly future from the chain response: each call's Black-76 forward is this rolled to the call's own expiry.
+  const [future, setFuture] = useState<FutureQuote | null>(null);
   const [restSpot, setRestSpot] = useState(0);
   const [feedError, setFeedError] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(true);
@@ -202,6 +206,8 @@ export default function NiftyCoveredCallTerminal() {
         const oc = (j.data.chain?.oc as ChainOc) ?? null;
         if (oc) setChains((prev) => ({ ...prev, [expiry]: oc }));
         if (j.data.spot) setRestSpot(j.data.spot);
+        const fq = futureQuote(j.data.future_price, j.data.future_expiry);
+        if (fq) setFuture(fq);
         setFeedError(null);
       } else {
         setFeedError(j.error || 'Failed to load option chain');
@@ -298,9 +304,9 @@ export default function NiftyCoveredCallTerminal() {
     if (!bees && reconciled.legs.length === 0) return null;
     return computeBook({
       beesQty, beesAvg: bees?.avgCost ?? 0, beesLtp, spot,
-      calls: reconciled.legs, marks, callsRealized: ledger.realized,
+      calls: reconciled.legs, marks, callsRealized: ledger.realized, future,
     });
-  }, [bees, beesQty, beesLtp, spot, reconciled.legs, marks, ledger.realized]);
+  }, [bees, beesQty, beesLtp, spot, reconciled.legs, marks, ledger.realized, future]);
 
   const rows: OpenCallRow[] = useMemo(() => reconciled.legs.map((l) => {
     const g = snapshot?.legs.find((x) => x.id === l.id);
@@ -321,8 +327,8 @@ export default function NiftyCoveredCallTerminal() {
   const selDte = optionExpiry ? daysToExpiry(optionExpiry, now) : 1;
   const selChain = optionExpiry ? chains[optionExpiry] : undefined;
   const suggestion = useMemo(
-    () => (selChain && spot > 0 ? suggestCoveredCall(selChain, spot, beesUnits, lotSize, targetDelta, selDte) : null),
-    [selChain, spot, beesUnits, lotSize, targetDelta, selDte],
+    () => (selChain && spot > 0 ? suggestCoveredCall(selChain, spot, beesUnits, lotSize, targetDelta, selDte, { expiry: optionExpiry ?? undefined, future }) : null),
+    [selChain, spot, beesUnits, lotSize, targetDelta, selDte, optionExpiry, future],
   );
   const manualStrike = parseFloat(manualStrikeStr) || null;
   const writeStrike = manualStrike ?? suggestion?.strike ?? null;
@@ -335,7 +341,8 @@ export default function NiftyCoveredCallTerminal() {
   const coverageAfter = beesUnits > 0 ? ((snapshot?.shortCallUnits ?? 0) + writeUnits) / beesUnits : null;
 
   // Active Trader Net Delta calculation
-  const writeDeltaPerUnit = writeLeg?.greeks?.delta ? Math.abs(writeLeg.greeks.delta) : (suggestion?.strikeDelta ?? targetDelta);
+  const writeGreeks = writeStrike && optionExpiry ? chainLegGreeks('CE', writeStrike, optionExpiry, writeLeg, writeLtp, { spot, future }) : null;
+  const writeDeltaPerUnit = writeGreeks ? Math.abs(writeGreeks.delta) : (suggestion?.strikeDelta ?? targetDelta);
   const currentNetDelta = snapshot?.net.delta ?? beesUnits;
   const netDeltaAfter = currentNetDelta - (writeDeltaPerUnit * writeUnits);
   const atmDeltaAfter = currentNetDelta - (0.50 * writeUnits);
@@ -514,6 +521,7 @@ export default function NiftyCoveredCallTerminal() {
           fetchChain(exp);
         }}
         chains={chains}
+        future={future}
         selectedStrike={writeStrike}
         onSelectStrike={(strike, delta) => {
           setManualStrikeStr(String(strike));
@@ -580,7 +588,7 @@ export default function NiftyCoveredCallTerminal() {
         <div className="flex items-center gap-2 flex-wrap">
           {/* Expiry Selector Pills */}
           <div className="flex items-center bg-zinc-900 border border-zinc-800 rounded-lg p-0.5 flex-wrap">
-            {expiries.slice(0, 6).map((e) => (
+            {expiries.slice(0, 4).map((e) => (
               <button
                 key={e}
                 onClick={() => setOptionExpiry(e)}
@@ -592,6 +600,20 @@ export default function NiftyCoveredCallTerminal() {
                 {e}
               </button>
             ))}
+            {expiries.length > 4 && (
+              <select
+                aria-label="More expiries"
+                value={expiries.indexOf(optionExpiry ?? '') >= 4 ? (optionExpiry ?? '') : ''}
+                onChange={(ev) => { if (ev.target.value) setOptionExpiry(ev.target.value); }}
+                className={cn(
+                  'px-2 py-1 rounded text-xs font-mono font-bold bg-zinc-900 outline-none cursor-pointer',
+                  expiries.indexOf(optionExpiry ?? '') >= 4 ? 'text-emerald-300 border border-emerald-500/40' : 'text-zinc-400',
+                )}
+              >
+                <option value="">More…</option>
+                {expiries.slice(4).map((e) => <option key={e} value={e}>{e}</option>)}
+              </select>
+            )}
           </div>
 
           {/* Option Chain Button */}

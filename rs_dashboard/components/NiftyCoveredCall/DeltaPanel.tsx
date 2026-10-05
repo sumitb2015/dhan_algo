@@ -5,8 +5,8 @@ import { cn } from '@/lib/utils';
 import type { BookSnapshot } from '@/lib/coveredCallEngine';
 
 // Net Greeks + coverage for the NIFTYBEES covered-call book. Greek units follow
-// dhan-position-greeks (chain-supplied, per unit × signed units — no lot or
-// ×100 rescaling): Delta in Nifty units, Theta ₹/day, Vega ₹ per IV point,
+// dhan-position-greeks (computed by the central pricing library from each
+// call's premium, per unit × signed units — no lot or ×100 rescaling): Delta in Nifty units, Theta ₹/day, Vega ₹ per IV point,
 // Gamma Δ per 1-pt Nifty move. NIFTYBEES contributes delta only.
 
 const TXT_LABEL = 'text-[9px]';

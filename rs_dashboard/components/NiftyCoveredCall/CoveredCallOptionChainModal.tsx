@@ -6,7 +6,8 @@ import { cn } from '@/lib/utils';
 import type { ChainOc, ChainLegData } from '@/lib/optionsStrategy';
 import { lookupChainLegData } from '@/lib/optionsStrategy';
 import { estimatePopAndDelta } from '@/lib/ultimateScannerEngine';
-import { daysToExpiry } from '@/lib/coveredCallEngine';
+import { daysToExpiry, chainLegGreeks } from '@/lib/coveredCallEngine';
+import type { FutureQuote } from '@/lib/optionsPricing';
 
 export interface CoveredCallOptionChainModalProps {
   isOpen: boolean;
@@ -18,6 +19,8 @@ export interface CoveredCallOptionChainModalProps {
   chains: Record<string, ChainOc>;
   selectedStrike: number | null;
   onSelectStrike: (strike: number, delta?: number) => void;
+  /** The monthly future (price + ISO expiry) for the Black-76 forward; omit for spot·e^{rT}. */
+  future?: FutureQuote | null;
   lotSize: number;
   onRefresh?: () => void;
 }
@@ -57,6 +60,7 @@ export default function CoveredCallOptionChainModal({
   chains,
   selectedStrike,
   onSelectStrike,
+  future,
   lotSize,
   onRefresh,
 }: CoveredCallOptionChainModalProps) {
@@ -133,20 +137,23 @@ export default function CoveredCallOptionChainModal({
       if (ceOI > maxCEOI) maxCEOI = ceOI;
       if (peOI > maxPEOI) maxPEOI = peOI;
 
-      // Calculate or estimate CE Delta
-      let ceDelta = ce?.greeks?.delta ?? 0;
+      // Delta from the central pricing recipe (forward rolled to the expiry, IV solved from the strike's premium);
+      // the plain Black-Scholes estimate only when that cannot price the strike.
+      const market = { spot, future };
+      const ceG = activeExpiry ? chainLegGreeks('CE', strike, activeExpiry, ce, null, market) : null;
+      let ceDelta = ceG?.delta ?? 0;
       let ceDeltaEst = false;
-      if (!ceDelta && spot > 0) {
+      if (!ceG && spot > 0) {
         const iv = ce?.implied_volatility && ce.implied_volatility > 0 ? ce.implied_volatility : 12;
         ceDelta = estimatePopAndDelta(spot, strike, Math.max(dte, 0.25), iv, true).delta;
         ceDeltaEst = true;
       }
       ceDelta = Math.abs(ceDelta);
 
-      // Calculate or estimate PE Delta
-      let peDelta = pe?.greeks?.delta ?? 0;
+      const peG = activeExpiry ? chainLegGreeks('PE', strike, activeExpiry, pe, null, market) : null;
+      let peDelta = peG?.delta ?? 0;
       let peDeltaEst = false;
-      if (!peDelta && spot > 0) {
+      if (!peG && spot > 0) {
         const iv = pe?.implied_volatility && pe.implied_volatility > 0 ? pe.implied_volatility : 12;
         peDelta = estimatePopAndDelta(spot, strike, Math.max(dte, 0.25), iv, false).delta;
         peDeltaEst = true;
@@ -193,7 +200,7 @@ export default function CoveredCallOptionChainModal({
       ceOIPct: (r.ceOI / maxCEOI) * 100,
       peOIPct: (r.peOI / maxPEOI) * 100,
     }));
-  }, [activeChain, spot, dte, atmStrike, wingRange]);
+  }, [activeChain, activeExpiry, future, spot, dte, atmStrike, wingRange]);
 
   // Auto-scroll to ATM when modal opens or expiry changes
   const scrollToATM = useCallback(() => {
@@ -289,7 +296,7 @@ export default function CoveredCallOptionChainModal({
           <div className="flex items-center gap-1.5 flex-wrap">
             <span className="text-[10px] uppercase font-bold text-zinc-500">Expiry:</span>
             <div className="flex items-center bg-zinc-900 border border-zinc-800 rounded-lg p-0.5 flex-wrap">
-              {expiries.slice(0, 7).map((exp) => (
+              {expiries.slice(0, 4).map((exp) => (
                 <button
                   key={exp}
                   type="button"
@@ -304,6 +311,20 @@ export default function CoveredCallOptionChainModal({
                   {exp}
                 </button>
               ))}
+              {expiries.length > 4 && (
+                <select
+                  aria-label="More expiries"
+                  value={expiries.indexOf(activeExpiry ?? '') >= 4 ? (activeExpiry ?? '') : ''}
+                  onChange={(ev) => { if (ev.target.value) onSelectExpiry(ev.target.value); }}
+                  className={cn(
+                    'px-2 py-1 rounded text-xs font-mono font-bold bg-zinc-900 outline-none cursor-pointer',
+                    expiries.indexOf(activeExpiry ?? '') >= 4 ? 'text-emerald-300 border border-emerald-500/40' : 'text-zinc-400',
+                  )}
+                >
+                  <option value="">More…</option>
+                  {expiries.slice(4).map((e) => <option key={e} value={e}>{e}</option>)}
+                </select>
+              )}
             </div>
             {activeExpiry && (
               <span className="text-[11px] font-mono text-zinc-400 ml-1">

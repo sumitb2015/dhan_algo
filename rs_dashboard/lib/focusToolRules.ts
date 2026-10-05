@@ -21,7 +21,8 @@
  * clock itself cannot be tested at 15:17.
  */
 
-import { NSE_HOLIDAYS } from './nseHolidays';
+import { NSE_HOLIDAYS } from './nseHolidays.ts';
+import { greeksForLeg, type FutureQuote } from './optionsPricing.ts';
 import type {
   FocusRow, FocusDte, FocusRowStatus, FocusReentryMode, FocusReentryTrigger, FocusPendingReentry, FocusLegSimpleMom, FocusLazyLeg, FocusLegRangeBreakout, FocusOverallMode,
   FocusLegSlRule, FocusLegTrailSl, FocusLegOrbSl, FocusOrbStamp, FocusStrikeCriteria, FocusLegCrit,
@@ -394,6 +395,24 @@ export function absDelta100(raw: unknown): number | null {
   const d = Math.abs(Number(raw));
   if (!Number.isFinite(d) || !(d > 0)) return null;
   return Math.round(d * 100 * 100) / 100;
+}
+
+/**
+ * |Delta| × 100 from the central pricing recipe (forward rolled to the strike's own expiry, IV solved from the strike's premium),
+ * so the delta a delta-strike / delta-SL / delta-target rule sees is the one every other page shows. Dhan's own chain delta is the
+ * fallback ONLY when the model cannot price the strike (no spot yet, no premium and no IV): a delta stop must keep working rather
+ * than silently drop back to SL ×.
+ */
+export function modelAbsDelta100(
+  type: 'CE' | 'PE', strike: number, expiry: string, mark: number | null | undefined,
+  chainIvPct: number | null | undefined, chainDelta: unknown,
+  market: { spot: number; future?: FutureQuote | null },
+): number | null {
+  const g = greeksForLeg(
+    { type, strike, expiry, mark, chainIv: chainIvPct && chainIvPct > 0 ? chainIvPct / 100 : null },
+    market,
+  );
+  return g ? absDelta100(g.delta) ?? absDelta100(chainDelta) : absDelta100(chainDelta);
 }
 
 /** Row fields every leg-stop rule reads. */

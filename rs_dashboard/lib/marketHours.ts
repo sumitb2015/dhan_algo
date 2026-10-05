@@ -1,5 +1,5 @@
-import { isMcxUnderlying } from '@/lib/underlyings';
-import { isNseTradingDay, istDateIso } from '@/lib/nseHolidays';
+import { isMcxUnderlying } from './underlyings.ts';
+import { isNseTradingDay, istDateIso } from './nseHolidays.ts';
 
 // NSE F&O session: 09:15-15:40 IST, Mon-Fri, except NSE holidays (SEBI's Close Auction Session pushed the F&O
 // close from 15:30 to 15:40; cash/equity's 15:30 close is separate and unaffected). Used

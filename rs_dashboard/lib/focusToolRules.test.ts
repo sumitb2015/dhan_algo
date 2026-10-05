@@ -22,7 +22,7 @@ import {
   legPinnedStrike, slRollStrike, evaluateReentry, costStopReason, legOwnEntry, DEFAULT_SL_ROLL_MAX,
   reentryWindowClosed, pendingReentryLevel, pendingReentryHit, legTargetReason, costReentryBasis, awaitingMomentumQuote, legTargetLevel,
   monitoringStopped, momentumReentryKind, legTrailSteps, legStopLevel, orbStopDistance, legTargetSpotLevel, MAX_LEG_REENTRIES,
-  resolveCriteriaStrike, closestPremiumStrike, absDelta100, legTargetDeltaLevel, ownedLegStop, legStopHit, rowQtyMultiplier, multipliedLots,
+  resolveCriteriaStrike, closestPremiumStrike, absDelta100, modelAbsDelta100, legTargetDeltaLevel, ownedLegStop, legStopHit, rowQtyMultiplier, multipliedLots,
   tradingDaysBack, tradingDte, dateForDte, rangeWindow, rangeWindowPhase, candleBucket, addMinutesHm,
   type RowLive, type PosRow, type WorkerHold,
   clampHm, ENTRY_TIME_MIN, ENTRY_TIME_MAX, EXIT_TIME_MIN, EXIT_TIME_MAX,
@@ -1142,3 +1142,20 @@ test('Entry / Exit Time are clamped to AlgoTest windows', () => {
   assert.equal(clampHm('15:30', EXIT_TIME_MIN, EXIT_TIME_MAX), '15:29');
   assert.equal(clampHm('', EXIT_TIME_MIN, EXIT_TIME_MAX), '');
 });
+
+test('modelAbsDelta100: delta comes from the central recipe, Dhan\'s only when the model cannot price the strike', () => {
+  const day = (n: number) => new Date(Date.now() + n * 86_400_000).toISOString().slice(0, 10);
+  const exp = day(7);
+  const market = { spot: 22555.75, future: { price: 22640, expiry: day(22) } };
+  // A 22900 call a week out, quoted at 28: a sane OTM delta, in AlgoTest's 0-100 scale.
+  const d = modelAbsDelta100('CE', 22900, exp, 28, 14, 0.9, market)!;
+  assert.ok(d > 10 && d < 40, `got ${d}`);
+  // Not Dhan's number: a deliberately wrong chain delta is ignored while the model can price the strike.
+  assert.equal(modelAbsDelta100('CE', 22900, exp, 28, 14, 0.99, market), d);
+  // Puts report the absolute value.
+  assert.ok(modelAbsDelta100('PE', 22200, exp, 28, 14, -0.9, market)! > 5);
+  // No spot yet, no premium, no IV: fall back to Dhan's delta; with none of that, null (read as missing).
+  assert.equal(modelAbsDelta100('CE', 22900, exp, 0, 0, 0.27, { spot: 0 }), 27);
+  assert.equal(modelAbsDelta100('CE', 22900, exp, 0, 0, 0, { spot: 0 }), null);
+});
+

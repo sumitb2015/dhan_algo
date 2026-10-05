@@ -10,8 +10,8 @@ description: Use when computing, aggregating, joining, or displaying option Gree
 > Multi-Leg Focus, Portfolio Greeks and the payoff-chart header all call `lib/optionsPricing.ts` / `lib/optionsPayoff.ts`, solving IV from each
 > leg's live mark. Adapters: `positionNetGreeks` / `positionNetGreeksBy` (multi-underlying) in `lib/positionPayoff.ts`, `computeBasketGreeks`
 > in `lib/multiLegGreeks.ts`, `bookGreeks` in `lib/optionsPayoff.ts`. `lib/positionGreeks.ts` (`computeNetGreeks`, which summed chain Greeks) was
-> deleted. Dhan's chain Greeks are now only *displayed* per strike in the option-chain views (OptionChainModal, Skew, SmartChain) and used as an
-> input to strike selection (Focus Tool delta rules, Covered Call); they are not summed into a book total anywhere. The sections below that describe
+> deleted. Dhan's chain Greeks are now only *displayed* per strike in the option-chain views (OptionChainModal, Skew, SmartChain) and kept as a last-resort
+> delta fallback in the Focus Tool; Focus Tool delta rules and the Covered Call desk (book Greeks, strike suggestion) use the model delta. They are not summed into a book total anywhere. The sections below that describe
 > the chain-supplied pipeline are historical context for those display and selection uses.
 > Why: on a live book Dhan's chain delta was −0.46 lots against the broker's −0.256 and its IV, price and Greeks were not mutually consistent.
 

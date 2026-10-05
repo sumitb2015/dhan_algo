@@ -2,9 +2,13 @@ import { test } from 'node:test';
 import assert from 'node:assert';
 import {
   reconstructCallLedger, reconcileCallsDown, beesNiftyUnits, computeBook, suggestCoveredCall,
-  fillIncrement, reservedBuyUnits,
+  fillIncrement, reservedBuyUnits, chainLegGreeks,
   type CallTrade, type PendingOrder,
 } from './coveredCallEngine.ts';
+import { greeksForLeg, priceOption, calculateTimeToExpiryYears, RISK_FREE_RATE } from './optionsPricing.ts';
+
+// One pinned clock: the Greeks depend on the time to the 2026-10-27 expiry.
+const NOW = Date.parse('2026-10-05T06:00:00Z');
 
 const open = (id: string, ts: number, units: number, price: number, sid = '111', strike = 23500): CallTrade => ({
   id, ts, action: 'SELL_OPEN', strike, expiry: '2026-10-27', units, price, securityId: sid,
@@ -43,17 +47,22 @@ test('beesNiftyUnits measures the holding by value', () => {
   assert.strictEqual(beesNiftyUnits(4500, 0, 22850), 0);
 });
 
-test('computeBook: Greeks scale by units, short calls are negative, coverage uses Nifty units', () => {
+test('computeBook: Greeks come from the central recipe, scale by units, short calls are negative, coverage uses Nifty units', () => {
   const calls = reconstructCallLedger([open('a', 1, 65, 100)]).open;
+  const spot = 22850;
   const book = computeBook({
-    beesQty: 4500, beesAvg: 260, beesLtp: 256.5, spot: 22850, callsRealized: 500,
+    beesQty: 4500, beesAvg: 260, beesLtp: 256.5, spot, callsRealized: 500, now: NOW,
     calls,
-    marks: { a: { ltp: 80, dte: 20, chainLeg: { last_price: 80, greeks: { delta: 0.3, gamma: 0.001, theta: -5, vega: 10 } } } },
+    // Dhan's own chain Greeks are deliberately absurd: they must be ignored.
+    marks: { a: { ltp: 80, dte: 20, chainLeg: { last_price: 80, greeks: { delta: 0.99, gamma: 9, theta: -999, vega: 999 } } } },
   });
-  assert.ok(Math.abs(book.callDelta - -19.5) < 1e-9);
-  assert.ok(Math.abs(book.net.delta - (book.beesUnits - 19.5)) < 1e-9);
-  assert.ok(Math.abs(book.net.theta - 325) < 1e-9); // short call earns theta
-  assert.ok(Math.abs(book.net.vega - -650) < 1e-9);
+  const g = greeksForLeg({ type: 'CE', strike: 23500, expiry: '2026-10-27', mark: 80 }, { spot }, { now: NOW })!;
+  assert.ok(Math.abs(book.callDelta - -65 * g.delta) < 1e-9);
+  assert.ok(Math.abs(book.net.delta - (book.beesUnits - 65 * g.delta)) < 1e-9);
+  assert.ok(book.net.theta > 0 && Math.abs(book.net.theta - -65 * g.theta) < 1e-9); // short call earns theta
+  assert.ok(book.net.vega < 0 && Math.abs(book.net.vega - -65 * g.vega) < 1e-9);
+  assert.ok(book.net.gamma < 0);
+  assert.strictEqual(book.legs[0].deltaEstimated, false);
   assert.strictEqual(book.callsOpenPnl, 1300);
   assert.ok(Math.abs((book.beesPnl ?? 0) - -15750) < 1e-6);
   assert.ok(Math.abs((book.totalPnl ?? 0) - (-15750 + 1300 + 500)) < 1e-6);
@@ -61,11 +70,21 @@ test('computeBook: Greeks scale by units, short calls are negative, coverage use
   assert.ok(book.uncoveredUnits > 14 && book.uncoveredUnits < 15);
 });
 
-test('computeBook: an all-zero-greeks leg is excluded from gamma/theta/vega but keeps an estimated delta', () => {
+test('computeBook rolls the monthly future to the call\'s own expiry', () => {
+  const calls = reconstructCallLedger([open('a', 1, 65, 100)]).open;
+  const base = { beesQty: 0, beesAvg: 0, beesLtp: 0, spot: 22850, callsRealized: 0, calls, now: NOW, marks: { a: { ltp: 80, dte: 22 } } };
+  const synthetic = computeBook(base);
+  const withFuture = computeBook({ ...base, future: { price: 22990, expiry: '2026-10-27' } });
+  assert.ok(withFuture.callDelta !== synthetic.callDelta);           // a real future moves the forward, hence the delta
+  const g = chainLegGreeks('CE', 23500, '2026-10-27', undefined, 80, { spot: 22850, future: { price: 22990, expiry: '2026-10-27' } }, NOW)!;
+  assert.ok(Math.abs(withFuture.callDelta - -65 * g.delta) < 1e-9);
+});
+
+test('computeBook: a leg the recipe cannot price (no premium, no IV) is excluded from gamma/theta/vega but keeps an estimated delta', () => {
   const calls = reconstructCallLedger([open('a', 1, 65, 100)]).open;
   const book = computeBook({
-    beesQty: 0, beesAvg: 0, beesLtp: 0, spot: 22850, callsRealized: 0, calls,
-    marks: { a: { ltp: 80, dte: 20, chainLeg: { last_price: 80, greeks: { delta: 0, gamma: 0, theta: 0, vega: 0 } } } },
+    beesQty: 0, beesAvg: 0, beesLtp: 0, spot: 22850, callsRealized: 0, calls, now: NOW,
+    marks: { a: { ltp: null, dte: 20 } },
   });
   assert.strictEqual(book.missingCount, 1);
   assert.strictEqual(book.net.theta, 0);
@@ -73,15 +92,22 @@ test('computeBook: an all-zero-greeks leg is excluded from gamma/theta/vega but 
   assert.strictEqual(book.legs[0].deltaEstimated, true);
 });
 
-test('suggestCoveredCall picks the OTM strike nearest the target delta and floors covered lots', () => {
-  const oc = {
-    '22800.000000': { ce: { last_price: 300, greeks: { delta: 0.55 } } },
-    '23000.000000': { ce: { last_price: 200, greeks: { delta: 0.42 } } },
-    '23200.000000': { ce: { last_price: 120, greeks: { delta: 0.31 } } },
-    '23400.000000': { ce: { last_price: 60, greeks: { delta: 0.18 } } },
-  };
-  const s = suggestCoveredCall(oc, 22850, 50.5, 65, 0.3, 20)!;
-  assert.strictEqual(s.strike, 23200);
+test('suggestCoveredCall picks the OTM strike nearest the target delta (model delta, not Dhan\'s) and floors covered lots', () => {
+  const spot = 22850;
+  const expiry = '2026-10-27';
+  const T = calculateTimeToExpiryYears(expiry, NOW);
+  const F = spot * Math.exp(RISK_FREE_RATE * T);
+  // A chain priced at 14% vol, with Dhan's delta field deliberately wrong everywhere (0.99).
+  const oc: Record<string, { ce: { last_price: number; implied_volatility: number; greeks: { delta: number } } }> = {};
+  for (const k of [22800, 23000, 23200, 23400, 23600]) {
+    oc[`${k}.000000`] = { ce: { last_price: priceOption('CE', F, k, T, 0.14, RISK_FREE_RATE, true), implied_volatility: 14, greeks: { delta: 0.99 } } };
+  }
+  const s = suggestCoveredCall(oc, spot, 50.5, 65, 0.3, 22, { expiry, now: NOW })!;
+  const want = [23000, 23200, 23400, 23600]
+    .map((k) => ({ k, d: greeksForLeg({ type: 'CE', strike: k, expiry, mark: oc[`${k}.000000`].ce.last_price }, { spot }, { now: NOW })!.delta }))
+    .sort((x, y) => Math.abs(x.d - 0.3) - Math.abs(y.d - 0.3))[0];
+  assert.strictEqual(s.strike, want.k);
+  assert.ok(Math.abs(s.strikeDelta - want.d) < 0.001 && s.deltaEstimated === false);
   assert.strictEqual(s.coveredLots, 0);
   assert.strictEqual(s.nearestLots, 1);
 });

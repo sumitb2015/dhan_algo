@@ -6,7 +6,7 @@
  * docs/NSE_HOLIDAYS_2026.md for the source and the maintenance notes. A year
  * the JSON lacks degrades to weekdays-only. MCX keeps its own calendar and is not covered.
  */
-import data from './nseHolidays.json';
+import data from './nseHolidays.json' with { type: 'json' };
 
 export const NSE_HOLIDAYS: ReadonlySet<string> = new Set(Object.values(data.holidays).flat());
 

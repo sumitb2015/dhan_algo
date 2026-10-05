@@ -9,12 +9,25 @@
 // user explicitly adopted it.
 //
 // Units: every quantity here is in CONTRACT UNITS (e.g. 65 for one NIFTY lot),
-// never lots, so the chain-supplied per-unit Greeks sum straight into
-// Nifty-unit exposure (dhan-position-greeks: posSign × units, no lot multiply).
+// never lots, so per-unit Greeks sum straight into Nifty-unit exposure
+// (posSign × units, no lot multiply). The Greeks are computed by the central
+// pricing library (`chainLegGreeks`: forward rolled to the leg's expiry, IV solved
+// from its premium), not read from Dhan's chain, so they match every other page.
 
 import type { ChainOc, ChainLegData } from './optionsStrategy';
 import { lookupChainLegData } from './optionsStrategy.ts';
 import { estimatePopAndDelta } from './ultimateScannerEngine.ts';
+import { greeksForLeg, type FutureQuote, type OptType } from './optionsPricing.ts';
+
+/** Per-unit Greeks of one chain strike from the central recipe; null when it cannot be priced (no spot/future, no premium, no IV). */
+export function chainLegGreeks(
+  type: OptType, strike: number, expiry: string, leg: ChainLegData | undefined, ltp: number | null | undefined,
+  market: { spot: number; future?: FutureQuote | null }, now?: number,
+) {
+  const mark = ltp != null && ltp > 0 ? ltp : leg?.last_price;
+  const chainIv = leg?.implied_volatility && leg.implied_volatility > 0 ? leg.implied_volatility / 100 : null;
+  return greeksForLeg({ type, strike, expiry, mark, chainIv }, market, { now });
+}
 
 // ── Ledger ─────────────────────────────────────────────────────────────────
 
@@ -206,7 +219,7 @@ export interface CallMark {
 export interface BookLegGreeks {
   id: string;
   delta: number | null; gamma: number | null; theta: number | null; vega: number | null;
-  /** True when delta came from the Black-Scholes fallback, not Dhan's chain. */
+  /** True when delta came from the plain Black-Scholes fallback because the central recipe had nothing to price the leg from. */
   deltaEstimated: boolean;
   missing: boolean;
 }
@@ -241,8 +254,11 @@ export function computeBook(params: {
   calls: (OpenCall & { ledgerUnits?: number })[];
   marks: Record<string, CallMark>;
   callsRealized: number;
+  /** The monthly future (price + ISO expiry): each call's forward is this rolled to its own expiry. Omit for spot·e^{rT}. */
+  future?: FutureQuote | null;
+  now?: number;
 }): BookSnapshot {
-  const { beesQty, beesAvg, beesLtp, spot, calls, marks, callsRealized } = params;
+  const { beesQty, beesAvg, beesLtp, spot, calls, marks, callsRealized, future, now } = params;
   const beesUnits = beesNiftyUnits(beesQty, beesLtp, spot);
   const beesPnl = beesQty > 0 && beesLtp > 0 && beesAvg > 0 ? (beesLtp - beesAvg) * beesQty : beesQty > 0 ? null : 0;
 
@@ -268,33 +284,32 @@ export function computeBook(params: {
     if (m?.ltp != null && m.ltp > 0) callsOpenPnl += (c.entryPrice - m.ltp) * c.units;
     else unpricedCount++;
 
-    const g = m?.chainLeg?.greeks;
-    const zeroOrNull = (v: number | null | undefined) => v === null || v === undefined || v === 0;
-    let d: number | null = g?.delta ?? null;
+    // Central recipe. When it cannot price the leg (no spot, no premium, no IV) delta falls back to the Black-Scholes
+    // estimate so coverage/net-delta never silently drop the leg; gamma/theta/vega stay excluded and the leg is counted missing.
+    const g = chainLegGreeks('CE', c.strike, c.expiry, m?.chainLeg, m?.ltp, { spot, future }, now);
+    const chainMissing = !g;
+    let d: number | null = g ? g.delta : null;
     let deltaEstimated = false;
-    const chainMissing = !g || (zeroOrNull(g.delta) && zeroOrNull(g.gamma) && zeroOrNull(g.theta) && zeroOrNull(g.vega));
-    if (chainMissing && spot > 0) {
-      // Delta drives the coverage/net-delta readout, so fall back to BS rather
-      // than silently dropping the leg. Gamma/theta/vega stay excluded.
+    if (!g && spot > 0) {
       const iv = m?.chainLeg?.implied_volatility && m.chainLeg.implied_volatility > 0 ? m.chainLeg.implied_volatility : 12;
       d = estimatePopAndDelta(spot, c.strike, Math.max(m?.dte ?? 1, 0.25), iv, true).delta;
       deltaEstimated = true;
     }
     const k = -c.units; // short
     if (d != null) callDelta += d * k;
-    if (!chainMissing) {
-      gamma += (g!.gamma ?? 0) * k;
-      theta += (g!.theta ?? 0) * k;
-      vega += (g!.vega ?? 0) * k;
+    if (g) {
+      gamma += g.gamma * k;
+      theta += g.theta * k;
+      vega += g.vega * k;
     } else {
       missingCount++;
     }
     legs.push({
       id: c.id,
       delta: d != null ? d * k : null,
-      gamma: chainMissing ? null : (g!.gamma ?? 0) * k,
-      theta: chainMissing ? null : (g!.theta ?? 0) * k,
-      vega: chainMissing ? null : (g!.vega ?? 0) * k,
+      gamma: g ? g.gamma * k : null,
+      theta: g ? g.theta * k : null,
+      vega: g ? g.vega * k : null,
       deltaEstimated,
       missing: chainMissing,
     });
@@ -344,6 +359,8 @@ export function suggestCoveredCall(
   lotSize: number,
   targetDelta: number,
   dte: number,
+  /** `expiry` (ISO) lets each strike's delta come from the central recipe; without it the Black-Scholes estimate on `dte` is used. */
+  opts: { expiry?: string; future?: FutureQuote | null; now?: number } = {},
 ): CoveredCallSuggestion | null {
   if (!(spot > 0)) return null;
   let best: { strike: number; delta: number; est: boolean; premium: number } | null = null;
@@ -352,9 +369,12 @@ export function suggestCoveredCall(
     if (!(strike > spot)) continue;
     const ce = lookupChainLegData(oc, strike, 'CE');
     if (!ce || !(ce.last_price > 0.05)) continue;
-    let delta = ce.greeks?.delta;
+    let delta: number;
     let est = false;
-    if (delta == null || delta === 0) {
+    const g = opts.expiry ? chainLegGreeks('CE', strike, opts.expiry, ce, null, { spot, future: opts.future }, opts.now) : null;
+    if (g) {
+      delta = g.delta;
+    } else {
       const iv = ce.implied_volatility && ce.implied_volatility > 0 ? ce.implied_volatility : 12;
       delta = estimatePopAndDelta(spot, strike, Math.max(dte, 0.25), iv, true).delta;
       est = true;

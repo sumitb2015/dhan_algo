@@ -239,9 +239,18 @@ Semantics every page now shares (each was a real divergence):
 - **Adapters, not engines.** `computePayoffStats`, `buildHeatmapGrid` (`optionsStrategy.ts`), `generatePayoffCurve`, `computeMultiExpiryStats`, `computeExpiryPnlAtSpot` (`optionsMonitorMath.ts`) keep their signatures but price through the library
   (`buildPayoffModel`, `payoffGrid`, `payoffAt`). The P&L-by-date grid now handles books with several expiries (the "narrow to one expiry" refusal is gone). Deleted as dead: `buildMultiExpiryCurve`, `buildTargetPayoffCurve`, `legsMissingIv`,
   `buildPayoffCurve`, `exactExpiryProfile`, `findBreakevens`, `computeCalendarPayoffCurve` and their tests (the calendar-spread semantics are covered in `lib/optionsPayoff.test.ts`).
-- **Left alone on purpose:** `lib/diagonalStrikeAdvisor.ts` (r = 7% for parity with the Python strategy); `computePayoff` in `basketStrategies.ts` (pure intrinsic payoff, no pricing, used for Baskets stats and thumbnails);
-  Options Monitor / Baskets *monitor* legs, which use the chain IV with the **monthly future as the forward for every leg** (the Sensibull convention; it overstates a weekly leg's forward by the monthly carry, ~64 pts on Nifty, so do not solve IV
-  from a mark against it — the Baskets Greeks panel rolls the future to each leg's expiry instead); chain Greeks used for strike selection (Focus Tool, Covered Call).
+- **Monitor legs follow the same recipe (2026-10-05).** Options Monitor and Baskets monitor legs no longer carry their own convention (they used the monthly future as EVERY leg's forward, a hardcoded 0.065, and in places Dhan's chain Greeks or spot pricing).
+  Every per-leg Greek now comes from `greeksForLeg(leg, {spot, future})` in `lib/optionsPricing.ts`: forward = the monthly future rolled to THAT leg's expiry (`rollForward`), IV solved from the leg's live premium (chain IV, then an assumed IV, only as fallbacks),
+  the library's rate and clock. `futureQuote(price, expiry)` guards the page's display label ("15 Sep") from reaching the clock. The Options Monitor page has one local wrapper, `modelLeg(...)`, for its twelve call sites. `generatePayoffCurve`,
+  `computeMultiExpiryStats` and `computeExpiryPnlAtSpot` take the future's expiry (`FutureQuote`) and roll per leg. **Sensibull parity is retired:** the pinned T+0 figure of −260 only held with the monthly forward on every leg; the parity test now
+  asserts the two surfaces agree with each other and that a just-entered strangle's T+0 P&L at spot is near zero.
+- **Diagonal advisor (2026-10-05):** `lib/diagonalStrikeAdvisor.ts` `computeBsGreeks` is a thin wrapper over `computeBsGreeksExact` (spot Black-Scholes, library rate). The Python strategy and its backtest use `RISK_FREE_RATE = 0.065` and `MIN_DTE_DAYS = 0.25`;
+  a test in `diagonalStrikeAdvisor.test.ts` fails if either drifts from the dashboard. Moving 7% → 6.5% shifted the backtest from +43.3% to +42.7% ROI (Jan–Sep 2026, 290 cycles).
+- **Focus Tool and Covered Call (2026-10-05):** strike selection and delta rules now use the model delta too. Focus Tool: the chain is mapped to quotes in one place (`FocusTool.tsx` chain fetch) through `modelAbsDelta100` in `lib/focusToolRules.ts`
+  (central recipe; Dhan's delta only when the model cannot price the strike, so a delta stop never silently falls back to SL ×); the pure rules and the Python parity fixtures are untouched. Covered Call: `chainLegGreeks` in `lib/coveredCallEngine.ts`
+  drives `computeBook` (book Greeks, no longer summed from the chain), `suggestCoveredCall`, the write-call delta and the chain modal; the terminal keeps the chain response's future for the forward.
+- **Left alone on purpose:** `computePayoff` in `basketStrategies.ts` (pure intrinsic payoff, no pricing, used for Baskets stats and thumbnails). Nothing else computes or sums a Greek outside `lib/optionsPricing.ts`; Dhan's chain Greeks remain only as per-strike display values
+  (option-chain tables, Skew, SmartChain) and as the last-resort delta fallback above.
 
 ### The pricing library: `lib/optionsPricing.ts` — the ONE place option maths lives (2026-10-05)
 Every page prices options and computes Greeks through this file, so a number can only be wrong in one place. Do not write a private

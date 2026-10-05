@@ -1,6 +1,6 @@
 // Open/closed state and last-tick age for the /markets table's Status column.
 
-import { isNseTradingDay, istDateIso } from '@/lib/nseHolidays';
+import { isNseTradingDay, istDateIso } from './nseHolidays.ts';
 
 export type MarketState = 'live' | 'pre' | 'stale' | 'closed';
 
