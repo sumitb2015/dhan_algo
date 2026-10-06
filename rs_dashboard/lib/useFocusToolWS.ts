@@ -15,9 +15,8 @@
  *
  * Same two-transport shape as useLiveOptionsWS: a direct WebSocket to the
  * bridge's localhost push server is primary; a 100ms HTTP poll of the API
- * route is the fallback while the WS is down. Renders are rAF-coalesced so a
- * 20-40Hz tick burst across three underlyings never queues more than one
- * render per frame.
+ * route is the fallback while the WS is down. Renders are coalesced (FLUSH_MIN_MS)
+ * so a tick burst never queues more than one render per window.
  */
 
 import { useEffect, useState } from 'react';
@@ -27,6 +26,8 @@ const FALLBACK_POLL_MS = 100;
 const WS_RETRY_BASE_MS = 500;
 const WS_RETRY_MAX_MS  = 5000;
 const WS_FAILS_TO_POLL = 3;
+/** Min gap between renders fed by ticks (~14 frames/s arrive; the page re-renders per flush). */
+const FLUSH_MIN_MS      = 150;
 /** Live WS frames older than this are ignored (half-open / stuck bridge). */
 const STALE_MS         = 10_000;
 /**
@@ -139,7 +140,8 @@ function runChannel(onUpdate: (patch: Partial<ChannelState>) => void): () => voi
   let lastWsMsgAt = 0;
   let wsConnectingAt = 0;
 
-  let rafId: number | null = null;
+  let flushTimer: ReturnType<typeof setTimeout> | null = null;
+  let lastFlushAt = 0;
   const latestRef = { quotes: null as FocusWSQuotes | null };
   const timers: ReturnType<typeof setTimeout>[] = [];
   let statusInterval: ReturnType<typeof setInterval> | null = null;
@@ -156,13 +158,18 @@ function runChannel(onUpdate: (patch: Partial<ChannelState>) => void): () => voi
     return !!(q.NIFTY || q.BANKNIFTY || q.SENSEX);
   };
 
+  // Coalesces tick bursts into at most one render per FLUSH_MIN_MS. A timer, not
+  // requestAnimationFrame: rAF never fires in a hidden tab, which would freeze the
+  // quotes the scheduler reads while the Focus Tool sits behind another tab.
   const scheduleFlush = () => {
-    if (rafId != null) return;
-    rafId = requestAnimationFrame(() => {
-      rafId = null;
+    if (flushTimer != null) return;
+    const wait = Math.max(0, FLUSH_MIN_MS - (Date.now() - lastFlushAt));
+    flushTimer = setTimeout(() => {
+      flushTimer = null;
       if (disposed || !latestRef.quotes) return;
+      lastFlushAt = Date.now();
       onUpdate({ quotes: latestRef.quotes });
-    });
+    }, wait);
   };
 
   const httpPoll = () => {
@@ -282,7 +289,7 @@ function runChannel(onUpdate: (patch: Partial<ChannelState>) => void): () => voi
 
   return () => {
     disposed = true;
-    if (rafId != null) cancelAnimationFrame(rafId);
+    if (flushTimer != null) clearTimeout(flushTimer);
     if (statusInterval) clearInterval(statusInterval);
     if (watchdogInterval) clearInterval(watchdogInterval);
     stopFallbackPolling();

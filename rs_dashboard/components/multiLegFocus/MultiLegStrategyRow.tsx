@@ -83,7 +83,7 @@ export interface MultiLegStrategyRowProps {
   onDelete: () => void;
   onPlace: () => Promise<void>;
   onExit: () => Promise<void>;
-  onExitLeg: (leg: MultiLegLeg) => Promise<void>;
+  onExitLeg: (leg: MultiLegLeg, exitLots?: number) => Promise<void>;
   /** Roll the given OPEN legs N strikes up/down (close, then reopen). */
   onShiftLegs?: (legIds: string[], direction: 'UP' | 'DOWN', steps: number) => Promise<void>;
   /** Which optional legs-table columns are shown (owned by MultiLegFocus so every row agrees). */
@@ -1295,7 +1295,7 @@ export default function MultiLegStrategyRow({
                       farExpiry={effectiveFarExpiry}
                       onChange={patch => updateLeg(leg.id, patch)}
                       onRemove={() => removeLeg(leg.id)}
-                      onExit={() => onExitLeg(leg)}
+                      onExit={lots => onExitLeg(leg, lots)}
                       onOpenAddLots={() => setSelectedLegForAddLots(leg)}
                       onShift={onShiftLegs ? (d => runShift([leg.id], d)) : undefined}
                       shiftSteps={shiftSteps}

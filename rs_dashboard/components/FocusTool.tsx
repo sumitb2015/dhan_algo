@@ -7,7 +7,7 @@ import NavBar from './NavBar';
 import {
   TrendingUp, Zap, ShieldOff, Shield, Activity,
   Clock, Plus, Layers, Target, Lock, RefreshCw, X, Trash2,
-  ChevronUp, ChevronDown, Grid3x3, Calendar, Minus, Ellipsis, ArrowRight, LayoutList,
+  ChevronUp, ChevronDown, Grid3x3, Calendar, Minus, Ellipsis, ArrowRight, LayoutList, Sigma,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
@@ -19,7 +19,7 @@ import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible';
 import {
-  DropdownMenu, DropdownMenuContent, DropdownMenuGroup, DropdownMenuItem, DropdownMenuLabel,
+  DropdownMenu, DropdownMenuContent, DropdownMenuItem,
   DropdownMenuSeparator, DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu';
 import { TabTable, type SortState, BUILDUP_STYLES } from './Scalper';
@@ -35,7 +35,7 @@ import type {
   FocusToolConfig, FocusRow, FocusRowFill, FocusIndexGroup,
   FocusReentryMode, FocusReentryTrigger, FocusPendingReentry, FocusLegSimpleMom, FocusLazyLeg, FocusLegRangeBreakout, FocusOverallMode,
   FocusUnderlying, FocusDte, FocusSide, FocusRowStatus, FocusStrikeMode,
-  FocusLegSlRule, FocusLegTrailSl, FocusLegOrbSl, FocusOrbStamp,
+  FocusLegSlRule, FocusLegTrailSl, FocusLegOrbSl, FocusOrbStamp, FocusLadderOrder,
 } from '@/lib/focusToolRows';
 // The pure rule engine for entry and exit decisions.
 import {
@@ -46,14 +46,17 @@ import {
   isSimRow, simLegPosition,
   legPinnedStrike, costStopReason, legOwnEntry, slRollStrike, DEFAULT_SL_ROLL_MAX,
   reentryConfig, evaluateReentry, reentryWindowClosed, monitoringStopped, momentumReentryKind, momentumTrigger,
-  absDelta100, modelAbsDelta100, addMinutesHm, resolveCriteriaStrike, closestPremiumStrike, ownedLegStop, legStopHit, legDeltaNow, legDeltaBasis, legTargetDeltaLevel,
+  addMinutesHm, resolveCriteriaStrike, closestPremiumStrike, ownedLegStop, legStopHit, legDeltaNow, legDeltaBasis, legTargetDeltaLevel,
   multipliedLots, clampHm, ENTRY_TIME_MIN, ENTRY_TIME_MAX, EXIT_TIME_MIN, EXIT_TIME_MAX, rangeWindow, rangeWindowPhase, rowHasMultiDayRange, candleBucket, tradingDte,
   legSlRuleOn, legStopLevel, legTargetSpotLevel, legTgtUnitLabel, MAX_LEG_REENTRIES, pendingReentryLevel, pendingReentryHit, legTargetReason, costReentryBasis,
   awaitingMomentumQuote, MOMENTUM_QUOTE_WAIT_MS, legTargetLevel,
   evaluateEntryMomentum, reRangeWindow, entryMomentumOn, overallSlConfig, overallProgress, nextOverallPeak, evaluateOverallExit, overallExitKind, evaluateOverallReentry, MAX_OVERALL_REENTRIES, rangeBreakoutOn, rangeBreakoutHit, costStopApplies, MAX_LAZY_LEGS, legSlMultiplier, legTarget, nextLazyLegId, lazyLegStrike, runningLazyLeg, simpleMomOn, simpleMomLevel, simpleMomHit,
   type PosRow, type RowLive,
 } from '@/lib/focusToolRules';
-import { futureQuote } from '@/lib/optionsPricing';
+import { postFocusEvent } from '@/lib/focusToolEvents';
+import { buildPayoffModel } from '@/lib/optionsPayoff';
+import { computeBasketGreeks, type GreekLeg } from '@/lib/multiLegGreeks';
+import { useFocusMarketData, expKey, strikeKey, type FutQuote, type StrikeRef } from '@/lib/useFocusMarketData';
 import { computeRowPnl, mtmForQty, shiftMayReopen, canMarkMtm, shiftCloseConfirmed, rowDisplayBookedPnl, putCallRatio, valuePutCallRatio, pickOpenInterest, closeRebaseDelta, closedSliceBooked, FTS_ORDER_SOURCE } from '@/lib/focusToolPnl';
 import { normalizeTradeRow, matchOutsideTrades, type NormalizedTrade } from '@/lib/multiLegFocus';
 import { stampItems, noteItems, adoptItems, canon, type RevBook } from '@/lib/revMerge';
@@ -63,6 +66,13 @@ import type { FocusConfigWrite } from '@/lib/focusToolRowsMerge';
 // â”€â”€ Constants â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 const UNDERLYINGS: FocusUnderlying[] = ['NIFTY', 'BANKNIFTY', 'SENSEX'];
+/** Limit-ladder levels: % above the leg's price at click. */
+const LADDER_PCTS = [5, 10, 15, 20, 25, 30] as const;
+/** Listed option tick; ladder prices round to it. */
+const OPTION_TICK = 0.05;
+function ladderPrice(ltp: number, pct: number): number {
+  return Math.round((ltp * (1 + pct / 100)) / OPTION_TICK) * OPTION_TICK;
+}
 const STRIKE_STEP: Record<FocusUnderlying, number> = { NIFTY: 50, BANKNIFTY: 100, SENSEX: 100 };
 
 /** Row layout: Pro (legs grid), Table (5-column) or Cards. */
@@ -207,11 +217,6 @@ function dteFor(expiry: string): number | null {
   return dteForExpiry(expiry, istToday());
 }
 
-/** The option chain keys strikes as '24250.000000'; every other source uses
- *  '24250'. Normalise both onto the integer form before joining them. */
-function strikeKey(n: number | string): string {
-  return String(Math.round(Number(n)));
-}
 
 /** Whether Focus WS buildup applies to this row, plus an expiry-mismatch hint.
  *
@@ -460,30 +465,6 @@ function LtpStack({
 
 // â”€â”€ Types â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
-interface FutQuote {
-  ltp: number;
-  change_pct: number | null;
-}
-
-/** Per-strike order handles from /api/scalper[/<broker>]/lookup. Dhan is the
- *  only broker that trades by numeric security id; the rest trade by symbol. */
-interface StrikeRef { ceId?: string; peId?: string; ceSymbol?: string; peSymbol?: string }
-interface LookupData { lotSize: number; strikes: Record<string, StrikeRef> }
-
-/** Spot + per-strike premiums/OI, flattened out of /api/options/chain.
- *  LTP drives the premium column; OI feeds OI PCR when the WS bridge is on a
- *  different expiry than this row (bridge stays on nearest). */
-interface ChainData {
-  spot: number;
-  oc: Record<string, { ce: number; pe: number; ceOi?: number | null; peOi?: number | null; ceDelta?: number | null; peDelta?: number | null; ceDeltaDhan?: number | null; peDeltaDhan?: number | null }>;
-}
-
-/** Cache key for `lookups`/`chains` — a row can trade any listed expiry, not
- *  just the nearest, so both caches are keyed per (underlying, expiry) pair
- *  rather than per underlying alone. */
-function expKey(underlying: FocusUnderlying, expiry: string): string {
-  return `${underlying}:${expiry}`;
-}
 
 /**
  * An order this page sent that its fill check could not confirm in full (a
@@ -528,6 +509,8 @@ interface UnconfirmedOrder {
 
 /** How long a close with no broker verdict blocks a resend (book-based brokers). */
 const UNCONFIRMED_ORDER_HOLD_MS = 15_000;
+/** Live WS quotes older than this (market hours) are treated as a stalled feed. */
+const WS_STALE_MS = 8_000;
 
 /**
  * The legs a row's VWAP series should cover, and the strikes to key it on.
@@ -602,7 +585,8 @@ const makeRow = (underlying: FocusUnderlying): FocusRow => ({
   vwapInterval: '1',
   vwapBufferPct: '0.1',
   slRupees: '',
-  slMultiplier: '1.2',
+  // Pair SL × starts off (blank); the per-leg SL × below stay at 1.2.
+  slMultiplier: '',
   ceSlMultiplier: '1.2',
   peSlMultiplier: '1.2',
   slRollStrikes: 0,
@@ -1263,9 +1247,13 @@ function LegRangeBreakoutControl({ row, leg, onUpdate, disabled, exclusiveNote }
           options={Array.from({ length: 25 }, (_, i) => ({ value: String(i), label: `End DTE ${i}` }))}
           onChange={v => set({ endDte: Number(v) })} className="w-28" />
       </>)}
+      <label className="inline-flex items-center gap-1.5" title={`Range start = the row's entry time (shared by every leg of this row; edit here or in Window). ${cur.kind === 'btst' ? 'BTST: this time on the previous trading day.' : cur.kind === 'positional' ? 'Positional: this time on the Entry DTE day.' : ''}`}>
+        Start
+        <TimeInput value={row.entryTime} onChange={v => onUpdate({ entryTime: clampHm(v, ENTRY_TIME_MIN, ENTRY_TIME_MAX) })} className="w-[5.5rem]" />
+      </label>
       <label className="inline-flex items-center gap-1.5" title="Range end — the last tracked second is one second before it">
         {cur.kind === 'btst' ? 'End (next day)' : 'End'}
-        <TimeInput value={cur.end} onChange={v => set({ end: v })} className="w-16" />
+        <TimeInput value={cur.end} onChange={v => set({ end: v })} className="w-[5.5rem]" />
       </label>
       <MiniSelect value={cur.side} ariaLabel={`${leg} Range Breakout side`} disabled={off}
         options={[{ value: 'high', label: 'High' }, { value: 'low', label: 'Low' }]}
@@ -1325,6 +1313,11 @@ function LegSimpleMomControl({ row, leg, onUpdate, disabled, exclusiveNote }: {
         className="w-40" />
       <RuleNumInput value={cur.value} onCommit={v => set({ value: v })} placeholder="0" disabled={off}
         className="w-12 h-6 text-center text-[11px]" />
+      <label className="inline-flex items-center gap-1.5"
+        title="Momentum is measured from the premium (or spot) at the row's entry time. Shared by every leg of this row; edit here or in Window.">
+        From
+        <TimeInput value={row.entryTime} onChange={v => onUpdate({ entryTime: clampHm(v, ENTRY_TIME_MIN, ENTRY_TIME_MAX) })} className="w-[5.5rem]" />
+      </label>
       {!off && simpleMomOn(cur) && status && <span className="text-[11px] font-semibold text-amber-400">{status}</span>}
     </div>
   );
@@ -1888,8 +1881,9 @@ function LegSlLevels({
  * an entry or exit a user was still editing.
  */
 function TimeInput({
-  value, onChange, title, className,
+  value, onChange, title, className, disabled,
 }: {
+  disabled?: boolean;
   value: string;
   onChange: (v: string) => void;
   title?: string;
@@ -1909,6 +1903,7 @@ function TimeInput({
     <div className={cn('relative flex items-center', className)}>
       <input
         type="time"
+        disabled={disabled}
         title={title}
         value={draft}
         onFocus={() => { focusedRef.current = true; }}
@@ -2256,10 +2251,12 @@ function GhostBtn({ onClick, children, title }: { onClick?: () => void; children
 // â”€â”€ Sticky Header â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 function FocusHeader({
-  futQuotes, realised, unrealised, total, marginAvailable, marginUtilized,
+  futQuotes, shown, realised, unrealised, total, marginAvailable, marginUtilized,
   wsLive, broker, setBroker, authenticatedBrokers,
 }: {
   futQuotes: Record<FocusUnderlying, FutQuote | null>;
+  /** Indices the futures strip lists (all three; one batched quote call regardless). */
+  shown: readonly FocusUnderlying[];
   realised: number; unrealised: number; total: number;
   marginAvailable: number | null; marginUtilized: number | null;
   wsLive: boolean;
@@ -2287,7 +2284,7 @@ function FocusHeader({
 
       {/* Centre: Futures */}
       <div className="flex items-center gap-6">
-        {UNDERLYINGS.map(u => {
+        {shown.map(u => {
           const q = futQuotes[u];
           const chg = q?.change_pct;
           return (
@@ -2439,7 +2436,7 @@ function ControlStrip({
   lockRupees, setLockRupees, trailX, setTrailX,
   totalPnl, peakMtm, lockMtm, simPnl, simRows,
   copyTrade,
-  onOpenRisk, onOpenOrders, onOpenOptionChain, onSetViewMode, viewMode,
+  onOpenRisk, onOpenOrders, onOpenOptionChain, onOpenGreeks, onSetViewMode, viewMode,
   onExitAll, confirmExitAll, exitingAll,
 }: {
   liveRealMoney: boolean; onToggleLive: () => void; broker: Broker;
@@ -2457,6 +2454,7 @@ function ControlStrip({
   onOpenRisk: () => void;
   onOpenOrders: () => void;
   onOpenOptionChain: () => void;
+  onOpenGreeks: () => void;
   onSetViewMode: (mode: FocusViewMode) => void;
   viewMode: FocusViewMode;
   onExitAll: () => void;
@@ -2522,6 +2520,10 @@ function ControlStrip({
         <GhostBtn onClick={onOpenRisk} title="Account-level P&L, target, stop and trail state">
           <Shield className="h-3.5 w-3.5 text-violet-400" />
           Risk / MTM
+        </GhostBtn>
+        <GhostBtn onClick={onOpenGreeks} title="Net Delta / Gamma / Theta / Vega of every open leg across the rows, from each leg's live price">
+          <Sigma className="h-3.5 w-3.5 text-violet-400" />
+          Greeks
         </GhostBtn>
         <GhostBtn onClick={onOpenOrders} title="Today's broker order book and tradebook for this account">
           <Activity className="h-3.5 w-3.5 text-zinc-400" />
@@ -2729,7 +2731,7 @@ function IndexGroupBar({
       </div>
 
       {/* Right stats */}
-      <div className="flex items-center gap-4">
+      <div className="flex items-center gap-6">
         {([
           { label: 'SPOT', hint: 'Current index level', val: spot > 0 ? spot.toFixed(2) : '\u2014' },
           { label: 'ATM', hint: `Nearest strike to ${group.atmBy === 'Fut' ? 'the futures LTP' : 'spot'} right now, per ATM BY`, val: liveAtm > 0 ? liveAtm : '\u2014' },
@@ -2737,8 +2739,8 @@ function IndexGroupBar({
           { label: 'DTE', hint: 'Days to the nearest expiry', val: dte ?? '\u2014' },
         ] as const).map(({ label, val, hint }) => (
           <div key={label} className="flex flex-col items-center" title={hint}>
-            <span className={cn(TXT_MICRO, 'font-bold text-zinc-600 uppercase tracking-widest')}>{label}</span>
-            <span className="text-xs font-mono font-bold text-zinc-200 tabular-nums">{val}</span>
+            <span className="text-xs font-bold text-zinc-400 uppercase tracking-widest">{label}</span>
+            <span className="text-lg font-mono font-black text-zinc-100 tabular-nums leading-tight">{val}</span>
           </div>
         ))}
         {wsLive && (
@@ -2851,6 +2853,11 @@ function FocusTableRowImpl({
   onExit: (leg: 'CE' | 'PE' | 'ALL') => void;
   onExitPartial: (leg: 'CE' | 'PE', pct: 25 | 50 | 75) => void;
   onAddLot: (leg: 'CE' | 'PE', lots: number) => void;
+  /** Add N lots to every open leg of the row in one action (pro view). */
+  onAddAllLegs?: (lots: number) => void;
+  /** Limit ladder (pro view): place a SELL limit at +pct% of the leg's price, or cancel one. */
+  onLadderPlace?: (leg: 'CE' | 'PE', pct: number, lots: number) => void;
+  onLadderCancel?: (leg: 'CE' | 'PE', orderId: string) => void;
   onReduceLot: (leg: 'CE' | 'PE', lots: number) => void;
   onCancelPending: (leg: 'CE' | 'PE') => void;
   onShift: (leg: 'CE' | 'PE', direction: 'UP' | 'DOWN') => void;
@@ -3148,7 +3155,7 @@ function FocusTableRowImpl({
               <button
                 onClick={() => onUpdate({
                   levelHigh: '', levelLow: '', levelVw: false, vwapInterval: '1', vwapBufferPct: '0.1',
-                  slRupees: '', slMultiplier: '1.2', ceSlMultiplier: '1.2', peSlMultiplier: '1.2',
+                  slRupees: '', slMultiplier: '', ceSlMultiplier: '1.2', peSlMultiplier: '1.2',
                   slRollStrikes: 0, slToCost: false, slToCostScope: undefined, squareOff: undefined, reSlMode: 'off', reTgtMode: 'off',
                   ceTgtPct: '', peTgtPct: '', noReEntryAfter: '', entryMomEnabled: false, entryMomValue: '', ceSimpleMom: undefined, peSimpleMom: undefined, ceRangeBreakout: undefined, peRangeBreakout: undefined, lazyLegs: undefined, reSlLazyId: undefined, reTgtLazyId: undefined, overallTarget: undefined, overallTrail: undefined, overallReSl: undefined, overallReTgt: undefined,
                 })}
@@ -3184,7 +3191,7 @@ function FocusTableRowImpl({
             </label>
             <label className="flex items-center gap-1.5 bg-zinc-900/60 border border-zinc-800/60 rounded-lg px-2 py-1" title="Pair stop: exit both legs when their combined premium reaches entry × this">
               <span className="text-amber-400 text-[11px] font-black w-12 shrink-0">Pair ×</span>
-              <RuleNumInput value={row.slMultiplier} onCommit={v => onUpdate({ slMultiplier: v })} className="w-full flex-1 min-w-0 h-7 text-center text-xs" />
+              <RuleNumInput value={row.slMultiplier} placeholder="off" onCommit={v => onUpdate({ slMultiplier: v })} className="w-full flex-1 min-w-0 h-7 text-center text-xs" />
             </label>
             <div className="flex items-center gap-1.5 bg-zinc-900/60 border border-zinc-800/60 rounded-lg px-2 py-1">
               <span className="text-rose-400 text-[11px] font-black w-12 shrink-0">Spot H&uarr;</span>
@@ -3299,13 +3306,44 @@ function fmtPnl0(n: number): string {
 function FocusProRowImpl({
   row, live, lotSize, spot, liveRealMoney, busy,
   expiries, buildupWsActive, buildupExpiryHint,
-  onUpdate, onDelete, onArm, onDisarm, onExit, onExitPartial, onAddLot, onReduceLot, onShift, onBlocked,
+  onUpdate, onDelete, onArm, onDisarm, onExit, onExitPartial, onAddLot, onAddAllLegs, onLadderPlace, onLadderCancel, onReduceLot, onShift, onBlocked,
   onCancelPending,
 }: FocusRowViewProps) {
   const combinedLtp = (live.ltpCe ?? 0) + (live.ltpPe ?? 0);
   const { ceValue, peValue, totalValue, pcr, pcrOi } = legValues(row, live, lotSize);
   const canTrade = (isSimRow(row) || liveRealMoney) && !busy && (live.ceStrike != null || live.peStrike != null) && (lotSize ?? 0) > 0;
   const flat = rowFlat(row);
+  // What is still in the market on the open legs. Premium left is in the same units as
+  // the entry premium (Σ lots × price); Profit left is that in rupees (Σ qty × price) — the
+  // most the open legs can still make if they all expire worthless.
+  const leftPremium = !rowFlat(row) ? sidePremium(row, live, undefined, lotSize) : 0;
+  const leftProfit = leftPremium * (lotSize ?? 0);
+  const leftPct = live.entryPremium > 0 && leftPremium > 0 ? (leftPremium / live.entryPremium) * 100 : null;
+  // Shown the way the legs read: the plain sum of each open leg's price (CE + PE), against the sum of
+  // their entry prices. The percent stays rupee-weighted (it is what Profit left is made of), so on a
+  // lopsided strangle (more lots on one leg) it can differ by a point or two from the plain ratio.
+  const openLegs = legsOf(row).filter(l => rowOwnsLeg(row, l));
+  const legNow = (l: 'CE' | 'PE') => Number(l === 'CE' ? live.ltpCe : live.ltpPe) || 0;
+  const nowSum = openLegs.reduce((a, l) => a + legNow(l), 0);
+  const entrySum = openLegs.reduce((a, l) => a + legOwnEntry(row, l, live), 0);
+  // Break-evens at expiry of the legs open now, from the central payoff model (same maths as every
+  // payoff chart). Re-solved only when the book changes, not on every tick.
+  const beExpiry = row.expiry || expiries[0] || '';
+  const beKey = flat ? '' : legsOf(row).filter(l => rowOwnsLeg(row, l)).map(l => {
+    const strike = l === 'CE' ? live.ceStrike : live.peStrike;
+    return `${l}:${strike}:${legOwnContracts(row, l, live)}:${legOwnEntry(row, l, live).toFixed(2)}`;
+  }).join('|');
+  const breakevens = useMemo<number[]>(() => {
+    if (!beKey || !beExpiry || !(spot > 0)) return [];
+    const legs = beKey.split('|').flatMap(part => {
+      const [t, k, q, e] = part.split(':');
+      const qty = Number(q), strike = Number(k), entry = Number(e);
+      if (!(qty > 0) || !(strike > 0) || !(entry > 0)) return [];
+      return [{ type: t as 'CE' | 'PE', strike, expiry: beExpiry, qty: -qty, entryPrice: entry }];
+    });
+    if (legs.length === 0) return [];
+    try { return buildPayoffModel({ legs, spot: Math.round(spot / 5) * 5, light: true, strikeStep: STRIKE_STEP[row.underlying] })?.breakevens ?? []; } catch { return []; }
+  }, [beKey, beExpiry, Math.round(spot / 5), row.underlying]); // eslint-disable-line react-hooks/exhaustive-deps
   const status = shownStatus(row, flat);
   const tradeBlockedWhy = !isSimRow(row) && !liveRealMoney
     ? 'REAL row — turn on LIVE · REAL MONEY to place orders, or switch the row to SIM'
@@ -3316,6 +3354,8 @@ function FocusProRowImpl({
         : 'Strike not resolved yet';
   const step = STRIKE_STEP[row.underlying];
   const [qty, setQty] = useState<Record<'CE' | 'PE', number>>({ CE: 1, PE: 1 });
+  const [addAllLots, setAddAllLots] = useState(1);
+  const [ladderLots, setLadderLots] = useState<Record<'CE' | 'PE', number>>({ CE: 1, PE: 1 });
   const [reOpen, setReOpen] = useState(false);
   const expiryLocked = rowOwnsLeg(row, 'CE') || rowOwnsLeg(row, 'PE');
   const onNearestExpiry = !row.expiry || row.expiry === expiries[0];
@@ -3324,7 +3364,7 @@ function FocusProRowImpl({
 
   const clearRules = () => onUpdate({
     levelHigh: '', levelLow: '', levelVw: false, vwapInterval: '1', vwapBufferPct: '0.1',
-    slRupees: '', slMultiplier: '1.2', ceSlMultiplier: '1.2', peSlMultiplier: '1.2',
+    slRupees: '', slMultiplier: '', ceSlMultiplier: '1.2', peSlMultiplier: '1.2',
     slRollStrikes: 0, slToCost: false, slToCostScope: undefined, squareOff: undefined, reSlMode: 'off', reTgtMode: 'off',
     ceTgtPct: '', peTgtPct: '', noReEntryAfter: '', entryMomEnabled: false, entryMomValue: '', ceSimpleMom: undefined, peSimpleMom: undefined, ceRangeBreakout: undefined, peRangeBreakout: undefined, lazyLegs: undefined, reSlLazyId: undefined, reTgtLazyId: undefined, overallTarget: undefined, overallTrail: undefined, overallReSl: undefined, overallReTgt: undefined,
   });
@@ -3346,8 +3386,12 @@ function FocusProRowImpl({
     const lockedTitle = `${leg} holds an open position — use the arrows to roll it, or exit the leg first`;
     const q = qty[leg];
     const tone = isCe ? 'text-emerald-400' : 'text-rose-400';
+    const ladderOpen = !!onLadderPlace && owns && Number(pos?.netQty) < 0;
+    const ladderRef = isCe ? live.ltpCe : live.ltpPe;
+    const pending = (row.ladder ?? []).filter(o => o.leg === leg);
     return (
-      <TableRow key={leg} className={cn('border-zinc-800/70 hover:bg-zinc-800/20', !inSide && !owns && 'opacity-50')}>
+      <React.Fragment key={leg}>
+      <TableRow className={cn('border-zinc-800/70 hover:bg-zinc-800/20', !inSide && !owns && 'opacity-50')}>
         <TableCell className="py-1.5 pl-3 pr-1 w-10">
           <span className={cn('inline-flex h-6 w-9 items-center justify-center rounded-md border text-xs font-black',
             isCe ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30' : 'bg-rose-500/10 text-rose-400 border-rose-500/30')}>{leg}</span>
@@ -3393,31 +3437,36 @@ function FocusProRowImpl({
             ) : null}
           </div>
         </TableCell>
-        <TableCell className={cn('py-1.5 px-2 text-right font-mono text-sm font-black tabular-nums', tone)}>
+        {/* Average entry: this row's own stamped entry (legOwnEntry), never the broker's blended day average when ours exists */}
+        <TableCell className="py-1.5 px-2 text-center font-mono text-sm font-bold tabular-nums text-zinc-100"
+          title={`${leg} average entry price (this row's own fills)`}>
+          {owns && pos && Number(pos.netQty) !== 0 && legOwnEntry(row, leg, live) > 0 ? legOwnEntry(row, leg, live).toFixed(2) : '—'}
+        </TableCell>
+        <TableCell className={cn('py-1.5 px-2 text-center font-mono text-sm font-black tabular-nums', tone)}>
           {ltp != null ? ltp.toFixed(2) : '—'}
         </TableCell>
-        <TableCell className="py-1.5 px-2">
+        <TableCell className="py-1.5 px-2 text-center">
           {owns && pos && Number(pos.netQty) !== 0
             ? <LegOpenBadge pos={pos} />
             : <span className="text-[11px] font-semibold uppercase tracking-wider text-zinc-500">{inSide ? 'Flat' : 'Not traded'}</span>}
         </TableCell>
-        <TableCell className={cn('py-1.5 px-2 text-right font-mono text-sm font-bold tabular-nums', pnlClass(pnl))}>
+        <TableCell className={cn('py-1.5 px-2 text-center font-mono text-sm font-bold tabular-nums', pnlClass(pnl))}>
           {pnl != null ? fmtPnl0(pnl) : '—'}
         </TableCell>
         {/* This leg's own rules */}
-        <TableCell className="py-1.5 px-2">
+        <TableCell className="py-1.5 px-2 text-center">
           <RuleNumInput value={(isCe ? row.ceSlMultiplier : row.peSlMultiplier) ?? '1.2'}
             onCommit={v => onUpdate(isCe ? { ceSlMultiplier: v } : { peSlMultiplier: v })}
             title={legSlOverridden(row, leg) ? `${leg} uses its ${legSlOverridden(row, leg)}; this × is the fallback when that cannot be measured` : `Exit ${leg} alone when its premium reaches its own entry × this`}
             className={cn(PRO_INPUT, 'w-14')} />
         </TableCell>
-        <TableCell className="py-1.5 px-2">
+        <TableCell className="py-1.5 px-2 text-center">
           <RuleNumInput value={(isCe ? row.ceTgtPct : row.peTgtPct) ?? ''} placeholder="off"
             onCommit={v => onUpdate(isCe ? { ceTgtPct: v } : { peTgtPct: v })}
             title={`Exit ${leg} alone once it has moved this many ${legTgtUnitWords(row.legTgtUnit)}. Blank = off`}
             className={cn(PRO_INPUT, 'w-14')} />
         </TableCell>
-        <TableCell className="py-1.5 px-2">
+        <TableCell className="py-1.5 px-2 text-center">
           <LegSlLevels row={row} live={live} leg={leg} lotSize={lotSize} inline />
         </TableCell>
         {/* Orders */}
@@ -3434,26 +3483,17 @@ function FocusProRowImpl({
               title={legFlat ? 'Nothing open' : canTrade ? `Buy back ${q} lot(s) of ${leg}` : tradeBlockedWhy} aria-label={`Reduce ${leg} by ${q} lots`}>
               <Minus className="size-3.5" />
             </Button>
-            <DropdownMenu>
-              <DropdownMenuTrigger
-                disabled={!canTrade || legFlat}
-                render={<Button variant="outline" size="icon" className="size-7 border-zinc-700 bg-zinc-900 text-zinc-300"
-                  aria-label={`Partial exit ${leg}`} title={legFlat ? 'Nothing open' : `Partial exit ${leg}`} />}
-              >
-                <Ellipsis className="size-3.5" />
-              </DropdownMenuTrigger>
-              <DropdownMenuContent align="end" className="w-44">
-                <DropdownMenuGroup>
-                  <DropdownMenuLabel>Exit part of {leg}</DropdownMenuLabel>
-                  {chips.map(c => (
-                    <DropdownMenuItem key={c.pct} disabled={!canTrade || !c.enabled}
-                      onClick={() => onExitPartial(leg, c.pct as 25 | 50 | 75)}>
-                      {c.pct}%<span className="ml-auto text-xs text-zinc-500">{c.title}</span>
-                    </DropdownMenuItem>
-                  ))}
-                </DropdownMenuGroup>
-              </DropdownMenuContent>
-            </DropdownMenu>
+            {/* Part-exit chips, shown directly (no menu): a chip is disabled when its % rounds to zero lots */}
+            {chips.map(c => (
+              <Button key={c.pct} variant="outline" size="sm"
+                className="h-7 px-1.5 border-zinc-700 bg-zinc-900 text-xs font-bold text-zinc-300"
+                disabled={!canTrade || legFlat || !c.enabled}
+                onClick={() => onExitPartial(leg, c.pct as 25 | 50 | 75)}
+                title={legFlat ? 'Nothing open' : c.title}
+                aria-label={`Exit ${c.pct}% of ${leg}`}>
+                {c.pct}%
+              </Button>
+            ))}
             <Button size="sm" className="h-7 px-3 bg-rose-600 text-oncolor hover:bg-rose-500 font-bold"
               disabled={!canTrade || legFlat} onClick={() => onExit(leg)}
               title={legFlat ? 'Nothing open' : canTrade ? `Exit the ${leg} leg` : tradeBlockedWhy}>
@@ -3462,6 +3502,39 @@ function FocusProRowImpl({
           </div>
         </TableCell>
       </TableRow>
+      {(ladderOpen || pending.length > 0) && (
+        <TableRow className="border-zinc-800/70 hover:bg-transparent">
+          <TableCell colSpan={10} className="py-1 pl-3 pr-3">
+            <div className="flex flex-wrap items-center gap-2">
+              <span className={cn('text-[11px] font-black uppercase tracking-wider', tone)}>{leg} limit sell</span>
+              <LegLotSelect value={ladderLots[leg]} onChange={n => setLadderLots(p => ({ ...p, [leg]: n }))} className="w-11 h-7 text-xs" title={`Lots each ${leg} limit order sells`} />
+              {LADDER_PCTS.map(pct => {
+                const px = ladderRef != null && ladderRef > 0 ? ladderPrice(ladderRef, pct) : null;
+                const taken = pending.some(o => o.pct === pct);
+                return (
+                  <Button key={pct} variant="outline" size="sm"
+                    className="h-7 px-2 border-zinc-700 bg-zinc-900 text-xs font-bold text-zinc-200"
+                    disabled={!ladderOpen || !canTrade || taken || px == null}
+                    onClick={() => onLadderPlace?.(leg, pct, ladderLots[leg])}
+                    title={taken ? `+${pct}% limit is already placed` : px != null ? `Place SELL LIMIT ${ladderLots[leg]} lot(s) at ${px.toFixed(2)} (+${pct}% over ${ladderRef!.toFixed(2)})` : 'Waiting for a price'}
+                    aria-label={`${leg} sell limit ${pct} percent above price`}>
+                    +{pct}%{px != null && <span className="ml-1 font-mono text-[11px] font-semibold text-zinc-400">{px.toFixed(2)}</span>}
+                  </Button>
+                );
+              })}
+              {pending.map(o => (
+                <span key={o.orderId} className="inline-flex items-center gap-1 rounded-md border border-amber-500/40 bg-amber-500/10 px-1.5 py-0.5 font-mono text-xs font-bold text-amber-300"
+                  title={`Resting SELL LIMIT ${o.qty} @ ${o.price.toFixed(2)} (+${o.pct}%)${o.credited ? ` · ${o.credited} filled` : ''}`}>
+                  {o.price.toFixed(2)} ×{Math.round(o.qty / (lotSize || 1))}
+                  <button type="button" className="ml-0.5 rounded px-1 text-amber-200 hover:bg-amber-500/30 cursor-pointer"
+                    onClick={() => onLadderCancel?.(leg, o.orderId)} aria-label={`Cancel ${leg} limit at ${o.price.toFixed(2)}`} title="Cancel this limit order">✕</button>
+                </span>
+              ))}
+            </div>
+          </TableCell>
+        </TableRow>
+      )}
+      </React.Fragment>
     );
   };
 
@@ -3521,12 +3594,51 @@ function FocusProRowImpl({
         </ProField>
 
         <div className="ml-auto flex items-center gap-2">
+          <div className="flex items-center gap-7 pr-3">
+          {breakevens.length > 0 && (
+            <div className="flex flex-col items-end leading-none"
+              title="Break-even index levels at expiry for the legs open now (premium collected on them only; realised P&L from closed legs is not included)">
+              <span className={PRO_LABEL}>Breakeven</span>
+              <span className="font-mono text-lg font-black tabular-nums text-sky-300">
+                {breakevens.map(b => Math.round(b).toLocaleString('en-IN')).join(' – ')}
+              </span>
+            </div>
+          )}
+          {leftPremium > 0 && (
+            <>
+              <div className="flex flex-col items-end leading-none"
+                title={`Sum of the open legs' prices now (${openLegs.map(l => `${l} ${legNow(l).toFixed(2)}`).join(' + ')}) against the sum of their entries (${entrySum.toFixed(2)})${leftPct != null ? `. ${leftPct.toFixed(0)}% of the premium (rupee-weighted by lots) is left to decay` : ''}`}>
+                <span className={PRO_LABEL}>Premium left</span>
+                <span className="font-mono text-lg font-black tabular-nums text-zinc-100">
+                  {nowSum.toFixed(2)}
+                  <span className="ml-1.5 text-xs font-bold text-zinc-400">of {entrySum.toFixed(2)}{leftPct != null && ` · ${leftPct.toFixed(0)}%`}</span>
+                </span>
+              </div>
+              <div className="flex flex-col items-end leading-none"
+                title={`Most you can still make on the open legs if everything expires worthless: Σ qty × current price = ${fmtInr(leftProfit)}. Realised so far is in P&L.`}>
+                <span className={PRO_LABEL}>Profit left</span>
+                <span className="font-mono text-lg font-black tabular-nums text-emerald-400">{fmtInr(leftProfit)}</span>
+              </div>
+            </>
+          )}
           <div className="flex flex-col items-end leading-none" title="Row total P&L (realized + open mark-to-market)">
             <span className={PRO_LABEL}>P&amp;L</span>
             <span className={cn('font-mono text-lg font-black tabular-nums', pnlClass(live.pnl))}>
               {fmtPnl0(live.pnl)}
             </span>
           </div>
+          </div>
+          {onAddAllLegs && !flat && (
+            <div className="flex items-center gap-1" title="Add this many lots to EVERY open leg of the row (CE then PE, one after the other)">
+              <LegLotSelect value={addAllLots} onChange={setAddAllLots} className="w-12 h-8 text-xs" title="Lots to add to each open leg" />
+              <Button size="sm" variant="outline" className="h-8 px-3 border-emerald-600/50 bg-zinc-900 text-emerald-400 hover:bg-emerald-600 hover:text-oncolor font-bold"
+                disabled={!canTrade} onClick={() => onAddAllLegs(addAllLots)}
+                title={canTrade ? `Sell ${addAllLots} more lot(s) on each open leg` : tradeBlockedWhy}
+                aria-label={`Add ${addAllLots} lots to every open leg`}>
+                <Plus className="size-3.5" /> Add to all legs
+              </Button>
+            </div>
+          )}
           {(status === 'draft' || status === 'exited') && (
             <Button size="sm" className="h-8 px-4 bg-violet-600 text-oncolor hover:bg-violet-500 font-bold" onClick={onArm}>
               <Zap className="size-3.5" /> Arm
@@ -3561,12 +3673,14 @@ function FocusProRowImpl({
       <div className="grid grid-cols-1 xl:grid-cols-[minmax(0,1fr)_17rem]">
         {/* ── Legs grid ── */}
         <div className="min-w-0">
-          <Table className="min-w-[980px]">
+          <Table className="min-w-[1500px] table-fixed">
             <TableHeader>
               <TableRow className="bg-zinc-800 hover:bg-zinc-800 border-zinc-700">
                 {[
-                  ['', 'pl-3'], ['Strike', ''], ['LTP', 'text-right'], ['Position', ''], ['P&L', 'text-right'],
-                  ['SL ×', ''], [`Tgt ${legTgtUnitLabel(row.legTgtUnit)}`, ''], ['Stop · target at', ''], ['Orders', 'text-right pr-3'],
+                  // Fixed percentage widths (sum 100) so the columns spread evenly instead of
+                  // each hugging its widest cell.
+                  ['', 'pl-3 w-[3%]'], ['Strike', 'w-[23%]'], ['Entry', 'text-center w-[7%]'], ['LTP', 'text-center w-[7%]'], ['Position', 'text-center w-[10%]'], ['P&L', 'text-center w-[8%]'],
+                  ['SL ×', 'text-center w-[6%]'], [`Tgt ${legTgtUnitLabel(row.legTgtUnit)}`, 'text-center w-[6%]'], ['Stop · target at', 'text-center w-[10%]'], ['Orders', 'text-right pr-3 w-[20%]'],
                 ].map(([h, c], i) => (
                   <TableHead key={i} className={cn('h-8 px-2 text-xs font-bold text-white', c)}>{h}</TableHead>
                 ))}
@@ -3607,7 +3721,7 @@ function FocusProRowImpl({
               <RuleNumInput value={row.slRupees} placeholder="off" onCommit={v => onUpdate({ slRupees: v })} className={cn(PRO_INPUT, 'w-20')} />
             </ProField>
             <ProField label="Pair ×" title="Pair stop: exit both legs when their combined premium reaches entry × this">
-              <RuleNumInput value={row.slMultiplier} onCommit={v => onUpdate({ slMultiplier: v })} className={cn(PRO_INPUT, 'w-14')} />
+              <RuleNumInput value={row.slMultiplier} placeholder="off" onCommit={v => onUpdate({ slMultiplier: v })} className={cn(PRO_INPUT, 'w-14')} />
             </ProField>
             <ProField label="Spot H ↑" title="Exit the row when spot reaches this high">
               <RuleNumStepper value={row.levelHigh} onCommit={v => onUpdate({ levelHigh: v })}
@@ -4021,7 +4135,7 @@ function FocusRowCardImpl({
           </span>
           <div className="flex items-center gap-1.5">
             <button
-              onClick={() => onUpdate({ levelHigh: '', levelLow: '', levelVw: false, vwapInterval: '1', vwapBufferPct: '0.1', slRupees: '', slMultiplier: '1.2', ceSlMultiplier: '1.2', peSlMultiplier: '1.2', slRollStrikes: 0, slToCost: false, slToCostScope: undefined, squareOff: undefined, reSlMode: 'off', reTgtMode: 'off', ceTgtPct: '', peTgtPct: '', noReEntryAfter: '', entryMomEnabled: false, entryMomValue: '', ceSimpleMom: undefined, peSimpleMom: undefined, ceRangeBreakout: undefined, peRangeBreakout: undefined, lazyLegs: undefined, reSlLazyId: undefined, reTgtLazyId: undefined, overallTarget: undefined, overallTrail: undefined, overallReSl: undefined, overallReTgt: undefined })}
+              onClick={() => onUpdate({ levelHigh: '', levelLow: '', levelVw: false, vwapInterval: '1', vwapBufferPct: '0.1', slRupees: '', slMultiplier: '', ceSlMultiplier: '1.2', peSlMultiplier: '1.2', slRollStrikes: 0, slToCost: false, slToCostScope: undefined, squareOff: undefined, reSlMode: 'off', reTgtMode: 'off', ceTgtPct: '', peTgtPct: '', noReEntryAfter: '', entryMomEnabled: false, entryMomValue: '', ceSimpleMom: undefined, peSimpleMom: undefined, ceRangeBreakout: undefined, peRangeBreakout: undefined, lazyLegs: undefined, reSlLazyId: undefined, reTgtLazyId: undefined, overallTarget: undefined, overallTrail: undefined, overallReSl: undefined, overallReTgt: undefined })}
               className={cn('text-[11px] text-zinc-500 hover:text-zinc-300 transition-colors cursor-pointer', FOCUS_RING)}
             >
               Clear
@@ -4237,23 +4351,16 @@ export default function FocusTool() {
     for (const p of positions) { r += Number(p.realizedProfit) || 0; u += Number(p.unrealizedProfit) || 0; }
     return { realised: r, unrealised: u, total: r + u };
   }, [positions]);
-  const [futQuotes, setFutQuotes] = useState<Record<FocusUnderlying, FutQuote | null>>({
-    NIFTY: null, BANKNIFTY: null, SENSEX: null,
+  // Indices in use: NIFTY always, the others once they have a row or a started group.
+  // Everything fetched per index (expiries, lookups, futures, the live bridge) is
+  // limited to these — BANKNIFTY / SENSEX cost nothing until you open a row for them.
+  const watchedKey = UNDERLYINGS.filter(u => u === 'NIFTY'
+    || config.rows.some(r => r.underlying === u)
+    || config.groups.some(g => g.underlying === u && g.enabled)).join(',');
+  const watched = useMemo(() => watchedKey.split(',') as FocusUnderlying[], [watchedKey]);
+  const { futQuotes, spotPrices, lotSizes, expiries, lookups, chains } = useFocusMarketData({
+    broker, watched, watchedKey, rows: config.rows, groups: config.groups,
   });
-  const [spotPrices, setSpotPrices] = useState<Record<FocusUnderlying, number>>({
-    NIFTY: 0, BANKNIFTY: 0, SENSEX: 0,
-  });
-  const [lotSizes, setLotSizes] = useState<Record<FocusUnderlying, number | null>>({
-    NIFTY: null, BANKNIFTY: null, SENSEX: null,
-  });
-  const [expiries, setExpiries] = useState<Record<FocusUnderlying, string[]>>({
-    NIFTY: [], BANKNIFTY: [], SENSEX: [],
-  });
-  // Keyed by expKey(underlying, expiry) — a row can trade any listed expiry,
-  // not just the nearest, so these can no longer be one entry per underlying.
-  // See expKey's doc comment.
-  const [lookups, setLookups] = useState<Record<string, LookupData | null>>({});
-  const [chains, setChains] = useState<Record<string, ChainData | null>>({});
   // For handlers that run outside a render (the fill-ledger writer stamps the
   // entry delta from it).
   const chainsRef = useRef(chains);
@@ -4329,7 +4436,7 @@ export default function FocusTool() {
    */
   const lockFloorRef = useRef<number | null>(null);
 
-  const [activeModal, setActiveModal] = useState<'risk' | 'orderbook' | 'optionchain' | null>(null);
+  const [activeModal, setActiveModal] = useState<'risk' | 'orderbook' | 'optionchain' | 'greeks' | null>(null);
   // Remembered per browser: a display preference only, never trading state.
   const [viewMode, setViewModeState] = useState<FocusViewMode>('table');
   useEffect(() => {
@@ -4374,7 +4481,28 @@ export default function FocusTool() {
   // Standalone bridge (scripts/tools/focus_tool_ws.py) — all three underlyings
   // over one WebSocket connection, independent of AdvancedScalper's
   // one-broker-one-underlying bridge. See useFocusToolWS's own doc comment.
-  const { quotes: focusWsQuotes, bridgeStatus: focusWsStatus } = useFocusToolWS();
+  const { quotes: rawWsQuotes, bridgeStatus: focusWsStatus } = useFocusToolWS();
+  // The last accepted WS frame stays in state when the feed stalls, so a frozen
+  // price looked identical to a live one. During market hours, frames older than
+  // WS_STALE_MS are dropped here: every consumer then falls back to the REST chain
+  // (and the banner below says so). Checked on a 1s timer that only re-renders when
+  // the flag flips, never per tick.
+  const rawWsQuotesRef = useRef(rawWsQuotes);
+  rawWsQuotesRef.current = rawWsQuotes;
+  const [wsStale, setWsStale] = useState(false);
+  useEffect(() => {
+    const check = () => {
+      const hm = istHm();
+      const at = Date.parse(rawWsQuotesRef.current?.updated_at ?? '');
+      const stale = hm >= '09:16' && hm < '15:30' && Number.isFinite(at) && Date.now() - at > WS_STALE_MS;
+      setWsStale(prev => (prev === stale ? prev : stale));
+    };
+    check();
+    const t = setInterval(check, 1000);
+    return () => clearInterval(t);
+  }, []);
+  const focusWsQuotes = wsStale ? null : rawWsQuotes;
+
   const wsLive = focusWsStatus.status === 'RUNNING';
 
   // Start (or restart onto new expiries) once each underlying's listed
@@ -4383,10 +4511,16 @@ export default function FocusTool() {
   // not nearest-only. Never stopped on unmount — same long-lived convention
   // as AdvancedScalper, so returning reconnects instantly.
   const niftyBridgeExpiry = bridgeExpiriesForUnderlying('NIFTY', config.rows, expiries.NIFTY ?? []);
-  const bankniftyBridgeExpiry = bridgeExpiriesForUnderlying('BANKNIFTY', config.rows, expiries.BANKNIFTY ?? []);
-  const sensexBridgeExpiry = bridgeExpiriesForUnderlying('SENSEX', config.rows, expiries.SENSEX ?? []);
+  // '' = not watched: the bridge then does not subscribe that index at all.
+  const bankniftyBridgeExpiry = watched.includes('BANKNIFTY') ? bridgeExpiriesForUnderlying('BANKNIFTY', config.rows, expiries.BANKNIFTY ?? []) : '';
+  const sensexBridgeExpiry = watched.includes('SENSEX') ? bridgeExpiriesForUnderlying('SENSEX', config.rows, expiries.SENSEX ?? []) : '';
+  // A watched index must have its expiry before the bridge starts, or it would start
+  // without it and be restarted a moment later.
+  const bridgeReady = !!niftyBridgeExpiry
+    && (!watched.includes('BANKNIFTY') || !!bankniftyBridgeExpiry)
+    && (!watched.includes('SENSEX') || !!sensexBridgeExpiry);
   useEffect(() => {
-    if (!niftyBridgeExpiry || !bankniftyBridgeExpiry || !sensexBridgeExpiry) return;
+    if (!bridgeReady) return;
     fetch('/api/focus-tool/live-ws', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -4399,7 +4533,7 @@ export default function FocusTool() {
         },
       }),
     }).catch(() => {});
-  }, [niftyBridgeExpiry, bankniftyBridgeExpiry, sensexBridgeExpiry]);
+  }, [bridgeReady, niftyBridgeExpiry, bankniftyBridgeExpiry, sensexBridgeExpiry]);
 
   // Self-heal: the effect above fires only when an expiry changes, so a bridge
   // that dies mid-session (a dashboard restart's PID sweep, a crash) is never
@@ -4408,7 +4542,7 @@ export default function FocusTool() {
   // idempotent (start lock + "already running" check), so this is safe.
   const bridgeDown = ['STOPPED', 'STALE', 'ERROR'].includes(focusWsStatus.status);
   useEffect(() => {
-    if (!bridgeDown || !niftyBridgeExpiry || !bankniftyBridgeExpiry || !sensexBridgeExpiry) return;
+    if (!bridgeDown || !bridgeReady) return;
     const restart = () => {
       fetch('/api/focus-tool/live-ws', {
         method: 'POST',
@@ -4425,7 +4559,7 @@ export default function FocusTool() {
     };
     const t = setInterval(restart, 15_000);
     return () => clearInterval(t);
-  }, [bridgeDown, niftyBridgeExpiry, bankniftyBridgeExpiry, sensexBridgeExpiry]);
+  }, [bridgeDown, bridgeReady, niftyBridgeExpiry, bankniftyBridgeExpiry, sensexBridgeExpiry]);
 
   /** Adopt a server-authoritative config: state plus the risk-bar mirrors. */
   // Last saved rev + content per row — see doSaveConfig and lib/revMerge.ts.
@@ -4501,209 +4635,6 @@ export default function FocusTool() {
     return () => { cancelled = true; clearInterval(t); };
   }, [applyServerConfig]);
 
-  useEffect(() => {
-    UNDERLYINGS.forEach(u => {
-      fetch(`/api/options/expiries?underlying=${u}&broker=${broker}`)
-        .then(r => r.json())
-        .then((j: { success: boolean; data?: string[] }) => {
-          if (j.success && j.data) setExpiries(prev => ({ ...prev, [u]: j.data! }));
-        })
-        .catch(() => {});
-    });
-  }, [broker]);
-
-  useEffect(() => {
-    const fetchTopIndices = () => {
-      fetch('/api/scalper/top-indices')
-        .then(r => r.json())
-        .then((j: { success?: boolean; quotes?: Record<string, { ltp: number; change_pct: number | null }> }) => {
-          if (!j.quotes) return;
-          const q = j.quotes;
-          // Spot only. This endpoint has no futures rows at all — the header's
-          // futures strip is served by /api/focus-tool/futures below — and it
-          // dropped SENSEX in favour of CRUDEOIL, so SENSEX spot comes off its
-          // option chain instead (see the chain effect).
-          const KEY_MAP: Record<string, FocusUnderlying> = {
-            'NIFTY 50': 'NIFTY', 'NIFTY': 'NIFTY', 'BANKNIFTY': 'BANKNIFTY', 'SENSEX': 'SENSEX',
-          };
-          setSpotPrices(prev => {
-            const next = { ...prev };
-            for (const [key, val] of Object.entries(q)) {
-              const u = KEY_MAP[key];
-              if (u && val?.ltp) {
-                next[u] = val.ltp;
-              }
-            }
-            return next;
-          });
-        })
-        .catch(() => {});
-    };
-    fetchTopIndices();
-    const t = setInterval(fetchTopIndices, 2000);
-    return () => clearInterval(t);
-  }, [broker]);
-
-  // ── Futures strip ───────────────────────────────────────────────
-  // /api/focus-tool/futures exists precisely for this header: futures contract
-  // ids expire, so it resolves them once per IST day and then quotes them off
-  // Dhan's batched OHLC endpoint. % change comes from the same response —
-  // the route caches the first genuine (pre-15:30-flip) close each day and
-  // guards against a later flipped value, so this never needs to reason about
-  // the flip itself. The header hides the % when it's still null (no genuine
-  // close cached yet today).
-  useEffect(() => {
-    const fetchFuts = () => {
-      fetch('/api/focus-tool/futures')
-        .then(r => r.json())
-        .then((j: { quotes?: Record<string, { ltp: number; change_pct: number | null }> }) => {
-          if (!j.quotes) return;
-          setFutQuotes(prev => {
-            const next = { ...prev };
-            for (const u of UNDERLYINGS) {
-              const q = j.quotes?.[u];
-              if (q && q.ltp > 0) next[u] = { ltp: q.ltp, change_pct: q.change_pct ?? null };
-            }
-            return next;
-          });
-        })
-        .catch(() => {});
-    };
-    fetchFuts();
-    const t = setInterval(fetchFuts, 3000);
-    return () => clearInterval(t);
-  }, []);
-
-  // The nearest expiry per underlying, as a scalar dep. `expiries` is replaced
-  // wholesale on every fetch, so depending on the object itself would re-run
-  // these effects on every poll even when nothing changed.
-  const expiryKey = UNDERLYINGS.map(u => expiries[u]?.[0] ?? '').join('|');
-  // Every row's own picked expiry (or '' if it hasn't picked one yet), as a
-  // scalar dep — a row can trade any listed expiry, not just nearest, so the
-  // lookup/chain effects below must also warm whatever a row actually picked.
-  const rowExpiryKey = config.rows.map(r => `${r.underlying}:${r.expiry ?? ''}`).join('|');
-
-  // ── Lot sizes + per-strike order handles ────────────────────────
-  // One lookup per (underlying, expiry): it carries the lot size AND the
-  // ce/pe security ids (Dhan) or trading symbols (everyone else) that the leg
-  // buttons need to place an order. Nearest expiry is pre-warmed for every
-  // underlying unconditionally (see the chain effect below for why); each
-  // row's own picked expiry is added on top since it may not be nearest.
-  const lookupSeq = React.useRef(0);
-  useEffect(() => {
-    const seq = ++lookupSeq.current;
-    const pairs = new Map<string, { u: FocusUnderlying; expiry: string }>();
-    UNDERLYINGS.forEach(u => {
-      const nearest = expiries[u]?.[0];
-      if (nearest) pairs.set(expKey(u, nearest), { u, expiry: nearest });
-    });
-    config.rows.forEach(r => {
-      const e = r.expiry || expiries[r.underlying]?.[0];
-      if (e) pairs.set(expKey(r.underlying, e), { u: r.underlying, expiry: e });
-    });
-    pairs.forEach(({ u, expiry }) => {
-      fetch(`${scalperRoute(broker, 'lookup')}?underlying=${u}&expiry=${expiry}`)
-        .then(r => r.json())
-        .then((j: { success?: boolean; data?: LookupData }) => {
-          // Out-of-order guard: a slow lookup for the previous broker must not
-          // land on top of the current one's — those ids place orders.
-          if (seq !== lookupSeq.current) return;
-          if (!j.success || !j.data?.strikes) return;
-          setLookups(prev => ({ ...prev, [expKey(u, expiry)]: j.data! }));
-          if (Number(j.data.lotSize) > 0) {
-            setLotSizes(prev => ({ ...prev, [u]: Number(j.data!.lotSize) }));
-          }
-        })
-        .catch(() => {});
-    });
-  }, [broker, expiryKey, rowExpiryKey]);
-
-  // ── Option premiums ─────────────────────────────────────────────
-  // The chain is the fallback LTP source for every underlying, and the spot
-  // source for SENSEX. The standalone tick bridge (useFocusToolWS, all three
-  // underlyings) is preferred per-strike in rowLive below because it's
-  // realtime; the chain route caches 10s and is paced ~1 call/3s per
-  // underlying account-wide, so it is polled at that cadence and only for
-  // underlyings that actually have rows.
-  // Pre-warmed, not lazy. Both /api/options/chain and /api/scalper/lookup spawn
-  // Python on a cold cache — measured at 6.5s and 2.7s respectively, against
-  // ~7ms once warm. Waiting until a row exists put that cold spawn in front of
-  // the first trade of the day, which is the worst possible place for it. An
-  // underlying whose GROUP is started is warmed even with no rows yet.
-  const activeUnderlyings = UNDERLYINGS.filter(u =>
-    config.rows.some(r => r.underlying === u)
-    || config.groups.some(g => g.underlying === u && g.enabled));
-  const activeKey = activeUnderlyings.join('|');
-  const chainSeq = React.useRef(0);
-  useEffect(() => {
-    if (!activeKey) return;
-    const seq = ++chainSeq.current;
-    const fetchChains = () => {
-      const pairs = new Map<string, { u: FocusUnderlying; expiry: string }>();
-      activeKey.split('|').forEach(name => {
-        const u = name as FocusUnderlying;
-        const nearest = expiries[u]?.[0];
-        if (nearest) pairs.set(expKey(u, nearest), { u, expiry: nearest });
-      });
-      // Every row's own picked expiry, even on an underlying whose group
-      // isn't "active" by the enabled/has-rows test above — a lone draft row
-      // pointed at a further expiry still needs its own chain to resolve
-      // PREMIUM-mode strikes and show a live LTP.
-      config.rows.forEach(r => {
-        const e = r.expiry || expiries[r.underlying]?.[0];
-        if (e) pairs.set(expKey(r.underlying, e), { u: r.underlying, expiry: e });
-      });
-      pairs.forEach(({ u, expiry }) => {
-        // Always Dhan's chain (market data is Dhan-sourced whichever broker
-        // places the orders): for Kotak / Zerodha the route otherwise serves a
-        // strike list with no prices or Greeks while their quote bridge runs,
-        // which left premium / delta strike criteria unresolved and delta
-        // stops silently falling back to SL ×. The route caches it 30 s.
-        fetch(`/api/options/chain?underlying=${u}&expiry=${expiry}&broker=dhan`)
-          .then(r => r.json())
-          .then((j: {
-            success?: boolean;
-            data?: { future_price?: number; future_expiry?: string; chain?: { last_price?: number; oc?: Record<string, {
-              ce?: { last_price?: number; oi?: number; implied_volatility?: number; top_bid_price?: number; top_ask_price?: number; greeks?: { delta?: number } };
-              pe?: { last_price?: number; oi?: number; implied_volatility?: number; top_bid_price?: number; top_ask_price?: number; greeks?: { delta?: number } };
-            }> } };
-          }) => {
-            if (seq !== chainSeq.current) return;
-            const oc = j.data?.chain?.oc;
-            // A failed chain fetch surfaces as 200 OK with no `oc`. Holding the
-            // last good chain beats blanking every premium on one 429.
-            if (!j.success || !oc) return;
-            const flat: ChainData['oc'] = {};
-            const market = { spot: Number(j.data?.chain?.last_price ?? 0), future: futureQuote(j.data?.future_price, j.data?.future_expiry) };
-            for (const [k, v] of Object.entries(oc)) {
-              const ceOiRaw = v.ce?.oi;
-              const peOiRaw = v.pe?.oi;
-              flat[strikeKey(k)] = {
-                ce: Number(v.ce?.last_price ?? 0),
-                pe: Number(v.pe?.last_price ?? 0),
-                // Keep absolute OI so non-nearest rows (WS gated off) can still
-                // show OI PCR — same chain that already backs their LTP.
-                ceOi: ceOiRaw != null && Number(ceOiRaw) >= 0 ? Number(ceOiRaw) : null,
-                peOi: peOiRaw != null && Number(peOiRaw) >= 0 ? Number(peOiRaw) : null,
-                // |delta| × 100 for AlgoTest's delta strike / SL / target / trail rules, from the central
-                // pricing recipe so it matches every other page; Dhan's own delta only when the model
-                // cannot price the strike (it sends 0 when it has none — read as missing).
-                ceDelta: modelAbsDelta100('CE', Number(k), expiry, v.ce?.last_price, v.ce?.implied_volatility, v.ce?.greeks?.delta, market, { bid: v.ce?.top_bid_price, ask: v.ce?.top_ask_price }),
-                peDelta: modelAbsDelta100('PE', Number(k), expiry, v.pe?.last_price, v.pe?.implied_volatility, v.pe?.greeks?.delta, market, { bid: v.pe?.top_bid_price, ask: v.pe?.top_ask_price }),
-                // Dhan's own delta, kept for legs whose entry delta was recorded before the model delta (see legDeltaBasis).
-                ceDeltaDhan: absDelta100(v.ce?.greeks?.delta),
-                peDeltaDhan: absDelta100(v.pe?.greeks?.delta),
-              };
-            }
-            setChains(prev => ({ ...prev, [expKey(u, expiry)]: { spot: Number(j.data?.chain?.last_price ?? 0), oc: flat } }));
-          })
-          .catch(() => {});
-      });
-    };
-    fetchChains();
-    const t = setInterval(fetchChains, 3000);
-    return () => clearInterval(t);
-  }, [broker, expiryKey, activeKey, rowExpiryKey]);
 
   /** Fetch the broker's position book once and return it, also refreshing
    *  state. Returns null if the call failed — callers that gate a real-money
@@ -5026,7 +4957,17 @@ export default function FocusTool() {
       const liveLegs: Parameters<typeof computeRowPnl>[1] = [];
       for (const leg of legsOf(row)) {
         const pos = leg === 'CE' ? cePosition : pePosition;
-        if (!pos) continue;
+        if (!pos) {
+          // The polled position book can trail a fill by a couple of seconds (a just-shifted or just-added
+          // leg). The leg is already in this row's ledger and in sidePremium, so its entry must be in the
+          // combined entry too — otherwise Pair × compares both legs now against ONE leg's entry and fires.
+          if (rowOwnsLeg(row, leg)) {
+            const owned = legOwnContracts(row, leg, { cePosition, pePosition } as RowLive);
+            const stored = Number(leg === 'CE' ? row.fill?.ceEntry : row.fill?.peEntry) || 0;
+            if (owned > 0 && stored > 0) entryNum += stored * owned;
+          }
+          continue;
+        }
         // A broker position at this leg's strike that this row didn't open —
         // another row, a manual trade, a running strategy — must not be
         // counted as this row's premium/P&L. Without this, ownShare()/
@@ -5265,6 +5206,8 @@ export default function FocusTool() {
     }
     setExitingAll(true);
     setConfirmExitAll(false);
+    for (const r of config.rows) logEvent('exit_all_positions', r, 'manual: EXIT ALL Positions (header button)');
+    await Promise.all(config.rows.map(r => cancelLadderOrders(r.id)));
     try {
       if (broker !== 'dhan') {
         const label = BROKER_LABELS[broker];
@@ -5742,6 +5685,9 @@ export default function FocusTool() {
       return false;
     }
 
+    // A full exit (or a roll, which exits fully first) must not leave resting limit
+    // sells behind: one filling after the leg is gone would open an unwatched short.
+    if (opts.reduce && opts.all) await cancelLadderOrders(row.id, leg);
     const live = rowLive[row.id];
     // strikeOverride lets a strike-shift open the new strike immediately —
     // rowLive still reflects the OLD strike at this point because it derives
@@ -5986,7 +5932,9 @@ export default function FocusTool() {
           }
           // AlgoTest "Tgt/SL Ref Price: Traded Price" — re-base this fill's
           // share of the entry on what the broker actually filled at.
-          if (!opts.reduce && filled > 0 && row.refPrice === 'traded' && broker === 'dhan' && j.order_id) {
+          // A shift's reopen (strikeOverride) always re-bases on the traded price: the stops and Pair × measure
+          // from this leg's real fill, not the LTP quoted a moment before the order.
+          if (!opts.reduce && filled > 0 && (row.refPrice === 'traded' || opts.strikeOverride != null) && broker === 'dhan' && j.order_id) {
             void rebaseEntryOnTradedPrice(row.id, leg, String(j.order_id), openEntryPx, filled);
           }
           return filled >= quantity && markOk;
@@ -6244,6 +6192,7 @@ export default function FocusTool() {
    */
   function handleManualExit(row: FocusRow, leg: 'CE' | 'PE' | 'ALL') {
     return runRowAction(row.id, async () => {
+      logEvent('manual_exit', row, `manual: exit ${leg}`, { leg });
       // Exit All closes only legs this row holds. A leg it already closed
       // re-resolves to the live strike, and placeLeg's no-ledger fallback
       // would close whatever the broker shows there — another row's or a
@@ -6288,6 +6237,7 @@ export default function FocusTool() {
    */
   function handleManualExitPartial(row: FocusRow, leg: 'CE' | 'PE', pct: 25 | 50 | 75) {
     return runRowAction(row.id, async () => {
+      logEvent('manual_exit_partial', row, `manual: exit ${pct}% of ${leg}`, { leg, pct });
       const u = row.underlying;
       const live = rowLive[row.id];
       const lotSize = lotSizes[u];
@@ -6312,6 +6262,7 @@ export default function FocusTool() {
    */
   async function handleShiftStrike(row: FocusRow, leg: 'CE' | 'PE', direction: 'UP' | 'DOWN') {
     if (busyRows.has(row.id)) return;
+    logEvent('manual_shift', row, `manual: shift ${leg} ${direction}`, { leg, direction });
     const u = row.underlying;
     // A shift only moves the strike, never the expiry — always this row's own.
     const expiry = row.expiry || expiries[u]?.[0] || '';
@@ -6482,6 +6433,216 @@ export default function FocusTool() {
   }
 
   /** Serialise a row's orders and disable its buttons while one is in flight. */
+  // ── Limit ladder ───────────────────────────────────────────────────────
+  // Resting SELL limits on an open short leg at +5…30% of its price at click. A fill
+  // sells the leg further, so it is credited to the row's fill ledger (the stops and
+  // exits size off that ledger) as it lands. Dhan, REAL rows only. Cancelled whenever
+  // the leg is fully exited or rolled (placeLeg), so a late fill can never open a
+  // position nothing is watching.
+  const ladderCreditedRef = useRef<Map<string, number>>(new Map());
+  const ladderBusyRef = useRef(false);
+
+  function patchLadder(rowId: string, fn: (cur: FocusLadderOrder[]) => FocusLadderOrder[]) {
+    setConfig(prev => {
+      const nextRows = prev.rows.map(r => r.id === rowId ? { ...r, ladder: fn(r.ladder ?? []), updatedAt: new Date().toISOString() } : r);
+      const nextConfig = { ...prev, rows: nextRows };
+      saveConfig(nextConfig);
+      return nextConfig;
+    });
+  }
+
+  /** Settle one ladder order against the broker: credit new fills, drop it once terminal. */
+  async function reconcileLadderOrder(rowId: string, o: FocusLadderOrder): Promise<void> {
+    try {
+      const r = await fetch(`/api/scalper/orders?orderId=${encodeURIComponent(o.orderId)}`);
+      const j = await r.json() as { success?: boolean; data?: { orderStatus?: string; filledQty?: number; averageTradedPrice?: number } };
+      if (!j.success || !j.data) return;   // unreadable: keep it, retry next tick
+      const status = String(j.data.orderStatus ?? '').toUpperCase();
+      const filled = Number(j.data.filledQty) || 0;
+      const done = Math.max(o.credited, ladderCreditedRef.current.get(o.orderId) ?? 0);
+      const delta = filled - done;
+      if (delta > 0) {
+        ladderCreditedRef.current.set(o.orderId, filled);
+        const px = Number(j.data.averageTradedPrice) || o.price;
+        adjustFillQty(rowId, o.leg, delta, o.strike, 0, px);
+        const row = schedulerRef.current.config.rows.find(x => x.id === rowId);
+        addToast('success', `Ladder fill: SELL ${delta} ${o.strike} ${o.leg} @ ${px.toFixed(2)}`, `+${o.pct}% limit`);
+        if (row) logEvent('ladder_fill', row, `limit +${o.pct}% filled`, { leg: o.leg, strike: o.strike, qty: delta, price: px, orderId: o.orderId });
+      }
+      const terminal = ['TRADED', 'CANCELLED', 'REJECTED', 'EXPIRED'].includes(status);
+      if (terminal) {
+        patchLadder(rowId, cur => cur.filter(x => x.orderId !== o.orderId));
+        ladderCreditedRef.current.delete(o.orderId);
+      } else if (delta > 0) {
+        patchLadder(rowId, cur => cur.map(x => x.orderId === o.orderId ? { ...x, credited: filled } : x));
+      }
+    } catch { /* retry next tick */ }
+  }
+
+  async function reconcileLadder() {
+    if (ladderBusyRef.current) return;
+    ladderBusyRef.current = true;
+    try {
+      for (const row of schedulerRef.current.config.rows) {
+        for (const o of row.ladder ?? []) await reconcileLadderOrder(row.id, o);
+      }
+    } finally { ladderBusyRef.current = false; }
+  }
+  const reconcileLadderRef = useRef(reconcileLadder);
+  reconcileLadderRef.current = reconcileLadder;
+  const hasLadder = config.rows.some(r => (r.ladder?.length ?? 0) > 0);
+  useEffect(() => {
+    if (!hasLadder || isLeader !== true) return;
+    const t = setInterval(() => { void reconcileLadderRef.current(); }, 3000);
+    return () => clearInterval(t);
+  }, [hasLadder, isLeader]);
+
+  /** Cancel a row's resting ladder orders (one leg, one order, or all). Never blocks an exit on failure. */
+  async function cancelLadderOrders(rowId: string, leg?: 'CE' | 'PE', orderId?: string): Promise<void> {
+    const row = schedulerRef.current.config.rows.find(r => r.id === rowId);
+    const targets = (row?.ladder ?? []).filter(o => (!leg || o.leg === leg) && (!orderId || o.orderId === orderId));
+    if (targets.length === 0) return;
+    await Promise.all(targets.map(async o => {
+      try {
+        const r = await fetch('/api/scalper/orders', {
+          method: 'DELETE', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ orderId: o.orderId, broker: 'dhan' }),
+        });
+        const j = await r.json() as { success?: boolean };
+        if (!j.success) addToast('error', `Could not cancel ${o.strike} ${o.leg} +${o.pct}% limit`, 'Cancel it in the broker order book before it fills');
+      } catch {
+        addToast('error', `Could not cancel ${o.strike} ${o.leg} +${o.pct}% limit`, 'Cancel it in the broker order book before it fills');
+      }
+      await reconcileLadderOrder(rowId, o);   // credit any fill that beat the cancel
+    }));
+    if (row) logEvent('ladder_cancel', row, `cancelled ${targets.length} limit order(s)`, { leg: leg ?? 'ALL' });
+  }
+
+  async function placeLadderOrder(row: FocusRow, leg: 'CE' | 'PE', pct: number, lots: number): Promise<void> {
+    const what = `${row.underlying} ${leg}`;
+    if (isSimRow(row)) { addToast('error', 'Limit ladder not available', 'SIM rows have no broker orders — it is for REAL rows'); return; }
+    if (broker !== 'dhan') { addToast('error', 'Limit ladder not available', 'Dhan only for now'); return; }
+    if (!liveRealMoney) { addToast('error', 'Dry run', 'Enable LIVE · REAL MONEY to place orders'); return; }
+    if (!hasAuthenticatedBroker) { addToast('error', 'No broker logged in', 'Log in to Dhan before placing orders'); return; }
+    const live = rowLive[row.id];
+    const pos = leg === 'CE' ? live?.cePosition : live?.pePosition;
+    const strike = leg === 'CE' ? live?.ceStrike : live?.peStrike;
+    const ltp = Number(leg === 'CE' ? live?.ltpCe : live?.ltpPe) || 0;
+    const lotSize = lotSizes[row.underlying];
+    if (!rowOwnsLeg(row, leg) || !(Number(pos?.netQty) < 0)) { addToast('error', `${what} order not sent`, 'The leg is not an open short'); return; }
+    if (!strike || !(ltp > 0) || !lotSize) { addToast('error', `${what} order not sent`, 'Strike, price or lot size not resolved yet'); return; }
+    if ((row.ladder ?? []).some(o => o.leg === leg && o.strike === strike && o.pct === pct)) {
+      addToast('error', `${what} +${pct}% already placed`, 'Cancel it first to move it'); return;
+    }
+    const expiry = row.expiry || expiries[row.underlying]?.[0] || '';
+    const ref = lookups[expKey(row.underlying, expiry)]?.strikes?.[strikeKey(strike)];
+    const securityId = leg === 'CE' ? ref?.ceId : ref?.peId;
+    if (!securityId) { addToast('error', `${what} order not sent`, `No Dhan contract for ${strike} ${leg}`); return; }
+    const group = config.groups.find(g => g.underlying === row.underlying);
+    const product = closeOrderProduct(broker, PRODUCT_ALIAS[group?.product ?? 'INTRADAY'][broker]);
+    if (!product) { addToast('error', `${what} order not sent`, 'Unsupported product'); return; }
+    const price = Number(ladderPrice(ltp, pct).toFixed(2));
+    const quantity = Math.max(1, Math.round(lots)) * lotSize;
+    try {
+      const res = await fetch('/api/scalper/fast-order', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ securityId, quantity, side: 'SELL', orderType: 'LIMIT', price, exchangeSegment: orderExchange(broker, row.underlying), ...product.fields, source: FTS_ORDER_SOURCE }),
+      });
+      const j = await res.json() as { success?: boolean; order_id?: string; error?: string };
+      if (!j.success || !j.order_id) { addToast('error', `${what} limit rejected`, j.error ?? 'Unknown broker error'); return; }
+      patchLadder(row.id, cur => [...cur, { orderId: String(j.order_id), leg, strike, pct, price, qty: quantity, credited: 0, placedAt: Date.now() }]);
+      addToast('success', `SELL LIMIT ${quantity} ${strike} ${leg} @ ${price.toFixed(2)}`, `+${pct}% over ${ltp.toFixed(2)} · order ${j.order_id}`);
+      logEvent('ladder_place', row, `limit +${pct}% over ${ltp}`, { leg, strike, qty: quantity, price, orderId: String(j.order_id) });
+    } catch (e) {
+      addToast('error', `${what} limit failed`, String(e));
+    }
+  }
+
+  // ── Portfolio Greeks (on demand) ───────────────────────────────────────
+  // Every open leg of every row, priced through the central payoff library from the leg's live
+  // premium (same numbers as the payoff charts and Multi-Leg Focus). Grouped by index, since
+  // deltas in different indices are not additive. Follows each row's own fill ledger, not the
+  // broker's netted position, so rows sharing a contract each count their own share.
+  const [greeksSnap, setGreeksSnap] = useState<{
+    at: Date;
+    groups: { underlying: FocusUnderlying; spot: number; result: ReturnType<typeof computeBasketGreeks>; labels: Record<string, string> }[];
+  } | null>(null);
+  function runPortfolioGreeks() {
+    const groups: NonNullable<typeof greeksSnap>['groups'] = [];
+    for (const u of UNDERLYINGS) {
+      const legs: GreekLeg[] = [];
+      const marks: Record<string, number> = {};
+      const labels: Record<string, string> = {};
+      for (const row of config.rows) {
+        if (row.underlying !== u) continue;
+        const live = rowLive[row.id];
+        if (!live) continue;
+        for (const leg of legsOf(row)) {
+          if (!rowOwnsLeg(row, leg)) continue;
+          const units = legOwnContracts(row, leg, live);
+          const strike = leg === 'CE' ? live.ceStrike : live.peStrike;
+          if (!(units > 0) || !strike) continue;
+          const pos = leg === 'CE' ? live.cePosition : live.pePosition;
+          const id = `${row.id}:${leg}`;
+          legs.push({
+            legId: id, side: Number(pos?.netQty) > 0 ? 'B' : 'S', option: leg, strike,
+            expiry: row.expiry || expiries[u]?.[0] || '', units,
+          });
+          const ltp = Number(leg === 'CE' ? live.ltpCe : live.ltpPe) || 0;
+          if (ltp > 0) marks[id] = ltp;
+          labels[id] = `${isSimRow(row) ? 'SIM ' : ''}${row.id.slice(-4)}`;
+        }
+      }
+      if (legs.length === 0) continue;
+      const result = computeBasketGreeks(legs, { spot: spots[u] ?? 0, markOf: gl => marks[gl.legId], fallbackIv: 0.15 });
+      groups.push({ underlying: u, spot: spots[u] ?? 0, result, labels });
+    }
+    setGreeksSnap({ at: new Date(), groups });
+  }
+
+  /**
+   * Audit journal entry (debug/focus_tool_events.jsonl): what happened to a row, the
+   * rule behind it and the prices at that moment. Never blocks or throws.
+   */
+  function logEvent(kind: string, row: FocusRow, reason: string, extra: Record<string, unknown> = {}) {
+    const live = rowLive[row.id];
+    postFocusEvent({
+      kind, rowId: row.id, underlying: row.underlying, expiry: row.expiry || expiries[row.underlying]?.[0] || '',
+      mode: isSimRow(row) ? 'sim' : 'real', status: row.status, reason,
+      spot: spots[row.underlying] ?? null,
+      ceStrike: live?.ceStrike ?? null, peStrike: live?.peStrike ?? null,
+      ltpCe: live?.ltpCe ?? null, ltpPe: live?.ltpPe ?? null,
+      ceQty: row.fill?.ceQty ?? null, peQty: row.fill?.peQty ?? null,
+      ceEntry: row.fill?.ceEntry ?? null, peEntry: row.fill?.peEntry ?? null,
+      ...extra,
+    });
+  }
+
+  /**
+   * Adds `lots` to every open leg of a row — CE then PE, strictly one after the other.
+   * If the first leg's order does not go through, the second is NOT sent, so a failure
+   * never leaves the straddle lopsided by more than the one leg that did fill; a
+   * half-done add is called out in the toast.
+   */
+  function addLotsToAllLegs(row: FocusRow, lots: number) {
+    return runRowAction(row.id, async () => {
+      logEvent('add_all_legs', row, `manual: add ${lots} lot(s) to every open leg`, { lots });
+      const legs = legsOf(row).filter(l => rowOwnsLeg(row, l));
+      if (legs.length === 0) { addToast('error', 'Nothing to add to', 'This row has no open leg'); return; }
+      const added: string[] = [];
+      for (const leg of legs) {
+        const ok = await placeLeg(row, leg, { reduce: false, lots });
+        if (!ok) {
+          addToast('error', added.length ? 'Add lots incomplete — row is lopsided' : 'Add lots failed',
+            added.length ? `${added.join(', ')} got ${lots} more lot(s); ${leg} did NOT. Fix ${leg} by hand.` : `${leg} order did not go through; nothing was added.`);
+          return;
+        }
+        added.push(leg);
+      }
+      addToast('success', `Added ${lots} lot(s) to ${added.join(' + ')}`, `${row.underlying} row`);
+    });
+  }
+
   async function runRowAction(rowId: string, fn: () => Promise<unknown>) {
     if (busyRows.has(rowId)) return;
     setBusyRows(prev => new Set(prev).add(rowId));
@@ -6603,6 +6764,7 @@ export default function FocusTool() {
     // the position the other way.
     setBusyRows(prev => new Set(prev).add(row.id));
     addToast('error', `${isSimRow(row) ? 'SIM ' : ''}Auto-exit: ${row.underlying} ${row.id.slice(-4)}`, reason);
+    logEvent('auto_exit_row', row, reason);
     // awaitFill so the ledger is confirmed-updated by the time waitRowFlat
     // reads it below.
     // Owned legs only — same reason as handleManualExit's Exit All.
@@ -6836,6 +6998,7 @@ export default function FocusTool() {
     const snap = schedulerRef.current;
     const row = snap.config.rows.find(r => r.id === rowId);
     if (!row) return 'skipped';
+    logEvent('reentry_leg', row, `re-entry after ${trigger}`, { leg, closedStrike, closedQty, closedEntry });
     const lazyId = nextLazyLegId(row, closedLazyId, trigger);
     if (lazyId) return openLazyLeg(row, lazyId, trigger);
     // A Lazy Leg with nothing chained after it ends the line: the row's own
@@ -7259,6 +7422,7 @@ export default function FocusTool() {
     setBusyRows(prev => new Set(prev).add(row.id));
     addToast(kind === 'tgt' ? 'success' : 'error',
       `${isSimRow(row) ? 'SIM ' : ''}Auto-exit ${leg}: ${row.underlying} ${row.id.slice(-4)}`, reason);
+    logEvent('auto_exit_leg', row, reason, { leg, rule: kind });
     // Captured before the close: afterwards the ledger is 0 and the pin gone.
     const live = rowLive[row.id] ?? EMPTY_ROW_LIVE;
     const closedStrike = leg === 'CE' ? live.ceStrike : live.peStrike;
@@ -7462,6 +7626,7 @@ export default function FocusTool() {
     if (autoEnteringRef.current.has(row.id) || autoExitingRef.current.has(row.id)) return;
     autoEnteringRef.current.add(row.id);
     addToast('success', `${isSimRow(row) ? 'SIM ' : ''}Auto-entry: ${row.underlying} ${row.id.slice(-4)}`, reason);
+    logEvent('auto_entry', row, reason);
     (async () => {
       // Each accepted leg stamps its own strike and quantity onto the row's
       // fill ledger from inside placeLeg, so the row stops re-resolving off the
@@ -8112,6 +8277,7 @@ export default function FocusTool() {
 
       <FocusHeader
         futQuotes={effectiveFutQuotes}
+        shown={UNDERLYINGS}
         realised={realised}
         unrealised={unrealised}
         total={total}
@@ -8158,16 +8324,26 @@ export default function FocusTool() {
         onOpenRisk={() => setActiveModal('risk')}
         onOpenOrders={() => setActiveModal('orderbook')}
         onOpenOptionChain={() => setActiveModal('optionchain')}
+        onOpenGreeks={() => { runPortfolioGreeks(); setActiveModal('greeks'); }}
         onSetViewMode={setViewMode}
         viewMode={viewMode}
         onExitAll={handleExitAll} confirmExitAll={confirmExitAll} exitingAll={exitingAll}
       />
+
+      {wsStale && (
+        <div role="status" className="mx-6 mt-3 rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-1.5 text-xs font-semibold text-amber-400">
+          Live feed stalled — no tick for {Math.round(WS_STALE_MS / 1000)}s+. Prices below are from the slower option-chain poll (3s, cached) until the feed resumes.
+        </div>
+      )}
 
       {/* Main */}
       <div className="flex-1 px-6 py-5 flex flex-col gap-6">
         {UNDERLYINGS.map(u => {
           const group = config.groups.find(g => g.underlying === u) ?? makeGroup(u);
           const rows = rowsByUnderlying[u];
+          // Only indices in use are shown: NIFTY always, the others once they have a
+          // row or a started group. Hidden ones come back via the "+ BANKNIFTY" chips below.
+          if (u !== 'NIFTY' && rows.length === 0 && !group.enabled) return null;
 
           return (
             <div key={u} className="flex flex-col gap-3">
@@ -8218,6 +8394,9 @@ export default function FocusTool() {
                           onExit={leg => handleManualExit(row, leg)}
                           onExitPartial={(leg, pct) => handleManualExitPartial(row, leg, pct)}
                           onAddLot={(leg, lots) => runRowAction(row.id, () => placeLeg(row, leg, { reduce: false, lots }))}
+                          onAddAllLegs={lots => addLotsToAllLegs(row, lots)}
+                          onLadderPlace={(leg, pct, lots) => { void placeLadderOrder(row, leg, pct, lots); }}
+                          onLadderCancel={(leg, orderId) => { void cancelLadderOrders(row.id, leg, orderId); }}
                           onReduceLot={(leg, lots) => runRowAction(row.id, () => placeLeg(row, leg, { reduce: true, lots }))}
                           onShift={(leg, dir) => handleShiftStrike(row, leg, dir)}
                           onBlocked={msg => addToast('error', 'Strike locked', msg)}
@@ -8357,8 +8536,97 @@ export default function FocusTool() {
             </div>
           );
         })}
+        {UNDERLYINGS.some(u => u !== 'NIFTY' && rowsByUnderlying[u].length === 0 && !(config.groups.find(g => g.underlying === u)?.enabled)) && (
+          <div className="flex items-center gap-2 text-xs text-zinc-500">
+            <span className="font-semibold">Other indices:</span>
+            {UNDERLYINGS.filter(u => u !== 'NIFTY' && rowsByUnderlying[u].length === 0 && !(config.groups.find(g => g.underlying === u)?.enabled)).map(u => (
+              <button
+                key={u} type="button" onClick={() => addRow(u)}
+                title={`Add a ${u} row (shows the ${u} section)`}
+                className={cn('flex items-center gap-1 text-xs font-extrabold px-2.5 py-1 rounded-lg border border-zinc-700 text-zinc-300 hover:bg-zinc-800 transition-colors cursor-pointer', FOCUS_RING)}
+              >
+                <Plus className="h-3.5 w-3.5" /> {u}
+              </button>
+            ))}
+          </div>
+        )}
       </div>
 
+
+      <FocusModal
+        isOpen={activeModal === 'greeks'}
+        onClose={() => setActiveModal(null)}
+        title="Portfolio Greeks"
+      >
+        <div className="flex flex-col gap-4">
+          <div className="flex items-center gap-2 text-xs text-zinc-400">
+            <span>{greeksSnap ? `as of ${greeksSnap.at.toLocaleTimeString('en-IN')}` : ''}</span>
+            <Button size="sm" variant="outline" className="ml-auto h-7 gap-1 border-zinc-700 bg-zinc-900 text-xs font-bold" onClick={runPortfolioGreeks}>
+              <RefreshCw className="size-3" /> Refresh
+            </Button>
+          </div>
+          {greeksSnap && greeksSnap.groups.length === 0 && (
+            <p className="text-sm text-zinc-400">No open legs to compute Greeks for.</p>
+          )}
+          {greeksSnap?.groups.map(g => {
+            const n = g.result.net;
+            const stat = (label: string, value: string, tone: string, sub?: string) => (
+              <div className="flex flex-col rounded-xl border border-zinc-800 bg-zinc-950/40 px-3 py-2">
+                <span className="text-[11px] font-black uppercase tracking-widest text-zinc-500">{label}</span>
+                <span className={cn('font-mono text-lg font-black tabular-nums', tone)}>{value}</span>
+                {sub && <span className="text-[11px] text-zinc-500">{sub}</span>}
+              </div>
+            );
+            return (
+              <div key={g.underlying} className="flex flex-col gap-2">
+                <div className="flex items-center gap-2">
+                  <span className={cn('inline-flex h-6 items-center gap-1.5 rounded-md border px-2 text-xs font-black', UNDERLYING_CHIP[g.underlying])}>
+                    <span className={cn('size-1.5 rounded-full', UNDERLYING_DOT[g.underlying])} />{g.underlying}
+                  </span>
+                  <span className="text-xs text-zinc-400">spot {g.spot > 0 ? g.spot.toFixed(2) : '—'} · {g.result.legs.length} leg(s)</span>
+                </div>
+                <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+                  {stat('Net Delta', n.delta.toFixed(2), n.delta > 0 ? 'text-emerald-400' : n.delta < 0 ? 'text-rose-400' : 'text-zinc-100', 'index units')}
+                  {stat('Net Gamma', n.gamma.toFixed(4), n.gamma < 0 ? 'text-rose-400' : 'text-zinc-100')}
+                  {stat('Net Theta', `₹${n.theta.toLocaleString('en-IN', { maximumFractionDigits: 0 })}`, n.theta > 0 ? 'text-emerald-400' : 'text-rose-400', 'per day')}
+                  {stat('Net Vega', n.vega.toFixed(2), n.vega < 0 ? 'text-rose-400' : 'text-zinc-100', 'per 1% IV')}
+                </div>
+                <table className="w-full font-mono text-xs tabular-nums">
+                  <thead>
+                    <tr className="bg-zinc-800 text-xs font-bold text-white">
+                      <th className="px-2 py-1 text-left">Leg</th>
+                      <th className="px-2 py-1 text-right">Delta</th><th className="px-2 py-1 text-right">Gamma</th>
+                      <th className="px-2 py-1 text-right">Theta</th><th className="px-2 py-1 text-right">Vega</th><th className="px-2 py-1 text-right">IV</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {g.result.legs.map(l => {
+                      const k = (l.side === 'S' ? -1 : 1) * l.units;
+                      const f = (v: number | null, d: number) => v === null ? '—' : (v * k).toFixed(d);
+                      return (
+                        <tr key={l.legId} className="border-b border-zinc-800/60 text-zinc-300">
+                          <td className="px-2 py-1">{g.labels[l.legId]} · {l.side === 'S' ? 'SELL' : 'BUY'} {l.strike} {l.option} ×{l.units}</td>
+                          <td className="px-2 py-1 text-right">{f(l.delta, 2)}</td><td className="px-2 py-1 text-right">{f(l.gamma, 4)}</td>
+                          <td className="px-2 py-1 text-right">{f(l.theta, 0)}</td><td className="px-2 py-1 text-right">{f(l.vega, 2)}</td>
+                          <td className="px-2 py-1 text-right">{l.iv === null ? '—' : `${(l.iv * 100).toFixed(1)}%`}</td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+                {g.result.assumed.length > 0 && (
+                  <p className="text-xs text-amber-300">
+                    {g.result.assumed.length} leg(s) have no live price ({g.result.assumed.map(l => `${l.strike} ${l.option}`).join(', ')}) — priced on an assumed 15% IV, so their Greeks are indicative.
+                  </p>
+                )}
+              </div>
+            );
+          })}
+          <p className="text-[11px] text-zinc-500">
+            Computed from each row&apos;s own fill record (not the broker&apos;s netted position) and each leg&apos;s live price, through the same pricing library as the payoff charts.
+          </p>
+        </div>
+      </FocusModal>
 
       <FocusModal
         isOpen={activeModal === 'risk'}

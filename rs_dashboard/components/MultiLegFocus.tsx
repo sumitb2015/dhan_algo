@@ -1572,7 +1572,7 @@ export default function MultiLegFocus({
     }
   }, [placeBasketInner, addToast]);
 
-  const exitOneLeg = useCallback(async (basketId: string, leg: MultiLegLeg): Promise<{ closed: boolean; qty: number; maxAfter?: number }> => {
+  const exitOneLeg = useCallback(async (basketId: string, leg: MultiLegLeg, exitLots?: number): Promise<{ closed: boolean; qty: number; maxAfter?: number }> => {
     let closed = false;   // true once this leg is confirmed flat/exited
     let closedQty = 0;    // units this call actually sent to close (0 when already flat)
     let maxAfter: number | undefined;   // broker |netQty| once the exit fills (set when an order was sent)
@@ -1672,7 +1672,25 @@ export default function MultiLegFocus({
       // Safe sizing: clamped to what this leg opened, clamped by what broker shows
       const brokerAbs = Math.abs(netQty);
       const ownQty = leg.fill?.qty && leg.fill.qty > 0 ? leg.fill.qty : brokerAbs;
-      const qty = Math.min(ownQty, brokerAbs);
+      let qty = Math.min(ownQty, brokerAbs);
+      // Partial exit: close only the requested lots; the rest of the leg stays OPEN.
+      let partialLotSize = 0;
+      if (exitLots != null && exitLots > 0 && exitLots < leg.lots) {
+        // Unit size from the leg's own ledger when it divides evenly; the lot-size
+        // lookup is only a fallback (a stale value would send a wrong-size order).
+        const ledgerUnit = leg.lots > 0 && ownQty % leg.lots === 0 ? ownQty / leg.lots : 0;
+        const lkExpiry = leg.expiry || basket?.expiry || '';
+        const unit = ledgerUnit > 0 ? ledgerUnit
+          : (lookupCacheRef.current[lkKey(bk, basket?.underlying ?? '', lkExpiry)]?.lotSize
+            ?? fallbackLotSize((basket?.underlying ?? 'NIFTY') as Underlying, bk));
+        const want = Math.round(exitLots) * unit;
+        if (!(want > 0 && want < qty)) {
+          addToast('error', `Cannot partially exit ${label}`, `${exitLots} lot(s) = ${want} qty does not fit inside the ${qty} qty available to exit — nothing was sent. Clear the lots box to exit the whole leg.`);
+          return { closed, qty: closedQty };
+        }
+        partialLotSize = unit;
+        qty = want;
+      }
       // Mid-lag after an add: the broker shows only part of what was just
       // placed. Exiting now would close that part and mark the whole leg
       // CLOSED, untracking the rest when it lands — wait for the book instead.
@@ -1723,6 +1741,17 @@ export default function MultiLegFocus({
         addToast('success', `Exited ${label}`, `ID: ${j2.order_id}`);
         const currentLtp = basket ? ltpFor(basket, leg) : 0;
         const exitPrice = (j2.price && j2.price > 0) ? j2.price : (currentLtp > 0 ? currentLtp : (leg.fill?.avgPrice ?? 0));
+        if (partialLotSize > 0) {
+          // Split: the leg keeps the remainder, the closed slice is its own CLOSED row.
+          patchLegs(basketId, legs => legs.flatMap(l => {
+            if (l.id !== leg.id) return [l];
+            const [rest, slice] = recordOutsideReduction(l, qty, exitPrice, partialLotSize);
+            return slice ? [rest, withPendingOrder(slice, j2.order_id, 'exit', qty, exitPrice)] : [rest];
+          }));
+          closedQty = qty;
+          maxAfter = brokerAbs - qty;
+          return { closed: false, qty: closedQty, maxAfter };
+        }
         patchLegs(basketId, legs => legs.map(l => (l.id === leg.id
           ? withPendingOrder({ ...l, status: 'CLOSED' as const, closedAt: Date.now(), fill: { qty: 0, avgPrice: l.fill?.avgPrice ?? 0 }, closedFill: { qty, exitPrice } }, j2.order_id, 'exit', qty, exitPrice)
           : l)));
@@ -3462,14 +3491,14 @@ export default function MultiLegFocus({
                 onDelete={() => deleteBasket(basket.id)}
                 onPlace={() => placeBasket(basket.id)}
                 onExit={() => exitBasket(basket.id)}
-                onExitLeg={async leg => {
+                onExitLeg={async (leg, exitLots) => {
                   const w = legQtyWarnings[`${basket.id}:${leg.id}`];
                   if (w?.kind === 'over' && !window.confirm(
                     `Strategies on ${leg.strike} ${leg.option} track ${w.trackedQty} but the broker holds only ${w.brokerQty}: `
                     + `${w.gap} was already closed outside this tool.\n\nIf that close was THIS leg's, use Reduce instead: exiting now `
                     + `would close quantity another strategy still tracks.\n\nExit ${leg.fill?.qty ?? 0} anyway?`,
                   )) return;
-                  await exitOneLeg(basket.id, leg);
+                  await exitOneLeg(basket.id, leg, exitLots);
                 }}
                 onShiftLegs={(legIds, direction, steps) => shiftLegs(basket.id, legIds, direction, steps)}
                 legColumns={legColumns}

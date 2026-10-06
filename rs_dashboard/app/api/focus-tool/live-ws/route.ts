@@ -122,9 +122,11 @@ export async function POST(request: NextRequest) {
     const sensexExpiry = String(expiries.SENSEX ?? '');
     const numStrikes = Number(body.numStrikes ?? 12);
 
-    if (!niftyExpiry || !bankniftyExpiry || !sensexExpiry) {
+    // NIFTY is required; BANKNIFTY / SENSEX are optional ('' = not subscribed) so an
+    // unused index adds no startup option-chain calls and no feed subscriptions.
+    if (!niftyExpiry) {
       return NextResponse.json(
-        { success: false, error: 'expiries.NIFTY / BANKNIFTY / SENSEX all required' },
+        { success: false, error: 'expiries.NIFTY required' },
         { status: 400 },
       );
     }
@@ -147,7 +149,7 @@ export async function POST(request: NextRequest) {
         isPidRunning(Number(status.pid));
       const sameExpiries = active && (() => {
         const e = (status!.expiries ?? {}) as Record<string, unknown>;
-        return e.NIFTY === niftyExpiry && e.BANKNIFTY === bankniftyExpiry && e.SENSEX === sensexExpiry;
+        return (e.NIFTY ?? '') === niftyExpiry && (e.BANKNIFTY ?? '') === bankniftyExpiry && (e.SENSEX ?? '') === sensexExpiry;
       })();
 
       if (active && sameExpiries) {
@@ -168,8 +170,8 @@ export async function POST(request: NextRequest) {
         [
           BRIDGE_SCRIPT,
           '--nifty-expiry', niftyExpiry,
-          '--banknifty-expiry', bankniftyExpiry,
-          '--sensex-expiry', sensexExpiry,
+          ...(bankniftyExpiry ? ['--banknifty-expiry', bankniftyExpiry] : []),
+          ...(sensexExpiry ? ['--sensex-expiry', sensexExpiry] : []),
           '--num-strikes', String(numStrikes),
           '--ws-port', String(freePort),
         ],
@@ -183,7 +185,11 @@ export async function POST(request: NextRequest) {
           status: 'STARTING',
           broker: 'dhan',
           pid: child.pid,
-          expiries: { NIFTY: niftyExpiry, BANKNIFTY: bankniftyExpiry, SENSEX: sensexExpiry },
+          expiries: {
+            NIFTY: niftyExpiry,
+            ...(bankniftyExpiry ? { BANKNIFTY: bankniftyExpiry } : {}),
+            ...(sensexExpiry ? { SENSEX: sensexExpiry } : {}),
+          },
           subscribed: 0,
           ws_port: freePort,
           started_at: new Date().toISOString(),

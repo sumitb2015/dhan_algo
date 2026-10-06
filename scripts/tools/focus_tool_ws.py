@@ -275,10 +275,10 @@ def main():
     parser = argparse.ArgumentParser(description='Focus Tool live WebSocket bridge — all three indices at once')
     parser.add_argument('--nifty-expiry', required=True,
                         help='NIFTY expiry YYYY-MM-DD (comma-separated for multiple)')
-    parser.add_argument('--banknifty-expiry', required=True,
-                        help='BANKNIFTY expiry YYYY-MM-DD (comma-separated for multiple)')
-    parser.add_argument('--sensex-expiry', required=True,
-                        help='SENSEX expiry YYYY-MM-DD (comma-separated for multiple)')
+    parser.add_argument('--banknifty-expiry', default='',
+                        help='BANKNIFTY expiry YYYY-MM-DD (comma-separated); omit to not subscribe BANKNIFTY')
+    parser.add_argument('--sensex-expiry', default='',
+                        help='SENSEX expiry YYYY-MM-DD (comma-separated); omit to not subscribe SENSEX')
     parser.add_argument('--num-strikes', type=int, default=12,
                         help='Number of strikes each side of ATM, per underlying (default 12)')
     parser.add_argument('--ws-port', type=int, default=8965,
@@ -290,11 +290,14 @@ def main():
         'BANKNIFTY': _parse_expiry_list(args.banknifty_expiry),
         'SENSEX': _parse_expiry_list(args.sensex_expiry),
     }
-    if not all(expiry_lists.values()):
-        print('[focus_tool_ws] ERROR: each underlying needs at least one expiry', flush=True)
+    # Only underlyings given an expiry are subscribed — an unused index costs
+    # option-chain calls at startup and ~50 contracts of feed for nothing.
+    active_unds = [u for u in UNDERLYINGS if expiry_lists[u]]
+    if not active_unds:
+        print('[focus_tool_ws] ERROR: at least one underlying needs an expiry', flush=True)
         sys.exit(1)
     # Status / restart fingerprint — comma-joined, same order as subscribed.
-    expiries = {u: ','.join(expiry_lists[u]) for u in UNDERLYINGS}
+    expiries = {u: ','.join(expiry_lists[u]) for u in active_unds}
 
     os.makedirs(DEBUG_DIR, exist_ok=True)
     started_at = datetime.now().isoformat()
@@ -319,7 +322,7 @@ def main():
     state: dict[str, dict] = {}
     instruments: list = []
 
-    for u in UNDERLYINGS:
+    for u in active_unds:
         step = STRIKE_STEP[u]
         exchange = UNDERLYING_EXCHANGE[u]
         sid = UNDERLYING_SIDS[u]
@@ -386,7 +389,7 @@ def main():
 
     total_contracts = sum(len(b['sid_map']) for s in state.values() for b in s['books'])
     total_futs = sum(1 for s in state.values() if s.get('fut'))
-    print(f'[focus_tool_ws] Subscribing to {total_contracts} option contracts + {total_futs} futures + 3 index canaries…', flush=True)
+    print(f'[focus_tool_ws] Subscribing to {total_contracts} option contracts + {total_futs} futures + {len(state)} index canaries…', flush=True)
 
     if total_contracts == 0:
         print('[focus_tool_ws] ERROR: no contracts resolved for any underlying — aborting', flush=True)
@@ -565,7 +568,7 @@ def main():
                     last_file_write = now_ts
 
             if now_ts - last_print > 10:
-                spots = ' | '.join(f'{u}={state[u]["spot"]:.2f}' for u in UNDERLYINGS)
+                spots = ' | '.join(f'{u}={state[u]["spot"]:.2f}' for u in state)
                 print(f'[focus_tool_ws] {spots} | Subscribed={total_contracts} | WS clients={len(push_server.clients)}',
                       flush=True)
                 last_print = now_ts

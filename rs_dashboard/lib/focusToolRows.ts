@@ -420,6 +420,22 @@ export interface FocusOverallReentry {
   max: number;
 }
 
+/**
+ * A resting SELL limit order added to an open short leg at a % above the price at
+ * the time (the "limit ladder"): if it fills, the leg is sold further at that
+ * level. `credited` is the qty already added to the row's fill ledger.
+ */
+export interface FocusLadderOrder {
+  orderId: string;
+  leg: 'CE' | 'PE';
+  strike: number;
+  pct: number;
+  price: number;
+  qty: number;
+  credited: number;
+  placedAt: number;
+}
+
 export interface FocusRow {
   id: string;
   underlying: FocusUnderlying;
@@ -571,6 +587,8 @@ export interface FocusRow {
    * legTgtUnit. Blank / 0 = off. (Named for the original %-only version;
    * holds points when legTgtUnit is 'pts'.)
    */
+  /** Resting limit-ladder orders on this row's legs (REAL, Dhan). */
+  ladder?: FocusLadderOrder[];
   ceTgtPct?: string;
   peTgtPct?: string;
   /**
