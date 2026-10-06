@@ -5,6 +5,7 @@ import {
   ComposedChart, Bar, Line, XAxis, YAxis, CartesianGrid, Tooltip,
   ResponsiveContainer, ReferenceLine, ReferenceArea, Cell, LabelList,
 } from 'recharts';
+import { RefreshCw } from 'lucide-react';
 import NavBar from './NavBar';
 import DataChip from './DataChip';
 import { PulseStat, ChartHeader } from './QuantPanel';
@@ -125,6 +126,10 @@ export default function GexProfilePage() {
   const [updated, setUpdated] = useState<string | null>(null);
   const [dataDate, setDataDate] = useState<string | null>(null);
   const seq = useRef(0);
+  // True while a (possibly multi-expiry) fetch is running, so a poll tick never cancels and restarts a slow aggregate load.
+  const running = useRef(false);
+  const [updatedAt, setUpdatedAt] = useState<number | null>(null);
+  const [nowMs, setNowMs] = useState(0);
 
   useEffect(() => {
     fetch(`/api/options/expiries?underlying=${UNDERLYING}`)
@@ -153,6 +158,7 @@ export default function GexProfilePage() {
   const fetchAll = useCallback(async () => {
     if (!scopeExpiries.length) return;
     const mine = ++seq.current;
+    running.current = true;
     try {
       const items: ChainPayload[] = [];
       // Sequential: the chain route is rate limited (1 call / 3 s account-wide) and caches each expiry for 30 s.
@@ -166,6 +172,7 @@ export default function GexProfilePage() {
       setPayload({ key: scopeExpiries.join('|'), items });
       setError('');
       setUpdated(new Date().toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', second: '2-digit' }));
+      setUpdatedAt(Date.now());
       setDataDate(todayIST());
       fetch('/api/scalper/top-indices')
         .then(r => r.json())
@@ -178,7 +185,7 @@ export default function GexProfilePage() {
     } catch (e) {
       if (mine === seq.current) setError(String(e));
     } finally {
-      if (mine === seq.current) setLoading(false);
+      if (mine === seq.current) { setLoading(false); running.current = false; }
     }
   }, [scopeExpiries]);
 
@@ -189,9 +196,16 @@ export default function GexProfilePage() {
     return () => clearTimeout(first);
   }, [scopeExpiries, fetchAll]);
 
+  // 1 s tick so the "updated Ns ago" label counts up between polls.
+  useEffect(() => {
+    const first = setTimeout(() => setNowMs(Date.now()), 0);
+    const id = setInterval(() => setNowMs(Date.now()), 1000);
+    return () => { clearTimeout(first); clearInterval(id); };
+  }, []);
+
   useEffect(() => {
     if (!scopeExpiries.length || !live) return;
-    const id = setInterval(() => { if (!document.hidden) void fetchAll(); }, POLL_MS);
+    const id = setInterval(() => { if (!document.hidden && !running.current) void fetchAll(); }, POLL_MS);
     const onVis = () => { if (!document.hidden) void fetchAll(); };
     document.addEventListener('visibilitychange', onVis);
     return () => { clearInterval(id); document.removeEventListener('visibilitychange', onVis); };
@@ -446,7 +460,29 @@ export default function GexProfilePage() {
                   ))}
                   {approxForward && <span className="text-[10px] text-amber-400">no future price: forward estimated from spot with cost of carry (approximate)</span>}
                 </div>
-                {updated && <span className="text-[10px] text-zinc-500 font-mono tabular-nums">Updated {updated}{live ? '' : ' · market closed, not polling'}</span>}
+                <div className="flex items-center gap-2.5">
+                  {(() => {
+                    const age = updatedAt != null && nowMs > 0 ? Math.max(0, Math.round((nowMs - updatedAt) / 1000)) : null;
+                    // Stale = more than two poll periods old while the market is open: the feed or the chain route is not delivering.
+                    const stale = live && age != null && age > (POLL_MS / 1000) * 2 + 20;
+                    const cls = !live ? TONE_CLS.manual : stale ? TONE_CLS.warn : TONE_CLS.ok;
+                    return (
+                      <span className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[10px] font-bold border ${cls}`}>
+                        <span className={`w-1.5 h-1.5 rounded-full ${!live ? 'bg-zinc-500' : stale ? 'bg-amber-400' : 'bg-emerald-400 animate-pulse'}`} />
+                        {!live ? 'MARKET CLOSED · static' : stale ? 'STALE' : `LIVE · every ${POLL_MS / 1000}s`}
+                      </span>
+                    );
+                  })()}
+                  {updated && <span className="text-[10px] text-zinc-500 font-mono tabular-nums">Updated {updated}{updatedAt != null && nowMs > 0 ? ` · ${Math.max(0, Math.round((nowMs - updatedAt) / 1000))}s ago` : ''}</span>}
+                  <button
+                    onClick={() => { setLoading(true); void fetchAll(); }}
+                    title="Refresh now"
+                    aria-label="Refresh now"
+                    className="p-1.5 rounded-md border border-zinc-800 bg-zinc-900 text-zinc-300 hover:bg-zinc-800 focus:outline-none focus:ring-2 focus:ring-emerald-500/50"
+                  >
+                    <RefreshCw className="w-3 h-3" aria-hidden="true" />
+                  </button>
+                </div>
               </div>
             </div>
 
