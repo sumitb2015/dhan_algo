@@ -5,7 +5,9 @@ import {
   ComposedChart, Bar, Line, XAxis, YAxis, CartesianGrid, Tooltip,
   ResponsiveContainer, ReferenceLine, Cell,
 } from 'recharts';
+import { BookOpen } from 'lucide-react';
 import NavBar from './NavBar';
+import GuidePanel from './RsStrategyGuide';
 import DataChip from './DataChip';
 import { PulseStat, ChartHeader } from './QuantPanel';
 import { useMarketLive } from '@/lib/useMarketLive';
@@ -75,7 +77,8 @@ function todayIST(): string {
   return new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Kolkata' }).format(new Date());
 }
 
-export default function GexOiPage() {
+export default function GexOiPage({ guide = '' }: { guide?: string }) {
+  const [guideOpen, setGuideOpen] = useState(false);
   const live = useMarketLive(UNDERLYING);
   const [expiries, setExpiries] = useState<string[]>([]);
   const [expiry, setExpiry] = useState('');
@@ -257,6 +260,17 @@ export default function GexOiPage() {
               <option value={1}>index units (video)</option>
             </select>
           </label>
+          {guide && (
+            <button
+              onClick={() => setGuideOpen(true)}
+              title="Open GEX OI Guide"
+              aria-label="Open GEX OI Guide"
+              className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-md border border-zinc-800 bg-zinc-900 text-xs font-bold text-zinc-200 hover:bg-zinc-800 focus:outline-none focus:ring-2 focus:ring-emerald-500/50"
+            >
+              <BookOpen className="w-3.5 h-3.5" aria-hidden="true" />
+              Guide
+            </button>
+          )}
           <span className="w-px h-5 bg-zinc-800 shrink-0" />
           <NavBar />
         </div>
@@ -399,6 +413,29 @@ export default function GexOiPage() {
           </>
         )}
       </div>
+      {guide && (
+        <GuidePanel
+          open={guideOpen}
+          onClose={() => setGuideOpen(false)}
+          markdown={guide}
+          title="GEX OI Chart Guide"
+          description="How to read gamma-weighted OI: walls, gamma flip, regimes, the strangle checklist and risk rules"
+          summary={
+            <div className="flex-none px-6 lg:px-10 py-3.5 border-b border-zinc-800 bg-zinc-900/60 text-xs text-zinc-300 leading-relaxed">
+              <div className="max-w-6xl mx-auto w-full space-y-1.5">
+                <div className="text-[10px] uppercase font-bold text-zinc-400 tracking-wider">Quick read</div>
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-x-6 gap-y-1">
+                  <div><strong className="text-red-400 font-bold">Call wall</strong>: highest call GEX, resistance.</div>
+                  <div><strong className="text-emerald-400 font-bold">Put wall</strong>: highest put GEX, support.</div>
+                  <div><strong className="text-amber-400 font-bold">Gamma flip</strong>: net GEX crosses zero. Above it dealers dampen moves, below it they amplify.</div>
+                  <div><strong className="text-zinc-200 font-bold">Pin strike</strong>: largest call plus put GEX, the likeliest expiry magnet.</div>
+                </div>
+                <div className="text-[11px] font-mono text-zinc-400 pt-0.5">Unvalidated: one video, one example, no backtest. This page places no orders.</div>
+              </div>
+            </div>
+          }
+        />
+      )}
     </div>
   );
 }

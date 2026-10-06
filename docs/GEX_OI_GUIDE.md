@@ -42,6 +42,7 @@ of dealer hedging counts for more.
 | **Net dealer GEX chart** | Net GEX per strike, red where negative and green where positive, with the spot and flip lines. |
 | **Open interest chart** | Raw call and put OI, so you can see where raw OI and GEX disagree. |
 | **Strangle entry checklist** | The video's five-point list (section 5). |
+| **Guide button** | Top right of the page: opens this guide in a side panel (the panel renders this file, so the two never drift). |
 
 Controls: **Expiry** (an expiry past its 15:40 IST close is not offered), **Strikes ±** (chart window; the KPIs use
 the whole chain, and a note lists any level that falls outside the window), **GEX in** (₹ notional or index units).

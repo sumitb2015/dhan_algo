@@ -1,6 +1,6 @@
 'use client';
 
-import { useMemo } from 'react';
+import { useMemo, type ReactNode } from 'react';
 import { BookOpen } from 'lucide-react';
 import { Sheet, SheetContent, SheetHeader, SheetTitle, SheetDescription } from '@/components/ui/sheet';
 import { parseMarkdown, type Block, type Inline } from '@/lib/miniMarkdown';
@@ -59,7 +59,17 @@ function BlockView({ b }: { b: Block }) {
   }
 }
 
-export default function RsStrategyGuide({ open, onClose, markdown }: { open: boolean; onClose: () => void; markdown: string }) {
+export default function RsStrategyGuide({
+  open, onClose, markdown,
+  title = 'RS Strategy Guide',
+  description = 'Complete strategy rules, indicators, signal states, and order mechanics',
+  summary,
+}: {
+  open: boolean; onClose: () => void; markdown: string;
+  title?: string; description?: string;
+  /** Replaces the default RS Strategy signals callout. Pass `null` for no callout. */
+  summary?: ReactNode | null;
+}) {
   const blocks = useMemo(() => parseMarkdown(markdown), [markdown]);
   return (
     <Sheet open={open} onOpenChange={(v) => { if (!v) onClose(); }}>
@@ -75,8 +85,8 @@ export default function RsStrategyGuide({ open, onClose, markdown }: { open: boo
                 <BookOpen className="w-4 h-4 text-emerald-400" aria-hidden="true" />
               </div>
               <div>
-                <SheetTitle className="text-base font-bold text-white">RS Strategy Guide</SheetTitle>
-                <SheetDescription className="text-xs text-zinc-400">Complete strategy rules, indicators, signal states, and order mechanics</SheetDescription>
+                <SheetTitle className="text-base font-bold text-white">{title}</SheetTitle>
+                <SheetDescription className="text-xs text-zinc-400">{description}</SheetDescription>
               </div>
             </div>
             <button
@@ -90,7 +100,7 @@ export default function RsStrategyGuide({ open, onClose, markdown }: { open: boo
           </div>
         </SheetHeader>
 
-        {/* Core Strategy Rules Callout */}
+        {summary === undefined ? (
         <div className="flex-none px-6 lg:px-10 py-3.5 border-b border-zinc-800 bg-zinc-900/60 text-xs text-zinc-300 leading-relaxed">
           <div className="max-w-6xl mx-auto w-full space-y-1.5">
             <div className="text-[10px] uppercase font-bold text-zinc-400 tracking-wider">Strategy Signals Summary</div>
@@ -113,6 +123,8 @@ export default function RsStrategyGuide({ open, onClose, markdown }: { open: boo
             </div>
           </div>
         </div>
+
+        ) : summary}
 
         <div className="flex-1 min-h-0 overflow-y-auto px-6 lg:px-10 pb-12 pt-3">
           <div className="max-w-6xl mx-auto w-full">
