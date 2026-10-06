@@ -236,11 +236,13 @@ def test_close_confirms_a_non_dhan_order_from_the_net_position():
     assert r.confirmed and r.qty_closed == 75 and h.waited == [] and b.net[(25850, "PE")] == 0
 
 
-def test_paper_close_needs_a_quote():
+def test_paper_close_without_a_quote_closes_at_entry_not_at_zero():
     ex, b, h = mk(dry=True, ltp={25850: 40.0})
     assert ex.close_leg(held("SELL", 25850)) .exit_price == 40.0
     ex2, *_ = mk(dry=True, ltp={})
-    assert not ex2.close_leg(held("SELL", 25850)).confirmed          # no quote: deferred, never "closed at 0"
+    leg = held("SELL", 25850)
+    r = ex2.close_leg(leg)
+    assert r.confirmed and r.exit_price == leg["avg_price"] > 0      # zero P&L, never "closed at 0", never hangs
 
 
 def test_close_all_closes_shorts_then_hedges_and_calls_back_per_leg():
@@ -309,3 +311,48 @@ def test_reconcile_skips_unreadable_legs_and_paper_books():
     assert ex.reconcile({"short_up": held("SELL", 25850)}) == []
     exp, *_ = mk(dry=True)
     assert exp.reconcile({"short_up": held("SELL", 25850)}) == []
+
+
+class _BaselineBroker:
+    """Non-Dhan broker whose position read fails: an order must not be sent without a baseline."""
+    def __init__(self):
+        self.orders = []
+
+    def get_owned_net_qty(self, *a, **k):
+        raise RuntimeError("positions unavailable")
+
+    def sell(self, *a, **k):
+        self.orders.append(("SELL", a))
+        return "X1"
+
+    buy = sell
+
+
+def _exec(broker, name="zerodha", dry=False, ltp=0.0):
+    from lib.algo_kit import LegExecutor
+    import logging
+    return LegExecutor(broker, object(), name, "MARGIN", dry_run=dry, ltp_fn=lambda leg: ltp,
+                       log=logging.getLogger("t"), sleep=lambda x: None, clock=lambda: 0.0)
+
+
+def test_no_order_when_the_baseline_read_fails():
+    b = _BaselineBroker()
+    ok, oid = _exec(b).open_leg("SELL", {"side": "SELL", "opt_type": "PE", "strike": 25000, "expiry": "2026-10-27",
+                                         "qty": 65, "avg_price": 100.0})
+    assert (ok, oid) == (False, None)
+    assert b.orders == []
+
+
+def test_paper_close_without_a_quote_closes_at_entry_instead_of_hanging():
+    leg = {"side": "SELL", "opt_type": "PE", "strike": 25000, "expiry": "2026-10-27", "qty": 65, "avg_price": 100.0}
+    res = _exec(_BaselineBroker(), dry=True, ltp=0.0).close_leg(leg)
+    assert res.confirmed and res.exit_price == 100.0 and res.qty_closed == 65
+
+
+def test_a_pending_leg_is_never_closed_automatically_in_live():
+    b = _BaselineBroker()
+    leg = {"side": "BUY", "opt_type": "PE", "strike": 24800, "expiry": "2026-10-27", "qty": 65, "avg_price": 50.0,
+           "pending": True}
+    res = _exec(b, ltp=50.0).close_leg(leg)
+    assert not res.confirmed
+    assert b.orders == []

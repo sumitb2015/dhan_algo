@@ -45,12 +45,9 @@ from lib.strategy_state_helper import (  # noqa: E402
     check_shutdown_trigger, exit_if_market_closed, flush_state,
     instance_log_suffix, parse_target_spec, save_strategy_state,
 )
-from lib.strategy_risk import resolve_exit_qty_broker  # noqa: E402
 from lib.execution_broker import ExecutionBroker, ExecutionBrokerError  # noqa: E402
 from lib.telegram_alert import notify  # noqa: E402
-from lib.algo_kit import (  # noqa: E402
-    PositionStore, confirm_order_fill, confirmed_fill_price, setup_strategy_logging,
-)
+from lib.algo_kit import LegExecutor, PositionStore, leg_pnl, setup_strategy_logging  # noqa: E402
 
 STRATEGY_KEY_DEFAULT = "nifty_volcano_calendar"   # must match strategyRegistry.ts
 LOG_FOLDER = "volcano_calendar"                   # must match STRATEGY_LOG_DIRS
@@ -101,10 +98,6 @@ def choose_strikes(spot: float, wing_points: int, ce_offset_points: int, step: i
 
 def leg_qty(name: str, lots: int, lot_size: int) -> int:
     return LEG_SPECS[name]["lot_mult"] * lots * lot_size
-
-
-def leg_pnl(side: str, entry_price: float, ltp: float, qty: int) -> float:
-    return (entry_price - ltp) * qty if side == "SELL" else (ltp - entry_price) * qty
 
 
 def monthly_expiries(expiries: list) -> list:
@@ -197,6 +190,10 @@ class Strategy:
         self.helper.start_websocket([("IDX_I", INDEX_ID, 15)])
         time.sleep(2)
         self.lot_size = self.helper.get_lot_size(UNDERLYING)
+        # Entry, rollback, close and the restart cross-check come from the kit (LegExecutor): every order
+        # checked, every fill confirmed, a leg only cleared once its close is confirmed.
+        self.exec = LegExecutor(self.broker, self.helper, broker, PRODUCT, dry_run=dry_run, ltp_fn=self._ltp,
+                                log=logger, sleep=lambda x: time.sleep(x), clock=lambda: time.time())  # looked up at call time
 
         self._reset_cycle_state()
         self.load_position()
@@ -261,26 +258,19 @@ class Strategy:
                     self.helper.subscribe_instruments([("NSE_FNO", str(leg["id"]), 15)])
                 except Exception as e:
                     logger.error(f"Resubscribe failed for {leg['id']}: {e}")
-        self._reconcile_against_broker()
+        if self.status in ("UNWINDING", "FLATTENING"):
+            # Mid-entry/mid-exit crash: a tracked leg may never have been placed. The close path sizes every
+            # exit off broker truth and calls a missing leg flat, so reconciling here would only block it.
+            logger.warning(f"Resuming {self.status}: will flatten the tracked legs against broker truth.")
+        else:
+            self._reconcile_against_broker()
 
     def _reconcile_against_broker(self):
-        """Diagnostic only; never used to size an exit. Refuses to start on a mismatch."""
-        if self.dry_run:
-            return
-        mismatch = False
-        for name, leg in self.legs.items():
-            if not leg:
-                continue
-            expected = -leg["qty"] if leg["side"] == "SELL" else leg["qty"]
-            try:
-                net = self.broker.get_owned_net_qty(leg["strike"], leg["expiry"], leg["opt_type"])
-            except Exception as e:
-                logger.warning(f"Reconcile: could not read {name} {leg['opt_type']} {leg['strike']}: {e}")
-                continue
-            if net != expected:
-                mismatch = True
-                logger.warning(f"Reconcile MISMATCH {name}: expected {expected}, broker {net}")
-        if mismatch:
+        """Diagnostic only; never used to size an exit. Refuses to start on a mismatch (exact match required)."""
+        problems = self.exec.reconcile(self.legs, shortfall_only=False)
+        if problems:
+            for line in problems:
+                logger.warning(f"Reconcile MISMATCH {line}")
             logger.error("Position does not match the broker. Fix it manually, then restart. Refusing to start.")
             sys.exit(1)
 
@@ -295,56 +285,17 @@ class Strategy:
         price = self.helper.get_ltp(str(sid), exchange="NSE_FNO", instrument="OPTIDX")
         return (sid, price) if price and price > 0 else (None, 0.0)
 
-    def _fill_price(self, order_id, fallback):
-        """wait_for_fill() returns a bool, not a price; the kit reads the fill price off the order.
-        Dhan order ids only: another broker's id is unknown to the Dhan helper, so use the LTP."""
-        if self.broker_name != "dhan":
-            return fallback
-        return confirmed_fill_price(self.helper, order_id, fallback, log=logger, raise_errors=True)
-
     def _ltp(self, leg):
         return self.helper.get_ltp(str(leg["id"]), exchange="NSE_FNO", instrument="OPTIDX")
 
     # ── orders (every call checked, every fill confirmed) ───────────────────────────────────────
 
-    def _open_leg(self, name, strike, opt_type, expiry, qty, quote_price):
-        """Place this leg's entry order. Returns fill price, or None if the order failed."""
-        side = LEG_SPECS[name]["side"]
-        if self.dry_run:
-            return quote_price
-        fn = self.broker.buy if side == "BUY" else self.broker.sell
-        oid = fn(strike, expiry, opt_type, qty, product=PRODUCT)
-        return self._fill_price(oid, quote_price) if oid else None
-
-    def _close_leg(self, name, leg) -> tuple:
-        """Returns (closed: bool, exit_price). A leg is only cleared once the broker confirms it."""
-        ltp = self._ltp(leg)
-        if self.dry_run:
-            return True, ltp
-        close_side = "SELL" if leg["side"] == "BUY" else "BUY"
-        try:
-            qty, net_before = resolve_exit_qty_broker(self.broker, leg["strike"], leg["expiry"], leg["opt_type"],
-                                                      leg["qty"], close_side, logger)
-            if qty <= 0:
-                return True, ltp                     # broker already flat: nothing to close
-            fn = self.broker.sell if close_side == "SELL" else self.broker.buy
-            oid = fn(leg["strike"], leg["expiry"], leg["opt_type"], qty, product=PRODUCT)
-            if not oid:
-                logger.critical(f"{name} {leg['opt_type']} {leg['strike']} close order FAILED; leg stays tracked.")
-                return False, ltp
-            # Broker-aware: Dhan order status, or the broker's own net position for Zerodha/Kotak. The
-            # Dhan helper cannot confirm another broker's order id, so a bare wait_for_fill() here
-            # reported every non-Dhan close as unconfirmed and the strategy never reached flat.
-            signed = qty if close_side == "BUY" else -qty
-            if not confirm_order_fill(self.helper, self.broker, self.broker_name, oid, leg["strike"],
-                                      leg["expiry"], leg["opt_type"], signed, net_before,
-                                      timeout=5, sleep=time.sleep, clock=time.time, log=logger):
-                logger.critical(f"{name} {leg['opt_type']} {leg['strike']} close NOT confirmed; leg stays tracked.")
-                return False, ltp
-            return True, self._fill_price(oid, ltp)
-        except Exception as e:
-            logger.error(f"Close {name} {leg['opt_type']} {leg['strike']} error: {e}")
-            return False, ltp
+    def _checkpoint_entry(self, tracked):
+        """Runs BEFORE each entry order: a crash mid-entry leaves a tracked UNWINDING book a restart flattens,
+        never live legs with no record."""
+        self.legs = {name: tracked.get(name) for name in LEG_SPECS}
+        self.position_open, self.status = True, "UNWINDING"
+        self.save_position()
 
     def enter_position(self, spot, today: date):
         """All-or-nothing across 5 legs. Resolve everything first; unwind on any mid-entry failure."""
@@ -368,45 +319,33 @@ class Strategy:
                 return
             quotes[name] = (sid, px, expiry)
 
-        placed = []          # [(name, leg_dict), ...] in placement order, for rollback
-        for name in ENTRY_ORDER:
-            spec = LEG_SPECS[name]
-            sid, px, expiry = quotes[name]
-            qty = leg_qty(name, self.lots, self.lot_size)
-            fill = self._open_leg(name, strikes[name], spec["opt_type"], expiry, qty, px)
-            if fill is None:
-                logger.critical(f"{name} {spec['side']} failed; unwinding {len(placed)} already-placed leg(s).")
-                all_unwound = True
-                for uname, uleg in placed:
-                    closed, exit_px = self._close_leg(uname, uleg)
-                    if closed:
-                        self.realized_pnl += leg_pnl(uleg["side"], uleg["avg_price"], exit_px, uleg["qty"])
-                    else:
-                        all_unwound = False
-                        self.legs[uname] = uleg
-                if not all_unwound:
-                    self.position_open, self.status = True, "UNWINDING"
-                    self.near_expiry, self.far_expiry = near, far
-                    self.save_position()
-                else:
-                    self.save_position()   # persists realized_pnl from the unwind + entry_month below
-                return
-            leg = {"id": sid, "strike": strikes[name], "opt_type": spec["opt_type"], "expiry": expiry,
-                   "side": spec["side"], "avg_price": fill, "qty": qty}
-            placed.append((name, leg))
+        specs = [{"name": name, "side": LEG_SPECS[name]["side"], "opt_type": LEG_SPECS[name]["opt_type"],
+                  "strike": strikes[name], "expiry": quotes[name][2], "qty": leg_qty(name, self.lots, self.lot_size),
+                  "avg_price": quotes[name][1], "id": quotes[name][0]} for name in ENTRY_ORDER]
+        self.near_expiry, self.far_expiry = near, far
+        res = self.exec.open_all(specs, checkpoint=self._checkpoint_entry)
+        if not res.ok:
+            for _name, uleg, exit_px, closed_qty in res.unwound:     # book what the rollback had to close
+                self.realized_pnl += leg_pnl(uleg["side"], uleg["avg_price"], exit_px, closed_qty)
+            self.legs = {name: res.stuck.get(name) for name in LEG_SPECS}
+            self.position_open, self.status = bool(res.stuck), ("UNWINDING" if res.stuck else "WAITING")
+            if not res.stuck:
+                self.near_expiry = self.far_expiry = None
+            self.save_position()
+            return
 
-        # All 5 legs filled — commit.
+        # All 5 legs filled and confirmed: commit.
+        placed = [(name, res.opened[name]) for name in ENTRY_ORDER]
         for name, leg in placed:
             self.legs[name] = leg
             self.helper.subscribe_instruments([("NSE_FNO", str(leg["id"]), 15)])
-        self.near_expiry, self.far_expiry = near, far
         self.entry_month = today.strftime("%Y-%m")
         self.position_open, self.status = True, "RUNNING"
         self._resolve_target_stop()
         self.save_position()
         logger.info(f"ENTERED {self.entry_month} near={near} far={far} " +
                     " ".join(f"{n}={l['strike']}({l['side']}@{l['avg_price']:.2f})" for n, l in placed))
-        notify(f"[{self.state_key}] Entered volcano calendar {self.entry_month}, near={near} far={far}")
+        notify(f"[{self.state_key}] Entered volcano calendar {self.entry_month}, near={near}, far={far}")
 
     def _resolve_target_stop(self):
         """Resolve target_rs/stop_rs ONCE at entry, against deployed margin (per the source's
@@ -448,20 +387,16 @@ class Strategy:
         """True only if every leg is confirmed closed. A leg clears only once its close is
         confirmed; on False the caller keeps a retry status and calls this again next tick."""
         logger.warning(f"!!! EXITING: {reason} !!!")
-        all_closed = True
-        for name, leg in list(self.legs.items()):
-            if not leg:
-                continue
-            closed, exit_px = self._close_leg(name, leg)
-            if closed:
-                self.realized_pnl += leg_pnl(leg["side"], leg["avg_price"], exit_px, leg["qty"])
-                try:
-                    self.helper.unsubscribe_instruments([("NSE_FNO", str(leg["id"]), 15)])
-                except Exception:
-                    pass
-                self.legs[name] = None
-            else:
-                all_closed = False
+        def book(name, leg, exit_px, closed_qty):                  # runs right after each CONFIRMED close
+            self.realized_pnl += leg_pnl(leg["side"], leg["avg_price"], exit_px, closed_qty)
+            try:
+                self.helper.unsubscribe_instruments([("NSE_FNO", str(leg["id"]), 15)])
+            except Exception:
+                pass
+            self.legs[name] = None
+            self.save_position()
+
+        all_closed = self.exec.close_all({n: l for n, l in self.legs.items() if l}, on_closed=book).all_closed
         if all_closed:
             was_stop = reason.startswith("Stop hit")
             self.consecutive_stops = self.consecutive_stops + 1 if was_stop else 0
@@ -547,7 +482,8 @@ class Strategy:
                         and in_time_window(now_hhmm, self.entry_time, self.entry_window_min)):
                     self.entry_month = today.strftime("%Y-%m")   # mark tried even if this attempt fails
                     self.enter_position(spot, today)
-                self.status = "WAITING"
+                if not self.position_open:           # a stuck unwind keeps UNWINDING so the retry branch runs
+                    self.status = "WAITING"
                 self.save_state(spot=spot)
                 time.sleep(5)
                 continue

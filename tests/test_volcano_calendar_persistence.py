@@ -109,11 +109,17 @@ open(path(), "w").write("{corrupt")
 check("corrupt position file refuses to start", refuses(lambda: new(True)))
 clean()
 
+lv = new(False)                                       # fill prices are only read in a live run
 H.filled, H.order = True, {"averageTradedPrice": 87.25}
-check("fill price comes from the order, not the wait bool", s._fill_price("o1", 90.0) == 87.25)
+check("fill price comes from the order, not the wait bool", lv.exec.fill_price("o1", 90.0) == 87.25)
 H.filled = False
-check("unconfirmed fill falls back", s._fill_price("o1", 90.0) == 90.0)
-check("paper / empty id returns fallback", s._fill_price("PAPER", 90.0) == 90.0 and s._fill_price(None, 90.0) == 90.0)
+check("a fill price is read off the order record even when wait_for_fill said no (confirming is a separate step)",
+      lv.exec.fill_price("o1", 90.0) == 87.25)
+H.order = {"averageTradedPrice": 0}
+check("an order record with no price falls back to the quote", lv.exec.fill_price("o1", 90.0) == 90.0)
+check("paper / empty id returns fallback", lv.exec.fill_price("PAPER", 90.0) == 90.0 and lv.exec.fill_price(None, 90.0) == 90.0)
+check("a paper run never reads fills", (setattr(H, "order", {"averageTradedPrice": 87.25}) or True)
+      and s.exec.fill_price("o1", 90.0) == 90.0)
 
 clean()
 
@@ -157,22 +163,25 @@ vc.time.sleep = lambda s: None
 H2 = DhanMustNotBeAsked()
 vc.DhanHelper = lambda dhan: H2
 live = new(False)
-live.helper, live.broker_name = H2, "zerodha"
-live.broker = NetBroker(net=-LEG["qty"])
-closed, px = live._close_leg("short_call", dict(LEG))
+live.helper, live.broker_name, live.broker = H2, "zerodha", NetBroker(net=-LEG["qty"])
+live.exec = vc.LegExecutor(live.broker, H2, "zerodha", vc.PRODUCT, dry_run=False, ltp_fn=live._ltp, log=vc.logger,
+                           sleep=lambda x: vc.time.sleep(x), clock=lambda: vc.time.time())
+r = live.exec.close_leg(dict(LEG), name="short_call"); closed, px = r.confirmed, r.exit_price
 check("non-Dhan close is confirmed from the broker's net position, not Dhan's order status",
       closed is True and live.broker.orders == [("BUY", LEG["qty"])] and live.broker.net == 0)
 check("non-Dhan fill price falls back to the LTP (never asks Dhan about a foreign id)",
-      live._fill_price("Z-BUY-1", 91.5) == 91.5)
+      live.exec.fill_price("Z-BUY-1", 91.5) == 91.5)
 
 stuck = new(False)
 stuck.helper, stuck.broker_name = H2, "kotak"
 class NeverMoves(NetBroker):
     def buy(self, *a, **k): self.orders.append(("BUY", a[3])); return "Z-BUY-2"
 stuck.broker = NeverMoves(net=-LEG["qty"])
+stuck.exec = vc.LegExecutor(stuck.broker, H2, "kotak", vc.PRODUCT, dry_run=False, ltp_fn=stuck._ltp, log=vc.logger,
+                            sleep=lambda x: vc.time.sleep(x), clock=lambda: vc.time.time(), confirm_timeout=5)
 vc.time.time, _t = (lambda: _t[0]), [0.0]
 vc.time.sleep = lambda s: _t.__setitem__(0, _t[0] + s)
-closed, _ = stuck._close_leg("short_call", dict(LEG))
+closed = stuck.exec.close_leg(dict(LEG), name="short_call").confirmed
 check("non-Dhan close that never shows in the net position stays tracked (not silently flat)", closed is False)
 clean()
 print(f"\n{ok} passed, {fail} failed")

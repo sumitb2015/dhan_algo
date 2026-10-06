@@ -79,6 +79,10 @@ class OpenResult:
         return not self.stuck
 
 
+class BaselineUnavailable(Exception):
+    """The broker position could not be read before an order, so the order must not be sent."""
+
+
 class LegExecutor:
     def __init__(self, broker, helper, broker_name: str, product: str, dry_run: bool = False,
                  ltp_fn: Optional[Callable[[dict], float]] = None, log=None, confirm_timeout: int = 15,
@@ -102,13 +106,17 @@ class LegExecutor:
             return None
 
     def _net_now(self, leg: dict) -> int:
-        """Broker net before an order, needed only to confirm a non-Dhan order (Dhan confirms by status)."""
+        """Broker net before an order, needed only to confirm a non-Dhan order (Dhan confirms by status).
+
+        Raises BaselineUnavailable when the read fails: defaulting to 0 would make the later confirmation
+        compare against a wrong baseline (a filled order reported unconfirmed, or a false match).
+        """
         if self.dry_run or self.broker_name == "dhan":
             return 0
         try:
             return int(self.broker.get_owned_net_qty(leg["strike"], leg["expiry"], leg["opt_type"]))
-        except Exception:
-            return 0
+        except Exception as e:
+            raise BaselineUnavailable(f"{leg['opt_type']} {leg['strike']}: {e}") from e
 
     def _confirm(self, leg: dict, oid, signed_qty: int, net_before: int, timeout: Optional[int] = None) -> bool:
         return confirm_order_fill(
@@ -126,7 +134,11 @@ class LegExecutor:
 
     def open_leg(self, side: str, leg: dict) -> Tuple[bool, object]:
         """Place and confirm one leg. Returns (confirmed, oid); oid is None when nothing can have filled."""
-        net_before = self._net_now(leg)
+        try:
+            net_before = self._net_now(leg)
+        except BaselineUnavailable as e:
+            self.log.error(f"Cannot read the broker position before ordering ({e}); order NOT placed.")
+            return False, None
         oid = self.place(side, leg, leg["qty"])
         signed = leg["qty"] if side == BUY else -leg["qty"]
         ok = bool(oid) and self._confirm(leg, oid, signed, net_before)
@@ -154,9 +166,11 @@ class LegExecutor:
             leg = {k: v for k, v in spec.items() if k != "name"}
             name = spec["name"]
             tracked[name] = leg
+            leg["pending"] = True             # order not sent yet: a crash now must not "close" a leg never opened
             if checkpoint:
                 checkpoint(tracked)           # BEFORE the order: a crash now leaves a tracked book
             ok, oid = self.open_leg(leg["side"], leg)
+            leg.pop("pending", None)
             if not oid:
                 tracked.pop(name)             # nothing was placed or it was rejected
             elif ok:
@@ -218,9 +232,26 @@ class LegExecutor:
         ltp = float(self.ltp_fn(leg) or 0.0) if self.ltp_fn else 0.0
         if self.dry_run:
             if ltp <= 0:
-                self.log.warning(f"[PAPER] no quote for {label}; close deferred.")
-                return CloseResult(False)
+                # A paper book is closed on a missing quote at the entry price (zero P&L): deferring would
+                # hang every paper exit and rollback after hours or on a subscription gap.
+                self.log.warning(f"[PAPER] no quote for {label}; closing at the entry price.")
+                return CloseResult(True, float(leg.get("avg_price") or 0.0), qty)
             return CloseResult(True, ltp, qty)
+        if leg.get("pending"):
+            # Checkpointed before its entry order and never resolved: it may never have been placed. Sizing an
+            # exit off the broker's net could then sell a sibling instance's contracts. So: if the broker shows
+            # nothing in this leg's direction it was never opened (flat, nothing to close); if it shows a
+            # position, whose it is cannot be told apart, so a human decides.
+            try:
+                net = int(self.broker.get_owned_net_qty(leg["strike"], leg["expiry"], leg["opt_type"]))
+            except Exception as e:
+                self.log.critical(f"Cannot verify pending leg {label} ({e}); leg stays tracked.")
+                return CloseResult(False)
+            if (net < 0) if leg["side"] == SELL else (net > 0):
+                self.log.critical(f"{label} was checkpointed before its order and never resolved, yet the broker "
+                                  f"shows {net}: it may be a sibling's. Not closing it automatically; verify.")
+                return CloseResult(False)
+            return CloseResult(True, leg["avg_price"], 0)
         close_side = SELL if leg["side"] == BUY else BUY
         try:
             to_close, net_before = resolve_exit_qty_broker(
