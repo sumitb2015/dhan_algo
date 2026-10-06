@@ -35,6 +35,7 @@ export function StraddlePanel({
   onAtmOffsetChange,
   fixedExpiry,
   fixedInterval,
+  onStrikeResolved,
 }: {
   underlying: ChartUnderlying;
   onUnderlyingChange: (u: ChartUnderlying) => void;
@@ -51,6 +52,8 @@ export function StraddlePanel({
   /** Page owns expiry/interval so every panel on it stays in sync; hides the panel's own. */
   fixedExpiry?: string;
   fixedInterval?: string;
+  /** Reports the strike on screen (ATM + offset snapped to the chain) so a parent can trade it. */
+  onStrikeResolved?: (strike: number | null) => void;
 }) {
   const [intervalState, setInterval_] = useState('1');
   const [expiry, setExpiry] = useState('');
@@ -135,6 +138,10 @@ export function StraddlePanel({
       return strike;
     return atmStrike;
   }, [strike, strikesData, atmStrike, atmOffset]);
+
+  useEffect(() => {
+    onStrikeResolved?.(effectiveStrike);
+  }, [effectiveStrike, onStrikeResolved]);
 
   const offsetChoices = useMemo(() => {
     const gap = strikeGap ?? 50;

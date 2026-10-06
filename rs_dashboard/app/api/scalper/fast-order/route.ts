@@ -100,6 +100,10 @@ export async function POST(req: NextRequest): Promise<Response> {
   return res.clone();
 }
 
+/** 'ts' = Triple Straddle: 50 lots (its lot cap) x 75, the largest index lot seen (NIFTY's
+ *  previous size; today 65 -> 3250), so the cap stays tight yet survives a lot-size change. */
+const SOURCE_QTY_CAPS: Record<string, number> = { ts: 3750 };
+
 async function placeOrderOnce(body: {
     securityId: string;
     quantity: number;
@@ -136,6 +140,13 @@ async function placeOrderOnce(body: {
   const qtyNum = Number(quantity);
   if (!Number.isInteger(qtyNum) || qtyNum <= 0) {
     return NextResponse.json({ success: false, error: `Invalid quantity: ${quantity} (must be a positive integer)` }, { status: 400 });
+  }
+
+  // Per-source sanity cap on units per order (a backstop against a UI bug, not an auth
+  // boundary: callers that send no source are uncapped, as before). Rejected, never clamped.
+  const sourceCap = body.source ? SOURCE_QTY_CAPS[body.source] : undefined;
+  if (sourceCap !== undefined && qtyNum > sourceCap) {
+    return NextResponse.json({ success: false, error: `Quantity ${qtyNum} exceeds the ${body.source} per-order cap of ${sourceCap}` }, { status: 400 });
   }
 
   const sideUpper = String(side).toUpperCase();

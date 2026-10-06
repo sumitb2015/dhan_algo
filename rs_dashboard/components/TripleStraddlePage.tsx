@@ -1,10 +1,14 @@
 'use client';
 
-import { useEffect, useState } from 'react';
-import { Columns3 } from 'lucide-react';
+import { useCallback, useEffect, useState } from 'react';
+import { Columns3, X } from 'lucide-react';
 import NavBar from '@/components/NavBar';
 import { PanelStyles } from '@/components/PanelStyles';
 import { StraddlePanel } from '@/components/StraddlePanel';
+import { StraddleTradeBar } from '@/components/triplestraddle/StraddleTradeBar';
+import { useTripleStraddle } from '@/components/triplestraddle/useTripleStraddle';
+import { isTsTradable } from '@/lib/tripleStraddleClient';
+import { openPositionFor, pnlSummary, type TsSlot } from '@/lib/tripleStraddle';
 import { isAbortError, optionsChartApi } from '@/lib/optionsChartApi';
 import { isUnderlyingLive } from '@/lib/marketHours';
 import { VALID_INTERVALS } from '@/lib/optionsChartTypes';
@@ -35,6 +39,17 @@ export default function TripleStraddlePage() {
   const [interval_, setInterval_] = useState('1');
   const [offsets, setOffsets] = useState(DEFAULT_OFFSETS);
   const [live, setLive] = useState(false);
+  const [strikes, setStrikes] = useState<Record<TsSlot, number | null>>({ left: null, center: null, right: null });
+  const onLeft = useCallback((k: number | null) => setStrikes((s) => (s.left === k ? s : { ...s, left: k })), []);
+  const onCenter = useCallback((k: number | null) => setStrikes((s) => (s.center === k ? s : { ...s, center: k })), []);
+  const onRight = useCallback((k: number | null) => setStrikes((s) => (s.right === k ? s : { ...s, right: k })), []);
+  const strikeCb: Record<TsSlot, (k: number | null) => void> = { left: onLeft, center: onCenter, right: onRight };
+  const ts = useTripleStraddle({ underlying, expiry, strikes });
+  const tradable = isTsTradable(underlying);
+  const openPositions = ts.ledger.positions.filter((p) => p.status === 'OPEN');
+  const pnlFor = (mode: 'SIM' | 'REAL') => pnlSummary(ts.ledger.positions.filter((p) => p.mode === mode), ts.livePrices);
+  const simPnl = pnlFor('SIM');
+  const realPnl = pnlFor('REAL');
 
   useEffect(() => {
     // Hydrate after mount so server and client first renders match.
@@ -150,6 +165,37 @@ export default function TripleStraddlePage() {
             <span className={`w-1.5 h-1.5 rounded-full ${live ? 'bg-emerald-400 animate-pulse' : 'bg-zinc-600'}`} />
             {live ? 'LIVE' : 'CLOSED'}
           </span>
+          <button
+            type="button"
+            onClick={() => {
+              if (!ts.realArmed && !window.confirm('Arm REAL MONEY? New straddles will place live Dhan orders until you turn this off or reload the page.')) return;
+              ts.setRealArmed(!ts.realArmed);
+            }}
+            className={`px-2.5 py-1.5 rounded-lg border text-[10px] font-bold uppercase tracking-wide focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500 ${ts.realArmed ? 'bg-red-500/15 border-red-500/40 text-red-400' : 'bg-zinc-900 border-zinc-800 text-zinc-300'}`}
+            aria-pressed={ts.realArmed}
+            title="SIM paper-fills at live prices and never calls the broker. REAL places live Dhan orders."
+          >
+            {ts.realArmed ? 'REAL · armed' : 'SIM mode'}
+          </button>
+          {(simPnl.priced + simPnl.unpriced) > 0 && (
+            <span className={`text-[10px] font-mono font-bold px-2.5 py-1.5 rounded-lg bg-zinc-900 border border-zinc-800 ${simPnl.total >= 0 ? 'text-emerald-400' : 'text-red-400'}`} title={simPnl.unpriced ? `${simPnl.unpriced} position(s) unpriced and excluded` : undefined}>
+              SIM {simPnl.total < 0 ? '-' : ''}₹{Math.abs(Math.round(simPnl.total)).toLocaleString('en-IN')}{simPnl.unpriced ? '*' : ''}
+            </span>
+          )}
+          {(realPnl.priced + realPnl.unpriced) > 0 && (
+            <span className={`text-[10px] font-mono font-bold px-2.5 py-1.5 rounded-lg bg-zinc-900 border border-zinc-800 ${realPnl.total >= 0 ? 'text-emerald-400' : 'text-red-400'}`} title={realPnl.unpriced ? `${realPnl.unpriced} position(s) unpriced and excluded` : undefined}>
+              REAL {realPnl.total < 0 ? '-' : ''}₹{Math.abs(Math.round(realPnl.total)).toLocaleString('en-IN')}{realPnl.unpriced ? '*' : ''}
+            </span>
+          )}
+          {openPositions.length > 0 && (
+            <button
+              type="button"
+              onClick={() => void ts.exitAll()}
+              className="px-2.5 py-1.5 rounded-lg bg-red-600 text-oncolor text-[10px] font-bold uppercase tracking-wide hover:bg-red-500 focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500"
+            >
+              Exit all {openPositions.length}
+            </button>
+          )}
           <span className="text-[10px] font-mono font-bold text-amber-300 px-2.5 py-1.5 rounded-lg bg-zinc-900 border border-zinc-800 uppercase">
             DATA: {today}
           </span>
@@ -157,6 +203,26 @@ export default function TripleStraddlePage() {
           <NavBar />
         </div>
       </header>
+
+      {(ts.isLeader === false || ts.staleOpen) && (
+        <div className="px-4 pt-2" role="status">
+          <div className="rounded-lg border border-amber-500/40 bg-amber-500/10 px-3 py-1.5 text-xs text-amber-300">
+            {ts.isLeader === false && 'Another tab is running stop-loss/target for this page; this tab only shows positions. '}
+            {ts.staleOpen && 'Option prices are stale — stop-loss and target are paused.'}
+          </div>
+        </div>
+      )}
+
+      {ts.notices.length > 0 && (
+        <div className="px-4 pt-2 flex flex-col gap-1" role="status" aria-live="polite">
+          {ts.notices.map((n) => (
+            <div key={n.id} className={`flex items-start justify-between gap-2 rounded-lg border px-3 py-1.5 text-xs ${n.kind === 'error' ? 'border-red-500/40 bg-red-500/10 text-red-400' : n.kind === 'success' ? 'border-emerald-500/40 bg-emerald-500/10 text-emerald-400' : 'border-zinc-700 bg-zinc-900 text-zinc-300'}`}>
+              <span>{n.text}</span>
+              <button type="button" onClick={() => ts.dismissNotice(n.id)} aria-label="Dismiss message" className="shrink-0"><X className="w-3.5 h-3.5" /></button>
+            </div>
+          ))}
+        </div>
+      )}
 
       <main className="triple-straddle flex-1 grid grid-cols-1 xl:grid-cols-3 gap-3 px-4 py-3">
         {expiry ? (
@@ -166,14 +232,37 @@ export default function TripleStraddlePage() {
               { id: 'center', offset: 0, onChange: undefined },
               { id: 'right', offset: offsets.right, onChange: (n: number) => updateOffsets({ ...offsets, right: n }) },
             ].map((p) => (
-              <div key={p.id} className="min-w-0 h-[560px] xl:h-[calc(100vh-110px)] xl:min-h-[480px]">
-                <StraddlePanel
-                  key={`${p.id}-${panelKey}`}
-                  {...common}
-                  fixedExpiry={expiry}
-                  atmOffset={p.offset}
-                  onAtmOffsetChange={p.onChange}
-                />
+              <div key={p.id} className="min-w-0 flex flex-col gap-2 xl:h-[calc(100vh-110px)]">
+                <div className="min-h-0 h-[500px] xl:h-auto xl:flex-1 xl:min-h-[400px]">
+                  <StraddlePanel
+                    key={`${p.id}-${panelKey}`}
+                    {...common}
+                    fixedExpiry={expiry}
+                    atmOffset={p.offset}
+                    onAtmOffsetChange={p.onChange}
+                    onStrikeResolved={strikeCb[p.id as TsSlot]}
+                  />
+                </div>
+                {(() => {
+                  const pos = openPositionFor(ts.ledger, p.id as TsSlot);
+                  return (
+                    <StraddleTradeBar
+                      slot={p.id as TsSlot}
+                      strike={strikes[p.id as TsSlot]}
+                      lookup={ts.lookups[p.id as TsSlot]}
+                      position={pos}
+                      live={pos ? ts.livePrices(pos) : {}}
+                      busy={ts.busy[p.id as TsSlot]}
+                      realArmed={ts.realArmed}
+                      canTrade={tradable && ts.loaded}
+                      tradableReason={!tradable ? `${underlying} cannot be traded from this page (NIFTY, BANKNIFTY, SENSEX only)` : 'Loading your positions…'}
+                      onTrade={ts.trade}
+                      onExit={(slot) => void ts.exit(slot)}
+                      onRisk={(slot, risk) => void ts.setRisk(slot, risk)}
+                      onResolve={(slot, option, action) => void ts.resolveLeg(slot, option, action)}
+                    />
+                  );
+                })()}
               </div>
             ))}
           </>
