@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  brokerCapacity, entryPremium, evaluateRisk, pnlSummary, exitQtyForLeg, openPositionFor, pruneState, straddlePnl, straddlePnlPct,
+  activeFloorPct, peakTrackable, brokerCapacity, nextPeakPct, entryPremium, evaluateRisk, pnlSummary, exitQtyForLeg, openPositionFor, pruneState, straddlePnl, straddlePnlPct,
   totalPnl, upsertPosition, validateTrade, type TsPosition, type TsState,
 } from './tripleStraddle.ts';
 
@@ -127,4 +127,85 @@ test('pnl pct basis survives a rejected (qty 0) first leg', () => {
 test('pnlSummary counts unpriced separately', () => {
   const r = pnlSummary([pos(), pos({ id: 'b' })], (p) => (p.id === 'a' ? { CE: 90, PE: 70 } : {}));
   assert.deepEqual(r, { total: 20 * 130, priced: 1, unpriced: 1 });
+});
+
+// pos(): entry 100+80 per unit, qty 130 -> pct = (180 - (ce+pe)) / 180 * 100
+const at = (pct: number) => ({ CE: 100 - (pct / 100) * 180, PE: 80 }); // CE moves, PE flat
+
+test('peak is ratcheted, never below 0, null while unpriced', () => {
+  assert.equal(nextPeakPct(pos(), at(-10)), 0);
+  assert.equal(nextPeakPct(pos({ peakPct: 12 }), at(5)), 12);
+  assert.equal(nextPeakPct(pos({ peakPct: 12 }), at(20)), 20);
+  assert.equal(nextPeakPct(pos(), {}), null);
+});
+
+test('trail SL: stop tightens by `by` for every `every` of peak, and can lock profit', () => {
+  const risk = { armed: true, slPct: 30, trail: { kind: 'trailSl' as const, every: 10, by: 10 } };
+  assert.deepEqual(activeFloorPct(risk, 5), { kind: 'SL', floor: -30 });
+  assert.deepEqual(activeFloorPct(risk, 10), { kind: 'TRAIL', floor: -20 });
+  assert.deepEqual(activeFloorPct(risk, 35), { kind: 'TRAIL', floor: 0 });     // 30 - 3*10 = 0 -> breakeven
+  assert.deepEqual(activeFloorPct(risk, 45), { kind: 'TRAIL', floor: 10 });    // passes zero -> locked profit
+  const p = pos({ risk, peakPct: 35 });
+  assert.equal(evaluateRisk(p, at(2)), null);
+  assert.equal(evaluateRisk(p, at(0)), 'TRAIL');
+  assert.equal(evaluateRisk(p, at(-1)), 'TRAIL');
+});
+
+test('trail SL needs an SL: without one it never fires', () => {
+  const risk = { armed: true, trail: { kind: 'trailSl' as const, every: 10, by: 10 } };
+  assert.equal(activeFloorPct(risk, 50), null);
+});
+
+test('lock: dormant until the peak reaches `reach`, then exits at `lock`', () => {
+  const risk = { armed: true, trail: { kind: 'lock' as const, reach: 20, lock: 5 } };
+  assert.equal(evaluateRisk(pos({ risk, peakPct: 15 }), at(-3)), null);          // never reached 20 -> no lock
+  assert.equal(evaluateRisk(pos({ risk, peakPct: 25 }), at(8)), null);           // above the lock
+  assert.equal(evaluateRisk(pos({ risk, peakPct: 25 }), at(5)), 'LOCK');
+  assert.equal(evaluateRisk(pos({ risk }), at(30)) , null);                       // the peak includes this tick, price still above lock
+});
+
+test('lock with lock unset is a breakeven lock', () => {
+  const risk = { armed: true, trail: { kind: 'lock' as const, reach: 20 } };
+  assert.equal(evaluateRisk(pos({ risk, peakPct: 22 }), at(0)), 'LOCK');
+  assert.equal(evaluateRisk(pos({ risk, peakPct: 22 }), at(3)), null);
+});
+
+test('lock and trail: floor rises by `by` for every `every` more peak', () => {
+  const risk = { armed: true, trail: { kind: 'lockTrail' as const, reach: 20, lock: 5, every: 10, by: 5 } };
+  assert.deepEqual(activeFloorPct(risk, 20), { kind: 'LOCK', floor: 5 });
+  assert.deepEqual(activeFloorPct(risk, 29), { kind: 'LOCK', floor: 5 });
+  assert.deepEqual(activeFloorPct(risk, 30), { kind: 'LOCK', floor: 10 });
+  assert.deepEqual(activeFloorPct(risk, 50), { kind: 'LOCK', floor: 20 });
+  assert.equal(evaluateRisk(pos({ risk, peakPct: 50 }), at(19)), 'LOCK');
+  assert.equal(evaluateRisk(pos({ risk, peakPct: 50 }), at(21)), null);
+});
+
+test('an invalid lock (lock >= reach) is ignored rather than firing immediately', () => {
+  const risk = { armed: true, slPct: 30, trail: { kind: 'lock' as const, reach: 10, lock: 10 } };
+  assert.deepEqual(activeFloorPct(risk, 50), { kind: 'SL', floor: -30 });
+});
+
+test('target still wins over trail, plain SL still works with a trail set', () => {
+  const risk = { armed: true, slPct: 30, targetPct: 50, trail: { kind: 'trailSl' as const, every: 10, by: 10 } };
+  assert.equal(evaluateRisk(pos({ risk, peakPct: 49 }), at(50)), 'TARGET');
+  assert.equal(evaluateRisk(pos({ risk }), at(-30)), 'SL');
+});
+
+test('by > every is invalid: it can never put the floor above the profit', () => {
+  const sl = { armed: true, slPct: 30, trail: { kind: 'trailSl' as const, every: 5, by: 20 } };
+  assert.deepEqual(activeFloorPct(sl, 10), { kind: 'SL', floor: -30 });
+  assert.equal(evaluateRisk(pos({ risk: sl, peakPct: 10 }), at(10)), null);
+  const lt = { armed: true, trail: { kind: 'lockTrail' as const, reach: 20, lock: 5, every: 5, by: 20 } };
+  assert.deepEqual(activeFloorPct(lt, 40), { kind: 'LOCK', floor: 5 });
+});
+
+test('peak is only tracked for armed, fully confirmed, open positions', () => {
+  assert.equal(peakTrackable(pos()), true);
+  assert.equal(peakTrackable(pos({ risk: { armed: false } })), false);
+  const u = pos(); u.legs[0] = { ...u.legs[0], unconfirmed: true };
+  assert.equal(peakTrackable(u), false);
+  const h = pos(); h.legs[0] = { ...h.legs[0], closed: true, exit: 50 };
+  assert.equal(peakTrackable(h), false);
+  const x = pos(); x.legs[1] = { ...x.legs[1], pendingExit: { orderId: 'O', at: 1 } };
+  assert.equal(peakTrackable(x), false);
 });

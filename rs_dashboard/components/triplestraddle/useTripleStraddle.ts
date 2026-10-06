@@ -3,8 +3,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTabLeader } from '@/hooks/useTabLeader';
 import {
-  evaluateRisk, openPositionFor, pruneState, TS_PRICE_STALE_MS, TS_SLOTS, upsertPosition, validateTrade,
-  type TsPosition, type TsProduct, type TsRisk, type TsSide, type TsSlot, type TsState,
+  evaluateRisk, nextPeakPct, openPositionFor, peakTrackable, pruneState, TS_PRICE_STALE_MS, TS_SLOTS, upsertPosition, validateTrade,
+  type TsExitReason, type TsPosition, type TsProduct, type TsRisk, type TsSide, type TsSlot, type TsState,
 } from '@/lib/tripleStraddle';
 import {
   checkMarginGate, enterStraddle, exitStraddle, fetchChainLookup, fetchChainPrices, isTsTradable, saveTsPosition,
@@ -44,6 +44,7 @@ export function useTripleStraddle(args: {
   const pricesRef = useRef({ prices, priceAt });
   const lockRef = useRef<Set<TsSlot>>(new Set());
   const lastRiskAttempt = useRef<Record<string, number>>({});
+  const lastPeakSaved = useRef<Record<string, number>>({});
   const noticeSeq = useRef(0);
 
   useEffect(() => { pricesRef.current = { prices, priceAt }; }, [prices, priceAt]);
@@ -153,12 +154,34 @@ export function useTripleStraddle(args: {
     return out;
   }, [chainLookup, underlying, expiry, strikes]);
 
-  const persist = useCallback(async (pos: TsPosition): Promise<boolean> => {
+  // Every ledger write goes through one chain, so two saves can never land out of order and a
+  // slow stale write cannot overwrite a newer one (e.g. a peak update over a close).
+  const writeChain = useRef<Promise<unknown>>(Promise.resolve());
+  const enqueue = useCallback(<T,>(job: () => Promise<T>): Promise<T> => {
+    const run = writeChain.current.then(job, job);
+    writeChain.current = run.catch(() => undefined);
+    return run;
+  }, []);
+
+  const persist = useCallback((pos: TsPosition): Promise<boolean> => enqueue(async () => {
     commit(upsertPosition(ledgerRef.current, pos));
     const ok = await saveTsPosition(pos);
     if (!ok) notify('error', `Saving the ${pos.slot} straddle failed. It is live — do not reload this page.`);
     return ok;
-  }, [commit, notify]);
+  }), [commit, notify, enqueue]);
+
+  /** Ratchets the saved peak. Reads the position at WRITE time (inside the chain), so it can
+   *  never save a copy that an exit, resolve or risk edit has since replaced. A failed save is
+   *  retried on a later tick and does not raise the "do not reload" alarm. */
+  const persistPeak = useCallback((id: string, slot: TsSlot, peak: number) => enqueue(async () => {
+    const cur = openPositionFor(ledgerRef.current, slot);
+    if (!cur || cur.id !== id || !peakTrackable(cur) || peak <= (cur.peakPct ?? 0)) return;
+    const next = { ...cur, peakPct: peak };
+    if (await saveTsPosition(next)) {
+      commit(upsertPosition(ledgerRef.current, next));
+      lastPeakSaved.current[id] = peak;
+    }
+  }), [commit, enqueue]);
 
   // ── actions ───────────────────────────────────────────────────────
   const trade = useCallback(async (slot: TsSlot, side: TsSide, lots: number, product: TsProduct, risk: TsRisk) => {
@@ -205,7 +228,7 @@ export function useTripleStraddle(args: {
     }
   }, [strikes, lookups, realArmed, loaded, underlying, expiry, notify, persist]);
 
-  const exit = useCallback(async (slot: TsSlot, reason: 'MANUAL' | 'SL' | 'TARGET' = 'MANUAL') => {
+  const exit = useCallback(async (slot: TsSlot, reason: TsExitReason = 'MANUAL') => {
     if (lockRef.current.has(slot)) return;
     lockRef.current.add(slot);
     setBusy((b) => ({ ...b, [slot]: 'Exiting' }));
@@ -260,15 +283,23 @@ export function useTripleStraddle(args: {
     const now = Date.now();
     for (const p of ledger.positions) {
       if (p.status !== 'OPEN') continue;
-      const hit = evaluateRisk(p, livePrices(p));
-      if (!hit) continue;
+      const live = livePrices(p);
+      const hit = evaluateRisk(p, live);
+      if (!hit) {
+        if (peakTrackable(p)) {
+          const peak = nextPeakPct(p, live);
+          const saved = lastPeakSaved.current[p.id] ?? p.peakPct ?? 0;
+          if (peak != null && peak >= saved + 0.25 && !lockRef.current.has(p.slot)) void persistPeak(p.id, p.slot, peak);
+        }
+        continue;
+      }
       if (!leaderRef.current) return;
       if (now - (lastRiskAttempt.current[p.id] ?? 0) < RISK_RETRY_MS) continue;
       lastRiskAttempt.current[p.id] = now;
-      notify('info', `${p.slot} straddle ${hit === 'SL' ? 'stop-loss' : 'target'} hit — exiting`);
+      notify('info', `${p.slot} straddle ${({ SL: 'stop-loss', TARGET: 'target', TRAIL: 'trailing stop', LOCK: 'profit lock' } as const)[hit]} hit — exiting`);
       void exit(p.slot, hit);
     }
-  }, [ledger.positions, livePrices, loaded, isLeader, leaderRef, exit, notify]);
+  }, [ledger.positions, livePrices, loaded, isLeader, leaderRef, exit, notify, persistPeak]);
 
   return {
     ledger, loaded, realArmed, setRealArmed, busy, notices, dismissNotice, isLeader, staleOpen,

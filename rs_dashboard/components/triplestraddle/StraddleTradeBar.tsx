@@ -2,6 +2,7 @@
 
 import { useState } from 'react';
 import RuleNumInput from '@/components/multiLegFocus/RuleNumInput';
+import { TrailControls } from '@/components/triplestraddle/TrailControls';
 import {
   entryPremium, straddlePnl, straddlePnlPct,
   type TsPosition, type TsProduct, type TsRisk, type TsSide, type TsSlot,
@@ -93,6 +94,7 @@ export function StraddleTradeBar({
               })}
             </div>
           )}
+          <TrailControls risk={risk} peakPct={position.peakPct ?? 0} onChange={(trail) => setRisk({ trail })} />
           <div className="flex items-center gap-2 flex-wrap">
             <label className="flex items-center gap-1 text-zinc-300">
               SL %
@@ -138,6 +140,7 @@ export function StraddleTradeBar({
             Tgt %
             <RuleNumInput value={draftRisk.targetPct} onCommit={(v) => setRisk({ targetPct: v })} className="w-12" />
           </label>
+          <TrailControls risk={draftRisk} onChange={(trail) => setRisk({ trail })} />
           <div className="flex items-center gap-1.5 ml-auto">
             <button
               type="button" disabled={disabled || !canTrade || !lookup}
