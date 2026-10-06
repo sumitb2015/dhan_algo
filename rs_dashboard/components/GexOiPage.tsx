@@ -11,7 +11,7 @@ import { PulseStat, ChartHeader } from './QuantPanel';
 import { useMarketLive } from '@/lib/useMarketLive';
 import { expiryEpochMs, rollForward } from '@/lib/optionsPricing';
 import {
-  buildGexRows, detectOiUnit, gexLevels, wallClarity, type GexChainEntry, type GexPower, type GexRow,
+  buildGexRows, forwardFromSpot, fmtGex, gexChecklist, gexLevels, wallClarity, type ChecklistTone, type GexChainEntry, type GexPower, type GexRow,
 } from '@/lib/gex';
 
 const UNDERLYING = 'NIFTY';
@@ -19,29 +19,25 @@ const STRIKE_STEP = 50;
 const POLL_MS = 15_000;
 const RANGE_OPTIONS = [8, 12, 20, 30] as const;
 
+/** A GexRow plus the OI figures the charts show (lots at the current lot size, or units when the lot is unknown). */
+interface GexViewRow extends GexRow { ceOiView: number; peOiView: number }
+
 interface ChainPayload {
+  /** The expiry this response was requested for; a response for another expiry must never be rendered. */
+  reqExpiry?: string;
   chain: { oc?: Record<string, GexChainEntry> };
   spot: number;
   future_price?: number;
   future_expiry?: string;
 }
 
-function fmtGex(n: number): string {
-  const a = Math.abs(n);
-  const s = n < 0 ? '-' : '';
-  if (a >= 1e9) return `${s}${Math.round(a / 1e7).toLocaleString('en-IN')} Cr`;
-  if (a >= 1e7) return `${s}${(a / 1e7).toFixed(a >= 1e9 ? 0 : 2)}Cr`;
-  if (a >= 1e5) return `${s}${(a / 1e5).toFixed(2)}L`;
-  if (a >= 1e3) return `${s}${(a / 1e3).toFixed(1)}K`;
-  return `${s}${a.toFixed(0)}`;
-}
 const fmtStrike = (n: number) => n.toLocaleString('en-IN');
 const fmtOi = (n: number) => fmtGex(n);
 const POWER_UNIT: Record<number, string> = { 1: 'index units', 2: '₹' };
 
 const GexTooltip = ({ active, payload, label, oiLabel }: Record<string, unknown> & { oiLabel: string }) => {
   if (!active || !Array.isArray(payload) || !payload.length) return null;
-  const row = (payload as Array<{ payload: GexRow }>)[0]?.payload;
+  const row = (payload as Array<{ payload: GexViewRow }>)[0]?.payload;
   if (!row) return null;
   return (
     <div className="bg-zinc-950 border border-zinc-700 rounded-xl px-4 py-3 text-xs shadow-2xl min-w-[200px] font-mono">
@@ -49,27 +45,26 @@ const GexTooltip = ({ active, payload, label, oiLabel }: Record<string, unknown>
       <div className="flex justify-between gap-8 mb-1"><span className="text-red-400 font-sans">Call GEX</span><span className="text-white font-bold tabular-nums">{fmtGex(row.ceGex)}</span></div>
       <div className="flex justify-between gap-8 mb-1"><span className="text-emerald-400 font-sans">Put GEX</span><span className="text-white font-bold tabular-nums">{fmtGex(row.peGex)}</span></div>
       <div className="flex justify-between gap-8 mb-2 pt-2 border-t border-zinc-800"><span className="text-zinc-400 font-sans">Net GEX</span><span className={`font-bold tabular-nums ${row.netGex >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>{fmtGex(row.netGex)}</span></div>
-      <div className="flex justify-between gap-8 mb-1 pt-2 border-t border-zinc-800"><span className="text-zinc-400 font-sans">CE OI ({oiLabel})</span><span className="text-white tabular-nums">{fmtOi(row.ceOi)}</span></div>
-      <div className="flex justify-between gap-8"><span className="text-zinc-400 font-sans">PE OI ({oiLabel})</span><span className="text-white tabular-nums">{fmtOi(row.peOi)}</span></div>
+      <div className="flex justify-between gap-8 mb-1 pt-2 border-t border-zinc-800"><span className="text-zinc-400 font-sans">CE OI ({oiLabel})</span><span className="text-white tabular-nums">{fmtOi(row.ceOiView)}</span></div>
+      <div className="flex justify-between gap-8"><span className="text-zinc-400 font-sans">PE OI ({oiLabel})</span><span className="text-white tabular-nums">{fmtOi(row.peOiView)}</span></div>
     </div>
   );
 };
 
 const OiTooltip = ({ active, payload, label, oiLabel }: Record<string, unknown> & { oiLabel: string }) => {
   if (!active || !Array.isArray(payload) || !payload.length) return null;
-  const row = (payload as Array<{ payload: GexRow }>)[0]?.payload;
+  const row = (payload as Array<{ payload: GexViewRow }>)[0]?.payload;
   if (!row) return null;
   return (
     <div className="bg-zinc-950 border border-zinc-700 rounded-xl px-4 py-3 text-xs shadow-2xl min-w-[170px] font-mono">
       <p className="text-zinc-300 font-bold mb-2 tabular-nums font-sans">Strike {fmtStrike(Number(label))}</p>
-      <div className="flex justify-between gap-8 mb-1"><span className="text-red-400 font-sans">CE OI ({oiLabel})</span><span className="text-white font-bold tabular-nums">{fmtOi(row.ceOi)}</span></div>
-      <div className="flex justify-between gap-8"><span className="text-emerald-400 font-sans">PE OI ({oiLabel})</span><span className="text-white font-bold tabular-nums">{fmtOi(row.peOi)}</span></div>
+      <div className="flex justify-between gap-8 mb-1"><span className="text-red-400 font-sans">CE OI ({oiLabel})</span><span className="text-white font-bold tabular-nums">{fmtOi(row.ceOiView)}</span></div>
+      <div className="flex justify-between gap-8"><span className="text-emerald-400 font-sans">PE OI ({oiLabel})</span><span className="text-white font-bold tabular-nums">{fmtOi(row.peOiView)}</span></div>
     </div>
   );
 };
 
-type Tone = 'ok' | 'warn' | 'bad' | 'manual';
-const TONE_CLS: Record<Tone, string> = {
+const TONE_CLS: Record<ChecklistTone, string> = {
   ok: 'border-emerald-500/40 bg-emerald-500/10 text-emerald-400',
   warn: 'border-amber-500/40 bg-amber-500/10 text-amber-400',
   bad: 'border-red-500/40 bg-red-500/10 text-red-400',
@@ -123,7 +118,7 @@ export default function GexOiPage() {
       const j = await res.json() as { success: boolean; data?: ChainPayload; error?: string };
       if (mine !== seq.current) return; // a newer request owns the screen
       if (!j.success || !j.data?.chain?.oc) { setError(j.error ?? 'No chain data'); return; }
-      setPayload(j.data);
+      setPayload({ ...j.data, reqExpiry: expiry });
       setError('');
       setUpdated(new Date().toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', second: '2-digit' }));
       setDataDate(todayIST());
@@ -133,7 +128,8 @@ export default function GexOiPage() {
           const v = Number(t.quotes?.VIX?.ltp);
           if (mine === seq.current) setVix(v > 0 ? v : null);
         })
-        .catch(() => { /* VIX is a checklist input only */ });
+        // A failed read clears the value: a stale VIX would keep the checklist tile green on old data.
+        .catch(() => { if (mine === seq.current) setVix(null); });
     } catch (e) {
       if (mine === seq.current) setError(String(e));
     } finally {
@@ -156,65 +152,52 @@ export default function GexOiPage() {
     return () => { clearInterval(id); document.removeEventListener('visibilitychange', onVis); };
   }, [expiry, live, fetchAll]);
 
-  const spot = payload?.spot ?? 0;
+  // A response fetched for another expiry (still in flight when the select changed) is ignored, not rendered.
+  const chain = payload && payload.reqExpiry === expiry ? payload : null;
+  const spot = chain?.spot ?? 0;
   // Black-76 wants the future that matches this chain; fall back to spot only when no future was returned.
-  const isFut = !!(payload?.future_price && payload.future_price > 0 && payload.future_expiry);
+  const isFut = !!(chain?.future_price && chain.future_price > 0 && chain.future_expiry);
   // The returned future is usually a later contract than the chain's expiry (monthly future, weekly chain), so roll it to
   // the chain's own expiry; Black-76 with the wrong forward shifts every gamma.
-  const underlying = isFut
-    ? rollForward(payload!.future_price!, payload!.future_expiry!, expiry)
-    : spot;
+  const underlying = isFut ? rollForward(chain!.future_price!, chain!.future_expiry!, expiry) : forwardFromSpot(spot, expiry);
+  // With no future price (typically after hours) the forward is spot carried to expiry (S*e^{rT}): still an estimate, so flagged.
+  const approxForward = !!chain && !isFut;
 
-  const oiUnit = useMemo(() => (payload?.chain.oc ? detectOiUnit(payload.chain.oc, lot) : 'units'), [payload, lot]);
-  // OI is charted in lots (the NSE / video convention) when the lot size is known; GEX itself is always built from units.
-  const oiDiv = oiUnit === 'units' && lot ? lot : 1;
-  const oiLabel = oiDiv > 1 ? 'lots' : oiUnit === 'lots' ? 'lots' : 'units';
+  // GEX is always built from OI in units (Dhan's convention, never guessed). Charts show lots when the lot size is known.
+  const oiDiv = lot && lot > 0 ? lot : 1;
+  const oiLabel = oiDiv > 1 ? 'lots' : 'units';
+  // Anchor the window on spot; with a transient spot of 0 fall back to the forward so the chart does not blank.
+  const anchor = spot > 0 ? spot : underlying;
 
-  const { rows, levels, clarity } = useMemo(() => {
-    if (!payload?.chain.oc || !(underlying > 0)) {
-      return { rows: [] as GexRow[], levels: gexLevels([], spot), clarity: { call: wallClarity([]), put: wallClarity([]) } };
+  const { rows, levels, clarity, outside } = useMemo(() => {
+    if (!chain?.chain.oc || !(underlying > 0)) {
+      return { rows: [] as GexViewRow[], levels: gexLevels([], spot), clarity: { call: wallClarity([]), put: wallClarity([]) }, outside: [] as string[] };
     }
-    const all = buildGexRows(payload.chain.oc, { expiry, underlying, lotSize: lot, oiUnit, power });
-    const centre = Math.round(spot / STRIKE_STEP) * STRIKE_STEP;
+    const all = buildGexRows(chain.chain.oc, { expiry, underlying, lotSize: lot, power });
+    const centre = Math.round(anchor / STRIKE_STEP) * STRIKE_STEP;
     // Levels and wall clarity both come from the whole chain, so the checklist describes the walls actually reported.
     const lv = gexLevels(all, spot);
     const cl = {
       call: wallClarity(all.map(r => ({ strike: r.strike, v: r.ceGex }))),
       put: wallClarity(all.map(r => ({ strike: r.strike, v: -r.peGex }))),
     };
-    const win = all
+    const inWin = (k: number | null) => k == null || Math.abs(k - centre) <= range * STRIKE_STEP;
+    const out: string[] = [];
+    if (!inWin(lv.callWall)) out.push(`call wall ${lv.callWall}`);
+    if (!inWin(lv.putWall)) out.push(`put wall ${lv.putWall}`);
+    if (!inWin(lv.pin)) out.push(`pin ${lv.pin}`);
+    if (!inWin(lv.flip == null ? null : Math.round(lv.flip))) out.push(`flip ${Math.round(lv.flip!)}`);
+    const win: GexViewRow[] = all
       .filter(r => Math.abs(r.strike - centre) <= range * STRIKE_STEP)
-      .map(r => ({ ...r, ceOi: r.ceOi / oiDiv, peOi: r.peOi / oiDiv }));
-    return { rows: win, levels: lv, clarity: cl };
-  }, [payload, lot, underlying, spot, expiry, power, range, oiUnit, oiDiv]);
+      .map(r => ({ ...r, ceOiView: r.ceOi / oiDiv, peOiView: r.peOi / oiDiv }));
+    return { rows: win, levels: lv, clarity: cl, outside: out };
+  }, [chain, lot, underlying, spot, anchor, expiry, power, range, oiDiv]);
 
   const atm = spot > 0 ? Math.round(spot / STRIKE_STEP) * STRIKE_STEP : 0;
-  const callClarity = clarity.call;
-  const putClarity = clarity.put;
+  // Regime comes from spot vs the flip; the checklist's first tile uses the whole-chain total. Say so when they disagree.
+  const regimeMismatch = levels.regime !== 'unknown' && levels.flip != null && (levels.totalNet > 0) !== (levels.regime === 'positive');
 
-  const checklist: { label: string; detail: string; tone: Tone }[] = [
-    {
-      label: 'Net GEX positive',
-      detail: levels.regime === 'unknown' ? 'no data' : `total ${fmtGex(levels.totalNet)}`,
-      tone: levels.regime === 'unknown' ? 'manual' : levels.totalNet > 0 ? 'ok' : 'bad',
-    },
-    {
-      label: 'Flip below spot',
-      detail: levels.flip == null ? (levels.regime === 'unknown' ? 'no data' : 'no sign change in chain') : `flip ${Math.round(levels.flip).toLocaleString('en-IN')} vs spot ${Math.round(spot).toLocaleString('en-IN')}`,
-      tone: levels.flip == null ? 'manual' : levels.flip < spot ? 'ok' : 'bad',
-    },
-    {
-      label: 'India VIX below 18',
-      detail: vix == null ? 'unavailable' : `VIX ${vix.toFixed(2)}`,
-      tone: vix == null ? 'manual' : vix < 18 ? 'ok' : vix < 20 ? 'warn' : 'bad',
-    },
-    { label: 'No major event in 3 days', detail: 'check manually (RBI, Fed, Budget, results)', tone: 'manual' },
-    {
-      label: 'Walls clear',
-      detail: callClarity.runnerUp == null ? 'no data' : `${callClarity.clear ? 'call clear' : `call split with ${callClarity.runnerUp}`} · ${putClarity.clear ? 'put clear' : `put split with ${putClarity.runnerUp}`}`,
-      tone: callClarity.runnerUp == null ? 'manual' : callClarity.clear && putClarity.clear ? 'ok' : 'warn',
-    },
-  ];
+  const checklist = gexChecklist({ levels, spot, vix, call: clarity.call, put: clarity.put });
 
   const regimeCls = levels.regime === 'positive' ? TONE_CLS.ok : levels.regime === 'negative' ? TONE_CLS.bad : TONE_CLS.manual;
   const regimeLabel = levels.regime === 'positive' ? 'POSITIVE GAMMA · dealers dampen'
@@ -253,7 +236,7 @@ export default function GexOiPage() {
           <span className="w-px h-5 bg-zinc-800 shrink-0" />
           <label className="flex items-center gap-1.5">
             <span className="text-[10px] text-zinc-500 font-bold uppercase tracking-widest">Expiry</span>
-            <select value={expiry} onChange={e => { setPayload(null); setLoading(true); setExpiry(e.target.value); }}
+            <select value={expiry} onChange={e => { setLoading(true); setExpiry(e.target.value); }}
               className="bg-zinc-900 border border-zinc-700 text-zinc-200 text-xs font-mono font-semibold rounded-lg px-2.5 py-1.5 focus:outline-none focus:border-emerald-500 tabular-nums">
               {expiries.map(e => <option key={e} value={e}>{e}</option>)}
             </select>
@@ -289,7 +272,7 @@ export default function GexOiPage() {
       )}
 
       <div className="flex-1 flex flex-col gap-4 px-6 py-5">
-        {loading && !payload ? (
+        {loading && !chain ? (
           <div className="flex flex-col items-center justify-center py-24 gap-3">
             <div className="w-6 h-6 border-2 border-zinc-700 border-t-emerald-400 rounded-full animate-spin" />
             <p className="text-sm text-zinc-400 font-medium">Loading option chain…</p>
@@ -306,12 +289,20 @@ export default function GexOiPage() {
                 <PulseStat label="Pin strike" value={levels.pin ? fmtStrike(levels.pin) : '—'} color="text-zinc-200" size="text-2xl" sub="largest call + put GEX" />
                 <div className="ml-auto flex items-center gap-5 flex-wrap">
                   <PulseStat label="Net GEX" value={fmtGex(levels.totalNet)} color={levels.totalNet >= 0 ? 'text-emerald-400' : 'text-red-400'} size="text-sm" sub={`${POWER_UNIT[power]} per 1% move, whole chain`} />
-                  <PulseStat label="Underlying" value={underlying > 0 ? underlying.toFixed(1) : '—'} size="text-sm" color="text-zinc-300" sub={isFut ? `future ${payload?.future_expiry ?? ''} rolled to expiry · Black-76` : 'spot (no future returned)'} />
-                  <PulseStat label="Lot · OI unit" value={lot ? String(lot) : '—'} size="text-sm" color="text-zinc-300" sub={`chain OI in ${oiUnit}`} />
+                  <PulseStat label="Underlying" value={underlying > 0 ? underlying.toFixed(1) : '—'} size="text-sm" color="text-zinc-300" sub={isFut ? `future ${chain?.future_expiry ?? ''} rolled to expiry · Black-76` : 'spot carried to expiry (no future): approximate'} />
+                  <PulseStat label="Lot · OI unit" value={lot ? String(lot) : '—'} size="text-sm" color="text-zinc-300" sub={`OI charted in ${oiLabel}; GEX built from units`} />
                 </div>
               </div>
               <div className="flex items-center justify-between gap-3 px-5 py-2 border-t border-zinc-800 flex-wrap">
-                <span className={`inline-flex items-center px-2.5 py-1 rounded-full text-[10px] font-bold border ${regimeCls}`}>{regimeLabel}</span>
+                <div className="flex items-center gap-2 flex-wrap">
+                  <span className={`inline-flex items-center px-2.5 py-1 rounded-full text-[10px] font-bold border ${regimeCls}`}>{regimeLabel}</span>
+                  {regimeMismatch && (
+                    <span className="text-[10px] text-amber-400">
+                      spot is {levels.regime === 'positive' ? 'above' : 'below'} the flip, but whole-chain net GEX is {levels.totalNet > 0 ? 'positive' : 'negative'} ({fmtGex(levels.totalNet)})
+                    </span>
+                  )}
+                  {approxForward && <span className="text-[10px] text-amber-400">no future price: forward estimated from spot with cost of carry (approximate)</span>}
+                </div>
                 {updated && <span className="text-[10px] text-zinc-500 font-mono tabular-nums">Updated {updated}{live ? '' : ' · market closed, not polling'}</span>}
               </div>
             </div>
@@ -322,6 +313,11 @@ export default function GexOiPage() {
               </div>
             ) : (
               <>
+                {outside.length > 0 && (
+                  <div className="px-3 py-2 bg-amber-900/20 border border-amber-700/40 rounded-lg text-xs text-amber-400">
+                    Outside the ±{range} strike window (see KPIs): {outside.join(', ')}. Widen the window to see them.
+                  </div>
+                )}
                 <div className="bg-zinc-900/60 border border-zinc-800 rounded-2xl p-5">
                   <ChartHeader
                     eyebrow="Gamma exposure"
@@ -340,8 +336,8 @@ export default function GexOiPage() {
                       <YAxis tick={{ fontSize: 10, fontFamily: 'var(--font-mono)' }} tickLine={false} axisLine={false} width={58} tickFormatter={numFmt} />
                       <Tooltip content={<GexTooltip oiLabel={oiLabel} />} cursor={{ fill: 'var(--chart-cursor-fill)', opacity: 0.5 }} />
                       <ReferenceLine y={0} stroke="var(--color-zinc-500)" />
-                      {atm > 0 && <ReferenceLine x={nearestStrike(spot)} stroke="var(--color-zinc-400)" strokeDasharray="5 4" label={{ value: 'SPOT', position: 'top', fontSize: 10, fontWeight: 700 }} />}
-                      {flipRef != null && <ReferenceLine x={nearestStrike(flipRef)} stroke="#fbbf24" strokeWidth={2} label={{ value: `FLIP ${Math.round(flipRef)}`, position: 'insideTopRight', fontSize: 10, fontWeight: 700, fill: '#fbbf24' }} />}
+                      {atm > 0 && <ReferenceLine x={nearestStrike(spot)} stroke="var(--color-zinc-400)" strokeDasharray="5 4" label={{ value: `SPOT ${spot.toLocaleString('en-IN', { maximumFractionDigits: 1 })}`, position: 'top', fontSize: 10, fontWeight: 700 }} />}
+                      {flipRef != null && <ReferenceLine x={nearestStrike(flipRef)} stroke="#fbbf24" strokeWidth={2} label={{ value: `FLIP ${Math.round(flipRef)}`, position: 'insideBottomRight', fontSize: 10, fontWeight: 700, fill: '#fbbf24' }} />}
                       <Bar dataKey="ceGex" name="Call GEX" stackId="g" isAnimationActive={false}>
                         {rows.map(r => <Cell key={r.strike} fill="#ef4444" stroke={r.strike === levels.callWall ? '#fecaca' : 'transparent'} strokeWidth={r.strike === levels.callWall ? 2 : 0} />)}
                       </Bar>
@@ -357,12 +353,13 @@ export default function GexOiPage() {
                   <div className="bg-zinc-900/60 border border-zinc-800 rounded-2xl p-5">
                     <ChartHeader eyebrow="Net" title="Net dealer GEX by strike" sub="Call minus put. Red zone below the flip amplifies moves; green above dampens them." />
                     <ResponsiveContainer width="100%" height={300}>
-                      <ComposedChart data={rows} margin={{ top: 8, right: 16, left: 0, bottom: 0 }}>
+                      <ComposedChart data={rows} margin={{ top: 20, right: 16, left: 0, bottom: 0 }}>
                         <CartesianGrid strokeDasharray="3 6" vertical={false} />
                         <XAxis {...xAxisProps} />
                         <YAxis tick={{ fontSize: 10, fontFamily: 'var(--font-mono)' }} tickLine={false} axisLine={false} width={58} tickFormatter={numFmt} />
                         <Tooltip content={<GexTooltip oiLabel={oiLabel} />} cursor={{ fill: 'var(--chart-cursor-fill)', opacity: 0.5 }} />
                         <ReferenceLine y={0} stroke="var(--color-zinc-500)" />
+                        {atm > 0 && <ReferenceLine x={nearestStrike(spot)} stroke="var(--color-zinc-400)" strokeDasharray="5 4" label={{ value: `SPOT ${spot.toLocaleString('en-IN', { maximumFractionDigits: 1 })}`, position: 'top', fontSize: 10, fontWeight: 700 }} />}
                         {flipRef != null && <ReferenceLine x={nearestStrike(flipRef)} stroke="#fbbf24" strokeWidth={2} />}
                         <Bar dataKey="netGex" name="Net GEX" isAnimationActive={false}>
                           {rows.map(r => <Cell key={r.strike} fill={r.netGex >= 0 ? '#10b981' : '#ef4444'} />)}
@@ -379,8 +376,8 @@ export default function GexOiPage() {
                         <YAxis tick={{ fontSize: 10, fontFamily: 'var(--font-mono)' }} tickLine={false} axisLine={false} width={58} tickFormatter={fmtOi} />
                         <Tooltip content={<OiTooltip oiLabel={oiLabel} />} cursor={{ fill: 'var(--chart-cursor-fill)', opacity: 0.5 }} />
                         {atm > 0 && <ReferenceLine x={nearestStrike(spot)} stroke="var(--color-zinc-400)" strokeDasharray="5 4" />}
-                        <Bar dataKey="ceOi" name="Call OI" fill="#ef4444" isAnimationActive={false} />
-                        <Bar dataKey="peOi" name="Put OI" fill="#10b981" isAnimationActive={false} />
+                        <Bar dataKey="ceOiView" name="Call OI" fill="#ef4444" isAnimationActive={false} />
+                        <Bar dataKey="peOiView" name="Put OI" fill="#10b981" isAnimationActive={false} />
                       </ComposedChart>
                     </ResponsiveContainer>
                   </div>

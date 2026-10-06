@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert';
-import { buildGexRows, detectOiUnit, gammaFlip, gexLevels, gexValue, wallClarity, type GexRow } from './gex.ts';
+import { buildGexRows, fmtGex, forwardFromSpot, gammaFlip, gexChecklist, gexLevels, gexValue, wallClarity, type GexRow } from './gex.ts';
 
 const row = (strike: number, netGex: number, ceGex = Math.max(netGex, 0), peGex = Math.min(netGex, 0)): GexRow => ({
   strike, ceOi: 1, peOi: 1, ceGamma: 0, peGamma: 0, ceGex, peGex, netGex,
@@ -77,12 +77,23 @@ test('video formula: 0.0008 x 50,000 lots x 65 x 24,200 x 0.01 = 629,200 index u
   assert.strictEqual(Math.round(gexValue(0.0008, oiUnits, 24200, 1) * 100), 62_920_000);
 });
 
-test('detectOiUnit: divisible by lot means units; otherwise lots', () => {
-  const u = { '1': { ce: { oi: 650 }, pe: { oi: 1300 } }, '2': { ce: { oi: 65 } } };
-  assert.strictEqual(detectOiUnit(u, 65), 'units');
-  const l = { '1': { ce: { oi: 100 }, pe: { oi: 130 } } };
-  assert.strictEqual(detectOiUnit(l, 65), 'lots');
-  assert.strictEqual(detectOiUnit(l, null), 'units');
+test('buildGexRows: a zero chain IV falls back to greeks.iv instead of dropping the strike', () => {
+  const base = { expiry: '2026-04-23', underlying: 24200, now: Date.UTC(2026, 3, 20, 4, 0) };
+  const withFallback = { '24000': { ce: { oi: 1000, implied_volatility: 0, greeks: { iv: 14 } } } };
+  const direct = { '24000': { ce: { oi: 1000, implied_volatility: 14 } } };
+  const [a] = buildGexRows(withFallback, base);
+  const [b] = buildGexRows(direct, base);
+  assert.ok(a.ceGex > 0);
+  assert.strictEqual(a.ceGex, b.ceGex);
+});
+
+test('OI is never rescaled by lot size unless the caller declares lots (no divisibility guessing)', () => {
+  // OI of 100 and 130 is not a multiple of 65, the case an auto-detector would misread as lots.
+  const oc = { '24000': { ce: { oi: 100, implied_volatility: 14 } } };
+  const base = { expiry: '2026-04-23', underlying: 24200, now: Date.UTC(2026, 3, 20, 4, 0) };
+  const [u] = buildGexRows(oc, { ...base, lotSize: 65 });
+  const [again] = buildGexRows(oc, { ...base, lotSize: 75 });
+  assert.strictEqual(u.ceGex, again.ceGex);
 });
 
 test('buildGexRows: unknown lot size or missing IV never invents numbers', () => {
@@ -98,4 +109,47 @@ test('buildGexRows: unknown lot size or missing IV never invents numbers', () =>
 test('wallClarity flags near-equal runners-up', () => {
   assert.strictEqual(wallClarity([{ strike: 1, v: 100 }, { strike: 2, v: 95 }]).clear, false);
   assert.strictEqual(wallClarity([{ strike: 1, v: 100 }, { strike: 2, v: 40 }]).clear, true);
+});
+
+const lv = (over: Partial<ReturnType<typeof gexLevels>>) => ({ ...gexLevels([], 100), ...over });
+
+test('checklist: total positive but spot below the flip is amber, not green', () => {
+  const items = gexChecklist({
+    levels: lv({ regime: 'negative', flip: 24300, totalNet: 5e8 }),
+    spot: 24200, vix: 14, call: { clear: true, runnerUp: 24400 }, put: { clear: true, runnerUp: 23800 },
+  });
+  assert.strictEqual(items[0].tone, 'warn');
+  assert.strictEqual(items[1].tone, 'bad'); // flip is above spot
+  assert.strictEqual(items[2].tone, 'ok');
+  assert.strictEqual(items[3].tone, 'manual');
+});
+
+test('checklist: all green in a clean positive-gamma setup; VIX bands and missing data', () => {
+  const good = gexChecklist({
+    levels: lv({ regime: 'positive', flip: 24100, totalNet: 5e8 }),
+    spot: 24200, vix: 15, call: { clear: true, runnerUp: 24400 }, put: { clear: true, runnerUp: 23800 },
+  });
+  assert.deepStrictEqual(good.map(i => i.tone), ['ok', 'ok', 'ok', 'manual', 'ok']);
+  const edge = (vix: number | null) => gexChecklist({ levels: lv({ regime: 'positive', flip: 1, totalNet: 1 }), spot: 2, vix, call: { clear: false, runnerUp: 1 }, put: { clear: true, runnerUp: 2 } });
+  assert.strictEqual(edge(19)[2].tone, 'warn');
+  assert.strictEqual(edge(25)[2].tone, 'bad');
+  assert.strictEqual(edge(null)[2].tone, 'manual');
+  assert.strictEqual(edge(15)[4].tone, 'warn'); // call wall split
+  const none = gexChecklist({ levels: lv({}), spot: 0, vix: null, call: { clear: false, runnerUp: null }, put: { clear: false, runnerUp: null } });
+  assert.deepStrictEqual(none.map(i => i.tone), ['manual', 'manual', 'manual', 'manual', 'manual']);
+});
+
+test('forwardFromSpot carries spot to expiry; zero spot gives zero (page falls back, never invents)', () => {
+  const now = Date.UTC(2026, 9, 6, 4, 0);
+  const f = forwardFromSpot(22776.1, '2026-10-27', undefined, now);
+  assert.ok(f > 22776.1 && f < 22776.1 * 1.01, String(f));
+  assert.strictEqual(forwardFromSpot(0, '2026-10-27', undefined, now), 0);
+});
+
+test('fmtGex tiers are consistent', () => {
+  assert.strictEqual(fmtGex(5.97e7), '5.97 Cr');
+  assert.strictEqual(fmtGex(-5.972e10), '-5,972 Cr');
+  assert.strictEqual(fmtGex(1.5e5), '1.50L');
+  assert.strictEqual(fmtGex(1234), '1.2K');
+  assert.strictEqual(fmtGex(12), '12');
 });

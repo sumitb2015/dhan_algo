@@ -13,6 +13,22 @@
 
 import { calculateTimeToExpiryYears, computeBsGreeksExact, RISK_FREE_RATE } from './optionsPricing.ts';
 
+/** Black-76 forward for `expiry` implied by spot alone (cost of carry S*e^{rT}). Used only when no future price is available. */
+export function forwardFromSpot(spot: number, expiry: string, r = RISK_FREE_RATE, now: number = Date.now()): number {
+  return spot > 0 ? spot * Math.exp(r * calculateTimeToExpiryYears(expiry, now)) : 0;
+}
+
+/** Compact GEX / OI figure: 1.2K, 3.4L, 5.97 Cr, 5,972 Cr. */
+export function fmtGex(n: number): string {
+  const a = Math.abs(n);
+  const s = n < 0 ? '-' : '';
+  if (a >= 1e9) return `${s}${Math.round(a / 1e7).toLocaleString('en-IN')} Cr`;
+  if (a >= 1e7) return `${s}${(a / 1e7).toFixed(2)} Cr`;
+  if (a >= 1e5) return `${s}${(a / 1e5).toFixed(2)}L`;
+  if (a >= 1e3) return `${s}${(a / 1e3).toFixed(1)}K`;
+  return `${s}${a.toFixed(0)}`;
+}
+
 export interface GexLegInput {
   oi?: number | null;
   /** Dhan chain IV, in percent (e.g. 14.2). */
@@ -29,24 +45,14 @@ export function gexValue(gamma: number, oiUnits: number, underlying: number, pow
   return gamma * oiUnits * Math.pow(underlying, power) * 0.01;
 }
 
-/**
- * Is the chain's OI in units or lots? Dhan reports units, so every OI is a multiple of the lot size; lot-denominated
- * OI would be divisible by 65 only by chance. Checked on live data 2026-10-06: 71/71 strikes divisible by 65.
- */
-export function detectOiUnit(oc: Record<string, GexChainEntry>, lotSize: number | null | undefined): 'units' | 'lots' {
-  if (!lotSize || lotSize <= 0) return 'units';
-  for (const v of Object.values(oc)) {
-    for (const oi of [v.ce?.oi, v.pe?.oi]) {
-      if (oi && oi > 0) {
-        if (oi % lotSize !== 0) return 'lots';
-      }
-    }
-  }
-  return 'units';
-}
+// OI unit: Dhan's chain reports OI in UNITS (every OI on the live chain was a multiple of the lot size, checked
+// 2026-10-06). There is deliberately no auto-detection: a lot revision leaves older series with OI in multiples of the
+// previous lot, which any divisibility test would misread as "lots" and silently inflate every strike 65x. A caller whose
+// source really is in lots passes oiUnit: 'lots' explicitly.
 
 export interface GexRow {
   strike: number;
+  /** Open interest in index UNITS, exactly as built; a view that shows lots divides in its own row type. */
   ceOi: number;
   peOi: number;
   ceGamma: number;
@@ -73,11 +79,11 @@ export interface GexLevels {
 
 export interface GexParams {
   expiry: string;
-  /** Black-76 underlying: the future matching the chain's expiry basis. */
+  /** Black-76 underlying: the future rolled to the chain's expiry. Spot is only an approximation (no cost of carry). */
   underlying: number;
-  /** Needed only to convert lot-denominated OI to units; null when unknown (OI is then taken as units). */
+  /** Needed only to convert lot-denominated OI to units. */
   lotSize?: number | null;
-  /** Default 'units' (Dhan's convention). */
+  /** Default 'units' (Dhan's convention). Never inferred; see the note above. */
   oiUnit?: 'units' | 'lots';
   power?: GexPower;
   now?: number;
@@ -92,7 +98,8 @@ function legGamma(
   t: number,
   r: number,
 ): number {
-  const ivPct = leg?.implied_volatility ?? leg?.greeks?.iv ?? 0;
+  // First positive IV wins: Dhan sends 0 (not null) for an untraded strike, which `??` would accept as the answer.
+  const ivPct = [leg?.implied_volatility, leg?.greeks?.iv].find((v): v is number => typeof v === 'number' && v > 0) ?? 0;
   if (!(ivPct > 0)) return 0; // no IV, no gamma: a zero is honest, a guess is not
   return computeBsGreeksExact(type, F, strike, t, ivPct / 100, r, true).gamma;
 }
@@ -186,4 +193,53 @@ export function wallClarity(values: { strike: number; v: number }[], ratio = 0.8
   const s = [...values].sort((a, b) => b.v - a.v);
   if (s.length < 2 || s[0].v <= 0) return { clear: false, runnerUp: null };
   return { clear: s[1].v < s[0].v * ratio, runnerUp: s[1].strike };
+}
+
+export type ChecklistTone = 'ok' | 'warn' | 'bad' | 'manual';
+export interface ChecklistItem { label: string; detail: string; tone: ChecklistTone }
+
+/**
+ * The source video's five-point strangle entry checklist. Informational only. `eventsManual` is always manual: the app has
+ * no event calendar. Net GEX and the flip can disagree (total positive while spot sits below the flip); that case is amber,
+ * never green, because the video's real test is "are we in the positive zone", not the chain total alone.
+ */
+export function gexChecklist(input: {
+  levels: GexLevels;
+  spot: number;
+  vix: number | null;
+  call: { clear: boolean; runnerUp: number | null };
+  put: { clear: boolean; runnerUp: number | null };
+}): ChecklistItem[] {
+  const { levels, spot, vix, call, put } = input;
+  const unknown = levels.regime === 'unknown';
+  const spotInPositive = levels.flip == null ? levels.totalNet > 0 : spot >= levels.flip;
+  const totalPositive = levels.totalNet > 0;
+  const disagree = !unknown && totalPositive !== spotInPositive;
+  return [
+    {
+      label: 'Net GEX positive',
+      detail: unknown ? 'no data' : `total ${fmtGex(levels.totalNet)}${disagree ? ' · disagrees with spot vs flip' : ''}`,
+      tone: unknown ? 'manual' : disagree ? 'warn' : totalPositive ? 'ok' : 'bad',
+    },
+    {
+      label: 'Flip below spot',
+      detail: levels.flip == null
+        ? (unknown ? 'no data' : 'no sign change in chain')
+        : `flip ${Math.round(levels.flip).toLocaleString('en-IN')} vs spot ${Math.round(spot).toLocaleString('en-IN')}`,
+      tone: levels.flip == null ? 'manual' : levels.flip < spot ? 'ok' : 'bad',
+    },
+    {
+      label: 'India VIX below 18',
+      detail: vix == null ? 'unavailable' : `VIX ${vix.toFixed(2)}`,
+      tone: vix == null ? 'manual' : vix < 18 ? 'ok' : vix < 20 ? 'warn' : 'bad',
+    },
+    { label: 'No major event in 3 days', detail: 'check manually (RBI, Fed, Budget, results)', tone: 'manual' },
+    {
+      label: 'Walls clear',
+      detail: call.runnerUp == null
+        ? 'no data'
+        : `${call.clear ? 'call clear' : `call split with ${call.runnerUp}`} · ${put.clear ? 'put clear' : `put split with ${put.runnerUp}`}`,
+      tone: call.runnerUp == null ? 'manual' : call.clear && put.clear ? 'ok' : 'warn',
+    },
+  ];
 }

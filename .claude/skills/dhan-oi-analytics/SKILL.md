@@ -110,3 +110,20 @@ missing baseline instead of excluding the row, reproducing the guard's own anti-
 third code path despite this skill already documenting it twice above. If you're adding a fourth
 OI-consuming path, treat "did I get a real OI reading this poll" as its own tracked boolean, not
 something you infer from whether the number is zero.
+
+## GEX OI chart (`/options/gex`, `lib/gex.ts`, `components/GexOiPage.tsx`)
+
+Gamma-weighted OI per strike: call/put GEX, net GEX, call wall, put wall, gamma flip, pin. Display only, no orders.
+
+- **Dhan's chain OI is in UNITS, not lots.** Every OI on the live NIFTY chain is a multiple of the lot size (checked
+  2026-10-06). GEX = gamma x OI_units x spot^k x 0.01 with NO further lot multiplication; multiplying by the lot again
+  inflated every number 65x in the first version. Do not add a divisibility "auto-detect": a lot revision leaves older
+  series in multiples of the old lot and the test would misfire. Pass `oiUnit: 'lots'` explicitly if a source needs it.
+- **k = 1 gives index units per 1% move; k = 2 gives rupees.** The source video's formula (k = 1) labels its answer in
+  rupees, and its slide figure (Rs 62.9 Cr) is 62.9 million; the page offers both and says which.
+- Gamma comes from `computeBsGreeksExact` (Black-76) on the future **rolled to the chain's expiry** (`rollForward`), from
+  the first positive IV (`implied_volatility`, then `greeks.iv`; Dhan sends 0, not null, for untraded strikes). Spot is
+  only a flagged fallback when the chain returns no future.
+- Default expiry must skip contracts past their 15:40 IST close: a clamped-time 0DTE chain makes one spike and a noise flip.
+- The flip ignores sign changes between strikes below 1% of the peak |net GEX|, and picks the crossing nearest spot.
+- A response fetched for another expiry must be dropped (`reqExpiry`), not rendered against the new expiry's time to expiry.
