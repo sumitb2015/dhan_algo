@@ -1,6 +1,6 @@
 ---
 name: dhan-terminal-position-ownership
-description: Use when a dashboard terminal (like FocusTool or MultiLegFocus) has multiple rows/legs or multiple execution engines (browser tab + server-side worker) that can each hold a position on the same underlying/strike, when sizing an exit or P&L off a broker position, when locking a strike selector because "a position is open", or when implementing a strike roll/shift that closes one leg and reopens another, or an automatic re-entry after a leg stop/target.
+description: Use when a dashboard terminal (like FocusTool, MultiLegFocus or Triple Straddle) has multiple rows/legs or multiple execution engines (browser tab + server-side worker) that can each hold a position on the same underlying/strike, when sizing an exit or P&L off a broker position, when locking a strike selector because "a position is open", or when implementing a strike roll/shift that closes one leg and reopens another, or an automatic re-entry after a leg stop/target.
 ---
 
 # Terminal Position Ownership & Strike Rolls
@@ -366,6 +366,37 @@ re-entry on SL/target) to `FocusTool.tsx` (`b04d0ce`, `66a8fe1`, `50f4bca`,
   `ceDeltaModel`/`peDeltaModel` mark a model-basis entry, and `legDeltaBasis(fill, leg)` picks the matching LIVE delta (`RowLive.ceDelta` model vs `ceDeltaDhan`). A new stamped field that is later compared with a live value needs the same
   marker, never a silent re-baseline of persisted state. Adds to a running leg keep the leg's existing basis.
 
+### 12. A terminal with a SIM mode keeps its own ledger file (Triple Straddle, 2026-10-06)
+
+`/options/triple-straddle` places CE+PE straddle pairs and tracks them in `debug/triple_straddle_state.json`
+(`app/api/triple-straddle/state/route.ts`, pure rules in `lib/tripleStraddle.ts`, orders in `lib/tripleStraddleClient.ts`,
+state hook `components/triplestraddle/useTripleStraddle.ts`). Rules that are not obvious from the code:
+
+- **Not `multi_leg_baskets.json`.** Multi-Leg Focus reconciles every basket in that file against the broker, so a paper
+  (SIM) leg stored there reads as "flat at the broker" and is wiped. A surface with paper positions needs its own store.
+- **SIM is the default and REAL is armed per page load, never persisted.** SIM never calls an order route (the browser
+  network log is the check). Each position carries its `mode`, so a REAL position from an earlier session is still
+  managed (a stop only reduces risk) while new REAL entries need the arm again.
+- **Checkpoint before the order.** A REAL entry saves a record with both legs `unconfirmed` BEFORE any order is sent
+  (`onIntent`); if that save fails, no order goes out. Otherwise a closed tab between the POST and the save leaves live legs
+  the ledger never knew about.
+- **Unconfirmed is a state with a way out.** `unconfirmed` (entry accepted, fill unproven) and `pendingExit` (closing
+  order accepted, fill unproven) are never auto-resolved and never re-sent over. `exitStraddle` looks at the pending
+  order first and sends a new close only if it died. The bar offers "It is open - track it" / "Nothing open - discard"
+  after the user has checked Orders; without that a leg could block its slot forever.
+- **An absent broker row is "unknown", not "flat"** (`brokerCapacity`). Match security id AND product. Right after entry
+  (inside `TS_FILL_GRACE_MS`) the book lags, so send own qty; later, with no matching row, do not send an order that could
+  open the opposite side. A positions call that FAILED outright fails open: an exit only reduces risk.
+- **Reverse only what is confirmed filled, and confirm the reverse** (an accepted reversal can still be rejected).
+- **Stale prices pause stops** (`TS_PRICE_STALE_MS`): a frozen quote must not fire or suppress a stop, and new orders are
+  refused on an old quote. Time must tick on its own clock, a dead feed produces no state updates.
+- **One ordered write queue** for every ledger save. A peak (trailing) update that races an exit can otherwise land last
+  and resurrect a closed leg. The peak writer re-reads the position inside the queue.
+- **One engine per browser:** the stop/target watcher runs only in the `useTabLeader('triple-straddle')` tab.
+- **Trailing rules** (`trailSl`, `lock`, `lockTrail`, in % of entry premium, ported from Focus Tool's overall trail): the
+  profit peak is persisted, tracked only for armed, fully confirmed positions, and `by > every` is invalid (it would put
+  the floor above the profit that set it, an instant exit).
+
 ## Before You Ship
 - Does every lock/exit/P&L decision route through an ownership check
   (ledger + worker-hold), not a raw broker position/netQty read?
@@ -393,6 +424,7 @@ re-entry on SL/target) to `FocusTool.tsx` (`b04d0ce`, `66a8fe1`, `50f4bca`,
 - Does any automatic re-entry check pending whole-row exits, the window, the cap (counted
   before the order), the row's Side, and — for waiting re-entries in a flat row — the
   account budget, Book Exit and spot levels that flat rows never see?
+- If the surface has a SIM mode, is its ledger in its own file, and does a REAL entry checkpoint before the first order?
 - Do stop/target/cost levels use the row's own stamped entry, not a broker average that
   may blend in an earlier trade on the same contract?
 

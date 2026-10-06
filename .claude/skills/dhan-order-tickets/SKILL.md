@@ -56,6 +56,13 @@ Frontend validation can be bypassed by direct HTTP POST, script calls, or compro
 
 ---
 
+**Per-source cap on `/api/scalper/fast-order`.** That route takes whole-contract quantities from many callers, so it has no lot
+cap of its own. `SOURCE_QTY_CAPS` in `fast-order/route.ts` caps units per order for a caller that tags its orders with
+`source` (Triple Straddle: `ts` = 3750, i.e. 50 lots x 75). It is a backstop against a UI bug, not an auth boundary: a caller
+that sends no `source` is uncapped. The lot cap proper (50, positive integer) is also enforced in the client rules
+(`validateTrade`) and the ledger route. Send an `idempotencyKey` on every order from a new surface (the route caches a repeat for 60 s;
+Triple Straddle uses `ts-<position>-<leg>-in|out|rb`). A 504 means status unknown: never treat it as a clean failure.
+
 ### 2. Multi-Segment & Exchange Contract Resolution
 Symbol resolution must never assume that all non-index contracts are NSE stock derivatives (`NSE_FNO / FUTSTK`).
 

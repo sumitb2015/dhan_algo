@@ -58,6 +58,14 @@ class Strategy:
 
 ## Contracts worth knowing
 
+- **A checkpointed leg is `pending` until its order resolves** (2026-10-06). `open_all` sets `leg["pending"]=True` before the
+  checkpoint and clears it when `open_leg` returns. `close_leg` on a pending leg (a restart after a crash mid-entry) calls it
+  flat only when the broker shows nothing in its direction; if the broker shows a position it could be a sibling instance's,
+  so the leg stays tracked and a human decides. A UNWINDING book must keep that status when an entry rollback leaves stuck legs
+  (the strategy loop must not overwrite it, or the retry branch never runs).
+- **No order without a baseline** (2026-10-06): `open_leg` raises `BaselineUnavailable` internally and sends nothing when the
+  pre-order broker read fails, because a default of 0 makes the later confirmation compare against the wrong net.
+- **A paper close with no quote closes at the entry price** (zero P&L), never at 0 and never deferred forever.
 - **`LegExecutor` never reports a leg closed it did not confirm.** `open_all` calls your `checkpoint(tracked_legs)`
   BEFORE each order (a crash mid-entry then leaves a tracked, restartable book), confirms every fill (Dhan status, or
   the broker's own net for Zerodha/Kotak), cancels an unconfirmed Dhan order (only a REJECTED one is known unfilled),

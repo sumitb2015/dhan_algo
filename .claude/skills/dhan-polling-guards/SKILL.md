@@ -249,9 +249,24 @@ user-supplied `date`, `symbol`, `id`, or similar must validate it against an exp
 `/^\d{4}-\d{2}-\d{2}$/` for a date) before it touches `path.join`, independent of whatever
 locking/caching/staleness guard the route also needs.
 
+### 15. A stale price must read as unknown, and time needs its own clock (Triple Straddle, 2026-10-06)
+
+When a poll fails the previous prices stay in state. A stop or P&L chip that keeps using them acts on a frozen market with
+no sign the feed is dead. Timestamp each successful fetch, treat a quote older than the limit as `{}` (P&L shows "-", stops
+pause, new orders refuse), and drive staleness from a `setInterval` clock: a dead feed produces no state updates, so nothing
+else would re-render the page to notice. Show a banner when it flips and when it recovers.
+
+### 16. Serialize every write to one JSON ledger from one client
+
+Two fire-and-forget saves can land out of order. A background peak/trailing update posted just before an exit can arrive after
+it and replace the closed position. Route every save through one promise chain, and make any background writer re-read the
+current record inside the chain (not from a closure captured earlier) and skip if the record changed or closed. The server
+refusing CLOSED to OPEN only covers one transition.
+
 ## Before You Ship
 - Can two tabs run this at once? What happens if they do?
 - If this spawns something, what stops a second spawn during the startup window?
 - If this caches, what does it do with a `{success:false}` 200?
 - If this is async and sets state, what happens when the previous request lands last?
+- If a poll feeds a stop or an order, what happens when it stops updating? Are all saves to one ledger ordered?
 - Does any query/body param reach a filesystem path? Is it format-validated first?

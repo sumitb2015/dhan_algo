@@ -5,6 +5,7 @@ import { Columns3, X } from 'lucide-react';
 import NavBar from '@/components/NavBar';
 import { PanelStyles } from '@/components/PanelStyles';
 import { StraddlePanel } from '@/components/StraddlePanel';
+import { HeaderIndexChips } from '@/components/triplestraddle/HeaderIndexChips';
 import { StraddleTradeBar } from '@/components/triplestraddle/StraddleTradeBar';
 import { useTripleStraddle } from '@/components/triplestraddle/useTripleStraddle';
 import { isTsTradable } from '@/lib/tripleStraddleClient';
@@ -165,6 +166,7 @@ export default function TripleStraddlePage() {
             <span className={`w-1.5 h-1.5 rounded-full ${live ? 'bg-emerald-400 animate-pulse' : 'bg-zinc-600'}`} />
             {live ? 'LIVE' : 'CLOSED'}
           </span>
+          <HeaderIndexChips />
           <button
             type="button"
             onClick={() => {
