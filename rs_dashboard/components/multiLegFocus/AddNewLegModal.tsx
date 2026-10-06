@@ -27,6 +27,12 @@ interface AddNewLegModalProps {
   }) => Promise<void>;
 }
 
+const DAY_MS = 86_400_000;
+const dteLabel = (expiry: string): string => {
+  const days = Math.round((Date.parse(expiry) - Date.parse(new Date(Date.now() + 5.5 * 3600_000).toISOString().slice(0, 10))) / DAY_MS);
+  return Number.isFinite(days) ? (days <= 0 ? (days === 0 ? 'Expiry day' : 'Expired') : `${days} DTE`) : '';
+};
+
 export default function AddNewLegModal({
   isOpen,
   onClose,
@@ -55,7 +61,11 @@ export default function AddNewLegModal({
 
   if (!isOpen || !basket) return null;
 
-  const canPickFar = !!basket.farExpiry && basket.farExpiry !== basket.expiry;
+  // Expired contracts cannot be traded; the basket's own expiry stays so its row never disappears.
+  const todayIst = new Date(Date.now() + 5.5 * 3600_000).toISOString().slice(0, 10);
+  const expiryChoices = Array.from(new Set([basket.expiry, basket.farExpiry, ...listedExpiries].filter((e): e is string => !!e)))
+    .filter(e => e >= todayIst || e === basket.expiry || e === expiry)
+    .sort();
   const effectiveExpiry = expiry || basket.expiry;
   const strikeChoices = allowedStrikes(basket.underlying, effectiveExpiry, listedExpiries, allStrikes);
   const strikeOk = strikeAllowed(basket.underlying, effectiveExpiry, listedExpiries, strike);
@@ -203,50 +213,31 @@ export default function AddNewLegModal({
             </select>
           </div>
 
-          {/* Expiry — only shown for a strategy that actually has a second
-             (far) expiry available, e.g. a Calendar/Diagonal spread. */}
-          {canPickFar && (
+          {/* Expiry — any listed expiry for this underlying, not just the
+             basket's own pair, so a leg can be added on a different expiry. */}
+          {expiryChoices.length > 1 && (
             <div>
               <label className="text-[11px] font-bold text-zinc-400 uppercase tracking-wider block mb-1">
                 Expiry
               </label>
-              <div className="grid grid-cols-2 gap-1.5">
-                <button
-                  type="button"
-                  onClick={() => {
-                    setExpiry(basket.expiry);
-                    const snapped = snapToAllowed(basket.underlying, basket.expiry, listedExpiries, strike, allStrikes);
-                    setStrike(snapped);
-                    const l = ltpForStrike(snapped, option, basket.expiry);
-                    if (l > 0) setLimitPrice(l);
-                  }}
-                  className={`py-1.5 rounded-lg text-xs font-bold border transition-all ${
-                    effectiveExpiry === basket.expiry
-                      ? 'bg-zinc-700 border-zinc-500 text-white'
-                      : 'bg-zinc-900 border-zinc-800 text-zinc-400 hover:text-zinc-200'
-                  }`}
-                >
-                  {formatExpiryLabel(basket.expiry)}
-                </button>
-                <button
-                  type="button"
-                  onClick={() => {
-                    if (!basket.farExpiry) return;
-                    setExpiry(basket.farExpiry);
-                    const snapped = snapToAllowed(basket.underlying, basket.farExpiry, listedExpiries, strike, allStrikes);
-                    setStrike(snapped);
-                    const l = ltpForStrike(snapped, option, basket.farExpiry);
-                    if (l > 0) setLimitPrice(l);
-                  }}
-                  className={`py-1.5 rounded-lg text-xs font-bold border transition-all ${
-                    effectiveExpiry === basket.farExpiry
-                      ? 'bg-fuchsia-600 border-fuchsia-500 text-white'
-                      : 'bg-zinc-900 border-zinc-800 text-zinc-400 hover:text-zinc-200'
-                  }`}
-                >
-                  {formatExpiryLabel(basket.farExpiry)}
-                </button>
-              </div>
+              <select
+                value={effectiveExpiry}
+                onChange={e => {
+                  const exp = e.target.value;
+                  setExpiry(exp);
+                  const snapped = snapToAllowed(basket.underlying, exp, listedExpiries, strike, allStrikes);
+                  setStrike(snapped);
+                  const l = ltpForStrike(snapped, option, exp);
+                  if (l > 0) setLimitPrice(l);
+                }}
+                className={`w-full h-9 bg-zinc-900 border border-zinc-700 text-zinc-100 font-mono text-sm rounded-lg px-3 focus:outline-none focus:border-emerald-500 ${FOCUS_RING}`}
+              >
+                {expiryChoices.map(exp => (
+                  <option key={exp} value={exp}>
+                    {formatExpiryLabel(exp)} · {dteLabel(exp)}{exp === basket.expiry ? ' (strategy)' : ''}
+                  </option>
+                ))}
+              </select>
             </div>
           )}
 
