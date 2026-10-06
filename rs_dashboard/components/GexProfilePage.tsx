@@ -3,31 +3,38 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ComposedChart, Bar, Line, XAxis, YAxis, CartesianGrid, Tooltip,
-  ResponsiveContainer, ReferenceLine, Cell, LabelList,
+  ResponsiveContainer, ReferenceLine, ReferenceArea, Cell, LabelList,
 } from 'recharts';
-import { BookOpen } from 'lucide-react';
 import NavBar from './NavBar';
-import GuidePanel from './RsStrategyGuide';
 import DataChip from './DataChip';
 import { PulseStat, ChartHeader } from './QuantPanel';
 import { useMarketLive } from '@/lib/useMarketLive';
 import { expiryEpochMs, rollForward } from '@/lib/optionsPricing';
 import {
-  buildGexRows, forwardFromSpot, fmtGex, gexChecklist, gexLevels, wallClarity, type ChecklistTone, type GexChainEntry, type GexPower, type GexRow,
+  buildGexRows, forwardFromSpot, fmtGex, gexChecklist, gexLevels, wallClarity, type ChecklistTone, type GexChainEntry, type GexLevels, type GexPower, type GexRow,
 } from '@/lib/gex';
+import {
+  buildGexLegs, dynamicFlip, emConfluence, expectedMove, mergeGexRows, regimeNote, spotSideWalls, topWalls, wallRank, type GexLeg,
+} from '@/lib/gexV2';
 
 const UNDERLYING = 'NIFTY';
 const STRIKE_STEP = 50;
 const POLL_MS = 15_000;
 const RANGE_OPTIONS = [8, 12, 20, 30] as const;
+const SCOPE_OPTIONS = [1, 2, 3] as const;
+const EM_TOLERANCE = 0.25;
 
 /** A GexRow plus the OI figures the charts show (lots at the current lot size, or units when the lot is unknown). */
 interface GexViewRow extends GexRow { ceOiView: number; peOiView: number }
 
+type ChainOc = Record<string, GexChainEntry & { ce?: { last_price?: number | null } | null; pe?: { last_price?: number | null } | null }>;
+
 interface ChainPayload {
   /** The expiry this response was requested for; a response for another expiry must never be rendered. */
   reqExpiry?: string;
-  chain: { oc?: Record<string, GexChainEntry> };
+  /** The expiry this chain belongs to (aggregate scope fetches several). */
+  expiry?: string;
+  chain: { oc?: ChainOc };
   spot: number;
   future_price?: number;
   future_expiry?: string;
@@ -92,8 +99,7 @@ function todayIST(): string {
   return new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Kolkata' }).format(new Date());
 }
 
-export default function GexOiPage({ guide = '' }: { guide?: string }) {
-  const [guideOpen, setGuideOpen] = useState(false);
+export default function GexProfilePage() {
   const live = useMarketLive(UNDERLYING);
   const [expiries, setExpiries] = useState<string[]>([]);
   const [expiry, setExpiry] = useState('');
@@ -111,7 +117,8 @@ export default function GexOiPage({ guide = '' }: { guide?: string }) {
     try { localStorage.setItem('gex_show_values', n ? '1' : '0'); } catch { /* storage blocked */ }
     return n;
   });
-  const [payload, setPayload] = useState<ChainPayload | null>(null);
+  const [scope, setScope] = useState<number>(1);
+  const [payload, setPayload] = useState<{ key: string; items: ChainPayload[] } | null>(null);
   const [vix, setVix] = useState<number | null>(null);
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(true);
@@ -139,15 +146,24 @@ export default function GexOiPage({ guide = '' }: { guide?: string }) {
       .catch(() => setLot(null));
   }, []);
 
+  // Single scope = the selected expiry; aggregate scope = the nearest N open expiries (the selector is then ignored).
+  const scopeExpiries = useMemo(() => (scope <= 1 ? (expiry ? [expiry] : []) : expiries.slice(0, scope)), [scope, expiry, expiries]);
+  const reqKey = scopeExpiries.join('|');
+
   const fetchAll = useCallback(async () => {
-    if (!expiry) return;
+    if (!scopeExpiries.length) return;
     const mine = ++seq.current;
     try {
-      const res = await fetch(`/api/options/chain?underlying=${UNDERLYING}&expiry=${expiry}`);
-      const j = await res.json() as { success: boolean; data?: ChainPayload; error?: string };
-      if (mine !== seq.current) return; // a newer request owns the screen
-      if (!j.success || !j.data?.chain?.oc) { setError(j.error ?? 'No chain data'); return; }
-      setPayload({ ...j.data, reqExpiry: expiry });
+      const items: ChainPayload[] = [];
+      // Sequential: the chain route is rate limited (1 call / 3 s account-wide) and caches each expiry for 30 s.
+      for (const ex of scopeExpiries) {
+        const res = await fetch(`/api/options/chain?underlying=${UNDERLYING}&expiry=${ex}`);
+        const j = await res.json() as { success: boolean; data?: ChainPayload; error?: string };
+        if (mine !== seq.current) return; // a newer request owns the screen
+        if (!j.success || !j.data?.chain?.oc) { setError(j.error ?? `No chain data for ${ex}`); return; }
+        items.push({ ...j.data, expiry: ex });
+      }
+      setPayload({ key: scopeExpiries.join('|'), items });
       setError('');
       setUpdated(new Date().toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', second: '2-digit' }));
       setDataDate(todayIST());
@@ -164,33 +180,39 @@ export default function GexOiPage({ guide = '' }: { guide?: string }) {
     } finally {
       if (mine === seq.current) setLoading(false);
     }
-  }, [expiry]);
+  }, [scopeExpiries]);
 
   useEffect(() => {
-    if (!expiry) return;
+    if (!scopeExpiries.length) return;
     // Deferred a task so no setState runs during the effect pass (same pattern as useMarketLive).
     const first = setTimeout(() => { void fetchAll(); }, 0);
     return () => clearTimeout(first);
-  }, [expiry, fetchAll]);
+  }, [scopeExpiries, fetchAll]);
 
   useEffect(() => {
-    if (!expiry || !live) return;
+    if (!scopeExpiries.length || !live) return;
     const id = setInterval(() => { if (!document.hidden) void fetchAll(); }, POLL_MS);
     const onVis = () => { if (!document.hidden) void fetchAll(); };
     document.addEventListener('visibilitychange', onVis);
     return () => { clearInterval(id); document.removeEventListener('visibilitychange', onVis); };
-  }, [expiry, live, fetchAll]);
+  }, [scopeExpiries, live, fetchAll]);
 
-  // A response fetched for another expiry (still in flight when the select changed) is ignored, not rendered.
-  const chain = payload && payload.reqExpiry === expiry ? payload : null;
-  const spot = chain?.spot ?? 0;
-  // Black-76 wants the future that matches this chain; fall back to spot only when no future was returned.
-  const isFut = !!(chain?.future_price && chain.future_price > 0 && chain.future_expiry);
+  // A response fetched for another expiry/scope (still in flight when the selection changed) is ignored, not rendered.
+  const items = payload && payload.key === reqKey ? payload.items : null;
+  const head = items?.[0] ?? null;
+  const spot = head?.spot ?? 0;
+
+  // Black-76 wants the future that matches each chain; fall back to spot only when no future was returned.
   // The returned future is usually a later contract than the chain's expiry (monthly future, weekly chain), so roll it to
   // the chain's own expiry; Black-76 with the wrong forward shifts every gamma.
-  const underlying = isFut ? rollForward(chain!.future_price!, chain!.future_expiry!, expiry) : forwardFromSpot(spot, expiry);
+  const underlyingFor = useCallback((c: ChainPayload, ex: string) => (
+    c.future_price && c.future_price > 0 && c.future_expiry ? rollForward(c.future_price, c.future_expiry, ex) : forwardFromSpot(c.spot, ex)
+  ), []);
+  const isFut = !!(head?.future_price && head.future_price > 0 && head.future_expiry);
+  const headExpiry = head?.expiry ?? expiry;
+  const underlying = head ? underlyingFor(head, headExpiry) : 0;
   // With no future price (typically after hours) the forward is spot carried to expiry (S*e^{rT}): still an estimate, so flagged.
-  const approxForward = !!chain && !isFut;
+  const approxForward = !!head && !isFut;
 
   // GEX is always built from OI in units (Dhan's convention, never guessed). Charts show lots when the lot size is known.
   const oiDiv = lot && lot > 0 ? lot : 1;
@@ -198,39 +220,65 @@ export default function GexOiPage({ guide = '' }: { guide?: string }) {
   // Anchor the window on spot; with a transient spot of 0 fall back to the forward so the chart does not blank.
   const anchor = spot > 0 ? spot : underlying;
 
-  const { rows, levels, clarity, outside } = useMemo(() => {
-    if (!chain?.chain.oc || !(underlying > 0)) {
-      return { rows: [] as GexViewRow[], levels: gexLevels([], spot), clarity: { call: wallClarity([]), put: wallClarity([]) }, outside: [] as string[] };
-    }
-    const all = buildGexRows(chain.chain.oc, { expiry, underlying, lotSize: lot, power });
+  const model = useMemo(() => {
+    const empty = {
+      rows: [] as GexViewRow[], levels: gexLevels([], spot), clarity: { call: wallClarity([]), put: wallClarity([]) }, outside: [] as string[],
+      walls: spotSideWalls([], spot), top: { call: [], put: [] } as ReturnType<typeof topWalls>,
+      flip: null as number | null, strikeFlip: null as number | null, em: null as ReturnType<typeof expectedMove>, emExpiry: '',
+      confluence: [] as ReturnType<typeof emConfluence>, regime: 'unknown' as GexLevels['regime'], totalNet: 0,
+    };
+    if (!items || !(spot > 0)) return empty;
+    const perExpiry = items.map(c => {
+      const ex = c.expiry ?? expiry;
+      const u = underlyingFor(c, ex);
+      return { c, ex, u, rows: u > 0 ? buildGexRows(c.chain.oc!, { expiry: ex, underlying: u, lotSize: lot, power }) : [], legs: u > 0 ? buildGexLegs(c.chain.oc!, { expiry: ex, underlying: u, spot: c.spot > 0 ? c.spot : spot }) : [] as GexLeg[] };
+    });
+    const all = mergeGexRows(perExpiry.map(x => x.rows));
+    if (!all.length) return empty;
+    const legs = perExpiry.flatMap(x => x.legs);
     const centre = Math.round(anchor / STRIKE_STEP) * STRIKE_STEP;
-    // Levels and wall clarity both come from the whole chain, so the checklist describes the walls actually reported.
-    const lv = gexLevels(all, spot);
+    const lv = gexLevels(all, spot); // v1 levels: strike-profile flip, global-max walls, pin, total net
+    const walls = spotSideWalls(all, spot);
+    const top = topWalls(all, spot, 3);
+    const dyn = dynamicFlip(legs, spot, { power });
+    const flip = dyn.flip;
+    const regime: GexLevels['regime'] = flip != null ? (spot >= flip ? 'positive' : 'negative') : (lv.totalNet >= 0 ? 'positive' : 'negative');
+    const nearest = perExpiry[0];
+    const em = expectedMove(nearest.c.chain.oc!, { spot, underlying: nearest.u, expiry: nearest.ex });
+    const confluence = em ? emConfluence([
+      { label: 'Call wall', value: walls.callWall },
+      { label: 'Put wall', value: walls.putWall },
+      { label: 'Gamma flip', value: flip },
+    ], em, EM_TOLERANCE) : [];
     const cl = {
-      call: wallClarity(all.map(r => ({ strike: r.strike, v: r.ceGex }))),
-      put: wallClarity(all.map(r => ({ strike: r.strike, v: -r.peGex }))),
+      call: wallClarity(all.filter(r => r.strike >= spot).map(r => ({ strike: r.strike, v: r.ceGex }))),
+      put: wallClarity(all.filter(r => r.strike <= spot).map(r => ({ strike: r.strike, v: -r.peGex }))),
     };
     const inWin = (k: number | null) => k == null || Math.abs(k - centre) <= range * STRIKE_STEP;
     const out: string[] = [];
-    if (!inWin(lv.callWall)) out.push(`call wall ${lv.callWall}`);
-    if (!inWin(lv.putWall)) out.push(`put wall ${lv.putWall}`);
+    if (!inWin(walls.callWall)) out.push(`call wall ${walls.callWall}`);
+    if (!inWin(walls.putWall)) out.push(`put wall ${walls.putWall}`);
     if (!inWin(lv.pin)) out.push(`pin ${lv.pin}`);
-    if (!inWin(lv.flip == null ? null : Math.round(lv.flip))) out.push(`flip ${Math.round(lv.flip!)}`);
+    if (!inWin(flip == null ? null : Math.round(flip))) out.push(`flip ${Math.round(flip!)}`);
     const win: GexViewRow[] = all
       .filter(r => Math.abs(r.strike - centre) <= range * STRIKE_STEP)
       .map(r => ({ ...r, ceOiView: r.ceOi / oiDiv, peOiView: r.peOi / oiDiv }));
-    return { rows: win, levels: lv, clarity: cl, outside: out };
-  }, [chain, lot, underlying, spot, anchor, expiry, power, range, oiDiv]);
+    return { rows: win, levels: lv, clarity: cl, outside: out, walls, top, flip, strikeFlip: lv.flip, em, emExpiry: nearest.ex, confluence, regime, totalNet: lv.totalNet };
+  }, [items, lot, spot, anchor, expiry, power, range, oiDiv, underlyingFor]);
+  const { rows, levels, clarity, outside, walls, top, flip, strikeFlip, em, emExpiry, confluence, regime, totalNet } = model;
 
   const atm = spot > 0 ? Math.round(spot / STRIKE_STEP) * STRIKE_STEP : 0;
   // Regime comes from spot vs the flip; the checklist's first tile uses the whole-chain total. Say so when they disagree.
-  const regimeMismatch = levels.regime !== 'unknown' && levels.flip != null && (levels.totalNet > 0) !== (levels.regime === 'positive');
+  // v2 levels: walls on their side of spot, flip from the hypothetical-spot recompute, regime from spot vs that flip.
+  const levelsV2: GexLevels = { ...levels, callWall: walls.callWall, putWall: walls.putWall, flip, regime };
+  // Regime comes from spot vs the flip; the checklist's first tile uses the whole-chain total. Say so when they disagree.
+  const regimeMismatch = regime !== 'unknown' && flip != null && (totalNet > 0) !== (regime === 'positive');
 
-  const checklist = gexChecklist({ levels, spot, vix, call: clarity.call, put: clarity.put });
+  const checklist = gexChecklist({ levels: levelsV2, spot, vix, call: clarity.call, put: clarity.put });
 
-  const regimeCls = levels.regime === 'positive' ? TONE_CLS.ok : levels.regime === 'negative' ? TONE_CLS.bad : TONE_CLS.manual;
-  const regimeLabel = levels.regime === 'positive' ? 'POSITIVE GAMMA · dealers dampen'
-    : levels.regime === 'negative' ? 'NEGATIVE GAMMA · dealers amplify' : 'REGIME UNKNOWN';
+  const regimeCls = regime === 'positive' ? TONE_CLS.ok : regime === 'negative' ? TONE_CLS.bad : TONE_CLS.manual;
+  const regimeLabel = regime === 'positive' ? 'POSITIVE GAMMA · dealers dampen'
+    : regime === 'negative' ? 'NEGATIVE GAMMA · dealers amplify' : 'REGIME UNKNOWN';
 
   const xAxisProps = {
     dataKey: 'strike' as const,
@@ -241,9 +289,45 @@ export default function GexOiPage({ guide = '' }: { guide?: string }) {
     minTickGap: 18,
   };
   const numFmt = (v: number) => fmtGex(v);
-  const flipRef = levels.flip != null && rows.length ? levels.flip : null;
+  const flipRef = flip != null && rows.length ? flip : null;
+  const strikeFlipRef = strikeFlip != null && rows.length ? strikeFlip : null;
   // A reference line on a category axis must sit on a real category: snap the flip to the nearest strike in view.
   const nearestStrike = (x: number) => rows.reduce((b, r) => (Math.abs(r.strike - x) < Math.abs(b - x) ? r.strike : b), rows[0]?.strike ?? x);
+  const inView = (x: number) => rows.length > 0 && x >= rows[0].strike - STRIKE_STEP / 2 && x <= rows[rows.length - 1].strike + STRIKE_STEP / 2;
+
+  // Shared annotations for the two GEX charts: spot, flip band (zone, not a line), strike-profile flip (v1, for comparison),
+  // and the expected-move bands. Returned as a keyed array because recharts reads its direct children.
+  const overlays = (labels: boolean) => {
+    const out: React.ReactNode[] = [];
+    if (atm > 0) out.push(<ReferenceLine key="spot" x={nearestStrike(spot)} stroke="var(--color-zinc-400)" strokeDasharray="5 4" label={labels ? { value: `SPOT ${spot.toLocaleString('en-IN', { maximumFractionDigits: 1 })}`, position: 'top', fontSize: 10, fontWeight: 700 } : undefined} />);
+    // A level outside the strike window is not drawn (snapping it to the edge would pass it off as a real level); the
+    // "outside the window" notice above the chart lists it instead.
+    if (flipRef != null && inView(flipRef)) {
+      // Band half-width 0.3% of spot, widened to one strike each side when both ends land on the same strike.
+      const tol = spot * 0.003;
+      let lo = nearestStrike(flipRef - tol);
+      let hi = nearestStrike(flipRef + tol);
+      if (lo === hi) { lo = nearestStrike(lo - STRIKE_STEP); hi = nearestStrike(hi + STRIKE_STEP); }
+      // At the very edge of the window both ends can still coincide: a zero-width area draws nothing, so skip it.
+      if (lo !== hi) out.push(<ReferenceArea key="flipband" x1={lo} x2={hi} fill="#fbbf24" fillOpacity={0.12} stroke="none" />);
+      out.push(<ReferenceLine key="flip" x={nearestStrike(flipRef)} stroke="#fbbf24" strokeWidth={2} label={labels ? { value: `FLIP ${Math.round(flipRef)}`, position: 'insideBottomRight', fontSize: 10, fontWeight: 700, fill: '#fbbf24' } : undefined} />);
+    }
+    if (strikeFlipRef != null && inView(strikeFlipRef) && (flipRef == null || !inView(flipRef) || nearestStrike(strikeFlipRef) !== nearestStrike(flipRef))) {
+      out.push(<ReferenceLine key="sflip" x={nearestStrike(strikeFlipRef)} stroke="#fbbf24" strokeDasharray="2 4" label={labels ? { value: `STRIKE FLIP ${Math.round(strikeFlipRef)}`, position: 'insideTopLeft', fontSize: 9, fontWeight: 600, fill: '#fbbf24' } : undefined} />);
+    }
+    if (em) {
+      if (inView(em.upper)) out.push(<ReferenceLine key="emu" x={nearestStrike(em.upper)} stroke="var(--color-sky-400)" strokeDasharray="6 3" label={labels ? { value: `EM + ${Math.round(em.upper)}`, position: 'insideTopRight', fontSize: 9, fontWeight: 700, fill: 'var(--color-sky-400)' } : undefined} />);
+      if (inView(em.lower)) out.push(<ReferenceLine key="eml" x={nearestStrike(em.lower)} stroke="var(--color-sky-400)" strokeDasharray="6 3" label={labels ? { value: `EM − ${Math.round(em.lower)}`, position: 'insideTopLeft', fontSize: 9, fontWeight: 700, fill: 'var(--color-sky-400)' } : undefined} />);
+    }
+    return out;
+  };
+  // Wall cell outline: the spot-side wall is bold, the 2nd/3rd largest walls on that side are thin.
+  const wallStroke = (strike: number, side: 'call' | 'put') => {
+    const primary = side === 'call' ? walls.callWall : walls.putWall;
+    if (strike === primary) return { stroke: side === 'call' ? '#fecaca' : '#a7f3d0', w: 2 };
+    if (wallRank(side === 'call' ? top.call : top.put, strike) != null) return { stroke: side === 'call' ? '#fecaca' : '#a7f3d0', w: 1 };
+    return { stroke: 'transparent', w: 0 };
+  };
 
   return (
     <div className="flex flex-col min-h-screen bg-zinc-950 text-white">
@@ -256,8 +340,8 @@ export default function GexOiPage({ guide = '' }: { guide?: string }) {
           </div>
           <div>
             <p className="text-[9px] font-bold text-emerald-500 uppercase tracking-[0.18em] mb-0.5">Options · {UNDERLYING}</p>
-            <h1 className="text-sm font-bold text-white tracking-tight leading-none">GEX OI Chart</h1>
-            <p className="text-[10px] text-zinc-500 font-medium mt-1">Gamma-weighted open interest: call wall, put wall, gamma flip</p>
+            <h1 className="text-sm font-bold text-white tracking-tight leading-none">GEX Profile <span className="ml-1 px-1.5 py-0.5 rounded text-[9px] font-bold border border-sky-500/40 bg-sky-500/10 text-sky-400 align-middle">v2</span></h1>
+            <p className="text-[10px] text-zinc-500 font-medium mt-1">Spot-side walls, zero-gamma flip and expected move (compare with GEX OI Chart)</p>
           </div>
         </div>
         <div className="flex items-center gap-2 flex-wrap">
@@ -265,9 +349,17 @@ export default function GexOiPage({ guide = '' }: { guide?: string }) {
           <span className="w-px h-5 bg-zinc-800 shrink-0" />
           <label className="flex items-center gap-1.5">
             <span className="text-[10px] text-zinc-500 font-bold uppercase tracking-widest">Expiry</span>
-            <select value={expiry} onChange={e => { setLoading(true); setExpiry(e.target.value); }}
+            <select value={expiry} disabled={scope > 1} title={scope > 1 ? 'Aggregate scope uses the nearest expiries' : undefined} onChange={e => { setLoading(true); setExpiry(e.target.value); }}
               className="bg-zinc-900 border border-zinc-700 text-zinc-200 text-xs font-mono font-semibold rounded-lg px-2.5 py-1.5 focus:outline-none focus:border-emerald-500 tabular-nums">
               {expiries.map(e => <option key={e} value={e}>{e}</option>)}
+            </select>
+          </label>
+          <label className="flex items-center gap-1.5">
+            <span className="text-[10px] text-zinc-500 font-bold uppercase tracking-widest">Scope</span>
+            <select value={scope} onChange={e => { setLoading(true); setScope(Number(e.target.value)); }}
+              title="Single expiry, or the summed GEX of the nearest N expiries (0DTE and the next weeklies all hedge together)"
+              className="bg-zinc-900 border border-zinc-700 text-zinc-200 text-xs font-mono font-semibold rounded-lg px-2.5 py-1.5 focus:outline-none focus:border-emerald-500">
+              {SCOPE_OPTIONS.map(n => <option key={n} value={n}>{n === 1 ? 'Single expiry' : `Nearest ${n} expiries`}</option>)}
             </select>
           </label>
           <label className="flex items-center gap-1.5">
@@ -298,17 +390,6 @@ export default function GexOiPage({ guide = '' }: { guide?: string }) {
               <span className={`absolute top-0.5 left-0.5 w-3 h-3 rounded-full bg-oncolor transition-transform ${showValues ? 'translate-x-3' : ''}`} />
             </span>
           </button>
-          {guide && (
-            <button
-              onClick={() => setGuideOpen(true)}
-              title="Open GEX OI Guide"
-              aria-label="Open GEX OI Guide"
-              className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-md border border-zinc-800 bg-zinc-900 text-xs font-bold text-zinc-200 hover:bg-zinc-800 focus:outline-none focus:ring-2 focus:ring-emerald-500/50"
-            >
-              <BookOpen className="w-3.5 h-3.5" aria-hidden="true" />
-              Guide
-            </button>
-          )}
           <span className="w-px h-5 bg-zinc-800 shrink-0" />
           <NavBar />
         </div>
@@ -324,7 +405,7 @@ export default function GexOiPage({ guide = '' }: { guide?: string }) {
       )}
 
       <div className="flex-1 flex flex-col gap-4 px-6 py-5">
-        {loading && !chain ? (
+        {loading && !items ? (
           <div className="flex flex-col items-center justify-center py-24 gap-3">
             <div className="w-6 h-6 border-2 border-zinc-700 border-t-emerald-400 rounded-full animate-spin" />
             <p className="text-sm text-zinc-400 font-medium">Loading option chain…</p>
@@ -335,13 +416,18 @@ export default function GexOiPage({ guide = '' }: { guide?: string }) {
               <div className="flex items-stretch gap-6 px-5 py-4 flex-wrap">
                 <PulseStat label={`${UNDERLYING} spot`} value={spot > 0 ? spot.toLocaleString('en-IN', { minimumFractionDigits: 2 }) : '—'} size="text-2xl" />
                 <div className="w-px bg-zinc-800 self-stretch" />
-                <PulseStat label="Call wall" value={levels.callWall ? fmtStrike(levels.callWall) : '—'} color="text-red-400" size="text-2xl" sub="resistance · highest call GEX" />
-                <PulseStat label="Put wall" value={levels.putWall ? fmtStrike(levels.putWall) : '—'} color="text-emerald-400" size="text-2xl" sub="support · highest put GEX" />
-                <PulseStat label="Gamma flip" value={levels.flip != null ? Math.round(levels.flip).toLocaleString('en-IN') : '—'} color="text-amber-400" size="text-2xl" sub="net GEX zero crossing" />
+                <PulseStat label="Call wall" value={walls.callWall ? fmtStrike(walls.callWall) : '—'} color="text-red-400" size="text-2xl"
+                  sub={walls.callOverall != null && walls.callOverall !== walls.callWall ? `highest call GEX at/above spot · overall max ${fmtStrike(walls.callOverall)}` : 'resistance · highest call GEX at/above spot'} />
+                <PulseStat label="Put wall" value={walls.putWall ? fmtStrike(walls.putWall) : '—'} color="text-emerald-400" size="text-2xl"
+                  sub={walls.putOverall != null && walls.putOverall !== walls.putWall ? `highest put GEX at/below spot · overall max ${fmtStrike(walls.putOverall)}` : 'support · highest put GEX at/below spot'} />
+                <PulseStat label="Gamma flip" value={flip != null ? Math.round(flip).toLocaleString('en-IN') : '—'} color="text-amber-400" size="text-2xl"
+                  sub={strikeFlip != null ? `re-priced at ±20% spots · strike-profile flip ${Math.round(strikeFlip).toLocaleString('en-IN')}` : 're-priced at ±20% spots'} />
+                <PulseStat label="Expected move" value={em ? `±${Math.round(em.em).toLocaleString('en-IN')}` : '—'} color="text-sky-400" size="text-2xl"
+                  sub={em ? `${emExpiry} ATM ${fmtStrike(em.strike)} straddle${em.source === 'model' ? ' (model price)' : ''} · ${Math.round(em.lower).toLocaleString('en-IN')} to ${Math.round(em.upper).toLocaleString('en-IN')}` : 'no ATM prices'} />
                 <PulseStat label="Pin strike" value={levels.pin ? fmtStrike(levels.pin) : '—'} color="text-zinc-200" size="text-2xl" sub="largest call + put GEX" />
                 <div className="ml-auto flex items-center gap-5 flex-wrap">
-                  <PulseStat label="Net GEX" value={fmtGex(levels.totalNet)} color={levels.totalNet >= 0 ? 'text-emerald-400' : 'text-red-400'} size="text-sm" sub={`${POWER_UNIT[power]} per 1% move, whole chain`} />
-                  <PulseStat label="Underlying" value={underlying > 0 ? underlying.toFixed(1) : '—'} size="text-sm" color="text-zinc-300" sub={isFut ? `future ${chain?.future_expiry ?? ''} rolled to expiry · Black-76` : 'spot carried to expiry (no future): approximate'} />
+                  <PulseStat label="Net GEX" value={fmtGex(totalNet)} color={totalNet >= 0 ? 'text-emerald-400' : 'text-red-400'} size="text-sm" sub={`${POWER_UNIT[power]} per 1% move, whole chain`} />
+                  <PulseStat label="Underlying" value={underlying > 0 ? underlying.toFixed(1) : '—'} size="text-sm" color="text-zinc-300" sub={isFut ? `future ${head?.future_expiry ?? ''} rolled to expiry · Black-76` : 'spot carried to expiry (no future): approximate'} />
                   <PulseStat label="Lot · OI unit" value={lot ? String(lot) : '—'} size="text-sm" color="text-zinc-300" sub={`OI charted in ${oiLabel}; GEX built from units`} />
                 </div>
               </div>
@@ -350,9 +436,14 @@ export default function GexOiPage({ guide = '' }: { guide?: string }) {
                   <span className={`inline-flex items-center px-2.5 py-1 rounded-full text-[10px] font-bold border ${regimeCls}`}>{regimeLabel}</span>
                   {regimeMismatch && (
                     <span className="text-[10px] text-amber-400">
-                      spot is {levels.regime === 'positive' ? 'above' : 'below'} the flip, but whole-chain net GEX is {levels.totalNet > 0 ? 'positive' : 'negative'} ({fmtGex(levels.totalNet)})
+                      spot is {regime === 'positive' ? 'above' : 'below'} the flip, but whole-chain net GEX is {totalNet > 0 ? 'positive' : 'negative'} ({fmtGex(totalNet)})
                     </span>
                   )}
+                  {confluence.map(c => (
+                    <span key={c.label} className="inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-bold border border-sky-500/40 bg-sky-500/10 text-sky-400">
+                      {c.label} {Math.round(c.value).toLocaleString('en-IN')} ≈ {c.band === 'upper' ? 'upper' : 'lower'} expected move ({Math.round(c.distance)} pts)
+                    </span>
+                  ))}
                   {approxForward && <span className="text-[10px] text-amber-400">no future price: forward estimated from spot with cost of carry (approximate)</span>}
                 </div>
                 {updated && <span className="text-[10px] text-zinc-500 font-mono tabular-nums">Updated {updated}{live ? '' : ' · market closed, not polling'}</span>}
@@ -371,6 +462,29 @@ export default function GexOiPage({ guide = '' }: { guide?: string }) {
                   </div>
                 )}
                 <div className="bg-zinc-900/60 border border-zinc-800 rounded-2xl p-5">
+                  <ChartHeader eyebrow="Reading" title="Regime and walls" sub={`${regimeNote(regime)} Walls are not guaranteed floors or ceilings; they matter most where they line up with the expected move or another level.`} />
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                    {([['Call walls', top.call, 'text-red-400'], ['Put walls', top.put, 'text-emerald-400']] as const).map(([title, list, cls]) => (
+                      <div key={title} className="rounded-xl border border-zinc-800 bg-zinc-900 px-3 py-2">
+                        <p className={`text-[10px] font-bold uppercase tracking-widest ${cls}`}>{title} · top 3</p>
+                        <div className="mt-1.5 space-y-1">
+                          {list.length === 0 && <p className="text-xs text-zinc-500">none</p>}
+                          {list.map((w, i) => (
+                            <div key={w.strike} className="flex items-center justify-between gap-3 text-xs font-mono tabular-nums">
+                              <span className="text-zinc-400">#{i + 1}</span>
+                              <span className="text-zinc-100 font-bold">{fmtStrike(w.strike)}</span>
+                              <span className="text-zinc-300">{fmtGex(w.gex)}</span>
+                              <span className={`text-[10px] font-sans font-bold ${w.broken ? 'text-amber-400' : 'text-zinc-500'}`}>
+                                {w.broken ? (w.side === 'call' ? 'broken · now support' : 'broken · now resistance') : (w.side === 'call' ? 'above spot' : 'below spot')}
+                              </span>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+                <div className="bg-zinc-900/60 border border-zinc-800 rounded-2xl p-5">
                   <ChartHeader
                     eyebrow="Gamma exposure"
                     title="Call vs put GEX by strike"
@@ -388,14 +502,13 @@ export default function GexOiPage({ guide = '' }: { guide?: string }) {
                       <YAxis tick={{ fontSize: 10, fontFamily: 'var(--font-mono)' }} tickLine={false} axisLine={false} width={58} tickFormatter={numFmt} />
                       <Tooltip content={<GexTooltip oiLabel={oiLabel} />} cursor={{ fill: 'var(--chart-cursor-fill)', opacity: 0.5 }} />
                       <ReferenceLine y={0} stroke="var(--color-zinc-500)" />
-                      {atm > 0 && <ReferenceLine x={nearestStrike(spot)} stroke="var(--color-zinc-400)" strokeDasharray="5 4" label={{ value: `SPOT ${spot.toLocaleString('en-IN', { maximumFractionDigits: 1 })}`, position: 'top', fontSize: 10, fontWeight: 700 }} />}
-                      {flipRef != null && <ReferenceLine x={nearestStrike(flipRef)} stroke="#fbbf24" strokeWidth={2} label={{ value: `FLIP ${Math.round(flipRef)}`, position: 'insideBottomRight', fontSize: 10, fontWeight: 700, fill: '#fbbf24' }} />}
+                      {overlays(true)}
                       <Bar dataKey="ceGex" name="Call GEX" stackId="g" isAnimationActive={false}>
-                        {rows.map(r => <Cell key={r.strike} fill="#ef4444" stroke={r.strike === levels.callWall ? '#fecaca' : 'transparent'} strokeWidth={r.strike === levels.callWall ? 2 : 0} />)}
+                        {rows.map(r => { const w = wallStroke(r.strike, 'call'); return <Cell key={r.strike} fill="#ef4444" stroke={w.stroke} strokeWidth={w.w} />; })}
                         {showValues && <LabelList dataKey="ceGex" content={barValueLabel as never} />}
                       </Bar>
                       <Bar dataKey="peGex" name="Put GEX" stackId="g" isAnimationActive={false}>
-                        {rows.map(r => <Cell key={r.strike} fill="#10b981" stroke={r.strike === levels.putWall ? '#a7f3d0' : 'transparent'} strokeWidth={r.strike === levels.putWall ? 2 : 0} />)}
+                        {rows.map(r => { const w = wallStroke(r.strike, 'put'); return <Cell key={r.strike} fill="#10b981" stroke={w.stroke} strokeWidth={w.w} />; })}
                         {showValues && <LabelList dataKey="peGex" content={barValueLabel as never} />}
                       </Bar>
                       <Line type="monotone" dataKey="netGex" name="Net GEX" stroke="#fbbf24" strokeWidth={2} dot={false} isAnimationActive={false} />
@@ -413,8 +526,7 @@ export default function GexOiPage({ guide = '' }: { guide?: string }) {
                         <YAxis tick={{ fontSize: 10, fontFamily: 'var(--font-mono)' }} tickLine={false} axisLine={false} width={58} tickFormatter={numFmt} />
                         <Tooltip content={<GexTooltip oiLabel={oiLabel} />} cursor={{ fill: 'var(--chart-cursor-fill)', opacity: 0.5 }} />
                         <ReferenceLine y={0} stroke="var(--color-zinc-500)" />
-                        {atm > 0 && <ReferenceLine x={nearestStrike(spot)} stroke="var(--color-zinc-400)" strokeDasharray="5 4" label={{ value: `SPOT ${spot.toLocaleString('en-IN', { maximumFractionDigits: 1 })}`, position: 'top', fontSize: 10, fontWeight: 700 }} />}
-                        {flipRef != null && <ReferenceLine x={nearestStrike(flipRef)} stroke="#fbbf24" strokeWidth={2} />}
+                        {overlays(false)}
                         <Bar dataKey="netGex" name="Net GEX" isAnimationActive={false}>
                           {rows.map(r => <Cell key={r.strike} fill={r.netGex >= 0 ? '#10b981' : '#ef4444'} />)}
                           {showValues && <LabelList dataKey="netGex" content={barValueLabel as never} />}
@@ -458,29 +570,6 @@ export default function GexOiPage({ guide = '' }: { guide?: string }) {
           </>
         )}
       </div>
-      {guide && (
-        <GuidePanel
-          open={guideOpen}
-          onClose={() => setGuideOpen(false)}
-          markdown={guide}
-          title="GEX OI Chart Guide"
-          description="How to read gamma-weighted OI: walls, gamma flip, regimes, the strangle checklist and risk rules"
-          summary={
-            <div className="flex-none px-6 lg:px-10 py-3.5 border-b border-zinc-800 bg-zinc-900/60 text-xs text-zinc-300 leading-relaxed">
-              <div className="max-w-6xl mx-auto w-full space-y-1.5">
-                <div className="text-[10px] uppercase font-bold text-zinc-400 tracking-wider">Quick read</div>
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-x-6 gap-y-1">
-                  <div><strong className="text-red-400 font-bold">Call wall</strong>: highest call GEX, resistance.</div>
-                  <div><strong className="text-emerald-400 font-bold">Put wall</strong>: highest put GEX, support.</div>
-                  <div><strong className="text-amber-400 font-bold">Gamma flip</strong>: net GEX crosses zero. Above it dealers dampen moves, below it they amplify.</div>
-                  <div><strong className="text-zinc-200 font-bold">Pin strike</strong>: largest call plus put GEX, the likeliest expiry magnet.</div>
-                </div>
-                <div className="text-[11px] font-mono text-zinc-400 pt-0.5">Unvalidated: one video, one example, no backtest. This page places no orders.</div>
-              </div>
-            </div>
-          }
-        />
-      )}
     </div>
   );
 }
