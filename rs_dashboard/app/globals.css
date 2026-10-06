@@ -565,6 +565,9 @@ body {
   background-size: 100% 100%, 100% 100%, 100% 100%, 32px 32px, 32px 32px;
   background-position: 0 0, 0 0, 0 0, -0.5px -0.5px, -0.5px -0.5px;
   font-family: var(--font-sans), Arial, sans-serif;
+  /* Hinting/kerning tuned for legibility and no synthesized bold/italic: sharper small text on 1x screens. */
+  text-rendering: optimizeLegibility;
+  font-synthesis: none;
   overflow-x: hidden;
   /* Set by components/Sidebar.tsx to its current rendered width; reset to 0
      when the sidebar unmounts (e.g. the unauthenticated /login page). */

@@ -104,11 +104,18 @@ export default function TripleStraddlePage() {
         .triple-straddle .lc-toolbar-stats > span { gap: 3px; }
         .triple-straddle .lc-stat-card,
         .triple-straddle .lc-spot-card { padding: 1px 4px; }
+        /* Sizes are kept at 9px or more (the old 7-8px labels smeared on a 1x display), and the mono
+           stack uses the loaded Geist Mono instead of JetBrains Mono, which is never loaded and fell
+           back to whatever generic monospace the OS has. */
         .triple-straddle .lc-stat-value,
-        .triple-straddle .lc-spot-value { font-size: 10px; }
-        .triple-straddle .lc-stat-label { font-size: 7px; letter-spacing: 0.06em; }
-        .triple-straddle .lc-view-btn { padding: 4px 6px; font-size: 10px; }
-        .triple-straddle .lc-status-pill { padding: 3px 6px; font-size: 8px; }
+        .triple-straddle .lc-spot-value { font-size: 11px; }
+        .triple-straddle .lc-stat-label { font-size: 9px; letter-spacing: 0.04em; }
+        .triple-straddle .lc-group-label { font-size: 9px; }
+        .triple-straddle .lc-view-btn { padding: 4px 7px; font-size: 11px; }
+        .triple-straddle .lc-status-pill { padding: 3px 6px; font-size: 9px; }
+        .triple-straddle .lc-select--mono,
+        .triple-straddle .lc-stat-value,
+        .triple-straddle .lc-spot-value { font-family: var(--font-geist-mono), ui-monospace, monospace; }
       `}</style>
       <header className="sticky top-0 z-30 flex items-center justify-between gap-3 flex-wrap px-6 py-3 border-b border-zinc-800 bg-zinc-950/95 backdrop-blur">
         <div className="flex items-center gap-3">
@@ -116,11 +123,11 @@ export default function TripleStraddlePage() {
             <Columns3 className="w-4 h-4 text-emerald-400" />
           </div>
           <div>
-            <p className="text-[10px] font-bold uppercase tracking-[0.16em] text-emerald-400 mb-0.5">
+            <p className="text-xs font-bold uppercase tracking-[0.16em] text-emerald-400 mb-0.5">
               Options · {underlying}
             </p>
             <h1 className="text-sm font-bold text-white tracking-tight leading-none">Triple Straddle</h1>
-            <p className="text-[10px] text-zinc-500 font-medium mt-1">
+            <p className="text-xs text-zinc-500 font-medium mt-1">
               ATM straddle with a lower and higher offset straddle side by side
             </p>
           </div>
@@ -162,7 +169,7 @@ export default function TripleStraddlePage() {
               </option>
             ))}
           </select>
-          <span className="inline-flex items-center gap-1 px-2 py-1 rounded-full bg-zinc-900 border border-zinc-800 text-[10px] font-bold text-zinc-300">
+          <span className="inline-flex items-center gap-1 px-2 py-1 rounded-full bg-zinc-900 border border-zinc-800 text-xs font-bold text-zinc-300">
             <span className={`w-1.5 h-1.5 rounded-full ${live ? 'bg-emerald-400 animate-pulse' : 'bg-zinc-600'}`} />
             {live ? 'LIVE' : 'CLOSED'}
           </span>
@@ -173,19 +180,19 @@ export default function TripleStraddlePage() {
               if (!ts.realArmed && !window.confirm('Arm REAL MONEY? New straddles will place live Dhan orders until you turn this off or reload the page.')) return;
               ts.setRealArmed(!ts.realArmed);
             }}
-            className={`px-2.5 py-1.5 rounded-lg border text-[10px] font-bold uppercase tracking-wide focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500 ${ts.realArmed ? 'bg-red-500/15 border-red-500/40 text-red-400' : 'bg-zinc-900 border-zinc-800 text-zinc-300'}`}
+            className={`px-2.5 py-1.5 rounded-lg border text-xs font-bold uppercase tracking-wide focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500 ${ts.realArmed ? 'bg-red-500/15 border-red-500/40 text-red-400' : 'bg-zinc-900 border-zinc-800 text-zinc-300'}`}
             aria-pressed={ts.realArmed}
             title="SIM paper-fills at live prices and never calls the broker. REAL places live Dhan orders."
           >
             {ts.realArmed ? 'REAL · armed' : 'SIM mode'}
           </button>
           {(simPnl.priced + simPnl.unpriced) > 0 && (
-            <span className={`text-[10px] font-mono font-bold px-2.5 py-1.5 rounded-lg bg-zinc-900 border border-zinc-800 ${simPnl.total >= 0 ? 'text-emerald-400' : 'text-red-400'}`} title={simPnl.unpriced ? `${simPnl.unpriced} position(s) unpriced and excluded` : undefined}>
+            <span className={`text-xs font-mono font-bold px-2.5 py-1.5 rounded-lg bg-zinc-900 border border-zinc-800 ${simPnl.total >= 0 ? 'text-emerald-400' : 'text-red-400'}`} title={simPnl.unpriced ? `${simPnl.unpriced} position(s) unpriced and excluded` : undefined}>
               SIM {simPnl.total < 0 ? '-' : ''}₹{Math.abs(Math.round(simPnl.total)).toLocaleString('en-IN')}{simPnl.unpriced ? '*' : ''}
             </span>
           )}
           {(realPnl.priced + realPnl.unpriced) > 0 && (
-            <span className={`text-[10px] font-mono font-bold px-2.5 py-1.5 rounded-lg bg-zinc-900 border border-zinc-800 ${realPnl.total >= 0 ? 'text-emerald-400' : 'text-red-400'}`} title={realPnl.unpriced ? `${realPnl.unpriced} position(s) unpriced and excluded` : undefined}>
+            <span className={`text-xs font-mono font-bold px-2.5 py-1.5 rounded-lg bg-zinc-900 border border-zinc-800 ${realPnl.total >= 0 ? 'text-emerald-400' : 'text-red-400'}`} title={realPnl.unpriced ? `${realPnl.unpriced} position(s) unpriced and excluded` : undefined}>
               REAL {realPnl.total < 0 ? '-' : ''}₹{Math.abs(Math.round(realPnl.total)).toLocaleString('en-IN')}{realPnl.unpriced ? '*' : ''}
             </span>
           )}
@@ -193,12 +200,12 @@ export default function TripleStraddlePage() {
             <button
               type="button"
               onClick={() => void ts.exitAll()}
-              className="px-2.5 py-1.5 rounded-lg bg-red-600 text-oncolor text-[10px] font-bold uppercase tracking-wide hover:bg-red-500 focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500"
+              className="px-2.5 py-1.5 rounded-lg bg-red-600 text-oncolor text-xs font-bold uppercase tracking-wide hover:bg-red-500 focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500"
             >
               Exit all {openPositions.length}
             </button>
           )}
-          <span className="text-[10px] font-mono font-bold text-amber-300 px-2.5 py-1.5 rounded-lg bg-zinc-900 border border-zinc-800 uppercase">
+          <span className="text-xs font-mono font-bold text-amber-300 px-2.5 py-1.5 rounded-lg bg-zinc-900 border border-zinc-800 uppercase">
             DATA: {today}
           </span>
           <span className="w-px h-5 bg-zinc-800 shrink-0" />

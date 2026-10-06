@@ -25,7 +25,7 @@ function Chip({ label, q, flash, dim }: { label: string; q?: Quote; flash?: 'up'
       'inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-zinc-900 border border-zinc-800 transition-colors',
       flash === 'up' && 'border-emerald-500/60', flash === 'down' && 'border-red-500/60', dim && 'opacity-60',
     )}>
-      <span className="text-[10px] font-bold uppercase tracking-wide text-zinc-400">{label}</span>
+      <span className="text-xs font-bold uppercase tracking-wide text-zinc-400">{label}</span>
       <span className="text-xs font-mono font-bold text-zinc-100 tabular-nums">{has ? fmtPrice(q!.ltp) : '—'}</span>
       {has && <PctPill v={q!.change_pct} />}
     </span>
@@ -49,7 +49,7 @@ export function HeaderIndexChips() {
     <div className="flex items-center gap-1.5" title={stale ? `Index feed is ${ageLabel(ageOf(tickMs, now))} old` : 'Live, vs previous close'}>
       <Chip label="Nifty" q={data?.quotes?.NIFTY} flash={flash.NIFTY} dim={stale} />
       <Chip label="VIX" q={data?.quotes?.VIX} flash={flash.VIX} dim={stale} />
-      {stale && <span className="text-[10px] font-bold text-amber-300">{ageLabel(ageOf(tickMs, now))} old</span>}
+      {stale && <span className="text-xs font-bold text-amber-300">{ageLabel(ageOf(tickMs, now))} old</span>}
     </div>
   );
 }

@@ -51,7 +51,7 @@ export function StraddleTradeBar({
         <div className="flex flex-col gap-2">
           <div className="flex items-center justify-between gap-2 flex-wrap">
             <div className="flex items-center gap-2 font-bold text-zinc-100">
-              <span className={`px-1.5 py-0.5 rounded text-[10px] ${position.mode === 'REAL' ? 'bg-red-500/15 text-red-400' : 'bg-zinc-800 text-zinc-300'}`}>
+              <span className={`px-1.5 py-0.5 rounded text-xs ${position.mode === 'REAL' ? 'bg-red-500/15 text-red-400' : 'bg-zinc-800 text-zinc-300'}`}>
                 {position.mode}
               </span>
               <span>{position.side === 'S' ? 'SHORT' : 'LONG'} {position.strike} × {position.lots} lot{position.lots > 1 ? 's' : ''}</span>
@@ -81,10 +81,10 @@ export function StraddleTradeBar({
                     <span>{msg}</span>
                     {(l.unconfirmed || l.pendingExit) && (
                       <>
-                        <button type="button" className="px-2 py-0.5 rounded bg-zinc-800 text-zinc-100 text-[10px] font-bold" onClick={() => {
+                        <button type="button" className="px-2 py-0.5 rounded bg-zinc-800 text-zinc-100 text-xs font-bold" onClick={() => {
                           if (window.confirm(`Only continue if Orders/Positions show the ${l.option} leg is OPEN at the broker. Track it as open?`)) onResolve(slot, l.option, 'adopt');
                         }}>It is open — track it</button>
-                        <button type="button" className="px-2 py-0.5 rounded bg-zinc-800 text-zinc-100 text-[10px] font-bold" onClick={() => {
+                        <button type="button" className="px-2 py-0.5 rounded bg-zinc-800 text-zinc-100 text-xs font-bold" onClick={() => {
                           if (window.confirm(`Only continue if Orders/Positions show NOTHING open for the ${l.option} leg. Discard it from this page?`)) onResolve(slot, l.option, 'discard');
                         }}>Nothing open — discard</button>
                       </>
