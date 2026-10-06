@@ -294,3 +294,21 @@ describe('buildPayoffModel: calendar spreads', () => {
   });
 });
 
+
+describe('buildPayoffModel: curve density', () => {
+  const near = leg({ type: 'CE', strike: 22700, expiry: NEAR, qty: -65, entryPrice: 120 });
+  const far = leg({ type: 'CE', strike: 22700, expiry: FAR, qty: 65, entryPrice: 210 });
+  it('samples about 8 points per strike step, so a wide window is not drawn as visible facets', () => {
+    const m = buildPayoffModel({ legs: [near, far], spot: SPOT, rangePct: 0.17 })!;
+    const xs = m.points.map(p => p.spot);
+    const maxGap = Math.max(...xs.slice(1).map((x, i) => x - xs[i]));
+    assert.ok(maxGap <= 7, `largest gap ${maxGap}`);   // 161 samples gave ~24 here
+    assert.ok(m.points.length > 161 && m.points.length <= 1201 + 40, `${m.points.length} points`);
+    assert.equal(m.today.length, m.points.length);
+  });
+  it('an explicit steps still wins, and a fixed sample grid is untouched', () => {
+    assert.equal(buildPayoffModel({ legs: [near], spot: SPOT, steps: 50, strikeStep: 50 })!.points.length >= 50, true);
+    const grid = [22000, 22500, 23000];
+    assert.deepEqual(buildPayoffModel({ legs: [near], spot: SPOT, samples: grid })!.points.map(p => p.spot), grid);
+  });
+});

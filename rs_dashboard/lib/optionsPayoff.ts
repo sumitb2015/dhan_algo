@@ -56,7 +56,7 @@ export interface PayoffInput {
   fallbackIv?: number;          // fraction used (and counted) when a leg has no solvable IV (default 15%)
   strikeStep?: number;          // default 50
   rangePct?: number;            // minimum half-width of the drawn window as a fraction of spot (default 8%)
-  steps?: number;               // evenly spaced samples (default 161)
+  steps?: number;               // evenly spaced samples (default: ~8 per strike step across the window, 161..1201)
   samples?: number[];           // evaluate exactly at these index levels instead of building a window (adapters that must keep a legacy grid)
   light?: boolean;              // header numbers only (break-evens, extremes, ROM, R:R, POP, Greeks): no curves. For collapsed rows.
 }
@@ -206,7 +206,9 @@ export function buildPayoffModel(input: PayoffInput): PayoffModel | null {
   const hi = spot + half;
 
   const xs = new Set<number>();
-  const steps = input.steps ?? 161;
+  // Density follows the strike step, not a fixed count: 161 samples over a ~3,800-point window is one sample per ~24 points, so the
+  // drawn curve showed visible facets (and a zoomed view only a dozen of them). Aim for ~8 samples per strike step, 161..1201.
+  const steps = input.steps ?? Math.min(1201, Math.max(161, Math.ceil((hi - lo) / (step / 8)) + 1));
   const fixedGrid = input.samples && input.samples.length > 1 ? [...input.samples].sort((a, b) => a - b) : null;
   if (fixedGrid) fixedGrid.forEach(x => xs.add(x));
   else {
