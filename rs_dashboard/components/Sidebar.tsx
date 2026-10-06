@@ -93,6 +93,7 @@ const NAV_GROUPS = [
       { href: '/options-analytics', label: 'Positions Analytics', desc: 'Combined payoff, Greeks, P&L and Kelly sizing for your open NIFTY / SENSEX positions' },
       { href: '/options/scatter-3d', label: 'Option Cube 3D', desc: '3D scatter of premium change × OI change × IV for the current expiry — find the best strikes to buy or sell' },
       { href: '/options/volatility-surface', label: '3D Volatility Surface', desc: 'Interactive 3D implied volatility surface across strikes and expiries — smile, skew and calendar term structure' },
+      { href: '/options/gex', label: 'GEX OI Chart', desc: 'Gamma-weighted OI: call wall, put wall, gamma flip and regime' },
       { href: '/option-strats', label: 'Option Strats', desc: 'Multi-leg P&L heatmap analyzer — strike × date, IV-adjustable' },
       { href: '/option-strats-stocks', label: 'Option Strats (Stocks)', desc: 'Same P&L heatmap analyzer for Nifty 50 F&O stocks' },
       { href: '/options/analyzer', label: 'Option Analyzer', desc: 'Rank strikes based on technical indicators & OI change' },

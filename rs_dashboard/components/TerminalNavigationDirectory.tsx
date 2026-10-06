@@ -210,6 +210,11 @@ export const TERMINAL_PILLARS: TerminalPillarGroup[] = [
         desc: 'Strike-by-strike open interest walls, shifts, and pin levels',
       },
       {
+        name: 'GEX OI Chart',
+        href: '/options/gex',
+        desc: 'Gamma-weighted open interest: call/put walls, gamma flip and dealer regime',
+      },
+      {
         name: 'Historical Expiry Move Analysis',
         href: '/expiry-analysis',
         desc: 'Statistical expiry-day range distributions, settlement pin risk & moves',
