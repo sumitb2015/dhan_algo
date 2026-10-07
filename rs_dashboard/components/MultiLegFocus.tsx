@@ -1,5 +1,7 @@
 'use client';
 
+import { createPortal } from 'react-dom';
+import { scaleBrokerPnl } from '@/lib/positionPnl';
 import React, { useState, useEffect, useMemo, useRef, useCallback } from 'react';
 import { Plus, RefreshCw, Layers, ClipboardList, ListTree, ChevronDown, ChevronRight, Download, History, CircleHelp, BarChart3 } from 'lucide-react';
 import Link from 'next/link';
@@ -1109,10 +1111,12 @@ export default function MultiLegFocus({
     const t = setInterval(load, 10 * 60_000);
     return () => { alive = false; clearInterval(t); };
   }, []);
-  const prevDaysPnl = useMemo(() => {
+
+  const [showPnlHistory, setShowPnlHistory] = useState(false);
+  const pnlHistory = useMemo(() => {
     if (!tradeHistory) return null;
     const todayIst = new Date(pnlNow).toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
-    return previousDaysPnl(tradeHistory, todayIst, 3);
+    return previousDaysPnl(tradeHistory, todayIst, 30);
   }, [tradeHistory, pnlNow]);
 
   const activeStrategiesCount = useMemo(() => {
@@ -1145,7 +1149,9 @@ export default function MultiLegFocus({
     let total = 0;
     for (const rows of Object.values(brokerRows)) {
       for (const r of rows ?? []) {
-        total += (Number(r.realizedProfit) || 0) + (Number(r.unrealizedProfit) || 0);
+        // Dhan reports MCX P&L without the barrels-per-lot multiplier (no-op elsewhere).
+        const row = scaleBrokerPnl(r);
+        total += (Number(row.realizedProfit) || 0) + (Number(row.unrealizedProfit) || 0);
       }
     }
     return total;
@@ -3296,27 +3302,62 @@ export default function MultiLegFocus({
                 Recon ⚠ {new Set(contractDrift.map(d => d.ident)).size}
               </span>
             )}
-            {prevDaysPnl ? (
-              <Link
-                href="/portfolio/diary"
-                className={`h-8 flex items-center px-3 rounded-lg text-xs font-bold font-mono tabular-nums border ${
-                  prevDaysPnl.net >= 0 ? 'text-emerald-400 border-emerald-500/30 bg-emerald-500/5' : 'text-rose-400 border-rose-500/30 bg-rose-500/5'
-                } ${FOCUS_RING}`}
-                title={`Whole Dhan account, net realized P&L (after charges) over the previous 3 market days — from the Trader's Diary${
-                  tradeHistory?.generatedAt ? `, synced ${tradeHistory.generatedAt.slice(0, 16).replace('T', ' ')}` : ''
-                }:\n${
-                  prevDaysPnl.days.map(d => `${d.date}: ${d.netPnl >= 0 ? '+' : ''}${fmtMoney(d.netPnl)}`).join('\n')
-                }\nGross ${prevDaysPnl.gross >= 0 ? '+' : ''}${fmtMoney(prevDaysPnl.gross)} − charges ${fmtMoney(prevDaysPnl.charges)}`}
-              >
-                Prev 3D: {prevDaysPnl.net >= 0 ? '+' : ''}{fmtMoney(prevDaysPnl.net)}
-              </Link>
-            ) : (
-              <span
-                className="h-8 flex items-center px-3 rounded-lg text-xs font-bold font-mono border border-zinc-700 text-zinc-500"
-                title="No trade history yet: run a sync from the Trader's Diary"
-              >
-                Prev 3D: —
-              </span>
+            <button
+              type="button"
+              onClick={() => setShowPnlHistory(true)}
+              className={`h-8 px-3 inline-flex items-center gap-1.5 text-xs font-bold rounded-lg border border-zinc-700 bg-zinc-900 hover:bg-zinc-800 text-zinc-200 hover:text-white transition-colors cursor-pointer ${FOCUS_RING}`}
+              title="Daily realized P&L of previous days (whole Dhan account, from the Trader's Diary)"
+            >
+              <History className="w-3.5 h-3.5 text-zinc-400" />
+              <span>Daily P&amp;L</span>
+            </button>
+            {showPnlHistory && typeof document !== 'undefined' && createPortal(
+              <div className="fixed inset-0 z-[100] flex items-center justify-center bg-oncolor-dark/60 p-4" onClick={() => setShowPnlHistory(false)}>
+                <div className="w-full max-w-lg max-h-[80vh] flex flex-col rounded-xl border border-zinc-700 bg-zinc-900 shadow-xl" onClick={e => e.stopPropagation()}>
+                  <div className="flex items-center justify-between px-4 py-3 border-b border-zinc-700">
+                    <div className="text-sm font-bold text-white">Previous days P&amp;L</div>
+                    <button type="button" aria-label="Close" onClick={() => setShowPnlHistory(false)} className={`px-2 text-zinc-400 hover:text-white cursor-pointer ${FOCUS_RING}`}>✕</button>
+                  </div>
+                  <div className="overflow-auto">
+                    {pnlHistory && pnlHistory.days.length > 0 ? (
+                      <table className="w-full text-xs font-mono tabular-nums">
+                        <thead className="sticky top-0">
+                          <tr className="bg-zinc-800 text-white font-bold">
+                            <th className="text-left px-4 py-2 text-xs font-bold">Date</th>
+                            <th className="text-right px-4 py-2 text-xs font-bold">Gross</th>
+                            <th className="text-right px-4 py-2 text-xs font-bold">Charges</th>
+                            <th className="text-right px-4 py-2 text-xs font-bold">Net</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {pnlHistory.days.map(d => (
+                            <tr key={d.date} className="border-t border-zinc-800">
+                              <td className="px-4 py-1.5 text-zinc-300">{d.date}</td>
+                              <td className={`px-4 py-1.5 text-right ${d.grossPnl >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>{d.grossPnl >= 0 ? '+' : ''}{fmtMoney(d.grossPnl)}</td>
+                              <td className="px-4 py-1.5 text-right text-zinc-400">{fmtMoney(d.charges)}</td>
+                              <td className={`px-4 py-1.5 text-right font-bold ${d.netPnl >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>{d.netPnl >= 0 ? '+' : ''}{fmtMoney(d.netPnl)}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                        <tfoot>
+                          <tr className="font-bold [&>td]:sticky [&>td]:bottom-0 [&>td]:bg-zinc-800 [&>td]:border-t-2 [&>td]:border-zinc-600">
+                            <td className="px-4 py-2 text-white">Total</td>
+                            <td className={`px-4 py-2 text-right ${pnlHistory.gross >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>{pnlHistory.gross >= 0 ? '+' : ''}{fmtMoney(pnlHistory.gross)}</td>
+                            <td className="px-4 py-2 text-right text-zinc-300">{fmtMoney(pnlHistory.charges)}</td>
+                            <td className={`px-4 py-2 text-right ${pnlHistory.net >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>{pnlHistory.net >= 0 ? '+' : ''}{fmtMoney(pnlHistory.net)}</td>
+                          </tr>
+                        </tfoot>
+                      </table>
+                    ) : (
+                      <div className="px-4 py-8 text-center text-xs text-zinc-500">No trade history yet: run a sync from the Trader&apos;s Diary.</div>
+                    )}
+                  </div>
+                  <div className="px-4 py-2 border-t border-zinc-700 text-xs text-zinc-500">
+                    Last 30 market days{tradeHistory?.generatedAt ? ` · synced ${tradeHistory.generatedAt.slice(0, 16).replace('T', ' ')}` : ''} · <Link href="/portfolio/diary" className="text-zinc-300 underline">Trader&apos;s Diary</Link>
+                  </div>
+                </div>
+              </div>,
+              document.body,
             )}
 
             {/* How to use (the page's README) */}
