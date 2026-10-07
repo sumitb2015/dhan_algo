@@ -13,11 +13,12 @@ import { useMarketLive } from '@/lib/useMarketLive';
 import { startLiveIndicesBridge } from '@/lib/startLiveIndicesBridge';
 import { expiryEpochMs, rollForward } from '@/lib/optionsPricing';
 import {
-  buildGexRows, forwardFromSpot, fmtGex, gexChecklist, gexLevels, wallClarity, type ChecklistTone, type GexChainEntry, type GexLevels, type GexPower, type GexRow,
+  buildGexRows, fmtGex, gexChecklist, gexLevels, topTwo, type ChecklistTone, type GexChainEntry, type GexLevels, type GammaSource, type GexPower, type GexRow,
 } from '@/lib/gex';
 import {
   buildGexLegs, dynamicFlip, emConfluence, expectedMove, mergeGexRows, regimeNote, spotSideWalls, topWalls, wallRank, type GexLeg,
 } from '@/lib/gexV2';
+import { buildGexRowsModel, forwardFromSpot, gexModelCalcTable } from '@/lib/gexModel';
 import { WallPill, WALL_TONE } from './GexWallParts';
 import GexCalcButton from './GexCalcTable';
 
@@ -130,7 +131,8 @@ export default function GexProfilePage() {
   const [expiries, setExpiries] = useState<string[]>([]);
   const [expiry, setExpiry] = useState('');
   const [lot, setLot] = useState<number | null | undefined>(undefined); // undefined = still loading, null = unknown
-  const [power, setPower] = useState<GexPower>(2);
+  const [power, setPower] = useState<GexPower>(1);
+  const [gammaSource, setGammaSource] = useState<GammaSource>('dhan');
   const [range, setRange] = useState<number>(12);
   const [showValues, setShowValues] = useState(false);
   useEffect(() => {
@@ -180,6 +182,19 @@ export default function GexProfilePage() {
   const scopeExpiries = useMemo(() => (scope <= 1 ? (expiry ? [expiry] : []) : expiries.slice(0, scope)), [scope, expiry, expiries]);
   const reqKey = scopeExpiries.join('|');
 
+  // A failed chain fetch is almost always Dhan's account-wide rate limit (~1 call / 3 s). Retry a few times at a gap longer than
+  // that, so one hiccup clears itself, including before the open when the poll loop is not running.
+  const retryRef = useRef<{ n: number; t: ReturnType<typeof setTimeout> | null }>({ n: 0, t: null });
+  const fetchRef = useRef<() => Promise<void>>(async () => {});
+  const retryLater = () => {
+    const r = retryRef.current;
+    if (r.n >= 3) return;
+    r.n += 1;
+    if (r.t) clearTimeout(r.t);
+    r.t = setTimeout(() => { void fetchRef.current(); }, 6000);
+  };
+  useEffect(() => () => { if (retryRef.current.t) clearTimeout(retryRef.current.t); }, []);
+
   const fetchAll = useCallback(async () => {
     if (!scopeExpiries.length) return;
     const mine = ++seq.current;
@@ -191,11 +206,12 @@ export default function GexProfilePage() {
         const res = await fetch(`/api/options/chain?underlying=${UNDERLYING}&expiry=${ex}`);
         const j = await res.json() as { success: boolean; data?: ChainPayload; error?: string };
         if (mine !== seq.current) return; // a newer request owns the screen
-        if (!j.success || !j.data?.chain?.oc) { setError(j.error ?? `No chain data for ${ex}`); return; }
+        if (!j.success || !j.data?.chain?.oc) { setError(j.error ?? `No chain data for ${ex}`); retryLater(); return; }
         items.push({ ...j.data, expiry: ex });
       }
       setPayload({ key: scopeExpiries.join('|'), items });
       setError('');
+      retryRef.current.n = 0;
       setUpdated(new Date().toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', second: '2-digit' }));
       setUpdatedAt(Date.now());
       setDataDate(todayIST());
@@ -208,11 +224,12 @@ export default function GexProfilePage() {
         // A failed read clears the value: a stale VIX would keep the checklist tile green on old data.
         .catch(() => { if (mine === seq.current) setVix(null); });
     } catch (e) {
-      if (mine === seq.current) setError(String(e));
+      if (mine === seq.current) { setError(String(e)); retryLater(); }
     } finally {
       if (mine === seq.current) { setLoading(false); running.current = false; }
     }
   }, [scopeExpiries]);
+  useEffect(() => { fetchRef.current = fetchAll; }, [fetchAll]);
 
   useEffect(() => {
     if (!scopeExpiries.length) return;
@@ -260,18 +277,21 @@ export default function GexProfilePage() {
   // Anchor the window on spot; with a transient spot of 0 fall back to the forward so the chart does not blank.
   const anchor = spot > 0 ? spot : underlying;
 
+  // Calc table: both gammas per leg, `gammaSource` choosing which feeds GEX, exactly as the charts do.
+  const calcBuild = useCallback((set: { oc: Record<string, GexChainEntry>; expiry: string; spot: number; underlying?: number }) => gexModelCalcTable(set.oc, { expiry: set.expiry, underlying: set.underlying ?? 0, spot: set.spot, lotSize: lot, power, gammaSource }), [lot, power, gammaSource]);
+
   const model = useMemo(() => {
     const empty = {
-      rows: [] as GexViewRow[], levels: gexLevels([], spot), clarity: { call: wallClarity([]), put: wallClarity([]) }, outside: [] as string[],
+      rows: [] as GexViewRow[], levels: gexLevels([], spot), clarity: { call: topTwo([]), put: topTwo([]) }, outside: [] as string[],
       walls: spotSideWalls([], spot), top: { call: [], put: [] } as ReturnType<typeof topWalls>,
       flip: null as number | null, strikeFlip: null as number | null, em: null as ReturnType<typeof expectedMove>, emExpiry: '',
-      confluence: [] as ReturnType<typeof emConfluence>, regime: 'unknown' as GexLevels['regime'], totalNet: 0,
+      confluence: [] as ReturnType<typeof emConfluence>, regime: 'unknown' as GexLevels['regime'], totalNet: 0, noChainGamma: false,
     };
     if (!items || !(spot > 0)) return empty;
     const perExpiry = items.map(c => {
       const ex = c.expiry ?? expiry;
       const u = underlyingFor(c, ex);
-      return { c, ex, u, rows: u > 0 ? buildGexRows(c.chain.oc!, { expiry: ex, underlying: u, lotSize: lot, power }) : [], legs: u > 0 ? buildGexLegs(c.chain.oc!, { expiry: ex, underlying: u, spot: c.spot > 0 ? c.spot : spot }) : [] as GexLeg[] };
+      return { c, ex, u, rows: u > 0 ? (gammaSource === 'dhan' ? buildGexRows(c.chain.oc!, { spot: c.spot > 0 ? c.spot : spot, lotSize: lot, power }) : buildGexRowsModel(c.chain.oc!, { expiry: ex, underlying: u, lotSize: lot, power })) : [], legs: u > 0 ? buildGexLegs(c.chain.oc!, { expiry: ex, underlying: u, spot: c.spot > 0 ? c.spot : spot }) : [] as GexLeg[] };
     });
     const all = mergeGexRows(perExpiry.map(x => x.rows));
     if (!all.length) return empty;
@@ -291,8 +311,8 @@ export default function GexProfilePage() {
       { label: 'Gamma flip', value: flip },
     ], em, EM_TOLERANCE) : [];
     const cl = {
-      call: wallClarity(all.filter(r => r.strike >= spot).map(r => ({ strike: r.strike, v: r.ceGex }))),
-      put: wallClarity(all.filter(r => r.strike <= spot).map(r => ({ strike: r.strike, v: -r.peGex }))),
+      call: topTwo(all.filter(r => r.strike >= spot).map(r => ({ strike: r.strike, v: r.ceGex }))),
+      put: topTwo(all.filter(r => r.strike <= spot).map(r => ({ strike: r.strike, v: -r.peGex }))),
     };
     const inWin = (k: number | null) => k == null || Math.abs(k - centre) <= range * STRIKE_STEP;
     const out: string[] = [];
@@ -303,9 +323,9 @@ export default function GexProfilePage() {
     const win: GexViewRow[] = all
       .filter(r => Math.abs(r.strike - centre) <= range * STRIKE_STEP)
       .map(r => ({ ...r, ceOiView: r.ceOi / oiDiv, peOiView: r.peOi / oiDiv }));
-    return { rows: win, levels: lv, clarity: cl, outside: out, walls, top, flip, strikeFlip: lv.flip, em, emExpiry: nearest.ex, confluence, regime, totalNet: lv.totalNet };
-  }, [items, lot, spot, anchor, expiry, power, range, oiDiv, underlyingFor]);
-  const { rows, levels, clarity, outside, walls, top, flip, strikeFlip, em, emExpiry, confluence, regime, totalNet } = model;
+    return { rows: win, levels: lv, clarity: cl, outside: out, walls, top, flip, strikeFlip: lv.flip, em, emExpiry: nearest.ex, confluence, regime, totalNet: lv.totalNet, noChainGamma: gammaSource === 'dhan' && all.length > 0 && all.every(r => r.ceGamma === 0 && r.peGamma === 0) };
+  }, [items, lot, spot, anchor, expiry, power, gammaSource, range, oiDiv, underlyingFor]);
+  const { rows, levels, clarity, outside, walls, top, flip, strikeFlip, em, emExpiry, confluence, regime, totalNet, noChainGamma } = model;
 
   const atm = spot > 0 ? Math.round(spot / STRIKE_STEP) * STRIKE_STEP : 0;
   // Regime comes from spot vs the flip; the checklist's first tile uses the whole-chain total. Say so when they disagree.
@@ -436,10 +456,19 @@ export default function GexProfilePage() {
           <label className="flex items-center gap-1.5">
             <span className="text-[10px] text-zinc-500 font-bold uppercase tracking-widest">GEX in</span>
             <select value={power} onChange={e => setPower(Number(e.target.value) as GexPower)}
-              title="₹ notional = gamma x OI units x spot² x 0.01. Index units = the video's formula (spot once), the number of units dealers trade per 1% move. Walls and flip are identical either way."
+              title="Index units = the video's formula: gamma x OI units x spot x 0.01, the number of units dealers trade per 1% move. ₹ notional multiplies by spot once more. Walls and flip are identical either way."
               className="bg-zinc-900 border border-zinc-700 text-zinc-200 text-xs font-mono font-semibold rounded-lg px-2.5 py-1.5 focus:outline-none focus:border-emerald-500">
-              <option value={2}>₹ notional</option>
               <option value={1}>index units (video)</option>
+              <option value={2}>₹ notional</option>
+            </select>
+          </label>
+          <label className="flex items-center gap-1.5">
+            <span className="text-[10px] text-zinc-500 font-bold uppercase tracking-widest">Gamma</span>
+            <select value={gammaSource} onChange={e => setGammaSource(e.target.value as GammaSource)}
+              title="Dhan chain: gamma exactly as Dhan reports it, times OI and spot (the video's method). Black-76 model: gamma recomputed from the chain IV on the rolled future (a cross-check, not from the video)."
+              className="bg-zinc-900 border border-zinc-700 text-zinc-200 text-xs font-mono font-semibold rounded-lg px-2.5 py-1.5 focus:outline-none focus:border-emerald-500">
+              <option value="dhan">Dhan chain (video)</option>
+              <option value="model">Black-76 model</option>
             </select>
           </label>
           <button
@@ -455,8 +484,8 @@ export default function GexProfilePage() {
             </span>
           </button>
           <GexCalcButton
-            sets={(items ?? []).filter(c => c.chain.oc).map(c => { const ex = c.expiry ?? expiry; return { expiry: ex, oc: c.chain.oc!, underlying: underlyingFor(c, ex) }; })}
-            power={power} spot={spot}
+            sets={(items ?? []).filter(c => c.chain.oc).map(c => { const ex = c.expiry ?? expiry; return { expiry: ex, oc: c.chain.oc!, underlying: underlyingFor(c, ex), spot: c.spot > 0 ? c.spot : spot }; })}
+            build={calcBuild} spot={spot}
             wallStrikes={[walls.callWall, walls.putWall].filter((x): x is number => x != null)}
           />
           <span className="w-px h-5 bg-zinc-800 shrink-0" />
@@ -466,6 +495,11 @@ export default function GexProfilePage() {
 
       {error && (
         <div className="mx-6 mt-3 px-3 py-2 bg-red-900/20 border border-red-700/40 rounded-lg text-xs text-red-400">{error}</div>
+      )}
+      {noChainGamma && (
+        <div className="mx-6 mt-3 px-3 py-2 bg-amber-900/20 border border-amber-700/40 rounded-lg text-xs text-amber-400">
+          Dhan&apos;s chain returned no gamma for any strike (market closed or the Greeks feed is empty), so every GEX is zero. Switch Gamma to Black-76 model to see an estimate.
+        </div>
       )}
       {lot === null && (
         <div className="mx-6 mt-3 px-3 py-2 bg-amber-900/20 border border-amber-700/40 rounded-lg text-xs text-amber-400">
@@ -490,7 +524,7 @@ export default function GexProfilePage() {
                 <PulseStat label="Put wall" value={walls.putWall ? fmtStrike(walls.putWall) : '—'} color="text-emerald-400" size="text-2xl"
                   sub={walls.putOverall != null && walls.putOverall !== walls.putWall ? `highest put GEX at/below spot · overall max ${fmtStrike(walls.putOverall)}` : 'support · highest put GEX at/below spot'} />
                 <PulseStat label="Gamma flip" value={flip != null ? Math.round(flip).toLocaleString('en-IN') : '—'} color="text-amber-400" size="text-2xl"
-                  sub={strikeFlip != null ? `re-priced at ±20% spots · strike-profile flip ${Math.round(strikeFlip).toLocaleString('en-IN')}` : 're-priced at ±20% spots'} />
+                  sub={strikeFlip != null ? `re-priced at ±20% spots (Black-76) · strike-profile flip ${Math.round(strikeFlip).toLocaleString('en-IN')}` : 're-priced at ±20% spots (Black-76)'} />
                 <PulseStat label="Expected move" value={em ? `±${Math.round(em.em).toLocaleString('en-IN')}` : '—'} color="text-sky-400" size="text-2xl"
                   sub={em ? `${emExpiry} ATM ${fmtStrike(em.strike)} straddle${em.source === 'model' ? ' (model price)' : ''} · ${Math.round(em.lower).toLocaleString('en-IN')} to ${Math.round(em.upper).toLocaleString('en-IN')}` : 'no ATM prices'} />
                 <PulseStat label="Pin strike" value={levels.pin ? fmtStrike(levels.pin) : '—'} color="text-zinc-200" size="text-2xl" sub="largest call + put GEX" />

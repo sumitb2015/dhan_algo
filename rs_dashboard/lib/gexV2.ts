@@ -8,7 +8,8 @@
 // Pure functions, no I/O.
 
 import { calculateTimeToExpiryYears, computeBsGreeksExact, RISK_FREE_RATE } from './optionsPricing.ts';
-import { black76Gamma, gexTimeYears, gexValue, resolveIvs, type GexChainEntry, type GexPower, type GexRow } from './gex.ts';
+import { gexValue, type GexChainEntry, type GexPower, type GexRow } from './gex.ts';
+import { black76Gamma, gexTimeYears, resolveIvs } from './gexModel.ts';
 
 // ───────────────────────── walls ─────────────────────────
 
@@ -131,7 +132,7 @@ export function buildGexLegs(
 }
 
 /** Net dealer GEX (calls +, puts -) with every leg re-priced as if spot were `spotH`. */
-export function netGexAtSpot(legs: GexLeg[], spotH: number, power: GexPower = 2, r = RISK_FREE_RATE): number {
+export function netGexAtSpot(legs: GexLeg[], spotH: number, power: GexPower = 1, r = RISK_FREE_RATE): number {
   let net = 0;
   for (const l of legs) {
     const F = spotH * l.fwdRatio;
@@ -160,7 +161,7 @@ export function dynamicFlip(legs: GexLeg[], spot: number, opts: { span?: number;
   const curve: { spot: number; net: number }[] = [];
   for (let i = 0; i < points; i++) {
     const s = spot * (1 - span + (2 * span * i) / (points - 1));
-    curve.push({ spot: s, net: netGexAtSpot(legs, s, opts.power ?? 2, opts.r) });
+    curve.push({ spot: s, net: netGexAtSpot(legs, s, opts.power ?? 1, opts.r) });
   }
   // Like v1's gammaFlip: a sign change between two near-zero points (far-OTM tails of the scan) is noise, not a regime change.
   const peak = curve.reduce((m, c) => Math.max(m, Math.abs(c.net)), 0);
@@ -178,7 +179,7 @@ export function dynamicFlip(legs: GexLeg[], spot: number, opts: { span?: number;
       const loNeg = a.net < 0;
       for (let k = 0; k < 40 && hi - lo > 0.05; k++) {
         const mid = (lo + hi) / 2;
-        if ((netGexAtSpot(legs, mid, opts.power ?? 2, opts.r) < 0) === loNeg) lo = mid; else hi = mid;
+        if ((netGexAtSpot(legs, mid, opts.power ?? 1, opts.r) < 0) === loNeg) lo = mid; else hi = mid;
       }
       crossings.push((lo + hi) / 2);
     }

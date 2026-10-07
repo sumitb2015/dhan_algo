@@ -1,23 +1,17 @@
-// Gamma exposure (GEX) per strike for an option chain, plus the levels read off it.
+// Gamma exposure (GEX) per strike for an option chain, plus the levels read off it. This module follows the source video
+// ("Trade the Influence, Not Contracts", Trading with 915) and contains no option-pricing maths:
 //
-// GEX_strike = gamma x OI_units x U^k x 0.01, where OI_units = contracts x lot (Dhan's chain OI is already in units).
-//   gamma x U x 0.01 is the delta change per unit for a 1% move, so with k = 1 the result is the number of INDEX UNITS
-//   dealers must trade per 1% move. The video's formula (gamma x OI x lot x spot x 0.01) is exactly this, but it labels
-//   the answer in rupees. k = 2 multiplies by U once more and gives the rupee notional.
+//   GEX_strike = gamma x OI_units x spot x 0.01
+//
+// gamma is Dhan's own chain value (greeks.gamma), used exactly as given; OI_units = contracts x lot (Dhan's chain OI is already in
+// units); spot is the index spot. The result is the number of INDEX UNITS dealers must trade per 1% move. The video labels the
+// answer in rupees; k = 2 multiplies by spot once more and gives the rupee notional.
 //   Video example (0.0008, 50,000 lots, lot 65, spot 24,200): k = 1 gives 629,200 units, k = 2 gives Rs 1,522.66 Cr.
 //   The slide's "Rs 62.9 Cr" is neither (it is 62.9 million = Rs 6.29 Cr, the product without the x 0.01).
-// Sign convention: dealers are assumed long calls / short puts, so call GEX is positive and put GEX negative.
-// That is an assumption (Indian index options have no public dealer book), not a measurement.
+// Sign convention (video): calls positive, puts negative, net = call minus put. Dealers are assumed long calls / short puts;
+// that is an assumption (Indian index options have no public dealer book), not a measurement.
 //
-// Gamma is Black-76 on the future (black76Gamma below, the same closed form as computeBsGreeksExact but with a 10-minute
-// time floor instead of 6 hours), never from rounded display values.
-
-import { calculateTimeToExpiryYears, expiryEpochMs, normPdf, CALENDAR_DAYS_PER_YEAR, RISK_FREE_RATE } from './optionsPricing.ts';
-
-/** Black-76 forward for `expiry` implied by spot alone (cost of carry S*e^{rT}). Used only when no future price is available. */
-export function forwardFromSpot(spot: number, expiry: string, r = RISK_FREE_RATE, now: number = Date.now()): number {
-  return spot > 0 ? spot * Math.exp(r * calculateTimeToExpiryYears(expiry, now)) : 0;
-}
+// A Black-76 recompute of gamma, for the v2 page only, lives in gexModel.ts. Nothing here imports it.
 
 /** Compact GEX / OI figure: 1.2K, 3.4L, 5.97 Cr, 5,972 Cr. */
 export function fmtGex(n: number): string {
@@ -41,8 +35,11 @@ export interface GexChainEntry { ce?: GexLegInput | null; pe?: GexLegInput | nul
 
 export type GexPower = 1 | 2;
 
+/** Where each strike's gamma comes from: Dhan's own chain value (the video's method, default) or our Black-76 recompute. */
+export type GammaSource = 'dhan' | 'model';
+
 /** One strike-side of GEX. `oiUnits` is open interest in index units (contracts x lot). */
-export function gexValue(gamma: number, oiUnits: number, underlying: number, power: GexPower = 2): number {
+export function gexValue(gamma: number, oiUnits: number, underlying: number, power: GexPower = 1): number {
   return gamma * oiUnits * Math.pow(underlying, power) * 0.01;
 }
 
@@ -79,125 +76,28 @@ export interface GexLevels {
 }
 
 export interface GexParams {
-  expiry: string;
-  /** Black-76 underlying: the future rolled to the chain's expiry. Spot is only an approximation (no cost of carry). */
-  underlying: number;
+  /** Index spot: the price multiplier in the video's formula. */
+  spot: number;
   /** Needed only to convert lot-denominated OI to units. */
   lotSize?: number | null;
   /** Default 'units' (Dhan's convention). Never inferred; see the note above. */
   oiUnit?: 'units' | 'lots';
   power?: GexPower;
-  now?: number;
-  r?: number;
 }
 
-/** Smallest time-to-expiry GEX will use (10 minutes). The shared pricing clock floors at 6 hours, which freezes every
- *  gamma from ~09:40 on expiry day and understates ATM against OTM strikes by 1.4x at 3h left and 2.5x at 1h left. */
-export const GEX_MIN_T = 10 / (60 * 24 * CALENDAR_DAYS_PER_YEAR);
-
-/** Years to the 15:40 IST close with only a 10-minute floor. GEX-only: prices and payoffs keep calculateTimeToExpiryYears. */
-export function gexTimeYears(expiry: string, now: number = Date.now()): number {
-  if (!expiry) return calculateTimeToExpiryYears(expiry, now);
-  const ms = expiryEpochMs(expiry) - now;
-  if (!Number.isFinite(ms)) return calculateTimeToExpiryYears(expiry, now);
-  return Math.max(GEX_MIN_T, ms / (CALENDAR_DAYS_PER_YEAR * 24 * 3600 * 1000));
+/** Dhan's own gamma for a leg, or 0 when the chain gives none (untraded strike, closed market). */
+export function chainGamma(leg: GexLegInput | null | undefined): number {
+  const g = leg?.greeks?.gamma;
+  return typeof g === 'number' && g > 0 ? g : 0;
 }
 
-export interface Black76GammaTerms {
-  /** Time used, after the GEX floor. */
-  t: number;
-  /** sigma x sqrt(t). */
-  sd: number;
-  d1: number;
-  /** Standard normal density at d1. */
-  pdf: number;
-  /** e^{-rt}. */
-  discount: number;
-  gamma: number;
-}
-
-/** Every intermediate of the Black-76 gamma, so a table can show the numbers the formula used. */
-export function black76GammaTerms(F: number, strike: number, t: number, iv: number, r: number = RISK_FREE_RATE): Black76GammaTerms | null {
-  if (!(F > 0) || !(strike > 0) || !(iv > 0)) return null;
-  const tt = Math.max(t, GEX_MIN_T);
-  const sd = iv * Math.sqrt(tt);
-  const d1 = (Math.log(F / strike) + 0.5 * iv * iv * tt) / sd;
-  const pdf = normPdf(d1);
-  const discount = Math.exp(-r * tt);
-  return { t: tt, sd, d1, pdf, discount, gamma: (discount * pdf) / (F * sd) };
-}
-
-/** Black-76 gamma per index unit (same for calls and puts) with the GEX time floor. Matches computeBsGreeksExact's gamma. */
-export function black76Gamma(F: number, strike: number, t: number, iv: number, r: number = RISK_FREE_RATE): number {
-  return black76GammaTerms(F, strike, t, iv, r)?.gamma ?? 0;
-}
-
-const firstIv = (leg: GexLegInput | null | undefined): number =>
-  // First positive IV wins: Dhan sends 0 (not null) for an untraded strike, which `??` would accept as the answer.
-  [leg?.implied_volatility, leg?.greeks?.iv].find((v): v is number => typeof v === 'number' && v > 0) ?? 0;
-
-export type IvSource = 'own' | 'otm-leg' | 'other-leg' | 'nearest';
-
-/**
- * IV in percent for every strike-side that has open interest, keyed `${strike}|CE` / `${strike}|PE`, with where it came from.
- * Preference: the OTM leg's own IV (an ITM leg's IV from the chain is noisy), then the opposite leg at the same strike
- * (put-call parity: same IV), then the nearest strike's IV on the same side within `maxGap` points. Absent only when none exists.
- */
-export function resolveIvDetail(oc: Record<string, GexChainEntry>, F: number, maxGap = 200): Map<string, { iv: number; source: IvSource }> {
-  const entries = Object.entries(oc).map(([k, v]) => ({ strike: Number(k), v })).filter(e => Number.isFinite(e.strike));
-  const own = (e: { v: GexChainEntry }, type: 'CE' | 'PE') => firstIv(type === 'CE' ? e.v.ce : e.v.pe);
-  const nearest = (strike: number, type: 'CE' | 'PE'): number => {
-    let best = 0;
-    let gap = Infinity;
-    for (const e of entries) {
-      const iv = own(e, type);
-      const g = Math.abs(e.strike - strike);
-      if (iv > 0 && g > 0 && g <= maxGap && g < gap) { best = iv; gap = g; }
-    }
-    return best;
-  };
-  const out = new Map<string, { iv: number; source: IvSource }>();
-  for (const e of entries) {
-    for (const type of ['CE', 'PE'] as const) {
-      const leg = type === 'CE' ? e.v.ce : e.v.pe;
-      if (!((leg?.oi ?? 0) > 0)) continue;
-      const other = type === 'CE' ? 'PE' : 'CE';
-      const itm = type === 'CE' ? e.strike < F : e.strike > F;
-      const a = own(e, type);
-      const b = own(e, other);
-      let iv = 0;
-      let source: IvSource = 'own';
-      if (itm && b > 0) { iv = b; source = 'otm-leg'; }
-      else if (a > 0) { iv = a; source = 'own'; }
-      else if (b > 0) { iv = b; source = 'other-leg'; }
-      else { iv = nearest(e.strike, type); source = 'nearest'; }
-      if (iv > 0) out.set(`${e.strike}|${type}`, { iv, source });
-    }
-  }
-  return out;
-}
-
-/** IV in percent per strike-side (see resolveIvDetail for the preference order). */
-export function resolveIvs(oc: Record<string, GexChainEntry>, F: number, maxGap = 200): Map<string, number> {
-  const out = new Map<string, number>();
-  for (const [k, v] of resolveIvDetail(oc, F, maxGap)) out.set(k, v.iv);
-  return out;
-}
-
-function legGamma(ivPct: number | undefined, strike: number, F: number, t: number, r: number): number {
-  if (!(ivPct && ivPct > 0)) return 0; // no IV anywhere nearby, no gamma: a zero is honest, a guess is not
-  return black76Gamma(F, strike, t, ivPct / 100, r);
-}
-
+/** Per-strike GEX from Dhan's chain gamma: gamma x OI units x spot x 0.01 (x spot again when power = 2). */
 export function buildGexRows(oc: Record<string, GexChainEntry>, p: GexParams): GexRow[] {
-  const power = p.power ?? 2;
-  const r = p.r ?? RISK_FREE_RATE;
-  const t = gexTimeYears(p.expiry, p.now);
-  if (!(p.underlying > 0)) return [];
+  const power = p.power ?? 1;
+  if (!(p.spot > 0)) return [];
   const oiToUnits = p.oiUnit === 'lots' ? (p.lotSize ?? 0) : 1;
   if (!(oiToUnits > 0)) return [];
 
-  const ivs = resolveIvs(oc, p.underlying);
   const rows: GexRow[] = [];
   for (const [k, v] of Object.entries(oc)) {
     const strike = Number(k);
@@ -205,33 +105,28 @@ export function buildGexRows(oc: Record<string, GexChainEntry>, p: GexParams): G
     const ceOi = Math.max(0, v.ce?.oi ?? 0);
     const peOi = Math.max(0, v.pe?.oi ?? 0);
     if (ceOi === 0 && peOi === 0) continue;
-    const ceGamma = legGamma(ivs.get(`${strike}|CE`), strike, p.underlying, t, r);
-    const peGamma = legGamma(ivs.get(`${strike}|PE`), strike, p.underlying, t, r);
-    const ceGex = gexValue(ceGamma, ceOi * oiToUnits, p.underlying, power);
-    const peGex = -gexValue(peGamma, peOi * oiToUnits, p.underlying, power);
+    const ceGamma = chainGamma(v.ce);
+    const peGamma = chainGamma(v.pe);
+    const ceGex = gexValue(ceGamma, ceOi * oiToUnits, p.spot, power);
+    const peGex = -gexValue(peGamma, peOi * oiToUnits, p.spot, power);
     rows.push({ strike, ceOi, peOi, ceGamma, peGamma, ceGex, peGex, netGex: ceGex + peGex });
   }
   return rows.sort((a, b) => a.strike - b.strike);
 }
 
 /**
- * Linear interpolation of the net-GEX zero crossing nearest to `near` (spot) when there are several.
- * A sign change between two strikes whose net GEX is a rounding error next to the chain's biggest strike is noise
- * (far-OTM strikes with tiny OI), not a regime change, so crossings below `minShare` of the peak |net| are ignored.
+ * Gamma flip, as the video defines it: where the Total (net) GEX column flips from negative to positive (slide 13, step 4).
+ * Reported as the midpoint of the two adjacent strikes, which is how the video reads its own chart (-597 at 24,200 and +250 at
+ * 24,250 are marked "Gamma Flip ~24,225"). Strikes with exactly zero net GEX carry no sign and are skipped. Only negative-to-positive
+ * changes count. The video shows one flip; if a chain has several, the one nearest `near` (spot) is used.
  */
-export function gammaFlip(rows: GexRow[], near?: number, minShare = 0.01): number | null {
-  const peak = rows.reduce((m, r) => Math.max(m, Math.abs(r.netGex)), 0);
-  const floor = peak * minShare;
+export function gammaFlip(rows: GexRow[], near?: number): number | null {
   const crossings: number[] = [];
-  for (let i = 1; i < rows.length; i++) {
-    const a = rows[i - 1];
-    const b = rows[i];
-    if (Math.max(Math.abs(a.netGex), Math.abs(b.netGex)) <= floor) continue;
-    if (a.netGex === 0) { crossings.push(a.strike); continue; }
-    if ((a.netGex < 0) !== (b.netGex < 0) && b.netGex !== 0) {
-      const w = Math.abs(a.netGex) / (Math.abs(a.netGex) + Math.abs(b.netGex));
-      crossings.push(a.strike + w * (b.strike - a.strike));
-    }
+  let last: GexRow | null = null; // last strike with a non-zero net
+  for (const r of rows) {
+    if (r.netGex === 0) continue;
+    if (last && last.netGex < 0 && r.netGex > 0) crossings.push((last.strike + r.strike) / 2);
+    last = r;
   }
   if (!crossings.length) return null;
   if (near == null) return crossings[0];
@@ -274,43 +169,47 @@ export function gexLevels(rows: GexRow[], spot?: number): GexLevels {
   };
 }
 
-/** Walls are "clear" when the runner-up is well below the leader; two near-equal strikes should split the position. */
-export function wallClarity(values: { strike: number; v: number }[], ratio = 0.8): { clear: boolean; runnerUp: number | null } {
-  const s = [...values].sort((a, b) => b.v - a.v);
-  if (s.length < 2 || s[0].v <= 0) return { clear: false, runnerUp: null };
-  return { clear: s[1].v < s[0].v * ratio, runnerUp: s[1].strike };
+export interface WallValue { strike: number; v: number }
+
+/** The largest and second-largest values on one side, for the "walls are clear" check. The video gives no number for "clear". */
+export function topTwo(values: WallValue[]): { leader: WallValue | null; runnerUp: WallValue | null } {
+  const s = [...values].filter(x => x.v > 0).sort((a, b) => b.v - a.v);
+  return { leader: s[0] ?? null, runnerUp: s[1] ?? null };
 }
 
 export type ChecklistTone = 'ok' | 'warn' | 'bad' | 'manual';
 export interface ChecklistItem { label: string; detail: string; tone: ChecklistTone }
 
 /**
- * The source video's five-point strangle entry checklist. Informational only. `eventsManual` is always manual: the app has
- * no event calendar. Net GEX and the flip can disagree (total positive while spot sits below the flip); that case is amber,
- * never green, because the video's real test is "are we in the positive zone", not the chain total alone.
+ * The video's five-point entry checklist (slide 10). Informational only.
+ *  1. Net GEX positive: the sign of the whole-chain total.
+ *  2. Gamma flip below spot.
+ *  3. VIX below 18 on the slide (the speaker says 20): green under 18, amber from 18 to 20, red above.
+ *  4. No major event in 3 days: always manual, the app has no event calendar.
+ *  5. Call and put walls clear: "one dominant strike each side, not scattered". The video gives no threshold and says to confirm it
+ *     on the GEX chart (slide 13, step 5), so this is shown as the top two values per side for you to judge, never auto-graded.
  */
 export function gexChecklist(input: {
   levels: GexLevels;
   spot: number;
   vix: number | null;
-  call: { clear: boolean; runnerUp: number | null };
-  put: { clear: boolean; runnerUp: number | null };
+  call: { leader: WallValue | null; runnerUp: WallValue | null };
+  put: { leader: WallValue | null; runnerUp: WallValue | null };
 }): ChecklistItem[] {
   const { levels, spot, vix, call, put } = input;
   const unknown = levels.regime === 'unknown';
-  const spotInPositive = levels.flip == null ? levels.totalNet > 0 : spot >= levels.flip;
-  const totalPositive = levels.totalNet > 0;
-  const disagree = !unknown && totalPositive !== spotInPositive;
+  const side = (name: string, t: { leader: WallValue | null; runnerUp: WallValue | null }) =>
+    t.leader == null ? `${name} none` : `${name} ${t.leader.strike.toLocaleString('en-IN')} ${fmtGex(t.leader.v)}${t.runnerUp ? ` vs ${t.runnerUp.strike.toLocaleString('en-IN')} ${fmtGex(t.runnerUp.v)}` : ''}`;
   return [
     {
       label: 'Net GEX positive',
-      detail: unknown ? 'no data' : `total ${fmtGex(levels.totalNet)}${disagree ? ' · disagrees with spot vs flip' : ''}`,
-      tone: unknown ? 'manual' : disagree ? 'warn' : totalPositive ? 'ok' : 'bad',
+      detail: unknown ? 'no data' : `total ${fmtGex(levels.totalNet)}`,
+      tone: unknown ? 'manual' : levels.totalNet > 0 ? 'ok' : 'bad',
     },
     {
       label: 'Flip below spot',
       detail: levels.flip == null
-        ? (unknown ? 'no data' : 'no sign change in chain')
+        ? (unknown ? 'no data' : 'no negative-to-positive flip in chain')
         : `flip ${Math.round(levels.flip).toLocaleString('en-IN')} vs spot ${Math.round(spot).toLocaleString('en-IN')}`,
       tone: levels.flip == null ? 'manual' : levels.flip < spot ? 'ok' : 'bad',
     },
@@ -322,10 +221,8 @@ export function gexChecklist(input: {
     { label: 'No major event in 3 days', detail: 'check manually (RBI, Fed, Budget, results)', tone: 'manual' },
     {
       label: 'Walls clear',
-      detail: call.runnerUp == null
-        ? 'no data'
-        : `${call.clear ? 'call clear' : `call split with ${call.runnerUp}`} · ${put.clear ? 'put clear' : `put split with ${put.runnerUp}`}`,
-      tone: call.runnerUp == null ? 'manual' : call.clear && put.clear ? 'ok' : 'warn',
+      detail: `${side('call', call)} · ${side('put', put)}`,
+      tone: 'manual',
     },
   ];
 }
@@ -333,55 +230,46 @@ export function gexChecklist(input: {
 export interface GexCalcSide {
   /** Open interest in index units, after any lot conversion. */
   oiUnits: number;
-  ivPct: number;
-  ivSource: IvSource;
-  d1: number;
-  /** Standard normal density at d1. */
-  pdf: number;
+  /** Gamma used in GEX. */
   gamma: number;
   /** Signed: positive for calls, negative for puts. */
   gex: number;
 }
 
-export interface GexCalcRow { strike: number; ce: GexCalcSide | null; pe: GexCalcSide | null; netGex: number }
+export interface GexCalcRow<S extends GexCalcSide = GexCalcSide> { strike: number; ce: S | null; pe: S | null; netGex: number }
 
-export interface GexCalcTable {
-  rows: GexCalcRow[];
-  /** Black-76 forward used for every strike of this expiry. */
-  F: number;
-  /** Years to expiry after the GEX floor. */
-  t: number;
-  r: number;
+export interface GexCalcTable<S extends GexCalcSide = GexCalcSide> {
+  rows: GexCalcRow<S>[];
+  source: GammaSource;
+  /** Index spot of this chain, one factor of the formula. */
+  spot: number;
+  /** Contract lot size, used to show OI in lots (units / lot). Null when unknown; GEX never depends on it. */
+  lot: number | null;
+  /** The price actually multiplied into GEX. */
+  price: number;
   power: GexPower;
-  discount: number;
-  /** F^k x 0.01: the factor that turns gamma x OI into GEX. */
+  /** price^k x 0.01: the factor that turns gamma x OI into GEX. */
   scale: number;
 }
 
 /** Every number behind each strike's GEX, for the calculation table. Sums to exactly what `buildGexRows` gives. */
 export function gexCalcTable(oc: Record<string, GexChainEntry>, p: GexParams): GexCalcTable {
-  const power = p.power ?? 2;
-  const r = p.r ?? RISK_FREE_RATE;
-  const t = Math.max(gexTimeYears(p.expiry, p.now), GEX_MIN_T);
-  const F = p.underlying;
-  const out: GexCalcTable = { rows: [], F, t, r, power, discount: Math.exp(-r * t), scale: F > 0 ? Math.pow(F, power) * 0.01 : 0 };
+  const power = p.power ?? 1;
+  const out: GexCalcTable = { rows: [], source: 'dhan', spot: p.spot, lot: p.lotSize && p.lotSize > 0 ? p.lotSize : null, price: p.spot, power, scale: p.spot > 0 ? Math.pow(p.spot, power) * 0.01 : 0 };
   const oiToUnits = p.oiUnit === 'lots' ? (p.lotSize ?? 0) : 1;
-  if (!(F > 0) || !(oiToUnits > 0)) return out;
-  const ivs = resolveIvDetail(oc, F);
-  const side = (type: 'CE' | 'PE', strike: number, oi: number): GexCalcSide | null => {
+  if (!(p.spot > 0) || !(oiToUnits > 0)) return out;
+  const side = (type: 'CE' | 'PE', leg: GexLegInput | null | undefined, oi: number): GexCalcSide | null => {
     if (!(oi > 0)) return null;
-    const d = ivs.get(`${strike}|${type}`);
-    const terms = d ? black76GammaTerms(F, strike, t, d.iv / 100, r) : null;
+    const gamma = chainGamma(leg);
     const oiUnits = oi * oiToUnits;
-    const gamma = terms?.gamma ?? 0;
-    const g = gexValue(gamma, oiUnits, F, power);
-    return { oiUnits, ivPct: d?.iv ?? 0, ivSource: d?.source ?? 'own', d1: terms?.d1 ?? NaN, pdf: terms?.pdf ?? NaN, gamma, gex: type === 'CE' ? g : -g };
+    const g = gexValue(gamma, oiUnits, p.spot, power);
+    return { oiUnits, gamma, gex: type === 'CE' ? g : -g };
   };
   for (const [k, v] of Object.entries(oc)) {
     const strike = Number(k);
     if (!Number.isFinite(strike)) continue;
-    const ce = side('CE', strike, Math.max(0, v.ce?.oi ?? 0));
-    const pe = side('PE', strike, Math.max(0, v.pe?.oi ?? 0));
+    const ce = side('CE', v.ce, Math.max(0, v.ce?.oi ?? 0));
+    const pe = side('PE', v.pe, Math.max(0, v.pe?.oi ?? 0));
     if (!ce && !pe) continue;
     out.rows.push({ strike, ce, pe, netGex: (ce?.gex ?? 0) + (pe?.gex ?? 0) });
   }

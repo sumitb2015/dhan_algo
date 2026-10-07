@@ -23,8 +23,8 @@ of dealer hedging counts for more.
 > OI = how many cars are on the road. Gamma = how fast each car is going. You care about impact, not headcount.
 
 - Gamma is **highest at the money** and **highest near expiry** (about 10x at 2 DTE compared with 30 DTE).
-- Gamma uses a 10-minute time floor (the shared pricing clock's 6-hour floor would freeze expiry-day gamma from ~09:40), and a strike with no IV borrows the OTM leg's IV, then the same strike's other side, then the nearest strike within 200 points.
-- GEX of a strike = **gamma × OI (in units) × spot^k × 0.01**: the hedge size per **1% move** in Nifty.
+- **Gamma comes from Dhan's option chain** (`greeks.gamma`), used exactly as given, the way the video does. A strike where the chain gives none counts as zero. The page computes no gamma of its own.
+- GEX of a strike = **gamma × OI (in units) × spot × 0.01** (the video's formula; default unit is index units): the hedge size per **1% move** in Nifty.
 - **Calls count positive and puts negative.** This assumes dealers are long calls and short puts. It is an
   assumption: Indian index options publish no dealer book, so treat the sign as a convention, not a measurement.
 - **Net GEX** of a strike = call GEX + put GEX (put GEX is negative), the video's "call minus put".
@@ -35,18 +35,18 @@ of dealer hedging counts for more.
 |---|---|
 | **Call wall** | Strike with the highest call GEX. Read as **resistance**: dealers sell into rallies there. |
 | **Put wall** | Strike with the highest put GEX. Read as **support**: dealers buy into drops there. |
-| **Strike flip** | Where per-strike net GEX crosses from negative to positive (interpolated between two strikes). It sits near spot by construction (calls above, puts below); it is **not** the zero-gamma level, which GEX v2 finds by re-pricing the chain at other spots. |
+| **Gamma flip** | Where the Total (net) GEX column flips from negative to positive, shown as the midpoint of the two adjacent strikes (the video's chart marks its −597 / +250 pair as ~24,225). The **pivot** where the regime changes. |
 | **Pin strike** | Strike with the largest call + put GEX combined. The likeliest **expiry magnet**. |
 | **Net GEX** | Whole-chain total, per 1% move. |
 | **Regime badge** | **Positive gamma**: spot is at or above the flip. **Negative gamma**: spot is below it. |
-| **Call vs put GEX chart** | Red bars (calls, up) and green bars (puts, down) by strike, net GEX as a gold line, dashed **SPOT** line, gold **STRIKE FLIP** line. The wall bars have a light outline. |
+| **Call vs put GEX chart** | Red bars (calls, up) and green bars (puts, down) by strike, net GEX as a gold line, dashed **SPOT** line, gold **FLIP** line. The wall bars have a light outline. |
 | **Net dealer GEX chart** | Net GEX per strike, red where negative and green where positive, with the spot and flip lines. |
 | **Open interest chart** | Raw call and put OI, so you can see where raw OI and GEX disagree. |
 | **Strangle entry checklist** | The video's five-point list (section 5). |
 | **Guide button** | Top right of the page: opens this guide in a side panel (the panel renders this file, so the two never drift). |
 
 Controls: **Expiry** (an expiry past its 15:40 IST close is not offered), **Strikes ±** (chart window; the KPIs use
-the whole chain, and a note lists any level that falls outside the window), **GEX in** (₹ notional or index units).
+the whole chain, and a note lists any level that falls outside the window).
 
 ## 3. How to read it
 
@@ -68,15 +68,15 @@ The video's central point is that the two can say different things. Compare the 
   The video's example: the 24,500 call wall.
 
 ### The flip is a zone, not a line
-The video's own numbers (net GEX −597 at 24,200 and +250 at 24,250) interpolate to about 24,235; the video calls it
-~24,225 and says "24,200 to 24,250". Spot sitting on it is a **knife edge**: below it moves amplify downside, above
+The video's own numbers (net GEX −597 at 24,200 and +250 at 24,250) give a flip of ~24,225, the midpoint, and the video
+says "24,200 to 24,250". Spot sitting on it is a **knife edge**: below it moves amplify downside, above
 it they dampen upside. Expect the regime badge to flip back and forth near it.
 
 ## 4. The video's trade: short strangle at the walls
 
 - **Sell the call at the call wall and the put at the put wall.** Example: short 24,500 CE and short 24,000 PE.
-- If two strikes are close in GEX, the author splits the position across both. The checklist says "call split" or
-  "put split" when the runner-up is within 80% of the leader.
+- If two strikes are close in GEX, the author splits the position across both. The video gives no number for "close", so
+  the checklist shows the top two values on each side and leaves the judgement to you.
 - **Only in positive gamma**, i.e. spot above the flip. In negative gamma do not enter.
 - Why it should work, per the video: dealers sell as price approaches the call wall and buy as it approaches the
   put wall, so price pins between the walls and the strangle decays.
@@ -87,11 +87,11 @@ The video says: all five green, execute; one amber, reduce size or wait.
 
 | Tile | Rule | Page behaviour |
 |---|---|---|
-| Net GEX positive | Total net GEX above zero | Green when positive and spot-vs-flip agrees; **amber** when the chain total and spot-vs-flip disagree; red when negative |
+| Net GEX positive | Total net GEX above zero | Green when positive, red when negative |
 | Flip below spot | You want to be in the positive zone | Green when flip < spot, red otherwise |
 | India VIX below 18 | High VIX is tail risk | Green under 18, amber 18–20, red above 20, grey when VIX is unavailable |
 | No major event in 3 days | RBI, Fed, Budget, elections, results | **Always manual**: the app has no event calendar |
-| Walls clear | One dominant strike on each side | Green when both runners-up are under 80% of the leader, amber otherwise |
+| Walls clear | One dominant strike on each side, not scattered | Never auto-graded: shows the leader and runner-up GEX for each side so you can judge it on the chart (the video: "visually confirm walls") |
 
 The slide says VIX 18 and the presenter says 20 aloud; the page uses 18 for green and treats 18–20 as amber. The
 slide says 3 days for events; the speech says 2 to 5.
@@ -111,22 +111,22 @@ slide says 3 days for events; the speech says 2 to 5.
 
 - **OI units.** Dhan's chain OI is already in **units** (every OI on the live chain is a multiple of the lot size),
   so the page does **not** multiply by the lot size again. Charts show OI in lots using the current lot size.
-- **Spot power ("GEX in").** `₹ notional` = gamma × OI units × spot² × 0.01. `index units` = gamma × OI units ×
-  spot × 0.01, which is the video's formula (spot once) and is the number of Nifty units dealers trade per 1% move.
-  Walls, flip and pin are identical either way; only the magnitudes scale.
+- **Units.** GEX = gamma × OI units × spot × 0.01, the video's formula (spot once). It is the number of Nifty index
+  units dealers trade per 1% move; the video labels it in rupees, which its own arithmetic does not support.
 - **The slide's "₹62.9 Cr" is wrong.** From the slide's own inputs (0.0008 × 50,000 lots × 65 × 24,200 × 0.01) the
   result is 629,200 index units, or about ₹1,522 Cr with spot squared. The slide figure is 62.9 *million*
   (₹6.29 Cr) read as crore.
-- **Gamma** is computed with the repo's Black-76 library from each strike's implied volatility, on the future
-  **rolled to the chosen expiry**. If no future price is returned (usually after hours), the forward is estimated
-  from spot with cost of carry and the page says so; gamma is then approximate.
-- **Flip.** Interpolated linearly between adjacent strikes. Sign changes between strikes with near-zero net GEX
-  (below 1% of the largest) are ignored, and with several crossings the one nearest spot is used.
+- **Gamma** is Dhan's own chain value (`greeks.gamma`), not recomputed. Dhan reports different gamma for the call and
+  the put at the same strike (the same option should have one gamma), so the call and put sides can disagree there.
+  The Calc table shows the exact values used.
+- **Flip.** Only negative-to-positive changes of net GEX count, reported as the midpoint of the two strikes. A strike
+  with zero net GEX (no gamma from Dhan) is skipped. The video shows a single flip; if a chain has several, the one
+  nearest spot is used.
 - **Regime.** Spot against the flip. If the chain never changes sign, the sign of the total decides.
 
 ## 8. Limits and cautions
 
-- **Unvalidated.** One example, no backtest, no trade log. Treat every threshold (18 VIX, 80% clarity, 2% size) as
+- **Unvalidated.** One example, no backtest, no trade log. Treat every threshold (18 VIX, 2% size) as
   the video's, not as tested.
 - **Dealer positioning is assumed.** If dealers are not long calls and short puts, the signs invert.
 - **OI is a snapshot.** The video says chain OI is a delayed snapshot while gamma changes in real time; how often Dhan
