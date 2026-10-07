@@ -3689,6 +3689,12 @@ export default function MultiLegFocus({
           count={selectedLegIds.size}
           busy={regrouping}
           targets={groupTargets}
+          scopeLabel={(() => {
+            const picked = baskets.filter(b => b.legs.some(l => selectedLegIds.has(l.id)));
+            const ref = picked[0];
+            if (!ref || picked.some(b => b.broker !== ref.broker || b.underlying !== ref.underlying)) return null;
+            return `${ref.underlying} · ${BROKER_LABELS[ref.broker as Broker] ?? ref.broker}`;
+          })()}
           canUngroup={baskets.some(b => b.legs.length > 1 && b.legs.some(l => selectedLegIds.has(l.id)))}
           onGroup={(name, targetBasketId) => runRegroup({ op: 'group', legIds: [...selectedLegIds], name, targetBasketId })}
           onUngroup={() => runRegroup({ op: 'ungroup', legIds: [...selectedLegIds] })}

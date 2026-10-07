@@ -11,6 +11,8 @@ interface Props {
   busy: boolean;
   /** Existing groups the selection can be moved into (same broker + underlying only). */
   targets: GroupTarget[];
+  /** e.g. "CRUDEOILM · Dhan": the only rows trades can join. Null when the ticks span several. */
+  scopeLabel: string | null;
   /** False when every ticked trade already sits alone in its row (nothing to split). */
   canUngroup: boolean;
   onGroup: (name: string, targetBasketId?: string) => void;
@@ -21,7 +23,7 @@ interface Props {
 const NEW = '__new__';
 
 /** Floating bar shown while trades are ticked: name a new group, or move them into one. */
-export default function GroupSelectionBar({ count, busy, targets, canUngroup, onGroup, onUngroup, onClear }: Props) {
+export default function GroupSelectionBar({ count, busy, targets, scopeLabel, canUngroup, onGroup, onUngroup, onClear }: Props) {
   const [name, setName] = useState('');
   const [dest, setDest] = useState(NEW);
   const destValid = dest === NEW || targets.some(t => t.id === dest);
@@ -39,6 +41,11 @@ export default function GroupSelectionBar({ count, busy, targets, canUngroup, on
         className={`h-7 bg-zinc-900 border border-zinc-700 text-zinc-200 text-xs font-semibold rounded px-1.5 max-w-[14rem] ${FOCUS_RING}`}>
         <option value={NEW}>New group…</option>
         {targets.map(t => <option key={t.id} value={t.id}>Into: {t.label}</option>)}
+        {targets.length === 0 && (
+          <option disabled value="">
+            {scopeLabel ? `No other ${scopeLabel} rows to join` : 'Ticked trades span brokers/underlyings'}
+          </option>
+        )}
       </select>
       {target === NEW && (
         <input value={name} maxLength={40} placeholder="Group name (optional)" aria-label="New group name"
