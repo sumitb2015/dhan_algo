@@ -506,11 +506,11 @@ export default function GexProfilePage() {
                         <div className="mt-1.5 space-y-1">
                           {list.length === 0 && <p className="text-xs text-zinc-500">none</p>}
                           {list.map((w, i) => (
-                            <div key={w.strike} className="flex items-center justify-between gap-3 text-xs font-mono tabular-nums">
+                            <div key={w.strike} className="grid grid-cols-[1.75rem_4.5rem_6rem_1fr] items-center gap-x-3 text-xs font-mono tabular-nums">
                               <span className="text-zinc-400">#{i + 1}</span>
-                              <span className="text-zinc-100 font-bold">{fmtStrike(w.strike)}</span>
-                              <span className="text-zinc-300">{fmtGex(w.gex)}</span>
-                              <span className={`text-[10px] font-sans font-bold ${w.broken ? 'text-amber-400' : 'text-zinc-500'}`}>
+                              <span className="text-zinc-100 font-bold text-right">{fmtStrike(w.strike)}</span>
+                              <span className="text-zinc-300 text-right">{fmtGex(w.gex)}</span>
+                              <span className={`text-[10px] font-sans font-bold text-right ${w.broken ? 'text-amber-400' : 'text-zinc-500'}`}>
                                 {w.broken ? (w.side === 'call' ? 'broken · now support' : 'broken · now resistance') : (w.side === 'call' ? 'above spot' : 'below spot')}
                               </span>
                             </div>
