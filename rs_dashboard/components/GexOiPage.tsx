@@ -7,7 +7,7 @@ import {
 } from 'recharts';
 import { WallPill, WALL_TONE } from './GexWallParts';
 import GexCalcButton from './GexCalcTable';
-import UpdateIntervalSlider, { useUpdateInterval } from './UpdateIntervalSlider';
+import UpdateIntervalSlider, { fmtInterval, useUpdateInterval } from './UpdateIntervalSlider';
 import GexLevelsButton, { type GexChartLevel } from './GexLevelsChart';
 import { BookOpen, RefreshCw } from 'lucide-react';
 import NavBar from './NavBar';
@@ -98,9 +98,9 @@ function todayIST(): string {
 export default function GexOiPage({ guide = '' }: { guide?: string }) {
   const [guideOpen, setGuideOpen] = useState(false);
   const live = useMarketLive(UNDERLYING);
-  // User-chosen refresh gap (1-30 min). Governs the chain, spot and level-chart polls below.
-  const [updateMin, setUpdateMin] = useUpdateInterval();
-  const pollMs = updateMin * 60_000;
+  // User-chosen refresh gap (5 s to 3 min). Governs the chain, spot and level-chart polls below.
+  const [updateSec, setUpdateSec] = useUpdateInterval();
+  const pollMs = updateSec * 1000;
   // Spot and the chain refresh on the user's chosen gap. The server caches each chain for 30 s, so walls/flip/regime stay on the
   // chain's numbers while the spot line and the side-of-spot logic can move between chain polls.
   const [liveSpot, setLiveSpot] = useState(0);
@@ -185,9 +185,13 @@ export default function GexOiPage({ guide = '' }: { guide?: string }) {
   };
   useEffect(() => () => { if (retryRef.current.t) clearTimeout(retryRef.current.t); }, []);
 
+  // True while a chain fetch is running, so a short poll gap never stacks a second request behind a slow one.
+  const inflight = useRef(false);
+
   const fetchAll = useCallback(async () => {
     if (!expiry) return;
     const mine = ++seq.current;
+    inflight.current = true;
     try {
       const res = await fetch(`/api/options/chain?underlying=${UNDERLYING}&expiry=${expiry}&allowStale=1`);
       const j = await res.json() as { success: boolean; stale?: boolean; as_of?: number; data?: ChainPayload; error?: string };
@@ -213,7 +217,7 @@ export default function GexOiPage({ guide = '' }: { guide?: string }) {
     } catch (e) {
       if (mine === seq.current) { setError(String(e)); retryLater(); }
     } finally {
-      if (mine === seq.current) setLoading(false);
+      if (mine === seq.current) { setLoading(false); inflight.current = false; }
     }
   }, [expiry]);
   useEffect(() => { fetchRef.current = fetchAll; }, [fetchAll]);
@@ -234,7 +238,7 @@ export default function GexOiPage({ guide = '' }: { guide?: string }) {
 
   useEffect(() => {
     if (!expiry || !live) return;
-    const id = setInterval(() => { if (!document.hidden) void fetchAll(); }, pollMs);
+    const id = setInterval(() => { if (!document.hidden && !inflight.current) void fetchAll(); }, pollMs);
     const onVis = () => { if (!document.hidden) void fetchAll(); };
     document.addEventListener('visibilitychange', onVis);
     return () => { clearInterval(id); document.removeEventListener('visibilitychange', onVis); };
@@ -339,7 +343,7 @@ export default function GexOiPage({ guide = '' }: { guide?: string }) {
               {RANGE_OPTIONS.map(n => <option key={n} value={n}>{n}</option>)}
             </select>
           </label>
-          <UpdateIntervalSlider minutes={updateMin} onChange={setUpdateMin} />
+          <UpdateIntervalSlider seconds={updateSec} onChange={setUpdateSec} />
           <button
             role="switch"
             aria-checked={showValues}
@@ -422,12 +426,12 @@ export default function GexOiPage({ guide = '' }: { guide?: string }) {
                   {(() => {
                     const age = updatedAt != null && nowMs > 0 ? Math.max(0, Math.round((nowMs - updatedAt) / 1000)) : null;
                     // Stale = more than two poll periods old while the market is open: the feed or the chain route is not delivering.
-                    const stale = live && age != null && age > (pollMs / 1000) * 2 + 20;
+                    const stale = live && age != null && age > Math.max(pollMs / 1000, 30) * 2 + 20;
                     const cls = !live ? TONE_CLS.manual : stale ? TONE_CLS.warn : TONE_CLS.ok;
                     return (
                       <span className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[10px] font-bold border ${cls}`}>
                         <span className={`w-1.5 h-1.5 rounded-full ${!live ? 'bg-zinc-500' : stale ? 'bg-amber-400' : 'bg-emerald-400 animate-pulse'}`} />
-                        {!live ? 'MARKET CLOSED · static' : stale ? 'STALE' : `LIVE · every ${updateMin} min`}
+                        {!live ? 'MARKET CLOSED · static' : stale ? 'STALE' : `LIVE · every ${fmtInterval(updateSec)}`}
                       </span>
                     );
                   })()}

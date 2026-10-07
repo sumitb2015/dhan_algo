@@ -21,7 +21,7 @@ import {
 import { buildGexRowsModel, forwardFromSpot, gexModelCalcTable } from '@/lib/gexModel';
 import { WallPill, WALL_TONE } from './GexWallParts';
 import GexCalcButton from './GexCalcTable';
-import UpdateIntervalSlider, { useUpdateInterval } from './UpdateIntervalSlider';
+import UpdateIntervalSlider, { fmtInterval, useUpdateInterval } from './UpdateIntervalSlider';
 import GexLevelsButton, { type GexChartLevel } from './GexLevelsChart';
 
 const UNDERLYING = 'NIFTY';
@@ -107,9 +107,9 @@ function todayIST(): string {
 
 export default function GexProfilePage() {
   const live = useMarketLive(UNDERLYING);
-  // User-chosen refresh gap (1-30 min). Governs the chain, spot and level-chart polls below.
-  const [updateMin, setUpdateMin] = useUpdateInterval();
-  const pollMs = updateMin * 60_000;
+  // User-chosen refresh gap (5 s to 3 min). Governs the chain, spot and level-chart polls below.
+  const [updateSec, setUpdateSec] = useUpdateInterval();
+  const pollMs = updateSec * 1000;
   // Spot and the chain refresh on the user's chosen gap. The server caches each chain for 30 s, so walls/flip/regime stay on the
   // chain's numbers while the spot line and the side-of-spot logic can move between chain polls.
   const [liveSpot, setLiveSpot] = useState(0);
@@ -495,7 +495,7 @@ export default function GexProfilePage() {
               <option value="model">Black-76 model</option>
             </select>
           </label>
-          <UpdateIntervalSlider minutes={updateMin} onChange={setUpdateMin} />
+          <UpdateIntervalSlider seconds={updateSec} onChange={setUpdateSec} />
           <button
             role="switch"
             aria-checked={showValues}
@@ -584,12 +584,12 @@ export default function GexProfilePage() {
                   {(() => {
                     const age = updatedAt != null && nowMs > 0 ? Math.max(0, Math.round((nowMs - updatedAt) / 1000)) : null;
                     // Stale = more than two poll periods old while the market is open: the feed or the chain route is not delivering.
-                    const stale = live && age != null && age > (pollMs / 1000) * 2 + 20;
+                    const stale = live && age != null && age > Math.max(pollMs / 1000, 30) * 2 + 20;
                     const cls = !live ? TONE_CLS.manual : stale ? TONE_CLS.warn : TONE_CLS.ok;
                     return (
                       <span className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[10px] font-bold border ${cls}`}>
                         <span className={`w-1.5 h-1.5 rounded-full ${!live ? 'bg-zinc-500' : stale ? 'bg-amber-400' : 'bg-emerald-400 animate-pulse'}`} />
-                        {!live ? 'MARKET CLOSED · static' : stale ? 'STALE' : `LIVE · every ${updateMin} min`}
+                        {!live ? 'MARKET CLOSED · static' : stale ? 'STALE' : `LIVE · every ${fmtInterval(updateSec)}`}
                       </span>
                     );
                   })()}

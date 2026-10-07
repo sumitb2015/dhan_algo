@@ -22,6 +22,7 @@ import {
 } from 'lightweight-charts';
 import { useChartChrome } from '@/lib/chartTheme';
 import { fmtGex } from '@/lib/gex';
+import { fmtInterval } from './UpdateIntervalSlider';
 
 export type LevelTone = 'call' | 'put' | 'flip' | 'pin' | 'em' | 'spot';
 export interface GexChartLevel { key: string; label: string; price: number; tone: LevelTone }
@@ -115,7 +116,10 @@ function LevelsChartBody({ levels, profile, spot, live, pollMs, symbol, onClose 
   const [rows, setRows] = useState<OverlayRow[]>([]);
   const [plotW, setPlotW] = useState(0);
 
+  const busy = useRef(false);
   const load = useCallback(async () => {
+    if (busy.current) return;
+    busy.current = true;
     try {
       const res = await fetch(`/api/level-chart?symbolType=index&symbol=${symbol}&chartInterval=5&levelInterval=15`);
       const j = await res.json() as { success: boolean; candles?: Candle[]; dataDate?: string; error?: string };
@@ -126,6 +130,7 @@ function LevelsChartBody({ levels, profile, spot, live, pollMs, symbol, onClose 
     } catch (e) {
       setError(String(e));
     } finally {
+      busy.current = false;
       setLoading(false);
     }
   }, [symbol]);
@@ -273,7 +278,7 @@ function LevelsChartBody({ levels, profile, spot, live, pollMs, symbol, onClose 
           <p className="text-[9px] font-bold text-sky-400 uppercase tracking-[0.18em] mb-0.5">Level chart</p>
           <h2 className="text-sm font-bold text-white tracking-tight">{symbol} · 5-minute line with GEX levels</h2>
           <p className="text-[11px] text-zinc-400 mt-1">
-            {dataDate ? `Session ${dataDate}` : 'Loading…'}{live ? ` · refreshing every ${Math.round(pollMs / 60_000)} min` : ' · market closed, last session'} · bars on the right are call (red) and put (green) GEX per strike
+            {dataDate ? `Session ${dataDate}` : 'Loading…'}{live ? ` · refreshing every ${fmtInterval(Math.round(pollMs / 1000))}` : ' · market closed, last session'} · bars on the right are call (red) and put (green) GEX per strike
           </p>
         </div>
         <div className="flex items-center gap-2">
