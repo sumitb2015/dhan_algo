@@ -10,6 +10,7 @@ import NavBar from './NavBar';
 import DataChip from './DataChip';
 import { PulseStat, ChartHeader } from './QuantPanel';
 import { useMarketLive } from '@/lib/useMarketLive';
+import { startLiveIndicesBridge } from '@/lib/startLiveIndicesBridge';
 import { expiryEpochMs, rollForward } from '@/lib/optionsPricing';
 import {
   buildGexRows, forwardFromSpot, fmtGex, gexChecklist, gexLevels, wallClarity, type ChecklistTone, type GexChainEntry, type GexLevels, type GexPower, type GexRow,
@@ -18,10 +19,12 @@ import {
   buildGexLegs, dynamicFlip, emConfluence, expectedMove, mergeGexRows, regimeNote, spotSideWalls, topWalls, wallRank, type GexLeg,
 } from '@/lib/gexV2';
 import { WallPill, WALL_TONE } from './GexWallParts';
+import GexCalcButton from './GexCalcTable';
 
 const UNDERLYING = 'NIFTY';
 const STRIKE_STEP = 50;
 const POLL_MS = 15_000;
+const SPOT_POLL_MS = 20_000;
 const RANGE_OPTIONS = [8, 12, 20, 30] as const;
 const SCOPE_OPTIONS = [1, 2, 3] as const;
 const EM_TOLERANCE = 0.25;
@@ -103,6 +106,27 @@ function todayIST(): string {
 
 export default function GexProfilePage() {
   const live = useMarketLive(UNDERLYING);
+  // Spot refreshes every 20 s from the shared index hub. The chain (and the OI/IV behind GEX) refreshes every 15 s but the server
+  // caches it for 30 s, so walls/flip/regime stay on the chain's numbers while the spot line and the side-of-spot logic move between polls.
+  const [liveSpot, setLiveSpot] = useState(0);
+  useEffect(() => { startLiveIndicesBridge(); }, []);
+  useEffect(() => {
+    if (!live) return;
+    let cancelled = false;
+    const pull = () => {
+      if (document.hidden) return;
+      fetch('/api/scalper/top-indices')
+        .then(r => r.json())
+        .then((t: { success?: boolean; quotes?: Record<string, { ltp?: number | null }> }) => {
+          const v = Number(t.quotes?.[UNDERLYING]?.ltp);
+          if (!cancelled && t.success !== false && v > 0) setLiveSpot(v);
+        })
+        .catch(() => { /* keep the last spot; the chain poll still refreshes it */ });
+    };
+    const first = setTimeout(pull, 0);
+    const id = setInterval(pull, SPOT_POLL_MS);
+    return () => { cancelled = true; clearTimeout(first); clearInterval(id); };
+  }, [live]);
   const [expiries, setExpiries] = useState<string[]>([]);
   const [expiry, setExpiry] = useState('');
   const [lot, setLot] = useState<number | null | undefined>(undefined); // undefined = still loading, null = unknown
@@ -215,7 +239,8 @@ export default function GexProfilePage() {
   // A response fetched for another expiry/scope (still in flight when the selection changed) is ignored, not rendered.
   const items = payload && payload.key === reqKey ? payload.items : null;
   const head = items?.[0] ?? null;
-  const spot = head?.spot ?? 0;
+  const chainSpot = head?.spot ?? 0;
+  const spot = live && liveSpot > 0 && chainSpot > 0 ? liveSpot : chainSpot;
 
   // Black-76 wants the future that matches each chain; fall back to spot only when no future was returned.
   // The returned future is usually a later contract than the chain's expiry (monthly future, weekly chain), so roll it to
@@ -429,6 +454,11 @@ export default function GexProfilePage() {
               <span className={`absolute top-0.5 left-0.5 w-3 h-3 rounded-full bg-oncolor transition-transform ${showValues ? 'translate-x-3' : ''}`} />
             </span>
           </button>
+          <GexCalcButton
+            sets={(items ?? []).filter(c => c.chain.oc).map(c => { const ex = c.expiry ?? expiry; return { expiry: ex, oc: c.chain.oc!, underlying: underlyingFor(c, ex) }; })}
+            power={power} spot={spot}
+            wallStrikes={[walls.callWall, walls.putWall].filter((x): x is number => x != null)}
+          />
           <span className="w-px h-5 bg-zinc-800 shrink-0" />
           <NavBar />
         </div>

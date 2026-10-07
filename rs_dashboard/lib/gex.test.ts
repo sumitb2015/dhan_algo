@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert';
-import { black76Gamma, buildGexRows, fmtGex, forwardFromSpot, gammaFlip, gexChecklist, gexLevels, gexTimeYears, gexValue, resolveIvs, wallClarity, type GexRow } from './gex.ts';
+import { black76Gamma, buildGexRows, fmtGex, forwardFromSpot, gammaFlip, gexChecklist, gexLevels, gexCalcTable, gexTimeYears, gexValue, resolveIvs, wallClarity, type GexRow } from './gex.ts';
 import { computeBsGreeksExact, RISK_FREE_RATE } from './optionsPricing.ts';
 
 const row = (strike: number, netGex: number, ceGex = Math.max(netGex, 0), peGex = Math.min(netGex, 0)): GexRow => ({
@@ -187,4 +187,28 @@ test('fmtGex tiers are consistent', () => {
   assert.strictEqual(fmtGex(1.5e5), '1.50L');
   assert.strictEqual(fmtGex(1234), '1.2K');
   assert.strictEqual(fmtGex(12), '12');
+});
+
+test('gexCalcTable reproduces buildGexRows exactly and exposes the formula terms', () => {
+  const oc = {
+    '24000': { ce: { oi: 130000, implied_volatility: 0 }, pe: { oi: 650000, implied_volatility: 13 } },
+    '24200': { ce: { oi: 260000, implied_volatility: 12 }, pe: { oi: 390000, implied_volatility: 12.5 } },
+    '24400': { ce: { oi: 650000, implied_volatility: 11 }, pe: { oi: 0, implied_volatility: 0 } },
+  };
+  const p = { expiry: '2026-10-27', underlying: 24250, lotSize: 65, now: Date.UTC(2026, 9, 6, 4, 0) };
+  const rows = buildGexRows(oc, p);
+  const tab = gexCalcTable(oc, p);
+  assert.strictEqual(tab.rows.length, rows.length);
+  tab.rows.forEach((r, i) => {
+    assert.strictEqual(r.strike, rows[i].strike);
+    assert.ok(Math.abs(r.netGex - rows[i].netGex) <= Math.abs(rows[i].netGex) * 1e-12);
+    for (const s of [r.ce, r.pe]) if (s) {
+      // gamma = e^{-rt} x pdf(d1) / (F x sigma x sqrt(t)), and GEX = gamma x OI x F^k x 0.01, recomputed from the exposed terms.
+      const g = (tab.discount * s.pdf) / (tab.F * (s.ivPct / 100) * Math.sqrt(tab.t));
+      assert.ok(Math.abs(g - s.gamma) <= s.gamma * 1e-12);
+      assert.ok(Math.abs(Math.abs(s.gex) - s.gamma * s.oiUnits * tab.scale) <= Math.abs(s.gex) * 1e-12);
+    }
+  });
+  assert.strictEqual(tab.rows[0].ce?.ivSource, 'otm-leg'); // 24000 CE is ITM at F=24250 and has no IV: take the put's 13
+  assert.strictEqual(tab.rows[0].ce?.ivPct, 13);
 });

@@ -6,12 +6,14 @@ import {
   ResponsiveContainer, ReferenceLine, Cell, LabelList,
 } from 'recharts';
 import { WallPill, WALL_TONE } from './GexWallParts';
-import { BookOpen } from 'lucide-react';
+import GexCalcButton from './GexCalcTable';
+import { BookOpen, RefreshCw } from 'lucide-react';
 import NavBar from './NavBar';
 import GuidePanel from './RsStrategyGuide';
 import DataChip from './DataChip';
 import { PulseStat, ChartHeader } from './QuantPanel';
 import { useMarketLive } from '@/lib/useMarketLive';
+import { startLiveIndicesBridge } from '@/lib/startLiveIndicesBridge';
 import { expiryEpochMs, rollForward } from '@/lib/optionsPricing';
 import {
   buildGexRows, forwardFromSpot, fmtGex, gexChecklist, gexLevels, wallClarity, type ChecklistTone, type GexChainEntry, type GexPower, type GexRow,
@@ -20,6 +22,7 @@ import {
 const UNDERLYING = 'NIFTY';
 const STRIKE_STEP = 50;
 const POLL_MS = 15_000;
+const SPOT_POLL_MS = 20_000;
 const RANGE_OPTIONS = [8, 12, 20, 30] as const;
 
 /** A GexRow plus the OI figures the charts show (lots at the current lot size, or units when the lot is unknown). */
@@ -96,6 +99,27 @@ function todayIST(): string {
 export default function GexOiPage({ guide = '' }: { guide?: string }) {
   const [guideOpen, setGuideOpen] = useState(false);
   const live = useMarketLive(UNDERLYING);
+  // Spot refreshes every 20 s from the shared index hub. The chain (and the OI/IV behind GEX) refreshes every 15 s but the server
+  // caches it for 30 s, so walls/flip/regime stay on the chain's numbers while the spot line and the side-of-spot logic move between polls.
+  const [liveSpot, setLiveSpot] = useState(0);
+  useEffect(() => { startLiveIndicesBridge(); }, []);
+  useEffect(() => {
+    if (!live) return;
+    let cancelled = false;
+    const pull = () => {
+      if (document.hidden) return;
+      fetch('/api/scalper/top-indices')
+        .then(r => r.json())
+        .then((t: { success?: boolean; quotes?: Record<string, { ltp?: number | null }> }) => {
+          const v = Number(t.quotes?.[UNDERLYING]?.ltp);
+          if (!cancelled && t.success !== false && v > 0) setLiveSpot(v);
+        })
+        .catch(() => { /* keep the last spot; the chain poll still refreshes it */ });
+    };
+    const first = setTimeout(pull, 0);
+    const id = setInterval(pull, SPOT_POLL_MS);
+    return () => { cancelled = true; clearTimeout(first); clearInterval(id); };
+  }, [live]);
   const [expiries, setExpiries] = useState<string[]>([]);
   const [expiry, setExpiry] = useState('');
   const [lot, setLot] = useState<number | null | undefined>(undefined); // undefined = still loading, null = unknown
@@ -118,6 +142,8 @@ export default function GexOiPage({ guide = '' }: { guide?: string }) {
   const [loading, setLoading] = useState(true);
   const [updated, setUpdated] = useState<string | null>(null);
   const [dataDate, setDataDate] = useState<string | null>(null);
+  const [updatedAt, setUpdatedAt] = useState<number | null>(null);
+  const [nowMs, setNowMs] = useState(0);
   const seq = useRef(0);
 
   useEffect(() => {
@@ -151,6 +177,7 @@ export default function GexOiPage({ guide = '' }: { guide?: string }) {
       setPayload({ ...j.data, reqExpiry: expiry });
       setError('');
       setUpdated(new Date().toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', second: '2-digit' }));
+      setUpdatedAt(Date.now());
       setDataDate(todayIST());
       fetch('/api/scalper/top-indices')
         .then(r => r.json())
@@ -174,6 +201,13 @@ export default function GexOiPage({ guide = '' }: { guide?: string }) {
     return () => clearTimeout(first);
   }, [expiry, fetchAll]);
 
+  // 1 s tick so "updated Ns ago" counts up between polls.
+  useEffect(() => {
+    const first = setTimeout(() => setNowMs(Date.now()), 0);
+    const id = setInterval(() => setNowMs(Date.now()), 1000);
+    return () => { clearTimeout(first); clearInterval(id); };
+  }, []);
+
   useEffect(() => {
     if (!expiry || !live) return;
     const id = setInterval(() => { if (!document.hidden) void fetchAll(); }, POLL_MS);
@@ -184,7 +218,8 @@ export default function GexOiPage({ guide = '' }: { guide?: string }) {
 
   // A response fetched for another expiry (still in flight when the select changed) is ignored, not rendered.
   const chain = payload && payload.reqExpiry === expiry ? payload : null;
-  const spot = chain?.spot ?? 0;
+  const chainSpot = chain?.spot ?? 0;
+  const spot = live && liveSpot > 0 && chainSpot > 0 ? liveSpot : chainSpot;
   // Black-76 wants the future that matches this chain; fall back to spot only when no future was returned.
   const isFut = !!(chain?.future_price && chain.future_price > 0 && chain.future_expiry);
   // The returned future is usually a later contract than the chain's expiry (monthly future, weekly chain), so roll it to
@@ -310,6 +345,11 @@ export default function GexOiPage({ guide = '' }: { guide?: string }) {
               Guide
             </button>
           )}
+          <GexCalcButton
+            sets={chain?.chain.oc && underlying > 0 ? [{ expiry, oc: chain.chain.oc, underlying }] : []}
+            power={power} spot={spot}
+            wallStrikes={[levels.callWall, levels.putWall].filter((x): x is number => x != null)}
+          />
           <span className="w-px h-5 bg-zinc-800 shrink-0" />
           <NavBar />
         </div>
@@ -356,7 +396,29 @@ export default function GexOiPage({ guide = '' }: { guide?: string }) {
                   )}
                   {approxForward && <span className="text-[10px] text-amber-400">no future price: forward estimated from spot with cost of carry (approximate)</span>}
                 </div>
-                {updated && <span className="text-[10px] text-zinc-500 font-mono tabular-nums">Updated {updated}{live ? '' : ' · market closed, not polling'}</span>}
+                <div className="flex items-center gap-2.5">
+                  {(() => {
+                    const age = updatedAt != null && nowMs > 0 ? Math.max(0, Math.round((nowMs - updatedAt) / 1000)) : null;
+                    // Stale = more than two poll periods old while the market is open: the feed or the chain route is not delivering.
+                    const stale = live && age != null && age > (POLL_MS / 1000) * 2 + 20;
+                    const cls = !live ? TONE_CLS.manual : stale ? TONE_CLS.warn : TONE_CLS.ok;
+                    return (
+                      <span className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[10px] font-bold border ${cls}`}>
+                        <span className={`w-1.5 h-1.5 rounded-full ${!live ? 'bg-zinc-500' : stale ? 'bg-amber-400' : 'bg-emerald-400 animate-pulse'}`} />
+                        {!live ? 'MARKET CLOSED · static' : stale ? 'STALE' : `LIVE · every ${POLL_MS / 1000}s`}
+                      </span>
+                    );
+                  })()}
+                  {updated && <span className="text-[10px] text-zinc-500 font-mono tabular-nums">Updated {updated}{updatedAt != null && nowMs > 0 ? ` · ${Math.max(0, Math.round((nowMs - updatedAt) / 1000))}s ago` : ''}</span>}
+                  <button
+                    onClick={() => { setLoading(true); void fetchAll(); }}
+                    title="Refresh now"
+                    aria-label="Refresh now"
+                    className="p-1.5 rounded-md border border-zinc-800 bg-zinc-900 text-zinc-300 hover:bg-zinc-800 focus:outline-none focus:ring-2 focus:ring-emerald-500/50"
+                  >
+                    <RefreshCw className="w-3 h-3" aria-hidden="true" />
+                  </button>
+                </div>
               </div>
             </div>
 

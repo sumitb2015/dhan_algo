@@ -103,25 +103,47 @@ export function gexTimeYears(expiry: string, now: number = Date.now()): number {
   return Math.max(GEX_MIN_T, ms / (CALENDAR_DAYS_PER_YEAR * 24 * 3600 * 1000));
 }
 
-/** Black-76 gamma per index unit (same for calls and puts) with the GEX time floor. Matches computeBsGreeksExact's gamma. */
-export function black76Gamma(F: number, strike: number, t: number, iv: number, r: number = RISK_FREE_RATE): number {
-  if (!(F > 0) || !(strike > 0) || !(iv > 0)) return 0;
+export interface Black76GammaTerms {
+  /** Time used, after the GEX floor. */
+  t: number;
+  /** sigma x sqrt(t). */
+  sd: number;
+  d1: number;
+  /** Standard normal density at d1. */
+  pdf: number;
+  /** e^{-rt}. */
+  discount: number;
+  gamma: number;
+}
+
+/** Every intermediate of the Black-76 gamma, so a table can show the numbers the formula used. */
+export function black76GammaTerms(F: number, strike: number, t: number, iv: number, r: number = RISK_FREE_RATE): Black76GammaTerms | null {
+  if (!(F > 0) || !(strike > 0) || !(iv > 0)) return null;
   const tt = Math.max(t, GEX_MIN_T);
   const sd = iv * Math.sqrt(tt);
   const d1 = (Math.log(F / strike) + 0.5 * iv * iv * tt) / sd;
-  return (Math.exp(-r * tt) * normPdf(d1)) / (F * sd);
+  const pdf = normPdf(d1);
+  const discount = Math.exp(-r * tt);
+  return { t: tt, sd, d1, pdf, discount, gamma: (discount * pdf) / (F * sd) };
+}
+
+/** Black-76 gamma per index unit (same for calls and puts) with the GEX time floor. Matches computeBsGreeksExact's gamma. */
+export function black76Gamma(F: number, strike: number, t: number, iv: number, r: number = RISK_FREE_RATE): number {
+  return black76GammaTerms(F, strike, t, iv, r)?.gamma ?? 0;
 }
 
 const firstIv = (leg: GexLegInput | null | undefined): number =>
   // First positive IV wins: Dhan sends 0 (not null) for an untraded strike, which `??` would accept as the answer.
   [leg?.implied_volatility, leg?.greeks?.iv].find((v): v is number => typeof v === 'number' && v > 0) ?? 0;
 
+export type IvSource = 'own' | 'otm-leg' | 'other-leg' | 'nearest';
+
 /**
- * IV in percent for every strike-side that has open interest, keyed `${strike}|CE` / `${strike}|PE`.
+ * IV in percent for every strike-side that has open interest, keyed `${strike}|CE` / `${strike}|PE`, with where it came from.
  * Preference: the OTM leg's own IV (an ITM leg's IV from the chain is noisy), then the opposite leg at the same strike
- * (put-call parity: same IV), then the nearest strike's IV on the same side within `maxGap` points. Zero only when none exists.
+ * (put-call parity: same IV), then the nearest strike's IV on the same side within `maxGap` points. Absent only when none exists.
  */
-export function resolveIvs(oc: Record<string, GexChainEntry>, F: number, maxGap = 200): Map<string, number> {
+export function resolveIvDetail(oc: Record<string, GexChainEntry>, F: number, maxGap = 200): Map<string, { iv: number; source: IvSource }> {
   const entries = Object.entries(oc).map(([k, v]) => ({ strike: Number(k), v })).filter(e => Number.isFinite(e.strike));
   const own = (e: { v: GexChainEntry }, type: 'CE' | 'PE') => firstIv(type === 'CE' ? e.v.ce : e.v.pe);
   const nearest = (strike: number, type: 'CE' | 'PE'): number => {
@@ -134,7 +156,7 @@ export function resolveIvs(oc: Record<string, GexChainEntry>, F: number, maxGap 
     }
     return best;
   };
-  const out = new Map<string, number>();
+  const out = new Map<string, { iv: number; source: IvSource }>();
   for (const e of entries) {
     for (const type of ['CE', 'PE'] as const) {
       const leg = type === 'CE' ? e.v.ce : e.v.pe;
@@ -143,10 +165,22 @@ export function resolveIvs(oc: Record<string, GexChainEntry>, F: number, maxGap 
       const itm = type === 'CE' ? e.strike < F : e.strike > F;
       const a = own(e, type);
       const b = own(e, other);
-      const iv = (itm ? (b || a) : (a || b)) || nearest(e.strike, type);
-      if (iv > 0) out.set(`${e.strike}|${type}`, iv);
+      let iv = 0;
+      let source: IvSource = 'own';
+      if (itm && b > 0) { iv = b; source = 'otm-leg'; }
+      else if (a > 0) { iv = a; source = 'own'; }
+      else if (b > 0) { iv = b; source = 'other-leg'; }
+      else { iv = nearest(e.strike, type); source = 'nearest'; }
+      if (iv > 0) out.set(`${e.strike}|${type}`, { iv, source });
     }
   }
+  return out;
+}
+
+/** IV in percent per strike-side (see resolveIvDetail for the preference order). */
+export function resolveIvs(oc: Record<string, GexChainEntry>, F: number, maxGap = 200): Map<string, number> {
+  const out = new Map<string, number>();
+  for (const [k, v] of resolveIvDetail(oc, F, maxGap)) out.set(k, v.iv);
   return out;
 }
 
@@ -294,4 +328,63 @@ export function gexChecklist(input: {
       tone: call.runnerUp == null ? 'manual' : call.clear && put.clear ? 'ok' : 'warn',
     },
   ];
+}
+
+export interface GexCalcSide {
+  /** Open interest in index units, after any lot conversion. */
+  oiUnits: number;
+  ivPct: number;
+  ivSource: IvSource;
+  d1: number;
+  /** Standard normal density at d1. */
+  pdf: number;
+  gamma: number;
+  /** Signed: positive for calls, negative for puts. */
+  gex: number;
+}
+
+export interface GexCalcRow { strike: number; ce: GexCalcSide | null; pe: GexCalcSide | null; netGex: number }
+
+export interface GexCalcTable {
+  rows: GexCalcRow[];
+  /** Black-76 forward used for every strike of this expiry. */
+  F: number;
+  /** Years to expiry after the GEX floor. */
+  t: number;
+  r: number;
+  power: GexPower;
+  discount: number;
+  /** F^k x 0.01: the factor that turns gamma x OI into GEX. */
+  scale: number;
+}
+
+/** Every number behind each strike's GEX, for the calculation table. Sums to exactly what `buildGexRows` gives. */
+export function gexCalcTable(oc: Record<string, GexChainEntry>, p: GexParams): GexCalcTable {
+  const power = p.power ?? 2;
+  const r = p.r ?? RISK_FREE_RATE;
+  const t = Math.max(gexTimeYears(p.expiry, p.now), GEX_MIN_T);
+  const F = p.underlying;
+  const out: GexCalcTable = { rows: [], F, t, r, power, discount: Math.exp(-r * t), scale: F > 0 ? Math.pow(F, power) * 0.01 : 0 };
+  const oiToUnits = p.oiUnit === 'lots' ? (p.lotSize ?? 0) : 1;
+  if (!(F > 0) || !(oiToUnits > 0)) return out;
+  const ivs = resolveIvDetail(oc, F);
+  const side = (type: 'CE' | 'PE', strike: number, oi: number): GexCalcSide | null => {
+    if (!(oi > 0)) return null;
+    const d = ivs.get(`${strike}|${type}`);
+    const terms = d ? black76GammaTerms(F, strike, t, d.iv / 100, r) : null;
+    const oiUnits = oi * oiToUnits;
+    const gamma = terms?.gamma ?? 0;
+    const g = gexValue(gamma, oiUnits, F, power);
+    return { oiUnits, ivPct: d?.iv ?? 0, ivSource: d?.source ?? 'own', d1: terms?.d1 ?? NaN, pdf: terms?.pdf ?? NaN, gamma, gex: type === 'CE' ? g : -g };
+  };
+  for (const [k, v] of Object.entries(oc)) {
+    const strike = Number(k);
+    if (!Number.isFinite(strike)) continue;
+    const ce = side('CE', strike, Math.max(0, v.ce?.oi ?? 0));
+    const pe = side('PE', strike, Math.max(0, v.pe?.oi ?? 0));
+    if (!ce && !pe) continue;
+    out.rows.push({ strike, ce, pe, netGex: (ce?.gex ?? 0) + (pe?.gex ?? 0) });
+  }
+  out.rows.sort((a, b) => a.strike - b.strike);
+  return out;
 }
