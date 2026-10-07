@@ -138,3 +138,20 @@ export function adoptServerBasket(
   const base = takeFields ? { ...server } : { ...local };
   return { ...base, legs } as MultiLegBasket;
 }
+
+/**
+ * A leg lives in exactly one basket. A stale tab's save of an old group must not bring
+ * back a leg that regroup moved elsewhere. Only legs the save ADDED (not in `storedLegIds`,
+ * the basket's legs on disk before the merge) are dropped; a leg already stored here is
+ * never removed by this rule. A basket left with no legs by it is removed. Mutates `baskets`.
+ */
+export function dropResurrectedLegs(baskets: MultiLegBasket[], basketId: string, storedLegIds: Set<string>): void {
+  const i = baskets.findIndex(b => b.id === basketId);
+  if (i < 0) return;
+  const elsewhere = new Set(baskets.flatMap((b, j) => (j === i ? [] : b.legs.map(l => l.id))));
+  const resurrected = (id: string) => !storedLegIds.has(id) && elsewhere.has(id);
+  if (!baskets[i].legs.some(l => resurrected(l.id))) return;
+  const kept = baskets[i].legs.filter(l => !resurrected(l.id));
+  if (kept.length === 0) baskets.splice(i, 1);
+  else baskets[i] = { ...baskets[i], legs: kept };
+}

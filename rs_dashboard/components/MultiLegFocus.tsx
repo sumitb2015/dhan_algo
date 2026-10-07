@@ -1096,6 +1096,12 @@ export default function MultiLegFocus({
   const [exitingMap, setExitingMap] = useState<Record<string, boolean>>({});
   const [exitingLegs, setExitingLegs] = useState<Set<string>>(new Set());
   const exitingLegsRef = useRef<Set<string>>(new Set());
+  // Manual order actions in flight per basket. Their continuations write back with
+  // patchLegs(basketId, …) after an await, so a regroup in between would drop the
+  // result on the floor (or on the wrong row). Regroup refuses while any is running,
+  // and these refuse to start while a regroup is running.
+  const basketOpsRef = useRef<Map<string, number>>(new Map());
+  const regroupingRef = useRef(false);
 
   // One-shot-per-occurrence dedup for the "tracked qty on a contract doesn't
   // match the broker" toast — the poll runs every 3s, so without this it would
@@ -1555,6 +1561,21 @@ export default function MultiLegFocus({
       fetchMarginsForBaskets();
     }
   }, [broker, hasAuthenticatedBroker, lookupCache, updateBasket, patchLegs, ltpFor, addToast, confirmDhanOrder, pollFunds, fetchMarginsForBaskets, basketMargins, fundsData, blockedStrikeLegs, toastBlockedStrikes, fetchSpreadIssues, resolveSpreadIssues]);
+
+  const trackOp = useCallback(async <T,>(basketId: string, fn: () => Promise<T>): Promise<T | undefined> => {
+    if (regroupingRef.current) {
+      addToast('error', 'Regrouping in progress', 'Try again in a moment.');
+      return undefined;
+    }
+    const ops = basketOpsRef.current;
+    ops.set(basketId, (ops.get(basketId) ?? 0) + 1);
+    try {
+      return await fn();
+    } finally {
+      const n = (ops.get(basketId) ?? 1) - 1;
+      if (n > 0) ops.set(basketId, n); else ops.delete(basketId);
+    }
+  }, [addToast]);
 
   // The lock is taken synchronously, before any await inside placeBasketInner
   // (funds read, confirm dialogs), so a fast double-click cannot slip a second
@@ -2104,9 +2125,28 @@ export default function MultiLegFocus({
     const live = new Set(baskets.flatMap(b => b.legs.map(l => l.id)));
     return new Set([...pickedLegIds].filter(id => live.has(id)));
   }, [baskets, pickedLegIds]);
-  const runRegroup = useCallback(async (body: Record<string, unknown>) => {
-    if (regrouping) return;
+  const runRegroup = useCallback(async (body: { op: 'group' | 'ungroup'; legIds?: string[]; basketId?: string; name?: string; targetBasketId?: string }) => {
+    // Synchronous: a double click must not send two regroups (the second would move the new group again).
+    if (regroupingRef.current) return;
     if (savesInFlightRef.current > 0) { addToast('error', 'Still saving', 'Try again in a second.'); return; }
+    const all = basketsRef.current;
+    const legIds = new Set(body.legIds ?? []);
+    const involved = new Set<string>([
+      ...all.filter(b => b.id === body.basketId || b.id === body.targetBasketId || b.legs.some(l => legIds.has(l.id))).map(b => b.id),
+    ]);
+    const unsavedPick = all.find(b => involved.has(b.id) && !revBookRef.current.has(`b:${b.id}`));
+    if (unsavedPick) {
+      addToast('error', 'Cannot regroup yet', `${basketLabel(unsavedPick, 'That strategy')} is not saved yet. Edit or place it first.`);
+      return;
+    }
+    const isBusy = () => placementLockRef.current
+      || [...involved].some(id => (basketOpsRef.current.get(id) ?? 0) > 0 || exitingBasketsRef.current.has(id) || scalingRef.current.has(id))
+      || all.some(b => involved.has(b.id) && b.legs.some(l => exitingLegsRef.current.has(l.id)));
+    if (isBusy()) {
+      addToast('error', 'Order in progress', 'Wait for the running order on these strategies to finish, then regroup.');
+      return;
+    }
+    regroupingRef.current = true;
     setRegrouping(true);
     // Counts as a save in flight so the poll doesn't re-read the file mid-move.
     savesInFlightRef.current += 1;
@@ -2124,22 +2164,30 @@ export default function MultiLegFocus({
       basketsRef.current = next;
       setBaskets(next);
       setSelectedLegIds(new Set());
+      // Automatic stop/target exits are never blocked; one that started during the move
+      // writes back to the old row. Reconciliation settles the leg against the broker, but say so.
+      if (isBusy()) {
+        addToast('error', 'An exit ran during the regroup', 'Check the moved trades: their status settles against the broker on the next poll.');
+      }
       addToast('success', j.message ?? 'Regrouped',
         j.disarmed?.length ? 'Strategy SL/target was disarmed on the changed groups. Re-arm after checking them.' : 'No orders were placed.');
     } catch (e) {
       addToast('error', 'Could not regroup', String(e));
     } finally {
       savesInFlightRef.current -= 1;
+      regroupingRef.current = false;
       setRegrouping(false);
     }
-  }, [regrouping, addToast]);
+  }, [addToast]);
   // Groups the selection may be moved into: same broker and underlying as the selected trades.
   const groupTargets = useMemo(() => {
     const picked = baskets.filter(b => b.legs.some(l => selectedLegIds.has(l.id)));
     const ref = picked[0];
     if (!ref || picked.some(b => b.broker !== ref.broker || b.underlying !== ref.underlying)) return [];
+    // A row already holding every ticked trade is not a destination.
+    const holdsAll = (b: MultiLegBasket) => [...selectedLegIds].every(id => b.legs.some(l => l.id === id));
     return baskets
-      .filter(b => b.broker === ref.broker && b.underlying === ref.underlying)
+      .filter(b => b.broker === ref.broker && b.underlying === ref.underlying && !holdsAll(b))
       .map(b => ({ id: b.id, label: basketLabel(b, 'Strategy') }));
   }, [baskets, selectedLegIds]);
   const allTags = useMemo(
@@ -3550,8 +3598,8 @@ export default function MultiLegFocus({
                 }}
                 onUpdate={patch => updateBasket(basket.id, patch)}
                 onDelete={() => deleteBasket(basket.id)}
-                onPlace={() => placeBasket(basket.id)}
-                onExit={() => exitBasket(basket.id)}
+                onPlace={async () => { await trackOp(basket.id, () => placeBasket(basket.id)); }}
+                onExit={async () => { await trackOp(basket.id, () => exitBasket(basket.id)); }}
                 onExitLeg={async (leg, exitLots) => {
                   const w = legQtyWarnings[`${basket.id}:${leg.id}`];
                   if (w?.kind === 'over' && !window.confirm(
@@ -3559,17 +3607,17 @@ export default function MultiLegFocus({
                     + `${w.gap} was already closed outside this tool.\n\nIf that close was THIS leg's, use Reduce instead: exiting now `
                     + `would close quantity another strategy still tracks.\n\nExit ${leg.fill?.qty ?? 0} anyway?`,
                   )) return;
-                  await exitOneLeg(basket.id, leg, exitLots);
+                  await trackOp(basket.id, () => exitOneLeg(basket.id, leg, exitLots));
                 }}
-                onShiftLegs={(legIds, direction, steps) => shiftLegs(basket.id, legIds, direction, steps)}
+                onShiftLegs={async (legIds, direction, steps) => { await trackOp(basket.id, () => shiftLegs(basket.id, legIds, direction, steps)); }}
                 legColumns={legColumns}
                 onLegColumnsChange={changeLegColumns}
-                onAddLots={params => addLotsToLeg(basket.id, params)}
-                onClaimBrokerQty={legId => claimBrokerQty(basket.id, legId)}
-                onReduceOutsideQty={legId => reduceOutsideQty(basket.id, legId)}
+                onAddLots={async params => { await trackOp(basket.id, () => addLotsToLeg(basket.id, params)); }}
+                onClaimBrokerQty={async legId => { await trackOp(basket.id, () => claimBrokerQty(basket.id, legId)); }}
+                onReduceOutsideQty={async legId => { await trackOp(basket.id, () => reduceOutsideQty(basket.id, legId)); }}
                 pnlNow={pnlNow}
-                onAddNewLeg={params => addNewLegToBasket(basket.id, params)}
-                onScaleStrategy={(multiplierDelta, sig) => scaleStrategy(basket.id, multiplierDelta, sig)}
+                onAddNewLeg={async params => { await trackOp(basket.id, () => addNewLegToBasket(basket.id, params)); }}
+                onScaleStrategy={async (multiplierDelta, sig) => { await trackOp(basket.id, () => scaleStrategy(basket.id, multiplierDelta, sig)); }}
                 scaling={!!scalingMap[basket.id]}
                 placing={!!placingMap[basket.id]}
                 exiting={!!exitingMap[basket.id]}

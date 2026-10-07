@@ -61,3 +61,44 @@ test('ungroup leaves one-leg rows (and their names) alone', () => {
   assert.equal(r.baskets.length, 3);
   assert.equal(regroupBaskets([solo], { op: 'ungroup', legIds: ['9'] }, nid, 'now').ok, false);
 });
+
+test('drafts never share a group with traded legs', () => {
+  const r = regroupBaskets([bk('A', [leg('1')]), bk('D', [leg('2', { status: 'DRAFT' })])], { op: 'group', legIds: ['1', '2'] }, nid, 'now');
+  assert.equal(r.ok, false);
+  const into = regroupBaskets([bk('A', [leg('1')]), bk('D', [leg('2', { status: 'DRAFT' }), leg('3', { status: 'DRAFT' })])],
+    { op: 'group', legIds: ['2'], targetBasketId: 'A' }, nid, 'now');
+  assert.equal(into.ok, false);
+  const drafts = regroupBaskets([bk('D', [leg('2', { status: 'DRAFT' }), leg('3', { status: 'DRAFT' })])], { op: 'group', legIds: ['2', '3'], name: 'x' }, nid, 'now');
+  assert.ok(drafts.ok);
+});
+
+test('moving trades into the row that already holds them is refused', () => {
+  const r = regroupBaskets([bk('A', [leg('1'), leg('2')])], { op: 'group', legIds: ['1'], targetBasketId: 'A' }, nid, 'now');
+  assert.equal(r.ok, false);
+});
+
+test('a leg id present in two rows is refused, not half-moved', () => {
+  const r = regroupBaskets([bk('A', [leg('1')]), bk('B', [leg('1')])], { op: 'group', legIds: ['1'] }, nid, 'now');
+  assert.equal(r.ok, false);
+  assert.match(r.error!, /more than one row/);
+});
+
+test('ungrouping a row keeps its closed legs there as history', () => {
+  const a = bk('A', [leg('1'), leg('2', { option: 'PE' }), leg('c', { status: 'CLOSED' })], { groupName: 'Mine' });
+  const r = regroupBaskets([a], { op: 'ungroup', basketId: 'A' }, nid, 'now');
+  assert.ok(r.ok);
+  const orig = r.baskets.find(b => b.id === 'A')!;
+  assert.deepEqual(orig.legs.map(l => l.id), ['c']);
+  assert.equal(orig.groupName, 'Mine');
+  assert.equal(r.baskets.length, 3);
+  // fewer than two live legs: nothing to ungroup
+  assert.equal(regroupBaskets([bk('B', [leg('1'), leg('c2', { status: 'CLOSED' })])], { op: 'ungroup', basketId: 'B' }, nid, 'now').ok, false);
+});
+
+test('a new group from one row keeps that row\'s lot multiplier', () => {
+  const r = regroupBaskets([bk('A', [leg('1', { lots: 3, ratio: 1 }), leg('2', { lots: 3, ratio: 1 }), leg('3')], { multiplier: 3 })],
+    { op: 'group', legIds: ['1', '2'] }, nid, 'now');
+  assert.equal(r.baskets[1].multiplier, 3);
+  const mixed = regroupBaskets([bk('A', [leg('1')], { multiplier: 3 }), bk('B', [leg('2')], { multiplier: 2 })], { op: 'group', legIds: ['1', '2'] }, nid, 'now');
+  assert.equal(mixed.baskets[0].multiplier, undefined);
+});

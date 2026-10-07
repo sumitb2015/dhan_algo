@@ -953,12 +953,12 @@ export default function MultiLegStrategyRow({
             </div>
           )}
 
-          {onUngroup && basket.legs.length > 1 && (
+          {onUngroup && basket.legs.filter(l => l.status !== 'CLOSED').length > 1 && (
             <button
               type="button"
               onClick={onUngroup}
               disabled={placing || exiting || shifting}
-              title="Ungroup: split every trade here into its own row (no orders are placed)"
+              title="Ungroup: give every live trade here its own row; closed trades stay as this row's history (no orders are placed)"
               className={`h-7 px-2 inline-flex items-center gap-1 text-[11px] font-bold rounded-lg border border-zinc-700 text-zinc-300 hover:text-white hover:bg-zinc-800 disabled:opacity-40 ${FOCUS_RING}`}
             >
               <Unlink className="w-3 h-3" /> Ungroup

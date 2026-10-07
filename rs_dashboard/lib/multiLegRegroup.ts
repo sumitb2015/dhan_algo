@@ -13,6 +13,10 @@ import type { MultiLegBasket, MultiLegLeg } from './multiLegFocus.ts';
  * - A basket that lost legs is disarmed: its strategy SL/target was set for the old
  *   composition and must not fire on whatever is left.
  * - Every touched basket's rev goes up so a stale tab's older copy loses the merge.
+ * - Draft (never placed) legs never share a group with traded ones: a row with any traded
+ *   leg hides Place and locks its drafts, so a moved draft could never be placed or removed.
+ * - Ungrouping a whole row splits only its live legs; CLOSED legs stay as that row's
+ *   history so realized P&L is not scattered into one row per closed slice.
  */
 
 export type RegroupRequest =
@@ -49,7 +53,10 @@ export function regroupBaskets(
   if (req.op === 'ungroup' && req.basketId) {
     const b = baskets.find(x => x.id === req.basketId);
     if (!b) return fail('Strategy not found');
-    wanted = new Set(b.legs.map(l => l.id));
+    const live = b.legs.filter(l => l.status !== 'CLOSED');
+    if (live.length < 2) return fail('Nothing to ungroup: this row has fewer than two live trades.');
+    // Live legs each get a row; closed legs stay behind as this row's history.
+    wanted = new Set(live.map(l => l.id));
   } else {
     wanted = new Set(req.legIds ?? []);
   }
@@ -57,13 +64,14 @@ export function regroupBaskets(
 
   const moving: { leg: MultiLegLeg; from: MultiLegBasket }[] = [];
   for (const b of baskets) for (const l of b.legs) if (wanted.has(l.id)) moving.push({ leg: l, from: b });
-  if (moving.length !== wanted.size) return fail('Some selected legs no longer exist. Reload and try again.');
+  if (moving.length > wanted.size) return fail('A selected leg id appears in more than one row. Fix the ledger file before regrouping.');
+  if (moving.length !== wanted.size) return fail('Some selected legs are not saved yet or no longer exist. Reload and try again.');
 
   const busy = moving.find(m => IN_FLIGHT.has(m.leg.status));
   if (busy) return fail(`${legLabel(busy.leg)} has an order in flight. Wait for it to settle, then regroup.`);
 
   // Ungroup leaves a one-leg row alone: splitting it would only rename a group the user may have named.
-  if (req.op === 'ungroup') {
+  if (req.op === 'ungroup' && !req.basketId) {
     const alone = moving.filter(m => m.from.legs.length === 1);
     if (alone.length === moving.length) return fail('Those trades are already in separate rows.');
     for (const a of alone) { wanted.delete(a.leg.id); moving.splice(moving.indexOf(a), 1); }
@@ -80,6 +88,16 @@ export function regroupBaskets(
     if (!target) return fail('Target group not found');
     if (target.broker !== first.broker || target.underlying !== first.underlying) {
       return fail('That group is on a different broker or underlying.');
+    }
+    if (moving.every(m => m.from.id === target!.id)) return fail('Those trades are already in that group.');
+  }
+
+  // Never mix drafts with traded legs in the resulting group (see header).
+  if (req.op === 'group') {
+    const result = [...(target ? target.legs.filter(l => !wanted.has(l.id)) : []), ...moving.map(m => m.leg)];
+    const drafts = result.filter(l => l.status === 'DRAFT').length;
+    if (drafts > 0 && drafts < result.length) {
+      return fail('Draft (unplaced) legs can only be grouped with other draft legs.');
     }
   }
 
@@ -98,7 +116,10 @@ export function regroupBaskets(
   });
 
   const legsOf = (ids: string[]) => moving.filter(m => ids.includes(m.leg.id)).map(m => m.leg);
-  const born = (legs: MultiLegLeg[], name?: string): MultiLegBasket => {
+  // A new group keeps the lot multiplier when every leg came from one row (Scale reads it).
+  const sources = new Set(moving.map(m => m.from.id));
+  const carriedMultiplier = sources.size === 1 ? first.multiplier : undefined;
+  const born = (legs: MultiLegLeg[], name?: string, multiplier?: number): MultiLegBasket => {
     const expiries = legs.map(l => l.expiry || first.expiry).filter(Boolean).sort();
     const front = expiries[0] || first.expiry;
     const far = expiries.find(e => e !== front);
@@ -109,6 +130,7 @@ export function regroupBaskets(
       expiry: front,
       ...(far ? { farExpiry: far } : {}),
       broker: first.broker,
+      ...(multiplier && multiplier > 1 ? { multiplier } : {}),
       legs,
       riskConfig: { targetUnit: 'pts', slUnit: 'pts', armed: false },
       createdAt: nowIso,
@@ -131,7 +153,7 @@ export function regroupBaskets(
       });
       message = `Moved ${moving.length} leg(s) into ${target.groupName || target.name || 'the group'}`;
     } else {
-      next = [...next, born(moving.map(m => m.leg), name)];
+      next = [...next, born(moving.map(m => m.leg), name, carriedMultiplier)];
       message = `Grouped ${moving.length} leg(s)${name ? ` as "${name}"` : ''}`;
     }
   } else {
