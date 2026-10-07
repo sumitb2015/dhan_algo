@@ -38,7 +38,6 @@ const TONE: Record<Exclude<LevelTone, 'spot'>, string> = {
   em: '#38bdf8',
 };
 const IST = 'Asia/Kolkata';
-const POLL_MS = 30_000;
 const PROFILE_W = 150;
 const STRIKE_STEP = 50;
 
@@ -52,12 +51,14 @@ const fmtPrice = (n: number) => n.toLocaleString('en-IN', { maximumFractionDigit
 
 interface OverlayRow { y: number; h: number; ce: number; pe: number; strike: number }
 
-export default function GexLevelsButton({ levels, profile, spot, live, symbol = 'NIFTY' }: {
+export default function GexLevelsButton({ levels, profile, spot, live, pollMs, symbol = 'NIFTY' }: {
   levels: GexChartLevel[];
   profile: GexProfileRow[];
   spot: number;
   /** Market open: poll for new candles. Closed: show the last session once. */
   live: boolean;
+  /** Candle refresh gap while open and live: the page's update slider. */
+  pollMs: number;
   symbol?: string;
 }) {
   const [open, setOpen] = useState(false);
@@ -83,7 +84,7 @@ export default function GexLevelsButton({ levels, profile, spot, live, symbol = 
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-oncolor-dark/60" onClick={() => setOpen(false)}>
           <div role="dialog" aria-modal="true" aria-label="GEX levels on the index chart"
             className="flex flex-col w-full max-w-[1500px] h-[88vh] rounded-2xl border border-zinc-800 bg-zinc-950 shadow-2xl" onClick={e => e.stopPropagation()}>
-            <LevelsChartBody levels={levels} profile={profile} spot={spot} live={live} symbol={symbol} onClose={() => setOpen(false)} />
+            <LevelsChartBody levels={levels} profile={profile} spot={spot} live={live} pollMs={pollMs} symbol={symbol} onClose={() => setOpen(false)} />
           </div>
         </div>,
         document.body,
@@ -92,8 +93,8 @@ export default function GexLevelsButton({ levels, profile, spot, live, symbol = 
   );
 }
 
-function LevelsChartBody({ levels, profile, spot, live, symbol, onClose }: {
-  levels: GexChartLevel[]; profile: GexProfileRow[]; spot: number; live: boolean; symbol: string; onClose: () => void;
+function LevelsChartBody({ levels, profile, spot, live, pollMs, symbol, onClose }: {
+  levels: GexChartLevel[]; profile: GexProfileRow[]; spot: number; live: boolean; pollMs: number; symbol: string; onClose: () => void;
 }) {
   const chrome = useChartChrome();
   const wrapRef = useRef<HTMLDivElement>(null);
@@ -135,9 +136,9 @@ function LevelsChartBody({ levels, profile, spot, live, symbol, onClose }: {
   }, [load]);
   useEffect(() => {
     if (!live) return;
-    const id = setInterval(() => { if (!document.hidden) void load(); }, POLL_MS);
+    const id = setInterval(() => { if (!document.hidden) void load(); }, pollMs);
     return () => clearInterval(id);
-  }, [live, load]);
+  }, [live, pollMs, load]);
 
   // Chart lifetime: created once per open. Data, levels and theme are applied by separate effects so a poll never resets zoom.
   useEffect(() => {
@@ -272,7 +273,7 @@ function LevelsChartBody({ levels, profile, spot, live, symbol, onClose }: {
           <p className="text-[9px] font-bold text-sky-400 uppercase tracking-[0.18em] mb-0.5">Level chart</p>
           <h2 className="text-sm font-bold text-white tracking-tight">{symbol} · 5-minute line with GEX levels</h2>
           <p className="text-[11px] text-zinc-400 mt-1">
-            {dataDate ? `Session ${dataDate}` : 'Loading…'}{live ? ' · refreshing every 30s' : ' · market closed, last session'} · bars on the right are call (red) and put (green) GEX per strike
+            {dataDate ? `Session ${dataDate}` : 'Loading…'}{live ? ` · refreshing every ${Math.round(pollMs / 60_000)} min` : ' · market closed, last session'} · bars on the right are call (red) and put (green) GEX per strike
           </p>
         </div>
         <div className="flex items-center gap-2">

@@ -7,6 +7,7 @@ import {
 } from 'recharts';
 import { WallPill, WALL_TONE } from './GexWallParts';
 import GexCalcButton from './GexCalcTable';
+import UpdateIntervalSlider, { useUpdateInterval } from './UpdateIntervalSlider';
 import GexLevelsButton, { type GexChartLevel } from './GexLevelsChart';
 import { BookOpen, RefreshCw } from 'lucide-react';
 import NavBar from './NavBar';
@@ -22,8 +23,6 @@ import {
 
 const UNDERLYING = 'NIFTY';
 const STRIKE_STEP = 50;
-const POLL_MS = 15_000;
-const SPOT_POLL_MS = 20_000;
 const RANGE_OPTIONS = [8, 12, 20, 30] as const;
 
 /** A GexRow plus the OI figures the charts show (lots at the current lot size, or units when the lot is unknown). */
@@ -99,15 +98,20 @@ function todayIST(): string {
 export default function GexOiPage({ guide = '' }: { guide?: string }) {
   const [guideOpen, setGuideOpen] = useState(false);
   const live = useMarketLive(UNDERLYING);
-  // Spot refreshes every 20 s from the shared index hub. The chain (and the OI/IV behind GEX) refreshes every 15 s but the server
-  // caches it for 30 s, so walls/flip/regime stay on the chain's numbers while the spot line and the side-of-spot logic move between polls.
+  // User-chosen refresh gap (1-30 min). Governs the chain, spot and level-chart polls below.
+  const [updateMin, setUpdateMin] = useUpdateInterval();
+  const pollMs = updateMin * 60_000;
+  // Spot and the chain refresh on the user's chosen gap. The server caches each chain for 30 s, so walls/flip/regime stay on the
+  // chain's numbers while the spot line and the side-of-spot logic can move between chain polls.
   const [liveSpot, setLiveSpot] = useState(0);
+  const lastSpotPull = useRef(0);
   useEffect(() => { startLiveIndicesBridge(); }, []);
   useEffect(() => {
     if (!live) return;
     let cancelled = false;
     const pull = () => {
       if (document.hidden) return;
+      lastSpotPull.current = Date.now();
       fetch('/api/scalper/top-indices')
         .then(r => r.json())
         .then((t: { success?: boolean; quotes?: Record<string, { ltp?: number | null }> }) => {
@@ -116,10 +120,11 @@ export default function GexOiPage({ guide = '' }: { guide?: string }) {
         })
         .catch(() => { /* keep the last spot; the chain poll still refreshes it */ });
     };
-    const first = setTimeout(pull, 0);
-    const id = setInterval(pull, SPOT_POLL_MS);
-    return () => { cancelled = true; clearTimeout(first); clearInterval(id); };
-  }, [live]);
+    // Changing the slider restarts this effect: do not refetch for every step of a drag.
+    const first = Date.now() - lastSpotPull.current > 5000 ? setTimeout(pull, 0) : undefined;
+    const id = setInterval(pull, pollMs);
+    return () => { cancelled = true; if (first) clearTimeout(first); clearInterval(id); };
+  }, [live, pollMs]);
   const [expiries, setExpiries] = useState<string[]>([]);
   const [expiry, setExpiry] = useState('');
   const [lot, setLot] = useState<number | null | undefined>(undefined); // undefined = still loading, null = unknown
@@ -142,6 +147,8 @@ export default function GexOiPage({ guide = '' }: { guide?: string }) {
   const [updated, setUpdated] = useState<string | null>(null);
   const [dataDate, setDataDate] = useState<string | null>(null);
   const [updatedAt, setUpdatedAt] = useState<number | null>(null);
+  /** Set while the chain on screen is a stale copy served because Dhan failed; the time it was fetched. */
+  const [staleAsOf, setStaleAsOf] = useState<number | null>(null);
   const [nowMs, setNowMs] = useState(0);
   const seq = useRef(0);
 
@@ -182,15 +189,18 @@ export default function GexOiPage({ guide = '' }: { guide?: string }) {
     if (!expiry) return;
     const mine = ++seq.current;
     try {
-      const res = await fetch(`/api/options/chain?underlying=${UNDERLYING}&expiry=${expiry}`);
-      const j = await res.json() as { success: boolean; data?: ChainPayload; error?: string };
+      const res = await fetch(`/api/options/chain?underlying=${UNDERLYING}&expiry=${expiry}&allowStale=1`);
+      const j = await res.json() as { success: boolean; stale?: boolean; as_of?: number; data?: ChainPayload; error?: string };
       if (mine !== seq.current) return; // a newer request owns the screen
       if (!j.success || !j.data?.chain?.oc) { setError(j.error ?? 'No chain data'); retryLater(); return; }
       setPayload({ ...j.data, reqExpiry: expiry });
       setError('');
-      retryRef.current.n = 0;
-      setUpdated(new Date().toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', second: '2-digit' }));
-      setUpdatedAt(Date.now());
+      // A stale copy keeps the real age (so the chip goes STALE) and keeps retrying; only a fresh chain resets the count.
+      const asOf = j.stale && j.as_of ? j.as_of : Date.now();
+      setStaleAsOf(j.stale && j.as_of ? j.as_of : null);
+      if (j.stale) retryLater(); else retryRef.current.n = 0;
+      setUpdated(new Date(asOf).toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', second: '2-digit' }));
+      setUpdatedAt(asOf);
       setDataDate(todayIST());
       fetch('/api/scalper/top-indices')
         .then(r => r.json())
@@ -224,11 +234,11 @@ export default function GexOiPage({ guide = '' }: { guide?: string }) {
 
   useEffect(() => {
     if (!expiry || !live) return;
-    const id = setInterval(() => { if (!document.hidden) void fetchAll(); }, POLL_MS);
+    const id = setInterval(() => { if (!document.hidden) void fetchAll(); }, pollMs);
     const onVis = () => { if (!document.hidden) void fetchAll(); };
     document.addEventListener('visibilitychange', onVis);
     return () => { clearInterval(id); document.removeEventListener('visibilitychange', onVis); };
-  }, [expiry, live, fetchAll]);
+  }, [expiry, live, pollMs, fetchAll]);
 
   // A response fetched for another expiry (still in flight when the select changed) is ignored, not rendered.
   const chain = payload && payload.reqExpiry === expiry ? payload : null;
@@ -329,6 +339,7 @@ export default function GexOiPage({ guide = '' }: { guide?: string }) {
               {RANGE_OPTIONS.map(n => <option key={n} value={n}>{n}</option>)}
             </select>
           </label>
+          <UpdateIntervalSlider minutes={updateMin} onChange={setUpdateMin} />
           <button
             role="switch"
             aria-checked={showValues}
@@ -352,7 +363,7 @@ export default function GexOiPage({ guide = '' }: { guide?: string }) {
               Guide
             </button>
           )}
-          <GexLevelsButton levels={chartLevels} profile={rows} spot={spot} live={live} />
+          <GexLevelsButton levels={chartLevels} profile={rows} spot={spot} live={live} pollMs={pollMs} />
           <GexCalcButton
             sets={chain?.chain.oc && chainSpot > 0 ? [{ expiry, oc: chain.chain.oc, spot: chainSpot }] : []}
             build={calcBuild} spot={spot}
@@ -363,6 +374,11 @@ export default function GexOiPage({ guide = '' }: { guide?: string }) {
         </div>
       </div>
 
+      {staleAsOf != null && (
+        <div className="mx-6 mt-3 px-3 py-2 bg-amber-900/20 border border-amber-700/40 rounded-lg text-xs text-amber-400">
+          Dhan is rate-limiting the option chain, so this is the last good chain from {new Date(staleAsOf).toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', second: '2-digit' })}. Retrying automatically.
+        </div>
+      )}
       {error && (
         <div className="mx-6 mt-3 px-3 py-2 bg-red-900/20 border border-red-700/40 rounded-lg text-xs text-red-400">{error}</div>
       )}
@@ -406,12 +422,12 @@ export default function GexOiPage({ guide = '' }: { guide?: string }) {
                   {(() => {
                     const age = updatedAt != null && nowMs > 0 ? Math.max(0, Math.round((nowMs - updatedAt) / 1000)) : null;
                     // Stale = more than two poll periods old while the market is open: the feed or the chain route is not delivering.
-                    const stale = live && age != null && age > (POLL_MS / 1000) * 2 + 20;
+                    const stale = live && age != null && age > (pollMs / 1000) * 2 + 20;
                     const cls = !live ? TONE_CLS.manual : stale ? TONE_CLS.warn : TONE_CLS.ok;
                     return (
                       <span className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[10px] font-bold border ${cls}`}>
                         <span className={`w-1.5 h-1.5 rounded-full ${!live ? 'bg-zinc-500' : stale ? 'bg-amber-400' : 'bg-emerald-400 animate-pulse'}`} />
-                        {!live ? 'MARKET CLOSED · static' : stale ? 'STALE' : `LIVE · every ${POLL_MS / 1000}s`}
+                        {!live ? 'MARKET CLOSED · static' : stale ? 'STALE' : `LIVE · every ${updateMin} min`}
                       </span>
                     );
                   })()}

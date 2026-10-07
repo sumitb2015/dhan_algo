@@ -25,6 +25,14 @@ interface ChainResponse {
 const cache = new Map<string, CacheEntry>();
 const CACHE_TTL = 30_000; // 30 s — protects against Dhan account-wide rate limit (1 call/3s)
 
+// Opt-in `allowStale=1`: when Dhan fails (rate limit, empty chain) answer with the last good chain for this key, flagged
+// `stale: true` with `as_of`, instead of an error. Only read-only analytics pages opt in; an order ticket must never get an old
+// price without asking for it. After a failure the route also stops re-spawning the script for FAIL_COOLDOWN, because every
+// poll that retried a rate-limited call kept the limit active (the script already retries 3 times by itself).
+const STALE_MAX = 15 * 60_000;
+const FAIL_COOLDOWN = 10_000;
+const failedAt = new Map<string, number>();
+
 // Brokers whose strike list comes from a locally cached instrument master.
 // Both caches share a row shape, so one branch serves them. Prices are always
 // filled in by the live-quote feed, never by this route.
@@ -123,6 +131,20 @@ export async function GET(request: NextRequest) {
     });
   }
 
+  const allowStale = searchParams.get('allowStale') === '1';
+  /** The last good chain for this key, only for a caller that opted in and only while it is recent enough to be useful. */
+  const staleEntry = (): CacheEntry | null => {
+    const e = cache.get(cacheKey);
+    return allowStale && e && Date.now() - e.ts < STALE_MAX ? e : null;
+  };
+  const staleResponse = (e: CacheEntry) =>
+    NextResponse.json({ success: true, stale: true, as_of: e.ts, data: e.data }, { headers: { 'Cache-Control': 'no-store' } });
+  const lastFail = failedAt.get(cacheKey);
+  if (lastFail && Date.now() - lastFail < FAIL_COOLDOWN) {
+    const e = staleEntry();
+    if (e) return staleResponse(e);
+  }
+
   try {
     // Dedupe concurrent identical requests: the Dhan chain API is rate-limited
     // (~1 call / 3s), so parallel Python spawns for the same expiry would 429
@@ -153,6 +175,9 @@ export async function GET(request: NextRequest) {
 
     if (parsed.error) {
       console.error('[/api/options/chain] script error:', parsed.error);
+      failedAt.set(cacheKey, Date.now());
+      const e = staleEntry();
+      if (e) return staleResponse(e);
       return NextResponse.json({ success: false, error: parsed.error }, { status: 500 });
     }
 
@@ -161,6 +186,9 @@ export async function GET(request: NextRequest) {
     // success — surface it so the client can show a retry.
     if (!parsed.chain || Object.keys(parsed.chain).length === 0) {
       console.error('[/api/options/chain] empty chain — Dhan rate limit or expired token');
+      failedAt.set(cacheKey, Date.now());
+      const e = staleEntry();
+      if (e) return staleResponse(e);
       return NextResponse.json(
         { success: false, error: 'Empty chain from Dhan API (rate-limited or token expired)' },
         { status: 502 },
@@ -179,6 +207,7 @@ export async function GET(request: NextRequest) {
       future_basis: parsed.future_basis,
     };
     cache.set(cacheKey, { data, ts: Date.now() });
+    failedAt.delete(cacheKey);
     return NextResponse.json({ success: true, data }, {
       headers: { 'Cache-Control': 'no-store' }
     });
@@ -217,6 +246,9 @@ export async function GET(request: NextRequest) {
       } catch {}
     }
     console.error('[/api/options/chain] error:', e.message, e.stderr ?? '');
+    failedAt.set(cacheKey, Date.now());
+    const stale = staleEntry();
+    if (stale) return staleResponse(stale);
     return NextResponse.json({ success: false, error: `Script error: ${String(e.message)}` }, { status: 500 });
   }
 }
