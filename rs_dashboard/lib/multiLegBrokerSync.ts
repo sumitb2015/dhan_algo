@@ -17,16 +17,17 @@ export function futuresContractOf(row: Record<string, unknown>, underlyings: str
 
 /**
  * Live price of a broker row. An explicit LTP field wins; else Dhan's row is inverted:
- * unrealizedProfit = (ltp - costPrice) x netQty x multiplier. 0 when it cannot be known.
+ * unrealizedProfit = (ltp - costPrice) x netQty. Dhan does NOT apply the row's `multiplier`
+ * to it (MCX P&L comes back per lot-unit; see the dhan-crudeoil-trading skill) — dividing by it
+ * put a CRUDEOILM future at 8590 while it traded at 8721 (2026-10-07). 0 when unknown.
  */
 export function ltpFromBrokerRow(row: Record<string, unknown>): number {
   const direct = Number(row.ltp ?? row.lastPrice ?? row.last_price ?? 0);
   if (direct > 0) return direct;
   const net = Number(row.netQty) || 0;
   const cost = Number(row.costPrice) || 0;
-  const mult = Number(row.multiplier) || 1;
   if (net === 0 || !(cost > 0) || row.unrealizedProfit == null) return 0;
-  const ltp = cost + (Number(row.unrealizedProfit) || 0) / (net * mult);
+  const ltp = cost + (Number(row.unrealizedProfit) || 0) / net;
   return ltp > 0 ? ltp : 0;
 }
 
@@ -179,7 +180,8 @@ export function brokerOnlyPositions(
     out.push({
       broker, ident, tradingSymbol, side, qty: Math.abs(net),
       avgPrice: Number((side === 'B' ? row.buyAvg : row.sellAvg) || row.costPrice || 0),
-      pnl: Number(row.unrealizedProfit ?? 0) || 0,
+      // Dhan leaves the contract multiplier out of unrealizedProfit (MCX x10 / x100).
+      pnl: (Number(row.unrealizedProfit ?? 0) || 0) * (Number(row.multiplier) || 1),
       expiry: expiry && expiry !== '0001-01-01' ? expiry : null,
       kind: isOpt ? 'OPT' : 'FUT',
     });

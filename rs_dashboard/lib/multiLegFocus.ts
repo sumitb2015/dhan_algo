@@ -305,6 +305,8 @@ export function legPnl(leg: MultiLegLeg, ltp: number, multiplier: number = 1): n
     return perUnit * leg.closedFill.qty * multiplier;
   }
   if (!leg.fill || leg.fill.qty <= 0) return 0;
+  // No live price: no P&L. Valuing against 0 showed a CRUDEOILM future short at +8,57,570 (2026-10-07).
+  if (!(ltp > 0)) return 0;
   const perUnit = leg.side === 'B' ? ltp - leg.fill.avgPrice : leg.fill.avgPrice - ltp;
   return perUnit * leg.fill.qty * multiplier;
 }
@@ -515,6 +517,9 @@ export interface StrategyMetrics {
   pnlPct: number;
   totalPnlRupees: number;
   hasUnpricedLegs: boolean;
+  /** A futures leg is in the group: points and % do not add up across futures and options, so
+   *  only the rupee P&L means anything (the row shows that, and strategy Target/SL stay off). */
+  hasFutures: boolean;
 }
 
 /**
@@ -580,6 +585,7 @@ export function computeStrategyMetrics(
     pnlPct: Math.round(pnlPct * 100) / 100,
     totalPnlRupees: Math.round(totalPnlRupees * 100) / 100,
     hasUnpricedLegs: unpricedCount > 0,
+    hasFutures: legs.some(l => l.option === 'FUT'),
   };
 }
 
@@ -595,6 +601,8 @@ export function checkStrategyRisk(
 
   // CRITICAL GUARD: Never trigger strategy Target or Stop Loss if any open leg is unpriced / missing market data
   if (metrics.hasUnpricedLegs) return null;
+  // Points / % thresholds mean nothing once futures and options are summed together.
+  if (metrics.hasFutures) return null;
 
   // 1. Check Target
   if (config.targetValue != null && config.targetValue > 0) {

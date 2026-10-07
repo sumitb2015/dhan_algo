@@ -357,7 +357,7 @@ export default function MultiLegLegRow({
       </td>
       <td className="px-2 py-1.5 text-center">
         {leg.status === 'OPEN' ? (
-          <div className="flex items-center justify-center gap-1.5 whitespace-nowrap">
+          <div className="flex items-center justify-end gap-1.5 whitespace-nowrap [&>*]:shrink-0">
             {onShift && (
               <div className="inline-flex items-center rounded border border-zinc-700 overflow-hidden">
                 <button

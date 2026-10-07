@@ -60,6 +60,8 @@ test('broker-only: futures on an unknown underlying are listed; held or adoptabl
   const list = brokerOnlyPositions([bk([leg()])], 'dhan', [fut, flat, heldOpt, adoptable], ['NIFTY', 'CRUDEOILM']);
   assert.equal(list.length, 1);
   assert.deepEqual([list[0].tradingSymbol, list[0].side, list[0].qty, list[0].kind, list[0].pnl], ['RELIANCE-19Oct2026-FUT', 'S', 10, 'FUT', -1423]);
+  // the broker's unrealizedProfit is scaled by the row's multiplier
+  assert.equal(brokerOnlyPositions([], 'dhan', [{ ...fut, multiplier: 10 }], ['NIFTY'])[0].pnl, -14230);
 });
 
 const futRow = {
@@ -80,17 +82,30 @@ test('futures: a broker futures position becomes a FUT leg; nothing is left brok
 test('futures: live price is recovered from the broker row, and the leg P&L matches the broker', async () => {
   const { legPnl } = await import('./multiLegFocus.ts');
   const ltp = ltpFromBrokerRow(futRow);
-  assert.equal(Math.round(ltp * 100) / 100, 8591.43);
+  // Real case 2026-10-07: cost 8575.7, unrealized -1453 on -10 lots, quote 8721. Dhan leaves the x10 out.
+  assert.equal(Math.round(ltpFromBrokerRow({ ...futRow, unrealizedProfit: -1453 }) * 100) / 100, 8721);
+  assert.equal(Math.round(ltp * 100) / 100, 8733);
   const [b] = outsidePositionBaskets([], 'dhan', [futRow], ['CRUDEOILM'], () => 1, '2026-10-07', 'now');
-  assert.equal(Math.round(legPnl(b.legs[0], ltp, 10)), -1573);
+  assert.equal(Math.round(legPnl(b.legs[0], ltp, 10)), -15730);   // the broker's -1573 x multiplier 10
 });
 
 test('futures: the synthetic payoff pair prices the open P&L like the broker', async () => {
   const { futuresAsSyntheticPayoffLegs } = await import('./multiLegFocus.ts');
   const { buildPayoffModel } = await import('./optionsPayoff.ts');
-  const legs = futuresAsSyntheticPayoffLegs(-100, 8575.7, '2026-10-19', 8591.43);
-  const m = buildPayoffModel({ spot: 8591.43, legs, fallbackIv: 0.2, strikeStep: 10 })!;
+  const legs = futuresAsSyntheticPayoffLegs(-100, 8575.7, '2026-10-19', 8733);
+  const m = buildPayoffModel({ spot: 8733, legs, fallbackIv: 0.2, strikeStep: 10 })!;
   assert.ok(m.maxLossUnlimited);   // a short future has unlimited risk
-  // Open P&L today matches the broker's -1573 to within the e^-rT discount (~0.2%).
-  assert.ok(Math.abs(m.nowPnl - -1573) < 10, String(m.nowPnl));
+  // Open P&L today is -100 x (8733 - 8575.7) = -15730, to within the e^-rT discount (~0.2%).
+  assert.ok(Math.abs(m.nowPnl - -15730) < 60, String(m.nowPnl));
+});
+
+test('an open leg with no live price has no P&L, and a group with futures never fires a points/% Target or SL', async () => {
+  const { legPnl, computeStrategyMetrics, checkStrategyRisk } = await import('./multiLegFocus.ts');
+  const fut: MultiLegLeg = { id: 'f', side: 'S', option: 'FUT', strike: 0, expiry: '2026-10-19', lots: 10, type: 'MARKET', status: 'OPEN', fill: { qty: 10, avgPrice: 8575.7 } };
+  assert.equal(legPnl(fut, 0, 10), 0);            // was +857,570 (valued against 0)
+  const put: MultiLegLeg = { id: 'p', side: 'S', option: 'PE', strike: 8000, expiry: '2026-10-15', lots: 20, type: 'MARKET', status: 'OPEN', fill: { qty: 20, avgPrice: 90.29 } };
+  const m = computeStrategyMetrics([put, fut], l => (l.option === 'FUT' ? 8721 : 65), 10);
+  assert.equal(m.hasFutures, true);
+  assert.equal(Math.round(m.totalPnlRupees), Math.round(20 * (90.29 - 65) * 10 + 10 * (8575.7 - 8721) * 10));
+  assert.equal(checkStrategyRisk(m, { targetUnit: 'pts', slUnit: 'pts', armed: true, slValue: 1, targetValue: 1 }), null);
 });

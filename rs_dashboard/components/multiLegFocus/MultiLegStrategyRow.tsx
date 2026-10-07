@@ -281,7 +281,8 @@ export default function MultiLegStrategyRow({
   const colWeights = [
     ...(onSelectLegs ? [6] : []), 5, 5, 8, ...(legColumns.otm ? [7] : []), ...(legColumns.iv ? [5] : []),
     5, ...(legColumns.qty ? [6] : []), 6, 6, ...(legColumns.avg ? [6] : []), ...(showExitCol ? [6] : []),
-    8, 8, 4, 6, 9, 7, ...(legColumns.pnlPct ? [6] : []), 6, 14,
+    // Action needs ~215px (shift ▲▼, ADD, lots box, EXIT): 19 x 12px at the table's minimum width.
+    8, 8, 4, 6, 9, 7, ...(legColumns.pnlPct ? [6] : []), 6, 19,
   ];
   const colTotal = colWeights.reduce((a, b) => a + b, 0);
   const sortTh = (key: LegSortKey, label: string, align: 'left' | 'right' | 'center', title?: string) => {
@@ -1065,18 +1066,28 @@ export default function MultiLegStrategyRow({
             <div className="flex items-center gap-3 flex-wrap">
               <div className="flex items-center gap-1.5">
                 <span className="text-zinc-400 text-[11px] font-semibold uppercase tracking-wider">Premium:</span>
-                <span className="font-mono text-zinc-200 font-bold">{stratMetrics.combinedCurrentPts.toFixed(1)} pts</span>
-                {stratMetrics.combinedEntryPts > 0 && (
+                <span className="font-mono text-zinc-200 font-bold" title={stratMetrics.hasFutures ? 'Points do not add up across futures and options' : undefined}>
+                  {stratMetrics.hasFutures ? '—' : `${stratMetrics.combinedCurrentPts.toFixed(1)} pts`}
+                </span>
+                {!stratMetrics.hasFutures && stratMetrics.combinedEntryPts > 0 && (
                   <span className="text-[10px] text-zinc-500 font-mono">(Entry {stratMetrics.combinedEntryPts.toFixed(1)} pts)</span>
                 )}
               </div>
               <div className="h-4 w-px bg-zinc-800" />
               <div className="flex items-center gap-1.5">
                 <span className="text-zinc-400 text-[11px] font-semibold uppercase tracking-wider">P&L:</span>
+                {stratMetrics.hasFutures ? (
+                  // Futures + options: only rupees add up (points would mix a ₹10/pt future with option premium).
+                  <span className={`font-mono font-bold ${stratMetrics.totalPnlRupees >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}
+                    title="Rupee P&L of every leg. Points and % are not shown: they do not add up across futures and options.">
+                    {stratMetrics.totalPnlRupees >= 0 ? '+' : ''}{fmtMoney(stratMetrics.totalPnlRupees)}
+                  </span>
+                ) : (
                 <span className={`font-mono font-bold ${stratMetrics.pnlPts >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
                   {stratMetrics.pnlPts >= 0 ? '+' : ''}{stratMetrics.pnlPts.toFixed(2)} pts
                   {' '}({stratMetrics.pnlPct >= 0 ? '+' : ''}{stratMetrics.pnlPct.toFixed(1)}%)
                 </span>
+                )}
               </div>
               <div className="h-4 w-px bg-zinc-800" />
               <div className="flex items-center gap-1.5">
@@ -1210,15 +1221,17 @@ export default function MultiLegStrategyRow({
               </div>
 
               {/* Auto-Exit Armed */}
-              <label className="flex items-center gap-1.5 cursor-pointer select-none text-[11px] font-semibold text-zinc-300 bg-zinc-900 border border-zinc-800 rounded px-2 py-1">
+              <label className="flex items-center gap-1.5 cursor-pointer select-none text-[11px] font-semibold text-zinc-300 bg-zinc-900 border border-zinc-800 rounded px-2 py-1"
+                title={stratMetrics.hasFutures ? 'Strategy Target/SL work in points or %, which do not add up across futures and options. Use leg SL/TP instead.' : undefined}>
                 <input
                   type="checkbox"
-                  checked={strategyRisk.armed}
+                  checked={strategyRisk.armed && !stratMetrics.hasFutures}
+                  disabled={stratMetrics.hasFutures}
                   onChange={e => updateRisk({ armed: e.target.checked })}
                   className="rounded border-zinc-700 text-emerald-500 focus:ring-0"
                 />
-                <span className={strategyRisk.armed ? 'text-emerald-400 font-bold' : 'text-zinc-400'}>
-                  {strategyRisk.armed ? 'Auto-Exit Armed' : 'Arm Guard'}
+                <span className={strategyRisk.armed && !stratMetrics.hasFutures ? 'text-emerald-400 font-bold' : 'text-zinc-400'}>
+                  {stratMetrics.hasFutures ? 'Guard off (futures)' : strategyRisk.armed ? 'Auto-Exit Armed' : 'Arm Guard'}
                 </span>
               </label>
             </div>

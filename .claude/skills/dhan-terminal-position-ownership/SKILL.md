@@ -162,7 +162,8 @@ must read as "danger," not "safe to take over."
 > **Futures legs (same day):** `MultiLegLeg.option` is `'CE' | 'PE' | 'FUT'` (FUT: strike 0, adopted from the
 > broker only). Payoff prices a FUT leg as a synthetic call minus put at strike = entry
 > (`futuresAsSyntheticPayoffLegs`), Greeks give it delta 1, its live price is inverted from Dhan's own row
-> (`ltpFromBrokerRow`: costPrice + unrealizedProfit / (netQty x multiplier)). Exit works (it sizes off the
+> (`ltpFromBrokerRow`: costPrice + unrealizedProfit / netQty — Dhan leaves the row's `multiplier` OUT of
+> unrealizedProfit for MCX, so dividing by it put a CRUDEOILM future at 8590 while it traded at 8721). Exit works (it sizes off the
 > broker row); place / add lots / shift / scale refuse FUT legs (`isOptionLeg`), and the option-chain views
 > (P&L table, Position Map, Strategy Chart) skip them.
 `MultiLegFocus` reconciles each leg against the broker's position book on a poll

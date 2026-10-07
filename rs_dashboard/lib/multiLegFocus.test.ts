@@ -311,7 +311,7 @@ test('checkStrategyRisk triggers Target and SL in both points and percentage mod
     pnlPts: 20,
     pnlPct: 20,
     totalPnlRupees: 1300,
-    hasUnpricedLegs: false,
+    hasUnpricedLegs: false, hasFutures: false,
   };
 
   // Points mode Target
@@ -332,7 +332,7 @@ test('checkStrategyRisk triggers Target and SL in both points and percentage mod
     pnlPts: -25,
     pnlPct: -25,
     totalPnlRupees: -1625,
-    hasUnpricedLegs: false,
+    hasUnpricedLegs: false, hasFutures: false,
   };
   assert.strictEqual(checkStrategyRisk(lossMetrics, { slValue: 20, slUnit: 'pts', armed: true, targetUnit: 'pts' }), 'SL');
   assert.strictEqual(checkStrategyRisk(lossMetrics, { slValue: 20, slUnit: 'pct', armed: true, targetUnit: 'pct' }), 'SL');

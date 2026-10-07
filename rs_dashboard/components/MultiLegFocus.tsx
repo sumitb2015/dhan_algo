@@ -112,6 +112,7 @@ export default function MultiLegFocus({
   const basketsRef = useRef<MultiLegBasket[]>([]);
   // Last poll's broker position rows (futures legs price off them, see ltpFor).
   const brokerRowsRef = useRef<Partial<Record<Broker, Record<string, unknown>[]>>>({});
+  const lastFutLtpRef = useRef<Map<string, number>>(new Map());
   useEffect(() => { basketsRef.current = baskets; }, [baskets]);
   // Set once the "restore saved baskets" fetch below has settled (mount, and
   // again on every broker switch, since that effect re-fires on [broker]).
@@ -658,7 +659,11 @@ export default function MultiLegFocus({
       const ident = basket.broker === 'dhan' ? leg.orderRef?.securityId : leg.orderRef?.symbol;
       const row = (brokerRowsRef.current[basket.broker as Broker] ?? [])
         .find(r => String(basket.broker === 'dhan' ? r.securityId : r.tradingSymbol) === ident);
-      return row ? ltpFromBrokerRow(row) : 0;
+      const fresh = row ? ltpFromBrokerRow(row) : 0;
+      // Keep the last known price: a poll that failed must not blank it (or fall back to the entry).
+      const key = `${basket.broker}|${ident}`;
+      if (fresh > 0) { lastFutLtpRef.current.set(key, fresh); return fresh; }
+      return lastFutLtpRef.current.get(key) ?? 0;
     }
 
     // 1. If WebSocket quotes match this basket's underlying & expiry:
@@ -2821,8 +2826,6 @@ export default function MultiLegFocus({
             }
           }),
         );
-        if (cancelled) return;
-
         // A poll that answered success but flagged positionsError carries an
         // EMPTY positions list — that's "unknown", not "flat", so it must not
         // reach reconciliation (which would read every leg as not found/flat).
@@ -2837,7 +2840,10 @@ export default function MultiLegFocus({
           }
         }
 
+        // Prices first, even if this effect was restarted mid-request: the rows are still today's,
+        // and dropping them left futures legs unpriced (their price comes only from these rows).
         brokerRowsRef.current = rowsByBroker;
+        if (cancelled) return;
         setBrokerRows(rowsByBroker);
         const selectedResult = results.find(r => r.broker === broker);
         setOrdersError(selectedResult?.error ?? null);
