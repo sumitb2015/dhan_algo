@@ -11,6 +11,8 @@ interface Props {
   busy: boolean;
   /** Existing groups the selection can be moved into (same broker + underlying only). */
   targets: GroupTarget[];
+  /** False when every ticked trade already sits alone in its row (nothing to split). */
+  canUngroup: boolean;
   onGroup: (name: string, targetBasketId?: string) => void;
   onUngroup: () => void;
   onClear: () => void;
@@ -19,7 +21,7 @@ interface Props {
 const NEW = '__new__';
 
 /** Floating bar shown while trades are ticked: name a new group, or move them into one. */
-export default function GroupSelectionBar({ count, busy, targets, onGroup, onUngroup, onClear }: Props) {
+export default function GroupSelectionBar({ count, busy, targets, canUngroup, onGroup, onUngroup, onClear }: Props) {
   const [name, setName] = useState('');
   const [dest, setDest] = useState(NEW);
   const destValid = dest === NEW || targets.some(t => t.id === dest);
@@ -47,11 +49,14 @@ export default function GroupSelectionBar({ count, busy, targets, onGroup, onUng
         className={`h-7 px-3 inline-flex items-center gap-1 text-xs font-bold rounded-lg bg-emerald-600 hover:bg-emerald-500 text-oncolor disabled:opacity-50 ${FOCUS_RING}`}>
         <Layers className="w-3.5 h-3.5" /> {target === NEW ? 'Group' : 'Move'}
       </button>
-      <button type="button" onClick={onUngroup} disabled={busy}
-        title="Give each selected trade its own row"
+      <button type="button" onClick={onUngroup} disabled={busy || !canUngroup}
+        title={canUngroup ? 'Give each selected trade its own row' : 'Already in its own row: nothing to ungroup. Use Group or Into: to combine it with other trades.'}
         className={`h-7 px-2.5 inline-flex items-center gap-1 text-xs font-bold rounded-lg border border-zinc-700 text-zinc-200 hover:bg-zinc-800 disabled:opacity-50 ${FOCUS_RING}`}>
         <Unlink className="w-3.5 h-3.5" /> Ungroup
       </button>
+      {!canUngroup && (
+        <span className="text-[11px] text-zinc-400">{count === 1 ? 'Already in its own row' : 'Each is already in its own row'}</span>
+      )}
       <button type="button" onClick={onClear} aria-label="Clear selection"
         className={`h-7 w-7 inline-flex items-center justify-center rounded-lg text-zinc-400 hover:text-white hover:bg-zinc-800 ${FOCUS_RING}`}>
         <X className="w-4 h-4" />

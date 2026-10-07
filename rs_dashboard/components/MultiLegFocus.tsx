@@ -3689,6 +3689,7 @@ export default function MultiLegFocus({
           count={selectedLegIds.size}
           busy={regrouping}
           targets={groupTargets}
+          canUngroup={baskets.some(b => b.legs.length > 1 && b.legs.some(l => selectedLegIds.has(l.id)))}
           onGroup={(name, targetBasketId) => runRegroup({ op: 'group', legIds: [...selectedLegIds], name, targetBasketId })}
           onUngroup={() => runRegroup({ op: 'ungroup', legIds: [...selectedLegIds] })}
           onClear={() => setSelectedLegIds(new Set())}
