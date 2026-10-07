@@ -4,7 +4,7 @@ import { PROJECT_ROOT } from '@/lib/pyExec';
 
 import type { MultiLegBasket } from './multiLegFocus';
 import { appendToArchive, historyIdFor, mergeHistoryRecord, splitEarlierDayLegs, splitStaleClosed, type ArchivedBasket } from './multiLegArchive';
-import { mergeBasketWrite, dropResurrectedLegs } from './multiLegStoreMerge';
+import { mergeBasketWrite, relocateResurrectedLegs } from './multiLegStoreMerge';
 import { regroupBaskets, type RegroupRequest, type RegroupResult } from './multiLegRegroup';
 
 const STORE_FILE = path.join(PROJECT_ROOT, 'debug', 'multi_leg_baskets.json');
@@ -93,8 +93,9 @@ export function upsertBasket(
       updatedAt: now,
     } as MultiLegBasket);
   }
-  // A stale tab's save must not bring back a leg regroup moved to another basket.
-  if (basket.id && Array.isArray(basket.legs)) dropResurrectedLegs(baskets, basket.id, storedLegIds);
+  // A stale tab's save must not bring back a leg regroup moved to another basket; its
+  // change to that leg is applied where the leg lives now.
+  if (basket.id && Array.isArray(basket.legs)) relocateResurrectedLegs(baskets, basket.id, storedLegIds, now);
   // A stale tab still holds legs that were split into the history record; its full
   // save would otherwise merge them straight back in.
   if (basket.id && Array.isArray(basket.legs)) {

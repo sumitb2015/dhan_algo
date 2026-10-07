@@ -91,6 +91,9 @@ export interface MultiLegFocusProps {
   helpMarkdown?: string;
 }
 
+/** Same-origin channel the page's tabs use to tell each other the ledger was regrouped. */
+const MLF_CHANNEL = 'mlf-baskets';
+
 export default function MultiLegFocus({
   embedded = false,
   hideHeader = false,
@@ -1102,6 +1105,9 @@ export default function MultiLegFocus({
   // and these refuse to start while a regroup is running.
   const basketOpsRef = useRef<Map<string, number>>(new Map());
   const regroupingRef = useRef(false);
+  // Set while a regroup request is out. Exits (manual or automatic) WAIT on it rather
+  // than being refused — a stop must not be skipped — then find their leg's new row.
+  const regroupGateRef = useRef<Promise<void> | null>(null);
 
   // One-shot-per-occurrence dedup for the "tracked qty on a contract doesn't
   // match the broker" toast — the poll runs every 3s, so without this it would
@@ -1562,8 +1568,9 @@ export default function MultiLegFocus({
     }
   }, [broker, hasAuthenticatedBroker, lookupCache, updateBasket, patchLegs, ltpFor, addToast, confirmDhanOrder, pollFunds, fetchMarginsForBaskets, basketMargins, fundsData, blockedStrikeLegs, toastBlockedStrikes, fetchSpreadIssues, resolveSpreadIssues]);
 
-  const trackOp = useCallback(async <T,>(basketId: string, fn: () => Promise<T>): Promise<T | undefined> => {
-    if (regroupingRef.current) {
+  // Exits are never refused: they wait for a running regroup inside exitOneLeg/exitBasket.
+  const trackOp = useCallback(async <T,>(basketId: string, fn: () => Promise<T>, opts: { exit?: boolean } = {}): Promise<T | undefined> => {
+    if (regroupingRef.current && !opts.exit) {
       addToast('error', 'Regrouping in progress', 'Try again in a moment.');
       return undefined;
     }
@@ -1595,6 +1602,12 @@ export default function MultiLegFocus({
   }, [placeBasketInner, addToast]);
 
   const exitOneLeg = useCallback(async (basketId: string, leg: MultiLegLeg, exitLots?: number): Promise<{ closed: boolean; qty: number; maxAfter?: number }> => {
+    while (regroupGateRef.current) {
+      await regroupGateRef.current;
+      // The leg may now live in another row: write back to the row that holds it.
+      const owner = basketsRef.current.find(b => b.legs.some(l => l.id === leg.id));
+      if (owner) { basketId = owner.id; leg = owner.legs.find(l => l.id === leg.id)!; }
+    }
     let closed = false;   // true once this leg is confirmed flat/exited
     let closedQty = 0;    // units this call actually sent to close (0 when already flat)
     let maxAfter: number | undefined;   // broker |netQty| once the exit fills (set when an order was sent)
@@ -1806,6 +1819,15 @@ export default function MultiLegFocus({
     setExitingMap(prev => ({ ...prev, [basketId]: true }));
 
     try {
+      if (regroupGateRef.current) {
+        const before = new Set(basketsRef.current.find(b => b.id === basketId)?.legs.filter(l => l.status !== 'CLOSED').map(l => l.id) ?? []);
+        while (regroupGateRef.current) await regroupGateRef.current;
+        const now = basketsRef.current.find(b => b.id === basketId)?.legs.filter(l => l.status !== 'CLOSED').map(l => l.id) ?? [];
+        if (now.length !== before.size || now.some(id => !before.has(id))) {
+          addToast('error', 'Strategy exit ran during a regroup',
+            'Only the trades still in this row were exited. Trades moved to another row were NOT exited: check them now.');
+        }
+      }
       const basket = basketsRef.current.find(b => b.id === basketId);
       if (!basket) return;
       const openLegs = sortLegsForExit(basket.legs.filter(l => l.status === 'OPEN' || l.status === 'CLOSING'));
@@ -2147,6 +2169,8 @@ export default function MultiLegFocus({
       return;
     }
     regroupingRef.current = true;
+    let openGate: () => void = () => {};
+    regroupGateRef.current = new Promise<void>(r => { openGate = r; });
     setRegrouping(true);
     // Counts as a save in flight so the poll doesn't re-read the file mid-move.
     savesInFlightRef.current += 1;
@@ -2155,6 +2179,8 @@ export default function MultiLegFocus({
     try {
       const j = await fetch('/api/multi-leg-focus/baskets/regroup', {
         method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+        // Exits wait on this request; never hold a stop for long. A late success is picked up by the poll.
+        signal: AbortSignal.timeout(8000),
       }).then(r => r.json()) as { success: boolean; data?: MultiLegBasket[]; message?: string; error?: string; disarmed?: string[] };
       if (!j.success || !j.data) { addToast('error', 'Could not regroup', j.error ?? 'Unknown error'); return; }
       saveGenRef.current += 1;
@@ -2164,18 +2190,19 @@ export default function MultiLegFocus({
       basketsRef.current = next;
       setBaskets(next);
       setSelectedLegIds(new Set());
-      // Automatic stop/target exits are never blocked; one that started during the move
-      // writes back to the old row. Reconciliation settles the leg against the broker, but say so.
-      if (isBusy()) {
-        addToast('error', 'An exit ran during the regroup', 'Check the moved trades: their status settles against the broker on the next poll.');
-      }
+      // Other open tabs re-read now instead of on their next poll (they may run the stops).
+      try { const ch = new BroadcastChannel(MLF_CHANNEL); ch.postMessage({ type: 'regrouped' }); ch.close(); } catch { /* no BroadcastChannel */ }
       addToast('success', j.message ?? 'Regrouped',
         j.disarmed?.length ? 'Strategy SL/target was disarmed on the changed groups. Re-arm after checking them.' : 'No orders were placed.');
     } catch (e) {
-      addToast('error', 'Could not regroup', String(e));
+      const timedOut = (e as Error)?.name === 'TimeoutError';
+      addToast('error', timedOut ? 'Regroup is taking too long' : 'Could not regroup',
+        timedOut ? 'It may still complete. The page re-reads the ledger within a few seconds; check before trying again.' : String(e));
     } finally {
       savesInFlightRef.current -= 1;
       regroupingRef.current = false;
+      regroupGateRef.current = null;
+      openGate();
       setRegrouping(false);
     }
   }, [addToast]);
@@ -2845,6 +2872,43 @@ export default function MultiLegFocus({
     }
   }, [hasAuthenticatedBroker, lookupCache, broker, expiriesMap, addToast, exitOneLeg, addNewLegCore, resolveDhanSecurityId, pollFunds, fetchMarginsForBaskets, blockedStrikeLegs, toastBlockedStrikes, fetchSpreadIssues, resolveSpreadIssues]);
 
+  // Pick up what other tabs (or the leader's reconcile) saved. Only while none of this
+  // tab's own saves are in flight — then the server copy already holds every local change.
+  const rereadBaskets = useCallback(async (isCancelled: () => boolean = () => false) => {
+    if (basketsLoadedRef.current && savesInFlightRef.current === 0) {
+      try {
+        const gen = saveGenRef.current;
+        const jb = await fetch('/api/multi-leg-focus/baskets').then(r => r.json()) as { success: boolean; data?: MultiLegBasket[] };
+        const fresh = () => savesInFlightRef.current === 0 && saveGenRef.current === gen;
+        if (!isCancelled() && jb.success && Array.isArray(jb.data) && fresh()) {
+          const book = revBookRef.current;
+          const serverIds = new Set(jb.data.map(b => b.id));
+          setBaskets(prev => {
+            // Checked again here: a local edit queued in this same render
+            // runs its updater (and its save) before this one.
+            if (!fresh()) return prev;
+            for (const b of jb.data!) noteSaved(book, b);
+            // A basket the server has never seen (the unsaved default draft)
+            // stays; one it had and no longer has was deleted elsewhere.
+            const server = [...jb.data!, ...prev.filter(b => !serverIds.has(b.id) && !book.has(`b:${b.id}`))];
+            const same = prev.length === server.length && prev.every((b, i) => b.id === server[i].id && stableBody(b) === stableBody(server[i]));
+            if (same) return prev;
+            basketsRef.current = server;
+            return server;
+          });
+        }
+      } catch { /* keep the local copy */ }
+    }
+  }, []);
+
+  // Another tab regrouped: re-read now rather than on the next 3s poll.
+  useEffect(() => {
+    let ch: BroadcastChannel | null = null;
+    try { ch = new BroadcastChannel(MLF_CHANNEL); } catch { return; }
+    ch.onmessage = e => { if ((e.data as { type?: string })?.type === 'regrouped') void rereadBaskets(); };
+    return () => { ch?.close(); };
+  }, [rereadBaskets]);
+
   // ── Broker Positions Poller across ALL Baskets ─────────────────────
   useEffect(() => {
     let cancelled = false;
@@ -2854,33 +2918,7 @@ export default function MultiLegFocus({
       // below needs to run even when this tool has zero baskets, so it can
       // discover a straddle/strangle opened from Scalper (or another broker
       // session) that this tool has never seen before.
-      // Pick up what other tabs (or the leader's reconcile) saved. Only while
-      // none of this tab's own saves are in flight — then the server copy
-      // already holds every local change.
-      if (basketsLoadedRef.current && savesInFlightRef.current === 0) {
-        try {
-          const gen = saveGenRef.current;
-          const jb = await fetch('/api/multi-leg-focus/baskets').then(r => r.json()) as { success: boolean; data?: MultiLegBasket[] };
-          const fresh = () => savesInFlightRef.current === 0 && saveGenRef.current === gen;
-          if (!cancelled && jb.success && Array.isArray(jb.data) && fresh()) {
-            const book = revBookRef.current;
-            const serverIds = new Set(jb.data.map(b => b.id));
-            setBaskets(prev => {
-              // Checked again here: a local edit queued in this same render
-              // runs its updater (and its save) before this one.
-              if (!fresh()) return prev;
-              for (const b of jb.data!) noteSaved(book, b);
-              // A basket the server has never seen (the unsaved default draft)
-              // stays; one it had and no longer has was deleted elsewhere.
-              const server = [...jb.data!, ...prev.filter(b => !serverIds.has(b.id) && !book.has(`b:${b.id}`))];
-              const same = prev.length === server.length && prev.every((b, i) => b.id === server[i].id && stableBody(b) === stableBody(server[i]));
-              if (same) return prev;
-              basketsRef.current = server;
-              return server;
-            });
-          }
-        } catch { /* keep the local copy */ }
-      }
+      await rereadBaskets(() => cancelled);
       const anyPlaced = basketsRef.current.some(b => b.legs.some(l => l.orderRef != null));
 
       type PollJson = {
@@ -3064,7 +3102,7 @@ export default function MultiLegFocus({
     poll();
     const interval = setInterval(poll, 3000);
     return () => { cancelled = true; clearInterval(interval); };
-  }, [broker, persistBasket, resolveDhanSecurityId, addToast]);
+  }, [broker, persistBasket, resolveDhanSecurityId, addToast, rereadBaskets]);
 
   // ── Automated Risk Watcher: SL, TP, Trailing SL, Strategy Target/SL ─
   // id -> when its auto-exit last fired. An exit that fails (429, match miss,
@@ -3599,7 +3637,7 @@ export default function MultiLegFocus({
                 onUpdate={patch => updateBasket(basket.id, patch)}
                 onDelete={() => deleteBasket(basket.id)}
                 onPlace={async () => { await trackOp(basket.id, () => placeBasket(basket.id)); }}
-                onExit={async () => { await trackOp(basket.id, () => exitBasket(basket.id)); }}
+                onExit={async () => { await trackOp(basket.id, () => exitBasket(basket.id), { exit: true }); }}
                 onExitLeg={async (leg, exitLots) => {
                   const w = legQtyWarnings[`${basket.id}:${leg.id}`];
                   if (w?.kind === 'over' && !window.confirm(
@@ -3607,7 +3645,7 @@ export default function MultiLegFocus({
                     + `${w.gap} was already closed outside this tool.\n\nIf that close was THIS leg's, use Reduce instead: exiting now `
                     + `would close quantity another strategy still tracks.\n\nExit ${leg.fill?.qty ?? 0} anyway?`,
                   )) return;
-                  await trackOp(basket.id, () => exitOneLeg(basket.id, leg, exitLots));
+                  await trackOp(basket.id, () => exitOneLeg(basket.id, leg, exitLots), { exit: true });
                 }}
                 onShiftLegs={async (legIds, direction, steps) => { await trackOp(basket.id, () => shiftLegs(basket.id, legIds, direction, steps)); }}
                 legColumns={legColumns}
@@ -3633,6 +3671,7 @@ export default function MultiLegFocus({
                 allBaskets={baskets}
                 selectedLegIds={selectedLegIds}
                 onSelectLegs={selectLegs}
+                onTagLeg={(legId, tag) => patchLegs(basket.id, legs => legs.map(l => (l.id === legId ? { ...l, tag } : l)))}
                 onUngroup={() => runRegroup({ op: 'ungroup', basketId: basket.id })}
                 />
               </React.Fragment>

@@ -132,6 +132,8 @@ export interface MultiLegStrategyRowProps {
   /** Legs ticked for regrouping (page-wide, so a group can span rows). */
   selectedLegIds?: Set<string>;
   onSelectLegs?: (legIds: string[], on: boolean) => void;
+  /** Set a leg's tag through the page's functional leg update (never this render's legs). */
+  onTagLeg?: (legId: string, tag: string | undefined) => void;
   /** Split this strategy into one row per leg. */
   onUngroup?: () => void;
 }
@@ -179,6 +181,7 @@ export default function MultiLegStrategyRow({
   allBaskets,
   selectedLegIds,
   onSelectLegs,
+  onTagLeg,
   onUngroup,
 }: MultiLegStrategyRowProps) {
   // Existing/already-placed positions default collapsed (this page can carry
@@ -1365,6 +1368,7 @@ export default function MultiLegStrategyRow({
                       onReduceQty={onReduceOutsideQty && leg.status === 'OPEN' ? (() => onReduceOutsideQty(leg.id)) : undefined}
                       selected={!!selectedLegIds?.has(leg.id)}
                       onSelect={onSelectLegs ? (on => onSelectLegs([leg.id], on)) : undefined}
+                      onTag={onTagLeg ? (tag => onTagLeg(leg.id, tag)) : undefined}
                     />
                   ))}
                 </tbody>

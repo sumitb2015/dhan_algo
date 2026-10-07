@@ -70,6 +70,8 @@ interface MultiLegLegRowProps {
   /** Selection for regrouping (checkbox). Omit to hide the control. */
   selected?: boolean;
   onSelect?: (on: boolean) => void;
+  /** Tag commit. Preferred over onChange, which saves from this render's legs. */
+  onTag?: (tag: string | undefined) => void;
 }
 
 /** Tag chip: shows the label, click to edit; commits on blur / Enter, Esc cancels. */
@@ -105,7 +107,7 @@ function TagCell({ value, onCommit }: { value?: string; onCommit: (v: string) =>
 }
 
 export default function MultiLegLegRow({
-  leg, allStrikes, ltp, spot, editable, exiting, margin, multiplier = 1, strategyMultiplier = 1, frontExpiry, farExpiry, onChange, onRemove, onExit, onOpenAddLots, onShift, shiftSteps = 1, shiftBusy = false, strikeBlocked = false, columns = DEFAULT_LEG_COLUMNS, showExit = false, iv = 0, qtyWarning, onClaimQty, onReduceQty, selected = false, onSelect,
+  leg, allStrikes, ltp, spot, editable, exiting, margin, multiplier = 1, strategyMultiplier = 1, frontExpiry, farExpiry, onChange, onRemove, onExit, onOpenAddLots, onShift, shiftSteps = 1, shiftBusy = false, strikeBlocked = false, columns = DEFAULT_LEG_COLUMNS, showExit = false, iv = 0, qtyWarning, onClaimQty, onReduceQty, selected = false, onSelect, onTag,
 }: MultiLegLegRowProps) {
   const [exitLotsText, setExitLotsText] = React.useState('');
   // The box resets once the leg's lots change (a partial exit landed), never before.
@@ -138,7 +140,7 @@ export default function MultiLegLegRow({
               aria-label={`Select ${leg.strike} ${leg.option} to group`}
               className="h-3.5 w-3.5 accent-emerald-500 cursor-pointer" />
           )}
-          <TagCell value={leg.tag} onCommit={v => onChange({ tag: v || undefined })} />
+          <TagCell value={leg.tag} onCommit={v => (onTag ? onTag(v || undefined) : onChange({ tag: v || undefined }))} />
         </div>
       </td>
       <td className="px-2 py-1.5">
