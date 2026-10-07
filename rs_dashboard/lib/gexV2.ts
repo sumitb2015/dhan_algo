@@ -8,7 +8,7 @@
 // Pure functions, no I/O.
 
 import { calculateTimeToExpiryYears, computeBsGreeksExact, RISK_FREE_RATE } from './optionsPricing.ts';
-import { gexValue, type GexChainEntry, type GexPower, type GexRow } from './gex.ts';
+import { black76Gamma, gexTimeYears, gexValue, resolveIvs, type GexChainEntry, type GexPower, type GexRow } from './gex.ts';
 
 // ───────────────────────── walls ─────────────────────────
 
@@ -111,8 +111,9 @@ export function buildGexLegs(
   p: { expiry: string; underlying: number; spot: number; now?: number },
 ): GexLeg[] {
   if (!(p.underlying > 0) || !(p.spot > 0)) return [];
-  const t = calculateTimeToExpiryYears(p.expiry, p.now);
+  const t = gexTimeYears(p.expiry, p.now);
   const fwdRatio = p.underlying / p.spot;
+  const ivs = resolveIvs(oc, p.underlying);
   const legs: GexLeg[] = [];
   for (const [k, v] of Object.entries(oc)) {
     const strike = Number(k);
@@ -120,8 +121,8 @@ export function buildGexLegs(
     for (const [type, leg] of [['CE', v.ce], ['PE', v.pe]] as const) {
       const oi = Math.max(0, leg?.oi ?? 0);
       if (oi === 0) continue;
-      // Same IV rule as v1's legGamma: Dhan sends 0 (not null) for an untraded strike.
-      const ivPct = [leg?.implied_volatility, leg?.greeks?.iv].find((x): x is number => typeof x === 'number' && x > 0) ?? 0;
+      // Same IV resolution as v1 (OTM leg preferred, parity and nearest-strike fallbacks).
+      const ivPct = ivs.get(`${strike}|${type}`) ?? 0;
       if (!(ivPct > 0)) continue;
       legs.push({ type, strike, oiUnits: oi, ivPct, t, fwdRatio });
     }
@@ -134,7 +135,7 @@ export function netGexAtSpot(legs: GexLeg[], spotH: number, power: GexPower = 2,
   let net = 0;
   for (const l of legs) {
     const F = spotH * l.fwdRatio;
-    const gamma = computeBsGreeksExact(l.type, F, l.strike, l.t, l.ivPct / 100, r, true).gamma;
+    const gamma = black76Gamma(F, l.strike, l.t, l.ivPct / 100, r);
     const g = gexValue(gamma, l.oiUnits, F, power);
     net += l.type === 'CE' ? g : -g;
   }
@@ -150,7 +151,7 @@ export interface DynamicFlip {
 
 /**
  * Zero-gamma level: net GEX recomputed at `points` hypothetical spots across +-`span` of real spot (default 61 points, +-20%),
- * linearly interpolated at the sign change closest to real spot.
+ * refined by bisection at the sign change closest to real spot.
  */
 export function dynamicFlip(legs: GexLeg[], spot: number, opts: { span?: number; points?: number; power?: GexPower; r?: number; minShare?: number } = {}): DynamicFlip {
   const span = opts.span ?? 0.2;
@@ -171,8 +172,15 @@ export function dynamicFlip(legs: GexLeg[], spot: number, opts: { span?: number;
     if (Math.max(Math.abs(a.net), Math.abs(b.net)) <= floor) continue;
     if (a.net === 0) { crossings.push(a.spot); continue; }
     if ((a.net < 0) !== (b.net < 0) && b.net !== 0) {
-      const w = Math.abs(a.net) / (Math.abs(a.net) + Math.abs(b.net));
-      crossings.push(a.spot + w * (b.spot - a.spot));
+      // The 61-point grid is ~150 index points wide: bisect on the real curve instead of interpolating across it.
+      let lo = a.spot;
+      let hi = b.spot;
+      const loNeg = a.net < 0;
+      for (let k = 0; k < 40 && hi - lo > 0.05; k++) {
+        const mid = (lo + hi) / 2;
+        if ((netGexAtSpot(legs, mid, opts.power ?? 2, opts.r) < 0) === loNeg) lo = mid; else hi = mid;
+      }
+      crossings.push((lo + hi) / 2);
     }
   }
   if (!crossings.length) return { flip: null, curve };

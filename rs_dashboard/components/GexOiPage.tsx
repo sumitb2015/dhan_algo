@@ -5,6 +5,7 @@ import {
   ComposedChart, Bar, Line, XAxis, YAxis, CartesianGrid, Tooltip,
   ResponsiveContainer, ReferenceLine, Cell, LabelList,
 } from 'recharts';
+import { WallPill, WALL_TONE } from './GexWallParts';
 import { BookOpen } from 'lucide-react';
 import NavBar from './NavBar';
 import GuidePanel from './RsStrategyGuide';
@@ -257,7 +258,7 @@ export default function GexOiPage({ guide = '' }: { guide?: string }) {
           <div>
             <p className="text-[9px] font-bold text-emerald-500 uppercase tracking-[0.18em] mb-0.5">Options · {UNDERLYING}</p>
             <h1 className="text-sm font-bold text-white tracking-tight leading-none">GEX OI Chart</h1>
-            <p className="text-[10px] text-zinc-500 font-medium mt-1">Gamma-weighted open interest: call wall, put wall, gamma flip</p>
+            <p className="text-[10px] text-zinc-500 font-medium mt-1">Gamma-weighted open interest: call wall, put wall, strike flip</p>
           </div>
         </div>
         <div className="flex items-center gap-2 flex-wrap">
@@ -337,7 +338,7 @@ export default function GexOiPage({ guide = '' }: { guide?: string }) {
                 <div className="w-px bg-zinc-800 self-stretch" />
                 <PulseStat label="Call wall" value={levels.callWall ? fmtStrike(levels.callWall) : '—'} color="text-red-400" size="text-2xl" sub="resistance · highest call GEX" />
                 <PulseStat label="Put wall" value={levels.putWall ? fmtStrike(levels.putWall) : '—'} color="text-emerald-400" size="text-2xl" sub="support · highest put GEX" />
-                <PulseStat label="Gamma flip" value={levels.flip != null ? Math.round(levels.flip).toLocaleString('en-IN') : '—'} color="text-amber-400" size="text-2xl" sub="net GEX zero crossing" />
+                <PulseStat label="Strike flip" value={levels.flip != null ? Math.round(levels.flip).toLocaleString('en-IN') : '—'} color="text-amber-400" size="text-2xl" sub="per-strike net GEX sign change, not zero-gamma (see GEX v2)" />
                 <PulseStat label="Pin strike" value={levels.pin ? fmtStrike(levels.pin) : '—'} color="text-zinc-200" size="text-2xl" sub="largest call + put GEX" />
                 <div className="ml-auto flex items-center gap-5 flex-wrap">
                   <PulseStat label="Net GEX" value={fmtGex(levels.totalNet)} color={levels.totalNet >= 0 ? 'text-emerald-400' : 'text-red-400'} size="text-sm" sub={`${POWER_UNIT[power]} per 1% move, whole chain`} />
@@ -389,7 +390,11 @@ export default function GexOiPage({ guide = '' }: { guide?: string }) {
                       <Tooltip content={<GexTooltip oiLabel={oiLabel} />} cursor={{ fill: 'var(--chart-cursor-fill)', opacity: 0.5 }} />
                       <ReferenceLine y={0} stroke="var(--color-zinc-500)" />
                       {atm > 0 && <ReferenceLine x={nearestStrike(spot)} stroke="var(--color-zinc-400)" strokeDasharray="5 4" label={{ value: `SPOT ${spot.toLocaleString('en-IN', { maximumFractionDigits: 1 })}`, position: 'top', fontSize: 10, fontWeight: 700 }} />}
-                      {flipRef != null && <ReferenceLine x={nearestStrike(flipRef)} stroke="#fbbf24" strokeWidth={2} label={{ value: `FLIP ${Math.round(flipRef)}`, position: 'insideBottomRight', fontSize: 10, fontWeight: 700, fill: '#fbbf24' }} />}
+                      {([['put', levels.putWall], ['call', levels.callWall]] as const).map(([side, k]) => k != null && rows.some(r => r.strike === k) && (
+                        <ReferenceLine key={`${side}wall`} x={nearestStrike(k)} stroke={WALL_TONE[side]} strokeWidth={1.75} strokeDasharray="5 3"
+                          label={((p: object) => <WallPill {...(p as { viewBox?: { x: number; y: number; width: number; height: number } })} side={side} text={`${side === 'call' ? 'CALL WALL' : 'PUT WALL'} ${k.toLocaleString('en-IN')}`} />) as never} />
+                      ))}
+                      {flipRef != null && <ReferenceLine x={nearestStrike(flipRef)} stroke="#fbbf24" strokeWidth={2} label={{ value: `STRIKE FLIP ${Math.round(flipRef)}`, position: 'insideBottomRight', fontSize: 10, fontWeight: 700, fill: '#fbbf24' }} />}
                       <Bar dataKey="ceGex" name="Call GEX" stackId="g" isAnimationActive={false}>
                         {rows.map(r => <Cell key={r.strike} fill="#ef4444" stroke={r.strike === levels.callWall ? '#fecaca' : 'transparent'} strokeWidth={r.strike === levels.callWall ? 2 : 0} />)}
                         {showValues && <LabelList dataKey="ceGex" content={barValueLabel as never} />}
@@ -414,7 +419,7 @@ export default function GexOiPage({ guide = '' }: { guide?: string }) {
                         <Tooltip content={<GexTooltip oiLabel={oiLabel} />} cursor={{ fill: 'var(--chart-cursor-fill)', opacity: 0.5 }} />
                         <ReferenceLine y={0} stroke="var(--color-zinc-500)" />
                         {atm > 0 && <ReferenceLine x={nearestStrike(spot)} stroke="var(--color-zinc-400)" strokeDasharray="5 4" label={{ value: `SPOT ${spot.toLocaleString('en-IN', { maximumFractionDigits: 1 })}`, position: 'top', fontSize: 10, fontWeight: 700 }} />}
-                        {flipRef != null && <ReferenceLine x={nearestStrike(flipRef)} stroke="#fbbf24" strokeWidth={2} />}
+                        {flipRef != null && <ReferenceLine x={nearestStrike(flipRef)} stroke="#fbbf24" strokeWidth={2} label={{ value: `STRIKE FLIP ${Math.round(flipRef)}`, position: 'insideBottomRight', fontSize: 10, fontWeight: 700, fill: '#fbbf24' }} />}
                         <Bar dataKey="netGex" name="Net GEX" isAnimationActive={false}>
                           {rows.map(r => <Cell key={r.strike} fill={r.netGex >= 0 ? '#10b981' : '#ef4444'} />)}
                           {showValues && <LabelList dataKey="netGex" content={barValueLabel as never} />}
@@ -472,7 +477,7 @@ export default function GexOiPage({ guide = '' }: { guide?: string }) {
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-x-6 gap-y-1">
                   <div><strong className="text-red-400 font-bold">Call wall</strong>: highest call GEX, resistance.</div>
                   <div><strong className="text-emerald-400 font-bold">Put wall</strong>: highest put GEX, support.</div>
-                  <div><strong className="text-amber-400 font-bold">Gamma flip</strong>: net GEX crosses zero. Above it dealers dampen moves, below it they amplify.</div>
+                  <div><strong className="text-amber-400 font-bold">Strike flip</strong>: where per-strike net GEX changes sign (calls above, puts below), so it sits near spot by construction. Above it dealers dampen moves, below it they amplify. The true zero-gamma level, found by re-pricing the whole chain at other spots, is on GEX v2.</div>
                   <div><strong className="text-zinc-200 font-bold">Pin strike</strong>: largest call plus put GEX, the likeliest expiry magnet.</div>
                 </div>
                 <div className="text-[11px] font-mono text-zinc-400 pt-0.5">Unvalidated: one video, one example, no backtest. This page places no orders.</div>

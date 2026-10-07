@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert';
-import { buildGexRows, fmtGex, forwardFromSpot, gammaFlip, gexChecklist, gexLevels, gexValue, wallClarity, type GexRow } from './gex.ts';
+import { black76Gamma, buildGexRows, fmtGex, forwardFromSpot, gammaFlip, gexChecklist, gexLevels, gexTimeYears, gexValue, resolveIvs, wallClarity, type GexRow } from './gex.ts';
+import { computeBsGreeksExact, RISK_FREE_RATE } from './optionsPricing.ts';
 
 const row = (strike: number, netGex: number, ceGex = Math.max(netGex, 0), peGex = Math.min(netGex, 0)): GexRow => ({
   strike, ceOi: 1, peOi: 1, ceGamma: 0, peGamma: 0, ceGex, peGex, netGex,
@@ -101,9 +102,43 @@ test('buildGexRows: unknown lot size or missing IV never invents numbers', () =>
   const base = { expiry: '2026-04-23', underlying: 24200, now: Date.UTC(2026, 3, 20, 4, 0) };
   // Lots declared but no lot size to convert with: refuse rather than guess.
   assert.deepStrictEqual(buildGexRows(oc, { ...base, lotSize: 0, oiUnit: 'lots' }), []);
+  // A call with no IV borrows the same strike's put IV (parity); it is not zero any more.
   const [r] = buildGexRows(oc, { ...base, lotSize: 65 });
-  assert.strictEqual(r.ceGex, 0);
+  assert.ok(r.ceGex > 0);
   assert.ok(r.peGex < 0);
+  // No IV on either side and no neighbour within range: still an honest zero.
+  const [z] = buildGexRows({ '24000': { ce: { oi: 1000 }, pe: { oi: 500 } } }, { ...base, lotSize: 65 });
+  assert.strictEqual(z.ceGex, 0);
+  assert.ok(z.peGex === 0); // -0 === 0
+});
+
+test('resolveIvs prefers the OTM leg, then parity, then the nearest strike', () => {
+  const oc = {
+    '24000': { ce: { oi: 1, implied_volatility: 30 }, pe: { oi: 1, implied_volatility: 12 } }, // CE is ITM at F=24200: use the put's 12
+    '24400': { ce: { oi: 1, implied_volatility: 11 }, pe: { oi: 1, implied_volatility: 40 } }, // PE is ITM: use the call's 11
+    '24450': { ce: { oi: 1, implied_volatility: 0 }, pe: { oi: 0 } },                           // no IV: nearest CE strike (24400 -> 11)
+  };
+  const m = resolveIvs(oc, 24200);
+  assert.strictEqual(m.get('24000|CE'), 12);
+  assert.strictEqual(m.get('24400|PE'), 11);
+  assert.strictEqual(m.get('24450|CE'), 11);
+});
+
+test('gexTimeYears floors at 10 minutes, not 6 hours, so expiry-afternoon gamma keeps growing', () => {
+  const exp = Date.UTC(2026, 9, 13, 10, 10); // 15:40 IST
+  const oneHour = gexTimeYears('2026-10-13', exp - 3600_000);
+  const tenMin = gexTimeYears('2026-10-13', exp - 600_000);
+  assert.ok(oneHour < 0.25 / 365, 'one hour left must be below the shared 6h floor');
+  assert.ok(Math.abs(oneHour * 365 * 24 - 1) < 1e-9);
+  assert.strictEqual(gexTimeYears('2026-10-13', exp + 1e6), tenMin);
+  assert.ok(black76Gamma(24000, 24000, oneHour, 0.12) > 2 * black76Gamma(24000, 24000, 0.25 / 365, 0.12));
+});
+
+test('black76Gamma agrees with computeBsGreeksExact away from the time floor', () => {
+  const t = 5 / 365;
+  const a = black76Gamma(24200, 24300, t, 0.14);
+  const b = computeBsGreeksExact('CE', 24200, 24300, t, 0.14, RISK_FREE_RATE, true).gamma;
+  assert.ok(Math.abs(a - b) / b < 1e-12);
 });
 
 test('wallClarity flags near-equal runners-up', () => {

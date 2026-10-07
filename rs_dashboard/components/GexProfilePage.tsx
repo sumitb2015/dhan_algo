@@ -17,6 +17,7 @@ import {
 import {
   buildGexLegs, dynamicFlip, emConfluence, expectedMove, mergeGexRows, regimeNote, spotSideWalls, topWalls, wallRank, type GexLeg,
 } from '@/lib/gexV2';
+import { WallPill, WALL_TONE } from './GexWallParts';
 
 const UNDERLYING = 'NIFTY';
 const STRIKE_STEP = 50;
@@ -257,7 +258,7 @@ export default function GexProfilePage() {
     const dyn = dynamicFlip(legs, spot, { power });
     const flip = dyn.flip;
     const regime: GexLevels['regime'] = flip != null ? (spot >= flip ? 'positive' : 'negative') : (lv.totalNet >= 0 ? 'positive' : 'negative');
-    const nearest = perExpiry[0];
+    const nearest = [...perExpiry].sort((a, b) => a.ex.localeCompare(b.ex))[0]; // nearest expiry, whatever order the fetch returned
     const em = expectedMove(nearest.c.chain.oc!, { spot, underlying: nearest.u, expiry: nearest.ex });
     const confluence = em ? emConfluence([
       { label: 'Call wall', value: walls.callWall },
@@ -313,6 +314,24 @@ export default function GexProfilePage() {
   // and the expected-move bands. Returned as a keyed array because recharts reads its direct children.
   const overlays = (labels: boolean) => {
     const out: React.ReactNode[] = [];
+    const cw = walls.callWall != null && inView(walls.callWall) ? walls.callWall : null;
+    const pw = walls.putWall != null && inView(walls.putWall) ? walls.putWall : null;
+    // Zone between the walls, tinted by regime: green where dealers dampen, red where they amplify.
+    if (cw != null && pw != null && nearestStrike(pw) !== nearestStrike(cw)) {
+      const zone = regime === 'negative' ? 'var(--color-red-500)' : regime === 'positive' ? 'var(--color-emerald-500)' : 'var(--color-zinc-500)';
+      out.push(<ReferenceArea key="zone" x1={nearestStrike(pw)} x2={nearestStrike(cw)} fill={zone} fillOpacity={0.07} stroke="none" />);
+    }
+    const wallLine = (side: 'call' | 'put', strike: number) => {
+      const row = rows.find(r => r.strike === nearestStrike(strike));
+      const gex = row ? (side === 'call' ? row.ceGex : -row.peGex) : 0;
+      const text = `${side === 'call' ? 'CALL WALL' : 'PUT WALL'} ${fmtStrike(strike)}${gex > 0 ? ` · ${fmtGex(gex)}` : ''}`;
+      return (
+        <ReferenceLine key={`${side}wall`} x={nearestStrike(strike)} stroke={WALL_TONE[side]} strokeWidth={1.75} strokeDasharray="5 3"
+          label={labels ? ((p: object) => <WallPill {...(p as { viewBox?: { x: number; y: number; width: number; height: number } })} side={side} text={text} />) as never : undefined} />
+      );
+    };
+    if (pw != null) out.push(wallLine('put', pw));
+    if (cw != null) out.push(wallLine('call', cw));
     if (atm > 0) out.push(<ReferenceLine key="spot" x={nearestStrike(spot)} stroke="var(--color-zinc-400)" strokeDasharray="5 4" label={labels ? { value: `SPOT ${spot.toLocaleString('en-IN', { maximumFractionDigits: 1 })}`, position: 'top', fontSize: 10, fontWeight: 700 } : undefined} />);
     // A level outside the strike window is not drawn (snapping it to the edge would pass it off as a real level); the
     // "outside the window" notice above the chart lists it instead.
@@ -335,6 +354,12 @@ export default function GexProfilePage() {
     }
     return out;
   };
+  // Bar opacity scales with each strike's share of the largest bar, so the heavy strikes read at a glance.
+  const maxCe = rows.reduce((m, r) => Math.max(m, r.ceGex), 0) || 1;
+  const maxPe = rows.reduce((m, r) => Math.max(m, -r.peGex), 0) || 1;
+  const maxNet = rows.reduce((m, r) => Math.max(m, Math.abs(r.netGex)), 0) || 1;
+  const shade = (v: number, max: number) => 0.38 + 0.62 * Math.min(1, Math.abs(v) / max);
+  const accentStrip = regime === 'positive' ? 'via-emerald-500' : regime === 'negative' ? 'via-red-500' : 'via-zinc-600';
   // Wall cell outline: the spot-side wall is bold, the 2nd/3rd largest walls on that side are thin.
   const wallStroke = (strike: number, side: 'call' | 'put') => {
     const primary = side === 'call' ? walls.callWall : walls.putWall;
@@ -497,20 +522,26 @@ export default function GexProfilePage() {
                     Outside the ±{range} strike window (see KPIs): {outside.join(', ')}. Widen the window to see them.
                   </div>
                 )}
-                <div className="bg-zinc-900/60 border border-zinc-800 rounded-2xl p-5">
+                <div className="relative overflow-hidden bg-zinc-900/60 border border-zinc-800 rounded-2xl p-5">
+                  <div aria-hidden className={`absolute inset-x-0 top-0 h-0.5 bg-gradient-to-r from-transparent ${accentStrip} to-transparent`} />
                   <ChartHeader eyebrow="Reading" title="Regime and walls" sub={`${regimeNote(regime)} Walls are not guaranteed floors or ceilings; they matter most where they line up with the expected move or another level.`} />
                   <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-                    {([['Call walls', top.call, 'text-red-400'], ['Put walls', top.put, 'text-emerald-400']] as const).map(([title, list, cls]) => (
-                      <div key={title} className="rounded-xl border border-zinc-800 bg-zinc-900 px-3 py-2">
+                    {([
+                      ['Call walls', top.call, 'text-red-400', 'bg-red-500/10', 'border-l-red-500'],
+                      ['Put walls', top.put, 'text-emerald-400', 'bg-emerald-500/10', 'border-l-emerald-500'],
+                    ] as const).map(([title, list, cls, bar, accent]) => (
+                      <div key={title} className={`rounded-xl border border-zinc-800 border-l-2 ${accent} bg-zinc-900 px-3 py-2.5`}>
                         <p className={`text-[10px] font-bold uppercase tracking-widest ${cls}`}>{title} · top 3</p>
                         <div className="mt-1.5 space-y-1">
                           {list.length === 0 && <p className="text-xs text-zinc-500">none</p>}
                           {list.map((w, i) => (
-                            <div key={w.strike} className="grid grid-cols-[1.75rem_4.5rem_6rem_1fr] items-center gap-x-3 text-xs font-mono tabular-nums">
-                              <span className="text-zinc-400">#{i + 1}</span>
-                              <span className="text-zinc-100 font-bold text-right">{fmtStrike(w.strike)}</span>
-                              <span className="text-zinc-300 text-right">{fmtGex(w.gex)}</span>
-                              <span className={`text-[10px] font-sans font-bold text-right ${w.broken ? 'text-amber-400' : 'text-zinc-500'}`}>
+                            <div key={w.strike} className="relative grid grid-cols-[1.75rem_4.5rem_6rem_6rem_1fr] items-center gap-x-3 rounded-md px-2 py-1 text-xs font-mono tabular-nums overflow-hidden">
+                              <span aria-hidden className={`absolute inset-y-0 left-0 ${bar}`} style={{ width: `${Math.max(4, (Math.abs(w.gex) / (Math.abs(list[0].gex) || 1)) * 100)}%` }} />
+                              <span className="relative text-zinc-400">#{i + 1}</span>
+                              <span className="relative text-zinc-100 font-bold text-right">{fmtStrike(w.strike)}</span>
+                              <span className="relative text-zinc-300 text-right">{fmtGex(w.gex)}</span>
+                              <span className="relative text-zinc-400 text-right">{spot > 0 ? `${w.strike >= spot ? '+' : '−'}${Math.abs(Math.round(w.strike - spot)).toLocaleString('en-IN')} · ${(Math.abs(w.strike - spot) / spot * 100).toFixed(1)}%` : '—'}</span>
+                              <span className={`relative text-[10px] font-sans font-bold text-right ${w.broken ? 'text-amber-400' : 'text-zinc-500'}`}>
                                 {w.broken ? (w.side === 'call' ? 'broken · now support' : 'broken · now resistance') : (w.side === 'call' ? 'above spot' : 'below spot')}
                               </span>
                             </div>
@@ -520,7 +551,8 @@ export default function GexProfilePage() {
                     ))}
                   </div>
                 </div>
-                <div className="bg-zinc-900/60 border border-zinc-800 rounded-2xl p-5">
+                <div className="relative overflow-hidden bg-zinc-900/60 border border-zinc-800 rounded-2xl p-5">
+                  <div aria-hidden className={`absolute inset-x-0 top-0 h-0.5 bg-gradient-to-r from-transparent ${accentStrip} to-transparent`} />
                   <ChartHeader
                     eyebrow="Gamma exposure"
                     title="Call vs put GEX by strike"
@@ -529,10 +561,17 @@ export default function GexProfilePage() {
                       <span className="flex items-center gap-1.5"><span className="w-3 h-3 rounded-sm bg-red-500" /><span className="text-zinc-300">Call GEX</span></span>
                       <span className="flex items-center gap-1.5"><span className="w-3 h-3 rounded-sm bg-emerald-500" /><span className="text-zinc-300">Put GEX</span></span>
                       <span className="flex items-center gap-1.5"><span className="w-3 h-0.5 bg-amber-400" /><span className="text-zinc-300">Net GEX</span></span>
+                      <span className="flex items-center gap-1.5"><span className="w-3 border-t-2 border-dashed border-red-400" /><span className="text-zinc-300">Call wall</span></span>
+                      <span className="flex items-center gap-1.5"><span className="w-3 border-t-2 border-dashed border-emerald-400" /><span className="text-zinc-300">Put wall</span></span>
+                      <span className={`flex items-center gap-1.5`}><span className={`w-3 h-3 rounded-sm ${regime === 'negative' ? 'bg-red-500/25' : 'bg-emerald-500/25'}`} /><span className="text-zinc-300">{regime === 'negative' ? 'Amplifying zone' : 'Dampening zone'}</span></span>
                     </>}
                   />
                   <ResponsiveContainer width="100%" height={400}>
                     <ComposedChart data={rows} stackOffset="sign" margin={{ top: 48, right: 16, left: 0, bottom: 40 }}>
+                      <defs>
+                        <linearGradient id="gexCallGrad" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stopColor="#f87171" /><stop offset="100%" stopColor="#dc2626" /></linearGradient>
+                        <linearGradient id="gexPutGrad" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stopColor="#059669" /><stop offset="100%" stopColor="#34d399" /></linearGradient>
+                      </defs>
                       <CartesianGrid strokeDasharray="3 6" vertical={false} />
                       <XAxis {...xAxisProps} />
                       <YAxis tick={{ fontSize: 10, fontFamily: 'var(--font-mono)' }} tickLine={false} axisLine={false} width={58} tickFormatter={numFmt} />
@@ -540,11 +579,11 @@ export default function GexProfilePage() {
                       <ReferenceLine y={0} stroke="var(--color-zinc-500)" />
                       {overlays(true)}
                       <Bar dataKey="ceGex" name="Call GEX" stackId="g" isAnimationActive={false}>
-                        {rows.map(r => { const w = wallStroke(r.strike, 'call'); return <Cell key={r.strike} fill="#ef4444" stroke={w.stroke} strokeWidth={w.w} />; })}
+                        {rows.map(r => { const w = wallStroke(r.strike, 'call'); return <Cell key={r.strike} fill="url(#gexCallGrad)" fillOpacity={w.w > 0 ? 1 : shade(r.ceGex, maxCe)} stroke={w.stroke} strokeWidth={w.w} />; })}
                         {showValues && <LabelList dataKey="ceGex" content={barValueLabel as never} />}
                       </Bar>
                       <Bar dataKey="peGex" name="Put GEX" stackId="g" isAnimationActive={false}>
-                        {rows.map(r => { const w = wallStroke(r.strike, 'put'); return <Cell key={r.strike} fill="#10b981" stroke={w.stroke} strokeWidth={w.w} />; })}
+                        {rows.map(r => { const w = wallStroke(r.strike, 'put'); return <Cell key={r.strike} fill="url(#gexPutGrad)" fillOpacity={w.w > 0 ? 1 : shade(r.peGex, maxPe)} stroke={w.stroke} strokeWidth={w.w} />; })}
                         {showValues && <LabelList dataKey="peGex" content={barValueLabel as never} />}
                       </Bar>
                       <Line type="monotone" dataKey="netGex" name="Net GEX" stroke="#fbbf24" strokeWidth={2} dot={false} isAnimationActive={false} />
@@ -562,9 +601,9 @@ export default function GexProfilePage() {
                         <YAxis tick={{ fontSize: 10, fontFamily: 'var(--font-mono)' }} tickLine={false} axisLine={false} width={58} tickFormatter={numFmt} />
                         <Tooltip content={<GexTooltip oiLabel={oiLabel} />} cursor={{ fill: 'var(--chart-cursor-fill)', opacity: 0.5 }} />
                         <ReferenceLine y={0} stroke="var(--color-zinc-500)" />
-                        {overlays(false)}
+                        {overlays(true)}
                         <Bar dataKey="netGex" name="Net GEX" isAnimationActive={false}>
-                          {rows.map(r => <Cell key={r.strike} fill={r.netGex >= 0 ? '#10b981' : '#ef4444'} />)}
+                          {rows.map(r => <Cell key={r.strike} fill={r.netGex >= 0 ? '#10b981' : '#ef4444'} fillOpacity={shade(r.netGex, maxNet)} />)}
                           {showValues && <LabelList dataKey="netGex" content={barValueLabel as never} />}
                         </Bar>
                       </ComposedChart>
@@ -578,7 +617,7 @@ export default function GexProfilePage() {
                         <XAxis {...xAxisProps} />
                         <YAxis tick={{ fontSize: 10, fontFamily: 'var(--font-mono)' }} tickLine={false} axisLine={false} width={58} tickFormatter={fmtOi} />
                         <Tooltip content={<OiTooltip oiLabel={oiLabel} />} cursor={{ fill: 'var(--chart-cursor-fill)', opacity: 0.5 }} />
-                        {atm > 0 && <ReferenceLine x={nearestStrike(spot)} stroke="var(--color-zinc-400)" strokeDasharray="5 4" />}
+                        {atm > 0 && <ReferenceLine x={nearestStrike(spot)} stroke="var(--color-zinc-400)" strokeDasharray="5 4" label={{ value: `SPOT ${spot.toLocaleString('en-IN', { maximumFractionDigits: 1 })}`, position: 'top', fontSize: 10, fontWeight: 700 }} />}
                         <Bar dataKey="ceOiView" name="Call OI" fill="#ef4444" isAnimationActive={false}>
                           {showValues && <LabelList dataKey="ceOiView" content={barValueLabel as never} />}
                         </Bar>

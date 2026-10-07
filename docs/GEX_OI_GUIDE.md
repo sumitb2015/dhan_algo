@@ -23,6 +23,7 @@ of dealer hedging counts for more.
 > OI = how many cars are on the road. Gamma = how fast each car is going. You care about impact, not headcount.
 
 - Gamma is **highest at the money** and **highest near expiry** (about 10x at 2 DTE compared with 30 DTE).
+- Gamma uses a 10-minute time floor (the shared pricing clock's 6-hour floor would freeze expiry-day gamma from ~09:40), and a strike with no IV borrows the OTM leg's IV, then the same strike's other side, then the nearest strike within 200 points.
 - GEX of a strike = **gamma × OI (in units) × spot^k × 0.01**: the hedge size per **1% move** in Nifty.
 - **Calls count positive and puts negative.** This assumes dealers are long calls and short puts. It is an
   assumption: Indian index options publish no dealer book, so treat the sign as a convention, not a measurement.
@@ -34,11 +35,11 @@ of dealer hedging counts for more.
 |---|---|
 | **Call wall** | Strike with the highest call GEX. Read as **resistance**: dealers sell into rallies there. |
 | **Put wall** | Strike with the highest put GEX. Read as **support**: dealers buy into drops there. |
-| **Gamma flip** | Where net GEX crosses from negative to positive (interpolated between two strikes). The **pivot** where the regime changes. |
+| **Strike flip** | Where per-strike net GEX crosses from negative to positive (interpolated between two strikes). It sits near spot by construction (calls above, puts below); it is **not** the zero-gamma level, which GEX v2 finds by re-pricing the chain at other spots. |
 | **Pin strike** | Strike with the largest call + put GEX combined. The likeliest **expiry magnet**. |
 | **Net GEX** | Whole-chain total, per 1% move. |
 | **Regime badge** | **Positive gamma**: spot is at or above the flip. **Negative gamma**: spot is below it. |
-| **Call vs put GEX chart** | Red bars (calls, up) and green bars (puts, down) by strike, net GEX as a gold line, dashed **SPOT** line, gold **FLIP** line. The wall bars have a light outline. |
+| **Call vs put GEX chart** | Red bars (calls, up) and green bars (puts, down) by strike, net GEX as a gold line, dashed **SPOT** line, gold **STRIKE FLIP** line. The wall bars have a light outline. |
 | **Net dealer GEX chart** | Net GEX per strike, red where negative and green where positive, with the spot and flip lines. |
 | **Open interest chart** | Raw call and put OI, so you can see where raw OI and GEX disagree. |
 | **Strangle entry checklist** | The video's five-point list (section 5). |

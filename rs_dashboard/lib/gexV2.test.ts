@@ -124,3 +124,18 @@ test('regime note covers all regimes', () => {
   assert.match(regimeNote('negative'), /faster/);
   assert.match(regimeNote('unknown'), /unknown/);
 });
+
+test('dynamicFlip refines the crossing by bisection: net GEX at the flip is ~0, much tighter than the grid step', async () => {
+  const { buildGexLegs, dynamicFlip, netGexAtSpot } = await import('./gexV2.ts');
+  const oc = {
+    '24000': { pe: { oi: 650000, implied_volatility: 13 } },
+    '24200': { ce: { oi: 130000, implied_volatility: 12 }, pe: { oi: 260000, implied_volatility: 12 } },
+    '24400': { ce: { oi: 650000, implied_volatility: 12 } },
+  };
+  const legs = buildGexLegs(oc, { expiry: '2026-10-27', underlying: 24250, spot: 24200, now: Date.UTC(2026, 9, 6, 4, 0) });
+  const { flip } = dynamicFlip(legs, 24200);
+  if (flip == null) return; // no crossing for this synthetic book: nothing to refine
+  const here = Math.abs(netGexAtSpot(legs, flip));
+  const nudged = Math.abs(netGexAtSpot(legs, flip + 75));
+  assert.ok(here < nudged * 0.01, `net at flip ${here} vs 75pts away ${nudged}`);
+});

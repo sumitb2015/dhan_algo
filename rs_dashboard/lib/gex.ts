@@ -9,9 +9,10 @@
 // Sign convention: dealers are assumed long calls / short puts, so call GEX is positive and put GEX negative.
 // That is an assumption (Indian index options have no public dealer book), not a measurement.
 //
-// Gamma comes from computeBsGreeksExact (Black-76 on the future), never from rounded display values.
+// Gamma is Black-76 on the future (black76Gamma below, the same closed form as computeBsGreeksExact but with a 10-minute
+// time floor instead of 6 hours), never from rounded display values.
 
-import { calculateTimeToExpiryYears, computeBsGreeksExact, RISK_FREE_RATE } from './optionsPricing.ts';
+import { calculateTimeToExpiryYears, expiryEpochMs, normPdf, CALENDAR_DAYS_PER_YEAR, RISK_FREE_RATE } from './optionsPricing.ts';
 
 /** Black-76 forward for `expiry` implied by spot alone (cost of carry S*e^{rT}). Used only when no future price is available. */
 export function forwardFromSpot(spot: number, expiry: string, r = RISK_FREE_RATE, now: number = Date.now()): number {
@@ -90,28 +91,79 @@ export interface GexParams {
   r?: number;
 }
 
-function legGamma(
-  type: 'CE' | 'PE',
-  leg: GexLegInput | null | undefined,
-  strike: number,
-  F: number,
-  t: number,
-  r: number,
-): number {
+/** Smallest time-to-expiry GEX will use (10 minutes). The shared pricing clock floors at 6 hours, which freezes every
+ *  gamma from ~09:40 on expiry day and understates ATM against OTM strikes by 1.4x at 3h left and 2.5x at 1h left. */
+export const GEX_MIN_T = 10 / (60 * 24 * CALENDAR_DAYS_PER_YEAR);
+
+/** Years to the 15:40 IST close with only a 10-minute floor. GEX-only: prices and payoffs keep calculateTimeToExpiryYears. */
+export function gexTimeYears(expiry: string, now: number = Date.now()): number {
+  if (!expiry) return calculateTimeToExpiryYears(expiry, now);
+  const ms = expiryEpochMs(expiry) - now;
+  if (!Number.isFinite(ms)) return calculateTimeToExpiryYears(expiry, now);
+  return Math.max(GEX_MIN_T, ms / (CALENDAR_DAYS_PER_YEAR * 24 * 3600 * 1000));
+}
+
+/** Black-76 gamma per index unit (same for calls and puts) with the GEX time floor. Matches computeBsGreeksExact's gamma. */
+export function black76Gamma(F: number, strike: number, t: number, iv: number, r: number = RISK_FREE_RATE): number {
+  if (!(F > 0) || !(strike > 0) || !(iv > 0)) return 0;
+  const tt = Math.max(t, GEX_MIN_T);
+  const sd = iv * Math.sqrt(tt);
+  const d1 = (Math.log(F / strike) + 0.5 * iv * iv * tt) / sd;
+  return (Math.exp(-r * tt) * normPdf(d1)) / (F * sd);
+}
+
+const firstIv = (leg: GexLegInput | null | undefined): number =>
   // First positive IV wins: Dhan sends 0 (not null) for an untraded strike, which `??` would accept as the answer.
-  const ivPct = [leg?.implied_volatility, leg?.greeks?.iv].find((v): v is number => typeof v === 'number' && v > 0) ?? 0;
-  if (!(ivPct > 0)) return 0; // no IV, no gamma: a zero is honest, a guess is not
-  return computeBsGreeksExact(type, F, strike, t, ivPct / 100, r, true).gamma;
+  [leg?.implied_volatility, leg?.greeks?.iv].find((v): v is number => typeof v === 'number' && v > 0) ?? 0;
+
+/**
+ * IV in percent for every strike-side that has open interest, keyed `${strike}|CE` / `${strike}|PE`.
+ * Preference: the OTM leg's own IV (an ITM leg's IV from the chain is noisy), then the opposite leg at the same strike
+ * (put-call parity: same IV), then the nearest strike's IV on the same side within `maxGap` points. Zero only when none exists.
+ */
+export function resolveIvs(oc: Record<string, GexChainEntry>, F: number, maxGap = 200): Map<string, number> {
+  const entries = Object.entries(oc).map(([k, v]) => ({ strike: Number(k), v })).filter(e => Number.isFinite(e.strike));
+  const own = (e: { v: GexChainEntry }, type: 'CE' | 'PE') => firstIv(type === 'CE' ? e.v.ce : e.v.pe);
+  const nearest = (strike: number, type: 'CE' | 'PE'): number => {
+    let best = 0;
+    let gap = Infinity;
+    for (const e of entries) {
+      const iv = own(e, type);
+      const g = Math.abs(e.strike - strike);
+      if (iv > 0 && g > 0 && g <= maxGap && g < gap) { best = iv; gap = g; }
+    }
+    return best;
+  };
+  const out = new Map<string, number>();
+  for (const e of entries) {
+    for (const type of ['CE', 'PE'] as const) {
+      const leg = type === 'CE' ? e.v.ce : e.v.pe;
+      if (!((leg?.oi ?? 0) > 0)) continue;
+      const other = type === 'CE' ? 'PE' : 'CE';
+      const itm = type === 'CE' ? e.strike < F : e.strike > F;
+      const a = own(e, type);
+      const b = own(e, other);
+      const iv = (itm ? (b || a) : (a || b)) || nearest(e.strike, type);
+      if (iv > 0) out.set(`${e.strike}|${type}`, iv);
+    }
+  }
+  return out;
+}
+
+function legGamma(ivPct: number | undefined, strike: number, F: number, t: number, r: number): number {
+  if (!(ivPct && ivPct > 0)) return 0; // no IV anywhere nearby, no gamma: a zero is honest, a guess is not
+  return black76Gamma(F, strike, t, ivPct / 100, r);
 }
 
 export function buildGexRows(oc: Record<string, GexChainEntry>, p: GexParams): GexRow[] {
   const power = p.power ?? 2;
   const r = p.r ?? RISK_FREE_RATE;
-  const t = calculateTimeToExpiryYears(p.expiry, p.now);
+  const t = gexTimeYears(p.expiry, p.now);
   if (!(p.underlying > 0)) return [];
   const oiToUnits = p.oiUnit === 'lots' ? (p.lotSize ?? 0) : 1;
   if (!(oiToUnits > 0)) return [];
 
+  const ivs = resolveIvs(oc, p.underlying);
   const rows: GexRow[] = [];
   for (const [k, v] of Object.entries(oc)) {
     const strike = Number(k);
@@ -119,8 +171,8 @@ export function buildGexRows(oc: Record<string, GexChainEntry>, p: GexParams): G
     const ceOi = Math.max(0, v.ce?.oi ?? 0);
     const peOi = Math.max(0, v.pe?.oi ?? 0);
     if (ceOi === 0 && peOi === 0) continue;
-    const ceGamma = legGamma('CE', v.ce, strike, p.underlying, t, r);
-    const peGamma = legGamma('PE', v.pe, strike, p.underlying, t, r);
+    const ceGamma = legGamma(ivs.get(`${strike}|CE`), strike, p.underlying, t, r);
+    const peGamma = legGamma(ivs.get(`${strike}|PE`), strike, p.underlying, t, r);
     const ceGex = gexValue(ceGamma, ceOi * oiToUnits, p.underlying, power);
     const peGex = -gexValue(peGamma, peOi * oiToUnits, p.underlying, power);
     rows.push({ strike, ceOi, peOi, ceGamma, peGamma, ceGex, peGex, netGex: ceGex + peGex });
