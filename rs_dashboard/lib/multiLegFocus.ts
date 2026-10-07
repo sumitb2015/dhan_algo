@@ -12,10 +12,15 @@ import { normalizeExpiry, normalizeOptType, parseTradingSymbol, symbolMatchesUnd
 
 export type MultiLegStatus = 'DRAFT' | 'PLACING' | 'OPEN' | 'CLOSING' | 'CLOSED' | 'FAILED';
 
+/** An option leg (CE/PE at a strike) or a futures leg ('FUT', strike 0). Futures legs only ever
+ *  come from the broker (lib/multiLegBrokerSync.ts); orders that resolve an option strike
+ *  (place, add lots, shift, scale) refuse them. Exit works off the broker row, so it covers both. */
+export type LegInstrument = OptionType | 'FUT';
+
 export interface MultiLegLeg {
   id: string;
   side: LegSide;
-  option: OptionType;
+  option: LegInstrument;
   strike: number;
   /** Which expiry this leg trades on. Equal to the basket's `expiry` (the
    *  front/main month) for every ordinary strategy; a Calendar/Diagonal
@@ -187,6 +192,25 @@ export interface MultiLegBasket {
   rev?: number;
 }
 
+export type OptionLeg = MultiLegLeg & { option: OptionType };
+export function isOptionLeg(l: MultiLegLeg): l is OptionLeg { return l.option !== 'FUT'; }
+export function isFutLeg(l: MultiLegLeg): boolean { return l.option === 'FUT'; }
+/** "23150 CE", or "FUT" for a futures leg. */
+export function legName(l: Pick<MultiLegLeg, 'option' | 'strike'>): string {
+  return l.option === 'FUT' ? 'FUT' : `${l.strike} ${l.option}`;
+}
+
+/**
+ * A futures leg for the options payoff library: a synthetic call minus put at strike = entry, which
+ * pays exactly (F - entry) per unit at expiry and ~e^-rT (F - entry) before it (same IV on both
+ * sides, so gamma, vega and theta cancel). `qty` is signed units; `futPrice` is the live futures price.
+ */
+export function futuresAsSyntheticPayoffLegs(qty: number, entry: number, expiry: string, futPrice?: number) {
+  // Both sides "entered" at 1: the 1s cancel, so the P&L is exactly qty x (C - P). (The library needs entry > 0.)
+  const common = { strike: entry, expiry, entryPrice: 1, iv: 0.2, ...(futPrice && futPrice > 0 ? { forward: futPrice } : {}) };
+  return [{ ...common, type: 'CE' as const, qty }, { ...common, type: 'PE' as const, qty: -qty }];
+}
+
 let _legSeq = 0;
 function newLegId(): string {
   _legSeq += 1;
@@ -334,7 +358,7 @@ export function legPnlPct(leg: MultiLegLeg, ltp: number, multiplier: number = 1)
 
 /** Distance of the strike from spot in %: positive = OTM, negative = ITM. */
 export function legOtmPct(leg: MultiLegLeg, spot: number): number | null {
-  if (!(spot > 0)) return null;
+  if (!(spot > 0) || leg.option === 'FUT') return null;
   const diff = leg.option === 'CE' ? leg.strike - spot : spot - leg.strike;
   return (diff / spot) * 100;
 }
@@ -374,8 +398,10 @@ export function basketTotalPnl(legs: MultiLegLeg[], ltpFor: (leg: MultiLegLeg) =
  * position; callers must exclude multi-expiry baskets themselves).
  */
 export function classifyBasketStructure(legs: MultiLegLeg[]): { structure: string; riskType: 'defined' | 'undefined' } | null {
-  const active = legs.filter(l => l.status !== 'CLOSED' && l.status !== 'FAILED' && l.lots > 0);
-  if (active.length === 0) return null;
+  const live = legs.filter(l => l.status !== 'CLOSED' && l.status !== 'FAILED' && l.lots > 0);
+  // The structure classifier knows option shapes only; a group with futures keeps its own name.
+  if (live.length === 0 || !live.every(isOptionLeg)) return null;
+  const active = live as OptionLeg[];
   const merged = new Map<string, GroupLeg>();
   for (const l of active) {
     const key = `${l.strike}:${l.option}:${l.side}`;
@@ -874,7 +900,7 @@ export interface SiblingLegCollision {
   basketId: string;
   basketName: string;
   side: 'B' | 'S';
-  option: 'CE' | 'PE';
+  option: LegInstrument;
   strike: number;
   expiry: string;
   lots: number;
@@ -895,7 +921,7 @@ export interface SiblingLegCollision {
 export function findSiblingLegCollisions(
   baskets: MultiLegBasket[],
   basketId: string,
-  candidates: { side: 'B' | 'S'; option: 'CE' | 'PE'; strike: number; expiry: string }[],
+  candidates: { side: 'B' | 'S'; option: LegInstrument; strike: number; expiry: string }[],
 ): SiblingLegCollision[] {
   const self = baskets.find(b => b.id === basketId);
   if (!self) return [];
@@ -908,7 +934,7 @@ export function findSiblingLegCollisions(
       for (const c of candidates) {
         if (c.option === l.option && c.strike === l.strike && c.expiry === legExpiry) {
           out.push({
-            basketId: b.id, basketName: b.name || b.presetKey || 'Unnamed basket',
+            basketId: b.id, basketName: basketLabel(b, 'Unnamed group'),
             side: l.side, option: l.option, strike: l.strike, expiry: legExpiry, lots: l.lots,
             opposite: c.side !== l.side,
           });

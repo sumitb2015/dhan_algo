@@ -16,7 +16,7 @@ import React, { useMemo, useState } from 'react';
 import { cn } from '@/lib/utils';
 import { computeBsGreeksExact, calculateTimeToExpiryYears } from '@/lib/optionsMonitorMath';
 import { impliedVolFromPrice } from '@/lib/optionsStrategy';
-import { legPnl, type MultiLegLeg } from '@/lib/multiLegFocus';
+import { legPnl, isOptionLeg, type MultiLegLeg } from '@/lib/multiLegFocus';
 
 export type LadderLayout = 'vertical' | 'horizontal';
 type RangePreset = 'fit' | '10' | '20' | '30';
@@ -283,7 +283,8 @@ export default function PositionVisualizer({
   const [pinId, setPinId] = useState<string | null>(null);
 
   const rows = useMemo<Row[]>(() => {
-    return legs
+    // Option legs only: the map is laid out by strike (futures legs are on the payoff chart).
+    return legs.filter(isOptionLeg)
       .filter(l => l.status !== 'FAILED' && (includeClosed || l.status !== 'CLOSED'))
       .map(l => {
         const expiry = l.expiry || basketExpiry;

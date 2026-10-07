@@ -1,13 +1,13 @@
 // On-demand Greeks for one Multi-Leg Focus strategy row. Pure — no fetch/React.
 // Computed through the central payoff/pricing library (IV solved from each leg's live mark) — the same numbers as the payoff chart.
 
-import type { MultiLegBasket } from './multiLegFocus.ts';
+import type { MultiLegBasket, LegInstrument } from './multiLegFocus.ts';
 import { bookGreeks } from './optionsPayoff.ts';
 
 export interface GreekLeg {
   legId: string;
   side: 'B' | 'S';
-  option: 'CE' | 'PE';
+  option: LegInstrument;
   strike: number;
   expiry: string;
   /** Real contract units (NOT lots) — the multiplier the Greeks are scaled by. */
@@ -72,16 +72,24 @@ export function computeBasketGreeks(
 ): { net: { delta: number; gamma: number; theta: number; vega: number }; legs: PricedGreekLeg[]; assumed: PricedGreekLeg[] } {
   const empty = { net: { delta: 0, gamma: 0, theta: 0, vega: 0 }, legs: [] as PricedGreekLeg[], assumed: [] as PricedGreekLeg[] };
   if (legs.length === 0) return empty;
-  const res = bookGreeks({
+  // Futures: delta 1 per unit, no gamma/theta/vega. Options go through the central library.
+  const opts = legs.filter((l): l is GreekLeg & { option: 'CE' | 'PE' } => l.option !== 'FUT');
+  const res = opts.length ? bookGreeks({
     spot: ctx.spot, now: ctx.now, fallbackIv: ctx.fallbackIv,
-    legs: legs.map(l => ({
+    legs: opts.map(l => ({
       type: l.option, strike: l.strike, expiry: l.expiry, qty: l.side === 'S' ? -l.units : l.units,
       entryPrice: 1, mark: ctx.markOf(l), chainIv: ctx.chainIvOf?.(l),
     })),
+  }) : null;
+  if (opts.length && !res) return empty;
+  const net = res ? { ...res.net } : { delta: 0, gamma: 0, theta: 0, vega: 0 };
+  const priced: PricedGreekLeg[] = legs.map(l => {
+    if (l.option === 'FUT') {
+      net.delta += l.side === 'S' ? -l.units : l.units;
+      return { ...l, delta: 1, gamma: 0, theta: 0, vega: 0, iv: null, ivSource: 'mark' as const };
+    }
+    const i = opts.indexOf(l as GreekLeg & { option: 'CE' | 'PE' });
+    return { ...l, ...res!.legs[i].unit, iv: res!.legs[i].iv, ivSource: res!.legs[i].ivSource };
   });
-  if (!res) return empty;
-  const priced: PricedGreekLeg[] = legs.map((l, i) => ({
-    ...l, ...res.legs[i].unit, iv: res.legs[i].iv, ivSource: res.legs[i].ivSource,
-  }));
-  return { net: res.net, legs: priced, assumed: priced.filter(p => p.ivSource === 'assumed') };
+  return { net, legs: priced, assumed: priced.filter(p => p.ivSource === 'assumed') };
 }

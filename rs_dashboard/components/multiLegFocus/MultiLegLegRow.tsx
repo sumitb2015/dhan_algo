@@ -3,7 +3,7 @@
 import React from 'react';
 import { X, Plus, AlertTriangle, ChevronUp, ChevronDown, Unlink } from 'lucide-react';
 import {
-  legPnl, computeLegTrailingSL, formatExpiryLabel, legAvgPrice, legExitPrice, legQtyUnits, legPnlPct, legOtmPct, type MultiLegLeg, type LegQtyWarning,
+  legPnl, computeLegTrailingSL, formatExpiryLabel, legAvgPrice, legExitPrice, legQtyUnits, legPnlPct, legOtmPct, type MultiLegLeg,
 } from '@/lib/multiLegFocus';
 import { DEFAULT_LEG_COLUMNS, type LegColumns } from '@/lib/legColumns';
 import { FOCUS_RING } from '@/components/Scalper';
@@ -57,16 +57,6 @@ interface MultiLegLegRowProps {
   strategyMultiplier?: number;
   /** Live implied volatility as a fraction (0.14 = 14%); 0 when unknown. */
   iv?: number;
-  /** Set when every live leg on this contract together tracks a different qty
-   *  than the broker holds — see MultiLegFocus.tsx's legQtyWarnings and the
-   *  dhan-terminal-position-ownership skill's Invariant 6: the displayed
-   *  qty/lots never follow the broker's pooled total, so this is the only
-   *  visible sign of the gap once the one-shot toast has scrolled away. */
-  qtyWarning?: LegQtyWarning;
-  /** 'under': adopt the untracked gap into this leg (confirmed by the handler). */
-  onClaimQty?: () => void;
-  /** 'over': record the outside close against this leg (confirmed, no order). */
-  onReduceQty?: () => void;
   /** Selection for regrouping (checkbox). Omit to hide the control. */
   selected?: boolean;
   onSelect?: (on: boolean) => void;
@@ -109,13 +99,14 @@ export function TagCell({ value, onCommit }: { value?: string; onCommit: (v: str
 }
 
 export default function MultiLegLegRow({
-  leg, allStrikes, ltp, spot, editable, exiting, margin, multiplier = 1, strategyMultiplier = 1, frontExpiry, farExpiry, onChange, onRemove, onExit, onOpenAddLots, onShift, shiftSteps = 1, shiftBusy = false, strikeBlocked = false, columns = DEFAULT_LEG_COLUMNS, showExit = false, iv = 0, qtyWarning, onClaimQty, onReduceQty, selected = false, onSelect, onTag, onDetach,
+  leg, allStrikes, ltp, spot, editable, exiting, margin, multiplier = 1, strategyMultiplier = 1, frontExpiry, farExpiry, onChange, onRemove, onExit, onOpenAddLots, onShift, shiftSteps = 1, shiftBusy = false, strikeBlocked = false, columns = DEFAULT_LEG_COLUMNS, showExit = false, iv = 0, selected = false, onSelect, onTag, onDetach,
 }: MultiLegLegRowProps) {
   const [exitLotsText, setExitLotsText] = React.useState('');
   // The box resets once the leg's lots change (a partial exit landed), never before.
   React.useEffect(() => { setExitLotsText(''); }, [leg.lots]);
   const exitLotsNum = Math.floor(Number(exitLotsText));
   const exitLotsValid = exitLotsText === '' || (exitLotsNum >= 1 && exitLotsNum <= leg.lots);
+  const isFut = leg.option === 'FUT';
   const pnl = leg.fill ? legPnl(leg, ltp, multiplier) : 0;
   const pnlColor = pnl > 0 ? 'text-emerald-400' : pnl < 0 ? 'text-rose-400' : 'text-zinc-400';
   const trailingEval = computeLegTrailingSL(leg, ltp);
@@ -161,13 +152,16 @@ export default function MultiLegLegRow({
         </select>
       </td>
       <td className="px-1.5 py-1.5">
+        {isFut ? <span className="text-xs font-bold text-zinc-200">FUT</span> : (
         <select value={leg.option} disabled={!editable} className={SELECT_CLASS}
           onChange={e => onChange({ option: e.target.value as MultiLegLeg['option'] })}>
           <option value="CE">CE</option>
           <option value="PE">PE</option>
         </select>
+        )}
       </td>
       <td className="px-2 py-1.5">
+        {isFut ? <span className="text-xs text-zinc-500" title="Futures have no strike">—</span> : <>
         <select value={leg.strike} disabled={!editable} className={SELECT_CLASS}
           onChange={e => onChange({ strike: Number(e.target.value) })}>
           {!allStrikes.includes(leg.strike) && <option value={leg.strike}>{leg.strike}</option>}
@@ -186,6 +180,7 @@ export default function MultiLegLegRow({
             )}
           </span>
         )}
+        </>}
       </td>
       {columns.otm && (
         <td className={`${numCell} ${otmPct != null && otmPct < 0 && leg.side === 'S' ? 'text-amber-400' : 'text-zinc-300'}`}
@@ -209,32 +204,6 @@ export default function MultiLegLegRow({
           >
             {Number((leg.ratio ?? 1).toFixed(2))}× ratio
           </span>
-        )}
-        {qtyWarning && (
-          <span
-            className={`mt-0.5 flex items-center justify-center gap-0.5 text-[9px] font-bold ${qtyWarning.kind === 'over' ? 'text-red-400' : 'text-amber-400'}`}
-            title={qtyWarning.kind === 'over'
-              ? `Strategies on this contract track ${qtyWarning.trackedQty} (this leg ${qtyWarning.ownQty}), but the broker holds only ${qtyWarning.brokerQty}: ${qtyWarning.gap} was closed outside this tool.`
-              : `Strategies on this contract track ${qtyWarning.trackedQty} (this leg ${qtyWarning.ownQty}), but the broker holds ${qtyWarning.brokerQty}: ${qtyWarning.gap} is untracked — a manual top-up, or an outside trade.`}
-          >
-            <AlertTriangle className="w-2.5 h-2.5" /> {qtyWarning.kind === 'over' ? `Over ${qtyWarning.gap}` : `Untracked ${qtyWarning.gap}`}
-          </span>
-        )}
-        {qtyWarning?.kind === 'under' && onClaimQty && (
-          <button type="button" onClick={onClaimQty}
-            aria-label={`Track ${qtyWarning.gap} untracked broker quantity on this leg`}
-            title="Placed the extra quantity for this leg? Adopt it into this leg's tracked qty (other strategies' share on this contract is excluded; asks to confirm)."
-            className={`mt-0.5 mx-auto block px-1.5 rounded border border-amber-500/40 bg-amber-500/10 text-[9px] font-bold text-amber-400 hover:bg-amber-500/20 ${FOCUS_RING}`}>
-            Claim
-          </button>
-        )}
-        {qtyWarning?.kind === 'over' && onReduceQty && (
-          <button type="button" onClick={onReduceQty}
-            aria-label={`Record ${qtyWarning.gap} quantity closed outside the tool on this leg`}
-            title="Was the outside close for THIS leg? Record it here — no order is placed (asks for the exit price and confirms)."
-            className={`mt-0.5 mx-auto block px-1.5 rounded border border-red-500/40 bg-red-500/10 text-[9px] font-bold text-red-400 hover:bg-red-500/20 ${FOCUS_RING}`}>
-            Reduce
-          </button>
         )}
       </td>
       {columns.qty && (

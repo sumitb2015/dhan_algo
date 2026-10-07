@@ -144,6 +144,27 @@ the double-driving the STALE check exists to catch; silence in that state
 must read as "danger," not "safe to take over."
 
 ### 6. Reconciliation needs a propagation grace window, and clamps DOWN ONLY — this policy flip-flopped once, don't flip it back
+
+> **Changed 2026-10-07 for Multi-Leg Focus (user decision): one strike per group, broker sync both ways.**
+> The clamp-down-only rule below existed because two baskets could hold the same contract and Dhan nets
+> them into one broker row. MultiLegFocus now refuses that outright (`refuseSharedStrike`: place, add lots,
+> add leg, scale and shift onto a strike open in another group are blocked, not confirmed), so a
+> contract's broker qty belongs to its one leg. `lib/multiLegBrokerSync.ts` then: grows that leg to the
+> broker qty (`growLegToBroker`, only when it is the contract's only live leg), and turns a broker option
+> position no leg holds into an ungrouped trade (`outsidePositionBaskets`). The Untracked/Over warnings,
+> Claim and Reduce are gone. Both rules stand down while this tool's own orders may still land (PLACING /
+> CLOSING, `pendingOrders`, fill grace, any order action or regroup in flight), so its own fill is never
+> counted twice. Known trade-off: a position opened on the same contract by another surface (Scalper,
+> Focus Tool, Triple Straddle, a Python strategy) is adopted here too, and a stop set here can close it.
+> Shrinking is unchanged (clamp + `brokerClampSlice`). The history below still applies to any surface
+> that lets two rows share a contract.
+>
+> **Futures legs (same day):** `MultiLegLeg.option` is `'CE' | 'PE' | 'FUT'` (FUT: strike 0, adopted from the
+> broker only). Payoff prices a FUT leg as a synthetic call minus put at strike = entry
+> (`futuresAsSyntheticPayoffLegs`), Greeks give it delta 1, its live price is inverted from Dhan's own row
+> (`ltpFromBrokerRow`: costPrice + unrealizedProfit / (netQty x multiplier)). Exit works (it sizes off the
+> broker row); place / add lots / shift / scale refuse FUT legs (`isOptionLeg`), and the option-chain views
+> (P&L table, Position Map, Strategy Chart) skip them.
 `MultiLegFocus` reconciles each leg against the broker's position book on a poll
 tick (`reconcileLegWithBroker` in `lib/multiLegFocus.ts`).
 - A leg placed seconds ago can still show as flat in the broker's position book —

@@ -19,7 +19,7 @@ import {
   type StrategyLeg,
 } from '@/lib/optionsChartTypes';
 import { CHART_UNDERLYINGS } from '@/lib/underlyings';
-import type { MultiLegLeg } from '@/lib/multiLegFocus';
+import { isOptionLeg, type MultiLegLeg } from '@/lib/multiLegFocus';
 import { FOCUS_RING } from '../Scalper';
 
 const INTERVALS = ['1', '2', '3', '5'] as const;
@@ -27,7 +27,8 @@ const INTERVALS = ['1', '2', '3', '5'] as const;
 /** Chart legs for a basket: every live (not CLOSED/FAILED) leg, same-contract legs merged. */
 export function chartLegsFor(legs: MultiLegLeg[], lotSize?: number): StrategyLeg[] {
   const merged = new Map<string, StrategyLeg>();
-  for (const l of legs) {
+  // Option legs only: the chart plots option premiums (futures legs are on the payoff chart).
+  for (const l of legs.filter(isOptionLeg)) {
     if (l.status === 'CLOSED' || l.status === 'FAILED' || !(l.lots > 0) || !Number.isFinite(l.strike)) continue;
     // A placed leg is sized from what actually filled (ledger qty / lot size), not the ordered
     // lots. Only when the qty divides cleanly; crude quantity semantics differ, so the caller

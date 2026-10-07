@@ -1,14 +1,14 @@
 'use client';
 
 import React from 'react';
-import { AlertTriangle } from 'lucide-react';
 import {
-  legPnl, legAvgPrice, legQtyUnits, formatExpiryLabel, crudeQtyMultiplier,
-  type MultiLegBasket, type MultiLegLeg, type LegQtyWarning,
+  legPnl, legAvgPrice, legQtyUnits, formatExpiryLabel, crudeQtyMultiplier, legName,
+  type MultiLegBasket, type MultiLegLeg,
 } from '@/lib/multiLegFocus';
 import { BROKER_LABELS, type Broker } from '@/hooks/useBrokerSelector';
 import { FOCUS_RING } from '@/components/Scalper';
 import { TagCell } from './MultiLegLegRow';
+import type { BrokerOnlyPosition } from '@/lib/multiLegBrokerSync';
 
 /** One ungrouped trade: a one-leg basket with no name (see isLooseTrade). */
 export interface UngroupedTrade { basket: MultiLegBasket; leg: MultiLegLeg }
@@ -21,8 +21,8 @@ interface Props {
   onTag: (trade: UngroupedTrade, tag: string | undefined) => void;
   onExit: (trade: UngroupedTrade) => void;
   exitingLegs: Set<string>;
-  /** Keyed `${basketId}:${legId}`. */
-  legQtyWarnings: Record<string, LegQtyWarning>;
+  /** Broker positions the ledger cannot hold (futures, unidentified options). Read-only rows. */
+  brokerOnly: BrokerOnlyPosition[];
 }
 
 function fmtMoney(n: number): string {
@@ -35,16 +35,16 @@ const NUM = `${TD} text-right font-mono tabular-nums`;
 
 /** Trades that are in no group, one line each. Tick them and use the group bar to combine them. */
 export default function UngroupedTradesTable({
-  trades, ltpFor, selectedLegIds, onSelectLegs, onTag, onExit, exitingLegs, legQtyWarnings,
+  trades, ltpFor, selectedLegIds, onSelectLegs, onTag, onExit, exitingLegs, brokerOnly,
 }: Props) {
-  if (trades.length === 0) return null;
+  if (trades.length === 0 && brokerOnly.length === 0) return null;
   const ids = trades.map(t => t.leg.id);
   const allTicked = ids.every(id => selectedLegIds.has(id));
 
   return (
     <section aria-label="Ungrouped trades" className="flex flex-col gap-2 pt-2">
       <div className="flex items-center gap-2">
-        <span className="text-xs font-bold uppercase tracking-wider text-zinc-300">Ungrouped trades · {trades.length}</span>
+        <span className="text-xs font-bold uppercase tracking-wider text-zinc-300">Ungrouped trades · {trades.length + brokerOnly.length}</span>
         <span className="text-[11px] text-zinc-500">Tick trades, then Group them in the bar below</span>
         <div className="flex-1 h-px bg-zinc-700" />
       </div>
@@ -77,7 +77,6 @@ export default function UngroupedTradesTable({
               const avg = legAvgPrice(leg);
               const qty = legQtyUnits(leg);
               const closed = leg.status === 'CLOSED';
-              const warn = legQtyWarnings[`${basket.id}:${leg.id}`];
               const ticked = selectedLegIds.has(leg.id);
               return (
                 <tr key={leg.id} className={`border-t border-zinc-800 ${ticked ? 'bg-emerald-500/5' : ''} ${closed ? 'text-zinc-500' : 'text-zinc-200'}`}>
@@ -91,13 +90,7 @@ export default function UngroupedTradesTable({
                   </td>
                   <td className={`${TD} font-semibold whitespace-nowrap`}>
                     <span className={leg.side === 'S' ? 'text-rose-400' : 'text-emerald-400'}>{leg.side === 'S' ? 'SELL' : 'BUY'}</span>
-                    {' '}{leg.strike} {leg.option}
-                    {warn && (
-                      <span className="ml-1.5 inline-flex items-center gap-0.5 text-[10px] font-bold text-amber-400"
-                        title={`Tracked ${warn.trackedQty}, broker ${warn.brokerQty}. Group this trade to use Claim / Reduce on it.`}>
-                        <AlertTriangle className="w-3 h-3" aria-hidden /> {warn.kind === 'over' ? `Over ${warn.gap}` : `Untracked ${warn.gap}`}
-                      </span>
-                    )}
+                    {' '}{legName(leg)}
                   </td>
                   <td className={`${TD} whitespace-nowrap`}>{formatExpiryLabel(leg.expiry || basket.expiry)}</td>
                   <td className={NUM}>{leg.lots}</td>
@@ -118,6 +111,32 @@ export default function UngroupedTradesTable({
                 </tr>
               );
             })}
+            {brokerOnly.map(p => (
+              <tr key={`${p.broker}:${p.ident}`} className="border-t border-zinc-800 text-zinc-200">
+                <td className={TD} />
+                <td className={TD}>
+                  <span className="font-semibold">{p.tradingSymbol.split('-')[0]}</span>
+                  <span className="ml-1.5 text-[10px] text-zinc-500">{BROKER_LABELS[p.broker as Broker] ?? p.broker}</span>
+                </td>
+                <td className={`${TD} font-semibold whitespace-nowrap`} title={p.tradingSymbol}>
+                  <span className={p.side === 'S' ? 'text-rose-400' : 'text-emerald-400'}>{p.side === 'S' ? 'SELL' : 'BUY'}</span>
+                  {' '}{p.kind === 'FUT' ? 'FUT' : p.tradingSymbol}
+                </td>
+                <td className={`${TD} whitespace-nowrap`}>{p.expiry ? formatExpiryLabel(p.expiry) : '—'}</td>
+                <td className={NUM}>—</td>
+                <td className={NUM}>{p.qty.toLocaleString('en-IN')}</td>
+                <td className={NUM}>{p.avgPrice > 0 ? p.avgPrice.toFixed(2) : '—'}</td>
+                <td className={NUM}>—</td>
+                <td className={`${NUM} font-bold ${p.pnl > 0 ? 'text-emerald-400' : p.pnl < 0 ? 'text-rose-400' : 'text-zinc-400'}`} title="The broker's own unrealized P&L">{fmtMoney(p.pnl)}</td>
+                <td className={`${TD} text-zinc-400`} title={p.kind === 'FUT'
+                  ? 'Futures are shown from the broker. Grouping, stops and exits here cover options only: manage this from Scalper or Cyber Scalper.'
+                  : 'An option this page cannot identify (underlying, strike or expiry). Shown from the broker only.'}>
+                  BROKER ONLY
+                </td>
+                <td className={TD} />
+                <td className={TD} />
+              </tr>
+            ))}
           </tbody>
         </table>
       </div>

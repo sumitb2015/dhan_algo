@@ -17,7 +17,7 @@ import { FocusModal } from '../FocusTool';
 import PnlTableTab from '../analytics/PnlTableTab';
 import { impliedVolFromPrice, type ResolvedLeg } from '@/lib/optionsStrategy';
 import { calculateTimeToExpiryYears } from '@/lib/optionsMonitorMath';
-import { legPnl, type MultiLegLeg } from '@/lib/multiLegFocus';
+import { legPnl, isOptionLeg, type MultiLegLeg } from '@/lib/multiLegFocus';
 
 const FALLBACK_IV = 0.15;
 
@@ -43,7 +43,8 @@ export default function PnlTableModal({
 }: Props) {
   const resolved = useMemo<ResolvedLeg[]>(() => {
     if (!isOpen) return [];
-    return legs
+    // Option legs only: this grid reprices premiums by strike (futures legs are on the payoff chart).
+    return legs.filter(isOptionLeg)
       .filter(l => l.status !== 'CLOSED' && l.status !== 'FAILED' && l.lots > 0)
       .map(l => {
         const legExpiry = l.expiry || basketExpiry;

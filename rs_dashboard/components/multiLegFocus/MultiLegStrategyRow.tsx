@@ -17,8 +17,8 @@ import { DEFAULT_LEG_COLUMNS, type LegColumns } from '@/lib/legColumns';
 import {
   computeLegTrailingSL, computeStrategyMetrics, checkStrategyRisk, computeBasketStatus,
   classifyBasketStructure, legCountsToday, legPnl, legAvgPrice, legPnlPct, legQtyUnits, crudeQtyMultiplier, basketLabel,
-  findSiblingLegCollisions, type SiblingLegCollision, scaleBasketMultiplier,
-  type MultiLegBasket, type MultiLegLeg, type StrategyRiskConfig, type LegQtyWarning,
+  findSiblingLegCollisions, type SiblingLegCollision, scaleBasketMultiplier, futuresAsSyntheticPayoffLegs, isOptionLeg,
+  type MultiLegBasket, type MultiLegLeg, type StrategyRiskConfig,
 } from '@/lib/multiLegFocus';
 import { calculateTimeToExpiryYears } from '@/lib/optionsPricing';
 import { FOCUS_RING } from '@/components/Scalper';
@@ -26,7 +26,7 @@ import { clampShiftSteps, MAX_SHIFT_STEPS } from '@/lib/strikeShift';
 import { allowedStrikes, strikeAllowed, snapToAllowed } from '@/lib/farExpiryRules';
 import { BROKER_LABELS, type Broker } from '@/hooks/useBrokerSelector';
 import PayoffDiagram, { modelToDiagramProps } from '@/components/strategy/PayoffDiagram';
-import { buildPayoffModel, type PayoffModel } from '@/lib/optionsPayoff';
+import { buildPayoffModel, type PayoffModel, type PayoffLegInput } from '@/lib/optionsPayoff';
 import { StatChip } from '@/components/analytics/PayoffMetricStrip';
 import { basketToGreekLegs, computeBasketGreeks } from '@/lib/multiLegGreeks';
 
@@ -97,10 +97,6 @@ export interface MultiLegStrategyRowProps {
     newSl?: number;
     newTp?: number;
   }) => Promise<void>;
-  /** Explicitly attribute an under-tracked broker qty gap to this leg (user-confirmed). */
-  onClaimBrokerQty?: (legId: string) => Promise<void>;
-  /** Record quantity closed outside this tool on this leg (no order). */
-  onReduceOutsideQty?: (legId: string) => Promise<void>;
   /** Page clock (epoch ms, ticks each minute) that splits Today from earlier days. */
   pnlNow: number;
   onAddNewLeg?: (params: {
@@ -125,8 +121,6 @@ export interface MultiLegStrategyRowProps {
   overallMargin?: number;
   hedgeBenefit?: number;
   availableFunds?: number;
-  /** Keyed `${basketId}:${legId}` — see MultiLegFocus.tsx's legQtyWarnings. */
-  legQtyWarnings?: Record<string, LegQtyWarning>;
   /** All baskets on the page — used only to flag Greeks legs that share a contract with a sibling. */
   allBaskets?: MultiLegBasket[];
   /** Legs ticked for regrouping (page-wide, so a group can span rows). */
@@ -163,8 +157,6 @@ export default function MultiLegStrategyRow({
   legColumns = DEFAULT_LEG_COLUMNS,
   onLegColumnsChange,
   onAddLots,
-  onClaimBrokerQty,
-  onReduceOutsideQty,
   pnlNow,
   onAddNewLeg,
   onScaleStrategy,
@@ -179,7 +171,6 @@ export default function MultiLegStrategyRow({
   overallMargin,
   hedgeBenefit,
   availableFunds,
-  legQtyWarnings,
   allBaskets,
   selectedLegIds,
   onSelectLegs,
@@ -337,7 +328,7 @@ export default function MultiLegStrategyRow({
     const result = computeBasketGreeks(legs, {
       spot: spot ?? 0,
       markOf: gl => { const l = byId.get(gl.legId); const v = l ? ltpFor(l) : 0; return v > 0 ? v : undefined; },
-      chainIvOf: gl => ivForStrike?.(gl.strike, gl.option, gl.expiry) || undefined,
+      chainIvOf: gl => (gl.option === 'FUT' ? undefined : ivForStrike?.(gl.strike, gl.option, gl.expiry) || undefined),
       fallbackIv: FALLBACK_IV,
     });
     // Sibling baskets holding the same contract share one netted broker row, so this basket's own ledger quantity may not
@@ -411,16 +402,18 @@ export default function MultiLegStrategyRow({
 
   const payoffLegInputs = basket.legs
     .filter(l => l.status !== 'CLOSED')
-    .map(l => {
+    .flatMap((l): PayoffLegInput[] => {
       const legExpiry = l.expiry || basket.expiry;
       const live = ltpFor(l);
       const entry = (l.fill?.avgPrice && l.fill.avgPrice > 0) ? l.fill.avgPrice : (live > 0 ? live : (l.price || 0));
       const units = ((l.fill?.qty && l.fill.qty > 0) ? l.fill.qty : (l.lots * defaultLotSize)) * payoffMultiplier;
-      return {
-        type: l.option, strike: l.strike, expiry: legExpiry, qty: l.side === 'S' ? -units : units,
+      const qty = l.side === 'S' ? -units : units;
+      if (l.option === 'FUT') return futuresAsSyntheticPayoffLegs(qty, entry, legExpiry, live);
+      return [{
+        type: l.option, strike: l.strike, expiry: legExpiry, qty,
         entryPrice: entry, mark: live > 0 ? live : undefined,
         chainIv: ivForStrike?.(l.strike, l.option, legExpiry) || undefined, lotSize: defaultLotSize,
-      };
+      }];
     });
 
   // ATM IV of the near expiry (never VIX): the SD band and POP are built on it.
@@ -455,7 +448,7 @@ export default function MultiLegStrategyRow({
 
   // ── Active leg strike markers for X-axis pins ────────────────────────
   const strategyStrikes = useMemo(() => {
-    const activeLegs = basket.legs.filter(l => l.status !== 'CLOSED');
+    const activeLegs = basket.legs.filter(isOptionLeg).filter(l => l.status !== 'CLOSED');
     return activeLegs.map(l => ({
       strike: l.strike,
       option: l.option,
@@ -1357,17 +1350,14 @@ export default function MultiLegStrategyRow({
                       onChange={patch => updateLeg(leg.id, patch)}
                       onRemove={() => removeLeg(leg.id)}
                       onExit={lots => onExitLeg(leg, lots)}
-                      onOpenAddLots={() => setSelectedLegForAddLots(leg)}
-                      onShift={onShiftLegs ? (d => runShift([leg.id], d)) : undefined}
+                      onOpenAddLots={leg.option === 'FUT' ? undefined : () => setSelectedLegForAddLots(leg)}
+                      onShift={onShiftLegs && leg.option !== 'FUT' ? (d => runShift([leg.id], d)) : undefined}
                       shiftSteps={shiftSteps}
                       shiftBusy={placing || exiting || shifting}
                       columns={legColumns}
                       showExit={showExitCol}
-                      iv={ivForStrike?.(leg.strike, leg.option, leg.expiry || basket.expiry) ?? 0}
+                      iv={leg.option === 'FUT' ? 0 : ivForStrike?.(leg.strike, leg.option, leg.expiry || basket.expiry) ?? 0}
                       strikeBlocked={leg.status === 'DRAFT' && !strikeAllowed(basket.underlying, leg.expiry || basket.expiry, expiries, leg.strike)}
-                      qtyWarning={legQtyWarnings?.[`${basket.id}:${leg.id}`]}
-                      onClaimQty={onClaimBrokerQty && leg.status === 'OPEN' ? (() => onClaimBrokerQty(leg.id)) : undefined}
-                      onReduceQty={onReduceOutsideQty && leg.status === 'OPEN' ? (() => onReduceOutsideQty(leg.id)) : undefined}
                       selected={!!selectedLegIds?.has(leg.id)}
                       onSelect={onSelectLegs ? (on => onSelectLegs([leg.id], on)) : undefined}
                       onTag={onTagLeg ? (tag => onTagLeg(leg.id, tag)) : undefined}

@@ -54,7 +54,7 @@ test('the same Greeks the payoff chart header shows (one library, one number)', 
   const gl = basketToGreekLegs(b, 65);
   const now = Date.now();
   const g = computeBasketGreeks(gl, { spot: 23000, markOf: () => 350, now });
-  const m = buildPayoffModel({ spot: 23000, now, legs: gl.map(l => ({ type: l.option, strike: l.strike, expiry: l.expiry, qty: l.side === 'S' ? -l.units : l.units, entryPrice: 350, mark: 350 })) })!;
+  const m = buildPayoffModel({ spot: 23000, now, legs: gl.map(l => ({ type: l.option as 'CE' | 'PE', strike: l.strike, expiry: l.expiry, qty: l.side === 'S' ? -l.units : l.units, entryPrice: 350, mark: 350 })) })!;
   assert.ok(Math.abs(g.net.delta - m.netGreeks.delta) < 1e-9 && Math.abs(g.net.theta - m.netGreeks.theta) < 1e-9);
 });
 
