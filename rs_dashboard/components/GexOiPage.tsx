@@ -3,22 +3,26 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ComposedChart, Bar, Line, XAxis, YAxis, CartesianGrid, Tooltip,
-  ResponsiveContainer, ReferenceLine, Cell,
+  ResponsiveContainer, ReferenceLine, Cell, LabelList,
 } from 'recharts';
-import { BookOpen } from 'lucide-react';
+import { WallPill, WALL_TONE } from './GexWallParts';
+import GexCalcButton from './GexCalcTable';
+import UpdateIntervalSlider, { fmtInterval, useUpdateInterval } from './UpdateIntervalSlider';
+import GexLevelsButton, { type GexChartLevel } from './GexLevelsChart';
+import { BookOpen, RefreshCw } from 'lucide-react';
 import NavBar from './NavBar';
 import GuidePanel from './RsStrategyGuide';
 import DataChip from './DataChip';
 import { PulseStat, ChartHeader } from './QuantPanel';
 import { useMarketLive } from '@/lib/useMarketLive';
-import { expiryEpochMs, rollForward } from '@/lib/optionsPricing';
+import { startLiveIndicesBridge } from '@/lib/startLiveIndicesBridge';
+import { expiryEpochMs } from '@/lib/optionsPricing';
 import {
-  buildGexRows, forwardFromSpot, fmtGex, gexChecklist, gexLevels, wallClarity, type ChecklistTone, type GexChainEntry, type GexPower, type GexRow,
+  buildGexRows, gexCalcTable, fmtGex, gexChecklist, gexLevels, topTwo, type ChecklistTone, type GexChainEntry, type GexRow,
 } from '@/lib/gex';
 
 const UNDERLYING = 'NIFTY';
 const STRIKE_STEP = 50;
-const POLL_MS = 15_000;
 const RANGE_OPTIONS = [8, 12, 20, 30] as const;
 
 /** A GexRow plus the OI figures the charts show (lots at the current lot size, or units when the lot is unknown). */
@@ -29,13 +33,27 @@ interface ChainPayload {
   reqExpiry?: string;
   chain: { oc?: Record<string, GexChainEntry> };
   spot: number;
-  future_price?: number;
-  future_expiry?: string;
 }
 
 const fmtStrike = (n: number) => n.toLocaleString('en-IN');
 const fmtOi = (n: number) => fmtGex(n);
-const POWER_UNIT: Record<number, string> = { 1: 'index units', 2: '₹' };
+/** Value label for a bar: above a positive bar, below a negative one, horizontal. */
+const barValueLabel = (props: Record<string, unknown>) => {
+  const { x, y, width, height, value } = props as { x: number; y: number; width: number; height: number; value: number };
+  const v = Number(value);
+  if (!Number.isFinite(v) || v === 0 || !Number.isFinite(x) || !Number.isFinite(y)) return null;
+  const top = Math.min(y, y + height);
+  const bottom = Math.max(y, y + height);
+  const cx = x + width / 2;
+  const py = v > 0 ? top - 6 : bottom + 10;
+  return (
+    <text x={cx} y={py} textAnchor="middle"
+      fontSize={9} fontWeight={600} fontFamily="var(--font-mono)" fill="var(--color-zinc-300)">{fmtGex(v)}</text>
+  );
+};
+
+/** The video's formula, gamma x OI x lot x spot x 0.01, in index units (spot once). */
+const GEX_UNIT = 'index units';
 
 const GexTooltip = ({ active, payload, label, oiLabel }: Record<string, unknown> & { oiLabel: string }) => {
   if (!active || !Array.isArray(payload) || !payload.length) return null;
@@ -80,17 +98,58 @@ function todayIST(): string {
 export default function GexOiPage({ guide = '' }: { guide?: string }) {
   const [guideOpen, setGuideOpen] = useState(false);
   const live = useMarketLive(UNDERLYING);
+  // User-chosen refresh gap (5 s to 3 min). Governs the chain, spot and level-chart polls below.
+  const [updateSec, setUpdateSec] = useUpdateInterval();
+  const pollMs = updateSec * 1000;
+  // Spot and the chain refresh on the user's chosen gap. The server caches each chain for 30 s, so walls/flip/regime stay on the
+  // chain's numbers while the spot line and the side-of-spot logic can move between chain polls.
+  const [liveSpot, setLiveSpot] = useState(0);
+  const lastSpotPull = useRef(0);
+  useEffect(() => { startLiveIndicesBridge(); }, []);
+  useEffect(() => {
+    if (!live) return;
+    let cancelled = false;
+    const pull = () => {
+      if (document.hidden) return;
+      lastSpotPull.current = Date.now();
+      fetch('/api/scalper/top-indices')
+        .then(r => r.json())
+        .then((t: { success?: boolean; quotes?: Record<string, { ltp?: number | null }> }) => {
+          const v = Number(t.quotes?.[UNDERLYING]?.ltp);
+          if (!cancelled && t.success !== false && v > 0) setLiveSpot(v);
+        })
+        .catch(() => { /* keep the last spot; the chain poll still refreshes it */ });
+    };
+    // Changing the slider restarts this effect: do not refetch for every step of a drag.
+    const first = Date.now() - lastSpotPull.current > 5000 ? setTimeout(pull, 0) : undefined;
+    const id = setInterval(pull, pollMs);
+    return () => { cancelled = true; if (first) clearTimeout(first); clearInterval(id); };
+  }, [live, pollMs]);
   const [expiries, setExpiries] = useState<string[]>([]);
   const [expiry, setExpiry] = useState('');
   const [lot, setLot] = useState<number | null | undefined>(undefined); // undefined = still loading, null = unknown
-  const [power, setPower] = useState<GexPower>(2);
   const [range, setRange] = useState<number>(12);
+  const [showValues, setShowValues] = useState(false);
+  useEffect(() => {
+    // Deferred a task so no setState runs during the effect pass (same pattern as the fetch effects below).
+    const t = setTimeout(() => { try { setShowValues(localStorage.getItem('gex_show_values') === '1'); } catch { /* storage blocked */ } }, 0);
+    return () => clearTimeout(t);
+  }, []);
+  const toggleValues = () => setShowValues(v => {
+    const n = !v;
+    try { localStorage.setItem('gex_show_values', n ? '1' : '0'); } catch { /* storage blocked */ }
+    return n;
+  });
   const [payload, setPayload] = useState<ChainPayload | null>(null);
   const [vix, setVix] = useState<number | null>(null);
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(true);
   const [updated, setUpdated] = useState<string | null>(null);
   const [dataDate, setDataDate] = useState<string | null>(null);
+  const [updatedAt, setUpdatedAt] = useState<number | null>(null);
+  /** Set while the chain on screen is a stale copy served because Dhan failed; the time it was fetched. */
+  const [staleAsOf, setStaleAsOf] = useState<number | null>(null);
+  const [nowMs, setNowMs] = useState(0);
   const seq = useRef(0);
 
   useEffect(() => {
@@ -113,17 +172,39 @@ export default function GexOiPage({ guide = '' }: { guide?: string }) {
       .catch(() => setLot(null));
   }, []);
 
+  // A failed chain fetch is almost always Dhan's account-wide rate limit (~1 call / 3 s). Retry a few times at a gap longer than
+  // that, so one hiccup clears itself, including before the open when the poll loop is not running.
+  const retryRef = useRef<{ n: number; t: ReturnType<typeof setTimeout> | null }>({ n: 0, t: null });
+  const fetchRef = useRef<() => Promise<void>>(async () => {});
+  const retryLater = () => {
+    const r = retryRef.current;
+    if (r.n >= 3) return;
+    r.n += 1;
+    if (r.t) clearTimeout(r.t);
+    r.t = setTimeout(() => { void fetchRef.current(); }, 6000);
+  };
+  useEffect(() => () => { if (retryRef.current.t) clearTimeout(retryRef.current.t); }, []);
+
+  // True while a chain fetch is running, so a short poll gap never stacks a second request behind a slow one.
+  const inflight = useRef(false);
+
   const fetchAll = useCallback(async () => {
     if (!expiry) return;
     const mine = ++seq.current;
+    inflight.current = true;
     try {
-      const res = await fetch(`/api/options/chain?underlying=${UNDERLYING}&expiry=${expiry}`);
-      const j = await res.json() as { success: boolean; data?: ChainPayload; error?: string };
+      const res = await fetch(`/api/options/chain?underlying=${UNDERLYING}&expiry=${expiry}&allowStale=1`);
+      const j = await res.json() as { success: boolean; stale?: boolean; as_of?: number; data?: ChainPayload; error?: string };
       if (mine !== seq.current) return; // a newer request owns the screen
-      if (!j.success || !j.data?.chain?.oc) { setError(j.error ?? 'No chain data'); return; }
+      if (!j.success || !j.data?.chain?.oc) { setError(j.error ?? 'No chain data'); retryLater(); return; }
       setPayload({ ...j.data, reqExpiry: expiry });
       setError('');
-      setUpdated(new Date().toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', second: '2-digit' }));
+      // A stale copy keeps the real age (so the chip goes STALE) and keeps retrying; only a fresh chain resets the count.
+      const asOf = j.stale && j.as_of ? j.as_of : Date.now();
+      setStaleAsOf(j.stale && j.as_of ? j.as_of : null);
+      if (j.stale) retryLater(); else retryRef.current.n = 0;
+      setUpdated(new Date(asOf).toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', second: '2-digit' }));
+      setUpdatedAt(asOf);
       setDataDate(todayIST());
       fetch('/api/scalper/top-indices')
         .then(r => r.json())
@@ -134,11 +215,12 @@ export default function GexOiPage({ guide = '' }: { guide?: string }) {
         // A failed read clears the value: a stale VIX would keep the checklist tile green on old data.
         .catch(() => { if (mine === seq.current) setVix(null); });
     } catch (e) {
-      if (mine === seq.current) setError(String(e));
+      if (mine === seq.current) { setError(String(e)); retryLater(); }
     } finally {
-      if (mine === seq.current) setLoading(false);
+      if (mine === seq.current) { setLoading(false); inflight.current = false; }
     }
   }, [expiry]);
+  useEffect(() => { fetchRef.current = fetchAll; }, [fetchAll]);
 
   useEffect(() => {
     if (!expiry) return;
@@ -147,42 +229,45 @@ export default function GexOiPage({ guide = '' }: { guide?: string }) {
     return () => clearTimeout(first);
   }, [expiry, fetchAll]);
 
+  // 1 s tick so "updated Ns ago" counts up between polls.
+  useEffect(() => {
+    const first = setTimeout(() => setNowMs(Date.now()), 0);
+    const id = setInterval(() => setNowMs(Date.now()), 1000);
+    return () => { clearTimeout(first); clearInterval(id); };
+  }, []);
+
   useEffect(() => {
     if (!expiry || !live) return;
-    const id = setInterval(() => { if (!document.hidden) void fetchAll(); }, POLL_MS);
+    const id = setInterval(() => { if (!document.hidden && !inflight.current) void fetchAll(); }, pollMs);
     const onVis = () => { if (!document.hidden) void fetchAll(); };
     document.addEventListener('visibilitychange', onVis);
     return () => { clearInterval(id); document.removeEventListener('visibilitychange', onVis); };
-  }, [expiry, live, fetchAll]);
+  }, [expiry, live, pollMs, fetchAll]);
 
   // A response fetched for another expiry (still in flight when the select changed) is ignored, not rendered.
   const chain = payload && payload.reqExpiry === expiry ? payload : null;
-  const spot = chain?.spot ?? 0;
-  // Black-76 wants the future that matches this chain; fall back to spot only when no future was returned.
-  const isFut = !!(chain?.future_price && chain.future_price > 0 && chain.future_expiry);
-  // The returned future is usually a later contract than the chain's expiry (monthly future, weekly chain), so roll it to
-  // the chain's own expiry; Black-76 with the wrong forward shifts every gamma.
-  const underlying = isFut ? rollForward(chain!.future_price!, chain!.future_expiry!, expiry) : forwardFromSpot(spot, expiry);
-  // With no future price (typically after hours) the forward is spot carried to expiry (S*e^{rT}): still an estimate, so flagged.
-  const approxForward = !!chain && !isFut;
-
+  const chainSpot = chain?.spot ?? 0;
+  const spot = live && liveSpot > 0 && chainSpot > 0 ? liveSpot : chainSpot;
   // GEX is always built from OI in units (Dhan's convention, never guessed). Charts show lots when the lot size is known.
   const oiDiv = lot && lot > 0 ? lot : 1;
   const oiLabel = oiDiv > 1 ? 'lots' : 'units';
-  // Anchor the window on spot; with a transient spot of 0 fall back to the forward so the chart does not blank.
-  const anchor = spot > 0 ? spot : underlying;
+  // Anchor the strike window on spot.
+  const anchor = spot;
 
-  const { rows, levels, clarity, outside } = useMemo(() => {
-    if (!chain?.chain.oc || !(underlying > 0)) {
-      return { rows: [] as GexViewRow[], levels: gexLevels([], spot), clarity: { call: wallClarity([]), put: wallClarity([]) }, outside: [] as string[] };
+  // Calc table: the same Dhan-gamma formula as the charts, so the table can be checked against them.
+  const calcBuild = useCallback((set: { oc: Record<string, GexChainEntry>; spot: number }) => gexCalcTable(set.oc, { spot: set.spot, lotSize: lot }), [lot]);
+
+  const { rows, levels, clarity, outside, noChainGamma } = useMemo(() => {
+    if (!chain?.chain.oc || !(chainSpot > 0)) {
+      return { rows: [] as GexViewRow[], levels: gexLevels([], spot), clarity: { call: topTwo([]), put: topTwo([]) }, outside: [] as string[], noChainGamma: false };
     }
-    const all = buildGexRows(chain.chain.oc, { expiry, underlying, lotSize: lot, power });
+    const all = buildGexRows(chain.chain.oc, { spot: chain.spot, lotSize: lot });
     const centre = Math.round(anchor / STRIKE_STEP) * STRIKE_STEP;
     // Levels and wall clarity both come from the whole chain, so the checklist describes the walls actually reported.
     const lv = gexLevels(all, spot);
     const cl = {
-      call: wallClarity(all.map(r => ({ strike: r.strike, v: r.ceGex }))),
-      put: wallClarity(all.map(r => ({ strike: r.strike, v: -r.peGex }))),
+      call: topTwo(all.map(r => ({ strike: r.strike, v: r.ceGex }))),
+      put: topTwo(all.map(r => ({ strike: r.strike, v: -r.peGex }))),
     };
     const inWin = (k: number | null) => k == null || Math.abs(k - centre) <= range * STRIKE_STEP;
     const out: string[] = [];
@@ -193,12 +278,19 @@ export default function GexOiPage({ guide = '' }: { guide?: string }) {
     const win: GexViewRow[] = all
       .filter(r => Math.abs(r.strike - centre) <= range * STRIKE_STEP)
       .map(r => ({ ...r, ceOiView: r.ceOi / oiDiv, peOiView: r.peOi / oiDiv }));
-    return { rows: win, levels: lv, clarity: cl, outside: out };
-  }, [chain, lot, underlying, spot, anchor, expiry, power, range, oiDiv]);
+    return { rows: win, levels: lv, clarity: cl, outside: out, noChainGamma: all.length > 0 && all.every(r => r.ceGamma === 0 && r.peGamma === 0) };
+  }, [chain, lot, chainSpot, spot, anchor, range, oiDiv]);
 
   const atm = spot > 0 ? Math.round(spot / STRIKE_STEP) * STRIKE_STEP : 0;
-  // Regime comes from spot vs the flip; the checklist's first tile uses the whole-chain total. Say so when they disagree.
-  const regimeMismatch = levels.regime !== 'unknown' && levels.flip != null && (levels.totalNet > 0) !== (levels.regime === 'positive');
+
+  // Level chart: the video's levels only (call wall, put wall, gamma flip, pinning strike) plus spot.
+  const chartLevels: GexChartLevel[] = [
+    { key: 'cw', label: 'CALL WALL', price: levels.callWall ?? 0, tone: 'call' },
+    { key: 'pw', label: 'PUT WALL', price: levels.putWall ?? 0, tone: 'put' },
+    { key: 'flip', label: 'GAMMA FLIP', price: levels.flip ?? 0, tone: 'flip' },
+    { key: 'pin', label: 'PIN', price: levels.pin ?? 0, tone: 'pin' },
+    { key: 'spot', label: 'SPOT', price: spot, tone: 'spot' },
+  ];
 
   const checklist = gexChecklist({ levels, spot, vix, call: clarity.call, put: clarity.put });
 
@@ -251,15 +343,19 @@ export default function GexOiPage({ guide = '' }: { guide?: string }) {
               {RANGE_OPTIONS.map(n => <option key={n} value={n}>{n}</option>)}
             </select>
           </label>
-          <label className="flex items-center gap-1.5">
-            <span className="text-[10px] text-zinc-500 font-bold uppercase tracking-widest">GEX in</span>
-            <select value={power} onChange={e => setPower(Number(e.target.value) as GexPower)}
-              title="₹ notional = gamma x OI units x spot² x 0.01. Index units = the video's formula (spot once), the number of units dealers trade per 1% move. Walls and flip are identical either way."
-              className="bg-zinc-900 border border-zinc-700 text-zinc-200 text-xs font-mono font-semibold rounded-lg px-2.5 py-1.5 focus:outline-none focus:border-emerald-500">
-              <option value={2}>₹ notional</option>
-              <option value={1}>index units (video)</option>
-            </select>
-          </label>
+          <UpdateIntervalSlider seconds={updateSec} onChange={setUpdateSec} />
+          <button
+            role="switch"
+            aria-checked={showValues}
+            onClick={toggleValues}
+            title="Show or hide the values on the bars"
+            className="flex items-center gap-2 px-2.5 py-1.5 rounded-lg border border-zinc-700 bg-zinc-900 text-xs font-bold text-zinc-200 focus:outline-none focus:ring-2 focus:ring-emerald-500/50"
+          >
+            <span className="text-[10px] text-zinc-500 font-bold uppercase tracking-widest">Values</span>
+            <span className={`relative inline-block w-7 h-4 rounded-full transition-colors ${showValues ? 'bg-emerald-600' : 'bg-zinc-700'}`}>
+              <span className={`absolute top-0.5 left-0.5 w-3 h-3 rounded-full bg-oncolor transition-transform ${showValues ? 'translate-x-3' : ''}`} />
+            </span>
+          </button>
           {guide && (
             <button
               onClick={() => setGuideOpen(true)}
@@ -271,13 +367,29 @@ export default function GexOiPage({ guide = '' }: { guide?: string }) {
               Guide
             </button>
           )}
+          <GexLevelsButton levels={chartLevels} profile={rows} spot={spot} live={live} pollMs={pollMs} />
+          <GexCalcButton
+            sets={chain?.chain.oc && chainSpot > 0 ? [{ expiry, oc: chain.chain.oc, spot: chainSpot }] : []}
+            build={calcBuild} spot={spot}
+            wallStrikes={[levels.callWall, levels.putWall].filter((x): x is number => x != null)}
+          />
           <span className="w-px h-5 bg-zinc-800 shrink-0" />
           <NavBar />
         </div>
       </div>
 
+      {staleAsOf != null && (
+        <div className="mx-6 mt-3 px-3 py-2 bg-amber-900/20 border border-amber-700/40 rounded-lg text-xs text-amber-400">
+          Dhan is rate-limiting the option chain, so this is the last good chain from {new Date(staleAsOf).toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', second: '2-digit' })}. Retrying automatically.
+        </div>
+      )}
       {error && (
         <div className="mx-6 mt-3 px-3 py-2 bg-red-900/20 border border-red-700/40 rounded-lg text-xs text-red-400">{error}</div>
+      )}
+      {noChainGamma && (
+        <div className="mx-6 mt-3 px-3 py-2 bg-amber-900/20 border border-amber-700/40 rounded-lg text-xs text-amber-400">
+          Dhan&apos;s chain returned no gamma for any strike (market closed or the Greeks feed is empty), so every GEX is zero.
+        </div>
       )}
       {lot === null && (
         <div className="mx-6 mt-3 px-3 py-2 bg-amber-900/20 border border-amber-700/40 rounded-lg text-xs text-amber-400">
@@ -302,22 +414,37 @@ export default function GexOiPage({ guide = '' }: { guide?: string }) {
                 <PulseStat label="Gamma flip" value={levels.flip != null ? Math.round(levels.flip).toLocaleString('en-IN') : '—'} color="text-amber-400" size="text-2xl" sub="net GEX zero crossing" />
                 <PulseStat label="Pin strike" value={levels.pin ? fmtStrike(levels.pin) : '—'} color="text-zinc-200" size="text-2xl" sub="largest call + put GEX" />
                 <div className="ml-auto flex items-center gap-5 flex-wrap">
-                  <PulseStat label="Net GEX" value={fmtGex(levels.totalNet)} color={levels.totalNet >= 0 ? 'text-emerald-400' : 'text-red-400'} size="text-sm" sub={`${POWER_UNIT[power]} per 1% move, whole chain`} />
-                  <PulseStat label="Underlying" value={underlying > 0 ? underlying.toFixed(1) : '—'} size="text-sm" color="text-zinc-300" sub={isFut ? `future ${chain?.future_expiry ?? ''} rolled to expiry · Black-76` : 'spot carried to expiry (no future): approximate'} />
+                  <PulseStat label="Net GEX" value={fmtGex(levels.totalNet)} color={levels.totalNet >= 0 ? 'text-emerald-400' : 'text-red-400'} size="text-sm" sub={`${GEX_UNIT} per 1% move, whole chain`} />
                   <PulseStat label="Lot · OI unit" value={lot ? String(lot) : '—'} size="text-sm" color="text-zinc-300" sub={`OI charted in ${oiLabel}; GEX built from units`} />
                 </div>
               </div>
               <div className="flex items-center justify-between gap-3 px-5 py-2 border-t border-zinc-800 flex-wrap">
                 <div className="flex items-center gap-2 flex-wrap">
                   <span className={`inline-flex items-center px-2.5 py-1 rounded-full text-[10px] font-bold border ${regimeCls}`}>{regimeLabel}</span>
-                  {regimeMismatch && (
-                    <span className="text-[10px] text-amber-400">
-                      spot is {levels.regime === 'positive' ? 'above' : 'below'} the flip, but whole-chain net GEX is {levels.totalNet > 0 ? 'positive' : 'negative'} ({fmtGex(levels.totalNet)})
-                    </span>
-                  )}
-                  {approxForward && <span className="text-[10px] text-amber-400">no future price: forward estimated from spot with cost of carry (approximate)</span>}
                 </div>
-                {updated && <span className="text-[10px] text-zinc-500 font-mono tabular-nums">Updated {updated}{live ? '' : ' · market closed, not polling'}</span>}
+                <div className="flex items-center gap-2.5">
+                  {(() => {
+                    const age = updatedAt != null && nowMs > 0 ? Math.max(0, Math.round((nowMs - updatedAt) / 1000)) : null;
+                    // Stale = more than two poll periods old while the market is open: the feed or the chain route is not delivering.
+                    const stale = live && age != null && age > Math.max(pollMs / 1000, 30) * 2 + 20;
+                    const cls = !live ? TONE_CLS.manual : stale ? TONE_CLS.warn : TONE_CLS.ok;
+                    return (
+                      <span className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[10px] font-bold border ${cls}`}>
+                        <span className={`w-1.5 h-1.5 rounded-full ${!live ? 'bg-zinc-500' : stale ? 'bg-amber-400' : 'bg-emerald-400 animate-pulse'}`} />
+                        {!live ? 'MARKET CLOSED · static' : stale ? 'STALE' : `LIVE · every ${fmtInterval(updateSec)}`}
+                      </span>
+                    );
+                  })()}
+                  {updated && <span className="text-[10px] text-zinc-500 font-mono tabular-nums">Updated {updated}{updatedAt != null && nowMs > 0 ? ` · ${Math.max(0, Math.round((nowMs - updatedAt) / 1000))}s ago` : ''}</span>}
+                  <button
+                    onClick={() => { setLoading(true); void fetchAll(); }}
+                    title="Refresh now"
+                    aria-label="Refresh now"
+                    className="p-1.5 rounded-md border border-zinc-800 bg-zinc-900 text-zinc-300 hover:bg-zinc-800 focus:outline-none focus:ring-2 focus:ring-emerald-500/50"
+                  >
+                    <RefreshCw className="w-3 h-3" aria-hidden="true" />
+                  </button>
+                </div>
               </div>
             </div>
 
@@ -336,7 +463,7 @@ export default function GexOiPage({ guide = '' }: { guide?: string }) {
                   <ChartHeader
                     eyebrow="Gamma exposure"
                     title="Call vs put GEX by strike"
-                    sub={`Bars: dealer hedge size per 1% move, in ${POWER_UNIT[power]} (calls positive, puts negative). Line: net. Assumes dealers are long calls and short puts.`}
+                    sub={`Bars: dealer hedge size per 1% move, in ${GEX_UNIT} (calls positive, puts negative). Line: net. Assumes dealers are long calls and short puts.`}
                     legend={<>
                       <span className="flex items-center gap-1.5"><span className="w-3 h-3 rounded-sm bg-red-500" /><span className="text-zinc-300">Call GEX</span></span>
                       <span className="flex items-center gap-1.5"><span className="w-3 h-3 rounded-sm bg-emerald-500" /><span className="text-zinc-300">Put GEX</span></span>
@@ -344,19 +471,25 @@ export default function GexOiPage({ guide = '' }: { guide?: string }) {
                     </>}
                   />
                   <ResponsiveContainer width="100%" height={400}>
-                    <ComposedChart data={rows} stackOffset="sign" margin={{ top: 16, right: 16, left: 0, bottom: 0 }}>
+                    <ComposedChart data={rows} stackOffset="sign" margin={{ top: 48, right: 16, left: 0, bottom: 40 }}>
                       <CartesianGrid strokeDasharray="3 6" vertical={false} />
                       <XAxis {...xAxisProps} />
                       <YAxis tick={{ fontSize: 10, fontFamily: 'var(--font-mono)' }} tickLine={false} axisLine={false} width={58} tickFormatter={numFmt} />
                       <Tooltip content={<GexTooltip oiLabel={oiLabel} />} cursor={{ fill: 'var(--chart-cursor-fill)', opacity: 0.5 }} />
                       <ReferenceLine y={0} stroke="var(--color-zinc-500)" />
                       {atm > 0 && <ReferenceLine x={nearestStrike(spot)} stroke="var(--color-zinc-400)" strokeDasharray="5 4" label={{ value: `SPOT ${spot.toLocaleString('en-IN', { maximumFractionDigits: 1 })}`, position: 'top', fontSize: 10, fontWeight: 700 }} />}
+                      {([['put', levels.putWall], ['call', levels.callWall]] as const).map(([side, k]) => k != null && rows.some(r => r.strike === k) && (
+                        <ReferenceLine key={`${side}wall`} x={nearestStrike(k)} stroke={WALL_TONE[side]} strokeWidth={1.75} strokeDasharray="5 3"
+                          label={((p: object) => <WallPill {...(p as { viewBox?: { x: number; y: number; width: number; height: number } })} side={side} text={`${side === 'call' ? 'CALL WALL' : 'PUT WALL'} ${k.toLocaleString('en-IN')}`} />) as never} />
+                      ))}
                       {flipRef != null && <ReferenceLine x={nearestStrike(flipRef)} stroke="#fbbf24" strokeWidth={2} label={{ value: `FLIP ${Math.round(flipRef)}`, position: 'insideBottomRight', fontSize: 10, fontWeight: 700, fill: '#fbbf24' }} />}
                       <Bar dataKey="ceGex" name="Call GEX" stackId="g" isAnimationActive={false}>
                         {rows.map(r => <Cell key={r.strike} fill="#ef4444" stroke={r.strike === levels.callWall ? '#fecaca' : 'transparent'} strokeWidth={r.strike === levels.callWall ? 2 : 0} />)}
+                        {showValues && <LabelList dataKey="ceGex" content={barValueLabel as never} />}
                       </Bar>
                       <Bar dataKey="peGex" name="Put GEX" stackId="g" isAnimationActive={false}>
                         {rows.map(r => <Cell key={r.strike} fill="#10b981" stroke={r.strike === levels.putWall ? '#a7f3d0' : 'transparent'} strokeWidth={r.strike === levels.putWall ? 2 : 0} />)}
+                        {showValues && <LabelList dataKey="peGex" content={barValueLabel as never} />}
                       </Bar>
                       <Line type="monotone" dataKey="netGex" name="Net GEX" stroke="#fbbf24" strokeWidth={2} dot={false} isAnimationActive={false} />
                     </ComposedChart>
@@ -367,16 +500,17 @@ export default function GexOiPage({ guide = '' }: { guide?: string }) {
                   <div className="bg-zinc-900/60 border border-zinc-800 rounded-2xl p-5">
                     <ChartHeader eyebrow="Net" title="Net dealer GEX by strike" sub="Call minus put. Red zone below the flip amplifies moves; green above dampens them." />
                     <ResponsiveContainer width="100%" height={300}>
-                      <ComposedChart data={rows} margin={{ top: 20, right: 16, left: 0, bottom: 0 }}>
+                      <ComposedChart data={rows} margin={{ top: 48, right: 16, left: 0, bottom: 40 }}>
                         <CartesianGrid strokeDasharray="3 6" vertical={false} />
                         <XAxis {...xAxisProps} />
                         <YAxis tick={{ fontSize: 10, fontFamily: 'var(--font-mono)' }} tickLine={false} axisLine={false} width={58} tickFormatter={numFmt} />
                         <Tooltip content={<GexTooltip oiLabel={oiLabel} />} cursor={{ fill: 'var(--chart-cursor-fill)', opacity: 0.5 }} />
                         <ReferenceLine y={0} stroke="var(--color-zinc-500)" />
                         {atm > 0 && <ReferenceLine x={nearestStrike(spot)} stroke="var(--color-zinc-400)" strokeDasharray="5 4" label={{ value: `SPOT ${spot.toLocaleString('en-IN', { maximumFractionDigits: 1 })}`, position: 'top', fontSize: 10, fontWeight: 700 }} />}
-                        {flipRef != null && <ReferenceLine x={nearestStrike(flipRef)} stroke="#fbbf24" strokeWidth={2} />}
+                        {flipRef != null && <ReferenceLine x={nearestStrike(flipRef)} stroke="#fbbf24" strokeWidth={2} label={{ value: `FLIP ${Math.round(flipRef)}`, position: 'insideBottomRight', fontSize: 10, fontWeight: 700, fill: '#fbbf24' }} />}
                         <Bar dataKey="netGex" name="Net GEX" isAnimationActive={false}>
                           {rows.map(r => <Cell key={r.strike} fill={r.netGex >= 0 ? '#10b981' : '#ef4444'} />)}
+                          {showValues && <LabelList dataKey="netGex" content={barValueLabel as never} />}
                         </Bar>
                       </ComposedChart>
                     </ResponsiveContainer>
@@ -384,14 +518,18 @@ export default function GexOiPage({ guide = '' }: { guide?: string }) {
                   <div className="bg-zinc-900/60 border border-zinc-800 rounded-2xl p-5">
                     <ChartHeader eyebrow="Raw" title="Open interest by strike" sub="What the plain option chain shows, for comparison with the GEX walls." />
                     <ResponsiveContainer width="100%" height={300}>
-                      <ComposedChart data={rows} margin={{ top: 8, right: 16, left: 0, bottom: 0 }} barGap={2}>
+                      <ComposedChart data={rows} margin={{ top: 40, right: 16, left: 0, bottom: 0 }} barGap={2}>
                         <CartesianGrid strokeDasharray="3 6" vertical={false} />
                         <XAxis {...xAxisProps} />
                         <YAxis tick={{ fontSize: 10, fontFamily: 'var(--font-mono)' }} tickLine={false} axisLine={false} width={58} tickFormatter={fmtOi} />
                         <Tooltip content={<OiTooltip oiLabel={oiLabel} />} cursor={{ fill: 'var(--chart-cursor-fill)', opacity: 0.5 }} />
                         {atm > 0 && <ReferenceLine x={nearestStrike(spot)} stroke="var(--color-zinc-400)" strokeDasharray="5 4" />}
-                        <Bar dataKey="ceOiView" name="Call OI" fill="#ef4444" isAnimationActive={false} />
-                        <Bar dataKey="peOiView" name="Put OI" fill="#10b981" isAnimationActive={false} />
+                        <Bar dataKey="ceOiView" name="Call OI" fill="#ef4444" isAnimationActive={false}>
+                          {showValues && <LabelList dataKey="ceOiView" content={barValueLabel as never} />}
+                        </Bar>
+                        <Bar dataKey="peOiView" name="Put OI" fill="#10b981" isAnimationActive={false}>
+                          {showValues && <LabelList dataKey="peOiView" content={barValueLabel as never} />}
+                        </Bar>
                       </ComposedChart>
                     </ResponsiveContainer>
                   </div>

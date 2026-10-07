@@ -1,0 +1,745 @@
+'use client';
+
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import {
+  ComposedChart, Bar, Line, XAxis, YAxis, CartesianGrid, Tooltip,
+  ResponsiveContainer, ReferenceLine, ReferenceArea, Cell, LabelList,
+} from 'recharts';
+import { RefreshCw } from 'lucide-react';
+import NavBar from './NavBar';
+import DataChip from './DataChip';
+import { PulseStat, ChartHeader } from './QuantPanel';
+import { useMarketLive } from '@/lib/useMarketLive';
+import { startLiveIndicesBridge } from '@/lib/startLiveIndicesBridge';
+import { expiryEpochMs, rollForward } from '@/lib/optionsPricing';
+import {
+  buildGexRows, fmtGex, gexChecklist, gexLevels, topTwo, type ChecklistTone, type GexChainEntry, type GexLevels, type GammaSource, type GexPower, type GexRow,
+} from '@/lib/gex';
+import {
+  buildGexLegs, dynamicFlip, emConfluence, expectedMove, mergeGexRows, regimeNote, spotSideWalls, topWalls, wallRank, type GexLeg,
+} from '@/lib/gexV2';
+import { buildGexRowsModel, forwardFromSpot, gexModelCalcTable } from '@/lib/gexModel';
+import { WallPill, WALL_TONE } from './GexWallParts';
+import GexCalcButton from './GexCalcTable';
+import UpdateIntervalSlider, { fmtInterval, useUpdateInterval } from './UpdateIntervalSlider';
+import GexLevelsButton, { type GexChartLevel } from './GexLevelsChart';
+
+const UNDERLYING = 'NIFTY';
+const STRIKE_STEP = 50;
+const RANGE_OPTIONS = [8, 12, 20, 30] as const;
+const SCOPE_OPTIONS = [1, 2, 3] as const;
+const EM_TOLERANCE = 0.25;
+
+/** A GexRow plus the OI figures the charts show (lots at the current lot size, or units when the lot is unknown). */
+interface GexViewRow extends GexRow { ceOiView: number; peOiView: number }
+
+type ChainOc = Record<string, GexChainEntry & { ce?: { last_price?: number | null } | null; pe?: { last_price?: number | null } | null }>;
+
+interface ChainPayload {
+  /** The expiry this response was requested for; a response for another expiry must never be rendered. */
+  reqExpiry?: string;
+  /** The expiry this chain belongs to (aggregate scope fetches several). */
+  expiry?: string;
+  chain: { oc?: ChainOc };
+  spot: number;
+  future_price?: number;
+  future_expiry?: string;
+}
+
+const fmtStrike = (n: number) => n.toLocaleString('en-IN');
+const fmtOi = (n: number) => fmtGex(n);
+/** Value label for a bar: above a positive bar, below a negative one, horizontal. */
+const barValueLabel = (props: Record<string, unknown>) => {
+  const { x, y, width, height, value } = props as { x: number; y: number; width: number; height: number; value: number };
+  const v = Number(value);
+  if (!Number.isFinite(v) || v === 0 || !Number.isFinite(x) || !Number.isFinite(y)) return null;
+  const top = Math.min(y, y + height);
+  const bottom = Math.max(y, y + height);
+  const cx = x + width / 2;
+  const py = v > 0 ? top - 6 : bottom + 10;
+  return (
+    <text x={cx} y={py} textAnchor="middle"
+      fontSize={9} fontWeight={600} fontFamily="var(--font-mono)" fill="var(--color-zinc-300)">{fmtGex(v)}</text>
+  );
+};
+
+const POWER_UNIT: Record<number, string> = { 1: 'index units', 2: '₹' };
+
+const GexTooltip = ({ active, payload, label, oiLabel }: Record<string, unknown> & { oiLabel: string }) => {
+  if (!active || !Array.isArray(payload) || !payload.length) return null;
+  const row = (payload as Array<{ payload: GexViewRow }>)[0]?.payload;
+  if (!row) return null;
+  return (
+    <div className="bg-zinc-950 border border-zinc-700 rounded-xl px-4 py-3 text-xs shadow-2xl min-w-[200px] font-mono">
+      <p className="text-zinc-300 font-bold mb-2 tabular-nums font-sans">Strike {fmtStrike(Number(label))}</p>
+      <div className="flex justify-between gap-8 mb-1"><span className="text-red-400 font-sans">Call GEX</span><span className="text-white font-bold tabular-nums">{fmtGex(row.ceGex)}</span></div>
+      <div className="flex justify-between gap-8 mb-1"><span className="text-emerald-400 font-sans">Put GEX</span><span className="text-white font-bold tabular-nums">{fmtGex(row.peGex)}</span></div>
+      <div className="flex justify-between gap-8 mb-2 pt-2 border-t border-zinc-800"><span className="text-zinc-400 font-sans">Net GEX</span><span className={`font-bold tabular-nums ${row.netGex >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>{fmtGex(row.netGex)}</span></div>
+      <div className="flex justify-between gap-8 mb-1 pt-2 border-t border-zinc-800"><span className="text-zinc-400 font-sans">CE OI ({oiLabel})</span><span className="text-white tabular-nums">{fmtOi(row.ceOiView)}</span></div>
+      <div className="flex justify-between gap-8"><span className="text-zinc-400 font-sans">PE OI ({oiLabel})</span><span className="text-white tabular-nums">{fmtOi(row.peOiView)}</span></div>
+    </div>
+  );
+};
+
+const OiTooltip = ({ active, payload, label, oiLabel }: Record<string, unknown> & { oiLabel: string }) => {
+  if (!active || !Array.isArray(payload) || !payload.length) return null;
+  const row = (payload as Array<{ payload: GexViewRow }>)[0]?.payload;
+  if (!row) return null;
+  return (
+    <div className="bg-zinc-950 border border-zinc-700 rounded-xl px-4 py-3 text-xs shadow-2xl min-w-[170px] font-mono">
+      <p className="text-zinc-300 font-bold mb-2 tabular-nums font-sans">Strike {fmtStrike(Number(label))}</p>
+      <div className="flex justify-between gap-8 mb-1"><span className="text-red-400 font-sans">CE OI ({oiLabel})</span><span className="text-white font-bold tabular-nums">{fmtOi(row.ceOiView)}</span></div>
+      <div className="flex justify-between gap-8"><span className="text-emerald-400 font-sans">PE OI ({oiLabel})</span><span className="text-white font-bold tabular-nums">{fmtOi(row.peOiView)}</span></div>
+    </div>
+  );
+};
+
+const TONE_CLS: Record<ChecklistTone, string> = {
+  ok: 'border-emerald-500/40 bg-emerald-500/10 text-emerald-400',
+  warn: 'border-amber-500/40 bg-amber-500/10 text-amber-400',
+  bad: 'border-red-500/40 bg-red-500/10 text-red-400',
+  manual: 'border-zinc-700 bg-zinc-800/60 text-zinc-400',
+};
+
+function todayIST(): string {
+  return new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Kolkata' }).format(new Date());
+}
+
+export default function GexProfilePage() {
+  const live = useMarketLive(UNDERLYING);
+  // User-chosen refresh gap (5 s to 3 min). Governs the chain, spot and level-chart polls below.
+  const [updateSec, setUpdateSec] = useUpdateInterval();
+  const pollMs = updateSec * 1000;
+  // Spot and the chain refresh on the user's chosen gap. The server caches each chain for 30 s, so walls/flip/regime stay on the
+  // chain's numbers while the spot line and the side-of-spot logic can move between chain polls.
+  const [liveSpot, setLiveSpot] = useState(0);
+  const lastSpotPull = useRef(0);
+  useEffect(() => { startLiveIndicesBridge(); }, []);
+  useEffect(() => {
+    if (!live) return;
+    let cancelled = false;
+    const pull = () => {
+      if (document.hidden) return;
+      lastSpotPull.current = Date.now();
+      fetch('/api/scalper/top-indices')
+        .then(r => r.json())
+        .then((t: { success?: boolean; quotes?: Record<string, { ltp?: number | null }> }) => {
+          const v = Number(t.quotes?.[UNDERLYING]?.ltp);
+          if (!cancelled && t.success !== false && v > 0) setLiveSpot(v);
+        })
+        .catch(() => { /* keep the last spot; the chain poll still refreshes it */ });
+    };
+    // Changing the slider restarts this effect: do not refetch for every step of a drag.
+    const first = Date.now() - lastSpotPull.current > 5000 ? setTimeout(pull, 0) : undefined;
+    const id = setInterval(pull, pollMs);
+    return () => { cancelled = true; if (first) clearTimeout(first); clearInterval(id); };
+  }, [live, pollMs]);
+  const [expiries, setExpiries] = useState<string[]>([]);
+  const [expiry, setExpiry] = useState('');
+  const [lot, setLot] = useState<number | null | undefined>(undefined); // undefined = still loading, null = unknown
+  const [power, setPower] = useState<GexPower>(1);
+  const [gammaSource, setGammaSource] = useState<GammaSource>('dhan');
+  const [range, setRange] = useState<number>(12);
+  const [showValues, setShowValues] = useState(false);
+  useEffect(() => {
+    // Deferred a task so no setState runs during the effect pass (same pattern as the fetch effects below).
+    const t = setTimeout(() => { try { setShowValues(localStorage.getItem('gex_show_values') === '1'); } catch { /* storage blocked */ } }, 0);
+    return () => clearTimeout(t);
+  }, []);
+  const toggleValues = () => setShowValues(v => {
+    const n = !v;
+    try { localStorage.setItem('gex_show_values', n ? '1' : '0'); } catch { /* storage blocked */ }
+    return n;
+  });
+  const [scope, setScope] = useState<number>(1);
+  const [payload, setPayload] = useState<{ key: string; items: ChainPayload[] } | null>(null);
+  const [vix, setVix] = useState<number | null>(null);
+  const [error, setError] = useState('');
+  const [loading, setLoading] = useState(true);
+  const [updated, setUpdated] = useState<string | null>(null);
+  const [dataDate, setDataDate] = useState<string | null>(null);
+  const seq = useRef(0);
+  // True while a (possibly multi-expiry) fetch is running, so a poll tick never cancels and restarts a slow aggregate load.
+  const running = useRef(false);
+  const [updatedAt, setUpdatedAt] = useState<number | null>(null);
+  /** Set while the chain on screen is a stale copy served because Dhan failed; the oldest fetch time across the expiries shown. */
+  const [staleAsOf, setStaleAsOf] = useState<number | null>(null);
+  const [nowMs, setNowMs] = useState(0);
+
+  useEffect(() => {
+    fetch(`/api/options/expiries?underlying=${UNDERLYING}`)
+      .then(r => r.json())
+      .then((j: { success: boolean; data?: string[]; error?: string }) => {
+        if (j.success && j.data?.length) {
+          // Skip an expiry whose 15:40 IST close has already passed: its gamma is a clamped-time artefact, not a signal.
+          const open = j.data.filter(e => expiryEpochMs(e) > Date.now());
+          const list = open.length ? open : j.data;
+          setExpiries(list);
+          setExpiry(list[0]);
+        }
+        else setError(j.error ?? 'Failed to load expiries');
+      })
+      .catch(e => setError(String(e)));
+    fetch(`/api/lotsize?symbol=${UNDERLYING}`)
+      .then(r => r.json())
+      .then((j: { lot_size?: number | null }) => setLot(j.lot_size && j.lot_size > 0 ? j.lot_size : null))
+      .catch(() => setLot(null));
+  }, []);
+
+  // Single scope = the selected expiry; aggregate scope = the nearest N open expiries (the selector is then ignored).
+  const scopeExpiries = useMemo(() => (scope <= 1 ? (expiry ? [expiry] : []) : expiries.slice(0, scope)), [scope, expiry, expiries]);
+  const reqKey = scopeExpiries.join('|');
+
+  // A failed chain fetch is almost always Dhan's account-wide rate limit (~1 call / 3 s). Retry a few times at a gap longer than
+  // that, so one hiccup clears itself, including before the open when the poll loop is not running.
+  const retryRef = useRef<{ n: number; t: ReturnType<typeof setTimeout> | null }>({ n: 0, t: null });
+  const fetchRef = useRef<() => Promise<void>>(async () => {});
+  const retryLater = () => {
+    const r = retryRef.current;
+    if (r.n >= 3) return;
+    r.n += 1;
+    if (r.t) clearTimeout(r.t);
+    r.t = setTimeout(() => { void fetchRef.current(); }, 6000);
+  };
+  useEffect(() => () => { if (retryRef.current.t) clearTimeout(retryRef.current.t); }, []);
+
+  const fetchAll = useCallback(async () => {
+    if (!scopeExpiries.length) return;
+    const mine = ++seq.current;
+    running.current = true;
+    try {
+      const items: ChainPayload[] = [];
+      let staleFrom: number | null = null;
+      // Sequential: the chain route is rate limited (1 call / 3 s account-wide) and caches each expiry for 30 s.
+      for (const ex of scopeExpiries) {
+        const res = await fetch(`/api/options/chain?underlying=${UNDERLYING}&expiry=${ex}&allowStale=1`);
+        const j = await res.json() as { success: boolean; stale?: boolean; as_of?: number; data?: ChainPayload; error?: string };
+        if (mine !== seq.current) return; // a newer request owns the screen
+        if (!j.success || !j.data?.chain?.oc) { setError(j.error ?? `No chain data for ${ex}`); retryLater(); return; }
+        items.push({ ...j.data, expiry: ex });
+        if (j.stale && j.as_of) staleFrom = Math.min(staleFrom ?? j.as_of, j.as_of);
+      }
+      setPayload({ key: scopeExpiries.join('|'), items });
+      setError('');
+      // A stale copy keeps the real age (so the chip goes STALE) and keeps retrying; only a fresh chain resets the count.
+      const asOf = staleFrom ?? Date.now();
+      setStaleAsOf(staleFrom);
+      if (staleFrom != null) retryLater(); else retryRef.current.n = 0;
+      setUpdated(new Date(asOf).toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', second: '2-digit' }));
+      setUpdatedAt(asOf);
+      setDataDate(todayIST());
+      fetch('/api/scalper/top-indices')
+        .then(r => r.json())
+        .then((t: { quotes?: Record<string, { ltp?: number }> }) => {
+          const v = Number(t.quotes?.VIX?.ltp);
+          if (mine === seq.current) setVix(v > 0 ? v : null);
+        })
+        // A failed read clears the value: a stale VIX would keep the checklist tile green on old data.
+        .catch(() => { if (mine === seq.current) setVix(null); });
+    } catch (e) {
+      if (mine === seq.current) { setError(String(e)); retryLater(); }
+    } finally {
+      if (mine === seq.current) { setLoading(false); running.current = false; }
+    }
+  }, [scopeExpiries]);
+  useEffect(() => { fetchRef.current = fetchAll; }, [fetchAll]);
+
+  useEffect(() => {
+    if (!scopeExpiries.length) return;
+    // Deferred a task so no setState runs during the effect pass (same pattern as useMarketLive).
+    const first = setTimeout(() => { void fetchAll(); }, 0);
+    return () => clearTimeout(first);
+  }, [scopeExpiries, fetchAll]);
+
+  // 1 s tick so the "updated Ns ago" label counts up between polls.
+  useEffect(() => {
+    const first = setTimeout(() => setNowMs(Date.now()), 0);
+    const id = setInterval(() => setNowMs(Date.now()), 1000);
+    return () => { clearTimeout(first); clearInterval(id); };
+  }, []);
+
+  useEffect(() => {
+    if (!scopeExpiries.length || !live) return;
+    const id = setInterval(() => { if (!document.hidden && !running.current) void fetchAll(); }, pollMs);
+    const onVis = () => { if (!document.hidden) void fetchAll(); };
+    document.addEventListener('visibilitychange', onVis);
+    return () => { clearInterval(id); document.removeEventListener('visibilitychange', onVis); };
+  }, [scopeExpiries, live, pollMs, fetchAll]);
+
+  // A response fetched for another expiry/scope (still in flight when the selection changed) is ignored, not rendered.
+  const items = payload && payload.key === reqKey ? payload.items : null;
+  const head = items?.[0] ?? null;
+  const chainSpot = head?.spot ?? 0;
+  const spot = live && liveSpot > 0 && chainSpot > 0 ? liveSpot : chainSpot;
+
+  // Black-76 wants the future that matches each chain; fall back to spot only when no future was returned.
+  // The returned future is usually a later contract than the chain's expiry (monthly future, weekly chain), so roll it to
+  // the chain's own expiry; Black-76 with the wrong forward shifts every gamma.
+  const underlyingFor = useCallback((c: ChainPayload, ex: string) => (
+    c.future_price && c.future_price > 0 && c.future_expiry ? rollForward(c.future_price, c.future_expiry, ex) : forwardFromSpot(c.spot, ex)
+  ), []);
+  const isFut = !!(head?.future_price && head.future_price > 0 && head.future_expiry);
+  const headExpiry = head?.expiry ?? expiry;
+  const underlying = head ? underlyingFor(head, headExpiry) : 0;
+  // With no future price (typically after hours) the forward is spot carried to expiry (S*e^{rT}): still an estimate, so flagged.
+  const approxForward = !!head && !isFut;
+
+  // GEX is always built from OI in units (Dhan's convention, never guessed). Charts show lots when the lot size is known.
+  const oiDiv = lot && lot > 0 ? lot : 1;
+  const oiLabel = oiDiv > 1 ? 'lots' : 'units';
+  // Anchor the window on spot; with a transient spot of 0 fall back to the forward so the chart does not blank.
+  const anchor = spot > 0 ? spot : underlying;
+
+  // Calc table: both gammas per leg, `gammaSource` choosing which feeds GEX, exactly as the charts do.
+  const calcBuild = useCallback((set: { oc: Record<string, GexChainEntry>; expiry: string; spot: number; underlying?: number }) => gexModelCalcTable(set.oc, { expiry: set.expiry, underlying: set.underlying ?? 0, spot: set.spot, lotSize: lot, power, gammaSource }), [lot, power, gammaSource]);
+
+  const model = useMemo(() => {
+    const empty = {
+      rows: [] as GexViewRow[], levels: gexLevels([], spot), clarity: { call: topTwo([]), put: topTwo([]) }, outside: [] as string[],
+      walls: spotSideWalls([], spot), top: { call: [], put: [] } as ReturnType<typeof topWalls>,
+      flip: null as number | null, strikeFlip: null as number | null, em: null as ReturnType<typeof expectedMove>, emExpiry: '',
+      confluence: [] as ReturnType<typeof emConfluence>, regime: 'unknown' as GexLevels['regime'], totalNet: 0, noChainGamma: false,
+    };
+    if (!items || !(spot > 0)) return empty;
+    const perExpiry = items.map(c => {
+      const ex = c.expiry ?? expiry;
+      const u = underlyingFor(c, ex);
+      return { c, ex, u, rows: u > 0 ? (gammaSource === 'dhan' ? buildGexRows(c.chain.oc!, { spot: c.spot > 0 ? c.spot : spot, lotSize: lot, power }) : buildGexRowsModel(c.chain.oc!, { expiry: ex, underlying: u, lotSize: lot, power })) : [], legs: u > 0 ? buildGexLegs(c.chain.oc!, { expiry: ex, underlying: u, spot: c.spot > 0 ? c.spot : spot }) : [] as GexLeg[] };
+    });
+    const all = mergeGexRows(perExpiry.map(x => x.rows));
+    if (!all.length) return empty;
+    const legs = perExpiry.flatMap(x => x.legs);
+    const centre = Math.round(anchor / STRIKE_STEP) * STRIKE_STEP;
+    const lv = gexLevels(all, spot); // v1 levels: strike-profile flip, global-max walls, pin, total net
+    const walls = spotSideWalls(all, spot);
+    const top = topWalls(all, spot, 3);
+    const dyn = dynamicFlip(legs, spot, { power });
+    const flip = dyn.flip;
+    const regime: GexLevels['regime'] = flip != null ? (spot >= flip ? 'positive' : 'negative') : (lv.totalNet >= 0 ? 'positive' : 'negative');
+    const nearest = [...perExpiry].sort((a, b) => a.ex.localeCompare(b.ex))[0]; // nearest expiry, whatever order the fetch returned
+    const em = expectedMove(nearest.c.chain.oc!, { spot, underlying: nearest.u, expiry: nearest.ex });
+    const confluence = em ? emConfluence([
+      { label: 'Call wall', value: walls.callWall },
+      { label: 'Put wall', value: walls.putWall },
+      { label: 'Gamma flip', value: flip },
+    ], em, EM_TOLERANCE) : [];
+    const cl = {
+      call: topTwo(all.filter(r => r.strike >= spot).map(r => ({ strike: r.strike, v: r.ceGex }))),
+      put: topTwo(all.filter(r => r.strike <= spot).map(r => ({ strike: r.strike, v: -r.peGex }))),
+    };
+    const inWin = (k: number | null) => k == null || Math.abs(k - centre) <= range * STRIKE_STEP;
+    const out: string[] = [];
+    if (!inWin(walls.callWall)) out.push(`call wall ${walls.callWall}`);
+    if (!inWin(walls.putWall)) out.push(`put wall ${walls.putWall}`);
+    if (!inWin(lv.pin)) out.push(`pin ${lv.pin}`);
+    if (!inWin(flip == null ? null : Math.round(flip))) out.push(`flip ${Math.round(flip!)}`);
+    const win: GexViewRow[] = all
+      .filter(r => Math.abs(r.strike - centre) <= range * STRIKE_STEP)
+      .map(r => ({ ...r, ceOiView: r.ceOi / oiDiv, peOiView: r.peOi / oiDiv }));
+    return { rows: win, levels: lv, clarity: cl, outside: out, walls, top, flip, strikeFlip: lv.flip, em, emExpiry: nearest.ex, confluence, regime, totalNet: lv.totalNet, noChainGamma: gammaSource === 'dhan' && all.length > 0 && all.every(r => r.ceGamma === 0 && r.peGamma === 0) };
+  }, [items, lot, spot, anchor, expiry, power, gammaSource, range, oiDiv, underlyingFor]);
+  const { rows, levels, clarity, outside, walls, top, flip, strikeFlip, em, emExpiry, confluence, regime, totalNet, noChainGamma } = model;
+
+  const atm = spot > 0 ? Math.round(spot / STRIKE_STEP) * STRIKE_STEP : 0;
+  // Regime comes from spot vs the flip; the checklist's first tile uses the whole-chain total. Say so when they disagree.
+  // v2 levels: walls on their side of spot, flip from the hypothetical-spot recompute, regime from spot vs that flip.
+  const levelsV2: GexLevels = { ...levels, callWall: walls.callWall, putWall: walls.putWall, flip, regime };
+  // Regime comes from spot vs the flip; the checklist's first tile uses the whole-chain total. Say so when they disagree.
+  const regimeMismatch = regime !== 'unknown' && flip != null && (totalNet > 0) !== (regime === 'positive');
+
+  // Level chart: spot-side walls, the zero-gamma flip, the pin and the expected-move bands, as shown on this page.
+  const chartLevels: GexChartLevel[] = [
+    { key: 'cw', label: 'CALL WALL', price: walls.callWall ?? 0, tone: 'call' },
+    { key: 'pw', label: 'PUT WALL', price: walls.putWall ?? 0, tone: 'put' },
+    { key: 'flip', label: 'GAMMA FLIP', price: flip ?? 0, tone: 'flip' },
+    { key: 'pin', label: 'PIN', price: levels.pin ?? 0, tone: 'pin' },
+    { key: 'emu', label: 'EM +', price: em?.upper ?? 0, tone: 'em' },
+    { key: 'eml', label: 'EM −', price: em?.lower ?? 0, tone: 'em' },
+    { key: 'spot', label: 'SPOT', price: spot, tone: 'spot' },
+  ];
+
+  const checklist = gexChecklist({ levels: levelsV2, spot, vix, call: clarity.call, put: clarity.put });
+
+  const regimeCls = regime === 'positive' ? TONE_CLS.ok : regime === 'negative' ? TONE_CLS.bad : TONE_CLS.manual;
+  const regimeLabel = regime === 'positive' ? 'POSITIVE GAMMA · dealers dampen'
+    : regime === 'negative' ? 'NEGATIVE GAMMA · dealers amplify' : 'REGIME UNKNOWN';
+
+  const xAxisProps = {
+    dataKey: 'strike' as const,
+    tickFormatter: fmtStrike,
+    tick: { fontSize: 10, fontWeight: 500 as const, fontFamily: 'var(--font-mono)' },
+    tickLine: false,
+    interval: 'preserveStartEnd' as const,
+    minTickGap: 18,
+  };
+  const numFmt = (v: number) => fmtGex(v);
+  const flipRef = flip != null && rows.length ? flip : null;
+  const strikeFlipRef = strikeFlip != null && rows.length ? strikeFlip : null;
+  // A reference line on a category axis must sit on a real category: snap the flip to the nearest strike in view.
+  const nearestStrike = (x: number) => rows.reduce((b, r) => (Math.abs(r.strike - x) < Math.abs(b - x) ? r.strike : b), rows[0]?.strike ?? x);
+  const inView = (x: number) => rows.length > 0 && x >= rows[0].strike - STRIKE_STEP / 2 && x <= rows[rows.length - 1].strike + STRIKE_STEP / 2;
+
+  // Shared annotations for the two GEX charts: spot, flip band (zone, not a line), strike-profile flip (v1, for comparison),
+  // and the expected-move bands. Returned as a keyed array because recharts reads its direct children.
+  const overlays = (labels: boolean) => {
+    const out: React.ReactNode[] = [];
+    const cw = walls.callWall != null && inView(walls.callWall) ? walls.callWall : null;
+    const pw = walls.putWall != null && inView(walls.putWall) ? walls.putWall : null;
+    // Zone between the walls, tinted by regime: green where dealers dampen, red where they amplify.
+    if (cw != null && pw != null && nearestStrike(pw) !== nearestStrike(cw)) {
+      const zone = regime === 'negative' ? 'var(--color-red-500)' : regime === 'positive' ? 'var(--color-emerald-500)' : 'var(--color-zinc-500)';
+      out.push(<ReferenceArea key="zone" x1={nearestStrike(pw)} x2={nearestStrike(cw)} fill={zone} fillOpacity={0.07} stroke="none" />);
+    }
+    const wallLine = (side: 'call' | 'put', strike: number) => {
+      const row = rows.find(r => r.strike === nearestStrike(strike));
+      const gex = row ? (side === 'call' ? row.ceGex : -row.peGex) : 0;
+      const text = `${side === 'call' ? 'CALL WALL' : 'PUT WALL'} ${fmtStrike(strike)}${gex > 0 ? ` · ${fmtGex(gex)}` : ''}`;
+      return (
+        <ReferenceLine key={`${side}wall`} x={nearestStrike(strike)} stroke={WALL_TONE[side]} strokeWidth={1.75} strokeDasharray="5 3"
+          label={labels ? ((p: object) => <WallPill {...(p as { viewBox?: { x: number; y: number; width: number; height: number } })} side={side} text={text} />) as never : undefined} />
+      );
+    };
+    if (pw != null) out.push(wallLine('put', pw));
+    if (cw != null) out.push(wallLine('call', cw));
+    if (atm > 0) out.push(<ReferenceLine key="spot" x={nearestStrike(spot)} stroke="var(--color-zinc-400)" strokeDasharray="5 4" label={labels ? { value: `SPOT ${spot.toLocaleString('en-IN', { maximumFractionDigits: 1 })}`, position: 'top', fontSize: 10, fontWeight: 700 } : undefined} />);
+    // A level outside the strike window is not drawn (snapping it to the edge would pass it off as a real level); the
+    // "outside the window" notice above the chart lists it instead.
+    if (flipRef != null && inView(flipRef)) {
+      // Band half-width 0.3% of spot, widened to one strike each side when both ends land on the same strike.
+      const tol = spot * 0.003;
+      let lo = nearestStrike(flipRef - tol);
+      let hi = nearestStrike(flipRef + tol);
+      if (lo === hi) { lo = nearestStrike(lo - STRIKE_STEP); hi = nearestStrike(hi + STRIKE_STEP); }
+      // At the very edge of the window both ends can still coincide: a zero-width area draws nothing, so skip it.
+      if (lo !== hi) out.push(<ReferenceArea key="flipband" x1={lo} x2={hi} fill="#fbbf24" fillOpacity={0.12} stroke="none" />);
+      out.push(<ReferenceLine key="flip" x={nearestStrike(flipRef)} stroke="#fbbf24" strokeWidth={2} label={labels ? { value: `FLIP ${Math.round(flipRef)}`, position: 'insideBottomRight', fontSize: 10, fontWeight: 700, fill: '#fbbf24' } : undefined} />);
+    }
+    if (strikeFlipRef != null && inView(strikeFlipRef) && (flipRef == null || !inView(flipRef) || nearestStrike(strikeFlipRef) !== nearestStrike(flipRef))) {
+      out.push(<ReferenceLine key="sflip" x={nearestStrike(strikeFlipRef)} stroke="#fbbf24" strokeDasharray="2 4" label={labels ? { value: `STRIKE FLIP ${Math.round(strikeFlipRef)}`, position: 'insideTopLeft', fontSize: 9, fontWeight: 600, fill: '#fbbf24' } : undefined} />);
+    }
+    if (em) {
+      if (inView(em.upper)) out.push(<ReferenceLine key="emu" x={nearestStrike(em.upper)} stroke="var(--color-sky-400)" strokeDasharray="6 3" label={labels ? { value: `EM + ${Math.round(em.upper)}`, position: 'insideTopRight', fontSize: 9, fontWeight: 700, fill: 'var(--color-sky-400)' } : undefined} />);
+      if (inView(em.lower)) out.push(<ReferenceLine key="eml" x={nearestStrike(em.lower)} stroke="var(--color-sky-400)" strokeDasharray="6 3" label={labels ? { value: `EM − ${Math.round(em.lower)}`, position: 'insideTopLeft', fontSize: 9, fontWeight: 700, fill: 'var(--color-sky-400)' } : undefined} />);
+    }
+    return out;
+  };
+  // Bar opacity scales with each strike's share of the largest bar, so the heavy strikes read at a glance.
+  const maxCe = rows.reduce((m, r) => Math.max(m, r.ceGex), 0) || 1;
+  const maxPe = rows.reduce((m, r) => Math.max(m, -r.peGex), 0) || 1;
+  const maxNet = rows.reduce((m, r) => Math.max(m, Math.abs(r.netGex)), 0) || 1;
+  const shade = (v: number, max: number) => 0.38 + 0.62 * Math.min(1, Math.abs(v) / max);
+  const accentStrip = regime === 'positive' ? 'via-emerald-500' : regime === 'negative' ? 'via-red-500' : 'via-zinc-600';
+  // Wall cell outline: the spot-side wall is bold, the 2nd/3rd largest walls on that side are thin.
+  const wallStroke = (strike: number, side: 'call' | 'put') => {
+    const primary = side === 'call' ? walls.callWall : walls.putWall;
+    if (strike === primary) return { stroke: side === 'call' ? '#fecaca' : '#a7f3d0', w: 2 };
+    if (wallRank(side === 'call' ? top.call : top.put, strike) != null) return { stroke: side === 'call' ? '#fecaca' : '#a7f3d0', w: 1 };
+    return { stroke: 'transparent', w: 0 };
+  };
+
+  return (
+    <div className="flex flex-col min-h-screen bg-zinc-950 text-white">
+      <div className="sticky top-0 z-30 flex items-center justify-between gap-3 flex-wrap px-6 py-3 border-b border-zinc-800 bg-zinc-950/95 backdrop-blur">
+        <div className="flex items-center gap-3">
+          <div className="flex items-center justify-center w-8 h-8 rounded-lg bg-emerald-500/10 border border-emerald-500/25 shrink-0">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" className="text-emerald-400">
+              <path d="M4 20V10M10 20V4M16 20v-7M22 20H2" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" />
+            </svg>
+          </div>
+          <div>
+            <p className="text-[9px] font-bold text-emerald-500 uppercase tracking-[0.18em] mb-0.5">Options · {UNDERLYING}</p>
+            <h1 className="text-sm font-bold text-white tracking-tight leading-none">GEX Profile <span className="ml-1 px-1.5 py-0.5 rounded text-[9px] font-bold border border-sky-500/40 bg-sky-500/10 text-sky-400 align-middle">v2</span></h1>
+            <p className="text-[10px] text-zinc-500 font-medium mt-1">Spot-side walls, zero-gamma flip and expected move (compare with GEX OI Chart)</p>
+          </div>
+        </div>
+        <div className="flex items-center gap-2 flex-wrap">
+          <DataChip date={dataDate} lastSession={!live} />
+          <span className="w-px h-5 bg-zinc-800 shrink-0" />
+          <label className="flex items-center gap-1.5">
+            <span className="text-[10px] text-zinc-500 font-bold uppercase tracking-widest">Expiry</span>
+            <select value={expiry} disabled={scope > 1} title={scope > 1 ? 'Aggregate scope uses the nearest expiries' : undefined} onChange={e => { setLoading(true); setExpiry(e.target.value); }}
+              className="bg-zinc-900 border border-zinc-700 text-zinc-200 text-xs font-mono font-semibold rounded-lg px-2.5 py-1.5 focus:outline-none focus:border-emerald-500 tabular-nums">
+              {expiries.map(e => <option key={e} value={e}>{e}</option>)}
+            </select>
+          </label>
+          <label className="flex items-center gap-1.5">
+            <span className="text-[10px] text-zinc-500 font-bold uppercase tracking-widest">Scope</span>
+            <select value={scope} onChange={e => { setLoading(true); setScope(Number(e.target.value)); }}
+              title="Single expiry, or the summed GEX of the nearest N expiries (0DTE and the next weeklies all hedge together)"
+              className="bg-zinc-900 border border-zinc-700 text-zinc-200 text-xs font-mono font-semibold rounded-lg px-2.5 py-1.5 focus:outline-none focus:border-emerald-500">
+              {SCOPE_OPTIONS.map(n => <option key={n} value={n}>{n === 1 ? 'Single expiry' : `Nearest ${n} expiries`}</option>)}
+            </select>
+          </label>
+          <label className="flex items-center gap-1.5">
+            <span className="text-[10px] text-zinc-500 font-bold uppercase tracking-widest">Strikes ±</span>
+            <select value={range} onChange={e => setRange(Number(e.target.value))}
+              className="bg-zinc-900 border border-zinc-700 text-zinc-200 text-xs font-mono font-semibold rounded-lg px-2.5 py-1.5 focus:outline-none focus:border-emerald-500">
+              {RANGE_OPTIONS.map(n => <option key={n} value={n}>{n}</option>)}
+            </select>
+          </label>
+          <label className="flex items-center gap-1.5">
+            <span className="text-[10px] text-zinc-500 font-bold uppercase tracking-widest">GEX in</span>
+            <select value={power} onChange={e => setPower(Number(e.target.value) as GexPower)}
+              title="Index units = the video's formula: gamma x OI units x spot x 0.01, the number of units dealers trade per 1% move. ₹ notional multiplies by spot once more. Walls and flip are identical either way."
+              className="bg-zinc-900 border border-zinc-700 text-zinc-200 text-xs font-mono font-semibold rounded-lg px-2.5 py-1.5 focus:outline-none focus:border-emerald-500">
+              <option value={1}>index units (video)</option>
+              <option value={2}>₹ notional</option>
+            </select>
+          </label>
+          <label className="flex items-center gap-1.5">
+            <span className="text-[10px] text-zinc-500 font-bold uppercase tracking-widest">Gamma</span>
+            <select value={gammaSource} onChange={e => setGammaSource(e.target.value as GammaSource)}
+              title="Dhan chain: gamma exactly as Dhan reports it, times OI and spot (the video's method). Black-76 model: gamma recomputed from the chain IV on the rolled future (a cross-check, not from the video)."
+              className="bg-zinc-900 border border-zinc-700 text-zinc-200 text-xs font-mono font-semibold rounded-lg px-2.5 py-1.5 focus:outline-none focus:border-emerald-500">
+              <option value="dhan">Dhan chain (video)</option>
+              <option value="model">Black-76 model</option>
+            </select>
+          </label>
+          <UpdateIntervalSlider seconds={updateSec} onChange={setUpdateSec} />
+          <button
+            role="switch"
+            aria-checked={showValues}
+            onClick={toggleValues}
+            title="Show or hide the values on the bars"
+            className="flex items-center gap-2 px-2.5 py-1.5 rounded-lg border border-zinc-700 bg-zinc-900 text-xs font-bold text-zinc-200 focus:outline-none focus:ring-2 focus:ring-emerald-500/50"
+          >
+            <span className="text-[10px] text-zinc-500 font-bold uppercase tracking-widest">Values</span>
+            <span className={`relative inline-block w-7 h-4 rounded-full transition-colors ${showValues ? 'bg-emerald-600' : 'bg-zinc-700'}`}>
+              <span className={`absolute top-0.5 left-0.5 w-3 h-3 rounded-full bg-oncolor transition-transform ${showValues ? 'translate-x-3' : ''}`} />
+            </span>
+          </button>
+          <GexLevelsButton levels={chartLevels} profile={rows} spot={spot} live={live} pollMs={pollMs} />
+          <GexCalcButton
+            sets={(items ?? []).filter(c => c.chain.oc).map(c => { const ex = c.expiry ?? expiry; return { expiry: ex, oc: c.chain.oc!, underlying: underlyingFor(c, ex), spot: c.spot > 0 ? c.spot : spot }; })}
+            build={calcBuild} spot={spot}
+            wallStrikes={[walls.callWall, walls.putWall].filter((x): x is number => x != null)}
+          />
+          <span className="w-px h-5 bg-zinc-800 shrink-0" />
+          <NavBar />
+        </div>
+      </div>
+
+      {staleAsOf != null && (
+        <div className="mx-6 mt-3 px-3 py-2 bg-amber-900/20 border border-amber-700/40 rounded-lg text-xs text-amber-400">
+          Dhan is rate-limiting the option chain, so this is the last good chain from {new Date(staleAsOf).toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', second: '2-digit' })}. Retrying automatically.
+        </div>
+      )}
+      {error && (
+        <div className="mx-6 mt-3 px-3 py-2 bg-red-900/20 border border-red-700/40 rounded-lg text-xs text-red-400">{error}</div>
+      )}
+      {noChainGamma && (
+        <div className="mx-6 mt-3 px-3 py-2 bg-amber-900/20 border border-amber-700/40 rounded-lg text-xs text-amber-400">
+          Dhan&apos;s chain returned no gamma for any strike (market closed or the Greeks feed is empty), so every GEX is zero. Switch Gamma to Black-76 model to see an estimate.
+        </div>
+      )}
+      {lot === null && (
+        <div className="mx-6 mt-3 px-3 py-2 bg-amber-900/20 border border-amber-700/40 rounded-lg text-xs text-amber-400">
+          Lot size is unknown. GEX is unaffected (Dhan reports OI in units), but OI is shown in units, not lots, and is never defaulted.
+        </div>
+      )}
+
+      <div className="flex-1 flex flex-col gap-4 px-6 py-5">
+        {loading && !items ? (
+          <div className="flex flex-col items-center justify-center py-24 gap-3">
+            <div className="w-6 h-6 border-2 border-zinc-700 border-t-emerald-400 rounded-full animate-spin" />
+            <p className="text-sm text-zinc-400 font-medium">Loading option chain…</p>
+          </div>
+        ) : (
+          <>
+            <div className="rounded-2xl border border-zinc-800 bg-zinc-900/60">
+              <div className="flex items-stretch gap-6 px-5 py-4 flex-wrap">
+                <PulseStat label={`${UNDERLYING} spot`} value={spot > 0 ? spot.toLocaleString('en-IN', { minimumFractionDigits: 2 }) : '—'} size="text-2xl" />
+                <div className="w-px bg-zinc-800 self-stretch" />
+                <PulseStat label="Call wall" value={walls.callWall ? fmtStrike(walls.callWall) : '—'} color="text-red-400" size="text-2xl"
+                  sub={walls.callOverall != null && walls.callOverall !== walls.callWall ? `highest call GEX at/above spot · overall max ${fmtStrike(walls.callOverall)}` : 'resistance · highest call GEX at/above spot'} />
+                <PulseStat label="Put wall" value={walls.putWall ? fmtStrike(walls.putWall) : '—'} color="text-emerald-400" size="text-2xl"
+                  sub={walls.putOverall != null && walls.putOverall !== walls.putWall ? `highest put GEX at/below spot · overall max ${fmtStrike(walls.putOverall)}` : 'support · highest put GEX at/below spot'} />
+                <PulseStat label="Gamma flip" value={flip != null ? Math.round(flip).toLocaleString('en-IN') : '—'} color="text-amber-400" size="text-2xl"
+                  sub={strikeFlip != null ? `re-priced at ±20% spots (Black-76) · strike-profile flip ${Math.round(strikeFlip).toLocaleString('en-IN')}` : 're-priced at ±20% spots (Black-76)'} />
+                <PulseStat label="Expected move" value={em ? `±${Math.round(em.em).toLocaleString('en-IN')}` : '—'} color="text-sky-400" size="text-2xl"
+                  sub={em ? `${emExpiry} ATM ${fmtStrike(em.strike)} straddle${em.source === 'model' ? ' (model price)' : ''} · ${Math.round(em.lower).toLocaleString('en-IN')} to ${Math.round(em.upper).toLocaleString('en-IN')}` : 'no ATM prices'} />
+                <PulseStat label="Pin strike" value={levels.pin ? fmtStrike(levels.pin) : '—'} color="text-zinc-200" size="text-2xl" sub="largest call + put GEX" />
+                <div className="ml-auto flex items-center gap-5 flex-wrap">
+                  <PulseStat label="Net GEX" value={fmtGex(totalNet)} color={totalNet >= 0 ? 'text-emerald-400' : 'text-red-400'} size="text-sm" sub={`${POWER_UNIT[power]} per 1% move, whole chain`} />
+                  <PulseStat label="Underlying" value={underlying > 0 ? underlying.toFixed(1) : '—'} size="text-sm" color="text-zinc-300" sub={isFut ? `future ${head?.future_expiry ?? ''} rolled to expiry · Black-76` : 'spot carried to expiry (no future): approximate'} />
+                  <PulseStat label="Lot · OI unit" value={lot ? String(lot) : '—'} size="text-sm" color="text-zinc-300" sub={`OI charted in ${oiLabel}; GEX built from units`} />
+                </div>
+              </div>
+              <div className="flex items-center justify-between gap-3 px-5 py-2 border-t border-zinc-800 flex-wrap">
+                <div className="flex items-center gap-2 flex-wrap">
+                  <span className={`inline-flex items-center px-2.5 py-1 rounded-full text-[10px] font-bold border ${regimeCls}`}>{regimeLabel}</span>
+                  {regimeMismatch && (
+                    <span className="text-[10px] text-amber-400">
+                      spot is {regime === 'positive' ? 'above' : 'below'} the flip, but whole-chain net GEX is {totalNet > 0 ? 'positive' : 'negative'} ({fmtGex(totalNet)})
+                    </span>
+                  )}
+                  {confluence.map(c => (
+                    <span key={c.label} className="inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-bold border border-sky-500/40 bg-sky-500/10 text-sky-400">
+                      {c.label} {Math.round(c.value).toLocaleString('en-IN')} ≈ {c.band === 'upper' ? 'upper' : 'lower'} expected move ({Math.round(c.distance)} pts)
+                    </span>
+                  ))}
+                  {approxForward && <span className="text-[10px] text-amber-400">no future price: forward estimated from spot with cost of carry (approximate)</span>}
+                </div>
+                <div className="flex items-center gap-2.5">
+                  {(() => {
+                    const age = updatedAt != null && nowMs > 0 ? Math.max(0, Math.round((nowMs - updatedAt) / 1000)) : null;
+                    // Stale = more than two poll periods old while the market is open: the feed or the chain route is not delivering.
+                    const stale = live && age != null && age > Math.max(pollMs / 1000, 30) * 2 + 20;
+                    const cls = !live ? TONE_CLS.manual : stale ? TONE_CLS.warn : TONE_CLS.ok;
+                    return (
+                      <span className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[10px] font-bold border ${cls}`}>
+                        <span className={`w-1.5 h-1.5 rounded-full ${!live ? 'bg-zinc-500' : stale ? 'bg-amber-400' : 'bg-emerald-400 animate-pulse'}`} />
+                        {!live ? 'MARKET CLOSED · static' : stale ? 'STALE' : `LIVE · every ${fmtInterval(updateSec)}`}
+                      </span>
+                    );
+                  })()}
+                  {updated && <span className="text-[10px] text-zinc-500 font-mono tabular-nums">Updated {updated}{updatedAt != null && nowMs > 0 ? ` · ${Math.max(0, Math.round((nowMs - updatedAt) / 1000))}s ago` : ''}</span>}
+                  <button
+                    onClick={() => { setLoading(true); void fetchAll(); }}
+                    title="Refresh now"
+                    aria-label="Refresh now"
+                    className="p-1.5 rounded-md border border-zinc-800 bg-zinc-900 text-zinc-300 hover:bg-zinc-800 focus:outline-none focus:ring-2 focus:ring-emerald-500/50"
+                  >
+                    <RefreshCw className="w-3 h-3" aria-hidden="true" />
+                  </button>
+                </div>
+              </div>
+            </div>
+
+            {rows.length === 0 ? (
+              <div className="flex items-center justify-center py-24 text-zinc-500 text-sm">
+                No GEX data for this expiry
+              </div>
+            ) : (
+              <>
+                {outside.length > 0 && (
+                  <div className="px-3 py-2 bg-amber-900/20 border border-amber-700/40 rounded-lg text-xs text-amber-400">
+                    Outside the ±{range} strike window (see KPIs): {outside.join(', ')}. Widen the window to see them.
+                  </div>
+                )}
+                <div className="relative overflow-hidden bg-zinc-900/60 border border-zinc-800 rounded-2xl p-5">
+                  <div aria-hidden className={`absolute inset-x-0 top-0 h-0.5 bg-gradient-to-r from-transparent ${accentStrip} to-transparent`} />
+                  <ChartHeader eyebrow="Reading" title="Regime and walls" sub={`${regimeNote(regime)} Walls are not guaranteed floors or ceilings; they matter most where they line up with the expected move or another level.`} />
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                    {([
+                      ['Call walls', top.call, 'text-red-400', 'bg-red-500/10', 'border-l-red-500'],
+                      ['Put walls', top.put, 'text-emerald-400', 'bg-emerald-500/10', 'border-l-emerald-500'],
+                    ] as const).map(([title, list, cls, bar, accent]) => (
+                      <div key={title} className={`rounded-xl border border-zinc-800 border-l-2 ${accent} bg-zinc-900 px-3 py-2.5`}>
+                        <p className={`text-[10px] font-bold uppercase tracking-widest ${cls}`}>{title} · top 3</p>
+                        <div className="mt-1.5 space-y-1">
+                          {list.length === 0 && <p className="text-xs text-zinc-500">none</p>}
+                          {list.map((w, i) => (
+                            <div key={w.strike} className="relative grid grid-cols-[1.75rem_4.5rem_6rem_6rem_1fr] items-center gap-x-3 rounded-md px-2 py-1 text-xs font-mono tabular-nums overflow-hidden">
+                              <span aria-hidden className={`absolute inset-y-0 left-0 ${bar}`} style={{ width: `${Math.max(4, (Math.abs(w.gex) / (Math.abs(list[0].gex) || 1)) * 100)}%` }} />
+                              <span className="relative text-zinc-400">#{i + 1}</span>
+                              <span className="relative text-zinc-100 font-bold text-right">{fmtStrike(w.strike)}</span>
+                              <span className="relative text-zinc-300 text-right">{fmtGex(w.gex)}</span>
+                              <span className="relative text-zinc-400 text-right">{spot > 0 ? `${w.strike >= spot ? '+' : '−'}${Math.abs(Math.round(w.strike - spot)).toLocaleString('en-IN')} · ${(Math.abs(w.strike - spot) / spot * 100).toFixed(1)}%` : '—'}</span>
+                              <span className={`relative text-[10px] font-sans font-bold text-right ${w.broken ? 'text-amber-400' : 'text-zinc-500'}`}>
+                                {w.broken ? (w.side === 'call' ? 'broken · now support' : 'broken · now resistance') : (w.side === 'call' ? 'above spot' : 'below spot')}
+                              </span>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+                <div className="relative overflow-hidden bg-zinc-900/60 border border-zinc-800 rounded-2xl p-5">
+                  <div aria-hidden className={`absolute inset-x-0 top-0 h-0.5 bg-gradient-to-r from-transparent ${accentStrip} to-transparent`} />
+                  <ChartHeader
+                    eyebrow="Gamma exposure"
+                    title="Call vs put GEX by strike"
+                    sub={`Bars: dealer hedge size per 1% move, in ${POWER_UNIT[power]} (calls positive, puts negative). Line: net. Assumes dealers are long calls and short puts.`}
+                    legend={<>
+                      <span className="flex items-center gap-1.5"><span className="w-3 h-3 rounded-sm bg-red-500" /><span className="text-zinc-300">Call GEX</span></span>
+                      <span className="flex items-center gap-1.5"><span className="w-3 h-3 rounded-sm bg-emerald-500" /><span className="text-zinc-300">Put GEX</span></span>
+                      <span className="flex items-center gap-1.5"><span className="w-3 h-0.5 bg-amber-400" /><span className="text-zinc-300">Net GEX</span></span>
+                      <span className="flex items-center gap-1.5"><span className="w-3 border-t-2 border-dashed border-red-400" /><span className="text-zinc-300">Call wall</span></span>
+                      <span className="flex items-center gap-1.5"><span className="w-3 border-t-2 border-dashed border-emerald-400" /><span className="text-zinc-300">Put wall</span></span>
+                      <span className={`flex items-center gap-1.5`}><span className={`w-3 h-3 rounded-sm ${regime === 'negative' ? 'bg-red-500/25' : 'bg-emerald-500/25'}`} /><span className="text-zinc-300">{regime === 'negative' ? 'Amplifying zone' : 'Dampening zone'}</span></span>
+                    </>}
+                  />
+                  <ResponsiveContainer width="100%" height={400}>
+                    <ComposedChart data={rows} stackOffset="sign" margin={{ top: 48, right: 16, left: 0, bottom: 40 }}>
+                      <defs>
+                        <linearGradient id="gexCallGrad" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stopColor="#f87171" /><stop offset="100%" stopColor="#dc2626" /></linearGradient>
+                        <linearGradient id="gexPutGrad" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stopColor="#059669" /><stop offset="100%" stopColor="#34d399" /></linearGradient>
+                      </defs>
+                      <CartesianGrid strokeDasharray="3 6" vertical={false} />
+                      <XAxis {...xAxisProps} />
+                      <YAxis tick={{ fontSize: 10, fontFamily: 'var(--font-mono)' }} tickLine={false} axisLine={false} width={58} tickFormatter={numFmt} />
+                      <Tooltip content={<GexTooltip oiLabel={oiLabel} />} cursor={{ fill: 'var(--chart-cursor-fill)', opacity: 0.5 }} />
+                      <ReferenceLine y={0} stroke="var(--color-zinc-500)" />
+                      {overlays(true)}
+                      <Bar dataKey="ceGex" name="Call GEX" stackId="g" isAnimationActive={false}>
+                        {rows.map(r => { const w = wallStroke(r.strike, 'call'); return <Cell key={r.strike} fill="url(#gexCallGrad)" fillOpacity={w.w > 0 ? 1 : shade(r.ceGex, maxCe)} stroke={w.stroke} strokeWidth={w.w} />; })}
+                        {showValues && <LabelList dataKey="ceGex" content={barValueLabel as never} />}
+                      </Bar>
+                      <Bar dataKey="peGex" name="Put GEX" stackId="g" isAnimationActive={false}>
+                        {rows.map(r => { const w = wallStroke(r.strike, 'put'); return <Cell key={r.strike} fill="url(#gexPutGrad)" fillOpacity={w.w > 0 ? 1 : shade(r.peGex, maxPe)} stroke={w.stroke} strokeWidth={w.w} />; })}
+                        {showValues && <LabelList dataKey="peGex" content={barValueLabel as never} />}
+                      </Bar>
+                      <Line type="monotone" dataKey="netGex" name="Net GEX" stroke="#fbbf24" strokeWidth={2} dot={false} isAnimationActive={false} />
+                    </ComposedChart>
+                  </ResponsiveContainer>
+                </div>
+
+                <div className="grid grid-cols-1 2xl:grid-cols-2 gap-4">
+                  <div className="bg-zinc-900/60 border border-zinc-800 rounded-2xl p-5">
+                    <ChartHeader eyebrow="Net" title="Net dealer GEX by strike" sub="Call minus put. Red zone below the flip amplifies moves; green above dampens them." />
+                    <ResponsiveContainer width="100%" height={300}>
+                      <ComposedChart data={rows} margin={{ top: 48, right: 16, left: 0, bottom: 40 }}>
+                        <CartesianGrid strokeDasharray="3 6" vertical={false} />
+                        <XAxis {...xAxisProps} />
+                        <YAxis tick={{ fontSize: 10, fontFamily: 'var(--font-mono)' }} tickLine={false} axisLine={false} width={58} tickFormatter={numFmt} />
+                        <Tooltip content={<GexTooltip oiLabel={oiLabel} />} cursor={{ fill: 'var(--chart-cursor-fill)', opacity: 0.5 }} />
+                        <ReferenceLine y={0} stroke="var(--color-zinc-500)" />
+                        {overlays(true)}
+                        <Bar dataKey="netGex" name="Net GEX" isAnimationActive={false}>
+                          {rows.map(r => <Cell key={r.strike} fill={r.netGex >= 0 ? '#10b981' : '#ef4444'} fillOpacity={shade(r.netGex, maxNet)} />)}
+                          {showValues && <LabelList dataKey="netGex" content={barValueLabel as never} />}
+                        </Bar>
+                      </ComposedChart>
+                    </ResponsiveContainer>
+                  </div>
+                  <div className="bg-zinc-900/60 border border-zinc-800 rounded-2xl p-5">
+                    <ChartHeader eyebrow="Raw" title="Open interest by strike" sub="What the plain option chain shows, for comparison with the GEX walls." />
+                    <ResponsiveContainer width="100%" height={300}>
+                      <ComposedChart data={rows} margin={{ top: 40, right: 16, left: 0, bottom: 0 }} barGap={2}>
+                        <CartesianGrid strokeDasharray="3 6" vertical={false} />
+                        <XAxis {...xAxisProps} />
+                        <YAxis tick={{ fontSize: 10, fontFamily: 'var(--font-mono)' }} tickLine={false} axisLine={false} width={58} tickFormatter={fmtOi} />
+                        <Tooltip content={<OiTooltip oiLabel={oiLabel} />} cursor={{ fill: 'var(--chart-cursor-fill)', opacity: 0.5 }} />
+                        {atm > 0 && <ReferenceLine x={nearestStrike(spot)} stroke="var(--color-zinc-400)" strokeDasharray="5 4" label={{ value: `SPOT ${spot.toLocaleString('en-IN', { maximumFractionDigits: 1 })}`, position: 'top', fontSize: 10, fontWeight: 700 }} />}
+                        <Bar dataKey="ceOiView" name="Call OI" fill="#ef4444" isAnimationActive={false}>
+                          {showValues && <LabelList dataKey="ceOiView" content={barValueLabel as never} />}
+                        </Bar>
+                        <Bar dataKey="peOiView" name="Put OI" fill="#10b981" isAnimationActive={false}>
+                          {showValues && <LabelList dataKey="peOiView" content={barValueLabel as never} />}
+                        </Bar>
+                      </ComposedChart>
+                    </ResponsiveContainer>
+                  </div>
+                </div>
+
+                <div className="bg-zinc-900/60 border border-zinc-800 rounded-2xl p-5">
+                  <ChartHeader eyebrow="Reference only" title="Strangle entry checklist" sub="From the source video. Informational: this page places no orders and the rule set is unvalidated." />
+                  <div className="grid grid-cols-1 md:grid-cols-5 gap-2">
+                    {checklist.map(c => (
+                      <div key={c.label} className={`rounded-xl border px-3 py-2 ${TONE_CLS[c.tone]}`}>
+                        <p className="text-xs font-bold">{c.label}</p>
+                        <p className="text-[10px] mt-1 text-zinc-300">{c.detail}</p>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              </>
+            )}
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
