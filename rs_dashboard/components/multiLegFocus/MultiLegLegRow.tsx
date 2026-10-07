@@ -72,12 +72,12 @@ interface MultiLegLegRowProps {
   onSelect?: (on: boolean) => void;
   /** Tag commit. Preferred over onChange, which saves from this render's legs. */
   onTag?: (tag: string | undefined) => void;
-  /** Take this trade out of its group (shown only for rows with more than one trade). */
+  /** Move this trade out of its group into the Ungrouped trades table. */
   onDetach?: () => void;
 }
 
 /** Tag chip: shows the label, click to edit; commits on blur / Enter, Esc cancels. */
-function TagCell({ value, onCommit }: { value?: string; onCommit: (v: string) => void }) {
+export function TagCell({ value, onCommit }: { value?: string; onCommit: (v: string) => void }) {
   const [editing, setEditing] = React.useState(false);
   const [draft, setDraft] = React.useState('');
   // Enter/Esc unmount the input, which can still deliver a blur: settle only once per edit.
@@ -146,7 +146,7 @@ export default function MultiLegLegRow({
           {onDetach && (
             <button type="button" onClick={onDetach}
               aria-label={`Remove ${leg.strike} ${leg.option} from this group`}
-              title="Remove from group: this trade moves to Ungrouped trades (no order is placed)"
+              title="Ungroup: move this trade to the Ungrouped trades table (no order is placed)"
               className={`h-5 px-1 inline-flex items-center gap-0.5 rounded border border-zinc-700 text-[10px] font-semibold text-zinc-400 hover:text-white hover:border-zinc-500 ${FOCUS_RING}`}>
               <Unlink className="w-3 h-3" aria-hidden /> Ungroup
             </button>

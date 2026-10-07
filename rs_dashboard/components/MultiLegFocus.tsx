@@ -15,6 +15,7 @@ import StrategyCardGrid from './basket/StrategyCardGrid';
 import MultiLegStrategyRow from './multiLegFocus/MultiLegStrategyRow';
 import OrdersTradesModal from './multiLegFocus/OrdersTradesModal';
 import GroupSelectionBar from './multiLegFocus/GroupSelectionBar';
+import UngroupedTradesTable, { type UngroupedTrade } from './multiLegFocus/UngroupedTradesTable';
 import ImportPositionsModal, { type ImportCandidate, type ImportRequest } from './multiLegFocus/ImportPositionsModal';
 import { withRevs, noteSaved, adoptServerBasket, stableBody, type RevBook } from '@/lib/multiLegStoreMerge';
 import { useTabLeader } from '@/hooks/useTabLeader';
@@ -2130,6 +2131,17 @@ export default function MultiLegFocus({
     underAllocatedWarnedRef.current = new Set([...live]);
   }, [legQtyWarnings, addToast]);
 
+  // Manual single-leg exit from a card or the Ungrouped trades table.
+  const exitLegFromPage = useCallback(async (basket: MultiLegBasket, leg: MultiLegLeg, exitLots?: number) => {
+    const w = legQtyWarnings[`${basket.id}:${leg.id}`];
+    if (w?.kind === 'over' && !window.confirm(
+      `Strategies on ${leg.strike} ${leg.option} track ${w.trackedQty} but the broker holds only ${w.brokerQty}: `
+      + `${w.gap} was already closed outside this tool.\n\nIf that close was THIS leg's, use Reduce instead: exiting now `
+      + `would close quantity another strategy still tracks.\n\nExit ${leg.fill?.qty ?? 0} anyway?`,
+    )) return;
+    await trackOp(basket.id, () => exitOneLeg(basket.id, leg, exitLots), { exit: true });
+  }, [trackOp, exitOneLeg, legQtyWarnings]);
+
   // ── Group / ungroup trades ──────────────────────────────────────────
   // Selection spans rows (key = leg id; leg ids are unique page-wide). The move itself
   // happens on the server file (baskets/regroup) so a stale tab can't resurrect a moved leg.
@@ -2147,15 +2159,13 @@ export default function MultiLegFocus({
     const live = new Set(baskets.flatMap(b => b.legs.map(l => l.id)));
     return new Set([...pickedLegIds].filter(id => live.has(id)));
   }, [baskets, pickedLegIds]);
-  const runRegroup = useCallback(async (body: { op: 'group' | 'ungroup'; legIds?: string[]; basketId?: string; name?: string; targetBasketId?: string }) => {
+  const runRegroup = useCallback(async (body: { op: 'group' | 'ungroup'; legIds: string[]; name?: string; targetBasketId?: string }) => {
     // Synchronous: a double click must not send two regroups (the second would move the new group again).
     if (regroupingRef.current) return;
     if (savesInFlightRef.current > 0) { addToast('error', 'Still saving', 'Try again in a second.'); return; }
     const all = basketsRef.current;
-    const legIds = new Set(body.legIds ?? []);
-    const involved = new Set<string>([
-      ...all.filter(b => b.id === body.basketId || b.id === body.targetBasketId || b.legs.some(l => legIds.has(l.id))).map(b => b.id),
-    ]);
+    const legIds = new Set(body.legIds);
+    const involved = new Set(all.filter(b => b.id === body.targetBasketId || b.legs.some(l => legIds.has(l.id))).map(b => b.id));
     const unsavedPick = all.find(b => involved.has(b.id) && !revBookRef.current.has(`b:${b.id}`));
     if (unsavedPick) {
       addToast('error', 'Cannot regroup yet', `${basketLabel(unsavedPick, 'That strategy')} is not saved yet. Edit or place it first.`);
@@ -2214,7 +2224,7 @@ export default function MultiLegFocus({
     // A row already holding every ticked trade is not a destination.
     const holdsAll = (b: MultiLegBasket) => [...selectedLegIds].every(id => b.legs.some(l => l.id === id));
     return baskets
-      .filter(b => b.broker === ref.broker && b.underlying === ref.underlying && !holdsAll(b))
+      .filter(b => !isLooseTrade(b) && b.broker === ref.broker && b.underlying === ref.underlying && !holdsAll(b))
       .map(b => ({ id: b.id, label: basketLabel(b, 'Strategy') }));
   }, [baskets, selectedLegIds]);
   const allTags = useMemo(
@@ -3189,22 +3199,18 @@ export default function MultiLegFocus({
   // to the bottom so a long-running page doesn't bury active positions under
   // its own trade history. Array#sort is stable (ES2019+), so relative order
   // within each group is preserved exactly as baskets were created/updated.
-  // Groups first, then trades that are in no group (isLooseTrade) in their own section.
+  // Groups are cards; trades in no group (isLooseTrade) go in the Ungrouped trades table.
   const sortedBaskets = useMemo(() => {
-    const rank = (b: MultiLegBasket) => (isLooseTrade(b) ? 2 : 0) + (computeBasketStatus(b.legs) === 'CLOSED' ? 1 : 0);
-    return [...baskets].sort((a, b) => rank(a) - rank(b));
+    const exited = (b: MultiLegBasket) => (computeBasketStatus(b.legs) === 'CLOSED' ? 1 : 0);
+    return baskets.filter(b => !isLooseTrade(b)).sort((a, b) => exited(a) - exited(b));
   }, [baskets]);
-  const firstLooseIdx = useMemo(() => sortedBaskets.findIndex(isLooseTrade), [sortedBaskets]);
-  const looseCount = firstLooseIdx < 0 ? 0 : sortedBaskets.length - firstLooseIdx;
-  // "Exited" divider: the first exited row of each section.
-  const exitedDividerIdx = useMemo(() => {
-    const out = new Set<number>();
-    const g = sortedBaskets.findIndex(b => !isLooseTrade(b) && computeBasketStatus(b.legs) === 'CLOSED');
-    const l = sortedBaskets.findIndex(b => isLooseTrade(b) && computeBasketStatus(b.legs) === 'CLOSED');
-    if (g >= 0) out.add(g);
-    if (l >= 0) out.add(l);
-    return out;
-  }, [sortedBaskets]);
+  const firstExitedIdx = useMemo(
+    () => sortedBaskets.findIndex(b => computeBasketStatus(b.legs) === 'CLOSED'),
+    [sortedBaskets],
+  );
+  const ungroupedTrades = useMemo<UngroupedTrade[]>(() => baskets.filter(isLooseTrade)
+    .map(b => ({ basket: b, leg: b.legs[0] }))
+    .sort((a, b) => (a.leg.status === 'CLOSED' ? 1 : 0) - (b.leg.status === 'CLOSED' ? 1 : 0)), [baskets]);
 
   return (
     <div className={embedded ? 'flex flex-col w-full' : 'min-h-screen bg-zinc-950 text-zinc-100'}>
@@ -3596,14 +3602,7 @@ export default function MultiLegFocus({
 
             return (
               <React.Fragment key={basket.id}>
-                {idx === firstLooseIdx && (
-                  <div className="flex items-center gap-2 pt-3">
-                    <span className="text-xs font-bold uppercase tracking-wider text-zinc-300">Ungrouped trades · {looseCount}</span>
-                    <span className="text-[11px] text-zinc-500">Tick trades and press Group to combine them</span>
-                    <div className="flex-1 h-px bg-zinc-700" />
-                  </div>
-                )}
-                {exitedDividerIdx.has(idx) && (
+                {idx === firstExitedIdx && (
                   <div className="flex items-center gap-2 pt-1">
                     <span className="text-[10px] font-bold uppercase tracking-wider text-zinc-500">Exited</span>
                     <div className="flex-1 h-px bg-zinc-800" />
@@ -3650,15 +3649,7 @@ export default function MultiLegFocus({
                 onDelete={() => deleteBasket(basket.id)}
                 onPlace={async () => { await trackOp(basket.id, () => placeBasket(basket.id)); }}
                 onExit={async () => { await trackOp(basket.id, () => exitBasket(basket.id), { exit: true }); }}
-                onExitLeg={async (leg, exitLots) => {
-                  const w = legQtyWarnings[`${basket.id}:${leg.id}`];
-                  if (w?.kind === 'over' && !window.confirm(
-                    `Strategies on ${leg.strike} ${leg.option} track ${w.trackedQty} but the broker holds only ${w.brokerQty}: `
-                    + `${w.gap} was already closed outside this tool.\n\nIf that close was THIS leg's, use Reduce instead: exiting now `
-                    + `would close quantity another strategy still tracks.\n\nExit ${leg.fill?.qty ?? 0} anyway?`,
-                  )) return;
-                  await trackOp(basket.id, () => exitOneLeg(basket.id, leg, exitLots), { exit: true });
-                }}
+                onExitLeg={(leg, exitLots) => exitLegFromPage(basket, leg, exitLots)}
                 onShiftLegs={async (legIds, direction, steps) => { await trackOp(basket.id, () => shiftLegs(basket.id, legIds, direction, steps)); }}
                 legColumns={legColumns}
                 onLegColumnsChange={changeLegColumns}
@@ -3684,13 +3675,26 @@ export default function MultiLegFocus({
                 selectedLegIds={selectedLegIds}
                 onSelectLegs={selectLegs}
                 onTagLeg={(legId, tag) => patchLegs(basket.id, legs => legs.map(l => (l.id === legId ? { ...l, tag } : l)))}
-                onUngroup={() => runRegroup({ op: 'ungroup', basketId: basket.id })}
+                onUngroup={() => runRegroup({ op: 'ungroup', legIds: basket.legs.filter(l => l.status !== 'CLOSED').map(l => l.id) })}
                 onDetachLeg={legId => runRegroup({ op: 'ungroup', legIds: [legId] })}
                 />
               </React.Fragment>
             );
           })
         )}
+        <UngroupedTradesTable
+          trades={ungroupedTrades}
+          ltpFor={ltpFor}
+          selectedLegIds={selectedLegIds}
+          onSelectLegs={selectLegs}
+          onTag={(t, tag) => patchLegs(t.basket.id, legs => legs.map(l => (l.id === t.leg.id ? { ...l, tag } : l)))}
+          onExit={t => {
+            if (!window.confirm(`Exit ${t.leg.side === 'S' ? 'SELL' : 'BUY'} ${t.leg.strike} ${t.leg.option} (${t.basket.underlying}, ${t.leg.fill?.qty ?? 0} qty) at market?`)) return;
+            void exitLegFromPage(t.basket, t.leg);
+          }}
+          exitingLegs={exitingLegs}
+          legQtyWarnings={legQtyWarnings}
+        />
       </div>
 
       <datalist id="mlf-tag-options">
@@ -3708,7 +3712,7 @@ export default function MultiLegFocus({
             if (!ref || picked.some(b => b.broker !== ref.broker || b.underlying !== ref.underlying)) return null;
             return `${ref.underlying} · ${BROKER_LABELS[ref.broker as Broker] ?? ref.broker}`;
           })()}
-          canUngroup={baskets.some(b => b.legs.length > 1 && b.legs.some(l => selectedLegIds.has(l.id)))}
+          canUngroup={baskets.some(b => !isLooseTrade(b) && b.legs.some(l => selectedLegIds.has(l.id)))}
           onGroup={(name, targetBasketId) => runRegroup({ op: 'group', legIds: [...selectedLegIds], name, targetBasketId })}
           onUngroup={() => runRegroup({ op: 'ungroup', legIds: [...selectedLegIds] })}
           onClear={() => setSelectedLegIds(new Set())}

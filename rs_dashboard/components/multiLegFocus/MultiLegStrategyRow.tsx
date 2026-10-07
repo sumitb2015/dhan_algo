@@ -134,9 +134,9 @@ export interface MultiLegStrategyRowProps {
   onSelectLegs?: (legIds: string[], on: boolean) => void;
   /** Set a leg's tag through the page's functional leg update (never this render's legs). */
   onTagLeg?: (legId: string, tag: string | undefined) => void;
-  /** Split this strategy into one row per leg. */
+  /** Move every live trade of this group to the Ungrouped trades table. */
   onUngroup?: () => void;
-  /** Take one trade out of this group into the Ungrouped trades section. */
+  /** Move one trade of this group to the Ungrouped trades table. */
   onDetachLeg?: (legId: string) => void;
 }
 
@@ -628,7 +628,7 @@ export default function MultiLegStrategyRow({
             >
               {BROKER_LABELS[basket.broker as Broker] ?? basket.broker}
             </span>
-          {onUngroup && basket.legs.filter(l => l.status !== 'CLOSED').length > 1 && (
+          {onUngroup && basket.legs.some(l => l.status !== 'CLOSED') && (
             <button
               type="button"
               onClick={onUngroup}
@@ -1371,7 +1371,7 @@ export default function MultiLegStrategyRow({
                       selected={!!selectedLegIds?.has(leg.id)}
                       onSelect={onSelectLegs ? (on => onSelectLegs([leg.id], on)) : undefined}
                       onTag={onTagLeg ? (tag => onTagLeg(leg.id, tag)) : undefined}
-                      onDetach={onDetachLeg && basket.legs.length > 1 && leg.status !== 'PLACING' && leg.status !== 'CLOSING'
+                      onDetach={onDetachLeg && leg.status !== 'PLACING' && leg.status !== 'CLOSING'
                         ? (() => onDetachLeg(leg.id)) : undefined}
                     />
                   ))}

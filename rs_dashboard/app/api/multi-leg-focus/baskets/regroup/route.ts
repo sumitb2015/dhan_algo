@@ -11,8 +11,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     }
     const okIds = (v: unknown) => v === undefined || (Array.isArray(v) && v.every(x => typeof x === 'string'));
     const str = (v: unknown) => v === undefined || typeof v === 'string';
-    if (!okIds(body.legIds) || !str((body as { name?: unknown }).name) || !str((body as { targetBasketId?: unknown }).targetBasketId)
-      || !str((body as { basketId?: unknown }).basketId)) {
+    if (!okIds(body.legIds) || !str((body as { name?: unknown }).name) || !str((body as { targetBasketId?: unknown }).targetBasketId)) {
       return NextResponse.json({ success: false, error: 'invalid request' }, { status: 400 });
     }
     const r = regroup(body);
