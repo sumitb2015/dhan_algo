@@ -143,6 +143,13 @@ export function basketLabel(basket: MultiLegBasket, fallback = 'Strategy'): stri
     ?? (basket.presetKey ? basket.presetKey.replace(/-/g, ' ') : fallback);
 }
 
+/** A trade that is not in any group: a row holding one traded leg and no user-given name.
+ *  The page lists these in their own "Ungrouped trades" section. A one-leg DRAFT is a
+ *  strategy still being built, not a loose trade. */
+export function isLooseTrade(basket: MultiLegBasket): boolean {
+  return basket.legs.length === 1 && basket.legs[0].status !== 'DRAFT' && !basket.groupName?.trim();
+}
+
 /** Dhan reports MCX crude quantity in lots-of-barrels differently per contract: CRUDEOIL x100,
  *  CRUDEOILM x10. Every other underlying/broker is 1. Single source for ledger-qty -> P&L scaling. */
 export function crudeQtyMultiplier(underlying: string, broker: string): number {

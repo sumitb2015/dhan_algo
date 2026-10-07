@@ -28,7 +28,7 @@ import {
   positionProduct, computeBasketStatus, closedFillFromRow,
   findSiblingLegCollisions, describeSiblingCollisions,
   legQtyWarningsFor, recordOutsideReduction, type LegQtyWarning,
-  basketLabel, findUntrackedPositions, residualBrokerAvg, findContractDrift, type ContractDrift, contractHintFromRow, legFromUntracked, mergeImportedLegs, brokerClampSlice,
+  basketLabel, isLooseTrade, findUntrackedPositions, residualBrokerAvg, findContractDrift, type ContractDrift, contractHintFromRow, legFromUntracked, mergeImportedLegs, brokerClampSlice,
   normalizeTradeRow, ownOrderIds, repriceEstimatedCloses, MLF_ORDER_SOURCE, type NormalizedTrade,
   type MultiLegLeg, type MultiLegBasket, type StrategyRiskConfig, type MultiLegStatus,
 } from '@/lib/multiLegFocus';
@@ -3189,17 +3189,22 @@ export default function MultiLegFocus({
   // to the bottom so a long-running page doesn't bury active positions under
   // its own trade history. Array#sort is stable (ES2019+), so relative order
   // within each group is preserved exactly as baskets were created/updated.
+  // Groups first, then trades that are in no group (isLooseTrade) in their own section.
   const sortedBaskets = useMemo(() => {
-    return [...baskets].sort((a, b) => {
-      const aExited = computeBasketStatus(a.legs) === 'CLOSED' ? 1 : 0;
-      const bExited = computeBasketStatus(b.legs) === 'CLOSED' ? 1 : 0;
-      return aExited - bExited;
-    });
+    const rank = (b: MultiLegBasket) => (isLooseTrade(b) ? 2 : 0) + (computeBasketStatus(b.legs) === 'CLOSED' ? 1 : 0);
+    return [...baskets].sort((a, b) => rank(a) - rank(b));
   }, [baskets]);
-  const firstExitedIdx = useMemo(
-    () => sortedBaskets.findIndex(b => computeBasketStatus(b.legs) === 'CLOSED'),
-    [sortedBaskets],
-  );
+  const firstLooseIdx = useMemo(() => sortedBaskets.findIndex(isLooseTrade), [sortedBaskets]);
+  const looseCount = firstLooseIdx < 0 ? 0 : sortedBaskets.length - firstLooseIdx;
+  // "Exited" divider: the first exited row of each section.
+  const exitedDividerIdx = useMemo(() => {
+    const out = new Set<number>();
+    const g = sortedBaskets.findIndex(b => !isLooseTrade(b) && computeBasketStatus(b.legs) === 'CLOSED');
+    const l = sortedBaskets.findIndex(b => isLooseTrade(b) && computeBasketStatus(b.legs) === 'CLOSED');
+    if (g >= 0) out.add(g);
+    if (l >= 0) out.add(l);
+    return out;
+  }, [sortedBaskets]);
 
   return (
     <div className={embedded ? 'flex flex-col w-full' : 'min-h-screen bg-zinc-950 text-zinc-100'}>
@@ -3591,7 +3596,14 @@ export default function MultiLegFocus({
 
             return (
               <React.Fragment key={basket.id}>
-                {idx === firstExitedIdx && (
+                {idx === firstLooseIdx && (
+                  <div className="flex items-center gap-2 pt-3">
+                    <span className="text-xs font-bold uppercase tracking-wider text-zinc-300">Ungrouped trades · {looseCount}</span>
+                    <span className="text-[11px] text-zinc-500">Tick trades and press Group to combine them</span>
+                    <div className="flex-1 h-px bg-zinc-700" />
+                  </div>
+                )}
+                {exitedDividerIdx.has(idx) && (
                   <div className="flex items-center gap-2 pt-1">
                     <span className="text-[10px] font-bold uppercase tracking-wider text-zinc-500">Exited</span>
                     <div className="flex-1 h-px bg-zinc-800" />
@@ -3673,6 +3685,7 @@ export default function MultiLegFocus({
                 onSelectLegs={selectLegs}
                 onTagLeg={(legId, tag) => patchLegs(basket.id, legs => legs.map(l => (l.id === legId ? { ...l, tag } : l)))}
                 onUngroup={() => runRegroup({ op: 'ungroup', basketId: basket.id })}
+                onDetachLeg={legId => runRegroup({ op: 'ungroup', legIds: [legId] })}
                 />
               </React.Fragment>
             );

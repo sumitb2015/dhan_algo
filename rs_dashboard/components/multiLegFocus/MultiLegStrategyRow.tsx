@@ -136,6 +136,8 @@ export interface MultiLegStrategyRowProps {
   onTagLeg?: (legId: string, tag: string | undefined) => void;
   /** Split this strategy into one row per leg. */
   onUngroup?: () => void;
+  /** Take one trade out of this group into the Ungrouped trades section. */
+  onDetachLeg?: (legId: string) => void;
 }
 
 export default function MultiLegStrategyRow({
@@ -183,6 +185,7 @@ export default function MultiLegStrategyRow({
   onSelectLegs,
   onTagLeg,
   onUngroup,
+  onDetachLeg,
 }: MultiLegStrategyRowProps) {
   // Existing/already-placed positions default collapsed (this page can carry
   // several parallel strategies, most of them just sitting open) — the user
@@ -625,6 +628,17 @@ export default function MultiLegStrategyRow({
             >
               {BROKER_LABELS[basket.broker as Broker] ?? basket.broker}
             </span>
+          {onUngroup && basket.legs.filter(l => l.status !== 'CLOSED').length > 1 && (
+            <button
+              type="button"
+              onClick={onUngroup}
+              disabled={placing || exiting || shifting}
+              title="Ungroup: move every live trade here to Ungrouped trades; closed trades stay as this row's history (no orders are placed)"
+              className={`h-6 px-1.5 inline-flex items-center gap-1 text-[10px] font-bold rounded border border-zinc-700 text-zinc-300 hover:text-white hover:bg-zinc-800 disabled:opacity-40 ${FOCUS_RING}`}
+            >
+              <Unlink className="w-3 h-3" /> Ungroup
+            </button>
+          )}
           </div>
 
           {/* Underlying + Expiry — a placed basket can't change either (the
@@ -954,18 +968,6 @@ export default function MultiLegStrategyRow({
                 {exiting ? 'Exiting…' : 'Exit Strategy'}
               </button>
             </div>
-          )}
-
-          {onUngroup && basket.legs.filter(l => l.status !== 'CLOSED').length > 1 && (
-            <button
-              type="button"
-              onClick={onUngroup}
-              disabled={placing || exiting || shifting}
-              title="Ungroup: give every live trade here its own row; closed trades stay as this row's history (no orders are placed)"
-              className={`h-7 px-2 inline-flex items-center gap-1 text-[11px] font-bold rounded-lg border border-zinc-700 text-zinc-300 hover:text-white hover:bg-zinc-800 disabled:opacity-40 ${FOCUS_RING}`}
-            >
-              <Unlink className="w-3 h-3" /> Ungroup
-            </button>
           )}
 
           {/* Delete Row button — strictly disabled when positions are active to prevent losing tracking */}
@@ -1369,6 +1371,8 @@ export default function MultiLegStrategyRow({
                       selected={!!selectedLegIds?.has(leg.id)}
                       onSelect={onSelectLegs ? (on => onSelectLegs([leg.id], on)) : undefined}
                       onTag={onTagLeg ? (tag => onTagLeg(leg.id, tag)) : undefined}
+                      onDetach={onDetachLeg && basket.legs.length > 1 && leg.status !== 'PLACING' && leg.status !== 'CLOSING'
+                        ? (() => onDetachLeg(leg.id)) : undefined}
                     />
                   ))}
                 </tbody>

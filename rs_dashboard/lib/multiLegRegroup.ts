@@ -157,8 +157,8 @@ export function regroupBaskets(
       message = `Grouped ${moving.length} leg(s)${name ? ` as "${name}"` : ''}`;
     }
   } else {
-    // Ungroup: every leg becomes its own row, named after the contract.
-    const singles = moving.map(m => born([m.leg], `${legLabel(m.leg)} ${m.leg.side === 'S' ? 'Short' : 'Long'}`));
+    // Ungroup: every leg becomes its own unnamed row, which the page lists as an ungrouped trade.
+    const singles = moving.map(m => born([m.leg]));
     next = [...next, ...singles];
     message = `Ungrouped ${moving.length} leg(s) into separate rows`;
   }

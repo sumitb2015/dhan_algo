@@ -42,7 +42,7 @@ test('ungroup splits every leg into its own row', () => {
   const r = regroupBaskets([bk('A', [leg('1'), leg('2', { option: 'PE', strike: 22000 })])], { op: 'ungroup', basketId: 'A' }, nid, 'now');
   assert.ok(r.ok);
   assert.equal(r.baskets.length, 2);
-  assert.equal(r.baskets[1].groupName, '22000 PE Short');
+  assert.equal(r.baskets[1].groupName, undefined);
 });
 
 test('group into an existing basket', () => {
