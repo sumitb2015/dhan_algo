@@ -14,6 +14,7 @@ import { sortLegsForPlacement, resolveOrderRequest, type StrikeIdentifier } from
 import StrategyCardGrid from './basket/StrategyCardGrid';
 import MultiLegStrategyRow from './multiLegFocus/MultiLegStrategyRow';
 import OrdersTradesModal from './multiLegFocus/OrdersTradesModal';
+import GroupSelectionBar from './multiLegFocus/GroupSelectionBar';
 import ImportPositionsModal, { type ImportCandidate, type ImportRequest } from './multiLegFocus/ImportPositionsModal';
 import { withRevs, noteSaved, adoptServerBasket, stableBody, type RevBook } from '@/lib/multiLegStoreMerge';
 import { useTabLeader } from '@/hooks/useTabLeader';
@@ -27,7 +28,7 @@ import {
   positionProduct, computeBasketStatus, closedFillFromRow,
   findSiblingLegCollisions, describeSiblingCollisions,
   legQtyWarningsFor, recordOutsideReduction, type LegQtyWarning,
-  findUntrackedPositions, residualBrokerAvg, findContractDrift, type ContractDrift, contractHintFromRow, legFromUntracked, mergeImportedLegs, brokerClampSlice,
+  basketLabel, findUntrackedPositions, residualBrokerAvg, findContractDrift, type ContractDrift, contractHintFromRow, legFromUntracked, mergeImportedLegs, brokerClampSlice,
   normalizeTradeRow, ownOrderIds, repriceEstimatedCloses, MLF_ORDER_SOURCE, type NormalizedTrade,
   type MultiLegLeg, type MultiLegBasket, type StrategyRiskConfig, type MultiLegStatus,
 } from '@/lib/multiLegFocus';
@@ -2086,6 +2087,66 @@ export default function MultiLegFocus({
     underAllocatedWarnedRef.current = new Set([...live]);
   }, [legQtyWarnings, addToast]);
 
+  // ── Group / ungroup trades ──────────────────────────────────────────
+  // Selection spans rows (key = leg id; leg ids are unique page-wide). The move itself
+  // happens on the server file (baskets/regroup) so a stale tab can't resurrect a moved leg.
+  const [pickedLegIds, setSelectedLegIds] = useState<Set<string>>(new Set());
+  const [regrouping, setRegrouping] = useState(false);
+  const selectLegs = useCallback((ids: string[], on: boolean) => {
+    setSelectedLegIds(prev => {
+      const next = new Set(prev);
+      for (const id of ids) { if (on) next.add(id); else next.delete(id); }
+      return next;
+    });
+  }, []);
+  // Ticks for legs that no longer exist (deleted / archived elsewhere) simply drop out.
+  const selectedLegIds = useMemo(() => {
+    const live = new Set(baskets.flatMap(b => b.legs.map(l => l.id)));
+    return new Set([...pickedLegIds].filter(id => live.has(id)));
+  }, [baskets, pickedLegIds]);
+  const runRegroup = useCallback(async (body: Record<string, unknown>) => {
+    if (regrouping) return;
+    if (savesInFlightRef.current > 0) { addToast('error', 'Still saving', 'Try again in a second.'); return; }
+    setRegrouping(true);
+    // Counts as a save in flight so the poll doesn't re-read the file mid-move.
+    savesInFlightRef.current += 1;
+    // Rows this tab has never saved (a fresh draft) are not in the server's answer; keep them.
+    const unsaved = basketsRef.current.filter(b => !revBookRef.current.has(`b:${b.id}`));
+    try {
+      const j = await fetch('/api/multi-leg-focus/baskets/regroup', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+      }).then(r => r.json()) as { success: boolean; data?: MultiLegBasket[]; message?: string; error?: string; disarmed?: string[] };
+      if (!j.success || !j.data) { addToast('error', 'Could not regroup', j.error ?? 'Unknown error'); return; }
+      saveGenRef.current += 1;
+      revBookRef.current.clear();
+      for (const b of j.data) noteSaved(revBookRef.current, b);
+      const next = [...j.data, ...unsaved.filter(b => !j.data!.some(x => x.id === b.id))];
+      basketsRef.current = next;
+      setBaskets(next);
+      setSelectedLegIds(new Set());
+      addToast('success', j.message ?? 'Regrouped',
+        j.disarmed?.length ? 'Strategy SL/target was disarmed on the changed groups. Re-arm after checking them.' : 'No orders were placed.');
+    } catch (e) {
+      addToast('error', 'Could not regroup', String(e));
+    } finally {
+      savesInFlightRef.current -= 1;
+      setRegrouping(false);
+    }
+  }, [regrouping, addToast]);
+  // Groups the selection may be moved into: same broker and underlying as the selected trades.
+  const groupTargets = useMemo(() => {
+    const picked = baskets.filter(b => b.legs.some(l => selectedLegIds.has(l.id)));
+    const ref = picked[0];
+    if (!ref || picked.some(b => b.broker !== ref.broker || b.underlying !== ref.underlying)) return [];
+    return baskets
+      .filter(b => b.broker === ref.broker && b.underlying === ref.underlying)
+      .map(b => ({ id: b.id, label: basketLabel(b, 'Strategy') }));
+  }, [baskets, selectedLegIds]);
+  const allTags = useMemo(
+    () => Array.from(new Set(baskets.flatMap(b => b.legs.map(l => l.tag).filter((t): t is string => !!t)))).sort(),
+    [baskets],
+  );
+
   // ── Import positions taken outside the tool ────────────────────────
   const [showImportModal, setShowImportModal] = useState(false);
   const [showHistoryModal, setShowHistoryModal] = useState(false);
@@ -3522,12 +3583,30 @@ export default function MultiLegFocus({
                 availableFunds={rowBroker === broker ? fundsData?.available : undefined}
                 legQtyWarnings={legQtyWarnings}
                 allBaskets={baskets}
+                selectedLegIds={selectedLegIds}
+                onSelectLegs={selectLegs}
+                onUngroup={() => runRegroup({ op: 'ungroup', basketId: basket.id })}
                 />
               </React.Fragment>
             );
           })
         )}
       </div>
+
+      <datalist id="mlf-tag-options">
+        {allTags.map(t => <option key={t} value={t} />)}
+      </datalist>
+
+      {selectedLegIds.size > 0 && (
+        <GroupSelectionBar
+          count={selectedLegIds.size}
+          busy={regrouping}
+          targets={groupTargets}
+          onGroup={(name, targetBasketId) => runRegroup({ op: 'group', legIds: [...selectedLegIds], name, targetBasketId })}
+          onUngroup={() => runRegroup({ op: 'ungroup', legIds: [...selectedLegIds] })}
+          onClear={() => setSelectedLegIds(new Set())}
+        />
+      )}
 
       {showHelp && helpMarkdown && (
         <HelpModal title="How to use Multi-Leg Focus" markdown={helpMarkdown} onClose={() => setShowHelp(false)} />

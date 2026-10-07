@@ -51,6 +51,7 @@ export default function HistoryModal({ onClose }: Props) {
     return archive
       .map(b => ({ b, s: summarizeArchived(b) }))
       .filter(({ b }) => !q
+        || (b.groupName ?? '').toLowerCase().includes(q)
         || (b.name ?? b.presetKey ?? '').toLowerCase().includes(q)
         || b.underlying.toLowerCase().includes(q)
         || b.broker.toLowerCase().includes(q)
@@ -140,7 +141,7 @@ export default function HistoryModal({ onClose }: Props) {
                           </button>
                         </td>
                         <td className="px-2 py-1.5 font-mono text-zinc-300 whitespace-nowrap">{fmtIst(s.closedAt)}</td>
-                        <td className="px-2 py-1.5 font-bold text-zinc-100">{b.name ?? b.presetKey ?? 'Strategy'}</td>
+                        <td className="px-2 py-1.5 font-bold text-zinc-100">{b.groupName?.trim() || b.name || b.presetKey || 'Strategy'}</td>
                         <td className="px-2 py-1.5 uppercase text-zinc-300">{b.broker}</td>
                         <td className="px-2 py-1.5 text-zinc-300">{b.underlying}</td>
                         <td className="px-2 py-1.5 font-mono text-zinc-300">{formatExpiryLabel(b.expiry)}</td>

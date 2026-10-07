@@ -5,6 +5,7 @@ import { PROJECT_ROOT } from '@/lib/pyExec';
 import type { MultiLegBasket } from './multiLegFocus';
 import { appendToArchive, historyIdFor, mergeHistoryRecord, splitEarlierDayLegs, splitStaleClosed, type ArchivedBasket } from './multiLegArchive';
 import { mergeBasketWrite } from './multiLegStoreMerge';
+import { regroupBaskets, type RegroupRequest, type RegroupResult } from './multiLegRegroup';
 
 const STORE_FILE = path.join(PROJECT_ROOT, 'debug', 'multi_leg_baskets.json');
 const ARCHIVE_FILE = path.join(PROJECT_ROOT, 'debug', 'multi_leg_baskets_archive.json');
@@ -90,6 +91,20 @@ export function upsertBasket(
       updatedAt: now,
     } as MultiLegBasket);
   }
+  // A leg lives in exactly one basket. A stale tab's save of the old group must not
+  // bring back a leg that regroup moved elsewhere.
+  if (basket.id && Array.isArray(basket.legs)) {
+    const i = baskets.findIndex(b => b.id === basket.id);
+    if (i >= 0) {
+      const elsewhere = new Set(baskets.flatMap((b, j) => (j === i ? [] : b.legs.map(l => l.id))));
+      if (baskets[i].legs.some(l => elsewhere.has(l.id))) {
+        const kept = baskets[i].legs.filter(l => !elsewhere.has(l.id));
+        // The stale copy was only the moved legs: its row is gone, don't leave an empty one.
+        if (kept.length === 0) baskets.splice(i, 1);
+        else baskets[i] = { ...baskets[i], legs: kept };
+      }
+    }
+  }
   // A stale tab still holds legs that were split into the history record; its full
   // save would otherwise merge them straight back in.
   if (basket.id && Array.isArray(basket.legs)) {
@@ -103,6 +118,18 @@ export function upsertBasket(
   writeBaskets(baskets);
   const saved = basket.id ? baskets.find(b => b.id === basket.id) : baskets[baskets.length - 1];
   return { baskets, basket: saved, conflicts };
+}
+
+/** Moves legs between baskets (group / ungroup). Keeps one backup of the file first. */
+export function regroup(req: RegroupRequest): RegroupResult {
+  const before = readBaskets();
+  const result = regroupBaskets(before, req, newBasketId, new Date().toISOString());
+  if (!result.ok) return result;
+  try {
+    if (fs.existsSync(STORE_FILE)) fs.copyFileSync(STORE_FILE, `${STORE_FILE}.bak_regroup`);
+  } catch { /* a missing backup must not block the user */ }
+  writeBaskets(result.baskets);
+  return result;
 }
 
 /** Removes a basket from the live store; one with trade history is archived first. */
