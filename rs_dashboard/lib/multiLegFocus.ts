@@ -68,6 +68,8 @@ export interface MultiLegLeg {
   outsideTradeKeys?: string[];
   /** Save revision — see lib/multiLegStoreMerge.ts. */
   rev?: number;
+  /** Free-text label the user attaches to this trade (e.g. "hedge", "adjustment"). Display only. */
+  tag?: string;
   status: MultiLegStatus;
 
   // ── Leg-wise Stop Loss, Take Profit, and Trailing SL ─────────────
@@ -134,6 +136,7 @@ export function planScale(basket: MultiLegBasket, delta: number): ScalePlan {
 /** The name a strategy row shows: the structure its live legs form (a strangle plus wings reads as an
  *  iron condor), else the saved name, else the preset key. Multi-expiry baskets skip classification. */
 export function basketLabel(basket: MultiLegBasket, fallback = 'Strategy'): string {
+  if (basket.groupName?.trim()) return basket.groupName.trim();
   const mixed = basket.legs.some(l => l.status !== 'CLOSED' && l.expiry && l.expiry !== basket.expiry);
   return (mixed ? null : classifyBasketStructure(basket.legs))?.structure
     ?? basket.name
@@ -165,6 +168,8 @@ export interface MultiLegBasket {
   farExpiry?: string;
   broker: string;
   presetKey?: string;
+  /** Name the user gave this group of trades. Wins over the derived structure name. */
+  groupName?: string;
   /** Strategy-level lot multiplier (default 1). */
   multiplier?: number;
   legs: MultiLegLeg[];

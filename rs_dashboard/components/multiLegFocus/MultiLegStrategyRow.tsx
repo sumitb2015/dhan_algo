@@ -2,7 +2,7 @@
 
 import React, { useState, useMemo, useCallback } from 'react';
 import {
-  ChevronDown, ChevronUp, Trash2, Plus, Minus, X, Check, Layers, Sigma, Loader2, RefreshCw, Table2, BarChart3, LineChart,
+  ChevronDown, ChevronUp, Trash2, Plus, Minus, X, Check, Layers, Sigma, Loader2, RefreshCw, Table2, BarChart3, LineChart, Pencil, Unlink,
 } from 'lucide-react';
 import MultiLegLegRow from './MultiLegLegRow';
 import RuleNumInput from './RuleNumInput';
@@ -129,6 +129,13 @@ export interface MultiLegStrategyRowProps {
   legQtyWarnings?: Record<string, LegQtyWarning>;
   /** All baskets on the page — used only to flag Greeks legs that share a contract with a sibling. */
   allBaskets?: MultiLegBasket[];
+  /** Legs ticked for regrouping (page-wide, so a group can span rows). */
+  selectedLegIds?: Set<string>;
+  onSelectLegs?: (legIds: string[], on: boolean) => void;
+  /** Set a leg's tag through the page's functional leg update (never this render's legs). */
+  onTagLeg?: (legId: string, tag: string | undefined) => void;
+  /** Split this strategy into one row per leg. */
+  onUngroup?: () => void;
 }
 
 export default function MultiLegStrategyRow({
@@ -172,6 +179,10 @@ export default function MultiLegStrategyRow({
   availableFunds,
   legQtyWarnings,
   allBaskets,
+  selectedLegIds,
+  onSelectLegs,
+  onTagLeg,
+  onUngroup,
 }: MultiLegStrategyRowProps) {
   // Existing/already-placed positions default collapsed (this page can carry
   // several parallel strategies, most of them just sitting open) — the user
@@ -274,7 +285,7 @@ export default function MultiLegStrategyRow({
   // (even when enabled) until then rather than showing a column of dashes.
   const showExitCol = legColumns.exit && legCounts.closed > 0;
   const colWeights = [
-    5, 5, 8, ...(legColumns.otm ? [7] : []), ...(legColumns.iv ? [5] : []),
+    ...(onSelectLegs ? [6] : []), 5, 5, 8, ...(legColumns.otm ? [7] : []), ...(legColumns.iv ? [5] : []),
     5, ...(legColumns.qty ? [6] : []), 6, 6, ...(legColumns.avg ? [6] : []), ...(showExitCol ? [6] : []),
     8, 8, 4, 6, 9, 7, ...(legColumns.pnlPct ? [6] : []), 6, 14,
   ];
@@ -372,8 +383,21 @@ export default function MultiLegStrategyRow({
       : chartLegsFor(basket.legs).length === 0
         ? 'No live legs to plot'
         : null;
-  const strategyLabel = derivedStructure?.structure
-    ?? basketLabel(basket, `Strategy #${index + 1}`);
+  const strategyLabel = basket.groupName?.trim()
+    || derivedStructure?.structure
+    || basketLabel(basket, `Strategy #${index + 1}`);
+  // Rename: click the name. Commits on blur / Enter, Esc cancels.
+  const [renaming, setRenaming] = useState(false);
+  const [nameDraft, setNameDraft] = useState('');
+  const renameSettled = React.useRef(false);
+  const commitName = (save: boolean) => {
+    if (renameSettled.current) return;
+    renameSettled.current = true;
+    setRenaming(false);
+    const v = nameDraft.trim().slice(0, 40);
+    // '' (not undefined) clears: an omitted key would let the server merge keep the old name.
+    if (save && v !== (basket.groupName ?? '')) onUpdate({ groupName: v });
+  };
 
   // ── Payoff: ONE call into the central payoff library (lib/optionsPayoff.ts) ───────────────────────────────
   // It prices every leg at its OWN expiry and IV (Black-76, IV solved from the leg's live mark so T+0 shows the real open P&L),
@@ -493,6 +517,7 @@ export default function MultiLegStrategyRow({
         if ('tp' in patch) allowed.tp = patch.tp;
         if ('tpType' in patch) allowed.tpType = patch.tpType;
         if ('trail' in patch) allowed.trail = patch.trail;
+        if ('tag' in patch) allowed.tag = patch.tag;
         return { ...l, ...allowed };
       }
       const next = { ...l, ...patch };
@@ -570,9 +595,22 @@ export default function MultiLegStrategyRow({
           </button>
 
           <div className="flex items-center gap-2">
-            <span className="text-xs font-bold text-zinc-100 uppercase tracking-wider">
-              {strategyLabel}
-            </span>
+            {renaming ? (
+              <input autoFocus value={nameDraft} maxLength={40} aria-label="Group name" placeholder={strategyLabel}
+                onChange={e => setNameDraft(e.target.value)} onBlur={() => commitName(true)}
+                onKeyDown={e => { if (e.key === 'Enter') commitName(true); else if (e.key === 'Escape') commitName(false); }}
+                className={`h-6 w-44 bg-zinc-900 border border-emerald-500 text-zinc-100 text-xs font-bold rounded px-1.5 ${FOCUS_RING}`} />
+            ) : (
+              <button type="button" onClick={() => { renameSettled.current = false; setNameDraft(basket.groupName ?? ''); setRenaming(true); }}
+                title="Click to name this group of trades"
+                className={`group inline-flex items-center gap-1 text-xs font-bold text-zinc-100 uppercase tracking-wider hover:text-emerald-300 ${FOCUS_RING}`}>
+                {strategyLabel}
+                <Pencil className="w-3 h-3 text-zinc-600 group-hover:text-emerald-400" aria-hidden />
+              </button>
+            )}
+            {basket.groupName?.trim() && derivedStructure?.structure && (
+              <span className="text-[10px] font-semibold text-zinc-500 normal-case">{derivedStructure.structure}</span>
+            )}
             <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded border ${STATUS_STYLE[basketStatus]}`}>
               {basketStatus}
             </span>
@@ -918,6 +956,18 @@ export default function MultiLegStrategyRow({
             </div>
           )}
 
+          {onUngroup && basket.legs.filter(l => l.status !== 'CLOSED').length > 1 && (
+            <button
+              type="button"
+              onClick={onUngroup}
+              disabled={placing || exiting || shifting}
+              title="Ungroup: give every live trade here its own row; closed trades stay as this row's history (no orders are placed)"
+              className={`h-7 px-2 inline-flex items-center gap-1 text-[11px] font-bold rounded-lg border border-zinc-700 text-zinc-300 hover:text-white hover:bg-zinc-800 disabled:opacity-40 ${FOCUS_RING}`}
+            >
+              <Unlink className="w-3 h-3" /> Ungroup
+            </button>
+          )}
+
           {/* Delete Row button — strictly disabled when positions are active to prevent losing tracking */}
           <button
             type="button"
@@ -1220,6 +1270,15 @@ export default function MultiLegStrategyRow({
                 </colgroup>
                 <thead>
                   <tr className="text-xs font-bold text-white border-b border-zinc-800 bg-zinc-800">
+                    {onSelectLegs && (
+                      <th className="px-1.5 py-2 text-left" title="Tick trades to group them; click a tag to label a trade">
+                        <input type="checkbox" aria-label="Select every trade in this strategy"
+                          checked={visibleLegs.length > 0 && visibleLegs.every(l => selectedLegIds?.has(l.id))}
+                          onChange={e => onSelectLegs(visibleLegs.map(l => l.id), e.target.checked)}
+                          className="h-3.5 w-3.5 accent-emerald-500 cursor-pointer align-middle" />
+                        <span className="ml-1">Tag</span>
+                      </th>
+                    )}
                     <th className="px-2 py-2 text-left" aria-sort={legSort?.key === 'side' ? (legSort.dir === 'asc' ? 'ascending' : 'descending') : 'none'}>
                       <button type="button" onClick={() => toggleLegSort('side')} className={`inline-flex w-full items-center gap-0.5 justify-start font-bold hover:text-emerald-300 ${FOCUS_RING}`}>
                         Side<span aria-hidden className="text-[10px]">{legSort?.key === 'side' ? (legSort.dir === 'asc' ? '▲' : '▼') : ''}</span>
@@ -1307,6 +1366,9 @@ export default function MultiLegStrategyRow({
                       qtyWarning={legQtyWarnings?.[`${basket.id}:${leg.id}`]}
                       onClaimQty={onClaimBrokerQty && leg.status === 'OPEN' ? (() => onClaimBrokerQty(leg.id)) : undefined}
                       onReduceQty={onReduceOutsideQty && leg.status === 'OPEN' ? (() => onReduceOutsideQty(leg.id)) : undefined}
+                      selected={!!selectedLegIds?.has(leg.id)}
+                      onSelect={onSelectLegs ? (on => onSelectLegs([leg.id], on)) : undefined}
+                      onTag={onTagLeg ? (tag => onTagLeg(leg.id, tag)) : undefined}
                     />
                   ))}
                 </tbody>

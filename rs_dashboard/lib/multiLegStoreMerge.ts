@@ -138,3 +138,39 @@ export function adoptServerBasket(
   const base = takeFields ? { ...server } : { ...local };
   return { ...base, legs } as MultiLegBasket;
 }
+
+/**
+ * A leg lives in exactly one basket. A stale tab's save of an old group must not bring
+ * back a leg that regroup moved elsewhere. Only legs the save ADDED (not in `storedLegIds`,
+ * the basket's legs on disk before the merge) are considered; a leg already stored here is
+ * never touched by this rule. Such a leg is removed from this basket, and its change is
+ * applied where the leg lives now under the normal per-leg rev rule: a stale tab's exit
+ * or fill that happened after the regroup still reaches the ledger. A basket left with
+ * no legs is removed. Mutates `baskets`; returns the ids of baskets that took a change.
+ */
+export function relocateResurrectedLegs(
+  baskets: MultiLegBasket[], basketId: string, storedLegIds: Set<string>, nowIso: string,
+): string[] {
+  const i = baskets.findIndex(b => b.id === basketId);
+  if (i < 0) return [];
+  const owner = new Map<string, number>();
+  baskets.forEach((b, j) => { if (j !== i) for (const l of b.legs) owner.set(l.id, j); });
+  const moved = baskets[i].legs.filter(l => !storedLegIds.has(l.id) && owner.has(l.id)) as (MultiLegLeg & Revved)[];
+  if (moved.length === 0) return [];
+  const changed = new Set<string>();
+  for (const inc of moved) {
+    const j = owner.get(inc.id)!;
+    const legs = baskets[j].legs.map(st => {
+      if (st.id !== inc.id) return st;
+      const next = (inc.rev ?? 0) > ((st as MultiLegLeg & Revved).rev ?? 0) ? withIdentity(inc, st) : withIdentity(st, inc);
+      if (next !== st) changed.add(baskets[j].id);
+      return next;
+    });
+    if (changed.has(baskets[j].id)) baskets[j] = { ...baskets[j], legs, updatedAt: nowIso };
+  }
+  const gone = new Set(moved.map(l => l.id));
+  const kept = baskets[i].legs.filter(l => !gone.has(l.id));
+  if (kept.length === 0) baskets.splice(i, 1);
+  else baskets[i] = { ...baskets[i], legs: kept };
+  return [...changed];
+}

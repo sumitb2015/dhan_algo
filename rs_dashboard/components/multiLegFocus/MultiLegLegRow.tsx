@@ -67,10 +67,47 @@ interface MultiLegLegRowProps {
   onClaimQty?: () => void;
   /** 'over': record the outside close against this leg (confirmed, no order). */
   onReduceQty?: () => void;
+  /** Selection for regrouping (checkbox). Omit to hide the control. */
+  selected?: boolean;
+  onSelect?: (on: boolean) => void;
+  /** Tag commit. Preferred over onChange, which saves from this render's legs. */
+  onTag?: (tag: string | undefined) => void;
+}
+
+/** Tag chip: shows the label, click to edit; commits on blur / Enter, Esc cancels. */
+function TagCell({ value, onCommit }: { value?: string; onCommit: (v: string) => void }) {
+  const [editing, setEditing] = React.useState(false);
+  const [draft, setDraft] = React.useState('');
+  // Enter/Esc unmount the input, which can still deliver a blur: settle only once per edit.
+  const settled = React.useRef(false);
+  const done = (save: boolean) => {
+    if (settled.current) return;
+    settled.current = true;
+    setEditing(false);
+    const v = draft.trim().slice(0, 24);
+    if (save && v !== (value ?? '')) onCommit(v);
+  };
+  if (editing) {
+    return (
+      <input autoFocus list="mlf-tag-options" value={draft} maxLength={24} aria-label="Trade tag"
+        onChange={e => setDraft(e.target.value)} onBlur={() => done(true)}
+        onKeyDown={e => { if (e.key === 'Enter') done(true); else if (e.key === 'Escape') done(false); }}
+        className={`h-5 w-full min-w-0 bg-zinc-900 border border-emerald-500 text-zinc-200 text-[10px] font-semibold rounded px-1 ${FOCUS_RING}`} />
+    );
+  }
+  return (
+    <button type="button" onClick={() => { settled.current = false; setDraft(value ?? ''); setEditing(true); }}
+      title={value ? 'Edit tag' : 'Add a tag to this trade'}
+      className={`max-w-full truncate h-5 px-1.5 rounded border text-[10px] font-semibold ${FOCUS_RING} ${value
+        ? 'bg-sky-500/10 border-sky-500/30 text-sky-300 hover:bg-sky-500/20'
+        : 'border-dashed border-zinc-700 text-zinc-500 hover:text-zinc-300 hover:border-zinc-500'}`}>
+      {value || '+ tag'}
+    </button>
+  );
 }
 
 export default function MultiLegLegRow({
-  leg, allStrikes, ltp, spot, editable, exiting, margin, multiplier = 1, strategyMultiplier = 1, frontExpiry, farExpiry, onChange, onRemove, onExit, onOpenAddLots, onShift, shiftSteps = 1, shiftBusy = false, strikeBlocked = false, columns = DEFAULT_LEG_COLUMNS, showExit = false, iv = 0, qtyWarning, onClaimQty, onReduceQty,
+  leg, allStrikes, ltp, spot, editable, exiting, margin, multiplier = 1, strategyMultiplier = 1, frontExpiry, farExpiry, onChange, onRemove, onExit, onOpenAddLots, onShift, shiftSteps = 1, shiftBusy = false, strikeBlocked = false, columns = DEFAULT_LEG_COLUMNS, showExit = false, iv = 0, qtyWarning, onClaimQty, onReduceQty, selected = false, onSelect, onTag,
 }: MultiLegLegRowProps) {
   const [exitLotsText, setExitLotsText] = React.useState('');
   // The box resets once the leg's lots change (a partial exit landed), never before.
@@ -95,7 +132,17 @@ export default function MultiLegLegRow({
   const legBE = leg.option === 'CE' ? leg.strike + legPrice : leg.strike - legPrice;
 
   return (
-    <tr className="border-b border-zinc-800/60 hover:bg-zinc-900/30 transition-colors">
+    <tr className={`border-b border-zinc-800/60 hover:bg-zinc-900/30 transition-colors ${selected ? 'bg-emerald-500/5' : ''}`}>
+      <td className="px-1.5 py-1.5">
+        <div className="flex flex-col items-start gap-1">
+          {onSelect && (
+            <input type="checkbox" checked={selected} onChange={e => onSelect(e.target.checked)}
+              aria-label={`Select ${leg.strike} ${leg.option} to group`}
+              className="h-3.5 w-3.5 accent-emerald-500 cursor-pointer" />
+          )}
+          <TagCell value={leg.tag} onCommit={v => (onTag ? onTag(v || undefined) : onChange({ tag: v || undefined }))} />
+        </div>
+      </td>
       <td className="px-2 py-1.5">
         <select value={leg.side} disabled={!editable} className={SELECT_CLASS}
           onChange={e => onChange({ side: e.target.value as MultiLegLeg['side'] })}>
