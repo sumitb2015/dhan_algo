@@ -145,3 +145,29 @@ test('computeBook keeps the P&L of units the broker clamp removed', () => {
   assert.strictEqual(book.callsOpenPnl, 3900);
   assert.strictEqual(book.totalPnl, 9000 + 3900 + 3900);
 });
+
+import { summarizeCallTrades, callsPerformance } from './coveredCallEngine.ts';
+test('summarizeCallTrades folds closes into their leg and keeps realized equal to the closes', () => {
+  const D = 86_400_000;
+  const trades = [
+    { id: 'a', ts: 0, action: 'SELL_OPEN', strike: 100, expiry: 'x', units: 100, price: 30, securityId: '1' },
+    { id: 'b', ts: 2 * D, action: 'BUY_CLOSE', strike: 100, expiry: 'x', units: 40, price: 20, securityId: '1', openLegId: 'a', realizedPnl: 400 },
+    { id: 'c', ts: 3 * D, action: 'SELL_OPEN', strike: 110, expiry: 'x', units: 50, price: 10, securityId: '2' },
+    { id: 'd', ts: 4 * D, action: 'BUY_CLOSE', strike: 90, expiry: 'x', units: 10, price: 5, securityId: '3', openLegId: 'gone', realizedPnl: -50 },
+  ] as CallTrade[];
+  const s = summarizeCallTrades(trades, { a: 300, c: null }, 5 * D);
+  const a = s.rows.find((r) => r.id === 'a')!;
+  assert.deepEqual([a.status, a.closedUnits, a.openUnits, a.exitPrice, a.realized, a.openMtm, a.total], ['PARTIAL', 40, 60, 20, 400, 300, 700]);
+  assert.equal(s.rows.find((r) => r.id === 'c')!.status, 'OPEN');
+  assert.equal(s.rows.find((r) => r.id === 'd')!.status, 'CLOSE-ONLY');
+  assert.equal(s.realized, 350);
+  assert.equal(s.total, 650);
+});
+test('callsPerformance withholds the annualised figure before 7 days', () => {
+  const D = 86_400_000;
+  assert.equal(callsPerformance({ callsPnl: 1000, holdingCost: 100000, holdingPnl: 500, firstTradeTs: 0, now: 3 * D }).annualisedPct, null);
+  const p = callsPerformance({ callsPnl: 1000, holdingCost: 100000, holdingPnl: 500, firstTradeTs: 0, now: 10 * D });
+  assert.equal(p.pctOfCost, 1);
+  assert.equal(Math.round(p.annualisedPct! * 10) / 10, 36.5);
+  assert.equal(p.withCalls, 1500);
+});

@@ -1,7 +1,7 @@
 'use client';
 
 import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
-import { Shield, RefreshCw, PenLine, Wallet, Link2, BookOpen, ChevronDown, SlidersHorizontal, Table2 } from 'lucide-react';
+import { Shield, RefreshCw, ListChecks, PenLine, Wallet, Link2, BookOpen, ChevronDown, SlidersHorizontal, Table2 } from 'lucide-react';
 import NavBar from '@/components/NavBar';
 import { cn } from '@/lib/utils';
 import { Button } from '@/components/ui/button';
@@ -10,6 +10,7 @@ import { Tooltip, TooltipTrigger, TooltipContent } from '@/components/ui/tooltip
 import DeltaPanel from './DeltaPanel';
 import HowToUseModal from './HowToUse';
 import CoveredCallOptionChainModal from './CoveredCallOptionChainModal';
+import TradesPnlModal from './TradesPnlModal';
 import TradeSheet, { type OpenCallRow } from './TradeSheet';
 import { useLiveOptionsWS } from '@/lib/useLiveOptionsWS';
 import { useLiveTickerPoll } from '@/lib/useLiveTickerPoll';
@@ -17,6 +18,8 @@ import { PctPill } from '@/components/LiveTickerPanel';
 import { lookupChainLegData, type ChainOc } from '@/lib/optionsStrategy';
 import {
   reconstructCallLedger,
+  summarizeCallTrades,
+  callsPerformance,
   reconcileCallsDown,
   computeBook,
   chainLegGreeks,
@@ -110,6 +113,7 @@ export default function NiftyCoveredCallTerminal() {
   // ── Guide & Option Chain Modals ─────────────────────────────────────────
   const [showGuide, setShowGuide] = useState(false);
   const [showChainModal, setShowChainModal] = useState(false);
+  const [showTradesPnl, setShowTradesPnl] = useState(false);
 
   // ── Broker book (NIFTYBEES + broker CE shorts) ──────────────────────────
   const [book, setBook] = useState<CoveredCallBookResponse | null>(null);
@@ -319,6 +323,21 @@ export default function NiftyCoveredCallTerminal() {
     };
   }), [reconciled.legs, snapshot, marks]);
 
+  // Per-trade P&L and the calls-vs-holding strip. Open MTM per leg comes from the same marks as the table above.
+  const tradeSummary = useMemo(() => {
+    const mtm: Record<string, number | null> = {};
+    for (const r of rows) mtm[r.id] = r.mtm;
+    return summarizeCallTrades(trades, mtm, now);
+  }, [trades, rows, now]);
+  const callsPnl = snapshot ? snapshot.callsOpenPnl + snapshot.callsRealized + snapshot.callsUnsyncedPnl : tradeSummary.total;
+  const perf = useMemo(() => callsPerformance({
+    callsPnl,
+    holdingCost: bees ? bees.avgCost * beesQty : 0,
+    holdingPnl: snapshot?.beesPnl ?? null,
+    firstTradeTs: trades.length ? Math.min(...trades.map((t) => t.ts)) : null,
+    now,
+  }), [callsPnl, bees, beesQty, snapshot?.beesPnl, trades, now]);
+
   // ── Write-call suggestion ───────────────────────────────────────────────
   const parsedDelta = parseFloat(targetDeltaStr);
   const targetDelta = !isNaN(parsedDelta) && parsedDelta > 0
@@ -509,6 +528,8 @@ export default function NiftyCoveredCallTerminal() {
       {/* GUIDE MODAL */}
       <HowToUseModal isOpen={showGuide} onClose={() => setShowGuide(false)} />
 
+      <TradesPnlModal isOpen={showTradesPnl} onClose={() => setShowTradesPnl(false)} summary={tradeSummary} />
+
       {/* OPTION CHAIN MODAL */}
       <CoveredCallOptionChainModal
         isOpen={showChainModal}
@@ -626,6 +647,16 @@ export default function NiftyCoveredCallTerminal() {
             <span className="hidden sm:inline">Option Chain</span>
           </button>
 
+          {/* Trades P&L Button */}
+          <button
+            onClick={() => setShowTradesPnl(true)}
+            className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-zinc-900 border border-zinc-800 text-xs font-bold text-zinc-300 hover:text-emerald-400 hover:border-emerald-500/40 transition-colors"
+            title="P&L of every call written against NIFTYBEES on this desk"
+          >
+            <ListChecks className="w-3.5 h-3.5 text-emerald-400" />
+            <span className="hidden sm:inline">Trades P&L</span>
+          </button>
+
           {/* Guide Button */}
           <button
             onClick={() => setShowGuide(true)}
@@ -701,6 +732,23 @@ export default function NiftyCoveredCallTerminal() {
           raw
           sub={bees && effCost != null ? `Subsidized by ₹${(bees.avgCost - effCost).toFixed(2)}/unit (-${(((bees.avgCost - effCost) / bees.avgCost) * 100).toFixed(1)}%)` : undefined}
         />
+      </div>
+
+      {/* PERFORMANCE STRIP: calls against the NIFTYBEES holding */}
+      <div className="mx-4 mt-3 rounded-xl border border-zinc-800/60 bg-zinc-950/40 px-4 py-2 flex flex-wrap items-center gap-x-6 gap-y-1">
+        <span className={cn(TXT_LABEL, 'text-zinc-500 uppercase font-bold tracking-wide')}>Calls vs NIFTYBEES</span>
+        <PerfItem label="Holding only" value={perf.holdingOnly != null ? signed(perf.holdingOnly) : '—'} tone={perf.holdingOnly} />
+        <PerfItem label="With calls" value={perf.withCalls != null ? signed(perf.withCalls) : '—'} tone={perf.withCalls} />
+        <PerfItem label="Calls added" value={signed(callsPnl)} tone={callsPnl} />
+        <PerfItem label="% of holding cost" value={perf.pctOfCost != null ? `${perf.pctOfCost.toFixed(2)}%` : '—'} tone={perf.pctOfCost} />
+        <PerfItem
+          label={`Annualised${perf.days >= 1 ? ` (${Math.floor(perf.days)}d)` : ''}`}
+          value={perf.annualisedPct != null ? `${perf.annualisedPct.toFixed(1)}%` : perf.days > 0 ? 'after 7 days' : '—'}
+          tone={perf.annualisedPct}
+        />
+        <PerfItem label="Win rate (closed)" value={tradeSummary.closedCount ? `${tradeSummary.wins}/${tradeSummary.closedCount}` : '—'} tone={null} />
+        <PerfItem label="Premium sold" value={`₹${fmtInt(tradeSummary.premiumSold)}`} tone={null} />
+        <span className="text-[10px] text-zinc-500">Holding P&L is since your buy, not since the first call.</span>
       </div>
 
       {/* MAIN 2-COLUMN WORKSPACE */}
@@ -1177,6 +1225,16 @@ function MetricTooltip({
         {text}
       </TooltipContent>
     </Tooltip>
+  );
+}
+
+function PerfItem({ label, value, tone }: { label: string; value: string; tone: number | null }) {
+  const cls = tone == null ? 'text-zinc-100' : tone > 0 ? 'text-emerald-400' : tone < 0 ? 'text-rose-400' : 'text-zinc-200';
+  return (
+    <div className="flex items-baseline gap-1.5">
+      <span className="text-[10px] text-zinc-500">{label}</span>
+      <span className={cn('font-mono text-xs font-bold', cls)}>{value}</span>
+    </div>
   );
 }
 

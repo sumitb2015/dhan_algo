@@ -430,3 +430,111 @@ export function daysToExpiry(expiry: string, now = Date.now()): number {
   if (Number.isNaN(d)) return 1;
   return Math.max(0, (d - now) / 86_400_000);
 }
+
+// ── Per-trade P&L and performance ──────────────────────────────────────────
+
+export interface TradeSummaryRow {
+  id: string;
+  /** Sell time (ms); for an orphan close, the close time. */
+  ts: number;
+  strike: number;
+  expiry: string;
+  units: number;
+  entryPrice: number;
+  closedUnits: number;
+  /** Units-weighted buy-back price; null while nothing is closed. */
+  exitPrice: number | null;
+  realized: number;
+  openUnits: number;
+  /** MTM of the still-open units; null when unpriced or nothing is open. */
+  openMtm: number | null;
+  /** realized + open MTM (open MTM counted as 0 when unpriced). */
+  total: number;
+  status: 'OPEN' | 'PARTIAL' | 'CLOSED' | 'CLOSE-ONLY';
+  /** Days from the sell to the last close (or to `now` while open). */
+  daysHeld: number;
+  premium: number;
+}
+
+export interface TradeSummary {
+  rows: TradeSummaryRow[];
+  realized: number;
+  openMtm: number;
+  total: number;
+  premiumSold: number;
+  closedCount: number;
+  wins: number;
+  avgDaysClosed: number | null;
+}
+
+/**
+ * One row per call written (SELL_OPEN / ADOPT) with its buy-backs folded in, plus a row for any close whose open leg is not in the
+ * ledger so `realized` always equals the sum of every BUY_CLOSE. `openMtmById` is the live MTM of each still-open leg (null = unpriced).
+ */
+export function summarizeCallTrades(trades: CallTrade[], openMtmById: Record<string, number | null>, now = Date.now()): TradeSummary {
+  const sorted = [...trades].sort((a, b) => a.ts - b.ts);
+  const DAY = 86_400_000;
+  const byId = new Map<string, TradeSummaryRow & { _cost: number; _lastClose: number }>();
+  const rows: TradeSummaryRow[] = [];
+  const orphans: TradeSummaryRow[] = [];
+  for (const t of sorted) {
+    if (t.action === 'SELL_OPEN' || t.action === 'ADOPT') {
+      const r = {
+        id: t.id, ts: t.ts, strike: t.strike, expiry: t.expiry, units: t.units, entryPrice: t.price, closedUnits: 0, exitPrice: null,
+        realized: 0, openUnits: t.units, openMtm: null, total: 0, status: 'OPEN' as const, daysHeld: 0, premium: t.price * t.units,
+        _cost: 0, _lastClose: 0,
+      };
+      byId.set(t.id, r);
+      rows.push(r);
+    } else if (t.action === 'BUY_CLOSE') {
+      const r = t.openLegId ? byId.get(t.openLegId) : undefined;
+      if (!r) {
+        orphans.push({
+          id: t.id, ts: t.ts, strike: t.strike, expiry: t.expiry, units: t.units, entryPrice: 0, closedUnits: t.units, exitPrice: t.price,
+          realized: t.realizedPnl ?? 0, openUnits: 0, openMtm: null, total: t.realizedPnl ?? 0, status: 'CLOSE-ONLY', daysHeld: 0, premium: 0,
+        });
+        continue;
+      }
+      r.closedUnits += t.units;
+      r._cost += t.price * t.units;
+      r.realized += t.realizedPnl ?? 0;
+      r.openUnits = Math.max(0, r.openUnits - t.units);
+      r._lastClose = t.ts;
+    }
+  }
+  for (const r of rows as (TradeSummaryRow & { _cost: number; _lastClose: number })[]) {
+    r.exitPrice = r.closedUnits > 0 ? r._cost / r.closedUnits : null;
+    const m = r.openUnits > 0 ? openMtmById[r.id] ?? null : null;
+    r.openMtm = m;
+    r.total = r.realized + (m ?? 0);
+    r.status = r.openUnits <= 0 ? 'CLOSED' : r.closedUnits > 0 ? 'PARTIAL' : 'OPEN';
+    r.daysHeld = Math.max(0, ((r.openUnits > 0 ? now : r._lastClose) - r.ts) / DAY);
+  }
+  const all = [...rows, ...orphans].sort((a, b) => b.ts - a.ts);
+  const closed = rows.filter((r) => r.status === 'CLOSED');
+  const realized = all.reduce((s, r) => s + r.realized, 0);
+  const openMtm = all.reduce((s, r) => s + (r.openMtm ?? 0), 0);
+  return {
+    rows: all, realized, openMtm, total: realized + openMtm,
+    premiumSold: rows.reduce((s, r) => s + r.premium, 0),
+    closedCount: closed.length,
+    wins: closed.filter((r) => r.realized > 0).length,
+    avgDaysClosed: closed.length ? closed.reduce((s, r) => s + r.daysHeld, 0) / closed.length : null,
+  };
+}
+
+/**
+ * Calls P&L against the NIFTYBEES holding. `holdingCost` = shares x average cost. The annualised figure needs at least 7 days since
+ * the first call: a few days on a small base annualises into a meaningless number, so it is null before that.
+ */
+export function callsPerformance(p: { callsPnl: number; holdingCost: number; holdingPnl: number | null; firstTradeTs: number | null; now?: number }) {
+  const now = p.now ?? Date.now();
+  const days = p.firstTradeTs != null ? Math.max(0, (now - p.firstTradeTs) / 86_400_000) : 0;
+  const pctOfCost = p.holdingCost > 0 ? (p.callsPnl / p.holdingCost) * 100 : null;
+  const annualisedPct = pctOfCost != null && days >= 7 ? pctOfCost * (365 / days) : null;
+  return {
+    days, pctOfCost, annualisedPct,
+    holdingOnly: p.holdingPnl,
+    withCalls: p.holdingPnl == null ? null : p.holdingPnl + p.callsPnl,
+  };
+}
