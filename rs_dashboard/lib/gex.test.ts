@@ -174,3 +174,8 @@ test('gexCalcTable shows Dhan gamma x OI x spot per strike and sums to buildGexR
   });
   assert.strictEqual(tab.rows[2].pe, null); // no put OI at 24,400
 });
+
+test('gammaFlip ignores a sign change between near-zero tail strikes', () => {
+  const rows = [row(100, -0.5), row(150, 0.4), row(200, -900), row(250, 800)];
+  assert.strictEqual(gammaFlip(rows), 225);
+});

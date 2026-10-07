@@ -122,10 +122,13 @@ export function buildGexRows(oc: Record<string, GexChainEntry>, p: GexParams): G
  */
 export function gammaFlip(rows: GexRow[], near?: number): number | null {
   const crossings: number[] = [];
+  // A sign change between two near-zero strikes (far-OTM tails with almost no gamma) is noise, not a regime change: ignore pairs
+  // whose larger |net| is under 1% of the chain's peak |net|.
+  const floor = rows.reduce((m, r) => Math.max(m, Math.abs(r.netGex)), 0) * 0.01;
   let last: GexRow | null = null; // last strike with a non-zero net
   for (const r of rows) {
     if (r.netGex === 0) continue;
-    if (last && last.netGex < 0 && r.netGex > 0) crossings.push((last.strike + r.strike) / 2);
+    if (last && last.netGex < 0 && r.netGex > 0 && Math.max(-last.netGex, r.netGex) > floor) crossings.push((last.strike + r.strike) / 2);
     last = r;
   }
   if (!crossings.length) return null;

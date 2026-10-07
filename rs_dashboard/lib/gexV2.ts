@@ -51,6 +51,42 @@ export function spotSideWalls(rows: GexRow[], spot: number): SpotSideWalls {
   };
 }
 
+/** Spot must be this fraction beyond a wall before it counts as breached, so a tick either side of the wall does not flicker the badge. */
+export const WALL_TOL = 0.001;
+
+export type WallState = 'intact' | 'breached' | 'breached-amplifying';
+
+export interface WallStatus {
+  side: 'call' | 'put';
+  state: WallState;
+  /** The overall-max wall spot is measured against. */
+  wall: number;
+  /** The wall that took over on spot's own side after a breach (null when there is none). */
+  newWall: number | null;
+  /** Points spot is beyond the old wall (0 while intact). */
+  beyond: number;
+}
+
+/**
+ * One state per side. Intact: spot has not crossed the overall-max wall. Breached: it has, and the wall now on spot's side is
+ * `newWall`. Breached-amplifying: breached while the regime is negative gamma, so nothing dampens the move. A breach alone is
+ * not called bearish/bullish; this reads the current snapshot only and keeps no history.
+ */
+export function wallStatuses(w: SpotSideWalls, spot: number, regime: 'positive' | 'negative' | 'unknown'): WallStatus[] {
+  const out: WallStatus[] = [];
+  if (!(spot > 0)) return out;
+  const state = (breached: boolean): WallState => (!breached ? 'intact' : regime === 'negative' ? 'breached-amplifying' : 'breached');
+  if (w.putOverall != null) {
+    const b = spot < w.putOverall * (1 - WALL_TOL);
+    out.push({ side: 'put', state: state(b), wall: w.putOverall, newWall: b ? w.putWall : null, beyond: b ? w.putOverall - spot : 0 });
+  }
+  if (w.callOverall != null) {
+    const b = spot > w.callOverall * (1 + WALL_TOL);
+    out.push({ side: 'call', state: state(b), wall: w.callOverall, newWall: b ? w.callWall : null, beyond: b ? spot - w.callOverall : 0 });
+  }
+  return out;
+}
+
 /** The `n` largest call walls and `n` largest put walls over the whole chain, each flagged when spot has crossed it. */
 export function topWalls(rows: GexRow[], spot: number, n = 3): { call: Wall[]; put: Wall[] } {
   const call = rows

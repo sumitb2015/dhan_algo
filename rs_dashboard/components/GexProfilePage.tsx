@@ -16,7 +16,7 @@ import {
   buildGexRows, fmtGex, gexChecklist, gexLevels, topTwo, type ChecklistTone, type GexChainEntry, type GexLevels, type GammaSource, type GexPower, type GexRow,
 } from '@/lib/gex';
 import {
-  buildGexLegs, dynamicFlip, emConfluence, expectedMove, mergeGexRows, regimeNote, spotSideWalls, topWalls, wallRank, type GexLeg,
+  buildGexLegs, dynamicFlip, emConfluence, expectedMove, mergeGexRows, regimeNote, spotSideWalls, wallStatuses, topWalls, wallRank, type GexLeg,
 } from '@/lib/gexV2';
 import { buildGexRowsModel, forwardFromSpot, gexModelCalcTable } from '@/lib/gexModel';
 import { WallPill, WALL_TONE } from './GexWallParts';
@@ -568,6 +568,14 @@ export default function GexProfilePage() {
               <div className="flex items-center justify-between gap-3 px-5 py-2 border-t border-zinc-800 flex-wrap">
                 <div className="flex items-center gap-2 flex-wrap">
                   <span className={`inline-flex items-center px-2.5 py-1 rounded-full text-[10px] font-bold border ${regimeCls}`}>{regimeLabel}</span>
+                  {wallStatuses(walls, spot, regime).map(ws => {
+                    const cls = ws.state === 'intact' ? TONE_CLS.ok : ws.state === 'breached' ? TONE_CLS.warn : TONE_CLS.bad;
+                    const nm = ws.side === 'put' ? 'Put wall' : 'Call wall';
+                    const txt = ws.state === 'intact'
+                      ? `${nm} ${fmtStrike(ws.wall)} intact`
+                      : `${nm} ${fmtStrike(ws.wall)} breached by ${Math.round(ws.beyond)} pts${ws.newWall != null ? ` · next ${fmtStrike(ws.newWall)}` : ' · no wall beyond'}${ws.state === 'breached-amplifying' ? ' · negative gamma' : ''}`;
+                    return <span key={ws.side} className={`inline-flex items-center px-2.5 py-1 rounded-full text-[10px] font-bold border ${cls}`}>{txt}</span>;
+                  })}
                   {regimeMismatch && (
                     <span className="text-[10px] text-amber-400">
                       spot is {regime === 'positive' ? 'above' : 'below'} the flip, but whole-chain net GEX is {totalNet > 0 ? 'positive' : 'negative'} ({fmtGex(totalNet)})

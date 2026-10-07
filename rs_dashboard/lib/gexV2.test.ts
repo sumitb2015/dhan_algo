@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert';
 import type { GexRow } from './gex.ts';
 import {
-  dynamicFlip, emConfluence, expectedMove, mergeGexRows, netGexAtSpot, regimeNote, spotSideWalls, topWalls, wallRank, type GexLeg,
+  dynamicFlip, emConfluence, expectedMove, mergeGexRows, netGexAtSpot, regimeNote, spotSideWalls, topWalls, wallRank, wallStatuses, type GexLeg,
 } from './gexV2.ts';
 
 const row = (strike: number, ceGex: number, peGex: number): GexRow => ({
@@ -138,4 +138,20 @@ test('dynamicFlip refines the crossing by bisection: net GEX at the flip is ~0, 
   const here = Math.abs(netGexAtSpot(legs, flip));
   const nudged = Math.abs(netGexAtSpot(legs, flip + 75));
   assert.ok(here < nudged * 0.01, `net at flip ${here} vs 75pts away ${nudged}`);
+});
+
+test('wall status: intact, breached, and breached in negative gamma', () => {
+  const w = { callWall: 25200, putWall: 24700, callOverall: 25200, putOverall: 24900 };
+  assert.equal(wallStatuses(w, 25000, 'positive').find(x => x.side === 'put')?.state, 'intact');
+  const p = wallStatuses(w, 24850, 'positive').find(x => x.side === 'put')!;
+  assert.deepEqual([p.state, p.newWall, p.beyond], ['breached', 24700, 50]);
+  assert.equal(wallStatuses(w, 24850, 'negative').find(x => x.side === 'put')?.state, 'breached-amplifying');
+  assert.deepEqual(wallStatuses(w, 0, 'positive'), []);
+});
+
+test('wall status ignores a tick beyond the wall (0.1% tolerance)', () => {
+  const w = { callWall: 25200, putWall: 24700, callOverall: 25200, putOverall: 24900 };
+  assert.equal(wallStatuses(w, 24899, 'positive').find(x => x.side === 'put')?.state, 'intact');
+  assert.equal(wallStatuses(w, 25201, 'positive').find(x => x.side === 'call')?.state, 'intact');
+  assert.equal(wallStatuses(w, 25240, 'positive').find(x => x.side === 'call')?.state, 'breached');
 });
