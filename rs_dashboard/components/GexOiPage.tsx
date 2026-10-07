@@ -7,6 +7,7 @@ import {
 } from 'recharts';
 import { WallPill, WALL_TONE } from './GexWallParts';
 import GexCalcButton from './GexCalcTable';
+import GexLevelsButton, { type GexChartLevel } from './GexLevelsChart';
 import { BookOpen, RefreshCw } from 'lucide-react';
 import NavBar from './NavBar';
 import GuidePanel from './RsStrategyGuide';
@@ -268,6 +269,15 @@ export default function GexOiPage({ guide = '' }: { guide?: string }) {
 
   const atm = spot > 0 ? Math.round(spot / STRIKE_STEP) * STRIKE_STEP : 0;
 
+  // Level chart: the video's levels only (call wall, put wall, gamma flip, pinning strike) plus spot.
+  const chartLevels: GexChartLevel[] = [
+    { key: 'cw', label: 'CALL WALL', price: levels.callWall ?? 0, tone: 'call' },
+    { key: 'pw', label: 'PUT WALL', price: levels.putWall ?? 0, tone: 'put' },
+    { key: 'flip', label: 'GAMMA FLIP', price: levels.flip ?? 0, tone: 'flip' },
+    { key: 'pin', label: 'PIN', price: levels.pin ?? 0, tone: 'pin' },
+    { key: 'spot', label: 'SPOT', price: spot, tone: 'spot' },
+  ];
+
   const checklist = gexChecklist({ levels, spot, vix, call: clarity.call, put: clarity.put });
 
   const regimeCls = levels.regime === 'positive' ? TONE_CLS.ok : levels.regime === 'negative' ? TONE_CLS.bad : TONE_CLS.manual;
@@ -342,6 +352,7 @@ export default function GexOiPage({ guide = '' }: { guide?: string }) {
               Guide
             </button>
           )}
+          <GexLevelsButton levels={chartLevels} profile={rows} spot={spot} live={live} />
           <GexCalcButton
             sets={chain?.chain.oc && chainSpot > 0 ? [{ expiry, oc: chain.chain.oc, spot: chainSpot }] : []}
             build={calcBuild} spot={spot}

@@ -21,6 +21,7 @@ import {
 import { buildGexRowsModel, forwardFromSpot, gexModelCalcTable } from '@/lib/gexModel';
 import { WallPill, WALL_TONE } from './GexWallParts';
 import GexCalcButton from './GexCalcTable';
+import GexLevelsButton, { type GexChartLevel } from './GexLevelsChart';
 
 const UNDERLYING = 'NIFTY';
 const STRIKE_STEP = 50;
@@ -334,6 +335,17 @@ export default function GexProfilePage() {
   // Regime comes from spot vs the flip; the checklist's first tile uses the whole-chain total. Say so when they disagree.
   const regimeMismatch = regime !== 'unknown' && flip != null && (totalNet > 0) !== (regime === 'positive');
 
+  // Level chart: spot-side walls, the zero-gamma flip, the pin and the expected-move bands, as shown on this page.
+  const chartLevels: GexChartLevel[] = [
+    { key: 'cw', label: 'CALL WALL', price: walls.callWall ?? 0, tone: 'call' },
+    { key: 'pw', label: 'PUT WALL', price: walls.putWall ?? 0, tone: 'put' },
+    { key: 'flip', label: 'GAMMA FLIP', price: flip ?? 0, tone: 'flip' },
+    { key: 'pin', label: 'PIN', price: levels.pin ?? 0, tone: 'pin' },
+    { key: 'emu', label: 'EM +', price: em?.upper ?? 0, tone: 'em' },
+    { key: 'eml', label: 'EM −', price: em?.lower ?? 0, tone: 'em' },
+    { key: 'spot', label: 'SPOT', price: spot, tone: 'spot' },
+  ];
+
   const checklist = gexChecklist({ levels: levelsV2, spot, vix, call: clarity.call, put: clarity.put });
 
   const regimeCls = regime === 'positive' ? TONE_CLS.ok : regime === 'negative' ? TONE_CLS.bad : TONE_CLS.manual;
@@ -483,6 +495,7 @@ export default function GexProfilePage() {
               <span className={`absolute top-0.5 left-0.5 w-3 h-3 rounded-full bg-oncolor transition-transform ${showValues ? 'translate-x-3' : ''}`} />
             </span>
           </button>
+          <GexLevelsButton levels={chartLevels} profile={rows} spot={spot} live={live} />
           <GexCalcButton
             sets={(items ?? []).filter(c => c.chain.oc).map(c => { const ex = c.expiry ?? expiry; return { expiry: ex, oc: c.chain.oc!, underlying: underlyingFor(c, ex), spot: c.spot > 0 ? c.spot : spot }; })}
             build={calcBuild} spot={spot}
