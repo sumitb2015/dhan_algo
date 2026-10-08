@@ -1189,16 +1189,17 @@ export default function MultiLegFocus({
   const [brokerRows, setBrokerRows] = useState<Partial<Record<Broker, Record<string, unknown>[]>>>({});
   // Today's P&L exactly as the brokers report it: realized + unrealized summed over
   // every polled broker's positions rows (all three shapers emit both fields).
-  const overallTodayPnl = useMemo(() => {
-    let total = 0;
+  const { overallTodayPnl, overallRealisedPnl, overallUnrealisedPnl } = useMemo(() => {
+    let realised = 0, unrealised = 0;
     for (const rows of Object.values(brokerRows)) {
       for (const r of rows ?? []) {
         // Dhan reports MCX P&L without the barrels-per-lot multiplier (no-op elsewhere).
         const row = scaleBrokerPnl(r);
-        total += (Number(row.realizedProfit) || 0) + (Number(row.unrealizedProfit) || 0);
+        realised += Number(row.realizedProfit) || 0;
+        unrealised += Number(row.unrealizedProfit) || 0;
       }
     }
-    return total;
+    return { overallTodayPnl: realised + unrealised, overallRealisedPnl: realised, overallUnrealisedPnl: unrealised };
   }, [brokerRows]);
   const contractDrift = useMemo<ContractDrift[]>(
     () => (Object.entries(brokerRows) as [Broker, Record<string, unknown>[]][])
@@ -3450,6 +3451,20 @@ export default function MultiLegFocus({
               title="Today's P&L as reported by the brokers (realized + unrealized across all positions)."
             >
               Today: {overallTodayPnl >= 0 ? '+' : ''}{fmtMoney(overallTodayPnl)}
+            </span>
+            <span
+              className={`h-8 flex items-center gap-1.5 px-2.5 rounded-lg text-xs font-bold font-mono tabular-nums bg-zinc-900 border border-zinc-700 ${overallRealisedPnl >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}
+              title="Realised: booked on legs already closed today, at the broker's average-cost basis (the Diary uses FIFO, so its figure can differ)."
+            >
+              <span className="text-zinc-400 font-medium text-[11px]">Realised:</span>
+              {overallRealisedPnl >= 0 ? '+' : ''}{fmtMoney(overallRealisedPnl)}
+            </span>
+            <span
+              className={`h-8 flex items-center gap-1.5 px-2.5 rounded-lg text-xs font-bold font-mono tabular-nums bg-zinc-900 border border-zinc-700 ${overallUnrealisedPnl >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}
+              title="Unrealised: mark-to-market on legs still open."
+            >
+              <span className="text-zinc-400 font-medium text-[11px]">Unrealised:</span>
+              {overallUnrealisedPnl >= 0 ? '+' : ''}{fmtMoney(overallUnrealisedPnl)}
             </span>
             {contractDrift.length > 0 && (
               <span
