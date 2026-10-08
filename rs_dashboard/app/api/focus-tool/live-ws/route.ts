@@ -122,11 +122,11 @@ export async function POST(request: NextRequest) {
     const sensexExpiry = String(expiries.SENSEX ?? '');
     const numStrikes = Number(body.numStrikes ?? 12);
 
-    // NIFTY is required; BANKNIFTY / SENSEX are optional ('' = not subscribed) so an
-    // unused index adds no startup option-chain calls and no feed subscriptions.
-    if (!niftyExpiry) {
+    // Each index is optional ('' = not subscribed) so an unused one adds no startup
+    // option-chain calls and no feed subscriptions; at least one is needed.
+    if (!niftyExpiry && !bankniftyExpiry && !sensexExpiry) {
       return NextResponse.json(
-        { success: false, error: 'expiries.NIFTY required' },
+        { success: false, error: 'at least one of expiries.NIFTY / BANKNIFTY / SENSEX required' },
         { status: 400 },
       );
     }
@@ -169,7 +169,7 @@ export async function POST(request: NextRequest) {
         PYTHON_EXE,
         [
           BRIDGE_SCRIPT,
-          '--nifty-expiry', niftyExpiry,
+          ...(niftyExpiry ? ['--nifty-expiry', niftyExpiry] : []),
           ...(bankniftyExpiry ? ['--banknifty-expiry', bankniftyExpiry] : []),
           ...(sensexExpiry ? ['--sensex-expiry', sensexExpiry] : []),
           '--num-strikes', String(numStrikes),
@@ -186,7 +186,7 @@ export async function POST(request: NextRequest) {
           broker: 'dhan',
           pid: child.pid,
           expiries: {
-            NIFTY: niftyExpiry,
+            ...(niftyExpiry ? { NIFTY: niftyExpiry } : {}),
             ...(bankniftyExpiry ? { BANKNIFTY: bankniftyExpiry } : {}),
             ...(sensexExpiry ? { SENSEX: sensexExpiry } : {}),
           },

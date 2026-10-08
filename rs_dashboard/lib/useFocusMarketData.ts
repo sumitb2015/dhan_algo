@@ -85,7 +85,9 @@ export function useFocusMarketData({ broker, watched, watchedKey, rows, groups }
   const [chains, setChains] = useState<Record<string, ChainData | null>>({});
 
   useEffect(() => {
-    watched.forEach(u => {
+    // NIFTY's expiries are always loaded: the header's option-chain viewer lists them even when
+    // NIFTY has no row. One cached call; its lookups and chains stay gated on `watched`.
+    new Set<FocusUnderlying>(['NIFTY', ...watched]).forEach(u => {
       fetch(`/api/options/expiries?underlying=${u}&broker=${broker}`)
         .then(r => r.json())
         .then((j: { success: boolean; data?: string[] }) => {

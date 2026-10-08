@@ -365,7 +365,11 @@ function computeLegPnl(row: FocusRow, leg: 'CE' | 'PE', live: RowLive): number |
   return (Number(pos.unrealizedProfit) || 0) * (qty / brokerQty);
 }
 
-/** Compact LTP column: combined premium → VWAP 1m → CE/PE → ₹ values → total ₹ → PnL → Val/OI PCR strip. */
+/**
+ * Telemetry card: combined premium (with how far it sits from its VWAP), the CE / PE
+ * legs as two tiles with a share-of-premium bar, total ₹ value, a P&L chip, and the
+ * Val / OI put-call ratios. Same data and tooltips as before, only the layout changed.
+ */
 function LtpStack({
   combinedLtp, live, ceValue, peValue, totalValue, pcr, pcrOi, compact = false,
 }: {
@@ -381,82 +385,97 @@ function LtpStack({
   const oiTitle = live.peOi != null && live.ceOi != null
     ? `OI PCR = PE OI ÷ CE OI at this row's strikes (${live.peOi.toLocaleString('en-IN')} / ${live.ceOi.toLocaleString('en-IN')})`
     : "OI PCR = PE OI ÷ CE OI at this row's strikes";
+  const ce = live.ltpCe != null && live.ltpCe > 0 ? live.ltpCe : null;
+  const pe = live.ltpPe != null && live.ltpPe > 0 ? live.ltpPe : null;
+  // CE's share of the combined premium: a skew read at a glance (50 = balanced straddle).
+  const cePct = ce != null && pe != null ? (ce / (ce + pe)) * 100 : null;
+  const vwap = live.vwap1m;
+  const vwapGap = vwap != null && vwap > 0 && combinedLtp > 0 ? ((combinedLtp - vwap) / vwap) * 100 : null;
+  const pnlTone = live.pnl > 0 ? 'text-emerald-400 bg-emerald-500/10 border-emerald-500/30'
+    : live.pnl < 0 ? 'text-rose-400 bg-rose-500/10 border-rose-500/30'
+    : 'text-zinc-400 bg-zinc-800 border-zinc-700';
+  const legTile = (name: 'CE' | 'PE', price: number | null, value: number | null) => (
+    <div className={cn(
+      'flex-1 min-w-0 rounded-lg border px-2 py-1.5 flex flex-col gap-1',
+      name === 'CE' ? 'border-emerald-500/25 bg-emerald-500/5' : 'border-rose-500/25 bg-rose-500/5',
+    )}>
+      <span className={cn('text-[10px] font-black tracking-widest leading-none', name === 'CE' ? 'text-emerald-400' : 'text-rose-400')}>{name}</span>
+      <span className="font-mono text-xs font-black text-zinc-100 tabular-nums leading-none">{price != null ? price.toFixed(2) : '\u2014'}</span>
+      <span
+        className="font-mono text-[10px] font-semibold text-zinc-400 tabular-nums leading-none whitespace-nowrap"
+        title="Value = premium × contracts held (or contracts this row is sized for, before it opens)"
+      >₹{fmtValue(value)}</span>
+    </div>
+  );
   return (
-    <div className={cn('flex flex-col min-w-[9.75rem]', compact ? 'gap-1' : 'gap-1.5')}>
+    <div className={cn('flex flex-col min-w-[9.75rem]', compact ? 'gap-2' : 'gap-2.5')}>
       <div>
-        <div className="text-[11px] font-black uppercase tracking-[0.14em] text-zinc-500 leading-none mb-1">Prem</div>
+        <div className="text-[10px] font-black uppercase tracking-[0.16em] text-zinc-500 leading-none mb-1.5">Combined premium</div>
         <div
           title="Combined CE + PE premium right now"
-          className={cn(
-            'font-mono font-black text-zinc-100 tabular-nums leading-none',
-            compact ? 'text-sm' : 'text-base',
-          )}
+          className={cn('font-mono font-black text-zinc-100 tabular-nums leading-none', compact ? 'text-xl' : 'text-2xl')}
         >
           {combinedLtp > 0 ? combinedLtp.toFixed(2) : '\u2014'}
         </div>
         <div
           title="Session VWAP of the combined CE+PE premium, fixed 1-minute interval \u2014 independent of this row's own VW exit-rule setting"
-          className="text-[10px] font-mono font-semibold text-violet-400 tabular-nums leading-none mt-1"
+          className="mt-1.5 inline-flex items-center gap-1.5 text-[10px] font-mono font-semibold tabular-nums leading-none"
         >
-          VWAP 1m {live.vwap1m != null ? live.vwap1m.toFixed(2) : '\u2014'}
+          <span className="text-violet-400">VWAP 1m {vwap != null ? vwap.toFixed(2) : '\u2014'}</span>
+          {vwapGap != null && (
+            <span className="text-zinc-400">{vwapGap >= 0 ? '▲' : '▼'} {Math.abs(vwapGap).toFixed(1)}%</span>
+          )}
         </div>
       </div>
-      <div className={cn(
-        'font-mono font-bold flex items-baseline gap-1 tabular-nums leading-none',
-        compact ? 'text-[11px]' : 'text-xs',
-      )}>
-        <span className="text-emerald-400">CE {live.ltpCe != null ? live.ltpCe.toFixed(2) : '\u2014'}</span>
-        <span className="text-zinc-600" aria-hidden>/</span>
-        <span className="text-rose-400">PE {live.ltpPe != null ? live.ltpPe.toFixed(2) : '\u2014'}</span>
-      </div>
-      <div
-        className="text-[10px] font-mono font-semibold flex items-baseline gap-1 whitespace-nowrap tabular-nums leading-none"
-        title="Value = premium × contracts held (or contracts this row is sized for, before it opens)"
-      >
-        <span className="text-emerald-500">₹{fmtValue(ceValue)}</span>
-        <span className="text-zinc-700" aria-hidden>/</span>
-        <span className="text-rose-500">₹{fmtValue(peValue)}</span>
-      </div>
-      <div
-        className={cn(
-          'font-mono font-black text-zinc-100 tabular-nums leading-none whitespace-nowrap',
-          compact ? 'text-[11px]' : 'text-xs',
+
+      <div className="flex flex-col gap-1.5">
+        <div className="flex gap-1.5">
+          {legTile('CE', ce, ceValue)}
+          {legTile('PE', pe, peValue)}
+        </div>
+        {cePct != null && (
+          <div
+            className="flex h-1 rounded-full overflow-hidden bg-zinc-800"
+            title={`CE is ${cePct.toFixed(0)}% of the combined premium, PE ${(100 - cePct).toFixed(0)}% (50/50 = balanced)`}
+            role="img" aria-label={`CE ${cePct.toFixed(0)} percent, PE ${(100 - cePct).toFixed(0)} percent of premium`}
+          >
+            <span className="bg-emerald-500" style={{ width: `${cePct}%` }} />
+            <span className="bg-rose-500 flex-1" />
+          </div>
         )}
-        title="Total rupee value across every lot this row holds — CE + PE combined"
-      >
-        Total ₹{fmtValue(totalValue)}
       </div>
-      <div className="flex items-center justify-between text-[11px] font-mono leading-none py-1 border-t border-zinc-800/60">
-        <span className="text-[11px] font-black uppercase tracking-wider text-zinc-400">P&amp;L</span>
-        <span className={cn(
-          'font-black tabular-nums',
-          live.pnl > 0 ? 'text-emerald-400' : live.pnl < 0 ? 'text-rose-400' : 'text-zinc-400'
-        )} title="Row current total P&L (realized + open mark-to-market)">
-          {live.pnl > 0 ? '+' : ''}₹{live.pnl.toFixed(0)}
+
+      <div className="flex items-center justify-between gap-2">
+        <span className="text-[10px] font-black uppercase tracking-wider text-zinc-500 leading-none">Total value</span>
+        <span
+          className="font-mono text-xs font-black text-zinc-100 tabular-nums leading-none whitespace-nowrap"
+          title="Total rupee value across every lot this row holds — CE + PE combined"
+        >₹{fmtValue(totalValue)}</span>
+      </div>
+
+      <div
+        className={cn('flex items-center justify-between rounded-lg border px-2 py-1.5', pnlTone)}
+        title="Row current total P&L (realized + open mark-to-market)"
+      >
+        <span className="text-[10px] font-black uppercase tracking-wider leading-none">P&amp;L</span>
+        <span className="font-mono text-sm font-black tabular-nums leading-none">
+          {live.pnl > 0 ? '+' : live.pnl < 0 ? '-' : ''}₹{Math.abs(live.pnl).toFixed(0)}
         </span>
       </div>
-      <div className="flex rounded-md border border-zinc-800 divide-x divide-zinc-800 overflow-hidden">
+
+      <div className="grid grid-cols-2 gap-1.5">
         <span
-          className="flex-1 min-w-0 px-1.5 py-1 flex flex-col gap-0.5"
+          className="rounded-lg border border-zinc-800 bg-zinc-950/40 px-2 py-1.5 flex flex-col gap-1"
           title="Val PCR = PE ₹ value ÷ CE ₹ value at this row's strikes (falls back to PE premium ÷ CE premium if ₹ values are unresolved)"
         >
-          <span className="text-[11px] font-black tracking-widest text-amber-500 leading-none">VAL</span>
-          <span className={cn(
-            'font-mono font-bold text-amber-400 tabular-nums leading-none',
-            compact ? 'text-[11px]' : 'text-xs',
-          )}>
+          <span className="text-[10px] font-black tracking-widest text-amber-400 leading-none">VAL PCR</span>
+          <span className="font-mono text-xs font-black text-amber-400 tabular-nums leading-none">
             {pcr != null ? pcr.toFixed(2) : '\u2014'}
           </span>
         </span>
-        <span
-          className="flex-1 min-w-0 px-1.5 py-1 flex flex-col gap-0.5"
-          title={oiTitle}
-        >
-          <span className="text-[11px] font-black tracking-widest text-zinc-400 leading-none">OI</span>
-          <span className={cn(
-            'font-mono font-bold text-sky-400 tabular-nums leading-none',
-            compact ? 'text-[11px]' : 'text-xs',
-          )}>
+        <span className="rounded-lg border border-zinc-800 bg-zinc-950/40 px-2 py-1.5 flex flex-col gap-1" title={oiTitle}>
+          <span className="text-[10px] font-black tracking-widest text-zinc-400 leading-none">OI PCR</span>
+          <span className="font-mono text-xs font-black text-sky-400 tabular-nums leading-none">
             {pcrOi != null ? pcrOi.toFixed(2) : '\u2014'}
           </span>
         </span>
@@ -4354,13 +4373,12 @@ export default function FocusTool() {
     for (const p of positions) { r += Number(p.realizedProfit) || 0; u += Number(p.unrealizedProfit) || 0; }
     return { realised: r, unrealised: u, total: r + u };
   }, [positions]);
-  // Indices in use: NIFTY always, the others once they have a row or a started group.
-  // Everything fetched per index (expiries, lookups, futures, the live bridge) is
-  // limited to these — BANKNIFTY / SENSEX cost nothing until you open a row for them.
-  const watchedKey = UNDERLYINGS.filter(u => u === 'NIFTY'
-    || config.rows.some(r => r.underlying === u)
+  // Indices in use: those with a row or a started group — NIFTY is no different, so a
+  // trader on another index can remove it. Everything fetched per index (expiries,
+  // lookups, the live bridge) is limited to these.
+  const watchedKey = UNDERLYINGS.filter(u => config.rows.some(r => r.underlying === u)
     || config.groups.some(g => g.underlying === u && g.enabled)).join(',');
-  const watched = useMemo(() => watchedKey.split(',') as FocusUnderlying[], [watchedKey]);
+  const watched = useMemo(() => watchedKey.split(',').filter(Boolean) as FocusUnderlying[], [watchedKey]);
   const { futQuotes, spotPrices, lotSizes, expiries, lookups, chains } = useFocusMarketData({
     broker, watched, watchedKey, rows: config.rows, groups: config.groups,
   });
@@ -4513,13 +4531,16 @@ export default function FocusTool() {
   // expiry (comma-separated) so a Sept monthly row still gets WS LTP/OI —
   // not nearest-only. Never stopped on unmount — same long-lived convention
   // as AdvancedScalper, so returning reconnects instantly.
-  const niftyBridgeExpiry = bridgeExpiriesForUnderlying('NIFTY', config.rows, expiries.NIFTY ?? []);
+  const niftyBridgeExpiry = watched.includes('NIFTY') ? bridgeExpiriesForUnderlying('NIFTY', config.rows, expiries.NIFTY ?? []) : '';
   // '' = not watched: the bridge then does not subscribe that index at all.
   const bankniftyBridgeExpiry = watched.includes('BANKNIFTY') ? bridgeExpiriesForUnderlying('BANKNIFTY', config.rows, expiries.BANKNIFTY ?? []) : '';
   const sensexBridgeExpiry = watched.includes('SENSEX') ? bridgeExpiriesForUnderlying('SENSEX', config.rows, expiries.SENSEX ?? []) : '';
   // A watched index must have its expiry before the bridge starts, or it would start
   // without it and be restarted a moment later.
-  const bridgeReady = !!niftyBridgeExpiry
+  // CRUDEOILM is not on the bridge, and with no index watched there is nothing to subscribe.
+  const bridgeUnderlyings = watched.filter(u => u === 'NIFTY' || u === 'BANKNIFTY' || u === 'SENSEX');
+  const bridgeReady = bridgeUnderlyings.length > 0
+    && (!watched.includes('NIFTY') || !!niftyBridgeExpiry)
     && (!watched.includes('BANKNIFTY') || !!bankniftyBridgeExpiry)
     && (!watched.includes('SENSEX') || !!sensexBridgeExpiry);
   useEffect(() => {
@@ -8379,9 +8400,9 @@ export default function FocusTool() {
         {UNDERLYINGS.map(u => {
           const group = config.groups.find(g => g.underlying === u) ?? makeGroup(u);
           const rows = rowsByUnderlying[u];
-          // Only indices in use are shown: NIFTY always, the others once they have a
-          // row or a started group. Hidden ones come back via the "+ BANKNIFTY" chips below.
-          if (u !== 'NIFTY' && rows.length === 0 && !group.enabled) return null;
+          // Only indices in use are shown: those with a row or a started group. An empty,
+          // stopped one (NIFTY included) disappears and comes back via the "+ NIFTY" chips below.
+          if (rows.length === 0 && !group.enabled) return null;
 
           return (
             <div key={u} className="flex flex-col gap-3">
@@ -8574,10 +8595,10 @@ export default function FocusTool() {
             </div>
           );
         })}
-        {UNDERLYINGS.some(u => u !== 'NIFTY' && rowsByUnderlying[u].length === 0 && !(config.groups.find(g => g.underlying === u)?.enabled)) && (
+        {UNDERLYINGS.some(u => rowsByUnderlying[u].length === 0 && !(config.groups.find(g => g.underlying === u)?.enabled)) && (
           <div className="flex items-center gap-2 text-xs text-zinc-500">
-            <span className="font-semibold">Other indices:</span>
-            {UNDERLYINGS.filter(u => u !== 'NIFTY' && rowsByUnderlying[u].length === 0 && !(config.groups.find(g => g.underlying === u)?.enabled)).map(u => (
+            <span className="font-semibold">Add index:</span>
+            {UNDERLYINGS.filter(u => rowsByUnderlying[u].length === 0 && !(config.groups.find(g => g.underlying === u)?.enabled)).map(u => (
               <button
                 key={u} type="button" onClick={() => addRow(u)}
                 title={`Add a ${u} row (shows the ${u} section)`}

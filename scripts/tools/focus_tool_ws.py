@@ -273,8 +273,8 @@ def _parse_expiry_list(raw: str) -> list[str]:
 
 def main():
     parser = argparse.ArgumentParser(description='Focus Tool live WebSocket bridge — all three indices at once')
-    parser.add_argument('--nifty-expiry', required=True,
-                        help='NIFTY expiry YYYY-MM-DD (comma-separated for multiple)')
+    parser.add_argument('--nifty-expiry', default='',
+                        help='NIFTY expiry YYYY-MM-DD (comma-separated); omit to not subscribe NIFTY')
     parser.add_argument('--banknifty-expiry', default='',
                         help='BANKNIFTY expiry YYYY-MM-DD (comma-separated); omit to not subscribe BANKNIFTY')
     parser.add_argument('--sensex-expiry', default='',
