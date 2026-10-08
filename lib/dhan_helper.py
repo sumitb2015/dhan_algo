@@ -1490,13 +1490,20 @@ class DhanHelper:
                 # option (SENSEX, BANKEX) matches nothing above.
                 contract = self.find_option(underlying, expiry, strike, option_type, exchange="BSE")
             if not contract:
+                # MCX commodity options (CRUDEOILM...) are OPTFUT on exchange MCX.
+                contract = self.find_option(underlying, expiry, strike, option_type, exchange="MCX", instrument="OPTFUT")
+            if not contract:
                 raise ValueError(f"strike not found: {strike} {option_type} @ {expiry}")
 
+            # MCX: Dhan's master reports LOT_SIZE 1 because MCX order quantity IS lots, so
+            # qty_lots * lot_size is already the right quantity (verified against the live
+            # calculator: 1 lot -> 27.9k, 2 lots -> 55.7k, 10 lots -> 278.6k).
             lot_size = int(contract['LOT_SIZE'])
             # Derive the segment from the contract actually found rather than
             # assuming NSE_FNO — sending a BSE security id under NSE_FNO makes the
             # margin calculator price a different instrument (or reject the leg).
-            exchange_segment = 'BSE_FNO' if str(contract.get('EXCH_ID', '')).upper() == 'BSE' else 'NSE_FNO'
+            exch_id = str(contract.get('EXCH_ID', '')).upper()
+            exchange_segment = 'MCX_COMM' if exch_id == 'MCX' else ('BSE_FNO' if exch_id == 'BSE' else 'NSE_FNO')
             scripts.append({
                 'exchangeSegment': exchange_segment,
                 'transactionType': side,

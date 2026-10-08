@@ -706,6 +706,8 @@ export interface ReentryContext {
   nowHm: string;
   product: 'INTRADAY' | 'MARGIN';
   groupEnabled: boolean;
+  /** Intraday square-off backstop for the row's underlying; defaults to the NSE one. */
+  backstopHm?: string;
   /** Re-entries of this trigger already taken on this leg this cycle. */
   done: number;
 }
@@ -735,7 +737,7 @@ export function reentryConfig(
  */
 export function reentryWindowClosed(
   row: Pick<FocusRow, 'exitTime' | 'noReEntryAfter'> & Partial<Pick<FocusRow, 'stopMonitoringAfter'>>,
-  ctx: Pick<ReentryContext, 'nowHm' | 'product' | 'groupEnabled'>,
+  ctx: Pick<ReentryContext, 'nowHm' | 'product' | 'groupEnabled' | 'backstopHm'>,
   /**
    * True for a cost / momentum / range re-entry that is already WAITING. AlgoTest
    * "No Re-entry After" only looks at when the stop / target hit: one that hit
@@ -750,7 +752,8 @@ export function reentryWindowClosed(
     return `no re-entry after ${row.noReEntryAfter}`;
   }
   if (row.exitTime && ctx.nowHm >= row.exitTime) return `past its own exit time ${row.exitTime}`;
-  if (ctx.product === 'INTRADAY' && ctx.nowHm >= INTRADAY_BACKSTOP_HM) return 'past 15:17 intraday cutoff';
+  const backstop = ctx.backstopHm ?? INTRADAY_BACKSTOP_HM;
+  if (ctx.product === 'INTRADAY' && ctx.nowHm >= backstop) return `past ${backstop} intraday cutoff`;
   return null;
 }
 
@@ -1126,6 +1129,8 @@ export interface EntryContext {
   /** The index group's Start control. */
   groupEnabled: boolean;
   product: 'INTRADAY' | 'MARGIN';
+  /** Intraday square-off backstop for the row's underlying; defaults to the NSE one. */
+  backstopHm?: string;
   /** Resolved DTE of the expiry this row would trade; null when unknown. */
   dte: number | null;
   /** At least one leg's strike has resolved. */
@@ -1167,8 +1172,9 @@ export function evaluateEntry(
   if (row.exitTime && ctx.nowHm >= row.exitTime) {
     return { enter: false, reason: `past its own exit time ${row.exitTime}` };
   }
-  if (ctx.product === 'INTRADAY' && ctx.nowHm >= INTRADAY_BACKSTOP_HM) {
-    return { enter: false, reason: 'past 15:17 intraday cutoff' };
+  const backstop = ctx.backstopHm ?? INTRADAY_BACKSTOP_HM;
+  if (ctx.product === 'INTRADAY' && ctx.nowHm >= backstop) {
+    return { enter: false, reason: `past ${backstop} intraday cutoff` };
   }
   return { enter: true, reason: `entry time ${row.entryTime} reached` };
 }
@@ -1511,7 +1517,7 @@ export function evaluateOverallReentry(
   row: Pick<FocusRow, 'overallReSl' | 'overallReTgt' | 'overallReSlCount' | 'overallReTgtCount'
     | 'overallTarget' | 'slRupees' | 'slMultiplier' | 'exitTime' | 'noReEntryAfter'>,
   kind: 'sl' | 'target',
-  ctx: Pick<ReentryContext, 'nowHm' | 'product' | 'groupEnabled'>,
+  ctx: Pick<ReentryContext, 'nowHm' | 'product' | 'groupEnabled' | 'backstopHm'>,
 ): EntryDecision & { mode: 'asap' | 'momentum' } {
   const cfg = kind === 'sl' ? row.overallReSl : row.overallReTgt;
   const mode = cfg?.mode ?? 'asap';
@@ -1674,7 +1680,7 @@ export function multipliedLots(row: Partial<Pick<FocusRow, 'qtyMultiplier'>>, lo
 // ── Strike criteria (AlgoTest Select Strike Criteria) ───────────────────────
 
 /** One strike of the polled chain: premiums and |delta| × 100 (null when the chain has none). */
-export interface ChainQuote { ce: number; pe: number; ceDelta?: number | null; peDelta?: number | null }
+export interface ChainQuote { ce: number; pe: number; ceDelta?: number | null; peDelta?: number | null; ceOi?: number | null; peOi?: number | null }
 
 export interface StrikeCtx {
   /** The ATM strike (spot or futures based, per the group's ATM BY). */
@@ -1692,6 +1698,12 @@ function chainRows(oc: StrikeCtx['oc'], leg: 'CE' | 'PE'): { strike: number; px:
   for (const [k, v] of Object.entries(oc)) {
     const strike = Number(k);
     if (!Number.isFinite(strike)) continue;
+    // A strike with a known open interest of zero is dead: its last price is a stale print from an
+    // earlier session (CRUDEOILM 6750 PE: 144.35 last, bid 0.05, no ask, no volume), not a quote
+    // anyone can trade. Letting it compete made "richest premium <= 150" pick a strike 2,250 points
+    // away. Unknown OI (null / absent) is kept, so a chain without OI behaves as before.
+    const oi = leg === 'CE' ? v.ceOi : v.peOi;
+    if (oi != null && Number(oi) <= 0) continue;
     const px = Number(leg === 'CE' ? v.ce : v.pe) || 0;
     const d = leg === 'CE' ? v.ceDelta : v.peDelta;
     out.push({ strike, px, delta: d != null && d > 0 ? d : null });

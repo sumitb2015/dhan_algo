@@ -39,7 +39,7 @@ import type {
 } from '@/lib/focusToolRows';
 // The pure rule engine for entry and exit decisions.
 import {
-  INTRADAY_BACKSTOP_HM, EMPTY_ROW_LIVE,
+  EMPTY_ROW_LIVE,
   legsOf, rowFlat, rowOwnsLeg, sidePremium, legOwnContracts,
   dteMatches, dteForExpiry, evaluateRowExit, evaluateEntry, evaluateGlobalRisk,
   legStopPremium, pairStopPremium, nextOpenedTs, isGhostDropProtected,
@@ -47,7 +47,7 @@ import {
   legPinnedStrike, costStopReason, legOwnEntry, slRollStrike, DEFAULT_SL_ROLL_MAX,
   reentryConfig, evaluateReentry, reentryWindowClosed, monitoringStopped, momentumReentryKind, momentumTrigger,
   addMinutesHm, resolveCriteriaStrike, closestPremiumStrike, ownedLegStop, legStopHit, legDeltaNow, legDeltaBasis, legTargetDeltaLevel,
-  multipliedLots, clampHm, ENTRY_TIME_MIN, ENTRY_TIME_MAX, EXIT_TIME_MIN, EXIT_TIME_MAX, rangeWindow, rangeWindowPhase, rowHasMultiDayRange, candleBucket, tradingDte,
+  multipliedLots, clampHm, rangeWindow, rangeWindowPhase, rowHasMultiDayRange, candleBucket, tradingDte,
   legSlRuleOn, legStopLevel, legTargetSpotLevel, legTgtUnitLabel, MAX_LEG_REENTRIES, pendingReentryLevel, pendingReentryHit, legTargetReason, costReentryBasis,
   awaitingMomentumQuote, MOMENTUM_QUOTE_WAIT_MS, legTargetLevel,
   evaluateEntryMomentum, reRangeWindow, entryMomentumOn, overallSlConfig, overallProgress, nextOverallPeak, evaluateOverallExit, overallExitKind, evaluateOverallReentry, MAX_OVERALL_REENTRIES, rangeBreakoutOn, rangeBreakoutHit, costStopApplies, MAX_LAZY_LEGS, legSlMultiplier, legTarget, nextLazyLegId, lazyLegStrike, runningLazyLeg, simpleMomOn, simpleMomLevel, simpleMomHit,
@@ -61,11 +61,12 @@ import { computeRowPnl, mtmForQty, shiftMayReopen, canMarkMtm, shiftCloseConfirm
 import { normalizeTradeRow, matchOutsideTrades, type NormalizedTrade } from '@/lib/multiLegFocus';
 import { stampItems, noteItems, adoptItems, canon, type RevBook } from '@/lib/revMerge';
 import { useTabLeader } from '@/hooks/useTabLeader';
+import { FOCUS_UNDERLYINGS, UNDERLYING_META, isMcxUnderlying, toInternalQty, orderQuantity } from '@/lib/focusToolUnderlyings';
 import type { FocusConfigWrite } from '@/lib/focusToolRowsMerge';
 
 // â”€â”€ Constants â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
-const UNDERLYINGS: FocusUnderlying[] = ['NIFTY', 'BANKNIFTY', 'SENSEX'];
+const UNDERLYINGS: FocusUnderlying[] = [...FOCUS_UNDERLYINGS];
 /** Limit-ladder levels: % above the leg's price at click. */
 const LADDER_PCTS = [5, 10, 15, 20, 25, 30] as const;
 /** Listed option tick; ladder prices round to it. */
@@ -73,7 +74,7 @@ const OPTION_TICK = 0.05;
 function ladderPrice(ltp: number, pct: number): number {
   return Math.round((ltp * (1 + pct / 100)) / OPTION_TICK) * OPTION_TICK;
 }
-const STRIKE_STEP: Record<FocusUnderlying, number> = { NIFTY: 50, BANKNIFTY: 100, SENSEX: 100 };
+const STRIKE_STEP = Object.fromEntries(FOCUS_UNDERLYINGS.map(u => [u, UNDERLYING_META[u].strikeStep])) as Record<FocusUnderlying, number>;
 
 /** Row layout: Pro (legs grid), Table (5-column) or Cards. */
 type FocusViewMode = 'pro' | 'table' | 'cards';
@@ -88,24 +89,22 @@ function offsetLabel(n: number, step: number): string {
   return `ATM${n > 0 ? '+' : ''}${n} (${rupees > 0 ? '+' : ''}${rupees})`;
 }
 
-const FUT_LABELS: Record<FocusUnderlying, string> = {
-  NIFTY: 'NIFTY FUT',
-  BANKNIFTY: 'BANKNIFTY FUT',
-  SENSEX: 'SENSEX FUT',
-};
+const FUT_LABELS = Object.fromEntries(FOCUS_UNDERLYINGS.map(u => [u, UNDERLYING_META[u].futLabel])) as Record<FocusUnderlying, string>;
+
+/** MCX (CRUDEOILM) is Dhan-only for now: Kotak counts MCX quantity in absolute units (100x off Dhan's lots)
+ *  and Zerodha has no MCX instrument cache here, so a non-Dhan MCX order would be mis-sized or unroutable. */
+function brokerTradesUnderlying(broker: Broker, u: FocusUnderlying): boolean {
+  return !isMcxUnderlying(u) || broker === 'dhan';
+}
 
 // Order-routing vocabulary. SENSEX is the only BSE underlying here, and each
 // broker spells the same exchange differently — Dhan takes a segment, Kite an
 // exchange code, Neo a lower-case one.
-const UNDERLYING_SEGMENT: Record<FocusUnderlying, string> = {
-  NIFTY: 'NSE_FNO',
-  BANKNIFTY: 'NSE_FNO',
-  SENSEX: 'BSE_FNO',
-} as const;
+const UNDERLYING_SEGMENT = Object.fromEntries(FOCUS_UNDERLYINGS.map(u => [u, UNDERLYING_META[u].segment])) as Record<FocusUnderlying, string>;
 
 function orderExchange(broker: Broker, u: FocusUnderlying): string {
   const bse = u === 'SENSEX';
-  if (broker === 'dhan')  return bse ? 'BSE_FNO' : 'NSE_FNO';
+  if (broker === 'dhan')  return UNDERLYING_SEGMENT[u];
   if (broker === 'kotak') return bse ? 'bse_fo' : 'nse_fo';
   return bse ? 'BFO' : 'NFO';
 }
@@ -172,16 +171,19 @@ const UNDERLYING_DOT: Record<FocusUnderlying, string> = {
   NIFTY: 'bg-violet-500',
   BANKNIFTY: 'bg-sky-500',
   SENSEX: 'bg-amber-500',
+  CRUDEOILM: 'bg-emerald-500',
 };
 const UNDERLYING_TXT: Record<FocusUnderlying, string> = {
   NIFTY: 'text-violet-400',
   BANKNIFTY: 'text-sky-400',
   SENSEX: 'text-amber-400',
+  CRUDEOILM: 'text-emerald-400',
 };
 const UNDERLYING_CHIP: Record<FocusUnderlying, string> = {
   NIFTY: 'bg-violet-500/10 text-violet-400 border-violet-500/25',
   BANKNIFTY: 'bg-sky-500/10 text-sky-400 border-sky-500/25',
   SENSEX: 'bg-amber-500/10 text-amber-400 border-amber-500/25',
+  CRUDEOILM: 'bg-emerald-500/10 text-emerald-400 border-emerald-500/25',
 };
 
 // â”€â”€ Helpers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
@@ -292,7 +294,7 @@ function pnlClass(n: number | null | undefined): string {
  */
 function underlyingOfSymbol(tradingSymbol: string | undefined): FocusUnderlying | null {
   const sym = String(tradingSymbol ?? '').toUpperCase();
-  for (const u of ['BANKNIFTY', 'SENSEX', 'NIFTY'] as FocusUnderlying[]) {
+  for (const u of ['CRUDEOILM', 'BANKNIFTY', 'SENSEX', 'NIFTY'] as FocusUnderlying[]) {
     if (!sym.startsWith(u)) continue;
     const next = sym.charAt(u.length);
     if (next && next >= 'A' && next <= 'Z') return null;
@@ -363,7 +365,11 @@ function computeLegPnl(row: FocusRow, leg: 'CE' | 'PE', live: RowLive): number |
   return (Number(pos.unrealizedProfit) || 0) * (qty / brokerQty);
 }
 
-/** Compact LTP column: combined premium → VWAP 1m → CE/PE → ₹ values → total ₹ → PnL → Val/OI PCR strip. */
+/**
+ * Telemetry card: combined premium (with how far it sits from its VWAP), the CE / PE
+ * legs as two tiles with a share-of-premium bar, total ₹ value, a P&L chip, and the
+ * Val / OI put-call ratios. Same data and tooltips as before, only the layout changed.
+ */
 function LtpStack({
   combinedLtp, live, ceValue, peValue, totalValue, pcr, pcrOi, compact = false,
 }: {
@@ -379,82 +385,97 @@ function LtpStack({
   const oiTitle = live.peOi != null && live.ceOi != null
     ? `OI PCR = PE OI ÷ CE OI at this row's strikes (${live.peOi.toLocaleString('en-IN')} / ${live.ceOi.toLocaleString('en-IN')})`
     : "OI PCR = PE OI ÷ CE OI at this row's strikes";
+  const ce = live.ltpCe != null && live.ltpCe > 0 ? live.ltpCe : null;
+  const pe = live.ltpPe != null && live.ltpPe > 0 ? live.ltpPe : null;
+  // CE's share of the combined premium: a skew read at a glance (50 = balanced straddle).
+  const cePct = ce != null && pe != null ? (ce / (ce + pe)) * 100 : null;
+  const vwap = live.vwap1m;
+  const vwapGap = vwap != null && vwap > 0 && combinedLtp > 0 ? ((combinedLtp - vwap) / vwap) * 100 : null;
+  const pnlTone = live.pnl > 0 ? 'text-emerald-400 bg-emerald-500/10 border-emerald-500/30'
+    : live.pnl < 0 ? 'text-rose-400 bg-rose-500/10 border-rose-500/30'
+    : 'text-zinc-400 bg-zinc-800 border-zinc-700';
+  const legTile = (name: 'CE' | 'PE', price: number | null, value: number | null) => (
+    <div className={cn(
+      'flex-1 min-w-0 rounded-lg border px-2 py-1.5 flex flex-col gap-1',
+      name === 'CE' ? 'border-emerald-500/25 bg-emerald-500/5' : 'border-rose-500/25 bg-rose-500/5',
+    )}>
+      <span className={cn('text-[10px] font-black tracking-widest leading-none', name === 'CE' ? 'text-emerald-400' : 'text-rose-400')}>{name}</span>
+      <span className="font-mono text-xs font-black text-zinc-100 tabular-nums leading-none">{price != null ? price.toFixed(2) : '\u2014'}</span>
+      <span
+        className="font-mono text-[10px] font-semibold text-zinc-400 tabular-nums leading-none whitespace-nowrap"
+        title="Value = premium × contracts held (or contracts this row is sized for, before it opens)"
+      >₹{fmtValue(value)}</span>
+    </div>
+  );
   return (
-    <div className={cn('flex flex-col min-w-[9.75rem]', compact ? 'gap-1' : 'gap-1.5')}>
+    <div className={cn('flex flex-col min-w-[9.75rem]', compact ? 'gap-2' : 'gap-2.5')}>
       <div>
-        <div className="text-[11px] font-black uppercase tracking-[0.14em] text-zinc-500 leading-none mb-1">Prem</div>
+        <div className="text-[10px] font-black uppercase tracking-[0.16em] text-zinc-500 leading-none mb-1.5">Combined premium</div>
         <div
           title="Combined CE + PE premium right now"
-          className={cn(
-            'font-mono font-black text-zinc-100 tabular-nums leading-none',
-            compact ? 'text-sm' : 'text-base',
-          )}
+          className={cn('font-mono font-black text-zinc-100 tabular-nums leading-none', compact ? 'text-xl' : 'text-2xl')}
         >
           {combinedLtp > 0 ? combinedLtp.toFixed(2) : '\u2014'}
         </div>
         <div
           title="Session VWAP of the combined CE+PE premium, fixed 1-minute interval \u2014 independent of this row's own VW exit-rule setting"
-          className="text-[10px] font-mono font-semibold text-violet-400 tabular-nums leading-none mt-1"
+          className="mt-1.5 inline-flex items-center gap-1.5 text-[10px] font-mono font-semibold tabular-nums leading-none"
         >
-          VWAP 1m {live.vwap1m != null ? live.vwap1m.toFixed(2) : '\u2014'}
+          <span className="text-violet-400">VWAP 1m {vwap != null ? vwap.toFixed(2) : '\u2014'}</span>
+          {vwapGap != null && (
+            <span className="text-zinc-400">{vwapGap >= 0 ? '▲' : '▼'} {Math.abs(vwapGap).toFixed(1)}%</span>
+          )}
         </div>
       </div>
-      <div className={cn(
-        'font-mono font-bold flex items-baseline gap-1 tabular-nums leading-none',
-        compact ? 'text-[11px]' : 'text-xs',
-      )}>
-        <span className="text-emerald-400">CE {live.ltpCe != null ? live.ltpCe.toFixed(2) : '\u2014'}</span>
-        <span className="text-zinc-600" aria-hidden>/</span>
-        <span className="text-rose-400">PE {live.ltpPe != null ? live.ltpPe.toFixed(2) : '\u2014'}</span>
-      </div>
-      <div
-        className="text-[10px] font-mono font-semibold flex items-baseline gap-1 whitespace-nowrap tabular-nums leading-none"
-        title="Value = premium × contracts held (or contracts this row is sized for, before it opens)"
-      >
-        <span className="text-emerald-500">₹{fmtValue(ceValue)}</span>
-        <span className="text-zinc-700" aria-hidden>/</span>
-        <span className="text-rose-500">₹{fmtValue(peValue)}</span>
-      </div>
-      <div
-        className={cn(
-          'font-mono font-black text-zinc-100 tabular-nums leading-none whitespace-nowrap',
-          compact ? 'text-[11px]' : 'text-xs',
+
+      <div className="flex flex-col gap-1.5">
+        <div className="flex gap-1.5">
+          {legTile('CE', ce, ceValue)}
+          {legTile('PE', pe, peValue)}
+        </div>
+        {cePct != null && (
+          <div
+            className="flex h-1 rounded-full overflow-hidden bg-zinc-800"
+            title={`CE is ${cePct.toFixed(0)}% of the combined premium, PE ${(100 - cePct).toFixed(0)}% (50/50 = balanced)`}
+            role="img" aria-label={`CE ${cePct.toFixed(0)} percent, PE ${(100 - cePct).toFixed(0)} percent of premium`}
+          >
+            <span className="bg-emerald-500" style={{ width: `${cePct}%` }} />
+            <span className="bg-rose-500 flex-1" />
+          </div>
         )}
-        title="Total rupee value across every lot this row holds — CE + PE combined"
-      >
-        Total ₹{fmtValue(totalValue)}
       </div>
-      <div className="flex items-center justify-between text-[11px] font-mono leading-none py-1 border-t border-zinc-800/60">
-        <span className="text-[11px] font-black uppercase tracking-wider text-zinc-400">P&amp;L</span>
-        <span className={cn(
-          'font-black tabular-nums',
-          live.pnl > 0 ? 'text-emerald-400' : live.pnl < 0 ? 'text-rose-400' : 'text-zinc-400'
-        )} title="Row current total P&L (realized + open mark-to-market)">
-          {live.pnl > 0 ? '+' : ''}₹{live.pnl.toFixed(0)}
+
+      <div className="flex items-center justify-between gap-2">
+        <span className="text-[10px] font-black uppercase tracking-wider text-zinc-500 leading-none">Total value</span>
+        <span
+          className="font-mono text-xs font-black text-zinc-100 tabular-nums leading-none whitespace-nowrap"
+          title="Total rupee value across every lot this row holds — CE + PE combined"
+        >₹{fmtValue(totalValue)}</span>
+      </div>
+
+      <div
+        className={cn('flex items-center justify-between rounded-lg border px-2 py-1.5', pnlTone)}
+        title="Row current total P&L (realized + open mark-to-market)"
+      >
+        <span className="text-[10px] font-black uppercase tracking-wider leading-none">P&amp;L</span>
+        <span className="font-mono text-sm font-black tabular-nums leading-none">
+          {live.pnl > 0 ? '+' : live.pnl < 0 ? '-' : ''}₹{Math.abs(live.pnl).toFixed(0)}
         </span>
       </div>
-      <div className="flex rounded-md border border-zinc-800 divide-x divide-zinc-800 overflow-hidden">
+
+      <div className="grid grid-cols-2 gap-1.5">
         <span
-          className="flex-1 min-w-0 px-1.5 py-1 flex flex-col gap-0.5"
+          className="rounded-lg border border-zinc-800 bg-zinc-950/40 px-2 py-1.5 flex flex-col gap-1"
           title="Val PCR = PE ₹ value ÷ CE ₹ value at this row's strikes (falls back to PE premium ÷ CE premium if ₹ values are unresolved)"
         >
-          <span className="text-[11px] font-black tracking-widest text-amber-500 leading-none">VAL</span>
-          <span className={cn(
-            'font-mono font-bold text-amber-400 tabular-nums leading-none',
-            compact ? 'text-[11px]' : 'text-xs',
-          )}>
+          <span className="text-[10px] font-black tracking-widest text-amber-400 leading-none">VAL PCR</span>
+          <span className="font-mono text-xs font-black text-amber-400 tabular-nums leading-none">
             {pcr != null ? pcr.toFixed(2) : '\u2014'}
           </span>
         </span>
-        <span
-          className="flex-1 min-w-0 px-1.5 py-1 flex flex-col gap-0.5"
-          title={oiTitle}
-        >
-          <span className="text-[11px] font-black tracking-widest text-zinc-400 leading-none">OI</span>
-          <span className={cn(
-            'font-mono font-bold text-sky-400 tabular-nums leading-none',
-            compact ? 'text-[11px]' : 'text-xs',
-          )}>
+        <span className="rounded-lg border border-zinc-800 bg-zinc-950/40 px-2 py-1.5 flex flex-col gap-1" title={oiTitle}>
+          <span className="text-[10px] font-black tracking-widest text-zinc-400 leading-none">OI PCR</span>
+          <span className="font-mono text-xs font-black text-sky-400 tabular-nums leading-none">
             {pcrOi != null ? pcrOi.toFixed(2) : '\u2014'}
           </span>
         </span>
@@ -564,8 +585,9 @@ interface Toast {
 const makeRow = (underlying: FocusUnderlying): FocusRow => ({
   id: newId(),
   underlying,
-  entryTime: '09:20',
-  exitTime: '15:15',
+  // MCX runs to 23:30, so the NSE 09:20 / 15:15 pair would flatten it mid-session.
+  entryTime: isMcxUnderlying(underlying) ? '09:30' : '09:20',
+  exitTime: isMcxUnderlying(underlying) ? '23:10' : '15:15',
   dte: 'Any',
   expiry: '',
   strikeMode: 'ATM',
@@ -1249,7 +1271,7 @@ function LegRangeBreakoutControl({ row, leg, onUpdate, disabled, exclusiveNote }
       </>)}
       <label className="inline-flex items-center gap-1.5" title={`Range start = the row's entry time (shared by every leg of this row; edit here or in Window). ${cur.kind === 'btst' ? 'BTST: this time on the previous trading day.' : cur.kind === 'positional' ? 'Positional: this time on the Entry DTE day.' : ''}`}>
         Start
-        <TimeInput value={row.entryTime} onChange={v => onUpdate({ entryTime: clampHm(v, ENTRY_TIME_MIN, ENTRY_TIME_MAX) })} className="w-[5.5rem]" />
+        <TimeInput value={row.entryTime} onChange={v => onUpdate({ entryTime: clampHm(v, UNDERLYING_META[row.underlying].entryMinHm, UNDERLYING_META[row.underlying].entryMaxHm) })} className="w-[5.5rem]" />
       </label>
       <label className="inline-flex items-center gap-1.5" title="Range end — the last tracked second is one second before it">
         {cur.kind === 'btst' ? 'End (next day)' : 'End'}
@@ -1316,7 +1338,7 @@ function LegSimpleMomControl({ row, leg, onUpdate, disabled, exclusiveNote }: {
       <label className="inline-flex items-center gap-1.5"
         title="Momentum is measured from the premium (or spot) at the row's entry time. Shared by every leg of this row; edit here or in Window.">
         From
-        <TimeInput value={row.entryTime} onChange={v => onUpdate({ entryTime: clampHm(v, ENTRY_TIME_MIN, ENTRY_TIME_MAX) })} className="w-[5.5rem]" />
+        <TimeInput value={row.entryTime} onChange={v => onUpdate({ entryTime: clampHm(v, UNDERLYING_META[row.underlying].entryMinHm, UNDERLYING_META[row.underlying].entryMaxHm) })} className="w-[5.5rem]" />
       </label>
       {!off && simpleMomOn(cur) && status && <span className="text-[11px] font-semibold text-amber-400">{status}</span>}
     </div>
@@ -3053,13 +3075,13 @@ function FocusTableRowImpl({
               <span className="text-[10px] font-black text-zinc-400 uppercase tracking-wider flex items-center gap-1">
                 <Clock className="h-2.5 w-2.5 text-zinc-500" /> ENTRY
               </span>
-              <TimeInput value={row.entryTime} onChange={v => onUpdate({ entryTime: clampHm(v, ENTRY_TIME_MIN, ENTRY_TIME_MAX) })} />
+              <TimeInput value={row.entryTime} onChange={v => onUpdate({ entryTime: clampHm(v, UNDERLYING_META[row.underlying].entryMinHm, UNDERLYING_META[row.underlying].entryMaxHm) })} />
             </div>
             <div className="flex items-center justify-between gap-1 bg-zinc-900/60 border border-zinc-800/60 rounded-lg px-2 py-1">
               <span className="text-[10px] font-black text-zinc-400 uppercase tracking-wider flex items-center gap-1">
                 <Clock className="h-2.5 w-2.5 text-zinc-500" /> EXIT
               </span>
-              <TimeInput value={row.exitTime} onChange={v => onUpdate({ exitTime: clampHm(v, EXIT_TIME_MIN, EXIT_TIME_MAX) })} />
+              <TimeInput value={row.exitTime} onChange={v => onUpdate({ exitTime: clampHm(v, UNDERLYING_META[row.underlying].exitMinHm, UNDERLYING_META[row.underlying].exitMaxHm) })} />
             </div>
           </div>
 
@@ -3568,9 +3590,9 @@ function FocusProRowImpl({
         </ToggleGroup>
         <ProField label="Lots"><LotStepper value={row.lots} onChange={v => onUpdate({ lots: v })} /></ProField>
         <ProField label="Window" title="Entry time → exit time (IST)">
-          <div className="w-[5.5rem]"><TimeInput value={row.entryTime} onChange={v => onUpdate({ entryTime: clampHm(v, ENTRY_TIME_MIN, ENTRY_TIME_MAX) })} /></div>
+          <div className="w-[5.5rem]"><TimeInput value={row.entryTime} onChange={v => onUpdate({ entryTime: clampHm(v, UNDERLYING_META[row.underlying].entryMinHm, UNDERLYING_META[row.underlying].entryMaxHm) })} /></div>
           <ArrowRight className="size-3.5 text-zinc-500" />
-          <div className="w-[5.5rem]"><TimeInput value={row.exitTime} onChange={v => onUpdate({ exitTime: clampHm(v, EXIT_TIME_MIN, EXIT_TIME_MAX) })} /></div>
+          <div className="w-[5.5rem]"><TimeInput value={row.exitTime} onChange={v => onUpdate({ exitTime: clampHm(v, UNDERLYING_META[row.underlying].exitMinHm, UNDERLYING_META[row.underlying].exitMaxHm) })} /></div>
         </ProField>
         <ProField label="Expiry">
           <Select value={row.expiry || expiries[0] || ''} disabled={expiryLocked || expiries.length === 0}
@@ -3906,13 +3928,13 @@ function FocusRowCardImpl({
             <span className="text-[10px] font-black text-zinc-500 uppercase tracking-wider flex items-center gap-1">
               <Clock className="h-2.5 w-2.5 text-zinc-500" /> ENTRY
             </span>
-            <TimeInput value={row.entryTime} onChange={v => onUpdate({ entryTime: clampHm(v, ENTRY_TIME_MIN, ENTRY_TIME_MAX) })} />
+            <TimeInput value={row.entryTime} onChange={v => onUpdate({ entryTime: clampHm(v, UNDERLYING_META[row.underlying].entryMinHm, UNDERLYING_META[row.underlying].entryMaxHm) })} />
           </div>
           <div className="flex items-center justify-between gap-1 bg-zinc-900/50 border border-zinc-800/50 rounded-lg px-2 py-1">
             <span className="text-[10px] font-black text-zinc-500 uppercase tracking-wider flex items-center gap-1">
               <Clock className="h-2.5 w-2.5 text-zinc-500" /> EXIT
             </span>
-            <TimeInput value={row.exitTime} onChange={v => onUpdate({ exitTime: clampHm(v, EXIT_TIME_MIN, EXIT_TIME_MAX) })} />
+            <TimeInput value={row.exitTime} onChange={v => onUpdate({ exitTime: clampHm(v, UNDERLYING_META[row.underlying].exitMinHm, UNDERLYING_META[row.underlying].exitMaxHm) })} />
           </div>
         </div>
 
@@ -4351,13 +4373,12 @@ export default function FocusTool() {
     for (const p of positions) { r += Number(p.realizedProfit) || 0; u += Number(p.unrealizedProfit) || 0; }
     return { realised: r, unrealised: u, total: r + u };
   }, [positions]);
-  // Indices in use: NIFTY always, the others once they have a row or a started group.
-  // Everything fetched per index (expiries, lookups, futures, the live bridge) is
-  // limited to these — BANKNIFTY / SENSEX cost nothing until you open a row for them.
-  const watchedKey = UNDERLYINGS.filter(u => u === 'NIFTY'
-    || config.rows.some(r => r.underlying === u)
+  // Indices in use: those with a row or a started group — NIFTY is no different, so a
+  // trader on another index can remove it. Everything fetched per index (expiries,
+  // lookups, the live bridge) is limited to these.
+  const watchedKey = UNDERLYINGS.filter(u => config.rows.some(r => r.underlying === u)
     || config.groups.some(g => g.underlying === u && g.enabled)).join(',');
-  const watched = useMemo(() => watchedKey.split(',') as FocusUnderlying[], [watchedKey]);
+  const watched = useMemo(() => watchedKey.split(',').filter(Boolean) as FocusUnderlying[], [watchedKey]);
   const { futQuotes, spotPrices, lotSizes, expiries, lookups, chains } = useFocusMarketData({
     broker, watched, watchedKey, rows: config.rows, groups: config.groups,
   });
@@ -4510,13 +4531,16 @@ export default function FocusTool() {
   // expiry (comma-separated) so a Sept monthly row still gets WS LTP/OI —
   // not nearest-only. Never stopped on unmount — same long-lived convention
   // as AdvancedScalper, so returning reconnects instantly.
-  const niftyBridgeExpiry = bridgeExpiriesForUnderlying('NIFTY', config.rows, expiries.NIFTY ?? []);
+  const niftyBridgeExpiry = watched.includes('NIFTY') ? bridgeExpiriesForUnderlying('NIFTY', config.rows, expiries.NIFTY ?? []) : '';
   // '' = not watched: the bridge then does not subscribe that index at all.
   const bankniftyBridgeExpiry = watched.includes('BANKNIFTY') ? bridgeExpiriesForUnderlying('BANKNIFTY', config.rows, expiries.BANKNIFTY ?? []) : '';
   const sensexBridgeExpiry = watched.includes('SENSEX') ? bridgeExpiriesForUnderlying('SENSEX', config.rows, expiries.SENSEX ?? []) : '';
   // A watched index must have its expiry before the bridge starts, or it would start
   // without it and be restarted a moment later.
-  const bridgeReady = !!niftyBridgeExpiry
+  // CRUDEOILM is not on the bridge, and with no index watched there is nothing to subscribe.
+  const bridgeUnderlyings = watched.filter(u => u === 'NIFTY' || u === 'BANKNIFTY' || u === 'SENSEX');
+  const bridgeReady = bridgeUnderlyings.length > 0
+    && (!watched.includes('NIFTY') || !!niftyBridgeExpiry)
     && (!watched.includes('BANKNIFTY') || !!bankniftyBridgeExpiry)
     && (!watched.includes('SENSEX') || !!sensexBridgeExpiry);
   useEffect(() => {
@@ -4647,11 +4671,27 @@ export default function FocusTool() {
       const rows = j.positions
         .filter(p => {
           const seg = String(p.exchangeSegment ?? '').toUpperCase();
-          return seg.includes('FNO') || seg.includes('FO');
+          // MCX_COMM is admitted only for Dhan, the one broker whose MCX quantity
+          // convention (lots) this page converts — see focusToolUnderlyings.
+          if (seg.includes('FNO') || seg.includes('FO')) return true;
+          // Only CRUDEOILM rows: other MCX contracts (CRUDEOIL x100, gas, gold...) have no unit
+          // conversion here and would corrupt the header P&L if admitted.
+          return broker === 'dhan' && seg === 'MCX_COMM' && underlyingOfSymbol(String(p.tradingSymbol ?? '')) === 'CRUDEOILM';
         })
-        // A no-op for NSE/BSE F&O, but applied at the pipeline entrance so
-        // it cannot be forgotten if a commodity row ever reaches here.
-        .map(p => scaleBrokerPnl(p as any) as PosRow);
+        // MCX: Dhan reports quantity and P&L per LOT; rescale P&L, then express quantity in
+        // barrels so the page's premium × quantity maths is right with no further care.
+        // A no-op for NSE/BSE F&O.
+        .map(p => {
+          const scaled = scaleBrokerPnl(p as any) as PosRow;
+          const u = underlyingOfSymbol(String(scaled.tradingSymbol ?? ''));
+          if (!u || !isMcxUnderlying(u)) return scaled;
+          return {
+            ...scaled,
+            netQty: toInternalQty(u, Number(scaled.netQty) || 0),
+            buyQty: toInternalQty(u, Number((scaled as any).buyQty) || 0),
+            sellQty: toInternalQty(u, Number((scaled as any).sellQty) || 0),
+          } as PosRow;
+        });
       setPositions(rows);
       return rows;
     } catch {
@@ -4735,7 +4775,7 @@ export default function FocusTool() {
   }, [trailEnabled, triggerRupees, lockRupees, trailX]);
 
   const underlyingPnl = useMemo(() => {
-    const out: Record<FocusUnderlying, number> = { NIFTY: 0, BANKNIFTY: 0, SENSEX: 0 };
+    const out: Record<FocusUnderlying, number> = { NIFTY: 0, BANKNIFTY: 0, SENSEX: 0, CRUDEOILM: 0 };
     for (const pos of positions) {
       const pnl = (Number(pos.realizedProfit) || 0) + (Number(pos.unrealizedProfit) || 0);
       const u = underlyingOfSymbol(pos.tradingSymbol);
@@ -5589,7 +5629,7 @@ export default function FocusTool() {
         const j = await res.json() as { success?: boolean; data?: { orderStatus?: string; filledQty?: number } };
         if (j.success && j.data) {
           const st = String(j.data.orderStatus ?? '').toUpperCase();
-          const fq = Math.min(rec.requested, Math.max(0, Number(j.data.filledQty) || 0));
+          const fq = Math.min(rec.requested, Math.max(0, toInternalQty(rowNow.underlying, Number(j.data.filledQty) || 0)));
           if (st === 'TRADED') filledNow = rec.requested;
           else if (st === 'REJECTED' || st === 'CANCELLED' || st === 'CANCELED' || st === 'EXPIRED') {
             filledNow = fq; dead = true;
@@ -5834,11 +5874,21 @@ export default function FocusTool() {
       return false;
     }
 
+    if (!brokerTradesUnderlying(broker, u)) {
+      addToast('error', `${what} order not sent`, `${u} trades on Dhan only — switch broker`);
+      return false;
+    }
     const exchange = orderExchange(broker, u);
     const url = broker === 'dhan' ? '/api/scalper/fast-order' : scalperRoute(broker, 'order');
+    // `quantity` is in page units (barrels for MCX); the broker takes lots there.
+    const sentQty = orderQuantity(u, quantity);
+    if (!(sentQty > 0)) {
+      addToast('error', `${what} order not sent`, `${quantity} is under one ${u} lot (${UNDERLYING_META[u].unitsPerLot})`);
+      return false;
+    }
     const body = broker === 'dhan'
-      ? { securityId, quantity, side, orderType: 'MARKET', exchangeSegment: exchange, ...product.fields, source: FTS_ORDER_SOURCE }
-      : { tradingsymbol: symbol, quantity, side, orderType: 'MARKET', exchange, ...product.fields };
+      ? { securityId, quantity: sentQty, side, orderType: 'MARKET', exchangeSegment: exchange, ...product.fields, source: FTS_ORDER_SOURCE }
+      : { tradingsymbol: symbol, quantity: sentQty, side, orderType: 'MARKET', exchange, ...product.fields };
 
     try {
       const res = await fetch(url, {
@@ -6458,7 +6508,10 @@ export default function FocusTool() {
       const j = await r.json() as { success?: boolean; data?: { orderStatus?: string; filledQty?: number; averageTradedPrice?: number } };
       if (!j.success || !j.data) return;   // unreadable: keep it, retry next tick
       const status = String(j.data.orderStatus ?? '').toUpperCase();
-      const filled = Number(j.data.filledQty) || 0;
+      const ladderRow = schedulerRef.current.config.rows.find(x => x.id === rowId);
+      if (!ladderRow) return;
+      // The order book counts MCX in lots; the ledger is in page units (barrels).
+      const filled = toInternalQty(ladderRow.underlying, Number(j.data.filledQty) || 0);
       const done = Math.max(o.credited, ladderCreditedRef.current.get(o.orderId) ?? 0);
       const delta = filled - done;
       if (delta > 0) {
@@ -6543,10 +6596,11 @@ export default function FocusTool() {
     if (!product) { addToast('error', `${what} order not sent`, 'Unsupported product'); return; }
     const price = Number(ladderPrice(ltp, pct).toFixed(2));
     const quantity = Math.max(1, Math.round(lots)) * lotSize;
+    if (!(orderQuantity(row.underlying, quantity) > 0)) { addToast('error', `${what} order not sent`, 'Quantity is under one lot'); return; }
     try {
       const res = await fetch('/api/scalper/fast-order', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ securityId, quantity, side: 'SELL', orderType: 'LIMIT', price, exchangeSegment: orderExchange(broker, row.underlying), ...product.fields, source: FTS_ORDER_SOURCE }),
+        body: JSON.stringify({ securityId, quantity: orderQuantity(row.underlying, quantity), side: 'SELL', orderType: 'LIMIT', price, exchangeSegment: orderExchange(broker, row.underlying), ...product.fields, source: FTS_ORDER_SOURCE }),
       });
       const j = await res.json() as { success?: boolean; order_id?: string; error?: string };
       if (!j.success || !j.order_id) { addToast('error', `${what} limit rejected`, j.error ?? 'Unknown broker error'); return; }
@@ -6720,6 +6774,7 @@ export default function FocusTool() {
     const group = snap.config.groups.find(g => g.underlying === fresh.underlying);
     const d = evaluateOverallReentry(fresh, kind, {
       nowHm: istHm(), product: group?.product ?? 'INTRADAY', groupEnabled: !!group?.enabled,
+      backstopHm: UNDERLYING_META[fresh.underlying].backstopHm,
     });
     const tag = `${isSimRow(fresh) ? 'SIM ' : ''}${fresh.underlying}`;
     if (!d.enter) {
@@ -6901,7 +6956,7 @@ export default function FocusTool() {
     if (!legsOf(row).includes(leg)) return refuse(`This row does not trade ${leg}`);
     if (row.fill.lazyUsed?.includes(lazy.id)) return refuse('Already opened once this cycle');
     const group = snap.config.groups.find(g => g.underlying === u);
-    const closed = reentryWindowClosed(row, { nowHm: istHm(), product: group?.product ?? 'INTRADAY', groupEnabled: !!group?.enabled });
+    const closed = reentryWindowClosed(row, { nowHm: istHm(), product: group?.product ?? 'INTRADAY', groupEnabled: !!group?.enabled, backstopHm: UNDERLYING_META[u].backstopHm });
     if (closed) return refuse(closed);
     if (!rowMayTrade(row, snap.liveRealMoney)) return refuse('LIVE · REAL MONEY is off');
     if (rowOwnsLeg(row, leg)) return refuse(`The ${leg} leg is still open — a Lazy Leg needs its slot free`);
@@ -7254,6 +7309,7 @@ export default function FocusTool() {
         // Monitoring After still do.
         const closed = reentryWindowClosed(row, {
           nowHm, product: group?.product ?? 'INTRADAY', groupEnabled: !!group?.enabled,
+          backstopHm: UNDERLYING_META[row.underlying].backstopHm,
         }, true);
         if (closed) { clear(closed); continue; }
         const wantedAt = rowExitWantedRef.current.get(row.id);
@@ -7751,7 +7807,7 @@ export default function FocusTool() {
       : entryMomentumOn(row) ? 'Overall Momentum turned on'
       : monitoringStopped(row, nowHm) ? `monitoring stopped at ${row.stopMonitoringAfter}`
       : (row.exitTime && nowHm >= row.exitTime) ? `past its exit time ${row.exitTime}`
-      : ((group?.product ?? 'INTRADAY') === 'INTRADAY' && nowHm >= INTRADAY_BACKSTOP_HM) ? 'past 15:17 intraday cutoff'
+      : ((group?.product ?? 'INTRADAY') === 'INTRADAY' && nowHm >= UNDERLYING_META[row.underlying].backstopHm) ? `past ${UNDERLYING_META[row.underlying].backstopHm} intraday cutoff`
       : null;
     let fired = false;   // one order per row per tick — busyRows reads this render's state
     // A BTST / Positional range leg makes the row's other legs wait for its range end too.
@@ -8019,8 +8075,9 @@ export default function FocusTool() {
           continue;
         }
         const product = cfg.groups.find(g => g.underlying === row.underlying)?.product ?? 'INTRADAY';
-        if (product === 'INTRADAY' && nowHm >= INTRADAY_BACKSTOP_HM) {
-          actionsRef.current.autoExitRow(row, `Intraday backstop ${INTRADAY_BACKSTOP_HM} reached`);
+        const backstopHm = UNDERLYING_META[row.underlying].backstopHm;
+        if (product === 'INTRADAY' && nowHm >= backstopHm) {
+          actionsRef.current.autoExitRow(row, `Intraday backstop ${backstopHm} reached`);
         }
       }
 
@@ -8048,6 +8105,7 @@ export default function FocusTool() {
           nowHm,
           groupEnabled: !!group?.enabled,
           product: group?.product ?? 'INTRADAY',
+          backstopHm: UNDERLYING_META[row.underlying].backstopHm,
           dte: dteFor(row.expiry || expiriesRef.current[row.underlying]?.[0] || ''),
           strikesReady: l.ceStrike != null || l.peStrike != null,
           flat: rowFlat(row),
@@ -8247,7 +8305,7 @@ export default function FocusTool() {
   }, []);
 
   const rowsByUnderlying = useMemo<Record<FocusUnderlying, FocusRow[]>>(() => {
-    const m: Record<FocusUnderlying, FocusRow[]> = { NIFTY: [], BANKNIFTY: [], SENSEX: [] };
+    const m: Record<FocusUnderlying, FocusRow[]> = { NIFTY: [], BANKNIFTY: [], SENSEX: [], CRUDEOILM: [] };
     for (const r of config.rows) m[r.underlying].push(r);
     return m;
   }, [config.rows]);
@@ -8341,9 +8399,9 @@ export default function FocusTool() {
         {UNDERLYINGS.map(u => {
           const group = config.groups.find(g => g.underlying === u) ?? makeGroup(u);
           const rows = rowsByUnderlying[u];
-          // Only indices in use are shown: NIFTY always, the others once they have a
-          // row or a started group. Hidden ones come back via the "+ BANKNIFTY" chips below.
-          if (u !== 'NIFTY' && rows.length === 0 && !group.enabled) return null;
+          // Only indices in use are shown: those with a row or a started group. An empty,
+          // stopped one (NIFTY included) disappears and comes back via the "+ NIFTY" chips below.
+          if (rows.length === 0 && !group.enabled) return null;
 
           return (
             <div key={u} className="flex flex-col gap-3">
@@ -8536,10 +8594,10 @@ export default function FocusTool() {
             </div>
           );
         })}
-        {UNDERLYINGS.some(u => u !== 'NIFTY' && rowsByUnderlying[u].length === 0 && !(config.groups.find(g => g.underlying === u)?.enabled)) && (
+        {UNDERLYINGS.some(u => rowsByUnderlying[u].length === 0 && !(config.groups.find(g => g.underlying === u)?.enabled)) && (
           <div className="flex items-center gap-2 text-xs text-zinc-500">
-            <span className="font-semibold">Other indices:</span>
-            {UNDERLYINGS.filter(u => u !== 'NIFTY' && rowsByUnderlying[u].length === 0 && !(config.groups.find(g => g.underlying === u)?.enabled)).map(u => (
+            <span className="font-semibold">Add index:</span>
+            {UNDERLYINGS.filter(u => rowsByUnderlying[u].length === 0 && !(config.groups.find(g => g.underlying === u)?.enabled)).map(u => (
               <button
                 key={u} type="button" onClick={() => addRow(u)}
                 title={`Add a ${u} row (shows the ${u} section)`}
@@ -8688,7 +8746,7 @@ export default function FocusTool() {
 
           <div className="bg-zinc-950/40 border border-zinc-800 rounded-xl p-4 flex flex-col gap-2">
             <h3 className="text-xs font-bold text-white uppercase tracking-wider mb-1">By Underlying</h3>
-            {(['NIFTY', 'BANKNIFTY', 'SENSEX'] as const).map(u => {
+            {FOCUS_UNDERLYINGS.map(u => {
               const val = underlyingPnl[u];
               return (
                 <div key={u} className="flex justify-between items-center text-xs border-b border-zinc-850 py-1">

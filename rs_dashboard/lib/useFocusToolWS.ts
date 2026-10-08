@@ -39,7 +39,7 @@ const STALE_MS         = 10_000;
  */
 const HTTP_SEED_STALE_MS = 6 * 60 * 60 * 1000;
 
-export type FocusUnderlying = 'NIFTY' | 'BANKNIFTY' | 'SENSEX';
+export type FocusUnderlying = 'NIFTY' | 'BANKNIFTY' | 'SENSEX' | 'CRUDEOILM';
 
 export interface FocusWSLeg {
   ltp: number;
@@ -103,6 +103,8 @@ export interface FocusWSQuotes {
   NIFTY?: FocusWSUnderlyingQuotes;
   BANKNIFTY?: FocusWSUnderlyingQuotes;
   SENSEX?: FocusWSUnderlyingQuotes;
+  /** Never populated: CRUDEOILM is not on the tick bridge, it prices off the chain poll. */
+  CRUDEOILM?: FocusWSUnderlyingQuotes;
 }
 
 export interface FocusWSBridgeStatus {

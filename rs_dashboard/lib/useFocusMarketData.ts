@@ -14,9 +14,10 @@ import React, { useEffect, useState } from 'react';
 import { scalperRoute, type Broker } from '@/hooks/useBrokerSelector';
 import { absDelta100, modelAbsDelta100 } from '@/lib/focusToolRules';
 import { futureQuote } from '@/lib/optionsPricing';
-import type { FocusUnderlying, FocusRow, FocusIndexGroup } from '@/lib/focusToolRows';
+import type { FocusRow, FocusIndexGroup } from '@/lib/focusToolRows';
+import { FOCUS_UNDERLYINGS, UNDERLYING_META, type FocusUnderlying } from '@/lib/focusToolUnderlyings';
 
-const UNDERLYINGS: FocusUnderlying[] = ['NIFTY', 'BANKNIFTY', 'SENSEX'];
+const UNDERLYINGS: FocusUnderlying[] = [...FOCUS_UNDERLYINGS];
 
 export interface FutQuote {
   ltp: number;
@@ -66,16 +67,16 @@ export function useFocusMarketData({ broker, watched, watchedKey, rows, groups }
   groups: readonly FocusIndexGroup[];
 }): FocusMarketData {
   const [futQuotes, setFutQuotes] = useState<Record<FocusUnderlying, FutQuote | null>>({
-    NIFTY: null, BANKNIFTY: null, SENSEX: null,
+    NIFTY: null, BANKNIFTY: null, SENSEX: null, CRUDEOILM: null,
   });
   const [spotPrices, setSpotPrices] = useState<Record<FocusUnderlying, number>>({
-    NIFTY: 0, BANKNIFTY: 0, SENSEX: 0,
+    NIFTY: 0, BANKNIFTY: 0, SENSEX: 0, CRUDEOILM: 0,
   });
   const [lotSizes, setLotSizes] = useState<Record<FocusUnderlying, number | null>>({
-    NIFTY: null, BANKNIFTY: null, SENSEX: null,
+    NIFTY: null, BANKNIFTY: null, SENSEX: null, CRUDEOILM: null,
   });
   const [expiries, setExpiries] = useState<Record<FocusUnderlying, string[]>>({
-    NIFTY: [], BANKNIFTY: [], SENSEX: [],
+    NIFTY: [], BANKNIFTY: [], SENSEX: [], CRUDEOILM: [],
   });
   // Keyed by expKey(underlying, expiry) — a row can trade any listed expiry,
   // not just the nearest, so these can no longer be one entry per underlying.
@@ -84,7 +85,9 @@ export function useFocusMarketData({ broker, watched, watchedKey, rows, groups }
   const [chains, setChains] = useState<Record<string, ChainData | null>>({});
 
   useEffect(() => {
-    watched.forEach(u => {
+    // NIFTY's expiries are always loaded: the header's option-chain viewer lists them even when
+    // NIFTY has no row. One cached call; its lookups and chains stay gated on `watched`.
+    new Set<FocusUnderlying>(['NIFTY', ...watched]).forEach(u => {
       fetch(`/api/options/expiries?underlying=${u}&broker=${broker}`)
         .then(r => r.json())
         .then((j: { success: boolean; data?: string[] }) => {
@@ -106,7 +109,7 @@ export function useFocusMarketData({ broker, watched, watchedKey, rows, groups }
           // dropped SENSEX in favour of CRUDEOIL, so SENSEX spot comes off its
           // option chain instead (see the chain effect).
           const KEY_MAP: Record<string, FocusUnderlying> = {
-            'NIFTY 50': 'NIFTY', 'NIFTY': 'NIFTY', 'BANKNIFTY': 'BANKNIFTY', 'SENSEX': 'SENSEX',
+            'NIFTY 50': 'NIFTY', 'NIFTY': 'NIFTY', 'BANKNIFTY': 'BANKNIFTY', 'SENSEX': 'SENSEX', 'CRUDEOILM': 'CRUDEOILM',
           };
           setSpotPrices(prev => {
             const next = { ...prev };
@@ -193,7 +196,12 @@ export function useFocusMarketData({ broker, watched, watchedKey, rows, groups }
           if (!j.success || !j.data?.strikes) return;
           setLookups(prev => ({ ...prev, [expKey(u, expiry)]: j.data! }));
           if (Number(j.data.lotSize) > 0) {
-            setLotSizes(prev => ({ ...prev, [u]: Number(j.data!.lotSize) }));
+            // MCX: the page works in barrels, so its lot is barrels-per-lot, a constant. The
+            // lookup's own figure is not used: Dhan reports 1 (order quantity is in lots) and
+            // Kotak a different unit again, so multiplying it would size SIM rows wrongly.
+            const unitsPerLot = UNDERLYING_META[u].unitsPerLot;
+            const lot = UNDERLYING_META[u].segment === 'MCX_COMM' ? unitsPerLot : Number(j.data!.lotSize);
+            setLotSizes(prev => ({ ...prev, [u]: lot }));
           }
         })
         .catch(() => {});
@@ -245,7 +253,7 @@ export function useFocusMarketData({ broker, watched, watchedKey, rows, groups }
           .then(r => r.json())
           .then((j: {
             success?: boolean;
-            data?: { future_price?: number; future_expiry?: string; chain?: { last_price?: number; oc?: Record<string, {
+            data?: { spot?: number; future_price?: number; future_expiry?: string; chain?: { last_price?: number; oc?: Record<string, {
               ce?: { last_price?: number; oi?: number; implied_volatility?: number; top_bid_price?: number; top_ask_price?: number; greeks?: { delta?: number } };
               pe?: { last_price?: number; oi?: number; implied_volatility?: number; top_bid_price?: number; top_ask_price?: number; greeks?: { delta?: number } };
             }> } };
@@ -256,7 +264,11 @@ export function useFocusMarketData({ broker, watched, watchedKey, rows, groups }
             // last good chain beats blanking every premium on one 429.
             if (!j.success || !oc) return;
             const flat: ChainData['oc'] = {};
-            const market = { spot: Number(j.data?.chain?.last_price ?? 0), future: futureQuote(j.data?.future_price, j.data?.future_expiry) };
+            // MCX: chain.last_price is a lagging snapshot (measured 4.7% behind), while the route's own
+            // `spot` is the live futures quote the chain sits on, so use that for ATM and deltas.
+            const lastPrice = Number(j.data?.chain?.last_price ?? 0);
+            const chainSpot = UNDERLYING_META[u].segment === 'MCX_COMM' && Number(j.data?.spot) > 0 ? Number(j.data?.spot) : lastPrice;
+            const market = { spot: chainSpot, future: futureQuote(j.data?.future_price, j.data?.future_expiry) };
             for (const [k, v] of Object.entries(oc)) {
               const ceOiRaw = v.ce?.oi;
               const peOiRaw = v.pe?.oi;
@@ -277,7 +289,7 @@ export function useFocusMarketData({ broker, watched, watchedKey, rows, groups }
                 peDeltaDhan: absDelta100(v.pe?.greeks?.delta),
               };
             }
-            setChains(prev => ({ ...prev, [expKey(u, expiry)]: { spot: Number(j.data?.chain?.last_price ?? 0), oc: flat } }));
+            setChains(prev => ({ ...prev, [expKey(u, expiry)]: { spot: chainSpot, oc: flat } }));
           })
           .catch(() => {});
       });
