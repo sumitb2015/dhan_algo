@@ -61,7 +61,7 @@ import { computeRowPnl, mtmForQty, shiftMayReopen, canMarkMtm, shiftCloseConfirm
 import { normalizeTradeRow, matchOutsideTrades, type NormalizedTrade } from '@/lib/multiLegFocus';
 import { stampItems, noteItems, adoptItems, canon, type RevBook } from '@/lib/revMerge';
 import { useTabLeader } from '@/hooks/useTabLeader';
-import { FOCUS_UNDERLYINGS, FEED_BRIDGE_UNDERLYINGS, FEED_SESSION_START_HM, FEED_SESSION_END_HM, UNDERLYING_META, isMcxUnderlying, toInternalQty, orderQuantity } from '@/lib/focusToolUnderlyings';
+import { FOCUS_UNDERLYINGS, FEED_BRIDGE_UNDERLYINGS, isTradingDayFor, FEED_SESSION_START_HM, FEED_SESSION_END_HM, UNDERLYING_META, isMcxUnderlying, toInternalQty, orderQuantity } from '@/lib/focusToolUnderlyings';
 import type { FocusConfigWrite } from '@/lib/focusToolRowsMerge';
 
 // â”€â”€ Constants â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
@@ -745,7 +745,7 @@ function RuleNumInput({ value, onCommit, placeholder, className, title, disabled
       onChange={e => setDraft(e.target.value)}
       onBlur={e => { focusedRef.current = false; commit(e.currentTarget.value); }}
       onKeyDown={e => {
-        if (e.key === 'Enter') { commit((e.target as HTMLInputElement).value); (e.target as HTMLInputElement).blur(); }
+        if (e.key === 'Enter') (e.target as HTMLInputElement).blur();   // blur commits (onBlur); committing here too sent every Enter to the parent twice
         if (e.key === 'Escape') { setDraft(value); (e.target as HTMLInputElement).blur(); }
       }}
       className={cn(
@@ -1936,7 +1936,7 @@ function TimeInput({
         onChange={e => setDraft(e.target.value)}
         onBlur={e => { focusedRef.current = false; commit(e.currentTarget.value); }}
         onKeyDown={e => {
-          if (e.key === 'Enter') { commit((e.target as HTMLInputElement).value); (e.target as HTMLInputElement).blur(); }
+          if (e.key === 'Enter') (e.target as HTMLInputElement).blur();   // blur commits (onBlur); committing here too sent every Enter to the parent twice
           if (e.key === 'Escape') { setDraft(value); (e.target as HTMLInputElement).blur(); }
         }}
         className="h-6 text-[11px] font-mono font-bold px-1.5 border border-zinc-700/80 rounded bg-zinc-900 text-zinc-100 focus:outline-none focus:border-violet-500 w-full text-center [&::-webkit-calendar-picker-indicator]:hidden [&::-webkit-inner-spin-button]:hidden"
@@ -8036,8 +8036,8 @@ export default function FocusTool() {
   // versions — and with them a stale `lookups`/`lotSizes`/`rowLive` inside
   // placeLeg, which resolves the contract an order is actually sent for.
   // Going through a ref that every render refreshes keeps orders on current data.
-  const actionsRef = useRef({ autoEnterRow, autoExitRow, placeLeg, simQuote, checkPendingReentries, sweepUnconfirmedOrders, driveLegEntries, rowHasLegEntryGate });
-  actionsRef.current = { autoEnterRow, autoExitRow, placeLeg, simQuote, checkPendingReentries, sweepUnconfirmedOrders, driveLegEntries, rowHasLegEntryGate };
+  const actionsRef = useRef({ updateRow, autoEnterRow, autoExitRow, placeLeg, simQuote, checkPendingReentries, sweepUnconfirmedOrders, driveLegEntries, rowHasLegEntryGate });
+  actionsRef.current = { updateRow, autoEnterRow, autoExitRow, placeLeg, simQuote, checkPendingReentries, sweepUnconfirmedOrders, driveLegEntries, rowHasLegEntryGate };
 
   /**
    * The scheduler: everything time- or account-level driven, on a 1s tick.
@@ -8095,6 +8095,7 @@ export default function FocusTool() {
         // themselves inside driveLegEntries.
         if (monitoringStopped(row, nowHm) && row.status === 'armed' && !Object.keys(simMomRef.current).some(k => k.startsWith(`${row.id}:`))) {
           delete entryMomRef.current[row.id];
+          if (row.entryMomState) actionsRef.current.updateRow(row.id, { entryMomState: undefined });
           putMomStatus(row.id, rowFlat(row) ? `monitoring stopped at ${row.stopMonitoringAfter} — no entry` : '');
           continue;
         }
@@ -8109,6 +8110,7 @@ export default function FocusTool() {
           dte: dteFor(row.expiry || expiriesRef.current[row.underlying]?.[0] || ''),
           strikesReady: l.ceStrike != null || l.peStrike != null,
           flat: rowFlat(row),
+          tradingDay: isTradingDayFor(row.underlying, istToday()),
         });
         // Per-leg Simple Momentum replaces the all-legs-at-once entry for this row.
         const simKeys = [`${row.id}:CE`, `${row.id}:PE`];
@@ -8125,6 +8127,11 @@ export default function FocusTool() {
         if (enter && entryMomentumOn(row) && row.overallReMode !== 'asap') {
           const today = istToday();
           let st = entryMomRef.current[row.id];
+          // A reload (or another tab taking over) while the row waits: take the day's pinned strikes and start premium back from the row.
+          if ((!st || st.day !== today) && row.entryMomState?.day === today) {
+            st = { ...row.entryMomState };
+            entryMomRef.current[row.id] = st;
+          }
           // The strikes belong to the entry time, as on AlgoTest — watching the
           // live ATM instead would jump the combined premium every time the
           // ATM moved and enter on that jump, at strikes nobody measured. Pin
@@ -8155,6 +8162,11 @@ export default function FocusTool() {
           const watched = row.entryMomEval === 'candle' ? (st.close ?? null) : liveNow;
           const md = evaluateEntryMomentum(row, st.ref, watched, liveNow);
           if (md.ref != null) st.ref = md.ref;
+          // Saved only when it changes (the pinned strikes, then the start premium once) — never every tick.
+          const saved = row.entryMomState;
+          if (!saved || saved.day !== st.day || saved.ref !== st.ref || saved.ce !== st.ce || saved.pe !== st.pe) {
+            actionsRef.current.updateRow(row.id, { entryMomState: { day: st.day, ref: st.ref, ce: st.ce, pe: st.pe } });
+          }
           pinned = { CE: st.ce, PE: st.pe };
           if (md.ready) reason = `${decision.reason}; ${md.reason}`;
           else { enter = false; momStatus = md.reason; }
@@ -8162,6 +8174,11 @@ export default function FocusTool() {
         // The start premium only lives while the row is waiting to enter: any
         // loss of eligibility (disarmed, index stopped, …) or the entry itself drops it.
         if (enter || !decision.enter) delete entryMomRef.current[row.id];
+        // The saved start survives a transient ineligibility (a chain still loading after a reload); it ends with the entry,
+        // a disarm, or the day.
+        if (row.entryMomState && (enter || row.status !== 'armed' || row.entryMomState.day !== istToday())) {
+          actionsRef.current.updateRow(row.id, { entryMomState: undefined });
+        }
         putMomStatus(row.id, momStatus);
         if (enter) actionsRef.current.autoEnterRow(row, reason, pinned);
       }

@@ -1160,6 +1160,8 @@ export interface EntryContext {
   strikesReady: boolean;
   /** The row currently holds nothing. */
   flat: boolean;
+  /** Today is a day this underlying trades (weekday, and not an exchange holiday for NSE / BSE) — isTradingDayFor(). */
+  tradingDay: boolean;
 }
 
 export interface EntryDecision { enter: boolean; reason: string }
@@ -1180,6 +1182,7 @@ export function evaluateEntry(
   ctx: EntryContext,
 ): EntryDecision {
   if (!ctx.groupEnabled) return { enter: false, reason: 'index not started' };
+  if (!ctx.tradingDay) return { enter: false, reason: 'market closed today' };
   if (row.status !== ('armed' as FocusRowStatus)) return { enter: false, reason: `status ${row.status}` };
   if (!(Number(row.lots) > 0)) return { enter: false, reason: 'lots must be > 0' };
   if (!ctx.flat) return { enter: false, reason: 'already holds a position' };
