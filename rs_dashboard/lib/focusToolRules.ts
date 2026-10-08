@@ -1878,6 +1878,48 @@ export function resolveCriteriaStrike(
   return null;
 }
 
+/** The ATM strike for a spot (or futures) price: rounded to the strike step, null without a price. */
+export function atmStrike(base: number, step: number): number | null {
+  return base > 0 && step > 0 ? Math.round(base / step) * step : null;
+}
+
+/**
+ * The strike a row's leg resolves to while it holds nothing. AlgoTest strike criteria when set; else, in PREMIUM mode,
+ * the ₹ target as Closest Premium (nearest either side); else ATM ± `offset` strike steps. Null when it cannot resolve.
+ * An open leg is pinned to its fill strike instead (legPinnedStrike) — this is only the live resolution.
+ */
+export function resolveRowLegStrike(
+  row: Pick<FocusRow, 'strikeCriteria' | 'ceCrit' | 'peCrit' | 'strikeMode' | 'cePremium' | 'pePremium' | 'ceOffset' | 'peOffset' | 'roundInterval'>,
+  leg: 'CE' | 'PE',
+  ctx: { atm: number | null; step: number; oc: StrikeCtx['oc'] },
+): number | null {
+  const crit = row.strikeCriteria;
+  if (crit) {
+    return resolveCriteriaStrike(crit, leg, leg === 'CE' ? row.ceCrit : row.peCrit, {
+      atm: ctx.atm ?? 0, step: ctx.step, oc: ctx.oc, roundInterval: row.roundInterval,
+    });
+  }
+  if (row.strikeMode === 'PREMIUM') return closestPremiumStrike(ctx.oc, leg, Number(leg === 'CE' ? row.cePremium : row.pePremium));
+  return ctx.atm != null ? ctx.atm + ((leg === 'CE' ? row.ceOffset : row.peOffset) ?? 0) * ctx.step : null;
+}
+
+/**
+ * Link legs: an edit on one leg, mirrored onto the other. Offsets mirror as the NEGATION (CE+7 / PE+7 would both sit 7
+ * steps above ATM — a synthetic future, not a strangle); a ₹ premium target mirrors as is. Unlinked: the patch unchanged.
+ */
+export function mirrorLinkedPatch(linked: boolean, leg: 'CE' | 'PE', patch: Partial<FocusRow>): Partial<FocusRow> {
+  const merged = { ...patch };
+  if (!linked) return merged;
+  if (leg === 'CE') {
+    if (patch.ceOffset !== undefined) merged.peOffset = -patch.ceOffset;
+    if ('cePremium' in patch) merged.pePremium = patch.cePremium;
+  } else {
+    if (patch.peOffset !== undefined) merged.ceOffset = -patch.peOffset;
+    if ('pePremium' in patch) merged.cePremium = patch.pePremium;
+  }
+  return merged;
+}
+
 // ── Multi-day Range Breakout (BTST / Positional ORB) ────────────────────────
 
 const dayMs = 86_400_000;
