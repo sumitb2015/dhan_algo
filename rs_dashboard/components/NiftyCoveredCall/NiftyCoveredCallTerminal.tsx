@@ -485,6 +485,17 @@ export default function NiftyCoveredCallTerminal() {
     .map((c) => ({ ...c, unowned: c.shortUnits - (ledgerUnitsBySid[c.securityId] ?? 0) }))
     .filter((c) => c.unowned > 0), [book?.brokerCalls, ledgerUnitsBySid]);
 
+  // Calls sold outside the desk are only tracked once adopted — surface them
+  // instead of leaving the Adopt panel inside a collapsed section.
+  const [advOpen, setAdvOpen] = useState(false);
+  const autoOpenedAdopt = useRef(false);
+  useEffect(() => {
+    if (adoptable.length > 0 && !autoOpenedAdopt.current) {
+      autoOpenedAdopt.current = true;
+      setAdvOpen(true);
+    }
+  }, [adoptable.length]);
+
   const handleAdopt = (c: (typeof adoptable)[number]) => withBusy(async () => {
     const lots = adoptLots[c.securityId] ?? (lotSize > 0 ? Math.floor(c.unowned / lotSize) : 0);
     const cj = await (await fetch(`/api/nifty-covered-call/state?candidates=${c.securityId}`)).json() as {
@@ -1109,7 +1120,21 @@ export default function NiftyCoveredCallTerminal() {
 
       {/* COLLAPSIBLE ADVANCED DETAILS & GREEKS */}
       <div className="px-4 pb-8">
-        <details className="group bg-zinc-950/40 border border-zinc-800/60 rounded-xl overflow-hidden">
+        {adoptable.length > 0 && !advOpen && (
+          <button
+            type="button"
+            onClick={() => setAdvOpen(true)}
+            className="w-full mb-3 flex items-center gap-2 px-4 py-2.5 rounded-xl border border-sky-500/40 bg-sky-500/10 text-xs font-bold text-sky-300 hover:bg-sky-500/20 transition-colors"
+          >
+            <Link2 className="w-4 h-4" />
+            {adoptable.length} NIFTY call short{adoptable.length > 1 ? 's' : ''} sold outside this desk — click to choose which to track
+          </button>
+        )}
+        <details
+          open={advOpen}
+          onToggle={(e) => setAdvOpen((e.currentTarget as HTMLDetailsElement).open)}
+          className="group bg-zinc-950/40 border border-zinc-800/60 rounded-xl overflow-hidden"
+        >
           <summary className="flex items-center justify-between px-4 py-2.5 cursor-pointer select-none text-xs font-bold text-zinc-300 uppercase tracking-wide hover:bg-zinc-900/40 transition-colors">
             <span className="flex items-center gap-2">
               <SlidersHorizontal className="w-4 h-4 text-emerald-400" />
