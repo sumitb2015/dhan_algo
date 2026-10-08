@@ -50,7 +50,7 @@ import {
   multipliedLots, clampHm, rangeWindow, rangeWindowPhase, rowHasMultiDayRange, candleBucket, tradingDte,
   legSlRuleOn, legStopLevel, legTargetSpotLevel, legTgtUnitLabel, MAX_LEG_REENTRIES, pendingReentryLevel, pendingReentryHit, legTargetReason, costReentryBasis,
   awaitingMomentumQuote, MOMENTUM_QUOTE_WAIT_MS, legTargetLevel,
-  evaluateEntryMomentum, reRangeWindow, entryMomentumOn, overallSlConfig, overallProgress, nextOverallPeak, evaluateOverallExit, overallExitKind, evaluateOverallReentry, MAX_OVERALL_REENTRIES, rangeBreakoutOn, rangeBreakoutHit, costStopApplies, squareOffLegs, MAX_LAZY_LEGS, legSlMultiplier, legTarget, nextLazyLegId, lazyLegStrike, runningLazyLeg, simpleMomOn, simpleMomLevel, simpleMomHit,
+  evaluateEntryMomentum, reRangeWindow, entryMomentumOn, overallSlConfig, overallProgress, nextOverallPeak, evaluateOverallExit, overallExitKind, evaluateOverallReentry, MAX_OVERALL_REENTRIES, rangeBreakoutOn, rangeBreakoutHit, costStopApplies, squareOffLegs, atmStrike, resolveRowLegStrike, mirrorLinkedPatch, MAX_LAZY_LEGS, legSlMultiplier, legTarget, nextLazyLegId, lazyLegStrike, runningLazyLeg, simpleMomOn, simpleMomLevel, simpleMomHit,
   type PosRow, type RowLive,
 } from '@/lib/focusToolRules';
 import { postFocusEvent } from '@/lib/focusToolEvents';
@@ -721,12 +721,16 @@ function RuleNumInput({ value, onCommit, placeholder, className, title, disabled
   // button) — but never while this field has focus, or the user's own typing
   // would be reverted mid-edit.
   const focusedRef = useRef(false);
+  // Bumped on every commit so the effect below also runs when the parent REJECTS the value (a level on the wrong side of
+  // spot): `value` is then unchanged, and without this the rejected text stayed on screen looking like an active level.
+  const [commits, setCommits] = useState(0);
   useEffect(() => {
     if (!focusedRef.current) setDraft(value);
-  }, [value]);
+  }, [value, commits]);
 
   const commit = (next: string) => {
     if (next !== value) onCommit(next);
+    setCommits(c => c + 1);
   };
 
   return (
@@ -2153,19 +2157,11 @@ function useStrikeEditing(
    */
   function setLeg(leg: 'CE' | 'PE', patch: Partial<FocusRow>) {
     if (legOpen[leg]) { onBlocked?.(blockedNote(leg)); return; }
-    const merged = { ...patch };
     const other = leg === 'CE' ? 'PE' : 'CE';
     // The mirror is suppressed when the OTHER leg is open — mirroring would
     // move a leg that has a live position, orphaning it exactly as above.
-    if ((row.linked ?? true) && !legOpen[other]) {
-      if (leg === 'CE') {
-        if (patch.ceOffset !== undefined) merged.peOffset = -patch.ceOffset;
-        if ('cePremium' in patch) merged.pePremium = patch.cePremium;
-      } else {
-        if (patch.peOffset !== undefined) merged.ceOffset = -patch.peOffset;
-        if ('pePremium' in patch) merged.cePremium = patch.pePremium;
-      }
-    } else if (row.linked ?? true) {
+    const merged = mirrorLinkedPatch((row.linked ?? true) && !legOpen[other], leg, patch);
+    if ((row.linked ?? true) && legOpen[other]) {
       onBlocked?.(`${other} is open, so it kept its strike — only ${leg} moved`);
     }
     onUpdate(merged);
@@ -4890,23 +4886,13 @@ export default function FocusTool() {
       const group = config.groups.find(g => g.underlying === u);
       const futLtp = effectiveFutQuotes[u]?.ltp ?? 0;
       const atmBase = group?.atmBy === 'Fut' && futLtp > 0 ? futLtp : spot;
-      const atm = atmBase > 0 ? Math.round(atmBase / step) * step : null;
+      const atm = atmStrike(atmBase, step);
       const oc = chains[expKey(u, rowExpiry)]?.oc;
 
       // AlgoTest strike criteria when set; else ATM ± steps, or the ₹ premium
       // target as AlgoTest's Closest Premium (nearest either side).
-      const crit = row.strikeCriteria;
-      const critCtx = { atm: atm ?? 0, step, oc, roundInterval: row.roundInterval };
-      const resolvedCe = crit
-        ? resolveCriteriaStrike(crit, 'CE', row.ceCrit, critCtx)
-        : row.strikeMode === 'PREMIUM'
-          ? closestPremiumStrike(oc, 'CE', Number(row.cePremium))
-          : (atm != null ? atm + (row.ceOffset ?? 0) * step : null);
-      const resolvedPe = crit
-        ? resolveCriteriaStrike(crit, 'PE', row.peCrit, critCtx)
-        : row.strikeMode === 'PREMIUM'
-          ? closestPremiumStrike(oc, 'PE', Number(row.pePremium))
-          : (atm != null ? atm + (row.peOffset ?? 0) * step : null);
+      const resolvedCe = resolveRowLegStrike(row, 'CE', { atm, step, oc });
+      const resolvedPe = resolveRowLegStrike(row, 'PE', { atm, step, oc });
 
       // An OPEN row uses the strikes it actually filled at, never the live
       // resolution. ATM moves every time spot crosses a half-step, and a row
