@@ -17,6 +17,7 @@ const STATUS_FILE   = path.join(DEBUG_DIR, 'daily_market_status.json');
 const BASELINE_FILE = path.join(DEBUG_DIR, 'daily_market_baseline.json');
 const STOP_TRIGGER  = path.join(DEBUG_DIR, 'daily_market_stop.trigger');
 const LOCK_FILE     = path.join(DEBUG_DIR, 'daily_market_start.lock');
+const INDEX_DIR     = path.join(PROJECT_ROOT, 'index_constituents');
 const BANKNIFTY_CSV = path.join(PROJECT_ROOT, 'index_constituents', 'niftybank.csv');
 
 const LOCK_STALE_MS = 25_000;
@@ -81,6 +82,14 @@ function getBankNiftySymbols(): string[] {
   ];
 }
 
+function readIndexSymbols(file: string): string[] {
+  try {
+    return parseConstituentSymbols(fs.readFileSync(path.join(INDEX_DIR, file), 'utf8'));
+  } catch {
+    return [];
+  }
+}
+
 interface StatusPayload {
   status: string;
   pid?: number;
@@ -117,6 +126,9 @@ export async function GET() {
       nifty50,
       banknifty,
       nifty500,
+      next50: readIndexSymbols('niftynext50.csv'),
+      midcap150: readIndexSymbols('niftymidcap150.csv'),
+      smallcap250: readIndexSymbols('niftysmallcap250.csv'),
     },
   });
 }
