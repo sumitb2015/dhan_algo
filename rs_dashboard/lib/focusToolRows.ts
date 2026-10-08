@@ -6,7 +6,8 @@ const ROWS_FILE = path.join(PROJECT_ROOT, 'debug', 'focus_tool_rows.json');
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
-export type FocusUnderlying = 'NIFTY' | 'BANKNIFTY' | 'SENSEX';
+import type { FocusUnderlying } from '@/lib/focusToolUnderlyings';
+export type { FocusUnderlying };
 export type FocusDte = 'Any' | '0' | '1' | '0+1';
 export type FocusRowStatus = 'draft' | 'armed' | 'entered' | 'exited';
 export type FocusSide = 'CE' | 'PE' | 'BOTH';
@@ -684,7 +685,7 @@ const DEFAULT_GROUP = (u: FocusUnderlying): FocusIndexGroup => ({
 });
 
 export const DEFAULT_CONFIG: FocusToolConfig = {
-  groups: [DEFAULT_GROUP('NIFTY'), DEFAULT_GROUP('BANKNIFTY'), DEFAULT_GROUP('SENSEX')],
+  groups: [DEFAULT_GROUP('NIFTY'), DEFAULT_GROUP('BANKNIFTY'), DEFAULT_GROUP('SENSEX'), DEFAULT_GROUP('CRUDEOILM')],
   rows: [],
   riskEnabled: false,
   targetRupees: '',
@@ -707,6 +708,12 @@ function writeJsonAtomic(file: string, data: unknown) {
   fs.renameSync(tmp, file);
 }
 
+/** A config saved before an underlying existed has no group for it; append the default so the page can always find one. */
+export function withAllGroups(groups: FocusIndexGroup[]): FocusIndexGroup[] {
+  const have = new Set(groups.map(g => g.underlying));
+  return [...groups, ...DEFAULT_CONFIG.groups.filter(g => !have.has(g.underlying))];
+}
+
 export function readFocusConfig(): FocusToolConfig {
   try {
     if (!fs.existsSync(ROWS_FILE)) return DEFAULT_CONFIG;
@@ -715,10 +722,10 @@ export function readFocusConfig(): FocusToolConfig {
     return {
       ...DEFAULT_CONFIG,
       ...raw,
-      groups: (raw.groups ?? DEFAULT_CONFIG.groups).map((g: Partial<FocusIndexGroup>, i: number) => ({
+      groups: withAllGroups((raw.groups ?? DEFAULT_CONFIG.groups).map((g: Partial<FocusIndexGroup>, i: number) => ({
         ...DEFAULT_CONFIG.groups[i] ?? DEFAULT_GROUP(g.underlying ?? 'NIFTY'),
         ...g,
-      })),
+      }))),
     };
   } catch {
     return DEFAULT_CONFIG;

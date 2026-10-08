@@ -3,7 +3,7 @@ import path from 'path';
 import { getDhanCredentials } from '@/lib/dhanToken';
 import { PROJECT_ROOT, runPythonJson, dedupe } from '@/lib/pyExec';
 
-// Live NIFTY / BANKNIFTY / SENSEX futures LTPs + % change for the Focus Tool
+// Live NIFTY / BANKNIFTY / SENSEX / CRUDEOILM futures LTPs + % change for the Focus Tool
 // header strip.
 //
 // Nothing else in the dashboard served these: /api/scalper/top-indices is index
@@ -29,7 +29,7 @@ import { PROJECT_ROOT, runPythonJson, dedupe } from '@/lib/pyExec';
 // The three underlyings this header serves, in display order. Inlined rather
 // than imported: lib/focusTool.ts belonged to the unwired second Focus Tool
 // implementation and was deleted with it.
-const UNDERLYINGS = ['NIFTY', 'BANKNIFTY', 'SENSEX'] as const;
+const UNDERLYINGS = ['NIFTY', 'BANKNIFTY', 'SENSEX', 'CRUDEOILM'] as const;
 
 const FUTS_SCRIPT   = path.join(PROJECT_ROOT, 'scripts', 'tools', 'focus_tool_futs.py');
 const DHAN_OHLC_URL = 'https://api.dhan.co/v2/marketfeed/ohlc';

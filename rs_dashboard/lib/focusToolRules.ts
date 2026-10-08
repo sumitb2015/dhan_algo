@@ -706,6 +706,8 @@ export interface ReentryContext {
   nowHm: string;
   product: 'INTRADAY' | 'MARGIN';
   groupEnabled: boolean;
+  /** Intraday square-off backstop for the row's underlying; defaults to the NSE one. */
+  backstopHm?: string;
   /** Re-entries of this trigger already taken on this leg this cycle. */
   done: number;
 }
@@ -735,7 +737,7 @@ export function reentryConfig(
  */
 export function reentryWindowClosed(
   row: Pick<FocusRow, 'exitTime' | 'noReEntryAfter'> & Partial<Pick<FocusRow, 'stopMonitoringAfter'>>,
-  ctx: Pick<ReentryContext, 'nowHm' | 'product' | 'groupEnabled'>,
+  ctx: Pick<ReentryContext, 'nowHm' | 'product' | 'groupEnabled' | 'backstopHm'>,
   /**
    * True for a cost / momentum / range re-entry that is already WAITING. AlgoTest
    * "No Re-entry After" only looks at when the stop / target hit: one that hit
@@ -750,7 +752,8 @@ export function reentryWindowClosed(
     return `no re-entry after ${row.noReEntryAfter}`;
   }
   if (row.exitTime && ctx.nowHm >= row.exitTime) return `past its own exit time ${row.exitTime}`;
-  if (ctx.product === 'INTRADAY' && ctx.nowHm >= INTRADAY_BACKSTOP_HM) return 'past 15:17 intraday cutoff';
+  const backstop = ctx.backstopHm ?? INTRADAY_BACKSTOP_HM;
+  if (ctx.product === 'INTRADAY' && ctx.nowHm >= backstop) return `past ${backstop} intraday cutoff`;
   return null;
 }
 
@@ -1126,6 +1129,8 @@ export interface EntryContext {
   /** The index group's Start control. */
   groupEnabled: boolean;
   product: 'INTRADAY' | 'MARGIN';
+  /** Intraday square-off backstop for the row's underlying; defaults to the NSE one. */
+  backstopHm?: string;
   /** Resolved DTE of the expiry this row would trade; null when unknown. */
   dte: number | null;
   /** At least one leg's strike has resolved. */
@@ -1167,8 +1172,9 @@ export function evaluateEntry(
   if (row.exitTime && ctx.nowHm >= row.exitTime) {
     return { enter: false, reason: `past its own exit time ${row.exitTime}` };
   }
-  if (ctx.product === 'INTRADAY' && ctx.nowHm >= INTRADAY_BACKSTOP_HM) {
-    return { enter: false, reason: 'past 15:17 intraday cutoff' };
+  const backstop = ctx.backstopHm ?? INTRADAY_BACKSTOP_HM;
+  if (ctx.product === 'INTRADAY' && ctx.nowHm >= backstop) {
+    return { enter: false, reason: `past ${backstop} intraday cutoff` };
   }
   return { enter: true, reason: `entry time ${row.entryTime} reached` };
 }
@@ -1511,7 +1517,7 @@ export function evaluateOverallReentry(
   row: Pick<FocusRow, 'overallReSl' | 'overallReTgt' | 'overallReSlCount' | 'overallReTgtCount'
     | 'overallTarget' | 'slRupees' | 'slMultiplier' | 'exitTime' | 'noReEntryAfter'>,
   kind: 'sl' | 'target',
-  ctx: Pick<ReentryContext, 'nowHm' | 'product' | 'groupEnabled'>,
+  ctx: Pick<ReentryContext, 'nowHm' | 'product' | 'groupEnabled' | 'backstopHm'>,
 ): EntryDecision & { mode: 'asap' | 'momentum' } {
   const cfg = kind === 'sl' ? row.overallReSl : row.overallReTgt;
   const mode = cfg?.mode ?? 'asap';

@@ -39,6 +39,8 @@ CONTRACTS = {
     'NIFTY':     {'exchange': 'NSE', 'segment': 'NSE_FNO'},
     'BANKNIFTY': {'exchange': 'NSE', 'segment': 'NSE_FNO'},
     'SENSEX':    {'exchange': 'BSE', 'segment': 'BSE_FNO'},
+    # MCX mini crude: commodity futures are FUTCOM, not FUTIDX.
+    'CRUDEOILM': {'exchange': 'MCX', 'segment': 'MCX_COMM', 'instrument': 'FUTCOM'},
 }
 
 
@@ -55,12 +57,12 @@ def main():
     for underlying, meta in CONTRACTS.items():
         try:
             fut = _find_nearest_future(helper, underlying,
-                                       exchange=meta['exchange'], instrument='FUTIDX')
+                                       exchange=meta['exchange'], instrument=meta.get('instrument', 'FUTIDX'))
         except Exception as e:
             errors[underlying] = str(e)
             continue
         if fut is None:
-            errors[underlying] = 'no non-lapsed FUTIDX contract found'
+            errors[underlying] = f"no non-lapsed {meta.get('instrument', 'FUTIDX')} contract found"
             continue
         data[underlying] = {
             'security_id': int(fut['SECURITY_ID']),
