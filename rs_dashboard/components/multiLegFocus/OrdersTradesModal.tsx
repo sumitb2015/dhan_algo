@@ -11,6 +11,7 @@ export interface OrdersTradesModalProps {
   broker: Broker;
   ordersData: Record<string, unknown>[];
   tradesData: Record<string, unknown>[];
+  positionsData: Record<string, unknown>[];
   isLoading: boolean;
   error: string | null;
   onRefresh: () => void;
@@ -40,11 +41,12 @@ export default function OrdersTradesModal({
   broker,
   ordersData,
   tradesData,
+  positionsData,
   isLoading,
   error,
   onRefresh,
 }: OrdersTradesModalProps) {
-  const [ordersTab, setOrdersTab] = useState<'orders' | 'trades'>('orders');
+  const [ordersTab, setOrdersTab] = useState<'orders' | 'trades' | 'positions'>('orders');
   const [tableSort, setTableSort] = useState<SortState>({ key: 'createTime', dir: 'desc' });
   const [filterText, setFilterText] = useState('');
 
@@ -170,7 +172,7 @@ export default function OrdersTradesModal({
 
   // Filtered orders or trades data by search query
   const filteredData = useMemo(() => {
-    const raw = ordersTab === 'orders' ? ordersData : tradesData;
+    const raw = ordersTab === 'orders' ? ordersData : ordersTab === 'trades' ? tradesData : positionsData;
     if (!filterText.trim()) return raw;
     const q = filterText.trim().toLowerCase();
     return raw.filter(item => {
@@ -179,7 +181,7 @@ export default function OrdersTradesModal({
       const side = String(item.transactionType ?? item.side ?? '').toLowerCase();
       return sym.includes(q) || st.includes(q) || side.includes(q);
     });
-  }, [ordersTab, ordersData, tradesData, filterText]);
+  }, [ordersTab, ordersData, tradesData, positionsData, filterText]);
 
   const sortedOrders = useMemo(() => {
     if (ordersTab !== 'orders') return [];
@@ -202,7 +204,7 @@ export default function OrdersTradesModal({
             <div className="flex items-center gap-2">
               <ClipboardList className="w-5 h-5 text-sky-400" />
               <h2 className="text-sm font-bold uppercase tracking-wider text-zinc-100">
-                Broker Orders &amp; Trades
+                Broker Orders, Trades &amp; Positions
               </h2>
             </div>
             <span className="px-2 py-0.5 rounded text-[11px] font-bold bg-zinc-800 border border-zinc-700 text-zinc-300 uppercase">
@@ -294,6 +296,20 @@ export default function OrdersTradesModal({
             >
               Tradebook ({tradesData.length})
             </button>
+            <button
+              type="button"
+              onClick={() => {
+                setOrdersTab('positions');
+                setTableSort({ key: 'tradingSymbol', dir: 'asc' });
+              }}
+              className={`px-3 py-1.5 text-xs font-bold rounded-lg transition-all cursor-pointer ${
+                ordersTab === 'positions'
+                  ? 'bg-zinc-800 text-white shadow-sm border border-zinc-700'
+                  : 'text-zinc-400 hover:text-zinc-200'
+              }`}
+            >
+              Positions ({positionsData.length})
+            </button>
           </div>
 
           <div className="flex items-center gap-2">
@@ -322,16 +338,16 @@ export default function OrdersTradesModal({
             <div className="p-4 text-xs text-rose-400 font-mono bg-rose-500/10 border border-rose-500/20 rounded-lg m-4">
               Error loading {ordersTab}: {error}
             </div>
-          ) : isLoading && (ordersTab === 'orders' ? ordersData.length === 0 : tradesData.length === 0) ? (
+          ) : isLoading && (ordersTab === 'orders' ? ordersData.length === 0 : ordersTab === 'trades' ? tradesData.length === 0 : positionsData.length === 0) ? (
             <div className="flex flex-col items-center justify-center py-24 gap-3">
               <RefreshCw className="w-6 h-6 text-zinc-600 animate-spin" />
               <span className="text-xs text-zinc-500">
-                Loading {ordersTab === 'orders' ? 'order book' : 'tradebook'} from {BROKER_LABELS[broker]}…
+                Loading {ordersTab === 'orders' ? 'order book' : ordersTab === 'trades' ? 'tradebook' : 'positions'} from {BROKER_LABELS[broker]}…
               </span>
             </div>
-          ) : ordersTab === 'trades' ? (
+          ) : ordersTab !== 'orders' ? (
             <TabTable
-              tab="trades"
+              tab={ordersTab}
               data={filteredData}
               sort={tableSort}
               onSort={handleTableSort}

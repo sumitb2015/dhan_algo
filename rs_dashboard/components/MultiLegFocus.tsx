@@ -219,6 +219,7 @@ export default function MultiLegFocus({
   const [showChainModal, setShowChainModal] = useState(false);
   const [ordersData, setOrdersData] = useState<Record<string, unknown>[]>([]);
   const [tradesData, setTradesData] = useState<Record<string, unknown>[]>([]);
+  const [positionsData, setPositionsData] = useState<Record<string, unknown>[]>([]);
   const [ordersLoading, setOrdersLoading] = useState(false);
   const [ordersError, setOrdersError] = useState<string | null>(null);
 
@@ -238,6 +239,8 @@ export default function MultiLegFocus({
       if (j.success) {
         if (Array.isArray(j.orders)) setOrdersData(j.orders);
         if (Array.isArray(j.trades)) setTradesData(j.trades);
+        // A positionsError poll carries an EMPTY list ("unknown", not "flat") — keep the last good rows.
+        if (Array.isArray(j.positions) && !j.positionsError) setPositionsData(j.positions);
       } else if (j.error || j.positionsError) {
         setOrdersError(j.error || j.positionsError || 'Failed to fetch orders');
       }
@@ -3534,7 +3537,7 @@ export default function MultiLegFocus({
               </button>
             )}
 
-            {/* Orders & Tradebook Button */}
+            {/* Orders, Tradebook & Positions Button */}
             <button
               type="button"
               onClick={() => {
@@ -3542,10 +3545,10 @@ export default function MultiLegFocus({
                 fetchOrdersAndTrades();
               }}
               className={`h-8 px-3 inline-flex items-center gap-1.5 text-xs font-bold rounded-lg border border-zinc-700 bg-zinc-900 hover:bg-zinc-800 text-zinc-200 hover:text-white transition-colors cursor-pointer ${FOCUS_RING}`}
-              title="View today's broker orders and executed trades"
+              title="View today's broker order book, tradebook and open positions"
             >
               <ClipboardList className="w-3.5 h-3.5 text-sky-400" />
-              <span>Orders</span>
+              <span>Book</span>
               {ordersData.length > 0 && (
                 <span className="px-1.5 py-0.5 rounded-full text-[10px] font-mono font-bold bg-sky-500/20 text-sky-300 border border-sky-500/30">
                   {ordersData.length}
@@ -3843,6 +3846,7 @@ export default function MultiLegFocus({
         broker={broker}
         ordersData={ordersData}
         tradesData={tradesData}
+        positionsData={positionsData}
         isLoading={ordersLoading}
         error={ordersError}
         onRefresh={fetchOrdersAndTrades}
