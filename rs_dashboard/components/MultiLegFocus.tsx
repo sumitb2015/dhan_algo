@@ -3,7 +3,7 @@
 import { createPortal } from 'react-dom';
 import { scaleBrokerPnl } from '@/lib/positionPnl';
 import React, { useState, useEffect, useMemo, useRef, useCallback } from 'react';
-import { Plus, RefreshCw, Layers, ClipboardList, ListTree, ChevronDown, ChevronRight, Download, History, CircleHelp, BarChart3 } from 'lucide-react';
+import { Plus, RefreshCw, Layers, ClipboardList, ListTree, ChevronDown, ChevronRight, Download, History, CircleHelp } from 'lucide-react';
 import Link from 'next/link';
 import NavBar from './NavBar';
 import { type Toast, FOCUS_RING } from './Scalper';
@@ -3580,21 +3580,11 @@ export default function MultiLegFocus({
               <span>Option Chain</span>
             </button>
 
-            {/* Strategy Position Visualizer Link Button */}
-            <Link
-              href={`/multi-leg-focus/visualization?underlying=${encodeURIComponent(activeUnderlying)}`}
-              className={`h-8 px-3 inline-flex items-center gap-1.5 text-xs font-bold rounded-lg border border-indigo-700/70 bg-indigo-950/40 hover:bg-indigo-900/60 text-indigo-200 hover:text-white transition-colors cursor-pointer ${FOCUS_RING}`}
-              title="Open Strategy Position Visualizer: horizontal strike line, CE/PE bars, live spot"
-            >
-              <BarChart3 className="w-3.5 h-3.5 text-indigo-400" />
-              <span>Visualizer</span>
-            </Link>
-
             {/* + Add Strategy Button */}
             <button
               type="button"
               onClick={() => addStrategy()}
-              className={`h-8 px-3 inline-flex items-center gap-1.5 text-xs font-bold rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white transition-colors ${FOCUS_RING}`}
+              className={`h-8 px-3 inline-flex items-center gap-1.5 text-xs font-bold rounded-lg bg-sky-600 hover:bg-sky-500 text-oncolor transition-colors ${FOCUS_RING}`}
             >
               <Plus className="w-3.5 h-3.5" />
               New Strategy Row
