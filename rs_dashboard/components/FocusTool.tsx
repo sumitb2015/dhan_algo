@@ -7092,6 +7092,8 @@ export default function FocusTool() {
       nowHm: istHm(),
       product: group?.product ?? 'INTRADAY',
       groupEnabled: !!group?.enabled,
+      // Without this the rules default to NSE's 15:17, which blocks every MCX (CRUDEOILM, to 23:15) re-entry after 15:17.
+      backstopHm: UNDERLYING_META[u].backstopHm,
       done,
     });
     if (!decision.enter) {
