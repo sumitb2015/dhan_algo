@@ -455,7 +455,7 @@ test('slRollStrike: OTM is up for CE, down for PE', () => {
 });
 
 test('evaluateReentry gates (SL, legacy OTM roll fields)', () => {
-  const ctx = { nowHm: '10:00', product: 'INTRADAY' as const, groupEnabled: true, done: 0 };
+  const ctx = { nowHm: '10:00', product: 'INTRADAY' as const, groupEnabled: true, backstopHm: '15:17', done: 0 };
   assert.equal(evaluateReentry(row({ slRollStrikes: 0 }), 'sl', ctx).enter, false);
   // A row saved before re-entry modes existed: slRollStrikes > 0 means OTM.
   const legacy = evaluateReentry(row({ slRollStrikes: 1 }), 'sl', ctx);
@@ -475,7 +475,7 @@ test('evaluateReentry gates (SL, legacy OTM roll fields)', () => {
 });
 
 test('evaluateReentry: target trigger and No re-entry after', () => {
-  const ctx = { nowHm: '11:00', product: 'INTRADAY' as const, groupEnabled: true, done: 0 };
+  const ctx = { nowHm: '11:00', product: 'INTRADAY' as const, groupEnabled: true, backstopHm: '15:17', done: 0 };
   assert.equal(evaluateReentry(row({}), 'tgt', ctx).enter, false);           // off by default
   assert.equal(evaluateReentry(row({ reTgtMode: 'asap' }), 'tgt', ctx).enter, true);
   // SL settings don't leak into target.
@@ -486,7 +486,7 @@ test('evaluateReentry: target trigger and No re-entry after', () => {
 });
 
 test('reentryWindowClosed', () => {
-  const ctx = { nowHm: '10:00', product: 'INTRADAY' as const, groupEnabled: true };
+  const ctx = { nowHm: '10:00', product: 'INTRADAY' as const, groupEnabled: true, backstopHm: '15:17' };
   assert.equal(reentryWindowClosed(row({}), ctx), null);
   assert.match(reentryWindowClosed(row({ noReEntryAfter: '09:30' }), ctx) ?? '', /no re-entry after/);
 });
@@ -797,7 +797,7 @@ test('overall exit kind and re-entry decision', () => {
   assert.equal(overallExitKind('Overall Lock ₹5000 hit'), 'sl');
   assert.equal(overallExitKind('CE SL ×1.2 hit (premium 1 vs entry 1)'), null);   // a leg's own stop
   assert.equal(overallExitKind('Exit time 15:15 reached'), null);
-  const ctx = { nowHm: '10:00', product: 'INTRADAY' as const, groupEnabled: true };
+  const ctx = { nowHm: '10:00', product: 'INTRADAY' as const, groupEnabled: true, backstopHm: '15:17' };
   const re = (o: object) => ({ slRupees: '5000', exitTime: '15:15', overallReSl: { enabled: true, mode: 'asap', max: 2 }, ...o }) as never;
   assert.equal(evaluateOverallReentry(re({}), 'sl', ctx).enter, true);
   assert.equal(evaluateOverallReentry(re({ overallReSl: { enabled: false, mode: 'asap', max: 2 } }), 'sl', ctx).enter, false);
@@ -823,7 +823,7 @@ test('re-range window after a stop / target (AlgoTest)', () => {
 
 test('No Re-entry After: judged when the stop / target hit, not when the re-entry fires (AlgoTest)', () => {
   const r = { exitTime: '15:10', noReEntryAfter: '13:00' } as never;
-  const ctx = { nowHm: '13:20', product: 'INTRADAY' as const, groupEnabled: true };
+  const ctx = { nowHm: '13:20', product: 'INTRADAY' as const, groupEnabled: true, backstopHm: '15:17' };
   // A stop at 13:20 (after the cutoff) takes no re-entry …
   assert.match(reentryWindowClosed(r, ctx) ?? '', /no re-entry after 13:00/);
   // … but a RE COST armed at 12:20 still fires when the price returns at 13:20.
@@ -837,7 +837,7 @@ test('Stop Monitoring After closes the re-entry window and is off when blank', (
   assert.equal(monitoringStopped({ stopMonitoringAfter: '14:00' }, '14:00'), true);
   assert.equal(monitoringStopped({ stopMonitoringAfter: '' }, '15:00'), false);
   assert.equal(monitoringStopped({ stopMonitoringAfter: '9:5' }, '15:00'), false);
-  const ctx = { nowHm: '14:30', product: 'MARGIN' as const, groupEnabled: true };
+  const ctx = { nowHm: '14:30', product: 'MARGIN' as const, groupEnabled: true, backstopHm: '15:17' };
   assert.match(reentryWindowClosed({ exitTime: '', noReEntryAfter: '', stopMonitoringAfter: '14:00' } as never, ctx, true) ?? '', /monitoring stopped/);
 });
 

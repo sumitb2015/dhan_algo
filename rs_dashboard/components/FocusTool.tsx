@@ -61,7 +61,7 @@ import { computeRowPnl, mtmForQty, shiftMayReopen, canMarkMtm, shiftCloseConfirm
 import { normalizeTradeRow, matchOutsideTrades, type NormalizedTrade } from '@/lib/multiLegFocus';
 import { stampItems, noteItems, adoptItems, canon, type RevBook } from '@/lib/revMerge';
 import { useTabLeader } from '@/hooks/useTabLeader';
-import { FOCUS_UNDERLYINGS, UNDERLYING_META, isMcxUnderlying, toInternalQty, orderQuantity } from '@/lib/focusToolUnderlyings';
+import { FOCUS_UNDERLYINGS, FEED_BRIDGE_UNDERLYINGS, FEED_SESSION_START_HM, FEED_SESSION_END_HM, UNDERLYING_META, isMcxUnderlying, toInternalQty, orderQuantity } from '@/lib/focusToolUnderlyings';
 import type { FocusConfigWrite } from '@/lib/focusToolRowsMerge';
 
 // â”€â”€ Constants â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
@@ -4516,7 +4516,7 @@ export default function FocusTool() {
     const check = () => {
       const hm = istHm();
       const at = Date.parse(rawWsQuotesRef.current?.updated_at ?? '');
-      const stale = hm >= '09:16' && hm < '15:30' && Number.isFinite(at) && Date.now() - at > WS_STALE_MS;
+      const stale = hm >= FEED_SESSION_START_HM && hm < FEED_SESSION_END_HM && Number.isFinite(at) && Date.now() - at > WS_STALE_MS;
       setWsStale(prev => (prev === stale ? prev : stale));
     };
     check();
@@ -4539,7 +4539,7 @@ export default function FocusTool() {
   // A watched index must have its expiry before the bridge starts, or it would start
   // without it and be restarted a moment later.
   // CRUDEOILM is not on the bridge, and with no index watched there is nothing to subscribe.
-  const bridgeUnderlyings = watched.filter(u => u === 'NIFTY' || u === 'BANKNIFTY' || u === 'SENSEX');
+  const bridgeUnderlyings = watched.filter(u => FEED_BRIDGE_UNDERLYINGS.includes(u));
   const bridgeReady = bridgeUnderlyings.length > 0
     && (!watched.includes('NIFTY') || !!niftyBridgeExpiry)
     && (!watched.includes('BANKNIFTY') || !!bankniftyBridgeExpiry)
@@ -7503,9 +7503,20 @@ export default function FocusTool() {
         if (latest && rest) {
           squaredOff = true;
           patchFill(row.id, () => ({ cePending: null, pePending: null }));
-          if (rest.length) {
-            addToast('error', `${row.underlying} Square Off Complete`, `${leg} ${kind === 'sl' ? 'SL' : 'target'} hit — closing ${rest.join(' + ')} too`);
-            const closed = await Promise.all(rest.map(l => placeLeg(latest, l, { reduce: true, all: true, awaitFill: true })));
+          // A sibling already closing through its own stop is left to that exit: a second close, sized off the
+          // 2s polled book that still shows the leg open, would flip it to the other side.
+          const toClose = rest.filter(l => !autoExitingLegRef.current.has(`${row.id}:${l}`));
+          if (toClose.length) {
+            addToast('error', `${row.underlying} Square Off Complete`, `${leg} ${kind === 'sl' ? 'SL' : 'target'} hit — closing ${toClose.join(' + ')} too`);
+            // Hold the sibling's per-leg lock for the close, so the scheduler's own stop on that leg cannot start a second one.
+            const sibKeys = toClose.map(l => `${row.id}:${l}`);
+            sibKeys.forEach(k => autoExitingLegRef.current.add(k));
+            let closed: boolean[];
+            try {
+              closed = await Promise.all(toClose.map(l => placeLeg(latest, l, { reduce: true, all: true, awaitFill: true })));
+            } finally {
+              sibKeys.forEach(k => autoExitingLegRef.current.delete(k));
+            }
             if (!closed.every(Boolean)) {
               addToast('error', 'Square Off incomplete', `${row.underlying}: a leg was rejected — still open, check the position book`);
               return;

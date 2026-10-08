@@ -32,7 +32,8 @@ test('every underlying has coherent time windows and a segment', () => {
 test('the 15:17 NSE backstop does not apply to an MCX row, its own backstop does', () => {
   const ctx = { nowHm: '16:00', product: 'INTRADAY' as const, groupEnabled: true };
   const row = { exitTime: '', noReEntryAfter: '' };
-  assert.match(reentryWindowClosed(row, ctx) ?? '', /15:17/);
+  // backstopHm is a required argument now (tsc); the cast keeps the runtime-fallback behaviour under test for untyped callers.
+  assert.match(reentryWindowClosed(row, ctx as never) ?? '', /15:17/);
   assert.equal(reentryWindowClosed(row, { ...ctx, backstopHm: UNDERLYING_META.CRUDEOILM.backstopHm }), null);
   assert.match(reentryWindowClosed(row, { ...ctx, nowHm: '23:20', backstopHm: '23:15' }) ?? '', /23:15/);
 });

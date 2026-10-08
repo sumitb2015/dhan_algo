@@ -64,3 +64,12 @@ export function orderQuantity(u: FocusUnderlying, internalQty: number): number {
   if (per === 1) return internalQty;
   return internalQty > 0 ? Math.floor(internalQty / per) : 0;
 }
+
+/**
+ * Underlyings the standalone quote bridge (scripts/tools/focus_tool_ws.py) streams. CRUDEOILM is not on it.
+ * The page's stale-feed check only watches the NSE/BSE cash session below, so every entry here must trade on it
+ * (a test asserts that): adding an MCX underlying to the bridge needs its own session window first.
+ */
+export const FEED_BRIDGE_UNDERLYINGS: readonly FocusUnderlying[] = ['NIFTY', 'BANKNIFTY', 'SENSEX'];
+export const FEED_SESSION_START_HM = '09:16';
+export const FEED_SESSION_END_HM = '15:30';
