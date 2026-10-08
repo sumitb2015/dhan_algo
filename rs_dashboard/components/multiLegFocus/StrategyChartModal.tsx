@@ -179,6 +179,7 @@ export default function StrategyChartModal({ isOpen, onClose, title, underlying,
                 {lastOkAt ? ` (last update ${new Date(lastOkAt).toLocaleTimeString('en-IN', { timeZone: 'Asia/Kolkata' })} IST)` : ''}: {error}
               </div>
             )}
+            <div className="h-[calc(100vh-18rem)] min-h-[320px]">
             <StrategyChart
               key={`${underlying}-${expiry}-${chartLegs.map((l) => `${l.action}${l.option_type}${l.strike}`).join(',')}-${interval_}`}
               chart={chart}
@@ -186,6 +187,7 @@ export default function StrategyChartModal({ isOpen, onClose, title, underlying,
               showSpot={showSpot}
               underlying={underlying}
             />
+            </div>
             {chart.coverage_note && <p className="mt-2 text-[10px] text-zinc-500">{chart.coverage_note}</p>}
           </div>
         )}
