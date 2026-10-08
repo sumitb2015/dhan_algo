@@ -39,7 +39,7 @@ interface CustomTab {
 
 const STORAGE_KEY = 'daily_market_custom_tabs_v1';
 
-type TabKey = 'nifty50' | 'banknifty' | 'nifty500' | string;
+type TabKey = 'nifty50' | 'banknifty' | 'nifty500' | 'next50' | 'midcap150' | 'smallcap250' | string;
 
 type SortField =
   | 'symbol'
@@ -133,7 +133,7 @@ export default function DailyMarketTerminal() {
   // ── F1/F2/F3 function keys switch the system tabs ──────────────────────────
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      const tab = e.key === 'F1' ? 'nifty50' : e.key === 'F2' ? 'banknifty' : e.key === 'F3' ? 'nifty500' : null;
+      const tab = e.key === 'F1' ? 'nifty50' : e.key === 'F2' ? 'banknifty' : e.key === 'F3' ? 'nifty500' : e.key === 'F4' ? 'next50' : e.key === 'F5' ? 'midcap150' : e.key === 'F6' ? 'smallcap250' : null;
       if (!tab || e.ctrlKey || e.altKey || e.metaKey || e.shiftKey) return;
       e.preventDefault();
       setActiveTab(tab);
@@ -262,6 +262,15 @@ export default function DailyMarketTerminal() {
       return indexConstituents.nifty500.length > 0
         ? indexConstituents.nifty500
         : Object.keys(quotes);
+    }
+    if (activeTab === 'next50') {
+      return indexConstituents.next50;
+    }
+    if (activeTab === 'midcap150') {
+      return indexConstituents.midcap150;
+    }
+    if (activeTab === 'smallcap250') {
+      return indexConstituents.smallcap250;
     }
     // Custom Tab
     const custom = customTabs.find((t) => t.id === activeTab);
@@ -473,6 +482,36 @@ export default function DailyMarketTerminal() {
               }`}
             >
               <span className="text-[9px] font-bold text-amber-400/80">[F3]</span> NIFTY 500
+            </button>
+            <button
+              onClick={() => { setActiveTab('next50'); setCurrentPage(1); }}
+              className={`flex items-center gap-1 px-2.5 py-1 rounded transition-colors ${
+                activeTab === 'next50'
+                  ? 'bg-amber-500/20 text-amber-400 border border-amber-500/40 font-bold'
+                  : 'bg-zinc-900 text-zinc-400 border border-zinc-800 hover:text-zinc-200 hover:bg-zinc-800/60'
+              }`}
+            >
+              <span className="text-[9px] font-bold text-amber-400/80">[F4]</span> NEXT 50
+            </button>
+            <button
+              onClick={() => { setActiveTab('midcap150'); setCurrentPage(1); }}
+              className={`flex items-center gap-1 px-2.5 py-1 rounded transition-colors ${
+                activeTab === 'midcap150'
+                  ? 'bg-amber-500/20 text-amber-400 border border-amber-500/40 font-bold'
+                  : 'bg-zinc-900 text-zinc-400 border border-zinc-800 hover:text-zinc-200 hover:bg-zinc-800/60'
+              }`}
+            >
+              <span className="text-[9px] font-bold text-amber-400/80">[F5]</span> MIDCAP 150
+            </button>
+            <button
+              onClick={() => { setActiveTab('smallcap250'); setCurrentPage(1); }}
+              className={`flex items-center gap-1 px-2.5 py-1 rounded transition-colors ${
+                activeTab === 'smallcap250'
+                  ? 'bg-amber-500/20 text-amber-400 border border-amber-500/40 font-bold'
+                  : 'bg-zinc-900 text-zinc-400 border border-zinc-800 hover:text-zinc-200 hover:bg-zinc-800/60'
+              }`}
+            >
+              <span className="text-[9px] font-bold text-amber-400/80">[F6]</span> SMALLCAP 250
             </button>
             <button
               onClick={() => setIsCreatingTab(true)}
@@ -710,6 +749,60 @@ export default function DailyMarketTerminal() {
               <span>NIFTY 500</span>
               <span className="text-[10px] opacity-70">
                 ({indexConstituents.nifty500.length || 500})
+              </span>
+            </button>
+
+            <button
+              onClick={() => {
+                setActiveTab('next50');
+                setCurrentPage(1);
+              }}
+              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg transition-colors ${
+                activeTab === 'next50'
+                  ? 'bg-amber-500/20 text-amber-400 border border-amber-500/40 font-bold'
+                  : 'bg-zinc-900/90 text-zinc-400 border border-zinc-800 hover:text-zinc-200 hover:bg-zinc-800'
+              }`}
+            >
+              <Layers className="h-3.5 w-3.5" />
+              <span>NEXT 50</span>
+              <span className="text-[10px] opacity-70">
+                ({indexConstituents.next50.length || 50})
+              </span>
+            </button>
+
+            <button
+              onClick={() => {
+                setActiveTab('midcap150');
+                setCurrentPage(1);
+              }}
+              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg transition-colors ${
+                activeTab === 'midcap150'
+                  ? 'bg-amber-500/20 text-amber-400 border border-amber-500/40 font-bold'
+                  : 'bg-zinc-900/90 text-zinc-400 border border-zinc-800 hover:text-zinc-200 hover:bg-zinc-800'
+              }`}
+            >
+              <Layers className="h-3.5 w-3.5" />
+              <span>MIDCAP 150</span>
+              <span className="text-[10px] opacity-70">
+                ({indexConstituents.midcap150.length || 150})
+              </span>
+            </button>
+
+            <button
+              onClick={() => {
+                setActiveTab('smallcap250');
+                setCurrentPage(1);
+              }}
+              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg transition-colors ${
+                activeTab === 'smallcap250'
+                  ? 'bg-amber-500/20 text-amber-400 border border-amber-500/40 font-bold'
+                  : 'bg-zinc-900/90 text-zinc-400 border border-zinc-800 hover:text-zinc-200 hover:bg-zinc-800'
+              }`}
+            >
+              <Layers className="h-3.5 w-3.5" />
+              <span>SMALLCAP 250</span>
+              <span className="text-[10px] opacity-70">
+                ({indexConstituents.smallcap250.length || 250})
               </span>
             </button>
 

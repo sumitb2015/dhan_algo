@@ -32,6 +32,9 @@ export interface DailyMarketWSState {
     nifty50: string[];
     banknifty: string[];
     nifty500: string[];
+    next50: string[];
+    midcap150: string[];
+    smallcap250: string[];
   };
   isLoading: boolean;
   startBridge: () => Promise<void>;
@@ -56,10 +59,16 @@ export function useDailyMarketWS(): DailyMarketWSState {
     nifty50: string[];
     banknifty: string[];
     nifty500: string[];
+    next50: string[];
+    midcap150: string[];
+    smallcap250: string[];
   }>({
     nifty50: [],
     banknifty: [],
     nifty500: [],
+    next50: [],
+    midcap150: [],
+    smallcap250: [],
   });
 
   const quotesRef = useRef<Record<string, DailyMarketQuote>>({});
@@ -122,7 +131,7 @@ export function useDailyMarketWS(): DailyMarketWSState {
       if (!json.success) return;
 
       if (json.indexConstituents) {
-        setIndexConstituents(json.indexConstituents);
+        setIndexConstituents({ next50: [], midcap150: [], smallcap250: [], ...json.indexConstituents });
       }
 
       const port = json.ws_port || 8975;

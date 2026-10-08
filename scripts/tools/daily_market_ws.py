@@ -48,6 +48,7 @@ STATUS_FILE   = os.path.join(DEBUG_DIR, 'daily_market_status.json')
 BASELINE_FILE = os.path.join(DEBUG_DIR, 'daily_market_baseline.json')
 STOP_TRIGGER  = os.path.join(DEBUG_DIR, 'daily_market_stop.trigger')
 NIFTY500_CSV  = os.path.join(ROOT, 'ind_nifty500list.csv')
+SMALLCAP250_CSV = os.path.join(ROOT, 'index_constituents', 'niftysmallcap250.csv')
 DATA_DIR      = os.path.join(ROOT, 'Daily_Historical_Data_Fresh')
 
 NSE_EQ     = 1   # NSE cash / equity segment
@@ -160,13 +161,24 @@ class QuotePushServer:
 
 
 def load_nifty500_meta() -> List[Dict[str, str]]:
-    """Loads symbol, company name, industry from ind_nifty500list.csv."""
+    """Nifty 500 plus any Smallcap 250 names the (older) Nifty 500 list lacks."""
+    items = _load_constituent_meta(NIFTY500_CSV)
+    seen = {i['symbol'] for i in items}
+    for it in _load_constituent_meta(SMALLCAP250_CSV):
+        if it['symbol'] not in seen:
+            seen.add(it['symbol'])
+            items.append(it)
+    return items
+
+
+def _load_constituent_meta(path: str) -> List[Dict[str, str]]:
+    """Loads symbol, company name, industry from an NSE constituent CSV."""
     items = []
-    if not os.path.exists(NIFTY500_CSV):
-        print(f'[daily_market_ws] ERROR: {NIFTY500_CSV} not found', flush=True)
+    if not os.path.exists(path):
+        print(f'[daily_market_ws] ERROR: {path} not found', flush=True)
         return items
 
-    with open(NIFTY500_CSV, 'r', encoding='utf-8', errors='ignore') as f:
+    with open(path, 'r', encoding='utf-8', errors='ignore') as f:
         lines = [l.strip() for l in f if l.strip()]
 
     if len(lines) < 2:

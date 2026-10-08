@@ -31,8 +31,8 @@ const PERIOD_DAYS: Record<Period, number | null> = {
   ALL: null,
 };
 
-export default function EquityCandlestickChart() {
-  const [symbol, setSymbol] = useState<string>('RELIANCE');
+export default function EquityCandlestickChart({ initialSymbol }: { initialSymbol?: string }) {
+  const [symbol, setSymbol] = useState<string>(initialSymbol || 'RELIANCE');
   const [period, setPeriod] = useState<Period>('1Y');
   // Bumped whenever the user explicitly picks a period, so the chart snaps
   // back to that window; left untouched while the user is freely panning/
