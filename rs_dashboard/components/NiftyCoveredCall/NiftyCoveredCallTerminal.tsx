@@ -31,6 +31,7 @@ import {
   type CallMark,
   type OpenCall,
   type PendingOrder,
+  netDeltaAtSpot,
 } from '@/lib/coveredCallEngine';
 import { futureQuote, type FutureQuote } from '@/lib/optionsPricing';
 import type { CoveredCallBookResponse } from '@/app/api/nifty-covered-call/book/route';
@@ -375,7 +376,13 @@ export default function NiftyCoveredCallTerminal() {
   const writeDeltaPerUnit = writeGreeks ? Math.abs(writeGreeks.delta) : (suggestion?.strikeDelta ?? targetDelta);
   const currentNetDelta = snapshot?.net.delta ?? beesUnits;
   const netDeltaAfter = currentNetDelta - (writeDeltaPerUnit * writeUnits);
-  const atmDeltaAfter = currentNetDelta - (0.50 * writeUnits);
+  // Whole book (BEES + every open short call + this new call) repriced with NIFTY at the strike.
+  const atmDeltaAfter = writeStrike && optionExpiry && spot > 0
+    ? netDeltaAtSpot({
+        beesUnits, calls: reconciled.legs, marks, spot, targetSpot: writeStrike, future,
+        extra: { strike: writeStrike, expiry: optionExpiry, units: writeUnits, ltp: writeLtp, chainLeg: writeLeg },
+      })
+    : currentNetDelta - (0.50 * writeUnits);
 
   // Seed limit price from live LTP whenever contract changes
   const writeKey = `${optionExpiry}:${writeStrike}`;
@@ -1085,7 +1092,7 @@ export default function NiftyCoveredCallTerminal() {
                 <div className="flex justify-between items-center">
                   <MetricTooltip
                     label="Net Δ if ATM:"
-                    text="Convexity & Gamma Risk: If NIFTY rallies to this strike, call delta rises to ~0.50. Net delta flips negative unless actively rolled or hedged as the spot approaches."
+                    text="Whole-book scenario: if NIFTY rallies to this strike, every short call (existing ones and this new one) is repriced at its own strike, expiry and current IV, and NIFTYBEES stays 1:1 with the index. Same IV and date, only spot moves. Negative = net short the market."
                   />
                   <span className={cn('font-mono', atmDeltaAfter < -20 ? 'text-amber-400/90' : 'text-zinc-300')}>
                     {atmDeltaAfter != null ? `${atmDeltaAfter >= 0 ? '+' : ''}${atmDeltaAfter.toFixed(1)} Δ` : '—'}

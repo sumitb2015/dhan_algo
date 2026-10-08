@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert';
 import {
   reconstructCallLedger, reconcileCallsDown, beesNiftyUnits, computeBook, suggestCoveredCall,
-  fillIncrement, reservedBuyUnits, chainLegGreeks,
+  fillIncrement, reservedBuyUnits, chainLegGreeks, netDeltaAtSpot,
   type CallTrade, type PendingOrder,
 } from './coveredCallEngine.ts';
 import { greeksForLeg, priceOption, calculateTimeToExpiryYears, RISK_FREE_RATE } from './optionsPricing.ts';
@@ -170,4 +170,15 @@ test('callsPerformance withholds the annualised figure before 7 days', () => {
   assert.equal(p.pctOfCost, 1);
   assert.equal(Math.round(p.annualisedPct! * 10) / 10, 36.5);
   assert.equal(p.withCalls, 1500);
+});
+
+test('netDeltaAtSpot: at today\'s spot it equals the book delta; at the strike the call delta is near 0.5, not the flat 0.15', () => {
+  const calls = reconstructCallLedger([open('a', 1, 65, 100)]).open;
+  const marks = { a: { ltp: 80, dte: 22 } };
+  const base = { beesUnits: 100, calls, marks, spot: 22850, now: NOW };
+  const book = computeBook({ beesQty: 0, beesAvg: 0, beesLtp: 0, spot: 22850, callsRealized: 0, calls, now: NOW, marks });
+  assert.ok(Math.abs(netDeltaAtSpot({ ...base, targetSpot: 22850 }) - (100 + book.callDelta)) < 1e-9);
+  const atStrike = netDeltaAtSpot({ ...base, targetSpot: 23500 });
+  const callDeltaAtStrike = (100 - atStrike) / 65;
+  assert.ok(callDeltaAtStrike > 0.4 && callDeltaAtStrike < 0.6);
 });

@@ -336,6 +336,45 @@ export function computeBook(params: {
   };
 }
 
+/**
+ * Net delta of the whole book (NIFTYBEES + every open short call, plus an optional call about to be written) if NIFTY were at
+ * `targetSpot` instead of now. Each call keeps the IV solved from its current premium and is repriced at the shifted forward, so
+ * it uses that leg's own strike/expiry delta rather than a flat 0.50. NIFTYBEES tracks the index 1:1, so its Nifty-unit delta is
+ * unchanged. A first-order scenario: same IV and same date, only spot moves.
+ */
+export function netDeltaAtSpot(p: {
+  beesUnits: number;
+  calls: OpenCall[];
+  marks: Record<string, CallMark>;
+  spot: number;
+  targetSpot: number;
+  future?: FutureQuote | null;
+  extra?: { strike: number; expiry: string; units: number; ltp: number | null; chainLeg?: ChainLegData } | null;
+  now?: number;
+}): number {
+  const { beesUnits, calls, marks, spot, targetSpot, future, extra, now } = p;
+  const shifted = future && future.price > 0 && spot > 0 ? { price: future.price * (targetSpot / spot), expiry: future.expiry } : null;
+  const legDelta = (strike: number, expiry: string, ltp: number | null | undefined, chainLeg: ChainLegData | undefined, dte: number): number => {
+    const now0 = chainLegGreeks('CE', strike, expiry, chainLeg, ltp, { spot, future }, now);
+    if (now0) {
+      const g = greeksForLeg({ type: 'CE', strike, expiry, chainIv: now0.iv }, { spot: targetSpot, future: shifted }, { now });
+      if (g) return g.delta;
+    }
+    const iv = chainLeg?.implied_volatility && chainLeg.implied_volatility > 0 ? chainLeg.implied_volatility : 12;
+    return estimatePopAndDelta(targetSpot, strike, Math.max(dte, 0.25), iv, true).delta;
+  };
+  let net = beesUnits;
+  for (const c of calls) {
+    if (c.units <= 0) continue;
+    const m = marks[c.id];
+    net -= legDelta(c.strike, c.expiry, m?.ltp, m?.chainLeg, m?.dte ?? 1) * c.units;
+  }
+  if (extra && extra.units > 0) {
+    net -= legDelta(extra.strike, extra.expiry, extra.ltp, extra.chainLeg, daysToExpiry(extra.expiry, now)) * extra.units;
+  }
+  return net;
+}
+
 // ── Strike suggestion ──────────────────────────────────────────────────────
 
 export interface CoveredCallSuggestion {
