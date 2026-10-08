@@ -451,7 +451,12 @@ export default function NiftyCoveredCallTerminal() {
   const handleRoll = (row: OpenCallRow) => withBusy(async () => {
     const leg = legById(row.id);
     if (!leg || !writeStrike || !optionExpiry) return;
-    if (!confirm(`REAL ORDERS — ROLL ${leg.units} units:\n1) BUY BACK ${leg.strike} CE ${leg.expiry} at MARKET\n2) SELL ${writeStrike} CE ${optionExpiry} at MARKET\n\nStep 2 only runs if step 1 fully fills.`)) return;
+    const buyPx = row.ltp, sellPx = writeLtp;
+    const net = buyPx != null && sellPx != null ? (sellPx - buyPx) * leg.units : null;
+    const netMsg = net != null
+      ? `\n\nApprox. net ${net >= 0 ? 'CREDIT' : 'DEBIT'} ₹${Math.abs(Math.round(net)).toLocaleString('en-IN')} (buy back ~₹${buyPx!.toFixed(2)}, sell ~₹${sellPx!.toFixed(2)})`
+      : '';
+    if (!confirm(`REAL ORDERS — ROLL ${leg.units} units:\n1) BUY BACK ${leg.strike} CE ${leg.expiry} at MARKET\n2) SELL ${writeStrike} CE ${optionExpiry} at MARKET (${manualStrike ? 'strike typed in Write panel' : 'strike suggested by Write panel'})${netMsg}\n\nStep 2 only runs if step 1 fully fills.`)) return;
     const closed = await buyBack(leg, leg.units, `Roll → ${writeStrike} ${optionExpiry}`);
     if (closed < leg.units) throw new Error(`Roll stopped: buy-back filled ${closed}/${leg.units}. No new call was written.`);
     await sellCall(writeStrike, optionExpiry, closed, 'MARKET', undefined, `Roll from ${leg.strike} ${leg.expiry}`);
@@ -502,28 +507,32 @@ export default function NiftyCoveredCallTerminal() {
       success: boolean; error?: string; candidates?: { orderId: string; units: number; price: number; at: number }[];
     };
     if (!cj.success) throw new Error(cj.error || 'Trade book unavailable');
-    const cands = cj.candidates ?? [];
-    const list = cands.map((o, i) =>
-      `${i + 1}) order ${o.orderId} · SELL ${o.units}u @ ₹${o.price.toFixed(2)} · ${new Date(o.at).toLocaleTimeString('en-IN', { hour12: false })}`).join('\n');
+    const cands = [...(cj.candidates ?? [])].sort((x, y) => x.at - y.at);
+    // Sells found in today's trade book are adopted directly at their own fill
+    // price — no prompt. Each call is capped server-side at the unowned units,
+    // so stop at the first 409 once the short is fully claimed.
+    if (cands.length > 0) {
+      let adopted = 0;
+      for (const o of cands) {
+        const r = await ledgerAction({ action: 'adopt', securityId: c.securityId, orderId: o.orderId });
+        if (r.success) { adopted++; continue; }
+        if (adopted > 0) break;
+        throw new Error(r.error || 'Adopt failed');
+      }
+      return;
+    }
+    // Nothing in today's trade book (sold on an earlier day): price must be typed.
     const typed = prompt(
       `Adopt ${c.tradingSymbol} (ledger only, no order).\n\n` +
-      (cands.length ? `Today's sells on this contract not in the desk:\n${list}\n\nType the number of the order you wrote against NIFTYBEES` : 'No sells on this contract in today\'s trade book.\n\nType') +
-      ` — or p<price> (e.g. p98.5) to adopt ${lots * lotSize} units at a price you enter.`,
+      `No sells on this contract in today's trade book.\n\n` +
+      `Enter the sell price per unit to adopt ${lots * lotSize} units (e.g. 98.5).`,
     );
     if (typed == null || typed.trim() === '') return;
-    const t = typed.trim().toLowerCase();
-    let j;
-    if (t.startsWith('p')) {
-      const px = Number(t.slice(1));
-      const units = Math.min(c.unowned, lots * lotSize);
-      if (!(px > 0)) throw new Error(`Not a price: ${typed}`);
-      if (!(units > 0)) throw new Error('Choose at least one lot to adopt');
-      j = await ledgerAction({ action: 'adopt', securityId: c.securityId, manualPrice: px, units });
-    } else {
-      const o = cands[Number(t) - 1];
-      if (!o) throw new Error(`No order #${typed}`);
-      j = await ledgerAction({ action: 'adopt', securityId: c.securityId, orderId: o.orderId });
-    }
+    const px = Number(typed.trim().replace(/^p/i, ''));
+    const units = Math.min(c.unowned, lots * lotSize);
+    if (!(px > 0)) throw new Error(`Not a price: ${typed}`);
+    if (!(units > 0)) throw new Error('Choose at least one lot to adopt');
+    const j = await ledgerAction({ action: 'adopt', securityId: c.securityId, manualPrice: px, units });
     if (!j.success) throw new Error(j.error || 'Adopt failed');
   });
 
@@ -603,8 +612,8 @@ export default function NiftyCoveredCallTerminal() {
 
               {/* NIFTYBEES Holding Ticker */}
               <div className="flex items-center gap-1.5 font-mono px-2 py-0.5 rounded-md bg-zinc-900 border border-zinc-800">
-                <span className={cn(TXT_VALUE, 'font-bold text-emerald-400/90')}>NIFTYBEES</span>
-                <span className={cn(TXT_CAPTION, 'font-bold text-emerald-400')}>
+                <span className="text-[10px] font-bold text-emerald-400">NIFTYBEES</span>
+                <span className={cn(TXT_CAPTION, 'font-bold text-white')}>
                   {beesLtp > 0 ? `₹${beesLtp.toFixed(2)}` : '—'}
                 </span>
                 {bees?.ltpSource === 'holdings' && (
@@ -707,7 +716,7 @@ export default function NiftyCoveredCallTerminal() {
           tooltip="Total NIFTYBEES shares in your Dhan account (Demat DP + T1 settling + today's delivery buys), converted to cash value and Nifty index-equivalent capacity."
           value={holdingValue}
           raw
-          sub={bees ? `${fmtInt(beesQty)} shares @ ₹${bees.avgCost.toFixed(2)}` : 'Loading holdings…'}
+          sub={bees ? `${fmtInt(beesQty)} shares @ ₹${bees.avgCost.toFixed(2)} · LTP ${beesLtp > 0 ? `₹${beesLtp.toFixed(2)}` : "—"}` : 'Loading holdings…'}
           badge={lotSize > 0 ? `${(beesUnits / lotSize).toFixed(1)} L Capacity` : undefined}
         />
 
@@ -771,7 +780,13 @@ export default function NiftyCoveredCallTerminal() {
             history={trades}
             lotSize={lotSize}
             busy={busy}
-            rollTarget={writeStrike && optionExpiry ? { strike: writeStrike, expiry: optionExpiry } : null}
+            rollTarget={writeStrike && optionExpiry ? {
+              strike: writeStrike,
+              expiry: optionExpiry,
+              basis: manualStrike
+                ? 'the strike you typed in Write Covered Call'
+                : `the strike the Write Covered Call panel suggests for ${(targetDelta * 100).toFixed(0)}Δ target delta`,
+            } : null}
             onBuyBack={handleBuyBack}
             onRoll={handleRoll}
             onSyncLedger={handleSync}
@@ -1161,7 +1176,7 @@ export default function NiftyCoveredCallTerminal() {
                   <Kv label="Holding Value" value={`₹${fmtInt(holdingValue)}`} />
                   <Kv label="Nifty-equivalent" value={`${beesUnits.toFixed(1)} units`} />
                   <Kv label="= Lots capacity" value={lotSize > 0 ? (beesUnits / lotSize).toFixed(2) : '—'} />
-                  <Kv label="BEES per Nifty pt" value={beesLtp > 0 && spot > 0 ? `1 : ${(spot / beesLtp).toFixed(1)}` : '—'} />
+                  <Kv label="Nifty pts per ₹1 of BEES" value={beesLtp > 0 && spot > 0 ? `1 : ${(spot / beesLtp).toFixed(1)}` : '—'} />
                 </div>
               ) : (
                 <div className="text-xs text-zinc-500">{book?.beesError ?? 'Loading holdings…'}</div>

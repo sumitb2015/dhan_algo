@@ -61,7 +61,7 @@ export default function TradeSheet({
   history: CallTrade[];
   lotSize: number;
   busy: boolean;
-  rollTarget: { strike: number; expiry: string } | null;
+  rollTarget: { strike: number; expiry: string; basis: string } | null;
   onBuyBack: (row: OpenCallRow) => void;
   onRoll: (row: OpenCallRow) => void;
   onSyncLedger: (row: OpenCallRow) => void;
@@ -126,6 +126,7 @@ export default function TradeSheet({
                 <th className={cn(TH, 'text-right')}><HeaderTip label="DTE" tip="Calendar days remaining until contract expiry." align="right" /></th>
                 <th className={cn(TH, 'text-right')}><HeaderTip label="Lots / Units" tip="Number of lots and total option units short in this contract." align="right" /></th>
                 <th className={cn(TH, 'text-right')}><HeaderTip label="Sold @" tip="Average execution price at which you wrote/sold the call." align="right" /></th>
+                <th className={cn(TH, 'text-right')}><HeaderTip label="Premium Sold" tip="Total premium collected in rupees: Sold @ price × units short." align="right" /></th>
                 <th className={cn(TH, 'text-right')}><HeaderTip label="Current LTP" tip="Last traded price of the call in the market right now." align="right" /></th>
                 <th className={cn(TH, 'text-center')}><HeaderTip label="Decay Progress" tip="Percentage of initial premium collected that has decayed into profit. Best practice is to Buy Back or Roll when decay reaches 70%–80%." align="center" /></th>
                 <th className={cn(TH, 'text-right')}><HeaderTip label="MTM P&amp;L" tip="Unrealized profit/loss on this specific call leg: (Sold Price − Current LTP) × Units." align="right" /></th>
@@ -136,7 +137,7 @@ export default function TradeSheet({
             <tbody>
               {rows.length === 0 && (
                 <tr>
-                  <td colSpan={9} className="px-4 py-8 text-center text-zinc-500">
+                  <td colSpan={10} className="px-4 py-8 text-center text-zinc-500">
                     <div className="flex flex-col items-center justify-center gap-2 max-w-sm mx-auto">
                       <div className="w-8 h-8 rounded-full bg-zinc-900 flex items-center justify-center text-zinc-600">
                         <Layers className="w-4 h-4" />
@@ -174,6 +175,7 @@ export default function TradeSheet({
                       )}
                     </td>
                     <td className="px-3 py-2.5 text-right tabular-nums text-zinc-300 font-mono">₹{r.entryPrice.toFixed(2)}</td>
+                    <td className="px-3 py-2.5 text-right tabular-nums text-emerald-400 font-mono font-bold">₹{fmt0(r.entryPrice * r.units)}</td>
                     <td className="px-3 py-2.5 text-right tabular-nums font-bold text-zinc-100 font-mono">{r.ltp != null ? `₹${r.ltp.toFixed(2)}` : '—'}</td>
                     <td className="px-3 py-2.5 text-center">
                       {decay == null ? (
@@ -207,7 +209,7 @@ export default function TradeSheet({
                         )}
                         {rollTarget && r.units > 0 && (rollTarget.strike !== r.strike || rollTarget.expiry !== r.expiry) && (
                           <Button size="xs" variant="outline" disabled={busy} onClick={() => onRoll(r)}
-                            title="Buy this call back, then write the selected strike/expiry"
+                            title={`Buy this call back, then sell ${rollTarget.strike} CE ${rollTarget.expiry} — ${rollTarget.basis}. Change it in Write Covered Call.`}
                             className="bg-sky-500/20 border-sky-500/40 text-sky-300 font-bold hover:bg-sky-500/30">
                             <ArrowRightLeft className="w-3 h-3 mr-1" /> ROLL → {rollTarget.strike}
                           </Button>
@@ -224,6 +226,15 @@ export default function TradeSheet({
                 );
               })}
             </tbody>
+            {rows.length > 1 && (
+              <tfoot>
+                <tr className="border-t border-zinc-700 bg-zinc-900/40 font-mono font-bold">
+                  <td className="px-3 py-2 text-zinc-300" colSpan={4}>Total</td>
+                  <td className="px-3 py-2 text-right tabular-nums text-emerald-400">₹{fmt0(rows.reduce((a, r) => a + r.entryPrice * r.units, 0))}</td>
+                  <td colSpan={5} />
+                </tr>
+              </tfoot>
+            )}
           </table>
         </div>
       )}
