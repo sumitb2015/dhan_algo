@@ -239,6 +239,13 @@ export default function AdvancedScalper() {
   const [activeTab, setActiveTab]       = useState<'positions' | 'orders' | 'trades' | 'funds' | 'mtm'>('positions');
   const [positionsData, setPositionsData] = useState<Record<string, unknown>[]>([]);
   const [positionsError, setPositionsError] = useState<string | null>(null);
+  // Trail-SL simulator (?trailSim=1): swaps the broker feed for ONE fake short leg
+  // and intercepts its closes, so guard logic can be exercised with zero order risk.
+  const [trailSim, setTrailSim] = useState(false);
+  const trailSimRef = useRef(false);
+  const [simLtp, setSimLtp] = useState(100);
+  const [simLog, setSimLog] = useState<string[]>([]);
+  const [simClosed, setSimClosed] = useState(false);
   const [ordersData, setOrdersData]       = useState<Record<string, unknown>[]>([]);
   const [tradesData, setTradesData]       = useState<Record<string, unknown>[]>([]);
   const [fundsData, setFundsData]         = useState<Record<string, any> | null>(null);
@@ -1078,6 +1085,7 @@ export default function AdvancedScalper() {
         // applying this response now would repopulate it with the old
         // broker's rows. See brokerRef's declaration.
         if (requestedBroker !== brokerRef.current) return;
+        if (trailSimRef.current) return;
         if (seq < tabAppliedSeqRef.current) return;
         if (j.success) {
           tabAppliedSeqRef.current = seq;
@@ -1102,6 +1110,7 @@ export default function AdvancedScalper() {
       .then(r => r.json())
       .then((j: { success: boolean; positions?: Record<string, unknown>[]; positionsError?: string | null; orders?: Record<string, unknown>[]; trades?: Record<string, unknown>[] }) => {
         if (requestedBroker !== brokerRef.current) return;
+        if (trailSimRef.current) return;
         if (seq < tabAppliedSeqRef.current) return;
         if (j.success) {
           tabAppliedSeqRef.current = seq;
@@ -1134,6 +1143,41 @@ export default function AdvancedScalper() {
     return () => { clearInterval(id); clearInterval(fundsId); };
   }, [fetchTabData, pollTabData, pollFunds]);
 
+  const toggleTrailSim = useCallback(() => {
+    if (!trailSimRef.current) {
+      trailSimRef.current = true;
+      setSimClosed(false); setSimLtp(100); setSimLog([]);
+      setTrailSim(true);
+      return;
+    }
+    trailSimRef.current = false;
+    setTrailSim(false);
+    setPosGuards(prev => {
+      const next = { ...prev };
+      for (const k of Object.keys(next)) if (k.includes('SIM-NIFTY-TRAIL-CE')) delete next[k];
+      return next;
+    });
+    setPositionsData([]);   // drop the fake leg now; the real book returns on the next fetch
+    fetchTabData();
+  }, [fetchTabData]);
+  useEffect(() => {
+    if (new URLSearchParams(window.location.search).get('trailSim') === '1') {
+      trailSimRef.current = true;
+      setTrailSim(true);
+    }
+  }, []);
+  useEffect(() => {
+    if (!trailSim) return;
+    const q = simClosed ? 0 : -75;
+    setPositionsData([{
+      tradingSymbol: 'SIM-NIFTY-TRAIL-CE', securityId: 'SIM', exchangeSegment: 'NSE_FNO',
+      productType: 'MARGIN', positionType: simClosed ? 'CLOSED' : 'SHORT', netQty: q,
+      buyAvg: 0, sellAvg: 100, buyQty: 0, sellQty: 75,
+      lastTradedPrice: simLtp, realizedProfit: 0,
+      unrealizedProfit: simClosed ? 0 : 75 * (100 - simLtp),
+      drvOptionType: 'CALL', drvStrikePrice: 99999, drvExpiryDate: '2099-01-01',
+    }]);
+  }, [trailSim, simLtp, simClosed]);
   useEffect(() => { positionsRef.current = enrichedPositions; }, [enrichedPositions]);
   useEffect(() => { posGuardsRef.current = posGuards; }, [posGuards]);
 
@@ -1497,6 +1541,12 @@ export default function AdvancedScalper() {
   ): Promise<{ ok: boolean; qty: number; closedUnits: number; partial: boolean }> => {
     const sym = String(pos.tradingSymbol ?? '');
     const fallbackSecId = String(pos.securityId ?? pos.security_id ?? '');
+    if (trailSimRef.current && fallbackSecId === 'SIM') {
+      setSimClosed(true);
+      setSimLog(l => [...l, `CLOSE fired: ${reason}`]);
+      addToast('success', `[SIM] ${reason}`, `${sym} would be closed — no order sent`);
+      return { ok: true, qty: Number(pos.netQty), closedUnits: Math.abs(Number(pos.netQty)), partial: false };
+    }
     // Guards and in-flight tracking key off (symbol, product): the same symbol
     // can be open under two products, and they must be closed independently.
     const key = positionKey(pos);
@@ -2486,6 +2536,22 @@ export default function AdvancedScalper() {
             <div className="shrink-0"><NavBar /></div>
           </div>
           <div className="flex items-center gap-3 flex-nowrap shrink-0">
+          <button
+            type="button"
+            onClick={toggleTrailSim}
+            aria-pressed={trailSim}
+            aria-label="Toggle guard simulator"
+            title="Guard simulator: replaces the broker feed with one fake short leg so Target / SL / Trail SL can be tested with no orders. Click again to return to the live book."
+            data-testid="sim-toggle"
+            className={cn(
+              'shrink-0 rounded-lg border px-2.5 py-1.5 text-xs font-bold focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-400',
+              trailSim
+                ? 'border-amber-500/60 bg-amber-500/20 text-amber-400'
+                : 'border-zinc-700 bg-zinc-900 text-zinc-400 hover:text-zinc-200',
+            )}
+          >
+            {trailSim ? 'SIM ON' : 'SIM'}
+          </button>
           <div className="flex items-center gap-2 flex-nowrap shrink-0 bg-zinc-950/40 border border-zinc-800/60 rounded-xl px-2.5 py-1">
             {/* Broker selector — only shown when more than one broker is authenticated */}
             {authenticatedBrokers.length > 1 && (
@@ -3140,6 +3206,20 @@ export default function AdvancedScalper() {
           </>
         )}
       </div>
+
+      {trailSim && (
+        <div className="mx-4 mb-3 rounded-xl border border-amber-500/40 bg-amber-500/10 px-4 py-3 text-xs text-zinc-300 space-y-2" data-testid="trail-sim-panel">
+          <div className="font-bold text-amber-400 uppercase tracking-wider">Trail SL simulator — fake short 75 @ 100, no orders sent</div>
+          <div className="flex flex-wrap items-center gap-2">
+            <span data-testid="sim-ltp">LTP {simLtp}</span>
+            <button className="px-2 py-1 rounded bg-zinc-800 text-white" onClick={() => setSimLtp(v => +(v - 5).toFixed(2))}>−5</button>
+            <button className="px-2 py-1 rounded bg-zinc-800 text-white" onClick={() => setSimLtp(v => +(v + 5).toFixed(2))}>+5</button>
+            <button className="px-2 py-1 rounded bg-zinc-800 text-white" onClick={() => { setSimClosed(false); setSimLtp(100); setSimLog([]); }}>Reset (reopen @100)</button>
+            <span>{simClosed ? 'CLOSED' : 'OPEN'}</span>
+          </div>
+          <div data-testid="sim-log">{simLog.length ? simLog.join(' | ') : 'no close fired yet'}</div>
+        </div>
+      )}
 
       {/* Live Combined Multi-Leg Strategy Banner */}
       {combinedStrategyStats.openLegsCount > 1 && combinedStrategyStats.entryCapitalSum > 0 && (
