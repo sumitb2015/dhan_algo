@@ -36,3 +36,19 @@ test('the 15:17 NSE backstop does not apply to an MCX row, its own backstop does
   assert.equal(reentryWindowClosed(row, { ...ctx, backstopHm: UNDERLYING_META.CRUDEOILM.backstopHm }), null);
   assert.match(reentryWindowClosed(row, { ...ctx, nowHm: '23:20', backstopHm: '23:15' }) ?? '', /23:15/);
 });
+
+test('premium criteria ignore a dead strike whose last print is stale (zero OI)', async () => {
+  const { resolveCriteriaStrike, closestPremiumStrike } = await import('./focusToolRules.ts');
+  const oc = {
+    '6750': { ce: 1124, pe: 144.35, ceOi: 0, peOi: 0 },        // dead: stale print
+    '8700': { ce: 441, pe: 143.4, ceOi: 5, peOi: 34934 },
+    '8750': { ce: 408, pe: 160.4, ceOi: 5, peOi: 15080 },
+    '9000': { ce: 274, pe: 250, ceOi: 5, peOi: 5 },
+  };
+  const ctx = { atm: 9000, step: 50, oc };
+  assert.equal(resolveCriteriaStrike('PREM_LTE', 'PE', { a: '150', b: '' }, ctx), 8700);
+  assert.equal(closestPremiumStrike(oc, 'PE', 144), 8700);
+  // No OI information at all: behaves as before.
+  const bare = { '6750': { ce: 1, pe: 144.35 }, '8700': { ce: 1, pe: 143.4 } };
+  assert.equal(resolveCriteriaStrike('PREM_LTE', 'PE', { a: '150', b: '' }, { atm: 9000, step: 50, oc: bare }), 6750);
+});

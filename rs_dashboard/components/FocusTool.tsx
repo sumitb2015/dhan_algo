@@ -8283,7 +8283,6 @@ export default function FocusTool() {
     const snap = schedulerRef.current;
     const row = snap.config.rows.find(r => r.id === rowId);
     if (!row) return 'row not found';
-    if (isMcxUnderlying(row.underlying)) return `margin estimate is not available for ${row.underlying} yet`;
     const l = snap.rowLive[rowId];
     const expiry = row.expiry || expiriesRef.current[row.underlying]?.[0] || '';
     const lots = multipliedLots(row, row.lots);
