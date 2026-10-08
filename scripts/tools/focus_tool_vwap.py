@@ -3,7 +3,7 @@ Session-open VWAP for one Focus Tool row's CE+PE strike pair.
 
 Genuine session-open VWAP, not a live-tick approximation: fetches today's
 intraday candles from Dhan's historical intraday endpoint, which starts at
-the exchange's actual 9:15 session open regardless of when the Focus Tool
+the exchange's actual session open (09:15 NSE/BSE, 09:00 MCX) regardless of when the Focus Tool
 page/bridge was started — unlike reconstructing VWAP from live WebSocket
 ticks (which would only cover the session from whenever this process
 happened to start watching).
@@ -49,8 +49,10 @@ sys.path.insert(0, ROOT)
 from login import get_dhan_client
 from lib.dhan_helper import DhanHelper
 
-UNDERLYING_EXCHANGE = {'NIFTY': 'NSE', 'BANKNIFTY': 'NSE', 'SENSEX': 'BSE'}
-SEGMENT_FOR_EXCHANGE = {'NSE': 'NSE_FNO', 'BSE': 'BSE_FNO'}
+UNDERLYING_EXCHANGE = {'NIFTY': 'NSE', 'BANKNIFTY': 'NSE', 'SENSEX': 'BSE', 'CRUDEOILM': 'MCX'}
+SEGMENT_FOR_EXCHANGE = {'NSE': 'NSE_FNO', 'BSE': 'BSE_FNO', 'MCX': 'MCX_COMM'}
+# Dhan's instrument type for the intraday endpoint; MCX commodity options are OPTFUT.
+OPTION_INSTRUMENT = {'NSE': 'OPTIDX', 'BSE': 'OPTIDX', 'MCX': 'OPTFUT'}
 _IST = timezone(timedelta(hours=5, minutes=30))
 
 
@@ -107,7 +109,7 @@ def _closed_bars_only(df, interval_minutes: int):
 
 def main():
     parser = argparse.ArgumentParser(description='Session-open VWAP for a Focus Tool row')
-    parser.add_argument('--underlying', required=True, choices=['NIFTY', 'BANKNIFTY', 'SENSEX'])
+    parser.add_argument('--underlying', required=True, choices=list(UNDERLYING_EXCHANGE))
     parser.add_argument('--expiry', required=True, help='Expiry date YYYY-MM-DD')
     parser.add_argument('--ce-strike', required=True, type=float)
     parser.add_argument('--pe-strike', required=True, type=float)
@@ -137,14 +139,15 @@ def main():
     # leg -> {minute: row}, plus that leg's resolved column names.
     per_leg: dict[str, tuple[dict, dict]] = {}
     for leg in legs:
-        opt = helper.find_option(args.underlying, args.expiry, strike_for[leg], leg, exchange=exchange)
+        opt = helper.find_option(args.underlying, args.expiry, strike_for[leg], leg, exchange=exchange,
+                                 instrument=OPTION_INSTRUMENT[exchange])
         if opt is None:
             print(json.dumps({'vwap': None, 'error': f'{leg} contract not resolved'}))
             return
 
         df = helper.get_intraday_minute_data(
             security_id=str(int(opt['SECURITY_ID'])), exchange_segment=segment,
-            instrument_type='OPTIDX', interval=args.interval, from_date=today, to_date=tomorrow)
+            instrument_type=OPTION_INSTRUMENT[exchange], interval=args.interval, from_date=today, to_date=tomorrow)
         if df is None or df.empty:
             print(json.dumps({'vwap': None, 'error': 'no intraday data yet'}))
             return

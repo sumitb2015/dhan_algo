@@ -36,7 +36,7 @@ export async function GET(request: NextRequest) {
   const interval = searchParams.get('interval') ?? '1';
   const side = (searchParams.get('side') ?? 'BOTH').toUpperCase();
 
-  if (!['NIFTY', 'BANKNIFTY', 'SENSEX'].includes(underlying) || !expiry || !ceStrike || !peStrike) {
+  if (!['NIFTY', 'BANKNIFTY', 'SENSEX', 'CRUDEOILM'].includes(underlying) || !expiry || !ceStrike || !peStrike) {
     return NextResponse.json(
       { success: false, error: 'underlying, expiry, ceStrike, peStrike all required' },
       { status: 400 },
