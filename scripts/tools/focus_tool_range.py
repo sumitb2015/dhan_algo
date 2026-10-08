@@ -39,8 +39,10 @@ sys.path.insert(0, ROOT)
 from login import get_dhan_client
 from lib.dhan_helper import DhanHelper
 
-UNDERLYING_EXCHANGE = {'NIFTY': 'NSE', 'BANKNIFTY': 'NSE', 'SENSEX': 'BSE'}
-SEGMENT_FOR_EXCHANGE = {'NSE': 'NSE_FNO', 'BSE': 'BSE_FNO'}
+UNDERLYING_EXCHANGE = {'NIFTY': 'NSE', 'BANKNIFTY': 'NSE', 'SENSEX': 'BSE', 'CRUDEOILM': 'MCX'}
+SEGMENT_FOR_EXCHANGE = {'NSE': 'NSE_FNO', 'BSE': 'BSE_FNO', 'MCX': 'MCX_COMM'}
+# Dhan's instrument type for option candles; MCX commodity options are OPTFUT.
+OPTION_INSTRUMENT = {'NSE': 'OPTIDX', 'BSE': 'OPTIDX', 'MCX': 'OPTFUT'}
 SPOT_IDS = {'NIFTY': 13, 'BANKNIFTY': 25, 'SENSEX': 51}
 _IST = timezone(timedelta(hours=5, minutes=30))
 
@@ -77,7 +79,7 @@ def _to_dt(raw):
 
 def main():
     p = argparse.ArgumentParser(description='High/low of a time range for Range Breakout')
-    p.add_argument('--underlying', required=True, choices=['NIFTY', 'BANKNIFTY', 'SENSEX'])
+    p.add_argument('--underlying', required=True, choices=list(UNDERLYING_EXCHANGE))
     p.add_argument('--index', action='store_true', help='Use the underlying index, not an option')
     p.add_argument('--expiry', help='Expiry YYYY-MM-DD (option only)')
     p.add_argument('--strike', type=float)
@@ -109,18 +111,28 @@ def main():
         return
     helper = DhanHelper(dhan)
 
-    if args.index:
+    if args.index and args.underlying == 'CRUDEOILM':
+        # MCX has no index: the underlying IS the nearest futures contract, the same one
+        # the page's spot / futures strip quotes.
+        from scripts.tools.premarket_data import _find_nearest_future
+        fut = _find_nearest_future(helper, 'CRUDEOILM', exchange='MCX', instrument='FUTCOM')
+        if fut is None:
+            print(json.dumps({'error': 'no non-lapsed CRUDEOILM futures contract'}))
+            return
+        security_id, segment, itype = int(fut['SECURITY_ID']), 'MCX_COMM', 'FUTCOM'
+    elif args.index:
         security_id, segment, itype = SPOT_IDS[args.underlying], 'IDX_I', 'INDEX'
     else:
         if not (args.expiry and args.strike and args.leg):
             print(json.dumps({'error': 'expiry, strike and leg are required for an option'}))
             return
         exchange = UNDERLYING_EXCHANGE[args.underlying]
-        opt = helper.find_option(args.underlying, args.expiry, args.strike, args.leg, exchange=exchange)
+        opt = helper.find_option(args.underlying, args.expiry, args.strike, args.leg, exchange=exchange,
+                                 instrument=OPTION_INSTRUMENT[exchange])
         if opt is None:
             print(json.dumps({'error': f'{args.leg} contract not resolved'}))
             return
-        security_id, segment, itype = int(opt['SECURITY_ID']), SEGMENT_FOR_EXCHANGE[exchange], 'OPTIDX'
+        security_id, segment, itype = int(opt['SECURITY_ID']), SEGMENT_FOR_EXCHANGE[exchange], OPTION_INSTRUMENT[exchange]
 
     df = helper.get_intraday_minute_data(
         security_id=str(security_id), exchange_segment=segment, instrument_type=itype,

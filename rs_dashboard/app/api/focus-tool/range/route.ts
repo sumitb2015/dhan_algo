@@ -33,7 +33,7 @@ export async function GET(request: NextRequest) {
     return NextResponse.json({ success: false, error: 'startDate / endDate must be YYYY-MM-DD' }, { status: 400 });
   }
 
-  if (!['NIFTY', 'BANKNIFTY', 'SENSEX'].includes(underlying) || !HM.test(start) || !HM.test(end)) {
+  if (!['NIFTY', 'BANKNIFTY', 'SENSEX', 'CRUDEOILM'].includes(underlying) || !HM.test(start) || !HM.test(end)) {
     return NextResponse.json({ success: false, error: 'underlying, start and end (HH:MM) required' }, { status: 400 });
   }
   if (on === 'instrument' && (!/^\d{4,6}$/.test(strike) || !['CE', 'PE'].includes(leg) || !/^\d{4}-\d{2}-\d{2}$/.test(expiry))) {
