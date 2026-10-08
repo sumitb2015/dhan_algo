@@ -12,7 +12,8 @@ export function istDateOf(iso: string): string {
 }
 
 export function isFullyClosed(basket: MultiLegBasket): boolean {
-  return basket.legs.length > 0 && basket.legs.every(l => l.status === 'CLOSED');
+  // A resting stop entry can still open a leg, so a row holding one is not finished.
+  return basket.legs.length > 0 && basket.legs.every(l => l.status === 'CLOSED') && !(basket.waitingEntries?.length);
 }
 
 /** A basket that never had an order acknowledged has no trade history worth keeping. */

@@ -3,7 +3,7 @@ import assert from 'node:assert';
 import {
   resolveTemplateLegs, reconcileLegFillDown, reconcileLegWithBroker, legPnl, basketTotalPnl, sortLegsForExit, findLegPosition,
   computeLegTrailingSL, computeStrategyMetrics, checkStrategyRisk, classifyBasketStructure, findSiblingLegCollisions,
-  formatExpiryLabel, LEG_FILL_GRACE_MS, claimableLegQty, executionBroker, applyOrderOutcomes, normalizeOrderRow, PENDING_ORDER_TTL_MS, legBrokerMismatch, classifyDhanOrder, type NormalizedOrder, legAvgPrice, legExitPrice, legQtyUnits, legPnlPct, legOtmPct, scaleBasketMultiplier,
+  formatExpiryLabel, LEG_FILL_GRACE_MS, claimableLegQty, executionBroker, applyOrderOutcomes, normalizeOrderRow, PENDING_ORDER_TTL_MS, legBrokerMismatch, classifyDhanOrder, settleWaitingEntry, applyTriggeredEntry, type WaitingEntry, type NormalizedOrder, legAvgPrice, legExitPrice, legQtyUnits, legPnlPct, legOtmPct, scaleBasketMultiplier,
   legQtyWarningsFor, recordOutsideReduction, findUntrackedPositions, residualBrokerAvg, findContractDrift, legFromUntracked, contractHintFromRow, legCountsToday, closedFillFromRow, mergeImportedLegs, brokerClampSlice,
   normalizeTradeRow, ownOrderIds, matchOutsideTrades, repriceEstimatedCloses, MLF_ORDER_SOURCE,
   type StrategyMetrics, type MultiLegLeg, type MultiLegBasket,
@@ -1201,4 +1201,77 @@ test('findContractDrift flags a wrong open avg, an unrecorded close and an estim
   assert.deepStrictEqual(findContractDrift('dhan', [{ ...row, securityId: '999' }], [alloc('b', [closed])], now), []);
   assert.deepStrictEqual(findContractDrift('dhan', [{ ...row, buyQty: undefined, sellQty: undefined }], [alloc('b', [closed])], now), []);
   assert.deepStrictEqual(findContractDrift('kotak', [row], [alloc('b', [closed])], now), []);
+});
+
+// ── Stop-loss ENTRY orders: resting orders are not legs ─────────────────
+test('classifyDhanOrder: a stop order waiting for its trigger is working, not pending', () => {
+  assert.strictEqual(classifyDhanOrder('PENDING', 'SL'), 'working');
+  assert.strictEqual(classifyDhanOrder('PENDING', 'SLM'), 'working');
+  assert.strictEqual(classifyDhanOrder('TRANSIT', 'SL'), 'pending');
+  assert.strictEqual(classifyDhanOrder('TRADED', 'SLM'), 'filled');
+  assert.strictEqual(classifyDhanOrder('REJECTED', 'SL'), 'dead');
+});
+
+const NOON = Date.parse('2026-10-08T07:00:00Z'); // 12:30 IST
+const waiting = (extra: Partial<WaitingEntry> = {}): WaitingEntry => ({
+  orderId: 'o1', side: 'S', option: 'CE', strike: 22250, expiry: '2026-10-19', lots: 2, qty: 130,
+  orderType: 'SL', triggerPrice: 240, limitPrice: 238, securityId: '51368', at: NOON - 60_000, ...extra,
+});
+const ord = (status: string, filled: number | null, avgPrice: number | null): NormalizedOrder => ({ id: 'o1', status, filled, avgPrice });
+
+test('settleWaitingEntry: keeps waiting while the trigger has not printed', () => {
+  assert.deepStrictEqual(settleWaitingEntry(waiting(), ord('PENDING', 0, null), NOON), { kind: 'wait' });
+  assert.deepStrictEqual(settleWaitingEntry(waiting(), ord('TRANSIT', 0, null), NOON), { kind: 'wait' });
+  // not in the book yet (ACK lag) on the same IST day
+  assert.deepStrictEqual(settleWaitingEntry(waiting(), undefined, NOON), { kind: 'wait' });
+});
+
+test('settleWaitingEntry: TRADED opens at the traded qty and average, never the trigger', () => {
+  assert.deepStrictEqual(settleWaitingEntry(waiting(), ord('TRADED', 130, 237.4), NOON),
+    { kind: 'open', qty: 130, avgPrice: 237.4, partial: false });
+  // an order row with no filled field still means the whole order for TRADED
+  assert.deepStrictEqual(settleWaitingEntry(waiting(), ord('TRADED', null, 237.4), NOON),
+    { kind: 'open', qty: 130, avgPrice: 237.4, partial: false });
+  // TRADED but no average yet: wait for a real price instead of booking the trigger
+  assert.deepStrictEqual(settleWaitingEntry(waiting(), ord('TRADED', 130, null), NOON), { kind: 'wait' });
+});
+
+test('settleWaitingEntry: a part-filled live order keeps waiting; a cancelled one opens only what traded', () => {
+  assert.deepStrictEqual(settleWaitingEntry(waiting(), ord('PART_TRADED', 65, 237), NOON), { kind: 'wait' });
+  assert.deepStrictEqual(settleWaitingEntry(waiting(), ord('CANCELLED', 65, 237), NOON),
+    { kind: 'open', qty: 65, avgPrice: 237, partial: true });
+});
+
+test('settleWaitingEntry: rejected/cancelled with nothing filled is dead; filled is never over entry qty', () => {
+  assert.deepStrictEqual(settleWaitingEntry(waiting(), ord('REJECTED', 0, null), NOON), { kind: 'dead', status: 'REJECTED' });
+  assert.deepStrictEqual(settleWaitingEntry(waiting(), ord('CANCELLED', 0, null), NOON), { kind: 'dead', status: 'CANCELLED' });
+  // part-filled then cancelled with no average yet is a real position: wait, never "dead"
+  assert.deepStrictEqual(settleWaitingEntry(waiting(), ord('CANCELLED', 65, null), NOON), { kind: 'wait' });
+  // a cancel whose row carries no filled qty / average is not guessed into a position
+  assert.deepStrictEqual(settleWaitingEntry(waiting(), ord('CANCELLED', null, null), NOON), { kind: 'dead', status: 'CANCELLED' });
+  const over = settleWaitingEntry(waiting(), ord('TRADED', 999, 237), NOON);
+  assert.strictEqual(over.kind === 'open' && over.qty, 130);
+});
+
+test('settleWaitingEntry: a DAY order from an earlier IST day is dropped, not assumed filled', () => {
+  const yesterday = waiting({ at: NOON - 26 * 3600_000 });
+  assert.deepStrictEqual(settleWaitingEntry(yesterday, undefined, NOON), { kind: 'gone' });
+});
+
+test('applyTriggeredEntry: new OPEN leg carries the traded fill and the grace stamp', () => {
+  const legs = applyTriggeredEntry([], waiting(), 130, 237.4, 65, NOON, 'L1');
+  assert.strictEqual(legs.length, 1);
+  assert.deepStrictEqual(
+    { id: legs[0].id, status: legs[0].status, lots: legs[0].lots, fill: legs[0].fill, filledAt: legs[0].filledAt, ref: legs[0].orderRef, ids: legs[0].orderIds },
+    { id: 'L1', status: 'OPEN', lots: 2, fill: { qty: 130, avgPrice: 237.4, orderId: 'o1' }, filledAt: NOON, ref: { securityId: '51368' }, ids: ['o1'] });
+});
+
+test('applyTriggeredEntry: same contract merges into the open leg at a weighted average', () => {
+  const existing = { id: 'e', side: 'S', option: 'CE', strike: 22250, expiry: '2026-10-19', lots: 1, type: 'MARKET',
+    status: 'OPEN', fill: { qty: 65, avgPrice: 200 }, orderRef: { securityId: '51368' } } as MultiLegLeg;
+  const legs = applyTriggeredEntry([existing], waiting(), 130, 230, 65, NOON, 'L2');
+  assert.strictEqual(legs.length, 1);
+  assert.strictEqual(legs[0].lots, 3);
+  assert.strictEqual(legs[0].fill?.qty, 195);
+  assert.ok(Math.abs((legs[0].fill?.avgPrice ?? 0) - (200 * 65 + 230 * 130) / 195) < 1e-9);
 });

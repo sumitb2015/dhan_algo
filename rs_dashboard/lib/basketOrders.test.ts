@@ -82,3 +82,30 @@ test('resolveOrderRequest maps productType MARGIN to Zerodha product NRML', () =
     body: { tradingsymbol: 'NIFTY24721P24000', quantity: 75, side: 'BUY', orderType: 'MARKET', exchange: 'NFO', product: 'NRML' },
   });
 });
+
+const stopLeg = { side: 'S' as const, option: 'CE' as const, strike: 24000, qty: 65, underlying: 'NIFTY', productType: 'MARGIN' as const };
+const stopMap = { '24000': { ceId: '12345', peId: '67890' } };
+
+test('resolveOrderRequest: a Dhan stop-limit carries STOP_LOSS, its trigger and limit on the 0.05 tick', () => {
+  const req = resolveOrderRequest('dhan', { ...stopLeg, type: 'SL', price: 238.03, triggerPrice: 240.02 }, stopMap, 'mlf');
+  assert.deepStrictEqual(req?.body, {
+    securityId: '12345', quantity: 65, side: 'SELL', orderType: 'STOP_LOSS', exchangeSegment: 'NSE_FNO',
+    productType: 'MARGIN', price: 238.05, triggerPrice: 240, source: 'mlf',
+  });
+});
+
+test('resolveOrderRequest: a Dhan stop-market sends a trigger and no limit price', () => {
+  const req = resolveOrderRequest('dhan', { ...stopLeg, type: 'SLM', triggerPrice: 240 }, stopMap);
+  assert.strictEqual(req?.body.orderType, 'STOP_LOSS_MARKET');
+  assert.strictEqual(req?.body.triggerPrice, 240);
+  assert.strictEqual('price' in (req?.body ?? {}), false);
+});
+
+test('resolveOrderRequest: stop orders are refused for other brokers and when trigger/limit are missing', () => {
+  const sl = { ...stopLeg, type: 'SL' as const, price: 238, triggerPrice: 240 };
+  assert.strictEqual(resolveOrderRequest('zerodha', sl, { '24000': { ceSymbol: 'X' } }), null);
+  assert.strictEqual(resolveOrderRequest('kotak', sl, { '24000': { ceSymbol: 'X' } }), null);
+  assert.strictEqual(resolveOrderRequest('dhan', { ...sl, triggerPrice: undefined }, stopMap), null);
+  assert.strictEqual(resolveOrderRequest('dhan', { ...sl, price: undefined }, stopMap), null);
+  assert.strictEqual(resolveOrderRequest('dhan', { ...sl, type: 'SLM', triggerPrice: 0 }, stopMap), null);
+});

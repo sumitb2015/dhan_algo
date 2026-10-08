@@ -110,6 +110,8 @@ async function placeOrderOnce(body: {
     side: string;
     orderType?: string;
     price?: number;
+    /** Stop-loss entry trigger (orderType STOP_LOSS / STOP_LOSS_MARKET only). */
+    triggerPrice?: number;
     exchangeSegment?: string;
     productType?: string;
     /** Short lowercase tag prefixed to the correlationId so a caller can tell
@@ -154,9 +156,24 @@ async function placeOrderOnce(body: {
     return NextResponse.json({ success: false, error: `Invalid side: ${side} (must be BUY or SELL)` }, { status: 400 });
   }
 
-  const isLimitOrder = String(orderType).toUpperCase() === 'LIMIT';
+  const orderTypeUpper = String(orderType).toUpperCase();
+  const isStopLimit = orderTypeUpper === 'STOP_LOSS';
+  const isStopMarket = orderTypeUpper === 'STOP_LOSS_MARKET';
+  const isLimitOrder = orderTypeUpper === 'LIMIT' || isStopLimit;
   if (isLimitOrder && !(Number(price) > 0)) {
-    return NextResponse.json({ success: false, error: `Invalid price for LIMIT order: ${price}` }, { status: 400 });
+    return NextResponse.json({ success: false, error: `Invalid price for ${orderTypeUpper} order: ${price}` }, { status: 400 });
+  }
+  // Stop-loss entries rest at the exchange until the trigger prints. Anything but a
+  // positive trigger is rejected here (never defaulted to a market order), and a limit
+  // that sits on the wrong side of its trigger could never fill after triggering.
+  const triggerNum = Number(body.triggerPrice) || 0;
+  if (isStopLimit || isStopMarket) {
+    if (!(triggerNum > 0)) {
+      return NextResponse.json({ success: false, error: `Invalid triggerPrice for ${orderTypeUpper} order: ${body.triggerPrice}` }, { status: 400 });
+    }
+    if (isStopLimit && (sideUpper === 'BUY' ? Number(price) < triggerNum : Number(price) > triggerNum)) {
+      return NextResponse.json({ success: false, error: `${sideUpper} STOP_LOSS limit ${price} must be ${sideUpper === 'BUY' ? '>=' : '<='} its trigger ${triggerNum}` }, { status: 400 });
+    }
   }
 
   const prefix = typeof body.source === 'string' && /^[a-z]{2,4}$/.test(body.source) ? body.source : 'wr';
@@ -184,7 +201,7 @@ async function placeOrderOnce(body: {
       transactionType:  sideUpper,
       exchangeSegment,
       productType,
-      orderType:        isLimitOrder ? 'LIMIT' : 'MARKET',
+      orderType:        isStopLimit ? 'STOP_LOSS' : isStopMarket ? 'STOP_LOSS_MARKET' : isLimitOrder ? 'LIMIT' : 'MARKET',
       validity:         'DAY',
       securityId:       String(securityId),
       quantity:         qtyNum,
@@ -193,7 +210,7 @@ async function placeOrderOnce(body: {
       afterMarketOrder: false,
       boProfitValue:    0,
       boStopLossValue:  0,
-      triggerPrice:     0,
+      triggerPrice:     (isStopLimit || isStopMarket) ? triggerNum : 0,
     };
 
     const send = async () => {

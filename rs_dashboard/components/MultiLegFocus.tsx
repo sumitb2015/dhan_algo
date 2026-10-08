@@ -27,7 +27,7 @@ import MultiLegOptionChainModal from './multiLegFocus/MultiLegOptionChainModal';
 import HelpModal from './HelpModal';
 import {
   resolveTemplateLegs, reconcileLegWithBroker, sortLegsForExit, findLegPosition, executionBroker,
-  applyOrderOutcomes, normalizeOrderRow, withPendingOrder, LEG_FILL_GRACE_MS, legBrokerMismatch, classifyDhanOrder, type DhanOrderPhase, type NormalizedOrder,
+  applyOrderOutcomes, normalizeOrderRow, withPendingOrder, settleWaitingEntry, applyTriggeredEntry, type WaitingEntry, LEG_FILL_GRACE_MS, legBrokerMismatch, classifyDhanOrder, type DhanOrderPhase, type NormalizedOrder,
   computeLegTrailingSL, computeStrategyMetrics, checkStrategyRisk, fallbackLotSize, planScale, scalePlanSignature,
   positionProduct, computeBasketStatus, closedFillFromRow,
   findSiblingLegCollisions, type SiblingLegCollision,
@@ -978,10 +978,52 @@ export default function MultiLegFocus({
     });
   }, [persistBasket]);
 
+  // Same functional-update rule as patchLegs, for the resting stop-entry list.
+  const patchWaiting = useCallback((basketId: string, fn: (w: WaitingEntry[]) => WaitingEntry[]) => {
+    setBaskets(prev => {
+      const next = prev.map(b => {
+        if (b.id !== basketId) return b;
+        const w = fn(b.waitingEntries ?? []);
+        return { ...b, waitingEntries: w.length ? w : undefined, updatedAt: new Date().toISOString() };
+      });
+      const target = next.find(b => b.id === basketId);
+      if (target) persistBasket(target);
+      basketsRef.current = next;
+      return next;
+    });
+  }, [persistBasket]);
+
+  // Asks Dhan to cancel one resting stop-entry order. The entry is NOT removed here: the poll
+  // drops it once the order book says CANCELLED, and — if the trigger printed first so Dhan
+  // refuses the cancel — opens the leg it became. Removing it locally would orphan that position.
+  const cancelWaitingEntry = useCallback(async (basketId: string, orderId: string): Promise<boolean> => {
+    try {
+      const res = await fetch('/api/scalper/orders', {
+        method: 'DELETE',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ orderId, broker: 'dhan' }),
+      });
+      const j = await res.json() as { success: boolean; error?: string; detail?: string };
+      if (!j.success) {
+        addToast('error', 'Could not cancel the stop order', `${j.detail ?? j.error ?? 'Dhan refused'} — it may already have triggered; check Orders.`);
+        return false;
+      }
+      addToast('success', 'Cancel sent', 'The stop order is being cancelled.');
+      return true;
+    } catch (e) {
+      addToast('error', 'Could not cancel the stop order', String(e));
+      return false;
+    }
+  }, [addToast]);
+
   const deleteBasket = useCallback((basketId: string) => {
     const target = basketsRef.current.find(b => b.id === basketId);
     if (target && target.legs.some(l => l.status === 'OPEN' || l.status === 'PLACING' || l.status === 'CLOSING')) {
       addToast('error', 'Cannot delete active strategy', 'Exit all open positions before deleting this row.');
+      return;
+    }
+    if (target?.waitingEntries?.length) {
+      addToast('error', 'Cannot delete: stop orders are resting', 'Cancel the waiting stop orders first, or one could trigger into a row you no longer see.');
       return;
     }
     setBaskets(prev => prev.filter(b => b.id !== basketId));
@@ -1237,7 +1279,7 @@ export default function MultiLegFocus({
   // after the hedges, or auto-reversing legs on an abort — the ACK is not
   // enough: wait for the order's actual outcome. 'pending' after the deadline
   // means unknown (treat as NOT confirmed; the poll's pendingOrders settles it).
-  const confirmDhanOrder = useCallback(async (orderId: string, orderType: 'MARKET' | 'LIMIT', timeoutMs = 6000): Promise<{
+  const confirmDhanOrder = useCallback(async (orderId: string, orderType: 'MARKET' | 'LIMIT' | 'SL' | 'SLM', timeoutMs = 6000): Promise<{
     phase: DhanOrderPhase; filledQty: number; avgPrice: number; reason: string;
   }> => {
     const deadline = Date.now() + timeoutMs;
@@ -1847,6 +1889,19 @@ export default function MultiLegFocus({
       }
       const basket = basketsRef.current.find(b => b.id === basketId);
       if (!basket) return;
+      // Exit All means flat: a resting stop entry would otherwise open a fresh position afterwards.
+      // Closing open risk comes first, so a refused cancel never blocks the exit; it is reported loudly instead.
+      // The cancels run alongside the exit orders (started, not awaited), so a slow cancel cannot delay squaring off.
+      const waitingNow = basket.waitingEntries ?? [];
+      if (waitingNow.length) {
+        void Promise.all(waitingNow.map(async w => ((await cancelWaitingEntry(basketId, w.orderId)) ? null : w))).then(res => {
+          const failed = res.filter((w): w is WaitingEntry => w != null);
+          if (failed.length) {
+            addToast('error', 'Stop order(s) NOT cancelled — may still open a position',
+              `${failed.map(w => `${w.side === 'B' ? 'BUY' : 'SELL'} ${w.strike} ${w.option}`).join(', ')}: check Orders and cancel by hand if still resting. If one traded, its leg will appear here.`);
+          }
+        });
+      }
       const openLegs = sortLegsForExit(basket.legs.filter(l => l.status === 'OPEN' || l.status === 'CLOSING'));
       // Legs exit concurrently within a side group; shorts (BUY-to-close) are
       // fully done before longs so margin is never released out of order.
@@ -1892,7 +1947,7 @@ export default function MultiLegFocus({
       exitingBasketsRef.current.delete(basketId);
       setExitingMap(prev => ({ ...prev, [basketId]: false }));
     }
-  }, [exitOneLeg, addToast, resolveDhanSecurityId]);
+  }, [exitOneLeg, addToast, resolveDhanSecurityId, cancelWaitingEntry]);
 
   // ── Add Lots to Existing Position Leg ─────────────────────────────
   const addLotsToLeg = useCallback(async (basketId: string, params: {
@@ -2222,8 +2277,10 @@ export default function MultiLegFocus({
     strike: number;
     expiry?: string;
     lots: number;
-    orderType: 'MARKET' | 'LIMIT';
+    orderType: 'MARKET' | 'LIMIT' | 'SL' | 'SLM';
     limitPrice?: number;
+    /** SL / SLM only. */
+    triggerPrice?: number;
   }, opts?: {
     /** Caller already confirmed sibling-contract collisions for a whole group. */
     skipCollisionCheck?: boolean;
@@ -2252,12 +2309,26 @@ export default function MultiLegFocus({
 
     const qty = params.lots * lotSize;
     const label = `${params.side === 'B' ? 'BUY' : 'SELL'} ${params.strike} ${params.option}`;
+    const isStop = params.orderType === 'SL' || params.orderType === 'SLM';
+    if (isStop && (bk !== 'dhan' || opts?.carry)) {
+      addToast('error', `Stop order refused for ${label}`, 'Stop-loss entry orders are Dhan only, and only from Add New Leg.');
+      return false;
+    }
+    // Dhan nets by security id: a stop on the OPPOSITE side of a leg this row already holds would
+    // trade against it, not open a new one (and would be booked here as a phantom second leg).
+    // To protect a leg use its own SL; this order type only opens or adds on the same side.
+    if (isStop && basket.legs.some(l => (l.status === 'OPEN' || l.status === 'CLOSING' || l.status === 'PLACING')
+        && l.option === params.option && l.strike === params.strike && (l.expiry || basket.expiry) === legExpiry && l.side !== params.side)) {
+      addToast('error', `Stop order refused for ${label}`,
+        `This row already holds the opposite side of that contract; a stop here would close it, not open a leg. Use the leg's own stop-loss instead.`);
+      return false;
+    }
 
     const collisions = findSiblingLegCollisions(
       basketsRef.current, basketId, [{ side: params.side, option: params.option, strike: params.strike, expiry: legExpiry }]);
     if (!opts?.skipCollisionCheck && refuseSharedStrike(collisions)) return false;
-    if (!opts?.skipSpreadCheck
-        && !resolveSpreadIssues(await fetchSpreadIssues(basket, [{ option: params.option, strike: params.strike, expiry: legExpiry, type: params.orderType }]))) return false;
+    if (!opts?.skipSpreadCheck && !isStop
+        && !resolveSpreadIssues(await fetchSpreadIssues(basket, [{ option: params.option, strike: params.strike, expiry: legExpiry, type: params.orderType === 'LIMIT' ? 'LIMIT' : 'MARKET' }]))) return false;
 
     const req = resolveOrderRequest(bk, {
       side: params.side,
@@ -2265,7 +2336,8 @@ export default function MultiLegFocus({
       strike: params.strike,
       qty,
       type: params.orderType,
-      price: params.orderType === 'LIMIT' ? params.limitPrice : undefined,
+      price: params.orderType === 'LIMIT' || params.orderType === 'SL' ? params.limitPrice : undefined,
+      triggerPrice: isStop ? params.triggerPrice : undefined,
       underlying: basket.underlying as Underlying,
       productType: 'MARGIN',
     }, strikeMap, MLF_ORDER_SOURCE);
@@ -2283,6 +2355,39 @@ export default function MultiLegFocus({
       });
       const j = await res.json() as { success: boolean; order_id?: string; securityId?: string; symbol?: string; price?: number; error?: string };
 
+      if (j.success && isStop) {
+        // A stop entry opens nothing yet: it rests until the trigger prints. Record it beside
+        // the legs (never as one) and let the poll open the leg when the order trades.
+        if (!j.order_id) {
+          addToast('error', `${label}: stop order not confirmed`, 'Dhan returned no order id — check Orders before retrying. Nothing was recorded here.');
+          return false;
+        }
+        const c = await confirmDhanOrder(String(j.order_id), params.orderType);
+        if (c.phase === 'dead') {
+          addToast('error', `${label} stop order rejected`, c.reason || 'Rejected/cancelled by the broker — nothing is resting.');
+          return false;
+        }
+        const entry: WaitingEntry = {
+          orderId: String(j.order_id),
+          side: params.side,
+          option: params.option,
+          strike: params.strike,
+          expiry: legExpiry,
+          lots: params.lots,
+          qty,
+          orderType: params.orderType as 'SL' | 'SLM',
+          triggerPrice: params.triggerPrice ?? 0,
+          ...(params.orderType === 'SL' ? { limitPrice: params.limitPrice } : {}),
+          securityId: String(j.securityId ?? req.body.securityId ?? ''),
+          ...(j.symbol ? { symbol: j.symbol } : {}),
+          at: Date.now(),
+        };
+        patchWaiting(basket.id, w => [...w, entry]);
+        pollFunds();
+        addToast('success', `Stop order resting: ${label}`,
+          `${params.lots} lot(s) trigger @ ₹${(params.triggerPrice ?? 0).toFixed(2)}${params.orderType === 'SL' ? `, limit ₹${(params.limitPrice ?? 0).toFixed(2)}` : ' (market)'}. The leg opens when it trades.`);
+        return true;
+      }
       if (j.success) {
         const chain = chainData[pair];
         const q = chain?.quotes?.[String(params.strike)];
@@ -2313,7 +2418,7 @@ export default function MultiLegFocus({
           strike: params.strike,
           expiry: legExpiry,
           lots: params.lots,
-          type: params.orderType,
+          type: params.orderType === 'LIMIT' ? 'LIMIT' : 'MARKET',
           price: fillPrice,
           status: 'OPEN',
           filledAt: Date.now(),
@@ -2376,7 +2481,7 @@ export default function MultiLegFocus({
       addToast('error', `Add leg failed for ${label}`, String(e));
       return false;
     }
-  }, [broker, hasAuthenticatedBroker, lookupCache, chainData, patchLegs, addToast, confirmDhanOrder, pollFunds, fetchMarginsForBaskets, blockedStrikeLegs, toastBlockedStrikes, fetchSpreadIssues, resolveSpreadIssues, refuseSharedStrike]);
+  }, [broker, hasAuthenticatedBroker, lookupCache, chainData, patchLegs, addToast, confirmDhanOrder, pollFunds, fetchMarginsForBaskets, blockedStrikeLegs, toastBlockedStrikes, fetchSpreadIssues, resolveSpreadIssues, refuseSharedStrike, patchWaiting]);
 
   const addNewLegToBasket = useCallback(async (basketId: string, params: Parameters<typeof addNewLegCore>[1]) => {
     await addNewLegCore(basketId, params);
@@ -2799,7 +2904,7 @@ export default function MultiLegFocus({
       // discover a straddle/strangle opened from Scalper (or another broker
       // session) that this tool has never seen before.
       await rereadBaskets(() => cancelled);
-      const anyPlaced = basketsRef.current.some(b => b.legs.some(l => l.orderRef != null));
+      const anyPlaced = basketsRef.current.some(b => b.legs.some(l => l.orderRef != null) || (b.waitingEntries?.length ?? 0) > 0);
 
       type PollJson = {
         success: boolean;
@@ -2878,6 +2983,8 @@ export default function MultiLegFocus({
           }
           // Rejected/cancelled orders found this tick — toasted once, outside the updater.
           const orderOutcomeToasts = new Map<string, { label: string; kind: 'grow' | 'exit'; status: string; unfilled: number; unknownFill?: boolean }>();
+          // Resting stop entries settled this tick — same rule, toasted once outside the updater.
+          const waitingToasts = new Map<string, { ok: boolean; title: string; msg: string }>();
 
           setBaskets(prevBaskets => {
             let anyChange = false;
@@ -2963,8 +3070,44 @@ export default function MultiLegFocus({
                 return [origLeg];
               });
 
+              // Resting stop-entry orders: open a leg only when the order book shows it traded.
+              // No order book this tick (fetch failed) = nothing settles; never guess.
+              let legsOut = nextLegs;
+              let waitingOut = basket.waitingEntries;
+              if (basketOrders && basket.waitingEntries?.length) {
+                const keepW: WaitingEntry[] = [];
+                for (const w of basket.waitingEntries) {
+                  const verdict = settleWaitingEntry(w, basketOrders.get(w.orderId));
+                  const label = `${w.side === 'B' ? 'BUY' : 'SELL'} ${w.strike} ${w.option}`;
+                  if (verdict.kind === 'wait') { keepW.push(w); continue; }
+                  if (verdict.kind === 'open') {
+                    // Another tab (or a store reread) may already have turned this very order into a
+                    // leg: settling is idempotent by order id, never a second leg for the same fill.
+                    if (legsOut.some(l => l.fill?.orderId === w.orderId || l.orderIds?.includes(w.orderId))) continue;
+                    // Dhan nets by security id: if another group already tracks this contract the
+                    // fill is that group's to own. Opening it here too would double-count it.
+                    const heldElsewhere = prevBaskets.some(b => b.id !== basket.id && b.broker === basket.broker
+                      && b.legs.some(l => (l.status === 'OPEN' || l.status === 'CLOSING' || l.status === 'PLACING') && l.orderRef?.securityId === w.securityId));
+                    if (heldElsewhere) {
+                      waitingToasts.set(`${w.orderId}`, { ok: false, title: `${label} stop order traded — NOT added here`,
+                        msg: `${verdict.qty} qty filled, but another group already tracks this contract. Check Positions and move it manually.` });
+                    } else {
+                      legsOut = applyTriggeredEntry(legsOut, w, verdict.qty, verdict.avgPrice, lotSize);
+                      waitingToasts.set(`${w.orderId}`, { ok: true, title: `${label} stop order triggered`,
+                        msg: `${verdict.partial ? 'Partly filled: ' : ''}${verdict.qty} qty @ ₹${verdict.avgPrice.toFixed(2)} — leg is now open.` });
+                    }
+                  } else if (verdict.kind === 'dead') {
+                    waitingToasts.set(`${w.orderId}`, { ok: false, title: `${label} stop order ${verdict.status}`, msg: 'It never traded — nothing was opened.' });
+                  } else {
+                    waitingToasts.set(`${w.orderId}`, { ok: false, title: `${label} stop order expired`, msg: 'It was from an earlier day and is no longer tracked.' });
+                  }
+                }
+                waitingOut = keepW.length ? keepW : undefined;
+                if (keepW.length !== basket.waitingEntries.length) basketChange = true;
+              }
+
               if (basketChange) {
-                const updated = { ...basket, legs: nextLegs, updatedAt: new Date().toISOString() };
+                const updated = { ...basket, legs: legsOut, waitingEntries: waitingOut, updatedAt: new Date().toISOString() };
                 persistBasket(updated);
                 return updated;
               }
@@ -2982,6 +3125,7 @@ export default function MultiLegFocus({
 
 
 
+          for (const t of waitingToasts.values()) addToast(t.ok ? 'success' : 'error', t.title, t.msg);
           for (const o of orderOutcomeToasts.values()) {
             if (o.unknownFill) {
               addToast('error', `${o.label}: order ${o.status}`, 'Broker did not report how much filled — this leg was NOT adjusted. Check Orders/Positions.');
@@ -3002,8 +3146,23 @@ export default function MultiLegFocus({
             const hit = Object.entries(lookupCacheRef.current).find(([k, v]) => k.startsWith(`${b}|${u}:`) && (v?.lotSize ?? 0) > 0);
             return hit?.[1]?.lotSize ?? fallbackLotSize(u as Underlying, b);
           };
-          const adoptFrom = (from: MultiLegBasket[]) => (Object.entries(rowsByBroker) as [Broker, Record<string, unknown>[]][])
-            .flatMap(([b, rows]) => outsidePositionBaskets(from, b, rows, Object.keys(DEFAULT_INDEX_SPOT), lotSizeFor(b), day, nowIso));
+          // A contract with a resting stop entry is about to be opened BY that entry; adopting its
+          // fill as an outside trade first would count the same position twice.
+          const adoptFrom = (from: MultiLegBasket[]) => {
+            // Only entries whose order has not traded anything: once a stop is part-filled its position is
+            // live, so it must stay visible to adoption (and so carry stops) instead of hiding behind the entry.
+            const dhanOrders = ordersByBroker.dhan;
+            const waitingIds = new Set(from.flatMap(b => (b.broker === 'dhan'
+              ? (b.waitingEntries ?? []).filter(w => {
+                  const o = dhanOrders?.get(w.orderId);
+                  return !o || (o.status !== 'PART_TRADED' && !(o.filled != null && o.filled > 0));
+                }).map(w => w.securityId)
+              : [])));
+            return (Object.entries(rowsByBroker) as [Broker, Record<string, unknown>[]][])
+              .flatMap(([b, rows]) => outsidePositionBaskets(from, b, b === 'dhan' && waitingIds.size
+                ? rows.filter(r => !waitingIds.has(String(r.securityId ?? ''))) : rows,
+                Object.keys(DEFAULT_INDEX_SPOT), lotSizeFor(b), day, nowIso));
+          };
           // Toast from the current list; the updater below recomputes from the latest state
           // (ids are deterministic, so both agree and a second pass adds nothing twice).
           for (const b of adoptFrom(basketsRef.current)) {
@@ -3612,6 +3771,7 @@ export default function MultiLegFocus({
                 onAddLots={async params => { await trackOp(basket.id, () => addLotsToLeg(basket.id, params)); }}
                 pnlNow={pnlNow}
                 onAddNewLeg={async params => { await trackOp(basket.id, () => addNewLegToBasket(basket.id, params)); }}
+                onCancelWaitingEntry={orderId => cancelWaitingEntry(basket.id, orderId)}
                 onScaleStrategy={async (multiplierDelta, sig) => { await trackOp(basket.id, () => scaleStrategy(basket.id, multiplierDelta, sig)); }}
                 scaling={!!scalingMap[basket.id]}
                 placing={!!placingMap[basket.id]}

@@ -22,8 +22,10 @@ interface AddNewLegModalProps {
     strike: number;
     expiry: string;
     lots: number;
-    orderType: 'MARKET' | 'LIMIT';
+    orderType: 'MARKET' | 'LIMIT' | 'SL' | 'SLM';
     limitPrice?: number;
+    /** SL / SLM only: the order rests at the exchange until this prints. */
+    triggerPrice?: number;
   }) => Promise<void>;
 }
 
@@ -55,8 +57,12 @@ export default function AddNewLegModal({
   // basket actually has a second expiry (a Calendar/Diagonal strategy).
   const [expiry, setExpiry] = useState<string>(() => basket?.expiry ?? '');
   const [lots, setLots] = useState<number>(1);
-  const [orderType, setOrderType] = useState<'MARKET' | 'LIMIT'>('MARKET');
+  const [orderType, setOrderType] = useState<'MARKET' | 'LIMIT' | 'SL' | 'SLM'>('MARKET');
   const [limitPrice, setLimitPrice] = useState<number>(0);
+  // Stop-entry prices stay as typed text: nothing reads them until Place, so a half-typed
+  // "24" never becomes a trigger (dhan-commit-on-blur).
+  const [triggerDraft, setTriggerDraft] = useState<string>('');
+  const [slLimitDraft, setSlLimitDraft] = useState<string>('');
   const [submitting, setSubmitting] = useState<boolean>(false);
 
   if (!isOpen || !basket) return null;
@@ -73,10 +79,28 @@ export default function AddNewLegModal({
   const effectiveLot = lotSize > 0 ? lotSize : fallbackLotSize(basket.underlying, basket.broker);
   const totalQty = lots * effectiveLot;
 
+  // Stop-loss entry: Dhan only. It rests until the trigger prints, so it must sit on the far
+  // side of the live price (a BUY stop above it, a SELL stop below it) or Dhan rejects it.
+  const isStop = orderType === 'SL' || orderType === 'SLM';
+  // Compared exactly as it will be sent: the order request snaps both prices to the 0.05 tick.
+  const tick = (v: number) => Math.round(v * 20) / 20;
+  const triggerNum = tick(Number(triggerDraft) || 0);
+  const slLimitNum = tick(Number(slLimitDraft) || 0);
+  const stopError: string | null = !isStop ? null
+    : !(triggerNum > 0) ? 'Enter the trigger price'
+    : !(currentLtp > 0) ? 'No live price for this strike yet, so the trigger side cannot be checked'
+    : currentLtp > 0 && side === 'B' && triggerNum <= currentLtp ? `A BUY stop trigger must be above the current price (₹${currentLtp.toFixed(2)})`
+    : currentLtp > 0 && side === 'S' && triggerNum >= currentLtp ? `A SELL stop trigger must be below the current price (₹${currentLtp.toFixed(2)})`
+    : orderType === 'SL' && !(slLimitNum > 0) ? 'Enter the limit price'
+    : orderType === 'SL' && side === 'B' && slLimitNum < triggerNum ? 'A BUY stop-limit price must be at or above its trigger'
+    : orderType === 'SL' && side === 'S' && slLimitNum > triggerNum ? 'A SELL stop-limit price must be at or below its trigger'
+    : null;
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (lots <= 0 || submitting || !strikeOk) return;
     if (orderType === 'LIMIT' && (limitPrice <= 0 || isNaN(limitPrice))) return;
+    if (stopError) return;
 
     setSubmitting(true);
     try {
@@ -87,7 +111,8 @@ export default function AddNewLegModal({
         expiry: effectiveExpiry,
         lots,
         orderType,
-        limitPrice: orderType === 'LIMIT' ? limitPrice : undefined,
+        limitPrice: orderType === 'LIMIT' ? limitPrice : orderType === 'SL' ? slLimitNum : undefined,
+        triggerPrice: isStop ? triggerNum : undefined,
       });
       onClose();
     } finally {
@@ -276,33 +301,66 @@ export default function AddNewLegModal({
           </div>
 
           {/* Order Type & Price */}
-          <div className="grid grid-cols-2 gap-2">
-            <button
-              type="button"
-              onClick={() => setOrderType('MARKET')}
-              className={`py-2 px-3 rounded-lg text-xs font-bold font-mono transition-all border ${
-                orderType === 'MARKET'
-                  ? 'bg-emerald-600 border-emerald-500 text-white shadow-sm'
-                  : 'bg-zinc-900 border-zinc-800 text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800'
-              }`}
-            >
-              MARKET
-            </button>
-            <button
-              type="button"
-              onClick={() => {
-                setOrderType('LIMIT');
-                if (limitPrice <= 0 && currentLtp > 0) setLimitPrice(currentLtp);
-              }}
-              className={`py-2 px-3 rounded-lg text-xs font-bold font-mono transition-all border ${
-                orderType === 'LIMIT'
-                  ? 'bg-emerald-600 border-emerald-500 text-white shadow-sm'
-                  : 'bg-zinc-900 border-zinc-800 text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800'
-              }`}
-            >
-              LIMIT
-            </button>
+          <div className={`grid gap-2 ${basket.broker === 'dhan' ? 'grid-cols-4' : 'grid-cols-2'}`}>
+            {([
+              ['MARKET', 'MARKET', 'Fill now at the market'],
+              ['LIMIT', 'LIMIT', 'Rest at your limit price'],
+              ['SL', 'SL-L', 'Stop-limit: open when the trigger prints, at your limit price'],
+              ['SLM', 'SL-M', 'Stop-market: open at the market when the trigger prints'],
+            ] as const).filter(([k]) => basket.broker === 'dhan' || k === 'MARKET' || k === 'LIMIT').map(([k, label, tip]) => (
+              <button
+                key={k}
+                type="button"
+                title={tip}
+                onClick={() => {
+                  setOrderType(k);
+                  if (k === 'LIMIT' && limitPrice <= 0 && currentLtp > 0) setLimitPrice(currentLtp);
+                }}
+                className={`py-2 px-2 rounded-lg text-xs font-bold font-mono transition-all border ${FOCUS_RING} ${
+                  orderType === k
+                    ? 'bg-emerald-600 border-emerald-500 text-white shadow-sm'
+                    : 'bg-zinc-900 border-zinc-800 text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800'
+                }`}
+              >
+                {label}
+              </button>
+            ))}
           </div>
+
+          {isStop && (
+            <div className="space-y-2">
+              <p className="text-[11px] text-zinc-400">
+                Rests at the exchange. The leg opens here only once the trigger prints and the order trades.{orderType === 'SL' ? ' Put the limit a little beyond the trigger (BUY above, SELL below), or a gap past it leaves the order unfilled.' : ''}
+              </p>
+              <div className={`grid gap-2 ${orderType === 'SL' ? 'grid-cols-2' : 'grid-cols-1'}`}>
+                <div>
+                  <label className="text-[11px] font-bold text-zinc-400 uppercase tracking-wider block mb-1">Trigger Price (₹)</label>
+                  <input
+                    type="number" step="0.05" min="0.05" inputMode="decimal"
+                    value={triggerDraft}
+                    onChange={e => setTriggerDraft(e.target.value)}
+                    placeholder={currentLtp > 0 ? `LTP ${currentLtp.toFixed(2)}` : 'Trigger'}
+                    aria-label="Stop trigger price"
+                    className={`w-full h-9 bg-zinc-900 border border-zinc-700 text-zinc-100 font-mono text-sm rounded-lg px-3 focus:outline-none focus:border-emerald-500 ${FOCUS_RING}`}
+                  />
+                </div>
+                {orderType === 'SL' && (
+                  <div>
+                    <label className="text-[11px] font-bold text-zinc-400 uppercase tracking-wider block mb-1">Limit Price (₹)</label>
+                    <input
+                      type="number" step="0.05" min="0.05" inputMode="decimal"
+                      value={slLimitDraft}
+                      onChange={e => setSlLimitDraft(e.target.value)}
+                      placeholder="Limit"
+                      aria-label="Stop limit price"
+                      className={`w-full h-9 bg-zinc-900 border border-zinc-700 text-zinc-100 font-mono text-sm rounded-lg px-3 focus:outline-none focus:border-emerald-500 ${FOCUS_RING}`}
+                    />
+                  </div>
+                )}
+              </div>
+              {stopError && (triggerDraft !== '' || slLimitDraft !== '') && <p className="text-[11px] text-red-400" role="alert">{stopError}</p>}
+            </div>
+          )}
 
           {orderType === 'LIMIT' && (
             <div>
@@ -334,12 +392,12 @@ export default function AddNewLegModal({
             </button>
             <button
               type="submit"
-              disabled={submitting || !strikeOk}
+              disabled={submitting || !strikeOk || !!stopError}
               title={strikeOk ? undefined : 'Far expiries only allow strikes in multiples of 100'}
               className={`h-9 px-5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold shadow-lg transition-all flex items-center gap-1.5 disabled:opacity-50 ${FOCUS_RING}`}
             >
               <Plus className="w-3.5 h-3.5" />
-              {submitting ? 'Placing Order…' : 'Place & Add Leg'}
+              {submitting ? 'Placing Order…' : isStop ? 'Place Stop Order' : 'Place & Add Leg'}
             </button>
           </div>
         </form>

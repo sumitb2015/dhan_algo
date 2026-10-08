@@ -6,8 +6,10 @@ export interface OrderLeg {
   option: OptionType;
   strike: number;
   qty: number;
-  type: 'MARKET' | 'LIMIT';
+  /** SL / SLM (Dhan stop-loss entry, rests until `triggerPrice` prints) are Dhan only. */
+  type: 'MARKET' | 'LIMIT' | 'SL' | 'SLM';
   price?: number;
+  triggerPrice?: number;
   underlying: string;
   productType: 'INTRADAY' | 'MARGIN';
   securityId?: string;
@@ -46,9 +48,15 @@ export function resolveOrderRequest(
 ): ResolvedOrder | null {
   const ident = strikeMap[String(leg.strike)];
   const side = leg.side === 'B' ? 'BUY' : 'SELL';
-  const limitPrice = leg.type === 'LIMIT' && leg.price != null
-    ? Math.round(leg.price * 20) / 20   // snap to 0.05 tick
-    : undefined;
+  const snap = (v: number) => Math.round(v * 20) / 20;   // snap to 0.05 tick
+  const limitPrice = leg.type === 'LIMIT' && leg.price != null ? snap(leg.price) : undefined;
+
+  const isStop = leg.type === 'SL' || leg.type === 'SLM';
+  if (isStop && broker !== 'dhan') return null;
+  const triggerPrice = isStop && leg.triggerPrice != null && leg.triggerPrice > 0 ? snap(leg.triggerPrice) : undefined;
+  if (isStop && triggerPrice == null) return null;
+  const stopLimit = leg.type === 'SL' && leg.price != null && leg.price > 0 ? snap(leg.price) : undefined;
+  if (leg.type === 'SL' && stopLimit == null) return null;
 
   const isSensex = leg.underlying === 'SENSEX';
   const isCrude = leg.underlying === 'CRUDEOIL' || leg.underlying === 'CRUDEOILM';
@@ -60,10 +68,13 @@ export function resolveOrderRequest(
     return {
       broker, url: '/api/scalper/fast-order',
       body: {
-        securityId, quantity: leg.qty, side, orderType: leg.type,
+        securityId, quantity: leg.qty, side,
+        orderType: leg.type === 'SL' ? 'STOP_LOSS' : leg.type === 'SLM' ? 'STOP_LOSS_MARKET' : leg.type,
         exchangeSegment,
         productType: leg.productType,
         ...(limitPrice != null ? { price: limitPrice } : {}),
+        ...(stopLimit != null ? { price: stopLimit } : {}),
+        ...(triggerPrice != null ? { triggerPrice } : {}),
         ...(source ? { source } : {}),
       },
     };

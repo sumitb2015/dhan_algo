@@ -186,10 +186,134 @@ export interface MultiLegBasket {
   multiplier?: number;
   legs: MultiLegLeg[];
   riskConfig?: StrategyRiskConfig;
+  /** Dhan stop-loss ENTRY orders resting at the exchange until their trigger prints.
+   *  Not legs: nothing is open until one trades, so no exit, stop, P&L or payoff rule
+   *  can see them (see WaitingEntry). */
+  waitingEntries?: WaitingEntry[];
   createdAt: string;
   updatedAt: string;
   /** Save revision — see lib/multiLegStoreMerge.ts. */
   rev?: number;
+}
+
+/**
+ * A stop-loss entry order that has been ACKed but has not triggered. It lives beside the
+ * legs, never among them: a leg means "this tool holds that position", and a resting
+ * trigger order holds nothing. Putting it in `legs` would let exits, SL/target rules and
+ * reconciliation act on a position that does not exist (an exit would OPEN the opposite
+ * side). When the order trades the poll turns it into a real OPEN leg at the traded qty
+ * and average; if it dies it is simply dropped.
+ */
+export interface WaitingEntry {
+  /** Dhan order id of the resting order. */
+  orderId: string;
+  side: LegSide;
+  option: 'CE' | 'PE';
+  strike: number;
+  expiry: string;
+  lots: number;
+  /** Contracts (lots x lot size) the order was sent for. */
+  qty: number;
+  /** SL = stop-limit, SLM = stop-market. */
+  orderType: 'SL' | 'SLM';
+  triggerPrice: number;
+  /** Stop-limit price (SL only). */
+  limitPrice?: number;
+  /** Dhan security id the order was sent against — also what the broker row is matched on. */
+  securityId: string;
+  symbol?: string;
+  /** Epoch ms the order was placed. */
+  at: number;
+}
+
+/**
+ * Adds a triggered waiting entry to a basket's legs: a new OPEN leg, or — when this basket
+ * already holds an OPEN leg on the same contract (Dhan nets by security id, so it is the
+ * same position) — a weighted-average merge into it. `filledAt` is stamped so the
+ * position book's lag cannot clamp the new qty away (LEG_FILL_GRACE_MS).
+ */
+export function applyTriggeredEntry(
+  legs: MultiLegLeg[],
+  entry: WaitingEntry,
+  qty: number,
+  avgPrice: number,
+  lotSize: number,
+  now: number = Date.now(),
+  newLegId: string = `mll_${now.toString(36)}_${Math.random().toString(36).slice(2, 6)}`,
+): MultiLegLeg[] {
+  const lotsOf = (q: number) => (lotSize > 0 ? Math.max(1, Math.round(q / lotSize)) : entry.lots);
+  const same = legs.find(l => l.status === 'OPEN' && l.side === entry.side && l.option === entry.option
+    && l.strike === entry.strike && l.expiry === entry.expiry);
+  if (same) {
+    const oldQty = same.fill?.qty && same.fill.qty > 0 ? same.fill.qty : same.lots * lotSize;
+    const oldAvg = same.fill?.avgPrice && same.fill.avgPrice > 0 ? same.fill.avgPrice : (same.price ?? avgPrice);
+    const total = oldQty + qty;
+    const avg = (oldAvg * oldQty + avgPrice * qty) / total;
+    return legs.map(l => (l.id === same.id ? {
+      ...l, lots: lotsOf(total), price: avg, filledAt: now,
+      fill: { ...l.fill, qty: total, avgPrice: avg, orderId: entry.orderId },
+      orderIds: Array.from(new Set([...(l.orderIds ?? []), entry.orderId])),
+    } : l));
+  }
+  return [...legs, {
+    id: newLegId,
+    side: entry.side,
+    option: entry.option,
+    strike: entry.strike,
+    expiry: entry.expiry,
+    lots: lotsOf(qty),
+    type: 'MARKET',
+    price: avgPrice,
+    status: 'OPEN',
+    filledAt: now,
+    fill: { qty, avgPrice, orderId: entry.orderId },
+    orderRef: { securityId: entry.securityId, ...(entry.symbol ? { symbol: entry.symbol } : {}) },
+    orderIds: [entry.orderId],
+  }];
+}
+
+/** What the order book says about a waiting entry. */
+export type WaitingEntryOutcome =
+  | { kind: 'wait' }
+  /** Traded (fully, or the order died after a partial fill): open a leg for `qty` at `avgPrice`. */
+  | { kind: 'open'; qty: number; avgPrice: number; partial: boolean }
+  | { kind: 'dead'; status: string }
+  /** DAY order from an earlier IST day, or absent from the book: stop tracking, never guess a fill. */
+  | { kind: 'gone' };
+
+/**
+ * Decides one waiting entry from this tick's order book (`order` undefined = not in it).
+ * A partly filled order that is still live keeps waiting — the leg opens once for the
+ * whole traded qty when it settles, never per slice.
+ */
+export function settleWaitingEntry(
+  entry: WaitingEntry,
+  order: NormalizedOrder | undefined,
+  now: number = Date.now(),
+): WaitingEntryOutcome {
+  if (!order) {
+    // A DAY order does not outlive its IST day; within the day an order the book has not
+    // shown yet (lag after the ACK) is simply not settled.
+    return istDay(entry.at) < istDay(now) ? { kind: 'gone' } : { kind: 'wait' };
+  }
+  if (FILLED_STATUSES.has(order.status)) {
+    // No traded average yet (a row read the instant it traded): wait a tick rather than book the
+    // trigger/limit as the entry price, which would misstate P&L, SL % and trails with no flag.
+    if (order.avgPrice == null) return { kind: 'wait' };
+    const qty = order.filled != null && order.filled > 0 ? Math.min(order.filled, entry.qty) : entry.qty;
+    return { kind: 'open', qty, avgPrice: order.avgPrice, partial: qty < entry.qty };
+  }
+  if (DEAD_STATUSES.has(order.status)) {
+    const filled = order.status === 'REJECTED' ? 0 : (order.filled ?? 0);
+    if (filled > 0) {
+      // Part of it traded before it died: that qty is a live position. Wait for the traded average
+      // rather than declare "never traded" or book a guessed price.
+      if (order.avgPrice == null) return { kind: 'wait' };
+      return { kind: 'open', qty: Math.min(filled, entry.qty), avgPrice: order.avgPrice, partial: filled < entry.qty };
+    }
+    return { kind: 'dead', status: order.status };
+  }
+  return { kind: 'wait' };
 }
 
 export type OptionLeg = MultiLegLeg & { option: OptionType };
@@ -1564,11 +1688,12 @@ export function legBrokerMismatch(leg: Pick<MultiLegLeg, 'orderRef'>, broker: st
  * - pending: TRANSIT / PENDING-for-MARKET / unknown — keep waiting. */
 export type DhanOrderPhase = 'filled' | 'working' | 'dead' | 'pending';
 
-export function classifyDhanOrder(status: string, orderType: 'MARKET' | 'LIMIT'): DhanOrderPhase {
+export function classifyDhanOrder(status: string, orderType: 'MARKET' | 'LIMIT' | 'SL' | 'SLM'): DhanOrderPhase {
   const s = status.toUpperCase();
   if (s === 'TRADED') return 'filled';
   if (s === 'REJECTED' || s === 'CANCELLED' || s === 'CANCELED' || s === 'EXPIRED') return 'dead';
-  if (orderType === 'LIMIT' && (s === 'PENDING' || s === 'PART_TRADED')) return 'working';
+  // A stop order waiting for its trigger reads PENDING at Dhan, same as a resting limit.
+  if (orderType !== 'MARKET' && (s === 'PENDING' || s === 'PART_TRADED')) return 'working';
   return 'pending';
 }
 

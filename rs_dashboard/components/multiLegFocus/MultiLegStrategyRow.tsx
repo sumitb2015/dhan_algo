@@ -105,9 +105,12 @@ export interface MultiLegStrategyRowProps {
     strike: number;
     expiry?: string;
     lots: number;
-    orderType: 'MARKET' | 'LIMIT';
+    orderType: 'MARKET' | 'LIMIT' | 'SL' | 'SLM';
     limitPrice?: number;
+    triggerPrice?: number;
   }) => Promise<void>;
+  /** Cancel one resting stop-entry order (Dhan). The poll removes it once Dhan confirms. */
+  onCancelWaitingEntry?: (orderId: string) => Promise<boolean>;
   /** Scale all open legs of this strategy by adding N multiplier units (BUYs first, then SELLs). */
   onScaleStrategy?: (multiplierDelta: number, expectedSignature?: string) => Promise<void>;
   scaling?: boolean;
@@ -159,6 +162,7 @@ export default function MultiLegStrategyRow({
   onAddLots,
   pnlNow,
   onAddNewLeg,
+  onCancelWaitingEntry,
   onScaleStrategy,
   scaling = false,
   placing,
@@ -1056,6 +1060,32 @@ export default function MultiLegStrategyRow({
               )}
             </>
           )}
+        </div>
+      )}
+
+      {(basket.waitingEntries?.length ?? 0) > 0 && (
+        <div className="px-4 py-2 border-t border-zinc-800/80 bg-amber-500/5 flex flex-col gap-1.5" aria-label="Waiting stop orders">
+          <span className="text-[10px] font-bold uppercase tracking-wider text-amber-400">
+            Waiting stop orders · open here only when they trade
+          </span>
+          {basket.waitingEntries!.map(w => (
+            <div key={w.orderId} className="flex items-center gap-2 text-[11px] font-mono tabular-nums text-zinc-300 flex-wrap">
+              <span className={w.side === 'B' ? 'text-emerald-400 font-bold' : 'text-red-400 font-bold'}>{w.side === 'B' ? 'BUY' : 'SELL'}</span>
+              <span>{w.strike} {w.option}</span>
+              <span className="text-zinc-500">{w.lots} lot{w.lots === 1 ? '' : 's'}</span>
+              <span>{w.orderType === 'SL' ? 'SL-L' : 'SL-M'} trigger ₹{w.triggerPrice.toFixed(2)}{w.orderType === 'SL' && w.limitPrice != null ? ` · limit ₹${w.limitPrice.toFixed(2)}` : ''}</span>
+              {onCancelWaitingEntry && (
+                <button
+                  type="button"
+                  onClick={() => { void onCancelWaitingEntry(w.orderId); }}
+                  aria-label={`Cancel stop order ${w.side === 'B' ? 'BUY' : 'SELL'} ${w.strike} ${w.option}`}
+                  className={`ml-auto h-6 px-2 rounded-md border border-zinc-700 text-[10px] font-bold text-zinc-300 hover:bg-zinc-800 ${FOCUS_RING}`}
+                >
+                  Cancel order
+                </button>
+              )}
+            </div>
+          ))}
         </div>
       )}
 
