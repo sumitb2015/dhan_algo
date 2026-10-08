@@ -118,7 +118,7 @@ function ownedRow(partial: Partial<FocusRow>, c: LiveCase): FocusRow {
 test('entry rules', async t => {
   for (const c of CASES.entry) {
     await t.test(c.name, () => {
-      const got = evaluateEntry(row(c.row), c.ctx);
+      const got = evaluateEntry(row(c.row), { tradingDay: true, ...c.ctx })   // the fixture is shared with the Python parity test, which has no calendar;
       assert.equal(got.enter, c.expect.enter);
       // The Python reports `None` where JS reports `null`; the fixture is
       // written in Python's spelling since that is what a log line shows.

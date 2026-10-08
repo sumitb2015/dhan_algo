@@ -12,6 +12,8 @@
 // way in (FocusTool fetchPositionsNow) and order quantities are scaled DOWN on
 // the way out (`orderQuantity`). Nothing in between needs to know.
 
+import { NSE_HOLIDAYS } from './nseHolidays.ts';
+
 export type FocusUnderlying = 'NIFTY' | 'BANKNIFTY' | 'SENSEX' | 'CRUDEOILM';
 
 export const FOCUS_UNDERLYINGS: readonly FocusUnderlying[] = ['NIFTY', 'BANKNIFTY', 'SENSEX', 'CRUDEOILM'];
@@ -73,3 +75,14 @@ export function orderQuantity(u: FocusUnderlying, internalQty: number): number {
 export const FEED_BRIDGE_UNDERLYINGS: readonly FocusUnderlying[] = ['NIFTY', 'BANKNIFTY', 'SENSEX'];
 export const FEED_SESSION_START_HM = '09:16';
 export const FEED_SESSION_END_HM = '15:30';
+
+/**
+ * Is `iso` ('YYYY-MM-DD', IST) a day this underlying can trade? Weekends never. NSE / BSE underlyings also skip the NSE holiday
+ * list (the repo's single source, lib/nseHolidays.ts). MCX has its own calendar, which this repo does not carry, so it is
+ * weekday-only: never blocks a day MCX might be open, at the cost of not knowing its own holidays.
+ */
+export function isTradingDayFor(u: FocusUnderlying, iso: string): boolean {
+  const day = new Date(`${iso}T00:00:00Z`).getUTCDay();
+  if (day === 0 || day === 6) return false;
+  return UNDERLYING_META[u].nseCalendar ? !NSE_HOLIDAYS.has(iso) : true;
+}

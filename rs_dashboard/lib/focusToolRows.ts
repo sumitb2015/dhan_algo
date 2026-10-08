@@ -583,6 +583,12 @@ export interface FocusRow {
   /** Set while a re-entry cycle is opening the row: how its legs enter. */
   overallReMode?: 'asap' | 'momentum';
   /**
+   * Overall Momentum while the row waits to enter: the strikes pinned at the entry time and the start premium, for one day.
+   * Saved so a reload or a leader-tab change keeps the trigger level instead of re-measuring from a new premium at a new ATM.
+   * Cleared on entry, disarm or a new day.
+   */
+  entryMomState?: { day: string; ref: number | null; ce: number | null; pe: number | null };
+  /**
    * Leg-wise target: the leg exits once its premium has decayed by this much
    * from its own entry — a % (entry × (1 − v/100)) or points (entry − v), per
    * legTgtUnit. Blank / 0 = off. (Named for the original %-only version;

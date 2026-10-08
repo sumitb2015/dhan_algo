@@ -19,7 +19,9 @@ import {
   evaluateOverallReentry, MAX_OVERALL_REENTRIES, evaluateEntry, momentumReentryKind,
   EMPTY_ROW_LIVE, type ChainQuote,
 } from './focusToolRules.ts';
-import { UNDERLYING_META, orderQuantity, type FocusUnderlying } from './focusToolUnderlyings.ts';
+import { readFileSync } from 'node:fs';
+import path from 'node:path';
+import { UNDERLYING_META, orderQuantity, isTradingDayFor, FOCUS_UNDERLYINGS, type FocusUnderlying } from './focusToolUnderlyings.ts';
 
 interface Mkt { u: FocusUnderlying; lot: number; step: number; atm: number; atmPrem: number }
 const MARKETS: Mkt[] = [
@@ -274,7 +276,7 @@ for (const m of MARKETS) {
     const exitTime = m.u === 'CRUDEOILM' ? '23:10' : '15:15';
     const row0 = { status: 'armed', lots: 1, dte: 'Any', entryTime, exitTime };
     const row = row0 as never;
-    const c = (nowHm: string, o: object = {}) => ({ nowHm, groupEnabled: true, product: 'INTRADAY' as const, backstopHm: meta.backstopHm, dte: 7, strikesReady: true, flat: true, ...o });
+    const c = (nowHm: string, o: object = {}) => ({ nowHm, groupEnabled: true, product: 'INTRADAY' as const, backstopHm: meta.backstopHm, dte: 7, strikesReady: true, flat: true, tradingDay: true, ...o });
     const hm = (x: string, d: number) => addMinutesHm(x, d)!;
     assert.match(evaluateEntry(row, c(hm(entryTime, -1))).reason, /waiting for/);
     assert.equal(evaluateEntry(row, c(entryTime)).enter, true);
@@ -312,3 +314,49 @@ for (const m of MARKETS) {
     assert.equal(momentumReentryKind({ ...base, ceRangeBreakout: { enabled: true, kind: 'intraday', end: '10:00', side: 'high', on: 'instrument' } } as never, 'CE'), 'range');
   });
 }
+
+// ── Trading day ──────────────────────────────────────────────────────────────
+test('trading day: weekends never, NSE / BSE skip NSE holidays, MCX is weekday-only', () => {
+  const SAT = '2026-10-10', SUN = '2026-10-11', FRI = '2026-10-09', HOLIDAY = '2026-10-20';   // Tuesday, on the NSE list
+  for (const u of FOCUS_UNDERLYINGS) {
+    assert.equal(isTradingDayFor(u, SAT), false, `${u} Saturday`);
+    assert.equal(isTradingDayFor(u, SUN), false, `${u} Sunday`);
+    assert.equal(isTradingDayFor(u, FRI), true, `${u} Friday`);
+  }
+  for (const u of ['NIFTY', 'BANKNIFTY', 'SENSEX'] as const) assert.equal(isTradingDayFor(u, HOLIDAY), false, `${u} NSE holiday`);
+  assert.equal(isTradingDayFor('CRUDEOILM', HOLIDAY), true, 'MCX has its own calendar; an NSE holiday must not block it');
+  // every underlying with nseCalendar set is blocked on a listed holiday, and the flag is what decides it
+  for (const u of FOCUS_UNDERLYINGS) assert.equal(isTradingDayFor(u, HOLIDAY), !UNDERLYING_META[u].nseCalendar);
+});
+
+test('entry is refused on a closed day, whatever else is true, and the reason says so', () => {
+  const row = { status: 'armed', lots: 1, dte: 'Any', entryTime: '09:20', exitTime: '15:15' } as never;
+  const ctx = { nowHm: '09:30', groupEnabled: true, product: 'INTRADAY' as const, backstopHm: '15:17', dte: 3, strikesReady: true, flat: true, tradingDay: true };
+  assert.equal(evaluateEntry(row, ctx).enter, true);
+  const closed = evaluateEntry(row, { ...ctx, tradingDay: false });
+  assert.equal(closed.enter, false);
+  assert.equal(closed.reason, 'market closed today');
+});
+
+// The page passes today's date through isTradingDayFor (tsc enforces the field is present; this checks it is the real check).
+test('FocusTool passes isTradingDayFor(row.underlying, today) to the entry decision', () => {
+  const src = readFileSync(path.join(import.meta.dirname, '..', 'components', 'FocusTool.tsx'), 'utf-8');
+  assert.match(src, /tradingDay: isTradingDayFor\(row\.underlying, istToday\(\)\)/);
+});
+
+// ── Persisted Overall Momentum ───────────────────────────────────────────────
+test('Overall Momentum keeps its start premium and pinned strikes across a reload, and drops them on entry / disarm / new day', () => {
+  const src = readFileSync(path.join(import.meta.dirname, '..', 'components', 'FocusTool.tsx'), 'utf-8');
+  assert.match(src, /row\.entryMomState\?\.day === today/);                                              // hydrated from the row
+  assert.match(src, /updateRow\(row\.id, \{ entryMomState: \{ day: st\.day, ref: st\.ref, ce: st\.ce, pe: st\.pe \} \}\)/);   // saved
+  assert.match(src, /row\.entryMomState && \(enter \|\| row\.status !== 'armed' \|\| row\.entryMomState\.day !== istToday\(\)\)/);   // cleared
+  // saved only on a change, never every tick
+  assert.match(src, /saved\.ref !== st\.ref \|\| saved\.ce !== st\.ce \|\| saved\.pe !== st\.pe/);
+});
+
+// ── Enter commits once ───────────────────────────────────────────────────────
+test('Enter in a rule / time input commits through blur only (it used to commit twice)', () => {
+  const src = readFileSync(path.join(import.meta.dirname, '..', 'components', 'FocusTool.tsx'), 'utf-8');
+  assert.equal((src.match(/if \(e\.key === 'Enter'\) \(e\.target as HTMLInputElement\)\.blur\(\);/g) ?? []).length, 2);
+  assert.doesNotMatch(src, /if \(e\.key === 'Enter'\) \{ commit\(/);
+});
