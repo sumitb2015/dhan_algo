@@ -69,8 +69,12 @@ export function useDailyMarketWS(): DailyMarketWSState {
   const pendingQuotesRef = useRef<Record<string, DailyMarketQuote> | null>(null);
   const retryTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const pollIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const flashClearRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const retryDelayRef = useRef<number>(WS_RETRY_BASE_MS);
   const isDisposedRef = useRef<boolean>(false);
+  const portRef = useRef<number>(8975);
+  const userStoppedRef = useRef<boolean>(false);
+  const autoStartedRef = useRef<boolean>(false);
 
   // ── Flush Batched Updates to React State ───────────────────────────────────
   const scheduleFlush = useCallback(() => {
@@ -97,9 +101,12 @@ export function useDailyMarketWS(): DailyMarketWSState {
       setQuotes(merged);
       setLastTickTime(new Date());
 
+      // Flash only what changed in THIS flush; one shared timer so an older timeout
+      // can't wipe a newer flash early.
+      setFlashMap(newFlash);
+      if (flashClearRef.current) clearTimeout(flashClearRef.current);
       if (Object.keys(newFlash).length > 0) {
-        setFlashMap(prev => ({ ...prev, ...newFlash }));
-        setTimeout(() => {
+        flashClearRef.current = setTimeout(() => {
           if (!isDisposedRef.current) setFlashMap({});
         }, 500);
       }
@@ -119,18 +126,21 @@ export function useDailyMarketWS(): DailyMarketWSState {
       }
 
       const port = json.ws_port || 8975;
+      portRef.current = port;
       setWsPort(port);
 
       const bStatus = json.status?.status || 'STOPPED';
       setBridgeStatus(bStatus);
 
-      // Seed quotes if available
+      // Seed quotes if available. While the WebSocket is live its frames are fresher than the
+      // 1s-old file snapshot, so only seed from the file when no WS is open (else values flicker back).
+      const wsOpen = wsRef.current?.readyState === WebSocket.OPEN;
       const incomingQuotes = json.quotes?.quotes as Record<string, DailyMarketQuote> | undefined;
-      if (incomingQuotes && Object.keys(incomingQuotes).length > 0) {
+      if (!wsOpen && incomingQuotes && Object.keys(incomingQuotes).length > 0) {
         quotesRef.current = { ...quotesRef.current, ...incomingQuotes };
         setQuotes(quotesRef.current);
         setIsLoading(false);
-      } else if (json.baseline?.baseline) {
+      } else if (!wsOpen && json.baseline?.baseline) {
         // Fallback seed from baseline cache if live quotes haven't arrived yet
         const base = json.baseline.baseline as Record<string, any>;
         const seeded: Record<string, DailyMarketQuote> = {};
@@ -164,8 +174,10 @@ export function useDailyMarketWS(): DailyMarketWSState {
         }
       }
 
-      // Auto start bridge if stopped
-      if (bStatus === 'STOPPED') {
+      // Auto-start once per page load, and never after the user pressed Stop
+      // (otherwise the next 3s poll immediately undoes the Stop).
+      if (bStatus === 'STOPPED' && !userStoppedRef.current && !autoStartedRef.current) {
+        autoStartedRef.current = true;
         fetch('/api/daily-market', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -220,7 +232,7 @@ export function useDailyMarketWS(): DailyMarketWSState {
         const delay = retryDelayRef.current;
         retryDelayRef.current = Math.min(delay * 1.5, WS_RETRY_MAX_MS);
         retryTimeoutRef.current = setTimeout(() => {
-          connectWebSocket(port);
+          connectWebSocket(portRef.current);
         }, delay);
       };
 
@@ -233,8 +245,18 @@ export function useDailyMarketWS(): DailyMarketWSState {
     }
   }, [scheduleFlush]);
 
+  // Close the socket WITHOUT letting its onclose reschedule a reconnect or null a newer wsRef.
+  const detachWebSocket = useCallback(() => {
+    const ws = wsRef.current;
+    wsRef.current = null;
+    if (!ws) return;
+    ws.onopen = ws.onmessage = ws.onclose = ws.onerror = null;
+    try { ws.close(); } catch { /* ignore */ }
+  }, []);
+
   // ── Actions ────────────────────────────────────────────────────────────────
   const startBridge = useCallback(async () => {
+    userStoppedRef.current = false;
     try {
       const res = await fetch('/api/daily-market', {
         method: 'POST',
@@ -243,18 +265,18 @@ export function useDailyMarketWS(): DailyMarketWSState {
       });
       const data = await res.json();
       if (data.ws_port) {
+        portRef.current = data.ws_port;
         setWsPort(data.ws_port);
-        if (wsRef.current) {
-          wsRef.current.close();
-          wsRef.current = null;
-        }
+        detachWebSocket();
+        if (retryTimeoutRef.current) clearTimeout(retryTimeoutRef.current);
         setTimeout(() => connectWebSocket(data.ws_port), 1000);
       }
       setBridgeStatus('RUNNING');
     } catch { /* ignore */ }
-  }, [connectWebSocket]);
+  }, [connectWebSocket, detachWebSocket]);
 
   const stopBridge = useCallback(async () => {
+    userStoppedRef.current = true;
     try {
       await fetch('/api/daily-market', {
         method: 'POST',
@@ -263,12 +285,10 @@ export function useDailyMarketWS(): DailyMarketWSState {
       });
       setBridgeStatus('STOPPED');
       setWsStatus('stopped');
-      if (wsRef.current) {
-        wsRef.current.close();
-        wsRef.current = null;
-      }
+      if (retryTimeoutRef.current) clearTimeout(retryTimeoutRef.current);
+      detachWebSocket();
     } catch { /* ignore */ }
-  }, []);
+  }, [detachWebSocket]);
 
   // ── Main Effect ────────────────────────────────────────────────────────────
   useEffect(() => {
@@ -285,15 +305,13 @@ export function useDailyMarketWS(): DailyMarketWSState {
 
     return () => {
       isDisposedRef.current = true;
-      if (wsRef.current) {
-        wsRef.current.close();
-        wsRef.current = null;
-      }
+      detachWebSocket();
+      if (flashClearRef.current) clearTimeout(flashClearRef.current);
       if (flushTimerRef.current) clearTimeout(flushTimerRef.current);
       if (retryTimeoutRef.current) clearTimeout(retryTimeoutRef.current);
       if (pollIntervalRef.current) clearInterval(pollIntervalRef.current);
     };
-  }, [fetchStatusAndQuotes, connectWebSocket, wsPort]);
+  }, [fetchStatusAndQuotes, connectWebSocket, detachWebSocket, wsPort]);
 
   return {
     quotes,

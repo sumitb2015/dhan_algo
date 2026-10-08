@@ -29,6 +29,7 @@ import {
 } from 'lucide-react';
 import { useDailyMarketWS, DailyMarketQuote } from '@/lib/useDailyMarketWS';
 import NavBar from './NavBar';
+import { istDateIso, isRegularSession, isNseTradingDay } from '@/lib/nseHolidays';
 
 interface CustomTab {
   id: string;
@@ -97,6 +98,8 @@ export default function DailyMarketTerminal() {
   // ── IST Clock ──────────────────────────────────────────────────────────────
   const [istTime, setIstTime] = useState<string>('');
   const [isMarketOpen, setIsMarketOpen] = useState<boolean>(false);
+  // Diwali Muhurat day: a one-hour evening session whose time isn't in the calendar, so don't guess OPEN/CLOSED.
+  const [isMuhurat, setIsMuhurat] = useState<boolean>(false);
 
   useEffect(() => {
     const updateTime = () => {
@@ -114,14 +117,30 @@ export default function DailyMarketTerminal() {
       const istHours = Number(istString.split(':')[0]);
       const istMins = Number(istString.split(':')[1]);
       const currentMins = istHours * 60 + istMins;
-      const day = now.getDay();
-      const isWeekday = day >= 1 && day <= 5;
-      setIsMarketOpen(isWeekday && currentMins >= 9 * 60 + 15 && currentMins <= 15 * 60 + 30);
+      // IST calendar day (not the browser's) and the shared NSE holiday calendar.
+      const iso = istDateIso(now);
+      setIsMuhurat(isNseTradingDay(iso) && !isRegularSession(iso));
+      setIsMarketOpen(
+        isRegularSession(iso) && currentMins >= 9 * 60 + 15 && currentMins <= 15 * 60 + 30
+      );
     };
 
     updateTime();
     const interval = setInterval(updateTime, 1000);
     return () => clearInterval(interval);
+  }, []);
+
+  // ── F1/F2/F3 function keys switch the system tabs ──────────────────────────
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      const tab = e.key === 'F1' ? 'nifty50' : e.key === 'F2' ? 'banknifty' : e.key === 'F3' ? 'nifty500' : null;
+      if (!tab || e.ctrlKey || e.altKey || e.metaKey || e.shiftKey) return;
+      e.preventDefault();
+      setActiveTab(tab);
+      setCurrentPage(1);
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
   }, []);
 
   // ── Load Custom Tabs from localStorage ─────────────────────────────────────
@@ -301,7 +320,7 @@ export default function DailyMarketTerminal() {
     let totalTurnoverCr = 0;
 
     for (const r of activeRows) {
-      if (r.ltp === 0 && r.prev_close === 0) continue;
+      if (r.ltp <= 0) continue;
       if (r.change_pct > 0) advances++;
       else if (r.change_pct < 0) declines++;
       else unchanged++;
@@ -363,6 +382,8 @@ export default function DailyMarketTerminal() {
 
     // Sorting
     return [...result].sort((a, b) => {
+      // Rows with no price yet always sink to the bottom, whatever the sort.
+      if ((a.ltp > 0) !== (b.ltp > 0)) return a.ltp > 0 ? -1 : 1;
       let aVal = a[sortField];
       let bVal = b[sortField];
 
@@ -379,8 +400,11 @@ export default function DailyMarketTerminal() {
 
   // ── Pagination ─────────────────────────────────────────────────────────────
   const totalPages = Math.ceil(filteredAndSortedRows.length / pageSize) || 1;
+  useEffect(() => {
+    if (currentPage > totalPages) setCurrentPage(totalPages);
+  }, [currentPage, totalPages]);
   const paginatedRows = useMemo(() => {
-    if (pageSize >= 500) return filteredAndSortedRows;
+    if (pageSize >= 100000) return filteredAndSortedRows;
     const start = (currentPage - 1) * pageSize;
     return filteredAndSortedRows.slice(start, start + pageSize);
   }, [filteredAndSortedRows, currentPage, pageSize]);
@@ -421,7 +445,7 @@ export default function DailyMarketTerminal() {
         <div className="flex flex-wrap items-center justify-between gap-2 border-b border-zinc-800/80 pb-2.5">
           <div className="flex flex-wrap items-center gap-1.5 font-mono text-[11px]">
             <button
-              onClick={() => setActiveTab('nifty50')}
+              onClick={() => { setActiveTab('nifty50'); setCurrentPage(1); }}
               className={`flex items-center gap-1 px-2.5 py-1 rounded transition-colors ${
                 activeTab === 'nifty50'
                   ? 'bg-amber-500/20 text-amber-400 border border-amber-500/40 font-bold'
@@ -431,7 +455,7 @@ export default function DailyMarketTerminal() {
               <span className="text-[9px] font-bold text-amber-400/80">[F1]</span> NIFTY 50
             </button>
             <button
-              onClick={() => setActiveTab('banknifty')}
+              onClick={() => { setActiveTab('banknifty'); setCurrentPage(1); }}
               className={`flex items-center gap-1 px-2.5 py-1 rounded transition-colors ${
                 activeTab === 'banknifty'
                   ? 'bg-amber-500/20 text-amber-400 border border-amber-500/40 font-bold'
@@ -441,7 +465,7 @@ export default function DailyMarketTerminal() {
               <span className="text-[9px] font-bold text-amber-400/80">[F2]</span> BANK NIFTY
             </button>
             <button
-              onClick={() => setActiveTab('nifty500')}
+              onClick={() => { setActiveTab('nifty500'); setCurrentPage(1); }}
               className={`flex items-center gap-1 px-2.5 py-1 rounded transition-colors ${
                 activeTab === 'nifty500'
                   ? 'bg-amber-500/20 text-amber-400 border border-amber-500/40 font-bold'
@@ -467,12 +491,14 @@ export default function DailyMarketTerminal() {
               <span className="tabular-nums text-zinc-300 font-semibold">{istTime || '--:--:--'} IST</span>
               <span
                 className={`ml-1 text-[9px] px-1 py-0.2 rounded font-bold uppercase ${
-                  isMarketOpen
+                  isMuhurat
+                    ? 'bg-amber-500/20 text-amber-400 border border-amber-500/30'
+                    : isMarketOpen
                     ? 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/30'
                     : 'bg-zinc-800 text-zinc-500 border border-zinc-700'
                 }`}
               >
-                {isMarketOpen ? 'OPEN' : 'CLOSED'}
+                {isMuhurat ? 'MUHURAT' : isMarketOpen ? 'OPEN' : 'CLOSED'}
               </span>
             </div>
 
@@ -533,7 +559,7 @@ export default function DailyMarketTerminal() {
 
             <div className="flex items-center gap-2.5">
               <span className="rounded px-2 py-0.5 font-mono text-[10px] font-bold border border-zinc-800 bg-zinc-950 text-zinc-400">
-                DATA: {lastTickTime ? lastTickTime.toLocaleTimeString('en-IN') : 'CONNECTING'}
+                DATA: {lastTickTime ? istDateIso(lastTickTime) : 'CONNECTING'}
               </span>
               <span className="rounded px-2 py-0.5 font-mono text-[10px] font-bold border border-zinc-800 bg-zinc-950 text-amber-400">
                 {activeRows.length} STOCKS
@@ -887,7 +913,7 @@ export default function DailyMarketTerminal() {
                 <option value={50}>50</option>
                 <option value={100}>100</option>
                 <option value={250}>250</option>
-                <option value={500}>All (500)</option>
+                <option value={100000}>All</option>
               </select>
             </div>
           </div>
@@ -1265,7 +1291,8 @@ export default function DailyMarketTerminal() {
                 Previous
               </button>
               {Array.from({ length: Math.min(5, totalPages) }, (_, i) => {
-                const pageNum = i + 1;
+                const windowStart = Math.max(1, Math.min(currentPage - 2, totalPages - 4));
+                const pageNum = windowStart + i;
                 return (
                   <button
                     key={pageNum}

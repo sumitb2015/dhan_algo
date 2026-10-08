@@ -7,10 +7,11 @@ and runs a local WebSocket push server for the Bloomberg-style Daily Market term
 Features:
 - On startup: checks database (Daily_Historical_Data_Fresh/*_Daily_2Y.csv) and caches
   the previous day's close, 52W High, and 52W Low for all Nifty 500 stocks.
-- Checks if percentage change is already provided in the WebSocket data; if so,
-  uses it directly without recomputing. Otherwise computes:
+- Previous close: Dhan's own tick prev_close/close when it is genuine (not the
+  post-15:30 flip where close == LTP), cached per day; else the CSV close.
   change = ltp - prev_close
   change_pct = (change / prev_close) * 100
+- 52W high/low start from the CSV and are widened by live day high/low.
 - Serves live real-time frames over local WebSocket (ws://127.0.0.1:<port>) and writes
   debug/daily_market_quotes.json & debug/daily_market_status.json for HTTP seeding.
 - Graceful stop via debug/daily_market_stop.trigger.
@@ -23,6 +24,9 @@ import glob
 import asyncio
 import argparse
 import threading
+import signal
+from http import HTTPStatus
+from urllib.parse import urlparse
 from datetime import datetime
 from zoneinfo import ZoneInfo
 from typing import Dict, Any, List, Optional, Tuple
@@ -76,6 +80,17 @@ class QuotePushServer:
         self._latest_payload: Optional[str] = None
         self._started = threading.Event()
 
+    @staticmethod
+    def _check_origin(connection, request):
+        """Browsers always send Origin; refuse any page that isn't served from localhost
+        so an arbitrary website open in the same browser can't read the feed."""
+        origin = request.headers.get('Origin')
+        if origin:
+            host = (urlparse(origin).hostname or '').lower()
+            if host not in ('localhost', '127.0.0.1', '::1'):
+                return connection.respond(HTTPStatus.FORBIDDEN, 'Forbidden origin\n')
+        return None
+
     async def _handler(self, ws):
         self.clients.add(ws)
         try:
@@ -93,7 +108,7 @@ class QuotePushServer:
         asyncio.set_event_loop(self.loop)
 
         async def _bind():
-            self.server = await ws_serve(self._handler, '127.0.0.1', self.port)
+            self.server = await ws_serve(self._handler, '127.0.0.1', self.port, process_request=self._check_origin)
             self.bound = True
 
         try:
@@ -309,6 +324,27 @@ def main():
     args = parser.parse_args()
 
     os.makedirs(DEBUG_DIR, exist_ok=True)
+
+    # Single-instance guard: the dashboard route dedups too, but a manual run must not
+    # start a second bridge next to a live one. The route writes STARTING with the child's
+    # own pid, so our own pid is never a conflict.
+    try:
+        with open(STATUS_FILE, 'r') as f:
+            prev = json.load(f)
+        prev_pid = prev.get('pid')
+        if (prev.get('status') in ('RUNNING', 'STARTING') and prev_pid
+                and int(prev_pid) != os.getpid() and hub_client.is_pid_running(int(prev_pid))):
+            print(f'[daily_market_ws] Already running (pid {prev_pid}) — exiting.', flush=True)
+            sys.exit(0)
+    except (OSError, ValueError, TypeError):
+        pass
+
+    # Treat SIGTERM like Ctrl-C so the finally block unregisters from the hub.
+    try:
+        signal.signal(signal.SIGTERM, lambda *_: (_ for _ in ()).throw(KeyboardInterrupt()))
+    except (ValueError, OSError):
+        pass
+
     started_at = datetime.now().isoformat()
     write_status('STARTING', ws_port=args.ws_port, started_at=started_at)
     print(f'[daily_market_ws] Starting Daily Market Bridge on port {args.ws_port}...', flush=True)
@@ -366,6 +402,8 @@ def main():
     last_hub_check = time.monotonic()
     last_broadcast_quotes: Dict[str, Any] = {}
     last_file_write = 0.0
+    prev_close_cache: Dict[str, float] = {}
+    cache_day = ''
 
     print('[daily_market_ws] Bridge active. Streaming quotes...', flush=True)
 
@@ -390,6 +428,10 @@ def main():
                     hub_client.ensure_hub_running()
 
             live_ticks = hub_client.read_live_data()
+            today_key = datetime.now(IST).strftime('%Y-%m-%d')
+            if today_key != cache_day:
+                prev_close_cache.clear()
+                cache_day = today_key
             current_quotes: Dict[str, Dict[str, Any]] = {}
 
             for sid, sym in sid_to_sym.items():
@@ -401,6 +443,10 @@ def main():
                 industry = base.get('industry', 'General')
 
                 tick = live_ticks.get(hub_client.tick_key(NSE_EQ, sid))
+                # A tick with no LTP (e.g. an OI/prev-close-only packet) must not blank the row —
+                # fall through to the baseline seed instead.
+                if tick and float(tick.get('LTP') or tick.get('last_price') or 0.0) <= 0.0:
+                    tick = None
                 if tick:
                     ltp = float(tick.get('LTP') or tick.get('last_price') or 0.0)
                     open_ = float(tick.get('open') or 0.0)
@@ -409,19 +455,23 @@ def main():
                     volume = int(tick.get('volume') or 0)
                     vwap = float(tick.get('avg_price') or 0.0)
 
-                    # Check if change_pct is already fetched / available from the websocket tick
-                    ws_chg_pct = tick.get('change_pct')
-                    if ws_chg_pct is not None and float(ws_chg_pct) != 0.0:
-                        change_pct = float(ws_chg_pct)
-                        change = float(tick.get('change') or (ltp * change_pct / 100.0))
+                    # Prefer Dhan's own previous close over the CSV (the CSV can lag a day).
+                    # A raw close equal to LTP is Dhan's post-15:30 flip, not a real close —
+                    # ignore it, and keep the first genuine value for the rest of the day.
+                    cached = prev_close_cache.get(sym)
+                    if cached is None:
+                        raw_close = float(tick.get('prev_close') or tick.get('close') or 0.0)
+                        if raw_close > 0.0 and raw_close != ltp:
+                            prev_close_cache[sym] = cached = raw_close
+                    if cached:
+                        prev_close = cached
+
+                    if prev_close > 0.0:
+                        change = round(ltp - prev_close, 2)
+                        change_pct = round((change / prev_close) * 100.0, 4)
                     else:
-                        # Compute using cached previous day's close from database
-                        if prev_close > 0.0 and ltp > 0.0:
-                            change = round(ltp - prev_close, 2)
-                            change_pct = round((change / prev_close) * 100.0, 4)
-                        else:
-                            change = 0.0
-                            change_pct = 0.0
+                        change = 0.0
+                        change_pct = 0.0
 
                     if high == 0.0 and ltp > 0.0:
                         high = ltp
@@ -441,6 +491,12 @@ def main():
                     vwap = ltp
                     change = round(ltp - prev_close, 2) if prev_close > 0.0 else 0.0
                     change_pct = round((change / prev_close) * 100.0, 4) if prev_close > 0.0 else 0.0
+
+                # Widen the CSV-based 52W range with today's live extremes.
+                if high > 0.0:
+                    high_52w = max(high_52w, high)
+                if low > 0.0:
+                    low_52w = min(low_52w, low) if low_52w > 0.0 else low
 
                 turnover_cr = round((volume * (vwap or ltp)) / 10_000_000.0, 2) if volume > 0 else 0.0
 

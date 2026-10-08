@@ -263,6 +263,13 @@ code stays inside the token system — a new themed surface must also get a
   `text-zinc-200`, `text-zinc-300` (body), `text-zinc-400` (secondary), `text-zinc-500`
   (muted), `text-zinc-600` (very dim). Opacity is fine on backgrounds
   (`bg-emerald-500/10`).
+- **Accepted "terminal glass" style (Daily Market, `components/DailyMarketTerminal.tsx`) — not
+  violations; don't "fix" them in review:** slash-opacity on *accent* text (`text-amber-400/80`, `/90`)
+  and accent tints on backgrounds/borders (`bg-amber-500/20`, `border-amber-500/40`); small `rgba()`
+  accent glow shadows on status dots and range markers (`shadow-[0_0_8px_rgba(52,211,153,0.8)]`);
+  per-column `text-zinc-400` on a `<th>` inside the `bg-zinc-800` thead for de-emphasised columns
+  (`#`, Action); an amber accent with an F-key ribbon (`[F1]`) for Bloomberg-style pages. The rules
+  above still bind neutral text (`text-white/70`, `text-zinc-400/50`), chrome colours and hex values.
 - Changing the palette, adding a themed surface or an injected `<style>` block, or
   chasing a component that won't flip? Use the **`dhan-theme-tokens`** skill — it
   covers why `@theme inline` must reference a var, the `--lc-*` panel tokens, and the

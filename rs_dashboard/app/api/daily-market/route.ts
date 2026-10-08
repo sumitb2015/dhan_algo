@@ -137,10 +137,16 @@ export async function POST(request: NextRequest) {
   // ── Start Action ───────────────────────────────────────────────────────────
   if (action === 'start') {
     const status = readJson<StatusPayload>(STATUS_FILE);
-    if (status && status.pid && status.status === 'RUNNING' && isPidRunning(Number(status.pid))) {
+    // STARTING counts: the bridge spends several seconds loading baselines and resolving
+    // security ids before it flips to RUNNING, and the start lock is already released by then.
+    if (
+      status && status.pid &&
+      (status.status === 'RUNNING' || status.status === 'STARTING') &&
+      isPidRunning(Number(status.pid))
+    ) {
       return NextResponse.json({
         success: true,
-        message: 'Bridge already running',
+        message: status.status === 'STARTING' ? 'Bridge start already in progress' : 'Bridge already running',
         pid: status.pid,
         ws_port: status.ws_port ?? 8975,
       });
