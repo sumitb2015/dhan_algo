@@ -664,6 +664,21 @@ export function costStopApplies(
 }
 
 /**
+ * AlgoTest legwise "Square Off". When a leg's own SL or target closes it:
+ *  - Partial (default): only that leg → null, the caller carries on with
+ *    SL-to-cost and re-entry;
+ *  - Complete: the strategy is over → the OTHER legs this row owns, which the
+ *    caller closes too (possibly none), with no SL-to-cost and no re-entry.
+ * A cost-stop exit never squares off the row.
+ */
+export function squareOffLegs(
+  row: Pick<FocusRow, 'squareOff' | 'fill'>, leg: 'CE' | 'PE', kind: 'sl' | 'tgt' | 'cost', workerHold?: WorkerHold,
+): ('CE' | 'PE')[] | null {
+  if ((kind !== 'sl' && kind !== 'tgt') || row.squareOff !== 'complete') return null;
+  return (['CE', 'PE'] as const).filter(l => l !== leg && rowOwnsLeg(row, l, workerHold));
+}
+
+/**
  * The SL-to-cost breach on a leg, or null.
  *
  * Only live once the sibling leg's own SL × has fired (fill.ceCostStop /

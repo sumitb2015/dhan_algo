@@ -50,7 +50,7 @@ import {
   multipliedLots, clampHm, rangeWindow, rangeWindowPhase, rowHasMultiDayRange, candleBucket, tradingDte,
   legSlRuleOn, legStopLevel, legTargetSpotLevel, legTgtUnitLabel, MAX_LEG_REENTRIES, pendingReentryLevel, pendingReentryHit, legTargetReason, costReentryBasis,
   awaitingMomentumQuote, MOMENTUM_QUOTE_WAIT_MS, legTargetLevel,
-  evaluateEntryMomentum, reRangeWindow, entryMomentumOn, overallSlConfig, overallProgress, nextOverallPeak, evaluateOverallExit, overallExitKind, evaluateOverallReentry, MAX_OVERALL_REENTRIES, rangeBreakoutOn, rangeBreakoutHit, costStopApplies, MAX_LAZY_LEGS, legSlMultiplier, legTarget, nextLazyLegId, lazyLegStrike, runningLazyLeg, simpleMomOn, simpleMomLevel, simpleMomHit,
+  evaluateEntryMomentum, reRangeWindow, entryMomentumOn, overallSlConfig, overallProgress, nextOverallPeak, evaluateOverallExit, overallExitKind, evaluateOverallReentry, MAX_OVERALL_REENTRIES, rangeBreakoutOn, rangeBreakoutHit, costStopApplies, squareOffLegs, MAX_LAZY_LEGS, legSlMultiplier, legTarget, nextLazyLegId, lazyLegStrike, runningLazyLeg, simpleMomOn, simpleMomLevel, simpleMomHit,
   type PosRow, type RowLive,
 } from '@/lib/focusToolRules';
 import { postFocusEvent } from '@/lib/focusToolEvents';
@@ -4340,8 +4340,9 @@ export function FocusModal({
 export default function FocusTool() {
   const { broker, setBroker, authenticatedBrokers, hasAuthenticatedBroker, authChecked } = useBrokerSelector();
   const [toasts, setToasts] = useState<Toast[]>([]);
+  const toastSeqRef = useRef(0);
   const addToast = useCallback((type: 'success' | 'error', message: string, detail?: string) => {
-    const id = Date.now().toString();
+    const id = `${Date.now()}-${++toastSeqRef.current}`;   // Date.now() alone collides for the CE + PE toasts of one tick
     setToasts(prev => [...prev, { id, type, message, detail }]);
     setTimeout(() => setToasts(prev => prev.filter(t => t.id !== id)), 4000);
   }, []);
@@ -7496,10 +7497,10 @@ export default function FocusTool() {
         // SL-to-cost and no re-entry — straight to the flat check below.
         const latest = schedulerRef.current.config.rows.find(r => r.id === row.id);
         let squaredOff = false;
-        if ((kind === 'sl' || kind === 'tgt') && latest?.squareOff === 'complete') {
+        const rest = latest ? squareOffLegs(latest, leg, kind) : null;
+        if (latest && rest) {
           squaredOff = true;
           patchFill(row.id, () => ({ cePending: null, pePending: null }));
-          const rest = (['CE', 'PE'] as const).filter(l => l !== leg && rowOwnsLeg(latest, l));
           if (rest.length) {
             addToast('error', `${row.underlying} Square Off Complete`, `${leg} ${kind === 'sl' ? 'SL' : 'target'} hit — closing ${rest.join(' + ')} too`);
             const closed = await Promise.all(rest.map(l => placeLeg(latest, l, { reduce: true, all: true, awaitFill: true })));
