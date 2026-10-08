@@ -182,6 +182,18 @@ test('reconcileLegWithBroker leaves leg untouched when match is not_found', () =
   assert.strictEqual(reconciled.fill?.qty, 65);
 });
 
+test('reconcileLegWithBroker closes a not_found leg opened on an earlier IST day, keeps a same-day one', () => {
+  const leg: MultiLegLeg = { id: '1', side: 'S', option: 'PE', strike: 8000, lots: 20, type: 'MARKET', status: 'OPEN', fill: { qty: 200, avgPrice: 90.29 }, orderRef: { securityId: '580912' } };
+  const now = Date.parse('2026-10-08T05:00:00Z');
+  const nf = { kind: 'not_found' as const };
+  const closed = reconcileLegWithBroker(leg, nf, 200, 10, now, Date.parse('2026-10-07T11:06:00Z'));
+  assert.strictEqual(closed.status, 'CLOSED');
+  assert.strictEqual(closed.fill?.qty, 0);
+  assert.strictEqual(closed.closedAt, now);
+  assert.strictEqual(reconcileLegWithBroker(leg, nf, 200, 10, now, Date.parse('2026-10-08T04:00:00Z')).status, 'OPEN');
+  assert.strictEqual(reconcileLegWithBroker(leg, nf, 200, 10, now).status, 'OPEN');
+});
+
 test('reconcileLegWithBroker updates lots to match broker filled qty / lotSize', () => {
   const leg: MultiLegLeg = { id: '1', side: 'S', option: 'CE', strike: 24300, lots: 2, type: 'MARKET', status: 'OPEN', fill: { qty: 65, avgPrice: 56.4 }, orderRef: { securityId: '47331' } };
   const match = { kind: 'match' as const, row: { securityId: '47331', netQty: -65, sellAvg: 56.4 } };

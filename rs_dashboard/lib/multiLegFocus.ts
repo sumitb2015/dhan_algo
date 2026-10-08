@@ -696,8 +696,14 @@ export function closedFillFromRow(
  *   Marks status as 'CLOSED', zeroes fill quantity, and — when the row is
  *   available — captures `closedFill` (see closedFillFromRow) so P&L stays
  *   at the realized number.
- * - If broker position is not found or ambiguous:
- *   Leaves the leg untouched (handles API propagation lag after order placement).
+ * - If broker position is not found:
+ *   Leaves the leg untouched (handles API propagation lag after order placement)
+ *   — unless the leg was opened on an EARLIER IST day (`openedSince`). Dhan drops
+ *   a flat row when the day rolls, and a still-open overnight position stays in
+ *   the book, so a missing row then means it was closed; without this a leg
+ *   closed while the page was shut stayed OPEN forever (Crude basket, 2026-10-08).
+ *   No exit price is recoverable from a missing row, so no closedFill is set.
+ * - If broker position is ambiguous: leaves the leg untouched.
  */
 /** How long after this tool grows a leg's ledger that a smaller/flat broker
  *  read is treated as position-book lag rather than a real reduction. */
@@ -719,8 +725,9 @@ export function reconcileLegWithBroker(
   ownQtyHint?: number | null,
   lotSize?: number | null,
   now: number = Date.now(),
+  openedSince?: number | null,
 ): MultiLegLeg {
-  const next = reconcileLegWithBrokerRaw(leg, match, ownQtyHint, lotSize, now);
+  const next = reconcileLegWithBrokerRaw(leg, match, ownQtyHint, lotSize, now, openedSince);
   // Propagation grace (skill invariant 6): right after this tool's own order
   // grew the leg, the broker can still show the OLD (smaller) qty, or flat.
   // Reconciliation only ever moves DOWN, so acting on that stale read would
@@ -772,6 +779,7 @@ function reconcileLegWithBrokerRaw(
   ownQtyHint?: number | null,
   lotSize?: number | null,
   now: number = Date.now(),
+  openedSince?: number | null,
 ): MultiLegLeg {
   if (leg.status === 'CLOSED') return leg;
 
@@ -816,7 +824,18 @@ function reconcileLegWithBrokerRaw(
     };
   }
 
-  // 'not_found' or 'ambiguous' -> leave untouched
+  if (match.kind === 'not_found' && leg.status === 'OPEN' && !(leg.pendingOrders?.length)
+      && (leg.fill?.qty ?? 0) > 0 && openedSince != null && Number.isFinite(openedSince)
+      && istDay(openedSince) < istDay(now)) {
+    return {
+      ...leg,
+      status: 'CLOSED',
+      closedAt: now,
+      fill: { qty: 0, avgPrice: leg.fill?.avgPrice ?? 0 },
+    };
+  }
+
+  // 'not_found' (same day) or 'ambiguous' -> leave untouched
   return leg;
 }
 

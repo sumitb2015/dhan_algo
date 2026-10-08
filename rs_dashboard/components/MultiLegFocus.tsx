@@ -2916,7 +2916,10 @@ export default function MultiLegFocus({
                 const match = findLegPosition(basket.broker, leg, basketRows, fallbackSecId);
                 // reconcileLegWithBroker compares against `leg` (post order-outcome);
                 // the change check below compares against the original.
-                let reconciled = reconcileLegWithBroker(leg, match, leg.lots * lotSize, lotSize);
+                let reconciled = reconcileLegWithBroker(
+                  leg, match, leg.lots * lotSize, lotSize, Date.now(),
+                  leg.filledAt ?? (Date.parse(basket.createdAt) || null),
+                );
                 // Self-heal a leg that only ever recorded a symbol/no securityId
                 // (see resolveDhanSecurityId) as soon as the poll resolves one,
                 // so it stops being permanently unmatchable for future exits.
