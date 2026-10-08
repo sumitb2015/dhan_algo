@@ -42,6 +42,7 @@ const NAV_GROUPS = [
     label: 'Equity',
     icon: TrendingUp,
     links: [
+      { href: '/daily-market', label: 'Daily Market', desc: 'Real-time WebSocket terminal for Nifty 50, Bank Nifty & Nifty 500 with custom watchlists' },
       { href: '/stage-screener', label: 'Stage Screener', desc: 'Minervini 8-point Trend Template & Stage 2 breakout screener' },
       { href: '/trend-confluence', label: 'Trend Confluence', desc: 'Multi-timeframe Weekly/Daily EMA alignment, ADX & RS blotter' },
       { href: '/rs-scanner', label: 'RS Scanner', desc: 'Relative strength scanner vs Nifty index' },

@@ -358,6 +358,13 @@ export const TERMINAL_PILLARS: TerminalPillarGroup[] = [
         desc: 'High-beta index heavyweights multi-timeframe technical charts',
       },
       {
+        name: 'Daily Market Terminal',
+        href: '/daily-market',
+        badge: 'REALTIME',
+        desc: 'Bloomberg-style real-time WebSocket market table with Nifty 50, Bank Nifty, Nifty 500 & custom watchlists',
+        hot: true,
+      },
+      {
         name: 'Equity Watchlist',
         href: '/equity-watchlist',
         desc: 'Custom price and volume alert watchlist for intraday setups',
