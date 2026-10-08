@@ -274,7 +274,7 @@ export default function AddLotsModal({
               <div className="grid grid-cols-2 gap-3 mt-3 pt-3 border-t border-zinc-800">
                 <div>
                   <label className="text-[10px] text-rose-400 font-bold uppercase block mb-1 flex items-center gap-1">
-                    <ShieldAlert className="w-3 h-3" /> Stop Loss ({leg.slType ?? 'pts'})
+                    <ShieldAlert className="w-3 h-3" /> Stop Loss ({leg.slType === 'pct' ? '%' : leg.slType ?? 'pts'})
                   </label>
                   <input
                     type="number"
@@ -287,7 +287,7 @@ export default function AddLotsModal({
                 </div>
                 <div>
                   <label className="text-[10px] text-emerald-400 font-bold uppercase block mb-1 flex items-center gap-1">
-                    <Target className="w-3 h-3" /> Take Profit ({leg.tpType ?? 'pts'})
+                    <Target className="w-3 h-3" /> Take Profit ({leg.tpType === 'pct' ? '%' : leg.tpType ?? 'pts'})
                   </label>
                   <input
                     type="number"

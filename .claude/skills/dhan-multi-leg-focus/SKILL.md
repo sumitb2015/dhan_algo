@@ -54,6 +54,15 @@ before changing any of it**; this skill only maps the page.
    section of `dhan-terminal-position-ownership`). The Position Map and P&L-by-date grid share `buildHeatmapGrid`.
 9. **Strategy Chart modal** fills the modal height (`dbebd53c`) and scopes chart errors to the selection.
 
+10. **Leg SL / TP units** (`LegThresholdType` = `'pts' | 'pct' | 'price'`, 2026-10-08). `pct` is a percentage of the
+   leg's *entry premium* (`fill.avgPrice`): SL 30 % on a 100 sell = exit at 130. The toggle in `MultiLegLegRow` cycles
+   pts → % → price via `nextLegThresholdType`. All conversion lives in `computeLegTrailingSL`; a new unit is added
+   there plus the type, the toggle/placeholder/label in `MultiLegLegRow` and `AddLotsModal`, and a test. The
+   1-rupee trail uses the resolved SL price, so it works with any unit. Strategy-level Target/SL
+   (`StrategyRiskConfig`, `checkStrategyRisk`) already has `pts | pct` (pct of combined gross entry premium).
+   `MultiLegStrategyRow` whitelists `slType`/`tpType` patches and `MultiLegFocus.tsx` carries them on scale; both
+   pass new values through untouched.
+
 ## Change checklist
 - Touched a basket/leg field? Update `multiLegStoreMerge` (rev + union rules) and its `…Resurrect` test, or a stale
   tab will drop/overwrite it.

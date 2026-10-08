@@ -3,7 +3,7 @@
 import React from 'react';
 import { X, Plus, AlertTriangle, ChevronUp, ChevronDown, Unlink } from 'lucide-react';
 import {
-  legPnl, computeLegTrailingSL, formatExpiryLabel, legAvgPrice, legExitPrice, legQtyUnits, legPnlPct, legOtmPct, type MultiLegLeg,
+  legPnl, computeLegTrailingSL, nextLegThresholdType, formatExpiryLabel, legAvgPrice, legExitPrice, legQtyUnits, legPnlPct, legOtmPct, type MultiLegLeg,
 } from '@/lib/multiLegFocus';
 import { DEFAULT_LEG_COLUMNS, type LegColumns } from '@/lib/legColumns';
 import { FOCUS_RING } from '@/components/Scalper';
@@ -242,17 +242,17 @@ export default function MultiLegLegRow({
             <RuleNumInput
               value={leg.sl}
               onCommit={val => onChange({ sl: val })}
-              placeholder={leg.slType === 'price' ? 'Price' : 'Pts'}
+              placeholder={leg.slType === 'price' ? 'Price' : leg.slType === 'pct' ? '%' : 'Pts'}
               className="w-14 h-7 text-rose-300 placeholder-rose-900/40"
-              title="Stop Loss (in points or price)"
+              title="Stop Loss (points, % of entry premium, or price)"
             />
             <button
               type="button"
-              onClick={() => onChange({ slType: leg.slType === 'price' ? 'pts' : 'price' })}
+              onClick={() => onChange({ slType: nextLegThresholdType(leg.slType) })}
               className="h-7 px-1 text-[10px] font-mono font-bold rounded border border-zinc-700 bg-zinc-800 text-zinc-400 hover:text-white"
-              title="Toggle between Points and Price"
+              title="Cycle Points → % of entry → Price"
             >
-              {leg.slType === 'price' ? '₹' : 'pts'}
+              {leg.slType === 'price' ? '₹' : leg.slType === 'pct' ? '%' : 'pts'}
             </button>
           </div>
           {trailingEval.effectiveSL != null && (
@@ -269,17 +269,17 @@ export default function MultiLegLegRow({
             <RuleNumInput
               value={leg.tp}
               onCommit={val => onChange({ tp: val })}
-              placeholder={leg.tpType === 'price' ? 'Price' : 'Pts'}
+              placeholder={leg.tpType === 'price' ? 'Price' : leg.tpType === 'pct' ? '%' : 'Pts'}
               className="w-14 h-7 text-emerald-300 placeholder-emerald-900/40"
-              title="Take Profit (in points or price)"
+              title="Take Profit (points, % of entry premium, or price)"
             />
             <button
               type="button"
-              onClick={() => onChange({ tpType: leg.tpType === 'price' ? 'pts' : 'price' })}
+              onClick={() => onChange({ tpType: nextLegThresholdType(leg.tpType) })}
               className="h-7 px-1 text-[10px] font-mono font-bold rounded border border-zinc-700 bg-zinc-800 text-zinc-400 hover:text-white"
-              title="Toggle between Points and Price"
+              title="Cycle Points → % of entry → Price"
             >
-              {leg.tpType === 'price' ? '₹' : 'pts'}
+              {leg.tpType === 'price' ? '₹' : leg.tpType === 'pct' ? '%' : 'pts'}
             </button>
           </div>
           {trailingEval.tpPrice != null && (

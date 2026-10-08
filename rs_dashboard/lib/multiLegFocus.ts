@@ -78,10 +78,10 @@ export interface MultiLegLeg {
   status: MultiLegStatus;
 
   // ── Leg-wise Stop Loss, Take Profit, and Trailing SL ─────────────
-  sl?: number;                 // Stop Loss (points or absolute price)
-  slType?: 'pts' | 'price';    // Default: 'pts'
-  tp?: number;                 // Take Profit (points or absolute price)
-  tpType?: 'pts' | 'price';    // Default: 'pts'
+  sl?: number;                 // Stop Loss (points, % of entry premium, or absolute price)
+  slType?: LegThresholdType;   // Default: 'pts'
+  tp?: number;                 // Take Profit (points, % of entry premium, or absolute price)
+  tpType?: LegThresholdType;   // Default: 'pts'
   trail?: boolean;             // Trailing SL enabled (1 rupee trailing step)
   bestPrice?: number;          // Peak favorable price tracked for trailing SL
 }
@@ -558,6 +558,19 @@ export interface LegTrailingEvaluation {
   triggered: 'SL' | 'TRAIL_SL' | 'TP' | null;
 }
 
+/** Leg SL/TP unit: points, % of the leg's entry premium, or an absolute option price. */
+export type LegThresholdType = 'pts' | 'pct' | 'price';
+
+/** Next unit when the user clicks the toggle: pts -> % -> price -> pts. */
+export function nextLegThresholdType(t?: LegThresholdType): LegThresholdType {
+  return t === 'pct' ? 'price' : t === 'price' ? 'pts' : 'pct';
+}
+
+function adverseSLPrice(entry: number, sl: number, type: LegThresholdType, isBuy: boolean): number {
+  const pts = type === 'pct' ? (entry * sl) / 100 : sl;
+  return isBuy ? entry - pts : entry + pts;
+}
+
 /**
  * Computes the effective Stop Loss (with 1-rupee trailing step if enabled)
  * and Take Profit price for an open option leg, and determines if either threshold is breached.
@@ -584,13 +597,14 @@ export function computeLegTrailingSL(
   // 1. Initial SL Price
   if (leg.sl != null && leg.sl > 0) {
     const slType = leg.slType ?? 'pts';
-    result.initialSLPrice = slType === 'price' ? leg.sl : (isBuy ? entry - leg.sl : entry + leg.sl);
+    result.initialSLPrice = slType === 'price' ? leg.sl : adverseSLPrice(entry, leg.sl, slType, isBuy);
   }
 
   // 2. TP Price
   if (leg.tp != null && leg.tp > 0) {
     const tpType = leg.tpType ?? 'pts';
-    result.tpPrice = tpType === 'price' ? leg.tp : (isBuy ? entry + leg.tp : entry - leg.tp);
+    const tpPts = tpType === 'pct' ? (entry * leg.tp) / 100 : leg.tp;
+    result.tpPrice = tpType === 'price' ? leg.tp : (isBuy ? entry + tpPts : entry - tpPts);
   }
 
   // 3. Trailing SL (1:1 trail for every 1 rupee favorable move)

@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert';
 import {
   resolveTemplateLegs, reconcileLegFillDown, reconcileLegWithBroker, legPnl, basketTotalPnl, sortLegsForExit, findLegPosition,
-  computeLegTrailingSL, computeStrategyMetrics, checkStrategyRisk, classifyBasketStructure, findSiblingLegCollisions,
+  computeLegTrailingSL, nextLegThresholdType, computeStrategyMetrics, checkStrategyRisk, classifyBasketStructure, findSiblingLegCollisions,
   formatExpiryLabel, LEG_FILL_GRACE_MS, claimableLegQty, executionBroker, applyOrderOutcomes, normalizeOrderRow, PENDING_ORDER_TTL_MS, legBrokerMismatch, classifyDhanOrder, settleWaitingEntry, applyTriggeredEntry, type WaitingEntry, type NormalizedOrder, legAvgPrice, legExitPrice, legQtyUnits, legPnlPct, legOtmPct, scaleBasketMultiplier,
   legQtyWarningsFor, recordOutsideReduction, findUntrackedPositions, residualBrokerAvg, findContractDrift, legFromUntracked, contractHintFromRow, legCountsToday, closedFillFromRow, mergeImportedLegs, brokerClampSlice,
   normalizeTradeRow, ownOrderIds, matchOutsideTrades, repriceEstimatedCloses, MLF_ORDER_SOURCE,
@@ -257,6 +257,22 @@ test('computeLegTrailingSL: Sell leg triggers hard SL and TP correctly', () => {
   assert.strictEqual(computeLegTrailingSL(leg, 81).triggered, 'SL');
   assert.strictEqual(computeLegTrailingSL(leg, 50).triggered, 'TP');
   assert.strictEqual(computeLegTrailingSL(leg, 49).triggered, 'TP');
+});
+
+test('computeLegTrailingSL: pct SL/TP are a percentage of the entry premium', () => {
+  const sell: MultiLegLeg = {
+    id: '1', side: 'S', option: 'PE', strike: 23500, lots: 1, type: 'MARKET', status: 'OPEN',
+    fill: { qty: 65, avgPrice: 100 }, sl: 30, slType: 'pct', tp: 50, tpType: 'pct',
+  };
+  assert.strictEqual(computeLegTrailingSL(sell, 129).triggered, null);
+  assert.strictEqual(computeLegTrailingSL(sell, 130).triggered, 'SL');
+  assert.strictEqual(computeLegTrailingSL(sell, 50).triggered, 'TP');
+  const buy: MultiLegLeg = { ...sell, side: 'B' };
+  assert.strictEqual(computeLegTrailingSL(buy, 70).triggered, 'SL');
+  assert.strictEqual(computeLegTrailingSL(buy, 150).triggered, 'TP');
+  assert.strictEqual(nextLegThresholdType('pts'), 'pct');
+  assert.strictEqual(nextLegThresholdType('pct'), 'price');
+  assert.strictEqual(nextLegThresholdType('price'), 'pts');
 });
 
 test('computeLegTrailingSL: Sell leg trailing at 1 rupee step tightens SL and triggers TRAIL_SL', () => {
