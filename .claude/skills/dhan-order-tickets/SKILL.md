@@ -63,6 +63,8 @@ that sends no `source` is uncapped. The lot cap proper (50, positive integer) is
 (`validateTrade`) and the ledger route. Send an `idempotencyKey` on every order from a new surface (the route caches a repeat for 60 s;
 Triple Straddle uses `ts-<position>-<leg>-in|out|rb`). A 504 means status unknown: never treat it as a clean failure.
 
+**Stop-loss entries on `fast-order`** (`ca20e7c7`). `orderType` also accepts `STOP_LOSS` (needs `triggerPrice` and a limit `price`; BUY limit ≥ trigger, SELL limit ≤ trigger, else 400) and `STOP_LOSS_MARKET` (trigger only). The ack is only a resting order, not a position: the caller must track it as a waiting entry and open a leg only when the order book shows it traded — see `dhan-terminal-position-ownership` Invariant 13.
+
 ### 2. Multi-Segment & Exchange Contract Resolution
 Symbol resolution must never assume that all non-index contracts are NSE stock derivatives (`NSE_FNO / FUTSTK`).
 

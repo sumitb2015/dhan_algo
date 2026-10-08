@@ -419,6 +419,24 @@ state hook `components/triplestraddle/useTripleStraddle.ts`). Rules that are not
   profit peak is persisted, tracked only for armed, fully confirmed positions, and `by > every` is invalid (it would put
   the floor above the profit that set it, an instant exit).
 
+### 13. A resting stop-entry order is not a leg (Multi-Leg Focus SL-L / SL-M, 2026-10-08)
+
+`ca20e7c7`. Add New Leg can send a Dhan `STOP_LOSS` / `STOP_LOSS_MARKET` entry instead of an immediate one. Until the
+trigger prints there is no position, so there is no leg:
+
+- **Track it beside the legs.** The order lives in `basket.waitingEntries` (`WaitingEntry`: order id, security id,
+  trigger, optional limit, `at`), never as a PLACING leg. Reconcile, regroup, P&L, Greeks and payoff never see it.
+- **Open a leg only from the order book.** `settleWaitingEntry` returns wait / open (traded qty and average) /
+  dead (rejected, cancelled) / expired (earlier IST day). With no order book this tick (fetch failed) nothing
+  settles — never guess a fill from a position row.
+- **Settling is idempotent by order id.** Another tab or a store reread may already have turned the order into a leg;
+  check `fill.orderId` / `orderIds` before opening one.
+- **A fill on a contract another group already tracks is not added** (Dhan nets by security id; adding it twice
+  double-counts). Toast the user to move it manually — consistent with one strike per group (Invariant 6).
+- **A row holding a waiting entry is not finished** (`isFullyClosed` is false) and cannot be deleted; Exit All
+  cancels the stop first. Stop-limit price must sit on the correct side of the trigger (BUY ≥, SELL ≤) —
+  `fast-order` rejects it otherwise.
+
 ## Before You Ship
 - Does every lock/exit/P&L decision route through an ownership check
   (ledger + worker-hold), not a raw broker position/netQty read?

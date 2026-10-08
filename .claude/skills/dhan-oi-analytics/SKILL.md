@@ -111,6 +111,8 @@ third code path despite this skill already documenting it twice above. If you're
 OI-consuming path, treat "did I get a real OI reading this poll" as its own tracked boolean, not
 something you infer from whether the number is zero.
 
+> The GEX pages now have their own skill, **`dhan-gex-profile`** (v1/v2 split, units traps, refresh model); this section is the original v1 record.
+
 ## GEX OI chart (`/options/gex`, `lib/gex.ts`, `components/GexOiPage.tsx`)
 
 Gamma-weighted OI per strike: call/put GEX, net GEX, call wall, put wall, gamma flip, pin. Display only, no orders.

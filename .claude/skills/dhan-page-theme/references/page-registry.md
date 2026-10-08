@@ -116,3 +116,12 @@ Compass link), `no-tile`. `comp` `(inline page.tsx)` means the page keeps its wh
 | `/trending-oi` | TrendingOiPage | flat | ChartColumnStacked | emerald | 30 |  |
 | `/ultimate-scanner` | UltimateScannerPage | flat | Layers | emerald | 20 | TEXT_500 DUP_ICON |
 | `/volume-footprint` | FootprintChart | - | - | - | - | NO_METADATA NAVBAR_BARE NO_HEADER |
+
+## Additions since the snapshot (2026-10-08, not generated — regenerate with the audit script)
+| Page | Component | Note |
+|---|---|---|
+| `/options/gex` | GexOiPage | GEX v1 (Dhan chain gamma); see `dhan-gex-profile` |
+| `/options/gex-v2` | GexProfilePage | GEX v2 (spot-side walls, dynamic flip, expected move); see `dhan-gex-profile` |
+| `/options/triple-straddle` | TripleStraddlePage | SIM/REAL straddle ledger; see `dhan-terminal-position-ownership` Invariant 12 |
+| `/markets` + `/markets/[key]` | MarketsOverviewGrid / MarketDetail | Now also a table view with global rows (DXY, US 10Y/30Y, US/Asia/Europe indices, WTI, Brent) from Yahoo via `lib/globalMarkets.ts` — the one deliberate non-Dhan data source; Live/Closed status allows Yahoo's 15-20 min index lag |
+| `/nifty-covered-call` | NiftyCoveredCallTerminal | Rebuilt as the NIFTYBEES desk; see `dhan-covered-call-desk` |

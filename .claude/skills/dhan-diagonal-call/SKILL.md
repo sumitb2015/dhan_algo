@@ -13,7 +13,8 @@ default, never forward-tested (see the backtest caveat below). Positional (`MARG
 
 ## The rules in one screen
 - Long: buy CE, 60-120 DTE, delta 0.55-0.65 (prefer 0.60), `--long-lots` default 3. **Entered first.**
-- Short: sell CE, monthly expiry only (`monthly_expiries()` = latest listed expiry per month; `is_monthly_expiry` weekday heuristic is a fallback that misreads holiday-shifted monthlies), 25-45 DTE (+14d if no monthly fits), expiring before the long, delta 0.15-0.22.
+- Short: sell CE, **weekly or monthly** expiry (since `5d3e987a` only the *long* must be a monthly — `monthly_expiries()` = latest listed expiry per month; `is_monthly_expiry` weekday heuristic is a fallback that misreads holiday-shifted monthlies), 25-45 DTE, strictly before the long's expiry, delta 0.15-0.22.
+  **Bid/ask gate:** a strike is skipped (fail closed) when it has no two-sided quote or its spread exceeds `--max-spread-pct` (default 5 % of mid); the TS advisor shows a BID/ASK column and never recommends an illiquid strike.
   Strike = closest to target delta; `Theta/|Gamma|` is only a tie-break (it is ~0.5*sigma^2*S^2 for every strike, so as primary key it picked the
   0.22 edge). Nothing sold out of band. IV floor `--min-iv`. New shorts are trimmed to 75% of the gamma floor.
 - Sizing: `short_lots = round((long_delta - target_net_delta) / (short_delta * lot_size))`, then clamped by
