@@ -721,10 +721,18 @@ export interface ReentryContext {
   nowHm: string;
   product: 'INTRADAY' | 'MARGIN';
   groupEnabled: boolean;
-  /** Intraday square-off backstop for the row's underlying; defaults to the NSE one. */
-  backstopHm?: string;
+  /**
+   * Intraday square-off backstop for the row's underlying (UNDERLYING_META[u].backstopHm). REQUIRED: an exchange-specific
+   * default silently blocked every CRUDEOILM re-entry after NSE's 15:17 (2026-10-08), so the compiler now catches a caller that forgets it.
+   */
+  backstopHm: string;
   /** Re-entries of this trigger already taken on this leg this cycle. */
   done: number;
+}
+
+/** A saved cap is only as trustworthy as the file it came from: keep it within AlgoTest's 0..MAX_LEG_REENTRIES. */
+function clampReentryMax(v: unknown): number {
+  return Math.min(MAX_LEG_REENTRIES, Math.max(0, Math.trunc(Number(v) || 0)));
 }
 
 /** The re-entry settings that apply to one trigger, with legacy fallbacks. */
@@ -737,10 +745,10 @@ export function reentryConfig(
     // Rows saved before re-entry modes existed only had the OTM roll.
     const mode = row.reSlMode ?? (Number(row.slRollStrikes) > 0 ? 'otm' : 'off');
     const max = row.reSlMax ?? row.slRollMax ?? DEFAULT_SL_ROLL_MAX;
-    return { mode, max: Math.trunc(Number(max) || 0), otmStrikes };
+    return { mode, max: clampReentryMax(max), otmStrikes };
   }
   const max = row.reTgtMax ?? DEFAULT_SL_ROLL_MAX;
-  return { mode: row.reTgtMode ?? 'off', max: Math.trunc(Number(max) || 0), otmStrikes };
+  return { mode: row.reTgtMode ?? 'off', max: clampReentryMax(max), otmStrikes };
 }
 
 /**
@@ -1145,7 +1153,7 @@ export interface EntryContext {
   groupEnabled: boolean;
   product: 'INTRADAY' | 'MARGIN';
   /** Intraday square-off backstop for the row's underlying; defaults to the NSE one. */
-  backstopHm?: string;
+  backstopHm: string;
   /** Resolved DTE of the expiry this row would trade; null when unknown. */
   dte: number | null;
   /** At least one leg's strike has resolved. */

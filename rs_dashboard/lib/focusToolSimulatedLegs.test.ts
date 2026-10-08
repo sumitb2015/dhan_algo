@@ -23,7 +23,7 @@ import {
 } from './focusToolRules.ts';
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
-import { UNDERLYING_META, type FocusUnderlying } from './focusToolUnderlyings.ts';
+import { UNDERLYING_META, FEED_BRIDGE_UNDERLYINGS, FEED_SESSION_START_HM, FEED_SESSION_END_HM, type FocusUnderlying } from './focusToolUnderlyings.ts';
 
 interface Mkt { u: FocusUnderlying; lot: number; spot: number; step: number; ce: number; pe: number; backstop: string }
 const MARKETS: Mkt[] = [
@@ -306,7 +306,7 @@ test('AlgoTest cap on re-entries per leg is 20', () => {
 test('the 15:17 default is NSE-only: a CRUDEOILM re-entry needs the caller to pass its own backstop', () => {
   const row = { reSlMode: 'asap', reSlMax: 3, exitTime: '', noReEntryAfter: '' } as never;
   const base = { nowHm: '22:00', product: 'INTRADAY' as const, groupEnabled: true, done: 0 };
-  assert.equal(evaluateReentry(row, 'sl', base).enter, false);                                              // the trap
+  assert.equal(evaluateReentry(row, 'sl', base as never).enter, false);                                     // the trap (backstopHm is required by tsc now)
   assert.equal(evaluateReentry(row, 'sl', { ...base, backstopHm: UNDERLYING_META.CRUDEOILM.backstopHm }).enter, true);
 });
 
@@ -324,4 +324,38 @@ test('every evaluateReentry / reentryWindowClosed / evaluateEntry call in FocusT
     assert.match(call, /backstopHm/, `missing backstopHm: ${call.slice(0, 120).replace(/\s+/g, ' ')}`);
   }
   assert.ok(n >= 5, `expected to find the page's calls, found ${n}`);
+});
+
+test('a saved re-entry cap is clamped to 0..20, whatever the file says', () => {
+  const cfg = (o: object) => reentryConfig({ reSlMode: 'asap', reTgtMode: 'asap', ...o } as never, 'sl').max;
+  assert.equal(cfg({ reSlMax: 99 }), MAX_LEG_REENTRIES);
+  assert.equal(cfg({ reSlMax: -3 }), 0);
+  assert.equal(cfg({ reSlMax: 'abc' }), 0);
+  assert.equal(cfg({ reSlMax: 3.9 }), 3);
+  assert.equal(reentryConfig({ reTgtMode: 'asap', reTgtMax: 500 } as never, 'tgt').max, MAX_LEG_REENTRIES);
+  assert.equal(cfg({}), DEFAULT_SL_ROLL_MAX);
+});
+
+test('the stale-feed window covers only what the quote bridge streams (NSE/BSE cash session)', () => {
+  for (const u of FEED_BRIDGE_UNDERLYINGS) {
+    assert.equal(UNDERLYING_META[u].nseCalendar, true, `${u} is on the bridge but not on the NSE session the stale check watches`);
+    assert.equal(UNDERLYING_META[u].segment === 'MCX_COMM', false);
+  }
+  assert.equal(FEED_BRIDGE_UNDERLYINGS.includes('CRUDEOILM'), false);
+  assert.ok(FEED_SESSION_START_HM < FEED_SESSION_END_HM);
+});
+
+// Square Off Complete closes the sibling leg straight through placeLeg. That sibling must hold its per-leg lock
+// (autoExitingLegRef) for the close, or the scheduler's own stop on it starts a second close sized off the 2s polled
+// book and the leg flips to the other side. A sibling already closing on its own is left to that exit. Source guard:
+// the order path needs the page.
+test('Square Off Complete locks the sibling leg for its close and skips one already exiting', () => {
+  const src = readFileSync(path.join(import.meta.dirname, '..', 'components', 'FocusTool.tsx'), 'utf-8');
+  const at = src.indexOf('squareOffLegs(latest, leg, kind)');
+  assert.ok(at > 0, 'Square Off Complete call site not found');
+  const block = src.slice(at, at + 2200);
+  assert.match(block, /rest\.filter\(l => !autoExitingLegRef\.current\.has\(/);          // already exiting on its own → not closed again
+  assert.match(block, /autoExitingLegRef\.current\.add\(k\)/);                              // lock held for the close
+  assert.match(block, /finally \{\s*sibKeys\.forEach\(k => autoExitingLegRef\.current\.delete\(k\)\)/);   // and always released
+  assert.ok(block.indexOf('.add(k)') < block.indexOf('placeLeg(latest'), 'lock must be taken before the order is sent');
 });
