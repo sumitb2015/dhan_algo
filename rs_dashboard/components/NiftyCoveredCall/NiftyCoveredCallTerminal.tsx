@@ -261,6 +261,17 @@ export default function NiftyCoveredCallTerminal() {
     return () => clearInterval(id);
   }, [fetchBook, sweepPending]);
 
+  // NIFTY / INDIA VIX come from the indices WebSocket bridge (top-indices reads
+  // its debug file); without it the header has no VIX and no % change. The
+  // start is idempotent and never stopped from here — other pages share it.
+  useEffect(() => {
+    fetch('/api/live-indices', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action: 'start' }),
+    }).catch(() => {});
+  }, []);
+
   // ── Live NIFTY & INDIA VIX ticker poll (/api/scalper/top-indices) ───────
   const { data: indicesData } = useLiveTickerPoll<IndicesResponse>('/api/scalper/top-indices', pickIndexLtps);
   const niftyQuote = indicesData?.quotes?.NIFTY;
