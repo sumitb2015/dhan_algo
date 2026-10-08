@@ -22,7 +22,6 @@ import { growLegToBroker, outsidePositionBaskets, brokerOnlyPositions, ltpFromBr
 import ImportPositionsModal, { type ImportCandidate, type ImportRequest } from './multiLegFocus/ImportPositionsModal';
 import { withRevs, noteSaved, adoptServerBasket, stableBody, type RevBook } from '@/lib/multiLegStoreMerge';
 import { useTabLeader } from '@/hooks/useTabLeader';
-import HistoryModal from './multiLegFocus/HistoryModal';
 import MultiLegOptionChainModal from './multiLegFocus/MultiLegOptionChainModal';
 import HelpModal from './HelpModal';
 import {
@@ -2156,7 +2155,6 @@ export default function MultiLegFocus({
 
   // ── Import positions taken outside the tool ────────────────────────
   const [showImportModal, setShowImportModal] = useState(false);
-  const [showHistoryModal, setShowHistoryModal] = useState(false);
 
   // Untracked qty per logged-in broker, each contract verified against that
   // broker's own strike lookup: a symbol parse is only a hint (Zerodha's
@@ -3491,6 +3489,7 @@ export default function MultiLegFocus({
                             <th className="text-left px-4 py-2 text-xs font-bold">Date</th>
                             <th className="text-right px-4 py-2 text-xs font-bold">Gross</th>
                             <th className="text-right px-4 py-2 text-xs font-bold">Charges</th>
+                            <th className="text-right px-4 py-2 text-xs font-bold" title="Charges as % of |Gross|">Cost %</th>
                             <th className="text-right px-4 py-2 text-xs font-bold">Net</th>
                           </tr>
                         </thead>
@@ -3500,6 +3499,7 @@ export default function MultiLegFocus({
                               <td className="px-4 py-1.5 text-zinc-300">{d.date}</td>
                               <td className={`px-4 py-1.5 text-right ${d.grossPnl >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>{d.grossPnl >= 0 ? '+' : ''}{fmtMoney(d.grossPnl)}</td>
                               <td className="px-4 py-1.5 text-right text-zinc-400">{fmtMoney(d.charges)}</td>
+                              <td className={`px-4 py-1.5 text-right ${d.grossPnl !== 0 && d.charges / Math.abs(d.grossPnl) > 0.1 ? 'text-rose-400 font-bold' : 'text-zinc-400'}`}>{d.grossPnl !== 0 ? `${((d.charges / Math.abs(d.grossPnl)) * 100).toFixed(1)}%` : '–'}</td>
                               <td className={`px-4 py-1.5 text-right font-bold ${d.netPnl >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>{d.netPnl >= 0 ? '+' : ''}{fmtMoney(d.netPnl)}</td>
                             </tr>
                           ))}
@@ -3509,6 +3509,7 @@ export default function MultiLegFocus({
                             <td className="px-4 py-2 text-white">Total</td>
                             <td className={`px-4 py-2 text-right ${pnlHistory.gross >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>{pnlHistory.gross >= 0 ? '+' : ''}{fmtMoney(pnlHistory.gross)}</td>
                             <td className="px-4 py-2 text-right text-zinc-300">{fmtMoney(pnlHistory.charges)}</td>
+                            <td className={`px-4 py-2 text-right ${pnlHistory.gross !== 0 && pnlHistory.charges / Math.abs(pnlHistory.gross) > 0.1 ? 'text-rose-400' : 'text-zinc-300'}`}>{pnlHistory.gross !== 0 ? `${((pnlHistory.charges / Math.abs(pnlHistory.gross)) * 100).toFixed(1)}%` : '–'}</td>
                             <td className={`px-4 py-2 text-right ${pnlHistory.net >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>{pnlHistory.net >= 0 ? '+' : ''}{fmtMoney(pnlHistory.net)}</td>
                           </tr>
                         </tfoot>
@@ -3566,17 +3567,6 @@ export default function MultiLegFocus({
             >
               <Download className="w-3.5 h-3.5 text-emerald-400" />
               <span>Import</span>
-            </button>
-
-            {/* Archived (closed on earlier days) strategies */}
-            <button
-              type="button"
-              onClick={() => setShowHistoryModal(true)}
-              className={`h-8 px-3 inline-flex items-center gap-1.5 text-xs font-bold rounded-lg border border-zinc-700 bg-zinc-900 hover:bg-zinc-800 text-zinc-200 hover:text-white transition-colors cursor-pointer ${FOCUS_RING}`}
-              title="Strategies closed on earlier days, with realized P&L"
-            >
-              <History className="w-3.5 h-3.5 text-amber-400" />
-              <span>History</span>
             </button>
 
             {/* Option Chain & Greeks Button */}
@@ -3852,7 +3842,6 @@ export default function MultiLegFocus({
         onRefresh={fetchOrdersAndTrades}
       />
 
-      {showHistoryModal && <HistoryModal onClose={() => setShowHistoryModal(false)} />}
 
       {showImportModal && (
         <ImportPositionsModal
