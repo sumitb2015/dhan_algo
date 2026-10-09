@@ -27,7 +27,8 @@ import { useBrokerSelector, scalperRoute, BROKER_LABELS, type Broker } from '@/h
 import { closeOrderProduct, positionProduct } from '@/lib/positionProduct';
 import { scaleBrokerPnl } from '@/lib/positionPnl';
 import { useCopyTrade, CopyTradeControls, type CopyTradeApi } from './CopyTrade';
-import { useFocusToolWS, focusWsBookForExpiry } from '@/lib/useFocusToolWS';
+import { useFocusToolWS, focusWsBookForExpiry, type FocusWSQuotes, type FocusWSStrike } from '@/lib/useFocusToolWS';
+import { useLiveOptionsWS } from '@/lib/useLiveOptionsWS';
 import FocusOptionChainModal from './FocusOptionChainModal';
 import { partialCloseChips } from '@/lib/partialQty';
 import { cn } from '@/lib/utils';
@@ -4563,7 +4564,52 @@ export default function FocusTool() {
     const t = setInterval(check, 1000);
     return () => clearInterval(t);
   }, []);
-  const focusWsQuotes = wsStale ? null : rawWsQuotes;
+  // CRUDEOILM is not on focus_tool_ws.py. Its option ticks come from the same shared
+  // bridge the Advanced Scalper uses (live_options_ws.py, one process per underlying), so
+  // CE/PE LTP, P&L and stops run off ticks instead of the 30s-cached REST chain.
+  // One bridge = one expiry: rows on another expiry fall back to the chain.
+  const crudeBridgeExpiry = useMemo(() => {
+    if (!watched.includes('CRUDEOILM')) return '';
+    const nearest = expiries.CRUDEOILM?.[0] ?? '';
+    const rowsOn = config.rows.filter(r => r.underlying === 'CRUDEOILM');
+    if (!rowsOn.length || rowsOn.some(r => !r.expiry || r.expiry === nearest)) return nearest;
+    return rowsOn[0].expiry;
+  }, [watched, expiries, config.rows]);
+  useEffect(() => {
+    if (!crudeBridgeExpiry) return;
+    // Idempotent start; never stopped on unmount (the Advanced Scalper may share it).
+    fetch('/api/options/live', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action: 'start', underlying: 'CRUDEOILM', expiry: crudeBridgeExpiry, numStrikes: 30, broker: 'dhan' }),
+    }).catch(() => {});
+  }, [crudeBridgeExpiry]);
+  const { liveQuotes: crudeLive } = useLiveOptionsWS(crudeBridgeExpiry, 'dhan', ['dhan'], 'CRUDEOILM');
+  // Same stale rule as the other feeds: a quote older than WS_STALE_MS is dropped so the chain takes over.
+  const [crudeClock, setCrudeClock] = useState(0);
+  useEffect(() => {
+    if (!crudeBridgeExpiry) return;
+    const t = setInterval(() => setCrudeClock(c => c + 1), 1000);
+    return () => clearInterval(t);
+  }, [crudeBridgeExpiry]);
+  const focusWsQuotes = useMemo<FocusWSQuotes | null>(() => {
+    const base = wsStale ? null : rawWsQuotes;
+    const q = crudeLive;
+    if (!q || !crudeBridgeExpiry || (q.expiry && q.expiry !== crudeBridgeExpiry) || !(q.spot > 0)) return base;
+    const at = Date.parse(q.updated_at ?? '');
+    if (!Number.isFinite(at) || Date.now() - at > WS_STALE_MS) return base;
+    const strikes: Record<string, FocusWSStrike> = {};
+    for (const [k, v] of Object.entries(q.strikes ?? {})) {
+      const leg = (o: typeof v.ce) => ({ ltp: o?.ltp ?? 0, oi: o?.oi, change_pct: o?.change_pct ?? null, oi_chg_pct: o?.oi_chg_pct, buildup: o?.buildup });
+      strikes[k] = { strike: v.strike, ce: leg(v.ce), pe: leg(v.pe) };
+    }
+    return {
+      type: 'quotes', updated_at: q.updated_at ?? '', ...(base ?? {}),
+      CRUDEOILM: { spot: q.spot, atm: q.atm, expiry: crudeBridgeExpiry, strikes, books: { [crudeBridgeExpiry]: { atm: q.atm, strikes } } },
+    } as FocusWSQuotes;
+    // crudeClock re-runs this each second so a stalled feed ages out.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [wsStale, rawWsQuotes, crudeLive, crudeBridgeExpiry, crudeClock]);
 
   const wsLive = focusWsStatus.status === 'RUNNING';
 
