@@ -81,12 +81,15 @@ function pickVixLtp(d: HeaderIndicesResponse): Record<string, number> {
  * True for index/stock F&O segments across all three brokers (Dhan NSE_FNO /
  * BSE_FNO, Zerodha NFO / BFO, Kotak nse_fo / bse_fo).
  *
- * MCX is excluded explicitly: Kotak spells its commodity segment `mcx_fo`, which
- * a bare "contains FO" test accepts, and a CRUDEOIL leg has no business being
- * summed into an index terminal's CE/PE values or its premium-decay basis.
+ * Dhan's MCX_COMM counts: crude options are tradable from this terminal, so their legs must
+ * be seen by the CE/PE values, the P&L Guard / profit lock and Exit-all-on-lock (their P&L is
+ * rescaled by scaleBrokerPnl before it reaches those sums). Kotak's `mcx_fo` (and any other
+ * MCX spelling) stays excluded: a bare "contains FO" test would accept it, and its MCX
+ * quantity scaling is not converted here.
  */
 function isFnoSegment(pos: Record<string, unknown>): boolean {
   const seg = String(pos.exchangeSegment ?? pos.exchange ?? '').toUpperCase();
+  if (seg === 'MCX_COMM') return true;
   if (seg.startsWith('MCX')) return false;
   return seg.includes('FNO') || seg.includes('FO');
 }
@@ -159,6 +162,9 @@ export default function AdvancedScalper() {
   // Expiry
   const [expiries, setExpiries]   = useState<string[]>([]);
   const [expiry, setExpiry]       = useState('');
+  // The underlying `expiry` belongs to. After an underlying switch `expiry` still holds the OLD underlying's date for a
+  // render, and a bridge started with it (e.g. CRUDEOILM on NIFTY's 2026-10-13) resolves no contracts and dies.
+  const [expiryOwner, setExpiryOwner] = useState('');
 
   // Chain data (one-time fetch per expiry for prev close + strike list)
   const [allStrikes, setAllStrikes]     = useState<number[]>([]);
@@ -850,6 +856,7 @@ export default function AdvancedScalper() {
         if (j.success && data?.length) {
           setExpiries(data);
           setExpiry(prev => data.includes(prev) ? prev : data[0]);
+          setExpiryOwner(underlying);
         }
       })
       .catch(() => {});
@@ -863,6 +870,8 @@ export default function AdvancedScalper() {
   // ─── useEffect 1a: Load prev-close whenever underlying changes ────
 
   useEffect(() => {
+    // The previous underlying's close must not be read against the new spot while this loads.
+    setPrevSpot(0);
     // MCX prev close arrives with the chain (futures-based); this route would
     // fall back to NIFTY's config for an unknown underlying.
     if (isMcxUnderlying(underlying)) return;
@@ -916,7 +925,7 @@ export default function AdvancedScalper() {
   // `broker` out left the ladder and prev-close on the previous broker's data
   // while the strikeMap effect below had already re-resolved for the new one.
   useEffect(() => {
-    if (!expiry) return;
+    if (!expiry || expiryOwner !== underlying) return;
 
     fetch(`/api/options/chain?underlying=${underlying}&expiry=${expiry}&broker=${broker}`)
       .then(r => r.json())
@@ -957,7 +966,7 @@ export default function AdvancedScalper() {
         }
       })
       .catch(() => {});
-  }, [expiry, underlying, broker, strikeStep]);
+  }, [expiry, underlying, broker, strikeStep, expiryOwner]);
 
   // ─── useEffect 2c: WS bridge lifecycle ────────────────────────────
 
@@ -979,7 +988,7 @@ export default function AdvancedScalper() {
   // stable joined string, not the array reference.
   const authenticatedBrokersKey = authenticatedBrokers.join(',');
   useEffect(() => {
-    if (!expiry) return;
+    if (!expiry || expiryOwner !== underlying) return;
 
     // Start a WS bridge for every authenticated broker concurrently — each
     // runs independently on its own port/files (see useLiveOptionsWS), so
@@ -1002,7 +1011,7 @@ export default function AdvancedScalper() {
         body: JSON.stringify({ action: 'stop', brokers, underlying }),
       }).catch(() => {});
     };
-  }, [expiry, underlying, authenticatedBrokersKey]);
+  }, [expiry, underlying, authenticatedBrokersKey, expiryOwner]);
 
   // Start the shared Nifty-50 equity bridge when the Top 10 panel is switched
   // on. The route is idempotent — it returns "Bridge already running" without
