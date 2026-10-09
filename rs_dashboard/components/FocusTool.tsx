@@ -76,6 +76,12 @@ function ladderPrice(ltp: number, pct: number): number {
 }
 const STRIKE_STEP = Object.fromEntries(FOCUS_UNDERLYINGS.map(u => [u, UNDERLYING_META[u].strikeStep])) as Record<FocusUnderlying, number>;
 
+/** A row's strike step: MCX rows with "100s only" skip the 50-point strikes. */
+function rowStep(row: Pick<FocusRow, 'underlying' | 'strike100'>): number {
+  const base = STRIKE_STEP[row.underlying];
+  return row.strike100 && UNDERLYING_META[row.underlying].segment === 'MCX_COMM' ? Math.max(base, 100) : base;
+}
+
 /** Row layout: Pro (legs grid), Table (5-column) or Cards. */
 type FocusViewMode = 'pro' | 'table' | 'cards';
 const VIEW_MODE_KEY = 'focusTool.viewMode';
@@ -2933,7 +2939,7 @@ function FocusTableRowImpl({
       : (lotSize ?? 0) <= 0
         ? 'Lot size for this index has not resolved yet'
         : 'Strike not resolved yet';
-  const step = STRIKE_STEP[row.underlying];
+  const step = rowStep(row);
   // How many lots the +/- buttons act on, independently per leg
   const [ceQty, setCeQty] = useState(1);
   const [peQty, setPeQty] = useState(1);
@@ -3389,7 +3395,7 @@ function FocusProRowImpl({
       return [{ type: t as 'CE' | 'PE', strike, expiry: beExpiry, qty: -qty, entryPrice: entry }];
     });
     if (legs.length === 0) return [];
-    try { return buildPayoffModel({ legs, spot: Math.round(spot / 5) * 5, light: true, strikeStep: STRIKE_STEP[row.underlying] })?.breakevens ?? []; } catch { return []; }
+    try { return buildPayoffModel({ legs, spot: Math.round(spot / 5) * 5, light: true, strikeStep: rowStep(row) })?.breakevens ?? []; } catch { return []; }
   }, [beKey, beExpiry, Math.round(spot / 5), row.underlying]); // eslint-disable-line react-hooks/exhaustive-deps
   const status = shownStatus(row, flat);
   const tradeBlockedWhy = !isSimRow(row) && !liveRealMoney
@@ -3399,7 +3405,7 @@ function FocusProRowImpl({
       : (lotSize ?? 0) <= 0
         ? 'Lot size for this index has not resolved yet'
         : 'Strike not resolved yet';
-  const step = STRIKE_STEP[row.underlying];
+  const step = rowStep(row);
   const [qty, setQty] = useState<Record<'CE' | 'PE', number>>({ CE: 1, PE: 1 });
   const [addAllLots, setAddAllLots] = useState(1);
   const [ladderLots, setLadderLots] = useState<Record<'CE' | 'PE', number>>({ CE: 1, PE: 1 });
@@ -3752,6 +3758,15 @@ function FocusProRowImpl({
               <Checkbox checked={row.linked ?? true} onCheckedChange={c => onUpdate({ linked: !!c })} />
               Link legs
             </label>
+            {UNDERLYING_META[row.underlying].segment === 'MCX_COMM' && (
+              <label className="flex items-center gap-2 text-xs font-semibold text-zinc-300 cursor-pointer"
+                title="Only trade strikes divisible by 100 (e.g. 8200, 8300) — skips the 50-point strikes like 8250"
+                >
+                <Checkbox checked={!!row.strike100} disabled={strikes.anyOpen}
+                  onCheckedChange={c => onUpdate({ strike100: !!c })} />
+                100s only
+              </label>
+            )}
             <ProField label="Tgt unit" title="Leg target type (both legs): % of the leg's own entry, premium points below it, or the index moving that far in the leg's favour from the spot at entry">
               <ToggleGroup value={[row.legTgtUnit ?? 'pct']} variant="outline" size="sm" spacing={0}
                 onValueChange={(v: unknown[]) => { const u2 = v[v.length - 1] as LegTgtUnit | undefined; if (u2) onUpdate({ legTgtUnit: u2 }); }}>
@@ -3887,7 +3902,7 @@ function FocusRowCardImpl({
       : (lotSize ?? 0) <= 0
         ? 'Lot size for this index has not resolved yet'
         : 'Strike not resolved yet';
-  const step = STRIKE_STEP[row.underlying];
+  const step = rowStep(row);
   // How many lots the +/- buttons act on, independently per leg
   const [ceQty, setCeQty] = useState(1);
   const [peQty, setPeQty] = useState(1);
@@ -4906,7 +4921,7 @@ export default function FocusTool() {
       // off this, not the underlying's nearest, now that a row can pick any
       // listed expiry.
       const rowExpiry = row.expiry || expiries[u]?.[0] || '';
-      const step = STRIKE_STEP[u];
+      const step = rowStep(row);
       const spot = spots[u] ?? 0;
       // ATM base per the index group's own "ATM BY" pick — Spot (the index
       // level) or Fut (the nearest futures contract's LTP, which can sit at a
@@ -6332,7 +6347,7 @@ export default function FocusTool() {
     const u = row.underlying;
     // A shift only moves the strike, never the expiry — always this row's own.
     const expiry = row.expiry || expiries[u]?.[0] || '';
-    const step = STRIKE_STEP[u];
+    const step = rowStep(row);
     const live = rowLive[row.id] ?? EMPTY_ROW_LIVE;
     const currStrike = leg === 'CE' ? live.ceStrike : live.peStrike;
     if (currStrike == null) {
@@ -6980,7 +6995,7 @@ export default function FocusTool() {
 
     const base = await resolvedStrikeAfterClose(row.id, leg);
     if (base == null) return refuse('Could not resolve the current strike');
-    const step = STRIKE_STEP[u];
+    const step = rowStep(row);
     // Plain ATM ± rows: the resolved strike minus its own offset IS the ATM the
     // row used. Any other rule (₹ premium, strike criteria) resolves a strike
     // that says nothing about ATM, so take ATM from the price the group's
@@ -7216,7 +7231,7 @@ export default function FocusTool() {
 
     // ── Immediate modes ──
     const newStrike = cfg.mode === 'otm'
-      ? slRollStrike(leg, closedStrike, cfg.otmStrikes, STRIKE_STEP[u])
+      ? slRollStrike(leg, closedStrike, cfg.otmStrikes, rowStep(row))
       : await resolvedStrikeAfterClose(rowId, leg);
     if (newStrike == null) {
       addToast('error', `${tag} no re-entry`, 'Could not resolve the current strike');
@@ -8049,7 +8064,7 @@ export default function FocusTool() {
       .then(r => r.json())
       .then((j: { open?: number | null }) => {
         const open = Number(j.open) || 0;
-        const step = STRIKE_STEP[row.underlying];
+        const step = rowStep(row);
         if (open > 0 && step > 0) {
           const strike = Math.round(open / step) * step + ((leg === 'CE' ? row.ceOffset : row.peOffset) ?? 0) * step;
           st.strike = strike;
