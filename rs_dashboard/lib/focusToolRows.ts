@@ -456,6 +456,14 @@ export interface FocusRow {
   cePremium: string;
   pePremium: string;
   lots: number;
+  /**
+   * AlgoTest per-leg lots: this leg's own lot count, for a row whose CE and PE
+   * differ (3 lots of CE, 1 of PE). Missing / 0 = the leg trades `lots`, which
+   * is every row saved before this existed. Entries only — a re-entry re-sells
+   * what the closed leg held, and exits size off the fill ledger.
+   */
+  ceLots?: number;
+  peLots?: number;
   side: FocusSide;
   status: FocusRowStatus;
   // Level exits

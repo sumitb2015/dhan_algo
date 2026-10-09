@@ -202,6 +202,24 @@ export function legsOf(row: Pick<FocusRow, 'side'>): ('CE' | 'PE')[] {
   return row.side === 'BOTH' ? ['CE', 'PE'] : [row.side as 'CE' | 'PE'];
 }
 
+/**
+ * Lots one leg's entry trades: its own ceLots / peLots when set (> 0), else the
+ * row's `lots`. Whole lots, never negative. The Quantity Multiplier is applied
+ * on top by multipliedLots.
+ */
+export function legLots(
+  row: Pick<FocusRow, 'lots'> & Partial<Pick<FocusRow, 'ceLots' | 'peLots'>>, leg: 'CE' | 'PE',
+): number {
+  const own = Math.trunc(Number(leg === 'CE' ? row.ceLots : row.peLots) || 0);
+  return Math.max(0, own > 0 ? own : Math.trunc(Number(row.lots) || 0));
+}
+
+/** True when the row sizes its legs differently (an override that is not just the row's lots). */
+export function hasLegLots(row: Pick<FocusRow, 'lots'> & Partial<Pick<FocusRow, 'ceLots' | 'peLots'>>): boolean {
+  return legLots(row, 'CE') !== Math.max(0, Math.trunc(Number(row.lots) || 0))
+    || legLots(row, 'PE') !== Math.max(0, Math.trunc(Number(row.lots) || 0));
+}
+
 /** True once neither leg carries a broker quantity — safe to delete the row. */
 export function legsFlat(live: RowLive): boolean {
   return Number(live.cePosition?.netQty ?? 0) === 0
@@ -991,18 +1009,16 @@ export function stopPremium(
   return e * m;
 }
 
-/** Flat-row preview: row.lots on each named leg × live LTP, summed. */
+/** Flat-row preview: each named leg's lots × its live LTP, summed. */
 function previewCombinedPremium(
-  row: Pick<FocusRow, 'side' | 'lots'>,
+  row: Pick<FocusRow, 'side' | 'lots'> & Partial<Pick<FocusRow, 'ceLots' | 'peLots'>>,
   live: RowLive,
 ): number {
-  const lots = Number(row.lots) || 0;
-  if (!(lots > 0)) return 0;
   let sum = 0;
   for (const leg of legsOf(row)) {
-    sum += (leg === 'CE' ? live.ltpCe : live.ltpPe) ?? 0;
+    sum += legLots(row, leg) * ((leg === 'CE' ? live.ltpCe : live.ltpPe) ?? 0);
   }
-  return sum * lots;
+  return sum;
 }
 
 /** This leg's SL × level. Uses sell/buy avg while owned and open, else live LTP (preview). */
@@ -1178,13 +1194,16 @@ export interface EntryDecision { enter: boolean; reason: string }
  * the same reason for the same row.
  */
 export function evaluateEntry(
-  row: Pick<FocusRow, 'status' | 'lots' | 'dte' | 'entryTime' | 'exitTime'>,
+  row: Pick<FocusRow, 'status' | 'lots' | 'dte' | 'entryTime' | 'exitTime'> & Partial<Pick<FocusRow, 'ceLots' | 'peLots' | 'side'>>,
   ctx: EntryContext,
 ): EntryDecision {
   if (!ctx.groupEnabled) return { enter: false, reason: 'index not started' };
   if (!ctx.tradingDay) return { enter: false, reason: 'market closed today' };
   if (row.status !== ('armed' as FocusRowStatus)) return { enter: false, reason: `status ${row.status}` };
-  if (!(Number(row.lots) > 0)) return { enter: false, reason: 'lots must be > 0' };
+  // Every leg the row trades needs lots (a row with no Side yet is judged on both legs).
+  if (!(row.side ? legsOf({ side: row.side }) : (['CE', 'PE'] as const)).every(l => legLots(row, l) > 0)) {
+    return { enter: false, reason: 'lots must be > 0' };
+  }
   if (!ctx.flat) return { enter: false, reason: 'already holds a position' };
   if (!ctx.strikesReady) return { enter: false, reason: 'strikes unresolved' };
   if (!dteMatches(row.dte, ctx.dte)) return { enter: false, reason: `DTE ${ctx.dte} != ${row.dte}` };

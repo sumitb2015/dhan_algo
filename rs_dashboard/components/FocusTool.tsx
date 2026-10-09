@@ -47,7 +47,7 @@ import {
   legPinnedStrike, costStopReason, legOwnEntry, slRollStrike, DEFAULT_SL_ROLL_MAX,
   reentryConfig, evaluateReentry, reentryWindowClosed, monitoringStopped, momentumReentryKind, momentumTrigger,
   addMinutesHm, resolveCriteriaStrike, closestPremiumStrike, ownedLegStop, legStopHit, legDeltaNow, legDeltaBasis, legTargetDeltaLevel,
-  multipliedLots, clampHm, rangeWindow, rangeWindowPhase, rowHasMultiDayRange, candleBucket, tradingDte,
+  multipliedLots, legLots, hasLegLots, clampHm, rangeWindow, rangeWindowPhase, rowHasMultiDayRange, candleBucket, tradingDte,
   legSlRuleOn, legStopLevel, legTargetSpotLevel, legTgtUnitLabel, MAX_LEG_REENTRIES, pendingReentryLevel, pendingReentryHit, legTargetReason, costReentryBasis,
   awaitingMomentumQuote, MOMENTUM_QUOTE_WAIT_MS, legTargetLevel,
   evaluateEntryMomentum, reRangeWindow, entryMomentumOn, overallSlConfig, overallProgress, nextOverallPeak, evaluateOverallExit, overallExitKind, evaluateOverallReentry, MAX_OVERALL_REENTRIES, rangeBreakoutOn, rangeBreakoutHit, costStopApplies, squareOffLegs, atmStrike, resolveRowLegStrike, mirrorLinkedPatch, MAX_LAZY_LEGS, legSlMultiplier, legTarget, nextLazyLegId, lazyLegStrike, runningLazyLeg, simpleMomOn, simpleMomLevel, simpleMomHit,
@@ -324,7 +324,7 @@ function legValues(row: FocusRow, live: RowLive, lotSize: number | null): {
   const lot = lotSize && lotSize > 0 ? lotSize : 0;
   const units = (leg: 'CE' | 'PE'): number => {
     const held = Math.abs(Number((leg === 'CE' ? live.cePosition : live.pePosition)?.netQty) || 0);
-    return held > 0 ? held : row.lots * lot;
+    return held > 0 ? held : legLots(row, leg) * lot;
   };
   const value = (ltp: number | null, leg: 'CE' | 'PE'): number | null => {
     const n = units(leg);
@@ -820,6 +820,36 @@ function LotStepper({ value, onChange }: { value: number; onChange: (v: number) 
       >
         +
       </button>
+    </div>
+  );
+}
+
+/**
+ * The row's lots, with AlgoTest's per-leg lots behind a switch: off = one stepper
+ * (both legs trade it); on = a stepper per traded leg (ceLots / peLots). Switching
+ * on starts both at the row's lots, switching off drops the overrides. Only the
+ * next entry reads these — an open position is sized off the fill ledger.
+ */
+function RowLotsControl({ row, onUpdate }: { row: FocusRow; onUpdate: (patch: Partial<FocusRow>) => void }) {
+  const perLeg = row.ceLots != null || row.peLots != null;
+  const legs = legsOf(row);
+  return (
+    <div className="inline-flex items-center gap-2 flex-wrap">
+      {!perLeg && <LotStepper value={row.lots} onChange={v => onUpdate({ lots: v })} />}
+      {perLeg && legs.map(leg => (
+        <span key={leg} className="inline-flex items-center gap-1">
+          <span className="text-[10px] font-bold text-zinc-500 uppercase">{leg}</span>
+          <LotStepper value={legLots(row, leg)} onChange={v => onUpdate(leg === 'CE' ? { ceLots: v } : { peLots: v })} />
+        </span>
+      ))}
+      {row.side === 'BOTH' && (
+        <label className="inline-flex items-center gap-1 text-[10px] font-bold text-zinc-400 cursor-pointer"
+          title="Per-leg lots: give CE and PE their own lot counts (e.g. 3 lots of CE, 1 of PE). Off = both legs trade the row's lots">
+          <Switch size="sm" checked={perLeg} aria-label="Per-leg lots"
+            onCheckedChange={c => onUpdate(c ? { ceLots: row.lots, peLots: row.lots } : { ceLots: undefined, peLots: undefined })} />
+          Per leg
+        </label>
+      )}
     </div>
   );
 }
@@ -1827,9 +1857,7 @@ function LegSlLevels({
     : (() => {
         const legs = legsOf(row);
         if (!legs.length) return 0;
-        const lots = Number(row.lots) || 0;
-        if (!(lots > 0)) return 0;
-        return lots * legs.reduce((s, l) => s + ((l === 'CE' ? live.ltpCe : live.ltpPe) ?? 0), 0);
+        return legs.reduce((s, l) => s + legLots(row, l) * ((l === 'CE' ? live.ltpCe : live.ltpPe) ?? 0), 0);
       })();
   return (
     <div className={cn(
@@ -3044,7 +3072,7 @@ function FocusTableRowImpl({
             <div className="flex items-center gap-1.5">
               <div className="flex items-center gap-1">
                 <span className="text-[10px] font-bold text-zinc-500 uppercase">Lots</span>
-                <LotStepper value={row.lots} onChange={v => onUpdate({ lots: v })} />
+                <RowLotsControl row={row} onUpdate={onUpdate} />
               </div>
               <button
                 type="button"
@@ -3584,7 +3612,7 @@ function FocusProRowImpl({
             <ToggleGroupItem key={s} value={s} className="h-7 px-2.5 text-xs font-bold aria-pressed:bg-violet-600 aria-pressed:text-oncolor">{s}</ToggleGroupItem>
           ))}
         </ToggleGroup>
-        <ProField label="Lots"><LotStepper value={row.lots} onChange={v => onUpdate({ lots: v })} /></ProField>
+        <ProField label="Lots"><RowLotsControl row={row} onUpdate={onUpdate} /></ProField>
         <ProField label="Window" title="Entry time → exit time (IST)">
           <div className="w-[5.5rem]"><TimeInput value={row.entryTime} onChange={v => onUpdate({ entryTime: clampHm(v, UNDERLYING_META[row.underlying].entryMinHm, UNDERLYING_META[row.underlying].entryMaxHm) })} /></div>
           <ArrowRight className="size-3.5 text-zinc-500" />
@@ -3889,7 +3917,7 @@ function FocusRowCardImpl({
             {row.side}
           </span>
           <span className="text-[11px] font-bold text-zinc-400 font-mono">
-            {row.lots} Lot{row.lots > 1 ? 's' : ''}
+            {hasLegLots(row) || row.ceLots != null ? legsOf(row).map(l => `${l} ${legLots(row, l)}`).join(' / ') : row.lots} Lot{row.lots > 1 || hasLegLots(row) ? 's' : ''}
           </span>
         </div>
 
@@ -7708,7 +7736,7 @@ export default function FocusTool() {
       // Overall Momentum picks the strikes at the entry time and keeps them.
       const at = (leg: 'CE' | 'PE') => (strikes?.[leg] ? { strikeOverride: strikes[leg]! } : {});
       for (const leg of wanted) {
-        if (await placeLeg(row, leg, { reduce: false, lots: multipliedLots(row, row.lots), ...at(leg) })) filled[leg] = true;
+        if (await placeLeg(row, leg, { reduce: false, lots: multipliedLots(row, legLots(row, leg)), ...at(leg) })) filled[leg] = true;
       }
 
       // A BOTH row that only got one leg away is a NAKED short, not a
@@ -7718,7 +7746,7 @@ export default function FocusTool() {
       const missing = wanted.filter(l => !filled[l]);
       if (missing.length && missing.length < wanted.length) {
         for (const leg of missing) {
-          if (await placeLeg(row, leg, { reduce: false, lots: multipliedLots(row, row.lots), ...at(leg) })) filled[leg] = true;
+          if (await placeLeg(row, leg, { reduce: false, lots: multipliedLots(row, legLots(row, leg)), ...at(leg) })) filled[leg] = true;
         }
       }
 
@@ -7945,13 +7973,13 @@ export default function FocusTool() {
       runRowAction(row.id, async () => {
         const fresh = schedulerRef.current.config.rows.find(r => r.id === row.id) ?? row;
         addToast('success', `${tag} entry`, trigger
-          ? `${trigger} — selling ${multipliedLots(row, row.lots)} lot(s) ${armed.strike} ${leg}`
-          : `Entry time reached — selling ${multipliedLots(row, row.lots)} lot(s) ${armed.strike} ${leg}`);
+          ? `${trigger} — selling ${multipliedLots(row, legLots(row, leg))} lot(s) ${armed.strike} ${leg}`
+          : `Entry time reached — selling ${multipliedLots(row, legLots(row, leg))} lot(s) ${armed.strike} ${leg}`);
         // The range it broke out of is the base of its ORB Range stop — handed
         // to the ledger write that opens the leg (whenever the fill confirms).
         const orb = kind === 'range' && rb && armed.range
           ? { high: armed.range.high, low: armed.range.low, side: rb.side, on: rb.on } : null;
-        const ok = await placeLeg(fresh, leg, { reduce: false, lots: multipliedLots(row, row.lots), strikeOverride: armed.strike, orb });
+        const ok = await placeLeg(fresh, leg, { reduce: false, lots: multipliedLots(row, legLots(row, leg)), strikeOverride: armed.strike, orb });
         if (ok) {
           delete simMomRef.current[key];
           const cur = schedulerRef.current.config.rows.find(r => r.id === row.id);
@@ -8302,8 +8330,8 @@ export default function FocusTool() {
     if (!row) return 'row not found';
     const l = snap.rowLive[rowId];
     const expiry = row.expiry || expiriesRef.current[row.underlying]?.[0] || '';
-    const lots = multipliedLots(row, row.lots);
     const legs = legsOf(row).flatMap(leg => {
+      const lots = multipliedLots(row, legLots(row, leg));
       const strike = leg === 'CE' ? l?.ceStrike : l?.peStrike;
       const price = (leg === 'CE' ? l?.ltpCe : l?.ltpPe) ?? 0;
       return strike ? [{ strike, type: leg, side: 'SELL' as const, qtyLots: lots, price }] : [];
@@ -8317,7 +8345,7 @@ export default function FocusTool() {
       const j = await r.json() as { success?: boolean; data?: { total_margin?: number }; error?: string };
       const total = Number(j.data?.total_margin) || 0;
       if (!j.success || !(total > 0)) return j.error ?? 'unavailable';
-      return `≈ ₹${Math.round(total).toLocaleString('en-IN')} for ${legs.map(x => `${x.strike} ${x.type}`).join(' + ')} × ${lots} lot(s)`;
+      return `≈ ₹${Math.round(total).toLocaleString('en-IN')} for ${legs.map(x => `${x.qtyLots} × ${x.strike} ${x.type}`).join(' + ')} lot(s)`;
     } catch (e) { return String(e); }
   }, []);
 
