@@ -53,7 +53,7 @@ interface ProcessedRow {
   isMaxPEOI: boolean;
 }
 
-type Underlying = 'NIFTY' | 'BANKNIFTY' | 'SENSEX';
+type Underlying = 'NIFTY' | 'BANKNIFTY' | 'SENSEX' | 'CRUDEOIL' | 'CRUDEOILM';
 
 // Must match AdvancedScalper.tsx's own strike-step assumptions for these
 // underlyings.
@@ -61,6 +61,8 @@ const STRIKE_STEP: Record<Underlying, number> = {
   NIFTY: 50,
   BANKNIFTY: 100,
   SENSEX: 100,
+  CRUDEOIL: 50,
+  CRUDEOILM: 50,
 };
 
 const POLL_MS = 20_000;

@@ -451,6 +451,8 @@ export interface FocusRow {
   // independent and an inverted strangle is a valid, user-chosen shape.
   strikeMode: FocusStrikeMode;
   linked: boolean;
+  /** MCX only: trade 100-multiple strikes (skip the 50s) — the row's strike step becomes 100. */
+  strike100?: boolean;
   ceOffset: number;
   peOffset: number;
   cePremium: string;

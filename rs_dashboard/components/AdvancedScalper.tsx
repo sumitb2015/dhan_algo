@@ -53,8 +53,12 @@ interface HalfLeg {
   lots: number;
 }
 
-const UNDERLYINGS = ['NIFTY', 'BANKNIFTY', 'SENSEX'] as const;
-const STRIKE_STEP: Record<string, number> = { NIFTY: 50, BANKNIFTY: 100, SENSEX: 100 };
+const UNDERLYINGS = ['NIFTY', 'BANKNIFTY', 'SENSEX', 'CRUDEOIL', 'CRUDEOILM'] as const;
+const STRIKE_STEP: Record<string, number> = { NIFTY: 50, BANKNIFTY: 100, SENSEX: 100, CRUDEOIL: 50, CRUDEOILM: 50 };
+// MCX crude is Dhan-only here: Dhan orders MCX in LOTS (lookup lotSize = 1), whereas
+// Kotak's MCX quantity scaling differs and Zerodha has no MCX support.
+const isMcxUnderlying = (u: string) => u === 'CRUDEOIL' || u === 'CRUDEOILM';
+const dhanFnoSegment = (u: string) => isMcxUnderlying(u) ? 'MCX_COMM' : u === 'SENSEX' ? 'BSE_FNO' : 'NSE_FNO';
 
 // India VIX chip in the header — sourced from /api/scalper/top-indices,
 // which as of the WS-hub migration serves this row off the shared
@@ -851,9 +855,17 @@ export default function AdvancedScalper() {
       .catch(() => {});
   }, [broker, underlying]);
 
+  // MCX crude is Dhan-only — fall back to NIFTY if the broker is switched away.
+  useEffect(() => {
+    if (broker !== 'dhan' && isMcxUnderlying(underlying)) setUnderlying('NIFTY');
+  }, [broker, underlying]);
+
   // ─── useEffect 1a: Load prev-close whenever underlying changes ────
 
   useEffect(() => {
+    // MCX prev close arrives with the chain (futures-based); this route would
+    // fall back to NIFTY's config for an unknown underlying.
+    if (isMcxUnderlying(underlying)) return;
     fetch(`/api/scalper/nifty-prev-close?underlying=${underlying}`)
       .then(r => r.json())
       .then((j: { success: boolean; prevClose?: number }) => {
@@ -908,8 +920,9 @@ export default function AdvancedScalper() {
 
     fetch(`/api/options/chain?underlying=${underlying}&expiry=${expiry}&broker=${broker}`)
       .then(r => r.json())
-      .then((j: { success: boolean; data?: { chain: { oc?: Record<string, ChainOcEntry> }; spot: number } }) => {
+      .then((j: { success: boolean; data?: { chain: { oc?: Record<string, ChainOcEntry> }; spot: number; prev_close?: number } }) => {
         if (!j.success || !j.data?.chain?.oc) return;
+        if (isMcxUnderlying(underlying) && (j.data.prev_close ?? 0) > 0) setPrevSpot(j.data.prev_close!);
         const oc = j.data.chain.oc;
         const strikes = Object.keys(oc).map(Number).filter(n => !isNaN(n)).sort((a, b) => a - b);
         setAllStrikes(strikes);
@@ -1350,7 +1363,7 @@ export default function AdvancedScalper() {
               quantity: lots * legLotSize,
               side,
               orderType: mode,
-              exchangeSegment: underlying === 'SENSEX' ? 'BSE_FNO' : 'NSE_FNO',
+              exchangeSegment: dhanFnoSegment(underlying),
               productType: legProductType,
               idempotencyKey: crypto.randomUUID(),
               ...(mode === 'LIMIT' ? { price: limitPrice } : {}),
@@ -1923,7 +1936,7 @@ export default function AdvancedScalper() {
                 quantity: movedUnits,
                 side: sideToOpen,
                 orderType: 'MARKET',
-                exchangeSegment: underlying === 'SENSEX' ? 'BSE_FNO' : 'NSE_FNO',
+                exchangeSegment: dhanFnoSegment(underlying),
                 productType: resolvedProductDhan,
               }),
             });
@@ -2572,8 +2585,8 @@ export default function AdvancedScalper() {
                 (e.g. NIFTY vs BANKNIFTY) */}
             <select value={underlying} onChange={e => setUnderlying(e.target.value as typeof UNDERLYINGS[number])}
               className="bg-zinc-900 border border-zinc-700 text-zinc-200 text-xs font-semibold
-                         rounded-lg px-2.5 py-1.5 focus:outline-none focus:border-emerald-500 w-[104px] shrink-0">
-              {UNDERLYINGS.map(sym => <option key={sym} value={sym}>{sym}</option>)}
+                         rounded-lg px-2.5 py-1.5 focus:outline-none focus:border-emerald-500 w-[128px] shrink-0">
+              {UNDERLYINGS.map(sym => <option key={sym} value={sym} disabled={isMcxUnderlying(sym) && broker !== 'dhan'}>{sym}</option>)}
             </select>
 
             {/* Expiry selector */}
