@@ -171,3 +171,22 @@ The OI collector (`scripts/tools/crudeoil_oi_collector.py`) polls the CRUDEOIL (
 not mini) option chain every 30s for ATM±10 strikes and writes a daily CSV — it's a
 read-only snapshot tool, not an order-placing one; see `dhan-oi-analytics` for the
 analytics consuming its output (`CrudeOilOITab.tsx`/`CrudeOilCumulativeOITab.tsx`).
+
+## Dashboard terminals that trade crude (added 2026-10-09)
+
+- **Advanced Scalper** lists `CRUDEOIL` and `CRUDEOILM` (strike step 50, **Dhan only** — the options are disabled for Kotak/
+  Zerodha and a broker switch drops back to NIFTY). Orders use `exchangeSegment: 'MCX_COMM'` via `dhanFnoSegment()`; lookup
+  `lotSize` is 1 (Dhan orders MCX in lots). Previous close for crude comes with the **chain** (`prev_close`, futures-based):
+  `/api/scalper/nifty-prev-close` falls back to NIFTY's config for an unknown underlying, so the page skips it for MCX and resets
+  `prevSpot` on every underlying change (otherwise the % change reads against NIFTY's close, ≈ −63 %).
+- `isFnoSegment()` there now accepts Dhan's exact `MCX_COMM` so crude legs reach the CE/PE values, the P&L Guard / profit lock
+  and Exit-all-on-lock (their P&L is rescaled by `scaleBrokerPnl` first). Kotak's `mcx_fo` stays excluded. If crude legs vanish
+  from the guard, look here first.
+- **Expiry race on an underlying switch:** `expiry` state still holds the old underlying's date for one render. The bridge
+  effect once started `CRUDEOILM` with NIFTY's `2026-10-13`, resolved no contracts, died (`status: ERROR`), and the page kept
+  painting the last file snapshot. Guard: `expiryOwner === underlying` before starting the bridge or fetching the chain. Any
+  new effect keyed on `(underlying, expiry)` needs the same guard. Symptom check: bridge status file `expiry` ≠ the dropdown,
+  or `live_options_quotes_*.json` `updated_at` frozen while prices still show.
+- **Focus Tool (CRUDEOILM only)** prices off the shared `live_options_ws` bridge, not `focus_tool_ws.py` and not the REST chain
+  (30 s cache, lagging `last_price`). Strike step per row via `rowStep(row)`; "100s only" makes it 100. See `dhan-focus-tool`.
+
