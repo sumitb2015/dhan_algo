@@ -24,7 +24,7 @@
 import { NSE_HOLIDAYS } from './nseHolidays.ts';
 import { greeksForLeg, trustedMark, type FutureQuote } from './optionsPricing.ts';
 import type {
-  FocusRow, FocusDte, FocusRowStatus, FocusReentryMode, FocusReentryTrigger, FocusPendingReentry, FocusLegSimpleMom, FocusLazyLeg, FocusLegRangeBreakout, FocusOverallMode,
+  FocusRow, FocusDte, FocusRowStatus, FocusReentryMode, FocusReentryTrigger, FocusPendingReentry, FocusLegSimpleMom, FocusLazyLeg, FocusLegRangeBreakout, FocusOverallMode, FocusOverallTrail,
   FocusLegSlRule, FocusLegTrailSl, FocusLegOrbSl, FocusOrbStamp, FocusStrikeCriteria, FocusLegCrit,
 } from '@/lib/focusToolRows';
 
@@ -1519,6 +1519,7 @@ export function evaluateOverallExit(
 
   const tr = row.overallTrail;
   if (!tr?.enabled) return null;
+  if (overallTrailInvalid(tr)) return null;     // never act on a trail that would exit at once
   const every = Number(tr.every);
   const by = Number(tr.by);
   if (tr.kind === 'trailSl') {
@@ -1541,6 +1542,25 @@ export function evaluateOverallExit(
   const floor = lock + (tr.kind === 'lockTrail' && every > 0 && by > 0 ? Math.floor((peak.pnl - reach) / (every * qm)) * by * qm : 0);
   if (p.pnl <= floor + OVERALL_EPS) {
     return { kind: 'sl', reason: `Overall ${tr.kind === 'lockTrail' ? 'Lock and Trail' : 'Lock'} ₹${floor.toFixed(0)} hit (P&L ₹${p.pnl.toFixed(0)}, peak ₹${peak.pnl.toFixed(0)})` };
+  }
+  return null;
+}
+
+/**
+ * A trail that raises its floor faster than the profit that earns it: "by" larger
+ * than "every" (Lock and Trail, Overall Trail SL). The floor climbs past the
+ * profit, so the row exits the moment it goes green — e.g. SL 600, every 50, by
+ * 250 locks ₹1,150 at a ₹367 peak. AlgoTest's examples always have by < every,
+ * and Triple Straddle rejects it too. Returns the reason, or null when fine.
+ * evaluateOverallExit ignores an invalid trail instead of acting on it.
+ */
+export function overallTrailInvalid(
+  tr: Pick<FocusOverallTrail, 'enabled' | 'kind' | 'every' | 'by'> | undefined,
+): string | null {
+  if (!tr?.enabled || tr.kind === 'lock') return null;
+  const every = Number(tr.every), by = Number(tr.by);
+  if (every > 0 && by > 0 && by > every) {
+    return `Trail by (${tr.by}) must not exceed the step (${tr.every}): the floor would rise faster than the profit and exit at once`;
   }
   return null;
 }

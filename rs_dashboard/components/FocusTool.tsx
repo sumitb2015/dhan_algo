@@ -50,7 +50,7 @@ import {
   multipliedLots, legLots, hasLegLots, clampHm, rangeWindow, rangeWindowPhase, rowHasMultiDayRange, candleBucket, tradingDte,
   legSlRuleOn, legStopLevel, legTargetSpotLevel, legTgtUnitLabel, MAX_LEG_REENTRIES, pendingReentryLevel, pendingReentryHit, legTargetReason, costReentryBasis,
   awaitingMomentumQuote, MOMENTUM_QUOTE_WAIT_MS, legTargetLevel,
-  evaluateEntryMomentum, reRangeWindow, entryMomentumOn, overallSlConfig, overallProgress, nextOverallPeak, evaluateOverallExit, overallExitKind, evaluateOverallReentry, MAX_OVERALL_REENTRIES, rangeBreakoutOn, rangeBreakoutHit, costStopApplies, squareOffLegs, atmStrike, resolveRowLegStrike, mirrorLinkedPatch, MAX_LAZY_LEGS, legSlMultiplier, legTarget, nextLazyLegId, lazyLegStrike, runningLazyLeg, simpleMomOn, simpleMomLevel, simpleMomHit,
+  evaluateEntryMomentum, reRangeWindow, entryMomentumOn, overallSlConfig, overallProgress, nextOverallPeak, evaluateOverallExit, overallTrailInvalid, overallExitKind, evaluateOverallReentry, MAX_OVERALL_REENTRIES, rangeBreakoutOn, rangeBreakoutHit, costStopApplies, squareOffLegs, atmStrike, resolveRowLegStrike, mirrorLinkedPatch, MAX_LAZY_LEGS, legSlMultiplier, legTarget, nextLazyLegId, lazyLegStrike, runningLazyLeg, simpleMomOn, simpleMomLevel, simpleMomHit,
   type PosRow, type RowLive,
 } from '@/lib/focusToolRules';
 import { postFocusEvent } from '@/lib/focusToolEvents';
@@ -1603,6 +1603,7 @@ function OverallSettingsControls({ row, onUpdate }: { row: FocusRow; onUpdate: (
           </label>
         </>)}
         {tr.enabled && tr.kind === 'trailSl' && !sl && <span className="text-[11px] font-semibold text-rose-400">Overall Trail SL needs an Overall SL</span>}
+        {overallTrailInvalid(tr) && <span className="text-[11px] font-semibold text-rose-400">Trail by must not exceed the step — this trail is ignored</span>}
       </div>
     </div>
   );

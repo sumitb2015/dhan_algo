@@ -14,7 +14,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
-  EMPTY_ROW_LIVE, evaluateRowExit, evaluateOverallExit, nextOverallPeak, type RowLive,
+  EMPTY_ROW_LIVE, evaluateRowExit, evaluateOverallExit, nextOverallPeak, overallTrailInvalid, type RowLive,
 } from './focusToolRules.ts';
 import { UNDERLYING_META } from './focusToolUnderlyings.ts';
 
@@ -171,6 +171,24 @@ for (const m of MARKETS) {
     assert.equal(hit?.tick, 2);
   });
 
+  // ── A trail that would exit the moment the row goes green is ignored ───────
+  test(`${tag} Overall Trail SL with by > every is ignored (the live case: SL 600, every 50, by 250, +367)`, () => {
+    const bad = { slRupees: rs(60), overallTrail: { enabled: true, kind: 'trailSl', reach: '', lock: '', every: rs(5), by: rs(25) } };
+    // before the guard: peak 36.7 → 7 steps → stop locked at +115 → exit on the very next tick at +36.7
+    assert.equal(replay(m, bad, [0, 36.7, 36.7]), null);
+    // the plain SL is still in force
+    assert.match(replay(m, bad, [0, 36.7, -60])?.reason ?? '', /^SL ₹/);
+  });
+
+  test(`${tag} Lock and Trail with by > every is ignored; by = every is still honoured`, () => {
+    const bad = { overallTrail: { enabled: true, kind: 'lockTrail', reach: rs(10), lock: rs(9), every: rs(1), by: rs(5) } };
+    assert.equal(replay(m, bad, [0, 10 + JUST, 20, 20]), null);          // floor would be 9 + 10·5 = 59 > the 20 earned
+    const eq = { slRupees: rs(60), overallTrail: { enabled: true, kind: 'trailSl', reach: '', lock: '', every: rs(10), by: rs(10) } };
+    // peak 10 → one step → SL 50: −49.9 holds, −50 exits
+    assert.equal(replay(m, eq, [0, 10 + JUST, -49.9]), null);
+    assert.equal(replay(m, eq, [0, 10 + JUST, -50])?.tick, 2);
+  });
+
   // ── Switch off / wrong config ─────────────────────────────────────────────
   test(`${tag} Trailing Options switched off never fires`, () => {
     const row = { overallTrail: { enabled: false, kind: 'lock', reach: rs(10), lock: rs(5), every: '', by: '' } };
@@ -182,3 +200,16 @@ for (const m of MARKETS) {
     assert.equal(replay(m, row, [0, 50, -50]), null);
   });
 }
+
+test('overallTrailInvalid: only by > every on a trailing kind, never Lock, never off or blank', () => {
+  const t = (o: object) => overallTrailInvalid({ enabled: true, kind: 'lockTrail', every: '100', by: '50', ...o } as never);
+  assert.equal(t({}), null);
+  assert.equal(t({ by: '100' }), null);                                  // equal is fine
+  assert.match(t({ by: '101' }) ?? '', /must not exceed/);
+  assert.match(t({ kind: 'trailSl', every: '50', by: '250' }) ?? '', /must not exceed/);
+  assert.equal(t({ kind: 'lock', every: '1', by: '999' }), null);       // Lock has no step
+  assert.equal(overallTrailInvalid({ enabled: false, kind: 'lockTrail', every: '1', by: '9' }), null);
+  assert.equal(t({ every: '', by: '9' }), null);                         // blank = not set yet, not invalid
+  assert.equal(t({ every: '50', by: '' }), null);
+  assert.equal(overallTrailInvalid(undefined), null);
+});
