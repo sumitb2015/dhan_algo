@@ -153,6 +153,18 @@ single-purpose with exactly one call site, declare it locally in the same file
 near where it's used (this codebase's convention — see `SwitchToggle`,
 `SegPill`, `LotStepper` in `FocusTool.tsx`) rather than extracting a new file.
 
+## Dense Row Actions: Icon Buttons, Dropdowns, Aligned Levels (Focus Tool, 2026-10-09)
+
+- Per-row action buttons (Exit all, Exit, Re-enter) are **icon-only** (`size="icon"`, lucide icon) with an `aria-label` and a
+  `title` that also says why it is disabled. Colour carries meaning (rose = exit, emerald = enter), not a text label.
+- Several same-kind chips (25/50/75 % part exit) collapse into **one dropdown** (`DropdownMenu`, items disabled when they
+  would do nothing); disable the trigger when no item is enabled.
+- A cell that stacks several computed levels (stop, target, pair) is a fixed-min-width `inline-flex flex-col items-end` block:
+  one level per line, right-aligned, so decimals line up between rows. A centred, wrapping inline list misaligns as soon as
+  one row has two levels and its neighbour one.
+- An open-quantity badge shows the unit a trader sizes in (lots), keeps the raw quantity in the tooltip, and does not repeat
+  both ("5 LOTS", not "5 LOTS · 50").
+
 ## Common Mistakes
 
 - Reaching for a full `recharts` chart for a 56×16px trend indicator — the

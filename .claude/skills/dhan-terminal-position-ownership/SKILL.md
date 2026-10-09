@@ -388,6 +388,13 @@ re-entry on SL/target) to `FocusTool.tsx` (`b04d0ce`, `66a8fe1`, `50f4bca`,
   `ceDeltaModel`/`peDeltaModel` mark a model-basis entry, and `legDeltaBasis(fill, leg)` picks the matching LIVE delta (`RowLive.ceDelta` model vs `ceDeltaDhan`). A new stamped field that is later compared with a live value needs the same
   marker, never a silent re-baseline of persisted state. Adds to a running leg keep the leg's existing basis.
 
+- **A manual entry must not race the scheduler's entry or resurrect a waiting one (2026-10-09).** "Enter now" re-arms a flat row
+  (clearing the one-entry latch and the fill) and then enters; "Re-enter" sells one flat leg. Both were reviewed down to the
+  same three rules: (1) refuse while an entry/exit is in flight or started seconds ago — re-arming mid-entry wipes the
+  half-stamped ledger and sells every leg twice; (2) wait for the re-arm to land in the scheduler's snapshot (poll with a
+  deadline), never a fixed timer; (3) a leg with a *waiting* re-entry (`cePending`/`pePending`) has its pending entry
+  cleared before the manual order, otherwise the trigger sells it a second time. See `dhan-focus-tool`.
+
 ### 12. A terminal with a SIM mode keeps its own ledger file (Triple Straddle, 2026-10-06)
 
 `/options/triple-straddle` places CE+PE straddle pairs and tracks them in `debug/triple_straddle_state.json`
