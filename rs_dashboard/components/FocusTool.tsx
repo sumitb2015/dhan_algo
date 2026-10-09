@@ -707,6 +707,19 @@ function SwitchToggle({
   );
 }
 
+/** An SL stored as a premium multiplier (1.2) but typed and shown as a percentage above entry (20), the same convention as Tgt %. */
+const slMultToPct = (m: string | undefined): string => {
+  const n = Number(m);
+  return m && n > 1 ? String(Math.round((n - 1) * 1e6) / 1e4) : '';
+};
+const slPctToMult = (pct: string): string => {
+  const n = Number(pct);
+  return pct.trim() !== '' && n > 0 ? String(Math.round((1 + n / 100) * 1e6) / 1e6) : '';
+};
+function SlPctInput({ mult, onMult, ...rest }: { mult: string | undefined; onMult: (m: string) => void; placeholder?: string; className?: string; title?: string; disabled?: boolean }) {
+  return <RuleNumInput value={slMultToPct(mult)} onCommit={v => onMult(slPctToMult(v))} {...rest} />;
+}
+
 /**
  * A number box that commits on blur or Enter, never per keystroke.
  *
@@ -2903,7 +2916,7 @@ function FocusTableRowImpl({
   buildupWsActive?: boolean;
   buildupExpiryHint?: string | null;
   onUpdate: (patch: Partial<FocusRow>) => void;
-  onDelete: () => void; onArm: () => void; onDisarm: () => void;
+  onDelete: () => void; onArm: () => void; onDisarm: () => void; onEnterNow?: () => void; onReenterLeg?: (leg: 'CE' | 'PE') => void;
   onExit: (leg: 'CE' | 'PE' | 'ALL') => void;
   onExitPartial: (leg: 'CE' | 'PE', pct: 25 | 50 | 75) => void;
   onAddLot: (leg: 'CE' | 'PE', lots: number) => void;
@@ -3007,10 +3020,10 @@ function FocusTableRowImpl({
         <div className="flex items-center justify-between gap-2 flex-wrap pt-1.5 border-t border-zinc-800/40">
           <div className="flex items-center gap-2 flex-wrap">
             <label className="inline-flex items-center gap-1 text-[11px] font-black text-zinc-400"
-              title={legSlOverridden(row, leg) ? `${leg} uses its ${legSlOverridden(row, leg)} (set under the row's rules); this × is the fallback when that cannot be measured (no delta / spot at entry)` : `Exit ${leg} alone when its premium reaches its own entry × this — independent of the other leg and of the pair stop`}>
-              SL ×
-              <RuleNumInput value={(isCe ? row.ceSlMultiplier : row.peSlMultiplier) ?? '1.2'}
-                onCommit={v => onUpdate(isCe ? { ceSlMultiplier: v } : { peSlMultiplier: v })}
+              title={legSlOverridden(row, leg) ? `${leg} uses its ${legSlOverridden(row, leg)} (set under the row's rules); this × is the fallback when that cannot be measured (no delta / spot at entry)` : `Exit ${leg} alone when its premium has risen this % above its own entry (20 = 20% above) — independent of the other leg and of the pair stop`}>
+              SL %
+              <SlPctInput mult={(isCe ? row.ceSlMultiplier : row.peSlMultiplier) ?? '1.2'}
+                onMult={v => onUpdate(isCe ? { ceSlMultiplier: v } : { peSlMultiplier: v })}
                 className="w-12 h-6 text-center text-[11px]" />
             </label>
             <label className="inline-flex items-center gap-1 text-[11px] font-black text-zinc-400"
@@ -3245,7 +3258,7 @@ function FocusTableRowImpl({
             </label>
             <label className="flex items-center gap-1.5 bg-zinc-900/60 border border-zinc-800/60 rounded-lg px-2 py-1" title="Pair stop: exit both legs when their combined premium reaches entry × this">
               <span className="text-amber-400 text-[11px] font-black w-12 shrink-0">Pair ×</span>
-              <RuleNumInput value={row.slMultiplier} placeholder="off" onCommit={v => onUpdate({ slMultiplier: v })} className="w-full flex-1 min-w-0 h-7 text-center text-xs" />
+              <SlPctInput mult={row.slMultiplier} placeholder="off" onMult={v => onUpdate({ slMultiplier: v })} className="w-full flex-1 min-w-0 h-7 text-center text-xs" />
             </label>
             <div className="flex items-center gap-1.5 bg-zinc-900/60 border border-zinc-800/60 rounded-lg px-2 py-1">
               <span className="text-rose-400 text-[11px] font-black w-12 shrink-0">Spot H&uarr;</span>
@@ -3360,7 +3373,7 @@ function fmtPnl0(n: number): string {
 function FocusProRowImpl({
   row, live, lotSize, spot, liveRealMoney, busy,
   expiries, buildupWsActive, buildupExpiryHint,
-  onUpdate, onDelete, onArm, onDisarm, onExit, onExitPartial, onAddLot, onAddAllLegs, onLadderPlace, onLadderCancel, onReduceLot, onShift, onBlocked,
+  onUpdate, onDelete, onArm, onDisarm, onEnterNow, onReenterLeg, onExit, onExitPartial, onAddLot, onAddAllLegs, onLadderPlace, onLadderCancel, onReduceLot, onShift, onBlocked,
   onCancelPending,
 }: FocusRowViewProps) {
   const combinedLtp = (live.ltpCe ?? 0) + (live.ltpPe ?? 0);
@@ -3509,9 +3522,9 @@ function FocusProRowImpl({
         </TableCell>
         {/* This leg's own rules */}
         <TableCell className="py-1.5 px-2 text-center">
-          <RuleNumInput value={(isCe ? row.ceSlMultiplier : row.peSlMultiplier) ?? '1.2'}
-            onCommit={v => onUpdate(isCe ? { ceSlMultiplier: v } : { peSlMultiplier: v })}
-            title={legSlOverridden(row, leg) ? `${leg} uses its ${legSlOverridden(row, leg)}; this × is the fallback when that cannot be measured` : `Exit ${leg} alone when its premium reaches its own entry × this`}
+          <SlPctInput mult={(isCe ? row.ceSlMultiplier : row.peSlMultiplier) ?? '1.2'}
+            onMult={v => onUpdate(isCe ? { ceSlMultiplier: v } : { peSlMultiplier: v })}
+            title={legSlOverridden(row, leg) ? `${leg} uses its ${legSlOverridden(row, leg)}; this × is the fallback when that cannot be measured` : `Exit ${leg} alone when its premium has risen this % above its own entry (20 = 20% above)`}
             className={cn(PRO_INPUT, 'w-14')} />
         </TableCell>
         <TableCell className="py-1.5 px-2 text-center">
@@ -3548,11 +3561,19 @@ function FocusProRowImpl({
                 {c.pct}%
               </Button>
             ))}
-            <Button size="sm" className="h-7 px-3 bg-rose-600 text-oncolor hover:bg-rose-500 font-bold"
-              disabled={!canTrade || legFlat} onClick={() => onExit(leg)}
-              title={legFlat ? 'Nothing open' : canTrade ? `Exit the ${leg} leg` : tradeBlockedWhy}>
-              Exit
-            </Button>
+            {legFlat && onReenterLeg ? (
+              <Button size="sm" className="h-7 px-3 bg-emerald-600 text-oncolor hover:bg-emerald-500 font-bold"
+                disabled={!canTrade} onClick={() => onReenterLeg(leg)}
+                title={canTrade ? `Sell ${leg} again now at its current strike, at the row's lots (ignores any waiting re-entry rule)` : tradeBlockedWhy}>
+                Re-enter
+              </Button>
+            ) : (
+              <Button size="sm" className="h-7 px-3 bg-rose-600 text-oncolor hover:bg-rose-500 font-bold"
+                disabled={!canTrade || legFlat} onClick={() => onExit(leg)}
+                title={legFlat ? 'Nothing open' : canTrade ? `Exit the ${leg} leg` : tradeBlockedWhy}>
+                Exit
+              </Button>
+            )}
           </div>
         </TableCell>
       </TableRow>
@@ -3698,6 +3719,13 @@ function FocusProRowImpl({
               <Zap className="size-3.5" /> Arm
             </Button>
           )}
+          {flat && onEnterNow && (
+            <Button size="sm" className="h-8 px-4 bg-emerald-600 text-oncolor hover:bg-emerald-500 font-bold"
+              disabled={!canTrade} onClick={onEnterNow}
+              title={canTrade ? 'Open the row now at its configured lots and strikes (re-arms it first, ignoring the entry time)' : tradeBlockedWhy}>
+              <Zap className="size-3.5" /> Enter now
+            </Button>
+          )}
           {row.status === 'armed' && (
             <Button size="sm" variant="outline" className="h-8 px-4 border-zinc-700 bg-zinc-900 font-bold" onClick={onDisarm}>
               <ShieldOff className="size-3.5" /> Disarm
@@ -3734,7 +3762,7 @@ function FocusProRowImpl({
                   // Fixed percentage widths (sum 100) so the columns spread evenly instead of
                   // each hugging its widest cell.
                   ['', 'pl-3 w-[3%]'], ['Strike', 'w-[23%]'], ['Entry', 'text-center w-[7%]'], ['LTP', 'text-center w-[7%]'], ['Position', 'text-center w-[10%]'], ['P&L', 'text-center w-[8%]'],
-                  ['SL ×', 'text-center w-[6%]'], [`Tgt ${legTgtUnitLabel(row.legTgtUnit)}`, 'text-center w-[6%]'], ['Stop · target at', 'text-center w-[10%]'], ['Orders', 'text-right pr-3 w-[20%]'],
+                  ['SL %', 'text-center w-[6%]'], [`Tgt ${legTgtUnitLabel(row.legTgtUnit)}`, 'text-center w-[6%]'], ['Stop · target at', 'text-center w-[10%]'], ['Orders', 'text-right pr-3 w-[20%]'],
                 ].map(([h, c], i) => (
                   <TableHead key={i} className={cn('h-8 px-2 text-xs font-bold text-white', c)}>{h}</TableHead>
                 ))}
@@ -3783,8 +3811,8 @@ function FocusProRowImpl({
             <ProField label="SL ₹" title="Row stop loss in ₹ across both legs">
               <RuleNumInput value={row.slRupees} placeholder="off" onCommit={v => onUpdate({ slRupees: v })} className={cn(PRO_INPUT, 'w-20')} />
             </ProField>
-            <ProField label="Pair ×" title="Pair stop: exit both legs when their combined premium reaches entry × this">
-              <RuleNumInput value={row.slMultiplier} placeholder="off" onCommit={v => onUpdate({ slMultiplier: v })} className={cn(PRO_INPUT, 'w-14')} />
+            <ProField label="Pair %" title="Pair stop: exit both legs when their combined premium has risen this % above entry (e.g. 20 = 20% above)">
+              <SlPctInput mult={row.slMultiplier} placeholder="off" onMult={v => onUpdate({ slMultiplier: v })} className={cn(PRO_INPUT, 'w-14')} />
             </ProField>
             <ProField label="Spot H ↑" title="Exit the row when spot reaches this high">
               <RuleNumStepper value={row.levelHigh} onCommit={v => onUpdate({ levelHigh: v })}
@@ -3873,7 +3901,7 @@ function FocusRowCardImpl({
   buildupWsActive?: boolean;
   buildupExpiryHint?: string | null;
   onUpdate: (patch: Partial<FocusRow>) => void;
-  onDelete: () => void; onArm: () => void; onDisarm: () => void;
+  onDelete: () => void; onArm: () => void; onDisarm: () => void; onEnterNow?: () => void; onReenterLeg?: (leg: 'CE' | 'PE') => void;
   onExit: (leg: 'CE' | 'PE' | 'ALL') => void;
   onExitPartial: (leg: 'CE' | 'PE', pct: 25 | 50 | 75) => void;
   onAddLot: (leg: 'CE' | 'PE', lots: number) => void;
@@ -4230,17 +4258,17 @@ function FocusRowCardImpl({
             <RuleNumInput value={row.slRupees} onCommit={v => onUpdate({ slRupees: v })} className="w-full flex-1 min-w-0 h-5 text-center text-[11px]" />
           </div>
           <div className="flex items-center gap-1.5 bg-zinc-900/50 border border-zinc-800/40 rounded-lg px-1.5 py-0.5">
-            <span className="text-amber-500 text-[11px] font-black w-9 shrink-0">SL &times;</span>
-            <RuleNumInput value={row.slMultiplier} onCommit={v => onUpdate({ slMultiplier: v })} className="w-full flex-1 min-w-0 h-5 text-center text-[11px]" />
+            <span className="text-amber-500 text-[11px] font-black w-9 shrink-0">SL %</span>
+            <SlPctInput mult={row.slMultiplier} onMult={v => onUpdate({ slMultiplier: v })} className="w-full flex-1 min-w-0 h-5 text-center text-[11px]" />
           </div>
           <div className="flex items-center gap-1.5 bg-zinc-900/50 border border-zinc-800/40 rounded-lg px-1.5 py-0.5">
-            <span className="text-emerald-400 text-[11px] font-black w-9 shrink-0" title="Exit CE alone on its own premium multiple, independent of PE and of SL × above">CE &times;</span>
-            <RuleNumInput value={row.ceSlMultiplier ?? '1.2'} onCommit={v => onUpdate({ ceSlMultiplier: v })}
+            <span className="text-emerald-400 text-[11px] font-black w-9 shrink-0" title="Exit CE alone on its own premium multiple, independent of PE and of SL % above">CE %</span>
+            <SlPctInput mult={row.ceSlMultiplier ?? '1.2'} onMult={v => onUpdate({ ceSlMultiplier: v })}
               title={legSlOverridden(row, 'CE') ? `CE uses its ${legSlOverridden(row, 'CE')}; this × is the fallback when that cannot be measured (no delta / spot at entry)` : undefined} className="w-full flex-1 min-w-0 h-5 text-center text-[11px]" />
           </div>
           <div className="flex items-center gap-1.5 bg-zinc-900/50 border border-zinc-800/40 rounded-lg px-1.5 py-0.5">
-            <span className="text-rose-400 text-[11px] font-black w-9 shrink-0" title="Exit PE alone on its own premium multiple, independent of CE and of SL × above">PE &times;</span>
-            <RuleNumInput value={row.peSlMultiplier ?? '1.2'} onCommit={v => onUpdate({ peSlMultiplier: v })}
+            <span className="text-rose-400 text-[11px] font-black w-9 shrink-0" title="Exit PE alone on its own premium multiple, independent of CE and of SL % above">PE %</span>
+            <SlPctInput mult={row.peSlMultiplier ?? '1.2'} onMult={v => onUpdate({ peSlMultiplier: v })}
               title={legSlOverridden(row, 'PE') ? `PE uses its ${legSlOverridden(row, 'PE')}; this × is the fallback when that cannot be measured (no delta / spot at entry)` : undefined} className="w-full flex-1 min-w-0 h-5 text-center text-[11px]" />
           </div>
         </div>
@@ -5463,6 +5491,26 @@ export default function FocusTool() {
     // fresh at the next entry, so a pin from the previous cycle would make it
     // look its new position up at last time's strikes.
     updateRow(id, { status: 'armed', fill: undefined, overallReSlCount: 0, overallReTgtCount: 0, overallReMode: undefined });
+  }
+
+  /** Open a flat row right now. Re-arms it first, which clears the one-entry latch and stale fill pin, then enters
+   *  without waiting for the scheduler tick (and its entry-time/momentum gates). Orders still go through placeLeg's
+   *  own SIM / LIVE · REAL MONEY guard. */
+  function enterRowNow(row: FocusRow) {
+    if (!rowFlat(row)) { addToast('error', 'Cannot enter', 'This row still holds a position'); return; }
+    if (!isSimRow(row) && !window.confirm(`Enter ${row.underlying} now with REAL money?`)) return;
+    armRow(row.id);
+    setTimeout(() => {
+      const fresh = schedulerRef.current.config.rows.find(x => x.id === row.id);
+      if (fresh && rowFlat(fresh)) autoEnterRow(fresh, 'manual: enter now');
+    }, 400);
+  }
+
+  /** Sell one flat leg again right now, at the row's lots and the leg's current strike. */
+  function reenterLegNow(row: FocusRow, leg: 'CE' | 'PE') {
+    if (rowOwnsLeg(row, leg)) { addToast('error', 'Cannot re-enter', `The ${leg} leg is still open`); return; }
+    if (!isSimRow(row) && !window.confirm(`Re-enter ${row.underlying} ${leg} now with REAL money?`)) return;
+    runRowAction(row.id, () => placeLeg(row, leg, { reduce: false, lots: multipliedLots(row, legLots(row, leg)) }));
   }
 
   function deleteRow(id: string) {
@@ -8555,6 +8603,8 @@ export default function FocusTool() {
                           onUpdate={patch => updateRow(row.id, patch)}
                           onDelete={() => deleteRow(row.id)}
                           onArm={() => armRow(row.id)}
+                          onEnterNow={() => enterRowNow(row)}
+                          onReenterLeg={leg => reenterLegNow(row, leg)}
                           onDisarm={() => updateRow(row.id, { status: 'draft' })}
                           onExit={leg => handleManualExit(row, leg)}
                           onExitPartial={(leg, pct) => handleManualExitPartial(row, leg, pct)}
@@ -8607,6 +8657,8 @@ export default function FocusTool() {
                           onUpdate={patch => updateRow(row.id, patch)}
                           onDelete={() => deleteRow(row.id)}
                           onArm={() => armRow(row.id)}
+                          onEnterNow={() => enterRowNow(row)}
+                          onReenterLeg={leg => reenterLegNow(row, leg)}
                           onDisarm={() => updateRow(row.id, { status: 'draft' })}
                           onExit={leg => handleManualExit(row, leg)}
                           onExitPartial={(leg, pct) => handleManualExitPartial(row, leg, pct)}
@@ -8661,6 +8713,8 @@ export default function FocusTool() {
                           onUpdate={patch => updateRow(row.id, patch)}
                           onDelete={() => deleteRow(row.id)}
                           onArm={() => armRow(row.id)}
+                          onEnterNow={() => enterRowNow(row)}
+                          onReenterLeg={leg => reenterLegNow(row, leg)}
                           onDisarm={() => updateRow(row.id, { status: 'draft' })}
                           onExit={leg => handleManualExit(row, leg)}
                           onExitPartial={(leg, pct) => handleManualExitPartial(row, leg, pct)}
