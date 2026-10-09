@@ -21,12 +21,14 @@ import sys
 import os
 import json
 import time
+from datetime import datetime
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, ROOT)
 
 MASTER_LIST = os.path.join(ROOT, 'master_list.csv')
 MARKET_OPEN = "09:15"
+MARKET_CLOSE = "15:30"
 
 # Small gap between per-symbol historical calls — quote_data is 1 bulk call,
 # but intraday_minute_data is one call per symbol; a burst of 60+ back-to-back
@@ -61,21 +63,24 @@ def build_security_id_map(symbols):
 
 
 def fetch_prev_closes(helper, sid_map):
-    """One bulk quote_data call → {symbol: prevClose}."""
+    """One bulk quote_data call → ({symbol: prevClose}, {symbol: lastPrice}).
+
+    prevClose is only trustworthy while the session is live; lastPrice is the
+    official closing price once it has ended."""
     sid_to_symbol = {v: k for k, v in sid_map.items()}
     res = helper.dhan.quote_data(securities={"NSE_EQ": list(sid_map.values())})
     if not isinstance(res, dict) or res.get('status') != 'success':
         sys.stderr.write(f"[breadth_intraday_backfill] quote_data failed: {res}\n")
-        return {}
+        return {}, {}
 
     raw = res.get('data', {})
     if isinstance(raw, dict) and 'data' in raw:
         raw = raw['data']
     segment_data = raw.get('NSE_EQ', raw) if isinstance(raw, dict) else {}
     if not isinstance(segment_data, dict):
-        return {}
+        return {}, {}
 
-    out = {}
+    out, last = {}, {}
     for sid_str, ticker in segment_data.items():
         if not isinstance(ticker, dict):
             continue
@@ -90,7 +95,10 @@ def fetch_prev_closes(helper, sid_map):
         prev_close = float(ticker.get('close', 0) or ohlc.get('close', 0) or 0)
         if prev_close > 0:
             out[sym] = prev_close
-    return out
+        ltp = float(ticker.get('last_price', 0) or 0)
+        if ltp > 0:
+            last[sym] = ltp
+    return out, last
 
 
 def main():
@@ -113,11 +121,32 @@ def main():
         print(json.dumps({'error': 'no security ids resolved'}))
         return
 
-    prev_closes = fetch_prev_closes(helper, sid_map)
+    prev_closes, last_prices = fetch_prev_closes(helper, sid_map)
 
     out = {}
     for i, sym in enumerate(sid_map.keys()):
-        prev_close = prev_closes.get(sym)
+        # The bulk quote's `close` is today's close once the session ends
+        # (net_change = 0), which would compare every minute against itself.
+        # Daily candles give the true previous-session close at any hour, and
+        # (after 15:30) today's official close for the final point.
+        prev_close = None
+        today_close = None
+        try:
+            daily = helper.get_latest_candles(sym, interval="D", days=10)
+            if daily is not None and not daily.empty and 'Close' in daily.columns:
+                today_d = datetime.now().date()
+                before = daily[daily.index.date < today_d]
+                if not before.empty:
+                    prev_close = float(before['Close'].iloc[-1])
+                # Dhan's daily candle is cut at 15:14 like the 1-min feed, so
+                # the official close comes from the quote's last price.
+                if datetime.now().strftime('%H:%M') >= MARKET_CLOSE:
+                    today_close = last_prices.get(sym)
+        except Exception as e:
+            sys.stderr.write(f"[breadth_intraday_backfill] {sym} daily candles: {e}\n")
+        time.sleep(CALL_GAP_SEC)
+        if not prev_close:
+            prev_close = prev_closes.get(sym)
         if not prev_close:
             continue
         try:
@@ -141,6 +170,12 @@ def main():
                     per_minute[hm] = 'down'
                 else:
                     per_minute[hm] = 'flat'
+            # Dhan's equity 1-min feed stops at 15:14 (360 candles/day); the
+            # daily candle supplies the official closing direction as 15:30.
+            if today_close and per_minute:
+                per_minute[MARKET_CLOSE] = (
+                    'up' if today_close > prev_close
+                    else 'down' if today_close < prev_close else 'flat')
             if per_minute:
                 out[sym] = per_minute
 
