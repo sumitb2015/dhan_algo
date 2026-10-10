@@ -54,6 +54,10 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       ...(t.reason ? { reason: String(t.reason) } : {}),
     };
     await fs.promises.mkdir(path.dirname(JOURNAL), { recursive: true });
+    // Keep the journal bounded: past 20 MB the current file becomes `.1` (one generation kept).
+    try {
+      if ((await fs.promises.stat(JOURNAL)).size > 20 * 1024 * 1024) await fs.promises.rename(JOURNAL, `${JOURNAL}.1`);
+    } catch { /* no file yet */ }
     await fs.promises.appendFile(JOURNAL, JSON.stringify(rec) + '\n', 'utf-8');
     return NextResponse.json({ success: true });
   } catch (err) {

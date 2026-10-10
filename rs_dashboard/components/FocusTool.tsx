@@ -2325,7 +2325,7 @@ function GhostBtn({ onClick, children, title }: { onClick?: () => void; children
 
 function FocusHeader({
   futQuotes, shown, realised, unrealised, total, marginAvailable, marginUtilized,
-  wsLive, broker, setBroker, authenticatedBrokers,
+  wsLive, broker, setBroker, authenticatedBrokers, brokerLocked,
 }: {
   futQuotes: Record<FocusUnderlying, FutQuote | null>;
   /** Indices the futures strip lists (all three; one batched quote call regardless). */
@@ -2336,6 +2336,8 @@ function FocusHeader({
   broker: Broker;
   setBroker: (b: Broker) => void;
   authenticatedBrokers: Broker[];
+  /** A REAL row holds a position: exits and stops route to the page's broker, so it must not change. */
+  brokerLocked: boolean;
 }) {
   return (
     <div className="sticky top-0 z-40 bg-zinc-950/95 backdrop-blur border-b border-zinc-800 px-6 py-3 flex items-center justify-between gap-4 flex-wrap">
@@ -2383,9 +2385,12 @@ function FocusHeader({
         {authenticatedBrokers.length > 1 && (
           <select
             value={broker}
-            title="Broker this terminal trades and reads positions from"
+            disabled={brokerLocked}
+            title={brokerLocked
+              ? 'Locked: a REAL row holds a position on this broker. Exit it before switching, or its exits would go to the wrong account.'
+              : 'Broker this terminal trades and reads positions from'}
             onChange={e => setBroker(e.target.value as Broker)}
-            className="bg-zinc-900 border border-zinc-700 text-zinc-200 text-xs font-semibold rounded-lg px-2.5 py-1.5 focus:outline-none focus:border-violet-500 w-[90px] shrink-0"
+            className="bg-zinc-900 border border-zinc-700 text-zinc-200 text-xs font-semibold rounded-lg px-2.5 py-1.5 focus:outline-none focus:border-violet-500 disabled:opacity-50 disabled:cursor-not-allowed w-[90px] shrink-0"
           >
             {authenticatedBrokers.map(b => (
               <option key={b} value={b}>{BROKER_LABELS[b]}</option>
@@ -4506,6 +4511,14 @@ export default function FocusTool() {
   // re-entries) — a second tab is a second execution engine. Manual buttons
   // and settling this tab's own unconfirmed orders run in every tab.
   const { isLeader, leaderRef } = useTabLeader('focus-tool');
+  // Hidden tabs get their timers throttled by the browser; the automatic rules all run on timers.
+  const [tabHidden, setTabHidden] = useState(false);
+  useEffect(() => {
+    const sync = () => setTabHidden(document.visibilityState === 'hidden');
+    sync();
+    document.addEventListener('visibilitychange', sync);
+    return () => document.removeEventListener('visibilitychange', sync);
+  }, []);
   // Rows the scheduler has already auto-entered. Same reasoning, plus: the
   // entry window stays open for the rest of the session, so without this a
   // row would re-enter on every 5s tick.
@@ -4586,6 +4599,11 @@ export default function FocusTool() {
   // row trades on paper at any time, a REAL row only while LIVE · REAL MONEY
   // is armed for today. Per row, not per page — see rowMayTrade.
   const rowMayTrade = (row: Pick<FocusRow, 'mode'>, live: boolean) => isSimRow(row) || live;
+  // Exits only reduce risk: a REAL row that still holds a ledger position stays watched (stops, targets,
+  // time exit) even when LIVE is not armed — e.g. a BTST/positional short after the daily arm expired.
+  // Entries and re-entries keep using rowMayTrade.
+  const rowMayExit = (row: Pick<FocusRow, 'mode' | 'fill'>, live: boolean) =>
+    isSimRow(row) || live || (Number(row.fill?.ceQty) || 0) > 0 || (Number(row.fill?.peQty) || 0) > 0;
 
   // Standalone bridge (scripts/tools/focus_tool_ws.py) — all three underlyings
   // over one WebSocket connection, independent of AdvancedScalper's
@@ -4809,7 +4827,14 @@ export default function FocusTool() {
   /** Fetch the broker's position book once and return it, also refreshing
    *  state. Returns null if the call failed — callers that gate a real-money
    *  decision on this must treat null as "unknown", never as "flat". */
+  const positionsSeqRef = useRef(0);
+  const brokerNowRef = useRef(broker);
+  brokerNowRef.current = broker;
   const fetchPositionsNow = useCallback(async (): Promise<PosRow[] | null> => {
+    // Out-of-order guard: only the newest request may write state, and a response for a broker
+    // that is no longer selected is discarded (its book is not this page's).
+    const seq = ++positionsSeqRef.current;
+    const askedBroker = broker;
     try {
       const res = await fetch(scalperRoute(broker, 'poll'));
       const j = await res.json() as { success: boolean; positions?: PosRow[] };
@@ -4838,7 +4863,8 @@ export default function FocusTool() {
             sellQty: toInternalQty(u, Number((scaled as any).sellQty) || 0),
           } as PosRow;
         });
-      setPositions(rows);
+      if (brokerNowRef.current !== askedBroker) return null;
+      if (seq === positionsSeqRef.current) setPositions(rows);
       return rows;
     } catch {
       return null;
@@ -5388,12 +5414,16 @@ export default function FocusTool() {
     setConfirmExitAll(false);
     for (const r of config.rows) logEvent('exit_all_positions', r, 'manual: EXIT ALL Positions (header button)');
     await Promise.all(config.rows.map(r => cancelLadderOrders(r.id)));
+    // Rows are retired only when the broker confirmed the exit. A failed or thrown exit leaves live
+    // shorts at the broker; wiping the ledger then would leave them with no stop watched.
+    let exitOk = false;
     try {
       if (broker !== 'dhan') {
         const label = BROKER_LABELS[broker];
         const res = await fetch(scalperRoute(broker, 'exit-all'), { method: 'POST' });
         const data = await res.json() as { success: boolean; closed: string[]; errors: string[] };
         if (data.success) {
+          exitOk = true;
           addToast('success', `All ${label} positions liquidated.${data.closed.length ? ` (${data.closed.join(', ')})` : ''}`);
         } else {
           addToast('error', `${label} exit failed`, data.errors.join('; ') || 'Unknown error');
@@ -5406,6 +5436,7 @@ export default function FocusTool() {
         });
         const data = await res.json();
         if (data.broker_exit) {
+          exitOk = true;
           const killed = data.killed?.length ?? 0;
           const fallback = data.trigger_fallback?.length ?? 0;
           const detail = killed > 0 ? ` ${killed} strategy process${killed === 1 ? '' : 'es'} terminated.` : '';
@@ -5421,8 +5452,9 @@ export default function FocusTool() {
       // Retire every active Focus row so the tab scheduler cannot re-enter into a book we just nuked.
       // Sim rows are untouched: the broker exit didn't close their paper
       // legs, and wiping their ledger would silently drop the forward test.
-      setConfig(prev => {
-        const nextRows = prev.rows.map(r => {
+      if (exitOk) {
+        // schedulerRef holds the latest config; this closure is from before the awaits above.
+        const nextRows = schedulerRef.current.config.rows.map(r => {
           if (r.status === 'draft' || isSimRow(r)) return r;
           return {
             ...r,
@@ -5431,10 +5463,14 @@ export default function FocusTool() {
             updatedAt: new Date().toISOString(),
           };
         });
-        const nextConfig = { ...prev, rows: nextRows };
-        saveConfig(nextConfig);
-        return nextConfig;
-      });
+        setConfig(prev => ({
+          ...prev,
+          rows: prev.rows.map(r => nextRows.find(n => n.id === r.id) ?? r),
+        }));
+        void saveConfig({ rows: nextRows });
+      } else {
+        addToast('error', 'Exit All not confirmed', 'Rows were left as they are so their stops stay watched. Check the broker positions.');
+      }
       setExitingAll(false);
       setTimeout(pollPositions, 1000);
     }
@@ -5900,7 +5936,8 @@ export default function FocusTool() {
     // LIVE arm nor a logged-in broker.
     if (isSimRow(row)) return placeSimLeg(row, leg, opts);
 
-    if (!liveRealMoney) {
+    // Only an order that opens or adds is held back by the daily arm; a reducing order is always allowed.
+    if (!liveRealMoney && !opts.reduce) {
       addToast('error', 'Dry run', 'Enable LIVE · REAL MONEY to place orders');
       return false;
     }
@@ -7750,7 +7787,7 @@ export default function FocusTool() {
     const openRows = config.rows.filter(r => {
       const l = rowLive[r.id];
       if (!l) return false;
-      return !rowFlat(r) && rowMayTrade(r, liveRealMoney);
+      return !rowFlat(r) && rowMayExit(r, liveRealMoney);
     });
     if (!openRows.length) return;
 
@@ -8260,7 +8297,7 @@ export default function FocusTool() {
       const nowHm = istHm();
       const openRows = cfg.rows.filter(r => {
         const l = live[r.id];
-        return l && !rowFlat(r) && rowMayTrade(r, liveArmed);
+        return l && !rowFlat(r) && rowMayExit(r, liveArmed);
       });
 
       // Only the leader tab acts; a follower still settles its own unconfirmed orders.
@@ -8560,12 +8597,22 @@ export default function FocusTool() {
         broker={broker}
         setBroker={setBroker}
         authenticatedBrokers={authenticatedBrokers}
+        brokerLocked={config.rows.some(r => !isSimRow(r) && ((Number(r.fill?.ceQty) || 0) > 0 || (Number(r.fill?.peQty) || 0) > 0))}
       />
 
       {authChecked && !hasAuthenticatedBroker && (
         <div className="z-20 bg-amber-900/95 border-b border-amber-500/40 px-4 py-2 text-center">
           <p className="text-xs font-bold text-amber-200">
             No broker logged in — log in to Dhan, Zerodha or Kotak to place orders.
+          </p>
+        </div>
+      )}
+
+      {isLeader === true && tabHidden && config.rows.some(r => !isSimRow(r) && !rowFlat(r)) && (
+        <div role="alert" className="z-20 bg-rose-900/95 border-b border-rose-500/40 px-4 py-2 text-center">
+          <p className="text-xs font-bold text-rose-200">
+            This tab is in the background: the browser may slow its timers to about once a minute, so stops, targets and
+            exits on REAL positions can fire late. Keep this tab visible (its own window) while a REAL row is open.
           </p>
         </div>
       )}
