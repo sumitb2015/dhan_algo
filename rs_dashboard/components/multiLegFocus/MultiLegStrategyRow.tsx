@@ -18,7 +18,7 @@ import {
   computeLegTrailingSL, withAutoLegRisk, computeStrategyMetrics, checkStrategyRisk, computeBasketStatus,
   classifyBasketStructure, legCountsToday, legPnl, legAvgPrice, legPnlPct, legQtyUnits, crudeQtyMultiplier, basketLabel,
   findSiblingLegCollisions, type SiblingLegCollision, scaleBasketMultiplier, futuresAsSyntheticPayoffLegs, isOptionLeg,
-  type MultiLegBasket, type MultiLegLeg, type StrategyRiskConfig, type AutoLegRule, DEFAULT_AUTO_LEG_RULE,
+  type MultiLegBasket, type MultiLegLeg, type StrategyRiskConfig, type AutoLegRule, DEFAULT_AUTO_LEG_RULE, SAME_DISTANCE, MATCH_OPPOSITE,
 } from '@/lib/multiLegFocus';
 import { calculateTimeToExpiryYears } from '@/lib/optionsPricing';
 import { FOCUS_RING } from '@/components/Scalper';
@@ -502,11 +502,13 @@ export default function MultiLegStrategyRow({
   }, [basket.autoLegRule, onUpdate]);
   const offsetOpts = [-3, -2, -1, 0, 1, 2, 3, 4, 5];
   const selCls = `h-6 bg-zinc-800 border border-zinc-700 rounded text-[11px] text-zinc-200 px-1 disabled:opacity-50 ${FOCUS_RING}`;
-  const offsetSel = (value: number | undefined, onChange: (v: number | undefined) => void, label: string) => (
+  const offsetSel = (value: number | typeof SAME_DISTANCE | typeof MATCH_OPPOSITE | undefined, onChange: (v: number | typeof SAME_DISTANCE | typeof MATCH_OPPOSITE | undefined) => void, label: string) => (
     <select aria-label={label} title={label} className={selCls}
       value={value == null ? 'off' : String(value)}
-      onChange={e => onChange(e.target.value === 'off' ? undefined : Number(e.target.value))}>
+      onChange={e => onChange(e.target.value === 'off' ? undefined : e.target.value === SAME_DISTANCE ? SAME_DISTANCE : e.target.value === MATCH_OPPOSITE ? MATCH_OPPOSITE : Number(e.target.value))}>
       <option value="off">Exit only</option>
+      <option value={SAME_DISTANCE}>Same distance</option>
+      <option value={MATCH_OPPOSITE}>Match opposite premium</option>
       {offsetOpts.map(n => <option key={n} value={n}>{n === 0 ? 'ATM' : `ATM${n > 0 ? '+' : ''}${n}`}</option>)}
     </select>
   );

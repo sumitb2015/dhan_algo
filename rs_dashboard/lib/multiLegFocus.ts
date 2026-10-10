@@ -21,6 +21,9 @@ export interface MultiLegLeg {
   id: string;
   /** Basket-default auto re-entries already used by the chain of legs this one came from. */
   autoRolls?: number;
+  /** Points OTM from spot when the leg was opened (CE: strike - spot, PE: spot - strike). Drives the
+   *  "Same distance" auto re-entry; unset for legs adopted from the broker. */
+  entryDist?: number;
   side: LegSide;
   option: LegInstrument;
   strike: number;
@@ -178,14 +181,20 @@ export interface StrategyRiskConfig {
  * After the leg exits and is confirmed closed, a new leg of the same side/lots/option opens at
  * ATM + offset strikes (offset counted OTM: CE up, PE down; 0 = ATM, negative = ITM).
  */
+/** Re-entry offset meaning: same points-from-spot as the leg that just exited, measured at its entry. */
+export const SAME_DISTANCE = 'same' as const;
+
+/** Re-entry offset meaning: strike whose premium is closest to the open opposite short leg's live premium. */
+export const MATCH_OPPOSITE = 'match' as const;
+
 export interface AutoLegRule {
   enabled: boolean;
   slPct: number;
   /** Strikes from ATM to re-enter after a stop; undefined = exit only. */
-  slOffset?: number;
+  slOffset?: number | typeof SAME_DISTANCE | typeof MATCH_OPPOSITE;
   tpPct: number;
   /** Strikes from ATM to re-enter after a target; undefined = exit only. */
-  tpOffset?: number;
+  tpOffset?: number | typeof SAME_DISTANCE | typeof MATCH_OPPOSITE;
   /** Re-entries allowed per chain of legs (like Focus Tool's slRollMax). Default 2. */
   maxRolls?: number;
 }
@@ -224,6 +233,40 @@ export function autoReentryStrike(strikes: number[], spot: number, option: 'CE' 
   for (let i = 1; i < sorted.length; i++) if (Math.abs(sorted[i] - spot) < Math.abs(sorted[atm] - spot)) atm = i;
   const idx = atm + (option === 'CE' ? 1 : -1) * Math.round(offset);
   return idx >= 0 && idx < sorted.length ? sorted[idx] : null;
+}
+
+/** Strike the same OTM `dist` points from the current spot (CE above, PE below), snapped to the chain. Null when off it. */
+export function autoReentryStrikeByDistance(strikes: number[], spot: number, option: 'CE' | 'PE', dist: number): number | null {
+  if (!strikes.length || !(spot > 0) || !Number.isFinite(dist)) return null;
+  const target = spot + (option === 'CE' ? dist : -dist);
+  if (target < Math.min(...strikes) || target > Math.max(...strikes)) return null;
+  return strikes.reduce((a, b) => (Math.abs(b - target) < Math.abs(a - target) ? b : a));
+}
+
+/** Strike (ATM or further OTM, CE up / PE down) whose live premium is closest to `target`. Null with no priced strike. */
+export function autoReentryStrikeByPremium(quotes: Record<string, { ce?: number; pe?: number }>, spot: number, option: 'CE' | 'PE', target: number): number | null {
+  if (!(spot > 0) || !(target > 0)) return null;
+  const strikes = Object.keys(quotes).map(Number).filter(Number.isFinite).sort((a, b) => a - b);
+  let atm = strikes[0];
+  for (const k of strikes) if (Math.abs(k - spot) < Math.abs(atm - spot)) atm = k;
+  let best: number | null = null, bestDiff = Infinity;
+  for (const k of strikes) {
+    if (option === 'CE' ? k < atm : k > atm) continue;
+    const q = quotes[String(k)]?.[option === 'CE' ? 'ce' : 'pe'];
+    if (!(q != null && q > 0)) continue;
+    const d = Math.abs(q - target);
+    if (d < bestDiff) { bestDiff = d; best = k; }
+  }
+  return best;
+}
+
+/** `strike` itself, or the next strike OTM (CE up / PE down) when it equals the strike that just exited. Null when that is off the chain. */
+export function avoidSameStrike(strikes: number[], strike: number, exited: number, option: 'CE' | 'PE'): number | null {
+  if (strike !== exited) return strike;
+  const sorted = [...strikes].sort((a, b) => a - b);
+  const i = sorted.indexOf(strike);
+  const j = i < 0 ? -1 : i + (option === 'CE' ? 1 : -1);
+  return j >= 0 && j < sorted.length ? sorted[j] : null;
 }
 
 export interface MultiLegBasket {
