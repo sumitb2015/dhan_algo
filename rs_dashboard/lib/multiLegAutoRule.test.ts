@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { withAutoLegRisk, autoReentryStrike, autoReentryStrikeByDistance, autoReentryStrikeByPremium, avoidSameStrike, autoRollAllowed, autoRuleOwns, DEFAULT_AUTO_LEG_RULE, type MultiLegLeg } from './multiLegFocus.ts';
+import { withAutoLegRisk, autoReentryStrike, autoReentryStrikeByDistance, autoReentryStrikeByPremium, avoidSameStrike, entryDistance, autoRollAllowed, autoRuleOwns, DEFAULT_AUTO_LEG_RULE, type MultiLegLeg } from './multiLegFocus.ts';
 
 const rule = { ...DEFAULT_AUTO_LEG_RULE, enabled: true };
 const leg = (o: Partial<MultiLegLeg>) => ({ id: 'a', side: 'S', option: 'CE', strike: 24000, ...o }) as MultiLegLeg;
@@ -51,4 +51,12 @@ test('avoidSameStrike steps one strike OTM only when the strike did not change',
   assert.equal(avoidSameStrike(st, 24000, 24000, 'CE'), 24050);
   assert.equal(avoidSameStrike(st, 24000, 24000, 'PE'), 23950);
   assert.equal(avoidSameStrike(st, 24050, 24050, 'CE'), null);
+});
+
+test('entryDistance is points OTM from spot, undefined without a spot', () => {
+  assert.equal(entryDistance('CE', 25000, 24500), 500);
+  assert.equal(entryDistance('PE', 24000, 24500), 500);
+  assert.equal(entryDistance('CE', 24400, 24500), -100);
+  assert.equal(entryDistance('CE', 25000, 0), undefined);
+  assert.equal(entryDistance('CE', 25000, undefined), undefined);
 });

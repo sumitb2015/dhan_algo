@@ -27,7 +27,7 @@ import HelpModal from './HelpModal';
 import {
   resolveTemplateLegs, reconcileLegWithBroker, sortLegsForExit, findLegPosition, executionBroker,
   applyOrderOutcomes, normalizeOrderRow, withPendingOrder, settleWaitingEntry, applyTriggeredEntry, type WaitingEntry, LEG_FILL_GRACE_MS, legBrokerMismatch, classifyDhanOrder, type DhanOrderPhase, type NormalizedOrder,
-  computeLegTrailingSL, withAutoLegRisk, SAME_DISTANCE, MATCH_OPPOSITE, autoRuleOwns, autoReentryStrike, autoReentryStrikeByDistance, autoReentryStrikeByPremium, avoidSameStrike, autoRollAllowed, computeStrategyMetrics, checkStrategyRisk, fallbackLotSize, planScale, scalePlanSignature,
+  computeLegTrailingSL, withAutoLegRisk, SAME_DISTANCE, MATCH_OPPOSITE, autoRuleOwns, autoReentryStrike, autoReentryStrikeByDistance, autoReentryStrikeByPremium, entryDistance, avoidSameStrike, autoRollAllowed, computeStrategyMetrics, checkStrategyRisk, fallbackLotSize, planScale, scalePlanSignature,
   positionProduct, computeBasketStatus, closedFillFromRow,
   findSiblingLegCollisions, type SiblingLegCollision,
   recordOutsideReduction, isLegInFillGrace,
@@ -253,6 +253,8 @@ export default function MultiLegFocus({
   // ── Expiries and Market Data by Underlying ─────────────────────────
   const [expiriesMap, setExpiriesMap] = useState<Record<string, string[]>>({});
   const [chainData, setChainData] = useState<Record<string, { spot: number; strikes: number[]; quotes: Record<string, { ce: number; pe: number; ceIv?: number; peIv?: number }>; prevClose?: number }>>({});
+  const chainDataRef = useRef(chainData);
+  chainDataRef.current = chainData;
   const [lookupCache, setLookupCache] = useState<Record<string, LookupEntry>>({});
   const lookupCacheRef = useRef(lookupCache);
   useEffect(() => { lookupCacheRef.current = lookupCache; }, [lookupCache]);
@@ -1535,6 +1537,7 @@ export default function MultiLegFocus({
               status: 'OPEN' as MultiLegStatus,
               fill: { qty: confirmedQty, avgPrice: fillPrice, orderId: j.order_id },
               filledAt: Date.now(),
+              entryDist: entryDistance(leg.option, leg.strike, chainDataRef.current[`${basket.underlying}:${leg.expiry || basket.expiry}`]?.spot),
               orderRef: { securityId: secId, symbol: sym },
               pendingOrders: j.order_id ? [{ id: String(j.order_id), kind: 'grow' as const, qty: confirmedQty, at: Date.now(), price: fillPrice }] : undefined,
             };
@@ -2412,7 +2415,7 @@ export default function MultiLegFocus({
         }
 
         const newLeg: MultiLegLeg = {
-          ...((chain?.spot ?? 0) > 0 ? { entryDist: params.option === 'CE' ? params.strike - chain!.spot : chain!.spot - params.strike } : {}),
+          entryDist: entryDistance(params.option, params.strike, chain?.spot),
           ...(opts?.carry ?? {}),
           bestPrice: undefined,
           id: `mll_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`,
@@ -3300,7 +3303,7 @@ export default function MultiLegFocus({
             const spot = chainData[`${basket.underlying}:${legExpiry}`]?.spot ?? 0;
             const strikeList = Object.keys(lk?.strikes ?? {}).map(Number);
             const oppLeg = reOffset === MATCH_OPPOSITE
-              ? basket.legs.find(l => l.id !== leg.id && l.status === 'OPEN' && l.fill && l.side === 'S' && l.option !== leg.option && (l.expiry || basket.expiry) === legExpiry)
+              ? (basketsRef.current.find(b => b.id === basket.id) ?? basket).legs.find(l => l.id !== leg.id && l.status === 'OPEN' && l.fill && l.side === 'S' && l.option !== leg.option && (l.expiry || basket.expiry) === legExpiry && !exitingLegsRef.current.has(l.id) && !recentlyTriggered(triggeredLegExitsRef.current, l.id))
               : undefined;
             const oppLtp = oppLeg ? ltpFor(basket, oppLeg) : 0;
             const matchOpp = reOffset === MATCH_OPPOSITE && oppLtp > 0;

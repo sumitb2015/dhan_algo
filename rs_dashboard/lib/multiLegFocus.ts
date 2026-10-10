@@ -237,6 +237,11 @@ export function autoReentryStrike(strikes: number[], spot: number, option: 'CE' 
   return idx >= 0 && idx < sorted.length ? sorted[idx] : null;
 }
 
+/** Points OTM from spot (CE: strike - spot, PE: spot - strike; negative = ITM). Undefined without a live spot. */
+export function entryDistance(option: 'CE' | 'PE', strike: number, spot: number | undefined): number | undefined {
+  return spot != null && spot > 0 ? (option === 'CE' ? strike - spot : spot - strike) : undefined;
+}
+
 /** Strike the same OTM `dist` points from the current spot (CE above, PE below), snapped to the chain. Null when off it. */
 export function autoReentryStrikeByDistance(strikes: number[], spot: number, option: 'CE' | 'PE', dist: number): number | null {
   if (!strikes.length || !(spot > 0) || !Number.isFinite(dist)) return null;
