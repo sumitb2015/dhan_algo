@@ -10,8 +10,30 @@ const execFileAsync = promisify(execFile);
 const PROJECT_ROOT   = path.resolve(process.cwd(), '..');
 const SCALPER_SCRIPT = path.join(PROJECT_ROOT, 'scripts', 'tools', 'scalper_api.py');
 
+// Opt-in idempotency (same contract as scalper/fast-order): a repeat of an `idempotencyKey` within
+// the TTL gets the first request's answer instead of booking a second order. A timeout with no
+// parseable output is kept too — the script may have placed the order.
+const IDEMPOTENCY_TTL_MS = 60_000;
+const idempotent = new Map<string, { at: number; result: Promise<NextResponse> }>();
+
 export async function POST(req: NextRequest): Promise<NextResponse> {
   const body = await req.json();
+  const key = typeof body?.idempotencyKey === 'string' && body.idempotencyKey.length >= 8 && body.idempotencyKey.length <= 64
+    ? body.idempotencyKey : null;
+  if (!key) return placeOnce(body);
+  const now = Date.now();
+  for (const [k, v] of idempotent) if (now - v.at > IDEMPOTENCY_TTL_MS) idempotent.delete(k);
+  const prior = idempotent.get(key);
+  if (prior) return (await prior.result).clone() as NextResponse;
+  const result = placeOnce(body);
+  idempotent.set(key, { at: now, result });
+  const res = await result;
+  const ok = res.status < 400 && ((await res.clone().json()) as { success?: boolean }).success === true;
+  if (!ok && res.status !== 504) idempotent.delete(key);
+  return res.clone() as NextResponse;
+}
+
+async function placeOnce(body: Record<string, unknown>): Promise<NextResponse> {
   const { underlying = 'NIFTY', expiry, strike, option, side, lots = 1, type = 'MARKET', price } = body;
 
   if (!expiry || !strike || !option || !side) {
@@ -76,6 +98,11 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       } catch {}
     }
     console.error('[/api/scalper/order] error:', e.message, e.stderr ?? '');
-    return NextResponse.json({ success: false, error: `Script error: ${String(e.message)}` }, { status: 500 });
+    // No parseable output: the script may have been killed AFTER placing the order (30s timeout),
+    // so this is "unknown", not a clean failure. 504 keeps the idempotency entry.
+    return NextResponse.json(
+      { success: false, error: `Order status unknown — the order script did not confirm (${String(e.message).slice(0, 120)}). Check Positions/Orders before retrying.` },
+      { status: 504 },
+    );
   }
 }

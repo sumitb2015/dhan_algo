@@ -41,6 +41,9 @@ interface BoxConfig {
   moveFraction?: 'HALF' | 'FULL';
 }
 
+// Hard ceiling on lots per order from this terminal (stepper, hotkeys, Add Lots). A runaway
+// click or key repeat can no longer size a market order beyond it.
+const MAX_LOTS_PER_ORDER = 100;
 const MIN_BOXES = 2;
 const MAX_BOXES = 5;
 
@@ -198,6 +201,21 @@ export default function AdvancedScalper() {
   // Live data: direct WebSocket to the Python bridge (HTTP polling fallback)
   const { liveQuotes, bridgeStatus, lastUpdated, transport } = useLiveOptionsWS(expiry, broker, authenticatedBrokers, underlying);
 
+  // Quote freshness. liveQuotes keeps its last value forever when the bridge dies, and it wins
+  // over the 5s broker price in the enrichment below — so without this the software SL/target
+  // would compare against a frozen price. Stale ⇒ fall back to the broker's own LTP.
+  const QUOTES_STALE_MS = 15_000;
+  const quotesAtRef = useRef(0);
+  const [quotesStale, setQuotesStale] = useState(false);
+  useEffect(() => { if (liveQuotes) quotesAtRef.current = Date.now(); }, [liveQuotes]);
+  useEffect(() => {
+    const id = setInterval(() => {
+      const stale = quotesAtRef.current > 0 && Date.now() - quotesAtRef.current > QUOTES_STALE_MS;
+      setQuotesStale(prev => (prev === stale ? prev : stale));
+    }, 2000);
+    return () => clearInterval(id);
+  }, []);
+
   // Trading controls
   const [orderMode, setOrderMode] = useState<'MARKET' | 'LIMIT'>('MARKET');
   const [productType, setProductType] = useState<'INTRADAY' | 'MARGIN'>('MARGIN');
@@ -267,9 +285,16 @@ export default function AdvancedScalper() {
 
   // P&L Guard
   const [pnlGuardStatus, setPnlGuardStatus]   = useState<PnlGuardStatus | null>(null);
+  // True when the broker lookup FAILED (5xx / timeout / expired token) — distinct from "no guard set".
+  const [pnlGuardUnknown, setPnlGuardUnknown] = useState(false);
   const [profitTarget, setProfitTarget]       = useState('');
   const [lossLimit, setLossLimit]             = useState('');
-  const [guardProductTypes, setGuardProductTypes] = useState<string[]>(['INTRADAY']);
+  // Starts on the product the order toggle starts on (MARGIN), so a fresh page never arms a
+  // guard that does not cover the orders it is about to place.
+  const [guardProductTypes, setGuardProductTypes] = useState<string[]>(['MARGIN']);
+  // Set when a mount/switch data load (expiries, chain, strike lookup) fails, so the page says
+  // why it is stuck instead of sitting at "Loading…".
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [enableKillSwitch, setEnableKillSwitch]   = useState(false);
   const [settingPnl, setSettingPnl]     = useState(false);
   const [clearingPnl, setClearingPnl]   = useState(false);
@@ -281,6 +306,10 @@ export default function AdvancedScalper() {
   // alone: the same strike can be open under both INTRADAY and MARGIN, and those
   // are two positions that must be guarded and closed independently.
   const [posGuards, setPosGuards] = useState<Record<string, PositionGuard>>({});
+  // First good positions snapshot for the current broker has arrived — guard prune/restore wait for it,
+  // otherwise the empty pre-load book would read as "every position is flat".
+  const [positionsLoaded, setPositionsLoaded] = useState(false);
+  const guardsRestoredRef = useRef(false);
   const [closingPositions, setClosingPositions] = useState<Set<string>>(new Set());
 
   const positionsRef = useRef<Record<string, unknown>[]>([]);
@@ -540,6 +569,7 @@ export default function AdvancedScalper() {
       return { ...pos, lastTradedPrice: liveLtp, unrealizedProfit };
     };
 
+    if (quotesStale) return pos;
     if (liveQuotes?.strikes && Object.keys(secIdToStrikeSide).length > 0) {
       const mapping = secIdToStrikeSide[positionJoinKey(pos)];
       const liveLtp = mapping ? liveQuotes.strikes[String(mapping.strike)]?.[mapping.side]?.ltp ?? 0 : 0;
@@ -594,7 +624,7 @@ export default function AdvancedScalper() {
     // recomputes exactly when it needs to without thrashing on its own
     // identity every render.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [realizedFixedPositions, liveQuotes, secIdToStrikeSide, positionJoinKey, broker, kotakSymbolMap]);
+  }, [realizedFixedPositions, liveQuotes, quotesStale, secIdToStrikeSide, positionJoinKey, broker, kotakSymbolMap]);
   /* eslint-enable react-hooks/refs */
 
   const totalPnl = useMemo(() => enrichedPositions.reduce((sum, p) =>
@@ -857,9 +887,12 @@ export default function AdvancedScalper() {
           setExpiries(data);
           setExpiry(prev => data.includes(prev) ? prev : data[0]);
           setExpiryOwner(underlying);
+          setLoadError(null);
+        } else {
+          setLoadError(`Could not load ${underlying} expiries`);
         }
       })
-      .catch(() => {});
+      .catch(() => setLoadError(`Could not load ${underlying} expiries`));
   }, [broker, underlying]);
 
   // MCX crude is Dhan-only — fall back to NIFTY if the broker is switched away.
@@ -887,11 +920,11 @@ export default function AdvancedScalper() {
 
   useEffect(() => {
     fetch('/api/pnl-exit')
-      .then(r => r.json())
+      .then(r => r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`)))
       .then((j: { success: boolean; data?: PnlGuardStatus }) => {
-        if (j.success && j.data) setPnlGuardStatus(j.data as PnlGuardStatus);
+        if (j.success && j.data) { setPnlGuardStatus(j.data as PnlGuardStatus); setPnlGuardUnknown(false); }
       })
-      .catch(() => {});
+      .catch(() => setPnlGuardUnknown(true));
   }, []);
 
   // ─── useEffect 2a: On expiry/underlying change — reset selections ──
@@ -927,10 +960,15 @@ export default function AdvancedScalper() {
   useEffect(() => {
     if (!expiry || expiryOwner !== underlying) return;
 
+    // A response for a previous underlying/expiry/broker must not write the strike ladder,
+    // prev-close, spot or default strikes of the one now selected.
+    let cancelled = false;
     fetch(`/api/options/chain?underlying=${underlying}&expiry=${expiry}&broker=${broker}`)
       .then(r => r.json())
       .then((j: { success: boolean; data?: { chain: { oc?: Record<string, ChainOcEntry> }; spot: number; prev_close?: number } }) => {
-        if (!j.success || !j.data?.chain?.oc) return;
+        if (cancelled) return;
+        if (!j.success || !j.data?.chain?.oc) { setLoadError(`Could not load the ${underlying} option chain`); return; }
+        setLoadError(null);
         if (isMcxUnderlying(underlying) && (j.data.prev_close ?? 0) > 0) setPrevSpot(j.data.prev_close!);
         const oc = j.data.chain.oc;
         const strikes = Object.keys(oc).map(Number).filter(n => !isNaN(n)).sort((a, b) => a - b);
@@ -965,7 +1003,8 @@ export default function AdvancedScalper() {
             : prev);
         }
       })
-      .catch(() => {});
+      .catch(() => { if (!cancelled) setLoadError(`Could not load the ${underlying} option chain`); });
+    return () => { cancelled = true; };
   }, [expiry, underlying, broker, strikeStep, expiryOwner]);
 
   // ─── useEffect 2c: WS bridge lifecycle ────────────────────────────
@@ -1051,20 +1090,25 @@ export default function AdvancedScalper() {
   useEffect(() => {
     if (!expiry) return;
 
-    const requestedExpiry = expiry;
+    let cancelled = false;
     const lookupUrl = `${scalperRoute(broker, 'lookup')}?underlying=${underlying}&expiry=${expiry}`;
     fetch(lookupUrl)
       .then(r => r.json())
       .then((j: { success: boolean; data?: { lotSize: number; strikes: Record<string, { ceId?: string; peId?: string; ceSymbol?: string; peSymbol?: string }> } }) => {
-        if (requestedExpiry !== expiryRef.current) return;
+        // Cancelled on any expiry / broker / underlying change — a late reply from the previous
+        // selection must not install its security IDs or lot size.
+        if (cancelled) return;
         if (j.success && j.data) {
           setStrikeMap(j.data.strikes);
           // Only accept a usable lot size. Leaving it null keeps every
           // sizing-dependent control disabled rather than trading on a bad value.
           setLotSize(Number(j.data.lotSize) > 0 ? Number(j.data.lotSize) : null);
+        } else {
+          setLoadError(`Could not load ${underlying} strike IDs — ordering is disabled`);
         }
       })
-      .catch(() => {});
+      .catch(() => { if (!cancelled) setLoadError(`Could not load ${underlying} strike IDs — ordering is disabled`); });
+    return () => { cancelled = true; };
   }, [expiry, broker, underlying]);
 
   // Full-underlying Kotak symbol -> {expiry, strike, side} map (every cached
@@ -1101,7 +1145,7 @@ export default function AdvancedScalper() {
     const seq = ++tabReqSeqRef.current;
     fetch(scalperRoute(broker, 'all'))
       .then(r => r.json())
-      .then((j: { success: boolean; positions?: Record<string, unknown>[]; positionsError?: string | null; orders?: Record<string, unknown>[]; trades?: Record<string, unknown>[]; funds?: Record<string, any>; pnl_guard?: any }) => {
+      .then((j: { success: boolean; positions?: Record<string, unknown>[]; positionsError?: string | null; orders?: Record<string, unknown>[]; trades?: Record<string, unknown>[]; funds?: Record<string, any>; pnl_guard?: any; pnl_guard_unknown?: boolean }) => {
         // Broker was switched while this request was in flight — the
         // broker-switch effect already cleared state for the new broker;
         // applying this response now would repopulate it with the old
@@ -1114,11 +1158,13 @@ export default function AdvancedScalper() {
           setPositionsError(j.positionsError ?? null);
           // A failed positions fetch comes back as an empty list — keep the last
           // good snapshot so the guards keep protecting open legs.
-          if (!(j.positionsError && !j.positions?.length)) setPositionsData(j.positions ?? []);
+          if (!(j.positionsError && !j.positions?.length)) { setPositionsData(j.positions ?? []); setPositionsLoaded(true); }
           setOrdersData(j.orders ?? []);
           setTradesData(j.trades ?? []);
           setFundsData(j.funds ?? null);
-          setPnlGuardStatus(j.pnl_guard ?? null);
+          // A failed lookup keeps whatever we last knew rather than claiming "NOT SET".
+          if (j.pnl_guard_unknown) setPnlGuardUnknown(true);
+          else { setPnlGuardStatus(j.pnl_guard ?? null); setPnlGuardUnknown(false); }
         }
       })
       .catch(() => {})
@@ -1137,7 +1183,7 @@ export default function AdvancedScalper() {
         if (j.success) {
           tabAppliedSeqRef.current = seq;
           setPositionsError(j.positionsError ?? null);
-          if (!(j.positionsError && !j.positions?.length)) setPositionsData(j.positions ?? []);
+          if (!(j.positionsError && !j.positions?.length)) { setPositionsData(j.positions ?? []); setPositionsLoaded(true); }
           setOrdersData(j.orders ?? []);
           setTradesData(j.trades ?? []);
         }
@@ -1203,9 +1249,71 @@ export default function AdvancedScalper() {
   useEffect(() => { positionsRef.current = enrichedPositions; }, [enrichedPositions]);
   useEffect(() => { posGuardsRef.current = posGuards; }, [posGuards]);
 
+  // A guard belongs to an OPEN position. When its row goes flat or drops out of the book without
+  // passing through closePosition (Exit All, the broker's P&L guard, a strategy, the broker app),
+  // drop it — otherwise a later re-entry on the same strike + product silently inherits the old
+  // target / SL / trail peak. Skipped while a positions fetch is failing (the book is stale then)
+  // and for rows with a close in flight.
+  useEffect(() => {
+    if (positionsError || trailSim || !positionsLoaded) return;
+    const qtyByKey = new Map<string, number>();
+    for (const p of enrichedPositions) qtyByKey.set(positionKey(p), Number(p.netQty) || 0);
+    setPosGuards(prev => {
+      let next: Record<string, PositionGuard> | null = null;
+      for (const k of Object.keys(prev)) {
+        if ((qtyByKey.get(k) ?? 0) !== 0 || closingInFlightRef.current.has(k)) continue;
+        if (!next) next = { ...prev };
+        delete next[k];
+      }
+      return next ?? prev;
+    });
+  }, [enrichedPositions, positionsError, trailSim, positionsLoaded]);
+
+  // Guards live in the browser, so a reload used to drop every SL/target silently. Persist them per
+  // broker per day with the entry price they were set against, and restore only onto a leg that is
+  // still open at that same entry (a fresh re-entry must not inherit them).
+  const guardStoreKey = `advanced_scalper_guards_v1_${broker}`;
+  const todayKey = () => new Date().toISOString().slice(0, 10);
+  const entryOf = (p: Record<string, unknown>) => Number(Number(p.netQty) > 0 ? p.buyAvg : p.sellAvg) || 0;
+  useEffect(() => {
+    if (!positionsLoaded || guardsRestoredRef.current || trailSim) return;
+    guardsRestoredRef.current = true;
+    try {
+      const raw = localStorage.getItem(guardStoreKey);
+      if (!raw) return;
+      const saved = JSON.parse(raw) as { date: string; guards: Record<string, { guard: PositionGuard; entry: number }> };
+      if (saved.date !== todayKey()) { localStorage.removeItem(guardStoreKey); return; }
+      const restored: Record<string, PositionGuard> = {};
+      for (const p of enrichedPositions) {
+        const k = positionKey(p);
+        const g = saved.guards?.[k];
+        if (g && Number(p.netQty) !== 0 && Math.abs(g.entry - entryOf(p)) < 0.01) restored[k] = { ...g.guard, triggered: false };
+      }
+      if (Object.keys(restored).length) {
+        setPosGuards(prev => ({ ...restored, ...prev }));
+        addToast('success', `Restored ${Object.keys(restored).length} SL/target guard(s)`, 'From this browser — set before the reload');
+      }
+    } catch { /* storage unavailable or corrupt — start clean */ }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [positionsLoaded, trailSim, guardStoreKey]);
+  useEffect(() => {
+    if (!guardsRestoredRef.current || trailSim) return;
+    try {
+      const guards: Record<string, { guard: PositionGuard; entry: number }> = {};
+      for (const p of positionsRef.current) {
+        const g = posGuards[positionKey(p)];
+        if (g && Number(p.netQty) !== 0 && (g.target || g.sl || g.trailEnabled)) guards[positionKey(p)] = { guard: g, entry: entryOf(p) };
+      }
+      localStorage.setItem(guardStoreKey, JSON.stringify({ date: todayKey(), guards }));
+    } catch { /* best effort */ }
+  }, [posGuards, trailSim, guardStoreKey]);
+
   // Clear stale data immediately on broker switch so a Dhan position is
   // never displayed or acted on as if it belonged to Zerodha (or vice versa).
   useEffect(() => {
+    setPositionsLoaded(false);
+    guardsRestoredRef.current = false;
+    setPosGuards({});
     setPositionsData([]);
     setOrdersData([]);
     setTradesData([]);
@@ -1337,6 +1445,9 @@ export default function AdvancedScalper() {
     legProductType: 'INTRADAY' | 'MARGIN';
   }): Promise<LegOrderResult> => {
     const { optionSide, legExpiry, strike, side, lots, mode, limitPrice, entry, legLotSize, legProductType } = params;
+    if (!Number.isInteger(lots) || lots < 1 || lots > MAX_LOTS_PER_ORDER) {
+      return { success: false, error: `Lots must be 1–${MAX_LOTS_PER_ORDER} (got ${lots})` };
+    }
     try {
       let res: Response;
       if (broker !== 'dhan') {
@@ -1386,6 +1497,7 @@ export default function AdvancedScalper() {
           // client-side strikeMap at all.
           const body: Record<string, unknown> = {
             underlying, expiry: legExpiry, strike, option: optionSide, side, lots, type: mode,
+            idempotencyKey: crypto.randomUUID(),
           };
           if (mode === 'LIMIT') body.price = limitPrice;
           res = await fetch('/api/scalper/order', {
@@ -1460,7 +1572,7 @@ export default function AdvancedScalper() {
   // just targeting the resolved leg directly instead of a box.
   const addLotsInFlightRef = useRef(false);
   const handleConfirmAddLots = useCallback(async (params: SubmitLegOrderParams) => {
-    if (addLotsInFlightRef.current) return;
+    if (addLotsInFlightRef.current) return false;
     addLotsInFlightRef.current = true;
     let j: LegOrderResult;
     try { j = await submitLegOrder(params); } finally { addLotsInFlightRef.current = false; }
@@ -1470,6 +1582,7 @@ export default function AdvancedScalper() {
     } else {
       addToast('error', `Add ${params.optionSide} lots failed`, j.error ?? 'Unknown error');
     }
+    return j.success;
   }, [submitLegOrder, addToast, fetchTabData]);
 
   // ─── Hotkey trading (one-click MARKET orders) ──────────────────────
@@ -1490,6 +1603,11 @@ export default function AdvancedScalper() {
     placeOrder(box.id, tradeSide, { forceMarket: true });
   }, [boxes, placeOrder, addToast]);
 
+  // Arrow keys must never trade while a modal is on screen — scrolling the chain or moving
+  // between toggle buttons in Add Lots would otherwise fire real market orders behind it.
+  const modalOpenRef = useRef(false);
+  useEffect(() => { modalOpenRef.current = showGreeks || showChain || !!addLotsTarget; }, [showGreeks, showChain, addLotsTarget]);
+
   // Kept current via a ref so the keydown listener below can be registered
   // exactly once and never torn down/re-added on every box/price update —
   // see commit bd0f305 for why that churn matters on a live-ticking page.
@@ -1503,7 +1621,8 @@ export default function AdvancedScalper() {
       // (lots, limit price, strike <select>, etc.), and ignore OS auto-repeat
       // from a held key so one press can never fire a stream of market orders.
       if (['INPUT', 'TEXTAREA', 'SELECT'].includes((e.target as HTMLElement)?.tagName)) return;
-      if (e.repeat || e.ctrlKey || e.metaKey || e.altKey) return;
+      if (e.repeat || e.ctrlKey || e.metaKey || e.altKey || e.defaultPrevented) return;
+      if (modalOpenRef.current) return;
 
       switch (e.key) {
         case 'ArrowUp':
@@ -1535,6 +1654,16 @@ export default function AdvancedScalper() {
 
   const lastCloseAtRef = useRef<Record<string, number>>({});
   const CLOSE_COOLDOWN_MS = 2000;
+  // After a close that failed or whose outcome is unknown, the guard loop must not re-fire at 1 Hz:
+  // an unknown outcome (504 / network error) may be a late fill, and a retry sized off a lagging
+  // book would reverse the position. Backoff doubles per consecutive failure; unknown outcomes hold
+  // longer. Cleared by a success.
+  const closeHoldRef = useRef<Record<string, { until: number; fails: number }>>({});
+  const holdClose = (key: string, unknown: boolean) => {
+    const fails = (closeHoldRef.current[key]?.fails ?? 0) + 1;
+    const ms = unknown ? 15_000 : Math.min(3000 * 2 ** (fails - 1), 30_000);
+    closeHoldRef.current[key] = { until: Date.now() + ms, fails };
+  };
 
   // ok=false means the close could not be confirmed (order failed / errored) —
   // callers that chain further actions (e.g. strike shift) MUST NOT proceed as
@@ -1590,6 +1719,11 @@ export default function AdvancedScalper() {
 
     // Prevent double-fire while order is in flight
     if (closingInFlightRef.current.has(key)) return { ok: false, qty: 0, closedUnits: 0, partial: false };
+    // Guard retries wait out the backoff after a failed / unknown-outcome close (silently — the
+    // original failure already toasted). A manual click is never blocked by it.
+    if (opts?.guard && Date.now() < (closeHoldRef.current[key]?.until ?? 0)) {
+      return { ok: false, qty: 0, closedUnits: 0, partial: false };
+    }
     // Cooldown after an accepted close: the book (and positionsRef) can lag the
     // fill, so an immediate second close would size off the pre-close quantity
     // and open a reverse position.
@@ -1632,7 +1766,9 @@ export default function AdvancedScalper() {
       try {
         const lr = await fetch(scalperRoute(broker, 'positions'), { signal: AbortSignal.timeout(2500) });
         const lj = await lr.json() as { success: boolean; data?: Record<string, unknown>[] };
-        if (lj.success && Array.isArray(lj.data)) liveRows = lj.data;
+        // An EMPTY list while our snapshot shows open legs is a broker glitch, not a flat book —
+        // keep the snapshot, otherwise the leg reads "already flat" and its guard is dropped.
+        if (lj.success && Array.isArray(lj.data) && (lj.data.length > 0 || positionsRef.current.length === 0)) liveRows = lj.data;
       } catch { /* use snapshot */ }
       const found = findLivePosition(liveRows, pos);
       if (found.kind === 'ambiguous') {
@@ -1691,6 +1827,7 @@ export default function AdvancedScalper() {
       });
       const j = await res.json() as { success: boolean; order_id?: string; error?: string };
       if (j.success) {
+        delete closeHoldRef.current[key];
         lastCloseAtRef.current[key] = Date.now();
         // A MARKET order accepted by the broker isn't necessarily filled — for
         // callers that chain a follow-up open (strike shift), poll live
@@ -1740,11 +1877,19 @@ export default function AdvancedScalper() {
         setTimeout(fetchTabData, 800);
         return { ok: true, qty: liveNetQty, closedUnits: confirmedUnits, partial: isPartial };
       } else {
+        // 504 = Dhan did not confirm in time: the order may well be live.
+        const unknownOutcome = res.status === 504;
+        holdClose(key, unknownOutcome);
+        if (unknownOutcome) lastCloseAtRef.current[key] = Date.now();
         addToast('error', `Close failed: ${sym}`, j.error ?? 'Unknown error');
+        setTimeout(fetchTabData, 1500);
         setPosGuards(prev => prev[key] ? { ...prev, [key]: { ...prev[key], triggered: false } } : prev);
         return { ok: false, qty: liveNetQty, closedUnits: 0, partial: isPartial };
       }
     } catch (e) {
+      // The request may have reached the broker — treat the outcome as unknown.
+      holdClose(key, true);
+      lastCloseAtRef.current[key] = Date.now();
       addToast('error', 'Network error closing position', String(e));
       setPosGuards(prev => prev[key] ? { ...prev, [key]: { ...prev[key], triggered: false } } : prev);
       return { ok: false, qty: 0, closedUnits: 0, partial: false };
@@ -1841,6 +1986,15 @@ export default function AdvancedScalper() {
       // Dhan nets by security id: reopening on a contract another box or an
       // existing position already holds pools with it (see dhan-position-netting).
       const targetEntry = strikeMap[String(newStrike)];
+      // Resolve the target contract BEFORE closing anything: discovering afterwards that it
+      // cannot be ordered leaves the old leg closed, the box moved and nothing reopened.
+      const targetOrderable = broker !== 'dhan'
+        ? !!targetEntry?.[box.side === 'CE' ? 'ceSymbol' : 'peSymbol']
+        : !!targetEntry?.[box.side === 'CE' ? 'ceId' : 'peId'];
+      if (!targetOrderable) {
+        addToast('error', 'Shift aborted', `No tradable ${newStrike} ${box.side} contract loaded — position left untouched`);
+        return;
+      }
       const targetSecId = targetEntry?.[box.side === 'CE' ? 'ceId' : 'peId'];
       const targetPos = targetSecId ? positionsBySecId[targetSecId] : undefined;
       const heldByPosition = !!targetPos && Number(targetPos.netQty) !== 0;
@@ -1947,6 +2101,7 @@ export default function AdvancedScalper() {
                 orderType: 'MARKET',
                 exchangeSegment: dhanFnoSegment(underlying),
                 productType: resolvedProductDhan,
+                idempotencyKey: crypto.randomUUID(),
               }),
             });
           } else {
@@ -1964,6 +2119,7 @@ export default function AdvancedScalper() {
               headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify({
                 underlying, expiry, strike: newStrike, option: box.side, side: sideToOpen, lots: openLotsN, type: 'MARKET',
+                idempotencyKey: crypto.randomUUID(),
               }),
             });
           }
@@ -2004,8 +2160,15 @@ export default function AdvancedScalper() {
   // elsewhere (header, RiskRail) is untouched.
 
   const exitAllForLock = useCallback(async (reason: string) => {
-    const open = positionsRef.current.filter(p => Number(p.netQty) !== 0 && isFnoSegment(p));
-    await Promise.allSettled(open.map(pos => closePosition(pos, reason)));
+    // Shorts first (buy back before selling the hedge), sequentially, and exempt from the manual
+    // close cooldown: the lock fires once and is terminal, so a leg refused for a 2s cooldown
+    // would otherwise stay open with nothing left to retry it.
+    const open = positionsRef.current
+      .filter(p => Number(p.netQty) !== 0 && isFnoSegment(p))
+      .sort((a, b) => Number(a.netQty) - Number(b.netQty));
+    for (const pos of open) {
+      try { await closePosition(pos, reason, { guard: true }); } catch { /* closePosition toasts its own errors */ }
+    }
     setTimeout(fetchTabData, 1000);
   }, [closePosition, fetchTabData]);
 
@@ -2025,6 +2188,18 @@ export default function AdvancedScalper() {
     storageKey: 'profit_lock_v1',
   });
 
+  // A lock is set against ONE broker's P&L. Switching broker would otherwise compare it to the
+  // other book and could fire exits there — clear it on switch.
+  const lockBrokerRef = useRef(broker);
+  useEffect(() => {
+    if (lockBrokerRef.current === broker) return;
+    lockBrokerRef.current = broker;
+    if (profitLock.lockState !== 'INACTIVE') {
+      profitLock.clearLock();
+      addToast('error', 'Profit lock cleared', `Broker switched to ${BROKER_LABELS[broker]} — set it again for this book`);
+    }
+  }, [broker, profitLock, addToast]);
+
   const copyTrade = useCopyTrade(addToast);
 
   const handleExitAll = useCallback(async () => {
@@ -2041,9 +2216,9 @@ export default function AdvancedScalper() {
         const res = await fetch(scalperRoute(broker, 'exit-all'), { method: 'POST' });
         const data = await res.json() as { success: boolean; closed: string[]; errors: string[] };
         if (data.success) {
-          addToast('success', `All ${label} positions liquidated.${data.closed.length ? ` (${data.closed.join(', ')})` : ''}`);
+          addToast('success', `All ${label} positions liquidated.${data.closed?.length ? ` (${data.closed.join(', ')})` : ''}`);
         } else {
-          addToast('error', `${label} exit failed`, data.errors.join('; ') || 'Unknown error');
+          addToast('error', `${label} exit failed`, (data.errors ?? []).join('; ') || 'Unknown error');
         }
       } else {
         const res = await fetch('/api/exit-all', {
@@ -2098,6 +2273,8 @@ export default function AdvancedScalper() {
       if (units <= 0) { skipped.push(`${sym} (${openLots(netQty, ls)} lot — needs ≥2)`); continue; }
       legs.push({ pos, sym, units, lots: units / ls });
     }
+    // Shorts first: trimming a long hedge before the short it covers briefly leaves it naked.
+    legs.sort((a, b) => Number(a.pos.netQty) - Number(b.pos.netQty));
     return { legs, skipped };
   }, [enrichedPositions, lotSizeForRow, underlying, broker]);
 
@@ -2202,8 +2379,12 @@ export default function AdvancedScalper() {
   }, [openPositionKeys]);
 
   const exitSelectedLegs = useMemo(
-    () => enrichedPositions.filter(p => Number(p.netQty) !== 0 && selectedPositions.has(positionKey(p))),
+    () => enrichedPositions
+      .filter(p => Number(p.netQty) !== 0 && selectedPositions.has(positionKey(p)))
+      .sort((a, b) => Number(a.netQty) - Number(b.netQty)),   // shorts first
     [enrichedPositions, selectedPositions]);
+  // The legs the user armed — the second click closes exactly these, not whatever is selected then.
+  const armedSelectedRef = useRef<Record<string, unknown>[] | null>(null);
 
   // Sequential, same rationale as handleHalfAll: closePosition re-reads the
   // live book per leg, and firing every selected leg's market order at once
@@ -2211,13 +2392,15 @@ export default function AdvancedScalper() {
   const handleExitSelected = useCallback(async () => {
     if (!exitSelectedLegs.length || exitingSelected) return;
     if (!confirmExitSelected) {
+      armedSelectedRef.current = exitSelectedLegs;
       setConfirmExitSelected(true);
-      setTimeout(() => setConfirmExitSelected(false), 3000);
+      setTimeout(() => { armedSelectedRef.current = null; setConfirmExitSelected(false); }, 3000);
       return;
     }
     setConfirmExitSelected(false);
     setExitingSelected(true);
-    const legs = exitSelectedLegs;
+    const legs = armedSelectedRef.current ?? exitSelectedLegs;
+    armedSelectedRef.current = null;
     let closed = 0;
     let alreadyFlat = 0;
     const failed: string[] = [];
@@ -2317,6 +2500,23 @@ export default function AdvancedScalper() {
   // `posKey` is the composite (symbol, product) key from lib/positionProduct,
   // NOT a trading symbol — see the posGuards declaration.
   const handleGuardChange = useCallback((posKey: string, field: 'target' | 'sl', value: string) => {
+    // A level already breached closes the leg within a second. That is usually a typo (SL typed
+    // in the target box, a long-side price on a short) — make the user say so.
+    const lvl = parseFloat(value);
+    const row = positionsRef.current.find(p => positionKey(p) === posKey);
+    if (row && lvl > 0) {
+      const ltp = Number(row.lastTradedPrice);
+      const qty = Number(row.netQty);
+      if (ltp > 0 && qty !== 0) {
+        const isLong = qty > 0;
+        const breached = field === 'target' ? (isLong ? lvl <= ltp : lvl >= ltp) : (isLong ? lvl >= ltp : lvl <= ltp);
+        if (breached && !window.confirm(
+          `${field === 'target' ? 'Target' : 'SL'} ${lvl} is already ${field === 'target' ? 'reached' : 'breached'} `
+          + `for this ${isLong ? 'long' : 'short'} (LTP ${ltp}). Applying it will CLOSE the position within a second. Apply anyway?`)) {
+          return;
+        }
+      }
+    }
     setPosGuards(prev => {
       const existing: PositionGuard = prev[posKey] ?? { target: '', sl: '', trailEnabled: false, bestPrice: 0, triggered: false };
       return {
@@ -2462,6 +2662,7 @@ export default function AdvancedScalper() {
     const p = Math.abs(parseFloat(profitTarget)) || 0;
     const l = Math.abs(parseFloat(lossLimit)) || 0;
     if (p <= 0 && l <= 0) { addToast('error', 'Enter a profit target or loss limit'); return; }
+    if (guardProductTypes.length === 0) { addToast('error', 'Select at least one product for the guard'); return; }
     setGuardError('');
     setSettingPnl(true);
     try {
@@ -2742,8 +2943,10 @@ export default function AdvancedScalper() {
             // Dhan may echo loss back as the negative level it was stored at rather
             // than the positive magnitude we sent — compare by magnitude either way.
             const hasConfig = !!(pnlGuardStatus && (Number(pnlGuardStatus.profit) > 0 || Math.abs(Number(pnlGuardStatus.loss)) > 0));
-            const guardLabel = isActive ? 'ACTIVE' : hasConfig ? 'CONFIGURED' : 'NOT SET';
-            const guardChipCls = isActive
+            const guardLabel = pnlGuardUnknown && !hasConfig ? 'UNKNOWN' : isActive ? 'ACTIVE' : hasConfig ? 'CONFIGURED' : 'NOT SET';
+            const guardChipCls = pnlGuardUnknown && !hasConfig
+              ? 'bg-rose-900/40 text-rose-300 border border-rose-500/30'
+              : isActive
               ? 'bg-emerald-900/60 text-emerald-400 border border-emerald-500/30'
               : hasConfig
               ? 'bg-amber-900/40 text-amber-400 border border-amber-500/30'
@@ -3026,7 +3229,7 @@ export default function AdvancedScalper() {
                       : 'bg-red-950/60 border-red-900/60 text-red-400 hover:bg-red-900/40 hover:border-red-700 hover:text-red-300',
                     FOCUS_RING,
                   )}
-                  title="Immediately liquidate ALL positions at broker level (DELETE /positions)">
+                  title="Market-closes every open F&O leg and cancels pending F&O orders at the broker (equity untouched), AND force-stops every running strategy process.">
                   {exitingAll ? <RefreshCw className="h-3 w-3 animate-spin" /> : <ShieldOff className="h-3 w-3" />}
                   {exitingAll ? 'Exiting…' : confirmExitAll ? 'Confirm EXIT ALL?' : 'EXIT ALL Positions'}
                 </button>
@@ -3034,7 +3237,7 @@ export default function AdvancedScalper() {
                 {/* Client-side minimum profit lock (total P&L floor) — leading
                     divider hidden, same note as Scalper.tsx's identical treatment. */}
                 <div className="flex items-center gap-2 flex-nowrap shrink-0 bg-zinc-950/40 border border-zinc-800/60 rounded-xl px-3 py-1.5 [&>span:first-child]:hidden">
-                  <ProfitLockControls lock={profitLock} totalPnl={totalPnl} />
+                  <ProfitLockControls lock={profitLock} totalPnl={fnoPnl} />
                 </div>
 
                 {/* Dhan → Zerodha trade replication (arm/disarm + multiplier) */}
@@ -3047,8 +3250,20 @@ export default function AdvancedScalper() {
         </div>
       </div>
 
+      {(loadError || (positionsError && positionsData.length > 0) || (quotesStale && hasOpenFnoPositions)) && (
+        <div className="mx-4 mt-2 flex flex-wrap items-center gap-x-4 gap-y-1 rounded-lg border border-amber-500/40 bg-amber-500/10 px-3 py-1.5 text-xs font-bold text-amber-300">
+          {loadError && <span>⚠ {loadError}</span>}
+          {positionsError && positionsData.length > 0 && (
+            <span>⚠ Positions refresh failing — showing the last good snapshot ({positionsError})</span>
+          )}
+          {quotesStale && hasOpenFnoPositions && (
+            <span>⚠ Live quotes stale &gt;15s — P&amp;L and software SL/target are using the broker&apos;s 5s price</span>
+          )}
+        </div>
+      )}
+
       {/* Centered underlying spot price strip with CE/PE Value Summary on Left */}
-      {spot > 0 && (() => {
+      {(spot > 0 || positionsData.length > 0) && (() => {
         const chg    = prevSpot > 0 ? spot - prevSpot : 0;
         const chgPct = prevSpot > 0 ? (chg / prevSpot) * 100 : 0;
         const isUp   = chg >= 0;
@@ -3100,7 +3315,7 @@ export default function AdvancedScalper() {
             />
 
             {/* Index Spot Price ticker */}
-            <div className="flex min-w-[220px] items-center gap-4 rounded-lg border border-amber-500/25 bg-zinc-950 px-4 py-2 shadow-inner">
+            {spot > 0 && <div className="flex min-w-[220px] items-center gap-4 rounded-lg border border-amber-500/25 bg-zinc-950 px-4 py-2 shadow-inner">
               <span className="text-[9px] font-bold uppercase tracking-[0.15em] text-amber-400">{underlying}</span>
               <span className="font-mono text-2xl font-bold leading-none tabular-nums text-zinc-100">
                 {spot.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
@@ -3112,7 +3327,7 @@ export default function AdvancedScalper() {
                   <span className="text-zinc-600">({isUp ? '+' : ''}{chgPct.toFixed(2)}%)</span>
                 </span>
               )}
-            </div>
+            </div>}
 
             {/* India VIX Pill — prefers the options WS bridge's own tick
                 (liveVixWs) over the hub poll (vix), see liveVixWs above. */}
@@ -3200,7 +3415,7 @@ export default function AdvancedScalper() {
                 onBuy={() => placeOrder(box.id, 'BUY')}
                 onSell={() => placeOrder(box.id, 'SELL')}
                 lots={box.lots}
-                onLotsChange={l => updateBox(box.id, { lots: l })}
+                onLotsChange={l => updateBox(box.id, { lots: Math.min(MAX_LOTS_PER_ORDER, Math.max(1, Math.trunc(Number(l)) || 1)) })}
                 onRemove={() => removeBox(box.id)}
                 canRemove={boxes.length > MIN_BOXES && !hasOpenPosition}
                 pnl={boxPnl}
@@ -3408,7 +3623,12 @@ export default function AdvancedScalper() {
         target={addLotsTarget}
         underlying={underlying}
         broker={broker}
-        defaultProductType={productType}
+        // Add to the leg under ITS product — defaulting to the terminal toggle would open a second,
+        // unguarded row for the same strike when the two differ.
+        defaultProductType={(() => {
+          const p = addLotsTarget ? positionProduct(addLotsTarget.pos) : '';
+          return p === 'INTRADAY' || p === 'MIS' ? 'INTRADAY' : p ? 'MARGIN' : productType;
+        })()}
         onConfirm={handleConfirmAddLots}
       />
     </div>

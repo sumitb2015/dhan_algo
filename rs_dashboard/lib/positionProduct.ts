@@ -85,6 +85,11 @@ export function dedupePositions(rows: Record<string, unknown>[]): Record<string,
   return out;
 }
 
+/** First row with open quantity, else the first row (a flat one the caller reports as flat). */
+function preferOpenRow(rows: Record<string, unknown>[]): Record<string, unknown> {
+  return rows.find(r => Number(r.netQty) !== 0) ?? rows[0];
+}
+
 /**
  * Result of locating `pos` in a freshly-fetched positions payload.
  *
@@ -114,8 +119,12 @@ export function findLivePosition(
   const sameSymbol = rows.filter(r => String(r.tradingSymbol) === sym);
 
   if (product) {
-    const row = sameSymbol.find(r => positionProduct(r) === product);
-    return row ? { kind: 'match', row } : { kind: 'flat' };
+    // Dhan can list a CLOSED row (netQty 0) AND a reopened live row for the same
+    // symbol+product. Taking the first one resolved to the closed row whenever it
+    // was listed first, so a stop-loss reported "already flat" and never closed
+    // the live leg. Prefer a row that still carries quantity.
+    const candidates = sameSymbol.filter(r => positionProduct(r) === product);
+    return candidates.length ? { kind: 'match', row: preferOpenRow(candidates) } : { kind: 'flat' };
   }
 
   if (sameSymbol.length === 1) return { kind: 'match', row: sameSymbol[0] };
