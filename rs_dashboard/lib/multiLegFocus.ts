@@ -175,26 +175,28 @@ export interface StrategyRiskConfig {
   armed: boolean;              // Whether strategy-level auto-exit is armed
 }
 
-/**
- * Basket-level default leg stop/target with automatic re-entry. Applies to SHORT legs only
- * (a hedge is never rolled automatically). SL/target are % of the leg's entry premium.
- * After the leg exits and is confirmed closed, a new leg of the same side/lots/option opens at
- * ATM + offset strikes (offset counted OTM: CE up, PE down; 0 = ATM, negative = ITM).
- */
 /** Re-entry offset meaning: same points-from-spot as the leg that just exited, measured at its entry. */
 export const SAME_DISTANCE = 'same' as const;
 
 /** Re-entry offset meaning: strike whose premium is closest to the open opposite short leg's live premium. */
 export const MATCH_OPPOSITE = 'match' as const;
 
+/**
+ * Basket-level default leg stop/target with automatic re-entry. Applies to SHORT legs only
+ * (a hedge is never rolled automatically). SL/target are % of the leg's entry premium.
+ * After the leg exits and is confirmed closed, a new leg of the same side/lots/option opens at
+ * ATM + offset strikes (offset counted OTM: CE up, PE down; 0 = ATM, negative = ITM).
+ */
+export type AutoReentryRule = number | typeof SAME_DISTANCE | typeof MATCH_OPPOSITE;
+
 export interface AutoLegRule {
   enabled: boolean;
   slPct: number;
-  /** Strikes from ATM to re-enter after a stop; undefined = exit only. */
-  slOffset?: number | typeof SAME_DISTANCE | typeof MATCH_OPPOSITE;
+  /** Re-entry after a stop: strikes from ATM, SAME_DISTANCE or MATCH_OPPOSITE; undefined = exit only. */
+  slOffset?: AutoReentryRule;
   tpPct: number;
-  /** Strikes from ATM to re-enter after a target; undefined = exit only. */
-  tpOffset?: number | typeof SAME_DISTANCE | typeof MATCH_OPPOSITE;
+  /** Re-entry after a target: strikes from ATM, SAME_DISTANCE or MATCH_OPPOSITE; undefined = exit only. */
+  tpOffset?: AutoReentryRule;
   /** Re-entries allowed per chain of legs (like Focus Tool's slRollMax). Default 2. */
   maxRolls?: number;
 }

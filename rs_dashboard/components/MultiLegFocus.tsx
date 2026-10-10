@@ -3313,12 +3313,16 @@ export default function MultiLegFocus({
               : autoReentryStrike(strikeList, spot, leg.option as 'CE' | 'PE', reOffset as number);
             // Re-entering the strike it just left (stop or target) is a no-op roll: step one strike OTM.
             const strike = picked != null ? avoidSameStrike(strikeList, picked, leg.strike, leg.option as 'CE' | 'PE') : picked;
+            const shifted = strike != null && strike !== picked;
             if (lots < 1 || strike == null) {
               addToast('error', `Auto re-entry skipped for ${label}`, strike == null ? (sameDist && leg.entryDist == null ? 'This leg has no recorded entry distance (adopted from the broker) — enter the new leg manually.' : 'No live spot/strike list for ATM — enter the new leg manually.') : `${r.qty} qty closed is under one lot.`);
               return;
             }
-            const ok = await addNewLegCore(basket.id, { side: 'S', option: leg.option as 'CE' | 'PE', strike, expiry: legExpiry, lots, orderType: 'MARKET' }, { carry: { sl: leg.sl, slType: leg.slType, tp: leg.tp, tpType: leg.tpType, trail: leg.trail, autoRolls: (leg.autoRolls ?? 0) + 1, entryDist: leg.entryDist } });
-            addToast(ok ? 'success' : 'error', ok ? `Auto re-entry: SELL ${strike} ${leg.option}` : `Auto re-entry FAILED for ${leg.option}`, ok ? `After ${kind === 'TP' ? 'target' : 'stop'} on ${leg.strike} (${matchOpp ? `premium ≈ ${oppLeg?.option} ₹${oppLtp.toFixed(1)}` : sameDist ? `${reOffset === MATCH_OPPOSITE ? 'no opposite leg, ' : ''}same ${leg.entryDist} pts from ATM` : `ATM${(reOffset as number) >= 0 ? '+' : ''}${reOffset}`})` : 'Position is flat on that leg — add the new leg manually');
+            const ruleDesc = matchOpp ? `premium ≈ ${oppLeg?.option} ₹${oppLtp.toFixed(1)}`
+              : sameDist ? `${reOffset === MATCH_OPPOSITE ? 'no opposite leg, ' : ''}same ${leg.entryDist} pts from spot`
+              : `ATM${(reOffset as number) >= 0 ? '+' : ''}${reOffset}`;
+            const ok = await addNewLegCore(basket.id, { side: 'S', option: leg.option as 'CE' | 'PE', strike, expiry: legExpiry, lots, orderType: 'MARKET' }, { carry: { sl: leg.sl, slType: leg.slType, tp: leg.tp, tpType: leg.tpType, trail: leg.trail, autoRolls: (leg.autoRolls ?? 0) + 1, ...(leg.entryDist != null ? { entryDist: leg.entryDist } : {}) } });
+            addToast(ok ? 'success' : 'error', ok ? `Auto re-entry: SELL ${strike} ${leg.option}` : `Auto re-entry FAILED for ${leg.option}`, ok ? `After ${kind === 'TP' ? 'target' : 'stop'} on ${leg.strike} (${ruleDesc}${shifted ? ', shifted 1 OTM off the exited strike' : ''})` : 'Position is flat on that leg — add the new leg manually');
           })();
         }
       }
