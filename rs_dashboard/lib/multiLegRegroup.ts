@@ -70,7 +70,7 @@ export function regroupBaskets(
       ...(b.riskConfig?.armed ? { riskConfig: { ...b.riskConfig, armed: false } } : {}),
     };
   };
-  const newBasket = (legs: MultiLegLeg[], name?: string, multiplier?: number): MultiLegBasket => {
+  const newBasket = (legs: MultiLegLeg[], name?: string, multiplier?: number, autoLegRule?: MultiLegBasket['autoLegRule']): MultiLegBasket => {
     const expiries = legs.map(l => l.expiry || first.expiry).sort();
     const far = expiries.find(e => e !== expiries[0]);
     return {
@@ -83,6 +83,8 @@ export function regroupBaskets(
       ...(multiplier && multiplier > 1 ? { multiplier } : {}),
       legs,
       riskConfig: { targetUnit: 'pts', slUnit: 'pts', armed: false },
+      // The default SL/target rule stays on until the user unticks it, so a leg moved out keeps it.
+      ...(autoLegRule ? { autoLegRule } : {}),
       createdAt: nowIso,
       updatedAt: nowIso,
       rev: 1,
@@ -101,7 +103,7 @@ export function regroupBaskets(
       }
       return b.legs.some(l => ids.has(l.id)) ? changed(b, b.legs.filter(l => !ids.has(l.id))) : b;
     });
-    next.push(...moving.map(p => newBasket([p.leg])));
+    next.push(...moving.map(p => newBasket([p.leg], undefined, undefined, p.from.autoLegRule)));
     message = `Ungrouped ${picked.length} trade(s)`;
   } else {
     const legs = picked.map(p => p.leg);
@@ -113,7 +115,7 @@ export function regroupBaskets(
       const name = req.name?.trim().slice(0, 40) || undefined;
       // A group made from one row keeps that row's lot multiplier (Scale reads it).
       const oneSource = new Set(picked.map(p => p.from.id)).size === 1;
-      next.push(newBasket(legs, name, oneSource ? first.multiplier : undefined));
+      next.push(newBasket(legs, name, oneSource ? first.multiplier : undefined, oneSource ? first.autoLegRule : undefined));
       message = `Grouped ${legs.length} trade(s)${name ? ` as "${name}"` : ''}`;
     }
   }

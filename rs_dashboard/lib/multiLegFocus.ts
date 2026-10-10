@@ -19,6 +19,8 @@ export type LegInstrument = OptionType | 'FUT';
 
 export interface MultiLegLeg {
   id: string;
+  /** Basket-default auto re-entries already used by the chain of legs this one came from. */
+  autoRolls?: number;
   side: LegSide;
   option: LegInstrument;
   strike: number;
@@ -170,6 +172,60 @@ export interface StrategyRiskConfig {
   armed: boolean;              // Whether strategy-level auto-exit is armed
 }
 
+/**
+ * Basket-level default leg stop/target with automatic re-entry. Applies to SHORT legs only
+ * (a hedge is never rolled automatically). SL/target are % of the leg's entry premium.
+ * After the leg exits and is confirmed closed, a new leg of the same side/lots/option opens at
+ * ATM + offset strikes (offset counted OTM: CE up, PE down; 0 = ATM, negative = ITM).
+ */
+export interface AutoLegRule {
+  enabled: boolean;
+  slPct: number;
+  /** Strikes from ATM to re-enter after a stop; undefined = exit only. */
+  slOffset?: number;
+  tpPct: number;
+  /** Strikes from ATM to re-enter after a target; undefined = exit only. */
+  tpOffset?: number;
+  /** Re-entries allowed per chain of legs (like Focus Tool's slRollMax). Default 2. */
+  maxRolls?: number;
+}
+
+export const DEFAULT_AUTO_LEG_RULE: AutoLegRule = { enabled: false, slPct: 20, slOffset: 1, tpPct: 40, tpOffset: 0, maxRolls: 2 };
+
+/** Re-entry allowed: under the roll cap and before the 15:17 IST intraday backstop (`istHM` = 'HH:MM'). */
+export function autoRollAllowed(leg: Pick<MultiLegLeg, 'autoRolls'>, rule: AutoLegRule, istHM: string): boolean {
+  return (leg.autoRolls ?? 0) < (rule.maxRolls ?? 2) && istHM < '15:17';
+}
+
+/** The leg with the basket's default SL/target filled in where the leg has none of its own. */
+export function withAutoLegRisk(leg: MultiLegLeg, rule?: AutoLegRule): MultiLegLeg {
+  if (!rule?.enabled || leg.side !== 'S' || leg.option === 'FUT') return leg;
+  const hasSl = leg.sl != null && leg.sl > 0;
+  const hasTp = leg.tp != null && leg.tp > 0;
+  if (hasSl && hasTp) return leg;
+  return {
+    ...leg,
+    ...(hasSl || !(rule.slPct > 0) ? {} : { sl: rule.slPct, slType: 'pct' as const }),
+    ...(hasTp || !(rule.tpPct > 0) ? {} : { tp: rule.tpPct, tpType: 'pct' as const }),
+  };
+}
+
+/** True when the leg's own SL/TP is absent, i.e. the basket default is what fired. */
+export function autoRuleOwns(leg: MultiLegLeg, kind: 'SL' | 'TP'): boolean {
+  const v = kind === 'SL' ? leg.sl : leg.tp;
+  return !(v != null && v > 0);
+}
+
+/** Strike `offset` places OTM from ATM on the sorted strike list (CE up, PE down). Null when off the chain. */
+export function autoReentryStrike(strikes: number[], spot: number, option: 'CE' | 'PE', offset: number): number | null {
+  if (!strikes.length || !(spot > 0) || !Number.isFinite(offset)) return null;
+  const sorted = [...strikes].sort((a, b) => a - b);
+  let atm = 0;
+  for (let i = 1; i < sorted.length; i++) if (Math.abs(sorted[i] - spot) < Math.abs(sorted[atm] - spot)) atm = i;
+  const idx = atm + (option === 'CE' ? 1 : -1) * Math.round(offset);
+  return idx >= 0 && idx < sorted.length ? sorted[idx] : null;
+}
+
 export interface MultiLegBasket {
   id: string;
   name?: string;
@@ -186,6 +242,8 @@ export interface MultiLegBasket {
   multiplier?: number;
   legs: MultiLegLeg[];
   riskConfig?: StrategyRiskConfig;
+  /** Default leg SL/target + auto re-entry (see AutoLegRule). */
+  autoLegRule?: AutoLegRule;
   /** Dhan stop-loss ENTRY orders resting at the exchange until their trigger prints.
    *  Not legs: nothing is open until one trades, so no exit, stop, P&L or payoff rule
    *  can see them (see WaitingEntry). */

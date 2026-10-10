@@ -27,7 +27,7 @@ import HelpModal from './HelpModal';
 import {
   resolveTemplateLegs, reconcileLegWithBroker, sortLegsForExit, findLegPosition, executionBroker,
   applyOrderOutcomes, normalizeOrderRow, withPendingOrder, settleWaitingEntry, applyTriggeredEntry, type WaitingEntry, LEG_FILL_GRACE_MS, legBrokerMismatch, classifyDhanOrder, type DhanOrderPhase, type NormalizedOrder,
-  computeLegTrailingSL, computeStrategyMetrics, checkStrategyRisk, fallbackLotSize, planScale, scalePlanSignature,
+  computeLegTrailingSL, withAutoLegRisk, autoRuleOwns, autoReentryStrike, autoRollAllowed, computeStrategyMetrics, checkStrategyRisk, fallbackLotSize, planScale, scalePlanSignature,
   positionProduct, computeBasketStatus, closedFillFromRow,
   findSiblingLegCollisions, type SiblingLegCollision,
   recordOutsideReduction, isLegInFillGrace,
@@ -3200,6 +3200,8 @@ export default function MultiLegFocus({
   const triggeredLegExitsRef = useRef<Map<string, number>>(new Map());
   const triggeredStrategyExitsRef = useRef<Map<string, number>>(new Map());
   const RISK_EXIT_RETRY_MS = 15_000;
+  // Legs whose basket-default stop/target already started an auto re-entry (once per leg).
+  const autoRolledRef = useRef<Set<string>>(new Set());
   const recentlyTriggered = (m: Map<string, number>, id: string) => {
     const t = m.get(id);
     return t != null && Date.now() - t < RISK_EXIT_RETRY_MS;
@@ -3242,7 +3244,7 @@ export default function MultiLegFocus({
         const ltp = ltpFor(basket, leg);
         if (ltp <= 0) continue;
 
-        const evalResult = computeLegTrailingSL(leg, ltp);
+        const evalResult = computeLegTrailingSL(withAutoLegRisk(leg, basket.autoLegRule), ltp);
 
         if (evalResult.newBestPrice !== leg.bestPrice && evalResult.newBestPrice != null) {
           bestUpdates.set(leg.id, evalResult.newBestPrice);
@@ -3259,7 +3261,50 @@ export default function MultiLegFocus({
               : `Take Profit Hit at ₹${ltp.toFixed(2)} (Target: ₹${evalResult.tpPrice?.toFixed(2)})`;
 
           addToast(evalResult.triggered === 'TP' ? 'success' : 'error', `${label} Triggered`, trigMsg);
-          exitOneLeg(basket.id, leg);
+          const rule = basket.autoLegRule;
+          const kind = evalResult.triggered === 'TP' ? 'TP' : 'SL';
+          const istHM = new Date(Date.now() + 330 * 60_000).toISOString().slice(11, 16);
+          const reOffset = rule?.enabled && leg.side === 'S' && autoRuleOwns(leg, kind) && autoRollAllowed(leg, rule, istHM)
+            ? (kind === 'TP' ? rule.tpOffset : rule.slOffset) : undefined;
+          if (reOffset == null) { exitOneLeg(basket.id, leg); continue; }
+          // Auto re-entry: only after the exit is CONFIRMED closed, once per leg, same lots.
+          if (autoRolledRef.current.has(leg.id)) { exitOneLeg(basket.id, leg); continue; }
+          autoRolledRef.current.add(leg.id);
+          void (async () => {
+            const r = await exitOneLeg(basket.id, leg).catch(() => ({ closed: false, qty: 0, maxAfter: undefined as number | undefined }));
+            if (!r.closed || r.qty <= 0) { autoRolledRef.current.delete(leg.id); return; }
+            const bk = executionBroker(basket, broker) as Broker;
+            // closed = the exit was ACKNOWLEDGED, not filled; a rejected exit reopens the leg. Selling the
+            // replacement first would double the short, so wait for the position book to show it came down.
+            let verified = false;
+            for (let attempt = 0; attempt < 6 && !verified; attempt++) {
+              if (attempt > 0) await new Promise(res => setTimeout(res, 1000));
+              try {
+                const pr = await fetch(scalperRoute(bk, 'positions'));
+                const pj = await pr.json() as { success: boolean; data?: Record<string, unknown>[] };
+                if (!pj.success || !Array.isArray(pj.data)) continue;
+                const fb = bk === 'dhan' && !leg.orderRef?.securityId ? resolveDhanSecurityId(basket, leg) : undefined;
+                const m = findLegPosition(bk, leg, pj.data, fb);
+                verified = m.kind === 'flat' || (m.kind === 'match' && Math.abs(Number(m.row.netQty ?? 0)) <= (r.maxAfter ?? 0));
+              } catch { /* retry */ }
+            }
+            if (!verified) {
+              addToast('error', `Auto re-entry skipped for ${label}`, 'Could not confirm the exit filled at the broker. Check Orders/Positions, then enter the new leg manually.');
+              return;
+            }
+            const legExpiry = leg.expiry || basket.expiry;
+            const lk = lookupCache[lkKey(bk, basket.underlying, legExpiry)];
+            const lotSize = lk?.lotSize ?? fallbackLotSize(basket.underlying as Underlying, bk);
+            const lots = Math.floor(r.qty / lotSize);
+            const spot = chainData[`${basket.underlying}:${legExpiry}`]?.spot ?? 0;
+            const strike = autoReentryStrike(Object.keys(lk?.strikes ?? {}).map(Number), spot, leg.option as 'CE' | 'PE', reOffset);
+            if (lots < 1 || strike == null) {
+              addToast('error', `Auto re-entry skipped for ${label}`, strike == null ? 'No live spot/strike list for ATM — enter the new leg manually.' : `${r.qty} qty closed is under one lot.`);
+              return;
+            }
+            const ok = await addNewLegCore(basket.id, { side: 'S', option: leg.option as 'CE' | 'PE', strike, expiry: legExpiry, lots, orderType: 'MARKET' }, { carry: { sl: leg.sl, slType: leg.slType, tp: leg.tp, tpType: leg.tpType, trail: leg.trail, autoRolls: (leg.autoRolls ?? 0) + 1 } });
+            addToast(ok ? 'success' : 'error', ok ? `Auto re-entry: SELL ${strike} ${leg.option}` : `Auto re-entry FAILED for ${leg.option}`, ok ? `After ${kind === 'TP' ? 'target' : 'stop'} on ${leg.strike} (ATM${reOffset >= 0 ? '+' : ''}${reOffset})` : 'Position is flat on that leg — add the new leg manually');
+          })();
         }
       }
 
@@ -3272,7 +3317,7 @@ export default function MultiLegFocus({
         }));
       }
     }
-  }, [baskets, ltpFor, exitingMap, exitBasket, exitOneLeg, patchLegs, addToast, isLeader]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [baskets, ltpFor, exitingMap, exitBasket, exitOneLeg, patchLegs, addToast, isLeader, addNewLegCore, lookupCache, chainData, broker, resolveDhanSecurityId]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Open/draft/placing rows stay put; fully-exited (every leg CLOSED) rows sink
   // to the bottom so a long-running page doesn't bury active positions under

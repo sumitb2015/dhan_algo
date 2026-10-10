@@ -355,7 +355,7 @@ export default function MultiLegLegRow({
           {leg.status}
         </span>
       </td>
-      <td className="px-2 py-1.5 text-center">
+      <td className="px-2 py-1.5 text-center sticky right-0 z-[1] bg-zinc-900 shadow-[-6px_0_6px_-6px_var(--chart-cursor-line)]">
         {leg.status === 'OPEN' ? (
           <div className="flex items-center justify-end gap-1.5 whitespace-nowrap [&>*]:shrink-0">
             {onShift && (
