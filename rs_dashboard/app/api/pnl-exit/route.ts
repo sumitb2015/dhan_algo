@@ -68,6 +68,9 @@ export async function POST(req: NextRequest) {
       productTypes?: string[];
       enableKillSwitch?: boolean;
     };
+    if (productTypes !== undefined && (!Array.isArray(productTypes) || productTypes.length === 0)) {
+      return NextResponse.json({ success: false, error: 'productTypes must list at least one product' }, { status: 400 });
+    }
     tokenCache = null; // always re-read token for mutating operations
     const { clientId, token } = getToken();
     const payload = {

@@ -49,6 +49,18 @@ test('findLivePosition reports flat when the symbol is absent entirely', () => {
   );
 });
 
+test('findLivePosition prefers the live row over a CLOSED row for the same symbol+product', () => {
+  const closed = { ...row('NIFTY25000CE', 'INTRADAY', 0), positionType: 'CLOSED' };
+  const live   = { ...row('NIFTY25000CE', 'INTRADAY', -65), positionType: 'SHORT' };
+  for (const book of [[closed, live], [live, closed]]) {
+    const hit = findLivePosition(book, live) as { kind: string; row: Record<string, unknown> };
+    assert.strictEqual(hit.kind, 'match');
+    assert.strictEqual(hit.row.netQty, -65);
+  }
+  // Only the closed row left: still a match, with netQty 0 for the caller to report flat.
+  assert.strictEqual((findLivePosition([closed], live) as { row: Record<string, unknown> }).row.netQty, 0);
+});
+
 test('a productless row falls back to symbol-only ONLY when unambiguous', () => {
   const one = [row('NIFTY25000CE', 'INTRADAY', 75)];
   const hit = findLivePosition(one, { tradingSymbol: 'NIFTY25000CE' });

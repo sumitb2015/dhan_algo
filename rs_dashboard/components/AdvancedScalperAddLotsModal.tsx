@@ -57,7 +57,8 @@ interface AddLotsModalProps {
   underlying: string;
   broker: Broker;
   defaultProductType: 'INTRADAY' | 'MARGIN';
-  onConfirm: (params: SubmitLegOrderParams) => Promise<void>;
+  /** Resolve false when the order failed, so the ticket stays open with its inputs. */
+  onConfirm: (params: SubmitLegOrderParams) => Promise<boolean | void>;
 }
 
 function fmtMoney(n: number): string {
@@ -150,7 +151,7 @@ export default function AdvancedScalperAddLotsModal({
     if (!canSubmit || submitting) return;
     setSubmitting(true);
     try {
-      await onConfirm({
+      const ok = await onConfirm({
         optionSide: target.option,
         legExpiry: target.posExpiry,
         strike: target.strike,
@@ -162,7 +163,7 @@ export default function AdvancedScalperAddLotsModal({
         legLotSize: effectiveLot,
         legProductType: productType,
       });
-      onClose();
+      if (ok !== false) onClose();
     } finally {
       setSubmitting(false);
     }
