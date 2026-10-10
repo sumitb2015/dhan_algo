@@ -15,10 +15,10 @@ import AddNewLegModal from './AddNewLegModal';
 import LegColumnsMenu from './LegColumnsMenu';
 import { DEFAULT_LEG_COLUMNS, type LegColumns } from '@/lib/legColumns';
 import {
-  computeLegTrailingSL, computeStrategyMetrics, checkStrategyRisk, computeBasketStatus,
+  computeLegTrailingSL, withAutoLegRisk, computeStrategyMetrics, checkStrategyRisk, computeBasketStatus,
   classifyBasketStructure, legCountsToday, legPnl, legAvgPrice, legPnlPct, legQtyUnits, crudeQtyMultiplier, basketLabel,
   findSiblingLegCollisions, type SiblingLegCollision, scaleBasketMultiplier, futuresAsSyntheticPayoffLegs, isOptionLeg,
-  type MultiLegBasket, type MultiLegLeg, type StrategyRiskConfig,
+  type MultiLegBasket, type MultiLegLeg, type StrategyRiskConfig, type AutoLegRule, DEFAULT_AUTO_LEG_RULE,
 } from '@/lib/multiLegFocus';
 import { calculateTimeToExpiryYears } from '@/lib/optionsPricing';
 import { FOCUS_RING } from '@/components/Scalper';
@@ -496,6 +496,21 @@ export default function MultiLegStrategyRow({
     onUpdate({ riskConfig: nextRisk });
   }, [strategyRisk, onUpdate]);
 
+  const autoRule: AutoLegRule = basket.autoLegRule ?? DEFAULT_AUTO_LEG_RULE;
+  const updateAuto = useCallback((patch: Partial<AutoLegRule>) => {
+    onUpdate({ autoLegRule: { ...(basket.autoLegRule ?? DEFAULT_AUTO_LEG_RULE), ...patch } });
+  }, [basket.autoLegRule, onUpdate]);
+  const offsetOpts = [-3, -2, -1, 0, 1, 2, 3, 4, 5];
+  const selCls = `h-6 bg-zinc-800 border border-zinc-700 rounded text-[11px] text-zinc-200 px-1 disabled:opacity-50 ${FOCUS_RING}`;
+  const offsetSel = (value: number | undefined, onChange: (v: number | undefined) => void, label: string) => (
+    <select aria-label={label} title={label} className={selCls}
+      value={value == null ? 'off' : String(value)}
+      onChange={e => onChange(e.target.value === 'off' ? undefined : Number(e.target.value))}>
+      <option value="off">Exit only</option>
+      {offsetOpts.map(n => <option key={n} value={n}>{n === 0 ? 'ATM' : `ATM${n > 0 ? '+' : ''}${n}`}</option>)}
+    </select>
+  );
+
   const currentMultiplier = basket.multiplier ?? 1;
 
   const handleMultiplierChange = useCallback((newMultiplier: number) => {
@@ -755,7 +770,7 @@ export default function MultiLegStrategyRow({
         <div className="flex items-center gap-2 flex-nowrap shrink-0">
           {hasMixedExpiry ? (
             <div
-              className="hidden md:flex items-center gap-2 px-2.5 py-1 rounded-lg bg-zinc-950 border border-fuchsia-500/20 text-xs font-mono"
+              className="hidden min-[1500px]:flex items-center gap-2 px-2.5 py-1 rounded-lg bg-zinc-950 border border-fuchsia-500/20 text-xs font-mono"
               title="Calendar/Diagonal value as of the near leg's expiry — see the payoff curve below for the full shape"
             >
               <div className="flex items-center gap-1">
@@ -768,7 +783,7 @@ export default function MultiLegStrategyRow({
                 <span className="text-emerald-400 font-bold">
                   {maxProfitDisplay}
                   {maxProfitPctOfMargin != null && (
-                    <span className="text-[10px] opacity-80"> ({maxProfitPctOfMargin >= 0 ? '+' : ''}{maxProfitPctOfMargin.toFixed(1)}% of margin)</span>
+                    <span className="hidden min-[1800px]:inline text-[10px] opacity-80" title="Max profit as % of margin blocked"> ({maxProfitPctOfMargin >= 0 ? '+' : ''}{maxProfitPctOfMargin.toFixed(1)}% of margin)</span>
                   )}
                 </span>
                 <span className="text-zinc-600">/</span>
@@ -776,7 +791,7 @@ export default function MultiLegStrategyRow({
               </div>
             </div>
           ) : payoffModel && (
-            <div className="hidden md:flex items-center gap-2 px-2.5 py-1 rounded-lg bg-zinc-950 border border-zinc-800 text-xs font-mono" title="Strategy Payoff: Breakevens & Max Profit / Loss">
+            <div className="hidden min-[1500px]:flex items-center gap-2 px-2.5 py-1 rounded-lg bg-zinc-950 border border-zinc-800 text-xs font-mono" title="Strategy Payoff: Breakevens & Max Profit / Loss">
               <div className="flex items-center gap-1">
                 <span className="text-zinc-500 text-[10px] uppercase font-semibold">BE:</span>
                 <span className="text-zinc-200 font-bold">{breakevensDisplay}</span>
@@ -787,7 +802,7 @@ export default function MultiLegStrategyRow({
                 <span className="text-emerald-400 font-bold">
                   {maxProfitDisplay}
                   {maxProfitPctOfMargin != null && (
-                    <span className="text-[10px] opacity-80"> ({maxProfitPctOfMargin >= 0 ? '+' : ''}{maxProfitPctOfMargin.toFixed(1)}% of margin)</span>
+                    <span className="hidden min-[1800px]:inline text-[10px] opacity-80" title="Max profit as % of margin blocked"> ({maxProfitPctOfMargin >= 0 ? '+' : ''}{maxProfitPctOfMargin.toFixed(1)}% of margin)</span>
                   )}
                 </span>
                 <span className="text-zinc-600">/</span>
@@ -876,87 +891,6 @@ export default function MultiLegStrategyRow({
           {/* Open Strategy Actions */}
           {basket.legs.some(l => l.status === 'OPEN' || l.status === 'CLOSING') && (
             <div className="flex items-center gap-1.5">
-              {onShiftLegs && (() => {
-                const openLegs = basket.legs.filter(l => l.status === 'OPEN');
-                if (!openLegs.length) return null;
-                const busy = placing || exiting || shifting;
-                const groups: { label: string; noun: string; ids: string[] }[] = [
-                  { label: 'CE', noun: 'CE legs', ids: openLegs.filter(l => l.option === 'CE').map(l => l.id) },
-                  { label: 'PE', noun: 'PE legs', ids: openLegs.filter(l => l.option === 'PE').map(l => l.id) },
-                  { label: 'All', noun: 'all open legs', ids: openLegs.map(l => l.id) },
-                ].filter((g, i, arr) => g.ids.length > 0 && !(g.label !== 'All' && g.ids.length === arr[arr.length - 1].ids.length));
-                const unit = `strike${shiftSteps > 1 ? 's' : ''}`;
-                const iconBtn = `h-full w-6 inline-flex items-center justify-center text-zinc-400 hover:text-white hover:bg-zinc-800 disabled:opacity-40 disabled:cursor-not-allowed transition-colors ${FOCUS_RING}`;
-                return (
-                  <div
-                    role="group"
-                    aria-label="Shift strikes"
-                    className="inline-flex items-stretch h-7 rounded-lg border border-zinc-700 bg-zinc-900 overflow-hidden divide-x divide-zinc-700"
-                  >
-                    {/* How far one click moves */}
-                    <div className="flex items-center" title="Strikes moved per click">
-                      <span className="pl-2 pr-1 text-[10px] font-bold uppercase tracking-wider text-zinc-500 select-none">Shift</span>
-                      <button type="button" className={iconBtn} disabled={busy || shiftSteps <= 1}
-                        aria-label="Decrease shift distance" onClick={() => setShiftSteps(n => clampShiftSteps(n - 1))}>
-                        <Minus className="w-3 h-3" />
-                      </button>
-                      <span className="min-w-[3.25rem] px-1 text-center text-[11px] font-mono font-bold text-zinc-100 tabular-nums select-none" aria-live="polite">
-                        {shiftSteps}<span className="ml-0.5 font-sans text-[10px] font-semibold text-zinc-500">{unit}</span>
-                      </span>
-                      <button type="button" className={iconBtn} disabled={busy || shiftSteps >= MAX_SHIFT_STEPS}
-                        aria-label="Increase shift distance" onClick={() => setShiftSteps(n => clampShiftSteps(n + 1))}>
-                        <Plus className="w-3 h-3" />
-                      </button>
-                    </div>
-                    {/* Which legs move, and which way */}
-                    {groups.map(g => (
-                      <div key={g.label} className="flex items-center">
-                        <span className={`px-2 text-[10px] font-bold select-none ${g.label === 'All' ? 'text-zinc-100' : 'text-zinc-300'}`}>{g.label}</span>
-                        <button type="button" className={iconBtn} disabled={busy}
-                          aria-label={`Shift ${g.noun} down ${shiftSteps} ${unit}`}
-                          title={`Move ${g.noun} to lower strikes (${shiftSteps} ${unit})`}
-                          onClick={() => runShift(g.ids, 'DOWN')}>
-                          <ChevronDown className="w-3.5 h-3.5" />
-                        </button>
-                        <button type="button" className={iconBtn} disabled={busy}
-                          aria-label={`Shift ${g.noun} up ${shiftSteps} ${unit}`}
-                          title={`Move ${g.noun} to higher strikes (${shiftSteps} ${unit})`}
-                          onClick={() => runShift(g.ids, 'UP')}>
-                          <ChevronUp className="w-3.5 h-3.5" />
-                        </button>
-                      </div>
-                    ))}
-                    {shifting && (
-                      <div className="flex items-center px-2" role="status">
-                        <Loader2 className="w-3.5 h-3.5 animate-spin text-zinc-400" aria-label="Shifting" />
-                      </div>
-                    )}
-                  </div>
-                );
-              })()}
-              {onScaleStrategy && (
-                <button
-                  type="button"
-                  onClick={() => setShowScale(true)}
-                  disabled={scaling || shifting || exiting || exitingLegs.size > 0}
-                  title="Add more copies of this strategy: preview the lots and margin, then place hedges first and shorts second"
-                  className={`h-7 px-2.5 inline-flex items-center gap-1 text-[11px] font-bold rounded-lg border border-amber-500/40 bg-amber-500/10 text-amber-300 hover:bg-amber-500/20 transition-all disabled:opacity-50 disabled:cursor-not-allowed ${FOCUS_RING}`}
-                >
-                  {scaling ? <Loader2 className="w-3 h-3 animate-spin" /> : <Plus className="w-3 h-3" />}
-                  {scaling ? 'Scaling…' : 'Scale…'}
-                </button>
-              )}
-              {onAddNewLeg && (
-                <button
-                  type="button"
-                  onClick={() => setIsAddNewLegModalOpen(true)}
-                  disabled={shifting}
-                  title="Add a new leg to this active strategy"
-                  className={`h-7 px-2.5 inline-flex items-center gap-1 text-[11px] font-bold rounded-lg border border-emerald-500/40 bg-emerald-500/10 text-emerald-300 hover:bg-emerald-500/20 disabled:opacity-50 disabled:cursor-not-allowed ${FOCUS_RING}`}
-                >
-                  <Plus className="w-3 h-3" /> Add Leg
-                </button>
-              )}
               <button
                 type="button"
                 onClick={onExit}
@@ -1091,6 +1025,94 @@ export default function MultiLegStrategyRow({
 
       {expanded && (
         <div className="p-4 flex flex-col gap-3">
+            {/* Manage open legs: shift / scale / add. Lives in the body, not the one-line header,
+                so the collapsed summary never needs a horizontal scroll to be read. */}
+            {basket.legs.some(l => l.status === 'OPEN' || l.status === 'CLOSING') && (onShiftLegs || onScaleStrategy || onAddNewLeg) && (
+              <div className="flex flex-wrap items-center gap-2 px-3 pt-2" role="toolbar" aria-label="Manage open legs">
+              {onShiftLegs && (() => {
+                const openLegs = basket.legs.filter(l => l.status === 'OPEN');
+                if (!openLegs.length) return null;
+                const busy = placing || exiting || shifting;
+                const groups: { label: string; noun: string; ids: string[] }[] = [
+                  { label: 'CE', noun: 'CE legs', ids: openLegs.filter(l => l.option === 'CE').map(l => l.id) },
+                  { label: 'PE', noun: 'PE legs', ids: openLegs.filter(l => l.option === 'PE').map(l => l.id) },
+                  { label: 'All', noun: 'all open legs', ids: openLegs.map(l => l.id) },
+                ].filter((g, i, arr) => g.ids.length > 0 && !(g.label !== 'All' && g.ids.length === arr[arr.length - 1].ids.length));
+                const unit = `strike${shiftSteps > 1 ? 's' : ''}`;
+                const iconBtn = `h-full w-6 inline-flex items-center justify-center text-zinc-400 hover:text-white hover:bg-zinc-800 disabled:opacity-40 disabled:cursor-not-allowed transition-colors ${FOCUS_RING}`;
+                return (
+                  <div
+                    role="group"
+                    aria-label="Shift strikes"
+                    className="inline-flex items-stretch h-7 rounded-lg border border-zinc-700 bg-zinc-900 overflow-hidden divide-x divide-zinc-700"
+                  >
+                    {/* How far one click moves */}
+                    <div className="flex items-center" title="Strikes moved per click">
+                      <span className="pl-2 pr-1 text-[10px] font-bold uppercase tracking-wider text-zinc-500 select-none">Shift</span>
+                      <button type="button" className={iconBtn} disabled={busy || shiftSteps <= 1}
+                        aria-label="Decrease shift distance" onClick={() => setShiftSteps(n => clampShiftSteps(n - 1))}>
+                        <Minus className="w-3 h-3" />
+                      </button>
+                      <span className="min-w-[3.25rem] px-1 text-center text-[11px] font-mono font-bold text-zinc-100 tabular-nums select-none" aria-live="polite">
+                        {shiftSteps}<span className="ml-0.5 font-sans text-[10px] font-semibold text-zinc-500">{unit}</span>
+                      </span>
+                      <button type="button" className={iconBtn} disabled={busy || shiftSteps >= MAX_SHIFT_STEPS}
+                        aria-label="Increase shift distance" onClick={() => setShiftSteps(n => clampShiftSteps(n + 1))}>
+                        <Plus className="w-3 h-3" />
+                      </button>
+                    </div>
+                    {/* Which legs move, and which way */}
+                    {groups.map(g => (
+                      <div key={g.label} className="flex items-center">
+                        <span className={`px-2 text-[10px] font-bold select-none ${g.label === 'All' ? 'text-zinc-100' : 'text-zinc-300'}`}>{g.label}</span>
+                        <button type="button" className={iconBtn} disabled={busy}
+                          aria-label={`Shift ${g.noun} down ${shiftSteps} ${unit}`}
+                          title={`Move ${g.noun} to lower strikes (${shiftSteps} ${unit})`}
+                          onClick={() => runShift(g.ids, 'DOWN')}>
+                          <ChevronDown className="w-3.5 h-3.5" />
+                        </button>
+                        <button type="button" className={iconBtn} disabled={busy}
+                          aria-label={`Shift ${g.noun} up ${shiftSteps} ${unit}`}
+                          title={`Move ${g.noun} to higher strikes (${shiftSteps} ${unit})`}
+                          onClick={() => runShift(g.ids, 'UP')}>
+                          <ChevronUp className="w-3.5 h-3.5" />
+                        </button>
+                      </div>
+                    ))}
+                    {shifting && (
+                      <div className="flex items-center px-2" role="status">
+                        <Loader2 className="w-3.5 h-3.5 animate-spin text-zinc-400" aria-label="Shifting" />
+                      </div>
+                    )}
+                  </div>
+                );
+              })()}
+              {onScaleStrategy && (
+                <button
+                  type="button"
+                  onClick={() => setShowScale(true)}
+                  disabled={scaling || shifting || exiting || exitingLegs.size > 0}
+                  title="Add more copies of this strategy: preview the lots and margin, then place hedges first and shorts second"
+                  className={`h-7 px-2.5 inline-flex items-center gap-1 text-[11px] font-bold rounded-lg border border-amber-500/40 bg-amber-500/10 text-amber-300 hover:bg-amber-500/20 transition-all disabled:opacity-50 disabled:cursor-not-allowed ${FOCUS_RING}`}
+                >
+                  {scaling ? <Loader2 className="w-3 h-3 animate-spin" /> : <Plus className="w-3 h-3" />}
+                  {scaling ? 'Scaling…' : 'Scale…'}
+                </button>
+              )}
+              {onAddNewLeg && (
+                <button
+                  type="button"
+                  onClick={() => setIsAddNewLegModalOpen(true)}
+                  disabled={shifting}
+                  title="Add a new leg to this active strategy"
+                  className={`h-7 px-2.5 inline-flex items-center gap-1 text-[11px] font-bold rounded-lg border border-emerald-500/40 bg-emerald-500/10 text-emerald-300 hover:bg-emerald-500/20 disabled:opacity-50 disabled:cursor-not-allowed ${FOCUS_RING}`}
+                >
+                  <Plus className="w-3 h-3" /> Add Leg
+                </button>
+              )}
+              </div>
+            )}
+
           {/* Strategy-Level Target & SL Bar */}
           <div className="p-2.5 bg-zinc-950/60 border border-zinc-800/80 rounded-lg flex items-center justify-between gap-3 flex-wrap text-xs">
             <div className="flex items-center gap-3 flex-wrap">
@@ -1250,6 +1272,43 @@ export default function MultiLegStrategyRow({
                 )}
               </div>
 
+              {/* Default leg SL / target with auto re-entry (short option legs only) */}
+              <div className="flex flex-wrap items-center gap-x-2 gap-y-1 max-w-full bg-zinc-900 border border-zinc-800 rounded px-2 py-0.5 text-[11px] whitespace-nowrap"
+                title="Short option legs without their own SL/TP get these defaults (% of entry premium). After the exit is confirmed, a new short leg opens at the chosen strike: ATM+n counts OTM outward (CE up, PE down). Same lots, capped re-entries, none after 15:17.">
+                <label className="flex items-center gap-1 cursor-pointer select-none font-semibold text-zinc-300">
+                  <input type="checkbox" checked={autoRule.enabled} onChange={e => {
+                      if (e.target.checked) {
+                        // Arming applies the defaults to legs already open: warn about any that are already past them.
+                        const armed = { ...autoRule, enabled: true };
+                        const hit = basket.legs.filter(l => l.status === 'OPEN' && l.fill && computeLegTrailingSL(withAutoLegRisk(l, armed), ltpFor(l)).triggered)
+                          .map(l => `${l.strike} ${l.option}`);
+                        if (hit.length && !window.confirm(`${hit.join(', ')} ${hit.length > 1 ? 'are' : 'is'} already past the default stop/target. Arming now exits ${hit.length > 1 ? 'them' : 'it'} at market on the next tick${armed.slOffset != null || armed.tpOffset != null ? ' and re-enters per your rule' : ''}.\n\nArm anyway?`)) return;
+                      }
+                      updateAuto({ enabled: e.target.checked });
+                    }}
+                    className={`rounded border-zinc-700 text-emerald-500 ${FOCUS_RING}`} />
+                  <span className={autoRule.enabled ? 'text-emerald-400 font-bold' : 'text-zinc-400'}>Auto SL/Tgt</span>
+                </label>
+                <span className="flex items-center gap-1">
+                  <span className="text-rose-400 font-bold">SL</span>
+                  <RuleNumInput value={autoRule.slPct} onCommit={v => updateAuto({ slPct: v ?? 20 })} placeholder="%" min={1} step={1}
+                    className="w-12 h-6 text-center text-rose-300" title="Default stop loss, % of the leg's entry premium" />
+                  <span className="text-zinc-500">% then</span>
+                  {offsetSel(autoRule.slOffset, v => updateAuto({ slOffset: v }), 'After stop loss: re-enter at')}
+                </span>
+                <span className="flex items-center gap-1">
+                  <span className="text-emerald-400 font-bold">Tgt</span>
+                  <RuleNumInput value={autoRule.tpPct} onCommit={v => updateAuto({ tpPct: v ?? 40 })} placeholder="%" min={1} step={1}
+                    className="w-12 h-6 text-center text-emerald-300" title="Default target, % of the leg's entry premium" />
+                  <span className="text-zinc-500">% then</span>
+                  {offsetSel(autoRule.tpOffset, v => updateAuto({ tpOffset: v }), 'After target: re-enter at')}
+                </span>
+                <select aria-label="Max auto re-entries per leg chain" title="Max auto re-entries"
+                  value={autoRule.maxRolls ?? 2} onChange={e => updateAuto({ maxRolls: Number(e.target.value) })} className={selCls}>
+                  {[1, 2, 3, 5, 10].map(n => <option key={n} value={n}>max ×{n}</option>)}
+                </select>
+              </div>
+
               {/* Auto-Exit Armed */}
               <label className="flex items-center gap-1.5 cursor-pointer select-none text-[11px] font-semibold text-zinc-300 bg-zinc-900 border border-zinc-800 rounded px-2 py-1"
                 title={stratMetrics.hasFutures ? 'Strategy Target/SL work in points or %, which do not add up across futures and options. Use leg SL/TP instead.' : undefined}>
@@ -1372,7 +1431,7 @@ export default function MultiLegStrategyRow({
                         Status<span aria-hidden className="text-[10px]">{legSort?.key === 'status' ? (legSort.dir === 'asc' ? '▲' : '▼') : ''}</span>
                       </button>
                     </th>
-                    <th className="px-2 py-2 text-center">Action</th>
+                    <th className="px-2 py-2 text-center sticky right-0 z-[1] bg-zinc-800 shadow-[-6px_0_6px_-6px_var(--chart-cursor-line)]">Action</th>
                   </tr>
                 </thead>
                 <tbody>

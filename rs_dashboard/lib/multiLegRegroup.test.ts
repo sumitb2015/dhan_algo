@@ -72,3 +72,13 @@ test('ungroup: a leg alone in a named basket just loses the name', () => {
   assert.equal(r.baskets[0].id, 'S');
   assert.ok(isLooseTrade(r.baskets[0]));
 });
+
+test('the Auto SL/Tgt rule follows a leg that is grouped or ungrouped out of its row', () => {
+  const rule = { enabled: true, slPct: 20, slOffset: 1, tpPct: 40, tpOffset: 0, maxRolls: 2 };
+  const grouped = regroupBaskets([bk('A', [leg('1'), leg('2'), leg('3')], { autoLegRule: rule })], { op: 'group', legIds: ['1', '2'] }, nid, 'now');
+  assert.deepEqual(grouped.baskets[1].autoLegRule, rule);
+  const ungrouped = regroupBaskets([bk('A', [leg('1'), leg('2')], { autoLegRule: rule })], { op: 'ungroup', legIds: ['1'] }, nid, 'now');
+  assert.deepEqual(ungrouped.baskets.find(isLooseTrade)?.autoLegRule, rule);
+  const mixed = regroupBaskets([bk('A', [leg('1')], { autoLegRule: rule }), bk('B', [leg('2')])], { op: 'group', legIds: ['1', '2'] }, nid, 'now');
+  assert.equal(mixed.baskets[0].autoLegRule, undefined);
+});
