@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { readFocusConfig, writeFocusConfig, newFocusRowId, type FocusRow } from '@/lib/focusToolRows';
+import { readFocusConfig, writeFocusConfig } from '@/lib/focusToolRows';
 import { mergeFocusConfigWrite, type FocusConfigWrite } from '@/lib/focusToolRowsMerge';
 
 export async function GET(): Promise<NextResponse> {
@@ -14,7 +14,7 @@ export async function GET(): Promise<NextResponse> {
 
 export async function POST(req: NextRequest): Promise<NextResponse> {
   try {
-    const body = await req.json() as FocusConfigWrite & { row?: Partial<FocusRow> };
+    const body = await req.json() as FocusConfigWrite;
     let config = readFocusConfig();
     let conflicts: string[] = [];
     let refusedDeletes: string[] = [];
@@ -24,22 +24,9 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     // is never rejected wholesale — at worst one row's same-rev change loses
     // to the stored one and comes back in `conflicts`. Other fields stay
     // last-write-wins, and only when the save carries them.
-    if (body.row) {
-      // Upsert a single row
-      const incoming = body.row;
-      const now = new Date().toISOString();
-      if (incoming.id) {
-        ({ config, conflicts } = mergeFocusConfigWrite(config, {
-          rows: [{ ...(config.rows.find(r => r.id === incoming.id) ?? { createdAt: now }), ...incoming, updatedAt: now } as FocusRow],
-        }));
-      } else {
-        config.rows.push({ ...incoming, id: newFocusRowId(), createdAt: now, updatedAt: now } as FocusRow);
-      }
-    } else {
-      const { row: _row, ...rest } = body;
-      void _row;
-      ({ config, conflicts, refusedDeletes } = mergeFocusConfigWrite(config, rest));
-    }
+    // (A single-row `row` upsert used to live here; no caller sent it and, with no rev, it was always
+    // reported as a conflict and dropped.)
+    ({ config, conflicts, refusedDeletes } = mergeFocusConfigWrite(config, body));
 
     writeFocusConfig(config);
     return NextResponse.json({ success: true, data: config, conflicts, refusedDeletes });

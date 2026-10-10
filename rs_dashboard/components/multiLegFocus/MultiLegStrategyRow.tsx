@@ -18,7 +18,7 @@ import {
   computeLegTrailingSL, withAutoLegRisk, computeStrategyMetrics, checkStrategyRisk, computeBasketStatus,
   classifyBasketStructure, legCountsToday, legPnl, legAvgPrice, legPnlPct, legQtyUnits, crudeQtyMultiplier, basketLabel,
   findSiblingLegCollisions, type SiblingLegCollision, scaleBasketMultiplier, futuresAsSyntheticPayoffLegs, isOptionLeg,
-  type MultiLegBasket, type MultiLegLeg, type StrategyRiskConfig, type AutoLegRule, DEFAULT_AUTO_LEG_RULE,
+  type MultiLegBasket, type MultiLegLeg, type StrategyRiskConfig, type AutoLegRule, type AutoReentryRule, DEFAULT_AUTO_LEG_RULE, SAME_DISTANCE, MATCH_OPPOSITE,
 } from '@/lib/multiLegFocus';
 import { calculateTimeToExpiryYears } from '@/lib/optionsPricing';
 import { FOCUS_RING } from '@/components/Scalper';
@@ -500,13 +500,17 @@ export default function MultiLegStrategyRow({
   const updateAuto = useCallback((patch: Partial<AutoLegRule>) => {
     onUpdate({ autoLegRule: { ...(basket.autoLegRule ?? DEFAULT_AUTO_LEG_RULE), ...patch } });
   }, [basket.autoLegRule, onUpdate]);
+  const parseReentryRule = (v: string): AutoReentryRule | undefined =>
+    v === 'off' ? undefined : v === SAME_DISTANCE || v === MATCH_OPPOSITE ? v : Number(v);
   const offsetOpts = [-3, -2, -1, 0, 1, 2, 3, 4, 5];
   const selCls = `h-6 bg-zinc-800 border border-zinc-700 rounded text-[11px] text-zinc-200 px-1 disabled:opacity-50 ${FOCUS_RING}`;
-  const offsetSel = (value: number | undefined, onChange: (v: number | undefined) => void, label: string) => (
+  const offsetSel = (value: AutoReentryRule | undefined, onChange: (v: AutoReentryRule | undefined) => void, label: string) => (
     <select aria-label={label} title={label} className={selCls}
       value={value == null ? 'off' : String(value)}
-      onChange={e => onChange(e.target.value === 'off' ? undefined : Number(e.target.value))}>
+      onChange={e => onChange(parseReentryRule(e.target.value))}>
       <option value="off">Exit only</option>
+      <option value={SAME_DISTANCE}>Same distance</option>
+      <option value={MATCH_OPPOSITE}>Match opposite premium</option>
       {offsetOpts.map(n => <option key={n} value={n}>{n === 0 ? 'ATM' : `ATM${n > 0 ? '+' : ''}${n}`}</option>)}
     </select>
   );
@@ -1274,7 +1278,7 @@ export default function MultiLegStrategyRow({
 
               {/* Default leg SL / target with auto re-entry (short option legs only) */}
               <div className="flex flex-wrap items-center gap-x-2 gap-y-1 max-w-full bg-zinc-900 border border-zinc-800 rounded px-2 py-0.5 text-[11px] whitespace-nowrap"
-                title="Short option legs without their own SL/TP get these defaults (% of entry premium). After the exit is confirmed, a new short leg opens at the chosen strike: ATM+n counts OTM outward (CE up, PE down). Same lots, capped re-entries, none after 15:17.">
+                title="Short option legs without their own SL/TP get these defaults (% of entry premium). After the exit is confirmed, a new short leg opens at the chosen strike: ATM+n counts OTM outward (CE up, PE down); Same distance keeps the exited leg's points from spot at entry; Match opposite premium picks the strike priced like the other short leg. Never the strike that just exited (steps 1 OTM). Same lots, capped re-entries, none after 15:17.">
                 <label className="flex items-center gap-1 cursor-pointer select-none font-semibold text-zinc-300">
                   <input type="checkbox" checked={autoRule.enabled} onChange={e => {
                       if (e.target.checked) {

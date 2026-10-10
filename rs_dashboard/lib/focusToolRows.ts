@@ -744,6 +744,12 @@ export function readFocusConfig(): FocusToolConfig {
       }))),
     };
   } catch {
+    // An unreadable file must not be silently overwritten by the next save: keep one copy of it
+    // (the fill ledger lives here) before the defaults take its place.
+    try {
+      const bak = `${ROWS_FILE}.corrupt`;
+      if (fs.existsSync(ROWS_FILE) && !fs.existsSync(bak)) fs.copyFileSync(ROWS_FILE, bak);
+    } catch { /* best effort */ }
     return DEFAULT_CONFIG;
   }
 }
