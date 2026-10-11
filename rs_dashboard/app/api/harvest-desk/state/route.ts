@@ -54,7 +54,12 @@ function write(l: Ledger): void {
 function algoError(a: unknown): string | null {
   const x = a as HdAlgo;
   if (!isHdAlgoShape(x) || !x.id || typeof x.name !== 'string') return 'not an algo';
-  if (!Number.isFinite(x.cycle) || !Number.isFinite(x.cumRealized)) return 'bad cycle / P&L numbers';
+  // Accounting totals are never defaulted: an unreadable one is refused with its name, not silently zeroed.
+  if (!Number.isFinite(x.cycle)) return 'cycle is not a number';
+  if (!Number.isFinite(x.cumRealized)) return 'cumRealized is not a number';
+  const whole = (v: unknown) => v === undefined || (typeof v === 'number' && Number.isInteger(v) && v >= 0 && v <= 2 ** 31);
+  if (!whole(x.rev) || !whole(x.wseq)) return 'bad revision / save sequence';
+  if (x.writer !== undefined && (typeof x.writer !== 'string' || x.writer.length > 80)) return 'bad writer id';
   if (!(HD_KINDS as readonly string[]).includes(x.kind) || !(HD_UNDERLYINGS as readonly string[]).includes(x.underlying)) return 'unknown strategy or underlying';
   if (!x.controls || typeof x.controls !== 'object' || Array.isArray(x.controls)) return 'missing controls';
   if (!Array.isArray(x.events) || x.events.length > 400 || !x.events.every((e) => e && Number.isFinite(e.t) && typeof e.k === 'string' && typeof e.msg === 'string')) return 'bad event log';
@@ -63,8 +68,9 @@ function algoError(a: unknown): string | null {
   // The engine clamps every leg to HD_MAX_LOTS (lots on entry, maxLots, short sizing), so the same bound holds here.
   for (const [i, l] of x.legs.entries()) {
     if (!l || typeof l.id !== 'string' || (l.option !== 'CE' && l.option !== 'PE') || (l.side !== 'S' && l.side !== 'B')) return `leg ${i + 1} is malformed`;
-    if (!Number.isFinite(l.lots) || l.lots < 0 || l.lots > HD_MAX_LOTS) return `leg ${i + 1} has ${l.lots} lots (max ${HD_MAX_LOTS})`;
-    if (!Number.isFinite(l.openLots) || l.openLots < 0 || l.openLots > HD_MAX_LOTS) return `leg ${i + 1} holds ${l.openLots} lots (max ${HD_MAX_LOTS})`;
+    // `lots` is a setting (a cleared box can read as null) and is repaired below; the lots HELD are position state.
+    if (isNum(l.lots) && (l.lots < 0 || l.lots > HD_MAX_LOTS)) return `leg ${i + 1} has ${l.lots} lots (max ${HD_MAX_LOTS})`;
+    if (!isNum(l.openLots) || l.openLots < 0 || l.openLots > HD_MAX_LOTS) return `leg ${i + 1} holds an unreadable or out-of-range lot count (${String(l.openLots)}, max ${HD_MAX_LOTS})`;
   }
   return null;
 }
@@ -85,15 +91,24 @@ function cleanAlgo(raw: HdAlgo): { algo: HdAlgo } | { error: string } {
     else if (defaults[k] !== undefined) controls[k] = defaults[k];
   }
   a.controls = controls;
-  // legs: known fields only; numbers coerced
-  const required = ['strikeValue', 'avgEntry', 'realized', 'reentries'] as const;
-  a.legs = a.legs.map((l) => {
+  // legs: known fields only. Settings are repaired; numbers that describe a position are never invented.
+  const hasOpen = a.legs.some((l) => l.openLots > 0);
+  const legs: HdAlgo['legs'] = [];
+  for (const [i, l] of a.legs.entries()) {
     const c = Object.fromEntries(Object.entries(l).filter(([k, v]) => KEEP_LEG_KEYS.has(k) && v !== null)) as Record<string, unknown>;
+    const open = (c.openLots as number) > 0;
     for (const k of LEG_NUMBERS) if (c[k] !== undefined && !isNum(c[k])) delete c[k];
-    for (const k of required) if (!isNum(c[k])) c[k] = 0;
+    if (!isNum(c.lots)) c.lots = c.role === 'short' ? 0 : 1;                 // setting
+    for (const k of ['strikeValue', 'reentries'] as const) if (!isNum(c[k])) c[k] = 0;   // settings / counters
+    if (!isNum(c.realized)) { if (l.realized === undefined) c.realized = 0; else return { error: `leg ${i + 1}: realized P&L is not a number` }; }
+    if (open) {
+      if (!isNum(c.avgEntry)) return { error: `leg ${i + 1} is open but its entry price is unreadable` };
+      if (!isNum(c.strike)) return { error: `leg ${i + 1} is open but its strike is unreadable` };
+    } else if (!isNum(c.avgEntry)) c.avgEntry = 0;
     for (const k of ['role', 'strikeBy', 'expiry', 'status'] as const) if (typeof c[k] !== 'string') c[k] = k === 'expiry' ? '' : k === 'status' ? 'IDLE' : k === 'role' ? 'main' : 'ATM';
-    return c as unknown as HdAlgo['legs'][number];
-  });
+    legs.push(c as unknown as HdAlgo['legs'][number]);
+  }
+  a.legs = legs;
   // events: newest HD_EVENT_CAP, trimmed
   a.events = a.events.slice(-HD_EVENT_CAP).map((e) => ({ t: e.t, k: e.k.slice(0, 20), msg: e.msg.slice(0, 600) }));
   a.windowsDone = a.windowsDone.filter((w) => typeof w === 'string').slice(0, 20);
@@ -104,11 +119,16 @@ function cleanAlgo(raw: HdAlgo): { algo: HdAlgo } | { error: string } {
       && [...v.bars, ...v.ticks, v.cur, v.curMin].every(isNum);
     if (!ok) a.vwap = undefined;
   }
-  if (a.entry && !['imbalance', 'atm', 'premiumUnits', 'premiumRs', 'at'].every((k) => isNum((a.entry as unknown as Record<string, unknown>)[k]))) a.entry = undefined;
+  const entryOk = !a.entry || ['imbalance', 'atm', 'premiumUnits', 'premiumRs', 'at'].every((k) => isNum((a.entry as unknown as Record<string, unknown>)[k]));
+  if (!entryOk) { if (hasOpen) return { error: 'the entry baseline of a running algo is unreadable' }; a.entry = undefined; }
   a.trail = { armed: !!a.trail?.armed, ...(isNum(a.trail?.best) ? { best: a.trail.best } : {}) };
-  // plain numbers: a missing or non-finite one (older copy, NaN turned into null) becomes 0
+  // Plain numbers: absent in an older copy = 0. Present but unreadable is only zeroed while nothing is open: on a
+  // running algo a zero would silently disable a percent stop or reset the trail peak.
   const n = a as unknown as Record<string, unknown>;
-  for (const k of ['refPremiumRs', 'dayStartPnl', 'peakMtm', 'tradesToday', 'peakEquity', 'longDebit', 'shortCredit']) if (!isNum(n[k])) n[k] = 0;
+  for (const k of ['refPremiumRs', 'dayStartPnl', 'peakMtm', 'tradesToday', 'peakEquity', 'longDebit', 'shortCredit']) {
+    if (n[k] === undefined) n[k] = 0;
+    else if (!isNum(n[k])) { if (hasOpen) return { error: `${k} is unreadable on a running algo` }; n[k] = 0; }
+  }
   if (typeof a.halved !== 'boolean') a.halved = false;
   a.staleCloses = (Array.isArray(a.staleCloses) ? a.staleCloses : []).filter((x) => typeof x === 'string').slice(-20).map((x) => x.slice(0, 200));
   if (!a.staleCloses.length) a.staleCloses = undefined;
@@ -124,7 +144,7 @@ export async function GET(): Promise<NextResponse> {
   }
 }
 
-type Result = { id: string; status: 'saved' | 'stale' | 'rejected'; rev?: number; error?: string; own?: boolean };
+type Result = { id: string; status: 'saved' | 'stale' | 'rejected'; rev?: number; wseq?: number; error?: string; own?: boolean };
 
 /** Upsert one algo (`algo`) or several (`algos`, the page-close save). Each is judged on its own: one that
  *  cannot be stored never blocks the others. Conflicts use a server-owned revision, not the client clock:
@@ -156,7 +176,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
         if (existing) {
           const sameSession = !!incoming.writer && incoming.writer === existing.writer;
           const stale = sameSession ? (incoming.wseq ?? 0) <= (existing.wseq ?? 0) : (incoming.rev ?? 0) < (existing.rev ?? 0);
-          if (stale) { results.push({ id: incoming.id, status: 'stale', rev: existing.rev, own: sameSession }); continue; }
+          if (stale) { results.push({ id: incoming.id, status: 'stale', rev: existing.rev, wseq: existing.wseq, own: sameSession }); continue; }
         }
         // Only the fields the desk stores are kept, and the nested values the engine reads are checked.
         const cleaned = cleanAlgo(incoming);

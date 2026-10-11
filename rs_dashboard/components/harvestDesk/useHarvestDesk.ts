@@ -49,7 +49,7 @@ function snapKey(a: HdAlgo): string {
 const istDay = (now: number) => new Date(now).toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
 const istHm = (now: number) => new Date(now).toLocaleTimeString('en-GB', { timeZone: 'Asia/Kolkata', hour: '2-digit', minute: '2-digit', hour12: false });
 
-type SaveResult = { id: string; status: 'saved' | 'stale' | 'rejected'; rev?: number; error?: string; own?: boolean };
+type SaveResult = { id: string; status: 'saved' | 'stale' | 'rejected'; rev?: number; wseq?: number; error?: string; own?: boolean };
 
 /** One request, a verdict per algo. Null = the request itself failed (network / server error). */
 async function postAlgos(algos: (HdAlgo & { trimmedEvents?: boolean })[]): Promise<SaveResult[] | null> {
@@ -80,6 +80,7 @@ export function useHarvestDesk() {
   const savedEvtRef = useRef<Map<string, number>>(new Map());
   const savedPeakRef = useRef<Map<string, string>>(new Map());
   const seqRef = useRef(0);
+  const ownStaleRef = useRef<Map<string, number>>(new Map());
   const writerRef = useRef('');
   /** Identifies this page session in saves, so the server can tell its own earlier write from another tab's. */
   const writerId = useCallback(() => {
@@ -353,8 +354,17 @@ export function useHarvestDesk() {
           if (r.rev != null) revRef.current.set(a.id, r.rev);
           savedEvtRef.current.set(a.id, lastEvt(a));
           savedPeakRef.current.set(a.id, peakKey(a));
+          ownStaleRef.current.delete(a.id);
           refusedRef.current.delete(a.id);
         } else if (r.status === 'stale' && r.own) {
+          // Jump this session's counter past the stored one, so the very next save is accepted; and if it still is not
+          // (a duplicated writer id), say so instead of re-posting the algo every tick for ever.
+          seqRef.current = Math.max(seqRef.current, r.wseq ?? 0);
+          ownStaleRef.current.set(a.id, (ownStaleRef.current.get(a.id) ?? 0) + 1);
+          if ((ownStaleRef.current.get(a.id) ?? 0) >= 3) {
+            refusedRef.current.set(a.id, snap);
+            tell(`seq:${a.id}`, `${a.name}: saves are out of sync with the ledger — reload the page`);
+          }
           // An older request of this same page session lost the race to a newer one of its own (the page-close save
           // overtook it). The stored copy is this session's, so nothing is overwritten; the next save carries a higher
           // sequence number and is accepted.
@@ -538,6 +548,13 @@ export function useHarvestDesk() {
         } catch { /* still unreachable */ }
       }
       if (final === 'deleted') { savedRef.current.delete(id); return; }
+      // Still no definite answer: ask the ledger once whether the algo is there before deciding.
+      if (final === 'unknown') {
+        try {
+          const g = await (await fetch('/api/harvest-desk/state', { cache: 'no-store' })).json() as { success: boolean; data?: { algos: HdAlgo[] } };
+          if (g.success && g.data && !g.data.algos.some((x) => x.id === id)) { savedRef.current.delete(id); toast('Deleted'); return; }
+        } catch { /* keep it */ }
+      }
       deletedRef.current.delete(id);
       const back = [...algosRef.current];
       back.splice(Math.min(at, back.length), 0, a);
