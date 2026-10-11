@@ -53,6 +53,8 @@ export function strikeKey(n: number | string): string {
 export interface FocusMarketData {
   futQuotes: Record<FocusUnderlying, FutQuote | null>;
   spotPrices: Record<FocusUnderlying, number>;
+  /** When each underlying's spot last arrived in a poll that actually carried it (ms; 0 = never). */
+  spotAt: Record<FocusUnderlying, number>;
   lotSizes: Record<FocusUnderlying, number | null>;
   expiries: Record<FocusUnderlying, string[]>;
   lookups: Record<string, LookupData | null>;
@@ -72,6 +74,9 @@ export function useFocusMarketData({ broker, watched, watchedKey, rows, groups }
     NIFTY: null, BANKNIFTY: null, SENSEX: null, CRUDEOILM: null,
   });
   const [spotPrices, setSpotPrices] = useState<Record<FocusUnderlying, number>>({
+    NIFTY: 0, BANKNIFTY: 0, SENSEX: 0, CRUDEOILM: 0,
+  });
+  const [spotAt, setSpotAt] = useState<Record<FocusUnderlying, number>>({
     NIFTY: 0, BANKNIFTY: 0, SENSEX: 0, CRUDEOILM: 0,
   });
   const [lotSizes, setLotSizes] = useState<Record<FocusUnderlying, number | null>>({
@@ -113,6 +118,9 @@ export function useFocusMarketData({ broker, watched, watchedKey, rows, groups }
           const KEY_MAP: Record<string, FocusUnderlying> = {
             'NIFTY 50': 'NIFTY', 'NIFTY': 'NIFTY', 'BANKNIFTY': 'BANKNIFTY', 'SENSEX': 'SENSEX', 'CRUDEOILM': 'CRUDEOILM',
           };
+          const arrived = Date.now();
+          const seen = Object.entries(q).flatMap(([key, val]) => (KEY_MAP[key] && val?.ltp ? [KEY_MAP[key]] : []));
+          if (seen.length) setSpotAt(prev => ({ ...prev, ...Object.fromEntries(seen.map(u => [u, arrived])) }));
           setSpotPrices(prev => {
             const next = { ...prev };
             for (const [key, val] of Object.entries(q)) {
@@ -301,5 +309,5 @@ export function useFocusMarketData({ broker, watched, watchedKey, rows, groups }
     return () => clearInterval(t);
   }, [broker, expiryKey, activeKey, rowExpiryKey]);
 
-  return { futQuotes, spotPrices, lotSizes, expiries, lookups, chains };
+  return { futQuotes, spotPrices, spotAt, lotSizes, expiries, lookups, chains };
 }

@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  atmStrike, cycleMtm, enterAlgoNow, enterLegNow, exitAllNow, exitLegNow, imbalancePct, isOpen, limitRs, newAlgo,
+  HD_ALGO_KEYS, HD_LAST_PX_MAX_AGE_MS, dayPnl as dayPnlOf, atmStrike, cycleMtm, enterAlgoNow, enterLegNow, exitAllNow, exitLegNow, imbalancePct, isOpen, limitRs, newAlgo,
   pickDeltaStrike, pickExpiryByDte, resolveStrike, sizeShortLots, stepAlgo, vwapOf,
   type HdAlgo, type HdLeg, type HdMarket, type HdOption, type HdQuote,
 } from './harvestDesk.ts';
@@ -556,14 +556,31 @@ test('re-entry log names the trigger price', () => {
   assert.ok(msg.includes('100.00') && !msg.includes('undefined'), msg);
 });
 
-test('day rollover with an unpriced open leg does not count its unrealized P&L as today', () => {
-  // a positional diagonal held overnight, unrealized +₹20k carried by lastPx
-  let a = stepAlgo(armed('diagonal_call', (x) => { x.controls.capital = 1_000_000; }), diagMarket());
+test('day rollover with an unpriced open leg waits for a live price before the day baseline is set', () => {
+  // a positional diagonal held overnight; yesterday's last price is far older than the allowed fallback age
+  let a = stepAlgo(armed('diagonal_call', (x) => { x.controls.capital = 1_000_000; x.controls.stopLoss = 1000; }), diagMarket());
   const lg = leg(a, 'CE', 'long');
   lg.lastPx = lg.avgEntry + 20_000 / (lg.openLots * 65);
-  const nextDay = diagMarket({ day: '2026-10-13', now: T0 + 86_400_000, px: () => null });
-  a = stepAlgo(a, nextDay);
-  assert.ok(a.dayStartPnl >= 19_000, `baseline includes the carried gain, got ${a.dayStartPnl}`);
+  lg.lastPxAt = T0;
+  const blindNextDay = diagMarket({ day: '2026-10-13', now: T0 + 86_400_000, px: () => null });
+  a = stepAlgo(a, blindNextDay);
+  assert.equal(a.dayStartPending, true);
+  assert.ok(a.legs.some(isOpen), 'nothing is booked at a day-old price');
+  // first live price of the day: the baseline is set from it, so the carried gain is not "today's"
+  const live = diagMarket({ day: '2026-10-13', now: T0 + 86_400_000 + 5000 });
+  a = stepAlgo(a, live);
+  assert.equal(a.dayStartPending, false);
+  assert.ok(Math.abs(dayPnlOf(a, live) ?? NaN) < 1, 'day P&L starts at zero');
+});
+
+test('a last known price older than the age limit is not used to close or to mark a leg', () => {
+  const base = stepAlgo(armed('imbalance_straddle', noLimits), market({ px: ladder(100, 100) }));
+  const old = T0 + HD_LAST_PX_MAX_AGE_MS + 1000;
+  const blind = market({ px: () => null, hm: '15:17', now: old });
+  const off = stepAlgo(base, blind);
+  assert.ok(off.legs.some(isOpen), 'stays open and is retried');
+  assert.equal(cycleMtm(off, blind, true), null);
+  assert.equal(off.events.filter((e) => e.k === 'ERROR').length, 1);
 });
 
 test('diagonal "Enter now" sells the missing short when the long is already open', () => {
@@ -634,4 +651,51 @@ test('lot controls above the cap are clamped so the ledger can always save them'
   let a = stepAlgo(armed('imbalance_straddle', (x) => { noLimits(x); x.controls.maxLots = 300; ce(x).lots = 50; }), market({ px: ladder(100, 100) }));
   a = stepAlgo(a, market({ px: ladder(60, 100), now: T0 + 2 * MIN }));   // CE (50 lots) is already at the 50 cap
   assert.ok(ce(a).openLots <= 50);
+});
+
+// ── third review fixes ────────────────────────────────────────────────────
+
+test('a stale spot holds entries and spot-based resets, but stops and the square-off still run', () => {
+  const stale = (over: MarketOver = {}) => market({ px: ladder(100, 100), spotFresh: false, ...over });
+  // no entry on a stale spot
+  const none = stepAlgo(armed('imbalance_straddle'), stale());
+  assert.ok(!none.legs.some(isOpen));
+  // open, then the spot "moves" 150 pts while stale: no ATM-shift reset
+  let a = stepAlgo(armed('imbalance_straddle', noLimits), market({ px: ladder(100, 100) }));
+  a = stepAlgo(a, stale({ spot: 25150, now: T0 + 1000 }));
+  assert.ok(a.legs.some(isOpen), 'no reset on a frozen spot');
+  // a stop is price based and still fires
+  let b = stepAlgo(armed('imbalance_straddle', (x) => { noLimits(x); ce(x).slPct = 20; }), market({ px: ladder(100, 100) }));
+  b = stepAlgo(b, stale({ px: () => ({ ltp: 130 }), now: T0 + 1000 }));
+  assert.equal(ce(b).openLots, 0);
+  // and so does the square-off
+  const off = stepAlgo(a, stale({ hm: '15:17', now: T0 + 2000 }));
+  assert.equal(off.phase, 'DONE');
+});
+
+test('square-off with no live price books at the last known price and says so; manual exit-all refuses', () => {
+  const base = stepAlgo(armed('imbalance_straddle', noLimits), market({ px: ladder(100, 100) }));
+  // the engine saw 90 on the last live tick
+  const seen = stepAlgo(base, market({ px: () => ({ ltp: 90 }), now: T0 + 1000 }));
+  const blind = market({ px: () => null, hm: '15:17', now: T0 + 60_000 });
+  const off = stepAlgo(seen, blind);
+  assert.equal(off.phase, 'DONE');
+  const msg = off.events.find((e) => e.k === 'EXIT')!.msg;
+  assert.ok(msg.includes('last known') && msg.includes('90.00'), msg);
+  // the manual button must not book a price it cannot see
+  const r = exitAllNow(seen, market({ px: () => null, now: T0 + 5000 }));
+  assert.equal(r.changed, false);
+  assert.ok(r.algo.legs.some(isOpen));
+  assert.ok(r.notes[0].includes('No live price'));
+});
+
+test('VWAP ticks stay bounded', () => {
+  let a = armed('vwap_straddle');
+  for (let i = 0; i < 300; i++) a = stepAlgo(a, market({ px: () => ({ ltp: 100 + (i % 3) }), now: T0 + i * 1000 }));
+  assert.ok(a.vwap!.ticks.length <= 60);
+});
+
+test('the ledger key list covers every field of a new algo', () => {
+  const keys = new Set<string>(HD_ALGO_KEYS);
+  for (const k of Object.keys(newAlgo('imbalance_straddle', 'NIFTY'))) assert.ok(keys.has(k), `${k} missing from HD_ALGO_KEYS`);
 });

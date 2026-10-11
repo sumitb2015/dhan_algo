@@ -23,6 +23,9 @@ export type HdPhase = 'ACTIVE' | 'PAUSED' | 'DONE';
 
 export const HD_MAX_LOTS = 50;
 export const HD_EVENT_CAP = 80;
+/** A leg's last known price is only used for MTM and for exits while it is no older than this. Beyond it the leg
+ *  is treated as unpriced: the exit waits for a live price instead of booking a price from hours ago. */
+export const HD_LAST_PX_MAX_AGE_MS = 10 * 60_000;
 /** Expiry rule on a leg: '' = nearest, 'AUTO' = pick by the diagonal's DTE band, else an ISO date. */
 export const HD_EXPIRY_AUTO = 'AUTO';
 
@@ -54,6 +57,8 @@ export interface HdLeg {
   /** ₹ banked by this leg in the current cycle (closed or rolled-out lots). */
   realized: number;
   lastPx?: number;
+  /** When `lastPx` was taken (ms): lets an exit say how old a fallback price was. */
+  lastPxAt?: number;
   exitReason?: string;
   waitingReentry?: boolean;
   reentryPx?: number;
@@ -124,7 +129,23 @@ export interface HdAlgo {
   shortCredit: number;
   events: HdEvent[];
   updatedAt: number;
+  /** Server-owned revision of the stored copy: a save made from an older revision is refused. */
+  rev?: number;
+  /** Which page session wrote this copy. A save from the same session is never "stale": it is the session's own
+   *  earlier write, whose reply may simply have been lost. */
+  writer?: string;
 }
+
+/** Every field of an algo the ledger stores. The route keeps exactly these and drops anything else a client sends;
+ *  the type check below fails the build if a field is added to HdAlgo and not listed here. */
+export const HD_ALGO_KEYS = [
+  'v', 'id', 'name', 'kind', 'underlying', 'product', 'armed', 'phase', 'pausedUntil', 'controls', 'legs', 'cycle', 'entry',
+  'refPremiumRs', 'cumRealized', 'dayStartPnl', 'day', 'peakMtm', 'trail', 'tradesToday', 'lastAdjustAt', 'vwap',
+  'windowsDone', 'suspendedDay', 'dayStartPending', 'closeErrAt', 'peakEquity', 'halved', 'longDebit', 'shortCredit',
+  'events', 'updatedAt', 'rev', 'writer',
+] as const satisfies readonly (keyof HdAlgo)[];
+const _allKeysListed: Exclude<keyof HdAlgo, (typeof HD_ALGO_KEYS)[number]> extends never ? true : never = true;
+void _allKeysListed;
 
 export interface HdQuote { ltp: number; deltaAbs?: number | null; spreadPct?: number | null }
 
@@ -140,6 +161,9 @@ export interface HdMarket {
   expiries: string[];
   strikes: (expiry: string) => number[];
   quote: (expiry: string, strike: number, option: HdOption) => HdQuote | null;
+  /** False when the spot is older than the feed allows (default true). Entries, adjustments and spot-based
+   *  resets wait; stops and the square-off still run. */
+  spotFresh?: boolean;
   dte: (expiry: string) => number;
 }
 
@@ -311,6 +335,11 @@ export function limitRs(a: Pick<HdAlgo, 'kind' | 'controls' | 'refPremiumRs'>, v
   return base > 0 ? (v / 100) * base : 0;
 }
 
+/** The leg's last live price while it is recent enough to stand in for a missing quote. */
+function usableLast(l: HdLeg, m: HdMarket): number | null {
+  return l.lastPx != null && l.lastPx > 0 && l.lastPxAt != null && m.now - l.lastPxAt <= HD_LAST_PX_MAX_AGE_MS ? l.lastPx : null;
+}
+
 function quoteOf(l: HdLeg, m: HdMarket): HdQuote | null {
   if (l.strike == null) return null;
   return m.quote(expOf(l, m), l.strike, l.option);
@@ -324,7 +353,7 @@ export function cycleMtm(a: Pick<HdAlgo, 'legs'>, m: HdMarket, lastKnown = false
   for (const l of a.legs) {
     total += l.realized;
     if (!isOpen(l)) continue;
-    const p = px(quoteOf(l, m)) ?? (lastKnown && l.lastPx != null && l.lastPx > 0 ? l.lastPx : null);
+    const p = px(quoteOf(l, m)) ?? (lastKnown ? usableLast(l, m) : null);
     if (p == null) return null;
     total += legOpenPnl(l, p, m.lotSize);
   }
@@ -380,6 +409,7 @@ function session(a: HdAlgo, m: HdMarket) {
     l.strike = strike;
     l.expiryUsed = expiry;
     l.lastPx = ltp;
+    l.lastPxAt = m.now;
     l.waitingReentry = false;
     l.reentryPx = undefined;
     l.exitReason = undefined;
@@ -392,15 +422,19 @@ function session(a: HdAlgo, m: HdMarket) {
   };
 
   /** Close `lots` of a leg at its price (last known price as a fallback, so a stop is never skipped). */
+  /** Legs closed at their last known price (no live quote), so the exit event can say so. */
+  const fallbacks: string[] = [];
   const unfill = (l: HdLeg, lots: number, reason: string, fallbackToLast = true): boolean => {
     if (!isOpen(l)) return true;
     const n = Math.min(lots, l.openLots);
-    const p = px(quoteOf(l, m)) ?? (fallbackToLast ? l.lastPx ?? null : null);
+    const live = px(quoteOf(l, m));
+    const p = live ?? (fallbackToLast ? usableLast(l, m) : null);
     if (p == null || n <= 0) return false;
+    if (live == null) fallbacks.push(`${l.option} ${l.strike} @ ${p.toFixed(2)} (${l.lastPxAt ? Math.round((m.now - l.lastPxAt) / 1000) : '?'}s old)`);
     const perUnit = l.side === 'S' ? l.avgEntry - p : p - l.avgEntry;
     l.realized += perUnit * n * m.lotSize;
     l.openLots -= n;
-    l.lastPx = p;
+    if (live != null) { l.lastPx = p; l.lastPxAt = m.now; }
     if (l.openLots <= 0) {
       l.openLots = 0;
       l.status = 'CLOSED';
@@ -435,22 +469,25 @@ function session(a: HdAlgo, m: HdMarket) {
   };
 
   /** Close every open leg (shorts before longs), bank the cycle, and move to `phase`. */
-  const closeAll = (reason: string, opts: { phase: HdPhase; pauseMs?: number; disarm?: boolean }) => {
+  const closeAll = (reason: string, opts: { phase: HdPhase; pauseMs?: number; disarm?: boolean; strict?: boolean }) => {
+    fallbacks.length = 0;
     const order = [...openLegs()].sort((x, y) => (x.side === 'B' ? 1 : 0) - (y.side === 'B' ? 1 : 0));
-    for (const l of order) unfill(l, l.openLots, reason);
+    for (const l of order) unfill(l, l.openLots, reason, !opts.strict);
     const stuck = a.legs.filter(isOpen);
     if (stuck.length) {
       // Retried every tick; log it once a minute so the event cap and the toasts are not flooded.
       if (a.closeErrAt == null || m.now - a.closeErrAt >= 60_000) {
         a.closeErrAt = m.now;
-        ev('ERROR', `Could not price ${stuck.length} leg(s) to close — they stay open and will be retried`);
+        ev('ERROR', `Could not price ${stuck.length} leg(s) to close — they stay open${opts.strict ? '' : ' and will be retried'}`);
       }
       return false;
     }
     a.closeErrAt = undefined;
     const pnl = a.legs.reduce((s, l) => s + l.realized, 0);
     a.cumRealized += pnl;
-    ev('EXIT', `${reason}: cycle ${a.cycle} closed, P&L ${fmtRs(pnl)}`);
+    const stale = fallbacks.length ? ` — no live price, closed at last known: ${fallbacks.join(', ')}` : '';
+    ev('EXIT', `${reason}: cycle ${a.cycle} closed, P&L ${fmtRs(pnl)}${stale}`);
+    fallbacks.length = 0;
     endCycleState();
     // A pause is only enforced in the PAUSED phase, so any exit with a pause goes there.
     a.phase = opts.phase === 'DONE' ? 'DONE' : opts.pauseMs ? 'PAUSED' : 'ACTIVE';
@@ -513,7 +550,7 @@ function session(a: HdAlgo, m: HdMarket) {
     return true;
   };
 
-  return { c, notes, ev, touch, openLegs, liveLegs, mainOpen, lotsFor, fill, unfill, closeAll, baseline, noteEntry, enterLeg, endCycleState, isChanged: () => changed };
+  return { c, notes, ev, touch, openLegs, liveLegs, fallbacks, mainOpen, lotsFor, fill, unfill, closeAll, baseline, noteEntry, enterLeg, endCycleState, isChanged: () => changed };
 }
 
 export const fmtRs = (n: number): string => `${n < 0 ? '-' : ''}₹${Math.abs(Math.round(n)).toLocaleString('en-IN')}`;
@@ -593,6 +630,7 @@ export function stepAlgo(prev: HdAlgo, m: HdMarket): HdAlgo {
 
   const open = s.openLegs();
   const kind = a.kind;
+  const spotLive = m.spotFresh !== false;
   const squareOff = hmOf(strCtl(c, 'squareOffTime'));
 
   // ── VWAP bookkeeping (before any gate that reads it) ──
@@ -607,7 +645,7 @@ export function stepAlgo(prev: HdAlgo, m: HdMarket): HdAlgo {
   if (open.length) {
     for (const l of open) {
       const p = px(quoteOf(l, m));
-      if (p != null) l.lastPx = p;
+      if (p != null) { l.lastPx = p; l.lastPxAt = m.now; }
     }
     // An unpriced leg is marked at its last good price here, so one missing quote never switches the stops off.
     let mtm = cycleMtm(a, m, true);
@@ -637,12 +675,12 @@ export function stepAlgo(prev: HdAlgo, m: HdMarket): HdAlgo {
         }
         mtm = cycleMtm(a, m, true);
       }
-      if (mtm != null && cycleRisk(a, m, s, mtm)) return a;
+      if (mtm != null && cycleRisk(a, m, s, mtm, spotLive)) return a;
     }
   }
 
   // ── everything below acts: needs the algo armed and a running phase ──
-  if (a.armed && a.phase === 'ACTIVE') {
+  if (a.armed && a.phase === 'ACTIVE' && spotLive) {
     if (kind === 'diagonal_call') {
       diagonalAct(a, m, s);
     } else if (kind === 'vwap_straddle') {
@@ -688,6 +726,7 @@ function legRules(a: HdAlgo, m: HdMarket, s: ReturnType<typeof session>): boolea
     const p = px(quoteOf(l, m));
     if (p == null) continue;
     l.lastPx = p;
+    l.lastPxAt = m.now;
     const sl = effSl(a, l);
     const tg = l.tgtPct ?? 0;
     let why = '';
@@ -726,7 +765,7 @@ function reentries(a: HdAlgo, m: HdMarket, s: ReturnType<typeof session>) {
 
 // ── cycle-level risk (imbalance family + vwap) ───────────────────────────────
 
-function cycleRisk(a: HdAlgo, m: HdMarket, s: ReturnType<typeof session>, mtm: number): boolean {
+function cycleRisk(a: HdAlgo, m: HdMarket, s: ReturnType<typeof session>, mtm: number, spotLive: boolean): boolean {
   const c = a.controls;
   const pause = numCtl(c, 'cyclePauseMin', 0) * 60_000;
 
@@ -782,7 +821,7 @@ function cycleRisk(a: HdAlgo, m: HdMarket, s: ReturnType<typeof session>, mtm: n
   }
 
   // cycle reset: straddle ATM drift from the entry strike / strangle strike-boundary breach
-  if (a.kind !== 'vwap_straddle' && a.entry) {
+  if (spotLive && a.kind !== 'vwap_straddle' && a.entry) {
     const ce = s.mainOpen('CE');
     const pe = s.mainOpen('PE');
     const straddleLike = a.entry.ceStrike != null && a.entry.ceStrike === a.entry.peStrike;
@@ -960,7 +999,8 @@ function trackVwap(a: HdAlgo, m: HdMarket) {
   }
   a.vwap.cur = combined;
   a.vwap.ticks.push(combined);
-  if (a.vwap.ticks.length > 200) a.vwap.ticks.splice(0, a.vwap.ticks.length - 200);
+  const keep = Math.max(60, numCtl(a.controls, 'declineTicks') + 2);
+  if (a.vwap.ticks.length > keep) a.vwap.ticks.splice(0, a.vwap.ticks.length - keep);
 }
 
 function vwapAct(a: HdAlgo, m: HdMarket, s: ReturnType<typeof session>) {
@@ -1217,8 +1257,8 @@ export function exitAllNow(prev: HdAlgo, m: HdMarket): HdResult {
     a.armed = false;
     return { algo: a, notes: ['Disarmed'], changed: true };
   }
-  const ok = s.closeAll('manual exit all', { phase: 'ACTIVE', disarm: true });
-  return { algo: ok ? a : prev, notes: s.notes, changed: ok };
+  const ok = s.closeAll('manual exit all', { phase: 'ACTIVE', disarm: true, strict: true });
+  return { algo: ok ? a : prev, notes: ok ? s.notes : ['No live price for an open leg — nothing was closed'], changed: ok };
 }
 
 export function canEditStructure(a: HdAlgo): boolean {
@@ -1248,8 +1288,14 @@ export function validateLeg(l: HdLeg): string | null {
   return null;
 }
 
-export function pruneAlgos(algos: HdAlgo[]): HdAlgo[] {
-  return algos.filter((a) => a && a.v === 1 && typeof a.id === 'string' && Array.isArray(a.legs));
+/** An entry the desk wrote itself. The ledger route counts and prunes by this one test. */
+export function isHdAlgoShape(a: unknown): a is HdAlgo {
+  const x = a as HdAlgo | null;
+  return !!x && typeof x === 'object' && x.v === 1 && typeof x.id === 'string' && Array.isArray(x.legs);
+}
+
+export function pruneAlgos(algos: unknown[]): HdAlgo[] {
+  return algos.filter(isHdAlgoShape);
 }
 
 // ── read-only status for the UI ──────────────────────────────────────────────

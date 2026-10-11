@@ -21,18 +21,23 @@ const WS_STALE_MS = 8_000;
 
 /** Chain prices older than this are not used: stops and fills must not run on a stalled poll (it ticks every 3 s). */
 const CHAIN_STALE_MS = 60_000;
+/** The index spot poll runs every 2 s; older than this and entries, adjustments and spot-based resets wait. */
+const SPOT_STALE_MS = 15_000;
+/** An open algo is re-saved at least this often, so its last known prices (used if the feed dies) stay recent. */
+const RESAVE_OPEN_MS = 60_000;
 /** Gap between engine ticks above which the page warns: a hidden tab throttles timers. */
 const LAG_WARN_MS = 5_000;
 
 export type FeedSource = 'ws' | 'chain' | 'stale' | 'none';
 
-/** What counts as "changed" for saving: fast-moving fields (last price, VWAP ticks, peak to the nearest ₹100,
- *  trail best to a point) are left out, so an open algo is not re-posted in full every few seconds. */
+/** What counts as "changed" for saving. Fast-moving fields (last price, VWAP ticks) are left out so an open algo is
+ *  not re-posted in full every few seconds; they ride along with the next real save and with the periodic re-save
+ *  of open algos. The trail peak and best are kept to the rupee: a reload must not forget how far it ran. */
 function snapKey(a: HdAlgo): string {
   return JSON.stringify(a, (k, v) => {
-    if (k === 'updatedAt' || k === 'lastPx' || k === 'ticks' || k === 'cur') return undefined;
-    if (k === 'peakMtm') return Math.round((v as number) / 100);
-    if (k === 'best') return Math.round(v as number);
+    if (k === 'updatedAt' || k === 'rev' || k === 'lastPx' || k === 'lastPxAt' || k === 'ticks' || k === 'cur') return undefined;
+    if (k === 'peakMtm') return Math.round(v as number);
+    if (k === 'best') return Math.round((v as number) * 10) / 10;
     return v;
   });
 }
@@ -40,15 +45,17 @@ function snapKey(a: HdAlgo): string {
 const istDay = (now: number) => new Date(now).toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
 const istHm = (now: number) => new Date(now).toLocaleTimeString('en-GB', { timeZone: 'Asia/Kolkata', hour: '2-digit', minute: '2-digit', hour12: false });
 
-/** `saved` is true only when the server stored this copy; a write it ignored as stale is not saved. */
-async function postAlgo(algo: HdAlgo): Promise<{ saved: boolean }> {
+type SaveResult = { id: string; status: 'saved' | 'stale' | 'rejected'; rev?: number; error?: string };
+
+/** One request, a verdict per algo. Null = the request itself failed (network / server error). */
+async function postAlgos(algos: (HdAlgo & { trimmedEvents?: boolean })[]): Promise<SaveResult[] | null> {
   try {
     const r = await fetch('/api/harvest-desk/state', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ algo }),
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ algos }),
     });
-    const j = await r.json() as { success: boolean; stale?: boolean };
-    return { saved: r.ok && j.success && !j.stale };
-  } catch { return { saved: false }; }
+    const j = await r.json() as { success: boolean; results?: SaveResult[] };
+    return r.ok && j.success && Array.isArray(j.results) ? j.results : null;
+  } catch { return null; }
 }
 
 /** State + actions for the Harvest Desk page. The ledger is the page's own record (paper only);
@@ -63,36 +70,64 @@ export function useHarvestDesk() {
   const [lagMs, setLagMs] = useState(0);
   const lastTickRef = useRef(0);
   const savedRef = useRef<Map<string, string>>(new Map());
-  const failedSaveToast = useRef(0);
+  const savedAtRef = useRef<Map<string, number>>(new Map());
+  const revRef = useRef<Map<string, number>>(new Map());
+  /** Time of the newest event the server has, per algo: the page-close save sends everything after it. */
+  const savedEvtRef = useRef<Map<string, number>>(new Map());
+  const writerRef = useRef('');
+  /** Identifies this page session in saves, so the server can tell its own earlier write from another tab's. */
+  const writerId = useCallback(() => {
+    if (!writerRef.current) writerRef.current = typeof crypto !== 'undefined' && crypto.randomUUID ? crypto.randomUUID() : `w${Date.now()}${Math.random()}`;
+    return writerRef.current;
+  }, []);
+  const lastEvt = (a: HdAlgo): number => (a.events.length ? a.events[a.events.length - 1].t : 0);
+  /** Algos the server refused, by the snapshot refused: not retried until the algo changes. */
+  const refusedRef = useRef<Map<string, string>>(new Map());
+  const isLeaderRef = useRef<boolean | null>(null);
+  useEffect(() => { isLeaderRef.current = isLeader; });
+  const [engineReady, setEngineReady] = useState(false);
 
   const commit = useCallback((next: HdAlgo[]) => {
     algosRef.current = next;
     setAlgos(next);
   }, []);
 
-  // ── load (and keep a follower tab current) ──
-  // `loaded` means the ledger was read successfully. A failed read is retried: the engine and the Add / Delete
+  // ── load ──
+  // `loaded` means the ledger was read successfully. A failed read is retried, and the engine and the Add / Delete
   // actions stay off until it succeeds, so an empty list is never mistaken for "no algos" and written over.
+  // Loads run one at a time, and once a leader has its list only a forced load (done at promotion) may replace it,
+  // so a slow earlier response can never overwrite what the user did since.
   const loadedRef = useRef(false);
   const deletedRef = useRef<Set<string>>(new Set());
-  const load = useCallback(async () => {
-    try {
-      const r = await fetch('/api/harvest-desk/state', { cache: 'no-store' });
-      const j = await r.json() as { success: boolean; data?: { algos: HdAlgo[] }; error?: string };
-      if (!j.success || !j.data) { if (!loadedRef.current) setLoadError(j.error ?? 'could not load the ledger'); return; }
-      const rows = j.data.algos.filter((a) => !deletedRef.current.has(a.id));
-      for (const a of rows) savedRef.current.set(a.id, snapKey(a));
-      commit(rows);
-      setLoadError(null);
-      loadedRef.current = true;
-      setLoaded(true);
-    } catch (e) {
-      if (!loadedRef.current) setLoadError(String(e));
-    }
+  const loadQueue = useRef<Promise<boolean>>(Promise.resolve(true));
+  const load = useCallback((force = false): Promise<boolean> => {
+    const run = async (): Promise<boolean> => {
+      try {
+        const r = await fetch('/api/harvest-desk/state', { cache: 'no-store' });
+        const j = await r.json() as { success: boolean; data?: { algos: HdAlgo[] }; error?: string };
+        if (!j.success || !j.data) { if (!loadedRef.current) setLoadError(j.error ?? 'could not load the ledger'); return false; }
+        if (loadedRef.current && isLeaderRef.current === true && !force) return true;
+        const rows = j.data.algos.filter((a) => !deletedRef.current.has(a.id));
+        const at = Date.now();
+        for (const a of rows) {
+          savedRef.current.set(a.id, snapKey(a)); savedAtRef.current.set(a.id, at); revRef.current.set(a.id, a.rev ?? 0);
+          savedEvtRef.current.set(a.id, lastEvt(a));
+        }
+        commit(rows);
+        setLoadError(null);
+        loadedRef.current = true;
+        setLoaded(true);
+        return true;
+      } catch (e) {
+        if (!loadedRef.current) setLoadError(String(e));
+        return false;
+      }
+    };
+    loadQueue.current = loadQueue.current.then(run, run);
+    return loadQueue.current;
   }, [commit]);
 
   useEffect(() => {
-    // eslint-disable-next-line react-hooks/set-state-in-effect
     void load();
   }, [load]);
 
@@ -107,6 +142,21 @@ export function useHarvestDesk() {
     const t = setInterval(() => { void load(); }, READONLY_REFRESH_MS);
     return () => clearInterval(t);
   }, [isLeader, loaded, load]);
+
+  // On becoming the leader (first tab, or a follower promoted when the leader closed) read the ledger afresh
+  // before the engine ticks: a follower's copy can be seconds old, and an armed algo would otherwise enter again.
+  useEffect(() => {
+    if (isLeader !== true) return;
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const attempt = async () => {
+      const ok = await load(true);
+      if (cancelled) return;
+      if (ok) setEngineReady(true); else timer = setTimeout(attempt, 3000);
+    };
+    void attempt();
+    return () => { cancelled = true; if (timer) clearTimeout(timer); setEngineReady(false); };
+  }, [isLeader, load]);
 
   // ── market data ──
   // Keyed by a string: the engine hands back a fresh algos array every second, and an array identity that
@@ -177,10 +227,17 @@ export function useHarvestDesk() {
   }, [bridgeDown, nearestKey]);
 
   const dataRef = useRef({ md, rawWs, bridgeStatus });
-  const chainAtRef = useRef(0);
+  // When each (underlying:expiry) chain, and the index spots, last came in. A successful poll replaces that chain's
+  // object, so a new identity means fresh data; one that keeps failing keeps its old object and ages out on its own.
+  const chainAtRef = useRef<Map<string, number>>(new Map());
+  const prevChainsRef = useRef<Record<string, unknown>>({});
+  const lastSpotRef = useRef<Record<string, number>>({});
   useEffect(() => { dataRef.current = { md, rawWs, bridgeStatus }; });
-  // `chains` is replaced on every successful poll, so a new identity means fresh chain data.
-  useEffect(() => { chainAtRef.current = Date.now(); }, [md.chains]);
+  useEffect(() => {
+    const at = Date.now();
+    for (const [k, v] of Object.entries(md.chains)) if (prevChainsRef.current[k] !== v) chainAtRef.current.set(k, at);
+    prevChainsRef.current = md.chains;
+  }, [md.chains]);
 
   const marketFor = useCallback((u: HdUnderlying, now: number = Date.now()): HdMarket | null => {
     const { md: d, rawWs: ws } = dataRef.current;
@@ -190,13 +247,30 @@ export function useHarvestDesk() {
     const lotSize = d.lotSizes[fu];
     const day = istDay(now);
     const exps = d.expiries[fu] ?? [];
-    const chainFresh = now - chainAtRef.current <= CHAIN_STALE_MS;
-    // A stalled chain poll must not drive fills or stops: the leg is then simply unpriced (stops hold their last price).
-    const chainFor = (e: string) => (chainFresh ? d.chains[`${fu}:${e}`] ?? null : null);
-    const spot = Number(wsU?.spot) > 0 ? Number(wsU!.spot) : d.spotPrices[fu] > 0 ? d.spotPrices[fu] : (chainFor(exps[0] ?? '')?.spot ?? 0);
+    // A stalled chain poll must not drive fills or stops: that expiry is then simply unpriced (stops hold their last
+    // price). Freshness is per underlying and expiry, so one failing chain is not hidden by the others polling fine.
+    const chainFor = (e: string) => {
+      const key = `${fu}:${e}`;
+      return now - (chainAtRef.current.get(key) ?? 0) <= CHAIN_STALE_MS ? d.chains[key] ?? null : null;
+    };
+    let spot = 0;
+    let spotFresh = false;
+    if (Number(wsU?.spot) > 0) { spot = Number(wsU!.spot); spotFresh = true; }
+    else {
+      // The polled index spot counts as fresh only while its own underlying keeps arriving. When it does not, a
+      // fresh chain's spot (never older than the chain freshness limit) takes over before giving up.
+      const polled = d.spotPrices[fu] > 0 && now - (d.spotAt[fu] ?? 0) <= SPOT_STALE_MS ? d.spotPrices[fu] : 0;
+      const viaChain = polled > 0 ? 0 : (chainFor(exps[0] ?? '')?.spot ?? 0);
+      if (polled > 0) { spot = polled; spotFresh = true; }
+      else if (viaChain > 0) { spot = viaChain; spotFresh = true; }
+      else if (d.spotPrices[fu] > 0) { spot = d.spotPrices[fu]; spotFresh = false; }
+    }
+    // With no live spot the engine still ticks on the last one it saw (flagged not fresh): the square-off and the
+    // stops must not depend on the spot poll being up.
+    if (spot > 0) lastSpotRef.current[u] = spot; else { spot = lastSpotRef.current[u] ?? 0; spotFresh = false; }
     if (!(spot > 0) || !lotSize || !exps.length) return null;
     return {
-      now, day, hm: istHm(now), spot, step: UNDERLYING_META[fu].strikeStep, lotSize, expiries: exps,
+      now, day, hm: istHm(now), spot, spotFresh, step: UNDERLYING_META[fu].strikeStep, lotSize, expiries: exps,
       strikes: (e) => {
         const oc = chainFor(e)?.oc;
         return oc ? Object.keys(oc).map(Number).filter(Number.isFinite).sort((a, b) => a - b) : [];
@@ -223,53 +297,97 @@ export function useHarvestDesk() {
     const frameAt = Date.parse(ws?.updated_at ?? '');
     const fresh = ws && Number.isFinite(frameAt) && Date.now() - frameAt <= WS_STALE_MS;
     if (fresh && (ws as FocusWSQuotes)[fu] && focusWsBookForExpiry((ws as FocusWSQuotes)[fu], expiry)) return 'ws';
-    if (!d.chains[`${fu}:${expiry}`]) return 'none';
-    return Date.now() - chainAtRef.current <= CHAIN_STALE_MS ? 'chain' : 'stale';
+    const key = `${fu}:${expiry}`;
+    if (!d.chains[key]) return 'none';
+    return Date.now() - (chainAtRef.current.get(key) ?? 0) <= CHAIN_STALE_MS ? 'chain' : 'stale';
   }, []);
 
   // ── persistence ──
-  // Saves of one ledger run one after another: two overlapping POSTs could land out of order and the
-  // server would then (correctly) refuse the older one as stale.
+  // Saves run one after another, and each carries the revision this tab last saw. The server (not the client clock)
+  // decides what is current: a save from an older revision is refused as stale, a bad algo is refused on its own
+  // without blocking the others, and a deleted id can never be written back.
   const flushChain = useRef<Promise<void>>(Promise.resolve());
+  const toastOnce = useRef<Map<string, number>>(new Map());
+  const tell = (key: string, msg: string) => {
+    if (Date.now() - (toastOnce.current.get(key) ?? 0) < 30_000) return;
+    toastOnce.current.set(key, Date.now());
+    toast.error(msg);
+  };
   const flush = useCallback((only?: string): Promise<void> => {
     const run = async () => {
+      const now = Date.now();
+      const batch: { a: HdAlgo; snap: string }[] = [];
       for (const a of algosRef.current) {
         if (only && a.id !== only) continue;
         if (deletedRef.current.has(a.id)) continue;
         const snap = snapKey(a);
-        if (savedRef.current.get(a.id) === snap) continue;
-        const { saved } = await postAlgo({ ...a, updatedAt: Date.now() });
-        if (saved) savedRef.current.set(a.id, snap);   // not marked when the server ignored it: retried next round
-        else if (Date.now() - failedSaveToast.current > 30_000) {
-          failedSaveToast.current = Date.now();
-          toast.error('Harvest Desk could not save — changes are kept in this tab only until it reconnects');
+        if (refusedRef.current.get(a.id) === snap) continue;       // refused as it stands: wait until it changes
+        const changed = savedRef.current.get(a.id) !== snap;
+        const resave = (a.armed || a.legs.some(isOpen)) && now - (savedAtRef.current.get(a.id) ?? 0) >= RESAVE_OPEN_MS;
+        if (changed || resave) batch.push({ a, snap });
+      }
+      if (!batch.length) return;
+      const results = await postAlgos(batch.map(({ a }) => ({ ...a, rev: revRef.current.get(a.id) ?? a.rev ?? 0, writer: writerId(), updatedAt: now })));
+      if (!results) { tell('net', 'Harvest Desk could not save — changes are kept in this tab only until it reconnects'); return; }
+      for (const { a, snap } of batch) {
+        const r = results.find((x) => x.id === a.id);
+        if (!r) continue;
+        if (r.status === 'saved') {
+          savedRef.current.set(a.id, snap);
+          savedAtRef.current.set(a.id, Date.now());
+          if (r.rev != null) revRef.current.set(a.id, r.rev);
+          savedEvtRef.current.set(a.id, lastEvt(a));
+          refusedRef.current.delete(a.id);
+        } else if (r.status === 'stale') {
+          refusedRef.current.set(a.id, snap);
+          tell(`stale:${a.id}`, `${a.name}: saved elsewhere since this tab loaded it — reload the page before changing it`);
+        } else if (r.error === 'deleted') {
+          deletedRef.current.add(a.id);
+          commit(algosRef.current.filter((x) => x.id !== a.id));
+          tell(`gone:${a.id}`, `${a.name} was deleted from the ledger elsewhere, so it was removed here`);
+        } else {
+          refusedRef.current.set(a.id, snap);
+          tell(`bad:${a.id}`, `${a.name} was not saved: ${r.error ?? 'refused by the ledger'}`);
         }
       }
     };
     flushChain.current = flushChain.current.then(run, run);
     return flushChain.current;
-  }, []);
+  }, [commit, writerId]);
 
-  // A fill made in the last seconds before a reload or a closed tab must reach the ledger, or the engine
-  // re-enters on the next load. On page hide ONE keepalive request carries every unsaved algo, trimmed to
-  // stay under the browser's ~64 KB keepalive quota; a merely hidden tab keeps running, so it uses the
-  // normal serialized save instead.
+  // A fill made in the last seconds before a reload or a closed tab must reach the ledger, or the engine re-enters
+  // on the next load. On page hide ONE keepalive request carries every unsaved algo with only its newest events
+  // (the server puts the older stored events back in front of them), which keeps it under the ~64 KB keepalive
+  // quota. A merely hidden tab keeps running, so it uses the normal serialized save. A page restored from the
+  // back/forward cache holds revisions the server has since moved past, so it reloads.
   useEffect(() => {
     if (isLeader !== true) return;
     const onPageHide = () => {
       const now = Date.now();
-      let dirty = algosRef.current.filter((a) => savedRef.current.get(a.id) !== snapKey(a))
-        .map((a) => ({ ...a, updatedAt: now, events: a.events.slice(-20), vwap: a.vwap ? { ...a.vwap, ticks: [] } : undefined }));
+      // Every event newer than the last save goes (the server keeps the older ones it already has), newest 60 at most.
+      const build = (keep: number) => algosRef.current
+        .filter((a) => !deletedRef.current.has(a.id) && savedRef.current.get(a.id) !== snapKey(a))
+        .map((a) => ({
+          ...a, rev: revRef.current.get(a.id) ?? a.rev ?? 0, writer: writerId(), updatedAt: now, trimmedEvents: true,
+          events: a.events.filter((e) => e.t > (savedEvtRef.current.get(a.id) ?? 0)).slice(-keep),
+        }));
+      let dirty = build(60);
       if (!dirty.length) return;
       let body = JSON.stringify({ algos: dirty });
-      if (body.length > 60_000) { dirty = dirty.map((a) => ({ ...a, events: [] })); body = JSON.stringify({ algos: dirty }); }
+      if (body.length > 60_000) { dirty = build(10); body = JSON.stringify({ algos: dirty }); }
       fetch('/api/harvest-desk/state', { method: 'POST', keepalive: true, headers: { 'Content-Type': 'application/json' }, body }).catch(() => {});
     };
+    const onPageShow = (e: PageTransitionEvent) => { if (e.persisted) window.location.reload(); };
     const onVisibility = () => { if (document.visibilityState === 'hidden') void flush(); };
     window.addEventListener('pagehide', onPageHide);
+    window.addEventListener('pageshow', onPageShow);
     document.addEventListener('visibilitychange', onVisibility);
-    return () => { window.removeEventListener('pagehide', onPageHide); document.removeEventListener('visibilitychange', onVisibility); };
-  }, [isLeader, flush]);
+    return () => {
+      window.removeEventListener('pagehide', onPageHide);
+      window.removeEventListener('pageshow', onPageShow);
+      document.removeEventListener('visibilitychange', onVisibility);
+    };
+  }, [isLeader, flush, writerId]);
 
   useEffect(() => {
     if (isLeader !== true) return;
@@ -279,7 +397,7 @@ export function useHarvestDesk() {
 
   // ── engine tick ──
   useEffect(() => {
-    if (!loaded) return;
+    if (!loaded || !engineReady) return;
     const t = setInterval(() => {
       const now = Date.now();
       setClock(now);
@@ -313,7 +431,7 @@ export function useHarvestDesk() {
       if (next.some((a) => a.events.length && a.events[a.events.length - 1].t === now)) void flush();
     }, TICK_MS);
     return () => clearInterval(t);
-  }, [loaded, leaderRef, marketFor, commit, flush]);
+  }, [loaded, engineReady, leaderRef, marketFor, commit, flush]);
 
   // ── actions ──
   const replace = useCallback((id: string, fn: (a: HdAlgo) => HdAlgo | null, flushNow = true) => {
@@ -329,14 +447,15 @@ export function useHarvestDesk() {
   }, [commit, flush]);
 
   const readOnly = isLeader === false;
-  const guard = (): boolean => {
+  const guard = useCallback((): boolean => {
     if (isLeader !== true) { toast.error('Another tab is running the desk — actions are disabled here'); return false; }
+    if (!engineReady) { toast.error('Still syncing with the ledger — try again in a moment'); return false; }
     return true;
-  };
+  }, [isLeader, engineReady]);
 
   /** Run a manual row action against fresh prices. */
   const act = useCallback((id: string, run: (a: HdAlgo, m: HdMarket) => HdResult) => {
-    if (isLeader !== true) { toast.error('Another tab is running the desk — actions are disabled here'); return; }
+    if (!guard()) return;
     const a = algosRef.current.find((x) => x.id === id);
     if (!a) return;
     const m = marketFor(a.underlying);
@@ -344,7 +463,7 @@ export function useHarvestDesk() {
     const r = run(a, m);
     r.notes.forEach((n) => toast(n));
     if (r.changed) replace(id, () => r.algo);
-  }, [isLeader, marketFor, replace]);
+  }, [guard, marketFor, replace]);
 
   const actions = useMemo(() => ({
     addAlgo: (kind: HdKind, underlying: HdUnderlying) => {
@@ -360,19 +479,30 @@ export function useHarvestDesk() {
       if (a.legs.some(isOpen)) { toast.error('Close the open legs first'); return; }
       // Take it out of the page first so no queued, in-flight or periodic save can write it back, then let
       // the saves already running settle before the DELETE goes out.
+      const at = algosRef.current.findIndex((x) => x.id === id);
       deletedRef.current.add(id);
       commit(algosRef.current.filter((x) => x.id !== id));
       await flushChain.current;
-      let ok = false;
+      // 'refused' = the server answered no (nothing was deleted); 'unknown' = no answer, so it may have been.
+      let outcome: 'deleted' | 'refused' | 'unknown' = 'unknown';
       try {
         const r = await fetch('/api/harvest-desk/state', { method: 'DELETE', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id }) });
         const j = await r.json() as { success: boolean; error?: string };
-        ok = j.success;
-        if (!ok) toast.error(j.error ?? 'Could not delete');
-      } catch { toast.error('Could not delete — ledger unreachable'); }
-      if (ok) { savedRef.current.delete(id); return; }
+        if (j.success) outcome = 'deleted';
+        else { outcome = 'refused'; toast.error(j.error ?? 'Could not delete'); }
+      } catch { /* no answer */ }
+      if (outcome === 'deleted') { savedRef.current.delete(id); return; }
       deletedRef.current.delete(id);
-      commit([...algosRef.current, a]);
+      if (outcome === 'refused') {
+        const back = [...algosRef.current];
+        back.splice(Math.min(at, back.length), 0, a);
+        commit(back);
+        return;
+      }
+      // No answer: the ledger may or may not have deleted it. Save what is pending, then take the ledger's word for it.
+      toast.error('Could not confirm the delete — checking the ledger');
+      await flush();
+      await load(true);
     },
     edit: (id: string, fn: (a: HdAlgo) => HdAlgo) => {
       if (!guard()) return;
@@ -420,18 +550,17 @@ export function useHarvestDesk() {
     exitLeg: (id: string, legId: string, lots?: number) => act(id, (a, m) => exitLegNow(a, legId, m, lots)),
     exitAll: (id: string) => act(id, (a, m) => exitAllNow(a, m)),
     exitEverything: () => {
-      if (isLeader !== true) { toast.error('Another tab is running the desk — actions are disabled here'); return; }
+      if (!guard()) return;
       for (const a of algosRef.current) if (a.legs.some(isOpen) || a.armed) act(a.id, (x, m) => exitAllNow(x, m));
     },
     reset: (id: string) => {
       if (!guard()) return;
       replace(id, (a) => resetAlgoRuntime(a));
     },
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }), [commit, flush, replace, act, isLeader]);
+  }), [commit, flush, load, replace, act, guard]);
 
   return {
-    algos, loaded, loadError, clock, lagMs, isLeader, readOnly, marketFor, feedFor, actions, bridgeStatus,
+    algos, loaded, engineReady, loadError, clock, lagMs, isLeader, readOnly, marketFor, feedFor, actions, bridgeStatus,
     kinds: HD_KINDS,
   };
 }
