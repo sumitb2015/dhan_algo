@@ -2,8 +2,8 @@ import { NextRequest, NextResponse } from 'next/server';
 import fs from 'fs';
 import path from 'path';
 import { PROJECT_ROOT } from '@/lib/pyExec';
-import { HD_KINDS } from '@/lib/harvestDeskControls';
-import { HD_ALGO_KEYS, HD_EVENT_CAP, HD_MAX_LOTS, HD_UNDERLYINGS, isHdAlgoShape, pruneAlgos, type HdAlgo } from '@/lib/harvestDesk';
+import { HD_KINDS, defaultControls, type HdControlValue } from '@/lib/harvestDeskControls';
+import { HD_ALGO_KEYS, HD_EVENT_CAP, HD_LEG_KEYS, HD_MAX_LOTS, HD_UNDERLYINGS, isHdAlgoShape, pruneAlgos, type HdAlgo } from '@/lib/harvestDesk';
 
 // Harvest Desk's own ledger (paper algos: controls, leg rows, cycle state, event log). Deliberately its
 // own file: nothing else reads it, and no broker reconcile may treat a paper leg as a missing position.
@@ -12,6 +12,9 @@ const MAX_ALGOS = 40;
 const MAX_LEGS = 24;
 const MAX_TOMBSTONES = 1000;
 const KEEP_KEYS: ReadonlySet<string> = new Set(HD_ALGO_KEYS);
+const KEEP_LEG_KEYS: ReadonlySet<string> = new Set(HD_LEG_KEYS);
+const LEG_NUMBERS = ['strikeValue', 'lots', 'slPct', 'tgtPct', 'strike', 'openLots', 'avgEntry', 'firstEntry', 'entryDelta', 'realized', 'lastPx', 'lastPxAt', 'reentryPx', 'reentries', 'openedAt'] as const;
+const isNum = (v: unknown): v is number => typeof v === 'number' && Number.isFinite(v);
 
 interface Ledger {
   /** Entries exactly as stored: ones this code does not recognise are carried through, never rewritten. */
@@ -66,6 +69,52 @@ function algoError(a: unknown): string | null {
   return null;
 }
 
+/** The stored shape of an incoming algo: only known fields, with the nested values the engine reads made safe.
+ *  A value that JSON turned into null (NaN / Infinity) or that an older copy simply lacks is not a reason to
+ *  refuse the algo for ever: it is coerced to a default, or dropped where the engine rebuilds it. */
+function cleanAlgo(raw: HdAlgo): { algo: HdAlgo } | { error: string } {
+  const a = Object.fromEntries(Object.entries(raw).filter(([k]) => KEEP_KEYS.has(k))) as unknown as HdAlgo;
+  const defaults = defaultControls(a.kind);
+  // controls: flat name -> number | string | boolean. A broken value falls back to the strategy's documented default.
+  const entries = Object.entries(a.controls);
+  if (entries.length > 150) return { error: 'too many controls' };
+  const controls: Record<string, HdControlValue> = {};
+  for (const [k, v] of entries) {
+    if (k.length > 60) continue;
+    if (isNum(v) || typeof v === 'boolean' || (typeof v === 'string' && v.length <= 200)) controls[k] = v;
+    else if (defaults[k] !== undefined) controls[k] = defaults[k];
+  }
+  a.controls = controls;
+  // legs: known fields only; numbers coerced
+  const required = ['strikeValue', 'avgEntry', 'realized', 'reentries'] as const;
+  a.legs = a.legs.map((l) => {
+    const c = Object.fromEntries(Object.entries(l).filter(([k, v]) => KEEP_LEG_KEYS.has(k) && v !== null)) as Record<string, unknown>;
+    for (const k of LEG_NUMBERS) if (c[k] !== undefined && !isNum(c[k])) delete c[k];
+    for (const k of required) if (!isNum(c[k])) c[k] = 0;
+    for (const k of ['role', 'strikeBy', 'expiry', 'status'] as const) if (typeof c[k] !== 'string') c[k] = k === 'expiry' ? '' : k === 'status' ? 'IDLE' : k === 'role' ? 'main' : 'ATM';
+    return c as unknown as HdAlgo['legs'][number];
+  });
+  // events: newest HD_EVENT_CAP, trimmed
+  a.events = a.events.slice(-HD_EVENT_CAP).map((e) => ({ t: e.t, k: e.k.slice(0, 20), msg: e.msg.slice(0, 600) }));
+  a.windowsDone = a.windowsDone.filter((w) => typeof w === 'string').slice(0, 20);
+  // state the engine rebuilds when it is missing
+  if (a.vwap) {
+    const v = a.vwap;
+    const ok = isNum(v.strike) && typeof v.expiry === 'string' && Array.isArray(v.bars) && Array.isArray(v.ticks) && v.bars.length <= 1000 && v.ticks.length <= 400
+      && [...v.bars, ...v.ticks, v.cur, v.curMin].every(isNum);
+    if (!ok) a.vwap = undefined;
+  }
+  if (a.entry && !['imbalance', 'atm', 'premiumUnits', 'premiumRs', 'at'].every((k) => isNum((a.entry as unknown as Record<string, unknown>)[k]))) a.entry = undefined;
+  a.trail = { armed: !!a.trail?.armed, ...(isNum(a.trail?.best) ? { best: a.trail.best } : {}) };
+  // plain numbers: a missing or non-finite one (older copy, NaN turned into null) becomes 0
+  const n = a as unknown as Record<string, unknown>;
+  for (const k of ['refPremiumRs', 'dayStartPnl', 'peakMtm', 'tradesToday', 'peakEquity', 'longDebit', 'shortCredit']) if (!isNum(n[k])) n[k] = 0;
+  if (typeof a.halved !== 'boolean') a.halved = false;
+  a.staleCloses = (Array.isArray(a.staleCloses) ? a.staleCloses : []).filter((x) => typeof x === 'string').slice(-20).map((x) => x.slice(0, 200));
+  if (!a.staleCloses.length) a.staleCloses = undefined;
+  return { algo: a };
+}
+
 export async function GET(): Promise<NextResponse> {
   try {
     const l = await withLock(read);
@@ -75,7 +124,7 @@ export async function GET(): Promise<NextResponse> {
   }
 }
 
-type Result = { id: string; status: 'saved' | 'stale' | 'rejected'; rev?: number; error?: string };
+type Result = { id: string; status: 'saved' | 'stale' | 'rejected'; rev?: number; error?: string; own?: boolean };
 
 /** Upsert one algo (`algo`) or several (`algos`, the page-close save). Each is judged on its own: one that
  *  cannot be stored never blocks the others. Conflicts use a server-owned revision, not the client clock:
@@ -101,20 +150,26 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
           results.push({ id: incoming.id, status: 'rejected', error: `at most ${MAX_ALGOS} algos` });
           continue;
         }
-        // Stale = made from an older revision than the stored one, by a DIFFERENT page session. The same session
-        // is only ever behind because the reply to its own earlier save was lost, so that save is accepted.
-        if (existing && (incoming.rev ?? 0) < (existing.rev ?? 0) && !(incoming.writer && incoming.writer === existing.writer)) {
-          results.push({ id: incoming.id, status: 'stale', rev: existing.rev });
-          continue;
+        // Which save is current. Within one page session saves carry a counter, and only a newer one wins: a lost
+        // reply is harmless, and a late older request can never overwrite a newer one. A DIFFERENT session must
+        // have been made from the stored revision or later, or it is stale.
+        if (existing) {
+          const sameSession = !!incoming.writer && incoming.writer === existing.writer;
+          const stale = sameSession ? (incoming.wseq ?? 0) <= (existing.wseq ?? 0) : (incoming.rev ?? 0) < (existing.rev ?? 0);
+          if (stale) { results.push({ id: incoming.id, status: 'stale', rev: existing.rev, own: sameSession }); continue; }
         }
-        // Only the fields the desk stores are kept; anything else a client sends is dropped.
-        const next = Object.fromEntries(Object.entries(incoming).filter(([k]) => KEEP_KEYS.has(k))) as unknown as HdAlgo;
+        // Only the fields the desk stores are kept, and the nested values the engine reads are checked.
+        const cleaned = cleanAlgo(incoming);
+        if ('error' in cleaned) { results.push({ id: incoming.id, status: 'rejected', error: cleaned.error }); continue; }
+        const next = cleaned.algo;
         next.rev = (existing?.rev ?? 0) + 1;
-        // A page-close save carries only the events newer than its last save: keep the stored older ones in front.
+        // A page-close save carries only the events from its last save on: keep the stored older ones in front. Two
+        // sessions writing one algo is already ruled out by the leader lock and the revision check above.
         if (incoming.trimmedEvents && existing) {
-          const first = incoming.events[0]?.t ?? Infinity;
+          const fresh = next.events;               // already trimmed and capped by cleanAlgo
+          const first = fresh[0]?.t ?? Infinity;
           const stored = Array.isArray(existing.events) ? existing.events : [];
-          next.events = [...stored.filter((e) => e.t < first), ...incoming.events].slice(-HD_EVENT_CAP);
+          next.events = [...stored.filter((e) => e.t < first), ...fresh].slice(-HD_EVENT_CAP);
         }
         if (idx >= 0) ledger.algos[idx] = next; else ledger.algos.push(next);
         results.push({ id: incoming.id, status: 'saved', rev: next.rev });

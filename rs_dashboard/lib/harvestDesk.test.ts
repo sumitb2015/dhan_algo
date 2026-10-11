@@ -339,13 +339,16 @@ test('row actions: single-leg entry, part exit by lots, exit all disarms', () =>
   assert.equal(all.algo.armed, false);
 });
 
-test('a manual exit without a live price is refused, not booked at a stale price', () => {
+test('a manual exit with no live price is refused once the last price is older than 30 s, and uses a recent one', () => {
   const m = market({ px: ladder(100, 100) });
   const e = enterAlgoNow(armed('imbalance_straddle'), m);
-  const blind = market({ px: () => null });
-  const r = exitLegNow(e.algo, ce(e.algo).id, blind);
-  assert.equal(r.changed, false);
-  assert.equal(ce(r.algo).openLots, 1);
+  const seen = stepAlgo(e.algo, market({ px: ladder(100, 100), now: T0 + 1000 }));   // stamps lastPx at T0+1000
+  const old = exitLegNow(seen, ce(seen).id, market({ px: () => null, now: T0 + 1000 + 31_000 }));
+  assert.equal(old.changed, false);
+  assert.equal(ce(old.algo).openLots, 1);
+  const recent = exitLegNow(seen, ce(seen).id, market({ px: () => null, now: T0 + 1000 + 20_000 }));
+  assert.equal(recent.changed, true);
+  assert.equal(ce(recent.algo).openLots, 0);
 });
 
 test('cycleMtm is null while an open leg has no price (stops never fire on a blank)', () => {
@@ -673,20 +676,34 @@ test('a stale spot holds entries and spot-based resets, but stops and the square
   assert.equal(off.phase, 'DONE');
 });
 
-test('square-off with no live price books at the last known price and says so; manual exit-all refuses', () => {
+test('square-off with no live price books at the last known price and says so; manual exit-all follows the 30 s limit', () => {
   const base = stepAlgo(armed('imbalance_straddle', noLimits), market({ px: ladder(100, 100) }));
-  // the engine saw 90 on the last live tick
-  const seen = stepAlgo(base, market({ px: () => ({ ltp: 90 }), now: T0 + 1000 }));
-  const blind = market({ px: () => null, hm: '15:17', now: T0 + 60_000 });
-  const off = stepAlgo(seen, blind);
+  const seen = stepAlgo(base, market({ px: () => ({ ltp: 90 }), now: T0 + 1000 }));   // last live price 90 at T0+1000
+  const off = stepAlgo(seen, market({ px: () => null, hm: '15:17', now: T0 + 60_000 }));
   assert.equal(off.phase, 'DONE');
   const msg = off.events.find((e) => e.k === 'EXIT')!.msg;
   assert.ok(msg.includes('last known') && msg.includes('90.00'), msg);
-  // the manual button must not book a price it cannot see
-  const r = exitAllNow(seen, market({ px: () => null, now: T0 + 5000 }));
-  assert.equal(r.changed, false);
-  assert.ok(r.algo.legs.some(isOpen));
-  assert.ok(r.notes[0].includes('No live price'));
+  // manual exit-all: too old -> nothing closed; recent -> closed
+  const tooOld = exitAllNow(seen, market({ px: () => null, now: T0 + 1000 + 60_000 }));
+  assert.equal(tooOld.changed, false);
+  assert.ok(tooOld.algo.legs.some(isOpen));
+  assert.ok(tooOld.notes[0].includes('30 s'));
+  const fresh = exitAllNow(seen, market({ px: () => null, now: T0 + 1000 + 10_000 }));
+  assert.equal(fresh.changed, true);
+  assert.ok(!fresh.algo.legs.some(isOpen));
+});
+
+test('a partly failed close still reports the stale-price legs in the EXIT event when it later completes', () => {
+  let a = stepAlgo(armed('imbalance_straddle', noLimits), market({ px: ladder(100, 100) }));
+  a = stepAlgo(a, market({ px: () => ({ ltp: 95 }), now: T0 + 1000 }));
+  // CE has a last price; PE's was never stamped, so the first attempt closes CE at the stale price and fails on PE
+  pe(a).lastPx = undefined; pe(a).lastPxAt = undefined;
+  a = stepAlgo(a, market({ px: () => null, hm: '15:17', now: T0 + 5000 }));
+  assert.ok(a.legs.some(isOpen));
+  a = stepAlgo(a, market({ px: () => ({ ltp: 95 }), hm: '15:18', now: T0 + 6000 }));
+  assert.ok(!a.legs.some(isOpen));
+  const msg = a.events.filter((e) => e.k === 'EXIT').pop()!.msg;
+  assert.ok(msg.includes('last known'), msg);
 });
 
 test('VWAP ticks stay bounded', () => {
@@ -698,4 +715,24 @@ test('VWAP ticks stay bounded', () => {
 test('the ledger key list covers every field of a new algo', () => {
   const keys = new Set<string>(HD_ALGO_KEYS);
   for (const k of Object.keys(newAlgo('imbalance_straddle', 'NIFTY'))) assert.ok(keys.has(k), `${k} missing from HD_ALGO_KEYS`);
+});
+
+// ── sixth review fixes ────────────────────────────────────────────────────
+
+test('a single-leg manual exit at a last known price says so itself and does not leak into the cycle EXIT event', () => {
+  let a = stepAlgo(armed('imbalance_straddle', noLimits), market({ px: ladder(100, 100) }));
+  a = stepAlgo(a, market({ px: () => ({ ltp: 95 }), now: T0 + 1000 }));
+  const r = exitLegNow(a, ce(a).id, market({ px: () => null, now: T0 + 1000 + 10_000 }));
+  assert.ok(r.algo.events.some((e) => e.k === 'LEG_EXIT' && e.msg.includes('last known')));
+  assert.equal(r.algo.staleCloses, undefined);
+  // the cycle closes normally later: its EXIT event carries no stale-price note
+  const done = stepAlgo(r.algo, market({ px: () => ({ ltp: 95 }), hm: '15:17', now: T0 + 20_000 }));
+  assert.ok(!done.events.filter((e) => e.k === 'EXIT').pop()!.msg.includes('last known'));
+});
+
+test('the stale-price note list stays bounded', () => {
+  let a = stepAlgo(armed('imbalance_straddle', noLimits), market({ px: ladder(100, 100) }));
+  a.staleCloses = Array.from({ length: 40 }, (_, i) => `x${i}`);
+  a = stepAlgo(a, market({ px: () => null, hm: '15:17', now: T0 + 5000 }));   // a close attempt that falls back
+  assert.ok((a.staleCloses?.length ?? 0) <= 20);
 });

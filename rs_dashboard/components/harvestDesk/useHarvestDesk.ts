@@ -25,10 +25,15 @@ const CHAIN_STALE_MS = 60_000;
 const SPOT_STALE_MS = 15_000;
 /** An open algo is re-saved at least this often, so its last known prices (used if the feed dies) stay recent. */
 const RESAVE_OPEN_MS = 60_000;
+/** A moving trail peak is saved at most this often (and exactly, on page close), so a reload keeps it without a save per tick. */
+const PEAK_SAVE_MS = 3_000;
 /** Gap between engine ticks above which the page warns: a hidden tab throttles timers. */
 const LAG_WARN_MS = 5_000;
 
 export type FeedSource = 'ws' | 'chain' | 'stale' | 'none';
+
+/** The trail peak and best, to the rupee / 0.1: saved on their own throttle (see `PEAK_SAVE_MS`), never per tick. */
+const peakKey = (a: HdAlgo): string => `${Math.round(a.peakMtm)}|${Math.round((a.trail.best ?? 0) * 10)}`;
 
 /** What counts as "changed" for saving. Fast-moving fields (last price, VWAP ticks) are left out so an open algo is
  *  not re-posted in full every few seconds; they ride along with the next real save and with the periodic re-save
@@ -36,8 +41,7 @@ export type FeedSource = 'ws' | 'chain' | 'stale' | 'none';
 function snapKey(a: HdAlgo): string {
   return JSON.stringify(a, (k, v) => {
     if (k === 'updatedAt' || k === 'rev' || k === 'lastPx' || k === 'lastPxAt' || k === 'ticks' || k === 'cur') return undefined;
-    if (k === 'peakMtm') return Math.round(v as number);
-    if (k === 'best') return Math.round((v as number) * 10) / 10;
+    if (k === 'peakMtm' || k === 'best' || k === 'staleCloses') return undefined;
     return v;
   });
 }
@@ -45,7 +49,7 @@ function snapKey(a: HdAlgo): string {
 const istDay = (now: number) => new Date(now).toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
 const istHm = (now: number) => new Date(now).toLocaleTimeString('en-GB', { timeZone: 'Asia/Kolkata', hour: '2-digit', minute: '2-digit', hour12: false });
 
-type SaveResult = { id: string; status: 'saved' | 'stale' | 'rejected'; rev?: number; error?: string };
+type SaveResult = { id: string; status: 'saved' | 'stale' | 'rejected'; rev?: number; error?: string; own?: boolean };
 
 /** One request, a verdict per algo. Null = the request itself failed (network / server error). */
 async function postAlgos(algos: (HdAlgo & { trimmedEvents?: boolean })[]): Promise<SaveResult[] | null> {
@@ -74,6 +78,8 @@ export function useHarvestDesk() {
   const revRef = useRef<Map<string, number>>(new Map());
   /** Time of the newest event the server has, per algo: the page-close save sends everything after it. */
   const savedEvtRef = useRef<Map<string, number>>(new Map());
+  const savedPeakRef = useRef<Map<string, string>>(new Map());
+  const seqRef = useRef(0);
   const writerRef = useRef('');
   /** Identifies this page session in saves, so the server can tell its own earlier write from another tab's. */
   const writerId = useCallback(() => {
@@ -111,7 +117,7 @@ export function useHarvestDesk() {
         const at = Date.now();
         for (const a of rows) {
           savedRef.current.set(a.id, snapKey(a)); savedAtRef.current.set(a.id, at); revRef.current.set(a.id, a.rev ?? 0);
-          savedEvtRef.current.set(a.id, lastEvt(a));
+          savedEvtRef.current.set(a.id, lastEvt(a)); savedPeakRef.current.set(a.id, peakKey(a));
         }
         commit(rows);
         setLoadError(null);
@@ -260,7 +266,14 @@ export function useHarvestDesk() {
       // The polled index spot counts as fresh only while its own underlying keeps arriving. When it does not, a
       // fresh chain's spot (never older than the chain freshness limit) takes over before giving up.
       const polled = d.spotPrices[fu] > 0 && now - (d.spotAt[fu] ?? 0) <= SPOT_STALE_MS ? d.spotPrices[fu] : 0;
-      const viaChain = polled > 0 ? 0 : (chainFor(exps[0] ?? '')?.spot ?? 0);
+      // Not in the index poll (SENSEX), or it stopped arriving: any fresh chain of this underlying has the spot.
+      let viaChain = 0;
+      if (polled <= 0) {
+        for (const e of [exps[0] ?? '', ...exps.slice(1)]) {
+          const cs = chainFor(e)?.spot ?? 0;
+          if (cs > 0) { viaChain = cs; break; }
+        }
+      }
       if (polled > 0) { spot = polled; spotFresh = true; }
       else if (viaChain > 0) { spot = viaChain; spotFresh = true; }
       else if (d.spotPrices[fu] > 0) { spot = d.spotPrices[fu]; spotFresh = false; }
@@ -322,12 +335,14 @@ export function useHarvestDesk() {
         if (deletedRef.current.has(a.id)) continue;
         const snap = snapKey(a);
         if (refusedRef.current.get(a.id) === snap) continue;       // refused as it stands: wait until it changes
-        const changed = savedRef.current.get(a.id) !== snap;
+        const peakMoved = peakKey(a) !== savedPeakRef.current.get(a.id) && now - (savedAtRef.current.get(a.id) ?? 0) >= PEAK_SAVE_MS;
+        const changed = savedRef.current.get(a.id) !== snap || peakMoved;
         const resave = (a.armed || a.legs.some(isOpen)) && now - (savedAtRef.current.get(a.id) ?? 0) >= RESAVE_OPEN_MS;
         if (changed || resave) batch.push({ a, snap });
       }
       if (!batch.length) return;
-      const results = await postAlgos(batch.map(({ a }) => ({ ...a, rev: revRef.current.get(a.id) ?? a.rev ?? 0, writer: writerId(), updatedAt: now })));
+      const seq = ++seqRef.current;
+      const results = await postAlgos(batch.map(({ a }) => ({ ...a, rev: revRef.current.get(a.id) ?? a.rev ?? 0, writer: writerId(), wseq: seq, updatedAt: now })));
       if (!results) { tell('net', 'Harvest Desk could not save — changes are kept in this tab only until it reconnects'); return; }
       for (const { a, snap } of batch) {
         const r = results.find((x) => x.id === a.id);
@@ -337,7 +352,13 @@ export function useHarvestDesk() {
           savedAtRef.current.set(a.id, Date.now());
           if (r.rev != null) revRef.current.set(a.id, r.rev);
           savedEvtRef.current.set(a.id, lastEvt(a));
+          savedPeakRef.current.set(a.id, peakKey(a));
           refusedRef.current.delete(a.id);
+        } else if (r.status === 'stale' && r.own) {
+          // An older request of this same page session lost the race to a newer one of its own (the page-close save
+          // overtook it). The stored copy is this session's, so nothing is overwritten; the next save carries a higher
+          // sequence number and is accepted.
+          if (r.rev != null) revRef.current.set(a.id, r.rev);
         } else if (r.status === 'stale') {
           refusedRef.current.set(a.id, snap);
           tell(`stale:${a.id}`, `${a.name}: saved elsewhere since this tab loaded it — reload the page before changing it`);
@@ -366,10 +387,12 @@ export function useHarvestDesk() {
       const now = Date.now();
       // Every event newer than the last save goes (the server keeps the older ones it already has), newest 60 at most.
       const build = (keep: number) => algosRef.current
-        .filter((a) => !deletedRef.current.has(a.id) && savedRef.current.get(a.id) !== snapKey(a))
+        .filter((a) => !deletedRef.current.has(a.id) && (savedRef.current.get(a.id) !== snapKey(a) || savedPeakRef.current.get(a.id) !== peakKey(a)))
         .map((a) => ({
-          ...a, rev: revRef.current.get(a.id) ?? a.rev ?? 0, writer: writerId(), updatedAt: now, trimmedEvents: true,
-          events: a.events.filter((e) => e.t > (savedEvtRef.current.get(a.id) ?? 0)).slice(-keep),
+          // '>=' on purpose: events share a millisecond within a tick, and the server replaces its own copies from
+          // that time on, so nothing is lost and nothing doubles.
+          ...a, rev: revRef.current.get(a.id) ?? a.rev ?? 0, writer: writerId(), wseq: ++seqRef.current, updatedAt: now, trimmedEvents: true,
+          events: a.events.filter((e) => e.t >= (savedEvtRef.current.get(a.id) ?? 0)).slice(-keep),
         }));
       let dirty = build(60);
       if (!dirty.length) return;
@@ -492,17 +515,34 @@ export function useHarvestDesk() {
         else { outcome = 'refused'; toast.error(j.error ?? 'Could not delete'); }
       } catch { /* no answer */ }
       if (outcome === 'deleted') { savedRef.current.delete(id); return; }
-      deletedRef.current.delete(id);
       if (outcome === 'refused') {
+        deletedRef.current.delete(id);
         const back = [...algosRef.current];
         back.splice(Math.min(at, back.length), 0, a);
         commit(back);
         return;
       }
-      // No answer: the ledger may or may not have deleted it. Save what is pending, then take the ledger's word for it.
-      toast.error('Could not confirm the delete — checking the ledger');
-      await flush();
-      await load(true);
+      // No answer: the ledger may or may not have deleted it. The algo stays out of the list (so the engine cannot
+      // change it meanwhile) and the DELETE is simply sent again, which is safe to repeat: the answer is then
+      // definite. Only if the ledger stays unreachable is the algo put back, unchanged, where it can be managed;
+      // if a late delete had landed, the next save is refused as "deleted" and removes it again with a message.
+      toast.error('Could not confirm the delete — retrying');
+      let final: 'deleted' | 'refused' | 'unknown' = 'unknown';
+      for (let i = 0; i < 5 && final === 'unknown'; i++) {
+        await new Promise((r) => setTimeout(r, 1500));
+        try {
+          const r = await fetch('/api/harvest-desk/state', { method: 'DELETE', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id }) });
+          const j = await r.json() as { success: boolean; error?: string };
+          final = j.success ? 'deleted' : 'refused';
+          if (final === 'refused') toast.error(j.error ?? 'Could not delete');
+        } catch { /* still unreachable */ }
+      }
+      if (final === 'deleted') { savedRef.current.delete(id); return; }
+      deletedRef.current.delete(id);
+      const back = [...algosRef.current];
+      back.splice(Math.min(at, back.length), 0, a);
+      commit(back);
+      if (final === 'unknown') toast.error('The ledger is unreachable — the algo was kept');
     },
     edit: (id: string, fn: (a: HdAlgo) => HdAlgo) => {
       if (!guard()) return;
@@ -557,7 +597,7 @@ export function useHarvestDesk() {
       if (!guard()) return;
       replace(id, (a) => resetAlgoRuntime(a));
     },
-  }), [commit, flush, load, replace, act, guard]);
+  }), [commit, flush, replace, act, guard]);
 
   return {
     algos, loaded, engineReady, loadError, clock, lagMs, isLeader, readOnly, marketFor, feedFor, actions, bridgeStatus,

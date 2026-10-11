@@ -26,6 +26,8 @@ export const HD_EVENT_CAP = 80;
 /** A leg's last known price is only used for MTM and for exits while it is no older than this. Beyond it the leg
  *  is treated as unpriced: the exit waits for a live price instead of booking a price from hours ago. */
 export const HD_LAST_PX_MAX_AGE_MS = 10 * 60_000;
+/** A manual exit is stricter: the price it may fall back on must have been live within this. */
+export const HD_MANUAL_LAST_PX_MAX_AGE_MS = 30_000;
 /** Expiry rule on a leg: '' = nearest, 'AUTO' = pick by the diagonal's DTE band, else an ISO date. */
 export const HD_EXPIRY_AUTO = 'AUTO';
 
@@ -65,6 +67,15 @@ export interface HdLeg {
   reentries: number;
   openedAt?: number;
 }
+
+/** Every field of a leg the ledger stores (same compile-time guard as HD_ALGO_KEYS). */
+export const HD_LEG_KEYS = [
+  'id', 'role', 'option', 'side', 'expiry', 'strikeBy', 'strikeValue', 'lots', 'slPct', 'tgtPct', 'reentry', 'auto', 'status',
+  'strike', 'expiryUsed', 'openLots', 'avgEntry', 'firstEntry', 'entryDelta', 'realized', 'lastPx', 'lastPxAt', 'exitReason',
+  'waitingReentry', 'reentryPx', 'reentries', 'openedAt',
+] as const satisfies readonly (keyof HdLeg)[];
+const _allLegKeysListed: Exclude<keyof HdLeg, (typeof HD_LEG_KEYS)[number]> extends never ? true : never = true;
+void _allLegKeysListed;
 
 export interface HdEvent { t: number; k: string; msg: string }
 
@@ -134,6 +145,11 @@ export interface HdAlgo {
   /** Which page session wrote this copy. A save from the same session is never "stale": it is the session's own
    *  earlier write, whose reply may simply have been lost. */
   writer?: string;
+  /** Per-session save counter. Within one session a save is accepted only if it is newer than the stored one,
+   *  so a late older request can never overwrite a newer one. */
+  wseq?: number;
+  /** Legs closed at their last known price (no live quote) and not yet reported in an EXIT event. */
+  staleCloses?: string[];
 }
 
 /** Every field of an algo the ledger stores. The route keeps exactly these and drops anything else a client sends;
@@ -142,7 +158,7 @@ export const HD_ALGO_KEYS = [
   'v', 'id', 'name', 'kind', 'underlying', 'product', 'armed', 'phase', 'pausedUntil', 'controls', 'legs', 'cycle', 'entry',
   'refPremiumRs', 'cumRealized', 'dayStartPnl', 'day', 'peakMtm', 'trail', 'tradesToday', 'lastAdjustAt', 'vwap',
   'windowsDone', 'suspendedDay', 'dayStartPending', 'closeErrAt', 'peakEquity', 'halved', 'longDebit', 'shortCredit',
-  'events', 'updatedAt', 'rev', 'writer',
+  'events', 'updatedAt', 'rev', 'writer', 'wseq', 'staleCloses',
 ] as const satisfies readonly (keyof HdAlgo)[];
 const _allKeysListed: Exclude<keyof HdAlgo, (typeof HD_ALGO_KEYS)[number]> extends never ? true : never = true;
 void _allKeysListed;
@@ -336,8 +352,8 @@ export function limitRs(a: Pick<HdAlgo, 'kind' | 'controls' | 'refPremiumRs'>, v
 }
 
 /** The leg's last live price while it is recent enough to stand in for a missing quote. */
-function usableLast(l: HdLeg, m: HdMarket): number | null {
-  return l.lastPx != null && l.lastPx > 0 && l.lastPxAt != null && m.now - l.lastPxAt <= HD_LAST_PX_MAX_AGE_MS ? l.lastPx : null;
+function usableLast(l: HdLeg, m: HdMarket, maxAgeMs: number = HD_LAST_PX_MAX_AGE_MS): number | null {
+  return l.lastPx != null && l.lastPx > 0 && l.lastPxAt != null && m.now - l.lastPxAt <= maxAgeMs ? l.lastPx : null;
 }
 
 function quoteOf(l: HdLeg, m: HdMarket): HdQuote | null {
@@ -422,15 +438,16 @@ function session(a: HdAlgo, m: HdMarket) {
   };
 
   /** Close `lots` of a leg at its price (last known price as a fallback, so a stop is never skipped). */
-  /** Legs closed at their last known price (no live quote), so the exit event can say so. */
-  const fallbacks: string[] = [];
-  const unfill = (l: HdLeg, lots: number, reason: string, fallbackToLast = true): boolean => {
+  /** `fallbackAgeMs`: how old a last known price may be when there is no live quote (null = never fall back). */
+  const unfill = (l: HdLeg, lots: number, reason: string, fallbackAgeMs: number | null = HD_LAST_PX_MAX_AGE_MS, report = false): boolean => {
     if (!isOpen(l)) return true;
     const n = Math.min(lots, l.openLots);
     const live = px(quoteOf(l, m));
-    const p = live ?? (fallbackToLast ? usableLast(l, m) : null);
+    const p = live ?? (fallbackAgeMs != null ? usableLast(l, m, fallbackAgeMs) : null);
     if (p == null || n <= 0) return false;
-    if (live == null) fallbacks.push(`${l.option} ${l.strike} @ ${p.toFixed(2)} (${l.lastPxAt ? Math.round((m.now - l.lastPxAt) / 1000) : '?'}s old)`);
+    // Only a cycle close reports its stale-price legs in its EXIT event; a single-leg exit says so in its own event.
+    if (live == null && report) (a.staleCloses ??= []).push(`${l.option} ${l.strike} @ ${p.toFixed(2)} (${l.lastPxAt ? Math.round((m.now - l.lastPxAt) / 1000) : '?'}s old)`);
+    if (a.staleCloses && a.staleCloses.length > 20) a.staleCloses.splice(0, a.staleCloses.length - 20);
     const perUnit = l.side === 'S' ? l.avgEntry - p : p - l.avgEntry;
     l.realized += perUnit * n * m.lotSize;
     l.openLots -= n;
@@ -465,29 +482,30 @@ function session(a: HdAlgo, m: HdMarket) {
     a.peakMtm = 0;
     a.trail = { armed: false };
     a.lastAdjustAt = undefined;
+    a.staleCloses = undefined;
     touch();
   };
 
   /** Close every open leg (shorts before longs), bank the cycle, and move to `phase`. */
-  const closeAll = (reason: string, opts: { phase: HdPhase; pauseMs?: number; disarm?: boolean; strict?: boolean }) => {
-    fallbacks.length = 0;
+  const closeAll = (reason: string, opts: { phase: HdPhase; pauseMs?: number; disarm?: boolean; fallbackAgeMs?: number | null }) => {
     const order = [...openLegs()].sort((x, y) => (x.side === 'B' ? 1 : 0) - (y.side === 'B' ? 1 : 0));
-    for (const l of order) unfill(l, l.openLots, reason, !opts.strict);
+    const age = opts.fallbackAgeMs === undefined ? HD_LAST_PX_MAX_AGE_MS : opts.fallbackAgeMs;
+    for (const l of order) unfill(l, l.openLots, reason, age, true);
     const stuck = a.legs.filter(isOpen);
     if (stuck.length) {
       // Retried every tick; log it once a minute so the event cap and the toasts are not flooded.
       if (a.closeErrAt == null || m.now - a.closeErrAt >= 60_000) {
         a.closeErrAt = m.now;
-        ev('ERROR', `Could not price ${stuck.length} leg(s) to close — they stay open${opts.strict ? '' : ' and will be retried'}`);
+        ev('ERROR', `Could not price ${stuck.length} leg(s) to close — they stay open${opts.fallbackAgeMs === null ? '' : ' and will be retried'}`);
       }
       return false;
     }
     a.closeErrAt = undefined;
     const pnl = a.legs.reduce((s, l) => s + l.realized, 0);
     a.cumRealized += pnl;
-    const stale = fallbacks.length ? ` — no live price, closed at last known: ${fallbacks.join(', ')}` : '';
+    // Legs closed at a last known price on an earlier, partly failed attempt are still reported here.
+    const stale = a.staleCloses?.length ? ` — no live price, closed at last known: ${a.staleCloses.join(', ')}` : '';
     ev('EXIT', `${reason}: cycle ${a.cycle} closed, P&L ${fmtRs(pnl)}${stale}`);
-    fallbacks.length = 0;
     endCycleState();
     // A pause is only enforced in the PAUSED phase, so any exit with a pause goes there.
     a.phase = opts.phase === 'DONE' ? 'DONE' : opts.pauseMs ? 'PAUSED' : 'ACTIVE';
@@ -550,7 +568,7 @@ function session(a: HdAlgo, m: HdMarket) {
     return true;
   };
 
-  return { c, notes, ev, touch, openLegs, liveLegs, fallbacks, mainOpen, lotsFor, fill, unfill, closeAll, baseline, noteEntry, enterLeg, endCycleState, isChanged: () => changed };
+  return { c, notes, ev, touch, openLegs, liveLegs, mainOpen, lotsFor, fill, unfill, closeAll, baseline, noteEntry, enterLeg, endCycleState, isChanged: () => changed };
 }
 
 export const fmtRs = (n: number): string => `${n < 0 ? '-' : ''}₹${Math.abs(Math.round(n)).toLocaleString('en-IN')}`;
@@ -1241,9 +1259,10 @@ export function exitLegNow(prev: HdAlgo, legId: string, m: HdMarket, lots?: numb
   if (!leg || !isOpen(leg)) return { algo: prev, notes: ['Leg is not open'], changed: false };
   const n = lots != null ? Math.min(lots, leg.openLots) : leg.openLots;
   const k = `${leg.option} ${leg.strike}`;
-  if (!s.unfill(leg, n, 'MANUAL', false)) return { algo: prev, notes: [`${k}: no live price — not closed`], changed: false };
+  const hadLive = px(quoteOf(leg, m)) != null;
+  if (!s.unfill(leg, n, 'MANUAL', HD_MANUAL_LAST_PX_MAX_AGE_MS)) return { algo: prev, notes: [`${k}: no live (or under 30 s old) price — not closed`], changed: false };
   leg.waitingReentry = false;
-  s.ev('LEG_EXIT', `Manual exit ${n}L ${k}`);
+  s.ev('LEG_EXIT', `Manual exit ${n}L ${k}${hadLive ? '' : ' at the last known price (no live quote)'}`);
   // Closing the last open leg ends the cycle and disarms, or an armed algo would re-enter next tick.
   if (!s.liveLegs().length && !a.legs.some((l) => l.waitingReentry)) s.closeAll('last leg exited manually', { phase: 'ACTIVE', disarm: true });
   return { algo: a, notes: s.notes, changed: true };
@@ -1257,8 +1276,8 @@ export function exitAllNow(prev: HdAlgo, m: HdMarket): HdResult {
     a.armed = false;
     return { algo: a, notes: ['Disarmed'], changed: true };
   }
-  const ok = s.closeAll('manual exit all', { phase: 'ACTIVE', disarm: true, strict: true });
-  return { algo: ok ? a : prev, notes: ok ? s.notes : ['No live price for an open leg — nothing was closed'], changed: ok };
+  const ok = s.closeAll('manual exit all', { phase: 'ACTIVE', disarm: true, fallbackAgeMs: HD_MANUAL_LAST_PX_MAX_AGE_MS });
+  return { algo: ok ? a : prev, notes: ok ? s.notes : ['No live (or under 30 s old) price for an open leg — nothing was closed'], changed: ok };
 }
 
 export function canEditStructure(a: HdAlgo): boolean {
