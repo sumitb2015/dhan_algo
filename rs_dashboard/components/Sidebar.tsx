@@ -163,6 +163,7 @@ const NAV_GROUPS = [
       { href: '/terminal', label: 'Intraday Terminal', desc: 'Nifty 50 intraday VWAP + RS signal blotter, positions & auto-trader control' },
       { href: '/strategies', label: 'Strategies', desc: 'Automated execution control panel' },
       { href: '/strategies-plus', label: 'Strategies+', desc: 'Advanced multi-leg algorithm inputs' },
+      { href: '/harvest-desk', label: 'Harvest Desk', desc: 'Premium Harvest algos as leg rows — every documented control, paper-traded' },
       { href: '/momentum', label: 'Momentum Portfolio', desc: 'Nifty 500 momentum investing portfolio — holdings, ranks, stops & signals' },
       { href: '/rs-strategy', label: 'RS Strategy', desc: 'Nifty 500 RS-55 vs Nifty + Supertrend(10,2) — buy when both are positive, sell when both turn negative' },
     ],

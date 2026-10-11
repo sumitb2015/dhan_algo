@@ -63,8 +63,10 @@ export function useFocusMarketData({ broker, watched, watchedKey, rows, groups }
   broker: Broker;
   watched: readonly FocusUnderlying[];
   watchedKey: string;
-  rows: readonly FocusRow[];
-  groups: readonly FocusIndexGroup[];
+  // Only the underlying / expiry of a row and the enabled flag of a group are read, so other pages
+  // (Harvest Desk) can drive this hook without building full Focus rows.
+  rows: readonly Pick<FocusRow, 'underlying' | 'expiry'>[];
+  groups: readonly Pick<FocusIndexGroup, 'underlying' | 'enabled'>[];
 }): FocusMarketData {
   const [futQuotes, setFutQuotes] = useState<Record<FocusUnderlying, FutQuote | null>>({
     NIFTY: null, BANKNIFTY: null, SENSEX: null, CRUDEOILM: null,
