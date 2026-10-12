@@ -1,7 +1,7 @@
 'use client';
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { AlertTriangle, Globe, Loader2, Play, Plus, RotateCcw, Search, Square, X } from 'lucide-react';
+import { AlertTriangle, Globe, Info, Loader2, Play, Plus, RotateCcw, Search, Square, X } from 'lucide-react';
 import NavBar from '@/components/NavBar';
 import { cn } from '@/lib/utils';
 import type { BridgeHealth, BridgeStatus, UsInstrument, UsQuoteRow } from '@/lib/usStocks';
@@ -60,7 +60,8 @@ export default function UsMarkets() {
   const [error, setError] = useState<string | null>(null);
   const [now, setNow] = useState(() => Date.now());
   const [busy, setBusy] = useState<string | null>(null);
-  const [notice, setNotice] = useState<string | null>(null);
+  // An 'info' notice is a courtesy (e.g. "already on the list") and clears itself; an 'error' one stays until the next action.
+  const [notice, setNotice] = useState<{ text: string; kind: 'info' | 'error' } | null>(null);
   const [q, setQ] = useState('');
   // Results are stored WITH the query they answer. Anything else could be a previous query's hits, and Enter must never add those.
   const [found, setFound] = useState<{ q: string; list: UsInstrument[] }>({ q: '', list: [] });
@@ -95,6 +96,13 @@ export default function UsMarkets() {
     return () => clearInterval(t);
   }, []);
 
+  // Courtesy notices clear themselves; the timer is tied to the notice object so a newer message is never cleared early.
+  useEffect(() => {
+    if (!notice || notice.kind !== 'info') return;
+    const t = setTimeout(() => setNotice(cur => (cur === notice ? null : cur)), 4000);
+    return () => clearTimeout(t);
+  }, [notice]);
+
   // Debounced search with an out-of-order guard.
   useEffect(() => {
     const text = q.trim();
@@ -107,7 +115,7 @@ export default function UsMarkets() {
         const j = await r.json().catch(() => null) as { success?: boolean; results?: UsInstrument[]; error?: string } | null;
         if (mine !== searchSeq.current) return;
         if (j?.success) setFound({ q: text, list: j.results ?? [] });
-        else { setFound({ q: text, list: [] }); setNotice(j?.error ?? 'Search failed'); }
+        else { setFound({ q: text, list: [] }); setNotice({ text: j?.error ?? 'Search failed', kind: 'error' }); }
       } catch {
         if (mine === searchSeq.current) setFound({ q: text, list: [] });   // settle the query so the dropdown cannot sit on "Searching…" forever
       } finally {
@@ -123,11 +131,11 @@ export default function UsMarkets() {
     try {
       const r = await fetch('/api/live-us', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
       const j = await r.json().catch(() => null) as { success?: boolean; error?: string } | null;
-      if (!r.ok || !j?.success) { setNotice(j?.error ?? `HTTP ${r.status}`); return false; }
+      if (!r.ok || !j?.success) { setNotice({ text: j?.error ?? `HTTP ${r.status}`, kind: 'error' }); return false; }
       await load();
       return true;
     } catch (e) {
-      setNotice(e instanceof Error ? e.message : 'Network error');
+      setNotice({ text: e instanceof Error ? e.message : 'Network error', kind: 'error' });
       return false;
     } finally { setBusy(null); }
   }, [load]);
@@ -143,7 +151,7 @@ export default function UsMarkets() {
   const live = health === 'live' && snapshotAgeMs != null && snapshotAgeMs < 15_000;
 
   const addInstrument = async (inst: UsInstrument) => {
-    if (have.has(inst.id)) { setNotice(`${inst.symbol} is already on the list`); return; }
+    if (have.has(inst.id)) { setNotice({ text: `${inst.symbol} is already on the list`, kind: 'info' }); return; }
     if (await post({ action: 'add', id: inst.id }, `add-${inst.id}`)) setQ('');
   };
   const addQuick = async (sym: string) => {
@@ -152,7 +160,7 @@ export default function UsMarkets() {
       const r = await fetch(`/api/live-us/search?q=${encodeURIComponent(sym)}`);
       const j = await r.json().catch(() => null) as { results?: UsInstrument[] } | null;
       const hit = j?.results?.find(x => x.symbol === sym);
-      if (!hit) { setNotice(`${sym} is not in Dhan's US instrument list`); return; }
+      if (!hit) { setNotice({ text: `${sym} is not in Dhan's US instrument list`, kind: 'error' }); return; }
       await addInstrument(hit);
     } finally { setBusy(null); }
   };
@@ -266,11 +274,15 @@ export default function UsMarkets() {
           {data && <span className="text-[10px] text-zinc-500">{rows.length}/{data.max} symbols</span>}
         </div>
 
-        {notice && (
-          <div role="alert" className="flex items-start gap-2 rounded-lg border border-red-500/30 bg-red-500/10 px-3 py-2 text-xs text-red-400">
-            <AlertTriangle className="h-3.5 w-3.5 shrink-0 mt-0.5" aria-hidden="true" /><span>{notice}</span>
+        {notice && (notice.kind === 'info' ? (
+          <div role="status" className="flex items-start gap-2 rounded-lg border border-zinc-700 bg-zinc-900 px-3 py-2 text-xs text-zinc-300">
+            <Info className="h-3.5 w-3.5 shrink-0 mt-0.5" aria-hidden="true" /><span>{notice.text}</span>
           </div>
-        )}
+        ) : (
+          <div role="alert" className="flex items-start gap-2 rounded-lg border border-red-500/30 bg-red-500/10 px-3 py-2 text-xs text-red-400">
+            <AlertTriangle className="h-3.5 w-3.5 shrink-0 mt-0.5" aria-hidden="true" /><span>{notice.text}</span>
+          </div>
+        ))}
         {error && (
           <div role="alert" className="flex items-start gap-2 rounded-lg border border-red-500/30 bg-red-500/10 px-3 py-2 text-xs text-red-400">
             <AlertTriangle className="h-3.5 w-3.5 shrink-0 mt-0.5" aria-hidden="true" /><span>{error}{data ? ' - showing the last loaded data.' : ''}</span>
