@@ -14,6 +14,7 @@ const MAX_TOMBSTONES = 1000;
 const KEEP_KEYS: ReadonlySet<string> = new Set(HD_ALGO_KEYS);
 const KEEP_LEG_KEYS: ReadonlySet<string> = new Set(HD_LEG_KEYS);
 const LEG_NUMBERS = ['strikeValue', 'lots', 'slPct', 'tgtPct', 'strike', 'openLots', 'avgEntry', 'firstEntry', 'entryDelta', 'realized', 'lastPx', 'lastPxAt', 'reentryPx', 'reentries', 'openedAt'] as const;
+const ID_RE = /^[A-Za-z0-9_-]{1,80}$/;
 const isNum = (v: unknown): v is number => typeof v === 'number' && Number.isFinite(v);
 
 interface Ledger {
@@ -53,7 +54,8 @@ function write(l: Ledger): void {
 /** Why an incoming algo cannot be stored, or null. The message is shown to the user. */
 function algoError(a: unknown): string | null {
   const x = a as HdAlgo;
-  if (!isHdAlgoShape(x) || !x.id || typeof x.name !== 'string') return 'not an algo';
+  if (!isHdAlgoShape(x) || !x.id || !ID_RE.test(x.id) || typeof x.name !== 'string' || x.name.length > 200) return 'not an algo';
+  if (!['ACTIVE', 'PAUSED', 'DONE'].includes(x.phase) || !['INTRADAY', 'MARGIN'].includes(x.product) || typeof x.armed !== 'boolean') return 'bad phase / product / armed flag';
   // Accounting totals are never defaulted: an unreadable one is refused with its name, not silently zeroed.
   if (!Number.isFinite(x.cycle)) return 'cycle is not a number';
   if (!Number.isFinite(x.cumRealized)) return 'cumRealized is not a number';
@@ -163,7 +165,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       for (const incoming of list) {
         const err = algoError(incoming);
         if (err) { results.push({ id: String(incoming.id), status: 'rejected', error: err }); continue; }
-        if (ledger.deleted[incoming.id]) { results.push({ id: incoming.id, status: 'rejected', error: 'deleted' }); continue; }
+        if (Object.hasOwn(ledger.deleted, incoming.id)) { results.push({ id: incoming.id, status: 'rejected', error: 'deleted' }); continue; }
         const idx = ledger.algos.findIndex((a) => isHdAlgoShape(a) && a.id === incoming.id);
         const existing = idx >= 0 ? (ledger.algos[idx] as HdAlgo) : undefined;
         if (!existing && ledger.algos.filter(isHdAlgoShape).length >= MAX_ALGOS) {
@@ -209,7 +211,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
 export async function DELETE(req: NextRequest): Promise<NextResponse> {
   try {
     const body = await req.json() as { id?: string };
-    if (typeof body.id !== 'string' || !body.id) return NextResponse.json({ success: false, error: 'id required' }, { status: 400 });
+    if (typeof body.id !== 'string' || !ID_RE.test(body.id)) return NextResponse.json({ success: false, error: 'id required' }, { status: 400 });
     const out = await withLock(() => {
       const ledger = read();
       const target = ledger.algos.find((a) => isHdAlgoShape(a) && a.id === body.id) as HdAlgo | undefined;

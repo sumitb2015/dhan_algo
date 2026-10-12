@@ -270,7 +270,7 @@ export function useHarvestDesk() {
       // Not in the index poll (SENSEX), or it stopped arriving: any fresh chain of this underlying has the spot.
       let viaChain = 0;
       if (polled <= 0) {
-        for (const e of [exps[0] ?? '', ...exps.slice(1)]) {
+        for (const e of exps) {
           const cs = chainFor(e)?.spot ?? 0;
           if (cs > 0) { viaChain = cs; break; }
         }
@@ -576,7 +576,10 @@ export function useHarvestDesk() {
         if (!cur) return a;
         const err = validateLeg({ ...cur, ...patch });
         if (err) { toast.error(err); return a; }
-        return { ...a, legs: a.legs.map((l) => (l.id === legId ? { ...l, ...patch } : l)) };
+        // Changing what a leg trades voids a pending re-entry, which would otherwise re-sell the old strike on the new leg.
+        const drop: Partial<HdLeg> = cur.waitingReentry && ['option', 'side', 'expiry', 'strikeBy', 'strikeValue'].some((k) => k in patch)
+          ? { waitingReentry: false, reentryPx: undefined, strike: undefined } : {};
+        return { ...a, legs: a.legs.map((l) => (l.id === legId ? { ...l, ...patch, ...drop } : l)) };
       });
     },
     addLeg: (id: string, role: HdLeg['role'] = 'main') => {

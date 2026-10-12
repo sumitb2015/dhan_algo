@@ -736,3 +736,19 @@ test('the stale-price note list stays bounded', () => {
   a = stepAlgo(a, market({ px: () => null, hm: '15:17', now: T0 + 5000 }));   // a close attempt that falls back
   assert.ok((a.staleCloses?.length ?? 0) <= 20);
 });
+
+test('a leg whose expiry has passed is settled and the cycle banked, so it cannot stay open for ever', () => {
+  const a = armed('imbalance_straddle');
+  a.day = '2026-10-12';
+  a.phase = 'ACTIVE';
+  const c = ce(a); const p = pe(a);
+  Object.assign(c, { status: 'OPEN', strike: 25000, expiryUsed: EXP, openLots: 1, avgEntry: 100, lastPx: 60, lastPxAt: T0 - 5 * 60 * MIN });
+  Object.assign(p, { status: 'OPEN', strike: 25000, expiryUsed: EXP, openLots: 1, avgEntry: 100 });
+  const m = market({ now: T0 + 24 * 60 * MIN, day: '2026-10-14', hm: '09:30', px: () => null });
+  const out = stepAlgo(a, m);
+  assert.ok(!out.legs.some(isOpen));
+  assert.equal(out.cycle, a.cycle + 1);
+  assert.ok(out.events.some((e) => e.k === 'EXPIRY'));
+  // CE settled at its last price 60 (+40/unit), PE at intrinsic floor 0.05 (spot 25000 = strike)
+  assert.ok(out.cumRealized > 0);
+});

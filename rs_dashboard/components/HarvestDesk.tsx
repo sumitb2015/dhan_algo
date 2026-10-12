@@ -484,7 +484,7 @@ function AlgoCard({ algo, desk, tab, setTab, open, setOpen }: {
                 <table className="w-full min-w-[1080px] border-collapse">
                   <thead>
                     <tr>{HEAD.map((h, i) => (
-                      <th key={`${h}${i}`} className={cn('px-2 py-1 text-left font-bold uppercase tracking-wide text-zinc-500', TXT_MICRO, ['Strike', 'Entry', 'LTP', 'P&L'].includes(h) && 'text-right')}
+                      <th key={`${h}${i}`} className={cn('bg-zinc-800 px-2 py-1.5 text-left text-xs font-bold uppercase tracking-wide text-white', ['Strike', 'Entry', 'LTP', 'P&L'].includes(h) && 'text-right')}
                         title={h === 'RE' ? 'Re-enter after an SL / target exit' : undefined}>{h}</th>
                     ))}</tr>
                   </thead>
@@ -553,6 +553,7 @@ export default function HarvestDesk() {
   const [tabs, setTabs] = useState<Record<string, 'legs' | 'controls' | 'log'>>({});
   const [closed, setClosed] = useState<Record<string, boolean>>({});
 
+  const dataDay = desk.clock ? new Date(desk.clock).toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' }) : '';
   const totals = useMemo(() => {
     let day = 0; let priced = 0; let unpriced = 0; let open = 0;
     for (const a of algos) {
@@ -578,6 +579,7 @@ export default function HarvestDesk() {
           </div>
         </div>
         <div className="flex flex-wrap items-center gap-2">
+          {dataDay && <Chip tone="zinc" title="Date of the prices on screen (IST)">DATA: {dataDay}</Chip>}
           <Chip tone="sky" title="Fills happen at the quoted LTP. This page never calls an order route.">Paper · SIM only</Chip>
           {totals.priced + totals.unpriced > 0 && (
             <span className={cn('rounded-lg border border-zinc-800 bg-zinc-900 px-2.5 py-1.5 font-mono text-xs font-bold', pnlTone(totals.day))}

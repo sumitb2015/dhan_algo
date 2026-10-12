@@ -639,6 +639,22 @@ export function stepAlgo(prev: HdAlgo, m: HdMarket): HdAlgo {
     }
   }
 
+  // A contract past its expiry no longer quotes and nothing could ever close it: settle it at its last known price
+  // (intrinsic value at the current spot when it never had one), then bank the cycle if nothing else is open.
+  const expired = a.legs.filter((l) => isOpen(l) && l.expiryUsed && l.expiryUsed < m.day && px(quoteOf(l, m)) == null);
+  if (expired.length) {
+    for (const l of expired) {
+      if (!(l.lastPx != null && l.lastPx > 0)) {
+        const k = l.strike ?? 0;
+        l.lastPx = Math.max(l.option === 'CE' ? m.spot - k : k - m.spot, 0.05);
+      }
+      l.lastPxAt = m.now;
+      s.unfill(l, l.openLots, 'EXPIRED', Infinity);
+      ev('EXPIRY', `${l.option} ${l.strike} expired ${l.expiryUsed}: settled at ${l.lastPx!.toFixed(2)}`);
+    }
+    if (!s.openLegs().length) s.closeAll('expired contracts settled', { phase: 'ACTIVE' });
+  }
+
   if (a.phase === 'PAUSED' && a.pausedUntil != null && m.now >= a.pausedUntil) {
     a.phase = 'ACTIVE';
     a.pausedUntil = undefined;
@@ -956,7 +972,7 @@ function balanceStep(a: HdAlgo, m: HdMarket, s: ReturnType<typeof session>) {
       return true;
     }
     const old = leg.strike!;
-    s.unfill(leg, leg.openLots, 'ROLL');
+    if (!s.unfill(leg, leg.openLots, 'ROLL')) { s.ev('SKIP', `${leg.option} ${old}: no price to close for the roll`, false); return false; }
     leg.status = 'IDLE';
     leg.openLots = 0;
     leg.avgEntry = 0;
@@ -1086,12 +1102,14 @@ function diagonalRisk(a: HdAlgo, m: HdMarket, s: ReturnType<typeof session>, mtm
     }
     if (halvePct > 0 && dd >= halvePct && !a.halved) {
       const sh = a.legs.find((l) => l.role === 'short' && isOpen(l));
-      a.halved = true;
       if (sh && sh.openLots > 1) {
+        // Marked done only once the buy-back really happened; an unpriced short is retried next tick.
         const cut = Math.floor(sh.openLots / 2);
-        s.unfill(sh, cut, 'HALVE');
-        s.ev('HALVE', `Drawdown ${dd.toFixed(1)}% — bought back ${cut}L of the short call`);
-      } else s.touch();
+        if (s.unfill(sh, cut, 'HALVE')) {
+          a.halved = true;
+          s.ev('HALVE', `Drawdown ${dd.toFixed(1)}% — bought back ${cut}L of the short call`);
+        }
+      } else { a.halved = true; s.touch(); }
     }
     const lossPct = numCtl(c, 'dailyLossPct');
     const day = equity - a.dayStartPnl;
@@ -1190,7 +1208,7 @@ function sellShort(a: HdAlgo, m: HdMarket, s: ReturnType<typeof session>, label:
   if (shortLeg.lots > 0) lots = Math.min(lots, s.lotsFor(shortLeg));
   if (isOpen(shortLeg)) {
     const old = shortLeg.strike;
-    s.unfill(shortLeg, shortLeg.openLots, 'ROLL');
+    if (!s.unfill(shortLeg, shortLeg.openLots, 'ROLL')) { s.ev('SKIP', `${shortLeg.option} ${old}: no price to buy back for the roll`, false); return false; }
     shortLeg.status = 'IDLE';
     shortLeg.openLots = 0;
     shortLeg.avgEntry = 0;
@@ -1257,7 +1275,7 @@ export function exitLegNow(prev: HdAlgo, legId: string, m: HdMarket, lots?: numb
   const s = session(a, m);
   const leg = a.legs.find((l) => l.id === legId);
   if (!leg || !isOpen(leg)) return { algo: prev, notes: ['Leg is not open'], changed: false };
-  const n = lots != null ? Math.min(lots, leg.openLots) : leg.openLots;
+  const n = lots != null ? Math.min(Math.max(1, Math.floor(lots)), leg.openLots) : leg.openLots;
   const k = `${leg.option} ${leg.strike}`;
   const hadLive = px(quoteOf(leg, m)) != null;
   if (!s.unfill(leg, n, 'MANUAL', HD_MANUAL_LAST_PX_MAX_AGE_MS)) return { algo: prev, notes: [`${k}: no live (or under 30 s old) price — not closed`], changed: false };
