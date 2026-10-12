@@ -4,6 +4,7 @@ import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import {
   ChevronDown, ChevronRight, CirclePlay, LogOut, Plus, RefreshCw, RotateCcw, ShieldOff, Sprout, Trash2, X,
 } from 'lucide-react';
+import Link from 'next/link';
 import NavBar from '@/components/NavBar';
 import { cn } from '@/lib/utils';
 import { useHarvestDesk, type FeedSource } from '@/components/harvestDesk/useHarvestDesk';
@@ -574,8 +575,8 @@ export default function HarvestDesk() {
           </div>
           <div>
             <p className="mb-0.5 text-xs font-bold uppercase tracking-[0.16em] text-emerald-400">Strategies · Premium Harvest</p>
-            <h1 className="text-sm font-bold leading-none tracking-tight text-white">Harvest Desk</h1>
-            <p className="mt-1 text-xs font-medium text-zinc-500">Row-by-row legs with every documented control of the harvest strategies</p>
+            <h1 className="text-sm font-bold leading-none tracking-tight text-white">Harvest Sandbox</h1>
+            <p className="mt-1 text-xs font-medium text-zinc-500">Paper simulator of the harvest rules, not the real scripts</p>
           </div>
         </div>
         <div className="flex flex-wrap items-center gap-2">
@@ -597,9 +598,14 @@ export default function HarvestDesk() {
       </header>
 
       <main className="mx-auto w-full max-w-[1600px] flex-1 space-y-4 px-6 py-5">
+        <div role="note" className="rounded-xl border border-sky-500/30 bg-sky-500/10 px-3 py-2 text-xs text-sky-200">
+          This is a paper <b>simulator</b> that re-implements the Premium Harvest rules in the browser. It can differ from the Python
+          scripts, so do not read its results as what a script would do. To run the real scripts (dry run first) use{' '}
+          <Link href="/strategies-plus" className="font-bold underline">Strategies+</Link>.
+        </div>
         {isLeader === false && (
           <div role="status" className="rounded-xl border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-200">
-            Harvest Desk is open in another tab. That tab runs the engine; this one is read-only and refreshes every few seconds.
+            Harvest Sandbox is open in another tab. That tab runs the engine; this one is read-only and refreshes every few seconds.
           </div>
         )}
         {loadError && !loaded && (

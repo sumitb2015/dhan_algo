@@ -1,6 +1,6 @@
 import HarvestDesk from '@/components/HarvestDesk';
 
-export const metadata = { title: 'Harvest Desk — Premium Harvest Algos' };
+export const metadata = { title: 'Harvest Sandbox — Premium Harvest Simulator' };
 
 export default function HarvestDeskPage() {
   return <HarvestDesk />;

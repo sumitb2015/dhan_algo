@@ -392,10 +392,10 @@ export const TERMINAL_PILLARS: TerminalPillarGroup[] = [
         desc: 'Cross-broker algorithmic strategy orchestrator and execution router',
       },
       {
-        name: 'Harvest Desk',
+        name: 'Harvest Sandbox',
         href: '/harvest-desk',
         badge: 'SIM',
-        desc: 'Premium Harvest strategies as leg rows with every documented control, paper-traded',
+        desc: 'Paper simulator of the Premium Harvest rules. Not the real scripts: run those from Strategies+',
       },
       {
         name: 'Nifty 500 Momentum Portfolio',

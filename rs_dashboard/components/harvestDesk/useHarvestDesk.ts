@@ -344,7 +344,7 @@ export function useHarvestDesk() {
       if (!batch.length) return;
       const seq = ++seqRef.current;
       const results = await postAlgos(batch.map(({ a }) => ({ ...a, rev: revRef.current.get(a.id) ?? a.rev ?? 0, writer: writerId(), wseq: seq, updatedAt: now })));
-      if (!results) { tell('net', 'Harvest Desk could not save — changes are kept in this tab only until it reconnects'); return; }
+      if (!results) { tell('net', 'Harvest Sandbox could not save — changes are kept in this tab only until it reconnects'); return; }
       for (const { a, snap } of batch) {
         const r = results.find((x) => x.id === a.id);
         if (!r) continue;
