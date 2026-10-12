@@ -85,3 +85,12 @@ test('classifyStructure names debit vertical spreads, not just credit ones', () 
   assert.strictEqual(classifyStructure([g(23000, 'PE', 'BUY'), g(22000, 'PE', 'SELL')]).structure, 'Bear Put Spread');
   assert.strictEqual(classifyStructure([g(22000, 'PE', 'BUY'), g(23000, 'PE', 'SELL')]).structure, 'Bull Put Spread');
 });
+
+test('classifyStructure: shorts at the same strike is an Iron Butterfly, not an Iron Condor', () => {
+  const fly = classifyStructure([
+    leg(100, 'CE', 'SELL', 1), leg(120, 'CE', 'BUY', 1),
+    leg(100, 'PE', 'SELL', 1), leg(80, 'PE', 'BUY', 1),
+  ]);
+  assert.strictEqual(fly.structure, 'Iron Butterfly');
+  assert.strictEqual(fly.riskType, 'defined');
+});
