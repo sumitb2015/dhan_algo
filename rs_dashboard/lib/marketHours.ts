@@ -27,3 +27,20 @@ export function isMcxLive(now: Date): boolean {
 export function isUnderlyingLive(underlying: string, now: Date): boolean {
   return isMcxUnderlying(underlying) ? isMcxLive(now) : isNseLive(now);
 }
+
+/** The NSE session whose numbers a ranking or quote fetched at `nowMs` belongs to, as 'YYYY-MM-DD' (IST).
+ *  A trading day from 09:15 IST is its own session; before the open, on a weekend or on a holiday it is the last trading day
+ *  before it. This is inferred from the calendar - the Market Movers payload itself carries no date. */
+export function lastNseSessionDate(nowMs: number): string {
+  const today = istDateIso(nowMs);
+  const ist = new Date(new Date(nowMs).toLocaleString('en-US', { timeZone: 'Asia/Kolkata' }));
+  const minutes = ist.getHours() * 60 + ist.getMinutes();
+  if (isNseTradingDay(today) && minutes >= 9 * 60 + 15) return today;
+  let d = new Date(`${today}T00:00:00Z`).getTime();
+  for (let i = 0; i < 14; i++) {
+    d -= 86_400_000;
+    const iso = new Date(d).toISOString().slice(0, 10);
+    if (isNseTradingDay(iso)) return iso;
+  }
+  return today;
+}
