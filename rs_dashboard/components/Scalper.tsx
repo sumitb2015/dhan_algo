@@ -8,7 +8,7 @@ import { partialCloseChips } from '@/lib/partialQty';
 import { positionKey, positionProduct, findLivePosition } from '@/lib/positionProduct';
 import { normalizeExpiry, parseTradingSymbol } from '@/lib/positionLegs';
 import { cn } from '@/lib/utils';
-import type { BracketLevels } from '@/lib/superOrder';
+import { bracketsForRow, type BracketLevels } from '@/lib/superOrder';
 
 // Visible keyboard-only focus ring for every clickable control on this page and
 // on AdvancedScalper.tsx (which imports this rather than redefining it, since
@@ -709,7 +709,7 @@ export interface PositionsTableProps {
   lotSizeFor?: (row: Record<string, unknown>) => number | null;
   /** Partial square-off. `units` is ABSOLUTE quantity, already rounded to whole lots. */
   onClosePartial?: (pos: Record<string, unknown>, units: number, pct: number) => void;
-  /** Live bracket levels by securityId (Dhan only). Omit where brackets do not apply. */
+  /** Live bracket levels by contract and product (lib/superOrder's bracketLevelsByContract; Dhan only). Omit where brackets do not apply. */
   brackets?: Record<string, BracketLevels[]>;
   sort: SortState;
   onSort: (key: string) => void;
@@ -794,14 +794,18 @@ function BracketLevelsLine({ levels, ltp }: { levels: BracketLevels[]; ltp: numb
   const b = levels[0];
   const px = (n: number | null) => (n != null ? n.toFixed(2) : '-');
   const away = (n: number | null) => (n != null && ltp > 0 ? `${Math.abs(n - ltp).toFixed(2)} pts from LTP` : 'distance unknown');
-  const title = `Bracket order ${b.orderId} resting at the broker. Target ${px(b.target)} (${away(b.target)}), stop ${px(b.stop)} (${away(b.stop)})`
-    + `${b.trail ? `, trailing ${b.trail} pts` : ''}${levels.length > 1 ? `. ${levels.length - 1} more bracket(s) on this contract.` : '.'}`;
+  const title = `Bracket order ${b.orderId}${b.entryPending ? ' - its entry has NOT filled yet, so these exits protect nothing until it does' : ' resting at the broker'}. `
+    + `Target ${px(b.target)} (${away(b.target)}), stop ${px(b.stop)} (${away(b.stop)})`
+    + `${b.trail ? `, trailing ${b.trail} pts - the stop level shown may be the initial one, not where it has trailed to` : ''}`
+    + `${levels.length > 1 ? `. ${levels.length - 1} more bracket(s) on this contract` : ''}. `
+    + `Only today's brackets are listed, so no line here does not mean there is no stop.`;
   return (
     <div className={cn('mt-0.5 flex items-center gap-1.5 whitespace-nowrap', TXT_LABEL, 'font-mono')} title={title}>
       <span className="text-zinc-500">BRK</span>
       <span className="text-emerald-400">T {px(b.target)}</span>
       <span className="text-rose-400">SL {px(b.stop)}</span>
       {b.trail ? <span className="text-amber-400">trail {b.trail}</span> : null}
+      {b.entryPending ? <span className="text-amber-400">entry pending</span> : null}
       {levels.length > 1 ? <span className="text-zinc-500">+{levels.length - 1}</span> : null}
     </div>
   );
@@ -1143,7 +1147,7 @@ export const PositionsTable = React.memo(function PositionsTable({ data, broker,
               onAddLeg={onAddLeg}
               lotSizeFor={lotSizeFor}
               onClosePartial={onClosePartial}
-              bracket={brackets?.[String(row.securityId ?? '')]}
+              bracket={bracketsForRow(brackets, row.securityId, positionProduct(row))}
               selected={selected?.has(rowKey) ?? false}
               onToggleSelect={onToggleSelect}
             />

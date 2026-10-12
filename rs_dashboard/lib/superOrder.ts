@@ -200,11 +200,15 @@ export function hasUnmatchableActive(rows: Record<string, unknown>[]): boolean {
 /** The resting exit levels of one live bracket, for showing on a position row. */
 export interface BracketLevels {
   orderId: string;
+  /** Product the bracket was placed under (INTRADAY / MARGIN / CNC), null when the row does not say. */
+  productType: string | null;
+  /** True while the ENTRY leg has not fully traded: the exit legs exist but protect nothing yet. */
+  entryPending: boolean;
   /** Resting target price, null when that leg is not live or carries no readable price. */
   target: number | null;
   /** Resting stop-loss price, null when that leg is not live or carries no readable price. */
   stop: number | null;
-  /** Trailing step in points when the stop trails, else null. */
+  /** Trailing step in points when the stop trails, else null. With a trail the level shown may be the initial stop. */
   trail: number | null;
 }
 
@@ -213,36 +217,64 @@ const posNum = (v: unknown): number | null => {
   return typeof n === 'number' && Number.isFinite(n) && n > 0 ? n : null;
 };
 
+/** Lookup key for one contract under one product. An empty product is the "product unknown" bucket. */
+export const bracketRowKey = (securityId: unknown, productType: unknown): string =>
+  `${String(securityId ?? '')}|${String(productType ?? '').trim().toUpperCase()}`;
+
 /**
- * Live brackets keyed by securityId, from the raw GET /super/orders rows. A bracket is "live" for
- * display while its TARGET and/or STOP leg is still resting (ACTIVE); a filled or cancelled leg shows
- * no level. Levels come from the order's own `targetPrice` / `stopLossPrice` / `trailingJump`, falling
- * back to the leg's `price` / `triggerPrice`. UNCONFIRMED against a live account (same caveat as the
- * rest of this file): a level that cannot be read is null and the row simply shows "-", never a guess.
+ * Live brackets keyed by `bracketRowKey(securityId, product)`, from the raw GET /super/orders rows. A bracket is "live"
+ * for display while its TARGET and/or STOP leg is still resting (ACTIVE); a filled or cancelled leg shows no level.
+ * Each level prefers the leg's own price (what is actually resting, and what a trailing stop moves) and falls back to
+ * the order's `targetPrice` / `stopLossPrice`. UNCONFIRMED against a live account (same caveat as the rest of this
+ * file): a level that cannot be read is null and the row shows "-", never a guess.
  */
-export function bracketLevelsBySecurity(rows: Record<string, unknown>[]): Record<string, BracketLevels[]> {
+export function bracketLevelsByContract(rows: Record<string, unknown>[]): Record<string, BracketLevels[]> {
   const out: Record<string, BracketLevels[]> = {};
   for (const r of rows) {
     const orderId = String(r.orderId ?? '');
     const securityId = String(r.securityId ?? '');
     const legs = Array.isArray(r.legDetails) ? (r.legDetails as Record<string, unknown>[]) : [];
     if (!orderId || !securityId || legs.length === 0) continue;
-    const live = (name: SuperLeg) => legs.find(l => up(l.legName) === name && ACTIVE.has(up(l.orderStatus)));
-    const tl = live('TARGET_LEG');
-    const sl = live('STOP_LOSS_LEG');
-    if (!tl && !sl) continue;
-    const trail = posNum(sl?.trailingJump) ?? posNum(r.trailingJump);
-    (out[securityId] ??= []).push({
+    const find = (name: SuperLeg) => legs.find(l => up(l.legName) === name);
+    const tl = find('TARGET_LEG');
+    const sl = find('STOP_LOSS_LEG');
+    const entry = find('ENTRY_LEG');
+    const tLive = !!tl && ACTIVE.has(up(tl.orderStatus));
+    const sLive = !!sl && ACTIVE.has(up(sl.orderStatus));
+    if (!tLive && !sLive) continue;
+    const product = up(r.productType);
+    (out[bracketRowKey(securityId, product)] ??= []).push({
       orderId,
-      target: tl ? (posNum(r.targetPrice) ?? posNum(tl.price) ?? posNum(tl.triggerPrice)) : null,
-      stop: sl ? (posNum(r.stopLossPrice) ?? posNum(sl.triggerPrice) ?? posNum(sl.price)) : null,
-      trail,
+      productType: product || null,
+      entryPending: !!entry && ACTIVE.has(up(entry.orderStatus)),
+      target: tLive ? (posNum(tl!.price) ?? posNum(tl!.triggerPrice) ?? posNum(r.targetPrice)) : null,
+      stop: sLive ? (posNum(sl!.triggerPrice) ?? posNum(sl!.price) ?? posNum(r.stopLossPrice)) : null,
+      trail: posNum(sl?.trailingJump) ?? posNum(r.trailingJump),
     });
   }
   return out;
 }
 
-/** Stable signature of a levels map, so a poll that changed nothing can reuse the previous object (row memoization). */
-export function bracketLevelsKey(m: Record<string, BracketLevels[]>): string {
-  return JSON.stringify(Object.keys(m).sort().map(k => [k, m[k]]));
+/** The brackets for one position row: its own product's, plus any whose product the order row did not report. */
+export function bracketsForRow(map: Record<string, BracketLevels[]> | undefined, securityId: unknown, productType: unknown): BracketLevels[] | undefined {
+  if (!map) return undefined;
+  const own = map[bracketRowKey(securityId, productType)];
+  const unknown = map[bracketRowKey(securityId, '')];
+  if (own && unknown) return [...own, ...unknown];   // rare; a fresh array is fine, it only happens with unlabeled rows
+  return own ?? unknown;
+}
+
+/**
+ * Next levels map that keeps the PREVIOUS array for every contract whose levels did not change, and returns `prev`
+ * itself when nothing changed. Position rows are memoized on array identity, so one contract's change re-renders one row.
+ */
+export function reuseUnchanged(prev: Record<string, BracketLevels[]>, next: Record<string, BracketLevels[]>): Record<string, BracketLevels[]> {
+  const nk = Object.keys(next);
+  let same = nk.length === Object.keys(prev).length;
+  const out: Record<string, BracketLevels[]> = {};
+  for (const k of nk) {
+    if (prev[k] && JSON.stringify(prev[k]) === JSON.stringify(next[k])) out[k] = prev[k];
+    else { out[k] = next[k]; same = false; }
+  }
+  return same ? prev : out;
 }

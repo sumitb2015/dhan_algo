@@ -93,43 +93,82 @@ test('hasUnmatchableActive flags a live row without a securityId, ignores finish
   assert.ok(!hasUnmatchableActive([{ orderId: '9', orderStatus: 'TRADED' }, { orderId: '8', securityId: '1', orderStatus: 'PENDING' }]));
 });
 
-// ─── bracketLevelsBySecurity ──────────────────────────────────────────────
-import { bracketLevelsBySecurity, bracketLevelsKey } from './superOrder.ts';
+// ─── bracketLevelsByContract / bracketsForRow / reuseUnchanged ────────────
+import { bracketLevelsByContract, bracketRowKey, bracketsForRow, reuseUnchanged } from './superOrder.ts';
 
-test('bracketLevelsBySecurity: resting exit legs give levels; finished legs and other states show none', () => {
+const L = (legName: string, orderStatus: string, extra: Record<string, unknown> = {}) => ({ legName, orderStatus, ...extra });
+
+test('bracketLevelsByContract: resting exit legs give levels; finished legs and other states show none', () => {
   const rows = [
-    { orderId: '1', securityId: '111', targetPrice: 120.5, stopLossPrice: '80', trailingJump: 2, legDetails: [
-      { legName: 'ENTRY_LEG', orderStatus: 'TRADED' }, { legName: 'TARGET_LEG', orderStatus: 'PENDING' }, { legName: 'STOP_LOSS_LEG', orderStatus: 'TRIGGER_PENDING' } ] },
-    // target already filled: only the stop is still resting
-    { orderId: '2', securityId: '222', targetPrice: 50, stopLossPrice: 30, legDetails: [
-      { legName: 'ENTRY_LEG', orderStatus: 'TRADED' }, { legName: 'TARGET_LEG', orderStatus: 'TRADED' }, { legName: 'STOP_LOSS_LEG', orderStatus: 'PENDING' } ] },
-    // everything finished: no live bracket
-    { orderId: '3', securityId: '333', targetPrice: 50, stopLossPrice: 30, legDetails: [
-      { legName: 'TARGET_LEG', orderStatus: 'CANCELLED' }, { legName: 'STOP_LOSS_LEG', orderStatus: 'TRADED' } ] },
-    // no legDetails / no securityId: cannot be placed on a row
+    { orderId: '1', securityId: '111', productType: 'MARGIN', targetPrice: 120.5, stopLossPrice: '80', trailingJump: 2,
+      legDetails: [L('ENTRY_LEG', 'TRADED'), L('TARGET_LEG', 'PENDING'), L('STOP_LOSS_LEG', 'TRIGGER_PENDING')] },
+    { orderId: '2', securityId: '222', targetPrice: 50, stopLossPrice: 30,
+      legDetails: [L('ENTRY_LEG', 'TRADED'), L('TARGET_LEG', 'TRADED'), L('STOP_LOSS_LEG', 'PENDING')] },
+    { orderId: '3', securityId: '333', targetPrice: 50, stopLossPrice: 30, legDetails: [L('TARGET_LEG', 'CANCELLED'), L('STOP_LOSS_LEG', 'TRADED')] },
     { orderId: '4', securityId: '444', orderStatus: 'PENDING' },
-    { orderId: '5', legDetails: [{ legName: 'TARGET_LEG', orderStatus: 'PENDING' }], targetPrice: 9 },
+    { orderId: '5', legDetails: [L('TARGET_LEG', 'PENDING')], targetPrice: 9 },
   ];
-  assert.deepStrictEqual(bracketLevelsBySecurity(rows), {
-    '111': [{ orderId: '1', target: 120.5, stop: 80, trail: 2 }],
-    '222': [{ orderId: '2', target: null, stop: 30, trail: null }],
+  assert.deepStrictEqual(bracketLevelsByContract(rows), {
+    '111|MARGIN': [{ orderId: '1', productType: 'MARGIN', entryPending: false, target: 120.5, stop: 80, trail: 2 }],
+    '222|': [{ orderId: '2', productType: null, entryPending: false, target: null, stop: 30, trail: null }],
   });
 });
 
-test('bracketLevelsBySecurity: falls back to leg prices, rejects junk, keeps several brackets on one contract', () => {
+test('levels prefer the leg\'s own price (what a trailing stop moves) over the order-level original', () => {
+  const rows = [{ orderId: '1', securityId: '9', stopLossPrice: 80, targetPrice: 120, trailingJump: 2,
+    legDetails: [L('TARGET_LEG', 'PENDING', { price: 118 }), L('STOP_LOSS_LEG', 'TRIGGER_PENDING', { triggerPrice: 88.5, trailingJump: 1.5 })] }];
+  assert.deepStrictEqual(bracketLevelsByContract(rows)['9|'], [{ orderId: '1', productType: null, entryPending: false, target: 118, stop: 88.5, trail: 1.5 }]);
+});
+
+test('falls back to the order-level prices, rejects junk, keeps several brackets on one contract', () => {
   const rows = [
-    { orderId: '1', securityId: '9', legDetails: [{ legName: 'TARGET_LEG', orderStatus: 'PENDING', price: 77 }, { legName: 'STOP_LOSS_LEG', orderStatus: 'PENDING', triggerPrice: '55.5', trailingJump: 1.5 }] },
-    { orderId: '2', securityId: '9', targetPrice: 0, stopLossPrice: 'abc', legDetails: [{ legName: 'TARGET_LEG', orderStatus: 'OPEN' }, { legName: 'STOP_LOSS_LEG', orderStatus: 'PENDING' }] },
+    { orderId: '1', securityId: '9', targetPrice: 77, stopLossPrice: '55.5', legDetails: [L('TARGET_LEG', 'PENDING'), L('STOP_LOSS_LEG', 'PENDING')] },
+    { orderId: '2', securityId: '9', targetPrice: 0, stopLossPrice: 'abc', legDetails: [L('TARGET_LEG', 'OPEN'), L('STOP_LOSS_LEG', 'PENDING')] },
   ];
-  assert.deepStrictEqual(bracketLevelsBySecurity(rows)['9'], [
-    { orderId: '1', target: 77, stop: 55.5, trail: 1.5 },
-    { orderId: '2', target: null, stop: null, trail: null },        // live but unreadable: null, never a guess
+  assert.deepStrictEqual(bracketLevelsByContract(rows)['9|'], [
+    { orderId: '1', productType: null, entryPending: false, target: 77, stop: 55.5, trail: null },
+    { orderId: '2', productType: null, entryPending: false, target: null, stop: null, trail: null },   // live but unreadable: null
   ]);
 });
 
-test('bracketLevelsKey is order-independent and changes with the levels', () => {
-  const a = { '2': [{ orderId: 'x', target: 1, stop: 2, trail: null }], '1': [{ orderId: 'y', target: 3, stop: 4, trail: null }] };
-  const b = { '1': a['1'], '2': a['2'] };
-  assert.equal(bracketLevelsKey(a), bracketLevelsKey(b));
-  assert.notEqual(bracketLevelsKey(a), bracketLevelsKey({ ...a, '1': [{ orderId: 'y', target: 3.5, stop: 4, trail: null }] }));
+test('an unfilled ENTRY leg marks the bracket entryPending (its exits protect nothing yet)', () => {
+  const rows = [{ orderId: '1', securityId: '9', targetPrice: 120, stopLossPrice: 80,
+    legDetails: [L('ENTRY_LEG', 'PENDING'), L('TARGET_LEG', 'PENDING'), L('STOP_LOSS_LEG', 'PENDING')] },
+    { orderId: '2', securityId: '9', targetPrice: 120, stopLossPrice: 80,
+      legDetails: [L('ENTRY_LEG', 'PART_TRADED'), L('TARGET_LEG', 'PENDING')] }];
+  const got = bracketLevelsByContract(rows)['9|'];
+  assert.equal(got[0].entryPending, true);
+  assert.equal(got[1].entryPending, true);
+});
+
+test('bracketsForRow matches the row\'s product, plus unlabeled brackets; another product never leaks in', () => {
+  const rows = [
+    { orderId: '1', securityId: '9', productType: 'INTRADAY', targetPrice: 120, stopLossPrice: 80, legDetails: [L('TARGET_LEG', 'PENDING')] },
+    { orderId: '2', securityId: '9', productType: 'MARGIN', targetPrice: 130, stopLossPrice: 70, legDetails: [L('TARGET_LEG', 'PENDING')] },
+    { orderId: '3', securityId: '9', targetPrice: 140, stopLossPrice: 60, legDetails: [L('TARGET_LEG', 'PENDING')] },
+  ];
+  const m = bracketLevelsByContract(rows);
+  assert.deepStrictEqual(bracketsForRow(m, '9', 'INTRADAY')!.map(b => b.orderId), ['1', '3']);
+  assert.deepStrictEqual(bracketsForRow(m, '9', 'margin')!.map(b => b.orderId), ['2', '3']);   // case-insensitive
+  assert.deepStrictEqual(bracketsForRow(m, '9', 'CNC')!.map(b => b.orderId), ['3']);
+  assert.equal(bracketsForRow(m, '8', 'MARGIN'), undefined);
+  assert.equal(bracketsForRow(undefined, '9', 'MARGIN'), undefined);
+  assert.equal(bracketRowKey(9, ' margin '), '9|MARGIN');
+});
+
+test('reuseUnchanged keeps previous arrays for untouched contracts and returns prev when nothing changed', () => {
+  const b = (id: string, t: number) => ({ orderId: id, productType: null, entryPending: false, target: t, stop: 1, trail: null });
+  const prev = { '1|': [b('a', 10)], '2|': [b('b', 20)] };
+  const same = reuseUnchanged(prev, { '1|': [b('a', 10)], '2|': [b('b', 20)] });
+  assert.equal(same, prev);
+  const one = reuseUnchanged(prev, { '1|': [b('a', 10)], '2|': [b('b', 25)] });
+  assert.notEqual(one, prev);
+  assert.equal(one['1|'], prev['1|']);                    // untouched contract: same array (its row will not re-render)
+  assert.notEqual(one['2|'], prev['2|']);
+  assert.equal(reuseUnchanged(prev, {}) === prev, false);  // everything gone
+  assert.deepStrictEqual(reuseUnchanged(prev, {}), {});
+  assert.deepStrictEqual(reuseUnchanged({}, {}), {});
+  const added = reuseUnchanged(prev, { ...prev, '3|': [b('c', 5)] });
+  assert.equal(added['1|'], prev['1|']);
+  assert.ok(added['3|']);
 });

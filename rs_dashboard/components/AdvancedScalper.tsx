@@ -27,7 +27,7 @@ import MtmChart, { useMtmHistory } from './MtmChart';
 import ScalperGreeksModal from './analytics/ScalperGreeksModal';
 import AdvancedScalperOptionChainModal from './AdvancedScalperOptionChainModal';
 import { capCloseQty } from '@/lib/intradayCap';
-import { resolveBracket, legsToCancel, hasUnmatchableActive, bracketLevelsBySecurity, bracketLevelsKey, type BracketLevels, type SuperOrderInput } from '@/lib/superOrder';
+import { resolveBracket, legsToCancel, hasUnmatchableActive, bracketLevelsByContract, reuseUnchanged, type BracketLevels, type SuperOrderInput } from '@/lib/superOrder';
 import AdvancedScalperAddLotsModal, { type SubmitLegOrderParams } from './AdvancedScalperAddLotsModal';
 
 // ─── Types ────────────────────────────────────────────────────────
@@ -672,22 +672,24 @@ export default function AdvancedScalper() {
     Number(p.netQty) !== 0 && !(Number(p.lastTradedPrice) > 0)).length,
     [enrichedPositions]);
 
-  // Resting bracket (Super Order) target / stop per contract, shown under each open position's symbol. Dhan only.
+  // Resting bracket (Super Order) target / stop per contract and product, shown under each open position's symbol. Dhan only.
   // The levels are the broker's, read back from GET /super/orders; a failed read CLEARS them (an unknown level must
-  // read as unknown, not as the last value). Polled only while something is open and the tab is visible, with an
-  // in-flight guard so a slow response cannot stack requests, and an immediate refresh after this tab places or cancels one.
+  // read as unknown, not as the last value). Polled only on the Positions tab, while something is open and the tab is
+  // visible, with an in-flight guard so a slow response cannot stack requests, and an immediate refresh after this tab
+  // places or cancels one. `reuseUnchanged` keeps each contract's array identity so only a changed row re-renders.
   const [bracketLevels, setBracketLevels] = useState<Record<string, BracketLevels[]>>({});
-  const bracketLevelsKeyRef = useRef('');
+  const bracketLevelsRef = useRef<Record<string, BracketLevels[]>>({});
   const refreshBracketsRef = useRef<() => void>(() => {});
   const hasOpenPosition = useMemo(() => enrichedPositions.some(p => Number(p.netQty) !== 0), [enrichedPositions]);
+  const bracketsWanted = broker === 'dhan' && hasOpenPosition && activeTab === 'positions';
   useEffect(() => {
     const setLevels = (next: Record<string, BracketLevels[]>) => {
-      const k = bracketLevelsKey(next);
-      if (k === bracketLevelsKeyRef.current) return;   // unchanged: keep the object so memoized rows do not re-render
-      bracketLevelsKeyRef.current = k;
-      setBracketLevels(next);
+      const merged = reuseUnchanged(bracketLevelsRef.current, next);
+      if (merged === bracketLevelsRef.current) return;   // nothing changed: no state update, no re-render
+      bracketLevelsRef.current = merged;
+      setBracketLevels(merged);
     };
-    if (broker !== 'dhan' || !hasOpenPosition) { setLevels({}); refreshBracketsRef.current = () => {}; return; }
+    if (!bracketsWanted) { setLevels({}); refreshBracketsRef.current = () => {}; return; }
     let cancelled = false;
     let inflight = false;
     const tick = async () => {
@@ -696,7 +698,7 @@ export default function AdvancedScalper() {
       try {
         const j = await (await fetch('/api/super-order')).json() as { success?: boolean; orders?: Record<string, unknown>[] };
         if (cancelled) return;
-        setLevels(j.success ? bracketLevelsBySecurity(j.orders ?? []) : {});
+        setLevels(j.success ? bracketLevelsByContract(j.orders ?? []) : {});
       } catch {
         if (!cancelled) setLevels({});
       } finally {
@@ -707,7 +709,7 @@ export default function AdvancedScalper() {
     void tick();
     const id = setInterval(tick, 6000);
     return () => { cancelled = true; clearInterval(id); };
-  }, [broker, hasOpenPosition]);
+  }, [bracketsWanted]);
 
   const totalUnrealizedPnl = useMemo(() => enrichedPositions.reduce((sum, p) =>
     sum + (Number(p.unrealizedProfit) || 0), 0),
