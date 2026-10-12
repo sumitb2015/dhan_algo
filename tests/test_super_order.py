@@ -24,13 +24,13 @@ class SuperOrderTest(unittest.TestCase):
         mkt = {**BUY, "order_type": "MARKET", "price": None}
         self.assertIn("ref_price", validate_super_order(**mkt))
         self.assertIsNone(validate_super_order(**mkt, ref_price=100.0))
-        payload = build_place_payload("1", "c1", **{k: v for k, v in mkt.items()})
-        self.assertEqual(payload["price"], 0)
+        payload = build_place_payload("1", "c1", **mkt, ref_price=100.0)
+        self.assertEqual(payload["price"], 100.0)   # never 0: Dhan's SDK refuses it
         self.assertNotIn("refPrice", payload)
 
     def test_hard_limits(self):
         for bad in ({"quantity": 0}, {"quantity": 7.5}, {"quantity": 99999}, {"quantity": True},
-                    {"product_type": "CO"}, {"exchange_segment": "IDX_I"}, {"security_id": "NIFTY"}):
+                    {"product_type": "CO"}, {"exchange_segment": "IDX_I"}, {"exchange_segment": "NSE_EQ"}, {"security_id": "NIFTY"}):
             self.assertIsNotNone(validate_super_order(**{**BUY, **bad}), bad)
 
     def test_trailing_jump(self):
@@ -40,6 +40,8 @@ class SuperOrderTest(unittest.TestCase):
 
     def test_modify_legs(self):
         self.assertIsNone(validate_modify("TARGET_LEG", targetPrice=125.0))
+        self.assertIn("order_type", validate_modify("ENTRY_LEG", price=101.0))
+        self.assertIsNone(validate_modify("ENTRY_LEG", order_type="LIMIT", price=101.0))
         self.assertIn("cannot change", validate_modify("TARGET_LEG", stopLossPrice=95.0))
         self.assertIsNone(validate_modify("STOP_LOSS_LEG", stopLossPrice=95.0, trailingJump=0))
         self.assertEqual(validate_modify("STOP_LOSS_LEG"), "Nothing to modify")

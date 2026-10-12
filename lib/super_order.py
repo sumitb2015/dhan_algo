@@ -8,7 +8,8 @@ from __future__ import annotations
 from typing import Any, Dict, Optional
 
 SUPER_PRODUCTS = {"INTRADAY", "MARGIN", "CNC"}
-SUPER_SEGMENTS = {"NSE_EQ", "BSE_EQ", "NSE_FNO", "BSE_FNO", "MCX_COMM"}
+# Derivatives only: equity is excluded so a super order cannot bypass equity-order's rupee cap / no-shorting rules.
+SUPER_SEGMENTS = {"NSE_FNO", "BSE_FNO", "MCX_COMM"}
 SUPER_LEGS = ("ENTRY_LEG", "TARGET_LEG", "STOP_LOSS_LEG")
 SUPER_MAX_QTY = 3750
 
@@ -62,9 +63,11 @@ def validate_super_order(*, security_id: Any, exchange_segment: str, side: str, 
     return None
 
 
-def validate_modify(leg_name: str, **fields: Any) -> Optional[str]:
+def validate_modify(leg_name: str, order_type: Optional[str] = None, **fields: Any) -> Optional[str]:
     if leg_name not in _MODIFY_FIELDS:
         return f"Invalid leg_name: {leg_name}"
+    if leg_name == "ENTRY_LEG" and str(order_type).upper() not in ("LIMIT", "MARKET"):
+        return "ENTRY_LEG modify needs order_type LIMIT or MARKET"
     given = {k: v for k, v in fields.items() if v is not None}
     if not given:
         return "Nothing to modify"
@@ -82,7 +85,8 @@ def validate_modify(leg_name: str, **fields: Any) -> Optional[str]:
 def build_place_payload(client_id: str, correlation_id: str, *, security_id: Any, exchange_segment: str,
                         side: str, product_type: str, quantity: int, target_price: float,
                         stop_loss_price: float, order_type: str = "LIMIT",
-                        price: Optional[float] = None, trailing_jump: float = 0) -> Dict[str, Any]:
+                        price: Optional[float] = None, trailing_jump: float = 0,
+                        ref_price: Optional[float] = None) -> Dict[str, Any]:
     ot = str(order_type).upper()
     return {
         "dhanClientId": client_id,
@@ -93,7 +97,8 @@ def build_place_payload(client_id: str, correlation_id: str, *, security_id: Any
         "orderType": ot,
         "securityId": str(security_id),
         "quantity": quantity,
-        "price": price if ot == "LIMIT" else 0,
+        # Dhan's SDK refuses price 0, so a MARKET entry carries the reference price.
+        "price": price if ot == "LIMIT" else ref_price,
         "targetPrice": target_price,
         "stopLossPrice": stop_loss_price,
         "trailingJump": trailing_jump or 0,

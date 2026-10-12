@@ -27,7 +27,7 @@ import MtmChart, { useMtmHistory } from './MtmChart';
 import ScalperGreeksModal from './analytics/ScalperGreeksModal';
 import AdvancedScalperOptionChainModal from './AdvancedScalperOptionChainModal';
 import { capCloseQty } from '@/lib/intradayCap';
-import { resolveBracket, legsToCancel, type SuperOrderInput } from '@/lib/superOrder';
+import { resolveBracket, legsToCancel, hasUnmatchableActive, type SuperOrderInput } from '@/lib/superOrder';
 import AdvancedScalperAddLotsModal, { type SubmitLegOrderParams } from './AdvancedScalperAddLotsModal';
 
 // ─── Types ────────────────────────────────────────────────────────
@@ -229,6 +229,8 @@ export default function AdvancedScalper() {
   const [bracketTrail, setBracketTrail] = useState('0');
   // Derived (no reset effect): inactive on any other broker. The toggle itself is kept, so returning to Dhan finds it as left, still shown amber.
   const bracketActive = bracketOn && broker === 'dhan';
+  // Set once this tab books a bracket: from then on a failed look-up at close time is loud, not silent.
+  const bracketPlacedRef = useRef(false);
 
   // Top-10-by-weight stocks panel. Off by default so no equity bridge is
   // spawned unless it's actually wanted.
@@ -1573,10 +1575,22 @@ export default function AdvancedScalper() {
     let bracketNote = '';
     if (bracketActive) {
       const secId = boxSecId(box);
-      const open = secId ? Number(positionsBySecId[secId]?.netQty ?? 0) : 0;
+      // Position identity is (contract, product): a MARGIN long does not make an INTRADAY SELL a
+      // close - that SELL opens a fresh INTRADAY short, which is exactly what a bracket is for.
+      const open = secId
+        ? enrichedPositions
+            .filter(p => positionJoinKey(p) === secId && positionProduct(p) === productType)
+            .reduce((n, p) => n + Number(p.netQty ?? 0), 0)
+        : 0;
       const reduces = (side === 'SELL' && open > 0) || (side === 'BUY' && open < 0);
+      const quotesFresh = quotesAtRef.current > 0 && Date.now() - quotesAtRef.current <= QUOTES_STALE_MS;
       if (reduces) {
         bracketNote = ' · closing, no bracket';
+      } else if (mode === 'MARKET' && !quotesFresh) {
+        // The target/stop are priced off this tick; a frozen price could put the stop on the wrong
+        // side of the real market (instant stop-out) or beyond it.
+        addToast('error', `${side} ${box.side} not sent`, 'Live quotes are stale - bracket levels cannot be priced. Use LIMIT or wait for the feed.');
+        return;
       } else {
         const ltpNow = liveQuotes?.strikes?.[String(box.strike)]?.[box.side === 'CE' ? 'ce' : 'pe']?.ltp ?? 0;
         const r = resolveBracket({
@@ -1612,6 +1626,7 @@ export default function AdvancedScalper() {
         bracket,
       });
       if (j.success) {
+        if (bracket) bracketPlacedRef.current = true;
         addToast('success', `${side} ${box.side} placed`, `${opts?.forceMarket ? 'Hotkey market order · ' : ''}ID: ${j.order_id}${bracketNote}`);
         setTimeout(fetchTabData, 1000);
       } else {
@@ -1622,7 +1637,7 @@ export default function AdvancedScalper() {
       setOrderPendingBoxes(prev => { const s = new Set(prev); s.delete(boxId); return s; });
     }
   }, [boxes, expiry, underlying, lotSize, strikeMap, orderMode, productType, submitLegOrder, addToast, fetchTabData,
-      bracketActive, bracketTgt, bracketSl, bracketTrail, boxSecId, positionsBySecId, liveQuotes]);
+      bracketActive, bracketTgt, bracketSl, bracketTrail, boxSecId, enrichedPositions, positionJoinKey, liveQuotes]);
 
   // Confirm handler for the Add Lots modal (see openAddLotsModal/addLotsTarget
   // above) — places the order via the same submitLegOrder the order boxes use,
@@ -1734,9 +1749,16 @@ export default function AdvancedScalper() {
   const cancelBracketsFor = useCallback(async (securityId: string, partial: boolean, sym: string) => {
     try {
       const list = await (await fetch('/api/super-order')).json() as { success?: boolean; orders?: Record<string, unknown>[] };
-      if (!list.success) return;
+      if (!list.success) {
+        // Quiet for someone who never uses brackets; loud once this tab has booked one.
+        if (bracketPlacedRef.current) addToast('error', `${sym}: could not check for a live bracket`, 'A resting target/stop may still be live - check Dhan Orders');
+        return;
+      }
       const legs = legsToCancel(list.orders ?? [], securityId);
-      if (legs.length === 0) return;
+      if (legs.length === 0) {
+        if (hasUnmatchableActive(list.orders ?? [])) addToast('error', `${sym}: a live bracket could not be matched to this contract`, 'Cancel any resting target/stop in Dhan Orders');
+        return;
+      }
       const results = await Promise.all(legs.map(async l => {
         try {
           const r = await (await fetch(`/api/super-order?orderId=${encodeURIComponent(l.orderId)}&leg=${l.leg}`, { method: 'DELETE' })).json() as { success?: boolean };

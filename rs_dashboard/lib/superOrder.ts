@@ -11,7 +11,9 @@
 export type SuperLeg = 'ENTRY_LEG' | 'TARGET_LEG' | 'STOP_LOSS_LEG';
 
 export const SUPER_PRODUCTS = new Set(['INTRADAY', 'MARGIN', 'CNC']);
-export const SUPER_SEGMENTS = new Set(['NSE_EQ', 'BSE_EQ', 'NSE_FNO', 'BSE_FNO', 'MCX_COMM']);
+// Derivatives only. Cash-equity is deliberately excluded: equity-order/ enforces a rupee cap, owned-quantity
+// sells and no shorting, and a super order would bypass all three.
+export const SUPER_SEGMENTS = new Set(['NSE_FNO', 'BSE_FNO', 'MCX_COMM']);
 /** Units per order. Same backstop as fast-order's Triple Straddle cap (50 lots x 75). */
 export const SUPER_MAX_QTY = 3750;
 
@@ -71,7 +73,9 @@ export function buildPlacePayload(i: SuperOrderInput, correlationId: string): Re
     orderType: ot,
     securityId: String(i.securityId),
     quantity: i.quantity,
-    price: ot === 'LIMIT' ? i.price : 0,
+    // Dhan's own SDK refuses a super order with price 0, so a MARKET entry carries the reference price
+    // (the order type, not this field, decides how it fills).
+    price: ot === 'LIMIT' ? i.price : i.refPrice,
     targetPrice: i.targetPrice,
     stopLossPrice: i.stopLossPrice,
     trailingJump: i.trailingJump ?? 0,
@@ -80,6 +84,8 @@ export function buildPlacePayload(i: SuperOrderInput, correlationId: string): Re
 
 export interface SuperModifyInput {
   legName: SuperLeg;
+  /** Required for ENTRY_LEG (Dhan's modify carries it); ignored for the exit legs. */
+  orderType?: string;
   quantity?: number;
   price?: number;
   targetPrice?: number;
@@ -90,6 +96,7 @@ export interface SuperModifyInput {
 /** Each leg only accepts its own fields; sending others is a caller bug, so reject rather than strip. */
 export function validateModify(m: SuperModifyInput): string | null {
   const keys = (['quantity', 'price', 'targetPrice', 'stopLossPrice', 'trailingJump'] as const).filter(k => m[k] !== undefined);
+  if (m.legName === 'ENTRY_LEG' && m.orderType !== 'LIMIT' && m.orderType !== 'MARKET') return 'ENTRY_LEG modify needs orderType LIMIT or MARKET';
   const allowed: Record<SuperLeg, readonly string[]> = {
     ENTRY_LEG: ['quantity', 'price', 'targetPrice', 'stopLossPrice', 'trailingJump'],
     TARGET_LEG: ['targetPrice'],
@@ -175,3 +182,15 @@ export function legsToCancel(rows: Record<string, unknown>[], securityId: string
   return out;
 }
 const LEG_NAMES = new Set<string>(['ENTRY_LEG', 'TARGET_LEG', 'STOP_LOSS_LEG']);
+
+/**
+ * True when some live bracket row carries no securityId, so legsToCancel can never match it.
+ * Callers should warn rather than conclude "nothing to cancel".
+ */
+export function hasUnmatchableActive(rows: Record<string, unknown>[]): boolean {
+  return rows.some(r => {
+    if (String(r.securityId ?? '') !== '') return false;
+    const legs = Array.isArray(r.legDetails) ? (r.legDetails as Record<string, unknown>[]) : [];
+    return ACTIVE.has(up(r.orderStatus)) || legs.some(l => ACTIVE.has(up(l.orderStatus)));
+  });
+}

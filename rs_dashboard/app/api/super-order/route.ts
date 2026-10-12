@@ -131,7 +131,7 @@ export async function PUT(req: NextRequest): Promise<NextResponse> {
   if (bad) return NextResponse.json({ success: false, error: bad }, { status: 400 });
   try {
     await reserveOrderSlot();
-    const body: Record<string, unknown> = { orderId, legName: m.legName };
+    const body: Record<string, unknown> = { orderId, legName: m.legName, ...(m.legName === 'ENTRY_LEG' ? { orderType: m.orderType } : {}) };
     for (const k of ['quantity', 'price', 'targetPrice', 'stopLossPrice', 'trailingJump'] as const) if (m[k] !== undefined) body[k] = m[k];
     const json = await dhanPut(`/super/orders/${orderId}`, body) as Record<string, unknown>;
     invalidateBrokerCache('dhan');

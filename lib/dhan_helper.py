@@ -2609,12 +2609,13 @@ class DhanHelper:
         if not dhan_http:
             out["error"] = "dhan_http not accessible"
             return out
-        correlation_id = f"so{int(time.time() * 1000):x}"[:25]
+        correlation_id = f"so{int(time.time() * 1000):x}{random.randrange(16**4):04x}"
         out["correlation_id"] = correlation_id
         payload = build_place_payload(
             self._client_id_for_rest(), correlation_id, security_id=security_id, exchange_segment=exchange_segment,
             side=side, product_type=product_type, quantity=quantity, target_price=target_price,
-            stop_loss_price=stop_loss_price, order_type=order_type, price=price, trailing_jump=trailing_jump)
+            stop_loss_price=stop_loss_price, order_type=order_type, price=price, trailing_jump=trailing_jump,
+            ref_price=ref_price)
         try:
             res = dhan_http.post('/super/orders', payload)
         except Exception as e:
@@ -2628,14 +2629,22 @@ class DhanHelper:
             out.update(ok=True, order_id=order_id, status=body.get('orderStatus'))
             logger.info(f"Super order placed: {order_id} ({side} {quantity} {security_id}, {product_type})")
         else:
-            out["error"] = (res.get('remarks') if isinstance(res, dict) else None) or str(res)
-            logger.error(f"place_super_order rejected: {out['error']}")
+            remarks = res.get('remarks') if isinstance(res, dict) else None
+            out["error"] = remarks or str(res)
+            # The SDK turns EVERY exception (timeout, reset) into a failure dict with a STRING remark,
+            # and a genuine Dhan rejection into a DICT {error_code, ...}. A string remark therefore means
+            # "no parsed answer from Dhan": the bracket may exist, so it is unknown, not rejected.
+            if not isinstance(remarks, dict):
+                out["unknown"] = True
+                logger.error(f"place_super_order status UNKNOWN ({correlation_id}): {out['error']}")
+            else:
+                logger.error(f"place_super_order rejected: {out['error']}")
         return out
 
-    def modify_super_order(self, order_id: str, leg_name: str, **fields) -> bool:
-        """PUT /super/orders/{id}. fields: quantity, price, targetPrice, stopLossPrice, trailingJump (leg-specific)."""
+    def modify_super_order(self, order_id: str, leg_name: str, order_type: Optional[str] = None, **fields) -> bool:
+        """PUT /super/orders/{id}. fields: quantity, price, targetPrice, stopLossPrice, trailingJump (leg-specific); ENTRY_LEG also needs order_type."""
         from lib.super_order import validate_modify
-        err = validate_modify(leg_name, **fields)
+        err = validate_modify(leg_name, order_type, **fields)
         if err:
             logger.error(f"modify_super_order: {err}")
             return False
@@ -2645,6 +2654,7 @@ class DhanHelper:
             logger.error("modify_super_order: dhan_http.put not available in this SDK version.")
             return False
         payload = {"dhanClientId": self._client_id_for_rest(), "orderId": str(order_id), "legName": leg_name,
+                   **({"orderType": str(order_type).upper()} if leg_name == "ENTRY_LEG" else {}),
                    **{k: v for k, v in fields.items() if v is not None}}
         try:
             res = put(f'/super/orders/{order_id}', payload)
