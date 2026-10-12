@@ -7,7 +7,7 @@
 //  - an exit trigger records `firedAt` first, so a reload continues the exit instead of ignoring or repeating it,
 //  - alarms announce once per escalation and re-arm only after the reading recovers past a hysteresis margin.
 
-import type { MultiLegLeg } from './multiLegFocus.ts';
+import { LEG_FILL_GRACE_MS, type MultiLegLeg } from './multiLegFocus.ts';
 
 /** What a spot trigger does when the underlying crosses its level. EXIT_CE / EXIT_PE close every open CE / PE leg. */
 export type SpotAction = 'ALERT' | 'EXIT_ALL' | 'EXIT_CE' | 'EXIT_PE';
@@ -90,6 +90,30 @@ export function spotActionLegs(legs: MultiLegLeg[], action: SpotAction): MultiLe
 }
 
 /**
+ * True while an exit on the legs `action` names may still be unconfirmed: any of them holds a pending order, or was closed
+ * within the fill-grace window. An exit flips the leg to CLOSED on ACK, so a flat scope alone does not mean the position is
+ * flat: a rejected exit reopens the leg once the order book says so.
+ */
+export function legsSettling(legs: MultiLegLeg[], action: SpotAction, now: number): boolean {
+  return legs.some(l => {
+    if (l.option === 'FUT') return false;
+    if (action === 'EXIT_CE' && l.option !== 'CE') return false;
+    if (action === 'EXIT_PE' && l.option !== 'PE') return false;
+    if ((l.pendingOrders?.length ?? 0) > 0) return true;
+    return l.status === 'CLOSED' && l.closedAt != null && now - l.closedAt >= 0 && now - l.closedAt < LEG_FILL_GRACE_MS;
+  });
+}
+
+/**
+ * True when a SHORT leg on that side was closed but its exit is not yet confirmed. A retry whose scope is hedges only (the
+ * shorts already ACKed closed) must wait: if that exit is then rejected the short reopens, and selling the hedge first
+ * would have left it naked.
+ */
+export function shortsSettling(legs: MultiLegLeg[], action: SpotAction, now: number): boolean {
+  return legsSettling(legs.filter(l => l.side === 'S'), action, now);
+}
+
+/**
  * Debounce for a breach: returns the time the breach began and whether it has now lasted `confirmMs`.
  * Pass `since = undefined` when no breach was being tracked. Clears (since undefined) the moment it is not breached.
  */
@@ -109,15 +133,18 @@ export type GuardStep =
 /**
  * One evaluation of one guard (spot trigger or Greek band). `lastAttempt` is when an exit for it was last sent
  * (retry spacing); `scopeOpen` is how many legs its exit still has to close; `exits` is false for alert-only guards.
+ * `settling` = an exit order on its scope is still unconfirmed (see legsSettling): an exit marks the leg CLOSED when the broker
+ * ACKs it, and a rejection later reopens it, so the guard must not finish (and stop retrying) until that has settled.
  */
 export function stepGuard(
   g: { armed: boolean; firedAt?: string }, breached: boolean, exits: boolean, now: number,
-  state: { since?: number; lastAttempt?: number; scopeOpen: number },
+  state: { since?: number; lastAttempt?: number; scopeOpen: number; settling?: boolean },
 ): GuardStep {
   if (!g.armed) return { kind: 'idle' };
   if (g.firedAt) {
     // Firing: keep going until the scope is flat, whatever the reading does now.
-    if (!exits || state.scopeOpen === 0) return { kind: 'finish' };
+    if (!exits) return { kind: 'finish' };
+    if (state.scopeOpen === 0) return state.settling ? { kind: 'idle' } : { kind: 'finish' };
     return state.lastAttempt != null && now - state.lastAttempt < GUARD_EXIT_RETRY_MS ? { kind: 'idle' } : { kind: 'retry' };
   }
   const c = confirmBreach(state.since, breached, now);
@@ -127,7 +154,7 @@ export function stepGuard(
 
 export function stepSpotTrigger(
   t: SpotTrigger, spot: number | undefined | null, now: number,
-  state: { since?: number; lastAttempt?: number; scopeOpen: number },
+  state: { since?: number; lastAttempt?: number; scopeOpen: number; settling?: boolean },
 ): GuardStep {
   return stepGuard(t, spotBreached(t, spot), t.action !== 'ALERT', now, state);
 }
@@ -222,4 +249,66 @@ export function disarmGuards(g: BasketGuards | undefined): BasketGuards | undefi
     ...(g.greekBands ? { greekBands: g.greekBands.map(b => ({ ...b, armed: false, firedAt: undefined })) } : {}),
     ...(g.alarm ? { alarm: { ...g.alarm, armed: false } } : {}),
   };
+}
+
+// ── Edit reducers ─────────────────────────────────────────────────────────────
+// The panel applies these through a functional state update (patchGuards), never from the render's copy of `guards`: the
+// watcher writes the same object (firedAt, armed) and a stale whole-object write would revert it. Each reducer touches
+// only the item it names and leaves every other array by reference.
+
+const upd = <T extends { id: string }>(arr: T[] | undefined, id: string, fn: (x: T) => T): T[] | undefined =>
+  arr?.map(x => (x.id === id ? fn(x) : x));
+
+export const addSpotTrigger = (g: BasketGuards, t: SpotTrigger): BasketGuards => ({ ...g, spotTriggers: [...(g.spotTriggers ?? []), t] });
+export const removeSpotTrigger = (g: BasketGuards, id: string): BasketGuards => ({ ...g, spotTriggers: (g.spotTriggers ?? []).filter(t => t.id !== id) });
+/** Any edit disarms: a level changed under a live guard could fire on the very next tick. */
+export const editSpotTrigger = (g: BasketGuards, id: string, patch: Partial<SpotTrigger>): BasketGuards =>
+  ({ ...g, spotTriggers: upd(g.spotTriggers, id, t => ({ ...t, ...patch, armed: false, firedAt: undefined })) });
+export const setSpotArmed = (g: BasketGuards, id: string, armed: boolean): BasketGuards =>
+  ({ ...g, spotTriggers: upd(g.spotTriggers, id, t => ({ ...t, armed, firedAt: undefined })) });
+
+export const addGreekBand = (g: BasketGuards, b: GreekBand): BasketGuards => ({ ...g, greekBands: [...(g.greekBands ?? []), b] });
+export const removeGreekBand = (g: BasketGuards, id: string): BasketGuards => ({ ...g, greekBands: (g.greekBands ?? []).filter(b => b.id !== id) });
+export const editGreekBand = (g: BasketGuards, id: string, patch: Partial<GreekBand>): BasketGuards =>
+  ({ ...g, greekBands: upd(g.greekBands, id, b => ({ ...b, ...patch, armed: false, firedAt: undefined })) });
+export const setBandArmed = (g: BasketGuards, id: string, armed: boolean): BasketGuards =>
+  ({ ...g, greekBands: upd(g.greekBands, id, b => ({ ...b, armed, firedAt: undefined })) });
+
+export const editAlarm = (g: BasketGuards, patch: Partial<RiskAlarm>): BasketGuards =>
+  ({ ...g, alarm: { ...(g.alarm ?? { armed: false }), ...patch, armed: false } });
+export const setAlarmArmed = (g: BasketGuards, armed: boolean): BasketGuards =>
+  ({ ...g, alarm: { ...(g.alarm ?? { armed: false }), armed } });
+
+// ── Exiting one side ──────────────────────────────────────────────────────────
+
+export interface SideExitDeps<L> {
+  /** Sends the exit for one leg. `closed` is the broker ACK, not a fill; `maxAfter` is the broker |netQty| allowed once it fills. */
+  exitLeg: (leg: L) => Promise<{ closed: boolean; maxAfter?: number }>;
+  /** A leg whose exit is already in flight elsewhere: treated as NOT closed (it is not ours to confirm). */
+  isBusy: (leg: L) => boolean;
+  /** Reads the broker and says whether every listed short came down to its `maxAfter`. */
+  confirmShortsDown: (done: { leg: L; maxAfter: number }[]) => Promise<boolean>;
+}
+
+export type SideExitOutcome = 'done' | 'short_not_closed' | 'shorts_unconfirmed';
+
+/**
+ * Closes the legs of one side: shorts first, then the hedges, same rule as exitBasket (Invariants 9 and 10).
+ * A hedge is sold only when every short exit was ACKed AND the broker shows the shorts down. An ACK is not a fill: if
+ * the short exit is rejected afterwards, selling the hedge anyway leaves a naked short. With no hedges there is nothing
+ * to protect, so no confirmation is needed.
+ */
+export async function exitSide<L extends { side: 'B' | 'S' }>(scope: L[], deps: SideExitDeps<L>): Promise<SideExitOutcome> {
+  const shorts = scope.filter(l => l.side === 'S');
+  const longs = scope.filter(l => l.side === 'B');
+  const results = await Promise.all(shorts.map(async l => {
+    if (deps.isBusy(l)) return { closed: false as boolean, maxAfter: undefined as number | undefined };
+    try { return await deps.exitLeg(l); } catch { return { closed: false, maxAfter: undefined }; }
+  }));
+  if (results.some(r => !r.closed)) return 'short_not_closed';
+  if (longs.length === 0) return 'done';
+  const toVerify = shorts.flatMap((leg, i) => (results[i].maxAfter != null ? [{ leg, maxAfter: results[i].maxAfter as number }] : []));
+  if (toVerify.length && !(await deps.confirmShortsDown(toVerify))) return 'shorts_unconfirmed';
+  await Promise.all(longs.filter(l => !deps.isBusy(l)).map(async l => { try { await deps.exitLeg(l); } catch { /* the retry window resends */ } }));
+  return 'done';
 }

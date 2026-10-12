@@ -37,7 +37,7 @@ import {
 } from '@/lib/multiLegFocus';
 import {
   guardsArmed, spotActionLegs, stepSpotTrigger, stepGuard, readGreekBand, confirmBreach, lossLevel, lossRecovered, marginUtilisationPct, marginLevel,
-  marginRecovered, nextAlarmState, type AlarmLevel, type BasketGuards, type SpotTrigger,
+  marginRecovered, nextAlarmState, legsSettling, shortsSettling, exitSide, type AlarmLevel, type BasketGuards, type SpotTrigger,
 } from '@/lib/multiLegGuards';
 import { basketToGreekLegs, computeBasketGreeks } from '@/lib/multiLegGreeks';
 import { closeOrderProduct } from '@/lib/positionProduct';
@@ -1895,6 +1895,27 @@ export default function MultiLegFocus({
 
   const exitingBasketsRef = useRef<Set<string>>(new Set());
 
+  // An exit ACK is not a fill (RMS can still reject it). True once the broker's position book shows every listed short
+  // down to `maxAfter`; retried briefly because the book lags a fill. Shared by Exit All and the spot-trigger side exits.
+  const confirmShortsDown = useCallback(async (basket: MultiLegBasket, items: { leg: MultiLegLeg; maxAfter: number }[]): Promise<boolean> => {
+    const bk = executionBroker(basket, brokerNowRef.current) as Broker;
+    for (let attempt = 0; attempt < 4; attempt++) {
+      if (attempt > 0) await new Promise(r => setTimeout(r, 700));
+      try {
+        const res = await fetch(scalperRoute(bk, 'positions'));
+        const j = await res.json() as { success: boolean; data?: Record<string, unknown>[] };
+        if (!j.success || !Array.isArray(j.data)) continue;
+        const ok = items.every(({ leg, maxAfter }) => {
+          const fb = bk === 'dhan' && !leg.orderRef?.securityId ? resolveDhanSecurityId(basket, leg) : undefined;
+          const m = findLegPosition(bk, leg, j.data!, fb);
+          return m.kind === 'flat' || (m.kind === 'match' && Math.abs(Number(m.row.netQty ?? 0)) <= maxAfter);
+        });
+        if (ok) return true;
+      } catch { /* retry */ }
+    }
+    return false;
+  }, [resolveDhanSecurityId]);
+
   const exitBasket = useCallback(async (basketId: string) => {
     if (exitingBasketsRef.current.has(basketId)) return;
     exitingBasketsRef.current.add(basketId);
@@ -1942,23 +1963,9 @@ export default function MultiLegFocus({
         }
         // An exit ACK is not a fill (it can still be rejected by RMS). Confirm the
         // shorts actually came down at the broker before selling the hedges.
-        const toVerify = shorts.map((l, i) => ({ l, maxAfter: shortResults[i].maxAfter })).filter(v => v.maxAfter != null);
+        const toVerify = shorts.map((l, i) => ({ leg: l, maxAfter: shortResults[i].maxAfter })).filter((v): v is { leg: MultiLegLeg; maxAfter: number } => v.maxAfter != null);
         if (toVerify.length) {
-          const bk = executionBroker(basket, brokerNowRef.current) as Broker;
-          let verified = false;
-          for (let attempt = 0; attempt < 4 && !verified; attempt++) {
-            if (attempt > 0) await new Promise(r => setTimeout(r, 700));
-            try {
-              const res = await fetch(scalperRoute(bk, 'positions'));
-              const j = await res.json() as { success: boolean; data?: Record<string, unknown>[] };
-              if (!j.success || !Array.isArray(j.data)) continue;
-              verified = toVerify.every(({ l, maxAfter }) => {
-                const fb = bk === 'dhan' && !l.orderRef?.securityId ? resolveDhanSecurityId(basket, l) : undefined;
-                const m = findLegPosition(bk, l, j.data!, fb);
-                return m.kind === 'flat' || (m.kind === 'match' && Math.abs(Number(m.row.netQty ?? 0)) <= maxAfter!);
-              });
-            } catch { /* retry */ }
-          }
+          const verified = await confirmShortsDown(basket, toVerify);
           if (!verified && !window.confirm('Could not confirm the short legs are closed at the broker yet (an exit can still be rejected). Exit the hedge (BUY) legs anyway?')) {
             addToast('error', 'Hedges kept', 'Short exits not confirmed yet — exit the long legs once Orders/Positions show the shorts closed.');
             return;
@@ -1970,7 +1977,7 @@ export default function MultiLegFocus({
       exitingBasketsRef.current.delete(basketId);
       setExitingMap(prev => ({ ...prev, [basketId]: false }));
     }
-  }, [exitOneLeg, addToast, resolveDhanSecurityId, cancelWaitingEntry]);
+  }, [exitOneLeg, addToast, confirmShortsDown, cancelWaitingEntry]);
 
   // ── Add Lots to Existing Position Leg ─────────────────────────────
   const addLotsToLeg = useCallback(async (basketId: string, params: {
@@ -3393,15 +3400,23 @@ export default function MultiLegFocus({
     return any?.[1].spot ?? 0;
   }, [liveQuotes, activeUnderlying, chainData]);
 
-  // Closes the legs a spot trigger names: shorts first, hedges only once every short is confirmed closed.
+  // Closes the legs a spot trigger names. Same rule as Exit All: shorts first, and a hedge is sold only once the broker's
+  // position book shows the shorts down (an ACK is not a fill; a rejected short exit would leave the hedge's side naked).
   const runSpotExit = useCallback(async (basketId: string, scope: MultiLegLeg[]) => {
-    const free = (l: MultiLegLeg) => !exitingLegsRef.current.has(l.id);
-    const shorts = scope.filter(l => l.side === 'S');
-    const longs = scope.filter(l => l.side === 'B');
-    const shortRes = await Promise.all(shorts.map(l => (free(l) ? exitOneLeg(basketId, l).catch(() => ({ closed: false })) : Promise.resolve({ closed: false }))));
-    if (!shortRes.every(r => r.closed)) return;
-    await Promise.all(longs.filter(free).map(l => exitOneLeg(basketId, l).catch(() => ({ closed: false }))));
-  }, [exitOneLeg]);
+    const basket = basketsRef.current.find(b => b.id === basketId);
+    if (!basket) return;
+    const label = basketLabel(basket);
+    const outcome = await exitSide(scope, {
+      exitLeg: async leg => { const r = await exitOneLeg(basketId, leg); return { closed: r.closed, maxAfter: r.maxAfter }; },
+      isBusy: leg => exitingLegsRef.current.has(leg.id),
+      confirmShortsDown: items => confirmShortsDown(basket, items.map(i => ({ leg: i.leg, maxAfter: i.maxAfter }))),
+    });
+    if (outcome === 'short_not_closed') {
+      addToast('error', `${label}: spot trigger kept the hedges`, 'A short leg did not close, so the long legs were NOT sold. The trigger retries; resolve the short if it keeps failing.');
+    } else if (outcome === 'shorts_unconfirmed') {
+      addToast('error', `${label}: spot trigger kept the hedges`, 'The broker does not show the shorts closed yet (an exit can still be rejected). The trigger retries shortly.');
+    }
+  }, [exitOneLeg, confirmShortsDown, addToast]);
 
   useEffect(() => {
     if (isLeader !== true) return;
@@ -3414,7 +3429,9 @@ export default function MultiLegFocus({
       const label = basketLabel(basket);
       const openLegs = basket.legs.filter(l => l.status === 'OPEN' && l.fill);
       if (openLegs.length === 0) {
-        // Nothing left to protect: a guard that was already firing is done; the rest wait for a position.
+        // Nothing left to protect: a guard that was already firing is done; the rest wait for a position. Not while an exit
+        // is unconfirmed: it flips legs CLOSED on ACK and a rejection reopens them, which the guard must still see.
+        if (legsSettling(basket.legs, 'EXIT_ALL', now)) continue;
         if ((g.spotTriggers ?? []).some(t => t.armed && t.firedAt) || (g.greekBands ?? []).some(b => b.armed && b.firedAt)) {
           patchGuards(basket.id, gg => ({
             ...gg,
@@ -3432,7 +3449,7 @@ export default function MultiLegFocus({
       for (const t of g.spotTriggers ?? []) {
         const key = `${basket.id}:${t.id}`;
         const scope = spotActionLegs(basket.legs, t.action);
-        const step = stepSpotTrigger(t, spot, now, { since: rt.since.get(key), lastAttempt: rt.lastAttempt.get(key), scopeOpen: scope.length });
+        const step = stepSpotTrigger(t, spot, now, { since: rt.since.get(key), lastAttempt: rt.lastAttempt.get(key), scopeOpen: scope.length, settling: legsSettling(basket.legs, t.action, now) });
         if (step.kind === 'watch') { rt.since.set(key, step.since); continue; }
         if (step.kind === 'idle') { if (!t.firedAt) rt.since.delete(key); continue; }
         if (step.kind === 'finish') {
@@ -3442,6 +3459,8 @@ export default function MultiLegFocus({
         }
         if (busy) continue;   // an order action is in flight on this row: re-evaluate next tick
         const exits = t.action !== 'ALERT';
+        // Only hedges left while a short's exit is still unconfirmed: wait, a rejection would reopen the short.
+        if (exits && scope.length > 0 && scope.every(l => l.side === 'B') && shortsSettling(basket.legs, t.action, now)) continue;
         const desc = `${t.dir === 'above' ? 'above' : 'below'} ${t.level}`;
         if (step.kind === 'fire') {
           rt.since.delete(key);
@@ -3487,7 +3506,7 @@ export default function MultiLegFocus({
             }
             continue;
           }
-          const step = stepGuard(b, breached, true, now, { since: rt.since.get(key), lastAttempt: rt.lastAttempt.get(key), scopeOpen: openLegs.length });
+          const step = stepGuard(b, breached, true, now, { since: rt.since.get(key), lastAttempt: rt.lastAttempt.get(key), scopeOpen: openLegs.length, settling: legsSettling(basket.legs, 'EXIT_ALL', now) });
           if (step.kind === 'watch') { rt.since.set(key, step.since); continue; }
           if (step.kind === 'idle') { if (!b.firedAt) rt.since.delete(key); continue; }
           if (step.kind === 'finish') {
@@ -3495,6 +3514,7 @@ export default function MultiLegFocus({
             continue;
           }
           if (busy) continue;
+          if (openLegs.every(l => l.side === 'B') && shortsSettling(basket.legs, 'EXIT_ALL', now)) continue;
           if (step.kind === 'fire') {
             rt.since.delete(key);
             patchGuards(basket.id, gg => ({ ...gg, greekBands: gg.greekBands?.map(x => (x.id === b.id ? { ...x, firedAt: iso } : x)) }));
@@ -4049,6 +4069,7 @@ export default function MultiLegFocus({
                 availableFunds={rowBroker === broker ? fundsData?.available : undefined}
                 fundsUsed={rowBroker === broker ? fundsData?.used : undefined}
                 guardSpot={guardSpotFor(basket)}
+                onPatchGuards={fn => patchGuards(basket.id, fn)}
                 isLeader={isLeader !== false}
                 allBaskets={baskets}
                 selectedLegIds={selectedLegIds}

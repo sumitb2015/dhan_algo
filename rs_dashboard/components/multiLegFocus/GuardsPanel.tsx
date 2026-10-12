@@ -4,6 +4,7 @@ import React, { useState } from 'react';
 import { FOCUS_RING } from '@/components/Scalper';
 import RuleNumInput from './RuleNumInput';
 import {
+  addSpotTrigger, removeSpotTrigger, editSpotTrigger, setSpotArmed, addGreekBand, removeGreekBand, editGreekBand, setBandArmed, editAlarm, setAlarmArmed,
   spotArmBlocker, greekBandInvalid, readGreekBand, lossLevel, marginUtilisationPct, marginLevel, DEFAULT_WARN_PCT,
   type BasketGuards, type SpotTrigger, type SpotAction, type GreekBand, type GreekMetric, type RiskAlarm, type NetGreeks,
 } from '@/lib/multiLegGuards';
@@ -19,7 +20,8 @@ interface Props {
   funds: { available: number; used: number } | null;
   /** The page's leader tab is the only one that acts; other tabs show a note. */
   isLeader: boolean;
-  onChange: (next: BasketGuards) => void;
+  /** Functional update (see lib/multiLegGuards.ts reducers): the watcher writes the same object, so never replace it whole. */
+  onPatch: (fn: (g: BasketGuards) => BasketGuards) => void;
 }
 
 const SPOT_ACTIONS: { value: SpotAction; label: string }[] = [
@@ -41,41 +43,35 @@ const selCls = `h-6 bg-zinc-800 border border-zinc-700 rounded text-[11px] text-
 const chip = 'flex items-center gap-1.5 bg-zinc-900 border border-zinc-800 rounded px-2 py-0.5 text-[11px]';
 const iconBtn = `h-6 w-6 rounded text-zinc-400 hover:text-zinc-100 hover:bg-zinc-800 ${FOCUS_RING}`;
 
-export default function GuardsPanel({ guards, spot, netGreeks, pnlRupees, funds, isLeader, onChange }: Props) {
+export default function GuardsPanel({ guards, spot, netGreeks, pnlRupees, funds, isLeader, onPatch }: Props) {
   const [notice, setNotice] = useState<string | null>(null);
   const g: BasketGuards = guards ?? {};
   const triggers = g.spotTriggers ?? [];
   const bands = g.greekBands ?? [];
   const alarm: RiskAlarm = g.alarm ?? { armed: false };
 
-  const set = (patch: Partial<BasketGuards>) => { setNotice(null); onChange({ ...g, ...patch }); };
-  // Any edit disarms: a level or limit changed under a live guard could fire on the very next tick.
-  const editTrigger = (id: string, patch: Partial<SpotTrigger>) =>
-    set({ spotTriggers: triggers.map(t => (t.id === id ? { ...t, ...patch, armed: false, firedAt: undefined } : t)) });
-  const editBand = (id: string, patch: Partial<GreekBand>) =>
-    set({ greekBands: bands.map(b => (b.id === id ? { ...b, ...patch, armed: false, firedAt: undefined } : b)) });
-  const editAlarm = (patch: Partial<RiskAlarm>) => set({ alarm: { ...alarm, ...patch, armed: false } });
+  const apply = (fn: (g: BasketGuards) => BasketGuards) => { setNotice(null); onPatch(fn); };
 
   const armTrigger = (t: SpotTrigger, on: boolean) => {
     if (on) {
       const why = spotArmBlocker(t, spot);
       if (why) { setNotice(why); return; }
     }
-    set({ spotTriggers: triggers.map(x => (x.id === t.id ? { ...x, armed: on, firedAt: undefined } : x)) });
+    apply(g => setSpotArmed(g, t.id, on));
   };
   const armBand = (b: GreekBand, on: boolean) => {
     if (on) {
       const why = greekBandInvalid(b);
       if (why) { setNotice(why); return; }
     }
-    set({ greekBands: bands.map(x => (x.id === b.id ? { ...x, armed: on, firedAt: undefined } : x)) });
+    apply(g => setBandArmed(g, b.id, on));
   };
   const armAlarm = (on: boolean) => {
     if (on && !(alarm.maxLoss && alarm.maxLoss > 0) && !(alarm.marginWarnPct && alarm.marginWarnPct > 0)) {
       setNotice('Set a max loss or a margin warning level first.');
       return;
     }
-    set({ alarm: { ...alarm, armed: on } });
+    apply(g => setAlarmArmed(g, on));
   };
 
   const util = marginUtilisationPct(funds);
@@ -95,21 +91,21 @@ export default function GuardsPanel({ guards, spot, netGreeks, pnlRupees, funds,
           <span className="text-zinc-300 font-bold uppercase tracking-wider">Spot triggers</span>
           <span className="text-zinc-500">Spot now: <span className="font-mono text-zinc-300">{spot > 0 ? spot.toLocaleString('en-IN') : 'no live price'}</span></span>
           <button type="button" className={`${chip} text-emerald-400 hover:bg-zinc-800 ${FOCUS_RING}`}
-            onClick={() => set({ spotTriggers: [...triggers, { id: newId(), level: 0, dir: 'above', action: 'ALERT', armed: false }] })}>
+            onClick={() => apply(g => addSpotTrigger(g, { id: newId(), level: 0, dir: 'above', action: 'ALERT', armed: false }))}>
             + Add trigger
           </button>
         </div>
         {triggers.map(t => (
           <div key={t.id} className="flex items-center gap-1.5 flex-wrap">
             <span className="text-zinc-400">When spot goes</span>
-            <select aria-label="Spot direction" className={selCls} value={t.dir} onChange={e => editTrigger(t.id, { dir: e.target.value as 'above' | 'below' })}>
+            <select aria-label="Spot direction" className={selCls} value={t.dir} onChange={e => apply(g => editSpotTrigger(g, t.id, { dir: e.target.value as 'above' | 'below' }))}>
               <option value="above">above</option>
               <option value="below">below</option>
             </select>
-            <RuleNumInput value={t.level > 0 ? t.level : undefined} onCommit={v => editTrigger(t.id, { level: v ?? 0 })}
+            <RuleNumInput value={t.level > 0 ? t.level : undefined} onCommit={v => apply(g => editSpotTrigger(g, t.id, { level: v ?? 0 }))}
               placeholder="level" min={0} step={50} className="w-20 h-6 text-center text-zinc-100" title="Underlying price level" />
             <span className="text-zinc-400">then</span>
-            <select aria-label="Spot action" className={selCls} value={t.action} onChange={e => editTrigger(t.id, { action: e.target.value as SpotAction })}>
+            <select aria-label="Spot action" className={selCls} value={t.action} onChange={e => apply(g => editSpotTrigger(g, t.id, { action: e.target.value as SpotAction }))}>
               {SPOT_ACTIONS.map(a => <option key={a.value} value={a.value}>{a.label}</option>)}
             </select>
             <label className={`${chip} cursor-pointer select-none`}>
@@ -119,7 +115,7 @@ export default function GuardsPanel({ guards, spot, netGreeks, pnlRupees, funds,
             {!t.armed && t.firedAt && <span className="text-zinc-500">fired {new Date(t.firedAt).toLocaleTimeString('en-IN', { timeZone: 'Asia/Kolkata', hour12: false })}</span>}
             {t.level > 0 && spot > 0 && <span className="text-zinc-500">{Math.abs(spot - t.level).toFixed(0)} pts away</span>}
             <button type="button" aria-label="Remove spot trigger" title="Remove" className={iconBtn}
-              onClick={() => set({ spotTriggers: triggers.filter(x => x.id !== t.id) })}>×</button>
+              onClick={() => apply(g => removeSpotTrigger(g, t.id))}>×</button>
           </div>
         ))}
         {triggers.length === 0 && <p className="text-zinc-500">e.g. spot above 24,800 then close the call side. An exit trigger must stay past its level for 3 seconds before it acts.</p>}
@@ -130,7 +126,7 @@ export default function GuardsPanel({ guards, spot, netGreeks, pnlRupees, funds,
         <div className="flex items-center gap-2">
           <span className="text-zinc-300 font-bold uppercase tracking-wider">Greek guardrails</span>
           <button type="button" className={`${chip} text-emerald-400 hover:bg-zinc-800 ${FOCUS_RING}`}
-            onClick={() => set({ greekBands: [...bands, { id: newId(), metric: 'delta', action: 'ALERT', armed: false }] })}>
+            onClick={() => apply(g => addGreekBand(g, { id: newId(), metric: 'delta', action: 'ALERT', armed: false }))}>
             + Add band
           </button>
           {!netGreeks && <span className="text-zinc-500">Greeks unavailable (a leg has no live price)</span>}
@@ -140,17 +136,17 @@ export default function GuardsPanel({ guards, spot, netGreeks, pnlRupees, funds,
           const r = readGreekBand(b, netGreeks);
           return (
             <div key={b.id} className="flex items-center gap-1.5 flex-wrap">
-              <select aria-label="Greek" className={selCls} value={b.metric} onChange={e => editBand(b.id, { metric: e.target.value as GreekMetric })}>
+              <select aria-label="Greek" className={selCls} value={b.metric} onChange={e => apply(g => editGreekBand(g, b.id, { metric: e.target.value as GreekMetric }))}>
                 {METRICS.map(x => <option key={x.value} value={x.value}>{x.label}</option>)}
               </select>
               <span className="text-zinc-400">stay between</span>
-              <RuleNumInput value={b.min} onCommit={v => editBand(b.id, { min: v })} placeholder="min" step={m.value === 'gamma' ? 0.001 : 1}
+              <RuleNumInput value={b.min} onCommit={v => apply(g => editGreekBand(g, b.id, { min: v }))} signed placeholder="min" step={m.value === 'gamma' ? 0.001 : 1}
                 className="w-20 h-6 text-center text-zinc-100" title={`Minimum (${m.hint}). Leave empty for no minimum.`} />
               <span className="text-zinc-400">and</span>
-              <RuleNumInput value={b.max} onCommit={v => editBand(b.id, { max: v })} placeholder="max" step={m.value === 'gamma' ? 0.001 : 1}
+              <RuleNumInput value={b.max} onCommit={v => apply(g => editGreekBand(g, b.id, { max: v }))} signed placeholder="max" step={m.value === 'gamma' ? 0.001 : 1}
                 className="w-20 h-6 text-center text-zinc-100" title={`Maximum (${m.hint}). Leave empty for no maximum.`} />
               <span className="text-zinc-500">({m.hint})</span>
-              <select aria-label="Band action" className={selCls} value={b.action} onChange={e => editBand(b.id, { action: e.target.value as GreekBand['action'] })}>
+              <select aria-label="Band action" className={selCls} value={b.action} onChange={e => apply(g => editGreekBand(g, b.id, { action: e.target.value as GreekBand['action'] }))}>
                 <option value="ALERT">Alert only</option>
                 <option value="EXIT_ALL">Close everything</option>
               </select>
@@ -160,7 +156,7 @@ export default function GuardsPanel({ guards, spot, netGreeks, pnlRupees, funds,
               </label>
               {r && <span className={r.breached ? 'text-rose-400 font-bold' : 'text-zinc-300'}>now {r.value.toFixed(b.metric === 'gamma' ? 4 : 0)}</span>}
               <button type="button" aria-label="Remove Greek band" title="Remove" className={iconBtn}
-                onClick={() => set({ greekBands: bands.filter(x => x.id !== b.id) })}>×</button>
+                onClick={() => apply(g => removeGreekBand(g, b.id))}>×</button>
             </div>
           );
         })}
@@ -172,18 +168,18 @@ export default function GuardsPanel({ guards, spot, netGreeks, pnlRupees, funds,
         <div className="flex items-center gap-1.5 flex-wrap">
           <span className="text-zinc-300 font-bold uppercase tracking-wider">Loss &amp; margin alarm</span>
           <span className="text-zinc-400">Max loss ₹</span>
-          <RuleNumInput value={alarm.maxLoss} onCommit={v => editAlarm({ maxLoss: v })} placeholder="₹" min={0} step={500}
+          <RuleNumInput value={alarm.maxLoss} onCommit={v => apply(g => editAlarm(g, { maxLoss: v }))} placeholder="₹" min={0} step={500}
             className="w-24 h-6 text-center text-rose-300" title="Maximum tolerated loss in rupees" />
           <span className="text-zinc-400">warn at</span>
-          <RuleNumInput value={alarm.warnPct ?? DEFAULT_WARN_PCT} onCommit={v => editAlarm({ warnPct: v })} placeholder="%" min={1} step={5}
+          <RuleNumInput value={alarm.warnPct ?? DEFAULT_WARN_PCT} onCommit={v => apply(g => editAlarm(g, { warnPct: v }))} placeholder="%" min={1} step={5}
             className="w-14 h-6 text-center text-amber-300" title="Warn when the loss reaches this % of max loss" />
           <span className="text-zinc-400">%</span>
           <label className={`${chip} cursor-pointer select-none`} title="Also close the strategy when the full max loss is reached">
-            <input type="checkbox" checked={!!alarm.exitAtMaxLoss} onChange={e => editAlarm({ exitAtMaxLoss: e.target.checked })} className="rounded border-zinc-700 text-emerald-500 focus:ring-0" />
+            <input type="checkbox" checked={!!alarm.exitAtMaxLoss} onChange={e => apply(g => editAlarm(g, { exitAtMaxLoss: e.target.checked }))} className="rounded border-zinc-700 text-emerald-500 focus:ring-0" />
             <span className={alarm.exitAtMaxLoss ? 'text-rose-400 font-bold' : 'text-zinc-400'}>Close at max loss</span>
           </label>
           <span className="text-zinc-400">Margin warn at</span>
-          <RuleNumInput value={alarm.marginWarnPct} onCommit={v => editAlarm({ marginWarnPct: v })} placeholder="%" min={1} step={5}
+          <RuleNumInput value={alarm.marginWarnPct} onCommit={v => apply(g => editAlarm(g, { marginWarnPct: v }))} placeholder="%" min={1} step={5}
             className="w-14 h-6 text-center text-amber-300" title="Warn when account margin utilisation reaches this %" />
           <span className="text-zinc-400">%</span>
           <label className={`${chip} cursor-pointer select-none`}>

@@ -5,7 +5,12 @@ import {
   lossLevel, marginUtilisationPct, marginLevel, nextAlarmState, lossRecovered, marginRecovered, guardsArmed, disarmGuards,
   SPOT_CONFIRM_MS, GUARD_EXIT_RETRY_MS, type SpotTrigger,
 } from './multiLegGuards.ts';
-import type { MultiLegLeg } from './multiLegFocus.ts';
+import { LEG_FILL_GRACE_MS, type MultiLegLeg } from './multiLegFocus.ts';
+import {
+  legsSettling, shortsSettling, exitSide, addSpotTrigger, removeSpotTrigger, editSpotTrigger, setSpotArmed,
+  addGreekBand, editGreekBand, setBandArmed, editAlarm, setAlarmArmed, type BasketGuards, type SideExitDeps,
+} from './multiLegGuards.ts';
+
 
 const leg = (id: string, side: 'B' | 'S', option: 'CE' | 'PE' | 'FUT', status = 'OPEN', fill = true) =>
   ({ id, side, option, strike: 24000, status, fill: fill ? { qty: 75, avgPrice: 100 } : undefined, lots: 1 }) as unknown as MultiLegLeg;
@@ -137,4 +142,142 @@ test('guardsArmed / disarmGuards: everything off, firedAt cleared, config kept',
   assert.equal(off.spotTriggers![0].level, 24500);
   assert.equal(off.alarm!.maxLoss, 100);
   assert.equal(disarmGuards(undefined), undefined);
+});
+
+// ── Review fixes: confirmed hedge exits, settle-before-finish, no whole-object edits ──
+
+const NOW = 1_800_000_000_000;
+const withLeg = (id: string, side: 'B' | 'S', option: 'CE' | 'PE', o: Record<string, unknown> = {}) =>
+  ({ ...leg(id, side, option), ...o }) as unknown as MultiLegLeg;
+
+test('legsSettling: a pending order or a just-closed leg is settling, scoped to the side', () => {
+  const pend = withLeg('a', 'S', 'CE', { status: 'CLOSED', pendingOrders: [{ kind: 'exit' }] });
+  const fresh = withLeg('b', 'S', 'PE', { status: 'CLOSED', closedAt: NOW - 1000 });
+  const old = withLeg('c', 'S', 'CE', { status: 'CLOSED', closedAt: NOW - LEG_FILL_GRACE_MS - 1 });
+  assert.equal(legsSettling([pend], 'EXIT_CE', NOW), true);
+  assert.equal(legsSettling([pend], 'EXIT_PE', NOW), false);          // other side
+  assert.equal(legsSettling([pend], 'EXIT_ALL', NOW), true);
+  assert.equal(legsSettling([fresh], 'EXIT_PE', NOW), true);
+  assert.equal(legsSettling([old], 'EXIT_CE', NOW), false);
+  assert.equal(legsSettling([withLeg('d', 'S', 'CE', { status: 'OPEN' })], 'EXIT_CE', NOW), false);
+  assert.equal(legsSettling([withLeg('f', 'S', 'FUT' as 'CE', { pendingOrders: [{}] })], 'EXIT_ALL', NOW), false);
+});
+
+test('stepGuard: an exit that is flat but still settling does not finish; it finishes once settled', () => {
+  const fired = trig({ firedAt: 'x' });
+  assert.deepEqual(stepSpotTrigger(fired, 24000, NOW, { scopeOpen: 0, settling: true }), { kind: 'idle' });
+  assert.deepEqual(stepSpotTrigger(fired, 24000, NOW, { scopeOpen: 0, settling: false }), { kind: 'finish' });
+  assert.deepEqual(stepSpotTrigger(fired, 24000, NOW, { scopeOpen: 0 }), { kind: 'finish' });
+  // a rejected exit reopens the leg: scope is open again, so the trigger retries instead of having disarmed
+  assert.deepEqual(stepSpotTrigger(fired, 24000, NOW, { scopeOpen: 1, settling: false, lastAttempt: NOW - GUARD_EXIT_RETRY_MS }), { kind: 'retry' });
+  // an alert never waits
+  assert.deepEqual(stepSpotTrigger(trig({ action: 'ALERT', firedAt: 'x' }), 24000, NOW, { scopeOpen: 0, settling: true }), { kind: 'finish' });
+});
+
+test('shortsSettling only looks at short legs', () => {
+  const longPending = withLeg('l', 'B', 'CE', { status: 'CLOSED', pendingOrders: [{}] });
+  const shortPending = withLeg('s', 'S', 'CE', { status: 'CLOSED', pendingOrders: [{}] });
+  assert.equal(shortsSettling([longPending], 'EXIT_CE', NOW), false);
+  assert.equal(shortsSettling([longPending, shortPending], 'EXIT_CE', NOW), true);
+});
+
+type L = { id: string; side: 'B' | 'S' };
+function sideDeps(over: Partial<SideExitDeps<L>> & { results?: Record<string, { closed: boolean; maxAfter?: number }> } = {}) {
+  const sent: string[] = [];
+  const confirmed: string[][] = [];
+  const deps: SideExitDeps<L> = {
+    exitLeg: async l => { sent.push(l.id); return over.results?.[l.id] ?? { closed: true, maxAfter: 0 }; },
+    isBusy: over.isBusy ?? (() => false),
+    confirmShortsDown: over.confirmShortsDown ?? (async items => { confirmed.push(items.map(i => i.leg.id)); return true; }),
+  };
+  return { deps, sent, confirmed };
+}
+const S1: L = { id: 's1', side: 'S' }, S2: L = { id: 's2', side: 'S' }, H1: L = { id: 'h1', side: 'B' };
+
+test('exitSide: shorts exit first, hedge only after the broker confirms the shorts are down', async () => {
+  const { deps, sent, confirmed } = sideDeps();
+  assert.equal(await exitSide([H1, S1, S2], deps), 'done');
+  assert.deepEqual(sent, ['s1', 's2', 'h1']);
+  assert.deepEqual(confirmed, [['s1', 's2']]);
+});
+
+test('exitSide: a short that is not ACKed closed keeps every hedge', async () => {
+  const { deps, sent } = sideDeps({ results: { s2: { closed: false } } });
+  assert.equal(await exitSide([S1, S2, H1], deps), 'short_not_closed');
+  assert.ok(!sent.includes('h1'));
+});
+
+test('exitSide: ACKed but not confirmed at the broker keeps the hedge (the rejected-exit case)', async () => {
+  const { deps, sent } = sideDeps({ confirmShortsDown: async () => false });
+  assert.equal(await exitSide([S1, H1], deps), 'shorts_unconfirmed');
+  assert.deepEqual(sent, ['s1']);
+});
+
+test('exitSide: a short already being exited elsewhere counts as not closed', async () => {
+  const { deps, sent } = sideDeps({ isBusy: l => l.id === 's1' });
+  assert.equal(await exitSide([S1, H1], deps), 'short_not_closed');
+  assert.deepEqual(sent, []);
+});
+
+test('exitSide: a throwing exit is a failed exit, not an unhandled rejection', async () => {
+  const { deps, sent } = sideDeps();
+  deps.exitLeg = async l => { sent.push(l.id); throw new Error('boom'); };
+  assert.equal(await exitSide([S1, H1], deps), 'short_not_closed');
+  assert.deepEqual(sent, ['s1']);
+});
+
+test('exitSide: no hedges means no confirmation round trip; a flat short (no order sent) needs none', async () => {
+  const a = sideDeps();
+  assert.equal(await exitSide([S1], a.deps), 'done');
+  assert.deepEqual(a.confirmed, []);
+  const b = sideDeps({ results: { s1: { closed: true } } });          // already flat: no maxAfter
+  assert.equal(await exitSide([S1, H1], b.deps), 'done');
+  assert.deepEqual(b.confirmed, []);
+  assert.deepEqual(b.sent, ['s1', 'h1']);
+});
+
+test('exitSide: hedges only (shorts closed on an earlier attempt) still exit', async () => {
+  const { deps, sent } = sideDeps();
+  assert.equal(await exitSide([H1], deps), 'done');
+  assert.deepEqual(sent, ['h1']);
+});
+
+test('reducers touch only the named item, so an edit cannot revert what the watcher wrote', () => {
+  // The watcher fired T1 (firedAt set) and a stale panel then edits band B1. T1 must come through untouched.
+  const watcherWrote: BasketGuards = {
+    spotTriggers: [trig({ id: 'T1', firedAt: 'iso', armed: true }), trig({ id: 'T2', armed: true })],
+    greekBands: [{ id: 'B1', metric: 'delta', max: 5, action: 'ALERT', armed: true }],
+    alarm: { armed: true, maxLoss: 100 },
+  };
+  const edited = editGreekBand(watcherWrote, 'B1', { max: 9 });
+  assert.equal(edited.spotTriggers, watcherWrote.spotTriggers);        // same reference: untouched
+  assert.equal(edited.alarm, watcherWrote.alarm);
+  assert.equal(edited.greekBands![0].max, 9);
+  assert.equal(edited.greekBands![0].armed, false);                    // any edit disarms
+
+  const t2 = editSpotTrigger(watcherWrote, 'T2', { level: 25000 });
+  assert.equal(t2.spotTriggers![0], watcherWrote.spotTriggers![0]);    // T1 (firing) is the same object
+  assert.equal(t2.spotTriggers![0].firedAt, 'iso');
+  assert.equal(t2.spotTriggers![1].armed, false);
+  assert.equal(t2.greekBands, watcherWrote.greekBands);
+});
+
+test('reducers: add / remove / arm / alarm', () => {
+  let g: BasketGuards = {};
+  g = addSpotTrigger(g, trig({ id: 'a', armed: false, firedAt: 'x' }));
+  g = setSpotArmed(g, 'a', true);
+  assert.equal(g.spotTriggers![0].armed, true);
+  assert.equal(g.spotTriggers![0].firedAt, undefined);                 // re-arming clears the old firing
+  g = removeSpotTrigger(g, 'a');
+  assert.deepEqual(g.spotTriggers, []);
+  g = addGreekBand(g, { id: 'b', metric: 'delta', action: 'ALERT', armed: false });
+  g = setBandArmed(g, 'b', true);
+  assert.equal(g.greekBands![0].armed, true);
+  g = editAlarm(g, { maxLoss: 500 });
+  assert.deepEqual(g.alarm, { armed: false, maxLoss: 500 });
+  g = setAlarmArmed(g, true);
+  assert.equal(g.alarm!.armed, true);
+  g = editAlarm(g, { warnPct: 70 });
+  assert.equal(g.alarm!.armed, false);
+  assert.equal(g.alarm!.maxLoss, 500);
 });

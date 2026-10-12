@@ -131,6 +131,8 @@ export interface MultiLegStrategyRowProps {
   /** Fresh underlying price for the guards (0 when unknown or stale) and whether this tab runs them. */
   guardSpot?: number;
   isLeader?: boolean;
+  /** Functional update of this row's guards. The watcher writes them too, so edits never replace the whole object. */
+  onPatchGuards?: (fn: (g: BasketGuards) => BasketGuards) => void;
   /** All baskets on the page — used only to flag Greeks legs that share a contract with a sibling. */
   allBaskets?: MultiLegBasket[];
   /** Legs ticked for regrouping (page-wide, so a group can span rows). */
@@ -185,6 +187,7 @@ export default function MultiLegStrategyRow({
   fundsUsed,
   guardSpot,
   isLeader,
+  onPatchGuards,
   allBaskets,
   selectedLegIds,
   onSelectLegs,
@@ -1373,7 +1376,7 @@ export default function MultiLegStrategyRow({
                 pnlRupees={stratMetrics.hasUnpricedLegs ? null : stratMetrics.totalPnlRupees}
                 funds={availableFunds != null && fundsUsed != null ? { available: availableFunds, used: fundsUsed } : null}
                 isLeader={isLeader !== false}
-                onChange={(guards: BasketGuards) => onUpdate({ guards })}
+                onPatch={fn => onPatchGuards?.(fn)}
               />
             )}
           </div>

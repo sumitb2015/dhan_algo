@@ -67,11 +67,22 @@ before changing any of it**; this skill only maps the page.
 11. **Guards** (`basket.guards`, 2026-10-12; rules in `lib/multiLegGuards.ts`). Leader tab only. A spot trigger acts
    only on a FRESH spot (`guardSpotFor`: live feed < 10 s, chain fallback < 30 s, else 0 = unknown) and only after the
    breach lasts `SPOT_CONFIRM_MS` (3 s; a 1 s tick drives the clock). An exit trigger stamps `firedAt` first, then keeps
-   retrying every 15 s until its scope is flat (`stepGuard`), so a reload resumes it. Exit-by-side (`EXIT_CE`/`EXIT_PE`)
-   closes shorts first and the hedge only after every short is confirmed closed. A trigger cannot be armed past its level.
-   Greek bands skip while any open leg is unpriced or an IV was assumed. The alarm announces once per escalation and
-   re-arms 5 points below the threshold. Editing any guard disarms it, and regroup disarms the guards of every changed
-   group (`disarmGuards`) because a trigger written for one set of legs must not act on another. There is no auto-hedge yet.
+   retrying every 15 s until its scope is flat (`stepGuard`), so a reload resumes it. A trigger cannot be armed past its level.
+   - **An exit ACK is not a fill.** Exits flip a leg to CLOSED on ACK and a rejection reopens it later. So (a) a side exit
+     (`EXIT_CE`/`EXIT_PE`, `exitSide`) sells a hedge only after the shorts are ACKed AND `confirmShortsDown` (the same
+     positions-book check Exit All uses) shows them down; (b) a guard does not `finish`/disarm while `legsSettling` (a pending
+     order or a leg closed inside the fill grace), or a rejected exit would never be retried; (c) a retry holding only hedges
+     waits while the shorts it already closed are still settling (`shortsSettling`).
+   - **Edits are functional.** The watcher writes `guards` too (firedAt, armed), so the panel applies the reducers
+     (`editSpotTrigger`, `setBandArmed`, ...) through `patchGuards`; replacing the whole object from the render's copy
+     reverts the watcher's write. Editing any guard disarms it.
+   - Greek bands take negative and zero limits (`RuleNumInput signed`, `parseRuleNum`); every other box stays positive-only.
+   - Greek bands skip while any open leg is unpriced or an IV was assumed. The alarm announces once per escalation and
+     re-arms 5 points below the threshold. Regroup disarms the guards of every changed group (`disarmGuards`) because a
+     trigger written for one set of legs must not act on another. There is no auto-hedge yet.
+   - Known gaps (2026-10-12 review): chain-fallback spot freshness is per chain map, not per underlying; armed guards do not
+     expire at day roll; the margin-alarm key is per broker, so two baskets with different thresholds can re-announce;
+     loss is measured on the basket's lifetime total.
 
 ## Change checklist
 - Touched a basket/leg field? Update `multiLegStoreMerge` (rev + union rules) and its `…Resurrect` test, or a stale

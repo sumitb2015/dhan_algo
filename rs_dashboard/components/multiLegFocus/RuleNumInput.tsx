@@ -2,6 +2,7 @@
 
 import React, { useState, useRef, useEffect } from 'react';
 import { FOCUS_RING } from '@/components/Scalper';
+import { parseRuleNum } from '@/lib/ruleNum';
 
 interface RuleNumInputProps {
   value: number | undefined;
@@ -12,6 +13,8 @@ interface RuleNumInputProps {
   disabled?: boolean;
   min?: number;
   step?: number;
+  /** Accept zero and negative numbers (Greek bands). Default: only numbers above 0. */
+  signed?: boolean;
 }
 
 /**
@@ -27,8 +30,9 @@ export default function RuleNumInput({
   disabled,
   min,
   step = 0.5,
+  signed = false,
 }: RuleNumInputProps) {
-  const strVal = value != null && value > 0 ? String(value) : '';
+  const strVal = value != null && (signed ? Number.isFinite(value) : value > 0) ? String(value) : '';
   const [draft, setDraft] = useState(strVal);
   const focusedRef = useRef(false);
 
@@ -39,14 +43,9 @@ export default function RuleNumInput({
   }, [strVal]);
 
   const commit = (raw: string) => {
-    const trimmed = raw.trim();
-    if (!trimmed) {
-      if (value !== undefined) onCommit(undefined);
-      return;
-    }
-    const num = parseFloat(trimmed);
-    if (!isNaN(num) && num > 0) {
-      if (num !== value) onCommit(num);
+    const p = parseRuleNum(raw, signed);
+    if (p.kind === 'value') {
+      if (p.n !== value) onCommit(p.n);
     } else if (value !== undefined) {
       onCommit(undefined);
     }
