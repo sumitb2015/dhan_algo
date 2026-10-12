@@ -8,7 +8,7 @@ import {
   resolveRowExpiry,
   type ChainOcEntry, type Toast,
   type PnlGuardStatus, type PositionGuard, type SortState,
-  FOCUS_RING, TXT_LABEL, TXT_VALUE, TXT_CAPTION, RiskRail,
+  FOCUS_RING, TXT_LABEL, TXT_VALUE, TXT_CAPTION, RiskRail, GuardInput,
 } from './Scalper';
 import { useLiveOptionsWS } from '@/lib/useLiveOptionsWS';
 import { useProfitLock, ProfitLockControls } from './ProfitLock';
@@ -27,6 +27,7 @@ import MtmChart, { useMtmHistory } from './MtmChart';
 import ScalperGreeksModal from './analytics/ScalperGreeksModal';
 import AdvancedScalperOptionChainModal from './AdvancedScalperOptionChainModal';
 import { capCloseQty } from '@/lib/intradayCap';
+import { resolveBracket, legsToCancel, type SuperOrderInput } from '@/lib/superOrder';
 import AdvancedScalperAddLotsModal, { type SubmitLegOrderParams } from './AdvancedScalperAddLotsModal';
 
 // ─── Types ────────────────────────────────────────────────────────
@@ -219,6 +220,15 @@ export default function AdvancedScalper() {
   // Trading controls
   const [orderMode, setOrderMode] = useState<'MARKET' | 'LIMIT'>('MARKET');
   const [productType, setProductType] = useState<'INTRADAY' | 'MARGIN'>('MARGIN');
+  // Bracket (Dhan Super Order): entry + a target and stop-loss that REST AT THE BROKER, so they
+  // survive this tab closing. Dhan only. Armed per page load on purpose - never persisted - so a
+  // reload can't silently turn protection on or off. Offsets are option points from the entry price.
+  const [bracketOn, setBracketOn] = useState(false);
+  const [bracketTgt, setBracketTgt] = useState('10');
+  const [bracketSl, setBracketSl] = useState('8');
+  const [bracketTrail, setBracketTrail] = useState('0');
+  // Derived (no reset effect): inactive on any other broker. The toggle itself is kept, so returning to Dhan finds it as left, still shown amber.
+  const bracketActive = bracketOn && broker === 'dhan';
 
   // Top-10-by-weight stocks panel. Off by default so no equity bridge is
   // spawned unless it's actually wanted.
@@ -1443,11 +1453,14 @@ export default function AdvancedScalper() {
     entry?: { ceId?: string; peId?: string; ceSymbol?: string; peSymbol?: string };
     legLotSize: number;
     legProductType: 'INTRADAY' | 'MARGIN';
+    /** Dhan Super Order levels (absolute prices). Never silently dropped: a path that cannot honour it refuses. */
+    bracket?: SuperOrderInput;
   }): Promise<LegOrderResult> => {
-    const { optionSide, legExpiry, strike, side, lots, mode, limitPrice, entry, legLotSize, legProductType } = params;
+    const { optionSide, legExpiry, strike, side, lots, mode, limitPrice, entry, legLotSize, legProductType, bracket } = params;
     if (!Number.isInteger(lots) || lots < 1 || lots > MAX_LOTS_PER_ORDER) {
       return { success: false, error: `Lots must be 1–${MAX_LOTS_PER_ORDER} (got ${lots})` };
     }
+    if (bracket && broker !== 'dhan') return { success: false, error: 'Bracket orders are Dhan-only' };
     try {
       let res: Response;
       if (broker !== 'dhan') {
@@ -1474,7 +1487,21 @@ export default function AdvancedScalper() {
         });
       } else {
         const secId = entry?.[optionSide === 'CE' ? 'ceId' : 'peId'];
-        if (secId) {
+        if (bracket) {
+          if (!secId) return { success: false, error: 'Bracket needs the contract id - strike data still loading' };
+          res = await fetch('/api/super-order', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              ...bracket,
+              securityId: secId,
+              exchangeSegment: dhanFnoSegment(underlying),
+              productType: legProductType,
+              quantity: lots * legLotSize,
+              idempotencyKey: crypto.randomUUID(),
+            }),
+          });
+        } else if (secId) {
           res = await fetch('/api/scalper/fast-order', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -1539,6 +1566,34 @@ export default function AdvancedScalper() {
       return;
     }
 
+    // Bracket applies only to an order that OPENS or ADDS. An order that reduces the box's open
+    // position is a manual close and goes out plain - a bracket there would open a fresh opposite
+    // position with its own stop and target.
+    let bracket: SuperOrderInput | undefined;
+    let bracketNote = '';
+    if (bracketActive) {
+      const secId = boxSecId(box);
+      const open = secId ? Number(positionsBySecId[secId]?.netQty ?? 0) : 0;
+      const reduces = (side === 'SELL' && open > 0) || (side === 'BUY' && open < 0);
+      if (reduces) {
+        bracketNote = ' · closing, no bracket';
+      } else {
+        const ltpNow = liveQuotes?.strikes?.[String(box.strike)]?.[box.side === 'CE' ? 'ce' : 'pe']?.ltp ?? 0;
+        const r = resolveBracket({
+          securityId: secId ?? '', exchangeSegment: dhanFnoSegment(underlying), productType,
+          side, orderType: mode, quantity: box.lots * lotSize,
+          limitPrice: mode === 'LIMIT' ? Number(box.limitPrice) : undefined, ltp: ltpNow,
+          targetPts: Number(bracketTgt), slPts: Number(bracketSl), trailPts: Number(bracketTrail) || 0,
+        });
+        if (!r.ok) {
+          addToast('error', `${side} ${box.side} not sent`, r.error);
+          return;
+        }
+        bracket = r.order;
+        bracketNote = ` · bracket tgt ${r.order.targetPrice} / SL ${r.order.stopLossPrice}${r.order.trailingJump ? ` / trail ${r.order.trailingJump}` : ''}`;
+      }
+    }
+
     orderInFlightRef.current.add(boxId);
     setOrderPendingBoxes(prev => new Set([...prev, boxId]));
 
@@ -1554,9 +1609,10 @@ export default function AdvancedScalper() {
         entry: strikeMap[String(box.strike)],
         legLotSize: lotSize,
         legProductType: productType,
+        bracket,
       });
       if (j.success) {
-        addToast('success', `${side} ${box.side} placed`, opts?.forceMarket ? `Hotkey market order · ID: ${j.order_id}` : `ID: ${j.order_id}`);
+        addToast('success', `${side} ${box.side} placed`, `${opts?.forceMarket ? 'Hotkey market order · ' : ''}ID: ${j.order_id}${bracketNote}`);
         setTimeout(fetchTabData, 1000);
       } else {
         addToast('error', `${side} ${box.side} failed`, j.error ?? 'Unknown error');
@@ -1565,7 +1621,8 @@ export default function AdvancedScalper() {
       orderInFlightRef.current.delete(boxId);
       setOrderPendingBoxes(prev => { const s = new Set(prev); s.delete(boxId); return s; });
     }
-  }, [boxes, expiry, underlying, lotSize, strikeMap, orderMode, productType, submitLegOrder, addToast, fetchTabData]);
+  }, [boxes, expiry, underlying, lotSize, strikeMap, orderMode, productType, submitLegOrder, addToast, fetchTabData,
+      bracketActive, bracketTgt, bracketSl, bracketTrail, boxSecId, positionsBySecId, liveQuotes]);
 
   // Confirm handler for the Add Lots modal (see openAddLotsModal/addLotsTarget
   // above) — places the order via the same submitLegOrder the order boxes use,
@@ -1672,6 +1729,31 @@ export default function AdvancedScalper() {
   // real prior exposure rather than a possibly-stale value passed in.
   // closedUnits is how much actually left the book (verified when verifyFlat is
   // set, else the requested size) — chain off this, never off a rounded ideal.
+  // Take down every live Super Order leg on one security (see the call in closePosition).
+  // Silent when there is nothing to cancel, so non-bracket scalping pays one GET and no noise.
+  const cancelBracketsFor = useCallback(async (securityId: string, partial: boolean, sym: string) => {
+    try {
+      const list = await (await fetch('/api/super-order')).json() as { success?: boolean; orders?: Record<string, unknown>[] };
+      if (!list.success) return;
+      const legs = legsToCancel(list.orders ?? [], securityId);
+      if (legs.length === 0) return;
+      const results = await Promise.all(legs.map(async l => {
+        try {
+          const r = await (await fetch(`/api/super-order?orderId=${encodeURIComponent(l.orderId)}&leg=${l.leg}`, { method: 'DELETE' })).json() as { success?: boolean };
+          return r.success === true;
+        } catch { return false; }
+      }));
+      const failed = results.filter(ok => !ok).length;
+      if (failed > 0) {
+        addToast('error', `${sym}: ${failed} bracket leg(s) NOT cancelled`, 'A resting target/stop may still be live - cancel it in Dhan Orders');
+      } else {
+        addToast('success', `${sym}: bracket cancelled`, partial ? 'Partial close - the remainder is now unprotected' : 'Target/stop legs removed');
+      }
+    } catch {
+      addToast('error', `${sym}: could not check for a live bracket`, 'A resting target/stop may still be live - check Dhan Orders');
+    }
+  }, [addToast]);
+
   const closePosition = useCallback(async (
     pos: Record<string, unknown>,
     reason: string,
@@ -1861,6 +1943,11 @@ export default function AdvancedScalper() {
         }
         addToast('success', `${isPartial ? 'Partially closed' : 'Closed'} ${sym} (${reason})`,
           `${qty}${isPartial ? ` of ${liveAbs}` : ''} qty${productPayload.assumed ? '' : ` · ${product}`} · ID: ${j.order_id}`);
+        // A bracket's target/stop rest at the broker and are sized for the original quantity: left
+        // alive after a manual close they could open the opposite side. Sent AFTER the close so it
+        // never delays it; a partial close takes the bracket down too (its legs would over-size the
+        // remainder), so the remainder needs re-protecting.
+        if (broker === 'dhan') void cancelBracketsFor(liveSecId, isPartial, sym);
         if (isPartial) {
           // Quantity survives, so the user's target/SL/trail must survive with
           // it. bestPrice stays valid (same entry, same direction) — only
@@ -1897,7 +1984,7 @@ export default function AdvancedScalper() {
       closingInFlightRef.current.delete(key);
       setClosingPositions(prev => { const s = new Set(prev); s.delete(key); return s; });
     }
-  }, [broker, addToast, fetchTabData]);
+  }, [broker, addToast, fetchTabData, cancelBracketsFor]);
 
   // Lot size for a positions-table row. `lotSize` state belongs to the SELECTED
   // underlying, but the table also lists legs from other underlyings — giving
@@ -2850,6 +2937,38 @@ export default function AdvancedScalper() {
                   {pt}
                 </button>
               ))}
+            </div>
+
+            {/* Bracket (Dhan Super Order): broker-held target + stop on opening orders */}
+            <div className={cn(
+              'flex items-center gap-1.5 rounded-xl border px-1.5 py-0.5 shrink-0',
+              bracketActive ? 'border-amber-500/40 bg-amber-500/10' : 'border-zinc-800 bg-zinc-900',
+            )}>
+              <button
+                type="button"
+                onClick={() => setBracketOn(v => !v)}
+                disabled={broker !== 'dhan'}
+                aria-pressed={bracketActive}
+                title={broker !== 'dhan'
+                  ? 'Bracket orders (Dhan Super Order) are Dhan-only'
+                  : 'When ON, orders that open or add a position carry a target and stop-loss held at the broker (survive closing this tab). Closing orders go out plain. Re-arm after each page load.'}
+                className={cn(
+                  'px-3 py-1.5 text-xs font-bold rounded-lg transition-all whitespace-nowrap disabled:opacity-40 disabled:cursor-not-allowed',
+                  bracketActive ? 'bg-amber-500/20 text-amber-400 border border-amber-500/40' : 'text-zinc-500 hover:text-zinc-300',
+                  FOCUS_RING,
+                )}>
+                BRACKET {bracketActive ? 'ON' : 'OFF'}
+              </button>
+              {bracketActive && (
+                <>
+                  <span className={cn(TXT_CAPTION, 'text-emerald-400')}>TGT pts</span>
+                  <GuardInput value={bracketTgt} onCommit={setBracketTgt} colorCls="text-emerald-400" focusBorderCls="focus:border-emerald-500" />
+                  <span className={cn(TXT_CAPTION, 'text-red-400')}>SL pts</span>
+                  <GuardInput value={bracketSl} onCommit={setBracketSl} colorCls="text-red-400" focusBorderCls="focus:border-red-500" />
+                  <span className={cn(TXT_CAPTION, 'text-amber-400')}>TRAIL pts</span>
+                  <GuardInput value={bracketTrail} onCommit={setBracketTrail} colorCls="text-amber-400" focusBorderCls="focus:border-amber-500" />
+                </>
+              )}
             </div>
 
             {/* Top 10 NIFTY heavyweights panel — display preference, so it sits

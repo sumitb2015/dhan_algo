@@ -106,3 +106,72 @@ export function validateModify(m: SuperModifyInput): string | null {
   if (m.quantity !== undefined && (!Number.isInteger(m.quantity) || m.quantity > SUPER_MAX_QTY)) return `Invalid quantity: ${m.quantity}`;
   return null;
 }
+
+// ─── Scalper ticket helpers ───────────────────────────────────────────────
+
+const TICK = 0.05;
+const roundTick = (n: number) => Math.round(Math.round(n / TICK) * TICK * 100) / 100;
+
+export interface BracketPoints {
+  /** Target / stop distance from the entry reference, in option points. */
+  targetPts: number;
+  slPts: number;
+  /** Trailing step in points; 0 = fixed stop. */
+  trailPts: number;
+}
+
+/**
+ * Turn the ticket's point offsets into the absolute prices a super order needs, then run the
+ * shared validator. The entry reference is the limit price for LIMIT and the live LTP for
+ * MARKET (the actual fill can differ - the levels are absolute, set once at placement).
+ */
+export function resolveBracket(i: {
+  securityId: string; exchangeSegment: string; productType: string;
+  side: 'BUY' | 'SELL'; orderType: 'MARKET' | 'LIMIT'; quantity: number;
+  limitPrice?: number; ltp: number;
+} & BracketPoints): { ok: true; order: SuperOrderInput } | { ok: false; error: string } {
+  const ref = i.orderType === 'LIMIT' ? i.limitPrice ?? 0 : i.ltp;
+  if (!pos(ref)) return { ok: false, error: i.orderType === 'LIMIT' ? 'Enter a limit price for the bracket' : 'No live price for this strike yet - cannot place a bracket' };
+  if (!pos(i.targetPts)) return { ok: false, error: 'Bracket target must be a positive number of points' };
+  if (!pos(i.slPts)) return { ok: false, error: 'Bracket SL must be a positive number of points' };
+  if (!(Number.isFinite(i.trailPts) && i.trailPts >= 0)) return { ok: false, error: 'Bracket trail must be 0 or more points' };
+  const dir = i.side === 'BUY' ? 1 : -1;
+  const order: SuperOrderInput = {
+    securityId: i.securityId, exchangeSegment: i.exchangeSegment, side: i.side, productType: i.productType,
+    orderType: i.orderType, quantity: i.quantity,
+    ...(i.orderType === 'LIMIT' ? { price: roundTick(ref) } : { refPrice: roundTick(ref) }),
+    targetPrice: roundTick(ref + dir * i.targetPts),
+    stopLossPrice: roundTick(ref - dir * i.slPts),
+    trailingJump: i.trailPts > 0 ? roundTick(i.trailPts) : 0,
+  };
+  const err = validateSuperOrder(order);
+  return err ? { ok: false, error: err } : { ok: true, order };
+}
+
+const ACTIVE = new Set(['PENDING', 'TRANSIT', 'OPEN', 'TRIGGER_PENDING', 'PART_TRADED']);
+const up = (v: unknown) => String(v ?? '').toUpperCase();
+
+/**
+ * Which legs to cancel to take down every live bracket on one security: resting target and
+ * stop legs, plus the entry leg if it has not fully traded. Used after the terminal closes
+ * a position by hand, so a surviving stop/target cannot re-open the opposite side.
+ * Rows are the raw GET /super/orders payload; unknown shapes fall back to the entry leg.
+ */
+export function legsToCancel(rows: Record<string, unknown>[], securityId: string): { orderId: string; leg: SuperLeg }[] {
+  const out: { orderId: string; leg: SuperLeg }[] = [];
+  for (const r of rows) {
+    const orderId = String(r.orderId ?? '');
+    if (!orderId || String(r.securityId ?? '') !== securityId) continue;
+    const legs = Array.isArray(r.legDetails) ? (r.legDetails as Record<string, unknown>[]) : null;
+    if (!legs) {
+      if (ACTIVE.has(up(r.orderStatus))) out.push({ orderId, leg: 'ENTRY_LEG' });
+      continue;
+    }
+    for (const l of legs) {
+      const name = up(l.legName) as SuperLeg;
+      if (LEG_NAMES.has(name) && ACTIVE.has(up(l.orderStatus))) out.push({ orderId, leg: name });
+    }
+  }
+  return out;
+}
+const LEG_NAMES = new Set<string>(['ENTRY_LEG', 'TARGET_LEG', 'STOP_LOSS_LEG']);
