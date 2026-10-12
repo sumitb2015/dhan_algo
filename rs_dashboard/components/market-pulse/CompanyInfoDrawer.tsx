@@ -55,7 +55,11 @@ function Section({ title, children }: { title: string; children: React.ReactNode
 }
 
 export default function CompanyInfoDrawer({ target, onClose }: { target: CompanyTarget | null; onClose: () => void }) {
-  const [state, setState] = useState<State>({ kind: 'loading' });
+  // The result is stored WITH the company it belongs to. Reading it for a different target renders 'loading' on the very first frame,
+  // so a reopened drawer can never show the previous company's numbers under the new company's header.
+  const targetKey = target ? `${target.exchangeSegment}:${target.securityId}` : '';
+  const [loaded, setLoaded] = useState<{ key: string; state: State }>({ key: '', state: { kind: 'loading' } });
+  const state: State = loaded.key === targetKey ? loaded.state : { kind: 'loading' };
   const seq = useRef(0);
   const closeRef = useRef<HTMLButtonElement>(null);
 
@@ -64,19 +68,18 @@ export default function CompanyInfoDrawer({ target, onClose }: { target: Company
     const counter = seq;
     const mine = ++counter.current;
     const isStale = () => mine !== seq.current;
-    setState({ kind: 'loading' });
     const qs = new URLSearchParams({ securityId: target.securityId, exchangeSegment: target.exchangeSegment });
     fetch(`/api/company-info?${qs}`)
       .then(async r => ({ ok: r.ok, j: await r.json().catch(() => null) as Record<string, unknown> | null }))
       .then(({ ok, j }) => {
         if (isStale()) return;
-        if (!ok || !j || j.success !== true) { setState({ kind: 'error', message: String(j?.error ?? 'Request failed') }); return; }
+        if (!ok || !j || j.success !== true) { setLoaded({ key: targetKey, state: { kind: 'error', message: String(j?.error ?? 'Request failed') } }); return; }
         const info = j.info as CompanyInfo | null;
-        setState(info ? { kind: 'ready', info, stale: j.stale === true } : { kind: 'empty' });
+        setLoaded({ key: targetKey, state: info ? { kind: 'ready', info, stale: j.stale === true } : { kind: 'empty' } });
       })
-      .catch(e => { if (!isStale()) setState({ kind: 'error', message: e instanceof Error ? e.message : 'Network error' }); });
+      .catch(e => { if (!isStale()) setLoaded({ key: targetKey, state: { kind: 'error', message: e instanceof Error ? e.message : 'Network error' } }); });
     return () => { counter.current++; };
-  }, [target]);
+  }, [target, targetKey]);
 
   useEffect(() => {
     if (!target) return;

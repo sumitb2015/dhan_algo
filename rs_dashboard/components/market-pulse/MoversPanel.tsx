@@ -6,7 +6,7 @@ import { cn } from '@/lib/utils';
 import { fmtAge } from '@/lib/marketStatus';
 import { fmtLakh, fmtPct, fmtPrice } from '@/lib/futuresFormatters';
 import { istDateIso } from '@/lib/nseHolidays';
-import { isNseLive, lastNseSessionDate } from '@/lib/marketHours';
+import { isNseCashLive, isNseLive, lastNseSessionDate } from '@/lib/marketHours';
 import {
   MOVER_CATEGORIES, MOVER_UNIVERSES, filterMinOi, moverExpiryMonths, type MoverMode, type MoverRow,
 } from '@/lib/dhanAnalytics';
@@ -25,6 +25,48 @@ const MIN_OI = [
 ];
 
 const selectCls = 'h-8 rounded-md border border-zinc-800 bg-zinc-900 px-2 text-xs text-zinc-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500/60';
+
+/** A clock for a small child only. Keeping `now` out of the panel means the 5 s tick re-renders a label, not a 100-row table. */
+function useNow(ms: number): number {
+  const [n, setN] = useState(() => Date.now());
+  useEffect(() => {
+    const t = setInterval(() => setN(Date.now()), ms);
+    return () => clearInterval(t);
+  }, [ms]);
+  return n;
+}
+
+/** Cash equities close at 15:30 IST, derivatives at 15:40: the badge follows the group on screen. */
+function sessionLive(mode: MoverMode, nowMs: number): boolean {
+  return mode === 'equity' ? isNseCashLive(new Date(nowMs)) : isNseLive(new Date(nowMs));
+}
+
+function UpdatedAgo({ at }: { at: number }) {
+  const now = useNow(5_000);
+  return <span className="text-[10px] text-zinc-500">updated {fmtAge(now, at)}</span>;
+}
+
+function SessionBadge({ mode }: { mode: MoverMode }) {
+  const live = sessionLive(mode, useNow(5_000));
+  return (
+    <span className={cn('text-[10px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded border',
+      live ? 'text-emerald-400 bg-emerald-500/10 border-emerald-500/20' : 'text-zinc-400 bg-zinc-800 border-zinc-700')}>
+      {live ? 'Live session' : 'Market closed · last session'}
+    </span>
+  );
+}
+
+function StaleBanner({ mode, stale, fetchedAt }: { mode: MoverMode; stale: boolean; fetchedAt: number | null }) {
+  const now = useNow(5_000);
+  const lapsed = fetchedAt != null && sessionLive(mode, now) && now - fetchedAt > 60_000;
+  if (!stale && !lapsed) return null;
+  return (
+    <div className="flex items-start gap-2 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-300">
+      <AlertTriangle className="h-3.5 w-3.5 shrink-0 mt-0.5" aria-hidden="true" />
+      <span>Ranking is {fetchedAt ? fmtAge(now, fetchedAt) : 'out of date'} - Dhan did not answer the last refresh.</span>
+    </div>
+  );
+}
 
 function requestKey(mode: MoverMode, category: string, universe: string, expiry: string, limit: number): string {
   return mode === 'equity' ? `eq|${category}|${universe}|${limit}` : `${mode}|${category}|${expiry}|${limit}`;
@@ -102,11 +144,10 @@ export default function MoversPanel({ active, onOpenCompany, onDataDate }: { act
   const [stale, setStale] = useState(false);
   const [fetchedAt, setFetchedAt] = useState<number | null>(null);
   const [loading, setLoading] = useState(false);
-  const [now, setNow] = useState(() => Date.now());
   const seq = useRef(0);
 
-  // Month choices come from the IST date; any date inside a month selects that month's monthly series.
-  const months = useMemo(() => moverExpiryMonths(istDateIso(now)), [now]);
+  // Month choices: each carries that month's real NSE monthly expiry, and a month already expired is not offered (it has no series).
+  const [months] = useState(() => moverExpiryMonths(istDateIso(Date.now())));
   const expiry = months[Math.min(monthIdx, months.length - 1)].expiry;
 
   // The request key names everything that changes the answer; rows render only when they match it, so a
@@ -156,17 +197,10 @@ export default function MoversPanel({ active, onOpenCompany, onDataDate }: { act
     return () => { clearInterval(t); counter.current++; };
   }, [load, active]);
 
-  useEffect(() => {
-    const t = setInterval(() => setNow(Date.now()), 5_000);
-    return () => clearInterval(t);
-  }, []);
-
   const matching = rows !== null && loadedKey === reqKey;
   const shown = useMemo(() => (matching && mode !== 'equity' ? filterMinOi(rows, minOi) : matching ? rows : []), [matching, rows, mode, minOi]);
   const openCompany = useCallback((r: MoverRow) => onOpenCompany({ securityId: r.securityId, exchangeSegment: 'NSE_EQ', label: r.name || r.symbol }), [onOpenCompany]);
   const columns = useMemo(() => buildColumns(mode, openCompany), [mode, openCompany]);
-  const live = isNseLive(new Date(now));
-  const dataAgeMs = fetchedAt ? now - fetchedAt : 0;
 
   return (
     <div className="flex flex-col gap-3">
@@ -195,7 +229,7 @@ export default function MoversPanel({ active, onOpenCompany, onDataDate }: { act
           <>
             <label className="sr-only" htmlFor="mv-month">Series month</label>
             <select id="mv-month" className={selectCls} value={monthIdx} onChange={e => setMonthIdx(Number(e.target.value))}>
-              {months.map((m, i) => <option key={m.expiry} value={i}>{m.label} (monthly)</option>)}
+              {months.map((m, i) => <option key={m.expiry} value={i}>{m.label} (monthly, {m.expiry.slice(5)})</option>)}
             </select>
             <label className="sr-only" htmlFor="mv-minoi">Minimum open interest</label>
             <select id="mv-minoi" className={selectCls} value={minOi} onChange={e => setMinOi(Number(e.target.value))}>
@@ -211,11 +245,8 @@ export default function MoversPanel({ active, onOpenCompany, onDataDate }: { act
           className="h-8 w-8 flex items-center justify-center rounded-md border border-zinc-800 bg-zinc-900 text-zinc-300 hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500/60">
           <RefreshCw className={cn('h-3.5 w-3.5', loading && 'animate-spin')} aria-hidden="true" />
         </button>
-        <span className={cn('text-[10px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded border',
-          live ? 'text-emerald-400 bg-emerald-500/10 border-emerald-500/20' : 'text-zinc-400 bg-zinc-800 border-zinc-700')}>
-          {live ? 'Live session' : 'Market closed · last session'}
-        </span>
-        {fetchedAt && <span className="text-[10px] text-zinc-500">updated {fmtAge(now, fetchedAt)}</span>}
+        <SessionBadge mode={mode} />
+        {fetchedAt && <UpdatedAgo at={fetchedAt} />}
       </div>
 
       {error && (
@@ -224,12 +255,7 @@ export default function MoversPanel({ active, onOpenCompany, onDataDate }: { act
           <span>{error}{matching ? ' - showing the last loaded ranking.' : ''}</span>
         </div>
       )}
-      {!error && (stale || (live && dataAgeMs > 60_000)) && (
-        <div className="flex items-start gap-2 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-300">
-          <AlertTriangle className="h-3.5 w-3.5 shrink-0 mt-0.5" aria-hidden="true" />
-          <span>Ranking is {fetchedAt ? fmtAge(now, fetchedAt) : 'out of date'} - Dhan did not answer the last refresh.</span>
-        </div>
-      )}
+      {!error && <StaleBanner mode={mode} stale={stale} fetchedAt={fetchedAt} />}
 
       {!matching && !error && (
         <div className="flex flex-col items-center gap-2 py-16">

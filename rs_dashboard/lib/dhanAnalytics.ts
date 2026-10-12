@@ -9,6 +9,7 @@
 //   - NSE_FNO `expiry` is month-granular - any date in a month ranks that month's MONTHLY series,
 //     weeklies are never returned;
 //   - news `nseScripCode` / `bseScripCode` are the NSE / BSE SECURITY_IDs.
+import { isNseTradingDay } from './nseHolidays.ts';
 
 export const NEWS_CATEGORIES = [
   'ALL', 'COMPANIES', 'EQUITY_MARKETS', 'DEBT_MARKETS', 'IPO', 'GLOBAL', 'INDIAN_ECONOMY',
@@ -362,22 +363,35 @@ export function filterMinOi(rows: MoverRow[], minOi: number): MoverRow[] {
   return minOi > 0 ? rows.filter(r => r.openInterest >= minOi) : rows;
 }
 
-/** Month key (YYYY-MM) for a month-granular NSE_FNO expiry selection. */
-export function monthKey(iso: string): string {
-  return iso.slice(0, 7);
+/** The NSE monthly derivatives expiry for a month: the last Tuesday, moved back to the previous trading day when that is an
+ *  NSE holiday. Matches what Dhan's movers returned on 2026-10-12 (Oct 27, Nov 23 because Tue Nov 24 is a holiday, Dec 29). It is
+ *  a rule, not a lookup - if NSE changes the weekday this needs updating, but the movers API ranks the month's series for ANY
+ *  date inside the month, so a wrong day here still selects the right series. `month` is 1-12. */
+export function nseMonthlyExpiry(year: number, month: number): string {
+  let d = Date.UTC(year, month, 0);                      // day 0 of the next month = last day of this one
+  while (new Date(d).getUTCDay() !== 2) d -= 86_400_000; // back to the last Tuesday
+  let iso = new Date(d).toISOString().slice(0, 10);
+  for (let i = 0; i < 7 && !isNseTradingDay(iso); i++) {
+    d -= 86_400_000;
+    iso = new Date(d).toISOString().slice(0, 10);
+  }
+  return iso;
 }
 
-/** The month choices for the F&O movers picker: the current month and the next two, derived from the
- *  IST date, each sent as the 15th (any date in the month selects the monthly series). */
+/** Month choices for the F&O movers picker, each carrying that month's real monthly expiry. A month whose expiry has already
+ *  passed is skipped: its series no longer exists, and defaulting to it gave an empty ranking with no explanation. The expiry day
+ *  itself still counts (the series trades until the close). */
 export function moverExpiryMonths(todayIso: string, count = 3): { label: string; expiry: string }[] {
   const [y, m] = todayIso.split('-').map(Number);
   const names = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
   const out: { label: string; expiry: string }[] = [];
-  for (let i = 0; i < count; i++) {
+  for (let i = 0; out.length < count && i < count + 2; i++) {
     const idx = (m - 1) + i;
     const yy = y + Math.floor(idx / 12);
     const mm = (idx % 12) + 1;
-    out.push({ label: `${names[mm - 1]} ${yy}`, expiry: `${yy}-${String(mm).padStart(2, '0')}-15` });
+    const expiry = nseMonthlyExpiry(yy, mm);
+    if (expiry < todayIso) continue;
+    out.push({ label: `${names[mm - 1]} ${yy}`, expiry });
   }
   return out;
 }

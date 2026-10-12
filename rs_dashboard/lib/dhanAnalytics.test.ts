@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   parseNewsRequest, normalizeNews, parseCompanyInfoRequest, normalizeCompanyInfo, metricNumber,
-  parseMoversRequest, normalizeMovers, filterMinOi, moverExpiryMonths,
+  parseMoversRequest, normalizeMovers, filterMinOi, moverExpiryMonths, nseMonthlyExpiry,
 } from './dhanAnalytics.ts';
 
 const q = (s: string) => new URLSearchParams(s);
@@ -166,8 +166,19 @@ test('filterMinOi drops the thin-OI noise OI_GAINERS surfaces, preserving order'
   assert.equal(filterMinOi(rows, 0).length, 3);
 });
 
-test('moverExpiryMonths rolls over the year', () => {
-  assert.deepEqual(moverExpiryMonths('2026-11-20'), [
-    { label: 'Nov 2026', expiry: '2026-11-15' }, { label: 'Dec 2026', expiry: '2026-12-15' }, { label: 'Jan 2027', expiry: '2027-01-15' },
-  ]);
+test('nseMonthlyExpiry: last Tuesday, rolled back over an NSE holiday (matches Dhan on 2026-10-12)', () => {
+  assert.equal(nseMonthlyExpiry(2026, 10), '2026-10-27');
+  assert.equal(nseMonthlyExpiry(2026, 11), '2026-11-23'); // Tue 24 Nov is an NSE holiday -> Monday
+  assert.equal(nseMonthlyExpiry(2026, 12), '2026-12-29');
+  assert.equal(nseMonthlyExpiry(2027, 1), '2027-01-26');  // last Tuesday of Jan 2027 (the repo has no 2027 holiday data: weekdays only)
+});
+
+test('moverExpiryMonths starts at the first month whose monthly expiry has not passed', () => {
+  assert.deepEqual(moverExpiryMonths('2026-10-12').map(m => m.expiry), ['2026-10-27', '2026-11-23', '2026-12-29']);
+  assert.equal(moverExpiryMonths('2026-10-27')[0].expiry, '2026-10-27');           // expiry day: still trading
+  assert.deepEqual(moverExpiryMonths('2026-10-28')[0], { label: 'Nov 2026', expiry: '2026-11-23' }); // after expiry: skip October
+  assert.equal(moverExpiryMonths('2026-11-24')[0].expiry, '2026-12-29');          // day after the holiday-shifted Nov expiry
+  const dec = moverExpiryMonths('2026-12-30');
+  assert.equal(dec.length, 3);
+  assert.equal(dec[0].label, 'Jan 2027');                                         // rolls over the year
 });

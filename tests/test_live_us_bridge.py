@@ -7,7 +7,9 @@ import asyncio
 import importlib.util
 import json
 import os
+import shutil
 import struct
+import subprocess
 import sys
 import tempfile
 import time
@@ -106,6 +108,45 @@ class FatalConnectTests(BridgeTestCase):
         self.assertEqual(code, 0)
         self.assertGreaterEqual(len(attempts), 3)
         self.assertGreaterEqual(attempts[1] - attempts[0], 0.25)   # the first retry waits BACKOFF_START, not double
+
+
+class SingletonGuardTests(BridgeTestCase):
+    def write_status(self, **kw):
+        with open(bridge_mod.STATUS_FILE, 'w') as f:
+            json.dump({'status': 'RUNNING', 'heartbeat': int(time.time() * 1000), **kw}, f)
+
+    def spawn(self, *argv):
+        p = subprocess.Popen(argv, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        self.addCleanup(lambda: (p.kill(), p.wait()))
+        return p
+
+    def test_a_live_python_bridge_with_a_fresh_heartbeat_blocks_a_second_start(self):
+        p = self.spawn(sys.executable, '-c', 'import time; time.sleep(60)')
+        self.write_status(pid=p.pid)
+        self.assertEqual(bridge_mod.another_bridge_running(), p.pid)
+        self.assertIsNone(p.poll(), 'the guard must only LOOK at the other process - on Windows os.kill(pid, 0) would terminate it')
+
+    def test_stale_heartbeat_dead_pid_and_non_python_pid_do_not_block(self):
+        p = self.spawn(sys.executable, '-c', 'import time; time.sleep(60)')
+        self.write_status(pid=p.pid, heartbeat=int((time.time() - 120) * 1000))
+        self.assertIsNone(bridge_mod.another_bridge_running())            # heartbeat too old
+        dead = self.spawn(sys.executable, '-c', 'pass')
+        dead.wait()
+        self.write_status(pid=dead.pid)
+        self.assertIsNone(bridge_mod.another_bridge_running())            # process gone
+        if shutil.which('sleep') is None:
+            self.skipTest('no non-python process available to stand in for a recycled PID on this platform')
+        sleeper = self.spawn('sleep', '60')
+        self.write_status(pid=sleeper.pid)
+        self.assertIsNone(bridge_mod.another_bridge_running())            # a recycled PID that is not python
+
+    def test_stopped_error_and_own_pid_do_not_block(self):
+        p = self.spawn(sys.executable, '-c', 'import time; time.sleep(60)')
+        for st in ('STOPPED', 'ERROR'):
+            self.write_status(pid=p.pid, status=st)
+            self.assertIsNone(bridge_mod.another_bridge_running(), st)
+        self.write_status(pid=os.getpid())
+        self.assertIsNone(bridge_mod.another_bridge_running())
 
 
 class BackoffHeartbeatTests(BridgeTestCase):

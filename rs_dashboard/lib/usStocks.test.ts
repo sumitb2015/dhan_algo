@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  splitCsvLine, parseUsScripMaster, searchUs, validateWatchlist, nextWatchlist, buildUsRow, bridgeHealth, US_WATCHLIST_MAX, type UsInstrument,
+  splitCsvLine, parseUsScripMaster, searchUs, validateWatchlist, nextWatchlist, startBlockReason, START_COOLDOWN_MS, buildUsRow, bridgeHealth, US_WATCHLIST_MAX, type UsInstrument,
 } from './usStocks.ts';
 
 const HEAD = 'EXCHANGE,SEGMENT,SCRIP_CODE,ISIN_CODE,SYMBOL,SYMBOL_NAME,EXCH_SYMBOL,CUSTOM_SYMBOL,TRADING_SYMBOL,FRACTION,CUSTOM_EXCH,INSTRUMENT_NAME,TICK_SIZE,LOT_SIZE,UPPER_LIMIT,LOWER_LIMIT,UPDATE_DATE';
@@ -141,4 +141,27 @@ test('nextWatchlist: add moves an existing id to the end, rejects bad ids, respe
   const big = new Set(Array.from({ length: US_WATCHLIST_MAX + 1 }, (_, i) => String(i + 1)));
   const full = Array.from({ length: US_WATCHLIST_MAX }, (_, i) => String(i + 1));
   assert.equal(nextWatchlist(full, 'add', String(US_WATCHLIST_MAX + 1), big).ok, false);
+});
+
+test('startBlockReason holds Start after a fatal feed error, until a login or the cooldown', () => {
+  const now = 10_000_000;
+  const err = (error: string, ago = 30_000) => ({ status: 'ERROR', error, heartbeat: now - ago });
+  assert.match(startBlockReason(err('808: authentication failure'), now, null)!, /IP blocked/);
+  assert.match(startBlockReason(err('808: authentication failure'), now, null)!, /login\.py/);
+  assert.match(startBlockReason(err('806: payment not done for broadcast (US feed not enabled on this account)'), now, null)!, /enabled/);
+  assert.match(startBlockReason(err('handshake rejected with HTTP 403 (token invalid/expired or feed not enabled)'), now, null)!, /login\.py/);
+  // a login AFTER the failure clears the block for credential errors...
+  assert.equal(startBlockReason(err('808: authentication failure'), now, now - 5_000), null);
+  assert.equal(startBlockReason(err('credentials: no token'), now, now - 5_000), null);
+  // ...but not for a plan/limit error, which a new token cannot fix
+  assert.notEqual(startBlockReason(err('806: payment not done for broadcast'), now, now - 5_000), null);
+  assert.notEqual(startBlockReason(err('805: connection limit exceeded'), now, now - 5_000), null);
+  // an old token file does not unblock
+  assert.notEqual(startBlockReason(err('808: authentication failure'), now, now - 600_000), null);
+  // the cooldown expires on its own
+  assert.equal(startBlockReason(err('808: authentication failure', START_COOLDOWN_MS + 1), now, null), null);
+  // non-fatal / non-error states never block
+  assert.equal(startBlockReason(err('ConnectionResetError: x'), now, null), null);
+  assert.equal(startBlockReason({ status: 'STOPPED', heartbeat: now }, now, null), null);
+  assert.equal(startBlockReason(null, now, null), null);
 });

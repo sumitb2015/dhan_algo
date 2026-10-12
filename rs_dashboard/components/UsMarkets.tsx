@@ -1,7 +1,7 @@
 'use client';
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { AlertTriangle, Globe, Loader2, Play, Plus, Search, Square, X } from 'lucide-react';
+import { AlertTriangle, Globe, Loader2, Play, Plus, RotateCcw, Search, Square, X } from 'lucide-react';
 import NavBar from '@/components/NavBar';
 import { cn } from '@/lib/utils';
 import type { BridgeHealth, BridgeStatus, UsInstrument, UsQuoteRow } from '@/lib/usStocks';
@@ -211,10 +211,18 @@ export default function UsMarkets() {
               {busy === 'start' ? <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden="true" /> : <Play className="h-3.5 w-3.5" aria-hidden="true" />}Start feed
             </button>
           ) : (
-            <button onClick={() => post({ action: 'stop' }, 'stop')} disabled={busy === 'stop'}
-              className="h-8 px-3 inline-flex items-center gap-1.5 rounded-md border border-zinc-700 bg-zinc-900 text-zinc-200 text-xs font-semibold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500/60 disabled:opacity-50">
-              <Square className="h-3.5 w-3.5" aria-hidden="true" />Stop feed
-            </button>
+            <>
+              {health === 'stale' && (
+                <button onClick={() => post({ action: 'restart' }, 'restart')} disabled={busy === 'restart'}
+                  className="h-8 px-3 inline-flex items-center gap-1.5 rounded-md border border-amber-500/30 bg-amber-500/10 text-amber-300 text-xs font-semibold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500/60 disabled:opacity-50">
+                  {busy === 'restart' ? <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden="true" /> : <RotateCcw className="h-3.5 w-3.5" aria-hidden="true" />}Restart feed
+                </button>
+              )}
+              <button onClick={() => post({ action: 'stop' }, 'stop')} disabled={busy === 'stop'}
+                className="h-8 px-3 inline-flex items-center gap-1.5 rounded-md border border-zinc-700 bg-zinc-900 text-zinc-200 text-xs font-semibold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500/60 disabled:opacity-50">
+                <Square className="h-3.5 w-3.5" aria-hidden="true" />Stop feed
+              </button>
+            </>
           )}
           <span className="text-[10px] font-mono font-bold uppercase tracking-wider text-amber-300 px-1.5 py-0.5 rounded bg-amber-500/10 border border-amber-500/20">
             DATA: {dataDate ?? '—'}
@@ -276,7 +284,7 @@ export default function UsMarkets() {
         {data && rows.length > 0 && !live && health !== 'idle' && !error && (
           <div className="flex items-start gap-2 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-300">
             <AlertTriangle className="h-3.5 w-3.5 shrink-0 mt-0.5" aria-hidden="true" />
-            <span>These are the last saved quotes{snapshotAgeMs != null ? `, ${ageText(snapshotAgeMs)}` : ''}, not live prices. {canStart ? 'Press Start feed.' : health === 'reconnecting' ? 'The feed is reconnecting.' : 'The feed has stopped updating.'}</span>
+            <span>These are the last saved quotes{snapshotAgeMs != null ? `, ${ageText(snapshotAgeMs)}` : ''}, not live prices. {canStart ? 'Press Start feed.' : health === 'reconnecting' ? 'The feed is reconnecting.' : health === 'stale' ? 'The feed has stopped updating - try Restart feed.' : 'The feed has stopped updating.'}</span>
           </div>
         )}
 

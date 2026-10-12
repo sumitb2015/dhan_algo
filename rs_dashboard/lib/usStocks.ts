@@ -191,3 +191,21 @@ export function bridgeHealth(st: BridgeStatus | null, pidAlive: boolean, nowMs: 
   // which is a normal, self-healing state - not the same as a bridge that has stopped updating.
   return st.status === 'CONNECTING' || st.status === 'RECONNECTING' ? 'reconnecting' : 'stale';
 }
+
+const AUTH_FIXED_BY_LOGIN = /^(807|808|809|credentials|handshake)/;
+const FATAL_ERROR = /^(80[5-9]|credentials|handshake)/;
+export const START_COOLDOWN_MS = 5 * 60_000;
+
+/** Why Start must be refused right now, or null. The bridge deliberately stops (status ERROR) on a credentials / plan / limit
+ *  failure rather than retry, because repeated invalid connects can get the source IP blocked. A Start button that respawns it
+ *  on every click would defeat that. A fresh login (token file newer than the failure) clears the block for the errors a login
+ *  can fix; anything else waits out a cooldown. */
+export function startBlockReason(st: BridgeStatus | null, nowMs: number, tokenMtimeMs: number | null): string | null {
+  if (!st || st.status !== 'ERROR' || !st.error || !FATAL_ERROR.test(st.error)) return null;
+  const at = typeof st.heartbeat === 'number' ? st.heartbeat : 0;
+  if (tokenMtimeMs != null && tokenMtimeMs > at && AUTH_FIXED_BY_LOGIN.test(st.error)) return null;
+  const waitMs = at + START_COOLDOWN_MS - nowMs;
+  if (waitMs <= 0) return null;
+  const hint = AUTH_FIXED_BY_LOGIN.test(st.error) ? 'run login.py, then Start' : 'check that the US feed is enabled on your Dhan account';
+  return `The feed stopped on "${st.error}". Retrying immediately can get your IP blocked (repeated invalid connects), so Start is held for ${Math.ceil(waitMs / 60_000)} more min - ${hint}.`;
+}

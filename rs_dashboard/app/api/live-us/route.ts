@@ -5,7 +5,7 @@ import { spawn } from 'child_process';
 import { isPidRunning } from '@/lib/processCheck';
 import { PYTHON_EXE } from '@/lib/pyExec';
 import {
-  bridgeHealth, buildUsRow, nextWatchlist, US_WATCHLIST_MAX, type BridgeStatus, type RawUsQuote,
+  bridgeHealth, buildUsRow, nextWatchlist, startBlockReason, US_WATCHLIST_MAX, type BridgeStatus, type RawUsQuote,
 } from '@/lib/usStocks';
 import { getUsMaster, US_DEBUG_DIR } from '@/lib/usStocksServer';
 
@@ -15,6 +15,7 @@ export const dynamic = 'force-dynamic';
 //   GET                     -> bridge health + the watchlist rows with their latest quotes
 //   POST {action:'start'}   -> spawn scripts/tools/live_us_ws.py (atomic start lock, one instance)
 //   POST {action:'stop'}    -> write debug/live_us_stop.trigger
+//   POST {action:'restart'} -> a bridge whose heartbeat has gone stale (wedged, pid still alive) is killed and respawned
 //   POST {action:'add'|'remove', id}  -> edit debug/live_us_watchlist.json (serialised, validated against the master)
 const PROJECT_ROOT = path.resolve(process.cwd(), '..');
 const BRIDGE_SCRIPT = path.join(PROJECT_ROOT, 'scripts', 'tools', 'live_us_ws.py');
@@ -23,6 +24,7 @@ const QUOTES_FILE = path.join(US_DEBUG_DIR, 'live_us_quotes.json');
 const STATUS_FILE = path.join(US_DEBUG_DIR, 'live_us_status.json');
 const STOP_TRIGGER = path.join(US_DEBUG_DIR, 'live_us_stop.trigger');
 const START_LOCK = path.join(US_DEBUG_DIR, 'live_us_start.lock');
+const TOKEN_FILE = path.join(PROJECT_ROOT, 'access_token.json');
 const LOCK_STALE_MS = 30_000;
 
 function readJson<T>(file: string): T | null {
@@ -61,6 +63,11 @@ function acquireStartLock(): boolean {
     }
   } catch { /* lost the steal race */ }
   return false;
+}
+
+/** Raw liveness (no image-name cache): after a kill we need the truth now, not a 3 s-old answer. */
+function pidAlive(pid: number): boolean {
+  try { process.kill(pid, 0); return true; } catch { return false; }
 }
 
 function health(): { status: BridgeStatus | null; health: ReturnType<typeof bridgeHealth> } {
@@ -115,13 +122,34 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     return NextResponse.json({ success: true, ids: out.ids });
   }
 
-  if (action === 'start') {
+  if (action === 'start' || action === 'restart') {
     fs.mkdirSync(US_DEBUG_DIR, { recursive: true });
     if (!acquireStartLock()) return NextResponse.json({ success: true, message: 'Start already in progress' });
     try {
       const cur = health();
-      if (cur.health === 'live' || cur.health === 'idle' || cur.health === 'reconnecting' || cur.health === 'stale') {
-        return NextResponse.json({ success: true, message: 'Bridge already running', pid: cur.status?.pid });
+      if (action === 'start') {
+        if (cur.health === 'live' || cur.health === 'idle' || cur.health === 'reconnecting' || cur.health === 'stale') {
+          return NextResponse.json({ success: true, message: 'Bridge already running', pid: cur.status?.pid });
+        }
+        // The bridge stops on credentials / plan / limit errors on purpose (repeated invalid connects can get the IP blocked);
+        // a Start button must not undo that by respawning it on every click.
+        let tokenMtime: number | null = null;
+        try { tokenMtime = fs.statSync(TOKEN_FILE).mtimeMs; } catch { /* no token file: nothing to compare */ }
+        const blocked = startBlockReason(cur.status, Date.now(), tokenMtime);
+        if (blocked) return NextResponse.json({ success: false, error: blocked }, { status: 429 });
+      } else {
+        // Restart is only for a bridge that has stopped heartbeating while its process lives (wedged): its Stop trigger is never read.
+        if (cur.health !== 'stale') return NextResponse.json({ success: false, error: `Restart is only for a stalled feed (it is ${cur.health})` }, { status: 409 });
+        const pid = cur.status?.pid;
+        if (typeof pid === 'number' && isPidRunning(pid)) {          // isPidRunning also checks the image name, so a recycled pid is left alone
+          try { process.kill(pid, 'SIGTERM'); } catch { /* already gone */ }
+          for (let i = 0; i < 12 && pidAlive(pid); i++) await new Promise(r => setTimeout(r, 250));
+          if (pidAlive(pid)) {
+            try { process.kill(pid, 'SIGKILL'); } catch { /* already gone */ }
+            for (let i = 0; i < 8 && pidAlive(pid); i++) await new Promise(r => setTimeout(r, 250));
+            if (pidAlive(pid)) return NextResponse.json({ success: false, error: `Could not stop the stalled bridge (pid ${pid}); end it manually` }, { status: 500 });
+          }
+        }
       }
       try { fs.unlinkSync(STOP_TRIGGER); } catch { /* none */ }
       // Append to a log so a silent death leaves a traceback to read.
@@ -136,7 +164,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
         const st = readJson<BridgeStatus>(STATUS_FILE);
         if (st?.pid === child.pid) break;
       }
-      return NextResponse.json({ success: true, message: 'Bridge started', pid: child.pid });
+      return NextResponse.json({ success: true, message: action === 'restart' ? 'Bridge restarted' : 'Bridge started', pid: child.pid });
     } finally {
       try { fs.unlinkSync(START_LOCK); } catch { /* already gone */ }
     }

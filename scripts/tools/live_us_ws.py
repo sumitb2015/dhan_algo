@@ -40,6 +40,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)
 sys.path.insert(0, ROOT)
 
 from lib import us_feed  # noqa: E402
+from lib.market_hub_client import is_pid_running  # noqa: E402  (psutil + image-name check; NOT os.kill(pid, 0), which TerminateProcess-es on Windows)
 
 DEBUG_DIR = os.path.join(ROOT, 'debug')
 WATCHLIST_FILE = os.path.join(DEBUG_DIR, 'live_us_watchlist.json')
@@ -82,25 +83,13 @@ def read_json(path: str):
         return None
 
 
-def pid_alive(pid: int) -> bool:
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return True
-    except OSError:
-        return False
-    return True
-
-
 def another_bridge_running() -> int | None:
     st = read_json(STATUS_FILE)
     if not st or st.get('status') not in ('RUNNING', 'IDLE', 'CONNECTING', 'RECONNECTING'):
         return None
     pid = st.get('pid')
     hb = st.get('heartbeat')
-    if isinstance(pid, int) and pid != os.getpid() and pid_alive(pid) and isinstance(hb, (int, float)) and time.time() - hb / 1000 < LIVE_PID_FRESH_SEC:
+    if isinstance(pid, int) and pid != os.getpid() and is_pid_running(pid) and isinstance(hb, (int, float)) and time.time() - hb / 1000 < LIVE_PID_FRESH_SEC:
         return pid
     return None
 

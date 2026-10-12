@@ -12,6 +12,15 @@ export function isNseLive(now: Date): boolean {
   return minutes >= 9 * 60 + 15 && minutes <= 15 * 60 + 40;
 }
 
+// NSE cash-equity session: 09:15-15:30 IST. The F&O close is 15:40 (isNseLive above); between 15:30 and 15:40 equity prices are
+// final while derivatives still trade, so a screen showing equity data must not call that window "live".
+export function isNseCashLive(now: Date): boolean {
+  const ist = new Date(now.toLocaleString('en-US', { timeZone: 'Asia/Kolkata' }));
+  if (!isNseTradingDay(istDateIso(now))) return false;
+  const minutes = ist.getHours() * 60 + ist.getMinutes();
+  return minutes >= 9 * 60 + 15 && minutes <= 15 * 60 + 30;
+}
+
 // MCX commodity session: 09:00-23:30 IST, Mon-Fri. Crude keeps trading for another 8 hours after
 // the NSE bell, so gating it on isNseLive() would drop its charts to the off-hours poll cadence
 // for most of its own session.

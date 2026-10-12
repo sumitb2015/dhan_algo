@@ -10,7 +10,8 @@ Wire facts (spec, 2026-10-12):
   * one WebSocket message may hold several packets back to back - loop until the buffer is used;
   * 11-byte header: u8 exchange segment (14 = INX_EQ), i32 security id, i32 security id again,
     u8 total packet length, u8 MsgCode. MsgCode is byte 10, NOT byte 0 (byte 0 is the segment);
-  * Error packets (MsgCode 50) arrive alone, never batched with market data.
+  * Error packets (MsgCode 50) arrive alone, never batched with market data;
+  * before the open the server may send zero-filled Circuit/52-week packets with security id 0 - "no data yet", ignored.
 
 The installed dhanhq SDK predates GlobalStocksFeed, and the SDK's own first parser read Trade as 37
 bytes and Previous Close as 19 (real sizes: 27 and 15) and detected errors at byte 0 - so every
@@ -20,10 +21,8 @@ from __future__ import annotations
 
 import struct
 from dataclasses import dataclass
-from typing import Iterator
 
 HEADER_SIZE = 11
-SEG_INX_EQ = 14
 
 MSG_TRADE = 1
 MSG_OHLC = 3
@@ -130,12 +129,6 @@ def _decode(code: int, seg: int, sid: int, buf: bytes, body: int, size: int) -> 
     return Packet('unknown', sid, seg, code, {})
 
 
-def is_zero_fill(pkt: Packet) -> bool:
-    """Spec: before the open the server may send a Circuit/52-week packet with ScripId 0 and 0.00
-    values. That means 'no data yet' - it is valid and must not overwrite a real value."""
-    return pkt.security_id == 0 and pkt.kind in ('circuit', 'week52', 'prev_close')
-
-
 def fatal_error(pkt: Packet) -> str | None:
     """Reason text if this packet is a disconnect the bridge must not retry, else None.
 
@@ -187,7 +180,9 @@ def apply_packet(state: dict[int, dict], pkt: Packet) -> bool:
 
     `ltt` is stored as received. Observed live it runs 19,800 s (5 h 30 m) ahead of `lut`, i.e. it looks like an
     IST-shifted epoch while `lut` is a true UTC epoch - use `lut` for "how fresh is this quote"""
-    if pkt.kind in ('error', 'unknown', 'market_status') or pkt.security_id == 0 or is_zero_fill(pkt):
+    # security_id 0 is the spec's zero-filled "no data yet" reference packet (Circuit / 52-week before the open): valid, but it
+    # must neither create an entry under id 0 nor overwrite a real value.
+    if pkt.kind in ('error', 'unknown', 'market_status') or pkt.security_id == 0:
         return False
     q = state.setdefault(pkt.security_id, {})
     d = pkt.data
@@ -214,7 +209,3 @@ def apply_packet(state: dict[int, dict], pkt: Packet) -> bool:
         if d['high'] > 0 and d['low'] > 0:
             q['wk52_high'], q['wk52_low'] = d['high'], d['low']
     return q != before
-
-
-def iter_ids(state: dict[int, dict]) -> Iterator[int]:
-    return iter(state)
