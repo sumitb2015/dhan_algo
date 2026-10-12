@@ -281,3 +281,38 @@ test('reducers: add / remove / arm / alarm', () => {
   assert.equal(g.alarm!.armed, false);
   assert.equal(g.alarm!.maxLoss, 500);
 });
+
+import { expireStaleGuards, istDayOf } from './multiLegGuards.ts';
+
+test('istDayOf rolls at IST midnight', () => {
+  assert.equal(istDayOf(Date.UTC(2026, 9, 11, 18, 29, 59)), '2026-10-11');
+  assert.equal(istDayOf(Date.UTC(2026, 9, 11, 18, 30, 0)), '2026-10-12');
+});
+
+test('expireStaleGuards: only armed guards from another day (or unstamped) go off; null when nothing is stale', () => {
+  const g: BasketGuards = {
+    spotTriggers: [trig({ id: 'a', armedDay: '2026-10-12' }), trig({ id: 'b', armedDay: '2026-10-09', firedAt: 'x' }), trig({ id: 'c', armed: false, armedDay: '2026-10-01' })],
+    greekBands: [{ id: 'g', metric: 'delta', max: 5, action: 'ALERT', armed: true }],
+    alarm: { armed: true, armedDay: '2026-10-12', maxLoss: 1 },
+  };
+  const out = expireStaleGuards(g, '2026-10-12')!;
+  assert.equal(out.spotTriggers![0], g.spotTriggers![0]);                                   // today's: same object
+  assert.equal(out.spotTriggers![1].armed, false);
+  assert.equal(out.spotTriggers![1].firedAt, undefined);
+  assert.equal(out.greekBands![0].armed, false);                                            // unstamped = stale
+  assert.equal(out.alarm, g.alarm);
+  assert.equal(expireStaleGuards(out, '2026-10-12'), null);
+  assert.equal(expireStaleGuards(undefined, '2026-10-12'), null);
+});
+
+test('arming stamps the day; disarming clears it', () => {
+  let g: BasketGuards = { spotTriggers: [trig({ id: 'a', armed: false })], greekBands: [{ id: 'b', metric: 'delta', max: 1, action: 'ALERT', armed: false }] };
+  g = setSpotArmed(g, 'a', true, '2026-10-12');
+  g = setBandArmed(g, 'b', true, '2026-10-12');
+  g = setAlarmArmed(g, true, '2026-10-12');
+  assert.equal(g.spotTriggers![0].armedDay, '2026-10-12');
+  assert.equal(g.greekBands![0].armedDay, '2026-10-12');
+  assert.equal(g.alarm!.armedDay, '2026-10-12');
+  g = setSpotArmed(g, 'a', false);
+  assert.equal(g.spotTriggers![0].armedDay, undefined);
+});

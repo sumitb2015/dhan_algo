@@ -18,7 +18,7 @@ before changing any of it**; this skill only maps the page.
 | `lib/multiLegStoreMerge.ts` | Server-side merge of a basket save into the stored copy by per-item `rev`; a leg that ever traded is never dropped by a save; append-only id lists (`orderIds`, `outsideTradeKeys`) are unioned; `relocateResurrectedLegs` |
 | `lib/multiLegRegroup.ts` | Group / ungroup = moving legs between baskets; places no orders; refuses PLACING/CLOSING legs; one broker + one underlying per basket; drafts never share a group with traded legs; disarms strategy SL/target on changed groups |
 | `lib/multiLegBrokerSync.ts` | Broker → ledger: `growLegToBroker`, `outsidePositionBaskets` (a position no leg holds becomes an ungrouped trade), futures-row detection (`futuresContractOf`) |
-| `lib/multiLegGuards.ts` | Basket `guards` (2026-10-12): spot triggers (`stepSpotTrigger`, `spotActionLegs`), net-Greek bands (`readGreekBand`), rupee max-loss + account margin-utilisation alarm (`lossLevel`, `marginLevel`, `nextAlarmState` hysteresis), `disarmGuards`. UI is `components/multiLegFocus/GuardsPanel.tsx`; the watcher is the "Guards" effect in `MultiLegFocus.tsx` |
+| `lib/multiLegGuards.ts` + `lib/multiLegGuardEngine.ts` | Basket `guards` (2026-10-12): spot triggers, net-Greek bands, rupee max-loss + account margin-utilisation alarm. `multiLegGuards.ts` = rules, edit reducers, `exitSide`, `expireStaleGuards`; `evaluateBasketGuards` (engine) = one pure evaluation pass returning effects (patch / toast / exitAll / exitSide). UI is `components/multiLegFocus/GuardsPanel.tsx`; `MultiLegFocus.tsx` only supplies inputs (1 s ref-driven timer, no re-render) and performs the effects |
 | `lib/multiLegArchive.ts` | Retiring finished strategies (`isFullyClosed`, `splitEarlierDayLegs`); a row holding a waiting stop entry is **not** finished |
 | `lib/multiLegFocusStore.ts` (server I/O) | Atomic JSON writes, calls merge/regroup/archive |
 | `lib/multiLegGreeks.ts`, `lib/positionPayoff.ts` | Greeks panel and payoff — through the central libraries (`dhan-payoff-diagrams`, `dhan-position-greeks`) |
@@ -80,9 +80,13 @@ before changing any of it**; this skill only maps the page.
    - Greek bands skip while any open leg is unpriced or an IV was assumed. The alarm announces once per escalation and
      re-arms 5 points below the threshold. Regroup disarms the guards of every changed group (`disarmGuards`) because a
      trigger written for one set of legs must not act on another. There is no auto-hedge yet.
-   - Known gaps (2026-10-12 review): chain-fallback spot freshness is per chain map, not per underlying; armed guards do not
-     expire at day roll; the margin-alarm key is per broker, so two baskets with different thresholds can re-announce;
-     loss is measured on the basket's lifetime total.
+   - **Day roll:** a guard stores `armedDay` (IST) when armed; `expireStaleGuards` disarms any armed guard from another day
+     (or unstamped) with one toast, so a level chosen for yesterday never acts on a carried or new position. Re-arm daily.
+   - **Loss scope:** `alarm.lossScope` = `today` (default: live legs + legs closed today, the page's Today P&L) or `total`
+     (also earlier days' closed trades, which can trip a fresh position).
+   - **Spot freshness is per chain pair** (`chainSpotAtRef`, stamped only when a fetch carried a positive spot), so another
+     underlying's updates cannot make a stale spot look fresh. Margin-alarm state is per basket, not per broker.
+   - **Test the engine, not the effect:** add a case to `lib/multiLegGuardEngine.test.ts` for any new guard behaviour.
 
 ## Change checklist
 - Touched a basket/leg field? Update `multiLegStoreMerge` (rev + union rules) and its `…Resurrect` test, or a stale

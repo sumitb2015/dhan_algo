@@ -20,6 +20,8 @@ export interface SpotTrigger {
   dir: 'above' | 'below';
   action: SpotAction;
   armed: boolean;
+  /** IST day (YYYY-MM-DD) it was armed. An armed guard does not carry into another day (see expireStaleGuards). */
+  armedDay?: string;
   /** ISO time the breach was confirmed. Set means "firing": an exit action keeps retrying until its scope is flat. */
   firedAt?: string;
 }
@@ -35,12 +37,17 @@ export interface GreekBand {
   /** ALERT only warns; EXIT_ALL squares the whole basket off. (Auto-hedge is deliberately not offered yet.) */
   action: 'ALERT' | 'EXIT_ALL';
   armed: boolean;
+  armedDay?: string;
   firedAt?: string;
 }
 
 /** Rupee max-loss and account margin-utilisation alarm. */
 export interface RiskAlarm {
   armed: boolean;
+  armedDay?: string;
+  /** What the max loss is measured on. 'today' (default) = live legs plus legs closed today, the same scope as the page's
+   *  Today P&L; 'total' also counts trades closed on earlier days, so an old realized loss can trip a fresh position. */
+  lossScope?: 'today' | 'total';
   /** Max tolerated loss in rupees (positive number). */
   maxLoss?: number;
   /** Warn when the loss reaches this % of maxLoss. Default 80. */
@@ -264,20 +271,20 @@ export const removeSpotTrigger = (g: BasketGuards, id: string): BasketGuards => 
 /** Any edit disarms: a level changed under a live guard could fire on the very next tick. */
 export const editSpotTrigger = (g: BasketGuards, id: string, patch: Partial<SpotTrigger>): BasketGuards =>
   ({ ...g, spotTriggers: upd(g.spotTriggers, id, t => ({ ...t, ...patch, armed: false, firedAt: undefined })) });
-export const setSpotArmed = (g: BasketGuards, id: string, armed: boolean): BasketGuards =>
-  ({ ...g, spotTriggers: upd(g.spotTriggers, id, t => ({ ...t, armed, firedAt: undefined })) });
+export const setSpotArmed = (g: BasketGuards, id: string, armed: boolean, day?: string): BasketGuards =>
+  ({ ...g, spotTriggers: upd(g.spotTriggers, id, t => ({ ...t, armed, armedDay: armed ? day : undefined, firedAt: undefined })) });
 
 export const addGreekBand = (g: BasketGuards, b: GreekBand): BasketGuards => ({ ...g, greekBands: [...(g.greekBands ?? []), b] });
 export const removeGreekBand = (g: BasketGuards, id: string): BasketGuards => ({ ...g, greekBands: (g.greekBands ?? []).filter(b => b.id !== id) });
 export const editGreekBand = (g: BasketGuards, id: string, patch: Partial<GreekBand>): BasketGuards =>
   ({ ...g, greekBands: upd(g.greekBands, id, b => ({ ...b, ...patch, armed: false, firedAt: undefined })) });
-export const setBandArmed = (g: BasketGuards, id: string, armed: boolean): BasketGuards =>
-  ({ ...g, greekBands: upd(g.greekBands, id, b => ({ ...b, armed, firedAt: undefined })) });
+export const setBandArmed = (g: BasketGuards, id: string, armed: boolean, day?: string): BasketGuards =>
+  ({ ...g, greekBands: upd(g.greekBands, id, b => ({ ...b, armed, armedDay: armed ? day : undefined, firedAt: undefined })) });
 
 export const editAlarm = (g: BasketGuards, patch: Partial<RiskAlarm>): BasketGuards =>
   ({ ...g, alarm: { ...(g.alarm ?? { armed: false }), ...patch, armed: false } });
-export const setAlarmArmed = (g: BasketGuards, armed: boolean): BasketGuards =>
-  ({ ...g, alarm: { ...(g.alarm ?? { armed: false }), armed } });
+export const setAlarmArmed = (g: BasketGuards, armed: boolean, day?: string): BasketGuards =>
+  ({ ...g, alarm: { ...(g.alarm ?? { armed: false }), armed, armedDay: armed ? day : undefined } });
 
 // ── Exiting one side ──────────────────────────────────────────────────────────
 
@@ -311,4 +318,30 @@ export async function exitSide<L extends { side: 'B' | 'S' }>(scope: L[], deps: 
   if (toVerify.length && !(await deps.confirmShortsDown(toVerify))) return 'shorts_unconfirmed';
   await Promise.all(longs.filter(l => !deps.isBusy(l)).map(async l => { try { await deps.exitLeg(l); } catch { /* the retry window resends */ } }));
   return 'done';
+}
+
+// ── Day roll ──────────────────────────────────────────────────────────────────
+
+/** IST calendar day (YYYY-MM-DD) of a timestamp. */
+export function istDayOf(ts: number): string {
+  return new Date(ts + 5.5 * 3_600_000).toISOString().slice(0, 10);
+}
+
+/**
+ * Guards armed on an earlier IST day (or with no stamp, i.e. armed before stamping existed) are disarmed: a level or limit
+ * chosen for yesterday's market must not act on a position opened or carried into today. Re-arm each day on purpose.
+ * Returns null when nothing is stale.
+ */
+export function expireStaleGuards(g: BasketGuards | undefined, today: string): BasketGuards | null {
+  if (!g) return null;
+  const stale = (x: { armed: boolean; armedDay?: string }) => x.armed && x.armedDay !== today;
+  const any = (g.spotTriggers ?? []).some(stale) || (g.greekBands ?? []).some(stale) || (g.alarm != null && stale(g.alarm));
+  if (!any) return null;
+  const off = <T extends { armed: boolean; armedDay?: string; firedAt?: string }>(x: T): T => (stale(x) ? { ...x, armed: false, armedDay: undefined, firedAt: undefined } : x);
+  return {
+    ...g,
+    ...(g.spotTriggers ? { spotTriggers: g.spotTriggers.map(off) } : {}),
+    ...(g.greekBands ? { greekBands: g.greekBands.map(off) } : {}),
+    ...(g.alarm ? { alarm: off(g.alarm) } : {}),
+  };
 }

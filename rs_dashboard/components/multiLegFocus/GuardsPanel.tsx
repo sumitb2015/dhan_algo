@@ -5,7 +5,7 @@ import { FOCUS_RING } from '@/components/Scalper';
 import RuleNumInput from './RuleNumInput';
 import {
   addSpotTrigger, removeSpotTrigger, editSpotTrigger, setSpotArmed, addGreekBand, removeGreekBand, editGreekBand, setBandArmed, editAlarm, setAlarmArmed,
-  spotArmBlocker, greekBandInvalid, readGreekBand, lossLevel, marginUtilisationPct, marginLevel, DEFAULT_WARN_PCT,
+  istDayOf, spotArmBlocker, greekBandInvalid, readGreekBand, lossLevel, marginUtilisationPct, marginLevel, DEFAULT_WARN_PCT,
   type BasketGuards, type SpotTrigger, type SpotAction, type GreekBand, type GreekMetric, type RiskAlarm, type NetGreeks,
 } from '@/lib/multiLegGuards';
 
@@ -15,8 +15,8 @@ interface Props {
   spot: number;
   /** Net Greeks from live marks, or null while any leg is unpriced. */
   netGreeks: NetGreeks | null;
-  /** Total strategy P&L in rupees, or null when a leg is unpriced. */
-  pnlRupees: number | null;
+  /** Strategy P&L in rupees on each scope the loss alarm can use, null when a leg is unpriced. */
+  pnl: { today: number | null; total: number | null };
   funds: { available: number; used: number } | null;
   /** The page's leader tab is the only one that acts; other tabs show a note. */
   isLeader: boolean;
@@ -43,7 +43,7 @@ const selCls = `h-6 bg-zinc-800 border border-zinc-700 rounded text-[11px] text-
 const chip = 'flex items-center gap-1.5 bg-zinc-900 border border-zinc-800 rounded px-2 py-0.5 text-[11px]';
 const iconBtn = `h-6 w-6 rounded text-zinc-400 hover:text-zinc-100 hover:bg-zinc-800 ${FOCUS_RING}`;
 
-export default function GuardsPanel({ guards, spot, netGreeks, pnlRupees, funds, isLeader, onPatch }: Props) {
+export default function GuardsPanel({ guards, spot, netGreeks, pnl, funds, isLeader, onPatch }: Props) {
   const [notice, setNotice] = useState<string | null>(null);
   const g: BasketGuards = guards ?? {};
   const triggers = g.spotTriggers ?? [];
@@ -57,23 +57,25 @@ export default function GuardsPanel({ guards, spot, netGreeks, pnlRupees, funds,
       const why = spotArmBlocker(t, spot);
       if (why) { setNotice(why); return; }
     }
-    apply(g => setSpotArmed(g, t.id, on));
+    apply(g => setSpotArmed(g, t.id, on, istDayOf(Date.now())));
   };
   const armBand = (b: GreekBand, on: boolean) => {
     if (on) {
       const why = greekBandInvalid(b);
       if (why) { setNotice(why); return; }
     }
-    apply(g => setBandArmed(g, b.id, on));
+    apply(g => setBandArmed(g, b.id, on, istDayOf(Date.now())));
   };
   const armAlarm = (on: boolean) => {
     if (on && !(alarm.maxLoss && alarm.maxLoss > 0) && !(alarm.marginWarnPct && alarm.marginWarnPct > 0)) {
       setNotice('Set a max loss or a margin warning level first.');
       return;
     }
-    apply(g => setAlarmArmed(g, on));
+    apply(g => setAlarmArmed(g, on, istDayOf(Date.now())));
   };
 
+  const lossScope = alarm.lossScope ?? 'today';
+  const pnlRupees = pnl[lossScope];
   const util = marginUtilisationPct(funds);
   const lossLvl = pnlRupees != null ? lossLevel(pnlRupees, alarm) : 'ok';
   const lvlCls = (l: string) => (l === 'breach' ? 'text-rose-400 font-bold' : l === 'warn' ? 'text-amber-400 font-bold' : 'text-zinc-300');
@@ -178,6 +180,11 @@ export default function GuardsPanel({ guards, spot, netGreeks, pnlRupees, funds,
             <input type="checkbox" checked={!!alarm.exitAtMaxLoss} onChange={e => apply(g => editAlarm(g, { exitAtMaxLoss: e.target.checked }))} className="rounded border-zinc-700 text-emerald-500 focus:ring-0" />
             <span className={alarm.exitAtMaxLoss ? 'text-rose-400 font-bold' : 'text-zinc-400'}>Close at max loss</span>
           </label>
+          <select aria-label="What the max loss counts" title="Today: open legs plus legs closed today (the page's Today P&L). All trades: also trades closed on earlier days."
+            className={selCls} value={lossScope} onChange={e => apply(g => editAlarm(g, { lossScope: e.target.value as 'today' | 'total' }))}>
+            <option value="today">Today&apos;s P&amp;L</option>
+            <option value="total">All trades</option>
+          </select>
           <span className="text-zinc-400">Margin warn at</span>
           <RuleNumInput value={alarm.marginWarnPct} onCommit={v => apply(g => editAlarm(g, { marginWarnPct: v }))} placeholder="%" min={1} step={5}
             className="w-14 h-6 text-center text-amber-300" title="Warn when account margin utilisation reaches this %" />
@@ -194,7 +201,7 @@ export default function GuardsPanel({ guards, spot, netGreeks, pnlRupees, funds,
             {funds ? ` · ${fmtRs(funds.available)} free` : ''}</span>
         </div>
       </section>
-      <p className="text-zinc-500">Editing any guard disarms it; re-arm after a change. Guards run only while this page is open in the leader tab.</p>
+      <p className="text-zinc-500">Editing any guard disarms it; re-arm after a change. A guard armed today is disarmed at the next IST day. Guards run only while this page is open in the leader tab.</p>
     </div>
   );
 }

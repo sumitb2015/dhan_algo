@@ -508,6 +508,12 @@ export default function MultiLegStrategyRow({
     });
     return res.assumed.length === 0 ? res.net : null;
   }, [showGuards, basket, guardSpot, ltpFor, crudeMult]);
+  // Strategy P&L on both scopes the loss alarm can measure; null while any open leg is unpriced.
+  const guardPnl = useMemo(() => {
+    if (!showGuards) return { today: null, total: null };
+    const mk = (legs: MultiLegLeg[]) => { const m = computeStrategyMetrics(legs, ltpFor, crudeMult); return m.hasUnpricedLegs ? null : m.totalPnlRupees; };
+    return { today: mk(basket.legs.filter(l => legCountsToday(l))), total: mk(basket.legs) };
+  }, [showGuards, basket.legs, ltpFor, crudeMult]);
   const guardsOn = guardsArmed(basket.guards);
 
   const strategyRisk: StrategyRiskConfig = useMemo(() => {
@@ -1373,7 +1379,7 @@ export default function MultiLegStrategyRow({
                 guards={basket.guards}
                 spot={guardSpot ?? 0}
                 netGreeks={guardNet}
-                pnlRupees={stratMetrics.hasUnpricedLegs ? null : stratMetrics.totalPnlRupees}
+                pnl={guardPnl}
                 funds={availableFunds != null && fundsUsed != null ? { available: availableFunds, used: fundsUsed } : null}
                 isLeader={isLeader !== false}
                 onPatch={fn => onPatchGuards?.(fn)}
