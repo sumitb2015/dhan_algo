@@ -2185,6 +2185,8 @@ export default function AdvancedScalper() {
 
         const newSecEntry = strikeMap[String(newStrike)];
         let res: Response;
+        let rollBracketNote = '';
+        let rollSendPlain: (() => Promise<Response>) | null = null;   // set only when a bracket was tried first
         if (broker !== 'dhan') {
           const symbol = newSecEntry?.[box.side === 'CE' ? 'ceSymbol' : 'peSymbol'];
           if (!symbol) {
@@ -2209,19 +2211,46 @@ export default function AdvancedScalper() {
         } else {
           const secId = newSecEntry?.[box.side === 'CE' ? 'ceId' : 'peId'];
           if (secId) {
-            res = await fetch('/api/scalper/fast-order', {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({
-                securityId: secId,
-                quantity: movedUnits,
-                side: sideToOpen,
-                orderType: 'MARKET',
-                exchangeSegment: dhanFnoSegment(underlying),
-                productType: resolvedProductDhan,
-                idempotencyKey: crypto.randomUUID(),
-              }),
+            const plainBody = JSON.stringify({
+              securityId: secId,
+              quantity: movedUnits,
+              side: sideToOpen,
+              orderType: 'MARKET',
+              exchangeSegment: dhanFnoSegment(underlying),
+              productType: resolvedProductDhan,
+              idempotencyKey: crypto.randomUUID(),
             });
+            const sendPlain = () => fetch('/api/scalper/fast-order', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: plainBody });
+
+            // With the bracket armed, the rolled leg is re-protected at the NEW strike (levels off its live
+            // price). The old leg is already closed, so if the bracket cannot be priced the leg is reopened
+            // plain with a loud warning - leaving the roll half-done (a hedge missing) would be worse.
+            let bracketOrder: SuperOrderInput | undefined;
+            if (bracketActive) {
+              const quotesFresh = quotesAtRef.current > 0 && Date.now() - quotesAtRef.current <= QUOTES_STALE_MS;
+              const newLtp = liveQuotes?.strikes?.[String(newStrike)]?.[box.side === 'CE' ? 'ce' : 'pe']?.ltp ?? 0;
+              const r = quotesFresh
+                ? resolveBracket({
+                    securityId: secId, exchangeSegment: dhanFnoSegment(underlying), productType: resolvedProductDhan,
+                    side: sideToOpen, orderType: 'MARKET', quantity: movedUnits, ltp: newLtp,
+                    targetPts: Number(bracketTgt), slPts: Number(bracketSl), trailPts: Number(bracketTrail) || 0,
+                  })
+                : { ok: false as const, error: 'Live quotes are stale' };
+              if (r.ok) bracketOrder = r.order;
+              else addToast('error', `Rolled leg reopens WITHOUT a bracket`, r.error);
+            }
+            if (bracketOrder) {
+              bracketPlacedRef.current = true;      // armed on attempt, as in placeOrder
+              rollSendPlain = sendPlain;
+              rollBracketNote = ` · bracket tgt ${bracketOrder.targetPrice} / SL ${bracketOrder.stopLossPrice}`;
+              res = await fetch('/api/super-order', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ ...bracketOrder, idempotencyKey: crypto.randomUUID() }),
+              });
+            } else {
+              res = await sendPlain();
+            }
           } else {
             // Fallback path is lot-denominated, so it can't express a sub-lot
             // remainder — bail rather than silently re-open a different size.
@@ -2243,12 +2272,20 @@ export default function AdvancedScalper() {
           }
         }
 
-        const j = await res.json() as { success: boolean; order_id?: string; error?: string };
+        let j = await res.json() as { success: boolean; order_id?: string; error?: string };
+        // A bracket that Dhan CLEANLY rejected (not a 504: that one may exist) must not leave the roll
+        // half-done with the hedge missing: reopen plain, loudly.
+        if (!j.success && rollSendPlain && res.status !== 504) {
+          addToast('error', 'Bracket rejected - reopening WITHOUT it', j.error ?? 'Unknown error');
+          rollBracketNote = '';
+          res = await rollSendPlain();
+          j = await res.json() as { success: boolean; order_id?: string; error?: string };
+        }
         if (j.success) {
           // Off the live pre-close quantity, not the table snapshot.
           const residual = Math.abs(closeResult.qty) - movedUnits;
           addToast('success', `Shift complete: ${newStrike} ${box.side}`,
-            `${sideToOpen} ${movedUnits} qty placed (ID: ${j.order_id})`
+            `${sideToOpen} ${movedUnits} qty placed (ID: ${j.order_id})${rollBracketNote}`
             + (residual > 0 ? ` · ${residual} qty left at ${box.strike}` : ''));
           setTimeout(fetchTabData, 1000);
         } else {
@@ -2266,7 +2303,12 @@ export default function AdvancedScalper() {
       addToast('success', `Strike shifted to ${newStrike} ${box.side}`,
         clamped ? `Chain edge: moved ${shiftTarget.moved} of ${requestedSteps} strikes` : undefined);
     }
-  }, [boxes, visibleStrikes, allStrikes, strikeStep, shiftSteps, boxSecId, positionsBySecId, lotSize, updateBox, strikeMap, broker, underlying, productType, expiry, closePosition, addToast, fetchTabData]);
+  }, [boxes, visibleStrikes, allStrikes, strikeStep, shiftSteps, boxSecId, positionsBySecId, lotSize, updateBox, strikeMap, broker, underlying, productType, expiry, closePosition, addToast, fetchTabData,
+      bracketActive, bracketTgt, bracketSl, bracketTrail, liveQuotes]);
+
+  // Same stale-closure guard as placeOrderRef: OptionPanel ignores its on* props when memoising.
+  const handleShiftStrikeRef = useRef(handleShiftStrike);
+  useEffect(() => { handleShiftStrikeRef.current = handleShiftStrike; });
 
   // ─── Client-side profit lock (total P&L floor) ────────────────────
   //
@@ -3551,8 +3593,8 @@ export default function AdvancedScalper() {
                 limitPrice={box.limitPrice}
                 orderMode={orderMode}
                 onStrikeChange={v => updateBox(box.id, { strike: v, limitPrice: '' })}
-                onShiftUp={() => handleShiftStrike(box.id, 'UP')}
-                onShiftDown={() => handleShiftStrike(box.id, 'DOWN')}
+                onShiftUp={() => handleShiftStrikeRef.current(box.id, 'UP')}
+                onShiftDown={() => handleShiftStrikeRef.current(box.id, 'DOWN')}
                 shiftSteps={shiftSteps}
                 onShiftStepsChange={n => setShiftSteps(clampShiftSteps(n))}
                 moveFraction={box.moveFraction ?? 'FULL'}

@@ -18,6 +18,9 @@ const BAD = body('bad', [
 const WARN = body('warn', [check('token', 'warn', 'Token 42m left', 'Expires 05:30 IST.')]);
 
 async function load(page: Page, respond: () => { status: number; payload: unknown }) {
+  // Registered first = lowest priority: every OTHER /api call from the dashboard home page is answered locally,
+  // so these tests spawn no Python and call no broker even on a machine with a live token.
+  await page.route('**/api/**', route => route.request().method() === 'GET' ? json(route, { success: false, error: 'e2e' }, 503) : route.fulfill({ status: 599, body: 'blocked by e2e' }));
   await page.route('**/api/dhan-health', route => { const r = respond(); return json(route, r.payload, r.status); });
   await page.goto('/', { waitUntil: 'domcontentloaded' });
   const chip = page.getByRole('button', { name: /Dhan account health/ });
@@ -52,4 +55,16 @@ test('an endpoint failure reads DHAN ? and never a false OK', async ({ page }) =
   await expect(chip).toContainText('DHAN ?');
   await chip.click();
   await expect(page.getByText(/Health check failed/)).toBeVisible();
+});
+
+test('the popover closes on Escape and on an outside click', async ({ page }) => {
+  const chip = await load(page, () => ({ status: 200, payload: OK }));
+  await chip.click();
+  await expect(page.getByText('IP whitelisted')).toBeVisible();
+  await page.keyboard.press('Escape');
+  await expect(page.getByText('IP whitelisted')).toHaveCount(0);
+  await chip.click();
+  await expect(page.getByText('IP whitelisted')).toBeVisible();
+  await page.mouse.click(5, 600);
+  await expect(page.getByText('IP whitelisted')).toHaveCount(0);
 });

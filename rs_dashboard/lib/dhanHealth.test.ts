@@ -55,6 +55,12 @@ test('an expired data plan warns', () => {
   assert.strictEqual(byId(r, 'dataplan').level, 'warn');
 });
 
+test('ipMismatch=warn downgrades a mismatch to a warning that never blocks a launch', () => {
+  const r = evaluateHealth({ ...good, publicIp: '9.9.9.9', ipMismatch: 'warn' }, NOW);
+  assert.strictEqual(byId(r, 'ip').level, 'warn');
+  assert.deepStrictEqual(liveLaunchBlockers(r.checks, 'dhan'), []);
+});
+
 test('live launch: kill switch / IP only block when Dhan executes; an expired token always blocks', () => {
   const bad = evaluateHealth({ ...good, killSwitch: { killSwitchStatus: 'ACTIVATE' }, publicIp: '9.9.9.9' }, NOW).checks;
   assert.deepStrictEqual(liveLaunchBlockers(bad, 'dhan').map(c => c.id).sort(), ['ip', 'killswitch']);

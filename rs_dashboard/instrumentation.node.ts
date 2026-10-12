@@ -43,7 +43,10 @@ function isPidRunning(pid: number): boolean {
 try {
   // Skip if market is already closed for the day (after 15:30 IST)
   const [h, m] = istHourMinute();
-  if (h > 15 || (h === 15 && m >= 30)) {
+  if (process.env.DASHBOARD_NO_BACKGROUND === '1') {
+    // Set by the Playwright run (playwright.config.ts) so a test server never spawns collectors that call Dhan.
+    console.log('[iv-collector] DASHBOARD_NO_BACKGROUND set — skipping auto-start');
+  } else if (h > 15 || (h === 15 && m >= 30)) {
     console.log('[iv-collector] Market closed — skipping auto-start');
   } else if (fs.existsSync(STOP_TRIGGER)) {
     // User explicitly stopped it today

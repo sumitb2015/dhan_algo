@@ -102,6 +102,11 @@ handle is refused with 599 and fails the test. Set `PW_CHROMIUM_PATH` to use an 
 the Dhan health chip, and the validation paths of `/api/super-order`. Never add a "valid order" case to the API spec:
 on a machine with a live token it would place a real bracket. Unit tests stay in `lib/*.test.ts` (`npm test`).
 
+`DASHBOARD_NO_BACKGROUND=1` (set by the Playwright config) stops `instrumentation.node.ts` auto-starting the IV collector.
+`DHAN_IP_CHECK=warn|off` tunes the Dhan health chip's public-IP check for VPN/proxy setups: `warn` turns a static-IP
+mismatch into a warning that does not block `--live` starts, `off` skips the lookup. The lookup uses two sources and
+asserts nothing if they disagree.
+
 ### Dashboard (Next.js)
 
 ```powershell

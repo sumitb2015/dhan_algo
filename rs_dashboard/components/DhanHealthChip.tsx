@@ -27,6 +27,17 @@ export default function DhanHealthChip() {
   const [data, setData] = useState<HealthResponse | null>(null);
   const [open, setOpen] = useState(false);
   const seq = useRef(0);
+  const rootRef = useRef<HTMLDivElement>(null);
+
+  // Close on an outside click or Escape.
+  useEffect(() => {
+    if (!open) return;
+    const onDown = (e: MouseEvent) => { if (!rootRef.current?.contains(e.target as Node)) setOpen(false); };
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setOpen(false); };
+    document.addEventListener('mousedown', onDown);
+    document.addEventListener('keydown', onKey);
+    return () => { document.removeEventListener('mousedown', onDown); document.removeEventListener('keydown', onKey); };
+  }, [open]);
 
   useEffect(() => {
     let alive = true;
@@ -52,7 +63,7 @@ export default function DhanHealthChip() {
   const headline = !data ? 'DHAN …' : !data.success ? 'DHAN ?' : level === 'ok' ? 'DHAN OK' : (bad[0]?.label ?? 'DHAN CHECK').toUpperCase();
 
   return (
-    <div className="relative">
+    <div className="relative" ref={rootRef}>
       <button
         type="button"
         onClick={() => setOpen(o => !o)}

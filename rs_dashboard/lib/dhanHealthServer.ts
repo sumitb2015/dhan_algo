@@ -14,18 +14,35 @@ export interface DhanHealth { success: true; checkedAt: string; publicIp: string
 let healthCache: { at: number; body: DhanHealth } | null = null;
 let publicIpCache: { at: number; ip: string } | null = null;
 
+const IPV4 = /^\d{1,3}(\.\d{1,3}){3}$/;
+
+async function ipFrom(url: string, parse: (body: string) => string): Promise<string | null> {
+  try {
+    const res = await fetch(url, { signal: AbortSignal.timeout(4_000) });
+    const ip = parse((await res.text()).trim());
+    return res.ok && IPV4.test(ip) ? ip : null;
+  } catch { return null; }
+}
+
+/**
+ * Two independent lookups. Agreement (or exactly one answering) gives the address; two DIFFERENT answers
+ * mean the egress path is not stable (VPN / split tunnel), so nothing is asserted and the check reads
+ * "unverified" rather than risk a false IP-mismatch block.
+ */
 async function lookupPublicIp(): Promise<string | null> {
   if (publicIpCache && Date.now() - publicIpCache.at < PUBLIC_IP_TTL_MS) return publicIpCache.ip;
-  try {
-    const res = await fetch('https://api.ipify.org?format=json', { signal: AbortSignal.timeout(4_000) });
-    const json = (await res.json()) as { ip?: string };
-    if (res.ok && typeof json.ip === 'string' && /^\d{1,3}(\.\d{1,3}){3}$/.test(json.ip)) {
-      publicIpCache = { at: Date.now(), ip: json.ip };   // success-only cache
-      return json.ip;
-    }
-  } catch { /* fall through */ }
-  return null;
+  const [a, b] = await Promise.all([
+    ipFrom('https://api.ipify.org?format=json', t => (JSON.parse(t) as { ip?: string }).ip ?? ''),
+    ipFrom('https://checkip.amazonaws.com', t => t),
+  ]);
+  if (a && b && a !== b) return null;
+  const ip = a ?? b;
+  if (ip) publicIpCache = { at: Date.now(), ip };   // success-only cache
+  return ip;
 }
+
+/** DHAN_IP_CHECK=warn (VPN / proxy users) makes a mismatch a warning; =off skips the lookup entirely. */
+const ipMode = () => (process.env.DHAN_IP_CHECK ?? 'block').toLowerCase();
 
 const asObj = (v: unknown): Record<string, unknown> | null =>
   v && typeof v === 'object' && !Array.isArray(v) ? (v as Record<string, unknown>) : null;
@@ -57,13 +74,14 @@ async function settleProfile(): Promise<{ body: Record<string, unknown> | null; 
 
 async function build(): Promise<DhanHealth> {
   const [profile, ks, ip, publicIp] = await Promise.all([
-    settleProfile(), settle('/killswitch'), settle('/ip/getIP'), lookupPublicIp(),
+    settleProfile(), settle('/killswitch'), settle('/ip/getIP'), ipMode() === 'off' ? Promise.resolve(null) : lookupPublicIp(),
   ]);
   const input: HealthInput = {
     profile: profile.body, profileError: profile.error,
     killSwitch: ks.body, killSwitchError: ks.error,
     staticIp: ip.body, staticIpError: ip.error,
     publicIp,
+    ipMismatch: ipMode() === 'warn' ? 'warn' : 'bad',
   };
   const body: DhanHealth = { success: true, checkedAt: new Date().toISOString(), publicIp, ...evaluateHealth(input) };
   // Don't pin a total outage (every call failed) in the cache for a minute.

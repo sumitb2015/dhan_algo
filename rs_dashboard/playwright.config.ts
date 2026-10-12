@@ -29,6 +29,8 @@ export default defineConfig({
     command: `npm run dev -- -p ${PORT}`,
     url: `http://localhost:${PORT}/login`,
     reuseExistingServer: !process.env.CI,
+    // A server started by the tests must not auto-start background collectors that call Dhan.
+    env: { DASHBOARD_NO_BACKGROUND: '1', DHAN_IP_CHECK: 'off' },
     timeout: 180_000,
   },
 });

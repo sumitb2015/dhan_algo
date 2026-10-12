@@ -32,10 +32,12 @@ export interface ScalperMock {
   ltp: number;
   superListFails: boolean;
   superDeleteFails: boolean;
+  /** What POST /api/super-order answers: booked, a clean rejection, or 504 'status unknown'. */
+  superPost: 'ok' | 'reject' | 'timeout';
 }
 
 export function newScalperMock(): ScalperMock {
-  return { calls: [], blocked: [], positions: [], superOrders: [], quotesFresh: true, ltp: 100.07, superListFails: false, superDeleteFails: false };
+  return { calls: [], blocked: [], positions: [], superOrders: [], quotesFresh: true, ltp: 100.07, superListFails: false, superDeleteFails: false, superPost: 'ok' };
 }
 
 /** An open long NIFTY 24000 CE, 1 lot (75), under the given product. */
@@ -91,16 +93,28 @@ export async function installScalperMock(page: Page, m: ScalperMock): Promise<vo
     if (p === '/api/scalper/all' || p === '/api/scalper/poll') {
       return json(route, { success: true, positions: m.positions, orders: [], trades: [], funds: {}, pnl_guard: null, pnl_guard_unknown: true });
     }
-    if (p === '/api/scalper/positions') return json(route, { success: true, positions: m.positions });
-    if (p === '/api/scalper/trades') return json(route, { success: true, trades: [] });
+    // These two use `data` (unlike /all and /poll, which use `positions`/`trades`): closePosition's live re-fetch
+    // and the flat-confirmation poll read it.
+    if (p === '/api/scalper/positions') return json(route, { success: true, data: m.positions });
+    if (p === '/api/scalper/trades') return json(route, { success: true, data: [] });
 
     if (p === '/api/super-order') {
       record();
       if (method === 'GET') return m.superListFails ? json(route, { success: false, error: 'boom' }, 502) : json(route, { success: true, orders: m.superOrders });
       if (method === 'DELETE') return m.superDeleteFails ? json(route, { success: false, error: 'rejected' }) : json(route, { success: true });
-      if (method === 'POST') return json(route, { success: true, order_id: '9001' });
+      if (method === 'POST') {
+        if (m.superPost === 'reject') return json(route, { success: false, error: 'rejected by test' });
+        if (m.superPost === 'timeout') return json(route, { success: false, error: 'status unknown' }, 504);
+        return json(route, { success: true, order_id: '9001' });
+      }
     }
-    if (p === '/api/scalper/fast-order') { record(); return json(route, { success: true, order_id: '7001' }); }
+    if (p === '/api/scalper/fast-order') {
+      record();
+      // The order "fills": the contract's position leaves the book, so the Scalper's flat-confirmation poll succeeds.
+      const sec = String((req.postDataJSON() as { securityId?: unknown } | null)?.securityId ?? '');
+      m.positions = m.positions.filter(pos => String(pos.securityId) !== sec);
+      return json(route, { success: true, order_id: '7001' });
+    }
 
     // Read-style POST (history reconstruction) and the P&L-guard read: answered locally so a machine with a
     // live token never reaches Dhan from a test. The page tolerates both failing.

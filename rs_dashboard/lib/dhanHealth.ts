@@ -31,8 +31,13 @@ export interface HealthInput {
   /** Raw /ip/getIP body, or null when the call failed. */
   staticIp: Record<string, unknown> | null;
   staticIpError?: string | null;
-  /** This machine's public IPv4, or null when the lookup failed. */
+  /** This machine's public IPv4, or null when the lookup failed (or two lookups disagreed). */
   publicIp: string | null;
+  /**
+   * How loudly a public-IP / static-IP mismatch reads. 'bad' (default) blocks live launches; 'warn' is for
+   * VPN or split-tunnel setups where the egress IP seen by the lookup can differ from the one Dhan sees.
+   */
+  ipMismatch?: 'bad' | 'warn';
 }
 
 const IST_OFFSET_MIN = 330;
@@ -134,7 +139,7 @@ export function evaluateHealth(input: HealthInput, now: Date = new Date()): { le
   } else if (input.publicIp === ip.primary || input.publicIp === ip.secondary) {
     checks.push({ id: 'ip', level: 'ok', label: 'IP whitelisted', detail: `${input.publicIp} matches the registered ${input.publicIp === ip.primary ? 'primary' : 'secondary'} IP.` });
   } else {
-    checks.push({ id: 'ip', level: 'bad', label: 'IP mismatch', detail: `This machine is ${input.publicIp}; registered ${[ip.primary, ip.secondary].filter(Boolean).join(', ')}. Orders will fail with DH-905.` });
+    checks.push({ id: 'ip', level: input.ipMismatch ?? 'bad', label: 'IP mismatch', detail: `This machine is ${input.publicIp}; registered ${[ip.primary, ip.secondary].filter(Boolean).join(', ')}. Orders will fail with DH-905 unless the lookup saw a different address than Dhan does (VPN/proxy).` });
   }
 
   const rank: Record<HealthLevel, number> = { ok: 0, unknown: 1, warn: 2, bad: 3 };
