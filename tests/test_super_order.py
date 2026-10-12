@@ -48,5 +48,34 @@ class SuperOrderTest(unittest.TestCase):
         self.assertIn("Invalid leg_name", validate_modify("NOPE", targetPrice=1.0))
 
 
+
+class ListShapeTest(unittest.TestCase):
+    GOOD = [{"orderId": "5001", "securityId": "111", "correlationId": "so1", "orderStatus": "PENDING",
+             "legDetails": [{"legName": "ENTRY_LEG", "orderStatus": "PENDING"}, {"legName": "TARGET_LEG", "orderStatus": "PENDING"},
+                            {"legName": "STOP_LOSS_LEG", "orderStatus": "PENDING"}]}]
+
+    def run_check(self, rows):
+        from lib.super_order import check_list_shape
+        return check_list_shape(rows, "5001", "so1", "111")
+
+    def test_matching_payload_passes_every_assumption(self):
+        self.assertTrue(all(ok for ok, _ in self.run_check(self.GOOD)))
+
+    def test_each_assumption_is_reported_when_it_fails(self):
+        import copy
+        for field, bad in (("securityId", None), ("correlationId", None), ("legDetails", None)):
+            rows = copy.deepcopy(self.GOOD)
+            if bad is None:
+                del rows[0][field]
+            res = self.run_check(rows)
+            self.assertFalse(all(ok for ok, _ in res), field)
+        rows = copy.deepcopy(self.GOOD)
+        rows[0]["legDetails"][1]["legName"] = "PROFIT_LEG"
+        self.assertFalse(all(ok for ok, _ in self.run_check(rows)))
+        self.assertFalse(self.run_check({"data": []})[0][0])        # not a list at all
+        self.assertFalse(self.run_check([])[0][0])                   # order missing
+
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -1704,6 +1704,18 @@ class DhanHelper:
         return False
 
     # --- ORDER MANAGEMENT ---
+    def _pace_order(self) -> None:
+        """
+        Take a slot in the account-wide order window shared with every other strategy and the dashboard
+        (lib/dhan_order_lane.py). Fail-open and bounded: never raises, never waits more than ~2 s, so it
+        can delay an order slightly under a burst but cannot block or drop one.
+        """
+        try:
+            from lib.dhan_order_lane import wait_for_slot
+            wait_for_slot()
+        except Exception:
+            pass
+
     def place_order(self,
                     security_id: str, 
                     exchange_segment: Any, 
@@ -1729,6 +1741,7 @@ class DhanHelper:
             product_type = "INTRADAY"
         
         try:
+            self._pace_order()
             # Check for AMO parameters in kwargs
             after_market_order = kwargs.get('after_market_order', False) or kwargs.get('afterMarketOrder', False)
             
@@ -1879,6 +1892,7 @@ class DhanHelper:
                     disclosed_quantity: int = 0) -> bool:
         """Modify an existing pending order. leg_name: 'ENTRY_LEG' (default), 'TARGET_LEG', or 'STOP_LOSS_LEG' for BO/CO orders."""
         try:
+            self._pace_order()
             res = self.dhan.modify_order(
                 order_id=order_id,
                 order_type=order_type,
@@ -2315,6 +2329,7 @@ class DhanHelper:
                 orders = res.get('data', [])
                 for order in orders:
                     if order.get('orderStatus') in ['PENDING', 'TRANSIT']:
+                        self._pace_order()
                         cancel_res = self.dhan.cancel_order(order.get('orderId'))
                         if isinstance(cancel_res, dict) and cancel_res.get('status') == 'success':
                             cancelled_count += 1
@@ -2616,6 +2631,7 @@ class DhanHelper:
             side=side, product_type=product_type, quantity=quantity, target_price=target_price,
             stop_loss_price=stop_loss_price, order_type=order_type, price=price, trailing_jump=trailing_jump,
             ref_price=ref_price)
+        self._pace_order()
         try:
             res = dhan_http.post('/super/orders', payload)
         except Exception as e:
@@ -2657,6 +2673,7 @@ class DhanHelper:
                    **({"orderType": str(order_type).upper()} if leg_name == "ENTRY_LEG" else {}),
                    **{k: v for k, v in fields.items() if v is not None}}
         try:
+            self._pace_order()
             res = put(f'/super/orders/{order_id}', payload)
             if isinstance(res, dict) and res.get('status') != 'failure' and not res.get('errorCode'):
                 return True
@@ -2676,6 +2693,7 @@ class DhanHelper:
             logger.error("cancel_super_order: dhan_http not accessible.")
             return False
         try:
+            self._pace_order()
             res = dhan_http.delete(f'/super/orders/{order_id}/{leg_name}')
             if isinstance(res, dict) and res.get('status') != 'failure' and not res.get('errorCode'):
                 return True
@@ -3198,6 +3216,7 @@ class DhanHelper:
     def cancel_order(self, order_id: str) -> bool:
         """Cancel a pending order."""
         try:
+            self._pace_order()
             res = self.dhan.cancel_order(order_id)
             if isinstance(res, dict) and res.get('status') == 'success':
                 logger.info(f"Order {order_id} cancelled successfully.")
@@ -3224,6 +3243,7 @@ class DhanHelper:
         order_type = order_type or self.LIMIT
         product_type = product_type or self.MARGIN
         try:
+            self._pace_order()
             res = self.dhan.place_slice_order(
                 security_id=str(security_id),
                 exchange_segment=exchange_segment,

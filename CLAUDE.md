@@ -464,6 +464,10 @@ the scalper terminals and as copy-trade children that mirror Dhan fills.
   Dhan's) — see [docs/API_GOTCHAS.md](docs/API_GOTCHAS.md) before touching `lib/kotak/`,
   `scripts/tools/kotak_instruments_cache.py`, or any Kotak MCX order sizing.
 - The startup OTM hedge (`copy_trade_hedge.py`) is **Zerodha-only** by design.
+- **Order-rate window**: Dhan allows ~10 order requests/s per account across ALL callers. `lib/dhan_order_lane.py` (Python, used by every
+  `DhanHelper` order call) and `rs_dashboard/lib/dhanOrderLaneFile.ts` (dashboard order routes) share one sliding window through
+  `debug/dhan_order_lane.json` (8/s). Fail-open and capped at ~2 s of waiting: it may delay an exit under a burst, never block it.
+  Keep the two implementations in sync (`tests/test_dhan_order_lane.py`, `lib/dhanOrderLaneFile.test.ts` book across both).
 - **Strategy Broker Selector**: Option-selling strategies accept `--broker {dhan,zerodha,kotak}`.
   Market data (LTP, option chain, technical indicators, expiries) always originates from `DhanHelper`,
   while orders are routed through `ExecutionBroker.create(broker, helper, underlying)`.

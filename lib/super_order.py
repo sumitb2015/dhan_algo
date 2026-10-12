@@ -103,3 +103,36 @@ def build_place_payload(client_id: str, correlation_id: str, *, security_id: Any
         "stopLossPrice": stop_loss_price,
         "trailingJump": trailing_jump or 0,
     }
+
+
+def check_list_shape(rows: Any, order_id: str, correlation_id: str, security_id: str) -> list:
+    """
+    Compare a real GET /super/orders payload with what this repo's code assumes of it. Returns
+    [(ok, message), ...]. Used by scripts/tools/super_order_smoke.py against a live account, and unit-tested
+    here with canned rows. Every assumption listed is one the code actually relies on:
+      - rows are dicts carrying orderId                      (route reconcile, legsToCancel)
+      - top-level securityId matches the order's contract    (legsToCancel: a row without it is skipped)
+      - correlationId is echoed                              (unknown-outcome reconcile after a timeout)
+      - legDetails is a list of {legName, orderStatus}       (which legs are still live)
+    """
+    out: list = []
+    if not isinstance(rows, list):
+        return [(False, f"list response is {type(rows).__name__}, expected a list of rows")]
+    row = next((r for r in rows if isinstance(r, dict) and str(r.get("orderId", "")) == str(order_id)), None)
+    if row is None:
+        return [(False, f"order {order_id} not present in GET /super/orders ({len(rows)} rows)")]
+    out.append((True, f"row found; keys: {sorted(row.keys())}"))
+    out.append((str(row.get("securityId", "")) == str(security_id),
+                f"top-level securityId = {row.get('securityId')!r} (expected {security_id!r})"))
+    out.append((str(row.get("correlationId", "")) == str(correlation_id),
+                f"correlationId = {row.get('correlationId')!r} (expected {correlation_id!r})"))
+    legs = row.get("legDetails")
+    if not isinstance(legs, list) or not legs:
+        out.append((False, f"legDetails = {legs!r}, expected a non-empty list"))
+        return out
+    names = [str(l.get("legName", "")).upper() for l in legs if isinstance(l, dict)]
+    out.append((all(n in SUPER_LEGS for n in names) and len(names) == len(legs),
+                f"leg names = {names} (expected members of {list(SUPER_LEGS)})"))
+    statuses = {str(l.get("legName")): l.get("orderStatus") for l in legs if isinstance(l, dict)}
+    out.append((all(s is not None for s in statuses.values()), f"leg statuses = {statuses}"))
+    return out
