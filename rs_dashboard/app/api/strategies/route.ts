@@ -1,3 +1,5 @@
+import { getDhanHealth } from '@/lib/dhanHealthServer';
+import { liveLaunchBlockers } from '@/lib/dhanHealth';
 import { NextRequest, NextResponse } from 'next/server';
 import path from 'path';
 import fs from 'fs';
@@ -242,6 +244,22 @@ export async function POST(request: NextRequest) {
             error: `Broker session verification failed for ${targetBroker}: ${errMsg}`,
           }, { status: 400 });
         }
+      }
+
+      // Live launches only: refuse to start a real-money strategy into a known-bad account state
+      // (expired token, kill switch on, public IP not on Dhan's static-IP list). Dry runs and
+      // "unknown" results (a failed lookup) never block - only a definite 'bad' does.
+      if (Array.isArray(args) && args.some((a: unknown) => a === '--live')) {
+        try {
+          const health = await getDhanHealth();
+          const blockers = liveLaunchBlockers(health.checks, targetBroker);
+          if (blockers.length > 0) {
+            return NextResponse.json({
+              success: false,
+              error: `Live start blocked: ${blockers.map(c => `${c.label} - ${c.detail}`).join(' | ')}`,
+            }, { status: 400 });
+          }
+        } catch { /* health lookup itself failed: do not block on it */ }
       }
 
       // Check if this specific instance is already running

@@ -88,6 +88,25 @@ Each test module exposes a `run(helper)` function. The orchestrator in `tests/ru
 
 **⚠️ The suite has real side effects — do not run it casually against a live account.** Never loop over `tests/test_*.py`: the numbered tests (01-19) and several others use the real session. `test_11_maintenance.py` also overwrites `master_list.csv` with NSE-only data (MCX and BSE lookups then fail until `fetch_security_list()` is re-run with its default segments). Run only the stubbed suites listed in [docs/ALGO_KIT.md](docs/ALGO_KIT.md#running-the-tests-safely). `test_06_orders.py` places a real AMO limit order (deep below LTP, then cancels), and `test_11_maintenance.py` / `test_13_advanced_logic.py` call `cancel_all_orders()`, which kills any pending orders from live strategies. Run individual read-only modules (e.g. `test_04_option_chain.py`) when you just need to verify data plumbing. The Dhan quote API is rate-limited to ~1 req/s — expect 429 backoff during the suite.
 
+### Dashboard browser tests (Playwright)
+
+```powershell
+cd rs_dashboard
+npm run test:e2e        # starts `next dev` on :3100 (E2E_PORT), reuses one that is already running
+```
+
+`rs_dashboard/e2e/` drives the real UI in Chromium with every broker-backed `/api/*` call mocked in the browser
+(`e2e/support.ts`), so it needs no Dhan session and **cannot place orders**: any non-GET request the mock does not
+handle is refused with 599 and fails the test. Set `PW_CHROMIUM_PATH` to use an existing Chromium instead of
+`npx playwright install chromium`. Covers the Scalper BRACKET (Super Order) ticket, the close-cancels-bracket flow,
+the Dhan health chip, and the validation paths of `/api/super-order`. Never add a "valid order" case to the API spec:
+on a machine with a live token it would place a real bracket. Unit tests stay in `lib/*.test.ts` (`npm test`).
+
+`DASHBOARD_NO_BACKGROUND=1` (set by the Playwright config) stops `instrumentation.node.ts` auto-starting the IV collector.
+`DHAN_IP_CHECK=warn|off` tunes the Dhan health chip's public-IP check for VPN/proxy setups: `warn` turns a static-IP
+mismatch into a warning that does not block `--live` starts, `off` skips the lookup. The lookup uses two sources and
+asserts nothing if they disagree.
+
 ### Dashboard (Next.js)
 
 ```powershell
@@ -445,6 +464,10 @@ the scalper terminals and as copy-trade children that mirror Dhan fills.
   Dhan's) — see [docs/API_GOTCHAS.md](docs/API_GOTCHAS.md) before touching `lib/kotak/`,
   `scripts/tools/kotak_instruments_cache.py`, or any Kotak MCX order sizing.
 - The startup OTM hedge (`copy_trade_hedge.py`) is **Zerodha-only** by design.
+- **Order-rate window**: Dhan allows ~10 order requests/s per account across ALL callers. `lib/dhan_order_lane.py` (Python, used by every
+  `DhanHelper` order call) and `rs_dashboard/lib/dhanOrderLaneFile.ts` (dashboard order routes) share one sliding window through
+  `debug/dhan_order_lane.json` (8/s). Fail-open and capped at ~2 s of waiting: it may delay an exit under a burst, never block it.
+  Keep the two implementations in sync (`tests/test_dhan_order_lane.py`, `lib/dhanOrderLaneFile.test.ts` book across both).
 - **Strategy Broker Selector**: Option-selling strategies accept `--broker {dhan,zerodha,kotak}`.
   Market data (LTP, option chain, technical indicators, expiries) always originates from `DhanHelper`,
   while orders are routed through `ExecutionBroker.create(broker, helper, underlying)`.

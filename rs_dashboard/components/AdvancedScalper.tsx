@@ -8,7 +8,7 @@ import {
   resolveRowExpiry,
   type ChainOcEntry, type Toast,
   type PnlGuardStatus, type PositionGuard, type SortState,
-  FOCUS_RING, TXT_LABEL, TXT_VALUE, TXT_CAPTION, RiskRail,
+  FOCUS_RING, TXT_LABEL, TXT_VALUE, TXT_CAPTION, RiskRail, GuardInput,
 } from './Scalper';
 import { useLiveOptionsWS } from '@/lib/useLiveOptionsWS';
 import { useProfitLock, ProfitLockControls } from './ProfitLock';
@@ -27,6 +27,7 @@ import MtmChart, { useMtmHistory } from './MtmChart';
 import ScalperGreeksModal from './analytics/ScalperGreeksModal';
 import AdvancedScalperOptionChainModal from './AdvancedScalperOptionChainModal';
 import { capCloseQty } from '@/lib/intradayCap';
+import { resolveBracket, legsToCancel, hasUnmatchableActive, type SuperOrderInput } from '@/lib/superOrder';
 import AdvancedScalperAddLotsModal, { type SubmitLegOrderParams } from './AdvancedScalperAddLotsModal';
 
 // ─── Types ────────────────────────────────────────────────────────
@@ -219,6 +220,17 @@ export default function AdvancedScalper() {
   // Trading controls
   const [orderMode, setOrderMode] = useState<'MARKET' | 'LIMIT'>('MARKET');
   const [productType, setProductType] = useState<'INTRADAY' | 'MARGIN'>('MARGIN');
+  // Bracket (Dhan Super Order): entry + a target and stop-loss that REST AT THE BROKER, so they
+  // survive this tab closing. Dhan only. Armed per page load on purpose - never persisted - so a
+  // reload can't silently turn protection on or off. Offsets are option points from the entry price.
+  const [bracketOn, setBracketOn] = useState(false);
+  const [bracketTgt, setBracketTgt] = useState('10');
+  const [bracketSl, setBracketSl] = useState('8');
+  const [bracketTrail, setBracketTrail] = useState('0');
+  // Derived (no reset effect): inactive on any other broker. The toggle itself is kept, so returning to Dhan finds it as left, still shown amber.
+  const bracketActive = bracketOn && broker === 'dhan';
+  // Set once this tab books a bracket: from then on a failed look-up at close time is loud, not silent.
+  const bracketPlacedRef = useRef(false);
 
   // Top-10-by-weight stocks panel. Off by default so no equity bridge is
   // spawned unless it's actually wanted.
@@ -1443,11 +1455,14 @@ export default function AdvancedScalper() {
     entry?: { ceId?: string; peId?: string; ceSymbol?: string; peSymbol?: string };
     legLotSize: number;
     legProductType: 'INTRADAY' | 'MARGIN';
+    /** Dhan Super Order levels (absolute prices). Never silently dropped: a path that cannot honour it refuses. */
+    bracket?: SuperOrderInput;
   }): Promise<LegOrderResult> => {
-    const { optionSide, legExpiry, strike, side, lots, mode, limitPrice, entry, legLotSize, legProductType } = params;
+    const { optionSide, legExpiry, strike, side, lots, mode, limitPrice, entry, legLotSize, legProductType, bracket } = params;
     if (!Number.isInteger(lots) || lots < 1 || lots > MAX_LOTS_PER_ORDER) {
       return { success: false, error: `Lots must be 1–${MAX_LOTS_PER_ORDER} (got ${lots})` };
     }
+    if (bracket && broker !== 'dhan') return { success: false, error: 'Bracket orders are Dhan-only' };
     try {
       let res: Response;
       if (broker !== 'dhan') {
@@ -1474,7 +1489,21 @@ export default function AdvancedScalper() {
         });
       } else {
         const secId = entry?.[optionSide === 'CE' ? 'ceId' : 'peId'];
-        if (secId) {
+        if (bracket) {
+          if (!secId) return { success: false, error: 'Bracket needs the contract id - strike data still loading' };
+          res = await fetch('/api/super-order', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              ...bracket,
+              securityId: secId,
+              exchangeSegment: dhanFnoSegment(underlying),
+              productType: legProductType,
+              quantity: lots * legLotSize,
+              idempotencyKey: crypto.randomUUID(),
+            }),
+          });
+        } else if (secId) {
           res = await fetch('/api/scalper/fast-order', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -1539,6 +1568,49 @@ export default function AdvancedScalper() {
       return;
     }
 
+    // Bracket applies only to an order that OPENS or ADDS. An order that reduces the box's open
+    // position is a manual close and goes out plain - a bracket there would open a fresh opposite
+    // position with its own stop and target.
+    let bracket: SuperOrderInput | undefined;
+    let bracketNote = '';
+    if (bracketActive) {
+      const secId = boxSecId(box);
+      // Position identity is (contract, product): a MARGIN long does not make an INTRADAY SELL a
+      // close - that SELL opens a fresh INTRADAY short, which is exactly what a bracket is for.
+      const open = secId
+        ? enrichedPositions
+            .filter(p => positionJoinKey(p) === secId && positionProduct(p) === productType)
+            .reduce((n, p) => n + Number(p.netQty ?? 0), 0)
+        : 0;
+      const reduces = (side === 'SELL' && open > 0) || (side === 'BUY' && open < 0);
+      const quotesFresh = quotesAtRef.current > 0 && Date.now() - quotesAtRef.current <= QUOTES_STALE_MS;
+      if (reduces) {
+        bracketNote = ' · closing, no bracket';
+      } else if (mode === 'MARKET' && !quotesFresh) {
+        // The target/stop are priced off this tick; a frozen price could put the stop on the wrong
+        // side of the real market (instant stop-out) or beyond it.
+        addToast('error', `${side} ${box.side} not sent`, 'Live quotes are stale - bracket levels cannot be priced. Use LIMIT or wait for the feed.');
+        return;
+      } else {
+        const ltpNow = liveQuotes?.strikes?.[String(box.strike)]?.[box.side === 'CE' ? 'ce' : 'pe']?.ltp ?? 0;
+        const r = resolveBracket({
+          securityId: secId ?? '', exchangeSegment: dhanFnoSegment(underlying), productType,
+          side, orderType: mode, quantity: box.lots * lotSize,
+          limitPrice: mode === 'LIMIT' ? Number(box.limitPrice) : undefined, ltp: ltpNow,
+          targetPts: Number(bracketTgt), slPts: Number(bracketSl), trailPts: Number(bracketTrail) || 0,
+        });
+        if (!r.ok) {
+          addToast('error', `${side} ${box.side} not sent`, r.error);
+          return;
+        }
+        bracket = r.order;
+        // Armed on ATTEMPT, not success: a timeout (504) leaves a bracket that may exist, and a later failed
+        // look-up at close time must then be loud.
+        bracketPlacedRef.current = true;
+        bracketNote = ` · bracket tgt ${r.order.targetPrice} / SL ${r.order.stopLossPrice}${r.order.trailingJump ? ` / trail ${r.order.trailingJump}` : ''}`;
+      }
+    }
+
     orderInFlightRef.current.add(boxId);
     setOrderPendingBoxes(prev => new Set([...prev, boxId]));
 
@@ -1554,9 +1626,10 @@ export default function AdvancedScalper() {
         entry: strikeMap[String(box.strike)],
         legLotSize: lotSize,
         legProductType: productType,
+        bracket,
       });
       if (j.success) {
-        addToast('success', `${side} ${box.side} placed`, opts?.forceMarket ? `Hotkey market order · ID: ${j.order_id}` : `ID: ${j.order_id}`);
+        addToast('success', `${side} ${box.side} placed`, `${opts?.forceMarket ? 'Hotkey market order · ' : ''}ID: ${j.order_id}${bracketNote}`);
         setTimeout(fetchTabData, 1000);
       } else {
         addToast('error', `${side} ${box.side} failed`, j.error ?? 'Unknown error');
@@ -1565,7 +1638,15 @@ export default function AdvancedScalper() {
       orderInFlightRef.current.delete(boxId);
       setOrderPendingBoxes(prev => { const s = new Set(prev); s.delete(boxId); return s; });
     }
-  }, [boxes, expiry, underlying, lotSize, strikeMap, orderMode, productType, submitLegOrder, addToast, fetchTabData]);
+  }, [boxes, expiry, underlying, lotSize, strikeMap, orderMode, productType, submitLegOrder, addToast, fetchTabData,
+      bracketActive, bracketTgt, bracketSl, bracketTrail, boxSecId, enrichedPositions, positionJoinKey, liveQuotes]);
+
+  // OptionPanel is memoised with a comparator that IGNORES every on* callback (Scalper.tsx,
+  // optionPanelPropsEqual), so the onBuy/onSell it holds can be a stale closure. placeOrder reads
+  // the bracket toggle, product and live prices; a stale copy would send an UNPROTECTED order while
+  // the toggle says ON. The panel calls through this ref, so a click always runs the latest handler.
+  const placeOrderRef = useRef(placeOrder);
+  useEffect(() => { placeOrderRef.current = placeOrder; });
 
   // Confirm handler for the Add Lots modal (see openAddLotsModal/addLotsTarget
   // above) — places the order via the same submitLegOrder the order boxes use,
@@ -1672,6 +1753,38 @@ export default function AdvancedScalper() {
   // real prior exposure rather than a possibly-stale value passed in.
   // closedUnits is how much actually left the book (verified when verifyFlat is
   // set, else the requested size) — chain off this, never off a rounded ideal.
+  // Take down every live Super Order leg on one security (see the call in closePosition).
+  // Silent when there is nothing to cancel, so non-bracket scalping pays one GET and no noise.
+  const cancelBracketsFor = useCallback(async (securityId: string, partial: boolean, sym: string) => {
+    try {
+      const list = await (await fetch('/api/super-order')).json() as { success?: boolean; orders?: Record<string, unknown>[] };
+      if (!list.success) {
+        // Quiet for someone who never uses brackets; loud once this tab has booked one.
+        if (bracketPlacedRef.current) addToast('error', `${sym}: could not check for a live bracket`, 'A resting target/stop may still be live - check Dhan Orders');
+        return;
+      }
+      const legs = legsToCancel(list.orders ?? [], securityId);
+      if (legs.length === 0) {
+        if (hasUnmatchableActive(list.orders ?? [])) addToast('error', `${sym}: a live bracket could not be matched to this contract`, 'Cancel any resting target/stop in Dhan Orders');
+        return;
+      }
+      const results = await Promise.all(legs.map(async l => {
+        try {
+          const r = await (await fetch(`/api/super-order?orderId=${encodeURIComponent(l.orderId)}&leg=${l.leg}`, { method: 'DELETE' })).json() as { success?: boolean };
+          return r.success === true;
+        } catch { return false; }
+      }));
+      const failed = results.filter(ok => !ok).length;
+      if (failed > 0) {
+        addToast('error', `${sym}: ${failed} bracket leg(s) NOT cancelled`, 'A resting target/stop may still be live - cancel it in Dhan Orders');
+      } else {
+        addToast('success', `${sym}: bracket cancelled`, partial ? 'Partial close - the remainder is now unprotected' : 'Target/stop legs removed');
+      }
+    } catch {
+      addToast('error', `${sym}: could not check for a live bracket`, 'A resting target/stop may still be live - check Dhan Orders');
+    }
+  }, [addToast]);
+
   const closePosition = useCallback(async (
     pos: Record<string, unknown>,
     reason: string,
@@ -1861,6 +1974,11 @@ export default function AdvancedScalper() {
         }
         addToast('success', `${isPartial ? 'Partially closed' : 'Closed'} ${sym} (${reason})`,
           `${qty}${isPartial ? ` of ${liveAbs}` : ''} qty${productPayload.assumed ? '' : ` · ${product}`} · ID: ${j.order_id}`);
+        // A bracket's target/stop rest at the broker and are sized for the original quantity: left
+        // alive after a manual close they could open the opposite side. Sent AFTER the close so it
+        // never delays it; a partial close takes the bracket down too (its legs would over-size the
+        // remainder), so the remainder needs re-protecting.
+        if (broker === 'dhan') void cancelBracketsFor(liveSecId, isPartial, sym);
         if (isPartial) {
           // Quantity survives, so the user's target/SL/trail must survive with
           // it. bestPrice stays valid (same entry, same direction) — only
@@ -1897,7 +2015,7 @@ export default function AdvancedScalper() {
       closingInFlightRef.current.delete(key);
       setClosingPositions(prev => { const s = new Set(prev); s.delete(key); return s; });
     }
-  }, [broker, addToast, fetchTabData]);
+  }, [broker, addToast, fetchTabData, cancelBracketsFor]);
 
   // Lot size for a positions-table row. `lotSize` state belongs to the SELECTED
   // underlying, but the table also lists legs from other underlyings — giving
@@ -2067,6 +2185,8 @@ export default function AdvancedScalper() {
 
         const newSecEntry = strikeMap[String(newStrike)];
         let res: Response;
+        let rollBracketNote = '';
+        let rollSendPlain: (() => Promise<Response>) | null = null;   // set only when a bracket was tried first
         if (broker !== 'dhan') {
           const symbol = newSecEntry?.[box.side === 'CE' ? 'ceSymbol' : 'peSymbol'];
           if (!symbol) {
@@ -2091,19 +2211,46 @@ export default function AdvancedScalper() {
         } else {
           const secId = newSecEntry?.[box.side === 'CE' ? 'ceId' : 'peId'];
           if (secId) {
-            res = await fetch('/api/scalper/fast-order', {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({
-                securityId: secId,
-                quantity: movedUnits,
-                side: sideToOpen,
-                orderType: 'MARKET',
-                exchangeSegment: dhanFnoSegment(underlying),
-                productType: resolvedProductDhan,
-                idempotencyKey: crypto.randomUUID(),
-              }),
+            const plainBody = JSON.stringify({
+              securityId: secId,
+              quantity: movedUnits,
+              side: sideToOpen,
+              orderType: 'MARKET',
+              exchangeSegment: dhanFnoSegment(underlying),
+              productType: resolvedProductDhan,
+              idempotencyKey: crypto.randomUUID(),
             });
+            const sendPlain = () => fetch('/api/scalper/fast-order', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: plainBody });
+
+            // With the bracket armed, the rolled leg is re-protected at the NEW strike (levels off its live
+            // price). The old leg is already closed, so if the bracket cannot be priced the leg is reopened
+            // plain with a loud warning - leaving the roll half-done (a hedge missing) would be worse.
+            let bracketOrder: SuperOrderInput | undefined;
+            if (bracketActive) {
+              const quotesFresh = quotesAtRef.current > 0 && Date.now() - quotesAtRef.current <= QUOTES_STALE_MS;
+              const newLtp = liveQuotes?.strikes?.[String(newStrike)]?.[box.side === 'CE' ? 'ce' : 'pe']?.ltp ?? 0;
+              const r = quotesFresh
+                ? resolveBracket({
+                    securityId: secId, exchangeSegment: dhanFnoSegment(underlying), productType: resolvedProductDhan,
+                    side: sideToOpen, orderType: 'MARKET', quantity: movedUnits, ltp: newLtp,
+                    targetPts: Number(bracketTgt), slPts: Number(bracketSl), trailPts: Number(bracketTrail) || 0,
+                  })
+                : { ok: false as const, error: 'Live quotes are stale' };
+              if (r.ok) bracketOrder = r.order;
+              else addToast('error', `Rolled leg reopens WITHOUT a bracket`, r.error);
+            }
+            if (bracketOrder) {
+              bracketPlacedRef.current = true;      // armed on attempt, as in placeOrder
+              rollSendPlain = sendPlain;
+              rollBracketNote = ` · bracket tgt ${bracketOrder.targetPrice} / SL ${bracketOrder.stopLossPrice}`;
+              res = await fetch('/api/super-order', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ ...bracketOrder, idempotencyKey: crypto.randomUUID() }),
+              });
+            } else {
+              res = await sendPlain();
+            }
           } else {
             // Fallback path is lot-denominated, so it can't express a sub-lot
             // remainder — bail rather than silently re-open a different size.
@@ -2125,12 +2272,20 @@ export default function AdvancedScalper() {
           }
         }
 
-        const j = await res.json() as { success: boolean; order_id?: string; error?: string };
+        let j = await res.json() as { success: boolean; order_id?: string; error?: string };
+        // A bracket that Dhan CLEANLY rejected (not a 504: that one may exist) must not leave the roll
+        // half-done with the hedge missing: reopen plain, loudly.
+        if (!j.success && rollSendPlain && res.status !== 504) {
+          addToast('error', 'Bracket rejected - reopening WITHOUT it', j.error ?? 'Unknown error');
+          rollBracketNote = '';
+          res = await rollSendPlain();
+          j = await res.json() as { success: boolean; order_id?: string; error?: string };
+        }
         if (j.success) {
           // Off the live pre-close quantity, not the table snapshot.
           const residual = Math.abs(closeResult.qty) - movedUnits;
           addToast('success', `Shift complete: ${newStrike} ${box.side}`,
-            `${sideToOpen} ${movedUnits} qty placed (ID: ${j.order_id})`
+            `${sideToOpen} ${movedUnits} qty placed (ID: ${j.order_id})${rollBracketNote}`
             + (residual > 0 ? ` · ${residual} qty left at ${box.strike}` : ''));
           setTimeout(fetchTabData, 1000);
         } else {
@@ -2148,7 +2303,12 @@ export default function AdvancedScalper() {
       addToast('success', `Strike shifted to ${newStrike} ${box.side}`,
         clamped ? `Chain edge: moved ${shiftTarget.moved} of ${requestedSteps} strikes` : undefined);
     }
-  }, [boxes, visibleStrikes, allStrikes, strikeStep, shiftSteps, boxSecId, positionsBySecId, lotSize, updateBox, strikeMap, broker, underlying, productType, expiry, closePosition, addToast, fetchTabData]);
+  }, [boxes, visibleStrikes, allStrikes, strikeStep, shiftSteps, boxSecId, positionsBySecId, lotSize, updateBox, strikeMap, broker, underlying, productType, expiry, closePosition, addToast, fetchTabData,
+      bracketActive, bracketTgt, bracketSl, bracketTrail, liveQuotes]);
+
+  // Same stale-closure guard as placeOrderRef: OptionPanel ignores its on* props when memoising.
+  const handleShiftStrikeRef = useRef(handleShiftStrike);
+  useEffect(() => { handleShiftStrikeRef.current = handleShiftStrike; });
 
   // ─── Client-side profit lock (total P&L floor) ────────────────────
   //
@@ -2852,6 +3012,38 @@ export default function AdvancedScalper() {
               ))}
             </div>
 
+            {/* Bracket (Dhan Super Order): broker-held target + stop on opening orders */}
+            <div className={cn(
+              'flex items-center gap-1.5 rounded-xl border px-1.5 py-0.5 shrink-0',
+              bracketActive ? 'border-amber-500/40 bg-amber-500/10' : 'border-zinc-800 bg-zinc-900',
+            )}>
+              <button
+                type="button"
+                onClick={() => setBracketOn(v => !v)}
+                disabled={broker !== 'dhan'}
+                aria-pressed={bracketActive}
+                title={broker !== 'dhan'
+                  ? 'Bracket orders (Dhan Super Order) are Dhan-only'
+                  : 'When ON, orders that open or add a position carry a target and stop-loss held at the broker (survive closing this tab). Closing orders go out plain. Re-arm after each page load.'}
+                className={cn(
+                  'px-3 py-1.5 text-xs font-bold rounded-lg transition-all whitespace-nowrap disabled:opacity-40 disabled:cursor-not-allowed',
+                  bracketActive ? 'bg-amber-500/20 text-amber-400 border border-amber-500/40' : 'text-zinc-500 hover:text-zinc-300',
+                  FOCUS_RING,
+                )}>
+                BRACKET {bracketActive ? 'ON' : 'OFF'}
+              </button>
+              {bracketActive && (
+                <>
+                  <span className={cn(TXT_CAPTION, 'text-emerald-400')}>TGT pts</span>
+                  <GuardInput value={bracketTgt} onCommit={setBracketTgt} colorCls="text-emerald-400" focusBorderCls="focus:border-emerald-500" />
+                  <span className={cn(TXT_CAPTION, 'text-red-400')}>SL pts</span>
+                  <GuardInput value={bracketSl} onCommit={setBracketSl} colorCls="text-red-400" focusBorderCls="focus:border-red-500" />
+                  <span className={cn(TXT_CAPTION, 'text-amber-400')}>TRAIL pts</span>
+                  <GuardInput value={bracketTrail} onCommit={setBracketTrail} colorCls="text-amber-400" focusBorderCls="focus:border-amber-500" />
+                </>
+              )}
+            </div>
+
             {/* Top 10 NIFTY heavyweights panel — display preference, so it sits
                 with the other view toggles rather than the order controls. */}
             <button onClick={() => setShowTop10(v => !v)}
@@ -3401,8 +3593,8 @@ export default function AdvancedScalper() {
                 limitPrice={box.limitPrice}
                 orderMode={orderMode}
                 onStrikeChange={v => updateBox(box.id, { strike: v, limitPrice: '' })}
-                onShiftUp={() => handleShiftStrike(box.id, 'UP')}
-                onShiftDown={() => handleShiftStrike(box.id, 'DOWN')}
+                onShiftUp={() => handleShiftStrikeRef.current(box.id, 'UP')}
+                onShiftDown={() => handleShiftStrikeRef.current(box.id, 'DOWN')}
                 shiftSteps={shiftSteps}
                 onShiftStepsChange={n => setShiftSteps(clampShiftSteps(n))}
                 moveFraction={box.moveFraction ?? 'FULL'}
@@ -3412,8 +3604,8 @@ export default function AdvancedScalper() {
                   ? 'No open position on this strike'
                   : `Needs ≥2 open lots — this leg has ${boxOpenLots} lot`}
                 onLimitPriceChange={v => updateBox(box.id, { limitPrice: v })}
-                onBuy={() => placeOrder(box.id, 'BUY')}
-                onSell={() => placeOrder(box.id, 'SELL')}
+                onBuy={() => placeOrderRef.current(box.id, 'BUY')}
+                onSell={() => placeOrderRef.current(box.id, 'SELL')}
                 lots={box.lots}
                 onLotsChange={l => updateBox(box.id, { lots: Math.min(MAX_LOTS_PER_ORDER, Math.max(1, Math.trunc(Number(l)) || 1)) })}
                 onRemove={() => removeBox(box.id)}

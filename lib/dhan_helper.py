@@ -1704,6 +1704,18 @@ class DhanHelper:
         return False
 
     # --- ORDER MANAGEMENT ---
+    def _pace_order(self) -> None:
+        """
+        Take a slot in the account-wide order window shared with every other strategy and the dashboard
+        (lib/dhan_order_lane.py). Fail-open and bounded: never raises, never waits more than ~2 s, so it
+        can delay an order slightly under a burst but cannot block or drop one.
+        """
+        try:
+            from lib.dhan_order_lane import wait_for_slot
+            wait_for_slot()
+        except Exception:
+            pass
+
     def place_order(self,
                     security_id: str, 
                     exchange_segment: Any, 
@@ -1729,6 +1741,7 @@ class DhanHelper:
             product_type = "INTRADAY"
         
         try:
+            self._pace_order()
             # Check for AMO parameters in kwargs
             after_market_order = kwargs.get('after_market_order', False) or kwargs.get('afterMarketOrder', False)
             
@@ -1879,6 +1892,7 @@ class DhanHelper:
                     disclosed_quantity: int = 0) -> bool:
         """Modify an existing pending order. leg_name: 'ENTRY_LEG' (default), 'TARGET_LEG', or 'STOP_LOSS_LEG' for BO/CO orders."""
         try:
+            self._pace_order()
             res = self.dhan.modify_order(
                 order_id=order_id,
                 order_type=order_type,
@@ -2315,6 +2329,7 @@ class DhanHelper:
                 orders = res.get('data', [])
                 for order in orders:
                     if order.get('orderStatus') in ['PENDING', 'TRANSIT']:
+                        self._pace_order()
                         cancel_res = self.dhan.cancel_order(order.get('orderId'))
                         if isinstance(cancel_res, dict) and cancel_res.get('status') == 'success':
                             cancelled_count += 1
@@ -2468,6 +2483,30 @@ class DhanHelper:
             logger.error(f"Exception in set_pnl_exit: {e}")
         return False
 
+    def _dhan_get_data(self, path: str, what: str) -> Optional[dict]:
+        """GET a read-only account endpoint through dhan_http; None on any failure."""
+        dhan_http = getattr(self.dhan, 'dhan_http', None)
+        if not dhan_http:
+            logger.error(f"{what}: dhan_http not accessible.")
+            return None
+        try:
+            from lib.dhan_health import unwrap
+            body = unwrap(dhan_http.get(path))
+            if body is None:
+                logger.error(f"{what} failed: no usable body")
+            return body
+        except Exception as e:
+            logger.error(f"Exception in {what}: {e}")
+        return None
+
+    def get_profile(self) -> Optional[dict]:
+        """GET /profile: tokenValidity, activeSegment, dataPlan/dataValidity. Works from a non-whitelisted IP."""
+        return self._dhan_get_data('/profile', 'get_profile')
+
+    def get_static_ip(self) -> Optional[dict]:
+        """GET /ip/getIP: registered primaryIP / secondaryIP (read-only; setting/modifying is deliberately not wrapped)."""
+        return self._dhan_get_data('/ip/getIP', 'get_static_ip')
+
     def delete_pnl_exit(self) -> bool:
         """Disable active P&L exit configuration for the current day."""
         dhan_http = getattr(self.dhan, 'dhan_http', None)
@@ -2554,6 +2593,131 @@ class DhanHelper:
             logger.error(f"Exception in get_expiry_list: {e}")
         return []
     # --- FOREVER ORDERS (GTT) ---
+    # --- SUPER ORDERS (entry + broker-resting target/stop/trail) ---
+    def _client_id_for_rest(self) -> str:
+        dhan_http = getattr(self.dhan, 'dhan_http', None)
+        return str(getattr(dhan_http, 'client_id', None) or os.getenv("client_id") or "")
+
+    def place_super_order(self, *, security_id, exchange_segment: str, side: str, product_type: str,
+                          quantity: int, target_price: float, stop_loss_price: float,
+                          order_type: str = "LIMIT", price: Optional[float] = None,
+                          trailing_jump: float = 0, ref_price: Optional[float] = None) -> Dict:
+        """
+        POST /super/orders. Returns {'ok', 'order_id', 'status', 'correlation_id', 'error', 'unknown'}.
+
+        unknown=True means no clean response (timeout/network): the bracket MAY exist. Do not
+        retry blindly - call get_super_orders() and match correlation_id first. The exit legs
+        rest at the broker, so do not also run a software stop on this security, and size any
+        manual close off your own quantity (lib/strategy_risk.resolve_exit_qty).
+        Dry-run is the caller's job; this method always sends.
+        """
+        from lib.super_order import validate_super_order, build_place_payload
+        out = {"ok": False, "order_id": None, "status": None, "correlation_id": None, "error": None, "unknown": False}
+        err = validate_super_order(
+            security_id=security_id, exchange_segment=exchange_segment, side=side, product_type=product_type,
+            quantity=quantity, target_price=target_price, stop_loss_price=stop_loss_price,
+            order_type=order_type, price=price, trailing_jump=trailing_jump, ref_price=ref_price)
+        if err:
+            out["error"] = err
+            return out
+        dhan_http = getattr(self.dhan, 'dhan_http', None)
+        if not dhan_http:
+            out["error"] = "dhan_http not accessible"
+            return out
+        correlation_id = f"so{int(time.time() * 1000):x}{random.randrange(16**4):04x}"
+        out["correlation_id"] = correlation_id
+        payload = build_place_payload(
+            self._client_id_for_rest(), correlation_id, security_id=security_id, exchange_segment=exchange_segment,
+            side=side, product_type=product_type, quantity=quantity, target_price=target_price,
+            stop_loss_price=stop_loss_price, order_type=order_type, price=price, trailing_jump=trailing_jump,
+            ref_price=ref_price)
+        self._pace_order()
+        try:
+            res = dhan_http.post('/super/orders', payload)
+        except Exception as e:
+            out["unknown"] = True
+            out["error"] = f"no clean response: {e}"
+            logger.error(f"place_super_order status UNKNOWN ({correlation_id}): {e}")
+            return out
+        body = res.get('data') if isinstance(res, dict) and isinstance(res.get('data'), dict) else res
+        order_id = str((body or {}).get('orderId') or '') if isinstance(body, dict) else ''
+        if order_id:
+            out.update(ok=True, order_id=order_id, status=body.get('orderStatus'))
+            logger.info(f"Super order placed: {order_id} ({side} {quantity} {security_id}, {product_type})")
+        else:
+            remarks = res.get('remarks') if isinstance(res, dict) else None
+            out["error"] = remarks or str(res)
+            # The SDK turns EVERY exception (timeout, reset) into a failure dict with a STRING remark,
+            # and a genuine Dhan rejection into a DICT {error_code, ...}. A string remark therefore means
+            # "no parsed answer from Dhan": the bracket may exist, so it is unknown, not rejected.
+            if not isinstance(remarks, dict):
+                out["unknown"] = True
+                logger.error(f"place_super_order status UNKNOWN ({correlation_id}): {out['error']}")
+            else:
+                logger.error(f"place_super_order rejected: {out['error']}")
+        return out
+
+    def modify_super_order(self, order_id: str, leg_name: str, order_type: Optional[str] = None, **fields) -> bool:
+        """PUT /super/orders/{id}. fields: quantity, price, targetPrice, stopLossPrice, trailingJump (leg-specific); ENTRY_LEG also needs order_type."""
+        from lib.super_order import validate_modify
+        err = validate_modify(leg_name, order_type, **fields)
+        if err:
+            logger.error(f"modify_super_order: {err}")
+            return False
+        dhan_http = getattr(self.dhan, 'dhan_http', None)
+        put = getattr(dhan_http, 'put', None)
+        if not put:
+            logger.error("modify_super_order: dhan_http.put not available in this SDK version.")
+            return False
+        payload = {"dhanClientId": self._client_id_for_rest(), "orderId": str(order_id), "legName": leg_name,
+                   **({"orderType": str(order_type).upper()} if leg_name == "ENTRY_LEG" else {}),
+                   **{k: v for k, v in fields.items() if v is not None}}
+        try:
+            self._pace_order()
+            res = put(f'/super/orders/{order_id}', payload)
+            if isinstance(res, dict) and res.get('status') != 'failure' and not res.get('errorCode'):
+                return True
+            logger.error(f"modify_super_order failed: {res}")
+        except Exception as e:
+            logger.error(f"Exception in modify_super_order: {e}")
+        return False
+
+    def cancel_super_order(self, order_id: str, leg_name: str = "ENTRY_LEG") -> bool:
+        """DELETE /super/orders/{id}/{leg}. Cancelling ENTRY_LEG cancels the whole bracket."""
+        from lib.super_order import SUPER_LEGS
+        if leg_name not in SUPER_LEGS:
+            logger.error(f"cancel_super_order: invalid leg {leg_name}")
+            return False
+        dhan_http = getattr(self.dhan, 'dhan_http', None)
+        if not dhan_http:
+            logger.error("cancel_super_order: dhan_http not accessible.")
+            return False
+        try:
+            self._pace_order()
+            res = dhan_http.delete(f'/super/orders/{order_id}/{leg_name}')
+            if isinstance(res, dict) and res.get('status') != 'failure' and not res.get('errorCode'):
+                return True
+            logger.error(f"cancel_super_order failed: {res}")
+        except Exception as e:
+            logger.error(f"Exception in cancel_super_order: {e}")
+        return False
+
+    def get_super_orders(self) -> List[Dict]:
+        """GET /super/orders: today's super orders with their leg details."""
+        dhan_http = getattr(self.dhan, 'dhan_http', None)
+        if not dhan_http:
+            logger.error("get_super_orders: dhan_http not accessible.")
+            return []
+        try:
+            res = dhan_http.get('/super/orders')
+            rows = res.get('data') if isinstance(res, dict) else res
+            if isinstance(rows, list):
+                return rows
+            logger.error(f"get_super_orders: unexpected response {res}")
+        except Exception as e:
+            logger.error(f"Exception in get_super_orders: {e}")
+        return []
+
     def place_forever_order(self,
                              security_id: str,
                              exchange_segment: Any,
@@ -3052,6 +3216,7 @@ class DhanHelper:
     def cancel_order(self, order_id: str) -> bool:
         """Cancel a pending order."""
         try:
+            self._pace_order()
             res = self.dhan.cancel_order(order_id)
             if isinstance(res, dict) and res.get('status') == 'success':
                 logger.info(f"Order {order_id} cancelled successfully.")
@@ -3078,6 +3243,7 @@ class DhanHelper:
         order_type = order_type or self.LIMIT
         product_type = product_type or self.MARGIN
         try:
+            self._pace_order()
             res = self.dhan.place_slice_order(
                 security_id=str(security_id),
                 exchange_segment=exchange_segment,

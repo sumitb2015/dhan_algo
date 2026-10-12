@@ -97,3 +97,29 @@ Organized under separate subdirectories for structured functionality.
 ### Performance Tips
 - **Caching**: The master list (15MB) is loaded once on `DhanHelper` init (~1.5s). Subsequent lookups are instant (<1ms).
 - **Batching**: Use `get_quote_data()` or `get_ticker_data()` for multi-symbol LTP instead of looping `get_ltp()`.
+
+## Super Orders (entry + broker-resting target / stop-loss / trail)
+
+Paths, leg names and per-leg modify fields match the `dhanhq` 2.3.0 SDK source; response shapes (list rows, `legDetails`, `correlationId`) are UNCONFIRMED against a live account - verify with one minimal order before relying on it.
+
+| Method | Endpoint | Notes |
+|---|---|---|
+| `place_super_order(security_id=, exchange_segment=, side=, product_type=, quantity=, target_price=, stop_loss_price=, order_type="LIMIT", price=, trailing_jump=0, ref_price=)` | `POST /super/orders` | Returns `{ok, order_id, status, correlation_id, error, unknown}`. `unknown=True` = no clean response; the bracket may exist - match `correlation_id` in `get_super_orders()` before retrying. `ref_price` only validates a MARKET entry and is never sent. Always sends: dry-run is the caller's job. |
+| `modify_super_order(order_id, leg_name, **fields)` | `PUT /super/orders/{id}` | `ENTRY_LEG` any field; `TARGET_LEG` only `targetPrice`; `STOP_LOSS_LEG` only `stopLossPrice`/`trailingJump`. |
+| `cancel_super_order(order_id, leg_name="ENTRY_LEG")` | `DELETE /super/orders/{id}/{leg}` | Cancelling `ENTRY_LEG` cancels the whole bracket. |
+| `get_super_orders()` | `GET /super/orders` | Today's brackets with leg details. |
+
+Confirm the unconfirmed shapes against YOUR account with one command (places a 1-lot far-below-market LIMIT bracket
+that cannot fill, checks every shape assumption the code relies on, cancels it in a `finally`; plan-only without the flag):
+`python scripts/tools/super_order_smoke.py --i-understand-this-places-a-real-order`. A MARKET entry is deliberately not
+covered (it would fill): verify that one by hand with a 1-lot bracket from the Scalper.
+
+Order pacing: every order call above (and `place_order`, `modify_order`, `cancel_order`, `cancel_all_orders`,
+`place_slice_order`) first takes a slot in the account-wide order window shared with the other strategies and the
+dashboard (`lib/dhan_order_lane.py` <-> `rs_dashboard/lib/dhanOrderLaneFile.ts`, file `debug/dhan_order_lane.json`,
+8 per second). It fails open and waits at most ~2 s, so it can delay an order under a burst but never block or drop one.
+
+Ownership: the exit legs rest at the broker, so don't also run a software stop on the same security,
+`cancel_all_orders()` will kill them, and manual closes must be sized off your own quantity
+(`lib/strategy_risk.resolve_exit_qty`). Rules live in `lib/super_order.py` (mirrored by
+`rs_dashboard/lib/superOrder.ts`); the dashboard route is `/api/super-order` (idempotencyKey required).

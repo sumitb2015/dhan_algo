@@ -24,6 +24,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import Link from 'next/link';
 import AnimatedNumber from './AnimatedNumber';
+import DhanHealthChip from './DhanHealthChip';
 import {
   Activity,
   AlertTriangle,
@@ -2091,6 +2092,9 @@ export default function MarketDashboard() {
           <span className="rounded-md border border-zinc-800 bg-zinc-900 px-2.5 py-1 font-mono text-[10px] font-semibold text-zinc-400">
             DATA: {dataDate}
           </span>
+
+          {/* Dhan account health: token / kill switch / static IP */}
+          <DhanHealthChip />
 
           {/* Live IST Clock */}
           <span className="flex items-center gap-1.5 rounded-md border border-amber-500/30 bg-amber-500/10 px-2.5 py-1 font-mono text-[10px] font-bold text-amber-400 shadow-sm">

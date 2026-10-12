@@ -4,6 +4,7 @@ import { execFile } from 'child_process';
 import { promisify } from 'util';
 import { PYTHON_EXE } from '@/lib/pyExec';
 import { invalidateBrokerCache } from '@/lib/brokerPositionsCache';
+import { reserveOrderSlot } from '@/lib/dhanOrderPacer';
 
 const execFileAsync = promisify(execFile);
 
@@ -67,6 +68,8 @@ async function placeOnce(body: Record<string, unknown>): Promise<NextResponse> {
   ];
 
   try {
+    // Same account-wide window as fast-order / super-order: this route spawns the script that places the order.
+    await reserveOrderSlot();
     const { stdout } = await execFileAsync(PYTHON_EXE, args, {
       encoding: 'utf8',
       cwd: PROJECT_ROOT,

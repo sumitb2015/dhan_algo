@@ -1,4 +1,4 @@
-﻿"""Verify session validity for a broker.
+"""Verify session validity for a broker.
 
 Usage:
     python scripts/tools/verify_broker_session.py <broker>
@@ -16,6 +16,29 @@ project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(_
 sys.path.insert(0, project_root)
 
 
+def _dhan_preflight(dhan):
+    """Token validity, kill switch and static-IP checks. Blockers fail the launch; unknowns only warn."""
+    from lib.dhan_health import unwrap, evaluate_preflight, lookup_public_ip
+    http = getattr(dhan, "dhan_http", None)
+    if http is None:
+        return True, "Dhan session is valid (health checks skipped: dhan_http unavailable)"
+
+    def get(path):
+        try:
+            return unwrap(http.get(path))
+        except Exception:
+            return None
+
+    static_ip = get("/ip/getIP")
+    blockers, warnings = evaluate_preflight(
+        get("/profile"), get("/killswitch"), static_ip,
+        lookup_public_ip() if static_ip is not None else None,
+    )
+    if blockers:
+        return False, "; ".join(blockers)
+    return True, "Dhan session is valid" + (f" (warnings: {'; '.join(warnings)})" if warnings else "")
+
+
 def verify(broker: str):
     broker = str(broker).lower().strip()
     if broker == "dhan":
@@ -24,7 +47,7 @@ def verify(broker: str):
             dhan = get_dhan_client()
             if not dhan:
                 return False, "Failed to initialize Dhan client (check access token / credentials)"
-            return True, "Dhan session is valid"
+            return _dhan_preflight(dhan)
         except Exception as e:
             return False, f"Dhan verification failed: {e}"
 
