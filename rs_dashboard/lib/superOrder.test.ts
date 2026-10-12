@@ -92,3 +92,44 @@ test('hasUnmatchableActive flags a live row without a securityId, ignores finish
   assert.ok(hasUnmatchableActive([{ orderId: '9', orderStatus: 'PENDING' }]));
   assert.ok(!hasUnmatchableActive([{ orderId: '9', orderStatus: 'TRADED' }, { orderId: '8', securityId: '1', orderStatus: 'PENDING' }]));
 });
+
+// ─── bracketLevelsBySecurity ──────────────────────────────────────────────
+import { bracketLevelsBySecurity, bracketLevelsKey } from './superOrder.ts';
+
+test('bracketLevelsBySecurity: resting exit legs give levels; finished legs and other states show none', () => {
+  const rows = [
+    { orderId: '1', securityId: '111', targetPrice: 120.5, stopLossPrice: '80', trailingJump: 2, legDetails: [
+      { legName: 'ENTRY_LEG', orderStatus: 'TRADED' }, { legName: 'TARGET_LEG', orderStatus: 'PENDING' }, { legName: 'STOP_LOSS_LEG', orderStatus: 'TRIGGER_PENDING' } ] },
+    // target already filled: only the stop is still resting
+    { orderId: '2', securityId: '222', targetPrice: 50, stopLossPrice: 30, legDetails: [
+      { legName: 'ENTRY_LEG', orderStatus: 'TRADED' }, { legName: 'TARGET_LEG', orderStatus: 'TRADED' }, { legName: 'STOP_LOSS_LEG', orderStatus: 'PENDING' } ] },
+    // everything finished: no live bracket
+    { orderId: '3', securityId: '333', targetPrice: 50, stopLossPrice: 30, legDetails: [
+      { legName: 'TARGET_LEG', orderStatus: 'CANCELLED' }, { legName: 'STOP_LOSS_LEG', orderStatus: 'TRADED' } ] },
+    // no legDetails / no securityId: cannot be placed on a row
+    { orderId: '4', securityId: '444', orderStatus: 'PENDING' },
+    { orderId: '5', legDetails: [{ legName: 'TARGET_LEG', orderStatus: 'PENDING' }], targetPrice: 9 },
+  ];
+  assert.deepStrictEqual(bracketLevelsBySecurity(rows), {
+    '111': [{ orderId: '1', target: 120.5, stop: 80, trail: 2 }],
+    '222': [{ orderId: '2', target: null, stop: 30, trail: null }],
+  });
+});
+
+test('bracketLevelsBySecurity: falls back to leg prices, rejects junk, keeps several brackets on one contract', () => {
+  const rows = [
+    { orderId: '1', securityId: '9', legDetails: [{ legName: 'TARGET_LEG', orderStatus: 'PENDING', price: 77 }, { legName: 'STOP_LOSS_LEG', orderStatus: 'PENDING', triggerPrice: '55.5', trailingJump: 1.5 }] },
+    { orderId: '2', securityId: '9', targetPrice: 0, stopLossPrice: 'abc', legDetails: [{ legName: 'TARGET_LEG', orderStatus: 'OPEN' }, { legName: 'STOP_LOSS_LEG', orderStatus: 'PENDING' }] },
+  ];
+  assert.deepStrictEqual(bracketLevelsBySecurity(rows)['9'], [
+    { orderId: '1', target: 77, stop: 55.5, trail: 1.5 },
+    { orderId: '2', target: null, stop: null, trail: null },        // live but unreadable: null, never a guess
+  ]);
+});
+
+test('bracketLevelsKey is order-independent and changes with the levels', () => {
+  const a = { '2': [{ orderId: 'x', target: 1, stop: 2, trail: null }], '1': [{ orderId: 'y', target: 3, stop: 4, trail: null }] };
+  const b = { '1': a['1'], '2': a['2'] };
+  assert.equal(bracketLevelsKey(a), bracketLevelsKey(b));
+  assert.notEqual(bracketLevelsKey(a), bracketLevelsKey({ ...a, '1': [{ orderId: 'y', target: 3.5, stop: 4, trail: null }] }));
+});

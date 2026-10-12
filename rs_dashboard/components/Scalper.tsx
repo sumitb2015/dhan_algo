@@ -8,6 +8,7 @@ import { partialCloseChips } from '@/lib/partialQty';
 import { positionKey, positionProduct, findLivePosition } from '@/lib/positionProduct';
 import { normalizeExpiry, parseTradingSymbol } from '@/lib/positionLegs';
 import { cn } from '@/lib/utils';
+import type { BracketLevels } from '@/lib/superOrder';
 
 // Visible keyboard-only focus ring for every clickable control on this page and
 // on AdvancedScalper.tsx (which imports this rather than redefining it, since
@@ -708,6 +709,8 @@ export interface PositionsTableProps {
   lotSizeFor?: (row: Record<string, unknown>) => number | null;
   /** Partial square-off. `units` is ABSOLUTE quantity, already rounded to whole lots. */
   onClosePartial?: (pos: Record<string, unknown>, units: number, pct: number) => void;
+  /** Live bracket levels by securityId (Dhan only). Omit where brackets do not apply. */
+  brackets?: Record<string, BracketLevels[]>;
   sort: SortState;
   onSort: (key: string) => void;
   // Set when the last positions fetch failed (network/API error) rather than
@@ -760,6 +763,8 @@ interface PositionRowProps {
   onAddLeg: (pos: Record<string, unknown>) => void;
   lotSizeFor?: (row: Record<string, unknown>) => number | null;
   onClosePartial?: (pos: Record<string, unknown>, units: number, pct: number) => void;
+  /** Live bracket (Super Order) exit levels resting at the broker for this contract, if any. */
+  bracket?: BracketLevels[];
   selected?: boolean;
   onToggleSelect?: (positionKey: string) => void;
 }
@@ -776,12 +781,35 @@ interface PositionRowProps {
  */
 function positionRowPropsEqual(prev: PositionRowProps, next: PositionRowProps): boolean {
   return prev.row === next.row && prev.guard === next.guard && prev.isClosing === next.isClosing
-    && prev.broker === next.broker && prev.selected === next.selected;
+    && prev.broker === next.broker && prev.selected === next.selected && prev.bracket === next.bracket;
+}
+
+/**
+ * The target / stop-loss a bracket (Dhan Super Order) has resting at the broker for this contract, under the
+ * symbol. These are the broker's own levels, not this page's software Target/SL guards (those have their own
+ * columns). A level that could not be read shows "-" rather than a guess; several live brackets on one
+ * contract show the first plus a count.
+ */
+function BracketLevelsLine({ levels, ltp }: { levels: BracketLevels[]; ltp: number }) {
+  const b = levels[0];
+  const px = (n: number | null) => (n != null ? n.toFixed(2) : '-');
+  const away = (n: number | null) => (n != null && ltp > 0 ? `${Math.abs(n - ltp).toFixed(2)} pts from LTP` : 'distance unknown');
+  const title = `Bracket order ${b.orderId} resting at the broker. Target ${px(b.target)} (${away(b.target)}), stop ${px(b.stop)} (${away(b.stop)})`
+    + `${b.trail ? `, trailing ${b.trail} pts` : ''}${levels.length > 1 ? `. ${levels.length - 1} more bracket(s) on this contract.` : '.'}`;
+  return (
+    <div className={cn('mt-0.5 flex items-center gap-1.5 whitespace-nowrap', TXT_LABEL, 'font-mono')} title={title}>
+      <span className="text-zinc-500">BRK</span>
+      <span className="text-emerald-400">T {px(b.target)}</span>
+      <span className="text-rose-400">SL {px(b.stop)}</span>
+      {b.trail ? <span className="text-amber-400">trail {b.trail}</span> : null}
+      {levels.length > 1 ? <span className="text-zinc-500">+{levels.length - 1}</span> : null}
+    </div>
+  );
 }
 
 const PositionRow = React.memo(function PositionRow({
   row, rowKey, broker, guard, isClosing, onGuardChange, onTrailToggle, onClose, onAddLeg, lotSizeFor, onClosePartial,
-  selected, onToggleSelect,
+  bracket, selected, onToggleSelect,
 }: PositionRowProps) {
   const sym = String(row.tradingSymbol ?? '');
   const netQty = Number(row.netQty);
@@ -838,6 +866,7 @@ const PositionRow = React.memo(function PositionRow({
           )}
           {sym}
         </div>
+        {!isFlat && bracket && bracket.length > 0 && <BracketLevelsLine levels={bracket} ltp={ltp} />}
       </td>
       <td className="px-3 py-2 whitespace-nowrap font-mono text-zinc-400">{resolveRowExpiry(row, sym, broker) ?? '—'}</td>
       <td className="px-3 py-2 whitespace-nowrap font-mono text-right tabular-nums text-zinc-300">{netQty}</td>
@@ -1020,7 +1049,7 @@ const PositionRow = React.memo(function PositionRow({
   );
 }, positionRowPropsEqual);
 
-export const PositionsTable = React.memo(function PositionsTable({ data, broker, guards, closingPositions, onGuardChange, onTrailToggle, onClose, onAddLeg, lotSizeFor, onClosePartial, sort, onSort, error, selected, onToggleSelect, onToggleSelectAll }: PositionsTableProps) {
+export const PositionsTable = React.memo(function PositionsTable({ data, broker, guards, closingPositions, onGuardChange, onTrailToggle, onClose, onAddLeg, lotSizeFor, onClosePartial, brackets, sort, onSort, error, selected, onToggleSelect, onToggleSelectAll }: PositionsTableProps) {
   // The broker positions API does not guarantee a stable row order between
   // polls, so with no explicit column sort applied ('none') the rows would
   // otherwise reshuffle on every 5s refresh. Pin each row to the order it was
@@ -1114,6 +1143,7 @@ export const PositionsTable = React.memo(function PositionsTable({ data, broker,
               onAddLeg={onAddLeg}
               lotSizeFor={lotSizeFor}
               onClosePartial={onClosePartial}
+              bracket={brackets?.[String(row.securityId ?? '')]}
               selected={selected?.has(rowKey) ?? false}
               onToggleSelect={onToggleSelect}
             />

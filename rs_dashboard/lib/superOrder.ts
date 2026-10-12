@@ -194,3 +194,55 @@ export function hasUnmatchableActive(rows: Record<string, unknown>[]): boolean {
     return ACTIVE.has(up(r.orderStatus)) || legs.some(l => ACTIVE.has(up(l.orderStatus)));
   });
 }
+
+// ─── Position-row display ─────────────────────────────────────────────────
+
+/** The resting exit levels of one live bracket, for showing on a position row. */
+export interface BracketLevels {
+  orderId: string;
+  /** Resting target price, null when that leg is not live or carries no readable price. */
+  target: number | null;
+  /** Resting stop-loss price, null when that leg is not live or carries no readable price. */
+  stop: number | null;
+  /** Trailing step in points when the stop trails, else null. */
+  trail: number | null;
+}
+
+const posNum = (v: unknown): number | null => {
+  const n = typeof v === 'string' && v.trim() !== '' ? Number(v) : v;
+  return typeof n === 'number' && Number.isFinite(n) && n > 0 ? n : null;
+};
+
+/**
+ * Live brackets keyed by securityId, from the raw GET /super/orders rows. A bracket is "live" for
+ * display while its TARGET and/or STOP leg is still resting (ACTIVE); a filled or cancelled leg shows
+ * no level. Levels come from the order's own `targetPrice` / `stopLossPrice` / `trailingJump`, falling
+ * back to the leg's `price` / `triggerPrice`. UNCONFIRMED against a live account (same caveat as the
+ * rest of this file): a level that cannot be read is null and the row simply shows "-", never a guess.
+ */
+export function bracketLevelsBySecurity(rows: Record<string, unknown>[]): Record<string, BracketLevels[]> {
+  const out: Record<string, BracketLevels[]> = {};
+  for (const r of rows) {
+    const orderId = String(r.orderId ?? '');
+    const securityId = String(r.securityId ?? '');
+    const legs = Array.isArray(r.legDetails) ? (r.legDetails as Record<string, unknown>[]) : [];
+    if (!orderId || !securityId || legs.length === 0) continue;
+    const live = (name: SuperLeg) => legs.find(l => up(l.legName) === name && ACTIVE.has(up(l.orderStatus)));
+    const tl = live('TARGET_LEG');
+    const sl = live('STOP_LOSS_LEG');
+    if (!tl && !sl) continue;
+    const trail = posNum(sl?.trailingJump) ?? posNum(r.trailingJump);
+    (out[securityId] ??= []).push({
+      orderId,
+      target: tl ? (posNum(r.targetPrice) ?? posNum(tl.price) ?? posNum(tl.triggerPrice)) : null,
+      stop: sl ? (posNum(r.stopLossPrice) ?? posNum(sl.triggerPrice) ?? posNum(sl.price)) : null,
+      trail,
+    });
+  }
+  return out;
+}
+
+/** Stable signature of a levels map, so a poll that changed nothing can reuse the previous object (row memoization). */
+export function bracketLevelsKey(m: Record<string, BracketLevels[]>): string {
+  return JSON.stringify(Object.keys(m).sort().map(k => [k, m[k]]));
+}

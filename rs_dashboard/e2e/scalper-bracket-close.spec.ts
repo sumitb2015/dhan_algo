@@ -23,12 +23,17 @@ test('closing a position cancels its resting target and stop - after the close, 
   await closeRow(page).click();
 
   await expect(page.getByText(/bracket cancelled/)).toBeVisible();
+  // The page also reads GET /api/super-order in the background to show bracket levels on the row, so reads can
+  // precede the close. What must hold: the close goes out, THEN the cancel lookup, THEN the deletes.
   const order = m.calls.map(c => (c.path === '/api/super-order' ? `super-${c.method}` : c.path));
-  expect(order[0]).toBe('/api/scalper/fast-order');                      // the close goes out first
-  expect(m.calls[0].body).toMatchObject({ securityId: '111', side: 'SELL', quantity: 75, productType: 'MARGIN' });
+  const closeAt = order.indexOf('/api/scalper/fast-order');
+  expect(closeAt).toBeGreaterThanOrEqual(0);
+  expect(m.calls[closeAt].body).toMatchObject({ securityId: '111', side: 'SELL', quantity: 75, productType: 'MARGIN' });
   const deletes = m.calls.filter(c => c.method === 'DELETE').map(c => c.search);
   expect(deletes.sort()).toEqual(['?orderId=5001&leg=STOP_LOSS_LEG', '?orderId=5001&leg=TARGET_LEG']);
-  expect(order.indexOf('super-GET')).toBeGreaterThan(order.indexOf('/api/scalper/fast-order'));
+  const lookupAfterClose = order.indexOf('super-GET', closeAt);
+  expect(lookupAfterClose).toBeGreaterThan(closeAt);
+  expect(order.indexOf('super-DELETE')).toBeGreaterThan(lookupAfterClose);   // no leg is deleted before the close and the lookup
 });
 
 test('no live bracket: the close is silent about brackets and deletes nothing', async ({ page }) => {

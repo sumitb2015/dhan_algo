@@ -27,7 +27,7 @@ import MtmChart, { useMtmHistory } from './MtmChart';
 import ScalperGreeksModal from './analytics/ScalperGreeksModal';
 import AdvancedScalperOptionChainModal from './AdvancedScalperOptionChainModal';
 import { capCloseQty } from '@/lib/intradayCap';
-import { resolveBracket, legsToCancel, hasUnmatchableActive, type SuperOrderInput } from '@/lib/superOrder';
+import { resolveBracket, legsToCancel, hasUnmatchableActive, bracketLevelsBySecurity, bracketLevelsKey, type BracketLevels, type SuperOrderInput } from '@/lib/superOrder';
 import AdvancedScalperAddLotsModal, { type SubmitLegOrderParams } from './AdvancedScalperAddLotsModal';
 
 // ─── Types ────────────────────────────────────────────────────────
@@ -671,6 +671,43 @@ export default function AdvancedScalper() {
   const unknownLtpCount = useMemo(() => enrichedPositions.filter(p =>
     Number(p.netQty) !== 0 && !(Number(p.lastTradedPrice) > 0)).length,
     [enrichedPositions]);
+
+  // Resting bracket (Super Order) target / stop per contract, shown under each open position's symbol. Dhan only.
+  // The levels are the broker's, read back from GET /super/orders; a failed read CLEARS them (an unknown level must
+  // read as unknown, not as the last value). Polled only while something is open and the tab is visible, with an
+  // in-flight guard so a slow response cannot stack requests, and an immediate refresh after this tab places or cancels one.
+  const [bracketLevels, setBracketLevels] = useState<Record<string, BracketLevels[]>>({});
+  const bracketLevelsKeyRef = useRef('');
+  const refreshBracketsRef = useRef<() => void>(() => {});
+  const hasOpenPosition = useMemo(() => enrichedPositions.some(p => Number(p.netQty) !== 0), [enrichedPositions]);
+  useEffect(() => {
+    const setLevels = (next: Record<string, BracketLevels[]>) => {
+      const k = bracketLevelsKey(next);
+      if (k === bracketLevelsKeyRef.current) return;   // unchanged: keep the object so memoized rows do not re-render
+      bracketLevelsKeyRef.current = k;
+      setBracketLevels(next);
+    };
+    if (broker !== 'dhan' || !hasOpenPosition) { setLevels({}); refreshBracketsRef.current = () => {}; return; }
+    let cancelled = false;
+    let inflight = false;
+    const tick = async () => {
+      if (inflight || cancelled || (typeof document !== 'undefined' && document.hidden)) return;
+      inflight = true;
+      try {
+        const j = await (await fetch('/api/super-order')).json() as { success?: boolean; orders?: Record<string, unknown>[] };
+        if (cancelled) return;
+        setLevels(j.success ? bracketLevelsBySecurity(j.orders ?? []) : {});
+      } catch {
+        if (!cancelled) setLevels({});
+      } finally {
+        inflight = false;
+      }
+    };
+    refreshBracketsRef.current = () => { void tick(); };
+    void tick();
+    const id = setInterval(tick, 6000);
+    return () => { cancelled = true; clearInterval(id); };
+  }, [broker, hasOpenPosition]);
 
   const totalUnrealizedPnl = useMemo(() => enrichedPositions.reduce((sum, p) =>
     sum + (Number(p.unrealizedProfit) || 0), 0),
@@ -1630,6 +1667,7 @@ export default function AdvancedScalper() {
       });
       if (j.success) {
         addToast('success', `${side} ${box.side} placed`, `${opts?.forceMarket ? 'Hotkey market order · ' : ''}ID: ${j.order_id}${bracketNote}`);
+        if (bracket) setTimeout(() => refreshBracketsRef.current(), 1500);   // Dhan lists the new legs a moment after the ACK
         setTimeout(fetchTabData, 1000);
       } else {
         addToast('error', `${side} ${box.side} failed`, j.error ?? 'Unknown error');
@@ -1780,6 +1818,7 @@ export default function AdvancedScalper() {
       } else {
         addToast('success', `${sym}: bracket cancelled`, partial ? 'Partial close - the remainder is now unprotected' : 'Target/stop legs removed');
       }
+      refreshBracketsRef.current();
     } catch {
       addToast('error', `${sym}: could not check for a live bracket`, 'A resting target/stop may still be live - check Dhan Orders');
     }
@@ -3777,6 +3816,7 @@ export default function AdvancedScalper() {
               onAddLeg={openAddLotsModal}
               lotSizeFor={lotSizeForRow}
               onClosePartial={handleClosePartial}
+              brackets={broker === 'dhan' ? bracketLevels : undefined}
               sort={tableSort}
               onSort={handleTableSort}
               error={positionsError}
