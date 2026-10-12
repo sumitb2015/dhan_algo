@@ -100,7 +100,7 @@ Organized under separate subdirectories for structured functionality.
 
 ## Super Orders (entry + broker-resting target / stop-loss / trail)
 
-UNCONFIRMED against a live account - verify with one minimal order before relying on it.
+Paths, leg names and per-leg modify fields match the `dhanhq` 2.3.0 SDK source; response shapes (list rows, `legDetails`, `correlationId`) are UNCONFIRMED against a live account - verify with one minimal order before relying on it.
 
 | Method | Endpoint | Notes |
 |---|---|---|

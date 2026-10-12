@@ -1604,6 +1604,9 @@ export default function AdvancedScalper() {
           return;
         }
         bracket = r.order;
+        // Armed on ATTEMPT, not success: a timeout (504) leaves a bracket that may exist, and a later failed
+        // look-up at close time must then be loud.
+        bracketPlacedRef.current = true;
         bracketNote = ` · bracket tgt ${r.order.targetPrice} / SL ${r.order.stopLossPrice}${r.order.trailingJump ? ` / trail ${r.order.trailingJump}` : ''}`;
       }
     }
@@ -1626,7 +1629,6 @@ export default function AdvancedScalper() {
         bracket,
       });
       if (j.success) {
-        if (bracket) bracketPlacedRef.current = true;
         addToast('success', `${side} ${box.side} placed`, `${opts?.forceMarket ? 'Hotkey market order · ' : ''}ID: ${j.order_id}${bracketNote}`);
         setTimeout(fetchTabData, 1000);
       } else {

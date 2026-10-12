@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert';
-import { evaluateHealth, isKillSwitchActive, parseDhanDateTime, type HealthInput } from './dhanHealth.ts';
+import { evaluateHealth, isKillSwitchActive, liveLaunchBlockers, parseDhanDateTime, type HealthInput } from './dhanHealth.ts';
 
 const NOW = new Date('2026-10-12T04:00:00Z'); // 09:30 IST
 
@@ -53,4 +53,13 @@ test('static IP: mismatch bad, none registered bad, lookup failure unknown, seco
 test('an expired data plan warns', () => {
   const r = evaluateHealth({ ...good, profile: { tokenValidity: '13/10/2026 05:30', dataValidity: '01/10/2026 00:00' } }, NOW);
   assert.strictEqual(byId(r, 'dataplan').level, 'warn');
+});
+
+test('live launch: kill switch / IP only block when Dhan executes; an expired token always blocks', () => {
+  const bad = evaluateHealth({ ...good, killSwitch: { killSwitchStatus: 'ACTIVATE' }, publicIp: '9.9.9.9' }, NOW).checks;
+  assert.deepStrictEqual(liveLaunchBlockers(bad, 'dhan').map(c => c.id).sort(), ['ip', 'killswitch']);
+  assert.deepStrictEqual(liveLaunchBlockers(bad, undefined).map(c => c.id).sort(), ['ip', 'killswitch']);
+  assert.deepStrictEqual(liveLaunchBlockers(bad, 'zerodha'), []);
+  const expired = evaluateHealth({ ...good, profile: { tokenValidity: '12/10/2026 08:00' } }, NOW).checks;
+  assert.deepStrictEqual(liveLaunchBlockers(expired, 'kotak').map(c => c.id), ['token']);
 });

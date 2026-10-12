@@ -75,6 +75,17 @@ function failed(error: string | null | undefined, what: string): HealthCheck['de
   return error ? `${what} check failed: ${error}` : `${what} check unavailable`;
 }
 
+/**
+ * Which 'bad' checks should stop a LIVE strategy launch. The kill switch and the static-IP list only
+ * gate Dhan ORDER calls, so they block only when Dhan is the execution broker; a Zerodha/Kotak-executed
+ * strategy still reads market data from Dhan (no static IP needed) and must not be held up by them.
+ * An invalid or expired token breaks the Dhan data feed for every broker, so it always blocks.
+ */
+export function liveLaunchBlockers(checks: HealthCheck[], execBroker: string | undefined): HealthCheck[] {
+  const dhanOrders = !execBroker || execBroker === 'dhan';
+  return checks.filter(c => c.level === 'bad' && (c.id === 'token' || dhanOrders));
+}
+
 export function evaluateHealth(input: HealthInput, now: Date = new Date()): { level: HealthLevel; checks: HealthCheck[] } {
   const checks: HealthCheck[] = [];
 

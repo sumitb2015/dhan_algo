@@ -1,4 +1,5 @@
 import { getDhanHealth } from '@/lib/dhanHealthServer';
+import { liveLaunchBlockers } from '@/lib/dhanHealth';
 import { NextRequest, NextResponse } from 'next/server';
 import path from 'path';
 import fs from 'fs';
@@ -251,7 +252,7 @@ export async function POST(request: NextRequest) {
       if (Array.isArray(args) && args.some((a: unknown) => a === '--live')) {
         try {
           const health = await getDhanHealth();
-          const blockers = health.checks.filter(c => c.level === 'bad');
+          const blockers = liveLaunchBlockers(health.checks, targetBroker);
           if (blockers.length > 0) {
             return NextResponse.json({
               success: false,
