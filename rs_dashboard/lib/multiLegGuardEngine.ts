@@ -71,12 +71,13 @@ export function evaluateBasketGuards(inp: GuardInput, rt: GuardRuntime): GuardEf
     // Nothing left to protect: a guard that was already firing is done; the rest wait for a position. Not while an exit is
     // unconfirmed: it flips legs CLOSED on ACK and a rejection reopens them, which the guard must still see.
     if (legsSettling(inp.legs, 'EXIT_ALL', now)) return fx;
-    if ((g.spotTriggers ?? []).some(t => t.armed && t.firedAt) || (g.greekBands ?? []).some(b => b.armed && b.firedAt)) {
+    if ((g.spotTriggers ?? []).some(t => t.armed && t.firedAt) || (g.greekBands ?? []).some(b => b.armed && b.firedAt) || (g.alarm?.armed && g.alarm.firedAt)) {
       fx.push({
         kind: 'patch', fn: gg => ({
           ...gg,
           spotTriggers: gg.spotTriggers?.map(t => (t.firedAt && t.armed ? { ...t, armed: false } : t)),
           greekBands: gg.greekBands?.map(b => (b.firedAt && b.armed ? { ...b, armed: false } : b)),
+          ...(gg.alarm ? { alarm: gg.alarm.firedAt && gg.alarm.armed ? { ...gg.alarm, armed: false } : gg.alarm } : {}),
         }),
       });
     }
@@ -159,6 +160,16 @@ export function evaluateBasketGuards(inp: GuardInput, rt: GuardRuntime): GuardEf
 
   // 3. Max-loss and margin alarm
   const alarm = g.alarm;
+  if (alarm?.armed && alarm.firedAt) {
+    // Closing: the max-loss exit has started. Finish it whatever the P&L does now; the no-open-legs branch above disarms the
+    // alarm once it is flat and settled, so a leg added later is not closed by a loss that was already realized.
+    const lossKey = `loss:${basketId}`;
+    // Only hedges left while a short's exit is still unconfirmed: wait, a rejection would reopen the short.
+    if (openLegs.every(l => l.side === 'B') && shortsSettling(inp.legs, 'EXIT_ALL', now)) return fx;
+    const last = rt.lastAttempt.get(lossKey);
+    if (!inp.busy && (last == null || now - last >= GUARD_EXIT_RETRY_MS)) { rt.lastAttempt.set(lossKey, now); fx.push({ kind: 'exitAll' }); }
+    return fx;
+  }
   if (alarm?.armed) {
     const lossKey = `loss:${basketId}`;
     const pnl = inp.pnlRupees(alarm.lossScope ?? 'today');
@@ -172,8 +183,9 @@ export function evaluateBasketGuards(inp: GuardInput, rt: GuardRuntime): GuardEf
           `P&L ${inp.fmtMoney(pnl)} against a max loss of ${inp.fmtMoney(alarm.maxLoss ?? 0)}.${level === 'breach' && alarm.exitAtMaxLoss ? ' Closing the strategy.' : ''}`);
       }
       if (level === 'breach' && alarm.exitAtMaxLoss && !inp.busy) {
-        const last = rt.lastAttempt.get(lossKey);
-        if (last == null || now - last >= GUARD_EXIT_RETRY_MS) { rt.lastAttempt.set(lossKey, now); fx.push({ kind: 'exitAll' }); }
+        rt.lastAttempt.set(lossKey, now);
+        fx.push({ kind: 'patch', fn: gg => (gg.alarm ? { ...gg, alarm: { ...gg.alarm, firedAt: iso } } : gg) });
+        fx.push({ kind: 'exitAll' });
       }
     }
     if (alarm.marginWarnPct != null && inp.funds) {

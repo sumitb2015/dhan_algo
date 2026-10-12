@@ -1682,7 +1682,9 @@ export default function MultiLegFocus({
     }
   }, [placeBasketInner, addToast]);
 
-  const exitOneLeg = useCallback(async (basketId: string, leg: MultiLegLeg, exitLots?: number): Promise<{ closed: boolean; qty: number; maxAfter?: number }> => {
+  // `unattended` = an automatic exit (a guard): never raise a blocking dialog. A hedge whose own side still has an open short is
+  // refused (it would leave that short naked); other open shorts only raise margin, which is not worth freezing the tab for.
+  const exitOneLeg = useCallback(async (basketId: string, leg: MultiLegLeg, exitLots?: number, opts?: { unattended?: boolean }): Promise<{ closed: boolean; qty: number; maxAfter?: number }> => {
     while (regroupGateRef.current) {
       await regroupGateRef.current;
       // The leg may now live in another row: write back to the row that holds it.
@@ -1715,7 +1717,9 @@ export default function MultiLegFocus({
         const warning = matchingShorts.length > 0
           ? `Warning: Exiting this ${leg.strike} ${leg.option} BUY hedge will leave your short ${matchingShorts.map(s => `${s.strike} ${s.option}`).join(', ')} leg completely NAKED without protection, and will increase margin requirements.\n\nExit this hedge anyway?`
           : `Warning: This strategy still has open short legs (${openShorts.map(s => `${s.strike} ${s.option}`).join(', ')}). Exiting this BUY leg will increase margin requirements.\n\nExit anyway?`;
-        if (!window.confirm(warning)) {
+        const refuse = opts?.unattended ? matchingShorts.length > 0 : !window.confirm(warning);
+        if (refuse) {
+          if (opts?.unattended) addToast('error', `Hedge ${label} kept`, `A short on the same side is still open (${matchingShorts.map(s => `${s.strike} ${s.option}`).join(', ')}); selling this hedge would leave it naked. The guard retries once the short is closed.`);
           exitingLegsRef.current.delete(leg.id);
           setExitingLegs(prev => {
             const next = new Set(prev);
@@ -1915,7 +1919,8 @@ export default function MultiLegFocus({
     return false;
   }, [resolveDhanSecurityId]);
 
-  const exitBasket = useCallback(async (basketId: string) => {
+  // `unattended` = an automatic exit (a guard): never raise a blocking confirm dialog, keep the hedges and let the retry decide.
+  const exitBasket = useCallback(async (basketId: string, opts?: { unattended?: boolean }) => {
     if (exitingBasketsRef.current.has(basketId)) return;
     exitingBasketsRef.current.add(basketId);
     setExitingMap(prev => ({ ...prev, [basketId]: true }));
@@ -1965,12 +1970,14 @@ export default function MultiLegFocus({
         const toVerify = shorts.map((l, i) => ({ leg: l, maxAfter: shortResults[i].maxAfter })).filter((v): v is { leg: MultiLegLeg; maxAfter: number } => v.maxAfter != null);
         if (toVerify.length) {
           const verified = await confirmShortsDown(basket, toVerify);
-          if (!verified && !window.confirm('Could not confirm the short legs are closed at the broker yet (an exit can still be rejected). Exit the hedge (BUY) legs anyway?')) {
-            addToast('error', 'Hedges kept', 'Short exits not confirmed yet — exit the long legs once Orders/Positions show the shorts closed.');
+          if (!verified && (opts?.unattended || !window.confirm('Could not confirm the short legs are closed at the broker yet (an exit can still be rejected). Exit the hedge (BUY) legs anyway?'))) {
+            addToast('error', 'Hedges kept', opts?.unattended
+              ? 'Short exits not confirmed at the broker yet, so the hedges were NOT sold. The guard retries shortly.'
+              : 'Short exits not confirmed yet — exit the long legs once Orders/Positions show the shorts closed.');
             return;
           }
         }
-        await Promise.allSettled(longs.map(leg => exitOneLeg(basketId, leg)));
+        await Promise.allSettled(longs.map(leg => exitOneLeg(basketId, leg, undefined, { unattended: opts?.unattended })));
       }
     } finally {
       exitingBasketsRef.current.delete(basketId);
@@ -3407,12 +3414,14 @@ export default function MultiLegFocus({
     if (!basket) return;
     const label = basketLabel(basket);
     const outcome = await exitSide(scope, {
-      exitLeg: async leg => { const r = await exitOneLeg(basketId, leg); return { closed: r.closed, maxAfter: r.maxAfter }; },
+      exitLeg: async leg => { const r = await exitOneLeg(basketId, leg, undefined, { unattended: true }); return { closed: r.closed, maxAfter: r.maxAfter }; },
       isBusy: leg => exitingLegsRef.current.has(leg.id),
       confirmShortsDown: items => confirmShortsDown(basket, items.map(i => ({ leg: i.leg, maxAfter: i.maxAfter }))),
     });
     if (outcome === 'short_not_closed') {
       addToast('error', `${label}: spot trigger kept the hedges`, 'A short leg did not close, so the long legs were NOT sold. The trigger retries; resolve the short if it keeps failing.');
+    } else if (outcome === 'short_busy') {
+      addToast('error', `${label}: spot trigger waiting`, 'An exit is already in progress on a short leg, so the long legs were NOT sold yet. The trigger retries shortly.');
     } else if (outcome === 'shorts_unconfirmed') {
       addToast('error', `${label}: spot trigger kept the hedges`, 'The broker does not show the shorts closed yet (an exit can still be rejected). The trigger retries shortly.');
     }
@@ -3456,7 +3465,7 @@ export default function MultiLegFocus({
         for (const e of effects) {
           if (e.kind === 'patch') patchGuards(basket.id, e.fn);
           else if (e.kind === 'toast') addToast('error', e.title, e.detail);
-          else if (e.kind === 'exitAll') void exitBasket(basket.id);
+          else if (e.kind === 'exitAll') void exitBasket(basket.id, { unattended: true });
           else void runSpotExit(basket.id, e.scope);
         }
       }

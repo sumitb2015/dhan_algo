@@ -54,6 +54,9 @@ export interface RiskAlarm {
   warnPct?: number;
   /** Also close the basket when the full maxLoss is reached. */
   exitAtMaxLoss?: boolean;
+  /** ISO time the close-at-max-loss exit started. Set means "closing": it retries until flat, then the alarm disarms, so a
+   *  position added afterwards is not closed by a loss that was already realized. */
+  firedAt?: string;
   /** Warn when account margin utilisation (used / (used + available)) reaches this %. */
   marginWarnPct?: number;
 }
@@ -254,7 +257,7 @@ export function disarmGuards(g: BasketGuards | undefined): BasketGuards | undefi
   return {
     ...(g.spotTriggers ? { spotTriggers: g.spotTriggers.map(t => ({ ...t, armed: false, firedAt: undefined })) } : {}),
     ...(g.greekBands ? { greekBands: g.greekBands.map(b => ({ ...b, armed: false, firedAt: undefined })) } : {}),
-    ...(g.alarm ? { alarm: { ...g.alarm, armed: false } } : {}),
+    ...(g.alarm ? { alarm: { ...g.alarm, armed: false, firedAt: undefined } } : {}),
   };
 }
 
@@ -282,9 +285,9 @@ export const setBandArmed = (g: BasketGuards, id: string, armed: boolean, day?: 
   ({ ...g, greekBands: upd(g.greekBands, id, b => ({ ...b, armed, armedDay: armed ? day : undefined, firedAt: undefined })) });
 
 export const editAlarm = (g: BasketGuards, patch: Partial<RiskAlarm>): BasketGuards =>
-  ({ ...g, alarm: { ...(g.alarm ?? { armed: false }), ...patch, armed: false } });
+  ({ ...g, alarm: { ...(g.alarm ?? { armed: false }), ...patch, armed: false, firedAt: undefined } });
 export const setAlarmArmed = (g: BasketGuards, armed: boolean, day?: string): BasketGuards =>
-  ({ ...g, alarm: { ...(g.alarm ?? { armed: false }), armed, armedDay: armed ? day : undefined } });
+  ({ ...g, alarm: { ...(g.alarm ?? { armed: false }), armed, armedDay: armed ? day : undefined, firedAt: undefined } });
 
 // ── Exiting one side ──────────────────────────────────────────────────────────
 
@@ -297,7 +300,7 @@ export interface SideExitDeps<L> {
   confirmShortsDown: (done: { leg: L; maxAfter: number }[]) => Promise<boolean>;
 }
 
-export type SideExitOutcome = 'done' | 'short_not_closed' | 'shorts_unconfirmed';
+export type SideExitOutcome = 'done' | 'short_not_closed' | 'short_busy' | 'shorts_unconfirmed';
 
 /**
  * Closes the legs of one side: shorts first, then the hedges, same rule as exitBasket (Invariants 9 and 10).
@@ -308,11 +311,14 @@ export type SideExitOutcome = 'done' | 'short_not_closed' | 'shorts_unconfirmed'
 export async function exitSide<L extends { side: 'B' | 'S' }>(scope: L[], deps: SideExitDeps<L>): Promise<SideExitOutcome> {
   const shorts = scope.filter(l => l.side === 'S');
   const longs = scope.filter(l => l.side === 'B');
-  const results = await Promise.all(shorts.map(async l => {
-    if (deps.isBusy(l)) return { closed: false as boolean, maxAfter: undefined as number | undefined };
+  const busy = shorts.map(l => deps.isBusy(l));   // decided once: a leg finishing mid-call must not flip the outcome
+  const results = await Promise.all(shorts.map(async (l, i) => {
+    if (busy[i]) return { closed: false as boolean, maxAfter: undefined as number | undefined };
     try { return await deps.exitLeg(l); } catch { return { closed: false, maxAfter: undefined }; }
   }));
-  if (results.some(r => !r.closed)) return 'short_not_closed';
+  // A short another exit is already working on is "in progress", not a failure: say so, keep the hedges, retry later.
+  if (results.some((r, i) => !r.closed && !busy[i])) return 'short_not_closed';
+  if (busy.some(Boolean)) return 'short_busy';
   if (longs.length === 0) return 'done';
   const toVerify = shorts.flatMap((leg, i) => (results[i].maxAfter != null ? [{ leg, maxAfter: results[i].maxAfter as number }] : []));
   if (toVerify.length && !(await deps.confirmShortsDown(toVerify))) return 'shorts_unconfirmed';

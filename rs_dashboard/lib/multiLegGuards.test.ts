@@ -213,9 +213,9 @@ test('exitSide: ACKed but not confirmed at the broker keeps the hedge (the rejec
   assert.deepEqual(sent, ['s1']);
 });
 
-test('exitSide: a short already being exited elsewhere counts as not closed', async () => {
+test('exitSide: a short already being exited elsewhere is busy and keeps the hedge', async () => {
   const { deps, sent } = sideDeps({ isBusy: l => l.id === 's1' });
-  assert.equal(await exitSide([S1, H1], deps), 'short_not_closed');
+  assert.equal(await exitSide([S1, H1], deps), 'short_busy');
   assert.deepEqual(sent, []);
 });
 
@@ -274,7 +274,8 @@ test('reducers: add / remove / arm / alarm', () => {
   g = setBandArmed(g, 'b', true);
   assert.equal(g.greekBands![0].armed, true);
   g = editAlarm(g, { maxLoss: 500 });
-  assert.deepEqual(g.alarm, { armed: false, maxLoss: 500 });
+  assert.equal(g.alarm!.armed, false);
+  assert.equal(g.alarm!.maxLoss, 500);
   g = setAlarmArmed(g, true);
   assert.equal(g.alarm!.armed, true);
   g = editAlarm(g, { warnPct: 70 });
@@ -315,4 +316,20 @@ test('arming stamps the day; disarming clears it', () => {
   assert.equal(g.alarm!.armedDay, '2026-10-12');
   g = setSpotArmed(g, 'a', false);
   assert.equal(g.spotTriggers![0].armedDay, undefined);
+});
+
+test('exitSide: a short already being exited elsewhere is "busy" (not a failure); a real failure still wins', async () => {
+  const a = sideDeps({ isBusy: l => l.id === 's1' });
+  assert.equal(await exitSide([S1, H1], a.deps), 'short_busy');
+  assert.deepEqual(a.sent, []);
+  const b = sideDeps({ isBusy: l => l.id === 's1', results: { s2: { closed: false } } });
+  assert.equal(await exitSide([S1, S2, H1], b.deps), 'short_not_closed');
+  assert.deepEqual(b.sent, ['s2']);                                                                  // the other short was still attempted
+});
+
+test('alarm edits and arming clear firedAt; disarmGuards clears it too', () => {
+  const g: BasketGuards = { alarm: { armed: true, maxLoss: 100, exitAtMaxLoss: true, firedAt: 'x' } };
+  assert.equal(editAlarm(g, { maxLoss: 200 }).alarm!.firedAt, undefined);
+  assert.equal(setAlarmArmed(g, true, '2026-10-12').alarm!.firedAt, undefined);
+  assert.equal(disarmGuards(g)!.alarm!.firedAt, undefined);
 });

@@ -86,6 +86,12 @@ before changing any of it**; this skill only maps the page.
      (also earlier days' closed trades, which can trip a fresh position).
    - **Spot freshness is per chain pair** (`chainSpotAtRef`, stamped only when a fetch carried a positive spot), so another
      underlying's updates cannot make a stale spot look fresh. Margin-alarm state is per basket, not per broker.
+   - **Automatic exits never raise a dialog.** `exitBasket` and `exitOneLeg` take `{ unattended: true }` (guards pass it): the
+     "could not confirm the shorts" confirm becomes "keep the hedges, retry", and the BUY-leg hedge prompt is skipped unless a
+     short on the same side is still open (then the hedge is refused with a toast). A `window.confirm` in an unattended tab
+     freezes it, and a 15 s retry would raise it again.
+   - **Close-at-max-loss closes once.** The alarm stamps `firedAt` with the exit, retries until flat (hedges-only retries wait
+     for settling shorts), then disarms. Otherwise a leg added the same day would be closed at once by the realized loss.
    - **Test the engine, not the effect:** add a case to `lib/multiLegGuardEngine.test.ts` for any new guard behaviour.
 
 ## Change checklist

@@ -189,6 +189,7 @@ export default function GuardsPanel({ guards, spot, netGreeks, pnl, funds, isLea
           <RuleNumInput value={alarm.marginWarnPct} onCommit={v => apply(g => editAlarm(g, { marginWarnPct: v }))} placeholder="%" min={1} step={5}
             className="w-14 h-6 text-center text-amber-300" title="Warn when account margin utilisation reaches this %" />
           <span className="text-zinc-400">%</span>
+          {!alarm.armed && alarm.firedAt && <span className="text-zinc-500">closed the strategy at max loss {new Date(alarm.firedAt).toLocaleTimeString('en-IN', { timeZone: 'Asia/Kolkata', hour12: false })}</span>}
           <label className={`${chip} cursor-pointer select-none`}>
             <input type="checkbox" checked={alarm.armed} onChange={e => armAlarm(e.target.checked)} className="rounded border-zinc-700 text-emerald-500 focus:ring-0" />
             <span className={alarm.armed ? 'text-emerald-400 font-bold' : 'text-zinc-400'}>{alarm.armed ? 'Armed' : 'Arm'}</span>
