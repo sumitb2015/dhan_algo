@@ -31,10 +31,15 @@ import {
   positionProduct, computeBasketStatus, closedFillFromRow,
   findSiblingLegCollisions, type SiblingLegCollision,
   recordOutsideReduction, isLegInFillGrace,
-  basketLabel, isLooseTrade, isOptionLeg, type OptionLeg, findUntrackedPositions, residualBrokerAvg, findContractDrift, type ContractDrift, contractHintFromRow, legFromUntracked, mergeImportedLegs, brokerClampSlice,
+  basketLabel, crudeQtyMultiplier, isLooseTrade, isOptionLeg, type OptionLeg, findUntrackedPositions, residualBrokerAvg, findContractDrift, type ContractDrift, contractHintFromRow, legFromUntracked, mergeImportedLegs, brokerClampSlice,
   normalizeTradeRow, ownOrderIds, repriceEstimatedCloses, MLF_ORDER_SOURCE, type NormalizedTrade,
   type MultiLegLeg, type MultiLegBasket, type StrategyRiskConfig, type MultiLegStatus,
 } from '@/lib/multiLegFocus';
+import {
+  guardsArmed, spotActionLegs, stepSpotTrigger, stepGuard, readGreekBand, confirmBreach, lossLevel, lossRecovered, marginUtilisationPct, marginLevel,
+  marginRecovered, nextAlarmState, type AlarmLevel, type BasketGuards, type SpotTrigger,
+} from '@/lib/multiLegGuards';
+import { basketToGreekLegs, computeBasketGreeks } from '@/lib/multiLegGreeks';
 import { closeOrderProduct } from '@/lib/positionProduct';
 import { planLegShifts, clampShiftSteps } from '@/lib/strikeShift';
 import { previousDaysPnl, type TradeHistoryResponse } from '@/lib/portfolioDailyPnl';
@@ -990,6 +995,18 @@ export default function MultiLegFocus({
         const w = fn(b.waitingEntries ?? []);
         return { ...b, waitingEntries: w.length ? w : undefined, updatedAt: new Date().toISOString() };
       });
+      const target = next.find(b => b.id === basketId);
+      if (target) persistBasket(target);
+      basketsRef.current = next;
+      return next;
+    });
+  }, [persistBasket]);
+
+  // Functional update of one basket's guards (spot triggers / Greek bands / alarm). Same rule as patchLegs: never write
+  // from the render's `basket`, a fill or another guard edit may have landed since.
+  const patchGuards = useCallback((basketId: string, fn: (g: BasketGuards) => BasketGuards) => {
+    setBaskets(prev => {
+      const next = prev.map(b => (b.id === basketId ? { ...b, guards: fn(b.guards ?? {}), updatedAt: new Date().toISOString() } : b));
       const target = next.find(b => b.id === basketId);
       if (target) persistBasket(target);
       basketsRef.current = next;
@@ -3341,6 +3358,187 @@ export default function MultiLegFocus({
     }
   }, [baskets, ltpFor, exitingMap, exitBasket, exitOneLeg, patchLegs, addToast, isLeader, addNewLegCore, lookupCache, chainData, broker, resolveDhanSecurityId]); // eslint-disable-line react-hooks/exhaustive-deps
 
+  // ── Guards: spot triggers, net-Greek bands, max-loss / margin alarm (rules in lib/multiLegGuards.ts) ──
+  // Leader tab only, like every other automatic exit. Spot is trusted only while its feed is fresh: a frozen quote
+  // must neither fire nor suppress a trigger. The 1s tick exists because a confirmation window needs time to pass
+  // even when no price changes.
+  const SPOT_FRESH_LIVE_MS = 10_000;
+  const SPOT_FRESH_CHAIN_MS = 30_000;
+  const feedSeenRef = useRef({ live: 0, chain: 0 });
+  useEffect(() => { if (liveQuotes) feedSeenRef.current.live = Date.now(); }, [liveQuotes]);
+  useEffect(() => { feedSeenRef.current.chain = Date.now(); }, [chainData]);
+  const guardRtRef = useRef({
+    since: new Map<string, number>(), lastAttempt: new Map<string, number>(),
+    alarm: new Map<string, AlarmLevel>(), alerted: new Set<string>(),
+  });
+  const anyGuardArmed = useMemo(() => baskets.some(b => guardsArmed(b.guards)), [baskets]);
+  const [guardTick, setGuardTick] = useState(0);
+  useEffect(() => {
+    if (!anyGuardArmed) return;
+    const t = setInterval(() => setGuardTick(n => n + 1), 1000);
+    return () => clearInterval(t);
+  }, [anyGuardArmed]);
+
+  /** Fresh underlying price for a basket, or 0 when unknown/stale. */
+  const guardSpotFor = useCallback((basket: MultiLegBasket): number => {
+    const now = Date.now();
+    const liveUnderlying = liveQuotes?.underlying ?? activeUnderlying;
+    if (liveQuotes?.spot && liveQuotes.spot > 0 && basket.underlying === liveUnderlying && now - feedSeenRef.current.live < SPOT_FRESH_LIVE_MS) {
+      return liveQuotes.spot;
+    }
+    if (now - feedSeenRef.current.chain >= SPOT_FRESH_CHAIN_MS) return 0;
+    const exact = chainData[`${basket.underlying}:${basket.expiry}`]?.spot;
+    if (exact && exact > 0) return exact;
+    const any = Object.entries(chainData).find(([k, v]) => k.startsWith(`${basket.underlying}:`) && v.spot > 0);
+    return any?.[1].spot ?? 0;
+  }, [liveQuotes, activeUnderlying, chainData]);
+
+  // Closes the legs a spot trigger names: shorts first, hedges only once every short is confirmed closed.
+  const runSpotExit = useCallback(async (basketId: string, scope: MultiLegLeg[]) => {
+    const free = (l: MultiLegLeg) => !exitingLegsRef.current.has(l.id);
+    const shorts = scope.filter(l => l.side === 'S');
+    const longs = scope.filter(l => l.side === 'B');
+    const shortRes = await Promise.all(shorts.map(l => (free(l) ? exitOneLeg(basketId, l).catch(() => ({ closed: false })) : Promise.resolve({ closed: false }))));
+    if (!shortRes.every(r => r.closed)) return;
+    await Promise.all(longs.filter(free).map(l => exitOneLeg(basketId, l).catch(() => ({ closed: false }))));
+  }, [exitOneLeg]);
+
+  useEffect(() => {
+    if (isLeader !== true) return;
+    const rt = guardRtRef.current;
+    const now = Date.now();
+    const iso = new Date(now).toISOString();
+    for (const basket of baskets) {
+      const g = basket.guards;
+      if (!g || !guardsArmed(g)) continue;
+      const label = basketLabel(basket);
+      const openLegs = basket.legs.filter(l => l.status === 'OPEN' && l.fill);
+      if (openLegs.length === 0) {
+        // Nothing left to protect: a guard that was already firing is done; the rest wait for a position.
+        if ((g.spotTriggers ?? []).some(t => t.armed && t.firedAt) || (g.greekBands ?? []).some(b => b.armed && b.firedAt)) {
+          patchGuards(basket.id, gg => ({
+            ...gg,
+            spotTriggers: gg.spotTriggers?.map(t => (t.firedAt && t.armed ? { ...t, armed: false } : t)),
+            greekBands: gg.greekBands?.map(b => (b.firedAt && b.armed ? { ...b, armed: false } : b)),
+          }));
+        }
+        continue;
+      }
+      const busy = !!exitingMap[basket.id] || !!placingMap[basket.id] || !!scalingMap[basket.id] || exitingBasketsRef.current.has(basket.id);
+      const crudeMult = crudeQtyMultiplier(basket.underlying, basket.broker);
+
+      // 1. Spot triggers
+      const spot = guardSpotFor(basket);
+      for (const t of g.spotTriggers ?? []) {
+        const key = `${basket.id}:${t.id}`;
+        const scope = spotActionLegs(basket.legs, t.action);
+        const step = stepSpotTrigger(t, spot, now, { since: rt.since.get(key), lastAttempt: rt.lastAttempt.get(key), scopeOpen: scope.length });
+        if (step.kind === 'watch') { rt.since.set(key, step.since); continue; }
+        if (step.kind === 'idle') { if (!t.firedAt) rt.since.delete(key); continue; }
+        if (step.kind === 'finish') {
+          patchGuards(basket.id, gg => ({ ...gg, spotTriggers: gg.spotTriggers?.map(x => (x.id === t.id ? { ...x, armed: false } : x)) }));
+          rt.since.delete(key); rt.lastAttempt.delete(key);
+          continue;
+        }
+        if (busy) continue;   // an order action is in flight on this row: re-evaluate next tick
+        const exits = t.action !== 'ALERT';
+        const desc = `${t.dir === 'above' ? 'above' : 'below'} ${t.level}`;
+        if (step.kind === 'fire') {
+          rt.since.delete(key);
+          patchGuards(basket.id, gg => ({ ...gg, spotTriggers: gg.spotTriggers?.map(x => (x.id === t.id ? { ...x, firedAt: iso } : x)) }));
+          const what = !exits ? 'alert'
+            : t.action === 'EXIT_ALL' ? 'closing the whole strategy'
+            : scope.length === 0 ? 'nothing open on that side'
+            : `closing the ${t.action === 'EXIT_CE' ? 'call' : 'put'} side`;
+          addToast('error', `${label}: ${basket.underlying} ${desc} (spot ${spot})`, `Spot trigger hit: ${what}.`);
+          if (!exits || scope.length === 0) continue;
+        }
+        // fire (exit actions) and retry both send the exit now.
+        rt.lastAttempt.set(key, now);
+        if (t.action === 'EXIT_ALL') void exitBasket(basket.id);
+        else void runSpotExit(basket.id, scope);
+      }
+
+      // 2. Net-Greek bands. Skipped while any leg is unpriced or on an assumed IV: acting on a guess is worse than waiting.
+      const bands = (g.greekBands ?? []).filter(b => b.armed);
+      if (bands.length) {
+        let net: ReturnType<typeof computeBasketGreeks>['net'] | null = null;
+        if (spot > 0 && !openLegs.some(l => ltpFor(basket, l) <= 0)) {
+          const byId = new Map(basket.legs.map(l => [l.id, l]));
+          const res = computeBasketGreeks(basketToGreekLegs(basket, 0, crudeMult), {
+            spot,
+            markOf: gl => { const l = byId.get(gl.legId); const v = l ? ltpFor(basket, l) : 0; return v > 0 ? v : undefined; },
+            fallbackIv: 0.15,
+          });
+          if (res.assumed.length === 0) net = res.net;
+        }
+        for (const b of bands) {
+          const key = `${basket.id}:${b.id}`;
+          const reading = readGreekBand(b, net);
+          const breached = reading?.breached ?? false;
+          if (b.action === 'ALERT') {
+            // A band is a standing monitor: announce once per breach, re-announce after it returns inside.
+            const c = confirmBreach(rt.since.get(key), breached, now);
+            if (c.since == null) rt.since.delete(key); else rt.since.set(key, c.since);
+            if (!breached) rt.alerted.delete(key);
+            else if (c.fire && !rt.alerted.has(key)) {
+              rt.alerted.add(key);
+              addToast('error', `${label}: net ${b.metric} outside its band`, `Now ${reading!.value.toFixed(b.metric === 'gamma' ? 4 : 0)} (${reading!.side === 'min' ? 'below min' : 'above max'} ${reading!.side === 'min' ? b.min : b.max}).`);
+            }
+            continue;
+          }
+          const step = stepGuard(b, breached, true, now, { since: rt.since.get(key), lastAttempt: rt.lastAttempt.get(key), scopeOpen: openLegs.length });
+          if (step.kind === 'watch') { rt.since.set(key, step.since); continue; }
+          if (step.kind === 'idle') { if (!b.firedAt) rt.since.delete(key); continue; }
+          if (step.kind === 'finish') {
+            patchGuards(basket.id, gg => ({ ...gg, greekBands: gg.greekBands?.map(x => (x.id === b.id ? { ...x, armed: false } : x)) }));
+            continue;
+          }
+          if (busy) continue;
+          if (step.kind === 'fire') {
+            rt.since.delete(key);
+            patchGuards(basket.id, gg => ({ ...gg, greekBands: gg.greekBands?.map(x => (x.id === b.id ? { ...x, firedAt: iso } : x)) }));
+            addToast('error', `${label}: net ${b.metric} outside its band`, `Closing the whole strategy (now ${reading?.value.toFixed(b.metric === 'gamma' ? 4 : 0)}).`);
+          }
+          rt.lastAttempt.set(key, now);
+          void exitBasket(basket.id);
+        }
+      }
+
+      // 3. Max-loss and margin alarm
+      const alarm = g.alarm;
+      if (alarm?.armed) {
+        const lossKey = `loss:${basket.id}`;
+        const metrics = computeStrategyMetrics(basket.legs, l => ltpFor(basket, l), crudeMult);
+        if (!metrics.hasUnpricedLegs) {
+          const level = lossLevel(metrics.totalPnlRupees, alarm);
+          const prev = rt.alarm.get(lossKey) ?? 'ok';
+          const { state, announce } = nextAlarmState(prev, level, lossRecovered(metrics.totalPnlRupees, alarm, prev));
+          rt.alarm.set(lossKey, state);
+          if (announce) {
+            addToast('error', level === 'breach' ? `${label}: MAX LOSS reached` : `${label}: approaching max loss`,
+              `P&L ${fmtMoney(metrics.totalPnlRupees)} against a max loss of ${fmtMoney(alarm.maxLoss ?? 0)}.${level === 'breach' && alarm.exitAtMaxLoss ? ' Closing the strategy.' : ''}`);
+          }
+          if (level === 'breach' && alarm.exitAtMaxLoss && !busy) {
+            const last = rt.lastAttempt.get(lossKey);
+            if (last == null || now - last >= 15_000) { rt.lastAttempt.set(lossKey, now); void exitBasket(basket.id); }
+          }
+        }
+        if (alarm.marginWarnPct != null && basket.broker === broker) {
+          const mKey = `margin:${broker}`;
+          const util = marginUtilisationPct(fundsData);
+          const level = marginLevel(util, alarm);
+          const prev = rt.alarm.get(mKey) ?? 'ok';
+          const { state, announce } = nextAlarmState(prev, level, util == null ? false : marginRecovered(util, alarm));
+          rt.alarm.set(mKey, state);
+          if (announce && util != null) {
+            addToast('error', `Margin buffer thin on ${broker}`, `${util.toFixed(0)}% of margin is in use (alarm at ${alarm.marginWarnPct}%). ${fundsData ? `${fmtMoney(fundsData.available)} still available.` : ''}`);
+          }
+        }
+      }
+    }
+  }, [baskets, guardTick, guardSpotFor, ltpFor, exitingMap, placingMap, scalingMap, exitBasket, runSpotExit, patchGuards, addToast, isLeader, fundsData, broker]); // eslint-disable-line react-hooks/exhaustive-deps
+
   // Open/draft/placing rows stay put; fully-exited (every leg CLOSED) rows sink
   // to the bottom so a long-running page doesn't bury active positions under
   // its own trade history. Array#sort is stable (ES2019+), so relative order
@@ -3849,6 +4047,9 @@ export default function MultiLegFocus({
                 overallMargin={basketMargins[basket.id]?.overallMargin}
                 hedgeBenefit={basketMargins[basket.id]?.hedgeBenefit}
                 availableFunds={rowBroker === broker ? fundsData?.available : undefined}
+                fundsUsed={rowBroker === broker ? fundsData?.used : undefined}
+                guardSpot={guardSpotFor(basket)}
+                isLeader={isLeader !== false}
                 allBaskets={baskets}
                 selectedLegIds={selectedLegIds}
                 onSelectLegs={selectLegs}

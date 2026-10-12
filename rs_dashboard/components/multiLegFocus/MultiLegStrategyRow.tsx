@@ -6,6 +6,8 @@ import {
 } from 'lucide-react';
 import MultiLegLegRow from './MultiLegLegRow';
 import RuleNumInput from './RuleNumInput';
+import GuardsPanel from './GuardsPanel';
+import { guardsArmed, type BasketGuards, type NetGreeks } from '@/lib/multiLegGuards';
 import AddLotsModal from './AddLotsModal';
 import PnlTableModal from './PnlTableModal';
 import PositionVisualizerModal from './PositionVisualizerModal';
@@ -124,6 +126,11 @@ export interface MultiLegStrategyRowProps {
   overallMargin?: number;
   hedgeBenefit?: number;
   availableFunds?: number;
+  /** Margin in use on this row's broker (for the margin-utilisation alarm). */
+  fundsUsed?: number;
+  /** Fresh underlying price for the guards (0 when unknown or stale) and whether this tab runs them. */
+  guardSpot?: number;
+  isLeader?: boolean;
   /** All baskets on the page — used only to flag Greeks legs that share a contract with a sibling. */
   allBaskets?: MultiLegBasket[];
   /** Legs ticked for regrouping (page-wide, so a group can span rows). */
@@ -175,6 +182,9 @@ export default function MultiLegStrategyRow({
   overallMargin,
   hedgeBenefit,
   availableFunds,
+  fundsUsed,
+  guardSpot,
+  isLeader,
   allBaskets,
   selectedLegIds,
   onSelectLegs,
@@ -198,6 +208,7 @@ export default function MultiLegStrategyRow({
   const [showPnlTable, setShowPnlTable] = useState(false);
   const [showPositionVisualizer, setShowPositionVisualizer] = useState(false);
   const [showStrategyChart, setShowStrategyChart] = useState(false);
+  const [showGuards, setShowGuards] = useState(false);
   const [simTargetDays, setSimTargetDays] = useState<number>(0);
   const [simIvShift, setSimIvShift] = useState<number>(0);
   const [confirmPlace, setConfirmPlace] = useState(false);
@@ -480,6 +491,21 @@ export default function MultiLegStrategyRow({
     if (!basketMargin || basketMargin <= 0) return null;
     return (todayPnl / basketMargin) * 100;
   }, [todayPnl, basketMargin]);
+
+  // Guards panel readings: net Greeks only when every open leg has a live mark and no IV was assumed (same rule as the watcher).
+  const guardNet: NetGreeks | null = useMemo(() => {
+    if (!showGuards) return null;
+    const open = basket.legs.filter(l => l.status === 'OPEN' && l.fill);
+    if (open.length === 0 || !((guardSpot ?? 0) > 0) || open.some(l => !(ltpFor(l) > 0))) return null;
+    const byId = new Map(basket.legs.map(l => [l.id, l]));
+    const res = computeBasketGreeks(basketToGreekLegs(basket, 0, crudeMult), {
+      spot: guardSpot ?? 0,
+      markOf: gl => { const l = byId.get(gl.legId); const v = l ? ltpFor(l) : 0; return v > 0 ? v : undefined; },
+      fallbackIv: FALLBACK_IV,
+    });
+    return res.assumed.length === 0 ? res.net : null;
+  }, [showGuards, basket, guardSpot, ltpFor, crudeMult]);
+  const guardsOn = guardsArmed(basket.guards);
 
   const strategyRisk: StrategyRiskConfig = useMemo(() => {
     return basket.riskConfig ?? {
@@ -1328,6 +1354,28 @@ export default function MultiLegStrategyRow({
                 </span>
               </label>
             </div>
+          </div>
+
+          {/* Guards: spot triggers, Greek bands, loss/margin alarm */}
+          <div className="border-t border-zinc-800">
+            <button type="button" onClick={() => setShowGuards(v => !v)} aria-expanded={showGuards}
+              className={`w-full flex items-center gap-2 px-3 py-1 text-[11px] font-semibold text-zinc-300 hover:bg-zinc-900 ${FOCUS_RING}`}>
+              <span aria-hidden>{showGuards ? '▾' : '▸'}</span>
+              <span>Guards</span>
+              <span className="text-zinc-500 font-normal">spot triggers · Greek bands · loss &amp; margin alarm</span>
+              {guardsOn && <span className="ml-auto text-emerald-400 font-bold">ARMED</span>}
+            </button>
+            {showGuards && (
+              <GuardsPanel
+                guards={basket.guards}
+                spot={guardSpot ?? 0}
+                netGreeks={guardNet}
+                pnlRupees={stratMetrics.hasUnpricedLegs ? null : stratMetrics.totalPnlRupees}
+                funds={availableFunds != null && fundsUsed != null ? { available: availableFunds, used: fundsUsed } : null}
+                isLeader={isLeader !== false}
+                onChange={(guards: BasketGuards) => onUpdate({ guards })}
+              />
+            )}
           </div>
 
           {/* Legs Table */}

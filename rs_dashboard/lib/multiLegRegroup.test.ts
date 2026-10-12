@@ -82,3 +82,19 @@ test('the Auto SL/Tgt rule follows a leg that is grouped or ungrouped out of its
   const mixed = regroupBaskets([bk('A', [leg('1')], { autoLegRule: rule }), bk('B', [leg('2')])], { op: 'group', legIds: ['1', '2'] }, nid, 'now');
   assert.equal(mixed.baskets[0].autoLegRule, undefined);
 });
+
+test('guards (spot triggers, Greek bands, alarm) are disarmed on a changed group and not copied to the new one', () => {
+  const guards = {
+    spotTriggers: [{ id: 't', level: 24500, dir: 'above' as const, action: 'EXIT_CE' as const, armed: true, firedAt: 'x' }],
+    alarm: { armed: true, maxLoss: 5000 },
+  };
+  const r = regroupBaskets([bk('A', [leg('1'), leg('2', { option: 'PE' })], { guards })], { op: 'group', legIds: ['2'], name: 'H' }, nid, 'now');
+  assert.ok(r.ok);
+  const [src, made] = r.baskets;
+  assert.equal(src.guards?.spotTriggers?.[0].armed, false);
+  assert.equal(src.guards?.spotTriggers?.[0].firedAt, undefined);
+  assert.equal(src.guards?.spotTriggers?.[0].level, 24500);
+  assert.equal(src.guards?.alarm?.armed, false);
+  assert.deepEqual(r.disarmed, ['A']);
+  assert.equal(made.guards, undefined);
+});

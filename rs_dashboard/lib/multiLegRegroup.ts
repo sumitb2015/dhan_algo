@@ -1,4 +1,5 @@
 import type { MultiLegBasket, MultiLegLeg } from './multiLegFocus.ts';
+import { guardsArmed, disarmGuards } from './multiLegGuards.ts';
 
 /**
  * Group / ungroup trades by moving legs between baskets in the ledger file. Pure (no I/O):
@@ -64,10 +65,13 @@ export function regroupBaskets(
   // 3. Apply.
   const disarmed: string[] = [];
   const changed = (b: MultiLegBasket, legs: MultiLegLeg[], extra: Partial<MultiLegBasket> = {}): MultiLegBasket => {
-    if (b.riskConfig?.armed) disarmed.push(b.id);
+    const guardsOn = guardsArmed(b.guards);
+    if (b.riskConfig?.armed || guardsOn) disarmed.push(b.id);
     return {
       ...b, ...extra, legs, rev: (b.rev ?? 0) + 1, updatedAt: nowIso,
       ...(b.riskConfig?.armed ? { riskConfig: { ...b.riskConfig, armed: false } } : {}),
+      // A spot/Greek trigger written for the old legs (e.g. "exit the call side") must not start acting on a different set.
+      ...(guardsOn ? { guards: disarmGuards(b.guards) } : {}),
     };
   };
   const newBasket = (legs: MultiLegLeg[], name?: string, multiplier?: number, autoLegRule?: MultiLegBasket['autoLegRule']): MultiLegBasket => {

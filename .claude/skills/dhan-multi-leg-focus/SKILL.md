@@ -18,6 +18,7 @@ before changing any of it**; this skill only maps the page.
 | `lib/multiLegStoreMerge.ts` | Server-side merge of a basket save into the stored copy by per-item `rev`; a leg that ever traded is never dropped by a save; append-only id lists (`orderIds`, `outsideTradeKeys`) are unioned; `relocateResurrectedLegs` |
 | `lib/multiLegRegroup.ts` | Group / ungroup = moving legs between baskets; places no orders; refuses PLACING/CLOSING legs; one broker + one underlying per basket; drafts never share a group with traded legs; disarms strategy SL/target on changed groups |
 | `lib/multiLegBrokerSync.ts` | Broker → ledger: `growLegToBroker`, `outsidePositionBaskets` (a position no leg holds becomes an ungrouped trade), futures-row detection (`futuresContractOf`) |
+| `lib/multiLegGuards.ts` | Basket `guards` (2026-10-12): spot triggers (`stepSpotTrigger`, `spotActionLegs`), net-Greek bands (`readGreekBand`), rupee max-loss + account margin-utilisation alarm (`lossLevel`, `marginLevel`, `nextAlarmState` hysteresis), `disarmGuards`. UI is `components/multiLegFocus/GuardsPanel.tsx`; the watcher is the "Guards" effect in `MultiLegFocus.tsx` |
 | `lib/multiLegArchive.ts` | Retiring finished strategies (`isFullyClosed`, `splitEarlierDayLegs`); a row holding a waiting stop entry is **not** finished |
 | `lib/multiLegFocusStore.ts` (server I/O) | Atomic JSON writes, calls merge/regroup/archive |
 | `lib/multiLegGreeks.ts`, `lib/positionPayoff.ts` | Greeks panel and payoff — through the central libraries (`dhan-payoff-diagrams`, `dhan-position-greeks`) |
@@ -62,6 +63,15 @@ before changing any of it**; this skill only maps the page.
    (`StrategyRiskConfig`, `checkStrategyRisk`) already has `pts | pct` (pct of combined gross entry premium).
    `MultiLegStrategyRow` whitelists `slType`/`tpType` patches and `MultiLegFocus.tsx` carries them on scale; both
    pass new values through untouched.
+
+11. **Guards** (`basket.guards`, 2026-10-12; rules in `lib/multiLegGuards.ts`). Leader tab only. A spot trigger acts
+   only on a FRESH spot (`guardSpotFor`: live feed < 10 s, chain fallback < 30 s, else 0 = unknown) and only after the
+   breach lasts `SPOT_CONFIRM_MS` (3 s; a 1 s tick drives the clock). An exit trigger stamps `firedAt` first, then keeps
+   retrying every 15 s until its scope is flat (`stepGuard`), so a reload resumes it. Exit-by-side (`EXIT_CE`/`EXIT_PE`)
+   closes shorts first and the hedge only after every short is confirmed closed. A trigger cannot be armed past its level.
+   Greek bands skip while any open leg is unpriced or an IV was assumed. The alarm announces once per escalation and
+   re-arms 5 points below the threshold. Editing any guard disarms it, and regroup disarms the guards of every changed
+   group (`disarmGuards`) because a trigger written for one set of legs must not act on another. There is no auto-hedge yet.
 
 ## Change checklist
 - Touched a basket/leg field? Update `multiLegStoreMerge` (rev + union rules) and its `…Resurrect` test, or a stale

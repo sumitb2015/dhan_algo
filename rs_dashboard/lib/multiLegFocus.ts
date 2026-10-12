@@ -8,6 +8,7 @@
 import { nearestStrike, type LegSide, type OptionType, type StrategyTemplate } from './basketStrategies.ts';
 import { positionProduct, findLivePosition } from './positionProduct.ts';
 import { classifyStructure, type GroupLeg } from './positionStructure.ts';
+import type { BasketGuards } from './multiLegGuards.ts';
 import { normalizeExpiry, normalizeOptType, parseTradingSymbol, symbolMatchesUnderlying } from './positionLegs.ts';
 
 export type MultiLegStatus = 'DRAFT' | 'PLACING' | 'OPEN' | 'CLOSING' | 'CLOSED' | 'FAILED';
@@ -294,6 +295,8 @@ export interface MultiLegBasket {
   riskConfig?: StrategyRiskConfig;
   /** Default leg SL/target + auto re-entry (see AutoLegRule). */
   autoLegRule?: AutoLegRule;
+  /** Spot-level triggers, net-Greek bands and the max-loss / margin alarm (see lib/multiLegGuards.ts). */
+  guards?: BasketGuards;
   /** Dhan stop-loss ENTRY orders resting at the exchange until their trigger prints.
    *  Not legs: nothing is open until one trades, so no exit, stop, P&L or payoff rule
    *  can see them (see WaitingEntry). */
