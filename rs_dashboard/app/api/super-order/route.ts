@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { dhanGet, dhanPost, dhanPut, dhanDelete } from '@/lib/dhanToken';
+import { dhanGet, dhanPost, dhanPut, dhanDelete, getDhanCredentials } from '@/lib/dhanToken';
 import { invalidateBrokerCache } from '@/lib/brokerPositionsCache';
 import { reserveOrderSlot, ORDER_WINDOW_MS } from '@/lib/dhanOrderPacer';
 import {
@@ -66,6 +66,10 @@ async function place(raw: Record<string, unknown>): Promise<Outcome> {
   const normalised: SuperOrderInput = { ...input, productType, exchangeSegment, securityId: String(raw.securityId ?? '') };
   const bad = validateSuperOrder(normalised);
   if (bad) return { status: 400, body: { success: false, error: bad } };
+
+  // Resolved before anything is sent: a missing/expired token file means NO request left this
+  // machine, so it must surface as itself - not as the "status unknown" 504 reserved for a real timeout.
+  try { getDhanCredentials(); } catch (e) { return { status: 500, body: { success: false, error: errText(e) } }; }
 
   const correlationId = `so${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
   const payload = buildPlacePayload(normalised, correlationId);

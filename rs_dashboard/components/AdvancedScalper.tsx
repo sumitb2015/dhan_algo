@@ -1639,6 +1639,13 @@ export default function AdvancedScalper() {
   }, [boxes, expiry, underlying, lotSize, strikeMap, orderMode, productType, submitLegOrder, addToast, fetchTabData,
       bracketActive, bracketTgt, bracketSl, bracketTrail, boxSecId, enrichedPositions, positionJoinKey, liveQuotes]);
 
+  // OptionPanel is memoised with a comparator that IGNORES every on* callback (Scalper.tsx,
+  // optionPanelPropsEqual), so the onBuy/onSell it holds can be a stale closure. placeOrder reads
+  // the bracket toggle, product and live prices; a stale copy would send an UNPROTECTED order while
+  // the toggle says ON. The panel calls through this ref, so a click always runs the latest handler.
+  const placeOrderRef = useRef(placeOrder);
+  useEffect(() => { placeOrderRef.current = placeOrder; });
+
   // Confirm handler for the Add Lots modal (see openAddLotsModal/addLotsTarget
   // above) — places the order via the same submitLegOrder the order boxes use,
   // just targeting the resolved leg directly instead of a box.
@@ -3553,8 +3560,8 @@ export default function AdvancedScalper() {
                   ? 'No open position on this strike'
                   : `Needs ≥2 open lots — this leg has ${boxOpenLots} lot`}
                 onLimitPriceChange={v => updateBox(box.id, { limitPrice: v })}
-                onBuy={() => placeOrder(box.id, 'BUY')}
-                onSell={() => placeOrder(box.id, 'SELL')}
+                onBuy={() => placeOrderRef.current(box.id, 'BUY')}
+                onSell={() => placeOrderRef.current(box.id, 'SELL')}
                 lots={box.lots}
                 onLotsChange={l => updateBox(box.id, { lots: Math.min(MAX_LOTS_PER_ORDER, Math.max(1, Math.trunc(Number(l)) || 1)) })}
                 onRemove={() => removeBox(box.id)}
