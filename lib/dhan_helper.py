@@ -2468,6 +2468,30 @@ class DhanHelper:
             logger.error(f"Exception in set_pnl_exit: {e}")
         return False
 
+    def _dhan_get_data(self, path: str, what: str) -> Optional[dict]:
+        """GET a read-only account endpoint through dhan_http; None on any failure."""
+        dhan_http = getattr(self.dhan, 'dhan_http', None)
+        if not dhan_http:
+            logger.error(f"{what}: dhan_http not accessible.")
+            return None
+        try:
+            from lib.dhan_health import unwrap
+            body = unwrap(dhan_http.get(path))
+            if body is None:
+                logger.error(f"{what} failed: no usable body")
+            return body
+        except Exception as e:
+            logger.error(f"Exception in {what}: {e}")
+        return None
+
+    def get_profile(self) -> Optional[dict]:
+        """GET /profile: tokenValidity, activeSegment, dataPlan/dataValidity. Works from a non-whitelisted IP."""
+        return self._dhan_get_data('/profile', 'get_profile')
+
+    def get_static_ip(self) -> Optional[dict]:
+        """GET /ip/getIP: registered primaryIP / secondaryIP (read-only; setting/modifying is deliberately not wrapped)."""
+        return self._dhan_get_data('/ip/getIP', 'get_static_ip')
+
     def delete_pnl_exit(self) -> bool:
         """Disable active P&L exit configuration for the current day."""
         dhan_http = getattr(self.dhan, 'dhan_http', None)
