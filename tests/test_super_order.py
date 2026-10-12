@@ -1,0 +1,50 @@
+"""Stubbed tests for lib/super_order.py (no broker session, no network)."""
+import os
+import sys
+import unittest
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from lib.super_order import build_place_payload, validate_modify, validate_super_order
+
+BUY = dict(security_id="12345", exchange_segment="NSE_FNO", side="BUY", product_type="INTRADAY",
+           quantity=75, price=100.0, target_price=120.0, stop_loss_price=90.0)
+
+
+class SuperOrderTest(unittest.TestCase):
+    def test_valid_brackets(self):
+        self.assertIsNone(validate_super_order(**BUY))
+        self.assertIsNone(validate_super_order(**{**BUY, "side": "SELL", "target_price": 80.0, "stop_loss_price": 110.0}))
+
+    def test_wrong_side_of_entry(self):
+        self.assertIn("BUY needs", validate_super_order(**{**BUY, "stop_loss_price": 105.0}))
+        self.assertIn("SELL needs", validate_super_order(**{**BUY, "side": "SELL"}))
+
+    def test_market_needs_ref_price_and_never_sends_it(self):
+        mkt = {**BUY, "order_type": "MARKET", "price": None}
+        self.assertIn("ref_price", validate_super_order(**mkt))
+        self.assertIsNone(validate_super_order(**mkt, ref_price=100.0))
+        payload = build_place_payload("1", "c1", **{k: v for k, v in mkt.items()})
+        self.assertEqual(payload["price"], 0)
+        self.assertNotIn("refPrice", payload)
+
+    def test_hard_limits(self):
+        for bad in ({"quantity": 0}, {"quantity": 7.5}, {"quantity": 99999}, {"quantity": True},
+                    {"product_type": "CO"}, {"exchange_segment": "IDX_I"}, {"security_id": "NIFTY"}):
+            self.assertIsNotNone(validate_super_order(**{**BUY, **bad}), bad)
+
+    def test_trailing_jump(self):
+        self.assertIsNone(validate_super_order(**BUY, trailing_jump=5))
+        self.assertIn("trailing_jump", validate_super_order(**BUY, trailing_jump=10))
+        self.assertIn("trailing_jump", validate_super_order(**BUY, trailing_jump=-1))
+
+    def test_modify_legs(self):
+        self.assertIsNone(validate_modify("TARGET_LEG", targetPrice=125.0))
+        self.assertIn("cannot change", validate_modify("TARGET_LEG", stopLossPrice=95.0))
+        self.assertIsNone(validate_modify("STOP_LOSS_LEG", stopLossPrice=95.0, trailingJump=0))
+        self.assertEqual(validate_modify("STOP_LOSS_LEG"), "Nothing to modify")
+        self.assertIn("Invalid leg_name", validate_modify("NOPE", targetPrice=1.0))
+
+
+if __name__ == "__main__":
+    unittest.main()

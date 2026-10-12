@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getDhanCredentials } from '@/lib/dhanToken';
 import { invalidateBrokerCache } from '@/lib/brokerPositionsCache';
+import { reserveOrderSlot, ORDER_WINDOW_MS } from '@/lib/dhanOrderPacer';
 
 const DHAN_ORDERS = 'https://api.dhan.co/v2/orders';
 const ORDER_TIMEOUT_MS = 10_000;
@@ -8,24 +9,8 @@ const RECONCILE_TIMEOUT_MS = 8_000;
 const RECONCILE_ATTEMPTS = 3;
 const RECONCILE_GAP_MS = 2_000;
 
-// Dhan limits order requests per ACCOUNT (about 10/second). Concurrent multi-leg
-// entries/exits, several baskets hitting a stop together, and every terminal that
-// posts here all share this one Node process, so a sliding window here keeps the
-// whole account under the limit. Stay below 10 to leave headroom; a burst larger
-// than this waits for the window instead of drawing DH-904 rejections mid-strategy
-// (a rejected leg of a concurrent entry would trigger a rollback).
-const ORDER_RATE_LIMIT = 8;
-const ORDER_WINDOW_MS = 1_000;
-const orderSendTimes: number[] = [];
-
-async function reserveOrderSlot(): Promise<void> {
-  for (;;) {
-    const now = Date.now();
-    while (orderSendTimes.length && now - orderSendTimes[0] >= ORDER_WINDOW_MS) orderSendTimes.shift();
-    if (orderSendTimes.length < ORDER_RATE_LIMIT) { orderSendTimes.push(now); return; }
-    await new Promise(r => setTimeout(r, orderSendTimes[0] + ORDER_WINDOW_MS - now + 5));
-  }
-}
+// Account-wide order pacing (about 10/second) lives in lib/dhanOrderPacer.ts so every
+// order route shares one window.
 
 /** Products this route will book. CNC is included so a delivery position can be
  *  closed under its own product; CO/BO are excluded because the broker holds its

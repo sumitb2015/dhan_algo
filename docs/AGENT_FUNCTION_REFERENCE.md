@@ -97,3 +97,19 @@ Organized under separate subdirectories for structured functionality.
 ### Performance Tips
 - **Caching**: The master list (15MB) is loaded once on `DhanHelper` init (~1.5s). Subsequent lookups are instant (<1ms).
 - **Batching**: Use `get_quote_data()` or `get_ticker_data()` for multi-symbol LTP instead of looping `get_ltp()`.
+
+## Super Orders (entry + broker-resting target / stop-loss / trail)
+
+UNCONFIRMED against a live account - verify with one minimal order before relying on it.
+
+| Method | Endpoint | Notes |
+|---|---|---|
+| `place_super_order(security_id=, exchange_segment=, side=, product_type=, quantity=, target_price=, stop_loss_price=, order_type="LIMIT", price=, trailing_jump=0, ref_price=)` | `POST /super/orders` | Returns `{ok, order_id, status, correlation_id, error, unknown}`. `unknown=True` = no clean response; the bracket may exist - match `correlation_id` in `get_super_orders()` before retrying. `ref_price` only validates a MARKET entry and is never sent. Always sends: dry-run is the caller's job. |
+| `modify_super_order(order_id, leg_name, **fields)` | `PUT /super/orders/{id}` | `ENTRY_LEG` any field; `TARGET_LEG` only `targetPrice`; `STOP_LOSS_LEG` only `stopLossPrice`/`trailingJump`. |
+| `cancel_super_order(order_id, leg_name="ENTRY_LEG")` | `DELETE /super/orders/{id}/{leg}` | Cancelling `ENTRY_LEG` cancels the whole bracket. |
+| `get_super_orders()` | `GET /super/orders` | Today's brackets with leg details. |
+
+Ownership: the exit legs rest at the broker, so don't also run a software stop on the same security,
+`cancel_all_orders()` will kill them, and manual closes must be sized off your own quantity
+(`lib/strategy_risk.resolve_exit_qty`). Rules live in `lib/super_order.py` (mirrored by
+`rs_dashboard/lib/superOrder.ts`); the dashboard route is `/api/super-order` (idempotencyKey required).
