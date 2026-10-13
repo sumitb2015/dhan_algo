@@ -51,18 +51,19 @@ export function ratioLabel(ratio: number | null): 'Bullish' | 'Balanced' | 'Bear
 export interface DexLevels {
   /** Largest call exposure in the rows (the app's Call Resistance). */
   callResistance: number | null;
-  /** Largest put exposure by magnitude (the app's Put Support). */
+  /** Largest put exposure by magnitude at a strike other than callResistance (the app's Put Support). */
   putSupport: number | null;
   /** Midpoint of the strikes where net turns negative to positive (the app's Delta Flip). */
   flip: number | null;
 }
 
 export function dexLevels(rows: GexRow[], spot?: number): DexLevels {
+  // The app picks Call Resistance first (largest call exposure), then Put Support as the largest put exposure at ANY OTHER strike:
+  // on 2026-10-13 09:22 the largest put (22400, -15,340 Cr) sat on the Call Resistance strike and the app showed Put Support 22500
+  // (-10,444 Cr), the next largest. Neither level is restricted to its side of spot (22400 was below spot 22,439.95).
   let c: GexRow | null = null;
+  for (const r of rows) if (r.ceGex > 0 && (!c || r.ceGex > c.ceGex)) c = r;
   let p: GexRow | null = null;
-  for (const r of rows) {
-    if (r.ceGex > 0 && (!c || r.ceGex > c.ceGex)) c = r;
-    if (r.peGex < 0 && (!p || r.peGex < p.peGex)) p = r;
-  }
+  for (const r of rows) if (r.peGex < 0 && r !== c && (!p || r.peGex < p.peGex)) p = r;
   return { callResistance: c?.strike ?? null, putSupport: p?.strike ?? null, flip: gammaFlip(rows, spot) };
 }

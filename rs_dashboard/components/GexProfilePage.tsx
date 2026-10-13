@@ -570,7 +570,11 @@ export default function GexProfilePage() {
     return { rows: win, winTotals, levels: lv, clarity: cl, outside: out, walls, top, flip, strikeFlip: lv.flip, em, emExpiry: nearest.ex, confluence, regime, totalNet: lv.totalNet, noChainGamma: gammaSource === 'dhan' && all.length > 0 && all.every(r => r.ceGamma === 0 && r.peGamma === 0) };
   }, [items, lot, spot, anchor, expiry, power, gammaSource, range, oiDiv, underlyingFor]);
   const dex = useDex(items, spot, anchor, range);
-  const { rows, winTotals, levels, clarity, outside, walls, top, flip, strikeFlip, em, emExpiry, confluence, regime, totalNet, noChainGamma } = model;
+  const { rows, winTotals, levels, clarity, outside, walls: wallsV2, top, flip, strikeFlip: strikeFlipV2, em, emExpiry, confluence, regime, totalNet, noChainGamma } = model;
+  // The app view's levels follow the app, not the spot-side walls: largest call / largest other-strike put / strike flip, on the window rows.
+  const appLv = useMemo(() => dexLevels(rows, spot), [rows, spot]);
+  const walls = showExtras ? wallsV2 : { ...wallsV2, callWall: appLv.callResistance, putWall: appLv.putSupport };
+  const strikeFlip = showExtras ? strikeFlipV2 : appLv.flip;
 
   const atm = spot > 0 ? Math.round(spot / STRIKE_STEP) * STRIKE_STEP : 0;
   // Regime comes from spot vs the flip; the checklist's first tile uses the whole-chain total. Say so when they disagree.

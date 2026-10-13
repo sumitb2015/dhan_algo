@@ -68,3 +68,12 @@ test('with two flips the one nearest spot is reported', () => {
   assert.strictEqual(dexLevels(rows, 240).flip, 225);
   assert.strictEqual(dexLevels(rows, 110).flip, 125);
 });
+
+test('put support skips the call-resistance strike: app 2026-10-13 09:22, largest put 22400 (-15,341) is also the largest call, support = 22500', () => {
+  const g = (strike: number, ceGex: number, peGex: number) => ({ strike, ceOi: 1, peOi: 1, ceGamma: 0, peGamma: 0, ceGex, peGex, netGex: ceGex + peGex });
+  const rows = [g(22300, 8356.72, -10369.10), g(22350, 9362.51, -8200.97), g(22400, 17806.66, -15340.84), g(22450, 15011.68, -10122.17), g(22500, 16784.12, -10443.66)];
+  const lv = dexLevels(rows, 22439.95);
+  assert.strictEqual(lv.callResistance, 22400);
+  assert.strictEqual(lv.putSupport, 22500);
+  assert.strictEqual(lv.flip, 22325);
+});
