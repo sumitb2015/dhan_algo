@@ -2,11 +2,12 @@
 
 import React, { useState, useMemo, useCallback } from 'react';
 import {
-  ChevronDown, ChevronUp, Trash2, Plus, Minus, X, Check, Layers, Sigma, Loader2, RefreshCw, Table2, BarChart3, LineChart, Pencil, Unlink,
+  ChevronDown, ChevronUp, Trash2, Plus, Minus, X, Check, Layers, Sigma, Loader2, RefreshCw, Table2, BarChart3, LineChart, Pencil, Unlink, ShieldAlert,
 } from 'lucide-react';
 import MultiLegLegRow from './MultiLegLegRow';
 import RuleNumInput from './RuleNumInput';
 import GuardsPanel from './GuardsPanel';
+import { unguardedShorts } from '@/lib/multiLegUnguarded';
 import { guardsArmed, type BasketGuards, type NetGreeks } from '@/lib/multiLegGuards';
 import AddLotsModal from './AddLotsModal';
 import ExitLotsModal from './ExitLotsModal';
@@ -517,6 +518,9 @@ export default function MultiLegStrategyRow({
     return { today: mk(basket.legs.filter(l => legCountsToday(l))), total: mk(basket.legs) };
   }, [showGuards, basket.legs, ltpFor, crudeMult]);
   const guardsOn = guardsArmed(basket.guards);
+  // Open shorts nothing will exit (no leg SL, strategy SL or armed exit guard). Re-evaluated every render, so an
+  // armed-yesterday guard shows up here the moment the day rolls.
+  const unguarded = unguardedShorts(basket, new Date(Date.now() + 5.5 * 3_600_000).toISOString().slice(0, 10));
 
   const strategyRisk: StrategyRiskConfig = useMemo(() => {
     return basket.riskConfig ?? {
@@ -682,6 +686,15 @@ export default function MultiLegStrategyRow({
             >
               {BROKER_LABELS[basket.broker as Broker] ?? basket.broker}
             </span>
+            {unguarded.length > 0 && (
+              <span
+                className="inline-flex items-center gap-1 text-[10px] font-bold px-1.5 py-0.5 rounded border border-red-500/40 bg-red-500/10 text-red-400"
+                title={`No stop will exit: ${unguarded.map(l => `SELL ${l.strike} ${l.option} x${l.lots}`).join(', ')}. Set a leg SL, a strategy SL, or arm a spot trigger / max-loss exit in Guards.`}
+              >
+                <ShieldAlert className="w-3 h-3" aria-hidden />
+                {unguarded.length} UNGUARDED SHORT{unguarded.length > 1 ? 'S' : ''}
+              </span>
+            )}
           {onUngroup && basket.legs.some(l => l.status !== 'CLOSED') && (
             <button
               type="button"

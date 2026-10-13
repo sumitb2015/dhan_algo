@@ -4,6 +4,7 @@ import React, { useState } from 'react';
 import { X, Plus } from 'lucide-react';
 import { fallbackLotSize, formatExpiryLabel, type MultiLegBasket } from '@/lib/multiLegFocus';
 import { FOCUS_RING } from '@/components/Scalper';
+import { rollSizeWarning } from '@/lib/multiLegRollSize';
 import { allowedStrikes, snapToAllowed, strikeAllowed } from '@/lib/farExpiryRules';
 
 interface AddNewLegModalProps {
@@ -64,6 +65,8 @@ export default function AddNewLegModal({
   const [triggerDraft, setTriggerDraft] = useState<string>('');
   const [slLimitDraft, setSlLimitDraft] = useState<string>('');
   const [submitting, setSubmitting] = useState<boolean>(false);
+  // The roll-size warning must be acknowledged for the exact size/side it was shown for (changing either re-asks).
+  const [ackedRoll, setAckedRoll] = useState<string>('');
 
   if (!isOpen || !basket) return null;
 
@@ -78,6 +81,9 @@ export default function AddNewLegModal({
   const currentLtp = ltpForStrike(strike, option, effectiveExpiry);
   const effectiveLot = lotSize > 0 ? lotSize : fallbackLotSize(basket.underlying, basket.broker);
   const totalQty = lots * effectiveLot;
+  const rollWarn = rollSizeWarning(basket, { side, option, lots }, effectiveLot);
+  const rollKey = rollWarn ? `${side}${option}${lots}/${rollWarn.stoppedLots}` : '';
+  const rollBlocked = !!rollWarn && ackedRoll !== rollKey;
 
   // Stop-loss entry: Dhan only. It rests until the trigger prints, so it must sit on the far
   // side of the live price (a BUY stop above it, a SELL stop below it) or Dhan rejects it.
@@ -100,7 +106,7 @@ export default function AddNewLegModal({
     e.preventDefault();
     if (lots <= 0 || submitting || !strikeOk) return;
     if (orderType === 'LIMIT' && (limitPrice <= 0 || isNaN(limitPrice))) return;
-    if (stopError) return;
+    if (stopError || rollBlocked) return;
 
     setSubmitting(true);
     try {
@@ -380,6 +386,17 @@ export default function AddNewLegModal({
             </div>
           )}
 
+          {rollWarn && (
+            <div role="alert" className="rounded-lg border border-red-500/40 bg-red-500/10 p-3 space-y-2">
+              <p className="text-xs font-bold text-red-400">Bigger than a short that lost today</p>
+              <p className="text-xs text-zinc-300">{rollWarn.message} (Any strike or expiry on this strategy.) Consider selling {rollWarn.stoppedLots} lot{rollWarn.stoppedLots > 1 ? 's' : ''} or fewer, or set a stop first.</p>
+              <label className="flex items-center gap-2 text-xs text-zinc-200 cursor-pointer">
+                <input type="checkbox" checked={ackedRoll === rollKey} onChange={e => setAckedRoll(e.target.checked ? rollKey : '')} className={FOCUS_RING} />
+                I know, sell {rollWarn.newLots} lots anyway
+              </label>
+            </div>
+          )}
+
           {/* Footer */}
           <div className="pt-2 flex items-center justify-end gap-2.5">
             <button
@@ -392,8 +409,8 @@ export default function AddNewLegModal({
             </button>
             <button
               type="submit"
-              disabled={submitting || !strikeOk || !!stopError}
-              title={strikeOk ? undefined : 'Far expiries only allow strikes in multiples of 100'}
+              disabled={submitting || !strikeOk || !!stopError || rollBlocked}
+              title={rollBlocked ? 'Tick the box above to confirm the larger size' : strikeOk ? undefined : 'Far expiries only allow strikes in multiples of 100'}
               className={`h-9 px-5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold shadow-lg transition-all flex items-center gap-1.5 disabled:opacity-50 ${FOCUS_RING}`}
             >
               <Plus className="w-3.5 h-3.5" />
