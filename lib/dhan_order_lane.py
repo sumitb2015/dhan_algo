@@ -50,8 +50,18 @@ def _acquire() -> bool:
         except FileExistsError:
             try:
                 if time.time() - os.path.getmtime(LOCK_FILE) > LOCK_STALE_SEC:
-                    os.remove(LOCK_FILE)
-                    continue
+                    # Move it aside, then re-check what was moved: if another waiter already took the lock over,
+                    # this moved ITS fresh lock and must put it back.
+                    aside = f'{LOCK_FILE}.stale.{os.getpid()}.{time.monotonic_ns()}'
+                    os.replace(LOCK_FILE, aside)
+                    if time.time() - os.path.getmtime(aside) > LOCK_STALE_SEC:
+                        os.remove(aside)
+                        continue
+                    try:
+                        os.link(aside, LOCK_FILE)
+                    except OSError:
+                        pass
+                    os.remove(aside)
             except OSError:
                 pass
         except OSError:

@@ -1,9 +1,10 @@
+import { derivativeTick } from '@/lib/derivativeTick';
 import { NextRequest, NextResponse } from 'next/server';
 import { dhanGet, dhanPost, dhanPut, dhanDelete, getDhanCredentials } from '@/lib/dhanToken';
 import { invalidateBrokerCache } from '@/lib/brokerPositionsCache';
 import { reserveOrderSlot, ORDER_WINDOW_MS } from '@/lib/dhanOrderPacer';
 import {
-  buildPlacePayload, validateModify, validateSuperOrder,
+  buildPlacePayload, validateModify, validateSuperOrder, validateTick,
   type SuperLeg, type SuperModifyInput, type SuperOrderInput,
 } from '@/lib/superOrder';
 
@@ -66,6 +67,10 @@ async function place(raw: Record<string, unknown>): Promise<Outcome> {
   const normalised: SuperOrderInput = { ...input, productType, exchangeSegment, securityId: String(raw.securityId ?? '') };
   const bad = validateSuperOrder(normalised);
   if (bad) return { status: 400, body: { success: false, error: bad } };
+  // Tick grid: enforced whenever the master knows the contract. An unknown contract is left to Dhan to judge.
+  const tick = derivativeTick(normalised.securityId, exchangeSegment);
+  const offTick = tick ? validateTick(normalised, tick) : null;
+  if (offTick) return { status: 400, body: { success: false, error: offTick } };
 
   // Resolved before anything is sent: a missing/expired token file means NO request left this
   // machine, so it must surface as itself - not as the "status unknown" 504 reserved for a real timeout.

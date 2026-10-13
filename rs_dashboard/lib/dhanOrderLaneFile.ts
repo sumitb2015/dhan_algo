@@ -37,7 +37,16 @@ async function acquire(): Promise<boolean> {
       if ((e as NodeJS.ErrnoException).code !== 'EEXIST') return false;
       try {
         const st = await fs.stat(lockFile());
-        if (Date.now() - st.mtimeMs > LOCK_STALE_MS) { await fs.unlink(lockFile()); continue; }
+        if (Date.now() - st.mtimeMs > LOCK_STALE_MS) {
+          // Move it aside instead of unlinking, then re-check what we actually moved: if another waiter already
+          // took the lock over, we moved ITS fresh lock and must put it back.
+          const aside = `${lockFile()}.stale.${process.pid}.${Math.random().toString(36).slice(2)}`;
+          await fs.rename(lockFile(), aside);
+          const moved = await fs.stat(aside);
+          if (Date.now() - moved.mtimeMs > LOCK_STALE_MS) { await fs.unlink(aside); continue; }
+          try { await fs.link(aside, lockFile()); } catch { /* someone re-created it: fine */ }
+          await fs.unlink(aside);
+        }
       } catch { /* released meanwhile */ }
     }
     if (Date.now() > deadline) return false;

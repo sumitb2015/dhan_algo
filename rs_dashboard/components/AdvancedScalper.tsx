@@ -27,6 +27,7 @@ import MtmChart, { useMtmHistory } from './MtmChart';
 import ScalperGreeksModal from './analytics/ScalperGreeksModal';
 import AdvancedScalperOptionChainModal from './AdvancedScalperOptionChainModal';
 import { capCloseQty } from '@/lib/intradayCap';
+import { fetchBracketTick } from '@/lib/bracketTick';
 import { resolveBracket, legsToCancel, hasUnmatchableActive, bracketLevelsByContract, reuseUnchanged, type BracketLevels, type SuperOrderInput } from '@/lib/superOrder';
 import AdvancedScalperAddLotsModal, { type SubmitLegOrderParams } from './AdvancedScalperAddLotsModal';
 
@@ -692,15 +693,17 @@ export default function AdvancedScalper() {
     if (!bracketsWanted) { setLevels({}); refreshBracketsRef.current = () => {}; return; }
     let cancelled = false;
     let inflight = false;
+    let failures = 0;   // consecutive failed reads; one blip (a 429) keeps the last levels, a sustained outage clears them
+    const onFail = () => { if (++failures >= 3) setLevels({}); };
     const tick = async () => {
       if (inflight || cancelled || (typeof document !== 'undefined' && document.hidden)) return;
       inflight = true;
       try {
         const j = await (await fetch('/api/super-order')).json() as { success?: boolean; orders?: Record<string, unknown>[] };
         if (cancelled) return;
-        setLevels(j.success ? bracketLevelsByContract(j.orders ?? []) : {});
+        if (j.success) { failures = 0; setLevels(bracketLevelsByContract(j.orders ?? [])); } else onFail();
       } catch {
-        if (!cancelled) setLevels({});
+        if (!cancelled) onFail();
       } finally {
         inflight = false;
       }
@@ -1632,7 +1635,9 @@ export default function AdvancedScalper() {
         return;
       } else {
         const ltpNow = liveQuotes?.strikes?.[String(box.strike)]?.[box.side === 'CE' ? 'ce' : 'pe']?.ltp ?? 0;
+        const tick = await fetchBracketTick(secId ?? '', dhanFnoSegment(underlying));
         const r = resolveBracket({
+          tick: tick ?? 0,
           securityId: secId ?? '', exchangeSegment: dhanFnoSegment(underlying), productType,
           side, orderType: mode, quantity: box.lots * lotSize,
           limitPrice: mode === 'LIMIT' ? Number(box.limitPrice) : undefined, ltp: ltpNow,
@@ -1795,7 +1800,7 @@ export default function AdvancedScalper() {
   // set, else the requested size) — chain off this, never off a rounded ideal.
   // Take down every live Super Order leg on one security (see the call in closePosition).
   // Silent when there is nothing to cancel, so non-bracket scalping pays one GET and no noise.
-  const cancelBracketsFor = useCallback(async (securityId: string, partial: boolean, sym: string) => {
+  const cancelBracketsFor = useCallback(async (securityId: string, partial: boolean, sym: string, scope: { productType?: string; netQty?: number }) => {
     try {
       const list = await (await fetch('/api/super-order')).json() as { success?: boolean; orders?: Record<string, unknown>[] };
       if (!list.success) {
@@ -1803,7 +1808,7 @@ export default function AdvancedScalper() {
         if (bracketPlacedRef.current) addToast('error', `${sym}: could not check for a live bracket`, 'A resting target/stop may still be live - check Dhan Orders');
         return;
       }
-      const legs = legsToCancel(list.orders ?? [], securityId);
+      const legs = legsToCancel(list.orders ?? [], securityId, scope);
       if (legs.length === 0) {
         if (hasUnmatchableActive(list.orders ?? [])) addToast('error', `${sym}: a live bracket could not be matched to this contract`, 'Cancel any resting target/stop in Dhan Orders');
         return;
@@ -2019,7 +2024,7 @@ export default function AdvancedScalper() {
         // alive after a manual close they could open the opposite side. Sent AFTER the close so it
         // never delays it; a partial close takes the bracket down too (its legs would over-size the
         // remainder), so the remainder needs re-protecting.
-        if (broker === 'dhan') void cancelBracketsFor(liveSecId, isPartial, sym);
+        if (broker === 'dhan') void cancelBracketsFor(liveSecId, isPartial, sym, { productType: product, netQty: liveNetQty });
         if (isPartial) {
           // Quantity survives, so the user's target/SL/trail must survive with
           // it. bestPrice stays valid (same entry, same direction) — only
@@ -2270,8 +2275,10 @@ export default function AdvancedScalper() {
             if (bracketActive) {
               const quotesFresh = quotesAtRef.current > 0 && Date.now() - quotesAtRef.current <= QUOTES_STALE_MS;
               const newLtp = liveQuotes?.strikes?.[String(newStrike)]?.[box.side === 'CE' ? 'ce' : 'pe']?.ltp ?? 0;
+              const tick = quotesFresh ? await fetchBracketTick(secId, dhanFnoSegment(underlying)) : null;
               const r = quotesFresh
                 ? resolveBracket({
+                    tick: tick ?? 0,
                     securityId: secId, exchangeSegment: dhanFnoSegment(underlying), productType: resolvedProductDhan,
                     side: sideToOpen, orderType: 'MARKET', quantity: movedUnits, ltp: newLtp,
                     targetPts: Number(bracketTgt), slPts: Number(bracketSl), trailPts: Number(bracketTrail) || 0,

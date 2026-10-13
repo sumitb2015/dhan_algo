@@ -50,9 +50,9 @@ test('each leg only accepts its own fields on modify', () => {
   assert.match(validateModify({ legName: 'STOP_LOSS_LEG' })!, /Nothing/);
 });
 
-import { hasUnmatchableActive, legsToCancel, resolveBracket } from './superOrder.ts';
+import { hasUnmatchableActive, legsToCancel, resolveBracket, validateTick } from './superOrder.ts';
 
-const tk = { securityId: '12345', exchangeSegment: 'NSE_FNO', productType: 'MARGIN', quantity: 75, targetPts: 10, slPts: 8, trailPts: 0 };
+const tk = { securityId: '12345', exchangeSegment: 'NSE_FNO', productType: 'MARGIN', quantity: 75, targetPts: 10, slPts: 8, trailPts: 0, tick: 0.05 };
 
 test('resolveBracket: BUY and SELL levels around the LTP, tick-rounded', () => {
   const b = resolveBracket({ ...tk, side: 'BUY', orderType: 'MARKET', ltp: 100.07 });
@@ -109,15 +109,15 @@ test('bracketLevelsByContract: resting exit legs give levels; finished legs and 
     { orderId: '5', legDetails: [L('TARGET_LEG', 'PENDING')], targetPrice: 9 },
   ];
   assert.deepStrictEqual(bracketLevelsByContract(rows), {
-    '111|MARGIN': [{ orderId: '1', productType: 'MARGIN', entryPending: false, target: 120.5, stop: 80, trail: 2 }],
-    '222|': [{ orderId: '2', productType: null, entryPending: false, target: null, stop: 30, trail: null }],
+    '111|MARGIN': [{ orderId: '1', productType: 'MARGIN', side: null, entryPending: false, target: 120.5, stop: 80, trail: 2 }],
+    '222|': [{ orderId: '2', productType: null, side: null, entryPending: false, target: null, stop: 30, trail: null }],
   });
 });
 
 test('levels prefer the leg\'s own price (what a trailing stop moves) over the order-level original', () => {
   const rows = [{ orderId: '1', securityId: '9', stopLossPrice: 80, targetPrice: 120, trailingJump: 2,
     legDetails: [L('TARGET_LEG', 'PENDING', { price: 118 }), L('STOP_LOSS_LEG', 'TRIGGER_PENDING', { triggerPrice: 88.5, trailingJump: 1.5 })] }];
-  assert.deepStrictEqual(bracketLevelsByContract(rows)['9|'], [{ orderId: '1', productType: null, entryPending: false, target: 118, stop: 88.5, trail: 1.5 }]);
+  assert.deepStrictEqual(bracketLevelsByContract(rows)['9|'], [{ orderId: '1', productType: null, side: null, entryPending: false, target: 118, stop: 88.5, trail: 1.5 }]);
 });
 
 test('falls back to the order-level prices, rejects junk, keeps several brackets on one contract', () => {
@@ -126,8 +126,8 @@ test('falls back to the order-level prices, rejects junk, keeps several brackets
     { orderId: '2', securityId: '9', targetPrice: 0, stopLossPrice: 'abc', legDetails: [L('TARGET_LEG', 'OPEN'), L('STOP_LOSS_LEG', 'PENDING')] },
   ];
   assert.deepStrictEqual(bracketLevelsByContract(rows)['9|'], [
-    { orderId: '1', productType: null, entryPending: false, target: 77, stop: 55.5, trail: null },
-    { orderId: '2', productType: null, entryPending: false, target: null, stop: null, trail: null },   // live but unreadable: null
+    { orderId: '1', productType: null, side: null, entryPending: false, target: 77, stop: 55.5, trail: null },
+    { orderId: '2', productType: null, side: null, entryPending: false, target: null, stop: null, trail: null },   // live but unreadable: null
   ]);
 });
 
@@ -157,7 +157,7 @@ test('bracketsForRow matches the row\'s product, plus unlabeled brackets; anothe
 });
 
 test('reuseUnchanged keeps previous arrays for untouched contracts and returns prev when nothing changed', () => {
-  const b = (id: string, t: number) => ({ orderId: id, productType: null, entryPending: false, target: t, stop: 1, trail: null });
+  const b = (id: string, t: number) => ({ orderId: id, productType: null, side: null, entryPending: false, target: t, stop: 1, trail: null });
   const prev = { '1|': [b('a', 10)], '2|': [b('b', 20)] };
   const same = reuseUnchanged(prev, { '1|': [b('a', 10)], '2|': [b('b', 20)] });
   assert.equal(same, prev);
@@ -171,4 +171,41 @@ test('reuseUnchanged keeps previous arrays for untouched contracts and returns p
   const added = reuseUnchanged(prev, { ...prev, '3|': [b('c', 5)] });
   assert.equal(added['1|'], prev['1|']);
   assert.ok(added['3|']);
+});
+
+test('legsToCancel: scoped to the closed position\'s product and direction; unlabeled rows still match', () => {
+  const leg = [{ legName: 'TARGET_LEG', orderStatus: 'PENDING' }];
+  const rows = [
+    { orderId: 'a', securityId: '7', productType: 'INTRADAY', transactionType: 'BUY', legDetails: leg },
+    { orderId: 'b', securityId: '7', productType: 'MARGIN', transactionType: 'BUY', legDetails: leg },
+    { orderId: 'c', securityId: '7', productType: 'INTRADAY', transactionType: 'SELL', legDetails: leg },
+    { orderId: 'd', securityId: '7', legDetails: leg },
+  ];
+  const ids = (s: { productType?: string; netQty?: number }) => legsToCancel(rows, '7', s).map(l => l.orderId);
+  assert.deepStrictEqual(ids({ productType: 'INTRADAY', netQty: 5 }), ['a', 'd']);
+  assert.deepStrictEqual(ids({ productType: 'MARGIN', netQty: -5 }), ['d']);
+  assert.deepStrictEqual(ids({}), ['a', 'b', 'c', 'd']);
+});
+
+test('bracketsForRow hides a bracket that points the same way as the position', () => {
+  const mk = (side: 'BUY' | 'SELL' | null) => ({ orderId: 'x', productType: 'MARGIN', side, entryPending: false, target: 1, stop: 1, trail: null });
+  const m = { '7|MARGIN': [mk('SELL')] };
+  assert.strictEqual(bracketsForRow(m, '7', 'MARGIN', 10), undefined);
+  assert.strictEqual(bracketsForRow(m, '7', 'MARGIN', -10)?.length, 1);
+  assert.strictEqual(bracketsForRow({ '7|MARGIN': [mk(null)] }, '7', 'MARGIN', 10)?.length, 1);
+});
+
+test('resolveBracket honours the contract tick and refuses an unknown one', () => {
+  const m = resolveBracket({ ...tk, tick: 0.5, side: 'BUY', orderType: 'MARKET', ltp: 100.3 });
+  assert.ok(m.ok);
+  assert.deepStrictEqual([m.order.refPrice, m.order.targetPrice, m.order.stopLossPrice], [100.5, 110.5, 92.5]);
+  for (const bad of [0, NaN, 5]) assert.ok(!resolveBracket({ ...tk, tick: bad, side: 'BUY', orderType: 'MARKET', ltp: 100 }).ok);
+});
+
+test('validateTick flags prices off the tick grid and ignores a MARKET entry price', () => {
+  const o = { securityId: '1', exchangeSegment: 'MCX_COMM', side: 'BUY', productType: 'MARGIN', quantity: 1, orderType: 'LIMIT', price: 100, targetPrice: 110.25, stopLossPrice: 90, trailingJump: 0 };
+  assert.match(validateTick(o, 0.5)!, /targetPrice/);
+  assert.strictEqual(validateTick({ ...o, targetPrice: 110.5 }, 0.5), null);
+  assert.strictEqual(validateTick({ ...o, orderType: 'MARKET', price: 100.3, targetPrice: 110.5 }, 0.5), null);
+  assert.strictEqual(validateTick({ ...o, targetPrice: 110.05 }, 0.05), null);
 });

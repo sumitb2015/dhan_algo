@@ -791,7 +791,10 @@ function positionRowPropsEqual(prev: PositionRowProps, next: PositionRowProps): 
  * contract show the first plus a count.
  */
 function BracketLevelsLine({ levels, ltp }: { levels: BracketLevels[]; ltp: number }) {
-  const b = levels[0];
+  // Several brackets on one contract: lead with the one whose stop is nearest the market, the one that fires first.
+  const b = ltp > 0
+    ? [...levels].sort((x, y) => (x.stop != null ? Math.abs(x.stop - ltp) : Infinity) - (y.stop != null ? Math.abs(y.stop - ltp) : Infinity))[0]
+    : levels[0];
   const px = (n: number | null) => (n != null ? n.toFixed(2) : '-');
   const away = (n: number | null) => (n != null && ltp > 0 ? `${Math.abs(n - ltp).toFixed(2)} pts from LTP` : 'distance unknown');
   const title = `Bracket order ${b.orderId}${b.entryPending ? ' - its entry has NOT filled yet, so these exits protect nothing until it does' : ' resting at the broker'}. `
@@ -1147,7 +1150,7 @@ export const PositionsTable = React.memo(function PositionsTable({ data, broker,
               onAddLeg={onAddLeg}
               lotSizeFor={lotSizeFor}
               onClosePartial={onClosePartial}
-              bracket={bracketsForRow(brackets, row.securityId, positionProduct(row))}
+              bracket={bracketsForRow(brackets, row.securityId, positionProduct(row), row.netQty)}
               selected={selected?.has(rowKey) ?? false}
               onToggleSelect={onToggleSelect}
             />
