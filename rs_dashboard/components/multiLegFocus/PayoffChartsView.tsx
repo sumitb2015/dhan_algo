@@ -2,7 +2,7 @@
 
 import React, { useEffect, useMemo, useState } from 'react';
 import { createPortal } from 'react-dom';
-import { ChevronLeft, ChevronRight, Maximize2, X, LayoutGrid, Square } from 'lucide-react';
+import { ChevronLeft, ChevronRight, Maximize2, X, LayoutGrid, Square, Activity } from 'lucide-react';
 import PayoffDiagram, { modelToDiagramProps, type StrikeMarker } from '@/components/strategy/PayoffDiagram';
 import { buildPayoffModel, type PayoffModel, type PayoffLegInput } from '@/lib/optionsPayoff';
 import { calculateTimeToExpiryYears } from '@/lib/optionsPricing';
@@ -77,6 +77,7 @@ export default function PayoffChartsView({ items }: { items: PayoffChartItem[] }
   const [mode, setMode] = useState<'grid' | 'single'>('grid');
   const [focusId, setFocusId] = useState<string | null>(null);
   const [full, setFull] = useState(false);
+  const [showVix, setShowVix] = useState(false);
 
   const idx = Math.max(0, items.findIndex(i => i.id === focusId));
   const current = items[idx];
@@ -100,10 +101,18 @@ export default function PayoffChartsView({ items }: { items: PayoffChartItem[] }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [mode, full, idx, items]);
 
+  const vixToggle = (
+    <button type="button" onClick={() => setShowVix(v => !v)} aria-pressed={showVix}
+      className={`h-8 px-3 inline-flex items-center gap-1.5 rounded-lg border border-zinc-700 text-xs font-bold ${showVix ? 'bg-zinc-700 text-white' : 'bg-zinc-900 text-zinc-400 hover:text-white'} ${FOCUS_RING}`}>
+      <Activity className="w-3.5 h-3.5" /> India VIX
+    </button>
+  );
+
   if (items.length === 0) {
     return (
       <div className="flex flex-col gap-3">
-        <VixChartPanel />
+        <div className="flex">{vixToggle}</div>
+        {showVix && <VixChartPanel />}
         <div className="flex flex-col items-center justify-center py-24 gap-2 border border-zinc-800/60 rounded-xl bg-zinc-900/20">
           <p className="text-sm font-semibold text-zinc-300">No live strategies to chart</p>
           <p className="text-xs text-zinc-500">Open or draft legs with a live price show up here.</p>
@@ -135,8 +144,9 @@ export default function PayoffChartsView({ items }: { items: PayoffChartItem[] }
 
   return (
     <div className="flex flex-col gap-3">
-      <VixChartPanel />
+      {showVix && <VixChartPanel />}
       <div className="flex items-center justify-between flex-wrap gap-2">
+        <div className="flex items-center gap-2">
         <div className="inline-flex rounded-lg border border-zinc-700 overflow-hidden" role="group" aria-label="Chart layout">
           <button type="button" onClick={() => { setMode('grid'); setFull(false); }} aria-pressed={mode === 'grid'}
             className={`h-8 px-3 inline-flex items-center gap-1.5 text-xs font-bold ${mode === 'grid' ? 'bg-zinc-700 text-white' : 'bg-zinc-900 text-zinc-400 hover:text-white'} ${FOCUS_RING}`}>
@@ -146,6 +156,8 @@ export default function PayoffChartsView({ items }: { items: PayoffChartItem[] }
             className={`h-8 px-3 inline-flex items-center gap-1.5 text-xs font-bold ${mode === 'single' ? 'bg-zinc-700 text-white' : 'bg-zinc-900 text-zinc-400 hover:text-white'} ${FOCUS_RING}`}>
             <Square className="w-3.5 h-3.5" /> Single
           </button>
+        </div>
+        {vixToggle}
         </div>
         {mode === 'single' && (
           <div className="flex items-center gap-3 flex-wrap">
