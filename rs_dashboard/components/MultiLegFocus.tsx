@@ -28,7 +28,7 @@ import MultiLegOptionChainModal from './multiLegFocus/MultiLegOptionChainModal';
 import HelpModal from './HelpModal';
 import {
   resolveTemplateLegs, reconcileLegWithBroker, sortLegsForExit, findLegPosition, executionBroker,
-  applyOrderOutcomes, normalizeOrderRow, withPendingOrder, settleWaitingEntry, applyTriggeredEntry, type WaitingEntry, LEG_FILL_GRACE_MS, legBrokerMismatch, classifyDhanOrder, type DhanOrderPhase, type NormalizedOrder,
+  applyOrderOutcomes, normalizeOrderRow, withPendingOrder, restingExitOrders, settleWaitingEntry, applyTriggeredEntry, type WaitingEntry, LEG_FILL_GRACE_MS, legBrokerMismatch, classifyDhanOrder, type DhanOrderPhase, type NormalizedOrder,
   computeLegTrailingSL, withAutoLegRisk, SAME_DISTANCE, MATCH_OPPOSITE, autoRuleOwns, autoReentryStrike, autoReentryStrikeByDistance, autoReentryStrikeByPremium, entryDistance, avoidSameStrike, autoRollAllowed, computeStrategyMetrics, checkStrategyRisk, fallbackLotSize, planScale, scalePlanSignature,
   positionProduct, computeBasketStatus, closedFillFromRow,
   findSiblingLegCollisions, type SiblingLegCollision,
@@ -1689,7 +1689,7 @@ export default function MultiLegFocus({
 
   // `unattended` = an automatic exit (a guard): never raise a blocking dialog. A hedge whose own side still has an open short is
   // refused (it would leave that short naked); other open shorts only raise margin, which is not worth freezing the tab for.
-  const exitOneLeg = useCallback(async (basketId: string, leg: MultiLegLeg, exitLots?: number, opts?: { unattended?: boolean; orderType?: 'MARKET' | 'LIMIT'; limitPrice?: number }): Promise<{ closed: boolean; qty: number; maxAfter?: number }> => {
+  const exitOneLeg = useCallback(async (basketId: string, leg: MultiLegLeg, exitLots?: number, opts?: { unattended?: boolean; orderType?: 'MARKET' | 'LIMIT'; limitPrice?: number }): Promise<{ closed: boolean; qty: number; maxAfter?: number; resting?: boolean }> => {
     while (regroupGateRef.current) {
       await regroupGateRef.current;
       // The leg may now live in another row: write back to the row that holds it.
@@ -1737,6 +1737,31 @@ export default function MultiLegFocus({
     }
 
     try {
+      // A LIMIT exit still resting on this leg (it stays OPEN, so every guard/SL/manual exit comes through here): cancel it FIRST,
+      // then read the position. Sending a second exit on top of it could fill both and flip the position; if the cancel fails the
+      // resting order may already have filled, so stop and let the next poll show the truth.
+      const resting = restingExitOrders(basketsRef.current.find(b => b.id === basketId)?.legs.find(l => l.id === leg.id) ?? leg);
+      if (resting.length > 0) {
+        let cancelFailed = '';
+        for (const p of resting) {
+          try {
+            const cr = await fetch('/api/scalper/orders', { method: 'DELETE', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ orderId: p.id, broker: bk }) });
+            const cj = await cr.json() as { success?: boolean; error?: string; detail?: string };
+            if (!cj.success) cancelFailed = cj.detail ?? cj.error ?? 'cancel refused';
+          } catch (e) { cancelFailed = String(e); }
+          if (cancelFailed) break;
+        }
+        if (cancelFailed) {
+          addToast('error', `Cannot exit ${label} yet`, `Its resting LIMIT exit could not be cancelled (${cancelFailed}) — it may already have filled. Nothing new was sent; retry once the position refreshes.`);
+          return { closed, qty: closedQty };
+        }
+        const gone = new Set(resting.map(p => p.id));
+        patchLegs(basketId, legs => legs.map(l => (l.id === leg.id
+          ? { ...l, pendingOrders: (l.pendingOrders ?? []).filter(p => !gone.has(p.id)).length ? (l.pendingOrders ?? []).filter(p => !gone.has(p.id)) : undefined, orderIds: Array.from(new Set([...(l.orderIds ?? []), ...gone])) }
+          : l)));
+        addToast('success', `Cancelled resting exit on ${label}`, 'Replacing it with the new exit.');
+      }
+
       const res = await fetch(scalperRoute(bk, 'positions'));
       const j = await res.json() as { success: boolean; data?: Record<string, unknown>[] };
       const rows = j.success && Array.isArray(j.data) ? j.data : [];
@@ -1885,9 +1910,16 @@ export default function MultiLegFocus({
       const j2 = await res2.json() as { success: boolean; order_id?: string; price?: number; error?: string };
 
       if (j2.success) {
-        addToast('success', exitType === 'LIMIT' ? `Exit order placed for ${label}` : `Exited ${label}`, exitType === 'LIMIT' ? `LIMIT @ ₹${exitLimit.toFixed(2)} — resting until filled · ID: ${j2.order_id}` : `ID: ${j2.order_id}`);
+        if (exitType === 'LIMIT') {
+          // Resting until it trades: the leg stays OPEN (its SL/target/guards keep working; any other exit cancels this order first).
+          // The fill reaches the ledger via broker reconcile, so nothing is marked CLOSED here.
+          patchLegs(basketId, legs => legs.map(l => (l.id === leg.id ? withPendingOrder(l, j2.order_id, 'exit', qty, exitLimit, Date.now(), true) : l)));
+          addToast('success', `Limit exit placed for ${label}`, `LIMIT @ ₹${exitLimit.toFixed(2)} for ${qty} — the leg stays open until it fills · ID: ${j2.order_id}`);
+          return { closed: false, qty: 0, resting: true };
+        }
+        addToast('success', `Exited ${label}`, `ID: ${j2.order_id}`);
         const currentLtp = basket ? ltpFor(basket, leg) : 0;
-        const exitPrice = (j2.price && j2.price > 0) ? j2.price : (exitType === 'LIMIT' ? exitLimit : (currentLtp > 0 ? currentLtp : (leg.fill?.avgPrice ?? 0)));
+        const exitPrice = (j2.price && j2.price > 0) ? j2.price : (currentLtp > 0 ? currentLtp : (leg.fill?.avgPrice ?? 0));
         if (partialLotSize > 0) {
           // Split: the leg keeps the remainder, the closed slice is its own CLOSED row.
           patchLegs(basketId, legs => legs.flatMap(l => {
@@ -2123,7 +2155,7 @@ export default function MultiLegFocus({
   const exitLegFromPage = useCallback(async (basket: MultiLegBasket, leg: MultiLegLeg, exitLots?: number, order?: { orderType: 'MARKET' | 'LIMIT'; limitPrice?: number }): Promise<boolean> => {
     const r = await trackOp(basket.id, () => exitOneLeg(basket.id, leg, exitLots, order), { exit: true });
     // true = an order went out or the leg was already flat; false = refused (the exit ticket stays open).
-    return !!r && (r.closed || r.qty > 0);
+    return !!r && (r.closed || r.qty > 0 || !!r.resting);
   }, [trackOp, exitOneLeg]);
 
   // ── Group / ungroup trades ──────────────────────────────────────────

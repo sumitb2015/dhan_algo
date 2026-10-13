@@ -160,6 +160,8 @@ test('legsSettling: a pending order or a just-closed leg is settling, scoped to 
   assert.equal(legsSettling([fresh], 'EXIT_PE', NOW), true);
   assert.equal(legsSettling([old], 'EXIT_CE', NOW), false);
   assert.equal(legsSettling([withLeg('d', 'S', 'CE', { status: 'OPEN' })], 'EXIT_CE', NOW), false);
+  // A resting limit exit leaves the leg OPEN and must not hold a guard back.
+  assert.equal(legsSettling([withLeg('r', 'S', 'CE', { status: 'OPEN', pendingOrders: [{ kind: 'exit', resting: true }] })], 'EXIT_CE', NOW), false);
   assert.equal(legsSettling([withLeg('f', 'S', 'FUT' as 'CE', { pendingOrders: [{}] })], 'EXIT_ALL', NOW), false);
 });
 

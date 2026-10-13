@@ -4,7 +4,7 @@ import {
   resolveTemplateLegs, reconcileLegFillDown, reconcileLegWithBroker, legPnl, basketTotalPnl, sortLegsForExit, findLegPosition,
   computeLegTrailingSL, nextLegThresholdType, computeStrategyMetrics, checkStrategyRisk, classifyBasketStructure, findSiblingLegCollisions,
   formatExpiryLabel, LEG_FILL_GRACE_MS, claimableLegQty, executionBroker, applyOrderOutcomes, normalizeOrderRow, PENDING_ORDER_TTL_MS, legBrokerMismatch, classifyDhanOrder, settleWaitingEntry, applyTriggeredEntry, type WaitingEntry, type NormalizedOrder, legAvgPrice, legExitPrice, legQtyUnits, legPnlPct, legOtmPct, scaleBasketMultiplier,
-  legQtyWarningsFor, recordOutsideReduction, findUntrackedPositions, residualBrokerAvg, findContractDrift, legFromUntracked, contractHintFromRow, legCountsToday, closedFillFromRow, mergeImportedLegs, brokerClampSlice,
+  legQtyWarningsFor, recordOutsideReduction, findUntrackedPositions, residualBrokerAvg, findContractDrift, legFromUntracked, contractHintFromRow, legCountsToday, closedFillFromRow, mergeImportedLegs, brokerClampSlice, restingExitOrders, withPendingOrder, RESTING_ORDER_TTL_MS,
   normalizeTradeRow, ownOrderIds, matchOutsideTrades, repriceEstimatedCloses, MLF_ORDER_SOURCE,
   type StrategyMetrics, type MultiLegLeg, type MultiLegBasket,
 } from './multiLegFocus.ts';
@@ -824,6 +824,35 @@ test('applyOrderOutcomes: rejected add-lots order comes back off the ledger', ()
   assert.strictEqual(out.lots, 1);
   assert.strictEqual(out.pendingOrders, undefined);
   assert.strictEqual(notes[0].unfilled, 325);
+});
+
+test('resting limit exit: the leg stays OPEN and untouched while the order works, and when it is cancelled or rejected', () => {
+  const base: MultiLegLeg = { id: '1', side: 'S', option: 'CE', strike: 23400, lots: 2, type: 'MARKET', status: 'OPEN', fill: { qty: 130, avgPrice: 98 } };
+  const leg = withPendingOrder(base, 'X', 'exit', 130, 60, 0, true);
+  assert.strictEqual(restingExitOrders(leg).length, 1);
+  assert.strictEqual(applyOrderOutcomes(leg, ob([{ orderId: 'X', orderStatus: 'PENDING' }]), 65, 1).leg.pendingOrders?.length, 1);
+  for (const st of ['CANCELLED', 'REJECTED', 'EXPIRED']) {
+    const { leg: out, notes } = applyOrderOutcomes(leg, ob([{ orderId: 'X', orderStatus: st, filledQty: 0 }]), 65, 1);
+    assert.strictEqual(out.status, 'OPEN');            // never "reopened" or grown: the ledger was never changed
+    assert.strictEqual(out.fill?.qty, 130);
+    assert.strictEqual(out.lots, 2);
+    assert.strictEqual(out.pendingOrders, undefined);
+    assert.deepStrictEqual(notes, []);
+  }
+});
+
+test('resting limit exit: a fill retires the entry without re-pricing or closing (broker reconcile books it)', () => {
+  const leg = withPendingOrder({ id: '1', side: 'S', option: 'CE', strike: 23400, lots: 1, type: 'MARKET', status: 'OPEN', fill: { qty: 65, avgPrice: 98 } }, 'X', 'exit', 65, 60, 0, true);
+  const { leg: out } = applyOrderOutcomes(leg, ob([{ orderId: 'X', orderStatus: 'TRADED', filledQty: 65, averageTradedPrice: 59 }]), 65, 1);
+  assert.strictEqual(out.status, 'OPEN');
+  assert.strictEqual(out.fill?.avgPrice, 98);
+  assert.strictEqual(out.pendingOrders, undefined);
+});
+
+test('resting limit exit outlives the normal pending TTL (a second exit must still know to cancel it)', () => {
+  const leg = withPendingOrder({ id: '1', side: 'S', option: 'CE', strike: 23400, lots: 1, type: 'MARKET', status: 'OPEN', fill: { qty: 65, avgPrice: 98 } }, 'X', 'exit', 65, 60, 0, true);
+  assert.strictEqual(applyOrderOutcomes(leg, ob([]), 65, PENDING_ORDER_TTL_MS + 1).leg.pendingOrders?.length, 1);
+  assert.strictEqual(applyOrderOutcomes(leg, ob([]), 65, RESTING_ORDER_TTL_MS + 1).leg.pendingOrders, undefined);
 });
 
 test('applyOrderOutcomes: rejected entry makes the leg FAILED; filled order is simply dropped', () => {

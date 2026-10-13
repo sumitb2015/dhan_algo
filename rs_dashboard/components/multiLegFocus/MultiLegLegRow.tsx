@@ -3,7 +3,7 @@
 import React from 'react';
 import { X, Plus, AlertTriangle, ChevronUp, ChevronDown, Unlink } from 'lucide-react';
 import {
-  legPnl, computeLegTrailingSL, nextLegThresholdType, formatExpiryLabel, legAvgPrice, legExitPrice, legQtyUnits, legPnlPct, legOtmPct, type MultiLegLeg,
+  legPnl, computeLegTrailingSL, nextLegThresholdType, formatExpiryLabel, legAvgPrice, legExitPrice, restingExitOrders, legQtyUnits, legPnlPct, legOtmPct, type MultiLegLeg,
 } from '@/lib/multiLegFocus';
 import { DEFAULT_LEG_COLUMNS, type LegColumns } from '@/lib/legColumns';
 import { FOCUS_RING } from '@/components/Scalper';
@@ -101,6 +101,7 @@ export function TagCell({ value, onCommit }: { value?: string; onCommit: (v: str
 export default function MultiLegLegRow({
   leg, allStrikes, ltp, spot, editable, exiting, margin, multiplier = 1, strategyMultiplier = 1, frontExpiry, farExpiry, onChange, onRemove, onOpenExit, onOpenAddLots, onShift, shiftSteps = 1, shiftBusy = false, strikeBlocked = false, columns = DEFAULT_LEG_COLUMNS, showExit = false, iv = 0, selected = false, onSelect, onTag, onDetach,
 }: MultiLegLegRowProps) {
+  const restingExit = restingExitOrders(leg)[0];
   const isFut = leg.option === 'FUT';
   const pnl = leg.fill ? legPnl(leg, ltp, multiplier) : 0;
   const pnlColor = pnl > 0 ? 'text-emerald-400' : pnl < 0 ? 'text-rose-400' : 'text-zinc-400';
@@ -387,6 +388,12 @@ export default function MultiLegLegRow({
               >
                 <Plus className="w-2.5 h-2.5" /> ADD
               </button>
+            )}
+            {restingExit && (
+              <span className="h-6 px-1.5 inline-flex items-center text-[10px] font-bold font-mono text-amber-400 rounded border border-amber-500/40 bg-amber-500/10"
+                title={`Limit exit resting: ${restingExit.qty} @ ₹${(restingExit.price ?? 0).toFixed(2)}. The leg stays open and protected until it fills; any other exit cancels it first.`}>
+                LMT {restingExit.price != null ? restingExit.price.toFixed(2) : ''}
+              </span>
             )}
             <button
               type="button"

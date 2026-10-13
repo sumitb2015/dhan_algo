@@ -109,7 +109,8 @@ export function legsSettling(legs: MultiLegLeg[], action: SpotAction, now: numbe
     if (l.option === 'FUT') return false;
     if (action === 'EXIT_CE' && l.option !== 'CE') return false;
     if (action === 'EXIT_PE' && l.option !== 'PE') return false;
-    if ((l.pendingOrders?.length ?? 0) > 0) return true;
+    // A resting limit exit leaves the leg OPEN and unconfirmed-free: it must never hold a guard back (the guard's own exit cancels it first).
+    if ((l.pendingOrders ?? []).some(p => !p.resting)) return true;
     return l.status === 'CLOSED' && l.closedAt != null && now - l.closedAt >= 0 && now - l.closedAt < LEG_FILL_GRACE_MS;
   });
 }

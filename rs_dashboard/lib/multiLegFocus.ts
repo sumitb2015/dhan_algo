@@ -1660,10 +1660,21 @@ export interface PendingLegOrder {
   /** Price the ledger recorded on ACK (response price, else LTP, else entry)
    *  — a placeholder. Replaced by the traded average once the order fills. */
   price?: number;
+  /** A resting LIMIT exit: the ledger was NOT touched on ACK (the leg stays OPEN and protected). The fill reaches the
+   *  ledger through broker reconcile (full close, or the clamp slice for a partial); applyOrderOutcomes only retires
+   *  this entry and never reopens or re-prices anything for it. */
+  resting?: boolean;
 }
 
 /** Give up on an order that never shows up in the order book after this long. */
 export const PENDING_ORDER_TTL_MS = 30 * 60_000;
+/** A resting limit may legitimately sit all session; losing track of it would let a second exit double up on it. */
+export const RESTING_ORDER_TTL_MS = 8 * 60 * 60_000;
+
+/** The resting LIMIT exit orders on a leg (see PendingLegOrder.resting). */
+export function restingExitOrders(leg: Pick<MultiLegLeg, 'pendingOrders'>): PendingLegOrder[] {
+  return (leg.pendingOrders ?? []).filter(p => p.kind === 'exit' && p.resting);
+}
 
 export interface NormalizedOrder { id: string; status: string; filled: number | null; avgPrice: number | null }
 
@@ -1711,7 +1722,12 @@ export function applyOrderOutcomes(
   for (const p of pending) {
     const o = ordersById.get(p.id);
     if (!o) {
-      if (now - p.at < PENDING_ORDER_TTL_MS) keep.push(p);
+      if (now - p.at < (p.resting ? RESTING_ORDER_TTL_MS : PENDING_ORDER_TTL_MS)) keep.push(p);
+      continue;
+    }
+    if (p.resting) {
+      // Ledger never moved for it: nothing to undo or re-price once it settles either way.
+      if (!FILLED_STATUSES.has(o.status) && !DEAD_STATUSES.has(o.status)) keep.push(p);
       continue;
     }
     if (FILLED_STATUSES.has(o.status)) {
@@ -1785,10 +1801,10 @@ function settleFillPrice(leg: MultiLegLeg, p: PendingLegOrder, actual: number): 
 
 /** Appends a just-ACKed order to a leg's pending list, with the price the ledger recorded for it. */
 export function withPendingOrder(
-  leg: MultiLegLeg, id: string | undefined, kind: 'grow' | 'exit', qty: number, price?: number, now: number = Date.now(),
+  leg: MultiLegLeg, id: string | undefined, kind: 'grow' | 'exit', qty: number, price?: number, now: number = Date.now(), resting = false,
 ): MultiLegLeg {
   if (!id || qty <= 0) return leg;
-  const entry: PendingLegOrder = { id: String(id), kind, qty, at: now, ...(price != null && price > 0 ? { price } : {}) };
+  const entry: PendingLegOrder = { id: String(id), kind, qty, at: now, ...(price != null && price > 0 ? { price } : {}), ...(resting ? { resting: true } : {}) };
   return { ...leg, pendingOrders: [...(leg.pendingOrders ?? []), entry] };
 }
 

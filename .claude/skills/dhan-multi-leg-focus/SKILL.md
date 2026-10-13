@@ -94,6 +94,14 @@ before changing any of it**; this skill only maps the page.
      for settling shorts), then disarms. Otherwise a leg added the same day would be closed at once by the realized loss.
    - **Test the engine, not the effect:** add a case to `lib/multiLegGuardEngine.test.ts` for any new guard behaviour.
 
+12. **Resting LIMIT exits** (Exit ticket, Dhan only, 2026-10-13). Unlike a market exit, a limit exit does NOT flip the leg to
+   CLOSED on ACK: it records `pendingOrders` `{kind:'exit', resting:true}` and the leg stays OPEN, so its SL/target/guards keep
+   working. The fill reaches the ledger through broker reconcile (full close, or `brokerClampSlice` for a partial, price
+   estimated from the row). `applyOrderOutcomes` only retires a resting entry (never reopens/re-prices; TTL 8 h, not 30 min) and
+   `legsSettling` ignores it. **Every other exit goes through `exitOneLeg`, which cancels the resting order first** (DELETE
+   `/api/scalper/orders`) and only then reads the position; a failed cancel aborts the exit (it may have filled). Never send a
+   second exit while a resting one is live. Limit price snaps to the contract tick (`lib/multiLegExitOrder.ts`).
+
 ## Change checklist
 - Touched a basket/leg field? Update `multiLegStoreMerge` (rev + union rules) and its `…Resurrect` test, or a stale
   tab will drop/overwrite it.
