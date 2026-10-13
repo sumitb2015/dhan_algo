@@ -6,6 +6,7 @@ import { ChevronLeft, ChevronRight, Maximize2, X, LayoutGrid, Square } from 'luc
 import PayoffDiagram, { modelToDiagramProps, type StrikeMarker } from '@/components/strategy/PayoffDiagram';
 import { buildPayoffModel, type PayoffModel, type PayoffLegInput } from '@/lib/optionsPayoff';
 import { calculateTimeToExpiryYears } from '@/lib/optionsPricing';
+import VixChartPanel from './VixChartPanel';
 import { FOCUS_RING } from '@/components/Scalper';
 
 /** One live strategy's inputs for the chart view (built by MultiLegFocus from the same data the row uses). */
@@ -101,9 +102,12 @@ export default function PayoffChartsView({ items }: { items: PayoffChartItem[] }
 
   if (items.length === 0) {
     return (
-      <div className="flex flex-col items-center justify-center py-24 gap-2 border border-zinc-800/60 rounded-xl bg-zinc-900/20">
-        <p className="text-sm font-semibold text-zinc-300">No live strategies to chart</p>
-        <p className="text-xs text-zinc-500">Open or draft legs with a live price show up here.</p>
+      <div className="flex flex-col gap-3">
+        <VixChartPanel />
+        <div className="flex flex-col items-center justify-center py-24 gap-2 border border-zinc-800/60 rounded-xl bg-zinc-900/20">
+          <p className="text-sm font-semibold text-zinc-300">No live strategies to chart</p>
+          <p className="text-xs text-zinc-500">Open or draft legs with a live price show up here.</p>
+        </div>
       </div>
     );
   }
@@ -131,6 +135,7 @@ export default function PayoffChartsView({ items }: { items: PayoffChartItem[] }
 
   return (
     <div className="flex flex-col gap-3">
+      <VixChartPanel />
       <div className="flex items-center justify-between flex-wrap gap-2">
         <div className="inline-flex rounded-lg border border-zinc-700 overflow-hidden" role="group" aria-label="Chart layout">
           <button type="button" onClick={() => { setMode('grid'); setFull(false); }} aria-pressed={mode === 'grid'}
