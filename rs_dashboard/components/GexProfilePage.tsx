@@ -20,6 +20,7 @@ import {
 } from '@/lib/gexV2';
 import { buildGexRowsModel, forwardFromSpot, gexModelCalcTable } from '@/lib/gexModel';
 import { WallPill, WALL_TONE } from './GexWallParts';
+import { buildDexRows, dexLevels, dexSummary, ratioLabel } from '@/lib/dex';
 import GexCalcButton from './GexCalcTable';
 import UpdateIntervalSlider, { fmtInterval, useUpdateInterval } from './UpdateIntervalSlider';
 import GexLevelsButton, { type GexChartLevel } from './GexLevelsChart';
@@ -70,7 +71,7 @@ const POWER_UNIT: Record<number, string> = { 1: 'index units', 2: '₹' };
 
 // Dhan-app style hover card: strike, spot and distance, call/put/net GEX, per-contract gamma, OI in units (Indian grouping).
 const fmtCr = (n: number) => `${n < 0 ? '-' : ''}${(Math.abs(n) / 1e7).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} Cr`;
-const GexTooltip = ({ active, payload, label, spot, power }: Record<string, unknown> & { spot: number; power: GexPower }) => {
+const GexTooltip = ({ active, payload, label, spot, power, noun = 'Gamma' }: Record<string, unknown> & { spot: number; power: GexPower; noun?: 'Gamma' | 'Delta' }) => {
   if (!active || !Array.isArray(payload) || !payload.length) return null;
   const row = (payload as Array<{ payload: GexViewRow }>)[0]?.payload;
   if (!row) return null;
@@ -87,11 +88,11 @@ const GexTooltip = ({ active, payload, label, spot, power }: Record<string, unkn
           Spot: {spot.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} | Distance: {dist! >= 0 ? '+' : ''}{dist!.toFixed(2)}%
         </p>
       )}
-      <p className="text-zinc-300 font-bold mb-1 font-sans">Gamma Exposure</p>
+      <p className="text-zinc-300 font-bold mb-1 font-sans">{noun} Exposure</p>
       <div className="flex justify-between gap-8 mb-1"><span className="text-amber-400 font-sans">Call:</span><span className="text-white font-bold tabular-nums">{gx(row.ceGex)}</span></div>
       <div className="flex justify-between gap-8 mb-1"><span className="text-violet-400 font-sans">Put:</span><span className="text-white font-bold tabular-nums">{gx(row.peGex)}</span></div>
       <div className="flex justify-between gap-8 mb-2 pb-2 border-b border-zinc-800"><span className="text-sky-400 font-sans">Net:</span><span className={`font-bold tabular-nums ${row.netGex >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>{gx(row.netGex)}</span></div>
-      <p className="text-zinc-300 font-bold mb-1 font-sans">Gamma (per contract)</p>
+      <p className="text-zinc-300 font-bold mb-1 font-sans">{noun} (per contract)</p>
       <div className="flex justify-between gap-6 mb-2 pb-2 border-b border-zinc-800 tabular-nums">
         <span><span className="text-amber-400 font-sans">Call:</span> <span className="text-white font-bold">{gm(row.ceGamma)}</span></span>
         <span><span className="text-violet-400 font-sans">Put:</span> <span className="text-white font-bold">{gm(row.peGamma)}</span></span>
@@ -104,8 +105,8 @@ const GexTooltip = ({ active, payload, label, spot, power }: Record<string, unkn
 };
 
 // Dhan-app style per-strike table under the charts: Call / Put / Net GEX, a stacked call+put distribution bar and level tags.
-const GexStrikeTable = ({ rows, power, callWall, putWall, flip, totals, range }: {
-  rows: GexViewRow[]; power: GexPower; callWall: number | null; putWall: number | null; flip: number | null;
+const GexStrikeTable = ({ rows, power, callWall, putWall, flip, totals, range, noun = 'Gamma' }: {
+  rows: GexViewRow[]; power: GexPower; noun?: 'Gamma' | 'Delta'; callWall: number | null; putWall: number | null; flip: number | null;
   totals: { call: number; put: number; net: number; ratio: number | null }; range: number;
 }) => {
   if (!rows.length) return null;
@@ -119,22 +120,22 @@ const GexStrikeTable = ({ rows, power, callWall, putWall, flip, totals, range }:
     const t: Array<{ text: string; cls: string }> = [];
     if (r.strike === callWall) t.push({ text: 'Call Resistance', cls: 'border-red-500/40 bg-red-500/10 text-red-400' });
     if (r.strike === putWall) t.push({ text: 'Put Support', cls: 'border-emerald-500/40 bg-emerald-500/10 text-emerald-400' });
-    if (r.strike === flipStrike) t.push({ text: 'Gamma Flip', cls: 'border-sky-500/40 bg-sky-500/10 text-sky-400' });
-    if (minRow.netGex < 0 && r === minRow) t.push({ text: 'Peak -Gamma exp', cls: 'border-red-500/40 bg-red-500/10 text-red-400' });
-    if (maxRow.netGex > 0 && r === maxRow) t.push({ text: 'Peak +Gamma exp', cls: 'border-emerald-500/40 bg-emerald-500/10 text-emerald-400' });
+    if (r.strike === flipStrike) t.push({ text: `${noun} Flip`, cls: 'border-sky-500/40 bg-sky-500/10 text-sky-400' });
+    if (minRow.netGex < 0 && r === minRow) t.push({ text: `Peak -${noun} exp`, cls: 'border-red-500/40 bg-red-500/10 text-red-400' });
+    if (maxRow.netGex > 0 && r === maxRow) t.push({ text: `Peak +${noun} exp`, cls: 'border-emerald-500/40 bg-emerald-500/10 text-emerald-400' });
     return t;
   };
   const th = 'px-3 py-2 text-left text-xs font-bold text-white bg-zinc-800';
   const sign = (v: number) => (v > 0 ? 'text-emerald-400' : v < 0 ? 'text-red-400' : 'text-zinc-500');
   return (
     <div className="bg-zinc-900/60 border border-zinc-800 rounded-2xl p-5">
-      <ChartHeader eyebrow="Per strike" title="Gamma exposure table"
-        sub={`ATM ±${range} window, ${POWER_UNIT[power]} per 1% move. Distribution = call (amber) + put (violet) share of the largest strike.`} />
+      <ChartHeader eyebrow="Per strike" title={`${noun} exposure table`}
+        sub={`ATM ±${range} window, ${noun === 'Delta' ? '₹ (delta × OI × spot)' : `${POWER_UNIT[power]} per 1% move`}. Distribution = call (amber) + put (violet) share of the largest strike.`} />
       <div className="flex flex-wrap gap-x-6 gap-y-1 text-xs font-mono mb-3 tabular-nums">
         <span className="text-zinc-400">Total Call: <span className="text-emerald-400 font-bold">{fmt(totals.call)}</span></span>
         <span className="text-zinc-400">Total Put: <span className="text-red-400 font-bold">{fmt(totals.put)}</span></span>
         <span className="text-zinc-400">Total Net: <span className={`${sign(totals.net)} font-bold`}>{fmt(totals.net)}</span></span>
-        <span className="text-zinc-400">GEX Ratio: <span className="text-white font-bold">{totals.ratio != null ? totals.ratio.toFixed(2) : '—'}</span></span>
+        <span className="text-zinc-400">{noun === 'Gamma' ? 'GEX' : 'DEX'} Ratio: <span className="text-white font-bold">{totals.ratio != null ? `${totals.ratio.toFixed(2)} (${ratioLabel(totals.ratio)})` : '—'}</span></span>
       </div>
       <div className="overflow-x-auto max-h-[520px] overflow-y-auto">
         <table className="w-full text-xs font-mono tabular-nums">
@@ -170,6 +171,73 @@ const GexStrikeTable = ({ rows, power, callWall, putWall, flip, totals, range }:
         </table>
       </div>
     </div>
+  );
+};
+
+// Delta Exposure tab: delta x OI x spot per strike (lib/dex.ts), drawn and tabulated like the Dhan app's Delta Exposure view.
+const DexPanel = ({ items, spot, anchor, range }: { items: ChainPayload[]; spot: number; anchor: number; range: number }) => {
+  const d = useMemo(() => {
+    const all = mergeGexRows(items.filter(c => c.chain.oc).map(c => buildDexRows(c.chain.oc as never, c.spot > 0 ? c.spot : spot)));
+    const centre = Math.round(anchor / STRIKE_STEP) * STRIKE_STEP;
+    const rows: GexViewRow[] = all.filter(r => Math.abs(r.strike - centre) <= range * STRIKE_STEP).map(r => ({ ...r, ceOiView: r.ceOi, peOiView: r.peOi }));
+    return { rows, totals: dexSummary(rows), levels: dexLevels(rows, spot) };
+  }, [items, spot, anchor, range]);
+  const { rows, totals, levels } = d;
+  if (!rows.length) return <div className="flex items-center justify-center py-24 text-zinc-500 text-sm">No delta exposure data for this expiry</div>;
+  const nearest = (x: number) => rows.reduce((b, r) => (Math.abs(r.strike - x) < Math.abs(b - x) ? r.strike : b), rows[0].strike);
+  const inView = (x: number) => x >= rows[0].strike - STRIKE_STEP / 2 && x <= rows[rows.length - 1].strike + STRIKE_STEP / 2;
+  const yFmt = (v: number) => { const cr = v / 1e7; return Math.abs(cr) >= 1000 ? `${+(cr / 1000).toFixed(1)}K Cr` : `${Math.round(cr)} Cr`; };
+  const pct = (k: number) => (spot > 0 ? ((k - spot) / spot) * 100 : 0).toFixed(2);
+  const pill = (side: 'call' | 'put', strike: number) => (
+    <ReferenceLine key={side} x={nearest(strike)} stroke={WALL_TONE[side]} strokeWidth={1.5} strokeDasharray="5 3"
+      label={((p: object) => <WallPill {...(p as { viewBox?: { x: number; y: number; width: number; height: number } })} side={side}
+        text={`${side === 'call' ? 'Call Resistance' : 'Put Support'} ${fmtStrike(strike)} (${pct(strike)}%)`} />) as never} />
+  );
+  const money = (v: number) => fmtCr(v);
+  return (
+    <>
+      <div className="rounded-2xl border border-zinc-800 bg-zinc-900/60 flex items-stretch gap-6 px-5 py-4 flex-wrap" data-testid="dex-strip">
+        <PulseStat label={`${UNDERLYING} spot`} value={spot > 0 ? spot.toLocaleString('en-IN', { minimumFractionDigits: 2 }) : '—'} size="text-2xl" />
+        <div className="w-px bg-zinc-800 self-stretch" />
+        <PulseStat label="Total Call" value={money(totals.call)} color="text-emerald-400" size="text-lg" />
+        <PulseStat label="Total Put" value={money(totals.put)} color="text-red-400" size="text-lg" />
+        <PulseStat label="Total Net" value={money(totals.net)} color={totals.net >= 0 ? 'text-emerald-400' : 'text-red-400'} size="text-lg" />
+        <PulseStat label="DEX Ratio" value={totals.ratio != null ? `${totals.ratio.toFixed(2)} (${ratioLabel(totals.ratio)})` : '—'}
+          color={totals.ratio != null && totals.ratio < 0.8 ? 'text-emerald-400' : totals.ratio != null && totals.ratio > 1.2 ? 'text-red-400' : 'text-zinc-200'} size="text-lg" sub={`ATM ±${range} · |put| ÷ call`} />
+      </div>
+      <div className="bg-zinc-900/60 border border-zinc-800 rounded-2xl p-5">
+        <ChartHeader eyebrow="Delta exposure" title="Delta exposure by strike"
+          sub="Delta × OI × spot per strike, in ₹ Cr: call (amber) up, put (violet) down, net (blue) stacked on top. Dealer sign is an assumption."
+          legend={<>
+            <span className="flex items-center gap-1.5"><span className="w-3 h-3 rounded-sm" style={{ background: GEX_CALL }} /><span className="text-zinc-300">Call Exposure</span></span>
+            <span className="flex items-center gap-1.5"><span className="w-3 h-3 rounded-sm" style={{ background: GEX_PUT }} /><span className="text-zinc-300">Put Exposure</span></span>
+            <span className="flex items-center gap-1.5"><span className="w-3 h-3 rounded-sm" style={{ background: GEX_NET }} /><span className="text-zinc-300">Net Exposure</span></span>
+          </>} />
+        <ResponsiveContainer width="100%" height={400}>
+          <ComposedChart data={rows} stackOffset="sign" margin={{ top: 48, right: 16, left: 0, bottom: 40 }}>
+            <CartesianGrid strokeDasharray="3 6" vertical={false} />
+            <XAxis dataKey="strike" tickFormatter={fmtStrike} tick={{ fontSize: 10, fontWeight: 500, fontFamily: 'var(--font-mono)' }} tickLine={false} interval="preserveStartEnd" minTickGap={18} />
+            <YAxis tick={{ fontSize: 10, fontFamily: 'var(--font-mono)' }} tickLine={false} axisLine={false} width={58} tickFormatter={yFmt} />
+            <Tooltip content={<GexTooltip spot={spot} power={2} noun="Delta" />} cursor={{ fill: 'var(--chart-cursor-fill)', opacity: 0.5 }} />
+            <ReferenceLine y={0} stroke="var(--color-zinc-500)" />
+            {levels.putSupport != null && inView(levels.putSupport) && pill('put', levels.putSupport)}
+            {levels.callResistance != null && inView(levels.callResistance) && pill('call', levels.callResistance)}
+            {levels.flip != null && inView(levels.flip) && (
+              <ReferenceLine x={nearest(levels.flip)} stroke={GEX_NET} strokeWidth={2} strokeDasharray="2 3"
+                label={{ value: `DELTA FLIP ${Math.round(levels.flip)}`, position: 'insideBottomRight', fontSize: 10, fontWeight: 700, fill: GEX_NET }} />
+            )}
+            {spot > 0 && inView(spot) && (
+              <ReferenceLine x={nearest(spot)} stroke="var(--color-zinc-400)" strokeDasharray="5 4"
+                label={{ value: `SPOT ${spot.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`, position: 'top', fontSize: 10, fontWeight: 600, fill: 'var(--color-zinc-300)' }} />
+            )}
+            <Bar dataKey="ceGex" name="Call Exposure" stackId="d" fill={GEX_CALL} isAnimationActive={false} />
+            <Bar dataKey="peGex" name="Put Exposure" stackId="d" fill={GEX_PUT} isAnimationActive={false} />
+            <Bar dataKey="netGex" name="Net Exposure" stackId="d" fill={GEX_NET} isAnimationActive={false} />
+          </ComposedChart>
+        </ResponsiveContainer>
+      </div>
+      <GexStrikeTable rows={rows} power={2} noun="Delta" callWall={levels.callResistance} putWall={levels.putSupport} flip={levels.flip} totals={totals} range={range} />
+    </>
   );
 };
 
@@ -240,6 +308,7 @@ export default function GexProfilePage() {
   }, []);
   // Extras = everything the Dhan app's Greeks Exposure tool does not show (expected move, Black-76 flip, regime zone, breach badges,
   // net/OI charts, entry checklist). Off by default so the page reads like the app; remembered per browser.
+  const [tab, setTab] = useState<'delta' | 'gamma'>('gamma');
   const [showExtras, setShowExtras] = useState(false);
   useEffect(() => {
     const t = setTimeout(() => { try { setShowExtras(localStorage.getItem('gex_show_extras') === '1'); } catch { /* storage blocked */ } }, 0);
@@ -661,11 +730,21 @@ export default function GexProfilePage() {
       )}
 
       <div className="flex-1 flex flex-col gap-4 px-6 py-5">
+        <div role="tablist" className="flex items-center gap-1 border-b border-zinc-800 -mb-1">
+          {([['delta', 'Delta Exposure'], ['gamma', 'Gamma Exposure']] as const).map(([k, t]) => (
+            <button key={k} role="tab" aria-selected={tab === k} onClick={() => setTab(k)}
+              className={`px-4 py-2 text-sm font-semibold border-b-2 -mb-px focus:outline-none focus:ring-2 focus:ring-emerald-500/50 ${tab === k ? 'text-white border-emerald-400' : 'text-zinc-400 border-transparent hover:text-zinc-200'}`}>
+              {t}
+            </button>
+          ))}
+        </div>
         {loading && !items ? (
           <div className="flex flex-col items-center justify-center py-24 gap-3">
             <div className="w-6 h-6 border-2 border-zinc-700 border-t-emerald-400 rounded-full animate-spin" />
             <p className="text-sm text-zinc-400 font-medium">Loading option chain…</p>
           </div>
+        ) : tab === 'delta' ? (
+          items ? <DexPanel items={items} spot={spot} anchor={anchor} range={range} /> : null
         ) : (
           <>
             <div className="rounded-2xl border border-zinc-800 bg-zinc-900/60">
@@ -676,7 +755,7 @@ export default function GexProfilePage() {
                   <PulseStat label="Total Call" value={power === 2 ? fmtCr(winTotals.call) : fmtGex(winTotals.call)} color="text-emerald-400" size="text-lg" />
                   <PulseStat label="Total Put" value={power === 2 ? fmtCr(winTotals.put) : fmtGex(winTotals.put)} color="text-red-400" size="text-lg" />
                   <PulseStat label="Total Net" value={power === 2 ? fmtCr(winTotals.net) : fmtGex(winTotals.net)} color={winTotals.net >= 0 ? 'text-emerald-400' : 'text-red-400'} size="text-lg" />
-                  <PulseStat label="GEX Ratio" value={winTotals.ratio != null ? `${winTotals.ratio.toFixed(2)} (${winTotals.ratio < 1 ? 'Bullish' : 'Bearish'})` : '—'} color={winTotals.ratio != null && winTotals.ratio < 1 ? 'text-emerald-400' : 'text-red-400'} size="text-lg"
+                  <PulseStat label="GEX Ratio" value={winTotals.ratio != null ? `${winTotals.ratio.toFixed(2)} (${ratioLabel(winTotals.ratio)})` : '—'} color={winTotals.ratio != null && winTotals.ratio < 0.8 ? 'text-emerald-400' : winTotals.ratio != null && winTotals.ratio > 1.2 ? 'text-red-400' : 'text-zinc-200'} size="text-lg"
                     sub={`ATM ±${range} · put ÷ call`} />
                 </div>
               ) : (
