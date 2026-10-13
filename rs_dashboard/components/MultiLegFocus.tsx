@@ -15,6 +15,8 @@ import {
 import { sortLegsForPlacement, resolveOrderRequest, type StrikeIdentifier } from '@/lib/basketOrders';
 import StrategyCardGrid from './basket/StrategyCardGrid';
 import MultiLegStrategyRow from './multiLegFocus/MultiLegStrategyRow';
+import PayoffChartsView, { type PayoffChartItem } from './multiLegFocus/PayoffChartsView';
+import type { PayoffLegInput } from '@/lib/optionsPayoff';
 import OrdersTradesModal from './multiLegFocus/OrdersTradesModal';
 import GroupSelectionBar from './multiLegFocus/GroupSelectionBar';
 import UngroupedTradesTable, { type UngroupedTrade } from './multiLegFocus/UngroupedTradesTable';
@@ -31,7 +33,7 @@ import {
   positionProduct, computeBasketStatus, closedFillFromRow,
   findSiblingLegCollisions, type SiblingLegCollision,
   recordOutsideReduction, isLegInFillGrace,
-  basketLabel, crudeQtyMultiplier, legCountsToday, isLooseTrade, isOptionLeg, type OptionLeg, findUntrackedPositions, residualBrokerAvg, findContractDrift, type ContractDrift, contractHintFromRow, legFromUntracked, mergeImportedLegs, brokerClampSlice,
+  basketLabel, futuresAsSyntheticPayoffLegs, crudeQtyMultiplier, legCountsToday, isLooseTrade, isOptionLeg, type OptionLeg, findUntrackedPositions, residualBrokerAvg, findContractDrift, type ContractDrift, contractHintFromRow, legFromUntracked, mergeImportedLegs, brokerClampSlice,
   normalizeTradeRow, ownOrderIds, repriceEstimatedCloses, MLF_ORDER_SOURCE, type NormalizedTrade,
   type MultiLegLeg, type MultiLegBasket, type StrategyRiskConfig, type MultiLegStatus,
 } from '@/lib/multiLegFocus';
@@ -109,6 +111,8 @@ export default function MultiLegFocus({
   helpMarkdown,
 }: MultiLegFocusProps = {}) {
   const [showHelp, setShowHelp] = useState(false);
+  // 'charts' = payoff-diagram view of every live strategy (grid / single / full screen).
+  const [pageView, setPageView] = useState<'strategies' | 'charts'>('strategies');
   const { broker, setBroker, authenticatedBrokers, hasAuthenticatedBroker } = useBrokerSelector();
 
   // Multi-Basket State: list of all strategies
@@ -3497,6 +3501,47 @@ export default function MultiLegFocus({
     .map(b => ({ basket: b, leg: b.legs[0] }))
     .sort((a, b) => (a.leg.status === 'CLOSED' ? 1 : 0) - (b.leg.status === 'CLOSED' ? 1 : 0)), [baskets]);
 
+  // Inputs for the Charts view: one item per strategy that still has an open/draft leg, built from the same data the row uses.
+  const chartItems = pageView !== 'charts' ? [] : sortedBaskets.flatMap((basket, i): PayoffChartItem[] => {
+    const open = basket.legs.filter(l => l.status !== 'CLOSED');
+    if (open.length === 0) return [];
+    const rowBroker = executionBroker(basket, broker);
+    const chain = chainData[`${basket.underlying}:${basket.expiry}`];
+    const allStrikes = chain?.strikes?.length ? chain.strikes : fallbackStrikesFor(basket.underlying as Underlying);
+    const step = strikeStep(allStrikes) || DEFAULT_INDEX_STEP[basket.underlying as Underlying] || 50;
+    const spot = (basket.underlying === activeUnderlying && liveQuotes?.spot && liveQuotes.spot > 0)
+      ? liveQuotes.spot : (chain?.spot ?? 0);
+    const lot = lookupCache[lkKey(rowBroker, basket.underlying, basket.expiry)]?.lotSize ?? fallbackLotSize(basket.underlying as Underlying, rowBroker);
+    const crudeMult = crudeQtyMultiplier(basket.underlying, rowBroker);
+    const ivFor = (strk: number, opt: OptionType, exp: string) => {
+      const q = chainData[`${basket.underlying}:${exp}`]?.quotes?.[String(strk)];
+      const iv = opt === 'CE' ? q?.ceIv : q?.peIv;
+      return iv && iv > 0 ? iv / 100 : 0;
+    };
+    const legs = open.flatMap((l): PayoffLegInput[] => {
+      const exp = l.expiry || basket.expiry;
+      const live = ltpFor(basket, l);
+      const entry = (l.fill?.avgPrice && l.fill.avgPrice > 0) ? l.fill.avgPrice : (live > 0 ? live : (l.price || 0));
+      const units = ((l.fill?.qty && l.fill.qty > 0) ? l.fill.qty : (l.lots * lot)) * crudeMult;
+      const qty = l.side === 'S' ? -units : units;
+      if (l.option === 'FUT') return futuresAsSyntheticPayoffLegs(qty, entry, exp, live);
+      return [{ type: l.option, strike: l.strike, expiry: exp, qty, entryPrice: entry, mark: live > 0 ? live : undefined, chainIv: ivFor(l.strike, l.option, exp) || undefined, lotSize: lot }];
+    });
+    const atmStrike = nearestStrike(allStrikes, spot);
+    const ce = (atmStrike && ivFor(atmStrike, 'CE', basket.expiry)) || 0;
+    const pe = (atmStrike && ivFor(atmStrike, 'PE', basket.expiry)) || 0;
+    const atmIv = ce > 0 && pe > 0 ? (ce + pe) / 2 : (ce || pe);
+    const m = computeStrategyMetrics(open, l => ltpFor(basket, l), crudeMult);
+    return [{
+      id: basket.id,
+      label: basket.groupName?.trim() || basketLabel(basket, `Strategy #${i + 1}`),
+      underlying: basket.underlying, expiry: basket.expiry, spot, legs, step,
+      strikes: open.filter(isOptionLeg).map(l => ({ strike: l.strike, option: l.option, side: l.side, lots: l.lots })),
+      margin: basketMargins[basket.id]?.basketMargin || undefined, atmIv: atmIv || undefined,
+      pnl: m.hasUnpricedLegs ? null : m.totalPnlRupees,
+    }];
+  });
+
   return (
     <div className={embedded ? 'flex flex-col w-full' : 'min-h-screen bg-zinc-950 text-zinc-100'}>
       {!hideHeader && <NavBar />}
@@ -3834,7 +3879,7 @@ export default function MultiLegFocus({
         </div>
 
         {/* Strategy Templates Bar — NEVER disabled so user can always add another strategy! */}
-        <div className="mt-2.5 pt-2.5 border-t border-zinc-800/80">
+        <div className={`mt-2.5 pt-2.5 border-t border-zinc-800/80${pageView === 'charts' ? ' hidden' : ''}`}>
           <div className={`flex items-center justify-between flex-wrap gap-2 ${presetsCollapsed ? '' : 'mb-1.5'}`}>
             <div className="flex items-center gap-2 flex-wrap">
               <button
@@ -3886,8 +3931,32 @@ export default function MultiLegFocus({
         </div>
       </div>
 
+      {/* View switch: strategy rows vs payoff charts */}
+      <div className={embedded ? 'px-2 pt-2' : 'px-4 pt-3'}>
+        <div className="inline-flex rounded-lg border border-zinc-700 overflow-hidden" role="tablist" aria-label="Page view">
+          {(['strategies', 'charts'] as const).map(v => (
+            <button
+              key={v}
+              type="button"
+              role="tab"
+              aria-selected={pageView === v}
+              onClick={() => setPageView(v)}
+              className={`h-8 px-4 text-xs font-bold ${pageView === v ? 'bg-zinc-700 text-white' : 'bg-zinc-900 text-zinc-400 hover:text-white'} ${FOCUS_RING}`}
+            >
+              {v === 'strategies' ? 'Strategies' : 'Payoff Charts'}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {pageView === 'charts' && (
+        <div className={embedded ? 'p-2 w-full' : 'p-4 w-full'}>
+          <PayoffChartsView items={chartItems} />
+        </div>
+      )}
+
       {/* Main Container: Parallel Strategy Rows */}
-      <div className={embedded ? 'p-2 flex flex-col gap-2.5 w-full' : 'p-4 flex flex-col gap-4 w-full'}>
+      <div className={`${pageView === 'charts' ? 'hidden ' : ''}${embedded ? 'p-2 flex flex-col gap-2.5 w-full' : 'p-4 flex flex-col gap-4 w-full'}`}>
         {baskets.length === 0 ? (
           <div className="flex flex-col items-center justify-center py-24 gap-3 border border-zinc-800/60 rounded-xl bg-zinc-900/20">
             <Layers className="w-10 h-10 text-zinc-600" />
