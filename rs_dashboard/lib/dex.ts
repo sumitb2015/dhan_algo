@@ -40,8 +40,12 @@ export function dexSummary(rows: GexRow[]): DexSummary {
 }
 
 /**
- * Bullish / Balanced / Bearish word beside the ratio. The app shows 0.57 as Bullish and 0.95 as Balanced; the cut-offs
- * (below 0.8, above 1.2) are our assumption between those two points, not read from the app.
+ * Bullish / Balanced / Bearish word beside the ratio (|put| / call). Dhan does not publish the cut-offs (its DEXT T3 launch post,
+ * madefortrade.in/t/92529, only names the tags). Ground truth read off the app, 2026-10-13:
+ *   Bullish  at 0.5703 (GEX), 0.6688 (DEX), 0.7443 (DEX)
+ *   Balanced at 0.9544 (DEX)
+ * so the Bullish/Balanced boundary lies in (0.7443, 0.9544); 0.8 is inside that bracket but not pinned. The Balanced/Bearish
+ * boundary has no data point above 1 yet; 1.2 is a guess. Tighten both from further app screenshots.
  */
 export function ratioLabel(ratio: number | null): 'Bullish' | 'Balanced' | 'Bearish' | null {
   if (ratio == null) return null;

@@ -77,3 +77,10 @@ test('put support skips the call-resistance strike: app 2026-10-13 09:22, larges
   assert.strictEqual(lv.putSupport, 22500);
   assert.strictEqual(lv.flip, 22325);
 });
+
+test('ratio label agrees with every ground-truth reading taken from the Dhan app (2026-10-13)', () => {
+  assert.strictEqual(ratioLabel(50421.81 / 88419.75), 'Bullish'); // 0.5703 GEX
+  assert.strictEqual(ratioLabel(59053.47 / 88295.0), 'Bullish'); // 0.6688 DEX
+  assert.strictEqual(ratioLabel(74742.66 / 100411.63), 'Bullish'); // 0.7443 DEX
+  assert.strictEqual(ratioLabel(61369.34 / 64304.01), 'Balanced'); // 0.9544 DEX
+});
