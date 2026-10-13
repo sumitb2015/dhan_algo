@@ -1688,7 +1688,7 @@ export default function MultiLegFocus({
 
   // `unattended` = an automatic exit (a guard): never raise a blocking dialog. A hedge whose own side still has an open short is
   // refused (it would leave that short naked); other open shorts only raise margin, which is not worth freezing the tab for.
-  const exitOneLeg = useCallback(async (basketId: string, leg: MultiLegLeg, exitLots?: number, opts?: { unattended?: boolean }): Promise<{ closed: boolean; qty: number; maxAfter?: number }> => {
+  const exitOneLeg = useCallback(async (basketId: string, leg: MultiLegLeg, exitLots?: number, opts?: { unattended?: boolean; orderType?: 'MARKET' | 'LIMIT'; limitPrice?: number }): Promise<{ closed: boolean; qty: number; maxAfter?: number }> => {
     while (regroupGateRef.current) {
       await regroupGateRef.current;
       // The leg may now live in another row: write back to the row that holds it.
@@ -1843,9 +1843,15 @@ export default function MultiLegFocus({
         ? (isSensex ? 'bse_fo' : (isCrude ? 'mcx_fo' : 'nse_fo'))
         : (isSensex ? 'BFO' : (isCrude ? 'MCX' : 'NFO'));
 
+      const exitType = opts?.orderType === 'LIMIT' ? 'LIMIT' : 'MARKET';
+      const exitLimit = exitType === 'LIMIT' ? Number((Math.round((opts?.limitPrice ?? 0) / 0.05) * 0.05).toFixed(2)) : 0;
+      if (exitType === 'LIMIT' && !(exitLimit > 0)) {
+        addToast('error', `Cannot exit ${label}`, 'A LIMIT exit needs a price above zero — nothing was sent.');
+        return { closed, qty: closedQty };
+      }
       const orderUrl = bk === 'dhan' ? '/api/scalper/fast-order' : scalperRoute(bk, 'order');
       const body = bk === 'dhan'
-        ? { securityId, quantity: qty, side, orderType: 'MARKET', exchangeSegment: match.row.exchangeSegment ?? defaultSegDhan, ...productPayload.fields, source: MLF_ORDER_SOURCE }
+        ? { securityId, quantity: qty, side, orderType: exitType, ...(exitType === 'LIMIT' ? { price: exitLimit } : {}), exchangeSegment: match.row.exchangeSegment ?? defaultSegDhan, ...productPayload.fields, source: MLF_ORDER_SOURCE }
         : {
             tradingsymbol: leg.orderRef?.symbol
               ?? (match.row.tradingSymbol as string | undefined)
@@ -1853,7 +1859,8 @@ export default function MultiLegFocus({
               ?? (match.row.symbol as string | undefined),
             quantity: qty,
             side,
-            orderType: 'MARKET',
+            orderType: exitType,
+            ...(exitType === 'LIMIT' ? { price: exitLimit } : {}),
             exchange: match.row.exchange ?? defaultExchOther,
             ...productPayload.fields,
           };
@@ -1864,7 +1871,7 @@ export default function MultiLegFocus({
       if (j2.success) {
         addToast('success', `Exited ${label}`, `ID: ${j2.order_id}`);
         const currentLtp = basket ? ltpFor(basket, leg) : 0;
-        const exitPrice = (j2.price && j2.price > 0) ? j2.price : (currentLtp > 0 ? currentLtp : (leg.fill?.avgPrice ?? 0));
+        const exitPrice = (j2.price && j2.price > 0) ? j2.price : (exitType === 'LIMIT' ? exitLimit : (currentLtp > 0 ? currentLtp : (leg.fill?.avgPrice ?? 0)));
         if (partialLotSize > 0) {
           // Split: the leg keeps the remainder, the closed slice is its own CLOSED row.
           patchLegs(basketId, legs => legs.flatMap(l => {
@@ -2097,8 +2104,8 @@ export default function MultiLegFocus({
 
 
   // Manual single-leg exit from a card or the Ungrouped trades table.
-  const exitLegFromPage = useCallback(async (basket: MultiLegBasket, leg: MultiLegLeg, exitLots?: number) => {
-    await trackOp(basket.id, () => exitOneLeg(basket.id, leg, exitLots), { exit: true });
+  const exitLegFromPage = useCallback(async (basket: MultiLegBasket, leg: MultiLegLeg, exitLots?: number, order?: { orderType: 'MARKET' | 'LIMIT'; limitPrice?: number }) => {
+    await trackOp(basket.id, () => exitOneLeg(basket.id, leg, exitLots, order), { exit: true });
   }, [trackOp, exitOneLeg]);
 
   // ── Group / ungroup trades ──────────────────────────────────────────
@@ -4034,7 +4041,7 @@ export default function MultiLegFocus({
                 onDelete={() => deleteBasket(basket.id)}
                 onPlace={async () => { await trackOp(basket.id, () => placeBasket(basket.id)); }}
                 onExit={async () => { await trackOp(basket.id, () => exitBasket(basket.id), { exit: true }); }}
-                onExitLeg={(leg, exitLots) => exitLegFromPage(basket, leg, exitLots)}
+                onExitLeg={(leg, exitLots, order) => exitLegFromPage(basket, leg, exitLots, order)}
                 onShiftLegs={async (legIds, direction, steps) => { await trackOp(basket.id, () => shiftLegs(basket.id, legIds, direction, steps)); }}
                 legColumns={legColumns}
                 onLegColumnsChange={changeLegColumns}

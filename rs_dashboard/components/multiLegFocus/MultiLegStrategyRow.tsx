@@ -9,6 +9,7 @@ import RuleNumInput from './RuleNumInput';
 import GuardsPanel from './GuardsPanel';
 import { guardsArmed, type BasketGuards, type NetGreeks } from '@/lib/multiLegGuards';
 import AddLotsModal from './AddLotsModal';
+import ExitLotsModal from './ExitLotsModal';
 import PnlTableModal from './PnlTableModal';
 import PositionVisualizerModal from './PositionVisualizerModal';
 import StrategyChartModal, { chartLegsFor, isChartableUnderlying } from './StrategyChartModal';
@@ -85,7 +86,7 @@ export interface MultiLegStrategyRowProps {
   onDelete: () => void;
   onPlace: () => Promise<void>;
   onExit: () => Promise<void>;
-  onExitLeg: (leg: MultiLegLeg, exitLots?: number) => Promise<void>;
+  onExitLeg: (leg: MultiLegLeg, exitLots?: number, order?: { orderType: 'MARKET' | 'LIMIT'; limitPrice?: number }) => Promise<void>;
   /** Roll the given OPEN legs N strikes up/down (close, then reopen). */
   onShiftLegs?: (legIds: string[], direction: 'UP' | 'DOWN', steps: number) => Promise<void>;
   /** Which optional legs-table columns are shown (owned by MultiLegFocus so every row agrees). */
@@ -225,6 +226,7 @@ export default function MultiLegStrategyRow({
   }, [onShiftLegs, shiftSteps]);
 
   const [selectedLegForAddLots, setSelectedLegForAddLots] = useState<MultiLegLeg | null>(null);
+  const [selectedLegForExit, setSelectedLegForExit] = useState<MultiLegLeg | null>(null);
   const [isAddNewLegModalOpen, setIsAddNewLegModalOpen] = useState<boolean>(false);
 
   // Legs-table view state: purely presentational (never written back to the
@@ -1512,7 +1514,7 @@ export default function MultiLegStrategyRow({
                       farExpiry={effectiveFarExpiry}
                       onChange={patch => updateLeg(leg.id, patch)}
                       onRemove={() => removeLeg(leg.id)}
-                      onExit={lots => onExitLeg(leg, lots)}
+                      onOpenExit={() => setSelectedLegForExit(leg)}
                       onOpenAddLots={leg.option === 'FUT' ? undefined : () => setSelectedLegForAddLots(leg)}
                       onShift={onShiftLegs && leg.option !== 'FUT' ? (d => runShift([leg.id], d)) : undefined}
                       shiftSteps={shiftSteps}
@@ -1621,6 +1623,23 @@ export default function MultiLegStrategyRow({
           currentLtp={ltpFor(selectedLegForAddLots)}
           broker={broker}
           onConfirm={onAddLots}
+        />
+      )}
+
+      {/* Exit Leg Modal */}
+      {selectedLegForExit && (
+        <ExitLotsModal
+          isOpen
+          onClose={() => setSelectedLegForExit(null)}
+          leg={basket.legs.find(l => l.id === selectedLegForExit.id) ?? selectedLegForExit}
+          basket={basket}
+          lotSize={defaultLotSize}
+          currentLtp={ltpFor(selectedLegForExit)}
+          broker={broker}
+          onConfirm={async ({ lots, orderType, limitPrice }) => {
+            const l = basket.legs.find(x => x.id === selectedLegForExit.id) ?? selectedLegForExit;
+            await onExitLeg(l, lots < l.lots ? lots : undefined, { orderType, limitPrice });
+          }}
         />
       )}
 

@@ -40,8 +40,8 @@ interface MultiLegLegRowProps {
   farExpiry?: string;
   onChange: (patch: Partial<MultiLegLeg>) => void;
   onRemove: () => void;
-  /** `lots` < leg.lots exits only that many lots; omitted = whole leg. */
-  onExit: (lots?: number) => void;
+  /** Opens the exit ticket (lots, market/limit). */
+  onOpenExit: () => void;
   onOpenAddLots?: () => void;
   /** Roll this OPEN leg N strikes (N is the strategy card's Steps stepper). */
   onShift?: (direction: 'UP' | 'DOWN') => void;
@@ -99,13 +99,8 @@ export function TagCell({ value, onCommit }: { value?: string; onCommit: (v: str
 }
 
 export default function MultiLegLegRow({
-  leg, allStrikes, ltp, spot, editable, exiting, margin, multiplier = 1, strategyMultiplier = 1, frontExpiry, farExpiry, onChange, onRemove, onExit, onOpenAddLots, onShift, shiftSteps = 1, shiftBusy = false, strikeBlocked = false, columns = DEFAULT_LEG_COLUMNS, showExit = false, iv = 0, selected = false, onSelect, onTag, onDetach,
+  leg, allStrikes, ltp, spot, editable, exiting, margin, multiplier = 1, strategyMultiplier = 1, frontExpiry, farExpiry, onChange, onRemove, onOpenExit, onOpenAddLots, onShift, shiftSteps = 1, shiftBusy = false, strikeBlocked = false, columns = DEFAULT_LEG_COLUMNS, showExit = false, iv = 0, selected = false, onSelect, onTag, onDetach,
 }: MultiLegLegRowProps) {
-  const [exitLotsText, setExitLotsText] = React.useState('');
-  // The box resets once the leg's lots change (a partial exit landed), never before.
-  React.useEffect(() => { setExitLotsText(''); }, [leg.lots]);
-  const exitLotsNum = Math.floor(Number(exitLotsText));
-  const exitLotsValid = exitLotsText === '' || (exitLotsNum >= 1 && exitLotsNum <= leg.lots);
   const isFut = leg.option === 'FUT';
   const pnl = leg.fill ? legPnl(leg, ltp, multiplier) : 0;
   const pnlColor = pnl > 0 ? 'text-emerald-400' : pnl < 0 ? 'text-rose-400' : 'text-zinc-400';
@@ -393,27 +388,12 @@ export default function MultiLegLegRow({
                 <Plus className="w-2.5 h-2.5" /> ADD
               </button>
             )}
-            {leg.lots > 1 && (
-              <input
-                type="number" min={1} max={leg.lots} placeholder={`${leg.lots}`}
-                value={exitLotsText}
-                onChange={e => setExitLotsText(e.target.value)}
-                disabled={exiting || shiftBusy}
-                aria-label="Lots to exit (blank = all)"
-                title="Lots to exit (blank = all)"
-                className={`h-6 w-10 bg-zinc-900 border text-zinc-200 text-[10px] font-semibold rounded px-1 text-right ${exitLotsValid ? 'border-zinc-700' : 'border-rose-500'} ${FOCUS_RING}`}
-              />
-            )}
             <button
               type="button"
-              onClick={() => {
-                if (!exitLotsValid) return;
-                const n = exitLotsText === '' ? undefined : exitLotsNum;
-                onExit(n != null && n < leg.lots ? n : undefined);
-              }}
-              disabled={exiting || shiftBusy || !exitLotsValid}
+              onClick={onOpenExit}
+              disabled={exiting || shiftBusy}
               aria-label="Exit this leg"
-              title={exitLotsText !== '' && exitLotsNum < leg.lots ? `Exit ${exitLotsNum} lot(s)` : 'Exit this leg'}
+              title="Exit this leg — choose lots and market/limit"
               className={`h-6 px-2.5 text-[10px] font-bold text-rose-400 hover:text-rose-300 rounded border border-rose-500/30 hover:bg-rose-500/10 disabled:opacity-50 disabled:cursor-not-allowed transition-colors ${FOCUS_RING}`}
             >
               {exiting ? 'Exiting…' : 'EXIT'}
