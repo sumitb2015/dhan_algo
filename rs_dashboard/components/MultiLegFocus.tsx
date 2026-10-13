@@ -37,6 +37,7 @@ import {
   normalizeTradeRow, ownOrderIds, repriceEstimatedCloses, MLF_ORDER_SOURCE, type NormalizedTrade,
   type MultiLegLeg, type MultiLegBasket, type StrategyRiskConfig, type MultiLegStatus,
 } from '@/lib/multiLegFocus';
+import { snapToTick, exitLimitTick } from '@/lib/multiLegExitOrder';
 import { guardsArmed, exitSide, istDayOf, type BasketGuards } from '@/lib/multiLegGuards';
 import { evaluateBasketGuards, newGuardRuntime } from '@/lib/multiLegGuardEngine';
 import { basketToGreekLegs, computeBasketGreeks } from '@/lib/multiLegGreeks';
@@ -1844,10 +1845,25 @@ export default function MultiLegFocus({
         : (isSensex ? 'BFO' : (isCrude ? 'MCX' : 'NFO'));
 
       const exitType = opts?.orderType === 'LIMIT' ? 'LIMIT' : 'MARKET';
-      const exitLimit = exitType === 'LIMIT' ? Number((Math.round((opts?.limitPrice ?? 0) / 0.05) * 0.05).toFixed(2)) : 0;
-      if (exitType === 'LIMIT' && !(exitLimit > 0)) {
-        addToast('error', `Cannot exit ${label}`, 'A LIMIT exit needs a price above zero — nothing was sent.');
-        return { closed, qty: closedQty };
+      let exitLimit = 0;
+      if (exitType === 'LIMIT') {
+        // Snap to the contract's own tick (Dhan: master list, via the read-only tick route); MCX with no known tick is refused.
+        let masterTick: number | null = null;
+        if (bk === 'dhan' && securityId) {
+          try {
+            const tr = await fetch(`/api/super-order/tick?securityId=${encodeURIComponent(String(securityId))}&segment=${encodeURIComponent(String(match.row.exchangeSegment ?? defaultSegDhan))}`);
+            const tj = await tr.json() as { success?: boolean; tick?: number };
+            if (tj.success && tj.tick && tj.tick > 0) masterTick = tj.tick;
+          } catch { /* unknown tick: handled below */ }
+        }
+        const tick = exitLimitTick({ masterTick, isMcx: isCrude });
+        exitLimit = tick ? snapToTick(opts?.limitPrice ?? 0, tick) : 0;
+        if (!(exitLimit > 0)) {
+          addToast('error', `Cannot exit ${label}`, tick == null
+            ? 'The tick size of this MCX contract is unknown, so a LIMIT price cannot be checked — nothing was sent. Use MARKET.'
+            : 'A LIMIT exit needs a price above zero — nothing was sent.');
+          return { closed, qty: closedQty };
+        }
       }
       const orderUrl = bk === 'dhan' ? '/api/scalper/fast-order' : scalperRoute(bk, 'order');
       const body = bk === 'dhan'
@@ -2104,8 +2120,10 @@ export default function MultiLegFocus({
 
 
   // Manual single-leg exit from a card or the Ungrouped trades table.
-  const exitLegFromPage = useCallback(async (basket: MultiLegBasket, leg: MultiLegLeg, exitLots?: number, order?: { orderType: 'MARKET' | 'LIMIT'; limitPrice?: number }) => {
-    await trackOp(basket.id, () => exitOneLeg(basket.id, leg, exitLots, order), { exit: true });
+  const exitLegFromPage = useCallback(async (basket: MultiLegBasket, leg: MultiLegLeg, exitLots?: number, order?: { orderType: 'MARKET' | 'LIMIT'; limitPrice?: number }): Promise<boolean> => {
+    const r = await trackOp(basket.id, () => exitOneLeg(basket.id, leg, exitLots, order), { exit: true });
+    // true = an order went out or the leg was already flat; false = refused (the exit ticket stays open).
+    return !!r && (r.closed || r.qty > 0);
   }, [trackOp, exitOneLeg]);
 
   // ── Group / ungroup trades ──────────────────────────────────────────

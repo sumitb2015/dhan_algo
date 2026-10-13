@@ -14,7 +14,7 @@ interface ExitLotsModalProps {
   lotSize: number;
   currentLtp: number;
   broker: Broker;
-  onConfirm: (params: { legId: string; lots: number; orderType: 'MARKET' | 'LIMIT'; limitPrice?: number }) => Promise<void>;
+  onConfirm: (params: { legId: string; lots: number; orderType: 'MARKET' | 'LIMIT'; limitPrice?: number }) => Promise<boolean | void>;
 }
 
 function fmtMoney(n: number): string {
@@ -55,8 +55,9 @@ export default function ExitLotsModal({ isOpen, onClose, leg, basket, lotSize, c
     if (submitting || limitInvalid) return;
     setSubmitting(true);
     try {
-      await onConfirm({ legId: leg.id, lots, orderType, limitPrice: orderType === 'LIMIT' ? limitPrice : undefined });
-      onClose();
+      const sent = await onConfirm({ legId: leg.id, lots, orderType, limitPrice: orderType === 'LIMIT' ? limitPrice : undefined });
+      // A refused exit (toast explains why) leaves the ticket open so the lots/price can be corrected.
+      if (sent !== false) onClose();
     } finally {
       setSubmitting(false);
     }

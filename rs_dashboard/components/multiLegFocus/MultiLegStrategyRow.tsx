@@ -86,7 +86,7 @@ export interface MultiLegStrategyRowProps {
   onDelete: () => void;
   onPlace: () => Promise<void>;
   onExit: () => Promise<void>;
-  onExitLeg: (leg: MultiLegLeg, exitLots?: number, order?: { orderType: 'MARKET' | 'LIMIT'; limitPrice?: number }) => Promise<void>;
+  onExitLeg: (leg: MultiLegLeg, exitLots?: number, order?: { orderType: 'MARKET' | 'LIMIT'; limitPrice?: number }) => Promise<boolean | void>;
   /** Roll the given OPEN legs N strikes up/down (close, then reopen). */
   onShiftLegs?: (legIds: string[], direction: 'UP' | 'DOWN', steps: number) => Promise<void>;
   /** Which optional legs-table columns are shown (owned by MultiLegFocus so every row agrees). */
@@ -1638,7 +1638,7 @@ export default function MultiLegStrategyRow({
           broker={broker}
           onConfirm={async ({ lots, orderType, limitPrice }) => {
             const l = basket.legs.find(x => x.id === selectedLegForExit.id) ?? selectedLegForExit;
-            await onExitLeg(l, lots < l.lots ? lots : undefined, { orderType, limitPrice });
+            return await onExitLeg(l, lots < l.lots ? lots : undefined, { orderType, limitPrice });
           }}
         />
       )}
