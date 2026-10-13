@@ -42,3 +42,29 @@ test('levels: largest call = resistance, largest put = support, flip between the
   assert.strictEqual(lv.putSupport, 22300);
   assert.strictEqual(lv.flip, 22325);
 });
+
+test('summary values: call and put totals, net and ratio over the rows given', () => {
+  const s = dexSummary(buildDexRows(oc, 100));
+  const calls = (0.68057 * 5433480 + 0.54487 * 8413925) * 100;
+  const puts = -(0.37846 * 10592010 + 0.46817 * 5402150) * 100;
+  assert.ok(Math.abs(s.call - calls) < 1e-3 * calls);
+  assert.ok(Math.abs(s.put - puts) < 1e-3 * Math.abs(puts));
+  assert.ok(Math.abs(s.net - (calls + puts)) < 1);
+  assert.ok(Math.abs((s.ratio ?? 0) - -puts / calls) < 1e-9);
+  assert.strictEqual(dexSummary([]).ratio, null);
+});
+
+test('a strike with only one side still builds, and a missing delta gives zero exposure', () => {
+  const rows = buildDexRows({ '100.000000': { ce: { oi: 50, greeks: { delta: 0.5 } } }, '150.000000': { ce: { oi: 50, greeks: null }, pe: { oi: 10, greeks: { delta: -0.3 } } } }, 10);
+  assert.strictEqual(rows[0].peGex, -0);
+  assert.strictEqual(rows[0].ceGex, 250);
+  assert.strictEqual(rows[1].ceGex, 0);
+  assert.strictEqual(rows[1].peGex, -30);
+});
+
+test('with two flips the one nearest spot is reported', () => {
+  const mk = (k: number, ce: number, pe: number) => ({ [`${k}.000000`]: { ce: { oi: 1, greeks: { delta: ce } }, pe: { oi: 1, greeks: { delta: pe } } } });
+  const rows = buildDexRows({ ...mk(100, 0.1, -0.9), ...mk(150, 0.9, -0.1), ...mk(200, 0.1, -0.9), ...mk(250, 0.9, -0.1) }, 1);
+  assert.strictEqual(dexLevels(rows, 240).flip, 225);
+  assert.strictEqual(dexLevels(rows, 110).flip, 125);
+});
