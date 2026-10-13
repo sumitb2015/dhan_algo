@@ -147,17 +147,17 @@ export default function PayoffChartsView({ items }: { items: PayoffChartItem[] }
       {showVix && <VixChartPanel />}
       <div className="flex items-center justify-between flex-wrap gap-2">
         <div className="flex items-center gap-2">
-        <div className="inline-flex rounded-lg border border-zinc-700 overflow-hidden" role="group" aria-label="Chart layout">
-          <button type="button" onClick={() => { setMode('grid'); setFull(false); }} aria-pressed={mode === 'grid'}
-            className={`h-8 px-3 inline-flex items-center gap-1.5 text-xs font-bold ${mode === 'grid' ? 'bg-zinc-700 text-white' : 'bg-zinc-900 text-zinc-400 hover:text-white'} ${FOCUS_RING}`}>
-            <LayoutGrid className="w-3.5 h-3.5" /> All (2 per row)
-          </button>
-          <button type="button" onClick={() => { if (!focusId) setFocusId(items[0].id); setMode('single'); }} aria-pressed={mode === 'single'}
-            className={`h-8 px-3 inline-flex items-center gap-1.5 text-xs font-bold ${mode === 'single' ? 'bg-zinc-700 text-white' : 'bg-zinc-900 text-zinc-400 hover:text-white'} ${FOCUS_RING}`}>
-            <Square className="w-3.5 h-3.5" /> Single
-          </button>
-        </div>
-        {vixToggle}
+          <div className="inline-flex rounded-lg border border-zinc-700 overflow-hidden" role="group" aria-label="Chart layout">
+            <button type="button" onClick={() => { setMode('grid'); setFull(false); }} aria-pressed={mode === 'grid'}
+              className={`h-8 px-3 inline-flex items-center gap-1.5 text-xs font-bold ${mode === 'grid' ? 'bg-zinc-700 text-white' : 'bg-zinc-900 text-zinc-400 hover:text-white'} ${FOCUS_RING}`}>
+              <LayoutGrid className="w-3.5 h-3.5" /> All (2 per row)
+            </button>
+            <button type="button" onClick={() => { if (!focusId) setFocusId(items[0].id); setMode('single'); }} aria-pressed={mode === 'single'}
+              className={`h-8 px-3 inline-flex items-center gap-1.5 text-xs font-bold ${mode === 'single' ? 'bg-zinc-700 text-white' : 'bg-zinc-900 text-zinc-400 hover:text-white'} ${FOCUS_RING}`}>
+              <Square className="w-3.5 h-3.5" /> Single
+            </button>
+          </div>
+          {vixToggle}
         </div>
         {mode === 'single' && (
           <div className="flex items-center gap-3 flex-wrap">

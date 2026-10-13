@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { X, LogOut } from 'lucide-react';
 import { fallbackLotSize, type MultiLegBasket, type MultiLegLeg } from '@/lib/multiLegFocus';
 import { FOCUS_RING } from '@/components/Scalper';
@@ -26,6 +26,13 @@ export default function ExitLotsModal({ isOpen, onClose, leg, basket, lotSize, c
   const [orderType, setOrderType] = useState<'MARKET' | 'LIMIT'>('MARKET');
   const [limitPrice, setLimitPrice] = useState<number>(() => (currentLtp > 0 ? currentLtp : 0));
   const [submitting, setSubmitting] = useState(false);
+
+  useEffect(() => {
+    if (!isOpen) return;
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape' && !submitting) onClose(); };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [isOpen, submitting, onClose]);
 
   if (!isOpen || !leg || !basket) return null;
 
@@ -59,7 +66,7 @@ export default function ExitLotsModal({ isOpen, onClose, leg, basket, lotSize, c
     active ? 'bg-rose-600 border-rose-500 text-oncolor shadow-sm' : 'bg-zinc-900 border-zinc-800 text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800'}`;
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-oncolor-dark/80 backdrop-blur-sm p-4">
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-oncolor-dark/80 backdrop-blur-sm p-4" role="dialog" aria-modal="true" aria-label="Exit position">
       <div className="bg-zinc-950 border border-zinc-800 rounded-2xl shadow-2xl max-w-md w-full overflow-hidden flex flex-col">
         <div className="px-5 py-4 bg-zinc-900/90 border-b border-zinc-800 flex items-center justify-between">
           <div className="flex items-center gap-2.5">

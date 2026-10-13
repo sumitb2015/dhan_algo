@@ -1869,7 +1869,7 @@ export default function MultiLegFocus({
       const j2 = await res2.json() as { success: boolean; order_id?: string; price?: number; error?: string };
 
       if (j2.success) {
-        addToast('success', `Exited ${label}`, `ID: ${j2.order_id}`);
+        addToast('success', exitType === 'LIMIT' ? `Exit order placed for ${label}` : `Exited ${label}`, exitType === 'LIMIT' ? `LIMIT @ ₹${exitLimit.toFixed(2)} — resting until filled · ID: ${j2.order_id}` : `ID: ${j2.order_id}`);
         const currentLtp = basket ? ltpFor(basket, leg) : 0;
         const exitPrice = (j2.price && j2.price > 0) ? j2.price : (exitType === 'LIMIT' ? exitLimit : (currentLtp > 0 ? currentLtp : (leg.fill?.avgPrice ?? 0)));
         if (partialLotSize > 0) {
