@@ -14,7 +14,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { toast } from 'sonner';
-import { TrendingDown, ClipboardList, LogOut, Bell, BellOff, TriangleAlert, ShieldAlert, Trash2 } from 'lucide-react';
+import { Settings, X, TrendingDown, ClipboardList, LogOut, Bell, BellOff, TriangleAlert, ShieldAlert, Trash2 } from 'lucide-react';
 import NavBar from '@/components/NavBar';
 import AddNewLegModal from '@/components/multiLegFocus/AddNewLegModal';
 import ExitLotsModal from '@/components/multiLegFocus/ExitLotsModal';
@@ -24,13 +24,13 @@ import { useLiveOptionsWS } from '@/lib/useLiveOptionsWS';
 import { useLiveTickerPoll, isStale } from '@/lib/useLiveTickerPoll';
 import { startLiveIndicesBridge } from '@/lib/startLiveIndicesBridge';
 import {
-  computeIndicators, evaluateBearish, istNowMs, mergeBars, oiView, passesFilters, pctBelow, recordTick,
+  computeIndicators, DEFAULT_IND_PARAMS, type IndParams, evaluateBearish, istNowMs, mergeBars, oiView, passesFilters, pctBelow, recordTick,
   type BearishSignal, type LiveMinutes, type OiMode, type StrikeFilters, type Timeframe,
 } from '@/lib/bearishStrikes';
 import { legPnl, type BsPosition, type LedgerOp } from '@/lib/bearishLedger';
 import { NO_RISK, riskHit, riskLevels, type RiskCfg, type RiskHit } from '@/lib/bearishRisk';
 import {
-  LEVELS, LEVEL_LABEL, activeLevels, levelStates, stepTracker, watchState,
+  LEVELS, activeLevels, levelStates, stepTracker, watchState,
   type Basis, type Level, type LevelState, type Tracker, type WatchState,
 } from '@/lib/bearishAlerts';
 import type { Bar } from '@/lib/volumeProfile';
@@ -95,6 +95,8 @@ function clockIst(ms: number): string {
   return new Date(ms).toLocaleTimeString('en-GB', { timeZone: 'Asia/Kolkata', hour12: false });
 }
 
+const clampInt = (n: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, Math.round(n)));
+
 function NumField({ label, value, onCommit, step = 1, min = 0, width = 'w-16', title }: {
   title?: string; label: string; value: number; onCommit: (n: number) => void; step?: number; min?: number; width?: string;
 }) {
@@ -148,6 +150,7 @@ export default function BearishStrikes() {
   const [strike100, setStrike100] = useState(false);   // CRUDEOILM only: skip the 50-point strikes
   const [oiMode, setOiMode] = useState<OiMode>('any');
   const [minLtp, setMinLtp] = useState(5);
+  const [maxLtp, setMaxLtp] = useState(0);              // 0 = off; only strikes priced at or below this premium
   const [minOiLots, setMinOiLots] = useState(0);
   const [minVolLots, setMinVolLots] = useState(0);
   const [atmWindow, setAtmWindow] = useState(12);
@@ -168,6 +171,11 @@ export default function BearishStrikes() {
   const [alertSound, setAlertSound] = useState(true);
   const [alertNotify, setAlertNotify] = useState(false);
   const [autoExit, setAutoExit] = useState(false);   // buys back a position at MARKET when a ticked alert fires — per page load, never persisted
+  const [indCfg, setIndCfg] = useState<IndParams>(DEFAULT_IND_PARAMS);   // indicator settings (Supertrend period/multiplier, EMA length)
+  const [showSettings, setShowSettings] = useState(false);
+  const stName = `Supertrend(${indCfg.stPeriod},${indCfg.stMult})`;
+  const emaName = `EMA${indCfg.emaPeriod}`;
+  const levelLabel = useMemo<Record<Level, string>>(() => ({ st: 'Supertrend', vwap: 'VWAP', ema: `EMA${indCfg.emaPeriod}` }), [indCfg.emaPeriod]);
   const [risk, setRisk] = useState<RiskCfg>(NO_RISK);   // % of avg sell premium, 0 = off; applies to every open position
   const audioRef = useRef<AudioContext | null>(null);
   const cfgLoaded = useRef(false);
@@ -183,6 +191,10 @@ export default function BearishStrikes() {
           if (typeof c.sound === 'boolean') setAlertSound(c.sound);
           const num = (v: unknown) => (typeof v === 'number' && Number.isFinite(v) && v >= 0 && v <= 1000 ? v : 0);
           setRisk({ sl: num(c.sl), tgt: num(c.tgt), trail: num(c.trail) });
+          const ip = c.ind as Partial<Record<keyof IndParams, unknown>> | undefined;
+          if (ip && typeof ip.stPeriod === 'number' && typeof ip.stMult === 'number' && typeof ip.emaPeriod === 'number') {
+            setIndCfg({ stPeriod: clampInt(ip.stPeriod, 2, 100), stMult: Math.min(10, Math.max(0.5, ip.stMult)), emaPeriod: clampInt(ip.emaPeriod, 2, 200) });
+          }
         }
       } catch { /* storage blocked: defaults */ }
       cfgLoaded.current = true;
@@ -191,8 +203,8 @@ export default function BearishStrikes() {
   }, []);
   useEffect(() => {
     if (!cfgLoaded.current) return;
-    try { localStorage.setItem('bs_alert_cfg', JSON.stringify({ st: watchSt, vwap: watchVwap, ema: watchEma, basis: alertBasis, sound: alertSound, sl: risk.sl, tgt: risk.tgt, trail: risk.trail })); } catch { /* ignore */ }
-  }, [watchSt, watchVwap, watchEma, alertBasis, alertSound, risk]);
+    try { localStorage.setItem('bs_alert_cfg', JSON.stringify({ st: watchSt, vwap: watchVwap, ema: watchEma, basis: alertBasis, sound: alertSound, sl: risk.sl, tgt: risk.tgt, trail: risk.trail, ind: indCfg })); } catch { /* ignore */ }
+  }, [watchSt, watchVwap, watchEma, alertBasis, alertSound, risk, indCfg]);
 
   const viewer = useRef(`bs-${Math.random().toString(36).slice(2, 10)}`);
   const [nowTick, setNowTick] = useState(0);
@@ -332,14 +344,14 @@ export default function BearishStrikes() {
         if (side !== 'BOTH' && side !== option) continue;
         if (otmOnly && spot > 0 && ((option === 'CE' && s <= spot) || (option === 'PE' && s >= spot))) continue;
         const d = q.strikes[String(s)]?.[option === 'CE' ? 'ce' : 'pe'];
-        if (!d || !(d.ltp > 0) || d.ltp < minLtp) continue;
+        if (!d || !(d.ltp > 0) || d.ltp < minLtp || (maxLtp > 0 && d.ltp > maxLtp)) continue;
         // Cheap prefilter that caps Data API calls: a short-able strike is trading below where the day started.
         if (belowOpenOnly && ((d.open ?? 0) > 0 || (d.prev_close ?? 0) > 0) && d.ltp >= Math.max(d.open ?? 0, d.prev_close ?? 0)) continue;
         out.push({ key: `${s}${option}`, option, strike: s, dist: Math.abs(s - atm) });
       }
     }
     return out.sort((a, b) => a.dist - b.dist).slice(0, maxScan);
-  }, [atmWindow, atmMin, side, otmOnly, minLtp, belowOpenOnly, maxScan, strike100, underlying]);
+  }, [atmWindow, atmMin, side, otmOnly, minLtp, maxLtp, belowOpenOnly, maxScan, strike100, underlying]);
 
   useEffect(() => {
     if (!expiry) return;
@@ -381,8 +393,8 @@ export default function BearishStrikes() {
   // ── 1 s compute tick: fold LTP into live minutes, evaluate signals ─
   const [rows, setRows] = useState<Row[]>([]);
   const filters: StrikeFilters = useMemo(() => ({
-    side, minLtp, minOiLots, minVolLots, maxSpreadPct: 0, otmOnly, requireSt, requireVwap, requireEma, oiMode,
-  }), [side, minLtp, minOiLots, minVolLots, otmOnly, requireSt, requireVwap, requireEma, oiMode]);
+    side, minLtp, maxLtp, minOiLots, minVolLots, maxSpreadPct: 0, otmOnly, requireSt, requireVwap, requireEma, oiMode,
+  }), [side, minLtp, maxLtp, minOiLots, minVolLots, otmOnly, requireSt, requireVwap, requireEma, oiMode]);
 
   useEffect(() => {
     const id = setInterval(() => {
@@ -408,7 +420,7 @@ export default function BearishStrikes() {
           recordTick(lm, d.ltp, nowIst);
           const cached = barsRef.current.get(key);
           if (!cached || !cached.bars.length) continue;          // no backfill = no VWAP/ST: never guess
-          const ind = computeIndicators(mergeBars(cached.bars, lm), tf, nowIst);
+          const ind = computeIndicators(mergeBars(cached.bars, lm), tf, nowIst, indCfg);
           const sig = evaluateBearish(ind);
           const liveBelowAll = sig.stLine != null && sig.vwap != null && sig.ema != null && sig.stDir === -1
             && d.ltp < sig.stLine && d.ltp < sig.vwap && d.ltp < sig.ema;
@@ -424,7 +436,7 @@ export default function BearishStrikes() {
       setRows(next);
     }, 1000);
     return () => clearInterval(id);
-  }, [tf, filters, lotSize, strike100, underlying, atmMin]);
+  }, [tf, filters, lotSize, strike100, underlying, atmMin, indCfg]);
 
   // ── Ledger ──────────────────────────────────────────────────────
   const [positions, setPositions] = useState<BsPosition[]>([]);
@@ -467,7 +479,7 @@ export default function BearishStrikes() {
         const ltp = d && d.ltp > 0 ? d.ltp : null;
         const key = `${p.strike}${p.option}`;
         const cached = inScope ? barsRef.current.get(key) : undefined;
-        const ind = cached?.bars.length ? computeIndicators(mergeBars(cached.bars, liveMinRef.current.get(key) ?? new Map()), tf, nowIst) : null;
+        const ind = cached?.bars.length ? computeIndicators(mergeBars(cached.bars, liveMinRef.current.get(key) ?? new Map()), tf, nowIst, indCfg) : null;
         const states = ind ? levelStates(ind, ltp, alertBasis) : { st: null, vwap: null, ema: null };
         const ws = watchState({ inScope, feedFresh, hasPrice: ltp != null, hasBars: !!ind, states, watch });
         next[p.id] = { ws, states, ind, ltp };
@@ -486,9 +498,9 @@ export default function BearishStrikes() {
         if (!p) continue;
         const w = next[p.id];
         const label = `${p.underlying} ${p.strike} ${p.option}`;
-        if (ev.kind === 'recovered') { toast.dismiss(ev.key); toast.success(`${label}: back below ${LEVEL_LABEL[ev.level]}`, { duration: 4000 }); continue; }
+        if (ev.kind === 'recovered') { toast.dismiss(ev.key); toast.success(`${label}: back below ${levelLabel[ev.level]}`, { duration: 4000 }); continue; }
         const lv = levelValue(w, ev.level);
-        const text = `${label} — price ${alertBasis === 'live' ? (w?.ltp ?? 0).toFixed(2) : (w?.ind?.close ?? 0).toFixed(2)} is above ${LEVEL_LABEL[ev.level]}${lv != null ? ` ${lv.toFixed(2)}` : ''}`;
+        const text = `${label} — price ${alertBasis === 'live' ? (w?.ltp ?? 0).toFixed(2) : (w?.ind?.close ?? 0).toFixed(2)} is above ${levelLabel[ev.level]}${lv != null ? ` ${lv.toFixed(2)}` : ''}`;
         toast.error(`⚠ ${text}`, { id: ev.key, duration: 10_000, action: { label: 'Exit', onClick: () => setExitId(p.id) } });
         if (alertSound) playAlertSound(audioRef.current);
         try {
@@ -499,7 +511,7 @@ export default function BearishStrikes() {
       }
     }, 1000);
     return () => clearInterval(id);
-  }, [watchSt, watchVwap, watchEma, alertBasis, alertSound, alertNotify, tf]);
+  }, [watchSt, watchVwap, watchEma, alertBasis, alertSound, alertNotify, tf, indCfg, levelLabel]);
 
   // Tab title: the one thing visible from another tab. (Browsers slow background timers, so a hidden tab may be a
   // few tens of seconds late — keep the page in its own window if it must be watched closely.)
@@ -828,12 +840,12 @@ export default function BearishStrikes() {
       const t = autoTries.current[id] ?? { n: 0, at: 0 };
       if (t.n >= 3 || now - t.at < 8000) continue;
       autoTries.current[id] = { n: t.n + 1, at: now };
-      const why = [...(activeAlerts[id] ?? []).map((l) => `${LEVEL_LABEL[l]} breached`), ...(riskHits[id] ? [riskHits[id] === 'SL' ? 'stop-loss hit' : riskHits[id] === 'TRAIL' ? 'trailing stop hit' : 'target hit'] : [])].join(' + ');
+      const why = [...(activeAlerts[id] ?? []).map((l) => `${levelLabel[l]} breached`), ...(riskHits[id] ? [riskHits[id] === 'SL' ? 'stop-loss hit' : riskHits[id] === 'TRAIL' ? 'trailing stop hit' : 'target hit'] : [])].join(' + ');
       toast.warning(`AUTO-EXIT ${p.underlying} ${p.strike} ${p.option} — ${why}`, { duration: 6000 });
       void doExit(p, p.qty / p.lotSize, 'MARKET');
       return;   // one order at a time; the next position goes on the next pass
     }
-  }, [autoExit, activeAlerts, riskHits, doExit]);
+  }, [autoExit, activeAlerts, riskHits, doExit, levelLabel]);
 
   // ── Derived header state ────────────────────────────────────────
   const openPositions = positions.filter((p) => p.status === 'OPEN');
@@ -860,7 +872,7 @@ export default function BearishStrikes() {
             <div>
               <p className="text-[10px] font-bold uppercase tracking-[0.16em] mb-0.5 text-emerald-400">Scalping · {underlying}</p>
               <h1 className="text-sm font-bold text-white tracking-tight leading-none">Bearish Strikes</h1>
-              <p className="text-[10px] text-zinc-500 font-medium mt-1">Below Supertrend(10,2), VWAP and EMA20 — short candidates, live</p>
+              <p className="text-[10px] text-zinc-500 font-medium mt-1">Below {stName}, VWAP and {emaName} — short candidates, live</p>
             </div>
           </div>
           <div className="flex items-center gap-2 flex-wrap">
@@ -910,7 +922,7 @@ export default function BearishStrikes() {
           <div role="group" aria-label="Conditions" className="flex items-center gap-2 rounded border border-zinc-700 bg-zinc-900 px-2 h-7"
             title="A strike must be below EVERY ticked level on the last closed bar. Untick one to ignore it (e.g. EMA20 while it is still warming up).">
             <span className="text-[10px] font-bold uppercase tracking-wider text-zinc-500">Below</span>
-            {([['Supertrend', requireSt, setRequireSt], ['VWAP', requireVwap, setRequireVwap], ['EMA20', requireEma, setRequireEma]] as const).map(([l, v, set]) => (
+            {([['Supertrend', requireSt, setRequireSt], ['VWAP', requireVwap, setRequireVwap], [emaName, requireEma, setRequireEma]] as const).map(([l, v, set]) => (
               <label key={l} className="flex items-center gap-1 text-[10px] font-bold uppercase tracking-wider text-zinc-300 cursor-pointer">
                 <input type="checkbox" checked={v} onChange={(e) => set(e.target.checked)} className={FOCUS_RING} />{l}
               </label>
@@ -934,11 +946,16 @@ export default function BearishStrikes() {
             </label>
           )}
           <NumField label="Min ₹" value={minLtp} onCommit={setMinLtp} step={0.5} />
+          <NumField label="Max ₹" value={maxLtp} onCommit={setMaxLtp} step={5} title="Only strikes priced at or below this premium. 0 = off." />
           <NumField label="Min OI lots" value={minOiLots} onCommit={setMinOiLots} width="w-20" />
           <NumField label="Min vol lots" value={minVolLots} onCommit={setMinVolLots} width="w-20" />
           <NumField label="ATM from" value={atmMin} title="Inner edge in strikes from ATM, both sides. 4 with ATM ± 8 scans ATM+4…+8 and ATM-4…-8 only."
             onCommit={(n) => { const v = Math.round(n); setAtmMin(v); setAtmWindow((w) => Math.max(w, v, 1)); }} />
           <NumField label="to ±" value={atmWindow} onCommit={(n) => { const v = Math.max(1, Math.round(n)); setAtmWindow(v); setAtmMin((m) => Math.min(m, v)); }} />
+          <button type="button" onClick={() => setShowSettings(true)} aria-label="Indicator settings" title="Indicator settings"
+            className={`h-7 w-7 inline-flex items-center justify-center rounded border border-zinc-700 bg-zinc-900 text-zinc-300 hover:text-white ${FOCUS_RING}`}>
+            <Settings className="w-3.5 h-3.5" aria-hidden="true" />
+          </button>
           <NumField label="Scan max" value={maxScan} onCommit={(n) => setMaxScan(Math.min(60, Math.max(5, Math.round(n))))} />
         </div>
       </div>
@@ -959,7 +976,7 @@ export default function BearishStrikes() {
                   <span className="text-zinc-100">
                     <span className="font-bold">{p.mode} · {p.underlying} {p.strike} {p.option}</span>
                     {' — price '}<span className="font-bold">{fmt(w?.ltp)}</span>{' above '}
-                    {activeAlerts[p.id].map((l, i) => <span key={l} className="text-red-400 font-bold">{i ? ', ' : ''}{LEVEL_LABEL[l]} {fmt(levelValue(w, l))}</span>)}
+                    {activeAlerts[p.id].map((l, i) => <span key={l} className="text-red-400 font-bold">{i ? ', ' : ''}{levelLabel[l]} {fmt(levelValue(w, l))}</span>)}
                   </span>
                   <button type="button" onClick={() => setExitId(p.id)} aria-label={`Exit ${p.strike} ${p.option} now`}
                     className={`h-7 px-3 rounded bg-red-600 hover:bg-red-500 text-oncolor text-[11px] font-bold ${FOCUS_RING}`}>EXIT NOW</button>
@@ -984,7 +1001,7 @@ export default function BearishStrikes() {
             <thead>
               <tr className="bg-zinc-800">
                 {[
-                  ['Strike', 'text-left'], ['LTP · Chg%', 'text-right'], [`Supertrend ${tf}m`, 'text-right'], ['VWAP', 'text-right'], ['EMA20', 'text-right'],
+                  ['Strike', 'text-left'], ['LTP · Chg%', 'text-right'], [`Supertrend ${tf}m`, 'text-right'], ['VWAP', 'text-right'], [emaName, 'text-right'],
                   ['OI lots · Δ% · Build', 'text-right'], ['Vol lots', 'text-right'], ['ST · VW · EMA · OI', 'text-center'], ['Signal', 'text-center'], ['', 'text-right'],
                 ].map(([h, al], i) => (
                   <th key={i} className={`px-3 py-2 text-xs font-bold text-white whitespace-nowrap ${al}`}>{h}</th>
@@ -1038,7 +1055,7 @@ export default function BearishStrikes() {
                           is below but the live price has crept back above, grey = still warming up. OI: green = SB/LU, red = LB. */}
                       <span className="inline-flex items-center gap-1.5" role="img"
                         aria-label="Indicator lights: Supertrend, VWAP, EMA20, open interest">
-                        {([['Supertrend', r.sig.below.st, r.sig.stLine], ['VWAP', r.sig.below.vwap, r.sig.vwap], ['EMA20', r.sig.below.ema, r.sig.ema]] as const).map(([name, below, lv]) => {
+                        {([['Supertrend', r.sig.below.st, r.sig.stLine], ['VWAP', r.sig.below.vwap, r.sig.vwap], [emaName, r.sig.below.ema, r.sig.ema]] as const).map(([name, below, lv]) => {
                           const liveAbove = below === true && lv != null && r.ltp >= lv;
                           const cls = below == null ? 'bg-zinc-600' : liveAbove ? 'bg-amber-400' : below ? 'bg-emerald-400' : 'bg-red-400';
                           const why = below == null ? 'warming up' : liveAbove ? 'closed bar below, but live price is back above' : below ? 'price is below (good for a short)' : 'price is above (against a short)';
@@ -1103,7 +1120,7 @@ export default function BearishStrikes() {
             <div role="group" aria-label="Exit alerts" className="flex items-center gap-2 flex-wrap"
               title="Alert when the live price (or the last closed bar) of an open short goes ABOVE a ticked level.">
               <span className="text-[10px] font-bold uppercase tracking-wider text-zinc-500 flex items-center gap-1"><Bell className="w-3 h-3" aria-hidden="true" />Alert above</span>
-              {([['Supertrend', watchSt, setWatchSt], ['VWAP', watchVwap, setWatchVwap], ['EMA20', watchEma, setWatchEma]] as const).map(([l, v, set]) => (
+              {([['Supertrend', watchSt, setWatchSt], ['VWAP', watchVwap, setWatchVwap], [emaName, watchEma, setWatchEma]] as const).map(([l, v, set]) => (
                 <label key={l} className="flex items-center gap-1 text-[10px] font-bold uppercase tracking-wider text-zinc-300 cursor-pointer">
                   <input type="checkbox" checked={v} onChange={(e) => set(e.target.checked)} className={FOCUS_RING} />{l}
                 </label>
@@ -1197,7 +1214,7 @@ export default function BearishStrikes() {
                                 : above ? 'border-amber-500/40 bg-amber-500/10 text-amber-300' : above === false ? 'border-emerald-500/30 text-emerald-400' : 'border-zinc-700 text-zinc-500';
                               return (
                                 <span key={l} className={`px-1 py-0.5 rounded border text-[10px] leading-tight ${cls}`}
-                                  title={`${LEVEL_LABEL[l]} ${lv != null ? lv.toFixed(2) : 'warming up'}${watched ? '' : ' (not alerting)'}`}>
+                                  title={`${levelLabel[l]} ${lv != null ? lv.toFixed(2) : 'warming up'}${watched ? '' : ' (not alerting)'}`}>
                                   {l === 'st' ? 'ST' : l === 'vwap' ? 'VW' : 'EM'} {dist == null ? '—' : `${dist > 0 ? '▲' : '▼'}${Math.abs(dist).toFixed(1)}%`}
                                 </span>
                               );
@@ -1229,6 +1246,34 @@ export default function BearishStrikes() {
           </table>
         </section>
       </div>
+
+      {showSettings && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-oncolor-dark/60 px-4" role="dialog" aria-modal="true" aria-label="Indicator settings"
+          onClick={() => setShowSettings(false)} onKeyDown={(e) => { if (e.key === 'Escape') setShowSettings(false); }}>
+          <div className="w-full max-w-sm rounded-xl border border-zinc-700 bg-zinc-900 p-4 flex flex-col gap-3" onClick={(e) => e.stopPropagation()}>
+            <div className="flex items-center justify-between">
+              <h2 className="text-sm font-bold text-white">Indicator settings</h2>
+              <button type="button" onClick={() => setShowSettings(false)} aria-label="Close settings" autoFocus
+                className={`h-7 w-7 inline-flex items-center justify-center rounded text-zinc-400 hover:text-white ${FOCUS_RING}`}><X className="w-4 h-4" aria-hidden="true" /></button>
+            </div>
+            <div className="flex items-center gap-4 flex-wrap">
+              <NumField label="ST period" value={indCfg.stPeriod} width="w-16" onCommit={(n) => setIndCfg((v) => ({ ...v, stPeriod: clampInt(n, 2, 100) }))} />
+              <NumField label="ST multiplier" value={indCfg.stMult} step={0.5} width="w-16" onCommit={(n) => setIndCfg((v) => ({ ...v, stMult: Math.min(10, Math.max(0.5, n)) }))} />
+              <NumField label="EMA period" value={indCfg.emaPeriod} width="w-16" onCommit={(n) => setIndCfg((v) => ({ ...v, emaPeriod: clampInt(n, 2, 200) }))} />
+            </div>
+            <p className="text-[11px] text-zinc-400 leading-snug">
+              Supertrend 2–100 / 0.5–10, EMA 2–200. VWAP is the session VWAP and has no setting. Changes apply to the scan, the lights,
+              the alerts and the SL levels immediately, and are remembered in this browser. Longer periods need more closed bars before a strike stops showing as warming up.
+            </p>
+            <div className="flex justify-between">
+              <button type="button" onClick={() => setIndCfg(DEFAULT_IND_PARAMS)}
+                className={`h-7 px-2.5 rounded border border-zinc-700 bg-zinc-900 text-[11px] font-bold text-zinc-300 hover:text-white ${FOCUS_RING}`}>Reset to 10 · 2 · 20</button>
+              <button type="button" onClick={() => setShowSettings(false)}
+                className={`h-7 px-3 rounded bg-emerald-600 hover:bg-emerald-500 text-oncolor text-[11px] font-bold ${FOCUS_RING}`}>Done</button>
+            </div>
+          </div>
+        </div>
+      )}
 
       <OrdersTradesModal
         isOpen={showBook} onClose={() => setShowBook(false)} broker="dhan"

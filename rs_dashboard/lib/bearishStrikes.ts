@@ -18,6 +18,10 @@ export const ST_PERIOD = 10;
 export const ST_MULT = 2;
 export const EMA_PERIOD = 20;
 
+/** Indicator settings the page lets the user change. VWAP is the session VWAP and has no parameter. */
+export interface IndParams { stPeriod: number; stMult: number; emaPeriod: number }
+export const DEFAULT_IND_PARAMS: IndParams = { stPeriod: ST_PERIOD, stMult: ST_MULT, emaPeriod: EMA_PERIOD };
+
 export type Timeframe = 1 | 3 | 5;
 
 export interface Indicators {
@@ -73,14 +77,14 @@ export function istNowMs(now = Date.now()): number {
 }
 
 /** Indicators on the last CLOSED bar of `bars1m` resampled to `tf` minutes. */
-export function computeIndicators(bars1m: Bar[], tf: Timeframe, nowIstMs: number): Indicators {
+export function computeIndicators(bars1m: Bar[], tf: Timeframe, nowIstMs: number, params: IndParams = DEFAULT_IND_PARAMS): Indicators {
   const empty: Indicators = { close: null, stLine: null, stDir: null, vwap: null, ema: null, barTime: null, barsUsed: 0 };
   if (!bars1m.length) return empty;
   const bars = closedBarsOnly(resampleBars(bars1m, tf), tf, nowIstMs);
   if (!bars.length) return empty;
 
-  const st = supertrendSeries(bars.map((b) => ({ high: b.h, low: b.l, close: b.c })), ST_PERIOD, ST_MULT);
-  const ema = emaSmaSeeded(bars.map((b) => b.c), EMA_PERIOD);
+  const st = supertrendSeries(bars.map((b) => ({ high: b.h, low: b.l, close: b.c })), params.stPeriod, params.stMult);
+  const ema = emaSmaSeeded(bars.map((b) => b.c), params.emaPeriod);
   const vw = sessionVwap(bars);
   const i = bars.length - 1;
   return {
@@ -176,6 +180,7 @@ export function oiView(buildup: string | null | undefined, sig: Pick<BearishSign
 export interface StrikeFilters {
   side: 'BOTH' | 'CE' | 'PE';
   minLtp: number;
+  maxLtp?: number;          // 0 / unset = off; premium at or below this
   minOiLots: number;
   minVolLots: number;
   maxSpreadPct: number;      // 0 = off
@@ -196,6 +201,7 @@ export function passesFilters(
 ): boolean {
   if (f.side !== 'BOTH' && row.option !== f.side) return false;
   if (row.ltp < f.minLtp) return false;
+  if (f.maxLtp && f.maxLtp > 0 && row.ltp > f.maxLtp) return false;
   const lot = lotSize > 0 ? lotSize : 1;
   if (row.oi / lot < f.minOiLots) return false;
   if (row.volume / lot < f.minVolLots) return false;

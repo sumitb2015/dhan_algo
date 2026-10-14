@@ -128,3 +128,12 @@ test('oiMode filter: confirm keeps SB/LU only, no-conflict drops LB only', () =>
     assert.strictEqual(passesFilters(row(b), 24400, 1, { ...f, oiMode: 'any' }), true);
   }
 });
+
+test('maxLtp keeps only premiums at or below it (0 = off)', () => {
+  const f = { side: 'BOTH' as const, minLtp: 0, minOiLots: 0, minVolLots: 0, maxSpreadPct: 0, otmOnly: false, requireSt: false, requireVwap: false, requireEma: false };
+  const sig = { below: { st: true, vwap: true, ema: true } } as never;
+  const row = (ltp: number) => ({ option: 'PE' as const, strike: 8800, ltp, oi: 0, volume: 0, spreadPct: null, sig });
+  assert.strictEqual(passesFilters(row(50), 9000, 1, { ...f, maxLtp: 50 }), true);
+  assert.strictEqual(passesFilters(row(50.05), 9000, 1, { ...f, maxLtp: 50 }), false);
+  assert.strictEqual(passesFilters(row(500), 9000, 1, { ...f, maxLtp: 0 }), true);
+});
