@@ -6,6 +6,7 @@
  * from `qty` here, never from the broker's netted position (see dhan-terminal-position-ownership).
  * Pure functions; the route does the locking and the file I/O.
  */
+import { MCX_LOT_MULTIPLIER } from './positionPnl.ts';
 
 export type LedgerMode = 'SIM' | 'REAL';
 
@@ -64,13 +65,18 @@ export class LedgerError extends Error {
 export const contractKey = (p: Pick<BsPosition, 'mode' | 'underlying' | 'expiry' | 'option' | 'strike'>) =>
   `${p.mode}|${p.underlying}|${p.expiry}|${p.option}|${p.strike}`;
 
+/** Rupees per 1.00 premium move per ledger qty unit. Dhan takes MCX quantity in LOTS (lotSize 1), so qty is lots and
+ *  one lot of CRUDEOILM is 10 barrels (CRUDEOIL 100): P&L must be scaled by barrels/lot. Every other underlying is 1
+ *  because its lotSize already makes qty real contract units. */
+export const pnlMultiplier = (underlying: string): number => MCX_LOT_MULTIPLIER[underlying] ?? 1;
+
 /** PnL sign: a short gains when price falls. */
 export function legPnl(p: BsPosition, ltp: number | null): number | null {
   const sign = p.side === 'S' ? 1 : -1;
   let open: number | null = 0;
   if (p.qty > 0) {
     if (ltp == null || !(ltp > 0)) open = null;       // no live price = no P&L, never zero
-    else open = (p.avgPrice - ltp) * p.qty * sign;
+    else open = (p.avgPrice - ltp) * p.qty * sign * pnlMultiplier(p.underlying);
   }
   return open == null ? null : open + p.realized;
 }
@@ -114,7 +120,7 @@ export function applyOp(file: LedgerFile, op: LedgerOp): LedgerFile {
       // Exit what THIS ledger owns, never more.
       const q = Math.min(op.qty, p.qty);
       const sign = p.side === 'S' ? 1 : -1;
-      p.realized += (p.avgPrice - op.price) * q * sign;
+      p.realized += (p.avgPrice - op.price) * q * sign * pnlMultiplier(p.underlying);
       p.qty -= q;
       p.filledAt = op.at;
       if (p.qty <= 0) { p.qty = 0; p.status = 'CLOSED'; p.closedAt = op.at; p.exitPrice = op.price; }
@@ -153,7 +159,7 @@ export function applyOp(file: LedgerFile, op: LedgerOp): LedgerFile {
         } else if (p.qty > 0) {
           const eq = Math.min(q, p.qty);
           const sign = p.side === 'S' ? 1 : -1;
-          p.realized += (p.avgPrice - op.avgPrice) * eq * sign;
+          p.realized += (p.avgPrice - op.avgPrice) * eq * sign * pnlMultiplier(p.underlying);
           p.qty -= eq;
           p.filledAt = op.at;
           p.exitPrice = op.avgPrice;

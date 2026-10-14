@@ -74,3 +74,10 @@ test('rejected entry closes the placeholder; settled exit books P&L', () => {
   assert.strictEqual(g.positions[0].status, 'CLOSED');
   assert.strictEqual(g.positions[0].realized, 40 * 65);
 });
+
+test('CRUDEOILM P&L is scaled by 10 barrels per lot (Dhan qty is in lots)', () => {
+  const p = base({ underlying: 'CRUDEOILM', lotSize: 1, qty: 10, avgPrice: 42.4 });
+  assert.ok(Math.abs((legPnl(p, 42.35) ?? 0) - 0.05 * 10 * 10) < 1e-9);
+  const f = applyOp({ rev: 0, positions: [p] }, { op: 'reduce', id: p.id, qty: 10, price: 42.2, at: 2 });
+  assert.ok(Math.abs(f.positions[0].realized - 0.2 * 10 * 10) < 1e-9);
+});

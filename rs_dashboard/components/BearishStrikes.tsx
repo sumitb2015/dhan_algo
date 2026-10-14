@@ -89,6 +89,11 @@ const istDate = () => new Date(Date.now() + 5.5 * 3600_000).toISOString().slice(
 const dte = (expiry: string) => Math.round((Date.parse(expiry) - Date.parse(istDate())) / 86_400_000);
 
 /** Free-typed number that only commits on blur / Enter (dhan-commit-on-blur): "2" on the way to "25" must not filter live. */
+/** HH:MM:SS in IST for a ledger timestamp (ms). */
+function clockIst(ms: number): string {
+  return new Date(ms).toLocaleTimeString('en-GB', { timeZone: 'Asia/Kolkata', hour12: false });
+}
+
 function NumField({ label, value, onCommit, step = 1, min = 0, width = 'w-16', title }: {
   title?: string; label: string; value: number; onCommit: (n: number) => void; step?: number; min?: number; width?: string;
 }) {
@@ -1041,8 +1046,8 @@ export default function BearishStrikes() {
           <table className="w-full text-xs font-mono">
             <thead>
               <tr className="bg-zinc-800">
-                {['Mode', 'Contract', 'Qty', 'Avg', 'LTP', 'P&L', 'Watch', 'Status', ''].map((h, i) => (
-                  <th key={i} className={`px-2 py-2 text-xs font-bold text-white ${i < 2 ? 'text-left' : 'text-right'}`}>{h}</th>
+                {['Mode', 'Side', 'Contract', 'Qty', 'Avg', 'LTP', 'Exit', 'Decay %', 'P&L', 'Opened', 'Closed', 'Watch', 'Status', ''].map((h, i) => (
+                  <th key={i} className={`px-2 py-2 text-xs font-bold text-white ${i < 3 ? 'text-left' : 'text-right'}`}>{h}</th>
                 ))}
               </tr>
             </thead>
@@ -1054,11 +1059,21 @@ export default function BearishStrikes() {
                 return (
                   <tr key={p.id} className="border-t border-zinc-800">
                     <td className="px-2 py-1.5 text-left"><span className={`px-1.5 py-0.5 rounded text-[10px] font-bold ${p.mode === 'REAL' ? 'bg-red-500/10 text-red-400' : 'bg-zinc-800 text-zinc-300'}`}>{p.mode}</span></td>
+                    <td className="px-2 py-1.5 text-left"><span className={`px-1.5 py-0.5 rounded text-[10px] font-bold ${p.side === 'S' ? 'bg-red-500/10 text-red-400' : 'bg-emerald-500/10 text-emerald-400'}`}>{p.side === 'S' ? 'SELL' : 'BUY'}</span></td>
                     <td className="px-2 py-1.5 text-left text-zinc-100">{p.underlying} {p.strike} {p.option} · {formatExpiryLabel(p.expiry)}</td>
                     <td className="px-2 py-1.5 text-right">{p.qty}{p.qty > 0 ? ` (${(p.qty / p.lotSize).toFixed(p.qty % p.lotSize ? 1 : 0)}L)` : ''}</td>
                     <td className="px-2 py-1.5 text-right">{p.avgPrice > 0 ? p.avgPrice.toFixed(2) : '—'}</td>
-                    <td className="px-2 py-1.5 text-right">{p.status === 'OPEN' ? fmt(ltp) : (p.exitPrice ? p.exitPrice.toFixed(2) : '—')}</td>
+                    <td className="px-2 py-1.5 text-right">{p.status === 'OPEN' ? fmt(ltp) : '—'}</td>
+                    <td className="px-2 py-1.5 text-right">{p.exitPrice ? p.exitPrice.toFixed(2) : '—'}</td>
+                    {(() => {
+                      // Premium move from entry in the trade's favour: a short gains as the premium decays (+), loses as it rises (−).
+                      const ref = p.status === 'OPEN' ? ltp : (p.exitPrice ?? null);
+                      const d = p.avgPrice > 0 && ref != null && ref > 0 ? ((p.side === 'S' ? p.avgPrice - ref : ref - p.avgPrice) / p.avgPrice) * 100 : null;
+                      return <td className={`px-2 py-1.5 text-right ${d == null ? 'text-zinc-600' : pnlCls(d)}`}>{d == null ? '—' : `${d > 0 ? '+' : ''}${d.toFixed(1)}%`}</td>;
+                    })()}
                     <td className={`px-2 py-1.5 text-right font-bold ${pnlCls(pnl)}`}>{money(pnl)}</td>
+                    <td className="px-2 py-1.5 text-right text-zinc-300">{clockIst(p.filledAt || p.openedAt)}</td>
+                    <td className="px-2 py-1.5 text-right text-zinc-300">{p.closedAt ? clockIst(p.closedAt) : '—'}</td>
                     <td className="px-2 py-1.5 text-right">
                       {p.status === 'OPEN' && p.qty > 0 && (() => {
                         const w = posWatch[p.id];
@@ -1102,7 +1117,7 @@ export default function BearishStrikes() {
                 );
               })}
               {positions.length === 0 && (
-                <tr><td colSpan={9} className="px-4 py-6 text-center text-zinc-500" role="status">No trades yet. Press SELL on a row to open a ticket ({mode}).</td></tr>
+                <tr><td colSpan={14} className="px-4 py-6 text-center text-zinc-500" role="status">No trades yet. Press SELL on a row to open a ticket ({mode}).</td></tr>
               )}
             </tbody>
           </table>
