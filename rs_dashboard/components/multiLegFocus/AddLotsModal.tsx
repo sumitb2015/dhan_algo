@@ -43,9 +43,14 @@ export default function AddLotsModal({
   const [limitPrice, setLimitPrice] = useState<number>(() => {
     return currentLtp > 0 ? currentLtp : (leg?.price || 0);
   });
-  const [adjustRisk, setAdjustRisk] = useState<boolean>(false);
-  const [newSl, setNewSl] = useState<string>(() => (leg?.sl != null ? String(leg.sl) : ''));
-  const [newTp, setNewTp] = useState<string>(() => (leg?.tp != null ? String(leg.tp) : ''));
+  // A leg with no SL/TP yet gets 25% / 25% of entry premium pre-armed; a leg that already has one keeps it unless adjusted.
+  const DEFAULT_RISK_PCT = 25;
+  const [adjustRisk, setAdjustRisk] = useState<boolean>(() => leg?.sl == null && leg?.tp == null);
+  // Same default as the leg row: % for an empty field, points for a legacy value saved without a type.
+  const slType = leg?.slType ?? (leg?.sl == null ? 'pct' : 'pts');
+  const tpType = leg?.tpType ?? (leg?.tp == null ? 'pct' : 'pts');
+  const [newSl, setNewSl] = useState<string>(() => (leg?.sl != null ? String(leg.sl) : leg?.tp == null ? String(DEFAULT_RISK_PCT) : ''));
+  const [newTp, setNewTp] = useState<string>(() => (leg?.tp != null ? String(leg.tp) : leg?.sl == null ? String(DEFAULT_RISK_PCT) : ''));
   const [submitting, setSubmitting] = useState<boolean>(false);
 
   // Sync limit price with currentLtp when switching to LIMIT if not set
@@ -274,7 +279,7 @@ export default function AddLotsModal({
               <div className="grid grid-cols-2 gap-3 mt-3 pt-3 border-t border-zinc-800">
                 <div>
                   <label className="text-[10px] text-rose-400 font-bold uppercase block mb-1 flex items-center gap-1">
-                    <ShieldAlert className="w-3 h-3" /> Stop Loss ({leg.slType === 'pct' ? '%' : leg.slType ?? 'pts'})
+                    <ShieldAlert className="w-3 h-3" /> Stop Loss ({slType === 'pct' ? '%' : slType})
                   </label>
                   <input
                     type="number"
@@ -287,7 +292,7 @@ export default function AddLotsModal({
                 </div>
                 <div>
                   <label className="text-[10px] text-emerald-400 font-bold uppercase block mb-1 flex items-center gap-1">
-                    <Target className="w-3 h-3" /> Take Profit ({leg.tpType === 'pct' ? '%' : leg.tpType ?? 'pts'})
+                    <Target className="w-3 h-3" /> Take Profit ({tpType === 'pct' ? '%' : tpType})
                   </label>
                   <input
                     type="number"

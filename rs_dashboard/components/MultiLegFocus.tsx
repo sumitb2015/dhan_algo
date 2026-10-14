@@ -2130,8 +2130,8 @@ export default function MultiLegFocus({
             ...l,
             lots: Math.max(1, Math.round(totalQty / lotSize)),
             price: avg,
-            ...(params.newSl !== undefined ? { sl: params.newSl } : {}),
-            ...(params.newTp !== undefined ? { tp: params.newTp } : {}),
+            ...(params.newSl !== undefined ? { sl: params.newSl, slType: leg.slType ?? (leg.sl == null ? 'pct' as const : 'pts' as const) } : {}),
+            ...(params.newTp !== undefined ? { tp: params.newTp, tpType: leg.tpType ?? (leg.tp == null ? 'pct' as const : 'pts' as const) } : {}),
             filledAt: Date.now(),
             fill: { qty: totalQty, avgPrice: avg, orderId: j.order_id ?? l.fill?.orderId },
           }, j.order_id, 'grow', qty, fillPrice);
