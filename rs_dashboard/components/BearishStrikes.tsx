@@ -139,6 +139,7 @@ export default function BearishStrikes() {
   const [requireEma, setRequireEma] = useState(true);
   const [otmOnly, setOtmOnly] = useState(true);
   const [belowOpenOnly, setBelowOpenOnly] = useState(true);
+  const [strike100, setStrike100] = useState(false);   // CRUDEOILM only: skip the 50-point strikes
   const [oiMode, setOiMode] = useState<OiMode>('any');
   const [minLtp, setMinLtp] = useState(5);
   const [minOiLots, setMinOiLots] = useState(0);
@@ -306,6 +307,7 @@ export default function BearishStrikes() {
   const candidateContracts = useCallback((): { key: string; option: 'CE' | 'PE'; strike: number }[] => {
     const q = quotesRef.current;
     if (!q) return [];
+    const only100 = strike100 && underlying === 'CRUDEOILM';
     const spot = q.spot || 0;
     const atm = q.atm || spot;
     const strikes = Object.keys(q.strikes).map(Number).sort((a, b) => a - b);
@@ -313,6 +315,7 @@ export default function BearishStrikes() {
     const out: { key: string; option: 'CE' | 'PE'; strike: number; dist: number }[] = [];
     for (const s of strikes) {
       if (Math.abs(s - atm) > atmWindow * step) continue;
+      if (only100 && s % 100 !== 0) continue;
       for (const option of ['CE', 'PE'] as const) {
         if (side !== 'BOTH' && side !== option) continue;
         if (otmOnly && spot > 0 && ((option === 'CE' && s <= spot) || (option === 'PE' && s >= spot))) continue;
@@ -324,7 +327,7 @@ export default function BearishStrikes() {
       }
     }
     return out.sort((a, b) => a.dist - b.dist).slice(0, maxScan);
-  }, [atmWindow, side, otmOnly, minLtp, belowOpenOnly, maxScan]);
+  }, [atmWindow, side, otmOnly, minLtp, belowOpenOnly, maxScan, strike100, underlying]);
 
   useEffect(() => {
     if (!expiry) return;
@@ -377,7 +380,9 @@ export default function BearishStrikes() {
       if (!q) return;
       const spot = q.spot || 0;
       const next: Row[] = [];
+      const only100 = strike100 && underlying === 'CRUDEOILM';
       for (const s of Object.keys(q.strikes)) {
+        if (only100 && Number(s) % 100 !== 0) continue;
         for (const option of ['CE', 'PE'] as const) {
           const d = q.strikes[s]?.[option === 'CE' ? 'ce' : 'pe'];
           if (!d || !(d.ltp > 0)) continue;
@@ -403,7 +408,7 @@ export default function BearishStrikes() {
       setRows(next);
     }, 1000);
     return () => clearInterval(id);
-  }, [tf, filters, lotSize]);
+  }, [tf, filters, lotSize, strike100, underlying]);
 
   // ── Ledger ──────────────────────────────────────────────────────
   const [positions, setPositions] = useState<BsPosition[]>([]);
@@ -844,6 +849,12 @@ export default function BearishStrikes() {
             title="Only fetch candles for strikes trading below the day's open / previous close. Caps Data API calls; untick to scan every strike in the window.">
             <input type="checkbox" checked={belowOpenOnly} onChange={(e) => setBelowOpenOnly(e.target.checked)} className={FOCUS_RING} />Below day open
           </label>
+          {underlying === 'CRUDEOILM' && (
+            <label className="flex items-center gap-1 text-[10px] font-bold uppercase tracking-wider text-zinc-400"
+              title="Only consider strikes divisible by 100 (e.g. 8500, 8600) — skips the 50-point strikes like 8550">
+              <input type="checkbox" checked={strike100} onChange={(e) => setStrike100(e.target.checked)} className={FOCUS_RING} />100s only
+            </label>
+          )}
           <NumField label="Min ₹" value={minLtp} onCommit={setMinLtp} step={0.5} />
           <NumField label="Min OI lots" value={minOiLots} onCommit={setMinOiLots} width="w-20" />
           <NumField label="Min vol lots" value={minVolLots} onCommit={setMinVolLots} width="w-20" />
