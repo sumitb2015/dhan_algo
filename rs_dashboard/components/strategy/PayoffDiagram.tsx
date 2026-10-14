@@ -496,8 +496,8 @@ export default function PayoffDiagram({
             {model.pins.map((s, i) => (
               <ReferenceLine key={`pin-${s.strike}-${s.option ?? ''}-${i}`} x={s.strike}
                 stroke={s.side === 'S' ? 'var(--color-red-400)' : s.side === 'B' ? 'var(--color-emerald-400)' : 'var(--color-zinc-500)'}
-                strokeOpacity={0.45} strokeDasharray="2 4"
-                label={{ value: `${s.strike}${s.option ? ` ${s.option}` : ''}`, position: 'insideBottom', fontSize: 10,
+                strokeOpacity={s.option === 'CE' ? 0.9 : 0.45} strokeWidth={s.option === 'CE' ? 1.5 : 1} strokeDasharray={s.option === 'CE' ? '6 3' : '2 4'}
+                label={{ value: `${s.strike}${s.option ? ` ${s.option}` : ''}`, position: 'insideBottom', offset: s.option === 'CE' ? 14 : 2, fontSize: 10,
                   fill: s.side === 'S' ? 'var(--color-red-400)' : s.side === 'B' ? 'var(--color-emerald-400)' : 'var(--color-zinc-400)', stroke: 'var(--color-zinc-950)', strokeWidth: 3, paintOrder: 'stroke' }} />
             ))}
 
