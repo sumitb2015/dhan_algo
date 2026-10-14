@@ -166,6 +166,7 @@ export default function BearishStrikes() {
   const [alertBasis, setAlertBasis] = useState<Basis>('live');
   const [alertSound, setAlertSound] = useState(true);
   const [alertNotify, setAlertNotify] = useState(false);
+  const [autoExit, setAutoExit] = useState(false);   // buys back a position at MARKET when a ticked alert fires — per page load, never persisted
   const audioRef = useRef<AudioContext | null>(null);
   const cfgLoaded = useRef(false);
   useEffect(() => {
@@ -768,6 +769,26 @@ export default function BearishStrikes() {
     for (const p of open) await doExit(p, p.qty / p.lotSize, 'MARKET');
   }, [positions, mode, doExit]);
 
+  // ── Auto-exit: an active alert (already debounced by the tracker) on a position sends a MARKET buy-back for what
+  // this ledger owns. Opt-in per page load. At most 3 tries per position, 8 s apart, then it is left to the user.
+  const autoTries = useRef<Record<string, { n: number; at: number }>>({});
+  useEffect(() => {
+    if (!autoExit) return;
+    const now = Date.now();
+    for (const id of Object.keys(activeAlerts)) {
+      if (lock.current) return;
+      const p = positionsRef.current.find((x) => x.id === id);
+      if (!p || p.status !== 'OPEN' || !(p.qty > 0)) continue;
+      if (p.pendingOrders?.some((o) => o.kind === 'exit')) continue;   // an exit is already working
+      const t = autoTries.current[id] ?? { n: 0, at: 0 };
+      if (t.n >= 3 || now - t.at < 8000) continue;
+      autoTries.current[id] = { n: t.n + 1, at: now };
+      toast.warning(`AUTO-EXIT ${p.underlying} ${p.strike} ${p.option} — ${activeAlerts[id].map((l) => LEVEL_LABEL[l]).join(' + ')} breached`, { duration: 6000 });
+      void doExit(p, p.qty / p.lotSize, 'MARKET');
+      return;   // one order at a time; the next position goes on the next pass
+    }
+  }, [autoExit, activeAlerts, doExit]);
+
   // ── Derived header state ────────────────────────────────────────
   const openPositions = positions.filter((p) => p.status === 'OPEN');
   const exitPos = positions.find((p) => p.id === exitId) ?? null;
@@ -1038,6 +1059,10 @@ export default function BearishStrikes() {
                 Desktop {alertNotify ? 'on' : 'off'}
               </button>
             </div>
+            <label className="flex items-center gap-1 text-[10px] font-bold uppercase tracking-wider text-zinc-300 cursor-pointer"
+              title="When a ticked alert fires on an open position (SIM or REAL), buy it back at MARKET automatically. Works only while this tab is open; off after a reload. Max 3 tries per position.">
+              <input type="checkbox" checked={autoExit} onChange={(e) => setAutoExit(e.target.checked)} className={FOCUS_RING} />Auto-exit on alert
+            </label>
             <button type="button" onClick={exitAll} disabled={!openPositions.some((p) => p.mode === mode)}
               className={`h-7 px-2 rounded border border-zinc-700 bg-zinc-900 text-[11px] font-bold text-zinc-200 hover:bg-zinc-800 disabled:opacity-40 flex items-center gap-1 ${FOCUS_RING}`}>
               <LogOut className="w-3.5 h-3.5" aria-hidden="true" />Exit all {mode}
