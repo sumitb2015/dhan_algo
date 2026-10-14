@@ -89,6 +89,13 @@ try {
 // ─── Process Shutdown Handler (Ctrl+C / SIGINT Cleanup) ─────────────
 let isShuttingDown = false;
 
+/** Status/state files whose pid belongs to a long-lived process that is NOT a child of this server: the live WebSocket
+ *  bridges (spawned detached, they keep every open page fed), the copy-trade bridge, the options-screener collector, the
+ *  focus-tool workers and — most important — live strategies (`*_state.json`), which may hold real positions. Restarting
+ *  the dashboard must never kill these (it did: every restart dropped the live feeds and could stop a running strategy).
+ *  Everything else with a pid (refresh/backfill/backtest/report jobs) is a short job tied to this server and is still cleaned up. */
+const SURVIVES_SHUTDOWN = /^(live_.+status.*|.+_state|copy_trade_status|options_screener_status|focus_tool_.+status.*)\.json$/;
+
 function cleanupAllProcesses() {
   if (isShuttingDown) return;
   isShuttingDown = true;
@@ -98,6 +105,7 @@ function cleanupAllProcesses() {
     if (fs.existsSync(DEBUG_DIR)) {
       const files = fs.readdirSync(DEBUG_DIR);
       for (const file of files) {
+        if (SURVIVES_SHUTDOWN.test(file)) continue;
         if (file.endsWith('.pid') || file.endsWith('.json')) {
           const filePath = path.join(DEBUG_DIR, file);
           try {
