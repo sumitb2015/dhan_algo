@@ -89,8 +89,8 @@ const istDate = () => new Date(Date.now() + 5.5 * 3600_000).toISOString().slice(
 const dte = (expiry: string) => Math.round((Date.parse(expiry) - Date.parse(istDate())) / 86_400_000);
 
 /** Free-typed number that only commits on blur / Enter (dhan-commit-on-blur): "2" on the way to "25" must not filter live. */
-function NumField({ label, value, onCommit, step = 1, min = 0, width = 'w-16' }: {
-  label: string; value: number; onCommit: (n: number) => void; step?: number; min?: number; width?: string;
+function NumField({ label, value, onCommit, step = 1, min = 0, width = 'w-16', title }: {
+  title?: string; label: string; value: number; onCommit: (n: number) => void; step?: number; min?: number; width?: string;
 }) {
   const [draft, setDraft] = useState<string>(String(value));
   const [seen, setSeen] = useState(value);
@@ -100,7 +100,7 @@ function NumField({ label, value, onCommit, step = 1, min = 0, width = 'w-16' }:
     if (draft.trim() !== '' && Number.isFinite(n) && n >= min) onCommit(n); else setDraft(String(value));
   };
   return (
-    <label className="flex items-center gap-1 text-[10px] font-bold uppercase tracking-wider text-zinc-400">
+    <label className="flex items-center gap-1 text-[10px] font-bold uppercase tracking-wider text-zinc-400" title={title}>
       {label}
       <input
         type="number" inputMode="decimal" step={step} min={min} value={draft} aria-label={label}
@@ -145,6 +145,7 @@ export default function BearishStrikes() {
   const [minOiLots, setMinOiLots] = useState(0);
   const [minVolLots, setMinVolLots] = useState(0);
   const [atmWindow, setAtmWindow] = useState(12);
+  const [atmMin, setAtmMin] = useState(0);            // inner edge: scan only strikes atmMin..atmWindow steps from ATM (either side)
   const [maxScan, setMaxScan] = useState(40);
 
   // ── Mode ────────────────────────────────────────────────────────
@@ -314,7 +315,8 @@ export default function BearishStrikes() {
     const step = strikes.length > 1 ? Math.min(...strikes.slice(1).map((s, i) => s - strikes[i]).filter((d) => d > 0)) : 50;
     const out: { key: string; option: 'CE' | 'PE'; strike: number; dist: number }[] = [];
     for (const s of strikes) {
-      if (Math.abs(s - atm) > atmWindow * step) continue;
+      const dSteps = Math.abs(s - atm) / step;
+      if (dSteps > atmWindow || dSteps < atmMin) continue;
       if (only100 && s % 100 !== 0) continue;
       for (const option of ['CE', 'PE'] as const) {
         if (side !== 'BOTH' && side !== option) continue;
@@ -327,7 +329,7 @@ export default function BearishStrikes() {
       }
     }
     return out.sort((a, b) => a.dist - b.dist).slice(0, maxScan);
-  }, [atmWindow, side, otmOnly, minLtp, belowOpenOnly, maxScan, strike100, underlying]);
+  }, [atmWindow, atmMin, side, otmOnly, minLtp, belowOpenOnly, maxScan, strike100, underlying]);
 
   useEffect(() => {
     if (!expiry) return;
@@ -381,8 +383,12 @@ export default function BearishStrikes() {
       const spot = q.spot || 0;
       const next: Row[] = [];
       const only100 = strike100 && underlying === 'CRUDEOILM';
+      const sorted = Object.keys(q.strikes).map(Number).sort((a, b) => a - b);
+      const gap = sorted.length > 1 ? Math.min(...sorted.slice(1).map((v, i) => v - sorted[i]).filter((d) => d > 0)) : 50;
+      const atm = q.atm || spot;
       for (const s of Object.keys(q.strikes)) {
         if (only100 && Number(s) % 100 !== 0) continue;
+        if (atmMin > 0 && atm > 0 && Math.abs(Number(s) - atm) / gap < atmMin) continue;   // inside the excluded inner band
         for (const option of ['CE', 'PE'] as const) {
           const d = q.strikes[s]?.[option === 'CE' ? 'ce' : 'pe'];
           if (!d || !(d.ltp > 0)) continue;
@@ -408,7 +414,7 @@ export default function BearishStrikes() {
       setRows(next);
     }, 1000);
     return () => clearInterval(id);
-  }, [tf, filters, lotSize, strike100, underlying]);
+  }, [tf, filters, lotSize, strike100, underlying, atmMin]);
 
   // ── Ledger ──────────────────────────────────────────────────────
   const [positions, setPositions] = useState<BsPosition[]>([]);
@@ -858,7 +864,9 @@ export default function BearishStrikes() {
           <NumField label="Min ₹" value={minLtp} onCommit={setMinLtp} step={0.5} />
           <NumField label="Min OI lots" value={minOiLots} onCommit={setMinOiLots} width="w-20" />
           <NumField label="Min vol lots" value={minVolLots} onCommit={setMinVolLots} width="w-20" />
-          <NumField label="ATM ±" value={atmWindow} onCommit={(n) => setAtmWindow(Math.max(1, Math.round(n)))} />
+          <NumField label="ATM from" value={atmMin} title="Inner edge in strikes from ATM, both sides. 4 with ATM ± 8 scans ATM+4…+8 and ATM-4…-8 only."
+            onCommit={(n) => { const v = Math.round(n); setAtmMin(v); setAtmWindow((w) => Math.max(w, v, 1)); }} />
+          <NumField label="to ±" value={atmWindow} onCommit={(n) => { const v = Math.max(1, Math.round(n)); setAtmWindow(v); setAtmMin((m) => Math.min(m, v)); }} />
           <NumField label="Scan max" value={maxScan} onCommit={(n) => setMaxScan(Math.min(60, Math.max(5, Math.round(n))))} />
         </div>
       </div>
