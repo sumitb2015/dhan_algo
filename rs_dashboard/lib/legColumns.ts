@@ -1,13 +1,13 @@
 // Which optional columns the Multi-leg Focus legs table shows. A per-viewer
 // convenience only: kept in localStorage, always readable without it.
 
-export type LegColumnKey = 'avg' | 'exit' | 'pnlPct' | 'qty' | 'iv' | 'otm';
+export type LegColumnKey = 'avg' | 'exit' | 'pnlPct' | 'qty' | 'iv' | 'otm' | 'oi';
 export type LegColumns = Record<LegColumnKey, boolean>;
 
 export const LEG_COLUMN_STORAGE_KEY = 'mlf_leg_cols_v1';
 
 export const DEFAULT_LEG_COLUMNS: LegColumns = {
-  avg: true, exit: true, pnlPct: true, qty: false, iv: false, otm: false,
+  avg: true, exit: true, pnlPct: true, qty: false, iv: false, otm: false, oi: true,
 };
 
 export const LEG_COLUMN_LABELS: { key: LegColumnKey; label: string; hint: string }[] = [
@@ -16,6 +16,7 @@ export const LEG_COLUMN_LABELS: { key: LegColumnKey; label: string; hint: string
   { key: 'pnlPct', label: 'P&L %',      hint: 'P&L as a % of the entry premium' },
   { key: 'qty',    label: 'Qty',        hint: 'Quantity in units (lots x lot size), as recorded for this leg' },
   { key: 'iv',     label: 'IV',         hint: 'Live implied volatility from the option chain' },
+  { key: 'oi',     label: 'OI buildup', hint: 'Long/short buildup, short covering or long unwinding from the live chain (OI and price vs the previous session)' },
   { key: 'otm',    label: 'OTM %',      hint: 'Distance of the strike from spot (negative = in the money)' },
 ];
 

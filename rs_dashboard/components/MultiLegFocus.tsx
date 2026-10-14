@@ -24,6 +24,7 @@ import { growLegToBroker, outsidePositionBaskets, brokerOnlyPositions, ltpFromBr
 import ImportPositionsModal, { type ImportCandidate, type ImportRequest } from './multiLegFocus/ImportPositionsModal';
 import { withRevs, noteSaved, adoptServerBasket, stableBody, type RevBook } from '@/lib/multiLegStoreMerge';
 import { useTabLeader } from '@/hooks/useTabLeader';
+import { classifyOiBuildup, type OiSnapshot } from '@/lib/oiBuildup';
 import MultiLegOptionChainModal from './multiLegFocus/MultiLegOptionChainModal';
 import HelpModal from './HelpModal';
 import {
@@ -260,7 +261,7 @@ export default function MultiLegFocus({
 
   // ── Expiries and Market Data by Underlying ─────────────────────────
   const [expiriesMap, setExpiriesMap] = useState<Record<string, string[]>>({});
-  const [chainData, setChainData] = useState<Record<string, { spot: number; strikes: number[]; quotes: Record<string, { ce: number; pe: number; ceIv?: number; peIv?: number }>; prevClose?: number }>>({});
+  const [chainData, setChainData] = useState<Record<string, { spot: number; strikes: number[]; quotes: Record<string, { ce: number; pe: number; ceIv?: number; peIv?: number; ceOi?: OiSnapshot; peOi?: OiSnapshot }>; prevClose?: number }>>({});
   const chainDataRef = useRef(chainData);
   chainDataRef.current = chainData;
   const [lookupCache, setLookupCache] = useState<Record<string, LookupEntry>>({});
@@ -555,7 +556,7 @@ export default function MultiLegFocus({
           if (!j.success || !j.data) return;
           const oc = (j.data.chain as { oc?: Record<string, unknown> })?.oc ?? (j.data.chain as Record<string, unknown> | undefined);
           let strikes: number[] = [];
-          const quotes: Record<string, { ce: number; pe: number; ceIv?: number; peIv?: number }> = {};
+          const quotes: Record<string, { ce: number; pe: number; ceIv?: number; peIv?: number; ceOi?: OiSnapshot; peOi?: OiSnapshot }> = {};
           let spot = Number(j.data.spot) || 0;
           const prevClose = Number(j.data.prev_close) || 0;
 
@@ -564,15 +565,16 @@ export default function MultiLegFocus({
             for (const [sk, entryRaw] of Object.entries(oc)) {
               const strikeNum = Math.round(parseFloat(sk));
               if (isNaN(strikeNum)) continue;
-              const entry = entryRaw as {
-                ce?: { last_price?: number; ltp?: number; previous_close_price?: number; previous_close?: number; implied_volatility?: number };
-                pe?: { last_price?: number; ltp?: number; previous_close_price?: number; previous_close?: number; implied_volatility?: number };
-              };
+              type ChainSideRaw = { last_price?: number; ltp?: number; previous_close_price?: number; previous_close?: number; implied_volatility?: number; oi?: number; previous_oi?: number };
+              const entry = entryRaw as { ce?: ChainSideRaw; pe?: ChainSideRaw };
+              const oiSnap = (side?: ChainSideRaw): OiSnapshot | undefined => side
+                ? { oi: Number(side.oi) || 0, prevOi: Number(side.previous_oi) || 0, ltp: Number(side.last_price ?? side.ltp) || 0, prevClose: Number(side.previous_close_price) || 0 }
+                : undefined;
               const ce = Number(entry?.ce?.last_price || entry?.ce?.ltp || entry?.ce?.previous_close_price || entry?.ce?.previous_close || 0);
               const pe = Number(entry?.pe?.last_price || entry?.pe?.ltp || entry?.pe?.previous_close_price || entry?.pe?.previous_close || 0);
               const ceIv = Number(entry?.ce?.implied_volatility) || undefined;
               const peIv = Number(entry?.pe?.implied_volatility) || undefined;
-              quotes[String(strikeNum)] = { ce, pe, ceIv, peIv };
+              quotes[String(strikeNum)] = { ce, pe, ceIv, peIv, ceOi: oiSnap(entry?.ce), peOi: oiSnap(entry?.pe) };
             }
           } else if (Array.isArray(j.data.strikes) && j.data.strikes.length > 0) {
             strikes = j.data.strikes;
@@ -4086,6 +4088,10 @@ export default function MultiLegFocus({
                   const q = chainData[pair]?.quotes?.[key];
                   const iv = opt === 'CE' ? q?.ceIv : q?.peIv;
                   return iv && iv > 0 ? iv / 100 : 0;
+                }}
+                oiBuildupFor={(strk, opt, legExpiry) => {
+                  const q = chainData[`${basket.underlying}:${legExpiry || basket.expiry}`]?.quotes?.[String(strk)];
+                  return classifyOiBuildup(opt === 'CE' ? q?.ceOi : q?.peOi);
                 }}
                 onUpdate={patch => updateBasket(basket.id, patch)}
                 onDelete={() => deleteBasket(basket.id)}

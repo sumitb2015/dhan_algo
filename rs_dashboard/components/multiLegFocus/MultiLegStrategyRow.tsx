@@ -16,6 +16,7 @@ import PositionVisualizerModal from './PositionVisualizerModal';
 import StrategyChartModal, { chartLegsFor, isChartableUnderlying } from './StrategyChartModal';
 import ScaleStrategyModal from './ScaleStrategyModal';
 import AddNewLegModal from './AddNewLegModal';
+import type { OiBuildup } from '@/lib/oiBuildup';
 import LegColumnsMenu from './LegColumnsMenu';
 import { DEFAULT_LEG_COLUMNS, type LegColumns } from '@/lib/legColumns';
 import {
@@ -83,6 +84,8 @@ export interface MultiLegStrategyRowProps {
   /** Live chain IV (fraction) for a strike/option/expiry, 0 when not yet
    *  resolved — only consumed for a Calendar/Diagonal far leg's payoff curve. */
   ivForStrike?: (strike: number, option: 'CE' | 'PE', expiry?: string) => number;
+  /** OI buildup label for a strike/option/expiry from the live chain; null when it cannot be classified. */
+  oiBuildupFor?: (strike: number, option: 'CE' | 'PE', expiry?: string) => OiBuildup | null;
   onUpdate: (patch: Partial<MultiLegBasket>) => void;
   onDelete: () => void;
   onPlace: () => Promise<void>;
@@ -162,6 +165,7 @@ export default function MultiLegStrategyRow({
   ltpFor,
   ltpForStrike,
   ivForStrike,
+  oiBuildupFor,
   onUpdate,
   onDelete,
   onPlace,
@@ -300,7 +304,7 @@ export default function MultiLegStrategyRow({
   // (even when enabled) until then rather than showing a column of dashes.
   const showExitCol = legColumns.exit && legCounts.closed > 0;
   const colWeights = [
-    ...(onSelectLegs ? [6] : []), 5, 5, 8, ...(legColumns.otm ? [7] : []), ...(legColumns.iv ? [5] : []),
+    ...(onSelectLegs ? [6] : []), 5, 5, 8, ...(legColumns.otm ? [7] : []), ...(legColumns.iv ? [5] : []), ...(legColumns.oi ? [7] : []),
     5, ...(legColumns.qty ? [6] : []), 6, 6, ...(legColumns.avg ? [6] : []), ...(showExitCol ? [6] : []),
     // Action needs ~215px (shift ▲▼, ADD, lots box, EXIT): 19 x 12px at the table's minimum width.
     8, 8, 4, 6, 9, 7, ...(legColumns.pnlPct ? [6] : []), 6, 19,
@@ -1469,6 +1473,7 @@ export default function MultiLegStrategyRow({
                     </th>
                     {legColumns.otm && <th className="px-2 py-2 text-right" title="Distance of the strike from spot (negative = in the money)">OTM %</th>}
                     {legColumns.iv && <th className="px-2 py-2 text-right" title="Live implied volatility">IV</th>}
+                    {legColumns.oi && <th className="px-2 py-2 text-center" title="OI buildup vs the previous session: OI change x this contract's own price change">OI</th>}
                     <th className="px-1.5 py-2 text-center" aria-sort={legSort?.key === 'lots' ? (legSort.dir === 'asc' ? 'ascending' : 'descending') : 'none'}>
                       <button type="button" onClick={() => toggleLegSort('lots')} className={`inline-flex w-full items-center gap-0.5 justify-center font-bold hover:text-emerald-300 ${FOCUS_RING}`}>
                         Lots<span aria-hidden className="text-[10px]">{legSort?.key === 'lots' ? (legSort.dir === 'asc' ? '▲' : '▼') : ''}</span>
@@ -1534,6 +1539,7 @@ export default function MultiLegStrategyRow({
                       shiftBusy={placing || exiting || shifting}
                       columns={legColumns}
                       showExit={showExitCol}
+                      oiBuildup={leg.option === 'FUT' || leg.status === 'CLOSED' ? null : oiBuildupFor?.(leg.strike, leg.option, leg.expiry || basket.expiry) ?? null}
                       iv={leg.option === 'FUT' ? 0 : ivForStrike?.(leg.strike, leg.option, leg.expiry || basket.expiry) ?? 0}
                       strikeBlocked={leg.status === 'DRAFT' && !strikeAllowed(basket.underlying, leg.expiry || basket.expiry, expiries, leg.strike)}
                       selected={!!selectedLegIds?.has(leg.id)}
