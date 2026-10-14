@@ -43,14 +43,15 @@ export default function AddLotsModal({
   const [limitPrice, setLimitPrice] = useState<number>(() => {
     return currentLtp > 0 ? currentLtp : (leg?.price || 0);
   });
-  // A leg with no SL/TP yet gets 25% / 25% of entry premium pre-armed; a leg that already has one keeps it unless adjusted.
-  const DEFAULT_RISK_PCT = 25;
+  // A leg with no SL/TP yet gets 25% SL / 50% target of entry premium pre-armed; a leg that already has one keeps it unless adjusted.
+  const DEFAULT_SL_PCT = 25;
+  const DEFAULT_TP_PCT = 50;
   const [adjustRisk, setAdjustRisk] = useState<boolean>(() => leg?.sl == null && leg?.tp == null);
   // Same default as the leg row: % for an empty field, points for a legacy value saved without a type.
   const slType = leg?.slType ?? (leg?.sl == null ? 'pct' : 'pts');
   const tpType = leg?.tpType ?? (leg?.tp == null ? 'pct' : 'pts');
-  const [newSl, setNewSl] = useState<string>(() => (leg?.sl != null ? String(leg.sl) : leg?.tp == null ? String(DEFAULT_RISK_PCT) : ''));
-  const [newTp, setNewTp] = useState<string>(() => (leg?.tp != null ? String(leg.tp) : leg?.sl == null ? String(DEFAULT_RISK_PCT) : ''));
+  const [newSl, setNewSl] = useState<string>(() => (leg?.sl != null ? String(leg.sl) : leg?.tp == null ? String(DEFAULT_SL_PCT) : ''));
+  const [newTp, setNewTp] = useState<string>(() => (leg?.tp != null ? String(leg.tp) : leg?.sl == null ? String(DEFAULT_TP_PCT) : ''));
   const [submitting, setSubmitting] = useState<boolean>(false);
 
   // Sync limit price with currentLtp when switching to LIMIT if not set

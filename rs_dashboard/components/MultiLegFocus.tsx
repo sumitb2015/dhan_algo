@@ -3394,7 +3394,11 @@ export default function MultiLegFocus({
             const lotSize = lk?.lotSize ?? fallbackLotSize(basket.underlying as Underlying, bk);
             const lots = Math.floor(r.qty / lotSize);
             const spot = chainData[`${basket.underlying}:${legExpiry}`]?.spot ?? 0;
-            const strikeList = Object.keys(lk?.strikes ?? {}).map(Number);
+            // Far expiries (3rd listed onward) only trade liquidly on multiples of 100, so re-entry never picks a 50-strike there.
+            const listedExp = expiriesMap[basket.underlying] ?? [];
+            const strikeList = allowedStrikes(basket.underlying, legExpiry, listedExp, Object.keys(lk?.strikes ?? {}).map(Number));
+            const allQuotes = chainData[`${basket.underlying}:${legExpiry}`]?.quotes ?? {};
+            const pickQuotes = Object.fromEntries(Object.entries(allQuotes).filter(([k]) => strikeAllowed(basket.underlying, legExpiry, listedExp, Number(k))));
             const oppLeg = reOffset === MATCH_OPPOSITE
               ? (basketsRef.current.find(b => b.id === basket.id) ?? basket).legs.find(l => l.id !== leg.id && l.status === 'OPEN' && l.fill && l.side === 'S' && l.option !== leg.option && (l.expiry || basket.expiry) === legExpiry && !exitingLegsRef.current.has(l.id) && !recentlyTriggered(triggeredLegExitsRef.current, l.id))
               : undefined;
@@ -3403,7 +3407,7 @@ export default function MultiLegFocus({
             // No priced opposite short (single leg, spread, condor side already out): fall back to same distance.
             const sameDist = reOffset === SAME_DISTANCE || (reOffset === MATCH_OPPOSITE && !matchOpp);
             const picked = matchOpp
-              ? autoReentryStrikeByPremium(chainData[`${basket.underlying}:${legExpiry}`]?.quotes ?? {}, spot, leg.option as 'CE' | 'PE', oppLtp)
+              ? autoReentryStrikeByPremium(pickQuotes, spot, leg.option as 'CE' | 'PE', oppLtp)
               : sameDist
               ? (leg.entryDist != null ? autoReentryStrikeByDistance(strikeList, spot, leg.option as 'CE' | 'PE', leg.entryDist) : null)
               : autoReentryStrike(strikeList, spot, leg.option as 'CE' | 'PE', reOffset as number);
@@ -3432,7 +3436,7 @@ export default function MultiLegFocus({
         }));
       }
     }
-  }, [baskets, ltpFor, exitingMap, exitBasket, exitOneLeg, patchLegs, addToast, isLeader, addNewLegCore, lookupCache, chainData, broker, resolveDhanSecurityId]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [baskets, ltpFor, exitingMap, exitBasket, exitOneLeg, patchLegs, addToast, isLeader, addNewLegCore, lookupCache, chainData, expiriesMap, broker, resolveDhanSecurityId]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // ── Guards: spot triggers, net-Greek bands, max-loss / margin alarm ──
   // Decisions live in lib/multiLegGuardEngine.ts (pure, tested); this block supplies the inputs and performs the effects.
