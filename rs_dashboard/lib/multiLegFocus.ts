@@ -251,8 +251,9 @@ export function autoReentryStrikeByDistance(strikes: number[], spot: number, opt
   return strikes.reduce((a, b) => (Math.abs(b - target) < Math.abs(a - target) ? b : a));
 }
 
-/** Strike (ATM or further OTM, CE up / PE down) whose live premium is closest to `target`. Null with no priced strike. */
-export function autoReentryStrikeByPremium(quotes: Record<string, { ce?: number; pe?: number }>, spot: number, option: 'CE' | 'PE', target: number): number | null {
+/** Strike (ATM or further OTM, CE up / PE down) whose live premium is closest to `target`. Null with no priced strike.
+ *  `exclude` (the strike that just exited) is skipped AFTER ATM is found, so excluding it never shifts the ATM. */
+export function autoReentryStrikeByPremium(quotes: Record<string, { ce?: number; pe?: number }>, spot: number, option: 'CE' | 'PE', target: number, exclude?: number): number | null {
   if (!(spot > 0) || !(target > 0)) return null;
   const strikes = Object.keys(quotes).map(Number).filter(Number.isFinite).sort((a, b) => a - b);
   let atm = strikes[0];
@@ -260,6 +261,7 @@ export function autoReentryStrikeByPremium(quotes: Record<string, { ce?: number;
   let best: number | null = null, bestDiff = Infinity;
   for (const k of strikes) {
     if (option === 'CE' ? k < atm : k > atm) continue;
+    if (k === exclude) continue;
     const q = quotes[String(k)]?.[option === 'CE' ? 'ce' : 'pe'];
     if (!(q != null && q > 0)) continue;
     const d = Math.abs(q - target);

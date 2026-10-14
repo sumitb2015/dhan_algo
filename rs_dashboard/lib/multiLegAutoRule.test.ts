@@ -43,6 +43,9 @@ test('match-premium re-entry picks the closest priced strike at or beyond ATM', 
   assert.equal(autoReentryStrikeByPremium(q, 24010, 'PE', 64), 23950);
   assert.equal(autoReentryStrikeByPremium(q, 24010, 'CE', 500), 24000); // never ITM
   assert.equal(autoReentryStrikeByPremium(q, 24010, 'CE', 0), null);
+  // The exited strike is skipped after ATM is fixed: next-closest wins, and ATM never shifts to an ITM strike.
+  assert.equal(autoReentryStrikeByPremium(q, 24010, 'CE', 72, 24050), 24100);
+  assert.equal(autoReentryStrikeByPremium(q, 24010, 'PE', 64, 23950), 24000);
 });
 
 test('avoidSameStrike steps one strike OTM only when the strike did not change', () => {

@@ -261,7 +261,7 @@ export default function MultiLegFocus({
 
   // ── Expiries and Market Data by Underlying ─────────────────────────
   const [expiriesMap, setExpiriesMap] = useState<Record<string, string[]>>({});
-  const [chainData, setChainData] = useState<Record<string, { spot: number; strikes: number[]; quotes: Record<string, { ce: number; pe: number; ceIv?: number; peIv?: number; ceOi?: OiSnapshot; peOi?: OiSnapshot }>; prevClose?: number }>>({});
+  const [chainData, setChainData] = useState<Record<string, { spot: number; strikes: number[]; quotes: Record<string, { ce: number; pe: number; ceIv?: number; peIv?: number; ceLive?: number; peLive?: number; ceOi?: OiSnapshot; peOi?: OiSnapshot }>; prevClose?: number }>>({});
   const chainDataRef = useRef(chainData);
   chainDataRef.current = chainData;
   const [lookupCache, setLookupCache] = useState<Record<string, LookupEntry>>({});
@@ -556,7 +556,7 @@ export default function MultiLegFocus({
           if (!j.success || !j.data) return;
           const oc = (j.data.chain as { oc?: Record<string, unknown> })?.oc ?? (j.data.chain as Record<string, unknown> | undefined);
           let strikes: number[] = [];
-          const quotes: Record<string, { ce: number; pe: number; ceIv?: number; peIv?: number; ceOi?: OiSnapshot; peOi?: OiSnapshot }> = {};
+          const quotes: Record<string, { ce: number; pe: number; ceIv?: number; peIv?: number; ceLive?: number; peLive?: number; ceOi?: OiSnapshot; peOi?: OiSnapshot }> = {};
           let spot = Number(j.data.spot) || 0;
           const prevClose = Number(j.data.prev_close) || 0;
 
@@ -574,7 +574,10 @@ export default function MultiLegFocus({
               const pe = Number(entry?.pe?.last_price || entry?.pe?.ltp || entry?.pe?.previous_close_price || entry?.pe?.previous_close || 0);
               const ceIv = Number(entry?.ce?.implied_volatility) || undefined;
               const peIv = Number(entry?.pe?.implied_volatility) || undefined;
-              quotes[String(strikeNum)] = { ce, pe, ceIv, peIv, ceOi: oiSnap(entry?.ce), peOi: oiSnap(entry?.pe) };
+              // ce/pe fall back to the previous close for an untraded strike; ceLive/peLive never do (premium matching needs a live price).
+              const ceLive = Number(entry?.ce?.last_price || entry?.ce?.ltp || 0) || undefined;
+              const peLive = Number(entry?.pe?.last_price || entry?.pe?.ltp || 0) || undefined;
+              quotes[String(strikeNum)] = { ce, pe, ceLive, peLive, ceIv, peIv, ceOi: oiSnap(entry?.ce), peOi: oiSnap(entry?.pe) };
             }
           } else if (Array.isArray(j.data.strikes) && j.data.strikes.length > 0) {
             strikes = j.data.strikes;
@@ -3398,7 +3401,12 @@ export default function MultiLegFocus({
             const listedExp = expiriesMap[basket.underlying] ?? [];
             const strikeList = allowedStrikes(basket.underlying, legExpiry, listedExp, Object.keys(lk?.strikes ?? {}).map(Number));
             const allQuotes = chainData[`${basket.underlying}:${legExpiry}`]?.quotes ?? {};
-            const pickQuotes = Object.fromEntries(Object.entries(allQuotes).filter(([k]) => strikeAllowed(basket.underlying, legExpiry, listedExp, Number(k))));
+            // Premium matching sees live prices only (no previous-close fallback).
+            const pickQuotes: Record<string, { ce?: number; pe?: number }> = {};
+            for (const [k, q] of Object.entries(allQuotes)) {
+              if (!strikeAllowed(basket.underlying, legExpiry, listedExp, Number(k))) continue;
+              pickQuotes[k] = { ce: q.ceLive, pe: q.peLive };
+            }
             const oppLeg = reOffset === MATCH_OPPOSITE
               ? (basketsRef.current.find(b => b.id === basket.id) ?? basket).legs.find(l => l.id !== leg.id && l.status === 'OPEN' && l.fill && l.side === 'S' && l.option !== leg.option && (l.expiry || basket.expiry) === legExpiry && !exitingLegsRef.current.has(l.id) && !recentlyTriggered(triggeredLegExitsRef.current, l.id))
               : undefined;
@@ -3407,7 +3415,7 @@ export default function MultiLegFocus({
             // No priced opposite short (single leg, spread, condor side already out): fall back to same distance.
             const sameDist = reOffset === SAME_DISTANCE || (reOffset === MATCH_OPPOSITE && !matchOpp);
             const picked = matchOpp
-              ? autoReentryStrikeByPremium(pickQuotes, spot, leg.option as 'CE' | 'PE', oppLtp)
+              ? autoReentryStrikeByPremium(pickQuotes, spot, leg.option as 'CE' | 'PE', oppLtp, leg.strike)
               : sameDist
               ? (leg.entryDist != null ? autoReentryStrikeByDistance(strikeList, spot, leg.option as 'CE' | 'PE', leg.entryDist) : null)
               : autoReentryStrike(strikeList, spot, leg.option as 'CE' | 'PE', reOffset as number);
