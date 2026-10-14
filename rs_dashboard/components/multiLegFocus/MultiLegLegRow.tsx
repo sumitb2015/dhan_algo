@@ -7,6 +7,7 @@ import {
 } from '@/lib/multiLegFocus';
 import { DEFAULT_LEG_COLUMNS, type LegColumns } from '@/lib/legColumns';
 import { FOCUS_RING } from '@/components/Scalper';
+import type { OiBuildup } from '@/lib/oiBuildup';
 import RuleNumInput from './RuleNumInput';
 
 const SELECT_CLASS = `h-7 bg-zinc-900 border border-zinc-700 text-zinc-200 text-xs font-semibold rounded px-1.5 focus:outline-none focus:border-emerald-500 disabled:opacity-50 disabled:cursor-not-allowed w-full ${FOCUS_RING}`;
@@ -18,6 +19,14 @@ const STATUS_STYLE: Record<MultiLegLeg['status'], string> = {
   CLOSING: 'bg-amber-500/10 text-amber-400 border-amber-500/20',
   CLOSED:  'bg-zinc-800 text-zinc-500 border-zinc-700',
   FAILED:  'bg-rose-500/10 text-rose-400 border-rose-500/20',
+};
+
+// Long side = green/amber family, short side = red/sky, matching the Buildup tab.
+const OI_BUILDUP_STYLE: Record<OiBuildup, string> = {
+  'Long Buildup':   'bg-emerald-500/10 text-emerald-400 border-emerald-500/30',
+  'Short Buildup':  'bg-red-500/10 text-red-400 border-red-500/30',
+  'Short Covering': 'bg-sky-500/10 text-sky-400 border-sky-500/30',
+  'Long Unwinding': 'bg-amber-500/10 text-amber-400 border-amber-500/30',
 };
 
 function fmtMoney(n: number): string {
@@ -57,6 +66,8 @@ interface MultiLegLegRowProps {
   strategyMultiplier?: number;
   /** Live implied volatility as a fraction (0.14 = 14%); 0 when unknown. */
   iv?: number;
+  /** OI buildup for this contract; null when it cannot be classified. */
+  oiBuildup?: OiBuildup | null;
   /** Selection for regrouping (checkbox). Omit to hide the control. */
   selected?: boolean;
   onSelect?: (on: boolean) => void;
@@ -99,12 +110,16 @@ export function TagCell({ value, onCommit }: { value?: string; onCommit: (v: str
 }
 
 export default function MultiLegLegRow({
-  leg, allStrikes, ltp, spot, editable, exiting, margin, multiplier = 1, strategyMultiplier = 1, frontExpiry, farExpiry, onChange, onRemove, onOpenExit, onOpenAddLots, onShift, shiftSteps = 1, shiftBusy = false, strikeBlocked = false, columns = DEFAULT_LEG_COLUMNS, showExit = false, iv = 0, selected = false, onSelect, onTag, onDetach,
+  leg, allStrikes, ltp, spot, editable, exiting, margin, multiplier = 1, strategyMultiplier = 1, frontExpiry, farExpiry, onChange, onRemove, onOpenExit, onOpenAddLots, onShift, shiftSteps = 1, shiftBusy = false, strikeBlocked = false, columns = DEFAULT_LEG_COLUMNS, showExit = false, iv = 0, oiBuildup = null, selected = false, onSelect, onTag, onDetach,
 }: MultiLegLegRowProps) {
   const restingExit = restingExitOrders(leg)[0];
   const isFut = leg.option === 'FUT';
   const pnl = leg.fill ? legPnl(leg, ltp, multiplier) : 0;
   const pnlColor = pnl > 0 ? 'text-emerald-400' : pnl < 0 ? 'text-rose-400' : 'text-zinc-400';
+  // New legs default to % of entry premium. A leg that already carries a value but no type was saved
+  // as points, so it keeps meaning points; the type is written with every committed value.
+  const slType = leg.slType ?? (leg.sl == null ? 'pct' : 'pts');
+  const tpType = leg.tpType ?? (leg.tp == null ? 'pct' : 'pts');
   const trailingEval = computeLegTrailingSL(leg, ltp);
   const isFar = !!leg.expiry && leg.expiry !== frontExpiry;
   const canToggleExpiry = editable && !!farExpiry && farExpiry !== frontExpiry;
@@ -189,6 +204,16 @@ export default function MultiLegLegRow({
           {iv > 0 && leg.status !== 'CLOSED' ? `${(iv * 100).toFixed(1)}%` : dash}
         </td>
       )}
+      {columns.oi && (
+        <td className="px-1 py-1.5 text-center">
+          {oiBuildup ? (
+            <span className={`inline-block px-1.5 py-0.5 rounded border text-[10px] font-bold whitespace-nowrap ${OI_BUILDUP_STYLE[oiBuildup]}`}
+              title={`${oiBuildup}: OI change x this contract's price change vs the previous session`}>
+              {oiBuildup}
+            </span>
+          ) : dash}
+        </td>
+      )}
       <td className="px-1.5 py-1.5 text-center">
         <input type="number" min={1} value={leg.lots} disabled={!editable}
           onChange={e => onChange({ lots: Math.max(1, Number(e.target.value) || 1) })}
@@ -237,18 +262,18 @@ export default function MultiLegLegRow({
           <div className="flex items-center gap-1">
             <RuleNumInput
               value={leg.sl}
-              onCommit={val => onChange({ sl: val })}
-              placeholder={leg.slType === 'price' ? 'Price' : leg.slType === 'pct' ? '%' : 'Pts'}
+              onCommit={val => onChange({ sl: val, slType: slType })}
+              placeholder={slType === 'price' ? 'Price' : slType === 'pct' ? '%' : 'Pts'}
               className="w-14 h-7 text-rose-300 placeholder-rose-900/40"
               title="Stop Loss (points, % of entry premium, or price)"
             />
             <button
               type="button"
-              onClick={() => onChange({ slType: nextLegThresholdType(leg.slType) })}
+              onClick={() => onChange({ slType: nextLegThresholdType(slType) })}
               className="h-7 px-1 text-[10px] font-mono font-bold rounded border border-zinc-700 bg-zinc-800 text-zinc-400 hover:text-white"
               title="Cycle Points → % of entry → Price"
             >
-              {leg.slType === 'price' ? '₹' : leg.slType === 'pct' ? '%' : 'pts'}
+              {slType === 'price' ? '₹' : slType === 'pct' ? '%' : 'pts'}
             </button>
           </div>
           {trailingEval.effectiveSL != null && (
@@ -264,18 +289,18 @@ export default function MultiLegLegRow({
           <div className="flex items-center gap-1">
             <RuleNumInput
               value={leg.tp}
-              onCommit={val => onChange({ tp: val })}
-              placeholder={leg.tpType === 'price' ? 'Price' : leg.tpType === 'pct' ? '%' : 'Pts'}
+              onCommit={val => onChange({ tp: val, tpType: tpType })}
+              placeholder={tpType === 'price' ? 'Price' : tpType === 'pct' ? '%' : 'Pts'}
               className="w-14 h-7 text-emerald-300 placeholder-emerald-900/40"
               title="Take Profit (points, % of entry premium, or price)"
             />
             <button
               type="button"
-              onClick={() => onChange({ tpType: nextLegThresholdType(leg.tpType) })}
+              onClick={() => onChange({ tpType: nextLegThresholdType(tpType) })}
               className="h-7 px-1 text-[10px] font-mono font-bold rounded border border-zinc-700 bg-zinc-800 text-zinc-400 hover:text-white"
               title="Cycle Points → % of entry → Price"
             >
-              {leg.tpType === 'price' ? '₹' : leg.tpType === 'pct' ? '%' : 'pts'}
+              {tpType === 'price' ? '₹' : tpType === 'pct' ? '%' : 'pts'}
             </button>
           </div>
           {trailingEval.tpPrice != null && (
