@@ -272,20 +272,30 @@ export default function BearishStrikes() {
   }, [underlying]);
 
   // ── Bridge (shared per underlying; never spawn it ourselves) ────
+  // Switching underlying leaves the previous bridge running, so flipping back (e.g. NIFTY <-> CRUDEOILM) is instant and
+  // the other feed keeps its history. Everything this page started is stopped when the page itself unmounts; the route's
+  // 7 s grace and its multi-viewer guard still apply, so another open tab keeps the feed alive.
+  const startedBridges = useRef<Set<string>>(new Set());
   useEffect(() => {
     if (!expiry) return;
-    const viewerId = viewer.current;
+    startedBridges.current.add(underlying);
     fetch('/api/options/live', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ action: 'start', underlying, expiry, numStrikes: 35, broker: 'dhan', viewer: viewerId }),
+      body: JSON.stringify({ action: 'start', underlying, expiry, numStrikes: 35, broker: 'dhan', viewer: viewer.current }),
     }).catch(() => {});
-    return () => {
-      fetch('/api/options/live', {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ action: 'stop', brokers: ['dhan'], underlying, viewer: viewerId }),
-      }).catch(() => {});
-    };
   }, [underlying, expiry]);
+  useEffect(() => {
+    const started = startedBridges.current;
+    const viewerId = viewer.current;
+    return () => {
+      for (const u of started) {
+        fetch('/api/options/live', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ action: 'stop', brokers: ['dhan'], underlying: u, viewer: viewerId }),
+        }).catch(() => {});
+      }
+    };
+  }, []);
 
   const { liveQuotes, bridgeStatus, lastUpdated, transport } = useLiveOptionsWS(expiry, 'dhan', ['dhan'], underlying);
   const quotesRef = useRef(liveQuotes);
