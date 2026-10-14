@@ -141,6 +141,9 @@ test('an open short alerts when its price goes above the Supertrend line, even i
   await expect(banner).toContainText('moving against you', { timeout: 30_000 });
   await expect(banner).toContainText('24600 CE');
   await expect(banner).toContainText('Supertrend');
+  // Contrast: the global white-mode rules once forced this label dark red on red. It must be white in every theme.
+  const exitNow = banner.getByRole('button', { name: /Exit 24600 CE now/ });
+  await expect(exitNow).toHaveCSS('color', 'rgb(255, 255, 255)');
   await expect(page.getByText('1 ALERT', { exact: true })).toBeVisible();
   await expect.poll(() => page.title()).toContain('ALERT');
 
@@ -168,3 +171,21 @@ test('OI buildup is highlighted against the bearish signal and can be filtered',
   await page.getByRole('button', { name: 'Any', exact: true }).click();
   await expect(lb).toHaveCount(1);
 });
+
+for (const theme of ['light', 'beige']) {
+  test(`alert banner EXIT NOW label stays white in ${theme} mode`, async ({ page }) => {
+    await page.addInitScript((t) => { try { localStorage.setItem('dhan-theme', t); } catch { /* storage blocked */ } }, theme);
+    const m = await install(page);
+    await page.goto('/bearish-strikes', { waitUntil: 'domcontentloaded' });
+    await page.getByRole('button', { name: 'CE', exact: true }).click();
+    await expect(page.getByRole('row').filter({ hasText: '24600' })).toContainText(/BEARISH/, { timeout: 60_000 });
+    await page.getByRole('button', { name: 'Sell 24600 CE' }).click();
+    await page.getByRole('button', { name: /Place & Add Leg/ }).click();
+    await expect(page.getByRole('region', { name: 'Positions on this page' })).toContainText('OPEN');
+    m.px.ce24600 = 400;
+    const banner = page.getByRole('alert', { name: 'Position alerts' });
+    await expect(banner).toContainText('moving against you', { timeout: 30_000 });
+    expect(await page.evaluate(() => document.documentElement.getAttribute('data-theme') ?? (document.documentElement.classList.contains('dark') ? 'dark' : 'light'))).toBe(theme);
+    await expect(banner.getByRole('button', { name: /Exit 24600 CE now/ })).toHaveCSS('color', 'rgb(255, 255, 255)');
+  });
+}

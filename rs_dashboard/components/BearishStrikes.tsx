@@ -855,12 +855,16 @@ export default function BearishStrikes() {
       {/* ── Body ── */}
       <div className="flex-1 flex flex-col gap-4 px-6 py-5">
         {alertCount > 0 && (
-          <section aria-label="Position alerts" role="alert" className="rounded-xl border border-red-500/50 bg-red-500/10 px-4 py-3 space-y-2">
-            <h2 className="text-xs font-bold text-red-400 uppercase tracking-wide flex items-center gap-1.5"><TriangleAlert className="w-4 h-4" aria-hidden="true" />Your short is moving against you</h2>
+          // The red tint is its own empty layer, NOT a class on the container: in white mode globals.css recolours every
+          // DESCENDANT of a bg-red-500/NN element dark red with !important, which turned the EXIT NOW label into dark red
+          // on red. With the tint on a sibling layer nothing inside the banner is a descendant of it.
+          <section aria-label="Position alerts" role="alert" className="relative rounded-xl border border-red-500/50 px-4 py-3 space-y-2">
+            <div aria-hidden="true" className="absolute inset-0 rounded-xl bg-red-500/10 pointer-events-none" />
+            <h2 className="relative text-xs font-bold text-red-400 uppercase tracking-wide flex items-center gap-1.5"><TriangleAlert className="w-4 h-4" aria-hidden="true" />Your short is moving against you</h2>
             {openPositions.filter((p) => activeAlerts[p.id]).map((p) => {
               const w = posWatch[p.id];
               return (
-                <div key={p.id} className="flex items-center justify-between gap-3 flex-wrap text-xs font-mono">
+                <div key={p.id} className="relative flex items-center justify-between gap-3 flex-wrap text-xs font-mono">
                   <span className="text-zinc-100">
                     <span className="font-bold">{p.mode} · {p.underlying} {p.strike} {p.option}</span>
                     {' — price '}<span className="font-bold">{fmt(w?.ltp)}</span>{' above '}
