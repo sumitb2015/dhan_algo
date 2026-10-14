@@ -985,7 +985,7 @@ export default function BearishStrikes() {
               <tr className="bg-zinc-800">
                 {[
                   ['Strike', 'text-left'], ['LTP · Chg%', 'text-right'], [`Supertrend ${tf}m`, 'text-right'], ['VWAP', 'text-right'], ['EMA20', 'text-right'],
-                  ['OI lots · Δ% · Build', 'text-right'], ['Vol lots', 'text-right'], ['Signal', 'text-center'], ['', 'text-right'],
+                  ['OI lots · Δ% · Build', 'text-right'], ['Vol lots', 'text-right'], ['ST · VW · EMA · OI', 'text-center'], ['Signal', 'text-center'], ['', 'text-right'],
                 ].map(([h, al], i) => (
                   <th key={i} className={`px-3 py-2 text-xs font-bold text-white whitespace-nowrap ${al}`}>{h}</th>
                 ))}
@@ -1033,6 +1033,21 @@ export default function BearishStrikes() {
                       </div>
                     </td>
                     <td className="px-3 py-1.5 text-right text-zinc-200">{(r.volume / lot).toLocaleString('en-IN', { maximumFractionDigits: 0 })}</td>
+                    <td className="px-3 py-1.5 text-center whitespace-nowrap">
+                      {/* Traffic lights. Green = price below the level (what a seller wants), red = above it, amber = the closed bar
+                          is below but the live price has crept back above, grey = still warming up. OI: green = SB/LU, red = LB. */}
+                      <span className="inline-flex items-center gap-1.5" role="img"
+                        aria-label="Indicator lights: Supertrend, VWAP, EMA20, open interest">
+                        {([['Supertrend', r.sig.below.st, r.sig.stLine], ['VWAP', r.sig.below.vwap, r.sig.vwap], ['EMA20', r.sig.below.ema, r.sig.ema]] as const).map(([name, below, lv]) => {
+                          const liveAbove = below === true && lv != null && r.ltp >= lv;
+                          const cls = below == null ? 'bg-zinc-600' : liveAbove ? 'bg-amber-400' : below ? 'bg-emerald-400' : 'bg-red-400';
+                          const why = below == null ? 'warming up' : liveAbove ? 'closed bar below, but live price is back above' : below ? 'price is below (good for a short)' : 'price is above (against a short)';
+                          return <span key={name} className={`inline-block w-2.5 h-2.5 rounded-full ${cls}`} title={`${name}: ${why}`} />;
+                        })}
+                        <span className={`inline-block w-2.5 h-2.5 rounded-full ${oi === 'confirm' ? 'bg-emerald-400' : oi === 'conflict' ? 'bg-red-400' : 'bg-zinc-600'}`}
+                          title={oi === 'confirm' ? `OI: ${r.buildup} backs the short` : oi === 'conflict' ? 'OI: long buildup disagrees' : 'OI: no clear read'} />
+                      </span>
+                    </td>
                     <td className="px-3 py-1.5 text-center whitespace-nowrap">
                       <span className={`px-1.5 py-0.5 rounded border text-[10px] font-bold ${full && r.liveBelowAll ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30'
                         : full ? 'bg-amber-500/10 text-amber-300 border-amber-500/30' : 'bg-zinc-900 text-zinc-400 border-zinc-700'}`}
