@@ -1719,25 +1719,19 @@ export default function MultiLegFocus({
       return { closed, qty: closedQty };
     }
 
-    // Hedge Protection Guard: Warn if manually exiting a BUY leg while short legs remain open
-    if (leg.side === 'B') {
-      const openShorts = (basket?.legs ?? []).filter(l => l.status === 'OPEN' && l.side === 'S' && l.id !== leg.id);
-      if (openShorts.length > 0) {
-        const matchingShorts = openShorts.filter(l => l.option === leg.option);
-        const warning = matchingShorts.length > 0
-          ? `Warning: Exiting this ${leg.strike} ${leg.option} BUY hedge will leave your short ${matchingShorts.map(s => `${s.strike} ${s.option}`).join(', ')} leg completely NAKED without protection, and will increase margin requirements.\n\nExit this hedge anyway?`
-          : `Warning: This strategy still has open short legs (${openShorts.map(s => `${s.strike} ${s.option}`).join(', ')}). Exiting this BUY leg will increase margin requirements.\n\nExit anyway?`;
-        const refuse = opts?.unattended ? matchingShorts.length > 0 : !window.confirm(warning);
-        if (refuse) {
-          if (opts?.unattended) addToast('error', `Hedge ${label} kept`, `A short on the same side is still open (${matchingShorts.map(s => `${s.strike} ${s.option}`).join(', ')}); selling this hedge would leave it naked. The guard retries once the short is closed.`);
-          exitingLegsRef.current.delete(leg.id);
-          setExitingLegs(prev => {
-            const next = new Set(prev);
-            next.delete(leg.id);
-            return next;
-          });
-          return { closed: false, qty: 0 };
-        }
+    // Hedge Protection Guard: an automatic (unattended) exit never sells a hedge while a short on its own side is still open.
+    // A manual exit goes straight through — the strategy row marks any short left unhedged instead of asking for confirmation.
+    if (leg.side === 'B' && opts?.unattended) {
+      const matchingShorts = (basket?.legs ?? []).filter(l => l.status === 'OPEN' && l.side === 'S' && l.id !== leg.id && l.option === leg.option);
+      if (matchingShorts.length > 0) {
+        addToast('error', `Hedge ${label} kept`, `A short on the same side is still open (${matchingShorts.map(s => `${s.strike} ${s.option}`).join(', ')}); selling this hedge would leave it naked. The guard retries once the short is closed.`);
+        exitingLegsRef.current.delete(leg.id);
+        setExitingLegs(prev => {
+          const next = new Set(prev);
+          next.delete(leg.id);
+          return next;
+        });
+        return { closed: false, qty: 0 };
       }
     }
 

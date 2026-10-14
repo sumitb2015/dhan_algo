@@ -1541,6 +1541,8 @@ export default function MultiLegStrategyRow({
                       showExit={showExitCol}
                       oiBuildup={leg.option === 'FUT' || leg.status === 'CLOSED' ? null : oiBuildupFor?.(leg.strike, leg.option, leg.expiry || basket.expiry) ?? null}
                       iv={leg.option === 'FUT' ? 0 : ivForStrike?.(leg.strike, leg.option, leg.expiry || basket.expiry) ?? 0}
+                      unhedged={leg.status === 'OPEN' && leg.side === 'S' && leg.option !== 'FUT'
+                        && !basket.legs.some(h => h.status === 'OPEN' && h.side === 'B' && h.option === leg.option && (h.expiry || basket.expiry) === (leg.expiry || basket.expiry))}
                       strikeBlocked={leg.status === 'DRAFT' && !strikeAllowed(basket.underlying, leg.expiry || basket.expiry, expiries, leg.strike)}
                       selected={!!selectedLegIds?.has(leg.id)}
                       onSelect={onSelectLegs ? (on => onSelectLegs([leg.id], on)) : undefined}

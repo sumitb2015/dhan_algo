@@ -58,6 +58,8 @@ interface MultiLegLegRowProps {
   shiftBusy?: boolean;
   /** Strike is not tradable on this leg's expiry (far expiry needs a multiple of 100). */
   strikeBlocked?: boolean;
+  /** An open short with no open BUY hedge of the same option type and expiry in its strategy. */
+  unhedged?: boolean;
   /** Optional columns to render (must match the header in MultiLegStrategyRow). */
   columns?: LegColumns;
   /** Exit column shown (only when the strategy has a closed leg). */
@@ -110,7 +112,7 @@ export function TagCell({ value, onCommit }: { value?: string; onCommit: (v: str
 }
 
 export default function MultiLegLegRow({
-  leg, allStrikes, ltp, spot, editable, exiting, margin, multiplier = 1, strategyMultiplier = 1, frontExpiry, farExpiry, onChange, onRemove, onOpenExit, onOpenAddLots, onShift, shiftSteps = 1, shiftBusy = false, strikeBlocked = false, columns = DEFAULT_LEG_COLUMNS, showExit = false, iv = 0, oiBuildup = null, selected = false, onSelect, onTag, onDetach,
+  leg, allStrikes, ltp, spot, editable, exiting, margin, multiplier = 1, strategyMultiplier = 1, frontExpiry, farExpiry, onChange, onRemove, onOpenExit, onOpenAddLots, onShift, shiftSteps = 1, shiftBusy = false, strikeBlocked = false, unhedged = false, columns = DEFAULT_LEG_COLUMNS, showExit = false, iv = 0, oiBuildup = null, selected = false, onSelect, onTag, onDetach,
 }: MultiLegLegRowProps) {
   const restingExit = restingExitOrders(leg)[0];
   const isFut = leg.option === 'FUT';
@@ -178,6 +180,11 @@ export default function MultiLegLegRow({
           {!allStrikes.includes(leg.strike) && <option value={leg.strike}>{leg.strike}</option>}
           {allStrikes.map(s => <option key={s} value={s}>{s}</option>)}
         </select>
+        {unhedged && (
+          <span className="mt-0.5 flex items-center gap-0.5 text-[9px] font-bold text-red-400" title="Naked short: no open BUY hedge on this side (same option type and expiry)">
+            <AlertTriangle className="w-2.5 h-2.5" /> UNHEDGED
+          </span>
+        )}
         {strikeBlocked && (
           <span className="mt-0.5 flex items-center gap-0.5 text-[9px] font-bold text-amber-400" title="Far expiries only allow strikes in multiples of 100 — pick another strike or this leg cannot be placed">
             <AlertTriangle className="w-2.5 h-2.5" /> ×100 only
