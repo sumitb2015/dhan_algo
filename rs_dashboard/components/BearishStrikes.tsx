@@ -1,0 +1,884 @@
+'use client';
+
+/**
+ * Bearish Strikes (/bearish-strikes) — live CE/PE strikes trading below their own Supertrend(10,2),
+ * session VWAP and EMA20: the ones an option seller wants to be short.
+ *
+ * Ticks come from the shared live-options WS bridge (useLiveOptionsWS); candles from
+ * /api/bearish-strikes/bars (1-min backfill, resampled here). Signals read CLOSED bars only — see
+ * lib/bearishStrikes.ts. Orders use the Multi-Leg Focus tickets (AddNewLegModal / ExitLotsModal)
+ * against this page's OWN ledger (lib/bearishLedger.ts, debug/bearish_strikes_state.json): SIM by
+ * default, REAL armed per page load, Dhan only. Exit size always comes from the ledger, never from
+ * the broker's netted position (dhan-terminal-position-ownership).
+ */
+
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { toast } from 'sonner';
+import { TrendingDown, ClipboardList, LogOut, ShieldAlert, Trash2 } from 'lucide-react';
+import NavBar from '@/components/NavBar';
+import AddNewLegModal from '@/components/multiLegFocus/AddNewLegModal';
+import ExitLotsModal from '@/components/multiLegFocus/ExitLotsModal';
+import OrdersTradesModal from '@/components/multiLegFocus/OrdersTradesModal';
+import { FOCUS_RING } from '@/components/Scalper';
+import { useLiveOptionsWS } from '@/lib/useLiveOptionsWS';
+import { useLiveTickerPoll, isStale } from '@/lib/useLiveTickerPoll';
+import { startLiveIndicesBridge } from '@/lib/startLiveIndicesBridge';
+import {
+  computeIndicators, evaluateBearish, istNowMs, mergeBars, passesFilters, pctBelow, recordTick,
+  type BearishSignal, type LiveMinutes, type StrikeFilters, type Timeframe,
+} from '@/lib/bearishStrikes';
+import { legPnl, type BsPosition, type LedgerOp } from '@/lib/bearishLedger';
+import type { Bar } from '@/lib/volumeProfile';
+import { fallbackLotSize, formatExpiryLabel, type MultiLegBasket, type MultiLegLeg } from '@/lib/multiLegFocus';
+import { resolveOrderRequest, type StrikeIdentifier } from '@/lib/basketOrders';
+
+const UNDERLYINGS = ['NIFTY', 'BANKNIFTY', 'SENSEX', 'CRUDEOILM'] as const;
+type Underlying = (typeof UNDERLYINGS)[number];
+const MAX_LOTS = 50;
+const SOURCE = 'bs';
+const FILL_GRACE_MS = 30_000;
+const SETTLE_GIVE_UP_MS = 6 * 3600_000;
+
+interface LookupEntry { lotSize: number; strikes: Record<string, StrikeIdentifier> }
+interface Row {
+  key: string; option: 'CE' | 'PE'; strike: number; ltp: number; oi: number; volume: number;
+  changePct: number | null; oiChgPct: number | null; buildup: string; sig: BearishSignal;
+  liveBelowAll: boolean;
+}
+
+interface HeaderIndices { updated_at?: string; quotes?: Record<string, { ltp?: number | null }> }
+// Module scope: the poll hook compares this by identity (see useLiveTickerPoll).
+function pickIndexLtps(d: HeaderIndices): Record<string, number> {
+  const out: Record<string, number> = {};
+  for (const k of ['NIFTY', 'VIX']) { const v = d?.quotes?.[k]?.ltp; if (typeof v === 'number' && v > 0) out[k] = v; }
+  return out;
+}
+
+const fmt = (n: number | null | undefined, d = 2) => (n == null || !Number.isFinite(n) ? '—' : n.toFixed(d));
+const money = (n: number | null) => (n == null ? '—' : `${n < 0 ? '-' : n > 0 ? '+' : ''}₹${Math.abs(n).toLocaleString('en-IN', { maximumFractionDigits: 0 })}`);
+const pnlCls = (n: number | null) => (n == null ? 'text-zinc-500' : n > 0 ? 'text-emerald-400' : n < 0 ? 'text-red-400' : 'text-zinc-300');
+const istDate = () => new Date(Date.now() + 5.5 * 3600_000).toISOString().slice(0, 10);
+const dte = (expiry: string) => Math.round((Date.parse(expiry) - Date.parse(istDate())) / 86_400_000);
+
+/** Free-typed number that only commits on blur / Enter (dhan-commit-on-blur): "2" on the way to "25" must not filter live. */
+function NumField({ label, value, onCommit, step = 1, min = 0, width = 'w-16' }: {
+  label: string; value: number; onCommit: (n: number) => void; step?: number; min?: number; width?: string;
+}) {
+  const [draft, setDraft] = useState<string>(String(value));
+  const [seen, setSeen] = useState(value);
+  if (seen !== value) { setSeen(value); setDraft(String(value)); }   // external change (clamped / reset) wins over a stale draft
+  const commit = () => {
+    const n = Number(draft);
+    if (draft.trim() !== '' && Number.isFinite(n) && n >= min) onCommit(n); else setDraft(String(value));
+  };
+  return (
+    <label className="flex items-center gap-1 text-[10px] font-bold uppercase tracking-wider text-zinc-400">
+      {label}
+      <input
+        type="number" inputMode="decimal" step={step} min={min} value={draft} aria-label={label}
+        onChange={(e) => setDraft(e.target.value)} onBlur={commit}
+        onKeyDown={(e) => { if (e.key === 'Enter') (e.target as HTMLInputElement).blur(); }}
+        className={`${width} h-7 bg-zinc-900 border border-zinc-700 text-zinc-100 font-mono text-xs rounded px-1.5 ${FOCUS_RING}`}
+      />
+    </label>
+  );
+}
+
+function Seg<T extends string | number>({ value, options, onChange, label }: {
+  value: T; options: { v: T; l: string }[]; onChange: (v: T) => void; label: string;
+}) {
+  return (
+    <div role="group" aria-label={label} className="flex items-center rounded border border-zinc-700 overflow-hidden">
+      {options.map((o) => (
+        <button
+          key={String(o.v)} type="button" onClick={() => onChange(o.v)} aria-pressed={value === o.v}
+          className={`h-7 px-2 text-[11px] font-bold font-mono ${FOCUS_RING} ${value === o.v ? 'bg-emerald-600 text-oncolor' : 'bg-zinc-900 text-zinc-400 hover:text-zinc-200'}`}
+        >{o.l}</button>
+      ))}
+    </div>
+  );
+}
+
+export default function BearishStrikes() {
+  // ── Header filters ──────────────────────────────────────────────
+  const [underlying, setUnderlyingRaw] = useState<Underlying>('NIFTY');
+  const [expiries, setExpiries] = useState<string[]>([]);
+  const [expiry, setExpiry] = useState('');
+  const [tf, setTf] = useState<Timeframe>(3);
+  const [side, setSide] = useState<'BOTH' | 'CE' | 'PE'>('BOTH');
+  const [requireSt, setRequireSt] = useState(true);
+  const [requireVwap, setRequireVwap] = useState(true);
+  const [requireEma, setRequireEma] = useState(true);
+  const [otmOnly, setOtmOnly] = useState(true);
+  const [belowOpenOnly, setBelowOpenOnly] = useState(true);
+  const [minLtp, setMinLtp] = useState(5);
+  const [minOiLots, setMinOiLots] = useState(0);
+  const [minVolLots, setMinVolLots] = useState(0);
+  const [atmWindow, setAtmWindow] = useState(12);
+  const [maxScan, setMaxScan] = useState(40);
+
+  // ── Mode ────────────────────────────────────────────────────────
+  // Switching underlying clears the expiry list in the same update, so no stale expiry is ever paired with the new underlying.
+  const setUnderlying = (u: Underlying) => { setUnderlyingRaw(u); setExpiries([]); setExpiry(''); };
+  const [armed, setArmed] = useState(false);     // REAL money — per page load, never persisted
+  const mode: 'SIM' | 'REAL' = armed ? 'REAL' : 'SIM';
+
+  const viewer = useRef(`bs-${Math.random().toString(36).slice(2, 10)}`);
+  const [nowTick, setNowTick] = useState(0);
+
+  // Nifty and India VIX for the header. Live LTP comes from the shared indices feed (/api/scalper/top-indices), independent
+  // of the option bridge. The previous close is fetched ONCE per index at page load (Dhan-only, close-flip-safe, cached per
+  // IST day by the route) and the % change is computed here as (live - prevClose) / prevClose — so it never depends on the
+  // feed's own prev_close field, which reads equal to the price whenever the feed has just reconnected.
+  useEffect(() => { startLiveIndicesBridge(); }, []);
+  const { data: idx, now: idxNow } = useLiveTickerPoll<HeaderIndices>('/api/scalper/top-indices', pickIndexLtps);
+  const idxStale = !idx?.updated_at || isStale(Date.parse(idx.updated_at), idxNow);
+  const [prevClose, setPrevClose] = useState<{ NIFTY: number | null; VIX: number | null }>({ NIFTY: null, VIX: null });
+  useEffect(() => {
+    let dead = false;
+    let tries = 0;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const load = async () => {
+      const get = async (u: 'NIFTY' | 'VIX'): Promise<number | null> => {
+        try {
+          const j = await (await fetch(`/api/scalper/nifty-prev-close?underlying=${u}`)).json() as { success?: boolean; prevClose?: number };
+          return j.success && typeof j.prevClose === 'number' && j.prevClose > 0 ? j.prevClose : null;
+        } catch { return null; }
+      };
+      const [n, v] = await Promise.all([get('NIFTY'), get('VIX')]);
+      if (dead) return;
+      setPrevClose((p) => ({ NIFTY: n ?? p.NIFTY, VIX: v ?? p.VIX }));
+      // Only a missing value is retried (the route caches a good one for the day), a few times, then left blank.
+      if ((n == null || v == null) && ++tries < 4) timer = setTimeout(load, 15_000 * tries);
+    };
+    timer = setTimeout(load, 0);
+    return () => { dead = true; if (timer) clearTimeout(timer); };
+  }, []);
+  const indexChip = (label: string, key: 'NIFTY' | 'VIX') => {
+    const ltp = idx?.quotes?.[key]?.ltp;
+    const live = typeof ltp === 'number' && ltp > 0 ? ltp : null;
+    const prev = prevClose[key];
+    const pct = live != null && prev != null ? ((live - prev) / prev) * 100 : null;
+    // VIX up = fear up, so its colour is not the P&L colour: amber when rising, calm when falling.
+    const tone = idxStale || pct == null ? 'text-zinc-500'
+      : key === 'VIX' ? (pct > 0 ? 'text-amber-300' : 'text-sky-400')
+      : (pct > 0 ? 'text-emerald-400' : pct < 0 ? 'text-red-400' : 'text-zinc-300');
+    return (
+      <span className="text-xs font-mono text-zinc-300 flex items-baseline gap-1"
+        title={idxStale ? `${label}: feed stale or unavailable` : prev != null ? `${label} vs previous close ${prev.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}` : `${label}: previous close unavailable`}>
+        <span className="text-[10px] font-bold uppercase tracking-wider text-zinc-400">{label}</span>
+        <span className={`font-bold ${idxStale ? 'text-zinc-500' : 'text-white'}`}>{live == null ? '—' : live.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
+        <span className={`text-[11px] font-bold ${tone}`}>{pct == null ? '' : `${pct > 0 ? '▲' : pct < 0 ? '▼' : ''} ${Math.abs(pct).toFixed(2)}%`}</span>
+      </span>
+    );
+  };
+
+  // ── Expiries ────────────────────────────────────────────────────
+  useEffect(() => {
+    let dead = false;
+    fetch(`/api/options/expiries?underlying=${underlying}&broker=dhan`)
+      .then((r) => r.json())
+      .then((j: { success: boolean; data?: string[] }) => {
+        if (dead || !j.success || !j.data?.length) return;
+        setExpiries(j.data);
+        setExpiry(j.data[0]);
+      })
+      .catch(() => {});
+    return () => { dead = true; };
+  }, [underlying]);
+
+  // ── Bridge (shared per underlying; never spawn it ourselves) ────
+  useEffect(() => {
+    if (!expiry) return;
+    const viewerId = viewer.current;
+    fetch('/api/options/live', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action: 'start', underlying, expiry, numStrikes: 35, broker: 'dhan', viewer: viewerId }),
+    }).catch(() => {});
+    return () => {
+      fetch('/api/options/live', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'stop', brokers: ['dhan'], underlying, viewer: viewerId }),
+      }).catch(() => {});
+    };
+  }, [underlying, expiry]);
+
+  const { liveQuotes, bridgeStatus, lastUpdated, transport } = useLiveOptionsWS(expiry, 'dhan', ['dhan'], underlying);
+  const quotesRef = useRef(liveQuotes);
+  useEffect(() => { quotesRef.current = liveQuotes; }, [liveQuotes]);
+
+  // ── Lot size + security ids ─────────────────────────────────────
+  const [lookupState, setLookup] = useState<{ scope: string; entry: LookupEntry } | null>(null);
+  const lookup = lookupState && lookupState.scope === `${underlying}|${expiry}` ? lookupState.entry : null;
+  useEffect(() => {
+    if (!expiry) return;
+    let dead = false;
+    fetch(`/api/scalper/lookup?underlying=${underlying}&expiry=${expiry}`)
+      .then((r) => r.json())
+      .then((j: { success: boolean; data?: { lotSize?: number; strikes?: Record<string, StrikeIdentifier> } }) => {
+        if (dead || !j.success || !j.data) return;
+        setLookup({ scope: `${underlying}|${expiry}`, entry: { lotSize: j.data.lotSize ?? fallbackLotSize(underlying, 'dhan'), strikes: j.data.strikes ?? {} } });
+      })
+      .catch(() => {});
+    return () => { dead = true; };
+  }, [underlying, expiry]);
+  const lotSize = lookup?.lotSize ?? fallbackLotSize(underlying, 'dhan');
+
+  // ── Candles: 1-min backfill per contract + LTP-built live minutes ─
+  const barsRef = useRef<Map<string, { minute: string; bars: Bar[]; error?: string }>>(new Map());
+  const liveMinRef = useRef<Map<string, LiveMinutes>>(new Map());
+  const scopeKey = `${underlying}|${expiry}`;
+  const scopeRef = useRef(scopeKey);
+  const [rateLimitS, setRateLimitS] = useState(0);
+  const [barsStatus, setBarsStatus] = useState<{ have: number; want: number; failed: number }>({ have: 0, want: 0, failed: 0 });
+
+  useEffect(() => {          // new underlying/expiry: drop every cached bar, they belong to other contracts
+    scopeRef.current = scopeKey;
+    barsRef.current = new Map();
+    liveMinRef.current = new Map();
+  }, [scopeKey]);
+
+  /** Contracts worth fetching bars for, nearest ATM first. */
+  const candidateContracts = useCallback((): { key: string; option: 'CE' | 'PE'; strike: number }[] => {
+    const q = quotesRef.current;
+    if (!q) return [];
+    const spot = q.spot || 0;
+    const atm = q.atm || spot;
+    const strikes = Object.keys(q.strikes).map(Number).sort((a, b) => a - b);
+    const step = strikes.length > 1 ? Math.min(...strikes.slice(1).map((s, i) => s - strikes[i]).filter((d) => d > 0)) : 50;
+    const out: { key: string; option: 'CE' | 'PE'; strike: number; dist: number }[] = [];
+    for (const s of strikes) {
+      if (Math.abs(s - atm) > atmWindow * step) continue;
+      for (const option of ['CE', 'PE'] as const) {
+        if (side !== 'BOTH' && side !== option) continue;
+        if (otmOnly && spot > 0 && ((option === 'CE' && s <= spot) || (option === 'PE' && s >= spot))) continue;
+        const d = q.strikes[String(s)]?.[option === 'CE' ? 'ce' : 'pe'];
+        if (!d || !(d.ltp > 0) || d.ltp < minLtp) continue;
+        // Cheap prefilter that caps Data API calls: a short-able strike is trading below where the day started.
+        if (belowOpenOnly && ((d.open ?? 0) > 0 || (d.prev_close ?? 0) > 0) && d.ltp >= Math.max(d.open ?? 0, d.prev_close ?? 0)) continue;
+        out.push({ key: `${s}${option}`, option, strike: s, dist: Math.abs(s - atm) });
+      }
+    }
+    return out.sort((a, b) => a.dist - b.dist).slice(0, maxScan);
+  }, [atmWindow, side, otmOnly, minLtp, belowOpenOnly, maxScan]);
+
+  useEffect(() => {
+    if (!expiry) return;
+    let dead = false;
+    let busy = false;
+    const minuteNow = () => new Date().toISOString().slice(0, 16);
+    const cycle = async () => {
+      if (busy || dead || !quotesRef.current) return;
+      busy = true;
+      const myScope = scopeRef.current;
+      try {
+        const cands = candidateContracts();
+        const stale = cands.filter((c) => barsRef.current.get(c.key)?.minute !== minuteNow()).map((c) => c.key);
+        for (let i = 0; i < stale.length && !dead; i += 10) {
+          const chunk = stale.slice(i, i + 10);
+          const res = await fetch(`/api/bearish-strikes/bars?underlying=${underlying}&expiry=${expiry}&contracts=${chunk.join(',')}`);
+          const j = await res.json() as { success: boolean; bars?: Record<string, Bar[]>; errors?: Record<string, string>; rateLimited?: boolean; retryInS?: number };
+          if (!dead) setRateLimitS(j.rateLimited ? (j.retryInS ?? 0) : 0);
+          if (scopeRef.current !== myScope) return;          // switched underlying/expiry mid-flight
+          for (const k of chunk) {
+            const b = j.bars?.[k];
+            barsRef.current.set(k, b ? { minute: minuteNow(), bars: b } : { minute: minuteNow(), bars: barsRef.current.get(k)?.bars ?? [], error: j.errors?.[k] ?? 'no data' });
+          }
+          if (j.rateLimited) break;                              // the route is backing off: do not queue more chunks
+        }
+        const have = cands.filter((c) => (barsRef.current.get(c.key)?.bars.length ?? 0) > 0).length;
+        const failed = cands.filter((c) => barsRef.current.get(c.key)?.error).length;
+        if (!dead) setBarsStatus({ have, want: cands.length, failed });
+      } catch { /* next cycle retries */ } finally { busy = false; }
+    };
+    const t0 = setTimeout(cycle, 1500);
+    const id = setInterval(cycle, 20_000);
+    return () => { dead = true; clearTimeout(t0); clearInterval(id); };
+  }, [underlying, expiry, candidateContracts]);
+
+  // ── 1 s compute tick: fold LTP into live minutes, evaluate signals ─
+  const [rows, setRows] = useState<Row[]>([]);
+  const filters: StrikeFilters = useMemo(() => ({
+    side, minLtp, minOiLots, minVolLots, maxSpreadPct: 0, otmOnly, requireSt, requireVwap, requireEma,
+  }), [side, minLtp, minOiLots, minVolLots, otmOnly, requireSt, requireVwap, requireEma]);
+
+  useEffect(() => {
+    const id = setInterval(() => {
+      const q = quotesRef.current;
+      const nowIst = istNowMs();
+      setNowTick(Date.now());
+      if (!q) return;
+      const spot = q.spot || 0;
+      const next: Row[] = [];
+      for (const s of Object.keys(q.strikes)) {
+        for (const option of ['CE', 'PE'] as const) {
+          const d = q.strikes[s]?.[option === 'CE' ? 'ce' : 'pe'];
+          if (!d || !(d.ltp > 0)) continue;
+          const key = `${s}${option}`;
+          let lm = liveMinRef.current.get(key);
+          if (!lm) { lm = new Map(); liveMinRef.current.set(key, lm); }
+          recordTick(lm, d.ltp, nowIst);
+          const cached = barsRef.current.get(key);
+          if (!cached || !cached.bars.length) continue;          // no backfill = no VWAP/ST: never guess
+          const ind = computeIndicators(mergeBars(cached.bars, lm), tf, nowIst);
+          const sig = evaluateBearish(ind);
+          const liveBelowAll = sig.stLine != null && sig.vwap != null && sig.ema != null && sig.stDir === -1
+            && d.ltp < sig.stLine && d.ltp < sig.vwap && d.ltp < sig.ema;
+          const row: Row = {
+            key, option, strike: Number(s), ltp: d.ltp, oi: d.oi ?? 0, volume: d.volume ?? 0,
+            changePct: d.change_pct ?? null, oiChgPct: d.oi_chg_pct ?? null, buildup: d.buildup ?? '', sig, liveBelowAll,
+          };
+          if (passesFilters({ option, strike: row.strike, ltp: d.ltp, oi: row.oi, volume: row.volume, spreadPct: null, sig }, spot, lotSize, filters)) next.push(row);
+        }
+      }
+      next.sort((a, b) => (Number(b.liveBelowAll) - Number(a.liveBelowAll)) || (b.ltp - a.ltp));
+      setRows(next);
+    }, 1000);
+    return () => clearInterval(id);
+  }, [tf, filters, lotSize]);
+
+  // ── Ledger ──────────────────────────────────────────────────────
+  const [positions, setPositions] = useState<BsPosition[]>([]);
+  const [ledgerOk, setLedgerOk] = useState(true);
+  const refreshLedger = useCallback(async () => {
+    try {
+      const j = await (await fetch('/api/bearish-strikes/state')).json() as { success: boolean; positions?: BsPosition[] };
+      if (j.success && j.positions) { setPositions(j.positions); setLedgerOk(true); }
+    } catch { setLedgerOk(false); }
+  }, []);
+  useEffect(() => {
+    const t0 = setTimeout(refreshLedger, 0);
+    const id = setInterval(refreshLedger, 5000);
+    return () => { clearTimeout(t0); clearInterval(id); };
+  }, [refreshLedger]);
+
+  const op = useCallback(async (o: LedgerOp): Promise<boolean> => {
+    try {
+      const res = await fetch('/api/bearish-strikes/state', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(o) });
+      const j = await res.json() as { success: boolean; error?: string; positions?: BsPosition[] };
+      if (!j.success) { toast.error(j.error ?? 'Ledger write failed'); return false; }
+      if (j.positions) setPositions(j.positions);
+      return true;
+    } catch { toast.error('Ledger write failed'); return false; }
+  }, []);
+
+  // Order outcomes: an ACK is not a fill. Poll every pending order and settle it by order id.
+  const settling = useRef(false);
+  useEffect(() => {
+    const id = setInterval(async () => {
+      if (settling.current) return;
+      settling.current = true;
+      try {
+        for (const p of positions) {
+          for (const o of p.pendingOrders ?? []) {
+            if (p.mode !== 'REAL') continue;
+            const r = await fetch(`/api/scalper/orders?orderId=${encodeURIComponent(o.orderId)}`).then((x) => x.json()).catch(() => null) as
+              { success: boolean; data?: { orderStatus: string; filledQty: number; averageTradedPrice: number } } | null;
+            if (!r?.success || !r.data) { if (Date.now() - o.at > SETTLE_GIVE_UP_MS) toast.warning(`Order ${o.orderId} status unknown — check the Dhan order book`); continue; }
+            const st = r.data.orderStatus;
+            if (st === 'TRADED') await op({ op: 'settle', id: p.id, orderId: o.orderId, filledQty: r.data.filledQty, avgPrice: r.data.averageTradedPrice, at: Date.now() });
+            else if (['REJECTED', 'CANCELLED', 'CANCELED', 'EXPIRED'].includes(st)) {
+              await op({ op: 'settle', id: p.id, orderId: o.orderId, filledQty: r.data.filledQty, avgPrice: r.data.averageTradedPrice, at: Date.now() });
+              if (r.data.filledQty === 0) toast.error(`${p.strike} ${p.option} ${o.kind} order ${st.toLowerCase()}`);
+            }
+          }
+        }
+      } finally { settling.current = false; }
+    }, 4000);
+    return () => clearInterval(id);
+  }, [positions, op]);
+
+  // Down-only reconcile against the broker for REAL rows: the broker may have LESS than the ledger (closed outside
+  // this page), never more. Skipped inside the fill grace and while any order is unresolved.
+  useEffect(() => {
+    const id = setInterval(async () => {
+      const real = positions.filter((p) => p.mode === 'REAL' && p.status === 'OPEN' && p.qty > 0 && !p.pendingOrders?.length && Date.now() - p.filledAt > FILL_GRACE_MS);
+      if (!real.length) return;
+      try {
+        const j = await (await fetch('/api/scalper/positions')).json() as { success: boolean; data?: Record<string, unknown>[] };
+        if (!j.success || !Array.isArray(j.data)) return;                       // unreadable book: touch nothing
+        for (const p of real) {
+          const rows = j.data.filter((r) => String(r.securityId) === p.securityId && String(r.productType ?? 'INTRADAY').toUpperCase() === 'INTRADAY');
+          const shortQty = rows.reduce((a, r) => a + Math.max(0, -(Number(r.netQty) || 0)), 0);
+          if (shortQty < p.qty) await op({ op: 'clamp', id: p.id, qty: shortQty, at: Date.now() });
+        }
+      } catch { /* retry next tick */ }
+    }, 10_000);
+    return () => clearInterval(id);
+  }, [positions, op]);
+
+  // ── Live price lookup for a ledger row ──────────────────────────
+  const ltpOf = useCallback((p: Pick<BsPosition, 'underlying' | 'expiry' | 'option' | 'strike'>): number | null => {
+    const q = liveQuotes;
+    if (!q || p.underlying !== underlying || p.expiry !== expiry) return null;
+    const d = q.strikes[String(p.strike)]?.[p.option === 'CE' ? 'ce' : 'pe'];
+    return d && d.ltp > 0 ? d.ltp : null;
+  }, [liveQuotes, underlying, expiry]);
+
+  // ── Broker order book / trade book / positions (Dhan account, whole book — not just this page's rows) ──
+  const [showBook, setShowBook] = useState(false);
+  const [bookData, setBookData] = useState<{ orders: Record<string, unknown>[]; trades: Record<string, unknown>[]; positions: Record<string, unknown>[] }>({ orders: [], trades: [], positions: [] });
+  const [bookLoading, setBookLoading] = useState(false);
+  const [bookError, setBookError] = useState<string | null>(null);
+  const fetchBook = useCallback(async () => {
+    setBookLoading(true); setBookError(null);
+    try {
+      const j = await (await fetch('/api/scalper/poll')).json() as {
+        success: boolean; positions?: Record<string, unknown>[]; orders?: Record<string, unknown>[]; trades?: Record<string, unknown>[];
+        positionsError?: string | null; error?: string;
+      };
+      if (j.success) {
+        // A positionsError poll carries an EMPTY list ("unknown", not "flat") — keep the last good rows.
+        setBookData((d) => ({
+          orders: Array.isArray(j.orders) ? j.orders : d.orders,
+          trades: Array.isArray(j.trades) ? j.trades : d.trades,
+          positions: Array.isArray(j.positions) && !j.positionsError ? j.positions : d.positions,
+        }));
+      } else setBookError(j.error || j.positionsError || 'Failed to fetch the order book');
+    } catch (e) { setBookError(String((e as Error).message)); } finally { setBookLoading(false); }
+  }, []);
+  useEffect(() => {
+    if (!showBook) return;
+    const t0 = setTimeout(fetchBook, 0);
+    const id = setInterval(fetchBook, 5000);
+    return () => { clearTimeout(t0); clearInterval(id); };
+  }, [showBook, fetchBook]);
+
+  // ── Tickets (Multi-Leg Focus modals on synthetic basket / leg) ──
+  const [sellTicket, setSellTicket] = useState<{ option: 'CE' | 'PE'; strike: number; n: number } | null>(null);
+  const [exitId, setExitId] = useState<string | null>(null);
+
+  const basket: MultiLegBasket = useMemo(() => ({
+    id: 'bearish-strikes', name: 'Bearish Strikes', underlying, expiry, broker: 'dhan',
+    // Today's losing closed shorts feed the Add Leg "bigger than a short that lost today" warning.
+    legs: positions.filter((p) => p.underlying === underlying && p.status === 'CLOSED').map((p) => legOf(p)),
+    createdAt: '', updatedAt: '',
+  }), [underlying, expiry, positions]);
+
+  const strikeList = useMemo(() => Object.keys(liveQuotes?.strikes ?? {}).map(Number).sort((a, b) => a - b), [liveQuotes]);
+  const ltpForStrike = useCallback((strike: number, option: 'CE' | 'PE') => ltpOf({ underlying, expiry, option, strike }) ?? 0, [ltpOf, underlying, expiry]);
+
+  const lock = useRef(false);   // taken synchronously before any await: a double-click cannot place twice
+
+  const confirmOrder = useCallback(async (orderId: string, timeoutMs = 6000) => {
+    const deadline = Date.now() + timeoutMs;
+    for (;;) {
+      try {
+        const j = await (await fetch(`/api/scalper/orders?orderId=${encodeURIComponent(orderId)}`)).json() as
+          { success: boolean; data?: { orderStatus: string; filledQty: number; averageTradedPrice: number; reason: string } };
+        if (j.success && j.data) {
+          const st = j.data.orderStatus;
+          if (st === 'TRADED') return { phase: 'filled' as const, qty: j.data.filledQty, avg: j.data.averageTradedPrice, reason: '' };
+          if (['REJECTED', 'CANCELLED', 'CANCELED', 'EXPIRED'].includes(st)) return { phase: 'dead' as const, qty: j.data.filledQty, avg: j.data.averageTradedPrice, reason: j.data.reason };
+        }
+      } catch { /* retry until deadline */ }
+      if (Date.now() + 500 > deadline) return { phase: 'pending' as const, qty: 0, avg: 0, reason: '' };
+      await new Promise((r) => setTimeout(r, 500));
+    }
+  }, []);
+
+  /** Sends one Dhan order through the shared fast-order route (server caps `bs` at 3750 units per order). */
+  const sendDhan = useCallback(async (args: {
+    side: 'S' | 'B'; option: 'CE' | 'PE'; strike: number; qty: number; type: 'MARKET' | 'LIMIT'; price?: number; securityId: string; idem: string;
+  }): Promise<{ orderId: string | null; error?: string; unknown?: boolean }> => {
+    const req = resolveOrderRequest('dhan', {
+      side: args.side, option: args.option, strike: args.strike, qty: args.qty, type: args.type, price: args.price,
+      underlying, productType: 'INTRADAY', securityId: args.securityId,
+    }, {}, SOURCE);
+    if (!req) return { orderId: null, error: 'Could not build the order' };
+    try {
+      const res = await fetch(req.url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ...req.body, idempotencyKey: args.idem }) });
+      const j = await res.json() as { success: boolean; order_id?: string; error?: string };
+      if (j.success && j.order_id) return { orderId: j.order_id };
+      return { orderId: null, error: j.error ?? 'Order rejected', unknown: res.status === 504 };
+    } catch (e) { return { orderId: null, error: String(e), unknown: true }; }
+  }, [underlying]);
+
+  const placeSell = useCallback(async (p: {
+    option: 'CE' | 'PE'; strike: number; expiry: string; lots: number; orderType: 'MARKET' | 'LIMIT' | 'SL' | 'SLM'; limitPrice?: number;
+  }) => {
+    if (lock.current) { toast.warning('Another order is still in flight'); return; }
+    if (p.orderType !== 'MARKET' && p.orderType !== 'LIMIT') { toast.error('Stop entries are not supported on this page'); return; }
+    if (!(p.lots >= 1 && p.lots <= MAX_LOTS) || !Number.isInteger(p.lots)) { toast.error(`Lots must be a whole number between 1 and ${MAX_LOTS}`); return; }
+    lock.current = true;
+    try {
+      const qty = p.lots * lotSize;
+      const ltp = ltpOf({ underlying, expiry: p.expiry, option: p.option, strike: p.strike });
+      const existing = positions.find((x) => x.status === 'OPEN' && x.mode === mode && x.underlying === underlying && x.expiry === p.expiry && x.option === p.option && x.strike === p.strike);
+      const label = `${underlying} ${p.strike} ${p.option}`;
+
+      if (mode === 'SIM') {
+        const price = p.orderType === 'LIMIT' ? (p.limitPrice ?? 0) : (ltp ?? 0);
+        if (!(price > 0)) { toast.error('No live price for this strike yet'); return; }
+        if (p.orderType === 'LIMIT' && ltp != null && ltp < price) { toast.error(`SIM limit ${price} is above the market (${ltp}); a sell limit would rest — use MARKET or a lower price`); return; }
+        const ok = existing
+          ? await op({ op: 'add', id: existing.id, qty, price, at: Date.now() })
+          : await op({ op: 'open', position: newPosition({ mode, underlying, expiry: p.expiry, option: p.option, strike: p.strike, lotSize, qty, avgPrice: price }) });
+        if (ok) toast.success(`SIM sold ${p.lots} lot${p.lots > 1 ? 's' : ''} ${label} @ ${price.toFixed(2)}`);
+        return;
+      }
+
+      const ident = lookup?.strikes[String(p.strike)];
+      const securityId = p.option === 'CE' ? ident?.ceId : ident?.peId;
+      if (!securityId) { toast.error(`No security id for ${label} — lookup not loaded`); return; }
+      const idem = `bs-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+      const r = await sendDhan({ side: 'S', option: p.option, strike: p.strike, qty, type: p.orderType, price: p.limitPrice, securityId, idem });
+      if (!r.orderId) {
+        toast.error(r.unknown ? `Order status unknown for ${label} — check Dhan Positions/Orders before retrying` : `Order rejected: ${r.error}`);
+        return;
+      }
+      // Track the order from the moment it is ACKed, so an unconfirmed one is never forgotten.
+      const pending = { orderId: r.orderId, kind: 'entry' as const, side: 'SELL' as const, qty, at: Date.now() };
+      const tracked = existing
+        ? await op({ op: 'pending', id: existing.id, pending })
+        : await op({ op: 'open', position: newPosition({ mode, underlying, expiry: p.expiry, option: p.option, strike: p.strike, lotSize, qty: 0, avgPrice: 0, securityId, pendingOrders: [pending] }) });
+      if (!tracked) { toast.error(`Order ${r.orderId} was sent but could not be recorded — check Dhan Positions`); return; }
+      const id = existing?.id ?? null;
+      const c = await confirmOrder(r.orderId);
+      if (c.phase === 'pending') { toast.warning(`${label} order still working — it is tracked and will settle automatically`); return; }
+      const pos = await currentPosition(id, { mode, underlying, expiry: p.expiry, option: p.option, strike: p.strike });
+      if (pos) await op({ op: 'settle', id: pos.id, orderId: r.orderId, filledQty: c.qty, avgPrice: c.avg, at: Date.now() });
+      if (c.phase === 'filled') toast.success(`Sold ${p.lots} lot${p.lots > 1 ? 's' : ''} ${label} @ ${c.avg.toFixed(2)}`);
+      else toast.error(`${label} order ${c.reason || 'rejected'}`);
+    } finally { lock.current = false; }
+  }, [lotSize, ltpOf, underlying, positions, mode, op, lookup, sendDhan, confirmOrder]);
+
+  const doExit = useCallback(async (pos: BsPosition, lots: number, orderType: 'MARKET' | 'LIMIT', limitPrice?: number): Promise<boolean> => {
+    if (lock.current) { toast.warning('Another order is still in flight'); return false; }
+    lock.current = true;
+    try {
+      const label = `${pos.underlying} ${pos.strike} ${pos.option}`;
+      // Exit what THIS ledger owns, never what the broker nets.
+      const qty = Math.min(pos.qty, Math.round(lots * pos.lotSize));
+      if (!(qty > 0)) { toast.error('Nothing to exit'); return false; }
+      const ltp = ltpOf(pos);
+      if (pos.mode === 'SIM') {
+        const price = orderType === 'LIMIT' ? (limitPrice ?? 0) : (ltp ?? 0);
+        if (!(price > 0)) { toast.error('No live price for this strike yet'); return false; }
+        if (orderType === 'LIMIT' && ltp != null && ltp > price) { toast.error(`SIM limit ${price} is below the market (${ltp}); a buy limit would rest — use MARKET`); return false; }
+        const ok = await op({ op: 'reduce', id: pos.id, qty, price, at: Date.now() });
+        if (ok) toast.success(`SIM bought back ${label} @ ${price.toFixed(2)}`);
+        return ok;
+      }
+      if (!pos.securityId) { toast.error('Position has no security id'); return false; }
+      // A resting exit must be cancelled first or the two would together over-buy; abort if the cancel fails.
+      for (const o of (pos.pendingOrders ?? []).filter((x) => x.kind === 'exit')) {
+        const cr = await fetch('/api/scalper/orders', { method: 'DELETE', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ orderId: o.orderId, broker: 'dhan' }) }).then((x) => x.json()).catch(() => null) as { success?: boolean } | null;
+        if (!cr?.success) { toast.error(`Could not cancel the resting exit ${o.orderId}; exit not sent`); return false; }
+        await op({ op: 'settle', id: pos.id, orderId: o.orderId, filledQty: 0, avgPrice: 0, at: Date.now() });
+      }
+      const idem = `bs-x-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+      const r = await sendDhan({ side: 'B', option: pos.option, strike: pos.strike, qty, type: orderType, price: limitPrice, securityId: pos.securityId, idem });
+      if (!r.orderId) {
+        toast.error(r.unknown ? `Exit status unknown for ${label} — check Dhan Positions before retrying` : `Exit rejected: ${r.error}`);
+        return false;
+      }
+      await op({ op: 'pending', id: pos.id, pending: { orderId: r.orderId, kind: 'exit', side: 'BUY', qty, at: Date.now() } });
+      const c = await confirmOrder(r.orderId);
+      if (c.phase === 'pending') { toast.warning(`${label} exit still working — tracked, will settle automatically`); return true; }
+      await op({ op: 'settle', id: pos.id, orderId: r.orderId, filledQty: c.qty, avgPrice: c.avg, at: Date.now() });
+      if (c.phase === 'filled') toast.success(`Bought back ${label} @ ${c.avg.toFixed(2)}`);
+      else toast.error(`${label} exit ${c.reason || 'rejected'} — position is still open`);
+      return c.phase === 'filled';
+    } finally { lock.current = false; }
+  }, [ltpOf, op, sendDhan, confirmOrder]);
+
+  const exitAll = useCallback(async () => {
+    const open = positions.filter((p) => p.status === 'OPEN' && p.qty > 0 && p.mode === mode);
+    if (!open.length) return;
+    if (!window.confirm(`Buy back ${open.length} open ${mode} short${open.length > 1 ? 's' : ''} at market?`)) return;
+    for (const p of open) await doExit(p, p.qty / p.lotSize, 'MARKET');
+  }, [positions, mode, doExit]);
+
+  // ── Derived header state ────────────────────────────────────────
+  const openPositions = positions.filter((p) => p.status === 'OPEN');
+  const exitPos = positions.find((p) => p.id === exitId) ?? null;
+  const spot = liveQuotes?.spot ?? 0;
+  const feedAge = liveQuotes?.updated_at ? (nowTick - new Date(liveQuotes.updated_at).getTime()) / 1000 : null;
+  const stale = bridgeStatus.status !== 'RUNNING' || (feedAge != null && feedAge > 15);
+  const dataDate = liveQuotes?.updated_at ? liveQuotes.updated_at.slice(0, 10) : null;
+  const totalPnl = openPositions.reduce<number | null>((a, p) => {
+    const v = legPnl(p, ltpOf(p));
+    return a == null || v == null ? null : a + v;
+  }, 0);
+  const warming = rows.length === 0 && barsStatus.want > 0 && barsStatus.have < barsStatus.want;
+
+  return (
+    <div className="flex flex-col min-h-screen bg-zinc-950 text-white">
+      {/* ── Header ── */}
+      <div className="sticky top-0 z-30 flex flex-col gap-2 px-6 py-3 border-b border-zinc-800 bg-zinc-950/95 backdrop-blur">
+        <div className="flex items-center justify-between gap-3 flex-wrap">
+          <div className="flex items-center gap-3">
+            <div className="flex items-center justify-center w-8 h-8 rounded-lg border shrink-0 bg-emerald-500/10 border-emerald-500/25">
+              <TrendingDown className="w-4 h-4 text-emerald-400" aria-hidden="true" />
+            </div>
+            <div>
+              <p className="text-[10px] font-bold uppercase tracking-[0.16em] mb-0.5 text-emerald-400">Scalping · {underlying}</p>
+              <h1 className="text-sm font-bold text-white tracking-tight leading-none">Bearish Strikes</h1>
+              <p className="text-[10px] text-zinc-500 font-medium mt-1">Below Supertrend(10,2), VWAP and EMA20 — short candidates, live</p>
+            </div>
+          </div>
+          <div className="flex items-center gap-2 flex-wrap">
+            {indexChip('Nifty', 'NIFTY')}
+            {indexChip('India VIX', 'VIX')}
+            {underlying !== 'NIFTY' && <span className="text-xs font-mono text-zinc-300">{underlying} <span className="font-bold text-white">{fmt(spot)}</span></span>}
+            <span className={`text-[10px] font-mono font-bold px-1.5 py-0.5 rounded border ${stale ? 'text-amber-300 bg-amber-500/10 border-amber-500/20' : 'text-emerald-400 bg-emerald-500/10 border-emerald-500/20'}`}
+              title={`Bridge ${bridgeStatus.status} · ${transport.toUpperCase()}${lastUpdated ? ` · ${lastUpdated}` : ''}`}>
+              {bridgeStatus.status !== 'RUNNING' ? `FEED ${bridgeStatus.status}` : stale ? `STALE ${feedAge != null ? Math.round(feedAge) : '?'}s` : `LIVE · ${transport.toUpperCase()}`}
+            </span>
+            <button
+              type="button" onClick={() => setShowBook(true)}
+              title="Dhan order book, trade book and open positions (whole account)"
+              className={`h-7 px-2 rounded border border-zinc-700 bg-zinc-900 text-[11px] font-bold text-zinc-200 hover:bg-zinc-800 hover:text-white flex items-center gap-1 ${FOCUS_RING}`}
+            >
+              <ClipboardList className="w-3.5 h-3.5 text-sky-400" aria-hidden="true" />Orders · Trades · Positions
+            </button>
+            <button
+              type="button" onClick={() => setArmed((a) => !a)} aria-pressed={armed}
+              title={armed ? 'REAL orders go to Dhan. Click to return to SIM.' : 'SIM: paper fills at live LTP. Click to arm REAL (Dhan, per page load).'}
+              className={`h-7 px-2 rounded border text-[11px] font-bold font-mono flex items-center gap-1 ${FOCUS_RING} ${armed ? 'bg-red-600 border-red-500 text-oncolor' : 'bg-zinc-900 border-zinc-700 text-zinc-300 hover:text-white'}`}
+            >
+              <ShieldAlert className="w-3.5 h-3.5" aria-hidden="true" />{armed ? 'LIVE · REAL MONEY' : 'SIM'}
+            </button>
+            <span className="text-[10px] font-mono font-bold uppercase tracking-wider text-amber-300 px-1.5 py-0.5 rounded bg-amber-500/10 border border-amber-500/20">
+              DATA: {dataDate || '—'}
+            </span>
+            <span className="w-px h-5 bg-zinc-800 shrink-0" />
+            <NavBar />
+          </div>
+        </div>
+
+        {/* Filters */}
+        <div className="flex items-center gap-x-3 gap-y-2 flex-wrap">
+          <Seg label="Underlying" value={underlying} onChange={setUnderlying} options={UNDERLYINGS.map((u) => ({ v: u, l: u }))} />
+          <select aria-label="Expiry" value={expiry} onChange={(e) => setExpiry(e.target.value)}
+            className={`h-7 bg-zinc-900 border border-zinc-700 text-zinc-100 font-mono text-xs rounded px-1.5 ${FOCUS_RING}`}>
+            {expiries.map((e) => <option key={e} value={e}>{formatExpiryLabel(e)} · {dte(e)}d</option>)}
+          </select>
+          <Seg label="Timeframe" value={tf} onChange={setTf} options={[{ v: 1, l: '1m' }, { v: 3, l: '3m' }, { v: 5, l: '5m' }]} />
+          <Seg label="Side" value={side} onChange={setSide} options={[{ v: 'BOTH', l: 'CE+PE' }, { v: 'CE', l: 'CE' }, { v: 'PE', l: 'PE' }]} />
+          <div role="group" aria-label="Conditions" className="flex items-center gap-2 rounded border border-zinc-700 bg-zinc-900 px-2 h-7"
+            title="A strike must be below EVERY ticked level on the last closed bar. Untick one to ignore it (e.g. EMA20 while it is still warming up).">
+            <span className="text-[10px] font-bold uppercase tracking-wider text-zinc-500">Below</span>
+            {([['Supertrend', requireSt, setRequireSt], ['VWAP', requireVwap, setRequireVwap], ['EMA20', requireEma, setRequireEma]] as const).map(([l, v, set]) => (
+              <label key={l} className="flex items-center gap-1 text-[10px] font-bold uppercase tracking-wider text-zinc-300 cursor-pointer">
+                <input type="checkbox" checked={v} onChange={(e) => set(e.target.checked)} className={FOCUS_RING} />{l}
+              </label>
+            ))}
+          </div>
+          <label className="flex items-center gap-1 text-[10px] font-bold uppercase tracking-wider text-zinc-400">
+            <input type="checkbox" checked={otmOnly} onChange={(e) => setOtmOnly(e.target.checked)} className={FOCUS_RING} />OTM only
+          </label>
+          <label className="flex items-center gap-1 text-[10px] font-bold uppercase tracking-wider text-zinc-400"
+            title="Only fetch candles for strikes trading below the day's open / previous close. Caps Data API calls; untick to scan every strike in the window.">
+            <input type="checkbox" checked={belowOpenOnly} onChange={(e) => setBelowOpenOnly(e.target.checked)} className={FOCUS_RING} />Below day open
+          </label>
+          <NumField label="Min ₹" value={minLtp} onCommit={setMinLtp} step={0.5} />
+          <NumField label="Min OI lots" value={minOiLots} onCommit={setMinOiLots} width="w-20" />
+          <NumField label="Min vol lots" value={minVolLots} onCommit={setMinVolLots} width="w-20" />
+          <NumField label="ATM ±" value={atmWindow} onCommit={(n) => setAtmWindow(Math.max(1, Math.round(n)))} />
+          <NumField label="Scan max" value={maxScan} onCommit={(n) => setMaxScan(Math.min(60, Math.max(5, Math.round(n))))} />
+        </div>
+      </div>
+
+      {/* ── Body ── */}
+      <div className="flex-1 flex flex-col gap-4 px-6 py-5">
+        {/* Table */}
+        <section aria-label="Bearish strikes" className="rounded-xl border border-zinc-800 bg-zinc-950 overflow-x-auto">
+          <table className="w-full text-xs font-mono tabular-nums">
+            <thead>
+              <tr className="bg-zinc-800">
+                {[
+                  ['Strike', 'text-left'], ['LTP · Chg%', 'text-right'], [`Supertrend ${tf}m`, 'text-right'], ['VWAP', 'text-right'], ['EMA20', 'text-right'],
+                  ['OI lots · Δ% · Build', 'text-right'], ['Vol lots', 'text-right'], ['Signal', 'text-center'], ['', 'text-right'],
+                ].map(([h, al], i) => (
+                  <th key={i} className={`px-3 py-2 text-xs font-bold text-white whitespace-nowrap ${al}`}>{h}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((r) => {
+                const lot = lotSize || 1;
+                const full = r.sig.bearish === true;
+                // Level over "how far price sits from it": ▼ price is below the level (what a seller wants), ▲ above.
+                const level = (v: number | null, below: boolean | null) => {
+                  const d = pctBelow(v, r.ltp);
+                  return (
+                    <div className="leading-tight">
+                      <div className="text-zinc-200">{fmt(v)}</div>
+                      <div className={`text-[10px] ${below ? 'text-emerald-400' : 'text-zinc-500'}`}>
+                        {d == null ? '—' : `${d >= 0 ? '▼' : '▲'} ${Math.abs(d).toFixed(1)}%`}
+                      </div>
+                    </div>
+                  );
+                };
+                return (
+                  <tr key={r.key} className="border-t border-zinc-800 hover:bg-zinc-900/60">
+                    <td className="px-3 py-1.5 text-left whitespace-nowrap">
+                      <span className="font-bold text-zinc-100">{r.strike}</span>
+                      <span className={`ml-1.5 px-1 py-0.5 rounded text-[10px] font-bold ${r.option === 'CE' ? 'bg-red-500/10 text-red-400' : 'bg-emerald-500/10 text-emerald-400'}`}>{r.option}</span>
+                    </td>
+                    <td className="px-3 py-1.5 text-right">
+                      <div className="leading-tight">
+                        <div className="font-bold text-zinc-100">{fmt(r.ltp)}</div>
+                        <div className={`text-[10px] ${pnlCls(r.changePct)}`}>{r.changePct == null ? '—' : `${r.changePct > 0 ? '+' : ''}${r.changePct.toFixed(1)}%`}</div>
+                      </div>
+                    </td>
+                    <td className="px-3 py-1.5 text-right">{level(r.sig.stLine, r.sig.below.st)}</td>
+                    <td className="px-3 py-1.5 text-right">{level(r.sig.vwap, r.sig.below.vwap)}</td>
+                    <td className="px-3 py-1.5 text-right">{level(r.sig.ema, r.sig.below.ema)}</td>
+                    <td className="px-3 py-1.5 text-right">
+                      <div className="leading-tight">
+                        <div className="text-zinc-200">{(r.oi / lot).toLocaleString('en-IN', { maximumFractionDigits: 0 })}</div>
+                        <div className="text-[10px]">
+                          <span className={pnlCls(r.oiChgPct)}>{r.oiChgPct == null ? '—' : `${r.oiChgPct > 0 ? '+' : ''}${r.oiChgPct.toFixed(0)}%`}</span>
+                          {r.buildup && <span className="ml-1 text-zinc-400">{r.buildup}</span>}
+                        </div>
+                      </div>
+                    </td>
+                    <td className="px-3 py-1.5 text-right text-zinc-200">{(r.volume / lot).toLocaleString('en-IN', { maximumFractionDigits: 0 })}</td>
+                    <td className="px-3 py-1.5 text-center whitespace-nowrap">
+                      <span className={`px-1.5 py-0.5 rounded border text-[10px] font-bold ${full && r.liveBelowAll ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30'
+                        : full ? 'bg-amber-500/10 text-amber-300 border-amber-500/30' : 'bg-zinc-900 text-zinc-400 border-zinc-700'}`}
+                        title={full ? (r.liveBelowAll ? 'Closed bar AND live price are below all three levels' : 'WATCH: the closed bar is bearish, but the live price is back above a level') : 'Not all three conditions hold on the closed bar'}>
+                        {full ? (r.liveBelowAll ? 'BEARISH' : 'WATCH') : `${[r.sig.below.st, r.sig.below.vwap, r.sig.below.ema].filter(Boolean).length}/3`}
+                      </span>
+                    </td>
+                    <td className="px-3 py-1.5 text-right">
+                      <button type="button" onClick={() => setSellTicket({ option: r.option, strike: r.strike, n: Date.now() })}
+                        aria-label={`Sell ${r.strike} ${r.option}`}
+                        className={`h-6 px-2.5 rounded bg-red-600 hover:bg-red-500 text-oncolor text-[11px] font-bold ${FOCUS_RING}`}>SELL</button>
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+          {rows.length === 0 && (
+            <div className="px-4 py-10 text-center text-xs text-zinc-400" role="status">
+              {!expiry ? 'Loading expiries…'
+                : !liveQuotes ? (bridgeStatus.status === 'ERROR' ? 'Live feed error — check the Dhan session and the options bridge.' : 'Waiting for the live options feed…')
+                : warming ? `Loading candles… ${barsStatus.have}/${barsStatus.want} contracts${barsStatus.failed ? ` (${barsStatus.failed} failed)` : ''}`
+                : barsStatus.failed && barsStatus.failed === barsStatus.want ? 'Candle fetch failed for every contract — the Dhan Data API may be rate-limited or the session expired.'
+                : 'No strike matches right now. Indicators are warmed from the previous 2 sessions (a strike with no earlier history needs 11+ closed bars for Supertrend and 20+ for EMA20) — widen the filters or untick a level.'}
+            </div>
+          )}
+          <div className="px-3 py-1.5 border-t border-zinc-800 text-[10px] text-zinc-500 flex flex-wrap gap-x-4">
+            {rateLimitS > 0 && <span className="text-amber-300 font-bold">Dhan Data API rate-limited — showing cached candles, retrying in ~{rateLimitS}s</span>}
+            <span>{rows.length} shown · candles {barsStatus.have}/{barsStatus.want}{barsStatus.failed ? ` · ${barsStatus.failed} failed` : ''}</span>
+            <span>Signals use the last CLOSED {tf}m bar. ▼ = price below that level. BEARISH = live price also below all three; WATCH = closed bar bearish but live price back above one.</span>
+            <span>Lot {lotSize} · feed window is fixed when the bridge starts.</span>
+          </div>
+        </section>
+
+        {/* Positions */}
+        <section aria-label="Positions on this page" className="rounded-xl border border-zinc-800 bg-zinc-950 overflow-x-auto">
+          <div className="flex items-center justify-between px-3 py-2 border-b border-zinc-800">
+            <h2 className="text-xs font-bold text-zinc-100 uppercase tracking-wide">
+              Positions ({openPositions.length} open) <span className={`ml-2 font-mono ${pnlCls(totalPnl)}`}>{money(totalPnl)}</span>
+              {!ledgerOk && <span className="ml-2 text-amber-300 text-[10px]">ledger unreachable</span>}
+            </h2>
+            <button type="button" onClick={exitAll} disabled={!openPositions.some((p) => p.mode === mode)}
+              className={`h-7 px-2 rounded border border-zinc-700 bg-zinc-900 text-[11px] font-bold text-zinc-200 hover:bg-zinc-800 disabled:opacity-40 flex items-center gap-1 ${FOCUS_RING}`}>
+              <LogOut className="w-3.5 h-3.5" aria-hidden="true" />Exit all {mode}
+            </button>
+          </div>
+          <table className="w-full text-xs font-mono">
+            <thead>
+              <tr className="bg-zinc-800">
+                {['Mode', 'Contract', 'Qty', 'Avg', 'LTP', 'P&L', 'Status', ''].map((h, i) => (
+                  <th key={i} className={`px-2 py-2 text-xs font-bold text-white ${i < 2 ? 'text-left' : 'text-right'}`}>{h}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {positions.filter((p) => p.status === 'OPEN' || p.openedAt > Date.now() - 12 * 3600_000).slice().reverse().map((p) => {
+                const ltp = ltpOf(p);
+                const pnl = legPnl(p, p.status === 'OPEN' ? ltp : null);
+                const prior = p.status === 'OPEN' && p.openedAt < Date.parse(`${istDate()}T00:00:00+05:30`);
+                return (
+                  <tr key={p.id} className="border-t border-zinc-800">
+                    <td className="px-2 py-1.5 text-left"><span className={`px-1.5 py-0.5 rounded text-[10px] font-bold ${p.mode === 'REAL' ? 'bg-red-500/10 text-red-400' : 'bg-zinc-800 text-zinc-300'}`}>{p.mode}</span></td>
+                    <td className="px-2 py-1.5 text-left text-zinc-100">{p.underlying} {p.strike} {p.option} · {formatExpiryLabel(p.expiry)}</td>
+                    <td className="px-2 py-1.5 text-right">{p.qty}{p.qty > 0 ? ` (${(p.qty / p.lotSize).toFixed(p.qty % p.lotSize ? 1 : 0)}L)` : ''}</td>
+                    <td className="px-2 py-1.5 text-right">{p.avgPrice > 0 ? p.avgPrice.toFixed(2) : '—'}</td>
+                    <td className="px-2 py-1.5 text-right">{p.status === 'OPEN' ? fmt(ltp) : (p.exitPrice ? p.exitPrice.toFixed(2) : '—')}</td>
+                    <td className={`px-2 py-1.5 text-right font-bold ${pnlCls(pnl)}`}>{money(pnl)}</td>
+                    <td className="px-2 py-1.5 text-right text-zinc-400">
+                      {p.pendingOrders?.length ? `${p.pendingOrders[0].kind} order working` : p.status === 'OPEN' ? (prior ? 'OPEN · prior day' : 'OPEN') : (p.note ?? 'CLOSED')}
+                    </td>
+                    <td className="px-2 py-1.5 text-right whitespace-nowrap">
+                      {p.status === 'OPEN' && p.qty > 0 && (
+                        <button type="button" onClick={() => setExitId(p.id)} aria-label={`Exit ${p.strike} ${p.option}`}
+                          className={`h-6 px-2 rounded border border-zinc-600 bg-zinc-900 text-[11px] font-bold text-zinc-100 hover:bg-zinc-800 ${FOCUS_RING}`}>EXIT</button>
+                      )}
+                      {p.mode === 'SIM' && p.status === 'CLOSED' && (
+                        <button type="button" onClick={() => op({ op: 'remove', id: p.id })} aria-label="Remove paper row"
+                          className={`ml-1 h-6 w-6 inline-flex items-center justify-center rounded text-zinc-500 hover:text-zinc-200 ${FOCUS_RING}`}><Trash2 className="w-3.5 h-3.5" aria-hidden="true" /></button>
+                      )}
+                    </td>
+                  </tr>
+                );
+              })}
+              {positions.length === 0 && (
+                <tr><td colSpan={8} className="px-4 py-6 text-center text-zinc-500" role="status">No trades yet. Press SELL on a row to open a ticket ({mode}).</td></tr>
+              )}
+            </tbody>
+          </table>
+        </section>
+      </div>
+
+      <OrdersTradesModal
+        isOpen={showBook} onClose={() => setShowBook(false)} broker="dhan"
+        ordersData={bookData.orders} tradesData={bookData.trades} positionsData={bookData.positions}
+        isLoading={bookLoading} error={bookError} onRefresh={fetchBook}
+      />
+
+      {/* ── Tickets: the Multi-Leg Focus modals ── */}
+      {sellTicket && (
+        <AddNewLegModal
+          key={sellTicket.n} isOpen onClose={() => setSellTicket(null)} basket={basket}
+          allStrikes={strikeList} listedExpiries={expiries} atmStrike={liveQuotes?.atm ?? 0} lotSize={lotSize}
+          ltpForStrike={ltpForStrike} initial={{ side: 'S', option: sellTicket.option, strike: sellTicket.strike }}
+          sellOnly allowStops={false}
+          onAddLeg={async (p) => { await placeSell(p); }}
+        />
+      )}
+      {exitPos && (
+        <ExitLotsModal
+          key={exitPos.id} isOpen onClose={() => setExitId(null)} leg={legOf(exitPos)} basket={{ ...basket, expiry: exitPos.expiry }}
+          lotSize={exitPos.lotSize} currentLtp={ltpOf(exitPos) ?? 0} broker="dhan"
+          onConfirm={async (p) => doExit(exitPos, p.lots, p.orderType, p.limitPrice)}
+        />
+      )}
+    </div>
+  );
+}
+
+// ── helpers ───────────────────────────────────────────────────────
+function newPosition(p: Pick<BsPosition, 'mode' | 'underlying' | 'expiry' | 'option' | 'strike' | 'lotSize' | 'qty' | 'avgPrice'> & Partial<BsPosition>): BsPosition {
+  const now = Date.now();
+  return {
+    id: `bs-${now.toString(36)}-${Math.random().toString(36).slice(2, 7)}`, side: 'S', status: 'OPEN',
+    openedAt: now, filledAt: now, realized: 0, ...p,
+  };
+}
+
+/** Adapt a ledger row to the leg shape the Multi-Leg Focus tickets read. */
+function legOf(p: BsPosition): MultiLegLeg {
+  const lots = Math.max(1, Math.round(p.qty / p.lotSize) || 1);
+  return {
+    id: p.id, side: p.side, option: p.option, strike: p.strike, expiry: p.expiry, lots, type: 'MARKET',
+    fill: { qty: p.qty, avgPrice: p.avgPrice },
+    status: p.status,
+    ...(p.status === 'CLOSED' ? { closedAt: p.closedAt, closedFill: { qty: p.maxQty ?? p.lotSize * lots, exitPrice: p.exitPrice ?? 0 } } : {}),
+  } as MultiLegLeg;
+}
+
+async function currentPosition(id: string | null, k: Pick<BsPosition, 'mode' | 'underlying' | 'expiry' | 'option' | 'strike'>): Promise<BsPosition | null> {
+  try {
+    const j = await (await fetch('/api/bearish-strikes/state')).json() as { positions?: BsPosition[] };
+    const list = j.positions ?? [];
+    return list.find((x) => x.id === id) ?? list.find((x) => x.status === 'OPEN' && x.mode === k.mode && x.underlying === k.underlying && x.expiry === k.expiry && x.option === k.option && x.strike === k.strike) ?? null;
+  } catch { return null; }
+}

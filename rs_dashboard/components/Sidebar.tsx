@@ -115,6 +115,7 @@ const NAV_GROUPS = [
       { href: '/advanced-scalper', label: 'Advanced Scalper', desc: 'Configurable 2-5 box scalper with per-box CE/PE, strike & lot presets' },
       { href: '/synthetic-futures', label: 'Synthetic Futures', desc: 'Futuristic ATM synthetic futures scalper with 1-click execution, hedging wings, trailing SL & WebSocket ticks' },
       { href: '/options/quiktrade', label: 'QuikTrade', desc: 'OI buildup quadrants, live positions & P&L' },
+      { href: '/bearish-strikes', label: 'Bearish Strikes', desc: 'Live CE/PE strikes below Supertrend(10,2), VWAP and EMA20 — short candidates with Multi-Leg Focus tickets (SIM / REAL)' },
       { href: '/level-chart', label: 'Level Chart', desc: 'Live High/50%/Low interval-level zones for any stock, index or crude oil future' },
     ],
   },

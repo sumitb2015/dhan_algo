@@ -17,6 +17,12 @@ interface AddNewLegModalProps {
   atmStrike: number;
   lotSize: number;
   ltpForStrike: (strike: number, option: 'CE' | 'PE', expiry?: string) => number;
+  /** Optional preselection (a table row's Sell button). Read once on mount, so remount with a `key`. */
+  initial?: { side?: 'B' | 'S'; option?: 'CE' | 'PE'; strike?: number };
+  /** Hide BUY (a page that only sells, e.g. Bearish Strikes). */
+  sellOnly?: boolean;
+  /** Hide the resting stop entries SL-L / SL-M (a page with no waiting-entry ledger). Default true. */
+  allowStops?: boolean;
   onAddLeg: (params: {
     side: 'B' | 'S';
     option: 'CE' | 'PE';
@@ -45,12 +51,15 @@ export default function AddNewLegModal({
   atmStrike,
   lotSize,
   ltpForStrike,
+  initial,
+  sellOnly = false,
+  allowStops = true,
   onAddLeg,
 }: AddNewLegModalProps) {
-  const [side, setSide] = useState<'B' | 'S'>('S');
-  const [option, setOption] = useState<'CE' | 'PE'>('CE');
+  const [side, setSide] = useState<'B' | 'S'>(sellOnly ? 'S' : (initial?.side ?? 'S'));
+  const [option, setOption] = useState<'CE' | 'PE'>(initial?.option ?? 'CE');
   const [strike, setStrike] = useState<number>(() => {
-    const start = atmStrike > 0 ? atmStrike : (allStrikes[0] ?? 24000);
+    const start = initial?.strike ?? (atmStrike > 0 ? atmStrike : (allStrikes[0] ?? 24000));
     // Opens on the basket's own expiry; on a far expiry the ATM strike may not be a multiple of 100.
     return basket ? snapToAllowed(basket.underlying, basket.expiry, listedExpiries, start, allStrikes) : start;
   });
@@ -157,7 +166,7 @@ export default function AddNewLegModal({
                 Side
               </label>
               <div className="grid grid-cols-2 gap-1.5">
-                <button
+                {!sellOnly && <button
                   type="button"
                   onClick={() => setSide('B')}
                   className={`py-1.5 rounded-lg text-xs font-bold border transition-all ${
@@ -167,7 +176,7 @@ export default function AddNewLegModal({
                   }`}
                 >
                   BUY
-                </button>
+                </button>}
                 <button
                   type="button"
                   onClick={() => setSide('S')}
@@ -307,13 +316,13 @@ export default function AddNewLegModal({
           </div>
 
           {/* Order Type & Price */}
-          <div className={`grid gap-2 ${basket.broker === 'dhan' ? 'grid-cols-4' : 'grid-cols-2'}`}>
+          <div className={`grid gap-2 ${basket.broker === 'dhan' && allowStops ? 'grid-cols-4' : 'grid-cols-2'}`}>
             {([
               ['MARKET', 'MARKET', 'Fill now at the market'],
               ['LIMIT', 'LIMIT', 'Rest at your limit price'],
               ['SL', 'SL-L', 'Stop-limit: open when the trigger prints, at your limit price'],
               ['SLM', 'SL-M', 'Stop-market: open at the market when the trigger prints'],
-            ] as const).filter(([k]) => basket.broker === 'dhan' || k === 'MARKET' || k === 'LIMIT').map(([k, label, tip]) => (
+            ] as const).filter(([k]) => (basket.broker === 'dhan' && allowStops) || k === 'MARKET' || k === 'LIMIT').map(([k, label, tip]) => (
               <button
                 key={k}
                 type="button"

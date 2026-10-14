@@ -18,6 +18,8 @@ const UNDERLYINGS: Record<string, UnderlyingConfig> = {
   NIFTY:     { sid: 13, dhanSeg: 'IDX_I' },
   BANKNIFTY: { sid: 25, dhanSeg: 'IDX_I' },
   SENSEX:    { sid: 51, dhanSeg: 'BSE_IDX' },
+  // India VIX: same IDX_I segment, sid 21 (as in top-indices). No CSV fallback exists for it.
+  VIX:       { sid: 21, dhanSeg: 'IDX_I' },
 };
 
 // Prev close changes once per trading day — cache per IST date, per underlying.

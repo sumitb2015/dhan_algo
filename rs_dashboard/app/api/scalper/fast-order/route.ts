@@ -87,7 +87,11 @@ export async function POST(req: NextRequest): Promise<Response> {
 
 /** 'ts' = Triple Straddle: 50 lots (its lot cap) x 75, the largest index lot seen (NIFTY's
  *  previous size; today 65 -> 3250), so the cap stays tight yet survives a lot-size change. */
-const SOURCE_QTY_CAPS: Record<string, number> = { ts: 3750 };
+const SOURCE_QTY_CAPS: Record<string, number> = {
+  ts: 3750,
+  // 'bs' = Bearish Strikes: same bound as 'ts' (50 lots x 75 units).
+  bs: 3750,
+};
 
 async function placeOrderOnce(body: {
     securityId: string;
