@@ -1109,7 +1109,7 @@ export default function BearishStrikes() {
               onCommit={(n) => setRisk((r0) => ({ ...r0, sl: Math.min(1000, n) }))} />
             <NumField label="Target %" value={risk.tgt} step={5} width="w-14" title="Target: exit when the premium falls this % below your average sell price. 0 = off."
               onCommit={(n) => setRisk((r0) => ({ ...r0, tgt: Math.min(100, n) }))} />
-            <NumField label="Trail %" value={risk.trail} step={5} width="w-14" title="Trailing stop: once the premium has traded below your entry, exit when it rebounds this % above its lowest point. 0 = off."
+            <NumField label="Trail pts" value={risk.trail} step={0.5} width="w-14" title="Trailing stop in premium points: once the premium has traded below your entry, the stop sits this many points above its lowest point and follows it 1:1 as it falls. 0 = off."
               onCommit={(n) => setRisk((r0) => ({ ...r0, trail: Math.min(1000, n) }))} />
             <label className="flex items-center gap-1 text-[10px] font-bold uppercase tracking-wider text-zinc-300 cursor-pointer"
               title="When a ticked alert fires, or the SL / Target / Trail below is hit, on an open position (SIM or REAL), buy it back at MARKET automatically. Works only while this tab is open; off after a reload. Max 3 tries per position.">

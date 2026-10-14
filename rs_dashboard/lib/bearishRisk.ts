@@ -1,9 +1,10 @@
 /**
  * Stop-loss / target / trailing-stop rules for the short positions on /bearish-strikes. Pure.
- * All three are a percentage of the position's average SELL premium (0 = off):
+ * SL and Target are a percentage of the position's average SELL premium; Trail is in premium POINTS (0 = off):
  *   SL     fires when premium rises to avg × (1 + sl%)
  *   Target fires when premium falls to avg × (1 − tgt%)
- *   Trail  follows the lowest premium seen since entry: fires when premium rebounds to low × (1 + trail%).
+ *   Trail  follows the lowest premium seen since entry at a fixed distance: fires when premium rebounds to low + trail
+ *          points (1 point of further decay moves the stop 1 point).
  *          It is armed only once the premium has traded below the entry (low < avg), so it never acts as a second SL.
  */
 export interface RiskCfg { sl: number; tgt: number; trail: number }
@@ -17,7 +18,7 @@ export function riskLevels(avg: number, low: number | null | undefined, cfg: Ris
   return {
     sl: cfg.sl > 0 ? avg * (1 + cfg.sl / 100) : null,
     target: cfg.tgt > 0 ? avg * (1 - cfg.tgt / 100) : null,
-    trail: armed ? low * (1 + cfg.trail / 100) : null,
+    trail: armed ? low + cfg.trail : null,
   };
 }
 
