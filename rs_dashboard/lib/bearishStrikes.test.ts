@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert';
 import {
-  sessionVwap, closedBarsOnly, computeIndicators, evaluateBearish, recordTick, mergeBars, passesFilters, type LiveMinutes,
+  sessionVwap, closedBarsOnly, computeIndicators, evaluateBearish, recordTick, mergeBars, passesFilters, oiView, type LiveMinutes,
 } from './bearishStrikes.ts';
 import type { Bar } from './volumeProfile.ts';
 
@@ -102,4 +102,29 @@ test('3-minute bars are built per day on the 09:15 grid across the day boundary'
   const ind = computeIndicators([...prev, ...today], 3, Date.UTC(2026, 9, 14, 9, 40));
   assert.strictEqual(ind.barTime, '2026-10-14 09:24:00');                // last fully closed 3m bucket
   assert.notStrictEqual(ind.ema, null);
+});
+
+test('oiView: bearish + SB/LU confirms, bearish + LB conflicts, others and non-bearish are neutral', () => {
+  const bear = evaluateBearish(computeIndicators(mk(60, (i) => 200 - i * 2), 1, NOW));
+  const bull = evaluateBearish(computeIndicators(mk(60, (i) => 100 + i * 2), 1, NOW));
+  assert.strictEqual(bear.bearish, true);
+  assert.strictEqual(oiView('SB', bear), 'confirm');
+  assert.strictEqual(oiView('LU', bear), 'confirm');
+  assert.strictEqual(oiView('LB', bear), 'conflict');
+  assert.strictEqual(oiView('SC', bear), null);
+  assert.strictEqual(oiView('', bear), null);
+  assert.strictEqual(oiView(undefined, bear), null);
+  assert.strictEqual(oiView('LB', bull), null);                       // signal not bearish: nothing to disagree with
+  assert.strictEqual(oiView('SB', { bearish: null }), null);          // still warming up
+});
+
+test('oiMode filter: confirm keeps SB/LU only, no-conflict drops LB only', () => {
+  const sig = evaluateBearish(computeIndicators(mk(60, (i) => 200 - i * 2), 1, NOW));
+  const f = { side: 'BOTH' as const, minLtp: 0, minOiLots: 0, minVolLots: 0, maxSpreadPct: 0, otmOnly: false, requireSt: true, requireVwap: true, requireEma: true };
+  const row = (b: string) => ({ option: 'CE' as const, strike: 24500, ltp: 80, oi: 1, volume: 1, spreadPct: null, sig, buildup: b });
+  for (const [b, confirm, noConflict] of [['SB', true, true], ['LU', true, true], ['LB', false, false], ['SC', false, true], ['', false, true]] as const) {
+    assert.strictEqual(passesFilters(row(b), 24400, 1, { ...f, oiMode: 'confirm' }), confirm, `confirm ${b}`);
+    assert.strictEqual(passesFilters(row(b), 24400, 1, { ...f, oiMode: 'no-conflict' }), noConflict, `no-conflict ${b}`);
+    assert.strictEqual(passesFilters(row(b), 24400, 1, { ...f, oiMode: 'any' }), true);
+  }
 });

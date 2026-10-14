@@ -29,11 +29,13 @@ async function install(page: Page) {
   const seen = { fastOrder: 0, blocked: [] as string[] };
   let ledger: LedgerFile = { rev: 0, positions: [] };
   const spot = 24500;
+  const px = { ce24600: 100 };
   const quotes = () => ({
     updated_at: new Date().toISOString(), underlying: 'NIFTY', expiry: '2099-12-31', spot, atm: 24500, straddle_premium: 200,
     strikes: {
-      '24600': { strike: 24600, ce: strike(100), pe: strike(40) },
+      '24600': { strike: 24600, ce: strike(px.ce24600), pe: strike(40) },
       '24700': { strike: 24700, ce: strike(100), pe: strike(30) },
+      '24800': { strike: 24800, ce: { ...strike(100), buildup: 'LB' }, pe: strike(20) },   // bearish bars but LONG buildup
       '24400': { strike: 24400, ce: strike(150), pe: strike(100) },
     },
   });
@@ -74,7 +76,7 @@ async function install(page: Page) {
     seen.blocked.push(`${method} ${p}`);
     return route.fulfill({ status: 599, body: 'blocked by e2e' });
   });
-  return seen;
+  return { ...seen, px };
 }
 
 test.beforeEach(async ({ context }) => { await signIn(context); });
@@ -121,4 +123,48 @@ test('header opens the broker order book, trade book and positions', async ({ pa
   await page.getByRole('button', { name: /Orders · Trades · Positions/ }).click();
   await expect(page.getByRole('heading', { name: 'Broker Orders, Trades & Positions' })).toBeVisible();
   await expect(page.getByText('NIFTY-Oct2026-24600-CE')).toBeVisible({ timeout: 30_000 });
+});
+
+test('an open short alerts when its price goes above the Supertrend line, even if the filters hide it', async ({ page }) => {
+  const m = await install(page);
+  await page.goto('/bearish-strikes', { waitUntil: 'domcontentloaded' });
+  await page.getByRole('button', { name: 'CE', exact: true }).click();
+  await expect(page.getByRole('row').filter({ hasText: '24600' })).toContainText(/BEARISH/, { timeout: 60_000 });
+  await page.getByRole('button', { name: 'Sell 24600 CE' }).click();
+  await page.getByRole('button', { name: /Place & Add Leg/ }).click();
+  const pos = page.getByRole('region', { name: 'Positions on this page' });
+  await expect(pos).toContainText('OPEN');
+  await expect(page.getByRole('alert', { name: 'Position alerts' })).toHaveCount(0);       // nothing wrong yet
+
+  m.px.ce24600 = 400;                                                                        // far above the Supertrend line
+  const banner = page.getByRole('alert', { name: 'Position alerts' });
+  await expect(banner).toContainText('moving against you', { timeout: 30_000 });
+  await expect(banner).toContainText('24600 CE');
+  await expect(banner).toContainText('Supertrend');
+  await expect(page.getByText('1 ALERT', { exact: true })).toBeVisible();
+  await expect.poll(() => page.title()).toContain('ALERT');
+
+  await banner.getByRole('button', { name: /Exit 24600 CE now/ }).click();                  // the alert leads straight to the exit ticket
+  await expect(page.getByRole('dialog', { name: 'Exit position' })).toBeVisible();
+  expect(m.fastOrder).toBe(0);
+  expect(m.blocked).toEqual([]);
+});
+
+test('OI buildup is highlighted against the bearish signal and can be filtered', async ({ page }) => {
+  await install(page);
+  await page.goto('/bearish-strikes', { waitUntil: 'domcontentloaded' });
+  await page.getByRole('button', { name: 'CE', exact: true }).click();
+  const sb = page.getByRole('row').filter({ hasText: '24600' });
+  const lb = page.getByRole('row').filter({ hasText: '24800' });
+  await expect(sb).toContainText('OI ✓ SB', { timeout: 60_000 });          // short buildup backs the signal
+  await expect(lb).toContainText('OI ⚠ LB');                              // long buildup contradicts it
+
+  await page.getByRole('button', { name: 'Not LB' }).click();
+  await expect(lb).toHaveCount(0);
+  await expect(sb).toHaveCount(1);
+  await page.getByRole('button', { name: 'SB / LU' }).click();
+  await expect(sb).toHaveCount(1);
+  await expect(lb).toHaveCount(0);
+  await page.getByRole('button', { name: 'Any', exact: true }).click();
+  await expect(lb).toHaveCount(1);
 });

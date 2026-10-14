@@ -155,6 +155,24 @@ export function mergeBars(api: Bar[], live: LiveMinutes): Bar[] {
   return out;
 }
 
+/**
+ * How the OI buildup label (from the live bridge, vs the previous day) sits against a BEARISH price signal:
+ *  - 'confirm'  SB short buildup (price down, OI up: writers adding) or LU long unwinding (price down, OI down:
+ *               longs leaving) — the move is backed by positioning, what a seller wants to see;
+ *  - 'conflict' LB long buildup (price up, OI up: fresh longs) — the day's positioning disagrees with the bearish bars;
+ *  - null       anything else (SC short covering, no label) or the signal is not bearish, so there is nothing to compare.
+ * The labels are the bridge's own (live_options_ws._classify_buildup); they are never re-derived here.
+ */
+export type OiView = 'confirm' | 'conflict' | null;
+export type OiMode = 'any' | 'confirm' | 'no-conflict';
+
+export function oiView(buildup: string | null | undefined, sig: Pick<BearishSignal, 'bearish'>): OiView {
+  if (sig.bearish !== true) return null;
+  if (buildup === 'SB' || buildup === 'LU') return 'confirm';
+  if (buildup === 'LB') return 'conflict';
+  return null;
+}
+
 export interface StrikeFilters {
   side: 'BOTH' | 'CE' | 'PE';
   minLtp: number;
@@ -166,10 +184,12 @@ export interface StrikeFilters {
   requireSt: boolean;
   requireVwap: boolean;
   requireEma: boolean;
+  /** 'confirm' keeps only bearish rows backed by SB/LU; 'no-conflict' drops bearish rows with LB. */
+  oiMode?: OiMode;
 }
 
 export function passesFilters(
-  row: { option: 'CE' | 'PE'; strike: number; ltp: number; oi: number; volume: number; spreadPct: number | null; sig: BearishSignal },
+  row: { option: 'CE' | 'PE'; strike: number; ltp: number; oi: number; volume: number; spreadPct: number | null; sig: BearishSignal; buildup?: string },
   spot: number,
   lotSize: number,
   f: StrikeFilters,
@@ -187,5 +207,8 @@ export function passesFilters(
   if (f.requireSt && row.sig.below.st !== true) return false;
   if (f.requireVwap && row.sig.below.vwap !== true) return false;
   if (f.requireEma && row.sig.below.ema !== true) return false;
+  const oi = oiView(row.buildup, row.sig);
+  if (f.oiMode === 'confirm' && oi !== 'confirm') return false;
+  if (f.oiMode === 'no-conflict' && oi === 'conflict') return false;
   return true;
 }

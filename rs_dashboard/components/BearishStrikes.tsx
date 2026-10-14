@@ -14,7 +14,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { toast } from 'sonner';
-import { TrendingDown, ClipboardList, LogOut, ShieldAlert, Trash2 } from 'lucide-react';
+import { TrendingDown, ClipboardList, LogOut, Bell, BellOff, TriangleAlert, ShieldAlert, Trash2 } from 'lucide-react';
 import NavBar from '@/components/NavBar';
 import AddNewLegModal from '@/components/multiLegFocus/AddNewLegModal';
 import ExitLotsModal from '@/components/multiLegFocus/ExitLotsModal';
@@ -24,11 +24,16 @@ import { useLiveOptionsWS } from '@/lib/useLiveOptionsWS';
 import { useLiveTickerPoll, isStale } from '@/lib/useLiveTickerPoll';
 import { startLiveIndicesBridge } from '@/lib/startLiveIndicesBridge';
 import {
-  computeIndicators, evaluateBearish, istNowMs, mergeBars, passesFilters, pctBelow, recordTick,
-  type BearishSignal, type LiveMinutes, type StrikeFilters, type Timeframe,
+  computeIndicators, evaluateBearish, istNowMs, mergeBars, oiView, passesFilters, pctBelow, recordTick,
+  type BearishSignal, type LiveMinutes, type OiMode, type StrikeFilters, type Timeframe,
 } from '@/lib/bearishStrikes';
 import { legPnl, type BsPosition, type LedgerOp } from '@/lib/bearishLedger';
+import {
+  LEVELS, LEVEL_LABEL, activeLevels, levelStates, stepTracker, watchState,
+  type Basis, type Level, type LevelState, type Tracker, type WatchState,
+} from '@/lib/bearishAlerts';
 import type { Bar } from '@/lib/volumeProfile';
+import type { Indicators } from '@/lib/bearishStrikes';
 import { fallbackLotSize, formatExpiryLabel, type MultiLegBasket, type MultiLegLeg } from '@/lib/multiLegFocus';
 import { resolveOrderRequest, type StrikeIdentifier } from '@/lib/basketOrders';
 
@@ -52,6 +57,29 @@ function pickIndexLtps(d: HeaderIndices): Record<string, number> {
   const out: Record<string, number> = {};
   for (const k of ['NIFTY', 'VIX']) { const v = d?.quotes?.[k]?.ltp; if (typeof v === 'number' && v > 0) out[k] = v; }
   return out;
+}
+
+interface PosWatch { ws: WatchState; states: Record<Level, LevelState>; ind: Indicators | null; ltp: number | null }
+const WATCH_WHY: Record<Exclude<WatchState, 'watching'>, string> = {
+  'other-chain': 'not watched: switch the page to this contract\'s underlying and expiry',
+  'no-price': 'not watched: no live price (feed stale)',
+  'no-bars': 'not watched: candles not loaded',
+  warming: 'not watched yet: indicators warming up',
+};
+
+/** Three descending beeps. The AudioContext is created on the user's click (autoplay policy), never on load. */
+function playAlertSound(ctx: AudioContext | null) {
+  if (!ctx) return;
+  try {
+    if (ctx.state === 'suspended') void ctx.resume();
+    [880, 660, 880].forEach((f, i) => {
+      const o = ctx.createOscillator(); const g = ctx.createGain();
+      o.type = 'square'; o.frequency.value = f; g.gain.value = 0.08;
+      o.connect(g); g.connect(ctx.destination);
+      const t = ctx.currentTime + i * 0.28;
+      o.start(t); o.stop(t + 0.2);
+    });
+  } catch { /* audio unavailable: the toast and banner still show */ }
 }
 
 const fmt = (n: number | null | undefined, d = 2) => (n == null || !Number.isFinite(n) ? '—' : n.toFixed(d));
@@ -111,6 +139,7 @@ export default function BearishStrikes() {
   const [requireEma, setRequireEma] = useState(true);
   const [otmOnly, setOtmOnly] = useState(true);
   const [belowOpenOnly, setBelowOpenOnly] = useState(true);
+  const [oiMode, setOiMode] = useState<OiMode>('any');
   const [minLtp, setMinLtp] = useState(5);
   const [minOiLots, setMinOiLots] = useState(0);
   const [minVolLots, setMinVolLots] = useState(0);
@@ -122,6 +151,36 @@ export default function BearishStrikes() {
   const setUnderlying = (u: Underlying) => { setUnderlyingRaw(u); setExpiries([]); setExpiry(''); };
   const [armed, setArmed] = useState(false);     // REAL money — per page load, never persisted
   const mode: 'SIM' | 'REAL' = armed ? 'REAL' : 'SIM';
+
+  // ── Exit alerts for open positions (settings are per-viewer conveniences, kept in localStorage) ──
+  const [watchSt, setWatchSt] = useState(true);
+  const [watchVwap, setWatchVwap] = useState(false);
+  const [watchEma, setWatchEma] = useState(false);
+  const [alertBasis, setAlertBasis] = useState<Basis>('live');
+  const [alertSound, setAlertSound] = useState(true);
+  const [alertNotify, setAlertNotify] = useState(false);
+  const audioRef = useRef<AudioContext | null>(null);
+  const cfgLoaded = useRef(false);
+  useEffect(() => {
+    const t = setTimeout(() => {
+      try {
+        const c = JSON.parse(localStorage.getItem('bs_alert_cfg') ?? 'null') as Partial<Record<string, unknown>> | null;
+        if (c) {
+          if (typeof c.st === 'boolean') setWatchSt(c.st);
+          if (typeof c.vwap === 'boolean') setWatchVwap(c.vwap);
+          if (typeof c.ema === 'boolean') setWatchEma(c.ema);
+          if (c.basis === 'live' || c.basis === 'closed') setAlertBasis(c.basis);
+          if (typeof c.sound === 'boolean') setAlertSound(c.sound);
+        }
+      } catch { /* storage blocked: defaults */ }
+      cfgLoaded.current = true;
+    }, 0);
+    return () => clearTimeout(t);
+  }, []);
+  useEffect(() => {
+    if (!cfgLoaded.current) return;
+    try { localStorage.setItem('bs_alert_cfg', JSON.stringify({ st: watchSt, vwap: watchVwap, ema: watchEma, basis: alertBasis, sound: alertSound })); } catch { /* ignore */ }
+  }, [watchSt, watchVwap, watchEma, alertBasis, alertSound]);
 
   const viewer = useRef(`bs-${Math.random().toString(36).slice(2, 10)}`);
   const [nowTick, setNowTick] = useState(0);
@@ -148,8 +207,9 @@ export default function BearishStrikes() {
       const [n, v] = await Promise.all([get('NIFTY'), get('VIX')]);
       if (dead) return;
       setPrevClose((p) => ({ NIFTY: n ?? p.NIFTY, VIX: v ?? p.VIX }));
-      // Only a missing value is retried (the route caches a good one for the day), a few times, then left blank.
-      if ((n == null || v == null) && ++tries < 4) timer = setTimeout(load, 15_000 * tries);
+      // Only a missing value is retried (the route caches a good one for the day). Slow on purpose: a miss usually means Dhan
+      // is rate-limiting this account (805), and asking again quickly is what turns a throttle into a block. 30s, 60s ... 150s.
+      if ((n == null || v == null) && ++tries < 6) timer = setTimeout(load, 30_000 * tries);
     };
     timer = setTimeout(load, 0);
     return () => { dead = true; if (timer) clearTimeout(timer); };
@@ -232,6 +292,10 @@ export default function BearishStrikes() {
   const [rateLimitS, setRateLimitS] = useState(0);
   const [barsStatus, setBarsStatus] = useState<{ have: number; want: number; failed: number }>({ have: 0, want: 0, failed: 0 });
 
+  // Open positions are always fetched, whatever the filters say: the "below day open" prefilter would otherwise drop
+  // exactly the strike that has turned against the position.
+  const positionsRef = useRef<BsPosition[]>([]);
+
   useEffect(() => {          // new underlying/expiry: drop every cached bar, they belong to other contracts
     scopeRef.current = scopeKey;
     barsRef.current = new Map();
@@ -273,7 +337,10 @@ export default function BearishStrikes() {
       const myScope = scopeRef.current;
       try {
         const cands = candidateContracts();
-        const stale = cands.filter((c) => barsRef.current.get(c.key)?.minute !== minuteNow()).map((c) => c.key);
+        const heldKeys = positionsRef.current
+          .filter((p) => p.status === 'OPEN' && p.qty > 0 && `${p.underlying}|${p.expiry}` === scopeRef.current).map((p) => `${p.strike}${p.option}`);
+        const want = [...new Set([...heldKeys, ...cands.map((c) => c.key)])];   // positions first: they alert
+        const stale = want.filter((k) => barsRef.current.get(k)?.minute !== minuteNow());
         for (let i = 0; i < stale.length && !dead; i += 10) {
           const chunk = stale.slice(i, i + 10);
           const res = await fetch(`/api/bearish-strikes/bars?underlying=${underlying}&expiry=${expiry}&contracts=${chunk.join(',')}`);
@@ -299,8 +366,8 @@ export default function BearishStrikes() {
   // ── 1 s compute tick: fold LTP into live minutes, evaluate signals ─
   const [rows, setRows] = useState<Row[]>([]);
   const filters: StrikeFilters = useMemo(() => ({
-    side, minLtp, minOiLots, minVolLots, maxSpreadPct: 0, otmOnly, requireSt, requireVwap, requireEma,
-  }), [side, minLtp, minOiLots, minVolLots, otmOnly, requireSt, requireVwap, requireEma]);
+    side, minLtp, minOiLots, minVolLots, maxSpreadPct: 0, otmOnly, requireSt, requireVwap, requireEma, oiMode,
+  }), [side, minLtp, minOiLots, minVolLots, otmOnly, requireSt, requireVwap, requireEma, oiMode]);
 
   useEffect(() => {
     const id = setInterval(() => {
@@ -328,10 +395,11 @@ export default function BearishStrikes() {
             key, option, strike: Number(s), ltp: d.ltp, oi: d.oi ?? 0, volume: d.volume ?? 0,
             changePct: d.change_pct ?? null, oiChgPct: d.oi_chg_pct ?? null, buildup: d.buildup ?? '', sig, liveBelowAll,
           };
-          if (passesFilters({ option, strike: row.strike, ltp: d.ltp, oi: row.oi, volume: row.volume, spreadPct: null, sig }, spot, lotSize, filters)) next.push(row);
+          if (passesFilters({ option, strike: row.strike, ltp: d.ltp, oi: row.oi, volume: row.volume, spreadPct: null, sig, buildup: row.buildup }, spot, lotSize, filters)) next.push(row);
         }
       }
-      next.sort((a, b) => (Number(b.liveBelowAll) - Number(a.liveBelowAll)) || (b.ltp - a.ltp));
+      const rank = (r: Row) => Number(r.liveBelowAll) * 2 + Number(oiView(r.buildup, r.sig) === 'confirm');   // live-bearish first, OI-backed ahead of the rest
+      next.sort((a, b) => (rank(b) - rank(a)) || (b.ltp - a.ltp));
       setRows(next);
     }, 1000);
     return () => clearInterval(id);
@@ -351,6 +419,100 @@ export default function BearishStrikes() {
     const id = setInterval(refreshLedger, 5000);
     return () => { clearTimeout(t0); clearInterval(id); };
   }, [refreshLedger]);
+
+  useEffect(() => { positionsRef.current = positions; }, [positions]);
+
+  // ── Exit alerts ─────────────────────────────────────────────────
+  // Every second, evaluate each open position of the page's current chain against the ticked levels. A position is
+  // evaluated from its own candles + live price, NOT from the table, so it is watched even when the filters hide it.
+  const trackerRef = useRef<Tracker>({});
+  const [posWatch, setPosWatch] = useState<Record<string, PosWatch>>({});
+  const [activeAlerts, setActiveAlerts] = useState<Record<string, Level[]>>({});
+  const levelValue = (w: PosWatch | undefined, l: Level): number | null => (!w?.ind ? null : l === 'st' ? w.ind.stLine : l === 'vwap' ? w.ind.vwap : w.ind.ema);
+
+  useEffect(() => {
+    const watch: Record<Level, boolean> = { st: watchSt, vwap: watchVwap, ema: watchEma };
+    const id = setInterval(() => {
+      const q = quotesRef.current;
+      const now = Date.now();
+      const nowIst = istNowMs();
+      const feedFresh = !!q?.updated_at && now - Date.parse(q.updated_at) < 15_000;
+      const next: Record<string, PosWatch> = {};
+      const obs: { positionId: string; level: Level; state: LevelState }[] = [];
+      for (const p of positionsRef.current) {
+        if (p.status !== 'OPEN' || !(p.qty > 0)) continue;
+        const inScope = `${p.underlying}|${p.expiry}` === scopeRef.current;
+        const d = inScope ? q?.strikes[String(p.strike)]?.[p.option === 'CE' ? 'ce' : 'pe'] : undefined;
+        const ltp = d && d.ltp > 0 ? d.ltp : null;
+        const key = `${p.strike}${p.option}`;
+        const cached = inScope ? barsRef.current.get(key) : undefined;
+        const ind = cached?.bars.length ? computeIndicators(mergeBars(cached.bars, liveMinRef.current.get(key) ?? new Map()), tf, nowIst) : null;
+        const states = ind ? levelStates(ind, ltp, alertBasis) : { st: null, vwap: null, ema: null };
+        const ws = watchState({ inScope, feedFresh, hasPrice: ltp != null, hasBars: !!ind, states, watch });
+        next[p.id] = { ws, states, ind, ltp };
+        // While a position cannot be watched its state is "unknown" so an active alert is held, not cleared.
+        for (const l of LEVELS) if (watch[l]) obs.push({ positionId: p.id, level: l, state: ws === 'watching' ? states[l] : null });
+      }
+      const { tracker, events } = stepTracker(trackerRef.current, obs, now);
+      trackerRef.current = tracker;
+      setPosWatch(next);
+      const act: Record<string, Level[]> = {};
+      for (const p of positionsRef.current) { const a = activeLevels(tracker, p.id); if (a.length) act[p.id] = a; }
+      setActiveAlerts(act);
+
+      for (const ev of events) {
+        const p = positionsRef.current.find((x) => x.id === ev.positionId);
+        if (!p) continue;
+        const w = next[p.id];
+        const label = `${p.underlying} ${p.strike} ${p.option}`;
+        if (ev.kind === 'recovered') { toast.dismiss(ev.key); toast.success(`${label}: back below ${LEVEL_LABEL[ev.level]}`, { duration: 4000 }); continue; }
+        const lv = levelValue(w, ev.level);
+        const text = `${label} — price ${alertBasis === 'live' ? (w?.ltp ?? 0).toFixed(2) : (w?.ind?.close ?? 0).toFixed(2)} is above ${LEVEL_LABEL[ev.level]}${lv != null ? ` ${lv.toFixed(2)}` : ''}`;
+        toast.error(`⚠ ${text}`, { id: ev.key, duration: Infinity, action: { label: 'Exit', onClick: () => setExitId(p.id) } });
+        if (alertSound) playAlertSound(audioRef.current);
+        try {
+          if (alertNotify && typeof Notification !== 'undefined' && Notification.permission === 'granted') {
+            new Notification('Short position against you', { body: text, tag: ev.key, requireInteraction: true });
+          }
+        } catch { /* notifications unavailable */ }
+      }
+    }, 1000);
+    return () => clearInterval(id);
+  }, [watchSt, watchVwap, watchEma, alertBasis, alertSound, alertNotify, tf]);
+
+  // Tab title: the one thing visible from another tab. (Browsers slow background timers, so a hidden tab may be a
+  // few tens of seconds late — keep the page in its own window if it must be watched closely.)
+  const alertCount = Object.values(activeAlerts).reduce((a, l) => a + l.length, 0);
+  useEffect(() => {
+    if (alertCount === 0) return;
+    const base = document.title;
+    document.title = `⚠ ${alertCount} ALERT · ${base}`;
+    return () => { document.title = base; };
+  }, [alertCount]);
+
+  // Browsers only allow audio after a user gesture: create the context on the first click anywhere on the page.
+  useEffect(() => {
+    const unlock = () => {
+      try {
+        if (!audioRef.current && typeof AudioContext !== 'undefined') audioRef.current = new AudioContext();
+        if (audioRef.current?.state === 'suspended') void audioRef.current.resume();
+      } catch { /* no audio */ }
+    };
+    window.addEventListener('pointerdown', unlock);
+    return () => window.removeEventListener('pointerdown', unlock);
+  }, []);
+  const toggleSound = () => {
+    const on = !alertSound;
+    setAlertSound(on);
+    if (on) playAlertSound(audioRef.current);   // audible confirmation that it works
+  };
+  const toggleNotify = async () => {
+    if (alertNotify) { setAlertNotify(false); return; }
+    if (typeof Notification === 'undefined') { toast.error('This browser does not support desktop notifications'); return; }
+    const perm = Notification.permission === 'granted' ? 'granted' : await Notification.requestPermission();
+    setAlertNotify(perm === 'granted');
+    if (perm !== 'granted') toast.warning('Desktop notifications are blocked — allow them in the browser site settings');
+  };
 
   const op = useCallback(async (o: LedgerOp): Promise<boolean> => {
     try {
@@ -633,6 +795,11 @@ export default function BearishStrikes() {
             >
               <ClipboardList className="w-3.5 h-3.5 text-sky-400" aria-hidden="true" />Orders · Trades · Positions
             </button>
+            {alertCount > 0 && (
+              <span role="status" className="text-[11px] font-bold font-mono px-2 py-0.5 rounded border border-red-500/50 bg-red-500/15 text-red-400 flex items-center gap-1 animate-pulse">
+                <TriangleAlert className="w-3.5 h-3.5" aria-hidden="true" />{alertCount} ALERT{alertCount > 1 ? 'S' : ''}
+              </span>
+            )}
             <button
               type="button" onClick={() => setArmed((a) => !a)} aria-pressed={armed}
               title={armed ? 'REAL orders go to Dhan. Click to return to SIM.' : 'SIM: paper fills at live LTP. Click to arm REAL (Dhan, per page load).'}
@@ -666,6 +833,10 @@ export default function BearishStrikes() {
               </label>
             ))}
           </div>
+          <div className="flex items-center gap-1" title="OI buildup vs the bearish signal. Confirmed = short buildup (SB) or long unwinding (LU); conflict = long buildup (LB). Labels are the live feed's, measured against the previous day.">
+            <span className="text-[10px] font-bold uppercase tracking-wider text-zinc-400">OI</span>
+            <Seg label="OI buildup" value={oiMode} onChange={setOiMode} options={[{ v: 'any', l: 'Any' }, { v: 'confirm', l: 'SB / LU' }, { v: 'no-conflict', l: 'Not LB' }]} />
+          </div>
           <label className="flex items-center gap-1 text-[10px] font-bold uppercase tracking-wider text-zinc-400">
             <input type="checkbox" checked={otmOnly} onChange={(e) => setOtmOnly(e.target.checked)} className={FOCUS_RING} />OTM only
           </label>
@@ -683,6 +854,35 @@ export default function BearishStrikes() {
 
       {/* ── Body ── */}
       <div className="flex-1 flex flex-col gap-4 px-6 py-5">
+        {alertCount > 0 && (
+          <section aria-label="Position alerts" role="alert" className="rounded-xl border border-red-500/50 bg-red-500/10 px-4 py-3 space-y-2">
+            <h2 className="text-xs font-bold text-red-400 uppercase tracking-wide flex items-center gap-1.5"><TriangleAlert className="w-4 h-4" aria-hidden="true" />Your short is moving against you</h2>
+            {openPositions.filter((p) => activeAlerts[p.id]).map((p) => {
+              const w = posWatch[p.id];
+              return (
+                <div key={p.id} className="flex items-center justify-between gap-3 flex-wrap text-xs font-mono">
+                  <span className="text-zinc-100">
+                    <span className="font-bold">{p.mode} · {p.underlying} {p.strike} {p.option}</span>
+                    {' — price '}<span className="font-bold">{fmt(w?.ltp)}</span>{' above '}
+                    {activeAlerts[p.id].map((l, i) => <span key={l} className="text-red-400 font-bold">{i ? ', ' : ''}{LEVEL_LABEL[l]} {fmt(levelValue(w, l))}</span>)}
+                  </span>
+                  <button type="button" onClick={() => setExitId(p.id)} aria-label={`Exit ${p.strike} ${p.option} now`}
+                    className={`h-7 px-3 rounded bg-red-600 hover:bg-red-500 text-oncolor text-[11px] font-bold ${FOCUS_RING}`}>EXIT NOW</button>
+                </div>
+              );
+            })}
+          </section>
+        )}
+        {(() => {
+          const blind = openPositions.filter((p) => posWatch[p.id] && posWatch[p.id].ws !== 'watching' && (watchSt || watchVwap || watchEma));
+          if (!blind.length) return null;
+          return (
+            <section aria-label="Unmonitored positions" role="status" className="rounded-xl border border-amber-500/40 bg-amber-500/10 px-4 py-2 text-xs text-amber-300">
+              <span className="font-bold">{blind.length} open position{blind.length > 1 ? 's are' : ' is'} not being watched right now.</span>{' '}
+              {blind.map((p) => `${p.strike} ${p.option}: ${WATCH_WHY[posWatch[p.id].ws as Exclude<WatchState, 'watching'>]}`).join(' · ')}
+            </section>
+          );
+        })()}
         {/* Table */}
         <section aria-label="Bearish strikes" className="rounded-xl border border-zinc-800 bg-zinc-950 overflow-x-auto">
           <table className="w-full text-xs font-mono tabular-nums">
@@ -700,6 +900,7 @@ export default function BearishStrikes() {
               {rows.map((r) => {
                 const lot = lotSize || 1;
                 const full = r.sig.bearish === true;
+                const oi = oiView(r.buildup, r.sig);
                 // Level over "how far price sits from it": ▼ price is below the level (what a seller wants), ▲ above.
                 const level = (v: number | null, below: boolean | null) => {
                   const d = pctBelow(v, r.ltp);
@@ -714,7 +915,7 @@ export default function BearishStrikes() {
                 };
                 return (
                   <tr key={r.key} className="border-t border-zinc-800 hover:bg-zinc-900/60">
-                    <td className="px-3 py-1.5 text-left whitespace-nowrap">
+                    <td className={`px-3 py-1.5 text-left whitespace-nowrap border-l-2 ${oi === 'confirm' ? 'border-l-emerald-500' : oi === 'conflict' ? 'border-l-amber-400' : 'border-l-transparent'}`}>
                       <span className="font-bold text-zinc-100">{r.strike}</span>
                       <span className={`ml-1.5 px-1 py-0.5 rounded text-[10px] font-bold ${r.option === 'CE' ? 'bg-red-500/10 text-red-400' : 'bg-emerald-500/10 text-emerald-400'}`}>{r.option}</span>
                     </td>
@@ -732,7 +933,7 @@ export default function BearishStrikes() {
                         <div className="text-zinc-200">{(r.oi / lot).toLocaleString('en-IN', { maximumFractionDigits: 0 })}</div>
                         <div className="text-[10px]">
                           <span className={pnlCls(r.oiChgPct)}>{r.oiChgPct == null ? '—' : `${r.oiChgPct > 0 ? '+' : ''}${r.oiChgPct.toFixed(0)}%`}</span>
-                          {r.buildup && <span className="ml-1 text-zinc-400">{r.buildup}</span>}
+                          {r.buildup && <span className={`ml-1 ${oi === 'confirm' ? 'text-emerald-400 font-bold' : oi === 'conflict' ? 'text-amber-300 font-bold' : 'text-zinc-400'}`}>{r.buildup}</span>}
                         </div>
                       </div>
                     </td>
@@ -743,6 +944,16 @@ export default function BearishStrikes() {
                         title={full ? (r.liveBelowAll ? 'Closed bar AND live price are below all three levels' : 'WATCH: the closed bar is bearish, but the live price is back above a level') : 'Not all three conditions hold on the closed bar'}>
                         {full ? (r.liveBelowAll ? 'BEARISH' : 'WATCH') : `${[r.sig.below.st, r.sig.below.vwap, r.sig.below.ema].filter(Boolean).length}/3`}
                       </span>
+                      {oi && (
+                        <div className="mt-1">
+                          <span className={`px-1.5 py-0.5 rounded border text-[10px] font-bold ${oi === 'confirm' ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30' : 'bg-amber-500/10 text-amber-300 border-amber-500/40'}`}
+                            title={oi === 'confirm'
+                              ? `${r.buildup === 'SB' ? 'Short buildup: price down with OI up (writers adding)' : 'Long unwinding: price down with OI down (longs leaving)'} — positioning backs the bearish signal`
+                              : 'Long buildup: price up with OI up (fresh longs) — today\'s positioning disagrees with the bearish bars. Labels are vs the previous day.'}>
+                            {oi === 'confirm' ? `OI ✓ ${r.buildup}` : `OI ⚠ ${r.buildup}`}
+                          </span>
+                        </div>
+                      )}
                     </td>
                     <td className="px-3 py-1.5 text-right">
                       <button type="button" onClick={() => setSellTicket({ option: r.option, strike: r.strike, n: Date.now() })}
@@ -766,6 +977,7 @@ export default function BearishStrikes() {
           <div className="px-3 py-1.5 border-t border-zinc-800 text-[10px] text-zinc-500 flex flex-wrap gap-x-4">
             {rateLimitS > 0 && <span className="text-amber-300 font-bold">Dhan Data API rate-limited — showing cached candles, retrying in ~{rateLimitS}s</span>}
             <span>{rows.length} shown · candles {barsStatus.have}/{barsStatus.want}{barsStatus.failed ? ` · ${barsStatus.failed} failed` : ''}</span>
+            <span>OI ✓ = bearish signal backed by short buildup (SB) or long unwinding (LU); OI ⚠ = bearish signal but long buildup (LB).</span>
             <span>Signals use the last CLOSED {tf}m bar. ▼ = price below that level. BEARISH = live price also below all three; WATCH = closed bar bearish but live price back above one.</span>
             <span>Lot {lotSize} · feed window is fixed when the bridge starts.</span>
           </div>
@@ -778,6 +990,26 @@ export default function BearishStrikes() {
               Positions ({openPositions.length} open) <span className={`ml-2 font-mono ${pnlCls(totalPnl)}`}>{money(totalPnl)}</span>
               {!ledgerOk && <span className="ml-2 text-amber-300 text-[10px]">ledger unreachable</span>}
             </h2>
+            <div role="group" aria-label="Exit alerts" className="flex items-center gap-2 flex-wrap"
+              title="Alert when the live price (or the last closed bar) of an open short goes ABOVE a ticked level.">
+              <span className="text-[10px] font-bold uppercase tracking-wider text-zinc-500 flex items-center gap-1"><Bell className="w-3 h-3" aria-hidden="true" />Alert above</span>
+              {([['Supertrend', watchSt, setWatchSt], ['VWAP', watchVwap, setWatchVwap], ['EMA20', watchEma, setWatchEma]] as const).map(([l, v, set]) => (
+                <label key={l} className="flex items-center gap-1 text-[10px] font-bold uppercase tracking-wider text-zinc-300 cursor-pointer">
+                  <input type="checkbox" checked={v} onChange={(e) => set(e.target.checked)} className={FOCUS_RING} />{l}
+                </label>
+              ))}
+              <Seg label="Alert basis" value={alertBasis} onChange={setAlertBasis} options={[{ v: 'live', l: 'Live price' }, { v: 'closed', l: 'Closed bar' }]} />
+              <button type="button" onClick={toggleSound} aria-pressed={alertSound} aria-label="Alert sound"
+                title={alertSound ? 'Sound on' : 'Sound off'}
+                className={`h-7 w-7 inline-flex items-center justify-center rounded border ${FOCUS_RING} ${alertSound ? 'border-emerald-500/40 bg-emerald-500/10 text-emerald-400' : 'border-zinc-700 bg-zinc-900 text-zinc-500'}`}>
+                {alertSound ? <Bell className="w-3.5 h-3.5" aria-hidden="true" /> : <BellOff className="w-3.5 h-3.5" aria-hidden="true" />}
+              </button>
+              <button type="button" onClick={toggleNotify} aria-pressed={alertNotify}
+                title="Desktop notification (works while the tab is in the background)"
+                className={`h-7 px-2 rounded border text-[10px] font-bold uppercase tracking-wider ${FOCUS_RING} ${alertNotify ? 'border-emerald-500/40 bg-emerald-500/10 text-emerald-400' : 'border-zinc-700 bg-zinc-900 text-zinc-400 hover:text-zinc-200'}`}>
+                Desktop {alertNotify ? 'on' : 'off'}
+              </button>
+            </div>
             <button type="button" onClick={exitAll} disabled={!openPositions.some((p) => p.mode === mode)}
               className={`h-7 px-2 rounded border border-zinc-700 bg-zinc-900 text-[11px] font-bold text-zinc-200 hover:bg-zinc-800 disabled:opacity-40 flex items-center gap-1 ${FOCUS_RING}`}>
               <LogOut className="w-3.5 h-3.5" aria-hidden="true" />Exit all {mode}
@@ -786,7 +1018,7 @@ export default function BearishStrikes() {
           <table className="w-full text-xs font-mono">
             <thead>
               <tr className="bg-zinc-800">
-                {['Mode', 'Contract', 'Qty', 'Avg', 'LTP', 'P&L', 'Status', ''].map((h, i) => (
+                {['Mode', 'Contract', 'Qty', 'Avg', 'LTP', 'P&L', 'Watch', 'Status', ''].map((h, i) => (
                   <th key={i} className={`px-2 py-2 text-xs font-bold text-white ${i < 2 ? 'text-left' : 'text-right'}`}>{h}</th>
                 ))}
               </tr>
@@ -804,6 +1036,32 @@ export default function BearishStrikes() {
                     <td className="px-2 py-1.5 text-right">{p.avgPrice > 0 ? p.avgPrice.toFixed(2) : '—'}</td>
                     <td className="px-2 py-1.5 text-right">{p.status === 'OPEN' ? fmt(ltp) : (p.exitPrice ? p.exitPrice.toFixed(2) : '—')}</td>
                     <td className={`px-2 py-1.5 text-right font-bold ${pnlCls(pnl)}`}>{money(pnl)}</td>
+                    <td className="px-2 py-1.5 text-right">
+                      {p.status === 'OPEN' && p.qty > 0 && (() => {
+                        const w = posWatch[p.id];
+                        if (!w) return <span className="text-zinc-600">…</span>;
+                        if (w.ws !== 'watching') return <span className="text-amber-300 text-[10px]" title={WATCH_WHY[w.ws]}>{w.ws === 'other-chain' ? 'other chain' : w.ws === 'no-price' ? 'no price' : w.ws === 'no-bars' ? 'no candles' : 'warming'}</span>;
+                        return (
+                          <span className="inline-flex gap-1 justify-end">
+                            {LEVELS.map((l) => {
+                              const lv = levelValue(w, l);
+                              const watched = l === 'st' ? watchSt : l === 'vwap' ? watchVwap : watchEma;
+                              const alerting = !!activeAlerts[p.id]?.includes(l);
+                              const above = w.states[l];
+                              const dist = lv != null && w.ltp != null && lv > 0 ? ((w.ltp - lv) / lv) * 100 : null;   // + = price above the level = against a short
+                              const cls = !watched ? 'border-zinc-800 text-zinc-600' : alerting ? 'border-red-500/60 bg-red-500/15 text-red-400 font-bold animate-pulse'
+                                : above ? 'border-amber-500/40 bg-amber-500/10 text-amber-300' : above === false ? 'border-emerald-500/30 text-emerald-400' : 'border-zinc-700 text-zinc-500';
+                              return (
+                                <span key={l} className={`px-1 py-0.5 rounded border text-[10px] leading-tight ${cls}`}
+                                  title={`${LEVEL_LABEL[l]} ${lv != null ? lv.toFixed(2) : 'warming up'}${watched ? '' : ' (not alerting)'}`}>
+                                  {l === 'st' ? 'ST' : l === 'vwap' ? 'VW' : 'EM'} {dist == null ? '—' : `${dist > 0 ? '▲' : '▼'}${Math.abs(dist).toFixed(1)}%`}
+                                </span>
+                              );
+                            })}
+                          </span>
+                        );
+                      })()}
+                    </td>
                     <td className="px-2 py-1.5 text-right text-zinc-400">
                       {p.pendingOrders?.length ? `${p.pendingOrders[0].kind} order working` : p.status === 'OPEN' ? (prior ? 'OPEN · prior day' : 'OPEN') : (p.note ?? 'CLOSED')}
                     </td>
@@ -821,7 +1079,7 @@ export default function BearishStrikes() {
                 );
               })}
               {positions.length === 0 && (
-                <tr><td colSpan={8} className="px-4 py-6 text-center text-zinc-500" role="status">No trades yet. Press SELL on a row to open a ticket ({mode}).</td></tr>
+                <tr><td colSpan={9} className="px-4 py-6 text-center text-zinc-500" role="status">No trades yet. Press SELL on a row to open a ticket ({mode}).</td></tr>
               )}
             </tbody>
           </table>
