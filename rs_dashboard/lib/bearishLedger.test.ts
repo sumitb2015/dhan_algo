@@ -81,3 +81,12 @@ test('CRUDEOILM P&L is scaled by 10 barrels per lot (Dhan qty is in lots)', () =
   const f = applyOp({ rev: 0, positions: [p] }, { op: 'reduce', id: p.id, qty: 10, price: 42.2, at: 2 });
   assert.ok(Math.abs(f.positions[0].realized - 0.2 * 10 * 10) < 1e-9);
 });
+
+test('low only ever moves down and ignores closed rows', () => {
+  let f = applyOp(empty, { op: 'open', position: base() });
+  f = applyOp(f, { op: 'low', id: 'a', low: 80 });
+  f = applyOp(f, { op: 'low', id: 'a', low: 90 });
+  assert.strictEqual(f.positions[0].low, 80);
+  f = applyOp(f, { op: 'low', id: 'a', low: 70 });
+  assert.strictEqual(f.positions[0].low, 70);
+});

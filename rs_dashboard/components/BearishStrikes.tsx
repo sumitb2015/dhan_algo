@@ -28,6 +28,7 @@ import {
   type BearishSignal, type LiveMinutes, type OiMode, type StrikeFilters, type Timeframe,
 } from '@/lib/bearishStrikes';
 import { legPnl, type BsPosition, type LedgerOp } from '@/lib/bearishLedger';
+import { NO_RISK, riskHit, riskLevels, type RiskCfg, type RiskHit } from '@/lib/bearishRisk';
 import {
   LEVELS, LEVEL_LABEL, activeLevels, levelStates, stepTracker, watchState,
   type Basis, type Level, type LevelState, type Tracker, type WatchState,
@@ -167,6 +168,7 @@ export default function BearishStrikes() {
   const [alertSound, setAlertSound] = useState(true);
   const [alertNotify, setAlertNotify] = useState(false);
   const [autoExit, setAutoExit] = useState(false);   // buys back a position at MARKET when a ticked alert fires — per page load, never persisted
+  const [risk, setRisk] = useState<RiskCfg>(NO_RISK);   // % of avg sell premium, 0 = off; applies to every open position
   const audioRef = useRef<AudioContext | null>(null);
   const cfgLoaded = useRef(false);
   useEffect(() => {
@@ -179,6 +181,8 @@ export default function BearishStrikes() {
           if (typeof c.ema === 'boolean') setWatchEma(c.ema);
           if (c.basis === 'live' || c.basis === 'closed') setAlertBasis(c.basis);
           if (typeof c.sound === 'boolean') setAlertSound(c.sound);
+          const num = (v: unknown) => (typeof v === 'number' && Number.isFinite(v) && v >= 0 && v <= 1000 ? v : 0);
+          setRisk({ sl: num(c.sl), tgt: num(c.tgt), trail: num(c.trail) });
         }
       } catch { /* storage blocked: defaults */ }
       cfgLoaded.current = true;
@@ -187,8 +191,8 @@ export default function BearishStrikes() {
   }, []);
   useEffect(() => {
     if (!cfgLoaded.current) return;
-    try { localStorage.setItem('bs_alert_cfg', JSON.stringify({ st: watchSt, vwap: watchVwap, ema: watchEma, basis: alertBasis, sound: alertSound })); } catch { /* ignore */ }
-  }, [watchSt, watchVwap, watchEma, alertBasis, alertSound]);
+    try { localStorage.setItem('bs_alert_cfg', JSON.stringify({ st: watchSt, vwap: watchVwap, ema: watchEma, basis: alertBasis, sound: alertSound, sl: risk.sl, tgt: risk.tgt, trail: risk.trail })); } catch { /* ignore */ }
+  }, [watchSt, watchVwap, watchEma, alertBasis, alertSound, risk]);
 
   const viewer = useRef(`bs-${Math.random().toString(36).slice(2, 10)}`);
   const [nowTick, setNowTick] = useState(0);
@@ -485,7 +489,7 @@ export default function BearishStrikes() {
         if (ev.kind === 'recovered') { toast.dismiss(ev.key); toast.success(`${label}: back below ${LEVEL_LABEL[ev.level]}`, { duration: 4000 }); continue; }
         const lv = levelValue(w, ev.level);
         const text = `${label} — price ${alertBasis === 'live' ? (w?.ltp ?? 0).toFixed(2) : (w?.ind?.close ?? 0).toFixed(2)} is above ${LEVEL_LABEL[ev.level]}${lv != null ? ` ${lv.toFixed(2)}` : ''}`;
-        toast.error(`⚠ ${text}`, { id: ev.key, duration: Infinity, action: { label: 'Exit', onClick: () => setExitId(p.id) } });
+        toast.error(`⚠ ${text}`, { id: ev.key, duration: 10_000, action: { label: 'Exit', onClick: () => setExitId(p.id) } });
         if (alertSound) playAlertSound(audioRef.current);
         try {
           if (alertNotify && typeof Notification !== 'undefined' && Notification.permission === 'granted') {
@@ -769,13 +773,54 @@ export default function BearishStrikes() {
     for (const p of open) await doExit(p, p.qty / p.lotSize, 'MARKET');
   }, [positions, mode, doExit]);
 
+  // ── SL / Target / Trailing SL ───────────────────────────────────
+  // Live premium vs the % rules in `risk`. The trailing anchor (lowest premium since entry) is persisted on the
+  // ledger row, so a reload cannot loosen the trail. Fires on the live price only (no closed-bar basis).
+  const [riskHits, setRiskHits] = useState<Record<string, RiskHit>>({});
+  const lowSent = useRef<Record<string, { v: number; at: number }>>({});
+  const riskNotified = useRef<Record<string, string>>({});
+  useEffect(() => {
+    const id = setInterval(() => {
+      const q = quotesRef.current;
+      const now = Date.now();
+      const fresh = !!q?.updated_at && now - Date.parse(q.updated_at) < 15_000;
+      const hits: Record<string, RiskHit> = {};
+      for (const p of positionsRef.current) {
+        if (p.status !== 'OPEN' || !(p.qty > 0) || p.side !== 'S') continue;
+        if (`${p.underlying}|${p.expiry}` !== scopeRef.current || !fresh) continue;
+        const d = q?.strikes[String(p.strike)]?.[p.option === 'CE' ? 'ce' : 'pe'];
+        const ltp = d && d.ltp > 0 ? d.ltp : null;
+        if (ltp == null) continue;
+        const sent = lowSent.current[p.id];
+        const known = Math.min(p.low ?? Infinity, sent?.v ?? Infinity);
+        if (ltp < known) {                       // new low: remember it now, persist at most every 5 s
+          lowSent.current[p.id] = { v: ltp, at: sent?.at ?? 0 };
+          if (now - (sent?.at ?? 0) > 5000) { lowSent.current[p.id].at = now; void op({ op: 'low', id: p.id, low: ltp }); }
+        }
+        const low = Math.min(known, ltp);
+        const hit = riskHit(p.avgPrice, Number.isFinite(low) ? low : null, ltp, risk);
+        if (!hit) { delete riskNotified.current[p.id]; continue; }
+        hits[p.id] = hit;
+        if (riskNotified.current[p.id] !== hit) {
+          riskNotified.current[p.id] = hit;
+          const label = `${p.underlying} ${p.strike} ${p.option}`;
+          toast.error(`⚠ ${label} — ${hit === 'SL' ? 'stop-loss' : hit === 'TRAIL' ? 'trailing stop' : 'target'} hit @ ${ltp.toFixed(2)}`,
+            { id: `risk-${p.id}`, duration: 10_000, action: { label: 'Exit', onClick: () => setExitId(p.id) } });
+          if (alertSound) playAlertSound(audioRef.current);
+        }
+      }
+      setRiskHits((prev) => (JSON.stringify(prev) === JSON.stringify(hits) ? prev : hits));
+    }, 1000);
+    return () => clearInterval(id);
+  }, [risk, alertSound, op]);
+
   // ── Auto-exit: an active alert (already debounced by the tracker) on a position sends a MARKET buy-back for what
   // this ledger owns. Opt-in per page load. At most 3 tries per position, 8 s apart, then it is left to the user.
   const autoTries = useRef<Record<string, { n: number; at: number }>>({});
   useEffect(() => {
     if (!autoExit) return;
     const now = Date.now();
-    for (const id of Object.keys(activeAlerts)) {
+    for (const id of Array.from(new Set([...Object.keys(activeAlerts), ...Object.keys(riskHits)]))) {
       if (lock.current) return;
       const p = positionsRef.current.find((x) => x.id === id);
       if (!p || p.status !== 'OPEN' || !(p.qty > 0)) continue;
@@ -783,11 +828,12 @@ export default function BearishStrikes() {
       const t = autoTries.current[id] ?? { n: 0, at: 0 };
       if (t.n >= 3 || now - t.at < 8000) continue;
       autoTries.current[id] = { n: t.n + 1, at: now };
-      toast.warning(`AUTO-EXIT ${p.underlying} ${p.strike} ${p.option} — ${activeAlerts[id].map((l) => LEVEL_LABEL[l]).join(' + ')} breached`, { duration: 6000 });
+      const why = [...(activeAlerts[id] ?? []).map((l) => `${LEVEL_LABEL[l]} breached`), ...(riskHits[id] ? [riskHits[id] === 'SL' ? 'stop-loss hit' : riskHits[id] === 'TRAIL' ? 'trailing stop hit' : 'target hit'] : [])].join(' + ');
+      toast.warning(`AUTO-EXIT ${p.underlying} ${p.strike} ${p.option} — ${why}`, { duration: 6000 });
       void doExit(p, p.qty / p.lotSize, 'MARKET');
       return;   // one order at a time; the next position goes on the next pass
     }
-  }, [autoExit, activeAlerts, doExit]);
+  }, [autoExit, activeAlerts, riskHits, doExit]);
 
   // ── Derived header state ────────────────────────────────────────
   const openPositions = positions.filter((p) => p.status === 'OPEN');
@@ -1059,8 +1105,14 @@ export default function BearishStrikes() {
                 Desktop {alertNotify ? 'on' : 'off'}
               </button>
             </div>
+            <NumField label="SL %" value={risk.sl} step={5} width="w-14" title="Stop-loss: exit when the premium rises this % above your average sell price. 0 = off."
+              onCommit={(n) => setRisk((r0) => ({ ...r0, sl: Math.min(1000, n) }))} />
+            <NumField label="Target %" value={risk.tgt} step={5} width="w-14" title="Target: exit when the premium falls this % below your average sell price. 0 = off."
+              onCommit={(n) => setRisk((r0) => ({ ...r0, tgt: Math.min(100, n) }))} />
+            <NumField label="Trail %" value={risk.trail} step={5} width="w-14" title="Trailing stop: once the premium has traded below your entry, exit when it rebounds this % above its lowest point. 0 = off."
+              onCommit={(n) => setRisk((r0) => ({ ...r0, trail: Math.min(1000, n) }))} />
             <label className="flex items-center gap-1 text-[10px] font-bold uppercase tracking-wider text-zinc-300 cursor-pointer"
-              title="When a ticked alert fires on an open position (SIM or REAL), buy it back at MARKET automatically. Works only while this tab is open; off after a reload. Max 3 tries per position.">
+              title="When a ticked alert fires, or the SL / Target / Trail below is hit, on an open position (SIM or REAL), buy it back at MARKET automatically. Works only while this tab is open; off after a reload. Max 3 tries per position.">
               <input type="checkbox" checked={autoExit} onChange={(e) => setAutoExit(e.target.checked)} className={FOCUS_RING} />Auto-exit on alert
             </label>
             <button type="button" onClick={exitAll} disabled={!openPositions.some((p) => p.mode === mode)}
@@ -1071,7 +1123,7 @@ export default function BearishStrikes() {
           <table className="w-full text-xs font-mono">
             <thead>
               <tr className="bg-zinc-800">
-                {['Mode', 'Side', 'Contract', 'Qty', 'Avg', 'LTP', 'Exit', 'Decay %', 'P&L', 'Opened', 'Closed', 'Watch', 'Status', ''].map((h, i) => (
+                {['Mode', 'Side', 'Contract', 'Qty', 'Avg', 'LTP', 'Exit', 'Decay %', 'P&L', 'Opened', 'Closed', 'SL / Tgt / Trail', 'Watch', 'Status', ''].map((h, i) => (
                   <th key={i} className={`px-2 py-2 text-xs font-bold text-white ${i < 3 ? 'text-left' : 'text-right'}`}>{h}</th>
                 ))}
               </tr>
@@ -1099,6 +1151,20 @@ export default function BearishStrikes() {
                     <td className={`px-2 py-1.5 text-right font-bold ${pnlCls(pnl)}`}>{money(pnl)}</td>
                     <td className="px-2 py-1.5 text-right text-zinc-300">{clockIst(p.filledAt || p.openedAt)}</td>
                     <td className="px-2 py-1.5 text-right text-zinc-300">{p.closedAt ? clockIst(p.closedAt) : '—'}</td>
+                    <td className="px-2 py-1.5 text-right">
+                      {p.status === 'OPEN' && p.qty > 0 && (() => {
+                        const lv = riskLevels(p.avgPrice, Math.min(p.low ?? Infinity, lowSent.current[p.id]?.v ?? Infinity), risk);
+                        const hit = riskHits[p.id];
+                        const f = (v: number | null) => (v == null ? '—' : v.toFixed(2));
+                        if (lv.sl == null && lv.target == null && risk.trail <= 0) return <span className="text-zinc-600">off</span>;
+                        return (
+                          <span className={`text-[11px] ${hit ? 'text-red-400 font-bold animate-pulse' : 'text-zinc-300'}`}
+                            title={hit ? `${hit} hit` : `SL ${f(lv.sl)} · Target ${f(lv.target)} · Trail ${lv.trail == null ? 'not armed (premium has not traded below entry)' : f(lv.trail)}`}>
+                            <span className="text-red-400">{f(lv.sl)}</span> / <span className="text-emerald-400">{f(lv.target)}</span> / <span className="text-amber-300">{f(lv.trail)}</span>
+                          </span>
+                        );
+                      })()}
+                    </td>
                     <td className="px-2 py-1.5 text-right">
                       {p.status === 'OPEN' && p.qty > 0 && (() => {
                         const w = posWatch[p.id];
@@ -1142,7 +1208,7 @@ export default function BearishStrikes() {
                 );
               })}
               {positions.length === 0 && (
-                <tr><td colSpan={14} className="px-4 py-6 text-center text-zinc-500" role="status">No trades yet. Press SELL on a row to open a ticket ({mode}).</td></tr>
+                <tr><td colSpan={15} className="px-4 py-6 text-center text-zinc-500" role="status">No trades yet. Press SELL on a row to open a ticket ({mode}).</td></tr>
               )}
             </tbody>
           </table>

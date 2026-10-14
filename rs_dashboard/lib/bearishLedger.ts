@@ -41,6 +41,8 @@ export interface BsPosition {
   /** Realized P&L from exits so far (rupees). */
   realized: number;
   exitPrice?: number;
+  /** Lowest premium seen while open (the trailing stop's anchor). Only ever moves down; survives a reload. */
+  low?: number;
   pendingOrders?: PendingOrder[];
   note?: string;
 }
@@ -55,6 +57,7 @@ export type LedgerOp =
   | { op: 'pending'; id: string; pending: PendingOrder | null; clearOrderId?: string }
   /** An order reached its outcome: book `filledQty` at `avgPrice` (0 = rejected / cancelled / never filled). */
   | { op: 'settle'; id: string; orderId: string; filledQty: number; avgPrice: number; at: number }
+  | { op: 'low'; id: string; low: number }
   | { op: 'remove'; id: string };                                   // SIM clean-up only
 
 export class LedgerError extends Error {
@@ -169,6 +172,13 @@ export function applyOp(file: LedgerFile, op: LedgerOp): LedgerFile {
         p.qty = 0; p.status = 'CLOSED'; p.closedAt = op.at;
         if (order.kind === 'entry' && p.realized === 0 && p.exitPrice == null) p.note = 'order did not fill';
       }
+      break;
+    }
+    case 'low': {
+      const p = find(op.id);
+      if (p.status !== 'OPEN' || !(op.low > 0)) return file;     // no-op: nothing to anchor
+      if (p.low != null && op.low >= p.low) return file;         // only ever lowers
+      p.low = op.low;
       break;
     }
     case 'remove': {
