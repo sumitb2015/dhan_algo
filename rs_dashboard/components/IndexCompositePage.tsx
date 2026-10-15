@@ -1,7 +1,7 @@
 'use client';
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { Sigma, AlertTriangle } from 'lucide-react';
+import { Sigma, AlertTriangle, SlidersHorizontal, X } from 'lucide-react';
 import NavBar from './NavBar';
 import IndexCompositeChart, { OVERLAY_PALETTE, type IndicatorSeries, type OverlaySeries } from './IndexCompositeChart';
 import {
@@ -43,11 +43,13 @@ interface Saved {
   emaFast: Toggle;
   emaSlow: Toggle;
   vwap: boolean;
+  /** The Indices settings panel; hidden by default so the chart gets the full width. */
+  panel: boolean;
 }
 interface Toggle { on: boolean; period: number }
 const DEFAULTS: Saved = {
   components: null, mode: 'equal', timeframe: '1m', overlay: true,
-  emaFast: { on: true, period: 9 }, emaSlow: { on: true, period: 20 }, vwap: true,
+  emaFast: { on: true, period: 9 }, emaSlow: { on: true, period: 20 }, vwap: true, panel: false,
 };
 
 function loadToggle(t: Partial<Toggle> | undefined, fallback: Toggle): Toggle {
@@ -70,6 +72,7 @@ function loadSaved(): Saved {
       emaFast: loadToggle(p.emaFast, DEFAULTS.emaFast),
       emaSlow: loadToggle(p.emaSlow, DEFAULTS.emaSlow),
       vwap: p.vwap !== false,
+      panel: p.panel === true,
     };
   } catch {
     return DEFAULTS;
@@ -321,6 +324,11 @@ export default function IndexCompositePage() {
                   </button>
                 ))}
               </div>
+              <button type="button" onClick={() => update({ panel: !saved.panel })} aria-expanded={saved.panel} aria-controls="composite-indices-panel"
+                title={saved.panel ? 'Hide the indices panel' : 'Choose indices and weights'}
+                className={`flex items-center gap-1.5 px-2.5 py-1 rounded border text-xs font-bold ${saved.panel ? 'border-sky-500/40 bg-sky-500/20 text-sky-300' : 'border-zinc-700 bg-zinc-900 text-zinc-400 hover:text-zinc-200'}`}>
+                <SlidersHorizontal className="w-3.5 h-3.5" /> Indices {active.length}/{components.length}
+              </button>
             </div>
           </div>
 
@@ -408,10 +416,17 @@ export default function IndexCompositePage() {
         </section>
 
         {/* Components */}
-        <aside className="w-full lg:w-[400px] shrink-0 flex flex-col gap-3 rounded-lg border border-zinc-800 bg-zinc-900/40 p-4 lg:max-h-[calc(100vh-110px)] lg:sticky lg:top-[88px]">
+        {saved.panel && (
+        <aside id="composite-indices-panel" className="w-full lg:w-[400px] shrink-0 flex flex-col gap-3 rounded-lg border border-zinc-800 bg-zinc-900/40 p-4 lg:max-h-[calc(100vh-110px)] lg:sticky lg:top-[88px]">
           <div className="flex items-center justify-between">
             <h2 className="text-xs font-bold uppercase tracking-wider text-zinc-300">Indices · {active.length}/{components.length}</h2>
-            <span className="text-[10px] text-zinc-500 font-mono">{mode === 'equal' ? 'S·Σ wᵢ·Pᵢ/Bᵢ / Σ|wᵢ|' : 'Σ wᵢ·Pᵢ'}</span>
+            <div className="flex items-center gap-2">
+              <span className="text-[10px] text-zinc-500 font-mono">{mode === 'equal' ? 'S·Σ wᵢ·Pᵢ/Bᵢ / Σ|wᵢ|' : 'Σ wᵢ·Pᵢ'}</span>
+              <button type="button" onClick={() => { update({ panel: false }); setHover(null); }} aria-label="Hide indices panel"
+                className="p-1 rounded text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800 focus-visible:outline focus-visible:outline-2 focus-visible:outline-sky-400">
+                <X className="w-3.5 h-3.5" />
+              </button>
+            </div>
           </div>
 
           <div className="flex flex-wrap gap-1.5">
@@ -490,6 +505,7 @@ export default function IndexCompositePage() {
             </p>
           </div>
         </aside>
+        )}
       </div>
     </div>
   );
