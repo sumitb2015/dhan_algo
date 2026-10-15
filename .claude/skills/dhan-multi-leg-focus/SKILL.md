@@ -59,7 +59,9 @@ before changing any of it**; this skill only maps the page.
    leg's *entry premium* (`fill.avgPrice`): SL 30 % on a 100 sell = exit at 130. The toggle in `MultiLegLegRow` cycles
    pts → % → price via `nextLegThresholdType`. All conversion lives in `computeLegTrailingSL`; a new unit is added
    there plus the type, the toggle/placeholder/label in `MultiLegLegRow` and `AddLotsModal`, and a test. The
-   1-rupee trail uses the resolved SL price, so it works with any unit. Strategy-level Target/SL
+   1-rupee trail uses the resolved SL price, so it works with any unit. Its gap is measured from `leg.trailFrom` (LTP when
+   the trail was ticked or its SL changed, set by `legTrailPatch`), not from entry: a stop placed in profit, measured from
+   entry, never moved (2026-10-15). Route any new SL/trail edit through `legTrailPatch`. Strategy-level Target/SL
    (`StrategyRiskConfig`, `checkStrategyRisk`) already has `pts | pct` (pct of combined gross entry premium).
    `MultiLegStrategyRow` whitelists `slType`/`tpType` patches and `MultiLegFocus.tsx` carries them on scale; both
    pass new values through untouched.

@@ -587,6 +587,9 @@ export default function MultiLegStrategyRow({
         if ('tp' in patch) allowed.tp = patch.tp;
         if ('tpType' in patch) allowed.tpType = patch.tpType;
         if ('trail' in patch) allowed.trail = patch.trail;
+        // Trail re-anchor from legTrailPatch (sent with trail / sl / slType edits).
+        if ('trailFrom' in patch) allowed.trailFrom = patch.trailFrom;
+        if ('bestPrice' in patch) allowed.bestPrice = patch.bestPrice;
         if ('slAction' in patch) allowed.slAction = patch.slAction;
         if ('tpAction' in patch) allowed.tpAction = patch.tpAction;
         if ('tag' in patch) allowed.tag = patch.tag;

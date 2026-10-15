@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert';
 import {
   resolveTemplateLegs, reconcileLegFillDown, reconcileLegWithBroker, legPnl, basketTotalPnl, sortLegsForExit, findLegPosition,
-  computeLegTrailingSL, nextLegThresholdType, computeStrategyMetrics, checkStrategyRisk, classifyBasketStructure, findSiblingLegCollisions,
+  computeLegTrailingSL, legTrailPatch, nextLegThresholdType, computeStrategyMetrics, checkStrategyRisk, classifyBasketStructure, findSiblingLegCollisions,
   formatExpiryLabel, LEG_FILL_GRACE_MS, claimableLegQty, executionBroker, applyOrderOutcomes, normalizeOrderRow, PENDING_ORDER_TTL_MS, legBrokerMismatch, classifyDhanOrder, settleWaitingEntry, applyTriggeredEntry, type WaitingEntry, type NormalizedOrder, legAvgPrice, legExitPrice, legQtyUnits, legPnlPct, legOtmPct, scaleBasketMultiplier,
   legQtyWarningsFor, recordOutsideReduction, findUntrackedPositions, residualBrokerAvg, findContractDrift, legFromUntracked, contractHintFromRow, legCountsToday, closedFillFromRow, mergeImportedLegs, brokerClampSlice, restingExitOrders, withPendingOrder, RESTING_ORDER_TTL_MS,
   normalizeTradeRow, ownOrderIds, matchOutsideTrades, repriceEstimatedCloses, MLF_ORDER_SOURCE,
@@ -314,6 +314,43 @@ test('computeLegTrailingSL: Buy leg trailing at 1 rupee step tightens SL upward'
   const trailedLeg = { ...leg, bestPrice: 58 };
   // Price drops to 48:
   assert.strictEqual(computeLegTrailingSL(trailedLeg, 48).triggered, 'TRAIL_SL');
+});
+
+test('computeLegTrailingSL: a stop set in profit trails from the price it was armed at, not from entry', () => {
+  // The reported case: BUY 22800 CE at 327.58, SL price 370, trail ticked with LTP 393.70.
+  const base: MultiLegLeg = {
+    id: '1', side: 'B', option: 'CE', strike: 22800, lots: 1, type: 'MARKET', status: 'OPEN',
+    fill: { qty: 65, avgPrice: 327.58 }, sl: 370, slType: 'price',
+  };
+  const leg = { ...base, ...legTrailPatch(base, { trail: true }, 393.7) };
+  assert.strictEqual(leg.trailFrom, 393.7);
+  assert.strictEqual(computeLegTrailingSL(leg, 393.7).effectiveSL, 370);
+  const up = computeLegTrailingSL(leg, 400);
+  assert.ok(Math.abs((up.effectiveSL ?? 0) - 376.3) < 1e-9); // moved 6.30 with the price
+  assert.strictEqual(computeLegTrailingSL({ ...leg, bestPrice: 400 }, 376).triggered, 'TRAIL_SL');
+
+  // Same leg without an anchor (older saves) keeps the entry-based gap: stop does not move at 400.
+  assert.strictEqual(computeLegTrailingSL({ ...base, trail: true }, 400).effectiveSL, 370);
+
+  // Sell side mirrors it: SELL at 100, LTP 60, SL price 80 -> gap 20 from 60.
+  const sell: MultiLegLeg = { ...base, side: 'S', fill: { qty: 65, avgPrice: 100 }, sl: 80 };
+  const s = { ...sell, ...legTrailPatch(sell, { trail: true }, 60) };
+  assert.strictEqual(computeLegTrailingSL(s, 55).effectiveSL, 75);
+});
+
+test('legTrailPatch: re-anchors only when the trail turns on or its SL changes', () => {
+  const leg: MultiLegLeg = {
+    id: '1', side: 'B', option: 'CE', strike: 22800, lots: 1, type: 'MARKET', status: 'OPEN',
+    fill: { qty: 65, avgPrice: 100 }, sl: 90, slType: 'price', trail: true, trailFrom: 110, bestPrice: 130,
+  };
+  assert.deepStrictEqual(legTrailPatch(leg, { tp: 50 }, 125), { tp: 50 });
+  assert.deepStrictEqual(legTrailPatch(leg, { sl: 90, slType: 'price' }, 125), { sl: 90, slType: 'price' });
+  assert.deepStrictEqual(legTrailPatch(leg, { sl: 115, slType: 'price' }, 125), { sl: 115, slType: 'price', trailFrom: 125, bestPrice: undefined });
+  assert.deepStrictEqual(legTrailPatch(leg, { trail: false }, 125), { trail: false, trailFrom: undefined, bestPrice: undefined });
+  // No live price yet: falls back to the entry anchor.
+  assert.deepStrictEqual(legTrailPatch({ ...leg, trail: false }, { trail: true }, 0), { trail: true, trailFrom: undefined, bestPrice: undefined });
+  // SL edit with the trail off changes nothing else.
+  assert.deepStrictEqual(legTrailPatch({ ...leg, trail: false }, { sl: 80 }, 125), { sl: 80 });
 });
 
 test('computeStrategyMetrics computes combined points and percentage accurately', () => {

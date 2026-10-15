@@ -4,7 +4,7 @@ import React, { useState } from 'react';
 import { X, Plus, AlertTriangle, ChevronUp, ChevronDown, Unlink, LineChart, Bell, LogOut } from 'lucide-react';
 import { clampShiftSteps, MAX_SHIFT_STEPS } from '@/lib/strikeShift';
 import {
-  legPnl, computeLegTrailingSL, nextLegThresholdType, formatExpiryLabel, legAvgPrice, legExitPrice, restingExitOrders, legQtyUnits, legPnlPct, legOtmPct, type MultiLegLeg,
+  legPnl, computeLegTrailingSL, legTrailPatch, nextLegThresholdType, formatExpiryLabel, legAvgPrice, legExitPrice, restingExitOrders, legQtyUnits, legPnlPct, legOtmPct, type MultiLegLeg,
 } from '@/lib/multiLegFocus';
 import { DEFAULT_LEG_COLUMNS, type LegColumns } from '@/lib/legColumns';
 import { FOCUS_RING } from '@/components/Scalper';
@@ -176,6 +176,8 @@ export default function MultiLegLegRow({
   const slType = leg.slType ?? (leg.sl == null ? 'pct' : 'pts');
   const tpType = leg.tpType ?? (leg.tp == null ? 'pct' : 'pts');
   const trailingEval = computeLegTrailingSL(leg, ltp);
+  // SL / trail edits re-anchor the trail at the current LTP.
+  const changeRisk = (patch: Partial<MultiLegLeg>) => onChange(legTrailPatch(leg, patch, ltp));
   const isFar = !!leg.expiry && leg.expiry !== frontExpiry;
   const canToggleExpiry = editable && !!farExpiry && farExpiry !== frontExpiry;
 
@@ -330,14 +332,14 @@ export default function MultiLegLegRow({
           <div className="flex items-center gap-1">
             <RuleNumInput
               value={leg.sl}
-              onCommit={val => onChange({ sl: val, slType: slType })}
+              onCommit={val => changeRisk({ sl: val, slType: slType })}
               placeholder={slType === 'price' ? 'Price' : slType === 'pct' ? '%' : 'Pts'}
               className="w-14 h-7 text-rose-300 placeholder-rose-900/40"
               title="Stop Loss (points, % of entry premium, or price)"
             />
             <button
               type="button"
-              onClick={() => onChange({ slType: nextLegThresholdType(slType) })}
+              onClick={() => changeRisk({ slType: nextLegThresholdType(slType) })}
               className="h-7 px-1 text-[10px] font-mono font-bold rounded border border-zinc-700 bg-zinc-800 text-zinc-400 hover:text-white"
               title="Cycle Points → % of entry → Price"
             >
@@ -386,7 +388,7 @@ export default function MultiLegLegRow({
           <input
             type="checkbox"
             checked={!!leg.trail}
-            onChange={e => onChange({ trail: e.target.checked })}
+            onChange={e => changeRisk({ trail: e.target.checked })}
             className="rounded border-zinc-700 text-amber-500 focus:ring-0"
           />
           <span className={leg.trail ? 'text-amber-400 font-bold' : 'text-zinc-500'}>

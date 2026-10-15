@@ -90,6 +90,9 @@ export interface MultiLegLeg {
   tpType?: LegThresholdType;   // Default: 'pts'
   trail?: boolean;             // Trailing SL enabled (1 rupee trailing step)
   bestPrice?: number;          // Peak favorable price tracked for trailing SL
+  /** LTP when the trail was ticked (or the SL changed while it was on). The stop keeps its distance from this price
+   *  behind the best price since. Unset (trail armed before a price, older legs): the entry price. See legTrailPatch. */
+  trailFrom?: number;
   /** What hitting the SL / Target does. Default 'EXIT' (close the leg). 'ALERT' only announces (toast + chime): the leg
    *  stays open and no auto re-entry starts. Carried with sl/tp on roll, scale and re-entry. */
   slAction?: LegHitAction;
@@ -731,14 +734,17 @@ export function computeLegTrailingSL(
     let effectiveSL = result.initialSLPrice;
 
     if (leg.trail) {
-      const initialRisk = Math.abs(result.initialSLPrice - entry);
-      const prevBest = leg.bestPrice ?? entry;
+      // The gap is measured from where the trail was armed, not from entry: a stop placed in profit (BUY at 327,
+      // SL 370 with LTP 394) measured from entry kept a 43-point gap and did not move until LTP passed 413.
+      const from = leg.trailFrom != null && leg.trailFrom > 0 ? leg.trailFrom : entry;
+      const gap = Math.abs(result.initialSLPrice - from);
+      const prevBest = leg.bestPrice ?? from;
       // For buy: favorable is higher LTP. For sell: favorable is lower LTP.
       const currentBest = isBuy ? Math.max(prevBest, ltp) : Math.min(prevBest, ltp);
       result.newBestPrice = currentBest;
 
       // Trailing SL price: 1 rupee trail per 1 rupee favorable movement
-      const trailSL = isBuy ? currentBest - initialRisk : currentBest + initialRisk;
+      const trailSL = isBuy ? currentBest - gap : currentBest + gap;
 
       // Only tighten the stop, never widen
       effectiveSL = isBuy ? Math.max(result.initialSLPrice, trailSL) : Math.min(result.initialSLPrice, trailSL);
@@ -765,6 +771,19 @@ export function computeLegTrailingSL(
   }
 
   return result;
+}
+
+/**
+ * Re-anchors the trail when a leg edit changes what it trails: ticking it on, or changing the SL while it is on, starts
+ * it from the current LTP (best price reset), so the stop moves from the next favourable rupee. Ticking it off clears
+ * both. Any other patch is returned unchanged.
+ */
+export function legTrailPatch(leg: MultiLegLeg, patch: Partial<MultiLegLeg>, ltp: number): Partial<MultiLegLeg> {
+  const trailOn = 'trail' in patch ? !!patch.trail : !!leg.trail;
+  if (!trailOn) return 'trail' in patch ? { ...patch, trailFrom: undefined, bestPrice: undefined } : patch;
+  const slChanged = ('sl' in patch && patch.sl !== leg.sl) || ('slType' in patch && patch.slType !== leg.slType);
+  if (!(('trail' in patch && !leg.trail) || slChanged)) return patch;
+  return { ...patch, trailFrom: ltp > 0 ? ltp : undefined, bestPrice: undefined };
 }
 
 export interface StrategyMetrics {

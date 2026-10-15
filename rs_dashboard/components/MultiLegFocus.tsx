@@ -3340,7 +3340,7 @@ export default function MultiLegFocus({
       }
 
       // 2. Leg-wise SL, TP, and Trailing SL
-      const bestUpdates = new Map<string, number>();
+      const bestUpdates = new Map<string, { bp: number; from: number | undefined }>();
       for (const leg of basket.legs) {
         if (leg.status !== 'OPEN' || !leg.fill) continue;
         const ltp = ltpFor(basket, leg);
@@ -3349,7 +3349,7 @@ export default function MultiLegFocus({
         const evalResult = computeLegTrailingSL(withAutoLegRisk(leg, basket.autoLegRule), ltp);
 
         if (evalResult.newBestPrice !== leg.bestPrice && evalResult.newBestPrice != null) {
-          bestUpdates.set(leg.id, evalResult.newBestPrice);
+          bestUpdates.set(leg.id, { bp: evalResult.newBestPrice, from: leg.trailFrom });
         }
 
         // Alert-only SL / Target: announce, keep the leg open, no auto re-entry.
@@ -3456,11 +3456,12 @@ export default function MultiLegFocus({
       }
 
       // Functional, bestPrice only: writing back this render's `basket.legs`
-      // wholesale could revert a fill an in-flight order just recorded.
+      // wholesale could revert a fill an in-flight order just recorded. Skipped when the trail was re-anchored
+      // (legTrailPatch) after this pass read the leg, or the old peak would undo the reset.
       if (bestUpdates.size) {
         patchLegs(basket.id, legs => legs.map(l => {
-          const bp = bestUpdates.get(l.id);
-          return bp != null && l.status === 'OPEN' ? { ...l, bestPrice: bp } : l;
+          const u = bestUpdates.get(l.id);
+          return u && l.status === 'OPEN' && l.trail && l.trailFrom === u.from ? { ...l, bestPrice: u.bp } : l;
         }));
       }
     }
