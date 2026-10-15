@@ -1537,6 +1537,7 @@ export default function MultiLegStrategyRow({
                       allStrikes={allowedStrikes(basket.underlying, leg.expiry || basket.expiry, expiries, allStrikes)}
                       spot={spot}
                       ltp={ltpFor(leg)}
+                      autoLegRule={basket.autoLegRule}
                       editable={!hasPlacedLeg}
                       exiting={exitingLegs.has(leg.id)}
                       margin={legMargins?.[leg.id]}

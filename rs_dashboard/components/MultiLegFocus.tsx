@@ -30,7 +30,7 @@ import HelpModal from './HelpModal';
 import {
   resolveTemplateLegs, reconcileLegWithBroker, sortLegsForExit, findLegPosition, executionBroker,
   applyOrderOutcomes, normalizeOrderRow, withPendingOrder, restingExitOrders, settleWaitingEntry, applyTriggeredEntry, type WaitingEntry, LEG_FILL_GRACE_MS, legBrokerMismatch, classifyDhanOrder, type DhanOrderPhase, type NormalizedOrder,
-  computeLegTrailingSL, withAutoLegRisk, legPnl, SAME_DISTANCE, MATCH_OPPOSITE, autoRuleOwns, autoReentryStrike, autoReentryStrikeByDistance, autoReentryStrikeByPremium, entryDistance, avoidSameStrike, autoRollAllowed, computeStrategyMetrics, checkStrategyRisk, fallbackLotSize, planScale, scalePlanSignature,
+  computeLegTrailingSL, legRiskView, trailAnchorPatch, legTrailPatch, withAutoLegRisk, legPnl, SAME_DISTANCE, MATCH_OPPOSITE, autoRuleOwns, autoReentryStrike, autoReentryStrikeByDistance, autoReentryStrikeByPremium, entryDistance, avoidSameStrike, autoRollAllowed, computeStrategyMetrics, checkStrategyRisk, fallbackLotSize, planScale, scalePlanSignature,
   positionProduct, computeBasketStatus, closedFillFromRow,
   findSiblingLegCollisions, type SiblingLegCollision,
   recordOutsideReduction, isLegInFillGrace,
@@ -2127,8 +2127,11 @@ export default function MultiLegFocus({
             ...l,
             lots: Math.max(1, Math.round(totalQty / lotSize)),
             price: avg,
-            ...(params.newSl !== undefined ? { sl: params.newSl, slType: leg.slType ?? (leg.sl == null ? 'pct' as const : 'pts' as const) } : {}),
-            ...(params.newTp !== undefined ? { tp: params.newTp, tpType: leg.tpType ?? (leg.tp == null ? 'pct' as const : 'pts' as const) } : {}),
+            // A new SL re-anchors a running trail (legTrailPatch), like an SL typed into the row.
+            ...legTrailPatch(l, {
+              ...(params.newSl !== undefined ? { sl: params.newSl, slType: leg.slType ?? (leg.sl == null ? 'pct' as const : 'pts' as const) } : {}),
+              ...(params.newTp !== undefined ? { tp: params.newTp, tpType: leg.tpType ?? (leg.tp == null ? 'pct' as const : 'pts' as const) } : {}),
+            }, currentLtp),
             filledAt: Date.now(),
             fill: { qty: totalQty, avgPrice: avg, orderId: j.order_id ?? l.fill?.orderId },
           }, j.order_id, 'grow', qty, fillPrice);
@@ -3340,19 +3343,17 @@ export default function MultiLegFocus({
       }
 
       // 2. Leg-wise SL, TP, and Trailing SL
-      const bestUpdates = new Map<string, { bp: number; from: number | undefined; anchor?: number }>();
+      const bestUpdates = new Map<string, { bp: number; from: number | undefined; prevBp: number | undefined; anchor: Partial<MultiLegLeg> | null }>();
       for (const leg of basket.legs) {
         if (leg.status !== 'OPEN' || !leg.fill) continue;
         const ltp = ltpFor(basket, leg);
         if (ltp <= 0) continue;
-        // A trail ticked with no price yet, before trailFrom existed, or carried onto a re-entered leg starts here.
-        const anchor = leg.trail && !(leg.trailFrom != null && leg.trailFrom > 0) ? ltp : undefined;
-        const evalLeg = anchor != null ? { ...leg, trailFrom: anchor, bestPrice: undefined } : leg;
+        // A trailing leg with no starting point is anchored here (trailAnchorPatch); legRiskView is the same view the row shows.
+        const anchor = trailAnchorPatch(leg, ltp);
+        const evalResult = computeLegTrailingSL(legRiskView(leg, basket.autoLegRule, ltp), ltp);
 
-        const evalResult = computeLegTrailingSL(withAutoLegRisk(evalLeg, basket.autoLegRule), ltp);
-
-        if (evalResult.newBestPrice != null && (anchor != null || evalResult.newBestPrice !== leg.bestPrice)) {
-          bestUpdates.set(leg.id, { bp: evalResult.newBestPrice, from: leg.trailFrom, anchor });
+        if (evalResult.newBestPrice != null && (anchor || evalResult.newBestPrice !== leg.bestPrice)) {
+          bestUpdates.set(leg.id, { bp: evalResult.newBestPrice, from: leg.trailFrom, prevBp: leg.bestPrice, anchor });
         }
 
         // Alert-only SL / Target: announce, keep the leg open, no auto re-entry.
@@ -3460,12 +3461,12 @@ export default function MultiLegFocus({
 
       // Functional, bestPrice only: writing back this render's `basket.legs`
       // wholesale could revert a fill an in-flight order just recorded. Skipped when the trail was re-anchored
-      // (legTrailPatch) after this pass read the leg, or the old peak would undo the reset.
+      // (legTrailPatch resets bestPrice) after this pass read the leg, or the old peak would undo the reset.
       if (bestUpdates.size) {
         patchLegs(basket.id, legs => legs.map(l => {
           const u = bestUpdates.get(l.id);
-          if (!u || l.status !== 'OPEN' || !l.trail || l.trailFrom !== u.from) return l;
-          return u.anchor != null ? { ...l, trailFrom: u.anchor, bestPrice: u.bp } : { ...l, bestPrice: u.bp };
+          if (!u || l.status !== 'OPEN' || !l.trail || l.trailFrom !== u.from || l.bestPrice !== u.prevBp) return l;
+          return { ...l, ...(u.anchor ?? {}), bestPrice: u.bp };
         }));
       }
     }

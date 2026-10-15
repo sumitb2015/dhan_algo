@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert';
 import {
   resolveTemplateLegs, reconcileLegFillDown, reconcileLegWithBroker, legPnl, basketTotalPnl, sortLegsForExit, findLegPosition,
-  computeLegTrailingSL, legTrailPatch, nextLegThresholdType, computeStrategyMetrics, checkStrategyRisk, classifyBasketStructure, findSiblingLegCollisions,
+  computeLegTrailingSL, legTrailPatch, trailAnchorPatch, legRiskView, nextLegThresholdType, computeStrategyMetrics, checkStrategyRisk, classifyBasketStructure, findSiblingLegCollisions,
   formatExpiryLabel, LEG_FILL_GRACE_MS, claimableLegQty, executionBroker, applyOrderOutcomes, normalizeOrderRow, PENDING_ORDER_TTL_MS, legBrokerMismatch, classifyDhanOrder, settleWaitingEntry, applyTriggeredEntry, type WaitingEntry, type NormalizedOrder, legAvgPrice, legExitPrice, legQtyUnits, legPnlPct, legOtmPct, scaleBasketMultiplier,
   legQtyWarningsFor, recordOutsideReduction, findUntrackedPositions, residualBrokerAvg, findContractDrift, legFromUntracked, contractHintFromRow, legCountsToday, closedFillFromRow, mergeImportedLegs, brokerClampSlice, restingExitOrders, withPendingOrder, RESTING_ORDER_TTL_MS,
   normalizeTradeRow, ownOrderIds, matchOutsideTrades, repriceEstimatedCloses, MLF_ORDER_SOURCE,
@@ -346,11 +346,50 @@ test('legTrailPatch: re-anchors only when the trail turns on or its SL changes',
   assert.deepStrictEqual(legTrailPatch(leg, { tp: 50 }, 125), { tp: 50 });
   assert.deepStrictEqual(legTrailPatch(leg, { sl: 90, slType: 'price' }, 125), { sl: 90, slType: 'price' });
   assert.deepStrictEqual(legTrailPatch(leg, { sl: 115, slType: 'price' }, 125), { sl: 115, slType: 'price', trailFrom: 125, bestPrice: undefined });
-  assert.deepStrictEqual(legTrailPatch(leg, { trail: false }, 125), { trail: false, trailFrom: undefined, bestPrice: undefined });
+  // Unticking keeps the trailed stop (best 130 - gap 20 = 110) as the SL price instead of falling back to 90.
+  assert.deepStrictEqual(legTrailPatch(leg, { trail: false }, 125), { sl: 110, slType: 'price', trail: false, trailFrom: undefined, bestPrice: undefined });
+  // Not tightened yet: nothing to keep.
+  assert.deepStrictEqual(legTrailPatch({ ...leg, bestPrice: 110 }, { trail: false }, 105), { trail: false, trailFrom: undefined, bestPrice: undefined });
   // No live price yet: falls back to the entry anchor.
   assert.deepStrictEqual(legTrailPatch({ ...leg, trail: false }, { trail: true }, 0), { trail: true, trailFrom: undefined, bestPrice: undefined });
   // SL edit with the trail off changes nothing else.
   assert.deepStrictEqual(legTrailPatch({ ...leg, trail: false }, { sl: 80 }, 125), { sl: 80 });
+});
+
+test('computeLegTrailingSL: a trail armed at a loss, near the stop, keeps the entry gap', () => {
+  // SELL at 100, SL 30% (130), trail ticked at 128: measuring from 128 would trail 2 points behind and exit on noise.
+  const sell: MultiLegLeg = {
+    id: '1', side: 'S', option: 'PE', strike: 22900, lots: 1, type: 'MARKET', status: 'OPEN',
+    fill: { qty: 65, avgPrice: 100 }, sl: 30, slType: 'pct',
+  };
+  const s = { ...sell, ...legTrailPatch(sell, { trail: true }, 128) };
+  assert.strictEqual(computeLegTrailingSL(s, 128).effectiveSL, 130);
+  assert.strictEqual(computeLegTrailingSL(s, 126).triggered, null);
+  assert.strictEqual(computeLegTrailingSL(s, 95).effectiveSL, 125); // trails 30 behind once past entry
+});
+
+test('trailAnchorPatch / legRiskView: an un-anchored trail starts at the LTP and keeps an already-tightened stop', () => {
+  // Saved before trailFrom existed: BUY at 100, SL price 90, best 130, so the entry-based trail had the stop at 120.
+  const legacy: MultiLegLeg = {
+    id: '1', side: 'B', option: 'CE', strike: 22800, lots: 1, type: 'MARKET', status: 'OPEN',
+    fill: { qty: 65, avgPrice: 100 }, sl: 90, slType: 'price', trail: true, bestPrice: 130,
+  };
+  assert.strictEqual(computeLegTrailingSL(legacy, 125).effectiveSL, 120);
+  assert.deepStrictEqual(trailAnchorPatch(legacy, 125), { sl: 120, slType: 'price', trailFrom: 125, bestPrice: undefined });
+  const view = legRiskView(legacy, undefined, 125);
+  assert.strictEqual(computeLegTrailingSL(view, 125).effectiveSL, 120); // not widened back to 90
+  assert.strictEqual(computeLegTrailingSL(view, 130).effectiveSL, 125); // and moves 1:1 from here
+  // Already anchored, no price, or trail off: nothing to do.
+  assert.strictEqual(trailAnchorPatch({ ...legacy, trailFrom: 110 }, 125), null);
+  assert.strictEqual(trailAnchorPatch(legacy, 0), null);
+  assert.strictEqual(trailAnchorPatch({ ...legacy, trail: false }, 125), null);
+  // An SL owned by the basket's auto rule stays rule-owned: anchored, but no SL is written onto the leg.
+  const ruleOwned: MultiLegLeg = { ...legacy, side: 'S', fill: { qty: 65, avgPrice: 100 }, sl: undefined, slType: undefined, bestPrice: 80 };
+  assert.deepStrictEqual(trailAnchorPatch(ruleOwned, 85), { trailFrom: 85, bestPrice: undefined });
+  const rule = { enabled: true, slPct: 20, slOffset: 1, tpPct: 40, tpOffset: 0, maxRolls: 2 };
+  // Rule SL 20% of 100 = 120; anchored at 85 the gap is 35, so the stop starts at 120 and moves 1:1 below 85.
+  assert.strictEqual(computeLegTrailingSL(legRiskView(ruleOwned, rule, 85), 85).effectiveSL, 120);
+  assert.strictEqual(computeLegTrailingSL(legRiskView(ruleOwned, rule, 85), 80).effectiveSL, 115);
 });
 
 test('computeStrategyMetrics computes combined points and percentage accurately', () => {

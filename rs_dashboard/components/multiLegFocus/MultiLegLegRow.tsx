@@ -4,7 +4,7 @@ import React, { useState } from 'react';
 import { X, Plus, AlertTriangle, ChevronUp, ChevronDown, Unlink, LineChart, Bell, LogOut } from 'lucide-react';
 import { clampShiftSteps, MAX_SHIFT_STEPS } from '@/lib/strikeShift';
 import {
-  legPnl, computeLegTrailingSL, legTrailPatch, nextLegThresholdType, formatExpiryLabel, legAvgPrice, legExitPrice, restingExitOrders, legQtyUnits, legPnlPct, legOtmPct, type MultiLegLeg,
+  legPnl, computeLegTrailingSL, legRiskView, legTrailPatch, nextLegThresholdType, formatExpiryLabel, legAvgPrice, legExitPrice, restingExitOrders, legQtyUnits, legPnlPct, legOtmPct, type MultiLegLeg, type AutoLegRule,
 } from '@/lib/multiLegFocus';
 import { DEFAULT_LEG_COLUMNS, type LegColumns } from '@/lib/legColumns';
 import { FOCUS_RING } from '@/components/Scalper';
@@ -40,6 +40,8 @@ interface MultiLegLegRowProps {
   onOpenChart?: () => void;
   allStrikes: number[];
   ltp: number;
+  /** The basket's auto SL/TP rule, so the shown stop is the one the risk loop enforces (legRiskView). */
+  autoLegRule?: AutoLegRule;
   spot?: number;
   editable: boolean;
   exiting: boolean;
@@ -162,7 +164,7 @@ function HitActionToggle({ kind, action, onChange }: { kind: 'stop' | 'target'; 
 }
 
 export default function MultiLegLegRow({
-  leg, allStrikes, ltp, spot, editable, exiting, margin, multiplier = 1, strategyMultiplier = 1, frontExpiry, farExpiry, onChange, onRemove, onOpenExit, onOpenAddLots, onShift, shiftSteps = 1, shiftBusy = false, strikeBlocked = false, unhedged = false, columns = DEFAULT_LEG_COLUMNS, showExit = false, iv = 0, oiBuildup = null, selected = false, onSelect, onTag, onDetach, onOpenChart,
+  leg, allStrikes, ltp, autoLegRule, spot, editable, exiting, margin, multiplier = 1, strategyMultiplier = 1, frontExpiry, farExpiry, onChange, onRemove, onOpenExit, onOpenAddLots, onShift, shiftSteps = 1, shiftBusy = false, strikeBlocked = false, unhedged = false, columns = DEFAULT_LEG_COLUMNS, showExit = false, iv = 0, oiBuildup = null, selected = false, onSelect, onTag, onDetach, onOpenChart,
 }: MultiLegLegRowProps) {
   // This leg's own roll distance (any N up to MAX_SHIFT_STEPS); empty = follow the strategy's Shift stepper.
   const [ownSteps, setOwnSteps] = useState<number | null>(null);
@@ -175,7 +177,7 @@ export default function MultiLegLegRow({
   // as points, so it keeps meaning points; the type is written with every committed value.
   const slType = leg.slType ?? (leg.sl == null ? 'pct' : 'pts');
   const tpType = leg.tpType ?? (leg.tp == null ? 'pct' : 'pts');
-  const trailingEval = computeLegTrailingSL(leg, ltp);
+  const trailingEval = computeLegTrailingSL(legRiskView(leg, autoLegRule, ltp), ltp);
   // Trail on with a priced stop: the SL box shows the live trailed stop, read-only.
   const trailLocked = !!leg.trail && trailingEval.effectiveSL != null;
   // SL / trail edits re-anchor the trail at the current LTP.

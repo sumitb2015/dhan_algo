@@ -734,9 +734,12 @@ export function computeLegTrailingSL(
     let effectiveSL = result.initialSLPrice;
 
     if (leg.trail) {
-      // The gap is measured from where the trail was armed, not from entry: a stop placed in profit (BUY at 327,
-      // SL 370 with LTP 394) measured from entry kept a 43-point gap and did not move until LTP passed 413.
-      const from = leg.trailFrom != null && leg.trailFrom > 0 ? leg.trailFrom : entry;
+      // The gap is measured from the better of entry and the price the trail was armed at. Armed in profit, the stop
+      // keeps its distance from that price (BUY at 327, SL 370, armed at 394: from entry the 43-point gap did not move
+      // until LTP passed 413). Armed at a loss, near the stop, it keeps the full entry gap instead of trailing a point
+      // or two behind and exiting on noise.
+      const armed = leg.trailFrom != null && leg.trailFrom > 0 ? leg.trailFrom : entry;
+      const from = isBuy ? Math.max(entry, armed) : Math.min(entry, armed);
       const gap = Math.abs(result.initialSLPrice - from);
       const prevBest = leg.bestPrice ?? from;
       // For buy: favorable is higher LTP. For sell: favorable is lower LTP.
@@ -774,13 +777,49 @@ export function computeLegTrailingSL(
 }
 
 /**
+ * The leg's own SL rewritten as the price the trail has tightened it to, or {} when the trail has not moved it (or the
+ * SL comes from the basket's auto rule, which must stay rule-owned). Used wherever the trail's state is about to be
+ * reset, so the protection it has built up is kept instead of falling back to the original, wider SL.
+ */
+export function freezeTrailedStop(leg: MultiLegLeg, ltp: number): Partial<MultiLegLeg> {
+  if (!leg.trail || !(leg.sl != null && leg.sl > 0)) return {};
+  const ev = computeLegTrailingSL(leg, ltp);
+  if (ev.effectiveSL == null || ev.initialSLPrice == null) return {};
+  const tighter = leg.side === 'B' ? ev.effectiveSL > ev.initialSLPrice : ev.effectiveSL < ev.initialSLPrice;
+  return tighter ? { sl: Math.round(ev.effectiveSL * 100) / 100, slType: 'price' } : {};
+}
+
+/**
+ * Starting point for a trailing leg that has none (ticked with no live price, saved before trailFrom existed, or
+ * carried onto a re-entered leg): the current LTP, keeping any stop the trail has already tightened. Null when the
+ * leg needs no anchor. The risk loop saves it; the row shows the same view through legRiskView.
+ */
+export function trailAnchorPatch(leg: MultiLegLeg, ltp: number): Partial<MultiLegLeg> | null {
+  if (!leg.trail || (leg.trailFrom != null && leg.trailFrom > 0) || ltp <= 0) return null;
+  return { ...freezeTrailedStop(leg, ltp), trailFrom: ltp, bestPrice: undefined };
+}
+
+/** The leg exactly as the risk loop evaluates it: pending trail anchor applied, then the basket's auto SL/TP rule. */
+export function legRiskView(leg: MultiLegLeg, rule: AutoLegRule | undefined, ltp: number): MultiLegLeg {
+  const anchor = trailAnchorPatch(leg, ltp);
+  return withAutoLegRisk(anchor ? { ...leg, ...anchor } : leg, rule);
+}
+
+/**
  * Re-anchors the trail when a leg edit changes what it trails: ticking it on, or changing the SL while it is on, starts
- * it from the current LTP (best price reset), so the stop moves from the next favourable rupee. Ticking it off clears
- * both. Any other patch is returned unchanged.
+ * it from the current LTP (best price reset), so the stop moves from the next favourable rupee. With no live price the
+ * risk loop anchors it at the first one (trailAnchorPatch). Ticking it off keeps the trailed stop as the leg's SL
+ * (a price) and clears the trail state. Any other patch is returned unchanged.
  */
 export function legTrailPatch(leg: MultiLegLeg, patch: Partial<MultiLegLeg>, ltp: number): Partial<MultiLegLeg> {
   const trailOn = 'trail' in patch ? !!patch.trail : !!leg.trail;
-  if (!trailOn) return 'trail' in patch ? { ...patch, trailFrom: undefined, bestPrice: undefined } : patch;
+  if (!trailOn) {
+    if (!('trail' in patch)) return patch;
+    const anchor = trailAnchorPatch(leg, ltp) ?? {};
+    const fromAnchor = 'sl' in anchor ? { sl: anchor.sl, slType: anchor.slType } : {};
+    const keep = { ...fromAnchor, ...freezeTrailedStop({ ...leg, ...anchor }, ltp) };
+    return { ...keep, ...patch, trailFrom: undefined, bestPrice: undefined };
+  }
   const slChanged = ('sl' in patch && patch.sl !== leg.sl) || ('slType' in patch && patch.slType !== leg.slType);
   if (!(('trail' in patch && !leg.trail) || slChanged)) return patch;
   return { ...patch, trailFrom: ltp > 0 ? ltp : undefined, bestPrice: undefined };
