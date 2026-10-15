@@ -4,6 +4,16 @@ import { kotakPost, KOTAK_PATHS, isKotakTokenValid } from '@/lib/kotakToken';
 import { kitePost, isZerodhaTokenValid } from '@/lib/zerodhaToken';
 import { invalidateBrokerCache } from '@/lib/brokerPositionsCache';
 import { exchangeSegmentFor, isCrudeUnderlying, type SyntheticFuturesUnderlying } from '@/lib/syntheticFuturesSegments';
+import {
+  DEFAULT_HEDGE,
+  buildHedgeWings,
+  sanitizeHedgeConfig,
+  MAX_SYNTHETIC_LOTS,
+  RATIO_CHOICES,
+  uncoveredShortLots,
+  wingOffsetsFor,
+  type HedgeConfig,
+} from '@/lib/syntheticHedge';
 
 const DHAN_ORDERS = 'https://api.dhan.co/v2/orders';
 
@@ -15,7 +25,7 @@ interface StrikeIdentifier {
 }
 
 export interface SyntheticLegSpec {
-  role: 'MAIN_CE' | 'MAIN_PE' | 'HEDGE' | 'EXIT' | 'ADD_LEG';
+  role: 'MAIN_CE' | 'MAIN_PE' | 'HEDGE' | 'HEDGE_SELL' | 'EXIT' | 'ADD_LEG';
   optionType: 'CE' | 'PE' | '';
   strike: number;
   side: 'BUY' | 'SELL';
@@ -35,6 +45,10 @@ interface ExecutedLegResult {
   side: string;
   quantity: number;
   orderId?: string;
+  // The contract this leg was (or would have been) placed on, so the client
+  // ledger records what the server sent rather than re-deriving it.
+  securityId?: string;
+  tradingSymbol?: string;
   status: 'FILLED' | 'TRANSIT' | 'FAILED' | 'SKIPPED';
   error?: string;
 }
@@ -205,6 +219,11 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     atmStrike?: number;
     lots?: number;
     lotSize?: number;
+    hedge?: Partial<HedgeConfig>;
+    // Must be true for a sold wing larger than the synthetic's own long ATM
+    // option (sellRatio > 1) — those extra lots are naked short options.
+    acknowledgeUncovered?: boolean;
+    // Legacy pre-hedge-modes request shape: mapped to PROTECTIVE 1:1.
     hedgeEnabled?: boolean;
     hedgeOffset?: number;
     productType?: 'INTRADAY' | 'MARGIN';
@@ -229,6 +248,12 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       quantity: number;
       productType?: string;
       exchangeSegment?: string;
+      // Set for a sold (covered) wing: the leg's qty after this add and the
+      // qty of the long ATM option it is written against. Anything above the
+      // cover is a naked short and needs acknowledgeUncovered, as on entry.
+      role?: string;
+      resultingQty?: number;
+      coverQty?: number;
     };
   };
 
@@ -241,8 +266,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     atmStrike,
     lots = 1,
     lotSize = 75,
-    hedgeEnabled = false,
-    hedgeOffset = 200,
+    acknowledgeUncovered = false,
     productType = 'INTRADAY',
     orderType = 'MARKET',
     strikeMap = {},
@@ -251,6 +275,18 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   } = body;
 
   const isCrude = isCrudeUnderlying(underlying);
+
+  // Server-side size limits. Hedge wings can be up to max(RATIO_CHOICES) x the
+  // synthetic lots, so an unbounded `lots` would be multiplied again.
+  if (!Number.isInteger(lotSize) || lotSize <= 0) {
+    return NextResponse.json({ success: false, error: `Invalid lot size: ${String(lotSize)}` }, { status: 400 });
+  }
+  if (action === 'enter' && (!Number.isInteger(lots) || lots < 1 || lots > MAX_SYNTHETIC_LOTS)) {
+    return NextResponse.json({
+      success: false,
+      error: `Lots must be a whole number from 1 to ${MAX_SYNTHETIC_LOTS} (got ${String(lots)}). Split larger orders.`,
+    }, { status: 400 });
+  }
 
   // Zerodha has no MCX crude contracts (confirmed: /api/options/expiries
   // 400s CRUDEOIL/CRUDEOILM for it) — fail loudly instead of routing an
@@ -356,6 +392,26 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     if (!legToAdd || !legToAdd.quantity || legToAdd.quantity <= 0) {
       return NextResponse.json({ success: false, error: 'Invalid leg to add' }, { status: 400 });
     }
+    const maxAddQty = MAX_SYNTHETIC_LOTS * Math.max(...RATIO_CHOICES) * lotSize;
+    if (legToAdd.quantity % lotSize !== 0 || legToAdd.quantity > maxAddQty) {
+      return NextResponse.json({
+        success: false,
+        error: `Add quantity ${legToAdd.quantity} must be whole lots of ${lotSize} and at most ${maxAddQty}`,
+      }, { status: 400 });
+    }
+    if (legToAdd.side === 'SELL' && legToAdd.role === 'HEDGE_SELL') {
+      const resulting = Number(legToAdd.resultingQty);
+      const cover = Number(legToAdd.coverQty);
+      if (!Number.isFinite(resulting) || !Number.isFinite(cover)) {
+        return NextResponse.json({ success: false, error: 'Sold wing add needs resultingQty and coverQty' }, { status: 400 });
+      }
+      if (resulting > cover && !acknowledgeUncovered) {
+        return NextResponse.json({
+          success: false,
+          error: `Sold wing would be ${resulting} qty against ${cover} long — ${resulting - cover} naked. Acknowledge uncovered risk to proceed.`,
+        }, { status: 400 });
+      }
+    }
 
     let dhanToken = '';
     let dhanClientId = '';
@@ -441,32 +497,64 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     }, { status: 400 });
   }
 
+  // Hedge config: validated field by field against this underlying's offsets.
+  // A field that fails validation would silently fall back to a default and
+  // place a different wing than the user saw, so reject instead of sanitizing.
+  const validOffsets = wingOffsetsFor(underlying);
+  // Legacy shape: only an enabled hedge carries a meaningful offset; a
+  // disabled one places no wing, so its offset is not validated.
+  const rawHedge: Partial<HedgeConfig> = body.hedge ?? (body.hedgeEnabled
+    ? { ...DEFAULT_HEDGE, enabled: true, buyOffset: body.hedgeOffset ?? DEFAULT_HEDGE.buyOffset }
+    : { ...DEFAULT_HEDGE, enabled: false });
+  const hedge = sanitizeHedgeConfig(rawHedge, validOffsets);
+  const keysToCheck = rawHedge.enabled === false
+    ? (['enabled'] as const)
+    : (['enabled', 'mode', 'buyOffset', 'sellOffset', 'buyRatio', 'sellRatio'] as const);
+  for (const key of keysToCheck) {
+    if (rawHedge[key] !== undefined && rawHedge[key] !== hedge[key]) {
+      return NextResponse.json({
+        success: false,
+        error: `Invalid hedge ${key}: ${String(rawHedge[key])}`,
+      }, { status: 400 });
+    }
+  }
+  if (direction !== 'LONG' && direction !== 'SHORT') {
+    return NextResponse.json({ success: false, error: `Invalid direction: ${String(direction)}` }, { status: 400 });
+  }
+  const uncovered = uncoveredShortLots(direction, lots, hedge);
+  if (uncovered > 0 && !acknowledgeUncovered) {
+    return NextResponse.json({
+      success: false,
+      error: `Sold wing is ${uncovered} lot(s) larger than the synthetic's long ATM ${direction === 'LONG' ? 'CE' : 'PE'} — those lots would be naked. Acknowledge uncovered risk to proceed.`,
+    }, { status: 400 });
+  }
+
+  for (const wing of buildHedgeWings(direction, atmStrike, lots, hedge)) {
+    const ident = strikeMap[String(wing.strike)];
+    const securityId = wing.optionType === 'CE' ? ident?.ceId : ident?.peId;
+    const tradingSymbol = wing.optionType === 'CE' ? ident?.ceSymbol : ident?.peSymbol;
+    if (broker === 'dhan' ? !securityId : !tradingSymbol) {
+      return NextResponse.json({
+        success: false,
+        error: `${wing.side === 'BUY' ? 'Protective' : 'Covered'} hedge strike ${wing.strike} ${wing.optionType} not found in ${broker} strike lookup. Aborting.`,
+      }, { status: 400 });
+    }
+    legsToBuild.push({
+      role: wing.role,
+      optionType: wing.optionType,
+      strike: wing.strike,
+      side: wing.side,
+      quantity: wing.lots * lotSize,
+      securityId,
+      tradingSymbol,
+      orderType,
+      productType,
+      exchangeSegment: defaultExchangeSegment,
+    });
+  }
+
   if (direction === 'LONG') {
     // Synthetic Long: BUY ATM CE + SELL ATM PE
-    // If hedge enabled: BUY OTM PE (atmStrike - hedgeOffset)
-    if (hedgeEnabled && hedgeOffset > 0) {
-      const hedgeStrike = atmStrike - hedgeOffset;
-      const hedgeIdent = strikeMap[String(hedgeStrike)];
-      const hasHedge = broker === 'dhan' ? Boolean(hedgeIdent?.peId) : Boolean(hedgeIdent?.peSymbol);
-      if (!hasHedge) {
-        return NextResponse.json({
-          success: false,
-          error: `Protective hedge strike ${hedgeStrike} PE not found in ${broker} strike lookup. Aborting for margin safety.`,
-        }, { status: 400 });
-      }
-      legsToBuild.push({
-        role: 'HEDGE',
-        optionType: 'PE',
-        strike: hedgeStrike,
-        side: 'BUY',
-        quantity: totalQty,
-        securityId: hedgeIdent?.peId,
-        tradingSymbol: hedgeIdent?.peSymbol,
-        orderType,
-        productType,
-        exchangeSegment: defaultExchangeSegment,
-      });
-    }
 
     // Main CE Leg: BUY ATM CE
     legsToBuild.push({
@@ -497,30 +585,6 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     });
   } else {
     // Synthetic Short: SELL ATM CE + BUY ATM PE
-    // If hedge enabled: BUY OTM CE (atmStrike + hedgeOffset)
-    if (hedgeEnabled && hedgeOffset > 0) {
-      const hedgeStrike = atmStrike + hedgeOffset;
-      const hedgeIdent = strikeMap[String(hedgeStrike)];
-      const hasHedge = broker === 'dhan' ? Boolean(hedgeIdent?.ceId) : Boolean(hedgeIdent?.ceSymbol);
-      if (!hasHedge) {
-        return NextResponse.json({
-          success: false,
-          error: `Protective hedge strike ${hedgeStrike} CE not found in ${broker} strike lookup. Aborting for margin safety.`,
-        }, { status: 400 });
-      }
-      legsToBuild.push({
-        role: 'HEDGE',
-        optionType: 'CE',
-        strike: hedgeStrike,
-        side: 'BUY',
-        quantity: totalQty,
-        securityId: hedgeIdent?.ceId,
-        tradingSymbol: hedgeIdent?.ceSymbol,
-        orderType,
-        productType,
-        exchangeSegment: defaultExchangeSegment,
-      });
-    }
 
     // Main PE Leg: BUY ATM PE
     legsToBuild.push({
@@ -551,10 +615,13 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     });
   }
 
-  // Margin safety: Sort legs so BUY legs are submitted first!
+  // Margin safety: BUY legs go first, and within the SELLs the ATM main leg
+  // goes before a covered (HEDGE_SELL) wing — the abort-on-first-failure loop
+  // below then never leaves a sold wing live without the synthetic it writes against.
   const sortedLegs: SyntheticLegSpec[] = [
     ...legsToBuild.filter(l => l.side === 'BUY'),
-    ...legsToBuild.filter(l => l.side === 'SELL'),
+    ...legsToBuild.filter(l => l.side === 'SELL' && l.role !== 'HEDGE_SELL'),
+    ...legsToBuild.filter(l => l.side === 'SELL' && l.role === 'HEDGE_SELL'),
   ];
 
   let dhanToken = '';
@@ -597,6 +664,8 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
         strike: leg.strike,
         side: leg.side,
         quantity: leg.quantity,
+        securityId: leg.securityId,
+        tradingSymbol: leg.tradingSymbol,
         status: 'SKIPPED',
         error: 'Not submitted — an earlier leg in this basket failed',
       });
@@ -612,6 +681,8 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
         strike: leg.strike,
         side: leg.side,
         quantity: leg.quantity,
+        securityId: leg.securityId,
+        tradingSymbol: leg.tradingSymbol,
         orderId: exec.orderId,
         status: 'TRANSIT',
       });
@@ -623,6 +694,8 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
         strike: leg.strike,
         side: leg.side,
         quantity: leg.quantity,
+        securityId: leg.securityId,
+        tradingSymbol: leg.tradingSymbol,
         status: 'FAILED',
         error: exec.error,
       });

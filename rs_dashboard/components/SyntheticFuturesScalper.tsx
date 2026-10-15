@@ -32,6 +32,26 @@ import { useLiveOptionsWS, type Broker } from '@/lib/useLiveOptionsWS';
 import { useBrokerSelector } from '@/hooks/useBrokerSelector';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import { exchangeSegmentFor, isCrudeUnderlying } from '@/lib/syntheticFuturesSegments';
+import {
+  DEFAULT_HEDGE,
+  HEDGE_MODES,
+  RATIO_CHOICES,
+  buildHedgeWings,
+  hasBuyWing,
+  hasSellWing,
+  isFullyProtected,
+  sameHedgeConfig,
+  soldWingExitQty,
+  sanitizeHedgeConfig,
+  uncoveredShortLots,
+  unprotectedShortLots,
+  wingOffsetsFor,
+  type HedgeConfig,
+  type HedgeMode,
+  type HedgeWing,
+} from '@/lib/syntheticHedge';
+
+const HEDGE_STORAGE_KEY = 'dhan_algo.synthetic_hedge';
 
 // ─── Types & Interfaces ──────────────────────────────────────────────────────
 
@@ -71,8 +91,9 @@ interface Toast {
   detail?: string;
 }
 
+// HEDGE = bought (protective) wing, HEDGE_SELL = sold (covered) wing.
 interface SyntheticLeg {
-  role: 'MAIN_CE' | 'MAIN_PE' | 'HEDGE';
+  role: 'MAIN_CE' | 'MAIN_PE' | 'HEDGE' | 'HEDGE_SELL';
   optionType: 'CE' | 'PE';
   strike: number;
   expiry?: string;
@@ -107,6 +128,9 @@ interface ActiveSyntheticPosition {
   enteredAt: string;
   hedged: boolean;
   hedgeOffset: number;
+  // Full hedge structure the position was opened with. Optional only for
+  // positions saved before hedge modes existed (those were PROTECTIVE 1:1).
+  hedge?: HedgeConfig;
   productType: ProductType;
   legs: SyntheticLeg[];
   peakPoints: number;
@@ -235,8 +259,25 @@ function legKey(l: SyntheticLeg): string {
 // whose fill partially rejected, or a manual per-leg top-up) must not have
 // that mismatch hidden behind an optimistic label.
 function impliedLotsFromLegs(legs: SyntheticLeg[], lotSize: number): number {
-  const mainLegs = legs.filter(l => l.role !== 'HEDGE' && l.qty > 0);
+  const mainLegs = legs.filter(l => l.role !== 'HEDGE' && l.role !== 'HEDGE_SELL' && l.qty > 0);
   return mainLegs.length > 0 ? Math.min(...mainLegs.map(l => Math.floor(l.qty / lotSize))) : 0;
+}
+
+function isLiveLeg(l: SyntheticLeg): boolean {
+  return (l.status === 'FILLED' || l.status === 'TRANSIT' || l.status == null) && l.qty > 0;
+}
+
+// Sold-wing coverage for one option type: the live long ATM option a sold
+// (HEDGE_SELL) wing is written against, and the live sold-wing total.
+function soldWingCoverage(legs: SyntheticLeg[], optionType: 'CE' | 'PE'): { cover: number; sold: number } {
+  let cover = 0;
+  let sold = 0;
+  for (const l of legs) {
+    if (!isLiveLeg(l) || l.optionType !== optionType) continue;
+    if (l.role === 'HEDGE_SELL') sold += l.qty;
+    else if ((l.role === 'MAIN_CE' || l.role === 'MAIN_PE') && l.side === 'BUY') cover += l.qty;
+  }
+  return { cover, sold };
 }
 
 // A leg the order route never placed (it FAILED or was SKIPPED after an earlier
@@ -271,6 +312,99 @@ function buildPositionQtyMap(positions: unknown): Map<string, number> {
     if (sym) map.set(`sym:${sym}`, (map.get(`sym:${sym}`) ?? 0) + netQty);
   }
   return map;
+}
+
+// ─── Hedge UI pieces ────────────────────────────────────────────────────────
+
+const HEDGE_MODE_HELP: Record<HedgeMode, string> = {
+  PROTECTIVE:
+    'Buys an opposite-side OTM wing first: caps the downside and unlocks basket margin relief.',
+  COVERED:
+    'Sells a same-side OTM wing against the synthetic: collects premium and caps the upside. No downside protection and no margin relief.',
+  COLLAR:
+    'Buys the protective wing and sells the covered wing: the sold premium finances the protection; upside and downside are both capped.',
+};
+
+function HedgeWingRow({ wing, lotsMain }: { wing: HedgeWing & { ltp: number }; lotsMain: number }) {
+  const bought = wing.side === 'BUY';
+  return (
+    <div
+      className={`flex items-center justify-between border-t border-zinc-800 pt-1.5 ${bought ? 'text-amber-300' : 'text-red-300'}`}
+    >
+      <span className="flex items-center gap-1.5">
+        <Shield className={`h-3 w-3 ${bought ? 'text-amber-400' : 'text-red-400'}`} />
+        {bought ? 'HEDGE: BUY' : 'WRITE: SELL'} OTM {wing.optionType === 'CE' ? 'Call' : 'Put'}
+        {wing.lots !== lotsMain && <span className="text-zinc-400">×{wing.lots}L</span>}:
+      </span>
+      <span className="font-bold">
+        {wing.strike} {wing.optionType} @ ₹{fmtNum(wing.ltp, 2)}
+      </span>
+    </div>
+  );
+}
+
+function WingControls({
+  title,
+  tone,
+  disabled,
+  offsets,
+  offset,
+  ratio,
+  onOffset,
+  onRatio,
+  longLabel,
+  shortLabel,
+}: {
+  title: string;
+  tone: 'amber' | 'red';
+  disabled: boolean;
+  offsets: number[];
+  offset: number;
+  ratio: number;
+  onOffset: (pts: number) => void;
+  onRatio: (r: number) => void;
+  longLabel: string;
+  shortLabel: string;
+}) {
+  const active =
+    tone === 'amber'
+      ? 'border-amber-500/50 bg-amber-500/20 text-amber-300'
+      : 'border-red-500/50 bg-red-500/15 text-red-300';
+  const idle = 'border-zinc-800 bg-zinc-900 text-zinc-400 hover:text-zinc-200';
+  return (
+    <div className="flex flex-col gap-1.5">
+      <span className="text-xs font-mono text-zinc-300 uppercase font-bold">{title}</span>
+      <div className="grid grid-cols-6 gap-1.5 font-mono text-xs">
+        {offsets.map(pts => (
+          <button
+            key={pts}
+            disabled={disabled}
+            onClick={() => onOffset(pts)}
+            className={`py-1.5 rounded-lg border font-bold transition-all ${offset === pts && !disabled ? active : idle} disabled:opacity-30`}
+          >
+            {pts} pts
+          </button>
+        ))}
+      </div>
+      <div className="flex flex-wrap items-center gap-1.5 font-mono text-xs">
+        <span className="text-zinc-400">Lots per synth lot</span>
+        {RATIO_CHOICES.map(r => (
+          <button
+            key={r}
+            disabled={disabled}
+            onClick={() => onRatio(r)}
+            className={`px-2 py-1 rounded-lg border font-bold transition-all ${ratio === r && !disabled ? active : idle} disabled:opacity-30`}
+          >
+            ×{r}
+          </button>
+        ))}
+      </div>
+      <div className="flex items-center justify-between text-[11px] font-mono text-zinc-400">
+        <span>{longLabel}</span>
+        <span>{shortLabel}</span>
+      </div>
+    </div>
+  );
 }
 
 // ─── Main Component ─────────────────────────────────────────────────────────
@@ -320,8 +454,32 @@ export default function SyntheticFuturesScalper() {
   const [limitBuffer, setLimitBuffer] = useState<string>('0.5');
 
   // Option Hedging Settings
-  const [hedgeEnabled, setHedgeEnabled] = useState<boolean>(true);
-  const [hedgeOffset, setHedgeOffset] = useState<number>(200);
+  const [hedge, setHedge] = useState<HedgeConfig>(DEFAULT_HEDGE);
+  // State, not a ref: the save effect reads it from its own render's closure,
+  // so the mount-time save (still holding DEFAULT_HEDGE) sees false and skips,
+  // and the first save happens on the render that already has the restored value.
+  const [hedgeLoaded, setHedgeLoaded] = useState(false);
+  const updateHedge = (patch: Partial<HedgeConfig>) => setHedge(prev => ({ ...prev, ...patch }));
+  const hedgeEnabled = hedge.enabled;
+  // Explicit opt-in for a sold wing bigger than the synthetic's own long ATM
+  // option — deliberately NOT persisted, so it has to be re-ticked each load.
+  const [acceptUncovered, setAcceptUncovered] = useState(false);
+
+  // Restore the last hedge choice.
+  useEffect(() => {
+    try {
+      const saved = localStorage.getItem(HEDGE_STORAGE_KEY);
+      if (saved) setHedge(sanitizeHedgeConfig(JSON.parse(saved), wingOffsetsFor('NIFTY').concat(wingOffsetsFor('SENSEX'))));
+    } catch {}
+    setHedgeLoaded(true);
+  }, []);
+
+  useEffect(() => {
+    if (!hedgeLoaded) return;
+    try {
+      localStorage.setItem(HEDGE_STORAGE_KEY, JSON.stringify(hedge));
+    } catch {}
+  }, [hedge, hedgeLoaded]);
 
   // Risk & Trailing Stop Settings
   const [slMode, setSlMode] = useState<SlMode>('POINTS');
@@ -529,18 +687,14 @@ export default function SyntheticFuturesScalper() {
   // Dynamic wing offset distances tailored to underlying index step. Every
   // offset in the non-NIFTY list is already a multiple of 100, so combined
   // with a 100-multiple ATM strike, hedge strikes stay on the liquid ladder.
-  const wingOffsets = useMemo(() => {
-    return underlying === 'NIFTY'
-      ? [100, 150, 200, 250, 300, 400]
-      : [100, 200, 300, 400, 500, 600];
-  }, [underlying]);
+  const wingOffsets = useMemo(() => wingOffsetsFor(underlying), [underlying]);
 
-  // Snap hedgeOffset to valid strike offset when underlying changes
+  // Snap both wing offsets to valid strike offsets when underlying changes
   useEffect(() => {
-    const validOffsets = underlying === 'NIFTY'
-      ? [100, 150, 200, 250, 300, 400]
-      : [100, 200, 300, 400, 500, 600];
-    setHedgeOffset(prev => (validOffsets.includes(prev) ? prev : 200));
+    setHedge(prev => {
+      const next = sanitizeHedgeConfig(prev, wingOffsetsFor(underlying));
+      return next.buyOffset === prev.buyOffset && next.sellOffset === prev.sellOffset ? prev : next;
+    });
   }, [underlying]);
 
   // Whether liveSpot below is backed by a real quote (WS tick or a resolved
@@ -617,19 +771,29 @@ export default function SyntheticFuturesScalper() {
   // Basis / Cost of Carry (Synthetic Price - Spot Price)
   const syntheticBasis = syntheticFuturePrice - liveSpot;
 
-  // Hedge Strike Calculations
-  const longHedgeStrike = atmStrike - hedgeOffset;
-  const shortHedgeStrike = atmStrike + hedgeOffset;
-  const longHedgeQuotes = liveQuotes?.strikes?.[String(longHedgeStrike)];
-  const shortHedgeQuotes = liveQuotes?.strikes?.[String(shortHedgeStrike)];
-  const longHedgePeLtp = longHedgeQuotes?.pe?.ltp ?? 0;
-  const shortHedgeCeLtp = shortHedgeQuotes?.ce?.ltp ?? 0;
+  // Hedge wings for each direction (shared with the order route via
+  // lib/syntheticHedge.ts) plus each wing's live premium.
+  const wingLtp = (w: HedgeWing): number => {
+    const q = liveQuotes?.strikes?.[String(w.strike)];
+    return (w.optionType === 'CE' ? q?.ce?.ltp : q?.pe?.ltp) ?? 0;
+  };
+  const longWings = buildHedgeWings('LONG', atmStrike, lots, hedge).map(w => ({ ...w, ltp: wingLtp(w) }));
+  const shortWings = buildHedgeWings('SHORT', atmStrike, lots, hedge).map(w => ({ ...w, ltp: wingLtp(w) }));
+  // Per synthetic lot: wing premium x (wing lots / main lots); bought adds debit, sold adds credit.
+  const wingsCarry = (wings: Array<HedgeWing & { ltp: number }>) =>
+    wings.reduce((acc, w) => acc + (w.side === 'BUY' ? 1 : -1) * w.ltp * (w.lots / Math.max(1, lots)), 0);
 
-  // Combined Entry Costs
-  // Long Synthetic: Buy CE @ atmCeLtp, Sell PE @ atmPeLtp, (Buy PE @ longHedgePeLtp)
-  const longEntryNetPrice = atmCeLtp - atmPeLtp + (hedgeEnabled ? longHedgePeLtp : 0);
-  // Short Synthetic: Sell CE @ atmCeLtp, Buy PE @ atmPeLtp, (Buy CE @ shortHedgeCeLtp)
-  const shortEntryNetPrice = atmPeLtp - atmCeLtp + (hedgeEnabled ? shortHedgeCeLtp : 0);
+  // Combined Entry Costs (positive = debit)
+  // Long Synthetic: Buy CE @ atmCeLtp, Sell PE @ atmPeLtp, + wings
+  const longEntryNetPrice = atmCeLtp - atmPeLtp + wingsCarry(longWings);
+  // Short Synthetic: Sell CE @ atmCeLtp, Buy PE @ atmPeLtp, + wings
+  const shortEntryNetPrice = atmPeLtp - atmCeLtp + wingsCarry(shortWings);
+  const uncoveredLong = uncoveredShortLots('LONG', lots, hedge);
+  const uncoveredShort = uncoveredShortLots('SHORT', lots, hedge);
+  // Only a bought wing gives margin relief, and only when it covers every
+  // short ATM lot (buyRatio >= 1). A covered-only structure margins like naked.
+  const marginRelief = hedgeEnabled && isFullyProtected(lots, hedge);
+  const unprotectedLots = hedgeEnabled && hasBuyWing(hedge.mode) ? unprotectedShortLots(lots, hedge) : 0;
 
   // ── 6. Update Active Position Live Telemetry ───────────────────────────────
   useEffect(() => {
@@ -792,21 +956,27 @@ export default function SyntheticFuturesScalper() {
       return;
     }
 
-    // Same zero-price risk as above, but for the hedge wing: it's a
-    // different strike than ATM, so synthPriceReady (which only checks the
-    // ATM CE/PE) doesn't cover it. Only the wing this direction actually buys
-    // matters — a LONG synthetic never touches shortHedgeCeLtp and vice versa.
-    if (hedgeEnabled && hedgeOffset > 0) {
-      const hedgeLtp = direction === 'LONG' ? longHedgePeLtp : shortHedgeCeLtp;
-      const hedgeStrike = direction === 'LONG' ? longHedgeStrike : shortHedgeStrike;
-      if (hedgeLtp <= 0) {
-        addToast(
-          'error',
-          'Hedge Premium Loading…',
-          `Hedge strike ${hedgeStrike} ${direction === 'LONG' ? 'PE' : 'CE'} premium not live yet — please wait a moment before firing.`
-        );
-        return;
-      }
+    // Same zero-price risk as above, but for the hedge wings: they're
+    // different strikes than ATM, so synthPriceReady (which only checks the
+    // ATM CE/PE) doesn't cover them. Only this direction's wings matter.
+    const entryWings = direction === 'LONG' ? longWings : shortWings;
+    const pendingWing = entryWings.find(w => w.ltp <= 0);
+    if (pendingWing) {
+      addToast(
+        'error',
+        'Hedge Premium Loading…',
+        `Hedge strike ${pendingWing.strike} ${pendingWing.optionType} premium not live yet — please wait a moment before firing.`
+      );
+      return;
+    }
+    // Server rejects this too; checked here so the user gets the reason before anything fires.
+    if ((direction === 'LONG' ? uncoveredLong : uncoveredShort) > 0 && !acceptUncovered) {
+      addToast(
+        'error',
+        'Uncovered Short Wing',
+        `Sold wing is larger than the synthetic's long ATM ${direction === 'LONG' ? 'CE' : 'PE'}. Tick "accept uncovered risk" in the hedge panel or lower the sell ratio.`
+      );
+      return;
     }
 
     const currentPos = activePositionRef.current || activePosition;
@@ -899,8 +1069,8 @@ export default function SyntheticFuturesScalper() {
           atmStrike,
           lots,
           lotSize,
-          hedgeEnabled,
-          hedgeOffset,
+          hedge,
+          acknowledgeUncovered: acceptUncovered,
           productType,
           orderType: orderMode,
           strikeMap,
@@ -908,7 +1078,10 @@ export default function SyntheticFuturesScalper() {
       });
 
       const json = await res.json();
-      const execLegs = (json.legs as Array<{ role?: string; orderId?: string; status?: string; error?: string }> | undefined) ?? [];
+      const execLegs =
+        (json.legs as
+          | Array<{ role?: string; orderId?: string; status?: string; error?: string; securityId?: string; tradingSymbol?: string }>
+          | undefined) ?? [];
       const anyLegLive = execLegs.some(l => l.orderId);
 
       if (!anyLegLive) {
@@ -931,29 +1104,32 @@ export default function SyntheticFuturesScalper() {
       const initialLegs: SyntheticLeg[] = [];
       const exchSeg = exchangeSegmentFor(effectiveBroker, underlying);
 
+      for (const wing of entryWings) {
+        const wingExec = execLegs.find(l => l.role === wing.role);
+        const ident = strikeMap[String(wing.strike)];
+        initialLegs.push({
+          role: wing.role,
+          optionType: wing.optionType,
+          strike: wing.strike,
+          expiry,
+          side: wing.side,
+          qty: wing.lots * lotSize,
+          entryPrice: wing.ltp,
+          currentLtp: wing.ltp,
+          pnl: 0,
+          // The contract the server actually placed; strikeMap only as a fallback.
+          securityId: wingExec?.securityId ?? (wing.optionType === 'CE' ? ident?.ceId : ident?.peId),
+          tradingSymbol: wingExec?.tradingSymbol ?? (wing.optionType === 'CE' ? ident?.ceSymbol : ident?.peSymbol),
+          orderId: wingExec?.orderId,
+          status: mapExecStatus(wingExec?.status),
+          statusMessage: wingExec?.error,
+          productType,
+          exchangeSegment: exchSeg,
+        });
+      }
+
       if (direction === 'LONG') {
-        if (hedgeEnabled && hedgeOffset > 0) {
-          const hedgeExec = (json.legs as Array<{ role?: string; orderId?: string; status?: string; error?: string }> | undefined)?.find(l => l.role === 'HEDGE');
-          initialLegs.push({
-            role: 'HEDGE',
-            optionType: 'PE',
-            strike: longHedgeStrike,
-            expiry,
-            side: 'BUY',
-            qty: totalQty,
-            entryPrice: longHedgePeLtp,
-            currentLtp: longHedgePeLtp,
-            pnl: 0,
-            securityId: strikeMap[String(longHedgeStrike)]?.peId,
-            tradingSymbol: strikeMap[String(longHedgeStrike)]?.peSymbol,
-            orderId: hedgeExec?.orderId,
-            status: mapExecStatus(hedgeExec?.status),
-            statusMessage: hedgeExec?.error,
-            productType,
-            exchangeSegment: exchSeg,
-          });
-        }
-        const ceExec = (json.legs as Array<{ role?: string; orderId?: string; status?: string; error?: string }> | undefined)?.find(l => l.role === 'MAIN_CE');
+        const ceExec = execLegs.find(l => l.role === 'MAIN_CE');
         initialLegs.push({
           role: 'MAIN_CE',
           optionType: 'CE',
@@ -972,7 +1148,7 @@ export default function SyntheticFuturesScalper() {
           productType,
           exchangeSegment: exchSeg,
         });
-        const peExec = (json.legs as Array<{ role?: string; orderId?: string; status?: string; error?: string }> | undefined)?.find(l => l.role === 'MAIN_PE');
+        const peExec = execLegs.find(l => l.role === 'MAIN_PE');
         initialLegs.push({
           role: 'MAIN_PE',
           optionType: 'PE',
@@ -992,28 +1168,7 @@ export default function SyntheticFuturesScalper() {
           exchangeSegment: exchSeg,
         });
       } else {
-        if (hedgeEnabled && hedgeOffset > 0) {
-          const hedgeExec = (json.legs as Array<{ role?: string; orderId?: string; status?: string; error?: string }> | undefined)?.find(l => l.role === 'HEDGE');
-          initialLegs.push({
-            role: 'HEDGE',
-            optionType: 'CE',
-            strike: shortHedgeStrike,
-            expiry,
-            side: 'BUY',
-            qty: totalQty,
-            entryPrice: shortHedgeCeLtp,
-            currentLtp: shortHedgeCeLtp,
-            pnl: 0,
-            securityId: strikeMap[String(shortHedgeStrike)]?.ceId,
-            tradingSymbol: strikeMap[String(shortHedgeStrike)]?.ceSymbol,
-            orderId: hedgeExec?.orderId,
-            status: mapExecStatus(hedgeExec?.status),
-            statusMessage: hedgeExec?.error,
-            productType,
-            exchangeSegment: exchSeg,
-          });
-        }
-        const peExec = (json.legs as Array<{ role?: string; orderId?: string; status?: string; error?: string }> | undefined)?.find(l => l.role === 'MAIN_PE');
+        const peExec = execLegs.find(l => l.role === 'MAIN_PE');
         initialLegs.push({
           role: 'MAIN_PE',
           optionType: 'PE',
@@ -1032,7 +1187,7 @@ export default function SyntheticFuturesScalper() {
           productType,
           exchangeSegment: exchSeg,
         });
-        const ceExec = (json.legs as Array<{ role?: string; orderId?: string; status?: string; error?: string }> | undefined)?.find(l => l.role === 'MAIN_CE');
+        const ceExec = execLegs.find(l => l.role === 'MAIN_CE');
         initialLegs.push({
           role: 'MAIN_CE',
           optionType: 'CE',
@@ -1077,8 +1232,9 @@ export default function SyntheticFuturesScalper() {
             lotSize,
             entrySyntheticPrice: syntheticFuturePrice,
             enteredAt: new Date().toLocaleTimeString('en-GB', { hour12: false }),
-            hedged: hedgeEnabled,
-            hedgeOffset,
+            hedged: marginRelief,
+            hedgeOffset: hedge.buyOffset,
+            hedge,
             productType,
             legs: initialLegs,
             peakPoints: 0,
@@ -1109,8 +1265,9 @@ export default function SyntheticFuturesScalper() {
           if (newLeg.status === 'REJECTED' || newLeg.status === 'FAILED' || newLeg.status === 'SKIPPED') {
             const existingIdx = mergedLegs.findIndex(
               l =>
-                (l.securityId && newLeg.securityId && l.securityId === newLeg.securityId) ||
-                (l.strike === newLeg.strike && l.optionType === newLeg.optionType && l.side === newLeg.side)
+                l.side === newLeg.side &&
+                ((l.securityId && newLeg.securityId && l.securityId === newLeg.securityId) ||
+                  (l.strike === newLeg.strike && l.optionType === newLeg.optionType))
             );
             if (existingIdx === -1) {
               mergedLegs.push({ ...newLeg });
@@ -1120,8 +1277,9 @@ export default function SyntheticFuturesScalper() {
 
           const matchIndex = mergedLegs.findIndex(
             l =>
-              (l.securityId && newLeg.securityId && l.securityId === newLeg.securityId) ||
-              (l.strike === newLeg.strike && l.optionType === newLeg.optionType && l.side === newLeg.side)
+              l.side === newLeg.side &&
+              ((l.securityId && newLeg.securityId && l.securityId === newLeg.securityId) ||
+                (l.strike === newLeg.strike && l.optionType === newLeg.optionType))
           );
 
           if (matchIndex >= 0) {
@@ -1177,12 +1335,19 @@ export default function SyntheticFuturesScalper() {
         // position only has partial coverage and must not report as hedged
         // (prev OR-ing this in overstated protection: 1 hedged lot + 1
         // unhedged lot showed as "hedged" for the full 2-lot position).
-        const fullyHedged = prev.hedged && hedgeEnabled;
-        if (prev.hedged !== hedgeEnabled) {
+        // Positions saved before hedge modes existed were PROTECTIVE 1:1.
+        const prevHedge: HedgeConfig = prev.hedge ?? {
+          ...DEFAULT_HEDGE,
+          enabled: prev.hedged,
+          buyOffset: prev.hedgeOffset,
+        };
+        const sameStructure = sameHedgeConfig(prevHedge, hedge);
+        const fullyHedged = prev.hedged && marginRelief && sameStructure;
+        if (!sameStructure) {
           addToast(
             'info',
-            'Partial Hedge Coverage',
-            `This add-on's hedge setting (${hedgeEnabled ? 'ON' : 'OFF'}) differs from the existing position's — only part of the combined position is protected.`
+            'Mixed Hedge Structure',
+            `This add-on's hedge setting differs from the existing position's — the combined position is not uniformly hedged.`
           );
         }
 
@@ -1458,10 +1623,38 @@ export default function SyntheticFuturesScalper() {
       // at the broker. On a partial close, cap each leg's exit qty at the lot
       // target (never above what's actually live — a leg already clamped down
       // by broker reconciliation exits whatever it still has).
+      //
+      // Hedge wings can be sized at a ratio to the main lots, so they close
+      // pro rata rather than at the main-leg target. Rounding errs safe both
+      // ways: a sold wing rounds UP, a bought wing rounds DOWN (keeps its
+      // protection). On top of that, a sold wing is closed at least down to
+      // what the long ATM option will still cover after this exit — that
+      // long may already sit below `lots` after broker reconciliation.
+      const exitQty = (l: SyntheticLeg): number => {
+        if (!isPartial) return l.qty;
+        if (l.role !== 'HEDGE' && l.role !== 'HEDGE_SELL') return Math.min(l.qty, targetQty);
+        const fraction = (l.qty / currentPos.lotSize) * (targetLots / Math.max(1, currentPos.lots));
+        const lotsToClose = l.role === 'HEDGE_SELL' ? Math.ceil(fraction - 1e-9) : Math.floor(fraction + 1e-9);
+        return Math.min(l.qty, lotsToClose * currentPos.lotSize);
+      };
+      const qtyByLeg = new Map<SyntheticLeg, number>(liveLegs.map(l => [l, exitQty(l)]));
+      if (isPartial) {
+        for (const optionType of ['CE', 'PE'] as const) {
+          let remainingCover = liveLegs
+            .filter(l => l.optionType === optionType && l.side === 'BUY' && (l.role === 'MAIN_CE' || l.role === 'MAIN_PE'))
+            .reduce((acc, l) => acc + l.qty - (qtyByLeg.get(l) ?? 0), 0);
+          for (const l of liveLegs) {
+            if (l.role !== 'HEDGE_SELL' || l.optionType !== optionType) continue;
+            const q = soldWingExitQty(l.qty, qtyByLeg.get(l) ?? 0, remainingCover);
+            qtyByLeg.set(l, q);
+            remainingCover -= l.qty - q;
+          }
+        }
+      }
       const closedQtyByLeg = new Map<string, number>();
       const legsToExit = liveLegs
         .map(l => {
-          const quantity = isPartial ? Math.min(l.qty, targetQty) : l.qty;
+          const quantity = qtyByLeg.get(l) ?? 0;
           if (quantity > 0) closedQtyByLeg.set(legKey(l), quantity);
           return {
             securityId: l.securityId,
@@ -1559,6 +1752,18 @@ export default function SyntheticFuturesScalper() {
     const addQty = addLots * currentPos.lotSize;
     const targetLeg = legKey(leg);
 
+    // Growing a sold wing past the long option it's written against makes the
+    // excess a naked short — the same gate entry applies (and the server re-checks).
+    const coverage = leg.role === 'HEDGE_SELL' ? soldWingCoverage(currentPos.legs, leg.optionType) : null;
+    if (coverage && coverage.sold + addQty > coverage.cover && !acceptUncovered) {
+      addToast(
+        'error',
+        'Uncovered Short Wing',
+        `Adding ${addLots} lot(s) would leave ${(coverage.sold + addQty - coverage.cover) / currentPos.lotSize} sold ${leg.optionType} lot(s) uncovered. Tick "accept uncovered risk" in the hedge panel first.`
+      );
+      return;
+    }
+
     inFlightRef.current = true;
     setInFlight(true);
     addToast('info', `Adding ${addLots} Lot(s) to ${leg.role} ${leg.strike}${leg.optionType}…`, `${leg.side} ${addQty} qty`);
@@ -1575,6 +1780,8 @@ export default function SyntheticFuturesScalper() {
           underlying: currentPos.underlying,
           expiry: currentPos.expiry,
           orderType: orderMode,
+          lotSize: currentPos.lotSize,
+          acknowledgeUncovered: acceptUncovered,
           legToAdd: {
             securityId: leg.securityId,
             tradingSymbol: leg.tradingSymbol,
@@ -1582,6 +1789,8 @@ export default function SyntheticFuturesScalper() {
             quantity: addQty,
             productType: leg.productType,
             exchangeSegment: leg.exchangeSegment,
+            role: leg.role,
+            ...(coverage ? { resultingQty: coverage.sold + addQty, coverQty: coverage.cover } : {}),
           },
         }),
       });
@@ -2336,17 +2545,9 @@ export default function SyntheticFuturesScalper() {
                   {atmStrike} PE @ ₹{fmtNum(atmPeLtp, 2)}
                 </span>
               </div>
-              {hedgeEnabled && (
-                <div className="flex items-center justify-between border-t border-zinc-800 pt-1.5 text-amber-300">
-                  <span className="flex items-center gap-1.5">
-                    <Shield className="h-3 w-3 text-amber-400" />
-                    HEDGE: BUY OTM Put:
-                  </span>
-                  <span className="font-bold">
-                    {longHedgeStrike} PE @ ₹{fmtNum(longHedgePeLtp, 2)}
-                  </span>
-                </div>
-              )}
+              {longWings.map(w => (
+                <HedgeWingRow key={w.role} wing={w} lotsMain={lots} />
+              ))}
             </div>
 
             {/* Price & Margin Telemetry */}
@@ -2359,8 +2560,8 @@ export default function SyntheticFuturesScalper() {
               </div>
               <div>
                 <span>Est. Margin:{' '}</span>
-                <strong className={hedgeEnabled ? 'text-emerald-400' : 'text-zinc-300'}>
-                  {hedgeEnabled ? '~₹38,000 (Hedged)' : '~₹1,35,000 (Naked)'}
+                <strong className={marginRelief ? 'text-emerald-400' : 'text-zinc-300'}>
+                  {marginRelief ? '~₹38,000 (Hedged)' : '~₹1,35,000 (Naked)'}
                 </strong>
               </div>
             </div>
@@ -2425,17 +2626,9 @@ export default function SyntheticFuturesScalper() {
                   {atmStrike} PE @ ₹{fmtNum(atmPeLtp, 2)}
                 </span>
               </div>
-              {hedgeEnabled && (
-                <div className="flex items-center justify-between border-t border-zinc-800 pt-1.5 text-amber-300">
-                  <span className="flex items-center gap-1.5">
-                    <Shield className="h-3 w-3 text-amber-400" />
-                    HEDGE: BUY OTM Call:
-                  </span>
-                  <span className="font-bold">
-                    {shortHedgeStrike} CE @ ₹{fmtNum(shortHedgeCeLtp, 2)}
-                  </span>
-                </div>
-              )}
+              {shortWings.map(w => (
+                <HedgeWingRow key={w.role} wing={w} lotsMain={lots} />
+              ))}
             </div>
 
             {/* Price & Margin Telemetry */}
@@ -2448,8 +2641,8 @@ export default function SyntheticFuturesScalper() {
               </div>
               <div>
                 <span>Est. Margin:{' '}</span>
-                <strong className={hedgeEnabled ? 'text-emerald-400' : 'text-zinc-300'}>
-                  {hedgeEnabled ? '~₹38,000 (Hedged)' : '~₹1,35,000 (Naked)'}
+                <strong className={marginRelief ? 'text-emerald-400' : 'text-zinc-300'}>
+                  {marginRelief ? '~₹38,000 (Hedged)' : '~₹1,35,000 (Naked)'}
                 </strong>
               </div>
             </div>
@@ -2491,7 +2684,7 @@ export default function SyntheticFuturesScalper() {
               </div>
               {/* Toggle Switch */}
               <button
-                onClick={() => setHedgeEnabled(!hedgeEnabled)}
+                onClick={() => updateHedge({ enabled: !hedgeEnabled })}
                 className={`flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] font-mono font-bold transition-all ${
                   hedgeEnabled
                     ? 'bg-amber-500/20 text-amber-300 border border-amber-500/40 shadow-[0_0_10px_rgba(245,158,11,0.2)]'
@@ -2503,35 +2696,79 @@ export default function SyntheticFuturesScalper() {
               </button>
             </div>
 
-            <p className="text-[11px] text-zinc-400 mb-3">
-              Buys OTM protective wings first to eliminate undefined tail risk and unlock exchange basket margin reduction (~70-80% margin relief).
-            </p>
+            {/* Hedge structure */}
+            <div className="grid grid-cols-3 gap-1.5 font-mono text-xs mb-2" role="radiogroup" aria-label="Hedge structure">
+              {HEDGE_MODES.map(m => (
+                <button
+                  key={m}
+                  role="radio"
+                  aria-checked={hedge.mode === m}
+                  disabled={!hedgeEnabled}
+                  onClick={() => updateHedge({ mode: m })}
+                  className={`py-1.5 rounded-lg border font-bold transition-all ${
+                    hedge.mode === m && hedgeEnabled
+                      ? 'border-amber-500/50 bg-amber-500/20 text-amber-300'
+                      : 'border-zinc-800 bg-zinc-900 text-zinc-400 hover:text-zinc-200'
+                  } disabled:opacity-30`}
+                >
+                  {m}
+                </button>
+              ))}
+            </div>
 
-            {/* Wing Distance Stepper */}
-            <div className="flex flex-col gap-2">
-              <span className="text-[10px] font-mono text-zinc-400 uppercase font-bold">
-                Wing Offset Distance (OTM Points)
-              </span>
-              <div className="grid grid-cols-6 gap-1.5 font-mono text-xs">
-                {wingOffsets.map(pts => (
-                  <button
-                    key={pts}
-                    disabled={!hedgeEnabled}
-                    onClick={() => setHedgeOffset(pts)}
-                    className={`py-1.5 rounded-lg border font-bold transition-all ${
-                      hedgeOffset === pts && hedgeEnabled
-                        ? 'border-amber-500/50 bg-amber-500/20 text-amber-300'
-                        : 'border-zinc-800 bg-zinc-900 text-zinc-400 hover:text-zinc-200'
-                    } disabled:opacity-30`}
-                  >
-                    {pts} pts
-                  </button>
-                ))}
-              </div>
-              <div className="flex items-center justify-between text-[11px] font-mono text-zinc-400 mt-1">
-                <span>Long Wing: {longHedgeStrike} PE</span>
-                <span>Short Wing: {shortHedgeStrike} CE</span>
-              </div>
+            <p className="text-[11px] text-zinc-400 mb-3">{HEDGE_MODE_HELP[hedge.mode]}</p>
+
+            <div className="flex flex-col gap-3">
+              {hasBuyWing(hedge.mode) && (
+                <WingControls
+                  title="Buy wing (protective)"
+                  tone="amber"
+                  disabled={!hedgeEnabled}
+                  offsets={wingOffsets}
+                  offset={hedge.buyOffset}
+                  ratio={hedge.buyRatio}
+                  onOffset={pts => updateHedge({ buyOffset: pts })}
+                  onRatio={r => updateHedge({ buyRatio: r })}
+                  longLabel={`Long: BUY ${atmStrike - hedge.buyOffset} PE`}
+                  shortLabel={`Short: BUY ${atmStrike + hedge.buyOffset} CE`}
+                />
+              )}
+              {hasSellWing(hedge.mode) && (
+                <WingControls
+                  title="Sell wing (covered)"
+                  tone="red"
+                  disabled={!hedgeEnabled}
+                  offsets={wingOffsets}
+                  offset={hedge.sellOffset}
+                  ratio={hedge.sellRatio}
+                  onOffset={pts => updateHedge({ sellOffset: pts })}
+                  onRatio={r => updateHedge({ sellRatio: r })}
+                  longLabel={`Long: SELL ${atmStrike + hedge.sellOffset} CE`}
+                  shortLabel={`Short: SELL ${atmStrike - hedge.sellOffset} PE`}
+                />
+              )}
+              {unprotectedLots > 0 && (
+                <div className="rounded-lg border border-amber-500/40 bg-amber-500/10 p-2 text-[11px] font-mono text-amber-300 flex items-center gap-1.5 font-bold">
+                  <AlertTriangle className="h-3.5 w-3.5" />
+                  Buy wing covers {lots - unprotectedLots} of {lots} lot(s): {unprotectedLots} short ATM lot(s) stay unprotected and margin like naked.
+                </div>
+              )}
+              {hedgeEnabled && (uncoveredLong > 0 || uncoveredShort > 0) && (
+                <div className="rounded-lg border border-red-500/40 bg-red-500/10 p-2 text-[11px] font-mono text-red-300 flex flex-col gap-1.5">
+                  <span className="flex items-center gap-1.5 font-bold">
+                    <AlertTriangle className="h-3.5 w-3.5" />
+                    {Math.max(uncoveredLong, uncoveredShort)} sold lot(s) exceed the synthetic&apos;s long ATM option: naked short risk.
+                  </span>
+                  <label className="flex items-center gap-1.5 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={acceptUncovered}
+                      onChange={e => setAcceptUncovered(e.target.checked)}
+                    />
+                    I accept uncovered short wing risk
+                  </label>
+                </div>
+              )}
             </div>
           </div>
 
@@ -2826,7 +3063,9 @@ export default function SyntheticFuturesScalper() {
                           className={`rounded px-1.5 py-0.5 text-[10px] font-bold ${
                             leg.role === 'HEDGE'
                               ? 'bg-amber-500/20 text-amber-300 border border-amber-500/30'
-                              : 'bg-zinc-800 text-zinc-300'
+                              : leg.role === 'HEDGE_SELL'
+                                ? 'bg-red-500/10 text-red-300 border border-red-500/30'
+                                : 'bg-zinc-800 text-zinc-300'
                           }`}
                         >
                           {leg.role}
