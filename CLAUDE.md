@@ -327,7 +327,8 @@ strike rolls and automatic re-entry),
 `dhan-api-errors` (DH-9xx / 8xx codes, `last_api_error`, silent-failure symptom table),
 `dhan-polling-guards` (poll loops, caches, JSON read-modify-write, process spawns),
 `dhan-theme-tokens` (the theme system), `dhan-commit-on-blur` (free-typed inputs
-must commit on blur/Enter so mid-edit values cannot fire live rules), plus
+must commit on blur/Enter so mid-edit values cannot fire live rules), `dhan-alert-sound` (a chime for any
+dashboard alert via `lib/alertSound.ts`: browser-autoplay unlock on first click, burst throttle, leader tab only), plus
 `dhan-dashboard-page`, `dhan-new-strategy`, `dhan-diagonal-call` (the diagonal covered call: Python/TS sizing parity, phantom-leg exit side, what its backtest does not prove), `dhan-quant-terminal-page` and
 `dhan-bloomberg-dashboard-page`,
 `dhan-auth-token-lifecycle` (login.py/session.ts cached-token validation and the

@@ -47,6 +47,7 @@ import { planLegShifts, clampShiftSteps, CONFIRM_SHIFT_STEPS } from '@/lib/strik
 import { previousDaysPnl, type TradeHistoryResponse } from '@/lib/portfolioDailyPnl';
 import { DEFAULT_LEG_COLUMNS, loadLegColumns, saveLegColumns, type LegColumns } from '@/lib/legColumns';
 import { strikeAllowed, strikeRuleApplies, allowedStrikes, snapToAllowed, assessSpread } from '@/lib/farExpiryRules';
+import { installAlertSoundUnlock, playAlertChime } from '@/lib/alertSound';
 
 const UNDERLYINGS = ['NIFTY', 'BANKNIFTY', 'SENSEX', 'CRUDEOIL', 'CRUDEOILM'] as const;
 type Underlying = typeof UNDERLYINGS[number];
@@ -3536,7 +3537,7 @@ export default function MultiLegFocus({
         }, guardRtRef.current);
         for (const e of effects) {
           if (e.kind === 'patch') patchGuards(basket.id, e.fn);
-          else if (e.kind === 'toast') addToast('error', e.title, e.detail);
+          else if (e.kind === 'toast') { addToast('error', e.title, e.detail); playAlertChime(); }   // chime: rules fire unattended
           else if (e.kind === 'exitAll') void exitBasket(basket.id, { unattended: true });
           else void runSpotExit(basket.id, e.scope);
         }
@@ -3548,6 +3549,8 @@ export default function MultiLegFocus({
     const t = setInterval(() => guardEvalRef.current(), 1000);
     return () => clearInterval(t);
   }, [anyGuardArmed]);
+  // Rule alerts chime; the browser only allows sound after a click or key press on the page, so unlock audio on the first one.
+  useEffect(() => installAlertSoundUnlock(), []);
 
   // Open/draft/placing rows stay put; fully-exited (every leg CLOSED) rows sink
   // to the bottom so a long-running page doesn't bury active positions under
