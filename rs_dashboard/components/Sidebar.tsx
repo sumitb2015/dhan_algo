@@ -50,6 +50,7 @@ const NAV_GROUPS = [
       { href: '/scanner', label: 'Scanner', desc: 'Custom criteria and queries scanner' },
       { href: '/movers', label: 'Movers', desc: 'Top gainers, losers & volume breakouts' },
       { href: '/movers-plus', label: 'Movers+', desc: 'Multi-timeframe activity dashboard' },
+      { href: '/fii-dii', label: 'FII / DII Activity', desc: 'Daily FII/DII cash-market flows and F&O participant-wise open interest from NSE' },
       { href: '/market-pulse', label: 'Market Pulse', desc: 'Dhan live headlines with sentiment, exchange-ranked movers & company fundamentals' },
       { href: '/us-markets', label: 'US Markets', desc: 'Live US stock quotes from Dhan\'s Global Stocks feed (watch-only)' },
       { href: '/rrg', label: 'RRG', desc: 'Relative Rotation Graphs & sector trends' },
