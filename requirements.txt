@@ -64,6 +64,7 @@ notebook==7.5.2
 notebook_shim==0.2.4
 numpy==2.5.3
 openpyxl==3.1.5
+xlrd==2.0.1  # legacy .xls reader for EIA history workbooks (scripts/tools/crude_inventory_fetch.py)
 packaging==26.0
 pandas==3.0.5
 pandocfilters==1.5.1
