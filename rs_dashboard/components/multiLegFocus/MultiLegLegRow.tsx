@@ -176,6 +176,8 @@ export default function MultiLegLegRow({
   const slType = leg.slType ?? (leg.sl == null ? 'pct' : 'pts');
   const tpType = leg.tpType ?? (leg.tp == null ? 'pct' : 'pts');
   const trailingEval = computeLegTrailingSL(leg, ltp);
+  // Trail on with a priced stop: the SL box shows the live trailed stop, read-only.
+  const trailLocked = !!leg.trail && trailingEval.effectiveSL != null;
   // SL / trail edits re-anchor the trail at the current LTP.
   const changeRisk = (patch: Partial<MultiLegLeg>) => onChange(legTrailPatch(leg, patch, ltp));
   const isFar = !!leg.expiry && leg.expiry !== frontExpiry;
@@ -330,26 +332,41 @@ export default function MultiLegLegRow({
       <td className="px-2 py-1.5">
         <div className="flex flex-col gap-0.5">
           <div className="flex items-center gap-1">
-            <RuleNumInput
-              value={leg.sl}
-              onCommit={val => changeRisk({ sl: val, slType: slType })}
-              placeholder={slType === 'price' ? 'Price' : slType === 'pct' ? '%' : 'Pts'}
-              className="w-14 h-7 text-rose-300 placeholder-rose-900/40"
-              title="Stop Loss (points, % of entry premium, or price)"
-            />
+            {trailLocked ? (
+              // Trail on: the box shows the live trailed stop (a price) and is read-only; untick the trail to edit the SL.
+              <input
+                type="text"
+                readOnly
+                value={trailingEval.effectiveSL!.toFixed(1)}
+                aria-label={`Trailing stop ${trailingEval.effectiveSL!.toFixed(1)}. Untick the trail to edit the stop loss`}
+                title={`Trailing stop (price), moves ₹1 per ₹1 of new best price. Set at ${trailingEval.initialSLPrice?.toFixed(1)}. Untick the trail to edit it.`}
+                className={`w-14 h-7 bg-zinc-800 border border-amber-500/40 text-amber-400 font-semibold text-xs font-mono rounded px-1.5 cursor-not-allowed focus:outline-none ${FOCUS_RING}`}
+              />
+            ) : (
+              <RuleNumInput
+                value={leg.sl}
+                onCommit={val => changeRisk({ sl: val, slType: slType })}
+                placeholder={slType === 'price' ? 'Price' : slType === 'pct' ? '%' : 'Pts'}
+                className="w-14 h-7 text-rose-300 placeholder-rose-900/40"
+                title="Stop Loss (points, % of entry premium, or price)"
+              />
+            )}
             <button
               type="button"
+              disabled={trailLocked}
               onClick={() => changeRisk({ slType: nextLegThresholdType(slType) })}
-              className="h-7 px-1 text-[10px] font-mono font-bold rounded border border-zinc-700 bg-zinc-800 text-zinc-400 hover:text-white"
-              title="Cycle Points → % of entry → Price"
+              className="h-7 px-1 text-[10px] font-mono font-bold rounded border border-zinc-700 bg-zinc-800 text-zinc-400 hover:text-white disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:text-zinc-400"
+              title={trailLocked ? 'Trailing stop shown as a price. Untick the trail to change the unit' : 'Cycle Points → % of entry → Price'}
             >
-              {slType === 'price' ? '₹' : slType === 'pct' ? '%' : 'pts'}
+              {trailLocked ? '₹' : slType === 'price' ? '₹' : slType === 'pct' ? '%' : 'pts'}
             </button>
             {leg.sl != null && <HitActionToggle kind="stop" action={leg.slAction} onChange={a => onChange({ slAction: a })} />}
           </div>
           {trailingEval.effectiveSL != null && (
             <span className={`text-[10px] font-mono ${leg.trail ? 'text-amber-400 font-semibold' : 'text-zinc-500'}`}>
-              {leg.trail ? 'TSL' : 'SL'}: {trailingEval.effectiveSL.toFixed(1)}{leg.slAction === 'ALERT' ? ' · alert' : ''}
+              {trailLocked
+                ? `TSL from ${trailingEval.initialSLPrice?.toFixed(1)}`
+                : `SL: ${trailingEval.effectiveSL.toFixed(1)}`}{leg.slAction === 'ALERT' ? ' · alert' : ''}
             </span>
           )}
         </div>
