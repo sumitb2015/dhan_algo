@@ -117,6 +117,7 @@ const NAV_GROUPS = [
       { href: '/options/quiktrade', label: 'QuikTrade', desc: 'OI buildup quadrants, live positions & P&L' },
       { href: '/bearish-strikes', label: 'Bearish Strikes', desc: 'Live CE/PE strikes below Supertrend(10,2), VWAP and EMA20 — short candidates with Multi-Leg Focus tickets (SIM / REAL)' },
       { href: '/level-chart', label: 'Level Chart', desc: 'Live High/50%/Low interval-level zones for any stock, index or crude oil future' },
+      { href: '/composite-index', label: 'Composite Index', desc: 'Weighted sum of live index prices (indices WebSocket) charted as a line or 1/3/5m candles' },
     ],
   },
   {
