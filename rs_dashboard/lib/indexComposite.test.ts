@@ -7,6 +7,8 @@ import {
   influenceShares,
   toCandles,
   toLineCloses,
+  emaLine,
+  vwapLine,
 } from './indexComposite.ts';
 
 const day = Date.UTC(2026, 9, 15) / 1000;
@@ -123,4 +125,22 @@ test('candles and overlay closes align to the 09:15 open', () => {
     { time: at(9, 15), value: 3 },
     { time: at(9, 18), value: 4 },
   ]);
+});
+
+test('EMA is SMA-seeded on closes and starts at bar `period`', () => {
+  const bars = [1, 2, 3, 4, 5].map((v, i) => ({ time: at(9, 15 + i), open: v, high: v, low: v, close: v }));
+  const e = emaLine(bars, 3);
+  assert.equal(e.length, 3);
+  assert.deepEqual(e[0], { time: at(9, 17), value: 2 });          // SMA(1,2,3)
+  assert.ok(close(e[1].value, 3));                                // 4·0.5 + 2·0.5
+  assert.deepEqual(emaLine(bars.slice(0, 2), 3), []);
+});
+
+test('VWAP (equal-weight) is the running mean of typical price', () => {
+  const v = vwapLine([
+    { time: at(9, 15), open: 10, high: 12, low: 6, close: 9 },   // typical 9
+    { time: at(9, 16), open: 9, high: 15, low: 9, close: 12 },   // typical 12
+  ]);
+  assert.deepEqual(v.map(p => p.value), [9, 10.5]);
+  assert.deepEqual(vwapLine([{ time: at(9, 15), value: 4 }, { time: at(9, 16), value: 8 }]).map(p => p.value), [4, 6]);
 });

@@ -28,6 +28,8 @@ export const OVERLAY_PALETTE = [
 ];
 
 export interface OverlaySeries { symbol: string; label: string; color: string; data: CompositePoint[] }
+/** EMA / VWAP lines on the composite, drawn above it. */
+export interface IndicatorSeries { id: string; label: string; color: string; dashed?: boolean; data: CompositePoint[] }
 
 type Bar = CompositeCandle | CompositePoint;
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -77,11 +79,13 @@ export default function IndexCompositeChart({
   data,
   kind,
   overlays = [],
+  indicators = [],
   highlight = null,
 }: {
   data: Bar[];
   kind: 'line' | 'candles';
   overlays?: OverlaySeries[];
+  indicators?: IndicatorSeries[];
   highlight?: string | null;
 }) {
   const chrome = useChartChrome();
@@ -90,12 +94,14 @@ export default function IndexCompositeChart({
   const mainRef = useRef<AnySeries | null>(null);
   const mainDrawnRef = useRef<Bar[]>([]);
   const overlayRef = useRef(new Map<string, { series: AnySeries; drawn: Bar[]; color: string }>());
+  const indicatorRef = useRef(new Map<string, { series: AnySeries; drawn: Bar[] }>());
   const fittedRef = useRef(false);
 
   useEffect(() => {
     const container = containerRef.current;
     if (!container) return;
     const overlayMap = overlayRef.current;
+    const indicatorMap = indicatorRef.current;
     const chart = createChart(container, {
       height: container.clientHeight || 480,
       layout: {
@@ -130,6 +136,7 @@ export default function IndexCompositeChart({
       mainRef.current = null;
       mainDrawnRef.current = [];
       overlayMap.clear();
+      indicatorMap.clear();
       fittedRef.current = false;
     };
     // chrome is re-applied by its own effect below; adding it here would recreate the chart (and lose zoom) on a theme flip.
@@ -183,11 +190,35 @@ export default function IndexCompositeChart({
     applyData(mainRef.current, mainDrawnRef.current, data);
     mainDrawnRef.current = data;
 
+    // Indicators are created after the composite, so they draw on top of it.
+    const indMap = indicatorRef.current;
+    const wantedInd = new Set(indicators.map(i => i.id));
+    for (const [id, entry] of indMap) {
+      if (!wantedInd.has(id)) { chart.removeSeries(entry.series); indMap.delete(id); }
+    }
+    for (const ind of indicators) {
+      let entry = indMap.get(ind.id);
+      if (!entry) {
+        entry = {
+          series: chart.addSeries(LineSeries, {
+            color: ind.color, lineWidth: 2, title: ind.label, priceLineVisible: false,
+            lineStyle: ind.dashed ? LineStyle.Dashed : LineStyle.Solid, crosshairMarkerVisible: false,
+          }),
+          drawn: [],
+        };
+        indMap.set(ind.id, entry);
+      } else {
+        entry.series.applyOptions({ title: ind.label });
+      }
+      applyData(entry.series, entry.drawn, ind.data);
+      entry.drawn = ind.data;
+    }
+
     if (!fittedRef.current && data.length > 0) {
       chart.timeScale().fitContent();
       fittedRef.current = true;
     }
-  }, [data, overlays, kind]);
+  }, [data, overlays, indicators, kind]);
 
   // Hovering a table row: thicken that index, fade the rest.
   useEffect(() => {

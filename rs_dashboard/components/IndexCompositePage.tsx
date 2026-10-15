@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Sigma, AlertTriangle } from 'lucide-react';
 import NavBar from './NavBar';
-import IndexCompositeChart, { OVERLAY_PALETTE, type OverlaySeries } from './IndexCompositeChart';
+import IndexCompositeChart, { OVERLAY_PALETTE, type IndicatorSeries, type OverlaySeries } from './IndexCompositeChart';
 import {
   activeComponents,
   buildComposite,
@@ -13,6 +13,8 @@ import {
   SCALE_SYMBOL,
   toCandles,
   toLineCloses,
+  emaLine,
+  vwapLine,
   type CompositeComponent,
   type CompositeMode,
   type IndicesHistory,
@@ -37,8 +39,21 @@ interface Saved {
   mode: CompositeMode;
   timeframe: TimeframeKey;
   overlay: boolean;
+  /** Two EMAs (9/20 by default, the scalpers' pair) and the session VWAP, drawn on the composite. */
+  emaFast: Toggle;
+  emaSlow: Toggle;
+  vwap: boolean;
 }
-const DEFAULTS: Saved = { components: null, mode: 'equal', timeframe: '1m', overlay: true };
+interface Toggle { on: boolean; period: number }
+const DEFAULTS: Saved = {
+  components: null, mode: 'equal', timeframe: '1m', overlay: true,
+  emaFast: { on: true, period: 9 }, emaSlow: { on: true, period: 20 }, vwap: true,
+};
+
+function loadToggle(t: Partial<Toggle> | undefined, fallback: Toggle): Toggle {
+  const period = Number(t?.period);
+  return { on: typeof t?.on === 'boolean' ? t.on : fallback.on, period: Number.isInteger(period) && period >= 2 && period <= 200 ? period : fallback.period };
+}
 
 function loadSaved(): Saved {
   try {
@@ -52,6 +67,9 @@ function loadSaved(): Saved {
       mode: p.mode === 'sum' ? 'sum' : 'equal',
       timeframe: TIMEFRAMES.some(t => t.key === p.timeframe) ? (p.timeframe as TimeframeKey) : DEFAULTS.timeframe,
       overlay: p.overlay !== false,
+      emaFast: loadToggle(p.emaFast, DEFAULTS.emaFast),
+      emaSlow: loadToggle(p.emaSlow, DEFAULTS.emaSlow),
+      vwap: p.vwap !== false,
     };
   } catch {
     return DEFAULTS;
@@ -67,29 +85,39 @@ function mergeWithCatalogue(saved: CompositeComponent[], catalogue: string[]): C
 
 const fmt = (v: number, d = 2) => v.toLocaleString('en-IN', { minimumFractionDigits: d, maximumFractionDigits: d });
 
-/** Influence box: commits on blur/Enter only, so a half-typed "-" or "0." never redraws the chart (dhan-commit-on-blur). */
-function WeightInput({ value, onCommit, label, disabled }: { value: number; onCommit: (v: number) => void; label: string; disabled?: boolean }) {
+/** Number box that commits on blur/Enter only, so a half-typed "-" or "0." never redraws the chart (dhan-commit-on-blur). */
+function NumberInput({ value, onCommit, ariaLabel, disabled, accept = Number.isFinite, className = 'w-14' }: {
+  value: number; onCommit: (v: number) => void; ariaLabel: string; disabled?: boolean;
+  accept?: (v: number) => boolean; className?: string;
+}) {
   const [draft, setDraft] = useState(String(value));
   const [shown, setShown] = useState(value);
   if (shown !== value) { setShown(value); setDraft(String(value)); } // a preset/reset replaced the weight
   const commit = () => {
     const v = Number(draft);
-    if (draft.trim() !== '' && Number.isFinite(v)) onCommit(v);
+    if (draft.trim() !== '' && accept(v)) onCommit(v);
     else setDraft(String(value));
   };
   return (
     <input
-      aria-label={`Influence for ${label}`}
+      aria-label={ariaLabel}
       inputMode="decimal"
       disabled={disabled}
       value={draft}
       onChange={e => setDraft(e.target.value)}
       onBlur={commit}
       onKeyDown={e => { if (e.key === 'Enter') (e.target as HTMLInputElement).blur(); }}
-      className="w-14 px-1.5 py-0.5 rounded bg-zinc-900 border border-zinc-700 text-right font-mono text-xs text-white disabled:opacity-40 focus:outline-none focus:ring-2 focus:ring-sky-400"
+      className={`${className} px-1.5 py-0.5 rounded bg-zinc-900 border border-zinc-700 text-right font-mono text-xs text-white disabled:opacity-40 focus:outline-none focus:ring-2 focus:ring-sky-400`}
     />
   );
 }
+
+const isPeriod = (v: number) => Number.isInteger(v) && v >= 2 && v <= 200;
+
+// Saturated data colours for the indicator lines (not themed). They are drawn 2px over the 1px overlays, VWAP dashed.
+const EMA_FAST_COLOR = '#fbbf24';
+const EMA_SLOW_COLOR = '#c084fc';
+const VWAP_COLOR = '#f472b6';
 
 type BridgeStatus = { status: string; subscribed?: number; last_update?: string };
 
@@ -175,6 +203,14 @@ export default function IndexCompositePage() {
     [result, tf.sec],
   );
   const showOverlay = overlay && mode === 'equal';
+  const { emaFast, emaSlow, vwap } = saved;
+  const indicatorSeries = useMemo<IndicatorSeries[]>(() => {
+    const out: IndicatorSeries[] = [];
+    if (emaFast.on) out.push({ id: 'emaFast', label: `EMA ${emaFast.period}`, color: EMA_FAST_COLOR, data: emaLine(chartData, emaFast.period) });
+    if (emaSlow.on) out.push({ id: 'emaSlow', label: `EMA ${emaSlow.period}`, color: EMA_SLOW_COLOR, data: emaLine(chartData, emaSlow.period) });
+    if (vwap) out.push({ id: 'vwap', label: 'VWAP', color: VWAP_COLOR, dashed: true, data: vwapLine(chartData) });
+    return out;
+  }, [chartData, emaFast, emaSlow, vwap]);
   const overlaySeries = useMemo<OverlaySeries[]>(() => {
     if (!result || !showOverlay) return [];
     return Object.entries(result.overlays).map(([symbol, pts]) => ({
@@ -288,6 +324,45 @@ export default function IndexCompositePage() {
             </div>
           </div>
 
+          <div className="flex items-center gap-2 flex-wrap px-4 py-2 border-b border-zinc-800 text-xs">
+            {([
+              ['emaFast', emaFast, EMA_FAST_COLOR],
+              ['emaSlow', emaSlow, EMA_SLOW_COLOR],
+            ] as const).map(([key, t, color]) => {
+              const series = indicatorSeries.find(i => i.id === key);
+              const last = series?.data.length ? series.data[series.data.length - 1].value : null;
+              return (
+                <div key={key} className="flex items-center gap-1.5 px-2 py-1 rounded border border-zinc-700 bg-zinc-900">
+                  <input type="checkbox" checked={t.on} aria-label={`Show EMA ${t.period}`} className="accent-sky-400"
+                    onChange={e => update({ [key]: { ...t, on: e.target.checked } })} />
+                  <span className="w-3 h-0.5 rounded" style={{ backgroundColor: color }} />
+                  <span className="font-bold text-zinc-300">EMA</span>
+                  <NumberInput value={t.period} ariaLabel={`EMA period (${key === 'emaFast' ? 'fast' : 'slow'})`} accept={isPeriod} className="w-10"
+                    onCommit={v => update({ [key]: { ...t, period: v } })} />
+                  <span className="font-mono text-zinc-400 min-w-[64px] text-right">{t.on && last !== null ? fmt(last) : '—'}</span>
+                </div>
+              );
+            })}
+            {(() => {
+              const series = indicatorSeries.find(i => i.id === 'vwap');
+              const last = series?.data.length ? series.data[series.data.length - 1].value : null;
+              const above = last !== null && lastValue !== null ? lastValue >= last : null;
+              return (
+                <div className="flex items-center gap-1.5 px-2 py-1 rounded border border-zinc-700 bg-zinc-900"
+                  title="Indices have no volume, so every bar is weighted equally: the running mean of typical price since the first live tick">
+                  <input type="checkbox" checked={vwap} aria-label="Show VWAP" className="accent-sky-400" onChange={e => update({ vwap: e.target.checked })} />
+                  <span className="w-3 border-t-2 border-dashed" style={{ borderColor: VWAP_COLOR }} />
+                  <span className="font-bold text-zinc-300">VWAP</span>
+                  <span className="font-mono text-zinc-400 min-w-[64px] text-right">{vwap && last !== null ? fmt(last) : '—'}</span>
+                  {vwap && above !== null && (
+                    <span className={`font-bold ${above ? 'text-emerald-400' : 'text-red-400'}`}>{above ? 'above' : 'below'}</span>
+                  )}
+                </div>
+              );
+            })()}
+            <span className="text-[10px] text-zinc-500">on {tf.sec ? `${tf.label} closes` : 'ticks'} · VWAP equal-weighted (indices have no volume)</span>
+          </div>
+
           {streamError && (
             <div className="mx-4 mt-3 flex items-center gap-2 text-xs text-amber-300 px-3 py-2 rounded border border-amber-500/30 bg-amber-500/10">
               <AlertTriangle className="w-3.5 h-3.5" /> Lost the live stream — reconnecting.
@@ -314,7 +389,7 @@ export default function IndexCompositePage() {
 
           <div className="flex-1 relative min-h-[420px] p-2">
             {chartData.length > 0 ? (
-              <IndexCompositeChart key={chartKey} data={chartData} kind={tf.sec ? 'candles' : 'line'} overlays={overlaySeries} highlight={hover} />
+              <IndexCompositeChart key={chartKey} data={chartData} kind={tf.sec ? 'candles' : 'line'} overlays={overlaySeries} indicators={indicatorSeries} highlight={hover} />
             ) : (
               <div className="absolute inset-0 flex flex-col items-center justify-center gap-2 text-sm text-zinc-500">
                 {!history
@@ -387,7 +462,7 @@ export default function IndexCompositePage() {
                         )}
                       </td>
                       <td className="px-1 py-1 text-right">
-                        <WeightInput value={c.weight} label={labelOf(c.symbol)} disabled={!on} onCommit={v => patchRow(c.symbol, { weight: v })} />
+                        <NumberInput value={c.weight} ariaLabel={`Influence for ${labelOf(c.symbol)}`} disabled={!on} onCommit={v => patchRow(c.symbol, { weight: v })} />
                       </td>
                       <td className="px-1 py-1 text-right font-mono text-zinc-400">{share !== undefined ? `${fmt(share, 1)}%` : '—'}</td>
                       <td className="px-2 py-1 text-right font-mono text-zinc-300">{ltp ? fmt(ltp) : '—'}</td>

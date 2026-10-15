@@ -7,6 +7,8 @@
  * indexComposite.test.ts.
  */
 
+import { emaSmaSeeded } from './indicators.ts';
+
 /** One row of the bridge's `ticks` array: `t` is IST wall-clock HH:MM:SS, every other key is a symbol's LTP. */
 export type IndexTick = { t: string } & Record<string, number | string>;
 
@@ -233,4 +235,31 @@ export function toLineCloses(points: CompositePoint[], bucketSec: number): Compo
   const out: CompositePoint[] = [];
   for (const p of points) pushPoint(out, bucketStart(p.time, bucketSec), p.value);
   return out;
+}
+
+/** Closing value of a line point or a candle. */
+function closeOf(bar: CompositePoint | CompositeCandle): number {
+  return 'close' in bar ? bar.close : bar.value;
+}
+
+/** EMA of the bars' closes, TradingView `ta.ema` semantics (SMA-seeded, nothing before `period` bars). */
+export function emaLine(bars: (CompositePoint | CompositeCandle)[], period: number): CompositePoint[] {
+  const p = Math.max(1, Math.round(period));
+  const ema = emaSmaSeeded(bars.map(closeOf), p);
+  const out: CompositePoint[] = [];
+  bars.forEach((b, i) => { if (ema[i] !== null) out.push({ time: b.time, value: ema[i] as number }); });
+  return out;
+}
+
+/**
+ * Session-anchored average price. Indices have no traded volume, so every bar gets equal
+ * weight: the running mean of each bar's typical price (H+L+C)/3 (a line point's value) from the
+ * first live bar. It is the VWAP line a chart would draw with flat volume, i.e. a session TWAP.
+ */
+export function vwapLine(bars: (CompositePoint | CompositeCandle)[]): CompositePoint[] {
+  let sum = 0;
+  return bars.map((b, i) => {
+    sum += 'close' in b ? (b.high + b.low + b.close) / 3 : b.value;
+    return { time: b.time, value: sum / (i + 1) };
+  });
 }
