@@ -16,34 +16,15 @@ import {
   OFF_HOURS_POLL_INTERVAL_MS,
   POLL_INTERVAL_MS,
   type CustomStrategyChartResponse,
-  type StrategyLeg,
 } from '@/lib/optionsChartTypes';
 import { CHART_UNDERLYINGS } from '@/lib/underlyings';
-import { isOptionLeg, type MultiLegLeg } from '@/lib/multiLegFocus';
+import type { MultiLegLeg } from '@/lib/multiLegFocus';
+import { chartLegsFor, chartHasMixedExpiry } from '@/lib/multiLegChartLegs';
 import { FOCUS_RING } from '../Scalper';
 
 const INTERVALS = ['1', '2', '3', '5'] as const;
 
-/** Chart legs for a basket: every live (not CLOSED/FAILED) leg, same-contract legs merged. */
-export function chartLegsFor(legs: MultiLegLeg[], lotSize?: number): StrategyLeg[] {
-  const merged = new Map<string, StrategyLeg>();
-  // Option legs only: the chart plots option premiums (futures legs are on the payoff chart).
-  for (const l of legs.filter(isOptionLeg)) {
-    if (l.status === 'CLOSED' || l.status === 'FAILED' || !(l.lots > 0) || !Number.isFinite(l.strike)) continue;
-    // A placed leg is sized from what actually filled (ledger qty / lot size), not the ordered
-    // lots. Only when the qty divides cleanly; crude quantity semantics differ, so the caller
-    // omits lotSize there and the ordered lots are used.
-    const filled = l.fill?.qty ?? 0;
-    const filledLots = lotSize && lotSize > 0 && filled > 0 ? Math.round(filled / lotSize) : 0;
-    const lots = l.status === 'OPEN' && filledLots > 0 && Math.abs(filledLots * (lotSize as number) - filled) < 1e-6 ? filledLots : l.lots;
-    const action = l.side === 'B' ? 'BUY' : 'SELL';
-    const key = `${l.strike}:${l.option}:${action}`;
-    const hit = merged.get(key);
-    if (hit) hit.lots += lots;
-    else merged.set(key, { option_type: l.option, action, strike: l.strike, lots });
-  }
-  return [...merged.values()];
-}
+export { chartLegsFor, chartHasMixedExpiry };
 
 export function isChartableUnderlying(u: string): boolean {
   return (CHART_UNDERLYINGS as readonly string[]).includes(u);

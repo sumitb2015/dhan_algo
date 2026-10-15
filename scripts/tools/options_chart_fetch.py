@@ -73,6 +73,10 @@ UNDERLYINGS: dict[str, dict] = {
 MIN_LOTS = 1
 MAX_LOTS = 10
 MAX_LEGS = 6
+# The custom-strategy chart is fed by Multi-Leg Focus baskets (Scale +N, stacked structures), so it
+# allows far more lots/legs than the straddle/strangle panels. Lots only weight the premium sum.
+STRATEGY_MAX_LOTS = 1000
+STRATEGY_MAX_LEGS = 10
 MAX_DAYS = 10
 VALID_INTERVALS = ("1", "2", "3", "5")
 
@@ -976,8 +980,8 @@ def get_strangle_chart(helper: DhanHelper, underlying: str, expiry: str, ce_stri
 
 def _validate_leg(index: int, leg: dict) -> None:
     lots = leg.get("lots", 1)
-    if not (MIN_LOTS <= lots <= MAX_LOTS):
-        raise ValueError(f"Leg {index + 1} lots must be between {MIN_LOTS} and {MAX_LOTS}.")
+    if not (MIN_LOTS <= lots <= STRATEGY_MAX_LOTS):
+        raise ValueError(f"Leg {index + 1} lots must be between {MIN_LOTS} and {STRATEGY_MAX_LOTS}.")
     if leg.get("option_type") not in ("CE", "PE"):
         raise ValueError(f"Leg {index + 1} option_type must be CE or PE.")
     if leg.get("action") not in ("BUY", "SELL"):
@@ -985,8 +989,8 @@ def _validate_leg(index: int, leg: dict) -> None:
 
 
 def get_strategy_chart(helper: DhanHelper, underlying: str, expiry: str, legs: list[dict], interval: str = "1", indicators: list[dict] | None = None, days: int = 2, include_spot: bool = False) -> dict:
-    if not (1 <= len(legs) <= MAX_LEGS):
-        raise ValueError(f"legs must contain between 1 and {MAX_LEGS} entries.")
+    if not (1 <= len(legs) <= STRATEGY_MAX_LEGS):
+        raise ValueError(f"legs must contain between 1 and {STRATEGY_MAX_LEGS} entries.")
     for i, leg in enumerate(legs):
         _validate_leg(i, leg)
 

@@ -13,7 +13,7 @@ import AddLotsModal from './AddLotsModal';
 import ExitLotsModal from './ExitLotsModal';
 import PnlTableModal from './PnlTableModal';
 import PositionVisualizerModal from './PositionVisualizerModal';
-import StrategyChartModal, { chartLegsFor, isChartableUnderlying } from './StrategyChartModal';
+import StrategyChartModal, { chartLegsFor, chartHasMixedExpiry, isChartableUnderlying } from './StrategyChartModal';
 import ScaleStrategyModal from './ScaleStrategyModal';
 import AddNewLegModal from './AddNewLegModal';
 import type { OiBuildup } from '@/lib/oiBuildup';
@@ -396,7 +396,7 @@ export default function MultiLegStrategyRow({
     () => (hasMixedExpiry ? null : classifyBasketStructure(basket.legs)),
     [basket.legs, hasMixedExpiry],
   );
-  const chartDisabledReason = hasMixedExpiry
+  const chartDisabledReason = chartHasMixedExpiry(basket.legs, basket.expiry)
     ? 'Strategy chart supports a single expiry only (Calendar/Diagonal not supported)'
     : !isChartableUnderlying(basket.underlying)
       ? `No chart data for ${basket.underlying}`
