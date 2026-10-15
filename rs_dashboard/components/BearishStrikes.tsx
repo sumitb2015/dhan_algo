@@ -1023,6 +1023,12 @@ export default function BearishStrikes() {
                 const lot = lotSize || 1;
                 const full = r.sig.bearish === true;
                 const oi = oiView(r.buildup, r.sig);
+                // Which levels the live price has climbed back above (the reason a closed-bar-bearish row is only WATCH).
+                const aboveNames = (x: Row) => {
+                  const n = [x.sig.stLine != null && x.ltp >= x.sig.stLine ? 'ST' : '', x.sig.vwap != null && x.ltp >= x.sig.vwap ? 'VWAP' : '',
+                    x.sig.ema != null && x.ltp >= x.sig.ema ? emaName : ''].filter(Boolean);
+                  return n.length ? n.join(' + ') : 'a level';
+                };
                 // Level over "how far price sits from it": ▼ price is below the level (what a seller wants), ▲ above.
                 const level = (v: number | null, below: boolean | null) => {
                   const d = pctBelow(v, r.ltp);
@@ -1078,8 +1084,8 @@ export default function BearishStrikes() {
                     <td className="px-3 py-1.5 text-center whitespace-nowrap">
                       <span className={`px-1.5 py-0.5 rounded border text-[10px] font-bold ${full && r.liveBelowAll ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30'
                         : full ? 'bg-amber-500/10 text-amber-300 border-amber-500/30' : 'bg-zinc-900 text-zinc-400 border-zinc-700'}`}
-                        title={full ? (r.liveBelowAll ? 'Closed bar AND live price are below all three levels' : 'WATCH: the closed bar is bearish, but the live price is back above a level') : 'Not all three conditions hold on the closed bar'}>
-                        {full ? (r.liveBelowAll ? 'BEARISH' : 'WATCH') : `${[r.sig.below.st, r.sig.below.vwap, r.sig.below.ema].filter(Boolean).length}/3`}
+                        title={full ? (r.liveBelowAll ? 'Closed bar AND live price are below all three levels' : `WATCH: the closed bar is bearish, but the live price is back above ${aboveNames(r)}`) : 'Not all three conditions hold on the closed bar'}>
+                        {full ? (r.liveBelowAll ? 'BEARISH' : `WATCH · ${aboveNames(r)}`) : `${[r.sig.below.st, r.sig.below.vwap, r.sig.below.ema].filter(Boolean).length}/3`}
                       </span>
                       {oi && (
                         <div className="mt-1">
