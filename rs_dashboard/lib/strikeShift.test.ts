@@ -29,7 +29,8 @@ test('clampShiftSteps sanitises input', () => {
   assert.strictEqual(clampShiftSteps(0), 1);
   assert.strictEqual(clampShiftSteps(NaN), 1);
   assert.strictEqual(clampShiftSteps(2.9), 2);
-  assert.strictEqual(clampShiftSteps(99), 10);
+  assert.strictEqual(clampShiftSteps(99), 99);
+  assert.strictEqual(clampShiftSteps(500), 100);
 });
 
 test('planLegShifts moves every leg the same number of listed strikes', () => {

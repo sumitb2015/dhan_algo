@@ -28,6 +28,34 @@ function candles() {
 
 test.beforeEach(async ({ context }) => { await signIn(context); });
 
+test('per-leg roll distance input takes any N, clamps at 100, and its arrows say so (no order is sent)', async ({ page }) => {
+  const orders: string[] = [];
+  await page.route('**/api/**', async (route: Route) => {
+    const req = route.request();
+    const p = new URL(req.url()).pathname;
+    if (p === '/api/multi-leg-focus/baskets') return json(route, req.method() === 'GET' ? { success: true, data: [BASKET] } : { success: true });
+    if (p === '/api/scalper/fast-order' || p === '/api/scalper/orders') { orders.push(p); return json(route, { success: false, error: 'e2e' }, 400); }
+    if (req.method() === 'GET') return json(route, { success: false, error: 'e2e' }, 503);
+    return route.fulfill({ status: 599, body: 'blocked by e2e' });
+  });
+  await page.goto('/multi-leg-focus', { waitUntil: 'domcontentloaded' });
+  await expect(page.getByRole('button', { name: /Strategy Chart/ })).toBeVisible({ timeout: 60_000 });
+  await page.getByRole('button', { name: 'Expand strategy', exact: true }).first().click();
+  const input = page.getByRole('textbox', { name: 'Strikes to roll this leg' }).first();
+  await expect(input).toBeVisible();
+  await input.fill('15');
+  await input.press('Enter');
+  await expect(input).toHaveValue('15');
+  await expect(page.getByRole('button', { name: 'Shift this leg up 15 strikes' }).first()).toBeVisible();
+  await input.fill('500');
+  await input.press('Enter');
+  await expect(input).toHaveValue('100');
+  await input.fill('');
+  await input.press('Enter');
+  await expect(page.getByRole('button', { name: 'Shift this leg up 1 strike' }).first()).toBeVisible();   // back to the strategy's value
+  expect(orders).toEqual([]);
+});
+
 test('per-leg Chart button plots only that contract at 1 lot, with its own side', async ({ page }) => {
   const chartLegs: unknown[] = [];
   const blocked: string[] = [];

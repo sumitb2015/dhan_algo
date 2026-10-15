@@ -226,10 +226,10 @@ export default function MultiLegStrategyRow({
   const [showScale, setShowScale] = useState(false);
   const [shiftSteps, setShiftSteps] = useState(1);   // per-strategy Steps stepper (UI only, not persisted)
   const [shifting, setShifting] = useState(false);
-  const runShift = useCallback(async (legIds: string[], direction: 'UP' | 'DOWN') => {
+  const runShift = useCallback(async (legIds: string[], direction: 'UP' | 'DOWN', steps?: number) => {
     if (!onShiftLegs || !legIds.length) return;
     setShifting(true);
-    try { await onShiftLegs(legIds, direction, shiftSteps); } finally { setShifting(false); }
+    try { await onShiftLegs(legIds, direction, steps ?? shiftSteps); } finally { setShifting(false); }
   }, [onShiftLegs, shiftSteps]);
 
   const [selectedLegForAddLots, setSelectedLegForAddLots] = useState<MultiLegLeg | null>(null);
@@ -1537,7 +1537,7 @@ export default function MultiLegStrategyRow({
                       onRemove={() => removeLeg(leg.id)}
                       onOpenExit={() => setSelectedLegForExit(leg)}
                       onOpenAddLots={leg.option === 'FUT' ? undefined : () => setSelectedLegForAddLots(leg)}
-                      onShift={onShiftLegs && leg.option !== 'FUT' ? (d => runShift([leg.id], d)) : undefined}
+                      onShift={onShiftLegs && leg.option !== 'FUT' ? ((d, n) => runShift([leg.id], d, n)) : undefined}
                       shiftSteps={shiftSteps}
                       shiftBusy={placing || exiting || shifting}
                       columns={legColumns}

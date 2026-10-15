@@ -1,7 +1,8 @@
 'use client';
 
-import React from 'react';
+import React, { useState } from 'react';
 import { X, Plus, AlertTriangle, ChevronUp, ChevronDown, Unlink, LineChart } from 'lucide-react';
+import { clampShiftSteps, MAX_SHIFT_STEPS } from '@/lib/strikeShift';
 import {
   legPnl, computeLegTrailingSL, nextLegThresholdType, formatExpiryLabel, legAvgPrice, legExitPrice, restingExitOrders, legQtyUnits, legPnlPct, legOtmPct, type MultiLegLeg,
 } from '@/lib/multiLegFocus';
@@ -55,7 +56,7 @@ interface MultiLegLegRowProps {
   onOpenExit: () => void;
   onOpenAddLots?: () => void;
   /** Roll this OPEN leg N strikes (N is the strategy card's Steps stepper). */
-  onShift?: (direction: 'UP' | 'DOWN') => void;
+  onShift?: (direction: 'UP' | 'DOWN', steps?: number) => void;
   shiftSteps?: number;
   shiftBusy?: boolean;
   /** Strike is not tradable on this leg's expiry (far expiry needs a multiple of 100). */
@@ -113,9 +114,43 @@ export function TagCell({ value, onCommit }: { value?: string; onCommit: (v: str
   );
 }
 
+/** Free-typed roll distance for one leg. Commits on blur / Enter (never per keystroke, so a half-typed
+ *  "1" of "15" can't be used by a click), Esc reverts, empty goes back to the strategy's Shift stepper. */
+function ShiftStepsInput({ value, fallback, disabled, onCommit }: {
+  value: number | null; fallback: number; disabled?: boolean; onCommit: (n: number | null) => void;
+}) {
+  const [draft, setDraft] = useState(value == null ? '' : String(value));
+  const commit = (raw: string) => {
+    const t = raw.trim();
+    if (!t) { onCommit(null); setDraft(''); return; }
+    const n = Number(t);
+    if (!Number.isFinite(n) || n < 1) { setDraft(value == null ? '' : String(value)); return; }
+    const c = clampShiftSteps(n);
+    onCommit(c); setDraft(String(c));
+  };
+  return (
+    <input
+      type="text" inputMode="numeric" value={draft} disabled={disabled}
+      placeholder={String(fallback)}
+      aria-label="Strikes to roll this leg"
+      title={`Strikes to roll this leg (1-${MAX_SHIFT_STEPS}). Empty = the strategy's Shift value (${fallback})`}
+      onChange={e => setDraft(e.target.value.replace(/[^\d]/g, ''))}
+      onBlur={e => commit(e.currentTarget.value)}
+      onKeyDown={e => {
+        if (e.key === 'Enter') { commit(e.currentTarget.value); e.currentTarget.blur(); }
+        if (e.key === 'Escape') { setDraft(value == null ? '' : String(value)); e.currentTarget.blur(); }
+      }}
+      className={`h-6 w-9 bg-zinc-900 border-r border-zinc-700 text-center text-[11px] font-mono font-bold text-zinc-100 placeholder:text-zinc-500 focus:outline-none focus:bg-zinc-800 disabled:opacity-50 ${FOCUS_RING}`}
+    />
+  );
+}
+
 export default function MultiLegLegRow({
   leg, allStrikes, ltp, spot, editable, exiting, margin, multiplier = 1, strategyMultiplier = 1, frontExpiry, farExpiry, onChange, onRemove, onOpenExit, onOpenAddLots, onShift, shiftSteps = 1, shiftBusy = false, strikeBlocked = false, unhedged = false, columns = DEFAULT_LEG_COLUMNS, showExit = false, iv = 0, oiBuildup = null, selected = false, onSelect, onTag, onDetach, onOpenChart,
 }: MultiLegLegRowProps) {
+  // This leg's own roll distance (any N up to MAX_SHIFT_STEPS); empty = follow the strategy's Shift stepper.
+  const [ownSteps, setOwnSteps] = useState<number | null>(null);
+  const steps = ownSteps ?? shiftSteps;
   const restingExit = restingExitOrders(leg)[0];
   const isFut = leg.option === 'FUT';
   const pnl = leg.fill ? legPnl(leg, ltp, multiplier) : 0;
@@ -398,22 +433,23 @@ export default function MultiLegLegRow({
           <div className="flex items-center justify-end gap-1.5 whitespace-nowrap [&>*]:shrink-0">
             {onShift && (
               <div className="inline-flex items-center rounded border border-zinc-700 overflow-hidden">
+                <ShiftStepsInput value={ownSteps} fallback={shiftSteps} disabled={exiting || shiftBusy} onCommit={setOwnSteps} />
                 <button
                   type="button"
-                  onClick={() => onShift('DOWN')}
+                  onClick={() => onShift('DOWN', steps)}
                   disabled={exiting || shiftBusy}
-                  aria-label={`Shift this leg down ${shiftSteps} strike${shiftSteps > 1 ? 's' : ''}`}
-                  title={`Roll down ${shiftSteps} strike${shiftSteps > 1 ? 's' : ''} (close, then reopen lower)`}
+                  aria-label={`Shift this leg down ${steps} strike${steps > 1 ? 's' : ''}`}
+                  title={`Roll down ${steps} strike${steps > 1 ? 's' : ''} (close, then reopen lower)`}
                   className={`h-6 w-6 inline-flex items-center justify-center text-zinc-300 hover:text-white hover:bg-zinc-800 disabled:opacity-50 disabled:cursor-not-allowed ${FOCUS_RING}`}
                 >
                   <ChevronDown className="w-3.5 h-3.5" />
                 </button>
                 <button
                   type="button"
-                  onClick={() => onShift('UP')}
+                  onClick={() => onShift('UP', steps)}
                   disabled={exiting || shiftBusy}
-                  aria-label={`Shift this leg up ${shiftSteps} strike${shiftSteps > 1 ? 's' : ''}`}
-                  title={`Roll up ${shiftSteps} strike${shiftSteps > 1 ? 's' : ''} (close, then reopen higher)`}
+                  aria-label={`Shift this leg up ${steps} strike${steps > 1 ? 's' : ''}`}
+                  title={`Roll up ${steps} strike${steps > 1 ? 's' : ''} (close, then reopen higher)`}
                   className={`h-6 w-6 inline-flex items-center justify-center text-zinc-300 hover:text-white hover:bg-zinc-800 border-l border-zinc-700 disabled:opacity-50 disabled:cursor-not-allowed ${FOCUS_RING}`}
                 >
                   <ChevronUp className="w-3.5 h-3.5" />

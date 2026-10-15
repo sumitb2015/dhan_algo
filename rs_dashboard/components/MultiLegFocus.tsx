@@ -43,7 +43,7 @@ import { guardsArmed, exitSide, istDayOf, type BasketGuards } from '@/lib/multiL
 import { evaluateBasketGuards, newGuardRuntime } from '@/lib/multiLegGuardEngine';
 import { basketToGreekLegs, computeBasketGreeks } from '@/lib/multiLegGreeks';
 import { closeOrderProduct } from '@/lib/positionProduct';
-import { planLegShifts, clampShiftSteps } from '@/lib/strikeShift';
+import { planLegShifts, clampShiftSteps, CONFIRM_SHIFT_STEPS } from '@/lib/strikeShift';
 import { previousDaysPnl, type TradeHistoryResponse } from '@/lib/portfolioDailyPnl';
 import { DEFAULT_LEG_COLUMNS, loadLegColumns, saveLegColumns, type LegColumns } from '@/lib/legColumns';
 import { strikeAllowed, strikeRuleApplies, allowedStrikes, snapToAllowed, assessSpread } from '@/lib/farExpiryRules';
@@ -2826,6 +2826,10 @@ export default function MultiLegFocus({
       return;
     }
     const moveFor = new Map(plan.moves.map(m => [m.legId, m]));
+    if (clampShiftSteps(steps) > CONFIRM_SHIFT_STEPS) {
+      const where = plan.moves.map(m => `${m.from} → ${m.to}`).join(', ');
+      if (!window.confirm(`Roll ${direction.toLowerCase()} ${clampShiftSteps(steps)} strikes (${where})?\n\nEach leg is closed, then reopened on the new strike.`)) return;
+    }
     const blockedTargets = blockedStrikeLegs(basket, targets.map(t => ({ strike: moveFor.get(t.id)!.to, option: t.option, expiry: t.expiry })));
     if (blockedTargets.length) { toastBlockedStrikes(blockedTargets, basket); return; }
 

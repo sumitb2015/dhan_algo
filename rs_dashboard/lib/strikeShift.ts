@@ -1,6 +1,8 @@
 // Strike-shift target resolution for the scalper chevrons.
 
-export const MAX_SHIFT_STEPS = 10;
+export const MAX_SHIFT_STEPS = 100;
+/** A shift longer than this asks for confirmation (it lands far from the current strike). */
+export const CONFIRM_SHIFT_STEPS = 10;
 
 export function clampShiftSteps(n: number): number {
   const v = Math.trunc(Number(n));
