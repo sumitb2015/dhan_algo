@@ -1,7 +1,7 @@
 'use client';
 
 import React from 'react';
-import { X, Plus, AlertTriangle, ChevronUp, ChevronDown, Unlink } from 'lucide-react';
+import { X, Plus, AlertTriangle, ChevronUp, ChevronDown, Unlink, LineChart } from 'lucide-react';
 import {
   legPnl, computeLegTrailingSL, nextLegThresholdType, formatExpiryLabel, legAvgPrice, legExitPrice, restingExitOrders, legQtyUnits, legPnlPct, legOtmPct, type MultiLegLeg,
 } from '@/lib/multiLegFocus';
@@ -35,6 +35,8 @@ function fmtMoney(n: number): string {
 
 interface MultiLegLegRowProps {
   leg: MultiLegLeg;
+  /** Opens this contract's own premium chart; undefined when the underlying has no chart data. */
+  onOpenChart?: () => void;
   allStrikes: number[];
   ltp: number;
   spot?: number;
@@ -112,7 +114,7 @@ export function TagCell({ value, onCommit }: { value?: string; onCommit: (v: str
 }
 
 export default function MultiLegLegRow({
-  leg, allStrikes, ltp, spot, editable, exiting, margin, multiplier = 1, strategyMultiplier = 1, frontExpiry, farExpiry, onChange, onRemove, onOpenExit, onOpenAddLots, onShift, shiftSteps = 1, shiftBusy = false, strikeBlocked = false, unhedged = false, columns = DEFAULT_LEG_COLUMNS, showExit = false, iv = 0, oiBuildup = null, selected = false, onSelect, onTag, onDetach,
+  leg, allStrikes, ltp, spot, editable, exiting, margin, multiplier = 1, strategyMultiplier = 1, frontExpiry, farExpiry, onChange, onRemove, onOpenExit, onOpenAddLots, onShift, shiftSteps = 1, shiftBusy = false, strikeBlocked = false, unhedged = false, columns = DEFAULT_LEG_COLUMNS, showExit = false, iv = 0, oiBuildup = null, selected = false, onSelect, onTag, onDetach, onOpenChart,
 }: MultiLegLegRowProps) {
   const restingExit = restingExitOrders(leg)[0];
   const isFut = leg.option === 'FUT';
@@ -147,6 +149,14 @@ export default function MultiLegLegRow({
               className="h-3.5 w-3.5 accent-emerald-500 cursor-pointer" />
           )}
           <TagCell value={leg.tag} onCommit={v => (onTag ? onTag(v || undefined) : onChange({ tag: v || undefined }))} />
+          {onOpenChart && !isFut && (
+            <button type="button" onClick={onOpenChart}
+              aria-label={`Chart ${leg.strike} ${leg.option} premium`}
+              title={`Chart: this contract's own premium (${leg.strike} ${leg.option}, 1 lot)`}
+              className={`h-5 px-1 inline-flex items-center gap-0.5 rounded border border-emerald-500/40 text-[10px] font-semibold text-emerald-300 hover:bg-emerald-500/10 ${FOCUS_RING}`}>
+              <LineChart className="w-3 h-3" aria-hidden /> Chart
+            </button>
+          )}
           {onDetach && (
             <button type="button" onClick={onDetach}
               aria-label={`Remove ${leg.strike} ${leg.option} from this group`}

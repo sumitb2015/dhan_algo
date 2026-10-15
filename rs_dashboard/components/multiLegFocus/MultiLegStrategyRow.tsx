@@ -217,6 +217,8 @@ export default function MultiLegStrategyRow({
   const [showPnlTable, setShowPnlTable] = useState(false);
   const [showPositionVisualizer, setShowPositionVisualizer] = useState(false);
   const [showStrategyChart, setShowStrategyChart] = useState(false);
+  // One contract's own premium chart (the per-leg Chart button).
+  const [chartLegId, setChartLegId] = useState<string | null>(null);
   const [showGuards, setShowGuards] = useState(false);
   const [simTargetDays, setSimTargetDays] = useState<number>(0);
   const [simIvShift, setSimIvShift] = useState<number>(0);
@@ -1520,6 +1522,7 @@ export default function MultiLegStrategyRow({
                     <MultiLegLegRow
                       key={leg.id}
                       leg={leg}
+                      onOpenChart={isChartableUnderlying(basket.underlying) && leg.option !== 'FUT' ? (() => setChartLegId(leg.id)) : undefined}
                       allStrikes={allowedStrikes(basket.underlying, leg.expiry || basket.expiry, expiries, allStrikes)}
                       spot={spot}
                       ltp={ltpFor(leg)}
@@ -1694,6 +1697,22 @@ export default function MultiLegStrategyRow({
           onConfirm={onScaleStrategy}
         />
       )}
+      {(() => {
+        const cl = chartLegId ? basket.legs.find(l => l.id === chartLegId) : undefined;
+        if (!cl || cl.option === 'FUT') return null;
+        // Plot the contract alone at 1 lot, whatever its status (a closed leg is still worth charting).
+        const single: MultiLegLeg = { ...cl, status: 'OPEN', lots: 1, fill: undefined };
+        return (
+          <StrategyChartModal
+            isOpen
+            onClose={() => setChartLegId(null)}
+            title={`${cl.strike} ${cl.option} ${cl.side === 'B' ? 'BUY' : 'SELL'}`}
+            underlying={basket.underlying}
+            expiry={cl.expiry || basket.expiry}
+            legs={[single]}
+          />
+        );
+      })()}
       {showStrategyChart && (
         <StrategyChartModal
           isOpen
