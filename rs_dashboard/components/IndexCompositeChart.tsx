@@ -20,7 +20,18 @@ const UP = '#34d399';
 const DOWN = '#f87171';
 const LINE = '#38bdf8';
 
+/** One colour per overlay index (25 in the feed). Saturated categorical colours, not themed. */
+export const OVERLAY_PALETTE = [
+  '#f472b6', '#fbbf24', '#a78bfa', '#4ade80', '#fb923c', '#22d3ee', '#e879f9', '#facc15',
+  '#60a5fa', '#f87171', '#2dd4bf', '#c084fc', '#a3e635', '#fda4af', '#93c5fd', '#fcd34d',
+  '#86efac', '#d8b4fe', '#fdba74', '#67e8f9', '#bef264', '#f9a8d4', '#818cf8', '#5eead4', '#fca5a5',
+];
+
+export interface OverlaySeries { symbol: string; label: string; color: string; data: CompositePoint[] }
+
 type Bar = CompositeCandle | CompositePoint;
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+type AnySeries = ISeriesApi<any>;
 
 function sameBar(a: Bar, b: Bar): boolean {
   const av = a as unknown as Record<string, number>;
@@ -42,24 +53,49 @@ function isTailUpdate(prev: Bar[], next: Bar[]): boolean {
   return true;
 }
 
+/** Draw `next` on `series`, extending the tail in place when that is provably safe. */
+function applyData(series: AnySeries, prev: Bar[], next: Bar[]) {
+  const data = next.map(b => ({ ...b, time: b.time as UTCTimestamp }));
+  if (isTailUpdate(prev, next)) {
+    try {
+      for (let i = prev.length - 1; i < data.length; i++) series.update(data[i]);
+      return;
+    } catch { /* fall through to a full redraw */ }
+  }
+  series.setData(data);
+}
+
 /**
  * Times are IST wall-clock seconds stored as UTCTimestamp (see lib/indexComposite.ts), so the
  * chart's default UTC formatting already reads IST — no tickMarkFormatter shift.
  *
  * The parent keys this component on mode/timeframe/weights, so a selection change remounts
- * (fresh fitContent) and a live tick only extends the tail, keeping the user's zoom.
+ * (fresh fitContent) and a live tick only extends the tails, keeping the user's zoom.
+ * Overlays share the composite's price scale: in `equal` mode every index is S × P/B.
  */
-export default function IndexCompositeChart({ data, kind }: { data: Bar[]; kind: 'line' | 'candles' }) {
+export default function IndexCompositeChart({
+  data,
+  kind,
+  overlays = [],
+  highlight = null,
+}: {
+  data: Bar[];
+  kind: 'line' | 'candles';
+  overlays?: OverlaySeries[];
+  highlight?: string | null;
+}) {
   const chrome = useChartChrome();
   const containerRef = useRef<HTMLDivElement>(null);
   const chartRef = useRef<IChartApi | null>(null);
-  const seriesRef = useRef<ISeriesApi<'Line'> | ISeriesApi<'Candlestick'> | null>(null);
-  const drawnRef = useRef<Bar[]>([]);
+  const mainRef = useRef<AnySeries | null>(null);
+  const mainDrawnRef = useRef<Bar[]>([]);
+  const overlayRef = useRef(new Map<string, { series: AnySeries; drawn: Bar[]; color: string }>());
   const fittedRef = useRef(false);
 
   useEffect(() => {
     const container = containerRef.current;
     if (!container) return;
+    const overlayMap = overlayRef.current;
     const chart = createChart(container, {
       height: container.clientHeight || 480,
       layout: {
@@ -80,11 +116,6 @@ export default function IndexCompositeChart({ data, kind }: { data: Bar[]; kind:
         horzLine: { color: chrome.baseline, labelBackgroundColor: chrome.textMuted },
       },
     });
-    seriesRef.current = kind === 'candles'
-      ? chart.addSeries(CandlestickSeries, {
-          upColor: UP, downColor: DOWN, wickUpColor: UP, wickDownColor: DOWN, borderVisible: false,
-        })
-      : chart.addSeries(LineSeries, { color: LINE, lineWidth: 2, priceLineVisible: true });
     chartRef.current = chart;
 
     const ro = new ResizeObserver(entries => {
@@ -96,8 +127,9 @@ export default function IndexCompositeChart({ data, kind }: { data: Bar[]; kind:
       ro.disconnect();
       chart.remove();
       chartRef.current = null;
-      seriesRef.current = null;
-      drawnRef.current = [];
+      mainRef.current = null;
+      mainDrawnRef.current = [];
+      overlayMap.clear();
       fittedRef.current = false;
     };
     // chrome is re-applied by its own effect below; adding it here would recreate the chart (and lose zoom) on a theme flip.
@@ -117,28 +149,57 @@ export default function IndexCompositeChart({ data, kind }: { data: Bar[]; kind:
     });
   }, [chrome]);
 
+  // Overlays first, so the composite (added after) draws on top of them.
   useEffect(() => {
-    const series = seriesRef.current;
-    if (!series) return;
-    const next = data.map(b => ({ ...b, time: b.time as UTCTimestamp }));
-    const prev = drawnRef.current;
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const target = series as ISeriesApi<any>;
-    if (isTailUpdate(prev, next)) {
-      try {
-        for (let i = prev.length - 1; i < next.length; i++) target.update(next[i]);
-      } catch {
-        target.setData(next);
-      }
-    } else {
-      target.setData(next);
+    const chart = chartRef.current;
+    if (!chart) return;
+    const map = overlayRef.current;
+    const wanted = new Set(overlays.map(o => o.symbol));
+    for (const [symbol, entry] of map) {
+      if (!wanted.has(symbol)) { chart.removeSeries(entry.series); map.delete(symbol); }
     }
-    drawnRef.current = next;
-    if (!fittedRef.current && next.length > 0) {
-      chartRef.current?.timeScale().fitContent();
+    for (const o of overlays) {
+      let entry = map.get(o.symbol);
+      if (!entry) {
+        entry = {
+          series: chart.addSeries(LineSeries, {
+            color: o.color, lineWidth: 1, title: '', lastValueVisible: false, priceLineVisible: false,
+            crosshairMarkerVisible: false,
+          }),
+          drawn: [],
+          color: o.color,
+        };
+        map.set(o.symbol, entry);
+      }
+      applyData(entry.series, entry.drawn, o.data);
+      entry.drawn = o.data;
+    }
+
+    if (!mainRef.current) {
+      mainRef.current = kind === 'candles'
+        ? chart.addSeries(CandlestickSeries, { upColor: UP, downColor: DOWN, wickUpColor: UP, wickDownColor: DOWN, borderVisible: false })
+        : chart.addSeries(LineSeries, { color: LINE, lineWidth: 3, priceLineVisible: true, title: 'Composite' });
+    }
+    applyData(mainRef.current, mainDrawnRef.current, data);
+    mainDrawnRef.current = data;
+
+    if (!fittedRef.current && data.length > 0) {
+      chart.timeScale().fitContent();
       fittedRef.current = true;
     }
-  }, [data, kind]);
+  }, [data, overlays, kind]);
+
+  // Hovering a table row: thicken that index, fade the rest.
+  useEffect(() => {
+    for (const [symbol, entry] of overlayRef.current) {
+      const on = highlight === symbol;
+      entry.series.applyOptions({
+        lineWidth: on ? 3 : 1,
+        color: highlight && !on ? `${entry.color}33` : entry.color,
+        lastValueVisible: on,
+      });
+    }
+  }, [highlight, overlays]);
 
   return <div ref={containerRef} className="w-full h-full min-h-[420px]" />;
 }

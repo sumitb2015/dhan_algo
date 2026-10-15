@@ -1,7 +1,7 @@
 /**
- * Composite index: a weighted sum of the indices streamed by
+ * Composite index: a weighted combination of the indices streamed by
  * scripts/tools/live_indices_ws.py (debug/live_indices_history.json), turned
- * into a line or OHLC candles for /composite-index.
+ * into a line or OHLC candles, plus one overlay line per index, for /composite-index.
  *
  * Pure — no React, no fetch — so the maths is unit-tested in
  * indexComposite.test.ts.
@@ -16,21 +16,30 @@ export interface IndicesHistory {
   catalogue: string[];
   available: string[];
   labels: Record<string, string>;
+  categories?: Record<string, string>;
   ticks: IndexTick[];
 }
 
 export interface CompositeComponent {
   symbol: string;
-  /** May be negative (a spread such as BANKNIFTY − 2 × NIFTY). Zero drops the index. */
+  /** Influence. May be negative (a spread such as BANKNIFTY − 2 × NIFTY). Zero drops the index. */
   weight: number;
+  /** Unticked rows keep their weight but are left out. Missing = enabled (v1 saved state). */
+  enabled?: boolean;
 }
 
 /**
- * `sum`        — Σ wᵢ·Pᵢ, in index points.
- * `normalized` — 100 × Σ wᵢ·(Pᵢ / Pᵢ,base) / Σ|wᵢ|, where the base is each index's first
- *                in-session price. A 50,000-point index no longer outweighs a 900-point one.
+ * `equal` — S × Σ wᵢ·(Pᵢ / Bᵢ) / Σ|wᵢ|: each index's move from its first in-session price Bᵢ,
+ *           weighted by influence, so a 69,000-point index has no more say than an 830-point
+ *           one at equal weight. S is NIFTY's base (100 if NIFTY is left out), so the composite
+ *           opens at Nifty's level and reads in Nifty-like points.
+ * `sum`   — Σ wᵢ·Pᵢ, raw index points; high-priced indices dominate.
  */
-export type CompositeMode = 'sum' | 'normalized';
+export type CompositeMode = 'equal' | 'sum';
+
+/** A volatility gauge, not a price: it has no meaning inside a price composite. */
+export const EXCLUDED_SYMBOLS = new Set(['INDIA VIX']);
+export const SCALE_SYMBOL = 'NIFTY';
 
 /** UTCTimestamp carrying IST wall-clock time, so lightweight-charts' UTC formatting reads IST. */
 export interface CompositePoint { time: number; value: number }
@@ -43,6 +52,25 @@ function secondsOfDay(t: string): number | null {
   const m = /^(\d{2}):(\d{2}):(\d{2})$/.exec(t);
   if (!m) return null;
   return Number(m[1]) * 3600 + Number(m[2]) * 60 + Number(m[3]);
+}
+
+/** Every price index in the feed at equal influence — the page's starting set. */
+export function defaultComponents(catalogue: string[]): CompositeComponent[] {
+  return catalogue.filter(s => !EXCLUDED_SYMBOLS.has(s)).map(symbol => ({ symbol, weight: 1, enabled: true }));
+}
+
+/** Rows that take part: enabled, finite, non-zero weight. */
+export function activeComponents(components: CompositeComponent[]): CompositeComponent[] {
+  return components.filter(c => c.symbol && c.enabled !== false && Number.isFinite(c.weight) && c.weight !== 0);
+}
+
+/** Each active row's share of total influence, in % (Σ|share| = 100). */
+export function influenceShares(components: CompositeComponent[]): Record<string, number> {
+  const active = activeComponents(components);
+  const total = active.reduce((s, c) => s + Math.abs(c.weight), 0);
+  const out: Record<string, number> = {};
+  for (const c of active) out[c.symbol] = total ? (c.weight / total) * 100 : 0;
+  return out;
 }
 
 /**
@@ -72,6 +100,26 @@ export function currentSessionTicks(history: Pick<IndicesHistory, 'ticks' | 'ses
   };
 }
 
+/** A run this long with every index unchanged is a dead feed, not a quiet market (25 indices never all sit still). */
+const STALE_RUN_TICKS = 3;
+
+/**
+ * Index of the first live tick. When the hub has no live data (expired token, hub restart) the
+ * bridge keeps writing the last known prices, so the session opens with a frozen stretch. Bases
+ * taken there would be stale prices and the whole session would read as one jump at feed-up time.
+ * Returns 0 when there is no such stretch (or the feed never came alive).
+ */
+export function firstLiveTick(ticks: { tick: IndexTick }[]): number {
+  if (ticks.length === 0) return 0;
+  const first = ticks[0].tick;
+  for (let i = 1; i < ticks.length; i++) {
+    const t = ticks[i].tick;
+    const changed = Object.keys(t).some(k => k !== 't' && k in first && t[k] !== first[k]);
+    if (changed) return i >= STALE_RUN_TICKS ? i : 0;
+  }
+  return 0;
+}
+
 function dayEpoch(date: string): number {
   const [y, m, d] = date.split('-').map(Number);
   return Date.UTC(y, (m || 1) - 1, d || 1) / 1000;
@@ -80,17 +128,29 @@ function dayEpoch(date: string): number {
 export interface CompositeResult {
   date: string;
   points: CompositePoint[];
-  /** Weighted symbols with no price in any in-session tick (deselected in the bridge, or not subscribed). */
+  /** `equal` mode only: per active symbol, S × Pᵢ/Bᵢ — on the composite's axis, all starting at S. */
+  overlays: Record<string, CompositePoint[]>;
+  /** S: NIFTY's first in-session price (100 if NIFTY is not active). Undefined in `sum` mode. */
+  scale?: number;
+  /** Active symbols with no price in any in-session tick (deselected in the bridge, or not subscribed). */
   missing: string[];
-  /** Base price per symbol used by `normalized` mode (first in-session price). */
+  /** First in-session price per active symbol. */
   bases: Record<string, number>;
-  /** Latest price per weighted symbol. */
+  /** Latest price per active symbol. */
   last: Record<string, number>;
+  /** HH:MM:SS of the first live tick when a frozen opening stretch was skipped (see firstLiveTick). */
+  staleUntil?: string;
+}
+
+function pushPoint(arr: CompositePoint[], time: number, value: number) {
+  // The bridge can write two ticks in the same second after a restart; keep the later one.
+  if (arr.length && arr[arr.length - 1].time === time) arr[arr.length - 1].value = value;
+  else arr.push({ time, value });
 }
 
 /**
  * Composite value per tick. A symbol absent from a tick is forward-filled from its last
- * price; ticks before every weighted symbol has printed once are skipped, so the line does
+ * price; ticks before every active symbol has printed once are skipped, so the line does
  * not jump when a late component first appears.
  */
 export function buildComposite(
@@ -98,13 +158,21 @@ export function buildComposite(
   components: CompositeComponent[],
   mode: CompositeMode,
 ): CompositeResult {
-  const active = components.filter(c => c.symbol && Number.isFinite(c.weight) && c.weight !== 0);
-  const { date, ticks } = currentSessionTicks(history);
+  const active = activeComponents(components);
+  const session = currentSessionTicks(history);
+  const { date } = session;
+  const liveFrom = firstLiveTick(session.ticks);
+  const ticks = session.ticks.slice(liveFrom);
+  const staleUntil = liveFrom > 0 ? String(session.ticks[liveFrom].tick.t) : undefined;
   const base0 = dayEpoch(date);
   const last: Record<string, number> = {};
   const bases: Record<string, number> = {};
   const points: CompositePoint[] = [];
+  const overlays: Record<string, CompositePoint[]> = {};
+  if (mode === 'equal') for (const c of active) overlays[c.symbol] = [];
   const absWeight = active.reduce((s, c) => s + Math.abs(c.weight), 0);
+  const scaleActive = active.some(c => c.symbol === SCALE_SYMBOL);
+  let scale: number | undefined;
 
   for (const { sec, tick } of ticks) {
     for (const c of active) {
@@ -115,32 +183,39 @@ export function buildComposite(
       }
     }
     if (active.length === 0 || active.some(c => last[c.symbol] === undefined)) continue;
-
-    let value = 0;
-    if (mode === 'sum') {
-      for (const c of active) value += c.weight * last[c.symbol];
-    } else {
-      for (const c of active) value += c.weight * (last[c.symbol] / bases[c.symbol]);
-      value = (100 * value) / absWeight;
-    }
     const time = base0 + sec;
-    // The bridge can write two ticks in the same second after a restart; keep the later one.
-    if (points.length && points[points.length - 1].time === time) points[points.length - 1].value = value;
-    else points.push({ time, value });
+
+    if (mode === 'sum') {
+      let value = 0;
+      for (const c of active) value += c.weight * last[c.symbol];
+      pushPoint(points, time, value);
+    } else {
+      scale ??= scaleActive ? bases[SCALE_SYMBOL] : 100;
+      let value = 0;
+      for (const c of active) {
+        const ratio = last[c.symbol] / bases[c.symbol];
+        value += c.weight * ratio;
+        pushPoint(overlays[c.symbol], time, scale * ratio);
+      }
+      pushPoint(points, time, (scale * value) / absWeight);
+    }
   }
 
   const missing = active.filter(c => bases[c.symbol] === undefined).map(c => c.symbol);
-  return { date, points, missing, bases, last };
+  return { date, points, overlays, scale, missing, bases, last, staleUntil };
+}
+
+function bucketStart(time: number, bucketSec: number): number {
+  const sinceMidnight = ((time % 86400) + 86400) % 86400;
+  const dayStart = time - sinceMidnight;
+  return dayStart + SESSION_OPEN_SEC + Math.floor((sinceMidnight - SESSION_OPEN_SEC) / bucketSec) * bucketSec;
 }
 
 /** Bucket points into `bucketSec` candles aligned to the 09:15 session open (so 3m/5m bars match the exchange's). */
 export function toCandles(points: CompositePoint[], bucketSec: number): CompositeCandle[] {
   const candles: CompositeCandle[] = [];
   for (const p of points) {
-    const sinceMidnight = ((p.time % 86400) + 86400) % 86400;
-    const dayStart = p.time - sinceMidnight;
-    const offset = sinceMidnight - SESSION_OPEN_SEC;
-    const time = dayStart + SESSION_OPEN_SEC + Math.floor(offset / bucketSec) * bucketSec;
+    const time = bucketStart(p.time, bucketSec);
     const bar = candles[candles.length - 1];
     if (bar && bar.time === time) {
       bar.high = Math.max(bar.high, p.value);
@@ -151,4 +226,11 @@ export function toCandles(points: CompositePoint[], bucketSec: number): Composit
     }
   }
   return candles;
+}
+
+/** Last value per `bucketSec` bucket, stamped at the bucket start — overlay lines that line up with toCandles' bars. */
+export function toLineCloses(points: CompositePoint[], bucketSec: number): CompositePoint[] {
+  const out: CompositePoint[] = [];
+  for (const p of points) pushPoint(out, bucketStart(p.time, bucketSec), p.value);
+  return out;
 }
