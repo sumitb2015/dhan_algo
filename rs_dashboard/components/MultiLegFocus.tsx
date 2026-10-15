@@ -3340,16 +3340,19 @@ export default function MultiLegFocus({
       }
 
       // 2. Leg-wise SL, TP, and Trailing SL
-      const bestUpdates = new Map<string, { bp: number; from: number | undefined }>();
+      const bestUpdates = new Map<string, { bp: number; from: number | undefined; anchor?: number }>();
       for (const leg of basket.legs) {
         if (leg.status !== 'OPEN' || !leg.fill) continue;
         const ltp = ltpFor(basket, leg);
         if (ltp <= 0) continue;
+        // A trail ticked with no price yet, before trailFrom existed, or carried onto a re-entered leg starts here.
+        const anchor = leg.trail && !(leg.trailFrom != null && leg.trailFrom > 0) ? ltp : undefined;
+        const evalLeg = anchor != null ? { ...leg, trailFrom: anchor, bestPrice: undefined } : leg;
 
-        const evalResult = computeLegTrailingSL(withAutoLegRisk(leg, basket.autoLegRule), ltp);
+        const evalResult = computeLegTrailingSL(withAutoLegRisk(evalLeg, basket.autoLegRule), ltp);
 
-        if (evalResult.newBestPrice !== leg.bestPrice && evalResult.newBestPrice != null) {
-          bestUpdates.set(leg.id, { bp: evalResult.newBestPrice, from: leg.trailFrom });
+        if (evalResult.newBestPrice != null && (anchor != null || evalResult.newBestPrice !== leg.bestPrice)) {
+          bestUpdates.set(leg.id, { bp: evalResult.newBestPrice, from: leg.trailFrom, anchor });
         }
 
         // Alert-only SL / Target: announce, keep the leg open, no auto re-entry.
@@ -3461,7 +3464,8 @@ export default function MultiLegFocus({
       if (bestUpdates.size) {
         patchLegs(basket.id, legs => legs.map(l => {
           const u = bestUpdates.get(l.id);
-          return u && l.status === 'OPEN' && l.trail && l.trailFrom === u.from ? { ...l, bestPrice: u.bp } : l;
+          if (!u || l.status !== 'OPEN' || !l.trail || l.trailFrom !== u.from) return l;
+          return u.anchor != null ? { ...l, trailFrom: u.anchor, bestPrice: u.bp } : { ...l, bestPrice: u.bp };
         }));
       }
     }
