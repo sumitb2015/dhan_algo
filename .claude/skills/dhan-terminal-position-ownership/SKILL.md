@@ -425,6 +425,10 @@ state hook `components/triplestraddle/useTripleStraddle.ts`). Rules that are not
 - **Trailing rules** (`trailSl`, `lock`, `lockTrail`, in % of entry premium, ported from Focus Tool's overall trail): the
   profit peak is persisted, tracked only for armed, fully confirmed positions, and `by > every` is invalid (it would put
   the floor above the profit that set it, an instant exit).
+- **A trailing stop's gap is anchored at the better of entry and the price it was armed at**, never entry alone (a stop
+  set in profit never moves) nor the armed price alone (armed near the stop, it trails 1-2 pts behind and exits on noise).
+  Re-anchor on every SL edit, keep the tightened stop when the trail is switched off, and have the display and the
+  enforcing loop evaluate the same view. Reference: Multi-Leg Focus leg trail, `dhan-multi-leg-focus` item 13 (2026-10-15).
 
 ### 13. A resting stop-entry order is not a leg (Multi-Leg Focus SL-L / SL-M, 2026-10-08)
 

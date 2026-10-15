@@ -59,13 +59,7 @@ before changing any of it**; this skill only maps the page.
    leg's *entry premium* (`fill.avgPrice`): SL 30 % on a 100 sell = exit at 130. The toggle in `MultiLegLegRow` cycles
    pts → % → price via `nextLegThresholdType`. All conversion lives in `computeLegTrailingSL`; a new unit is added
    there plus the type, the toggle/placeholder/label in `MultiLegLegRow` and `AddLotsModal`, and a test. The
-   1-rupee trail uses the resolved SL price, so it works with any unit. Its gap is measured from the better of entry and
-   `leg.trailFrom` (LTP when the trail was ticked or its SL changed, set by `legTrailPatch`): from entry alone a stop
-   placed in profit never moved; from the armed price alone a trail ticked near the stop trailed 1-2 points behind
-   (2026-10-15). Route every SL/trail edit (row, Add Lots) through `legTrailPatch`; unticking keeps the trailed stop as
-   the SL price (`freezeTrailedStop`). The risk loop anchors an un-anchored trail via `trailAnchorPatch`, and the row
-   and the loop both evaluate `legRiskView` so the TSL shown is the stop enforced. The loop's bestPrice write is
-   skipped if trailFrom or bestPrice changed since it read the leg. Strategy-level Target/SL
+   1-rupee trail uses the resolved SL price, so it works with any unit (see item 13). Strategy-level Target/SL
    (`StrategyRiskConfig`, `checkStrategyRisk`) already has `pts | pct` (pct of combined gross entry premium).
    `MultiLegStrategyRow` whitelists `slType`/`tpType` patches and `MultiLegFocus.tsx` carries them on scale; both
    pass new values through untouched.
@@ -119,6 +113,34 @@ before changing any of it**; this skill only maps the page.
    `legsSettling` ignores it. **Every other exit goes through `exitOneLeg`, which cancels the resting order first** (DELETE
    `/api/scalper/orders`) and only then reads the position; a failed cancel aborts the exit (it may have filled). Never send a
    second exit while a resting one is live. Limit price snaps to the contract tick (`lib/multiLegExitOrder.ts`).
+
+13. **Leg trailing SL** (`leg.trail`, ₹1 of stop per ₹1 of new best price; `92576145` → `7048996a`, 2026-10-15). All
+   maths is pure in `lib/multiLegFocus.ts`; the components only call it.
+   - **Gap = |SL price − anchor|, anchor = the better of entry and `leg.trailFrom`** (max for a BUY, min for a SELL).
+     `trailFrom` is the LTP when the trail was ticked or its SL changed. Both single-anchor versions were bugs: from entry
+     alone, a stop placed in profit (BUY 327.58, SL 370, LTP 393.70) kept a 42-pt gap and did not move until LTP passed
+     412; from the armed price alone, a trail ticked near the stop trailed 1-2 pts behind and exited on noise. The stop
+     only tightens (`max`/`min` against the initial SL). Legs with no `trailFrom` fall back to entry.
+   - **Every SL/trail edit goes through `legTrailPatch(leg, patch, ltp)`** — the row (`changeRisk`) and Add Lots with a
+     new SL. It re-anchors (`trailFrom = ltp`, `bestPrice` reset) only when the trail turns on or `sl`/`slType` changes;
+     any other patch passes through unchanged. A new edit path that writes `sl` directly keeps the old anchor and peak.
+   - **Unticking keeps the protection**: `freezeTrailedStop` rewrites the leg's SL as the tightened price
+     (`slType: 'price'`) before trail state is cleared. Skipped when the SL comes from the basket's auto rule
+     (rule-owned) or the trail never moved it.
+   - **Un-anchored trails** (ticked with no live price, saved before `trailFrom` existed, carried onto a re-entered leg):
+     the leader-tab risk loop stamps one with `trailAnchorPatch` at the first live LTP, keeping any stop already tightened.
+   - **Shown = enforced.** Both `MultiLegLegRow` and the risk loop evaluate `computeLegTrailingSL(legRiskView(leg,
+     autoLegRule, ltp), ltp)` (pending anchor + auto SL/TP rule). Never evaluate the raw leg in only one of them, or the
+     TSL on screen is not the stop that fires.
+   - **The risk loop's `bestPrice` write is conditional**: it is dropped if `trailFrom` or `bestPrice` changed since the
+     pass read the leg (a re-anchor in between), or the stale peak would undo the reset. Keep that check if you touch
+     the write.
+   - **UI** (`6ca5d766`): with the trail on and a priced stop (`trailLocked`), the SL box is a read-only amber input
+     showing the live trailed stop as a price, the unit toggle is disabled and shows ₹, and the caption reads
+     `TSL from <initial SL>`. Untick the trail to edit. `MultiLegStrategyRow`'s leg-patch whitelist passes `trailFrom`
+     through; a new trail field edited from the row must be added to that whitelist too, or it is silently dropped.
+   - Tests: the `computeLegTrailingSL` / `legTrailPatch` / `trailAnchorPatch` cases in `lib/multiLegFocus.test.ts`
+     (profit-armed, loss-armed near the stop, re-anchor triggers, anchor keeps a tightened stop). Add one per new rule.
 
 ## Change checklist
 - Touched a basket/leg field? Update `multiLegStoreMerge` (rev + union rules) and its `…Resurrect` test, or a stale
