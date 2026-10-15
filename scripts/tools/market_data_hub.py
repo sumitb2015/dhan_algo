@@ -34,6 +34,7 @@ calls lib.market_hub_client.ensure_hub_running() at startup and periodically
 thereafter, so the hub is spawned (and respawned if it dies) automatically.
 Stop gracefully by writing debug/market_hub/hub_stop.trigger.
 """
+import json
 import os
 import sys
 import time
@@ -61,16 +62,20 @@ STOP_TRIGGER = os.path.join(hub_client.HUB_DIR, 'hub_stop.trigger')
 # old one is revoked: Dhan accepts the socket then drops it, the reconnect loop never
 # re-reads the file, and after enough tries the server answers HTTP 429 — so every
 # consumer serves yesterday's LTPs (prev_close == ltp, 0.00% on every index) all day.
-# Exiting on a token-file change lets the consumers' periodic ensure_hub_running()
-# respawn the hub with the fresh token.
+# Exiting when the file holds a different token lets the consumers' periodic
+# ensure_hub_running() respawn the hub with it (they wait for live_data.json to go
+# 8 s stale, by which time login.py has finished writing). A re-save of the same token
+# does not restart the feed, and an unreadable or half-written file is ignored.
 TOKEN_FILE = os.path.join(ROOT, 'access_token.json')
 
 
-def _token_mtime():
+def _file_token():
     try:
-        return os.path.getmtime(TOKEN_FILE)
-    except OSError:
+        with open(TOKEN_FILE) as f:
+            token = json.load(f).get('accessToken')
+    except (OSError, ValueError, AttributeError):
         return None
+    return token if isinstance(token, str) and token else None
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
 log = logging.getLogger('market_data_hub')
@@ -141,7 +146,7 @@ def main():
         log.error('Authentication failed — aborting.')
         write_status('ERROR', started_at)
         sys.exit(1)
-    token_mtime_at_start = _token_mtime()  # after login: get_dhan_client may rewrite it
+    token_at_start = _file_token()  # after login: get_dhan_client may have re-issued it
 
     helper = DhanHelper(dhan)
 
@@ -187,6 +192,7 @@ def main():
 
     current = {}  # (seg, sid) -> (seg, sid, feed_type), the hub's own confirmed-subscribed set
     last_scan = 0.0
+    last_token_check = 0.0
     last_write = 0.0
     last_tick_signature = None
     last_tick_change_ts = time.monotonic()
@@ -201,14 +207,17 @@ def main():
                 log.info('Stop trigger detected — exiting.')
                 break
 
-            token_mtime = _token_mtime()
-            if token_mtime is not None and token_mtime != token_mtime_at_start:
-                log.info('access_token.json changed since start — exiting so a consumer '
-                         'respawns the hub with the new token.')
-                write_status('STOPPED', started_at)
-                break
-
             now = time.monotonic()
+
+            # Same ~3 s cadence as the registry scan, not every 0.05 s pass of this loop.
+            if now - last_token_check >= REGISTRY_SCAN_SEC:
+                last_token_check = now
+                token = _file_token()
+                if token is not None and token != token_at_start:
+                    log.info('access_token.json holds a new token — exiting so a consumer '
+                             'respawns the hub with it.')
+                    write_status('STOPPED', started_at)
+                    break
 
             try:
                 # ── Registry scan: union wanted_*.json, diff-subscribe the delta ──
