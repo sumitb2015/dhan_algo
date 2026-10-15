@@ -1,7 +1,7 @@
 'use client';
 
 import React, { useState } from 'react';
-import { X, Plus, AlertTriangle, ChevronUp, ChevronDown, Unlink, LineChart } from 'lucide-react';
+import { X, Plus, AlertTriangle, ChevronUp, ChevronDown, Unlink, LineChart, Bell, LogOut } from 'lucide-react';
 import { clampShiftSteps, MAX_SHIFT_STEPS } from '@/lib/strikeShift';
 import {
   legPnl, computeLegTrailingSL, nextLegThresholdType, formatExpiryLabel, legAvgPrice, legExitPrice, restingExitOrders, legQtyUnits, legPnlPct, legOtmPct, type MultiLegLeg,
@@ -142,6 +142,22 @@ function ShiftStepsInput({ value, fallback, disabled, onCommit }: {
       }}
       className={`h-6 w-9 bg-zinc-900 border-r border-zinc-700 text-center text-[11px] font-mono font-bold text-zinc-100 placeholder:text-zinc-500 focus:outline-none focus:bg-zinc-800 disabled:opacity-50 ${FOCUS_RING}`}
     />
+  );
+}
+
+/** What hitting a leg's SL / Target does: close the leg (default) or only alert. Shown once a value is set. */
+function HitActionToggle({ kind, action, onChange }: { kind: 'stop' | 'target'; action: 'EXIT' | 'ALERT' | undefined; onChange: (a: 'EXIT' | 'ALERT') => void }) {
+  const alert = action === 'ALERT';
+  return (
+    <button
+      type="button"
+      onClick={() => onChange(alert ? 'EXIT' : 'ALERT')}
+      aria-label={alert ? `At ${kind}: alert only. Switch to close the leg` : `At ${kind}: close the leg. Switch to alert only`}
+      title={alert ? `At ${kind}: alert only (toast + sound), the leg stays open. Click to close the leg instead.` : `At ${kind}: close the leg. Click to only alert instead.`}
+      className={`h-7 w-6 inline-flex items-center justify-center rounded border ${alert ? 'border-amber-500/40 bg-amber-500/10 text-amber-400' : 'border-zinc-700 bg-zinc-800 text-zinc-400 hover:text-zinc-100'} ${FOCUS_RING}`}
+    >
+      {alert ? <Bell className="w-3 h-3" aria-hidden /> : <LogOut className="w-3 h-3" aria-hidden />}
+    </button>
   );
 }
 
@@ -327,10 +343,11 @@ export default function MultiLegLegRow({
             >
               {slType === 'price' ? '₹' : slType === 'pct' ? '%' : 'pts'}
             </button>
+            {leg.sl != null && <HitActionToggle kind="stop" action={leg.slAction} onChange={a => onChange({ slAction: a })} />}
           </div>
           {trailingEval.effectiveSL != null && (
             <span className={`text-[10px] font-mono ${leg.trail ? 'text-amber-400 font-semibold' : 'text-zinc-500'}`}>
-              {leg.trail ? 'TSL' : 'SL'}: {trailingEval.effectiveSL.toFixed(1)}
+              {leg.trail ? 'TSL' : 'SL'}: {trailingEval.effectiveSL.toFixed(1)}{leg.slAction === 'ALERT' ? ' · alert' : ''}
             </span>
           )}
         </div>
@@ -354,10 +371,11 @@ export default function MultiLegLegRow({
             >
               {tpType === 'price' ? '₹' : tpType === 'pct' ? '%' : 'pts'}
             </button>
+            {leg.tp != null && <HitActionToggle kind="target" action={leg.tpAction} onChange={a => onChange({ tpAction: a })} />}
           </div>
           {trailingEval.tpPrice != null && (
             <span className="text-[10px] font-mono text-emerald-500">
-              TP: {trailingEval.tpPrice.toFixed(1)}
+              TP: {trailingEval.tpPrice.toFixed(1)}{leg.tpAction === 'ALERT' ? ' · alert' : ''}
             </span>
           )}
         </div>

@@ -51,3 +51,16 @@ test('max-loss alarm protects only with exitAtMaxLoss and a limit; Greek band on
   const noLimit = { guards: { greekBands: [{ id: 'g', metric: 'delta', action: 'EXIT_ALL', armed: true, armedDay: T }] } } as unknown as Partial<MultiLegBasket>;
   assert.deepEqual(ids(bk(legs, noLimit)), ['a']);
 });
+
+test('an alert-only leg SL does not protect; a leg target never did', () => {
+  assert.deepEqual(ids(bk([leg('a', 'S', 'CE', { sl: 50, slType: 'pct', slAction: 'ALERT' })])), ['a']);
+  assert.deepEqual(ids(bk([leg('a', 'S', 'CE', { sl: 50, slType: 'pct', slAction: 'EXIT' })])), []);
+});
+
+test('an armed-today leg rule that closes the leg protects that leg only; an alert-only or stale one does not', () => {
+  const rule = (o: Record<string, unknown>) => ({ guards: { legRules: [{ id: 'r', legId: 'a', kind: 'spot', dir: 'above', level: 23000, action: 'EXIT_LEG', armed: true, armedDay: T, ...o }] } }) as Partial<MultiLegBasket>;
+  const legs = () => [leg('a', 'S', 'CE'), leg('b', 'S', 'PE')];
+  assert.deepEqual(ids(bk(legs(), rule({}))), ['b']);
+  assert.deepEqual(ids(bk(legs(), rule({ action: 'ALERT' }))), ['a', 'b']);
+  assert.deepEqual(ids(bk(legs(), rule({ armedDay: '2026-10-12' }))), ['a', 'b']);
+});

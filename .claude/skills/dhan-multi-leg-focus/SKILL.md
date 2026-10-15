@@ -87,6 +87,15 @@ before changing any of it**; this skill only maps the page.
      (`guards.marginAlarm`, alert only, own switch). `normalizeGuards` migrates older saves (`alarm.lossScope` / `warnPct` /
      `marginWarnPct`): the engine stores the new shape on its first pass and turns OFF an armed loss rule whose meaning changed
      (it counted all trades, or warned at another %), with a toast. Every reducer normalizes first.
+   - **Leg rules** (`guards.legRules`, 2026-10-15): one leg by id, watching spot, its own price, or its own ₹ loss
+     (80% heads-up) → Alert me / Close leg (`exitLeg` effect → `exitOneLeg(..., { unattended: true })`). Same 3 s confirm,
+     firedAt + 15 s retry, settling waits, day expiry and edit-turns-off as the strategy rules. Option legs only. A rule
+     ends (turns off) when its leg closes and has settled; it does NOT follow a strike roll to the new leg. A hedge leg
+     waits with one notice while a short on its side is open (`hedgeHeldOpen`, the same predicate `exitOneLeg` refuses on).
+     An armed-today EXIT_LEG rule counts as protection in `unguardedShorts`.
+   - **Alert-only SL / Target** (`leg.slAction` / `tpAction` = `'ALERT'`, bell toggle in the leg row): the leg monitor
+     toasts + chimes once per crossing (30 s quiet period), never exits or auto re-enters; an alert-only SL is not
+     protection in `unguardedShorts`. Carried with sl/tp on roll and auto re-entry; allowed by `updateLeg`'s live-edit whitelist.
    - **Spot freshness is per chain pair** (`chainSpotAtRef`, stamped only when a fetch carried a positive spot), so another
      underlying's updates cannot make a stale spot look fresh. Margin-alarm state is per basket, not per broker.
    - **Automatic exits never raise a dialog.** `exitBasket` and `exitOneLeg` take `{ unattended: true }` (guards pass it): the

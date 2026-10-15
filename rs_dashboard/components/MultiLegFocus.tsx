@@ -30,7 +30,7 @@ import HelpModal from './HelpModal';
 import {
   resolveTemplateLegs, reconcileLegWithBroker, sortLegsForExit, findLegPosition, executionBroker,
   applyOrderOutcomes, normalizeOrderRow, withPendingOrder, restingExitOrders, settleWaitingEntry, applyTriggeredEntry, type WaitingEntry, LEG_FILL_GRACE_MS, legBrokerMismatch, classifyDhanOrder, type DhanOrderPhase, type NormalizedOrder,
-  computeLegTrailingSL, withAutoLegRisk, SAME_DISTANCE, MATCH_OPPOSITE, autoRuleOwns, autoReentryStrike, autoReentryStrikeByDistance, autoReentryStrikeByPremium, entryDistance, avoidSameStrike, autoRollAllowed, computeStrategyMetrics, checkStrategyRisk, fallbackLotSize, planScale, scalePlanSignature,
+  computeLegTrailingSL, withAutoLegRisk, legPnl, SAME_DISTANCE, MATCH_OPPOSITE, autoRuleOwns, autoReentryStrike, autoReentryStrikeByDistance, autoReentryStrikeByPremium, entryDistance, avoidSameStrike, autoRollAllowed, computeStrategyMetrics, checkStrategyRisk, fallbackLotSize, planScale, scalePlanSignature,
   positionProduct, computeBasketStatus, closedFillFromRow,
   findSiblingLegCollisions, type SiblingLegCollision,
   recordOutsideReduction, isLegInFillGrace,
@@ -39,7 +39,7 @@ import {
   type MultiLegLeg, type MultiLegBasket, type StrategyRiskConfig, type MultiLegStatus,
 } from '@/lib/multiLegFocus';
 import { snapToTick, exitLimitTick } from '@/lib/multiLegExitOrder';
-import { guardsArmed, exitSide, istDayOf, type BasketGuards } from '@/lib/multiLegGuards';
+import { guardsArmed, exitSide, istDayOf, hedgeHeldOpen, type BasketGuards } from '@/lib/multiLegGuards';
 import { evaluateBasketGuards, newGuardRuntime } from '@/lib/multiLegGuardEngine';
 import { basketToGreekLegs, computeBasketGreeks } from '@/lib/multiLegGreeks';
 import { closeOrderProduct } from '@/lib/positionProduct';
@@ -1722,18 +1722,17 @@ export default function MultiLegFocus({
 
     // Hedge Protection Guard: an automatic (unattended) exit never sells a hedge while a short on its own side is still open.
     // A manual exit goes straight through — the strategy row marks any short left unhedged instead of asking for confirmation.
-    if (leg.side === 'B' && opts?.unattended) {
+    // The predicate is shared with the leg rules (hedgeHeldOpen), which wait on it instead of sending a refused exit.
+    if (opts?.unattended && hedgeHeldOpen(leg, basket?.legs ?? [])) {
       const matchingShorts = (basket?.legs ?? []).filter(l => l.status === 'OPEN' && l.side === 'S' && l.id !== leg.id && l.option === leg.option);
-      if (matchingShorts.length > 0) {
-        addToast('error', `Hedge ${label} kept`, `A short on the same side is still open (${matchingShorts.map(s => `${s.strike} ${s.option}`).join(', ')}); selling this hedge would leave it naked. The guard retries once the short is closed.`);
-        exitingLegsRef.current.delete(leg.id);
-        setExitingLegs(prev => {
-          const next = new Set(prev);
-          next.delete(leg.id);
-          return next;
-        });
-        return { closed: false, qty: 0 };
-      }
+      addToast('error', `Hedge ${label} kept`, `A short on the same side is still open (${matchingShorts.map(s => `${s.strike} ${s.option}`).join(', ')}); selling this hedge would leave it naked. The guard retries once the short is closed.`);
+      exitingLegsRef.current.delete(leg.id);
+      setExitingLegs(prev => {
+        const next = new Set(prev);
+        next.delete(leg.id);
+        return next;
+      });
+      return { closed: false, qty: 0 };
     }
 
     try {
@@ -2937,7 +2936,7 @@ export default function MultiLegFocus({
         }, {
           skipCollisionCheck: true,
           skipSpreadCheck: true,
-          carry: { sl: l.sl, slType: l.slType, tp: l.tp, tpType: l.tpType, trail: l.trail },
+          carry: { sl: l.sl, slType: l.slType, tp: l.tp, tpType: l.tpType, trail: l.trail, slAction: l.slAction, tpAction: l.tpAction },
         });
         if (!ok) addToast('error', `Closed ${mv.from} ${l.option} but NOT reopened at ${mv.to}`, 'Position is flat at that leg — add the new leg manually');
         return ok;
@@ -3301,6 +3300,10 @@ export default function MultiLegFocus({
   const RISK_EXIT_RETRY_MS = 15_000;
   // Legs whose basket-default stop/target already started an auto re-entry (once per leg).
   const autoRolledRef = useRef<Set<string>>(new Set());
+  // Alert-only SL / Target (leg.slAction / tpAction = 'ALERT'): announce once per crossing, and not again within
+  // LEG_ALERT_QUIET_MS of the last one, so a price wobbling on the level does not toast every tick.
+  const legHitAlertRef = useRef<Map<string, { active: boolean; at: number }>>(new Map());
+  const LEG_ALERT_QUIET_MS = 30_000;
   const recentlyTriggered = (m: Map<string, number>, id: string) => {
     const t = m.get(id);
     return t != null && Date.now() - t < RISK_EXIT_RETRY_MS;
@@ -3349,7 +3352,25 @@ export default function MultiLegFocus({
           bestUpdates.set(leg.id, evalResult.newBestPrice);
         }
 
-        if (evalResult.triggered && !recentlyTriggered(triggeredLegExitsRef.current, leg.id) && !exitingLegsRef.current.has(leg.id)) {
+        // Alert-only SL / Target: announce, keep the leg open, no auto re-entry.
+        for (const k of ['SL', 'TP'] as const) {
+          const hit = k === 'TP' ? evalResult.triggered === 'TP' : evalResult.triggered === 'SL' || evalResult.triggered === 'TRAIL_SL';
+          const st = legHitAlertRef.current.get(`${leg.id}:${k}`);
+          if (!hit) { if (st?.active) legHitAlertRef.current.set(`${leg.id}:${k}`, { ...st, active: false }); continue; }
+          if ((k === 'TP' ? leg.tpAction : leg.slAction) !== 'ALERT' || st?.active) continue;
+          const nowMs = Date.now();
+          // `at` is the last ANNOUNCED time: a crossing skipped inside the quiet window must not push it forward, or a price
+          // wobbling on the level would never alert again.
+          const quiet = !!st && nowMs - st.at < LEG_ALERT_QUIET_MS;
+          legHitAlertRef.current.set(`${leg.id}:${k}`, { active: true, at: quiet && st ? st.at : nowMs });
+          if (quiet) continue;
+          const label = `${leg.side === 'B' ? 'BUY' : 'SELL'} ${leg.strike} ${leg.option}`;
+          addToast('error', `${label}: ${k === 'TP' ? 'target' : evalResult.triggered === 'TRAIL_SL' ? 'trailing stop' : 'stop'} reached (alert only)`,
+            `Price ₹${ltp.toFixed(2)} vs ${k === 'TP' ? `target ₹${evalResult.tpPrice?.toFixed(2)}` : `stop ₹${evalResult.effectiveSL?.toFixed(2)}`}. The leg stays open.`);
+          playAlertChime();
+        }
+        const hitAction = evalResult.triggered === 'TP' ? leg.tpAction : leg.slAction;
+        if (evalResult.triggered && hitAction !== 'ALERT' && !recentlyTriggered(triggeredLegExitsRef.current, leg.id) && !exitingLegsRef.current.has(leg.id)) {
           triggeredLegExitsRef.current.set(leg.id, Date.now());
           const label = `${leg.side === 'B' ? 'BUY' : 'SELL'} ${leg.strike} ${leg.option}`;
           const trigMsg =
@@ -3428,7 +3449,7 @@ export default function MultiLegFocus({
             const ruleDesc = matchOpp ? `premium ≈ ${oppLeg?.option} ₹${oppLtp.toFixed(1)}`
               : sameDist ? `${reOffset === MATCH_OPPOSITE ? 'no opposite leg, ' : ''}same ${leg.entryDist} pts from spot`
               : `ATM${(reOffset as number) >= 0 ? '+' : ''}${reOffset}`;
-            const ok = await addNewLegCore(basket.id, { side: 'S', option: leg.option as 'CE' | 'PE', strike, expiry: legExpiry, lots, orderType: 'MARKET' }, { carry: { sl: leg.sl, slType: leg.slType, tp: leg.tp, tpType: leg.tpType, trail: leg.trail, autoRolls: (leg.autoRolls ?? 0) + 1, ...(leg.entryDist != null ? { entryDist: leg.entryDist } : {}) } });
+            const ok = await addNewLegCore(basket.id, { side: 'S', option: leg.option as 'CE' | 'PE', strike, expiry: legExpiry, lots, orderType: 'MARKET' }, { carry: { sl: leg.sl, slType: leg.slType, tp: leg.tp, tpType: leg.tpType, trail: leg.trail, slAction: leg.slAction, tpAction: leg.tpAction, autoRolls: (leg.autoRolls ?? 0) + 1, ...(leg.entryDist != null ? { entryDist: leg.entryDist } : {}) } });
             addToast(ok ? 'success' : 'error', ok ? `Auto re-entry: SELL ${strike} ${leg.option}` : `Auto re-entry FAILED for ${leg.option}`, ok ? `After ${kind === 'TP' ? 'target' : 'stop'} on ${leg.strike} (${ruleDesc}${shifted ? ', shifted 1 OTM off the exited strike' : ''})` : 'Position is flat on that leg — add the new leg manually');
           })();
         }
@@ -3534,11 +3555,15 @@ export default function MultiLegFocus({
           },
           funds: basket.broker === broker ? fundsData : null,
           fmtMoney,
+          legLtp: l => ltpFor(basket, l),
+          legPnl: l => { const p = ltpFor(basket, l); return p > 0 ? legPnl(l, p, crudeMult) : null; },
+          legBusy: id => exitingLegsRef.current.has(id),
         }, guardRtRef.current);
         for (const e of effects) {
           if (e.kind === 'patch') patchGuards(basket.id, e.fn);
           else if (e.kind === 'toast') { addToast('error', e.title, e.detail); playAlertChime(); }   // chime: rules fire unattended
           else if (e.kind === 'exitAll') void exitBasket(basket.id, { unattended: true });
+          else if (e.kind === 'exitLeg') void exitOneLeg(basket.id, e.leg, undefined, { unattended: true });
           else void runSpotExit(basket.id, e.scope);
         }
       }

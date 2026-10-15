@@ -13,7 +13,7 @@ const leg = (id: string, option: 'CE' | 'PE', strike: number) => ({
 
 const BASKET = {
   id: 'b1', name: 'Short Strangle', underlying: 'NIFTY', expiry: '2099-12-31', broker: 'dhan', presetKey: 'short-strangle',
-  multiplier: 1, legs: [leg('l1', 'CE', 23600), leg('l2', 'PE', 21500)],
+  multiplier: 1, legs: [{ ...leg('l1', 'CE', 23600), sl: 50, slType: 'pct' }, leg('l2', 'PE', 21500)],
   // Older shape: margin shared the loss rule's switch, and the P&L scope was editable.
   guards: {
     spotTriggers: [{ id: 't1', level: 24800, dir: 'above', action: 'EXIT_CE', armed: false }],
@@ -68,8 +68,21 @@ test('risk rules: legacy alarm splits into loss + margin rules; incomplete rules
   await pct.press('Enter');
   await expect(page.getByRole('switch', { name: 'Margin rule: off' })).toBeVisible();
 
+  // A leg rule names its leg and refuses to switch on without a level.
+  await page.getByRole('button', { name: '+ Leg rule' }).click();
+  await expect(page.getByRole('combobox', { name: 'Rule leg' })).toHaveValue('l1');
+  await page.getByRole('switch', { name: 'Leg rule: off' }).click();
+  await expect(page.getByText('Enter a level above 0.')).toBeVisible();
+  await page.getByRole('combobox', { name: 'Watch', exact: true }).selectOption('loss');
+  await expect(page.getByRole('textbox', { name: 'Leg max loss in rupees' })).toBeVisible();
+
+  // The leg's SL can be set to alert only.
+  await page.getByRole('button', { name: 'At stop: close the leg. Switch to alert only' }).click();
+  await expect(page.getByRole('button', { name: 'At stop: alert only. Switch to close the leg' })).toBeVisible();
+
   if (process.env.E2E_SHOT_DIR) {
     await page.locator('ul:has(> li [role="switch"])').first().locator('..').screenshot({ path: `${process.env.E2E_SHOT_DIR}/risk-rules.png` });
+    await page.locator('tr:has(button[aria-label^="At stop"])').first().screenshot({ path: `${process.env.E2E_SHOT_DIR}/leg-row.png` });
   }
   expect(orders).toEqual([]);
 });

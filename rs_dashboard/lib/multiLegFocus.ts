@@ -90,7 +90,13 @@ export interface MultiLegLeg {
   tpType?: LegThresholdType;   // Default: 'pts'
   trail?: boolean;             // Trailing SL enabled (1 rupee trailing step)
   bestPrice?: number;          // Peak favorable price tracked for trailing SL
+  /** What hitting the SL / Target does. Default 'EXIT' (close the leg). 'ALERT' only announces (toast + chime): the leg
+   *  stays open and no auto re-entry starts. Carried with sl/tp on roll, scale and re-entry. */
+  slAction?: LegHitAction;
+  tpAction?: LegHitAction;
 }
+
+export type LegHitAction = 'EXIT' | 'ALERT';
 
 /** Fallback lot size used only until `/api/scalper/lookup` populates the real
  *  broker value — must stay in sync with each underlying's actual contract

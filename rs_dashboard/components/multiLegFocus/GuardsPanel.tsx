@@ -7,9 +7,11 @@ import {
   addSpotTrigger, removeSpotTrigger, editSpotTrigger, setSpotArmed, addGreekBand, removeGreekBand, editGreekBand, setBandArmed,
   addLossRule, removeLossRule, editAlarm, setAlarmArmed, addMarginRule, removeMarginRule, editMarginRule, setMarginArmed,
   normalizeGuards, istDayOf, spotArmBlocker, greekBandInvalid, readGreekBand, lossLevel, marginUtilisationPct, marginLevel,
+  addLegRule, removeLegRule, editLegRule, setLegRuleArmed, legRuleArmBlocker, legRuleTargetable, legRuleLabel,
   DEFAULT_WARN_PCT, SPOT_CONFIRM_MS,
-  type BasketGuards, type SpotTrigger, type SpotAction, type GreekBand, type GreekMetric, type NetGreeks,
+  type BasketGuards, type SpotTrigger, type SpotAction, type GreekBand, type GreekMetric, type NetGreeks, type LegRule, type LegRuleKind,
 } from '@/lib/multiLegGuards';
+import type { MultiLegLeg } from '@/lib/multiLegFocus';
 
 interface Props {
   guards: BasketGuards | undefined;
@@ -24,7 +26,19 @@ interface Props {
   isLeader: boolean;
   /** Functional update (see lib/multiLegGuards.ts reducers): the watcher writes the same object, so never replace it whole. */
   onPatch: (fn: (g: BasketGuards) => BasketGuards) => void;
+  /** The group's legs, for leg rules. */
+  legs: MultiLegLeg[];
+  /** Live price of one leg, 0 when unknown. */
+  legLtp: (leg: MultiLegLeg) => number;
+  /** One open leg's P&L in rupees, null when it has no live price. */
+  legPnl: (leg: MultiLegLeg) => number | null;
 }
+
+const LEG_KINDS: { value: LegRuleKind; label: string }[] = [
+  { value: 'premium', label: 'its price' },
+  { value: 'spot', label: 'spot' },
+  { value: 'loss', label: 'its loss' },
+];
 
 const SPOT_ACTIONS: { value: SpotAction; label: string }[] = [
   { value: 'ALERT', label: 'Alert me' },
@@ -88,7 +102,7 @@ function RuleRow({ on, firing, name, onToggle, onRemove, condition, action, read
   );
 }
 
-export default function GuardsPanel({ guards, spot, netGreeks, pnl, funds, isLeader, onPatch }: Props) {
+export default function GuardsPanel({ guards, spot, netGreeks, pnl, funds, isLeader, onPatch, legs, legLtp, legPnl }: Props) {
   // A message shown under the rule it belongs to (why it could not be switched on).
   const [notice, setNotice] = useState<{ key: string; text: string } | null>(null);
   const g = normalizeGuards(guards);
@@ -96,6 +110,15 @@ export default function GuardsPanel({ guards, spot, netGreeks, pnl, funds, isLea
   const bands = g.greekBands ?? [];
   const loss = g.alarm;
   const margin = g.marginAlarm;
+  const legRules = g.legRules ?? [];
+  const openLegs = legs.filter(legRuleTargetable);
+  /** What a leg rule compares against right now, null when unknown. */
+  const legReading = (r: LegRule, leg: MultiLegLeg | undefined): number | null => {
+    if (!leg) return null;
+    if (r.kind === 'spot') return spot > 0 ? spot : null;
+    if (r.kind === 'premium') { const p = legLtp(leg); return p > 0 ? p : null; }
+    return legRuleTargetable(leg) ? legPnl(leg) : null;
+  };
 
   const apply = (fn: (g: BasketGuards) => BasketGuards) => { setNotice(null); onPatch(fn); };
   /** Switches a rule on only when `blocker` finds nothing wrong; switching off always works. */
@@ -111,7 +134,7 @@ export default function GuardsPanel({ guards, spot, netGreeks, pnl, funds, isLea
   const util = marginUtilisationPct(funds);
   const lossLvl = loss && pnl != null ? lossLevel(pnl, loss) : 'ok';
   const marginLvl = marginLevel(util, margin);
-  const empty = triggers.length === 0 && bands.length === 0 && !loss && !margin;
+  const empty = triggers.length === 0 && bands.length === 0 && !loss && !margin && legRules.length === 0;
 
   const addBtn = `h-6 px-2 rounded border border-zinc-700 bg-zinc-900 text-[11px] font-semibold text-emerald-400 hover:bg-zinc-800 disabled:text-zinc-600 disabled:hover:bg-zinc-900 disabled:cursor-not-allowed ${FOCUS_RING}`;
 
@@ -230,6 +253,61 @@ export default function GuardsPanel({ guards, spot, netGreeks, pnl, funds, isLea
             reading={funds ? `${fmtRs(funds.available)} free` : null}
           />
         )}
+
+        {legRules.map(r => {
+          const key = `leg:${r.id}`;
+          const leg = legs.find(l => l.id === r.legId);
+          const open = legRuleTargetable(leg);
+          const reading = legReading(r, leg);
+          // Pick list: the open option legs, plus this rule's own leg if it has closed (so the row still says which).
+          const choices = open || !leg ? openLegs : [...openLegs, leg];
+          const lvl = r.kind === 'loss' && reading != null ? lossLevel(reading, { maxLoss: r.level }) : 'ok';
+          return (
+            <RuleRow key={r.id} name="Leg rule" on={r.armed} firing={r.armed && !!r.firedAt}
+              onToggle={on => toggle(key, on, () => legRuleArmBlocker(r, leg, reading), gg => setLegRuleArmed(gg, r.id, on, today()))}
+              onRemove={() => apply(gg => removeLegRule(gg, r.id))}
+              note={noteFor(key)}
+              condition={<>
+                <span className={muted}>For</span>
+                <select aria-label="Rule leg" className={selCls} value={r.legId} onChange={e => apply(gg => editLegRule(gg, r.id, { legId: e.target.value }))}>
+                  {!leg && <option value={r.legId}>leg no longer here</option>}
+                  {choices.map(l => <option key={l.id} value={l.id}>{legRuleLabel(l)}{l.status !== 'OPEN' ? ' (closed)' : ''}</option>)}
+                </select>
+                <span className={muted}>if</span>
+                <select aria-label="Watch" className={selCls} value={r.kind} onChange={e => apply(gg => editLegRule(gg, r.id, { kind: e.target.value as LegRuleKind, level: undefined }))}>
+                  {LEG_KINDS.map(k => <option key={k.value} value={k.value}>{k.label}</option>)}
+                </select>
+                {r.kind === 'loss' ? <>
+                  <span className={muted}>reaches ₹</span>
+                  <RuleNumInput value={r.level} onCommit={v => apply(gg => editLegRule(gg, r.id, { level: v }))} placeholder="amount" min={0} step={500}
+                    className={`w-24 ${numCls}`} ariaLabel="Leg max loss in rupees" title={`This leg's own P&L. You get a heads-up at ${DEFAULT_WARN_PCT}%.`} />
+                </> : <>
+                  <span className={muted}>goes</span>
+                  <select aria-label="Direction" className={selCls} value={r.dir ?? 'above'} onChange={e => apply(gg => editLegRule(gg, r.id, { dir: e.target.value as 'above' | 'below' }))}>
+                    <option value="above">above</option>
+                    <option value="below">below</option>
+                  </select>
+                  <RuleNumInput value={r.level} onCommit={v => apply(gg => editLegRule(gg, r.id, { level: v }))} placeholder={r.kind === 'spot' ? 'level' : 'price'} min={0}
+                    step={r.kind === 'spot' ? 50 : 0.5} className={`w-24 ${numCls}`} ariaLabel={r.kind === 'spot' ? 'Spot level' : 'Leg price level'}
+                    title={r.kind === 'spot' ? 'Underlying price level' : "This leg's option price"} />
+                </>}
+              </>}
+              action={
+                <select aria-label="Then" className={selCls} value={r.action} onChange={e => apply(gg => editLegRule(gg, r.id, { action: e.target.value as LegRule['action'] }))}>
+                  <option value="ALERT">Alert me</option>
+                  <option value="EXIT_LEG">Close leg</option>
+                </select>
+              }
+              reading={!open ? (r.firedAt ? `closed ${fmtTime(r.firedAt)}` : 'leg closed')
+                : reading == null ? 'now —'
+                : r.kind === 'loss' ? (r.level && r.level > 0
+                  ? <span className={lvlCls(lvl)}>{reading < 0 ? Math.min(999, Math.round((-reading / r.level) * 100)) : 0}% of limit</span>
+                  : `P&L ${fmtRs(reading)}`)
+                : r.kind === 'spot' ? (r.level && r.level > 0 ? `${Math.abs(reading - r.level).toLocaleString('en-IN', { maximumFractionDigits: 0 })} pts away` : null)
+                : `now ₹${reading.toFixed(2)}`}
+            />
+          );
+        })}
       </ul>
 
       <div className="flex items-center gap-1.5 flex-wrap">
@@ -241,10 +319,12 @@ export default function GuardsPanel({ guards, spot, netGreeks, pnl, funds, isLea
           onClick={() => apply(addLossRule)}>+ Max loss</button>
         <button type="button" className={addBtn} disabled={!!margin} title={margin ? 'Already added' : undefined}
           onClick={() => apply(addMarginRule)}>+ Margin use</button>
+        <button type="button" className={addBtn} disabled={openLegs.length === 0} title={openLegs.length === 0 ? 'No open option leg in this group' : 'A rule on one leg'}
+          onClick={() => apply(gg => addLegRule(gg, { id: newId(), legId: openLegs[0].id, kind: 'premium', dir: 'above', action: 'ALERT', armed: false }))}>+ Leg rule</button>
       </div>
 
       <p className="text-zinc-500">
-        Rules run only while this page is open. An exit waits {SPOT_CONFIRM_MS / 1000} s to confirm before acting. Editing a rule turns it off, and every rule turns off at the end of the day.
+        Rules run only while this page is open. An exit waits {SPOT_CONFIRM_MS / 1000} s to confirm before acting. Editing a rule turns it off, and every rule turns off at the end of the day. A leg rule also ends when its leg closes.
       </p>
     </div>
   );

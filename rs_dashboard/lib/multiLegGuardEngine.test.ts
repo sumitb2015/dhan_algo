@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { evaluateBasketGuards, newGuardRuntime, type GuardEffect, type GuardInput, type GuardRuntime } from './multiLegGuardEngine.ts';
-import { SPOT_CONFIRM_MS, GUARD_EXIT_RETRY_MS, type BasketGuards, type SpotTrigger, type GreekBand } from './multiLegGuards.ts';
+import { SPOT_CONFIRM_MS, GUARD_EXIT_RETRY_MS, type BasketGuards, type SpotTrigger, type GreekBand, type LegRule } from './multiLegGuards.ts';
 import type { MultiLegLeg } from './multiLegFocus.ts';
 
 const T0 = 1_800_000_000_000;               // 2027-01-15 ~08:00 UTC
@@ -19,6 +19,7 @@ function input(over: Partial<GuardInput> & { guards: BasketGuards }): GuardInput
     now: T0, today: TODAY, spot: 24000, busy: false,
     netGreeks: () => ({ delta: 0, gamma: 0, theta: 0, vega: 0 }),
     pnlToday: () => 0, funds: null, fmtMoney: n => `₹${Math.round(n)}`,
+    legLtp: () => 100, legPnl: () => 0, legBusy: () => false,
     ...over,
   };
 }
@@ -263,4 +264,106 @@ test('close-at-max-loss: a busy row defers the exit without stamping firedAt', (
   const g = { alarm: { armed: true, armedDay: TODAY, maxLoss: 1000, exitAtMaxLoss: true } };
   const fx = run(input({ guards: g, pnlToday: () => -1500, busy: true }), rt, 0);
   assert.deepEqual(kinds(fx), ['toast']);
+});
+
+// ── Leg rules ──
+
+const legRule = (o: Partial<LegRule> = {}): LegRule => ({ id: 'r', legId: 's', kind: 'premium', dir: 'above', level: 150, action: 'ALERT', armed: true, armedDay: TODAY, ...o });
+
+test('leg rule, premium alert: confirms for 3 s, announces once, again after the price comes back', () => {
+  const rt = newGuardRuntime();
+  let ltp = 160;
+  const inp = () => input({ guards: { legRules: [legRule()] }, legLtp: () => ltp });
+  assert.deepEqual(run(inp(), rt, 0), []);
+  assert.deepEqual(kinds(run(inp(), rt, SPOT_CONFIRM_MS)), ['toast']);
+  assert.deepEqual(run(inp(), rt, SPOT_CONFIRM_MS + 1000), []);
+  ltp = 140;
+  assert.deepEqual(run(inp(), rt, SPOT_CONFIRM_MS + 2000), []);
+  ltp = 160;
+  run(inp(), rt, 20_000);
+  assert.deepEqual(kinds(run(inp(), rt, 20_000 + SPOT_CONFIRM_MS)), ['toast']);
+});
+
+test('leg rule, unknown price never fires', () => {
+  const rt = newGuardRuntime();
+  const inp = input({ guards: { legRules: [legRule()] }, legLtp: () => 0 });
+  assert.deepEqual(run(inp, rt, 0), []);
+  assert.deepEqual(run(inp, rt, 60_000), []);
+});
+
+test('leg rule, spot exit: stamps firedAt, closes only that leg, retries spaced, then turns off once flat and settled', () => {
+  const rt = newGuardRuntime();
+  const g: BasketGuards = { legRules: [legRule({ kind: 'spot', level: 24500, action: 'EXIT_LEG' })] };
+  const inp = input({ guards: g, spot: 24600 });
+  run(inp, rt, 0);
+  const fx = run(inp, rt, SPOT_CONFIRM_MS);
+  assert.deepEqual(kinds(fx), ['patch', 'toast', 'exitLeg']);
+  const exitFx = fx.find(e => e.kind === 'exitLeg') as { kind: 'exitLeg'; leg: MultiLegLeg };
+  assert.equal(exitFx.leg.id, 's');
+  const fired = applyPatches(g, fx);
+  assert.ok(fired.legRules![0].firedAt);
+  const firing = { ...inp, guards: fired, spot: 24000 };                                  // spot back: keeps closing
+  assert.deepEqual(run(firing, rt, SPOT_CONFIRM_MS + 1000), []);                          // spaced
+  assert.deepEqual(kinds(run(firing, rt, SPOT_CONFIRM_MS + GUARD_EXIT_RETRY_MS)), ['exitLeg']);
+  const settling = [leg('s', 'S', 'CE', { status: 'CLOSED', pendingOrders: [{}] }), leg('p', 'S', 'PE')];
+  assert.deepEqual(run({ ...firing, legs: settling }, rt, 40_000), []);                     // exit unconfirmed: still on
+  const flat = [leg('s', 'S', 'CE', { status: 'CLOSED', closedAt: T0 - 120_000 }), leg('p', 'S', 'PE')];
+  const done = applyPatches(fired, run({ ...firing, legs: flat }, rt, 60_000));
+  assert.equal(done.legRules![0].armed, false);
+});
+
+test('leg rule exit: a breach seen before a price gap needs the full confirmation again', () => {
+  const rt = newGuardRuntime();
+  const g: BasketGuards = { legRules: [legRule({ action: 'EXIT_LEG' })] };
+  const at = (ms: number, ltp: number) => run(input({ guards: g, legLtp: () => ltp }), rt, ms);
+  at(0, 160);
+  at(1000, 0);
+  at(60_000, 0);
+  assert.deepEqual(at(120_000, 160), []);                                                  // first tick back: clock restarts
+  assert.deepEqual(kinds(at(120_000 + SPOT_CONFIRM_MS, 160)), ['patch', 'toast', 'exitLeg']);
+});
+
+test('leg rule exit: a busy leg defers without stamping', () => {
+  const rt = newGuardRuntime();
+  const g: BasketGuards = { legRules: [legRule({ action: 'EXIT_LEG' })] };
+  const inp = input({ guards: g, legLtp: () => 160, legBusy: id => id === 's' });
+  run(inp, rt, 0);
+  assert.deepEqual(run(inp, rt, SPOT_CONFIRM_MS), []);
+  assert.deepEqual(kinds(run({ ...inp, legBusy: () => false }, rt, SPOT_CONFIRM_MS + 1000)), ['patch', 'toast', 'exitLeg']);
+});
+
+test('leg rule exit on a hedge: waits with one notice while a short on its side is open', () => {
+  const rt = newGuardRuntime();
+  const legs = [leg('h', 'B', 'CE'), leg('s', 'S', 'CE'), leg('p', 'S', 'PE')];
+  const g: BasketGuards = { legRules: [legRule({ legId: 'h', action: 'EXIT_LEG' })] };
+  const inp = input({ guards: g, legs, legLtp: () => 160 });
+  run(inp, rt, 0);
+  const fx = run(inp, rt, SPOT_CONFIRM_MS);
+  assert.deepEqual(kinds(fx), ['patch', 'toast', 'toast']);                               // hit + "waiting to close", no exit
+  const fired = applyPatches(g, fx);
+  assert.deepEqual(run({ ...inp, guards: fired }, rt, SPOT_CONFIRM_MS + GUARD_EXIT_RETRY_MS), []);   // no repeat notice
+  const shortGone = [leg('h', 'B', 'CE'), leg('s', 'S', 'CE', { status: 'CLOSED', closedAt: T0 - 120_000 }), leg('p', 'S', 'PE')];
+  assert.deepEqual(kinds(run({ ...inp, guards: fired, legs: shortGone }, rt, 50_000)), ['exitLeg']);
+});
+
+test('leg rule, loss: heads-up at 80%, then limit closes the leg once', () => {
+  const rt = newGuardRuntime();
+  const g: BasketGuards = { legRules: [legRule({ kind: 'loss', level: 1000, action: 'EXIT_LEG' })] };
+  let pnl = -850;
+  const inp = () => input({ guards: g, legPnl: () => pnl });
+  assert.deepEqual(kinds(run(inp(), rt, 0)), ['toast']);
+  assert.deepEqual(run(inp(), rt, 1000), []);
+  pnl = -1200;
+  const fx = run(inp(), rt, 2000);
+  assert.deepEqual(kinds(fx), ['toast', 'patch', 'exitLeg']);
+  assert.ok(applyPatches(g, fx).legRules![0].firedAt);
+});
+
+test('leg rule whose leg closed or left the group turns off; no open legs turns every leg rule off', () => {
+  const rt = newGuardRuntime();
+  const gone: BasketGuards = { legRules: [legRule({ legId: 'missing' })] };
+  assert.equal(applyPatches(gone, run(input({ guards: gone }), rt, 0)).legRules![0].armed, false);
+  const g: BasketGuards = { legRules: [legRule()] };
+  const allClosed = [leg('s', 'S', 'CE', { status: 'CLOSED', closedAt: T0 - 120_000 })];
+  assert.equal(applyPatches(g, run(input({ guards: g, legs: allClosed }), rt, 0)).legRules![0].armed, false);
 });

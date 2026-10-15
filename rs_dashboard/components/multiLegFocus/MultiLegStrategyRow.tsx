@@ -309,7 +309,8 @@ export default function MultiLegStrategyRow({
     ...(onSelectLegs ? [6] : []), 5, 5, 8, ...(legColumns.otm ? [7] : []), ...(legColumns.iv ? [5] : []), ...(legColumns.oi ? [7] : []),
     5, ...(legColumns.qty ? [6] : []), 6, 6, ...(legColumns.avg ? [6] : []), ...(showExitCol ? [6] : []),
     // Action needs ~215px (shift ▲▼, ADD, lots box, EXIT): 19 x 12px at the table's minimum width.
-    8, 8, 4, 6, 9, 7, ...(legColumns.pnlPct ? [6] : []), 6, 19,
+    // SL / TP hold the box, the unit toggle and the Exit/Alert toggle.
+    10, 10, 4, 6, 9, 7, ...(legColumns.pnlPct ? [6] : []), 6, 19,
   ];
   const colTotal = colWeights.reduce((a, b) => a + b, 0);
   const sortTh = (key: LegSortKey, label: string, align: 'left' | 'right' | 'center', title?: string) => {
@@ -524,6 +525,8 @@ export default function MultiLegStrategyRow({
     return m.hasUnpricedLegs ? null : m.totalPnlRupees;
   }, [showGuards, basket.legs, ltpFor, crudeMult]);
   const rulesOn = armedRuleCount(basket.guards);
+  // One leg's P&L in rupees for the leg rules (same multiplier as everything else on the row); null with no live price.
+  const guardLegPnl = useCallback((l: MultiLegLeg) => { const p = ltpFor(l); return p > 0 ? legPnl(l, p, crudeMult) : null; }, [ltpFor, crudeMult]);
   // Open shorts nothing will exit (no leg SL, strategy SL or armed exit guard). Re-evaluated every render, so an
   // armed-yesterday guard shows up here the moment the day rolls.
   const unguarded = unguardedShorts(basket, new Date(Date.now() + 5.5 * 3_600_000).toISOString().slice(0, 10));
@@ -584,6 +587,8 @@ export default function MultiLegStrategyRow({
         if ('tp' in patch) allowed.tp = patch.tp;
         if ('tpType' in patch) allowed.tpType = patch.tpType;
         if ('trail' in patch) allowed.trail = patch.trail;
+        if ('slAction' in patch) allowed.slAction = patch.slAction;
+        if ('tpAction' in patch) allowed.tpAction = patch.tpAction;
         if ('tag' in patch) allowed.tag = patch.tag;
         return { ...l, ...allowed };
       }
@@ -1404,6 +1409,9 @@ export default function MultiLegStrategyRow({
                 funds={availableFunds != null && fundsUsed != null ? { available: availableFunds, used: fundsUsed } : null}
                 isLeader={isLeader !== false}
                 onPatch={onPatchGuards}
+                legs={basket.legs}
+                legLtp={ltpFor}
+                legPnl={guardLegPnl}
               />
             )}
           </div>

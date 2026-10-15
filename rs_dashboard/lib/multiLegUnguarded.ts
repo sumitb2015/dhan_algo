@@ -5,6 +5,8 @@
 //  - an armed spot trigger that EXITS (an ALERT does not exit) covering its side,
 //  - an armed Greek band set to EXIT_ALL,
 //  - an armed max-loss alarm with exitAtMaxLoss and a loss limit.
+//  - an armed leg rule on that leg that closes it (EXIT_LEG).
+// A leg SL set to 'ALERT' only announces, so it does not count.
 // An armed guard stamped with another day is not counted: expireStaleGuards disarms it on the next tick.
 // Hedges (BUY legs), futures and legs with no fill are never reported.
 
@@ -25,6 +27,7 @@ export function unguardedShorts(basket: MultiLegBasket, today: string): MultiLeg
 
   const triggers = (g?.spotTriggers ?? []).filter(t => live(t) && t.action !== 'ALERT' && pos(t.level));
   const exitAll = triggers.some(t => t.action === 'EXIT_ALL');
+  const legExitRules = new Set((g?.legRules ?? []).filter(r => live(r) && r.action === 'EXIT_LEG' && pos(r.level)).map(r => r.legId));
   const exitSides = new Set(triggers.flatMap(t => (t.action === 'EXIT_CE' ? ['CE'] : t.action === 'EXIT_PE' ? ['PE'] : [])));
   // autoLegRule is deliberately ignored: it is stamped onto a leg's own `sl` when the leg is placed (withAutoLegRisk) and
   // the monitor only evaluates `leg.sl`, so a rule enabled after a leg was placed protects nothing.
@@ -32,7 +35,8 @@ export function unguardedShorts(basket: MultiLegBasket, today: string): MultiLeg
   return basket.legs.filter(l => {
     if (l.side !== 'S' || l.status !== 'OPEN' || l.option === 'FUT') return false;
     if (!((l.fill?.qty ?? 0) > 0)) return false;
-    if (basketWide || exitAll || exitSides.has(l.option) || pos(l.sl)) return false;
+    if (basketWide || exitAll || exitSides.has(l.option) || legExitRules.has(l.id)) return false;
+    if (pos(l.sl) && l.slAction !== 'ALERT') return false;
     return true;
   });
 }

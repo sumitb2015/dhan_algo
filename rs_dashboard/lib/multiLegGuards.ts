@@ -62,11 +62,34 @@ export interface MarginAlarm {
   pct?: number;
 }
 
+/** What a leg rule watches: the underlying (spot), the leg's own price (premium), or the leg's own P&L in rupees (loss). */
+export type LegRuleKind = 'spot' | 'premium' | 'loss';
+
+/**
+ * A rule on ONE leg (by id). It ends when that leg closes: a strike roll opens a new leg, which does not inherit it.
+ * Option legs only (futures legs exit through the broker row).
+ */
+export interface LegRule {
+  id: string;
+  legId: string;
+  kind: LegRuleKind;
+  /** spot / premium: 'above' fires when the reading is >= level, 'below' when <= level. Unused for loss. */
+  dir?: 'above' | 'below';
+  /** spot or premium level; for 'loss' the max loss in rupees (positive). */
+  level?: number;
+  /** ALERT only announces; EXIT_LEG closes this one leg (a hedge waits while a short on its side is open). */
+  action: 'ALERT' | 'EXIT_LEG';
+  armed: boolean;
+  armedDay?: string;
+  firedAt?: string;
+}
+
 export interface BasketGuards {
   spotTriggers?: SpotTrigger[];
   greekBands?: GreekBand[];
   alarm?: RiskAlarm;
   marginAlarm?: MarginAlarm;
+  legRules?: LegRule[];
 }
 
 /** Fields older saves carried on `alarm` (before 2026-10-15): margin shared the loss rule's switch, and the warn % and
@@ -199,6 +222,51 @@ export function greekBandInvalid(b: Pick<GreekBand, 'min' | 'max'>): string | nu
   return null;
 }
 
+// ── Leg rules ─────────────────────────────────────────────────────────────────
+
+/** A leg a leg rule can watch: an OPEN, filled option leg. */
+export function legRuleTargetable(leg: MultiLegLeg | undefined): leg is MultiLegLeg {
+  return !!leg && leg.status === 'OPEN' && !!leg.fill && (leg.fill.qty ?? 0) > 0 && leg.option !== 'FUT';
+}
+
+/** Short label for a leg, e.g. "SELL 24800 CE". */
+export function legRuleLabel(leg: Pick<MultiLegLeg, 'side' | 'strike' | 'option'>): string {
+  return `${leg.side === 'B' ? 'BUY' : 'SELL'} ${leg.strike} ${leg.option}`;
+}
+
+/**
+ * True when closing this leg alone would leave a short naked: it is a BUY (hedge) and a SHORT of the same option type is
+ * still open in the group. The same rule exitOneLeg enforces for every unattended exit; checking it here lets a leg rule
+ * wait quietly instead of sending an exit that would only be refused (and toast) every retry.
+ */
+export function hedgeHeldOpen(leg: Pick<MultiLegLeg, 'id' | 'side' | 'option'>, legs: MultiLegLeg[]): boolean {
+  return leg.side === 'B' && legs.some(l => l.status === 'OPEN' && l.side === 'S' && l.id !== leg.id && l.option === leg.option);
+}
+
+/** True when a spot/premium reading is on the rule's side of its level. Unknown readings are never a breach. */
+export function legLevelBreached(r: Pick<LegRule, 'dir' | 'level'>, reading: number | null | undefined): boolean {
+  if (!finite(reading) || !(reading > 0) || !(r.level != null && r.level > 0)) return false;
+  return (r.dir ?? 'above') === 'above' ? reading >= r.level : reading <= r.level;
+}
+
+/**
+ * Why a leg rule cannot be switched on, or null. `reading` is the live spot (spot), leg price (premium) or leg P&L in
+ * rupees (loss); null when unknown.
+ */
+export function legRuleArmBlocker(r: LegRule, leg: MultiLegLeg | undefined, reading: number | null): string | null {
+  if (!legRuleTargetable(leg)) return 'That leg is not open. Pick an open option leg.';
+  if (!(r.level != null && r.level > 0)) return r.kind === 'loss' ? 'Enter the max loss first.' : 'Enter a level above 0.';
+  if (r.kind === 'loss') {
+    if (reading != null && lossLevel(reading, { maxLoss: r.level }) === 'breach') return 'This leg has already lost that much, so the rule would fire at once.';
+    return null;
+  }
+  if (reading == null || !(reading > 0)) return r.kind === 'spot' ? 'No live spot price yet.' : 'No live price for this leg yet.';
+  if (legLevelBreached(r, reading)) {
+    return `${r.kind === 'spot' ? 'Spot' : 'The leg price'} is already ${(r.dir ?? 'above') === 'above' ? 'above' : 'below'} ${r.level.toLocaleString('en-IN')}, so this rule would fire at once.`;
+  }
+  return null;
+}
+
 // ── Max-loss and margin alarm ─────────────────────────────────────────────────
 
 export type AlarmLevel = 'ok' | 'warn' | 'breach';
@@ -283,7 +351,8 @@ export function lossRuleDisarmedByMigration(before: BasketGuards | undefined, af
  * would turn off still reaches the engine once, which stores the new shape and says so. Use armedRuleCount for display.
  */
 export function guardsArmed(g: BasketGuards | undefined): boolean {
-  return !!g && ((g.spotTriggers ?? []).some(t => t.armed) || (g.greekBands ?? []).some(b => b.armed) || !!g.alarm?.armed || !!g.marginAlarm?.armed);
+  return !!g && ((g.spotTriggers ?? []).some(t => t.armed) || (g.greekBands ?? []).some(b => b.armed) || !!g.alarm?.armed || !!g.marginAlarm?.armed
+    || (g.legRules ?? []).some(r => r.armed));
 }
 
 /** How many rules on the basket are switched on. */
@@ -291,7 +360,7 @@ export function armedRuleCount(g: BasketGuards | undefined): number {
   if (!g) return 0;
   const n = normalizeGuards(g);
   return (n.spotTriggers ?? []).filter(t => t.armed).length + (n.greekBands ?? []).filter(b => b.armed).length
-    + (n.alarm?.armed ? 1 : 0) + (n.marginAlarm?.armed ? 1 : 0);
+    + (n.alarm?.armed ? 1 : 0) + (n.marginAlarm?.armed ? 1 : 0) + (n.legRules ?? []).filter(r => r.armed).length;
 }
 
 /**
@@ -306,6 +375,7 @@ export function disarmGuards(g: BasketGuards | undefined): BasketGuards | undefi
     ...(g.spotTriggers ? { spotTriggers: g.spotTriggers.map(t => ({ ...t, armed: false, firedAt: undefined })) } : {}),
     ...(g.greekBands ? { greekBands: g.greekBands.map(b => ({ ...b, armed: false, firedAt: undefined })) } : {}),
     ...(g.alarm ? { alarm: { ...g.alarm, armed: false, firedAt: undefined } } : {}),
+    ...(g.legRules ? { legRules: g.legRules.map(r => ({ ...r, armed: false, firedAt: undefined })) } : {}),
   };
 }
 
@@ -350,6 +420,14 @@ export const editMarginRule = (g: BasketGuards, pct: number | undefined): Basket
   { g = N(g); return { ...g, marginAlarm: { ...(g.marginAlarm ?? { armed: false }), pct, armed: false, armedDay: undefined } }; };
 export const setMarginArmed = (g: BasketGuards, armed: boolean, day?: string): BasketGuards =>
   { g = N(g); return { ...g, marginAlarm: { ...(g.marginAlarm ?? { armed: false }), armed, armedDay: armed ? day : undefined } }; };
+
+export const addLegRule = (g: BasketGuards, r: LegRule): BasketGuards => { g = N(g); return { ...g, legRules: [...(g.legRules ?? []), r] }; };
+export const removeLegRule = (g: BasketGuards, id: string): BasketGuards => { g = N(g); return { ...g, legRules: (g.legRules ?? []).filter(r => r.id !== id) }; };
+/** Any edit turns the rule off, including picking another leg or kind. */
+export const editLegRule = (g: BasketGuards, id: string, patch: Partial<Omit<LegRule, 'id' | 'armed' | 'armedDay' | 'firedAt'>>): BasketGuards =>
+  { g = N(g); return { ...g, legRules: upd(g.legRules, id, r => ({ ...r, ...patch, armed: false, armedDay: undefined, firedAt: undefined })) }; };
+export const setLegRuleArmed = (g: BasketGuards, id: string, armed: boolean, day?: string): BasketGuards =>
+  { g = N(g); return { ...g, legRules: upd(g.legRules, id, r => ({ ...r, armed, armedDay: armed ? day : undefined, firedAt: undefined })) }; };
 
 // ── Exiting one side ──────────────────────────────────────────────────────────
 
@@ -405,7 +483,7 @@ export function expireStaleGuards(g: BasketGuards | undefined, today: string): B
   g = normalizeGuards(g);
   const stale = (x: { armed: boolean; armedDay?: string }) => x.armed && x.armedDay !== today;
   const any = (g.spotTriggers ?? []).some(stale) || (g.greekBands ?? []).some(stale) || (g.alarm != null && stale(g.alarm))
-    || (g.marginAlarm != null && stale(g.marginAlarm));
+    || (g.marginAlarm != null && stale(g.marginAlarm)) || (g.legRules ?? []).some(stale);
   if (!any) return null;
   const off = <T extends { armed: boolean; armedDay?: string; firedAt?: string }>(x: T): T => (stale(x) ? { ...x, armed: false, armedDay: undefined, firedAt: undefined } : x);
   return {
@@ -414,5 +492,6 @@ export function expireStaleGuards(g: BasketGuards | undefined, today: string): B
     ...(g.spotTriggers ? { spotTriggers: g.spotTriggers.map(off) } : {}),
     ...(g.greekBands ? { greekBands: g.greekBands.map(off) } : {}),
     ...(g.alarm ? { alarm: off(g.alarm) } : {}),
+    ...(g.legRules ? { legRules: g.legRules.map(off) } : {}),
   };
 }

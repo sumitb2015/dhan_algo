@@ -10,6 +10,7 @@ import {
   legsSettling, shortsSettling, exitSide, addSpotTrigger, removeSpotTrigger, editSpotTrigger, setSpotArmed,
   addGreekBand, editGreekBand, setBandArmed, editAlarm, setAlarmArmed, addLossRule, removeLossRule, addMarginRule, removeMarginRule,
   editMarginRule, setMarginArmed, normalizeGuards, lossRuleDisarmedByMigration, armedRuleCount, type BasketGuards, type SideExitDeps,
+  addLegRule, removeLegRule, editLegRule, setLegRuleArmed, legRuleArmBlocker, hedgeHeldOpen, legLevelBreached, legRuleTargetable, type LegRule,
 } from './multiLegGuards.ts';
 
 
@@ -385,4 +386,61 @@ test('alarm edits and arming clear firedAt; disarmGuards clears it too', () => {
   assert.equal(editAlarm(g, { maxLoss: 200 }).alarm!.firedAt, undefined);
   assert.equal(setAlarmArmed(g, true, '2026-10-12').alarm!.firedAt, undefined);
   assert.equal(disarmGuards(g)!.alarm!.firedAt, undefined);
+});
+
+// ── Leg rules ──
+
+const lr = (o: Partial<LegRule> = {}): LegRule => ({ id: 'r', legId: 's', kind: 'premium', dir: 'above', level: 150, action: 'ALERT', armed: false, ...o });
+
+test('leg rule reducers: add, switch on, any edit (incl. another leg) turns it off, remove', () => {
+  let g: BasketGuards = addLegRule({}, lr());
+  g = setLegRuleArmed(g, 'r', true, '2026-10-15');
+  assert.equal(g.legRules![0].armed, true);
+  assert.equal(armedRuleCount(g), 1);
+  assert.equal(guardsArmed(g), true);
+  g = editLegRule(g, 'r', { legId: 'p' });
+  assert.equal(g.legRules![0].armed, false);
+  assert.equal(g.legRules![0].legId, 'p');
+  g = removeLegRule(g, 'r');
+  assert.deepEqual(g.legRules, []);
+});
+
+test('leg rules: disarmGuards and the day roll turn them off', () => {
+  const g: BasketGuards = { legRules: [lr({ armed: true, armedDay: '2026-10-14', firedAt: 'x' })] };
+  assert.equal(disarmGuards(g)!.legRules![0].armed, false);
+  assert.equal(expireStaleGuards(g, '2026-10-15')!.legRules![0].armed, false);
+  assert.equal(expireStaleGuards(g, '2026-10-14'), null);
+});
+
+test('legLevelBreached and legRuleTargetable', () => {
+  assert.equal(legLevelBreached({ dir: 'above', level: 150 }, 150), true);
+  assert.equal(legLevelBreached({ dir: 'below', level: 150 }, 151), false);
+  assert.equal(legLevelBreached({ dir: 'above', level: 150 }, 0), false);
+  assert.equal(legLevelBreached({ dir: 'above', level: undefined }, 200), false);
+  assert.equal(legRuleTargetable(leg('a', 'S', 'CE')), true);
+  assert.equal(legRuleTargetable(leg('a', 'S', 'FUT')), false);
+  assert.equal(legRuleTargetable(leg('a', 'S', 'CE', 'CLOSED')), false);
+  assert.equal(legRuleTargetable(leg('a', 'S', 'CE', 'OPEN', false)), false);
+  assert.equal(legRuleTargetable(undefined), false);
+});
+
+test('legRuleArmBlocker: open leg, a level, a live reading, and not already past it', () => {
+  const open = leg('s', 'S', 'CE');
+  assert.match(legRuleArmBlocker(lr(), leg('s', 'S', 'CE', 'CLOSED'), 120)!, /not open/);
+  assert.match(legRuleArmBlocker(lr({ level: undefined }), open, 120)!, /level above 0/);
+  assert.match(legRuleArmBlocker(lr(), open, null)!, /No live price/);
+  assert.match(legRuleArmBlocker(lr({ kind: 'spot' }), open, null)!, /No live spot/);
+  assert.match(legRuleArmBlocker(lr(), open, 160)!, /already above/);
+  assert.equal(legRuleArmBlocker(lr(), open, 120), null);
+  assert.match(legRuleArmBlocker(lr({ kind: 'loss', level: undefined }), open, -10)!, /max loss/);
+  assert.match(legRuleArmBlocker(lr({ kind: 'loss', level: 1000 }), open, -1500)!, /already lost/);
+  assert.equal(legRuleArmBlocker(lr({ kind: 'loss', level: 1000 }), open, null), null);   // unknown P&L: can still arm
+});
+
+test('hedgeHeldOpen: a BUY leg waits while a short of the same type is open', () => {
+  const h = leg('h', 'B', 'CE');
+  assert.equal(hedgeHeldOpen(h, [h, leg('s', 'S', 'CE')]), true);
+  assert.equal(hedgeHeldOpen(h, [h, leg('s', 'S', 'PE')]), false);
+  assert.equal(hedgeHeldOpen(h, [h, leg('s', 'S', 'CE', 'CLOSED')]), false);
+  assert.equal(hedgeHeldOpen(leg('s', 'S', 'CE'), [leg('s', 'S', 'CE'), leg('t', 'S', 'CE')]), false);   // a short is never held
 });
