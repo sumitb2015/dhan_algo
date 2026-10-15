@@ -1,4 +1,4 @@
-// Multi-Leg Focus guards: spot-level triggers, net-Greek bands and the max-loss / margin alarm.
+// Multi-Leg Focus guards ("Risk rules" in the UI): spot-level triggers, net-Greek bands, the max-loss rule and the margin-use alert.
 // Pure rules only (no fetch, no React) so the watcher in MultiLegFocus.tsx stays thin and every decision is tested.
 //
 // Safety shape shared by all three:
@@ -41,31 +41,37 @@ export interface GreekBand {
   firedAt?: string;
 }
 
-/** Rupee max-loss and account margin-utilisation alarm. */
+/** Rupee max-loss rule, measured on today's P&L (live legs plus legs closed today, the page's Today P&L). */
 export interface RiskAlarm {
   armed: boolean;
   armedDay?: string;
-  /** What the max loss is measured on. 'today' (default) = live legs plus legs closed today, the same scope as the page's
-   *  Today P&L; 'total' also counts trades closed on earlier days, so an old realized loss can trip a fresh position. */
-  lossScope?: 'today' | 'total';
-  /** Max tolerated loss in rupees (positive number). */
+  /** Max tolerated loss in rupees (positive number). A heads-up is announced at DEFAULT_WARN_PCT of it. */
   maxLoss?: number;
-  /** Warn when the loss reaches this % of maxLoss. Default 80. */
-  warnPct?: number;
   /** Also close the basket when the full maxLoss is reached. */
   exitAtMaxLoss?: boolean;
   /** ISO time the close-at-max-loss exit started. Set means "closing": it retries until flat, then the alarm disarms, so a
    *  position added afterwards is not closed by a loss that was already realized. */
   firedAt?: string;
-  /** Warn when account margin utilisation (used / (used + available)) reaches this %. */
-  marginWarnPct?: number;
+}
+
+/** Account margin-utilisation alert (used / (used + available)). Alert only, account-wide, with its own switch. */
+export interface MarginAlarm {
+  armed: boolean;
+  armedDay?: string;
+  /** Alert when utilisation reaches this %. */
+  pct?: number;
 }
 
 export interface BasketGuards {
   spotTriggers?: SpotTrigger[];
   greekBands?: GreekBand[];
   alarm?: RiskAlarm;
+  marginAlarm?: MarginAlarm;
 }
+
+/** Fields older saves carried on `alarm` (before 2026-10-15): margin shared the loss rule's switch, and the warn % and
+ *  P&L scope were editable. normalizeGuards moves them out. */
+type LegacyRiskAlarm = RiskAlarm & { lossScope?: 'today' | 'total'; warnPct?: number; marginWarnPct?: number };
 
 export const SPOT_CONFIRM_MS = 3_000;
 export const GUARD_EXIT_RETRY_MS = 15_000;
@@ -87,7 +93,7 @@ export function spotBreached(t: Pick<SpotTrigger, 'level' | 'dir'>, spot: number
 export function spotArmBlocker(t: Pick<SpotTrigger, 'level' | 'dir'>, spot: number | undefined | null): string | null {
   if (!(t.level > 0)) return 'Enter a level above 0.';
   if (!finite(spot) || !(spot > 0)) return 'No live spot price yet.';
-  if (spotBreached(t, spot)) return `Spot ${spot} is already ${t.dir === 'above' ? 'above' : 'below'} ${t.level}: it would fire immediately.`;
+  if (spotBreached(t, spot)) return `Spot is already ${t.dir === 'above' ? 'above' : 'below'} ${t.level.toLocaleString('en-IN')}, so this rule would fire at once. Pick a level spot has not reached.`;
   return null;
 }
 
@@ -188,8 +194,8 @@ export function readGreekBand(band: Pick<GreekBand, 'metric' | 'min' | 'max'>, n
 
 /** A band with min above max can never be satisfied: reject it instead of exiting on the first tick. */
 export function greekBandInvalid(b: Pick<GreekBand, 'min' | 'max'>): string | null {
-  if (!finite(b.min) && !finite(b.max)) return 'Set a min, a max, or both.';
-  if (finite(b.min) && finite(b.max) && b.min > b.max) return 'Min is above max.';
+  if (!finite(b.min) && !finite(b.max)) return 'Enter a lower limit, an upper limit, or both.';
+  if (finite(b.min) && finite(b.max) && b.min > b.max) return 'The lower limit is above the upper limit.';
   return null;
 }
 
@@ -198,13 +204,12 @@ export function greekBandInvalid(b: Pick<GreekBand, 'min' | 'max'>): string | nu
 export type AlarmLevel = 'ok' | 'warn' | 'breach';
 const RANK: Record<AlarmLevel, number> = { ok: 0, warn: 1, breach: 2 };
 
-/** Loss level for a rupee P&L: 'warn' from warnPct of maxLoss, 'breach' at maxLoss. Unknown P&L reads as ok. */
-export function lossLevel(pnlRupees: number | undefined | null, alarm: Pick<RiskAlarm, 'maxLoss' | 'warnPct'> | undefined): AlarmLevel {
+/** Loss level for a rupee P&L: 'warn' from DEFAULT_WARN_PCT of maxLoss, 'breach' at maxLoss. Unknown P&L reads as ok. */
+export function lossLevel(pnlRupees: number | undefined | null, alarm: Pick<RiskAlarm, 'maxLoss'> | undefined): AlarmLevel {
   if (!alarm || !finite(pnlRupees) || !(alarm.maxLoss != null && alarm.maxLoss > 0)) return 'ok';
   const loss = -pnlRupees;
   if (loss >= alarm.maxLoss) return 'breach';
-  const warn = (alarm.warnPct != null && alarm.warnPct > 0 && alarm.warnPct < 100 ? alarm.warnPct : DEFAULT_WARN_PCT) / 100;
-  return loss >= alarm.maxLoss * warn ? 'warn' : 'ok';
+  return loss >= alarm.maxLoss * (DEFAULT_WARN_PCT / 100) ? 'warn' : 'ok';
 }
 
 /** Account margin utilisation in % (used / (used + available)), or null when the funds reading is unusable. */
@@ -214,9 +219,9 @@ export function marginUtilisationPct(funds: { available: number; used: number } 
   return total > 0 ? (funds.used / total) * 100 : null;
 }
 
-export function marginLevel(utilPct: number | null | undefined, alarm: Pick<RiskAlarm, 'marginWarnPct'> | undefined): AlarmLevel {
-  if (!finite(utilPct) || !(alarm?.marginWarnPct != null && alarm.marginWarnPct > 0)) return 'ok';
-  return utilPct >= alarm.marginWarnPct ? 'warn' : 'ok';
+export function marginLevel(utilPct: number | null | undefined, m: Pick<MarginAlarm, 'pct'> | undefined): AlarmLevel {
+  if (!finite(utilPct) || !(m?.pct != null && m.pct > 0)) return 'ok';
+  return utilPct >= m.pct ? 'warn' : 'ok';
 }
 
 /**
@@ -231,22 +236,62 @@ export function nextAlarmState(prev: AlarmLevel, level: AlarmLevel, recovered: b
 }
 
 /** For loss: recovered once loss is ALARM_HYSTERESIS_PCT of maxLoss below the level it was announced at. */
-export function lossRecovered(pnlRupees: number, alarm: Pick<RiskAlarm, 'maxLoss' | 'warnPct'>, prev: AlarmLevel): boolean {
+export function lossRecovered(pnlRupees: number, alarm: Pick<RiskAlarm, 'maxLoss'>, prev: AlarmLevel): boolean {
   if (!(alarm.maxLoss != null && alarm.maxLoss > 0)) return true;
-  const warn = (alarm.warnPct != null && alarm.warnPct > 0 && alarm.warnPct < 100 ? alarm.warnPct : DEFAULT_WARN_PCT);
-  const lowerEdge = prev === 'breach' ? 100 : warn;
+  const lowerEdge = prev === 'breach' ? 100 : DEFAULT_WARN_PCT;
   return (-pnlRupees / alarm.maxLoss) * 100 <= lowerEdge - ALARM_HYSTERESIS_PCT;
 }
 
-export function marginRecovered(utilPct: number, alarm: Pick<RiskAlarm, 'marginWarnPct'>): boolean {
-  return !(alarm.marginWarnPct != null && alarm.marginWarnPct > 0) || utilPct <= alarm.marginWarnPct - ALARM_HYSTERESIS_PCT;
+export function marginRecovered(utilPct: number, m: Pick<MarginAlarm, 'pct'>): boolean {
+  return !(m.pct != null && m.pct > 0) || utilPct <= m.pct - ALARM_HYSTERESIS_PCT;
 }
 
 // ── Housekeeping ──────────────────────────────────────────────────────────────
 
-/** True when any guard on the basket is armed. */
+/**
+ * Moves fields older saves kept on `alarm` (see LegacyRiskAlarm) to today's shape. Idempotent; returns `g` itself when it is
+ * already current. The margin level becomes its own rule (keeping its switch). A loss rule whose meaning changed (it
+ * counted all trades, or warned at another %) is turned off rather than silently re-scoped. A legacy alarm with no max
+ * loss was a margin-only alarm, so it leaves no loss rule behind.
+ */
+export function normalizeGuards(g: BasketGuards | undefined): BasketGuards {
+  if (!g) return {};
+  const a = g.alarm as LegacyRiskAlarm | undefined;
+  if (!a || (a.lossScope === undefined && a.warnPct === undefined && a.marginWarnPct === undefined)) return g;
+  const { lossScope, warnPct, marginWarnPct, ...loss } = a;
+  const out: BasketGuards = { ...g };
+  if (marginWarnPct != null && marginWarnPct > 0 && !g.marginAlarm) {
+    out.marginAlarm = { armed: a.armed, ...(a.armed && a.armedDay ? { armedDay: a.armedDay } : {}), pct: marginWarnPct };
+  }
+  if ((loss.maxLoss != null && loss.maxLoss > 0) || loss.firedAt) {
+    const changed = lossScope === 'total' || (warnPct != null && warnPct !== DEFAULT_WARN_PCT);
+    // A close-at-max-loss already under way keeps going: stopping it halfway would leave part of the book open.
+    out.alarm = changed && loss.armed && !loss.firedAt ? { ...loss, armed: false, armedDay: undefined } : loss;
+  } else {
+    delete out.alarm;
+  }
+  return out;
+}
+
+/** True when the migration in normalizeGuards turned an armed max-loss rule off. */
+export function lossRuleDisarmedByMigration(before: BasketGuards | undefined, after: BasketGuards): boolean {
+  return !!before?.alarm?.armed && !!before.alarm.maxLoss && !after.alarm?.armed;
+}
+
+/**
+ * True when any guard is armed AS STORED (not normalized). The watcher gates on this, so a legacy rule that normalizeGuards
+ * would turn off still reaches the engine once, which stores the new shape and says so. Use armedRuleCount for display.
+ */
 export function guardsArmed(g: BasketGuards | undefined): boolean {
-  return !!g && ((g.spotTriggers ?? []).some(t => t.armed) || (g.greekBands ?? []).some(b => b.armed) || !!g.alarm?.armed);
+  return !!g && ((g.spotTriggers ?? []).some(t => t.armed) || (g.greekBands ?? []).some(b => b.armed) || !!g.alarm?.armed || !!g.marginAlarm?.armed);
+}
+
+/** How many rules on the basket are switched on. */
+export function armedRuleCount(g: BasketGuards | undefined): number {
+  if (!g) return 0;
+  const n = normalizeGuards(g);
+  return (n.spotTriggers ?? []).filter(t => t.armed).length + (n.greekBands ?? []).filter(b => b.armed).length
+    + (n.alarm?.armed ? 1 : 0) + (n.marginAlarm?.armed ? 1 : 0);
 }
 
 /**
@@ -255,7 +300,9 @@ export function guardsArmed(g: BasketGuards | undefined): boolean {
  */
 export function disarmGuards(g: BasketGuards | undefined): BasketGuards | undefined {
   if (!g) return g;
+  g = normalizeGuards(g);
   return {
+    ...(g.marginAlarm ? { marginAlarm: { ...g.marginAlarm, armed: false } } : {}),
     ...(g.spotTriggers ? { spotTriggers: g.spotTriggers.map(t => ({ ...t, armed: false, firedAt: undefined })) } : {}),
     ...(g.greekBands ? { greekBands: g.greekBands.map(b => ({ ...b, armed: false, firedAt: undefined })) } : {}),
     ...(g.alarm ? { alarm: { ...g.alarm, armed: false, firedAt: undefined } } : {}),
@@ -270,25 +317,39 @@ export function disarmGuards(g: BasketGuards | undefined): BasketGuards | undefi
 const upd = <T extends { id: string }>(arr: T[] | undefined, id: string, fn: (x: T) => T): T[] | undefined =>
   arr?.map(x => (x.id === id ? fn(x) : x));
 
-export const addSpotTrigger = (g: BasketGuards, t: SpotTrigger): BasketGuards => ({ ...g, spotTriggers: [...(g.spotTriggers ?? []), t] });
-export const removeSpotTrigger = (g: BasketGuards, id: string): BasketGuards => ({ ...g, spotTriggers: (g.spotTriggers ?? []).filter(t => t.id !== id) });
+// Every reducer normalizes first, so an edit on a basket saved in the older shape writes the current shape.
+const N = normalizeGuards;
+
+export const addSpotTrigger = (g: BasketGuards, t: SpotTrigger): BasketGuards => { g = N(g); return { ...g, spotTriggers: [...(g.spotTriggers ?? []), t] }; };
+export const removeSpotTrigger = (g: BasketGuards, id: string): BasketGuards => { g = N(g); return { ...g, spotTriggers: (g.spotTriggers ?? []).filter(t => t.id !== id) }; };
 /** Any edit disarms: a level changed under a live guard could fire on the very next tick. */
 export const editSpotTrigger = (g: BasketGuards, id: string, patch: Partial<SpotTrigger>): BasketGuards =>
-  ({ ...g, spotTriggers: upd(g.spotTriggers, id, t => ({ ...t, ...patch, armed: false, firedAt: undefined })) });
+  { g = N(g); return { ...g, spotTriggers: upd(g.spotTriggers, id, t => ({ ...t, ...patch, armed: false, firedAt: undefined })) }; };
 export const setSpotArmed = (g: BasketGuards, id: string, armed: boolean, day?: string): BasketGuards =>
-  ({ ...g, spotTriggers: upd(g.spotTriggers, id, t => ({ ...t, armed, armedDay: armed ? day : undefined, firedAt: undefined })) });
+  { g = N(g); return { ...g, spotTriggers: upd(g.spotTriggers, id, t => ({ ...t, armed, armedDay: armed ? day : undefined, firedAt: undefined })) }; };
 
-export const addGreekBand = (g: BasketGuards, b: GreekBand): BasketGuards => ({ ...g, greekBands: [...(g.greekBands ?? []), b] });
-export const removeGreekBand = (g: BasketGuards, id: string): BasketGuards => ({ ...g, greekBands: (g.greekBands ?? []).filter(b => b.id !== id) });
+export const addGreekBand = (g: BasketGuards, b: GreekBand): BasketGuards => { g = N(g); return { ...g, greekBands: [...(g.greekBands ?? []), b] }; };
+export const removeGreekBand = (g: BasketGuards, id: string): BasketGuards => { g = N(g); return { ...g, greekBands: (g.greekBands ?? []).filter(b => b.id !== id) }; };
 export const editGreekBand = (g: BasketGuards, id: string, patch: Partial<GreekBand>): BasketGuards =>
-  ({ ...g, greekBands: upd(g.greekBands, id, b => ({ ...b, ...patch, armed: false, firedAt: undefined })) });
+  { g = N(g); return { ...g, greekBands: upd(g.greekBands, id, b => ({ ...b, ...patch, armed: false, firedAt: undefined })) }; };
 export const setBandArmed = (g: BasketGuards, id: string, armed: boolean, day?: string): BasketGuards =>
-  ({ ...g, greekBands: upd(g.greekBands, id, b => ({ ...b, armed, armedDay: armed ? day : undefined, firedAt: undefined })) });
+  { g = N(g); return { ...g, greekBands: upd(g.greekBands, id, b => ({ ...b, armed, armedDay: armed ? day : undefined, firedAt: undefined })) }; };
 
-export const editAlarm = (g: BasketGuards, patch: Partial<RiskAlarm>): BasketGuards =>
-  ({ ...g, alarm: { ...(g.alarm ?? { armed: false }), ...patch, armed: false, firedAt: undefined } });
+/** Adds an empty max-loss rule (off) when there is none. */
+export const addLossRule = (g: BasketGuards): BasketGuards => { g = N(g); return g.alarm ? g : { ...g, alarm: { armed: false } }; };
+export const removeLossRule = (g: BasketGuards): BasketGuards => { const out = { ...N(g) }; delete out.alarm; return out; };
+export const editAlarm = (g: BasketGuards, patch: Partial<Pick<RiskAlarm, 'maxLoss' | 'exitAtMaxLoss'>>): BasketGuards =>
+  { g = N(g); return { ...g, alarm: { ...(g.alarm ?? { armed: false }), ...patch, armed: false, firedAt: undefined } }; };
 export const setAlarmArmed = (g: BasketGuards, armed: boolean, day?: string): BasketGuards =>
-  ({ ...g, alarm: { ...(g.alarm ?? { armed: false }), armed, armedDay: armed ? day : undefined, firedAt: undefined } });
+  { g = N(g); return { ...g, alarm: { ...(g.alarm ?? { armed: false }), armed, armedDay: armed ? day : undefined, firedAt: undefined } }; };
+
+/** Adds an empty margin-use rule (off) when there is none. */
+export const addMarginRule = (g: BasketGuards): BasketGuards => { g = N(g); return g.marginAlarm ? g : { ...g, marginAlarm: { armed: false } }; };
+export const removeMarginRule = (g: BasketGuards): BasketGuards => { const out = { ...N(g) }; delete out.marginAlarm; return out; };
+export const editMarginRule = (g: BasketGuards, pct: number | undefined): BasketGuards =>
+  { g = N(g); return { ...g, marginAlarm: { ...(g.marginAlarm ?? { armed: false }), pct, armed: false, armedDay: undefined } }; };
+export const setMarginArmed = (g: BasketGuards, armed: boolean, day?: string): BasketGuards =>
+  { g = N(g); return { ...g, marginAlarm: { ...(g.marginAlarm ?? { armed: false }), armed, armedDay: armed ? day : undefined } }; };
 
 // ── Exiting one side ──────────────────────────────────────────────────────────
 
@@ -341,12 +402,15 @@ export function istDayOf(ts: number): string {
  */
 export function expireStaleGuards(g: BasketGuards | undefined, today: string): BasketGuards | null {
   if (!g) return null;
+  g = normalizeGuards(g);
   const stale = (x: { armed: boolean; armedDay?: string }) => x.armed && x.armedDay !== today;
-  const any = (g.spotTriggers ?? []).some(stale) || (g.greekBands ?? []).some(stale) || (g.alarm != null && stale(g.alarm));
+  const any = (g.spotTriggers ?? []).some(stale) || (g.greekBands ?? []).some(stale) || (g.alarm != null && stale(g.alarm))
+    || (g.marginAlarm != null && stale(g.marginAlarm));
   if (!any) return null;
   const off = <T extends { armed: boolean; armedDay?: string; firedAt?: string }>(x: T): T => (stale(x) ? { ...x, armed: false, armedDay: undefined, firedAt: undefined } : x);
   return {
     ...g,
+    ...(g.marginAlarm ? { marginAlarm: stale(g.marginAlarm) ? { ...g.marginAlarm, armed: false, armedDay: undefined } : g.marginAlarm } : {}),
     ...(g.spotTriggers ? { spotTriggers: g.spotTriggers.map(off) } : {}),
     ...(g.greekBands ? { greekBands: g.greekBands.map(off) } : {}),
     ...(g.alarm ? { alarm: off(g.alarm) } : {}),

@@ -5,8 +5,8 @@
 
 import type { MultiLegLeg } from './multiLegFocus.ts';
 import {
-  expireStaleGuards, guardsArmed, legsSettling, shortsSettling, spotActionLegs, stepSpotTrigger, stepGuard, readGreekBand,
-  confirmBreach, lossLevel, lossRecovered, marginUtilisationPct, marginLevel, marginRecovered, nextAlarmState, GUARD_EXIT_RETRY_MS,
+  expireStaleGuards, guardsArmed, normalizeGuards, lossRuleDisarmedByMigration, legsSettling, shortsSettling, spotActionLegs, stepSpotTrigger, stepGuard, readGreekBand,
+  confirmBreach, lossLevel, lossRecovered, marginUtilisationPct, marginLevel, marginRecovered, nextAlarmState, GUARD_EXIT_RETRY_MS, DEFAULT_WARN_PCT,
   type AlarmLevel, type BasketGuards, type NetGreeks,
 } from './multiLegGuards.ts';
 
@@ -40,8 +40,8 @@ export interface GuardInput {
   busy: boolean;
   /** Lazy: only called when a band needs it. Null when any open leg is unpriced or on an assumed IV. */
   netGreeks: () => NetGreeks | null;
-  /** Lazy: strategy P&L in rupees on the given scope, null while any open leg is unpriced. */
-  pnlRupees: (scope: 'today' | 'total') => number | null;
+  /** Lazy: today's strategy P&L in rupees (open legs plus legs closed today), null while any open leg is unpriced. */
+  pnlToday: () => number | null;
   /** Account funds for THIS basket's broker, null when unknown or that broker is not the one being polled. */
   funds: { available: number; used: number } | null;
   fmtMoney: (n: number) => string;
@@ -54,14 +54,23 @@ export function evaluateBasketGuards(inp: GuardInput, rt: GuardRuntime): GuardEf
   const { now, label, basketId } = inp;
   const iso = new Date(now).toISOString();
   const toast = (title: string, detail: string) => fx.push({ kind: 'toast', title, detail });
-  let g = inp.guards;
-  if (!guardsArmed(g)) return fx;
+  if (!guardsArmed(inp.guards)) return fx;
+
+  // Older saves: move margin out of the loss rule, drop the retired knobs (see normalizeGuards) and store the result.
+  let g = normalizeGuards(inp.guards);
+  if (g !== inp.guards) {
+    fx.push({ kind: 'patch', fn: cur => normalizeGuards(cur) });
+    if (lossRuleDisarmedByMigration(inp.guards, g)) {
+      toast(`${label}: max-loss rule turned off`, `It now counts today's P&L only and gives a heads-up at ${DEFAULT_WARN_PCT}%. Check it and turn it on again.`);
+    }
+    if (!guardsArmed(g)) return fx;
+  }
 
   // Day roll: yesterday's armed guards do not carry into today.
   const fresh = expireStaleGuards(g, inp.today);
   if (fresh) {
     fx.push({ kind: 'patch', fn: cur => expireStaleGuards(cur, inp.today) ?? cur });
-    toast(`${label}: guards from an earlier day were disarmed`, 'Spot triggers, Greek bands and the loss alarm do not carry over a day. Re-arm them if you still want them.');
+    toast(`${label}: yesterday's risk rules were turned off`, 'Rules do not carry over to a new day. Turn them on again if you still want them.');
     g = fresh;
     if (!guardsArmed(g)) return fx;
   }
@@ -109,7 +118,7 @@ export function evaluateBasketGuards(inp: GuardInput, rt: GuardRuntime): GuardEf
         : t.action === 'EXIT_ALL' ? 'closing the whole strategy'
         : scope.length === 0 ? 'nothing open on that side'
         : `closing the ${t.action === 'EXIT_CE' ? 'call' : 'put'} side`;
-      toast(`${label}: ${inp.underlying} ${t.dir} ${t.level} (spot ${inp.spot})`, `Spot trigger hit: ${what}.`);
+      toast(`${label}: ${inp.underlying} ${t.dir} ${t.level} (spot ${inp.spot})`, `Spot rule hit: ${what}.`);
       if (!exits || scope.length === 0) continue;
     }
     // fire (exit actions) and retry both send the exit now.
@@ -133,7 +142,7 @@ export function evaluateBasketGuards(inp: GuardInput, rt: GuardRuntime): GuardEf
         if (!reading.breached) rt.alerted.delete(key);
         else if (c.fire && !rt.alerted.has(key)) {
           rt.alerted.add(key);
-          toast(`${label}: net ${b.metric} outside its band`, `Now ${dec(reading.value, b.metric)} (${reading.side === 'min' ? 'below min' : 'above max'} ${reading.side === 'min' ? b.min : b.max}).`);
+          toast(`${label}: net ${b.metric} outside its limits`, `Now ${dec(reading.value, b.metric)} (${reading.side === 'min' ? 'below the lower limit' : 'above the upper limit'} ${reading.side === 'min' ? b.min : b.max}).`);
         }
         continue;
       }
@@ -151,19 +160,34 @@ export function evaluateBasketGuards(inp: GuardInput, rt: GuardRuntime): GuardEf
       if (step.kind === 'fire') {
         rt.since.delete(key);
         fx.push({ kind: 'patch', fn: gg => ({ ...gg, greekBands: gg.greekBands?.map(x => (x.id === b.id ? { ...x, firedAt: iso } : x)) }) });
-        toast(`${label}: net ${b.metric} outside its band`, `Closing the whole strategy (now ${reading ? dec(reading.value, b.metric) : '?'}).`);
+        toast(`${label}: net ${b.metric} outside its limits`, `Closing the whole strategy (now ${reading ? dec(reading.value, b.metric) : '?'}).`);
       }
       rt.lastAttempt.set(key, now);
       fx.push({ kind: 'exitAll' });
     }
   }
 
-  // 3. Max-loss and margin alarm
+  // 3. Margin-use alert (account-wide, alert only). Per basket, not per broker: two baskets with different levels each keep
+  // their own announce state, so one cannot reset the other's every tick.
+  const m = g.marginAlarm;
+  if (m?.armed && m.pct != null && m.pct > 0 && inp.funds) {
+    const mKey = `margin:${basketId}`;
+    const util = marginUtilisationPct(inp.funds);
+    const level = marginLevel(util, m);
+    const prev = rt.alarm.get(mKey) ?? 'ok';
+    const { state, announce } = nextAlarmState(prev, level, util == null ? false : marginRecovered(util, m));
+    rt.alarm.set(mKey, state);
+    if (announce && util != null) {
+      toast(`${label}: margin buffer thin on ${inp.broker}`, `${util.toFixed(0)}% of margin is in use (alert at ${m.pct}%). ${inp.fmtMoney(inp.funds.available)} still available.`);
+    }
+  }
+
+  // 4. Max-loss rule
   const alarm = g.alarm;
+  const lossKey = `loss:${basketId}`;
   if (alarm?.armed && alarm.firedAt) {
     // Closing: the max-loss exit has started. Finish it whatever the P&L does now; the no-open-legs branch above disarms the
     // alarm once it is flat and settled, so a leg added later is not closed by a loss that was already realized.
-    const lossKey = `loss:${basketId}`;
     // Only hedges left while a short's exit is still unconfirmed: wait, a rejection would reopen the short.
     if (openLegs.every(l => l.side === 'B') && shortsSettling(inp.legs, 'EXIT_ALL', now)) return fx;
     const last = rt.lastAttempt.get(lossKey);
@@ -171,8 +195,7 @@ export function evaluateBasketGuards(inp: GuardInput, rt: GuardRuntime): GuardEf
     return fx;
   }
   if (alarm?.armed) {
-    const lossKey = `loss:${basketId}`;
-    const pnl = inp.pnlRupees(alarm.lossScope ?? 'today');
+    const pnl = inp.pnlToday();
     if (pnl != null) {
       const level = lossLevel(pnl, alarm);
       const prev = rt.alarm.get(lossKey) ?? 'ok';
@@ -186,19 +209,6 @@ export function evaluateBasketGuards(inp: GuardInput, rt: GuardRuntime): GuardEf
         rt.lastAttempt.set(lossKey, now);
         fx.push({ kind: 'patch', fn: gg => (gg.alarm ? { ...gg, alarm: { ...gg.alarm, firedAt: iso } } : gg) });
         fx.push({ kind: 'exitAll' });
-      }
-    }
-    if (alarm.marginWarnPct != null && inp.funds) {
-      // Per basket, not per broker: two baskets with different thresholds each keep their own announce state, so one
-      // cannot reset the other's every tick.
-      const mKey = `margin:${basketId}`;
-      const util = marginUtilisationPct(inp.funds);
-      const level = marginLevel(util, alarm);
-      const prev = rt.alarm.get(mKey) ?? 'ok';
-      const { state, announce } = nextAlarmState(prev, level, util == null ? false : marginRecovered(util, alarm));
-      rt.alarm.set(mKey, state);
-      if (announce && util != null) {
-        toast(`${label}: margin buffer thin on ${inp.broker}`, `${util.toFixed(0)}% of margin is in use (alarm at ${alarm.marginWarnPct}%). ${inp.fmtMoney(inp.funds.available)} still available.`);
       }
     }
   }

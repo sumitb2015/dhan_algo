@@ -3527,9 +3527,8 @@ export default function MultiLegFocus({
             });
             return res.assumed.length === 0 ? res.net : null;
           },
-          pnlRupees: scope => {
-            const legs = scope === 'today' ? basket.legs.filter(l => legCountsToday(l, now)) : basket.legs;
-            const m = computeStrategyMetrics(legs, l => ltpFor(basket, l), crudeMult);
+          pnlToday: () => {
+            const m = computeStrategyMetrics(basket.legs.filter(l => legCountsToday(l, now)), l => ltpFor(basket, l), crudeMult);
             return m.hasUnpricedLegs ? null : m.totalPnlRupees;
           },
           funds: basket.broker === broker ? fundsData : null,

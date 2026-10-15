@@ -8,7 +8,7 @@ import MultiLegLegRow from './MultiLegLegRow';
 import RuleNumInput from './RuleNumInput';
 import GuardsPanel from './GuardsPanel';
 import { unguardedShorts } from '@/lib/multiLegUnguarded';
-import { guardsArmed, type BasketGuards, type NetGreeks } from '@/lib/multiLegGuards';
+import { armedRuleCount, type BasketGuards, type NetGreeks } from '@/lib/multiLegGuards';
 import AddLotsModal from './AddLotsModal';
 import ExitLotsModal from './ExitLotsModal';
 import PnlTableModal from './PnlTableModal';
@@ -517,13 +517,13 @@ export default function MultiLegStrategyRow({
     });
     return res.assumed.length === 0 ? res.net : null;
   }, [showGuards, basket, guardSpot, ltpFor, crudeMult]);
-  // Strategy P&L on both scopes the loss alarm can measure; null while any open leg is unpriced.
+  // Today's strategy P&L, the figure the max-loss rule measures; null while any open leg is unpriced.
   const guardPnl = useMemo(() => {
-    if (!showGuards) return { today: null, total: null };
-    const mk = (legs: MultiLegLeg[]) => { const m = computeStrategyMetrics(legs, ltpFor, crudeMult); return m.hasUnpricedLegs ? null : m.totalPnlRupees; };
-    return { today: mk(basket.legs.filter(l => legCountsToday(l))), total: mk(basket.legs) };
+    if (!showGuards) return null;
+    const m = computeStrategyMetrics(basket.legs.filter(l => legCountsToday(l)), ltpFor, crudeMult);
+    return m.hasUnpricedLegs ? null : m.totalPnlRupees;
   }, [showGuards, basket.legs, ltpFor, crudeMult]);
-  const guardsOn = guardsArmed(basket.guards);
+  const rulesOn = armedRuleCount(basket.guards);
   // Open shorts nothing will exit (no leg SL, strategy SL or armed exit guard). Re-evaluated every render, so an
   // armed-yesterday guard shows up here the moment the day rolls.
   const unguarded = unguardedShorts(basket, new Date(Date.now() + 5.5 * 3_600_000).toISOString().slice(0, 10));
@@ -695,7 +695,7 @@ export default function MultiLegStrategyRow({
             {unguarded.length > 0 && (
               <span
                 className="inline-flex items-center gap-1 text-[10px] font-bold px-1.5 py-0.5 rounded border border-red-500/40 bg-red-500/10 text-red-400"
-                title={`No stop will exit: ${unguarded.map(l => `SELL ${l.strike} ${l.option} x${l.lots}`).join(', ')}. Set a leg SL, a strategy SL, or arm a spot trigger / max-loss exit in Guards.`}
+                title={`No stop will exit: ${unguarded.map(l => `SELL ${l.strike} ${l.option} x${l.lots}`).join(', ')}. Set a leg SL, a strategy SL, or turn on a spot or max-loss rule that closes positions in Risk rules.`}
               >
                 <ShieldAlert className="w-3 h-3" aria-hidden />
                 {unguarded.length} UNGUARDED SHORT{unguarded.length > 1 ? 'S' : ''}
@@ -1386,14 +1386,14 @@ export default function MultiLegStrategyRow({
             </div>
           </div>
 
-          {/* Guards: spot triggers, Greek bands, loss/margin alarm */}
+          {/* Risk rules (basket.guards): spot levels, Greek limits, max loss, margin use */}
           <div className="border-t border-zinc-800">
             <button type="button" onClick={() => setShowGuards(v => !v)} aria-expanded={showGuards}
               className={`w-full flex items-center gap-2 px-3 py-1 text-[11px] font-semibold text-zinc-300 hover:bg-zinc-900 ${FOCUS_RING}`}>
               <span aria-hidden>{showGuards ? '▾' : '▸'}</span>
-              <span>Guards</span>
-              <span className="text-zinc-500 font-normal">spot triggers · Greek bands · loss &amp; margin alarm</span>
-              {guardsOn && <span className="ml-auto text-emerald-400 font-bold">ARMED</span>}
+              <span>Risk rules</span>
+              <span className="text-zinc-500 font-normal">automatic alerts and exits</span>
+              {rulesOn > 0 && <span className="ml-auto text-emerald-400 font-bold">{rulesOn} ON</span>}
             </button>
             {showGuards && (
               <GuardsPanel

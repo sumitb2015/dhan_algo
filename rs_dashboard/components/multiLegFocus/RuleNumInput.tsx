@@ -10,6 +10,8 @@ interface RuleNumInputProps {
   placeholder?: string;
   className?: string;
   title?: string;
+  /** Accessible name when no visible <label> wraps the box. */
+  ariaLabel?: string;
   disabled?: boolean;
   min?: number;
   step?: number;
@@ -27,6 +29,7 @@ export default function RuleNumInput({
   placeholder,
   className = '',
   title,
+  ariaLabel,
   disabled,
   min,
   step = 0.5,
@@ -58,6 +61,7 @@ export default function RuleNumInput({
       value={draft}
       placeholder={placeholder}
       title={title}
+      aria-label={ariaLabel}
       disabled={disabled}
       min={min}
       step={step}

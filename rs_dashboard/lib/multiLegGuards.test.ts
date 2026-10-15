@@ -8,7 +8,8 @@ import {
 import { LEG_FILL_GRACE_MS, type MultiLegLeg } from './multiLegFocus.ts';
 import {
   legsSettling, shortsSettling, exitSide, addSpotTrigger, removeSpotTrigger, editSpotTrigger, setSpotArmed,
-  addGreekBand, editGreekBand, setBandArmed, editAlarm, setAlarmArmed, type BasketGuards, type SideExitDeps,
+  addGreekBand, editGreekBand, setBandArmed, editAlarm, setAlarmArmed, addLossRule, removeLossRule, addMarginRule, removeMarginRule,
+  editMarginRule, setMarginArmed, normalizeGuards, lossRuleDisarmedByMigration, armedRuleCount, type BasketGuards, type SideExitDeps,
 } from './multiLegGuards.ts';
 
 
@@ -79,23 +80,20 @@ test('readGreekBand: min/max/both, unknown net, NaN', () => {
 });
 
 test('greekBandInvalid', () => {
-  assert.match(greekBandInvalid({})!, /min, a max/);
-  assert.match(greekBandInvalid({ min: 5, max: 1 })!, /above max/);
+  assert.match(greekBandInvalid({})!, /lower limit, an upper limit/);
+  assert.match(greekBandInvalid({ min: 5, max: 1 })!, /lower limit is above the upper/);
   assert.equal(greekBandInvalid({ min: -5, max: 5 }), null);
   assert.equal(greekBandInvalid({ max: 0 }), null);
 });
 
-test('lossLevel: warn at warnPct, breach at maxLoss, unknown reads ok', () => {
-  const a = { maxLoss: 10000, warnPct: 80 };
+test('lossLevel: heads-up at 80%, breach at maxLoss, unknown reads ok', () => {
+  const a = { maxLoss: 10000 };
   assert.equal(lossLevel(-7999, a), 'ok');
   assert.equal(lossLevel(-8000, a), 'warn');
   assert.equal(lossLevel(-10000, a), 'breach');
   assert.equal(lossLevel(5000, a), 'ok');
   assert.equal(lossLevel(NaN, a), 'ok');
   assert.equal(lossLevel(-99999, { maxLoss: 0 }), 'ok');
-  assert.equal(lossLevel(-8000, { maxLoss: 10000 }), 'warn');           // default 80
-  assert.equal(lossLevel(-5000, { maxLoss: 10000, warnPct: 50 }), 'warn');
-  assert.equal(lossLevel(-5000, { maxLoss: 10000, warnPct: 120 }), 'ok'); // nonsense warnPct falls back to the default
 });
 
 test('margin utilisation and level', () => {
@@ -103,9 +101,9 @@ test('margin utilisation and level', () => {
   assert.equal(marginUtilisationPct({ available: 0, used: 0 }), null);
   assert.equal(marginUtilisationPct({ available: -1, used: 5 }), null);
   assert.equal(marginUtilisationPct(null), null);
-  assert.equal(marginLevel(80, { marginWarnPct: 80 }), 'warn');
-  assert.equal(marginLevel(79.9, { marginWarnPct: 80 }), 'ok');
-  assert.equal(marginLevel(null, { marginWarnPct: 80 }), 'ok');
+  assert.equal(marginLevel(80, { pct: 80 }), 'warn');
+  assert.equal(marginLevel(79.9, { pct: 80 }), 'ok');
+  assert.equal(marginLevel(null, { pct: 80 }), 'ok');
   assert.equal(marginLevel(99, {}), 'ok');
 });
 
@@ -119,13 +117,13 @@ test('nextAlarmState announces escalations once and needs recovery to step down'
 });
 
 test('hysteresis helpers', () => {
-  const a = { maxLoss: 10000, warnPct: 80 };
+  const a = { maxLoss: 10000 };
   assert.equal(lossRecovered(-7900, a, 'warn'), false);   // 79% > 75%
   assert.equal(lossRecovered(-7500, a, 'warn'), true);
   assert.equal(lossRecovered(-9600, a, 'breach'), false); // 96% > 95%
   assert.equal(lossRecovered(-9500, a, 'breach'), true);
-  assert.equal(marginRecovered(76, { marginWarnPct: 80 }), false);
-  assert.equal(marginRecovered(75, { marginWarnPct: 80 }), true);
+  assert.equal(marginRecovered(76, { pct: 80 }), false);
+  assert.equal(marginRecovered(75, { pct: 80 }), true);
 });
 
 test('guardsArmed / disarmGuards: everything off, firedAt cleared, config kept', () => {
@@ -280,9 +278,62 @@ test('reducers: add / remove / arm / alarm', () => {
   assert.equal(g.alarm!.maxLoss, 500);
   g = setAlarmArmed(g, true);
   assert.equal(g.alarm!.armed, true);
-  g = editAlarm(g, { warnPct: 70 });
+  g = editAlarm(g, { exitAtMaxLoss: true });
   assert.equal(g.alarm!.armed, false);
   assert.equal(g.alarm!.maxLoss, 500);
+});
+
+test('loss and margin rules: add once, edit disarms, remove drops only that rule', () => {
+  let g: BasketGuards = addLossRule({});
+  assert.deepEqual(g.alarm, { armed: false });
+  assert.equal(addLossRule(g), g);                                       // only one
+  g = addMarginRule(g);
+  g = editMarginRule(g, 85);
+  g = setMarginArmed(g, true, '2026-10-15');
+  assert.deepEqual(g.marginAlarm, { armed: true, armedDay: '2026-10-15', pct: 85 });
+  assert.equal(guardsArmed(g), true);
+  assert.equal(armedRuleCount(g), 1);
+  g = editMarginRule(g, 90);
+  assert.equal(g.marginAlarm!.armed, false);
+  g = removeLossRule(g);
+  assert.equal(g.alarm, undefined);
+  assert.equal(g.marginAlarm!.pct, 90);
+  g = removeMarginRule(g);
+  assert.equal(g.marginAlarm, undefined);
+});
+
+test('normalizeGuards: moves the legacy margin level to its own rule and keeps its switch', () => {
+  const legacy = { alarm: { armed: true, armedDay: '2026-10-15', maxLoss: 5000, warnPct: 80, lossScope: 'today', marginWarnPct: 85 } } as unknown as BasketGuards;
+  const n = normalizeGuards(legacy);
+  assert.deepEqual(n.marginAlarm, { armed: true, armedDay: '2026-10-15', pct: 85 });
+  assert.deepEqual(n.alarm, { armed: true, armedDay: '2026-10-15', maxLoss: 5000 });   // same meaning: stays on
+  assert.equal(normalizeGuards(n), n);                                                 // idempotent, same reference
+  assert.equal(lossRuleDisarmedByMigration(legacy, n), false);
+});
+
+test('normalizeGuards: a loss rule whose meaning changed is turned off; a margin-only alarm leaves no loss rule', () => {
+  const total = { alarm: { armed: true, armedDay: 'd', maxLoss: 5000, lossScope: 'total' } } as unknown as BasketGuards;
+  const n1 = normalizeGuards(total);
+  assert.equal(n1.alarm!.armed, false);
+  assert.equal(n1.alarm!.maxLoss, 5000);
+  assert.equal(lossRuleDisarmedByMigration(total, n1), true);
+  const warn70 = normalizeGuards({ alarm: { armed: true, maxLoss: 5000, warnPct: 70 } } as unknown as BasketGuards);
+  assert.equal(warn70.alarm!.armed, false);
+  const closing = normalizeGuards({ alarm: { armed: true, maxLoss: 5000, lossScope: 'total', firedAt: 'x' } } as unknown as BasketGuards);
+  assert.equal(closing.alarm!.armed, true);                                            // an exit under way keeps going
+  const marginOnly = normalizeGuards({ alarm: { armed: false, marginWarnPct: 70 } } as unknown as BasketGuards);
+  assert.equal(marginOnly.alarm, undefined);
+  assert.deepEqual(marginOnly.marginAlarm, { armed: false, pct: 70 });
+  const current: BasketGuards = { alarm: { armed: false } };
+  assert.equal(normalizeGuards(current), current);
+});
+
+test('margin rule: counted by guardsArmed, turned off by disarmGuards and by the day roll', () => {
+  const g: BasketGuards = { marginAlarm: { armed: true, armedDay: '2026-10-14', pct: 80 } };
+  assert.equal(guardsArmed(g), true);
+  assert.equal(disarmGuards(g)!.marginAlarm!.armed, false);
+  assert.equal(expireStaleGuards(g, '2026-10-15')!.marginAlarm!.armed, false);
+  assert.equal(expireStaleGuards(g, '2026-10-14'), null);
 });
 
 import { expireStaleGuards, istDayOf } from './multiLegGuards.ts';

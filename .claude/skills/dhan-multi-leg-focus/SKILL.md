@@ -82,8 +82,11 @@ before changing any of it**; this skill only maps the page.
      trigger written for one set of legs must not act on another. There is no auto-hedge yet.
    - **Day roll:** a guard stores `armedDay` (IST) when armed; `expireStaleGuards` disarms any armed guard from another day
      (or unstamped) with one toast, so a level chosen for yesterday never acts on a carried or new position. Re-arm daily.
-   - **Loss scope:** `alarm.lossScope` = `today` (default: live legs + legs closed today, the page's Today P&L) or `total`
-     (also earlier days' closed trades, which can trip a fresh position).
+   - **UI is "Risk rules"** (2026-10-15): one row per rule, `[ON/OFF switch] If … → action`. The max loss always measures
+     today's P&L (live legs + legs closed today) with a fixed 80% heads-up; margin use is its own rule
+     (`guards.marginAlarm`, alert only, own switch). `normalizeGuards` migrates older saves (`alarm.lossScope` / `warnPct` /
+     `marginWarnPct`): the engine stores the new shape on its first pass and turns OFF an armed loss rule whose meaning changed
+     (it counted all trades, or warned at another %), with a toast. Every reducer normalizes first.
    - **Spot freshness is per chain pair** (`chainSpotAtRef`, stamped only when a fetch carried a positive spot), so another
      underlying's updates cannot make a stale spot look fresh. Margin-alarm state is per basket, not per broker.
    - **Automatic exits never raise a dialog.** `exitBasket` and `exitOneLeg` take `{ unattended: true }` (guards pass it): the

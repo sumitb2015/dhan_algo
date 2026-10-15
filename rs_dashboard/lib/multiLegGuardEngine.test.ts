@@ -18,7 +18,7 @@ function input(over: Partial<GuardInput> & { guards: BasketGuards }): GuardInput
     legs: [leg('s', 'S', 'CE'), leg('p', 'S', 'PE')],
     now: T0, today: TODAY, spot: 24000, busy: false,
     netGreeks: () => ({ delta: 0, gamma: 0, theta: 0, vega: 0 }),
-    pnlRupees: () => 0, funds: null, fmtMoney: n => `₹${Math.round(n)}`,
+    pnlToday: () => 0, funds: null, fmtMoney: n => `₹${Math.round(n)}`,
     ...over,
   };
 }
@@ -144,54 +144,76 @@ test('Greek EXIT_ALL band: unknown Greeks never fire; a confirmed breach exits t
   assert.deepEqual(kinds(run(inp, rt, 100_000 + SPOT_CONFIRM_MS)), ['patch', 'toast', 'exitAll']);
 });
 
-test('loss alarm: warn then breach each announce once; scope picks the P&L it reads', () => {
+test('loss alarm: heads-up then breach each announce once', () => {
   const rt = newGuardRuntime();
-  const g = { alarm: { armed: true, armedDay: TODAY, maxLoss: 10_000, warnPct: 80 } };
+  const g = { alarm: { armed: true, armedDay: TODAY, maxLoss: 10_000 } };
   let pnl = -8_500;
-  const scopes: string[] = [];
-  const mk = () => input({ guards: g, pnlRupees: s => { scopes.push(s); return pnl; } });
+  const mk = () => input({ guards: g, pnlToday: () => pnl });
   assert.deepEqual(kinds(run(mk(), rt, 0)), ['toast']);
   assert.deepEqual(run(mk(), rt, 1000), []);
   pnl = -10_500;
   assert.deepEqual(kinds(run(mk(), rt, 2000)), ['toast']);
   assert.deepEqual(run(mk(), rt, 3000), []);
-  assert.ok(scopes.every(s => s === 'today'));                                              // default scope
-  const seen: string[] = [];
-  run(input({ guards: { alarm: { ...g.alarm, lossScope: 'total' } }, pnlRupees: s => { seen.push(s); return 0; } }), newGuardRuntime(), 0);
-  assert.deepEqual(seen, ['total']);
+});
+
+test('legacy guards: stored in the new shape on first pass; a re-scoped loss rule is turned off with a notice', () => {
+  const rt = newGuardRuntime();
+  const legacy = { alarm: { armed: true, armedDay: TODAY, maxLoss: 1000, exitAtMaxLoss: true, lossScope: 'total', marginWarnPct: 50 } } as unknown as BasketGuards;
+  const funds = { available: 10_000, used: 90_000 };
+  const fx = run(input({ guards: legacy, pnlToday: () => -5000, funds }), rt, 0);
+  assert.deepEqual(kinds(fx), ['patch', 'toast', 'toast']);                                 // migrate, loss-rule notice, margin alert
+  assert.equal(fx.some(e => e.kind === 'exitAll'), false);                                  // the turned-off loss rule does not exit
+  const after = applyPatches(legacy, fx);
+  assert.equal(after.alarm!.armed, false);
+  assert.deepEqual(after.marginAlarm, { armed: true, armedDay: TODAY, pct: 50 });
+});
+
+test('legacy guards: an armed all-trades loss rule with nothing else armed is still migrated and announced', () => {
+  const legacy = { alarm: { armed: true, armedDay: TODAY, maxLoss: 1000, exitAtMaxLoss: true, lossScope: 'total' } } as unknown as BasketGuards;
+  const fx = run(input({ guards: legacy, pnlToday: () => -5000 }), newGuardRuntime(), 0);
+  assert.deepEqual(kinds(fx), ['patch', 'toast']);                                          // migrate + notice, no exit
+  assert.equal(applyPatches(legacy, fx).alarm!.armed, false);
+});
+
+test('margin rule acts on its own switch, independent of the loss rule (even while it is closing)', () => {
+  const funds = { available: 10_000, used: 90_000 };
+  const closing = { alarm: { armed: true, armedDay: TODAY, maxLoss: 1000, exitAtMaxLoss: true, firedAt: 'x' }, marginAlarm: { armed: true, armedDay: TODAY, pct: 80 } };
+  assert.deepEqual(kinds(run(input({ guards: closing, funds }), newGuardRuntime(), 0)), ['toast', 'exitAll']);
+  const lossOff = { alarm: { armed: false, maxLoss: 1000 }, marginAlarm: { armed: true, armedDay: TODAY, pct: 80 } };
+  assert.deepEqual(kinds(run(input({ guards: lossOff, funds }), newGuardRuntime(), 0)), ['toast']);
 });
 
 test('loss alarm: unpriced P&L reads as unknown, never as a breach', () => {
   const rt = newGuardRuntime();
   const g = { alarm: { armed: true, armedDay: TODAY, maxLoss: 100, exitAtMaxLoss: true } };
-  assert.deepEqual(run(input({ guards: g, pnlRupees: () => null }), rt, 0), []);
+  assert.deepEqual(run(input({ guards: g, pnlToday: () => null }), rt, 0), []);
 });
 
 test('loss alarm: close-at-max-loss exits once (stamping firedAt) and never while the row is busy', () => {
   const rt = newGuardRuntime();
   const g = { alarm: { armed: true, armedDay: TODAY, maxLoss: 1000, exitAtMaxLoss: true } };
-  assert.deepEqual(kinds(run(input({ guards: g, pnlRupees: () => -1500 }), rt, 0)), ['toast', 'patch', 'exitAll']);
-  assert.deepEqual(run(input({ guards: g, pnlRupees: () => -1500, busy: true }), newGuardRuntime(), 0).filter(e => e.kind === 'exitAll'), []);
+  assert.deepEqual(kinds(run(input({ guards: g, pnlToday: () => -1500 }), rt, 0)), ['toast', 'patch', 'exitAll']);
+  assert.deepEqual(run(input({ guards: g, pnlToday: () => -1500, busy: true }), newGuardRuntime(), 0).filter(e => e.kind === 'exitAll'), []);
 });
 
 test('margin alarm: per-basket announce state, so two thresholds on one account do not flip-flop', () => {
   const rt = newGuardRuntime();
   const funds = { available: 15_000, used: 85_000 };                                        // 85% in use
-  const a = (ms: number) => run(input({ basketId: 'A', guards: { alarm: { armed: true, armedDay: TODAY, marginWarnPct: 80 } }, funds }), rt, ms);
-  const b = (ms: number) => run(input({ basketId: 'B', guards: { alarm: { armed: true, armedDay: TODAY, marginWarnPct: 90 } }, funds }), rt, ms);
+  const a = (ms: number) => run(input({ basketId: 'A', guards: { marginAlarm: { armed: true, armedDay: TODAY, pct: 80 } }, funds }), rt, ms);
+  const b = (ms: number) => run(input({ basketId: 'B', guards: { marginAlarm: { armed: true, armedDay: TODAY, pct: 90 } }, funds }), rt, ms);
   const toasts = [...a(0), ...b(0), ...a(1000), ...b(1000), ...a(2000), ...b(2000)].filter(e => e.kind === 'toast');
   assert.equal(toasts.length, 1);                                                           // A once; B (90%) never
 });
 
 test('margin alarm: unknown funds say nothing', () => {
   const rt = newGuardRuntime();
-  assert.deepEqual(run(input({ guards: { alarm: { armed: true, armedDay: TODAY, marginWarnPct: 50 } }, funds: null }), rt, 0), []);
+  assert.deepEqual(run(input({ guards: { marginAlarm: { armed: true, armedDay: TODAY, pct: 50 } }, funds: null }), rt, 0), []);
 });
 
 test('day roll: guards armed on an earlier day (or unstamped) are disarmed with one notice and do not act', () => {
   const rt = newGuardRuntime();
   const old = { spotTriggers: [spotTrig({ armedDay: '2026-10-09' })], greekBands: [band({ armedDay: undefined })], alarm: { armed: true, armedDay: '2026-10-09', maxLoss: 100 } };
-  const fx = run(input({ guards: old, spot: 24600, pnlRupees: () => -5000 }), rt, 0);
+  const fx = run(input({ guards: old, spot: 24600, pnlToday: () => -5000 }), rt, 0);
   assert.deepEqual(kinds(fx), ['patch', 'toast']);
   const after = applyPatches(old, fx);
   assert.equal(after.spotTriggers![0].armed, false);
@@ -207,13 +229,13 @@ test('day roll: guards armed on an earlier day (or unstamped) are disarmed with 
 test('close-at-max-loss: stamps firedAt with the exit, retries until flat, then disarms so a later leg is not closed', () => {
   const rt = newGuardRuntime();
   const g = { alarm: { armed: true, armedDay: TODAY, maxLoss: 1000, exitAtMaxLoss: true } };
-  const inp = input({ guards: g, pnlRupees: () => -1500 });
+  const inp = input({ guards: g, pnlToday: () => -1500 });
   const fx = run(inp, rt, 0);
   assert.deepEqual(kinds(fx), ['toast', 'patch', 'exitAll']);
   const fired = applyPatches(g, fx);
   assert.ok(fired.alarm!.firedAt);
   // closing: P&L recovering does not cancel it, retries are spaced
-  const closing = { ...inp, guards: fired, pnlRupees: () => 0 };
+  const closing = { ...inp, guards: fired, pnlToday: () => 0 };
   assert.deepEqual(run(closing, rt, 5000), []);
   assert.deepEqual(kinds(run(closing, rt, GUARD_EXIT_RETRY_MS)), ['exitAll']);
   // flat and settled -> the alarm disarms
@@ -222,7 +244,7 @@ test('close-at-max-loss: stamps firedAt with the exit, retries until flat, then 
   assert.equal(done.alarm!.armed, false);
   // ...so a new leg added the same day is left alone even though today's realized loss is still past the limit
   const newLeg = [...flat, leg('n', 'S', 'CE')];
-  assert.deepEqual(run(input({ guards: done, legs: newLeg, pnlRupees: () => -1500 }), rt, 120_000), []);
+  assert.deepEqual(run(input({ guards: done, legs: newLeg, pnlToday: () => -1500 }), rt, 120_000), []);
 });
 
 test('close-at-max-loss: still settling does not disarm; hedges-only retry waits for the shorts it closed', () => {
@@ -239,6 +261,6 @@ test('close-at-max-loss: still settling does not disarm; hedges-only retry waits
 test('close-at-max-loss: a busy row defers the exit without stamping firedAt', () => {
   const rt = newGuardRuntime();
   const g = { alarm: { armed: true, armedDay: TODAY, maxLoss: 1000, exitAtMaxLoss: true } };
-  const fx = run(input({ guards: g, pnlRupees: () => -1500, busy: true }), rt, 0);
+  const fx = run(input({ guards: g, pnlToday: () => -1500, busy: true }), rt, 0);
   assert.deepEqual(kinds(fx), ['toast']);
 });

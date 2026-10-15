@@ -9,12 +9,13 @@
 // Hedges (BUY legs), futures and legs with no fill are never reported.
 
 import type { MultiLegBasket, MultiLegLeg } from './multiLegFocus.ts';
+import { normalizeGuards } from './multiLegGuards.ts';
 
 const pos = (n: unknown): n is number => typeof n === 'number' && Number.isFinite(n) && n > 0;
 
 /** The open short option legs of `basket` that nothing will exit. `today` is the IST day (YYYY-MM-DD). */
 export function unguardedShorts(basket: MultiLegBasket, today: string): MultiLegLeg[] {
-  const g = basket.guards;
+  const g = basket.guards ? normalizeGuards(basket.guards) : undefined;
   const live = (x: { armed: boolean; armedDay?: string }) => x.armed && x.armedDay === today;
 
   const basketWide =

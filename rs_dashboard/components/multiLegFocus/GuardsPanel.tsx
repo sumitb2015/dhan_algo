@@ -4,9 +4,11 @@ import React, { useState } from 'react';
 import { FOCUS_RING } from '@/components/Scalper';
 import RuleNumInput from './RuleNumInput';
 import {
-  addSpotTrigger, removeSpotTrigger, editSpotTrigger, setSpotArmed, addGreekBand, removeGreekBand, editGreekBand, setBandArmed, editAlarm, setAlarmArmed,
-  istDayOf, spotArmBlocker, greekBandInvalid, readGreekBand, lossLevel, marginUtilisationPct, marginLevel, DEFAULT_WARN_PCT,
-  type BasketGuards, type SpotTrigger, type SpotAction, type GreekBand, type GreekMetric, type RiskAlarm, type NetGreeks,
+  addSpotTrigger, removeSpotTrigger, editSpotTrigger, setSpotArmed, addGreekBand, removeGreekBand, editGreekBand, setBandArmed,
+  addLossRule, removeLossRule, editAlarm, setAlarmArmed, addMarginRule, removeMarginRule, editMarginRule, setMarginArmed,
+  normalizeGuards, istDayOf, spotArmBlocker, greekBandInvalid, readGreekBand, lossLevel, marginUtilisationPct, marginLevel,
+  DEFAULT_WARN_PCT, SPOT_CONFIRM_MS,
+  type BasketGuards, type SpotTrigger, type SpotAction, type GreekBand, type GreekMetric, type NetGreeks,
 } from '@/lib/multiLegGuards';
 
 interface Props {
@@ -15,8 +17,8 @@ interface Props {
   spot: number;
   /** Net Greeks from live marks, or null while any leg is unpriced. */
   netGreeks: NetGreeks | null;
-  /** Strategy P&L in rupees on each scope the loss alarm can use, null when a leg is unpriced. */
-  pnl: { today: number | null; total: number | null };
+  /** Today's strategy P&L in rupees (what the max-loss rule measures), null when a leg is unpriced. */
+  pnl: number | null;
   funds: { available: number; used: number } | null;
   /** The page's leader tab is the only one that acts; other tabs show a note. */
   isLeader: boolean;
@@ -25,184 +27,225 @@ interface Props {
 }
 
 const SPOT_ACTIONS: { value: SpotAction; label: string }[] = [
-  { value: 'ALERT', label: 'Alert only' },
-  { value: 'EXIT_CE', label: 'Close call side' },
-  { value: 'EXIT_PE', label: 'Close put side' },
-  { value: 'EXIT_ALL', label: 'Close everything' },
+  { value: 'ALERT', label: 'Alert me' },
+  { value: 'EXIT_CE', label: 'Close calls' },
+  { value: 'EXIT_PE', label: 'Close puts' },
+  { value: 'EXIT_ALL', label: 'Close all' },
 ];
-const METRICS: { value: GreekMetric; label: string; hint: string }[] = [
-  { value: 'delta', label: 'Net Δ', hint: 'underlying units' },
-  { value: 'gamma', label: 'Net Γ', hint: 'per point' },
-  { value: 'theta', label: 'Net Θ', hint: '₹ per day' },
-  { value: 'vega', label: 'Net Vega', hint: '₹ per 1% IV' },
+const METRICS: { value: GreekMetric; label: string; unit: string }[] = [
+  { value: 'delta', label: 'Delta (Δ)', unit: 'underlying units' },
+  { value: 'gamma', label: 'Gamma (Γ)', unit: 'per point' },
+  { value: 'theta', label: 'Theta (Θ)', unit: '₹ per day' },
+  { value: 'vega', label: 'Vega', unit: '₹ per 1% IV' },
 ];
 
 const newId = () => (typeof crypto !== 'undefined' && 'randomUUID' in crypto ? crypto.randomUUID().slice(0, 8) : Math.random().toString(36).slice(2, 10));
 const fmtRs = (n: number) => `${n < 0 ? '-' : ''}₹${Math.abs(Math.round(n)).toLocaleString('en-IN')}`;
-const selCls = `h-6 bg-zinc-800 border border-zinc-700 rounded text-[11px] text-zinc-200 px-1 disabled:opacity-50 ${FOCUS_RING}`;
-const chip = 'flex items-center gap-1.5 bg-zinc-900 border border-zinc-800 rounded px-2 py-0.5 text-[11px]';
-const iconBtn = `h-6 w-6 rounded text-zinc-400 hover:text-zinc-100 hover:bg-zinc-800 ${FOCUS_RING}`;
+const fmtTime = (iso: string) => new Date(iso).toLocaleTimeString('en-IN', { timeZone: 'Asia/Kolkata', hour12: false, hour: '2-digit', minute: '2-digit' });
+const today = () => istDayOf(Date.now());
+const lvlCls = (l: string) => (l === 'breach' ? 'text-rose-400 font-bold' : l === 'warn' ? 'text-amber-400 font-bold' : 'text-zinc-200');
+
+const selCls = `h-7 bg-zinc-900 border border-zinc-700 rounded text-[11px] text-zinc-100 px-1 ${FOCUS_RING}`;
+const numCls = 'h-7 text-center';
+const muted = 'text-zinc-400';
+
+/** ON / OFF / FIRING switch for one rule. */
+function RuleSwitch({ on, firing, label, onToggle }: { on: boolean; firing?: boolean; label: string; onToggle: (on: boolean) => void }) {
+  const tone = firing ? 'border-amber-500/50 bg-amber-500/15 text-amber-400'
+    : on ? 'border-emerald-500/50 bg-emerald-500/15 text-emerald-400'
+    : 'border-zinc-700 bg-zinc-900 text-zinc-500 hover:text-zinc-300';
+  const dot = firing ? 'bg-amber-400' : on ? 'bg-emerald-400' : 'bg-zinc-600';
+  return (
+    <button type="button" role="switch" aria-checked={on} aria-label={label} onClick={() => onToggle(!on)}
+      title={firing ? 'Acting now: switch off to stop it' : on ? 'On: switch off to stop this rule' : 'Off: switch on to start this rule'}
+      className={`h-6 w-[4.5rem] shrink-0 inline-flex items-center justify-center gap-1.5 rounded-full border text-[10px] font-bold tracking-wider ${tone} ${FOCUS_RING}`}>
+      <span aria-hidden className={`h-1.5 w-1.5 rounded-full ${dot}`} />
+      {firing ? 'FIRING' : on ? 'ON' : 'OFF'}
+    </button>
+  );
+}
+
+/** One rule: switch · "If <condition>" → action · live reading · remove. */
+function RuleRow({ on, firing, name, onToggle, onRemove, condition, action, reading, note }: {
+  on: boolean; firing?: boolean; name: string; onToggle: (on: boolean) => void; onRemove: () => void;
+  condition: React.ReactNode; action: React.ReactNode; reading?: React.ReactNode; note?: string | null;
+}) {
+  return (
+    <li className={`rounded border px-2 py-1 ${on ? 'border-emerald-500/30 bg-emerald-500/5' : 'border-zinc-800 bg-zinc-900/40'}`}>
+      <div className="flex items-center gap-2 flex-wrap">
+        <RuleSwitch on={on} firing={firing} label={`${name}: ${on ? 'on' : 'off'}`} onToggle={onToggle} />
+        <div className="flex items-center gap-1.5 flex-wrap">{condition}</div>
+        <span aria-hidden className="text-zinc-500">→</span>
+        <div className="flex items-center gap-1.5">{action}</div>
+        <div className="ml-auto flex items-center gap-2">
+          {reading && <span className={`font-mono ${muted}`}>{reading}</span>}
+          <button type="button" aria-label={`Remove ${name}`} title="Remove rule" onClick={onRemove}
+            className={`h-6 w-6 rounded text-zinc-400 hover:text-zinc-100 hover:bg-zinc-800 ${FOCUS_RING}`}>×</button>
+        </div>
+      </div>
+      {note && <p role="alert" className="mt-1 pl-[5.25rem] text-rose-400">{note}</p>}
+    </li>
+  );
+}
 
 export default function GuardsPanel({ guards, spot, netGreeks, pnl, funds, isLeader, onPatch }: Props) {
-  const [notice, setNotice] = useState<string | null>(null);
-  const g: BasketGuards = guards ?? {};
+  // A message shown under the rule it belongs to (why it could not be switched on).
+  const [notice, setNotice] = useState<{ key: string; text: string } | null>(null);
+  const g = normalizeGuards(guards);
   const triggers = g.spotTriggers ?? [];
   const bands = g.greekBands ?? [];
-  const alarm: RiskAlarm = g.alarm ?? { armed: false };
+  const loss = g.alarm;
+  const margin = g.marginAlarm;
 
   const apply = (fn: (g: BasketGuards) => BasketGuards) => { setNotice(null); onPatch(fn); };
-
-  const armTrigger = (t: SpotTrigger, on: boolean) => {
+  /** Switches a rule on only when `blocker` finds nothing wrong; switching off always works. */
+  const toggle = (key: string, on: boolean, blocker: () => string | null, fn: (g: BasketGuards) => BasketGuards) => {
     if (on) {
-      const why = spotArmBlocker(t, spot);
-      if (why) { setNotice(why); return; }
+      const why = blocker();
+      if (why) { setNotice({ key, text: why }); return; }
     }
-    apply(g => setSpotArmed(g, t.id, on, istDayOf(Date.now())));
+    apply(fn);
   };
-  const armBand = (b: GreekBand, on: boolean) => {
-    if (on) {
-      const why = greekBandInvalid(b);
-      if (why) { setNotice(why); return; }
-    }
-    apply(g => setBandArmed(g, b.id, on, istDayOf(Date.now())));
-  };
-  const armAlarm = (on: boolean) => {
-    if (on && !(alarm.maxLoss && alarm.maxLoss > 0) && !(alarm.marginWarnPct && alarm.marginWarnPct > 0)) {
-      setNotice('Set a max loss or a margin warning level first.');
-      return;
-    }
-    apply(g => setAlarmArmed(g, on, istDayOf(Date.now())));
-  };
+  const noteFor = (key: string) => (notice?.key === key ? notice.text : null);
 
-  const lossScope = alarm.lossScope ?? 'today';
-  const pnlRupees = pnl[lossScope];
   const util = marginUtilisationPct(funds);
-  const lossLvl = pnlRupees != null ? lossLevel(pnlRupees, alarm) : 'ok';
-  const lvlCls = (l: string) => (l === 'breach' ? 'text-rose-400 font-bold' : l === 'warn' ? 'text-amber-400 font-bold' : 'text-zinc-300');
+  const lossLvl = loss && pnl != null ? lossLevel(pnl, loss) : 'ok';
+  const marginLvl = marginLevel(util, margin);
+  const empty = triggers.length === 0 && bands.length === 0 && !loss && !margin;
+
+  const addBtn = `h-6 px-2 rounded border border-zinc-700 bg-zinc-900 text-[11px] font-semibold text-emerald-400 hover:bg-zinc-800 disabled:text-zinc-600 disabled:hover:bg-zinc-900 disabled:cursor-not-allowed ${FOCUS_RING}`;
 
   return (
-    <div className="border-t border-zinc-800 px-3 py-2 space-y-2.5 text-[11px]">
-      {!isLeader && (
-        <p className="text-amber-400">Another tab runs the automatic guards. They will not fire from this one.</p>
-      )}
-      {notice && <p role="alert" className="text-rose-400">{notice}</p>}
+    <div className="border-t border-zinc-800 px-3 py-2 space-y-2 text-[11px]">
+      {/* Live readings the rules compare against */}
+      <div className="flex items-center gap-3 flex-wrap text-zinc-400">
+        <span>Spot <span className="font-mono text-zinc-200">{spot > 0 ? spot.toLocaleString('en-IN') : '—'}</span></span>
+        <span>P&amp;L today <span className={`font-mono ${lvlCls(lossLvl)}`}>{pnl != null ? fmtRs(pnl) : '—'}</span></span>
+        <span>Margin used <span className={`font-mono ${lvlCls(marginLvl)}`}>{util != null ? `${util.toFixed(0)}%` : '—'}</span></span>
+        {!isLeader && <span className="text-amber-400">Another open tab runs these rules; this one only shows them.</span>}
+      </div>
 
-      {/* Spot triggers */}
-      <section aria-label="Spot triggers" className="space-y-1">
-        <div className="flex items-center gap-2">
-          <span className="text-zinc-300 font-bold uppercase tracking-wider">Spot triggers</span>
-          <span className="text-zinc-500">Spot now: <span className="font-mono text-zinc-300">{spot > 0 ? spot.toLocaleString('en-IN') : 'no live price'}</span></span>
-          <button type="button" className={`${chip} text-emerald-400 hover:bg-zinc-800 ${FOCUS_RING}`}
-            onClick={() => apply(g => addSpotTrigger(g, { id: newId(), level: 0, dir: 'above', action: 'ALERT', armed: false }))}>
-            + Add trigger
-          </button>
-        </div>
-        {triggers.map(t => (
-          <div key={t.id} className="flex items-center gap-1.5 flex-wrap">
-            <span className="text-zinc-400">When spot goes</span>
-            <select aria-label="Spot direction" className={selCls} value={t.dir} onChange={e => apply(g => editSpotTrigger(g, t.id, { dir: e.target.value as 'above' | 'below' }))}>
-              <option value="above">above</option>
-              <option value="below">below</option>
-            </select>
-            <RuleNumInput value={t.level > 0 ? t.level : undefined} onCommit={v => apply(g => editSpotTrigger(g, t.id, { level: v ?? 0 }))}
-              placeholder="level" min={0} step={50} className="w-20 h-6 text-center text-zinc-100" title="Underlying price level" />
-            <span className="text-zinc-400">then</span>
-            <select aria-label="Spot action" className={selCls} value={t.action} onChange={e => apply(g => editSpotTrigger(g, t.id, { action: e.target.value as SpotAction }))}>
-              {SPOT_ACTIONS.map(a => <option key={a.value} value={a.value}>{a.label}</option>)}
-            </select>
-            <label className={`${chip} cursor-pointer select-none`}>
-              <input type="checkbox" checked={t.armed} onChange={e => armTrigger(t, e.target.checked)} className="rounded border-zinc-700 text-emerald-500 focus:ring-0" />
-              <span className={t.armed ? 'text-emerald-400 font-bold' : 'text-zinc-400'}>{t.armed ? (t.firedAt ? 'Firing' : 'Armed') : 'Arm'}</span>
-            </label>
-            {!t.armed && t.firedAt && <span className="text-zinc-500">fired {new Date(t.firedAt).toLocaleTimeString('en-IN', { timeZone: 'Asia/Kolkata', hour12: false })}</span>}
-            {t.level > 0 && spot > 0 && <span className="text-zinc-500">{Math.abs(spot - t.level).toFixed(0)} pts away</span>}
-            <button type="button" aria-label="Remove spot trigger" title="Remove" className={iconBtn}
-              onClick={() => apply(g => removeSpotTrigger(g, t.id))}>×</button>
-          </div>
-        ))}
-        {triggers.length === 0 && <p className="text-zinc-500">e.g. spot above 24,800 then close the call side. An exit trigger must stay past its level for 3 seconds before it acts.</p>}
-      </section>
+      {empty && <p className="text-zinc-400">No rules yet. Example: if spot goes above 24,800, close the calls.</p>}
 
-      {/* Greek bands */}
-      <section aria-label="Greek guardrails" className="space-y-1">
-        <div className="flex items-center gap-2">
-          <span className="text-zinc-300 font-bold uppercase tracking-wider">Greek guardrails</span>
-          <button type="button" className={`${chip} text-emerald-400 hover:bg-zinc-800 ${FOCUS_RING}`}
-            onClick={() => apply(g => addGreekBand(g, { id: newId(), metric: 'delta', action: 'ALERT', armed: false }))}>
-            + Add band
-          </button>
-          {!netGreeks && <span className="text-zinc-500">Greeks unavailable (a leg has no live price)</span>}
-        </div>
-        {bands.map(b => {
-          const m = METRICS.find(x => x.value === b.metric)!;
-          const r = readGreekBand(b, netGreeks);
+      <ul className="space-y-1">
+        {triggers.map(t => {
+          const key = `spot:${t.id}`;
           return (
-            <div key={b.id} className="flex items-center gap-1.5 flex-wrap">
-              <select aria-label="Greek" className={selCls} value={b.metric} onChange={e => apply(g => editGreekBand(g, b.id, { metric: e.target.value as GreekMetric }))}>
-                {METRICS.map(x => <option key={x.value} value={x.value}>{x.label}</option>)}
-              </select>
-              <span className="text-zinc-400">stay between</span>
-              <RuleNumInput value={b.min} onCommit={v => apply(g => editGreekBand(g, b.id, { min: v }))} signed placeholder="min" step={m.value === 'gamma' ? 0.001 : 1}
-                className="w-20 h-6 text-center text-zinc-100" title={`Minimum (${m.hint}). Leave empty for no minimum.`} />
-              <span className="text-zinc-400">and</span>
-              <RuleNumInput value={b.max} onCommit={v => apply(g => editGreekBand(g, b.id, { max: v }))} signed placeholder="max" step={m.value === 'gamma' ? 0.001 : 1}
-                className="w-20 h-6 text-center text-zinc-100" title={`Maximum (${m.hint}). Leave empty for no maximum.`} />
-              <span className="text-zinc-500">({m.hint})</span>
-              <select aria-label="Band action" className={selCls} value={b.action} onChange={e => apply(g => editGreekBand(g, b.id, { action: e.target.value as GreekBand['action'] }))}>
-                <option value="ALERT">Alert only</option>
-                <option value="EXIT_ALL">Close everything</option>
-              </select>
-              <label className={`${chip} cursor-pointer select-none`}>
-                <input type="checkbox" checked={b.armed} onChange={e => armBand(b, e.target.checked)} className="rounded border-zinc-700 text-emerald-500 focus:ring-0" />
-                <span className={b.armed ? 'text-emerald-400 font-bold' : 'text-zinc-400'}>{b.armed ? (b.firedAt ? 'Firing' : 'Armed') : 'Arm'}</span>
-              </label>
-              {r && <span className={r.breached ? 'text-rose-400 font-bold' : 'text-zinc-300'}>now {r.value.toFixed(b.metric === 'gamma' ? 4 : 0)}</span>}
-              <button type="button" aria-label="Remove Greek band" title="Remove" className={iconBtn}
-                onClick={() => apply(g => removeGreekBand(g, b.id))}>×</button>
-            </div>
+            <RuleRow key={t.id} name="Spot rule" on={t.armed} firing={t.armed && !!t.firedAt}
+              onToggle={on => toggle(key, on, () => spotArmBlocker(t, spot), gg => setSpotArmed(gg, t.id, on, today()))}
+              onRemove={() => apply(gg => removeSpotTrigger(gg, t.id))}
+              note={noteFor(key)}
+              condition={<>
+                <span className={muted}>If spot goes</span>
+                <select aria-label="Direction" className={selCls} value={t.dir} onChange={e => apply(gg => editSpotTrigger(gg, t.id, { dir: e.target.value as SpotTrigger['dir'] }))}>
+                  <option value="above">above</option>
+                  <option value="below">below</option>
+                </select>
+                <RuleNumInput value={t.level > 0 ? t.level : undefined} onCommit={v => apply(gg => editSpotTrigger(gg, t.id, { level: v ?? 0 }))}
+                  placeholder="level" min={0} step={50} className={`w-24 ${numCls}`} ariaLabel="Spot level" title="Underlying price level" />
+              </>}
+              action={
+                <select aria-label="Then" className={selCls} value={t.action} onChange={e => apply(gg => editSpotTrigger(gg, t.id, { action: e.target.value as SpotAction }))}>
+                  {SPOT_ACTIONS.map(a => <option key={a.value} value={a.value}>{a.label}</option>)}
+                </select>
+              }
+              reading={!t.armed && t.firedAt ? `fired ${fmtTime(t.firedAt)}`
+                : t.level > 0 && spot > 0 ? `${Math.abs(spot - t.level).toLocaleString('en-IN', { maximumFractionDigits: 0 })} pts away` : null}
+            />
           );
         })}
-        {bands.length === 0 && <p className="text-zinc-500">e.g. net Δ between -150 and 150. Net values use your open legs&apos; live marks; auto-hedging is not offered yet.</p>}
-      </section>
 
-      {/* Max loss + margin alarm */}
-      <section aria-label="Max loss and margin alarm" className="space-y-1">
-        <div className="flex items-center gap-1.5 flex-wrap">
-          <span className="text-zinc-300 font-bold uppercase tracking-wider">Loss &amp; margin alarm</span>
-          <span className="text-zinc-400">Max loss ₹</span>
-          <RuleNumInput value={alarm.maxLoss} onCommit={v => apply(g => editAlarm(g, { maxLoss: v }))} placeholder="₹" min={0} step={500}
-            className="w-24 h-6 text-center text-rose-300" title="Maximum tolerated loss in rupees" />
-          <span className="text-zinc-400">warn at</span>
-          <RuleNumInput value={alarm.warnPct ?? DEFAULT_WARN_PCT} onCommit={v => apply(g => editAlarm(g, { warnPct: v }))} placeholder="%" min={1} step={5}
-            className="w-14 h-6 text-center text-amber-300" title="Warn when the loss reaches this % of max loss" />
-          <span className="text-zinc-400">%</span>
-          <label className={`${chip} cursor-pointer select-none`} title="Also close the strategy when the full max loss is reached">
-            <input type="checkbox" checked={!!alarm.exitAtMaxLoss} onChange={e => apply(g => editAlarm(g, { exitAtMaxLoss: e.target.checked }))} className="rounded border-zinc-700 text-emerald-500 focus:ring-0" />
-            <span className={alarm.exitAtMaxLoss ? 'text-rose-400 font-bold' : 'text-zinc-400'}>Close at max loss</span>
-          </label>
-          <select aria-label="What the max loss counts" title="Today: open legs plus legs closed today (the page's Today P&L). All trades: also trades closed on earlier days."
-            className={selCls} value={lossScope} onChange={e => apply(g => editAlarm(g, { lossScope: e.target.value as 'today' | 'total' }))}>
-            <option value="today">Today&apos;s P&amp;L</option>
-            <option value="total">All trades</option>
-          </select>
-          <span className="text-zinc-400">Margin warn at</span>
-          <RuleNumInput value={alarm.marginWarnPct} onCommit={v => apply(g => editAlarm(g, { marginWarnPct: v }))} placeholder="%" min={1} step={5}
-            className="w-14 h-6 text-center text-amber-300" title="Warn when account margin utilisation reaches this %" />
-          <span className="text-zinc-400">%</span>
-          {!alarm.armed && alarm.firedAt && <span className="text-zinc-500">closed the strategy at max loss {new Date(alarm.firedAt).toLocaleTimeString('en-IN', { timeZone: 'Asia/Kolkata', hour12: false })}</span>}
-          <label className={`${chip} cursor-pointer select-none`}>
-            <input type="checkbox" checked={alarm.armed} onChange={e => armAlarm(e.target.checked)} className="rounded border-zinc-700 text-emerald-500 focus:ring-0" />
-            <span className={alarm.armed ? 'text-emerald-400 font-bold' : 'text-zinc-400'}>{alarm.armed ? 'Armed' : 'Arm'}</span>
-          </label>
-        </div>
-        <div className="flex items-center gap-3 text-zinc-500">
-          <span>P&amp;L <span className={`font-mono ${lvlCls(lossLvl)}`}>{pnlRupees != null ? fmtRs(pnlRupees) : '—'}</span>
-            {alarm.maxLoss && alarm.maxLoss > 0 && pnlRupees != null && pnlRupees < 0 ? ` (${Math.min(999, Math.round((-pnlRupees / alarm.maxLoss) * 100))}% of max loss)` : ''}</span>
-          <span>Margin in use <span className={`font-mono ${lvlCls(marginLevel(util, alarm))}`}>{util != null ? `${util.toFixed(0)}%` : '—'}</span>
-            {funds ? ` · ${fmtRs(funds.available)} free` : ''}</span>
-        </div>
-      </section>
-      <p className="text-zinc-500">Editing any guard disarms it; re-arm after a change. A guard armed today is disarmed at the next IST day. Guards run only while this page is open in the leader tab.</p>
+        {bands.map(b => {
+          const key = `band:${b.id}`;
+          const m = METRICS.find(x => x.value === b.metric)!;
+          const r = readGreekBand(b, netGreeks);
+          const step = b.metric === 'gamma' ? 0.001 : 1;
+          return (
+            <RuleRow key={b.id} name="Greek rule" on={b.armed} firing={b.armed && !!b.firedAt}
+              onToggle={on => toggle(key, on, () => greekBandInvalid(b), gg => setBandArmed(gg, b.id, on, today()))}
+              onRemove={() => apply(gg => removeGreekBand(gg, b.id))}
+              note={noteFor(key)}
+              condition={<>
+                <span className={muted}>If net</span>
+                <select aria-label="Greek" className={selCls} value={b.metric} onChange={e => apply(gg => editGreekBand(gg, b.id, { metric: e.target.value as GreekMetric }))}>
+                  {METRICS.map(x => <option key={x.value} value={x.value}>{x.label}</option>)}
+                </select>
+                <span className={muted}>goes outside</span>
+                <RuleNumInput value={b.min} onCommit={v => apply(gg => editGreekBand(gg, b.id, { min: v }))} signed placeholder="lower" step={step}
+                  className={`w-20 ${numCls}`} ariaLabel="Lower limit" title={`Lower limit, in ${m.unit}. Leave empty for none.`} />
+                <span className={muted}>to</span>
+                <RuleNumInput value={b.max} onCommit={v => apply(gg => editGreekBand(gg, b.id, { max: v }))} signed placeholder="upper" step={step}
+                  className={`w-20 ${numCls}`} ariaLabel="Upper limit" title={`Upper limit, in ${m.unit}. Leave empty for none.`} />
+              </>}
+              action={
+                <select aria-label="Then" className={selCls} value={b.action} onChange={e => apply(gg => editGreekBand(gg, b.id, { action: e.target.value as GreekBand['action'] }))}>
+                  <option value="ALERT">Alert me</option>
+                  <option value="EXIT_ALL">Close all</option>
+                </select>
+              }
+              reading={r
+                ? <span className={r.breached ? 'text-rose-400 font-bold' : undefined}>now {r.value.toFixed(b.metric === 'gamma' ? 4 : 0)}</span>
+                : <span title="Needs a live price on every open leg">now —</span>}
+            />
+          );
+        })}
+
+        {loss && (
+          <RuleRow name="Max-loss rule" on={loss.armed} firing={loss.armed && !!loss.firedAt}
+            onToggle={on => toggle('loss', on, () => (loss.maxLoss && loss.maxLoss > 0 ? null : 'Enter the max loss first.'), gg => setAlarmArmed(gg, on, today()))}
+            onRemove={() => apply(removeLossRule)}
+            note={noteFor('loss')}
+            condition={<>
+              <span className={muted}>If today&apos;s loss reaches ₹</span>
+              <RuleNumInput value={loss.maxLoss} onCommit={v => apply(gg => editAlarm(gg, { maxLoss: v }))} placeholder="amount" min={0} step={500}
+                className={`w-24 ${numCls}`} ariaLabel="Max loss in rupees" title={`Today's P&L counts open legs and legs closed today. You get a heads-up at ${DEFAULT_WARN_PCT}%.`} />
+            </>}
+            action={
+              <select aria-label="Then" className={selCls} value={loss.exitAtMaxLoss ? 'EXIT_ALL' : 'ALERT'}
+                onChange={e => apply(gg => editAlarm(gg, { exitAtMaxLoss: e.target.value === 'EXIT_ALL' }))}>
+                <option value="ALERT">Alert me</option>
+                <option value="EXIT_ALL">Close all</option>
+              </select>
+            }
+            reading={!loss.armed && loss.firedAt ? `closed all ${fmtTime(loss.firedAt)}`
+              : loss.maxLoss && loss.maxLoss > 0 && pnl != null
+                ? <span className={lvlCls(lossLvl)}>{pnl < 0 ? Math.min(999, Math.round((-pnl / loss.maxLoss) * 100)) : 0}% of limit</span>
+                : null}
+          />
+        )}
+
+        {margin && (
+          <RuleRow name="Margin rule" on={margin.armed}
+            onToggle={on => toggle('margin', on, () => (!(margin.pct && margin.pct > 0) ? 'Enter a margin % first.' : margin.pct >= 100 ? 'Use a % below 100.' : null),
+              gg => setMarginArmed(gg, on, today()))}
+            onRemove={() => apply(removeMarginRule)}
+            note={noteFor('margin')}
+            condition={<>
+              <span className={muted}>If account margin used reaches</span>
+              <RuleNumInput value={margin.pct} onCommit={v => apply(gg => editMarginRule(gg, v))} placeholder="%" min={1} step={5}
+                className={`w-14 ${numCls}`} ariaLabel="Margin used percent" title="Share of this broker account's margin in use (all positions, not only this strategy)" />
+              <span className={muted}>%</span>
+            </>}
+            action={<span className="text-zinc-200">Alert me</span>}
+            reading={funds ? `${fmtRs(funds.available)} free` : null}
+          />
+        )}
+      </ul>
+
+      <div className="flex items-center gap-1.5 flex-wrap">
+        <button type="button" className={addBtn}
+          onClick={() => apply(gg => addSpotTrigger(gg, { id: newId(), level: 0, dir: 'above', action: 'ALERT', armed: false }))}>+ Spot level</button>
+        <button type="button" className={addBtn}
+          onClick={() => apply(gg => addGreekBand(gg, { id: newId(), metric: 'delta', action: 'ALERT', armed: false }))}>+ Greek limit</button>
+        <button type="button" className={addBtn} disabled={!!loss} title={loss ? 'Already added' : undefined}
+          onClick={() => apply(addLossRule)}>+ Max loss</button>
+        <button type="button" className={addBtn} disabled={!!margin} title={margin ? 'Already added' : undefined}
+          onClick={() => apply(addMarginRule)}>+ Margin use</button>
+      </div>
+
+      <p className="text-zinc-500">
+        Rules run only while this page is open. An exit waits {SPOT_CONFIRM_MS / 1000} s to confirm before acting. Editing a rule turns it off, and every rule turns off at the end of the day.
+      </p>
     </div>
   );
 }
