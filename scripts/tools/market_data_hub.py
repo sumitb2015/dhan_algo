@@ -57,6 +57,20 @@ WRITE_MIN_INTERVAL_SEC = 0.05  # ceiling on live_data.json write frequency (~20/
 STALL_SEC = 20                 # centralized version of live_equity_ws.py's watchdog
 FEED_READY_TIMEOUT_SEC = 10
 STOP_TRIGGER = os.path.join(hub_client.HUB_DIR, 'hub_stop.trigger')
+# The feed's token is fixed at connect time. When login.py re-issues it (daily), the
+# old one is revoked: Dhan accepts the socket then drops it, the reconnect loop never
+# re-reads the file, and after enough tries the server answers HTTP 429 — so every
+# consumer serves yesterday's LTPs (prev_close == ltp, 0.00% on every index) all day.
+# Exiting on a token-file change lets the consumers' periodic ensure_hub_running()
+# respawn the hub with the fresh token.
+TOKEN_FILE = os.path.join(ROOT, 'access_token.json')
+
+
+def _token_mtime():
+    try:
+        return os.path.getmtime(TOKEN_FILE)
+    except OSError:
+        return None
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
 log = logging.getLogger('market_data_hub')
@@ -127,6 +141,7 @@ def main():
         log.error('Authentication failed — aborting.')
         write_status('ERROR', started_at)
         sys.exit(1)
+    token_mtime_at_start = _token_mtime()  # after login: get_dhan_client may rewrite it
 
     helper = DhanHelper(dhan)
 
@@ -184,6 +199,13 @@ def main():
                 except OSError:
                     pass
                 log.info('Stop trigger detected — exiting.')
+                break
+
+            token_mtime = _token_mtime()
+            if token_mtime is not None and token_mtime != token_mtime_at_start:
+                log.info('access_token.json changed since start — exiting so a consumer '
+                         'respawns the hub with the new token.')
+                write_status('STOPPED', started_at)
                 break
 
             now = time.monotonic()
