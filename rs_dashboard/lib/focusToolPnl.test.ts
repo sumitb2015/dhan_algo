@@ -14,6 +14,7 @@ import {
   computeRowPnl, mtmForQty, ownShare, shiftMayReopen,
   canMarkMtm, shiftCloseConfirmed, rowDisplayBookedPnl, putCallRatio,
   valuePutCallRatio, pickOpenInterest, closeRebaseDelta, closedSliceBooked,
+  pnlPctOfPremium,
 } from './focusToolPnl.ts';
 
 test('mtmForQty: short leg profits when premium falls', () => {
@@ -200,4 +201,16 @@ test('closedSliceBooked prices an outside close against the own entry', () => {
   assert.ok(Math.abs(closedSliceBooked(true, 96.85, 64, 130) - 4270.5) < 1e-9);
   assert.equal(closedSliceBooked(true, 0, 64, 130), 0);
   assert.equal(closedSliceBooked(true, 96.85, 0, 130), 0);
+});
+
+test('pnlPctOfPremium: leg P&L as a % of the premium it was opened at', () => {
+  // short 4 lots × 65 sold at 82.26, now 88.65 → −₹1,661.4 = −7.77 %
+  const pnl = mtmForQty({ netQty: -260, buyAvg: 0, sellAvg: 82.26, ltp: 88.65, qty: 260 });
+  assert.ok(Math.abs((pnlPctOfPremium(pnl, 82.26, 260) ?? 0) - ((82.26 - 88.65) / 82.26) * 100) < 1e-9);
+  assert.ok(Math.abs((pnlPctOfPremium(1358, 75.57, 195) ?? 0) - 1358 / (75.57 * 195) * 100) < 1e-9);
+  assert.equal(pnlPctOfPremium(-100 * 65, 100, 65), -100);   // doubled against a short
+  assert.equal(pnlPctOfPremium(0, 50, 65), 0);
+  assert.equal(pnlPctOfPremium(100, 0, 65), null);           // no basis
+  assert.equal(pnlPctOfPremium(100, 50, 0), null);
+  assert.equal(pnlPctOfPremium(null, 50, 65), null);
 });

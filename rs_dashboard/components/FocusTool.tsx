@@ -59,7 +59,7 @@ import { buildPayoffModel } from '@/lib/optionsPayoff';
 import { computeBasketGreeks, type GreekLeg } from '@/lib/multiLegGreeks';
 import { useFocusMarketData, expKey, strikeKey, type FutQuote, type StrikeRef } from '@/lib/useFocusMarketData';
 import { isStale, ageOf, ageLabel } from '@/lib/useLiveTickerPoll';
-import { computeRowPnl, mtmForQty, shiftMayReopen, canMarkMtm, shiftCloseConfirmed, rowDisplayBookedPnl, putCallRatio, valuePutCallRatio, pickOpenInterest, closeRebaseDelta, closedSliceBooked, FTS_ORDER_SOURCE } from '@/lib/focusToolPnl';
+import { computeRowPnl, mtmForQty, pnlPctOfPremium, shiftMayReopen, canMarkMtm, shiftCloseConfirmed, rowDisplayBookedPnl, putCallRatio, valuePutCallRatio, pickOpenInterest, closeRebaseDelta, closedSliceBooked, FTS_ORDER_SOURCE } from '@/lib/focusToolPnl';
 import { normalizeTradeRow, matchOutsideTrades, type NormalizedTrade } from '@/lib/multiLegFocus';
 import { stampItems, noteItems, adoptItems, canon, type RevBook } from '@/lib/revMerge';
 import { useTabLeader } from '@/hooks/useTabLeader';
@@ -356,8 +356,9 @@ function legValues(row: FocusRow, live: RowLive, lotSize: number | null): {
   };
 }
 
-/** Computes the live mark-to-market P&L for a single owned leg of a row. */
-function computeLegPnl(row: FocusRow, leg: 'CE' | 'PE', live: RowLive): number | null {
+/** A row's owned leg: live mark-to-market P&L in ₹, and as a % of the premium it was opened at (same avg and qty, so
+ *  the two agree). */
+function computeLegPnlDetail(row: FocusRow, leg: 'CE' | 'PE', live: RowLive): { pnl: number; pct: number | null } | null {
   const pos = leg === 'CE' ? live.cePosition : live.pePosition;
   if (!pos || !rowOwnsLeg(row, leg)) return null;
   const brokerQty = Math.abs(Number(pos.netQty) || 0);
@@ -365,17 +366,19 @@ function computeLegPnl(row: FocusRow, leg: 'CE' | 'PE', live: RowLive): number |
   const owned = legOwnContracts(row, leg, live);
   const qty = Math.min(owned > 0 ? owned : 0, brokerQty);
   if (qty <= 0) return null;
+  const net = Number(pos.netQty) || 0;
+  const avg = net < 0 ? Number(pos.sellAvg) || 0 : Number(pos.buyAvg) || 0;
   const ltp = leg === 'CE' ? live.ltpCe : live.ltpPe;
-  if (ltp != null && ltp > 0) {
-    return mtmForQty({
-      netQty: Number(pos.netQty) || 0,
-      buyAvg: Number(pos.buyAvg) || 0,
-      sellAvg: Number(pos.sellAvg) || 0,
-      ltp,
-      qty,
-    });
-  }
-  return (Number(pos.unrealizedProfit) || 0) * (qty / brokerQty);
+  const pnl = ltp != null && ltp > 0
+    ? mtmForQty({ netQty: net, buyAvg: Number(pos.buyAvg) || 0, sellAvg: Number(pos.sellAvg) || 0, ltp, qty })
+    : (Number(pos.unrealizedProfit) || 0) * (qty / brokerQty);
+  return { pnl, pct: pnlPctOfPremium(pnl, avg, qty) };
+}
+
+/** "+2.3%" / "\u22124.0%" for a leg P&L %, or '' when unknown. */
+function fmtPnlPct(pct: number | null | undefined): string {
+  if (pct == null || !Number.isFinite(pct)) return '';
+  return `${pct > 0 ? '+' : pct < 0 ? '\u2212' : ''}${Math.abs(pct).toFixed(1)}%`;
 }
 
 /**
@@ -3106,8 +3109,10 @@ function FocusTableRowImpl({
   // How many lots the +/- buttons act on, independently per leg
   const [ceQty, setCeQty] = useState(1);
   const [peQty, setPeQty] = useState(1);
-  const cePnl = computeLegPnl(row, 'CE', live);
-  const pePnl = computeLegPnl(row, 'PE', live);
+  const cePnlD = computeLegPnlDetail(row, 'CE', live);
+  const pePnlD = computeLegPnlDetail(row, 'PE', live);
+  const cePnl = cePnlD?.pnl ?? null;
+  const pePnl = pePnlD?.pnl ?? null;
   // Expiry is locked once this row owns an active leg.
   const expiryLocked = rowOwnsLeg(row, 'CE') || rowOwnsLeg(row, 'PE');
   // DTE (0/1/0+1) only means something relative to the NEAREST expiry — a row
@@ -3126,6 +3131,7 @@ function FocusTableRowImpl({
     const pos = isCe ? live.cePosition : live.pePosition;
     const legFlat = isCe ? ceFlat : peFlat;
     const pnl = isCe ? cePnl : pePnl;
+    const pnlPct = (isCe ? cePnlD : pePnlD)?.pct ?? null;
     const qty = isCe ? ceQty : peQty;
     const setQty = isCe ? setCeQty : setPeQty;
     const chips = isCe ? ceChips : peChips;
@@ -3151,8 +3157,8 @@ function FocusTableRowImpl({
                 pnl > 0 ? 'bg-emerald-500/15 text-emerald-400 border-emerald-500/40 shadow-sm'
                   : pnl < 0 ? 'bg-rose-500/15 text-rose-400 border-rose-500/40 shadow-sm'
                   : 'bg-zinc-800 text-zinc-400 border-zinc-700'
-              )} title={`${leg} leg mark-to-market P&L`}>
-                {pnl > 0 ? '+' : ''}₹{pnl.toFixed(0)}
+              )} title={`${leg} leg mark-to-market P&L — ₹ and % of the premium it was sold at`}>
+                {pnl > 0 ? '+' : ''}₹{pnl.toFixed(0)}{pnlPct != null && <span className="ml-1 font-bold">{fmtPnlPct(pnlPct)}</span>}
               </span>
             )}
           </div>
@@ -3598,7 +3604,8 @@ function FocusProRowImpl({
     const ltp = isCe ? live.ltpCe : live.ltpPe;
     const strike = isCe ? live.ceStrike : live.peStrike;
     const pos = isCe ? live.cePosition : live.pePosition;
-    const pnl = computeLegPnl(row, leg, live);
+    const pnlD = computeLegPnlDetail(row, leg, live);
+    const pnl = pnlD?.pnl ?? null;
     const chips = partialCloseChips(legOwnContracts(row, leg, live), lotSize ?? 0, [25, 50, 75]);
     const buildup = isCe ? live.ceBuildup : live.peBuildup;
     const buildupStyle = buildup ? BUILDUP_STYLES[buildup] : undefined;
@@ -3671,8 +3678,10 @@ function FocusProRowImpl({
             ? <LegOpenBadge pos={pos} lotSize={lotSize} />
             : <span className="text-[11px] font-semibold uppercase tracking-wider text-zinc-500">{inSide ? 'Flat' : 'Not traded'}</span>}
         </TableCell>
-        <TableCell className={cn('py-1.5 px-2 text-center font-mono text-sm font-bold tabular-nums', pnlClass(pnl))}>
+        <TableCell className={cn('py-1.5 px-2 text-center font-mono text-sm font-bold tabular-nums', pnlClass(pnl))}
+          title={pnl != null ? `${leg} leg P&L — ₹ and % of the premium it was sold at` : undefined}>
           {pnl != null ? fmtPnl0(pnl) : '—'}
+          {pnlD?.pct != null && <div className="text-[11px] font-semibold leading-tight">{fmtPnlPct(pnlD.pct)}</div>}
         </TableCell>
         {/* This leg's own rules */}
         <TableCell className="py-1.5 px-2 text-center">
@@ -4103,8 +4112,10 @@ function FocusRowCardImpl({
   // How many lots the +/- buttons act on, independently per leg
   const [ceQty, setCeQty] = useState(1);
   const [peQty, setPeQty] = useState(1);
-  const cePnl = computeLegPnl(row, 'CE', live);
-  const pePnl = computeLegPnl(row, 'PE', live);
+  const cePnlD = computeLegPnlDetail(row, 'CE', live);
+  const pePnlD = computeLegPnlDetail(row, 'PE', live);
+  const cePnl = cePnlD?.pnl ?? null;
+  const pePnl = pePnlD?.pnl ?? null;
   // Expiry is locked once this row owns an active leg.
   const expiryLocked = rowOwnsLeg(row, 'CE') || rowOwnsLeg(row, 'PE');
   const onNearestExpiry = !row.expiry || row.expiry === expiries[0];
@@ -4317,8 +4328,8 @@ function FocusRowCardImpl({
                 cePnl > 0 ? 'bg-emerald-500/15 text-emerald-400 border-emerald-500/40 shadow-sm'
                   : cePnl < 0 ? 'bg-rose-500/15 text-rose-400 border-rose-500/40 shadow-sm'
                   : 'bg-zinc-800 text-zinc-400 border-zinc-700'
-              )} title="CE leg mark-to-market P&L">
-                {cePnl > 0 ? '+' : ''}₹{cePnl.toFixed(0)}
+              )} title="CE leg mark-to-market P&L — ₹ and % of the premium it was sold at">
+                {cePnl > 0 ? '+' : ''}₹{cePnl.toFixed(0)}{cePnlD?.pct != null && <span className="ml-1 font-bold">{fmtPnlPct(cePnlD.pct)}</span>}
               </span>
             )}
             <LegSlLevels row={row} live={live} leg="CE" lotSize={lotSize} inline />
@@ -4359,8 +4370,8 @@ function FocusRowCardImpl({
                 pePnl > 0 ? 'bg-emerald-500/15 text-emerald-400 border-emerald-500/40 shadow-sm'
                   : pePnl < 0 ? 'bg-rose-500/15 text-rose-400 border-rose-500/40 shadow-sm'
                   : 'bg-zinc-800 text-zinc-400 border-zinc-700'
-              )} title="PE leg mark-to-market P&L">
-                {pePnl > 0 ? '+' : ''}₹{pePnl.toFixed(0)}
+              )} title="PE leg mark-to-market P&L — ₹ and % of the premium it was sold at">
+                {pePnl > 0 ? '+' : ''}₹{pePnl.toFixed(0)}{pePnlD?.pct != null && <span className="ml-1 font-bold">{fmtPnlPct(pePnlD.pct)}</span>}
               </span>
             )}
             <LegSlLevels row={row} live={live} leg="PE" lotSize={lotSize} inline />

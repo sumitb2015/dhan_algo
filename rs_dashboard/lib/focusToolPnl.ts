@@ -34,6 +34,17 @@ export function mtmForQty(input: MtmInput): number {
 }
 
 /**
+ * A leg's P&L as a % of the premium it was opened at: `pnl` over avg × qty, the same avg and qty that produced `pnl`
+ * (mtmForQty), so ₹ and % always agree. A short that has decayed from 80 to 60 shows +25 %; doubled against you, −100 %.
+ * Null when the basis is unknown.
+ */
+export function pnlPctOfPremium(pnl: number | null | undefined, avg: number, qty: number): number | null {
+  const basis = Math.abs(Number(avg) || 0) * Math.abs(Number(qty) || 0);
+  if (pnl == null || !Number.isFinite(pnl) || !(basis > 0)) return null;
+  return (pnl / basis) * 100;
+}
+
+/**
  * Share of a netted broker position that belongs to this row.
  *
  * Missing/zero own qty → 0, NEVER 1. A row with no recorded ownership on a
