@@ -51,7 +51,7 @@ import {
   multipliedLots, legLots, hasLegLots, clampHm, rangeWindow, rangeWindowPhase, rowHasMultiDayRange, candleBucket, tradingDte,
   legSlRuleOn, legStopLevel, legTargetSpotLevel, legTgtUnitLabel, MAX_LEG_REENTRIES, pendingReentryLevel, pendingReentryHit, legTargetReason, costReentryBasis,
   awaitingMomentumQuote, MOMENTUM_QUOTE_WAIT_MS, legTargetLevel,
-  evaluateEntryMomentum, reRangeWindow, entryMomentumOn, overallSlConfig, overallProgress, nextOverallPeak, evaluateOverallExit, overallTrailInvalid, overallExitKind, evaluateOverallReentry, MAX_OVERALL_REENTRIES, rangeBreakoutOn, rangeBreakoutHit, costStopApplies, squareOffLegs, atmStrike, resolveRowLegStrike, mirrorLinkedPatch, MAX_LAZY_LEGS, legSlMultiplier, legTarget, nextLazyLegId, lazyLegStrike, runningLazyLeg, simpleMomOn, simpleMomLevel, simpleMomHit, otmReentryStrike, reentryOtmFromAtm,
+  evaluateEntryMomentum, reRangeWindow, entryMomentumOn, overallSlConfig, overallProgress, nextOverallPeak, evaluateOverallExit, overallTrailInvalid, overallExitKind, evaluateOverallReentry, MAX_OVERALL_REENTRIES, rangeBreakoutOn, rangeBreakoutHit, costStopApplies, squareOffLegs, atmStrike, resolveRowLegStrike, mirrorLinkedPatch, MAX_LAZY_LEGS, legSlMultiplier, legTarget, nextLazyLegId, lazyLegStrike, runningLazyLeg, simpleMomOn, simpleMomLevel, simpleMomHit, otmReentryStrike, reentryOtmFromAtm, matchPremiumStrike,
   type PosRow, type RowLive,
 } from '@/lib/focusToolRules';
 import { postFocusEvent } from '@/lib/focusToolEvents';
@@ -1076,14 +1076,17 @@ function slTone(now: number | null, stop: number | null, idle: string): string {
 }
 
 const REENTRY_LABEL: Record<FocusReentryMode, string> = {
-  off: 'Off', asap: 'RE ASAP', otm: 'RE OTM', cost: 'RE COST', momentum: 'RE MOMENTUM', lazy: 'Lazy Leg',
+  off: 'Off', asap: 'RE ASAP', otm: 'RE OTM', match: 'RE MATCH', cost: 'RE COST', momentum: 'RE MOMENTUM', lazy: 'Lazy Leg',
 };
 const REENTRY_HELP: Record<FocusReentryMode, string> = {
   off: 'Leg stays closed',
   asap: 'Re-sell at once at the strike the row resolves to now (ATM ± offset / ₹ target)',
   otm: 'Re-sell at once, N strikes OTM. On SL: N further OTM than the strike that closed — or, if that stop had trailed, '
-    + 'N OTM of the ATM now. On target: N OTM of the ATM now (CE above, PE below), so the new leg sits a set distance from '
-    + 'where spot is, not at the deep OTM strike that decayed',
+    + 'counted like a target. On target: N OTM of the ATM now, or (from Row) N beyond the strike this row would enter at '
+    + 'now, so the new leg sits a set distance from where spot is, not at the deep OTM strike that decayed',
+  match: 'Re-sell at once at the strike whose premium is closest to the other leg\'s live premium (OTM side only: CE at or '
+    + 'above ATM, PE at or below; never the strike that just closed — that steps one further OTM). If the other leg is not '
+    + 'open, the leg stays closed',
   cost: 'Wait on the same strike until its premium returns to that strike\'s initial entry this cycle, then re-sell',
   momentum: 'Pick the strike the row resolves to when the leg closes, then re-sell once it has moved as far as this '
     + 'leg\'s Simple Momentum says (premium or underlying, points or %). With no Simple Momentum it behaves exactly like RE ASAP. '
@@ -1736,12 +1739,13 @@ function LegReentryControls({ row, onUpdate, onCancelPending, legTargetsElsewher
     : `CE ${f?.ceTgtReentries ?? 0} · PE ${f?.peTgtReentries ?? 0}`;
   const anyOtm = sl.mode === 'otm';
   const tgtOtm = tgt.mode === 'otm';
+  const otmFromRow = row.reOtmFrom === 'row';
   const anyOn = sl.mode !== 'off' || tgt.mode !== 'off';
   const tgtUnitWord = legTgtUnitWords(row.legTgtUnit);
 
   const modeSelect = (t: 'sl' | 'tgt') => {
     const c = t === 'sl' ? sl : tgt;
-    const modes: FocusReentryMode[] = ['off', 'asap', 'otm', 'cost', 'momentum', 'lazy'];
+    const modes: FocusReentryMode[] = ['off', 'asap', 'otm', 'match', 'cost', 'momentum', 'lazy'];
     return (
       <div className={lbl} title={`${t === 'sl' ? 'After a leg SL % (CE % / PE %)' : 'After a leg target (CE Tgt / PE Tgt)'}: ${REENTRY_HELP[c.mode]}`}>
         {t === 'sl' ? 'RE on SL' : 'RE on Tgt'}
@@ -1805,7 +1809,7 @@ function LegReentryControls({ row, onUpdate, onCancelPending, legTargetsElsewher
           onChange={v => onUpdate({ legTgtUnit: v as LegTgtUnit })} className="w-32" />
         </>)}
         {anyOtm && (
-          <div className={lbl} title="RE-OTM on SL: strikes further OTM than the strike that closed (CE up, PE down). If the stop had trailed: strikes OTM of the ATM now">
+          <div className={lbl} title="RE-OTM on SL: strikes further OTM than the strike that closed (CE up, PE down). If the stop had trailed: counted from the 'from' choice instead (never the strike that just stopped)">
             {tgtOtm ? 'SL OTM' : 'OTM'}
             <MiniSelect value={String(Math.max(1, Math.trunc(Number(row.slRollStrikes) || 1)))} ariaLabel="Strikes OTM for RE-OTM on stop loss"
               options={[1, 2, 3].map(n => ({ value: String(n), label: String(n) }))}
@@ -1813,11 +1817,33 @@ function LegReentryControls({ row, onUpdate, onCancelPending, legTargetsElsewher
           </div>
         )}
         {tgtOtm && (
-          <div className={lbl} title="RE-OTM on target: strikes OTM of the ATM at the moment the target hits (CE above ATM, PE below)">
+          <div className={lbl} title={otmFromRow
+            ? "RE-OTM on target: strikes beyond the strike this row would enter at now (its own ATM ± offset). 0 = exactly that strike"
+            : 'RE-OTM on target: strikes OTM of the ATM at the moment the target hits (CE above ATM, PE below)'}>
             Tgt OTM
-            <MiniSelect value={String(tgt.otmStrikes)} ariaLabel="Strikes OTM of current ATM for RE-OTM on target"
-              options={[1, 2, 3, 4, 5, 6].map(n => ({ value: String(n), label: String(n) }))}
+            <MiniSelect value={String(tgt.otmStrikes)} ariaLabel="Strikes OTM for RE-OTM on target"
+              options={(otmFromRow ? [0, 1, 2, 3, 4, 5, 6] : [1, 2, 3, 4, 5, 6]).map(n => ({ value: String(n), label: String(n) }))}
               onChange={v => onUpdate({ reTgtOtmStrikes: Number(v) })} className="w-12" />
+          </div>
+        )}
+        {(anyOtm || tgtOtm) && (
+          <div className={lbl} title={'Where RE OTM counts its strikes from after a target, or after a stop that had trailed. '
+            + 'ATM: the ATM at that moment. Row: the strike this row would enter at now (its own ATM ± offset), so a '
+            + 're-entry is never closer to the money than a fresh entry. A plain SL always rolls from the strike that stopped'}>
+            from
+            <ToggleGroup value={[otmFromRow ? 'row' : 'atm']} variant="outline" size="sm" spacing={0} aria-label="RE OTM counts from"
+              onValueChange={(v: unknown[]) => {
+                const next = v[v.length - 1] as 'atm' | 'row' | undefined;
+                if (!next) return;
+                const patch: Partial<FocusRow> = { reOtmFrom: next };
+                // 0 only means something from the row's strike; from ATM it would sell ATM itself.
+                if (next === 'atm' && tgt.otmStrikes < 1) patch.reTgtOtmStrikes = 1;
+                onUpdate(patch);
+              }}
+              >
+              <ToggleGroupItem value="atm" className="h-6 px-2 text-[11px] font-bold aria-pressed:bg-violet-600 aria-pressed:text-oncolor">ATM</ToggleGroupItem>
+              <ToggleGroupItem value="row" className="h-6 px-2 text-[11px] font-bold aria-pressed:bg-violet-600 aria-pressed:text-oncolor">Row</ToggleGroupItem>
+            </ToggleGroup>
           </div>
         )}
       </div>
@@ -3482,7 +3508,7 @@ function reentrySummary(row: FocusRow): string {
   const tgt = reentryConfig(row, 'tgt');
   const one = (c: typeof sl) => c.mode === 'off'
     ? 'off'
-    : `${REENTRY_LABEL[c.mode]}${c.mode === 'otm' ? ` ${c.otmStrikes}` : ''} ×${c.max}`;
+    : `${REENTRY_LABEL[c.mode]}${c.mode === 'otm' ? ` ${c.otmStrikes}${row.reOtmFrom === 'row' ? ' from row' : ''}` : ''} ×${c.max}`;
   const parts = [`SL: ${one(sl)}`, `Tgt: ${one(tgt)}`];
   if (row.noReEntryAfter) parts.push(`none after ${row.noReEntryAfter}`);
   if (row.squareOff === 'complete') parts.push('Square off complete');
@@ -7688,24 +7714,67 @@ export default function FocusTool() {
     // RE OTM after a target, or after a stop that had trailed, counts from the ATM now (same Spot / Fut base the row
     // resolves its strikes from): the closed strike can be deep OTM, so rolling further out from it would leave the
     // other leg naked. A plain SL hit rolls from the closed strike (see reentryOtmFromAtm).
-    let tgtAtm: number | null = null;
+    let anchorNote = '';
     let newStrike: number | null;
     if (cfg.mode === 'otm') {
+      const from = row.reOtmFrom === 'row' ? 'row' : 'atm';
+      let atm: number | null = null;
+      let rowStrike: number | null = null;
       if (reentryOtmFromAtm(trigger, trailedSteps)) {
-        const fut = snap.futQuotes[u]?.ltp ?? 0;
-        tgtAtm = atmStrike(group?.atmBy === 'Fut' && fut > 0 ? fut : (snap.spots[u] ?? 0), rowStep(row));
+        if (from === 'row') {
+          // The strike this row would enter at now (its own ATM ± offset / criteria), once the closed leg is flat.
+          rowStrike = await resolvedStrikeAfterClose(rowId, leg);
+        } else {
+          const fut = snap.futQuotes[u]?.ltp ?? 0;
+          atm = atmStrike(group?.atmBy === 'Fut' && fut > 0 ? fut : (snap.spots[u] ?? 0), rowStep(row));
+        }
       }
       const pick = otmReentryStrike({
-        trigger, trailedSteps, leg, atm: tgtAtm, closedStrike, strikes: cfg.otmStrikes, step: rowStep(row),
+        trigger, trailedSteps, leg, atm, closedStrike, strikes: cfg.otmStrikes, step: rowStep(row), from, rowStrike,
       });
       newStrike = pick.strike;
-      if (!pick.fromAtm) tgtAtm = null;   // fell back to the closed-strike roll: don't claim an ATM in the toast
+      // Only claim an anchor when the strike was counted from it (not the closed-strike fallback).
+      if (pick.anchored && from === 'atm' && atm != null) anchorNote = ` (${cfg.otmStrikes} OTM of ATM ${atm})`;
+      if (pick.anchored && from === 'row' && rowStrike != null) anchorNote = ` (${cfg.otmStrikes} beyond the row's strike ${rowStrike})`;
+    } else if (cfg.mode === 'match') {
+      // RE MATCH: price the new leg like the row's OTHER open leg. Read the row now — the close above has awaited.
+      const other: 'CE' | 'PE' = leg === 'CE' ? 'PE' : 'CE';
+      const now = schedulerRef.current.config.rows.find(r => r.id === rowId) ?? row;
+      const otherQty = Number(other === 'CE' ? now.fill?.ceQty : now.fill?.peQty) || 0;
+      if (otherQty <= 0 || autoExitingLegRef.current.has(`${rowId}:${other}`)) {
+        addToast('error', `${tag} no re-entry`, `RE MATCH: the ${other} leg is not open, so there is no premium to match — ${leg} left closed`);
+        return 'skipped';
+      }
+      const live = schedulerRef.current.rowLive[rowId] ?? EMPTY_ROW_LIVE;
+      const otherStrike = other === 'CE' ? live.ceStrike : live.peStrike;
+      const target = otherStrike != null ? actionsRef.current.simQuote(u, expiry, otherStrike, other) : 0;
+      const fut = snap.futQuotes[u]?.ltp ?? 0;
+      const step = rowStep(row);
+      const atm = atmStrike(group?.atmBy === 'Fut' && fut > 0 ? fut : (snap.spots[u] ?? 0), step);
+      // Every listed strike of this expiry (chain + tick feed), on the row's own step (MCX "100s only").
+      const keys = new Set<number>([
+        ...Object.keys(chains[expKey(u, expiry)]?.oc ?? {}).map(Number),
+        ...Object.keys(focusWsBookForExpiry(focusWsQuotes?.[u], expiry)?.strikes ?? {}).map(Number),
+      ]);
+      const quotes = [...keys]
+        .filter(k => Number.isFinite(k) && k > 0 && Math.abs(k / step - Math.round(k / step)) < 1e-9)
+        .map(k => ({ strike: k, px: actionsRef.current.simQuote(u, expiry, k, leg) }));
+      newStrike = matchPremiumStrike({ quotes, leg, target, atm, exclude: closedStrike });
+      if (newStrike == null) {
+        addToast('error', `${tag} no re-entry`, target > 0
+          ? `RE MATCH: no quoted ${leg} strike on the OTM side to match ${other} ₹${target.toFixed(2)} — leg left closed`
+          : `RE MATCH: no live ${other} premium to match — leg left closed`);
+        return 'skipped';
+      }
+      anchorNote = ` (premium matched to ${other} ₹${target.toFixed(2)})`;
     } else {
       newStrike = await resolvedStrikeAfterClose(rowId, leg);
     }
     if (newStrike == null) {
       addToast('error', `${tag} no re-entry`, cfg.mode === 'otm'
-        ? 'RE OTM needs the current ATM and spot / futures is not loaded — leg left closed'
+        ? (row.reOtmFrom === 'row'
+          ? "RE OTM needs the row's current strike and it could not be resolved — leg left closed"
+          : 'RE OTM needs the current ATM and spot / futures is not loaded — leg left closed')
         : 'Could not resolve the current strike');
       return 'skipped';
     }
@@ -7721,7 +7790,7 @@ export default function FocusTool() {
       return 'unconfirmed';
     }
     addToast('success', `${tag} re-entered (${cfg.mode.toUpperCase()}${momKind === 'asap' ? ' — RE MOMENTUM with no momentum set' : ''})`,
-      `${what} at ${closedStrike} → re-sold ${lots} lot(s) at ${newStrike}${tgtAtm != null ? ` (${cfg.otmStrikes} OTM of ATM ${tgtAtm})` : ''} (${done + 1}/${cfg.max})`);
+      `${what} at ${closedStrike} → re-sold ${lots} lot(s) at ${newStrike}${anchorNote} (${done + 1}/${cfg.max})`);
     return 'reentered';
   }
 

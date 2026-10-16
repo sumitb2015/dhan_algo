@@ -17,7 +17,7 @@ import assert from 'node:assert/strict';
 
 import {
   EMPTY_ROW_LIVE, legStopReason, legStopLevel, legTargetReason, reentryConfig, evaluateReentry,
-  slRollStrike, reTgtOtmStrike, reentryOtmFromAtm, otmReentryStrike, pendingReentryLevel, pendingReentryHit, costReentryBasis, awaitingMomentumQuote,
+  slRollStrike, reTgtOtmStrike, reentryOtmFromAtm, otmReentryStrike, matchPremiumStrike, pendingReentryLevel, pendingReentryHit, costReentryBasis, awaitingMomentumQuote,
   MAX_LEG_REENTRIES, DEFAULT_SL_ROLL_MAX,
   type RowLive,
 } from './focusToolRules.ts';
@@ -272,17 +272,75 @@ for (const m of MARKETS) {
       trigger: 'sl', trailedSteps: 0, leg: 'CE', atm, closedStrike: atm + 4 * st, strikes: 1, step: st, ...o,
     });
     // plain SL: one further out than the closed strike, whatever ATM is
-    assert.deepEqual(pick({}), { strike: atm + 5 * st, fromAtm: false });
+    assert.deepEqual(pick({}), { strike: atm + 5 * st, anchored: false });
     // trailed SL: from the ATM now …
-    assert.deepEqual(pick({ trailedSteps: 1 }), { strike: atm + st, fromAtm: true });
+    assert.deepEqual(pick({ trailedSteps: 1 }), { strike: atm + st, anchored: true });
     // … but landing on the strike that just stopped steps one further (CE up, PE down)
-    assert.deepEqual(pick({ trailedSteps: 1, closedStrike: atm + st }), { strike: atm + 2 * st, fromAtm: true });
-    assert.deepEqual(pick({ trailedSteps: 1, leg: 'PE', closedStrike: atm - st }), { strike: atm - 2 * st, fromAtm: true });
+    assert.deepEqual(pick({ trailedSteps: 1, closedStrike: atm + st }), { strike: atm + 2 * st, anchored: true });
+    assert.deepEqual(pick({ trailedSteps: 1, leg: 'PE', closedStrike: atm - st }), { strike: atm - 2 * st, anchored: true });
     // a target may re-sell the same strike (it made money there)
-    assert.deepEqual(pick({ trigger: 'tgt', closedStrike: atm + st }), { strike: atm + st, fromAtm: true });
+    assert.deepEqual(pick({ trigger: 'tgt', closedStrike: atm + st }), { strike: atm + st, anchored: true });
     // ATM unknown: a stop falls back to the roll; a target does not re-enter
-    assert.deepEqual(pick({ trailedSteps: 2, atm: null }), { strike: atm + 5 * st, fromAtm: false });
-    assert.deepEqual(pick({ trigger: 'tgt', atm: null }), { strike: null, fromAtm: true });
+    assert.deepEqual(pick({ trailedSteps: 2, atm: null }), { strike: atm + 5 * st, anchored: false });
+    assert.deepEqual(pick({ trigger: 'tgt', atm: null }), { strike: null, anchored: true });
+  });
+
+  test(`${tag} RE OTM from Row: N beyond the strike a fresh entry would take, never closer than it`, () => {
+    const atm = Math.round(m.spot / m.step) * m.step;
+    const st = m.step;
+    // row normally sells PE at ATM − 2; its target re-entry with N = 1 goes to ATM − 3, with N = 0 to ATM − 2
+    const rowPe = atm - 2 * st;
+    const pick = (o: Partial<Parameters<typeof otmReentryStrike>[0]>) => otmReentryStrike({
+      trigger: 'tgt', trailedSteps: 0, leg: 'PE', atm, closedStrike: atm - 6 * st, strikes: 1, step: st,
+      from: 'row', rowStrike: rowPe, ...o,
+    });
+    assert.deepEqual(pick({}), { strike: atm - 3 * st, anchored: true });
+    assert.deepEqual(pick({ strikes: 0 }), { strike: rowPe, anchored: true });
+    assert.deepEqual(pick({ leg: 'CE', rowStrike: atm + st }), { strike: atm + 2 * st, anchored: true });
+    // the ATM is ignored from Row
+    assert.deepEqual(pick({ atm: null }), { strike: atm - 3 * st, anchored: true });
+    // trailed SL from Row: never the strike that stopped
+    assert.deepEqual(pick({ trigger: 'sl', trailedSteps: 1, strikes: 0, closedStrike: rowPe }), { strike: rowPe - st, anchored: true });
+    // row strike unknown: a stop rolls from the closed strike, a target does not re-enter
+    assert.deepEqual(pick({ trigger: 'sl', trailedSteps: 1, rowStrike: null }), { strike: atm - 7 * st, anchored: false });
+    assert.deepEqual(pick({ rowStrike: null }), { strike: null, anchored: true });
+    // a plain SL is unaffected by the switch
+    assert.deepEqual(pick({ trigger: 'sl', trailedSteps: 0 }), { strike: atm - 7 * st, anchored: false });
+  });
+
+  test(`${tag} RE MATCH: closest premium to the other leg, OTM side only, never the strike that closed`, () => {
+    const atm = Math.round(m.spot / m.step) * m.step;
+    const st = m.step;
+    // PE premiums fall as the strike goes down (further OTM); one ITM PE is cheaper-looking noise that must be ignored
+    const pe = [
+      { strike: atm + st, px: 40 },          // ITM side — never chosen even though it is nearest 40
+      { strike: atm, px: 100 },
+      { strike: atm - st, px: 80 },
+      { strike: atm - 2 * st, px: 62 },
+      { strike: atm - 3 * st, px: 45 },
+      { strike: atm - 4 * st, px: 30 },
+      { strike: atm - 5 * st, px: 0 },       // unquoted — skipped
+    ];
+    const pick = (o: Partial<Parameters<typeof matchPremiumStrike>[0]>) =>
+      matchPremiumStrike({ quotes: pe, leg: 'PE', target: 68, atm, exclude: null, ...o });
+    assert.equal(pick({}), atm - 2 * st);                          // 62 is nearest 68
+    assert.equal(pick({ target: 41 }), atm - 3 * st);              // 45, not the ITM 40
+    assert.equal(pick({ exclude: atm - 2 * st }), atm - 3 * st);   // the closed strike → one further OTM
+    assert.equal(pick({ target: 71 }), atm - 2 * st);              // tie 80/62 → the one further OTM
+    assert.equal(pick({ target: 20, exclude: atm - 4 * st }), null); // nothing further OTM is quoted
+    assert.equal(pick({ target: 0 }), null);
+    assert.equal(pick({ atm: null }), null);
+    // CE: OTM is at or above ATM
+    const ce = [{ strike: atm - st, px: 70 }, { strike: atm, px: 95 }, { strike: atm + st, px: 72 }, { strike: atm + 2 * st, px: 50 }];
+    assert.equal(matchPremiumStrike({ quotes: ce, leg: 'CE', target: 68, atm, exclude: null }), atm + st);
+    assert.equal(matchPremiumStrike({ quotes: ce, leg: 'CE', target: 68, atm, exclude: atm + st }), atm + 2 * st);
+  });
+
+  test(`${tag} Tgt OTM count: missing = 1, 0 allowed only from Row`, () => {
+    assert.equal(reentryConfig({ reTgtMode: 'otm' } as never, 'tgt').otmStrikes, 1);
+    assert.equal(reentryConfig({ reTgtMode: 'otm', reOtmFrom: 'row' } as never, 'tgt').otmStrikes, 1);
+    assert.equal(reentryConfig({ reTgtMode: 'otm', reOtmFrom: 'row', reTgtOtmStrikes: 0 } as never, 'tgt').otmStrikes, 0);
+    assert.equal(reentryConfig({ reTgtMode: 'otm', reTgtOtmStrikes: 0 } as never, 'tgt').otmStrikes, 1);
   });
 
   test(`${tag} RE Cost / Momentum: what a waiting re-entry waits for`, () => {

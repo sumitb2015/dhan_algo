@@ -756,7 +756,7 @@ function clampReentryMax(v: unknown): number {
 /** The re-entry settings that apply to one trigger, with legacy fallbacks. */
 export function reentryConfig(
   row: Pick<FocusRow, 'reSlMode' | 'reSlMax' | 'reTgtMode' | 'reTgtMax' | 'slRollStrikes' | 'slRollMax'>
-    & Partial<Pick<FocusRow, 'reTgtOtmStrikes'>>,
+    & Partial<Pick<FocusRow, 'reTgtOtmStrikes' | 'reOtmFrom'>>,
   trigger: FocusReentryTrigger,
 ): { mode: FocusReentryMode; max: number; otmStrikes: number } {
   if (trigger === 'sl') {
@@ -767,8 +767,10 @@ export function reentryConfig(
     return { mode, max: clampReentryMax(max), otmStrikes };
   }
   const max = row.reTgtMax ?? DEFAULT_SL_ROLL_MAX;
-  // RE OTM on target counts from the ATM now, not the closed strike (see reTgtOtmStrike).
-  const otmStrikes = Math.max(1, Math.trunc(Number(row.reTgtOtmStrikes) || 0));
+  // RE OTM on target counts from the ATM / the row's own strike now, not the closed strike (see otmReentryStrike).
+  // 0 is allowed only from the row's strike ("re-enter where a fresh entry would"); from ATM it would be ATM itself.
+  const raw = row.reTgtOtmStrikes == null ? 1 : Math.trunc(Number(row.reTgtOtmStrikes) || 0);
+  const otmStrikes = Math.max(row.reOtmFrom === 'row' ? 0 : 1, raw);
   return { mode: row.reTgtMode ?? 'off', max: clampReentryMax(max), otmStrikes };
 }
 
@@ -793,24 +795,59 @@ export function reTgtOtmStrike(leg: 'CE' | 'PE', atm: number | null, strikes: nu
 }
 
 /**
- * The strike an RE OTM re-entry sells. Null = cannot resolve (no re-entry).
+ * The strike an RE OTM re-entry sells. Null = cannot resolve (no re-entry). `anchored` = it was counted from the
+ * anchor (ATM or the row's strike) rather than rolled from the closed strike.
  *  - Plain SL: `strikes` further OTM than the closed strike (slRollStrike).
- *  - Target, or an SL whose stop had trailed: `strikes` OTM of the ATM now (reTgtOtmStrike).
+ *  - Target, or an SL whose stop had trailed: `strikes` OTM of the anchor —
+ *      from 'atm': the ATM now (at least 1 strike, reTgtOtmStrike);
+ *      from 'row': the strike the row would enter at now (its own ATM ± offset), so never closer to the money than a
+ *      fresh entry; 0 = exactly that strike.
  *  - After a trailed SL the result is never the strike that just stopped out: landing on it steps one more strike
- *    OTM. And when the ATM is unknown (spot / futures not loaded) a stop falls back to the closed-strike roll rather
- *    than leaving the leg closed. A target with no ATM gets no re-entry — rolling from its decayed strike is the
- *    naked-leg case this mode exists to avoid.
+ *    OTM. When the anchor is unknown (spot / futures or the row's strike not loaded) a stop falls back to the
+ *    closed-strike roll rather than leaving the leg closed. A target with no anchor gets no re-entry — rolling from
+ *    its decayed strike is the naked-leg case this mode exists to avoid.
  */
 export function otmReentryStrike(p: {
   trigger: FocusReentryTrigger; trailedSteps: number; leg: 'CE' | 'PE';
   atm: number | null; closedStrike: number; strikes: number; step: number;
-}): { strike: number | null; fromAtm: boolean } {
+  from?: 'atm' | 'row'; rowStrike?: number | null;
+}): { strike: number | null; anchored: boolean } {
   const roll = () => slRollStrike(p.leg, p.closedStrike, p.strikes, p.step);
-  if (!reentryOtmFromAtm(p.trigger, p.trailedSteps)) return { strike: roll(), fromAtm: false };
-  const s = reTgtOtmStrike(p.leg, p.atm, p.strikes, p.step);
-  if (s == null) return p.trigger === 'sl' ? { strike: roll(), fromAtm: false } : { strike: null, fromAtm: true };
-  if (p.trigger === 'sl' && s === p.closedStrike) return { strike: slRollStrike(p.leg, s, 1, p.step), fromAtm: true };
-  return { strike: s, fromAtm: true };
+  if (!reentryOtmFromAtm(p.trigger, p.trailedSteps)) return { strike: roll(), anchored: false };
+  const s = p.from === 'row'
+    ? (p.rowStrike != null && p.rowStrike > 0 && p.step > 0 ? slRollStrike(p.leg, p.rowStrike, p.strikes, p.step) : null)
+    : reTgtOtmStrike(p.leg, p.atm, p.strikes, p.step);
+  if (s == null) return p.trigger === 'sl' ? { strike: roll(), anchored: false } : { strike: null, anchored: true };
+  if (p.trigger === 'sl' && s === p.closedStrike) return { strike: slRollStrike(p.leg, s, 1, p.step), anchored: true };
+  return { strike: s, anchored: true };
+}
+
+/**
+ * RE MATCH: the strike of `leg`'s type whose live premium is closest to `target` (the row's other open leg), from the
+ * OTM side only — CE at or above `atm`, PE at or below it — so it never sells in the money. A tie goes to the strike
+ * further OTM (less risk for the same premium). Never `exclude` (the strike that just closed): landing on it takes the
+ * next quoted strike further OTM. Null when nothing qualifies (no ATM, no target, no quotes).
+ */
+export function matchPremiumStrike(p: {
+  quotes: { strike: number; px: number }[]; leg: 'CE' | 'PE'; target: number; atm: number | null; exclude: number | null;
+}): number | null {
+  if (!(p.target > 0) || p.atm == null || !(p.atm > 0)) return null;
+  const otm = (k: number) => (p.leg === 'CE' ? k >= p.atm! : k <= p.atm!);
+  const further = (a: number, b: number) => (p.leg === 'CE' ? a > b : a < b);   // a is further OTM than b
+  const rows = p.quotes.filter(q => Number.isFinite(q.strike) && q.px > 0 && otm(q.strike));
+  let best: { strike: number; px: number } | null = null;
+  for (const q of rows) {
+    const d = Math.abs(q.px - p.target);
+    const bd = best ? Math.abs(best.px - p.target) : Infinity;
+    if (d < bd - 1e-9 || (best && Math.abs(d - bd) <= 1e-9 && further(q.strike, best.strike))) best = q;
+  }
+  if (!best) return null;
+  if (best.strike !== p.exclude) return best.strike;
+  let next: number | null = null;
+  for (const q of rows) {
+    if (further(q.strike, best.strike) && (next == null || further(next, q.strike))) next = q.strike;
+  }
+  return next;
 }
 
 /**

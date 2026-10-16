@@ -25,6 +25,9 @@ export type FocusRowMode = 'real' | 'sim';
  *               stop had trailed, slRollStrikes OTM of the ATM NOW. On target:
  *               FocusRow.reTgtOtmStrikes OTM of the ATM NOW — the closed strike
  *               is already far from spot, and the row's own offset may be ATM.
+ *  - match    — re-sell at once at the strike (OTM side, same type) whose live
+ *               premium is closest to the row's OTHER open leg; never the strike
+ *               that just closed. No other open leg = no re-entry.
  *  - cost     — wait on the SAME strike until its premium returns to the
  *               closed leg's own entry, then re-sell there.
  *  - momentum — pick the strike the row resolves to now, note its premium (or
@@ -32,7 +35,7 @@ export type FocusRowMode = 'real' | 'sim';
  *               Simple Momentum setting says (AlgoTest: needs it switched on).
  *  - lazy     — open a Lazy Leg (FocusRow.lazyLegs) in the closed leg's place.
  */
-export type FocusReentryMode = 'off' | 'asap' | 'otm' | 'cost' | 'momentum' | 'lazy';
+export type FocusReentryMode = 'off' | 'asap' | 'otm' | 'match' | 'cost' | 'momentum' | 'lazy';
 export type FocusReentryTrigger = 'sl' | 'tgt';
 
 /**
@@ -512,8 +515,14 @@ export interface FocusRow {
   /** Re-entry after a leg TARGET close — same modes. Missing = 'off'. */
   reTgtMode?: FocusReentryMode;
   reTgtMax?: number;
-  /** RE OTM on target: strikes OTM of the current ATM (CE up, PE down). Missing = 1. */
+  /** RE OTM on target: strikes OTM of the anchor (reOtmFrom). Missing = 1; 0 only with reOtmFrom 'row'. */
   reTgtOtmStrikes?: number;
+  /**
+   * What RE OTM counts its strikes from when it does not roll from the closed strike (after a target, or a stop that
+   * had trailed): 'atm' — the ATM now (missing = this, the original behaviour); 'row' — the strike this row would
+   * enter at now (its own ATM ± offset / criteria), so a re-entry is never closer to the money than a fresh entry.
+   */
+  reOtmFrom?: 'atm' | 'row';
   /** Lazy Leg to open when the leg's SL / target closes it (reSlMode / reTgtMode = 'lazy'). */
   reSlLazyId?: string;
   reTgtLazyId?: string;
