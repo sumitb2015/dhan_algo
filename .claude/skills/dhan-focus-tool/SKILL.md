@@ -69,6 +69,11 @@ works in **barrels** internally (`toInternalQty`), orders go out in **lots** (`o
 row's `lotSize` and shows **lots only** ("S 5 LOTS @ 169.61", barrels in the tooltip; falls back to raw qty when the
 quantity is not a whole number of lots). Pass `lotSize` to every new `LegOpenBadge`.
 
+## P&L basis
+Booked and live P&L use the leg's ACTUAL fill price (`fill.ceFillEntry`, re-priced to Dhan's traded price), never
+the stop reference `ceEntry`. Read `dhan-fill-price-pnl` before touching `bookedPnl`, the rebase helpers or any
+P&L display.
+
 ## Manual entry: "Enter now" and per-leg "Re-enter"
 - The scheduler enters a row once: `autoEnteringRef` is a **one-entry latch** set in `autoEnterRow` and cleared only on a
   failed entry or by `armRow` (which also clears `fill`, the overall re-entry counters and `overallReMode`). A row can
