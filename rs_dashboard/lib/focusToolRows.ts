@@ -721,7 +721,8 @@ export const DEFAULT_CONFIG: FocusToolConfig = {
 
 // ── I/O ───────────────────────────────────────────────────────────────────────
 
-function writeJsonAtomic(file: string, data: unknown) {
+/** Write JSON via a temp file + rename, so a reader never sees a half-written file. */
+export function writeJsonAtomic(file: string, data: unknown) {
   const dir = path.dirname(file);
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
   const tmp = `${file}.tmp`;

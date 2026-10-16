@@ -773,12 +773,6 @@ export function reentryConfig(
 }
 
 /**
- * RE OTM after a leg TARGET: `strikes` OTM of the ATM now (CE up, PE down). A target hits because spot has moved away
- * from the leg, so the closed strike is already deep OTM (rolling further from it leaves the other leg naked), while
- * RE ASAP's row offset can land on ATM. Measuring from today's ATM keeps the new leg a set distance from spot. Null
- * when ATM is unknown.
- */
-/**
  * Whether RE OTM counts from the ATM now (reTgtOtmStrike) rather than from the closed strike (slRollStrike). A target
  * always does. So does a stop that had TRAILED: the trail only tightens after spot has moved away from the leg, so
  * the trailed stop can hit with the strike still deep OTM — rolling further out from it would leave the other leg
@@ -788,8 +782,35 @@ export function reentryOtmFromAtm(trigger: FocusReentryTrigger, trailedSteps = 0
   return trigger === 'tgt' || (Number(trailedSteps) || 0) > 0;
 }
 
+/**
+ * RE OTM counted from the ATM now: `strikes` OTM of it (CE up, PE down). A target hits because spot has moved away
+ * from the leg, so the closed strike is already deep OTM (rolling further from it leaves the other leg naked), while
+ * RE ASAP's row offset can land on ATM. Measuring from today's ATM keeps the new leg a set distance from spot. Null
+ * when ATM is unknown.
+ */
 export function reTgtOtmStrike(leg: 'CE' | 'PE', atm: number | null, strikes: number, step: number): number | null {
   return atm != null && atm > 0 && step > 0 ? slRollStrike(leg, atm, Math.max(1, strikes), step) : null;
+}
+
+/**
+ * The strike an RE OTM re-entry sells. Null = cannot resolve (no re-entry).
+ *  - Plain SL: `strikes` further OTM than the closed strike (slRollStrike).
+ *  - Target, or an SL whose stop had trailed: `strikes` OTM of the ATM now (reTgtOtmStrike).
+ *  - After a trailed SL the result is never the strike that just stopped out: landing on it steps one more strike
+ *    OTM. And when the ATM is unknown (spot / futures not loaded) a stop falls back to the closed-strike roll rather
+ *    than leaving the leg closed. A target with no ATM gets no re-entry — rolling from its decayed strike is the
+ *    naked-leg case this mode exists to avoid.
+ */
+export function otmReentryStrike(p: {
+  trigger: FocusReentryTrigger; trailedSteps: number; leg: 'CE' | 'PE';
+  atm: number | null; closedStrike: number; strikes: number; step: number;
+}): { strike: number | null; fromAtm: boolean } {
+  const roll = () => slRollStrike(p.leg, p.closedStrike, p.strikes, p.step);
+  if (!reentryOtmFromAtm(p.trigger, p.trailedSteps)) return { strike: roll(), fromAtm: false };
+  const s = reTgtOtmStrike(p.leg, p.atm, p.strikes, p.step);
+  if (s == null) return p.trigger === 'sl' ? { strike: roll(), fromAtm: false } : { strike: null, fromAtm: true };
+  if (p.trigger === 'sl' && s === p.closedStrike) return { strike: slRollStrike(p.leg, s, 1, p.step), fromAtm: true };
+  return { strike: s, fromAtm: true };
 }
 
 /**

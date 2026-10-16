@@ -17,7 +17,7 @@ import assert from 'node:assert/strict';
 
 import {
   EMPTY_ROW_LIVE, legStopReason, legStopLevel, legTargetReason, reentryConfig, evaluateReentry,
-  slRollStrike, reTgtOtmStrike, reentryOtmFromAtm, pendingReentryLevel, pendingReentryHit, costReentryBasis, awaitingMomentumQuote,
+  slRollStrike, reTgtOtmStrike, reentryOtmFromAtm, otmReentryStrike, pendingReentryLevel, pendingReentryHit, costReentryBasis, awaitingMomentumQuote,
   MAX_LEG_REENTRIES, DEFAULT_SL_ROLL_MAX,
   type RowLive,
 } from './focusToolRules.ts';
@@ -263,6 +263,26 @@ for (const m of MARKETS) {
     assert.equal(reentryOtmFromAtm('sl'), false);
     assert.equal(reentryOtmFromAtm('sl', 0), false);
     assert.equal(reentryOtmFromAtm('sl', 2), true);
+  });
+
+  test(`${tag} RE OTM strike: plain SL rolls, trailed SL never re-sells the stopped strike, ATM unknown`, () => {
+    const atm = Math.round(m.spot / m.step) * m.step;
+    const st = m.step;
+    const pick = (o: Partial<Parameters<typeof otmReentryStrike>[0]>) => otmReentryStrike({
+      trigger: 'sl', trailedSteps: 0, leg: 'CE', atm, closedStrike: atm + 4 * st, strikes: 1, step: st, ...o,
+    });
+    // plain SL: one further out than the closed strike, whatever ATM is
+    assert.deepEqual(pick({}), { strike: atm + 5 * st, fromAtm: false });
+    // trailed SL: from the ATM now …
+    assert.deepEqual(pick({ trailedSteps: 1 }), { strike: atm + st, fromAtm: true });
+    // … but landing on the strike that just stopped steps one further (CE up, PE down)
+    assert.deepEqual(pick({ trailedSteps: 1, closedStrike: atm + st }), { strike: atm + 2 * st, fromAtm: true });
+    assert.deepEqual(pick({ trailedSteps: 1, leg: 'PE', closedStrike: atm - st }), { strike: atm - 2 * st, fromAtm: true });
+    // a target may re-sell the same strike (it made money there)
+    assert.deepEqual(pick({ trigger: 'tgt', closedStrike: atm + st }), { strike: atm + st, fromAtm: true });
+    // ATM unknown: a stop falls back to the roll; a target does not re-enter
+    assert.deepEqual(pick({ trailedSteps: 2, atm: null }), { strike: atm + 5 * st, fromAtm: false });
+    assert.deepEqual(pick({ trigger: 'tgt', atm: null }), { strike: null, fromAtm: true });
   });
 
   test(`${tag} RE Cost / Momentum: what a waiting re-entry waits for`, () => {

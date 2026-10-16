@@ -52,8 +52,9 @@ export function strikeKey(n: number | string): string {
 
 export interface FocusMarketData {
   futQuotes: Record<FocusUnderlying, FutQuote | null>;
-  /** India VIX from the top-indices poll; null until it first arrives. */
-  vixQuote: FutQuote | null;
+  /** India VIX from the top-indices poll; null until it first arrives. `at` = the feed's own timestamp (ms, NaN if
+   *  the response had none), so the header can show a frozen feed as stale instead of live. */
+  vixQuote: (FutQuote & { at: number }) | null;
   spotPrices: Record<FocusUnderlying, number>;
   /** When each underlying's spot last arrived in a poll that actually carried it (ms; 0 = never). */
   spotAt: Record<FocusUnderlying, number>;
@@ -73,7 +74,7 @@ export function useFocusMarketData({ broker, watched, watchedKey, rows, groups }
   groups: readonly Pick<FocusIndexGroup, 'underlying' | 'enabled'>[];
 }): FocusMarketData {
   /** India VIX off the same top-indices poll, for the header (display only). */
-  const [vixQuote, setVixQuote] = useState<FutQuote | null>(null);
+  const [vixQuote, setVixQuote] = useState<(FutQuote & { at: number }) | null>(null);
   const [futQuotes, setFutQuotes] = useState<Record<FocusUnderlying, FutQuote | null>>({
     NIFTY: null, BANKNIFTY: null, SENSEX: null, CRUDEOILM: null,
   });
@@ -112,11 +113,13 @@ export function useFocusMarketData({ broker, watched, watchedKey, rows, groups }
     const fetchTopIndices = () => {
       fetch('/api/scalper/top-indices')
         .then(r => r.json())
-        .then((j: { success?: boolean; quotes?: Record<string, { ltp: number; change_pct: number | null }> }) => {
+        .then((j: { success?: boolean; updated_at?: string; quotes?: Record<string, { ltp: number; change_pct: number | null }> }) => {
           if (!j.quotes) return;
           const q = j.quotes;
           const vix = q.VIX;
-          if (vix?.ltp > 0) setVixQuote({ ltp: vix.ltp, change_pct: vix.change_pct ?? null });
+          if (vix?.ltp > 0) {
+            setVixQuote({ ltp: vix.ltp, change_pct: vix.change_pct ?? null, at: j.updated_at ? Date.parse(j.updated_at) : NaN });
+          }
           // Spot only. This endpoint has no futures rows at all — the header's
           // futures strip is served by /api/focus-tool/futures below — and it
           // dropped SENSEX in favour of CRUDEOIL, so SENSEX spot comes off its

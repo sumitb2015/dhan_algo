@@ -7,7 +7,7 @@ import NavBar from './NavBar';
 import {
   TrendingUp, Zap, ShieldOff, Shield, Activity,
   Clock, Plus, Layers, Target, Lock, RefreshCw, X, Trash2,
-  ChevronUp, ChevronDown, Grid3x3, Calendar, Minus, Ellipsis, ArrowRight, LayoutList, Sigma, LogOut,
+  ChevronUp, ChevronDown, Grid3x3, Calendar, Minus, Ellipsis, ArrowRight, LayoutList, Sigma, LogOut, Bookmark,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
@@ -45,25 +45,31 @@ import {
   dteMatches, dteForExpiry, evaluateRowExit, evaluateEntry, evaluateGlobalRisk,
   legStopPremium, pairStopPremium, nextOpenedTs, isGhostDropProtected,
   isSimRow, simLegPosition,
-  legPinnedStrike, costStopReason, legOwnEntry, slRollStrike, DEFAULT_SL_ROLL_MAX,
+  legPinnedStrike, costStopReason, legOwnEntry, DEFAULT_SL_ROLL_MAX,
   reentryConfig, evaluateReentry, reentryWindowClosed, monitoringStopped, momentumReentryKind, momentumTrigger,
   addMinutesHm, resolveCriteriaStrike, closestPremiumStrike, ownedLegStop, legStopHit, legDeltaNow, legDeltaBasis, legTargetDeltaLevel,
   multipliedLots, legLots, hasLegLots, clampHm, rangeWindow, rangeWindowPhase, rowHasMultiDayRange, candleBucket, tradingDte,
   legSlRuleOn, legStopLevel, legTargetSpotLevel, legTgtUnitLabel, MAX_LEG_REENTRIES, pendingReentryLevel, pendingReentryHit, legTargetReason, costReentryBasis,
   awaitingMomentumQuote, MOMENTUM_QUOTE_WAIT_MS, legTargetLevel,
-  evaluateEntryMomentum, reRangeWindow, entryMomentumOn, overallSlConfig, overallProgress, nextOverallPeak, evaluateOverallExit, overallTrailInvalid, overallExitKind, evaluateOverallReentry, MAX_OVERALL_REENTRIES, rangeBreakoutOn, rangeBreakoutHit, costStopApplies, squareOffLegs, atmStrike, resolveRowLegStrike, mirrorLinkedPatch, MAX_LAZY_LEGS, legSlMultiplier, legTarget, nextLazyLegId, lazyLegStrike, runningLazyLeg, simpleMomOn, simpleMomLevel, simpleMomHit, reTgtOtmStrike, reentryOtmFromAtm,
+  evaluateEntryMomentum, reRangeWindow, entryMomentumOn, overallSlConfig, overallProgress, nextOverallPeak, evaluateOverallExit, overallTrailInvalid, overallExitKind, evaluateOverallReentry, MAX_OVERALL_REENTRIES, rangeBreakoutOn, rangeBreakoutHit, costStopApplies, squareOffLegs, atmStrike, resolveRowLegStrike, mirrorLinkedPatch, MAX_LAZY_LEGS, legSlMultiplier, legTarget, nextLazyLegId, lazyLegStrike, runningLazyLeg, simpleMomOn, simpleMomLevel, simpleMomHit, otmReentryStrike, reentryOtmFromAtm,
   type PosRow, type RowLive,
 } from '@/lib/focusToolRules';
 import { postFocusEvent } from '@/lib/focusToolEvents';
 import { buildPayoffModel } from '@/lib/optionsPayoff';
 import { computeBasketGreeks, type GreekLeg } from '@/lib/multiLegGreeks';
 import { useFocusMarketData, expKey, strikeKey, type FutQuote, type StrikeRef } from '@/lib/useFocusMarketData';
+import { isStale, ageOf, ageLabel } from '@/lib/useLiveTickerPoll';
 import { computeRowPnl, mtmForQty, shiftMayReopen, canMarkMtm, shiftCloseConfirmed, rowDisplayBookedPnl, putCallRatio, valuePutCallRatio, pickOpenInterest, closeRebaseDelta, closedSliceBooked, FTS_ORDER_SOURCE } from '@/lib/focusToolPnl';
 import { normalizeTradeRow, matchOutsideTrades, type NormalizedTrade } from '@/lib/multiLegFocus';
 import { stampItems, noteItems, adoptItems, canon, type RevBook } from '@/lib/revMerge';
 import { useTabLeader } from '@/hooks/useTabLeader';
 import { FOCUS_UNDERLYINGS, FEED_BRIDGE_UNDERLYINGS, isTradingDayFor, FEED_SESSION_START_HM, FEED_SESSION_END_HM, UNDERLYING_META, isMcxUnderlying, toInternalQty, orderQuantity } from '@/lib/focusToolUnderlyings';
 import type { FocusConfigWrite } from '@/lib/focusToolRowsMerge';
+import {
+  duplicateRow as duplicateRowRules, applyPresetPatch, presetBlockedReason, presetRules, normalizePresetName,
+  buildExport, parseImport, rowFromImport, importExpiry, MAX_PRESETS, type FocusPreset,
+} from '@/lib/focusToolPresets';
+import { FocusPresetsContext, RowPresetMenuItems, RowPresetMenuButton, PresetsPanel, type FocusPresetsApi } from './FocusToolPresets';
 
 // â”€â”€ Constants â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
@@ -767,11 +773,12 @@ function RuleNumInput({ value, onCommit, placeholder, className, title, disabled
     setCommits(c => c + 1);
   };
 
-  // An arrow is a discrete, complete choice (like a stepper), so it commits at once. It steps from what is in the
-  // box — a half-typed draft included — so "2" + ↑ means 2+step, not the last committed value + step.
+  // An arrow is a discrete, complete choice (like a stepper), so it commits at once — and therefore steps from the
+  // last COMMITTED value, never from a half-typed draft: clearing Target to type 5000 and brushing ↑ must not commit
+  // 0 + step, and a leg SL half-typed as "2" (meaning 25) plus ↑ must not commit 7. Any unsaved draft is discarded.
   const nudge = (dir: 1 | -1) => {
     if (!step || disabled) return;
-    const base = Number(focusedRef.current ? draft : value) || 0;
+    const base = Number(value) || 0;
     const decimals = (String(step).split('.')[1] ?? '').length;
     const n = Number((base + dir * step).toFixed(decimals));
     const next = n >= min ? String(n) : offBelowMin ? '' : String(min);
@@ -2390,13 +2397,42 @@ function GhostBtn({ onClick, children, title }: { onClick?: () => void; children
 
 // â”€â”€ Sticky Header â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
+/** India VIX for the header: dimmed with its age once the index feed's own timestamp is older than STALE_MS. */
+function VixTile({ q }: { q: (FutQuote & { at: number }) | null }) {
+  // Own 1s clock so a frozen feed is shown as stale even when nothing else re-renders the header.
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const t = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(t);
+  }, []);
+  const stale = !!q && isStale(q.at, now);
+  const age = q ? ageLabel(ageOf(q.at, now)) : '';
+  const chg = q?.change_pct;
+  return (
+    <div className={cn('flex flex-col items-center pl-6 border-l border-zinc-800', stale && 'opacity-60')}
+      title={stale ? `India VIX — index feed is ${age || 'of unknown age'} old; not live` : 'India VIX last value and % change since previous close'}>
+      <span className="text-[11px] font-black text-zinc-500 uppercase tracking-widest">
+        India VIX{stale && age ? <span className="ml-1 text-amber-300 normal-case tracking-normal">{age} old</span> : null}
+      </span>
+      <span className="text-sm font-mono font-black text-zinc-100 tabular-nums">
+        {q ? q.ltp.toFixed(2) : '\u2014'}
+      </span>
+      {chg != null && (
+        <span className={cn('text-[11px] font-mono font-bold', chg >= 0 ? 'text-emerald-400' : 'text-rose-400')}>
+          {chg >= 0 ? '+' : ''}{chg.toFixed(2)}%
+        </span>
+      )}
+    </div>
+  );
+}
+
 function FocusHeader({
   futQuotes, vixQuote, shown, realised, unrealised, total, marginAvailable, marginUtilized,
   wsLive, broker, setBroker, authenticatedBrokers, brokerLocked,
 }: {
   futQuotes: Record<FocusUnderlying, FutQuote | null>;
-  /** India VIX, shown after the futures. */
-  vixQuote: FutQuote | null;
+  /** India VIX, shown after the futures; dimmed with its age once the feed's timestamp is stale. */
+  vixQuote: (FutQuote & { at: number }) | null;
   /** Indices the futures strip lists (all three; one batched quote call regardless). */
   shown: readonly FocusUnderlying[];
   realised: number; unrealised: number; total: number;
@@ -2446,18 +2482,7 @@ function FocusHeader({
             </div>
           );
         })}
-        <div className="flex flex-col items-center pl-6 border-l border-zinc-800"
-          title="India VIX last value and % change since previous close">
-          <span className="text-[11px] font-black text-zinc-500 uppercase tracking-widest">India VIX</span>
-          <span className="text-sm font-mono font-black text-zinc-100 tabular-nums">
-            {vixQuote ? vixQuote.ltp.toFixed(2) : '\u2014'}
-          </span>
-          {vixQuote?.change_pct != null && (
-            <span className={cn('text-[11px] font-mono font-bold', vixQuote.change_pct >= 0 ? 'text-emerald-400' : 'text-rose-400')}>
-              {vixQuote.change_pct >= 0 ? '+' : ''}{vixQuote.change_pct.toFixed(2)}%
-            </span>
-          )}
-        </div>
+        <VixTile q={vixQuote} />
         <LivePulse active={wsLive} />
       </div>
 
@@ -2595,7 +2620,7 @@ function ControlStrip({
   lockRupees, setLockRupees, trailX, setTrailX,
   totalPnl, peakMtm, lockMtm, simPnl, simRows,
   copyTrade,
-  onOpenRisk, onOpenOrders, onOpenOptionChain, onOpenGreeks, onSetViewMode, viewMode,
+  onOpenRisk, onOpenOrders, onOpenOptionChain, onOpenGreeks, onOpenPresets, onSetViewMode, viewMode,
   onExitAll, confirmExitAll, exitingAll,
 }: {
   liveRealMoney: boolean; onToggleLive: () => void; broker: Broker;
@@ -2614,6 +2639,8 @@ function ControlStrip({
   onOpenOrders: () => void;
   onOpenOptionChain: () => void;
   onOpenGreeks: () => void;
+  /** Presets & backup drawer (duplicate / presets / export / import). */
+  onOpenPresets: () => void;
   onSetViewMode: (mode: FocusViewMode) => void;
   viewMode: FocusViewMode;
   onExitAll: () => void;
@@ -2691,6 +2718,10 @@ function ControlStrip({
         <GhostBtn onClick={onOpenOptionChain} title="Live NIFTY option chain — price/OI/volume by strike, with Buy/Sell">
           <Grid3x3 className="h-3.5 w-3.5 text-cyan-400" />
           Option Chain
+        </GhostBtn>
+        <GhostBtn onClick={onOpenPresets} title="Saved rule presets, and export / import of every row's rules">
+          <Bookmark className="h-3.5 w-3.5 text-violet-400" />
+          Presets
         </GhostBtn>
         <div className="flex items-center bg-zinc-900 border border-zinc-700/80 rounded-lg p-0.5" title="Switch view: Pro, Table or Cards">
           {([
@@ -3189,6 +3220,7 @@ function FocusTableRowImpl({
                 <span className="text-[10px] font-bold text-zinc-500 uppercase">Lots</span>
                 <RowLotsControl row={row} onUpdate={onUpdate} />
               </div>
+              <RowPresetMenuButton row={row} />
               <button
                 type="button"
                 onClick={flat ? onDelete : undefined}
@@ -3325,6 +3357,7 @@ function FocusTableRowImpl({
               >
                 &times; clear
               </button>
+              <RowPresetMenuButton row={row} />
               <button
                 type="button"
                 onClick={flat ? onDelete : undefined}
@@ -3851,6 +3884,8 @@ function FocusProRowImpl({
               <DropdownMenuItem onClick={clearRules}><X className="size-4" /> Clear rules</DropdownMenuItem>
               <DropdownMenuItem onClick={strikes.resetStrikes} disabled={strikes.anyOpen}><RefreshCw className="size-4" /> Reset strikes to ATM</DropdownMenuItem>
               <DropdownMenuSeparator />
+              <RowPresetMenuItems row={row} />
+              <DropdownMenuSeparator />
               <DropdownMenuItem variant="destructive" disabled={!flat} onClick={onDelete}>
                 <Trash2 className="size-4" /> {flat ? 'Delete row' : 'Delete (exit first)'}
               </DropdownMenuItem>
@@ -4084,6 +4119,7 @@ function FocusRowCardImpl({
           <span className={cn('text-[11px] font-black px-2 py-0.5 rounded-md border uppercase tracking-wider', STATUS_PILL[shownStatus(row, flat)])}>
             {shownStatus(row, flat)}
           </span>
+          <RowPresetMenuButton row={row} className="h-6 w-6 flex items-center justify-center" />
           <button
             type="button"
             onClick={flat ? onDelete : undefined}
@@ -4645,7 +4681,11 @@ export default function FocusTool() {
    */
   const lockFloorRef = useRef<number | null>(null);
 
-  const [activeModal, setActiveModal] = useState<'risk' | 'orderbook' | 'optionchain' | 'greeks' | null>(null);
+  const [activeModal, setActiveModal] = useState<'risk' | 'orderbook' | 'optionchain' | 'greeks' | 'presets' | null>(null);
+  const [presets, setPresets] = useState<FocusPreset[]>([]);
+  /** Row picked for "Save as preset" when the drawer was opened from a row menu. */
+  const [presetRowId, setPresetRowId] = useState<string | null>(null);
+  const [presetBusy, setPresetBusy] = useState(false);
   // Remembered per browser: a display preference only, never trading state.
   const [viewMode, setViewModeState] = useState<FocusViewMode>('table');
   useEffect(() => {
@@ -5732,6 +5772,142 @@ export default function FocusTool() {
     });
     addToast('success', `Added ${underlying} row`);
   }
+
+  // ── Duplicate row / presets / export & import (lib/focusToolPresets.ts) ──
+  // Configuration only: every new row is a flat SIM draft, and a preset only lands on a row that holds nothing.
+
+  useEffect(() => {
+    fetch('/api/focus-tool/presets')
+      .then(r => r.json())
+      .then((j: { success: boolean; data?: FocusPreset[] }) => { if (j.success && j.data) setPresets(j.data); })
+      .catch(() => {});
+  }, []);
+
+  async function presetsPost(body: object, failTitle: string): Promise<{ imported: number; refused: number } | null> {
+    setPresetBusy(true);
+    try {
+      const res = await fetch('/api/focus-tool/presets', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+      });
+      const j = await res.json() as { success: boolean; data?: FocusPreset[]; error?: string; imported?: number; refused?: number };
+      if (!j.success || !j.data) { addToast('error', failTitle, j.error ?? `HTTP ${res.status}`); return null; }
+      setPresets(j.data);
+      return { imported: j.imported ?? 0, refused: j.refused ?? 0 };
+    } catch (e) {
+      addToast('error', failTitle, String(e));
+      return null;
+    } finally {
+      setPresetBusy(false);
+    }
+  }
+
+  function duplicateRowById(id: string) {
+    const src = config.rows.find(r => r.id === id);
+    if (!src) return;
+    const copy = duplicateRowRules(src, newId(), new Date().toISOString());
+    // The copy's spot levels are re-checked like a typed level: spot may have moved past them since they were set.
+    const levelErr = (copy.levelHigh || copy.levelLow) ? validateLevelExits(copy, spots[copy.underlying] ?? 0) : null;
+    if (levelErr) { copy.levelHigh = ''; copy.levelLow = ''; }
+    setConfig(prev => {
+      const at = prev.rows.findIndex(r => r.id === id);
+      const nextRows = at < 0 ? [...prev.rows, copy] : [...prev.rows.slice(0, at + 1), copy, ...prev.rows.slice(at + 1)];
+      const nextConfig = { ...prev, rows: nextRows };
+      saveConfig(nextConfig);
+      return nextConfig;
+    });
+    addToast('success', `Duplicated ${src.underlying} row`, 'The copy is a SIM draft — switch it to REAL and arm it when ready'
+      + (levelErr ? `. Spot H↑ / L↓ not copied: ${levelErr}` : ''));
+  }
+
+  async function savePresetFromRow(rowId: string, rawName: string) {
+    const row = config.rows.find(r => r.id === rowId);
+    const name = normalizePresetName(rawName);
+    if (!row || !name) return;
+    if (!presets.some(p => p.underlying === row.underlying && p.name.toLowerCase() === name.toLowerCase())
+      && presets.length >= MAX_PRESETS) {
+      addToast('error', 'Preset not saved', `${MAX_PRESETS} presets saved already — delete one first`);
+      return;
+    }
+    const ok = await presetsPost(
+      { action: 'save', preset: { name, underlying: row.underlying, rules: presetRules(row) } }, 'Preset not saved');
+    if (ok) addToast('success', `Preset "${name}" saved`, `${row.underlying} rules — apply it from any ${row.underlying} row's menu`);
+  }
+
+  async function deletePreset(p: FocusPreset) {
+    if (await presetsPost({ action: 'delete', name: p.name, underlying: p.underlying }, 'Preset not deleted')) {
+      addToast('success', `Preset "${p.name}" deleted`);
+    }
+  }
+
+  function applyPresetToRow(rowId: string, p: FocusPreset) {
+    // Read the row now, not from the render that drew the menu: a fill may have landed since.
+    const row = schedulerRef.current.config.rows.find(r => r.id === rowId);
+    if (!row) return;
+    if (p.underlying !== row.underlying) {
+      addToast('error', 'Preset not applied', `"${p.name}" is a ${p.underlying} preset; this is a ${row.underlying} row`);
+      return;
+    }
+    const why = presetBlockedReason(row) ?? (busyRows.has(row.id) || autoEnteringRef.current.has(row.id) || autoExitingRef.current.has(row.id) ? 'An order is in flight on this row' : null);
+    if (why) { addToast('error', 'Preset not applied', why); return; }
+    updateRow(row.id, applyPresetPatch(row, makeRow(row.underlying), p.rules));
+    addToast('success', `Applied "${p.name}"`, `${row.underlying} #${row.id.slice(-4)}: rules replaced; expiry, spot levels and ${isSimRow(row) ? 'SIM' : 'REAL'} mode kept`);
+  }
+
+  function exportConfig() {
+    const data = buildExport(config.rows, presets, new Date().toISOString());
+    const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `focus-tool-${istToday()}.json`;
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+    addToast('success', 'Exported', `${data.rows.length} row(s), ${data.presets.length} preset(s)`);
+  }
+
+  async function importConfig(file: File) {
+    const parsed = parseImport(await file.text());
+    if (!parsed.ok) { addToast('error', 'Import failed', parsed.error); return; }
+    let expiryMoved = 0;
+    const added = parsed.rows.map(r => {
+      const base = makeRow(r.underlying);
+      const ex = importExpiry(r.expiry, expiries[r.underlying] ?? []);
+      if (!ex.kept) expiryMoved += 1;
+      // rowFromImport keeps base's expiry: the file's rules never carry one (it is runtime).
+      base.expiry = ex.expiry;
+      return { ...rowFromImport(base, r.rules), id: newId() };
+    });
+    if (added.length) {
+      setConfig(prev => {
+        const nextConfig = { ...prev, rows: [...prev.rows, ...added] };
+        saveConfig(nextConfig);
+        return nextConfig;
+      });
+    }
+    const res = parsed.presets.length === 0
+      ? { imported: 0, refused: 0 }
+      : await presetsPost({ action: 'import', presets: parsed.presets }, 'Presets not imported');
+    const notes = [
+      `${added.length} row(s) added as SIM drafts`,
+      `${res ? res.imported : 0} preset(s)`,
+      res && res.refused ? `${res.refused} preset(s) refused — the ${MAX_PRESETS}-preset limit is reached` : '',
+      expiryMoved ? `${expiryMoved} row(s) moved to the nearest expiry (theirs is no longer listed)` : '',
+      parsed.skipped ? `${parsed.skipped} entr${parsed.skipped === 1 ? 'y' : 'ies'} skipped` : '',
+      'spot H↑ / L↓ levels are not restored',
+    ].filter(Boolean);
+    addToast(res && !res.refused ? 'success' : 'error', 'Imported', notes.join('; '));
+  }
+
+  // The handlers are re-created every render; the context value must not be, or every row's preset menu re-renders on
+  // every tick. Stable wrappers call the latest handlers through a ref, so the value changes only with `presets`.
+  const presetHandlersRef = useRef({ duplicateRowById, applyPresetToRow });
+  presetHandlersRef.current = { duplicateRowById, applyPresetToRow };
+  const presetsApi = useMemo<FocusPresetsApi>(() => ({
+    presets,
+    duplicateRow: id => presetHandlersRef.current.duplicateRowById(id),
+    openSavePreset: rowId => { setPresetRowId(rowId); setActiveModal('presets'); },
+    applyPreset: (id, p) => presetHandlersRef.current.applyPresetToRow(id, p),
+  }), [presets]);
 
   /**
    * Move this row's own fill ledger after an accepted order: `delta` units on
@@ -7513,18 +7689,24 @@ export default function FocusTool() {
     // resolves its strikes from): the closed strike can be deep OTM, so rolling further out from it would leave the
     // other leg naked. A plain SL hit rolls from the closed strike (see reentryOtmFromAtm).
     let tgtAtm: number | null = null;
-    const fromAtm = cfg.mode === 'otm' && reentryOtmFromAtm(trigger, trailedSteps);
-    if (fromAtm) {
-      const fut = snap.futQuotes[u]?.ltp ?? 0;
-      tgtAtm = atmStrike(group?.atmBy === 'Fut' && fut > 0 ? fut : (snap.spots[u] ?? 0), rowStep(row));
+    let newStrike: number | null;
+    if (cfg.mode === 'otm') {
+      if (reentryOtmFromAtm(trigger, trailedSteps)) {
+        const fut = snap.futQuotes[u]?.ltp ?? 0;
+        tgtAtm = atmStrike(group?.atmBy === 'Fut' && fut > 0 ? fut : (snap.spots[u] ?? 0), rowStep(row));
+      }
+      const pick = otmReentryStrike({
+        trigger, trailedSteps, leg, atm: tgtAtm, closedStrike, strikes: cfg.otmStrikes, step: rowStep(row),
+      });
+      newStrike = pick.strike;
+      if (!pick.fromAtm) tgtAtm = null;   // fell back to the closed-strike roll: don't claim an ATM in the toast
+    } else {
+      newStrike = await resolvedStrikeAfterClose(rowId, leg);
     }
-    const newStrike = cfg.mode === 'otm'
-      ? fromAtm
-        ? reTgtOtmStrike(leg, tgtAtm, cfg.otmStrikes, rowStep(row))
-        : slRollStrike(leg, closedStrike, cfg.otmStrikes, rowStep(row))
-      : await resolvedStrikeAfterClose(rowId, leg);
     if (newStrike == null) {
-      addToast('error', `${tag} no re-entry`, 'Could not resolve the current strike');
+      addToast('error', `${tag} no re-entry`, cfg.mode === 'otm'
+        ? 'RE OTM needs the current ATM and spot / futures is not loaded — leg left closed'
+        : 'Could not resolve the current strike');
       return 'skipped';
     }
     patchFill(rowId, () => countPatch(done + 1));
@@ -8667,6 +8849,7 @@ export default function FocusTool() {
   }, [config.rows]);
 
   return (
+    <FocusPresetsContext.Provider value={presetsApi}>
     <EntryMomContext.Provider value={entryMomStatus}>
     <MarginEstimateContext.Provider value={estimateRowMargin}>
     <div className="min-h-screen bg-zinc-950 text-white flex flex-col font-sans relative">
@@ -8750,6 +8933,7 @@ export default function FocusTool() {
         onOpenOrders={() => setActiveModal('orderbook')}
         onOpenOptionChain={() => setActiveModal('optionchain')}
         onOpenGreeks={() => { runPortfolioGreeks(); setActiveModal('greeks'); }}
+        onOpenPresets={() => { setPresetRowId(null); setActiveModal('presets'); }}
         onSetViewMode={setViewMode}
         viewMode={viewMode}
         onExitAll={handleExitAll} confirmExitAll={confirmExitAll} exitingAll={exitingAll}
@@ -9234,6 +9418,14 @@ export default function FocusTool() {
         </div>
       </FocusModal>
 
+      <FocusModal isOpen={activeModal === 'presets'} onClose={() => setActiveModal(null)} title="Presets & backup">
+        <PresetsPanel
+          key={presetRowId ?? 'none'}
+          rows={config.rows} presets={presets} initialRowId={presetRowId} busy={presetBusy}
+          onSave={savePresetFromRow} onDelete={deletePreset} onExport={exportConfig} onImport={f => { void importConfig(f); }}
+        />
+      </FocusModal>
+
       <FocusOptionChainModal
         isOpen={activeModal === 'optionchain'}
         onClose={() => setActiveModal(null)}
@@ -9243,6 +9435,7 @@ export default function FocusTool() {
     </div>
     </MarginEstimateContext.Provider>
     </EntryMomContext.Provider>
+    </FocusPresetsContext.Provider>
   );
 }
 
