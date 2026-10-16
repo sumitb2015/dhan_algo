@@ -3,7 +3,7 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import {
   Download, RefreshCw, CheckCircle2, XCircle, AlertCircle,
-  Database, TrendingUp, BarChart2, Layers, Square
+  Database, TrendingUp, BarChart2, Layers, Square, Landmark
 } from 'lucide-react';
 import {
   Sheet, SheetContent, SheetHeader, SheetTitle, SheetDescription
@@ -179,6 +179,39 @@ export default function DataRefreshPanel({ open, onClose, onRefreshComplete }: D
     }
   }, [status?.log]);
 
+  // ── FII / DII activity (NSE reports → debug/fii_dii.json, the /fii-dii page) ──
+  // POST /api/fii-dii runs scripts/tools/fii_dii_fetch.py and returns when it is done (deduped server-side, so a second
+  // click or tab shares the run). Refresh All Data runs it too.
+  interface FiiStatus { running: boolean; latestCash: string | null; latestFno: string | null; fetchedAt: string | null; error: string | null }
+  const [fii, setFii] = useState<FiiStatus>({ running: false, latestCash: null, latestFno: null, fetchedAt: null, error: null });
+  const fiiRunningRef = useRef(false);
+  const readFii = (d: { latest_cash?: string | null; latest_fno?: string | null; fetched_at?: string } | null | undefined) =>
+    ({ latestCash: d?.latest_cash ?? null, latestFno: d?.latest_fno ?? null, fetchedAt: d?.fetched_at ?? null });
+
+  useEffect(() => {
+    if (!open || fiiRunningRef.current) return;
+    fetch('/api/fii-dii').then(r => r.json())
+      .then(j => setFii(f => (f.running ? f : { ...f, ...readFii(j.data) })))
+      .catch(() => {});
+  }, [open]);
+
+  const updateFii = useCallback(async () => {
+    if (fiiRunningRef.current) return;
+    fiiRunningRef.current = true;
+    setFii(f => ({ ...f, running: true, error: null }));
+    try {
+      const res = await fetch('/api/fii-dii', { method: 'POST' });
+      const j = await res.json();
+      setFii({ running: false, ...readFii(j.data), error: res.ok ? null : (j.error ?? `HTTP ${res.status}`) });
+      // An open /fii-dii page reloads its data from the file just written.
+      if (res.ok) window.dispatchEvent(new CustomEvent('fii-dii:updated'));
+    } catch (e) {
+      setFii(f => ({ ...f, running: false, error: e instanceof Error ? e.message : String(e) }));
+    } finally {
+      fiiRunningRef.current = false;
+    }
+  }, []);
+
   const [dataSource, setDataSource] = useState<'dhan' | 'yahoo'>('yahoo');
 
   const startRefresh = async (target: TargetId) => {
@@ -242,7 +275,8 @@ export default function DataRefreshPanel({ open, onClose, onRefreshComplete }: D
           </div>
 
           <Button
-            onClick={() => startRefresh('all')}
+            onClick={() => { void startRefresh('all'); void updateFii(); }}
+            title="Refreshes every price dataset below, plus the FII / DII activity"
             disabled={running || starting}
             className={`w-full flex items-center justify-between rounded-xl h-11 px-4 border ${
               dataSource === 'yahoo'
@@ -271,6 +305,33 @@ export default function DataRefreshPanel({ open, onClose, onRefreshComplete }: D
                 {t.label}
               </Button>
             ))}
+          </div>
+
+          <Separator className="my-3 bg-zinc-800/60" />
+
+          <div className="space-y-2">
+            <span className="text-[10px] font-semibold uppercase tracking-widest text-zinc-500">FII / DII Activity</span>
+            <Button
+              onClick={() => { void updateFii(); }}
+              disabled={fii.running}
+              className="w-full flex items-center justify-between bg-amber-500/10 hover:bg-amber-500/15 text-amber-400 border border-amber-500/30 rounded-xl h-11 px-4"
+              variant="ghost"
+              title="NSE's provisional FII / DII cash figures and the F&O participant reports, for the FII / DII page"
+            >
+              <div className="flex items-center gap-2 font-semibold text-sm">
+                {fii.running ? <RefreshCw className="h-4 w-4 animate-spin" /> : <Landmark className="h-4 w-4" />}
+                {fii.running ? 'Updating FII / DII…' : 'Update FII / DII'}
+              </div>
+              {!fii.running && !fii.error && fii.latestCash && (
+                <span className="text-[10px] text-emerald-400 flex items-center gap-1 font-mono">
+                  <CheckCircle2 className="h-3 w-3" />
+                  Cash {fii.latestCash}{fii.latestFno ? ` · F&O ${fii.latestFno}` : ''}
+                </span>
+              )}
+            </Button>
+            {fii.error && !fii.running && (
+              <p className="text-[10px] text-red-400 font-mono mt-1 px-1 truncate" title={fii.error}>{fii.error}</p>
+            )}
           </div>
 
           <Separator className="my-3 bg-zinc-800/60" />

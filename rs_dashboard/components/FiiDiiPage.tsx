@@ -211,6 +211,15 @@ export default function FiiDiiPage() {
     return () => { cancelled = true; };
   }, [refresh]);
 
+  // The Sync Data panel updated the file: show it without a page reload.
+  useEffect(() => {
+    const onUpdated = () => {
+      fetch('/api/fii-dii').then(r => r.json()).then(j => { if (j.data) setData(j.data); }).catch(() => {});
+    };
+    window.addEventListener('fii-dii:updated', onUpdated);
+    return () => window.removeEventListener('fii-dii:updated', onUpdated);
+  }, []);
+
   const cash = useMemo(() => (data ? cashSeries(data.cash, src) : []), [data, src]);
   const cashLatest = cash[cash.length - 1];
 
