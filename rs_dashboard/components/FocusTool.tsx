@@ -3351,7 +3351,8 @@ function FocusTableRowImpl({
           {legPod('CE')}
           {legPod('PE')}
           <div className="bg-zinc-950/40 border border-zinc-800/60 rounded-xl px-2.5 py-2 flex flex-col gap-1">
-            <span className="text-[11px] font-black uppercase tracking-wider text-zinc-500">Re-entry after a leg SL % / target</span>
+            <span className="text-[11px] font-black uppercase tracking-wider text-zinc-500">Rules &amp; re-entry</span>
+            <OverallSummaryChip row={row} />
             <LegReentryControls row={row} onUpdate={onUpdate} onCancelPending={onCancelPending} legTargetsElsewhere />
           </div>
         </div>
@@ -3520,6 +3521,42 @@ function reentrySummary(row: FocusRow): string {
   if (row.squareOff === 'complete') parts.push('Square off complete');
   if (row.slToCost) parts.push(`Trail SL to BE (${row.slToCostScope === 'sl' ? 'SL legs' : 'all legs'})`);
   return parts.join(' · ');
+}
+
+/**
+ * One-line summary of the row's strategy-level (Overall) SL, Target, Trail and overall re-entry, for the collapsed
+ * rules line — so they are visible without opening the panel. `active` = at least one of them is on.
+ */
+function overallSummary(row: FocusRow): { text: string; active: boolean } {
+  const amt = (mode: FocusOverallMode, v: number) =>
+    mode === 'mtm' ? `\u20B9${Math.round(v).toLocaleString('en-IN')}` : `${Math.round(v * 100) / 100}% prem`;
+  const parts: string[] = [];
+  const sl = overallSlConfig(row);
+  if (sl) parts.push(`SL ${amt(sl.mode, sl.value)}`);
+  const t = row.overallTarget;
+  const tv = Number(t?.value);
+  if (t?.enabled && tv > 0) parts.push(`Tgt ${amt(t.mode, tv)}`);
+  const tr = row.overallTrail;
+  if (tr?.enabled) {
+    const label = tr.kind === 'lock' ? `Lock ${tr.reach || '?'}\u2192${tr.lock || '?'}`
+      : tr.kind === 'lockTrail' ? `Lock & trail ${tr.reach || '?'}\u2192${tr.lock || '?'}, +${tr.by || '?'}/${tr.every || '?'}`
+      : `Trail SL ${tr.by || '?'}/${tr.every || '?'}`;
+    parts.push(`Trail ${label}${overallTrailInvalid(tr) ? ' (invalid)' : ''}`);
+  }
+  const re = [row.overallReSl?.enabled && 'SL', row.overallReTgt?.enabled && 'Tgt'].filter(Boolean);
+  if (re.length) parts.push(`RE on ${re.join('/')}`);
+  return parts.length ? { text: parts.join(' \u00b7 '), active: true } : { text: 'off', active: false };
+}
+
+/** The Overall summary as a labelled chip: highlighted when anything is on, muted when all off. */
+function OverallSummaryChip({ row }: { row: FocusRow }) {
+  const o = overallSummary(row);
+  return (
+    <span className={cn('font-mono text-xs', o.active ? 'text-amber-300' : 'text-zinc-500')}
+      title="Strategy-level SL, target, trail and re-entry for this row (Overall strategy card, inside Rules & re-entry)">
+      <span className="font-sans font-bold text-zinc-400">Overall:</span> {o.text}
+    </span>
+  );
 }
 
 /** Whole-rupee signed P&L with Indian grouping: +₹1,729 / −₹1,245 / ₹0. */
@@ -4027,9 +4064,13 @@ function FocusProRowImpl({
                 <button type="button" className={cn('flex items-center gap-2 rounded-md px-1.5 py-1 text-xs text-zinc-300 hover:bg-zinc-800/60 cursor-pointer', FOCUS_RING)} />
               }>
                 <ChevronDown className={cn('size-4 text-zinc-500 transition-transform', !reOpen && '-rotate-90')} />
-                <span className={PRO_LABEL}>Re-entry</span>
-                <span className="font-mono text-zinc-300">{reentrySummary(row)}</span>
+                <span className={PRO_LABEL}>Rules &amp; re-entry</span>
               </CollapsibleTrigger>
+              <OverallSummaryChip row={row} />
+              <span className="text-zinc-600" aria-hidden>|</span>
+              <span className="font-mono text-xs text-zinc-300" title="Re-entry after a leg SL % / target">
+                <span className="font-sans font-bold text-zinc-400">RE</span> {reentrySummary(row)}
+              </span>
               {/* Waiting re-entries stay visible (and cancellable) while collapsed. */}
               {!reOpen && <LegReentryPendingChips row={row} onCancelPending={onCancelPending} />}
             </div>
@@ -4455,7 +4496,8 @@ function FocusRowCardImpl({
           </div>
         </div>
 
-        <div className="border-t border-zinc-800/50 pt-1">
+        <div className="border-t border-zinc-800/50 pt-1 flex flex-col gap-1">
+          <OverallSummaryChip row={row} />
           <LegReentryControls row={row} onUpdate={onUpdate} onCancelPending={onCancelPending} />
         </div>
 
