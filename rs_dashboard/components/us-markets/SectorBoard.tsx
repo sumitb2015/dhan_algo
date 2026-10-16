@@ -39,6 +39,8 @@ export default function SectorBoard({ groups, selected, onSelect, title }: Props
       <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 2xl:grid-cols-6 gap-2">
         {groups.map(g => {
           const head = g.etfPct ?? g.medianPct;
+          // A group with a benchmark that has not moved yet (no quote / no previous close) falls back to its member median: say so.
+          const onMedian = g.etf != null && g.etfPct == null && g.medianPct != null;
           return (
             <button key={g.key} onClick={() => onSelect(selected === g.key ? null : g.key)} aria-pressed={selected === g.key} title={g.desc}
               className={cn('text-left rounded-lg border px-3 py-2 flex flex-col gap-1.5 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-500/60',
@@ -48,7 +50,10 @@ export default function SectorBoard({ groups, selected, onSelect, title }: Props
                 {g.etf && <span className="text-[10px] font-semibold text-zinc-400">{g.etf}</span>}
               </div>
               <div className="flex items-baseline justify-between gap-2">
-                <span className={cn('text-base font-bold tabular-nums leading-none', signCls(head))}>{pctText(head)}</span>
+                <span className="flex items-baseline gap-1.5">
+                  <span className={cn('text-base font-bold tabular-nums leading-none', signCls(head))}>{pctText(head)}</span>
+                  {onMedian && <span className="text-[9px] font-bold uppercase tracking-wider text-amber-300" title={`${g.etf} has no move yet; this is the median of its stocks`}>median</span>}
+                </span>
                 <span className="text-[10px] text-zinc-400 tabular-nums" title="Median % change of the group's stocks">med {pctText(g.medianPct)}</span>
               </div>
               <AdvDecBar adv={g.adv} dec={g.dec} unch={g.unch} />

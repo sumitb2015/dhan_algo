@@ -460,6 +460,7 @@ def main():
                 if tick and float(tick.get('LTP') or tick.get('last_price') or 0.0) <= 0.0:
                     tick = None
                 if tick:
+                    source = 'tick'
                     ltp = float(tick.get('LTP') or tick.get('last_price') or 0.0)
                     open_ = float(tick.get('open') or 0.0)
                     high = float(tick.get('high') or 0.0)
@@ -494,7 +495,10 @@ def main():
                     if vwap == 0.0 and ltp > 0.0:
                         vwap = ltp
                 else:
-                    # Seed fallback from database baseline
+                    # Seed fallback from database baseline. `source` tells readers which kind of row this is:
+                    # 'eod' = today's real close from the CSV; 'none' = no price at all for today, so LTP is just the
+                    # previous close and the 0% change is not a real move (India Markets shows it as "no quote").
+                    source = 'eod' if base.get('seed_close', 0.0) else 'none'
                     ltp = base.get('seed_close', 0.0) or prev_close
                     open_ = base.get('seed_open', 0.0) or ltp
                     high = base.get('seed_high', 0.0) or ltp
@@ -514,6 +518,7 @@ def main():
 
                 current_quotes[sym] = {
                     'symbol': sym,
+                    'source': source,
                     'company': company,
                     'industry': industry,
                     'ltp': round(ltp, 2),

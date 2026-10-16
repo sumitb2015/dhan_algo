@@ -1,7 +1,7 @@
 // Pure aggregation for the US Markets dashboard (group breadth, movers) and the Yahoo index-level parser. No fetch, no fs,
 // no `@/` imports, so `node --test` can load it. Routes: app/api/live-us/dashboard/ and app/api/live-us/indices/.
 import type { UsQuoteRow } from './usStocks.ts';
-import type { UsGroup, UsGroupKind } from './usUniverse.ts';
+import type { UsGroup } from './usUniverse.ts';
 
 export interface DashRow extends UsQuoteRow {
   /** GICS sector group key, null for ETFs and index/macro proxies. */
@@ -13,12 +13,15 @@ export interface DashRow extends UsQuoteRow {
 
 export interface MemberMove { symbol: string; pct: number }
 
+/** A group of symbols with an optional benchmark (an ETF, or an index for the India page) - the input to groupStats. */
+export interface StatGroup { key: string; label: string; kind: string; desc: string; etf?: string; symbols: readonly string[] }
+
 export interface GroupStat {
-  key: string; label: string; kind: UsGroupKind; desc: string;
+  key: string; label: string; kind: string; desc: string;
   etf: string | null;
   /** The ETF's own % change, null when it has not quoted. */
   etfPct: number | null;
-  symbols: string[];
+  symbols: readonly string[];
   /** Members with a computable % change. */
   quoted: number;
   adv: number; dec: number; unch: number;
@@ -45,7 +48,12 @@ function countMoves(pcts: readonly number[]): { adv: number; dec: number; unch: 
 }
 
 /** One stat block per group. A member that has not quoted is left out of every figure (counted in `symbols`, not in `quoted`). */
-export function groupStats(groups: readonly UsGroup[], rowBySymbol: ReadonlyMap<string, UsQuoteRow>): GroupStat[] {
+/** `benchBySymbol` resolves each group's benchmark (`etf`); it defaults to the member map, which holds the US ETFs too. */
+export function groupStats(
+  groups: readonly StatGroup[],
+  rowBySymbol: ReadonlyMap<string, { changePct: number | null }>,
+  benchBySymbol: ReadonlyMap<string, { changePct: number | null }> = rowBySymbol,
+): GroupStat[] {
   return groups.map(g => {
     const moves: MemberMove[] = [];
     for (const s of g.symbols) {
@@ -57,7 +65,7 @@ export function groupStats(groups: readonly UsGroup[], rowBySymbol: ReadonlyMap<
     return {
       key: g.key, label: g.label, kind: g.kind, desc: g.desc,
       etf: g.etf ?? null,
-      etfPct: g.etf ? rowBySymbol.get(g.etf)?.changePct ?? null : null,
+      etfPct: g.etf ? benchBySymbol.get(g.etf)?.changePct ?? null : null,
       symbols: g.symbols,
       quoted: moves.length,
       ...countMoves(pcts),

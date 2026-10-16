@@ -151,7 +151,7 @@ export default function UsDashboard({ onDataDate, universeOn }: Props) {
           </div>
 
           <div className="grid grid-cols-1 xl:grid-cols-[1fr_20rem] gap-4">
-            <StockHeatmap rows={rows} sectors={sectors} themes={themes} onSelect={select} />
+            <StockHeatmap rows={rows} views={[{ key: 'sector', label: 'Sectors', groups: sectors }, { key: 'ai', label: 'AI themes', groups: themes }]} onSelect={select} />
             <UsMovers gainers={data.gainers} losers={data.losers} />
           </div>
 

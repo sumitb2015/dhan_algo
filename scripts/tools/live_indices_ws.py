@@ -194,13 +194,19 @@ _prev_close_fetch_failed: set[str] = set()
 
 # All symbols needing the fallback tend to become "unknown" at the same
 # moment (the bridge just started, so every row's cache is empty at once),
-# which would otherwise fire up to 9 concurrent get_prev_day_levels() calls —
+# which would otherwise fire up to 26 concurrent get_prev_day_levels() calls (the
+# 9 ROUTE_KEY_MAP rows are started first, the rest only once those are done) —
 # Dhan's historical endpoint is rate-limited to ~1 req/s. This lock plus a
 # minimum gap serializes them, same intent as pyExec.ts's `spaced()` /
 # top-indices/route.ts's HISTORICAL_STAGGER_MS on the Node side.
 _prev_close_fetch_lock = threading.Lock()
 _prev_close_last_fetch_monotonic = 0.0
 PREV_CLOSE_FETCH_MIN_GAP_SEC = 2.0
+
+
+def _start_prev_close_fetch(helper, symbol: str, cache_key: str, cache: dict) -> None:
+    _prev_close_fetch_inflight.add(cache_key)
+    threading.Thread(target=_fetch_prev_close_background, args=(helper, symbol, cache_key, cache), daemon=True).start()
 
 
 def _fetch_prev_close_background(helper, symbol: str, cache_key: str, cache: dict) -> None:
@@ -232,7 +238,11 @@ def _fetch_prev_close_background(helper, symbol: str, cache_key: str, cache: dic
         _prev_close_fetch_inflight.discard(cache_key)
 
 
-def write_quotes_snapshot(sid_to_symbol: dict, prev_close_cache: dict, helper=None) -> None:
+ROUTE_KEYS = frozenset(ROUTE_KEY_MAP.values())
+
+
+def write_quotes_snapshot(sid_to_symbol: dict, prev_close_cache: dict, helper=None,
+                          labels: dict | None = None, categories: dict | None = None) -> None:
     """
     Write QUOTES_FILE from the hub's current merged ticks.
 
@@ -253,10 +263,14 @@ def write_quotes_snapshot(sid_to_symbol: dict, prev_close_cache: dict, helper=No
     now_min = ist_minutes_of_day()
 
     quotes: dict[str, dict] = {}
+    # Every catalogue index keyed by its catalogue SYMBOL, for the India Markets dashboard. `quotes` (above) stays the
+    # 9-row route-key subset that scalper/top-indices reads; `indices` carries change_pct=None (not 0) without a prev close.
+    indices: dict[str, dict] = {}
+    # Fallback fetches for indices only the India Markets page uses wait until no route-key (scalper) fetch is in
+    # flight, so the 9 top-indices rows never queue behind 17 dashboard-only lookups on the shared lock.
+    deferred_fetches: list[tuple[str, str]] = []
     for sid, sym in sid_to_symbol.items():
         route_key = ROUTE_KEY_MAP.get(sym)
-        if route_key is None:
-            continue
         tick = live_ticks.get(hub_client.tick_key(IDX, sid))
         if not tick:
             continue
@@ -265,7 +279,7 @@ def write_quotes_snapshot(sid_to_symbol: dict, prev_close_cache: dict, helper=No
         if ltp <= 0:
             continue
 
-        cache_key = f'{day}:{route_key}'
+        cache_key = f'{day}:{route_key or sym}'
         cached = prev_close_cache.get(cache_key)
         if cached is not None:
             prev_close = cached
@@ -292,12 +306,10 @@ def write_quotes_snapshot(sid_to_symbol: dict, prev_close_cache: dict, helper=No
                     # 15:30) — no live tick can recover yesterday's close, so
                     # fall back to a REST daily-candle lookup, off the main
                     # loop so it can't stall QUOTES_FILE's 2s cadence.
-                    _prev_close_fetch_inflight.add(cache_key)
-                    threading.Thread(
-                        target=_fetch_prev_close_background,
-                        args=(helper, sym, cache_key, prev_close_cache),
-                        daemon=True,
-                    ).start()
+                    if route_key is not None:
+                        _start_prev_close_fetch(helper, sym, cache_key, prev_close_cache)
+                    else:
+                        deferred_fetches.append((sym, cache_key))
             if prev_close:
                 prev_close_cache[cache_key] = prev_close
 
@@ -310,6 +322,19 @@ def write_quotes_snapshot(sid_to_symbol: dict, prev_close_cache: dict, helper=No
         high = float(tick.get('high') or 0)
         low  = float(tick.get('low') or 0)
 
+        indices[sym] = {
+            'label':      (labels or {}).get(sym, sym),
+            'category':   (categories or {}).get(sym, ''),
+            'ltp':        round(ltp, 2),
+            'prev_close': round(prev_close, 2) if prev_close else None,
+            'change':     round(change, 2) if prev_close else None,
+            'change_pct': round(change_pct, 4) if prev_close else None,
+            'high':       round(high, 2) if high > 0 else None,
+            'low':        round(low, 2) if low > 0 else None,
+        }
+        if route_key is None:
+            continue
+
         quotes[route_key] = {
             'ltp':        round(ltp, 2),
             'prev_close': round(prev_close, 2),
@@ -319,9 +344,14 @@ def write_quotes_snapshot(sid_to_symbol: dict, prev_close_cache: dict, helper=No
             'low':        round(low, 2) if low > 0 else 0,
         }
 
+    if deferred_fetches and not any(k.split(':', 1)[1] in ROUTE_KEYS for k in _prev_close_fetch_inflight):
+        for sym, cache_key in deferred_fetches:
+            _start_prev_close_fetch(helper, sym, cache_key, prev_close_cache)
+
     atomic_write(QUOTES_FILE, {
         'updated_at': datetime.now(IST).isoformat(),
         'quotes':     quotes,
+        'indices':    indices,
     })
 
 
@@ -433,7 +463,7 @@ def main():
     # must NOT be recreated each call, or every 2s write would forget the
     # genuine pre-flip close it cached.
     quotes_prev_close_cache: dict[str, float] = {}
-    write_quotes_snapshot(sid_to_symbol, quotes_prev_close_cache, helper)
+    write_quotes_snapshot(sid_to_symbol, quotes_prev_close_cache, helper, labels, categories)
 
     try:
         while True:
@@ -526,7 +556,7 @@ def main():
                 chunk = min(QUOTES_WRITE_SEC, interval - slept)
                 time.sleep(chunk)
                 slept += chunk
-                write_quotes_snapshot(sid_to_symbol, quotes_prev_close_cache, helper)
+                write_quotes_snapshot(sid_to_symbol, quotes_prev_close_cache, helper, labels, categories)
 
     except KeyboardInterrupt:
         print('[live_indices_ws] KeyboardInterrupt - shutting down.', flush=True)
