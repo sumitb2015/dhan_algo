@@ -46,7 +46,7 @@ import {
   dteMatches, dteForExpiry, evaluateRowExit, evaluateEntry, evaluateGlobalRisk,
   legStopPremium, pairStopPremium, nextOpenedTs, isGhostDropProtected,
   isSimRow, simLegPosition,
-  legPinnedStrike, costStopReason, legOwnEntry, DEFAULT_SL_ROLL_MAX,
+  legPinnedStrike, costStopReason, legOwnEntry, legFillEntry, DEFAULT_SL_ROLL_MAX,
   reentryConfig, evaluateReentry, reentryWindowClosed, monitoringStopped, momentumReentryKind, momentumTrigger,
   addMinutesHm, resolveCriteriaStrike, closestPremiumStrike, ownedLegStop, legStopHit, legDeltaNow, legDeltaBasis, legTargetDeltaLevel,
   multipliedLots, legLots, hasLegLots, clampHm, rangeWindow, rangeWindowPhase, rowHasMultiDayRange, candleBucket, tradingDte,
@@ -60,7 +60,7 @@ import { buildPayoffModel } from '@/lib/optionsPayoff';
 import { computeBasketGreeks, type GreekLeg } from '@/lib/multiLegGreeks';
 import { useFocusMarketData, expKey, strikeKey, type FutQuote, type StrikeRef } from '@/lib/useFocusMarketData';
 import { isStale, ageOf, ageLabel } from '@/lib/useLiveTickerPoll';
-import { computeRowPnl, mtmForQty, pnlPctOfPremium, shiftMayReopen, canMarkMtm, shiftCloseConfirmed, rowDisplayBookedPnl, putCallRatio, valuePutCallRatio, pickOpenInterest, closeRebaseDelta, closedSliceBooked, FTS_ORDER_SOURCE } from '@/lib/focusToolPnl';
+import { computeRowPnl, mtmForQty, pnlPctOfPremium, blendFillBasis, sliceTradedPrice, fillRebasePatch, shiftMayReopen, canMarkMtm, shiftCloseConfirmed, rowDisplayBookedPnl, putCallRatio, valuePutCallRatio, pickOpenInterest, closeRebaseDelta, closedSliceBooked, FTS_ORDER_SOURCE } from '@/lib/focusToolPnl';
 import { normalizeTradeRow, matchOutsideTrades, type NormalizedTrade } from '@/lib/multiLegFocus';
 import { stampItems, noteItems, adoptItems, canon, type RevBook } from '@/lib/revMerge';
 import { useTabLeader } from '@/hooks/useTabLeader';
@@ -368,12 +368,23 @@ function computeLegPnlDetail(row: FocusRow, leg: 'CE' | 'PE', live: RowLive): { 
   const qty = Math.min(owned > 0 ? owned : 0, brokerQty);
   if (qty <= 0) return null;
   const net = Number(pos.netQty) || 0;
-  const avg = net < 0 ? Number(pos.sellAvg) || 0 : Number(pos.buyAvg) || 0;
+  // This row's own actual fill price first (the broker average is pooled over the day's trades on the contract).
+  const ownFill = ownFillBasis(row, leg);
+  const avg = ownFill > 0 ? ownFill : (net < 0 ? Number(pos.sellAvg) || 0 : Number(pos.buyAvg) || 0);
   const ltp = leg === 'CE' ? live.ltpCe : live.ltpPe;
   const pnl = ltp != null && ltp > 0
-    ? mtmForQty({ netQty: net, buyAvg: Number(pos.buyAvg) || 0, sellAvg: Number(pos.sellAvg) || 0, ltp, qty })
+    ? mtmForQty({ netQty: net, buyAvg: avg, sellAvg: avg, ltp, qty })
     : (Number(pos.unrealizedProfit) || 0) * (qty / brokerQty);
   return { pnl, pct: pnlPctOfPremium(pnl, avg, qty) };
+}
+
+/**
+ * This row's own ACTUAL fill price for a leg (fill.ceFillEntry), or 0 when not recorded. Live P&L marks against it
+ * and falls back to the broker average (exact for a sole owner, and what Zerodha / Kotak rows always use); booked P&L
+ * goes through legFillEntry (fill → stop reference → broker average).
+ */
+function ownFillBasis(row: FocusRow, leg: 'CE' | 'PE'): number {
+  return Number(leg === 'CE' ? row.fill?.ceFillEntry : row.fill?.peFillEntry) || 0;
 }
 
 /** "+2.3%" / "\u22124.0%" for a leg P&L %, or '' when unknown. */
@@ -526,6 +537,8 @@ interface UnconfirmedOrder {
   strike: number;
   /** Entry-price estimate for an open's late-credited qty. */
   entryPx: number;
+  /** A late-credited open also re-bases the stop reference (refPrice 'traded', or a shift's reopen). */
+  rebaseStop?: boolean;
   /** A Range Breakout open's range, stamped if the qty is credited late. */
   orb?: FocusOrbStamp | null;
   orderId: string | null;
@@ -4900,6 +4913,9 @@ export default function FocusTool() {
   // Legs with a scale-out REDUCE in flight (`rowId:leg`). Kept apart from autoExitingLegRef, which means "this leg is
   // being closed in full" — Square Off Complete and RE MATCH read that, and a partial reduce is not a full close.
   const scalingLegRef = useRef<Set<string>>(new Set());
+  // Traded prices already applied per order slice (`orderId:open|close` → cumulative qty and average), so a late
+  // slice is priced on its own (sliceTradedPrice).
+  const tradedSliceRef = useRef<Map<string, { qty: number; atp: number }>>(new Map());
   // A scale-out step that was refused before any order went out is retried, but not before this time (ms), and at
   // most twice per step (`rowId:leg:at` → attempts).
   const scaleRetryRef = useRef<Map<string, { notBefore: number; tries: number }>>(new Map());
@@ -5605,10 +5621,13 @@ export default function FocusTool() {
         const isShort = Number(pos.netQty) < 0;
         const avg = isShort ? (Number(pos.sellAvg) || 0) : (Number(pos.buyAvg) || 0);
         const ltp = leg === 'CE' ? ltpCe : ltpPe;
+        // Open MTM off THIS row's own actual fill price when recorded — the broker's average is pooled over every
+        // trade on the contract today (earlier cycles, other rows), so it is only the fallback.
+        const ownFill = ownFillBasis(row, leg);
         liveLegs.push({
           netQty: Number(pos.netQty) || 0,
-          buyAvg: Number(pos.buyAvg) || 0,
-          sellAvg: Number(pos.sellAvg) || 0,
+          buyAvg: ownFill > 0 ? ownFill : Number(pos.buyAvg) || 0,
+          sellAvg: ownFill > 0 ? ownFill : Number(pos.sellAvg) || 0,
           ltp,
           unrealizedProfit: Number(pos.unrealizedProfit) || 0,
           ownQty,
@@ -6236,6 +6255,14 @@ export default function FocusTool() {
           : (delta > 0 && prevQty <= 0 ? null : prevEntry);
         const nextCeQty = leg === 'CE' ? Math.max(0, (f?.ceQty ?? 0) + delta) : (f?.ceQty ?? 0);
         const nextPeQty = leg === 'PE' ? Math.max(0, (f?.peQty ?? 0) + delta) : (f?.peQty ?? 0);
+        // The P&L basis (fill.ceFillEntry) blends the same way from the estimate; rebaseOpenOnTradedPrice then swaps
+        // in the broker's traded price for this fill's share. Kept only where it can be made exact — a SIM paper fill,
+        // or a Dhan order (traded price): Zerodha / Kotak rows leave it unset and mark off the broker's own average.
+        // Unknown stays unknown (blendFillBasis never dilutes toward 0); a reduce leaves it; a flat leg drops it.
+        const trackFill = isSimRow(r) || broker === 'dhan';
+        const prevFill = leg === 'CE' ? f?.ceFillEntry : f?.peFillEntry;
+        const nextFillEntry = !trackFill ? null
+          : delta > 0 ? blendFillBasis(prevFill, prevQty, Number(entryPrice) || 0, delta) : (prevFill ?? null);
         // |delta| × 100 of the strike opened, off the polled chain — the base of a Delta stop / target / trail.
         const legDeltaEntry = (l: 'CE' | 'PE', nextQty: number, prev: number | null | undefined, rr: FocusRow) => {
           if (nextQty <= 0) return null;
@@ -6276,6 +6303,8 @@ export default function FocusTool() {
           peQty: nextPeQty,
           ceEntry: leg === 'CE' ? nextEntry : (f?.ceEntry ?? null),
           peEntry: leg === 'PE' ? nextEntry : (f?.peEntry ?? null),
+          ceFillEntry: nextCeQty <= 0 ? undefined : (leg === 'CE' ? (nextFillEntry ?? undefined) : f?.ceFillEntry),
+          peFillEntry: nextPeQty <= 0 ? undefined : (leg === 'PE' ? (nextFillEntry ?? undefined) : f?.peFillEntry),
           ceOpenedTs,
           peOpenedTs,
           // SL-to-cost belongs to the position it was armed on: a leg that
@@ -6452,11 +6481,28 @@ export default function FocusTool() {
         const mark = { ...rec.snap, qty: late };
         const booked = canMarkMtm(mark) ? mtmForQty(mark) : 0;
         adjustFillQty(rec.rowId, rec.leg, -late, undefined, booked);
+        // Book the late slice at what the broker actually filled, as an in-time close does.
+        if (booked !== 0 && broker === 'dhan' && rec.orderId) {
+          void rebaseBookedOnTradedPrice(rec.rowId, rec.orderId, rec.snap.netQty < 0, rec.snap.ltp, late);
+        }
         addToast('success', `${rec.leg} close confirmed late`,
           `${late} of ${rec.requested} filled after the check window — ledger updated. `
           + 'Re-entry / SL→Cost for that stop were NOT applied (they only follow a close confirmed in time).');
       } else {
+        const beforeLate = rowNow.fill;
+        const heldBefore = Number(rec.leg === 'CE' ? beforeLate?.ceQty : beforeLate?.peQty) || 0;
+        const basisBefore = Number(rec.leg === 'CE' ? beforeLate?.ceFillEntry : beforeLate?.peFillEntry) || 0;
         adjustFillQty(rec.rowId, rec.leg, late, rec.strike, 0, rec.entryPx, rec.orb);
+        // The late slice follows its OWN traded price (sliceTradedPrice), for the P&L basis and, where the row
+        // uses it, the stop reference.
+        if (broker === 'dhan' && rec.orderId) {
+          void rebaseOpenOnTradedPrice(rec.rowId, rec.leg, rec.orderId, rec.entryPx, late, {
+            stop: !!rec.rebaseStop,
+            fill: !(heldBefore > 0 && !(basisBefore > 0)),
+            heldAfterAdd: heldBefore + late,
+            assumed: rec.entryPx > 0 ? rec.entryPx : (heldBefore > 0 ? basisBefore : 0),
+          });
+        }
         addToast('success', `${rec.leg} ${rec.strike} sell confirmed late`,
           `${late} of ${rec.requested} filled after the check window — now tracked by this row, stops included`);
       }
@@ -6603,7 +6649,8 @@ export default function FocusTool() {
           // trade(s) when Dhan's trade book explains the whole qty exactly;
           // otherwise book nothing and say so, rather than invent a price
           // (dropping it silently lost the slice's P&L — 2026-10-01 audit).
-          const entry = live ? legOwnEntry(row, leg, live) : (Number(leg === 'CE' ? row.fill?.ceEntry : row.fill?.peEntry) || 0);
+          const entry = live ? legFillEntry(row, leg, live)
+            : (Number(leg === 'CE' ? (row.fill?.ceFillEntry ?? row.fill?.ceEntry) : (row.fill?.peFillEntry ?? row.fill?.peEntry)) || 0);
           const openedAt = Number(leg === 'CE' ? row.fill?.ceOpenedTs : row.fill?.peOpenedTs) || 0;
           const match = broker === 'dhan' && securityId ? await outsideCloseExit(String(securityId), pageOwn, openedAt) : null;
           const exit = match?.exitPrice ?? null;
@@ -6700,7 +6747,10 @@ export default function FocusTool() {
         // average only for a legacy row with none) — the broker's buyAvg /
         // sellAvg is pooled across every row and trade on the contract
         // (2026-10-01 audit). Both slots carry it; mtmForQty picks by netQty.
-        const ownEntry = live ? legOwnEntry(row, leg, live) : (Number(leg === 'CE' ? row.fill?.ceEntry : row.fill?.peEntry) || 0);
+        // P&L basis: the leg's ACTUAL average fill (legFillEntry), not the stop reference — a close books what the
+        // broker really filled on both sides (the exit side is rebased on the traded price below).
+        const ownEntry = live ? legFillEntry(row, leg, live)
+          : (Number(leg === 'CE' ? (row.fill?.ceFillEntry ?? row.fill?.ceEntry) : (row.fill?.peFillEntry ?? row.fill?.peEntry)) || 0);
         const bookedSnap = opts.reduce ? {
           netQty,
           buyAvg: ownEntry,
@@ -6718,6 +6768,10 @@ export default function FocusTool() {
             ? simQuote(u, expiry, Number(strike), leg)
             : Number(leg === 'CE' ? live?.ltpCe : live?.ltpPe) || 0;
         const applyFill = (filled: number) => {
+          // The leg as it stood before this fill — what a traded-price correction of an open is measured against.
+          const before = schedulerRef.current.config.rows.find(r => r.id === row.id)?.fill;
+          const prevHeld = Number(leg === 'CE' ? before?.ceQty : before?.peQty) || 0;
+          const prevBasis = Number(leg === 'CE' ? before?.ceFillEntry : before?.peFillEntry) || 0;
           if (filled < quantity) {
             addToast('error', `${what}: partial fill`,
               `Requested ${quantity}, broker confirms ${filled} filled — ledger updated to match`);
@@ -6746,6 +6800,7 @@ export default function FocusTool() {
               kind: opts.reduce ? 'close' : 'open',
               strike: Number(strike),
               entryPx: openEntryPx,
+              rebaseStop: !opts.reduce && (row.refPrice === 'traded' || opts.strikeOverride != null),
               orb: opts.reduce ? null : (opts.orb ?? null),
               rowId: row.id, leg,
               orderId: j.order_id ? String(j.order_id) : null,
@@ -6771,8 +6826,15 @@ export default function FocusTool() {
           // share of the entry on what the broker actually filled at.
           // A shift's reopen (strikeOverride) always re-bases on the traded price: the stops and Pair × measure
           // from this leg's real fill, not the LTP quoted a moment before the order.
-          if (!opts.reduce && filled > 0 && (row.refPrice === 'traded' || opts.strikeOverride != null) && broker === 'dhan' && j.order_id) {
-            void rebaseEntryOnTradedPrice(row.id, leg, String(j.order_id), openEntryPx, filled);
+          // ONE order read corrects both: the stop reference (only for refPrice 'traded' or a shift's reopen) and the
+          // P&L basis (always — a held leg whose basis is already unknown is left to its fallback).
+          if (!opts.reduce && filled > 0 && broker === 'dhan' && j.order_id) {
+            void rebaseOpenOnTradedPrice(row.id, leg, String(j.order_id), openEntryPx, filled, {
+              stop: row.refPrice === 'traded' || opts.strikeOverride != null,
+              fill: !(prevHeld > 0 && !(prevBasis > 0)),
+              heldAfterAdd: prevHeld + filled,
+              assumed: openEntryPx > 0 ? openEntryPx : (prevHeld > 0 ? prevBasis : 0),
+            });
           }
           return filled >= quantity && markOk;
         };
@@ -6828,45 +6890,90 @@ export default function FocusTool() {
     }
   }
 
-  /** The close side of rebaseEntryOnTradedPrice: moves bookedPnl by the gap
-   *  between the LTP the close was booked at and the order's traded average. */
-  async function rebaseBookedOnTradedPrice(rowId: string, orderId: string, isShort: boolean, estimate: number, filled: number) {
-    for (let i = 0; i < 4; i++) {
+  /**
+   * The traded price of one slice of an order (Dhan reports a CUMULATIVE average): earlier slices of the same order
+   * are remembered per kind, so a late slice gets its own price (sliceTradedPrice). Backs off 1 / 2 / 4 / 8 s, so a
+   * 429 or an order still in transit gets time to settle. Null = never reported.
+   */
+  async function fetchSliceTradedPrice(orderId: string, kind: 'open' | 'close', sliceQty: number): Promise<number | null> {
+    for (const wait of [1000, 2000, 4000, 8000]) {
+      await new Promise(res => setTimeout(res, wait));
       try {
         const r = await fetch(`/api/scalper/orders?orderId=${encodeURIComponent(orderId)}`);
         const j = await r.json() as { success?: boolean; data?: { averageTradedPrice?: number } };
         const atp = Number(j.data?.averageTradedPrice) || 0;
         if (j.success && atp > 0) {
-          const delta = closeRebaseDelta(isShort, estimate, atp, filled);
-          if (delta !== 0) patchFill(rowId, f => ({ bookedPnl: (f.bookedPnl ?? 0) + delta }));
-          return;
+          const key = `${orderId}:${kind}`;
+          const prior = tradedSliceRef.current.get(key);
+          const cumQty = (prior?.qty ?? 0) + sliceQty;
+          const px = sliceTradedPrice(atp, cumQty, prior);
+          tradedSliceRef.current.set(key, { qty: cumQty, atp });
+          return px;
         }
       } catch { /* retry */ }
-      await new Promise(res => setTimeout(res, 1000));
     }
+    return null;
   }
 
-  async function rebaseEntryOnTradedPrice(rowId: string, leg: 'CE' | 'PE', orderId: string, estimate: number, filled: number) {
-    for (let i = 0; i < 4; i++) {
-      try {
-        const r = await fetch(`/api/scalper/orders?orderId=${encodeURIComponent(orderId)}`);
-        const j = await r.json() as { success?: boolean; data?: { averageTradedPrice?: number } };
-        const atp = Number(j.data?.averageTradedPrice) || 0;
-        if (j.success && atp > 0) {
-          patchFill(rowId, f => {
-            const held = Number(leg === 'CE' ? f.ceQty : f.peQty) || 0;
-            const cur = Number(leg === 'CE' ? f.ceEntry : f.peEntry) || 0;
-            if (!(held > 0)) return {};
-            const next = cur > 0 && estimate > 0 ? cur + (atp - estimate) * Math.min(filled, held) / held
-              : (held <= filled ? atp : cur);
-            if (!(next > 0)) return {};
-            return leg === 'CE' ? { ceEntry: next } : { peEntry: next };
-          });
-          return;
-        }
-      } catch { /* retry */ }
-      await new Promise(res => setTimeout(res, 1000));
+  /** A close's booked P&L, re-priced from the LTP snapshot to the slice's traded price. */
+  async function rebaseBookedOnTradedPrice(rowId: string, orderId: string, isShort: boolean, estimate: number, filled: number) {
+    const px = await fetchSliceTradedPrice(orderId, 'close', filled);
+    if (px == null) return;
+    const delta = closeRebaseDelta(isShort, estimate, px, filled);
+    if (delta !== 0) patchFill(rowId, f => ({ bookedPnl: (f.bookedPnl ?? 0) + delta }));
+  }
+
+  /**
+   * An open, re-priced to its traded price with ONE order read:
+   *  - `fill`: the P&L basis (fillRebasePatch) — including the booked P&L of anything closed before the price arrived,
+   *    and never the basis of a newer position (identity = the leg's openedTs when this fill landed).
+   *  - `stop`: the stop / target reference ceEntry (refPrice 'traded', or a shift's reopen).
+   * When the price never arrives, the basis of this position is dropped to unknown, so P&L falls back to the
+   * reference / broker average instead of keeping an estimate as if it were a fill.
+   */
+  async function rebaseOpenOnTradedPrice(
+    rowId: string, leg: 'CE' | 'PE', orderId: string, estimate: number, filled: number,
+    ctx: { stop: boolean; fill: boolean; heldAfterAdd: number; assumed: number },
+  ) {
+    if (!ctx.stop && !ctx.fill) return;
+    const openedOf = (f: FocusRowFill | undefined) => (leg === 'CE' ? f?.ceOpenedTs : f?.peOpenedTs) ?? null;
+    // The position this fill belongs to: once the ledger write has landed (a render), its openedTs.
+    let identity: number | null = null;
+    for (let i = 0; i < 10; i++) {
+      const f = schedulerRef.current.config.rows.find(r => r.id === rowId)?.fill;
+      if ((Number(leg === 'CE' ? f?.ceQty : f?.peQty) || 0) >= Math.min(ctx.heldAfterAdd, filled)) { identity = openedOf(f); break; }
+      await new Promise(res => setTimeout(res, 50));
     }
+    const px = await fetchSliceTradedPrice(orderId, 'open', filled);
+    if (px == null) {
+      if (ctx.fill) {
+        patchFill(rowId, f => (identity != null && openedOf(f) === identity
+          ? (leg === 'CE' ? { ceFillEntry: undefined } : { peFillEntry: undefined }) : {}));
+      }
+      return;
+    }
+    patchFill(rowId, f => {
+      const out: Partial<FocusRowFill> = {};
+      const held = Number(leg === 'CE' ? f.ceQty : f.peQty) || 0;
+      const same = identity != null && openedOf(f) === identity;
+      if (ctx.fill) {
+        const r = fillRebasePatch({
+          curBasis: leg === 'CE' ? f.ceFillEntry : f.peFillEntry, heldNow: same ? held : 0,
+          heldAfterAdd: ctx.heldAfterAdd, samePosition: same, assumed: ctx.assumed, traded: px, filled,
+        });
+        if (r.basis !== undefined && r.basis > 0) { if (leg === 'CE') out.ceFillEntry = r.basis; else out.peFillEntry = r.basis; }
+        if (r.bookedDelta) out.bookedPnl = (f.bookedPnl ?? 0) + r.bookedDelta;
+      }
+      if (ctx.stop && same && held > 0) {
+        const cur = Number(leg === 'CE' ? f.ceEntry : f.peEntry) || 0;
+        const share = Math.min(filled, held);
+        const next = cur > 0 && estimate > 0 ? cur + (px - estimate) * share / held
+          : cur > 0 && held > share ? (cur * (held - share) + px * share) / held
+          : px;
+        if (next > 0) { if (leg === 'CE') out.ceEntry = next; else out.peEntry = next; }
+      }
+      return out;
+    });
   }
 
   /** A strike's live premium for paper fills — the WS tick when it is on this
@@ -6929,7 +7036,8 @@ export default function FocusTool() {
         return false;
       }
       const qty = opts.all ? own : Math.min((opts.lots ?? 1) * lotSize, own);
-      const entry = Number(leg === 'CE' ? current.fill?.ceEntry : current.fill?.peEntry) || 0;
+      // The paper P&L basis (the SIM fill price), as the live mark uses; the stop reference only for an older row.
+      const entry = Number(leg === 'CE' ? (current.fill?.ceFillEntry ?? current.fill?.ceEntry) : (current.fill?.peFillEntry ?? current.fill?.peEntry)) || 0;
       // Short leg: bought back at px against the paper entry.
       const booked = entry > 0 ? (entry - px) * qty : 0;
       adjustFillQty(row.id, leg, -qty, undefined, booked);

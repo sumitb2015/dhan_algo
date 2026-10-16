@@ -234,6 +234,14 @@ export interface FocusRowFill {
   ceTrailSteps?: number;
   peTrailSteps?: number;
   /**
+   * The ACTUAL average fill price of this row's open qty on the leg — the P&L basis. Blended like ceEntry on every
+   * add, then corrected to Dhan's averageTradedPrice once the order reports it (always, whatever refPrice says).
+   * ceEntry stays the STOP / TARGET reference (LTP at the order, or the traded price with refPrice 'traded'), so this
+   * is kept apart: booked and live P&L follow what the broker actually filled. Missing = fall back to ceEntry.
+   */
+  ceFillEntry?: number | null;
+  peFillEntry?: number | null;
+  /**
    * Scale-out (FocusRow.scaleOut) on this leg's current position: the highest trigger (% of target) that has fired,
    * and the leg's own qty when the first step did — every step's % is of that base, so "25% then 25%" leaves half.
    * Keyed by trigger, not a step count, so editing the ladder mid-trade can neither re-fire a step nor skip one: a

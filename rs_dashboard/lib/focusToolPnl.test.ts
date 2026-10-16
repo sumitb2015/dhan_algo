@@ -14,7 +14,7 @@ import {
   computeRowPnl, mtmForQty, ownShare, shiftMayReopen,
   canMarkMtm, shiftCloseConfirmed, rowDisplayBookedPnl, putCallRatio,
   valuePutCallRatio, pickOpenInterest, closeRebaseDelta, closedSliceBooked,
-  pnlPctOfPremium,
+  pnlPctOfPremium, blendFillBasis, sliceTradedPrice, fillRebasePatch,
 } from './focusToolPnl.ts';
 
 test('mtmForQty: short leg profits when premium falls', () => {
@@ -213,4 +213,44 @@ test('pnlPctOfPremium: leg P&L as a % of the premium it was opened at', () => {
   assert.equal(pnlPctOfPremium(100, 0, 65), null);           // no basis
   assert.equal(pnlPctOfPremium(100, 50, 0), null);
   assert.equal(pnlPctOfPremium(null, 50, 65), null);
+});
+
+test('blendFillBasis: weighted on adds, never diluted toward 0', () => {
+  assert.equal(blendFillBasis(null, 0, 100, 75), 100);                 // opened from flat
+  assert.equal(blendFillBasis(null, 0, 0, 75), null);                  // from flat, no price
+  assert.equal(blendFillBasis(100, 75, 102, 75), 101);
+  assert.equal(blendFillBasis(100, 75, 0, 75), 100);                   // add with no estimate: old basis for now
+  assert.equal(blendFillBasis(null, 75, 100, 75), null);               // held with unknown basis: stays unknown
+  assert.equal(blendFillBasis(0, 75, 100, 75), null);
+});
+
+test('sliceTradedPrice: a late slice is priced from the cumulative average', () => {
+  assert.equal(sliceTradedPrice(100, 50, undefined), 100);
+  // 50 in time at 100, then 25 late: cumulative 102 over 75 → the late 25 were at 106
+  assert.equal(sliceTradedPrice(102, 75, { qty: 50, atp: 100 }), 106);
+  assert.equal(sliceTradedPrice(102, 50, { qty: 50, atp: 100 }), 102); // nothing new: the cumulative
+});
+
+test('fillRebasePatch: basis, closes before the price arrived, a replaced position', () => {
+  // add 75 (estimate 100) onto 75 @100; traded 102 → basis 101
+  assert.deepEqual(fillRebasePatch({ curBasis: 100, heldNow: 150, heldAfterAdd: 150, samePosition: true, assumed: 100, traded: 102, filled: 75 }),
+    { basis: 101, bookedDelta: 0 });
+  // 75 closed before the price arrived: they were booked at 100, the truth was 101 → +1 × 75 booked; basis 101 for the rest
+  assert.deepEqual(fillRebasePatch({ curBasis: 100, heldNow: 75, heldAfterAdd: 150, samePosition: true, assumed: 100, traded: 102, filled: 75 }),
+    { basis: 101, bookedDelta: 75 });
+  // all closed already: booked corrected for the whole position, no basis left
+  assert.deepEqual(fillRebasePatch({ curBasis: null, heldNow: 0, heldAfterAdd: 150, samePosition: true, assumed: 100, traded: 102, filled: 75 }),
+    { bookedDelta: 150 });
+  // the leg was closed and re-opened: never touch the new basis
+  assert.deepEqual(fillRebasePatch({ curBasis: 90, heldNow: 75, heldAfterAdd: 150, samePosition: false, assumed: 100, traded: 102, filled: 75 }),
+    { bookedDelta: 150 });
+  // add with no estimate, priced at the old basis 100; traded 120 → (100×75 + 120×75)/150 = 110
+  assert.deepEqual(fillRebasePatch({ curBasis: 100, heldNow: 150, heldAfterAdd: 150, samePosition: true, assumed: 100, traded: 120, filled: 75 }),
+    { basis: 110, bookedDelta: 0 });
+  // from flat with no estimate: the traded price becomes the basis
+  assert.deepEqual(fillRebasePatch({ curBasis: null, heldNow: 75, heldAfterAdd: 75, samePosition: true, assumed: 0, traded: 98.5, filled: 75 }),
+    { basis: 98.5, bookedDelta: 0 });
+  // unknown assumed on a held leg: nothing to correct
+  assert.deepEqual(fillRebasePatch({ curBasis: null, heldNow: 150, heldAfterAdd: 150, samePosition: true, assumed: 0, traded: 98.5, filled: 75 }),
+    { bookedDelta: 0 });
 });

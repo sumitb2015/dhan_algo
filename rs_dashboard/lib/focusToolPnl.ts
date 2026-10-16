@@ -222,6 +222,64 @@ export function closeRebaseDelta(isShort: boolean, estimateExit: number, tradedE
   return (isShort ? estimateExit - tradedExit : tradedExit - estimateExit) * qty;
 }
 
+// ── P&L basis on actual fills (fill.ceFillEntry) ───────────────────────────
+// Focus Tool legs are always SHORT (it only opens with a SELL), so a higher basis = more profit.
+
+/**
+ * The leg's P&L basis after an add of `addQty` at `price` (the estimate; 0 = no price yet). Unknown stays unknown —
+ * never blended toward 0: a held leg with no basis yields null, so readers fall back to the old reference.
+ */
+export function blendFillBasis(prevBasis: number | null | undefined, prevQty: number, price: number, addQty: number): number | null {
+  const prev = Number(prevBasis) || 0;
+  if (!(addQty > 0)) return prevQty > 0 && prev > 0 ? prev : null;
+  if (!(prevQty > 0)) return price > 0 ? price : null;
+  if (!(prev > 0)) return null;
+  if (!(price > 0)) return prev;            // priced at the old basis until the traded price arrives
+  return (prev * prevQty + price * addQty) / (prevQty + addQty);
+}
+
+/**
+ * One slice's traded price from an order's CUMULATIVE average (Dhan reports the average of everything filled so far).
+ * `prior` = what earlier slices of the same order were already priced at. A late slice therefore gets its own price,
+ * not the blended one.
+ */
+export function sliceTradedPrice(cumAtp: number, cumQty: number, prior: { qty: number; atp: number } | undefined): number {
+  if (prior && prior.qty > 0 && cumQty > prior.qty && cumAtp > 0) {
+    const px = (cumAtp * cumQty - prior.atp * prior.qty) / (cumQty - prior.qty);
+    if (px > 0) return px;
+  }
+  return cumAtp;
+}
+
+/**
+ * Correct a short leg's P&L basis once an add's traded price is known.
+ *  - `assumed` = the price the add was blended at (its estimate, or the old basis when it had none); 0 = unknown.
+ *  - The basis moves by c = (traded − assumed) × filled / heldAfterAdd, the add's share of the average.
+ *  - Qty closed since the add (heldAfterAdd − heldNow) was booked at the old basis: bookedDelta = c × that qty.
+ *  - `samePosition` false (the leg went flat and re-opened since): the old position was closed in full, so only its
+ *    booked P&L is corrected; the new position's basis is left alone.
+ *  - A leg opened from flat with no estimate gets the traded price as its basis.
+ */
+export function fillRebasePatch(p: {
+  curBasis: number | null | undefined; heldNow: number; heldAfterAdd: number; samePosition: boolean;
+  assumed: number; traded: number; filled: number;
+}): { basis?: number; bookedDelta: number } {
+  if (!(p.traded > 0) || !(p.filled > 0) || !(p.heldAfterAdd > 0)) return { bookedDelta: 0 };
+  if (!(p.assumed > 0)) {
+    // No price at all for this add: only a from-flat open (the whole position is this order) can be priced.
+    return p.samePosition && p.heldNow > 0 && p.heldAfterAdd <= p.filled && !(Number(p.curBasis) > 0)
+      ? { basis: p.traded, bookedDelta: 0 } : { bookedDelta: 0 };
+  }
+  const c = (p.traded - p.assumed) * Math.min(p.filled, p.heldAfterAdd) / p.heldAfterAdd;
+  if (!p.samePosition) return { bookedDelta: c * p.heldAfterAdd };
+  const reduced = Math.max(0, p.heldAfterAdd - p.heldNow);
+  const cur = Number(p.curBasis) || 0;
+  return {
+    ...(p.heldNow > 0 && cur > 0 ? { basis: cur + c } : {}),
+    bookedDelta: c * reduced,
+  };
+}
+
 /** Realized P&L of `qty` closed at `exit` against this row's own `entry` (0 when either is unknown). */
 export function closedSliceBooked(isShort: boolean, entry: number, exit: number, qty: number): number {
   if (!(entry > 0) || !(exit > 0) || !(qty > 0)) return 0;

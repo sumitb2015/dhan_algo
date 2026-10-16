@@ -17,11 +17,12 @@ import assert from 'node:assert/strict';
 
 import {
   EMPTY_ROW_LIVE, legStopReason, legStopLevel, legTargetReason, reentryConfig, evaluateReentry,
-  slRollStrike, reTgtOtmStrike, reentryOtmFromAtm, otmReentryStrike, matchPremiumStrike, legTargetProgress, dueScaleOutStep, scaleOutLots, scaleOutSteps, scaleOutStepsPassed, legLevelOn, levelSide, levelCrossStep, entryLevelFiredToday, levelSig, pendingReentryLevel, pendingReentryHit, costReentryBasis, awaitingMomentumQuote,
+  slRollStrike, reTgtOtmStrike, reentryOtmFromAtm, otmReentryStrike, matchPremiumStrike, legTargetProgress, dueScaleOutStep, scaleOutLots, scaleOutSteps, scaleOutStepsPassed, legLevelOn, levelSide, levelCrossStep, entryLevelFiredToday, levelSig, legFillEntry, legOwnEntry, pendingReentryLevel, pendingReentryHit, costReentryBasis, awaitingMomentumQuote,
   MAX_LEG_REENTRIES, DEFAULT_SL_ROLL_MAX,
   type RowLive,
 } from './focusToolRules.ts';
 import { readFileSync } from 'node:fs';
+import { mtmForQty } from './focusToolPnl.ts';
 import path from 'node:path';
 import { UNDERLYING_META, FEED_BRIDGE_UNDERLYINGS, FEED_SESSION_START_HM, FEED_SESSION_END_HM, type FocusUnderlying } from './focusToolUnderlyings.ts';
 
@@ -422,6 +423,19 @@ for (const m of MARKETS) {
     assert.equal(levelSig(up), levelSig({ level: `${m.spot + 100}.0`, dir: 'above' }));
     assert.notEqual(levelSig(up), levelSig({ ...up, dir: 'below' }));
     assert.notEqual(levelSig(up), levelSig({ ...up, level: String(m.spot + 50) }));
+  });
+
+  test(`${tag} P&L basis: the actual fill price, separate from the stop reference`, () => {
+    // stop reference stamped at the LTP before the order; the broker filled 1.5 better
+    const r = rowFor(m, {}, { ceEntry: m.ce, ceFillEntry: m.ce + 1.5 });
+    assert.equal(legFillEntry(r, 'CE', liveFor(m, m.ce, m.pe)), m.ce + 1.5);
+    assert.equal(legOwnEntry(r, 'CE', liveFor(m, m.ce, m.pe)), m.ce);          // stops / targets unchanged
+    // no fill price recorded yet (older row, or the traded price not back yet): the stop reference
+    assert.equal(legFillEntry(rowFor(m), 'CE', liveFor(m, m.ce, m.pe)), m.ce);
+    // a booked close at the real fills: sold at entry + 1.5, bought back at 10 below
+    const exit = m.ce - 10;
+    assert.equal(mtmForQty({ netQty: -m.lot, buyAvg: 0, sellAvg: legFillEntry(r, 'CE', liveFor(m, m.ce, m.pe)), ltp: exit, qty: m.lot }),
+      (m.ce + 1.5 - exit) * m.lot);
   });
 
   test(`${tag} Tgt OTM count: missing = 1, 0 allowed only from Row`, () => {

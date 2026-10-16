@@ -661,6 +661,17 @@ export function legOwnEntry(
   return q < 0 ? Number(pos?.sellAvg) || 0 : Number(pos?.buyAvg) || 0;
 }
 
+/**
+ * The leg's P&L basis: its actual average fill (fill.ceFillEntry, corrected to Dhan's traded price) when recorded,
+ * else legOwnEntry. Booked and live P&L use this; stops and targets keep legOwnEntry (the row's chosen ref price).
+ */
+export function legFillEntry(
+  row: Pick<FocusRow, 'fill'>, leg: 'CE' | 'PE', live: RowLive,
+): number {
+  const fill = Number(leg === 'CE' ? row.fill?.ceFillEntry : row.fill?.peFillEntry) || 0;
+  return fill > 0 ? fill : legOwnEntry(row, leg, live);
+}
+
 /** Does this leg carry a stop loss of its own (SL ×, another SL basis, or an ORB Range stop)? */
 export function legHasOwnSl(row: LegStopRow, leg: 'CE' | 'PE'): boolean {
   if (Number(legSlMultiplier(row, leg)) > 1) return true;
