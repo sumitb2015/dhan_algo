@@ -395,6 +395,14 @@ re-entry on SL/target) to `FocusTool.tsx` (`b04d0ce`, `66a8fe1`, `50f4bca`,
   deadline), never a fixed timer; (3) a leg with a *waiting* re-entry (`cePending`/`pePending`) has its pending entry
   cleared before the manual order, otherwise the trigger sells it a second time. See `dhan-focus-tool`.
 
+- **A partial reduce is not a full close (scale-out, 2026-10-16, `ce7733b6`).** Any automatic PARTIAL reduce of a leg must
+  (1) take its own lock set (`scalingLegRef`), never `autoExitingLegRef` — Square Off Complete and RE MATCH read that set as
+  "this leg is being closed in full" and would skip / mis-read the leg; (2) count in `legExitsInFlightRef` and release the
+  row's busy lock only when the LAST in-flight leg action ends — releasing it on its own finish let a whole-row exit size a
+  full close off a ledger that didn't yet show the reduce, and flip the leg; (3) not hold back the other leg's stop or the
+  row rules (it is not a `legAction`; `autoExitRow` defers by itself); (4) block only the SAME leg's stop until it confirms.
+  A sibling's full close (Square Off) waits for the reduce to settle, then closes it.
+
 ### 12. A terminal with a SIM mode keeps its own ledger file (Triple Straddle, 2026-10-06)
 
 `/options/triple-straddle` places CE+PE straddle pairs and tracks them in `debug/triple_straddle_state.json`

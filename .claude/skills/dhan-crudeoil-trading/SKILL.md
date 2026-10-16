@@ -156,6 +156,20 @@ other Kotak underlying — not MCX-specific, but easy to conflate with the quant
 above since both are "×100" for CRUDEOIL specifically. They are unrelated numbers that
 happen to share a multiplier for the full-size contract.
 
+## An MCX option month is priced off ITS OWN futures month, not the front month (2026-10-16, `e3949f89`)
+CRUDEOILM options expiring 2026-11-17 are struck against the **November** futures (expiring 2026-11-19), even while
+October (2026-10-19) is the front month — the two differed by ~135 points, putting a Nov-expiry Focus Tool row's ATM on
+9300 instead of 9200. The rule: **the nearest FUTCOM expiring on or after the option expiry**
+(`scripts/tools/premarket_data._find_nearest_future(…, on_or_after=expiry)`).
+- `options_data_fetch.py chain` and `live_options_ws.py` quote that contract as `spot` (and the tracked future) for the
+  requested expiry. The chain itself is still looked up through the **front** contract — that already returns the
+  requested month's options; only the PRICE moved.
+- Dashboard: Focus Tool's `rowAtmBase` uses the row's own expiry's price (bridge when it runs that expiry, else that
+  expiry's chain). Any other page computing an MCX ATM for a non-front option month needs the same.
+- A running bridge keeps its old price source until restarted (`debug/live_options_stop_dhan_crudeoilm.trigger`; both
+  bridges of an underlying share that trigger, and the first to see it deletes it). Check
+  `debug/live_options_log_dhan_crudeoilm.log` for `Spot=… ATM=…`.
+
 ## Session hours and other repo-specific defaults
 
 MCX trades a longer session than NSE equities/F&O — `scripts/tools/crudeoil_oi_collector.py`

@@ -120,6 +120,13 @@ Reuse or mirror these; do not regress them to immediate `onChange`:
 Immediate is correct for: ATM offset `<select>`, side SegPill, product
 select, LegLotSelect, Arm/Disarm, +/- lot *buttons*.
 
+## Stepper arrows on a commit-on-blur box (2026-10-16, `d56a8c10`)
+`RuleNumInput` takes opt-in `step` / `min` / `offBelowMin` / `stepFromBlank`. An arrow (or ArrowUp / ArrowDown) is a
+discrete choice and commits at once — but it must step from the last **committed** value and discard any half-typed draft.
+Stepping from the draft (the first version) let "clear Target to type 5000, brush ↑" commit 500 and flatten the book, and a
+leg SL half-typed as "2" plus ↑ commit 7 %. Price levels (index levels) use `stepFromBlank={false}`: ↑ on an empty box
+must not commit a nonsense level such as 50.
+
 ## Checklist Before Shipping an Input
 
 - [ ] Free-typed? → draft + blur/Enter commit + Escape revert

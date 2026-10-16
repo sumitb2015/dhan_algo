@@ -54,6 +54,23 @@ across every trade on that contract today (earlier cycles, other rows, manual tr
    basis to unknown** for that position, so readers fall back. Keeping an estimate as if it were a fill is the bug this
    skill exists to prevent.
 
+## Later the same day (`47537388`)
+- **One reader for every page:** `lib/tradedPriceClient.ts` — `readOrderPrice`, `finalAvgOf`, `fetchSliceTradedPrice`.
+  Only a FINAL status counts (TRADED, or CANCELLED / EXPIRED with a fill): a PART_TRADED average priced the whole slice at
+  a partial average. Pass `peek` to read the page's own order-book poll first (Synthetic Futures polls every 3 s), so a
+  correction adds no Dhan calls.
+- **Adds after the add being corrected:** `fillRebasePatch` takes `addedSince` (track qty ever added to the position:
+  `fill.ceAddedQty`, Synthetic `leg.addedQty`). survive = (heldNow − addedSince) / heldAfterAdd; basis += mass × survive /
+  heldNow; booked += mass × (1 − survive). Without it an add landing before the price over-corrected the average.
+- **Measure against the write, not a timed snapshot:** capture held / added qty and the position id in the state updater
+  that applied the fill (Synthetic `captureLanded`); a 50 ms "wait and read" can read the pre-add state.
+- **Synthetic Futures:** each leg keeps its opening orders (`opens`) so the exit report rebuilds the entry from real fills;
+  a leg whose entry can't be priced makes the report "partly estimated", never "at actual fills". An unmatched / unreported
+  price flags `entryUnconfirmed`.
+- **Triple Straddle:** a late price is owed via `entryEst` / `exitEst` (order id) and settled by a leader-tab sweep
+  (`settleLegPrice`). Settling an OPEN position's entry re-expresses `peakPct` on the new basis, or a trail / lock floor fires
+  on the re-price alone. A give-up keeps `priceUnconfirmed` on the leg — never erase the "this is a guess" marker.
+
 ## Brokers and modes
 
 - **Dhan:** per-order `averageTradedPrice` via `/api/scalper/orders?orderId=` → the full scheme above.
@@ -92,6 +109,7 @@ across every trade on that contract today (earlier cycles, other rows, manual tr
 
 ## Tests
 
+`lib/tradedPriceClient.test.ts` (`finalAvgOf`), `lib/tripleStraddle.test.ts` (`settleLegPrice` incl. the peak re-base),
 `lib/focusToolPnl.test.ts` (`blendFillBasis`, `sliceTradedPrice`, `fillRebasePatch`, `pnlPctOfPremium`) and
 `lib/focusToolSimulatedLegs.test.ts` ("P&L basis…") for `legFillEntry` vs `legOwnEntry`. Add a case to the pure
 helpers for every new race; the component wiring has no unit tests, so keep the maths in `lib/`.

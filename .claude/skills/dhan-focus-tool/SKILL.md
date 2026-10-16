@@ -21,6 +21,9 @@ REAL also needs the daily LIVE · REAL MONEY arm. Ownership/safety rules: `dhan-
 | `lib/focusToolUnderlyings.ts` | Per-underlying meta: `strikeStep`, `segment`, `unitsPerLot`, session windows, `FEED_BRIDGE_UNDERLYINGS`, `toInternalQty`/`orderQuantity` |
 | `lib/useFocusMarketData.ts` | REST polling: expiries, lot sizes, lookups, **chains** (3 s client poll of `/api/options/chain`, itself 30 s cached) |
 | `lib/useFocusToolWS.ts` + `scripts/tools/focus_tool_ws.py` (port 8965, via `market_data_hub`) | Tick feed for NIFTY / BANKNIFTY / SENSEX **only** |
+| `lib/focusToolPnl.ts` (+`.test.ts`) | Row / leg P&L, `pnlPctOfPremium`, the fill-price basis maths (`blendFillBasis`, `sliceTradedPrice`, `fillRebasePatch`) — see `dhan-fill-price-pnl` |
+| `lib/focusToolPresets.ts` (+`.test.ts`), `lib/focusToolPresetsStore.ts`, `app/api/focus-tool/presets/`, `components/FocusToolPresets.tsx` | Duplicate row, rule presets (`debug/focus_tool_presets.json`), export / import |
+| `lib/tradedPriceClient.ts` | The one browser-side Dhan order-price reader (final status only), shared with Synthetic Futures and Triple Straddle |
 
 Three row views — **Pro** (`FocusProRowImpl`, the legs grid), **Table** (`FocusTableRowImpl`), **Cards**. `FocusRowViewProps`
 is derived from the Table impl's props; Cards declares its own prop type. A new row action therefore needs: the prop in
@@ -74,6 +77,44 @@ Booked and live P&L use the leg's ACTUAL fill price (`fill.ceFillEntry`, re-pric
 the stop reference `ceEntry`. Read `dhan-fill-price-pnl` before touching `bookedPnl`, the rebase helpers or any
 P&L display.
 
+## MCX rows measure ATM from their own month's futures (2026-10-16, `e3949f89`)
+`rowAtmBase(row, …)` is the single ATM base for rowLive, lazy legs, RE OTM and RE MATCH. For an MCX row it is the futures
+contract of the **row's option month** (Nov-17 CRUDEOILM options → Nov-19 futures), taken from the bridge when it runs
+that expiry, else that expiry's chain; index rows keep the group's ATM BY. The front-month price put ATM ~100 points off.
+A new ATM consumer must call `rowAtmBase`, never `spots[u]` directly. Bridge / chain side: `dhan-crudeoil-trading`.
+
+## Re-entry strike rules (RE on SL / RE on Tgt)
+| Mode | Strike sold | Notes |
+|---|---|---|
+| RE ASAP | what the row resolves to now (ATM ± offset / criteria) | |
+| RE OTM, plain SL | `slRollStrikes` further OTM than the strike that stopped | |
+| RE OTM, target or a stop that had **trailed** | N OTM of the anchor — `reOtmFrom`: `'atm'` (default) or `'row'` (the strike a fresh entry would take; N may be 0) | `otmReentryStrike`. A trailed SL never re-sells the strike that stopped (steps one more); no anchor → a stop rolls from the closed strike, a target stays closed |
+| RE MATCH | OTM-side strike whose premium is closest to the row's OTHER open leg (`matchPremiumStrike`), never the closed strike | Other leg not open / unquoted → leg stays closed with a toast |
+| RE COST / MOMENTUM / Lazy | unchanged | |
+The trailed-SL flag reaches `reenterLegAfterExit` as `trailedSteps` (passed from the watcher's `ownedLegStop`). Ask the
+user which anchor they mean before changing a strike rule — "OTM 1" meant different things across three iterations.
+
+## Leg rules added 2026-10-16
+- **Scale-out ladder** (`row.scaleOut`, `ce7733b6`): reduce a leg by 25 / 50 / 75 % of its qty-at-first-step as it moves toward
+  ITS OWN target (`legTargetProgress`, any target unit). Reduce only; one lot always kept (the target closes the rest).
+  Steps are keyed by **trigger** (`fill.ceScaleAt`), so editing the ladder mid-trade can't re-fire or skip one; recorded
+  before the order. A reduce in flight sits in `scalingLegRef` (NOT `autoExitingLegRef`, which means "closing in full") and
+  counts in `legExitsInFlightRef`; Square Off Complete waits for it, then closes the sibling (Invariant 11).
+- **Per-leg index levels** (`ceEntryLevel` / `ceExitLevel` …, `325abc1e`, UI on each leg's line `923f1d79` via
+  `LegIndexLevels`): entry = a `'level'` kind in `legEntryKind` / `driveLegEntries`; exit = `autoExitLeg(…, 'sl')`, so RE on SL
+  runs. Both need a REAL cross (`levelCrossStep`); the "seen safe side" mark is keyed to the exact setting (`levelSig`) so an
+  edit never fires at once. Entry fires once per day (`firedOn`, reserved BEFORE the order; `armRow` clears it) and also
+  starts on an already-entered row. Ignored under Overall Momentum and in an overall re-entry cycle.
+- **Leg P&L %** next to ₹ in all views (`pnlPctOfPremium`, same avg and qty as the ₹ figure).
+
+## Duplicate, presets, export / import (`a37d98df`)
+A row = RULES + RUNTIME (`ROW_RUNTIME_KEYS`: id, status, mode, fill, rev, counters, ladder, expiry). Copies carry rules
+only: a duplicate / imported row is always a flat **SIM draft**. Day prices (`PRESET_SKIP_KEYS`: spot H/L and the per-leg
+index levels) never go into presets or imports; Duplicate keeps them and re-validates spot levels. `typedRules` drops a
+value whose type differs from a default row's and range-checks lots / Qty ×. A preset applies only to a flat, not-entered,
+**not armed** row (`presetBlockedReason`) and replaces every rule (missing ones reset to defaults). Past 100 presets a new
+name is refused — never evict.
+
 ## Manual entry: "Enter now" and per-leg "Re-enter"
 - The scheduler enters a row once: `autoEnteringRef` is a **one-entry latch** set in `autoEnterRow` and cleared only on a
   failed entry or by `armRow` (which also clears `fill`, the overall re-entry counters and `overallReMode`). A row can
@@ -90,6 +131,12 @@ P&L display.
   `evaluateOverallExit`) so a silently disabled trail is not discovered mid-trade.
 
 ## UI conventions (see `dhan-terminal-polish`, `dhan-a11y-controls`)
+- Rule number boxes (`RuleNumInput`) take opt-in `step` / `min` / `offBelowMin` / `stepFromBlank` arrows. An arrow commits at
+  once but steps from the **committed** value, never a half-typed draft; price levels use `stepFromBlank={false}`
+  (`dhan-commit-on-blur`).
+- The per-row settings section is **Rules & re-entry**; its collapsed line shows an `OverallSummaryChip` (strategy-level
+  SL / target / trail / overall RE) so they are visible without expanding. The header has an India VIX tile that dims with
+  its age when the index feed is stale.
 - Row-level and per-leg **Exit all / Exit / Re-enter are icon-only** (`ShieldOff`, `LogOut`, `RefreshCw`) with `aria-label`
   and a `title` that says what it does and why it is disabled (`tradeBlockedWhy`). Part-exit is one **`%` dropdown**
   (Exit 25/50/75 %, items disabled when the % rounds to zero lots), not three chips.
@@ -104,8 +151,11 @@ P&L display.
 - A hot-reloaded page keeps old state: reload after changing prop wiring. Phantom 404s: see CLAUDE.md (stale Turbopack cache).
 
 ## Change checklist
-- New `FocusRow` field → `lib/focusToolRows.ts`, its default in the create/reset paths (three "reset rules" literals in
-  `FocusTool.tsx`), the server merge if it is list-like, and a test.
+- New `FocusRow` field → `lib/focusToolRows.ts`, its default in `makeRow`, the ONE `CLEARED_RULES` constant (Clear rules in
+  every view), the server merge if it is list-like, and a test. Decide whether it is a day price (`PRESET_SKIP_KEYS`) or a
+  runtime field (`ROW_RUNTIME_KEYS`) — everything else is copied by Duplicate / presets / export.
+- New fill-ledger field tied to the position → clear it in `adjustFillQty` when the leg goes flat or re-opens from flat
+  (the `ceTrailSteps` / `ceScaleAt` / `ceFillEntry` pattern).
 - New order path → `placeLeg` only; sequential legs; a BOTH row that fills one leg is naked (the retry/toast in `autoEnterRow`).
 - New price consumer → read `focusWsQuotes` first and the chain second (`pick(ws, chain)`); never the chain alone for a stop.
 - Past review findings worth remembering: latch + timer races, stale pending re-entries, blank-looking stored values, a
