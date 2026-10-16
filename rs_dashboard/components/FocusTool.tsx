@@ -283,6 +283,34 @@ function bridgeExpiriesForUnderlying(
   return [nearest, ...rest].join(',');
 }
 
+/**
+ * The price a row's strikes are measured from (its ATM base). For an MCX row it is the FUTURES CONTRACT OF THE ROW'S
+ * OWN OPTION MONTH — Nov-17 CRUDEOILM options are struck against November futures even while October is the front
+ * month, so the front-month "spot" puts ATM on the wrong strike. Taken from the live bridge when it runs this expiry,
+ * else from that expiry's chain (both quote the matching contract); Spot / Fut is the same thing there.
+ * Index rows: the group's ATM BY pick (index spot or the near futures), as before.
+ */
+function rowAtmBase(
+  row: Pick<FocusRow, 'underlying' | 'expiry'>,
+  ctx: {
+    spots: Record<FocusUnderlying, number>; futs: Record<FocusUnderlying, FutQuote | null>;
+    expiries: Record<FocusUnderlying, string[]>; ws: FocusWSQuotes | null | undefined;
+    chains: Record<string, { spot: number } | null>; groups: FocusIndexGroup[];
+  },
+): number {
+  const u = row.underlying;
+  if (isMcxUnderlying(u)) {
+    const exp = row.expiry || ctx.expiries[u]?.[0] || '';
+    const ws = ctx.ws?.[u];
+    if (ws && ws.expiry === exp && ws.spot > 0) return ws.spot;
+    const ch = Number(ctx.chains[expKey(u, exp)]?.spot) || 0;
+    if (ch > 0) return ch;
+  }
+  const group = ctx.groups.find(g => g.underlying === u);
+  const fut = ctx.futs[u]?.ltp ?? 0;
+  return group?.atmBy === 'Fut' && fut > 0 ? fut : (ctx.spots[u] ?? 0);
+}
+
 function newId(): string {
   return `ft_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`;
 }
@@ -5409,6 +5437,13 @@ export default function FocusTool() {
     return out;
   }, [spotPrices, chains, focusWsQuotes, expiries]);
 
+  /** The page's inputs to rowAtmBase (module level) — bound to this render. */
+  const atmBaseFor = (
+    row: Pick<FocusRow, 'underlying' | 'expiry'>,
+    spotsNow: Record<FocusUnderlying, number>,
+    futNow: Record<FocusUnderlying, FutQuote | null>,
+  ) => rowAtmBase(row, { spots: spotsNow, futs: futNow, expiries, ws: focusWsQuotes, chains, groups: config.groups });
+
   // Futures quotes: prefer realtime WebSocket updates from the Focus Tool bridge,
   // falling back to the 3s REST poll while WS is connecting/down.
   const effectiveFutQuotes = useMemo<Record<FocusUnderlying, FutQuote | null>>(() => {
@@ -5486,14 +5521,12 @@ export default function FocusTool() {
       // listed expiry.
       const rowExpiry = row.expiry || expiries[u]?.[0] || '';
       const step = rowStep(row);
-      const spot = spots[u] ?? 0;
       // ATM base per the index group's own "ATM BY" pick — Spot (the index
       // level) or Fut (the nearest futures contract's LTP, which can sit at a
       // premium/discount to spot). Falls back to spot if the futures strip
       // hasn't resolved yet, so a row is never left unresolved by a slow feed.
       const group = config.groups.find(g => g.underlying === u);
-      const futLtp = effectiveFutQuotes[u]?.ltp ?? 0;
-      const atmBase = group?.atmBy === 'Fut' && futLtp > 0 ? futLtp : spot;
+      const atmBase = rowAtmBase(row, { spots, futs: effectiveFutQuotes, expiries, ws: focusWsQuotes, chains, groups: config.groups });
       const atm = atmStrike(atmBase, step);
       const ocAll = chains[expKey(u, rowExpiry)]?.oc;
       // "100s only": premium / delta / criteria picks must skip the 50-point strikes too, not just ATM rounding.
@@ -7850,8 +7883,7 @@ export default function FocusTool() {
     // row used. Any other rule (₹ premium, strike criteria) resolves a strike
     // that says nothing about ATM, so take ATM from the price the group's
     // ATM BY names — spot, or the futures LTP — exactly as rowLive does.
-    const futLtp = effectiveFutQuotes[u]?.ltp ?? 0;
-    const atmBase = group?.atmBy === 'Fut' && futLtp > 0 ? futLtp : (snap.spots[u] ?? 0);
+    const atmBase = atmBaseFor(row, snap.spots, effectiveFutQuotes);
     const atm = !row.strikeCriteria && row.strikeMode === 'ATM'
       ? base - ((leg === 'CE' ? row.ceOffset : row.peOffset) ?? 0) * step
       : Math.round(atmBase / step) * step;
@@ -8096,8 +8128,7 @@ export default function FocusTool() {
           // The strike this row would enter at now (its own ATM ± offset / criteria), once the closed leg is flat.
           rowStrike = await resolvedStrikeAfterClose(rowId, leg);
         } else {
-          const fut = snap.futQuotes[u]?.ltp ?? 0;
-          atm = atmStrike(group?.atmBy === 'Fut' && fut > 0 ? fut : (snap.spots[u] ?? 0), rowStep(row));
+          atm = atmStrike(atmBaseFor(row, snap.spots, snap.futQuotes), rowStep(row));
         }
       }
       const pick = otmReentryStrike({
@@ -8119,9 +8150,8 @@ export default function FocusTool() {
       const live = schedulerRef.current.rowLive[rowId] ?? EMPTY_ROW_LIVE;
       const otherStrike = other === 'CE' ? live.ceStrike : live.peStrike;
       const target = otherStrike != null ? actionsRef.current.simQuote(u, expiry, otherStrike, other) : 0;
-      const fut = snap.futQuotes[u]?.ltp ?? 0;
       const step = rowStep(row);
-      const atm = atmStrike(group?.atmBy === 'Fut' && fut > 0 ? fut : (snap.spots[u] ?? 0), step);
+      const atm = atmStrike(atmBaseFor(row, snap.spots, snap.futQuotes), step);
       // Every listed strike of this expiry (chain + tick feed), on the row's own step (MCX "100s only").
       const keys = new Set<number>([
         ...Object.keys(chains[expKey(u, expiry)]?.oc ?? {}).map(Number),
@@ -9545,11 +9575,16 @@ export default function FocusTool() {
               <IndexGroupBar
                 group={group}
                 onChange={patch => updateGroup(u, patch)}
-                spot={spots[u] ?? 0}
+                // MCX: the futures of the first row's option month (what its strikes are measured from).
+                spot={(() => {
+                  const first = config.rows.find(r => r.underlying === u);
+                  return isMcxUnderlying(u) && first ? atmBaseFor(first, spots, effectiveFutQuotes) : (spots[u] ?? 0);
+                })()}
                 liveAtm={(() => {
-                  const base = group.atmBy === 'Fut' && (effectiveFutQuotes[u]?.ltp ?? 0) > 0
-                    ? effectiveFutQuotes[u]!.ltp : (spots[u] ?? 0);
-                  const stepU = rowStep(config.rows.find(r => r.underlying === u) ?? { underlying: u });
+                  const first = config.rows.find(r => r.underlying === u);
+                  const base = first ? atmBaseFor(first, spots, effectiveFutQuotes)
+                    : group.atmBy === 'Fut' && (effectiveFutQuotes[u]?.ltp ?? 0) > 0 ? effectiveFutQuotes[u]!.ltp : (spots[u] ?? 0);
+                  const stepU = rowStep(first ?? { underlying: u });
                   return base > 0 ? Math.round(base / stepU) * stepU : 0;
                 })()}
                 lot={lotSizes[u]} dte={dteFor(expiries[u]?.[0] ?? '')} wsLive={wsLive}

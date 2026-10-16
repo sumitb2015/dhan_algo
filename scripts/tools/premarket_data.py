@@ -30,13 +30,19 @@ SEG_NSE_FNO  = "NSE_FNO"
 SEG_MCX_COMM = "MCX_COMM"
 
 
-def _find_nearest_future(helper, symbol, exchange="NSE", instrument="FUTIDX"):
+def _find_nearest_future(helper, symbol, exchange="NSE", instrument="FUTIDX", on_or_after=None):
     """
     Find nearest non-expired future for a symbol.
     DhanHelper.find_future picks the lowest expiry date without filtering past dates,
     so we need to explicitly skip expired contracts.
+
+    on_or_after ('YYYY-MM-DD'): the nearest future expiring on or after that date instead of today. An MCX
+    option is priced off the futures contract of its own month, which expires a few days AFTER the option:
+    CRUDEOILM options expiring 2026-11-17 sit on the November futures, not on the nearer October contract.
     """
     today = date.today().isoformat()          # "2026-07-06"
+    if on_or_after and str(on_or_after)[:10] > today:
+        today = str(on_or_after)[:10]
     df = helper._load_master_list()
     symbol_upper = symbol.upper()
     mask = (

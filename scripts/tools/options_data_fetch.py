@@ -186,13 +186,22 @@ def main():
         spot = 0
         prev_close = 0.0
         if is_crude and fut_sid is not None:
-            ohlc_raw = helper.get_ohlc_data({"MCX_COMM": [fut_sid]})
-            entry = ohlc_raw.get("MCX_COMM", {}).get(str(fut_sid), {})
+            # The price an MCX option month is struck against is ITS OWN futures contract (the nearest one expiring
+            # on or after the option expiry), not the nearest futures overall: Nov-17 options sit on November
+            # futures even while October is the front month. The chain itself is still looked up through the front
+            # contract (that already returns the requested expiry's options).
+            spot_sid = fut_sid
+            if target_expiry and str(target_expiry).lower() != 'nearest':
+                fut_month = _find_nearest_future(helper, under, exchange="MCX", instrument="FUTCOM", on_or_after=target_expiry)
+                if fut_month:
+                    spot_sid = int(fut_month["SECURITY_ID"])
+            ohlc_raw = helper.get_ohlc_data({"MCX_COMM": [spot_sid]})
+            entry = ohlc_raw.get("MCX_COMM", {}).get(str(spot_sid), {})
             spot = entry.get("last_price") or 0.0
             prev_close = entry.get("ohlc", {}).get("close") or 0.0
             if not spot:
                 # Final fallback: dedicated LTP call
-                spot = helper.get_ltp(fut_sid, exchange="MCX", instrument="FUTCOM") or 0.0
+                spot = helper.get_ltp(spot_sid, exchange="MCX", instrument="FUTCOM") or 0.0
         else:
             # Index/equity: prefer chain snapshot, fall back to dedicated LTP
             spot = (chain or {}).get('last_price') or 0

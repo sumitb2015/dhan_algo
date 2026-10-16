@@ -430,11 +430,18 @@ def main():
             write_status('ERROR', underlying=args.underlying, expiry=args.expiry,
                          started_at=started_at, ws_port=ws_port)
             sys.exit(1)
+        # The chain is looked up through the front contract; the PRICE (spot canary, ATM, tracked future) is the
+        # futures contract this option expiry is struck against — the nearest one expiring on or after it. Nov-17
+        # CRUDEOILM options sit on November futures even while October is the front month.
+        front_sid = str(int(fut["SECURITY_ID"]))
+        fut_month = _find_nearest_future(helper, under, exchange="MCX", instrument="FUTCOM", on_or_after=args.expiry) if args.expiry else None
+        if fut_month:
+            fut = fut_month
         fut_sid = str(int(fut["SECURITY_ID"]))
         underlying_sid = fut_sid
         underlying_exchange = 'MCX'
         underlying_seg = 'MCX_COMM'
-        chain_symbol = fut_sid
+        chain_symbol = front_sid
         chain_seg = 'MCX_COMM'
         opt_inst = 'OPTFUT'
         canary_feed_seg = MCX_COMM
