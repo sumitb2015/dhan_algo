@@ -37,6 +37,7 @@ import type {
   FocusReentryMode, FocusReentryTrigger, FocusPendingReentry, FocusLegSimpleMom, FocusLazyLeg, FocusLegRangeBreakout, FocusOverallMode,
   FocusUnderlying, FocusDte, FocusSide, FocusRowStatus, FocusStrikeMode,
   FocusLegSlRule, FocusLegTrailSl, FocusLegOrbSl, FocusOrbStamp, FocusLadderOrder, FocusScaleOut, FocusScaleStep,
+  FocusLegLevel, FocusLegEntryLevel,
 } from '@/lib/focusToolRows';
 // The pure rule engine for entry and exit decisions.
 import {
@@ -51,7 +52,7 @@ import {
   multipliedLots, legLots, hasLegLots, clampHm, rangeWindow, rangeWindowPhase, rowHasMultiDayRange, candleBucket, tradingDte,
   legSlRuleOn, legStopLevel, legTargetSpotLevel, legTgtUnitLabel, MAX_LEG_REENTRIES, pendingReentryLevel, pendingReentryHit, legTargetReason, costReentryBasis,
   awaitingMomentumQuote, MOMENTUM_QUOTE_WAIT_MS, legTargetLevel,
-  evaluateEntryMomentum, reRangeWindow, entryMomentumOn, overallSlConfig, overallProgress, nextOverallPeak, evaluateOverallExit, overallTrailInvalid, overallExitKind, evaluateOverallReentry, MAX_OVERALL_REENTRIES, rangeBreakoutOn, rangeBreakoutHit, costStopApplies, squareOffLegs, atmStrike, resolveRowLegStrike, mirrorLinkedPatch, MAX_LAZY_LEGS, legSlMultiplier, legTarget, nextLazyLegId, lazyLegStrike, runningLazyLeg, simpleMomOn, simpleMomLevel, simpleMomHit, otmReentryStrike, reentryOtmFromAtm, matchPremiumStrike, legTargetProgress, dueScaleOutStep, scaleOutLots, scaleOutSteps, scaleOutStepsPassed, MAX_SCALE_STEPS,
+  evaluateEntryMomentum, reRangeWindow, entryMomentumOn, overallSlConfig, overallProgress, nextOverallPeak, evaluateOverallExit, overallTrailInvalid, overallExitKind, evaluateOverallReentry, MAX_OVERALL_REENTRIES, rangeBreakoutOn, rangeBreakoutHit, costStopApplies, squareOffLegs, atmStrike, resolveRowLegStrike, mirrorLinkedPatch, MAX_LAZY_LEGS, legSlMultiplier, legTarget, nextLazyLegId, lazyLegStrike, runningLazyLeg, simpleMomOn, simpleMomLevel, simpleMomHit, otmReentryStrike, reentryOtmFromAtm, matchPremiumStrike, legTargetProgress, dueScaleOutStep, scaleOutLots, scaleOutSteps, scaleOutStepsPassed, MAX_SCALE_STEPS, legLevelOn, levelCrossStep, entryLevelFiredToday, levelSig,
   type PosRow, type RowLive,
 } from '@/lib/focusToolRules';
 import { postFocusEvent } from '@/lib/focusToolEvents';
@@ -745,7 +746,7 @@ function SlPctInput({ mult, onMult, ...rest }: {
  * Discrete controls (selects, toggles, +/- steppers) still commit immediately —
  * each click is a complete choice, not a partial edit.
  */
-function RuleNumInput({ value, onCommit, placeholder, className, title, disabled, step, min = 0, offBelowMin, label, wrapperClassName }: {
+function RuleNumInput({ value, onCommit, placeholder, className, title, disabled, step, min = 0, offBelowMin, label, wrapperClassName, stepFromBlank = true }: {
   value: string; onCommit: (v: string) => void; placeholder?: string; className?: string;
   title?: string; disabled?: boolean;
   /** Show up/down arrows (and ArrowUp/ArrowDown keys) that nudge by this much and commit at once. */
@@ -758,6 +759,8 @@ function RuleNumInput({ value, onCommit, placeholder, className, title, disabled
   label?: string;
   /** Classes for the wrapper the arrows add (e.g. `flex-1` when the box must stretch). */
   wrapperClassName?: string;
+  /** false = the arrows do nothing on a blank box (a price level: stepping from 0 would commit a nonsense level). */
+  stepFromBlank?: boolean;
 }) {
   const [draft, setDraft] = useState(value);
   // Re-sync when the value changes underneath us (a config load, a clear
@@ -781,6 +784,7 @@ function RuleNumInput({ value, onCommit, placeholder, className, title, disabled
   // 0 + step, and a leg SL half-typed as "2" (meaning 25) plus ↑ must not commit 7. Any unsaved draft is discarded.
   const nudge = (dir: 1 | -1) => {
     if (!step || disabled) return;
+    if (!stepFromBlank && value.trim() === '') return;
     const base = Number(value) || 0;
     const decimals = (String(step).split('.')[1] ?? '').length;
     const n = Number((base + dir * step).toFixed(decimals));
@@ -1706,7 +1710,63 @@ function OverallSettingsControls({ row, onUpdate }: { row: FocusRow; onUpdate: (
   );
 }
 
-/** A recessed, titled group for the row's settings (see dhan-terminal-polish). */
+/**
+ * Per-leg index levels (FocusRow.ceEntryLevel / ceExitLevel …). Levels are free-typed → RuleNumInput (commit on
+ * blur/Enter); the direction is a select and commits at once. Blank level = off.
+ */
+function IndexLevelControls({ row, onUpdate }: { row: FocusRow; onUpdate: (patch: Partial<FocusRow>) => void }) {
+  const step = rowStep(row);
+  const today = istToday();
+  const dirOpts = [{ value: 'above', label: 'crosses above' }, { value: 'below', label: 'crosses below' }];
+  const lbl = 'text-zinc-500';
+  const momOn = entryMomentumOn(row);
+  return (
+    <div className="flex flex-col gap-2 text-[11px]">
+      {legsOf(row).map(leg => {
+        const isCe = leg === 'CE';
+        const en: FocusLegEntryLevel = (isCe ? row.ceEntryLevel : row.peEntryLevel) ?? { level: '', dir: isCe ? 'below' : 'above' };
+        const ex: FocusLegLevel = (isCe ? row.ceExitLevel : row.peExitLevel) ?? { level: '', dir: isCe ? 'above' : 'below' };
+        const setEn = (patch: Partial<FocusLegEntryLevel>) => onUpdate(isCe ? { ceEntryLevel: { ...en, ...patch } } : { peEntryLevel: { ...en, ...patch } });
+        const setEx = (patch: Partial<FocusLegLevel>) => onUpdate(isCe ? { ceExitLevel: { ...ex, ...patch } } : { peExitLevel: { ...ex, ...patch } });
+        return (
+          <div key={leg} className="flex flex-col gap-1">
+            <div className="flex flex-wrap items-center gap-1.5"
+              title={`Sell ${leg} when the index CROSSES this level (spot must first be on the other side), between the row's entry and exit time, while ${leg} holds nothing. Once per day — Arm re-enables it. Replaces this leg's Range Breakout / Simple Momentum`}>
+              <span className={cn('font-black w-6', isCe ? 'text-emerald-400' : 'text-rose-400')}>{leg}</span>
+              <span className={lbl}>Entry: sell when spot</span>
+              <MiniSelect value={en.dir} ariaLabel={`${leg} entry level direction`} options={dirOpts}
+                onChange={v => setEn({ dir: v as 'above' | 'below' })} className="w-28" />
+              <RuleNumInput value={en.level} onCommit={v => setEn({ level: v })} placeholder="off" step={step} min={step} offBelowMin stepFromBlank={false}
+                label={`${leg} entry level`} className="w-24 h-6 text-center" />
+              {entryLevelFiredToday(en, today) && <span className="text-amber-300 font-semibold">used today — Arm to re-enable</span>}
+            </div>
+            <div className="flex flex-wrap items-center gap-1.5"
+              title={`Close ${leg} when the index CROSSES this level (spot must first be on the other side while ${leg} is held). Handled as ${leg}'s SL: RE on SL runs and uses one of its re-entries`}>
+              <span className="w-6" />
+              <span className={lbl}>Exit: close when spot</span>
+              <MiniSelect value={ex.dir} ariaLabel={`${leg} exit level direction`} options={dirOpts}
+                onChange={v => setEx({ dir: v as 'above' | 'below' })} className="w-28" />
+              <RuleNumInput value={ex.level} onCommit={v => setEx({ level: v })} placeholder="off" step={step} min={step} offBelowMin stepFromBlank={false}
+                label={`${leg} exit level`} className="w-24 h-6 text-center" />
+            </div>
+          </div>
+        );
+      })}
+      <span className="text-zinc-500">
+        A level fires on a real cross only: if spot is already past it, it waits for spot to come back and cross again.
+        An exit is handled like the leg&rsquo;s SL (RE on SL applies).
+      </span>
+      {momOn && legsOf(row).some(l => legLevelOn(l === 'CE' ? row.ceEntryLevel : row.peEntryLevel)) && (
+        <span className="text-amber-300 font-semibold">Overall Momentum is on, so the entry levels are ignored (exit levels still work).</span>
+      )}
+      {(row.overallReSl?.enabled || row.overallReTgt?.enabled) && legsOf(row).some(l => legLevelOn(l === 'CE' ? row.ceEntryLevel : row.peEntryLevel)) && (
+        <span className="text-amber-300 font-semibold">Overall re-entry is on: a re-entry cycle after an overall SL / target opens the legs its own way and ignores the entry levels, like the other entry gates.</span>
+      )}
+      <span className="text-zinc-500">Levels are prices for the day: presets and imports do not carry them (Duplicate does).</span>
+    </div>
+  );
+}
+
 /**
  * Scale-out ladder (FocusRow.scaleOut): as each leg moves toward its OWN target, take part of it off. Reduce only.
  * The trigger % is free-typed → RuleNumInput (commit on blur/Enter); the size is a select and commits at once.
@@ -1773,6 +1833,7 @@ function ScaleOutControls({ row, onUpdate }: { row: FocusRow; onUpdate: (patch: 
   );
 }
 
+/** A recessed, titled group for the row's settings (see dhan-terminal-polish). */
 function SettingsCard({ title, children }: { title: string; children: React.ReactNode }) {
   return (
     <section className="flex flex-col gap-1.5 rounded-xl border border-zinc-800/60 bg-zinc-950/40 px-3 py-2">
@@ -1919,6 +1980,9 @@ function LegReentryControls({ row, onUpdate, onCancelPending, legTargetsElsewher
       </SettingsCard>
       <SettingsCard title="Lazy legs">
         <LazyLegsEditor row={row} onUpdate={onUpdate} />
+      </SettingsCard>
+      <SettingsCard title="Index levels (per leg)">
+        <IndexLevelControls row={row} onUpdate={onUpdate} />
       </SettingsCard>
       <SettingsCard title="Scale-out on leg target">
         <ScaleOutControls row={row} onUpdate={onUpdate} />
@@ -3585,6 +3649,7 @@ const CLEARED_RULES: Partial<FocusRow> = {
   ceSimpleMom: undefined, peSimpleMom: undefined, ceRangeBreakout: undefined, peRangeBreakout: undefined,
   lazyLegs: undefined, reSlLazyId: undefined, reTgtLazyId: undefined,
   overallTarget: undefined, overallTrail: undefined, overallReSl: undefined, overallReTgt: undefined, scaleOut: undefined,
+  ceEntryLevel: undefined, peEntryLevel: undefined, ceExitLevel: undefined, peExitLevel: undefined,
 };
 
 /** One-line summary of the row's re-entry setup for the collapsed strip. */
@@ -3598,6 +3663,12 @@ function reentrySummary(row: FocusRow): string {
   if (row.noReEntryAfter) parts.push(`none after ${row.noReEntryAfter}`);
   if (row.squareOff === 'complete') parts.push('Square off complete');
   if (row.slToCost) parts.push(`Trail SL to BE (${row.slToCostScope === 'sl' ? 'SL legs' : 'all legs'})`);
+  for (const l of ['CE', 'PE'] as const) {
+    const en = l === 'CE' ? row.ceEntryLevel : row.peEntryLevel;
+    const ex = l === 'CE' ? row.ceExitLevel : row.peExitLevel;
+    const bits = [legLevelOn(en) && `in${en.dir === 'above' ? '>' : '<'}${en.level}`, legLevelOn(ex) && `out${ex.dir === 'above' ? '>' : '<'}${ex.level}`].filter(Boolean);
+    if (bits.length) parts.push(`${l} ${bits.join(' / ')}`);
+  }
   const scale = scaleOutSteps(row.scaleOut);
   if (scale.length) parts.push(`Scale-out ${scale.map(st => `${st.at}%→−${st.pct}%`).join(', ')}`);
   return parts.join(' · ');
@@ -4819,7 +4890,10 @@ export default function FocusTool() {
   // seen at the entry time. start 0 = this leg has no momentum and enters at once.
   // `failed` = the order was rejected: never resent on its own.
   const simMomRef = useRef<Record<string, {
-    day: string; kind: 'range' | 'momentum' | 'now'; strike: number; start: number; failed?: boolean;
+    day: string; kind: 'range' | 'momentum' | 'level' | 'now'; strike: number; start: number; failed?: boolean;
+    /** Index entry level: spot has been seen on the level's safe side since this gate started (a real cross) — for
+     *  the setting in `levelSig`; an edit to the level / direction resets it. */
+    seenSafe?: boolean; levelSig?: string;
     range?: { high: number; low: number }; rangeSince?: number; rangeNextTry?: number; rangeFetching?: boolean; rangeFailed?: boolean;
     /** Strike being rebuilt from the index's open at the range start (the tab was not open then). */
     strikeFetching?: boolean; strikeNextTry?: number; strikeSince?: number;
@@ -5852,7 +5926,13 @@ export default function FocusTool() {
     // Drop any stale fill pin — arming means this row resolves its strikes
     // fresh at the next entry, so a pin from the previous cycle would make it
     // look its new position up at last time's strikes.
-    updateRow(id, { status: 'armed', fill: undefined, overallReSlCount: 0, overallReTgtCount: 0, overallReMode: undefined });
+    const cur = config.rows.find(r => r.id === id);
+    updateRow(id, {
+      status: 'armed', fill: undefined, overallReSlCount: 0, overallReTgtCount: 0, overallReMode: undefined,
+      // Arming by hand re-enables each leg's once-per-day index entry level.
+      ...(cur?.ceEntryLevel?.firedOn ? { ceEntryLevel: { ...cur.ceEntryLevel, firedOn: undefined } } : {}),
+      ...(cur?.peEntryLevel?.firedOn ? { peEntryLevel: { ...cur.peEntryLevel, firedOn: undefined } } : {}),
+    });
   }
 
   /** Open a flat row right now. Re-arms it first, which clears the one-entry latch and stale fill pin, then enters
@@ -6167,6 +6247,9 @@ export default function FocusTool() {
           peScaleAt: nextPeQty > 0 && !(leg === 'PE' && prevQty <= 0) ? f?.peScaleAt : undefined,
           ceScaleBase: nextCeQty > 0 && !(leg === 'CE' && prevQty <= 0) ? f?.ceScaleBase : undefined,
           peScaleBase: nextPeQty > 0 && !(leg === 'PE' && prevQty <= 0) ? f?.peScaleBase : undefined,
+          // An index exit level must see spot on its safe side again for each new position (a real cross).
+          ceExitLevelSeen: nextCeQty > 0 && !(leg === 'CE' && prevQty <= 0) ? f?.ceExitLevelSeen : undefined,
+          peExitLevelSeen: nextPeQty > 0 && !(leg === 'PE' && prevQty <= 0) ? f?.peExitLevelSeen : undefined,
           ceOrb: nextCeQty <= 0 ? undefined : (leg === 'CE' && prevQty <= 0 ? (orb ?? undefined) : f?.ceOrb),
           peOrb: nextPeQty <= 0 ? undefined : (leg === 'PE' && prevQty <= 0 ? (orb ?? undefined) : f?.peOrb),
           bookedPnl: (f?.bookedPnl ?? 0) + (Number(bookedDelta) || 0),
@@ -8474,6 +8557,24 @@ export default function FocusTool() {
         if (tgtReason) { if (autoExitLeg(row, leg, tgtReason, 'tgt')) legAction = true; continue; }
         const costReason = costStopReason(row, leg, live);
         if (costReason) { if (autoExitLeg(row, leg, costReason, 'cost')) legAction = true; continue; }
+        // Index exit level: close this leg on a REAL cross, handled as its SL (RE on SL runs, ×N counts).
+        const xl = leg === 'CE' ? row.ceExitLevel : row.peExitLevel;
+        const seenSig = leg === 'CE' ? row.fill?.ceExitLevelSeen : row.fill?.peExitLevelSeen;
+        // Switched off: forget what was seen, so switching it back on needs a fresh safe-side sighting.
+        if (!legLevelOn(xl) && seenSig) patchFill(row.id, () => (leg === 'CE' ? { ceExitLevelSeen: undefined } : { peExitLevelSeen: undefined }));
+        if (legLevelOn(xl) && rowOwnsLeg(row, leg)) {
+          // "Seen" only counts for the exact level / direction it was seen against — an edit must see its own safe side.
+          const seen = seenSig === levelSig(xl);
+          const stp = levelCrossStep(seen, xl, spot);
+          if (stp.seenSafe && !seen) {
+            const sig = levelSig(xl);
+            patchFill(row.id, () => (leg === 'CE' ? { ceExitLevelSeen: sig } : { peExitLevelSeen: sig }));
+          }
+          if (stp.hit) {
+            if (autoExitLeg(row, leg, `${leg} index exit: spot ${spot.toFixed(2)} ${xl.dir === 'above' ? '≥' : '≤'} ${xl.level}`, 'sl')) legAction = true;
+            continue;
+          }
+        }
         // Scale-out ladder: part of the leg comes off as it moves toward its own target. Reduce only. Not a legAction —
         // a partial profit-take must not hold back this tick's whole-row rules (autoExitRow waits for it by itself).
         const due = dueScaleOutStep(row.scaleOut, Number(leg === 'CE' ? row.fill?.ceScaleAt : row.fill?.peScaleAt) || 0,
@@ -8574,8 +8675,8 @@ export default function FocusTool() {
     });
   }
 
-  /** The entry gate a leg is set up with: Range Breakout, Simple Momentum, or neither (opens at the entry time). */
-  function legEntryKind(row: FocusRow, leg: 'CE' | 'PE'): 'range' | 'momentum' | 'now' {
+  /** The entry gate a leg is set up with: an index level, Range Breakout, Simple Momentum, or none (opens at the entry time). */
+  function legEntryKind(row: FocusRow, leg: 'CE' | 'PE'): 'range' | 'momentum' | 'level' | 'now' {
     // A re-entry cycle after an overall SL / target: ASAP opens at once; MOMENTUM
     // goes through each leg's Simple Momentum (a leg without it opens at once).
     // The first-entry gates (Overall Momentum, Range Breakout) do not apply.
@@ -8585,6 +8686,8 @@ export default function FocusTool() {
     if (row.overallReMode) {
       return row.overallReMode === 'momentum' && simpleMomOn(leg === 'CE' ? row.ceSimpleMom : row.peSimpleMom) ? 'momentum' : 'now';
     }
+    // A leg's own index entry level wins over its Range Breakout / Simple Momentum.
+    if (legLevelOn(leg === 'CE' ? row.ceEntryLevel : row.peEntryLevel)) return 'level';
     if (rangeBreakoutOn(leg === 'CE' ? row.ceRangeBreakout : row.peRangeBreakout, row.entryTime)) return 'range';
     return simpleMomOn(leg === 'CE' ? row.ceSimpleMom : row.peSimpleMom) ? 'momentum' : 'now';
   }
@@ -8667,8 +8770,17 @@ export default function FocusTool() {
       // The leg's gate was edited while waiting: start over.
       if (st && st.kind !== kind) { drop(); st = undefined; }
 
+      const lv = leg === 'CE' ? row.ceEntryLevel : row.peEntryLevel;
+      if (!st && kind === 'level' && entryLevelFiredToday(lv, today) && !rowOwnsLeg(row, leg)) {
+        putMomStatus(key, closedReason ? '' : `${leg}: index entry level used today — Arm the row to enable it again`);
+        continue;
+      }
       if (!st) {
-        if (!(row.status === 'armed' && enterOk) || rowOwnsLeg(row, leg)) continue;
+        // A level leg also starts watching on a row that is already 'entered' (its other leg went first, or the tab was
+        // reloaded mid-wait): inside the window, while this leg holds nothing and has no re-entry of its own waiting.
+        const levelLate = kind === 'level' && row.status === 'entered' && !closedReason && nowHm >= row.entryTime
+          && !(leg === 'CE' ? row.fill?.cePending : row.fill?.pePending);
+        if (!((row.status === 'armed' && enterOk) || levelLate) || rowOwnsLeg(row, leg)) continue;
         let strike: number | null = leg === 'CE' ? live.ceStrike : live.peStrike;
         let start = 0;
         if (kind === 'range' && rb && win) {
@@ -8758,6 +8870,23 @@ export default function FocusTool() {
           continue;
         }
         trigger = `Range breakout: ${rb.on === 'underlying' ? 'spot' : 'premium'} ${now.toFixed(2)} reached the ${what} (${(rb.side === 'high' ? st.range.high : st.range.low).toFixed(2)})`;
+      } else if (kind === 'level' && legLevelOn(lv)) {
+        // Edited level / direction while waiting: the new setting must see its own safe side first.
+        if (st.levelSig !== levelSig(lv)) { st.levelSig = levelSig(lv); st.seenSafe = false; }
+        const stp = levelCrossStep(!!st.seenSafe, lv, spot);
+        st.seenSafe = stp.seenSafe;
+        const want = `${lv.dir === 'above' ? '≥' : '≤'} ${lv.level}`;
+        if (!stp.hit) {
+          putMomStatus(key, `${leg}: spot ${spot > 0 ? spot.toFixed(2) : '—'} — ${st.seenSafe
+            ? `waiting to cross ${lv.dir} ${lv.level}`
+            : `already ${want}; waiting for spot to go back ${lv.dir === 'above' ? 'below' : 'above'} ${lv.level} first`}`);
+          continue;
+        }
+        // Sell the strike the row resolves to NOW, not the one noted when the gate started.
+        const strikeNow = leg === 'CE' ? live.ceStrike : live.peStrike;
+        if (!strikeNow) { putMomStatus(key, `${leg}: level crossed — waiting for the strike to resolve`); continue; }
+        st.strike = strikeNow;
+        trigger = `Index level: spot ${spot.toFixed(2)} crossed ${lv.dir} ${lv.level}`;
       }
       putMomStatus(key, '');
       if (fired || busyRows.has(row.id) || autoExitingRef.current.has(row.id) || simMomFiringRef.current.has(key)) continue;
@@ -8767,6 +8896,12 @@ export default function FocusTool() {
       const armed = st;
       runRowAction(row.id, async () => {
         const fresh = schedulerRef.current.config.rows.find(r => r.id === row.id) ?? row;
+        // Once per day is reserved BEFORE the order goes out: a reload during the fill wait, or a late fill, must not
+        // leave the level free to sell this leg a second time today.
+        const freshLv = leg === 'CE' ? fresh.ceEntryLevel : fresh.peEntryLevel;
+        if (kind === 'level' && freshLv) {
+          updateRow(row.id, leg === 'CE' ? { ceEntryLevel: { ...freshLv, firedOn: today } } : { peEntryLevel: { ...freshLv, firedOn: today } });
+        }
         addToast('success', `${tag} entry`, trigger
           ? `${trigger} — selling ${multipliedLots(row, legLots(row, leg))} lot(s) ${armed.strike} ${leg}`
           : `Entry time reached — selling ${multipliedLots(row, legLots(row, leg))} lot(s) ${armed.strike} ${leg}`);

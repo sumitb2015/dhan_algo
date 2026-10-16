@@ -16,8 +16,11 @@ export const ROW_RUNTIME_KEYS = [
   'overallReSlCount', 'overallReTgtCount', 'overallReMode', 'entryMomState', 'ladder',
 ] as const satisfies readonly (keyof FocusRow)[];
 
-/** Spot exit levels are prices for one day — a preset applied next week must not carry them. */
-export const PRESET_SKIP_KEYS = ['levelHigh', 'levelLow'] as const satisfies readonly (keyof FocusRow)[];
+/** Index levels (row spot exits and the per-leg entry / exit levels) are prices for one day — a preset applied next
+ *  week, or a file imported later, must not carry them. A same-day Duplicate keeps them. */
+export const PRESET_SKIP_KEYS = [
+  'levelHigh', 'levelLow', 'ceEntryLevel', 'peEntryLevel', 'ceExitLevel', 'peExitLevel',
+] as const satisfies readonly (keyof FocusRow)[];
 
 export type FocusRowRules = Partial<Omit<FocusRow, typeof ROW_RUNTIME_KEYS[number]>>;
 
@@ -45,7 +48,13 @@ export function rowRules(row: Partial<FocusRow>): FocusRowRules {
   for (const [k, v] of Object.entries(row)) {
     if (!RUNTIME.has(k) && v !== undefined) out[k] = v;
   }
-  return JSON.parse(JSON.stringify(out)) as FocusRowRules;
+  const copy = JSON.parse(JSON.stringify(out)) as Record<string, unknown>;
+  // An entry level's "fired today" mark belongs to that row's day, not to its configuration.
+  for (const k of ['ceEntryLevel', 'peEntryLevel']) {
+    const lv = copy[k];
+    if (lv && typeof lv === 'object') delete (lv as { firedOn?: string }).firedOn;
+  }
+  return copy as FocusRowRules;
 }
 
 /** What a preset saves from a row: its rules minus the day's spot levels. */

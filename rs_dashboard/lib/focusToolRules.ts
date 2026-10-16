@@ -27,6 +27,7 @@ import { openLots } from './partialQty.ts';
 import type {
   FocusRow, FocusDte, FocusRowStatus, FocusReentryMode, FocusReentryTrigger, FocusPendingReentry, FocusLegSimpleMom, FocusLazyLeg, FocusLegRangeBreakout, FocusOverallMode, FocusOverallTrail,
   FocusLegSlRule, FocusLegTrailSl, FocusLegOrbSl, FocusOrbStamp, FocusStrikeCriteria, FocusLegCrit, FocusScaleOut,
+  FocusLegLevel, FocusLegEntryLevel,
 } from '@/lib/focusToolRows';
 
 // ── Constants ────────────────────────────────────────────────────────────────
@@ -1489,6 +1490,44 @@ export function legTarget(
   const lazy = runningLazyLeg(row, leg);
   if (lazy) return { value: lazy.tgtPct, unit: lazy.tgtUnit ?? 'pct' };
   return { value: leg === 'CE' ? row.ceTgtPct : row.peTgtPct, unit: row.legTgtUnit };
+}
+
+// ── Per-leg index levels (entry / exit) ─────────────────────────────────────
+
+/** A leg level is usable: a positive number and a known direction. */
+export function legLevelOn(cfg: FocusLegLevel | null | undefined): cfg is FocusLegLevel {
+  const v = Number(cfg?.level);
+  return !!cfg && typeof cfg.level === 'string' && cfg.level.trim() !== '' && Number.isFinite(v) && v > 0
+    && (cfg.dir === 'above' || cfg.dir === 'below');
+}
+
+/** Which side of a leg level spot is on: 'trigger' at or beyond it in `dir`, else 'safe'. Null without a spot. */
+export function levelSide(cfg: FocusLegLevel, spot: number): 'trigger' | 'safe' | null {
+  if (!(spot > 0) || !legLevelOn(cfg)) return null;
+  const v = Number(cfg.level);
+  return (cfg.dir === 'above' ? spot >= v : spot <= v) ? 'trigger' : 'safe';
+}
+
+/**
+ * One tick of a REAL cross: a level fires only after spot has been seen on its safe side and then reaches it. A level
+ * already passed when watching starts therefore waits for spot to come back and cross again — and a leg re-entered
+ * beyond its exit level is not closed again at once.
+ */
+export function levelCrossStep(seenSafe: boolean, cfg: FocusLegLevel, spot: number): { seenSafe: boolean; hit: boolean } {
+  const side = levelSide(cfg, spot);
+  if (side == null) return { seenSafe, hit: false };
+  if (side === 'safe') return { seenSafe: true, hit: false };
+  return { seenSafe, hit: seenSafe };
+}
+
+/** Identity of a level setting (`dir:level`): a "seen on the safe side" mark only counts for the same setting. */
+export function levelSig(cfg: FocusLegLevel): string {
+  return `${cfg.dir}:${Number(cfg.level)}`;
+}
+
+/** The entry level has already fired today (once per day; Arm re-enables it). */
+export function entryLevelFiredToday(cfg: FocusLegEntryLevel | null | undefined, today: string): boolean {
+  return !!cfg?.firedOn && cfg.firedOn === today;
 }
 
 // ── Scale-out on the leg's own target ───────────────────────────────────────

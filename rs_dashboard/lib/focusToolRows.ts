@@ -241,6 +241,11 @@ export interface FocusRowFill {
    */
   ceScaleAt?: number;
   peScaleAt?: number;
+  /** The exit level (FocusRow.ceExitLevel) spot has been seen on the safe side of during this position, as
+   *  `dir:level` — a cross of THAT level may now fire. Any edit to the level or direction no longer matches, so the new
+   *  level must see its own safe side first. Persisted so a reload keeps it; cleared with the position. */
+  ceExitLevelSeen?: string;
+  peExitLevelSeen?: string;
   ceScaleBase?: number;
   peScaleBase?: number;
   /**
@@ -403,6 +408,11 @@ export interface FocusLegOrbSl {
  */
 export type FocusOverallMode = 'mtm' | 'premiumPct';
 
+/** A fixed index level for one leg (FocusRow.ceEntryLevel / ceExitLevel …): fires when spot CROSSES it in `dir`. */
+export interface FocusLegLevel { level: string; dir: 'above' | 'below' }
+/** An entry level also remembers the IST day it last fired — once per day, re-enabled by Arm. */
+export type FocusLegEntryLevel = FocusLegLevel & { firedOn?: string };
+
 /** One scale-out step: at `at` % of the way to the leg's target, reduce by `pct` % (see FocusRow.scaleOut). */
 export interface FocusScaleStep { at: string; pct: 25 | 50 | 75 }
 export interface FocusScaleOut { enabled: boolean; steps: FocusScaleStep[] }
@@ -546,6 +556,15 @@ export interface FocusRow {
    * once per leg position; off when the leg has no target.
    */
   scaleOut?: FocusScaleOut;
+  /**
+   * Per-leg index levels. Entry: sell this leg when spot crosses the level (inside the row's window, while the leg
+   * holds nothing; once per day). Exit: close this leg when spot crosses the level — handled as the leg's SL (RE on SL
+   * runs). Both need a REAL cross: spot must first be seen on the other side, so a level already passed waits.
+   */
+  ceEntryLevel?: FocusLegEntryLevel;
+  peEntryLevel?: FocusLegEntryLevel;
+  ceExitLevel?: FocusLegLevel;
+  peExitLevel?: FocusLegLevel;
   /** AlgoTest Lazy Legs: up to 10 (MAX_LAZY_LEGS in focusToolRules), chainable through onSl / onTgt. */
   lazyLegs?: FocusLazyLeg[];
   /**

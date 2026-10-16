@@ -34,6 +34,17 @@ test('rowRules drops every runtime key and deep-copies the rest', () => {
   assert.equal('levelHigh' in presetRules(src), false);  // …a preset does not
 });
 
+test('per-leg index levels: a same-day copy keeps them, presets and imports do not', () => {
+  const src = base({ ceEntryLevel: { level: '23000', dir: 'below', firedOn: '2026-10-16' }, peExitLevel: { level: '22800', dir: 'below' } });
+  const r = rowRules(src);
+  assert.deepEqual(r.peExitLevel, { level: '22800', dir: 'below' });
+  assert.equal(r.ceEntryLevel?.level, '23000');
+  assert.equal('firedOn' in (r.ceEntryLevel ?? {}), false);          // the day's mark is not copied
+  assert.equal(src.ceEntryLevel?.firedOn, '2026-10-16');              // and the source row keeps it
+  assert.equal('peExitLevel' in presetRules(src), false);              // a day's prices: never in a preset
+  assert.equal('ceEntryLevel' in presetRules(src), false);
+});
+
 test('duplicate is a flat SIM draft with its own id, same index and expiry', () => {
   const d = duplicateRow(live(), 'ft_new', 'now');
   assert.equal(d.id, 'ft_new');

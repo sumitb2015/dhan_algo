@@ -17,7 +17,7 @@ import assert from 'node:assert/strict';
 
 import {
   EMPTY_ROW_LIVE, legStopReason, legStopLevel, legTargetReason, reentryConfig, evaluateReentry,
-  slRollStrike, reTgtOtmStrike, reentryOtmFromAtm, otmReentryStrike, matchPremiumStrike, legTargetProgress, dueScaleOutStep, scaleOutLots, scaleOutSteps, scaleOutStepsPassed, pendingReentryLevel, pendingReentryHit, costReentryBasis, awaitingMomentumQuote,
+  slRollStrike, reTgtOtmStrike, reentryOtmFromAtm, otmReentryStrike, matchPremiumStrike, legTargetProgress, dueScaleOutStep, scaleOutLots, scaleOutSteps, scaleOutStepsPassed, legLevelOn, levelSide, levelCrossStep, entryLevelFiredToday, levelSig, pendingReentryLevel, pendingReentryHit, costReentryBasis, awaitingMomentumQuote,
   MAX_LEG_REENTRIES, DEFAULT_SL_ROLL_MAX,
   type RowLive,
 } from './focusToolRules.ts';
@@ -379,6 +379,49 @@ for (const m of MARKETS) {
     assert.equal(scaleOutLots(1 * lot, 1 * lot, lot, 75), 0);
     assert.equal(scaleOutLots(3 * lot, 3 * lot, lot, 25), 0);         // 0.75 lot rounds down
     assert.equal(scaleOutLots(8 * lot, 8 * lot, 0, 50), 0);
+  });
+
+  test(`${tag} index levels per leg: a level fires only on a REAL cross`, () => {
+    const up = { level: String(m.spot + 100), dir: 'above' as const };
+    const dn = { level: String(m.spot - 100), dir: 'below' as const };
+    assert.equal(legLevelOn(up), true);
+    assert.equal(legLevelOn({ level: '', dir: 'above' }), false);
+    assert.equal(legLevelOn({ level: '-5', dir: 'above' }), false);
+    assert.equal(legLevelOn({ level: '23000', dir: 'sideways' } as never), false);
+    assert.equal(legLevelOn(undefined), false);
+    assert.equal(levelSide(up, m.spot), 'safe');
+    assert.equal(levelSide(up, m.spot + 100), 'trigger');            // exactly at the level counts
+    assert.equal(levelSide(dn, m.spot - 100), 'trigger');
+    assert.equal(levelSide(up, 0), null);
+
+    // started on the safe side: crossing fires
+    let st = levelCrossStep(false, up, m.spot);
+    assert.deepEqual(st, { seenSafe: true, hit: false });
+    st = levelCrossStep(st.seenSafe, up, m.spot + 120);
+    assert.equal(st.hit, true);
+    // started already past it: no fire until spot has gone back and crossed again
+    let p = levelCrossStep(false, up, m.spot + 150);
+    assert.deepEqual(p, { seenSafe: false, hit: false });
+    p = levelCrossStep(p.seenSafe, up, m.spot + 200);
+    assert.equal(p.hit, false);
+    p = levelCrossStep(p.seenSafe, up, m.spot + 50);                  // back below
+    p = levelCrossStep(p.seenSafe, up, m.spot + 101);
+    assert.equal(p.hit, true);
+    // below-levels mirror it; an unknown spot changes nothing
+    let d = levelCrossStep(false, dn, m.spot - 150);
+    assert.equal(d.hit, false);
+    d = levelCrossStep(d.seenSafe, dn, 0);
+    assert.deepEqual(d, { seenSafe: false, hit: false });
+    d = levelCrossStep(true, dn, m.spot - 100);
+    assert.equal(d.hit, true);
+
+    assert.equal(entryLevelFiredToday({ ...up, firedOn: '2026-10-16' }, '2026-10-16'), true);
+    assert.equal(entryLevelFiredToday({ ...up, firedOn: '2026-10-15' }, '2026-10-16'), false);
+    assert.equal(entryLevelFiredToday(up, '2026-10-16'), false);
+    // a "seen" mark belongs to one exact setting: any edit of level or direction is a different signature
+    assert.equal(levelSig(up), levelSig({ level: `${m.spot + 100}.0`, dir: 'above' }));
+    assert.notEqual(levelSig(up), levelSig({ ...up, dir: 'below' }));
+    assert.notEqual(levelSig(up), levelSig({ ...up, level: String(m.spot + 50) }));
   });
 
   test(`${tag} Tgt OTM count: missing = 1, 0 allowed only from Row`, () => {
