@@ -778,6 +778,16 @@ export function reentryConfig(
  * RE ASAP's row offset can land on ATM. Measuring from today's ATM keeps the new leg a set distance from spot. Null
  * when ATM is unknown.
  */
+/**
+ * Whether RE OTM counts from the ATM now (reTgtOtmStrike) rather than from the closed strike (slRollStrike). A target
+ * always does. So does a stop that had TRAILED: the trail only tightens after spot has moved away from the leg, so
+ * the trailed stop can hit with the strike still deep OTM — rolling further out from it would leave the other leg
+ * naked, exactly as on a target. A plain (untrailed) SL hit means spot came to the strike, so it rolls from there.
+ */
+export function reentryOtmFromAtm(trigger: FocusReentryTrigger, trailedSteps = 0): boolean {
+  return trigger === 'tgt' || (Number(trailedSteps) || 0) > 0;
+}
+
 export function reTgtOtmStrike(leg: 'CE' | 'PE', atm: number | null, strikes: number, step: number): number | null {
   return atm != null && atm > 0 && step > 0 ? slRollStrike(leg, atm, Math.max(1, strikes), step) : null;
 }

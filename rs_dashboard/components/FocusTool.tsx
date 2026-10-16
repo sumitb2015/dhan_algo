@@ -51,7 +51,7 @@ import {
   multipliedLots, legLots, hasLegLots, clampHm, rangeWindow, rangeWindowPhase, rowHasMultiDayRange, candleBucket, tradingDte,
   legSlRuleOn, legStopLevel, legTargetSpotLevel, legTgtUnitLabel, MAX_LEG_REENTRIES, pendingReentryLevel, pendingReentryHit, legTargetReason, costReentryBasis,
   awaitingMomentumQuote, MOMENTUM_QUOTE_WAIT_MS, legTargetLevel,
-  evaluateEntryMomentum, reRangeWindow, entryMomentumOn, overallSlConfig, overallProgress, nextOverallPeak, evaluateOverallExit, overallTrailInvalid, overallExitKind, evaluateOverallReentry, MAX_OVERALL_REENTRIES, rangeBreakoutOn, rangeBreakoutHit, costStopApplies, squareOffLegs, atmStrike, resolveRowLegStrike, mirrorLinkedPatch, MAX_LAZY_LEGS, legSlMultiplier, legTarget, nextLazyLegId, lazyLegStrike, runningLazyLeg, simpleMomOn, simpleMomLevel, simpleMomHit, reTgtOtmStrike,
+  evaluateEntryMomentum, reRangeWindow, entryMomentumOn, overallSlConfig, overallProgress, nextOverallPeak, evaluateOverallExit, overallTrailInvalid, overallExitKind, evaluateOverallReentry, MAX_OVERALL_REENTRIES, rangeBreakoutOn, rangeBreakoutHit, costStopApplies, squareOffLegs, atmStrike, resolveRowLegStrike, mirrorLinkedPatch, MAX_LAZY_LEGS, legSlMultiplier, legTarget, nextLazyLegId, lazyLegStrike, runningLazyLeg, simpleMomOn, simpleMomLevel, simpleMomHit, reTgtOtmStrike, reentryOtmFromAtm,
   type PosRow, type RowLive,
 } from '@/lib/focusToolRules';
 import { postFocusEvent } from '@/lib/focusToolEvents';
@@ -1074,8 +1074,9 @@ const REENTRY_LABEL: Record<FocusReentryMode, string> = {
 const REENTRY_HELP: Record<FocusReentryMode, string> = {
   off: 'Leg stays closed',
   asap: 'Re-sell at once at the strike the row resolves to now (ATM ± offset / ₹ target)',
-  otm: 'Re-sell at once, N strikes OTM. On SL: N further OTM than the strike that closed. On target: N OTM of the ATM '
-    + 'now (CE above, PE below), so the new leg sits a set distance from where spot is, not at the deep OTM strike that decayed',
+  otm: 'Re-sell at once, N strikes OTM. On SL: N further OTM than the strike that closed — or, if that stop had trailed, '
+    + 'N OTM of the ATM now. On target: N OTM of the ATM now (CE above, PE below), so the new leg sits a set distance from '
+    + 'where spot is, not at the deep OTM strike that decayed',
   cost: 'Wait on the same strike until its premium returns to that strike\'s initial entry this cycle, then re-sell',
   momentum: 'Pick the strike the row resolves to when the leg closes, then re-sell once it has moved as far as this '
     + 'leg\'s Simple Momentum says (premium or underlying, points or %). With no Simple Momentum it behaves exactly like RE ASAP. '
@@ -1797,7 +1798,7 @@ function LegReentryControls({ row, onUpdate, onCancelPending, legTargetsElsewher
           onChange={v => onUpdate({ legTgtUnit: v as LegTgtUnit })} className="w-32" />
         </>)}
         {anyOtm && (
-          <div className={lbl} title="RE-OTM on SL: strikes further OTM than the strike that closed (CE up, PE down)">
+          <div className={lbl} title="RE-OTM on SL: strikes further OTM than the strike that closed (CE up, PE down). If the stop had trailed: strikes OTM of the ATM now">
             {tgtOtm ? 'SL OTM' : 'OTM'}
             <MiniSelect value={String(Math.max(1, Math.trunc(Number(row.slRollStrikes) || 1)))} ariaLabel="Strikes OTM for RE-OTM on stop loss"
               options={[1, 2, 3].map(n => ({ value: String(n), label: String(n) }))}
@@ -7356,6 +7357,8 @@ export default function FocusTool() {
   async function reenterLegAfterExit(
     rowId: string, leg: 'CE' | 'PE', trigger: FocusReentryTrigger,
     closedStrike: number | null, closedQty: number, closedEntry: number, closedLazyId: string | null = null,
+    /** Trail SL steps the stop that closed the leg had taken (0 = untrailed). */
+    trailedSteps = 0,
   ): Promise<'reentered' | 'pending' | 'skipped' | 'unconfirmed'> {
     const snap = schedulerRef.current;
     const row = snap.config.rows.find(r => r.id === rowId);
@@ -7506,15 +7509,17 @@ export default function FocusTool() {
     }
 
     // ── Immediate modes ──
-    // RE OTM after a target counts from the ATM now (same Spot / Fut base the row resolves its strikes from):
-    // the closed strike is already deep OTM, so rolling further out from it would leave the other leg naked.
+    // RE OTM after a target, or after a stop that had trailed, counts from the ATM now (same Spot / Fut base the row
+    // resolves its strikes from): the closed strike can be deep OTM, so rolling further out from it would leave the
+    // other leg naked. A plain SL hit rolls from the closed strike (see reentryOtmFromAtm).
     let tgtAtm: number | null = null;
-    if (cfg.mode === 'otm' && trigger === 'tgt') {
+    const fromAtm = cfg.mode === 'otm' && reentryOtmFromAtm(trigger, trailedSteps);
+    if (fromAtm) {
       const fut = snap.futQuotes[u]?.ltp ?? 0;
       tgtAtm = atmStrike(group?.atmBy === 'Fut' && fut > 0 ? fut : (snap.spots[u] ?? 0), rowStep(row));
     }
     const newStrike = cfg.mode === 'otm'
-      ? trigger === 'tgt'
+      ? fromAtm
         ? reTgtOtmStrike(leg, tgtAtm, cfg.otmStrikes, rowStep(row))
         : slRollStrike(leg, closedStrike, cfg.otmStrikes, rowStep(row))
       : await resolvedStrikeAfterClose(rowId, leg);
@@ -7776,7 +7781,11 @@ export default function FocusTool() {
    * this was the row's last leg — retire it like autoExitRow once the ledger
    * confirms flat, or it would sit at 'entered' with no Arm button.
    */
-  function autoExitLeg(row: FocusRow, leg: 'CE' | 'PE', reason: string, kind: 'sl' | 'tgt' | 'cost' = 'sl'): boolean {
+  function autoExitLeg(
+    row: FocusRow, leg: 'CE' | 'PE', reason: string, kind: 'sl' | 'tgt' | 'cost' = 'sl',
+    /** Trail SL steps the breached stop had taken — RE OTM then counts from the ATM now. */
+    trailedSteps = 0,
+  ): boolean {
     const key = `${row.id}:${leg}`;
     if (autoExitingLegRef.current.has(key) || autoExitingRef.current.has(row.id)) return false;
     // A previous order on this leg is still unconfirmed — the scheduler's
@@ -7847,7 +7856,7 @@ export default function FocusTool() {
           }
         }
         if (!squaredOff && (kind === 'sl' || kind === 'tgt')) {
-          const re = await reenterLegAfterExit(row.id, leg, kind, closedStrike, closingQty, closedEntry, closedLazyId);
+          const re = await reenterLegAfterExit(row.id, leg, kind, closedStrike, closingQty, closedEntry, closedLazyId, trailedSteps);
           // 'unconfirmed': an order went out but didn't confirm — it may fill
           // late, so don't retire on a momentarily-flat ledger. 'pending':
           // the row must stay alive to fire it.
@@ -7981,7 +7990,7 @@ export default function FocusTool() {
           });
         }
         const slReason = legStopHit(stop, leg, live, spot);
-        if (slReason) { if (autoExitLeg(row, leg, slReason)) legAction = true; continue; }
+        if (slReason) { if (autoExitLeg(row, leg, slReason, 'sl', steps)) legAction = true; continue; }
         const tgtReason = legTargetReason(row, leg, live, undefined, spot);
         if (tgtReason) { if (autoExitLeg(row, leg, tgtReason, 'tgt')) legAction = true; continue; }
         const costReason = costStopReason(row, leg, live);

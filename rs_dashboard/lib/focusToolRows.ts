@@ -21,7 +21,8 @@ export type FocusRowMode = 'real' | 'sim';
  *  - asap     — re-sell at once at the strike the row resolves to NOW
  *               (ATM ± offset, or the ₹ premium target).
  *  - otm      — re-sell at once. On SL: FocusRow.slRollStrikes further OTM than
- *               the strike that just closed (CE up, PE down). On target:
+ *               the strike that just closed (CE up, PE down) — or, when the
+ *               stop had trailed, slRollStrikes OTM of the ATM NOW. On target:
  *               FocusRow.reTgtOtmStrikes OTM of the ATM NOW — the closed strike
  *               is already far from spot, and the row's own offset may be ATM.
  *  - cost     — wait on the SAME strike until its premium returns to the

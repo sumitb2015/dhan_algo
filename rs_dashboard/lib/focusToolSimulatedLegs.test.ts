@@ -17,7 +17,7 @@ import assert from 'node:assert/strict';
 
 import {
   EMPTY_ROW_LIVE, legStopReason, legStopLevel, legTargetReason, reentryConfig, evaluateReentry,
-  slRollStrike, reTgtOtmStrike, pendingReentryLevel, pendingReentryHit, costReentryBasis, awaitingMomentumQuote,
+  slRollStrike, reTgtOtmStrike, reentryOtmFromAtm, pendingReentryLevel, pendingReentryHit, costReentryBasis, awaitingMomentumQuote,
   MAX_LEG_REENTRIES, DEFAULT_SL_ROLL_MAX,
   type RowLive,
 } from './focusToolRules.ts';
@@ -258,7 +258,11 @@ for (const m of MARKETS) {
     const row = { reSlMode: 'otm', reTgtMode: 'otm', slRollStrikes: 1, reTgtOtmStrikes: 3 } as never;
     assert.equal(reentryConfig(row, 'tgt').otmStrikes, 3);
     assert.equal(reentryConfig(row, 'sl').otmStrikes, 1);
-    assert.equal(reentryConfig({ reTgtMode: 'otm' } as never, 'tgt').otmStrikes, 1);
+    assert.equal(reentryConfig({ reTgtMode: 'otm' } as never, 'tgt').otmStrikes, 1);    // ATM-based on every target and on a stop that had trailed; a plain SL rolls from the closed strike
+    assert.equal(reentryOtmFromAtm('tgt'), true);
+    assert.equal(reentryOtmFromAtm('sl'), false);
+    assert.equal(reentryOtmFromAtm('sl', 0), false);
+    assert.equal(reentryOtmFromAtm('sl', 2), true);
   });
 
   test(`${tag} RE Cost / Momentum: what a waiting re-entry waits for`, () => {
