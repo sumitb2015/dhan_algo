@@ -20,8 +20,10 @@ export type FocusRowMode = 'real' | 'sim';
  *  - off      — stays closed.
  *  - asap     — re-sell at once at the strike the row resolves to NOW
  *               (ATM ± offset, or the ₹ premium target).
- *  - otm      — re-sell at once, FocusRow.slRollStrikes further OTM than the
- *               strike that just closed (CE up, PE down).
+ *  - otm      — re-sell at once. On SL: FocusRow.slRollStrikes further OTM than
+ *               the strike that just closed (CE up, PE down). On target:
+ *               FocusRow.reTgtOtmStrikes OTM of the ATM NOW — the closed strike
+ *               is already far from spot, and the row's own offset may be ATM.
  *  - cost     — wait on the SAME strike until its premium returns to the
  *               closed leg's own entry, then re-sell there.
  *  - momentum — pick the strike the row resolves to now, note its premium (or
@@ -509,6 +511,8 @@ export interface FocusRow {
   /** Re-entry after a leg TARGET close — same modes. Missing = 'off'. */
   reTgtMode?: FocusReentryMode;
   reTgtMax?: number;
+  /** RE OTM on target: strikes OTM of the current ATM (CE up, PE down). Missing = 1. */
+  reTgtOtmStrikes?: number;
   /** Lazy Leg to open when the leg's SL / target closes it (reSlMode / reTgtMode = 'lazy'). */
   reSlLazyId?: string;
   reTgtLazyId?: string;

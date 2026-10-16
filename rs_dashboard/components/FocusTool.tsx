@@ -51,7 +51,7 @@ import {
   multipliedLots, legLots, hasLegLots, clampHm, rangeWindow, rangeWindowPhase, rowHasMultiDayRange, candleBucket, tradingDte,
   legSlRuleOn, legStopLevel, legTargetSpotLevel, legTgtUnitLabel, MAX_LEG_REENTRIES, pendingReentryLevel, pendingReentryHit, legTargetReason, costReentryBasis,
   awaitingMomentumQuote, MOMENTUM_QUOTE_WAIT_MS, legTargetLevel,
-  evaluateEntryMomentum, reRangeWindow, entryMomentumOn, overallSlConfig, overallProgress, nextOverallPeak, evaluateOverallExit, overallTrailInvalid, overallExitKind, evaluateOverallReentry, MAX_OVERALL_REENTRIES, rangeBreakoutOn, rangeBreakoutHit, costStopApplies, squareOffLegs, atmStrike, resolveRowLegStrike, mirrorLinkedPatch, MAX_LAZY_LEGS, legSlMultiplier, legTarget, nextLazyLegId, lazyLegStrike, runningLazyLeg, simpleMomOn, simpleMomLevel, simpleMomHit,
+  evaluateEntryMomentum, reRangeWindow, entryMomentumOn, overallSlConfig, overallProgress, nextOverallPeak, evaluateOverallExit, overallTrailInvalid, overallExitKind, evaluateOverallReentry, MAX_OVERALL_REENTRIES, rangeBreakoutOn, rangeBreakoutHit, costStopApplies, squareOffLegs, atmStrike, resolveRowLegStrike, mirrorLinkedPatch, MAX_LAZY_LEGS, legSlMultiplier, legTarget, nextLazyLegId, lazyLegStrike, runningLazyLeg, simpleMomOn, simpleMomLevel, simpleMomHit, reTgtOtmStrike,
   type PosRow, type RowLive,
 } from '@/lib/focusToolRules';
 import { postFocusEvent } from '@/lib/focusToolEvents';
@@ -717,7 +717,10 @@ const slPctToMult = (pct: string): string => {
   const n = Number(pct);
   return pct.trim() !== '' && n > 0 ? String(Math.round((1 + n / 100) * 1e6) / 1e6) : '';
 };
-function SlPctInput({ mult, onMult, ...rest }: { mult: string | undefined; onMult: (m: string) => void; placeholder?: string; className?: string; title?: string; disabled?: boolean }) {
+function SlPctInput({ mult, onMult, ...rest }: {
+  mult: string | undefined; onMult: (m: string) => void; placeholder?: string; className?: string; title?: string; disabled?: boolean;
+  step?: number; min?: number; offBelowMin?: boolean; label?: string; wrapperClassName?: string;
+}) {
   return <RuleNumInput value={slMultToPct(mult)} onCommit={v => onMult(slPctToMult(v))} {...rest} />;
 }
 
@@ -733,9 +736,19 @@ function SlPctInput({ mult, onMult, ...rest }: { mult: string | undefined; onMul
  * Discrete controls (selects, toggles, +/- steppers) still commit immediately —
  * each click is a complete choice, not a partial edit.
  */
-function RuleNumInput({ value, onCommit, placeholder, className, title, disabled }: {
+function RuleNumInput({ value, onCommit, placeholder, className, title, disabled, step, min = 0, offBelowMin, label, wrapperClassName }: {
   value: string; onCommit: (v: string) => void; placeholder?: string; className?: string;
   title?: string; disabled?: boolean;
+  /** Show up/down arrows (and ArrowUp/ArrowDown keys) that nudge by this much and commit at once. */
+  step?: number;
+  /** Lowest value an arrow can reach. */
+  min?: number;
+  /** Stepping below `min` clears the box (rule off) instead of clamping to `min`. */
+  offBelowMin?: boolean;
+  /** Names the field in the arrows' aria-labels. */
+  label?: string;
+  /** Classes for the wrapper the arrows add (e.g. `flex-1` when the box must stretch). */
+  wrapperClassName?: string;
 }) {
   const [draft, setDraft] = useState(value);
   // Re-sync when the value changes underneath us (a config load, a clear
@@ -754,7 +767,19 @@ function RuleNumInput({ value, onCommit, placeholder, className, title, disabled
     setCommits(c => c + 1);
   };
 
-  return (
+  // An arrow is a discrete, complete choice (like a stepper), so it commits at once. It steps from what is in the
+  // box — a half-typed draft included — so "2" + ↑ means 2+step, not the last committed value + step.
+  const nudge = (dir: 1 | -1) => {
+    if (!step || disabled) return;
+    const base = Number(focusedRef.current ? draft : value) || 0;
+    const decimals = (String(step).split('.')[1] ?? '').length;
+    const n = Number((base + dir * step).toFixed(decimals));
+    const next = n >= min ? String(n) : offBelowMin ? '' : String(min);
+    setDraft(next);
+    commit(next);
+  };
+
+  const input = (
     <input
       type="text"
       inputMode="decimal"
@@ -768,6 +793,7 @@ function RuleNumInput({ value, onCommit, placeholder, className, title, disabled
       onKeyDown={e => {
         if (e.key === 'Enter') (e.target as HTMLInputElement).blur();   // blur commits (onBlur); committing here too sent every Enter to the parent twice
         if (e.key === 'Escape') { setDraft(value); (e.target as HTMLInputElement).blur(); }
+        if (step && (e.key === 'ArrowUp' || e.key === 'ArrowDown')) { e.preventDefault(); nudge(e.key === 'ArrowUp' ? 1 : -1); }
       }}
       className={cn(
         'h-7 text-[11px] font-mono font-bold px-2 border border-zinc-700 rounded-md',
@@ -775,9 +801,40 @@ function RuleNumInput({ value, onCommit, placeholder, className, title, disabled
         'focus:outline-none focus:border-violet-500 focus:ring-1 focus:ring-violet-500/40',
         'disabled:opacity-50 disabled:cursor-not-allowed',
         className,
+        step && 'pr-4',
       )}
     />
   );
+  if (!step) return input;
+
+  const what = label ?? 'value';
+  const arrowCls = cn(
+    'flex-1 w-3.5 flex items-center justify-center rounded-sm text-zinc-500 hover:text-zinc-100 hover:bg-zinc-800',
+    'cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-transparent',
+  );
+  return (
+    <span className={cn('relative inline-flex items-center', wrapperClassName)}>
+      {input}
+      <span className="absolute right-0.5 top-0.5 bottom-0.5 flex flex-col">
+        {/* preventDefault on mousedown keeps focus in the box, so the click does not also blur-commit the draft */}
+        <button type="button" tabIndex={-1} disabled={disabled} className={arrowCls}
+          onMouseDown={e => e.preventDefault()} onClick={() => nudge(1)}
+          title={`Increase by ${step}`} aria-label={`Increase ${what} by ${step}`}>
+          <ChevronUp size={10} strokeWidth={3} />
+        </button>
+        <button type="button" tabIndex={-1} disabled={disabled} className={arrowCls}
+          onMouseDown={e => e.preventDefault()} onClick={() => nudge(-1)}
+          title={`Decrease by ${step}`} aria-label={`Decrease ${what} by ${step}`}>
+          <ChevronDown size={10} strokeWidth={3} />
+        </button>
+      </span>
+    </span>
+  );
+}
+
+/** Arrow step for a leg target box, in the unit it is typed in. */
+function legTgtStep(unit: FocusRow['legTgtUnit']): number {
+  return unit === 'pts' ? 1 : unit === 'uPts' ? 10 : unit === 'uPct' ? 0.1 : unit === 'delta' ? 1 : 5;
 }
 
 /** RuleNumInput flanked by -/+ steppers, step size 1 — for level-exit H/L price fields. */
@@ -1017,7 +1074,8 @@ const REENTRY_LABEL: Record<FocusReentryMode, string> = {
 const REENTRY_HELP: Record<FocusReentryMode, string> = {
   off: 'Leg stays closed',
   asap: 'Re-sell at once at the strike the row resolves to now (ATM ± offset / ₹ target)',
-  otm: 'Re-sell at once, N strikes further OTM than the strike that closed',
+  otm: 'Re-sell at once, N strikes OTM. On SL: N further OTM than the strike that closed. On target: N OTM of the ATM '
+    + 'now (CE above, PE below), so the new leg sits a set distance from where spot is, not at the deep OTM strike that decayed',
   cost: 'Wait on the same strike until its premium returns to that strike\'s initial entry this cycle, then re-sell',
   momentum: 'Pick the strike the row resolves to when the leg closes, then re-sell once it has moved as far as this '
     + 'leg\'s Simple Momentum says (premium or underlying, points or %). With no Simple Momentum it behaves exactly like RE ASAP. '
@@ -1669,14 +1727,13 @@ function LegReentryControls({ row, onUpdate, onCancelPending, legTargetsElsewher
     ? `CE ${f?.ceRolls ?? 0} · PE ${f?.peRolls ?? 0}`
     : `CE ${f?.ceTgtReentries ?? 0} · PE ${f?.peTgtReentries ?? 0}`;
   const anyOtm = sl.mode === 'otm';
+  const tgtOtm = tgt.mode === 'otm';
   const anyOn = sl.mode !== 'off' || tgt.mode !== 'off';
   const tgtUnitWord = legTgtUnitWords(row.legTgtUnit);
 
   const modeSelect = (t: 'sl' | 'tgt') => {
     const c = t === 'sl' ? sl : tgt;
-    const modes: FocusReentryMode[] = t === 'sl'
-      ? ['off', 'asap', 'otm', 'cost', 'momentum', 'lazy']
-      : ['off', 'asap', 'cost', 'momentum', 'lazy'];
+    const modes: FocusReentryMode[] = ['off', 'asap', 'otm', 'cost', 'momentum', 'lazy'];
     return (
       <div className={lbl} title={`${t === 'sl' ? 'After a leg SL % (CE % / PE %)' : 'After a leg target (CE Tgt / PE Tgt)'}: ${REENTRY_HELP[c.mode]}`}>
         {t === 'sl' ? 'RE on SL' : 'RE on Tgt'}
@@ -1686,7 +1743,8 @@ function LegReentryControls({ row, onUpdate, onCancelPending, legTargetsElsewher
             const mode = v as FocusReentryMode;
             const patch: Partial<FocusRow> = t === 'sl' ? { reSlMode: mode } : { reTgtMode: mode };
             // OTM needs a strike count; default to 1 when first chosen.
-            if (mode === 'otm' && !(Number(row.slRollStrikes) > 0)) patch.slRollStrikes = 1;
+            if (mode === 'otm' && t === 'sl' && !(Number(row.slRollStrikes) > 0)) patch.slRollStrikes = 1;
+            if (mode === 'otm' && t === 'tgt' && !(Number(row.reTgtOtmStrikes) > 0)) patch.reTgtOtmStrikes = 1;
             onUpdate(patch);
           }} className="w-24" />
         {c.mode !== 'off' && c.mode !== 'lazy' && (
@@ -1739,11 +1797,19 @@ function LegReentryControls({ row, onUpdate, onCancelPending, legTargetsElsewher
           onChange={v => onUpdate({ legTgtUnit: v as LegTgtUnit })} className="w-32" />
         </>)}
         {anyOtm && (
-          <div className={lbl} title="RE-OTM: strikes further OTM than the strike that closed (CE up, PE down)">
-            OTM
-            <MiniSelect value={String(Math.max(1, Math.trunc(Number(row.slRollStrikes) || 1)))} ariaLabel="Strikes OTM for RE-OTM"
+          <div className={lbl} title="RE-OTM on SL: strikes further OTM than the strike that closed (CE up, PE down)">
+            {tgtOtm ? 'SL OTM' : 'OTM'}
+            <MiniSelect value={String(Math.max(1, Math.trunc(Number(row.slRollStrikes) || 1)))} ariaLabel="Strikes OTM for RE-OTM on stop loss"
               options={[1, 2, 3].map(n => ({ value: String(n), label: String(n) }))}
               onChange={v => onUpdate({ slRollStrikes: Number(v) })} className="w-12" />
+          </div>
+        )}
+        {tgtOtm && (
+          <div className={lbl} title="RE-OTM on target: strikes OTM of the ATM at the moment the target hits (CE above ATM, PE below)">
+            Tgt OTM
+            <MiniSelect value={String(tgt.otmStrikes)} ariaLabel="Strikes OTM of current ATM for RE-OTM on target"
+              options={[1, 2, 3, 4, 5, 6].map(n => ({ value: String(n), label: String(n) }))}
+              onChange={v => onUpdate({ reTgtOtmStrikes: Number(v) })} className="w-12" />
           </div>
         )}
       </div>
@@ -2644,14 +2710,14 @@ function ControlStrip({
         <div className="flex items-center gap-1.5">
           <Target className="h-3 w-3 text-emerald-500" />
           <span className={cn(TXT_VALUE, 'font-black text-zinc-500 uppercase')}>Target</span>
-          <RuleNumInput value={targetRupees} onCommit={setTargetRupees} className="w-16" placeholder="0"
+          <RuleNumInput value={targetRupees} onCommit={setTargetRupees} step={500} className="w-20" placeholder="0"
             title="Close every open row once total P&L reaches this profit (₹). Applies when you leave the field, not while typing." />
         </div>
 
         <div className="flex items-center gap-1.5">
           <ShieldOff className="h-3 w-3 text-rose-500" />
           <span className={cn(TXT_VALUE, 'font-black text-zinc-500 uppercase')}>Stop</span>
-          <RuleNumInput value={stopRupees} onCommit={setStopRupees} className="w-16" placeholder="0"
+          <RuleNumInput value={stopRupees} onCommit={setStopRupees} step={500} className="w-20" placeholder="0"
             title="Close every open row once total P&L falls to this loss (₹). Applies when you leave the field, not while typing." />
         </div>
 
@@ -2666,26 +2732,26 @@ function ControlStrip({
         {trailX.kind !== 'trailSl' && (<>
         <div className="flex items-center gap-1.5">
           <span className={cn(TXT_VALUE, 'font-black text-zinc-500 uppercase')}>{trailX.kind === 'peakGap' ? 'Trigger' : 'Reach'}</span>
-          <RuleNumInput value={triggerRupees} onCommit={setTriggerRupees} className="w-16" placeholder="0"
+          <RuleNumInput value={triggerRupees} onCommit={setTriggerRupees} step={500} className="w-20" placeholder="0"
             title={trailX.kind === 'peakGap' ? 'Profit (₹) at which the trail wakes up and starts locking' : 'When total profit first reaches this (₹) …'} />
         </div>
 
         <div className="flex items-center gap-1.5">
           <Lock className="h-3 w-3 text-amber-500" />
           <span className={cn(TXT_VALUE, 'font-black text-zinc-500 uppercase')}>{trailX.kind === 'peakGap' ? 'Gap' : 'Lock'}</span>
-          <RuleNumInput value={lockRupees} onCommit={setLockRupees} className="w-16" placeholder="0"
+          <RuleNumInput value={lockRupees} onCommit={setLockRupees} step={500} className="w-20" placeholder="0"
             title={trailX.kind === 'peakGap' ? 'Profit (₹) kept back from each new peak — the floor that never falls' : '… lock this profit (₹): exit everything if total P&L falls back to it'} />
         </div>
         </>)}
         {(trailX.kind === 'lockTrail' || trailX.kind === 'trailSl') && (<>
           <div className="flex items-center gap-1.5">
             <span className={cn(TXT_VALUE, 'font-black text-zinc-500 uppercase')}>Every</span>
-            <RuleNumInput value={trailX.every} onCommit={v => setTrailX({ every: v })} className="w-16" placeholder="0"
+            <RuleNumInput value={trailX.every} onCommit={v => setTrailX({ every: v })} step={500} className="w-20" placeholder="0"
               title={trailX.kind === 'trailSl' ? 'For every this much profit (₹) …' : 'For every this much more profit (₹) …'} />
           </div>
           <div className="flex items-center gap-1.5">
             <span className={cn(TXT_VALUE, 'font-black text-zinc-500 uppercase')}>By</span>
-            <RuleNumInput value={trailX.by} onCommit={v => setTrailX({ by: v })} className="w-16" placeholder="0"
+            <RuleNumInput value={trailX.by} onCommit={v => setTrailX({ by: v })} step={500} className="w-20" placeholder="0"
               title={trailX.kind === 'trailSl' ? '… tighten STOP by this much (₹)' : '… raise the locked profit by this much (₹)'} />
           </div>
         </>)}
@@ -3035,14 +3101,16 @@ function FocusTableRowImpl({
               SL %
               <SlPctInput mult={(isCe ? row.ceSlMultiplier : row.peSlMultiplier) ?? '1.2'}
                 onMult={v => onUpdate(isCe ? { ceSlMultiplier: v } : { peSlMultiplier: v })}
-                className="w-12 h-6 text-center text-[11px]" />
+                step={5} min={5} label={`${leg} SL %`}
+                className="w-14 h-6 text-center text-[11px]" />
             </label>
             <label className="inline-flex items-center gap-1 text-[11px] font-black text-zinc-400"
               title={`${leg} target: exit ${leg} alone once it has moved this many ${legTgtUnitWords(row.legTgtUnit)}. Blank = off`}>
               Tgt
               <RuleNumInput value={(isCe ? row.ceTgtPct : row.peTgtPct) ?? ''}
                 onCommit={v => onUpdate(isCe ? { ceTgtPct: v } : { peTgtPct: v })}
-                placeholder="off" className="w-12 h-6 text-center text-[11px]" />
+                step={legTgtStep(row.legTgtUnit)} min={legTgtStep(row.legTgtUnit)} offBelowMin label={`${leg} target`}
+                placeholder="off" className="w-14 h-6 text-center text-[11px]" />
               <select value={row.legTgtUnit ?? 'pct'} aria-label="Leg target unit (both legs)"
                 title="Leg target type (both legs): % of the leg's own entry, premium points below it, or the index moving that far in the leg's favour from the spot at entry"
                 onChange={e => onUpdate({ legTgtUnit: e.target.value as LegTgtUnit })}
@@ -3265,11 +3333,11 @@ function FocusTableRowImpl({
           <div className="grid grid-cols-2 gap-1.5">
             <label className="flex items-center gap-1.5 bg-zinc-900/60 border border-zinc-800/60 rounded-lg px-2 py-1" title="Row stop loss in ₹ (both legs together)">
               <span className="text-amber-400 text-[11px] font-black w-12 shrink-0">SL ₹</span>
-              <RuleNumInput value={row.slRupees} onCommit={v => onUpdate({ slRupees: v })} placeholder="off" className="w-full flex-1 min-w-0 h-7 text-center text-xs" />
+              <RuleNumInput value={row.slRupees} onCommit={v => onUpdate({ slRupees: v })} placeholder="off" step={500} min={500} offBelowMin label="row SL ₹" wrapperClassName="flex-1 min-w-0" className="w-full min-w-0 h-7 text-center text-xs" />
             </label>
             <label className="flex items-center gap-1.5 bg-zinc-900/60 border border-zinc-800/60 rounded-lg px-2 py-1" title="Pair stop: exit both legs when their combined premium has risen this % above entry (20 = 20% above)">
               <span className="text-amber-400 text-[11px] font-black w-12 shrink-0">Pair ×</span>
-              <SlPctInput mult={row.slMultiplier} placeholder="off" onMult={v => onUpdate({ slMultiplier: v })} className="w-full flex-1 min-w-0 h-7 text-center text-xs" />
+              <SlPctInput mult={row.slMultiplier} placeholder="off" onMult={v => onUpdate({ slMultiplier: v })} step={5} min={5} offBelowMin label="pair SL %" wrapperClassName="flex-1 min-w-0" className="w-full min-w-0 h-7 text-center text-xs" />
             </label>
             <div className="flex items-center gap-1.5 bg-zinc-900/60 border border-zinc-800/60 rounded-lg px-2 py-1">
               <span className="text-rose-400 text-[11px] font-black w-12 shrink-0">Spot H&uarr;</span>
@@ -3289,7 +3357,7 @@ function FocusTableRowImpl({
                 <select value={row.vwapInterval || '1'} onChange={e => onUpdate({ vwapInterval: e.target.value })} aria-label="VWAP candle interval" className="text-[11px] font-bold h-6 px-1 border border-zinc-700 rounded bg-zinc-900 text-zinc-300">
                   <option value="1">1m</option><option value="5">5m</option>
                 </select>
-                <RuleNumInput value={row.vwapBufferPct} onCommit={v => onUpdate({ vwapBufferPct: v })} className="w-12 h-6 text-center text-[11px]" title="Buffer %" />
+                <RuleNumInput value={row.vwapBufferPct} onCommit={v => onUpdate({ vwapBufferPct: v })} step={0.1} label="VWAP buffer %" className="w-14 h-6 text-center text-[11px]" title="Buffer %" />
                 <span className="font-mono text-zinc-300">{live.vwap != null ? `VWAP ${live.vwap.toFixed(2)}` : 'VWAP —'}</span>
               </div>
             )}
@@ -3537,13 +3605,15 @@ function FocusProRowImpl({
           <SlPctInput mult={(isCe ? row.ceSlMultiplier : row.peSlMultiplier) ?? '1.2'}
             onMult={v => onUpdate(isCe ? { ceSlMultiplier: v } : { peSlMultiplier: v })}
             title={legSlOverridden(row, leg) ? `${leg} uses its ${legSlOverridden(row, leg)}; this × is the fallback when that cannot be measured` : `Exit ${leg} alone when its premium has risen this % above its own entry (20 = 20% above)`}
-            className={cn(PRO_INPUT, 'w-14')} />
+            step={5} min={5} label={`${leg} SL %`}
+            className={cn(PRO_INPUT, 'w-16')} />
         </TableCell>
         <TableCell className="py-1.5 px-2 text-center">
           <RuleNumInput value={(isCe ? row.ceTgtPct : row.peTgtPct) ?? ''} placeholder="off"
             onCommit={v => onUpdate(isCe ? { ceTgtPct: v } : { peTgtPct: v })}
             title={`Exit ${leg} alone once it has moved this many ${legTgtUnitWords(row.legTgtUnit)}. Blank = off`}
-            className={cn(PRO_INPUT, 'w-14')} />
+            step={legTgtStep(row.legTgtUnit)} min={legTgtStep(row.legTgtUnit)} offBelowMin label={`${leg} target`}
+            className={cn(PRO_INPUT, 'w-16')} />
         </TableCell>
         <TableCell className="py-1.5 px-2 text-center">
           <LegSlLevels row={row} live={live} leg={leg} lotSize={lotSize} inline />
@@ -3831,10 +3901,10 @@ function FocusProRowImpl({
 
             <span className={PRO_LABEL}>Row stops</span>
             <ProField label="SL ₹" title="Row stop loss in ₹ across both legs">
-              <RuleNumInput value={row.slRupees} placeholder="off" onCommit={v => onUpdate({ slRupees: v })} className={cn(PRO_INPUT, 'w-20')} />
+              <RuleNumInput value={row.slRupees} placeholder="off" onCommit={v => onUpdate({ slRupees: v })} step={500} min={500} offBelowMin label="row SL ₹" className={cn(PRO_INPUT, 'w-20')} />
             </ProField>
             <ProField label="Pair %" title="Pair stop: exit both legs when their combined premium has risen this % above entry (e.g. 20 = 20% above)">
-              <SlPctInput mult={row.slMultiplier} placeholder="off" onMult={v => onUpdate({ slMultiplier: v })} className={cn(PRO_INPUT, 'w-14')} />
+              <SlPctInput mult={row.slMultiplier} placeholder="off" onMult={v => onUpdate({ slMultiplier: v })} step={5} min={5} offBelowMin label="pair SL %" className={cn(PRO_INPUT, 'w-16')} />
             </ProField>
             <ProField label="Spot H ↑" title="Exit the row when spot reaches this high">
               <RuleNumStepper value={row.levelHigh} onCommit={v => onUpdate({ levelHigh: v })}
@@ -3858,7 +3928,7 @@ function FocusProRowImpl({
                       <SelectItem value="5">5m</SelectItem>
                     </SelectContent>
                   </Select>
-                  <RuleNumInput value={row.vwapBufferPct} onCommit={v => onUpdate({ vwapBufferPct: v })} title="Buffer %" className={cn(PRO_INPUT, 'w-14')} />
+                  <RuleNumInput value={row.vwapBufferPct} onCommit={v => onUpdate({ vwapBufferPct: v })} title="Buffer %" step={0.1} label="VWAP buffer %" className={cn(PRO_INPUT, 'w-16')} />
                   <span className="font-mono text-zinc-400">{live.vwap != null ? live.vwap.toFixed(2) : '—'}</span>
                 </>
               )}
@@ -4277,21 +4347,23 @@ function FocusRowCardImpl({
           </div>
           <div className="flex items-center gap-1.5 bg-zinc-900/50 border border-zinc-800/40 rounded-lg px-1.5 py-0.5">
             <span className="text-amber-400 text-[11px] font-black w-9 shrink-0">SL ₹</span>
-            <RuleNumInput value={row.slRupees} onCommit={v => onUpdate({ slRupees: v })} className="w-full flex-1 min-w-0 h-5 text-center text-[11px]" />
+            <RuleNumInput value={row.slRupees} onCommit={v => onUpdate({ slRupees: v })} step={500} min={500} offBelowMin label="row SL ₹" wrapperClassName="flex-1 min-w-0" className="w-full min-w-0 h-5 text-center text-[11px]" />
           </div>
           <div className="flex items-center gap-1.5 bg-zinc-900/50 border border-zinc-800/40 rounded-lg px-1.5 py-0.5">
             <span className="text-amber-500 text-[11px] font-black w-9 shrink-0">SL %</span>
-            <SlPctInput mult={row.slMultiplier} onMult={v => onUpdate({ slMultiplier: v })} className="w-full flex-1 min-w-0 h-5 text-center text-[11px]" />
+            <SlPctInput mult={row.slMultiplier} onMult={v => onUpdate({ slMultiplier: v })} step={5} min={5} offBelowMin label="pair SL %" wrapperClassName="flex-1 min-w-0" className="w-full min-w-0 h-5 text-center text-[11px]" />
           </div>
           <div className="flex items-center gap-1.5 bg-zinc-900/50 border border-zinc-800/40 rounded-lg px-1.5 py-0.5">
             <span className="text-emerald-400 text-[11px] font-black w-9 shrink-0" title="Exit CE alone on its own premium multiple, independent of PE and of SL % above">CE %</span>
             <SlPctInput mult={row.ceSlMultiplier ?? '1.2'} onMult={v => onUpdate({ ceSlMultiplier: v })}
-              title={legSlOverridden(row, 'CE') ? `CE uses its ${legSlOverridden(row, 'CE')}; this × is the fallback when that cannot be measured (no delta / spot at entry)` : undefined} className="w-full flex-1 min-w-0 h-5 text-center text-[11px]" />
+              title={legSlOverridden(row, 'CE') ? `CE uses its ${legSlOverridden(row, 'CE')}; this × is the fallback when that cannot be measured (no delta / spot at entry)` : undefined}
+              step={5} min={5} label="CE SL %" wrapperClassName="flex-1 min-w-0" className="w-full min-w-0 h-5 text-center text-[11px]" />
           </div>
           <div className="flex items-center gap-1.5 bg-zinc-900/50 border border-zinc-800/40 rounded-lg px-1.5 py-0.5">
             <span className="text-rose-400 text-[11px] font-black w-9 shrink-0" title="Exit PE alone on its own premium multiple, independent of CE and of SL % above">PE %</span>
             <SlPctInput mult={row.peSlMultiplier ?? '1.2'} onMult={v => onUpdate({ peSlMultiplier: v })}
-              title={legSlOverridden(row, 'PE') ? `PE uses its ${legSlOverridden(row, 'PE')}; this × is the fallback when that cannot be measured (no delta / spot at entry)` : undefined} className="w-full flex-1 min-w-0 h-5 text-center text-[11px]" />
+              title={legSlOverridden(row, 'PE') ? `PE uses its ${legSlOverridden(row, 'PE')}; this × is the fallback when that cannot be measured (no delta / spot at entry)` : undefined}
+              step={5} min={5} label="PE SL %" wrapperClassName="flex-1 min-w-0" className="w-full min-w-0 h-5 text-center text-[11px]" />
           </div>
         </div>
 
@@ -6947,7 +7019,7 @@ export default function FocusTool() {
   // toggles Risk on expects it to be watching straight away rather than only
   // after a separate Save.
   const schedulerSnapshot = {
-    config, rowLive, spots, toolPnl, lockMtm, peakMtm, liveRealMoney,
+    config, rowLive, spots, futQuotes: effectiveFutQuotes, toolPnl, lockMtm, peakMtm, liveRealMoney,
     riskEnabled, targetRupees, stopRupees, trailEnabled, triggerRupees, lockRupees,
   };
   const schedulerRef = useRef(schedulerSnapshot);
@@ -7420,8 +7492,17 @@ export default function FocusTool() {
     }
 
     // ── Immediate modes ──
+    // RE OTM after a target counts from the ATM now (same Spot / Fut base the row resolves its strikes from):
+    // the closed strike is already deep OTM, so rolling further out from it would leave the other leg naked.
+    let tgtAtm: number | null = null;
+    if (cfg.mode === 'otm' && trigger === 'tgt') {
+      const fut = snap.futQuotes[u]?.ltp ?? 0;
+      tgtAtm = atmStrike(group?.atmBy === 'Fut' && fut > 0 ? fut : (snap.spots[u] ?? 0), rowStep(row));
+    }
     const newStrike = cfg.mode === 'otm'
-      ? slRollStrike(leg, closedStrike, cfg.otmStrikes, rowStep(row))
+      ? trigger === 'tgt'
+        ? reTgtOtmStrike(leg, tgtAtm, cfg.otmStrikes, rowStep(row))
+        : slRollStrike(leg, closedStrike, cfg.otmStrikes, rowStep(row))
       : await resolvedStrikeAfterClose(rowId, leg);
     if (newStrike == null) {
       addToast('error', `${tag} no re-entry`, 'Could not resolve the current strike');
@@ -7439,7 +7520,7 @@ export default function FocusTool() {
       return 'unconfirmed';
     }
     addToast('success', `${tag} re-entered (${cfg.mode.toUpperCase()}${momKind === 'asap' ? ' — RE MOMENTUM with no momentum set' : ''})`,
-      `${what} at ${closedStrike} → re-sold ${lots} lot(s) at ${newStrike} (${done + 1}/${cfg.max})`);
+      `${what} at ${closedStrike} → re-sold ${lots} lot(s) at ${newStrike}${tgtAtm != null ? ` (${cfg.otmStrikes} OTM of ATM ${tgtAtm})` : ''} (${done + 1}/${cfg.max})`);
     return 'reentered';
   }
 

@@ -755,18 +755,31 @@ function clampReentryMax(v: unknown): number {
 
 /** The re-entry settings that apply to one trigger, with legacy fallbacks. */
 export function reentryConfig(
-  row: Pick<FocusRow, 'reSlMode' | 'reSlMax' | 'reTgtMode' | 'reTgtMax' | 'slRollStrikes' | 'slRollMax'>,
+  row: Pick<FocusRow, 'reSlMode' | 'reSlMax' | 'reTgtMode' | 'reTgtMax' | 'slRollStrikes' | 'slRollMax'>
+    & Partial<Pick<FocusRow, 'reTgtOtmStrikes'>>,
   trigger: FocusReentryTrigger,
 ): { mode: FocusReentryMode; max: number; otmStrikes: number } {
-  const otmStrikes = Math.max(1, Math.trunc(Number(row.slRollStrikes) || 0));
   if (trigger === 'sl') {
+    const otmStrikes = Math.max(1, Math.trunc(Number(row.slRollStrikes) || 0));
     // Rows saved before re-entry modes existed only had the OTM roll.
     const mode = row.reSlMode ?? (Number(row.slRollStrikes) > 0 ? 'otm' : 'off');
     const max = row.reSlMax ?? row.slRollMax ?? DEFAULT_SL_ROLL_MAX;
     return { mode, max: clampReentryMax(max), otmStrikes };
   }
   const max = row.reTgtMax ?? DEFAULT_SL_ROLL_MAX;
+  // RE OTM on target counts from the ATM now, not the closed strike (see reTgtOtmStrike).
+  const otmStrikes = Math.max(1, Math.trunc(Number(row.reTgtOtmStrikes) || 0));
   return { mode: row.reTgtMode ?? 'off', max: clampReentryMax(max), otmStrikes };
+}
+
+/**
+ * RE OTM after a leg TARGET: `strikes` OTM of the ATM now (CE up, PE down). A target hits because spot has moved away
+ * from the leg, so the closed strike is already deep OTM (rolling further from it leaves the other leg naked), while
+ * RE ASAP's row offset can land on ATM. Measuring from today's ATM keeps the new leg a set distance from spot. Null
+ * when ATM is unknown.
+ */
+export function reTgtOtmStrike(leg: 'CE' | 'PE', atm: number | null, strikes: number, step: number): number | null {
+  return atm != null && atm > 0 && step > 0 ? slRollStrike(leg, atm, Math.max(1, strikes), step) : null;
 }
 
 /**

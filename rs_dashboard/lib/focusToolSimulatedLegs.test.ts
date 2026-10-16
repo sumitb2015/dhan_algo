@@ -17,7 +17,7 @@ import assert from 'node:assert/strict';
 
 import {
   EMPTY_ROW_LIVE, legStopReason, legStopLevel, legTargetReason, reentryConfig, evaluateReentry,
-  slRollStrike, pendingReentryLevel, pendingReentryHit, costReentryBasis, awaitingMomentumQuote,
+  slRollStrike, reTgtOtmStrike, pendingReentryLevel, pendingReentryHit, costReentryBasis, awaitingMomentumQuote,
   MAX_LEG_REENTRIES, DEFAULT_SL_ROLL_MAX,
   type RowLive,
 } from './focusToolRules.ts';
@@ -245,6 +245,20 @@ for (const m of MARKETS) {
     assert.equal(slRollStrike('CE', atm, 0, m.step), atm);
     assert.equal(slRollStrike('CE', atm, -2, m.step), atm);          // never rolls the wrong way
     assert.equal(slRollStrike('PE', atm, 1.9, m.step), atm - m.step); // truncated, not rounded up
+  });
+
+  test(`${tag} RE OTM on target: N strikes OTM of the ATM now, not of the decayed strike`, () => {
+    const atm = Math.round(m.spot / m.step) * m.step;
+    // spot rallied: the PE that hit target sits far below; the new PE is N below the ATM now
+    assert.equal(reTgtOtmStrike('PE', atm, 2, m.step), atm - 2 * m.step);
+    assert.equal(reTgtOtmStrike('CE', atm, 2, m.step), atm + 2 * m.step);
+    assert.equal(reTgtOtmStrike('CE', atm, 0, m.step), atm + m.step);   // at least one strike OTM
+    assert.equal(reTgtOtmStrike('PE', null, 1, m.step), null);           // ATM unknown → no re-entry
+    // its own strike count; the SL roll keeps slRollStrikes
+    const row = { reSlMode: 'otm', reTgtMode: 'otm', slRollStrikes: 1, reTgtOtmStrikes: 3 } as never;
+    assert.equal(reentryConfig(row, 'tgt').otmStrikes, 3);
+    assert.equal(reentryConfig(row, 'sl').otmStrikes, 1);
+    assert.equal(reentryConfig({ reTgtMode: 'otm' } as never, 'tgt').otmStrikes, 1);
   });
 
   test(`${tag} RE Cost / Momentum: what a waiting re-entry waits for`, () => {
