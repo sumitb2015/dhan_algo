@@ -8,7 +8,11 @@
 //   - `ltt` runs 19,800 s (5 h 30 m) ahead of `lut` - an IST-shifted epoch. `lut` is a true UTC epoch,
 //     so freshness is judged on `lut` and on the bridge's own `updated_at`.
 
-export const US_WATCHLIST_MAX = 100;
+/** Symbols the user can add to their own watchlist. */
+export const US_WATCHLIST_MAX = 200;
+/** Total the bridge subscribes: user watchlist + dashboard universe (2 subscriptions each, of the 5,000 a connection allows).
+ *  The bridge trims universe names first, never the user's. Keep in sync with MAX_WATCHLIST in scripts/tools/live_us_ws.py. */
+export const US_SUBSCRIBE_MAX = 400;
 
 export interface UsInstrument {
   /** Dhan SCRIP_CODE - the securityId the feed and the orders API use. */

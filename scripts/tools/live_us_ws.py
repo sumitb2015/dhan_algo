@@ -44,6 +44,7 @@ from lib.market_hub_client import is_pid_running  # noqa: E402  (psutil + image-
 
 DEBUG_DIR = os.path.join(ROOT, 'debug')
 WATCHLIST_FILE = os.path.join(DEBUG_DIR, 'live_us_watchlist.json')
+UNIVERSE_FILE = os.path.join(DEBUG_DIR, 'live_us_universe.json')   # the dashboard's curated market universe (written by the route)
 QUOTES_FILE = os.path.join(DEBUG_DIR, 'live_us_quotes.json')
 STATUS_FILE = os.path.join(DEBUG_DIR, 'live_us_status.json')
 STOP_TRIGGER = os.path.join(DEBUG_DIR, 'live_us_stop.trigger')
@@ -54,7 +55,7 @@ FEED_HOST = 'wss://global-stocks-api-feed.dhan.co/'
 SEG_INX_EQ = 'INX_EQ'
 REQ_DISCONNECT, REQ_SUB_TRADE, REQ_UNSUB_TRADE, REQ_SUB_OHLC, REQ_UNSUB_OHLC = 12, 15, 16, 17, 18
 MAX_PER_REQUEST = 100          # spec: max instruments in one subscribe/unsubscribe message
-MAX_WATCHLIST = 100            # 2 subscriptions per symbol -> 200 of the 5000 a connection allows
+MAX_WATCHLIST = 400            # watchlist + universe; 2 subscriptions per symbol -> 800 of the 5000 a connection allows
 WRITE_EVERY_SEC = 1.0
 HEARTBEAT_SEC = 5.0
 LIVE_PID_FRESH_SEC = 15.0      # a status heartbeat younger than this + a live pid = another bridge is running
@@ -113,13 +114,22 @@ def load_credentials() -> tuple[str, str]:
     return client_id, token
 
 
+def _ids_from(path: str, need_enabled: bool) -> list[str]:
+    data = read_json(path) or {}
+    if not isinstance(data, dict) or (need_enabled and data.get('enabled') is not True):
+        return []
+    ids = data.get('ids')
+    return [str(v).strip() for v in ids] if isinstance(ids, list) else []
+
+
 def read_watchlist() -> list[str]:
-    data = read_json(WATCHLIST_FILE) or {}
-    ids = data.get('ids') if isinstance(data, dict) else None
+    """The ids to subscribe: the user's watchlist first, then the dashboard universe (only while it is enabled), de-duplicated
+    in that order and capped at MAX_WATCHLIST - so a cap can only ever trim universe names, never a symbol the user added."""
     out: list[str] = []
-    for v in ids or []:
-        s = str(v).strip()
-        if _ID_RE.match(s) and s not in out:
+    seen: set[str] = set()
+    for s in _ids_from(WATCHLIST_FILE, False) + _ids_from(UNIVERSE_FILE, True):
+        if _ID_RE.match(s) and s not in seen:
+            seen.add(s)
             out.append(s)
     return out[:MAX_WATCHLIST]
 

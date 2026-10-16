@@ -35,9 +35,10 @@ class BridgeTestCase(unittest.IsolatedAsyncioTestCase):
         self.tmp = tempfile.TemporaryDirectory()
         d = self.tmp.name
         self.saved = {k: getattr(bridge_mod, k) for k in (
-            'DEBUG_DIR', 'WATCHLIST_FILE', 'QUOTES_FILE', 'STATUS_FILE', 'STOP_TRIGGER', 'TOKEN_FILE', 'ENV_FILE', 'FEED_HOST', 'BACKOFF_START', 'BACKOFF_MAX')}
+            'DEBUG_DIR', 'WATCHLIST_FILE', 'UNIVERSE_FILE', 'QUOTES_FILE', 'STATUS_FILE', 'STOP_TRIGGER', 'TOKEN_FILE', 'ENV_FILE', 'FEED_HOST', 'BACKOFF_START', 'BACKOFF_MAX')}
         bridge_mod.DEBUG_DIR = d
         bridge_mod.WATCHLIST_FILE = os.path.join(d, 'wl.json')
+        bridge_mod.UNIVERSE_FILE = os.path.join(d, 'universe.json')
         bridge_mod.QUOTES_FILE = os.path.join(d, 'q.json')
         bridge_mod.STATUS_FILE = os.path.join(d, 's.json')
         bridge_mod.STOP_TRIGGER = os.path.join(d, 'stop.trigger')
@@ -190,6 +191,38 @@ class ErrorPacketTests(BridgeTestCase):
         self.assertEqual(code, 2)
         self.assertEqual(self.status()['status'], 'ERROR')
         self.assertIn('808', self.status()['error'])
+
+
+
+class WatchlistUnionTests(BridgeTestCase):
+    def write(self, path, obj):
+        with open(path, 'w') as f:
+            json.dump(obj, f)
+
+    def test_universe_is_ignored_unless_enabled(self):
+        self.write(bridge_mod.UNIVERSE_FILE, {'enabled': False, 'ids': ['10000001', '10000002']})
+        self.assertEqual(bridge_mod.read_watchlist(), ['10000025'])
+        os.remove(bridge_mod.UNIVERSE_FILE)
+        self.assertEqual(bridge_mod.read_watchlist(), ['10000025'])
+
+    def test_union_keeps_watchlist_first_and_dedupes(self):
+        self.write(bridge_mod.UNIVERSE_FILE, {'enabled': True, 'ids': ['10000001', '10000025', 'x1', '10000002']})
+        self.assertEqual(bridge_mod.read_watchlist(), ['10000025', '10000001', '10000002'])
+
+    def test_turning_the_universe_off_leaves_only_the_watchlist(self):
+        self.write(bridge_mod.UNIVERSE_FILE, {'enabled': True, 'ids': ['10000001']})
+        self.assertEqual(len(bridge_mod.read_watchlist()), 2)
+        self.write(bridge_mod.UNIVERSE_FILE, {'enabled': False, 'ids': ['10000001']})
+        self.assertEqual(bridge_mod.read_watchlist(), ['10000025'])
+
+    def test_cap_trims_universe_never_the_watchlist(self):
+        mine = [str(20000000 + i) for i in range(5)]
+        self.write(bridge_mod.WATCHLIST_FILE, {'ids': mine})
+        self.write(bridge_mod.UNIVERSE_FILE, {'enabled': True, 'ids': [str(10000000 + i) for i in range(1000)]})
+        out = bridge_mod.read_watchlist()
+        self.assertEqual(len(out), bridge_mod.MAX_WATCHLIST)
+        self.assertEqual(out[:5], mine)
+        self.assertTrue(bridge_mod.MAX_WATCHLIST * 2 <= 5000)
 
 
 if __name__ == '__main__':

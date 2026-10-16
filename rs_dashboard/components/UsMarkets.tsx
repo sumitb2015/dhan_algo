@@ -1,10 +1,13 @@
 'use client';
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { AlertTriangle, Globe, Info, Loader2, Play, Plus, RotateCcw, Search, Square, X } from 'lucide-react';
+import { AlertTriangle, Globe, Info, LayoutGrid, Loader2, Play, Plus, RotateCcw, Search, Square } from 'lucide-react';
 import NavBar from '@/components/NavBar';
 import { cn } from '@/lib/utils';
 import type { BridgeHealth, BridgeStatus, UsInstrument, UsQuoteRow } from '@/lib/usStocks';
+import UsQuoteTable from '@/components/us-markets/UsQuoteTable';
+import UsDashboard from '@/components/us-markets/UsDashboard';
+import { ageText, usDataDate } from '@/components/us-markets/format';
 
 const POLL_MS = 1500;
 const QUICK = ['AAPL', 'MSFT', 'NVDA', 'AMZN', 'GOOGL', 'META', 'TSLA', 'SPY', 'QQQ'];
@@ -13,7 +16,11 @@ interface LiveResponse {
   success: boolean; error?: string;
   health: BridgeHealth; status: BridgeStatus | null; rows: UsQuoteRow[];
   quotesAgeMs: number | null; serverTime: number; max: number;
+  universe?: { enabled: boolean; count: number; subscribeMax: number };
 }
+
+type Tab = 'dashboard' | 'watchlist';
+const TAB_KEY = 'usMarkets.tab';
 
 const HEALTH_UI: Record<BridgeHealth, { label: string; cls: string }> = {
   live: { label: 'Live feed', cls: 'text-emerald-400 bg-emerald-500/10 border-emerald-500/20' },
@@ -23,37 +30,6 @@ const HEALTH_UI: Record<BridgeHealth, { label: string; cls: string }> = {
   stopped: { label: 'Feed stopped', cls: 'text-zinc-400 bg-zinc-800 border-zinc-700' },
   error: { label: 'Feed error', cls: 'text-red-400 bg-red-500/10 border-red-500/20' },
 };
-
-/** Seconds below a minute, then minutes/hours - a tick feed needs the seconds that fmtAge drops. */
-function ageText(ms: number): string {
-  const s = Math.max(0, Math.round(ms / 1000));
-  if (s < 60) return `${s}s ago`;
-  const m = Math.round(s / 60);
-  return m < 90 ? `${m}m ago` : `${Math.round(m / 60)}h ago`;
-}
-
-const usd = (v: number | null, dec = 2) => (v == null ? '–' : v.toLocaleString('en-US', { minimumFractionDigits: dec, maximumFractionDigits: dec }));
-const compact = (v: number | null) => (v == null ? '–' : new Intl.NumberFormat('en-US', { notation: 'compact', maximumFractionDigits: 2 }).format(v));
-const signCls = (v: number | null) => (v == null || v === 0 ? 'text-zinc-300' : v > 0 ? 'text-emerald-400' : 'text-red-400');
-
-/** The US trading date of the newest quote, in New York time - the date the numbers belong to. */
-function usDataDate(rows: UsQuoteRow[], serverTime: number): string | null {
-  let ageMin: number | null = null;
-  for (const r of rows) if (r.tradeAgeMs != null && (ageMin == null || r.tradeAgeMs < ageMin)) ageMin = r.tradeAgeMs;
-  if (ageMin == null) return null;
-  return new Intl.DateTimeFormat('en-CA', { timeZone: 'America/New_York', year: 'numeric', month: '2-digit', day: '2-digit' }).format(serverTime - ageMin);
-}
-
-interface Col { key: string; label: string; align: 'l' | 'r'; cell: (r: UsQuoteRow, i: number) => React.ReactNode }
-
-function RangeBar({ pos }: { pos: number | null }) {
-  if (pos == null) return <span className="text-zinc-500">–</span>;
-  return (
-    <span className="inline-block align-middle w-20 h-1.5 rounded-full bg-zinc-800 relative" title={`${Math.round(pos * 100)}% of the 52-week range`}>
-      <span className="absolute top-1/2 -translate-y-1/2 h-2.5 w-1 rounded-sm bg-emerald-400" style={{ left: `calc(${pos * 100}% - 2px)` }} />
-    </span>
-  );
-}
 
 export default function UsMarkets() {
   const [data, setData] = useState<LiveResponse | null>(null);
@@ -68,6 +44,18 @@ export default function UsMarkets() {
   const [searching, setSearching] = useState(false);
   const seq = useRef(0);
   const searchSeq = useRef(0);
+  const [tab, setTabState] = useState<Tab>('dashboard');
+  const [dashDate, setDashDate] = useState<string | null>(null);
+
+  // The chosen tab is a per-viewer convenience; storage can throw (private mode), so it is optional.
+  useEffect(() => {
+    // Read after mount (the server render has no storage), deferred a tick so it is not a synchronous setState in the effect.
+    const t = setTimeout(() => {
+      try { const v = localStorage.getItem(TAB_KEY); if (v === 'watchlist' || v === 'dashboard') setTabState(v); } catch { /* no storage */ }
+    }, 0);
+    return () => clearTimeout(t);
+  }, []);
+  const setTab = (t: Tab) => { setTabState(t); try { localStorage.setItem(TAB_KEY, t); } catch { /* no storage */ } };
 
   const load = useCallback(async () => {
     const mine = ++seq.current;
@@ -165,33 +153,10 @@ export default function UsMarkets() {
     } finally { setBusy(null); }
   };
 
-  const columns: Col[] = [
-    { key: 'sym', label: 'Symbol', align: 'l', cell: r => (
-      <span className="flex flex-col leading-tight">
-        <span className="font-bold text-zinc-100">{r.symbol}<span className="ml-2 text-[10px] font-medium text-zinc-500">{r.exchange}</span></span>
-        <span className="text-[10px] text-zinc-500 truncate max-w-[16rem]">{r.name}</span>
-      </span>) },
-    { key: 'ltp', label: 'Last', align: 'r', cell: r => <span className={cn('font-semibold', signCls(r.change))}>{usd(r.ltp)}</span> },
-    { key: 'chg', label: 'Chg', align: 'r', cell: r => <span className={signCls(r.change)}>{r.change == null ? '–' : (r.change > 0 ? '+' : '') + usd(r.change)}</span> },
-    { key: 'pct', label: 'Chg %', align: 'r', cell: r => <span className={signCls(r.changePct)}>{r.changePct == null ? '–' : (r.changePct > 0 ? '+' : '') + r.changePct.toFixed(2) + '%'}</span> },
-    { key: 'open', label: 'Open', align: 'r', cell: r => usd(r.open) },
-    { key: 'high', label: 'High', align: 'r', cell: r => usd(r.high) },
-    { key: 'low', label: 'Low', align: 'r', cell: r => usd(r.low) },
-    { key: 'prev', label: 'Prev close', align: 'r', cell: r => usd(r.prevClose) },
-    { key: 'vol', label: 'Volume', align: 'r', cell: r => compact(r.volume) },
-    { key: 'wk', label: '52-wk range', align: 'r', cell: r => (
-      <span className="inline-flex items-center gap-2 justify-end">
-        <span className="text-[10px] text-zinc-500">{usd(r.wk52Low, 0)}</span><RangeBar pos={r.wk52Pos} /><span className="text-[10px] text-zinc-500">{usd(r.wk52High, 0)}</span>
-      </span>) },
-    { key: 'age', label: 'Last trade', align: 'r', cell: r => <span className="text-zinc-500">{r.tradeAgeMs == null ? '–' : ageText(r.tradeAgeMs + (now - (data?.serverTime ?? now)))}</span> },
-    { key: 'rm', label: '', align: 'r', cell: r => (
-      <button onClick={() => post({ action: 'remove', id: r.id }, `rm-${r.id}`)} disabled={busy === `rm-${r.id}`} aria-label={`Remove ${r.symbol}`}
-        className="h-6 w-6 inline-flex items-center justify-center rounded text-zinc-500 hover:text-red-400 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500/60">
-        <X className="h-3.5 w-3.5" aria-hidden="true" />
-      </button>) },
-  ];
-
-  const dataDate = data ? usDataDate(rows, data.serverTime) : null;
+  const watchDate = data ? usDataDate(rows, data.serverTime) : null;
+  const dataDate = tab === 'dashboard' ? dashDate : watchDate;
+  const universe = data?.universe;
+  const universeOn = universe?.enabled === true;
   const canStart = health === 'stopped' || health === 'error';
   // `live` from the bridge is only believed while its quotes are fresh in this page's own clock.
   const uiHealth: BridgeHealth = health === 'live' && !live ? 'stale' : health;
@@ -206,10 +171,31 @@ export default function UsMarkets() {
           <div>
             <p className="text-[10px] font-bold uppercase tracking-[0.16em] text-sky-400 mb-0.5">Global · US stocks via Dhan</p>
             <h1 className="text-sm font-bold text-white tracking-tight leading-none">US Markets</h1>
-            <p className="text-[10px] text-zinc-500 font-medium mt-1">Live US trade ticks from Dhan&apos;s Global Stocks feed. Prices in USD. Watch-only - no orders.</p>
+            <p className="text-[10px] text-zinc-500 font-medium mt-1">Indices, GICS sectors and the AI stack from Dhan&apos;s Global Stocks feed. Prices in USD. Watch-only - no orders.</p>
           </div>
         </div>
         <div className="flex items-center gap-2 flex-wrap">
+          <div className="flex items-center gap-1 bg-zinc-900 border border-zinc-800 p-0.5 rounded-lg" role="group" aria-label="View">
+            {([['dashboard', 'Dashboard'], ['watchlist', 'Watchlist']] as const).map(([k, label]) => (
+              <button key={k} onClick={() => setTab(k)} aria-pressed={tab === k}
+                className={cn('px-2.5 py-1 text-[11px] font-semibold rounded-md border transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-500/60',
+                  tab === k ? 'bg-sky-500/10 text-sky-400 border-sky-500/20' : 'text-zinc-500 hover:text-zinc-300 border-transparent')}>
+                {label}
+              </button>
+            ))}
+          </div>
+          <button onClick={() => post({ action: 'universe', enabled: !universeOn }, 'universe')} disabled={busy === 'universe' || !data} aria-pressed={universeOn}
+            title={`Stream the dashboard's curated sector + AI universe (${universe?.count ?? 0} symbols) as well as your watchlist`}
+            className={cn('h-8 px-3 inline-flex items-center gap-1.5 rounded-md border text-xs font-semibold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-500/60 disabled:opacity-50',
+              universeOn ? 'border-sky-500/30 bg-sky-500/10 text-sky-400' : 'border-zinc-700 bg-zinc-900 text-zinc-300')}>
+            {busy === 'universe' ? <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden="true" /> : <LayoutGrid className="h-3.5 w-3.5" aria-hidden="true" />}
+            Market universe {universeOn ? 'ON' : 'OFF'}
+          </button>
+          {data && universe && (
+            <span className="text-[10px] text-zinc-500 tabular-nums" title={`The feed subscribes your watchlist plus the universe (shared symbols once), at most ${universe.subscribeMax}`}>
+              {universeOn ? `${universe.count} universe + ` : ''}{rows.length} watchlist
+            </span>
+          )}
           <span className={cn('text-[10px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded border', HEALTH_UI[uiHealth].cls)}>
             {HEALTH_UI[uiHealth].label}
           </span>
@@ -240,7 +226,20 @@ export default function UsMarkets() {
         </div>
       </div>
 
-      <div className="flex-1 flex flex-col gap-3 px-6 py-5 max-w-[1680px] w-full mx-auto">
+      <div className="flex-1 flex flex-col gap-3 px-4 sm:px-6 py-5 max-w-[1680px] w-full mx-auto">
+        {notice && tab === 'dashboard' && (
+          <div role={notice.kind === 'error' ? 'alert' : 'status'} className={cn('flex items-start gap-2 rounded-lg border px-3 py-2 text-xs',
+            notice.kind === 'error' ? 'border-red-500/30 bg-red-500/10 text-red-400' : 'border-zinc-700 bg-zinc-900 text-zinc-300')}>
+            <AlertTriangle className="h-3.5 w-3.5 shrink-0 mt-0.5" aria-hidden="true" /><span>{notice.text}</span>
+          </div>
+        )}
+        {data?.status?.error && (health === 'error' || health === 'stale') && tab === 'dashboard' && (
+          <div role="alert" className="flex items-start gap-2 rounded-lg border border-red-500/30 bg-red-500/10 px-3 py-2 text-xs text-red-400">
+            <AlertTriangle className="h-3.5 w-3.5 shrink-0 mt-0.5" aria-hidden="true" /><span>Feed: {data.status.error}</span>
+          </div>
+        )}
+        {tab === 'dashboard' && <UsDashboard onDataDate={setDashDate} universeOn={universeOn} />}
+        {tab === 'watchlist' && (<>
         <div className="flex items-center gap-2 flex-wrap">
           <div className="relative">
             <Search className="absolute left-2 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-zinc-500" aria-hidden="true" />
@@ -316,20 +315,8 @@ export default function UsMarkets() {
         )}
 
         {rows.length > 0 && (
-          <div className="overflow-auto rounded-lg border border-zinc-800">
-            <table className="w-full text-xs tabular-nums">
-              <thead className="sticky top-0 z-10">
-                <tr>{columns.map(c => <th key={c.key} scope="col" className={cn('px-3 py-2 text-xs font-bold text-white bg-zinc-800 whitespace-nowrap', c.align === 'r' ? 'text-right' : 'text-left')}>{c.label}</th>)}</tr>
-              </thead>
-              <tbody>
-                {rows.map((r, i) => (
-                  <tr key={r.id} className="border-t border-zinc-800 hover:bg-zinc-900">
-                    {columns.map(c => <td key={c.key} className={cn('px-3 py-1.5 whitespace-nowrap text-zinc-200', c.align === 'r' ? 'text-right' : 'text-left')}>{c.cell(r, i)}</td>)}
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
+          <UsQuoteTable rows={rows} clockSkewMs={now - (data?.serverTime ?? now)} busyKey={busy}
+            onRemove={r => post({ action: 'remove', id: r.id }, `rm-${r.id}`)} />
         )}
 
         <p className="text-[10px] text-zinc-500 leading-relaxed">
@@ -337,6 +324,7 @@ export default function UsMarkets() {
           A dash means the feed has not sent that value yet (volume appears with the first trade). The trade packet carries no VWAP, open interest or bid/ask.
           Needs the Global Stocks feed enabled on your Dhan account (feed error 806 = not enabled).
         </p>
+        </>)}
       </div>
     </div>
   );

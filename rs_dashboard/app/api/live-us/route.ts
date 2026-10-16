@@ -5,9 +5,10 @@ import { spawn } from 'child_process';
 import { isPidRunning } from '@/lib/processCheck';
 import { PYTHON_EXE } from '@/lib/pyExec';
 import {
-  bridgeHealth, buildUsRow, nextWatchlist, startBlockReason, US_WATCHLIST_MAX, type BridgeStatus, type RawUsQuote,
+  bridgeHealth, buildUsRow, nextWatchlist, startBlockReason, US_SUBSCRIBE_MAX, US_WATCHLIST_MAX, type BridgeStatus, type RawUsQuote,
 } from '@/lib/usStocks';
-import { getUsMaster, US_DEBUG_DIR } from '@/lib/usStocksServer';
+import { getUsMaster, readUniverseFile, US_DEBUG_DIR, writeUniverseFile } from '@/lib/usStocksServer';
+import { resolveUniverse } from '@/lib/usUniverse';
 
 export const dynamic = 'force-dynamic';
 
@@ -17,6 +18,8 @@ export const dynamic = 'force-dynamic';
 //   POST {action:'stop'}    -> write debug/live_us_stop.trigger
 //   POST {action:'restart'} -> a bridge whose heartbeat has gone stale (wedged, pid still alive) is killed and respawned
 //   POST {action:'add'|'remove', id}  -> edit debug/live_us_watchlist.json (serialised, validated against the master)
+//   POST {action:'universe', enabled} -> write debug/live_us_universe.json: the dashboard's curated universe (lib/usUniverse.ts),
+//                                        resolved to ids here; the bridge subscribes watchlist ∪ universe (cap US_SUBSCRIBE_MAX)
 const PROJECT_ROOT = path.resolve(process.cwd(), '..');
 const BRIDGE_SCRIPT = path.join(PROJECT_ROOT, 'scripts', 'tools', 'live_us_ws.py');
 const WATCHLIST_FILE = path.join(US_DEBUG_DIR, 'live_us_watchlist.json');
@@ -70,6 +73,11 @@ function pidAlive(pid: number): boolean {
   try { process.kill(pid, 0); return true; } catch { return false; }
 }
 
+function universeSummary(): { enabled: boolean; count: number; subscribeMax: number } {
+  const u = readUniverseFile();
+  return { enabled: u.enabled, count: u.enabled ? u.ids.length : 0, subscribeMax: US_SUBSCRIBE_MAX };
+}
+
 function health(): { status: BridgeStatus | null; health: ReturnType<typeof bridgeHealth> } {
   const status = readJson<BridgeStatus>(STATUS_FILE);
   const alive = typeof status?.pid === 'number' ? isPidRunning(status.pid) : false;
@@ -94,11 +102,12 @@ export async function GET(): Promise<NextResponse> {
   return NextResponse.json({
     success: true, health: h.health, status: h.status, rows, marketStatus: quotes?.market_status ?? null,
     quotesAgeMs, serverTime: now, max: US_WATCHLIST_MAX, masterSource: master.loadedFrom,
+    universe: universeSummary(),
   });
 }
 
 export async function POST(req: NextRequest): Promise<NextResponse> {
-  const body = await req.json().catch(() => ({})) as { action?: string; id?: unknown };
+  const body = await req.json().catch(() => ({})) as { action?: string; id?: unknown; enabled?: unknown };
   const action = String(body.action ?? '');
 
   if (action === 'stop') {
@@ -120,6 +129,19 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     });
     if (!out.ok) return NextResponse.json({ success: false, error: out.error }, { status: 400 });
     return NextResponse.json({ success: true, ids: out.ids });
+  }
+
+  if (action === 'universe') {
+    if (typeof body.enabled !== 'boolean') return NextResponse.json({ success: false, error: 'enabled must be true or false' }, { status: 400 });
+    const enabled = body.enabled;
+    let master;
+    try { master = await getUsMaster(); } catch (err) {
+      return NextResponse.json({ success: false, error: err instanceof Error ? err.message : 'US instrument list unavailable' }, { status: 502 });
+    }
+    // Ids are resolved from the server's own catalog and master - the browser only says on/off.
+    const r = resolveUniverse(new Map(master.list.map(i => [i.symbol, i.id])));
+    await withWriteLock(() => writeUniverseFile({ enabled, ids: r.ids }));
+    return NextResponse.json({ success: true, universe: universeSummary(), unresolved: r.unresolved });
   }
 
   if (action === 'start' || action === 'restart') {

@@ -2,7 +2,8 @@
 // Parsing/search is pure and lives in lib/usStocks.ts.
 import fs from 'fs';
 import path from 'path';
-import { parseUsScripMaster, type UsInstrument } from '@/lib/usStocks';
+import { bridgeHealth, parseUsScripMaster, type BridgeHealth, type BridgeStatus, type RawUsQuote, type UsInstrument } from '@/lib/usStocks';
+import { isPidRunning } from '@/lib/processCheck';
 
 const PROJECT_ROOT = path.resolve(process.cwd(), '..');
 const DEBUG_DIR = path.join(PROJECT_ROOT, 'debug');
@@ -72,6 +73,44 @@ export async function getUsMaster(): Promise<UsMaster> {
   const fresh = fromDisk('download');
   if (fresh) return fresh;
   throw new Error('US instrument list unavailable');
+}
+
+const UNIVERSE_FILE = path.join(DEBUG_DIR, 'live_us_universe.json');
+
+export interface UniverseFile { enabled: boolean; ids: string[] }
+
+/** debug/live_us_universe.json - read by scripts/tools/live_us_ws.py (subscribed only while enabled). Missing = off. */
+export function readUniverseFile(): UniverseFile {
+  try {
+    const j = JSON.parse(fs.readFileSync(UNIVERSE_FILE, 'utf8')) as { enabled?: unknown; ids?: unknown };
+    const ids = Array.isArray(j.ids) ? j.ids.map(String).filter(s => /^\d{1,9}$/.test(s)) : [];
+    return { enabled: j.enabled === true, ids };
+  } catch { return { enabled: false, ids: [] }; }
+}
+
+export function writeUniverseFile(u: UniverseFile): void {
+  fs.mkdirSync(DEBUG_DIR, { recursive: true });
+  const tmp = `${UNIVERSE_FILE}.${process.pid}.tmp`;
+  fs.writeFileSync(tmp, JSON.stringify({ enabled: u.enabled, ids: u.ids, updated_at: Date.now() }));
+  fs.renameSync(tmp, UNIVERSE_FILE);
+}
+
+function readJsonFile<T>(file: string): T | null {
+  try { return JSON.parse(fs.readFileSync(file, 'utf8')) as T; } catch { return null; }
+}
+
+export interface UsQuotesFile { updated_at?: number; connected?: boolean; market_status?: unknown; quotes?: Record<string, RawUsQuote> }
+
+/** The bridge's last quotes snapshot (may be from an earlier session - judge it by `updated_at` and the bridge health). */
+export function readUsQuotes(): UsQuotesFile | null {
+  return readJsonFile<UsQuotesFile>(path.join(DEBUG_DIR, 'live_us_quotes.json'));
+}
+
+/** Bridge health from its status file + a pid check (the same rule the /api/live-us route uses). */
+export function readUsBridgeHealth(): { status: BridgeStatus | null; health: BridgeHealth } {
+  const status = readJsonFile<BridgeStatus>(path.join(DEBUG_DIR, 'live_us_status.json'));
+  const alive = typeof status?.pid === 'number' ? isPidRunning(status.pid) : false;
+  return { status, health: bridgeHealth(status, alive, Date.now()) };
 }
 
 export { DEBUG_DIR as US_DEBUG_DIR };
