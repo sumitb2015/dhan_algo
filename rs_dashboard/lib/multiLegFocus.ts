@@ -279,6 +279,21 @@ export function autoReentryStrikeByPremium(quotes: Record<string, { ce?: number;
   return best;
 }
 
+/** MATCH_OPPOSITE target: among open, filled, opposite-type SHORT legs in the exited leg's own expiry (never
+ *  another expiry), the one with the highest live premium. Unpriced (ltp <= 0) and `skip`ped legs don't count;
+ *  ties keep leg order. Undefined when none qualifies — the caller falls back to same distance. */
+export function pickMatchOppositeLeg(legs: MultiLegLeg[], exited: MultiLegLeg, expiry: string, basketExpiry: string,
+  ltp: (l: MultiLegLeg) => number, skip: (l: MultiLegLeg) => boolean): { leg: MultiLegLeg; ltp: number } | undefined {
+  let best: { leg: MultiLegLeg; ltp: number } | undefined;
+  for (const l of legs) {
+    if (l.id === exited.id || l.status !== 'OPEN' || !l.fill || l.side !== 'S' || l.option === exited.option) continue;
+    if ((l.expiry || basketExpiry) !== expiry || skip(l)) continue;
+    const p = ltp(l);
+    if (p > 0 && (!best || p > best.ltp)) best = { leg: l, ltp: p };
+  }
+  return best;
+}
+
 /** `strike` itself, or the next strike OTM (CE up / PE down) when it equals the strike that just exited. Null when that is off the chain. */
 export function avoidSameStrike(strikes: number[], strike: number, exited: number, option: 'CE' | 'PE'): number | null {
   if (strike !== exited) return strike;

@@ -30,7 +30,7 @@ import HelpModal from './HelpModal';
 import {
   resolveTemplateLegs, reconcileLegWithBroker, sortLegsForExit, findLegPosition, executionBroker,
   applyOrderOutcomes, normalizeOrderRow, withPendingOrder, restingExitOrders, settleWaitingEntry, applyTriggeredEntry, type WaitingEntry, LEG_FILL_GRACE_MS, legBrokerMismatch, classifyDhanOrder, type DhanOrderPhase, type NormalizedOrder,
-  computeLegTrailingSL, legRiskView, trailAnchorPatch, legTrailPatch, withAutoLegRisk, legPnl, SAME_DISTANCE, MATCH_OPPOSITE, autoRuleOwns, autoReentryStrike, autoReentryStrikeByDistance, autoReentryStrikeByPremium, entryDistance, avoidSameStrike, autoRollAllowed, computeStrategyMetrics, checkStrategyRisk, fallbackLotSize, planScale, scalePlanSignature,
+  computeLegTrailingSL, legRiskView, trailAnchorPatch, legTrailPatch, withAutoLegRisk, legPnl, SAME_DISTANCE, MATCH_OPPOSITE, autoRuleOwns, autoReentryStrike, autoReentryStrikeByDistance, autoReentryStrikeByPremium, pickMatchOppositeLeg, entryDistance, avoidSameStrike, autoRollAllowed, computeStrategyMetrics, checkStrategyRisk, fallbackLotSize, planScale, scalePlanSignature,
   positionProduct, computeBasketStatus, closedFillFromRow,
   findSiblingLegCollisions, type SiblingLegCollision,
   recordOutsideReduction, isLegInFillGrace,
@@ -3431,10 +3431,13 @@ export default function MultiLegFocus({
               if (!strikeAllowed(basket.underlying, legExpiry, listedExp, Number(k))) continue;
               pickQuotes[k] = { ce: q.ceLive, pe: q.peLive };
             }
-            const oppLeg = reOffset === MATCH_OPPOSITE
-              ? (basketsRef.current.find(b => b.id === basket.id) ?? basket).legs.find(l => l.id !== leg.id && l.status === 'OPEN' && l.fill && l.side === 'S' && l.option !== leg.option && (l.expiry || basket.expiry) === legExpiry && !exitingLegsRef.current.has(l.id) && !recentlyTriggered(triggeredLegExitsRef.current, l.id))
+            // Highest-premium opposite short in THIS leg's expiry only (a basket can span expiries).
+            const opp = reOffset === MATCH_OPPOSITE
+              ? pickMatchOppositeLeg((basketsRef.current.find(b => b.id === basket.id) ?? basket).legs, leg, legExpiry, basket.expiry,
+                l => ltpFor(basket, l), l => exitingLegsRef.current.has(l.id) || recentlyTriggered(triggeredLegExitsRef.current, l.id))
               : undefined;
-            const oppLtp = oppLeg ? ltpFor(basket, oppLeg) : 0;
+            const oppLeg = opp?.leg;
+            const oppLtp = opp?.ltp ?? 0;
             const matchOpp = reOffset === MATCH_OPPOSITE && oppLtp > 0;
             // No priced opposite short (single leg, spread, condor side already out): fall back to same distance.
             const sameDist = reOffset === SAME_DISTANCE || (reOffset === MATCH_OPPOSITE && !matchOpp);

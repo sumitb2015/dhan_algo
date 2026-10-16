@@ -560,7 +560,7 @@ export default function MultiLegStrategyRow({
       onChange={e => onChange(parseReentryRule(e.target.value))}>
       <option value="off">Exit only</option>
       <option value={SAME_DISTANCE}>Same distance</option>
-      <option value={MATCH_OPPOSITE}>Match opposite premium</option>
+      <option value={MATCH_OPPOSITE} title="Premium of the highest-priced open opposite short in the same expiry">Match opposite premium</option>
       {offsetOpts.map(n => <option key={n} value={n}>{n === 0 ? 'ATM' : `ATM${n > 0 ? '+' : ''}${n}`}</option>)}
     </select>
   );

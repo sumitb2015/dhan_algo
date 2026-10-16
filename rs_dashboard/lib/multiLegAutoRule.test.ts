@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { withAutoLegRisk, autoReentryStrike, autoReentryStrikeByDistance, autoReentryStrikeByPremium, avoidSameStrike, entryDistance, autoRollAllowed, autoRuleOwns, DEFAULT_AUTO_LEG_RULE, type MultiLegLeg } from './multiLegFocus.ts';
+import { withAutoLegRisk, autoReentryStrike, autoReentryStrikeByDistance, autoReentryStrikeByPremium, avoidSameStrike, pickMatchOppositeLeg, entryDistance, autoRollAllowed, autoRuleOwns, DEFAULT_AUTO_LEG_RULE, type MultiLegLeg } from './multiLegFocus.ts';
 
 const rule = { ...DEFAULT_AUTO_LEG_RULE, enabled: true };
 const leg = (o: Partial<MultiLegLeg>) => ({ id: 'a', side: 'S', option: 'CE', strike: 24000, ...o }) as MultiLegLeg;
@@ -62,4 +62,30 @@ test('entryDistance is points OTM from spot, undefined without a spot', () => {
   assert.equal(entryDistance('CE', 24400, 24500), -100);
   assert.equal(entryDistance('CE', 25000, 0), undefined);
   assert.equal(entryDistance('CE', 25000, undefined), undefined);
+});
+
+test('match-opposite picks the highest-premium opposite short in the exited leg\'s expiry only', () => {
+  const near = '2026-10-20', far = '2026-10-27';
+  const open = (o: Partial<MultiLegLeg>) => leg({ status: 'OPEN', fill: { qty: 75, avgPrice: 50 }, ...o } as Partial<MultiLegLeg>);
+  const exited = open({ id: 'pe', option: 'PE', strike: 23800 });
+  const px: Record<string, number> = { c1: 40, c2: 65, w: 200, cf: 120, cz: 0 };
+  const ltp = (l: MultiLegLeg) => px[l.id] ?? 0;
+  const none = () => false;
+  const pick = (legs: MultiLegLeg[], exp = near, skip: (l: MultiLegLeg) => boolean = none) =>
+    pickMatchOppositeLeg(legs, exited, exp, near, ltp, skip)?.leg.id;
+
+  const c1 = open({ id: 'c1' }), c2 = open({ id: 'c2' });
+  assert.equal(pick([exited, c1, c2]), 'c2');
+  assert.equal(pick([exited, c2, c1]), 'c2');
+  // Long wing ignored even with a higher premium.
+  assert.equal(pick([exited, c1, open({ id: 'w', side: 'B' })]), 'c1');
+  // Another expiry is never considered, whatever its premium.
+  const cf = open({ id: 'cf', expiry: far });
+  assert.equal(pick([exited, c1, cf]), 'c1');
+  assert.equal(pick([exited, cf]), undefined);
+  assert.equal(pickMatchOppositeLeg([open({ id: 'pe', option: 'PE', expiry: far }), c1, cf], { ...exited, expiry: far }, far, near, ltp, none)?.leg.id, 'cf');
+  // Skipped (exiting / just triggered) and unpriced legs don't count.
+  assert.equal(pick([exited, c1, c2], near, l => l.id === 'c2'), 'c1');
+  assert.equal(pick([exited, c1, open({ id: 'cz' })]), 'c1');
+  assert.equal(pick([exited, open({ id: 'cz' })]), undefined);
 });
