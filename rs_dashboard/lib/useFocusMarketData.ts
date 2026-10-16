@@ -52,6 +52,8 @@ export function strikeKey(n: number | string): string {
 
 export interface FocusMarketData {
   futQuotes: Record<FocusUnderlying, FutQuote | null>;
+  /** India VIX from the top-indices poll; null until it first arrives. */
+  vixQuote: FutQuote | null;
   spotPrices: Record<FocusUnderlying, number>;
   /** When each underlying's spot last arrived in a poll that actually carried it (ms; 0 = never). */
   spotAt: Record<FocusUnderlying, number>;
@@ -70,6 +72,8 @@ export function useFocusMarketData({ broker, watched, watchedKey, rows, groups }
   rows: readonly Pick<FocusRow, 'underlying' | 'expiry'>[];
   groups: readonly Pick<FocusIndexGroup, 'underlying' | 'enabled'>[];
 }): FocusMarketData {
+  /** India VIX off the same top-indices poll, for the header (display only). */
+  const [vixQuote, setVixQuote] = useState<FutQuote | null>(null);
   const [futQuotes, setFutQuotes] = useState<Record<FocusUnderlying, FutQuote | null>>({
     NIFTY: null, BANKNIFTY: null, SENSEX: null, CRUDEOILM: null,
   });
@@ -111,6 +115,8 @@ export function useFocusMarketData({ broker, watched, watchedKey, rows, groups }
         .then((j: { success?: boolean; quotes?: Record<string, { ltp: number; change_pct: number | null }> }) => {
           if (!j.quotes) return;
           const q = j.quotes;
+          const vix = q.VIX;
+          if (vix?.ltp > 0) setVixQuote({ ltp: vix.ltp, change_pct: vix.change_pct ?? null });
           // Spot only. This endpoint has no futures rows at all — the header's
           // futures strip is served by /api/focus-tool/futures below — and it
           // dropped SENSEX in favour of CRUDEOIL, so SENSEX spot comes off its
@@ -309,5 +315,5 @@ export function useFocusMarketData({ broker, watched, watchedKey, rows, groups }
     return () => clearInterval(t);
   }, [broker, expiryKey, activeKey, rowExpiryKey]);
 
-  return { futQuotes, spotPrices, spotAt, lotSizes, expiries, lookups, chains };
+  return { futQuotes, vixQuote, spotPrices, spotAt, lotSizes, expiries, lookups, chains };
 }

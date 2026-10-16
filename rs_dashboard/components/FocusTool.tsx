@@ -2390,10 +2390,12 @@ function GhostBtn({ onClick, children, title }: { onClick?: () => void; children
 // â”€â”€ Sticky Header â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 function FocusHeader({
-  futQuotes, shown, realised, unrealised, total, marginAvailable, marginUtilized,
+  futQuotes, vixQuote, shown, realised, unrealised, total, marginAvailable, marginUtilized,
   wsLive, broker, setBroker, authenticatedBrokers, brokerLocked,
 }: {
   futQuotes: Record<FocusUnderlying, FutQuote | null>;
+  /** India VIX, shown after the futures. */
+  vixQuote: FutQuote | null;
   /** Indices the futures strip lists (all three; one batched quote call regardless). */
   shown: readonly FocusUnderlying[];
   realised: number; unrealised: number; total: number;
@@ -2443,6 +2445,18 @@ function FocusHeader({
             </div>
           );
         })}
+        <div className="flex flex-col items-center pl-6 border-l border-zinc-800"
+          title="India VIX last value and % change since previous close">
+          <span className="text-[11px] font-black text-zinc-500 uppercase tracking-widest">India VIX</span>
+          <span className="text-sm font-mono font-black text-zinc-100 tabular-nums">
+            {vixQuote ? vixQuote.ltp.toFixed(2) : '\u2014'}
+          </span>
+          {vixQuote?.change_pct != null && (
+            <span className={cn('text-[11px] font-mono font-bold', vixQuote.change_pct >= 0 ? 'text-emerald-400' : 'text-rose-400')}>
+              {vixQuote.change_pct >= 0 ? '+' : ''}{vixQuote.change_pct.toFixed(2)}%
+            </span>
+          )}
+        </div>
         <LivePulse active={wsLive} />
       </div>
 
@@ -4543,7 +4557,7 @@ export default function FocusTool() {
   const watchedKey = UNDERLYINGS.filter(u => config.rows.some(r => r.underlying === u)
     || config.groups.some(g => g.underlying === u && g.enabled)).join(',');
   const watched = useMemo(() => watchedKey.split(',').filter(Boolean) as FocusUnderlying[], [watchedKey]);
-  const { futQuotes, spotPrices, lotSizes, expiries, lookups, chains } = useFocusMarketData({
+  const { futQuotes, vixQuote, spotPrices, lotSizes, expiries, lookups, chains } = useFocusMarketData({
     broker, watched, watchedKey, rows: config.rows, groups: config.groups,
   });
   // For handlers that run outside a render (the fill-ledger writer stamps the
@@ -8668,6 +8682,7 @@ export default function FocusTool() {
 
       <FocusHeader
         futQuotes={effectiveFutQuotes}
+        vixQuote={vixQuote}
         shown={UNDERLYINGS}
         realised={realised}
         unrealised={unrealised}
