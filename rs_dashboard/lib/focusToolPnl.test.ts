@@ -250,6 +250,10 @@ test('fillRebasePatch: basis, closes before the price arrived, a replaced positi
   // from flat with no estimate: the traded price becomes the basis
   assert.deepEqual(fillRebasePatch({ curBasis: null, heldNow: 75, heldAfterAdd: 75, samePosition: true, assumed: 0, traded: 98.5, filled: 75 }),
     { basis: 98.5, bookedDelta: 0 });
+  // an ADD landed before the price arrived (65 @100 est → traded 98, then +65 @110 → blended 105 on 130)
+  // the true average is (98×65 + 110×65)/130 = 104
+  assert.deepEqual(fillRebasePatch({ curBasis: 105, heldNow: 130, heldAfterAdd: 65, addedSince: 65, samePosition: true, assumed: 100, traded: 98, filled: 65 }),
+    { basis: 104, bookedDelta: 0 });
   // unknown assumed on a held leg: nothing to correct
   assert.deepEqual(fillRebasePatch({ curBasis: null, heldNow: 150, heldAfterAdd: 150, samePosition: true, assumed: 0, traded: 98.5, filled: 75 }),
     { bookedDelta: 0 });

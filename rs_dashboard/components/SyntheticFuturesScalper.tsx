@@ -32,6 +32,8 @@ import { useLiveOptionsWS, type Broker } from '@/lib/useLiveOptionsWS';
 import { useBrokerSelector } from '@/hooks/useBrokerSelector';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import { exchangeSegmentFor, isCrudeUnderlying } from '@/lib/syntheticFuturesSegments';
+import { fetchSliceTradedPrice, finalAvgOf, readOrderPrice, type OrderPeek, type OrderPriceRead, type TradedSliceMemo } from '@/lib/tradedPriceClient';
+import { blendFillBasis, fillRebasePatch } from '@/lib/focusToolPnl';
 import {
   DEFAULT_HEDGE,
   HEDGE_MODES,
@@ -114,6 +116,13 @@ interface SyntheticLeg {
   // the position book lags a fresh fill and would otherwise read as "never
   // filled" and clamp qty to 0.
   openedAt?: number;
+  /** Total qty ADDED to this leg (its first open and every add-on). A traded-price correction uses it to tell later
+   *  adds from later reduces (fillRebasePatch). */
+  addedQty?: number;
+  /** This leg's opening orders and their qty — the exit report prices the entry from their actual fills. */
+  opens?: Array<{ orderId: string; qty: number }>;
+  /** An entry order's traded price never came back: entryPrice still holds (part of) an order-time estimate. */
+  entryUnconfirmed?: boolean;
 }
 
 interface ActiveSyntheticPosition {
@@ -251,6 +260,131 @@ function fmtSignedINR(n: number | null | undefined): string {
 // securityId (Dhan) or tradingSymbol (Kotak, Zerodha, and as a Dhan fallback).
 function legKey(l: SyntheticLeg): string {
   return l.securityId || l.tradingSymbol || '';
+}
+
+// ── Fill prices (Dhan) ─────────────────────────────────────────────────────
+// Entries are stamped at the live quote when the order goes out. These swap in each order's traded price so the
+// live P&L, and the targets / stops that read it, run on actual fills (skill dhan-fill-price-pnl). Module-level with
+// their dependencies passed in: they run long after the click that started them, never during a render.
+
+type LogFn = (type: 'ENTRY' | 'EXIT' | 'TRAIL' | 'REVERSE' | 'ERROR', msg: string, detail?: string) => void;
+type ToastFn = (type: 'success' | 'error' | 'info', title: string, msg?: string) => void;
+
+interface FillPriceDeps {
+  positionRef: { current: ActiveSyntheticPosition | null };
+  setPosition: (fn: (prev: ActiveSyntheticPosition | null) => ActiveSyntheticPosition | null) => void;
+  memo: TradedSliceMemo;
+  /** The page's own order-book poll (Dhan): read before any extra order-status call. */
+  peek: OrderPeek;
+  log: LogFn;
+  toast: ToastFn;
+}
+
+/** The position as a fill's write left it — filled in by the state updater that applied the fill. */
+interface FillCapture { posId: string | null; held: Map<string, number>; added: Map<string, number> }
+
+function captureLanded(c: FillCapture, pos: ActiveSyntheticPosition) {
+  c.posId = pos.id;
+  c.held = new Map(pos.legs.map(l => [legKey(l), l.qty] as const));
+  c.added = new Map(pos.legs.map(l => [legKey(l), l.addedQty ?? l.qty] as const));
+}
+
+/**
+ * Re-price open legs to their orders' traded prices, in the position the fills were written into (its id), measured
+ * against that write (held / added qty) — so adds or reduces that happen before the price arrives are accounted for
+ * (fillRebasePatch). A price that never arrives marks the leg entryUnconfirmed instead of passing the estimate off as
+ * a fill.
+ */
+async function repriceOpenLegs(
+  deps: FillPriceDeps, landed: FillCapture, fills: Array<{ key: string; orderId: string; estimate: number; qty: number }>,
+) {
+  if (!fills.length) return;
+  for (let i = 0; i < 40 && landed.posId == null; i++) await new Promise(res => setTimeout(res, 50));
+  const posId = landed.posId;
+  const markUnconfirmed = (key: string) => deps.setPosition(prev => {
+    if (!prev || prev.id !== posId) return prev;
+    const next = { ...prev, legs: prev.legs.map(l => (legKey(l) === key ? { ...l, entryUnconfirmed: true } : l)) };
+    deps.positionRef.current = next;
+    return next;
+  });
+  if (posId == null) {
+    deps.log('ENTRY', 'Entry fill prices could not be matched to the position — P&L uses the order-time quotes');
+    return;
+  }
+  await Promise.all(fills.map(async f => {
+    const px = await fetchSliceTradedPrice(f.orderId, 'open', f.qty, deps.memo, { peek: deps.peek });
+    if (px == null) {
+      markUnconfirmed(f.key);
+      deps.log('ENTRY', `Entry price for order ${f.orderId} not confirmed by the broker — that leg's P&L uses the order-time quote`);
+      return;
+    }
+    deps.setPosition(prev => {
+      if (!prev || prev.id !== posId) return prev;
+      const legs = prev.legs.map(l => {
+        if (legKey(l) !== f.key) return l;
+        const r = fillRebasePatch({
+          curBasis: l.entryPrice, heldNow: l.qty, heldAfterAdd: landed.held.get(f.key) ?? l.qty,
+          addedSince: Math.max(0, (l.addedQty ?? l.qty) - (landed.added.get(f.key) ?? l.addedQty ?? l.qty)),
+          samePosition: true, assumed: f.estimate, traded: px, filled: f.qty,
+        });
+        if (r.basis === undefined || !(r.basis > 0)) return l;
+        const ltp = l.currentLtp > 0 ? l.currentLtp : r.basis;
+        return { ...l, entryPrice: r.basis, pnl: l.side === 'BUY' ? (ltp - r.basis) * l.qty : (r.basis - ltp) * l.qty };
+      });
+      const next = { ...prev, legs };
+      deps.positionRef.current = next;
+      return next;
+    });
+  }));
+}
+
+/**
+ * After a flatten: the closed slice's P&L with BOTH sides at actual fills — the entry rebuilt from the leg's own
+ * opening orders, the exit from its close order. A leg whose entry can't be priced from fills is counted on its
+ * estimated entry and the result says so; it is never presented as all-fill.
+ */
+async function reportClosedPnlAtFills(
+  deps: FillPriceDeps,
+  closed: Array<{ key: string; side: 'BUY' | 'SELL'; entry: number; qty: number; opens?: Array<{ orderId: string; qty: number }>; entryUnconfirmed: boolean }>,
+  results: Array<{ orderId?: string; securityId?: string; tradingSymbol?: string }>,
+  estimate: number,
+) {
+  let total = 0;
+  let missing = 0;
+  let estimatedEntries = 0;
+  await Promise.all(closed.map(async c => {
+    const res = results.find(r => (r.securityId || r.tradingSymbol || '') === c.key && r.orderId);
+    const exit = res?.orderId ? await fetchSliceTradedPrice(res.orderId, 'close', c.qty, deps.memo, { peek: deps.peek }) : null;
+    if (exit == null) { missing += 1; return; }
+    // Entry from the opening orders' own final averages (no slicing memo: each is read whole).
+    let entry: number | null = null;
+    if (c.opens?.length) {
+      let value = 0;
+      let qty = 0;
+      for (const o of c.opens) {
+        let avg = finalAvgOf(deps.peek(o.orderId));
+        if (!(avg > 0)) avg = finalAvgOf(await readOrderPrice(o.orderId));
+        if (!(avg > 0)) { value = NaN; break; }
+        value += avg * o.qty;
+        qty += o.qty;
+      }
+      if (qty > 0 && Number.isFinite(value)) entry = value / qty;
+    }
+    if (entry == null) {
+      if (!(c.entry > 0)) { missing += 1; return; }
+      entry = c.entry;
+      estimatedEntries += 1;
+    }
+    total += c.side === 'BUY' ? (exit - entry) * c.qty : (entry - exit) * c.qty;
+  }));
+  const notes = [
+    missing ? `${missing} leg(s) not confirmed — excluded` : '',
+    estimatedEntries ? `${estimatedEntries} leg(s) on an estimated entry` : '',
+  ].filter(Boolean).join('; ');
+  const allFills = !missing && !estimatedEntries;
+  const title = allFills ? 'Exit P&L at actual fills' : 'Exit P&L (partly estimated)';
+  deps.log('EXIT', `${title}: ${fmtSignedINR(total)}${notes ? ` (${notes})` : ''}`, `Estimate at the time: ${fmtSignedINR(estimate)}`);
+  deps.toast(allFills ? 'success' : 'info', title, `${fmtSignedINR(total)}${notes ? ` (${notes})` : ''} · estimate was ${fmtSignedINR(estimate)}`);
 }
 
 // The position's lot count, derived from what's actually live on the main
@@ -492,6 +626,15 @@ export default function SyntheticFuturesScalper() {
   // Active Synthetic Position State
   const [activePosition, setActivePosition] = useState<ActiveSyntheticPosition | null>(null);
   const activePositionRef = useRef<ActiveSyntheticPosition | null>(null);
+  // Traded prices already applied per order slice (`orderId:open|close`), so a late slice is priced on its own.
+  const tradedSliceRef = useRef<TradedSliceMemo>(new Map());
+  /** The fill-price helpers' dependencies, built at call time inside handlers (never during a render). */
+  // Dhan orders from the page's own 3 s order-book poll, by id — the fill-price helpers read these first.
+  const polledOrdersRef = useRef<Map<string, OrderPriceRead>>(new Map());
+  const fillDeps = (): FillPriceDeps => ({
+    positionRef: activePositionRef, setPosition: setActivePosition, memo: tradedSliceRef.current,
+    peek: id => polledOrdersRef.current.get(id), log: addLog, toast: addToast,
+  });
   const [inFlight, setInFlight] = useState<boolean>(false);
   const inFlightRef = useRef<boolean>(false);
   const [visualFlash, setVisualFlash] = useState<'LONG' | 'SHORT' | 'EXIT' | null>(null);
@@ -1209,7 +1352,15 @@ export default function SyntheticFuturesScalper() {
       }
 
       const nowTs = Date.now();
-      for (const leg of initialLegs) leg.openedAt = nowTs;
+      for (const leg of initialLegs) {
+        leg.openedAt = nowTs;
+        const live = leg.orderId && leg.status !== 'REJECTED' && leg.status !== 'FAILED' && leg.status !== 'SKIPPED' && leg.qty > 0;
+        leg.addedQty = live ? leg.qty : 0;
+        leg.opens = live ? [{ orderId: String(leg.orderId), qty: leg.qty }] : [];
+      }
+      // What the position looks like once the write below lands (filled in by the updater): the traded-price
+      // correction measures against exactly this, never a guessed snapshot.
+      const landed: FillCapture = { posId: null, held: new Map(), added: new Map() };
 
       // Reset the auto-exit warmup window so the §10 watcher can't fire for
       // 8 s from now — the fill confirmation and first subsequent price tick
@@ -1242,6 +1393,7 @@ export default function SyntheticFuturesScalper() {
             broker: effectiveBroker,
           };
           activePositionRef.current = freshPos;
+          captureLanded(landed, freshPos);
           finalTotalLots = lots;
           finalSynthPrice = syntheticFuturePrice;
           return freshPos;
@@ -1309,6 +1461,9 @@ export default function SyntheticFuturesScalper() {
               ...existing,
               qty: combinedQty,
               entryPrice: combinedEntryPrice,
+              addedQty: (isExistingLive ? existing.addedQty ?? existing.qty : 0) + newLeg.qty,
+              opens: [...(isExistingLive ? existing.opens ?? [] : []), ...(newLeg.opens ?? [])],
+              entryUnconfirmed: (isExistingLive && existing.entryUnconfirmed) || undefined,
               currentLtp,
               pnl: combinedPnl,
               orderId: combinedOrderId,
@@ -1366,6 +1521,7 @@ export default function SyntheticFuturesScalper() {
           broker: prev.broker ?? effectiveBroker,
         };
         activePositionRef.current = updatedPos;
+        captureLanded(landed, updatedPos);
         return updatedPos;
       });
 
@@ -1391,6 +1547,12 @@ export default function SyntheticFuturesScalper() {
           `Entered Synthetic ${direction} @ ${fmtNum(syntheticFuturePrice, 2)} (${lots} lots · ATM ${atmStrike})`,
           `Orders: ${(json.orderIds || []).join(', ')}`
         );
+      }
+      // Each leg's entry was stamped at the live quote: swap in the order's traded price (Dhan reports it per order).
+      if (effectiveBroker === 'dhan') {
+        void repriceOpenLegs(fillDeps(), landed, initialLegs
+          .filter(l => l.orderId && l.status !== 'REJECTED' && l.status !== 'FAILED' && l.status !== 'SKIPPED' && l.qty > 0)
+          .map(l => ({ key: legKey(l), orderId: String(l.orderId), estimate: l.entryPrice, qty: l.qty })));
       }
     } catch (err) {
       addToast('error', 'Execution Error', String(err));
@@ -1456,6 +1618,14 @@ export default function SyntheticFuturesScalper() {
 
         if (cancelled) return;
 
+        if (pollBroker === 'dhan') {
+          const m = new Map<string, OrderPriceRead>();
+          for (const o of json.orders as Array<Record<string, unknown>>) {
+            const id = String(o.orderId ?? '');
+            if (id) m.set(id, { status: String(o.orderStatus ?? ''), filledQty: Number(o.filledQty) || 0, avg: Number(o.averageTradedPrice) || 0 });
+          }
+          polledOrdersRef.current = m;
+        }
         const orderList = json.orders as Array<{
           orderId?: string | number;
           order_id?: string | number;
@@ -1694,10 +1864,23 @@ export default function SyntheticFuturesScalper() {
         const closedQty = closedQtyByLeg.get(legKey(l)) ?? 0;
         return acc + (l.qty > 0 ? (l.pnl * closedQty) / l.qty : 0);
       }, 0);
+      // The figure above is marked to the live quote. On Dhan, follow it with the P&L at the actual fills: each close
+      // order's traded price against the leg's (re-priced) entry.
+      if ((currentPos.broker ?? effectiveBroker) === 'dhan') {
+        void reportClosedPnlAtFills(
+          fillDeps(),
+          liveLegs.map(l => ({
+            key: legKey(l), side: l.side, entry: l.entryPrice, qty: closedQtyByLeg.get(legKey(l)) ?? 0,
+            opens: l.opens, entryUnconfirmed: !!l.entryUnconfirmed,
+          })).filter(l => l.qty > 0),
+          ((json.results ?? []) as Array<{ orderId?: string; securityId?: string; tradingSymbol?: string }>),
+          totalClosedPnl,
+        );
+      }
 
       // Marked-to-LTP, not the broker's confirmed fill price for the closed
       // slice — flag it as an estimate rather than implying a booked figure.
-      const pnlLabel = isPartial ? 'Est. Net P&L' : 'Net P&L';
+      const pnlLabel = 'Est. Net P&L';
       addToast(
         'success',
         isPartial ? `Closed ${targetLots} Lot(s)!` : 'Synthetic Position Flattened!',
@@ -1802,13 +1985,34 @@ export default function SyntheticFuturesScalper() {
         return;
       }
 
+      // The added qty's price: the live quote now (re-priced to the order's traded price below). Without a quote it
+      // is carried at the leg's existing average until the traded price arrives — never at 0.
+      const addEstimate = leg.currentLtp > 0 ? leg.currentLtp : leg.entryPrice;
+      const landedAdd: FillCapture = { posId: null, held: new Map(), added: new Map() };
+      let basisKnown = true;
       setActivePosition(prev => {
         if (!prev) return prev;
-        const nextLegs = prev.legs.map(l =>
-          legKey(l) === targetLeg ? { ...l, qty: l.qty + addQty, openedAt: Date.now() } : l
-        );
-        return { ...prev, lots: impliedLotsFromLegs(nextLegs, prev.lotSize), legs: nextLegs };
+        const nextLegs = prev.legs.map(l => {
+          if (legKey(l) !== targetLeg) return l;
+          const qty = l.qty + addQty;
+          // blendFillBasis: a held leg with no known price stays unknown — never priced wholesale at this add.
+          const blended = blendFillBasis(l.entryPrice > 0 ? l.entryPrice : null, l.qty, addEstimate > 0 ? addEstimate : 0, addQty);
+          basisKnown = blended != null;
+          return {
+            ...l, qty, entryPrice: blended ?? l.entryPrice, openedAt: Date.now(),
+            addedQty: (l.addedQty ?? l.qty) + addQty,
+            opens: [...(l.opens ?? []), { orderId: String(json.orderId), qty: addQty }],
+            ...(blended == null ? { entryUnconfirmed: true } : {}),
+          };
+        });
+        const next = { ...prev, lots: impliedLotsFromLegs(nextLegs, prev.lotSize), legs: nextLegs };
+        activePositionRef.current = next;
+        captureLanded(landedAdd, next);
+        return next;
       });
+      if ((currentPos.broker ?? effectiveBroker) === 'dhan' && basisKnown) {
+        void repriceOpenLegs(fillDeps(), landedAdd, [{ key: targetLeg, orderId: String(json.orderId), estimate: addEstimate, qty: addQty }]);
+      }
 
       addToast('success', `Added ${addLots} Lot(s) to ${leg.role}!`, `${leg.strike}${leg.optionType} · +${addQty} qty`);
       addLog('ENTRY', `Added ${addLots} Lot(s) (+${addQty} qty) to ${leg.role} ${leg.strike}${leg.optionType}`);

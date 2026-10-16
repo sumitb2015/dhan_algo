@@ -366,6 +366,10 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
         strike: 0,
         side: leg.side,
         quantity: Math.abs(leg.quantity),
+        // Which contract this close was for: results come back BUY-first (margin-safe order), not in leg order,
+        // so the page matches each exit fill to its leg by this.
+        securityId: leg.securityId,
+        tradingSymbol: leg.tradingSymbol,
         orderId: res.orderId,
         status: res.orderId ? 'TRANSIT' : 'FAILED',
         error: res.error,

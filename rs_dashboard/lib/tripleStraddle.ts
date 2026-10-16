@@ -35,6 +35,15 @@ export interface TsLeg {
    *  NOT re-sent (a retry could double-close and open the opposite side). */
   pendingExit?: { orderId: string; at: number };
   orderIds: string[];
+  /**
+   * The entry / exit price is the live quote stamped while the order's traded average was not reported yet: the
+   * order id it is owed by. The page re-reads that order and swaps the real price in (settleLegPrice), so P&L ends up
+   * on actual fills (skill dhan-fill-price-pnl). Unset = the price is the order's own traded average (or SIM).
+   */
+  entryEst?: string;
+  exitEst?: string;
+  /** The traded price never came back (the re-price gave up): the entry / exit shown is an estimate, not a fill. */
+  priceUnconfirmed?: boolean;
 }
 
 /** Trailing / profit-lock rules, ported from Focus Tool's overall trail (evaluateOverallExit),
@@ -179,6 +188,44 @@ export function validateTrade(lots: number, lotSize: number): string | null {
 
 export function openPositionFor(state: TsState, slot: TsSlot): TsPosition | undefined {
   return state.positions.find((p) => p.slot === slot && p.status === 'OPEN');
+}
+
+/**
+ * Put an order's traded average on the leg it was owed to: the entry when `entryEst` names that order, the exit when
+ * `exitEst` does. Anything else (an older order, a leg since re-priced) leaves the position untouched.
+ */
+export function settleLegPrice(pos: TsPosition, orderId: string, avgPrice: number): TsPosition {
+  if (!(avgPrice > 0)) return pos;
+  let changed = false;
+  let entryShift = 0;   // Σ (new − old entry) × qty, rupee-units of premium
+  const legs = pos.legs.map((l) => {
+    if (l.entryEst === orderId) {
+      changed = true;
+      entryShift += (avgPrice - l.entry) * l.qty;
+      const { entryEst: _e, ...rest } = l; void _e;
+      return { ...rest, entry: avgPrice };
+    }
+    if (l.exitEst === orderId) { changed = true; const { exitEst: _x, ...rest } = l; void _x; return { ...rest, exit: avgPrice }; }
+    return l;
+  }) as TsPosition['legs'];
+  if (!changed) return pos;
+  // The saved peak is a % of the OLD entry premium. Re-express it on the new basis — the same price path now shows
+  // a different profit % — or a trail / lock floor could fire on the re-price alone, with no price move.
+  let peakPct = pos.peakPct;
+  if (entryShift !== 0 && pos.peakPct != null) {
+    const oldBasis = pos.legs.reduce((sum, l) => sum + l.entry * l.qty, 0);
+    const newBasis = oldBasis + entryShift;
+    if (oldBasis > 0 && newBasis > 0) {
+      const peakRupees = (pos.peakPct / 100) * oldBasis + (pos.side === 'S' ? entryShift : -entryShift);
+      peakPct = Math.max(0, (peakRupees / newBasis) * 100);
+    }
+  }
+  return { ...pos, legs, ...(peakPct !== pos.peakPct ? { peakPct } : {}) };
+}
+
+/** Order ids whose traded price a position still owes (estimated entries / exits). */
+export function owedPriceOrders(pos: TsPosition): string[] {
+  return pos.legs.flatMap((l) => [l.entryEst, l.exitEst].filter((x): x is string => !!x));
 }
 
 /** Replace/insert one position by id. */

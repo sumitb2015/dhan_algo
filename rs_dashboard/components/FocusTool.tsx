@@ -60,7 +60,8 @@ import { buildPayoffModel } from '@/lib/optionsPayoff';
 import { computeBasketGreeks, type GreekLeg } from '@/lib/multiLegGreeks';
 import { useFocusMarketData, expKey, strikeKey, type FutQuote, type StrikeRef } from '@/lib/useFocusMarketData';
 import { isStale, ageOf, ageLabel } from '@/lib/useLiveTickerPoll';
-import { computeRowPnl, mtmForQty, pnlPctOfPremium, blendFillBasis, sliceTradedPrice, fillRebasePatch, shiftMayReopen, canMarkMtm, shiftCloseConfirmed, rowDisplayBookedPnl, putCallRatio, valuePutCallRatio, pickOpenInterest, closeRebaseDelta, closedSliceBooked, FTS_ORDER_SOURCE } from '@/lib/focusToolPnl';
+import { fetchSliceTradedPrice } from '@/lib/tradedPriceClient';
+import { computeRowPnl, mtmForQty, pnlPctOfPremium, blendFillBasis, fillRebasePatch, shiftMayReopen, canMarkMtm, shiftCloseConfirmed, rowDisplayBookedPnl, putCallRatio, valuePutCallRatio, pickOpenInterest, closeRebaseDelta, closedSliceBooked, FTS_ORDER_SOURCE } from '@/lib/focusToolPnl';
 import { normalizeTradeRow, matchOutsideTrades, type NormalizedTrade } from '@/lib/multiLegFocus';
 import { stampItems, noteItems, adoptItems, canon, type RevBook } from '@/lib/revMerge';
 import { useTabLeader } from '@/hooks/useTabLeader';
@@ -6305,6 +6306,10 @@ export default function FocusTool() {
           peEntry: leg === 'PE' ? nextEntry : (f?.peEntry ?? null),
           ceFillEntry: nextCeQty <= 0 ? undefined : (leg === 'CE' ? (nextFillEntry ?? undefined) : f?.ceFillEntry),
           peFillEntry: nextPeQty <= 0 ? undefined : (leg === 'PE' ? (nextFillEntry ?? undefined) : f?.peFillEntry),
+          ceAddedQty: nextCeQty <= 0 ? undefined
+            : leg === 'CE' && delta > 0 ? (prevQty > 0 ? Number(f?.ceAddedQty) || 0 : 0) + delta : f?.ceAddedQty,
+          peAddedQty: nextPeQty <= 0 ? undefined
+            : leg === 'PE' && delta > 0 ? (prevQty > 0 ? Number(f?.peAddedQty) || 0 : 0) + delta : f?.peAddedQty,
           ceOpenedTs,
           peOpenedTs,
           // SL-to-cost belongs to the position it was armed on: a leg that
@@ -6492,6 +6497,7 @@ export default function FocusTool() {
         const beforeLate = rowNow.fill;
         const heldBefore = Number(rec.leg === 'CE' ? beforeLate?.ceQty : beforeLate?.peQty) || 0;
         const basisBefore = Number(rec.leg === 'CE' ? beforeLate?.ceFillEntry : beforeLate?.peFillEntry) || 0;
+        const addedBefore = heldBefore > 0 ? Number(rec.leg === 'CE' ? beforeLate?.ceAddedQty : beforeLate?.peAddedQty) || 0 : 0;
         adjustFillQty(rec.rowId, rec.leg, late, rec.strike, 0, rec.entryPx, rec.orb);
         // The late slice follows its OWN traded price (sliceTradedPrice), for the P&L basis and, where the row
         // uses it, the stop reference.
@@ -6500,6 +6506,7 @@ export default function FocusTool() {
             stop: !!rec.rebaseStop,
             fill: !(heldBefore > 0 && !(basisBefore > 0)),
             heldAfterAdd: heldBefore + late,
+            addedAfterAdd: addedBefore + late,
             assumed: rec.entryPx > 0 ? rec.entryPx : (heldBefore > 0 ? basisBefore : 0),
           });
         }
@@ -6772,6 +6779,7 @@ export default function FocusTool() {
           const before = schedulerRef.current.config.rows.find(r => r.id === row.id)?.fill;
           const prevHeld = Number(leg === 'CE' ? before?.ceQty : before?.peQty) || 0;
           const prevBasis = Number(leg === 'CE' ? before?.ceFillEntry : before?.peFillEntry) || 0;
+          const prevAdded = prevHeld > 0 ? Number(leg === 'CE' ? before?.ceAddedQty : before?.peAddedQty) || 0 : 0;
           if (filled < quantity) {
             addToast('error', `${what}: partial fill`,
               `Requested ${quantity}, broker confirms ${filled} filled — ledger updated to match`);
@@ -6833,6 +6841,7 @@ export default function FocusTool() {
               stop: row.refPrice === 'traded' || opts.strikeOverride != null,
               fill: !(prevHeld > 0 && !(prevBasis > 0)),
               heldAfterAdd: prevHeld + filled,
+              addedAfterAdd: prevAdded + filled,
               assumed: openEntryPx > 0 ? openEntryPx : (prevHeld > 0 ? prevBasis : 0),
             });
           }
@@ -6890,34 +6899,9 @@ export default function FocusTool() {
     }
   }
 
-  /**
-   * The traded price of one slice of an order (Dhan reports a CUMULATIVE average): earlier slices of the same order
-   * are remembered per kind, so a late slice gets its own price (sliceTradedPrice). Backs off 1 / 2 / 4 / 8 s, so a
-   * 429 or an order still in transit gets time to settle. Null = never reported.
-   */
-  async function fetchSliceTradedPrice(orderId: string, kind: 'open' | 'close', sliceQty: number): Promise<number | null> {
-    for (const wait of [1000, 2000, 4000, 8000]) {
-      await new Promise(res => setTimeout(res, wait));
-      try {
-        const r = await fetch(`/api/scalper/orders?orderId=${encodeURIComponent(orderId)}`);
-        const j = await r.json() as { success?: boolean; data?: { averageTradedPrice?: number } };
-        const atp = Number(j.data?.averageTradedPrice) || 0;
-        if (j.success && atp > 0) {
-          const key = `${orderId}:${kind}`;
-          const prior = tradedSliceRef.current.get(key);
-          const cumQty = (prior?.qty ?? 0) + sliceQty;
-          const px = sliceTradedPrice(atp, cumQty, prior);
-          tradedSliceRef.current.set(key, { qty: cumQty, atp });
-          return px;
-        }
-      } catch { /* retry */ }
-    }
-    return null;
-  }
-
   /** A close's booked P&L, re-priced from the LTP snapshot to the slice's traded price. */
   async function rebaseBookedOnTradedPrice(rowId: string, orderId: string, isShort: boolean, estimate: number, filled: number) {
-    const px = await fetchSliceTradedPrice(orderId, 'close', filled);
+    const px = await fetchSliceTradedPrice(orderId, 'close', filled, tradedSliceRef.current);
     if (px == null) return;
     const delta = closeRebaseDelta(isShort, estimate, px, filled);
     if (delta !== 0) patchFill(rowId, f => ({ bookedPnl: (f.bookedPnl ?? 0) + delta }));
@@ -6933,7 +6917,7 @@ export default function FocusTool() {
    */
   async function rebaseOpenOnTradedPrice(
     rowId: string, leg: 'CE' | 'PE', orderId: string, estimate: number, filled: number,
-    ctx: { stop: boolean; fill: boolean; heldAfterAdd: number; assumed: number },
+    ctx: { stop: boolean; fill: boolean; heldAfterAdd: number; addedAfterAdd: number; assumed: number },
   ) {
     if (!ctx.stop && !ctx.fill) return;
     const openedOf = (f: FocusRowFill | undefined) => (leg === 'CE' ? f?.ceOpenedTs : f?.peOpenedTs) ?? null;
@@ -6944,7 +6928,7 @@ export default function FocusTool() {
       if ((Number(leg === 'CE' ? f?.ceQty : f?.peQty) || 0) >= Math.min(ctx.heldAfterAdd, filled)) { identity = openedOf(f); break; }
       await new Promise(res => setTimeout(res, 50));
     }
-    const px = await fetchSliceTradedPrice(orderId, 'open', filled);
+    const px = await fetchSliceTradedPrice(orderId, 'open', filled, tradedSliceRef.current);
     if (px == null) {
       if (ctx.fill) {
         patchFill(rowId, f => (identity != null && openedOf(f) === identity
@@ -6957,9 +6941,11 @@ export default function FocusTool() {
       const held = Number(leg === 'CE' ? f.ceQty : f.peQty) || 0;
       const same = identity != null && openedOf(f) === identity;
       if (ctx.fill) {
+        const addedNow = Number(leg === 'CE' ? f.ceAddedQty : f.peAddedQty) || 0;
         const r = fillRebasePatch({
           curBasis: leg === 'CE' ? f.ceFillEntry : f.peFillEntry, heldNow: same ? held : 0,
-          heldAfterAdd: ctx.heldAfterAdd, samePosition: same, assumed: ctx.assumed, traded: px, filled,
+          heldAfterAdd: ctx.heldAfterAdd, addedSince: same ? Math.max(0, addedNow - ctx.addedAfterAdd) : 0,
+          samePosition: same, assumed: ctx.assumed, traded: px, filled,
         });
         if (r.basis !== undefined && r.basis > 0) { if (leg === 'CE') out.ceFillEntry = r.basis; else out.peFillEntry = r.basis; }
         if (r.bookedDelta) out.bookedPnl = (f.bookedPnl ?? 0) + r.bookedDelta;

@@ -13,6 +13,7 @@ import {
   brokerCapacity, exitQtyForLeg, TS_FILL_GRACE_MS, TS_ORDER_SOURCE,
   type TsLeg, type TsMode, type TsPosition, type TsProduct, type TsSide,
 } from './tripleStraddle.ts';
+import { finalAvgOf, readOrderPrice } from './tradedPriceClient.ts';
 
 export const TS_TRADABLE = ['NIFTY', 'BANKNIFTY', 'SENSEX'] as const;
 export const isTsTradable = (u: string): boolean => (TS_TRADABLE as readonly string[]).includes(u);
@@ -70,6 +71,12 @@ async function confirmOrder(orderId: string, timeoutMs = 6000): Promise<{ phase:
     if (Date.now() + 400 > deadline) return last;
     await new Promise((r) => setTimeout(r, 400));
   }
+}
+
+/** An order's FINAL traded average (0 = still working / not reported), one read — the shared reader
+ *  (lib/tradedPriceClient.ts), so a part-traded average is never taken as the fill. */
+export async function fetchOrderAvgPrice(orderId: string): Promise<number> {
+  return finalAvgOf(await readOrderPrice(orderId));
 }
 
 interface SendResult { ok: boolean; orderId?: string; error?: string; unknown?: boolean }
@@ -170,7 +177,11 @@ export async function enterStraddle(p: EntryParams): Promise<EntryOutcome> {
       legs.push(mk(opt, { qty: 0, closed: true, exit: p.prices[opt], orderIds: ids(r.orderId) }));
     } else if (c.phase === 'filled') {
       filled.push({ opt, secId });
-      legs.push(mk(opt, { entry: c.avgPrice > 0 ? c.avgPrice : p.prices[opt], qty: c.filledQty > 0 ? c.filledQty : qty, orderIds: ids(r.orderId) }));
+      legs.push(mk(opt, {
+        entry: c.avgPrice > 0 ? c.avgPrice : p.prices[opt], qty: c.filledQty > 0 ? c.filledQty : qty, orderIds: ids(r.orderId),
+        // Traded average not reported yet: the live quote stands in until the page re-reads the order.
+        ...(c.avgPrice > 0 || !r.orderId ? {} : { entryEst: r.orderId }),
+      }));
     } else {
       failed = true;
       notes.push(`${opt} fill NOT confirmed (order ${r.orderId}); tracked, will not be auto-reversed. Check Orders.`);
@@ -188,7 +199,10 @@ export async function enterStraddle(p: EntryParams): Promise<EntryOutcome> {
       if (!rev.ok) { notes.push(`Could not reverse ${f.opt} (${rev.error}) — close it manually`); continue; }
       const c = rev.orderId ? await confirmOrder(rev.orderId) : null;
       if (c?.phase === 'filled') {
-        legs[i] = { ...leg, closed: true, exit: c.avgPrice > 0 ? c.avgPrice : p.prices[f.opt], orderIds: [...leg.orderIds, ...(rev.orderId ? [rev.orderId] : [])] };
+        legs[i] = {
+          ...leg, closed: true, exit: c.avgPrice > 0 ? c.avgPrice : p.prices[f.opt], orderIds: [...leg.orderIds, ...(rev.orderId ? [rev.orderId] : [])],
+          ...(c.avgPrice > 0 || !rev.orderId ? {} : { exitEst: rev.orderId }),
+        };
         notes.push(`Reversed ${f.opt} so no single leg is left open`);
       } else {
         legs[i] = { ...leg, pendingExit: rev.orderId ? { orderId: rev.orderId, at: Date.now() } : undefined, orderIds: [...leg.orderIds, ...(rev.orderId ? [rev.orderId] : [])] };
@@ -254,7 +268,11 @@ export async function exitStraddle(
     if (leg.pendingExit) {
       const c = await confirmOrder(leg.pendingExit.orderId, 0);
       if (c.phase === 'filled') {
-        return { ...leg, closed: true, exit: c.avgPrice > 0 ? c.avgPrice : (prices[leg.option] ?? leg.entry), pendingExit: undefined };
+        // Never book a confirmed close at the ENTRY price (a silent ₹0): estimate from the live quote and owe the order.
+        return {
+          ...leg, closed: true, exit: c.avgPrice > 0 ? c.avgPrice : (prices[leg.option] ?? leg.entry), pendingExit: undefined,
+          ...(c.avgPrice > 0 ? {} : { exitEst: leg.pendingExit.orderId }),
+        };
       }
       if (c.phase !== 'dead') {
         notes.push(`${leg.option}: earlier exit order ${leg.pendingExit.orderId} is still unsettled — not re-sending. Check Orders.`);
@@ -265,8 +283,12 @@ export async function exitStraddle(
 
     const cap = brokerCapacity(rows, leg.securityId, pos.product, pos.side);
     if (cap.kind === 'flat') {
-      notes.push(`${leg.option}: broker shows it already flat — marked closed at the last price`);
-      return { ...current, closed: true, exit: prices[leg.option] ?? current.entry };
+      // Closed outside this page: there is no order of ours to re-read for its price.
+      const last = prices[leg.option];
+      notes.push(last && last > 0
+        ? `${leg.option}: broker shows it already flat — marked closed at the last price ${last.toFixed(2)} (an estimate; the real exit was outside this page)`
+        : `${leg.option}: broker shows it already flat and there is no live price — marked closed at its ENTRY price, so its P&L shows ₹0. Check the real exit in Orders`);
+      return { ...current, closed: true, exit: last ?? current.entry };
     }
     if (cap.kind === 'opposite') {
       notes.push(`${leg.option}: broker shows only the opposite side open — not closing. Verify in Positions, then use Resolve.`);
@@ -288,7 +310,10 @@ export async function exitStraddle(
     const orderIds = [...current.orderIds, ...(r.orderId ? [r.orderId] : [])];
     const c = r.orderId ? await confirmOrder(r.orderId) : null;
     if (c?.phase === 'filled') {
-      return { ...current, closed: true, exit: c.avgPrice > 0 ? c.avgPrice : (prices[leg.option] ?? current.entry), orderIds };
+      return {
+        ...current, closed: true, exit: c.avgPrice > 0 ? c.avgPrice : (prices[leg.option] ?? current.entry), orderIds,
+        ...(c.avgPrice > 0 || !r.orderId ? {} : { exitEst: r.orderId }),
+      };
     }
     notes.push(`${leg.option} exit not confirmed (${c?.reason || 'pending'}) — leg stays open on the ledger; it will be re-checked, not re-sent`);
     return { ...current, orderIds, pendingExit: r.orderId ? { orderId: r.orderId, at: Date.now() } : undefined };

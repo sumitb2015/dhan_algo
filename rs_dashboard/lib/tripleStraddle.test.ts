@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   activeFloorPct, peakTrackable, brokerCapacity, nextPeakPct, entryPremium, evaluateRisk, pnlSummary, exitQtyForLeg, openPositionFor, pruneState, straddlePnl, straddlePnlPct,
-  totalPnl, upsertPosition, validateTrade, type TsPosition, type TsState,
+  totalPnl, upsertPosition, validateTrade, settleLegPrice, owedPriceOrders, type TsPosition, type TsState,
 } from './tripleStraddle.ts';
 
 function pos(over: Partial<TsPosition> = {}): TsPosition {
@@ -208,4 +208,43 @@ test('peak is only tracked for armed, fully confirmed, open positions', () => {
   assert.equal(peakTrackable(h), false);
   const x = pos(); x.legs[1] = { ...x.legs[1], pendingExit: { orderId: 'O', at: 1 } };
   assert.equal(peakTrackable(x), false);
+});
+
+test('settleLegPrice swaps an estimated entry / exit for the order traded average, nothing else', () => {
+  const pos = {
+    id: 'p', slot: 'center', underlying: 'NIFTY', expiry: '2026-10-20', strike: 23100, side: 'S', product: 'MIS', mode: 'REAL',
+    status: 'CLOSED', openedAt: 0, risk: { armed: false },
+    legs: [
+      { option: 'CE', qty: 65, entry: 100, entryEst: 'o-ce-in', exit: 80, exitEst: 'o-ce-out', closed: true, orderIds: ['o-ce-in', 'o-ce-out'] },
+      { option: 'PE', qty: 65, entry: 90, exit: 70, closed: true, orderIds: ['o-pe-in', 'o-pe-out'] },
+    ],
+  } as unknown as TsPosition;
+  assert.deepEqual(owedPriceOrders(pos), ['o-ce-in', 'o-ce-out']);
+  const a = settleLegPrice(pos, 'o-ce-in', 101.5);
+  assert.equal(a.legs[0].entry, 101.5);
+  assert.equal(a.legs[0].entryEst, undefined);
+  assert.equal(a.legs[0].exitEst, 'o-ce-out');                 // the exit is still owed
+  const b = settleLegPrice(a, 'o-ce-out', 78.25);
+  assert.equal(b.legs[0].exit, 78.25);
+  assert.deepEqual(owedPriceOrders(b), []);
+  assert.equal(settleLegPrice(b, 'unknown', 50), b);            // an order nothing owes: untouched
+  assert.equal(settleLegPrice(pos, 'o-ce-in', 0), pos);         // not reported yet: untouched
+  assert.equal(b.legs[1].entry, 90);                            // the other leg never moves
+});
+
+test('settleLegPrice re-expresses the saved peak on the new entry basis', () => {
+  // short 100+100 x 65, peak saved at 20% (= 2,600 of 13,000). Fills were 98+98: the same path is 18.4% of 12,740
+  const pos = {
+    id: 'p', slot: 'center', underlying: 'NIFTY', expiry: '2026-10-20', strike: 23100, side: 'S', product: 'MIS', mode: 'REAL',
+    status: 'OPEN', openedAt: 0, risk: { armed: true }, peakPct: 20,
+    legs: [
+      { option: 'CE', qty: 65, entry: 100, entryEst: 'ce', orderIds: ['ce'] },
+      { option: 'PE', qty: 65, entry: 100, entryEst: 'pe', orderIds: ['pe'] },
+    ],
+  } as unknown as TsPosition;
+  const a = settleLegPrice(settleLegPrice(pos, 'ce', 98), 'pe', 98);
+  // peak in rupees: 2,600 - 2*65*2 = 2,340 on a basis of 12,740
+  assert.ok(Math.abs((a.peakPct ?? 0) - (2340 / 12740) * 100) < 1e-9);
+  // a straddle with no saved peak keeps none
+  assert.equal(settleLegPrice({ ...pos, peakPct: undefined } as TsPosition, 'ce', 98).peakPct, undefined);
 });

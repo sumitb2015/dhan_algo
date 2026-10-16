@@ -3,11 +3,11 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTabLeader } from '@/hooks/useTabLeader';
 import {
-  evaluateRisk, nextPeakPct, openPositionFor, peakTrackable, pruneState, TS_PRICE_STALE_MS, TS_SLOTS, upsertPosition, validateTrade,
+  evaluateRisk, nextPeakPct, openPositionFor, owedPriceOrders, peakTrackable, settleLegPrice, pruneState, TS_PRICE_STALE_MS, TS_SLOTS, upsertPosition, validateTrade,
   type TsExitReason, type TsPosition, type TsProduct, type TsRisk, type TsSide, type TsSlot, type TsState,
 } from '@/lib/tripleStraddle';
 import {
-  checkMarginGate, enterStraddle, exitStraddle, fetchChainLookup, fetchChainPrices, isTsTradable, saveTsPosition,
+  checkMarginGate, enterStraddle, exitStraddle, fetchChainLookup, fetchChainPrices, fetchOrderAvgPrice, isTsTradable, saveTsPosition,
   type TsChainLookup, type TsLookup,
 } from '@/lib/tripleStraddleClient';
 
@@ -274,6 +274,59 @@ export function useTripleStraddle(args: {
     const allClosed = legs.every((l) => l.closed);
     await persist({ ...pos, legs, ...(allClosed ? { status: 'CLOSED' as const, closedAt: Date.now(), exitReason: 'MANUAL' as const } : {}) });
   }, [persist]);
+
+  // ── re-price estimated fills (leader tab) ─────────────────────────
+  // An entry / exit whose traded average was not reported in time carries the live quote and the order it is owed by
+  // (entryEst / exitEst). Re-read those orders until Dhan reports the price, then swap it in — P&L on actual fills
+  // (skill dhan-fill-price-pnl). Backs off per order; gives up after 10 minutes and says so (the estimate stays).
+  const priceRetry = useRef<Record<string, { next: number; tries: number; since: number }>>({});
+  useEffect(() => {
+    if (!loaded || isLeader !== true) return;
+    let busy = false;
+    const tick = async () => {
+      if (busy) return;
+      busy = true;
+      try {
+        for (const p of ledgerRef.current.positions) {
+          for (const orderId of owedPriceOrders(p)) {
+            const now = Date.now();
+            const r = priceRetry.current[orderId] ?? (priceRetry.current[orderId] = { next: 0, tries: 0, since: now });
+            if (now < r.next) continue;
+            if (now - r.since > 10 * 60_000) {
+              notify('error', `${p.slot} straddle: order ${orderId} never reported its traded price — that leg's price is an ESTIMATE (marked on the leg), not a fill`);
+              await enqueue(async () => {
+                const cur = ledgerRef.current.positions.find((x) => x.id === p.id);
+                if (!cur) return;
+                // Stop re-reading, but keep the record that this price is a guess (priceUnconfirmed).
+                const legs = cur.legs.map((l) => (l.entryEst === orderId || l.exitEst === orderId ? {
+                  ...l, priceUnconfirmed: true,
+                  ...(l.entryEst === orderId ? { entryEst: undefined } : {}), ...(l.exitEst === orderId ? { exitEst: undefined } : {}),
+                } : l)) as TsPosition['legs'];
+                const next = { ...cur, legs };
+                if (await saveTsPosition(next)) commit(upsertPosition(ledgerRef.current, next));
+              });
+              delete priceRetry.current[orderId];
+              continue;
+            }
+            r.tries += 1;
+            r.next = now + Math.min(60_000, 2_000 * 2 ** Math.min(r.tries, 5));
+            const avg = await fetchOrderAvgPrice(orderId);
+            if (!(avg > 0)) continue;
+            await enqueue(async () => {
+              // Read at WRITE time, so a close or risk edit since is never overwritten by an older copy.
+              const cur = ledgerRef.current.positions.find((x) => x.id === p.id);
+              if (!cur) return;
+              const next = settleLegPrice(cur, orderId, avg);
+              if (next !== cur && await saveTsPosition(next)) commit(upsertPosition(ledgerRef.current, next));
+            });
+            delete priceRetry.current[orderId];
+          }
+        }
+      } finally { busy = false; }
+    };
+    const id = setInterval(() => { void tick(); }, 3_000);
+    return () => clearInterval(id);
+  }, [loaded, isLeader, enqueue, commit, notify]);
 
   // ── stop / target watcher (open tab only, leader tab only) ─────────
   // A stop is risk-reducing, so it also runs for REAL positions held from an earlier

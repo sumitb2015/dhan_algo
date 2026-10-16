@@ -241,6 +241,10 @@ export interface FocusRowFill {
    */
   ceFillEntry?: number | null;
   peFillEntry?: number | null;
+  /** Total qty ADDED to this leg's current position (every open, from flat on). A traded-price correction uses it to
+   *  tell later adds from later reduces (fillRebasePatch). Cleared with the position. */
+  ceAddedQty?: number;
+  peAddedQty?: number;
   /**
    * Scale-out (FocusRow.scaleOut) on this leg's current position: the highest trigger (% of target) that has fired,
    * and the leg's own qty when the first step did — every step's % is of that base, so "25% then 25%" leaves half.

@@ -252,31 +252,36 @@ export function sliceTradedPrice(cumAtp: number, cumQty: number, prior: { qty: n
 }
 
 /**
- * Correct a short leg's P&L basis once an add's traded price is known.
+ * Correct a leg's P&L basis once an add's traded price is known.
  *  - `assumed` = the price the add was blended at (its estimate, or the old basis when it had none); 0 = unknown.
- *  - The basis moves by c = (traded − assumed) × filled / heldAfterAdd, the add's share of the average.
- *  - Qty closed since the add (heldAfterAdd − heldNow) was booked at the old basis: bookedDelta = c × that qty.
+ *  - The add's pricing error is a cost "mass" m = (traded − assumed) × filled, sitting in the position's average.
+ *  - What happened since the add moves it: later ADDS (`addedSince`) only dilute it over more qty; later REDUCES
+ *    took their average-cost share of it out with them. The share still in the position:
+ *    survive = (heldNow − addedSince) / heldAfterAdd, clamped to [0, 1] (reduces assumed to come before later adds).
+ *  - basis += m × survive / heldNow; the closed share m × (1 − survive) was booked at the old basis, so for a SHORT
+ *    leg bookedDelta = m × (1 − survive) (a higher basis = more profit on what was bought back).
  *  - `samePosition` false (the leg went flat and re-opened since): the old position was closed in full, so only its
  *    booked P&L is corrected; the new position's basis is left alone.
  *  - A leg opened from flat with no estimate gets the traded price as its basis.
  */
 export function fillRebasePatch(p: {
   curBasis: number | null | undefined; heldNow: number; heldAfterAdd: number; samePosition: boolean;
-  assumed: number; traded: number; filled: number;
+  assumed: number; traded: number; filled: number; addedSince?: number;
 }): { basis?: number; bookedDelta: number } {
   if (!(p.traded > 0) || !(p.filled > 0) || !(p.heldAfterAdd > 0)) return { bookedDelta: 0 };
+  const added = Math.max(0, Number(p.addedSince) || 0);
   if (!(p.assumed > 0)) {
-    // No price at all for this add: only a from-flat open (the whole position is this order) can be priced.
-    return p.samePosition && p.heldNow > 0 && p.heldAfterAdd <= p.filled && !(Number(p.curBasis) > 0)
+    // No price at all for this add: only a from-flat open with nothing added since can be priced outright.
+    return p.samePosition && p.heldNow > 0 && p.heldAfterAdd <= p.filled && added === 0 && !(Number(p.curBasis) > 0)
       ? { basis: p.traded, bookedDelta: 0 } : { bookedDelta: 0 };
   }
-  const c = (p.traded - p.assumed) * Math.min(p.filled, p.heldAfterAdd) / p.heldAfterAdd;
-  if (!p.samePosition) return { bookedDelta: c * p.heldAfterAdd };
-  const reduced = Math.max(0, p.heldAfterAdd - p.heldNow);
+  const mass = (p.traded - p.assumed) * Math.min(p.filled, p.heldAfterAdd);
+  if (!p.samePosition) return { bookedDelta: mass || 0 };
+  const survive = Math.min(1, Math.max(0, (p.heldNow - added) / p.heldAfterAdd));
   const cur = Number(p.curBasis) || 0;
   return {
-    ...(p.heldNow > 0 && cur > 0 ? { basis: cur + c } : {}),
-    bookedDelta: c * reduced,
+    ...(p.heldNow > 0 && cur > 0 ? { basis: cur + mass * survive / p.heldNow } : {}),
+    bookedDelta: mass * (1 - survive) || 0,   // never -0
   };
 }
 
