@@ -17,7 +17,7 @@ import assert from 'node:assert/strict';
 
 import {
   EMPTY_ROW_LIVE, legStopReason, legStopLevel, legTargetReason, reentryConfig, evaluateReentry,
-  slRollStrike, reTgtOtmStrike, reentryOtmFromAtm, otmReentryStrike, matchPremiumStrike, pendingReentryLevel, pendingReentryHit, costReentryBasis, awaitingMomentumQuote,
+  slRollStrike, reTgtOtmStrike, reentryOtmFromAtm, otmReentryStrike, matchPremiumStrike, legTargetProgress, dueScaleOutStep, scaleOutLots, scaleOutSteps, scaleOutStepsPassed, pendingReentryLevel, pendingReentryHit, costReentryBasis, awaitingMomentumQuote,
   MAX_LEG_REENTRIES, DEFAULT_SL_ROLL_MAX,
   type RowLive,
 } from './focusToolRules.ts';
@@ -334,6 +334,51 @@ for (const m of MARKETS) {
     const ce = [{ strike: atm - st, px: 70 }, { strike: atm, px: 95 }, { strike: atm + st, px: 72 }, { strike: atm + 2 * st, px: 50 }];
     assert.equal(matchPremiumStrike({ quotes: ce, leg: 'CE', target: 68, atm, exclude: null }), atm + st);
     assert.equal(matchPremiumStrike({ quotes: ce, leg: 'CE', target: 68, atm, exclude: atm + st }), atm + 2 * st);
+  });
+
+  test(`${tag} scale-out: progress toward the leg's own target, steps in order, reduce only and one lot kept`, () => {
+    // premium % target: entry 100, target 40% → level 60; at 80 the leg is half way
+    const r = rowFor(m, { ceTgtPct: '40' });
+    const entry = m.ce;
+    const at = (px: number) => legTargetProgress(r, 'CE', liveFor(m, px, m.pe));
+    assert.ok(Math.abs((at(entry) ?? NaN) - 0) < 1e-9);
+    assert.ok(Math.abs((at(entry * 0.8) ?? NaN) - 0.5) < 1e-9);
+    assert.ok(Math.abs((at(entry * 0.6) ?? NaN) - 1) < 1e-9);
+    assert.ok((at(entry * 1.1) ?? 0) < 0);                         // moving against it
+    assert.equal(legTargetProgress(rowFor(m, { ceTgtPct: '' }), 'CE', liveFor(m, m.ce, m.pe)), null);   // no target
+    // index target: PE gains as spot rises — 100 idx pts target, spot +50 = half way
+    const ix = rowFor(m, { peTgtPct: '100', legTgtUnit: 'uPts' });
+    assert.ok(Math.abs((legTargetProgress(ix, 'PE', liveFor(m, m.ce, m.pe), m.spot + 50) ?? NaN) - 0.5) < 1e-9);
+    assert.ok((legTargetProgress(ix, 'PE', liveFor(m, m.ce, m.pe), m.spot - 50) ?? 0) < 0);
+
+    const cfg = { enabled: true, steps: [{ at: '75', pct: 25 as const }, { at: '50', pct: 50 as const }, { at: '150', pct: 25 as const }] };
+    assert.deepEqual(scaleOutSteps(cfg), [{ at: 50, pct: 50 }, { at: 75, pct: 25 }]);   // sorted; 150 dropped
+    assert.equal(dueScaleOutStep(cfg, 0, 0.49), null);
+    assert.deepEqual(dueScaleOutStep(cfg, 0, 0.5), { at: 50, pct: 50 });
+    assert.equal(dueScaleOutStep(cfg, 50, 0.6), null);                 // 50 fired; 75 not reached
+    assert.deepEqual(dueScaleOutStep(cfg, 50, 0.8), { at: 75, pct: 25 });
+    assert.equal(dueScaleOutStep(cfg, 75, 0.99), null);                // ladder done
+    assert.deepEqual(dueScaleOutStep(cfg, 0, 0.9), { at: 50, pct: 50 }); // a jump past both: lowest first
+    assert.equal(dueScaleOutStep({ ...cfg, enabled: false }, 0, 0.9), null);
+    assert.equal(dueScaleOutStep({ enabled: true, steps: 'junk' } as never, 0, 0.9), null);
+    assert.equal(dueScaleOutStep(cfg, 0, null), null);
+    // editing mid-trade: a step added BELOW the fired one is passed, never fired late …
+    const added = { enabled: true, steps: [{ at: '25', pct: 25 as const }, { at: '50', pct: 50 as const }] };
+    assert.equal(dueScaleOutStep(added, 50, 0.6), null);
+    assert.equal(scaleOutStepsPassed(added, 50), 2);
+    // … and removing a lower step cannot make a higher one skip or re-fire
+    const removed = { enabled: true, steps: [{ at: '75', pct: 25 as const }] };
+    assert.deepEqual(dueScaleOutStep(removed, 50, 0.8), { at: 75, pct: 25 });
+    assert.equal(dueScaleOutStep(removed, 75, 0.9), null);
+
+    const lot = 65;
+    assert.equal(scaleOutLots(8 * lot, 8 * lot, lot, 50), 4);
+    assert.equal(scaleOutLots(8 * lot, 4 * lot, lot, 25), 2);         // % of the BASE, not of what is left
+    assert.equal(scaleOutLots(4 * lot, 4 * lot, lot, 75), 3);
+    assert.equal(scaleOutLots(4 * lot, 2 * lot, lot, 75), 1);         // never the last lot
+    assert.equal(scaleOutLots(1 * lot, 1 * lot, lot, 75), 0);
+    assert.equal(scaleOutLots(3 * lot, 3 * lot, lot, 25), 0);         // 0.75 lot rounds down
+    assert.equal(scaleOutLots(8 * lot, 8 * lot, 0, 50), 0);
   });
 
   test(`${tag} Tgt OTM count: missing = 1, 0 allowed only from Row`, () => {

@@ -36,7 +36,7 @@ import type {
   FocusToolConfig, FocusRow, FocusRowFill, FocusIndexGroup,
   FocusReentryMode, FocusReentryTrigger, FocusPendingReentry, FocusLegSimpleMom, FocusLazyLeg, FocusLegRangeBreakout, FocusOverallMode,
   FocusUnderlying, FocusDte, FocusSide, FocusRowStatus, FocusStrikeMode,
-  FocusLegSlRule, FocusLegTrailSl, FocusLegOrbSl, FocusOrbStamp, FocusLadderOrder,
+  FocusLegSlRule, FocusLegTrailSl, FocusLegOrbSl, FocusOrbStamp, FocusLadderOrder, FocusScaleOut, FocusScaleStep,
 } from '@/lib/focusToolRows';
 // The pure rule engine for entry and exit decisions.
 import {
@@ -51,7 +51,7 @@ import {
   multipliedLots, legLots, hasLegLots, clampHm, rangeWindow, rangeWindowPhase, rowHasMultiDayRange, candleBucket, tradingDte,
   legSlRuleOn, legStopLevel, legTargetSpotLevel, legTgtUnitLabel, MAX_LEG_REENTRIES, pendingReentryLevel, pendingReentryHit, legTargetReason, costReentryBasis,
   awaitingMomentumQuote, MOMENTUM_QUOTE_WAIT_MS, legTargetLevel,
-  evaluateEntryMomentum, reRangeWindow, entryMomentumOn, overallSlConfig, overallProgress, nextOverallPeak, evaluateOverallExit, overallTrailInvalid, overallExitKind, evaluateOverallReentry, MAX_OVERALL_REENTRIES, rangeBreakoutOn, rangeBreakoutHit, costStopApplies, squareOffLegs, atmStrike, resolveRowLegStrike, mirrorLinkedPatch, MAX_LAZY_LEGS, legSlMultiplier, legTarget, nextLazyLegId, lazyLegStrike, runningLazyLeg, simpleMomOn, simpleMomLevel, simpleMomHit, otmReentryStrike, reentryOtmFromAtm, matchPremiumStrike,
+  evaluateEntryMomentum, reRangeWindow, entryMomentumOn, overallSlConfig, overallProgress, nextOverallPeak, evaluateOverallExit, overallTrailInvalid, overallExitKind, evaluateOverallReentry, MAX_OVERALL_REENTRIES, rangeBreakoutOn, rangeBreakoutHit, costStopApplies, squareOffLegs, atmStrike, resolveRowLegStrike, mirrorLinkedPatch, MAX_LAZY_LEGS, legSlMultiplier, legTarget, nextLazyLegId, lazyLegStrike, runningLazyLeg, simpleMomOn, simpleMomLevel, simpleMomHit, otmReentryStrike, reentryOtmFromAtm, matchPremiumStrike, legTargetProgress, dueScaleOutStep, scaleOutLots, scaleOutSteps, scaleOutStepsPassed, MAX_SCALE_STEPS,
   type PosRow, type RowLive,
 } from '@/lib/focusToolRules';
 import { postFocusEvent } from '@/lib/focusToolEvents';
@@ -1707,6 +1707,72 @@ function OverallSettingsControls({ row, onUpdate }: { row: FocusRow; onUpdate: (
 }
 
 /** A recessed, titled group for the row's settings (see dhan-terminal-polish). */
+/**
+ * Scale-out ladder (FocusRow.scaleOut): as each leg moves toward its OWN target, take part of it off. Reduce only.
+ * The trigger % is free-typed → RuleNumInput (commit on blur/Enter); the size is a select and commits at once.
+ */
+function ScaleOutControls({ row, onUpdate }: { row: FocusRow; onUpdate: (patch: Partial<FocusRow>) => void }) {
+  const saved = row.scaleOut;
+  const cfg: FocusScaleOut = saved && Array.isArray(saved.steps) && saved.steps.length
+    ? { enabled: !!saved.enabled, steps: saved.steps.filter(st => !!st && typeof st === 'object') }
+    : { enabled: !!saved?.enabled, steps: [{ at: '50', pct: 50 }] };
+  const set = (patch: Partial<FocusScaleOut>) => onUpdate({ scaleOut: { ...cfg, ...patch } });
+  const setStep = (i: number, patch: Partial<FocusScaleStep>) =>
+    set({ steps: cfg.steps.map((st, j) => (j === i ? { ...st, ...patch } : st)) });
+  const lbl = 'inline-flex items-center gap-1.5 font-bold text-zinc-400';
+  const usable = scaleOutSteps({ ...cfg, enabled: true }).length;
+  const passed = (at: number | undefined) => scaleOutStepsPassed({ ...cfg, enabled: true }, Number(at) || 0);
+  // The same target the ladder measures against: a running Lazy Leg's own target first (legTarget).
+  const hasTarget = (['CE', 'PE'] as const).some(l => Number(legTarget(row, l).value) > 0);
+  const f = row.fill;
+  const unit = legTgtUnitLabel(row.legTgtUnit);
+  return (
+    <div className="flex flex-col gap-1.5 text-[11px]">
+      <label className={cn(lbl, 'cursor-pointer text-zinc-300')}
+        title="As a leg moves toward its own target (CE Tgt / PE Tgt), reduce it in steps. Reduce only — never adds. Each step fires once per leg position, sized off the leg's quantity when the first step fired, and always leaves at least one lot for the target to close">
+        <Switch size="sm" checked={cfg.enabled} onCheckedChange={c => set({ enabled: !!c })} aria-label="Scale out on leg target" />
+        Scale out as each leg nears its target
+      </label>
+      {cfg.enabled && (<>
+        {cfg.steps.map((st, i) => {
+          const at = Number(st.at);
+          const bad = !(at > 0 && at < 100);
+          return (
+            <div key={i} className="flex flex-wrap items-center gap-1.5">
+              <span className="text-zinc-500">Step {i + 1}: at</span>
+              <RuleNumInput value={st.at} onCommit={v => setStep(i, { at: v })} placeholder="50" step={5} min={5} label={`step ${i + 1} trigger %`}
+                className="w-16 h-6 text-center" title="% of the way from the leg's entry to its target (50 = half way)" />
+              <span className="text-zinc-500">% of target → reduce</span>
+              <MiniSelect value={String(st.pct)} ariaLabel={`Step ${i + 1} reduce size`}
+                options={[25, 50, 75].map(n => ({ value: String(n), label: `${n}%` }))}
+                onChange={v => setStep(i, { pct: Number(v) as 25 | 50 | 75 })} className="w-16" />
+              {cfg.steps.length > 1 && (
+                <button type="button" onClick={() => set({ steps: cfg.steps.filter((_, j) => j !== i) })}
+                  aria-label={`Remove step ${i + 1}`} title="Remove this step"
+                  className={cn('text-zinc-500 hover:text-rose-400 cursor-pointer rounded px-1', FOCUS_RING)}>&times;</button>
+              )}
+              {bad && <span className="text-rose-400 font-semibold">enter 1–99</span>}
+            </div>
+          );
+        })}
+        {cfg.steps.length < MAX_SCALE_STEPS && (
+          <button type="button" onClick={() => set({ steps: [...cfg.steps, { at: '75', pct: 25 }] })}
+            className={cn('self-start text-violet-300 hover:text-violet-200 font-bold cursor-pointer rounded', FOCUS_RING)}>
+            + Add step
+          </button>
+        )}
+        <span className="text-zinc-500">
+          Steps fire in order of their trigger; each % is of the leg&rsquo;s lots when the first step fired, rounded down,
+          and one lot always stays for the target ({unit}).{' '}
+          Editing the ladder mid-trade never re-fires a step: one at or below the highest step already taken is passed.{' '}
+          {f && <span className="text-zinc-400">Done: CE {passed(f.ceScaleAt)}/{usable} · PE {passed(f.peScaleAt)}/{usable}</span>}
+        </span>
+        {!hasTarget && <span className="text-amber-300 font-semibold">No leg target set (CE / PE Tgt, or the running Lazy Leg&rsquo;s) — scale-out measures progress toward it, so it is off without one.</span>}
+      </>)}
+    </div>
+  );
+}
+
 function SettingsCard({ title, children }: { title: string; children: React.ReactNode }) {
   return (
     <section className="flex flex-col gap-1.5 rounded-xl border border-zinc-800/60 bg-zinc-950/40 px-3 py-2">
@@ -1853,6 +1919,9 @@ function LegReentryControls({ row, onUpdate, onCancelPending, legTargetsElsewher
       </SettingsCard>
       <SettingsCard title="Lazy legs">
         <LazyLegsEditor row={row} onUpdate={onUpdate} />
+      </SettingsCard>
+      <SettingsCard title="Scale-out on leg target">
+        <ScaleOutControls row={row} onUpdate={onUpdate} />
       </SettingsCard>
       <SettingsCard title="Overall strategy (SL · target · trail)">
         <OverallSettingsControls row={row} onUpdate={onUpdate} />
@@ -3379,12 +3448,7 @@ function FocusTableRowImpl({
 
             <div className="flex items-center gap-1.5">
               <button
-                onClick={() => onUpdate({
-                  levelHigh: '', levelLow: '', levelVw: false, vwapInterval: '1', vwapBufferPct: '0.1',
-                  slRupees: '', slMultiplier: '', ceSlMultiplier: '1.2', peSlMultiplier: '1.2',
-                  slRollStrikes: 0, slToCost: false, slToCostScope: undefined, squareOff: undefined, reSlMode: 'off', reTgtMode: 'off',
-                  ceTgtPct: '', peTgtPct: '', noReEntryAfter: '', entryMomEnabled: false, entryMomValue: '', ceSimpleMom: undefined, peSimpleMom: undefined, ceRangeBreakout: undefined, peRangeBreakout: undefined, lazyLegs: undefined, reSlLazyId: undefined, reTgtLazyId: undefined, overallTarget: undefined, overallTrail: undefined, overallReSl: undefined, overallReTgt: undefined,
-                })}
+                onClick={() => onUpdate(CLEARED_RULES)}
                 title="Clear rules"
                 className={cn('text-[11px] text-zinc-500 hover:text-zinc-300 transition-colors cursor-pointer', FOCUS_RING)}
               >
@@ -3509,6 +3573,20 @@ const PRO_STATUS: Record<FocusRowStatus, { cls: string; bar: string }> = {
   exited:  { cls: 'bg-zinc-800 text-zinc-400 border-zinc-700', bar: 'before:bg-zinc-600' },
 };
 
+/**
+ * The rule fields every view's "Clear rules" resets — ONE copy, so a new rule field is added (and cleared) once.
+ * Strikes, timing, lots and REAL/SIM are not rules here and stay.
+ */
+const CLEARED_RULES: Partial<FocusRow> = {
+  levelHigh: '', levelLow: '', levelVw: false, vwapInterval: '1', vwapBufferPct: '0.1',
+  slRupees: '', slMultiplier: '', ceSlMultiplier: '1.2', peSlMultiplier: '1.2',
+  slRollStrikes: 0, slToCost: false, slToCostScope: undefined, squareOff: undefined, reSlMode: 'off', reTgtMode: 'off',
+  ceTgtPct: '', peTgtPct: '', noReEntryAfter: '', entryMomEnabled: false, entryMomValue: '',
+  ceSimpleMom: undefined, peSimpleMom: undefined, ceRangeBreakout: undefined, peRangeBreakout: undefined,
+  lazyLegs: undefined, reSlLazyId: undefined, reTgtLazyId: undefined,
+  overallTarget: undefined, overallTrail: undefined, overallReSl: undefined, overallReTgt: undefined, scaleOut: undefined,
+};
+
 /** One-line summary of the row's re-entry setup for the collapsed strip. */
 function reentrySummary(row: FocusRow): string {
   const sl = reentryConfig(row, 'sl');
@@ -3520,6 +3598,8 @@ function reentrySummary(row: FocusRow): string {
   if (row.noReEntryAfter) parts.push(`none after ${row.noReEntryAfter}`);
   if (row.squareOff === 'complete') parts.push('Square off complete');
   if (row.slToCost) parts.push(`Trail SL to BE (${row.slToCostScope === 'sl' ? 'SL legs' : 'all legs'})`);
+  const scale = scaleOutSteps(row.scaleOut);
+  if (scale.length) parts.push(`Scale-out ${scale.map(st => `${st.at}%→−${st.pct}%`).join(', ')}`);
   return parts.join(' · ');
 }
 
@@ -3626,12 +3706,7 @@ function FocusProRowImpl({
   const strikes = useStrikeEditing(row, live, onUpdate, onBlocked);
   const traded = legsOf(row);
 
-  const clearRules = () => onUpdate({
-    levelHigh: '', levelLow: '', levelVw: false, vwapInterval: '1', vwapBufferPct: '0.1',
-    slRupees: '', slMultiplier: '', ceSlMultiplier: '1.2', peSlMultiplier: '1.2',
-    slRollStrikes: 0, slToCost: false, slToCostScope: undefined, squareOff: undefined, reSlMode: 'off', reTgtMode: 'off',
-    ceTgtPct: '', peTgtPct: '', noReEntryAfter: '', entryMomEnabled: false, entryMomValue: '', ceSimpleMom: undefined, peSimpleMom: undefined, ceRangeBreakout: undefined, peRangeBreakout: undefined, lazyLegs: undefined, reSlLazyId: undefined, reTgtLazyId: undefined, overallTarget: undefined, overallTrail: undefined, overallReSl: undefined, overallReTgt: undefined,
-  });
+  const clearRules = () => onUpdate(CLEARED_RULES);
 
   const legLine = (leg: 'CE' | 'PE') => {
     const isCe = leg === 'CE';
@@ -4447,7 +4522,7 @@ function FocusRowCardImpl({
           </span>
           <div className="flex items-center gap-1.5">
             <button
-              onClick={() => onUpdate({ levelHigh: '', levelLow: '', levelVw: false, vwapInterval: '1', vwapBufferPct: '0.1', slRupees: '', slMultiplier: '', ceSlMultiplier: '1.2', peSlMultiplier: '1.2', slRollStrikes: 0, slToCost: false, slToCostScope: undefined, squareOff: undefined, reSlMode: 'off', reTgtMode: 'off', ceTgtPct: '', peTgtPct: '', noReEntryAfter: '', entryMomEnabled: false, entryMomValue: '', ceSimpleMom: undefined, peSimpleMom: undefined, ceRangeBreakout: undefined, peRangeBreakout: undefined, lazyLegs: undefined, reSlLazyId: undefined, reTgtLazyId: undefined, overallTarget: undefined, overallTrail: undefined, overallReSl: undefined, overallReTgt: undefined })}
+              onClick={() => onUpdate(CLEARED_RULES)}
               className={cn('text-[11px] text-zinc-500 hover:text-zinc-300 transition-colors cursor-pointer', FOCUS_RING)}
             >
               Clear
@@ -4696,6 +4771,12 @@ export default function FocusTool() {
   // — a leg exit must not be deduped by row id alone, or a CE breach on a row
   // could suppress an independent PE breach on the same row.
   const autoExitingLegRef = useRef<Set<string>>(new Set());
+  // Legs with a scale-out REDUCE in flight (`rowId:leg`). Kept apart from autoExitingLegRef, which means "this leg is
+  // being closed in full" — Square Off Complete and RE MATCH read that, and a partial reduce is not a full close.
+  const scalingLegRef = useRef<Set<string>>(new Set());
+  // A scale-out step that was refused before any order went out is retried, but not before this time (ms), and at
+  // most twice per step (`rowId:leg:at` → attempts).
+  const scaleRetryRef = useRef<Map<string, { notBefore: number; tries: number }>>(new Map());
   // Auto leg exits (and their SL rolls) in flight per row. The two legs are
   // independent contracts, so a PE stop must not wait behind the CE's close +
   // roll (easily 10s) — they may run together, and the row's busy lock is only
@@ -6081,6 +6162,11 @@ export default function FocusTool() {
           peDeltaModel: nextPeQty <= 0 ? undefined : (leg === 'PE' && prevQty <= 0 ? true : f?.peDeltaModel),
           ceTrailSteps: nextCeQty > 0 && !(leg === 'CE' && prevQty <= 0) ? f?.ceTrailSteps : undefined,
           peTrailSteps: nextPeQty > 0 && !(leg === 'PE' && prevQty <= 0) ? f?.peTrailSteps : undefined,
+          // The scale-out ladder belongs to the position too: a re-opened leg starts its own.
+          ceScaleAt: nextCeQty > 0 && !(leg === 'CE' && prevQty <= 0) ? f?.ceScaleAt : undefined,
+          peScaleAt: nextPeQty > 0 && !(leg === 'PE' && prevQty <= 0) ? f?.peScaleAt : undefined,
+          ceScaleBase: nextCeQty > 0 && !(leg === 'CE' && prevQty <= 0) ? f?.ceScaleBase : undefined,
+          peScaleBase: nextPeQty > 0 && !(leg === 'PE' && prevQty <= 0) ? f?.peScaleBase : undefined,
           ceOrb: nextCeQty <= 0 ? undefined : (leg === 'CE' && prevQty <= 0 ? (orb ?? undefined) : f?.ceOrb),
           peOrb: nextPeQty <= 0 ? undefined : (leg === 'PE' && prevQty <= 0 ? (orb ?? undefined) : f?.peOrb),
           bookedPnl: (f?.bookedPnl ?? 0) + (Number(bookedDelta) || 0),
@@ -8133,7 +8219,14 @@ export default function FocusTool() {
           patchFill(row.id, () => ({ cePending: null, pePending: null }));
           // A sibling already closing through its own stop is left to that exit: a second close, sized off the
           // 2s polled book that still shows the leg open, would flip it to the other side.
-          const toClose = rest.filter(l => !autoExitingLegRef.current.has(`${row.id}:${l}`));
+          // A sibling with a scale-out reduce in flight IS closed — but only once that reduce has settled, so the full
+          // close is sized off a ledger that already shows it (closing on top of it would over-buy and flip the leg).
+          const scaleDeadline = Date.now() + 8000;
+          while (rest.some(l => scalingLegRef.current.has(`${row.id}:${l}`)) && Date.now() < scaleDeadline) {
+            await new Promise(res => setTimeout(res, 100));
+          }
+          const toClose = rest.filter(l => !autoExitingLegRef.current.has(`${row.id}:${l}`)
+            && !scalingLegRef.current.has(`${row.id}:${l}`));
           if (toClose.length) {
             addToast('error', `${row.underlying} Square Off Complete`, `${leg} ${kind === 'sl' ? 'SL' : 'target'} hit — closing ${toClose.join(' + ')} too`);
             // Hold the sibling's per-leg lock for the close, so the scheduler's own stop on that leg cannot start a second one.
@@ -8182,6 +8275,86 @@ export default function FocusTool() {
           legExitsInFlightRef.current.set(row.id, left);
           return;
         }
+        legExitsInFlightRef.current.delete(row.id);
+        setBusyRows(prev => { const next = new Set(prev); next.delete(row.id); return next; });
+      });
+    return true;
+  }
+
+  /**
+   * One scale-out step on one leg: reduce it by the step's % of its base qty (its qty when the first step fired).
+   *
+   * Locks: the leg goes in scalingLegRef (not autoExitingLegRef — this is not a full close) and the row is counted in
+   * legExitsInFlightRef like a leg exit, so the busy lock is released only when the LAST in-flight leg action ends,
+   * autoExitRow defers (and records the wanted exit) while it runs, and the other leg's own stop is not held up.
+   *
+   * The step is recorded BEFORE the order goes out, so a slow or rejected order can never fire it twice. If placeLeg
+   * refused before anything went out (ledger unchanged, nothing left unconfirmed), the step is put back and retried
+   * after 30 s, at most twice.
+   */
+  function scaleOutLeg(row: FocusRow, leg: 'CE' | 'PE', step: { at: number; pct: 25 | 50 | 75 }, live: RowLive): boolean {
+    const key = `${row.id}:${leg}`;
+    if (autoExitingLegRef.current.has(key) || scalingLegRef.current.has(key) || autoExitingRef.current.has(row.id)) return false;
+    if (unconfirmedOrderRef.current.has(key)) return false;
+    const inFlight = legExitsInFlightRef.current.get(row.id) ?? 0;
+    // Busy for anything but another leg action (a manual order, a shift, a firing re-entry) → wait.
+    if (busyRows.has(row.id) && inFlight === 0) return false;
+    // A whole-row exit is waiting for the row to free up: taking profit on a leg about to be closed is pointless.
+    const wantedAt = rowExitWantedRef.current.get(row.id);
+    if (wantedAt != null && Date.now() - wantedAt < 5_000) return false;
+    const retryKey = `${key}:${step.at}`;
+    const retry = scaleRetryRef.current.get(retryKey);
+    if (retry && Date.now() < retry.notBefore) return false;
+    // Lot size from the row's own live data first (as the row exits size), the market-data map second. Unknown = wait;
+    // never record the step as done on a lot size that simply has not loaded yet.
+    const lotSize = live.lotSize > 0 ? live.lotSize : (lotSizes[row.underlying] ?? 0);
+    if (!(lotSize > 0)) return false;
+    const held = legOwnContracts(row, leg, live);
+    if (!(held > 0)) return false;
+    const prevAt = Number(leg === 'CE' ? row.fill?.ceScaleAt : row.fill?.peScaleAt) || 0;
+    const savedBase = Number(leg === 'CE' ? row.fill?.ceScaleBase : row.fill?.peScaleBase) || 0;
+    const base = savedBase > 0 ? savedBase : held;
+    const lots = scaleOutLots(base, held, lotSize, step.pct);
+    const tag = `${isSimRow(row) ? 'SIM ' : ''}${row.underlying} ${leg}`;
+    // Record the step first (and the base on the first one): it fires once, whatever happens to the order.
+    patchFill(row.id, () => (leg === 'CE'
+      ? { ceScaleAt: step.at, ceScaleBase: base }
+      : { peScaleAt: step.at, peScaleBase: base }));
+    if (!(lots > 0)) {
+      addToast('error', `${tag} scale-out skipped`,
+        `${step.at}% of target reached, but ${step.pct}% of ${Math.round(base / lotSize)} lot(s) rounds to zero once one `
+        + 'lot is kept open (the target closes the rest)');
+      return false;
+    }
+    const reason = `${leg} scale-out: ${step.at}% of target reached — reduce ${step.pct}% (${lots} lot(s))`;
+    logEvent('scale_out_leg', row, reason, { leg, at: step.at, pct: step.pct, lots, base });
+    addToast('success', `${tag} scale-out`, reason);
+    scalingLegRef.current.add(key);
+    legExitsInFlightRef.current.set(row.id, inFlight + 1);
+    setBusyRows(prev => new Set(prev).add(row.id));
+    placeLeg(row, leg, { reduce: true, lots, awaitFill: true })
+      .then(ok => {
+        if (ok) { scaleRetryRef.current.delete(retryKey); return; }
+        const now = schedulerRef.current.config.rows.find(r => r.id === row.id);
+        const heldNow = Number(leg === 'CE' ? now?.fill?.ceQty : now?.fill?.peQty) || 0;
+        const heldBefore = Number(leg === 'CE' ? row.fill?.ceQty : row.fill?.peQty) || 0;
+        const tries = (retry?.tries ?? 0) + 1;
+        // Nothing went out (or it was refused outright): the ledger did not move and no order is left unconfirmed.
+        if (!unconfirmedOrderRef.current.has(key) && heldNow === heldBefore && tries <= 2) {
+          scaleRetryRef.current.set(retryKey, { notBefore: Date.now() + 30_000, tries });
+          patchFill(row.id, () => (leg === 'CE'
+            ? { ceScaleAt: prevAt || undefined, ceScaleBase: savedBase || undefined }
+            : { peScaleAt: prevAt || undefined, peScaleBase: savedBase || undefined }));
+          addToast('error', `${tag} scale-out not sent`, `The ${lots}-lot reduce was refused before it filled — retrying in 30s (${tries}/2)`);
+          return;
+        }
+        addToast('error', `${tag} scale-out not confirmed`,
+          `The ${lots}-lot reduce was rejected or not confirmed in time. It may still fill — do NOT re-send it by hand; the step is not retried.`);
+      })
+      .finally(() => {
+        scalingLegRef.current.delete(key);
+        const left = (legExitsInFlightRef.current.get(row.id) ?? 1) - 1;
+        if (left > 0) { legExitsInFlightRef.current.set(row.id, left); return; }
         legExitsInFlightRef.current.delete(row.id);
         setBusyRows(prev => { const next = new Set(prev); next.delete(row.id); return next; });
       });
@@ -8278,7 +8451,9 @@ export default function FocusTool() {
         // Already exiting: nothing new to fire on this leg. The pair rules
         // below still run, so a whole-row breach during the close/roll gets
         // recorded (rowExitWantedRef) and stops the roll re-selling.
-        if (autoExitingLegRef.current.has(`${row.id}:${leg}`)) continue;
+        // A scale-out reduce in flight on this leg holds it too (≤ the ~5s fill wait): a stop sized off the ledger while
+        // that reduce is unconfirmed would close more than the leg holds. The OTHER leg and the row rules are not held.
+        if (autoExitingLegRef.current.has(`${row.id}:${leg}`) || scalingLegRef.current.has(`${row.id}:${leg}`)) continue;
         // legAction only when an exit actually STARTED: a breach that is
         // held (unconfirmed order, row busy) must not also suppress the
         // row's own pair/level rules below every tick while it waits.
@@ -8298,7 +8473,12 @@ export default function FocusTool() {
         const tgtReason = legTargetReason(row, leg, live, undefined, spot);
         if (tgtReason) { if (autoExitLeg(row, leg, tgtReason, 'tgt')) legAction = true; continue; }
         const costReason = costStopReason(row, leg, live);
-        if (costReason && autoExitLeg(row, leg, costReason, 'cost')) legAction = true;
+        if (costReason) { if (autoExitLeg(row, leg, costReason, 'cost')) legAction = true; continue; }
+        // Scale-out ladder: part of the leg comes off as it moves toward its own target. Reduce only. Not a legAction —
+        // a partial profit-take must not hold back this tick's whole-row rules (autoExitRow waits for it by itself).
+        const due = dueScaleOutStep(row.scaleOut, Number(leg === 'CE' ? row.fill?.ceScaleAt : row.fill?.peScaleAt) || 0,
+          legTargetProgress(row, leg, live, spot));
+        if (due) scaleOutLeg(row, leg, due, live);
       }
       if (legAction) continue;
 

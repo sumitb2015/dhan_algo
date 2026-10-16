@@ -23,9 +23,10 @@
 
 import { NSE_HOLIDAYS } from './nseHolidays.ts';
 import { greeksForLeg, trustedMark, type FutureQuote } from './optionsPricing.ts';
+import { openLots } from './partialQty.ts';
 import type {
   FocusRow, FocusDte, FocusRowStatus, FocusReentryMode, FocusReentryTrigger, FocusPendingReentry, FocusLegSimpleMom, FocusLazyLeg, FocusLegRangeBreakout, FocusOverallMode, FocusOverallTrail,
-  FocusLegSlRule, FocusLegTrailSl, FocusLegOrbSl, FocusOrbStamp, FocusStrikeCriteria, FocusLegCrit,
+  FocusLegSlRule, FocusLegTrailSl, FocusLegOrbSl, FocusOrbStamp, FocusStrikeCriteria, FocusLegCrit, FocusScaleOut,
 } from '@/lib/focusToolRows';
 
 // ── Constants ────────────────────────────────────────────────────────────────
@@ -1488,6 +1489,88 @@ export function legTarget(
   const lazy = runningLazyLeg(row, leg);
   if (lazy) return { value: lazy.tgtPct, unit: lazy.tgtUnit ?? 'pct' };
   return { value: leg === 'CE' ? row.ceTgtPct : row.peTgtPct, unit: row.legTgtUnit };
+}
+
+// ── Scale-out on the leg's own target ───────────────────────────────────────
+
+export const MAX_SCALE_STEPS = 3;
+
+/**
+ * How far a leg has travelled toward its OWN target: 0 at entry, 1 at the target (above 1 = past it, below 0 = against
+ * it). Measured in the target's own unit — premium (% / pts), the index (idx pts / idx %) or delta — from the same
+ * levels legTargetReason fires on. Null when the leg holds nothing, has no target, or the price it needs is missing.
+ */
+export function legTargetProgress(
+  row: Pick<FocusRow, 'ceTgtPct' | 'peTgtPct' | 'legTgtUnit' | 'fill' | 'lazyLegs'>,
+  leg: 'CE' | 'PE', live: RowLive, spot = 0,
+): number | null {
+  if (legOwnContracts(row, leg, live) <= 0) return null;
+  const { value, unit } = legTarget(row, leg);
+  const frac = (start: number, now: number, level: number) => {
+    const span = start - level;
+    return Math.abs(span) > 1e-9 && Number.isFinite(now) ? (start - now) / span : null;
+  };
+  if (unit === 'delta') {
+    const start = Number(leg === 'CE' ? row.fill?.ceDeltaEntry : row.fill?.peDeltaEntry) || 0;
+    const lvl = legTargetDeltaLevel(start, value);
+    const d = legDeltaNow(leg, live, legDeltaBasis(row.fill, leg));
+    return lvl == null || d == null || !(start > 0) ? null : frac(start, d, lvl);
+  }
+  if (unit === 'uPts' || unit === 'uPct') {
+    const start = Number(leg === 'CE' ? row.fill?.ceSpotEntry : row.fill?.peSpotEntry) || 0;
+    const lvl = legTargetSpotLevel(leg, start, value, unit);
+    return lvl == null || !(spot > 0) || !(start > 0) ? null : frac(start, spot, lvl);
+  }
+  const entry = legOwnEntry(row, leg, live);
+  const level = legTargetLevel(entry, value, unit);
+  const now = (leg === 'CE' ? live.ltpCe : live.ltpPe) ?? 0;
+  return level == null || !(now > 0) || !(entry > 0) ? null : frac(entry, now, level);
+}
+
+/** The usable scale-out steps, by trigger: 0 < at < 100, pct 25 / 50 / 75, at most MAX_SCALE_STEPS. */
+export function scaleOutSteps(cfg: FocusScaleOut | null | undefined): { at: number; pct: 25 | 50 | 75 }[] {
+  // A hand-edited or imported config can carry anything here: never throw in the exit watcher.
+  if (!cfg?.enabled || !Array.isArray(cfg.steps)) return [];
+  return cfg.steps
+    .filter(s => !!s && typeof s === 'object')
+    .map(s => ({ at: Number(s.at), pct: s.pct }))
+    .filter(s => Number.isFinite(s.at) && s.at > 0 && s.at < 100 && [25, 50, 75].includes(s.pct))
+    .sort((a, b) => a.at - b.at)
+    .slice(0, MAX_SCALE_STEPS);
+}
+
+/**
+ * The next scale-out step due on a leg, or null: the lowest step ABOVE the highest trigger already fired
+ * (`firedAt`, 0 = none) that progress has reached. Keyed by trigger so an edit mid-trade is safe: a step added below
+ * a fired one is passed, a removed one cannot shift the rest. One step per call — a jump past two triggers fires them
+ * on consecutive ticks, each sized off the same base.
+ */
+export function dueScaleOutStep(
+  cfg: FocusScaleOut | null | undefined, firedAt: number, progress: number | null,
+): { at: number; pct: 25 | 50 | 75 } | null {
+  if (progress == null) return null;
+  const fired = Number(firedAt) || 0;
+  const s = scaleOutSteps(cfg).find(st => st.at > fired);
+  return s && progress * 100 >= s.at ? s : null;
+}
+
+/** How many of the ladder's steps a leg has passed (fired or skipped below the highest fired trigger). */
+export function scaleOutStepsPassed(cfg: FocusScaleOut | null | undefined, firedAt: number): number {
+  const fired = Number(firedAt) || 0;
+  return scaleOutSteps(cfg).filter(st => st.at <= fired).length;
+}
+
+/**
+ * Lots one scale-out step closes: `pct` % of the base qty (the leg's qty when the first step fired), rounded DOWN to
+ * whole lots, and always leaving at least one lot open — closing the whole leg is its target's (or stop's) job, which
+ * also runs the re-entry and retires the row; a scale-out must not bypass that. 0 = nothing to close.
+ */
+export function scaleOutLots(baseQty: number, heldQty: number, lotSize: number, pct: number): number {
+  if (!(lotSize > 0) || !(baseQty > 0) || !(heldQty > 0)) return 0;
+  // Same whole-lot rounding as the manual Exit 25 / 50 / 75 % chips (lib/partialQty.ts).
+  const want = openLots(Math.round(baseQty * pct) / 100, lotSize);
+  const held = openLots(heldQty, lotSize);
+  return Math.max(0, Math.min(want, held - 1));
 }
 
 /**

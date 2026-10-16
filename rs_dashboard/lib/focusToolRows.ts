@@ -234,6 +234,16 @@ export interface FocusRowFill {
   ceTrailSteps?: number;
   peTrailSteps?: number;
   /**
+   * Scale-out (FocusRow.scaleOut) on this leg's current position: the highest trigger (% of target) that has fired,
+   * and the leg's own qty when the first step did — every step's % is of that base, so "25% then 25%" leaves half.
+   * Keyed by trigger, not a step count, so editing the ladder mid-trade can neither re-fire a step nor skip one: a
+   * step at or below the highest fired trigger is passed. Both clear when the leg goes flat or re-opens from flat.
+   */
+  ceScaleAt?: number;
+  peScaleAt?: number;
+  ceScaleBase?: number;
+  peScaleBase?: number;
+  /**
    * The range a Range Breakout leg entered on, stamped when it opened — the base
    * of its ORB-based stop loss (FocusLegOrbSl). Cleared when the leg goes flat.
    */
@@ -393,6 +403,10 @@ export interface FocusLegOrbSl {
  */
 export type FocusOverallMode = 'mtm' | 'premiumPct';
 
+/** One scale-out step: at `at` % of the way to the leg's target, reduce by `pct` % (see FocusRow.scaleOut). */
+export interface FocusScaleStep { at: string; pct: 25 | 50 | 75 }
+export interface FocusScaleOut { enabled: boolean; steps: FocusScaleStep[] }
+
 export interface FocusOverallTarget {
   enabled: boolean;
   mode: FocusOverallMode;
@@ -526,6 +540,12 @@ export interface FocusRow {
   /** Lazy Leg to open when the leg's SL / target closes it (reSlMode / reTgtMode = 'lazy'). */
   reSlLazyId?: string;
   reTgtLazyId?: string;
+  /**
+   * Scale-out ladder on each leg's own target: when a leg's progress toward ITS target reaches `at` % (50 = half way),
+   * reduce that leg by `pct` % of its quantity when the first step fired. Reduce only — never adds. Each step fires
+   * once per leg position; off when the leg has no target.
+   */
+  scaleOut?: FocusScaleOut;
   /** AlgoTest Lazy Legs: up to 10 (MAX_LAZY_LEGS in focusToolRules), chainable through onSl / onTgt. */
   lazyLegs?: FocusLazyLeg[];
   /**
