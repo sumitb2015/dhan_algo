@@ -1714,6 +1714,45 @@ function OverallSettingsControls({ row, onUpdate }: { row: FocusRow; onUpdate: (
  * Per-leg index levels (FocusRow.ceEntryLevel / ceExitLevel …). Levels are free-typed → RuleNumInput (commit on
  * blur/Enter); the direction is a select and commits at once. Blank level = off.
  */
+/** One leg's index entry / exit levels, compact, for that leg's own line (Pro sub-row, Table leg box). */
+function LegIndexLevels({ row, leg, onUpdate }: { row: FocusRow; leg: 'CE' | 'PE'; onUpdate: (patch: Partial<FocusRow>) => void }) {
+  const step = rowStep(row);
+  const isCe = leg === 'CE';
+  const en: FocusLegEntryLevel = (isCe ? row.ceEntryLevel : row.peEntryLevel) ?? { level: '', dir: isCe ? 'below' : 'above' };
+  const ex: FocusLegLevel = (isCe ? row.ceExitLevel : row.peExitLevel) ?? { level: '', dir: isCe ? 'above' : 'below' };
+  const setEn = (patch: Partial<FocusLegEntryLevel>) => onUpdate(isCe ? { ceEntryLevel: { ...en, ...patch } } : { peEntryLevel: { ...en, ...patch } });
+  const setEx = (patch: Partial<FocusLegLevel>) => onUpdate(isCe ? { ceExitLevel: { ...ex, ...patch } } : { peExitLevel: { ...ex, ...patch } });
+  const dirOpts = [{ value: 'above', label: 'above' }, { value: 'below', label: 'below' }];
+  const lbl = 'text-[11px] font-bold text-zinc-400';
+  const ignored = entryMomentumOn(row) && legLevelOn(en);
+  return (
+    <div className="inline-flex flex-wrap items-center gap-1.5">
+      <span className={cn('text-[11px] font-black uppercase tracking-wider', isCe ? 'text-emerald-400' : 'text-rose-400')}
+        title="Index levels for this leg only. A level fires on a REAL cross: if spot is already past it, it waits for spot to come back and cross again. Levels are prices for the day: presets and imports do not carry them">
+        {leg} index
+      </span>
+      <span className={lbl}
+        title={`Sell ${leg} when the index crosses this level, between the row's entry and exit time, while ${leg} holds nothing. Once per day — Arm re-enables it. Replaces this leg's Range Breakout / Simple Momentum. Ignored under Overall Momentum and in an overall re-entry cycle`}>
+        sell when
+      </span>
+      <MiniSelect value={en.dir} ariaLabel={`${leg} entry level direction`} options={dirOpts}
+        onChange={v => setEn({ dir: v as 'above' | 'below' })} className="w-[4.5rem]" />
+      <RuleNumInput value={en.level} onCommit={v => setEn({ level: v })} placeholder="off" step={step} min={step} offBelowMin stepFromBlank={false}
+        label={`${leg} entry level`} className="w-20 h-6 text-center" />
+      <span className={lbl}
+        title={`Close ${leg} when the index crosses this level (spot must first be on the other side while ${leg} is held). Handled as ${leg}'s SL: RE on SL runs`}>
+        close when
+      </span>
+      <MiniSelect value={ex.dir} ariaLabel={`${leg} exit level direction`} options={dirOpts}
+        onChange={v => setEx({ dir: v as 'above' | 'below' })} className="w-[4.5rem]" />
+      <RuleNumInput value={ex.level} onCommit={v => setEx({ level: v })} placeholder="off" step={step} min={step} offBelowMin stepFromBlank={false}
+        label={`${leg} exit level`} className="w-20 h-6 text-center" />
+      {entryLevelFiredToday(en, istToday()) && <span className="text-[11px] text-amber-300 font-semibold">entry used today — Arm to re-enable</span>}
+      {ignored && <span className="text-[11px] text-amber-300 font-semibold">entry ignored: Overall Momentum on</span>}
+    </div>
+  );
+}
+
 function IndexLevelControls({ row, onUpdate }: { row: FocusRow; onUpdate: (patch: Partial<FocusRow>) => void }) {
   const step = rowStep(row);
   const today = istToday();
@@ -1852,12 +1891,14 @@ function SettingsCard({ title, children }: { title: string; children: React.Reac
  * so they go through RuleNumInput (commit on blur/Enter — a half-typed "5"
  * on the way to "50" must never reach the rule engine).
  */
-function LegReentryControls({ row, onUpdate, onCancelPending, legTargetsElsewhere = false }: {
+function LegReentryControls({ row, onUpdate, onCancelPending, legTargetsElsewhere = false, levelsElsewhere = false }: {
   row: FocusRow;
   onUpdate: (patch: Partial<FocusRow>) => void;
   onCancelPending: (leg: 'CE' | 'PE') => void;
   /** The CE/PE target inputs are rendered with each leg (table view) — don't repeat them here. */
   legTargetsElsewhere?: boolean;
+  /** The per-leg index levels sit on each leg's own line (Pro / Table) — don't repeat them here. */
+  levelsElsewhere?: boolean;
 }) {
   const sl = reentryConfig(row, 'sl');
   const tgt = reentryConfig(row, 'tgt');
@@ -1981,9 +2022,11 @@ function LegReentryControls({ row, onUpdate, onCancelPending, legTargetsElsewher
       <SettingsCard title="Lazy legs">
         <LazyLegsEditor row={row} onUpdate={onUpdate} />
       </SettingsCard>
-      <SettingsCard title="Index levels (per leg)">
-        <IndexLevelControls row={row} onUpdate={onUpdate} />
-      </SettingsCard>
+      {!levelsElsewhere && (
+        <SettingsCard title="Index levels (per leg)">
+          <IndexLevelControls row={row} onUpdate={onUpdate} />
+        </SettingsCard>
+      )}
       <SettingsCard title="Scale-out on leg target">
         <ScaleOutControls row={row} onUpdate={onUpdate} />
       </SettingsCard>
@@ -3344,6 +3387,11 @@ function FocusTableRowImpl({
             </div>
           )}
         </div>
+        {legsOf(row).includes(leg) && (
+          <div className="pt-1.5 border-t border-zinc-800/40">
+            <LegIndexLevels row={row} leg={leg} onUpdate={onUpdate} />
+          </div>
+        )}
       </div>
     );
   };
@@ -3486,7 +3534,7 @@ function FocusTableRowImpl({
           <div className="bg-zinc-950/40 border border-zinc-800/60 rounded-xl px-2.5 py-2 flex flex-col gap-1">
             <span className="text-[11px] font-black uppercase tracking-wider text-zinc-500">Rules &amp; re-entry</span>
             <OverallSummaryChip row={row} />
-            <LegReentryControls row={row} onUpdate={onUpdate} onCancelPending={onCancelPending} legTargetsElsewhere />
+            <LegReentryControls row={row} onUpdate={onUpdate} onCancelPending={onCancelPending} legTargetsElsewhere levelsElsewhere />
           </div>
         </div>
       </td>
@@ -3934,10 +3982,11 @@ function FocusProRowImpl({
           </div>
         </TableCell>
       </TableRow>
-      {(ladderOpen || pending.length > 0) && (
+      {(ladderOpen || pending.length > 0 || inSide) && (
         <TableRow className="border-zinc-800/70 hover:bg-transparent">
           <TableCell colSpan={10} className="py-1 pl-3 pr-3">
             <div className="flex flex-wrap items-center gap-2">
+              {(ladderOpen || pending.length > 0) && (<>
               <span className={cn('text-[11px] font-black uppercase tracking-wider', tone)}>{leg} limit sell</span>
               <LegLotSelect value={ladderLots[leg]} onChange={n => setLadderLots(p => ({ ...p, [leg]: n }))} className="w-11 h-7 text-xs" title={`Lots each ${leg} limit order sells`} />
               {LADDER_PCTS.map(pct => {
@@ -3962,6 +4011,12 @@ function FocusProRowImpl({
                     onClick={() => onLadderCancel?.(leg, o.orderId)} aria-label={`Cancel ${leg} limit at ${o.price.toFixed(2)}`} title="Cancel this limit order">✕</button>
                 </span>
               ))}
+              </>)}
+              {inSide && (
+                <div className="ml-auto">
+                  <LegIndexLevels row={row} leg={leg} onUpdate={onUpdate} />
+                </div>
+              )}
             </div>
           </TableCell>
         </TableRow>
@@ -4222,7 +4277,7 @@ function FocusProRowImpl({
             </div>
             <CollapsibleContent>
               <div className="px-3 pb-2.5 pt-1 bg-zinc-950/30">
-                <LegReentryControls row={row} onUpdate={onUpdate} onCancelPending={onCancelPending} legTargetsElsewhere />
+                <LegReentryControls row={row} onUpdate={onUpdate} onCancelPending={onCancelPending} legTargetsElsewhere levelsElsewhere />
               </div>
             </CollapsibleContent>
           </Collapsible>
