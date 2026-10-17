@@ -8,6 +8,7 @@ import NavBar from '../NavBar';
 import { FOCUS_RING } from '../Scalper';
 import { useLiveOptionsWS } from '@/lib/useLiveOptionsWS';
 import { useBrokerSelector } from '@/hooks/useBrokerSelector';
+import { withSavedBroker } from '@/hooks/withSavedBroker';
 import PositionVisualizer from './PositionVisualizer';
 import {
   type MultiLegBasket, type MultiLegLeg, fallbackLotSize, crudeQtyMultiplier, basketLabel,
@@ -30,7 +31,7 @@ const pill = (on: boolean) => cn(
   FOCUS_RING,
 );
 
-export default function PositionVisualizerPage() {
+function PositionVisualizerPage() {
   const searchParams = useSearchParams();
   const queryBasketId = searchParams.get('basketId') || '';
   const queryUnderlying = searchParams.get('underlying') as Underlying | null;
@@ -310,3 +311,6 @@ export default function PositionVisualizerPage() {
     </div>
   );
 }
+
+// First render already on the saved broker: no Dhan-account calls from a page saved on Kotak/Zerodha.
+export default withSavedBroker(PositionVisualizerPage);

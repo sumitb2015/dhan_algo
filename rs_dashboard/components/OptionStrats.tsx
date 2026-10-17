@@ -11,6 +11,7 @@ import {
   sortLegsForPlacement, resolveOrderRequest, type OrderLeg, type StrikeIdentifier,
 } from '@/lib/basketOrders';
 import { useBrokerSelector, scalperRoute, type Broker } from '@/hooks/useBrokerSelector';
+import { withSavedBroker } from '@/hooks/withSavedBroker';
 import { fetchMarginSummary, type MarginSummary } from '@/lib/optionsMargin';
 import { useLiveOptionsWS } from '@/lib/useLiveOptionsWS';
 import {
@@ -63,7 +64,7 @@ function todayIso(): string {
   return new Date().toISOString().slice(0, 10);
 }
 
-export default function OptionStrats() {
+function OptionStrats() {
   const [activeView, setActiveView] = useState<'table' | 'graph'>('table');
 
   const [expiries, setExpiries] = useState<{ date: string; kind: 'weekly' | 'monthly' }[]>([]);
@@ -973,3 +974,6 @@ function Metric({ label, value, tone }: { label: string; value: React.ReactNode;
     </div>
   );
 }
+
+// First render already on the saved broker: no Dhan-account calls from a page saved on Kotak/Zerodha.
+export default withSavedBroker(OptionStrats);

@@ -11,6 +11,7 @@ import NavBar from '@/components/NavBar';
 import BrokerSelector from '@/components/BrokerSelector';
 import { usePortfolio } from '@/lib/usePortfolio';
 import { useBrokerSelector } from '@/hooks/useBrokerSelector';
+import { withSavedBroker } from '@/hooks/withSavedBroker';
 import {
   useGroupCollapse, groupByUnderlying, runningInstancesOf, sessionPnlOf, inr, signedInr,
 } from '@/lib/useStrategyGroups';
@@ -24,7 +25,7 @@ type RegistryEntry = [string, any];
 /** Is the instance this page actually renders a card for live? */
 const isPrimaryRunning = (item: any) => item?.state?.status !== 'STOPPED';
 
-export default function StrategiesPage() {
+function StrategiesPage() {
   const { broker, setBroker, authenticatedBrokers } = useBrokerSelector();
   const [strategies, setStrategies] = useState<Record<string, any>>({});
   const [loading, setLoading] = useState<boolean>(true);
@@ -436,3 +437,6 @@ export default function StrategiesPage() {
     </div>
   );
 }
+
+// First render already on the saved broker: no Dhan-account calls from a page saved on Kotak/Zerodha.
+export default withSavedBroker(StrategiesPage);

@@ -13,6 +13,7 @@ import NavBar from '@/components/NavBar';
 import BrokerSelector from '@/components/BrokerSelector';
 import { usePortfolio } from '@/lib/usePortfolio';
 import { useBrokerSelector } from '@/hooks/useBrokerSelector';
+import { withSavedBroker } from '@/hooks/withSavedBroker';
 import { useGroupCollapse, groupByUnderlying, signedInr, inr } from '@/lib/useStrategyGroups';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -124,7 +125,7 @@ function withAllBrokers(children: CopyTradeChild[]): CopyTradeChild[] {
 
 let toastCounter = 0;
 
-export default function StrategiesPlusPage() {
+function StrategiesPlusPage() {
   const { broker, setBroker, authenticatedBrokers } = useBrokerSelector();
   const [strategies, setStrategies] = useState<Record<string, any>>({});
   const [loading, setLoading] = useState(true);
@@ -1141,3 +1142,6 @@ export default function StrategiesPlusPage() {
     </div>
   );
 }
+
+// First render already on the saved broker: no Dhan-account calls from a page saved on Kotak/Zerodha.
+export default withSavedBroker(StrategiesPlusPage);

@@ -11,6 +11,7 @@ import Link from 'next/link';
 import { ArrowRight, RefreshCw, AlertTriangle, Sparkles } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { useBrokerSelector, scalperRoute, BROKER_LABELS, type Broker } from '@/hooks/useBrokerSelector';
+import { withSavedBroker } from '@/hooks/withSavedBroker';
 import { ANALYTICS_UNDERLYINGS, underlyingOfSymbol, type AnalyticsUnderlying } from '@/lib/analyticsUnderlyings';
 import { todayIso } from '@/components/crudeoil/format';
 import type { ScalperPosition } from '@/lib/zerodhaShape';
@@ -39,7 +40,7 @@ interface Group {
   unpriced: number;
 }
 
-export default function PositionsAnalyticsHome() {
+function PositionsAnalyticsHome() {
   const { broker, setBroker, authenticatedBrokers, authChecked } = useBrokerSelector();
   const [positions, setPositions] = useState<ScalperPosition[]>([]);
   const [error, setError] = useState<string | null>(null);
@@ -221,3 +222,6 @@ export default function PositionsAnalyticsHome() {
     </div>
   );
 }
+
+// First render already on the saved broker: no Dhan-account calls from a page saved on Kotak/Zerodha.
+export default withSavedBroker(PositionsAnalyticsHome);

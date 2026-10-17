@@ -16,6 +16,7 @@ import Link from 'next/link';
 import { ArrowLeft, RefreshCw, AlertTriangle, Loader2, Sparkles, LineChart } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { useBrokerSelector, scalperRoute, BROKER_LABELS, type Broker } from '@/hooks/useBrokerSelector';
+import { withSavedBroker } from '@/hooks/withSavedBroker';
 import {
   buildPositionLegs, buildInstrumentIndex, computeExposure, legExpiries,
   type PositionLeg, type UnparseableLeg, type InstrumentRow,
@@ -88,7 +89,7 @@ function isoPlusDays(days: number): string {
   return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
 }
 
-export default function PositionsAnalysis({ underlying }: { underlying: AnalyticsUnderlying }) {
+function PositionsAnalysis({ underlying }: { underlying: AnalyticsUnderlying }) {
   const { broker, setBroker, authenticatedBrokers, authChecked } = useBrokerSelector();
   const strikeStep = STRIKE_STEP[underlying];
 
@@ -1303,3 +1304,6 @@ export default function PositionsAnalysis({ underlying }: { underlying: Analytic
     </div>
   );
 }
+
+// First render already on the saved broker: no Dhan-account calls from a page saved on Kotak/Zerodha.
+export default withSavedBroker(PositionsAnalysis);

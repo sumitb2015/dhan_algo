@@ -457,7 +457,11 @@ the scalper terminals and as copy-trade children that mirror Dhan fills.
   for irregular ones — it takes a **map**, because a positional pair silently routed a third
   broker to Dhan's endpoint (i.e. traded the wrong account). Dhan is the only broker with a
   numeric `securityId`; every other broker joins positions and places orders by trading symbol,
-  so branch on `broker !== 'dhan'`, not on a specific broker name.
+  so branch on `broker !== 'dhan'`, not on a specific broker name. Every component that calls
+  `useBrokerSelector()` is exported as `withSavedBroker(Component)` (`hooks/withSavedBroker.tsx`):
+  without it the first render runs as `'dhan'` and its mount effects read the Dhan account on a
+  page saved on Kotak. Account reads that only apply to Dhan (e.g. `/api/pnl-exit`) are gated
+  on `broker === 'dhan'`; the Kotak e2e spec fails on any Dhan-account request.
 - **Bridge**: `scripts/tools/child_brokers.py` defines `ChildBroker` plus `ZerodhaChild` /
   `KotakChild`; `copy_trade_bridge.py` is broker-agnostic and drives them through that interface.
   Each broker owns its own instrument cache, margin state, position snapshot and replication

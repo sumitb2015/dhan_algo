@@ -36,18 +36,32 @@ const STORAGE_KEY = 'dhan_algo.selected_broker';
  * reloads) and which brokers currently have a valid session, fetched
  * once from /api/auth/broker-status.
  */
+/** The broker saved by setBroker, or null. Client only. */
+function readSavedBroker(): Broker | null {
+  try {
+    const saved = localStorage.getItem(STORAGE_KEY) as Broker | null;
+    return saved && BROKERS.includes(saved) ? saved : null;
+  } catch {
+    return null;
+  }
+}
+
+// True once a withSavedBroker gate has mounted in this page load: from then on a component using this hook renders
+// on the client only (never hydrated from server HTML), so the saved broker can be read during its FIRST render.
+let savedBrokerReadable = false;
+/** @internal withSavedBroker's mount signal. */
+export function markSavedBrokerReadable(): void { savedBrokerReadable = true; }
+
 export function useBrokerSelector() {
-  // Always initialize to 'dhan' so the client's first render matches the SSR
-  // HTML — reading localStorage here (even guarded by typeof window) still
-  // runs during the client's first render pass, before hydration reconciles,
-  // so it diverged from the server's output and threw a hydration mismatch.
-  const [broker, setBrokerState] = useState<Broker>('dhan');
+  // A component rendered behind withSavedBroker starts on the SAVED broker. Anything else starts on 'dhan' so its
+  // client render matches the SSR HTML (reading localStorage while hydrating threw a hydration mismatch) and switches
+  // in the effect below - which means its first render, and every effect and fetch that render starts, ran as DHAN:
+  // a Kotak user's Advanced Scalper read Dhan's positions and P&L guard on every load. Real-money pages use the gate.
+  const [broker, setBrokerState] = useState<Broker>(() => (savedBrokerReadable ? readSavedBroker() ?? 'dhan' : 'dhan'));
 
   useEffect(() => {
-    try {
-      const saved = localStorage.getItem(STORAGE_KEY) as Broker | null;
-      if (saved && BROKERS.includes(saved)) setBrokerState(saved);
-    } catch {}
+    const saved = readSavedBroker();
+    if (saved) setBrokerState(saved);
   }, []);
   const [authenticatedBrokers, setAuthenticatedBrokers] = useState<Broker[]>(['dhan']);
   // True once /api/auth/broker-status has actually confirmed at least one

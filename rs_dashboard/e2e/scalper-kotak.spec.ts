@@ -42,8 +42,21 @@ const STRIKES = ['23100', '23150', '23200'];
 interface KotakMock {
   calls: Call[];
   blocked: Call[];
+  /** Every request to a DHAN-account route, reads included — a page saved on Kotak must make none. */
+  dhan: string[];
   positions: Record<string, unknown>[];
   guard: { date: string; pnl: unknown; brackets: unknown[]; watch: unknown[]; events: unknown[] };
+}
+
+/** Routes that read or act on the DHAN account (Kotak's own live under /api/scalper/kotak/). */
+const DHAN_ACCOUNT_ROUTE = /^\/api\/(scalper\/(all|poll|positions|trades|funds|orders|lookup|fast-order|order)|pnl-exit|super-order(\/.*)?|exit-all)$/;
+
+/** A request that reads or acts on the Dhan ACCOUNT. Dhan MARKET DATA is allowed (prices are Dhan-only by design):
+ *  /api/options/live?broker=dhan is the Dhan quote bridge, not the account. mtm-history names its broker in the body. */
+function touchesDhanAccount(p: string, q: URLSearchParams, body: Record<string, unknown> | null): boolean {
+  if (DHAN_ACCOUNT_ROUTE.test(p)) return true;
+  if (p === '/api/scalper/mtm-history') return String(body?.broker ?? 'dhan') === 'dhan';
+  return q.get('broker') === 'dhan' && p !== '/api/options/live';
 }
 
 async function installKotakMock(page: Page, m: KotakMock): Promise<void> {
@@ -55,6 +68,7 @@ async function installKotakMock(page: Page, m: KotakMock): Promise<void> {
     const method = req.method();
     const body = method === 'GET' ? null : (req.postDataJSON() as Record<string, unknown> | null);
     const record = () => m.calls.push({ method, path: p, search: u.search, body });
+    if (touchesDhanAccount(p, u.searchParams, body)) m.dhan.push(`${method} ${p}${u.search}`);
 
     if (p === '/api/auth/broker-status') return json(route, { dhan: true, zerodha: false, kotak: true });
     if (p === '/api/options/expiries') return json(route, { success: true, data: ['2026-10-19', '2026-10-27'] });
@@ -114,12 +128,15 @@ const row = (page: Page, sym: string) => page.locator('tr', { has: page.getByTex
 
 test.afterEach(() => {
   expect(m.blocked.map(c => `${c.method} ${c.path}`), 'an unmocked write was attempted').toEqual([]);
+  // The page loads straight onto Kotak: not even a read of the Dhan account (before 2026-10-17 its first render ran
+  // as Dhan and called /api/scalper/all, /api/pnl-exit and broker=dhan routes on every load).
+  expect(m.dhan, 'a Dhan-account route was called on a Kotak page').toEqual([]);
   // Kotak must never fall through to a Dhan order route.
   expect(m.calls.filter(c => /\/api\/(scalper\/(fast-order|order)|super-order|exit-all|pnl-exit)$/.test(c.path) && c.method !== 'GET')).toEqual([]);
 });
 
 test.beforeEach(async ({ page, context }) => {
-  m = { calls: [], blocked: [], positions: POSITIONS(), guard: { date: '2026-10-17', pnl: null, brackets: [], watch: [], events: [] } };
+  m = { calls: [], blocked: [], dhan: [], positions: POSITIONS(), guard: { date: '2026-10-17', pnl: null, brackets: [], watch: [], events: [] } };
   await signIn(context);
   await installKotakMock(page, m);
   await page.goto('/advanced-scalper', { waitUntil: 'domcontentloaded' });

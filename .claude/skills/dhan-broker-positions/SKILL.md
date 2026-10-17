@@ -39,6 +39,7 @@ multipliers, or close-order product inline. Every one of them already has a help
 | Broker payload normalisation | `lib/kotakShape.ts`, `lib/zerodhaShape.ts` |
 | Real (not order-quantity) lot size | `lib/lotSize.ts` - `resolveLotSize()` |
 | Per-broker endpoint routing | `hooks/useBrokerSelector.ts` - `scalperRoute()`, `brokerRoute()` |
+| First render on the SAVED broker (no Dhan-account call from a Kotak/Zerodha page) | `hooks/withSavedBroker.tsx` - `export default withSavedBroker(Component)` on every component that calls `useBrokerSelector()` |
 | Partial square-off quantities | `lib/partialQty.ts` |
 | Strike-shift target index (N steps, chain-edge clamp) | `lib/strikeShift.ts` - `resolveShiftTarget()`, `clampShiftSteps()` |
 | Kotak LTP join for a read-only summary page (no live WS bridge available) | `lib/kotakLtpJoin.ts` - `joinKotakLtp()` |

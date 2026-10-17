@@ -11,6 +11,7 @@ import { Card } from '@/components/ui/card';
 import { formatFundsValue, type ChainOcEntry, type Toast } from './Scalper';
 import { useLiveOptionsWS } from '@/lib/useLiveOptionsWS';
 import { useBrokerSelector, scalperRoute, BROKER_LABELS, type Broker } from '@/hooks/useBrokerSelector';
+import { withSavedBroker } from '@/hooks/withSavedBroker';
 import {
   STRATEGY_CATEGORIES, type StrategyCategory, type StrategyTemplate,
   type BasketLeg, type OptionType, type PayoffLeg,
@@ -178,7 +179,7 @@ function getVixRegime(vix: number | null | undefined) {
   return { label: 'HIGH VOL', regime: 'EXPANSION', tone: 'red' as const };
 }
 
-export default function Baskets() {
+function Baskets() {
   const { broker, setBroker, authenticatedBrokers, hasAuthenticatedBroker, authChecked } = useBrokerSelector();
   const [underlying, setUnderlying] = useState<Underlying>('NIFTY');
 
@@ -1381,3 +1382,6 @@ export default function Baskets() {
     </div>
   );
 }
+
+// First render already on the saved broker: no Dhan-account calls from a page saved on Kotak/Zerodha.
+export default withSavedBroker(Baskets);

@@ -30,6 +30,7 @@ import {
 } from 'lucide-react';
 import { useLiveOptionsWS, type Broker } from '@/lib/useLiveOptionsWS';
 import { useBrokerSelector } from '@/hooks/useBrokerSelector';
+import { withSavedBroker } from '@/hooks/withSavedBroker';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import { exchangeSegmentFor, isCrudeUnderlying } from '@/lib/syntheticFuturesSegments';
 import { fetchSliceTradedPrice, finalAvgOf, readOrderPrice, type OrderPeek, type OrderPriceRead, type TradedSliceMemo } from '@/lib/tradedPriceClient';
@@ -543,7 +544,7 @@ function WingControls({
 
 // ─── Main Component ─────────────────────────────────────────────────────────
 
-export default function SyntheticFuturesScalper() {
+function SyntheticFuturesScalper() {
   // Underlying, Expiry & Broker
   const [underlying, setUnderlying] = useState<Underlying>('NIFTY');
   const [expiries, setExpiries] = useState<string[]>([]);
@@ -3447,3 +3448,6 @@ export default function SyntheticFuturesScalper() {
     </div>
   );
 }
+
+// First render already on the saved broker: no Dhan-account calls from a page saved on Kotak/Zerodha.
+export default withSavedBroker(SyntheticFuturesScalper);

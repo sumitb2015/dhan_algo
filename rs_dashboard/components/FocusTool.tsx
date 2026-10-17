@@ -24,6 +24,7 @@ import {
 } from '@/components/ui/dropdown-menu';
 import { TabTable, type SortState, BUILDUP_STYLES } from './Scalper';
 import { useBrokerSelector, scalperRoute, BROKER_LABELS, type Broker } from '@/hooks/useBrokerSelector';
+import { withSavedBroker } from '@/hooks/withSavedBroker';
 import { closeOrderProduct, positionProduct } from '@/lib/positionProduct';
 import { scaleBrokerPnl } from '@/lib/positionPnl';
 import { useCopyTrade, CopyTradeControls, type CopyTradeApi } from './CopyTrade';
@@ -4880,7 +4881,7 @@ export function FocusModal({
 
 // ── Main Component ──────────────────────────────────────────────────────────
 
-export default function FocusTool() {
+function FocusTool() {
   const { broker, setBroker, authenticatedBrokers, hasAuthenticatedBroker, authChecked } = useBrokerSelector();
   const [toasts, setToasts] = useState<Toast[]>([]);
   const toastSeqRef = useRef(0);
@@ -10090,3 +10091,5 @@ export default function FocusTool() {
   );
 }
 
+// First render already on the saved broker: no Dhan-account calls from a page saved on Kotak/Zerodha.
+export default withSavedBroker(FocusTool);

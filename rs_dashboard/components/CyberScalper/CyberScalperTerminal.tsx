@@ -14,6 +14,7 @@ import { saveTerminalOrder } from '@/lib/terminalTradeStore';
 import { cyberAudio } from '@/lib/cyberAudio';
 import { contractMultiplier, scaleBrokerPnl } from '@/lib/positionPnl';
 import { useBrokerSelector, scalperRoute, BROKER_LABELS, type Broker } from '@/hooks/useBrokerSelector';
+import { withSavedBroker } from '@/hooks/withSavedBroker';
 
 // Statuses that mean the order actually traded (as opposed to being cancelled/
 // rejected/expired without a fill) — mirrors the broker vocabulary handled in
@@ -28,7 +29,7 @@ const INTERVALS = [
   { value: '5', label: '5m Trend' },
 ];
 
-export default function CyberScalperTerminal() {
+function CyberScalperTerminal() {
   const [symbol, setSymbol] = useState('NIFTY');
   const [timeframe, setTimeframe] = useState('1');
   const [expiry, setExpiry] = useState<string | null>(null);
@@ -1258,3 +1259,6 @@ export default function CyberScalperTerminal() {
     </div>
   );
 }
+
+// First render already on the saved broker: no Dhan-account calls from a page saved on Kotak/Zerodha.
+export default withSavedBroker(CyberScalperTerminal);

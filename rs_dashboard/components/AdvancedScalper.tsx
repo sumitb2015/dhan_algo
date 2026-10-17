@@ -14,6 +14,7 @@ import { useLiveOptionsWS } from '@/lib/useLiveOptionsWS';
 import { useProfitLock, ProfitLockControls } from './ProfitLock';
 import { useCopyTrade, CopyTradeControls } from './CopyTrade';
 import { useBrokerSelector, scalperRoute, BROKER_LABELS, type Broker } from '@/hooks/useBrokerSelector';
+import { withSavedBroker } from '@/hooks/withSavedBroker';
 import { contractMultiplier, scaleBrokerPnl } from '@/lib/positionPnl';
 import { openLots, fractionUnits } from '@/lib/partialQty';
 import { resolveShiftTarget, clampShiftSteps } from '@/lib/strikeShift';
@@ -163,7 +164,7 @@ function NetSideTag({ value }: { value: number }) {
 
 // ─── Main Component ───────────────────────────────────────────────
 
-export default function AdvancedScalper() {
+function AdvancedScalper() {
   // Underlying
   const [underlying, setUnderlying] = useState<typeof UNDERLYINGS[number]>('NIFTY');
   const strikeStep = STRIKE_STEP[underlying] ?? 50;
@@ -967,14 +968,17 @@ export default function AdvancedScalper() {
 
   // ─── useEffect 1b: Load mount data ───────────────────────────────
 
+  // /api/pnl-exit is Dhan's ACCOUNT-level guard: read it only on Dhan (it was read on every load, whatever the broker).
+  // Kotak's guard is the server one (refreshServerGuard); Zerodha has none.
   useEffect(() => {
+    if (broker !== 'dhan') return;
     fetch('/api/pnl-exit')
       .then(r => r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`)))
       .then((j: { success: boolean; data?: PnlGuardStatus }) => {
         if (j.success && j.data) { setPnlGuardStatus(j.data as PnlGuardStatus); setPnlGuardUnknown(false); }
       })
       .catch(() => setPnlGuardUnknown(true));
-  }, []);
+  }, [broker]);
 
   // ─── useEffect 2a: On expiry/underlying change — reset selections ──
 
@@ -4064,3 +4068,6 @@ export default function AdvancedScalper() {
     </div>
   );
 }
+
+// First render already on the saved broker: no Dhan-account calls from a page saved on Kotak/Zerodha.
+export default withSavedBroker(AdvancedScalper);

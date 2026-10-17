@@ -9,6 +9,7 @@ import NavBar from './NavBar';
 import { type Toast, FOCUS_RING } from './Scalper';
 import { useLiveOptionsWS } from '@/lib/useLiveOptionsWS';
 import { useBrokerSelector, scalperRoute, BROKER_LABELS, BROKERS, type Broker } from '@/hooks/useBrokerSelector';
+import { withSavedBroker } from '@/hooks/withSavedBroker';
 import {
   STRATEGY_CATEGORIES, type StrategyCategory, type StrategyTemplate, type OptionType, nearestStrike, strikeStep, daysToExpiry,
 } from '@/lib/basketStrategies';
@@ -105,7 +106,7 @@ export interface MultiLegFocusProps {
 /** Same-origin channel the page's tabs use to tell each other the ledger was regrouped. */
 const MLF_CHANNEL = 'mlf-baskets';
 
-export default function MultiLegFocus({
+function MultiLegFocus({
   embedded = false,
   hideHeader = false,
   activeUnderlyingProp,
@@ -4259,3 +4260,6 @@ export default function MultiLegFocus({
     </div>
   );
 }
+
+// First render already on the saved broker: no Dhan-account calls from a page saved on Kotak/Zerodha.
+export default withSavedBroker(MultiLegFocus);
