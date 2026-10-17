@@ -4,7 +4,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTabLeader } from '@/hooks/useTabLeader';
 import {
   evaluateRisk, nextPeakPct, openPositionFor, owedPriceOrders, peakTrackable, settleLegPrice, pruneState, TS_PRICE_STALE_MS, TS_SLOTS, upsertPosition, validateTrade,
-  type TsExitReason, type TsPosition, type TsProduct, type TsRisk, type TsSide, type TsSlot, type TsState,
+  type TsBroker, type TsExitReason, type TsPosition, type TsProduct, type TsRisk, type TsSide, type TsSlot, type TsState,
 } from '@/lib/tripleStraddle';
 import {
   checkMarginGate, enterStraddle, exitStraddle, fetchChainLookup, fetchChainPrices, fetchOrderAvgPrice, isTsTradable, saveTsPosition,
@@ -25,8 +25,11 @@ export function useTripleStraddle(args: {
   underlying: string;
   expiry: string;
   strikes: Record<TsSlot, number | null>;
+  /** Account NEW positions open on. An open position keeps the broker it was opened on (exits never follow this). */
+  broker?: TsBroker;
 }) {
   const { underlying, expiry, strikes } = args;
+  const broker: TsBroker = args.broker ?? 'dhan';
   const [ledger, setLedger] = useState<TsState>({ positions: [] });
   const [loaded, setLoaded] = useState(false);
   const [prices, setPrices] = useState<PriceBook>({});
@@ -132,27 +135,28 @@ export function useTripleStraddle(args: {
     if (!expiry) return;
     let cancelled = false;
     let timer: ReturnType<typeof setTimeout> | undefined;
-    const key = `${underlying}|${expiry}`;
+    const key = `${broker}|${underlying}|${expiry}`;
     const attempt = async () => {
-      const r = await fetchChainLookup(underlying, expiry);
+      const r = await fetchChainLookup(underlying, expiry, broker);
       if (cancelled) return;
       if (r) setChainLookup({ key, data: r });
       else timer = setTimeout(() => { void attempt(); }, LOOKUP_RETRY_MS);
     };
     void attempt();
     return () => { cancelled = true; if (timer) clearTimeout(timer); };
-  }, [underlying, expiry]);
+  }, [underlying, expiry, broker]);
 
   const lookups = useMemo(() => {
     const out = { left: null, center: null, right: null } as Record<TsSlot, TsLookup | null>;
-    if (!chainLookup || chainLookup.key !== `${underlying}|${expiry}`) return out;
+    // A lookup for another broker must never size or address this broker's order.
+    if (!chainLookup || chainLookup.key !== `${broker}|${underlying}|${expiry}`) return out;
     for (const slot of TS_SLOTS) {
       const k = strikes[slot];
       const ids = k != null ? chainLookup.data.strikes[String(k)] : undefined;
       out[slot] = ids ? { lotSize: chainLookup.data.lotSize, ids } : null;
     }
     return out;
-  }, [chainLookup, underlying, expiry, strikes]);
+  }, [chainLookup, underlying, expiry, strikes, broker]);
 
   // Every ledger write goes through one chain, so two saves can never land out of order and a
   // slow stale write cannot overwrite a newer one (e.g. a peak update over a close).
@@ -205,18 +209,18 @@ export function useTripleStraddle(args: {
       if (Date.now() - (at[key] ?? 0) > TS_PRICE_STALE_MS) return notify('error', 'Option prices are stale — not placing an order on an old quote');
 
       if (mode === 'REAL') {
-        const gate = await checkMarginGate({ underlying, expiry, strike, side, lots, lotSize: lk.lotSize, ids: lk.ids, prices: px });
+        const gate = await checkMarginGate({ underlying, expiry, strike, side, lots, lotSize: lk.lotSize, ids: lk.ids, prices: px, broker });
         if (!gate.ok) return notify('error', gate.message);
         const est = gate.estimate ? '\n(Margin is an ESTIMATE — broker calculator unavailable.)' : '';
         const ok = window.confirm(
-          `REAL ORDER — ${side === 'S' ? 'SELL' : 'BUY'} ${lots} lot(s) ${underlying} ${strike} straddle (${expiry}), ${product}.\n`
+          `REAL ORDER on ${broker === 'kotak' ? 'KOTAK' : 'DHAN'} — ${side === 'S' ? 'SELL' : 'BUY'} ${lots} lot(s) ${underlying} ${strike} straddle (${expiry}), ${product}.\n`
           + `Qty ${lots * lk.lotSize} per leg. Margin ~₹${Math.round(gate.required ?? 0).toLocaleString('en-IN')}.${est}\nPlace it?`,
         );
         if (!ok) return;
       }
 
       const out = await enterStraddle({
-        slot, underlying, expiry, strike, side, lots, lotSize: lk.lotSize, product, mode, ids: lk.ids, prices: px, risk,
+        slot, underlying, expiry, strike, side, lots, lotSize: lk.lotSize, product, mode, ids: lk.ids, prices: px, risk, broker,
         onIntent: persist,
       });
       for (const n of out.notes) notify('error', n);
@@ -226,7 +230,7 @@ export function useTripleStraddle(args: {
       lockRef.current.delete(slot);
       setBusy((b) => ({ ...b, [slot]: null }));
     }
-  }, [strikes, lookups, realArmed, loaded, underlying, expiry, notify, persist]);
+  }, [strikes, lookups, realArmed, loaded, underlying, expiry, notify, persist, broker]);
 
   const exit = useCallback(async (slot: TsSlot, reason: TsExitReason = 'MANUAL') => {
     if (lockRef.current.has(slot)) return;
@@ -310,7 +314,7 @@ export function useTripleStraddle(args: {
             }
             r.tries += 1;
             r.next = now + Math.min(60_000, 2_000 * 2 ** Math.min(r.tries, 5));
-            const avg = await fetchOrderAvgPrice(orderId);
+            const avg = await fetchOrderAvgPrice(orderId, p.broker ?? 'dhan');
             if (!(avg > 0)) continue;
             await enqueue(async () => {
               // Read at WRITE time, so a close or risk edit since is never overwritten by an older copy.

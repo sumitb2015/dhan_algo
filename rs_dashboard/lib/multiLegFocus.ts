@@ -404,7 +404,7 @@ export function applyTriggeredEntry(
     status: 'OPEN',
     filledAt: now,
     fill: { qty, avgPrice, orderId: entry.orderId },
-    orderRef: { securityId: entry.securityId, ...(entry.symbol ? { symbol: entry.symbol } : {}) },
+    orderRef: { ...(entry.securityId ? { securityId: entry.securityId } : {}), ...(entry.symbol ? { symbol: entry.symbol } : {}) },
     orderIds: [entry.orderId],
   }];
 }
@@ -1771,8 +1771,8 @@ export function normalizeOrderRow(row: Record<string, unknown>): NormalizedOrder
   return { id, status, filled, avgPrice: avg > 0 ? avg : null };
 }
 
-const FILLED_STATUSES = new Set(['TRADED', 'COMPLETE', 'FILLED']);
-const DEAD_STATUSES = new Set(['REJECTED', 'CANCELLED', 'CANCELED', 'EXPIRED']);
+const FILLED_STATUSES = new Set(['TRADED', 'COMPLETE', 'COMPLETED', 'EXECUTED', 'FILLED']);
+const DEAD_STATUSES = new Set(['REJECTED', 'REJECT', 'REJ', 'CANCELLED', 'CANCELED', 'CAN', 'EXPIRED']);
 
 export interface OrderOutcomeNote { kind: 'grow' | 'exit'; status: string; unfilled: number; unknownFill?: boolean }
 
@@ -1945,6 +1945,16 @@ function tradeTime(raw: unknown): number {
   // Dhan / Zerodha send IST wall-clock "YYYY-MM-DD HH:MM:SS" with no zone;
   // Kotak's fill time can be the bare "HH:MM:SS" of today (IST).
   const today = new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
+  // Kotak order/trade stamps read "21-Aug-2026 10:15:22" (IST). Date.parse does not take them with an offset, so
+  // an unparsed stamp would give at=0 and silently exclude the trade from outside-close matching.
+  const kt = /^(\d{1,2})-([A-Za-z]{3})-(\d{4})[ T](\d{2}:\d{2}(?::\d{2})?)$/.exec(s);
+  if (kt) {
+    const mon = ['jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec'].indexOf(kt[2].toLowerCase());
+    if (mon >= 0) {
+      const t = Date.parse(`${kt[3]}-${String(mon + 1).padStart(2, '0')}-${kt[1].padStart(2, '0')}T${kt[4].length === 5 ? `${kt[4]}:00` : kt[4]}+05:30`);
+      return Number.isFinite(t) ? t : 0;
+    }
+  }
   const full = /^\d{2}:\d{2}(:\d{2})?$/.test(s) ? `${today} ${s}` : s;
   const ist = /^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}(:\d{2})?$/.test(full) ? `${full.replace(' ', 'T')}+05:30` : full;
   const t = Date.parse(ist);

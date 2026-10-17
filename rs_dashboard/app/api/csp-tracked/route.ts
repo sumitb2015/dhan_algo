@@ -47,6 +47,8 @@ export async function POST(req: NextRequest) {
       if (b?.[k]) row[k] = String(b[k]);
     }
     if (b?.rolledFromId) row.rolledFromId = String(b.rolledFromId);
+    // An adopted Kotak short: its handle in securityId is a Kotak trading symbol, so the row must know its broker.
+    if (b?.broker === 'kotak') row.broker = 'kotak';
 
     const rows = readTracked();
     rows.push(row);

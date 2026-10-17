@@ -1,5 +1,6 @@
 'use client';
 
+import { BrokerPicker, usePageBroker } from '@/components/BrokerPicker';
 import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { RefreshCw, Terminal, Plus, X, Play, Square, ChevronDown, BookOpen, Info } from 'lucide-react';
 import { cn } from '@/lib/utils';
@@ -75,6 +76,8 @@ interface TrackedRow {
   avgPrice: number;
   orderId?: string;
   securityId?: string;
+  /** Account the row trades on (absent = Dhan). Its exit / Shift go there, whatever the page now selects. */
+  broker?: 'dhan' | 'kotak';
   status: 'OPEN' | 'CLOSED' | 'ROLLED';
   exitPrice?: number;
   realizedPnl?: number;
@@ -95,6 +98,7 @@ interface UntrackedPosition {
   productType: string;
   exchangeSegment: string;
   lotSize: number;
+  broker?: 'dhan' | 'kotak';
 }
 
 import type { SyncRow } from '@/lib/cspTracked';
@@ -165,6 +169,8 @@ const SELL_CLIENT_TIMEOUT_MS = 120_000;
 const SYNC_CLIENT_TIMEOUT_MS = 300_000;
 
 export default function CspScreener() {
+  // Account a NEW put is sold on. Tracked rows keep the broker they were opened on; reconcile reads both.
+  const [broker, setBroker] = usePageBroker('csp.broker');
   const [scanRows, setScanRows] = useState<ScanRow[]>([]);
   const [scannedAt, setScannedAt] = useState<string | null>(null);
   // `universe` is the next-scan selection the toggle controls; `resultsUniverse`
@@ -377,6 +383,7 @@ export default function CspScreener() {
           qty: lots * sell.row.lotSize,
           lotSize: sell.row.lotSize,
           entrySpot: sell.row.ltp,
+          broker,
         }),
       });
       const j = await res.json();
@@ -427,6 +434,7 @@ export default function CspScreener() {
         securityId: p.securityId,
         exchangeSegment: p.exchangeSegment,
         productType: p.productType,
+        ...(p.broker === 'kotak' ? { broker: 'kotak' } : {}),
       }),
     });
     const j = await res.json();
@@ -545,6 +553,8 @@ export default function CspScreener() {
         </div>
         <div className="hidden h-5 w-px bg-zinc-800 sm:block" />
         <NavBar />
+        <BrokerPicker value={broker} onChange={setBroker} disabled={!!sell?.submitting}
+          disabledReason="Locked while a sell is being placed" />
         {/* Selects the universe for the *next* Rescan — does not affect the
             rows currently on screen, which stay labelled by resultsUniverse. */}
         <div className="flex items-center gap-0.5 rounded-lg border border-zinc-800 bg-zinc-900 p-0.5 text-[11px]">
@@ -1143,6 +1153,7 @@ export default function CspScreener() {
                                 qty: r.qty, lotSize: r.lotSize, spot, peLtp,
                                 move1d: null, move5d: null, moveCycle: null,
                                 securityId: r.securityId,
+                                broker: r.broker,
                               })}
                               className="rounded-sm border border-sky-500/30 bg-sky-500/10 px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide text-sky-400 hover:bg-sky-500/20"
                             >

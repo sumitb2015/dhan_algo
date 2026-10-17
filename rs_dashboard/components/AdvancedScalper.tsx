@@ -28,6 +28,9 @@ import ScalperGreeksModal from './analytics/ScalperGreeksModal';
 import AdvancedScalperOptionChainModal from './AdvancedScalperOptionChainModal';
 import { capCloseQty } from '@/lib/intradayCap';
 import { fetchBracketTick } from '@/lib/bracketTick';
+import { guardProductOf, validateSoftPnlGuard, softBracketLevels, softEntryEffect } from '@/lib/softGuards';
+import type { ServerGuardState } from '@/lib/kotakGuardEngine';
+import { exitLimitTick } from '@/lib/multiLegExitOrder';
 import { resolveBracket, legsToCancel, hasUnmatchableActive, bracketLevelsByContract, reuseUnchanged, type BracketLevels, type SuperOrderInput } from '@/lib/superOrder';
 import AdvancedScalperAddLotsModal, { type SubmitLegOrderParams } from './AdvancedScalperAddLotsModal';
 
@@ -60,8 +63,10 @@ interface HalfLeg {
 
 const UNDERLYINGS = ['NIFTY', 'BANKNIFTY', 'SENSEX', 'CRUDEOIL', 'CRUDEOILM'] as const;
 const STRIKE_STEP: Record<string, number> = { NIFTY: 50, BANKNIFTY: 100, SENSEX: 100, CRUDEOIL: 50, CRUDEOILM: 50 };
-// MCX crude is Dhan-only here: Dhan orders MCX in LOTS (lookup lotSize = 1), whereas
-// Kotak's MCX quantity scaling differs and Zerodha has no MCX support.
+// MCX crude trades on Dhan and Kotak. Dhan orders MCX in LOTS (lookup lotSize = 1) while Kotak orders absolute
+// barrels (lookup lotSize = barrels per lot: 100 CRUDEOIL / 10 CRUDEOILM), so `lots x lotSize` is right for both.
+// Zerodha has no MCX support.
+const brokerTradesMcx = (b: string) => b === 'dhan' || b === 'kotak';
 const isMcxUnderlying = (u: string) => u === 'CRUDEOIL' || u === 'CRUDEOILM';
 const dhanFnoSegment = (u: string) => isMcxUnderlying(u) ? 'MCX_COMM' : u === 'SENSEX' ? 'BSE_FNO' : 'NSE_FNO';
 
@@ -88,13 +93,13 @@ function pickVixLtp(d: HeaderIndicesResponse): Record<string, number> {
  *
  * Dhan's MCX_COMM counts: crude options are tradable from this terminal, so their legs must
  * be seen by the CE/PE values, the P&L Guard / profit lock and Exit-all-on-lock (their P&L is
- * rescaled by scaleBrokerPnl before it reaches those sums). Kotak's `mcx_fo` (and any other
- * MCX spelling) stays excluded: a bare "contains FO" test would accept it, and its MCX
- * quantity scaling is not converted here.
+ * rescaled by scaleBrokerPnl before it reaches those sums). Kotak's `mcx_fo` counts too: its quantity is
+ * already in barrels and its P&L in rupees, so nothing needs converting. Any other MCX spelling stays
+ * excluded (a bare "contains FO" test would accept it).
  */
 function isFnoSegment(pos: Record<string, unknown>): boolean {
   const seg = String(pos.exchangeSegment ?? pos.exchange ?? '').toUpperCase();
-  if (seg === 'MCX_COMM') return true;
+  if (seg === 'MCX_COMM' || seg === 'MCX_FO') return true;
   if (seg.startsWith('MCX')) return false;
   return seg.includes('FNO') || seg.includes('FO');
 }
@@ -230,6 +235,10 @@ export default function AdvancedScalper() {
   const [bracketTrail, setBracketTrail] = useState('0');
   // Derived (no reset effect): inactive on any other broker. The toggle itself is kept, so returning to Dhan finds it as left, still shown amber.
   const bracketActive = bracketOn && broker === 'dhan';
+  // Kotak has no resting bracket, so the same toggle registers a bracket with the dashboard SERVER (lib/kotakGuardServer):
+  // it arms when the entry shows in the book and exits at the target / stop even with this tab closed.
+  const softBracketActive = bracketOn && broker === 'kotak';
+  const bracketShown = bracketActive || softBracketActive;
   // Set once this tab books a bracket: from then on a failed look-up at close time is loud, not silent.
   const bracketPlacedRef = useRef(false);
 
@@ -901,11 +910,13 @@ export default function AdvancedScalper() {
   // Dhan-only, matching where the guard controls render: the other brokers report
   // Kite/Neo product names (MIS/NRML) that this vocabulary does not describe.
   const uncoveredGuardProducts = useMemo(() => {
-    if (broker !== 'dhan') return [];
+    if (broker !== 'dhan' && broker !== 'kotak') return [];
     const out = new Set<string>();
     for (const pos of enrichedPositions) {
       if (Number(pos.netQty) === 0) continue;
-      const pt = String(pos.productType ?? '').toUpperCase();
+      if (broker === 'kotak' && !isFnoSegment(pos)) continue;
+      // Kotak names products MIS / NRML; the chips are INTRADAY / MARGIN / CNC.
+      const pt = broker === 'kotak' ? guardProductOf(pos.productType) : String(pos.productType ?? '').toUpperCase();
       if (pt && !guardProductTypes.includes(pt)) out.add(pt);
     }
     return [...out];
@@ -949,9 +960,9 @@ export default function AdvancedScalper() {
       .catch(() => setLoadError(`Could not load ${underlying} expiries`));
   }, [broker, underlying]);
 
-  // MCX crude is Dhan-only — fall back to NIFTY if the broker is switched away.
+  // MCX crude needs Dhan or Kotak — fall back to NIFTY if the broker is switched away.
   useEffect(() => {
-    if (broker !== 'dhan' && isMcxUnderlying(underlying)) setUnderlying('NIFTY');
+    if (!brokerTradesMcx(broker) && isMcxUnderlying(underlying)) setUnderlying('NIFTY');
   }, [broker, underlying]);
 
   // ─── useEffect 1a: Load prev-close whenever underlying changes ────
@@ -1383,6 +1394,55 @@ export default function AdvancedScalper() {
     setTimeout(() => setToasts(prev => prev.filter(t => t.id !== id)), type === 'error' ? 7000 : 3000);
   }, []);
 
+  // ─── Server-resident P&L Guard + brackets (Kotak) ─────────────────
+  //
+  // Dhan keeps its P&L Guard and bracket at the broker. Kotak has neither, so the dashboard SERVER watches them
+  // (lib/kotakGuardServer.ts, started with the server): they keep working with this tab closed. This tab only registers
+  // a guard and displays the server's state - it never fires one, so two executors can never close the same leg.
+  const [serverGuard, setServerGuard] = useState<{ sessionValid: boolean; state: ServerGuardState } | null>(null);
+  const seenGuardEventRef = useRef<number | null>(null);
+  const refreshServerGuard = useCallback(async () => {
+    try {
+      const res = await fetch('/api/scalper/kotak/guards');
+      const j = await res.json() as { success: boolean; sessionValid?: boolean; state?: ServerGuardState };
+      if (!j.success || !j.state) return;
+      setServerGuard({ sessionValid: !!j.sessionValid, state: j.state });
+      // Toast what the server did since the last look. The first look only sets the baseline (no replay of old events).
+      const last = j.state.events.reduce((m, e) => Math.max(m, e.at), 0);
+      if (seenGuardEventRef.current == null) { seenGuardEventRef.current = last; return; }
+      for (const e of j.state.events) {
+        if (e.at <= seenGuardEventRef.current) continue;
+        const bad = e.kind === 'fired' || e.kind === 'pnl_fired' || e.kind === 'incomplete' || e.kind === 'error';
+        addToast(bad ? 'error' : 'success', `Guard: ${e.kind.replace('_', ' ')}`, e.text);
+      }
+      seenGuardEventRef.current = Math.max(seenGuardEventRef.current, last);
+    } catch { /* unreadable: keep the last view */ }
+  }, [addToast]);
+  useEffect(() => {
+    seenGuardEventRef.current = null;
+    setServerGuard(null);
+    if (broker !== 'kotak') return;
+    void refreshServerGuard();
+    const id = setInterval(() => { void refreshServerGuard(); }, 3000);
+    return () => clearInterval(id);
+  }, [broker, refreshServerGuard]);
+  const serverPnlGuard = broker === 'kotak' ? serverGuard?.state.pnl ?? null : null;
+  const serverBrackets = broker === 'kotak' ? serverGuard?.state.brackets ?? [] : [];
+  const postGuard = useCallback(async (body: Record<string, unknown>): Promise<boolean> => {
+    try {
+      const res = await fetch('/api/scalper/kotak/guards', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+      });
+      const j = await res.json() as { success: boolean; error?: string; state?: ServerGuardState };
+      if (!j.success) { addToast('error', 'Guard not registered', j.error ?? 'Unknown error'); return false; }
+      void refreshServerGuard();
+      return true;
+    } catch (e) {
+      addToast('error', 'Guard not registered', String(e));
+      return false;
+    }
+  }, [addToast, refreshServerGuard]);
+
   // ─── Box management ─────────────────────────────────────────────
 
   const updateBox = useCallback((id: string, patch: Partial<BoxConfig>) => {
@@ -1514,7 +1574,7 @@ export default function AdvancedScalper() {
         const symbol = entry?.[optionSide === 'CE' ? 'ceSymbol' : 'peSymbol'];
         if (!symbol) return { success: false, error: `${BROKER_LABELS[broker]} strike data still loading` };
         const exchange = broker === 'kotak'
-          ? (underlying === 'SENSEX' ? 'bse_fo' : 'nse_fo')
+          ? (underlying === 'SENSEX' ? 'bse_fo' : isMcxUnderlying(underlying) ? 'mcx_fo' : 'nse_fo')
           : (underlying === 'SENSEX' ? 'BFO' : 'NFO');
         res = await fetch(scalperRoute(broker, 'order'), {
           method: 'POST',
@@ -1655,6 +1715,59 @@ export default function AdvancedScalper() {
       }
     }
 
+    // Kotak: the SOFTWARE bracket. Same rule as above (only an order that opens or adds), but the levels become this
+    // tab's own position guard once the entry shows in the book, instead of resting orders at the broker.
+    let softBracketId: string | undefined;
+    if (softBracketActive) {
+      const symbol = strikeMap[String(box.strike)]?.[box.side === 'CE' ? 'ceSymbol' : 'peSymbol'];
+      const open = symbol
+        ? enrichedPositions
+            .filter(p => positionJoinKey(p) === symbol && guardProductOf(p.productType) === productType)
+            .reduce((n, p) => n + Number(p.netQty ?? 0), 0)
+        : 0;
+      // An order bigger than the opposite position flips it: the remainder opens a fresh position and gets the bracket.
+      const reduces = softEntryEffect(side, box.lots * lotSize, open) === 'closes';
+      if (reduces) {
+        bracketNote = ' · closing, no bracket';
+      } else {
+        const quotesFresh = quotesAtRef.current > 0 && Date.now() - quotesAtRef.current <= QUOTES_STALE_MS;
+        const ltpNow = liveQuotes?.strikes?.[String(box.strike)]?.[box.side === 'CE' ? 'ce' : 'pe']?.ltp ?? 0;
+        if (!symbol) {
+          addToast('error', `${side} ${box.side} not sent`, 'Bracket needs the contract symbol - strike data still loading');
+          return;
+        }
+        if (mode === 'MARKET' && !quotesFresh) {
+          addToast('error', `${side} ${box.side} not sent`, 'Live quotes are stale - bracket levels cannot be priced. Use LIMIT or wait for the feed.');
+          return;
+        }
+        const tick = exitLimitTick({ masterTick: null, isMcx: isMcxUnderlying(underlying), mcxUnderlying: underlying }) ?? 0;
+        const r = softBracketLevels({
+          side, ref: mode === 'LIMIT' ? Number(box.limitPrice) : ltpNow,
+          targetPts: Number(bracketTgt), slPts: Number(bracketSl), tick,
+        });
+        if (!r.ok) {
+          addToast('error', `${side} ${box.side} not sent`, r.error);
+          return;
+        }
+        // Registered with the server BEFORE the order goes out, so it is already watching when the fill lands. If it
+        // cannot be registered the order is not sent (an unprotected "bracketed" order is the failure to avoid); if the
+        // order then fails, the registration is withdrawn below.
+        const reg = await fetch('/api/scalper/kotak/guards', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            action: 'addBracket', symbol, product: productType, dir: side === 'BUY' ? 1 : -1, target: r.target, sl: r.sl,
+            trail: Number(bracketTrail) > 0, mode, qtyBefore: open,
+          }),
+        }).then(x => x.json() as Promise<{ success: boolean; id?: string; error?: string }>).catch(e => ({ success: false, id: undefined, error: String(e) }));
+        if (!reg.success || !reg.id) {
+          addToast('error', `${side} ${box.side} not sent`, `Bracket could not be registered with the server: ${reg.error ?? 'unknown error'}`);
+          return;
+        }
+        softBracketId = reg.id;
+        bracketNote = ` · bracket tgt ${r.target} / SL ${r.sl}${Number(bracketTrail) > 0 ? ' / trail' : ''} (held by the server)`;
+      }
+    }
+
     orderInFlightRef.current.add(boxId);
     setOrderPendingBoxes(prev => new Set([...prev, boxId]));
 
@@ -1675,16 +1788,22 @@ export default function AdvancedScalper() {
       if (j.success) {
         addToast('success', `${side} ${box.side} placed`, `${opts?.forceMarket ? 'Hotkey market order · ' : ''}ID: ${j.order_id}${bracketNote}`);
         if (bracket) setTimeout(() => refreshBracketsRef.current(), 1500);   // Dhan lists the new legs a moment after the ACK
+        if (softBracketId) void refreshServerGuard();
         setTimeout(fetchTabData, 1000);
       } else {
         addToast('error', `${side} ${box.side} failed`, j.error ?? 'Unknown error');
+        if (softBracketId) void postGuard({ action: 'removeBracket', id: softBracketId });   // nothing was placed: withdraw it
       }
+    } catch (e) {
+      if (softBracketId) void postGuard({ action: 'removeBracket', id: softBracketId });
+      throw e;
     } finally {
       orderInFlightRef.current.delete(boxId);
       setOrderPendingBoxes(prev => { const s = new Set(prev); s.delete(boxId); return s; });
     }
   }, [boxes, expiry, underlying, lotSize, strikeMap, orderMode, productType, submitLegOrder, addToast, fetchTabData,
-      bracketActive, bracketTgt, bracketSl, bracketTrail, boxSecId, enrichedPositions, positionJoinKey, liveQuotes]);
+      bracketActive, softBracketActive, bracketTgt, bracketSl, bracketTrail, boxSecId, enrichedPositions, positionJoinKey, liveQuotes,
+      postGuard, refreshServerGuard]);
 
   // OptionPanel is memoised with a comparator that IGNORES every on* callback (Scalper.tsx,
   // optionPanelPropsEqual), so the onBuy/onSell it holds can be a stale closure. placeOrder reads
@@ -2240,7 +2359,7 @@ export default function AdvancedScalper() {
             return;
           }
           const exchange = broker === 'kotak'
-            ? (underlying === 'SENSEX' ? 'bse_fo' : 'nse_fo')
+            ? (underlying === 'SENSEX' ? 'bse_fo' : isMcxUnderlying(underlying) ? 'mcx_fo' : 'nse_fo')
             : (underlying === 'SENSEX' ? 'BFO' : 'NFO');
           res = await fetch(scalperRoute(broker, 'order'), {
             method: 'POST',
@@ -2408,6 +2527,7 @@ export default function AdvancedScalper() {
     }
   }, [broker, profitLock, addToast]);
 
+
   const copyTrade = useCopyTrade(addToast);
 
   const handleExitAll = useCallback(async () => {
@@ -2422,9 +2542,10 @@ export default function AdvancedScalper() {
       if (broker !== 'dhan') {
         const label = BROKER_LABELS[broker];
         const res = await fetch(scalperRoute(broker, 'exit-all'), { method: 'POST' });
-        const data = await res.json() as { success: boolean; closed: string[]; errors: string[] };
+        const data = await res.json() as { success: boolean; closed: string[]; errors: string[]; skipped?: string[] };
+        const kept = data.skipped?.length ? ` Cash-equity positions left open: ${data.skipped.join(', ')}.` : '';
         if (data.success) {
-          addToast('success', `All ${label} positions liquidated.${data.closed?.length ? ` (${data.closed.join(', ')})` : ''}`);
+          addToast('success', `All ${label} F&O positions liquidated.${data.closed?.length ? ` (${data.closed.join(', ')})` : ''}${kept}`);
         } else {
           addToast('error', `${label} exit failed`, (data.errors ?? []).join('; ') || 'Unknown error');
         }
@@ -2860,6 +2981,20 @@ export default function AdvancedScalper() {
   }, []);
 
   const handleSetPnl = async () => {
+    if (broker === 'kotak') {
+      const p = Math.abs(parseFloat(profitTarget)) || 0;
+      const l = Math.abs(parseFloat(lossLimit)) || 0;
+      const err = validateSoftPnlGuard(p, l, guardProductTypes);
+      if (err) { addToast('error', err); return; }
+      setGuardError('');
+      setSettingPnl(true);
+      try {
+        if (await postGuard({ action: 'setPnl', profit: p, loss: l, products: guardProductTypes })) {
+          addToast('success', 'P&L Guard armed (server)', 'Watched by the dashboard server - it keeps working if you close this tab. Keep the dashboard server running.');
+        }
+      } finally { setSettingPnl(false); }
+      return;
+    }
     // /api/pnl-exit is Dhan's native account-level guard only — no Zerodha
     // equivalent exists. The UI already hides these controls for Zerodha;
     // this is a defense-in-depth guard against calling it anyway.
@@ -2909,6 +3044,12 @@ export default function AdvancedScalper() {
   };
 
   const handleClearPnl = async () => {
+    if (broker === 'kotak') {
+      if (!confirmClear) { setConfirmClear(true); setTimeout(() => setConfirmClear(false), 3000); return; }
+      setConfirmClear(false);
+      if (await postGuard({ action: 'clearPnl' })) addToast('success', 'P&L Guard cleared');
+      return;
+    }
     if (broker !== 'dhan') { addToast('error', 'P&L Guard is Dhan-only'); return; }
     if (!confirmClear) { setConfirmClear(true); setTimeout(() => setConfirmClear(false), 3000); return; }
     setClearingPnl(true);
@@ -3004,7 +3145,7 @@ export default function AdvancedScalper() {
             <select value={underlying} onChange={e => setUnderlying(e.target.value as typeof UNDERLYINGS[number])}
               className="bg-zinc-900 border border-zinc-700 text-zinc-200 text-xs font-semibold
                          rounded-lg px-2.5 py-1.5 focus:outline-none focus:border-emerald-500 w-[128px] shrink-0">
-              {UNDERLYINGS.map(sym => <option key={sym} value={sym} disabled={isMcxUnderlying(sym) && broker !== 'dhan'}>{sym}</option>)}
+              {UNDERLYINGS.map(sym => <option key={sym} value={sym} disabled={isMcxUnderlying(sym) && !brokerTradesMcx(broker)}>{sym}</option>)}
             </select>
 
             {/* Expiry selector */}
@@ -3063,24 +3204,26 @@ export default function AdvancedScalper() {
             {/* Bracket (Dhan Super Order): broker-held target + stop on opening orders */}
             <div className={cn(
               'flex items-center gap-1.5 rounded-xl border px-1.5 py-0.5 shrink-0',
-              bracketActive ? 'border-amber-500/40 bg-amber-500/10' : 'border-zinc-800 bg-zinc-900',
+              bracketShown ? 'border-amber-500/40 bg-amber-500/10' : 'border-zinc-800 bg-zinc-900',
             )}>
               <button
                 type="button"
                 onClick={() => setBracketOn(v => !v)}
-                disabled={broker !== 'dhan'}
-                aria-pressed={bracketActive}
-                title={broker !== 'dhan'
+                disabled={broker !== 'dhan' && broker !== 'kotak'}
+                aria-pressed={bracketShown}
+                title={broker === 'kotak'
+                  ? 'Kotak has no resting bracket, so orders that open or add a position register a target and stop-loss with the dashboard SERVER, which exits at market when one is hit. It keeps working with this tab closed (not if the dashboard server stops). Closing orders go out plain.'
+                  : broker !== 'dhan'
                   ? 'Bracket orders (Dhan Super Order) are Dhan-only'
                   : 'When ON, orders that open or add a position carry a target and stop-loss held at the broker (survive closing this tab). Closing orders go out plain. Re-arm after each page load.'}
                 className={cn(
                   'px-3 py-1.5 text-xs font-bold rounded-lg transition-all whitespace-nowrap disabled:opacity-40 disabled:cursor-not-allowed',
-                  bracketActive ? 'bg-amber-500/20 text-amber-400 border border-amber-500/40' : 'text-zinc-500 hover:text-zinc-300',
+                  bracketShown ? 'bg-amber-500/20 text-amber-400 border border-amber-500/40' : 'text-zinc-500 hover:text-zinc-300',
                   FOCUS_RING,
                 )}>
-                BRACKET {bracketActive ? 'ON' : 'OFF'}
+                BRACKET {bracketShown ? 'ON' : 'OFF'}{softBracketActive ? ' · SERVER' : ''}
               </button>
-              {bracketActive && (
+              {bracketShown && (
                 <>
                   <span className={cn(TXT_CAPTION, 'text-emerald-400')}>TGT pts</span>
                   <GuardInput value={bracketTgt} onCommit={setBracketTgt} colorCls="text-emerald-400" focusBorderCls="focus:border-emerald-500" />
@@ -3088,6 +3231,19 @@ export default function AdvancedScalper() {
                   <GuardInput value={bracketSl} onCommit={setBracketSl} colorCls="text-red-400" focusBorderCls="focus:border-red-500" />
                   <span className={cn(TXT_CAPTION, 'text-amber-400')}>TRAIL pts</span>
                   <GuardInput value={bracketTrail} onCommit={setBracketTrail} colorCls="text-amber-400" focusBorderCls="focus:border-amber-500" />
+                </>
+              )}
+              {broker === 'kotak' && serverBrackets.length > 0 && (
+                <>
+                  <span className={cn(TXT_CAPTION, 'text-amber-300 font-mono whitespace-nowrap')}
+                    title={serverBrackets.map(b => `${b.symbol} ${b.state} tgt ${b.target} / SL ${b.sl}`).join('\n')}>
+                    {serverBrackets.filter(b => b.state === 'armed').length} armed / {serverBrackets.filter(b => b.state === 'pending').length} pending
+                  </span>
+                  <button type="button" onClick={() => { void postGuard({ action: 'clearBrackets' }); }}
+                    title="Withdraw every bracket held by the server (open positions stay open)"
+                    className={cn('px-2 py-1 text-[11px] font-bold rounded-lg text-zinc-400 hover:text-zinc-200 border border-zinc-700', FOCUS_RING)}>
+                    Clear
+                  </button>
                 </>
               )}
             </div>
@@ -3179,12 +3335,17 @@ export default function AdvancedScalper() {
         {/* P&L Guard bar — always visible; controls themselves are Dhan-only (see below) */}
         <div className="mt-2 pt-2 border-t border-amber-500/25">
           {(() => {
-            const isActive = pnlGuardStatus?.pnlExitStatus === 'ACTIVE';
+            const soft = broker === 'kotak';
+            const isActive = soft ? !!serverPnlGuard : pnlGuardStatus?.pnlExitStatus === 'ACTIVE';
             // Dhan may echo loss back as the negative level it was stored at rather
             // than the positive magnitude we sent — compare by magnitude either way.
-            const hasConfig = !!(pnlGuardStatus && (Number(pnlGuardStatus.profit) > 0 || Math.abs(Number(pnlGuardStatus.loss)) > 0));
-            const guardLabel = pnlGuardUnknown && !hasConfig ? 'UNKNOWN' : isActive ? 'ACTIVE' : hasConfig ? 'CONFIGURED' : 'NOT SET';
-            const guardChipCls = pnlGuardUnknown && !hasConfig
+            const hasConfig = soft
+              ? !!serverPnlGuard
+              : !!(pnlGuardStatus && (Number(pnlGuardStatus.profit) > 0 || Math.abs(Number(pnlGuardStatus.loss)) > 0));
+            const guardLabel = soft
+              ? (serverPnlGuard ? (serverGuard?.sessionValid ? 'SERVER · ACTIVE' : 'SERVER · NO SESSION') : 'NOT SET')
+              : pnlGuardUnknown && !hasConfig ? 'UNKNOWN' : isActive ? 'ACTIVE' : hasConfig ? 'CONFIGURED' : 'NOT SET';
+            const guardChipCls = !soft && pnlGuardUnknown && !hasConfig
               ? 'bg-rose-900/40 text-rose-300 border border-rose-500/30'
               : isActive
               ? 'bg-emerald-900/60 text-emerald-400 border border-emerald-500/30'
@@ -3198,7 +3359,7 @@ export default function AdvancedScalper() {
                   <Shield className="w-3 h-3 text-amber-400" /> P&amp;L Guard
                 </span>
 
-                {broker !== 'dhan' ? (
+                {broker !== 'dhan' && broker !== 'kotak' ? (
                   // Dhan's native /pnlExit is an account-level kill switch with no
                   // Zerodha equivalent — showing live-looking controls here would
                   // silently configure Dhan's guard while this tab shows Zerodha
@@ -3313,7 +3474,7 @@ export default function AdvancedScalper() {
                       ))}
                     </div>
 
-                    <button onClick={() => setEnableKillSwitch(v => !v)}
+                    {broker === 'dhan' && (<button onClick={() => setEnableKillSwitch(v => !v)}
                       aria-pressed={enableKillSwitch}
                       className={cn(
                         'flex items-center gap-1.5 px-2.5 py-1 rounded', TXT_VALUE, 'font-bold border transition-all shrink-0 whitespace-nowrap',
@@ -3323,7 +3484,7 @@ export default function AdvancedScalper() {
                         FOCUS_RING,
                       )}>
                       🔴 Kill Switch {enableKillSwitch ? 'ON' : 'OFF'}
-                    </button>
+                    </button>)}
 
                     <button onClick={handleSetPnl} disabled={settingPnl}
                       className={cn('px-3 py-1.5 text-xs font-bold rounded-lg bg-violet-600 hover:bg-violet-500 text-white border border-violet-500/40 transition-all disabled:opacity-50 shrink-0 whitespace-nowrap', FOCUS_RING)}>
@@ -3336,7 +3497,7 @@ export default function AdvancedScalper() {
                     {uncoveredGuardProducts.length > 0 && (
                       <span
                         className={cn(TXT_VALUE, 'px-2 py-1 rounded font-bold border bg-amber-900/50 border-amber-500/50 text-amber-300 shrink-0 whitespace-nowrap')}
-                        title={`You hold open ${uncoveredGuardProducts.join(' / ')} position(s), but the guard is scoped to ${guardProductTypes.join(' / ') || 'nothing'}. Dhan will not square those off. Select the missing product above and press Set Guard again.`}>
+                        title={`You hold open ${uncoveredGuardProducts.join(' / ')} position(s), but the guard is scoped to ${guardProductTypes.join(' / ') || 'nothing'}. The guard will not square those off. Select the missing product above and press Set Guard again.`}>
                         ⚠ {uncoveredGuardProducts.join('/')} NOT COVERED
                       </span>
                     )}
@@ -3358,6 +3519,15 @@ export default function AdvancedScalper() {
 
                 {/* Current guard values + persistent error, kept inside the Guard
                     card since both describe its own state. */}
+                {broker === 'kotak' && serverPnlGuard && (
+                  <span className={cn(TXT_VALUE, 'text-zinc-500 font-mono shrink-0 whitespace-nowrap')}
+                    title="Kotak has no broker-side P&L exit, so the dashboard SERVER watches this guard. It keeps working with this tab closed, but not if the dashboard server is stopped. With a leg unpriced only the loss limit can fire.">
+                    {serverPnlGuard.profit > 0 ? `🎯 ₹${serverPnlGuard.profit}` : ''}
+                    {serverPnlGuard.profit > 0 && serverPnlGuard.loss > 0 ? '  ' : ''}
+                    {serverPnlGuard.loss > 0 ? `🛑 ₹${serverPnlGuard.loss}` : ''}
+                    {'  '}· held by the server
+                  </span>
+                )}
                 {broker === 'dhan' && hasConfig && (
                   <span className={cn(TXT_VALUE, 'text-zinc-500 font-mono shrink-0 whitespace-nowrap')}>
                     {Number(pnlGuardStatus?.profit) > 0 ? `🎯 ₹${pnlGuardStatus?.profit}` : ''}
@@ -3365,7 +3535,7 @@ export default function AdvancedScalper() {
                     {Math.abs(Number(pnlGuardStatus?.loss)) > 0 ? `🛑 ₹${Math.abs(Number(pnlGuardStatus?.loss))}` : ''}
                   </span>
                 )}
-                {broker === 'dhan' && guardError && (
+                {(broker === 'dhan' || broker === 'kotak') && guardError && (
                   <span className={cn(TXT_VALUE, 'text-rose-400 font-semibold shrink-0 whitespace-nowrap')}>⚠ {guardError}</span>
                 )}
                 </div>

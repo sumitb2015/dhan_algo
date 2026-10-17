@@ -61,11 +61,12 @@ import { computeBasketGreeks, type GreekLeg } from '@/lib/multiLegGreeks';
 import { useFocusMarketData, expKey, strikeKey, type FutQuote, type StrikeRef } from '@/lib/useFocusMarketData';
 import { isStale, ageOf, ageLabel } from '@/lib/useLiveTickerPoll';
 import { fetchSliceTradedPrice } from '@/lib/tradedPriceClient';
+import { loadOwnOrders, rememberOwnOrder } from '@/lib/focusOwnOrders';
 import { computeRowPnl, mtmForQty, pnlPctOfPremium, blendFillBasis, fillRebasePatch, shiftMayReopen, canMarkMtm, shiftCloseConfirmed, rowDisplayBookedPnl, putCallRatio, valuePutCallRatio, pickOpenInterest, closeRebaseDelta, closedSliceBooked, FTS_ORDER_SOURCE } from '@/lib/focusToolPnl';
 import { normalizeTradeRow, matchOutsideTrades, type NormalizedTrade } from '@/lib/multiLegFocus';
 import { stampItems, noteItems, adoptItems, canon, type RevBook } from '@/lib/revMerge';
 import { useTabLeader } from '@/hooks/useTabLeader';
-import { FOCUS_UNDERLYINGS, FEED_BRIDGE_UNDERLYINGS, isTradingDayFor, FEED_SESSION_START_HM, FEED_SESSION_END_HM, UNDERLYING_META, isMcxUnderlying, toInternalQty, orderQuantity } from '@/lib/focusToolUnderlyings';
+import { FOCUS_UNDERLYINGS, FEED_BRIDGE_UNDERLYINGS, isTradingDayFor, FEED_SESSION_START_HM, FEED_SESSION_END_HM, UNDERLYING_META, isMcxUnderlying, brokerOrderQuantity, brokerToInternalQuantity } from '@/lib/focusToolUnderlyings';
 import type { FocusConfigWrite } from '@/lib/focusToolRowsMerge';
 import {
   duplicateRow as duplicateRowRules, applyPresetPatch, presetBlockedReason, presetRules, normalizePresetName,
@@ -106,10 +107,16 @@ function offsetLabel(n: number, step: number): string {
 
 const FUT_LABELS = Object.fromEntries(FOCUS_UNDERLYINGS.map(u => [u, UNDERLYING_META[u].futLabel])) as Record<FocusUnderlying, string>;
 
-/** MCX (CRUDEOILM) is Dhan-only for now: Kotak counts MCX quantity in absolute units (100x off Dhan's lots)
- *  and Zerodha has no MCX instrument cache here, so a non-Dhan MCX order would be mis-sized or unroutable. */
+/** MCX (CRUDEOILM) trades on Dhan (quantity in lots) and Kotak (absolute barrels — see brokerOrderQty). Zerodha has
+ *  no MCX instrument cache here, so a Zerodha MCX order would be unroutable. */
 function brokerTradesUnderlying(broker: Broker, u: FocusUnderlying): boolean {
-  return !isMcxUnderlying(u) || broker === 'dhan';
+  return !isMcxUnderlying(u) || broker === 'dhan' || broker === 'kotak';
+}
+
+/** Brokers with a per-order status route (/api/scalper/orders?orderId=&broker=): Dhan and Kotak. They are the ones
+ *  whose fills can be confirmed and re-priced from the order itself rather than guessed from the position book. */
+function tracksOrderStatus(b: Broker): b is 'dhan' | 'kotak' {
+  return b === 'dhan' || b === 'kotak';
 }
 
 // Order-routing vocabulary. SENSEX is the only BSE underlying here, and each
@@ -120,7 +127,7 @@ const UNDERLYING_SEGMENT = Object.fromEntries(FOCUS_UNDERLYINGS.map(u => [u, UND
 function orderExchange(broker: Broker, u: FocusUnderlying): string {
   const bse = u === 'SENSEX';
   if (broker === 'dhan')  return UNDERLYING_SEGMENT[u];
-  if (broker === 'kotak') return bse ? 'bse_fo' : 'nse_fo';
+  if (broker === 'kotak') return bse ? 'bse_fo' : isMcxUnderlying(u) ? 'mcx_fo' : 'nse_fo';
   return bse ? 'BFO' : 'NFO';
 }
 
@@ -1248,7 +1255,7 @@ function StrikeCriteriaControl({ row, onUpdate }: { row: FocusRow; onUpdate: (pa
             options={Array.from({ length: 10 }, (_, i) => ({ value: String(i + 1), label: `×${i + 1}` }))}
             onChange={v => onUpdate({ qtyMultiplier: Number(v) })} className="w-16" />
         </div>
-        <div className={lbl} title="Tgt/SL Ref Price (AlgoTest): measure leg stops and targets from the LTP when the order went out (Trigger), or from the broker's average traded price (Traded — Dhan only; other brokers keep the trigger price)">
+        <div className={lbl} title="Tgt/SL Ref Price (AlgoTest): measure leg stops and targets from the LTP when the order went out (Trigger), or from the broker's average traded price (Traded — Dhan and Kotak, read from the order; Zerodha keeps the trigger price)">
           Tgt/SL ref
           <MiniSelect value={row.refPrice ?? 'trigger'} ariaLabel="Target and stop reference price"
             options={[{ value: 'trigger', label: 'Trigger Price' }, { value: 'traded', label: 'Traded Price' }]}
@@ -5302,13 +5309,16 @@ export default function FocusTool() {
       if (!j.success || !j.positions) return null;
       const rows = j.positions
         .filter(p => {
-          const seg = String(p.exchangeSegment ?? '').toUpperCase();
-          // MCX_COMM is admitted only for Dhan, the one broker whose MCX quantity
-          // convention (lots) this page converts — see focusToolUnderlyings.
-          if (seg.includes('FNO') || seg.includes('FO')) return true;
-          // Only CRUDEOILM rows: other MCX contracts (CRUDEOIL x100, gas, gold...) have no unit
+          // Dhan rows carry `exchangeSegment` (NSE_FNO / MCX_COMM); Kotak and Zerodha rows carry `exchange`
+          // (nse_fo / mcx_fo / NFO). Reading only exchangeSegment dropped EVERY Kotak position.
+          const seg = String(p.exchangeSegment ?? (p as { exchange?: unknown }).exchange ?? '').toUpperCase();
+          // MCX is admitted only for Dhan (lots) and Kotak (barrels), the brokers whose MCX quantity convention this
+          // page converts, and only CRUDEOILM: other MCX contracts (CRUDEOIL x100, gas, gold...) have no unit
           // conversion here and would corrupt the header P&L if admitted.
-          return broker === 'dhan' && seg === 'MCX_COMM' && underlyingOfSymbol(String(p.tradingSymbol ?? '')) === 'CRUDEOILM';
+          if (seg.startsWith('MCX')) {
+            return tracksOrderStatus(broker) && underlyingOfSymbol(String(p.tradingSymbol ?? '')) === 'CRUDEOILM';
+          }
+          return seg.includes('FNO') || seg.includes('FO');
         })
         // MCX: Dhan reports quantity and P&L per LOT; rescale P&L, then express quantity in
         // barrels so the page's premium × quantity maths is right with no further care.
@@ -5317,11 +5327,12 @@ export default function FocusTool() {
           const scaled = scaleBrokerPnl(p as any) as PosRow;
           const u = underlyingOfSymbol(String(scaled.tradingSymbol ?? ''));
           if (!u || !isMcxUnderlying(u)) return scaled;
+          // Kotak already reports barrels, so brokerToInternalQty leaves it alone.
           return {
             ...scaled,
-            netQty: toInternalQty(u, Number(scaled.netQty) || 0),
-            buyQty: toInternalQty(u, Number((scaled as any).buyQty) || 0),
-            sellQty: toInternalQty(u, Number((scaled as any).sellQty) || 0),
+            netQty: brokerToInternalQuantity(broker, u, Number(scaled.netQty) || 0),
+            buyQty: brokerToInternalQuantity(broker, u, Number((scaled as any).buyQty) || 0),
+            sellQty: brokerToInternalQuantity(broker, u, Number((scaled as any).sellQty) || 0),
           } as PosRow;
         });
       if (brokerNowRef.current !== askedBroker) return null;
@@ -5890,10 +5901,11 @@ export default function FocusTool() {
       if (broker !== 'dhan') {
         const label = BROKER_LABELS[broker];
         const res = await fetch(scalperRoute(broker, 'exit-all'), { method: 'POST' });
-        const data = await res.json() as { success: boolean; closed: string[]; errors: string[] };
+        const data = await res.json() as { success: boolean; closed: string[]; errors: string[]; skipped?: string[] };
+        const kept = data.skipped?.length ? ` Cash-equity positions left open: ${data.skipped.join(', ')}.` : '';
         if (data.success) {
           exitOk = true;
-          addToast('success', `All ${label} positions liquidated.${data.closed.length ? ` (${data.closed.join(', ')})` : ''}`);
+          addToast('success', `All ${label} F&O positions liquidated.${data.closed.length ? ` (${data.closed.join(', ')})` : ''}${kept}`);
         } else {
           addToast('error', `${label} exit failed`, data.errors.join('; ') || 'Unknown error');
         }
@@ -6293,7 +6305,7 @@ export default function FocusTool() {
         // in the broker's traded price for this fill's share. Kept only where it can be made exact — a SIM paper fill,
         // or a Dhan order (traded price): Zerodha / Kotak rows leave it unset and mark off the broker's own average.
         // Unknown stays unknown (blendFillBasis never dilutes toward 0); a reduce leaves it; a flat leg drops it.
-        const trackFill = isSimRow(r) || broker === 'dhan';
+        const trackFill = isSimRow(r) || tracksOrderStatus(broker);
         const prevFill = leg === 'CE' ? f?.ceFillEntry : f?.peFillEntry;
         const nextFillEntry = !trackFill ? null
           : delta > 0 ? blendFillBasis(prevFill, prevQty, Number(entryPrice) || 0, delta) : (prevFill ?? null);
@@ -6476,13 +6488,13 @@ export default function FocusTool() {
     const remaining = rec.requested - rec.filled;
     let filledNow: number | null = null;   // total filled on this order, if known
     let dead = false;
-    if (broker === 'dhan' && rec.orderId) {
+    if (tracksOrderStatus(broker) && rec.orderId) {
       try {
-        const res = await fetch(`/api/scalper/orders?orderId=${encodeURIComponent(rec.orderId)}`);
+        const res = await fetch(`/api/scalper/orders?orderId=${encodeURIComponent(rec.orderId)}&broker=${broker}`);
         const j = await res.json() as { success?: boolean; data?: { orderStatus?: string; filledQty?: number } };
         if (j.success && j.data) {
           const st = String(j.data.orderStatus ?? '').toUpperCase();
-          const fq = Math.min(rec.requested, Math.max(0, toInternalQty(rowNow.underlying, Number(j.data.filledQty) || 0)));
+          const fq = Math.min(rec.requested, Math.max(0, brokerToInternalQuantity(broker, rowNow.underlying, Number(j.data.filledQty) || 0)));
           if (st === 'TRADED') filledNow = rec.requested;
           else if (st === 'REJECTED' || st === 'CANCELLED' || st === 'CANCELED' || st === 'EXPIRED') {
             filledNow = fq; dead = true;
@@ -6520,7 +6532,7 @@ export default function FocusTool() {
         const booked = canMarkMtm(mark) ? mtmForQty(mark) : 0;
         adjustFillQty(rec.rowId, rec.leg, -late, undefined, booked);
         // Book the late slice at what the broker actually filled, as an in-time close does.
-        if (booked !== 0 && broker === 'dhan' && rec.orderId) {
+        if (booked !== 0 && tracksOrderStatus(broker) && rec.orderId) {
           void rebaseBookedOnTradedPrice(rec.rowId, rec.orderId, rec.snap.netQty < 0, rec.snap.ltp, late);
         }
         addToast('success', `${rec.leg} close confirmed late`,
@@ -6534,7 +6546,7 @@ export default function FocusTool() {
         adjustFillQty(rec.rowId, rec.leg, late, rec.strike, 0, rec.entryPx, rec.orb);
         // The late slice follows its OWN traded price (sliceTradedPrice), for the P&L basis and, where the row
         // uses it, the stop reference.
-        if (broker === 'dhan' && rec.orderId) {
+        if (tracksOrderStatus(broker) && rec.orderId) {
           void rebaseOpenOnTradedPrice(rec.rowId, rec.leg, rec.orderId, rec.entryPx, late, {
             stop: !!rec.rebaseStop,
             fill: !(heldBefore > 0 && !(basisBefore > 0)),
@@ -6692,7 +6704,8 @@ export default function FocusTool() {
           const entry = live ? legFillEntry(row, leg, live)
             : (Number(leg === 'CE' ? (row.fill?.ceFillEntry ?? row.fill?.ceEntry) : (row.fill?.peFillEntry ?? row.fill?.peEntry)) || 0);
           const openedAt = Number(leg === 'CE' ? row.fill?.ceOpenedTs : row.fill?.peOpenedTs) || 0;
-          const match = broker === 'dhan' && securityId ? await outsideCloseExit(String(securityId), pageOwn, openedAt) : null;
+          const outsideIdent = broker === 'dhan' ? securityId : broker === 'kotak' ? symbol : undefined;
+          const match = outsideIdent ? await outsideCloseExit(String(outsideIdent), pageOwn, openedAt) : null;
           const exit = match?.exitPrice ?? null;
           const booked = exit != null ? closedSliceBooked(true, entry, exit, pageOwn) : 0;
           if (booked !== 0 && match) for (const k of match.keys) usedOutsideTradeKeysRef.current.add(k);
@@ -6749,13 +6762,13 @@ export default function FocusTool() {
     }
 
     if (!brokerTradesUnderlying(broker, u)) {
-      addToast('error', `${what} order not sent`, `${u} trades on Dhan only — switch broker`);
+      addToast('error', `${what} order not sent`, `${u} trades on Dhan or Kotak only — switch broker`);
       return false;
     }
     const exchange = orderExchange(broker, u);
     const url = broker === 'dhan' ? '/api/scalper/fast-order' : scalperRoute(broker, 'order');
     // `quantity` is in page units (barrels for MCX); the broker takes lots there.
-    const sentQty = orderQuantity(u, quantity);
+    const sentQty = brokerOrderQuantity(broker, u, quantity);
     if (!(sentQty > 0)) {
       addToast('error', `${what} order not sent`, `${quantity} is under one ${u} lot (${UNDERLYING_META[u].unitsPerLot})`);
       return false;
@@ -6770,6 +6783,7 @@ export default function FocusTool() {
       });
       const j = await res.json() as { success?: boolean; order_id?: string; error?: string };
       if (j.success) {
+        noteOwnOrder(j.order_id);
         addToast('success', `${side} ${quantity} ${strike} ${leg}`, j.order_id ? `Order ${j.order_id}` : undefined);
         // Confirm the actual fill in the background rather than blocking on
         // it — this is a scalping terminal, and the row's busy lock (see
@@ -6860,7 +6874,7 @@ export default function FocusTool() {
             opts.reduce ? undefined : Number(strike), bookedDelta, openEntryPx, opts.reduce ? undefined : opts.orb);
           // The close booked at the LTP snapshot; swap in the order's traded
           // average once Dhan reports it.
-          if (opts.reduce && filled > 0 && bookedDelta !== 0 && bookedSnap && broker === 'dhan' && j.order_id) {
+          if (opts.reduce && filled > 0 && bookedDelta !== 0 && bookedSnap && tracksOrderStatus(broker) && j.order_id) {
             void rebaseBookedOnTradedPrice(row.id, String(j.order_id), bookedSnap.netQty < 0, bookedSnap.ltp, filled);
           }
           // AlgoTest "Tgt/SL Ref Price: Traded Price" — re-base this fill's
@@ -6869,7 +6883,7 @@ export default function FocusTool() {
           // from this leg's real fill, not the LTP quoted a moment before the order.
           // ONE order read corrects both: the stop reference (only for refPrice 'traded' or a shift's reopen) and the
           // P&L basis (always — a held leg whose basis is already unknown is left to its fallback).
-          if (!opts.reduce && filled > 0 && broker === 'dhan' && j.order_id) {
+          if (!opts.reduce && filled > 0 && tracksOrderStatus(broker) && j.order_id) {
             void rebaseOpenOnTradedPrice(row.id, leg, String(j.order_id), openEntryPx, filled, {
               stop: row.refPrice === 'traded' || opts.strikeOverride != null,
               fill: !(prevHeld > 0 && !(prevBasis > 0)),
@@ -6909,24 +6923,35 @@ export default function FocusTool() {
    * place when the price never comes back (a missed read is not a reason to
    * guess). Stops and targets measure from the new entry on the next tick.
    */
+  /** Remembers an order this tool placed on a broker that cannot tag orders (Kotak). */
+  function noteOwnOrder(orderId: unknown) {
+    if (broker !== 'kotak' || !orderId) return;
+    try { rememberOwnOrder(localStorage, 'kotak', istToday(), String(orderId)); } catch { /* storage unavailable */ }
+  }
+
   /** Average price of the outside BUY trade(s) that closed `qty` of this
-   *  contract: today's Dhan trade book, minus the Focus Tool's own orders
-   *  (FTS_ORDER_SOURCE correlationIds), since the leg opened, not already used
-   *  for another row. Null unless a run of trades adds up to exactly `qty`
-   *  (matchOutsideTrades). */
-  async function outsideCloseExit(securityId: string, qty: number, openedAt: number): Promise<{ exitPrice: number; keys: string[] } | null> {
+   *  contract: today's trade book (Dhan, or Kotak), minus the Focus Tool's own
+   *  orders (Dhan: FTS_ORDER_SOURCE correlationIds; Kotak: remembered order ids),
+   *  since the leg opened, not already used for another row. Null unless a run
+   *  of trades adds up to exactly `qty` (matchOutsideTrades). */
+  async function outsideCloseExit(ident: string, qty: number, openedAt: number): Promise<{ exitPrice: number; keys: string[] } | null> {
     try {
-      const r = await fetch('/api/scalper/poll');
+      // `ident` is the Dhan security id, or the trading symbol on Kotak (the trade rows' own join key there).
+      const r = await fetch(scalperRoute(broker, 'poll'));
       const j = await r.json() as { success?: boolean; orders?: Record<string, unknown>[]; trades?: Record<string, unknown>[] };
       if (!j.success || !Array.isArray(j.trades)) return null;
-      const own = new Set((j.orders ?? [])
-        .filter(o => String(o.correlationId ?? '').startsWith(FTS_ORDER_SOURCE))
-        .map(o => String(o.orderId ?? '')));
+      // Dhan tags this tool's orders with a correlationId prefix; Kotak cannot, so its own order ids were remembered
+      // at placement (noteOwnOrder). Anything else on the contract is an outside trade.
+      const own = broker === 'kotak'
+        ? loadOwnOrders(localStorage, 'kotak', istToday())
+        : new Set((j.orders ?? [])
+            .filter(o => String(o.correlationId ?? '').startsWith(FTS_ORDER_SOURCE))
+            .map(o => String(o.orderId ?? '')));
       const trades = j.trades.map(normalizeTradeRow).filter((t): t is NormalizedTrade => t != null);
       // Only trades since this leg opened can be its close (that also skips the
       // tool's own untagged closes of earlier cycles), and a trade already
       // used to price another row's close is not used again.
-      return matchOutsideTrades(trades, securityId, 'B', qty, Date.now(), own, usedOutsideTradeKeysRef.current, openedAt);
+      return matchOutsideTrades(trades, ident, 'B', qty, Date.now(), own, usedOutsideTradeKeysRef.current, openedAt);
     } catch {
       return null;
     }
@@ -6934,7 +6959,7 @@ export default function FocusTool() {
 
   /** A close's booked P&L, re-priced from the LTP snapshot to the slice's traded price. */
   async function rebaseBookedOnTradedPrice(rowId: string, orderId: string, isShort: boolean, estimate: number, filled: number) {
-    const px = await fetchSliceTradedPrice(orderId, 'close', filled, tradedSliceRef.current);
+    const px = await fetchSliceTradedPrice(orderId, 'close', filled, tradedSliceRef.current, { broker: tracksOrderStatus(broker) ? broker : 'dhan' });
     if (px == null) return;
     const delta = closeRebaseDelta(isShort, estimate, px, filled);
     if (delta !== 0) patchFill(rowId, f => ({ bookedPnl: (f.bookedPnl ?? 0) + delta }));
@@ -6961,7 +6986,7 @@ export default function FocusTool() {
       if ((Number(leg === 'CE' ? f?.ceQty : f?.peQty) || 0) >= Math.min(ctx.heldAfterAdd, filled)) { identity = openedOf(f); break; }
       await new Promise(res => setTimeout(res, 50));
     }
-    const px = await fetchSliceTradedPrice(orderId, 'open', filled, tradedSliceRef.current);
+    const px = await fetchSliceTradedPrice(orderId, 'open', filled, tradedSliceRef.current, { broker: tracksOrderStatus(broker) ? broker : 'dhan' });
     if (px == null) {
       if (ctx.fill) {
         patchFill(rowId, f => (identity != null && openedOf(f) === identity
@@ -7400,7 +7425,7 @@ export default function FocusTool() {
   // ── Limit ladder ───────────────────────────────────────────────────────
   // Resting SELL limits on an open short leg at +5…30% of its price at click. A fill
   // sells the leg further, so it is credited to the row's fill ledger (the stops and
-  // exits size off that ledger) as it lands. Dhan, REAL rows only. Cancelled whenever
+  // exits size off that ledger) as it lands. Dhan and Kotak, REAL rows only. Cancelled whenever
   // the leg is fully exited or rolled (placeLeg), so a late fill can never open a
   // position nothing is watching.
   const ladderCreditedRef = useRef<Map<string, number>>(new Map());
@@ -7418,14 +7443,14 @@ export default function FocusTool() {
   /** Settle one ladder order against the broker: credit new fills, drop it once terminal. */
   async function reconcileLadderOrder(rowId: string, o: FocusLadderOrder): Promise<void> {
     try {
-      const r = await fetch(`/api/scalper/orders?orderId=${encodeURIComponent(o.orderId)}`);
+      const r = await fetch(`/api/scalper/orders?orderId=${encodeURIComponent(o.orderId)}&broker=${tracksOrderStatus(broker) ? broker : 'dhan'}`);
       const j = await r.json() as { success?: boolean; data?: { orderStatus?: string; filledQty?: number; averageTradedPrice?: number } };
       if (!j.success || !j.data) return;   // unreadable: keep it, retry next tick
       const status = String(j.data.orderStatus ?? '').toUpperCase();
       const ladderRow = schedulerRef.current.config.rows.find(x => x.id === rowId);
       if (!ladderRow) return;
-      // The order book counts MCX in lots; the ledger is in page units (barrels).
-      const filled = toInternalQty(ladderRow.underlying, Number(j.data.filledQty) || 0);
+      // Dhan's order book counts MCX in lots (Kotak's is in barrels); the ledger is in page units (barrels).
+      const filled = brokerToInternalQuantity(broker, ladderRow.underlying, Number(j.data.filledQty) || 0);
       const done = Math.max(o.credited, ladderCreditedRef.current.get(o.orderId) ?? 0);
       const delta = filled - done;
       if (delta > 0) {
@@ -7473,7 +7498,7 @@ export default function FocusTool() {
       try {
         const r = await fetch('/api/scalper/orders', {
           method: 'DELETE', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ orderId: o.orderId, broker: 'dhan' }),
+          body: JSON.stringify({ orderId: o.orderId, broker: tracksOrderStatus(broker) ? broker : 'dhan' }),
         });
         const j = await r.json() as { success?: boolean };
         if (!j.success) addToast('error', `Could not cancel ${o.strike} ${o.leg} +${o.pct}% limit`, 'Cancel it in the broker order book before it fills');
@@ -7488,9 +7513,9 @@ export default function FocusTool() {
   async function placeLadderOrder(row: FocusRow, leg: 'CE' | 'PE', pct: number, lots: number): Promise<void> {
     const what = `${row.underlying} ${leg}`;
     if (isSimRow(row)) { addToast('error', 'Limit ladder not available', 'SIM rows have no broker orders — it is for REAL rows'); return; }
-    if (broker !== 'dhan') { addToast('error', 'Limit ladder not available', 'Dhan only for now'); return; }
+    if (!tracksOrderStatus(broker)) { addToast('error', 'Limit ladder not available', 'Dhan and Kotak only'); return; }
     if (!liveRealMoney) { addToast('error', 'Dry run', 'Enable LIVE · REAL MONEY to place orders'); return; }
-    if (!hasAuthenticatedBroker) { addToast('error', 'No broker logged in', 'Log in to Dhan before placing orders'); return; }
+    if (!hasAuthenticatedBroker) { addToast('error', 'No broker logged in', 'Log in to your broker before placing orders'); return; }
     const live = rowLive[row.id];
     const pos = leg === 'CE' ? live?.cePosition : live?.pePosition;
     const strike = leg === 'CE' ? live?.ceStrike : live?.peStrike;
@@ -7504,20 +7529,25 @@ export default function FocusTool() {
     const expiry = row.expiry || expiries[row.underlying]?.[0] || '';
     const ref = lookups[expKey(row.underlying, expiry)]?.strikes?.[strikeKey(strike)];
     const securityId = leg === 'CE' ? ref?.ceId : ref?.peId;
-    if (!securityId) { addToast('error', `${what} order not sent`, `No Dhan contract for ${strike} ${leg}`); return; }
+    const symbol = leg === 'CE' ? ref?.ceSymbol : ref?.peSymbol;
+    if (broker === 'dhan' ? !securityId : !symbol) { addToast('error', `${what} order not sent`, `No ${BROKER_LABELS[broker]} contract for ${strike} ${leg}`); return; }
     const group = config.groups.find(g => g.underlying === row.underlying);
     const product = closeOrderProduct(broker, PRODUCT_ALIAS[group?.product ?? 'INTRADAY'][broker]);
     if (!product) { addToast('error', `${what} order not sent`, 'Unsupported product'); return; }
     const price = Number(ladderPrice(ltp, pct).toFixed(2));
     const quantity = Math.max(1, Math.round(lots)) * lotSize;
-    if (!(orderQuantity(row.underlying, quantity) > 0)) { addToast('error', `${what} order not sent`, 'Quantity is under one lot'); return; }
+    const sentLadderQty = brokerOrderQuantity(broker, row.underlying, quantity);
+    if (!(sentLadderQty > 0)) { addToast('error', `${what} order not sent`, 'Quantity is under one lot'); return; }
     try {
-      const res = await fetch('/api/scalper/fast-order', {
+      const res = await fetch(broker === 'dhan' ? '/api/scalper/fast-order' : scalperRoute(broker, 'order'), {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ securityId, quantity: orderQuantity(row.underlying, quantity), side: 'SELL', orderType: 'LIMIT', price, exchangeSegment: orderExchange(broker, row.underlying), ...product.fields, source: FTS_ORDER_SOURCE }),
+        body: JSON.stringify(broker === 'dhan'
+          ? { securityId, quantity: sentLadderQty, side: 'SELL', orderType: 'LIMIT', price, exchangeSegment: orderExchange(broker, row.underlying), ...product.fields, source: FTS_ORDER_SOURCE }
+          : { tradingsymbol: symbol, quantity: sentLadderQty, side: 'SELL', orderType: 'LIMIT', price, exchange: orderExchange(broker, row.underlying), ...product.fields }),
       });
       const j = await res.json() as { success?: boolean; order_id?: string; error?: string };
       if (!j.success || !j.order_id) { addToast('error', `${what} limit rejected`, j.error ?? 'Unknown broker error'); return; }
+      noteOwnOrder(j.order_id);
       patchLadder(row.id, cur => [...cur, { orderId: String(j.order_id), leg, strike, pct, price, qty: quantity, credited: 0, placedAt: Date.now() }]);
       addToast('success', `SELL LIMIT ${quantity} ${strike} ${leg} @ ${price.toFixed(2)}`, `+${pct}% over ${ltp.toFixed(2)} · order ${j.order_id}`);
       logEvent('ladder_place', row, `limit +${pct}% over ${ltp}`, { leg, strike, qty: quantity, price, orderId: String(j.order_id) });

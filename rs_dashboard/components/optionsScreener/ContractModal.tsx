@@ -1,5 +1,6 @@
 'use client';
 
+import { BrokerPicker, usePageBroker } from '@/components/BrokerPicker';
 import { useEffect, useState } from 'react';
 import { AlertTriangle, CheckCircle2, Loader2, X } from 'lucide-react';
 import { toast } from 'sonner';
@@ -77,6 +78,11 @@ export default function ContractModal({ row, onClose }: Props) {
   const setOrdType = voiding(setOrdTypeRaw);
   const setPrice = voiding(setPriceRaw);
   const setProduct = voiding(setProductRaw);
+  // The account this ticket sends to. Kotak resolves the same contract in its own master on the server
+  // (its lot size and tick, MCX in barrels), so the qty shown below is Dhan's lot and is only a guide there.
+  const [brokerRaw, setBrokerRaw] = usePageBroker('optionsScreener.broker');
+  const broker = brokerRaw;
+  const setBroker = voiding(setBrokerRaw);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape' && !placing) onClose(); };
@@ -98,7 +104,7 @@ export default function ContractModal({ row, onClose }: Props) {
       const res = await fetch('/api/options-screener/order', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ id: row.id, side, lots, orderType: ordType, price: ordType === 'LIMIT' ? price : undefined, product }),
+        body: JSON.stringify({ id: row.id, side, lots, orderType: ordType, price: ordType === 'LIMIT' ? price : undefined, product, broker }),
       });
       const json = await res.json();
       if (json.unknown) setUnknownOutcome(true);
@@ -232,7 +238,11 @@ export default function ContractModal({ row, onClose }: Props) {
         {/* order ticket */}
         <div className="px-5 py-4 border-t border-zinc-800 bg-zinc-900/60">
           <div className="flex items-center justify-between mb-3">
-            <p className="text-[10px] font-bold uppercase tracking-[0.14em] text-violet-300">Trade · Dhan · real money</p>
+            <div className="flex items-center gap-2">
+              <p className="text-[10px] font-bold uppercase tracking-[0.14em] text-violet-300">Trade · {broker === 'kotak' ? 'Kotak' : 'Dhan'} · real money</p>
+              <BrokerPicker value={broker} onChange={setBroker} disabled={placing || unknownOutcome}
+                disabledReason="Locked while an order is in flight or its outcome is unknown" />
+            </div>
             <span className="text-[10px] text-zinc-500">lot = {row.lot} qty{row.x === 'MCX' ? ` (${row.mult} units)` : ''} · tick {row.tick}</span>
           </div>
 
@@ -268,7 +278,7 @@ export default function ContractModal({ row, onClose }: Props) {
 
           <p className="text-[11px] text-zinc-400 mt-3">
             {side} <span className="font-mono text-zinc-100">{lots}</span> lot{lots === 1 ? '' : 's'} = qty{' '}
-            <span className="font-mono text-zinc-100">{qty}</span> · premium ≈{' '}
+            <span className="font-mono text-zinc-100">{qty}</span>{broker === 'kotak' && row.x === 'MCX' && <span className="text-zinc-500"> (Kotak sends the same lots in barrels: {lots} × {row.mult})</span>} · premium ≈{' '}
             <span className="font-mono text-zinc-100">₹{Math.round(premium).toLocaleString('en-IN')}</span>
             {ordType === 'MARKET' && <span className="text-amber-300"> · market order — fills at the prevailing ask/bid</span>}
             {side === 'SELL' && <span className="text-amber-300"> · short option: margin blocked, risk is unlimited on CE</span>}
@@ -296,7 +306,7 @@ export default function ContractModal({ row, onClose }: Props) {
               type="button"
               onClick={place}
               disabled={placing || unknownOutcome}
-              title={unknownOutcome ? 'Order status unknown — check the Dhan order book, then close and reopen this ticket to place again' : undefined}
+              title={unknownOutcome ? `Order status unknown — check the ${broker === 'kotak' ? 'Kotak' : 'Dhan'} order book, then close and reopen this ticket to place again` : undefined}
               className={`px-4 py-2 rounded-md text-xs font-bold text-oncolor transition disabled:opacity-60 ${FOCUS_RING} ${
                 side === 'BUY' ? 'bg-emerald-600 hover:bg-emerald-500' : 'bg-red-600 hover:bg-red-500'
               } ${confirming ? 'ring-2 ring-amber-400' : ''}`}

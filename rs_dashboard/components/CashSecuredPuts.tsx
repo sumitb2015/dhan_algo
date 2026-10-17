@@ -1,5 +1,6 @@
 'use client';
 
+import { BrokerPicker, usePageBroker } from '@/components/BrokerPicker';
 import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import { Plus, X, RefreshCw, Terminal, AlertTriangle } from 'lucide-react';
 import { cn } from '@/lib/utils';
@@ -291,6 +292,10 @@ function SellPutPanel({ form, onChange, onExpiryChange, onCancel, onSubmit }: {
 }
 
 export default function CashSecuredPuts() {
+  // The account whose working orders and open puts are listed, and that every order here goes to.
+  const [broker, setBroker] = usePageBroker('cashSecuredPuts.broker');
+  const brokerRef = useRef(broker);
+  brokerRef.current = broker;
   const [rows, setRows] = useState<CspRow[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -311,8 +316,10 @@ export default function CashSecuredPuts() {
     if (showLoading) setLoading(true);
     setError(null);
     try {
-      const res = await fetch('/api/csp-watchlist');
+      const asked = broker;
+      const res = await fetch(`/api/csp-watchlist?broker=${asked}`);
       const json: WatchlistResponse = await res.json();
+      if (brokerRef.current !== asked) return;   // a reply for the account no longer shown
       if (json.success) {
         setRows(json.rows ?? []);
         setAsOf(json.asOf ?? null);
@@ -324,7 +331,7 @@ export default function CashSecuredPuts() {
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [broker]);
 
   useEffect(() => { fetchDataRef.current = fetchData; }, [fetchData]);
   useEffect(() => { fetchData(); }, [fetchData]);
@@ -419,6 +426,7 @@ export default function CashSecuredPuts() {
           afterMarketOrder: sellForm.afterMarketOrder,
           amoTime: sellForm.amoTime,
           productType: sellForm.productType,
+          broker,
         }),
       });
       const json = await res.json();
@@ -438,7 +446,7 @@ export default function CashSecuredPuts() {
       await fetch('/api/csp-watchlist/orders', {
         method: 'DELETE',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ orderId: cancelConfirm.orderId }),
+        body: JSON.stringify({ orderId: cancelConfirm.orderId, broker }),
       });
       setCancelConfirm(null);
       fetchData(false);
@@ -459,6 +467,7 @@ export default function CashSecuredPuts() {
           exchangeSegment: exitConfirm.trade.exchangeSegment,
           quantity: exitConfirm.trade.netQty,
           productType: exitConfirm.trade.productType,
+          broker,
         }),
       });
       setExitConfirm(null);
@@ -484,6 +493,8 @@ export default function CashSecuredPuts() {
         </div>
         <div className="w-px h-5 bg-zinc-800 hidden sm:block" />
         <NavBar />
+        <BrokerPicker value={broker} onChange={(b) => { setRows([]); setBroker(b); }} disabled={!!sellForm?.submitting || cancelSubmitting || exitSubmitting}
+          disabledReason="Locked while an order is being sent" />
         <div className="flex items-center gap-2 ml-auto">
           {asOf && (
             <span className="text-[10px] font-mono font-bold text-zinc-400 hidden md:inline px-2 py-0.5 rounded-sm bg-zinc-900 border border-zinc-800 uppercase tracking-wide">

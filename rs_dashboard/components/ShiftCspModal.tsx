@@ -19,6 +19,8 @@ export interface ShiftTarget {
   moveCycle: number | null;
   /** Absent on paper rows — the exit leg cannot be placed for those. */
   securityId?: string;
+  /** Account the row trades on (absent = Dhan); its order cancels go there. */
+  broker?: 'dhan' | 'kotak';
 }
 
 interface ChainStrike {
@@ -262,7 +264,7 @@ export default function ShiftCspModal({ target, onClose, onComplete }: {
       const res = await fetch('/api/csp-watchlist/orders', {
         method: 'DELETE',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ orderId }),
+        body: JSON.stringify({ orderId, broker: target.broker ?? 'dhan' }),
       });
       const j = await res.json();
       if (!j.success) {

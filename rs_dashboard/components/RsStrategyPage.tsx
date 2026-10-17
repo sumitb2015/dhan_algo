@@ -1,5 +1,6 @@
 'use client';
 
+import { BrokerPicker, usePageBroker } from '@/components/BrokerPicker';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ChartNoAxesCombined,
@@ -284,6 +285,8 @@ export default function RsStrategyPage({ guide = '' }: { guide?: string }) {
   const [showProcessBanner, setShowProcessBanner] = useState(true);
 
   // What the account already holds (Dhan holdings + today's NSE equity positions), keyed by symbol.
+  // Account the Buy/Sell ticket and the Held column use. Data (prices, RS) is Dhan's either way.
+  const [broker, setBroker] = usePageBroker('rsStrategy.broker');
   const [holdings, setHoldings] = useState<Record<string, EquityHolding> | null>(null);
   const [holdingsError, setHoldingsError] = useState<string | null>(null);
   const [holdingsTick, setHoldingsTick] = useState(0); // bump to force a fresh read (after an order)
@@ -416,7 +419,7 @@ export default function RsStrategyPage({ guide = '' }: { guide?: string }) {
     let cancelled = false;
     const read = async (fresh: boolean) => {
       try {
-        const res = await fetch(`/api/equity-order/holdings${fresh ? '?refresh=true' : ''}`);
+        const res = await fetch(`/api/equity-order/holdings?broker=${broker}${fresh ? '&refresh=true' : ''}`);
         const json = await res.json();
         if (cancelled) return;
         if (!json.success) throw new Error(json.error || 'Holdings unavailable');
@@ -434,7 +437,9 @@ export default function RsStrategyPage({ guide = '' }: { guide?: string }) {
       cancelled = true;
       clearInterval(id);
     };
-  }, [holdingsTick]);
+  }, [holdingsTick, broker]);
+  // The other account's holdings must never show under this one while the new read is in flight.
+  useEffect(() => { setHoldings(null); setHoldingsError(null); }, [broker]);
 
   // NSE index membership: static reference data, read once per session.
   useEffect(() => {
@@ -744,6 +749,8 @@ export default function RsStrategyPage({ guide = '' }: { guide?: string }) {
           <span className="text-[10px] font-mono font-bold uppercase tracking-wider text-amber-300 px-1.5 py-0.5 rounded bg-amber-500/10 border border-amber-500/20">
             DATA: {data?.dataDate || '—'}
           </span>
+          <BrokerPicker value={broker} onChange={setBroker} disabled={!!order}
+            disabledReason="Close the order ticket first" />
           <span className="w-px h-5 bg-zinc-800 shrink-0" />
           <NavBar />
         </div>
@@ -1287,9 +1294,10 @@ export default function RsStrategyPage({ guide = '' }: { guide?: string }) {
 
       {order && (
         <EquityOrderModal
-          key={`${order.symbol}:${order.side}`}
+          key={`${broker}:${order.symbol}:${order.side}`}
           symbol={order.symbol}
           side={order.side}
+          broker={broker}
           onClose={() => setOrder(null)}
           onPlaced={afterOrder}
         />

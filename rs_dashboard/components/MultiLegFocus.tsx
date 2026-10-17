@@ -1028,11 +1028,12 @@ export default function MultiLegFocus({
   // drops it once the order book says CANCELLED, and — if the trigger printed first so Dhan
   // refuses the cancel — opens the leg it became. Removing it locally would orphan that position.
   const cancelWaitingEntry = useCallback(async (basketId: string, orderId: string): Promise<boolean> => {
+    const waitingBroker = basketsRef.current.find(b => b.id === basketId)?.broker === 'kotak' ? 'kotak' : 'dhan';
     try {
       const res = await fetch('/api/scalper/orders', {
         method: 'DELETE',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ orderId, broker: 'dhan' }),
+        body: JSON.stringify({ orderId, broker: waitingBroker }),
       });
       const j = await res.json() as { success: boolean; error?: string; detail?: string };
       if (!j.success) {
@@ -1311,14 +1312,14 @@ export default function MultiLegFocus({
   // after the hedges, or auto-reversing legs on an abort — the ACK is not
   // enough: wait for the order's actual outcome. 'pending' after the deadline
   // means unknown (treat as NOT confirmed; the poll's pendingOrders settles it).
-  const confirmDhanOrder = useCallback(async (orderId: string, orderType: 'MARKET' | 'LIMIT' | 'SL' | 'SLM', timeoutMs = 6000): Promise<{
+  const confirmDhanOrder = useCallback(async (orderId: string, orderType: 'MARKET' | 'LIMIT' | 'SL' | 'SLM', timeoutMs = 6000, confirmBroker: 'dhan' | 'kotak' = 'dhan'): Promise<{
     phase: DhanOrderPhase; filledQty: number; avgPrice: number; reason: string;
   }> => {
     const deadline = Date.now() + timeoutMs;
     let last = { phase: 'pending' as DhanOrderPhase, filledQty: 0, avgPrice: 0, reason: '' };
     for (;;) {
       try {
-        const res = await fetch(`/api/scalper/orders?orderId=${encodeURIComponent(orderId)}`);
+        const res = await fetch(`/api/scalper/orders?orderId=${encodeURIComponent(orderId)}&broker=${confirmBroker}`);
         const j = await res.json() as { success: boolean; data?: { orderStatus: string; filledQty: number; averageTradedPrice: number; reason: string } };
         if (j.success && j.data) {
           last = {
@@ -1542,8 +1543,8 @@ export default function MultiLegFocus({
           // it gates the SELL phase and decides what an abort auto-reverses.
           let confirmedQty = qty;
           let unconfirmed = false;
-          if (bk === 'dhan' && j.order_id) {
-            const c = await confirmDhanOrder(String(j.order_id), leg.type);
+          if ((bk === 'dhan' || bk === 'kotak') && j.order_id) {
+            const c = await confirmDhanOrder(String(j.order_id), leg.type, 6000, bk);
             if (c.phase === 'dead') {
               working = working.map(l => (l.id === leg.id ? { ...l, status: 'FAILED' as MultiLegStatus } : l));
               updateBasket(basketId, { legs: working });
@@ -1880,7 +1881,7 @@ export default function MultiLegFocus({
             if (tj.success && tj.tick && tj.tick > 0) masterTick = tj.tick;
           } catch { /* unknown tick: handled below */ }
         }
-        const tick = exitLimitTick({ masterTick, isMcx: isCrude });
+        const tick = exitLimitTick({ masterTick, isMcx: isCrude, mcxUnderlying: isCrude ? basket?.underlying : undefined });
         exitLimit = tick ? snapToTick(opts?.limitPrice ?? 0, tick) : 0;
         if (!(exitLimit > 0)) {
           addToast('error', `Cannot exit ${label}`, tick == null
@@ -2408,8 +2409,8 @@ export default function MultiLegFocus({
     const qty = params.lots * lotSize;
     const label = `${params.side === 'B' ? 'BUY' : 'SELL'} ${params.strike} ${params.option}`;
     const isStop = params.orderType === 'SL' || params.orderType === 'SLM';
-    if (isStop && (bk !== 'dhan' || opts?.carry)) {
-      addToast('error', `Stop order refused for ${label}`, 'Stop-loss entry orders are Dhan only, and only from Add New Leg.');
+    if (isStop && ((bk !== 'dhan' && bk !== 'kotak') || opts?.carry)) {
+      addToast('error', `Stop order refused for ${label}`, 'Stop-loss entry orders are available on Dhan and Kotak only, and only from Add New Leg.');
       return false;
     }
     // Dhan nets by security id: a stop on the OPPOSITE side of a leg this row already holds would
@@ -2460,7 +2461,7 @@ export default function MultiLegFocus({
           addToast('error', `${label}: stop order not confirmed`, 'Dhan returned no order id — check Orders before retrying. Nothing was recorded here.');
           return false;
         }
-        const c = await confirmDhanOrder(String(j.order_id), params.orderType);
+        const c = await confirmDhanOrder(String(j.order_id), params.orderType, 6000, bk === 'kotak' ? 'kotak' : 'dhan');
         if (c.phase === 'dead') {
           addToast('error', `${label} stop order rejected`, c.reason || 'Rejected/cancelled by the broker — nothing is resting.');
           return false;
@@ -2477,7 +2478,7 @@ export default function MultiLegFocus({
           triggerPrice: params.triggerPrice ?? 0,
           ...(params.orderType === 'SL' ? { limitPrice: params.limitPrice } : {}),
           securityId: String(j.securityId ?? req.body.securityId ?? ''),
-          ...(j.symbol ? { symbol: j.symbol } : {}),
+          ...((j.symbol ?? req.body.tradingsymbol) ? { symbol: String(j.symbol ?? req.body.tradingsymbol) } : {}),
           at: Date.now(),
         };
         patchWaiting(basket.id, w => [...w, entry]);
@@ -2497,8 +2498,8 @@ export default function MultiLegFocus({
         // Dhan: confirm the ACK became a fill before reporting success — a shift
         // reopens its SELLs only after the BUY reopen returns true.
         let unconfirmed = false;
-        if (bk === 'dhan' && j.order_id) {
-          const c = await confirmDhanOrder(String(j.order_id), params.orderType);
+        if ((bk === 'dhan' || bk === 'kotak') && j.order_id) {
+          const c = await confirmDhanOrder(String(j.order_id), params.orderType, 6000, bk);
           if (c.phase === 'dead') {
             addToast('error', `${label} rejected after acceptance`, c.reason || 'Order rejected/cancelled by the broker — nothing opened');
             return false;
@@ -2713,8 +2714,8 @@ export default function MultiLegFocus({
         let fillPrice = (j.price && j.price > 0) ? j.price : (currentLtp > 0 ? currentLtp : (leg.price ?? 0));
         // Dhan: a hedge ACK must be a real fill before the SELL phase runs.
         let unconfirmed = false;
-        if (bk === 'dhan' && j.order_id) {
-          const c = await confirmDhanOrder(String(j.order_id), 'MARKET');
+        if ((bk === 'dhan' || bk === 'kotak') && j.order_id) {
+          const c = await confirmDhanOrder(String(j.order_id), 'MARKET', 6000, bk);
           if (c.phase === 'dead') throw new Error(`${leg.strike} ${leg.option} rejected after acceptance${c.reason ? `: ${c.reason}` : ''}`);
           if (c.phase === 'filled' && c.avgPrice > 0) fillPrice = c.avgPrice;
           unconfirmed = c.phase === 'pending';
@@ -3190,7 +3191,8 @@ export default function MultiLegFocus({
                     // Dhan nets by security id: if another group already tracks this contract the
                     // fill is that group's to own. Opening it here too would double-count it.
                     const heldElsewhere = prevBaskets.some(b => b.id !== basket.id && b.broker === basket.broker
-                      && b.legs.some(l => (l.status === 'OPEN' || l.status === 'CLOSING' || l.status === 'PLACING') && l.orderRef?.securityId === w.securityId));
+                      && b.legs.some(l => (l.status === 'OPEN' || l.status === 'CLOSING' || l.status === 'PLACING')
+                        && (basket.broker === 'dhan' ? l.orderRef?.securityId === w.securityId : !!w.symbol && l.orderRef?.symbol === w.symbol)));
                     if (heldElsewhere) {
                       waitingToasts.set(`${w.orderId}`, { ok: false, title: `${label} stop order traded — NOT added here`,
                         msg: `${verdict.qty} qty filled, but another group already tracks this contract. Check Positions and move it manually.` });
@@ -3254,16 +3256,20 @@ export default function MultiLegFocus({
           const adoptFrom = (from: MultiLegBasket[]) => {
             // Only entries whose order has not traded anything: once a stop is part-filled its position is
             // live, so it must stay visible to adoption (and so carry stops) instead of hiding behind the entry.
-            const dhanOrders = ordersByBroker.dhan;
-            const waitingIds = new Set(from.flatMap(b => (b.broker === 'dhan'
+            // Dhan rows are matched on security id, Kotak rows on trading symbol (it has no numeric id).
+            const waitingFor = (bk: Broker) => new Set(from.flatMap(b => (b.broker === bk
               ? (b.waitingEntries ?? []).filter(w => {
-                  const o = dhanOrders?.get(w.orderId);
+                  const o = ordersByBroker[bk]?.get(w.orderId);
                   return !o || (o.status !== 'PART_TRADED' && !(o.filled != null && o.filled > 0));
-                }).map(w => w.securityId)
+                }).map(w => (bk === 'dhan' ? w.securityId : (w.symbol ?? '')))
               : [])));
+            const waitingDhan = waitingFor('dhan');
+            const waitingKotak = waitingFor('kotak');
             return (Object.entries(rowsByBroker) as [Broker, Record<string, unknown>[]][])
-              .flatMap(([b, rows]) => outsidePositionBaskets(from, b, b === 'dhan' && waitingIds.size
-                ? rows.filter(r => !waitingIds.has(String(r.securityId ?? ''))) : rows,
+              .flatMap(([b, rows]) => outsidePositionBaskets(from, b,
+                b === 'dhan' && waitingDhan.size ? rows.filter(r => !waitingDhan.has(String(r.securityId ?? '')))
+                : b === 'kotak' && waitingKotak.size ? rows.filter(r => !waitingKotak.has(String(r.tradingSymbol ?? '')))
+                : rows,
                 Object.keys(DEFAULT_INDEX_SPOT), lotSizeFor(b), day, nowIso));
           };
           // Toast from the current list; the updater below recomputes from the latest state

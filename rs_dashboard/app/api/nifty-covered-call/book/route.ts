@@ -1,7 +1,12 @@
-import { NextResponse } from 'next/server';
+import { NextRequest, NextResponse } from 'next/server';
 import { dhanGet, getDhanCredentials } from '@/lib/dhanToken';
 import { getCachedPositions, brokerCacheGeneration } from '@/lib/brokerPositionsCache';
 import { pacedQuoteCall } from '@/lib/dhanQuotePacer';
+import { kotakGet, kotakRows, KOTAK_PATHS } from '@/lib/kotakToken';
+import { shapeKotakPosition } from '@/lib/kotakShape';
+import { kotakHoldings } from '@/lib/kotakContracts';
+import { kotakNiftyCallRows, deskBrokerOf, type DeskBroker } from '@/lib/coveredCallLedgerStore';
+import { findEquity } from '@/lib/equityMaster';
 
 // Broker-side read model for the NIFTYBEES Covered Call desk (display only —
 // never sizes an order; the order route re-reads positions live):
@@ -71,6 +76,60 @@ async function fetchBeesLtp(securityId: string): Promise<number> {
     const json = (await res.json()) as { data?: { NSE_EQ?: Record<string, { last_price?: number }> } };
     return num(json.data?.NSE_EQ?.[securityId]?.last_price);
   });
+}
+
+/**
+ * The Kotak account's view, same shape. NIFTYBEES = Kotak holdings + today's CNC position (as on Dhan); the LTP is
+ * Dhan's quote (market data is always Dhan's). Kotak holdings fields are read defensively (see shapeKotakHolding) and
+ * whether Kotak already folds today's delivery buy into holdings is UNCONFIRMED: this read model is display only, it
+ * never sizes an order. CE shorts carry the Kotak trading symbol in `securityId`, the Kotak ledger's contract handle.
+ */
+async function buildKotak(): Promise<CoveredCallBookResponse> {
+  const [holdingsRes, positionsRes] = await Promise.allSettled([
+    kotakHoldings(),
+    getCachedPositions('kotak', () => kotakGet(KOTAK_PATHS.positions)),
+  ]);
+  const positions = positionsRes.status === 'fulfilled'
+    ? kotakRows(positionsRes.value as Record<string, unknown>).map(shapeKotakPosition)
+    : null;
+
+  let bees: BeesHolding | null = null;
+  let beesError: string | undefined = holdingsRes.status === 'rejected' ? String((holdingsRes.reason as Error)?.message ?? holdingsRes.reason) : undefined;
+  const h = holdingsRes.status === 'fulfilled' ? holdingsRes.value.find((x) => x.symbol === BEES_SYMBOL) : undefined;
+  const p = positions?.find((r) => r.tradingSymbol.replace(/-EQ$/, '') === BEES_SYMBOL && /_cm$/i.test(r.exchange) && r.productType.toUpperCase() === 'CNC');
+  const holdingsQty = h?.qty ?? 0;
+  const todayQty = p?.netQty ?? 0;
+  const qty = holdingsQty + todayQty;
+  if (h || p) {
+    const hAvg = h?.avgPrice ?? 0;
+    const pAvg = p?.buyAvg ?? 0;
+    const avgCost = todayQty > 0 && qty > 0 ? (holdingsQty * hAvg + todayQty * pAvg) / qty : hAvg || pAvg;
+    const dhanId = findEquity(BEES_SYMBOL)?.securityId ?? '';
+    let ltp = 0;
+    try { if (dhanId) ltp = await fetchBeesLtp(dhanId); } catch { /* lane busy: no price */ }
+    bees = { securityId: dhanId, qty, holdingsQty, todayQty, avgCost, ltp, ltpSource: ltp > 0 ? 'quote' : null, dpQty: 0, t1Qty: 0 };
+    beesError = undefined;
+  } else if (!beesError) {
+    beesError = `No ${BEES_SYMBOL} found in Kotak holdings or today's positions`;
+  }
+
+  let brokerShortUnits: Record<string, number> | null = null;
+  const brokerCalls: BrokerShortCall[] = [];
+  let positionsError: string | undefined = positionsRes.status === 'rejected' ? String((positionsRes.reason as Error)?.message ?? positionsRes.reason) : undefined;
+  if (positions) {
+    try {
+      brokerShortUnits = {};
+      for (const r of await kotakNiftyCallRows()) {
+        if (r.netQty >= 0) continue;
+        brokerShortUnits[r.tradingSymbol] = (brokerShortUnits[r.tradingSymbol] ?? 0) + -r.netQty;
+        brokerCalls.push({ securityId: r.tradingSymbol, tradingSymbol: r.tradingSymbol, strike: r.strike, expiry: r.expiry, shortUnits: -r.netQty, sellAvg: r.sellAvg, productType: r.productType });
+      }
+    } catch (e) {
+      brokerShortUnits = null;   // unknown, not flat
+      positionsError = String((e as Error).message ?? e);
+    }
+  }
+  return { success: Boolean(bees) || Boolean(positions), ts: Date.now(), bees, beesError, brokerCalls, brokerShortUnits, positionsError };
 }
 
 async function build(): Promise<CoveredCallBookResponse> {
@@ -162,16 +221,18 @@ async function build(): Promise<CoveredCallBookResponse> {
 // Whole-response memo + in-flight dedupe: several tabs polling this must not
 // each spend a holdings call and a quote-lane slot. Stamped with the broker
 // cache generation so an order fill invalidates it (dhan-broker-cache).
-let memo: { at: number; gen: string; body: CoveredCallBookResponse } | null = null;
-let inflight: Promise<CoveredCallBookResponse> | null = null;
+const memo: Partial<Record<DeskBroker, { at: number; gen: string; body: CoveredCallBookResponse }>> = {};
+const inflight: Partial<Record<DeskBroker, Promise<CoveredCallBookResponse> | null>> = {};
 
-export async function GET() {
-  const gen = brokerCacheGeneration(['dhan']);
-  if (memo && memo.gen === gen && Date.now() - memo.at < RESPONSE_TTL_MS) return NextResponse.json(memo.body);
+export async function GET(req: NextRequest) {
+  const broker = deskBrokerOf(req.nextUrl.searchParams.get('broker'));
+  const gen = brokerCacheGeneration([broker]);
+  const hit = memo[broker];
+  if (hit && hit.gen === gen && Date.now() - hit.at < RESPONSE_TTL_MS) return NextResponse.json(hit.body);
   try {
-    const run = inflight ?? (inflight = build().finally(() => { inflight = null; }));
+    const run = inflight[broker] ?? (inflight[broker] = (broker === 'kotak' ? buildKotak() : build()).finally(() => { inflight[broker] = null; }));
     const body = await run;
-    memo = { at: Date.now(), gen, body };
+    memo[broker] = { at: Date.now(), gen, body };
     return NextResponse.json(body, { status: body.success ? 200 : 502 });
   } catch (err) {
     return NextResponse.json({ success: false, error: String((err as Error).message ?? err) }, { status: 500 });

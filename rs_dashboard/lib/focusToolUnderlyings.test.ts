@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { UNDERLYING_META, FOCUS_UNDERLYINGS, orderQuantity, toInternalQty, isMcxUnderlying } from './focusToolUnderlyings.ts';
+import { UNDERLYING_META, FOCUS_UNDERLYINGS, orderQuantity, toInternalQty, isMcxUnderlying, brokerOrderQuantity, brokerToInternalQuantity } from './focusToolUnderlyings.ts';
 import { reentryWindowClosed } from './focusToolRules.ts';
 
 test('NSE/BSE quantities pass through unchanged', () => {
@@ -52,4 +52,20 @@ test('premium criteria ignore a dead strike whose last print is stale (zero OI)'
   // No OI information at all: behaves as before.
   const bare = { '6750': { ce: 1, pe: 144.35 }, '8700': { ce: 1, pe: 143.4 } };
   assert.equal(resolveCriteriaStrike('PREM_LTE', 'PE', { a: '150', b: '' }, { atm: 9000, step: 50, oc: bare }), 6750);
+});
+
+test('brokerOrderQuantity: Dhan sends lots, Kotak sends whole-lot barrels, a remainder is dropped never rounded up', () => {
+  assert.equal(brokerOrderQuantity('dhan', 'CRUDEOILM', 30), 3);
+  assert.equal(brokerOrderQuantity('kotak', 'CRUDEOILM', 30), 30);
+  assert.equal(brokerOrderQuantity('kotak', 'CRUDEOILM', 34), 30);   // 4 barrels of ledger remainder are not a lot
+  assert.equal(brokerOrderQuantity('kotak', 'CRUDEOILM', 9), 0);     // under one lot: refuse
+  assert.equal(brokerOrderQuantity('kotak', 'CRUDEOILM', 0), 0);
+  assert.equal(brokerOrderQuantity('kotak', 'CRUDEOILM', -10), 0);
+  for (const b of ['dhan', 'kotak', 'zerodha']) assert.equal(brokerOrderQuantity(b, 'NIFTY', 65), 65);
+});
+
+test('brokerToInternalQuantity: only Dhan reports MCX in lots', () => {
+  assert.equal(brokerToInternalQuantity('dhan', 'CRUDEOILM', 3), 30);
+  assert.equal(brokerToInternalQuantity('kotak', 'CRUDEOILM', 30), 30);
+  assert.equal(brokerToInternalQuantity('kotak', 'NIFTY', 65), 65);
 });

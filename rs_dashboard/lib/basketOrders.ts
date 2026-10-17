@@ -1,3 +1,4 @@
+import { snapToTick, optionOrderTick } from './multiLegExitOrder.ts';
 import type { LegSide, OptionType } from './basketStrategies';
 import type { Broker } from '@/hooks/useBrokerSelector';
 
@@ -48,11 +49,12 @@ export function resolveOrderRequest(
 ): ResolvedOrder | null {
   const ident = strikeMap[String(leg.strike)];
   const side = leg.side === 'B' ? 'BUY' : 'SELL';
-  const snap = (v: number) => Math.round(v * 20) / 20;   // snap to 0.05 tick
+  const snap = (v: number) => snapToTick(v, optionOrderTick(leg.underlying));   // the contract's own grid: 0.05, CRUDEOIL 0.10
   const limitPrice = leg.type === 'LIMIT' && leg.price != null ? snap(leg.price) : undefined;
 
   const isStop = leg.type === 'SL' || leg.type === 'SLM';
-  if (isStop && broker !== 'dhan') return null;
+  // Stop entries rest at the exchange: Dhan (Super/STOP_LOSS) and Kotak (SL / SL-M) place them; Zerodha's route does not.
+  if (isStop && broker !== 'dhan' && broker !== 'kotak') return null;
   const triggerPrice = isStop && leg.triggerPrice != null && leg.triggerPrice > 0 ? snap(leg.triggerPrice) : undefined;
   if (isStop && triggerPrice == null) return null;
   const stopLimit = leg.type === 'SL' && leg.price != null && leg.price > 0 ? snap(leg.price) : undefined;
@@ -94,6 +96,8 @@ export function resolveOrderRequest(
       exchange,
       product: leg.productType === 'MARGIN' ? 'NRML' : 'MIS',
       ...(limitPrice != null ? { price: limitPrice } : {}),
+      ...(stopLimit != null ? { price: stopLimit } : {}),
+      ...(triggerPrice != null ? { triggerPrice } : {}),
     },
   };
 }

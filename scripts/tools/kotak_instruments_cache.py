@@ -238,6 +238,8 @@ def build_rows(master_rows, underlying: str, segment: str = 'nse_fo'):
             # Market orders above the freeze quantity are rejected outright, so
             # the bridge slices to it rather than assuming Zerodha's 1800.
             'freeze_qty': int(_num(_column(row, 'lFreezeQty'), 0)),
+            # Contract tick in rupees (the master stores paise: 5 = 0.05). None when the master has none.
+            'tick': (round(_num(_column(row, 'dTickSize', 'dTickSize;'), 0.0) / 100.0, 4) or None),
         })
     return rows
 
@@ -267,10 +269,66 @@ def refresh(underlying: str = 'NIFTY', client=None, log=None):
     return rows
 
 
+EQUITY_FILE = os.path.join(ROOT, 'debug', 'kotak_nse_cm_equity.json')
+
+
+def build_equity_rows(master_rows):
+    """NSE cash-equity contracts (series EQ / BE / BZ...) keyed by plain symbol, for Kotak cash orders.
+
+    The trading symbol (e.g. RELIANCE-EQ) and tick are read from the master, never constructed. Ticks are in paise in
+    some Kotak masters; anything above Rs 1 is treated as paise. A row with no symbol is skipped.
+    """
+    out = {}
+    for row in master_rows:
+        name = str(_column(row, 'pSymbolName') or '').strip().upper()
+        trading_symbol = str(_column(row, 'pTrdSymbol') or '').strip()
+        group = str(_column(row, 'pGroup', 'pSeries') or '').strip().upper()
+        if not name or not trading_symbol:
+            continue
+        # dTickSize is in PAISE in Kotak's masters (confirmed on nse_fo: 5 = Rs 0.05), so 1 = Rs 0.01.
+        tick = _num(_column(row, 'dTickSize', 'dTickSize;'), 0.0) / 100.0
+        entry = {
+            'tradingsymbol': trading_symbol,
+            'instrument_token': str(_column(row, 'pSymbol') or '').strip(),
+            'series': group,
+            'tick': round(tick, 4) if tick > 0 else None,
+            'lot_size': int(_num(_column(row, 'iLotSize', 'lLotSize'), 1)) or 1,
+        }
+        # Prefer the EQ series when a symbol trades in several.
+        if name not in out or (group == 'EQ' and out[name].get('series') != 'EQ'):
+            out[name] = entry
+    return out
+
+
+def refresh_equity(client=None, log=None):
+    log = log or (lambda msg: print(f'[kotak_instruments] {msg}', file=sys.stderr, flush=True))
+    if client is None:
+        from lib.kotak.authentication import get_kotak_client
+        client = get_kotak_client()
+    rows = build_equity_rows(load_master(client, 'nse_cm', log))
+    os.makedirs(os.path.dirname(EQUITY_FILE), exist_ok=True)
+    tmp = EQUITY_FILE + '.tmp'
+    with open(tmp, 'w', encoding='utf-8') as f:
+        json.dump(rows, f)
+    os.replace(tmp, EQUITY_FILE)
+    log(f'nse_cm: cached {len(rows)} equity symbols')
+    return rows
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--underlying', default='NIFTY')
+    parser.add_argument('--equity', action='store_true', help='cache NSE cash-equity symbols instead of one underlying\'s F&O')
     args = parser.parse_args()
+
+    if args.equity:
+        try:
+            rows = refresh_equity()
+        except Exception as e:
+            print(json.dumps({'success': False, 'error': str(e)}))
+            sys.exit(1)
+        print(json.dumps({'success': True, 'count': len(rows)}))
+        return
 
     try:
         rows = refresh(args.underlying)

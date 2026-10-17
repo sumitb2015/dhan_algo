@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { kotakPost, KOTAK_PATHS } from '@/lib/kotakToken';
+import { placeKotakOrder } from '@/lib/kotakPlaceOrder';
 import { invalidateBrokerCache } from '@/lib/brokerPositionsCache';
 
 /** Products this route will book. CO/BO are excluded — Neo holds its own exit
@@ -17,6 +17,8 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     side: string;
     orderType?: string;
     price?: number;
+    /** Stop orders (orderType SL / SLM): the trigger the exchange watches. */
+    triggerPrice?: number;
     exchange?: string;
     product?: string;
   };
@@ -53,48 +55,55 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     return NextResponse.json({ success: false, error: `Invalid side: ${side} (must be BUY or SELL)` }, { status: 400 });
   }
 
-  const isLimitOrder = String(orderType).toUpperCase() === 'LIMIT';
+  const orderTypeUpper = String(orderType).toUpperCase();
+  const isStopLimit = orderTypeUpper === 'SL' || orderTypeUpper === 'STOP_LOSS';
+  const isStopMarket = orderTypeUpper === 'SLM' || orderTypeUpper === 'STOP_LOSS_MARKET';
+  const isLimitOrder = orderTypeUpper === 'LIMIT' || isStopLimit;
   if (isLimitOrder && !(Number(price) > 0)) {
-    return NextResponse.json({ success: false, error: `Invalid price for LIMIT order: ${price}` }, { status: 400 });
+    return NextResponse.json({ success: false, error: `Invalid price for ${orderTypeUpper} order: ${price}` }, { status: 400 });
+  }
+  // A stop with no positive trigger must never fall through as a market order.
+  const triggerNum = Number(body.triggerPrice) || 0;
+  if ((isStopLimit || isStopMarket) && !(triggerNum > 0)) {
+    return NextResponse.json({ success: false, error: `Invalid triggerPrice for ${orderTypeUpper} order: ${body.triggerPrice}` }, { status: 400 });
+  }
+  const sideForCheck = String(side).toUpperCase();
+  if (isStopLimit && (sideForCheck === 'BUY' ? Number(price) < triggerNum : Number(price) > triggerNum)) {
+    return NextResponse.json({ success: false, error: `${sideForCheck} ${orderTypeUpper} limit ${price} must be ${sideForCheck === 'BUY' ? '>=' : '<='} its trigger ${triggerNum}` }, { status: 400 });
   }
 
   // NSE/BSE options trade in Rs 0.05 ticks — snap so the exchange never rejects
   // an otherwise-valid limit price.
-  const tickPrice = isLimitOrder ? (Math.round(Number(price) / 0.05) * 0.05).toFixed(2) : '0';
+  // Derivatives (`*_fo`) snap to the 0.05 grid; a cash-equity price (nse_cm, ticks down to 0.01) is the caller's own,
+  // already on the stock's tick, and is only rounded to paise.
+  const isDerivative = /_fo$/i.test(String(exchange));
+  const tickPrice = !isLimitOrder ? '0'
+    : isDerivative ? (Math.round(Number(price) / 0.05) * 0.05).toFixed(2)
+    : (Math.round(Number(price) * 100) / 100).toFixed(2);
 
-  try {
-    const orderPayload = {
-      es: String(exchange).toLowerCase(),          // exchange segment
-      pc: product,                                  // product code
-      pr: tickPrice,                                // price
-      pt: isLimitOrder ? 'L' : 'MKT',               // price type
-      qt: String(qtyNum),                           // absolute quantity, not lots
-      rt: 'DAY',                                    // retention/validity
-      ts: tradingsymbol,                            // trading symbol
-      tt: sideUpper === 'BUY' ? 'B' : 'S',          // transaction type
-      am: 'NO',
-      dq: '0',
-      mp: '0',
-      pf: 'N',
-      tp: '0',
-      os: 'NEOTRADEAPI',
-    };
-    console.log('[scalper/kotak/order] payload →', JSON.stringify(orderPayload));
-    const json = await kotakPost(KOTAK_PATHS.placeOrder, orderPayload);
-    console.log('[scalper/kotak/order] response ←', JSON.stringify(json));
-
-    const data = (typeof json.data === 'object' && json.data !== null ? json.data : {}) as Record<string, unknown>;
-    const orderId = json.nOrdNo ?? data.nOrdNo;
-    if (json.stat === 'Ok' && orderId) {
-      invalidateBrokerCache('kotak');
-      return NextResponse.json({ success: true, order_id: String(orderId) });
-    }
-    // kotakPost already throws on an error-shaped body; reaching here means the
-    // response was neither an error nor a confirmed placement, which is worth
-    // surfacing verbatim rather than reporting as success.
-    return NextResponse.json({ success: false, error: `Unexpected Kotak response: ${JSON.stringify(json)}` });
-  } catch (err) {
-    console.error('[scalper/kotak/order] error:', err);
-    return NextResponse.json({ success: false, error: String((err as Error).message ?? err) });
+  const orderPayload = {
+    es: String(exchange).toLowerCase(),          // exchange segment
+    pc: product,                                  // product code
+    pr: tickPrice,                                // price
+    pt: isStopLimit ? 'SL' : isStopMarket ? 'SL-M' : isLimitOrder ? 'L' : 'MKT',  // price type
+    qt: String(qtyNum),                           // absolute quantity, not lots
+    rt: 'DAY',                                    // retention/validity
+    ts: tradingsymbol,                            // trading symbol
+    tt: sideUpper === 'BUY' ? 'B' : 'S',          // transaction type
+    am: 'NO',
+    dq: '0',
+    mp: '0',
+    pf: 'N',
+    tp: (isStopLimit || isStopMarket) ? (Math.round(triggerNum / 0.05) * 0.05).toFixed(2) : '0',  // trigger price
+    os: 'NEOTRADEAPI',
+  };
+  console.log('[scalper/kotak/order] payload →', JSON.stringify(orderPayload));
+  const r = await placeKotakOrder(orderPayload);
+  console.log('[scalper/kotak/order] outcome ←', JSON.stringify(r));
+  if (r.status === 'placed') {
+    invalidateBrokerCache('kotak');
+    return NextResponse.json({ success: true, order_id: r.orderId, ...(r.reconciled ? { reconciled: true } : {}) });
   }
+  if (r.status === 'unknown') return NextResponse.json({ success: false, unknown: true, error: r.error }, { status: 504 });
+  return NextResponse.json({ success: false, error: r.error });
 }

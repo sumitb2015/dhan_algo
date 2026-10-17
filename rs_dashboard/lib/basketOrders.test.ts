@@ -101,11 +101,31 @@ test('resolveOrderRequest: a Dhan stop-market sends a trigger and no limit price
   assert.strictEqual('price' in (req?.body ?? {}), false);
 });
 
-test('resolveOrderRequest: stop orders are refused for other brokers and when trigger/limit are missing', () => {
+test('resolveOrderRequest: a Kotak stop carries its trigger (and limit for SL) by trading symbol', () => {
+  const sl = resolveOrderRequest('kotak', { ...stopLeg, type: 'SL', price: 238.03, triggerPrice: 240.02 }, { '24000': { ceSymbol: 'X' } });
+  assert.strictEqual(sl?.url, '/api/scalper/kotak/order');
+  assert.deepStrictEqual({ t: sl?.body.tradingsymbol, ot: sl?.body.orderType, tp: sl?.body.triggerPrice, p: sl?.body.price },
+    { t: 'X', ot: 'SL', tp: 240, p: 238.05 });
+  const slm = resolveOrderRequest('kotak', { ...stopLeg, type: 'SLM', triggerPrice: 240 }, { '24000': { ceSymbol: 'X' } });
+  assert.strictEqual(slm?.body.orderType, 'SLM');
+  assert.strictEqual(slm?.body.price, undefined);
+});
+
+test('resolveOrderRequest: stop orders are refused for Zerodha and when trigger/limit are missing', () => {
   const sl = { ...stopLeg, type: 'SL' as const, price: 238, triggerPrice: 240 };
   assert.strictEqual(resolveOrderRequest('zerodha', sl, { '24000': { ceSymbol: 'X' } }), null);
-  assert.strictEqual(resolveOrderRequest('kotak', sl, { '24000': { ceSymbol: 'X' } }), null);
+  assert.strictEqual(resolveOrderRequest('kotak', { ...sl, triggerPrice: undefined }, { '24000': { ceSymbol: 'X' } }), null);
+  assert.strictEqual(resolveOrderRequest('kotak', { ...sl, price: undefined }, { '24000': { ceSymbol: 'X' } }), null);
   assert.strictEqual(resolveOrderRequest('dhan', { ...sl, triggerPrice: undefined }, stopMap), null);
   assert.strictEqual(resolveOrderRequest('dhan', { ...sl, price: undefined }, stopMap), null);
   assert.strictEqual(resolveOrderRequest('dhan', { ...sl, type: 'SLM', triggerPrice: 0 }, stopMap), null);
+});
+
+test('resolveOrderRequest snaps a CRUDEOIL stop/limit to its 0.10 grid and a NIFTY one to 0.05', () => {
+  const crude = resolveOrderRequest('kotak', { ...stopLeg, underlying: 'CRUDEOIL', type: 'SL', price: 123.14, triggerPrice: 123.06 }, { '24000': { ceSymbol: 'X' } });
+  assert.deepStrictEqual({ p: crude?.body.price, t: crude?.body.triggerPrice }, { p: 123.1, t: 123.1 });
+  const crudeLimit = resolveOrderRequest('dhan', { ...stopLeg, underlying: 'CRUDEOIL', type: 'LIMIT', price: 99.97 }, stopMap);
+  assert.strictEqual(crudeLimit?.body.price, 100);
+  const nifty = resolveOrderRequest('kotak', { ...stopLeg, type: 'SL', price: 123.14, triggerPrice: 123.06 }, { '24000': { ceSymbol: 'X' } });
+  assert.deepStrictEqual({ p: nifty?.body.price, t: nifty?.body.triggerPrice }, { p: 123.15, t: 123.05 });
 });

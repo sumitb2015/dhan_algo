@@ -31,7 +31,12 @@ export interface BsPosition {
   /** Units currently owned (lots * lotSize). Drops to 0 on close. */
   qty: number;
   avgPrice: number;
+  /** Account the row trades on. Absent on older rows = Dhan. Every later order for the row goes to THIS broker. */
+  broker?: 'dhan' | 'kotak';
+  /** Dhan contract id (Dhan rows) ... */
   securityId?: string;
+  /** ... or Kotak trading symbol (Kotak rows: Kotak has no numeric id). */
+  symbol?: string;
   status: 'OPEN' | 'CLOSED';
   openedAt: number;
   filledAt: number;
@@ -65,13 +70,16 @@ export class LedgerError extends Error {
   constructor(message: string, status = 400) { super(message); this.status = status; }
 }
 
-export const contractKey = (p: Pick<BsPosition, 'mode' | 'underlying' | 'expiry' | 'option' | 'strike'>) =>
-  `${p.mode}|${p.underlying}|${p.expiry}|${p.option}|${p.strike}`;
+/** Same contract on another broker is a different position (two accounts), so the broker is part of the key. */
+export const contractKey = (p: Pick<BsPosition, 'mode' | 'underlying' | 'expiry' | 'option' | 'strike' | 'broker'>) =>
+  `${p.mode}|${p.broker ?? 'dhan'}|${p.underlying}|${p.expiry}|${p.option}|${p.strike}`;
 
 /** Rupees per 1.00 premium move per ledger qty unit. Dhan takes MCX quantity in LOTS (lotSize 1), so qty is lots and
  *  one lot of CRUDEOILM is 10 barrels (CRUDEOIL 100): P&L must be scaled by barrels/lot. Every other underlying is 1
  *  because its lotSize already makes qty real contract units. */
-export const pnlMultiplier = (underlying: string): number => MCX_LOT_MULTIPLIER[underlying] ?? 1;
+export const pnlMultiplier = (underlying: string, broker: 'dhan' | 'kotak' = 'dhan'): number =>
+  // Kotak counts MCX in barrels (its lot size is barrels per lot), so its qty is already real units.
+  (broker === 'kotak' ? 1 : MCX_LOT_MULTIPLIER[underlying] ?? 1);
 
 /** PnL sign: a short gains when price falls. */
 export function legPnl(p: BsPosition, ltp: number | null): number | null {
@@ -79,7 +87,7 @@ export function legPnl(p: BsPosition, ltp: number | null): number | null {
   let open: number | null = 0;
   if (p.qty > 0) {
     if (ltp == null || !(ltp > 0)) open = null;       // no live price = no P&L, never zero
-    else open = (p.avgPrice - ltp) * p.qty * sign * pnlMultiplier(p.underlying);
+    else open = (p.avgPrice - ltp) * p.qty * sign * pnlMultiplier(p.underlying, p.broker);
   }
   return open == null ? null : open + p.realized;
 }
@@ -98,7 +106,9 @@ export function applyOp(file: LedgerFile, op: LedgerOp): LedgerFile {
       // qty 0 is allowed only as a placeholder for an order whose outcome is still unknown (it is tracked, not forgotten).
       const awaiting = !(p.qty > 0) && (p.pendingOrders?.length ?? 0) > 0;
       if (!(p.lotSize > 0) || (!awaiting && (!(p.qty > 0) || !(p.avgPrice > 0)))) throw new LedgerError('qty, avgPrice and lotSize must be positive');
-      if (p.mode === 'REAL' && !p.securityId) throw new LedgerError('REAL position needs a securityId');
+      if (p.mode === 'REAL' && ((p.broker ?? 'dhan') === 'kotak' ? !p.symbol : !p.securityId)) {
+        throw new LedgerError(`REAL position needs a ${(p.broker ?? 'dhan') === 'kotak' ? 'Kotak trading symbol' : 'securityId'}`);
+      }
       // One strike per row: the same contract in the same mode is added to, never duplicated.
       if (positions.some((x) => x.status === 'OPEN' && contractKey(x) === contractKey(p))) {
         throw new LedgerError('contract already open in this mode — add lots to it instead', 409);
@@ -123,7 +133,7 @@ export function applyOp(file: LedgerFile, op: LedgerOp): LedgerFile {
       // Exit what THIS ledger owns, never more.
       const q = Math.min(op.qty, p.qty);
       const sign = p.side === 'S' ? 1 : -1;
-      p.realized += (p.avgPrice - op.price) * q * sign * pnlMultiplier(p.underlying);
+      p.realized += (p.avgPrice - op.price) * q * sign * pnlMultiplier(p.underlying, p.broker);
       p.qty -= q;
       p.filledAt = op.at;
       if (p.qty <= 0) { p.qty = 0; p.status = 'CLOSED'; p.closedAt = op.at; p.exitPrice = op.price; }
@@ -162,7 +172,7 @@ export function applyOp(file: LedgerFile, op: LedgerOp): LedgerFile {
         } else if (p.qty > 0) {
           const eq = Math.min(q, p.qty);
           const sign = p.side === 'S' ? 1 : -1;
-          p.realized += (p.avgPrice - op.avgPrice) * eq * sign * pnlMultiplier(p.underlying);
+          p.realized += (p.avgPrice - op.avgPrice) * eq * sign * pnlMultiplier(p.underlying, p.broker);
           p.qty -= eq;
           p.filledAt = op.at;
           p.exitPrice = op.avgPrice;

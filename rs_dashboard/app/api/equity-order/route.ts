@@ -5,9 +5,19 @@ import { findEquity } from '@/lib/equityMaster';
 import { fetchEquityLtp } from '@/lib/dhanEquityQuote';
 import { fetchHoldingsLive, fetchIntradayLongQty, fetchPendingSellQty, readEquityPortfolio, sellableQty } from '@/lib/dhanEquityPortfolio';
 import { validateOrder, MAX_ORDER_VALUE, MAX_QTY_PER_ORDER, LIMIT_BAND } from '@/lib/equityOrder';
+import { isKotakTokenValid, kotakLimits } from '@/lib/kotakToken';
+import { shapeKotakFunds } from '@/lib/kotakShape';
+import { kotakEquityContract } from '@/lib/kotakContracts';
+import { kotakSellable, kotakIntradayLongQty, kotakOpenSellQty, readKotakEquityPortfolio } from '@/lib/kotakEquityPortfolio';
+import { placeKotakOrder } from '@/lib/kotakPlaceOrder';
 
 /**
- * NSE cash-equity order ticket (Dhan).
+ * NSE cash-equity order ticket (Dhan, or Kotak with `broker=kotak` / `broker: 'kotak'`).
+ *
+ * Kotak: same caps, price band, idempotency and sell-only-what-you-own rules. The live price stays Dhan's (market data
+ * is always Dhan's); the Kotak contract (RELIANCE-EQ) and its tick come from Kotak's own NSE cash master, a delivery sell
+ * is checked against a fresh Kotak holdings read (sellable qty), an intraday sell against Kotak's open MIS long, and open
+ * Kotak sell orders are deducted - none of it trusts the browser.
  *
  * GET  ?symbol=ENGINERSIN → what the ticket needs: live price, tick, current holding, today's
  *      positions and available funds.
@@ -23,17 +33,24 @@ const IDEMPOTENCY_TTL_MS = 2 * 60_000;
 
 export async function GET(req: NextRequest) {
   const symbol = (req.nextUrl.searchParams.get('symbol') ?? '').trim();
+  const kotak = req.nextUrl.searchParams.get('broker') === 'kotak';
   const eq = symbol ? findEquity(symbol) : null;
   if (!eq) return NextResponse.json({ success: false, error: `Unknown NSE stock "${symbol}"` }, { status: 404 });
 
-  const [ltp, portfolio, funds] = await Promise.allSettled([
+  const [ltp, portfolio, funds, kc] = await Promise.allSettled([
     fetchEquityLtp(eq.securityId),
-    readEquityPortfolio(),
-    getCachedFunds('dhan', () => dhanGet('/fundlimit')),
+    kotak ? readKotakEquityPortfolio() : readEquityPortfolio(),
+    kotak ? getCachedFunds('kotak', () => kotakLimits()) : getCachedFunds('dhan', () => dhanGet('/fundlimit')),
+    kotak ? kotakEquityContract(eq.symbol) : Promise.resolve(null),
   ]);
   const held = portfolio.status === 'fulfilled' ? portfolio.value[eq.symbol] : undefined;
   const f = funds.status === 'fulfilled' ? (funds.value as Record<string, unknown>) : null;
-  const available = f ? Number(f.availabelBalance ?? f.availableBalance ?? NaN) : NaN; // Dhan spells it "availabelBalance"
+  // Dhan spells it "availabelBalance"; Kotak's Net includes pledged collateral, so a BUY is checked against its CASH.
+  const available = !f ? NaN : kotak ? shapeKotakFunds(f).cashBalance : Number(f.availabelBalance ?? f.availableBalance ?? NaN);
+  const kotakContract = kc.status === 'fulfilled' ? kc.value : null;
+  if (kotak && !kotakContract) {
+    return NextResponse.json({ success: false, error: `Kotak does not list ${eq.symbol} on NSE cash${kc.status === 'rejected' ? ` (${String(kc.reason?.message ?? kc.reason)})` : ''}` }, { status: 404 });
+  }
 
   return NextResponse.json({
     success: true,
@@ -42,7 +59,8 @@ export async function GET(req: NextRequest) {
       name: eq.name,
       securityId: eq.securityId,
       series: eq.series,
-      tick: eq.tick,
+      tick: kotakContract?.tick ?? eq.tick,
+      broker: kotak ? 'kotak' : 'dhan',
       ltp: ltp.status === 'fulfilled' ? ltp.value : null,
       ltpError: ltp.status === 'rejected' ? String(ltp.reason?.message ?? ltp.reason) : null,
       holding: { totalQty: held?.totalQty ?? 0, availableQty: held?.availableQty ?? 0, avgCost: held?.avgCost ?? 0 },
@@ -115,6 +133,7 @@ async function place(body: Record<string, unknown>): Promise<Outcome> {
 
   const eq = findEquity(String(body.symbol ?? ''));
   if (!eq) return fail(400, `Unknown NSE stock "${String(body.symbol ?? '')}"`);
+  if (body.broker === 'kotak') return placeKotak(body, eq, fail);
 
   let ltp: number;
   let availableQty = 0;
@@ -201,8 +220,57 @@ async function place(body: Record<string, unknown>): Promise<Outcome> {
   return { status: 200, body: { success: true, orderId, orderStatus: json.orderStatus ?? null, summary, product: o.product } };
 }
 
+/** One sell lock per (broker, security): the two accounts' holdings are independent. */
 function eqForLock(body: Record<string, unknown>): string | null {
-  return findEquity(String(body.symbol ?? ''))?.securityId ?? null;
+  const id = findEquity(String(body.symbol ?? ''))?.securityId;
+  return id ? `${body.broker === 'kotak' ? 'kotak' : 'dhan'}:${id}` : null;
+}
+
+async function placeKotak(
+  body: Record<string, unknown>,
+  eq: NonNullable<ReturnType<typeof findEquity>>,
+  fail: (status: number, error: string, extra?: Record<string, unknown>) => Outcome,
+): Promise<Outcome> {
+  if (!isKotakTokenValid()) return fail(401, 'Kotak session is not valid - log in first. Nothing was ordered.');
+  let contract: Awaited<ReturnType<typeof kotakEquityContract>>;
+  try { contract = await kotakEquityContract(eq.symbol); }
+  catch (e) { return fail(503, `Kotak contract list unavailable (${String((e as Error).message ?? e)}). Nothing was ordered.`); }
+  if (!contract) return fail(400, `Kotak does not list ${eq.symbol} on NSE cash`);
+  const tick = contract.tick && contract.tick > 0 ? contract.tick : eq.tick;
+
+  let ltp: number;
+  let availableQty = 0;
+  let intradayLongQty = 0;
+  let pendingSellQty = 0;
+  try {
+    ltp = await fetchEquityLtp(eq.securityId);
+  } catch (e) {
+    return fail(503, `Could not get a live price for ${eq.symbol} (${String((e as Error).message ?? e)}). Nothing was ordered — try again.`);
+  }
+  if (body.side === 'SELL') {
+    try {
+      const product = body.product === 'INTRADAY' ? 'INTRADAY' : 'CNC';
+      if (product === 'INTRADAY') intradayLongQty = await kotakIntradayLongQty(eq.symbol);
+      else availableQty = (await kotakSellable(eq.symbol)).availableQty;
+      pendingSellQty = await kotakOpenSellQty(contract.tradingsymbol, product);
+    } catch (e) {
+      return fail(503, `Could not confirm what you hold in ${eq.symbol} on Kotak (${String((e as Error).message ?? e)}). Nothing was sold — try again.`);
+    }
+  }
+  const v = validateOrder(body, { ltp, tick, availableQty, intradayLongQty, pendingSellQty });
+  if (!v.ok) return fail(400, v.error);
+  const o = v.order;
+  const label = `${o.side} ${o.quantity} ${eq.symbol}`;
+  const summary = `${label} · ${o.product === 'CNC' ? 'Delivery (CNC)' : 'Intraday (MIS)'} · ${o.orderType}${o.orderType === 'LIMIT' ? ` @ ${o.price}` : ''}${o.amo ? ' · AMO' : ''} · Kotak`;
+  const r = await placeKotakOrder({
+    es: 'nse_cm', pc: o.product === 'INTRADAY' ? 'MIS' : 'CNC', pr: o.orderType === 'LIMIT' ? o.price.toFixed(2) : '0',
+    pt: o.orderType === 'LIMIT' ? 'L' : 'MKT', qt: String(o.quantity), rt: 'DAY', ts: contract.tradingsymbol,
+    tt: o.side === 'BUY' ? 'B' : 'S', am: o.amo ? 'YES' : 'NO', dq: '0', mp: '0', pf: 'N', tp: '0', os: 'NEOTRADEAPI',
+  });
+  invalidateBrokerCache('kotak');
+  if (r.status === 'placed') return { status: 200, body: { success: true, orderId: r.orderId, orderStatus: null, summary, product: o.product } };
+  if (r.status === 'unknown') return fail(504, `Order status unknown. Kotak did not confirm ${label} — check the Kotak order book before placing it again.`, { unknown: true });
+  return fail(502, `Kotak rejected ${label}: ${r.error}`);
 }
 
 export async function POST(req: NextRequest) {

@@ -4,6 +4,7 @@ import { PROJECT_ROOT, runPythonJson } from '@/lib/pyExec';
 import { readTracked, writeTracked, newTrackedId, type TrackedCsp } from '@/lib/cspTracked';
 import { invalidateBrokerCache } from '@/lib/brokerPositionsCache';
 import { sendTelegramAlert } from '@/lib/telegramAlert';
+import { kotakPlacePut } from '@/lib/cspKotak';
 
 const SCRIPT = path.join(PROJECT_ROOT, 'scripts', 'tools', 'csp_watchlist.py');
 
@@ -31,6 +32,7 @@ export async function POST(req: NextRequest) {
     const strike = Number(b?.strike);
     const qty = Number(b?.qty);
     const productType = String(b?.productType ?? 'MARGIN').toUpperCase();
+    const broker: 'dhan' | 'kotak' = b?.broker === 'kotak' ? 'kotak' : 'dhan';
 
     if (!symbol || !expiry || !Number.isFinite(strike) || strike <= 0 || !Number.isFinite(qty) || qty <= 0) {
       return NextResponse.json(
@@ -39,7 +41,9 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    const result = await runPythonJson<PlaceOutcome>(
+    const result: PlaceOutcome = broker === 'kotak'
+      ? await kotakPlacePut({ symbol, expiry, strike, quantity: qty, productType, orderType: 'MARKET', waitFill: true })
+      : await runPythonJson<PlaceOutcome>(
       SCRIPT,
       [
         'place',
@@ -74,6 +78,7 @@ export async function POST(req: NextRequest) {
       entryDate: now.slice(0, 10),
       avgPrice: typeof result.tradedPrice === 'number' ? result.tradedPrice : 0,
       productType,
+      broker,
       status: 'OPEN',
       createdAt: now,
       updatedAt: now,
@@ -89,9 +94,9 @@ export async function POST(req: NextRequest) {
     const rows = readTracked();
     rows.push(row);
     writeTracked(rows);
-    invalidateBrokerCache('dhan');
+    invalidateBrokerCache(broker);
     void sendTelegramAlert(
-      `🟢 CSP sold: ${symbol} ${strike}PE ${expiry} x${qty}` +
+      `🟢 CSP sold${broker === 'kotak' ? ' (Kotak)' : ''}: ${symbol} ${strike}PE ${expiry} x${qty}` +
         (typeof result.tradedPrice === 'number' ? ` @ ₹${result.tradedPrice.toFixed(2)}` : '')
     );
 

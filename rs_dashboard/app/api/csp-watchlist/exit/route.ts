@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import path from 'path';
 import { PROJECT_ROOT, runPythonJson } from '@/lib/pyExec';
 import { invalidateBrokerCache } from '@/lib/brokerPositionsCache';
+import { kotakExitPut } from '@/lib/cspKotak';
 
 const SCRIPT = path.join(PROJECT_ROOT, 'scripts', 'tools', 'csp_watchlist.py');
 
@@ -15,9 +16,16 @@ export async function POST(req: NextRequest) {
   try {
     const body = await req.json();
     const { securityId, exchangeSegment, quantity, productType = 'MARGIN' } = body ?? {};
+    const broker = body?.broker === 'kotak' ? 'kotak' : 'dhan';
 
     if (!securityId || !exchangeSegment || !quantity) {
       return NextResponse.json({ success: false, error: 'Missing required fields' }, { status: 400 });
+    }
+    if (broker === 'kotak') {
+      // securityId carries the Kotak trading symbol on Kotak rows.
+      const r = await kotakExitPut({ tradingSymbol: String(securityId), exchangeSegment: String(exchangeSegment), quantity: Number(quantity), productType: String(productType) });
+      if (r.success) invalidateBrokerCache('kotak');
+      return NextResponse.json(r, { status: r.success ? 200 : 500 });
     }
 
     const args = [

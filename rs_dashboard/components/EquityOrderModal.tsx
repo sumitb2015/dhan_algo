@@ -4,7 +4,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { X, Minus, Plus, AlertTriangle, CheckCircle2, Loader2 } from 'lucide-react';
 import { validateOrder, roundToTick, type Side, type Product, type OrderType } from '@/lib/equityOrder';
 
-// Buy/Sell ticket for one NSE cash-equity stock (Dhan). REAL MONEY: the server re-validates every
+// Buy/Sell ticket for one NSE cash-equity stock (Dhan or Kotak). REAL MONEY: the server re-validates every
 // field and caps; this modal only makes the common mistakes hard. Typed fields commit on
 // blur/Enter, never per keystroke (dhan-commit-on-blur), and the submit button stays disabled
 // while a draft is uncommitted. See dhan-order-tickets.
@@ -25,6 +25,8 @@ interface Ctx {
 interface Props {
   symbol: string;
   side: Side;
+  /** Account the ticket reads holdings/funds from and sends to. Default Dhan. */
+  broker?: 'dhan' | 'kotak';
   onClose: () => void;
   /** Called once after Dhan accepted the order (or its outcome is unknown) so the page can refresh holdings. */
   onPlaced: () => void;
@@ -60,7 +62,7 @@ function Seg<T extends string>({ value, options, onChange, label, disabled }: {
   );
 }
 
-export default function EquityOrderModal({ symbol, side, onClose, onPlaced }: Props) {
+export default function EquityOrderModal({ symbol, side, onClose, onPlaced, broker = 'dhan' }: Props) {
   const [ctx, setCtx] = useState<Ctx | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
@@ -89,7 +91,7 @@ export default function EquityOrderModal({ symbol, side, onClose, onPlaced }: Pr
     let cancelled = false;
     (async () => {
       try {
-        const res = await fetch(`/api/equity-order?symbol=${encodeURIComponent(symbol)}`);
+        const res = await fetch(`/api/equity-order?symbol=${encodeURIComponent(symbol)}&broker=${broker}`);
         const json = await res.json();
         if (cancelled) return;
         if (!json.success) throw new Error(json.error || 'Could not load the ticket');
@@ -164,12 +166,12 @@ export default function EquityOrderModal({ symbol, side, onClose, onPlaced }: Pr
       const res = await fetch('/api/equity-order', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ symbol, side, product, orderType, quantity: qty, price: orderType === 'LIMIT' ? price : undefined, amo, clientKey: clientKey.current }),
+        body: JSON.stringify({ symbol, side, product, orderType, quantity: qty, price: orderType === 'LIMIT' ? price : undefined, amo, clientKey: clientKey.current, broker }),
       });
       const json = await res.json().catch(() => null);
       if (json === null) {
         // Not our JSON (a proxy/gateway page): the order may or may not have been booked.
-        setResult({ kind: 'unknown', message: `Unexpected reply from the server (HTTP ${res.status}). Check the Dhan order book before placing ${symbol} again.` });
+        setResult({ kind: 'unknown', message: `Unexpected reply from the server (HTTP ${res.status}). Check the ${broker === 'kotak' ? 'Kotak' : 'Dhan'} order book before placing ${symbol} again.` });
         onPlaced();
       } else if (json.success) {
         setResult({ kind: 'ok', orderId: String(json.orderId), status: json.orderStatus ?? null, summary: String(json.summary ?? '') });
@@ -183,7 +185,7 @@ export default function EquityOrderModal({ symbol, side, onClose, onPlaced }: Pr
       }
     } catch (e) {
       // The request may have reached Dhan even though the reply never reached us.
-      setResult({ kind: 'unknown', message: `No reply from the server (${e instanceof Error ? e.message : e}). Check the Dhan order book before placing ${symbol} again.` });
+      setResult({ kind: 'unknown', message: `No reply from the server (${e instanceof Error ? e.message : e}). Check the ${broker === 'kotak' ? 'Kotak' : 'Dhan'} order book before placing ${symbol} again.` });
       onPlaced();
     } finally {
       setPlacing(false);
@@ -328,14 +330,14 @@ export default function EquityOrderModal({ symbol, side, onClose, onPlaced }: Pr
 
             {result?.kind === 'ok' && result.status && BAD_STATUS.has(result.status) && (
               <div role="alert" className="rounded-lg border border-red-500/25 bg-red-500/10 px-3 py-2 text-xs text-red-300 space-y-0.5">
-                <p className="flex items-center gap-1.5 font-bold"><AlertTriangle className="w-3.5 h-3.5" aria-hidden="true" />Dhan accepted the request but the order is {result.status}</p>
+                <p className="flex items-center gap-1.5 font-bold"><AlertTriangle className="w-3.5 h-3.5" aria-hidden="true" />{broker === 'kotak' ? 'Kotak' : 'Dhan'} accepted the request but the order is {result.status}</p>
                 <p className="font-mono text-zinc-200">{result.summary}</p>
-                <p className="font-mono text-zinc-400">Order {result.orderId} · check the Dhan order book for the reason.</p>
+                <p className="font-mono text-zinc-400">Order {result.orderId} · check the {broker === 'kotak' ? 'Kotak' : 'Dhan'} order book for the reason.</p>
               </div>
             )}
             {result?.kind === 'ok' && !(result.status && BAD_STATUS.has(result.status)) && (
               <div role="status" className="rounded-lg border border-emerald-500/25 bg-emerald-500/10 px-3 py-2 text-xs text-emerald-400 space-y-0.5">
-                <p className="flex items-center gap-1.5 font-bold"><CheckCircle2 className="w-3.5 h-3.5" aria-hidden="true" />Order sent to Dhan</p>
+                <p className="flex items-center gap-1.5 font-bold"><CheckCircle2 className="w-3.5 h-3.5" aria-hidden="true" />Order sent to {broker === 'kotak' ? 'Kotak' : 'Dhan'}</p>
                 <p className="font-mono text-zinc-200">{result.summary}</p>
                 <p className="font-mono text-zinc-400">Order {result.orderId}{result.status ? ` · ${result.status}` : ''}</p>
               </div>

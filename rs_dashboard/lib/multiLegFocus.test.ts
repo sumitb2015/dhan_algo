@@ -1396,3 +1396,11 @@ test('applyTriggeredEntry: same contract merges into the open leg at a weighted 
   assert.strictEqual(legs[0].fill?.qty, 195);
   assert.ok(Math.abs((legs[0].fill?.avgPrice ?? 0) - (200 * 65 + 230 * 130) / 195) < 1e-9);
 });
+
+test('normalizeTradeRow reads a Kotak "DD-Mon-YYYY HH:MM:SS" stamp as IST (an unparsed stamp would drop the trade from matching)', () => {
+  const t = normalizeTradeRow({ tradingSymbol: 'NIFTY26OCT24500CE', transactionType: 'BUY', tradedQuantity: 75, tradedPrice: 80, createTime: '21-Aug-2026 10:15:22', orderId: '9' });
+  assert.strictEqual(t?.at, Date.parse('2026-08-21T10:15:22+05:30'));
+  const t2 = normalizeTradeRow({ tradingSymbol: 'X', transactionType: 'SELL', tradedQuantity: 1, tradedPrice: 1, createTime: '1-Sep-2026 09:05' });
+  assert.strictEqual(t2?.at, Date.parse('2026-09-01T09:05:00+05:30'));
+  assert.strictEqual(normalizeTradeRow({ tradingSymbol: 'X', transactionType: 'SELL', tradedQuantity: 1, tradedPrice: 1, createTime: '5-Foo-2026 09:05:00' })?.at, 0);
+});

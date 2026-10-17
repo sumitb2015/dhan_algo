@@ -4,6 +4,7 @@ import { PROJECT_ROOT, runPythonJson } from '@/lib/pyExec';
 import { readTracked, writeTracked } from '@/lib/cspTracked';
 import { invalidateBrokerCache } from '@/lib/brokerPositionsCache';
 import { sendTelegramAlert } from '@/lib/telegramAlert';
+import { kotakExitPut } from '@/lib/cspKotak';
 
 const SCRIPT = path.join(PROJECT_ROOT, 'scripts', 'tools', 'csp_watchlist.py');
 
@@ -52,7 +53,9 @@ export async function POST(req: NextRequest) {
       }, { status: 400 });
     }
 
-    const result = await runPythonJson<OrderOutcome>(
+    const result: OrderOutcome = row.broker === 'kotak'
+      ? await kotakExitPut({ tradingSymbol: row.securityId, exchangeSegment: row.exchangeSegment, quantity: row.qty, productType: row.productType, waitFill: true })
+      : await runPythonJson<OrderOutcome>(
       SCRIPT,
       [
         'exit',
@@ -107,7 +110,7 @@ export async function POST(req: NextRequest) {
       fresh.realizedPnl = (fresh.avgPrice - exitPrice) * filledQty;
     }
     writeTracked(rows);
-    invalidateBrokerCache('dhan');
+    invalidateBrokerCache(row.broker ?? 'dhan');
     void sendTelegramAlert(
       `🔁 CSP roll — exit leg filled: ${fresh.symbol} ${fresh.strike}PE ${fresh.expiry} x${filledQty}` +
         (exitPrice !== undefined ? ` @ ₹${exitPrice.toFixed(2)}` : '')

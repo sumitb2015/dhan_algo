@@ -86,3 +86,21 @@ export function isTradingDayFor(u: FocusUnderlying, iso: string): boolean {
   if (day === 0 || day === 6) return false;
   return UNDERLYING_META[u].nseCalendar ? !NSE_HOLIDAYS.has(iso) : true;
 }
+
+/**
+ * Page units → the quantity THIS broker's order carries. Dhan counts MCX in whole lots (orderQuantity). Kotak takes absolute
+ * barrels but only in whole lots, so a remainder is dropped, never rounded up, exactly as for Dhan: sending a ledger
+ * remainder of 4 barrels as-is would be rejected, and rounding it up to a lot would close more than this row owns. A positive
+ * request under one lot returns 0 and the caller must refuse it. NSE/BSE (unitsPerLot 1) pass through unchanged.
+ */
+export function brokerOrderQuantity(broker: string, u: FocusUnderlying, internalQty: number): number {
+  if (broker === 'dhan') return orderQuantity(u, internalQty);
+  const per = UNDERLYING_META[u].unitsPerLot;
+  if (per === 1) return internalQty;
+  return internalQty > 0 ? Math.floor(internalQty / per) * per : 0;
+}
+
+/** The inverse: a quantity the broker reported → page units. Only Dhan reports MCX in lots. */
+export function brokerToInternalQuantity(broker: string, u: FocusUnderlying, brokerQty: number): number {
+  return broker === 'dhan' ? toInternalQty(u, brokerQty) : brokerQty;
+}

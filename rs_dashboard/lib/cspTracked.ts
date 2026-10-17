@@ -16,6 +16,9 @@ export interface TrackedCsp {
   entrySpot: number;
   entryDate: string;
   avgPrice: number;
+  /** Account the row's orders go to. Absent on older rows = Dhan. On Kotak, `securityId` holds the Kotak trading
+   *  symbol (Kotak has no numeric id) and `exchangeSegment` is 'nse_fo'. Every later order follows the row. */
+  broker?: 'dhan' | 'kotak';
   /** Present only when the row came from a real order placed through the dashboard. */
   orderId?: string;
   securityId?: string;

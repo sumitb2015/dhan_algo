@@ -1,5 +1,7 @@
-// Client-side execution for the Triple Straddle page. Dhan only (the page's panels
-// and ledger carry numeric security ids). SIM never touches an order route.
+// Client-side execution for the Triple Straddle page, on Dhan or Kotak. Dhan legs are identified by numeric
+// security id, Kotak legs by trading symbol (it has no numeric id); each position records its broker and every
+// later action (exit, re-price, resolve) goes to THAT broker, never the page's current selection.
+// SIM never touches an order route.
 //
 // Safety rules (see dhan-terminal-position-ownership / dhan-order-tickets):
 //  - an ACK is not a fill: every REAL order is confirmed against the order book;
@@ -11,21 +13,30 @@
 import { classifyDhanOrder, type DhanOrderPhase } from './multiLegFocus.ts';
 import {
   brokerCapacity, exitQtyForLeg, TS_FILL_GRACE_MS, TS_ORDER_SOURCE,
-  type TsLeg, type TsMode, type TsPosition, type TsProduct, type TsSide,
+  type TsBroker, type TsLeg, type TsMode, type TsPosition, type TsProduct, type TsSide,
 } from './tripleStraddle.ts';
 import { finalAvgOf, readOrderPrice } from './tradedPriceClient.ts';
 
 export const TS_TRADABLE = ['NIFTY', 'BANKNIFTY', 'SENSEX'] as const;
 export const isTsTradable = (u: string): boolean => (TS_TRADABLE as readonly string[]).includes(u);
 
-export interface TsLookup { lotSize: number; ids: { ceId?: string; peId?: string } }
-export interface TsChainLookup { lotSize: number; strikes: Record<string, { ceId?: string; peId?: string }> }
+export type TsIds = { ceId?: string; peId?: string; ceSymbol?: string; peSymbol?: string };
+export interface TsLookup { lotSize: number; ids: TsIds }
+export interface TsChainLookup { lotSize: number; strikes: Record<string, TsIds> }
 
-/** One lookup per (underlying, expiry): lot size and the whole strike -> id map. */
-export async function fetchChainLookup(underlying: string, expiry: string): Promise<TsChainLookup | null> {
+const brokerOf = (p: Pick<TsPosition, 'broker'>): TsBroker => p.broker ?? 'dhan';
+
+/** The contract handle an order for this leg needs: Dhan security id, or Kotak trading symbol. */
+export function legIdent(broker: TsBroker, ids: TsIds, option: 'CE' | 'PE'): string | undefined {
+  if (broker === 'kotak') return option === 'CE' ? ids.ceSymbol : ids.peSymbol;
+  return option === 'CE' ? ids.ceId : ids.peId;
+}
+
+/** One lookup per (broker, underlying, expiry): lot size and the whole strike -> id map. */
+export async function fetchChainLookup(underlying: string, expiry: string, broker: TsBroker = 'dhan'): Promise<TsChainLookup | null> {
   try {
-    const r = await fetch(`/api/scalper/lookup?underlying=${underlying}&expiry=${expiry}`);
-    const j = await r.json() as { success: boolean; data?: { lotSize?: number; strikes?: Record<string, { ceId?: string; peId?: string }> } };
+    const r = await fetch(`/api/scalper/${broker === 'kotak' ? 'kotak/' : ''}lookup?underlying=${underlying}&expiry=${expiry}`);
+    const j = await r.json() as { success: boolean; data?: { lotSize?: number; strikes?: Record<string, TsIds> } };
     if (!j.success || !j.data?.lotSize || !j.data.strikes) return null;
     return { lotSize: j.data.lotSize, strikes: j.data.strikes };
   } catch { return null; }
@@ -56,12 +67,12 @@ export async function fetchChainPrices(
   } catch { return null; }
 }
 
-async function confirmOrder(orderId: string, timeoutMs = 6000): Promise<{ phase: DhanOrderPhase; filledQty: number; avgPrice: number; reason: string }> {
+async function confirmOrder(orderId: string, timeoutMs = 6000, broker: TsBroker = 'dhan'): Promise<{ phase: DhanOrderPhase; filledQty: number; avgPrice: number; reason: string }> {
   const deadline = Date.now() + timeoutMs;
   let last = { phase: 'pending' as DhanOrderPhase, filledQty: 0, avgPrice: 0, reason: '' };
   for (;;) {
     try {
-      const res = await fetch(`/api/scalper/orders?orderId=${encodeURIComponent(orderId)}`);
+      const res = await fetch(`/api/scalper/orders?orderId=${encodeURIComponent(orderId)}&broker=${broker}`);
       const j = await res.json() as { success: boolean; data?: { orderStatus: string; filledQty: number; averageTradedPrice: number; reason: string } };
       if (j.success && j.data) {
         last = { phase: classifyDhanOrder(j.data.orderStatus, 'MARKET'), filledQty: j.data.filledQty, avgPrice: j.data.averageTradedPrice, reason: j.data.reason };
@@ -75,24 +86,34 @@ async function confirmOrder(orderId: string, timeoutMs = 6000): Promise<{ phase:
 
 /** An order's FINAL traded average (0 = still working / not reported), one read — the shared reader
  *  (lib/tradedPriceClient.ts), so a part-traded average is never taken as the fill. */
-export async function fetchOrderAvgPrice(orderId: string): Promise<number> {
-  return finalAvgOf(await readOrderPrice(orderId));
+export async function fetchOrderAvgPrice(orderId: string, broker: TsBroker = 'dhan'): Promise<number> {
+  return finalAvgOf(await readOrderPrice(orderId, broker));
 }
 
 interface SendResult { ok: boolean; orderId?: string; error?: string; unknown?: boolean }
 
 async function sendOrder(
-  underlying: string, securityId: string, qty: number, side: TsSide, product: TsProduct, key: string,
+  broker: TsBroker, underlying: string, ident: string, qty: number, side: TsSide, product: TsProduct, key: string,
 ): Promise<SendResult> {
   try {
-    const res = await fetch('/api/scalper/fast-order', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        securityId, quantity: qty, side: side === 'B' ? 'BUY' : 'SELL', orderType: 'MARKET',
-        exchangeSegment: underlying === 'SENSEX' ? 'BSE_FNO' : 'NSE_FNO',
-        productType: product, source: TS_ORDER_SOURCE, idempotencyKey: key,
-      }),
-    });
+    const res = broker === 'kotak'
+      // Kotak: by trading symbol, its own segment and product names. Its route checks the order book itself when
+      // the reply is unclear and answers 504 when the outcome is still unknown.
+      ? await fetch('/api/scalper/kotak/order', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            tradingsymbol: ident, quantity: qty, side: side === 'B' ? 'BUY' : 'SELL', orderType: 'MARKET',
+            exchange: underlying === 'SENSEX' ? 'bse_fo' : 'nse_fo', product: product === 'MARGIN' ? 'NRML' : 'MIS',
+          }),
+        })
+      : await fetch('/api/scalper/fast-order', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            securityId: ident, quantity: qty, side: side === 'B' ? 'BUY' : 'SELL', orderType: 'MARKET',
+            exchangeSegment: underlying === 'SENSEX' ? 'BSE_FNO' : 'NSE_FNO',
+            productType: product, source: TS_ORDER_SOURCE, idempotencyKey: key,
+          }),
+        });
     const j = await res.json() as { success: boolean; order_id?: string; error?: string };
     if (j.success) return { ok: true, orderId: j.order_id ? String(j.order_id) : undefined };
     // 504 = status unknown: the order may exist. Never treat it as a clean failure.
@@ -105,7 +126,9 @@ async function sendOrder(
 export interface EntryParams {
   slot: TsPosition['slot']; underlying: string; expiry: string; strike: number; side: TsSide;
   lots: number; lotSize: number; product: TsProduct; mode: TsMode;
-  ids: { ceId?: string; peId?: string };
+  /** The account REAL orders go to (SIM records it too, so a re-armed page shows where it would have traded). */
+  broker?: TsBroker;
+  ids: TsIds;
   /** Live prices used for SIM fills and as the REAL fallback when the book has no average. */
   prices: { CE: number; PE: number };
   risk: TsPosition['risk'];
@@ -129,13 +152,18 @@ export async function enterStraddle(p: EntryParams): Promise<EntryOutcome> {
   const qty = p.lots * p.lotSize;
   const id = newId(p.slot);
   const openedAt = Date.now();
+  const broker: TsBroker = p.broker ?? 'dhan';
   // Entry always starts from a real quote (never 0): an unknown-fill leg must not read
   // as a free leg in the P&L.
   const mk = (option: 'CE' | 'PE', extra: Partial<TsLeg> = {}): TsLeg => ({
-    option, qty, entry: p.prices[option], orderIds: [], securityId: option === 'CE' ? p.ids.ceId : p.ids.peId, ...extra,
+    option, qty, entry: p.prices[option], orderIds: [],
+    ...(broker === 'kotak'
+      ? { symbol: option === 'CE' ? p.ids.ceSymbol : p.ids.peSymbol }
+      : { securityId: option === 'CE' ? p.ids.ceId : p.ids.peId }),
+    ...extra,
   });
   const base = {
-    id, slot: p.slot, mode: p.mode, side: p.side, underlying: p.underlying, expiry: p.expiry, strike: p.strike,
+    id, broker, slot: p.slot, mode: p.mode, side: p.side, underlying: p.underlying, expiry: p.expiry, strike: p.strike,
     lots: p.lots, lotSize: p.lotSize, product: p.product, risk: p.risk, openedAt,
   };
 
@@ -145,7 +173,9 @@ export async function enterStraddle(p: EntryParams): Promise<EntryOutcome> {
     return { ok: true, notes: [], position: { ...base, status: 'OPEN', legs: [mk('CE'), mk('PE')] } };
   }
 
-  if (!p.ids.ceId || !p.ids.peId) return { position: null, ok: false, notes: ['Security ids not resolved for this strike'] };
+  const ceIdent = legIdent(broker, p.ids, 'CE');
+  const peIdent = legIdent(broker, p.ids, 'PE');
+  if (!ceIdent || !peIdent) return { position: null, ok: false, notes: [`${broker === 'kotak' ? 'Kotak trading symbols' : 'Security ids'} not resolved for this strike`] };
 
   // Checkpoint before any order leaves: both legs "unconfirmed" until proven otherwise.
   const intent: TsPosition = { ...base, status: 'OPEN', risk: { ...p.risk, armed: false }, legs: [mk('CE', { unconfirmed: true }), mk('PE', { unconfirmed: true })] };
@@ -155,14 +185,14 @@ export async function enterStraddle(p: EntryParams): Promise<EntryOutcome> {
 
   const sent = await Promise.all((['CE', 'PE'] as const).map(async (opt) => ({
     opt,
-    r: await sendOrder(p.underlying, opt === 'CE' ? p.ids.ceId! : p.ids.peId!, qty, p.side, p.product, `ts-${id}-${opt}-in`),
+    r: await sendOrder(broker, p.underlying, opt === 'CE' ? ceIdent : peIdent, qty, p.side, p.product, `ts-${id}-${opt}-in`),
   })));
 
   const legs: TsLeg[] = [];
   const filled: { opt: 'CE' | 'PE'; secId: string }[] = [];
   let failed = false;
   for (const { opt, r } of sent) {
-    const secId = opt === 'CE' ? p.ids.ceId! : p.ids.peId!;
+    const secId = opt === 'CE' ? ceIdent : peIdent;
     const ids = (oid?: string) => (oid ? [oid] : []);
     if (!r.ok) {
       failed = true;
@@ -170,7 +200,7 @@ export async function enterStraddle(p: EntryParams): Promise<EntryOutcome> {
       legs.push(r.unknown ? mk(opt, { unconfirmed: true }) : mk(opt, { qty: 0, closed: true, exit: p.prices[opt] }));
       continue;
     }
-    const c = r.orderId ? await confirmOrder(r.orderId) : { phase: 'pending' as DhanOrderPhase, filledQty: 0, avgPrice: 0, reason: '' };
+    const c = r.orderId ? await confirmOrder(r.orderId, 6000, broker) : { phase: 'pending' as DhanOrderPhase, filledQty: 0, avgPrice: 0, reason: '' };
     if (c.phase === 'dead') {
       failed = true;
       notes.push(`${opt} rejected after acceptance: ${c.reason || 'broker rejected'}`);
@@ -195,9 +225,9 @@ export async function enterStraddle(p: EntryParams): Promise<EntryOutcome> {
     for (const f of filled) {
       const i = legs.findIndex((l) => l.option === f.opt);
       const leg = legs[i];
-      const rev = await sendOrder(p.underlying, f.secId, leg.qty, p.side === 'S' ? 'B' : 'S', p.product, `ts-${id}-${f.opt}-rb`);
+      const rev = await sendOrder(broker, p.underlying, f.secId, leg.qty, p.side === 'S' ? 'B' : 'S', p.product, `ts-${id}-${f.opt}-rb`);
       if (!rev.ok) { notes.push(`Could not reverse ${f.opt} (${rev.error}) — close it manually`); continue; }
-      const c = rev.orderId ? await confirmOrder(rev.orderId) : null;
+      const c = rev.orderId ? await confirmOrder(rev.orderId, 6000, broker) : null;
       if (c?.phase === 'filled') {
         legs[i] = {
           ...leg, closed: true, exit: c.avgPrice > 0 ? c.avgPrice : p.prices[f.opt], orderIds: [...leg.orderIds, ...(rev.orderId ? [rev.orderId] : [])],
@@ -230,6 +260,8 @@ export async function exitStraddle(
   const notes: string[] = [];
   const closeSide: TsSide = pos.side === 'S' ? 'B' : 'S';
   const now = Date.now();
+  const broker = brokerOf(pos);
+  const identOf = (l: TsLeg) => (broker === 'kotak' ? l.symbol : l.securityId);
   const finish = (legs: TsLeg[]): ExitOutcome => {
     const done = legs.every((l) => l.closed);
     return {
@@ -251,22 +283,22 @@ export async function exitStraddle(
   // Broker truth is used only to CLAMP the exit size down and to detect an already-flat leg.
   let rows: Record<string, unknown>[] | null = null;
   try {
-    const r = await fetch('/api/scalper/positions');
+    const r = await fetch(broker === 'kotak' ? '/api/scalper/kotak/positions' : '/api/scalper/positions');
     const j = await r.json() as { success: boolean; data?: Record<string, unknown>[] };
     if (j.success && Array.isArray(j.data)) rows = j.data;
   } catch { /* unreadable: handled below as "fail open" */ }
 
   const legs = await Promise.all(pos.legs.map(async (leg): Promise<TsLeg> => {
     if (leg.closed) return leg;
-    if (leg.unconfirmed || !leg.securityId) {
-      notes.push(`${leg.option}: ${leg.unconfirmed ? 'entry unconfirmed' : 'no security id'} — verify in Orders/Positions, then use Resolve`);
+    if (leg.unconfirmed || !identOf(leg)) {
+      notes.push(`${leg.option}: ${leg.unconfirmed ? 'entry unconfirmed' : 'no contract id'} — verify in Orders/Positions, then use Resolve`);
       return leg;
     }
 
     // A previous exit order is still unsettled: look at IT, never send another on top of it.
     let current = leg;
     if (leg.pendingExit) {
-      const c = await confirmOrder(leg.pendingExit.orderId, 0);
+      const c = await confirmOrder(leg.pendingExit.orderId, 0, broker);
       if (c.phase === 'filled') {
         // Never book a confirmed close at the ENTRY price (a silent ₹0): estimate from the live quote and owe the order.
         return {
@@ -281,7 +313,7 @@ export async function exitStraddle(
       current = { ...leg, pendingExit: undefined };   // that order died; a fresh exit is safe
     }
 
-    const cap = brokerCapacity(rows, leg.securityId, pos.product, pos.side);
+    const cap = brokerCapacity(rows, identOf(leg), pos.product, pos.side, broker === 'kotak' ? 'tradingSymbol' : 'securityId');
     if (cap.kind === 'flat') {
       // Closed outside this page: there is no order of ours to re-read for its price.
       const last = prices[leg.option];
@@ -302,13 +334,13 @@ export async function exitStraddle(
       return current;
     }
     const qty = exitQtyForLeg(current.qty, cap.kind === 'qty' ? cap.qty : null);
-    const r = await sendOrder(pos.underlying, current.securityId!, qty, closeSide, pos.product, `ts-${pos.id}-${leg.option}-out-${current.orderIds.length}`);
+    const r = await sendOrder(broker, pos.underlying, identOf(current)!, qty, closeSide, pos.product, `ts-${pos.id}-${leg.option}-out-${current.orderIds.length}`);
     if (!r.ok) {
       notes.push(`${leg.option} exit ${r.unknown ? 'status UNKNOWN' : 'rejected'}: ${r.error}`);
       return current;
     }
     const orderIds = [...current.orderIds, ...(r.orderId ? [r.orderId] : [])];
-    const c = r.orderId ? await confirmOrder(r.orderId) : null;
+    const c = r.orderId ? await confirmOrder(r.orderId, 6000, broker) : null;
     if (c?.phase === 'filled') {
       return {
         ...current, closed: true, exit: c.avgPrice > 0 ? c.avgPrice : (prices[leg.option] ?? current.entry), orderIds,
@@ -324,19 +356,22 @@ export async function exitStraddle(
 /** REAL pre-trade gate. Fails CLOSED: unknown margin or funds blocks the order. */
 export async function checkMarginGate(p: {
   underlying: string; expiry: string; strike: number; side: TsSide; lots: number; lotSize: number;
-  ids: { ceId?: string; peId?: string }; prices: { CE: number; PE: number };
+  ids: TsIds; prices: { CE: number; PE: number };
+  /** Kotak has no margin calculator: its basket is priced through Dhan's (same contracts) and checked against Kotak funds. */
+  broker?: TsBroker;
 }): Promise<{ ok: boolean; message: string; estimate: boolean; required?: number; available?: number }> {
   try {
     const legs = (['CE', 'PE'] as const).map((option) => ({
       id: option, side: p.side, option, strike: p.strike, expiry: p.expiry, lots: p.lots,
-      quantity: p.lots * p.lotSize, price: p.prices[option], securityId: option === 'CE' ? p.ids.ceId : p.ids.peId,
+      quantity: p.lots * p.lotSize, price: p.prices[option],
+      ...((p.broker ?? 'dhan') === 'dhan' ? { securityId: option === 'CE' ? p.ids.ceId : p.ids.peId } : {}),
     }));
     const [mr, fr] = await Promise.all([
       fetch('/api/multi-leg-focus/margin', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ underlying: p.underlying, expiry: p.expiry, broker: 'dhan', legs }),
+        body: JSON.stringify({ underlying: p.underlying, expiry: p.expiry, broker: p.broker ?? 'dhan', legs }),
       }),
-      fetch('/api/scalper/funds'),
+      fetch((p.broker ?? 'dhan') === 'kotak' ? '/api/scalper/kotak/funds' : '/api/scalper/funds'),
     ]);
     const mj = await mr.json() as { success: boolean; data?: { basketMargin?: number; basketMarginSource?: string } };
     const fj = await fr.json() as { success: boolean; data?: Record<string, unknown> };

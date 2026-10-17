@@ -3,6 +3,9 @@ import { getDhanCredentials } from '@/lib/dhanToken';
 import { invalidateBrokerCache } from '@/lib/brokerPositionsCache';
 import { readScreenerSnapshot } from '@/lib/optionsScreenerStore';
 import { roundToTick } from '@/lib/optionsScreener';
+import { isKotakTokenValid } from '@/lib/kotakToken';
+import { kotakOptionContract } from '@/lib/kotakContracts';
+import { placeKotakOrder } from '@/lib/kotakPlaceOrder';
 
 /**
  * POST — place a single-leg Dhan option order for a contract the screener is tracking.
@@ -53,6 +56,8 @@ interface OrderBody {
   orderType?: string;
   price?: number;
   product?: string;
+  /** 'kotak' places the same contract on Kotak (resolved from Kotak's own master); default Dhan. */
+  broker?: string;
 }
 
 export async function POST(req: NextRequest) {
@@ -84,6 +89,8 @@ export async function POST(req: NextRequest) {
       { status: 400 },
     );
   }
+
+  if (body.broker === 'kotak') return placeOnKotak(row, { side, orderType, product, lots, price: Number(body.price) });
 
   const qty = lots * row.lot;
   if (!Number.isFinite(qty) || qty <= 0 || qty > MAX_QTY_PER_ORDER) {
@@ -185,4 +192,46 @@ export async function POST(req: NextRequest) {
   }
   invalidateBrokerCache('dhan');
   return NextResponse.json({ success: true, orderId, orderStatus: json.orderStatus ?? null, summary });
+}
+
+/**
+ * The same screener contract on Kotak. Kotak has no Dhan security id, so the contract is looked up in Kotak's own master by
+ * underlying / expiry / strike / type; its lot size (barrels for MCX) and tick are Kotak's. Same caps and price band as Dhan.
+ */
+async function placeOnKotak(
+  row: { u: string; e: string; s: number; t: string; ltp: number; tick: number },
+  o: { side: 'BUY' | 'SELL'; orderType: 'MARKET' | 'LIMIT'; product: 'INTRADAY' | 'MARGIN'; lots: number; price: number },
+) {
+  if (!isKotakTokenValid()) return NextResponse.json({ success: false, error: 'Kotak session is not valid - log in first' }, { status: 401 });
+  if (row.t !== 'CE' && row.t !== 'PE') return NextResponse.json({ success: false, error: 'Only options can be placed on Kotak from here' }, { status: 400 });
+  let c;
+  try { c = await kotakOptionContract(row.u, row.e, row.s, row.t); }
+  catch (e) { return NextResponse.json({ success: false, error: `Kotak contract list unavailable: ${String(e)}` }, { status: 502 }); }
+  if (!c) return NextResponse.json({ success: false, error: `Kotak does not list ${row.u} ${row.e} ${row.s} ${row.t}` }, { status: 400 });
+  const qty = o.lots * c.lotSize;
+  if (!Number.isFinite(qty) || qty <= 0 || qty > MAX_QTY_PER_ORDER) {
+    return NextResponse.json({ success: false, error: `Quantity ${qty} outside the safety limit` }, { status: 400 });
+  }
+  let price = 0;
+  if (o.orderType === 'LIMIT') {
+    if (!Number.isFinite(o.price) || o.price <= 0) return NextResponse.json({ success: false, error: 'LIMIT order requires a valid price' }, { status: 400 });
+    const tick = c.tick && c.tick > 0 && c.tick <= 1 ? c.tick : (row.tick > 0 && row.tick <= 1 ? row.tick : 0.05);
+    price = roundToTick(o.price, tick);
+    if (row.ltp > 0 && (price > row.ltp * 3 + 5 || price < row.ltp / 3 - 5)) {
+      return NextResponse.json({ success: false, error: `Limit ${price} is too far from LTP ${row.ltp} — check the price` }, { status: 400 });
+    }
+  }
+  const label = `${o.side} ${o.lots} lot${o.lots === 1 ? '' : 's'} ${row.u} ${row.e} ${row.s} ${row.t}`;
+  const summary = `${label} · qty ${qty} · ${o.product} · ${o.orderType}${o.orderType === 'LIMIT' ? ` @ ${price}` : ''} · Kotak`;
+  const r = await placeKotakOrder({
+    es: c.segment, pc: o.product === 'MARGIN' ? 'NRML' : 'MIS', pr: o.orderType === 'LIMIT' ? price.toFixed(2) : '0',
+    pt: o.orderType === 'LIMIT' ? 'L' : 'MKT', qt: String(qty), rt: 'DAY', ts: c.tradingsymbol,
+    tt: o.side === 'BUY' ? 'B' : 'S', am: 'NO', dq: '0', mp: '0', pf: 'N', tp: '0', os: 'NEOTRADEAPI',
+  });
+  invalidateBrokerCache('kotak');
+  if (r.status === 'placed') return NextResponse.json({ success: true, orderId: r.orderId, orderStatus: null, summary });
+  if (r.status === 'unknown') {
+    return NextResponse.json({ success: false, unknown: true, error: `Order status unknown. Kotak did not confirm ${label} — check the Kotak order book before placing it again.` }, { status: 504 });
+  }
+  return NextResponse.json({ success: false, error: `Kotak rejected ${label}: ${r.error}` }, { status: 502 });
 }

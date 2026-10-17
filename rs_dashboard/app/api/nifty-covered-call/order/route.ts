@@ -3,9 +3,13 @@ import { dhanGet, dhanPost } from '@/lib/dhanToken';
 import { invalidateBrokerCache } from '@/lib/brokerPositionsCache';
 import { resolveLotSize } from '@/lib/lotSize';
 import { reconstructCallLedger, reservedBuyUnits, TERMINAL_ORDER_STATUSES, type CallTrade } from '@/lib/coveredCallEngine';
-import { mutateLedger, newId, fetchOrderStatus, bookOrderStatus, type OrderStatus } from '@/lib/coveredCallLedgerStore';
+import { mutateLedger, newId, fetchOrderStatus, bookOrderStatus, deskBrokerOf, kotakNiftyCallRows, type DeskBroker, type OrderStatus } from '@/lib/coveredCallLedgerStore';
+import { isKotakTokenValid } from '@/lib/kotakToken';
+import { placeKotakOrder } from '@/lib/kotakPlaceOrder';
 
-// Dhan-only order placement for the NIFTYBEES Covered Call desk — REAL MONEY.
+// Order placement for the NIFTYBEES Covered Call desk, on Dhan or Kotak — REAL MONEY. `broker: 'kotak'` uses the
+// desk's Kotak ledger, the Kotak trading symbol as the contract handle (`securityId` field), Kotak positions for the
+// buy-back cap and Kotak's order book for fills; everything else is identical.
 // Only NIFTY index calls are ever traded here; NIFTYBEES itself is never
 // bought or sold by this page.
 //
@@ -41,6 +45,8 @@ export interface CoveredCallOrderRequest {
   /** BUY: the ledger leg being bought back (required). */
   openLegId?: string;
   note?: string;
+  /** Account (and so ledger) this order belongs to. Default Dhan. */
+  broker?: DeskBroker;
 }
 
 export interface CoveredCallOrderResult {
@@ -61,7 +67,10 @@ export interface CoveredCallOrderResult {
 
 type Row = Record<string, unknown>;
 
-async function liveShortUnits(securityId: string): Promise<number> {
+async function liveShortUnits(securityId: string, broker: DeskBroker): Promise<number> {
+  if (broker === 'kotak') {
+    return (await kotakNiftyCallRows()).filter((r) => r.tradingSymbol === securityId).reduce((s, r) => s + Math.max(0, -r.netQty), 0);
+  }
   const rows = (await dhanGet('/positions')) as Row[];
   if (!Array.isArray(rows)) throw new Error('Unexpected /positions payload');
   return rows
@@ -69,13 +78,13 @@ async function liveShortUnits(securityId: string): Promise<number> {
     .reduce((s, r) => s + Math.max(0, -Number(r.netQty || 0)), 0);
 }
 
-async function pollFill(orderId: string): Promise<OrderStatus> {
+async function pollFill(orderId: string, broker: DeskBroker): Promise<OrderStatus> {
   const deadline = Date.now() + FILL_POLL_MS;
   let last: OrderStatus = { status: 'UNKNOWN', filled: 0, avg: 0, reason: '' };
   while (Date.now() < deadline) {
     await new Promise((r) => setTimeout(r, 600));
     try {
-      const st = await fetchOrderStatus(orderId);
+      const st = await fetchOrderStatus(orderId, broker);
       if (!st) continue;
       last = st;
       // A TRADED order can briefly report avg 0; keep polling for the price.
@@ -90,12 +99,17 @@ export async function POST(req: NextRequest): Promise<NextResponse<CoveredCallOr
   try { body = await req.json(); } catch { return NextResponse.json({ success: false, error: 'Invalid JSON' }, { status: 400 }); }
 
   const side = body.side;
+  const broker = deskBrokerOf(body.broker);
   const securityId = String(body.securityId ?? '');
   let units = Math.floor(Number(body.units));
   const orderType = body.orderType === 'LIMIT' ? 'LIMIT' : 'MARKET';
 
   if (side !== 'BUY' && side !== 'SELL') return NextResponse.json({ success: false, error: 'side must be BUY or SELL' }, { status: 400 });
-  if (!/^\d+$/.test(securityId)) return NextResponse.json({ success: false, error: 'Invalid securityId' }, { status: 400 });
+  // Dhan: numeric security id. Kotak: a NIFTY trading symbol (letters and digits only).
+  if (broker === 'kotak' ? !/^NIFTY[0-9A-Z]+CE$/.test(securityId) : !/^\d+$/.test(securityId)) {
+    return NextResponse.json({ success: false, error: `Invalid ${broker === 'kotak' ? 'Kotak NIFTY CE trading symbol' : 'securityId'}` }, { status: 400 });
+  }
+  if (broker === 'kotak' && !isKotakTokenValid()) return NextResponse.json({ success: false, error: 'Kotak session is not valid - log in first' }, { status: 401 });
   if (!(units > 0)) return NextResponse.json({ success: false, error: 'units must be > 0' }, { status: 400 });
   if (orderType === 'LIMIT' && !(Number(body.price) > 0)) return NextResponse.json({ success: false, error: 'LIMIT needs a price' }, { status: 400 });
 
@@ -118,7 +132,7 @@ export async function POST(req: NextRequest): Promise<NextResponse<CoveredCallOr
     if (!body.openLegId) return NextResponse.json({ success: false, error: 'openLegId required for a buy-back' }, { status: 400 });
     let shortUnits: number;
     try {
-      shortUnits = await liveShortUnits(securityId);
+      shortUnits = await liveShortUnits(securityId, broker);
     } catch (err) {
       // Fail closed: without a live read we can't prove the buy only closes.
       return NextResponse.json({ success: false, error: `Positions unavailable, buy-back refused: ${(err as Error).message}` }, { status: 503 });
@@ -131,7 +145,7 @@ export async function POST(req: NextRequest): Promise<NextResponse<CoveredCallOr
     if (!(Number(body.strike) > 0) || !body.expiry) return NextResponse.json({ success: false, error: 'strike and expiry required for a sell' }, { status: 400 });
     contract = {
       strike: Number(body.strike), expiry: String(body.expiry),
-      tradingSymbol: body.tradingSymbol || `NIFTY-${body.expiry}-${body.strike}-CE`,
+      tradingSymbol: broker === 'kotak' ? securityId : (body.tradingSymbol || `NIFTY-${body.expiry}-${body.strike}-CE`),
     };
   }
 
@@ -157,13 +171,13 @@ export async function POST(req: NextRequest): Promise<NextResponse<CoveredCallOr
       note: body.note, bookedUnits: 0, bookedValue: 0, createdAt: Date.now(),
     });
     return { result: { id, units: u }, write: true };
-  });
+  }, broker);
   if ('error' in reservation) return NextResponse.json({ success: false, error: reservation.error }, { status: 409 });
   units = reservation.units;
   const dropReservation = () => mutateLedger((s) => {
     s.pending = s.pending.filter((p) => p.id !== reservation.id);
     return { result: null, write: true };
-  });
+  }, broker);
 
   const payload = {
     transactionType: side,
@@ -180,7 +194,17 @@ export async function POST(req: NextRequest): Promise<NextResponse<CoveredCallOr
   };
 
   let orderId = '';
-  try {
+  if (broker === 'kotak') {
+    const r = await placeKotakOrder({
+      es: 'nse_fo', pc: 'NRML', pr: orderType === 'LIMIT' ? (Math.round(Number(body.price) / 0.05) * 0.05).toFixed(2) : '0',
+      pt: orderType === 'LIMIT' ? 'L' : 'MKT', qt: String(units), rt: 'DAY', ts: securityId, tt: side === 'BUY' ? 'B' : 'S',
+      am: 'NO', dq: '0', mp: '0', pf: 'N', tp: '0', os: 'NEOTRADEAPI',
+    });
+    if (r.status === 'rejected') { await dropReservation(); return NextResponse.json({ success: false, error: r.error }); }
+    // Unknown: the reservation (no order id) keeps a second buy-back out until the sweep drops it, as on Dhan.
+    if (r.status === 'unknown') return NextResponse.json({ success: false, error: r.error });
+    orderId = r.orderId;
+  } else try {
     const json = (await dhanPost('/orders', payload)) as Row;
     orderId = String(json.orderId ?? (json.data as Row | undefined)?.orderId ?? '');
     if (!orderId) {
@@ -197,12 +221,12 @@ export async function POST(req: NextRequest): Promise<NextResponse<CoveredCallOr
     const p = s.pending.find((x) => x.id === reservation.id);
     if (p) p.orderId = orderId;
     return { result: null, write: Boolean(p) };
-  });
+  }, broker);
 
-  invalidateBrokerCache('dhan');
-  const fill = await pollFill(orderId);
-  invalidateBrokerCache('dhan');
-  const booked = await bookOrderStatus(reservation.id, fill);
+  invalidateBrokerCache(broker);
+  const fill = await pollFill(orderId, broker);
+  invalidateBrokerCache(broker);
+  const booked = await bookOrderStatus(reservation.id, fill, broker);
   const filledUnits = booked.reduce((s, t) => s + t.units, 0);
   const terminal = TERMINAL_ORDER_STATUSES.includes(fill.status);
 

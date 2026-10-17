@@ -2,6 +2,8 @@ import { NextRequest, NextResponse } from 'next/server';
 import path from 'path';
 import { PROJECT_ROOT, runPythonJson } from '@/lib/pyExec';
 import { invalidateBrokerCache } from '@/lib/brokerPositionsCache';
+import { kotakPlacePut } from '@/lib/cspKotak';
+import { kotakPost, KOTAK_PATHS, isKotakTokenValid } from '@/lib/kotakToken';
 
 const SCRIPT = path.join(PROJECT_ROOT, 'scripts', 'tools', 'csp_watchlist.py');
 
@@ -38,6 +40,16 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ success: false, error: 'triggerPrice is required for STOP_LOSS orders' }, { status: 400 });
     }
 
+    if (body?.broker === 'kotak') {
+      const r = await kotakPlacePut({
+        symbol: String(symbol).toUpperCase(), expiry: String(expiry), strike: Number(strike), quantity: Number(quantity),
+        productType: String(productType), orderType: orderTypeUpper, price: Number(price ?? 0), triggerPrice: Number(triggerPrice ?? 0),
+        afterMarketOrder: !!afterMarketOrder,
+      });
+      if (r.success) invalidateBrokerCache('kotak');
+      return NextResponse.json(r, { status: r.success ? 200 : 500 });
+    }
+
     const args = [
       'place',
       '--symbol', String(symbol).toUpperCase(),
@@ -70,6 +82,16 @@ export async function DELETE(req: NextRequest) {
       return NextResponse.json({ success: false, error: 'orderId is required' }, { status: 400 });
     }
 
+    if (body?.broker === 'kotak') {
+      if (!isKotakTokenValid()) return NextResponse.json({ success: false, error: 'Kotak session is not valid' }, { status: 401 });
+      try {
+        await kotakPost(KOTAK_PATHS.cancelOrder, { on: String(orderId), am: 'NO' });
+        invalidateBrokerCache('kotak');
+        return NextResponse.json({ success: true });
+      } catch (e) {
+        return NextResponse.json({ success: false, error: `Failed to cancel order: ${String((e as Error).message ?? e)}` }, { status: 500 });
+      }
+    }
     const result = await runPythonJson<OrderResult>(SCRIPT, ['cancel', '--order-id', String(orderId)], 20_000);
     // Cancelling a resting order releases the margin it was blocking.
     if (result.success) invalidateBrokerCache('dhan');

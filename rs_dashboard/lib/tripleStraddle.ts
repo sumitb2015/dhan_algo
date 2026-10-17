@@ -71,8 +71,12 @@ export interface TsRisk {
   armed: boolean;
 }
 
+/** Which account a position was opened on. Absent on older records = Dhan. Exits always go to THIS broker. */
+export type TsBroker = 'dhan' | 'kotak';
+
 export interface TsPosition {
   id: string;
+  broker?: TsBroker;
   slot: TsSlot;
   mode: TsMode;
   side: TsSide;
@@ -267,12 +271,16 @@ export type BrokerCapacity =
  *  strategy's MARGIN row must not be read as this INTRADAY leg). An absent row is
  *  'unknown', never 'flat': the book lags and may be empty on a transient failure. */
 export function brokerCapacity(
-  rows: Record<string, unknown>[] | null, securityId: string | undefined, product: TsProduct, side: TsSide,
+  rows: Record<string, unknown>[] | null, ident: string | undefined, product: TsProduct, side: TsSide,
+  /** Dhan rows join on security id; Kotak rows have none and join on trading symbol. */
+  by: 'securityId' | 'tradingSymbol' = 'securityId',
 ): BrokerCapacity {
-  if (!rows || !securityId) return { kind: 'unknown' };
+  if (!rows || !ident) return { kind: 'unknown' };
   const mine = rows.filter((r) => {
-    if (String(r.securityId ?? '') !== securityId) return false;
-    const prod = String(r.productType ?? r.product ?? '').trim().toUpperCase();
+    if (String(r[by] ?? '') !== ident) return false;
+    // Kotak names products MIS / NRML; this ledger uses Dhan's INTRADAY / MARGIN.
+    const raw = String(r.productType ?? r.product ?? '').trim().toUpperCase();
+    const prod = raw === 'MIS' ? 'INTRADAY' : raw === 'NRML' ? 'MARGIN' : raw;
     return prod === '' || prod === product;
   });
   if (mine.length === 0) return { kind: 'unknown' };

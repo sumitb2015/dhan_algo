@@ -90,3 +90,21 @@ test('low only ever moves down and ignores closed rows', () => {
   f = applyOp(f, { op: 'low', id: 'a', low: 70 });
   assert.strictEqual(f.positions[0].low, 70);
 });
+
+import { applyOp as applyOpK, contractKey as contractKeyK, legPnl as legPnlK, pnlMultiplier as pnlMultiplierK } from './bearishLedger.ts';
+
+test('Kotak rows: keyed apart from Dhan, need a trading symbol, and MCX P&L is not scaled (qty is already barrels)', () => {
+  const base = { id: 'k1', mode: 'REAL' as const, underlying: 'CRUDEOILM', expiry: '2026-11-17', option: 'CE' as const, strike: 8500, side: 'S' as const,
+    lotSize: 10, qty: 10, avgPrice: 100, status: 'OPEN' as const, openedAt: 1, filledAt: 1, realized: 0 };
+  assert.notStrictEqual(contractKeyK({ ...base, broker: 'kotak' }), contractKeyK(base));
+  assert.strictEqual(pnlMultiplierK('CRUDEOILM', 'kotak'), 1);
+  assert.strictEqual(pnlMultiplierK('CRUDEOILM'), 10);
+  // 10 barrels short, premium 100 -> 90: Rs 100 on Kotak.
+  assert.strictEqual(legPnlK({ ...base, broker: 'kotak', symbol: 'CRUDEOILM17NOV268500CE' }, 90), 100);
+  assert.throws(() => applyOpK({ rev: 0, positions: [] }, { op: 'open', position: { ...base, broker: 'kotak' } }), /Kotak trading symbol/);
+  const ok = applyOpK({ rev: 0, positions: [] }, { op: 'open', position: { ...base, broker: 'kotak', symbol: 'CRUDEOILM17NOV268500CE' } });
+  assert.strictEqual(ok.positions.length, 1);
+  // The same contract on Dhan is a different account's position, not a duplicate.
+  const both = applyOpK(ok, { op: 'open', position: { ...base, id: 'd1', underlying: 'NIFTY', securityId: '1' } });
+  assert.strictEqual(both.positions.length, 2);
+});

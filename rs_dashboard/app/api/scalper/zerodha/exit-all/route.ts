@@ -1,14 +1,31 @@
-import { NextResponse } from 'next/server';
+import { NextRequest, NextResponse } from 'next/server';
 import { kiteGet, kitePost } from '@/lib/zerodhaToken';
 import { invalidateBrokerCache } from '@/lib/brokerPositionsCache';
 
-export async function POST(): Promise<NextResponse> {
+/** Kite's derivative exchanges. NSE / BSE are cash equity, which the F&O terminals' Exit All must never sell. */
+const KITE_FNO_EXCHANGES = new Set(['NFO', 'BFO', 'MCX', 'CDS', 'BCD']);
+
+/**
+ * Square off Zerodha positions: F&O only by default (same scope as Dhan's scalper Exit All and Kotak's), shorts bought back
+ * before longs are sold. `{ scope: 'all' }` opts into everything.
+ */
+export async function POST(req: NextRequest): Promise<NextResponse> {
   const closed: string[] = [];
   const errors: string[] = [];
+  const skipped: string[] = [];
+  const body = await req.json().catch(() => ({})) as { scope?: string };
+  const all = body?.scope === 'all';
 
   try {
     const positions = await kiteGet('/portfolio/positions') as { net: any[] };
-    const open = (positions.net ?? []).filter(p => Number(p.quantity) !== 0);
+    const open = (positions.net ?? [])
+      .filter(p => Number(p.quantity) !== 0)
+      .filter(p => {
+        if (all || KITE_FNO_EXCHANGES.has(String(p.exchange ?? '').toUpperCase())) return true;
+        skipped.push(String(p.tradingsymbol));
+        return false;
+      })
+      .sort((a, b) => Number(a.quantity) - Number(b.quantity));   // most-short first
 
     for (const pos of open) {
       const qty = Math.abs(Number(pos.quantity));
@@ -34,9 +51,9 @@ export async function POST(): Promise<NextResponse> {
     // Invalidate even on a partial failure — some legs can close while others
     // error out, and `closed` being non-empty still means positions moved.
     if (closed.length > 0) invalidateBrokerCache('zerodha');
-    return NextResponse.json({ success: errors.length === 0, closed, errors });
+    return NextResponse.json({ success: errors.length === 0, closed, errors, skipped });
   } catch (err) {
     console.error('[scalper/zerodha/exit-all] error:', err);
-    return NextResponse.json({ success: false, closed, errors: [String((err as Error).message ?? err)] }, { status: 500 });
+    return NextResponse.json({ success: false, closed, errors: [String((err as Error).message ?? err)], skipped }, { status: 500 });
   }
 }

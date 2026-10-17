@@ -1,5 +1,5 @@
 /**
- * An order's FINAL traded price, from the browser (Dhan only: /api/scalper/orders reports a per-order
+ * An order's FINAL traded price, from the browser (Dhan and Kotak: /api/scalper/orders reports a per-order
  * averageTradedPrice). One implementation for every terminal (Focus Tool, Synthetic Futures, Triple Straddle) — see the
  * dhan-fill-price-pnl skill.
  *
@@ -27,9 +27,9 @@ export function finalAvgOf(r: OrderPriceRead | null | undefined): number {
 }
 
 /** One network read of the order. Null = unreadable (rate limit, network). */
-export async function readOrderPrice(orderId: string): Promise<OrderPriceRead | null> {
+export async function readOrderPrice(orderId: string, broker: 'dhan' | 'kotak' = 'dhan'): Promise<OrderPriceRead | null> {
   try {
-    const r = await fetch(`/api/scalper/orders?orderId=${encodeURIComponent(orderId)}`);
+    const r = await fetch(`/api/scalper/orders?orderId=${encodeURIComponent(orderId)}&broker=${broker}`);
     const j = await r.json() as { success?: boolean; data?: { orderStatus?: string; filledQty?: number; averageTradedPrice?: number } };
     if (!j.success || !j.data) return null;
     return { status: String(j.data.orderStatus ?? ''), filledQty: Number(j.data.filledQty) || 0, avg: Number(j.data.averageTradedPrice) || 0 };
@@ -43,12 +43,12 @@ export async function readOrderPrice(orderId: string): Promise<OrderPriceRead | 
  */
 export async function fetchSliceTradedPrice(
   orderId: string, kind: 'open' | 'close', sliceQty: number, memo: TradedSliceMemo,
-  opts: { peek?: OrderPeek; waits?: readonly number[] } = {},
+  opts: { peek?: OrderPeek; waits?: readonly number[]; broker?: 'dhan' | 'kotak' } = {},
 ): Promise<number | null> {
   for (const wait of opts.waits ?? [1000, 2000, 4000, 8000]) {
     await new Promise(res => setTimeout(res, wait));
     let atp = finalAvgOf(opts.peek?.(orderId));
-    if (!(atp > 0)) atp = finalAvgOf(await readOrderPrice(orderId));
+    if (!(atp > 0)) atp = finalAvgOf(await readOrderPrice(orderId, opts.broker));
     if (atp > 0) {
       const key = `${orderId}:${kind}`;
       const prior = memo.get(key);

@@ -33,6 +33,8 @@ export interface ScalperOrder {
   createTime: string;
   /** Traded average; 0 until something fills. */
   averagePrice?: number;
+  /** Quantity traded so far (Kotak reports it per order; lets a part-filled cancel be sized). */
+  filledQty?: number;
 }
 
 export interface ScalperTrade {

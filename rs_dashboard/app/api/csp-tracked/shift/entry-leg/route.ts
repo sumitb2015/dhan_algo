@@ -4,6 +4,7 @@ import { PROJECT_ROOT, runPythonJson } from '@/lib/pyExec';
 import { readTracked, writeTracked, newTrackedId, type TrackedCsp } from '@/lib/cspTracked';
 import { invalidateBrokerCache } from '@/lib/brokerPositionsCache';
 import { sendTelegramAlert } from '@/lib/telegramAlert';
+import { kotakPlacePut } from '@/lib/cspKotak';
 
 const SCRIPT = path.join(PROJECT_ROOT, 'scripts', 'tools', 'csp_watchlist.py');
 
@@ -48,7 +49,10 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ success: false, error: 'newStrike and newExpiry are required' }, { status: 400 });
     }
 
-    const result = await runPythonJson<OrderOutcome>(
+    // The new leg opens on the SAME account as the row it rolls out of.
+    const result: OrderOutcome = prior.broker === 'kotak'
+      ? await kotakPlacePut({ symbol: prior.symbol, expiry: newExpiry, strike: newStrike, quantity: prior.qty, productType: prior.productType ?? 'MARGIN', orderType: 'MARKET', waitFill: true })
+      : await runPythonJson<OrderOutcome>(
       SCRIPT,
       [
         'place',
@@ -89,6 +93,7 @@ export async function POST(req: NextRequest) {
       // missing when the order is still working, which is surfaced below.
       avgPrice: typeof result.tradedPrice === 'number' ? result.tradedPrice : 0,
       productType: prior.productType,
+      ...(prior.broker ? { broker: prior.broker } : {}),
       status: 'OPEN',
       rolledFromId: prior.id,
       createdAt: now,
@@ -110,7 +115,7 @@ export async function POST(req: NextRequest) {
     }
     rows.push(newRow);
     writeTracked(rows);
-    invalidateBrokerCache('dhan');
+    invalidateBrokerCache(prior.broker ?? 'dhan');
     void sendTelegramAlert(
       `🔁 CSP roll — entry leg filled: ${newRow.symbol} ${newRow.strike}PE ${newRow.expiry} x${newRow.qty}` +
         (typeof result.tradedPrice === 'number' ? ` @ ₹${result.tradedPrice.toFixed(2)}` : '')

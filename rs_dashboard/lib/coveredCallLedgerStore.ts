@@ -11,12 +11,21 @@ import path from 'path';
 import fs from 'fs';
 import { PROJECT_ROOT } from '@/lib/pyExec';
 import { dhanGet } from '@/lib/dhanToken';
+import { kotakGet, kotakRows, KOTAK_PATHS } from '@/lib/kotakToken';
+import { shapeKotakOrderStatus, shapeKotakPosition } from '@/lib/kotakShape';
+import { kotakSymbolMap } from '@/lib/kotakLtpJoin';
 import {
   reconstructCallLedger, fillIncrement, TERMINAL_ORDER_STATUSES,
   type CallTrade, type PendingOrder,
 } from '@/lib/coveredCallEngine';
 
-const STATE_FILE = path.join(PROJECT_ROOT, 'debug', 'nifty_covered_call_ledger.json');
+/** The desk trades on Dhan or Kotak. Each broker has its OWN ledger file (two accounts, two books): a leg can never be
+ *  reconciled, bought back or adopted against the other account. On Kotak a leg's `securityId` field carries the Kotak
+ *  trading symbol (Kotak has no numeric id) - it is the contract handle every route matches on. */
+export type DeskBroker = 'dhan' | 'kotak';
+export const deskBrokerOf = (v: unknown): DeskBroker => (v === 'kotak' ? 'kotak' : 'dhan');
+
+const stateFile = (b: DeskBroker) => path.join(PROJECT_ROOT, 'debug', b === 'kotak' ? 'nifty_covered_call_ledger_kotak.json' : 'nifty_covered_call_ledger.json');
 /** A reservation whose order never got an id (the placement call died). */
 const ORPHAN_RESERVATION_MS = 60_000;
 
@@ -25,7 +34,8 @@ export interface LedgerState {
   pending: PendingOrder[];
 }
 
-export function readLedger(): LedgerState {
+export function readLedger(broker: DeskBroker = 'dhan'): LedgerState {
+  const STATE_FILE = stateFile(broker);
   try {
     if (!fs.existsSync(STATE_FILE)) return { trades: [], pending: [] };
     const parsed = JSON.parse(fs.readFileSync(STATE_FILE, 'utf8')) as Partial<LedgerState>;
@@ -38,25 +48,26 @@ export function readLedger(): LedgerState {
   }
 }
 
-function writeLedger(state: LedgerState): void {
+function writeLedger(state: LedgerState, broker: DeskBroker): void {
+  const STATE_FILE = stateFile(broker);
   fs.mkdirSync(path.dirname(STATE_FILE), { recursive: true });
   const tmp = `${STATE_FILE}.tmp`;
   fs.writeFileSync(tmp, JSON.stringify(state, null, 2), 'utf8');
   fs.renameSync(tmp, STATE_FILE);
 }
 
-let writeQueue: Promise<unknown> = Promise.resolve();
-/** Read-modify-write under the desk's single lock. `fn` must be synchronous —
+const writeQueue: Record<DeskBroker, Promise<unknown>> = { dhan: Promise.resolve(), kotak: Promise.resolve() };
+/** Read-modify-write under the desk's lock (one per broker ledger). `fn` must be synchronous —
  *  never hold the lock across a broker call. `write: false` skips the write. */
-export function mutateLedger<T>(fn: (state: LedgerState) => { result: T; write: boolean }): Promise<T> {
+export function mutateLedger<T>(fn: (state: LedgerState) => { result: T; write: boolean }, broker: DeskBroker = 'dhan'): Promise<T> {
   const run = () => {
-    const state = readLedger();
+    const state = readLedger(broker);
     const { result, write } = fn(state);
-    if (write) writeLedger(state);
+    if (write) writeLedger(state, broker);
     return result;
   };
-  const result = writeQueue.then(run, run);
-  writeQueue = result.then(() => undefined, () => undefined);
+  const result = writeQueue[broker].then(run, run);
+  writeQueue[broker] = result.then(() => undefined, () => undefined);
   return result;
 }
 
@@ -66,7 +77,14 @@ type Row = Record<string, unknown>;
 
 export interface OrderStatus { status: string; filled: number; avg: number; reason: string }
 
-export async function fetchOrderStatus(orderId: string): Promise<OrderStatus | null> {
+export async function fetchOrderStatus(orderId: string, broker: DeskBroker = 'dhan'): Promise<OrderStatus | null> {
+  if (broker === 'kotak') {
+    // No single-order endpoint: the order book row, folded onto Dhan's status words (TRADED / REJECTED / ...).
+    const o = kotakRows(await kotakGet(KOTAK_PATHS.orderBook)).find((r) => String(r.nOrdNo ?? '') === orderId);
+    if (!o) return null;
+    const st = shapeKotakOrderStatus(o, orderId);
+    return { status: st.orderStatus, filled: st.filledQty, avg: st.averageTradedPrice, reason: st.reason };
+  }
   const raw = await dhanGet(`/orders/${orderId}`, 4_000);
   const o = (Array.isArray(raw) ? raw[0] : raw) as Row | undefined;
   if (!o) return null;
@@ -85,7 +103,7 @@ export async function fetchOrderStatus(orderId: string): Promise<OrderStatus | n
  * book each unit once, because the increment is computed from the fresh file
  * under the lock. Returns the rows it booked.
  */
-export function bookOrderStatus(pendingId: string, st: OrderStatus): Promise<CallTrade[]> {
+export function bookOrderStatus(pendingId: string, st: OrderStatus, broker: DeskBroker = 'dhan'): Promise<CallTrade[]> {
   return mutateLedger((state) => {
     const idx = state.pending.findIndex((p) => p.id === pendingId);
     if (idx < 0) return { result: [], write: false };
@@ -116,31 +134,54 @@ export function bookOrderStatus(pendingId: string, st: OrderStatus): Promise<Cal
     // priced yet (avg 0) stays pending and is retried on the next sweep.
     if (TERMINAL_ORDER_STATUSES.includes(st.status) && p.bookedUnits >= filled) state.pending.splice(idx, 1);
     return { result: booked, write: booked.length > 0 || !state.pending.includes(p) };
-  });
+  }, broker);
 }
 
 /** Re-read every pending order and book late fills. Safe to call from any tab. */
-export async function sweepPending(): Promise<void> {
-  const { pending } = readLedger();
+export async function sweepPending(broker: DeskBroker = 'dhan'): Promise<void> {
+  const { pending } = readLedger(broker);
   const now = Date.now();
   const orphans = pending.filter((p) => !p.orderId && now - p.createdAt > ORPHAN_RESERVATION_MS).map((p) => p.id);
   if (orphans.length) {
     await mutateLedger((s) => {
       s.pending = s.pending.filter((p) => !orphans.includes(p.id));
       return { result: null, write: true };
-    });
+    }, broker);
   }
   for (const p of pending) {
     if (!p.orderId) continue;
     try {
-      const st = await fetchOrderStatus(p.orderId);
-      if (st) await bookOrderStatus(p.id, st);
+      const st = await fetchOrderStatus(p.orderId, broker);
+      if (st) await bookOrderStatus(p.id, st, broker);
     } catch { /* transient — next sweep retries */ }
   }
 }
 
-/** Live (uncached) NIFTY CE shorts by security id, with the contract details. */
-export async function liveBrokerCallShorts(): Promise<Map<string, { units: number; strike: number; expiry: string; tradingSymbol: string }>> {
+/** Kotak's NIFTY index CE positions (net, all products), with strike/expiry from Kotak's own master (its symbol is not
+ *  decoded by hand). Shared by the desk's routes. */
+export async function kotakNiftyCallRows(): Promise<{ tradingSymbol: string; netQty: number; strike: number; expiry: string; sellAvg: number; productType: string }[]> {
+  const rows = kotakRows(await kotakGet(KOTAK_PATHS.positions)).map(shapeKotakPosition);
+  const map = await kotakSymbolMap('NIFTY');
+  const out = [];
+  for (const r of rows) {
+    const info = map[r.tradingSymbol];
+    if (!info || info.side !== 'CE' || !/_fo$/i.test(r.exchange)) continue;
+    out.push({ tradingSymbol: r.tradingSymbol, netQty: r.netQty, strike: info.strike, expiry: info.expiry, sellAvg: r.sellAvg, productType: r.productType });
+  }
+  return out;
+}
+
+/** Live (uncached) NIFTY CE shorts by contract handle (Dhan security id / Kotak trading symbol), with the contract details. */
+export async function liveBrokerCallShorts(broker: DeskBroker = 'dhan'): Promise<Map<string, { units: number; strike: number; expiry: string; tradingSymbol: string }>> {
+  if (broker === 'kotak') {
+    const out = new Map<string, { units: number; strike: number; expiry: string; tradingSymbol: string }>();
+    for (const r of await kotakNiftyCallRows()) {
+      if (r.netQty >= 0) continue;
+      const prev = out.get(r.tradingSymbol);
+      out.set(r.tradingSymbol, { units: (prev?.units ?? 0) - r.netQty, strike: r.strike, expiry: r.expiry, tradingSymbol: r.tradingSymbol });
+    }
+    return out;
+  }
   const rows = (await dhanGet('/positions')) as Row[];
   if (!Array.isArray(rows)) throw new Error('Unexpected /positions payload');
   const out = new Map<string, { units: number; strike: number; expiry: string; tradingSymbol: string }>();

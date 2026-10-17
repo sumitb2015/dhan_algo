@@ -130,11 +130,16 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       // like the cross-broker pattern in app/api/margin-allocator/route.ts —
       // this looks up the SAME strikes' real Dhan security ids and prices the
       // whole basket through Dhan's netted calculator anyway. A flat estimate
-      // is reserved for crude (MCX quantity semantics differ 100x across
-      // brokers per CLAUDE.md — not safe to cross-price) or when the Dhan
+      // is reserved for when the Dhan
       // lookup itself fails (expiry not yet in the master list, etc).
       const hasLiveMarginApi = broker === 'dhan';
-      const crossPriceViaDhan = !hasLiveMarginApi && !isCrude;
+      // Crude is cross-priced too: Dhan's calculator takes MCX quantity in LOTS, while every other broker's order
+      // quantity is in barrels, so the barrels are converted back to lots (dhanQtyFor) before the call.
+      const crossPriceViaDhan = !hasLiveMarginApi;
+      const crudeBarrelsPerLot = underlying === 'CRUDEOIL' ? 100 : underlying === 'CRUDEOILM' ? 10 : 1;
+      const dhanQtyFor = (leg: LegInput): number => (hasLiveMarginApi || !isCrude
+        ? leg.quantity
+        : (leg.quantity % crudeBarrelsPerLot === 0 ? leg.quantity / crudeBarrelsPerLot : 0));
       // A Calendar/Diagonal far leg trades a DIFFERENT expiry than the
       // basket's front-month `body.expiry` — cross-pricing it through a
       // single lookup for body.expiry would silently price it against the
@@ -179,7 +184,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
         }
 
         // SELL leg: writing option requires SPAN + exposure margin
-        const dhanSecId = canPriceViaDhan ? dhanSecIdFor(leg) : undefined;
+        const dhanSecId = canPriceViaDhan && dhanQtyFor(leg) > 0 ? dhanSecIdFor(leg) : undefined;
         if (dhanSecId) {
           try {
             // Shares the same account-wide lane as the strangle-matrix
@@ -191,7 +196,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
               securityId: dhanSecId,
               exchangeSegment,
               transactionType: 'SELL',
-              quantity: leg.quantity,
+              quantity: dhanQtyFor(leg),
               productType: 'MARGIN',
               price: Number(leg.price) || 0,
             }))) as Record<string, unknown>;
@@ -225,7 +230,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       const activeLegs = body.legs.filter(l => l.status !== 'CLOSED' && l.quantity > 0);
       const activeLegsWithSecId = canPriceViaDhan
         ? activeLegs
-          .map(l => ({ leg: l, dhanSecId: dhanSecIdFor(l) }))
+          .map(l => ({ leg: l, dhanSecId: dhanQtyFor(l) > 0 ? dhanSecIdFor(l) : undefined }))
           .filter((x): x is { leg: LegInput; dhanSecId: string } => !!x.dhanSecId)
         : [];
       const allActiveLegsHaveSecId = activeLegsWithSecId.length === activeLegs.length;
@@ -241,7 +246,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
             securityId: dhanSecId,
             exchangeSegment,
             transactionType: l.side === 'B' ? 'BUY' : 'SELL',
-            quantity: l.quantity,
+            quantity: dhanQtyFor(l),
             productType: 'MARGIN',
             price: Number(l.price) || 0,
           }));

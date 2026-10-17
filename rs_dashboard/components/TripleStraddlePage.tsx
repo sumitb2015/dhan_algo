@@ -6,6 +6,7 @@ import NavBar from '@/components/NavBar';
 import { PanelStyles } from '@/components/PanelStyles';
 import { StraddlePanel } from '@/components/StraddlePanel';
 import { HeaderIndexChips } from '@/components/triplestraddle/HeaderIndexChips';
+import { BrokerPicker, usePageBroker } from '@/components/BrokerPicker';
 import { StraddleTradeBar } from '@/components/triplestraddle/StraddleTradeBar';
 import { useTripleStraddle } from '@/components/triplestraddle/useTripleStraddle';
 import { isTsTradable } from '@/lib/tripleStraddleClient';
@@ -45,7 +46,8 @@ export default function TripleStraddlePage() {
   const onCenter = useCallback((k: number | null) => setStrikes((s) => (s.center === k ? s : { ...s, center: k })), []);
   const onRight = useCallback((k: number | null) => setStrikes((s) => (s.right === k ? s : { ...s, right: k })), []);
   const strikeCb: Record<TsSlot, (k: number | null) => void> = { left: onLeft, center: onCenter, right: onRight };
-  const ts = useTripleStraddle({ underlying, expiry, strikes });
+  const [broker, setBroker] = usePageBroker('tripleStraddle.broker');
+  const ts = useTripleStraddle({ underlying, expiry, strikes, broker });
   const tradable = isTsTradable(underlying);
   const openPositions = ts.ledger.positions.filter((p) => p.status === 'OPEN');
   const pnlFor = (mode: 'SIM' | 'REAL') => pnlSummary(ts.ledger.positions.filter((p) => p.mode === mode), ts.livePrices);
@@ -174,15 +176,17 @@ export default function TripleStraddlePage() {
             {live ? 'LIVE' : 'CLOSED'}
           </span>
           <HeaderIndexChips />
+          <BrokerPicker value={broker} onChange={setBroker} disabled={ts.realArmed}
+            disabledReason="Disarm REAL first: new straddles must not switch account while armed. Open positions always exit on the broker they were opened on." />
           <button
             type="button"
             onClick={() => {
-              if (!ts.realArmed && !window.confirm('Arm REAL MONEY? New straddles will place live Dhan orders until you turn this off or reload the page.')) return;
+              if (!ts.realArmed && !window.confirm(`Arm REAL MONEY? New straddles will place live ${broker === 'kotak' ? 'Kotak' : 'Dhan'} orders until you turn this off or reload the page.`)) return;
               ts.setRealArmed(!ts.realArmed);
             }}
             className={`px-2.5 py-1.5 rounded-lg border text-xs font-bold uppercase tracking-wide focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500 ${ts.realArmed ? 'bg-red-500/15 border-red-500/40 text-red-400' : 'bg-zinc-900 border-zinc-800 text-zinc-300'}`}
             aria-pressed={ts.realArmed}
-            title="SIM paper-fills at live prices and never calls the broker. REAL places live Dhan orders."
+            title={`SIM paper-fills at live prices and never calls the broker. REAL places live ${broker === 'kotak' ? 'Kotak' : 'Dhan'} orders.`}
           >
             {ts.realArmed ? 'REAL · armed' : 'SIM mode'}
           </button>

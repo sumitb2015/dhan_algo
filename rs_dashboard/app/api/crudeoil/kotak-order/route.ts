@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { kotakPost, KOTAK_PATHS } from '@/lib/kotakToken';
+import { placeKotakOrder } from '@/lib/kotakPlaceOrder';
 import { invalidateBrokerCache } from '@/lib/brokerPositionsCache';
 
 /**
@@ -70,36 +70,27 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
 
   // Sequential, not Promise.all: Kotak rate-limits order placement, and a
   // rejected basket leg should not race the others.
-  const results: { success: boolean; orderId?: string; error?: string; symbol: string }[] = [];
+  const results: { success: boolean; orderId?: string; error?: string; symbol: string; unknown?: boolean }[] = [];
   for (const leg of legs) {
     const symbol = String(leg.tradingsymbol).toUpperCase().trim();
-    try {
-      const json = await kotakPost(KOTAK_PATHS.placeOrder, {
-        es: 'mcx_fo',
-        pc: product,
-        pr: '0',
-        pt: 'MKT',
-        qt: String(Number(leg.quantity)),
-        rt: 'DAY',
-        ts: symbol,
-        tt: leg.side === 'BUY' ? 'B' : 'S',
-        am: 'NO',
-        dq: '0',
-        mp: '0',
-        pf: 'N',
-        tp: '0',
-        os: 'NEOTRADEAPI',
-      });
-      const data = (typeof json.data === 'object' && json.data !== null ? json.data : {}) as Record<string, unknown>;
-      const orderId = json.nOrdNo ?? data.nOrdNo;
-      if (json.stat === 'Ok' && orderId) {
-        results.push({ success: true, orderId: String(orderId), symbol });
-      } else {
-        results.push({ success: false, error: `Unexpected Kotak response: ${JSON.stringify(json)}`, symbol });
-      }
-    } catch (err) {
-      results.push({ success: false, error: String((err as Error).message ?? err), symbol });
-    }
+    const r = await placeKotakOrder({
+      es: 'mcx_fo',
+      pc: product,
+      pr: '0',
+      pt: 'MKT',
+      qt: String(Number(leg.quantity)),
+      rt: 'DAY',
+      ts: symbol,
+      tt: leg.side === 'BUY' ? 'B' : 'S',
+      am: 'NO',
+      dq: '0',
+      mp: '0',
+      pf: 'N',
+      tp: '0',
+      os: 'NEOTRADEAPI',
+    });
+    if (r.status === 'placed') results.push({ success: true, orderId: r.orderId, symbol });
+    else results.push({ success: false, error: r.error, symbol, ...(r.status === 'unknown' ? { unknown: true } : {}) });
   }
 
   // Invalidate even on a partial failure — a basket can place some legs and
@@ -108,9 +99,11 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
 
   const failures = results.filter(r => !r.success);
   if (failures.length) {
+    const unknown = failures.filter(f => f.unknown);
     return NextResponse.json({
       success: false,
-      error: `Failed to place some orders: ${failures.map(f => `${f.symbol}: ${f.error}`).join(', ')}`,
+      ...(unknown.length ? { unknown: true } : {}),
+      error: `${unknown.length ? `STATUS UNKNOWN (may be live - check Orders before retrying): ${unknown.map(f => f.symbol).join(', ')}. ` : ''}Failed to place some orders: ${failures.map(f => `${f.symbol}: ${f.error}`).join(', ')}`,
       data: results,
     });
   }

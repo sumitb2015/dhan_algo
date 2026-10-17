@@ -5,7 +5,9 @@ import {
   reconstructCallLedger, reconcileCallsDown, deskOrderIds, usedTradeKeys,
   type CallTrade,
 } from '@/lib/coveredCallEngine';
-import { readLedger, mutateLedger, newId, sweepPending, liveBrokerCallShorts } from '@/lib/coveredCallLedgerStore';
+import { readLedger, mutateLedger, newId, sweepPending, liveBrokerCallShorts, deskBrokerOf, type DeskBroker } from '@/lib/coveredCallLedgerStore';
+import { kotakGet, kotakRows, KOTAK_PATHS } from '@/lib/kotakToken';
+import { shapeKotakTrade } from '@/lib/kotakShape';
 
 // Short-call ledger for the NIFTYBEES Covered Call desk. This ledger — not the
 // broker's net position — is what makes a NIFTY CE short "a covered call of
@@ -31,7 +33,13 @@ import { readLedger, mutateLedger, newId, sweepPending, liveBrokerCallShorts } f
 
 type Row = Record<string, unknown>;
 
-async function todayTrades(): Promise<NormalizedTrade[]> {
+/** Every route below acts on ONE broker's ledger: `?broker=kotak` (GET) / `broker: 'kotak'` (POST); default Dhan. */
+async function todayTrades(broker: DeskBroker): Promise<NormalizedTrade[]> {
+  if (broker === 'kotak') {
+    // Kotak trade rows carry no numeric id, so normalizeTradeRow keys them by trading symbol - the Kotak leg handle.
+    return kotakRows(await kotakGet(KOTAK_PATHS.tradeBook)).map(shapeKotakTrade)
+      .map((t) => normalizeTradeRow(t as unknown as Row)).filter((t): t is NormalizedTrade => t != null);
+  }
   const raw = await dhanGet('/trades');
   if (!Array.isArray(raw)) throw new Error('Unexpected /trades payload');
   return (raw as Row[]).map(normalizeTradeRow).filter((t): t is NormalizedTrade => t != null);
@@ -42,14 +50,15 @@ const fail = (error: string, status = 400, extra: Record<string, unknown> = {}) 
 
 export async function GET(req: NextRequest) {
   const sid = req.nextUrl.searchParams.get('candidates');
-  const state = readLedger();
+  const broker = deskBrokerOf(req.nextUrl.searchParams.get('broker'));
+  const state = readLedger(broker);
   if (!sid) return NextResponse.json({ success: true, trades: state.trades, pending: state.pending });
 
   try {
     const own = deskOrderIds(state.trades, state.pending);
     const used = usedTradeKeys(state.trades);
     const byOrder = new Map<string, { orderId: string; units: number; value: number; at: number }>();
-    for (const t of await todayTrades()) {
+    for (const t of await todayTrades(broker)) {
       if (t.ident !== sid || t.side !== 'S' || own.has(t.orderId) || used.has(t.key)) continue;
       const o = byOrder.get(t.orderId) ?? { orderId: t.orderId, units: 0, value: 0, at: t.at };
       o.units += t.qty;
@@ -67,23 +76,24 @@ export async function GET(req: NextRequest) {
 }
 
 export async function POST(req: NextRequest) {
-  let body: { action?: string; legId?: string; securityId?: string; orderId?: string; manualPrice?: number; units?: number };
+  let body: { action?: string; legId?: string; securityId?: string; orderId?: string; manualPrice?: number; units?: number; broker?: string };
   try { body = await req.json(); } catch { return fail('Invalid JSON'); }
+  const broker = deskBrokerOf(body.broker);
 
   if (body.action === 'sweep') {
-    await sweepPending();
-    const s = readLedger();
+    await sweepPending(broker);
+    const s = readLedger(broker);
     return NextResponse.json({ success: true, trades: s.trades, pending: s.pending });
   }
 
-  if (body.action === 'sync') return sync(body.legId, body.manualPrice);
-  if (body.action === 'adopt') return adopt(body);
+  if (body.action === 'sync') return sync(body.legId, body.manualPrice, broker);
+  if (body.action === 'adopt') return adopt(body, broker);
   return fail('Unknown action');
 }
 
 type LedgerOutcome = { status: number; error?: string; needsPrice?: boolean; gap?: number; row?: CallTrade };
 
-async function sync(legId: string | undefined, manualPrice: number | undefined) {
+async function sync(legId: string | undefined, manualPrice: number | undefined, broker: DeskBroker) {
   if (!legId) return fail('legId required');
   const manual = manualPrice !== undefined && manualPrice !== null;
   if (manual && !(Number(manualPrice) >= 0)) return fail('manualPrice must be ≥ 0');
@@ -91,8 +101,8 @@ async function sync(legId: string | undefined, manualPrice: number | undefined) 
   let shorts: Awaited<ReturnType<typeof liveBrokerCallShorts>>;
   let trades: NormalizedTrade[] = [];
   try {
-    shorts = await liveBrokerCallShorts();
-    if (!manual) trades = await todayTrades();
+    shorts = await liveBrokerCallShorts(broker);
+    if (!manual) trades = await todayTrades(broker);
   } catch (err) {
     return fail(`Broker unavailable, nothing synced: ${(err as Error).message}`, 503);
   }
@@ -137,15 +147,15 @@ async function sync(legId: string | undefined, manualPrice: number | undefined) 
     };
     state.trades.push(row);
     return { result: { status: 200, row }, write: true };
-  });
+  }, broker);
 
   if (out.status !== 200) return fail(out.error!, out.status, out.needsPrice ? { needsPrice: true, gap: out.gap } : {});
-  return NextResponse.json({ success: true, trade: out.row, trades: readLedger().trades });
+  return NextResponse.json({ success: true, trade: out.row, trades: readLedger(broker).trades });
 }
 
-async function adopt(body: { securityId?: string; orderId?: string; manualPrice?: number; units?: number }) {
+async function adopt(body: { securityId?: string; orderId?: string; manualPrice?: number; units?: number }, broker: DeskBroker) {
   const securityId = String(body.securityId ?? '');
-  if (!/^\d+$/.test(securityId)) return fail('Invalid securityId');
+  if (broker === 'kotak' ? !/^NIFTY[0-9A-Z]+CE$/.test(securityId) : !/^\d+$/.test(securityId)) return fail('Invalid contract');
   if (!body.orderId && !(Number(body.manualPrice) > 0 && Number(body.units) > 0)) {
     return fail('Adopt needs the orderId of the sell, or a manualPrice > 0 and units');
   }
@@ -153,8 +163,8 @@ async function adopt(body: { securityId?: string; orderId?: string; manualPrice?
   let shorts: Awaited<ReturnType<typeof liveBrokerCallShorts>>;
   let trades: NormalizedTrade[] = [];
   try {
-    shorts = await liveBrokerCallShorts();
-    if (body.orderId) trades = await todayTrades();
+    shorts = await liveBrokerCallShorts(broker);
+    if (body.orderId) trades = await todayTrades(broker);
   } catch (err) {
     return fail(`Broker unavailable, nothing adopted: ${(err as Error).message}`, 503);
   }
@@ -196,8 +206,8 @@ async function adopt(body: { securityId?: string; orderId?: string; manualPrice?
     };
     state.trades.push(row);
     return { result: { status: 200, row }, write: true };
-  });
+  }, broker);
 
   if (out.status !== 200) return fail(out.error!, out.status);
-  return NextResponse.json({ success: true, trade: out.row, trades: readLedger().trades });
+  return NextResponse.json({ success: true, trade: out.row, trades: readLedger(broker).trades });
 }

@@ -721,6 +721,15 @@ export default function SyntheticFuturesScalper() {
     }, 4500);
   }, []);
 
+  // Kotak can leave a placement unanswered: the route then reports the leg as failed with `unknown: true`, meaning it MAY be
+  // live at the broker even though this page will not track it. Never let that pass as a plain failure.
+  const warnUnknownOutcome = useCallback((j: { unknown?: boolean; legs?: { unknown?: boolean; role?: string }[]; results?: { unknown?: boolean; tradingSymbol?: string }[] }) => {
+    const legs = [...(j.legs ?? []), ...(j.results ?? [])].filter(l => l?.unknown);
+    if (!j.unknown && legs.length === 0) return;
+    addToast('error', 'Order status UNKNOWN - check the broker now',
+      `${legs.length ? `${legs.length} leg(s)` : 'The order'} got no confirmation from the broker and may be live. Check Orders/Positions before retrying or exiting.`);
+  }, [addToast]);
+
   // Add Log Event
   const addLog = useCallback((type: LogEvent['type'], message: string, detail?: string) => {
     const time = new Date().toLocaleTimeString('en-GB', { hour12: false });
@@ -1221,6 +1230,7 @@ export default function SyntheticFuturesScalper() {
       });
 
       const json = await res.json();
+      warnUnknownOutcome(json);
       const execLegs =
         (json.legs as
           | Array<{ role?: string; orderId?: string; status?: string; error?: string; securityId?: string; tradingSymbol?: string }>
@@ -1854,6 +1864,7 @@ export default function SyntheticFuturesScalper() {
       });
 
       const json = await res.json();
+      warnUnknownOutcome(json);
       if (!json.success) {
         addToast('error', 'Flatten Failed', json.error || 'Broker rejected close orders');
         addLog('ERROR', `Flatten Failed: ${json.error || 'Unknown error'}`);
@@ -1979,6 +1990,7 @@ export default function SyntheticFuturesScalper() {
       });
 
       const json = await res.json();
+      warnUnknownOutcome(json);
       if (!json.success || !json.orderId) {
         addToast('error', 'Add Lots Failed', json.error || 'Broker rejected the order');
         addLog('ERROR', `Add ${addLots} Lot(s) to ${leg.role} Failed: ${json.error || 'Unknown error'}`);

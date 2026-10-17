@@ -20,6 +20,7 @@ import AddNewLegModal from '@/components/multiLegFocus/AddNewLegModal';
 import ExitLotsModal from '@/components/multiLegFocus/ExitLotsModal';
 import OrdersTradesModal from '@/components/multiLegFocus/OrdersTradesModal';
 import { FOCUS_RING } from '@/components/Scalper';
+import { BrokerPicker, usePageBroker, type DhanKotak } from '@/components/BrokerPicker';
 import { useLiveOptionsWS } from '@/lib/useLiveOptionsWS';
 import { useLiveTickerPoll, isStale } from '@/lib/useLiveTickerPoll';
 import { startLiveIndicesBridge } from '@/lib/startLiveIndicesBridge';
@@ -162,6 +163,8 @@ export default function BearishStrikes() {
   const setUnderlying = (u: Underlying) => { setUnderlyingRaw(u); setExpiries([]); setExpiry(''); };
   const [armed, setArmed] = useState(false);     // REAL money — per page load, never persisted
   const mode: 'SIM' | 'REAL' = armed ? 'REAL' : 'SIM';
+  // Account NEW sells go to. A row keeps the broker it was opened on; its exits, settles and reconcile follow the row.
+  const [broker, setBroker] = usePageBroker('bearishStrikes.broker');
 
   // ── Exit alerts for open positions (settings are per-viewer conveniences, kept in localStorage) ──
   const [watchSt, setWatchSt] = useState(true);
@@ -303,20 +306,21 @@ export default function BearishStrikes() {
 
   // ── Lot size + security ids ─────────────────────────────────────
   const [lookupState, setLookup] = useState<{ scope: string; entry: LookupEntry } | null>(null);
-  const lookup = lookupState && lookupState.scope === `${underlying}|${expiry}` ? lookupState.entry : null;
+  // Per broker: Dhan gives security ids (MCX lot size 1 = lots), Kotak trading symbols (MCX lot size = barrels per lot).
+  const lookup = lookupState && lookupState.scope === `${broker}|${underlying}|${expiry}` ? lookupState.entry : null;
   useEffect(() => {
     if (!expiry) return;
     let dead = false;
-    fetch(`/api/scalper/lookup?underlying=${underlying}&expiry=${expiry}`)
+    fetch(`/api/scalper/${broker === 'kotak' ? 'kotak/' : ''}lookup?underlying=${underlying}&expiry=${expiry}`)
       .then((r) => r.json())
       .then((j: { success: boolean; data?: { lotSize?: number; strikes?: Record<string, StrikeIdentifier> } }) => {
         if (dead || !j.success || !j.data) return;
-        setLookup({ scope: `${underlying}|${expiry}`, entry: { lotSize: j.data.lotSize ?? fallbackLotSize(underlying, 'dhan'), strikes: j.data.strikes ?? {} } });
+        setLookup({ scope: `${broker}|${underlying}|${expiry}`, entry: { lotSize: j.data.lotSize ?? fallbackLotSize(underlying, broker), strikes: j.data.strikes ?? {} } });
       })
       .catch(() => {});
     return () => { dead = true; };
-  }, [underlying, expiry]);
-  const lotSize = lookup?.lotSize ?? fallbackLotSize(underlying, 'dhan');
+  }, [underlying, expiry, broker]);
+  const lotSize = lookup?.lotSize ?? fallbackLotSize(underlying, broker);
 
   // ── Candles: 1-min backfill per contract + LTP-built live minutes ─
   const barsRef = useRef<Map<string, { minute: string; bars: Bar[]; error?: string }>>(new Map());
@@ -577,9 +581,9 @@ export default function BearishStrikes() {
         for (const p of positions) {
           for (const o of p.pendingOrders ?? []) {
             if (p.mode !== 'REAL') continue;
-            const r = await fetch(`/api/scalper/orders?orderId=${encodeURIComponent(o.orderId)}`).then((x) => x.json()).catch(() => null) as
+            const r = await fetch(`/api/scalper/orders?orderId=${encodeURIComponent(o.orderId)}&broker=${p.broker ?? 'dhan'}`).then((x) => x.json()).catch(() => null) as
               { success: boolean; data?: { orderStatus: string; filledQty: number; averageTradedPrice: number } } | null;
-            if (!r?.success || !r.data) { if (Date.now() - o.at > SETTLE_GIVE_UP_MS) toast.warning(`Order ${o.orderId} status unknown — check the Dhan order book`); continue; }
+            if (!r?.success || !r.data) { if (Date.now() - o.at > SETTLE_GIVE_UP_MS) toast.warning(`Order ${o.orderId} status unknown — check the ${p.broker === 'kotak' ? 'Kotak' : 'Dhan'} order book`); continue; }
             const st = r.data.orderStatus;
             if (st === 'TRADED') await op({ op: 'settle', id: p.id, orderId: o.orderId, filledQty: r.data.filledQty, avgPrice: r.data.averageTradedPrice, at: Date.now() });
             else if (['REJECTED', 'CANCELLED', 'CANCELED', 'EXPIRED'].includes(st)) {
@@ -599,15 +603,21 @@ export default function BearishStrikes() {
     const id = setInterval(async () => {
       const real = positions.filter((p) => p.mode === 'REAL' && p.status === 'OPEN' && p.qty > 0 && !p.pendingOrders?.length && Date.now() - p.filledAt > FILL_GRACE_MS);
       if (!real.length) return;
-      try {
-        const j = await (await fetch('/api/scalper/positions')).json() as { success: boolean; data?: Record<string, unknown>[] };
-        if (!j.success || !Array.isArray(j.data)) return;                       // unreadable book: touch nothing
-        for (const p of real) {
-          const rows = j.data.filter((r) => String(r.securityId) === p.securityId && String(r.productType ?? 'INTRADAY').toUpperCase() === 'INTRADAY');
-          const shortQty = rows.reduce((a, r) => a + Math.max(0, -(Number(r.netQty) || 0)), 0);
-          if (shortQty < p.qty) await op({ op: 'clamp', id: p.id, qty: shortQty, at: Date.now() });
-        }
-      } catch { /* retry next tick */ }
+      // Each row against ITS broker's book: Dhan by security id, Kotak by trading symbol (product MIS = INTRADAY).
+      for (const bk of ['dhan', 'kotak'] as const) {
+        const mine = real.filter((p) => (p.broker ?? 'dhan') === bk);
+        if (!mine.length) continue;
+        try {
+          const j = await (await fetch(bk === 'kotak' ? '/api/scalper/kotak/positions' : '/api/scalper/positions')).json() as { success: boolean; data?: Record<string, unknown>[] };
+          if (!j.success || !Array.isArray(j.data)) continue;                     // unreadable book: touch nothing
+          for (const p of mine) {
+            const rows = j.data.filter((r) => (bk === 'kotak' ? String(r.tradingSymbol) === p.symbol : String(r.securityId) === p.securityId)
+              && ['INTRADAY', 'MIS'].includes(String(r.productType ?? 'INTRADAY').toUpperCase()));
+            const shortQty = rows.reduce((a, r) => a + Math.max(0, -(Number(r.netQty) || 0)), 0);
+            if (shortQty < p.qty) await op({ op: 'clamp', id: p.id, qty: shortQty, at: Date.now() });
+          }
+        } catch { /* retry next tick */ }
+      }
     }, 10_000);
     return () => clearInterval(id);
   }, [positions, op]);
@@ -620,7 +630,7 @@ export default function BearishStrikes() {
     return d && d.ltp > 0 ? d.ltp : null;
   }, [liveQuotes, underlying, expiry]);
 
-  // ── Broker order book / trade book / positions (Dhan account, whole book — not just this page's rows) ──
+  // ── Broker order book / trade book / positions (the selected account's whole book — not just this page's rows) ──
   const [showBook, setShowBook] = useState(false);
   const [bookData, setBookData] = useState<{ orders: Record<string, unknown>[]; trades: Record<string, unknown>[]; positions: Record<string, unknown>[] }>({ orders: [], trades: [], positions: [] });
   const [bookLoading, setBookLoading] = useState(false);
@@ -628,7 +638,7 @@ export default function BearishStrikes() {
   const fetchBook = useCallback(async () => {
     setBookLoading(true); setBookError(null);
     try {
-      const j = await (await fetch('/api/scalper/poll')).json() as {
+      const j = await (await fetch(broker === 'kotak' ? '/api/scalper/kotak/poll' : '/api/scalper/poll')).json() as {
         success: boolean; positions?: Record<string, unknown>[]; orders?: Record<string, unknown>[]; trades?: Record<string, unknown>[];
         positionsError?: string | null; error?: string;
       };
@@ -641,7 +651,7 @@ export default function BearishStrikes() {
         }));
       } else setBookError(j.error || j.positionsError || 'Failed to fetch the order book');
     } catch (e) { setBookError(String((e as Error).message)); } finally { setBookLoading(false); }
-  }, []);
+  }, [broker]);
   useEffect(() => {
     if (!showBook) return;
     const t0 = setTimeout(fetchBook, 0);
@@ -654,22 +664,22 @@ export default function BearishStrikes() {
   const [exitId, setExitId] = useState<string | null>(null);
 
   const basket: MultiLegBasket = useMemo(() => ({
-    id: 'bearish-strikes', name: 'Bearish Strikes', underlying, expiry, broker: 'dhan',
+    id: 'bearish-strikes', name: 'Bearish Strikes', underlying, expiry, broker,
     // Today's losing closed shorts feed the Add Leg "bigger than a short that lost today" warning.
     legs: positions.filter((p) => p.underlying === underlying && p.status === 'CLOSED').map((p) => legOf(p)),
     createdAt: '', updatedAt: '',
-  }), [underlying, expiry, positions]);
+  }), [underlying, expiry, positions, broker]);
 
   const strikeList = useMemo(() => Object.keys(liveQuotes?.strikes ?? {}).map(Number).sort((a, b) => a - b), [liveQuotes]);
   const ltpForStrike = useCallback((strike: number, option: 'CE' | 'PE') => ltpOf({ underlying, expiry, option, strike }) ?? 0, [ltpOf, underlying, expiry]);
 
   const lock = useRef(false);   // taken synchronously before any await: a double-click cannot place twice
 
-  const confirmOrder = useCallback(async (orderId: string, timeoutMs = 6000) => {
+  const confirmOrder = useCallback(async (orderId: string, bk: DhanKotak, timeoutMs = 6000) => {
     const deadline = Date.now() + timeoutMs;
     for (;;) {
       try {
-        const j = await (await fetch(`/api/scalper/orders?orderId=${encodeURIComponent(orderId)}`)).json() as
+        const j = await (await fetch(`/api/scalper/orders?orderId=${encodeURIComponent(orderId)}&broker=${bk}`)).json() as
           { success: boolean; data?: { orderStatus: string; filledQty: number; averageTradedPrice: number; reason: string } };
         if (j.success && j.data) {
           const st = j.data.orderStatus;
@@ -682,13 +692,16 @@ export default function BearishStrikes() {
     }
   }, []);
 
-  /** Sends one Dhan order through the shared fast-order route (server caps `bs` at 3750 units per order). */
-  const sendDhan = useCallback(async (args: {
-    side: 'S' | 'B'; option: 'CE' | 'PE'; strike: number; qty: number; type: 'MARKET' | 'LIMIT'; price?: number; securityId: string; idem: string;
+  /** Sends one order: Dhan through the shared fast-order route (server caps `bs` at 3750 units per order), Kotak by
+   *  trading symbol through its own route (which checks the order book itself when the reply is unclear). */
+  const sendOrder = useCallback(async (args: {
+    broker: DhanKotak; underlying: string;
+    side: 'S' | 'B'; option: 'CE' | 'PE'; strike: number; qty: number; type: 'MARKET' | 'LIMIT'; price?: number; ident: string; idem: string;
   }): Promise<{ orderId: string | null; error?: string; unknown?: boolean }> => {
-    const req = resolveOrderRequest('dhan', {
+    const req = resolveOrderRequest(args.broker, {
       side: args.side, option: args.option, strike: args.strike, qty: args.qty, type: args.type, price: args.price,
-      underlying, productType: 'INTRADAY', securityId: args.securityId,
+      underlying: args.underlying, productType: 'INTRADAY',
+      ...(args.broker === 'kotak' ? { tradingsymbol: args.ident } : { securityId: args.ident }),
     }, {}, SOURCE);
     if (!req) return { orderId: null, error: 'Could not build the order' };
     try {
@@ -697,7 +710,7 @@ export default function BearishStrikes() {
       if (j.success && j.order_id) return { orderId: j.order_id };
       return { orderId: null, error: j.error ?? 'Order rejected', unknown: res.status === 504 };
     } catch (e) { return { orderId: null, error: String(e), unknown: true }; }
-  }, [underlying]);
+  }, []);
 
   const placeSell = useCallback(async (p: {
     option: 'CE' | 'PE'; strike: number; expiry: string; lots: number; orderType: 'MARKET' | 'LIMIT' | 'SL' | 'SLM'; limitPrice?: number;
@@ -709,7 +722,9 @@ export default function BearishStrikes() {
     try {
       const qty = p.lots * lotSize;
       const ltp = ltpOf({ underlying, expiry: p.expiry, option: p.option, strike: p.strike });
-      const existing = positions.find((x) => x.status === 'OPEN' && x.mode === mode && x.underlying === underlying && x.expiry === p.expiry && x.option === p.option && x.strike === p.strike);
+      // The same contract on the OTHER broker is another account's position, never one to add to.
+      const existing = positions.find((x) => x.status === 'OPEN' && x.mode === mode && (mode === 'SIM' || (x.broker ?? 'dhan') === broker)
+        && x.underlying === underlying && x.expiry === p.expiry && x.option === p.option && x.strike === p.strike);
       const label = `${underlying} ${p.strike} ${p.option}`;
 
       if (mode === 'SIM') {
@@ -724,29 +739,34 @@ export default function BearishStrikes() {
       }
 
       const ident = lookup?.strikes[String(p.strike)];
-      const securityId = p.option === 'CE' ? ident?.ceId : ident?.peId;
-      if (!securityId) { toast.error(`No security id for ${label} — lookup not loaded`); return; }
+      const contract = broker === 'kotak'
+        ? (p.option === 'CE' ? ident?.ceSymbol : ident?.peSymbol)
+        : (p.option === 'CE' ? ident?.ceId : ident?.peId);
+      if (!contract) { toast.error(`No ${broker === 'kotak' ? 'Kotak trading symbol' : 'security id'} for ${label} — lookup not loaded`); return; }
       const idem = `bs-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
-      const r = await sendDhan({ side: 'S', option: p.option, strike: p.strike, qty, type: p.orderType, price: p.limitPrice, securityId, idem });
+      const r = await sendOrder({ broker, underlying, side: 'S', option: p.option, strike: p.strike, qty, type: p.orderType, price: p.limitPrice, ident: contract, idem });
       if (!r.orderId) {
-        toast.error(r.unknown ? `Order status unknown for ${label} — check Dhan Positions/Orders before retrying` : `Order rejected: ${r.error}`);
+        toast.error(r.unknown ? `Order status unknown for ${label} — check ${broker === 'kotak' ? 'Kotak' : 'Dhan'} Positions/Orders before retrying` : `Order rejected: ${r.error}`);
         return;
       }
       // Track the order from the moment it is ACKed, so an unconfirmed one is never forgotten.
       const pending = { orderId: r.orderId, kind: 'entry' as const, side: 'SELL' as const, qty, at: Date.now() };
       const tracked = existing
         ? await op({ op: 'pending', id: existing.id, pending })
-        : await op({ op: 'open', position: newPosition({ mode, underlying, expiry: p.expiry, option: p.option, strike: p.strike, lotSize, qty: 0, avgPrice: 0, securityId, pendingOrders: [pending] }) });
-      if (!tracked) { toast.error(`Order ${r.orderId} was sent but could not be recorded — check Dhan Positions`); return; }
+        : await op({ op: 'open', position: newPosition({
+            mode, underlying, expiry: p.expiry, option: p.option, strike: p.strike, lotSize, qty: 0, avgPrice: 0, broker,
+            ...(broker === 'kotak' ? { symbol: contract } : { securityId: contract }), pendingOrders: [pending],
+          }) });
+      if (!tracked) { toast.error(`Order ${r.orderId} was sent but could not be recorded — check ${broker === 'kotak' ? 'Kotak' : 'Dhan'} Positions`); return; }
       const id = existing?.id ?? null;
-      const c = await confirmOrder(r.orderId);
+      const c = await confirmOrder(r.orderId, broker);
       if (c.phase === 'pending') { toast.warning(`${label} order still working — it is tracked and will settle automatically`); return; }
-      const pos = await currentPosition(id, { mode, underlying, expiry: p.expiry, option: p.option, strike: p.strike });
+      const pos = await currentPosition(id, { mode, broker, underlying, expiry: p.expiry, option: p.option, strike: p.strike });
       if (pos) await op({ op: 'settle', id: pos.id, orderId: r.orderId, filledQty: c.qty, avgPrice: c.avg, at: Date.now() });
       if (c.phase === 'filled') toast.success(`Sold ${p.lots} lot${p.lots > 1 ? 's' : ''} ${label} @ ${c.avg.toFixed(2)}`);
       else toast.error(`${label} order ${c.reason || 'rejected'}`);
     } finally { lock.current = false; }
-  }, [lotSize, ltpOf, underlying, positions, mode, op, lookup, sendDhan, confirmOrder]);
+  }, [lotSize, ltpOf, underlying, positions, mode, op, lookup, sendOrder, confirmOrder, broker]);
 
   const doExit = useCallback(async (pos: BsPosition, lots: number, orderType: 'MARKET' | 'LIMIT', limitPrice?: number): Promise<boolean> => {
     if (lock.current) { toast.warning('Another order is still in flight'); return false; }
@@ -765,28 +785,30 @@ export default function BearishStrikes() {
         if (ok) toast.success(`SIM bought back ${label} @ ${price.toFixed(2)}`);
         return ok;
       }
-      if (!pos.securityId) { toast.error('Position has no security id'); return false; }
+      const bk: DhanKotak = pos.broker ?? 'dhan';
+      const contract = bk === 'kotak' ? pos.symbol : pos.securityId;
+      if (!contract) { toast.error(`Position has no ${bk === 'kotak' ? 'Kotak trading symbol' : 'security id'}`); return false; }
       // A resting exit must be cancelled first or the two would together over-buy; abort if the cancel fails.
       for (const o of (pos.pendingOrders ?? []).filter((x) => x.kind === 'exit')) {
-        const cr = await fetch('/api/scalper/orders', { method: 'DELETE', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ orderId: o.orderId, broker: 'dhan' }) }).then((x) => x.json()).catch(() => null) as { success?: boolean } | null;
+        const cr = await fetch('/api/scalper/orders', { method: 'DELETE', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ orderId: o.orderId, broker: bk }) }).then((x) => x.json()).catch(() => null) as { success?: boolean } | null;
         if (!cr?.success) { toast.error(`Could not cancel the resting exit ${o.orderId}; exit not sent`); return false; }
         await op({ op: 'settle', id: pos.id, orderId: o.orderId, filledQty: 0, avgPrice: 0, at: Date.now() });
       }
       const idem = `bs-x-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
-      const r = await sendDhan({ side: 'B', option: pos.option, strike: pos.strike, qty, type: orderType, price: limitPrice, securityId: pos.securityId, idem });
+      const r = await sendOrder({ broker: bk, underlying: pos.underlying, side: 'B', option: pos.option, strike: pos.strike, qty, type: orderType, price: limitPrice, ident: contract, idem });
       if (!r.orderId) {
-        toast.error(r.unknown ? `Exit status unknown for ${label} — check Dhan Positions before retrying` : `Exit rejected: ${r.error}`);
+        toast.error(r.unknown ? `Exit status unknown for ${label} — check ${bk === 'kotak' ? 'Kotak' : 'Dhan'} Positions before retrying` : `Exit rejected: ${r.error}`);
         return false;
       }
       await op({ op: 'pending', id: pos.id, pending: { orderId: r.orderId, kind: 'exit', side: 'BUY', qty, at: Date.now() } });
-      const c = await confirmOrder(r.orderId);
+      const c = await confirmOrder(r.orderId, bk);
       if (c.phase === 'pending') { toast.warning(`${label} exit still working — tracked, will settle automatically`); return true; }
       await op({ op: 'settle', id: pos.id, orderId: r.orderId, filledQty: c.qty, avgPrice: c.avg, at: Date.now() });
       if (c.phase === 'filled') toast.success(`Bought back ${label} @ ${c.avg.toFixed(2)}`);
       else toast.error(`${label} exit ${c.reason || 'rejected'} — position is still open`);
       return c.phase === 'filled';
     } finally { lock.current = false; }
-  }, [ltpOf, op, sendDhan, confirmOrder]);
+  }, [ltpOf, op, sendOrder, confirmOrder]);
 
   const exitAll = useCallback(async () => {
     const open = positions.filter((p) => p.status === 'OPEN' && p.qty > 0 && p.mode === mode);
@@ -905,9 +927,11 @@ export default function BearishStrikes() {
                 <TriangleAlert className="w-3.5 h-3.5" aria-hidden="true" />{alertCount} ALERT{alertCount > 1 ? 'S' : ''}
               </span>
             )}
+            <BrokerPicker value={broker} onChange={setBroker} disabled={armed}
+              disabledReason="Return to SIM first: new sells must not switch account while armed. Open rows always exit on their own broker." />
             <button
               type="button" onClick={() => setArmed((a) => !a)} aria-pressed={armed}
-              title={armed ? 'REAL orders go to Dhan. Click to return to SIM.' : 'SIM: paper fills at live LTP. Click to arm REAL (Dhan, per page load).'}
+              title={armed ? `REAL orders go to ${broker === 'kotak' ? 'Kotak' : 'Dhan'}. Click to return to SIM.` : `SIM: paper fills at live LTP. Click to arm REAL (${broker === 'kotak' ? 'Kotak' : 'Dhan'}, per page load).`}
               className={`h-7 px-2 rounded border text-[11px] font-bold font-mono flex items-center gap-1 ${FOCUS_RING} ${armed ? 'bg-red-600 border-red-500 text-oncolor' : 'bg-zinc-900 border-zinc-700 text-zinc-300 hover:text-white'}`}
             >
               <ShieldAlert className="w-3.5 h-3.5" aria-hidden="true" />{armed ? 'LIVE · REAL MONEY' : 'SIM'}
@@ -1292,7 +1316,7 @@ export default function BearishStrikes() {
       )}
 
       <OrdersTradesModal
-        isOpen={showBook} onClose={() => setShowBook(false)} broker="dhan"
+        isOpen={showBook} onClose={() => setShowBook(false)} broker={broker}
         ordersData={bookData.orders} tradesData={bookData.trades} positionsData={bookData.positions}
         isLoading={bookLoading} error={bookError} onRefresh={fetchBook}
       />
@@ -1309,8 +1333,8 @@ export default function BearishStrikes() {
       )}
       {exitPos && (
         <ExitLotsModal
-          key={exitPos.id} isOpen onClose={() => setExitId(null)} leg={legOf(exitPos)} basket={{ ...basket, expiry: exitPos.expiry }}
-          lotSize={exitPos.lotSize} currentLtp={ltpOf(exitPos) ?? 0} broker="dhan"
+          key={exitPos.id} isOpen onClose={() => setExitId(null)} leg={legOf(exitPos)} basket={{ ...basket, expiry: exitPos.expiry, broker: exitPos.broker ?? 'dhan' }}
+          lotSize={exitPos.lotSize} currentLtp={ltpOf(exitPos) ?? 0} broker={exitPos.broker ?? 'dhan'}
           onConfirm={async (p) => doExit(exitPos, p.lots, p.orderType, p.limitPrice)}
         />
       )}
@@ -1338,10 +1362,11 @@ function legOf(p: BsPosition): MultiLegLeg {
   } as MultiLegLeg;
 }
 
-async function currentPosition(id: string | null, k: Pick<BsPosition, 'mode' | 'underlying' | 'expiry' | 'option' | 'strike'>): Promise<BsPosition | null> {
+async function currentPosition(id: string | null, k: Pick<BsPosition, 'mode' | 'broker' | 'underlying' | 'expiry' | 'option' | 'strike'>): Promise<BsPosition | null> {
   try {
     const j = await (await fetch('/api/bearish-strikes/state')).json() as { positions?: BsPosition[] };
     const list = j.positions ?? [];
-    return list.find((x) => x.id === id) ?? list.find((x) => x.status === 'OPEN' && x.mode === k.mode && x.underlying === k.underlying && x.expiry === k.expiry && x.option === k.option && x.strike === k.strike) ?? null;
+    return list.find((x) => x.id === id) ?? list.find((x) => x.status === 'OPEN' && x.mode === k.mode && (x.broker ?? 'dhan') === (k.broker ?? 'dhan')
+      && x.underlying === k.underlying && x.expiry === k.expiry && x.option === k.option && x.strike === k.strike) ?? null;
   } catch { return null; }
 }

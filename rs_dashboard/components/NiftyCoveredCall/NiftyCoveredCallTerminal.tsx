@@ -1,5 +1,6 @@
 'use client';
 
+import { BrokerPicker, usePageBroker } from '@/components/BrokerPicker';
 import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { Shield, RefreshCw, ListChecks, PenLine, Wallet, Link2, BookOpen, ChevronDown, SlidersHorizontal, Table2 } from 'lucide-react';
 import NavBar from '@/components/NavBar';
@@ -37,7 +38,7 @@ import { futureQuote, type FutureQuote } from '@/lib/optionsPricing';
 import type { CoveredCallBookResponse } from '@/app/api/nifty-covered-call/book/route';
 import type { CoveredCallOrderResult } from '@/app/api/nifty-covered-call/order/route';
 
-// ── NIFTYBEES Covered Call desk — Dhan-only, REAL MONEY (calls only).
+// ── NIFTYBEES Covered Call desk — Dhan or Kotak (one ledger per account), REAL MONEY (calls only).
 
 const TXT_LABEL = 'text-[9px]';
 const TXT_VALUE = 'text-[10px]';
@@ -100,6 +101,14 @@ function RuleNumInput({ value, onCommit, placeholder, className, ariaLabel }: {
 }
 
 export default function NiftyCoveredCallTerminal() {
+  // ── Account ─────────────────────────────────────────────────────────────
+  // Each broker has its own desk ledger on the server; switching shows that account's book and legs, and every order,
+  // sweep, sync and adopt goes to the selected account only. Market data (chain, Greeks, NIFTYBEES price) is Dhan's.
+  const [broker, setBroker] = usePageBroker('coveredCall.broker');
+  const bq = `broker=${broker}`;
+  // Out-of-order guard: a response for the account that is no longer selected is dropped, never shown.
+  const brokerRef = useRef(broker);
+  brokerRef.current = broker;
   // ── Contracts / market data ─────────────────────────────────────────────
   const [expiries, setExpiries] = useState<string[]>([]);
   const [optionExpiry, setOptionExpiry] = useState<string | null>(null);
@@ -171,21 +180,24 @@ export default function NiftyCoveredCallTerminal() {
   }, []);
   const reloadLedger = useCallback(async () => {
     try {
-      const j = await (await fetch('/api/nifty-covered-call/state')).json();
-      if (j.success) applyLedger(j);
+      const asked = broker;
+      const j = await (await fetch(`/api/nifty-covered-call/state?${bq}`)).json();
+      if (j.success && brokerRef.current === asked) applyLedger(j);
     } catch {}
-  }, [applyLedger]);
+  }, [applyLedger, bq, broker]);
+  // A switch of account must never show (or act on) the other account's legs: clear first, then load this one.
+  useEffect(() => { setTrades([]); setPending([]); setBook(null); setBookError(null); }, [broker]);
   useEffect(() => { reloadLedger(); }, [reloadLedger]);
 
   const ledgerAction = useCallback(async (payload: Record<string, unknown>) => {
     const j = await (await fetch('/api/nifty-covered-call/state', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload),
+      body: JSON.stringify({ ...payload, broker }),
     })).json();
-    if (j.success) { applyLedger(j); await reloadLedger(); }
+    if (j.success && brokerRef.current === broker) { applyLedger(j); await reloadLedger(); }
     return j as { success: boolean; error?: string; needsPrice?: boolean; gap?: number };
-  }, [applyLedger, reloadLedger]);
+  }, [applyLedger, reloadLedger, broker]);
 
   const pendingRef = useRef(pending);
   useEffect(() => { pendingRef.current = pending; }, [pending]);
@@ -247,7 +259,9 @@ export default function NiftyCoveredCallTerminal() {
     if (bookInFlight.current) return;
     bookInFlight.current = true;
     try {
-      const j = (await (await fetch('/api/nifty-covered-call/book')).json()) as CoveredCallBookResponse & { error?: string };
+      const asked = broker;
+      const j = (await (await fetch(`/api/nifty-covered-call/book?${bq}`)).json()) as CoveredCallBookResponse & { error?: string };
+      if (brokerRef.current !== asked) return;
       if (j.ts) setBook(j);
       setBookError(j.success ? null : j.error || j.beesError || j.positionsError || 'Broker book unavailable');
     } catch (err) {
@@ -255,7 +269,7 @@ export default function NiftyCoveredCallTerminal() {
     } finally {
       bookInFlight.current = false;
     }
-  }, []);
+  }, [bq, broker]);
   useEffect(() => {
     fetchBook();
     const id = setInterval(() => { fetchBook(); sweepPending(); setNow(Date.now()); }, BOOK_POLL_MS);
@@ -402,12 +416,23 @@ export default function NiftyCoveredCallTerminal() {
     const res = await fetch('/api/nifty-covered-call/order', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(req),
+      body: JSON.stringify({ ...req, broker }),
     });
     const r = (await res.json()) as CoveredCallOrderResult;
     await reloadLedger();
     return r;
-  }, [reloadLedger]);
+  }, [reloadLedger, broker]);
+
+  // Kotak has no Dhan security id: a call is written by the Kotak trading symbol of the same strike/expiry, read from
+  // Kotak's own contract list (one lookup per expiry, cached for the session).
+  const kotakSymbols = useRef<Record<string, Record<string, { ceSymbol?: string }>>>({});
+  const kotakCeSymbol = useCallback(async (expiry: string, strike: number): Promise<string | undefined> => {
+    if (!kotakSymbols.current[expiry]) {
+      const j = await (await fetch(`/api/scalper/kotak/lookup?underlying=NIFTY&expiry=${expiry}`)).json() as { success: boolean; data?: { strikes?: Record<string, { ceSymbol?: string }> } };
+      if (j.success && j.data?.strikes) kotakSymbols.current[expiry] = j.data.strikes;
+    }
+    return kotakSymbols.current[expiry]?.[String(strike)]?.ceSymbol;
+  }, []);
 
   const withBusy = useCallback(async (fn: () => Promise<void>) => {
     if (busyRef.current) return;
@@ -425,17 +450,25 @@ export default function NiftyCoveredCallTerminal() {
     'The desk keeps watching it — any later fill is booked automatically.';
 
   const sellCall = useCallback(async (strike: number, expiry: string, units: number, type: 'MARKET' | 'LIMIT', price: number | undefined, note?: string) => {
-    const oc = chains[expiry];
-    const ce = oc ? lookupChainLegData(oc, strike, 'CE') : undefined;
-    if (!ce?.security_id) throw new Error(`No security id for ${strike} CE ${expiry} — chain not loaded`);
+    let contract: string;
+    if (broker === 'kotak') {
+      const sym = await kotakCeSymbol(expiry, strike);
+      if (!sym) throw new Error(`Kotak does not list NIFTY ${strike} CE ${expiry} (or its contract list did not load)`);
+      contract = sym;
+    } else {
+      const oc = chains[expiry];
+      const ce = oc ? lookupChainLegData(oc, strike, 'CE') : undefined;
+      if (!ce?.security_id) throw new Error(`No security id for ${strike} CE ${expiry} — chain not loaded`);
+      contract = String(ce.security_id);
+    }
     const r = await placeOrder({
-      side: 'SELL', securityId: String(ce.security_id), units, orderType: type, price,
-      strike, expiry, tradingSymbol: `NIFTY-${expiry}-${strike}-CE`, note,
+      side: 'SELL', securityId: contract, units, orderType: type, price,
+      strike, expiry, tradingSymbol: broker === 'kotak' ? contract : `NIFTY-${expiry}-${strike}-CE`, note,
     });
     if (!r.success) throw new Error(`Sell ${strike} CE failed: ${r.error ?? r.status}`);
     if (r.pending) alert(pendingNote(r, units));
     return r.filledUnits ?? 0;
-  }, [chains, placeOrder]);
+  }, [chains, placeOrder, broker, kotakCeSymbol]);
 
   const buyBack = useCallback(async (leg: OpenCall, units: number, note: string) => {
     const r = await placeOrder({ side: 'BUY', securityId: leg.securityId, units, orderType: 'MARKET', openLegId: leg.id, note });
@@ -521,7 +554,7 @@ export default function NiftyCoveredCallTerminal() {
 
   const handleAdopt = (c: (typeof adoptable)[number]) => withBusy(async () => {
     const lots = adoptLots[c.securityId] ?? (lotSize > 0 ? Math.floor(c.unowned / lotSize) : 0);
-    const cj = await (await fetch(`/api/nifty-covered-call/state?candidates=${c.securityId}`)).json() as {
+    const cj = await (await fetch(`/api/nifty-covered-call/state?candidates=${encodeURIComponent(c.securityId)}&${bq}`)).json() as {
       success: boolean; error?: string; candidates?: { orderId: string; units: number; price: number; at: number }[];
     };
     if (!cj.success) throw new Error(cj.error || 'Trade book unavailable');
@@ -675,6 +708,10 @@ export default function NiftyCoveredCallTerminal() {
             )}
           </div>
 
+          {/* Account: switches which broker's desk ledger and book are shown and traded. Locked mid-order. */}
+          <BrokerPicker value={broker} onChange={(b) => { if (!busyRef.current) setBroker(b); }} disabled={busy || pending.length > 0}
+            disabledReason="Locked while an order is in flight or a pending order is still being filled on this account" />
+
           {/* Option Chain Button */}
           <button
             onClick={() => setShowChainModal(true)}
@@ -731,7 +768,7 @@ export default function NiftyCoveredCallTerminal() {
         {/* Card 1: NIFTYBEES Holding */}
         <StatTile
           label="NIFTYBEES Holding"
-          tooltip="Total NIFTYBEES shares in your Dhan account (Demat DP + T1 settling + today's delivery buys), converted to cash value and Nifty index-equivalent capacity."
+          tooltip={`Total NIFTYBEES shares in your ${broker === 'kotak' ? 'Kotak' : 'Dhan'} account (${broker === 'kotak' ? 'Kotak holdings' : 'Demat DP + T1 settling'} + today's delivery buys), converted to cash value and Nifty index-equivalent capacity.`}
           value={holdingValue}
           raw
           sub={bees ? `${fmtInt(beesQty)} shares @ ₹${bees.avgCost.toFixed(2)} · LTP ${beesLtp > 0 ? `₹${beesLtp.toFixed(2)}` : "—"}` : 'Loading holdings…'}

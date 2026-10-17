@@ -30,7 +30,7 @@ const CHAIN_CACHE_TTL_MS = 10_000;
 // it already has a recent answer for. Past this it blocks for a fresh one.
 const CHAIN_STALE_OK_MS = 60_000;
 
-interface KotakSymbolInfo { expiry: string; strike: number; side: 'CE' | 'PE' }
+export interface KotakSymbolInfo { expiry: string; strike: number; side: 'CE' | 'PE' }
 type ChainSide = { last_price?: number };
 type ChainOc = Record<string, { ce?: ChainSide; pe?: ChainSide }>;
 
@@ -41,7 +41,7 @@ function kotakCacheFile(underlying: string): string {
 /** tradingSymbol -> {expiry, strike, side} for one underlying, refreshing the
  *  on-disk cache if stale. Same dedupe key as the symbol-lookup route, so a
  *  concurrent refresh from either place collapses onto one Python spawn. */
-async function kotakSymbolMap(underlying: string): Promise<Record<string, KotakSymbolInfo>> {
+export async function kotakSymbolMap(underlying: string): Promise<Record<string, KotakSymbolInfo>> {
   const file = kotakCacheFile(underlying);
   const stale = !fs.existsSync(file) || Date.now() - fs.statSync(file).mtimeMs > KOTAK_CACHE_MAX_AGE_MS;
   if (stale) {
@@ -92,7 +92,7 @@ async function fetchChainOc(underlying: string, expiry: string): Promise<ChainOc
   return refresh();
 }
 
-function underlyingPrefix(tradingSymbol: string): string {
+export function underlyingPrefix(tradingSymbol: string): string {
   return /^[A-Z]+/.exec(tradingSymbol.toUpperCase())?.[0] ?? '';
 }
 

@@ -23,21 +23,22 @@ function broker(opts: {
     const body = init?.body ? JSON.parse(init.body) as Record<string, unknown> : undefined;
     sent.push({ url, body });
     const json = (o: unknown, status = 200) => ({ ok: status < 400, status, json: async () => o }) as Response;
-    if (url.startsWith('/api/scalper/fast-order')) {
-      const mode = opts.post[String(body!.securityId)] ?? 'ok';
+    if (url.startsWith('/api/scalper/fast-order') || url.startsWith('/api/scalper/kotak/order')) {
+      const ident = String(body!.securityId ?? body!.tradingsymbol);
+      const mode = opts.post[ident] ?? 'ok';
       if (mode === 'reject') return json({ success: false, error: 'RMS reject' }, 400);
       if (mode === 'unknown') return json({ success: false, error: 'timeout' }, 504);
       n += 1;
       const id = `O${n}`;
-      idFor[`${body!.securityId}|${body!.side}`] = id;
+      idFor[`${ident}|${body!.side}`] = id;
       return json({ success: true, order_id: id });
     }
     if (url.startsWith('/api/scalper/orders?orderId=')) {
-      const id = decodeURIComponent(url.split('=')[1]);
+      const id = new URLSearchParams(url.split('?')[1]).get('orderId') ?? '';
       const o = opts.orders?.[id] ?? { status: 'TRADED', avg: 100, qty: 65 };
       return json({ success: true, data: { orderStatus: o.status, filledQty: o.status === 'TRADED' ? (o.qty ?? 65) : 0, averageTradedPrice: o.avg ?? 0, reason: o.status === 'REJECTED' ? 'margin' : '' } });
     }
-    if (url.startsWith('/api/scalper/positions')) {
+    if (url.startsWith('/api/scalper/positions') || url.startsWith('/api/scalper/kotak/positions')) {
       if (opts.positions === 'fail') return json({ success: false }, 500);
       return json({ success: true, data: opts.positions ?? [] });
     }
@@ -219,4 +220,43 @@ test('exit: unconfirmed entry legs are never auto-closed', async () => {
   pos.legs[1] = { ...pos.legs[1], unconfirmed: true };
   await exitStraddle(pos, { CE: 95, PE: 75 }, 'MANUAL');
   assert.ok(orderPosts().every((o) => o.body!.securityId !== 'PE1'));
+});
+
+test('Kotak: entry orders go to the Kotak route by trading symbol with Kotak segment/product names, and confirm on Kotak', async () => {
+  broker({ post: {} });
+  const out = await enterStraddle(params({
+    mode: 'REAL', broker: 'kotak', product: 'INTRADAY', ids: { ceSymbol: 'NIFTY26OCT25000CE', peSymbol: 'NIFTY26OCT25000PE' },
+    onIntent: async () => true,
+  }));
+  assert.equal(out.ok, true);
+  const posts = sent.filter((s) => s.url === '/api/scalper/kotak/order');
+  assert.equal(posts.length, 2);
+  assert.deepEqual(posts.map((p) => [p.body!.tradingsymbol, p.body!.exchange, p.body!.product, p.body!.side]).sort(),
+    [['NIFTY26OCT25000CE', 'nse_fo', 'MIS', 'SELL'], ['NIFTY26OCT25000PE', 'nse_fo', 'MIS', 'SELL']]);
+  assert.equal(sent.filter((s) => s.url.startsWith('/api/scalper/fast-order')).length, 0);
+  assert.ok(sent.filter((s) => s.url.startsWith('/api/scalper/orders?')).every((s) => s.url.includes('broker=kotak')));
+  assert.equal(out.position!.broker, 'kotak');
+  assert.deepEqual(out.position!.legs.map((l) => [l.symbol, l.securityId]), [['NIFTY26OCT25000CE', undefined], ['NIFTY26OCT25000PE', undefined]]);
+});
+
+test('Kotak: a Kotak position exits on Kotak, matched by trading symbol and MIS = INTRADAY, whatever the page now selects', async () => {
+  broker({ post: {}, positions: [
+    { tradingSymbol: 'NIFTY26OCT25000CE', productType: 'MIS', netQty: -65 },
+    { tradingSymbol: 'NIFTY26OCT25000PE', productType: 'MIS', netQty: -65 },
+  ] });
+  const pos: TsPosition = {
+    id: 'k1', broker: 'kotak', slot: 'center', mode: 'REAL', side: 'S', underlying: 'NIFTY', expiry: '2026-10-13', strike: 25000,
+    lots: 1, lotSize: 65, product: 'INTRADAY', status: 'OPEN', openedAt: Date.now() - 600_000,
+    risk: { armed: false } as TsPosition['risk'],
+    legs: [
+      { option: 'CE', symbol: 'NIFTY26OCT25000CE', qty: 65, entry: 100, orderIds: [] },
+      { option: 'PE', symbol: 'NIFTY26OCT25000PE', qty: 65, entry: 100, orderIds: [] },
+    ],
+  };
+  const out = await exitStraddle(pos, { CE: 90, PE: 90 }, 'MANUAL');
+  assert.equal(out.ok, true);
+  assert.ok(sent.some((s) => s.url === '/api/scalper/kotak/positions'));
+  const posts = sent.filter((s) => s.url === '/api/scalper/kotak/order');
+  assert.deepEqual(posts.map((p) => [p.body!.tradingsymbol, p.body!.side, p.body!.quantity]).sort(),
+    [['NIFTY26OCT25000CE', 'BUY', 65], ['NIFTY26OCT25000PE', 'BUY', 65]]);
 });

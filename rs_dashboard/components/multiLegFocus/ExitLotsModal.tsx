@@ -37,8 +37,9 @@ export default function ExitLotsModal({ isOpen, onClose, leg, basket, lotSize, c
   if (!isOpen || !leg || !basket) return null;
 
   const isBuy = leg.side === 'B';
-  // Resting LIMIT exits are cancelled and replaced through the Dhan order API only; other brokers exit at market.
-  const limitOk = (basket.broker || broker) === 'dhan';
+  // Resting LIMIT exits are cancelled and replaced through the order API (/api/scalper/orders): Dhan and Kotak.
+  // Zerodha has no cancel route here, so it exits at market.
+  const limitOk = ['dhan', 'kotak'].includes(basket.broker || broker);
   const effectiveLot = lotSize > 0 ? lotSize : fallbackLotSize(basket.underlying ?? '', broker);
   const ownQty = (leg.fill?.qty && leg.fill.qty > 0) ? leg.fill.qty : leg.lots * effectiveLot;
   const unit = leg.lots > 0 ? ownQty / leg.lots : effectiveLot;
@@ -106,7 +107,7 @@ export default function ExitLotsModal({ isOpen, onClose, leg, basket, lotSize, c
             <label className="text-[11px] font-bold text-zinc-400 uppercase tracking-wider block mb-1.5">Execution Order Type</label>
             <div className="grid grid-cols-2 gap-2">
               <button type="button" onClick={() => setOrderType('MARKET')} className={segBtn(orderType === 'MARKET')}>MARKET</button>
-              <button type="button" disabled={!limitOk} title={limitOk ? undefined : 'Limit exits are available on Dhan only (a resting order can only be cancelled there)'}
+              <button type="button" disabled={!limitOk} title={limitOk ? undefined : 'Limit exits are available on Dhan and Kotak only (a resting order can only be cancelled there)'}
                 onClick={() => { setOrderType('LIMIT'); if (limitPrice <= 0 && currentLtp > 0) setLimitPrice(currentLtp); }} className={`${segBtn(orderType === 'LIMIT')} disabled:opacity-40 disabled:cursor-not-allowed`}>LIMIT</button>
             </div>
           </div>

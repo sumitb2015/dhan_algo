@@ -40,6 +40,8 @@ export const KOTAK_PATHS = {
   tradeBook: 'quick/user/trades',
   positions: 'quick/user/positions',
   limits: 'quick/user/limits',
+  // From the SDK's settings.py (portfolio_holdings: GET, Sid/Auth headers). Not exercised from Node before 2026-10-17.
+  holdings: 'portfolio/v1/holdings',
 } as const;
 
 export interface KotakSession {
@@ -183,6 +185,14 @@ function authHeaders(): Record<string, string> {
   return headers;
 }
 
+/**
+ * Kotak ANSWERED and refused the request (an error-shaped body). Distinct from a timeout / network / unparseable reply,
+ * where the request may still have been acted on: for an order, only this error means "nothing was placed".
+ */
+export class KotakRejectedError extends Error {
+  constructor(message: string) { super(message); this.name = 'KotakRejectedError'; }
+}
+
 function raiseIfError(json: Record<string, unknown>): void {
   if (json.stCode === KOTAK_NO_DATA) return;   // an empty book, not a failure
   if (json.error) {
@@ -191,7 +201,7 @@ function raiseIfError(json: Record<string, unknown>): void {
       ? errs.map(e => (e && typeof e === 'object' ? String((e as Record<string, unknown>).message ?? e) : String(e))).join('; ')
       : String(errs);
     console.error('[kotakToken] request failed, full response:', JSON.stringify(json));
-    throw new Error(message);
+    throw new KotakRejectedError(message);
   }
   const data = (typeof json.data === 'object' && json.data !== null ? json.data : {}) as Record<string, unknown>;
   const msg = json.errMsg ?? json.emsg ?? data.errMsg ?? data.emsg;
@@ -201,11 +211,11 @@ function raiseIfError(json: Record<string, unknown>): void {
     // errMsg text ("Unauthorized", etc.) across genuinely different stCodes,
     // and the bare message alone isn't enough to tell them apart later.
     const code = json.stCode ?? data.stCode;
-    throw new Error(code !== undefined ? `${String(msg)} (stCode ${code})` : String(msg));
+    throw new KotakRejectedError(code !== undefined ? `${String(msg)} (stCode ${code})` : String(msg));
   }
   if (json.stat === 'Not_Ok') {
     console.error('[kotakToken] request failed, full response:', JSON.stringify(json));
-    throw new Error(`Kotak rejected the request (stCode ${json.stCode ?? '?'})`);
+    throw new KotakRejectedError(`Kotak rejected the request (stCode ${json.stCode ?? '?'})`);
   }
 }
 

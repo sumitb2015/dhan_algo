@@ -1,4 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
+import { kotakCspActivity } from '@/lib/cspKotak';
+import { isKotakTokenValid } from '@/lib/kotakToken';
 import path from 'path';
 import fs from 'fs';
 import { PROJECT_ROOT, runPythonJson, dedupe } from '@/lib/pyExec';
@@ -65,7 +67,8 @@ function writeWatchlist(symbols: string[]) {
   fs.writeFileSync(WATCHLIST_FILE, JSON.stringify(symbols, null, 2), 'utf-8');
 }
 
-export async function GET() {
+export async function GET(req: NextRequest) {
+  const kotak = req.nextUrl.searchParams.get('broker') === 'kotak';
   const symbols = readWatchlist();
   if (symbols.length === 0) {
     return NextResponse.json({ success: true, rows: [], asOf: new Date().toISOString() });
@@ -81,6 +84,13 @@ export async function GET() {
     );
     if (!parsed.success) {
       return NextResponse.json({ success: false, error: parsed.error ?? 'Unknown error' }, { status: 500 });
+    }
+    if (kotak) {
+      // Prices and lot sizes stay Dhan's (market data); the orders and positions shown are the KOTAK account's.
+      if (!isKotakTokenValid()) return NextResponse.json({ success: false, error: 'Kotak session is not valid - log in first' }, { status: 401 });
+      const k = await kotakCspActivity(symbols);
+      const rows = (parsed.rows ?? []).map((r) => ({ ...r, activeOrders: k[r.symbol]?.activeOrders ?? [], activeTrades: k[r.symbol]?.activeTrades ?? [] })) as unknown as CspRow[];
+      return NextResponse.json({ success: true, rows, asOf: parsed.asOf, broker: 'kotak' });
     }
     return NextResponse.json({ success: true, rows: parsed.rows ?? [], asOf: parsed.asOf });
   } catch (err: unknown) {

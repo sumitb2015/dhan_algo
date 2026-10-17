@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getDhanCredentials } from '@/lib/dhanToken';
-import { kotakPost, KOTAK_PATHS, isKotakTokenValid } from '@/lib/kotakToken';
+import { isKotakTokenValid } from '@/lib/kotakToken';
+import { placeKotakOrder } from '@/lib/kotakPlaceOrder';
 import { kitePost, isZerodhaTokenValid } from '@/lib/zerodhaToken';
 import { invalidateBrokerCache } from '@/lib/brokerPositionsCache';
 import { exchangeSegmentFor, isCrudeUnderlying, type SyntheticFuturesUnderlying } from '@/lib/syntheticFuturesSegments';
@@ -51,6 +52,8 @@ interface ExecutedLegResult {
   tradingSymbol?: string;
   status: 'FILLED' | 'TRANSIT' | 'FAILED' | 'SKIPPED';
   error?: string;
+  /** FAILED as far as this request knows, but the broker never answered cleanly: the order MAY be live (Kotak). */
+  unknown?: boolean;
 }
 
 function toKotakExchange(segment: string, isSensex: boolean): string {
@@ -67,7 +70,7 @@ function toZerodhaExchange(segment: string, isSensex: boolean): string {
   return 'NFO';
 }
 
-async function placeKotakLeg(leg: SyntheticLegSpec): Promise<{ orderId?: string; error?: string }> {
+async function placeKotakLeg(leg: SyntheticLegSpec): Promise<{ orderId?: string; error?: string; unknown?: boolean }> {
   if (!leg.tradingSymbol) {
     return { error: `Missing Kotak tradingsymbol for ${leg.strike} ${leg.optionType}` };
   }
@@ -77,34 +80,25 @@ async function placeKotakLeg(leg: SyntheticLegSpec): Promise<{ orderId?: string;
   const product = leg.productType === 'MARGIN' ? 'NRML' : 'MIS';
   const es = toKotakExchange(leg.exchangeSegment, leg.exchangeSegment.toLowerCase().includes('bse'));
 
-  try {
-    const json = await kotakPost(KOTAK_PATHS.placeOrder, {
-      es,
-      pc: product,
-      pr: tickPrice,
-      pt: isLimit ? 'L' : 'MKT',
-      qt: String(Math.abs(leg.quantity)),
-      rt: 'DAY',
-      ts: leg.tradingSymbol,
-      tt: leg.side === 'BUY' ? 'B' : 'S',
-      am: 'NO',
-      dq: '0',
-      mp: '0',
-      pf: 'N',
-      tp: '0',
-      os: 'NEOTRADEAPI',
-    });
-
-    const data = (typeof json.data === 'object' && json.data !== null ? json.data : {}) as Record<string, unknown>;
-    const orderId = json.nOrdNo ?? data.nOrdNo;
-    if (json.stat === 'Ok' && orderId) {
-      return { orderId: String(orderId) };
-    }
-    const errMsg = String(json.errMsg ?? json.message ?? JSON.stringify(json));
-    return { error: errMsg };
-  } catch (err) {
-    return { error: String((err as Error).message ?? err) };
-  }
+  const r = await placeKotakOrder({
+    es,
+    pc: product,
+    pr: tickPrice,
+    pt: isLimit ? 'L' : 'MKT',
+    qt: String(Math.abs(leg.quantity)),
+    rt: 'DAY',
+    ts: leg.tradingSymbol,
+    tt: leg.side === 'BUY' ? 'B' : 'S',
+    am: 'NO',
+    dq: '0',
+    mp: '0',
+    pf: 'N',
+    tp: '0',
+    os: 'NEOTRADEAPI',
+  });
+  if (r.status === 'placed') return { orderId: r.orderId };
+  // An unknown outcome may be a live order: flagged so the basket stops there and the page says "check", not "failed".
+  return { error: r.error, ...(r.status === 'unknown' ? { unknown: true } : {}) };
 }
 
 async function placeZerodhaLeg(leg: SyntheticLegSpec): Promise<{ orderId?: string; error?: string }> {
@@ -198,7 +192,7 @@ async function placeBrokerLeg(
   dhanToken: string,
   dhanClientId: string,
   leg: SyntheticLegSpec,
-): Promise<{ orderId?: string; error?: string }> {
+): Promise<{ orderId?: string; error?: string; unknown?: boolean }> {
   if (broker === 'dhan') {
     return placeDhanLeg(dhanToken, dhanClientId, leg);
   } else if (broker === 'kotak') {
@@ -373,6 +367,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
         orderId: res.orderId,
         status: res.orderId ? 'TRANSIT' : 'FAILED',
         error: res.error,
+        ...(res.unknown ? { unknown: true } : {}),
       });
     }
 
@@ -466,6 +461,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       orderId: exec.orderId,
       quantity: Math.abs(legToAdd.quantity),
       error: exec.error,
+      ...(exec.unknown ? { unknown: true } : {}),
     });
   }
 
@@ -702,6 +698,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
         tradingSymbol: leg.tradingSymbol,
         status: 'FAILED',
         error: exec.error,
+        ...(exec.unknown ? { unknown: true } : {}),
       });
     }
   }
