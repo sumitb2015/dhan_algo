@@ -4,7 +4,7 @@ import { TooltipProvider } from "@/components/ui/tooltip";
 import ThemeInit from "@/components/ThemeInit";
 import Sidebar from "@/components/Sidebar";
 import { Toaster } from "sonner";
-import Script from "next/script";
+import ThemeInitScript from "@/components/ThemeInitScript";
 import "./globals.css";
 
 // Inter over Geist: hand-tuned hinting for small UI text (this app's sidebar
@@ -93,7 +93,8 @@ export default function RootLayout({
       suppressHydrationWarning
     >
       <head>
-        <Script id="theme-init" strategy="beforeInteractive" dangerouslySetInnerHTML={{ __html: THEME_INIT_SCRIPT }} />
+        {/* Not next/script: see components/ThemeInitScript.tsx for why a client-rendered copy must stay inert. */}
+        <ThemeInitScript code={THEME_INIT_SCRIPT} />
       </head>
       <body className="min-h-full flex flex-col">
         <ThemeInit />
