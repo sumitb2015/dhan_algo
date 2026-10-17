@@ -17,7 +17,9 @@ import {
   Lock,
 } from 'lucide-react';
 import { fmtPrice, fmtLakhRs } from '@/lib/futuresFormatters';
-import type { LedgerBasket } from '@/lib/liveChartsLedger';
+import { normProduct, rowIdent, type LedgerBasket, type LedgerBroker } from '@/lib/liveChartsLedger';
+import { scalperRoute, BROKER_LABELS } from '@/hooks/useBrokerSelector';
+import { UNKNOWN_ORDER_HINT } from '@/lib/orderOutcome';
 
 export interface OptionTradeLeg {
   strike: number;
@@ -25,6 +27,8 @@ export interface OptionTradeLeg {
   action: 'BUY' | 'SELL';
   lots: number;
   securityId?: string;
+  /** Kotak: the contract's trading symbol (resolved by the modal's own lookup). */
+  tradingSymbol?: string;
 }
 
 export interface OptionOrderInitialState {
@@ -43,6 +47,8 @@ export interface OptionOrderInitialState {
  *  a later broker read; this is what the modal itself just told the broker to do. */
 export interface PlacedOptionLeg {
   securityId: string;
+  /** Kotak: the trading symbol the order went out on (Kotak has no Dhan security id). */
+  tradingSymbol?: string;
   exchangeSegment: string;
   strike: number;
   optionType: 'CE' | 'PE';
@@ -63,6 +69,9 @@ interface OptionOrderModalProps {
    *  it - never to size or originate an order (ownership stays the ledger's job, per the
    *  dhan-terminal-position-ownership skill). Omitted by callers with no such ledger. */
   existingBaskets?: LedgerBasket[];
+  /** The account the basket goes to. Default Dhan (Options Monitor); Live Options Charts passes its picker's choice.
+   *  Prices and the chain stay Dhan's either way; only the contract ids, product lock and the orders follow it. */
+  broker?: LedgerBroker;
 }
 
 const MAX_LOTS_PER_ORDER = 50;
@@ -80,7 +89,10 @@ export default function OptionOrderModal({
   initialOrder,
   onOrderSuccess,
   existingBaskets,
+  broker = 'dhan',
 }: OptionOrderModalProps) {
+  // The leg's contract identifier on this broker: Dhan's securityId, Kotak's trading symbol.
+  const identOf = useCallback((l: { securityId?: string; tradingSymbol?: string }) => (broker === 'kotak' ? l.tradingSymbol : l.securityId), [broker]);
   const [productType, setProductType] = useState<'INTRADAY' | 'MARGIN'>('INTRADAY');
   const [productTypeLock, setProductTypeLock] = useState<'INTRADAY' | 'MARGIN' | null>(null);
   const [lotsMultiplier, setLotsMultiplier] = useState<number>(1);
@@ -108,14 +120,16 @@ export default function OptionOrderModal({
 
   // Resolved strikes and contract data
   const [lotSize, setLotSize] = useState<number>(1);
-  const [resolvedLegs, setResolvedLegs] = useState<(OptionTradeLeg & { ltp?: number; securityId?: string })[]>([]);
+  const [resolvedLegs, setResolvedLegs] = useState<(OptionTradeLeg & { ltp?: number })[]>([]);
   // Every strike on this expiry's chain -> {ceId, peId}, from the same lookup that resolved the
   // initial legs. Powers the strike up/down stepper without a second round-trip per click.
-  const [strikesMap, setStrikesMap] = useState<Record<string, { ceId?: string; peId?: string }>>({});
+  const [strikesMap, setStrikesMap] = useState<Record<string, { ceId?: string; peId?: string; ceSymbol?: string; peSymbol?: string }>>({});
   const [loadingLookup, setLoadingLookup] = useState<boolean>(false);
   const [placingOrder, setPlacingOrder] = useState<boolean>(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [successResult, setSuccessResult] = useState<{ orderIds: string[]; summary: string } | null>(null);
+  // A basket where some legs went out and others did not (rejected, or UNKNOWN: may be live) — said leg by leg.
+  const [partialResult, setPartialResult] = useState<{ placed: string[]; unknown: string[]; rejected: string[] } | null>(null);
 
   // Out-of-order guard
   const fetchSeqRef = useRef(0);
@@ -149,7 +163,7 @@ export default function OptionOrderModal({
     setLoadingLookup(true);
     setErrorMsg(null);
     try {
-      const res = await fetch(`/api/scalper/lookup?underlying=${encodeURIComponent(underlying.toUpperCase())}&expiry=${encodeURIComponent(expiry)}`);
+      const res = await fetch(`${scalperRoute(broker, 'lookup')}?underlying=${encodeURIComponent(underlying.toUpperCase())}&expiry=${encodeURIComponent(expiry)}`);
       const json = await res.json();
       if (seq !== fetchSeqRef.current) return;
       if (!json.success || !json.data) {
@@ -164,6 +178,9 @@ export default function OptionOrderModal({
       setStrikesMap(chainStrikes);
       const updated = baseLegs.map((leg) => {
         const strikeEntry = chainStrikes[String(leg.strike)];
+        if (broker === 'kotak') {
+          return { ...leg, tradingSymbol: (leg.optionType === 'CE' ? strikeEntry?.ceSymbol : strikeEntry?.peSymbol) || undefined };
+        }
         const secId = (leg.optionType === 'CE' ? strikeEntry?.ceId : strikeEntry?.peId) || leg.securityId;
         return {
           ...leg,
@@ -178,7 +195,7 @@ export default function OptionOrderModal({
     } finally {
       if (seq === fetchSeqRef.current) setLoadingLookup(false);
     }
-  }, []);
+  }, [broker]);
 
   useEffect(() => {
     if (isOpen && initialOrder) {
@@ -188,6 +205,7 @@ export default function OptionOrderModal({
       setLotsDraft(String(initLots));
       setErrorMsg(null);
       setSuccessResult(null);
+      setPartialResult(null);
       setResolvedLegs(initialOrder.legs);
       setStrikesMap({});
       setOrderType('MARKET');
@@ -226,6 +244,7 @@ export default function OptionOrderModal({
           ...leg,
           strike: nextStrike,
           securityId: (leg.optionType === 'CE' ? entry?.ceId : entry?.peId) ?? undefined,
+          tradingSymbol: (leg.optionType === 'CE' ? entry?.ceSymbol : entry?.peSymbol) ?? undefined,
         })),
       );
     },
@@ -254,23 +273,21 @@ export default function OptionOrderModal({
     }
     let cancelled = false;
 
-    const secIds = new Set(resolvedLegs.map((l) => String(l.securityId)).filter(Boolean));
+    const secIds = new Set(resolvedLegs.map((l) => String(identOf(l) ?? '')).filter(Boolean));
     if (secIds.size > 0) {
-      fetch('/api/scalper/positions')
+      fetch(scalperRoute(broker, 'positions'))
         .then((res) => res.json())
         .then((json) => {
           if (cancelled) return;
           if (json.success && Array.isArray(json.data)) {
             const rows = json.data as Record<string, unknown>[];
             const match = rows.find((row) => {
-              const secId = String(row.securityId ?? row.security_id ?? '');
-              if (!secIds.has(secId)) return false;
+              if (!secIds.has(rowIdent(row, broker))) return false;
               const netQty = Number(row.netQty ?? row.net_qty ?? 0);
               return Number.isFinite(netQty) && netQty !== 0;
             });
-            const product = match
-              ? String(match.productType ?? match.product ?? '').trim().toUpperCase()
-              : '';
+            // Kotak reports MIS / NRML for INTRADAY / MARGIN.
+            const product = match ? normProduct(match.productType ?? match.product) : '';
             if (product === 'INTRADAY' || product === 'MARGIN') {
               setProductType(product);
               setProductTypeLock(product);
@@ -291,6 +308,7 @@ export default function OptionOrderModal({
       const match = (existingBaskets ?? [])
         .filter(
           (b) =>
+            (b.broker ?? 'dhan') === broker &&
             b.underlying.toUpperCase() === initialOrder!.underlying.toUpperCase() &&
             b.expiry === initialOrder!.expiry,
         )
@@ -307,7 +325,7 @@ export default function OptionOrderModal({
     return () => {
       cancelled = true;
     };
-  }, [isOpen, initialOrder, commonStrike, existingBaskets, resolvedLegs]);
+  }, [isOpen, initialOrder, commonStrike, existingBaskets, resolvedLegs, broker, identOf]);
 
   // The title carries the strike, so a stepper-shifted straddle needs it recomputed rather than
   // showing the strike it was opened at.
@@ -326,6 +344,7 @@ export default function OptionOrderModal({
     if (!initialOrder) return;
     setErrorMsg(null);
     setSuccessResult(null);
+    setPartialResult(null);
 
     // Validation
     if (lotsMultiplier <= 0 || lotsMultiplier > MAX_LOTS_PER_ORDER) {
@@ -333,9 +352,9 @@ export default function OptionOrderModal({
       return;
     }
 
-    const missingSecId = resolvedLegs.find((l) => !l.securityId);
+    const missingSecId = resolvedLegs.find((l) => !identOf(l));
     if (missingSecId) {
-      setErrorMsg(`Contract ID missing for ${missingSecId.strike} ${missingSecId.optionType}. Please click Refresh.`);
+      setErrorMsg(`${broker === 'kotak' ? 'Kotak trading symbol' : 'Contract ID'} missing for ${missingSecId.strike} ${missingSecId.optionType}. Please click Refresh.`);
       return;
     }
 
@@ -356,12 +375,17 @@ export default function OptionOrderModal({
 
     try {
       const underUpper = initialOrder.underlying.toUpperCase();
-      const exchangeSegment =
-        underUpper === 'SENSEX' ? 'BSE_FNO' : (underUpper === 'CRUDEOIL' || underUpper === 'CRUDEOILM') ? 'MCX_COMM' : 'NSE_FNO';
+      const isCrude = underUpper === 'CRUDEOIL' || underUpper === 'CRUDEOILM';
+      const exchangeSegment = broker === 'kotak'
+        ? (underUpper === 'SENSEX' ? 'bse_fo' : isCrude ? 'mcx_fo' : 'nse_fo')
+        : (underUpper === 'SENSEX' ? 'BSE_FNO' : isCrude ? 'MCX_COMM' : 'NSE_FNO');
       const dhanOrderType = orderType === 'SL-M' ? 'STOP_LOSS_MARKET' : orderType === 'SL' ? 'STOP_LOSS' : orderType;
 
+      // Quantity in units: Dhan's lookup reports MCX lot size 1 (its MCX orders are in lots), Kotak's the absolute
+      // units per lot (its MCX orders are in units) — so lots x lot size is right for either.
       const placedLegs: PlacedOptionLeg[] = resolvedLegs.map((leg) => ({
-        securityId: String(leg.securityId),
+        securityId: broker === 'kotak' ? '' : String(leg.securityId),
+        ...(broker === 'kotak' ? { tradingSymbol: String(leg.tradingSymbol) } : {}),
         exchangeSegment,
         strike: leg.strike,
         optionType: leg.optionType,
@@ -371,47 +395,72 @@ export default function OptionOrderModal({
       }));
 
       const payloadLegs = placedLegs.map((leg) => ({
-        securityId: leg.securityId,
+        ...(broker === 'kotak' ? { tradingSymbol: leg.tradingSymbol, exchange: exchangeSegment } : { securityId: leg.securityId, exchangeSegment }),
         quantity: leg.qty,
         side: leg.action,
         orderType: dhanOrderType,
-        exchangeSegment,
         ...(orderType === 'LIMIT' || orderType === 'SL' ? { price } : {}),
         ...(orderType === 'SL' || orderType === 'SL-M' ? { triggerPrice } : {}),
       }));
 
-      const res = await fetch('/api/options/order', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          legs: payloadLegs,
-          mode: productType === 'MARGIN' ? 'positional' : 'intraday',
-        }),
-      });
-
-      const json = await res.json();
-      if (!json.success) {
-        throw new Error(json.error || 'Failed to place spread options order');
+      let json: { success?: boolean; error?: string; data?: { success?: boolean; orderId?: string; securityId?: string; tradingSymbol?: string; error?: string; unknown?: boolean }[] } | null = null;
+      let status: number | null = null;
+      try {
+        const res = await fetch('/api/options/order', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            broker,
+            legs: payloadLegs,
+            mode: productType === 'MARGIN' ? 'positional' : 'intraday',
+          }),
+        });
+        status = res.status;
+        json = await res.json().catch(() => null);
+      } catch { /* no reply at all */ }
+      // A non-JSON 4xx never reached a broker (a missing route, the auth gate): a plain failure.
+      if (!json && status != null && status < 500) throw new Error(`Order route answered HTTP ${status}`);
+      const label = (l: PlacedOptionLeg) => `${l.action} ${l.strike} ${l.optionType}`;
+      if (!json) {
+        // No reply at all: every leg may or may not have gone out.
+        setPartialResult({ placed: [], unknown: placedLegs.map(label), rejected: [] });
+        setErrorMsg(`No reply from the order route — order status UNKNOWN for every leg. ${UNKNOWN_ORDER_HINT}`);
+        return;
       }
-
-      const results: { orderId?: string; securityId?: string }[] = Array.isArray(json.data) ? json.data : [];
-      const orderIds: string[] = results.map((d) => d.orderId ?? '').filter(Boolean);
-      // Each leg's own order — results come back in leg order (Promise.all),
-      // checked against the securityId so a mismatch never mis-assigns one.
-      placedLegs.forEach((leg, i) => {
+      // Per leg, in leg order, checked against the leg's own identifier so a mismatch never mis-assigns a result.
+      const results = Array.isArray(json.data) ? json.data : [];
+      const outcome = placedLegs.map((leg, i) => {
         const r = results[i];
-        if (r?.orderId && String(r.securityId) === leg.securityId) leg.orderId = String(r.orderId);
+        const sameLeg = r && String(broker === 'kotak' ? r.tradingSymbol : r.securityId) === String(identOf(leg));
+        // A reply that cannot be tied to this leg proves nothing about it.
+        if (!sameLeg) return json!.success ? 'placed' : 'unknown';
+        if (r.success) { if (r.orderId) leg.orderId = String(r.orderId); return 'placed'; }
+        return r.unknown ? 'unknown' : 'rejected';
       });
-      const summary = `${displayTitle} · ${lotsMultiplier}x (${lotsMultiplier * lotSize} qty) · ${productType} · ${ORDER_TYPE_LABELS[orderType]}`;
+      if (!json.success && results.length === 0) throw new Error(json.error || 'Failed to place spread options order');
 
-      setSuccessResult({
-        orderIds,
-        summary,
-      });
+      const placedOnly = placedLegs.filter((_, i) => outcome[i] === 'placed');
+      const orderIds: string[] = placedOnly.map((l) => l.orderId ?? '').filter(Boolean);
+      const summary = `${displayTitle} · ${lotsMultiplier}x (${lotsMultiplier * lotSize} qty) · ${productType} · ${ORDER_TYPE_LABELS[orderType]}${broker === 'kotak' ? ' · Kotak' : ''}`;
 
-      if (onOrderSuccess) {
-        onOrderSuccess(orderIds, summary, placedLegs, initialOrder.underlying, initialOrder.expiry, displayTitle);
+      // Whatever went out is handed to the ledger, even when another leg failed: a placed leg left out of the ledger
+      // is a live position this page neither shows as its own nor can exit as its own.
+      if (placedOnly.length > 0 && onOrderSuccess) {
+        onOrderSuccess(orderIds, summary, placedOnly, initialOrder.underlying, initialOrder.expiry, displayTitle);
       }
+      if (outcome.every((o) => o === 'placed')) {
+        setSuccessResult({ orderIds, summary });
+        return;
+      }
+      const partial = {
+        placed: placedLegs.filter((_, i) => outcome[i] === 'placed').map(label),
+        unknown: placedLegs.filter((_, i) => outcome[i] === 'unknown').map(label),
+        rejected: placedLegs.filter((_, i) => outcome[i] === 'rejected').map(label),
+      };
+      setPartialResult(partial);
+      setErrorMsg(partial.unknown.length
+        ? `Order status UNKNOWN for ${partial.unknown.join(', ')} — it may be live. Do not place it again; ${UNKNOWN_ORDER_HINT}`
+        : (json.error || 'Some legs were rejected'));
     } catch (err: unknown) {
       setErrorMsg(err instanceof Error ? err.message : 'Order submission failed');
     } finally {
@@ -437,6 +486,9 @@ export default function OptionOrderModal({
                 </h2>
                 <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-zinc-800 text-zinc-300">
                   Exp: {initialOrder.expiry}
+                </span>
+                <span className="text-[10px] font-bold px-2 py-0.5 rounded bg-sky-500/15 text-sky-300 border border-sky-500/30" title="The account this basket is sent to">
+                  {BROKER_LABELS[broker]}
                 </span>
               </div>
               <p className="text-[10px] text-zinc-400">
@@ -645,7 +697,7 @@ export default function OptionOrderModal({
                         {leg.lots * lotsMultiplier} lot{leg.lots * lotsMultiplier > 1 ? 's' : ''} (<strong className="text-white">{legQty}</strong> qty)
                       </span>
                       <span className="text-[10px] text-zinc-500">
-                        {leg.securityId ? `ID: ${leg.securityId}` : <span className="text-amber-400">Resolving...</span>}
+                        {identOf(leg) ? `${broker === 'kotak' ? '' : 'ID: '}${identOf(leg)}` : <span className="text-amber-400">Resolving...</span>}
                       </span>
                     </div>
                   </div>
@@ -727,6 +779,14 @@ export default function OptionOrderModal({
             </div>
           )}
 
+          {partialResult && (
+            <div className="p-3 rounded-xl bg-amber-500/10 border border-amber-500/30 text-xs space-y-1 font-mono">
+              {partialResult.placed.length > 0 && <p className="text-emerald-400">Placed (now on the desk): {partialResult.placed.join(', ')}</p>}
+              {partialResult.unknown.length > 0 && <p className="text-amber-300">Status UNKNOWN (may be live, not retried): {partialResult.unknown.join(', ')}</p>}
+              {partialResult.rejected.length > 0 && <p className="text-red-400">Rejected: {partialResult.rejected.join(', ')}</p>}
+            </div>
+          )}
+
           {successResult && (
             <div className="p-3 rounded-xl bg-emerald-500/10 border border-emerald-500/20 text-emerald-400 text-xs space-y-1">
               <div className="flex items-center gap-1.5 font-bold">
@@ -753,7 +813,7 @@ export default function OptionOrderModal({
 
           <button
             type="button"
-            disabled={placingOrder || loadingLookup || resolvedLegs.some((l) => !l.securityId)}
+            disabled={placingOrder || loadingLookup || resolvedLegs.some((l) => !identOf(l)) || !!partialResult}
             onClick={handlePlaceOrder}
             className="flex-1 flex items-center justify-center gap-2 py-2 px-4 rounded-xl text-xs font-bold transition-all shadow-md cursor-pointer bg-sky-600 hover:bg-sky-500 text-oncolor disabled:opacity-50 disabled:cursor-not-allowed"
           >

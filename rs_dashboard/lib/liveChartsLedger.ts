@@ -7,6 +7,8 @@
 // consulted to shrink it (clamp down), never to originate or grow it.
 
 export type LedgerOptionType = 'CE' | 'PE';
+/** The account a basket was placed on. Missing = Dhan (every basket before Kotak support). */
+export type LedgerBroker = 'dhan' | 'kotak';
 export type LedgerAction = 'BUY' | 'SELL';
 export type LedgerProductType = 'INTRADAY' | 'MARGIN';
 
@@ -43,6 +45,8 @@ export const RECONCILE_GRACE_MS = 15_000;
 
 export interface LedgerBasket {
   id: string;
+  /** Where this basket's orders went; its exits, reconcile and P&L read that broker's book only. */
+  broker?: LedgerBroker;
   title: string;
   underlying: string;
   expiry: string;
@@ -53,19 +57,29 @@ export interface LedgerBasket {
 /** A broker /positions row, typed loosely since Dhan's payload is passed straight through. */
 export type BrokerPositionRow = Record<string, unknown>;
 
-/** Find the live broker position row for a ledger leg by securityId + product (Dhan's numeric
- *  securityId is a stable per-contract identifier - no symbol-matching ambiguity here, unlike
- *  Zerodha/Kotak). */
-export function findBrokerRow(rows: BrokerPositionRow[], leg: LedgerLeg): BrokerPositionRow | null {
-  const productUpper = leg.productType.toUpperCase();
-  return (
-    rows.find((r) => {
-      const secId = String(r.securityId ?? r.security_id ?? '');
-      if (secId !== String(leg.securityId)) return false;
-      const product = String(r.productType ?? r.product ?? '').trim().toUpperCase();
-      return product === productUpper;
-    }) ?? null
-  );
+export const basketBroker = (b: Pick<LedgerBasket, 'broker'>): LedgerBroker => b.broker ?? 'dhan';
+
+/** A contract's identifier on a broker: Dhan's numeric securityId, Kotak's trading symbol (Kotak's own
+ *  `securityId` field is its instrument token, unrelated to Dhan's). */
+export function legIdent(leg: Pick<LedgerLeg, 'securityId' | 'tradingSymbol'>, broker: LedgerBroker = 'dhan'): string {
+  return String((broker === 'kotak' ? leg.tradingSymbol : leg.securityId) ?? '');
+}
+export function rowIdent(row: BrokerPositionRow, broker: LedgerBroker = 'dhan'): string {
+  return String((broker === 'kotak' ? row.tradingSymbol ?? row.trading_symbol : row.securityId ?? row.security_id) ?? '');
+}
+/** One product vocabulary: Kotak / Zerodha report MIS / NRML for Dhan's INTRADAY / MARGIN. */
+export function normProduct(p: unknown): string {
+  const u = String(p ?? '').trim().toUpperCase();
+  return u === 'MIS' ? 'INTRADAY' : u === 'NRML' ? 'MARGIN' : u;
+}
+
+/** Find the live broker position row for a ledger leg by contract identifier + product (Dhan's numeric
+ *  securityId or Kotak's trading symbol — see legIdent). */
+export function findBrokerRow(rows: BrokerPositionRow[], leg: LedgerLeg, broker: LedgerBroker = 'dhan'): BrokerPositionRow | null {
+  const ident = legIdent(leg, broker);
+  if (!ident) return null;
+  const product = normProduct(leg.productType);
+  return rows.find((r) => rowIdent(r, broker) === ident && normProduct(r.productType ?? r.product) === product) ?? null;
 }
 
 /** How much of this leg is still live at the broker, clamped DOWN to what the broker actually
@@ -118,13 +132,18 @@ export function legUnrealizedPnl(row: BrokerPositionRow | null, ownQty: number):
  *  at 0 stay at 0. A leg within RECONCILE_GRACE_MS of its last order is left untouched -
  *  the broker's book may not have caught up yet, and reading that as "closed" would be
  *  unrecoverable (down-only). Pure function - callers own persisting the result into state. */
-export function reconcileBasket(basket: LedgerBasket, rows: BrokerPositionRow[], now: number = Date.now()): LedgerBasket {
+export function reconcileBasket(
+  basket: LedgerBasket, rows: BrokerPositionRow[], now: number = Date.now(),
+  /** Whose book `rows` is. Another broker's book says nothing about this basket: it is left as it is. */
+  rowsBroker: LedgerBroker = 'dhan',
+): LedgerBasket {
+  if (basketBroker(basket) !== rowsBroker) return basket;
   return {
     ...basket,
     legs: basket.legs.map((leg) => {
       if (leg.qty <= 0) return leg;
       if (now - leg.lastOrderAt < RECONCILE_GRACE_MS) return leg;
-      const row = findBrokerRow(rows, leg);
+      const row = findBrokerRow(rows, leg, rowsBroker);
       const live = liveLegQty(row, leg);
       return live < leg.qty ? { ...leg, qty: live } : leg;
     }),
@@ -141,18 +160,19 @@ export function legEntryIsOwn(leg: LedgerLeg): boolean {
 }
 
 /** Trade-book row fields used to price a leg's own entry. */
-export interface LedgerTrade { orderId: string; securityId: string; tradedQuantity: number; tradedPrice: number }
+export interface LedgerTrade { orderId: string; securityId: string; tradingSymbol?: string; tradedQuantity: number; tradedPrice: number }
 
 /** Average fill of this leg's own entry orders, or null when none are in the
  *  trade book yet. Matched on the contract as well as the order id: legs from
  *  before 2026-10-01 (or an unmapped one) hold every order id of their basket,
  *  and a CE at 100 and a PE at 80 would otherwise both read 90. */
-export function ownEntryFromTrades(leg: LedgerLeg, trades: LedgerTrade[]): number | null {
+export function ownEntryFromTrades(leg: LedgerLeg, trades: LedgerTrade[], broker: LedgerBroker = 'dhan'): number | null {
   const ids = new Set(leg.entryOrderIds);
+  const ident = legIdent(leg, broker);
   let qty = 0;
   let value = 0;
   for (const t of trades) {
-    if (!ids.has(t.orderId) || String(t.securityId) !== String(leg.securityId)) continue;
+    if (!ids.has(t.orderId) || legIdent(t, broker) !== ident) continue;
     if (!(t.tradedQuantity > 0) || !(t.tradedPrice > 0)) continue;
     qty += t.tradedQuantity;
     value += t.tradedQuantity * t.tradedPrice;
@@ -160,14 +180,15 @@ export function ownEntryFromTrades(leg: LedgerLeg, trades: LedgerTrade[]): numbe
   return qty > 0 ? value / qty : null;
 }
 
-/** Stamps each leg's own entry price from the trade book. Returns `baskets`
- *  itself when nothing changed. */
-export function stampOwnEntries(baskets: LedgerBasket[], trades: LedgerTrade[]): LedgerBasket[] {
+/** Stamps each leg's own entry price from the trade book of `tradesBroker` (other brokers' baskets are left alone).
+ *  Returns `baskets` itself when nothing changed. */
+export function stampOwnEntries(baskets: LedgerBasket[], trades: LedgerTrade[], tradesBroker: LedgerBroker = 'dhan'): LedgerBasket[] {
   let changed = false;
   const next = baskets.map((b) => {
+    if (basketBroker(b) !== tradesBroker) return b;
     let bChanged = false;
     const legs = b.legs.map((leg) => {
-      const px = ownEntryFromTrades(leg, trades);
+      const px = ownEntryFromTrades(leg, trades, tradesBroker);
       if (px == null || px === leg.entryPrice) return leg;
       bChanged = true;
       return { ...leg, entryPrice: px };
@@ -191,16 +212,18 @@ export function ledgerLegKey(basketId: string, legIdx: number): string {
  * on its own, so two baskets on one contract both claimed it and the desk
  * counted its P&L twice (2026-10-01 audit). Keyed by ledgerLegKey.
  */
-export function allocateLiveQty(baskets: LedgerBasket[], rows: BrokerPositionRow[]): Map<string, number> {
+export function allocateLiveQty(baskets: LedgerBasket[], rows: BrokerPositionRow[], rowsBroker: LedgerBroker = 'dhan'): Map<string, number> {
   const out = new Map<string, number>();
   const remaining = new Map<string, number>();
   const ordered = [...baskets].sort((a, b) => a.createdAt - b.createdAt);
   for (const b of ordered) {
+    // A basket on another broker owns nothing in this book.
+    const own = basketBroker(b) === rowsBroker;
     b.legs.forEach((leg, i) => {
       const key = ledgerLegKey(b.id, i);
-      if (leg.qty <= 0) { out.set(key, 0); return; }
-      const row = findBrokerRow(rows, leg);
-      const contract = `${leg.securityId}|${leg.productType.toUpperCase()}|${leg.action}`;
+      if (leg.qty <= 0 || !own) { out.set(key, 0); return; }
+      const row = findBrokerRow(rows, leg, rowsBroker);
+      const contract = `${legIdent(leg, rowsBroker)}|${normProduct(leg.productType)}|${leg.action}`;
       const pool = remaining.has(contract) ? remaining.get(contract)! : liveLegQty(row, { ...leg, qty: Number.MAX_SAFE_INTEGER });
       const take = Math.min(leg.qty, pool);
       remaining.set(contract, pool - take);
@@ -209,3 +232,32 @@ export function allocateLiveQty(baskets: LedgerBasket[], rows: BrokerPositionRow
   }
   return out;
 }
+
+/**
+ * Kotak position rows priced from Dhan's option chain. Kotak's positions payload carries no usable price, so
+ * shapeKotakPosition reports unrealizedProfit 0 — read as-is, every Kotak leg showed ₹0 P&L. A row whose contract is
+ * known (drv fields from lib/kotakPositionContracts.ts:withKotakContracts) and whose chain quote is in gets
+ * `lastTradedPrice` and `unrealizedProfit = (ltp − the row's own-side average) × netQty`; any other open row is marked
+ * `pnlUnknown` so the desk shows "—", never a fabricated zero. An estimate: the chain is a cached snapshot.
+ */
+export function priceRowsFromChain(
+  rows: BrokerPositionRow[],
+  ltpOf: (underlying: string, expiry: string, strike: number, opt: 'CE' | 'PE') => number | null,
+  underlyingOf: (tradingSymbol: string) => string | null,
+): BrokerPositionRow[] {
+  return rows.map((row) => {
+    const netQty = Number(row.netQty ?? 0);
+    if (!Number.isFinite(netQty) || netQty === 0) return row;
+    const opt = row.drvOptionType === 'CALL' ? 'CE' : row.drvOptionType === 'PUT' ? 'PE' : null;
+    const strike = Number(row.drvStrikePrice);
+    const expiry = String(row.drvExpiryDate ?? '');
+    const underlying = underlyingOf(String(row.tradingSymbol ?? ''));
+    const ltp = opt && strike > 0 && expiry && underlying ? ltpOf(underlying, expiry, strike, opt) : null;
+    const avg = Number(netQty < 0 ? row.sellAvg : row.buyAvg) || 0;
+    if (!(ltp != null && ltp > 0) || !(avg > 0)) return { ...row, pnlUnknown: true };
+    return { ...row, lastTradedPrice: ltp, unrealizedProfit: (ltp - avg) * netQty, pnlEstimated: true };
+  });
+}
+
+/** True when this row's P&L could not be priced (see priceRowsFromChain). */
+export const rowPnlUnknown = (row: BrokerPositionRow | null): boolean => row?.pnlUnknown === true;

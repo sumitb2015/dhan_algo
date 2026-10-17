@@ -12,6 +12,9 @@ import {
 } from '@/lib/basketOrders';
 import { fetchMarginSummary, type MarginSummary } from '@/lib/optionsMargin';
 import { NIFTY50_SYMBOLS } from '@/lib/nifty50';
+import { BrokerPicker, usePageBroker } from '@/components/BrokerPicker';
+import { scalperRoute, BROKER_LABELS } from '@/hooks/useBrokerSelector';
+import { sendOrderRequest, UNKNOWN_ORDER_HINT } from '@/lib/orderOutcome';
 import type { Toast } from './Scalper';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
@@ -29,10 +32,10 @@ import { AlertTriangle, Plus, RefreshCw, RotateCcw, ShoppingBasket, Trash2 } fro
 import { cn } from '@/lib/utils';
 import NavBar from './NavBar';
 
-// Stock F&O order placement is Dhan-only today — /api/options/chain and
-// /api/options/expiries both 400 for Zerodha on any underlying outside
-// NIFTY/BANKNIFTY/SENSEX, so this page never offers a broker selector.
-const BROKER = 'dhan' as const;
+// Stock F&O orders go to Dhan or Kotak (a per-page picker). Zerodha is not offered: /api/options/chain and
+// /api/options/expiries both 400 for Zerodha outside NIFTY/BANKNIFTY/SENSEX. The chain, expiries and prices are
+// always Dhan's; Kotak only supplies its contracts (trading symbols, lot size) from its own instrument master, which
+// lists stock options (OPTSTK) per underlying.
 
 interface LegDraft {
   id: string;
@@ -58,6 +61,7 @@ function todayIso(): string {
 }
 
 export default function OptionStratsStock() {
+  const [broker, setBroker, brokerLoaded] = usePageBroker('optionStratsStocks.broker');
   const [underlying, setUnderlying] = useState(NIFTY50_SYMBOLS[0]);
   const [activeView, setActiveView] = useState<'table' | 'graph'>('table');
 
@@ -93,8 +97,10 @@ export default function OptionStratsStock() {
   // once some other change actually goes through — not on every render.
   useEffect(() => { setDuplicateWarning(null); }, [legs]);
 
-  // ── Order placement (Dhan only, see BROKER above) ────────────────────
-  const [strikeMap, setStrikeMap] = useState<Record<string, StrikeIdentifier>>({});
+  // ── Order placement (Dhan or Kotak, the page picker) ────────────────────
+  // The order handles (Dhan security ids / Kotak trading symbols) and, on Kotak, Kotak's own lot size — tagged with the
+  // (broker, underlying, expiry) they were fetched for, so the other broker's handles are never used while these load.
+  const [brokerLookup, setBrokerLookup] = useState<{ key: string; strikes: Record<string, StrikeIdentifier>; lot: number | null } | null>(null);
   const [toasts, setToasts] = useState<Toast[]>([]);
   const [placing, setPlacing] = useState(false);
   const [confirmPlace, setConfirmPlace] = useState(false);
@@ -106,13 +112,30 @@ export default function OptionStratsStock() {
     setTimeout(() => setToasts((prev) => prev.filter((t) => t.id !== id)), type === 'error' ? 7000 : 3000);
   }, []);
 
+  const lookupKey = `${broker}|${underlying}|${selectedExpiry}`;
   useEffect(() => {
-    if (!selectedExpiry) return;
-    fetch(`/api/scalper/lookup?underlying=${underlying}&expiry=${selectedExpiry}`)
+    if (!selectedExpiry || !brokerLoaded) return;   // the first render is always 'dhan' (see usePageBroker)
+    let cancelled = false;
+    fetch(`${scalperRoute(broker, 'lookup')}?underlying=${underlying}&expiry=${selectedExpiry}`)
       .then((r) => r.json())
-      .then((json) => setStrikeMap(json?.success ? (json.data?.strikes ?? {}) : {}))
-      .catch(() => setStrikeMap({}));
-  }, [selectedExpiry, underlying]);
+      .then((json) => {
+        if (cancelled) return;
+        const lot = Number(json?.data?.lotSize);
+        setBrokerLookup({
+          key: lookupKey,
+          strikes: json?.success ? (json.data?.strikes ?? {}) : {},
+          lot: json?.success && Number.isFinite(lot) && lot > 0 ? lot : null,
+        });
+      })
+      .catch(() => { if (!cancelled) setBrokerLookup({ key: lookupKey, strikes: {}, lot: null }); });
+    return () => { cancelled = true; };
+  }, [selectedExpiry, underlying, broker, lookupKey, brokerLoaded]);
+  const current = brokerLookup?.key === lookupKey ? brokerLookup : null;
+  const strikeMap = useMemo(() => current?.strikes ?? {}, [current]);
+  const brokerLot = current?.lot ?? null;
+  // What an ORDER is sized with: Kotak's own lot for a Kotak order (its master), Dhan's for Dhan. Never the 1-unit
+  // display fallback (effectiveLotSize) — an unresolved lot size refuses the order.
+  const orderLot = broker === 'kotak' ? brokerLot : lotSize;
 
   useEffect(() => {
     fetch(`/api/lotsize?symbol=${underlying}`)
@@ -228,7 +251,7 @@ export default function OptionStratsStock() {
     addToast('error', `Auto-flattening ${placed.length} placed leg(s)`, 'Reversing with market orders — verify in Orders/Positions after');
     for (const p of [...placed].reverse()) {
       const label = `${p.side} ${p.strike} ${p.type}`;
-      const req = resolveOrderRequest(BROKER, {
+      const req = resolveOrderRequest(broker, {
         side: p.side === 'BUY' ? 'S' : 'B', option: p.type, strike: p.strike, qty: p.qty, type: 'MARKET', underlying,
         productType: 'MARGIN',
       }, strikeMap);
@@ -236,20 +259,12 @@ export default function OptionStratsStock() {
         addToast('error', `Could not auto-reverse ${label}`, 'No order identifier — close manually from Orders/Positions');
         continue;
       }
-      try {
-        const res = await fetch(req.url, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(req.body),
-        });
-        const j = await res.json() as { success: boolean; order_id?: string; error?: string };
-        if (j.success) addToast('success', `Reversed ${label}`, `ID: ${j.order_id}`);
-        else addToast('error', `Reverse failed for ${label}`, `${j.error ?? 'Unknown error'} — close manually from Orders/Positions`);
-      } catch (e) {
-        addToast('error', `Reverse UNCONFIRMED for ${label}`, `Close manually from Orders/Positions: ${String(e)}`);
-      }
+      const { outcome } = await sendOrderRequest(req.url, req.body);
+      if (outcome.kind === 'placed') addToast('success', `Reversed ${label}`, `ID: ${outcome.orderId ?? 'OK'}`);
+      else if (outcome.kind === 'unknown') addToast('error', `Reverse of ${label}: status UNKNOWN`, `${outcome.error} It may have closed the leg — check Positions before closing it again.`);
+      else addToast('error', `Reverse rejected for ${label}`, `${outcome.error} — close manually from Orders/Positions`);
     }
-  }, [strikeMap, addToast, underlying]);
+  }, [strikeMap, addToast, underlying, broker]);
 
   const placeTrade = useCallback(async () => {
     if (legs.length === 0 || !selectedExpiry) return;
@@ -260,12 +275,17 @@ export default function OptionStratsStock() {
     }
     setConfirmPlace(false);
     if (placingRef.current) return;
+    if (!brokerLoaded) return;   // the account is not known yet (usePageBroker's first render)
+    if (!(orderLot && orderLot > 0)) {
+      addToast('error', 'Lot size not resolved', `${BROKER_LABELS[broker]}'s lot size for ${underlying} has not loaded — nothing was sent.`);
+      return;
+    }
 
     placingRef.current = true;
     setPlacing(true);
 
     type QueuedLeg = { side: Side; type: OptType; strike: number; qty: number };
-    const queued: QueuedLeg[] = legs.map((l) => ({ side: l.side, type: l.type, strike: l.strike, qty: l.qtyLots * effectiveLotSize }));
+    const queued: QueuedLeg[] = legs.map((l) => ({ side: l.side, type: l.type, strike: l.strike, qty: l.qtyLots * orderLot }));
     const ordered = sortLegsForPlacement(queued.map((l) => ({ ...l, side: (l.side === 'BUY' ? 'B' : 'S') as 'B' | 'S' })));
     const placedLegs: QueuedLeg[] = [];
 
@@ -273,7 +293,7 @@ export default function OptionStratsStock() {
       for (const leg of ordered) {
         const origSide: Side = leg.side === 'B' ? 'BUY' : 'SELL';
         const label = `${origSide} ${leg.strike} ${leg.type}`;
-        const req = resolveOrderRequest(BROKER, {
+        const req = resolveOrderRequest(broker, {
           side: leg.side, option: leg.type, strike: leg.strike, qty: leg.qty, type: 'MARKET', underlying,
           productType: 'MARGIN',
         }, strikeMap);
@@ -282,33 +302,29 @@ export default function OptionStratsStock() {
           await rollbackPlacedLegs(placedLegs);
           return;
         }
-        try {
-          const res = await fetch(req.url, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(req.body),
-          });
-          const j = await res.json() as { success: boolean; order_id?: string; error?: string };
-          if (j.success) {
-            placedLegs.push({ side: origSide, type: leg.type, strike: leg.strike, qty: leg.qty });
-            addToast('success', `${label} placed`, `ID: ${j.order_id}`);
-          } else {
-            addToast('error', `${label} failed — trade stopped`, j.error ?? 'Unknown error');
-            await rollbackPlacedLegs(placedLegs);
-            return;
-          }
-        } catch (e) {
-          addToast('error', `${label} UNCONFIRMED — trade stopped`, `Check Orders before retrying: ${String(e)}`);
-          await rollbackPlacedLegs(placedLegs);
+        const { outcome } = await sendOrderRequest(req.url, req.body);
+        if (outcome.kind === 'placed') {
+          placedLegs.push({ side: origSide, type: leg.type, strike: leg.strike, qty: leg.qty });
+          addToast('success', `${label} placed`, `ID: ${outcome.orderId ?? 'OK'}`);
+          continue;
+        }
+        if (outcome.kind === 'unknown') {
+          // It may be live. Unwinding the legs already placed (the hedges, which go first) could leave it naked if it
+          // filled, so nothing is reversed: the trade stops and the placed legs stay as they are.
+          addToast('error', `${label}: order status UNKNOWN — trade stopped, nothing reversed`,
+            `${outcome.error} ${placedLegs.length ? `Placed so far: ${placedLegs.map(p => `${p.side} ${p.strike} ${p.type}`).join(', ')}. ` : ''}${UNKNOWN_ORDER_HINT}`);
           return;
         }
+        addToast('error', `${label} rejected — trade stopped`, outcome.error);
+        await rollbackPlacedLegs(placedLegs);
+        return;
       }
       addToast('success', `Trade complete: ${placedLegs.length}/${legs.length} legs placed`);
     } finally {
       placingRef.current = false;
       setPlacing(false);
     }
-  }, [legs, selectedExpiry, confirmPlace, effectiveLotSize, strikeMap, addToast, rollbackPlacedLegs, underlying]);
+  }, [legs, selectedExpiry, confirmPlace, orderLot, strikeMap, addToast, rollbackPlacedLegs, underlying, broker, brokerLoaded]);
 
   const legMarketData = useMemo(() => {
     const map = new Map<string, { price: number; iv: number | null } | null>();
@@ -333,8 +349,8 @@ export default function OptionStratsStock() {
     return computePayoffStats(resolvedLegs, spot, effectiveLotSize, selectedExpiry, strikeStep);
   }, [resolvedLegs, spot, effectiveLotSize, selectedExpiry, strikeStep]);
 
-  // Margin is always computed against Dhan (the /api/options/margin script is
-  // Dhan-only) — matches BROKER above, so this is never out of sync.
+  // Margin is always computed against Dhan (the /api/options/margin script is Dhan-only). On Kotak it is shown as
+  // Dhan's estimate of the same exchange margin.
   const [margin, setMargin] = useState<MarginSummary | null>(null);
   const [marginLoading, setMarginLoading] = useState(false);
 
@@ -479,6 +495,7 @@ export default function OptionStratsStock() {
             </TabsList>
           </Tabs>
 
+          <BrokerPicker value={broker} onChange={setBroker} disabled={placing} disabledReason="An order is being placed" />
           <span className="w-px h-5 bg-zinc-800 shrink-0" />
           <NavBar />
         </div>
@@ -658,7 +675,7 @@ export default function OptionStratsStock() {
               ) : margin && (
                 <>
                   <Metric label="Overall Margin" value={`₹${margin.overall_margin.toLocaleString('en-IN', { maximumFractionDigits: 0 })}`} tone="neutral" />
-                  <Metric label="Final Margin" value={margin.total_margin > 0 ? `₹${margin.total_margin.toLocaleString('en-IN', { maximumFractionDigits: 0 })}` : '— (market closed)'} tone="neutral" />
+                  <Metric label={broker === 'kotak' ? 'Final Margin (Dhan est.)' : 'Final Margin'} value={margin.total_margin > 0 ? `₹${margin.total_margin.toLocaleString('en-IN', { maximumFractionDigits: 0 })}` : '— (market closed)'} tone="neutral" />
                   <Metric label="Hedge Benefit" value={`₹${margin.hedge_benefit.toLocaleString('en-IN', { maximumFractionDigits: 0 })}`} tone="pos" />
                   <Metric label="Net Premium" value={`₹${fmtInr(stats.netPremium * effectiveLotSize)}`} tone={stats.netPremium >= 0 ? 'pos' : 'neg'} />
                 </>

@@ -9,6 +9,8 @@ import { PanelStyles } from '@/components/PanelStyles';
 import { type ChartUnderlying } from '@/lib/underlyings';
 import OptionOrderModal, { type OptionOrderInitialState, type PlacedOptionLeg } from '@/components/OptionOrderModal';
 import LiveTradingDesk from '@/components/LiveTradingDesk';
+import { BrokerPicker, usePageBroker } from '@/components/BrokerPicker';
+import { basketIsFlat } from '@/lib/liveChartsLedger';
 import { type LedgerBasket } from '@/lib/liveChartsLedger';
 import { LiveChartsIndexTicker } from '@/components/LiveChartsIndexTicker';
 import NavBar from './NavBar';
@@ -48,6 +50,12 @@ export default function LiveOptionsChartsPage() {
   // lib/liveChartsLedger.ts and the dhan-terminal-position-ownership skill. Lives at page
   // level (not inside LiveTradingDesk) so it survives the desk panel being hidden/shown.
   const [tradedBaskets, setTradedBaskets] = useState<LedgerBasket[]>([]);
+  // The account NEW baskets go to (Dhan or Kotak; this page only — not the dashboard-wide selector). Prices and charts
+  // stay Dhan's. Locked while a basket holds quantity: the desk reads one broker's book, and an open basket's exits,
+  // reconcile and P&L must stay on the account it was placed on (lib/liveChartsLedger.ts basketBroker).
+  const [pageBroker, setPageBroker, brokerLoaded] = usePageBroker('liveCharts.broker');
+  const openBasket = tradedBaskets.find((b) => !basketIsFlat(b));
+  const broker = openBasket?.broker ?? (openBasket ? 'dhan' : pageBroker);
   const [deskOpen, setDeskOpen] = useState(false);
 
   function handleOrderSuccess(
@@ -60,12 +68,14 @@ export default function LiveOptionsChartsPage() {
   ) {
     const basket: LedgerBasket = {
       id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      broker,
       title,
       underlying,
       expiry,
       createdAt: Date.now(),
       legs: legs.map((l) => ({
         securityId: l.securityId,
+        ...(l.tradingSymbol ? { tradingSymbol: l.tradingSymbol } : {}),
         exchangeSegment: l.exchangeSegment,
         strike: l.strike,
         optionType: l.optionType,
@@ -184,6 +194,8 @@ export default function LiveOptionsChartsPage() {
             Live <span className="lc-header-accent">{SPREAD_LABELS[spreadType]}</span> Chart
           </h1>
           <div className="lc-header-controls">
+            <BrokerPicker value={broker} onChange={setPageBroker} disabled={!!openBasket}
+              disabledReason={`Locked: a basket placed here is open on ${broker === 'kotak' ? 'Kotak' : 'Dhan'}. Exit it before switching.`} />
             <LiveChartsIndexTicker />
             <NavBar />
           </div>
@@ -230,6 +242,8 @@ export default function LiveOptionsChartsPage() {
           a collapsible right-side panel (a slim always-visible rail when collapsed) rather than
           a floating overlay, so charts resize to make room via their own ResizeObserver. */}
       <LiveTradingDesk
+        broker={broker}
+        ready={brokerLoaded}
         baskets={tradedBaskets}
         onBasketsChange={setTradedBaskets}
         open={deskOpen}
@@ -237,12 +251,15 @@ export default function LiveOptionsChartsPage() {
       />
 
       {/* Options Spread Order Execution Modal */}
+      {/* Not before the page knows its broker: usePageBroker's first render is always Dhan, and a ticket opened in
+          that instant would resolve contracts — and could send the order — on the wrong account. */}
       <OptionOrderModal
-        isOpen={tradeModalOpen}
+        isOpen={tradeModalOpen && brokerLoaded}
         onClose={() => setTradeModalOpen(false)}
         initialOrder={activeTradeOrder}
         onOrderSuccess={handleOrderSuccess}
         existingBaskets={tradedBaskets}
+        broker={broker}
       />
 
       <style>{`

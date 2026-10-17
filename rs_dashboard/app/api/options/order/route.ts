@@ -2,6 +2,20 @@ import { NextRequest, NextResponse } from 'next/server';
 import path from 'path';
 import fs from 'fs';
 import { invalidateBrokerCache } from '@/lib/brokerPositionsCache';
+import { placeKotakOrder } from '@/lib/kotakPlaceOrder';
+import { buildKotakOrderPayload } from '@/lib/kotakOrderPayload';
+import { kotakDerivativeBySymbol } from '@/lib/kotakContracts';
+import { kotakUnderlyingOf } from '@/lib/kotakPositionContracts';
+import { isKotakTokenValid } from '@/lib/kotakToken';
+
+// A basket of option legs (Live Options Charts' order modal and trading desk), every leg sent concurrently.
+// broker 'dhan' (default): straight to Dhan's order API by securityId. broker 'kotak': by trading symbol through the
+// same payload builder and placement as /api/scalper/kotak/order (lib/kotakOrderPayload.ts, lib/kotakPlaceOrder.ts).
+// Each leg's result says placed / failed / UNKNOWN (`unknown: true`: no clean reply — it may be live; the caller must
+// not retry it). Market data never comes from here.
+
+/** One leg's outcome, in leg order. `securityId` (Dhan) or `tradingSymbol` (Kotak) echoes the leg. */
+interface LegResult { success: boolean; orderId?: string; securityId?: string; tradingSymbol?: string; error?: string; unknown?: boolean }
 
 const PROJECT_ROOT = path.resolve(process.cwd(), '..');
 const TOKEN_FILE   = path.join(PROJECT_ROOT, 'access_token.json');
@@ -42,8 +56,13 @@ function getToken(): { clientId: string; token: string } {
 
 export async function POST(req: NextRequest): Promise<NextResponse> {
   const body = await req.json().catch(() => null) as {
+    broker?: 'dhan' | 'kotak';
     legs?: {
-      securityId: string;
+      securityId?: string;
+      /** Kotak: the contract's trading symbol (Kotak has no Dhan security id). */
+      tradingSymbol?: string;
+      /** Kotak: nse_fo / bse_fo / mcx_fo. */
+      exchange?: string;
       quantity: number;
       side: 'BUY' | 'SELL';
       exchangeSegment?: string;
@@ -59,6 +78,11 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   }
 
   const { legs, mode = 'intraday' } = body;
+  const broker = body.broker ?? 'dhan';
+  if (broker !== 'dhan' && broker !== 'kotak') {
+    return NextResponse.json({ success: false, error: `Unsupported broker: ${broker}` }, { status: 400 });
+  }
+  const identOf = (leg: { securityId?: string; tradingSymbol?: string }) => (broker === 'kotak' ? leg.tradingSymbol : leg.securityId);
 
   // Maximum quantity ceiling per leg (e.g. 5,000 units = ~76 lots of Nifty)
   // Enforces Invariant #1 of dhan-order-tickets skill against uncapped API calls
@@ -67,8 +91,9 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   // Validate every leg before touching the broker — fail fast with a clear message
   const invalidLegs: string[] = [];
   for (const leg of legs) {
-    if (!leg.securityId || String(leg.securityId) === 'null' || String(leg.securityId).trim() === '') {
-      invalidLegs.push(`leg ${leg.securityId ?? 'unknown'}: missing securityId (option chain data may not have loaded yet)`);
+    const ident = identOf(leg);
+    if (!ident || String(ident) === 'null' || String(ident).trim() === '') {
+      invalidLegs.push(`leg ${ident ?? 'unknown'}: missing ${broker === 'kotak' ? 'Kotak trading symbol' : 'securityId'} (option chain data may not have loaded yet)`);
     }
     if (!Number.isFinite(leg.quantity) || leg.quantity <= 0) {
       invalidLegs.push(`leg ${leg.securityId}: invalid quantity=${leg.quantity}`);
@@ -91,11 +116,36 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     }, { status: 400 });
   }
 
+  if (broker === 'kotak') {
+    if (!isKotakTokenValid()) return NextResponse.json({ success: false, error: 'Kotak not connected — run kotak_autologin.py' }, { status: 401 });
+    // Build every payload first: a leg the builder refuses fails the whole basket before anything is sent.
+    const built = legs.map(leg => {
+      const symbol = String(leg.tradingSymbol);
+      const exchange = leg.exchange ?? 'nse_fo';
+      const underlying = /_fo$/i.test(exchange) ? kotakUnderlyingOf(symbol) : null;
+      return buildKotakOrderPayload({
+        tradingsymbol: symbol, quantity: Number(leg.quantity), side: leg.side, orderType: leg.orderType ?? 'MARKET',
+        price: leg.price, triggerPrice: leg.triggerPrice, exchange, product: mode === 'positional' ? 'NRML' : 'MIS',
+      }, underlying ? kotakDerivativeBySymbol(symbol, underlying) : null);
+    });
+    const refused = built.flatMap((b, i) => ('error' in b ? [`${legs[i].tradingSymbol}: ${b.error}`] : []));
+    if (refused.length) {
+      return NextResponse.json({ success: false, error: `Cannot place order — invalid leg(s): ${refused.join('; ')}` }, { status: 400 });
+    }
+    const results: LegResult[] = await Promise.all(built.map(async (b, i): Promise<LegResult> => {
+      const r = await placeKotakOrder((b as { payload: Record<string, string> }).payload);
+      const tradingSymbol = String(legs[i].tradingSymbol);
+      if (r.status === 'placed') return { success: true, orderId: r.orderId, tradingSymbol };
+      return { success: false, error: r.error, tradingSymbol, ...(r.status === 'unknown' ? { unknown: true } : {}) };
+    }));
+    return basketReply('kotak', results);
+  }
+
   try {
     const { clientId, token } = getToken();
     const productType = mode === 'positional' ? 'MARGIN' : 'INTRADAY';
 
-    const orderPromises = legs.map(async (leg) => {
+    const orderPromises = legs.map(async (leg): Promise<LegResult> => {
       const orderType = leg.orderType ?? 'MARKET';
       // For STOP_LOSS_MARKET: price=0, triggerPrice=trigger
       // For STOP_LOSS (limit): price=leg.price, triggerPrice=trigger
@@ -130,36 +180,43 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
           body: JSON.stringify(payload),
         });
 
-        const json = await res.json() as Record<string, any>;
+        // No readable reply (or a 5xx without one): Dhan may still have booked it.
+        const json = await res.json().catch(() => null) as Record<string, any> | null;
+        if (!json) return { success: false, error: `Dhan answered HTTP ${res.status} with no readable body — the order may be live`, securityId: leg.securityId, unknown: true };
         const orderId = String(json.orderId ?? json.data?.orderId ?? '');
         if (orderId) {
           return { success: true, orderId, securityId: leg.securityId };
         }
         return { success: false, error: json.remarks ?? json.message ?? JSON.stringify(json), securityId: leg.securityId };
       } catch (e) {
-        return { success: false, error: String(e), securityId: leg.securityId };
+        // The request may have reached Dhan before it failed.
+        return { success: false, error: String(e), securityId: leg.securityId, unknown: true };
       }
     });
 
-    const results = await Promise.all(orderPromises);
-    const failures = results.filter(r => !r.success);
-
-    // Invalidate even on a partial failure — a basket can place some legs
-    // and reject others, and any placed leg still means positions moved.
-    if (results.some(r => r.success)) invalidateBrokerCache('dhan');
-
-    if (failures.length > 0) {
-      return NextResponse.json({
-        success: false,
-        error: `Failed to place some orders: ${failures.map(f => `${f.securityId}: ${f.error}`).join(', ')}`,
-        data: results
-      });
-    }
-
-    return NextResponse.json({ success: true, data: results });
+    return basketReply('dhan', await Promise.all(orderPromises));
 
   } catch (err) {
     console.error('[options/order] error:', err);
     return NextResponse.json({ success: false, error: String(err) }, { status: 500 });
   }
+}
+
+/** The basket's reply: per-leg `data` always (a partial basket still placed what it placed), `unknown: true` when any
+ *  leg's outcome is unknown. */
+function basketReply(broker: 'dhan' | 'kotak', results: LegResult[]): NextResponse {
+  // Invalidate even on a partial failure — a basket can place some legs and reject others, and any placed (or
+  // possibly placed) leg still means positions moved.
+  if (results.some(r => r.success || r.unknown)) invalidateBrokerCache(broker);
+  const failures = results.filter(r => !r.success);
+  if (failures.length > 0) {
+    const anyUnknown = failures.some(f => f.unknown);
+    return NextResponse.json({
+      success: false,
+      ...(anyUnknown ? { unknown: true } : {}),
+      error: `${anyUnknown ? 'Some orders have an UNKNOWN status' : 'Failed to place some orders'}: ${failures.map(f => `${f.securityId ?? f.tradingSymbol}: ${f.unknown ? 'UNKNOWN — ' : ''}${f.error}`).join(', ')}`,
+      data: results,
+    });
+  }
+  return NextResponse.json({ success: true, data: results });
 }

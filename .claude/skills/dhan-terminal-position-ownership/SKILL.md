@@ -469,6 +469,10 @@ Classify every order reply with `lib/orderOutcome.ts` (`classifyOrderReply`, `se
 - **Hold the next close.** Focus Tool unconfirmed close (60 s), Multi-Leg Focus `exitUnknownRef` (60 s, manual too),
   Triple Straddle `TsLeg.unknownExitAt` (60 s; Kotak has no idempotency key, Dhan's fast-order replays the 504 for
   60 s on the same key), Advanced Scalper `closeHoldRef.unknown` (15 s, manual click too).
+- **Same rule on the basket desks (2026-10-17):** Live Options Charts' modal hands every PLACED leg to its ledger even
+  when another leg failed, shows unknown legs as UNKNOWN and disables re-sending the ticket; its desk holds a leg's
+  exits 60 s after an unknown exit. Option Strats – Stocks stops with nothing reversed on an unknown leg (a clean
+  rejection still reverses what was placed).
 - **Keep protection attached.** Advanced Scalper keeps a Kotak server bracket on an unknown entry (the pending TTL
   drops it if no position appears); only a clean rejection withdraws it.
 - **Say it.** "status UNKNOWN — check Positions", never "failed" / "rejected" (`UNKNOWN_ORDER_HINT`).

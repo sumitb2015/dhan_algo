@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   allocateLiveQty, stampOwnEntries, ownEntryFromTrades, legEntryPrice, legEntryIsOwn, legUnrealizedPnl,
-  ledgerLegKey, type LedgerBasket, type LedgerLeg,
+  ledgerLegKey, findBrokerRow, reconcileBasket, type LedgerBasket, type LedgerLeg,
 } from './liveChartsLedger.ts';
 
 const leg = (over: Partial<LedgerLeg> = {}): LedgerLeg => ({
@@ -58,4 +58,56 @@ test('a leg holding the whole basket\'s order ids only averages its own contract
     { orderId: 'oPE', securityId: '51321', tradedQuantity: 130, tradedPrice: 80 },
   ];
   assert.equal(ownEntryFromTrades(pe, trades), 80);
+});
+
+// ── Kotak baskets: matched by trading symbol (Kotak's securityId is its own token), products MIS / NRML ──
+const KSYM = 'NIFTY26O2722300PE';
+const kLeg = (over: Partial<LedgerLeg> = {}) => leg({ securityId: '', tradingSymbol: KSYM, exchangeSegment: 'nse_fo', productType: 'MARGIN', ...over });
+const kBasket = (id: string, createdAt: number, legs: LedgerLeg[]): LedgerBasket => ({ ...basket(id, createdAt, legs), broker: 'kotak' });
+// shapeKotakPosition: tradingSymbol, Kotak's own token in securityId, product NRML.
+const kRow = { tradingSymbol: KSYM, securityId: '51331', productType: 'NRML', netQty: -130, sellAvg: 101, unrealizedProfit: -650 };
+
+test('Kotak: a leg finds its row by trading symbol, NRML = MARGIN, MIS = INTRADAY; never by Kotak\'s token', () => {
+  assert.equal(findBrokerRow([kRow], kLeg(), 'kotak'), kRow);
+  assert.equal(findBrokerRow([kRow], kLeg({ productType: 'INTRADAY' }), 'kotak'), null);
+  assert.equal(findBrokerRow([{ ...kRow, productType: 'MIS' }], kLeg({ productType: 'INTRADAY' }), 'kotak')?.netQty, -130);
+  // Kotak's securityId (its own token) is never used: a leg with only that id finds nothing.
+  assert.equal(findBrokerRow([kRow], kLeg({ tradingSymbol: undefined, securityId: '51331' }), 'kotak'), null);
+});
+
+test('Kotak: allocation and reconcile read only the basket\'s own broker book', () => {
+  const k = kBasket('k', 1, [kLeg({ qty: 195 })]);
+  const d = basket('d', 2, [leg()]);
+  const alloc = allocateLiveQty([k, d], [kRow], 'kotak');
+  assert.equal(alloc.get('k:0'), 130, 'clamped to the Kotak book');
+  assert.equal(alloc.get('d:0'), 0, 'a Dhan basket owns nothing in the Kotak book');
+  // A Dhan book (here: empty) says nothing about a Kotak basket: it is not clamped to 0.
+  assert.equal(reconcileBasket(k, [], 1e15, 'dhan'), k);
+  assert.equal(reconcileBasket(k, [kRow], 1e15, 'kotak').legs[0].qty, 130);
+  assert.equal(reconcileBasket(d, [kRow], 1e15, 'kotak'), d);
+});
+
+test('Kotak: own entry from Kotak trades by symbol; another broker\'s basket is not stamped', () => {
+  const k = kBasket('k', 1, [kLeg({ entryOrderIds: ['K1'] })]);
+  const d = basket('d', 2, [leg({ entryOrderIds: ['K1'] })]);
+  const trades = [{ orderId: 'K1', securityId: '51331', tradingSymbol: KSYM, tradedQuantity: 130, tradedPrice: 99.5 }];
+  const out = stampOwnEntries([k, d], trades, 'kotak');
+  assert.equal(out[0].legs[0].entryPrice, 99.5);
+  assert.equal(out[1], d);
+});
+
+test('Kotak rows are priced from the chain; an unpriceable open row is marked unknown, never ₹0', async () => {
+  const { priceRowsFromChain, rowPnlUnknown } = await import('./liveChartsLedger.ts');
+  const rows = [
+    { ...kRow, drvOptionType: 'PUT', drvStrikePrice: 22300, drvExpiryDate: '2026-10-27' },       // short 130 @ 101
+    { tradingSymbol: 'NIFTY26O2722400CE', netQty: 65, buyAvg: 50, productType: 'NRML' },           // contract unknown
+    { tradingSymbol: 'NIFTY26O2722500CE', netQty: 0 },                                             // flat: untouched
+  ];
+  const ltp = (u: string, e: string, k: number, o: 'CE' | 'PE') => (u === 'NIFTY' && e === '2026-10-27' && k === 22300 && o === 'PE' ? 96 : null);
+  const out = priceRowsFromChain(rows, ltp, s => (s.startsWith('NIFTY') ? 'NIFTY' : null));
+  assert.equal(out[0].lastTradedPrice, 96);
+  assert.equal(out[0].unrealizedProfit, (96 - 101) * -130);   // +650 on the short
+  assert.equal(rowPnlUnknown(out[0]), false);
+  assert.equal(rowPnlUnknown(out[1]), true);
+  assert.equal(out[2], rows[2]);
 });

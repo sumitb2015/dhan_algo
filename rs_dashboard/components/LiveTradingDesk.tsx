@@ -6,9 +6,19 @@ import { scaleBrokerPnl, contractMultiplier } from '@/lib/positionPnl';
 import { buildPositionLegs, type PositionLeg } from '@/lib/positionLegs';
 import { aggregateLegs, classifyStructure } from '@/lib/positionStructure';
 import type { ScalperPosition } from '@/lib/zerodhaShape';
+import { scalperRoute, BROKER_LABELS } from '@/hooks/useBrokerSelector';
+import { withKotakContracts, kotakOpenUnderlyings, kotakUnderlyingOf, type KotakSymbolMap } from '@/lib/kotakPositionContracts';
+import { UNKNOWN_ORDER_HINT } from '@/lib/orderOutcome';
 import {
   type LedgerBasket,
+  type LedgerBroker,
   type BrokerPositionRow,
+  basketBroker,
+  legIdent,
+  rowIdent,
+  normProduct,
+  priceRowsFromChain,
+  rowPnlUnknown,
   findBrokerRow,
   legUnrealizedPnl,
   legEntryPrice,
@@ -59,7 +69,17 @@ function fmtPrice(n: number): string {
 
 type DeskTab = 'positions' | 'orders' | 'trades';
 
+/** How long further exits on a leg wait after an exit whose outcome is UNKNOWN (it may have filled). */
+const UNKNOWN_EXIT_HOLD_MS = 60_000;
+/** Kotak legs are priced from Dhan's option chain (a ~30 s server snapshot) — see priceRowsFromChain. */
+const KOTAK_CHAIN_POLL_MS = 5_000;
+
 interface LiveTradingDeskProps {
+  /** The account this desk reads and trades: positions, orders, trades and exits all follow it. Its baskets are the
+   *  ones placed on it (the page locks its picker while a basket is open). */
+  broker: LedgerBroker;
+  /** False until the page knows its broker (usePageBroker's first render is always Dhan): no account is read before. */
+  ready?: boolean;
   baskets: LedgerBasket[];
   onBasketsChange: (baskets: LedgerBasket[]) => void;
   open: boolean;
@@ -70,9 +90,13 @@ interface LiveTradingDeskProps {
  * trade book as tabs, with the running unrealized P&L always visible in the header. Collapses to
  * a slim always-present rail (rather than only appearing after a trade, like the previous
  * bottom-right overlay) so the desk is reachable before a basket exists too. */
-export default function LiveTradingDesk({ baskets, onBasketsChange, open, onToggle }: LiveTradingDeskProps) {
+export default function LiveTradingDesk({ broker, ready = true, baskets, onBasketsChange, open, onToggle }: LiveTradingDeskProps) {
   const [tab, setTab] = useState<DeskTab>('positions');
   const [positions, setPositions] = useState<BrokerPositionRow[]>([]);
+  // Another account's book must never be shown (or sized off) as this one's: dropped the moment the broker changes
+  // (adjusted during render; the positions poll restarts on `broker`).
+  const [positionsFor, setPositionsFor] = useState(broker);
+  if (positionsFor !== broker) { setPositionsFor(broker); setPositions([]); }
   const [orders, setOrders] = useState<OrderRow[]>([]);
   const [trades, setTrades] = useState<TradeRow[]>([]);
   const [exitingLegKey, setExitingLegKey] = useState<string | null>(null);
@@ -80,6 +104,10 @@ export default function LiveTradingDesk({ baskets, onBasketsChange, open, onTogg
   const [draftPrice, setDraftPrice] = useState('');
   const [draftQty, setDraftQty] = useState('');
   const [cancelConfirmId, setCancelConfirmId] = useState<string | null>(null);
+  // A refused / UNKNOWN exit or order action used to fail silently here; it is said in one line at the top.
+  const [notice, setNotice] = useState<{ tone: 'error' | 'warn'; text: string } | null>(null);
+  // Leg key -> when its last exit came back UNKNOWN (see UNKNOWN_EXIT_HOLD_MS).
+  const exitUnknownRef = useRef<Map<string, number>>(new Map());
   const basketsRef = useRef(baskets);
   useEffect(() => {
     basketsRef.current = baskets;
@@ -106,20 +134,68 @@ export default function LiveTradingDesk({ baskets, onBasketsChange, open, onTogg
     bookSecIdsRef.current = new Set(
       positions
         .filter((r) => Number(r.netQty ?? r.net_qty ?? 0) !== 0)
-        .map((r) => String(r.securityId ?? r.security_id ?? '')),
+        .map((r) => rowIdent(r, broker)),
     );
-  }, [positions]);
+  }, [positions, broker]);
+
+  /** Contracts the order / trade books are filtered to: this broker's own baskets' legs plus everything in its book. */
+  function trackedIdents(): Set<string> {
+    return new Set([
+      ...basketsRef.current.filter((b) => basketBroker(b) === broker).flatMap((b) => b.legs.map((l) => legIdent(l, broker))),
+      ...bookSecIdsRef.current,
+    ].filter(Boolean));
+  }
+
+  /** The reply of /api/options/order for one leg: placed, rejected, or UNKNOWN (may be live). */
+  async function sendExit(leg: { ident: string; exchange: string }, qty: number, side: 'BUY' | 'SELL', productType: string): Promise<{ kind: 'placed'; orderId: string } | { kind: 'rejected'; error: string } | { kind: 'unknown'; error: string }> {
+    let json: { success?: boolean; error?: string; data?: { success?: boolean; orderId?: string; error?: string; unknown?: boolean }[] } | null = null;
+    let status: number | null = null;
+    try {
+      const res = await fetch('/api/options/order', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          broker,
+          legs: [{
+            ...(broker === 'kotak' ? { tradingSymbol: leg.ident, exchange: leg.exchange } : { securityId: leg.ident, exchangeSegment: leg.exchange }),
+            quantity: qty, side, orderType: 'MARKET',
+          }],
+          mode: normProduct(productType) === 'MARGIN' ? 'positional' : 'intraday',
+        }),
+      });
+      status = res.status;
+      json = await res.json().catch(() => null);
+    } catch { /* no reply */ }
+    if (!json) {
+      return status != null && status < 500
+        ? { kind: 'rejected', error: `Order route answered HTTP ${status}` }
+        : { kind: 'unknown', error: 'No reply from the order route' };
+    }
+    const r = json.data?.[0];
+    if (json.success && r?.orderId) return { kind: 'placed', orderId: String(r.orderId) };
+    if (r?.unknown || (json as { unknown?: boolean }).unknown) return { kind: 'unknown', error: r?.error ?? json.error ?? 'status unknown' };
+    return { kind: 'rejected', error: r?.error ?? json.error ?? 'rejected' };
+  }
+
+  /** A leg whose last exit came back UNKNOWN within the hold: refuse (and say why) instead of sending a second close. */
+  function exitHeld(key: string, label: string): boolean {
+    const at = exitUnknownRef.current.get(key);
+    if (at == null || Date.now() - at >= UNKNOWN_EXIT_HOLD_MS) return false;
+    setNotice({ tone: 'warn', text: `${label}: the previous exit's status is UNKNOWN — not sending another for ${Math.ceil((UNKNOWN_EXIT_HOLD_MS - (Date.now() - at)) / 1000)} s. ${UNKNOWN_ORDER_HINT}` });
+    return true;
+  }
 
   // Positions poll - clamps every ledger leg's qty down to what the broker actually still
   // shows (never up, per dhan-terminal-position-ownership). Deliberately raw (not the shared
   // brokerPositionsCache) because the Exit button below sizes real orders off this same read.
   const seqRef = useRef(0);
   useEffect(() => {
+    if (!ready) return;
     let cancelled = false;
     async function poll() {
       const seq = ++seqRef.current;
       try {
-        const res = await fetch('/api/scalper/positions');
+        const res = await fetch(scalperRoute(broker, 'positions'));
         const json = await res.json();
         if (cancelled || seq !== seqRef.current) return;
         if (json.success && Array.isArray(json.data)) {
@@ -127,7 +203,7 @@ export default function LiveTradingDesk({ baskets, onBasketsChange, open, onTogg
           setPositions(scaled);
           const current = basketsRef.current;
           if (current.length > 0) {
-            const reconciled = current.map((b) => reconcileBasket(b, scaled));
+            const reconciled = current.map((b) => reconcileBasket(b, scaled, Date.now(), broker));
             const changed = reconciled.some((b, i) => JSON.stringify(b) !== JSON.stringify(current[i]));
             if (changed) onBasketsChange(reconciled);
           }
@@ -143,7 +219,7 @@ export default function LiveTradingDesk({ baskets, onBasketsChange, open, onTogg
       clearInterval(id);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [broker, ready]);
 
   // Order book poll - filters down to orders for security IDs this page's own baskets track,
   // so the panel doesn't show unrelated orders from Scalper/strategies/manual trades. Gated on
@@ -152,23 +228,20 @@ export default function LiveTradingDesk({ baskets, onBasketsChange, open, onTogg
   // in the background would just be extra load against Dhan's shared rate limit for no visible
   // benefit - see dhan-polling-guards.
   useEffect(() => {
-    if (!open) return;
+    if (!open || !ready) return;
     let cancelled = false;
     async function poll() {
       try {
-        const res = await fetch('/api/scalper/orders');
+        const res = await fetch(scalperRoute(broker, 'orders'));
         const json = await res.json();
         if (cancelled) return;
         if (json.success && Array.isArray(json.data)) {
-          const trackedSecIds = new Set([
-            ...basketsRef.current.flatMap((b) => b.legs.map((l) => String(l.securityId))),
-            ...bookSecIdsRef.current,
-          ]);
+          const trackedSecIds = trackedIdents();
           const rows: OrderRow[] = (json.data as Record<string, unknown>[])
-            .filter((o) => trackedSecIds.has(String(o.securityId)))
+            .filter((o) => trackedSecIds.has(rowIdent(o, broker)))
             .map((o) => ({
               orderId: String(o.orderId ?? ''),
-              securityId: String(o.securityId ?? ''),
+              securityId: rowIdent(o, broker),
               tradingSymbol: String(o.tradingSymbol ?? ''),
               orderStatus: String(o.orderStatus ?? ''),
               transactionType: String(o.transactionType ?? ''),
@@ -189,38 +262,37 @@ export default function LiveTradingDesk({ baskets, onBasketsChange, open, onTogg
       cancelled = true;
       clearInterval(id);
     };
-  }, [open]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, broker, ready]);
 
   // Trade book poll - same tracked-security-id filter as the order book, so a manual/strategy
   // fill on an unrelated contract never shows up here. Gated on `open`, same reasoning as the
   // Orders poll above.
   useEffect(() => {
-    if (!open) return;
+    if (!open || !ready) return;
     let cancelled = false;
     async function poll() {
       try {
-        const res = await fetch('/api/scalper/trades');
+        const res = await fetch(scalperRoute(broker, 'trades'));
         const json = await res.json();
         if (cancelled) return;
         if (json.success && Array.isArray(json.data)) {
-          const trackedSecIds = new Set([
-            ...basketsRef.current.flatMap((b) => b.legs.map((l) => String(l.securityId))),
-            ...bookSecIdsRef.current,
-          ]);
+          const trackedSecIds = trackedIdents();
           const relevant = (json.data as Record<string, unknown>[])
-            .filter((t) => trackedSecIds.has(String(t.securityId)));
+            .filter((t) => trackedSecIds.has(rowIdent(t, broker)));
           // Each ledger leg's own entry price from its own orders' fills — the
           // positions row's average is pooled across every basket on the contract.
           const stamped = stampOwnEntries(basketsRef.current, relevant.map((t) => ({
             orderId: String(t.orderId ?? ''),
             securityId: String(t.securityId ?? ''),
+            tradingSymbol: String(t.tradingSymbol ?? ''),
             tradedQuantity: Number(t.tradedQuantity ?? 0),
             tradedPrice: Number(t.tradedPrice ?? 0),
-          })));
+          })), broker);
           if (stamped !== basketsRef.current) onBasketsChange(stamped);
           const rows: TradeRow[] = relevant
             .map((t) => ({
-              securityId: String(t.securityId ?? ''),
+              securityId: rowIdent(t, broker),
               tradingSymbol: String(t.tradingSymbol ?? ''),
               transactionType: String(t.transactionType ?? ''),
               tradedQuantity: Number(t.tradedQuantity ?? 0),
@@ -241,12 +313,89 @@ export default function LiveTradingDesk({ baskets, onBasketsChange, open, onTogg
       cancelled = true;
       clearInterval(id);
     };
-  }, [open]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, broker, ready]);
+
+  // Kotak only: contracts for its symbol-only rows (the instrument cache, per underlying) and Dhan chain quotes to
+  // price them — Kotak's payload has no price (see priceRowsFromChain). Dhan rows carry their own P&L.
+  const [kotakSymbols, setKotakSymbols] = useState<KotakSymbolMap>({});
+  const [chainQuotes, setChainQuotes] = useState<Record<string, Record<string, { ce?: number; pe?: number }>>>({});
+  const kotakUnderlyingsKey = broker === 'kotak' ? kotakOpenUnderlyings(positions as { tradingSymbol?: unknown; netQty?: unknown }[]).join(',') : '';
+  useEffect(() => {
+    if (!kotakUnderlyingsKey) return;
+    let cancelled = false;
+    for (const u of kotakUnderlyingsKey.split(',')) {
+      fetch(`/api/scalper/kotak/symbol-lookup?underlying=${encodeURIComponent(u)}`)
+        .then((r) => r.json())
+        .then((j: { success?: boolean; data?: KotakSymbolMap }) => {
+          if (!cancelled && j.success && j.data) setKotakSymbols((prev) => ({ ...prev, ...j.data }));
+        })
+        .catch(() => { /* unpriced: shown as — */ });
+    }
+    return () => { cancelled = true; };
+  }, [kotakUnderlyingsKey]);
+  const contractRows = useMemo(
+    () => (broker === 'kotak' ? withKotakContracts(positions, kotakSymbols) : positions),
+    [broker, positions, kotakSymbols],
+  );
+  const chainKeys = useMemo(() => {
+    if (broker !== 'kotak') return '';
+    const keys = new Set<string>();
+    for (const r of contractRows) {
+      if (!Number(r.netQty)) continue;
+      const u = kotakUnderlyingOf(String(r.tradingSymbol ?? ''));
+      if (u && r.drvExpiryDate) keys.add(`${u}|${r.drvExpiryDate}`);
+    }
+    return [...keys].sort().join(',');
+  }, [broker, contractRows]);
+  useEffect(() => {
+    if (!chainKeys) return;
+    let cancelled = false;
+    const load = () => {
+      for (const key of chainKeys.split(',')) {
+        const [u, exp] = key.split('|');
+        fetch(`/api/options/chain?underlying=${encodeURIComponent(u)}&expiry=${encodeURIComponent(exp)}`)
+          .then((r) => r.json())
+          .then((j: { data?: { chain?: { oc?: Record<string, { ce?: { last_price?: number }; pe?: { last_price?: number } }> } } }) => {
+            const oc = j?.data?.chain?.oc;
+            if (cancelled || !oc) return;
+            const byStrike: Record<string, { ce?: number; pe?: number }> = {};
+            for (const [k, v] of Object.entries(oc)) byStrike[String(Number(k))] = { ce: v?.ce?.last_price, pe: v?.pe?.last_price };
+            setChainQuotes((prev) => ({ ...prev, [key]: byStrike }));
+          })
+          .catch(() => { /* keep the last quotes */ });
+      }
+    };
+    load();
+    const id = setInterval(load, KOTAK_CHAIN_POLL_MS);
+    return () => { cancelled = true; clearInterval(id); };
+  }, [chainKeys]);
+  // What every P&L figure below reads: Dhan's rows as they are, Kotak's priced from the chain (an estimate).
+  const pricedPositions = useMemo(
+    () => (broker === 'kotak'
+      ? priceRowsFromChain(contractRows, (u, exp, k, opt) => {
+          const q = chainQuotes[`${u}|${exp}`]?.[String(k)];
+          const v = opt === 'CE' ? q?.ce : q?.pe;
+          return v != null && v > 0 ? v : null;
+        }, kotakUnderlyingOf)
+      : positions),
+    [broker, contractRows, chainQuotes, positions],
+  );
+
+
+
+
 
   const handleExitLeg = useCallback(
     async (basket: LedgerBasket, legIdx: number) => {
       const leg = basket.legs[legIdx];
       const key = `${basket.id}:${legIdx}`;
+      const label = `${leg.action} ${leg.strike} ${leg.optionType}`;
+      if (basketBroker(basket) !== broker) {
+        setNotice({ tone: 'error', text: `${label} was placed on ${BROKER_LABELS[basketBroker(basket)]}; this desk is on ${BROKER_LABELS[broker]}. Exit it from that account.` });
+        return;
+      }
+      if (exitHeld(key, label)) return;
       setExitingLegKey(key);
       try {
         // Fetch live positions right here rather than trusting the background poll's
@@ -257,7 +406,7 @@ export default function LiveTradingDesk({ baskets, onBasketsChange, open, onTogg
         // with no reduce-only flag.
         let freshRows: BrokerPositionRow[] | null = null;
         try {
-          const posRes = await fetch('/api/scalper/positions');
+          const posRes = await fetch(scalperRoute(broker, 'positions'));
           const posJson = await posRes.json();
           if (posJson.success && Array.isArray(posJson.data)) {
             freshRows = (posJson.data as BrokerPositionRow[]).map((r) => scaleBrokerPnl(r, contractMultiplier(r)));
@@ -267,26 +416,25 @@ export default function LiveTradingDesk({ baskets, onBasketsChange, open, onTogg
         }
         // This leg's share of the contract's position — shared out across every
         // basket on it, so two baskets can't each exit the whole position.
-        const exitQty = allocateLiveQty(basketsRef.current, freshRows ?? positions).get(ledgerLegKey(basket.id, legIdx)) ?? 0;
-        if (exitQty <= 0) return;
+        const exitQty = allocateLiveQty(basketsRef.current, freshRows ?? positions, broker).get(ledgerLegKey(basket.id, legIdx)) ?? 0;
+        if (exitQty <= 0) {
+          setNotice({ tone: 'warn', text: `${label}: ${BROKER_LABELS[broker]} shows nothing of this leg open — nothing sent.` });
+          return;
+        }
 
-        const res = await fetch('/api/options/order', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            legs: [{
-              securityId: leg.securityId,
-              quantity: exitQty,
-              side: leg.action === 'BUY' ? 'SELL' : 'BUY',
-              orderType: 'MARKET',
-              exchangeSegment: leg.exchangeSegment,
-            }],
-            mode: leg.productType === 'MARGIN' ? 'positional' : 'intraday',
-          }),
-        });
-        const json = await res.json();
-        const orderId = json?.data?.[0]?.orderId;
-        if (json.success && orderId) {
+        const out = await sendExit({ ident: legIdent(leg, broker), exchange: leg.exchangeSegment }, exitQty, leg.action === 'BUY' ? 'SELL' : 'BUY', leg.productType);
+        if (out.kind === 'unknown') {
+          exitUnknownRef.current.set(key, Date.now());
+          setNotice({ tone: 'warn', text: `${label}: exit status UNKNOWN (${out.error}). The leg stays open here; no further exit on it for a minute. ${UNKNOWN_ORDER_HINT}` });
+          return;
+        }
+        if (out.kind === 'rejected') {
+          setNotice({ tone: 'error', text: `${label}: exit rejected — ${out.error}` });
+          return;
+        }
+        exitUnknownRef.current.delete(key);
+        const orderId = out.orderId;
+        {
           const updated = basketsRef.current.map((b) => {
             if (b.id !== basket.id) return b;
             return {
@@ -305,13 +453,12 @@ export default function LiveTradingDesk({ baskets, onBasketsChange, open, onTogg
           });
           onBasketsChange(updated);
         }
-      } catch {
-        // Network failure - leg qty left untouched, position poll will reconcile on next tick.
       } finally {
         setExitingLegKey(null);
       }
     },
-    [positions, onBasketsChange]
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [positions, onBasketsChange, broker]
   );
 
   const handleExitBasket = useCallback(
@@ -333,16 +480,19 @@ export default function LiveTradingDesk({ baskets, onBasketsChange, open, onTogg
   // close.
   const handleExitBrokerLeg = useCallback(
     async (leg: PositionLeg) => {
-      const key = `book:${leg.securityId}:${leg.display.productType}`;
+      const ident = broker === 'kotak' ? leg.display.tradingSymbol : String(leg.securityId ?? '');
+      const key = `book:${ident}:${leg.display.productType}`;
+      const label = `${leg.side} ${leg.strike} ${leg.type}`;
+      if (exitHeld(key, label)) return;
       setExitingLegKey(key);
       try {
         const matchesLeg = (row: BrokerPositionRow) =>
-          String(row.securityId ?? '') === String(leg.securityId) &&
-          String(row.productType ?? '').trim().toUpperCase() === leg.display.productType.trim().toUpperCase();
+          rowIdent(row, broker) === ident &&
+          normProduct(row.productType ?? row.product) === normProduct(leg.display.productType);
 
         let freshRow: BrokerPositionRow | null = null;
         try {
-          const posRes = await fetch('/api/scalper/positions');
+          const posRes = await fetch(scalperRoute(broker, 'positions'));
           const posJson = await posRes.json();
           if (posJson.success && Array.isArray(posJson.data)) {
             freshRow = (posJson.data as BrokerPositionRow[]).find(matchesLeg) ?? null;
@@ -356,25 +506,24 @@ export default function LiveTradingDesk({ baskets, onBasketsChange, open, onTogg
 
         const exitQty = Math.abs(netQty);
         const side: 'BUY' | 'SELL' = netQty > 0 ? 'SELL' : 'BUY';
-        const exchangeSegment = String(row.exchangeSegment ?? row.exchange ?? 'NSE_FNO');
+        const exchangeSegment = String(row.exchangeSegment ?? row.exchange ?? (broker === 'kotak' ? 'nse_fo' : 'NSE_FNO'));
 
-        await fetch('/api/options/order', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            legs: [{ securityId: leg.securityId, quantity: exitQty, side, orderType: 'MARKET', exchangeSegment }],
-            mode: leg.display.productType.trim().toUpperCase() === 'MARGIN' ? 'positional' : 'intraday',
-          }),
-        });
-        // No ledger to update - the positions poll picks up the closed/reduced quantity on its
-        // own next tick.
-      } catch {
-        // Network failure - the positions poll will reflect the real state on its next tick.
+        const out = await sendExit({ ident, exchange: exchangeSegment }, exitQty, side, leg.display.productType);
+        // No ledger to update - the positions poll picks up the closed/reduced quantity on its own next tick.
+        if (out.kind === 'unknown') {
+          exitUnknownRef.current.set(key, Date.now());
+          setNotice({ tone: 'warn', text: `${label}: exit status UNKNOWN (${out.error}). No further exit on it for a minute. ${UNKNOWN_ORDER_HINT}` });
+        } else if (out.kind === 'rejected') {
+          setNotice({ tone: 'error', text: `${label}: exit rejected — ${out.error}` });
+        } else {
+          exitUnknownRef.current.delete(key);
+        }
       } finally {
         setExitingLegKey(null);
       }
     },
-    [positions]
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [positions, broker]
   );
 
   const handleExitBrokerGroup = useCallback(
@@ -392,12 +541,12 @@ export default function LiveTradingDesk({ baskets, onBasketsChange, open, onTogg
       await fetch('/api/scalper/orders', {
         method: 'DELETE',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ orderId, broker: 'dhan' }),
+        body: JSON.stringify({ orderId, broker }),
       });
     } catch {
       // Order book poll will reflect the real state on its next tick regardless.
     }
-  }, []);
+  }, [broker]);
 
   const startEditOrder = (row: OrderRow) => {
     setEditingOrderId(row.orderId);
@@ -418,7 +567,7 @@ export default function LiveTradingDesk({ baskets, onBasketsChange, open, onTogg
           price,
           quantity: qty,
           orderType: row.orderType,
-          broker: 'dhan',
+          broker,
         }),
       });
     } finally {
@@ -435,19 +584,28 @@ export default function LiveTradingDesk({ baskets, onBasketsChange, open, onTogg
   // session happened to trade - a position opened before this page loaded, in another tab, or in
   // an earlier session is otherwise invisible to the in-memory ledger.
   const bookLegs = useMemo(
-    () => buildPositionLegs(positions as unknown as ScalperPosition[], { raw: positions }).legs,
-    [positions],
+    // Kotak rows go in with their contract (drv fields) and chain-priced P&L; Dhan's as they are. Kotak rows are not
+    // passed as `raw`: that flag means "a genuine Dhan row" (trust its own unrealizedProfit).
+    () => buildPositionLegs(pricedPositions as unknown as ScalperPosition[], broker === 'dhan' ? { raw: positions } : {}).legs,
+    [pricedPositions, positions, broker],
   );
 
   // Legs already covered by an active ledger basket keep the nicer "Basket" / "Exit All"
   // grouped rendering below; every other live leg is rendered from the broker book directly.
   const ledgerSecIds = useMemo(
-    () => new Set(activeBaskets.flatMap((b) => b.legs.filter((l) => l.qty > 0).map((l) => String(l.securityId)))),
-    [activeBaskets],
+    () => new Set(activeBaskets.filter((b) => basketBroker(b) === broker).flatMap((b) => b.legs.filter((l) => l.qty > 0).map((l) => legIdent(l, broker)))),
+    [activeBaskets, broker],
   );
+  const bookIdent = useCallback((leg: PositionLeg) => (broker === 'kotak' ? leg.display.tradingSymbol : String(leg.securityId ?? '')), [broker]);
   const unledgeredLegs = useMemo(
-    () => bookLegs.filter((leg) => !leg.securityId || !ledgerSecIds.has(String(leg.securityId))),
-    [bookLegs, ledgerSecIds],
+    () => bookLegs.filter((leg) => !bookIdent(leg) || !ledgerSecIds.has(bookIdent(leg))),
+    [bookLegs, ledgerSecIds, bookIdent],
+  );
+  // A book leg's P&L could not be priced (Kotak row with no chain quote): shown as —, and the total says so.
+  const bookLegUnpriced = useCallback(
+    (leg: PositionLeg) => broker === 'kotak' && rowPnlUnknown(pricedPositions.find((r) => rowIdent(r, broker) === bookIdent(leg)
+      && normProduct(r.productType ?? r.product) === normProduct(leg.display.productType)) ?? null),
+    [broker, pricedPositions, bookIdent],
   );
   // Grouped by (underlying, expiry, product) only - NOT by strike, so a multi-strike structure
   // (strangle, spread, condor) groups as one row instead of each leg showing up separately as a
@@ -474,20 +632,30 @@ export default function LiveTradingDesk({ baskets, onBasketsChange, open, onTogg
       .sort((a, b) => a.title.localeCompare(b.title));
   }, [unledgeredLegs]);
 
-  const allocated = allocateLiveQty(baskets, positions);
+  const allocated = allocateLiveQty(baskets, pricedPositions, broker);
   let totalPnl = 0;
+  let totalUnpriced = false;
   for (const basket of activeBaskets) {
     basket.legs.forEach((leg, legIdx) => {
       if (leg.qty <= 0) return;
-      const row = findBrokerRow(positions, leg);
+      const row = findBrokerRow(pricedPositions, leg, broker);
+      if (rowPnlUnknown(row)) totalUnpriced = true;
       totalPnl += legUnrealizedPnl(row, allocated.get(ledgerLegKey(basket.id, legIdx)) ?? 0);
     });
   }
-  for (const leg of unledgeredLegs) totalPnl += leg.display.unrealizedProfit;
+  for (const leg of unledgeredLegs) {
+    if (bookLegUnpriced(leg)) totalUnpriced = true;
+    else totalPnl += leg.display.unrealizedProfit;
+  }
+  // Kotak P&L is an estimate off Dhan's chain snapshot; an unpriced leg makes the total unknown, never a partial sum.
+  const pnlText = totalUnpriced ? '—' : `${fmtRupee(totalPnl)}${broker === 'kotak' ? ' est.' : ''}`;
+  const pnlTitle = broker === 'kotak'
+    ? (totalUnpriced ? 'A Kotak leg has no price yet (Kotak sends none; it is priced from Dhan\'s chain)' : 'Estimated from Dhan\'s option chain (a snapshot up to ~30 s old) — Kotak sends no price')
+    : 'Unrealized P&L';
 
   const hasAnyPosition = activeBaskets.length > 0 || unledgeredGroups.length > 0;
   const pnlChip = hasAnyPosition && (
-    <span className={`ltd-pnl-chip ${totalPnl >= 0 ? 'ltd-pnl-pos' : 'ltd-pnl-neg'}`}>{fmtRupee(totalPnl)}</span>
+    <span className={`ltd-pnl-chip ${totalPnl >= 0 ? 'ltd-pnl-pos' : 'ltd-pnl-neg'}`} title={pnlTitle}>{pnlText}</span>
   );
 
   if (!open) {
@@ -496,7 +664,7 @@ export default function LiveTradingDesk({ baskets, onBasketsChange, open, onTogg
         <Layers className="h-4 w-4" />
         <span className="ltd-rail-label">TRADE</span>
         {hasAnyPosition && (
-          <span className={`ltd-rail-pnl ${totalPnl >= 0 ? 'ltd-pnl-pos' : 'ltd-pnl-neg'}`}>{fmtRupee(totalPnl)}</span>
+          <span className={`ltd-rail-pnl ${totalPnl >= 0 ? 'ltd-pnl-pos' : 'ltd-pnl-neg'}`} title={pnlTitle}>{pnlText}</span>
         )}
         <style>{`
           .ltd-rail {
@@ -569,6 +737,18 @@ export default function LiveTradingDesk({ baskets, onBasketsChange, open, onTogg
         </button>
       </div>
 
+      {notice && (
+        <div role="alert" className={`ltd-notice ltd-notice--${notice.tone}`}>
+          <span>{notice.text}</span>
+          <button type="button" onClick={() => setNotice(null)} aria-label="Dismiss" className="ltd-notice-x">×</button>
+        </div>
+      )}
+      {broker === 'kotak' && (
+        <div className="ltd-broker-note" title="Orders, positions and exits on this desk go to Kotak. Prices still come from Dhan.">
+          {BROKER_LABELS.kotak} account · P&amp;L estimated from Dhan&apos;s chain
+        </div>
+      )}
+
       <div className="ltd-body">
         {tab === 'positions' && (
           !hasAnyPosition ? (
@@ -591,9 +771,10 @@ export default function LiveTradingDesk({ baskets, onBasketsChange, open, onTogg
                     const liveLegs = basket.legs.filter((l) => l.qty > 0);
                     return liveLegs.map((leg, i) => {
                       const legIdx = basket.legs.indexOf(leg);
-                      const row = findBrokerRow(positions, leg);
+                      const row = findBrokerRow(pricedPositions, leg, broker);
                       const ownQty = allocated.get(ledgerLegKey(basket.id, legIdx)) ?? 0;
                       const pnl = legUnrealizedPnl(row, ownQty);
+                      const unpriced = rowPnlUnknown(row);
                       const key = `${basket.id}:${legIdx}`;
                       const isExiting = exitingLegKey === key;
                       return (
@@ -625,8 +806,8 @@ export default function LiveTradingDesk({ baskets, onBasketsChange, open, onTogg
                             {fmtPrice(legEntryPrice(row, leg))}{!legEntryIsOwn(leg) && legEntryPrice(row, leg) > 0 ? '*' : ''}
                           </td>
                           <td className="text-right tabular-nums">{ownQty}</td>
-                          <td className={`text-right tabular-nums font-bold ${pnl >= 0 ? 'ltd-text-pos' : 'ltd-text-neg'}`}>
-                            {fmtRupee(pnl)}
+                          <td className={`text-right tabular-nums font-bold ${pnl >= 0 ? 'ltd-text-pos' : 'ltd-text-neg'}`} title={pnlTitle}>
+                            {unpriced ? '—' : fmtRupee(pnl)}
                           </td>
                           <td className="text-right">
                             <button
@@ -649,9 +830,10 @@ export default function LiveTradingDesk({ baskets, onBasketsChange, open, onTogg
                       reads identically to one traded from this page. */}
                   {unledgeredGroups.map((group) => (
                     group.legs.map((leg, i) => {
-                      const key = `book:${leg.securityId}:${leg.display.productType}`;
+                      const key = `book:${bookIdent(leg)}:${leg.display.productType}`;
                       const isExiting = exitingLegKey === key;
                       const pnl = leg.display.unrealizedProfit;
+                      const unpriced = bookLegUnpriced(leg);
                       return (
                         <tr key={key}>
                           {i === 0 && (
@@ -678,7 +860,7 @@ export default function LiveTradingDesk({ baskets, onBasketsChange, open, onTogg
                           <td className="text-right tabular-nums">{fmtPrice(leg.price)}</td>
                           <td className="text-right tabular-nums">{leg.qtyLots}</td>
                           <td className={`text-right tabular-nums font-bold ${pnl >= 0 ? 'ltd-text-pos' : 'ltd-text-neg'}`}>
-                            {fmtRupee(pnl)}
+                            {unpriced ? '—' : fmtRupee(pnl)}
                           </td>
                           <td className="text-right">
                             <button
@@ -885,6 +1067,14 @@ export default function LiveTradingDesk({ baskets, onBasketsChange, open, onTogg
         .ltd-body { flex: 1; min-height: 0; overflow-y: auto; padding: 10px 12px 12px; }
         .ltd-count { background: rgba(99,102,241,0.2); color: #a5b4fc; padding: 0 5px; border-radius: 999px; font-size: 9px; }
         .ltd-empty { font-size: 11px; color: rgba(255,255,255,0.4); padding: 8px 0; }
+        .ltd-notice { display: flex; align-items: flex-start; gap: 8px; margin: 6px 10px 0; padding: 6px 8px; border-radius: 6px; font-size: 10.5px; line-height: 1.35; }
+        .ltd-notice--warn { background: rgba(245,158,11,0.12); border: 1px solid rgba(245,158,11,0.35); color: #fcd34d; }
+        .ltd-notice--error { background: rgba(244,63,94,0.12); border: 1px solid rgba(244,63,94,0.35); color: #fda4af; }
+        :root:not(.dark) .ltd-notice--warn { color: #92400e; }
+        :root:not(.dark) .ltd-notice--error { color: #9f1239; }
+        .ltd-notice-x { margin-left: auto; background: none; border: none; color: inherit; cursor: pointer; font-size: 13px; line-height: 1; }
+        .ltd-broker-note { margin: 6px 10px 0; font-size: 10px; font-weight: 700; color: #a5b4fc; }
+        :root:not(.dark) .ltd-broker-note { color: #4338ca; }
         :root:not(.dark) .ltd-empty { color: #94a3b8; }
         .ltd-table-wrap { overflow-x: auto; }
         .ltd-table { width: 100%; font-size: 11px; font-family: monospace; border-collapse: collapse; }
