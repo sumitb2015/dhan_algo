@@ -14,6 +14,8 @@ import sys
 import os
 import json
 import argparse
+import subprocess
+import time
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, ROOT)
@@ -31,6 +33,25 @@ UNDERLYING_EXCHANGE = {
 
 def output_file(underlying: str) -> str:
     return os.path.join(ROOT, 'debug', f'zerodha_{underlying.lower()}_instruments.json')
+
+INSTRUMENTS_CACHE_MAX_AGE_SEC = 24 * 3600
+
+
+def load_zerodha_instruments_cache(underlying: str = 'NIFTY'):
+    """Reads debug/zerodha_<underlying>_instruments.json, regenerating it via
+    this script when missing or older than 24h. Used by the copy-trade bridge,
+    its startup hedge and the reconcile tool (restored after commit 0d02f773
+    removed the copy that lived in live_options_ws_zerodha.py)."""
+    cache_file = output_file(underlying)
+    stale = (os.path.exists(cache_file)
+             and time.time() - os.path.getmtime(cache_file) > INSTRUMENTS_CACHE_MAX_AGE_SEC)
+    if not os.path.exists(cache_file) or stale:
+        subprocess.run(
+            [sys.executable, os.path.abspath(__file__), '--underlying', underlying],
+            check=True, timeout=120, stdout=subprocess.DEVNULL,
+        )
+    with open(cache_file) as f:
+        return json.load(f)
 
 
 def restore_session_from_json():

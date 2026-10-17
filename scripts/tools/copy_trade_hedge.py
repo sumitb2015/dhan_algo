@@ -731,7 +731,7 @@ def build_plan(kite, helper, cfg: dict, expiry: str, underlying: str = 'NIFTY',
             f'(Rs {d_per_lot:,.2f} needed, Rs {funds:,.2f} available) — no hedge to size')
         return report
 
-    from scripts.tools.live_options_ws_zerodha import load_zerodha_instruments_cache
+    from scripts.tools.zerodha_instruments_cache import load_zerodha_instruments_cache
     try:
         instruments = load_zerodha_instruments_cache(underlying)
     except Exception as e:
@@ -978,7 +978,7 @@ def main():
     from login import get_dhan_client
     from lib.dhan_helper import DhanHelper
     from scripts.tools.zerodha_instruments_cache import restore_session_from_json
-    from scripts.tools.live_options_ws_zerodha import load_zerodha_instruments_cache
+    from scripts.tools.zerodha_instruments_cache import load_zerodha_instruments_cache
 
     kite = restore_session_from_json()
     if kite is None:

@@ -960,6 +960,8 @@ function StrategiesPlusPage() {
                     step="1"
                     value={child.multiplier}
                     aria-label={`${CHILD_BROKER_LABELS[child.broker]} lot multiplier`}
+                    disabled={copyTradeConfig.armed}
+                    title={copyTradeConfig.armed ? 'Disarm to change the multiplier — changing it mid-position leaves the child with a residual or flipped position' : undefined}
                     onChange={e => {
                       const n = parseInt(e.target.value, 10);
                       if (Number.isInteger(n) && n > 0) updateCopyTradeChild(child.broker, { multiplier: n });
@@ -971,6 +973,7 @@ function StrategiesPlusPage() {
                     type="button"
                     role="switch"
                     aria-checked={child.enabled}
+                    disabled={copyTradeConfig.armed}
                     aria-label={`Copy fills to ${CHILD_BROKER_LABELS[child.broker]}`}
                     onClick={() => updateCopyTradeChild(child.broker, { enabled: !child.enabled })}
                     className={`relative w-8 h-4 rounded-full transition-colors focus-visible:outline-2 focus-visible:outline-sky-400 ${

@@ -48,6 +48,10 @@ UNREPLICATED_RESULTS = {
     'baseline_skipped':   'filled while the bridge was down — deliberately not replicated',
     'safety_exit_gave_up': 'watchdog could not force-close an orphaned child position',
     'margin_blocked':     'refused up front — insufficient Zerodha margin',
+    'cash_blocked_exhausted': 'cash gate blocked every retry — fill never reached the child',
+    'child_order_rejected': 'child broker rejected the order after accepting it',
+    'broker_unavailable': 'child broker was not initialised — fill queued or lost',
+    'exit_skipped_child_flat': 'exit skipped: the child held nothing to close (its entry was never copied)',
     'pending_confirm_timeout': 'Kotak order status never resolved within CONFIRM_TIMEOUT_SEC — parent/child may be desynced, verify manually',
 }
 
@@ -136,10 +140,13 @@ def main():
     from login import get_dhan_client
     from lib.dhan_helper import DhanHelper
     from scripts.tools.zerodha_instruments_cache import restore_session_from_json
-    from scripts.tools.live_options_ws_zerodha import load_zerodha_instruments_cache
+    from scripts.tools.zerodha_instruments_cache import load_zerodha_instruments_cache
 
     cfg = load_config()
-    children = [c for c in cfg.get('children', []) if c.get('enabled')]
+    # This tool reconciles ZERODHA only, so use Zerodha's multiplier — not the
+    # first enabled child's (which is Kotak's when Kotak is configured first).
+    children = [c for c in cfg.get('children', [])
+                if c.get('enabled') and str(c.get('broker', '')).lower() == 'zerodha']
     multiplier = 1
     if children:
         try:

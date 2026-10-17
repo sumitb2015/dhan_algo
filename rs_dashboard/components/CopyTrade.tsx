@@ -94,7 +94,7 @@ export function useCopyTrade(notify: (type: 'success' | 'error', message: string
     try {
       const [cfgRes, statusRes] = await Promise.all([
         fetch('/api/copy-trade/config').then(r => r.json()),
-        fetch('/api/copy-trade').then(r => r.json()),
+        fetch('/api/copy-trade?checkPid=1').then(r => r.json()),
       ]);
       if (cfgRes.success && cfgRes.config) {
         setConfig(cfgRes.config);
@@ -151,11 +151,17 @@ export function useCopyTrade(notify: (type: 'success' | 'error', message: string
     if (confirmTimerRef.current) clearTimeout(confirmTimerRef.current);
     setArming(true);
     try {
-      await fetch('/api/copy-trade', {
+      // Never arm against a bridge that failed to launch: ARMED would then show
+      // while nothing is mirroring fills.
+      const startRes = await fetch('/api/copy-trade', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ action: 'start' }),
-      });
+      }).then(r => r.json()).catch(() => null);
+      if (!startRes || startRes.success === false) {
+        notify('error', startRes?.error || 'Could not start the copy-trade bridge — not armed.');
+        return;
+      }
       const res = await fetch('/api/copy-trade/config', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -197,7 +203,7 @@ export function useCopyTrade(notify: (type: 'success' | 'error', message: string
       const data = await res.json();
       if (data.success) {
         setConfig(data.config);
-        notify('success', 'Trade replication disarmed.');
+        notify('success', 'Trade replication disarmed. Any positions already copied to child accounts are NOT closed — manage or exit them there.');
       } else {
         notify('error', data.error || 'Failed to disarm trade replication.');
       }

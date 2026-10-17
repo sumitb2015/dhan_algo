@@ -94,8 +94,14 @@ export async function POST(request: NextRequest) {
     const logFd = fs.openSync(BRIDGE_LOG_FILE, 'a');
     const child = spawn(PYTHON_EXE, [BRIDGE_SCRIPT], { detached: true, stdio: ['ignore', logFd, logFd], windowsHide: true });
     fs.closeSync(logFd);
+    // Without a listener a bad interpreter path is an unhandled 'error' event.
+    child.on('error', (e) => { console.error('[copy-trade] bridge spawn failed:', e); startInFlight = false; });
     child.unref();
 
+    if (child.pid === undefined) {
+      startInFlight = false;
+      return NextResponse.json({ success: false, error: 'Failed to launch the bridge process' }, { status: 500 });
+    }
     return NextResponse.json({ success: true, message: 'Bridge started', pid: child.pid });
   }
 

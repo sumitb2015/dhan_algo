@@ -550,10 +550,8 @@ def test_focus_tool_style_positional_call_still_works():
     assert ids == [ORDER_ID]
 
 
-def test_zerodha_child_is_unaffected_by_the_confirmation_machinery():
+def test_zerodha_placement_result_is_unchanged_by_the_confirmation_machinery():
     from scripts.tools.child_brokers import ZerodhaChild
-    assert ZerodhaChild.confirm_placements is ChildBroker.confirm_placements
-
     class FakeKite:
         VARIETY_REGULAR = 'regular'
         EXCHANGE_NFO = 'NFO'
@@ -574,5 +572,7 @@ def test_zerodha_child_is_unaffected_by_the_confirmation_machinery():
     placed, ids, err = z.place_child_order('NIFTY26AUG24250PE', 'SELL', 65, 'NRML',
                                            context={'strike': 24250.0})
     assert (placed, err) == (65, None)
-    assert z.pending_confirm == []          # never parks anything
+    # Since 2026-10-17 Zerodha parks each order so an async exchange rejection
+    # is seen (see test_copy_trade_review_fixes); an unreadable book changes nothing.
+    assert len(z.pending_confirm) == 1
     assert z.confirm_placements() == ([], [])

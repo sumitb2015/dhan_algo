@@ -71,6 +71,9 @@ function writeConfig(config: CopyTradeConfig) {
   }
 }
 
+// A typo (100 instead of 10) would otherwise send 100x the parent's size.
+const MAX_MULTIPLIER = 50;
+
 export async function GET(): Promise<NextResponse> {
   return NextResponse.json({ success: true, config: readConfig() });
 }
@@ -88,6 +91,9 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   if (Array.isArray(body.children)) {
     const seen = new Set<string>();
     for (const c of body.children) {
+      if (!c || typeof c !== 'object') {
+        return NextResponse.json({ success: false, error: 'Each child must be an object' }, { status: 400 });
+      }
       if (!CHILD_BROKERS.includes(c.broker)) {
         return NextResponse.json({ success: false, error: `Unsupported broker: ${c.broker}` }, { status: 400 });
       }
@@ -97,8 +103,8 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
         return NextResponse.json({ success: false, error: `Duplicate broker in children: ${c.broker}` }, { status: 400 });
       }
       seen.add(c.broker);
-      if (!Number.isInteger(c.multiplier) || c.multiplier <= 0) {
-        return NextResponse.json({ success: false, error: `Invalid multiplier: ${c.multiplier} (must be a positive integer)` }, { status: 400 });
+      if (!Number.isInteger(c.multiplier) || c.multiplier <= 0 || c.multiplier > MAX_MULTIPLIER) {
+        return NextResponse.json({ success: false, error: `Invalid multiplier: ${c.multiplier} (must be an integer from 1 to ${MAX_MULTIPLIER})` }, { status: 400 });
       }
       if (typeof c.enabled !== 'boolean') {
         return NextResponse.json({ success: false, error: 'enabled must be a boolean' }, { status: 400 });

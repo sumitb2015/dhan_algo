@@ -297,7 +297,10 @@ class ChildBroker:
         out on its own and fails open once it is too old to trust.
         """
         try:
-            self.set_position_snapshot({r['symbol']: r['qty'] for r in self.positions_rows()})
+            snap = {}
+            for r in self.positions_rows():  # one row per product: SUM, don't overwrite
+                snap[r['symbol']] = snap.get(r['symbol'], 0) + r['qty']
+            self.set_position_snapshot(snap)
             return True
         except Exception:
             return False
@@ -450,12 +453,18 @@ class ChildBroker:
         detail['shortfall'] = round(required - available, 2)
         return False, detail
 
+    def held_qty_cached(self, symbol: str):
+        """Signed net qty from the cached snapshot, or None when it is missing or
+        too old to trust. No HTTP — safe on the WS callback thread."""
+        positions = self.margin.get('positions')
+        age = time.time() - (self.margin.get('positions_ts') or 0.0)
+        if positions is None or age > POSITIONS_MAX_AGE_SEC:
+            return None
+        return int(positions.get(symbol, 0))
+
     def _held_qty_live(self, symbol: str) -> int:
         """Signed net qty straight from the broker (exact path only)."""
-        for row in self.positions_rows():
-            if row['symbol'] == symbol:
-                return int(row['qty'])
-        return 0
+        return sum(int(row['qty']) for row in self.positions_rows() if row['symbol'] == symbol)
 
     def _required_margin_exact(self, symbol, side, qty, product):
         raise NotImplementedError
@@ -509,7 +518,15 @@ class ChildBroker:
         placed = 0
         remaining = qty
         while remaining > 0:
-            chunk = min(remaining, self.freeze_qty)
+            # Slice on a lot boundary: a raw freeze_qty (1800 / 3511) is not a
+            # multiple of the lot (65), so the first slice of any order above one
+            # freeze would be an invalid quantity the exchange rejects.
+            try:
+                lot = max(1, int(self.lot_size_for(symbol) or 1))
+            except Exception:
+                lot = 1
+            slice_max = max(lot, (int(self.freeze_qty) // lot) * lot)
+            chunk = min(remaining, slice_max)
             try:
                 order_id = self._place_one(symbol, side, chunk, product)
             except PartialFill as e:
@@ -643,7 +660,7 @@ class ZerodhaChild(ChildBroker):
 
     # -- instruments
     def load_instruments(self) -> list:
-        from scripts.tools.live_options_ws_zerodha import load_zerodha_instruments_cache
+        from scripts.tools.zerodha_instruments_cache import load_zerodha_instruments_cache
         return load_zerodha_instruments_cache()
 
     def _refresh_instruments_cache(self) -> bool:
@@ -725,6 +742,55 @@ class ZerodhaChild(ChildBroker):
 
     # -- orders
     def _place_one(self, symbol, side, qty, product):
+        order_id = self._kite_place(symbol, side, qty, product)
+        # Kite returns an id as soon as the order is ACCEPTED FOR ROUTING; the
+        # exchange/RMS can still reject it a moment later (price band, market
+        # protection). Park it so confirm_placements() can see that verdict —
+        # otherwise it would be logged `success` and the child silently desynced.
+        self._park_pending({
+            'order_id': str(order_id), 'symbol': symbol, 'side': str(side).upper(),
+            'qty': int(qty), 'product': str(product).upper(), 'ts': time.time(),
+            'context': None,
+        })
+        return order_id
+
+    # Statuses after which Kite will not change its mind about acceptance.
+    _KITE_DONE = ('COMPLETE', 'OPEN', 'TRIGGER PENDING')
+
+    def confirm_placements(self):
+        """Resolve Kite orders parked at placement. Watchdog thread only."""
+        with self._pending_lock:
+            pending = list(self.pending_confirm)
+        if not pending:
+            return [], []
+        try:
+            rows = {str(o.get('order_id')): o for o in (self.kite.orders() or [])}
+        except Exception:
+            rows = None  # unreadable: keep pending until the timeout below
+        rejected, timed_out, resolved = [], [], []
+        now = time.time()
+        for entry in pending:
+            row = rows.get(entry['order_id']) if rows is not None else None
+            status = str((row or {}).get('status', '') or '').upper()
+            if status in ('REJECTED', 'CANCELLED'):
+                resolved.append(entry)
+                filled = int((row or {}).get('filled_quantity') or 0)
+                rejected.append({**entry, 'reason': (row or {}).get('status_message') or status,
+                                 'filled_qty': min(filled, int(entry['qty']))})
+            elif status in self._KITE_DONE:
+                resolved.append(entry)
+            elif now - entry['ts'] >= self.CONFIRM_TIMEOUT_SEC:
+                resolved.append(entry)
+                timed_out.append({**entry, 'reason': f'unresolved: {status or "not in order book"}'})
+                self.log(f'[{self.name}] Could not confirm order {entry["order_id"]} within '
+                         f'{self.CONFIRM_TIMEOUT_SEC:.0f}s — NOT re-placed; verify manually.')
+        if resolved:
+            ids = {e['order_id'] for e in resolved}
+            with self._pending_lock:
+                self.pending_confirm = [e for e in self.pending_confirm if e['order_id'] not in ids]
+        return rejected, timed_out
+
+    def _kite_place(self, symbol, side, qty, product):
         return self.kite.place_order(
             variety=self.kite.VARIETY_REGULAR,
             exchange=self.kite.EXCHANGE_NFO,
@@ -874,6 +940,9 @@ class KotakChild(ChildBroker):
             self.client = kotak_login(verbose=False)
             self.available = True
             self.unavailable_reason = None
+            # The cap is for CONSECUTIVE failures; a success must reset it or two
+            # good mid-day re-logins would permanently disable the child.
+            self._relogin_attempts = 0
             self.log(f'[{self.name}] Re-login succeeded')
             return True
         except Exception as e:
@@ -969,7 +1038,7 @@ class KotakChild(ChildBroker):
     def _fetch_margin(self):
         from lib.kotak.margin import get_margin_snapshot
         snap, err = get_margin_snapshot(self.client)
-        if err and 'unauthorized' in str(err).lower():
+        if err and ('unauthorized' in str(err).lower() or '100008' in str(err)):
             self._relogin()
         return snap, err
 
