@@ -286,6 +286,15 @@ def kotak_login(verbose: bool = True):
     except Exception as e:
         login_response, err = None, str(e)
 
+    if err and 'consumer key' in err.lower():
+        # Rejected before the TOTP is even looked at (seen 2026-10-17: 424
+        # "Consumer key <uuid> does not exist"). A fresh code cannot help, so
+        # don't spend 30s retrying or send the operator off to re-register TOTP.
+        raise RuntimeError(
+            f'Kotak rejected the consumer key: {err}. Check KOTAK_CONSUMER_KEY '
+            'in .env.kotak against the Trade API app on the Kotak Neo portal.'
+        )
+
     if err:
         # An "Invalid TOTP" is usually a code that rolled over mid-flight.
         # Sleeping a fixed 1s regenerates the SAME 30-second code — instead
@@ -296,10 +305,10 @@ def kotak_login(verbose: bool = True):
         login_response = try_login(totp_helper.now())
         err = _response_error(login_response)
         if err:
-            raise RuntimeError(
-                f'TOTP login failed: {err}. If this persists, re-register TOTP on '
-                'the Kotak Neo portal and update .env.kotak.'
-            )
+            hint = (' If this persists, re-register TOTP on the Kotak Neo portal '
+                    'and update KOTAK_TOTP_SECRET in .env.kotak.'
+                    if 'otp' in err.lower() else '')
+            raise RuntimeError(f'Kotak login failed: {err}.{hint}')
 
     log('Validating MPIN...')
     try:
