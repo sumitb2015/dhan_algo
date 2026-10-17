@@ -14,6 +14,7 @@ import {
   STRATEGY_CATEGORIES, type StrategyCategory, type StrategyTemplate, type OptionType, nearestStrike, strikeStep, daysToExpiry,
 } from '@/lib/basketStrategies';
 import { sortLegsForPlacement, resolveOrderRequest, type StrikeIdentifier } from '@/lib/basketOrders';
+import { sendOrderRequest, UNKNOWN_ORDER_HINT } from '@/lib/orderOutcome';
 import StrategyCardGrid from './basket/StrategyCardGrid';
 import MultiLegStrategyRow from './multiLegFocus/MultiLegStrategyRow';
 import PayoffChartsView, { type PayoffChartItem } from './multiLegFocus/PayoffChartsView';
@@ -31,7 +32,7 @@ import MultiLegOptionChainModal from './multiLegFocus/MultiLegOptionChainModal';
 import HelpModal from './HelpModal';
 import {
   resolveTemplateLegs, reconcileLegWithBroker, sortLegsForExit, findLegPosition, executionBroker,
-  applyOrderOutcomes, normalizeOrderRow, withPendingOrder, restingExitOrders, settleWaitingEntry, applyTriggeredEntry, type WaitingEntry, LEG_FILL_GRACE_MS, legBrokerMismatch, classifyDhanOrder, type DhanOrderPhase, type NormalizedOrder,
+  applyOrderOutcomes, settleUnknownLeg, normalizeOrderRow, withPendingOrder, restingExitOrders, settleWaitingEntry, applyTriggeredEntry, type WaitingEntry, LEG_FILL_GRACE_MS, UNKNOWN_ORDER_HOLD_MS, legBrokerMismatch, classifyDhanOrder, type DhanOrderPhase, type NormalizedOrder,
   computeLegTrailingSL, legRiskView, trailAnchorPatch, legTrailPatch, withAutoLegRisk, legPnl, SAME_DISTANCE, MATCH_OPPOSITE, autoRuleOwns, autoReentryStrike, autoReentryStrikeByDistance, autoReentryStrikeByPremium, pickMatchOppositeLeg, entryDistance, avoidSameStrike, autoRollAllowed, computeStrategyMetrics, checkStrategyRisk, fallbackLotSize, planScale, scalePlanSignature,
   positionProduct, computeBasketStatus, closedFillFromRow,
   findSiblingLegCollisions, type SiblingLegCollision,
@@ -1474,6 +1475,10 @@ function MultiLegFocus({
       symbol?: string;
     };
     const placedLegs: PlacedLeg[] = [];
+    // A leg whose order may be live without this run knowing it (UNKNOWN reply, or accepted but not confirmed
+    // filled): the run stops and NOTHING is rolled back. Unwinding the hedges while an unknown SELL may have filled
+    // is how a naked short is made; the placed legs stay open and guarded instead.
+    let uncertain = false;
 
     // Flattens whatever already filled in this call by firing opposite-side
     // MARKET orders for each — best-effort, since a rejected or
@@ -1518,10 +1523,15 @@ function MultiLegFocus({
           continue;
         }
         try {
-          const res = await fetch(reverseReq.url, {
-            method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(reverseReq.body),
-          });
-          const j = await res.json() as { success: boolean; order_id?: string; price?: number; error?: string };
+          const { outcome, reply } = await sendOrderRequest(reverseReq.url, reverseReq.body);
+          if (outcome.kind === 'unknown') {
+            // The leg stays OPEN on the ledger (its stops keep working); the poll closes it if the reversal filled.
+            addToast('error', `Reverse of ${p.label}: status UNKNOWN`,
+              `${outcome.error} The leg stays OPEN here until the broker shows it closed. Do not close it again before checking Positions.`);
+            continue;
+          }
+          const j = { ...(reply ?? {}), success: outcome.kind === 'placed', error: outcome.kind === 'rejected' ? outcome.error : undefined } as
+            { success: boolean; order_id?: string; price?: number; error?: string };
           if (j.success) {
             addToast('success', `Reversed ${p.label}`, `ID: ${j.order_id}`);
             const reversedLeg = basketsRef.current.find(b => b.id === basketId)?.legs.find(l => l.id === p.legId);
@@ -1532,10 +1542,10 @@ function MultiLegFocus({
                 ? withPendingOrder({ ...l, status: 'CLOSED' as MultiLegStatus, closedAt: Date.now(), fill: { qty: 0, avgPrice: l.fill?.avgPrice ?? 0 }, closedFill: { qty: p.qty, exitPrice } }, j.order_id, 'exit', p.qty, exitPrice)
                 : l)));
           } else {
-            addToast('error', `Reverse failed for ${p.label}`, `${j.error ?? 'Unknown error'} — close manually from Orders/Positions`);
+            addToast('error', `Reverse rejected for ${p.label}`, `${j.error ?? 'Unknown error'} — close manually from Orders/Positions`);
           }
         } catch (e) {
-          addToast('error', `Reverse UNCONFIRMED for ${p.label}`, `Close manually from Orders/Positions: ${String(e)}`);
+          addToast('error', `Reverse of ${p.label} placed, but recording it failed`, `${String(e)} ${UNKNOWN_ORDER_HINT}`);
         }
       }
     };
@@ -1562,13 +1572,27 @@ function MultiLegFocus({
         return false;
       }
 
+      let sentPlaced = false;
+      const legRef = { securityId: req.body.securityId as string | undefined, symbol: req.body.tradingsymbol as string | undefined };
+      // Held, not FAILED-and-forgotten: the poll adopts it (stops included) if its position shows up (settleUnknownLeg).
+      const holdUnknown = (error: string) => {
+        uncertain = true;
+        working = working.map(l => (l.id === leg.id
+          ? { ...l, status: 'FAILED' as MultiLegStatus, orderRef: l.orderRef ?? legRef, unknownOrder: { at: Date.now(), qty, error } }
+          : l));
+        updateBasket(basketId, { legs: working });
+      };
       try {
-        const res = await fetch(req.url, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(req.body),
-        });
-        const j = await res.json() as { success: boolean; order_id?: string; securityId?: string; symbol?: string; price?: number; error?: string };
+        const { outcome, reply } = await sendOrderRequest(req.url, req.body);
+        if (outcome.kind === 'unknown') {
+          holdUnknown(outcome.error);
+          addToast('error', `${label}: order status UNKNOWN — strategy stopped, nothing reversed`,
+            `${outcome.error} If it went through, this leg is picked up from the broker within a minute, with its stops. ${UNKNOWN_ORDER_HINT}`);
+          return false;
+        }
+        const j = { ...(reply ?? {}), success: outcome.kind === 'placed', error: outcome.kind === 'rejected' ? outcome.error : undefined } as
+          { success: boolean; order_id?: string; securityId?: string; symbol?: string; price?: number; error?: string };
+        sentPlaced = j.success;
 
         if (j.success) {
           const currentLtp = ltpFor(basket, leg);
@@ -1610,7 +1634,9 @@ function MultiLegFocus({
           updateBasket(basketId, { legs: working });
           if (unconfirmed) {
             // Tracked (the poll settles it) but NOT counted as placed: no later phase
-            // runs on it, and an abort never auto-reverses an order that may not exist.
+            // runs on it, and an abort never auto-reverses an order that may not exist —
+            // nor the hedges that cover it, should it fill (uncertain).
+            uncertain = true;
             addToast('error', `${label}: fill not confirmed — strategy stopped`, `Order ${j.order_id} still not TRADED. It is tracked on this row; check Orders before acting — it will NOT be auto-reversed.`);
             return false;
           }
@@ -1627,6 +1653,12 @@ function MultiLegFocus({
         addToast('error', `Rejected ${label} — strategy stopped`, j.error ?? 'Unknown broker error');
         return false;
       } catch (e) {
+        if (sentPlaced) {
+          // The broker booked it; only recording it failed. Hold it like an unknown order so the poll adopts it.
+          holdUnknown(String(e));
+          addToast('error', `${label} placed but not recorded — strategy stopped`, `${String(e)} ${UNKNOWN_ORDER_HINT}`);
+          return false;
+        }
         working = working.map(l => (l.id === leg.id ? { ...l, status: 'FAILED' as MultiLegStatus } : l));
         updateBasket(basketId, { legs: working });
         addToast('error', `Order failed for ${label} — strategy stopped`, String(e));
@@ -1687,6 +1719,13 @@ function MultiLegFocus({
         const results = await Promise.all(phase.map(placeOneLeg));
         if (results.some(ok => !ok)) {
           releaseUnattempted();
+          if (uncertain) {
+            if (placedLegs.length) {
+              addToast('error', 'Strategy stopped — placed legs NOT reversed',
+                `An order's outcome is not known, so ${placedLegs.map(p => p.label).join(', ')} stay open and guarded: unwinding them could leave that order naked if it filled. Check Positions, then exit or complete the strategy by hand.`);
+            }
+            return;
+          }
           await rollbackPlacedLegs();
           return;
         }
@@ -1733,6 +1772,12 @@ function MultiLegFocus({
 
   // `unattended` = an automatic exit (a guard): never raise a blocking dialog. A hedge whose own side still has an open short is
   // refused (it would leave that short naked); other open shorts only raise margin, which is not worth freezing the tab for.
+  // Legs whose last exit came back UNKNOWN -> when it was sent. For UNKNOWN_ORDER_HOLD_MS no further exit is sent on
+  // the leg (the risk rules re-fire every 15 s; a manual click too): sized off a book that has not caught up, a second
+  // close flips the position. The broker poll closes the leg meanwhile if the first one filled.
+  const exitUnknownRef = useRef<Map<string, number>>(new Map());
+  const exitUnknownToastRef = useRef<Map<string, number>>(new Map());
+
   const exitOneLeg = useCallback(async (basketId: string, leg: MultiLegLeg, exitLots?: number, opts?: { unattended?: boolean; orderType?: 'MARKET' | 'LIMIT'; limitPrice?: number }): Promise<{ closed: boolean; qty: number; maxAfter?: number; resting?: boolean }> => {
     while (regroupGateRef.current) {
       await regroupGateRef.current;
@@ -1744,6 +1789,16 @@ function MultiLegFocus({
     let closedQty = 0;    // units this call actually sent to close (0 when already flat)
     let maxAfter: number | undefined;   // broker |netQty| once the exit fills (set when an order was sent)
     if (exitingLegsRef.current.has(leg.id)) return { closed, qty: closedQty };
+    const unknownAt = exitUnknownRef.current.get(leg.id);
+    if (unknownAt != null && Date.now() - unknownAt < UNKNOWN_ORDER_HOLD_MS) {
+      const lastToast = exitUnknownToastRef.current.get(leg.id) ?? 0;
+      if (Date.now() - lastToast > 10_000) {
+        exitUnknownToastRef.current.set(leg.id, Date.now());
+        addToast('error', `${leg.side === 'B' ? 'BUY' : 'SELL'} ${leg.strike} ${leg.option}: exit on hold`,
+          `The previous exit's status is UNKNOWN (${Math.ceil((UNKNOWN_ORDER_HOLD_MS - (Date.now() - unknownAt)) / 1000)} s left). Not sending another until the broker settles it. ${UNKNOWN_ORDER_HINT}`);
+      }
+      return { closed, qty: closedQty };
+    }
     exitingLegsRef.current.add(leg.id);
     setExitingLegs(prev => new Set(prev).add(leg.id));
 
@@ -1943,8 +1998,17 @@ function MultiLegFocus({
             ...productPayload.fields,
           };
 
-      const res2 = await fetch(orderUrl, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
-      const j2 = await res2.json() as { success: boolean; order_id?: string; price?: number; error?: string };
+      const { outcome: exitOutcome, reply: exitReply } = await sendOrderRequest(orderUrl, body);
+      if (exitOutcome.kind === 'unknown') {
+        exitUnknownRef.current.set(leg.id, Date.now());
+        exitUnknownToastRef.current.delete(leg.id);   // the first refused retry says why; later ones are throttled
+        addToast('error', `Exit status UNKNOWN for ${label}`,
+          `${exitOutcome.error} The leg stays OPEN here; no further exit is sent on it for a minute while the broker settles (the poll closes it if this one filled). ${UNKNOWN_ORDER_HINT}`);
+        return { closed, qty: closedQty };
+      }
+      const j2 = { ...(exitReply ?? {}), success: exitOutcome.kind === 'placed', error: exitOutcome.kind === 'rejected' ? exitOutcome.error : undefined } as
+        { success: boolean; order_id?: string; price?: number; error?: string };
+      if (j2.success) exitUnknownRef.current.delete(leg.id);
 
       if (j2.success) {
         if (exitType === 'LIMIT') {
@@ -1975,7 +2039,7 @@ function MultiLegFocus({
         closedQty = qty;
         maxAfter = brokerAbs - qty;
       } else {
-        addToast('error', `Exit failed for ${label}`, j2.error ?? 'Unknown error');
+        addToast('error', `Exit rejected for ${label}`, j2.error ?? 'Unknown error');
       }
     } catch (e) {
       addToast('error', `Exit unconfirmed for ${label}`, String(e));
@@ -2167,12 +2231,15 @@ function MultiLegFocus({
     }
 
     try {
-      const res = await fetch(req.url, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(req.body),
-      });
-      const j = await res.json() as { success: boolean; order_id?: string; securityId?: string; symbol?: string; price?: number; error?: string };
+      const { outcome, reply } = await sendOrderRequest(req.url, req.body);
+      if (outcome.kind === 'unknown') {
+        // Not re-sent. If it filled, the leg (this contract's only leg) grows to the broker quantity on the next poll.
+        addToast('error', `Add lots to ${label}: status UNKNOWN`,
+          `${outcome.error} If it filled, the leg grows to the broker quantity on the next poll. Do not add again until Positions shows it. ${UNKNOWN_ORDER_HINT}`);
+        return;
+      }
+      const j = { ...(reply ?? {}), success: outcome.kind === 'placed', error: outcome.kind === 'rejected' ? outcome.error : undefined } as
+        { success: boolean; order_id?: string; securityId?: string; symbol?: string; price?: number; error?: string };
 
       if (j.success) {
         const currentLtp = ltpFor(basket, leg);
@@ -2211,10 +2278,10 @@ function MultiLegFocus({
         pollFunds();
         fetchMarginsForBaskets();
       } else {
-        addToast('error', `Add lots failed for ${label}`, j.error ?? 'Unknown broker error');
+        addToast('error', `Add lots rejected for ${label}`, j.error ?? 'Unknown broker error');
       }
     } catch (e) {
-      addToast('error', `Add lots failed for ${label}`, String(e));
+      addToast('error', `Add lots to ${label}: order placed, but recording it failed`, `${String(e)} ${UNKNOWN_ORDER_HINT}`);
     }
   }, [broker, hasAuthenticatedBroker, lookupCache, ltpFor, patchLegs, addToast, pollFunds, fetchMarginsForBaskets, refuseSharedStrike, basketMargins]);
 
@@ -2512,12 +2579,40 @@ function MultiLegFocus({
     }
 
     try {
-      const res = await fetch(req.url, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(req.body),
-      });
-      const j = await res.json() as { success: boolean; order_id?: string; securityId?: string; symbol?: string; price?: number; error?: string };
+      const { outcome, reply } = await sendOrderRequest(req.url, req.body);
+      if (outcome.kind === 'unknown') {
+        // It may be live. Never retried; the caller (a shift's reopen, an auto re-entry) stops here as on a rejection.
+        if (isStop) {
+          addToast('error', `${label}: stop order status UNKNOWN`,
+            `${outcome.error} A stop order may be resting with no id to track — find it in Orders and cancel it if so. Nothing was recorded here.`);
+          return false;
+        }
+        const sameOpen = (basketsRef.current.find(b => b.id === basket.id)?.legs ?? basket.legs).some(l =>
+          l.status === 'OPEN' && l.side === params.side && l.option === params.option && l.strike === params.strike && (l.expiry || basket.expiry) === legExpiry);
+        if (!sameOpen) {
+          // A new leg, held: the poll opens it (with the carried SL / target) if its position shows up (settleUnknownLeg).
+          const held: MultiLegLeg = {
+            ...(opts?.carry ?? {}),
+            bestPrice: undefined,
+            id: `mll_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`,
+            side: params.side, option: params.option, strike: params.strike, expiry: legExpiry, lots: params.lots,
+            type: params.orderType === 'LIMIT' ? 'LIMIT' : 'MARKET',
+            price: params.limitPrice && params.limitPrice > 0 ? params.limitPrice : undefined,
+            status: 'FAILED',
+            orderRef: { securityId: req.body.securityId as string | undefined, symbol: req.body.tradingsymbol as string | undefined },
+            unknownOrder: { at: Date.now(), qty, error: outcome.error },
+          };
+          patchLegs(basket.id, legs => [...legs, held]);
+        }
+        // An add onto a leg already OPEN on this contract needs no hold: the poll grows that leg to the broker's
+        // quantity if it filled (growLegToBroker).
+        addToast('error', `${label}: order status UNKNOWN`,
+          `${outcome.error} ${sameOpen ? 'If it filled, the open leg grows to the broker quantity on the next poll.' : 'If it filled, the leg opens here within a minute, with its stops.'} ${UNKNOWN_ORDER_HINT}`);
+        pollFunds();
+        return false;
+      }
+      const j = { ...(reply ?? {}), success: outcome.kind === 'placed', error: outcome.kind === 'rejected' ? outcome.error : undefined } as
+        { success: boolean; order_id?: string; securityId?: string; symbol?: string; price?: number; error?: string };
 
       if (j.success && isStop) {
         // A stop entry opens nothing yet: it rests until the trigger prints. Record it beside
@@ -2639,11 +2734,12 @@ function MultiLegFocus({
         }
         return true;
       } else {
-        addToast('error', `Add leg failed for ${label}`, j.error ?? 'Unknown broker error');
+        addToast('error', `Add leg rejected for ${label}`, j.error ?? 'Unknown broker error');
         return false;
       }
     } catch (e) {
-      addToast('error', `Add leg failed for ${label}`, String(e));
+      // sendOrderRequest never throws: this is the recording after a booked order, not the order itself.
+      addToast('error', `${label}: order placed, but recording it failed`, `${String(e)} ${UNKNOWN_ORDER_HINT}`);
       return false;
     }
   }, [broker, hasAuthenticatedBroker, lookupCache, chainData, patchLegs, addToast, confirmDhanOrder, pollFunds, fetchMarginsForBaskets, blockedStrikeLegs, toastBlockedStrikes, fetchSpreadIssues, resolveSpreadIssues, refuseSharedStrike, patchWaiting]);
@@ -2767,13 +2863,12 @@ function MultiLegFocus({
 
         if (!req) throw new Error(`Could not resolve security for ${leg.strike} ${leg.option}`);
 
-        const res = await fetch(req.url, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(req.body),
-        });
-        const j = await res.json() as { success: boolean; order_id?: string; price?: number; error?: string };
-        if (!j.success) throw new Error(j.error || `Order failed for ${leg.strike} ${leg.option}`);
+        const { outcome, reply } = await sendOrderRequest(req.url, req.body);
+        // UNKNOWN: thrown like a rejection, so a BUY stops the SELLs; but said as it is. If it filled, the leg grows to
+        // the broker quantity on the next poll (growLegToBroker) — never re-sent.
+        if (outcome.kind === 'unknown') throw new Error(`status UNKNOWN — ${outcome.error} If it filled, the leg grows to the broker quantity on the next poll; do not re-send it`);
+        if (outcome.kind === 'rejected') throw new Error(outcome.error || `Order rejected for ${leg.strike} ${leg.option}`);
+        const j = { ...(reply ?? {}), success: true } as { success: boolean; order_id?: string; price?: number; error?: string };
 
         const currentLtp = ltpFor(basket, leg);
         let fillPrice = (j.price && j.price > 0) ? j.price : (currentLtp > 0 ? currentLtp : (leg.price ?? 0));
@@ -3170,6 +3265,20 @@ function MultiLegFocus({
               const basketOrders = ordersByBroker[basket.broker as Broker];
 
               const nextLegs = basket.legs.flatMap((origLeg): MultiLegLeg[] => {
+                // 0. A leg whose opening order came back UNKNOWN: adopt it if its position appeared, else wait out the hold.
+                if (origLeg.unknownOrder) {
+                  if (!basketRows || legBrokerMismatch(origLeg, basket.broker)) return [origLeg];
+                  const ident = basket.broker === 'dhan' ? origLeg.orderRef?.securityId : origLeg.orderRef?.symbol;
+                  const match = origLeg.orderRef ? findLegPosition(basket.broker, origLeg, basketRows) : { kind: 'not_found' as const };
+                  const r = settleUnknownLeg(origLeg, match, lotSize, ident ? (openPerContract.get(`${basket.broker}|${ident}`) ?? 0) : 1);
+                  if (r.outcome === 'wait' || r.outcome === 'none') return [origLeg];
+                  basketChange = true; anyChange = true;
+                  const label = `${origLeg.side === 'B' ? 'BUY' : 'SELL'} ${origLeg.strike} ${origLeg.option}`;
+                  waitingToasts.set(`unknown:${origLeg.id}`, r.outcome === 'adopted'
+                    ? { ok: true, title: `${label}: the UNKNOWN order did fill`, msg: `${r.leg.fill?.qty ?? 0} qty found at the broker — the leg is OPEN again with its stops (entry is the broker's average, an estimate).` }
+                    : { ok: false, title: `${label}: no position after the UNKNOWN order`, msg: 'Nothing showed up at the broker within a minute — treated as not filled. If it appears later it is added as an ungrouped trade.' });
+                  return [r.leg];
+                }
                 // 1. Settle orders the broker ACKed but later rejected/cancelled.
                 let leg = origLeg;
                 if (basketOrders && leg.pendingOrders?.length) {

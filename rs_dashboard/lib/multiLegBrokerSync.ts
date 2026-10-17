@@ -1,5 +1,5 @@
 import {
-  findUntrackedPositions, contractHintFromRow, legFromUntracked, isLegInFillGrace, residualBrokerAvg,
+  findUntrackedPositions, contractHintFromRow, legFromUntracked, isLegInFillGrace, residualBrokerAvg, unknownOrderHeld,
   type MultiLegBasket, type MultiLegLeg,
 } from './multiLegFocus.ts';
 import { normalizeOptType, symbolMatchesUnderlying } from './positionLegs.ts';
@@ -60,7 +60,9 @@ export function growLegToBroker(leg: MultiLegLeg, brokerQty: number, addedAvg: n
 /** True while any of this tool's orders may still be landing at the broker. */
 export function ordersSettling(baskets: MultiLegBasket[], now: number = Date.now()): boolean {
   return baskets.some(b => b.legs.some(l =>
-    l.status === 'PLACING' || l.status === 'CLOSING' || (l.pendingOrders?.length ?? 0) > 0 || isLegInFillGrace(l, now)));
+    l.status === 'PLACING' || l.status === 'CLOSING' || (l.pendingOrders?.length ?? 0) > 0 || isLegInFillGrace(l, now)
+    // An UNKNOWN opening order may still land: its leg adopts the position, not a new ungrouped trade.
+    || unknownOrderHeld(l, now)));
 }
 
 /**
@@ -198,6 +200,8 @@ export function basketHasBrokerWork(b: MultiLegBasket, today: string): boolean {
   return (b.waitingEntries?.length ?? 0) > 0 || b.legs.some(l =>
     (l.status !== 'CLOSED' && l.status !== 'DRAFT' && l.status !== 'FAILED')
     || (l.pendingOrders?.length ?? 0) > 0
+    // A FAILED leg held by an UNKNOWN order still needs its broker's book: the poll adopts it if it filled.
+    || l.unknownOrder != null
     || (l.status === 'CLOSED' && l.closedAt != null && istDay(l.closedAt) === today));
 }
 

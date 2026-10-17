@@ -12,10 +12,11 @@
 
 import { classifyDhanOrder, type DhanOrderPhase } from './multiLegFocus.ts';
 import {
-  brokerCapacity, exitQtyForLeg, TS_FILL_GRACE_MS, TS_ORDER_SOURCE,
+  brokerCapacity, exitQtyForLeg, TS_FILL_GRACE_MS, TS_ORDER_SOURCE, TS_UNKNOWN_EXIT_HOLD_MS,
   type TsBroker, type TsLeg, type TsMode, type TsPosition, type TsProduct, type TsSide,
 } from './tripleStraddle.ts';
 import { finalAvgOf, readOrderPrice } from './tradedPriceClient.ts';
+import { classifyOrderReply } from './orderOutcome.ts';
 
 export const TS_TRADABLE = ['NIFTY', 'BANKNIFTY', 'SENSEX'] as const;
 export const isTsTradable = (u: string): boolean => (TS_TRADABLE as readonly string[]).includes(u);
@@ -114,10 +115,10 @@ async function sendOrder(
             productType: product, source: TS_ORDER_SOURCE, idempotencyKey: key,
           }),
         });
-    const j = await res.json() as { success: boolean; order_id?: string; error?: string };
-    if (j.success) return { ok: true, orderId: j.order_id ? String(j.order_id) : undefined };
-    // 504 = status unknown: the order may exist. Never treat it as a clean failure.
-    return { ok: false, error: j.error ?? `HTTP ${res.status}`, unknown: res.status === 504 };
+    // 504 / unknown:true / a non-JSON 5xx = status unknown: the order may exist. Never treat it as a clean failure.
+    const o = classifyOrderReply(res.status, await res.json().catch(() => undefined));
+    if (o.kind === 'placed') return { ok: true, orderId: o.orderId ?? undefined };
+    return { ok: false, error: o.error, unknown: o.kind === 'unknown' };
   } catch (e) {
     return { ok: false, error: String(e), unknown: true };
   }
@@ -226,6 +227,12 @@ export async function enterStraddle(p: EntryParams): Promise<EntryOutcome> {
       const i = legs.findIndex((l) => l.option === f.opt);
       const leg = legs[i];
       const rev = await sendOrder(broker, p.underlying, f.secId, leg.qty, p.side === 'S' ? 'B' : 'S', p.product, `ts-${id}-${f.opt}-rb`);
+      if (!rev.ok && rev.unknown) {
+        // The reversal may have filled: the leg stays tracked OPEN, and no further exit goes out on it for a while.
+        legs[i] = { ...leg, unknownExitAt: Date.now() };
+        notes.push(`${f.opt} reversal status UNKNOWN (${rev.error}) — it may have closed the leg. Check Positions before closing it again; the leg stays tracked as open`);
+        continue;
+      }
       if (!rev.ok) { notes.push(`Could not reverse ${f.opt} (${rev.error}) — close it manually`); continue; }
       const c = rev.orderId ? await confirmOrder(rev.orderId, 6000, broker) : null;
       if (c?.phase === 'filled') {
@@ -295,14 +302,23 @@ export async function exitStraddle(
       return leg;
     }
 
-    // A previous exit order is still unsettled: look at IT, never send another on top of it.
+    // A previous exit came back UNKNOWN: send nothing on this leg until the hold passes; then the book decides.
     let current = leg;
+    if (leg.unknownExitAt != null) {
+      const left = TS_UNKNOWN_EXIT_HOLD_MS - (Date.now() - leg.unknownExitAt);
+      if (left > 0) {
+        notes.push(`${leg.option}: the previous exit's status is UNKNOWN — not re-sending for ${Math.ceil(left / 1000)} s. Check Positions.`);
+        return leg;
+      }
+      current = { ...leg, unknownExitAt: undefined };
+    }
+    // A previous exit order is still unsettled: look at IT, never send another on top of it.
     if (leg.pendingExit) {
       const c = await confirmOrder(leg.pendingExit.orderId, 0, broker);
       if (c.phase === 'filled') {
         // Never book a confirmed close at the ENTRY price (a silent ₹0): estimate from the live quote and owe the order.
         return {
-          ...leg, closed: true, exit: c.avgPrice > 0 ? c.avgPrice : (prices[leg.option] ?? leg.entry), pendingExit: undefined,
+          ...current, closed: true, exit: c.avgPrice > 0 ? c.avgPrice : (prices[leg.option] ?? leg.entry), pendingExit: undefined,
           ...(c.avgPrice > 0 ? {} : { exitEst: leg.pendingExit.orderId }),
         };
       }
@@ -310,7 +326,7 @@ export async function exitStraddle(
         notes.push(`${leg.option}: earlier exit order ${leg.pendingExit.orderId} is still unsettled — not re-sending. Check Orders.`);
         return leg;
       }
-      current = { ...leg, pendingExit: undefined };   // that order died; a fresh exit is safe
+      current = { ...current, pendingExit: undefined };   // that order died; a fresh exit is safe
     }
 
     const cap = brokerCapacity(rows, identOf(leg), pos.product, pos.side, broker === 'kotak' ? 'tradingSymbol' : 'securityId');
@@ -336,8 +352,8 @@ export async function exitStraddle(
     const qty = exitQtyForLeg(current.qty, cap.kind === 'qty' ? cap.qty : null);
     const r = await sendOrder(broker, pos.underlying, identOf(current)!, qty, closeSide, pos.product, `ts-${pos.id}-${leg.option}-out-${current.orderIds.length}`);
     if (!r.ok) {
-      notes.push(`${leg.option} exit ${r.unknown ? 'status UNKNOWN' : 'rejected'}: ${r.error}`);
-      return current;
+      notes.push(`${leg.option} exit ${r.unknown ? 'status UNKNOWN' : 'rejected'}: ${r.error}${r.unknown ? ' — it may have filled; no further exit on this leg for a minute. Check Positions.' : ''}`);
+      return r.unknown ? { ...current, unknownExitAt: Date.now() } : current;
     }
     const orderIds = [...current.orderIds, ...(r.orderId ? [r.orderId] : [])];
     const c = r.orderId ? await confirmOrder(r.orderId, 6000, broker) : null;

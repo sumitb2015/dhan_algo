@@ -34,6 +34,13 @@ export interface TsLeg {
   /** A closing order was accepted but its fill is unconfirmed. While set, the exit is
    *  NOT re-sent (a retry could double-close and open the opposite side). */
   pendingExit?: { orderId: string; at: number };
+  /**
+   * When a closing order came back with an UNKNOWN outcome (no reply / 504: it may have filled, and there is no order
+   * id to re-read). For TS_UNKNOWN_EXIT_HOLD_MS no further exit is sent on this leg: the stop watcher retries every
+   * 15 s, and on Kotak (no idempotency key) a second close sized off a lagging book would flip the leg. After the
+   * hold the next exit reads the broker book first (already flat -> marked closed).
+   */
+  unknownExitAt?: number;
   orderIds: string[];
   /**
    * The entry / exit price is the live quote stamped while the order's traded average was not reported yet: the
@@ -321,8 +328,11 @@ export function totalPnl(
   return total;
 }
 
+/** How long a leg's exit waits after an UNKNOWN-outcome close before another may be sent (see TsLeg.unknownExitAt). */
+export const TS_UNKNOWN_EXIT_HOLD_MS = 60_000;
+
 /** Whether the profit peak may be ratcheted and saved: armed, and every leg confirmed open.
  *  Half-closed or unconfirmed positions mix prices and would record a bogus peak. */
 export function peakTrackable(p: TsPosition): boolean {
-  return p.status === 'OPEN' && p.risk.armed && p.legs.every((l) => !l.closed && !l.unconfirmed && !l.pendingExit);
+  return p.status === 'OPEN' && p.risk.armed && p.legs.every((l) => !l.closed && !l.unconfirmed && !l.pendingExit && l.unknownExitAt == null);
 }

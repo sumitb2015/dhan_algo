@@ -36,6 +36,9 @@ interface Mock {
   rejectAfterAck: Set<string>;
   /** Contracts whose next order the broker refuses outright (success: false). */
   refuseOnSend: Set<string>;
+  /** Contracts whose next order gets an UNKNOWN reply (504, as both order routes send it); `fills` = it still went
+   *  through at the broker (the reply was lost), so the book moves. */
+  unknownOnSend: Map<string, { fills: boolean }>;
   /** Kotak instrument-cache entries beyond the weekly NIFTY chain (symbol-lookup), e.g. monthly symbols and futures. */
   kotakExtra: Record<string, { underlying: string; expiry: string; strike: number; side: 'CE' | 'PE' | 'FUT' }>;
   /** Raw extra rows in this broker's book (positions this page never placed), shaped as the broker returns them. */
@@ -46,7 +49,7 @@ interface Mock {
 function newMock(bk: Bk, baskets: Record<string, unknown>[] = []): Mock {
   return {
     bk, calls: [], blocked: [], wrongBroker: [], book: new Map(), orders: [], funds: 5_00_000, margin: 1_20_000,
-    rejectAfterAck: new Set(), refuseOnSend: new Set(), kotakExtra: {}, extraRows: [], store: new Map(baskets.map(b => [String(b.id), b])),
+    rejectAfterAck: new Set(), refuseOnSend: new Set(), unknownOnSend: new Map(), kotakExtra: {}, extraRows: [], store: new Map(baskets.map(b => [String(b.id), b])),
   };
 }
 
@@ -168,6 +171,12 @@ async function install(page: Page, m: Mock): Promise<void> {
       if (!strikeOpt) return json(route, { success: false, error: `e2e: unknown contract ${key}` }, 400);
       const price = Number(body!.price) || premium(strikeOpt.k, strikeOpt.o);
       if (m.refuseOnSend.has(key)) { m.refuseOnSend.delete(key); return json(route, { success: false, error: 'e2e: RMS refused' }); }
+      const unk = m.unknownOnSend.get(key);
+      if (unk) {
+        m.unknownOnSend.delete(key);
+        if (unk.fills) fill(m, key, side, qty, price);
+        return json(route, { success: false, unknown: true, error: 'Order status unknown - the broker did not confirm in time.' }, 504);
+      }
       let status = 'TRADED';
       if (m.rejectAfterAck.has(key)) { m.rejectAfterAck.delete(key); status = 'REJECTED'; }
       else if (body!.orderType === 'LIMIT' && pos) status = 'PENDING';   // a resting exit: never fills in these tests
@@ -258,7 +267,10 @@ async function open(page: Page) {
   if (await toggle.getAttribute('title') === 'Expand strategy') await toggle.click();
 }
 
-async function placeBasket(page: Page) {
+async function placeBasket(page: Page, opts: { waitMargin?: boolean } = {}) {
+  // The fail-closed margin gate refuses a click that lands before the live margin does. A Dhan basket's margin is
+  // requested only once its contract ids resolve (+500 ms), so on a busy dev server an immediate click lost that race.
+  if (opts.waitMargin !== false) await expect(page.getByTitle(/^Real SPAN\+exposure margin/).first()).toBeVisible({ timeout: 30_000 });
   const btn = page.getByRole('button', { name: /^(Place Basket|Confirm Place\?)$/ }).first();
   await expect(btn).toHaveText('Place Basket');
   await btn.click();
@@ -327,6 +339,78 @@ for (const bk of ['dhan', 'kotak'] as const) {
       expect(m.wrongBroker).toEqual([]);
     });
 
+    test(`${bk}: a short whose order comes back UNKNOWN stops the strategy and reverses NOTHING; it is adopted when it shows`, async ({ page }) => {
+      const m = newMock(bk, [IRON_CONDOR(bk)]);
+      // The 24100 CE short went through at the broker, but its reply was lost.
+      m.unknownOnSend.set(contractOf(bk, 24100, 'CE'), { fills: true });
+      await install(page, m);
+      await open(page);
+      await placeBasket(page);
+
+      await expect(page.getByText(/SELL 24100 CE: order status UNKNOWN/).first()).toBeVisible({ timeout: 30_000 });
+      await expect.poll(() => orderCalls(m).length, { timeout: 30_000 }).toBe(4);
+      // Before the fix the run unwound both hedges and the other short here (7 orders), leaving the 24100 CE naked.
+      await page.waitForTimeout(4_000);
+      expect(orderCalls(m)).toHaveLength(4);
+      await expect(page.getByText(/Auto-flattening/)).toHaveCount(0);
+      expect(netOf(m, 24300, 'CE')).toBe(LOT);
+      expect(netOf(m, 23700, 'PE')).toBe(LOT);
+      // The broker poll adopts the leg from the book: OPEN, tracked, with its own stops from here on.
+      await expect.poll(() => storedLegs(m).find(l => l.id === 'l2')?.status, { timeout: 30_000 }).toBe('OPEN');
+      expect(storedLegs(m).find(l => l.id === 'l2')?.fill?.qty).toBe(LOT);
+      expect(orderCalls(m), 'adoption sends nothing').toHaveLength(4);
+      expect(m.blocked).toEqual([]);
+      expect(m.wrongBroker).toEqual([]);
+    });
+
+    test(`${bk}: a leg whose order is UNKNOWN and not (yet) at the broker is shown UNKNOWN, never retried`, async ({ page }) => {
+      const m = newMock(bk, [IRON_CONDOR(bk)]);
+      m.unknownOnSend.set(contractOf(bk, 24300, 'CE'), { fills: false });
+      await install(page, m);
+      await open(page);
+      await placeBasket(page);
+
+      // A hedge came back unknown: the SELL phase never runs, the other hedge is not reversed.
+      await expect(page.getByText(/BUY 24300 CE: order status UNKNOWN/).first()).toBeVisible({ timeout: 30_000 });
+      await page.waitForTimeout(5_000);
+      expect(orderCalls(m).map(c => c.body!.side)).toEqual(['BUY', 'BUY']);
+      expect(netOf(m, 23700, 'PE')).toBe(LOT);
+      const held = (m.store.get('b1')?.legs as { id: string; status: string; unknownOrder?: unknown }[]).find(l => l.id === 'l1');
+      expect(held?.status).toBe('FAILED');
+      expect(held?.unknownOrder).toBeTruthy();
+      await expect(page.getByText('UNKNOWN', { exact: true }).first()).toBeVisible();
+      expect(m.blocked).toEqual([]);
+      expect(m.wrongBroker).toEqual([]);
+    });
+
+    test(`${bk}: an exit whose order is UNKNOWN holds the next exit on that leg instead of sending a second close`, async ({ page }) => {
+      const m = newMock(bk);
+      m.store.set('b1', openShort(m));
+      m.unknownOnSend.set(contractOf(bk, 24100, 'CE'), { fills: false });
+      await install(page, m);
+      await open(page);
+
+      const dialog = page.getByRole('dialog', { name: 'Exit position' });
+      // The dialog stays open after an exit that did not close the leg (as after a rejection): the second attempt is
+      // the user pressing Confirm in it again.
+      const exitLeg = async () => {
+        if (!(await dialog.isVisible())) await page.getByRole('button', { name: 'Exit this leg' }).first().click();
+        await dialog.getByRole('button', { name: /^Confirm Exit/ }).click();
+      };
+      await exitLeg();
+      await expect(page.getByText(/Exit status UNKNOWN for SELL 24100 CE/).first()).toBeVisible({ timeout: 20_000 });
+      expect(orderCalls(m)).toHaveLength(1);
+      // The toast covers the dialog's Confirm button; the next click comes once it has gone (still inside the hold).
+      await expect(page.getByText(/Exit status UNKNOWN for SELL 24100 CE/)).toHaveCount(0, { timeout: 20_000 });
+      await exitLeg();
+      await expect(page.getByText(/SELL 24100 CE: exit on hold/).first()).toBeVisible({ timeout: 10_000 });
+      await page.waitForTimeout(1_000);
+      expect(orderCalls(m), 'a second close while the first may still land').toHaveLength(1);
+      expect(storedLegs(m).find(l => l.id === 'l1')?.status ?? 'OPEN').toBe('OPEN');
+      expect(m.blocked).toEqual([]);
+      expect(m.wrongBroker).toEqual([]);
+    });
+
     test(`${bk}: margin gate blocks placement when funds are short or margin is unverified`, async ({ page }) => {
       const m = newMock(bk, [IRON_CONDOR(bk)]);
       m.funds = 10_000;
@@ -340,7 +424,7 @@ for (const bk of ['dhan', 'kotak'] as const) {
       m.margin = null;
       await page.reload({ waitUntil: 'domcontentloaded' });
       await open(page);
-      await placeBasket(page);
+      await placeBasket(page, { waitMargin: false });
       await expect(page.getByText('Margin not verified — placement blocked').first()).toBeVisible();
       expect(orderCalls(m)).toEqual([]);
       expect(m.blocked).toEqual([]);

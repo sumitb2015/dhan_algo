@@ -34,6 +34,7 @@ import { guardProductOf, validateSoftPnlGuard, softBracketLevels, softEntryEffec
 import type { ServerGuardState } from '@/lib/kotakGuardEngine';
 import { exitLimitTick } from '@/lib/multiLegExitOrder';
 import { resolveBracket, legsToCancel, hasUnmatchableActive, bracketLevelsByContract, reuseUnchanged, type BracketLevels, type SuperOrderInput } from '@/lib/superOrder';
+import { classifyOrderReply, UNKNOWN_NO_REPLY, UNKNOWN_ORDER_HINT } from '@/lib/orderOutcome';
 import AdvancedScalperAddLotsModal, { type SubmitLegOrderParams } from './AdvancedScalperAddLotsModal';
 
 // ─── Types ────────────────────────────────────────────────────────
@@ -1549,7 +1550,9 @@ function AdvancedScalper() {
 
   // ─── placeOrder ───────────────────────────────────────────────────
 
-  type LegOrderResult = { success: boolean; order_id?: string; error?: string };
+  // `unknown`: the order may be live (504 / no reply / non-JSON 5xx — lib/orderOutcome.ts). Never shown as "failed",
+  // never followed by an action that assumes nothing was placed.
+  type LegOrderResult = { success: boolean; order_id?: string; error?: string; unknown?: boolean };
 
   // The actual network call for one option leg order, factored out of
   // placeOrder so the Add Lots modal (which targets a position directly,
@@ -1651,9 +1654,13 @@ function AdvancedScalper() {
           });
         }
       }
-      return await res.json() as LegOrderResult;
+      const body = await res.json().catch(() => undefined) as LegOrderResult | undefined;
+      const outcome = classifyOrderReply(res.status, body);
+      if (outcome.kind === 'placed') return { ...(body as LegOrderResult), success: true };
+      return { success: false, error: outcome.error, unknown: outcome.kind === 'unknown' };
     } catch (e) {
-      return { success: false, error: String(e) };
+      // The request may have reached the broker before it failed.
+      return { success: false, error: `${UNKNOWN_NO_REPLY} (${String(e)})`, unknown: true };
     }
   }, [broker, underlying]);
 
@@ -1803,8 +1810,15 @@ function AdvancedScalper() {
         if (bracket) setTimeout(() => refreshBracketsRef.current(), 1500);   // Dhan lists the new legs a moment after the ACK
         if (softBracketId) void refreshServerGuard();
         setTimeout(fetchTabData, 1000);
+      } else if (j.unknown) {
+        // It may be live. The server bracket STAYS: it arms if the position shows up and drops itself when its entry
+        // window passes with none (kotakGuardEngine's pending TTL). Withdrawing it left a filled order unprotected.
+        addToast('error', `${side} ${box.side}: order status UNKNOWN`,
+          `${j.error ?? ''} ${softBracketId ? 'Its bracket is kept: it arms if the position appears. ' : ''}${UNKNOWN_ORDER_HINT}`);
+        if (softBracketId) void refreshServerGuard();
+        setTimeout(fetchTabData, 1000);
       } else {
-        addToast('error', `${side} ${box.side} failed`, j.error ?? 'Unknown error');
+        addToast('error', `${side} ${box.side} rejected`, j.error ?? 'Unknown error');
         if (softBracketId) void postGuard({ action: 'removeBracket', id: softBracketId });   // nothing was placed: withdraw it
       }
     } catch (e) {
@@ -1837,8 +1851,11 @@ function AdvancedScalper() {
     if (j.success) {
       addToast('success', `${params.side} ${params.optionSide} added`, `ID: ${j.order_id}`);
       setTimeout(fetchTabData, 1000);
+    } else if (j.unknown) {
+      addToast('error', `Add ${params.optionSide} lots: status UNKNOWN`, `${j.error ?? ''} Do not add again until Positions shows it. ${UNKNOWN_ORDER_HINT}`);
+      setTimeout(fetchTabData, 1000);
     } else {
-      addToast('error', `Add ${params.optionSide} lots failed`, j.error ?? 'Unknown error');
+      addToast('error', `Add ${params.optionSide} lots rejected`, j.error ?? 'Unknown error');
     }
     return j.success;
   }, [submitLegOrder, addToast, fetchTabData]);
@@ -1916,11 +1933,11 @@ function AdvancedScalper() {
   // an unknown outcome (504 / network error) may be a late fill, and a retry sized off a lagging
   // book would reverse the position. Backoff doubles per consecutive failure; unknown outcomes hold
   // longer. Cleared by a success.
-  const closeHoldRef = useRef<Record<string, { until: number; fails: number }>>({});
+  const closeHoldRef = useRef<Record<string, { until: number; fails: number; unknown: boolean }>>({});
   const holdClose = (key: string, unknown: boolean) => {
     const fails = (closeHoldRef.current[key]?.fails ?? 0) + 1;
     const ms = unknown ? 15_000 : Math.min(3000 * 2 ** (fails - 1), 30_000);
-    closeHoldRef.current[key] = { until: Date.now() + ms, fails };
+    closeHoldRef.current[key] = { until: Date.now() + ms, fails, unknown };
   };
 
   // ok=false means the close could not be confirmed (order failed / errored) —
@@ -2013,6 +2030,14 @@ function AdvancedScalper() {
     // Guard retries wait out the backoff after a failed / unknown-outcome close (silently — the
     // original failure already toasted). A manual click is never blocked by it.
     if (opts?.guard && Date.now() < (closeHoldRef.current[key]?.until ?? 0)) {
+      return { ok: false, qty: 0, closedUnits: 0, partial: false };
+    }
+    // A manual click IS held after an UNKNOWN close (only then, and only for that 15 s): the first close may still be
+    // landing, and a second one sized off a book that has not caught up flips the position.
+    const hold = closeHoldRef.current[key];
+    if (!opts?.guard && hold?.unknown && Date.now() < hold.until) {
+      addToast('error', `Close of ${sym} on hold`,
+        `The previous close's status is UNKNOWN — try again in ${Math.ceil((hold.until - Date.now()) / 1000)} s, after checking Positions.`);
       return { ok: false, qty: 0, closedUnits: 0, partial: false };
     }
     // Cooldown after an accepted close: the book (and positionsRef) can lag the
@@ -2116,7 +2141,10 @@ function AdvancedScalper() {
             : { securityId: liveSecId, quantity: qty, side, orderType: 'MARKET', exchangeSegment: liveExchange, idempotencyKey: crypto.randomUUID(), ...productPayload.fields },
         ),
       });
-      const j = await res.json() as { success: boolean; order_id?: string; error?: string };
+      const replyBody = await res.json().catch(() => undefined) as { success: boolean; order_id?: string; error?: string } | undefined;
+      const closeOutcome = classifyOrderReply(res.status, replyBody);
+      const j = { ...(replyBody ?? {}), success: closeOutcome.kind === 'placed', error: closeOutcome.kind === 'placed' ? undefined : closeOutcome.error } as
+        { success: boolean; order_id?: string; error?: string };
       if (j.success) {
         delete closeHoldRef.current[key];
         lastCloseAtRef.current[key] = Date.now();
@@ -2173,11 +2201,12 @@ function AdvancedScalper() {
         setTimeout(fetchTabData, 800);
         return { ok: true, qty: liveNetQty, closedUnits: confirmedUnits, partial: isPartial };
       } else {
-        // 504 = Dhan did not confirm in time: the order may well be live.
-        const unknownOutcome = res.status === 504;
+        // 504 / unknown:true / non-JSON 5xx: the broker did not confirm in time — the order may well be live.
+        const unknownOutcome = closeOutcome.kind === 'unknown';
         holdClose(key, unknownOutcome);
         if (unknownOutcome) lastCloseAtRef.current[key] = Date.now();
-        addToast('error', `Close failed: ${sym}`, j.error ?? 'Unknown error');
+        addToast('error', unknownOutcome ? `Close of ${sym}: status UNKNOWN` : `Close rejected: ${sym}`,
+          unknownOutcome ? `${j.error ?? ''} Further closes on it wait 15 s. ${UNKNOWN_ORDER_HINT}` : (j.error ?? 'Unknown error'));
         setTimeout(fetchTabData, 1500);
         setPosGuards(prev => prev[key] ? { ...prev, [key]: { ...prev[key], triggered: false } } : prev);
         return { ok: false, qty: liveNetQty, closedUnits: 0, partial: isPartial };
@@ -2186,7 +2215,7 @@ function AdvancedScalper() {
       // The request may have reached the broker — treat the outcome as unknown.
       holdClose(key, true);
       lastCloseAtRef.current[key] = Date.now();
-      addToast('error', 'Network error closing position', String(e));
+      addToast('error', `Close of ${sym}: status UNKNOWN`, `${String(e)} Further closes on it wait 15 s. ${UNKNOWN_ORDER_HINT}`);
       setPosGuards(prev => prev[key] ? { ...prev, [key]: { ...prev[key], triggered: false } } : prev);
       return { ok: false, qty: 0, closedUnits: 0, partial: false };
     } finally {
@@ -2460,14 +2489,20 @@ function AdvancedScalper() {
           }
         }
 
-        let j = await res.json() as { success: boolean; order_id?: string; error?: string };
-        // A bracket that Dhan CLEANLY rejected (not a 504: that one may exist) must not leave the roll
+        const readRoll = async (r: Response) => {
+          const b = await r.json().catch(() => undefined) as { success: boolean; order_id?: string; error?: string } | undefined;
+          const o = classifyOrderReply(r.status, b);
+          return { ...(b ?? {}), success: o.kind === 'placed', error: o.kind === 'placed' ? undefined : o.error, unknown: o.kind === 'unknown' } as
+            { success: boolean; order_id?: string; error?: string; unknown: boolean };
+        };
+        let j = await readRoll(res);
+        // A bracket that Dhan CLEANLY rejected (not an unknown outcome: that one may exist) must not leave the roll
         // half-done with the hedge missing: reopen plain, loudly.
-        if (!j.success && rollSendPlain && res.status !== 504) {
+        if (!j.success && rollSendPlain && !j.unknown) {
           addToast('error', 'Bracket rejected - reopening WITHOUT it', j.error ?? 'Unknown error');
           rollBracketNote = '';
           res = await rollSendPlain();
-          j = await res.json() as { success: boolean; order_id?: string; error?: string };
+          j = await readRoll(res);
         }
         if (j.success) {
           // Off the live pre-close quantity, not the table snapshot.
@@ -2476,8 +2511,11 @@ function AdvancedScalper() {
             `${sideToOpen} ${movedUnits} qty placed (ID: ${j.order_id})${rollBracketNote}`
             + (residual > 0 ? ` · ${residual} qty left at ${box.strike}` : ''));
           setTimeout(fetchTabData, 1000);
+        } else if (j.unknown) {
+          addToast('error', `New strike ${newStrike} ${box.side}: order status UNKNOWN`, `${j.error ?? ''} Do not re-open it by hand until Positions shows whether it went through. ${UNKNOWN_ORDER_HINT}`);
+          setTimeout(fetchTabData, 1000);
         } else {
-          addToast('error', `New strike order failed`, j.error ?? 'Unknown error');
+          addToast('error', `New strike order rejected`, j.error ?? 'Unknown error');
         }
       } catch (e) {
         addToast('error', 'Shift failed', String(e));

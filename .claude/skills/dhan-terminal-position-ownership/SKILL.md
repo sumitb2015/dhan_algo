@@ -456,6 +456,25 @@ trigger prints there is no position, so there is no leg:
   cancels the stop first. Stop-limit price must sit on the correct side of the trigger (BUY ≥, SELL ≤) —
   `fast-order` rejects it otherwise.
 
+### 14. An order with an UNKNOWN outcome is neither placed nor rejected (all four desks, 2026-10-17)
+A 504 / `unknown: true` / no reply / non-JSON 5xx means the order MAY be live and there is no order id to read.
+Classify every order reply with `lib/orderOutcome.ts` (`classifyOrderReply`, `sendOrderRequest`) — never read
+`success` as a boolean. Rules, each with a test that failed before:
+- **Never retry it, never unwind around it.** Multi-Leg Focus placement used to roll back the confirmed hedges when
+  a SELL came back unknown (a naked short if it filled); now the run stops and nothing is reversed — the same for an
+  ACKed-but-unconfirmed leg (`uncertain`). Focus Tool pauses the row's opens (`FocusRow.orderUnknown`).
+- **Keep watching for it.** A held record credits / adopts a late fill from the position book: Focus Tool's
+  unconfirmed sweep (open records kept even with no ledger), Multi-Leg Focus `MultiLegLeg.unknownOrder`
+  (`settleUnknownLeg`, 60 s, broker sync waits meanwhile), Triple Straddle `unconfirmed` legs.
+- **Hold the next close.** Focus Tool unconfirmed close (60 s), Multi-Leg Focus `exitUnknownRef` (60 s, manual too),
+  Triple Straddle `TsLeg.unknownExitAt` (60 s; Kotak has no idempotency key, Dhan's fast-order replays the 504 for
+  60 s on the same key), Advanced Scalper `closeHoldRef.unknown` (15 s, manual click too).
+- **Keep protection attached.** Advanced Scalper keeps a Kotak server bracket on an unknown entry (the pending TTL
+  drops it if no position appears); only a clean rejection withdraws it.
+- **Say it.** "status UNKNOWN — check Positions", never "failed" / "rejected" (`UNKNOWN_ORDER_HINT`).
+Proofs: `e2e/focus-tool-unknown-order.spec.ts`, `e2e/multi-leg-brokers.spec.ts` (UNKNOWN cases),
+`e2e/scalper-kotak.spec.ts` (UNKNOWN cases), `lib/tripleStraddleClient.test.ts`, `lib/multiLegUnknownOrder.test.ts`.
+
 ## Before You Ship
 - Does every lock/exit/P&L decision route through an ownership check
   (ledger + worker-hold), not a raw broker position/netQty read?

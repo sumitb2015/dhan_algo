@@ -46,6 +46,8 @@ interface KotakMock {
   dhan: string[];
   positions: Record<string, unknown>[];
   guard: { date: string; pnl: unknown; brackets: unknown[]; watch: unknown[]; events: unknown[] };
+  /** Scripted reply for the next Kotak order POSTs (default: booked). */
+  orderReply?: (body: Record<string, unknown> | null) => { status: number; body: unknown };
 }
 
 /** Routes that read or act on the DHAN account (Kotak's own live under /api/scalper/kotak/). */
@@ -108,6 +110,7 @@ async function installKotakMock(page: Page, m: KotakMock): Promise<void> {
     }
     if (p === '/api/scalper/kotak/order' || p === '/api/scalper/kotak/exit-all') {
       record();
+      if (p.endsWith('/order') && m.orderReply) { const r = m.orderReply(body); return json(route, r.body, r.status); }
       return json(route, p.endsWith('exit-all') ? { success: true, closed: ['x'], errors: [], skipped: [] } : { success: true, order_id: 'K1' });
     }
     if (p === '/api/scalper/mtm-history') return json(route, { success: false, error: 'e2e' });
@@ -263,4 +266,41 @@ test('the EXIT ALL tooltip says what Kotak actually does', async ({ page }) => {
   expect(title).toContain('Kotak F&O leg on every underlying');
   expect(title).toContain('NOT cancelled');
   expect(title).not.toContain('force-stops');
+});
+
+// ── Orders whose outcome is UNKNOWN (lib/orderOutcome.ts): 504 / unknown:true, the order may be live ──
+const KOTAK_UNKNOWN = { status: 504, body: { success: false, unknown: true, error: 'Order status unknown - Kotak did not confirm in time.' } };
+
+test('soft bracket: an entry whose order is UNKNOWN keeps its server bracket (it arms if the position appears)', async ({ page }) => {
+  m.orderReply = () => KOTAK_UNKNOWN;
+  await page.getByRole('button', { name: /^BRACKET (ON|OFF)/ }).click();
+  await page.getByRole('button', { name: 'BUY PE' }).first().click();
+  await expect.poll(() => orders().length).toBe(1);
+  await expect(page.getByText(/BUY PE: order status UNKNOWN/).first()).toBeVisible();
+  await page.waitForTimeout(1_500);
+  // Before the fix: "BUY PE failed" and removeBracket — a filled order left with no stop or target.
+  expect(m.calls.filter(c => c.body?.action === 'removeBracket')).toHaveLength(0);
+  await expect(page.getByText(/BUY PE failed/)).toHaveCount(0);
+});
+
+test('soft bracket: an entry the broker cleanly REJECTS still withdraws its bracket', async ({ page }) => {
+  m.orderReply = () => ({ status: 200, body: { success: false, error: 'RMS: margin exceeds' } });
+  await page.getByRole('button', { name: /^BRACKET (ON|OFF)/ }).click();
+  await page.getByRole('button', { name: 'BUY PE' }).first().click();
+  await expect.poll(() => m.calls.filter(c => c.body?.action === 'removeBracket').length).toBe(1);
+  await expect(page.getByText(/BUY PE rejected/).first()).toBeVisible();
+});
+
+test('a close whose order is UNKNOWN holds a second manual close for 15 s instead of sending it', async ({ page }) => {
+  m.orderReply = () => KOTAK_UNKNOWN;
+  const close = row(page, 'CRUDEOILM17NOV268800PE').getByRole('button', { name: 'Close', exact: true });
+  await close.click();
+  await expect.poll(() => orders().length).toBe(1);
+  await expect(page.getByText(/Close of CRUDEOILM17NOV268800PE: status UNKNOWN/).first()).toBeVisible();
+  // Past the 2 s cooldown that was the only thing stopping a second close before.
+  await page.waitForTimeout(3_000);
+  await close.click();
+  await expect(page.getByText(/Close of CRUDEOILM17NOV268800PE on hold/).first()).toBeVisible();
+  await page.waitForTimeout(1_000);
+  expect(orders()).toHaveLength(1);
 });

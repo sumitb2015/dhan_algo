@@ -463,9 +463,17 @@ export default function MultiLegLegRow({
         </td>
       )}
       <td className="px-1.5 py-1.5 text-center">
-        <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded border ${STATUS_STYLE[leg.status]}`}>
-          {leg.status}
-        </span>
+        {leg.unknownOrder ? (
+          // Held by an UNKNOWN opening order (MultiLegLeg.unknownOrder): it may be live; the poll adopts it if so.
+          <span className="text-[10px] font-bold px-1.5 py-0.5 rounded border bg-amber-500/10 text-amber-400 border-amber-500/30"
+            title={`Order status UNKNOWN: ${leg.unknownOrder.error} — checking the broker for up to a minute; if it filled, this leg opens with its stops. Check Positions before acting.`}>
+            UNKNOWN
+          </span>
+        ) : (
+          <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded border ${STATUS_STYLE[leg.status]}`}>
+            {leg.status}
+          </span>
+        )}
       </td>
       <td className="px-2 py-1.5 text-center sticky right-0 z-[1] bg-zinc-900 shadow-[-6px_0_6px_-6px_var(--chart-cursor-line)]">
         {leg.status === 'OPEN' ? (

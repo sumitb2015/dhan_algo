@@ -70,6 +70,13 @@ export interface MultiLegLeg {
    *  against the order book and undoes the ledger effect of a rejected or
    *  cancelled one — see applyOrderOutcomes. */
   pendingOrders?: PendingLegOrder[];
+  /**
+   * The opening order for this leg came back with an UNKNOWN outcome (no reply / 504 — it may be live, and there is
+   * no order id to read). The leg is FAILED (not live) while held: the broker poll ADOPTS it as OPEN, stops included,
+   * if its position appears within UNKNOWN_ORDER_HOLD_MS, else the hold lapses (settleUnknownLeg). While held, broker
+   * sync does not turn that position into an ungrouped trade (ordersSettling). Never retried or reversed.
+   */
+  unknownOrder?: { at: number; qty: number; error: string };
   /** Ids of this tool's own orders on this leg once they settle (pendingOrders
    *  drops them), so a trade-book row can always be told apart from an
    *  outside trade on the same contract — see ownOrderIds. */
@@ -1043,6 +1050,47 @@ export const LEG_FILL_GRACE_MS = 20_000;
  *  long): if it's then rejected, applyOrderOutcomes takes its qty back off —
  *  which would double-count if reconciliation had already clamped it away. */
 export const PENDING_GROW_GRACE_MS = 120_000;
+
+/** How long a leg with an UNKNOWN opening order waits for its position to appear before the hold lapses. */
+export const UNKNOWN_ORDER_HOLD_MS = 60_000;
+
+export function unknownOrderHeld(leg: Pick<MultiLegLeg, 'unknownOrder'>, now: number = Date.now()): boolean {
+  return leg.unknownOrder != null && now - leg.unknownOrder.at < UNKNOWN_ORDER_HOLD_MS;
+}
+
+/**
+ * Settle a leg held by an UNKNOWN opening order against the broker's book (see MultiLegLeg.unknownOrder).
+ *  - adopted: the contract shows a position on the leg's side and no other live leg holds the contract -> OPEN at
+ *    min(broker qty, ordered qty), priced at the broker's average for that side (an estimate: pooled for the day).
+ *  - expired: the hold window passed with nothing to adopt -> the hold is dropped; the leg stays FAILED. A position
+ *    that turns up later is picked up by broker sync as an ungrouped trade, so it is never invisible.
+ *  - wait: not yet.
+ * `liveOnContract` = live legs (any basket) already on this contract.
+ */
+export function settleUnknownLeg(
+  leg: MultiLegLeg, match: MultiLegMatch, lotSize: number, liveOnContract: number, now: number = Date.now(),
+): { leg: MultiLegLeg; outcome: 'adopted' | 'expired' | 'wait' | 'none' } {
+  const u = leg.unknownOrder;
+  if (!u) return { leg, outcome: 'none' };
+  if (match.kind === 'match' && liveOnContract === 0) {
+    const net = Number(match.row.netQty) || 0;
+    if (Math.sign(net) === (leg.side === 'B' ? 1 : -1)) {
+      const qty = Math.min(Math.abs(net), u.qty);
+      const brokerAvg = Number((leg.side === 'B' ? match.row.buyAvg : match.row.sellAvg) || match.row.costPrice || 0);
+      const avgPrice = brokerAvg > 0 ? brokerAvg : (leg.price ?? 0);
+      return {
+        outcome: 'adopted',
+        leg: {
+          ...leg, status: 'OPEN', unknownOrder: undefined, filledAt: now, price: avgPrice,
+          lots: lotSize > 0 ? Math.max(1, Math.round(qty / lotSize)) : leg.lots,
+          fill: { qty, avgPrice },
+        },
+      };
+    }
+  }
+  if (!unknownOrderHeld(leg, now)) return { leg: { ...leg, unknownOrder: undefined }, outcome: 'expired' };
+  return { leg, outcome: 'wait' };
+}
 
 export function isLegInFillGrace(leg: MultiLegLeg, now: number = Date.now()): boolean {
   if (leg.filledAt != null && now - leg.filledAt >= 0 && now - leg.filledAt < LEG_FILL_GRACE_MS) return true;

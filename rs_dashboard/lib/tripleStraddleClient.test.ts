@@ -260,3 +260,73 @@ test('Kotak: a Kotak position exits on Kotak, matched by trading symbol and MIS 
   assert.deepEqual(posts.map((p) => [p.body!.tradingsymbol, p.body!.side, p.body!.quantity]).sort(),
     [['NIFTY26OCT25000CE', 'BUY', 65], ['NIFTY26OCT25000PE', 'BUY', 65]]);
 });
+
+// ── An exit whose outcome is UNKNOWN (TsLeg.unknownExitAt) ───────────────
+const kotakPos = (over: Partial<TsPosition> = {}): TsPosition => ({
+  id: 'k2', broker: 'kotak', slot: 'center', mode: 'REAL', side: 'S', underlying: 'NIFTY', expiry: '2026-10-13', strike: 25000,
+  lots: 1, lotSize: 65, product: 'INTRADAY', status: 'OPEN', openedAt: Date.now() - 600_000,
+  risk: { armed: true } as TsPosition['risk'],
+  legs: [
+    { option: 'CE', symbol: 'NIFTY26OCT25000CE', qty: 65, entry: 100, orderIds: [] },
+    { option: 'PE', symbol: 'NIFTY26OCT25000PE', qty: 65, entry: 100, orderIds: [] },
+  ],
+  ...over,
+});
+const KOTAK_BOOK = [
+  { tradingSymbol: 'NIFTY26OCT25000CE', productType: 'MIS', netQty: -65 },
+  { tradingSymbol: 'NIFTY26OCT25000PE', productType: 'MIS', netQty: -65 },
+];
+const kotakPosts = () => sent.filter((s) => s.url === '/api/scalper/kotak/order');
+
+test('Kotak: an UNKNOWN exit marks the leg, and the stop retry 15 s later sends NOTHING on it', async () => {
+  broker({ post: { NIFTY26OCT25000CE: 'unknown' }, positions: KOTAK_BOOK });
+  const first = await exitStraddle(kotakPos(), { CE: 90, PE: 90 }, 'SL');
+  assert.equal(first.ok, false);
+  const ce = first.position.legs.find((l) => l.option === 'CE')!;
+  assert.ok(ce.unknownExitAt != null && !ce.closed, 'held, still tracked open');
+  assert.ok(first.notes.some((n) => /CE exit status UNKNOWN/.test(n)));
+  assert.equal(kotakPosts().length, 2);
+
+  // The watcher fires again (the book still shows the short: Kotak lags). Before this fix: a second BUY 65.
+  sent = [];
+  const again = await exitStraddle(first.position, { CE: 90 }, 'SL');
+  assert.equal(kotakPosts().length, 0, 'no second close while the first may still be landing');
+  assert.ok(again.notes.some((n) => /previous exit's status is UNKNOWN/.test(n)));
+});
+
+test('after the hold, the book decides: already flat -> closed without an order; still open -> one fresh close', async () => {
+  const stale = Date.now() - 61_000;
+  const leg = (o: 'CE' | 'PE') => ({ option: o, symbol: `NIFTY26OCT25000${o}`, qty: 65, entry: 100, orderIds: [] as string[], ...(o === 'CE' ? { unknownExitAt: stale } : { closed: true, exit: 90 }) });
+  broker({ post: {}, positions: [{ tradingSymbol: 'NIFTY26OCT25000CE', productType: 'MIS', netQty: 0 }] });
+  const flat = await exitStraddle(kotakPos({ legs: [leg('CE'), leg('PE')] as TsPosition['legs'] }), { CE: 88 }, 'SL');
+  assert.equal(kotakPosts().length, 0);
+  assert.equal(flat.position.legs[0].closed, true);
+  assert.equal(flat.position.legs[0].unknownExitAt, undefined);
+
+  sent = [];
+  broker({ post: {}, positions: [KOTAK_BOOK[0]] });
+  const open = await exitStraddle(kotakPos({ legs: [leg('CE'), leg('PE')] as TsPosition['legs'] }), { CE: 88 }, 'SL');
+  assert.equal(kotakPosts().length, 1);
+  assert.equal(open.position.legs[0].closed, true);
+});
+
+test('an UNKNOWN reversal of an entry leg keeps it tracked open and held, never "close it manually" at once', async () => {
+  broker({ post: { PE1: 'reject', CE1: 'ok' }, orders: {} });
+  // CE fills, PE is rejected -> CE is reversed; script that reversal as unknown.
+  let posts = 0;
+  const base = globalThis.fetch;
+  globalThis.fetch = (async (input: string, init?: { body?: string }) => {
+    const url = String(input);
+    if (url.startsWith('/api/scalper/fast-order')) {
+      const b = JSON.parse(init!.body!) as Record<string, unknown>;
+      if (b.securityId === 'CE1' && b.side === 'BUY') { posts += 1; sent.push({ url, body: b }); return { ok: false, status: 504, json: async () => ({ success: false, error: 'timeout' }) } as Response; }
+    }
+    return base(input as never, init as never);
+  }) as unknown as typeof fetch;
+  const out = await enterStraddle(params());
+  assert.equal(posts, 1);
+  const ce = out.position!.legs.find((l) => l.option === 'CE')!;
+  assert.ok(!ce.closed && ce.unknownExitAt != null);
+  assert.equal(out.position!.status, 'OPEN');
+  assert.ok(out.notes.some((n) => /CE reversal status UNKNOWN/.test(n)));
+});
