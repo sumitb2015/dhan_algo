@@ -30,6 +30,22 @@ is derived from the Table impl's props; Cards declares its own prop type. A new 
 the Table type (`onX?`), the Cards type (else TS fails at the call site), the three `onX={…}` call sites, and the UI in
 each view you care about. Polish so far is Pro-first; say which views you changed.
 
+## Which broker a REAL row is on (2026-10-17)
+The page broker is the ONE `dhan_algo.selected_broker` localStorage setting every dashboard page shares, so the Focus
+Tool can load on a broker another page picked. `FocusRowFill.broker` records the account a REAL position opened on
+(`nextFillBroker` in `adjustFillQty`: stamped flat→held, kept while held, dropped when flat; never guessed for a row
+opened before the field). Pure rules in `lib/focusToolBroker.ts` (+ test), browser proof in `e2e/focus-tool-broker.spec.ts`.
+- On load the page **follows** the broker its open REAL rows agree on (`followBroker`: this page only, not saved), never
+  while an order is in flight or unconfirmed. Rows split across two brokers: not followed, selector unlocked, toast.
+- `placeLeg`, the ladder (place / reconcile / cancel), the level watcher, the 1 s scheduler, pending re-entries and Exit
+  All's row retirement all skip or refuse a row with `rowBrokerMismatch(row, broker)` (`refuseForeignBroker`, 10 s
+  toast throttle); the row views disable its buttons with the reason.
+- The selector locks on `brokerSelectorLocked(rows)` OR `busyRows.size` OR a pending unconfirmed order.
+- A position book is "unknown", never "flat", when the poll carries `positionsError` (Kotak / Zerodha answer
+  `success:true, positions:[]` when the session is gone) or belongs to the previous broker (`positionsBrokerRef`;
+  `placeLeg` re-reads it). Either read as flat made the next exit drop a live leg as "closed outside the tool".
+- New order path or new rule loop → add the mismatch check; new fill writer → go through `adjustFillQty`.
+
 ## Where live prices come from (the lag bug, 2026-10-09)
 | Underlying | Option LTP / P&L source |
 |---|---|

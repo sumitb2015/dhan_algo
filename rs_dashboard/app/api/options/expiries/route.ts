@@ -4,7 +4,7 @@ import fs from 'fs';
 import { execFile } from 'child_process';
 import { promisify } from 'util';
 
-import { PROJECT_ROOT, PYTHON_EXE, dedupe } from '@/lib/pyExec';
+import { PROJECT_ROOT, PYTHON_EXE, dedupe, runPythonJson } from '@/lib/pyExec';
 
 const execFileAsync = promisify(execFile);
 
@@ -16,14 +16,24 @@ const CACHE_TTL = 60 * 60 * 1000; // 1 hour
 // Brokers whose expiries come from a locally cached instrument master rather
 // than a live API call. Both caches are written in the same row shape, so one
 // code path serves them; only the file name and the builder script differ.
-const CACHE_BROKERS: Record<string, { supported: Set<string>; script: string }> = {
+// `maxAgeMs` and `dedupeKey` are the SAME refresh rule and in-flight key the broker's own lookup route uses
+// (app/api/scalper/<broker>/lookup): a file older than that is rebuilt, never served as-is. Rebuilding only when the
+// file was missing kept a days-old list - Kotak's SENSEX list lacked four newly listed weeklies until a lookup call
+// happened to refresh the file.
+const CACHE_BROKERS: Record<string, { supported: Set<string>; script: string; maxAgeMs: number; timeoutMs: number; dedupeKey: (u: string) => string }> = {
   zerodha: {
     supported: new Set(['NIFTY', 'BANKNIFTY', 'SENSEX']),
     script: 'zerodha_instruments_cache.py',
+    maxAgeMs: 24 * 60 * 60 * 1000,
+    timeoutMs: 60_000,
+    dedupeKey: u => `zerodha-instruments-cache:${u}`,
   },
   kotak: {
     supported: new Set(['NIFTY', 'BANKNIFTY', 'FINNIFTY', 'SENSEX', 'CRUDEOIL', 'CRUDEOILM']),
     script: 'kotak_instruments_cache.py',
+    maxAgeMs: 12 * 60 * 60 * 1000,
+    timeoutMs: 120_000,
+    dedupeKey: u => `kotak-instruments-cache:${u}`,
   },
 };
 
@@ -54,9 +64,18 @@ export async function GET(request: NextRequest) {
   if (cacheBroker) {
     try {
       const cacheFile = path.join(PROJECT_ROOT, 'debug', `${broker}_${underlying.toLowerCase()}_instruments.json`);
-      if (!fs.existsSync(cacheFile)) {
+      const exists = fs.existsSync(cacheFile);
+      if (!exists || Date.now() - fs.statSync(cacheFile).mtimeMs > cacheBroker.maxAgeMs) {
         const cacheScript = path.join(PROJECT_ROOT, 'scripts', 'tools', cacheBroker.script);
-        await execFileAsync(PYTHON_EXE, [cacheScript, '--underlying', underlying], { encoding: 'utf8', timeout: 120_000, windowsHide: true });
+        try {
+          await dedupe(cacheBroker.dedupeKey(underlying), () =>
+            runPythonJson<{ success: boolean; error?: string }>(cacheScript, ['--underlying', underlying], cacheBroker.timeoutMs));
+        } catch (err) {
+          // A failed refresh of an EXISTING list serves the old list (lapsed dates are filtered below; at worst a
+          // newly listed expiry is missing) rather than no expiries at all. A missing file is still an error.
+          if (!exists) throw err;
+          console.warn(`[/api/options/expiries] ${broker} ${underlying} cache refresh failed, serving the previous list:`, err);
+        }
       }
       if (fs.existsSync(cacheFile)) {
         const raw = fs.readFileSync(cacheFile, 'utf8');

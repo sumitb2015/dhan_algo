@@ -67,6 +67,7 @@ import { computeRowPnl, mtmForQty, pnlPctOfPremium, blendFillBasis, fillRebasePa
 import { normalizeTradeRow, matchOutsideTrades, type NormalizedTrade } from '@/lib/multiLegFocus';
 import { stampItems, noteItems, adoptItems, canon, type RevBook } from '@/lib/revMerge';
 import { useTabLeader } from '@/hooks/useTabLeader';
+import { brokerSelectorLocked, heldBrokers, nextFillBroker, rowBrokerMismatch } from '@/lib/focusToolBroker';
 import { FOCUS_UNDERLYINGS, FEED_BRIDGE_UNDERLYINGS, isTradingDayFor, FEED_SESSION_START_HM, FEED_SESSION_END_HM, UNDERLYING_META, isMcxUnderlying, brokerOrderQuantity, brokerToInternalQuantity } from '@/lib/focusToolUnderlyings';
 import type { FocusConfigWrite } from '@/lib/focusToolRowsMerge';
 import {
@@ -2743,7 +2744,7 @@ function FocusHeader({
 
       {/* Right: Broker Selector + P&L tiles */}
       <div className="flex items-center gap-3">
-        {authenticatedBrokers.length > 1 && (
+        {(authenticatedBrokers.length > 1 || !authenticatedBrokers.includes(broker)) && (
           <select
             value={broker}
             disabled={brokerLocked}
@@ -2753,8 +2754,8 @@ function FocusHeader({
             onChange={e => setBroker(e.target.value as Broker)}
             className="bg-zinc-900 border border-zinc-700 text-zinc-200 text-xs font-semibold rounded-lg px-2.5 py-1.5 focus:outline-none focus:border-violet-500 disabled:opacity-50 disabled:cursor-not-allowed w-[90px] shrink-0"
           >
-            {authenticatedBrokers.map(b => (
-              <option key={b} value={b}>{BROKER_LABELS[b]}</option>
+            {(authenticatedBrokers.includes(broker) ? authenticatedBrokers : [...authenticatedBrokers, broker]).map(b => (
+              <option key={b} value={b}>{BROKER_LABELS[b]}{authenticatedBrokers.includes(b) ? '' : ' (logged out)'}</option>
             ))}
           </select>
         )}
@@ -3312,7 +3313,9 @@ function FocusTableRowImpl({
   const { ceValue, peValue, totalValue, pcr, pcrOi } = legValues(row, live, lotSize);
   // Orders are only sendable once at least one leg's contract and the lot size
   // are known — placeLeg re-checks the specific leg it is about to trade.
-  const canTrade = (isSimRow(row) || liveRealMoney) && !busy && (live.ceStrike != null || live.peStrike != null) && (lotSize ?? 0) > 0;
+  // A REAL row open on another broker account than the page's: every order would be refused (placeLeg).
+  const foreignBroker = rowBrokerMismatch(row, broker);
+  const canTrade = (isSimRow(row) || liveRealMoney) && !busy && !foreignBroker && (live.ceStrike != null || live.peStrike != null) && (lotSize ?? 0) > 0;
   // Ownership, not raw broker qty: checked against this row's own fill ledger.
   const flat = rowFlat(row);
   const ceFlat = !rowOwnsLeg(row, 'CE');
@@ -3324,7 +3327,9 @@ function FocusTableRowImpl({
   const ceChips = partialCloseChips(legOwnContracts(row, 'CE', live), lotSize ?? 0, [25, 50, 75]);
   const peChips = partialCloseChips(legOwnContracts(row, 'PE', live), lotSize ?? 0, [25, 50, 75]);
   // Why the leg buttons are greyed out.
-  const tradeBlockedWhy = !isSimRow(row) && !liveRealMoney
+  const tradeBlockedWhy = foreignBroker
+    ? `This row's position is on ${BROKER_LABELS[foreignBroker]} — switch the page broker to ${BROKER_LABELS[foreignBroker]} to manage it`
+    : !isSimRow(row) && !liveRealMoney
     ? 'REAL row — turn on LIVE · REAL MONEY to place orders, or switch the row to SIM'
     : busy
       ? 'An order for this row is already in flight'
@@ -3817,14 +3822,16 @@ function fmtPnl0(n: number): string {
 }
 
 function FocusProRowImpl({
-  row, live, lotSize, spot, liveRealMoney, busy,
+  row, live, lotSize, spot, liveRealMoney, broker, busy,
   expiries, buildupWsActive, buildupExpiryHint,
   onUpdate, onDelete, onArm, onDisarm, onEnterNow, onReenterLeg, onExit, onExitPartial, onAddLot, onAddAllLegs, onLadderPlace, onLadderCancel, onReduceLot, onShift, onBlocked,
   onCancelPending,
 }: FocusRowViewProps) {
   const combinedLtp = (live.ltpCe ?? 0) + (live.ltpPe ?? 0);
   const { ceValue, peValue, totalValue, pcr, pcrOi } = legValues(row, live, lotSize);
-  const canTrade = (isSimRow(row) || liveRealMoney) && !busy && (live.ceStrike != null || live.peStrike != null) && (lotSize ?? 0) > 0;
+  // A REAL row open on another broker account than the page's: every order would be refused (placeLeg).
+  const foreignBroker = rowBrokerMismatch(row, broker);
+  const canTrade = (isSimRow(row) || liveRealMoney) && !busy && !foreignBroker && (live.ceStrike != null || live.peStrike != null) && (lotSize ?? 0) > 0;
   const flat = rowFlat(row);
   // What is still in the market on the open legs. Premium left is in the same units as
   // the entry premium (Σ lots × price); Profit left is that in rupees (Σ qty × price) — the
@@ -3858,7 +3865,9 @@ function FocusProRowImpl({
     try { return buildPayoffModel({ legs, spot: Math.round(spot / 5) * 5, light: true, strikeStep: rowStep(row) })?.breakevens ?? []; } catch { return []; }
   }, [beKey, beExpiry, Math.round(spot / 5), row.underlying]); // eslint-disable-line react-hooks/exhaustive-deps
   const status = shownStatus(row, flat);
-  const tradeBlockedWhy = !isSimRow(row) && !liveRealMoney
+  const tradeBlockedWhy = foreignBroker
+    ? `This row's position is on ${BROKER_LABELS[foreignBroker]} — switch the page broker to ${BROKER_LABELS[foreignBroker]} to manage it`
+    : !isSimRow(row) && !liveRealMoney
     ? 'REAL row — turn on LIVE · REAL MONEY to place orders, or switch the row to SIM'
     : busy
       ? 'An order for this row is already in flight'
@@ -4381,7 +4390,9 @@ function FocusRowCardImpl({
 }) {
   const combinedLtp = (live.ltpCe ?? 0) + (live.ltpPe ?? 0);
   const { ceValue, peValue, totalValue, pcr, pcrOi } = legValues(row, live, lotSize);
-  const canTrade = (isSimRow(row) || liveRealMoney) && !busy && (live.ceStrike != null || live.peStrike != null) && (lotSize ?? 0) > 0;
+  // A REAL row open on another broker account than the page's: every order would be refused (placeLeg).
+  const foreignBroker = rowBrokerMismatch(row, broker);
+  const canTrade = (isSimRow(row) || liveRealMoney) && !busy && !foreignBroker && (live.ceStrike != null || live.peStrike != null) && (lotSize ?? 0) > 0;
   // Ownership, not raw broker qty: checked against this row's own fill ledger.
   const flat = rowFlat(row);
   const ceFlat = !rowOwnsLeg(row, 'CE');
@@ -4393,7 +4404,9 @@ function FocusRowCardImpl({
   const ceChips = partialCloseChips(legOwnContracts(row, 'CE', live), lotSize ?? 0, [25, 50, 75]);
   const peChips = partialCloseChips(legOwnContracts(row, 'PE', live), lotSize ?? 0, [25, 50, 75]);
   // Why the leg buttons are greyed out.
-  const tradeBlockedWhy = !isSimRow(row) && !liveRealMoney
+  const tradeBlockedWhy = foreignBroker
+    ? `This row's position is on ${BROKER_LABELS[foreignBroker]} — switch the page broker to ${BROKER_LABELS[foreignBroker]} to manage it`
+    : !isSimRow(row) && !liveRealMoney
     ? 'REAL row — turn on LIVE · REAL MONEY to place orders, or switch the row to SIM'
     : busy
       ? 'An order for this row is already in flight'
@@ -4882,7 +4895,7 @@ export function FocusModal({
 // ── Main Component ──────────────────────────────────────────────────────────
 
 function FocusTool() {
-  const { broker, setBroker, authenticatedBrokers, hasAuthenticatedBroker, authChecked } = useBrokerSelector();
+  const { broker, setBroker, followBroker, authenticatedBrokers, hasAuthenticatedBroker, authChecked } = useBrokerSelector();
   const [toasts, setToasts] = useState<Toast[]>([]);
   const toastSeqRef = useRef(0);
   const addToast = useCallback((type: 'success' | 'error', message: string, detail?: string) => {
@@ -4969,6 +4982,28 @@ function FocusTool() {
   // Orders sent but not confirmed filled in full, keyed row:leg — see
   // UnconfirmedOrder / reconcileUnconfirmedOrder.
   const unconfirmedOrderRef = useRef<Map<string, UnconfirmedOrder>>(new Map());
+  // Last "position is on another broker" toast per row (refuseForeignBroker), so a stop re-firing every tick can't spam.
+  const foreignBrokerToastRef = useRef<Map<string, number>>(new Map());
+
+  // The broker selector is one setting shared by every dashboard page, so this page can load on a broker another page
+  // picked while a REAL row here holds a position on a different account. Follow the account the open rows are on
+  // (this page only — the saved choice for other pages is left alone). Not while an order is in flight or unconfirmed:
+  // its fill is settled against the account it went to. Rows split across two brokers are not followed (the selector
+  // stays unlocked for them, and each refuses orders until the page is on its broker).
+  const held = useMemo(() => heldBrokers(config.rows), [config.rows]);
+  const heldConflictKey = held.conflict ? held.brokers.join('+') : '';
+  useEffect(() => {
+    if (!held.follow || held.follow === broker) return;
+    if (busyRows.size > 0 || unconfirmedOrderRef.current.size > 0) return;   // re-runs when busyRows clears
+    followBroker(held.follow);
+    addToast('error', `Switched to ${BROKER_LABELS[held.follow]}`,
+      `A REAL row holds a position on ${BROKER_LABELS[held.follow]} — this page stays on it until those rows are flat (other pages keep their own broker).`);
+  }, [held.follow, broker, busyRows]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => {
+    if (!heldConflictKey) return;
+    addToast('error', 'REAL rows on two brokers',
+      `Open rows sit on ${heldConflictKey.split('+').map(b => BROKER_LABELS[b as Broker]).join(' and ')}. Each is only watched and traded while the page is on its own broker — switch to manage the others.`);
+  }, [heldConflictKey, addToast]);
   // Only one tab runs the automatic rules (scheduler, stops, targets,
   // re-entries) — a second tab is a second execution engine. Manual buttons
   // and settling this tab's own unconfirmed orders run in every tab.
@@ -5299,6 +5334,13 @@ function FocusTool() {
   const positionsSeqRef = useRef(0);
   const brokerNowRef = useRef(broker);
   brokerNowRef.current = broker;
+  // Which broker's book `positions` holds. Right after a broker switch it is still the PREVIOUS account's, and the new
+  // broker's contract lookups can land first: a close joined against the old book reads the leg flat. placeLeg
+  // re-reads the book when this is not the page's broker.
+  const positionsBrokerRef = useRef<Broker | null>(null);
+  // Drop the previous account's book on a switch so no view shows it as this broker's (adjusted during render).
+  const [positionsShownFor, setPositionsShownFor] = useState(broker);
+  if (positionsShownFor !== broker) { setPositionsShownFor(broker); setPositions([]); }
   const fetchPositionsNow = useCallback(async (): Promise<PosRow[] | null> => {
     // Out-of-order guard: only the newest request may write state, and a response for a broker
     // that is no longer selected is discarded (its book is not this page's).
@@ -5306,8 +5348,11 @@ function FocusTool() {
     const askedBroker = broker;
     try {
       const res = await fetch(scalperRoute(broker, 'poll'));
-      const j = await res.json() as { success: boolean; positions?: PosRow[] };
-      if (!j.success || !j.positions) return null;
+      const j = await res.json() as { success: boolean; positions?: PosRow[]; positionsError?: string | null };
+      // Kotak / Zerodha answer success:true with an EMPTY list and `positionsError` when the session is gone or the
+      // positions call failed. That is an unknown book, not a flat one — read as flat, the next exit dropped a live leg
+      // from the ledger as "closed outside the tool".
+      if (!j.success || !j.positions || j.positionsError) return null;
       const rows = j.positions
         .filter(p => {
           // Dhan rows carry `exchangeSegment` (NSE_FNO / MCX_COMM); Kotak and Zerodha rows carry `exchange`
@@ -5337,7 +5382,7 @@ function FocusTool() {
           } as PosRow;
         });
       if (brokerNowRef.current !== askedBroker) return null;
-      if (seq === positionsSeqRef.current) setPositions(rows);
+      if (seq === positionsSeqRef.current) { positionsBrokerRef.current = askedBroker; setPositions(rows); }
       return rows;
     } catch {
       return null;
@@ -5937,7 +5982,8 @@ function FocusTool() {
       if (exitOk) {
         // schedulerRef holds the latest config; this closure is from before the awaits above.
         const nextRows = schedulerRef.current.config.rows.map(r => {
-          if (r.status === 'draft' || isSimRow(r)) return r;
+          // A row whose position is on another broker account was not touched by this account's exit.
+          if (r.status === 'draft' || isSimRow(r) || rowBrokerMismatch(r, broker)) return r;
           return {
             ...r,
             status: 'exited' as FocusRow['status'],
@@ -6348,6 +6394,11 @@ function FocusTool() {
           peStrike: leg === 'PE' && strike != null ? strike : (f?.peStrike ?? null),
           ceQty: nextCeQty,
           peQty: nextPeQty,
+          // The account this REAL position is on: stamped on the flat→held move (this order went to `broker`), kept
+          // while held, dropped when flat. Every order path refuses the row on any other broker (focusToolBroker.ts).
+          broker: nextFillBroker(isSimRow(r),
+            { ceQty: f?.ceQty ?? 0, peQty: f?.peQty ?? 0, broker: f?.broker },
+            { ceQty: nextCeQty, peQty: nextPeQty }, broker),
           ceEntry: leg === 'CE' ? nextEntry : (f?.ceEntry ?? null),
           peEntry: leg === 'PE' ? nextEntry : (f?.peEntry ?? null),
           ceFillEntry: nextCeQty <= 0 ? undefined : (leg === 'CE' ? (nextFillEntry ?? undefined) : f?.ceFillEntry),
@@ -6601,6 +6652,11 @@ function FocusTool() {
     // LIVE arm nor a logged-in broker.
     if (isSimRow(row)) return placeSimLeg(row, leg, opts);
 
+    // The row's open position is on another broker account: this page's book would read it flat (and a close would
+    // then drop it from the ledger as "closed outside the tool"), an open would land on the wrong account. Refused —
+    // opens and closes alike — until the page is on the row's broker. Checked on the LATEST row, not the caller's copy.
+    if (refuseForeignBroker(schedulerRef.current.config.rows.find(r => r.id === row.id) ?? row, what)) return false;
+
     // Only an order that opens or adds is held back by the daily arm; a reducing order is always allowed.
     if (!liveRealMoney && !opts.reduce) {
       addToast('error', 'Dry run', 'Enable LIVE · REAL MONEY to place orders');
@@ -6651,6 +6707,15 @@ function FocusTool() {
     let bookRows: PosRow[] = positions;
     let credited = 0;
     const closeKey = `${row.id}:${leg}`;
+    if (positionsBrokerRef.current !== broker) {
+      // The polled book is not this broker's yet (just switched): sizing off it would read every leg flat.
+      const fresh = await fetchPositionsNow();
+      if (!fresh) {
+        addToast('error', `${what} order not sent`, `${BROKER_LABELS[broker]} position book not readable yet — retrying`);
+        return false;
+      }
+      bookRows = fresh;
+    }
     if (opts.reduce && unconfirmedOrderRef.current.has(closeKey)) {
       const r = await reconcileUnconfirmedOrder(closeKey);
       if (r.state !== 'resolved') {
@@ -6924,6 +6989,20 @@ function FocusTool() {
    * place when the price never comes back (a missed read is not a reason to
    * guess). Stops and targets measure from the new entry on the next tick.
    */
+  /** True (and a toast, at most every 10 s per row) when `row` holds a REAL position on another broker than the
+   *  page's — see lib/focusToolBroker.ts. Callers then send nothing. */
+  function refuseForeignBroker(row: FocusRow, what: string): boolean {
+    const owner = rowBrokerMismatch(row, broker);
+    if (!owner) return false;
+    const last = foreignBrokerToastRef.current.get(row.id) ?? 0;
+    if (Date.now() - last > 10_000) {
+      foreignBrokerToastRef.current.set(row.id, Date.now());
+      addToast('error', `${what} order not sent`,
+        `This row's position is on ${BROKER_LABELS[owner]}, the page is on ${BROKER_LABELS[broker]}. Switch the broker to ${BROKER_LABELS[owner]} to manage it.`);
+    }
+    return true;
+  }
+
   /** Remembers an order this tool placed on a broker that cannot tag orders (Kotak). */
   function noteOwnOrder(orderId: unknown) {
     if (broker !== 'kotak' || !orderId) return;
@@ -7443,6 +7522,9 @@ function FocusTool() {
 
   /** Settle one ladder order against the broker: credit new fills, drop it once terminal. */
   async function reconcileLadderOrder(rowId: string, o: FocusLadderOrder): Promise<void> {
+    // The ladder rests on the row's own broker; another account's order book would read it "not found" forever.
+    const owned = schedulerRef.current.config.rows.find(x => x.id === rowId);
+    if (owned && rowBrokerMismatch(owned, broker)) return;
     try {
       const r = await fetch(`/api/scalper/orders?orderId=${encodeURIComponent(o.orderId)}&broker=${tracksOrderStatus(broker) ? broker : 'dhan'}`);
       const j = await r.json() as { success?: boolean; data?: { orderStatus?: string; filledQty?: number; averageTradedPrice?: number } };
@@ -7495,6 +7577,8 @@ function FocusTool() {
     const row = schedulerRef.current.config.rows.find(r => r.id === rowId);
     const targets = (row?.ladder ?? []).filter(o => (!leg || o.leg === leg) && (!orderId || o.orderId === orderId));
     if (targets.length === 0) return;
+    // A cancel sent to the page's broker cannot reach an order resting on another account.
+    if (row && refuseForeignBroker(row, `${row.underlying} ladder`)) return;
     await Promise.all(targets.map(async o => {
       try {
         const r = await fetch('/api/scalper/orders', {
@@ -7514,6 +7598,7 @@ function FocusTool() {
   async function placeLadderOrder(row: FocusRow, leg: 'CE' | 'PE', pct: number, lots: number): Promise<void> {
     const what = `${row.underlying} ${leg}`;
     if (isSimRow(row)) { addToast('error', 'Limit ladder not available', 'SIM rows have no broker orders — it is for REAL rows'); return; }
+    if (refuseForeignBroker(schedulerRef.current.config.rows.find(r => r.id === row.id) ?? row, what)) return;
     if (!tracksOrderStatus(broker)) { addToast('error', 'Limit ladder not available', 'Dhan and Kotak only'); return; }
     if (!liveRealMoney) { addToast('error', 'Dry run', 'Enable LIVE · REAL MONEY to place orders'); return; }
     if (!hasAuthenticatedBroker) { addToast('error', 'No broker logged in', 'Log in to your broker before placing orders'); return; }
@@ -8275,6 +8360,8 @@ function FocusTool() {
     const nowHm = istHm();
     for (const row of snap.config.rows) {
       if (!hasPendingReentry(row)) continue;
+      // Its other leg is open on another broker account: a re-entry here would open on the wrong one. It waits.
+      if (rowBrokerMismatch(row, broker)) continue;
       // At most ONE firing per row per tick: runRowAction's busy check reads
       // this render's state, so a second leg firing in the same pass would
       // run as a second concurrent action on the row. The other leg (still
@@ -8661,6 +8748,10 @@ function FocusTool() {
     const openRows = config.rows.filter(r => {
       const l = rowLive[r.id];
       if (!l) return false;
+      // A REAL row whose position is on another broker account is not watched from this one: every order would be
+      // refused (placeLeg), and its legs read flat in this account's book. The page follows that broker on load
+      // (the heldBrokers effect); until it does — or while rows are split across brokers — the row waits.
+      if (rowBrokerMismatch(r, broker)) return false;
       return !rowFlat(r) && rowMayExit(r, liveRealMoney);
     });
     if (!openRows.length) return;
@@ -9230,7 +9321,8 @@ function FocusTool() {
       const nowHm = istHm();
       const openRows = cfg.rows.filter(r => {
         const l = live[r.id];
-        return l && !rowFlat(r) && rowMayExit(r, liveArmed);
+        // Same gate as the level watcher: a row on another broker account is left alone here.
+        return l && !rowFlat(r) && rowMayExit(r, liveArmed) && !rowBrokerMismatch(r, brokerNowRef.current);
       });
 
       // Only the leader tab acts; a follower still settles its own unconfirmed orders.
@@ -9257,6 +9349,8 @@ function FocusTool() {
       // ── 3. Auto-entry for armed rows ──
       for (const row of cfg.rows) {
         if (!rowMayTrade(row, liveArmed)) continue;
+        // A leg entry (lazy / per-leg gate) on a row already open on another broker account would land on the wrong one.
+        if (rowBrokerMismatch(row, brokerNowRef.current)) continue;
         const l = live[row.id] ?? EMPTY_ROW_LIVE;
         const group = cfg.groups.find(g => g.underlying === row.underlying);
         // Stop Monitoring After: no new entry either. Waiting leg gates drop
@@ -9532,7 +9626,9 @@ function FocusTool() {
         broker={broker}
         setBroker={setBroker}
         authenticatedBrokers={authenticatedBrokers}
-        brokerLocked={config.rows.some(r => !isSimRow(r) && ((Number(r.fill?.ceQty) || 0) > 0 || (Number(r.fill?.peQty) || 0) > 0))}
+        // Locked while a REAL row is open (its exits would point at another account), and while any order is in flight
+        // or unconfirmed (its fill is settled against the account it went to).
+        brokerLocked={brokerSelectorLocked(config.rows) || busyRows.size > 0 || unconfirmedOrderRef.current.size > 0}
       />
 
       {authChecked && !hasAuthenticatedBroker && (

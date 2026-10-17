@@ -142,6 +142,14 @@ export interface FocusRowFill {
   ceQty: number;
   peQty: number;
   /**
+   * The broker account a REAL row's position sits on — stamped when the row opens from flat, dropped when it is flat
+   * again (lib/focusToolBroker.ts). The page broker is one setting shared by every dashboard page, so without this a
+   * reload after another page switched broker read the wrong account: the next exit saw the leg flat, dropped it from
+   * the ledger as "closed outside the tool" and left the real short unwatched. Every order, ladder and Exit All path
+   * refuses a row whose broker is not the page's. Absent on SIM rows and on rows opened before 2026-10-17.
+   */
+  broker?: 'dhan' | 'zerodha' | 'kotak';
+  /**
    * Realised P&L from qty this row has already closed or rolled away.
    *
    * The pin tracks only the CURRENT strike per leg. Closing (or shifting off)

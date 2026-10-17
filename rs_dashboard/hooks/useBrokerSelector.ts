@@ -79,6 +79,10 @@ export function useBrokerSelector() {
     } catch {}
   };
 
+  /** Switch THIS component only, without saving it as the dashboard-wide choice. For a page whose open positions
+   *  pin it to one account (Focus Tool) — saving would change which broker every other page opens on. */
+  const followBroker = (b: Broker) => { setBrokerState(b); };
+
   useEffect(() => {
     fetch('/api/auth/broker-status')
       .then(r => r.json())
@@ -91,5 +95,5 @@ export function useBrokerSelector() {
       .catch(() => {});
   }, []);
 
-  return { broker, setBroker, authenticatedBrokers, hasAuthenticatedBroker, authChecked };
+  return { broker, setBroker, followBroker, authenticatedBrokers, hasAuthenticatedBroker, authChecked };
 }
