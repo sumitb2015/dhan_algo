@@ -133,7 +133,8 @@ PyJWT==2.13.0
 # the legacy git-pinned "neo-api-client" v2 fork this used to be. Migrated
 # 2026-09-06 -- verified end-to-end against the live account (cached-session
 # restore, a fresh totp_login()/totp_validate(), and real margin/positions
-# reads all round-tripped correctly under v3).
+# reads all round-tripped correctly under v3). Bumped to 3.0.9 on 2026-10-17
+# (same dependency list; positions() moved to portfolio/v2/positions).
 #
 # MUST be installed with --no-deps. It declares pandas>=2.2,<3 and
 # numpy>=1.26,<3 -- installing it normally would downgrade this venv's
@@ -147,9 +148,9 @@ PyJWT==2.13.0
 # (no pandas/numpy conflict) so they install normally as part of this file;
 # only the SDK itself needs the separate --no-deps command:
 #
-#   venv\Scripts\python.exe -m pip install --no-deps kotakneoapi==3.0.6
+#   venv\Scripts\python.exe -m pip install --no-deps kotakneoapi==3.0.9
 #
-# kotakneoapi==3.0.6
+# kotakneoapi==3.0.9
 h2==4.4.1
 structlog==26.1.0
 tenacity==9.1.4

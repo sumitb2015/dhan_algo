@@ -38,11 +38,17 @@ export const KOTAK_PATHS = {
   modifyOrder: 'quick/order/vr/modify',
   orderBook: 'quick/user/orders',
   tradeBook: 'quick/user/trades',
-  positions: 'quick/user/positions',
+  // kotakneoapi 3.0.9 moved positions() here from quick/user/positions "per a backend endpoint update". Same row
+  // fields plus `ltp` (verified live 2026-10-17); the old path still answered then.
+  positions: 'portfolio/v2/positions',
   limits: 'quick/user/limits',
-  // From the SDK's settings.py (portfolio_holdings: GET, Sid/Auth headers). Not exercised from Node before 2026-10-17.
+  // From the SDK's settings.py (portfolio_holdings: GET, Sid/Auth headers, NO sId — see NO_SERVER_ID_PATHS).
   holdings: 'portfolio/v1/holdings',
 } as const;
+
+// Paths the SDK calls WITHOUT the `sId` query parameter. Holdings answers HTTP 404 {"error": ...} when it is
+// present and 200 with the book when it is not (verified live 2026-10-17), so a sell capped by holdings failed closed.
+const NO_SERVER_ID_PATHS: ReadonlySet<string> = new Set([KOTAK_PATHS.holdings]);
 
 export interface KotakSession {
   baseUrl: string;
@@ -167,6 +173,7 @@ function kotakUrl(apiPath: string): string {
   // `sId` is always sent, even when empty — that is what the Kotak SDK does, and
   // some accounts genuinely come back with an empty hsServerId. Omitting the
   // parameter on those accounts is an untested deviation from the working path.
+  if (NO_SERVER_ID_PATHS.has(apiPath)) return `${baseUrl}/${apiPath}`;
   return `${baseUrl}/${apiPath}?sId=${encodeURIComponent(serverId ?? '')}`;
 }
 
