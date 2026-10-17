@@ -98,6 +98,9 @@ export async function installScalperMock(page: Page, m: ScalperMock): Promise<vo
     if (p === '/api/scalper/positions') return json(route, { success: true, data: m.positions });
     if (p === '/api/scalper/trades') return json(route, { success: true, data: [] });
 
+    // The bracket's tick size. Unmocked, it fell through to the real route, which looks the made-up security ids
+    // (111...) up in the real master_list.csv: not found, so every bracketed order stalled and those tests failed.
+    if (p === '/api/super-order/tick') return json(route, { success: true, tick: 0.05 });
     if (p === '/api/super-order') {
       record();
       if (method === 'GET') return m.superListFails ? json(route, { success: false, error: 'boom' }, 502) : json(route, { success: true, orders: m.superOrders });

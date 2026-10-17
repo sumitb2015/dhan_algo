@@ -173,10 +173,18 @@ test('shapeKotakPosition ignores the ltp portfolio/v2/positions sends (it echoed
     trdSym: 'CRUDEOILM17NOV268800PE', tok: '123', exSeg: 'mcx_fo', prod: 'NRML',
     cfBuyQty: '0', cfSellQty: '0', flBuyQty: '0', flSellQty: '140',
     cfBuyAmt: '0.00', cfSellAmt: '0.00', buyAmt: '0.00', sellAmt: '40145.00',
-    stkPrc: '8800.00', ltp: '286.75',
+    stkPrc: '8800.00', ltp: '286.75', lotSz: '10',
   });
   assert.strictEqual(pos.netQty, -140);
   assert.strictEqual(pos.sellAvg, 286.75);
   assert.strictEqual(pos.lastTradedPrice, 0);
   assert.strictEqual(pos.unrealizedProfit, 0);
+});
+
+test('shapeKotakPosition carries lotSz as lotSize (same units as the quantities), and omits a missing or bad one', () => {
+  const row = { trdSym: 'CRUDEOILM19NOV26FUT', exSeg: 'mcx_fo', cfSellQty: '150', cfSellAmt: '1408950' };
+  assert.strictEqual(shapeKotakPosition({ ...row, lotSz: '10' }).lotSize, 10);
+  assert.strictEqual(shapeKotakPosition(row).lotSize, undefined);
+  assert.strictEqual(shapeKotakPosition({ ...row, lotSz: '0' }).lotSize, undefined);
+  assert.strictEqual(shapeKotakPosition({ ...row, lotSz: 'x' }).lotSize, undefined);
 });

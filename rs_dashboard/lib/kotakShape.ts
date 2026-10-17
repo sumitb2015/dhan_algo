@@ -67,6 +67,8 @@ export function shapeKotakPosition(p: Record<string, any>): ScalperPosition {
     unrealizedProfit: unrealized,
     productType: String(p.prod ?? p.prd ?? ''),
   };
+  const lotSz = Number(p.lotSz);
+  if (Number.isInteger(lotSz) && lotSz > 0) base.lotSize = lotSz;
   if (cfBuyQty > 0 || cfSellQty > 0) {
     base.cfBuyQty = cfBuyQty;
     base.cfSellQty = cfSellQty;

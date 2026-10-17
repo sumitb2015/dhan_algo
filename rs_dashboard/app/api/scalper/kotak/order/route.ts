@@ -1,6 +1,9 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { placeKotakOrder } from '@/lib/kotakPlaceOrder';
 import { invalidateBrokerCache } from '@/lib/brokerPositionsCache';
+import { kotakDerivativeBySymbol } from '@/lib/kotakContracts';
+import { kotakUnderlyingOf } from '@/lib/kotakPositionContracts';
+import { snapToTick, sourceLotCapError } from '@/lib/kotakOrderRules';
 
 /** Products this route will book. CO/BO are excluded — Neo holds its own exit
  *  order against them, which a plain market order would leave dangling. */
@@ -21,6 +24,8 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     triggerPrice?: number;
     exchange?: string;
     product?: string;
+    /** Calling terminal, for SOURCE_LOT_CAPS. Absent = uncapped (closes, other desks). */
+    source?: string;
   };
 
   const {
@@ -72,13 +77,20 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     return NextResponse.json({ success: false, error: `${sideForCheck} ${orderTypeUpper} limit ${price} must be ${sideForCheck === 'BUY' ? '>=' : '<='} its trigger ${triggerNum}` }, { status: 400 });
   }
 
-  // NSE/BSE options trade in Rs 0.05 ticks — snap so the exchange never rejects
-  // an otherwise-valid limit price.
-  // Derivatives (`*_fo`) snap to the 0.05 grid; a cash-equity price (nse_cm, ticks down to 0.01) is the caller's own,
-  // already on the stock's tick, and is only rounded to paise.
   const isDerivative = /_fo$/i.test(String(exchange));
+  const underlying = isDerivative ? kotakUnderlyingOf(String(tradingsymbol)) : null;
+  const contract = underlying ? kotakDerivativeBySymbol(String(tradingsymbol), underlying) : null;
+
+  // Per-source lot cap (lib/kotakOrderRules): only callers that name a source, on opening orders.
+  const capError = sourceLotCapError(qtyNum, body.source, String(tradingsymbol), contract?.lotSize ?? null);
+  if (capError) return NextResponse.json({ success: false, error: capError }, { status: 400 });
+
+  // Snap derivative prices to the contract's own tick so the exchange never rejects an otherwise-valid price (an MCX
+  // future ticks at 1.00). A cash-equity price (nse_cm, ticks down to 0.01) is the caller's own, already on the stock's
+  // tick, and is only rounded to paise.
+  const snap = (v: number) => snapToTick(v, contract?.tick);
   const tickPrice = !isLimitOrder ? '0'
-    : isDerivative ? (Math.round(Number(price) / 0.05) * 0.05).toFixed(2)
+    : isDerivative ? snap(Number(price))
     : (Math.round(Number(price) * 100) / 100).toFixed(2);
 
   const orderPayload = {
@@ -94,7 +106,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     dq: '0',
     mp: '0',
     pf: 'N',
-    tp: (isStopLimit || isStopMarket) ? (Math.round(triggerNum / 0.05) * 0.05).toFixed(2) : '0',  // trigger price
+    tp: (isStopLimit || isStopMarket) ? (isDerivative ? snap(triggerNum) : (Math.round(triggerNum / 0.05) * 0.05).toFixed(2)) : '0',  // trigger price
     os: 'NEOTRADEAPI',
   };
   console.log('[scalper/kotak/order] payload →', JSON.stringify(orderPayload));

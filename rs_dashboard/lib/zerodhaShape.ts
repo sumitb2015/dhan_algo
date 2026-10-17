@@ -11,6 +11,8 @@ export interface ScalperPosition {
   realizedProfit: number;
   unrealizedProfit: number;
   productType: string;
+  /** Kotak only: the contract's lot in the same units as the quantities (`lotSz`; 10 for a CRUDEOILM lot of 150 = 15 lots). */
+  lotSize?: number;
   carryForwardBuyQty?: number;
   carryForwardSellQty?: number;
   carryForwardBuyValue?: number;

@@ -91,11 +91,15 @@ exchange-set, not broker-set). (`c6ffb22`)
 whichever one you find first:**
 - The **Scalper terminals** (`AdvancedScalper.tsx`, `Scalper.tsx`) already have a live
   options-quotes WS bridge running for the on-screen expiry, so they join against that
-  in-memory feed plus `kotakSymbolMap` (from `/api/scalper/kotak/symbol-lookup`) for
-  legs on an off-screen expiry — see the `offExpiryKotakRequests` /
-  `kotakSymbolToStrikeByUnderlying` machinery in `AdvancedScalper.tsx` and the mirror
-  of it in `CrudeOilOptions.tsx`. Reach for this pattern when the page is already
-  driving a live chain/WS bridge for its own display.
+  in-memory feed. In `AdvancedScalper.tsx`, every other open Kotak leg (another
+  expiry, **another underlying**, or a future) goes to that same bridge via
+  `/api/options/live` `watchContracts` (`lib/kotakPositionContracts.ts`) and is priced
+  from `quotes.contracts[tradingSymbol]`; `kotakSymbolMap` is fetched for every
+  underlying an open leg is on. Don't send such legs through `watchExtra`: it carries
+  no underlying, so a CRUDEOILM leg would be asked of the NIFTY bridge as a NIFTY
+  option (`d8cfe354`). `CrudeOilOptions.tsx` still uses the older per-expiry
+  `watchExtra` mirror. Reach for this pattern when the page is already driving a live
+  chain/WS bridge for its own display.
 - A **read-only summary page with no chain on screen** (the dashboard's Consolidated
   Portfolio Balance Sheet, `app/api/dashboard/portfolio/route.ts`) has no running WS
   bridge to join against and no business starting one just to price a table. Use

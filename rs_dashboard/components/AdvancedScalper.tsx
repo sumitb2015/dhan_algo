@@ -1593,6 +1593,9 @@ export default function AdvancedScalper() {
             exchange,
             product: legProductType === 'MARGIN' ? 'NRML' : 'MIS',
             ...(mode === 'LIMIT' ? { price: limitPrice } : {}),
+            // Server-side twin of MAX_LOTS_PER_ORDER (kotak/order SOURCE_LOT_CAPS). Box and Add Lots orders only: a
+            // close, or a strike-roll reopen sized off what was just closed, must never be refused for its size.
+            ...(broker === 'kotak' ? { source: 'as' } : {}),
           }),
         });
       } else {
@@ -2205,6 +2208,14 @@ export default function AdvancedScalper() {
     if (next && next >= 'A' && next <= 'Z') return null;
     return lotSize;
   }, [underlying, lotSize]);
+
+  // Partial-close chips on ONE row: the row's own lot when the broker reports it (Kotak's lotSz, same units as the
+  // quantities), so a CRUDEOILM leg gets 25/50/75% while NIFTY is on screen. Close 50% All keeps lotSizeForRow, whose
+  // selected-underlying scope is deliberate.
+  const rowPartialLotSize = useCallback((row: Record<string, unknown>): number | null => {
+    const own = broker === 'kotak' ? Number(row.lotSize) : NaN;
+    return Number.isInteger(own) && own > 0 ? own : lotSizeForRow(row);
+  }, [broker, lotSizeForRow]);
 
   // Partial square-off from the positions table. No verifyFlat: manual closes
   // take the fast path (see closePosition's note), and the 800ms refresh shows
@@ -3645,7 +3656,9 @@ export default function AdvancedScalper() {
                       : 'bg-red-950/60 border-red-900/60 text-red-400 hover:bg-red-900/40 hover:border-red-700 hover:text-red-300',
                     FOCUS_RING,
                   )}
-                  title="Market-closes every open F&O leg and cancels pending F&O orders at the broker (equity untouched), AND force-stops every running strategy process.">
+                  title={broker === 'dhan'
+                    ? 'Market-closes every open F&O leg and cancels pending F&O orders at the broker (equity untouched), AND force-stops every running strategy process.'
+                    : `Market-closes every open ${BROKER_LABELS[broker]} F&O leg on every underlying, shorts first (cash equity untouched). Pending orders are NOT cancelled and running strategies are NOT stopped.`}>
                   {exitingAll ? <RefreshCw className="h-3 w-3 animate-spin" /> : <ShieldOff className="h-3 w-3" />}
                   {exitingAll ? 'Exiting…' : confirmExitAll ? 'Confirm EXIT ALL?' : 'EXIT ALL Positions'}
                 </button>
@@ -3999,7 +4012,7 @@ export default function AdvancedScalper() {
               onTrailToggle={handleTrailToggle}
               onClose={pos => closePosition(pos, 'Manual')}
               onAddLeg={openAddLotsModal}
-              lotSizeFor={lotSizeForRow}
+              lotSizeFor={rowPartialLotSize}
               onClosePartial={handleClosePartial}
               brackets={broker === 'dhan' ? bracketLevels : undefined}
               sort={tableSort}

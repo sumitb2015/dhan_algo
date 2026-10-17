@@ -30,6 +30,32 @@ async function optionRows(underlying: string): Promise<CachedOption[]> {
   return JSON.parse(fs.readFileSync(file, 'utf8')) as CachedOption[];
 }
 
+export interface KotakDerivative { lotSize: number; tick: number | null; segment: string; type: 'CE' | 'PE' | 'FUT' }
+
+const bySymbolCache = new Map<string, { mtimeMs: number; rows: Map<string, CachedOption> }>();
+
+/**
+ * A Kotak F&O contract by its trading symbol, from the on-disk instrument cache — or null when the cache for its
+ * underlying is absent or does not list it. NEVER refreshes the cache (a refresh is a Python spawn of up to 120 s), so
+ * it is safe on an order path; a caller that needs the contract to exist must treat null as "unknown" and decide.
+ */
+export function kotakDerivativeBySymbol(symbol: string, underlying: string): KotakDerivative | null {
+  const file = path.join(PROJECT_ROOT, 'debug', `kotak_${underlying.toLowerCase()}_instruments.json`);
+  let mtimeMs: number;
+  try { mtimeMs = fs.statSync(file).mtimeMs; } catch { return null; }
+  let entry = bySymbolCache.get(file);
+  if (!entry || entry.mtimeMs !== mtimeMs) {
+    try {
+      const rows = JSON.parse(fs.readFileSync(file, 'utf8')) as CachedOption[];
+      entry = { mtimeMs, rows: new Map(rows.map(r => [r.tradingsymbol, r])) };
+      bySymbolCache.set(file, entry);
+    } catch { return null; }
+  }
+  const hit = entry.rows.get(symbol);
+  if (!hit || !(hit.lot_size > 0)) return null;
+  return { lotSize: hit.lot_size, tick: hit.tick && hit.tick > 0 ? hit.tick : null, segment: hit.exchange_segment || 'nse_fo', type: hit.instrument_type };
+}
+
 /** The Kotak option for (underlying, expiry YYYY-MM-DD, strike, CE/PE), or null when Kotak does not list it. */
 export async function kotakOptionContract(
   underlying: string, expiry: string, strike: number, type: 'CE' | 'PE',
