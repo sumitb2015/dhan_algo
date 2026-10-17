@@ -262,3 +262,13 @@ test('kellyFraction returns the raw value, including a negative edge', () => {
   assert.strictEqual(kellyFraction(0.6, 0), null);
   assert.strictEqual(kellyFraction(1.4, 2), null);
 });
+
+test('parseTradingSymbol reads Kotak monthly SYMBOL+YY+MON+STRIKE instead of an expired DD-MON-YY contract', () => {
+  // Seen 2026-10-17 in the Advanced Scalper as expiry 2022-10-26 / strike 500 and 2024-03-27 / strike 000.
+  assert.deepStrictEqual(parseTradingSymbol('NIFTY26OCT22500PE'), {
+    underlying: 'NIFTY', strike: 22500, type: 'PE', expiry: null,
+  });
+  assert.deepStrictEqual(parseTradingSymbol('NIFTY27MAR24000PE'), {
+    underlying: 'NIFTY', strike: 24000, type: 'PE', expiry: null,
+  });
+});

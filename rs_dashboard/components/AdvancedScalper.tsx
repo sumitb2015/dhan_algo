@@ -626,10 +626,18 @@ export default function AdvancedScalper() {
     const nextByKey: Record<string, Record<string, unknown>> = {};
     const out: Record<string, unknown>[] = [];
     for (const pos of realizedFixedPositions) {
-      const computed = computeEnrichedRow(pos);
+      const enriched = computeEnrichedRow(pos);
+      // Kotak rows carry no expiry field, and its monthly trading symbol (NIFTY26OCT22500PE = Oct 2026, strike 22500)
+      // cannot be told apart from the DD-MON-YY compact form by parsing — it read as 2026-10-26 → "2022-10-26", strike
+      // 500. The instrument cache knows the real contract, so the Expiry column and Add Lots read it from there.
+      const kotakExpiry = broker === 'kotak' && !enriched.drvExpiryDate
+        ? kotakSymbolMap[String(pos.tradingSymbol ?? '')]?.expiry
+        : undefined;
+      const computed = kotakExpiry ? { ...enriched, drvExpiryDate: kotakExpiry } : enriched;
       const k = positionKey(pos);
       const prevRow = prevByKey[k];
       const reused = prevRow
+        && prevRow.drvExpiryDate === computed.drvExpiryDate
         && prevRow.lastTradedPrice === computed.lastTradedPrice
         && prevRow.unrealizedProfit === computed.unrealizedProfit
         && prevRow.realizedProfit === computed.realizedProfit
@@ -1528,6 +1536,13 @@ export default function AdvancedScalper() {
       return;
     }
 
+    // Kotak: the instrument cache's contract, never the symbol parse (see enrichedPositions on the monthly form).
+    const kotakInfo = broker === 'kotak' ? kotakSymbolMap[sym] : undefined;
+    if (kotakInfo) {
+      setAddLotsTarget({ pos, posExpiry: kotakInfo.expiry, strike: kotakInfo.strike, option: kotakInfo.side });
+      return;
+    }
+
     const posExpiry = resolveRowExpiry(pos, sym, broker);
     const parsed = parseTradingSymbol(sym);
     if (!posExpiry || !parsed) {
@@ -1535,7 +1550,7 @@ export default function AdvancedScalper() {
       return;
     }
     setAddLotsTarget({ pos, posExpiry, strike: parsed.strike, option: parsed.type });
-  }, [secIdToStrikeSide, positionJoinKey, broker, expiry, addToast]);
+  }, [secIdToStrikeSide, positionJoinKey, broker, expiry, addToast, kotakSymbolMap]);
 
   // ─── placeOrder ───────────────────────────────────────────────────
 

@@ -17,14 +17,6 @@ function num(row: Record<string, any>, ...keys: string[]): number {
   return total;
 }
 
-function first(row: Record<string, any>, ...keys: string[]): number {
-  for (const key of keys) {
-    const v = Number(row[key]);
-    if (Number.isFinite(v) && v !== 0) return v;
-  }
-  return 0;
-}
-
 export function shapeKotakPosition(p: Record<string, any>): ScalperPosition {
   // No net-qty field exists — sum the four legs. Carry-forward first so an
   // overnight position that traded again today still nets correctly.
@@ -42,11 +34,15 @@ export function shapeKotakPosition(p: Record<string, any>): ScalperPosition {
   const buyAvg = buyQty ? buyAmt / buyQty : 0;
   const sellAvg = sellQty ? sellAmt / sellQty : 0;
 
-  // Kotak's positions payload carries NO last-traded price at all. `stkPrc` is
-  // the option's STRIKE — reading it as an LTP marks a 4.40 option at 24300 and
-  // reports lakhs of phantom P&L, which the target/SL guards would then act on.
-  // 0 means "unknown": the UI joins live quotes onto the row by trading symbol.
-  const lastPrice = first(p, 'ltp', 'lastPrice');
+  // Never take a price from Kotak's positions payload. `stkPrc` is the option's
+  // STRIKE — reading it as an LTP marks a 4.40 option at 24300 and reports lakhs
+  // of phantom P&L, which the target/SL guards would then act on. And the `ltp`
+  // that portfolio/v2/positions added (kotakneoapi 3.0.9) is not live: on
+  // 2026-10-17 it equalled each leg's entry average, or 0 — the SDK itself
+  // leaves it unused as unreliable. Trusting it made every consumer skip the
+  // Dhan quote join (prices are Dhan-only). 0 means "unknown": the UI joins live
+  // Dhan quotes onto the row by trading symbol.
+  const lastPrice = 0;
 
   // Realized is the matched (round-tripped) quantity only; the open quantity's
   // mark-to-market is unrealized. Deriving realized as total-minus-unrealized

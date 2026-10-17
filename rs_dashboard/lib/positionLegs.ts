@@ -153,11 +153,23 @@ export function parseTradingSymbol(symbol: string): ParsedSymbol | null {
   if (compact) {
     const mm = MONTHS[compact[3]];
     if (!mm) return null;
+    const expiry = `20${compact[4]}-${mm}-${compact[2]}`;
+    // Kotak's MONTHLY form is SYMBOL + YY + MON + STRIKE (NIFTY26OCT22500PE = Oct 2026, strike 22500), which this
+    // pattern also matches — as 26-OCT-22, strike 500. Whichever reading puts the year nearer the current one wins
+    // (ties keep DD-MON-YY): CRUDEOILM17AUG264150CE stays 2026 rather than 2017. The monthly form has month
+    // precision only, so its day is left null like the Dhan form above.
+    const thisYear = new Date().getFullYear();
+    const ddMonYyGap = Math.abs(2000 + Number(compact[4]) - thisYear);
+    const yyMonGap = Math.abs(2000 + Number(compact[2]) - thisYear);
+    if (yyMonGap < ddMonYyGap) {
+      const monthly = /^([A-Z]+?)(\d{2})([A-Z]{3})(\d+)(CE|PE)$/.exec(s);
+      if (monthly) return { underlying: monthly[1], strike: parseFloat(monthly[4]), type: monthly[5] as OptType, expiry: null };
+    }
     return {
       underlying: compact[1],
       strike: parseFloat(compact[5]),
       type: compact[6] as OptType,
-      expiry: `20${compact[4]}-${mm}-${compact[2]}`,
+      expiry,
     };
   }
 

@@ -165,3 +165,18 @@ test('kotakPendingSellQty counts the unfilled part of open sells on that symbol 
   assert.strictEqual(kotakPendingSellQty(rows, 'RELIANCE-EQ', 'CNC'), 6 + 5);
   assert.strictEqual(kotakPendingSellQty(rows, 'RELIANCE-EQ', 'INTRADAY'), 3);
 });
+
+test('shapeKotakPosition ignores the ltp portfolio/v2/positions sends (it echoed the entry average on 2026-10-17)', () => {
+  // A short CRUDEOILM put as v2 returned it: `ltp` equal to the sell average. Trusting it skipped the Dhan quote join
+  // and showed LTP = average with zero P&L, so the price must stay unknown (0) for the join to fill.
+  const pos = shapeKotakPosition({
+    trdSym: 'CRUDEOILM17NOV268800PE', tok: '123', exSeg: 'mcx_fo', prod: 'NRML',
+    cfBuyQty: '0', cfSellQty: '0', flBuyQty: '0', flSellQty: '140',
+    cfBuyAmt: '0.00', cfSellAmt: '0.00', buyAmt: '0.00', sellAmt: '40145.00',
+    stkPrc: '8800.00', ltp: '286.75',
+  });
+  assert.strictEqual(pos.netQty, -140);
+  assert.strictEqual(pos.sellAvg, 286.75);
+  assert.strictEqual(pos.lastTradedPrice, 0);
+  assert.strictEqual(pos.unrealizedProfit, 0);
+});
