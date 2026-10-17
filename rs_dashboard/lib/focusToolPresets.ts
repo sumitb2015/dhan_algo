@@ -13,7 +13,7 @@ import { FOCUS_UNDERLYINGS, type FocusUnderlying } from './focusToolUnderlyings.
 /** Per-row state that belongs to one row's life, never to its configuration. */
 export const ROW_RUNTIME_KEYS = [
   'id', 'underlying', 'expiry', 'status', 'mode', 'fill', 'createdAt', 'updatedAt', 'rev',
-  'overallReSlCount', 'overallReTgtCount', 'overallReMode', 'entryMomState', 'ladder',
+  'overallReSlCount', 'overallReTgtCount', 'overallReMode', 'entryMomState', 'ladder', 'orderUnknown',
 ] as const satisfies readonly (keyof FocusRow)[];
 
 /** Index levels (row spot exits and the per-leg entry / exit levels) are prices for one day — a preset applied next

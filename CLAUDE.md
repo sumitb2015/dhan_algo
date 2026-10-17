@@ -92,8 +92,13 @@ Each test module exposes a `run(helper)` function. The orchestrator in `tests/ru
 
 ```powershell
 cd rs_dashboard
-npm run test:e2e        # starts `next dev` on :3100 (E2E_PORT), reuses one that is already running
+npm run test:e2e        # starts `next dev` on :3100 (E2E_PORT), reuses one already running on THAT port
 ```
+
+**Never let it start a second `next dev` while the dashboard runs on :3000.** Both share `rs_dashboard/.next/dev`: the
+new server rebuilds it, the :3000 one sees it deleted, restarts, loses the dev lock and exits — and its shutdown
+handler kills the bridges it tracks in `debug/*.json` (this stopped the dashboard twice on 2026-10-17). With :3000 up,
+run against it instead: `$env:E2E_PORT=3000; npm run test:e2e` (the mocks live in the browser, so it is just as safe).
 
 `rs_dashboard/e2e/` drives the real UI in Chromium with every broker-backed `/api/*` call mocked in the browser
 (`e2e/support.ts`), so it needs no Dhan session and **cannot place orders**: any non-GET request the mock does not

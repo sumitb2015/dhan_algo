@@ -68,6 +68,7 @@ import { normalizeTradeRow, matchOutsideTrades, type NormalizedTrade } from '@/l
 import { stampItems, noteItems, adoptItems, canon, type RevBook } from '@/lib/revMerge';
 import { useTabLeader } from '@/hooks/useTabLeader';
 import { brokerSelectorLocked, heldBrokers, nextFillBroker, rowBrokerMismatch } from '@/lib/focusToolBroker';
+import { classifyOrderReply, openHoldReason } from '@/lib/focusToolOrderOutcome';
 import { FOCUS_UNDERLYINGS, FEED_BRIDGE_UNDERLYINGS, isTradingDayFor, FEED_SESSION_START_HM, FEED_SESSION_END_HM, UNDERLYING_META, isMcxUnderlying, brokerOrderQuantity, brokerToInternalQuantity } from '@/lib/focusToolUnderlyings';
 import type { FocusConfigWrite } from '@/lib/focusToolRowsMerge';
 import {
@@ -594,10 +595,15 @@ interface UnconfirmedOrder {
   ts: number;
   lastCheck: number;
   lastToast: number;
+  /** How long this record waits for the book before it is treated as dead. Default UNCONFIRMED_ORDER_HOLD_MS. */
+  holdMs?: number;
 }
 
 /** How long a close with no broker verdict blocks a resend (book-based brokers). */
 const UNCONFIRMED_ORDER_HOLD_MS = 15_000;
+/** An order with an UNKNOWN outcome (no order id at all) watches the book longer before its hold lapses. Its row's
+ *  opens stay paused after that, until the user clears it (FocusRow.orderUnknown). */
+const UNKNOWN_ORDER_HOLD_MS = 60_000;
 /** Live WS quotes older than this (market hours) are treated as a stalled feed. */
 const WS_STALE_MS = 8_000;
 
@@ -4984,6 +4990,13 @@ function FocusTool() {
   const unconfirmedOrderRef = useRef<Map<string, UnconfirmedOrder>>(new Map());
   // Last "position is on another broker" toast per row (refuseForeignBroker), so a stop re-firing every tick can't spam.
   const foreignBrokerToastRef = useRef<Map<string, number>>(new Map());
+  // Rows held by an UNKNOWN order outcome, synchronously: the persisted FocusRow.orderUnknown lands in the scheduler's
+  // view only after a render, and the NEXT leg of the same entry runs before that. Cleared with the field.
+  const unknownHoldRef = useRef<Set<string>>(new Set());
+  function clearUnknownHold(rowId: string) {
+    unknownHoldRef.current.delete(rowId);
+    updateRow(rowId, { orderUnknown: undefined });
+  }
 
   // The broker selector is one setting shared by every dashboard page, so this page can load on a broker another page
   // picked while a REAL row here holds a position on a different account. Follow the account the open rows are on
@@ -6090,12 +6103,15 @@ function FocusTool() {
     }
     autoEnteringRef.current.delete(id);
     rowExitWantedRef.current.delete(id);
+    unknownHoldRef.current.delete(id);   // re-arming is the user's "I have checked" (orderUnknown cleared below)
     // Drop any stale fill pin — arming means this row resolves its strikes
     // fresh at the next entry, so a pin from the previous cycle would make it
     // look its new position up at last time's strikes.
     const cur = config.rows.find(r => r.id === id);
     updateRow(id, {
       status: 'armed', fill: undefined, overallReSlCount: 0, overallReTgtCount: 0, overallReMode: undefined,
+      // Arming by hand is the user's "I have checked": an unknown-order hold is cleared with it.
+      orderUnknown: undefined,
       // Arming by hand re-enables each leg's once-per-day index entry level.
       ...(cur?.ceEntryLevel?.firedOn ? { ceEntryLevel: { ...cur.ceEntryLevel, firedOn: undefined } } : {}),
       ...(cur?.peEntryLevel?.firedOn ? { peEntryLevel: { ...cur.peEntryLevel, firedOn: undefined } } : {}),
@@ -6530,7 +6546,9 @@ function FocusTool() {
     // Row gone, re-armed or retired (ledger dropped): nothing left to credit
     // into — crediting would recreate a ledger on a finished row.
     const rowNow = schedulerRef.current.config.rows.find(r => r.id === rec.rowId);
-    if (!rowNow?.fill) {
+    // An OPEN is kept while its row exists, ledger or not: an unknown first entry has no ledger yet, and a late fill
+    // of it must still be credited — dropping it left a live short nothing watched.
+    if (!rowNow || (!rowNow.fill && rec.kind === 'close')) {
       unconfirmedOrderRef.current.delete(key);
       return { state: 'resolved', credited: 0 };
     }
@@ -6575,7 +6593,7 @@ function FocusTool() {
         const observed = rec.side === 'BUY' ? netNow - rec.netBefore : rec.netBefore - netNow;
         filledNow = Math.min(rec.requested, Math.max(rec.filled, observed));
       }
-      if (now - rec.ts >= UNCONFIRMED_ORDER_HOLD_MS && (filledNow ?? rec.filled) < rec.requested) dead = true;
+      if (now - rec.ts >= (rec.holdMs ?? UNCONFIRMED_ORDER_HOLD_MS) && (filledNow ?? rec.filled) < rec.requested) dead = true;
     }
     const late = filledNow != null ? Math.max(0, Math.min(remaining, filledNow - rec.filled)) : 0;
     if (late > 0) {
@@ -6655,7 +6673,24 @@ function FocusTool() {
     // The row's open position is on another broker account: this page's book would read it flat (and a close would
     // then drop it from the ledger as "closed outside the tool"), an open would land on the wrong account. Refused —
     // opens and closes alike — until the page is on the row's broker. Checked on the LATEST row, not the caller's copy.
-    if (refuseForeignBroker(schedulerRef.current.config.rows.find(r => r.id === row.id) ?? row, what)) return false;
+    const latestRow = schedulerRef.current.config.rows.find(r => r.id === row.id) ?? row;
+    if (refuseForeignBroker(latestRow, what)) return false;
+    if (!opts.reduce) {
+      // An earlier order on this row came back UNKNOWN: open nothing until the user has looked. Exits still go.
+      const hold = openHoldReason(latestRow)
+        ?? (unknownHoldRef.current.has(row.id) ? 'An order on this row came back with an UNKNOWN status — check the broker, then press "Checked" on the banner' : null);
+      // An earlier order on THIS leg is still unconfirmed (partial, or unknown): a second open could double it.
+      const pending = unconfirmedOrderRef.current.has(`${row.id}:${leg}`)
+        ? `The previous order on ${leg} is not confirmed yet — not sending another until the broker settles it` : null;
+      if (hold || pending) {
+        const k = `${row.id}:hold`;
+        if (Date.now() - (foreignBrokerToastRef.current.get(k) ?? 0) > 10_000) {
+          foreignBrokerToastRef.current.set(k, Date.now());
+          addToast('error', `${what} order not sent`, (hold ?? pending)!);
+        }
+        return false;
+      }
+    }
 
     // Only an order that opens or adds is held back by the daily arm; a reducing order is always allowed.
     if (!liveRealMoney && !opts.reduce) {
@@ -6843,12 +6878,69 @@ function FocusTool() {
       ? { securityId, quantity: sentQty, side, orderType: 'MARKET', exchangeSegment: exchange, ...product.fields, source: FTS_ORDER_SOURCE }
       : { tradingsymbol: symbol, quantity: sentQty, side, orderType: 'MARKET', exchange, ...product.fields };
 
+    // Computed before the send: an UNKNOWN outcome needs them for its hold record as much as a fill does.
+    // Snapshot entry + LTP now so a reduce can bank the closed slice's
+    // MTM into fill.bookedPnl (the pin moves off this strike on a roll).
+    // The entry is this row's OWN (legOwnEntry: its stamp, the broker
+    // average only for a legacy row with none) — the broker's buyAvg /
+    // sellAvg is pooled across every row and trade on the contract
+    // (2026-10-01 audit). Both slots carry it; mtmForQty picks by netQty.
+    // P&L basis: the leg's ACTUAL average fill (legFillEntry), not the stop reference — a close books what the
+    // broker really filled on both sides (the exit side is rebased on the traded price below).
+    const ownEntry = live ? legFillEntry(row, leg, live)
+      : (Number(leg === 'CE' ? (row.fill?.ceFillEntry ?? row.fill?.ceEntry) : (row.fill?.peFillEntry ?? row.fill?.peEntry)) || 0);
+    const bookedSnap = opts.reduce ? {
+      netQty,
+      buyAvg: ownEntry,
+      sellAvg: ownEntry,
+      ltp: Number(leg === 'CE' ? live?.ltpCe : live?.ltpPe) || 0,
+    } : null;
+    // Opening: the LTP right before this order went out is this fill's
+    // own entry-price estimate — stamped into fill.ceEntry/peEntry so a
+    // shared-strike row's SL × entry side has a cost basis scoped to
+    // only what THIS row itself opened (see FocusRowFill.ceEntry).
+    // A strikeOverride open (shift / SL roll) targets a different strike
+    // than rowLive's LTP describes, so quote the strike actually sold.
+    const openEntryPx = opts.reduce ? 0
+      : opts.strikeOverride != null
+        ? simQuote(u, expiry, Number(strike), leg)
+        : Number(leg === 'CE' ? live?.ltpCe : live?.ltpPe) || 0;
+
+    let replyStatus: number | null = null;
+    let reply: unknown;
     try {
       const res = await fetch(url, {
         method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
       });
-      const j = await res.json() as { success?: boolean; order_id?: string; error?: string };
-      if (j.success) {
+      replyStatus = res.status;
+      reply = await res.json().catch(() => undefined);
+    } catch { /* no reply at all: classified unknown below */ }
+    const outcome = classifyOrderReply(replyStatus, reply);
+    if (outcome.kind === 'unknown') {
+      // It may be live. Never report it as rejected: the callers would retry it (a doubled short) or, for an
+      // auto-entry, clear the latch and re-sell every tick. Hold it like an unconfirmed order, so a late fill is
+      // credited to this row, and (for an open) pause every further open on the row until the user has checked.
+      holdUnknownOrder(row, leg, {
+        kind: opts.reduce ? 'close' : 'open',
+        strike: Number(strike), entryPx: openEntryPx,
+        rebaseStop: !opts.reduce && (row.refPrice === 'traded' || opts.strikeOverride != null),
+        orb: opts.reduce ? null : (opts.orb ?? null),
+        orderId: null,
+        securityId: securityId ? String(securityId) : null,
+        symbol: symbol ? String(symbol) : null,
+        product: rawProduct, netBefore: netQty, requested: quantity, side,
+        snap: bookedSnap ?? { netQty, buyAvg: 0, sellAvg: 0, ltp: 0 },
+      }, outcome.error);
+      return false;
+    }
+    if (outcome.kind === 'rejected') {
+      addToast('error', `${what} order rejected`, outcome.error);
+      return false;
+    }
+    const j = { success: true as const, order_id: outcome.orderId ?? undefined };
+
+    try {
+      {
         noteOwnOrder(j.order_id);
         addToast('success', `${side} ${quantity} ${strike} ${leg}`, j.order_id ? `Order ${j.order_id}` : undefined);
         // Confirm the actual fill in the background rather than blocking on
@@ -6861,32 +6953,6 @@ function FocusTool() {
         // min(ownQty, brokerQty) clamp already protects against over-closing
         // in the meantime, since it never trusts the ledger past what the
         // broker book actually shows.
-        // Snapshot entry + LTP now so a reduce can bank the closed slice's
-        // MTM into fill.bookedPnl (the pin moves off this strike on a roll).
-        // The entry is this row's OWN (legOwnEntry: its stamp, the broker
-        // average only for a legacy row with none) — the broker's buyAvg /
-        // sellAvg is pooled across every row and trade on the contract
-        // (2026-10-01 audit). Both slots carry it; mtmForQty picks by netQty.
-        // P&L basis: the leg's ACTUAL average fill (legFillEntry), not the stop reference — a close books what the
-        // broker really filled on both sides (the exit side is rebased on the traded price below).
-        const ownEntry = live ? legFillEntry(row, leg, live)
-          : (Number(leg === 'CE' ? (row.fill?.ceFillEntry ?? row.fill?.ceEntry) : (row.fill?.peFillEntry ?? row.fill?.peEntry)) || 0);
-        const bookedSnap = opts.reduce ? {
-          netQty,
-          buyAvg: ownEntry,
-          sellAvg: ownEntry,
-          ltp: Number(leg === 'CE' ? live?.ltpCe : live?.ltpPe) || 0,
-        } : null;
-        // Opening: the LTP right before this order went out is this fill's
-        // own entry-price estimate — stamped into fill.ceEntry/peEntry so a
-        // shared-strike row's SL × entry side has a cost basis scoped to
-        // only what THIS row itself opened (see FocusRowFill.ceEntry).
-        // A strikeOverride open (shift / SL roll) targets a different strike
-        // than rowLive's LTP describes, so quote the strike actually sold.
-        const openEntryPx = opts.reduce ? 0
-          : opts.strikeOverride != null
-            ? simQuote(u, expiry, Number(strike), leg)
-            : Number(leg === 'CE' ? live?.ltpCe : live?.ltpPe) || 0;
         const applyFill = (filled: number) => {
           // The leg as it stood before this fill — what a traded-price correction of an open is measured against.
           const before = schedulerRef.current.config.rows.find(r => r.id === row.id)?.fill;
@@ -6974,10 +7040,9 @@ function FocusTool() {
         pollPositions();
         return true;
       }
-      addToast('error', `${what} order rejected`, j.error ?? 'Unknown broker error');
-      return false;
     } catch (e) {
-      addToast('error', `${what} order failed`, String(e));
+      // The broker ACCEPTED this order; only recording it here failed.
+      addToast('error', `${what} order placed, but not recorded`, `${String(e)} — check this leg in the broker's positions`);
       return false;
     }
   }
@@ -7001,6 +7066,32 @@ function FocusTool() {
         `This row's position is on ${BROKER_LABELS[owner]}, the page is on ${BROKER_LABELS[broker]}. Switch the broker to ${BROKER_LABELS[owner]} to manage it.`);
     }
     return true;
+  }
+
+  /**
+   * An order came back with an UNKNOWN outcome (lib/focusToolOrderOutcome.ts). Held like an unconfirmed order with
+   * nothing filled yet, so the sweep credits a late fill from the position book (no order id to read). An open also
+   * pauses the row's opens (FocusRow.orderUnknown) until the user clears it; a close only holds further closes on
+   * this leg while the book settles. Nothing is resent automatically.
+   */
+  function holdUnknownOrder(
+    row: FocusRow, leg: 'CE' | 'PE',
+    rec: Omit<UnconfirmedOrder, 'rowId' | 'leg' | 'filled' | 'ts' | 'lastCheck' | 'lastToast' | 'holdMs'>,
+    error: string,
+  ) {
+    const now = Date.now();
+    unconfirmedOrderRef.current.set(`${row.id}:${leg}`, {
+      ...rec, rowId: row.id, leg, filled: 0, holdMs: UNKNOWN_ORDER_HOLD_MS, ts: now, lastCheck: now, lastToast: now,
+    });
+    if (rec.kind === 'open') {
+      unknownHoldRef.current.add(row.id);
+      updateRow(row.id, { orderUnknown: { at: new Date().toISOString(), leg, kind: 'open', detail: error } });
+    }
+    logEvent('order_unknown', row, error, { leg, orderKind: rec.kind, side: rec.side, qty: rec.requested, strike: rec.strike, broker });
+    addToast('error', `${row.underlying} ${leg} ${rec.strike}: order status UNKNOWN`,
+      rec.kind === 'open'
+        ? `${error} This row now opens nothing until you check ${BROKER_LABELS[broker]}'s positions and press "Checked" on the banner. A fill that shows up is tracked automatically; exits keep running.`
+        : `${error} The close may have gone through. Further closes on this leg wait up to 60 s for the position book — check ${BROKER_LABELS[broker]}.`);
   }
 
   /** Remembers an order this tool placed on a broker that cannot tag orders (Kotak). */
@@ -7598,7 +7689,10 @@ function FocusTool() {
   async function placeLadderOrder(row: FocusRow, leg: 'CE' | 'PE', pct: number, lots: number): Promise<void> {
     const what = `${row.underlying} ${leg}`;
     if (isSimRow(row)) { addToast('error', 'Limit ladder not available', 'SIM rows have no broker orders — it is for REAL rows'); return; }
-    if (refuseForeignBroker(schedulerRef.current.config.rows.find(r => r.id === row.id) ?? row, what)) return;
+    const ladderRow = schedulerRef.current.config.rows.find(r => r.id === row.id) ?? row;
+    if (refuseForeignBroker(ladderRow, what)) return;
+    const hold = openHoldReason(ladderRow) ?? (unknownHoldRef.current.has(row.id) ? 'An order on this row came back with an UNKNOWN status' : null);
+    if (hold) { addToast('error', `${what} limit not sent`, hold); return; }
     if (!tracksOrderStatus(broker)) { addToast('error', 'Limit ladder not available', 'Dhan and Kotak only'); return; }
     if (!liveRealMoney) { addToast('error', 'Dry run', 'Enable LIVE · REAL MONEY to place orders'); return; }
     if (!hasAuthenticatedBroker) { addToast('error', 'No broker logged in', 'Log in to your broker before placing orders'); return; }
@@ -7624,6 +7718,8 @@ function FocusTool() {
     const quantity = Math.max(1, Math.round(lots)) * lotSize;
     const sentLadderQty = brokerOrderQuantity(broker, row.underlying, quantity);
     if (!(sentLadderQty > 0)) { addToast('error', `${what} order not sent`, 'Quantity is under one lot'); return; }
+    let replyStatus: number | null = null;
+    let reply: unknown;
     try {
       const res = await fetch(broker === 'dhan' ? '/api/scalper/fast-order' : scalperRoute(broker, 'order'), {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -7631,8 +7727,28 @@ function FocusTool() {
           ? { securityId, quantity: sentLadderQty, side: 'SELL', orderType: 'LIMIT', price, exchangeSegment: orderExchange(broker, row.underlying), ...product.fields, source: FTS_ORDER_SOURCE }
           : { tradingsymbol: symbol, quantity: sentLadderQty, side: 'SELL', orderType: 'LIMIT', price, exchange: orderExchange(broker, row.underlying), ...product.fields }),
       });
-      const j = await res.json() as { success?: boolean; order_id?: string; error?: string };
-      if (!j.success || !j.order_id) { addToast('error', `${what} limit rejected`, j.error ?? 'Unknown broker error'); return; }
+      replyStatus = res.status;
+      reply = await res.json().catch(() => undefined);
+    } catch { /* no reply: classified unknown below */ }
+    const outcome = classifyOrderReply(replyStatus, reply);
+    // A booked order with no id is as untrackable as an unknown one: the ladder could neither credit nor cancel it.
+    if (outcome.kind === 'unknown' || (outcome.kind === 'placed' && !outcome.orderId)) {
+      // A SELL LIMIT may now be resting at the broker with no order id to watch or cancel: pause the row's opens and
+      // say exactly what to look for.
+      const why = outcome.kind === 'unknown' ? outcome.error : 'The broker booked it but returned no order id.';
+      unknownHoldRef.current.add(row.id);
+      updateRow(row.id, { orderUnknown: { at: new Date().toISOString(), leg, kind: 'ladder', detail: why } });
+      logEvent('order_unknown', row, why, { leg, orderKind: 'ladder', qty: quantity, price, strike, broker });
+      addToast('error', `${what} +${pct}% limit: status UNKNOWN`,
+        `${why} A SELL LIMIT ${quantity} ${strike} ${leg} @ ${price.toFixed(2)} may be resting — find it in ${BROKER_LABELS[broker]}'s order book and cancel it if so. This tool cannot track or cancel it.`);
+      return;
+    }
+    if (outcome.kind === 'rejected') {
+      addToast('error', `${what} limit rejected`, outcome.error);
+      return;
+    }
+    const j = { order_id: outcome.orderId };
+    try {
       noteOwnOrder(j.order_id);
       patchLadder(row.id, cur => [...cur, { orderId: String(j.order_id), leg, strike, pct, price, qty: quantity, credited: 0, placedAt: Date.now() }]);
       addToast('success', `SELL LIMIT ${quantity} ${strike} ${leg} @ ${price.toFixed(2)}`, `+${pct}% over ${ltp.toFixed(2)} · order ${j.order_id}`);
@@ -8362,6 +8478,8 @@ function FocusTool() {
       if (!hasPendingReentry(row)) continue;
       // Its other leg is open on another broker account: a re-entry here would open on the wrong one. It waits.
       if (rowBrokerMismatch(row, broker)) continue;
+      // An order of this row came back UNKNOWN: the re-entry waits until the user clears it.
+      if (row.orderUnknown) continue;
       // At most ONE firing per row per tick: runRowAction's busy check reads
       // this render's state, so a second leg firing in the same pass would
       // run as a second concurrent action on the row. The other leg (still
@@ -8941,7 +9059,9 @@ function FocusTool() {
       // and if it still will not go, say so loudly rather than marking the row
       // entered and moving on, which is how a naked leg used to go unnoticed.
       const missing = wanted.filter(l => !filled[l]);
-      if (missing.length && missing.length < wanted.length) {
+      // A leg whose order came back UNKNOWN may be live: never retried (placeLeg refuses opens on a held row anyway).
+      const held = () => unknownHoldRef.current.has(row.id) || !!schedulerRef.current.config.rows.find(r => r.id === row.id)?.orderUnknown;
+      if (missing.length && missing.length < wanted.length && !held()) {
         for (const leg of missing) {
           if (await placeLeg(row, leg, { reduce: false, lots: multipliedLots(row, legLots(row, leg)), ...at(leg) })) filled[leg] = true;
         }
@@ -8949,6 +9069,13 @@ function FocusTool() {
 
       const opened = wanted.filter(l => filled[l]);
       if (!opened.length) {
+        if (held()) {
+          // Not a failure: an order's outcome is unknown. The latch stays set (no retry on later ticks); the row's
+          // orderUnknown hold is what the user clears.
+          addToast('error', 'Auto-entry paused', `${row.underlying}: an order's status is unknown — no further entry until you check the broker and press "Checked"`);
+          await fetchPositionsNow();
+          return;
+        }
         addToast('error', 'Auto-entry failed', `${row.underlying}: no leg was accepted — row left armed`);
         autoEnteringRef.current.delete(row.id);   // let it retry on a later tick
         await fetchPositionsNow();
@@ -8959,8 +9086,10 @@ function FocusTool() {
 
       const stillMissing = wanted.filter(l => !filled[l]);
       if (stillMissing.length) {
-        addToast('error', `${row.underlying}: NAKED ${stillMissing.join('+')} leg`,
-          `${opened.join('+')} opened but ${stillMissing.join('+')} was rejected twice — this row is one-sided. Close it or place the missing leg manually.`);
+        addToast('error', `${row.underlying}: ${held() ? 'POSSIBLY ' : ''}NAKED ${stillMissing.join('+')} leg`,
+          held()
+            ? `${opened.join('+')} opened; the ${stillMissing.join('+')} order's status is unknown — it may or may not be live. Check the broker's positions before doing anything else.`
+            : `${opened.join('+')} opened but ${stillMissing.join('+')} was rejected twice — this row is one-sided. Close it or place the missing leg manually.`);
       }
       await fetchPositionsNow();
     })().catch(() => autoEnteringRef.current.delete(row.id));
@@ -9351,6 +9480,8 @@ function FocusTool() {
         if (!rowMayTrade(row, liveArmed)) continue;
         // A leg entry (lazy / per-leg gate) on a row already open on another broker account would land on the wrong one.
         if (rowBrokerMismatch(row, brokerNowRef.current)) continue;
+        // An order of this row came back UNKNOWN: no automatic entry until the user clears it.
+        if (row.orderUnknown) continue;
         const l = live[row.id] ?? EMPTY_ROW_LIVE;
         const group = cfg.groups.find(g => g.underlying === row.underlying);
         // Stop Monitoring After: no new entry either. Waiting leg gates drop
@@ -9654,6 +9785,31 @@ function FocusTool() {
             Focus Tool is open in another tab, and that tab runs the automatic rules (entries, exits, stops, re-entries).
             This tab won&apos;t fire them; manual buttons still work. Close the other tab to make this one take over.
           </p>
+        </div>
+      )}
+
+      {/* Rows paused by an order with an UNKNOWN outcome (FocusRow.orderUnknown): they open nothing until cleared here
+          or re-armed. Shown in every view, since the hold is row-level, not a per-view control. */}
+      {config.rows.some(r => r.orderUnknown) && (
+        <div role="alert" className="z-20 bg-rose-950/95 border-b border-rose-500/40 px-4 py-2 space-y-1.5">
+          {config.rows.filter(r => r.orderUnknown).map(r => (
+            <div key={r.id} className="flex flex-wrap items-center justify-center gap-x-3 gap-y-1 text-xs">
+              <span className="font-bold text-rose-200">
+                {r.underlying} {r.id.slice(-4)} · {r.orderUnknown!.leg} {r.orderUnknown!.kind === 'ladder' ? 'limit-ladder order' : 'order'} status UNKNOWN
+              </span>
+              <span className="text-zinc-300">
+                {openHoldReason(r)}. Since {new Date(r.orderUnknown!.at).toLocaleTimeString('en-IN', { timeZone: 'Asia/Kolkata', hour12: false })} IST · {r.orderUnknown!.detail}
+              </span>
+              <button
+                onClick={() => clearUnknownHold(r.id)}
+                aria-label={`Clear the unknown-order hold on ${r.underlying} row ${r.id.slice(-4)}`}
+                title="Only after checking the broker's positions and order book. The row's automatic entries and re-entries resume."
+                className={cn('px-2 py-0.5 rounded border border-rose-400/50 text-rose-100 font-semibold hover:bg-rose-500/20 cursor-pointer', FOCUS_RING)}
+              >
+                Checked — resume
+              </button>
+            </div>
+          ))}
         </div>
       )}
 

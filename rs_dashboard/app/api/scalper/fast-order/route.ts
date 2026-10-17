@@ -254,7 +254,8 @@ async function placeOrderOnce(body: {
     }
 
     return NextResponse.json(
-      { success: false, error: 'Order status unknown — Dhan did not confirm in time. Check Positions/Orders before retrying.' },
+      // `unknown: true` says the same as the 504, explicitly (the Kotak route sends both): callers must not retry it.
+      { success: false, unknown: true, error: 'Order status unknown — Dhan did not confirm in time. Check Positions/Orders before retrying.' },
       { status: 504 },
     );
   }

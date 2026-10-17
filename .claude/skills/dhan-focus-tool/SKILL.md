@@ -46,6 +46,24 @@ opened before the field). Pure rules in `lib/focusToolBroker.ts` (+ test), brows
   `placeLeg` re-reads it). Either read as flat made the next exit drop a live leg as "closed outside the tool".
 - New order path or new rule loop → add the mismatch check; new fill writer → go through `adjustFillQty`.
 
+## An order with an UNKNOWN outcome (2026-10-17)
+`classifyOrderReply` (`lib/focusToolOrderOutcome.ts` + test) sorts every order reply into placed / rejected / unknown.
+Unknown = no reply, a 504 (Dhan: not found by correlationId; Kotak: not in the order book within ~5 s; both routes now
+send `unknown: true`), or a non-JSON 5xx. It may be LIVE. Never report it as "rejected": the entry retried the leg (a
+doubled short) and an all-unknown entry cleared its latch and re-sold every tick.
+- `holdUnknownOrder`: an unconfirmed-order record with `orderId: null`, `holdMs` 60 s (the sweep credits a late fill
+  from the position book). Open records are kept while the row exists even with no ledger (a first entry has none).
+- An unknown OPEN (or ladder order) also sets `FocusRow.orderUnknown` (persisted, `ROW_RUNTIME_KEYS`) plus the
+  synchronous `unknownHoldRef` (the next leg of the same entry runs before a render). While set, `placeLeg` and the
+  ladder refuse every open, the scheduler and pending re-entries skip the row, and `autoEnterRow` neither retries the
+  missing leg nor clears its latch. Exits still run. A red banner lists held rows; only its "Checked — resume" button
+  (`clearUnknownHold`) or `armRow` (Arm / Enter now) clears it.
+- An unknown CLOSE only holds further closes on that leg (no row pause).
+- `placeLeg` also refuses an open while an earlier order on the same leg is unconfirmed.
+- Proof: `e2e/focus-tool-unknown-order.spec.ts` (shared mock `e2e/focusToolMock.ts`; "Enter now" is Pro-view only, so
+  those tests open with `view: 'pro'`). Event kind `order_unknown` carries `orderKind` — an `extra.kind` would overwrite
+  the event's own kind in `logEvent`.
+
 ## Where live prices come from (the lag bug, 2026-10-09)
 | Underlying | Option LTP / P&L source |
 |---|---|

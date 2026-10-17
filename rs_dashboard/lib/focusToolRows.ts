@@ -679,6 +679,14 @@ export interface FocusRow {
    */
   /** Resting limit-ladder orders on this row's legs (REAL, Dhan). */
   ladder?: FocusLadderOrder[];
+  /**
+   * An order from this row came back with an UNKNOWN outcome (timeout / unreadable reply, not in the order book): it
+   * may be live at the broker. While set, the row opens nothing - no auto-entry, no retry of the missing leg, no
+   * re-entry, no ladder, no manual add - so a second order can never stack on one that silently filled. Exits still
+   * run. A late fill is credited by the unconfirmed-order sweep. Cleared only by the user (the banner's "Checked"
+   * button, or Arm / Enter now). See lib/focusToolOrderOutcome.ts.
+   */
+  orderUnknown?: { at: string; leg: 'CE' | 'PE'; kind: 'open' | 'ladder'; detail: string };
   ceTgtPct?: string;
   peTgtPct?: string;
   /**
