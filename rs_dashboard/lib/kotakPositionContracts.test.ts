@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert';
-import { kotakUnderlyingOf, kotakContractRequests, type KotakSymbolMap } from './kotakPositionContracts.ts';
+import { kotakUnderlyingOf, kotakContractRequests, kotakOpenUnderlyings, withKotakContracts, type KotakSymbolMap } from './kotakPositionContracts.ts';
 
 test('kotakUnderlyingOf takes the longest root and needs a digit after it', () => {
   assert.strictEqual(kotakUnderlyingOf('CRUDEOILM17NOV268800PE'), 'CRUDEOILM');
@@ -35,4 +35,29 @@ test('kotakContractRequests sends every open leg the map knows, across underlyin
     { key: 'NIFTY26OCT22500PE', underlying: 'NIFTY', expiry: '2026-10-27', strike: 22500, side: 'PE' },
     { key: 'NIFTY27MAR24000PE', underlying: 'NIFTY', expiry: '2027-03-30', strike: 24000, side: 'PE' },
   ]);
+});
+
+test('withKotakContracts fills expiry/strike/type from the map; futures get only the expiry; unknown rows unchanged', () => {
+  const map: KotakSymbolMap = {
+    NIFTY26OCT22500PE: { underlying: 'NIFTY', expiry: '2026-10-27', strike: 22500, side: 'PE' },
+    CRUDEOILM19NOV26FUT: { underlying: 'CRUDEOILM', expiry: '2026-11-19', strike: 0, side: 'FUT' },
+  };
+  const rows = [
+    { tradingSymbol: 'NIFTY26OCT22500PE', netQty: -390 },
+    { tradingSymbol: 'CRUDEOILM19NOV26FUT', netQty: -150 },
+    { tradingSymbol: 'NIFTY27MAR24000PE', netQty: 130 },
+  ];
+  const [opt, fut, unknown] = withKotakContracts(rows, map);
+  assert.deepStrictEqual(opt, { tradingSymbol: 'NIFTY26OCT22500PE', netQty: -390, drvExpiryDate: '2026-10-27', drvOptionType: 'PUT', drvStrikePrice: 22500 });
+  assert.deepStrictEqual(fut, { tradingSymbol: 'CRUDEOILM19NOV26FUT', netQty: -150, drvExpiryDate: '2026-11-19' });
+  assert.strictEqual(unknown, rows[2]);
+});
+
+test('kotakOpenUnderlyings lists the roots of open rows only', () => {
+  assert.deepStrictEqual(kotakOpenUnderlyings([
+    { tradingSymbol: 'NIFTY26OCT22500PE', netQty: -390 },
+    { tradingSymbol: 'CRUDEOILM19NOV26FUT', netQty: 0 },
+    { tradingSymbol: 'CRUDEOILM17NOV268800PE', netQty: -140 },
+    { tradingSymbol: 'NIFTYBEES-EQ', netQty: 10 },
+  ]), ['CRUDEOILM', 'NIFTY']);
 });

@@ -41,3 +41,34 @@ export function kotakContractRequests(
   }
   return [...out.values()].sort((a, b) => a.key.localeCompare(b.key));
 }
+
+/** Kotak F&O roots of every open position, longest-first resolved: which symbol-lookup caches a page must load. */
+export function kotakOpenUnderlyings(positions: { tradingSymbol?: unknown; netQty?: unknown }[]): string[] {
+  const set = new Set<string>();
+  for (const pos of positions) {
+    if (!Number(pos.netQty)) continue;
+    const root = kotakUnderlyingOf(String(pos.tradingSymbol ?? ''));
+    if (root) set.add(root);
+  }
+  return [...set].sort();
+}
+
+/**
+ * Kotak position rows with the contract fields Dhan's rows carry (drvOptionType / drvStrikePrice / drvExpiryDate),
+ * filled from the instrument-cache map. Kotak's payload has only a trading symbol, and its monthly symbols
+ * (NIFTY26OCT22500PE) hold no expiry day, so without this every Kotak NIFTY option read as an unidentified
+ * "BROKER ONLY" futures row on Multi-Leg Focus. A row the map does not know is returned unchanged.
+ */
+export function withKotakContracts<T extends Record<string, unknown>>(rows: T[], map: KotakSymbolMap): T[] {
+  return rows.map(row => {
+    const info = map[String(row.tradingSymbol ?? '')];
+    if (!info) return row;
+    return {
+      ...row,
+      drvExpiryDate: info.expiry,
+      ...(info.side === 'FUT'
+        ? {}
+        : { drvOptionType: info.side === 'CE' ? 'CALL' : 'PUT', drvStrikePrice: info.strike }),
+    };
+  });
+}

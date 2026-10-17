@@ -5,6 +5,7 @@ import { X, LogOut } from 'lucide-react';
 import { fallbackLotSize, type MultiLegBasket, type MultiLegLeg } from '@/lib/multiLegFocus';
 import { FOCUS_RING } from '@/components/Scalper';
 import type { Broker } from '@/hooks/useBrokerSelector';
+import TickSnapNote from './TickSnapNote';
 
 interface ExitLotsModalProps {
   isOpen: boolean;
@@ -123,13 +124,15 @@ export default function ExitLotsModal({ isOpen, onClose, leg, basket, lotSize, c
                 )}
               </div>
               <input
-                type="number" step="0.05" min="0.05"
+                type="number" step="any" min="0.05" inputMode="decimal"
+                aria-label="Limit price"
                 value={limitPrice || ''}
                 onChange={e => setLimitPrice(Number(e.target.value) || 0)}
                 placeholder="Enter limit price"
                 className={`w-full h-9 bg-zinc-900 border border-zinc-700 text-zinc-100 font-mono text-sm rounded-lg px-3 ${FOCUS_RING}`}
                 required
               />
+              <TickSnapNote value={limitPrice} underlying={basket.underlying} />
               <p className="text-[10px] text-zinc-500 mt-1">The leg stays open (SL, target and guards keep working) until this fills. Any other exit cancels this order first.</p>
             </div>
           )}

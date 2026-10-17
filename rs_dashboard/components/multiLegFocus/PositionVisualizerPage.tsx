@@ -78,8 +78,9 @@ function PositionVisualizerPage() {
   }, [fetchBaskets]);
 
   const underlyingBaskets = useMemo(
-    () => baskets.filter(b => b.underlying === activeUnderlying && b.legs.some(l => ACTIVE_STATUSES.has(l.status))),
-    [baskets, activeUnderlying],
+    // One broker at a time, like the Multi-Leg Focus page itself.
+    () => baskets.filter(b => (b.broker || broker) === broker && b.underlying === activeUnderlying && b.legs.some(l => ACTIVE_STATUSES.has(l.status))),
+    [baskets, activeUnderlying, broker],
   );
 
   // A basketId from the URL that belongs to another underlying falls back to the combined view.

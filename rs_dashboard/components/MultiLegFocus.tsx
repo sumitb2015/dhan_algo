@@ -8,7 +8,7 @@ import Link from 'next/link';
 import NavBar from './NavBar';
 import { type Toast, FOCUS_RING } from './Scalper';
 import { useLiveOptionsWS } from '@/lib/useLiveOptionsWS';
-import { useBrokerSelector, scalperRoute, BROKER_LABELS, BROKERS, type Broker } from '@/hooks/useBrokerSelector';
+import { useBrokerSelector, scalperRoute, BROKER_LABELS, type Broker } from '@/hooks/useBrokerSelector';
 import { withSavedBroker } from '@/hooks/withSavedBroker';
 import {
   STRATEGY_CATEGORIES, type StrategyCategory, type StrategyTemplate, type OptionType, nearestStrike, strikeStep, daysToExpiry,
@@ -21,7 +21,8 @@ import type { PayoffLegInput } from '@/lib/optionsPayoff';
 import OrdersTradesModal from './multiLegFocus/OrdersTradesModal';
 import GroupSelectionBar from './multiLegFocus/GroupSelectionBar';
 import UngroupedTradesTable, { type UngroupedTrade } from './multiLegFocus/UngroupedTradesTable';
-import { growLegToBroker, outsidePositionBaskets, brokerOnlyPositions, ltpFromBrokerRow } from '@/lib/multiLegBrokerSync';
+import { growLegToBroker, outsidePositionBaskets, brokerOnlyPositions, ltpFromBrokerRow, brokersToPoll, basketHasBrokerWork } from '@/lib/multiLegBrokerSync';
+import { kotakOpenUnderlyings, withKotakContracts, type KotakSymbolMap } from '@/lib/kotakPositionContracts';
 import ImportPositionsModal, { type ImportCandidate, type ImportRequest } from './multiLegFocus/ImportPositionsModal';
 import { withRevs, noteSaved, adoptServerBasket, stableBody, type RevBook } from '@/lib/multiLegStoreMerge';
 import { useTabLeader } from '@/hooks/useTabLeader';
@@ -530,8 +531,12 @@ function MultiLegFocus({
       if (!pairs.has(pair)) pairs.set(pair, new Set());
       pairs.get(pair)!.add(b);
     };
+    const today = istDayOf(Date.now());
     for (const b of basketsRef.current) {
       const bk = executionBroker(b, broker);
+      // A strategy on another broker is hidden; it needs prices and ids only while it has work there (live legs,
+      // waiting stops, unsettled orders). Its drafts are not loaded until that broker is selected.
+      if (bk !== broker && !basketHasBrokerWork(b, today)) continue;
       if (b.underlying && b.expiry) {
         need(`${b.underlying}:${b.expiry}`, bk);
       }
@@ -1194,9 +1199,12 @@ function MultiLegFocus({
     return previousDaysPnl(tradeHistory, todayIst, 30);
   }, [tradeHistory, pnlNow]);
 
+  // The page shows ONE broker: the selected one. Strategies on other brokers stay in `baskets` (their stops,
+  // reconcile and guards keep running, see brokersToPoll) but are not listed until that broker is selected.
+  const shownBaskets = useMemo(() => baskets.filter(b => executionBroker(b, broker) === broker), [baskets, broker]);
   const activeStrategiesCount = useMemo(() => {
-    return baskets.filter(b => b.legs.some(l => l.status === 'OPEN')).length;
-  }, [baskets]);
+    return shownBaskets.filter(b => b.legs.some(l => l.status === 'OPEN')).length;
+  }, [shownBaskets]);
 
   // ── Placement & Exits per Basket ──────────────────────────────────
   const [placingMap, setPlacingMap] = useState<Record<string, boolean>>({});
@@ -1218,25 +1226,53 @@ function MultiLegFocus({
   // Last positions poll's rows per broker, audited against the basket store by
   // findContractDrift: unrecorded closes / wrong entry averages / estimated exits.
   const [brokerRows, setBrokerRows] = useState<Partial<Record<Broker, Record<string, unknown>[]>>>({});
-  // Today's P&L exactly as the brokers report it: realized + unrealized summed over
-  // every polled broker's positions rows (all three shapers emit both fields).
+  // Today's P&L exactly as the SELECTED broker reports it: realized + unrealized over its
+  // positions rows (all three shapers emit both fields). The page shows one broker at a time.
   const { overallTodayPnl, overallRealisedPnl, overallUnrealisedPnl } = useMemo(() => {
     let realised = 0, unrealised = 0;
-    for (const rows of Object.values(brokerRows)) {
-      for (const r of rows ?? []) {
-        // Dhan reports MCX P&L without the barrels-per-lot multiplier (no-op elsewhere).
-        const row = scaleBrokerPnl(r);
-        realised += Number(row.realizedProfit) || 0;
-        unrealised += Number(row.unrealizedProfit) || 0;
-      }
+    for (const r of brokerRows[broker] ?? []) {
+      // Dhan reports MCX P&L without the barrels-per-lot multiplier (no-op elsewhere).
+      const row = scaleBrokerPnl(r);
+      realised += Number(row.realizedProfit) || 0;
+      unrealised += Number(row.unrealizedProfit) || 0;
     }
     return { overallTodayPnl: realised + unrealised, overallRealisedPnl: realised, overallUnrealisedPnl: unrealised };
-  }, [brokerRows]);
+  }, [brokerRows, broker]);
   const contractDrift = useMemo<ContractDrift[]>(
-    () => (Object.entries(brokerRows) as [Broker, Record<string, unknown>[]][])
-      .flatMap(([br, rows]) => findContractDrift(br, rows, baskets, pnlNow)),
-    [brokerRows, baskets, pnlNow],
+    () => findContractDrift(broker, brokerRows[broker] ?? [], baskets, pnlNow),
+    [brokerRows, broker, baskets, pnlNow],
   );
+
+  // Kotak trading symbol -> contract, from Kotak's instrument cache, for every underlying an open Kotak row is on.
+  // Kotak positions carry only a symbol, and a monthly one (NIFTY26OCT22500PE) has no expiry day, so without this
+  // the rows could not be identified, adopted or grouped (they sat in the table as BROKER ONLY futures). The poll
+  // stamps each Kotak row from this map (withKotakContracts); the map only grows, so a loaded underlying stays known.
+  const kotakSymbolMapRef = useRef<KotakSymbolMap>({});
+  const kotakMapUnderlyings = useMemo(() => kotakOpenUnderlyings(brokerRows.kotak ?? []).join(','), [brokerRows.kotak]);
+  useEffect(() => {
+    const need = kotakMapUnderlyings ? kotakMapUnderlyings.split(',') : [];
+    const known = new Set(Object.values(kotakSymbolMapRef.current).map(c => c.underlying));
+    const missing = need.filter(u => !known.has(u));
+    if (!missing.length) return;
+    let cancelled = false;
+    Promise.all(missing.map(u =>
+      fetch(`/api/scalper/kotak/symbol-lookup?underlying=${u}`)
+        .then(r => r.json())
+        .then((j: { success: boolean; data?: Record<string, { expiry: string; strike: number; side: 'CE' | 'PE' | 'FUT' }> }) => {
+          const out: KotakSymbolMap = {};
+          for (const [sym, info] of Object.entries(j.success && j.data ? j.data : {})) out[sym] = { ...info, underlying: u };
+          return out;
+        })
+        .catch(() => ({} as KotakSymbolMap))))
+      .then(maps => {
+        if (cancelled) return;
+        const map = Object.assign({}, kotakSymbolMapRef.current, ...maps) as KotakSymbolMap;
+        kotakSymbolMapRef.current = map;
+        // Re-stamp the rows on screen now rather than on the next poll.
+        setBrokerRows(prev => (prev.kotak ? { ...prev, kotak: withKotakContracts(prev.kotak, map) } : prev));
+      });
+    return () => { cancelled = true; };
+  }, [kotakMapUnderlyings]);
 
   // ── Far-expiry strike rule + bid/ask spread guards ───────────────────
   // Far expiries (3rd listed onward) only trade liquidly on multiples of 100, and a
@@ -2084,6 +2120,34 @@ function MultiLegFocus({
       basketsRef.current, basketId, [{ side: leg.side, option: leg.option, strike: leg.strike, expiry: legExpiry }]);
     if (refuseSharedStrike(collisions)) return;
 
+    // Pre-trade margin gate, fail-closed like placement and Scale. The leg's own margin (standalone, no hedge
+    // credit, so a conservative figure for a short; the premium for a long) is scaled from its current qty to the
+    // qty being added, and checked against live funds before anything is sent.
+    const marginEntry = basketMargins[basketId];
+    const legMargin = marginEntry?.legMargins?.[leg.id];
+    const legQtyNow = (leg.fill?.qty ?? 0) > 0 ? leg.fill!.qty : leg.lots * lotSize;
+    if (legMargin == null || !(legQtyNow > 0) || marginCompRef.current[basketId] !== `${bk}|${basketCompKey(basket)}`) {
+      addToast('error', 'Margin not verified — add blocked', 'Required margin is not calculated for this leg yet. Wait a moment and retry.');
+      return;
+    }
+    if (marginEntry.legMarginSource?.[leg.id] === 'estimate'
+        && !window.confirm('Required margin is only an ESTIMATE (broker calculator unavailable). Add lots anyway?')) return;
+    const extraMargin = legMargin * (qty / legQtyNow);
+    let availableFunds: number | null = null;
+    try {
+      const fr = await fetch(scalperRoute(bk, 'funds'));
+      const fj = await fr.json() as { success: boolean; data?: Record<string, unknown> };
+      if (fj.success && fj.data) availableFunds = Number(fj.data.availabelBalance ?? fj.data.availableBalance ?? 0);
+    } catch { /* fail closed below */ }
+    if (availableFunds == null) {
+      addToast('error', 'Funds unavailable — add blocked', 'Could not read available margin from the broker. Retry once funds load.');
+      return;
+    }
+    if (extraMargin > availableFunds) {
+      addToast('error', 'Insufficient margin — add blocked', `Adding ${params.lots} lot(s) to ${label} needs ~${fmtMoney(extraMargin)} but only ${fmtMoney(availableFunds)} is available.`);
+      return;
+    }
+
     const req = resolveOrderRequest(bk, {
       side: leg.side,
       option: leg.option,
@@ -2152,7 +2216,7 @@ function MultiLegFocus({
     } catch (e) {
       addToast('error', `Add lots failed for ${label}`, String(e));
     }
-  }, [broker, hasAuthenticatedBroker, lookupCache, ltpFor, patchLegs, addToast, pollFunds, fetchMarginsForBaskets, refuseSharedStrike]);
+  }, [broker, hasAuthenticatedBroker, lookupCache, ltpFor, patchLegs, addToast, pollFunds, fetchMarginsForBaskets, refuseSharedStrike, basketMargins]);
 
 
   // Manual single-leg exit from a card or the Ungrouped trades table.
@@ -2255,12 +2319,12 @@ function MultiLegFocus({
   // ── Import positions taken outside the tool ────────────────────────
   const [showImportModal, setShowImportModal] = useState(false);
 
-  // Untracked qty per logged-in broker, each contract verified against that
-  // broker's own strike lookup: a symbol parse is only a hint (Zerodha's
+  // Untracked qty on the SELECTED broker (the page shows one broker at a time), each contract verified against
+  // that broker's own strike lookup: a symbol parse is only a hint (Zerodha's
   // monthly symbols misparse), and a wrong strike would misprice the leg.
   const scanUntracked = useCallback(async (): Promise<{ candidates: ImportCandidate[]; errors: string[] }> => {
     const underlyings = Object.keys(DEFAULT_INDEX_SPOT);
-    const brokers = Array.from(new Set(authenticatedBrokers)) as Broker[];
+    const brokers: Broker[] = [broker];
     const errors: string[] = [];
     const perBroker = await Promise.all(brokers.map(async b => {
       try {
@@ -2294,7 +2358,7 @@ function MultiLegFocus({
       }
     }));
     return { candidates: perBroker.flat(), errors };
-  }, [authenticatedBrokers, ensureLookup]);
+  }, [broker, ensureLookup]);
 
   const importPositions = useCallback(async (req: ImportRequest): Promise<boolean> => {
     const first = req.items[0]?.candidate;
@@ -3022,14 +3086,12 @@ function MultiLegFocus({
       };
 
       try {
-        // A basket can carry a different broker than whatever is currently
-        // selected in the toolbar (e.g. a Dhan strategy tracked while Kotak
-        // is selected — every basket is shown regardless of the selector).
-        // Reconciling every basket against only the selected broker's rows
-        // means an exit made on a non-selected broker's leg is never
-        // observed, so it stays stuck OPEN forever. So poll every broker
-        // unconditionally, not just the selected one / ones in use.
-        const pollBrokers = new Set<Broker>(BROKERS);
+        // The page SHOWS only the selected broker, but a strategy on another
+        // broker (e.g. a Dhan strategy while Kotak is selected) still needs
+        // reconciling: an exit made on it would otherwise never be observed
+        // and its stops would act on a stale ledger. So poll the selected
+        // broker plus every broker that still has work here (brokersToPoll).
+        const pollBrokers = new Set<Broker>(brokersToPoll(basketsRef.current, broker, istDayOf(Date.now())) as Broker[]);
         const results = await Promise.all(
           Array.from(pollBrokers).map(async (b) => {
             try {
@@ -3048,7 +3110,8 @@ function MultiLegFocus({
         const rowsByBroker: Partial<Record<Broker, Record<string, unknown>[]>> = {};
         const ordersByBroker: Partial<Record<Broker, Map<string, NormalizedOrder>>> = {};
         for (const r of results) {
-          if (r.rows && !r.j?.positionsError) rowsByBroker[r.broker] = r.rows;
+          // Kotak rows carry only a trading symbol: stamp expiry/strike/type from its instrument cache.
+          if (r.rows && !r.j?.positionsError) rowsByBroker[r.broker] = r.broker === 'kotak' ? withKotakContracts(r.rows, kotakSymbolMapRef.current) : r.rows;
           if (Array.isArray(r.j?.orders)) {
             const m = new Map<string, NormalizedOrder>();
             for (const row of r.j!.orders!) { const n = normalizeOrderRow(row); if (n) m.set(n.id, n); }
@@ -3600,18 +3663,17 @@ function MultiLegFocus({
   // Groups are cards; trades in no group (isLooseTrade) go in the Ungrouped trades table.
   const sortedBaskets = useMemo(() => {
     const exited = (b: MultiLegBasket) => (computeBasketStatus(b.legs) === 'CLOSED' ? 1 : 0);
-    return baskets.filter(b => !isLooseTrade(b)).sort((a, b) => exited(a) - exited(b));
-  }, [baskets]);
+    return shownBaskets.filter(b => !isLooseTrade(b)).sort((a, b) => exited(a) - exited(b));
+  }, [shownBaskets]);
   const firstExitedIdx = useMemo(
     () => sortedBaskets.findIndex(b => computeBasketStatus(b.legs) === 'CLOSED'),
     [sortedBaskets],
   );
   // Open broker positions the ledger cannot hold (futures, unidentified options): shown read-only.
-  const brokerOnly = useMemo(() => (Object.entries(brokerRows) as [Broker, Record<string, unknown>[]][])
-    .flatMap(([b, rows]) => brokerOnlyPositions(baskets, b, rows, Object.keys(DEFAULT_INDEX_SPOT))), [brokerRows, baskets]);
-  const ungroupedTrades = useMemo<UngroupedTrade[]>(() => baskets.filter(isLooseTrade)
+  const brokerOnly = useMemo(() => brokerOnlyPositions(baskets, broker, brokerRows[broker] ?? [], Object.keys(DEFAULT_INDEX_SPOT)), [brokerRows, baskets, broker]);
+  const ungroupedTrades = useMemo<UngroupedTrade[]>(() => shownBaskets.filter(isLooseTrade)
     .map(b => ({ basket: b, leg: b.legs[0] }))
-    .sort((a, b) => (a.leg.status === 'CLOSED' ? 1 : 0) - (b.leg.status === 'CLOSED' ? 1 : 0)), [baskets]);
+    .sort((a, b) => (a.leg.status === 'CLOSED' ? 1 : 0) - (b.leg.status === 'CLOSED' ? 1 : 0)), [shownBaskets]);
 
   // Inputs for the Charts view: one item per strategy that still has an open/draft leg, built from the same data the row uses.
   const chartItems = pageView !== 'charts' ? [] : sortedBaskets.flatMap((basket, i): PayoffChartItem[] => {
@@ -3696,7 +3758,7 @@ function MultiLegFocus({
               </h1>
             )}
             <span className="text-xs text-zinc-400 font-semibold">
-              {activeStrategiesCount} Running · {baskets.length} Total
+              {activeStrategiesCount} Running · {shownBaskets.length} Total
             </span>
 
             {/* Underlying Ticker Selector Pills */}
@@ -3773,7 +3835,7 @@ function MultiLegFocus({
               <select
                 value={broker}
                 onChange={e => setBroker(e.target.value as Broker)}
-                title="Broker for NEW strategies, and for the funds/orders shown here. An existing strategy always trades on the broker badge on its own row."
+                title="Shows this broker's strategies, trades, funds and P&L, and places NEW strategies on it. An existing strategy always trades on the broker badge on its own row."
                 aria-label="Broker for new strategies"
                 className="h-8 bg-zinc-900 border border-zinc-700 text-zinc-200 text-xs font-bold rounded-lg px-2 focus:outline-none focus:border-emerald-500"
               >
@@ -3808,7 +3870,7 @@ function MultiLegFocus({
               className={`h-8 flex items-center px-3 rounded-lg text-xs font-bold font-mono tabular-nums border ${
                 overallTodayPnl >= 0 ? 'text-emerald-400 border-emerald-500/30 bg-emerald-500/5' : 'text-rose-400 border-rose-500/30 bg-rose-500/5'
               }`}
-              title="Today's P&L as reported by the brokers (realized + unrealized across all positions)."
+              title={`Today's P&L as reported by ${BROKER_LABELS[broker]} (realized + unrealized across its positions).`}
             >
               Today: {overallTodayPnl >= 0 ? '+' : ''}{fmtMoney(overallTodayPnl)}
             </span>
@@ -4069,10 +4131,10 @@ function MultiLegFocus({
 
       {/* Main Container: Parallel Strategy Rows */}
       <div className={`${pageView === 'charts' ? 'hidden ' : ''}${embedded ? 'p-2 flex flex-col gap-2.5 w-full' : 'p-4 flex flex-col gap-4 w-full'}`}>
-        {baskets.length === 0 ? (
+        {shownBaskets.length === 0 ? (
           <div className="flex flex-col items-center justify-center py-24 gap-3 border border-zinc-800/60 rounded-xl bg-zinc-900/20">
             <Layers className="w-10 h-10 text-zinc-600" />
-            <p className="text-sm font-semibold text-zinc-300">No Active or Draft Strategies</p>
+            <p className="text-sm font-semibold text-zinc-300">No Active or Draft Strategies on {BROKER_LABELS[broker]}</p>
             <p className="text-xs text-zinc-500">Click &ldquo;New Strategy Row&rdquo; or pick a preset above to run strategies in parallel.</p>
             <button
               type="button"

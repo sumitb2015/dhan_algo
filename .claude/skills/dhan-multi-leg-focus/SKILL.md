@@ -43,12 +43,14 @@ before changing any of it**; this skill only maps the page.
    **no P&L** (never value against 0). Groups with futures show rupee P&L only; points/% and strategy Target/SL are off.
 5. **Day roll.** A leg opened on an earlier IST day whose security id is absent from the broker book is marked CLOSED
    (no exit price recoverable); the same day an absent row only waits (order-propagation lag). `86a03d93`.
-6. **Stop-loss entry orders (SL-L / SL-M, Dhan only, `ca20e7c7`).** A resting stop is a `WaitingEntry` on
+6. **Stop-loss entry orders (SL-L / SL-M, Dhan and Kotak; Zerodha refused, `ca20e7c7`).** A resting stop is a `WaitingEntry` on
    `basket.waitingEntries`, **never a leg**. Each poll, `settleWaitingEntry(w, orderRow)` returns wait / open / dead /
    expired; only `open` creates a leg (`applyTriggeredEntry`, at the traded qty and average, idempotent by order id).
    No order book this tick = nothing settles. If another group already tracks that security id the fill is **not**
    added (toast: move it manually). Exit All cancels waiting stops; deleting a row that holds one is blocked;
-   `fast-order` accepts `STOP_LOSS` (limit must be on the correct side of the trigger) and `STOP_LOSS_MARKET`.
+   `fast-order` accepts `STOP_LOSS` (limit must be on the correct side of the trigger) and `STOP_LOSS_MARKET`; Kotak's
+   `/api/scalper/kotak/order` takes `SL` / `SLM`, is confirmed through `/api/scalper/orders?broker=kotak` and cancelled with
+   `DELETE /api/scalper/orders {broker:'kotak'}` (covered per broker in `e2e/multi-leg-brokers.spec.ts`).
 7. **Header Today P&L comes from broker positions** (not summed legs); MCX is scaled by the multiplier. The Recon
    chip audits baskets against broker day totals. Only one broker-scope MTM chip.
 8. **Scale (+N)** previews with `planScale()` and re-checks margin live — preview equals execution (see the Scale
@@ -106,7 +108,7 @@ before changing any of it**; this skill only maps the page.
      for settling shorts), then disarms. Otherwise a leg added the same day would be closed at once by the realized loss.
    - **Test the engine, not the effect:** add a case to `lib/multiLegGuardEngine.test.ts` for any new guard behaviour.
 
-12. **Resting LIMIT exits** (Exit ticket, Dhan only, 2026-10-13). Unlike a market exit, a limit exit does NOT flip the leg to
+12. **Resting LIMIT exits** (Exit ticket, Dhan and Kotak; Zerodha is MARKET only, 2026-10-13). Unlike a market exit, a limit exit does NOT flip the leg to
    CLOSED on ACK: it records `pendingOrders` `{kind:'exit', resting:true}` and the leg stays OPEN, so its SL/target/guards keep
    working. The fill reaches the ledger through broker reconcile (full close, or `brokerClampSlice` for a partial, price
    estimated from the row). `applyOrderOutcomes` only retires a resting entry (never reopens/re-prices; TTL 8 h, not 30 min) and
@@ -142,12 +144,30 @@ before changing any of it**; this skill only maps the page.
    - Tests: the `computeLegTrailingSL` / `legTrailPatch` / `trailAnchorPatch` cases in `lib/multiLegFocus.test.ts`
      (profit-armed, loss-armed near the stop, re-anchor triggers, anchor keeps a tightened stop). Add one per new rule.
 
+14. **One broker at a time** (2026-10-17). The page lists only baskets whose `executionBroker` is the selected broker
+   (`shownBaskets`): strategy cards, Ungrouped trades, BROKER ONLY rows, header Today/Realised/Unrealised, the Recon chip,
+   Import and the Position Map page. Hidden baskets stay in `baskets`, so their stops, guards and reconcile keep running:
+   `brokersToPoll` polls the selected broker plus any broker with `basketHasBrokerWork` (live legs, waiting stops,
+   unsettled orders, closed today), and `fetchAllChains` skips a hidden basket with no work (its drafts load nothing).
+   A Kotak-only page therefore makes no Dhan account calls. New view code must read `shownBaskets`, not `baskets`.
+15. **Kotak rows are stamped from the instrument cache** before anything reads them (`withKotakContracts`, map from
+   `/api/scalper/kotak/symbol-lookup`, loaded per `kotakOpenUnderlyings`). Kotak positions carry only a trading symbol and
+   monthly ones (`NIFTY26OCT22500PE`) have no expiry day; unstamped, they fell through `contractHintFromRow` and showed
+   as BROKER ONLY "FUT" rows with no checkbox. Stamped rows get Dhan's `drvOptionType`/`drvStrikePrice`/`drvExpiryDate`,
+   so adoption, futures detection and broker-only listing work unchanged. Never parse a Kotak expiry from the symbol.
+16. **Every order path is margin-gated, fail-closed**: Place, Scale and (since 2026-10-17) Add Lots, which scales the
+   leg's standalone `legMargins[legId]` from its current qty to the added qty and checks live funds. Price inputs use
+   `step="any"` with `TickSnapNote` (the order paths snap to tick); `step="0.05"` made the browser refuse off-tick prices
+   behind its own popup.
+
 ## Change checklist
 - Touched a basket/leg field? Update `multiLegStoreMerge` (rev + union rules) and its `…Resurrect` test, or a stale
   tab will drop/overwrite it.
 - New order path? Two-phase concurrent placement with rollback, shorts exit before hedges, fail-closed margin gate
   (Invariants 6/9/10) and a unique idempotency key.
 - New leg kind or state? Check `isFullyClosed`, regroup refusals, broker sync, exit sizing and the Greeks/payoff skip rules.
-- Run: `cd rs_dashboard && node --test lib/multiLegFocus.test.ts lib/multiLegStoreMerge.test.ts lib/multiLegStoreMergeResurrect.test.ts lib/multiLegRegroup.test.ts lib/multiLegBrokerSync.test.ts lib/basketOrders.test.ts`.
+- Run: `cd rs_dashboard && node --test lib/multiLegFocus.test.ts lib/multiLegStoreMerge.test.ts lib/multiLegStoreMergeResurrect.test.ts lib/multiLegRegroup.test.ts lib/multiLegBrokerSync.test.ts lib/basketOrders.test.ts lib/kotakPositionContracts.test.ts`.
+- Browser, both brokers (mocked, cannot place orders): `npx playwright test e2e/multi-leg-brokers.spec.ts` (set `PW_CHROMIUM_PATH` if
+  Playwright's own Chromium is not installed).
 - Reload every open Multi-Leg tab after a store-shape change; first real-money check is a 1-lot order compared with
   the broker's order book (vault thread: `multi-leg-focus-followups`).

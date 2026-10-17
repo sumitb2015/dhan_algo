@@ -14,7 +14,7 @@ interface CachedInstrument {
   tradingsymbol: string;
   strike: number;
   expiry: string;
-  instrument_type: 'CE' | 'PE';
+  instrument_type: 'CE' | 'PE' | 'FUT';
 }
 
 async function ensureCache(underlying: string): Promise<CachedInstrument[]> {
@@ -48,7 +48,7 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
 
   try {
     const all = await ensureCache(underlying);
-    const symbols: Record<string, { expiry: string; strike: number; side: 'CE' | 'PE' }> = {};
+    const symbols: Record<string, { expiry: string; strike: number; side: 'CE' | 'PE' | 'FUT' }> = {};
     for (const r of all) {
       symbols[r.tradingsymbol] = { expiry: r.expiry, strike: r.strike, side: r.instrument_type };
     }

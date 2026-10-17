@@ -6,6 +6,7 @@ import { X, Plus } from 'lucide-react';
 import { fallbackLotSize, formatExpiryLabel, type MultiLegBasket } from '@/lib/multiLegFocus';
 import { FOCUS_RING } from '@/components/Scalper';
 import { rollSizeWarning } from '@/lib/multiLegRollSize';
+import TickSnapNote from './TickSnapNote';
 import { allowedStrikes, snapToAllowed, strikeAllowed } from '@/lib/farExpiryRules';
 
 interface AddNewLegModalProps {
@@ -352,25 +353,27 @@ export default function AddNewLegModal({
                 <div>
                   <label className="text-[11px] font-bold text-zinc-400 uppercase tracking-wider block mb-1">Trigger Price (₹)</label>
                   <input
-                    type="number" step="0.05" min="0.05" inputMode="decimal"
+                    type="number" step="any" min="0.05" inputMode="decimal"
                     value={triggerDraft}
                     onChange={e => setTriggerDraft(e.target.value)}
                     placeholder={currentLtp > 0 ? `LTP ${currentLtp.toFixed(2)}` : 'Trigger'}
                     aria-label="Stop trigger price"
                     className={`w-full h-9 bg-zinc-900 border border-zinc-700 text-zinc-100 font-mono text-sm rounded-lg px-3 focus:outline-none focus:border-emerald-500 ${FOCUS_RING}`}
                   />
+                  <TickSnapNote value={Number(triggerDraft) || 0} underlying={basket.underlying} />
                 </div>
                 {orderType === 'SL' && (
                   <div>
                     <label className="text-[11px] font-bold text-zinc-400 uppercase tracking-wider block mb-1">Limit Price (₹)</label>
                     <input
-                      type="number" step="0.05" min="0.05" inputMode="decimal"
+                      type="number" step="any" min="0.05" inputMode="decimal"
                       value={slLimitDraft}
                       onChange={e => setSlLimitDraft(e.target.value)}
                       placeholder="Limit"
                       aria-label="Stop limit price"
                       className={`w-full h-9 bg-zinc-900 border border-zinc-700 text-zinc-100 font-mono text-sm rounded-lg px-3 focus:outline-none focus:border-emerald-500 ${FOCUS_RING}`}
                     />
+                    <TickSnapNote value={Number(slLimitDraft) || 0} underlying={basket.underlying} />
                   </div>
                 )}
               </div>
@@ -385,14 +388,17 @@ export default function AddNewLegModal({
               </label>
               <input
                 type="number"
-                step="0.05"
+                step="any"
                 min="0.05"
+                inputMode="decimal"
+                aria-label="Limit price"
                 value={limitPrice || ''}
                 onChange={e => setLimitPrice(Number(e.target.value) || 0)}
                 placeholder="Enter limit price"
                 className={`w-full h-9 bg-zinc-900 border border-zinc-700 text-zinc-100 font-mono text-sm rounded-lg px-3 focus:outline-none focus:border-emerald-500 ${FOCUS_RING}`}
                 required
               />
+              <TickSnapNote value={limitPrice} underlying={basket.underlying} />
             </div>
           )}
 

@@ -175,7 +175,8 @@ export function brokerOnlyPositions(
     const hint = contractHintFromRow(row, underlyings);
     if (hint?.expiry || futuresContractOf(row, underlyings)) continue;   // the poll adopts these as ungrouped trades
     const side: 'B' | 'S' = net > 0 ? 'B' : 'S';
-    const isOpt = /\b(CE|PE|CALL|PUT)\b/i.test(String(row.drvOptionType ?? '')) || /-(CE|PE)$/i.test(tradingSymbol);
+    // Dhan spells an option -CE / -PE; Kotak runs the strike into it (NIFTY26OCT22500PE) and its futures end in FUT.
+    const isOpt = /\b(CE|PE|CALL|PUT)\b/i.test(String(row.drvOptionType ?? '')) || /(-|\d)(CE|PE)$/i.test(tradingSymbol);
     const expiry = String(row.drvExpiryDate ?? '').slice(0, 10) || null;
     out.push({
       broker, ident, tradingSymbol, side, qty: Math.abs(net),
@@ -188,3 +189,30 @@ export function brokerOnlyPositions(
   }
   return out;
 }
+
+/**
+ * True while a strategy still has work at its broker: a live leg, a waiting stop entry, an unsettled order, or a leg
+ * closed today (its exit is still repriced from the trade book). Drafts, failures and earlier days' closes do not.
+ */
+export function basketHasBrokerWork(b: MultiLegBasket, today: string): boolean {
+  return (b.waitingEntries?.length ?? 0) > 0 || b.legs.some(l =>
+    (l.status !== 'CLOSED' && l.status !== 'DRAFT' && l.status !== 'FAILED')
+    || (l.pendingOrders?.length ?? 0) > 0
+    || (l.status === 'CLOSED' && l.closedAt != null && istDay(l.closedAt) === today));
+}
+
+/**
+ * Brokers the page polls: the selected one, plus every broker with a strategy that still has work
+ * (basketHasBrokerWork). Strategies on another broker are hidden from view but their stops, reconcile and fills
+ * keep running; a broker with nothing here is not called at all (a Kotak-only page no longer reads the Dhan account
+ * every 3 s).
+ */
+export function brokersToPoll(baskets: MultiLegBasket[], selected: string, today: string): string[] {
+  const out = new Set<string>([selected]);
+  for (const b of baskets) {
+    if (b.broker && !out.has(b.broker) && basketHasBrokerWork(b, today)) out.add(b.broker);
+  }
+  return [...out];
+}
+
+const istDay = (ms: number) => new Date(ms).toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
