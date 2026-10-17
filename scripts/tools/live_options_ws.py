@@ -43,6 +43,13 @@ HISTORY_FILE = os.path.join(DEBUG_DIR, 'live_options_history_dhan.json')
 # kotakShape.ts), so those legs have no live price at all unless this bridge
 # subscribes to them too. See the extra-instrument handling in main().
 EXTRA_FILE   = os.path.join(DEBUG_DIR, 'live_options_extra_dhan.json')
+# Dashboard-written list of whole contracts to price, on ANY underlying, any
+# expiry, options or futures — the Kotak scalper's open legs, so a CRUDEOILM leg
+# is live while the page shows NIFTY. Each request carries the caller's own
+# `key` (the Kotak trading symbol) and its price comes back under
+# quotes['contracts'][key]. Kept apart from EXTRA_FILE, whose per-underlying
+# full-replace contract other pages (Multi-Leg Focus, Baskets) rely on.
+CONTRACTS_FILE = os.path.join(DEBUG_DIR, 'live_options_contracts_dhan.json')
 STATUS_FILE  = os.path.join(DEBUG_DIR, 'live_options_status_dhan.json')
 STOP_TRIGGER = os.path.join(DEBUG_DIR, 'live_options_stop_dhan.trigger')
 
@@ -55,6 +62,14 @@ MCX_COMM    = 5   # MCX Commodity segment
 IDX         = 0   # Index segment (shared across exchanges, differentiated by security ID)
 FULL        = 21  # Full packet — includes OI
 FEED_QUOTE  = 17  # Quote packet — LTP + OHLC + volume (includes prev_close)
+
+# MCX_SNAPSHOT_NOTE — measured 2026-10-17 (Saturday, both exchanges shut): on subscribe Dhan replays an
+# instrument's last packet, which is how a closed market still shows prices. An NSE F&O contract answers in
+# Full or Quote mode; an MCX contract (CRUDEOILM option 583412, future 573423) answered in Quote mode and sent
+# NOTHING in Full mode. Subscribing both modes gave Quote's LTP/OI plus Full's volume. So MCX instruments are
+# subscribed in Full AND Quote; Full alone left the CRUDEOILM chain blank whenever MCX was closed.
+def _feed_modes(feed_segment: int) -> tuple:
+    return (FULL, FEED_QUOTE) if feed_segment == MCX_COMM else (FULL,)
 
 # Security IDs
 VIX_SID = '21'   # India VIX index
@@ -84,6 +99,38 @@ OPTION_FEED_SEGMENT = {
 }
 
 OHLC_URL = 'https://api.dhan.co/v2/marketfeed/ohlc'
+
+
+def _resolve_contract(helper, req: dict):
+    """(feed_segment, security_id) for one CONTRACTS_FILE request, or None.
+
+    `req` = {underlying, expiry: YYYY-MM-DD, side: CE|PE|FUT, strike (options)}.
+    The expiry must match the master list exactly — find_future() with an
+    explicit expiry never falls back to "nearest", so a wrong date resolves to
+    nothing rather than to another contract's price.
+    """
+    underlying = str(req.get('underlying') or '').upper()
+    exchange = UNDERLYING_EXCHANGE.get(underlying)
+    expiry = str(req.get('expiry') or '')
+    side = str(req.get('side') or '').upper()
+    if not exchange or not expiry:
+        return None
+    mcx = exchange == 'MCX'
+    if side == 'FUT':
+        sec = helper.find_future(underlying, expiry=expiry, exchange=exchange,
+                                 instrument='FUTCOM' if mcx else 'FUTIDX')
+    elif side in ('CE', 'PE'):
+        try:
+            strike = float(req.get('strike'))
+        except (TypeError, ValueError):
+            return None
+        sec = helper.find_option(underlying, expiry, strike, side, exchange=exchange,
+                                 instrument='OPTFUT' if mcx else 'OPTIDX')
+    else:
+        return None
+    if sec is None:
+        return None
+    return OPTION_FEED_SEGMENT[exchange], str(int(sec['SECURITY_ID']))
 
 
 def _fetch_prev_closes(dhan, underlying_sid: str, underlying_seg: str = 'IDX_I',
@@ -386,11 +433,12 @@ def main():
     # `global` is required here, not optional: write_status() below is a
     # top-level function (not nested in main()), so it has no lexical access
     # to a plain local reassignment of STATUS_FILE.
-    global QUOTES_FILE, HISTORY_FILE, EXTRA_FILE, STATUS_FILE, STOP_TRIGGER
+    global QUOTES_FILE, HISTORY_FILE, EXTRA_FILE, CONTRACTS_FILE, STATUS_FILE, STOP_TRIGGER
     suffix = args.underlying.lower()
     QUOTES_FILE  = os.path.join(DEBUG_DIR, f'live_options_quotes_dhan_{suffix}.json')
     HISTORY_FILE = os.path.join(DEBUG_DIR, f'live_options_history_dhan_{suffix}.json')
     EXTRA_FILE   = os.path.join(DEBUG_DIR, f'live_options_extra_dhan_{suffix}.json')
+    CONTRACTS_FILE = os.path.join(DEBUG_DIR, f'live_options_contracts_dhan_{suffix}.json')
     STATUS_FILE  = os.path.join(DEBUG_DIR, f'live_options_status_dhan_{suffix}.json')
     STOP_TRIGGER = os.path.join(DEBUG_DIR, f'live_options_stop_dhan_{suffix}.trigger')
 
@@ -510,7 +558,8 @@ def main():
                 continue
             sid = str(int(opt['SECURITY_ID']))
             sid_map[sid] = {'strike': int(strike), 'type': opt_type, 'expiry': args.expiry}
-            instruments.append((option_feed_segment, sid, FULL))
+            for mode in _feed_modes(option_feed_segment):
+                instruments.append((option_feed_segment, sid, mode))
 
     # Subscribe to underlying index/future (spot canary) and India VIX
     instruments.append((canary_feed_seg, underlying_sid, FEED_QUOTE))
@@ -577,6 +626,14 @@ def main():
     # contract that fails to resolve (bad strike/expiry combo) is not retried
     # every 3s forever.
     resolved_extra: set = set()
+    # CONTRACTS_FILE: caller key -> Dhan security id, and the request tuples
+    # already attempted (resolved or not) so a bad one isn't re-looked-up every 3s.
+    # Kept out of sid_map on purpose: sid_map feeds this underlying's strikes /
+    # extra buckets, and a CRUDEOILM leg must never land in NIFTY's chain.
+    contract_sids: dict[str, str] = {}
+    attempted_contracts: dict[str, tuple] = {}
+    subscribed_sids: set = {sid for _, sid, _ in instruments}
+    last_contracts_check = 0.0
     # Each history tick is serialized to JSON ONCE when it's captured (~20KB,
     # ~1ms). The writer thread only joins the pre-serialized strings and writes
     # the ~6MB file. Never re-json.dumps the whole 300-snapshot history:
@@ -650,7 +707,8 @@ def main():
                             if sid in sid_map:
                                 continue
                             sid_map[sid] = {'strike': int(req_strike), 'type': req_side, 'expiry': req_expiry}
-                            new_instruments.append((option_feed_segment, sid, FULL))
+                            for mode in _feed_modes(option_feed_segment):
+                                new_instruments.append((option_feed_segment, sid, mode))
                         if new_instruments:
                             helper.start_websocket(new_instruments)
                             n = len(sid_map)
@@ -658,6 +716,49 @@ def main():
                                   f'contract(s) — now tracking {n} total.', flush=True)
                 except Exception as e:
                     print(f'[live_options_ws] WARN: extra-instrument check failed: {e}', flush=True)
+
+            # Whole contracts on any underlying (see CONTRACTS_FILE). Full replace:
+            # a key absent from the file stops being reported (its subscription
+            # stays — the feed has no cheap per-instrument unsubscribe here, and
+            # one idle instrument costs nothing). On subscribe Dhan answers with the
+            # instrument's last packet, so a closed market still shows a price.
+            if extra_check_ts - last_contracts_check >= 3.0:
+                last_contracts_check = extra_check_ts
+                try:
+                    wanted: dict[str, tuple] = {}
+                    if os.path.exists(CONTRACTS_FILE):
+                        with open(CONTRACTS_FILE, 'r') as f:
+                            for r in (json.load(f).get('requests') or []):
+                                key = str(r.get('key') or '')
+                                if key:
+                                    wanted[key] = (str(r.get('underlying') or '').upper(), str(r.get('expiry') or ''),
+                                                   r.get('strike'), str(r.get('side') or '').upper())
+                    new_instruments = []
+                    for key, spec in wanted.items():
+                        if attempted_contracts.get(key) == spec:
+                            continue
+                        attempted_contracts[key] = spec
+                        contract_sids.pop(key, None)
+                        hit = _resolve_contract(helper, dict(zip(('underlying', 'expiry', 'strike', 'side'), spec)))
+                        if hit is None:
+                            print(f'[live_options_ws] WARN: could not resolve contract {key} {spec}', flush=True)
+                            continue
+                        feed_seg, sid = hit
+                        contract_sids[key] = sid
+                        if sid not in subscribed_sids and sid not in sid_map:
+                            subscribed_sids.add(sid)
+                            # Quote, not Full: only the LTP is read, and with the market shut an MCX contract
+                            # subscribed in Full mode sends nothing at all (see MCX_SNAPSHOT_NOTE).
+                            new_instruments.append((feed_seg, sid, FEED_QUOTE))
+                    for key in [k for k in contract_sids if k not in wanted]:
+                        contract_sids.pop(key, None)
+                        attempted_contracts.pop(key, None)
+                    if new_instruments:
+                        helper.start_websocket(new_instruments)
+                        print(f'[live_options_ws] Subscribed {len(new_instruments)} position contract(s) — '
+                              f'{len(contract_sids)} tracked.', flush=True)
+                except Exception as e:
+                    print(f'[live_options_ws] WARN: contract check failed: {e}', flush=True)
 
             # Update spot from index canary
             idx_tick = helper.live_data.get(underlying_sid)
@@ -760,6 +861,13 @@ def main():
                         'buildup':    _classify_buildup(change_pct, oi_chg_pct),
                     }
 
+            contracts_data: dict[str, dict] = {}
+            for key, sid in contract_sids.items():
+                tick = helper.live_data.get(sid)
+                ltp = _f(tick.get('LTP') or tick.get('last_price')) if tick else 0.0
+                if ltp > 0:
+                    contracts_data[key] = {'ltp': round(ltp, 2)}
+
             # ATM straddle premium
             atm_key = str(atm)
             straddle = 0.0
@@ -788,6 +896,7 @@ def main():
                 'vix':               vix_data,
                 'future':            future_data,
                 'extra':             extra_data,
+                'contracts':         contracts_data,
             }
 
             now_ts = time.time()

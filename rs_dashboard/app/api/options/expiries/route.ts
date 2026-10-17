@@ -60,8 +60,11 @@ export async function GET(request: NextRequest) {
       }
       if (fs.existsSync(cacheFile)) {
         const raw = fs.readFileSync(cacheFile, 'utf8');
-        const instruments = JSON.parse(raw) as { expiry: string }[];
-        const uniqueExpiries = Array.from(new Set(instruments.map(x => x.expiry)))
+        const instruments = JSON.parse(raw) as { expiry: string; instrument_type?: string }[];
+        // OPTION expiries only. The cache also lists futures, and an MCX future expires on its own day — CRUDEOILM's
+        // October future (2026-10-19) came first in the list, the page started its options bridge on a date with no
+        // options, and the bridge aborted with "no contracts resolved".
+        const uniqueExpiries = Array.from(new Set(instruments.filter(x => x.instrument_type !== 'FUT').map(x => x.expiry)))
           .filter(d => d >= today)
           .sort();
         return NextResponse.json({ success: true, data: uniqueExpiries });

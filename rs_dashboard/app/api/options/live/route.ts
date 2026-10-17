@@ -125,6 +125,7 @@ function filesFor(broker: Broker, underlying: string) {
     stop:    path.join(DEBUG_DIR, `live_options_stop_${suffix}.trigger`),
     log:     path.join(DEBUG_DIR, `live_options_log_${suffix}.log`),
     extra:   path.join(DEBUG_DIR, `live_options_extra_${suffix}.json`),
+    contracts: path.join(DEBUG_DIR, `live_options_contracts_${suffix}.json`),
   };
 }
 
@@ -412,6 +413,37 @@ export async function POST(request: NextRequest) {
       for (const [reqUnderlying, group] of byUnderlying) {
         fs.writeFileSync(filesFor(broker, reqUnderlying).extra, JSON.stringify({ requests: group }));
       }
+    } catch (err) {
+      return NextResponse.json({ success: false, error: String((err as Error).message ?? err) }, { status: 500 });
+    }
+    return NextResponse.json({ success: true, count: clean.length });
+  }
+
+  // ── Watch whole contracts on any underlying ─────────────────────────────
+  // The Kotak scalper's open legs, across every underlying and expiry, options
+  // and futures, priced by the ONE bridge the page is running (`underlying`), so
+  // a CRUDEOILM leg stays live while NIFTY is on screen. Prices come back as
+  // quotes.contracts[key]. A full replace of that bridge's own contracts file —
+  // separate from `extra`, whose files other pages share.
+  if (action === 'watchContracts') {
+    const underlying = normalizeUnderlying(body.underlying);
+    const requests = Array.isArray(body.requests) ? body.requests : [];
+    const clean: { key: string; underlying: string; expiry: string; strike: number; side: 'CE' | 'PE' | 'FUT' }[] = [];
+    for (const r of requests.slice(0, 200)) {
+      if (!r || typeof r !== 'object') continue;
+      const req = r as Record<string, unknown>;
+      const key = String(req.key ?? '');
+      const legUnderlying = String(req.underlying ?? '').toUpperCase();
+      const expiry = String(req.expiry ?? '');
+      const side = String(req.side ?? '').toUpperCase();
+      const strike = Number(req.strike ?? 0);
+      if (!/^[A-Z0-9-]{1,40}$/.test(key) || !KNOWN_UNDERLYINGS.has(legUnderlying)) continue;
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(expiry) || (side !== 'CE' && side !== 'PE' && side !== 'FUT')) continue;
+      if (side !== 'FUT' && !(Number.isFinite(strike) && strike > 0)) continue;
+      clean.push({ key, underlying: legUnderlying, expiry, strike: side === 'FUT' ? 0 : strike, side });
+    }
+    try {
+      fs.writeFileSync(filesFor('dhan', underlying).contracts, JSON.stringify({ requests: clean }));
     } catch (err) {
       return NextResponse.json({ success: false, error: String((err as Error).message ?? err) }, { status: 500 });
     }

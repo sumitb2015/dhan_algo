@@ -155,6 +155,9 @@ export interface LiveQuotes {
    *  Namespaced by expiry so a strike number shared with the main tracked
    *  expiry never collides with it. LTP only — no OI/buildup/prev-close. */
   extra?: Record<string, Record<string, { ce?: { ltp: number }; pe?: { ltp: number } }>>;
+  /** Whole contracts on ANY underlying (options and futures) the page asked for by key — the Kotak trading symbol —
+   *  via /api/options/live's `watchContracts` action. LTP only. */
+  contracts?: Record<string, { ltp: number }>;
 }
 
 export interface BridgeStatus {

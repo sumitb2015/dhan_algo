@@ -19,6 +19,7 @@ import { openLots, fractionUnits } from '@/lib/partialQty';
 import { resolveShiftTarget, clampShiftSteps } from '@/lib/strikeShift';
 import { positionKey, positionProduct, findLivePosition, closeOrderProduct } from '@/lib/positionProduct';
 import { parseTradingSymbol } from '@/lib/positionLegs';
+import { kotakContractRequests, kotakUnderlyingOf, type KotakSymbolMap } from '@/lib/kotakPositionContracts';
 import { cn } from '@/lib/utils';
 import TopWeightStocks from './TopWeightStocks';
 import TopIndices from './TopIndices';
@@ -191,7 +192,7 @@ export default function AdvancedScalper() {
   // kotakShape.ts), so a leg on a non-selected expiry can only be identified
   // by looking its symbol up here. Feeds the off-expiry live-price request
   // below (see /api/options/live's `watchExtra` action).
-  const [kotakSymbolMap, setKotakSymbolMap] = useState<Record<string, { expiry: string; strike: number; side: 'CE' | 'PE' }>>({});
+  const [kotakSymbolMap, setKotakSymbolMap] = useState<KotakSymbolMap>({});
   // null until the lookup resolves it from DhanHelper.get_lot_size(). Never seed
   // this with a literal: exchange lot sizes get revised (NIFTY has been 75 and is
   // 65 today), and a seeded value is indistinguishable from a resolved one — it
@@ -532,40 +533,22 @@ export default function AdvancedScalper() {
     });
   }, [positionsData]);
 
-  // Open Kotak legs whose own expiry isn't the one selected in the dropdown
-  // above — the live-quotes WS bridge only tracks one expiry's strikes by
-  // default, so these have no live price at all otherwise (Kotak's
-  // positions payload never carries an LTP — see kotakShape.ts). Asked for
-  // by tradingSymbol -> the shared kotakSymbolMap resolves it to a real
-  // expiry/strike/side.
-  const offExpiryKotakRequests = useMemo(() => {
-    if (broker !== 'kotak') return [];
-    const out: { expiry: string; strike: number; side: 'CE' | 'PE' }[] = [];
-    const seen = new Set<string>();
-    for (const pos of positionsData) {
-      if (Number(pos.netQty) === 0) continue;
-      const info = kotakSymbolMap[String(pos.tradingSymbol ?? '')];
-      if (!info || info.expiry === expiry) continue;
-      const key = `${info.expiry}|${info.strike}|${info.side}`;
-      if (seen.has(key)) continue;
-      seen.add(key);
-      out.push({ expiry: info.expiry, strike: info.strike, side: info.side });
-    }
-    return out;
-  }, [broker, positionsData, kotakSymbolMap, expiry]);
-
-  // Tells the (always-Dhan) live-quotes bridge to also track the off-expiry
-  // legs above, so their real LTP shows up in liveQuotes.extra. A full
-  // replace each call (see the route's own comment) — nothing to clean up
-  // here when a leg closes, it just stops being sent.
+  // Every open Kotak leg — any underlying, any expiry, options and futures — priced by the bridge this page runs, so
+  // a CRUDEOILM leg stays live while NIFTY is on screen (Kotak's positions payload carries no usable price, see
+  // kotakShape.ts). Prices come back as liveQuotes.contracts[tradingSymbol]. Sent as a full replace whenever the set
+  // changes (a closed leg just drops out), and re-sent on a new underlying because each bridge reads its own file.
+  const kotakContractsJson = useMemo(
+    () => broker === 'kotak' ? JSON.stringify(kotakContractRequests(positionsData, kotakSymbolMap)) : '[]',
+    [broker, positionsData, kotakSymbolMap],
+  );
   useEffect(() => {
-    if (offExpiryKotakRequests.length === 0) return;
+    if (broker !== 'kotak') return;
     fetch('/api/options/live', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ action: 'watchExtra', underlying, requests: offExpiryKotakRequests }),
+      body: JSON.stringify({ action: 'watchContracts', underlying, requests: JSON.parse(kotakContractsJson) }),
     }).catch(() => {});
-  }, [offExpiryKotakRequests, underlying]);
+  }, [broker, kotakContractsJson, underlying]);
 
   // liveQuotes is a brand-new object reference on every WS-coalesced tick
   // (the bridge re-parses a full snapshot every message), so this would
@@ -598,18 +581,11 @@ export default function AdvancedScalper() {
       if (liveLtp > 0) return applyLtp(liveLtp);
     }
 
-    // Off-expiry leg (Kotak only): the row's tradingSymbol isn't in the
-    // currently-selected expiry's strikeMap above, so resolve it via the
-    // full-underlying kotakSymbolMap instead and read its price from the
-    // bridge's separately-tracked `extra` bucket (see offExpiryKotakRequests
-    // / the /api/options/live `watchExtra` action that populates it).
-    if (broker === 'kotak' && liveQuotes?.extra) {
-      const info = kotakSymbolMap[String(pos.tradingSymbol ?? '')];
-      if (info) {
-        const sideKey = info.side.toLowerCase() as 'ce' | 'pe';
-        const extraLtp = liveQuotes.extra[info.expiry]?.[String(info.strike)]?.[sideKey]?.ltp ?? 0;
-        if (extraLtp > 0) return applyLtp(extraLtp);
-      }
+    // Any other Kotak leg (another expiry, another underlying, a future): the bridge's per-contract bucket, keyed by
+    // the Kotak trading symbol (see kotakContractsJson / the /api/options/live `watchContracts` action).
+    if (broker === 'kotak') {
+      const contractLtp = liveQuotes?.contracts?.[String(pos.tradingSymbol ?? '')]?.ltp ?? 0;
+      if (contractLtp > 0) return applyLtp(contractLtp);
     }
 
     return pos;
@@ -1184,21 +1160,35 @@ export default function AdvancedScalper() {
     return () => { cancelled = true; };
   }, [expiry, broker, underlying]);
 
-  // Full-underlying Kotak symbol -> {expiry, strike, side} map (every cached
-  // expiry, not just the selected one) — see kotakSymbolMap's declaration.
-  // Only Kotak needs this: Dhan and Zerodha positions already carry their
-  // own live/derivable price regardless of which expiry is on screen.
+  // Kotak symbol -> {underlying, expiry, strike, side} for the selected underlying AND every underlying an open Kotak
+  // leg is on (every cached expiry, futures included) — see kotakSymbolMap's declaration. Only Kotak needs this:
+  // Dhan and Zerodha positions already carry their own live/derivable price.
+  const kotakMapUnderlyings = useMemo(() => {
+    if (broker !== 'kotak') return '';
+    const set = new Set<string>([underlying]);
+    for (const pos of positionsData) {
+      if (Number(pos.netQty) === 0) continue;
+      const root = kotakUnderlyingOf(String(pos.tradingSymbol ?? ''));
+      if (root) set.add(root);
+    }
+    return [...set].sort().join(',');
+  }, [broker, underlying, positionsData]);
+
   useEffect(() => {
-    if (broker !== 'kotak') return;
+    if (!kotakMapUnderlyings) return;
     let cancelled = false;
-    fetch(`/api/scalper/kotak/symbol-lookup?underlying=${underlying}`)
-      .then(r => r.json())
-      .then((j: { success: boolean; data?: Record<string, { expiry: string; strike: number; side: 'CE' | 'PE' }> }) => {
-        if (!cancelled && j.success && j.data) setKotakSymbolMap(j.data);
-      })
-      .catch(() => {});
+    Promise.all(kotakMapUnderlyings.split(',').map(u =>
+      fetch(`/api/scalper/kotak/symbol-lookup?underlying=${u}`)
+        .then(r => r.json())
+        .then((j: { success: boolean; data?: Record<string, { expiry: string; strike: number; side: 'CE' | 'PE' | 'FUT' }> }) => {
+          const out: KotakSymbolMap = {};
+          for (const [sym, info] of Object.entries(j.success && j.data ? j.data : {})) out[sym] = { ...info, underlying: u };
+          return out;
+        })
+        .catch(() => ({} as KotakSymbolMap))))
+      .then(maps => { if (!cancelled) setKotakSymbolMap(Object.assign({}, ...maps)); });
     return () => { cancelled = true; };
-  }, [broker, underlying]);
+  }, [kotakMapUnderlyings]);
 
   // Live quotes arrive via useLiveOptionsWS (direct WebSocket push from the
   // Python bridge, rAF-coalesced; falls back to 100ms HTTP polling if the WS
@@ -1537,8 +1527,9 @@ export default function AdvancedScalper() {
     }
 
     // Kotak: the instrument cache's contract, never the symbol parse (see enrichedPositions on the monthly form).
+    // The cache also lists futures (side 'FUT'); Add Lots is an options modal, so those fall through to the refusal.
     const kotakInfo = broker === 'kotak' ? kotakSymbolMap[sym] : undefined;
-    if (kotakInfo) {
+    if (kotakInfo && (kotakInfo.side === 'CE' || kotakInfo.side === 'PE')) {
       setAddLotsTarget({ pos, posExpiry: kotakInfo.expiry, strike: kotakInfo.strike, option: kotakInfo.side });
       return;
     }
