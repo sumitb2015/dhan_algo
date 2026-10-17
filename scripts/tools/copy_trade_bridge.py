@@ -95,6 +95,7 @@ LOG_FILE         = os.path.join(DEBUG_DIR, 'copy_trade_log.json')
 REPLICATED_FILE  = os.path.join(DEBUG_DIR, 'copy_trade_replicated.json')
 RETRY_FILE       = os.path.join(DEBUG_DIR, 'copy_trade_retry_queue.json')
 INFLIGHT_FILE    = os.path.join(DEBUG_DIR, 'copy_trade_inflight.json')
+LEDGER_FILE      = os.path.join(DEBUG_DIR, 'copy_trade_ledger.json')
 RAW_EVENTS_FILE  = os.path.join(DEBUG_DIR, 'copy_trade_raw_events.json')
 STOP_TRIGGER     = os.path.join(DEBUG_DIR, 'copy_trade_stop.trigger')
 
@@ -621,18 +622,61 @@ def split_reducing(parent_before: int, side: str, delta: int):
     return red, delta - red
 
 
-def clamp_child_qty(reducing_qty: int, opening_qty: int, multiplier: int, side: str, held):
-    """Child quantity for a fill: the opening part scaled normally, the reducing
-    part scaled but never beyond what the child actually holds on the closing
-    side (an exit the child has no position for would open the opposite one).
-    `held` is the child's signed net qty, or None when unknown (fail open).
-    Returns (qty, clamped_away)."""
-    want_red = reducing_qty * multiplier
+def clamp_child_qty(reducing_qty: int, opening_qty: int, multiplier: int, side: str, held,
+                    want_red=None):
+    """Child quantity for a fill: the opening part scaled by the multiplier, the
+    reducing part by `want_red` (default reducing_qty * multiplier) but never
+    beyond what the child actually holds on the closing side (an exit the child
+    has no position for would open the opposite one). `held` is the child's
+    signed net qty, or None when unknown (fail open).
+    Returns (qty, clamped_away, reducing_part_actually_sent)."""
+    if want_red is None:
+        want_red = reducing_qty * multiplier
     if held is None:
-        return want_red + opening_qty * multiplier, 0
+        return want_red + opening_qty * multiplier, 0, want_red
     closable = max(0, -held) if str(side).upper() == 'BUY' else max(0, held)
     red = min(want_red, closable)
-    return red + opening_qty * multiplier, want_red - red
+    return red + opening_qty * multiplier, want_red - red, red
+
+
+def scale_reducing(entry, side: str, red: int, multiplier: int, lot: int = 1) -> int:
+    """Child qty for the reducing part of a parent fill.
+
+    `entry` is the bridge's own ledger for this child symbol: {'p': signed parent
+    qty, 'c': signed child qty} it opened. Closing the SAME FRACTION of what the
+    bridge opened keeps parent and child proportional even if the multiplier was
+    changed (or a leg was clamped) since the entry. With no usable ledger it
+    falls back to red * multiplier."""
+    sgn = 1 if str(side).upper() == 'BUY' else -1
+    if not entry or not entry.get('p') or not entry.get('c') or (entry['p'] > 0) == (sgn > 0):
+        return red * multiplier
+    p, c = abs(entry['p']), abs(entry['c'])
+    if red >= p:
+        return c
+    lot = max(1, int(lot or 1))
+    return min(c, int(round(c * red / p / lot)) * lot)
+
+
+def apply_ledger(ledger: dict, key: str, side: str, red_parent: int, red_child: int,
+                 open_parent: int, open_child: int):
+    sgn = 1 if str(side).upper() == 'BUY' else -1
+    e = ledger.setdefault(key, {'p': 0, 'c': 0})
+    e['p'] += sgn * (red_parent + open_parent)
+    e['c'] += sgn * (red_child + open_child)
+    if e['p'] == 0:
+        e['c'] = 0  # parent flat in this strike: nothing left to stay proportional to
+
+
+def load_ledger() -> dict:
+    data = read_json(LEDGER_FILE, {})
+    if isinstance(data, dict) and data.get('date') == datetime.now().strftime('%Y-%m-%d') \
+            and isinstance(data.get('legs'), dict):
+        return data['legs']
+    return {}
+
+
+def save_ledger(ledger: dict):
+    atomic_write(LEDGER_FILE, {'date': datetime.now().strftime('%Y-%m-%d'), 'legs': ledger})
 
 
 def baseline_today_orders(helper, replicated_qty: dict) -> int:
@@ -1406,17 +1450,22 @@ def drain_retry_queue(helper, brokers: dict, retry_queue: list, state: dict,
         # line, and it is the only trustworthy signal that the account really is
         # short — which is exactly what should trigger a hedge.
         #
-        # PROACTIVE HEDGE (non-exact-margin brokers only): If this item has
-        # already been attempted at least once and the cached estimate STILL
-        # shows a shortfall, the standalone estimate is no longer "probably
-        # over-stating" — the account is persistently short against even the
-        # conservative proxy. Buy a hedge step now, before placing, so the order
-        # has a chance of succeeding rather than burning another broker round-trip
-        # on a rejection that shows up as a Rejected order in the user's book.
-        # This runs on every failed retry rather than only when the broker says
-        # "no", so it is gated by the daily lot cap inside ensure_hedge_capacity.
+        # PROACTIVE HEDGE (non-exact-margin brokers only): when the cached
+        # estimate shows a shortfall for a queued SELL, buy a hedge step BEFORE
+        # placing, so the order has a chance of succeeding instead of burning a
+        # broker round-trip on a rejection that shows up in the user's book.
+        # `proactive_hedge_min_attempts` (copy_trade_config.json, default 0 = on
+        # the first drain, as shipped in aea0bd57 for the 2026-08-21 desync) sets
+        # how many failed attempts an item needs first. Raise it to 1 to let the
+        # broker answer once before the estimate — which prices a standalone naked
+        # lot and over-states on a hedged book — is allowed to buy anything. The
+        # daily lot cap inside ensure_hedge_capacity bounds the cost either way.
         use_margin_check = margin_check and broker.supports_exact_margin
-        if (margin_check and not use_margin_check and item['attempts'] >= 0
+        try:
+            proactive_min = max(0, int((cfg or {}).get('proactive_hedge_min_attempts', 0)))
+        except (TypeError, ValueError):
+            proactive_min = 0
+        if (margin_check and not use_margin_check and item['attempts'] >= proactive_min
                 and child_hedge_qty is not None
                 and str(item.get('side', '')).upper() == 'SELL'):
             ok_est, _est = broker.check_margin(
@@ -1647,9 +1696,12 @@ def flush_retry_queue(retry_queue: list, state: dict, reason: str):
 
 
 def make_handle_update(brokers, broker_failures, parent_net, replicated_qty,
-                       replication_scopes, retry_queue, state, warn_product_mismatch):
+                       replication_scopes, retry_queue, state, warn_product_mismatch,
+                       ledger=None):
     """Build the Dhan order-update callback. A factory (not a closure inside main())
     so tests can drive the fill path with stub brokers."""
+    if ledger is None:
+        ledger = {}
     def handle_update(payload: dict):
         # Serialize against poll_parent_orders() below — both read-check-act on
         # replicated_qty for the same order_no, and without this lock a fill
@@ -1875,14 +1927,25 @@ def make_handle_update(brokers, broker_failures, parent_net, replicated_qty,
                     # copy_trade_reconcile.py, which both read `zerodha_symbol`.
                     entry['zerodha_symbol'] = child_symbol
 
-                    if armed and reducing_qty > 0:
-                        new_qty, dropped = clamp_child_qty(
+                    if armed:
+                        lkey = f'{bname}|{child_symbol}'
+                        try:
+                            lot = int(broker.lot_size_for(child_symbol) or 1)
+                        except Exception:
+                            lot = 1
+                        want_red = (scale_reducing(ledger.get(lkey), side, reducing_qty,
+                                                   multiplier, lot) if reducing_qty > 0 else 0)
+                        new_qty, dropped, red_sent = clamp_child_qty(
                             reducing_qty, opening_qty, multiplier, side,
-                            broker.held_qty_cached(child_symbol))
-                        if dropped:
-                            entry['exit_clamped'] = dropped
+                            broker.held_qty_cached(child_symbol) if reducing_qty > 0 else None,
+                            want_red)
+                        if want_red != reducing_qty * multiplier:
+                            entry['exit_scaled_to'] = want_red  # proportional to what was opened
+                        if new_qty != child_qty:
                             entry['child_qty'] = new_qty
                             child_qty = new_qty
+                        if dropped:
+                            entry['exit_clamped'] = dropped
                             if child_qty <= 0:
                                 entry['result'] = 'exit_skipped_child_flat'
                                 entry['error'] = (f'{bname} holds nothing to close for this exit '
@@ -1892,6 +1955,9 @@ def make_handle_update(brokers, broker_failures, parent_net, replicated_qty,
                                 print(f'[copy_trade_bridge] {bname} has no position in {child_symbol} '
                                       f'to close — exit {order_no} skipped', flush=True)
                                 continue
+                        apply_ledger(ledger, lkey, side, reducing_qty, red_sent,
+                                     opening_qty, opening_qty * multiplier)
+                        save_ledger(ledger)
 
                     if not armed:
                         # Record what the margin gate WOULD have decided, so a
@@ -2111,6 +2177,25 @@ def main():
     brokers = {}
     broker_failures = {}
     broker_attempts = {}   # {name: {'n': int, 'next_ts': float}}
+
+    _init_threads = {}
+
+    def ensure_broker_bg(name) -> bool:
+        """ensure_broker() for the watchdog thread: the login (Kotak: TOTP, up to
+        ~30s on a rejection) runs on its own thread so it cannot stall the retry
+        drain and confirmations of every other broker. Single-flight per broker."""
+        name = str(name or '').lower()
+        if not name:
+            return False
+        if name in brokers:
+            return True
+        t = _init_threads.get(name)
+        if t is None or not t.is_alive():
+            t = threading.Thread(target=ensure_broker, args=(name,), daemon=True,
+                                 name=f'init-{name}')
+            _init_threads[name] = t
+            t.start()
+        return False
 
     def ensure_broker(name) -> bool:
         """Initialise a child broker on demand. Returns True if it is live.
@@ -2416,7 +2501,8 @@ def main():
               f'Set hedge_product={p} in copy_trade_config.json.', flush=True)
 
     handle_update = make_handle_update(brokers, broker_failures, parent_net, replicated_qty,
-                                       replication_scopes, retry_queue, state, warn_product_mismatch)
+                                       replication_scopes, retry_queue, state, warn_product_mismatch,
+                                       ledger=load_ledger())
 
     def poll_parent_orders():
         """REST-polling backup for the order-update WS. The WS is the primary,
@@ -2490,7 +2576,7 @@ def main():
     watchdog_thread = threading.Thread(
         target=watchdog_loop,
         args=(helper, brokers, watchdog_stop, state, retry_queue, replication_scopes,
-              hedge_qty, hedge_product, hedge_ctx, ensure_broker, child_hedge_qty),
+              hedge_qty, hedge_product, hedge_ctx, ensure_broker_bg, child_hedge_qty),
         daemon=True, name='copy-trade-watchdog',
     )
     watchdog_thread.start()

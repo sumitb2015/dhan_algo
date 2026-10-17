@@ -44,15 +44,15 @@ def test_split_reducing_and_clamp():
     # parent short 130, BUY 130 -> all reducing; child holds short 65 only
     red, opn = bridge.split_reducing(-130, 'BUY', 130)
     assert (red, opn) == (130, 0)
-    assert bridge.clamp_child_qty(red, opn, 1, 'BUY', -65) == (65, 65)
+    assert bridge.clamp_child_qty(red, opn, 1, 'BUY', -65) == (65, 65, 65)
     # child flat -> nothing to close, exit would have opened a long
-    assert bridge.clamp_child_qty(red, opn, 1, 'BUY', 0) == (0, 130)
+    assert bridge.clamp_child_qty(red, opn, 1, 'BUY', 0) == (0, 130, 0)
     # unknown child position fails open
-    assert bridge.clamp_child_qty(red, opn, 2, 'BUY', None) == (260, 0)
+    assert bridge.clamp_child_qty(red, opn, 2, 'BUY', None) == (260, 0, 260)
     # flip: parent long 65, SELL 130 -> 65 reducing + 65 opening
     red, opn = bridge.split_reducing(65, 'SELL', 130)
     assert (red, opn) == (65, 65)
-    assert bridge.clamp_child_qty(red, opn, 1, 'SELL', 0) == (65, 65)
+    assert bridge.clamp_child_qty(red, opn, 1, 'SELL', 0) == (65, 65, 0)
     # plain entry never clamps
     assert bridge.split_reducing(0, 'SELL', 65) == (0, 65)
 
@@ -101,6 +101,7 @@ def env(tmp_path, monkeypatch):
     (tmp_path / 'config_file.json').write_text(json.dumps(cfg))
     monkeypatch.setattr(bridge, 'load_config', lambda: cfg)
     child = StubChild()
+    child.cfg = cfg
     state = {'last_replication_ts': 0.0, 'failed_count': 0}
     retry_queue, replicated = [], {}
     parent_net = {}
@@ -198,3 +199,51 @@ def test_zerodha_async_rejection_is_detected():
     rejected, timed_out = z.confirm_placements()
     assert len(rejected) == 1 and rejected[0]['reason'] == 'price band' and not timed_out
     assert z.pending_confirm == []
+
+
+def test_exit_closes_same_fraction_after_multiplier_change(env):
+    h, child, _q, _r, parent_net, _t = env
+    child.cfg['children'][0]['multiplier'] = 2
+    h(_fill('E1', 'S', 130))  # parent short 130 -> child short 260
+    sym = 'NIFTY2026-10-0622500PE'
+    child.held[sym] = -260
+    child.cfg['children'][0]['multiplier'] = 1
+    # multiplier edited to 1 behind the bridge's back, then parent covers half
+    # (the stub reads config through load_config, so patch the child entry)
+    h(_fill('E2', 'B', 65))
+    assert child.orders[-1][2] == 130  # half of 260, not 65 x current multiplier
+    child.held[sym] = -130
+    h(_fill('E3', 'B', 65))            # parent now flat
+    assert child.orders[-1][2] == 130  # closes the rest exactly
+
+
+def test_scale_reducing_falls_back_without_ledger():
+    assert bridge.scale_reducing(None, 'BUY', 65, 2, 65) == 130
+    assert bridge.scale_reducing({'p': -130, 'c': -260}, 'BUY', 65, 1, 65) == 130
+    assert bridge.scale_reducing({'p': -130, 'c': -260}, 'BUY', 130, 1, 65) == 260
+
+
+def test_kotak_relogin_never_blocks_the_caller():
+    import threading
+    import time
+    from scripts.tools.child_brokers import KotakChild
+
+    k = KotakChild(object(), log=lambda *a, **kw: None)
+    started, release = threading.Event(), threading.Event()
+    calls = []
+
+    def slow_relogin():
+        calls.append(1)
+        started.set()
+        release.wait(5)
+
+    k._relogin = slow_relogin
+    t0 = time.time()
+    assert k._handle_response({'stat': 'Not_Ok', 'stCode': 100008, 'errMsg': 'unauthorized'}) is True
+    k._handle_response({'stat': 'Not_Ok', 'stCode': 100008, 'errMsg': 'unauthorized'})
+    assert time.time() - t0 < 1.0           # returned without waiting for the login
+    assert started.wait(2)
+    release.set()
+    k._relogin_thread.join(2)
+    assert len(calls) == 1                  # single-flight
+

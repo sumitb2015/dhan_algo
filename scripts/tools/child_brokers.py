@@ -894,6 +894,8 @@ class KotakChild(ChildBroker):
         self.available = True
         self.unavailable_reason = None
         self._relogin_attempts = 0
+        self._relogin_lock = threading.Lock()
+        self._relogin_thread = None
         self._segment = 'bse_fo' if underlying == 'SENSEX' else 'nse_fo'
 
     @classmethod
@@ -917,8 +919,22 @@ class KotakChild(ChildBroker):
         from lib.kotak.responses import is_unauthorized
         if not is_unauthorized(res):
             return False
-        self._relogin()
+        # Never log in on the caller's thread: a rejected TOTP sleeps ~30s, and
+        # the caller is usually the Dhan order-update WS callback (events stall,
+        # the connection can drop) or the watchdog (every broker's retry drain
+        # stalls). The order that hit this raises 'NOT placed' and goes to the
+        # retry queue; by its next attempt the session is usually back.
+        self._relogin_async()
         return True
+
+    def _relogin_async(self):
+        with self._relogin_lock:
+            t = self._relogin_thread
+            if t is not None and t.is_alive():
+                return  # single-flight: one login at a time
+            self._relogin_thread = threading.Thread(
+                target=self._relogin, daemon=True, name=f'{self.name}-relogin')
+            self._relogin_thread.start()
 
     def _relogin(self):
         """One capped attempt to re-establish the session.
@@ -1039,7 +1055,7 @@ class KotakChild(ChildBroker):
         from lib.kotak.margin import get_margin_snapshot
         snap, err = get_margin_snapshot(self.client)
         if err and ('unauthorized' in str(err).lower() or '100008' in str(err)):
-            self._relogin()
+            self._relogin_async()
         return snap, err
 
     def _measure_per_lot(self, symbol, qty, product):
