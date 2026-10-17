@@ -115,3 +115,45 @@ export async function sendSingleLegOrder(
   if (r?.unknown || json.unknown) return { kind: 'unknown', error: r?.error ?? json.error ?? 'status unknown' };
   return { kind: 'rejected', error: r?.error ?? json.error ?? 'rejected' };
 }
+
+// ── Persisted page trades (debug/options_monitor_trades.json, app/api/options-monitor/trades) ─────────────────────
+// A leg holding an order is saved whole, so Exit still knows what this page placed after a reload or in another tab.
+// Its version is `order.at` (bumped on every order or exit on it); a newer copy always wins, so a stale tab cannot
+// roll a leg back, and a removal (fully exited) only deletes a copy no newer than itself.
+
+export interface StoredTradeLeg { id: string; order: LegOrder; [k: string]: unknown }
+export interface TradeRemoval { id: string; at: number }
+
+/** Is this a leg worth storing (and restoring): an id and an open order record. */
+export function isStoredTradeLeg(v: unknown): v is StoredTradeLeg {
+  if (!v || typeof v !== 'object') return false;
+  const l = v as { id?: unknown; order?: Partial<LegOrder> };
+  const o = l.order;
+  return typeof l.id === 'string' && !!o && (o.broker === 'dhan' || o.broker === 'kotak')
+    && typeof o.qty === 'number' && o.qty > 0 && typeof o.ident === 'string' && o.ident !== ''
+    && typeof o.at === 'number' && (o.productType === 'INTRADAY' || o.productType === 'MARGIN');
+}
+
+export function mergeStoredTrades(stored: StoredTradeLeg[], incoming: StoredTradeLeg[], removed: TradeRemoval[]): StoredTradeLeg[] {
+  const byId = new Map(stored.map((l) => [l.id, l]));
+  for (const l of incoming) {
+    const cur = byId.get(l.id);
+    if (!cur || l.order.at >= cur.order.at) byId.set(l.id, l);
+  }
+  for (const r of removed) {
+    const cur = byId.get(r.id);
+    if (cur && cur.order.at <= r.at) byId.delete(r.id);
+  }
+  return [...byId.values()];
+}
+
+/** What a tab must save: upserts (new / changed orders) and removals (legs it saved that no longer hold an order). */
+export function tradeSaveDiff(
+  legs: { id: string; order?: LegOrder }[], lastSaved: Map<string, number>, now: number,
+): { upserts: StoredTradeLeg[]; removed: TradeRemoval[] } {
+  const open = legs.filter((l): l is { id: string; order: LegOrder } => !!l.order && l.order.qty > 0);
+  const upserts = open.filter((l) => lastSaved.get(l.id) !== l.order.at) as unknown as StoredTradeLeg[];
+  const openIds = new Set(open.map((l) => l.id));
+  const removed = [...lastSaved.keys()].filter((id) => !openIds.has(id)).map((id) => ({ id, at: now }));
+  return { upserts, removed };
+}

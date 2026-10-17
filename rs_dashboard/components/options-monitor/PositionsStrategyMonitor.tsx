@@ -262,7 +262,7 @@ export default function PositionsStrategyMonitor({
             <span
               className="text-[10px] px-2 py-0.5 rounded border font-bold bg-emerald-500/10 text-emerald-400 border-emerald-500/30"
             >
-              INTRADAY (DHAN)
+              INTRADAY ({brokerLabel.toUpperCase()})
             </span>
             <span className="text-[10px] bg-zinc-950 text-zinc-400 px-2 py-0.5 rounded border border-zinc-800">
               {legs.length} {legs.length === 1 ? 'LEG' : 'LEGS'}

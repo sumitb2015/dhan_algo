@@ -18,6 +18,8 @@ interface Mock {
   next: Map<string, 'reject' | 'unknown'>;
   /** contract -> { net qty, product } per broker: placed orders move it, positions read it. */
   book: Record<'dhan' | 'kotak', Map<string, { net: number; product: string }>>;
+  /** The persisted page trades (app/api/options-monitor/trades), by leg id — survives a reload within a test. */
+  stored: Map<string, Record<string, unknown>>;
 }
 
 async function install(page: Page, m: Mock, broker: 'dhan' | 'kotak') {
@@ -38,6 +40,13 @@ async function install(page: Page, m: Mock, broker: 'dhan' | 'kotak') {
         pe: { last_price: 75, security_id: dId(k, 'PE'), implied_volatility: 13 },
       }]));
       return json(route, { success: true, data: { spot: 25010, prev_close: 24990, chain: { oc } } });
+    }
+    if (p === '/api/options-monitor/trades') {
+      if (method === 'POST') {
+        for (const l of (body?.legs ?? []) as Record<string, unknown>[]) m.stored.set(String(l.id), l);
+        for (const r of (body?.removed ?? []) as { id: string }[]) m.stored.delete(r.id);
+      }
+      return json(route, { success: true, legs: [...m.stored.values()] });
     }
     if (p === '/api/scalper/funds') return json(route, { success: true, data: { availabelBalance: 1_000_000 } });
     if (p === '/api/scalper/kotak/funds') return json(route, { success: true, data: { availabelBalance: 2_500_000 } });
@@ -92,7 +101,7 @@ async function executeBasket(page: Page) {
 
 let m: Mock;
 test.beforeEach(async ({ context }) => {
-  m = { calls: [], blocked: [], next: new Map(), book: { dhan: new Map(), kotak: new Map() } };
+  m = { calls: [], blocked: [], next: new Map(), book: { dhan: new Map(), kotak: new Map() }, stored: new Map() };
   await signIn(context);
 });
 test.afterEach(() => { expect(m.blocked.map(c => `${c.method} ${c.path}`), 'an unmocked write was attempted').toEqual([]); });
@@ -194,4 +203,21 @@ test('Dhan: Exit goes to Dhan by security id', async ({ page }) => {
   await expect.poll(() => orderPosts(m).length).toBe(2);
   expect(orderPosts(m)[1].body).toMatchObject({ broker: 'dhan', legs: [{ securityId: dId(24900, 'PE'), exchangeSegment: 'NSE_FNO', quantity: LOT, side: 'BUY' }] });
   expect(m.calls.some(c => c.path.startsWith('/api/scalper/kotak/'))).toBe(false);
+});
+
+test('Kotak: a placed leg survives a reload — restored with its Exit, which still closes it on Kotak', async ({ page }) => {
+  await install(page, m, 'kotak');
+  await placeAndClose(page);
+  await expect.poll(() => m.stored.size).toBe(2);   // both placed legs saved with their order record
+  await page.reload({ waitUntil: 'domcontentloaded' });
+  await expect(page.getByText(/Restored 2 leg\(s\) placed from this page/).first()).toBeVisible({ timeout: 60_000 });
+  await expect(lockedLegs(page)).toHaveCount(2);
+  // The restored strategy replaces the preset: no extra model legs were added.
+  await expect(page.getByRole('button', { name: /^Exit SELL/ })).toHaveCount(2);
+  const btn = exitBtn(page, 24900, 'PE');
+  await btn.click(); await btn.click();
+  await expect.poll(() => orderPosts(m).length).toBe(2);
+  expect(orderPosts(m)[1].body).toMatchObject({ broker: 'kotak', legs: [{ tradingSymbol: kSym(24900, 'PE'), side: 'BUY', quantity: LOT }] });
+  // Fully exited: dropped from the store.
+  await expect.poll(() => [...m.stored.keys()].length).toBe(1);
 });

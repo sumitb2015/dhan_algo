@@ -1,6 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { afterExit, exitPlan, stampPlacedLegs, EXIT_FLAT_GRACE_MS, type LegOrder } from './optionsMonitorOrders.ts';
+import {
+  afterExit, exitPlan, stampPlacedLegs, EXIT_FLAT_GRACE_MS, isStoredTradeLeg, mergeStoredTrades, tradeSaveDiff, type LegOrder,
+} from './optionsMonitorOrders.ts';
 
 const T0 = 1_792_000_000_000;
 type TLeg = { id: string; strike: number; type: 'CE' | 'PE'; side: 'BUY' | 'SELL'; underlying?: string; expiry?: string; isEntered?: boolean; order?: LegOrder };
@@ -48,4 +50,41 @@ test('after an exit the remainder stays tracked; a full exit un-enters the leg',
   const done = afterExit(l, 130, T0 + 1);
   assert.equal(done.order, undefined);
   assert.equal(done.isEntered, false);
+});
+
+// ── persisted page trades ──
+
+const stored = (id: string, at: number, qty = 65) => ({ id, strike: 25100, order: order({ at, qty }) });
+
+test('a newer copy of a leg wins; an older one never rolls it back', () => {
+  const s = [stored('a', T0 + 10, 130)];
+  assert.equal(mergeStoredTrades(s, [stored('a', T0 + 20, 65)], [])[0].order.qty, 65);
+  assert.equal(mergeStoredTrades(s, [stored('a', T0 + 5, 999)], [])[0].order.qty, 130);
+  assert.equal(mergeStoredTrades(s, [stored('b', T0)], []).length, 2);
+});
+
+test('a removal deletes only a copy no newer than itself', () => {
+  const s = [stored('a', T0 + 10)];
+  assert.equal(mergeStoredTrades(s, [], [{ id: 'a', at: T0 + 11 }]).length, 0);
+  assert.equal(mergeStoredTrades(s, [], [{ id: 'a', at: T0 + 9 }]).length, 1, 'another tab re-ordered on it since');
+});
+
+test('only open order records are stored or restored', () => {
+  assert.equal(isStoredTradeLeg(stored('a', T0)), true);
+  assert.equal(isStoredTradeLeg({ id: 'a', order: { ...order(), qty: 0 } }), false);
+  assert.equal(isStoredTradeLeg({ id: 'a' }), false);
+  assert.equal(isStoredTradeLeg({ id: 'a', order: { ...order(), broker: 'zerodha' } }), false);
+});
+
+test('the save diff sends new / changed legs and removes the ones no longer open', () => {
+  const last = new Map([['a', T0], ['b', T0]]);
+  const { upserts, removed } = tradeSaveDiff([
+    { id: 'a', order: order({ at: T0 }) },            // unchanged
+    { id: 'b', order: order({ at: T0 + 5 }) },        // changed (partial exit)
+    { id: 'c', order: order({ at: T0 + 6 }) },        // new
+    { id: 'd' },                                      // model leg: never stored
+  ], last, T0 + 9);
+  assert.deepEqual(upserts.map((u) => u.id), ['b', 'c']);
+  assert.deepEqual(removed, []);
+  assert.deepEqual(tradeSaveDiff([{ id: 'a' }], last, T0 + 9).removed, [{ id: 'a', at: T0 + 9 }, { id: 'b', at: T0 + 9 }]);
 });

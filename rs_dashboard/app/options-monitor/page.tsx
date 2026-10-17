@@ -13,7 +13,7 @@ import OptionChainModal from '@/components/options-monitor/OptionChainModal';
 import OptionOrderModal, { type OptionOrderInitialState, type OptionTradeLeg, type PlacedOptionLeg } from '@/components/OptionOrderModal';
 import { BrokerPicker, usePageBroker } from '@/components/BrokerPicker';
 import { scalperRoute, BROKER_LABELS } from '@/hooks/useBrokerSelector';
-import { afterExit, exitPlan, sendSingleLegOrder, stampPlacedLegs } from '@/lib/optionsMonitorOrders';
+import { afterExit, exitPlan, sendSingleLegOrder, stampPlacedLegs, isStoredTradeLeg, tradeSaveDiff } from '@/lib/optionsMonitorOrders';
 import { UNKNOWN_ORDER_HINT } from '@/lib/orderOutcome';
 import { useLiveOptionsWS } from '@/lib/useLiveOptionsWS';
 import {
@@ -399,8 +399,47 @@ export default function OptionsMonitorPage() {
     }
   }, [selectedExpiry, selectedUnderlying, fetchOptionChain]);
 
+  // ── Persisted page trades ─────────────────────────────────────────────────
+  // Legs this page placed (with their order record — what Exit sizes from) are kept on the server
+  // (app/api/options-monitor/trades), so a reload or another tab can still exit them. Restored once on load, before the
+  // preset strangle is built; saved whenever a placed leg changes (merged per leg by version server-side).
+  const [tradesLoaded, setTradesLoaded] = useState(false);
+  const savedTradesRef = useRef<Map<string, number>>(new Map());
+  useEffect(() => {
+    let cancelled = false;
+    fetch('/api/options-monitor/trades', { cache: 'no-store' })
+      .then((r) => r.json())
+      .then((j: { success?: boolean; legs?: unknown[] }) => {
+        if (cancelled) return;
+        const stored = (j.success && Array.isArray(j.legs) ? j.legs : []).filter(isStoredTradeLeg) as unknown as OptionLegModel[];
+        if (stored.length) {
+          savedTradesRef.current = new Map(stored.map((l) => [l.id, l.order!.at]));
+          setActiveLegs((prev) => [...stored.map((l) => ({ ...l, isEntered: true })), ...prev.filter((l) => !stored.some((s) => s.id === l.id))]);
+          notifyAction(`Restored ${stored.length} leg(s) placed from this page — Exit is on each.`);
+        }
+      })
+      .catch(() => { /* none restored: the page still works; a later save re-creates the file */ })
+      .finally(() => { if (!cancelled) setTradesLoaded(true); });
+    return () => { cancelled = true; };
+  }, [notifyAction]);
+  useEffect(() => {
+    if (!tradesLoaded) return;
+    const { upserts, removed } = tradeSaveDiff(activeLegs, savedTradesRef.current, Date.now());
+    if (!upserts.length && !removed.length) return;
+    // Recorded before the request lands, so a re-render cannot send the same change twice.
+    for (const u of upserts) savedTradesRef.current.set(u.id, u.order.at);
+    for (const r of removed) savedTradesRef.current.delete(r.id);
+    fetch('/api/options-monitor/trades', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ legs: upserts, removed }),
+    }).catch(() => notifyAction('Could not save this page\'s placed legs — they will not survive a reload until the next save.'));
+  }, [activeLegs, tradesLoaded, notifyAction]);
+
   // Initialize realistic strategy preset once chain data arrives (if no broker positions loaded)
   useEffect(() => {
+    // Not before the stored trades are restored: those ARE the strategy when there are any.
+    if (!tradesLoaded) return;
     if (hasInitializedPresetRef.current || chainStrikes.length === 0 || Object.keys(normalizedChain).length === 0) {
       return;
     }
@@ -472,7 +511,7 @@ export default function OptionsMonitorPage() {
         expiry: selectedExpiry,
       },
     ]);
-  }, [chainStrikes, normalizedChain, spot, futurePrice, futureExpiry, uConfig.strikeStep, uConfig.lotSize, ivPct, selectedExpiry, liveQuotes, activeLegs.length]);
+  }, [chainStrikes, normalizedChain, spot, futurePrice, futureExpiry, uConfig.strikeStep, uConfig.lotSize, ivPct, selectedExpiry, liveQuotes, activeLegs.length, tradesLoaded]);
 
   // ── 5. REALTIME MERGED LEGS WITH SUB-SECOND WS TICKS ────────────────────────
   // Real remaining time on the selected expiry — the target-date slider (targetDays) can never

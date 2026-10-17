@@ -273,7 +273,7 @@ export default function RiskGreeksMatrix({
 
             <div className="p-2 rounded-lg bg-zinc-950 border border-zinc-800">
               <span className="text-[9px] font-bold uppercase tracking-wider text-zinc-500 block">
-                AVAIL. MARGIN (DHAN)
+                AVAIL. MARGIN ({brokerLabel.toUpperCase()})
               </span>
               <span className="font-bold text-emerald-400 text-xs mt-0.5 block tabular-nums truncate">
                 {availableMargin !== null && availableMargin !== undefined
