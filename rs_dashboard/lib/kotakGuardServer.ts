@@ -6,7 +6,9 @@ import { shapeKotakPosition } from '@/lib/kotakShape';
 import { joinKotakLtp, kotakSymbolMap, underlyingPrefix } from '@/lib/kotakLtpJoin';
 import { invalidateBrokerCache } from '@/lib/brokerPositionsCache';
 import { PROJECT_ROOT } from '@/lib/pyExec';
-import { emptyGuardState, stepGuards, type ServerGuardState, type PosView, type ExitOrder } from '@/lib/kotakGuardEngine';
+import {
+  emptyGuardState, stepGuards, contractPricesFromBridges, type ServerGuardState, type PosView, type ExitOrder, type BridgeQuoteFile,
+} from '@/lib/kotakGuardEngine';
 
 // The server-resident Kotak guards (P&L Guard + brackets): file store, tick loop and order sending around the pure engine
 // in lib/kotakGuardEngine.ts. The state lives in debug/kotak_server_guards.json and is re-read on every tick and every
@@ -100,7 +102,9 @@ async function bridgePrice(symbol: string, maps: Map<string, Awaited<ReturnType<
   if (!quotes.has(u)) quotes.set(u, readQuoteFile(u));
   const info = maps.get(u)?.[symbol];
   const q = quotes.get(u);
-  if (!info || !q) return 0;
+  // A future has no CE/PE row in the chain buckets (it used to read the PE side at strike 0); its price comes from the
+  // contracts bucket below.
+  if (!info || !q || (info.side !== 'CE' && info.side !== 'PE')) return 0;
   const key = String(Math.round(info.strike));
   const side = info.side === 'CE' ? 'ce' : 'pe';
   const row = info.expiry === q.expiry ? q.strikes?.[key] : q.extra?.[info.expiry]?.[key];
@@ -108,16 +112,38 @@ async function bridgePrice(symbol: string, maps: Map<string, Awaited<ReturnType<
   return ltp > 0 ? ltp : 0;
 }
 
+/** Every live bridge quotes file on disk (any underlying), for their `contracts` buckets. */
+function readAllBridgeFiles(): BridgeQuoteFile[] {
+  let names: string[] = [];
+  try { names = fs.readdirSync(DEBUG_DIR).filter(n => /^live_options_quotes_dhan_[a-z]+\.json$/.test(n)); } catch { return []; }
+  const out: BridgeQuoteFile[] = [];
+  for (const n of names) {
+    try { out.push(JSON.parse(fs.readFileSync(path.join(DEBUG_DIR, n), 'utf8')) as BridgeQuoteFile); } catch { /* mid-write */ }
+  }
+  return out;
+}
+
 async function loadPositions(): Promise<PosView[]> {
   const shaped = kotakRows(await kotakGet(KOTAK_PATHS.positions)).map(shapeKotakPosition);
   const maps = new Map<string, Awaited<ReturnType<typeof kotakSymbolMap>>>();
   const quotes = new Map<string, QuoteFile | null>();
+  // Read lazily, once per pass: only when some open leg is missing from its own underlying's chain.
+  let contracts: Map<string, number> | null = null;
   const views: PosView[] = [];
   for (const p of shaped) {
+    let ltp = 0;
+    if (p.netQty !== 0) {
+      // 1. The leg's own underlying's bridge (chain / off-expiry buckets). 2. Any fresh bridge's per-contract bucket -
+      // another underlying, or a future. 3. loadPositionsPriced falls back to Dhan's option chain for what is left.
+      ltp = await bridgePrice(p.tradingSymbol, maps, quotes);
+      if (!(ltp > 0)) {
+        contracts ??= contractPricesFromBridges(readAllBridgeFiles(), Date.now(), QUOTES_FRESH_MS);
+        ltp = contracts.get(p.tradingSymbol) ?? 0;
+      }
+    }
     views.push({
       symbol: p.tradingSymbol, productRaw: p.productType, exchange: p.exchange || 'nse_fo', netQty: p.netQty,
-      buyAvg: p.buyAvg, sellAvg: p.sellAvg, ltp: p.netQty !== 0 ? await bridgePrice(p.tradingSymbol, maps, quotes) : 0,
-      realized: p.realizedProfit, unrealized: 0,
+      buyAvg: p.buyAvg, sellAvg: p.sellAvg, ltp, realized: p.realizedProfit, unrealized: 0,
     });
   }
   return views;

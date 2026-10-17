@@ -60,6 +60,32 @@ export interface ExitOrder {
 }
 
 export const EXIT_VERIFY_MS = 10_000;
+
+/** The parts of a live options bridge's quotes file (debug/live_options_quotes_dhan_<u>.json) the guards read. */
+export interface BridgeQuoteFile {
+  updated_at?: string;
+  /** Whole contracts the Advanced Scalper asked this bridge to price, on ANY underlying, keyed by Kotak trading symbol. */
+  contracts?: Record<string, { ltp?: number }>;
+}
+
+/**
+ * Kotak trading symbol -> LTP from the `contracts` bucket of every FRESH bridge file. The Advanced Scalper has whichever
+ * bridge it runs price every open Kotak leg, so a CRUDEOIL leg has a price while only the NIFTY bridge is running - but
+ * only in NIFTY's file, which is why every file is read, not just the leg's own underlying. A stale file contributes
+ * nothing (the guard then treats the leg as unpriced and pauses rather than act on an old price).
+ */
+export function contractPricesFromBridges(files: BridgeQuoteFile[], now: number, freshMs: number): Map<string, number> {
+  const out = new Map<string, number>();
+  for (const f of files) {
+    const at = Date.parse(String(f.updated_at ?? ''));
+    if (!Number.isFinite(at) || now - at > freshMs) continue;
+    for (const [symbol, q] of Object.entries(f.contracts ?? {})) {
+      const ltp = Number(q?.ltp);
+      if (ltp > 0 && !out.has(symbol)) out.set(symbol, ltp);
+    }
+  }
+  return out;
+}
 const MAX_EVENTS = 40;
 
 export function emptyGuardState(today: string): ServerGuardState {

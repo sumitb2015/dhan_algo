@@ -1,7 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert';
 import {
-  emptyGuardState, stepGuards, bracketVerdict, EXIT_VERIFY_MS, type PosView, type ServerBracket, type ServerGuardState,
+  emptyGuardState, stepGuards, bracketVerdict, contractPricesFromBridges, EXIT_VERIFY_MS, type PosView, type ServerBracket,
+  type ServerGuardState,
 } from './kotakGuardEngine.ts';
 
 const T = '2026-10-17';
@@ -121,4 +122,26 @@ test('stepGuards never mutates its input', () => {
   const snapshot = JSON.stringify(s);
   stepGuards(s, [pos({ ltp: 70 })], 2000, T);
   assert.strictEqual(JSON.stringify(s), snapshot);
+});
+
+test('contract prices come from every fresh bridge file: a CRUDEOIL leg is priced from the NIFTY bridge', () => {
+  const now = Date.parse('2026-10-19T10:00:05Z');
+  const fresh = '2026-10-19T10:00:03Z';
+  const prices = contractPricesFromBridges([
+    // The NIFTY bridge, which the Advanced Scalper asked to price every open Kotak leg.
+    { updated_at: fresh, contracts: { CRUDEOIL19NOV26FUT: { ltp: 9388 }, CRUDEOIL17NOV269000PE: { ltp: 355.7 }, NIFTY26OCT22500PE: { ltp: 37.05 } } },
+    // A stale CRUDEOIL bridge file: ignored, never an old price.
+    { updated_at: '2026-10-19T09:00:00Z', contracts: { CRUDEOIL19NOV26FUT: { ltp: 9000 } } },
+  ], now, 6000);
+  assert.strictEqual(prices.get('CRUDEOIL19NOV26FUT'), 9388);
+  assert.strictEqual(prices.get('CRUDEOIL17NOV269000PE'), 355.7);
+  assert.strictEqual(prices.get('NIFTY26OCT22500PE'), 37.05);
+});
+
+test('contract prices: nothing from a stale or undated file, and a zero or missing ltp is not a price', () => {
+  const now = Date.parse('2026-10-19T10:00:05Z');
+  assert.strictEqual(contractPricesFromBridges([{ updated_at: '2026-10-19T09:59:00Z', contracts: { A: { ltp: 1 } } }], now, 6000).size, 0);
+  assert.strictEqual(contractPricesFromBridges([{ contracts: { A: { ltp: 1 } } }], now, 6000).size, 0);
+  const p = contractPricesFromBridges([{ updated_at: '2026-10-19T10:00:04Z', contracts: { A: { ltp: 0 }, B: {}, C: { ltp: 2 } } }], now, 6000);
+  assert.deepStrictEqual([...p.entries()], [['C', 2]]);
 });
