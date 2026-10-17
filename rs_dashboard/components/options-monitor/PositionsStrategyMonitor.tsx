@@ -159,8 +159,14 @@ interface PositionsStrategyMonitorProps {
   onUpdateLegLots?: (id: string, deltaLots: number) => void;
   onUpdateAllLots?: (deltaLots: number) => void;
   onOpenTradeBasket?: () => void;
+  /** The account EXECUTE BASKET sends to (the page's order broker). Default 'Dhan'. */
+  brokerLabel?: string;
   onOpenSingleLegTrade?: (leg: OptionLegModel) => void;
   onCloseSingleLeg?: (leg: OptionLegModel) => void;
+  /** A leg this page's ticket placed (`leg.order`): a real market exit, sized by the page off the broker's book. */
+  onExitLeg?: (leg: OptionLegModel) => void;
+  /** Legs whose exit is in flight (their Exit button is disabled). */
+  exitingLegIds?: Set<string>;
   onToggleLegEntered?: (id: string) => void;
   onOpenOptionChain?: () => void;
 }
@@ -195,11 +201,28 @@ export default function PositionsStrategyMonitor({
   onUpdateLegLots,
   onUpdateAllLots,
   onOpenTradeBasket,
+  brokerLabel = 'Dhan',
   onOpenSingleLegTrade,
   onCloseSingleLeg,
+  onExitLeg,
+  exitingLegIds,
   onToggleLegEntered,
   onOpenOptionChain,
 }: PositionsStrategyMonitorProps) {
+  // Exit is real money: the first click arms it for 4 s ("Confirm?"), the second sends.
+  const [exitConfirmId, setExitConfirmId] = useState<string | null>(null);
+  const exitConfirmTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const clickExit = (leg: OptionLegModel) => {
+    if (exitConfirmTimer.current) clearTimeout(exitConfirmTimer.current);
+    if (exitConfirmId === leg.id) {
+      setExitConfirmId(null);
+      onExitLeg?.(leg);
+      return;
+    }
+    setExitConfirmId(leg.id);
+    exitConfirmTimer.current = setTimeout(() => setExitConfirmId(null), 4000);
+  };
+
   // Real remaining time on the selected expiry — never floored to a fixed weekly-expiry
   // assumption, since that overstates time value / SD band width on 0- and 1-DTE contracts.
   // Matches BasketPayoffChart's identical computation so both pages produce the same curve.
@@ -339,7 +362,7 @@ export default function PositionsStrategyMonitor({
                 onClick={onOpenTradeBasket}
                 disabled={legs.length === 0}
                 className="flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs shadow transition-colors cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
-                title="Place Live Multi-Leg Order on DHAN [F5]"
+                title={`Place Live Multi-Leg Order on ${brokerLabel.toUpperCase()} [F5]`}
               >
                 <Zap className="w-3.5 h-3.5 fill-current" />
                 <span>EXECUTE BASKET</span>
@@ -694,20 +717,34 @@ export default function PositionsStrategyMonitor({
                                 type="button"
                                 onClick={() => onOpenSingleLegTrade(leg)}
                                 className="flex items-center gap-0.5 px-1.5 py-0.5 rounded bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 text-[10px] font-bold transition-colors cursor-pointer"
-                                title={`Place Order for ${leg.side} ${leg.strike} ${leg.type} on DHAN`}
+                                title={`Place Order for ${leg.side} ${leg.strike} ${leg.type} on ${brokerLabel}`}
                               >
                                 <Zap className="w-2.5 h-2.5 fill-current" />
                                 <span>Trade</span>
                               </button>
                             )}
 
-                            {/* Single Leg Close / Square Off Button */}
-                            {onCloseSingleLeg && (leg.isEntered || guard?.triggered) && (
+                            {/* Exit: a leg this page placed — closes what it placed, on its own broker and product */}
+                            {onExitLeg && leg.order && leg.order.qty > 0 && (
+                              <button
+                                type="button"
+                                onClick={() => clickExit(leg)}
+                                disabled={exitingLegIds?.has(leg.id)}
+                                aria-label={`Exit ${leg.side} ${leg.strike} ${leg.type}`}
+                                className="flex items-center gap-0.5 px-1.5 py-0.5 rounded bg-rose-600 hover:bg-rose-500 text-oncolor border border-rose-500 text-[10px] font-bold transition-colors cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
+                                title={`Exit ${leg.order.qty} qty (what this page placed, capped by what ${leg.order.broker === 'kotak' ? 'Kotak' : 'Dhan'} still shows) at market, ${leg.order.productType} — ${leg.side === 'BUY' ? 'SELL' : 'BUY'}. Click twice to send.`}
+                              >
+                                <span>{exitingLegIds?.has(leg.id) ? 'Exiting…' : exitConfirmId === leg.id ? 'Confirm exit?' : 'Exit'}</span>
+                              </button>
+                            )}
+
+                            {/* Single Leg Close / Square Off Button: a leg marked entered by hand (no order record) */}
+                            {onCloseSingleLeg && !(leg.order && leg.order.qty > 0) && (leg.isEntered || guard?.triggered) && (
                               <button
                                 type="button"
                                 onClick={() => onCloseSingleLeg(leg)}
                                 className="flex items-center gap-0.5 px-1.5 py-0.5 rounded bg-rose-500/10 hover:bg-rose-500/20 text-rose-400 border border-rose-500/30 text-[10px] font-bold transition-colors cursor-pointer"
-                                title={`Square Off ${leg.side} ${leg.strike} ${leg.type} on DHAN (opposite action: ${leg.side === 'BUY' ? 'SELL' : 'BUY'})`}
+                                title={`Open a square-off ticket for ${leg.side} ${leg.strike} ${leg.type} (opposite action: ${leg.side === 'BUY' ? 'SELL' : 'BUY'}) — this leg has no order record from this page, so check its quantity yourself`}
                               >
                                 <span>Close</span>
                               </button>

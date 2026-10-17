@@ -9,6 +9,7 @@ import type { ScalperPosition } from '@/lib/zerodhaShape';
 import { scalperRoute, BROKER_LABELS } from '@/hooks/useBrokerSelector';
 import { withKotakContracts, kotakOpenUnderlyings, kotakUnderlyingOf, type KotakSymbolMap } from '@/lib/kotakPositionContracts';
 import { UNKNOWN_ORDER_HINT } from '@/lib/orderOutcome';
+import { sendSingleLegOrder } from '@/lib/optionsMonitorOrders';
 import {
   type LedgerBasket,
   type LedgerBroker,
@@ -146,35 +147,9 @@ export default function LiveTradingDesk({ broker, ready = true, baskets, onBaske
     ].filter(Boolean));
   }
 
-  /** The reply of /api/options/order for one leg: placed, rejected, or UNKNOWN (may be live). */
-  async function sendExit(leg: { ident: string; exchange: string }, qty: number, side: 'BUY' | 'SELL', productType: string): Promise<{ kind: 'placed'; orderId: string } | { kind: 'rejected'; error: string } | { kind: 'unknown'; error: string }> {
-    let json: { success?: boolean; error?: string; data?: { success?: boolean; orderId?: string; error?: string; unknown?: boolean }[] } | null = null;
-    let status: number | null = null;
-    try {
-      const res = await fetch('/api/options/order', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          broker,
-          legs: [{
-            ...(broker === 'kotak' ? { tradingSymbol: leg.ident, exchange: leg.exchange } : { securityId: leg.ident, exchangeSegment: leg.exchange }),
-            quantity: qty, side, orderType: 'MARKET',
-          }],
-          mode: normProduct(productType) === 'MARGIN' ? 'positional' : 'intraday',
-        }),
-      });
-      status = res.status;
-      json = await res.json().catch(() => null);
-    } catch { /* no reply */ }
-    if (!json) {
-      return status != null && status < 500
-        ? { kind: 'rejected', error: `Order route answered HTTP ${status}` }
-        : { kind: 'unknown', error: 'No reply from the order route' };
-    }
-    const r = json.data?.[0];
-    if (json.success && r?.orderId) return { kind: 'placed', orderId: String(r.orderId) };
-    if (r?.unknown || (json as { unknown?: boolean }).unknown) return { kind: 'unknown', error: r?.error ?? json.error ?? 'status unknown' };
-    return { kind: 'rejected', error: r?.error ?? json.error ?? 'rejected' };
+  /** The reply of /api/options/order for one leg: placed, rejected, or UNKNOWN (may be live) — on this desk's broker. */
+  function sendExit(leg: { ident: string; exchange: string }, qty: number, side: 'BUY' | 'SELL', productType: string) {
+    return sendSingleLegOrder(broker, leg, qty, side, productType);
   }
 
   /** A leg whose last exit came back UNKNOWN within the hold: refuse (and say why) instead of sending a second close. */

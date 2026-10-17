@@ -27,6 +27,8 @@ interface RiskGreeksMatrixProps {
   onTrim50: () => void;
   onFlatten: () => void;
   onOpenTradeBasket?: () => void;
+  /** The account EXECUTE BASKET sends to (the page's order broker). Default 'Dhan'. */
+  brokerLabel?: string;
 }
 
 function formatRupee(amount: number): string {
@@ -62,6 +64,7 @@ export default function RiskGreeksMatrix({
   onTrim50,
   onFlatten,
   onOpenTradeBasket,
+  brokerLabel = 'Dhan',
 }: RiskGreeksMatrixProps) {
   const [multiplyByLotSize, setMultiplyByLotSize] = React.useState<boolean>(true);
   const isRupeeDeltaPositive = greeks.rupeeDelta >= 0;
@@ -316,7 +319,7 @@ export default function RiskGreeksMatrix({
               type="button"
               onClick={onOpenTradeBasket}
               className="w-full flex items-center justify-between px-3 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs shadow-sm transition-all cursor-pointer group"
-              title="Execute active strategy basket on Dhan broker [F5]"
+              title={`Execute active strategy basket on ${brokerLabel} [F5]`}
             >
               <div className="flex items-center gap-1.5">
                 <Zap className="w-3.5 h-3.5 fill-current group-hover:scale-110 transition-transform" />

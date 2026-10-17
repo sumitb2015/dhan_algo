@@ -413,7 +413,7 @@ export default function AddLegModal({
                     });
                   }}
                   className="flex items-center gap-1.5 px-3.5 py-1.5 rounded-xl disabled:opacity-50 disabled:cursor-not-allowed bg-emerald-600 hover:bg-emerald-500 text-white font-bold shadow transition-colors cursor-pointer"
-                  title="Open Broker Order Ticket to execute this trade on Dhan"
+                  title="Open the order ticket to execute this trade on the broker picked in the page header"
                 >
                   <Zap className="w-3.5 h-3.5 fill-current" />
                   <span>PLACE ORDER NOW</span>

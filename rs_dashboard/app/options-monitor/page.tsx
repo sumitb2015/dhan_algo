@@ -10,7 +10,11 @@ import RiskGreeksMatrix from '@/components/options-monitor/RiskGreeksMatrix';
 import AddLegModal from '@/components/options-monitor/AddLegModal';
 import HotkeysModal from '@/components/options-monitor/HotkeysModal';
 import OptionChainModal from '@/components/options-monitor/OptionChainModal';
-import OptionOrderModal, { type OptionOrderInitialState, type OptionTradeLeg } from '@/components/OptionOrderModal';
+import OptionOrderModal, { type OptionOrderInitialState, type OptionTradeLeg, type PlacedOptionLeg } from '@/components/OptionOrderModal';
+import { BrokerPicker, usePageBroker } from '@/components/BrokerPicker';
+import { scalperRoute, BROKER_LABELS } from '@/hooks/useBrokerSelector';
+import { afterExit, exitPlan, sendSingleLegOrder, stampPlacedLegs } from '@/lib/optionsMonitorOrders';
+import { UNKNOWN_ORDER_HINT } from '@/lib/orderOutcome';
 import { useLiveOptionsWS } from '@/lib/useLiveOptionsWS';
 import {
   UNDERLYINGS,
@@ -39,6 +43,10 @@ function modelLeg(
 
 
 export default function OptionsMonitorPage() {
+  // The account this page's orders go to (Dhan or Kotak; this page only). The chain, live feed, Greeks and every price
+  // stay Dhan's; the order ticket resolves the contracts on the chosen broker. The first render is always Dhan
+  // (usePageBroker), so the funds read and the order ticket wait for `brokerLoaded`.
+  const [broker, setBroker, brokerLoaded] = usePageBroker('optionsMonitor.broker');
   // Underlying configuration
   const [selectedUnderlying, setSelectedUnderlying] = useState<string>('NIFTY');
   const uConfig = UNDERLYINGS[selectedUnderlying] || UNDERLYINGS.NIFTY;
@@ -337,11 +345,12 @@ export default function OptionsMonitorPage() {
     }
   }, []);
 
-  // ── 4. FETCH CURRENT AVAILABLE MARGIN (DHAN API ONLY) ────────────────────
+  // ── 4. FETCH CURRENT AVAILABLE MARGIN (the order broker's account) ─────────
   const fetchAvailableMargin = useCallback(async () => {
+    if (!brokerLoaded) return;
     setIsFundsLoading(true);
     try {
-      const res = await fetch('/api/scalper/funds', { cache: 'no-store' });
+      const res = await fetch(scalperRoute(broker, 'funds'), { cache: 'no-store' });
       const json = await res.json();
       if (json && json.success && json.data) {
         const bal =
@@ -356,20 +365,22 @@ export default function OptionsMonitorPage() {
       }
       setAvailableMargin(null);
     } catch (err) {
-      console.error('[OptionsMonitor] Failed to fetch available margin from Dhan API:', err);
+      console.error(`[OptionsMonitor] Failed to fetch available margin from ${broker}:`, err);
       setAvailableMargin(null);
     } finally {
       setIsFundsLoading(false);
     }
-  }, []);
+  }, [broker, brokerLoaded]);
 
-  // Initial mount: load expiries, chain, and Dhan funds
+  // The order broker's funds: once its choice is known, and again whenever it changes.
+  useEffect(() => { (async () => { await fetchAvailableMargin(); })(); }, [fetchAvailableMargin]);
+
+  // Initial mount: load expiries and chain (Dhan market data)
   useEffect(() => {
     document.title = 'Options Risk & Strategy Monitor | Dhan Algo';
 
     let isSubscribed = true;
     (async () => {
-      fetchAvailableMargin();
       const exp = await fetchExpiries(selectedUnderlying);
       if (isSubscribed && exp) {
         await fetchOptionChain(selectedUnderlying, exp);
@@ -379,7 +390,7 @@ export default function OptionsMonitorPage() {
     return () => {
       isSubscribed = false;
     };
-  }, [selectedUnderlying, fetchExpiries, fetchOptionChain, fetchAvailableMargin]);
+  }, [selectedUnderlying, fetchExpiries, fetchOptionChain]);
 
   // When selectedExpiry changes, re-fetch chain
   useEffect(() => {
@@ -1536,11 +1547,80 @@ export default function OptionsMonitorPage() {
     setOrderModalOpen(true);
   }, [selectedUnderlying, selectedExpiry, uConfig.lotSize, normalizedChain]);
 
-  const handleOrderSuccess = useCallback((orderIds: string[], summary: string) => {
-    notifyAction(`Intraday orders placed successfully [INTRADAY]! IDs: ${orderIds.join(', ')}`);
-    setActiveLegs((prev) => prev.map((l) => ({ ...l, isEntered: true })));
+  // Only the legs the broker actually took are marked entered: the ticket reports a partial basket (a leg rejected, or
+  // UNKNOWN — it may be live) and hands back just the placed ones. Matched by contract (strike, type, side, and the
+  // basket's underlying / expiry) — marking every leg entered on any success also flagged the whole basket after a
+  // single leg was sent from the chain window. Each placed leg records its order (lib/optionsMonitorOrders.ts): what
+  // Exit sizes from, on that account.
+  const handleOrderSuccess = useCallback((orderIds: string[], summary: string, placed: PlacedOptionLeg[], underlying: string, expiry: string) => {
+    notifyAction(`Orders placed on ${BROKER_LABELS[broker]}: ${summary}${orderIds.length ? ` · IDs: ${orderIds.join(', ')}` : ''}`);
+    setActiveLegs((prev) => stampPlacedLegs(prev, placed, broker, { underlying, expiry }, { underlying: selectedUnderlying, expiry: selectedExpiry }, Date.now()));
     fetchAvailableMargin();
+  }, [notifyAction, fetchAvailableMargin, broker, selectedUnderlying, selectedExpiry]);
+
+  // ── Exit a leg this page placed ───────────────────────────────────────────
+  // Re-reads the leg's OWN broker's book and closes min(what this page placed, what the broker still shows) on the leg's
+  // own product — never its lot count (the old Close ticket could over-close a shared contract or flip it). An exit
+  // whose outcome is UNKNOWN holds further exits on that leg for a minute (it may still land).
+  const [exitingLegIds, setExitingLegIds] = useState<Set<string>>(new Set());
+  const exitingRef = useRef<Set<string>>(new Set());
+  const exitUnknownRef = useRef<Map<string, number>>(new Map());
+  const handleExitLeg = useCallback(async (leg: OptionLegModel) => {
+    const o = leg.order;
+    const label = `${leg.side} ${leg.strike} ${leg.type}`;
+    if (!o || !(o.qty > 0) || exitingRef.current.has(leg.id)) return;
+    const heldAt = exitUnknownRef.current.get(leg.id);
+    if (heldAt != null && Date.now() - heldAt < 60_000) {
+      notifyAction(`${label}: the previous exit's status is UNKNOWN — not sending another for ${Math.ceil((60_000 - (Date.now() - heldAt)) / 1000)} s. ${UNKNOWN_ORDER_HINT}`);
+      return;
+    }
+    exitingRef.current.add(leg.id);
+    setExitingLegIds(new Set(exitingRef.current));
+    try {
+      let rows: Record<string, unknown>[] | null = null;
+      try {
+        const res = await fetch(scalperRoute(o.broker, 'positions'), { cache: 'no-store' });
+        const j = await res.json() as { success?: boolean; data?: Record<string, unknown>[] };
+        if (j.success && Array.isArray(j.data)) rows = j.data;
+      } catch { /* unreadable */ }
+      if (!rows) {
+        notifyAction(`${label}: ${BROKER_LABELS[o.broker]} positions could not be read — nothing was sent. Try again.`);
+        return;
+      }
+      const plan = exitPlan(o, leg.side, rows, Date.now());
+      if (plan.kind === 'flat') {
+        if (plan.lag) {
+          notifyAction(`${label}: ${BROKER_LABELS[o.broker]} does not show the position yet (just placed) — try again in a few seconds. Nothing was sent.`);
+        } else {
+          setActiveLegs((prev) => prev.map((l) => (l.id === leg.id ? afterExit(l, o.qty, Date.now()) : l)));
+          notifyAction(`${label}: ${BROKER_LABELS[o.broker]} shows nothing open — it was closed outside this page. Marked exited; nothing was sent.`);
+        }
+        return;
+      }
+      if (plan.kind === 'opposite') {
+        notifyAction(`${label}: ${BROKER_LABELS[o.broker]} shows the OPPOSITE side open on this contract — nothing was sent. Check Positions.`);
+        return;
+      }
+      const out = await sendSingleLegOrder(o.broker, { ident: o.ident, exchange: o.exchange }, plan.qty, plan.side, o.productType);
+      if (out.kind === 'placed') {
+        exitUnknownRef.current.delete(leg.id);
+        setActiveLegs((prev) => prev.map((l) => (l.id === leg.id ? afterExit(l, plan.qty, Date.now()) : l)));
+        notifyAction(`Exited ${label}: ${plan.side} ${plan.qty} on ${BROKER_LABELS[o.broker]} · order ${out.orderId}`);
+        fetchAvailableMargin();
+      } else if (out.kind === 'unknown') {
+        exitUnknownRef.current.set(leg.id, Date.now());
+        notifyAction(`${label}: exit status UNKNOWN (${out.error}). The leg stays open here; no further exit on it for a minute. ${UNKNOWN_ORDER_HINT}`);
+      } else {
+        notifyAction(`${label}: exit rejected — ${out.error}`);
+      }
+    } finally {
+      exitingRef.current.delete(leg.id);
+      setExitingLegIds(new Set(exitingRef.current));
+    }
   }, [notifyAction, fetchAvailableMargin]);
+  // A leg holding an order on an account locks the picker: new orders on another account would leave the page's
+  // positions split across two brokers.
+  const brokerLockedByLeg = activeLegs.some((l) => (l.order?.qty ?? 0) > 0);
 
   const handleToggleLegEntered = useCallback((id: string) => {
     setActiveLegs((prev) =>
@@ -1724,8 +1804,10 @@ export default function OptionsMonitorPage() {
             </Link>
           </div>
 
-          {/* Right Controls: Global Navbar */}
+          {/* Right Controls: order broker + Global Navbar */}
           <div className="flex items-center gap-2">
+            <BrokerPicker value={broker} onChange={setBroker} disabled={orderModalOpen || brokerLockedByLeg}
+              disabledReason={brokerLockedByLeg ? `Locked: a leg placed here is open on ${BROKER_LABELS[broker]}. Exit it before switching.` : 'Close the order ticket to switch broker'} />
             <NavBar />
           </div>
         </header>
@@ -1755,6 +1837,7 @@ export default function OptionsMonitorPage() {
           netTheta={portfolioGreeks.netTheta}
           estimatedMargin={portfolioGreeks.estimatedMargin}
           availableMargin={availableMargin}
+          marginBrokerLabel={BROKER_LABELS[broker]}
           isFundsLoading={isFundsLoading}
           isLiveLoading={isChainLoading}
           wsTransport={transport}
@@ -1777,6 +1860,7 @@ export default function OptionsMonitorPage() {
           {/* LEFT COLUMN: Expansive Strategy, Positions Table & Payoff Curve */}
           <div className="flex-1 min-w-0 w-full">
             <PositionsStrategyMonitor
+              brokerLabel={BROKER_LABELS[broker]}
               strategyName={strategyName}
               totalLots={totalLots}
               totalQty={totalQty}
@@ -1808,6 +1892,8 @@ export default function OptionsMonitorPage() {
               onOpenTradeBasket={handleOpenTradeBasket}
               onOpenSingleLegTrade={handleOpenSingleLegTrade}
               onCloseSingleLeg={handleOpenSingleLegClose}
+              onExitLeg={handleExitLeg}
+              exitingLegIds={exitingLegIds}
               onToggleLegEntered={handleToggleLegEntered}
               onOpenOptionChain={() => setIsOptionChainOpen(true)}
             />
@@ -1819,6 +1905,7 @@ export default function OptionsMonitorPage() {
               greeks={portfolioGreeks}
               lastActionMessage={lastActionMessage}
               availableMargin={availableMargin}
+              brokerLabel={BROKER_LABELS[broker]}
               onRollCe={handleRollCe}
               onRollPe={handleRollPe}
               onRollCeUp={handleRollCeUp}
@@ -1858,11 +1945,14 @@ export default function OptionsMonitorPage() {
       />
 
       {/* ── BROKER ORDER EXECUTION MODAL ─────────────────────────────────── */}
+      {/* Not before the saved broker is known: a ticket opened on the first render would resolve contracts — and could
+          send the order — on Dhan for a page saved on Kotak. */}
       <OptionOrderModal
-        isOpen={orderModalOpen}
+        isOpen={orderModalOpen && brokerLoaded}
         onClose={() => setOrderModalOpen(false)}
         initialOrder={activeTradeOrder}
         onOrderSuccess={handleOrderSuccess}
+        broker={broker}
       />
 
       {/* ── OPTION CHAIN MODAL WINDOW ─────────────────────────────────────── */}

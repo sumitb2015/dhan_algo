@@ -6,6 +6,7 @@
  */
 
 import { buildPayoffModel, payoffAt } from './optionsPayoff.ts';
+import type { LegOrder } from './optionsMonitorOrders.ts';
 import {
   type OptType,
   CALENDAR_DAYS_PER_YEAR,
@@ -100,6 +101,9 @@ export interface OptionLegModel {
   securityId?: string; // Dhan security id captured from the chain at leg-creation time
   isEntered?: boolean; // true if position has been entered/executed
   guard?: PositionGuard;
+  /** What THIS page's order ticket placed on this leg (account, units, product, contract) — what Exit sizes from. Absent
+   *  on a leg marked entered by hand. See lib/optionsMonitorOrders.ts. */
+  order?: LegOrder;
 }
 
 /**

@@ -7,7 +7,7 @@ export type DhanKotak = 'dhan' | 'kotak';
 
 /**
  * Per-page Dhan / Kotak choice for the terminals that trade on either (Triple Straddle, Bearish Strikes, Options Screener,
- * Covered Call, Equity ticket, CSP desk, Live Options Charts, Option Strats – Stocks). Remembered per page in this browser only; it is a convenience, never the
+ * Covered Call, Equity ticket, CSP desk, Live Options Charts, Option Strats – Stocks, Options Monitor). Remembered per page in this browser only; it is a convenience, never the
  * authority for an open position, which always keeps the broker it was opened on.
  */
 export function usePageBroker(storageKey: string): [DhanKotak, (b: DhanKotak) => void, boolean] {

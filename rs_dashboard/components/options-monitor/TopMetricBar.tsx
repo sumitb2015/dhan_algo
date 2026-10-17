@@ -25,6 +25,8 @@ interface TopMetricBarProps {
   estimatedMargin: number;
   availableMargin?: number | null;
   isFundsLoading?: boolean;
+  /** Whose funds AVAIL. MARGIN shows (the page's order broker). Default 'Dhan'. */
+  marginBrokerLabel?: string;
   isLiveLoading: boolean;
   wsTransport?: 'ws' | 'poll';
   wsStatus?: 'RUNNING' | 'STOPPED' | 'STARTING' | 'ERROR';
@@ -55,6 +57,7 @@ export default function TopMetricBar({
   estimatedMargin,
   availableMargin = null,
   isFundsLoading = false,
+  marginBrokerLabel = 'Dhan',
   isLiveLoading,
   wsTransport = 'poll',
   wsStatus = 'STOPPED',
@@ -285,12 +288,12 @@ export default function TopMetricBar({
           {/* AVAIL. MARGIN */}
           <div
             className="flex flex-col justify-between gap-0.5 rounded-lg border border-zinc-800 bg-zinc-950 px-2.5 py-1 min-w-[95px]"
-            title="Current available margin in Dhan HQ account"
+            title={`Current available margin in the ${marginBrokerLabel} account (where this page's orders go)`}
           >
             <div className="flex items-center justify-between gap-1">
               <span className="text-[9px] font-bold uppercase tracking-[0.14em] text-zinc-400">AVAIL. MARGIN</span>
               <span className="text-[8px] font-bold uppercase text-sky-400 px-1 py-0.2 rounded bg-sky-500/10">
-                DHAN
+                {marginBrokerLabel}
               </span>
             </div>
             <div className="font-bold text-xs text-emerald-400 tabular-nums">
