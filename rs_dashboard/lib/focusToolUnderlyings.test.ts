@@ -69,3 +69,30 @@ test('brokerToInternalQuantity: only Dhan reports MCX in lots', () => {
   assert.equal(brokerToInternalQuantity('kotak', 'CRUDEOILM', 30), 30);
   assert.equal(brokerToInternalQuantity('kotak', 'NIFTY', 65), 65);
 });
+
+test('maxOrderUnits: one under the freeze, whole lots, never above the route caps', async () => {
+  const { maxOrderUnits, FALLBACK_FREEZE_UNITS } = await import('./focusToolUnderlyings.ts');
+  assert.equal(maxOrderUnits('dhan', 'NIFTY', 65, 3511), 3510);          // 54 lots
+  assert.equal(maxOrderUnits('dhan', 'SENSEX', 20, 1001), 1000);         // 50 lots
+  assert.equal(maxOrderUnits('dhan', 'BANKNIFTY', 30, 1441), 1440);      // 48 lots
+  // A freeze above the fts cap of 3750: the cap wins (57 NIFTY lots).
+  assert.equal(maxOrderUnits('dhan', 'NIFTY', 65, 9000), 3705);
+  // Kotak: its 100-lot opening cap.
+  assert.equal(maxOrderUnits('kotak', 'SENSEX', 20, 9000), 2000);
+  // No freeze in the lookup: the conservative fallback.
+  assert.equal(maxOrderUnits('dhan', 'NIFTY', 65, undefined), Math.floor(FALLBACK_FREEZE_UNITS.NIFTY / 65) * 65);
+  // MCX in page units (barrels): Dhan freeze 494 lots → 4930 barrels.
+  assert.equal(maxOrderUnits('dhan', 'CRUDEOILM', 10, 4940), 4930);
+  // Never under one lot, and 0 without a lot size.
+  assert.equal(maxOrderUnits('dhan', 'NIFTY', 65, 10), 65);
+  assert.equal(maxOrderUnits('dhan', 'NIFTY', 0, 3511), 0);
+});
+
+test('sliceOrderUnits: whole slices first, the remainder last, nothing lost', async () => {
+  const { sliceOrderUnits } = await import('./focusToolUnderlyings.ts');
+  assert.deepEqual(sliceOrderUnits(650, 3510), [650]);
+  assert.deepEqual(sliceOrderUnits(13000, 3510), [3510, 3510, 3510, 2470]);
+  assert.deepEqual(sliceOrderUnits(7020, 3510), [3510, 3510]);
+  assert.deepEqual(sliceOrderUnits(0, 3510), []);
+  assert.equal(sliceOrderUnits(13000, 3510).reduce((a, b) => a + b, 0), 13000);
+});

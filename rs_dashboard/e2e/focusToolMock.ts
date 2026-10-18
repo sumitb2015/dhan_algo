@@ -73,12 +73,17 @@ export interface FocusMock {
   kotakPositionsError: string | null;
   /** The reply to an order POST. Default: booked. A test may also move the mocked book here (a fill). */
   orderReply: (path: string, body: Record<string, unknown> | null, m: FocusMock) => OrderReply;
+  /** One order's status (/api/scalper/orders?orderId=): its `data`, or null for "not found" (the default, like a lag). */
+  orderStatus: (orderId: string, m: FocusMock) => Record<string, unknown> | null;
+  /** Freeze quantity the lookups report (the broker's own units), or undefined for an older cache without one. */
+  freezeQty?: number;
 }
 
 export function newFocusMock(): FocusMock {
   return {
     calls: [], blocked: [], config: config([]), saves: [], kotakPositions: [], dhanPositions: [], kotakPositionsError: null,
     orderReply: () => ({ status: 200, body: { success: true, order_id: 'E2E1' } }),
+    orderStatus: () => null,
   };
 }
 
@@ -135,11 +140,11 @@ export async function installFocusMock(page: Page, m: FocusMock, savedBroker: 'd
     }
     if (p === '/api/scalper/lookup') {
       const strikes = Object.fromEntries(STRIKES.map((k, i) => [k, { ceId: String(100 + i), peId: String(200 + i) }]));
-      return json(route, { success: true, data: { lotSize: 65, strikes } });
+      return json(route, { success: true, data: { lotSize: 65, strikes, ...(m.freezeQty ? { freezeQty: m.freezeQty } : {}) } });
     }
     if (p === '/api/scalper/kotak/lookup') {
       const strikes = Object.fromEntries(STRIKES.map(k => [k, { ceSymbol: `NIFTY26O19${k}CE`, peSymbol: `NIFTY26O19${k}PE` }]));
-      return json(route, { success: true, data: { lotSize: 65, strikes } });
+      return json(route, { success: true, data: { lotSize: 65, strikes, ...(m.freezeQty ? { freezeQty: m.freezeQty } : {}) } });
     }
     if (p === '/api/scalper/poll') return json(route, { success: true, positions: m.dhanPositions, positionsError: null, orders: [], trades: [] });
     if (p === '/api/scalper/kotak/poll') {
@@ -150,7 +155,11 @@ export async function installFocusMock(page: Page, m: FocusMock, savedBroker: 'd
     if (p === '/api/scalper/funds' || p === '/api/scalper/kotak/funds') return json(route, { success: true, data: { availabelBalance: 500000 } });
     if (p === '/api/scalper/orders' || p === '/api/scalper/kotak/orders') {
       // A single order's status (fill confirmation / traded price): unknown to the mock → "not found", like a lag.
-      if (u.searchParams.get('orderId')) return json(route, { success: false, error: 'Order not found' }, 404);
+      const oid = u.searchParams.get('orderId');
+      if (oid) {
+        const st = m.orderStatus(oid, m);
+        return st ? json(route, { success: true, data: st }) : json(route, { success: false, error: 'Order not found' }, 404);
+      }
       return json(route, { success: true, data: [] });
     }
     if (p === '/api/scalper/trades' || p === '/api/scalper/kotak/trades') return json(route, { success: true, data: [] });

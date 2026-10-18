@@ -60,7 +60,7 @@ def _to_dt(raw):
         val = float(str(raw).strip())
         if val > 1_500_000_000_000:
             val /= 1000
-        # Dhan's intraday epoch is IST-naive for some instruments: treat as UTC clock then label IST
+        # True unix epoch (UTC-based): convert to the IST wall clock the page's IST-naive stamps use
         return datetime.fromtimestamp(val, tz=_IST)
     except (ValueError, TypeError, OSError):
         pass

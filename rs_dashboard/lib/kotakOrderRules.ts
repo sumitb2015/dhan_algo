@@ -1,11 +1,14 @@
 // Pure rules for /api/scalper/kotak/order: the per-source lot cap and derivative price snapping. Kept out of the route
 // so they are unit-tested without ever reaching an order API.
 
+import { FTS_KOTAK_MAX_ORDER_LOTS } from './focusToolUnderlyings.ts';
+
 /** Per-source cap on LOTS per order — the server-side twin of a page's own limit, a backstop against a UI bug, not an
  *  auth boundary (fast-order's SOURCE_QTY_CAPS has the same shape). Only a caller that names its source is capped, and
  *  callers name it on OPENING orders only: a close must never be refused for its size. 'as' = Advanced Scalper
- *  (its MAX_LOTS_PER_ORDER = 100); 'bds' = Breakdown Scalper (20 lots, its MAX_LOTS_PER_TRADE); 'alab' = Algo Lab entries (20 lots, same). */
-export const SOURCE_LOT_CAPS: Record<string, number> = { as: 100, bds: 20, alab: 20 };
+ *  (its MAX_LOTS_PER_ORDER = 100); 'bds' = Breakdown Scalper (20 lots, its MAX_LOTS_PER_TRADE); 'alab' = Algo Lab entries (20 lots, same);
+ *  'fts' = Focus Tool opens (its orders are sliced under this on the page). */
+export const SOURCE_LOT_CAPS: Record<string, number> = { as: 100, bds: 20, alab: 20, fts: FTS_KOTAK_MAX_ORDER_LOTS };
 
 /** NSE/BSE options and futures tick at 0.05; used only when the instrument cache has no tick for the contract. */
 export const DEFAULT_FO_TICK = 0.05;

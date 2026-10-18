@@ -27,7 +27,9 @@ export interface FutQuote {
 /** Per-strike order handles from /api/scalper[/<broker>]/lookup. Dhan is the
  *  only broker that trades by numeric security id; the rest trade by symbol. */
 export interface StrikeRef { ceId?: string; peId?: string; ceSymbol?: string; peSymbol?: string }
-export interface LookupData { lotSize: number; strikes: Record<string, StrikeRef> }
+/** `freezeQty`: the exchange freeze quantity in the BROKER's order units (Dhan: contracts, or lots for MCX; Kotak:
+ *  absolute), the first size it refuses. Absent from an older cached lookup. */
+export interface LookupData { lotSize: number; strikes: Record<string, StrikeRef>; freezeQty?: number }
 
 /** Spot + per-strike premiums/OI, flattened out of /api/options/chain.
  *  LTP drives the premium column; OI feeds OI PCR when the WS bridge is on a

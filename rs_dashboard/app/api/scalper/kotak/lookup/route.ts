@@ -55,9 +55,13 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
     const strikes: Record<string, { ceSymbol?: string; peSymbol?: string }> = {};
     let lotSize = 75;
     let exchangeSegment = 'nse_fo';
+    // The smallest freeze quantity over the expiry's options (Kotak's own units, as `qt` takes them), so one value is
+    // safe for every strike. Undefined when the master carries none: callers then use their own conservative limit.
+    let freezeQty: number | undefined;
     for (const r of rows) {
       if (r.instrument_type === 'FUT') continue; // handled separately below
       lotSize = r.lot_size || lotSize;
+      if (Number(r.freeze_qty) > 1) freezeQty = freezeQty === undefined ? Number(r.freeze_qty) : Math.min(freezeQty, Number(r.freeze_qty));
       exchangeSegment = r.exchange_segment || exchangeSegment;
       const key = String(Math.round(r.strike));
       if (!strikes[key]) strikes[key] = {};
@@ -83,7 +87,7 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
         }
       : null;
 
-    return NextResponse.json({ success: true, data: { lotSize, strikes, exchangeSegment, future } });
+    return NextResponse.json({ success: true, data: { lotSize, strikes, exchangeSegment, future, ...(freezeQty !== undefined ? { freezeQty } : {}) } });
   } catch (err) {
     console.error('[scalper/kotak/lookup] error:', err);
     return NextResponse.json({ success: false, error: String((err as Error).message ?? err) }, { status: 500 });
