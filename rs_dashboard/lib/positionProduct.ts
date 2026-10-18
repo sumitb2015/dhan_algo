@@ -177,3 +177,14 @@ export function isIntradayProduct(product: string): boolean {
   const p = String(product ?? '').trim().toUpperCase();
   return p === 'INTRADAY' || p === 'MIS';
 }
+
+/**
+ * The row of `product` among ONE contract's position rows, preferring the one with open quantity. Dhan lists a
+ * closed-then-reopened leg as two rows of the same product — a CLOSED one (netQty 0, kept for its realised P&L) and
+ * the reopened one — and taking the first read a same-strike re-entry as flat (the Focus Tool then dropped the live
+ * short from its ledger as "closed outside the tool").
+ */
+export function openRowOfProduct<T extends { netQty?: unknown }>(candidates: readonly T[], product: string): T | undefined {
+  const same = candidates.filter(p => positionProduct(p as unknown as Record<string, unknown>) === product);
+  return same.find(p => Number(p.netQty) !== 0) ?? same[0];
+}

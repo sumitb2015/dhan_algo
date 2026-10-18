@@ -150,6 +150,15 @@ export interface FocusRowFill {
    */
   broker?: 'dhan' | 'zerodha' | 'kotak';
   /**
+   * The product a REAL leg was opened under, in its broker's own vocabulary (Dhan INTRADAY / MARGIN, Kotak MIS /
+   * NRML) — stamped when the leg opens from flat, dropped when it is flat again. Every position lookup for a held leg
+   * matches on this, never on the index group's CURRENT product: a group switched MIS → NRML mid-trade read the open
+   * MIS short as flat, the next stop dropped it from the ledger as "closed outside the tool" and re-sold the leg under
+   * NRML. Absent on SIM rows and on legs opened before 2026-10-18 (those fall back to the group's product).
+   */
+  ceProduct?: string;
+  peProduct?: string;
+  /**
    * Realised P&L from qty this row has already closed or rolled away.
    *
    * The pin tracks only the CURRENT strike per leg. Closing (or shifting off)

@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { getDhanCredentials } from '@/lib/dhanToken';
 import { invalidateBrokerCache } from '@/lib/brokerPositionsCache';
 import { reserveOrderSlot, ORDER_WINDOW_MS } from '@/lib/dhanOrderPacer';
+import { FTS_DHAN_MAX_ORDER_QTY } from '@/lib/focusToolUnderlyings';
 
 const DHAN_ORDERS = 'https://api.dhan.co/v2/orders';
 const ORDER_TIMEOUT_MS = 10_000;
@@ -95,6 +96,8 @@ const SOURCE_QTY_CAPS: Record<string, number> = {
   bds: 3750,
   // 'alab' = Algo Lab entries (lib/algoLab/configSchema.ts MAX_LOTS_PER_TRADE = 20, also checked by its ledger).
   alab: 3750,
+  // 'fts' = Focus Tool: every order (closes too) is sliced under this cap and the exchange freeze on the page.
+  fts: FTS_DHAN_MAX_ORDER_QTY,
 };
 
 async function placeOrderOnce(body: {
