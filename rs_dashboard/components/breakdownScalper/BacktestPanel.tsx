@@ -13,7 +13,7 @@ import {
   XAxis,
   YAxis,
 } from 'recharts';
-import { ChevronDown, ChevronRight, Download, FlaskConical, Play, RefreshCw, Square, AlertTriangle } from 'lucide-react';
+import { ChevronDown, ChevronRight, Download, FlaskConical, Play, RefreshCw, Square, AlertTriangle, Settings } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { summarize, type BtDayResult, type BtExitKind, type BtWindow } from '@/lib/breakdownBacktest';
 import type { BreakdownConfig } from '@/lib/breakdownLedger';
@@ -165,7 +165,15 @@ function writeCache(stamp: string | null, days: BtDayResult[]) {
   }
 }
 
-export function BacktestPanel({ pageConfig }: { pageConfig: BreakdownConfig }) {
+export function BacktestPanel({
+  pageConfig,
+  onRunningChange,
+  onOpenSettings,
+}: {
+  pageConfig: BreakdownConfig;
+  onRunningChange?: (running: boolean) => void;
+  onOpenSettings?: () => void;
+}) {
   const [data, setData] = useState<BacktestResponse | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [days, setDays] = useState<BtDayResult[]>([]);
@@ -229,6 +237,10 @@ export function BacktestPanel({ pageConfig }: { pageConfig: BreakdownConfig }) {
 
   // Poll: every 4 s while a run is going, every 60 s otherwise (a file read on the server, no broker call).
   const running = data?.running ?? false;
+  useEffect(() => {
+    onRunningChange?.(running);
+  }, [running, onRunningChange]);
+
   useEffect(() => {
     const t0 = setTimeout(load, 0);
     const id = setInterval(load, running ? 4000 : 60_000);
@@ -359,6 +371,16 @@ export function BacktestPanel({ pageConfig }: { pageConfig: BreakdownConfig }) {
           >
             <Download className="h-3 w-3" /> CSV
           </button>
+          {onOpenSettings && (
+            <button
+              type="button"
+              onClick={onOpenSettings}
+              className="flex h-7 items-center gap-1.5 rounded-lg border border-zinc-700 bg-zinc-900 px-2.5 text-xs font-bold text-zinc-300 hover:bg-zinc-800 hover:text-white"
+              title="Configure Strategy Rules & Risk Parameters"
+            >
+              <Settings className="h-3 w-3 text-amber-400" /> Rules
+            </button>
+          )}
         </div>
       </div>
 

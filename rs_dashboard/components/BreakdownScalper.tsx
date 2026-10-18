@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { toast } from 'sonner';
-import { Target, ClipboardList, BookOpen } from 'lucide-react';
+import { Target, ClipboardList, BookOpen, Zap, FlaskConical, RefreshCw } from 'lucide-react';
 import NavBar from '@/components/NavBar';
 import { cn } from '@/lib/utils';
 import { BrokerPicker, usePageBroker, type DhanKotak } from '@/components/BrokerPicker';
@@ -189,6 +189,31 @@ export default function BreakdownScalper() {
   const [isRulesOpen, setIsRulesOpen] = useState(false);
   const [isDocOpen, setIsDocOpen] = useState(false);
   const [showBookModal, setShowBookModal] = useState(false);
+  const [activeTab, setActiveTab] = useState<'live' | 'backtest'>('live');
+  const [isBacktestRunning, setIsBacktestRunning] = useState(false);
+
+  useEffect(() => {
+    if (typeof window !== 'undefined') {
+      const params = new URLSearchParams(window.location.search);
+      const tabParam = params.get('tab');
+      if (tabParam === 'backtest' || tabParam === 'live') {
+        setActiveTab(tabParam);
+      }
+    }
+  }, []);
+
+  const handleTabChange = useCallback((tab: 'live' | 'backtest') => {
+    setActiveTab(tab);
+    if (typeof window !== 'undefined') {
+      const url = new URL(window.location.href);
+      if (tab === 'live') {
+        url.searchParams.delete('tab');
+      } else {
+        url.searchParams.set('tab', tab);
+      }
+      window.history.replaceState(null, '', url.pathname + url.search);
+    }
+  }, []);
 
   // 1 Hz wall clock for render-time ages (clock() must not be called while rendering).
   const [nowMs, setNowMs] = useState(0);
@@ -1285,66 +1310,144 @@ export default function BreakdownScalper() {
     <div className="flex min-h-screen flex-col bg-zinc-950 text-white">
       {/* Sticky Header — Standard Dhan Page Theme */}
       <div className="sticky top-0 z-30 flex items-center justify-between gap-3 flex-wrap px-6 py-3 border-b border-zinc-800 bg-zinc-950/95 backdrop-blur">
-        <div className="flex items-center gap-3">
-          <div className="flex items-center justify-center w-8 h-8 rounded-lg shrink-0 bg-emerald-500/10 border border-emerald-500/25">
-            <Target className="w-4 h-4 text-emerald-400" />
+        <div className="flex items-center gap-4 flex-wrap">
+          <div className="flex items-center gap-3">
+            <div className="flex items-center justify-center w-8 h-8 rounded-lg shrink-0 bg-emerald-500/10 border border-emerald-500/25">
+              <Target className="w-4 h-4 text-emerald-400" />
+            </div>
+            <div>
+              <p className="text-[10px] font-bold uppercase tracking-[0.16em] text-emerald-400 mb-0.5">
+                Scalping · Multi-Strike Breakdown
+              </p>
+              <h1 className="text-sm font-bold text-white tracking-tight leading-none">
+                Breakdown Auto-Scalper
+              </h1>
+              <p className="text-[10px] text-zinc-500 font-medium mt-1">
+                Automated multi-strike option breakdown seller with NIFTY trend bias & trailing SL
+              </p>
+            </div>
           </div>
-          <div>
-            <p className="text-[10px] font-bold uppercase tracking-[0.16em] text-emerald-400 mb-0.5">
-              Scalping · Multi-Strike Breakdown
-            </p>
-            <h1 className="text-sm font-bold text-white tracking-tight leading-none">
-              Breakdown Auto-Scalper
-            </h1>
-            <p className="text-[10px] text-zinc-500 font-medium mt-1">
-              Automated multi-strike option breakdown seller with NIFTY trend bias & trailing SL
-            </p>
+
+          {/* View Mode Tabs: Live Trading vs Backtest */}
+          <div className="flex items-center gap-1 bg-zinc-900 border border-zinc-800 p-1 rounded-xl shadow-inner">
+            <button
+              type="button"
+              onClick={() => handleTabChange('live')}
+              className={cn(
+                'flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold transition-all',
+                activeTab === 'live'
+                  ? 'bg-zinc-800 text-white shadow-sm'
+                  : 'text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/40',
+              )}
+            >
+              <Zap className="w-3.5 h-3.5 text-emerald-400" />
+              <span>Live Trading</span>
+              {openPositions.length > 0 && (
+                <span className="rounded-full bg-emerald-500/10 border border-emerald-500/30 px-1.5 py-0.2 text-[10px] font-mono text-emerald-400 font-bold">
+                  {openPositions.length}
+                </span>
+              )}
+            </button>
+            <button
+              type="button"
+              onClick={() => handleTabChange('backtest')}
+              className={cn(
+                'flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold transition-all',
+                activeTab === 'backtest'
+                  ? 'bg-zinc-800 text-white shadow-sm'
+                  : 'text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/40',
+              )}
+            >
+              <FlaskConical className="w-3.5 h-3.5 text-violet-400" />
+              <span>Backtest</span>
+              {isBacktestRunning && (
+                <span className="flex items-center gap-1 rounded-full bg-sky-500/10 border border-sky-500/30 px-1.5 py-0.2 text-[10px] font-bold text-sky-400">
+                  <RefreshCw className="h-2.5 w-2.5 animate-spin" />
+                  <span>Running</span>
+                </span>
+              )}
+            </button>
           </div>
         </div>
 
         {/* Right Header Controls */}
         <div className="flex items-center gap-2.5 flex-wrap">
-          {/* Underlying Selector */}
-          <div className="flex items-center rounded-lg border border-zinc-800 bg-zinc-900 p-0.5 text-xs font-bold">
-            {UNDERLYINGS.map((u) => (
-              <button
-                key={u}
-                type="button"
-                onClick={() => changeUnderlying(u)}
-                disabled={chainLocked && underlying !== u}
-                title={chainLocked ? 'Locked to the chain of the open positions (their stops need its quotes)' : undefined}
+          {activeTab === 'live' && (
+            <>
+              {/* Underlying Selector */}
+              <div className="flex items-center rounded-lg border border-zinc-800 bg-zinc-900 p-0.5 text-xs font-bold">
+                {UNDERLYINGS.map((u) => (
+                  <button
+                    key={u}
+                    type="button"
+                    onClick={() => changeUnderlying(u)}
+                    disabled={chainLocked && underlying !== u}
+                    title={chainLocked ? 'Locked to the chain of the open positions (their stops need its quotes)' : undefined}
+                    className={cn(
+                      'rounded-md px-2.5 py-1 transition-all disabled:cursor-not-allowed disabled:opacity-50',
+                      underlying === u
+                        ? 'bg-zinc-800 text-white shadow-sm'
+                        : 'text-zinc-400 hover:text-zinc-200',
+                    )}
+                  >
+                    {u}
+                  </button>
+                ))}
+              </div>
+
+              {/* Expiry Selector */}
+              {expiries.length > 0 && (
+                <select
+                  value={expiry}
+                  onChange={(e) => setExpiry(e.target.value)}
+                  disabled={chainLocked}
+                  title={chainLocked ? 'Locked to the expiry of the open positions (their stops need its quotes)' : undefined}
+                  aria-label="Expiry"
+                  className="disabled:cursor-not-allowed disabled:opacity-50 h-8 rounded-lg border border-zinc-800 bg-zinc-900 px-2.5 text-xs font-bold text-zinc-200 focus:outline-none focus:border-zinc-700"
+                >
+                  {expiries.map((exp) => (
+                    <option key={exp} value={exp}>
+                      {exp}
+                    </option>
+                  ))}
+                </select>
+              )}
+
+              {/* Broker Picker */}
+              <BrokerPicker value={broker as DhanKotak} onChange={(b) => setBroker(b as 'dhan' | 'kotak')} />
+
+              {/* WebSocket Feed Indicator */}
+              <div
                 className={cn(
-                  'rounded-md px-2.5 py-1 transition-all disabled:cursor-not-allowed disabled:opacity-50',
-                  underlying === u
-                    ? 'bg-zinc-800 text-white shadow-sm'
-                    : 'text-zinc-400 hover:text-zinc-200',
+                  'flex items-center gap-1.5 rounded-lg border px-2.5 py-1 text-xs font-mono font-bold transition-all',
+                  bridgeStatus.status !== 'RUNNING'
+                    ? 'border-zinc-800 bg-zinc-900 text-zinc-400'
+                    : isWsStale
+                    ? 'border-amber-500/30 bg-amber-500/10 text-amber-400'
+                    : 'border-emerald-500/30 bg-emerald-500/10 text-emerald-400',
                 )}
+                title={`Options WebSocket Feed: ${bridgeStatus.status} · Transport: ${transport.toUpperCase()}${lastUpdated ? ` · Last Tick: ${lastUpdated}` : ''}`}
               >
-                {u}
-              </button>
-            ))}
-          </div>
-
-          {/* Expiry Selector */}
-          {expiries.length > 0 && (
-            <select
-              value={expiry}
-              onChange={(e) => setExpiry(e.target.value)}
-              disabled={chainLocked}
-              title={chainLocked ? 'Locked to the expiry of the open positions (their stops need its quotes)' : undefined}
-              aria-label="Expiry"
-              className="disabled:cursor-not-allowed disabled:opacity-50 h-8 rounded-lg border border-zinc-800 bg-zinc-900 px-2.5 text-xs font-bold text-zinc-200 focus:outline-none focus:border-zinc-700"
-            >
-              {expiries.map((exp) => (
-                <option key={exp} value={exp}>
-                  {exp}
-                </option>
-              ))}
-            </select>
+                <span
+                  className={cn(
+                    'h-2 w-2 rounded-full shrink-0',
+                    bridgeStatus.status !== 'RUNNING'
+                      ? 'bg-zinc-500'
+                      : isWsStale
+                      ? 'bg-amber-400 animate-pulse'
+                      : 'bg-emerald-400 animate-ping',
+                  )}
+                />
+                <span>
+                  {bridgeStatus.status !== 'RUNNING'
+                    ? `WS ${bridgeStatus.status}`
+                    : isWsStale
+                    ? `WS STALE (${feedAge != null ? Math.round(feedAge) : '?'}s)`
+                    : `LIVE WS · ${transport.toUpperCase()}`}
+                </span>
+              </div>
+            </>
           )}
-
-          {/* Broker Picker */}
-          <BrokerPicker value={broker as DhanKotak} onChange={(b) => setBroker(b as 'dhan' | 'kotak')} />
 
           {/* India VIX Live Chip */}
           <div className="flex items-center gap-1.5 rounded-lg border border-zinc-800 bg-zinc-900 px-2.5 py-1 text-xs">
@@ -1368,37 +1471,6 @@ export default function BreakdownScalper() {
             )}
           </div>
 
-          {/* WebSocket Feed Indicator */}
-          <div
-            className={cn(
-              'flex items-center gap-1.5 rounded-lg border px-2.5 py-1 text-xs font-mono font-bold transition-all',
-              bridgeStatus.status !== 'RUNNING'
-                ? 'border-zinc-800 bg-zinc-900 text-zinc-400'
-                : isWsStale
-                ? 'border-amber-500/30 bg-amber-500/10 text-amber-400'
-                : 'border-emerald-500/30 bg-emerald-500/10 text-emerald-400',
-            )}
-            title={`Options WebSocket Feed: ${bridgeStatus.status} · Transport: ${transport.toUpperCase()}${lastUpdated ? ` · Last Tick: ${lastUpdated}` : ''}`}
-          >
-            <span
-              className={cn(
-                'h-2 w-2 rounded-full shrink-0',
-                bridgeStatus.status !== 'RUNNING'
-                  ? 'bg-zinc-500'
-                  : isWsStale
-                  ? 'bg-amber-400 animate-pulse'
-                  : 'bg-emerald-400 animate-ping',
-              )}
-            />
-            <span>
-              {bridgeStatus.status !== 'RUNNING'
-                ? `WS ${bridgeStatus.status}`
-                : isWsStale
-                ? `WS STALE (${feedAge != null ? Math.round(feedAge) : '?'}s)`
-                : `LIVE WS · ${transport.toUpperCase()}`}
-            </span>
-          </div>
-
           {/* DATA Chip */}
           <div className="flex items-center gap-1.5 rounded-full border border-amber-500/30 bg-amber-500/10 px-2.5 py-0.5 text-[10px] font-bold text-amber-400 tracking-wider">
             <span>DATA: {istDate()}</span>
@@ -1415,16 +1487,18 @@ export default function BreakdownScalper() {
             <span>DOCS</span>
           </button>
 
-          {/* Orders, Trades & Positions Header Button */}
-          <button
-            type="button"
-            onClick={() => setShowBookModal(true)}
-            className="flex items-center gap-1.5 h-8 rounded-lg border border-zinc-800 bg-zinc-900 px-2.5 text-xs font-bold text-zinc-300 hover:text-white hover:bg-zinc-800 hover:border-zinc-700 transition"
-            title="Broker Order Book, Trade Book and Open Positions"
-          >
-            <ClipboardList className="w-3.5 h-3.5 text-sky-400" />
-            <span>ORDERS ({bookData.orders.length})</span>
-          </button>
+          {activeTab === 'live' && (
+            /* Orders, Trades & Positions Header Button */
+            <button
+              type="button"
+              onClick={() => setShowBookModal(true)}
+              className="flex items-center gap-1.5 h-8 rounded-lg border border-zinc-800 bg-zinc-900 px-2.5 text-xs font-bold text-zinc-300 hover:text-white hover:bg-zinc-800 hover:border-zinc-700 transition"
+              title="Broker Order Book, Trade Book and Open Positions"
+            >
+              <ClipboardList className="w-3.5 h-3.5 text-sky-400" />
+              <span>ORDERS ({bookData.orders.length})</span>
+            </button>
+          )}
 
           <span className="w-px h-5 bg-zinc-800 shrink-0" />
           <NavBar />
@@ -1433,76 +1507,85 @@ export default function BreakdownScalper() {
 
       {/* Main Workspace Body */}
       <div className="flex-1 flex flex-col gap-4 px-6 py-5 max-w-[1720px] w-full mx-auto">
-        {unwatched.length > 0 && (
-          <div role="alert" className="rounded-lg border border-red-500/40 bg-red-500/10 px-4 py-2 text-xs font-bold text-red-400">
-            {unwatched.length} open position(s) are on another chain (
-            {unwatched.map((p) => `${p.underlying} ${p.expiry} ${p.strike}${p.option}`).join(', ')}): their stops are NOT
-            being evaluated from this view. Close them or check them at the broker.
-          </div>
-        )}
+        {/* Tab 1: Live Trading Workspace */}
+        <div className={cn('flex flex-col gap-4', activeTab === 'live' ? 'flex' : 'hidden')}>
+          {unwatched.length > 0 && (
+            <div role="alert" className="rounded-lg border border-red-500/40 bg-red-500/10 px-4 py-2 text-xs font-bold text-red-400">
+              {unwatched.length} open position(s) are on another chain (
+              {unwatched.map((p) => `${p.underlying} ${p.expiry} ${p.strike}${p.option}`).join(', ')}): their stops are NOT
+              being evaluated from this view. Close them or check them at the broker.
+            </div>
+          )}
 
-        {config.engineActive && (
-          <div
-            role="status"
-            className="rounded-lg border border-amber-500/30 bg-amber-500/10 px-4 py-2 text-xs font-medium text-amber-400"
-          >
-            <span className="font-bold">Engine runs in this browser tab only.</span> Keep it open and visible: stops are
-            software-only (no resting broker stop), and a hidden tab slows its timers.
-            {!isLeader && <span className="ml-1 font-bold">Another tab is running the engine; this tab is view-only.</span>}
-            {engineNote && <span className="ml-1 font-bold">· {engineNote}</span>}
-          </div>
-        )}
+          {config.engineActive && (
+            <div
+              role="status"
+              className="rounded-lg border border-amber-500/30 bg-amber-500/10 px-4 py-2 text-xs font-medium text-amber-400"
+            >
+              <span className="font-bold">Engine runs in this browser tab only.</span> Keep it open and visible: stops are
+              software-only (no resting broker stop), and a hidden tab slows its timers.
+              {!isLeader && <span className="ml-1 font-bold">Another tab is running the engine; this tab is view-only.</span>}
+              {engineNote && <span className="ml-1 font-bold">· {engineNote}</span>}
+            </div>
+          )}
 
-        {/* 1. Market Direction Bias & Telemetry Strip */}
-        <MarketBiasStrip
-          underlying={underlying}
-          trend={underlyingTrend}
-          config={config}
-          mode={mode}
-          openCount={openPositions.length}
-          realizedPnl={realizedPnl}
-          unrealizedPnl={unrealizedPnl}
-          onToggleEngine={toggleEngine}
-          onSquareOffAll={handleSquareOffAll}
-          onOpenSettings={() => setIsRulesOpen(true)}
-          onOpenDocs={() => setIsDocOpen(true)}
-          vixLtp={vixLtp}
-          vixChangePct={vixChangePct}
-          vixPrevClose={vixPrevClose}
-          wsTransport={transport}
-          wsStatus={bridgeStatus.status}
-          wsStale={isWsStale}
-        />
+          {/* 1. Market Direction Bias & Telemetry Strip */}
+          <MarketBiasStrip
+            underlying={underlying}
+            trend={underlyingTrend}
+            config={config}
+            mode={mode}
+            openCount={openPositions.length}
+            realizedPnl={realizedPnl}
+            unrealizedPnl={unrealizedPnl}
+            onToggleEngine={toggleEngine}
+            onSquareOffAll={handleSquareOffAll}
+            onOpenSettings={() => setIsRulesOpen(true)}
+            onOpenDocs={() => setIsDocOpen(true)}
+            vixLtp={vixLtp}
+            vixChangePct={vixChangePct}
+            vixPrevClose={vixPrevClose}
+            wsTransport={transport}
+            wsStatus={bridgeStatus.status}
+            wsStale={isWsStale}
+          />
 
-        {/* 2. Unified Trade & Orders Desk (Positions, Order Book, Trade Book) */}
-        <PositionsTable
-          positions={positions}
-          quotes={quotesMap}
-          onClosePosition={handleClosePosition}
-          viewUnderlying={underlying}
-          viewExpiry={expiry}
-          broker={broker as 'dhan' | 'kotak'}
-          ordersData={bookData.orders}
-          tradesData={bookData.trades}
-          brokerPositionsData={bookData.positions}
-          isBookLoading={bookLoading}
-          bookError={bookError}
-          onRefreshBook={fetchBook}
-          onOpenBookModal={() => setShowBookModal(true)}
-        />
+          {/* 2. Unified Trade & Orders Desk (Positions, Order Book, Trade Book) */}
+          <PositionsTable
+            positions={positions}
+            quotes={quotesMap}
+            onClosePosition={handleClosePosition}
+            viewUnderlying={underlying}
+            viewExpiry={expiry}
+            broker={broker as 'dhan' | 'kotak'}
+            ordersData={bookData.orders}
+            tradesData={bookData.trades}
+            brokerPositionsData={bookData.positions}
+            isBookLoading={bookLoading}
+            bookError={bookError}
+            onRefreshBook={fetchBook}
+            onOpenBookModal={() => setShowBookModal(true)}
+          />
 
-        {/* 3. Multi-Strike Scanner Matrix */}
-        <ScannerGrid
-          candidates={candidates}
-          atm={liveQuotes?.atm || underlyingTrend.spot}
-          onManualShort={handleManualShort}
-        />
+          {/* 3. Multi-Strike Scanner Matrix */}
+          <ScannerGrid
+            candidates={candidates}
+            atm={liveQuotes?.atm || underlyingTrend.spot}
+            onManualShort={handleManualShort}
+          />
 
-        {/* 4. Strategy backtest: daily results + day-wise trade log (appended at EOD) */}
-        <BacktestPanel pageConfig={config} />
+          {/* 4. Execution & Audit Log */}
+          <AuditLogPanel logs={logs} onClearLogs={() => mutateLedger({ op: 'clearLogs' })} />
+        </div>
 
-        {/* 5. Execution & Audit Log */}
-        <AuditLogPanel logs={logs} onClearLogs={() => mutateLedger({ op: 'clearLogs' })} />
+        {/* Tab 2: Strategy Backtesting Workspace */}
+        <div className={cn('flex flex-col gap-4', activeTab === 'backtest' ? 'flex' : 'hidden')}>
+          <BacktestPanel
+            pageConfig={config}
+            onRunningChange={setIsBacktestRunning}
+            onOpenSettings={() => setIsRulesOpen(true)}
+          />
+        </div>
       </div>
 
       {/* Rules & Risk Configuration Drawer */}
