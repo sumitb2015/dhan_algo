@@ -240,6 +240,7 @@ export interface UnderlyingTrend {
 
 /** Index (NIFTY) trend settings: EMA fast/slow cross, optionally confirmed by a Supertrend on the same bars. */
 export interface IndexTrendParams {
+  useEma: boolean;
   emaFast: number;
   emaSlow: number;
   useSupertrend: boolean;
@@ -251,10 +252,11 @@ export interface IndexTrendParams {
  * Defaults from the 2026-10-18 backtest: the EMA cross alone made the most (+₹4.10L over 124 sessions); every index
  * Supertrend variant cut profit (best, 7/3: +₹3.37L, though with lower drawdown), so it is off and starts at 7/3 when on.
  */
-export const DEFAULT_INDEX_TREND: IndexTrendParams = { emaFast: 9, emaSlow: 20, useSupertrend: false, stPeriod: 7, stMultiplier: 3 };
+export const DEFAULT_INDEX_TREND: IndexTrendParams = { useEma: true, emaFast: 9, emaSlow: 20, useSupertrend: false, stPeriod: 7, stMultiplier: 3 };
 
 /** Index trend settings from a config, with defaults for fields an older config does not have. */
 export function indexTrendParamsOf(c: {
+  trendUseEma?: boolean;
   trendEmaFast?: number;
   trendEmaSlow?: number;
   trendUseSupertrend?: boolean;
@@ -262,6 +264,7 @@ export function indexTrendParamsOf(c: {
   trendStMultiplier?: number;
 }): IndexTrendParams {
   return {
+    useEma: c.trendUseEma ?? DEFAULT_INDEX_TREND.useEma,
     emaFast: c.trendEmaFast ?? DEFAULT_INDEX_TREND.emaFast,
     emaSlow: c.trendEmaSlow ?? DEFAULT_INDEX_TREND.emaSlow,
     useSupertrend: c.trendUseSupertrend ?? DEFAULT_INDEX_TREND.useSupertrend,
@@ -303,8 +306,9 @@ export function indexTrendInputs(closes: number[], p: IndexTrendParams) {
 
 /**
  * Market bias and option-selling eligibility from the index trend inputs:
- *  - Bullish: EMA fast > EMA slow, and Supertrend up when it is enabled -> PE selling eligible.
- *  - Bearish: EMA fast < EMA slow, and Supertrend down when it is enabled -> CE selling eligible.
+ *  - Bullish: EMA fast > EMA slow (if enabled) and Supertrend up (if enabled) -> PE selling eligible.
+ *  - Bearish: EMA fast < EMA slow (if enabled) and Supertrend down (if enabled) -> CE selling eligible.
+ *  - Both off -> no trend filter, both sides eligible in AUTO mode.
  *  - Disagreeing / still warming up -> neither (blocked) in AUTO mode.
  */
 export function evaluateUnderlyingTrend(
@@ -314,14 +318,35 @@ export function evaluateUnderlyingTrend(
 ): UnderlyingTrend {
   const { spot, emaFast, emaSlow, stLine, stDir } = inputs;
   const forced: EligibleSide = mode === 'BYPASS' ? 'BOTH' : mode === 'CE_ONLY' ? 'CE' : mode === 'PE_ONLY' ? 'PE' : 'NONE';
-  if (spot <= 0 || emaFast == null || emaSlow == null || (p.useSupertrend && stDir == null)) {
+  const emaActive = p.useEma !== false;
+  const stActive = p.useSupertrend;
+
+  const spread = emaFast != null && emaSlow != null ? emaFast - emaSlow : null;
+
+  // If neither filter is active, allow both sides in AUTO mode
+  if (!emaActive && !stActive) {
     return {
       spot,
       emaFast,
       emaSlow,
       stLine,
       stDir,
-      spread: null,
+      spread,
+      trend: 'SIDEWAYS',
+      eligibleSide: mode === 'AUTO' ? 'BOTH' : forced,
+      headline: 'TREND FILTER OFF',
+      detail: 'Index EMA cross and Supertrend are both off. All breakdown signals are eligible.',
+    };
+  }
+
+  if (spot <= 0 || (emaActive && (emaFast == null || emaSlow == null)) || (stActive && stDir == null)) {
+    return {
+      spot,
+      emaFast,
+      emaSlow,
+      stLine,
+      stDir,
+      spread,
       trend: 'SIDEWAYS',
       eligibleSide: forced,
       headline: 'Awaiting Indicators',
@@ -329,27 +354,38 @@ export function evaluateUnderlyingTrend(
     };
   }
 
-  const spread = emaFast - emaSlow;
-  const isBull = spread > 0 && (!p.useSupertrend || stDir === 1);
-  const isBear = spread < 0 && (!p.useSupertrend || stDir === -1);
+  const emaBull = emaActive ? (spread != null && spread > 0) : true;
+  const emaBear = emaActive ? (spread != null && spread < 0) : true;
+  const stBull = stActive ? (stDir === 1) : true;
+  const stBear = stActive ? (stDir === -1) : true;
+
+  const isBull = emaBull && stBull;
+  const isBear = emaBear && stBear;
   const trend: TrendBias = isBull ? 'BULLISH' : isBear ? 'BEARISH' : 'SIDEWAYS';
 
   let eligibleSide: EligibleSide = forced;
   if (mode === 'AUTO') eligibleSide = trend === 'BULLISH' ? 'PE' : trend === 'BEARISH' ? 'CE' : 'NONE';
 
-  const ema = `EMA${p.emaFast} ${spread > 0 ? '>' : spread < 0 ? '<' : '='} EMA${p.emaSlow} (${spread > 0 ? '+' : ''}${spread.toFixed(1)})`;
-  const st = p.useSupertrend ? ` and Supertrend(${p.stPeriod}, ${p.stMultiplier}) ${stDir === 1 ? 'up' : 'down'}` : '';
+  const parts: string[] = [];
+  if (emaActive && spread != null) {
+    parts.push(`EMA${p.emaFast} ${spread > 0 ? '>' : spread < 0 ? '<' : '='} EMA${p.emaSlow} (${spread > 0 ? '+' : ''}${spread.toFixed(1)})`);
+  }
+  if (stActive) {
+    parts.push(`Supertrend(${p.stPeriod}, ${p.stMultiplier}) ${stDir === 1 ? 'up' : 'down'}`);
+  }
+  const summary = parts.join(' and ');
+
   let headline: string;
   let detail: string;
   if (trend === 'BULLISH') {
     headline = 'BULLISH TREND CONFIRMED';
-    detail = `${ema}${st}. Only PUT (PE) selling permitted.`;
+    detail = `${summary}. Only PUT (PE) selling permitted.`;
   } else if (trend === 'BEARISH') {
     headline = 'BEARISH TREND CONFIRMED';
-    detail = `${ema}${st}. Only CALL (CE) selling permitted.`;
+    detail = `${summary}. Only CALL (CE) selling permitted.`;
   } else {
     headline = 'SIDEWAYS / RANGEBOUND CHOP';
-    detail = `${ema}${st}: the trend checks disagree. New selling is blocked to avoid whipsaw losses.`;
+    detail = `${summary}: the trend checks disagree. New selling is blocked to avoid whipsaw losses.`;
   }
 
   return { spot, emaFast, emaSlow, stLine, stDir, spread, trend, eligibleSide, headline, detail };

@@ -110,10 +110,12 @@ No trade is ever initiated based solely on the option's chart. The underlying in
   - The EMA cross and the Supertrend disagree, or the indicators are still warming up.
 - There is no VWAP in the trend gate: the index has no volume, so its "VWAP" was only the day's average price. All
   trend indicators run on the option candle timeframe, on today's index closes from 09:15, and are set in the Rules
-  drawer (`trendEmaFast`, `trendEmaSlow`, `trendUseSupertrend`, `trendStPeriod`, `trendStMultiplier`). Live and
+  drawer (`trendUseEma`, `trendEmaFast`, `trendEmaSlow`, `trendUseSupertrend`, `trendStPeriod`, `trendStMultiplier`). Both
+  the Index EMA Cross and the Index Supertrend have independent on/off checkboxes in the Rules drawer. If both are
+  unchecked, the trend filter is disabled and all breakdown signals are eligible in AUTO mode. Live and
   backtest share `indexTrendInputs()` in `lib/breakdownScalper.ts`; the index Supertrend's ATR is close-to-close because
   the backtest stores only index closes, so live ignores the candle highs and lows too.
-- Why the Supertrend is off (2026-10-18 backtest, 124 Dhan sessions, recommended rules, 0.5 pt slippage): EMA 9/20 alone
+- Why the Supertrend is off by default (2026-10-18 backtest, 124 Dhan sessions, recommended rules, 0.5 pt slippage): EMA 9/20 alone
   +₹4.10L (the old EMA + "VWAP" rule +₹4.07L); adding a Supertrend cut profit in every variant tried (7/3 +₹3.37L,
   14/3 +₹3.14L, 10/3 +₹2.86L, 10/2 +₹2.40L) while lowering drawdown from about ₹30k to ₹20k.
   - *Action*: Strategy goes into **Standby**. No new positions are permitted.

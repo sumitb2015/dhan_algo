@@ -68,13 +68,31 @@ export function MarketBiasStrip({
             </span>
           </div>
 
-          <div className="flex items-center gap-2 text-xs font-medium text-zinc-400">
-            <span className="rounded bg-zinc-900 px-2 py-0.5 border border-zinc-800">
-              EMA {tp.emaFast}: <strong className="font-mono text-zinc-200">{trend.emaFast ? trend.emaFast.toFixed(1) : '—'}</strong>
-            </span>
-            <span className="rounded bg-zinc-900 px-2 py-0.5 border border-zinc-800">
-              EMA {tp.emaSlow}: <strong className="font-mono text-zinc-200">{trend.emaSlow ? trend.emaSlow.toFixed(1) : '—'}</strong>
-            </span>
+            {tp.useEma && (
+              <>
+                <span className="rounded bg-zinc-900 px-2 py-0.5 border border-zinc-800">
+                  EMA {tp.emaFast}: <strong className="font-mono text-zinc-200">{trend.emaFast ? trend.emaFast.toFixed(1) : '—'}</strong>
+                </span>
+                <span className="rounded bg-zinc-900 px-2 py-0.5 border border-zinc-800">
+                  EMA {tp.emaSlow}: <strong className="font-mono text-zinc-200">{trend.emaSlow ? trend.emaSlow.toFixed(1) : '—'}</strong>
+                </span>
+                <span className="rounded bg-zinc-900 px-2 py-0.5 border border-zinc-800">
+                  Spread:{' '}
+                  <strong
+                    className={cn(
+                      'font-mono',
+                      trend.spread != null && trend.spread > 0
+                        ? 'text-emerald-400'
+                        : trend.spread != null && trend.spread < 0
+                        ? 'text-red-400'
+                        : 'text-zinc-400',
+                    )}
+                  >
+                    {trend.spread != null ? (trend.spread > 0 ? `+${trend.spread.toFixed(1)}` : trend.spread.toFixed(1)) : '—'}
+                  </strong>
+                </span>
+              </>
+            )}
             {tp.useSupertrend && (
               <span className="rounded bg-zinc-900 px-2 py-0.5 border border-zinc-800">
                 ST ({tp.stPeriod}, {tp.stMultiplier}):{' '}
@@ -89,21 +107,11 @@ export function MarketBiasStrip({
                 </strong>
               </span>
             )}
-            <span className="rounded bg-zinc-900 px-2 py-0.5 border border-zinc-800">
-              Spread:{' '}
-              <strong
-                className={cn(
-                  'font-mono',
-                  trend.spread != null && trend.spread > 0
-                    ? 'text-emerald-400'
-                    : trend.spread != null && trend.spread < 0
-                    ? 'text-red-400'
-                    : 'text-zinc-400',
-                )}
-              >
-                {trend.spread != null ? (trend.spread > 0 ? `+${trend.spread.toFixed(1)}` : trend.spread.toFixed(1)) : '—'}
-              </strong>
-            </span>
+            {!tp.useEma && !tp.useSupertrend && (
+              <span className="rounded bg-zinc-900/60 px-2 py-0.5 border border-zinc-800 text-[11px] text-zinc-500">
+                Trend Filter: <strong className="text-zinc-400">OFF</strong>
+              </span>
+            )}
 
             <span className="flex items-center gap-1.5 rounded bg-zinc-900 px-2 py-0.5 border border-zinc-800">
               <span className="text-zinc-400">INDIA VIX:</span>

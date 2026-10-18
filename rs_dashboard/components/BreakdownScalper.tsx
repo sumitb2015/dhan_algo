@@ -475,13 +475,14 @@ export default function BreakdownScalper() {
   const trendParams = useMemo(
     () =>
       indexTrendParamsOf({
+        trendUseEma: config.trendUseEma,
         trendEmaFast: config.trendEmaFast,
         trendEmaSlow: config.trendEmaSlow,
         trendUseSupertrend: config.trendUseSupertrend,
         trendStPeriod: config.trendStPeriod,
         trendStMultiplier: config.trendStMultiplier,
       }),
-    [config.trendEmaFast, config.trendEmaSlow, config.trendUseSupertrend, config.trendStPeriod, config.trendStMultiplier],
+    [config.trendUseEma, config.trendEmaFast, config.trendEmaSlow, config.trendUseSupertrend, config.trendStPeriod, config.trendStMultiplier],
   );
 
   const fetchUnderlyingFeed = useCallback(async () => {

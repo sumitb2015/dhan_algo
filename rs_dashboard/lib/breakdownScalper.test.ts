@@ -10,7 +10,7 @@ import {
   type UnderlyingTrend,
 } from './breakdownScalper.ts';
 
-const P = { emaFast: 9, emaSlow: 20, useSupertrend: true, stPeriod: 10, stMultiplier: 3 };
+const P = { useEma: true, emaFast: 9, emaSlow: 20, useSupertrend: true, stPeriod: 10, stMultiplier: 3 };
 const inp = (emaFast: number | null, emaSlow: number | null, stDir: 1 | -1 | null) => ({ spot: 25000, emaFast, emaSlow, stLine: 24900, stDir });
 
 test('evaluateUnderlyingTrend: Bullish requires EMA fast > EMA slow and Supertrend up', () => {
@@ -36,6 +36,22 @@ test('evaluateUnderlyingTrend: with Supertrend off, the EMA cross alone decides'
   assert.equal(t.trend, 'BULLISH');
 });
 
+test('evaluateUnderlyingTrend: with EMA cross off, Supertrend alone decides', () => {
+  const tBull = evaluateUnderlyingTrend(inp(24800, 24900, 1), { ...P, useEma: false, useSupertrend: true }, 'AUTO');
+  assert.equal(tBull.trend, 'BULLISH');
+  assert.equal(tBull.eligibleSide, 'PE');
+
+  const tBear = evaluateUnderlyingTrend(inp(25000, 24900, -1), { ...P, useEma: false, useSupertrend: true }, 'AUTO');
+  assert.equal(tBear.trend, 'BEARISH');
+  assert.equal(tBear.eligibleSide, 'CE');
+});
+
+test('evaluateUnderlyingTrend: with both EMA cross and Supertrend off, filter is OFF and BOTH sides are eligible', () => {
+  const t = evaluateUnderlyingTrend(inp(24800, 24900, -1), { ...P, useEma: false, useSupertrend: false }, 'AUTO');
+  assert.equal(t.headline, 'TREND FILTER OFF');
+  assert.equal(t.eligibleSide, 'BOTH');
+});
+
 test('evaluateUnderlyingTrend: a Supertrend still warming up holds entries', () => {
   const t = evaluateUnderlyingTrend(inp(24980, 24940, null), P, 'AUTO');
   assert.equal(t.headline, 'Awaiting Indicators');
@@ -59,8 +75,9 @@ test('indexTrendInputs: EMAs follow pandas ewm(adjust=False) and Supertrend need
 });
 
 test('indexTrendParamsOf: defaults for a config saved before the index trend settings existed', () => {
-  assert.deepEqual(indexTrendParamsOf({}), { emaFast: 9, emaSlow: 20, useSupertrend: false, stPeriod: 7, stMultiplier: 3 });
+  assert.deepEqual(indexTrendParamsOf({}), { useEma: true, emaFast: 9, emaSlow: 20, useSupertrend: false, stPeriod: 7, stMultiplier: 3 });
   assert.equal(indexTrendParamsOf({ trendEmaFast: 5, trendUseSupertrend: false }).emaFast, 5);
+  assert.equal(indexTrendParamsOf({ trendUseEma: false }).useEma, false);
 });
 
 test('rankBreakdownSignals: Ranks fresh breakdown higher and filters by market trend', () => {

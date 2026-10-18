@@ -137,6 +137,7 @@ test('breakdownLedger: setConfig drops malformed values and refuses out-of-order
   assert.equal(f.config.useSupertrend, true, 'useSupertrend defaults to true');
   assert.equal(f.config.useVwap, true, 'useVwap defaults to true');
   assert.equal(f.config.useEma, true, 'useEma defaults to true');
+  assert.equal(f.config.trendUseEma, true, 'trendUseEma defaults to true');
   assert.equal(f.config.stPeriod, 10, 'stPeriod defaults to 10');
   assert.equal(f.config.stMultiplier, 2.0, 'stMultiplier defaults to 2.0');
   assert.equal(f.config.emaPeriod, 20, 'emaPeriod defaults to 20');
@@ -144,12 +145,13 @@ test('breakdownLedger: setConfig drops malformed values and refuses out-of-order
 
   const off = applyOp(emptyFile, {
     op: 'setConfig',
-    config: { hardCircuitBreaker: false, useSupertrend: false, useEma: false, stPeriod: 14, stMultiplier: 3.0, emaPeriod: 50 },
+    config: { hardCircuitBreaker: false, useSupertrend: false, useEma: false, trendUseEma: false, stPeriod: 14, stMultiplier: 3.0, emaPeriod: 50 },
   });
   assert.equal(off.config.hardCircuitBreaker, false);
   assert.equal(off.config.useSupertrend, false);
   assert.equal(off.config.useVwap, true);
   assert.equal(off.config.useEma, false);
+  assert.equal(off.config.trendUseEma, false);
   assert.equal(off.config.stPeriod, 14);
   assert.equal(off.config.stMultiplier, 3.0);
   assert.equal(off.config.emaPeriod, 50);

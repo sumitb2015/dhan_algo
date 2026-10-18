@@ -181,41 +181,53 @@ export function RulesConfigDrawer({
             </div>
 
             <div className="flex flex-col gap-2 border-t border-zinc-800/60 pt-2.5">
-              <div className="flex items-center justify-between">
+              <label className="flex items-center justify-between cursor-pointer">
                 <div>
                   <span className="text-zinc-300 font-medium">Index EMA Cross</span>
                   <p className="text-[10px] text-zinc-500">Bull when fast &gt; slow, bear when fast &lt; slow</p>
                 </div>
-                <div className="flex items-center gap-1.5">
-                  <span className="text-[11px] text-zinc-400">Fast</span>
-                  <RuleNumInput
-                    value={tp.emaFast}
-                    onCommit={(v) =>
-                      onUpdateConfig({ trendEmaFast: Math.max(2, Math.min(tp.emaSlow - 1, Math.round(Number(v) || tp.emaFast))) })
-                    }
-                    step={1}
-                    min={2}
-                    max={tp.emaSlow - 1}
-                    className="w-14 text-center"
-                  />
-                  <span className="text-[11px] text-zinc-400">Slow</span>
-                  <RuleNumInput
-                    value={tp.emaSlow}
-                    onCommit={(v) =>
-                      onUpdateConfig({ trendEmaSlow: Math.max(tp.emaFast + 1, Math.min(200, Math.round(Number(v) || tp.emaSlow))) })
-                    }
-                    step={1}
-                    min={tp.emaFast + 1}
-                    max={200}
-                    className="w-14 text-center"
-                  />
+                <input
+                  type="checkbox"
+                  checked={tp.useEma}
+                  onChange={(e) => onUpdateConfig({ trendUseEma: e.target.checked })}
+                  aria-label="Use index EMA cross in the trend filter"
+                  className="h-4 w-4 rounded border-zinc-700 bg-zinc-900 text-emerald-500 focus:ring-emerald-500"
+                />
+              </label>
+              {tp.useEma && (
+                <div className="flex items-center justify-between pl-3 border-l-2 border-zinc-800">
+                  <span className="text-[11px] text-zinc-400">Periods</span>
+                  <div className="flex items-center gap-1.5">
+                    <span className="text-[11px] text-zinc-400">Fast</span>
+                    <RuleNumInput
+                      value={tp.emaFast}
+                      onCommit={(v) =>
+                        onUpdateConfig({ trendEmaFast: Math.max(2, Math.min(tp.emaSlow - 1, Math.round(Number(v) || tp.emaFast))) })
+                      }
+                      step={1}
+                      min={2}
+                      max={tp.emaSlow - 1}
+                      className="w-14 text-center"
+                    />
+                    <span className="text-[11px] text-zinc-400">Slow</span>
+                    <RuleNumInput
+                      value={tp.emaSlow}
+                      onCommit={(v) =>
+                        onUpdateConfig({ trendEmaSlow: Math.max(tp.emaFast + 1, Math.min(200, Math.round(Number(v) || tp.emaSlow))) })
+                      }
+                      step={1}
+                      min={tp.emaFast + 1}
+                      max={200}
+                      className="w-14 text-center"
+                    />
+                  </div>
                 </div>
-              </div>
+              )}
 
               <label className="flex items-center justify-between cursor-pointer">
                 <div>
                   <span className="text-zinc-300 font-medium">Index Supertrend</span>
-                  <p className="text-[10px] text-zinc-500">Must agree with the EMA cross · off by default: it cut profit in the backtest</p>
+                  <p className="text-[10px] text-zinc-500">Confirmed direction · off by default: it cut profit in the backtest</p>
                 </div>
                 <input
                   type="checkbox"
@@ -254,6 +266,11 @@ export function RulesConfigDrawer({
               <p className="text-[10px] text-zinc-500">
                 The index Supertrend uses close-to-close range (the backtest stores only index closes, so live does the same).
               </p>
+              {!tp.useEma && !tp.useSupertrend && (
+                <p className="text-[10px] text-amber-400 font-medium">
+                  Both index trend filters are off: in AUTO mode, all breakdown signals will be allowed.
+                </p>
+              )}
             </div>
           </div>
 

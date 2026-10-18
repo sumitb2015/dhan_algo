@@ -61,6 +61,7 @@ export interface BreakdownConfig {
   stMultiplier?: number; // default 2.0 (Supertrend multiplier)
   emaPeriod?: number; // default 20 (EMA period)
   /** Index (NIFTY) trend: EMA fast/slow cross on the option timeframe, optionally confirmed by a Supertrend. */
+  trendUseEma?: boolean; // default true
   trendEmaFast?: number; // default 9
   trendEmaSlow?: number; // default 20 (must be > trendEmaFast)
   trendUseSupertrend?: boolean; // default false (it cut profit in the backtest)
@@ -104,6 +105,7 @@ export const DEFAULT_CONFIG: BreakdownConfig = {
   stPeriod: 10,
   stMultiplier: 2.0,
   emaPeriod: 20,
+  trendUseEma: DEFAULT_INDEX_TREND.useEma,
   trendEmaFast: DEFAULT_INDEX_TREND.emaFast,
   trendEmaSlow: DEFAULT_INDEX_TREND.emaSlow,
   trendUseSupertrend: DEFAULT_INDEX_TREND.useSupertrend,
@@ -181,6 +183,7 @@ export function sanitizeConfigPatch(patch: unknown): Partial<BreakdownConfig> {
   if (typeof p.useSupertrend === 'boolean') out.useSupertrend = p.useSupertrend;
   if (typeof p.useVwap === 'boolean') out.useVwap = p.useVwap;
   if (typeof p.useEma === 'boolean') out.useEma = p.useEma;
+  if (typeof p.trendUseEma === 'boolean') out.trendUseEma = p.trendUseEma;
   if (typeof p.trendUseSupertrend === 'boolean') out.trendUseSupertrend = p.trendUseSupertrend;
   if (typeof p.btWarmOnly === 'boolean') out.btWarmOnly = p.btWarmOnly;
   if (p.dataSource === 'dhan' || p.dataSource === 'breeze') out.dataSource = p.dataSource;
@@ -282,7 +285,7 @@ export function normalizeConfig(raw: unknown): BreakdownConfig {
   if (merged.stMultiplier === undefined) {
     merged.stMultiplier = DEFAULT_CONFIG.stMultiplier;
   }
-  for (const k of ['trendEmaFast', 'trendEmaSlow', 'trendUseSupertrend', 'trendStPeriod', 'trendStMultiplier'] as const) {
+  for (const k of ['trendUseEma', 'trendEmaFast', 'trendEmaSlow', 'trendUseSupertrend', 'trendStPeriod', 'trendStMultiplier'] as const) {
     if (merged[k] === undefined) (merged as unknown as Record<string, unknown>)[k] = DEFAULT_CONFIG[k];
   }
   // A fast EMA that is not faster than the slow one is no cross: reset the pair as a whole.
