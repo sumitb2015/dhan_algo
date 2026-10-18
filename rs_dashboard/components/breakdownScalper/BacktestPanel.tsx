@@ -36,6 +36,7 @@ interface BacktestResponse {
   running: boolean;
   status: RunStatus | null;
   from: string;
+  dbRange?: { earliest: string; latest: string };
   missing: string[];
   configKey: string;
   config: BreakdownConfig;
@@ -184,6 +185,9 @@ export function BacktestPanel({
   const stamp = useRef<string | null>(null);
   const cacheRead = useRef(false);
   const [rerunWindow, setRerunWindow] = useState<BtWindow>('db4');
+  const [customFrom, setCustomFrom] = useState('2026-09-01');
+  const [customTo, setCustomTo] = useState('2026-10-13');
+  const initializedDates = useRef(false);
   const [busy, setBusy] = useState(false);
   const seq = useRef(0);
   const autoStarted = useRef(false);
@@ -275,6 +279,17 @@ export function BacktestPanel({
     return () => clearTimeout(t);
   }, [data, post]);
 
+  useEffect(() => {
+    if (data?.store && !initializedDates.current) {
+      initializedDates.current = true;
+      if (data.store.from) setCustomFrom(data.store.from);
+      if (data.store.to) setCustomTo(data.store.to);
+      if (data.store.window) setRerunWindow(data.store.window);
+    } else if (data?.dbRange && !initializedDates.current) {
+      if (data.dbRange.latest) setCustomTo(data.dbRange.latest);
+    }
+  }, [data]);
+
   const summary = useMemo(() => summarize(days), [days]);
   const chart = useMemo(
     () =>
@@ -353,18 +368,71 @@ export function BacktestPanel({
                 value={rerunWindow}
                 onChange={(e) => setRerunWindow(e.target.value as BtWindow)}
                 aria-label="Re-run window"
-                className="h-7 rounded-lg border border-zinc-700 bg-zinc-900 px-2 text-xs font-bold text-zinc-300"
+                className="h-7 rounded-lg border border-zinc-700 bg-zinc-900 px-2 text-xs font-bold text-zinc-300 focus:outline-none"
               >
                 <option value="db4">4 weeks (Options DB)</option>
-                <option value="month">1 month (Options DB)</option>
                 <option value="week">1 week (Options DB)</option>
+                <option value="month">1 month (Options DB)</option>
+                <option value="3months">3 months (Options DB)</option>
+                <option value="6months">6 months (Options DB)</option>
+                <option value="1year">1 year (Options DB)</option>
+                <option value="all">All Data (2021–2026)</option>
+                <option value="custom">Custom Date Range…</option>
               </select>
+              {rerunWindow === 'custom' && (
+                <div className="flex items-center gap-1.5 rounded-lg border border-zinc-700 bg-zinc-900/90 px-2 py-0.5 text-xs">
+                  <span className="text-[10px] font-bold uppercase tracking-wider text-zinc-400">From</span>
+                  <input
+                    type="date"
+                    value={customFrom}
+                    onChange={(e) => setCustomFrom(e.target.value)}
+                    min={data?.dbRange?.earliest ?? '2020-12-31'}
+                    max={customTo || data?.dbRange?.latest || '2026-10-13'}
+                    aria-label="Start date"
+                    className="h-6 rounded border border-zinc-700 bg-zinc-950 px-1.5 text-xs font-mono text-zinc-200 focus:border-violet-500 focus:outline-none"
+                  />
+                  <span className="text-[10px] font-bold uppercase tracking-wider text-zinc-400">To</span>
+                  <input
+                    type="date"
+                    value={customTo}
+                    onChange={(e) => setCustomTo(e.target.value)}
+                    min={customFrom || data?.dbRange?.earliest || '2020-12-31'}
+                    max={data?.dbRange?.latest ?? '2026-10-13'}
+                    aria-label="End date"
+                    className="h-6 rounded border border-zinc-700 bg-zinc-950 px-1.5 text-xs font-mono text-zinc-200 focus:border-violet-500 focus:outline-none"
+                  />
+                </div>
+              )}
               <button
                 type="button"
                 onClick={() => {
-                  const label = rerunWindow === 'db4' ? 'latest 4 weeks held in the options DB' : `last ${rerunWindow}`;
-                  if (confirm(`Rebuild the backtest for the ${label} with the page's current rules? Existing results are replaced.`)) {
-                    void post({ action: 'rerun', window: rerunWindow });
+                  if (rerunWindow === 'custom') {
+                    if (!customFrom || !customTo) {
+                      alert('Please select both Start Date and End Date.');
+                      return;
+                    }
+                    if (customFrom > customTo) {
+                      alert('Start Date cannot be after End Date.');
+                      return;
+                    }
+                    if (confirm(`Rebuild the backtest from ${customFrom} to ${customTo} with current rules? Existing results will be replaced.`)) {
+                      void post({ action: 'rerun', window: 'custom', from: customFrom, to: customTo });
+                    }
+                  } else {
+                    const labels: Record<BtWindow, string> = {
+                      db4: 'latest 4 weeks held in options DB',
+                      week: 'last 1 week',
+                      month: 'last 1 month',
+                      '3months': 'last 3 months',
+                      '6months': 'last 6 months',
+                      '1year': 'last 1 year',
+                      all: 'all available historical data (2021–2026)',
+                      custom: `${customFrom} to ${customTo}`,
+                    };
+                    const label = labels[rerunWindow] ?? rerunWindow;
+                    if (confirm(`Rebuild the backtest for ${label} with current rules? Existing results will be replaced.`)) {
+                      void post({ action: 'rerun', window: rerunWindow });
+                    }
                   }
                 }}
                 disabled={busy}

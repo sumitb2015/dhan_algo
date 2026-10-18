@@ -65,6 +65,7 @@ export async function GET(request: NextRequest) {
   const missing = sessions.filter((d) => !store?.days?.[d]);
   // A status left at "running" by a runner that died (killed, machine slept) is reported as interrupted.
   const runStatus = status && status.state === 'running' && !isRunning ? { ...status, state: 'interrupted' } : status;
+  const DB_RANGE = { earliest: '2020-12-31', latest: '2026-10-13' };
   return NextResponse.json({
     success: true,
     unchanged,
@@ -73,6 +74,7 @@ export async function GET(request: NextRequest) {
       ? { state: 'starting', message: 'Starting backtest engine…' }
       : runStatus,
     from,
+    dbRange: DB_RANGE,
     missing,
     configKey,
     config,
@@ -80,7 +82,7 @@ export async function GET(request: NextRequest) {
     store: store
       ? {
           from: store.from,
-          window: store.window ?? 'month',
+          window: store.window ?? 'db4',
           to: store.to ?? null,
           offline: !!store.offline,
           updatedAt: store.updatedAt,
@@ -113,9 +115,16 @@ function acquireStartLock(): boolean {
 }
 
 export async function POST(request: NextRequest) {
-  const body = (await request.json().catch(() => null)) as { action?: string; window?: string } | null;
+  const body = (await request.json().catch(() => null)) as {
+    action?: string;
+    window?: string;
+    from?: string;
+    to?: string;
+  } | null;
   const action = body?.action;
-  const window = body?.window === 'month' ? 'month' : body?.window === 'db4' ? 'db4' : 'week';
+  const window = body?.window ?? 'db4';
+  const from = body?.from;
+  const to = body?.to;
 
   if (action === 'stop') {
     const pid = runnerPid();
@@ -168,7 +177,11 @@ export async function POST(request: NextRequest) {
   try {
     if (fs.existsSync(STOP)) fs.unlinkSync(STOP);
     const logFd = fs.openSync(LOG, 'w');
-    const child = spawn(process.execPath, [RUNNER, '--mode', action, '--window', window], {
+    const runnerArgs = [RUNNER, '--mode', action, '--window', window];
+    if (from && to) {
+      runnerArgs.push('--from', from, '--to', to);
+    }
+    const child = spawn(process.execPath, runnerArgs, {
       cwd: process.cwd(),
       detached: true,
       stdio: ['ignore', logFd, logFd],

@@ -557,13 +557,17 @@ export function backtestConfigKey(c: BreakdownConfig): string {
   });
 }
 
-export type BtWindow = 'week' | 'month' | 'db4';
+export type BtWindow = 'week' | 'month' | 'db4' | '3months' | '6months' | '1year' | 'all' | 'custom';
 
-/** First session of a fresh backfill: the same calendar day one week (or one month) back. Daily appends keep it. */
+/** First session of a fresh backfill: the same calendar day one week (or months/year) back. Daily appends keep it. */
 export function backfillStart(todayIst: string, window: BtWindow = 'week'): string {
   const d = new Date(`${todayIst}T00:00:00Z`);
   if (window === 'month') d.setUTCMonth(d.getUTCMonth() - 1);
-  else d.setUTCDate(d.getUTCDate() - 7);
+  else if (window === '3months') d.setUTCMonth(d.getUTCMonth() - 3);
+  else if (window === '6months') d.setUTCMonth(d.getUTCMonth() - 6);
+  else if (window === '1year') d.setUTCFullYear(d.getUTCFullYear() - 1);
+  else if (window === 'all') return '2021-01-01';
+  else d.setUTCDate(d.getUTCDate() - (window === 'db4' ? 28 : 7));
   return d.toISOString().slice(0, 10);
 }
 

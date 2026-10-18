@@ -49,8 +49,11 @@ if (mode !== 'catchup' && mode !== 'rerun') {
   process.exit(2);
 }
 
-const windowArg = process.argv.includes('--window') ? process.argv[process.argv.indexOf('--window') + 1] : 'week';
-const btWindow: BtWindow = windowArg === 'month' ? 'month' : windowArg === 'db4' ? 'db4' : 'week';
+const windowArg = process.argv.includes('--window') ? process.argv[process.argv.indexOf('--window') + 1] : 'db4';
+const fromArg = process.argv.includes('--from') ? process.argv[process.argv.indexOf('--from') + 1] : undefined;
+const toArg = process.argv.includes('--to') ? process.argv[process.argv.indexOf('--to') + 1] : undefined;
+const validWindows: BtWindow[] = ['week', 'month', 'db4', '3months', '6months', '1year', 'all', 'custom'];
+const btWindow: BtWindow = (validWindows.includes(windowArg as BtWindow) ? windowArg : (fromArg && toArg ? 'custom' : 'db4')) as BtWindow;
 
 const nowIso = () => new Date().toISOString();
 const istHm = () => new Date(Date.now() + 5.5 * 3600_000).toISOString().slice(11, 16);
@@ -217,16 +220,35 @@ async function main() {
       return;
     }
     if (!store || mode === 'rerun') {
-      const latest = await runPy(['--db-latest']);
-      if (!latest.ok || typeof latest.latest !== 'string' || !latest.latest) {
-        saveStatus({ state: 'error', message: `Cannot read the options DB: ${String(latest.error ?? 'empty')}`, finishedAt: nowIso() });
+      const dbInfo = await runPy(['--db-range']);
+      if (!dbInfo.ok || typeof dbInfo.latest !== 'string' || !dbInfo.latest) {
+        saveStatus({ state: 'error', message: `Cannot read the options DB: ${String(dbInfo.error ?? 'empty')}`, finishedAt: nowIso() });
         return;
       }
-      const to = latest.latest;
-      const d = new Date(`${to}T00:00:00Z`);
-      const daysBack = btWindow === 'week' ? 7 : btWindow === 'month' ? 30 : 28;
-      d.setUTCDate(d.getUTCDate() - daysBack);
-      const from = d.toISOString().slice(0, 10);
+      let from: string;
+      let to: string | null = null;
+      let resolvedWindow = btWindow;
+
+      if (fromArg && toArg) {
+        from = fromArg;
+        to = toArg;
+        resolvedWindow = 'custom';
+      } else {
+        to = dbInfo.latest;
+        if (btWindow === 'all') {
+          from = typeof dbInfo.earliest === 'string' ? dbInfo.earliest : '2021-01-01';
+        } else {
+          const d = new Date(`${to}T00:00:00Z`);
+          const daysBack =
+            btWindow === 'week' ? 7 :
+            btWindow === 'month' ? 30 :
+            btWindow === '3months' ? 90 :
+            btWindow === '6months' ? 180 :
+            btWindow === '1year' ? 365 : 28;
+          d.setUTCDate(d.getUTCDate() - daysBack);
+          from = d.toISOString().slice(0, 10);
+        }
+      }
       store = {
         version: 1,
         underlying: 'NIFTY',
@@ -235,7 +257,7 @@ async function main() {
         from,
         to,
         offline: true,
-        window: btWindow,
+        window: resolvedWindow,
         updatedAt: null,
         days: {},
         failures: {},
@@ -245,7 +267,12 @@ async function main() {
 
     const sessions = sessionsToHold(store.from, today, istHm(), isRegularSession, store.to ?? null);
     const missing = sessions.filter((d) => !store!.days[d]);
-    saveStatus({ total: missing.length, message: missing.length ? `${missing.length} session(s) to backtest` : 'Up to date' });
+    saveStatus({
+      total: missing.length,
+      message: missing.length
+        ? `${missing.length} session(s) to backtest (${store.from} → ${store.to ?? today})`
+        : 'Up to date',
+    });
 
     for (const date of missing) {
       if (stopRequested()) {

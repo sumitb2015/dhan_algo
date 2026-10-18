@@ -55,9 +55,15 @@ EXPIRED_ATTEMPTS = 3
 RATE_BACKOFF_S = (60, 120, 180)
 PROGRESS = os.path.join(OUT_DIR, 'data_progress.json')
 
-# NIFTY option lot size by first session it applies to (newest first). Only sessions covered here are backtestable:
-# a wrong lot size silently scales every rupee figure, so an older date fails instead of guessing.
-NIFTY_LOT_SIZES = [('2026-01-01', 65)]
+# NIFTY option lot size by first session it applies to (newest first).
+# Historical NSE lot sizes: 65 (2025+), 75 (Nov 2024 - Dec 2024), 25 (May 2024 - Nov 2024), 50 (July 2021 - April 2024), 75 (pre-July 2021)
+NIFTY_LOT_SIZES = [
+    ('2025-01-01', 65),
+    ('2024-11-20', 75),
+    ('2024-04-26', 25),
+    ('2021-07-01', 50),
+    ('2020-01-01', 75),
+]
 # Bump when the payload's meaning changes (2 = always 2 warm-up sessions): older cached day files are rebuilt.
 FORMAT_VERSION = 2
 
@@ -353,15 +359,18 @@ def main():
     ap.add_argument('--offline', action='store_true',
                     help='options DB only, no Dhan calls: warm-up is whatever the DB holds for the contract (Wed/Thu partial)')
     ap.add_argument('--db-latest', action='store_true', help='print the latest session in the options DB and exit')
+    ap.add_argument('--db-range', action='store_true', help='print earliest and latest session in the options DB and exit')
     args = ap.parse_args()
-    if args.db_latest:
+    if args.db_latest or args.db_range:
         con = sqlite3.connect(f'file:{DB_PATH}?mode=ro', uri=True)
         try:
-            exp = con.execute('SELECT MAX(expiry) FROM option_prices').fetchone()[0]
-            last = con.execute('SELECT MAX(datetime) FROM option_prices WHERE expiry=?', (exp,)).fetchone()[0]
+            min_exp = con.execute('SELECT MIN(expiry) FROM option_prices').fetchone()[0]
+            max_exp = con.execute('SELECT MAX(expiry) FROM option_prices').fetchone()[0]
+            first = con.execute('SELECT MIN(datetime) FROM option_prices WHERE expiry=?', (min_exp,)).fetchone()[0]
+            last = con.execute('SELECT MAX(datetime) FROM option_prices WHERE expiry=?', (max_exp,)).fetchone()[0]
         finally:
             con.close()
-        emit({'ok': True, 'latest': (last or '')[:10], 'expiry': exp})
+        emit({'ok': True, 'latest': (last or '')[:10], 'earliest': (first or '')[:10], 'expiry': max_exp, 'min_expiry': min_exp})
     day = args.date
     if not day:
         emit({'ok': False, 'error': '--date is required', 'retry': False})
