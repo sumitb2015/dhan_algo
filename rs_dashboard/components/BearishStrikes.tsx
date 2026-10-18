@@ -28,7 +28,7 @@ import {
   computeIndicators, DEFAULT_IND_PARAMS, type IndParams, evaluateBearish, istNowMs, mergeBars, oiView, passesFilters, pctBelow, recordTick,
   type BearishSignal, type LiveMinutes, type OiMode, type StrikeFilters, type Timeframe,
 } from '@/lib/bearishStrikes';
-import { legPnl, type BsPosition, type LedgerOp } from '@/lib/bearishLedger';
+import { RESERVATION_PREFIX, isReservation, legPnl, type BsPosition, type LedgerOp, type PendingOrder } from '@/lib/bearishLedger';
 import { NO_RISK, riskHit, riskLevels, type RiskCfg, type RiskHit } from '@/lib/bearishRisk';
 import {
   LEVELS, activeLevels, levelStates, stepTracker, watchState,
@@ -45,6 +45,9 @@ const MAX_LOTS = 50;
 const SOURCE = 'bs';
 const FILL_GRACE_MS = 30_000;
 const SETTLE_GIVE_UP_MS = 6 * 3600_000;
+/** A reservation (order recorded, broker id not back yet) older than this belongs to a tab that died mid-send. */
+const RESERVATION_STALE_MS = 60_000;
+const FEED_FRESH_MS = 15_000;
 
 interface LookupEntry { lotSize: number; strikes: Record<string, StrikeIdentifier> }
 interface Row {
@@ -90,7 +93,6 @@ const pnlCls = (n: number | null) => (n == null ? 'text-zinc-500' : n > 0 ? 'tex
 const istDate = () => new Date(Date.now() + 5.5 * 3600_000).toISOString().slice(0, 10);
 const dte = (expiry: string) => Math.round((Date.parse(expiry) - Date.parse(istDate())) / 86_400_000);
 
-/** Free-typed number that only commits on blur / Enter (dhan-commit-on-blur): "2" on the way to "25" must not filter live. */
 /** HH:MM:SS in IST for a ledger timestamp (ms). */
 function clockIst(ms: number): string {
   return new Date(ms).toLocaleTimeString('en-GB', { timeZone: 'Asia/Kolkata', hour12: false });
@@ -98,6 +100,7 @@ function clockIst(ms: number): string {
 
 const clampInt = (n: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, Math.round(n)));
 
+/** Free-typed number that only commits on blur / Enter (dhan-commit-on-blur): "2" on the way to "25" must not filter live. */
 function NumField({ label, value, onCommit, step = 1, min = 0, width = 'w-16', title }: {
   title?: string; label: string; value: number; onCommit: (n: number) => void; step?: number; min?: number; width?: string;
 }) {
@@ -416,6 +419,14 @@ export default function BearishStrikes() {
       const nowIst = istNowMs();
       setNowTick(Date.now());
       if (!q) return;
+      // A stalled feed repeats its last price: folding that into live minutes would fabricate flat bars.
+      const feedFresh = !!q.updated_at && Date.now() - Date.parse(q.updated_at) < FEED_FRESH_MS;
+      // Only strikes still in the scan (plus held ones) are shown: a strike that left the scan keeps its old candles,
+      // and with zero-volume live minutes its VWAP would sit frozen while the row still reads BEARISH.
+      const inScan = new Set([
+        ...candidateContracts().map((c) => c.key),
+        ...positionsRef.current.filter((p) => p.status === 'OPEN' && p.qty > 0 && `${p.underlying}|${p.expiry}` === scopeRef.current).map((p) => `${p.strike}${p.option}`),
+      ]);
       const spot = q.spot || 0;
       const next: Row[] = [];
       const only100 = strike100 && underlying === 'CRUDEOILM';
@@ -431,7 +442,8 @@ export default function BearishStrikes() {
           const key = `${s}${option}`;
           let lm = liveMinRef.current.get(key);
           if (!lm) { lm = new Map(); liveMinRef.current.set(key, lm); }
-          recordTick(lm, d.ltp, nowIst);
+          if (feedFresh) recordTick(lm, d.ltp, nowIst);
+          if (!inScan.has(key)) continue;
           const cached = barsRef.current.get(key);
           if (!cached || !cached.bars.length) continue;          // no backfill = no VWAP/ST: never guess
           const ind = computeIndicators(mergeBars(cached.bars, lm), tf, nowIst, indCfg);
@@ -450,7 +462,7 @@ export default function BearishStrikes() {
       setRows(next);
     }, 1000);
     return () => clearInterval(id);
-  }, [tf, filters, lotSize, strike100, underlying, atmMin, indCfg]);
+  }, [tf, filters, lotSize, strike100, underlying, atmMin, indCfg, candidateContracts]);
 
   // ── Ledger ──────────────────────────────────────────────────────
   const [positions, setPositions] = useState<BsPosition[]>([]);
@@ -566,24 +578,41 @@ export default function BearishStrikes() {
       const res = await fetch('/api/bearish-strikes/state', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(o) });
       const j = await res.json() as { success: boolean; error?: string; positions?: BsPosition[] };
       if (!j.success) { toast.error(j.error ?? 'Ledger write failed'); return false; }
-      if (j.positions) setPositions(j.positions);
+      // The 1 s loops read positionsRef: update it now, not a render later, so a write is seen by the very next tick.
+      if (j.positions) { positionsRef.current = j.positions; setPositions(j.positions); }
       return true;
     } catch { toast.error('Ledger write failed'); return false; }
   }, []);
 
   // Order outcomes: an ACK is not a fill. Poll every pending order and settle it by order id.
   const settling = useRef(false);
+  const warnedUnknown = useRef<Set<string>>(new Set());
   useEffect(() => {
     const id = setInterval(async () => {
       if (settling.current) return;
       settling.current = true;
       try {
-        for (const p of positions) {
+        for (const p of positionsRef.current) {
           for (const o of p.pendingOrders ?? []) {
             if (p.mode !== 'REAL') continue;
+            const bkName = p.broker === 'kotak' ? 'Kotak' : 'Dhan';
+            if (isReservation(o.orderId)) {
+              // Recorded before sending, broker id never written back: the sending tab died (or is still sending).
+              if (Date.now() - o.at > RESERVATION_STALE_MS) {
+                await op({ op: 'pending', id: p.id, pending: null, clearOrderId: o.orderId });
+                toast.warning(`${p.strike} ${p.option}: an ${o.kind} order may have been sent without being recorded — check the ${bkName} order book`, { duration: 15_000 });
+              }
+              continue;
+            }
             const r = await fetch(`/api/scalper/orders?orderId=${encodeURIComponent(o.orderId)}&broker=${p.broker ?? 'dhan'}`).then((x) => x.json()).catch(() => null) as
               { success: boolean; data?: { orderStatus: string; filledQty: number; averageTradedPrice: number } } | null;
-            if (!r?.success || !r.data) { if (Date.now() - o.at > SETTLE_GIVE_UP_MS) toast.warning(`Order ${o.orderId} status unknown — check the ${p.broker === 'kotak' ? 'Kotak' : 'Dhan'} order book`); continue; }
+            if (!r?.success || !r.data) {
+              if (Date.now() - o.at > SETTLE_GIVE_UP_MS && !warnedUnknown.current.has(o.orderId)) {
+                warnedUnknown.current.add(o.orderId);
+                toast.warning(`Order ${o.orderId} status unknown — check the ${bkName} order book`);
+              }
+              continue;
+            }
             const st = r.data.orderStatus;
             if (st === 'TRADED') await op({ op: 'settle', id: p.id, orderId: o.orderId, filledQty: r.data.filledQty, avgPrice: r.data.averageTradedPrice, at: Date.now() });
             else if (['REJECTED', 'CANCELLED', 'CANCELED', 'EXPIRED'].includes(st)) {
@@ -595,13 +624,13 @@ export default function BearishStrikes() {
       } finally { settling.current = false; }
     }, 4000);
     return () => clearInterval(id);
-  }, [positions, op]);
+  }, [op]);
 
   // Down-only reconcile against the broker for REAL rows: the broker may have LESS than the ledger (closed outside
   // this page), never more. Skipped inside the fill grace and while any order is unresolved.
   useEffect(() => {
     const id = setInterval(async () => {
-      const real = positions.filter((p) => p.mode === 'REAL' && p.status === 'OPEN' && p.qty > 0 && !p.pendingOrders?.length && Date.now() - p.filledAt > FILL_GRACE_MS);
+      const real = positionsRef.current.filter((p) => p.mode === 'REAL' && p.status === 'OPEN' && p.qty > 0 && !p.pendingOrders?.length && Date.now() - p.filledAt > FILL_GRACE_MS);
       if (!real.length) return;
       // Each row against ITS broker's book: Dhan by security id, Kotak by trading symbol (product MIS = INTRADAY).
       for (const bk of ['dhan', 'kotak'] as const) {
@@ -614,13 +643,19 @@ export default function BearishStrikes() {
             const rows = j.data.filter((r) => (bk === 'kotak' ? String(r.tradingSymbol) === p.symbol : String(r.securityId) === p.securityId)
               && ['INTRADAY', 'MIS'].includes(String(r.productType ?? 'INTRADAY').toUpperCase()));
             const shortQty = rows.reduce((a, r) => a + Math.max(0, -(Number(r.netQty) || 0)), 0);
-            if (shortQty < p.qty) await op({ op: 'clamp', id: p.id, qty: shortQty, at: Date.now() });
+            if (shortQty < p.qty) {
+              // Price the vanished qty at the live LTP when the page has one (an estimate — the real fill is unknown).
+              const q = quotesRef.current;
+              const d = `${p.underlying}|${p.expiry}` === scopeRef.current ? q?.strikes[String(p.strike)]?.[p.option === 'CE' ? 'ce' : 'pe'] : undefined;
+              const fresh = !!q?.updated_at && Date.now() - Date.parse(q.updated_at) < FEED_FRESH_MS;
+              await op({ op: 'clamp', id: p.id, qty: shortQty, at: Date.now(), ...(fresh && d && d.ltp > 0 ? { price: d.ltp } : {}) });
+            }
           }
         } catch { /* retry next tick */ }
       }
     }, 10_000);
     return () => clearInterval(id);
-  }, [positions, op]);
+  }, [op]);
 
   // ── Live price lookup for a ledger row ──────────────────────────
   const ltpOf = useCallback((p: Pick<BsPosition, 'underlying' | 'expiry' | 'option' | 'strike'>): number | null => {
@@ -743,30 +778,39 @@ export default function BearishStrikes() {
         ? (p.option === 'CE' ? ident?.ceSymbol : ident?.peSymbol)
         : (p.option === 'CE' ? ident?.ceId : ident?.peId);
       if (!contract) { toast.error(`No ${broker === 'kotak' ? 'Kotak trading symbol' : 'security id'} for ${label} — lookup not loaded`); return; }
+      const bkName = broker === 'kotak' ? 'Kotak' : 'Dhan';
       const idem = `bs-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+      // Record the order BEFORE sending it. The ledger refuses a CLOSED row (this tab's copy can be 5 s old), so a sell
+      // can never fill onto a row nothing watches; nothing is sent if the reservation is refused.
+      const resv: PendingOrder = { orderId: `${RESERVATION_PREFIX}${idem}`, kind: 'entry', side: 'SELL', qty, at: Date.now() };
+      let rowId: string;
+      if (existing) {
+        if (!await op({ op: 'pending', id: existing.id, pending: resv })) { void refreshLedger(); return; }
+        rowId = existing.id;
+      } else {
+        const np = newPosition({
+          mode, underlying, expiry: p.expiry, option: p.option, strike: p.strike, lotSize, qty: 0, avgPrice: 0, broker,
+          ...(broker === 'kotak' ? { symbol: contract } : { securityId: contract }), pendingOrders: [resv],
+        });
+        if (!await op({ op: 'open', position: np })) { void refreshLedger(); return; }
+        rowId = np.id;
+      }
       const r = await sendOrder({ broker, underlying, side: 'S', option: p.option, strike: p.strike, qty, type: p.orderType, price: p.limitPrice, ident: contract, idem });
       if (!r.orderId) {
-        toast.error(r.unknown ? `Order status unknown for ${label} — check ${broker === 'kotak' ? 'Kotak' : 'Dhan'} Positions/Orders before retrying` : `Order rejected: ${r.error}`);
+        // Unknown outcome: keep the reservation — it blocks a blind re-send and is cleared with a warning after a minute.
+        if (!r.unknown) await op({ op: 'pending', id: rowId, pending: null, clearOrderId: resv.orderId });
+        toast.error(r.unknown ? `Order status unknown for ${label} — check ${bkName} Positions/Orders before retrying` : `Order rejected: ${r.error}`);
         return;
       }
-      // Track the order from the moment it is ACKed, so an unconfirmed one is never forgotten.
-      const pending = { orderId: r.orderId, kind: 'entry' as const, side: 'SELL' as const, qty, at: Date.now() };
-      const tracked = existing
-        ? await op({ op: 'pending', id: existing.id, pending })
-        : await op({ op: 'open', position: newPosition({
-            mode, underlying, expiry: p.expiry, option: p.option, strike: p.strike, lotSize, qty: 0, avgPrice: 0, broker,
-            ...(broker === 'kotak' ? { symbol: contract } : { securityId: contract }), pendingOrders: [pending],
-          }) });
-      if (!tracked) { toast.error(`Order ${r.orderId} was sent but could not be recorded — check ${broker === 'kotak' ? 'Kotak' : 'Dhan'} Positions`); return; }
-      const id = existing?.id ?? null;
+      const tracked = await op({ op: 'pending', id: rowId, pending: { ...resv, orderId: r.orderId, at: Date.now() }, clearOrderId: resv.orderId });
+      if (!tracked) { toast.error(`Order ${r.orderId} was sent but could not be recorded — check ${bkName} Positions`); return; }
       const c = await confirmOrder(r.orderId, broker);
       if (c.phase === 'pending') { toast.warning(`${label} order still working — it is tracked and will settle automatically`); return; }
-      const pos = await currentPosition(id, { mode, broker, underlying, expiry: p.expiry, option: p.option, strike: p.strike });
-      if (pos) await op({ op: 'settle', id: pos.id, orderId: r.orderId, filledQty: c.qty, avgPrice: c.avg, at: Date.now() });
+      await op({ op: 'settle', id: rowId, orderId: r.orderId, filledQty: c.qty, avgPrice: c.avg, at: Date.now() });
       if (c.phase === 'filled') toast.success(`Sold ${p.lots} lot${p.lots > 1 ? 's' : ''} ${label} @ ${c.avg.toFixed(2)}`);
       else toast.error(`${label} order ${c.reason || 'rejected'}`);
     } finally { lock.current = false; }
-  }, [lotSize, ltpOf, underlying, positions, mode, op, lookup, sendOrder, confirmOrder, broker]);
+  }, [lotSize, ltpOf, underlying, positions, mode, op, lookup, sendOrder, confirmOrder, broker, refreshLedger]);
 
   const doExit = useCallback(async (pos: BsPosition, lots: number, orderType: 'MARKET' | 'LIMIT', limitPrice?: number): Promise<boolean> => {
     if (lock.current) { toast.warning('Another order is still in flight'); return false; }
@@ -786,24 +830,42 @@ export default function BearishStrikes() {
         return ok;
       }
       const bk: DhanKotak = pos.broker ?? 'dhan';
+      const bkName = bk === 'kotak' ? 'Kotak' : 'Dhan';
       const contract = bk === 'kotak' ? pos.symbol : pos.securityId;
-      if (!contract) { toast.error(`Position has no ${bk === 'kotak' ? 'Kotak trading symbol' : 'security id'}`); return false; }
+      if (!contract) { toast.error(`Position has no ${bkName === 'Kotak' ? 'Kotak trading symbol' : 'security id'}`); return false; }
       // A resting exit must be cancelled first or the two would together over-buy; abort if the cancel fails.
       for (const o of (pos.pendingOrders ?? []).filter((x) => x.kind === 'exit')) {
+        if (isReservation(o.orderId)) { toast.error(`Another exit for ${label} is being sent right now — wait for it to settle`); return false; }
         const cr = await fetch('/api/scalper/orders', { method: 'DELETE', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ orderId: o.orderId, broker: bk }) }).then((x) => x.json()).catch(() => null) as { success?: boolean } | null;
         if (!cr?.success) { toast.error(`Could not cancel the resting exit ${o.orderId}; exit not sent`); return false; }
-        await op({ op: 'settle', id: pos.id, orderId: o.orderId, filledQty: 0, avgPrice: 0, at: Date.now() });
+        // A cancel ACK is not proof (Kotak can answer 200 with an error body), and the order may have part-filled before
+        // it died: read its final state and book exactly what it filled, or send nothing.
+        const fin = await confirmOrder(o.orderId, bk, 5000);
+        if (fin.phase === 'pending') { toast.error(`Resting exit ${o.orderId} still shows as working after the cancel — new exit not sent; check the ${bkName} order book`); return false; }
+        await op({ op: 'settle', id: pos.id, orderId: o.orderId, filledQty: fin.qty, avgPrice: fin.avg, at: Date.now() });
       }
+      // Size from the ledger as it is NOW, not as this modal last saw it (a cancelled exit may have part-filled).
+      const now = await readLedgerRow(pos.id);
+      if (!now) { toast.error('Ledger unreachable — exit not sent'); return false; }
+      setPositions(now.all);
+      const row = now.row;
+      if (!row || row.status !== 'OPEN' || !(row.qty > 0)) { toast.success(`${label} is already flat`); return true; }
+      const xqty = Math.min(row.qty, Math.round(lots * row.lotSize));
       const idem = `bs-x-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
-      const r = await sendOrder({ broker: bk, underlying: pos.underlying, side: 'B', option: pos.option, strike: pos.strike, qty, type: orderType, price: limitPrice, ident: contract, idem });
+      // Reserve before sending: the ledger refuses an exit that would take the working exits past the owned qty, so a
+      // second tab (or auto-exit racing a click) cannot send a second buy-back.
+      const resv: PendingOrder = { orderId: `${RESERVATION_PREFIX}${idem}`, kind: 'exit', side: 'BUY', qty: xqty, at: Date.now() };
+      if (!await op({ op: 'pending', id: row.id, pending: resv })) return false;
+      const r = await sendOrder({ broker: bk, underlying: row.underlying, side: 'B', option: row.option, strike: row.strike, qty: xqty, type: orderType, price: limitPrice, ident: contract, idem });
       if (!r.orderId) {
-        toast.error(r.unknown ? `Exit status unknown for ${label} — check ${bk === 'kotak' ? 'Kotak' : 'Dhan'} Positions before retrying` : `Exit rejected: ${r.error}`);
+        if (!r.unknown) await op({ op: 'pending', id: row.id, pending: null, clearOrderId: resv.orderId });
+        toast.error(r.unknown ? `Exit status unknown for ${label} — check ${bkName} Positions before retrying` : `Exit rejected: ${r.error}`);
         return false;
       }
-      await op({ op: 'pending', id: pos.id, pending: { orderId: r.orderId, kind: 'exit', side: 'BUY', qty, at: Date.now() } });
+      await op({ op: 'pending', id: row.id, pending: { ...resv, orderId: r.orderId, at: Date.now() }, clearOrderId: resv.orderId });
       const c = await confirmOrder(r.orderId, bk);
       if (c.phase === 'pending') { toast.warning(`${label} exit still working — tracked, will settle automatically`); return true; }
-      await op({ op: 'settle', id: pos.id, orderId: r.orderId, filledQty: c.qty, avgPrice: c.avg, at: Date.now() });
+      await op({ op: 'settle', id: row.id, orderId: r.orderId, filledQty: c.qty, avgPrice: c.avg, at: Date.now() });
       if (c.phase === 'filled') toast.success(`Bought back ${label} @ ${c.avg.toFixed(2)}`);
       else toast.error(`${label} exit ${c.reason || 'rejected'} — position is still open`);
       return c.phase === 'filled';
@@ -818,8 +880,10 @@ export default function BearishStrikes() {
   }, [positions, mode, doExit]);
 
   // ── SL / Target / Trailing SL ───────────────────────────────────
-  // Live premium vs the % rules in `risk`. The trailing anchor (lowest premium since entry) is persisted on the
-  // ledger row, so a reload cannot loosen the trail. Fires on the live price only (no closed-bar basis).
+  // Live premium vs the % rules in `risk`. The trailing anchor (lowest premium while the trail is on) is persisted on
+  // the ledger row, so a reload cannot loosen the trail. Fires on the live price only (no closed-bar basis).
+  // The anchor is tracked only while Trail > 0 and restarts when the user switches Trail on: a low recorded while
+  // the trail was off would otherwise fire it (and auto-exit at MARKET) the instant it is enabled.
   const [riskHits, setRiskHits] = useState<Record<string, RiskHit>>({});
   const lowSent = useRef<Record<string, { v: number; at: number }>>({});
   const riskNotified = useRef<Record<string, string>>({});
@@ -837,7 +901,7 @@ export default function BearishStrikes() {
         if (ltp == null) continue;
         const sent = lowSent.current[p.id];
         const known = Math.min(p.low ?? Infinity, sent?.v ?? Infinity);
-        if (ltp < known) {                       // new low: remember it now, persist at most every 5 s
+        if (risk.trail > 0 && ltp < known) {     // new low: remember it now, persist at most every 5 s
           lowSent.current[p.id] = { v: ltp, at: sent?.at ?? 0 };
           if (now - (sent?.at ?? 0) > 5000) { lowSent.current[p.id].at = now; void op({ op: 'low', id: p.id, low: ltp }); }
         }
@@ -857,6 +921,15 @@ export default function BearishStrikes() {
     }, 1000);
     return () => clearInterval(id);
   }, [risk, alertSound, op]);
+
+  /** Trail switched on (0 -> >0) by the user: restart every open short's anchor at its entry, so trailing starts now. */
+  const restartTrailAnchors = useCallback(async () => {
+    for (const p of positionsRef.current) {
+      if (p.status !== 'OPEN' || !(p.qty > 0) || !(p.avgPrice > 0)) continue;
+      delete lowSent.current[p.id];
+      await op({ op: 'low', id: p.id, low: p.avgPrice, reset: true });
+    }
+  }, [op]);
 
   // ── Auto-exit: an active alert (already debounced by the tracker) on a position sends a MARKET buy-back for what
   // this ledger owns. Opt-in per page load. At most 3 tries per position, 8 s apart, then it is left to the user.
@@ -1182,7 +1255,12 @@ export default function BearishStrikes() {
             <NumField label="Target %" value={risk.tgt} step={5} width="w-14" title="Target: exit when the premium falls this % below your average sell price. 0 = off."
               onCommit={(n) => setRisk((r0) => ({ ...r0, tgt: Math.min(100, n) }))} />
             <NumField label="Trail pts" value={risk.trail} step={0.5} width="w-14" title="Trailing stop in premium points: once the premium has traded below your entry, the stop sits this many points above its lowest point and follows it 1:1 as it falls. 0 = off."
-              onCommit={(n) => setRisk((r0) => ({ ...r0, trail: Math.min(1000, n) }))} />
+              onCommit={(n) => {
+                const v = Math.min(1000, n);
+                // Switching on: the new trail only takes effect once every anchor has restarted.
+                if (risk.trail <= 0 && v > 0) void restartTrailAnchors().then(() => setRisk((r0) => ({ ...r0, trail: v })));
+                else setRisk((r0) => ({ ...r0, trail: v }));
+              }} />
             <label className="flex items-center gap-1 text-[10px] font-bold uppercase tracking-wider text-zinc-300 cursor-pointer"
               title="When a ticked alert fires, or the SL / Target / Trail below is hit, on an open position (SIM or REAL), buy it back at MARKET automatically. Works only while this tab is open; off after a reload. Max 3 tries per position.">
               <input type="checkbox" checked={autoExit} onChange={(e) => setAutoExit(e.target.checked)} className={FOCUS_RING} />Auto-exit on alert
@@ -1362,11 +1440,11 @@ function legOf(p: BsPosition): MultiLegLeg {
   } as MultiLegLeg;
 }
 
-async function currentPosition(id: string | null, k: Pick<BsPosition, 'mode' | 'broker' | 'underlying' | 'expiry' | 'option' | 'strike'>): Promise<BsPosition | null> {
+/** One row as the ledger holds it right now (plus the whole list); null when the ledger cannot be read. */
+async function readLedgerRow(id: string): Promise<{ row: BsPosition | null; all: BsPosition[] } | null> {
   try {
-    const j = await (await fetch('/api/bearish-strikes/state')).json() as { positions?: BsPosition[] };
-    const list = j.positions ?? [];
-    return list.find((x) => x.id === id) ?? list.find((x) => x.status === 'OPEN' && x.mode === k.mode && (x.broker ?? 'dhan') === (k.broker ?? 'dhan')
-      && x.underlying === k.underlying && x.expiry === k.expiry && x.option === k.option && x.strike === k.strike) ?? null;
+    const j = await (await fetch('/api/bearish-strikes/state')).json() as { success?: boolean; positions?: BsPosition[] };
+    if (!j.success || !Array.isArray(j.positions)) return null;
+    return { row: j.positions.find((x) => x.id === id) ?? null, all: j.positions };
   } catch { return null; }
 }

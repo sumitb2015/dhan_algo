@@ -61,6 +61,15 @@ test('recordTick builds minute OHLC; mergeBars extends, appends and keeps API vo
   assert.strictEqual(m[2].c, 80);
 });
 
+test('mergeBars never rewrites an earlier (final) backfilled minute with live prints', () => {
+  const api = mk(3, () => 100, 50);                       // 09:15, 09:16, 09:17
+  const live: LiveMinutes = new Map();
+  recordTick(live, 140, Date.UTC(2026, 9, 14, 9, 15, 30)); // a stale/odd print inside a closed minute
+  const m = mergeBars(api, live);
+  assert.strictEqual(m[0].c, 100);
+  assert.strictEqual(m[0].h, 101);
+});
+
 test('passesFilters honours side, OTM and the individual conditions', () => {
   const sig = evaluateBearish(computeIndicators(mk(60, (i) => 200 - i * 2), 1, NOW));
   const row = { option: 'CE' as const, strike: 24500, ltp: 80, oi: 6500, volume: 6500, spreadPct: 1, sig };

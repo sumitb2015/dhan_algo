@@ -139,8 +139,10 @@ export function recordTick(live: LiveMinutes, ltp: number, nowIstMs: number): vo
 /**
  * Backfilled 1-minute bars (volume-bearing) + LTP-built minutes. The backfill is only refreshed once a
  * minute, so minutes that closed since the last fetch exist only in `live`; they are appended with zero
- * volume (VWAP ignores them). A minute present in both keeps the backfill's O/volume and extends H/L/C
- * with the live prints. Includes the forming minute; computeIndicators drops it as not yet closed.
+ * volume (VWAP ignores them). Only the LAST backfilled minute (possibly fetched mid-minute, so partial) keeps
+ * its O/volume and is extended with the live prints; every earlier backfilled minute is final and the broker's
+ * bar wins outright — live prints sampled from a stalled feed must never rewrite a closed bar's close.
+ * Includes the forming minute; computeIndicators drops it as not yet closed.
  */
 export function mergeBars(api: Bar[], live: LiveMinutes): Bar[] {
   const out = api.map((b) => ({ ...b }));
@@ -150,6 +152,7 @@ export function mergeBars(api: Bar[], live: LiveMinutes): Bar[] {
     const m = live.get(t)!;
     const i = idx.get(t);
     if (i != null) {
+      if (i !== out.length - 1) continue;
       const b = out[i];
       b.h = Math.max(b.h, m.h); b.l = Math.min(b.l, m.l); b.c = m.c;
     } else if (t > lastApi) {
