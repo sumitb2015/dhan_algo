@@ -183,7 +183,7 @@ export function BacktestPanel({
   const [logOpen, setLogOpen] = useState(false);
   const stamp = useRef<string | null>(null);
   const cacheRead = useRef(false);
-  const [rerunWindow, setRerunWindow] = useState<BtWindow>('week');
+  const [rerunWindow, setRerunWindow] = useState<BtWindow>('db4');
   const [busy, setBusy] = useState(false);
   const seq = useRef(0);
   const autoStarted = useRef(false);
@@ -359,9 +359,9 @@ export function BacktestPanel({
                 aria-label="Re-run window"
                 className="h-7 rounded-lg border border-zinc-700 bg-zinc-900 px-2 text-xs font-bold text-zinc-300"
               >
-                <option value="week">1 week</option>
-                <option value="month">1 month</option>
-                <option value="db4">4 weeks in options DB (offline)</option>
+                <option value="db4">4 weeks in options DB (Instant / Offline)</option>
+                <option value="month">1 month (Options DB + Live EOD)</option>
+                <option value="week">1 week (Options DB + Live EOD)</option>
               </select>
               <button
                 type="button"

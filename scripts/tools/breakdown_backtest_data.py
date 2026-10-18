@@ -418,7 +418,8 @@ def main():
             source = 'expired_api'
     if rows is not None:
         # Warm-up sessions the near-week data does not hold (on/before the previous expiry).
-        extra, err = ([], None) if args.offline else warm_rows(day, expiry, prev)
+        # When source is 'db', use local DB directly without making 42 slow Dhan REST calls.
+        extra, err = ([], None) if (args.offline or source == 'db') else warm_rows(day, expiry, prev)
         if err:
             emit({'ok': False, 'error': f'warm-up: {err}', 'retry': True})
         payload = build_payload(day, expiry, source, list(rows) + list(extra))
