@@ -493,54 +493,63 @@ export default function BreakdownScalper() {
       if (expiry) q.set('expiry', expiry);
 
       const res = await fetch(`/api/cyber-scalper/feed?${q.toString()}`);
-      const json = await res.json();
+      const json = await res.json().catch(() => null);
       if (trendKeyRef.current !== key) return; // selection changed while this was in flight
 
-      const closes = Array.isArray(json.candles)
+      const closes = Array.isArray(json?.candles)
         ? (json.candles as { close?: number }[]).map((c) => Number(c.close)).filter((c) => Number.isFinite(c) && c > 0)
         : [];
-      if (json.success && closes.length) {
+      if (json?.success && closes.length) {
         const inputs = indexTrendInputs(closes, trendParams);
         const spot = json.spot || inputs.spot;
         setUnderlyingTrend(evaluateUnderlyingTrend({ ...inputs, spot }, trendParams, config.trendMode));
         trendAtRef.current = clock();
         trendForRef.current = underlying;
+      } else if (trendAtRef.current === 0) {
+        const errMsg = json?.error ? String(json.error) : res.ok ? 'No candle data' : `Feed error (HTTP ${res.status})`;
+        setUnderlyingTrend((prev) => ({
+          ...prev,
+          headline: 'Feed Unavailable',
+          detail: errMsg,
+        }));
       }
-    } catch {
+    } catch (err) {
+      if (trendAtRef.current === 0) {
+        setUnderlyingTrend((prev) => ({
+          ...prev,
+          headline: 'Feed Offline',
+          detail: String((err as Error)?.message ?? err),
+        }));
+      }
       // Keep the last trend; its age is checked before any entry (STALE_TREND_MS).
     }
   }, [underlying, config.timeframe, config.trendMode, expiry, trendParams]);
 
-  useEffect(() => {
-    const t0 = setTimeout(fetchUnderlyingFeed, 0);
-    const id = setInterval(fetchUnderlyingFeed, 10_000);
-    return () => {
-      clearTimeout(t0);
-      clearInterval(id);
-    };
-  }, [fetchUnderlyingFeed]);
-
   // ── 5. Ledger State Load & Mutations ──────────────────────────────
+  const [stateLoaded, setStateLoaded] = useState(false);
   const loadState = useCallback(async () => {
     try {
       const res = await fetch('/api/breakdown-scalper/state');
       const j = await res.json();
       // Only a NEWER revision replaces local state: a slow poll must not roll back a mutation's answer.
-      if (!j.success) return;
-      setStateFile((prev) => (j.rev > prev.rev ? j : prev));
-      // Pin the page to the chain of today's open positions: stops are evaluated only on the chain on screen, so a
-      // reload (which starts on NIFTY) or another tab's entry must bring the view to where the positions are.
-      const file = j as BreakdownStateFile;
-      const today = istDayOf(clock());
-      const pin = file.positions.find(
-        (p) => p.status === 'OPEN' && istDayOf(p.openedAt) === today && (ALLOWED_UNDERLYINGS as readonly string[]).includes(p.underlying),
-      );
-      if (pin) {
-        setUnderlying(pin.underlying as Underlying);
-        setExpiry(pin.expiry);
+      if (j.success) {
+        setStateFile((prev) => (j.rev > prev.rev ? j : prev));
+        // Pin the page to the chain of today's open positions: stops are evaluated only on the chain on screen, so a
+        // reload (which starts on NIFTY) or another tab's entry must bring the view to where the positions are.
+        const file = j as BreakdownStateFile;
+        const today = istDayOf(clock());
+        const pin = file.positions.find(
+          (p) => p.status === 'OPEN' && istDayOf(p.openedAt) === today && (ALLOWED_UNDERLYINGS as readonly string[]).includes(p.underlying),
+        );
+        if (pin) {
+          setUnderlying(pin.underlying as Underlying);
+          setExpiry(pin.expiry);
+        }
       }
     } catch {
       // offline / retry next tick
+    } finally {
+      setStateLoaded(true);
     }
   }, []);
 
@@ -552,6 +561,26 @@ export default function BreakdownScalper() {
       clearInterval(id);
     };
   }, [loadState]);
+
+  useEffect(() => {
+    if (!stateLoaded) return;
+    let timer: ReturnType<typeof setTimeout>;
+    let dead = false;
+
+    const poll = async () => {
+      await fetchUnderlyingFeed();
+      if (dead) return;
+      // Fast retry (3s) while waiting for first successful trend, normal cadence (10s) once running.
+      const delay = trendAtRef.current > 0 ? 10_000 : 3_000;
+      timer = setTimeout(poll, delay);
+    };
+
+    timer = setTimeout(poll, 0);
+    return () => {
+      dead = true;
+      clearTimeout(timer);
+    };
+  }, [stateLoaded, fetchUnderlyingFeed]);
 
   /** Apply a ledger op on the server. Resolves true only when the server accepted it. */
   const mutateLedger = useCallback(async (op: LedgerOp): Promise<boolean> => {

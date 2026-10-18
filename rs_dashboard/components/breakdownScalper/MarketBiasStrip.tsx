@@ -285,7 +285,17 @@ export function MarketBiasStrip({
               </span>
             </div>
           </div>
-          <span className="text-[10px] text-zinc-500 text-right max-w-[120px] truncate" title={trend.headline}>
+          <span
+            className={cn(
+              'text-[10px] text-right max-w-[130px] truncate font-medium',
+              trend.headline.includes('Error') || trend.headline.includes('Unavailable') || trend.headline.includes('Offline')
+                ? 'text-red-400 font-semibold'
+                : trend.headline === 'Initializing'
+                ? 'text-zinc-500 animate-pulse'
+                : 'text-zinc-500',
+            )}
+            title={trend.detail ? `${trend.headline}: ${trend.detail}` : trend.headline}
+          >
             {trend.headline}
           </span>
         </div>
