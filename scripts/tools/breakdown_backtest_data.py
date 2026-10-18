@@ -75,6 +75,9 @@ NIFTY_LOT_SIZES = [
 ]
 # Bump when the payload's meaning changes (3 = previous session only as warm-up): older cached day files are rebuilt.
 FORMAT_VERSION = 3
+# Breeze: an expiry with fewer than this share of the fullest expiry's strikes is still downloading (or a stray test
+# download) and is not backtested.
+MIN_STRIKE_SHARE = 0.8
 
 
 def lot_size_for(day: str):
@@ -187,6 +190,20 @@ def build_payload(day: str, expiry: str, source: str, rows: list[tuple]) -> dict
 
 
 # ── 1. Local options DB ─────────────────────────────────────────────────────
+def expiry_stats(expiry: str) -> tuple[int, int, int]:
+    """(rows, distinct strikes of `expiry`, most distinct strikes any expiry in the DB has). Breeze downloads an expiry
+    strike by strike, so a partial or stray expiry shows up as fewer strikes than the fullest one."""
+    con = sqlite3.connect(f'file:{DB_PATH}?mode=ro', uri=True)
+    try:
+        rows, strikes = con.execute(
+            'SELECT COUNT(*), COUNT(DISTINCT strike) FROM option_prices WHERE expiry=?', (expiry,)).fetchone()
+        widest = con.execute(
+            'SELECT MAX(n) FROM (SELECT COUNT(DISTINCT strike) n FROM option_prices GROUP BY expiry)').fetchone()[0]
+        return rows, strikes, widest or 0
+    finally:
+        con.close()
+
+
 def from_db(day: str):
     """(expiry, rows) for the session from the local store, or None. Rows cover the contract's life in the store."""
     if not os.path.exists(DB_PATH):
@@ -507,8 +524,14 @@ def main():
     if args.db_latest or args.db_range:
         con = sqlite3.connect(f'file:{DB_PATH}?mode=ro', uri=True)
         try:
-            min_exp = con.execute('SELECT MIN(expiry) FROM option_prices').fetchone()[0]
-            max_exp = con.execute('SELECT MAX(expiry) FROM option_prices').fetchone()[0]
+            where, args = '', ()
+            if SOURCE == 'breeze':  # only expiries with their full strike set count as covered
+                per = con.execute('SELECT expiry, COUNT(DISTINCT strike) FROM option_prices GROUP BY expiry').fetchall()
+                widest = max((n for _, n in per), default=0)
+                full = [e for e, n in per if n >= MIN_STRIKE_SHARE * widest]
+                where, args = f" WHERE expiry IN ({','.join('?' * len(full))})", tuple(full)
+            min_exp = con.execute('SELECT MIN(expiry) FROM option_prices' + where, args).fetchone()[0]
+            max_exp = con.execute('SELECT MAX(expiry) FROM option_prices' + where, args).fetchone()[0]
             first = con.execute('SELECT MIN(datetime) FROM option_prices WHERE expiry=?', (min_exp,)).fetchone()[0]
             last = con.execute('SELECT MAX(datetime) FROM option_prices WHERE expiry=?', (max_exp,)).fetchone()[0]
         finally:
@@ -539,6 +562,9 @@ def main():
         return os.path.getmtime(path) if path and os.path.exists(path) else None
     warm_current = (not cached or not cached.get('warmNeeded')
                     or cached.get('warmMtime') == warm_mtime(cached.get('expiry')))
+    # A Breeze expiry grows while it downloads: a day built from fewer rows than the DB now holds is rebuilt.
+    if cached and SOURCE == 'breeze' and cached.get('expiry') and cached.get('dbRows') != expiry_stats(cached['expiry'])[0]:
+        cached = None
     if cached and cached.get('v') == FORMAT_VERSION and warm_current and (
             args.offline or cached.get('warmupSessions', 0) >= WARMUP_SESSIONS):
         emit({'ok': True, 'source': cached.get('source'), 'path': out, 'contracts': len(cached.get('contracts', {})), 'cached': True})
@@ -557,6 +583,12 @@ def main():
     if db is None:
         emit({'ok': False, 'error': f'{day} is not in {os.path.basename(DB_PATH)} (offline backtest)', 'retry': False})
     expiry, rows, prev = db
+    db_rows = None
+    if SOURCE == 'breeze':
+        db_rows, strikes, widest = expiry_stats(expiry)
+        if strikes < MIN_STRIKE_SHARE * widest:
+            emit({'ok': False, 'error': f'{day} is not in {os.path.basename(DB_PATH)}: expiry {expiry} has only {strikes} of '
+                                        f'{widest} strikes (incomplete download)', 'retry': False})
     source = 'db' if SOURCE == 'dhan' else 'breeze_db'
     # The contract's first session (normally Wednesday) has no previous day in the DB: merge the previous expiry day
     # from the --fetch-warm cache when one exists (DB rows come first, so they win any duplicate minute).
@@ -566,6 +598,7 @@ def main():
         extra, warm_m = cached_warm_rows(expiry)
         rows = list(rows) + extra
     payload = build_payload(day, expiry, source, rows)
+    payload['dbRows'] = db_rows
     payload['warmNeeded'] = warm_needed
     payload['warmMtime'] = warm_m
     if 'error' in payload:
