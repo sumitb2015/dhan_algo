@@ -58,12 +58,23 @@ export type LedgerOp =
   | { op: 'open'; position: BsPosition }
   | { op: 'add'; id: string; qty: number; price: number; at: number }
   | { op: 'reduce'; id: string; qty: number; price: number; at: number }
-  | { op: 'clamp'; id: string; qty: number; at: number }          // down-only reconcile against the broker
+  /** Down-only reconcile against the broker. `price` (live LTP, optional) books the vanished qty's P&L as an estimate. */
+  | { op: 'clamp'; id: string; qty: number; at: number; price?: number }
+  /**
+   * Record (or clear / replace) a working order. Recorded BEFORE the order is sent, under a RESERVATION_PREFIX id, and
+   * swapped for the broker's id once it is ACKed: an exit that would take the working exits past the owned qty, or any
+   * order on a CLOSED row, is refused here, so a second tab cannot send a second buy-back.
+   */
   | { op: 'pending'; id: string; pending: PendingOrder | null; clearOrderId?: string }
   /** An order reached its outcome: book `filledQty` at `avgPrice` (0 = rejected / cancelled / never filled). */
   | { op: 'settle'; id: string; orderId: string; filledQty: number; avgPrice: number; at: number }
-  | { op: 'low'; id: string; low: number }
+  /** Trailing anchor. Only ever lowers, except `reset` (the trail was just switched on: start trailing from here). */
+  | { op: 'low'; id: string; low: number; reset?: boolean }
   | { op: 'remove'; id: string };                                   // SIM clean-up only
+
+/** Id prefix of an order recorded before it is sent (no broker id yet). */
+export const RESERVATION_PREFIX = 'resv-';
+export const isReservation = (orderId: string) => orderId.startsWith(RESERVATION_PREFIX);
 
 export class LedgerError extends Error {
   status: number;
@@ -144,16 +155,38 @@ export function applyOp(file: LedgerFile, op: LedgerOp): LedgerFile {
       if (p.status !== 'OPEN') break;
       // Reconcile is down-only: a broker reading never grows the ledger.
       if (op.qty < p.qty) {
+        const gone = p.qty - Math.max(0, op.qty);
+        const priced = op.price != null && op.price > 0;
+        if (priced) {
+          const sign = p.side === 'S' ? 1 : -1;
+          p.realized += (p.avgPrice - op.price!) * gone * sign * pnlMultiplier(p.underlying, p.broker);
+        }
         p.qty = Math.max(0, op.qty);
-        if (p.qty === 0) { p.status = 'CLOSED'; p.closedAt = op.at; p.note = 'closed outside this page'; }
+        if (p.qty === 0) {
+          p.status = 'CLOSED'; p.closedAt = op.at;
+          if (priced) p.exitPrice = op.price;
+          p.note = priced ? 'closed outside this page (P&L at LTP, estimate)' : 'closed outside this page (P&L unknown)';
+        }
       }
       break;
     }
     case 'pending': {
       const p = find(op.id);
       const list = (p.pendingOrders ?? []).filter((o) => o.orderId !== (op.clearOrderId ?? op.pending?.orderId));
-      if (op.pending) list.push(op.pending);
+      if (op.pending) {
+        if (p.status !== 'OPEN') throw new LedgerError('position is closed — refresh before placing on it', 409);
+        if (op.pending.kind === 'exit') {
+          const working = list.filter((o) => o.kind === 'exit').reduce((a, o) => a + o.qty, 0);
+          if (working + op.pending.qty > p.qty) throw new LedgerError(`exit of ${op.pending.qty} would exceed the ${p.qty - working} owned and not already being exited`, 409);
+        }
+        list.push(op.pending);
+      }
       p.pendingOrders = list.length ? list : undefined;
+      // A placeholder row whose only order was never sent (reservation cleared) holds nothing: close it.
+      if (p.status === 'OPEN' && !(p.qty > 0) && !p.pendingOrders) {
+        p.qty = 0; p.status = 'CLOSED'; p.closedAt = Date.now();
+        if (p.realized === 0 && p.exitPrice == null) p.note = 'order not placed';
+      }
       break;
     }
     case 'settle': {
@@ -165,6 +198,8 @@ export function applyOp(file: LedgerFile, op: LedgerOp): LedgerFile {
       const q = Math.max(0, Math.min(op.filledQty, order.qty));
       if (q > 0 && op.avgPrice > 0) {
         if (order.kind === 'entry') {
+          // A fill always lands on an OPEN row: a short the page cannot see is a short with no alerts, SL or Exit button.
+          if (p.status !== 'OPEN') { p.status = 'OPEN'; p.closedAt = undefined; p.note = 'reopened: entry filled after close'; }
           p.avgPrice = p.qty > 0 ? (p.avgPrice * p.qty + op.avgPrice * q) / (p.qty + q) : op.avgPrice;
           p.qty += q;
           p.maxQty = Math.max(p.maxQty ?? 0, p.qty);
@@ -187,7 +222,7 @@ export function applyOp(file: LedgerFile, op: LedgerOp): LedgerFile {
     case 'low': {
       const p = find(op.id);
       if (p.status !== 'OPEN' || !(op.low > 0)) return file;     // no-op: nothing to anchor
-      if (p.low != null && op.low >= p.low) return file;         // only ever lowers
+      if (!op.reset && p.low != null && op.low >= p.low) return file;   // only ever lowers
       p.low = op.low;
       break;
     }
@@ -198,4 +233,52 @@ export function applyOp(file: LedgerFile, op: LedgerOp): LedgerFile {
     }
   }
   return { rev: file.rev + 1, positions };
+}
+
+const isNum = (v: unknown): v is number => typeof v === 'number' && Number.isFinite(v);
+const isStr = (v: unknown): v is string => typeof v === 'string' && v.length > 0;
+
+/**
+ * Shape check for an op arriving over HTTP. applyOp's arithmetic assumes numbers: a string qty would concatenate
+ * (`p.qty += "2"`) instead of adding. Throws LedgerError(400) on anything malformed.
+ */
+export function validateOp(raw: unknown): LedgerOp {
+  const bad = (what: string): never => { throw new LedgerError(`invalid op: ${what}`); };
+  if (!raw || typeof raw !== 'object') bad('body must be an object');
+  const o = raw as Record<string, unknown>;
+  const num = (k: string, optional = false) => { if (optional && o[k] == null) return; if (!isNum(o[k])) bad(`${k} must be a number`); };
+  const str = (k: string) => { if (!isStr(o[k])) bad(`${k} must be a non-empty string`); };
+  const pend = (v: unknown) => {
+    const x = v as Record<string, unknown>;
+    if (!x || typeof x !== 'object' || !isStr(x.orderId) || !isNum(x.qty) || !(x.qty > 0) || !isNum(x.at)
+      || (x.kind !== 'entry' && x.kind !== 'exit') || (x.side !== 'BUY' && x.side !== 'SELL')) bad('pending order shape');
+  };
+  switch (o.op) {
+    case 'open': {
+      const p = o.position as Record<string, unknown>;
+      if (!p || typeof p !== 'object') bad('position required');
+      for (const k of ['id', 'underlying', 'expiry']) if (!isStr(p[k])) bad(`position.${k}`);
+      for (const k of ['strike', 'lotSize', 'qty', 'avgPrice', 'openedAt', 'filledAt']) if (!isNum(p[k])) bad(`position.${k}`);
+      if (p.mode !== 'SIM' && p.mode !== 'REAL') bad('position.mode');
+      if (p.option !== 'CE' && p.option !== 'PE') bad('position.option');
+      if (p.side !== 'S' && p.side !== 'B') bad('position.side');
+      if (p.broker != null && p.broker !== 'dhan' && p.broker !== 'kotak') bad('position.broker');
+      if (p.securityId != null && typeof p.securityId !== 'string') bad('position.securityId');
+      if (p.symbol != null && typeof p.symbol !== 'string') bad('position.symbol');
+      if (p.pendingOrders != null) { if (!Array.isArray(p.pendingOrders)) bad('position.pendingOrders'); (p.pendingOrders as unknown[]).forEach(pend); }
+      break;
+    }
+    case 'add': case 'reduce': str('id'); num('qty'); num('price'); num('at'); break;
+    case 'clamp': str('id'); num('qty'); num('at'); num('price', true); break;
+    case 'pending':
+      str('id');
+      if (o.pending !== null) pend(o.pending);
+      if (o.clearOrderId != null && !isStr(o.clearOrderId)) bad('clearOrderId');
+      break;
+    case 'settle': str('id'); str('orderId'); num('filledQty'); num('avgPrice'); num('at'); break;
+    case 'low': str('id'); num('low'); if (o.reset != null && typeof o.reset !== 'boolean') bad('reset'); break;
+    case 'remove': str('id'); break;
+    default: bad('unknown op');
+  }
+  return o as unknown as LedgerOp;
 }

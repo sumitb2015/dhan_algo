@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import path from 'path';
 import fs from 'fs';
 import { PROJECT_ROOT } from '@/lib/pyExec';
-import { applyOp, LedgerError, type LedgerFile, type LedgerOp } from '@/lib/bearishLedger';
+import { applyOp, validateOp, LedgerError, type LedgerFile } from '@/lib/bearishLedger';
 
 // Ledger behind /bearish-strikes. Own file (never multi_leg_baskets.json — Multi-Leg Focus would
 // reconcile paper legs away). Every mutation is a small named op applied under one in-process
@@ -38,11 +38,9 @@ export async function GET() {
 }
 
 export async function POST(request: NextRequest) {
-  const body = await request.json().catch(() => null) as LedgerOp | null;
-  if (!body || typeof body !== 'object' || typeof (body as { op?: unknown }).op !== 'string') {
-    return NextResponse.json({ success: false, error: 'op required' }, { status: 400 });
-  }
+  const raw = await request.json().catch(() => null);
   try {
+    const body = validateOp(raw);
     const next = await locked(() => {
       const out = applyOp(read(), body);
       writeAtomic(out);

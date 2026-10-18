@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert';
-import { applyOp, legPnl, LedgerError, type BsPosition, type LedgerFile } from './bearishLedger.ts';
+import { applyOp, legPnl, validateOp, LedgerError, type BsPosition, type LedgerFile } from './bearishLedger.ts';
 
 const base = (over: Partial<BsPosition> = {}): BsPosition => ({
   id: 'a', mode: 'SIM', underlying: 'NIFTY', expiry: '2026-10-20', option: 'CE', strike: 24500, side: 'S',
@@ -107,4 +107,64 @@ test('Kotak rows: keyed apart from Dhan, need a trading symbol, and MCX P&L is n
   // The same contract on Dhan is a different account's position, not a duplicate.
   const both = applyOpK(ok, { op: 'open', position: { ...base, id: 'd1', underlying: 'NIFTY', securityId: '1' } });
   assert.strictEqual(both.positions.length, 2);
+});
+
+const is409 = (e: unknown) => e instanceof LedgerError && e.status === 409;
+const exitOrder = (orderId: string, qty: number) => ({ orderId, kind: 'exit' as const, side: 'BUY' as const, qty, at: 1 });
+
+test('exit reservations cannot exceed the owned qty (a second tab cannot send a second buy-back)', () => {
+  let f = applyOp(empty, { op: 'open', position: base({ mode: 'REAL', securityId: '9', qty: 130 }) });
+  f = applyOp(f, { op: 'pending', id: 'a', pending: exitOrder('resv-1', 130) });
+  assert.throws(() => applyOp(f, { op: 'pending', id: 'a', pending: exitOrder('resv-2', 65) }), is409);
+  // swapping the reservation for the broker id is not double-counted
+  f = applyOp(f, { op: 'pending', id: 'a', pending: exitOrder('o1', 130), clearOrderId: 'resv-1' });
+  assert.deepStrictEqual(f.positions[0].pendingOrders?.map((o) => o.orderId), ['o1']);
+});
+
+test('no order can be recorded on a CLOSED row; a cleared placeholder reservation closes the row', () => {
+  const entry = { orderId: 'resv-1', kind: 'entry' as const, side: 'SELL' as const, qty: 65, at: 1 };
+  let f = applyOp(empty, { op: 'open', position: base({ mode: 'REAL', securityId: '9', qty: 0, avgPrice: 0, pendingOrders: [entry] }) });
+  f = applyOp(f, { op: 'pending', id: 'a', pending: null, clearOrderId: 'resv-1' });   // order never sent
+  assert.strictEqual(f.positions[0].status, 'CLOSED');
+  assert.strictEqual(f.positions[0].note, 'order not placed');
+  assert.throws(() => applyOp(f, { op: 'pending', id: 'a', pending: { ...entry, orderId: 'resv-2' } }), is409);
+});
+
+test('an entry that fills on a row closed meanwhile reopens it', () => {
+  const entry = { orderId: 'o2', kind: 'entry' as const, side: 'SELL' as const, qty: 65, at: 1 };
+  let f = applyOp(empty, { op: 'open', position: base({ mode: 'REAL', securityId: '9', pendingOrders: [entry] }) });
+  f = applyOp(f, { op: 'clamp', id: 'a', qty: 0, at: 2 });
+  f.positions[0].status = 'CLOSED';                 // e.g. closed by another path while the order was working
+  f = applyOp(f, { op: 'settle', id: 'a', orderId: 'o2', filledQty: 65, avgPrice: 90, at: 3 });
+  assert.strictEqual(f.positions[0].status, 'OPEN');
+  assert.strictEqual(f.positions[0].qty, 65);
+});
+
+test('clamp books the vanished qty at the given LTP; without a price it says P&L unknown', () => {
+  let f = applyOp(empty, { op: 'open', position: base() });
+  f = applyOp(f, { op: 'clamp', id: 'a', qty: 0, at: 2, price: 80 });
+  assert.strictEqual(f.positions[0].realized, 20 * 65);
+  assert.strictEqual(f.positions[0].exitPrice, 80);
+  let g = applyOp(empty, { op: 'open', position: base() });
+  g = applyOp(g, { op: 'clamp', id: 'a', qty: 0, at: 2 });
+  assert.strictEqual(g.positions[0].realized, 0);
+  assert.match(g.positions[0].note ?? '', /unknown/);
+});
+
+test('low reset may raise the anchor (trail just switched on)', () => {
+  let f = applyOp(empty, { op: 'open', position: base() });
+  f = applyOp(f, { op: 'low', id: 'a', low: 60 });
+  f = applyOp(f, { op: 'low', id: 'a', low: 100 });
+  assert.strictEqual(f.positions[0].low, 60);
+  f = applyOp(f, { op: 'low', id: 'a', low: 100, reset: true });
+  assert.strictEqual(f.positions[0].low, 100);
+});
+
+test('validateOp refuses non-numeric fields and unknown ops', () => {
+  assert.throws(() => validateOp({ op: 'add', id: 'a', qty: '2', price: 1, at: 1 }), (e: unknown) => e instanceof LedgerError && e.status === 400);
+  assert.throws(() => validateOp({ op: 'nope' }));
+  assert.throws(() => validateOp(null));
+  assert.throws(() => validateOp({ op: 'pending', id: 'a', pending: { orderId: 'x', kind: 'exit', side: 'BUY', qty: 0, at: 1 } }));
+  assert.doesNotThrow(() => validateOp({ op: 'pending', id: 'a', pending: null, clearOrderId: 'resv-1' }));
+  assert.doesNotThrow(() => validateOp({ op: 'open', position: base() }));
 });
