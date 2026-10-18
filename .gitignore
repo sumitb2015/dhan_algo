@@ -119,3 +119,6 @@ temp_data/
 
 # Claude Code local runtime files (tokens, scratch)
 .claude/debug/
+
+# Breakdown Scalper backtest cache + results (rs_dashboard/scripts/breakdown-backtest.ts)
+debug/breakdown_backtest/

@@ -216,3 +216,24 @@ Before trading real capital on this strategy:
 - **Unknown or unrecorded entry** halts the engine; 3 rejected auto entries in a row also halt it.
 - **Engine runs in the browser tab only**; stops are software-only (no resting broker stop). One tab at a time acts (tab lock); keep it open and visible.
 - Entry/exit prices in the ledger are the LTP at the decision, not the broker fill.
+
+---
+
+## 6. Daily backtest (page panel "Strategy backtest · NIFTY")
+
+- **Engine**: `rs_dashboard/lib/breakdownBacktest.ts` `simulateDay` replays a session minute by minute through the live
+  engine's own functions (`evaluateOptionBreakdown`, `evaluateUnderlyingTrend`, `rankBreakdownSignals`,
+  `evaluatePositionRisk`) with the page's current rules (ledger config snapshot, stored with the results).
+- **Fills**: signals on bars closed before minute m; entry at bar m's open; stops/targets inside each bar in the order
+  open → high → low → close (adverse first); a level crossed intrabar fills at the level, a gap at the open; EOD at the
+  open of the cutoff bar. Costs per Dhan F&O order (`DHAN_OPTION_COSTS`). Not modelled: tick fills, slippage, rejections.
+- **Trend**: the options DB's 1-minute spot closes; VWAP = running mean (the live feed also falls back to it, the index
+  has no volume); EMA9/20 = `ewm(adjust=False)` on today's timeframe closes, as `cyber_scalper_feed.py`.
+- **Data** (`scripts/tools/breakdown_backtest_data.py`, Dhan only, cached per session under `debug/breakdown_backtest/`):
+  the options DB, else Dhan's expired-options API (contract expired), else the intraday API with OI (contract live).
+  Every session carries the 2 previous sessions of the same contracts, so indicators are warm from 09:15; sessions on or
+  before the previous weekly expiry come from the expired API with `expiry_code=2`. The expired API is slow (~25-60 s a
+  call, one at a time to stay inside the account-wide DH-904 limit): a cold expiry week takes 20-40 minutes, once.
+- **Runs**: `rs_dashboard/scripts/breakdown-backtest.ts` (detached, one at a time). Opening the page after 15:35 IST
+  appends any missing sessions (catch-up); Run now / Re-run (1 week or 1 month) in the panel. A rules change pauses
+  appends until a Re-run, so every stored day used the same rules. NIFTY only (the options DB has no other index).

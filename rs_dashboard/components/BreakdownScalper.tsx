@@ -37,6 +37,7 @@ import { PositionsTable } from './breakdownScalper/PositionsTable';
 import { ScannerGrid } from './breakdownScalper/ScannerGrid';
 import { RulesConfigDrawer } from './breakdownScalper/RulesConfigDrawer';
 import { AuditLogPanel } from './breakdownScalper/AuditLogPanel';
+import { BacktestPanel } from './breakdownScalper/BacktestPanel';
 import BreakdownDocModal from './breakdownScalper/BreakdownDocModal';
 import OrdersTradesModal from '@/components/multiLegFocus/OrdersTradesModal';
 
@@ -1494,7 +1495,10 @@ export default function BreakdownScalper() {
           onManualShort={handleManualShort}
         />
 
-        {/* 4. Execution & Audit Log */}
+        {/* 4. Strategy backtest: daily results + day-wise trade log (appended at EOD) */}
+        <BacktestPanel pageConfig={config} />
+
+        {/* 5. Execution & Audit Log */}
         <AuditLogPanel logs={logs} onClearLogs={() => mutateLedger({ op: 'clearLogs' })} />
       </div>
 
