@@ -17,7 +17,7 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
-import { execFile } from 'node:child_process';
+import { execFile, type ChildProcess } from 'node:child_process';
 import {
   backfillStart,
   backtestConfigKey,
@@ -141,13 +141,16 @@ function runPy(args: string[]): Promise<Record<string, unknown>> {
   });
 }
 
+let activeChild: ChildProcess | null = null;
+
 function runData(date: string, offline: boolean): Promise<{ ok: boolean; path?: string; source?: string; error?: string; retry?: boolean }> {
   return new Promise((resolve) => {
-    execFile(
+    const child = execFile(
       PYTHON_EXE,
       [DATA_SCRIPT, '--date', date, ...(offline ? ['--offline'] : [])],
       { cwd: PROJECT_ROOT, timeout: DATA_TIMEOUT_MS, maxBuffer: 8 * 1024 * 1024, windowsHide: true },
       (err, stdout) => {
+        activeChild = null;
         const line = (stdout ?? '').trim().split('\n').pop() ?? '';
         try {
           resolve(JSON.parse(line));
@@ -156,6 +159,7 @@ function runData(date: string, offline: boolean): Promise<{ ok: boolean; path?: 
         }
       },
     );
+    activeChild = child;
   });
 }
 
@@ -274,13 +278,29 @@ async function main() {
       saveStatus({ current: date, message: `Loading data for ${date}…` });
       // Relay the data script's own progress (slow expired-options fetches) into the status the panel shows.
       const relay = setInterval(() => {
+        if (stopRequested()) {
+          clearInterval(relay);
+          if (activeChild) {
+            try {
+              if (process.platform === 'win32') {
+                execFile('taskkill', ['/PID', String(activeChild.pid), '/T', '/F']);
+              } else {
+                activeChild.kill('SIGKILL');
+              }
+            } catch {
+              /* ignore */
+            }
+          }
+          saveStatus({ state: 'stopped', message: `Stopped by user after ${status.done} session(s)`, current: null, finishedAt: nowIso() });
+          process.exit(0);
+        }
         try {
           const p = JSON.parse(fs.readFileSync(DATA_PROGRESS, 'utf8')) as { date: string; step: string; done: number; total: number };
           if (p.date === date) saveStatus({ message: `Loading ${date}: ${p.step}${p.total ? ` (${p.done}/${p.total} calls)` : ''}…` });
         } catch {
           /* no progress yet */
         }
-      }, 2000);
+      }, 1000);
       const res = await runData(date, offline).finally(() => clearInterval(relay));
       if (!res.ok || !res.path) {
         store.failures[date] = { at: nowIso(), error: res.error ?? 'unknown error' };

@@ -221,12 +221,27 @@ export function BacktestPanel({
   const post = useCallback(
     async (body: Record<string, string>) => {
       setBusy(true);
+      if (body.action === 'stop') {
+        setData((prev) =>
+          prev
+            ? {
+                ...prev,
+                running: false,
+                status: prev.status ? { ...prev.status, state: 'stopped', message: 'Stopping backtest engine…' } : null,
+              }
+            : null,
+        );
+      }
       try {
-        await fetch('/api/breakdown-scalper/backtest', {
+        const res = await fetch('/api/breakdown-scalper/backtest', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(body),
         });
+        const j = (await res.json()) as { success?: boolean; running?: boolean; status?: RunStatus };
+        if (j && j.status && j.running !== undefined) {
+          setData((prev) => (prev ? { ...prev, running: j.running ?? false, status: j.status ?? null } : null));
+        }
       } finally {
         setBusy(false);
         void load();

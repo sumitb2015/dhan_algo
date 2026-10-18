@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import path from 'path';
 import fs from 'fs';
-import { spawn } from 'child_process';
+import { spawn, execSync } from 'child_process';
 import { PROJECT_ROOT } from '@/lib/pyExec';
 import { isPidRunning } from '@/lib/processCheck';
 import { isRegularSession } from '@/lib/nseHolidays';
@@ -118,10 +118,45 @@ export async function POST(request: NextRequest) {
   const window = body?.window === 'month' ? 'month' : body?.window === 'db4' ? 'db4' : 'week';
 
   if (action === 'stop') {
-    if (!runnerPid()) return NextResponse.json({ success: true, running: false });
+    const pid = runnerPid();
     fs.mkdirSync(DIR, { recursive: true });
     fs.writeFileSync(STOP, String(Date.now()));
-    return NextResponse.json({ success: true, stopping: true });
+
+    if (pid) {
+      try {
+        if (process.platform === 'win32') {
+          execSync(`taskkill /PID ${pid} /T /F`, { stdio: 'ignore', windowsHide: true });
+        } else {
+          try {
+            execSync(`kill -9 -${pid}`, { stdio: 'ignore' });
+          } catch {
+            try { execSync(`pkill -P ${pid}`, { stdio: 'ignore' }); } catch {}
+            try { process.kill(pid, 'SIGKILL'); } catch {}
+          }
+        }
+      } catch (err) {
+        console.error('Failed to kill backtest runner process', err);
+      }
+    }
+
+    try { fs.unlinkSync(RUN_LOCK); } catch {}
+    try { fs.unlinkSync(START_LOCK); } catch {}
+    try { fs.unlinkSync(STOP); } catch {}
+
+    const curStatus = readJson<Record<string, unknown>>(STATUS);
+    const updatedStatus = {
+      ...(curStatus ?? {}),
+      state: 'stopped',
+      message: `Stopped by user after ${curStatus?.done ?? 0} session(s)`,
+      current: null,
+      finishedAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    };
+    try {
+      fs.writeFileSync(STATUS, JSON.stringify(updatedStatus));
+    } catch {}
+
+    return NextResponse.json({ success: true, stopping: true, running: false, status: updatedStatus });
   }
 
   if (action !== 'catchup' && action !== 'rerun') {
