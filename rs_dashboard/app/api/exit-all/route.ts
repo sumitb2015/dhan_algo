@@ -7,14 +7,13 @@ import { DEBUG_DIR, allStateKeys, isStrategyRunning } from '@/lib/strategyRegist
 import { runPythonJson, PROJECT_ROOT } from '@/lib/pyExec';
 import { capCloseQty } from '@/lib/intradayCap';
 import { invalidateBrokerCache } from '@/lib/brokerPositionsCache';
+import { reserveOrderSlot } from '@/lib/dhanOrderPacer';
+import { reconcileByCorrelationId } from '@/lib/dhanOrderReconcile';
+import { isDhanFnoSegment, planFnoExits } from '@/lib/exitAllPlan';
 
 const DHAN_POSITIONS = 'https://api.dhan.co/v2/positions';
 const DHAN_ORDERS = 'https://api.dhan.co/v2/orders';
 const PENDING_ORDER_STATUSES = new Set(['PENDING', 'TRANSIT', 'OPEN', 'PART_TRADED']);
-
-function isFnoSegment(segment: unknown): boolean {
-  return typeof segment === 'string' && segment.toUpperCase().includes('FNO');
-}
 
 /** Dhan's raw REST error body is `{errorCode, errorType, errorMessage}` — never an array
  *  and never `{data: [...]}` — so it's distinguishable from a genuine empty list/array response. */
@@ -26,8 +25,8 @@ function dhanErrorDetail(json: unknown): string | null {
   return null;
 }
 
-/** Fetch open F&O positions, flatten each with an opposite-side market order, then
- *  cancel any pending F&O orders. Equity (NSE_EQ/BSE_EQ) positions/orders are left untouched. */
+/** Fetch open F&O positions (NSE_FNO / BSE_FNO / MCX_COMM), flatten each with an opposite-side market order, shorts
+ *  first, then cancel any pending F&O orders. Equity (NSE_EQ/BSE_EQ) positions/orders are left untouched. */
 async function exitFnoOnly(clientId: string, token: string): Promise<{ ok: boolean; error: string | null }> {
   const headers = {
     'access-token': token,
@@ -45,7 +44,8 @@ async function exitFnoOnly(clientId: string, token: string): Promise<{ ok: boole
       errors.push(`positions fetch: HTTP ${posRes.status}${posErr ? ` - ${posErr}` : ''}`);
     } else {
       const positions: Record<string, unknown>[] = Array.isArray(posJson) ? posJson : (Array.isArray((posJson as any)?.data) ? (posJson as any).data : []);
-      const openFno = positions.filter(p => Number(p.netQty ?? 0) !== 0 && isFnoSegment(p.exchangeSegment));
+      // NSE_FNO / BSE_FNO / MCX_COMM, shorts first (see lib/exitAllPlan.ts).
+      const openFno = planFnoExits(positions);
 
       // Today's trades, to cap INTRADAY closes at the book's own net (see
       // lib/intradayCap.ts). A failed fetch just disables the cap.
@@ -60,8 +60,10 @@ async function exitFnoOnly(clientId: string, token: string): Promise<{ ok: boole
         const netQty = Number(pos.netQty ?? 0);
         const cap = capCloseQty(pos, trades, Math.abs(netQty));
         if (cap.capped) console.warn(`[exit-all] ${pos.tradingSymbol ?? pos.securityId}: INTRADAY qty reduced ${Math.abs(netQty)} -> ${cap.qty} per trades`);
+        const correlationId = `xa${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
         const payload = {
           dhanClientId: clientId,
+          correlationId,
           transactionType: netQty > 0 ? 'SELL' : 'BUY',
           exchangeSegment: pos.exchangeSegment,
           productType: pos.productType,
@@ -76,11 +78,22 @@ async function exitFnoOnly(clientId: string, token: string): Promise<{ ok: boole
           boStopLossValue: 0,
           triggerPrice: 0,
         };
-        const res = await fetch(DHAN_ORDERS, { method: 'POST', headers, body: JSON.stringify(payload), signal: AbortSignal.timeout(15_000) });
-        const json = await res.json().catch(() => ({} as Record<string, unknown>));
-        const orderId = String((json as any).orderId ?? (json as any).data?.orderId ?? '');
-        if (!orderId) {
-          errors.push(`close ${pos.tradingSymbol ?? pos.securityId}: ${String((json as any).remarks ?? (json as any).message ?? JSON.stringify(json))}`);
+        const label = pos.tradingSymbol ?? pos.securityId;
+        // One leg's timeout or network error must not abort the legs after it, and its order may still have been
+        // booked: look it up by correlationId and report UNKNOWN (never a plain failure) if it cannot be found.
+        try {
+          await reserveOrderSlot();
+          const res = await fetch(DHAN_ORDERS, { method: 'POST', headers, body: JSON.stringify(payload), signal: AbortSignal.timeout(15_000) });
+          const json = await res.json().catch(() => ({} as Record<string, unknown>));
+          const orderId = String((json as any).orderId ?? (json as any).data?.orderId ?? '');
+          if (!orderId) {
+            errors.push(`close ${label}: ${String((json as any).remarks ?? (json as any).message ?? JSON.stringify(json))}`);
+          }
+        } catch (err) {
+          const recovered = await reconcileByCorrelationId(correlationId, clientId, token);
+          if (!recovered) {
+            errors.push(`close ${label}: STATUS UNKNOWN (may have closed) - ${String((err as Error).message ?? err)}`);
+          }
         }
       }
     }
@@ -96,13 +109,17 @@ async function exitFnoOnly(clientId: string, token: string): Promise<{ ok: boole
       errors.push(`orders fetch: HTTP ${ordRes.status}${ordErr ? ` - ${ordErr}` : ''}`);
     } else {
       const orders: Record<string, unknown>[] = Array.isArray(ordJson) ? ordJson : (Array.isArray((ordJson as any)?.data) ? (ordJson as any).data : []);
-      const pendingFno = orders.filter(o => PENDING_ORDER_STATUSES.has(String(o.orderStatus ?? '').toUpperCase()) && isFnoSegment(o.exchangeSegment));
+      const pendingFno = orders.filter(o => PENDING_ORDER_STATUSES.has(String(o.orderStatus ?? '').toUpperCase()) && isDhanFnoSegment(o.exchangeSegment));
 
       for (const ord of pendingFno) {
-        const res = await fetch(`${DHAN_ORDERS}/${ord.orderId}`, { method: 'DELETE', headers, signal: AbortSignal.timeout(15_000) });
-        if (!res.ok) {
-          const json = await res.json().catch(() => ({} as Record<string, unknown>));
-          errors.push(`cancel order ${ord.orderId}: ${String((json as any).remarks ?? (json as any).message ?? `HTTP ${res.status}`)}`);
+        try {
+          const res = await fetch(`${DHAN_ORDERS}/${ord.orderId}`, { method: 'DELETE', headers, signal: AbortSignal.timeout(15_000) });
+          if (!res.ok) {
+            const json = await res.json().catch(() => ({} as Record<string, unknown>));
+            errors.push(`cancel order ${ord.orderId}: ${String((json as any).remarks ?? (json as any).message ?? `HTTP ${res.status}`)}`);
+          }
+        } catch (err) {
+          errors.push(`cancel order ${ord.orderId}: ${String((err as Error).message ?? err)}`);
         }
       }
     }
