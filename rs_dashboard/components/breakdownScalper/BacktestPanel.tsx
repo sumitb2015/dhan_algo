@@ -13,10 +13,11 @@ import {
   XAxis,
   YAxis,
 } from 'recharts';
-import { ChevronDown, ChevronRight, Download, FlaskConical, Play, RefreshCw, Square, AlertTriangle, Settings } from 'lucide-react';
+import { ChevronDown, ChevronRight, Download, FlaskConical, Play, RefreshCw, Square, AlertTriangle, Settings, ShieldCheck } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { summarize, type BtDayResult, type BtExitKind, type BtWindow } from '@/lib/breakdownBacktest';
 import type { BreakdownConfig } from '@/lib/breakdownLedger';
+import { BacktestAuditReport } from './BacktestAuditReport';
 
 interface RunStatus {
   state: 'running' | 'done' | 'error' | 'stopped' | 'interrupted';
@@ -450,6 +451,17 @@ export function BacktestPanel({
           >
             <Download className="h-3 w-3" /> CSV
           </button>
+          <button
+            type="button"
+            onClick={() => {
+              const el = document.getElementById('backtest-audit-report');
+              if (el) el.scrollIntoView({ behavior: 'smooth' });
+            }}
+            className="flex h-7 items-center gap-1.5 rounded-lg border border-emerald-500/30 bg-emerald-500/10 px-2.5 text-xs font-bold text-emerald-400 hover:bg-emerald-500/20"
+            title="View Strategy & Backtest Verification Audit Report (2026-10-18)"
+          >
+            <ShieldCheck className="h-3.5 w-3.5" /> Audit
+          </button>
           {onOpenSettings && (
             <button
               type="button"
@@ -752,6 +764,11 @@ export function BacktestPanel({
           per Dhan F&amp;O order. Indicators are warm from 09:15 (2 prior sessions). Not modelled: tick-level fills, slippage beyond
           the bar, broker rejections. Max adverse = worst premium rise above entry while open.
         </p>
+
+        {/* Verification & Accuracy Audit Report */}
+        <div id="backtest-audit-report" className="pt-2">
+          <BacktestAuditReport />
+        </div>
       </div>
     </section>
   );
