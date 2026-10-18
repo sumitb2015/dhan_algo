@@ -35,7 +35,7 @@ const readJson = <T,>(file: string): T | null => {
 function runnerPid(): number | null {
   try {
     const pid = Number(fs.readFileSync(RUN_LOCK, 'utf8').trim());
-    return pid && isPidRunning(pid, true) ? pid : null;
+    return pid && isPidRunning(pid, true, /(node|tsx)/i) ? pid : null;
   } catch {
     return null;
   }
@@ -55,6 +55,8 @@ export async function GET(request: NextRequest) {
   const unchanged = !!store && !!store.updatedAt && known === store.updatedAt;
   const status = readJson<Record<string, unknown>>(STATUS);
   const pid = runnerPid();
+  const isStarting = !pid && fs.existsSync(START_LOCK) && (Date.now() - fs.statSync(START_LOCK).mtimeMs < START_LOCK_STALE_MS);
+  const isRunning = pid != null || isStarting;
   const config = currentConfig();
   const configKey = backtestConfigKey(config);
   const today = istDayOf(Date.now());
@@ -62,12 +64,14 @@ export async function GET(request: NextRequest) {
   const sessions = sessionsToHold(from, today, istHm(), isRegularSession, store?.to ?? null);
   const missing = sessions.filter((d) => !store?.days?.[d]);
   // A status left at "running" by a runner that died (killed, machine slept) is reported as interrupted.
-  const runStatus = status && status.state === 'running' && !pid ? { ...status, state: 'interrupted' } : status;
+  const runStatus = status && status.state === 'running' && !isRunning ? { ...status, state: 'interrupted' } : status;
   return NextResponse.json({
     success: true,
     unchanged,
-    running: pid != null,
-    status: runStatus,
+    running: isRunning,
+    status: isStarting && (!status || status.state !== 'running')
+      ? { state: 'starting', message: 'Starting backtest engine…' }
+      : runStatus,
     from,
     missing,
     configKey,

@@ -1,11 +1,13 @@
 import { execSync } from 'child_process';
 
+import fs from 'fs';
+
 // tasklist/ps is a blocking child-process spawn (~50-200ms on Windows). Several routes
 // poll this every 2-3s to check whether a background Python process is still alive;
 // calling it unconditionally on every poll can saturate the single-threaded Node event
 // loop and starve concurrent requests. Cache the result per PID.
 const PID_CHECK_TTL = 3000;
-const cache = new Map<number, { result: boolean; ts: number }>();
+const cache = new Map<string, { result: boolean; ts: number }>();
 
 // Start times are cached by OBSERVATION CONTINUITY, not by age. Re-querying one on a
 // timer is not affordable: `powershell Get-Process` measures ~4.5s on this machine
@@ -44,7 +46,9 @@ function isPidAlive(pid: number): boolean {
   try {
     process.kill(pid, 0);
   } catch {
-    cache.delete(pid);
+    for (const key of cache.keys()) {
+      if (key.startsWith(`${pid}:`)) cache.delete(key);
+    }
     pidStartTimeMap.delete(pid);
     return false;
   }
@@ -61,13 +65,15 @@ function isPidAlive(pid: number): boolean {
 }
 
 /** `force` bypasses the cache — use only for short-lived poll loops (e.g. waiting
- *  for a process to exit) where the 3s TTL would otherwise mask the state change. */
-export function isPidRunning(pid: number, force = false): boolean {
+ *  for a process to exit) where the 3s TTL would otherwise mask the state change.
+ *  `expectedName`: process image name substring or RegExp to match against command line. Defaults to 'python'. */
+export function isPidRunning(pid: number, force = false, expectedName: string | RegExp = 'python'): boolean {
   if (!pid || isNaN(pid)) return false;
 
   if (!isPidAlive(pid)) return false;
 
-  const hit = force ? undefined : cache.get(pid);
+  const cacheKey = `${pid}:${typeof expectedName === 'string' ? expectedName : expectedName.source}`;
+  const hit = force ? undefined : cache.get(cacheKey);
   if (hit && Date.now() - hit.ts < PID_CHECK_TTL) {
     return hit.result;
   }
@@ -79,16 +85,27 @@ export function isPidRunning(pid: number, force = false): boolean {
         encoding: 'utf8', stdio: ['pipe', 'pipe', 'ignore'], windowsHide: true,
       });
       const lower = out.toLowerCase();
-      result = lower.includes('python') && lower.includes(pid.toString());
+      const match = typeof expectedName === 'string'
+        ? lower.includes(expectedName.toLowerCase())
+        : expectedName.test(lower);
+      result = match && lower.includes(pid.toString());
     } else {
-      const out = execSync(`ps -p ${pid} -o comm=`, { encoding: 'utf8', stdio: ['pipe', 'pipe', 'ignore'] });
-      result = out.toLowerCase().includes('python');
+      let cmdline = '';
+      try {
+        cmdline = fs.readFileSync(`/proc/${pid}/cmdline`, 'utf8');
+      } catch {
+        cmdline = execSync(`ps -p ${pid} -o args=`, { encoding: 'utf8', stdio: ['pipe', 'pipe', 'ignore'] });
+      }
+      const lower = cmdline.toLowerCase();
+      result = typeof expectedName === 'string'
+        ? lower.includes(expectedName.toLowerCase())
+        : expectedName.test(lower);
     }
   } catch {
     result = false;
   }
 
-  cache.set(pid, { result, ts: Date.now() });
+  cache.set(cacheKey, { result, ts: Date.now() });
   pruneExpired(cache);
   return result;
 }

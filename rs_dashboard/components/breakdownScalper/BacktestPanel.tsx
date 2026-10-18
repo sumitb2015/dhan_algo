@@ -347,7 +347,7 @@ export function BacktestPanel({ pageConfig }: { pageConfig: BreakdownConfig }) {
                 disabled={busy}
                 className="flex h-7 items-center gap-1.5 rounded-lg border border-zinc-700 bg-zinc-900 px-2.5 text-xs font-bold text-zinc-300 hover:bg-zinc-800 hover:text-white disabled:opacity-50"
               >
-                <RefreshCw className="h-3 w-3 text-sky-400" /> Re-run
+                <RefreshCw className={cn('h-3 w-3 text-sky-400', busy && 'animate-spin')} /> Re-run
               </button>
             </>
           )}
@@ -368,7 +368,7 @@ export function BacktestPanel({ pageConfig }: { pageConfig: BreakdownConfig }) {
           <div
             role="status"
             className={cn(
-              'flex flex-wrap items-center gap-2 rounded-lg border px-3 py-2 text-xs',
+              'flex flex-col gap-2 rounded-lg border px-3 py-2 text-xs',
               running
                 ? 'border-sky-500/30 bg-sky-500/10 text-sky-400'
                 : status.state === 'error' || status.state === 'interrupted'
@@ -376,11 +376,26 @@ export function BacktestPanel({ pageConfig }: { pageConfig: BreakdownConfig }) {
                   : 'border-zinc-800 bg-zinc-900 text-zinc-400',
             )}
           >
-            {running && <RefreshCw className="h-3 w-3 animate-spin" />}
-            <span className="font-bold uppercase">{running ? 'Running' : status.state}</span>
-            {running && status.total ? <span className="font-mono">{status.done ?? 0}/{status.total} sessions</span> : null}
-            <span className="text-zinc-300">{status.message}</span>
-            {!running && status.finishedAt && <span className="text-zinc-500">· {new Date(status.finishedAt).toLocaleString('en-IN')}</span>}
+            <div className="flex flex-wrap items-center gap-2">
+              {running && <RefreshCw className="h-3 w-3 animate-spin" />}
+              <span className="font-bold uppercase">{running ? 'Running' : status.state}</span>
+              {running && status.total ? <span className="font-mono">{status.done ?? 0}/{status.total} sessions</span> : null}
+              <span className="text-zinc-300">{status.message}</span>
+              {!running && status.finishedAt && <span className="text-zinc-500">· {new Date(status.finishedAt).toLocaleString('en-IN')}</span>}
+            </div>
+            {running && typeof status.total === 'number' && status.total > 0 && (
+              <div className="flex items-center gap-2 pt-0.5">
+                <div className="flex-1 h-1.5 rounded-full bg-sky-950/80 overflow-hidden border border-sky-500/20">
+                  <div
+                    className="h-full bg-sky-400 transition-all duration-300"
+                    style={{ width: `${Math.min(100, Math.round(((status.done ?? 0) / status.total) * 100))}%` }}
+                  />
+                </div>
+                <span className="text-[10px] font-mono font-bold text-sky-300 shrink-0">
+                  {Math.round(((status.done ?? 0) / status.total) * 100)}%
+                </span>
+              </div>
+            )}
           </div>
         )}
         {data?.rulesChanged && (
