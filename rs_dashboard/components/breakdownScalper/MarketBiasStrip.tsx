@@ -68,6 +68,7 @@ export function MarketBiasStrip({
             </span>
           </div>
 
+          <div className="flex items-center gap-2 text-xs font-medium text-zinc-400">
             {tp.useEma && (
               <>
                 <span className="rounded bg-zinc-900 px-2 py-0.5 border border-zinc-800">
