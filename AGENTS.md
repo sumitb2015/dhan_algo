@@ -116,9 +116,12 @@ lib/
   execution_broker.py       # ExecutionBroker front (dhan/zerodha/kotak) for option strategies
   strategy_risk.py          # resolve_exit_qty / resolve_exit_qty_broker safe exit sizing
   strategy_state_helper.py  # save_strategy_state() / check_shutdown_trigger()
+  managed_straddle_rules.py # Pure decision rules for straddle entries, combined SL, leg SL/targets & strike matching
+  straddle_manager.py       # Reusable StraddleExecutor, StraddlePosition, StraddleLeg & StraddleRiskConfig
   zerodha/                  # Kite session + margin/basket-margin helpers
   kotak/                    # Kotak Neo session (TOTP+MPIN), response unwrapping, margin/positions
 strategies/
+  managed_straddle/         # Nifty Managed Straddle (20% combined SL, 20% leg SL, 30% leg target with premium-matching rolls)
   value_imbalance/          # Straddle, Strangle, Advanced Imbalance, VWAP straddle, and Delta Neutral strategies
   spread_trend/             # Trend-following Bear Call / Bull Put spread strategy (EMA20 + Supertrend)
   st_oi_bearcall/           # Dual Supertrend (index + option) + OI short-buildup bear call spread only

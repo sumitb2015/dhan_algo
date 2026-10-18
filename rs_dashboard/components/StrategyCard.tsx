@@ -272,6 +272,14 @@ function StrategyCard({ meta, state, onRefresh, selectedBroker }: StrategyCardPr
   const [winnerRollEntryBalance, setWinnerRollEntryBalance] = useState<number>(10.0);
   const [atmShiftResetPts, setAtmShiftResetPts] = useState<number>(100.0);
 
+  // Managed Straddle
+  const [msCombinedSlPct, setMsCombinedSlPct] = useState<number>(20.0);
+  const [msLegSlPct, setMsLegSlPct] = useState<number>(20.0);
+  const [msLegTargetPct, setMsLegTargetPct] = useState<number>(30.0);
+  const [msEntryDiffPct, setMsEntryDiffPct] = useState<number>(10.0);
+  const [msMaxAdjustments, setMsMaxAdjustments] = useState<number>(10);
+  const [msAdjustmentCooldown, setMsAdjustmentCooldown] = useState<number>(30);
+
   // OI Directional
   const [pcrThreshold, setPcrThreshold] = useState<number>(1.5);
   const [exitPcrChange, setExitPcrChange] = useState<number>(30);
@@ -745,6 +753,16 @@ function StrategyCard({ meta, state, onRefresh, selectedBroker }: StrategyCardPr
         args.push('--max-rolls', String(maxRolls));
         args.push('--roll-cooldown', String(rollCooldown));
         args.push('--atm-shift-reset-pts', String(atmShiftResetPts));
+        args.push('--start-time', startTime);
+        args.push('--trail-start-rs', String(trailStartRs));
+        args.push('--trail-gap-rs', String(trailGapRs));
+      } else if (meta.key === 'nifty_managed_straddle') {
+        args.push('--combined-sl-pct', String(msCombinedSlPct));
+        args.push('--leg-sl-pct', String(msLegSlPct));
+        args.push('--leg-target-pct', String(msLegTargetPct));
+        args.push('--entry-diff-pct', String(msEntryDiffPct));
+        args.push('--max-adjustments', String(msMaxAdjustments));
+        args.push('--adjustment-cooldown', String(msAdjustmentCooldown));
         args.push('--start-time', startTime);
         args.push('--trail-start-rs', String(trailStartRs));
         args.push('--trail-gap-rs', String(trailGapRs));
@@ -1939,7 +1957,8 @@ function StrategyCard({ meta, state, onRefresh, selectedBroker }: StrategyCardPr
           meta.key === 'nifty_value_imbalance_straddle' ||
           meta.key === 'nifty_value_imbalance_strangle' ||
           meta.key === 'nifty_delta_neutral' ||
-          meta.key === 'nifty_winner_roll_straddle') && (
+          meta.key === 'nifty_winner_roll_straddle' ||
+          meta.key === 'nifty_managed_straddle') && (
           <>
             <div className={fieldCls}>
               <FieldLabel text="Trail Arm (₹)" tip="Arms the trailing stop once MTM profit reaches this many rupees. Size it against your lot count." />
@@ -2195,6 +2214,35 @@ function StrategyCard({ meta, state, onRefresh, selectedBroker }: StrategyCardPr
             <div className={fieldCls}>
               <FieldLabel text="ATM Shift Reset (pts)" tip="If spot moves this many points from the entry ATM strike, square off everything and start a fresh cycle at the new ATM." />
               <Input type="number" step="5" min={0} value={atmShiftResetPts} onChange={(e) => { const v = parseFloat(e.target.value); setAtmShiftResetPts(Number.isNaN(v) ? 100.0 : v); }} className={inputCls} />
+            </div>
+          </>
+        )}
+
+        {meta.key === 'nifty_managed_straddle' && (
+          <>
+            <div className={fieldCls}>
+              <FieldLabel text="Combined SL (%)" tip="Stop-loss % on the combined entry straddle premium; triggers global exit if premium expands by this percentage." />
+              <Input type="number" step="0.5" min={1} max={100} value={msCombinedSlPct} onChange={(e) => setMsCombinedSlPct(parseFloat(e.target.value) || 20.0)} className={inputCls} />
+            </div>
+            <div className={fieldCls}>
+              <FieldLabel text="Leg Stop Loss (%)" tip="Stop-loss % on individual legs; closes losing leg and matches opposite surviving leg's premium." />
+              <Input type="number" step="0.5" min={1} max={100} value={msLegSlPct} onChange={(e) => setMsLegSlPct(parseFloat(e.target.value) || 20.0)} className={inputCls} />
+            </div>
+            <div className={fieldCls}>
+              <FieldLabel text="Leg Target (%)" tip="Profit target decay % on individual legs; closes winning leg and matches opposite surviving leg's premium." />
+              <Input type="number" step="0.5" min={1} max={100} value={msLegTargetPct} onChange={(e) => setMsLegTargetPct(parseFloat(e.target.value) || 30.0)} className={inputCls} />
+            </div>
+            <div className={fieldCls}>
+              <FieldLabel text="Entry Balance (%)" tip="Maximum CE/PE premium difference % allowed before entry; waits until premiums are balanced within this band." />
+              <Input type="number" step="0.5" min={1} max={50} value={msEntryDiffPct} onChange={(e) => setMsEntryDiffPct(parseFloat(e.target.value) || 10.0)} className={inputCls} />
+            </div>
+            <div className={fieldCls}>
+              <FieldLabel text="Max Adjustments" tip="Maximum number of premium-matching leg adjustments allowed per session." />
+              <Input type="number" min={1} max={30} value={msMaxAdjustments} onChange={(e) => setMsMaxAdjustments(parseInt(e.target.value) || 10)} className={inputCls} />
+            </div>
+            <div className={fieldCls}>
+              <FieldLabel text="Cooldown (s)" tip="Minimum cooldown in seconds between adjustments." />
+              <Input type="number" min={5} step={5} value={msAdjustmentCooldown} onChange={(e) => setMsAdjustmentCooldown(parseInt(e.target.value) || 30)} className={inputCls} />
             </div>
           </>
         )}

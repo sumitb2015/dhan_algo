@@ -178,6 +178,15 @@ export const STRATEGIES_METADATA: Record<string, {
     readmePath: readmePath('value_imbalance', 'nifty_winner_roll_straddle'),
     execBrokerEligible: true,
   },
+  nifty_managed_straddle: {
+    name: 'Nifty Managed Straddle',
+    underlying: 'NIFTY',
+    logicGroup: 'rotation',
+    timeframe: 'intraday',
+    path: path.join(PROJECT_ROOT, 'strategies', 'managed_straddle', 'nifty_managed_straddle.py'),
+    readmePath: readmePath('managed_straddle', 'nifty_managed_straddle'),
+    execBrokerEligible: true,
+  },
   nifty_delta_strangle: {
     name: 'Nifty Delta Strangle (Weekly)',
     underlying: 'NIFTY',

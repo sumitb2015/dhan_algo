@@ -168,6 +168,13 @@ function StrategyRowWide({ meta, state, onRefresh, instanceId, onAddInstance, on
   const [rollThresholdPct, setRollThresholdPct] = useState(50.0);
   const [winnerRollEntryBalance, setWinnerRollEntryBalance] = useState(10.0);
   const [atmShiftResetPts, setAtmShiftResetPts] = useState(100.0);
+  // Managed Straddle
+  const [msCombinedSlPct, setMsCombinedSlPct] = useState(20.0);
+  const [msLegSlPct, setMsLegSlPct] = useState(20.0);
+  const [msLegTargetPct, setMsLegTargetPct] = useState(30.0);
+  const [msEntryDiffPct, setMsEntryDiffPct] = useState(10.0);
+  const [msMaxAdjustments, setMsMaxAdjustments] = useState(10);
+  const [msAdjustmentCooldown, setMsAdjustmentCooldown] = useState(30);
   const [pcrThreshold, setPcrThreshold] = useState(1.5);
   const [exitPcrChange, setExitPcrChange] = useState(30);
   const [pollInterval, setPollInterval] = useState(60);
@@ -611,6 +618,16 @@ function StrategyRowWide({ meta, state, onRefresh, instanceId, onAddInstance, on
         args.push('--start-time', startTime);
         args.push('--trail-start-rs', String(trailStartRs));
         args.push('--trail-gap-rs', String(trailGapRs));
+      } else if (meta.key === 'nifty_managed_straddle') {
+        args.push('--combined-sl-pct', String(msCombinedSlPct));
+        args.push('--leg-sl-pct', String(msLegSlPct));
+        args.push('--leg-target-pct', String(msLegTargetPct));
+        args.push('--entry-diff-pct', String(msEntryDiffPct));
+        args.push('--max-adjustments', String(msMaxAdjustments));
+        args.push('--adjustment-cooldown', String(msAdjustmentCooldown));
+        args.push('--start-time', startTime);
+        args.push('--trail-start-rs', String(trailStartRs));
+        args.push('--trail-gap-rs', String(trailGapRs));
       } else if (meta.key === 'nifty_delta_strangle') {
         args.push('--min-lots', String(dsMinLots));
         args.push('--entry-delta', String(dsEntryDelta));
@@ -833,6 +850,11 @@ function StrategyRowWide({ meta, state, onRefresh, instanceId, onAddInstance, on
         return {
           summary: 'Winner-roll short straddle · Continuous winner leg re-centering · OTM loser protection',
           tags: ['Winner Roll', 'ATM Straddle', 'Theta Harvest', 'Intraday'],
+        };
+      case 'nifty_managed_straddle':
+        return {
+          summary: 'Managed ATM short straddle · 20% Combined SL · 20% Leg SL / 30% Leg Target · Premium matching rolls',
+          tags: ['Managed Straddle', 'Premium Matching', 'Theta Harvest', 'Intraday'],
         };
       case 'nifty_value_imbalance_straddle':
         return {
@@ -2074,6 +2096,35 @@ function StrategyRowWide({ meta, state, onRefresh, instanceId, onAddInstance, on
           </>
         )}
 
+        {meta.key === 'nifty_managed_straddle' && (
+          <>
+            <div className={fieldCls}>
+              <FieldLabel text="Combined SL (%)" tip="Stop-loss % on the combined entry straddle premium; triggers global exit if premium expands by this percentage." />
+              <Input type="number" step="0.5" min={1} max={100} value={msCombinedSlPct} onChange={(e) => setMsCombinedSlPct(parseFloat(e.target.value) || 20.0)} className={inputCls} style={{ width: 64 }} />
+            </div>
+            <div className={fieldCls}>
+              <FieldLabel text="Leg Stop Loss (%)" tip="Stop-loss % on individual legs; closes losing leg and matches opposite surviving leg's premium." />
+              <Input type="number" step="0.5" min={1} max={100} value={msLegSlPct} onChange={(e) => setMsLegSlPct(parseFloat(e.target.value) || 20.0)} className={inputCls} style={{ width: 64 }} />
+            </div>
+            <div className={fieldCls}>
+              <FieldLabel text="Leg Target (%)" tip="Profit target decay % on individual legs; closes winning leg and matches opposite surviving leg's premium." />
+              <Input type="number" step="0.5" min={1} max={100} value={msLegTargetPct} onChange={(e) => setMsLegTargetPct(parseFloat(e.target.value) || 30.0)} className={inputCls} style={{ width: 64 }} />
+            </div>
+            <div className={fieldCls}>
+              <FieldLabel text="Entry Balance (%)" tip="Maximum CE/PE premium difference % allowed before entry; waits until premiums are balanced within this band." />
+              <Input type="number" step="0.5" min={1} max={50} value={msEntryDiffPct} onChange={(e) => setMsEntryDiffPct(parseFloat(e.target.value) || 10.0)} className={inputCls} style={{ width: 64 }} />
+            </div>
+            <div className={fieldCls}>
+              <FieldLabel text="Max Adjustments" tip="Maximum number of premium-matching leg adjustments allowed per session." />
+              <Input type="number" min={1} max={30} value={msMaxAdjustments} onChange={(e) => setMsMaxAdjustments(parseInt(e.target.value) || 10)} className={inputCls} style={{ width: 64 }} />
+            </div>
+            <div className={fieldCls}>
+              <FieldLabel text="Cooldown (s)" tip="Minimum cooldown in seconds between adjustments." />
+              <Input type="number" min={5} step={5} value={msAdjustmentCooldown} onChange={(e) => setMsAdjustmentCooldown(parseInt(e.target.value) || 30)} className={inputCls} style={{ width: 64 }} />
+            </div>
+          </>
+        )}
+
         {meta.key === 'crudeoilm_supertrend' && (
           <>
             <div className={fieldCls}>
@@ -2387,7 +2438,8 @@ function StrategyRowWide({ meta, state, onRefresh, instanceId, onAddInstance, on
           meta.key === 'nifty_value_imbalance_straddle' ||
           meta.key === 'nifty_value_imbalance_strangle' ||
           meta.key === 'nifty_delta_neutral' ||
-          meta.key === 'nifty_winner_roll_straddle') && (
+          meta.key === 'nifty_winner_roll_straddle' ||
+          meta.key === 'nifty_managed_straddle') && (
           <>
             <div className={fieldCls}>
               <FieldLabel text="Trail Arm (₹)" tip="Arms the trailing stop once MTM profit reaches this many rupees. Size it against your lot count." />

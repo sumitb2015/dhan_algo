@@ -177,6 +177,7 @@ Full CLI references, parameter explanations, and examples live in each strategy 
 | `strategies/crudeoil/` | [`strategy.md`](strategies/crudeoil/strategy.md) — CRUDEOILM Supertrend, Renko stop-and-reverse, VWAP+Supertrend, EMA+Supertrend, and pivot-gated ORB futures |
 | `strategies/intraday_equity/` | [`strategy.md`](strategies/intraday_equity/strategy.md) — Nifty-50 cash VWAP+RS auto-trader (NOT VALIDATED, dry-run only) |
 | `strategies/momentum_investing/` | [`strategy.md`](strategies/momentum_investing/strategy.md) — Nifty-500 positional (CNC) relative-strength momentum portfolio |
+| `strategies/managed_straddle/` | [`strategy.md`](strategies/managed_straddle/strategy.md) — Managed straddle with 20% combined SL, 20% leg SL, 30% leg target with premium-matching rolls |
 | `strategies/adaptive_strangle/` | [`strategy.md`](strategies/adaptive_strangle/strategy.md) — Bi-weekly far-OTM strangle with conditional Delta/Vega hedging & directional conversion |
 | `strategies/diagonal_call/` | [`strategy.md`](strategies/diagonal_call/strategy.md) — Delta-controlled, low-gamma diagonal covered call (60-120 DTE long CE + 25-45 DTE short CE) |
 
@@ -254,6 +255,17 @@ python strategies/diagonal_call/nifty_diagonal_call.py [--live]
     [--target-profit INR|%] [--stop-loss INR|%] [--start-time HH:MM]
     [--rebalance-times "10:00,12:00,14:00"] [--max-short-ratio RATIO] [--min-gamma-limit G]
     [--instance-id ID] [--broker {dhan,zerodha,kotak}]
+```
+
+**Nifty Managed Straddle** (`strategies/managed_straddle/nifty_managed_straddle.py`, dry-run default; `--live` places real orders). Enters ATM straddle starting at 09:20 IST if ATM CE and PE prices differ by < 10%. Manages risk via 20% combined premium SL (global exit), 20% individual leg SL (closes losing leg and rolls to replacement strike matching opposite surviving leg's LTP), and 30% individual leg target decay (closes winning leg and rolls to replacement strike matching opposite leg's LTP). Product `MARGIN`. Mandatory EOD square-off at 15:15 IST. Full flag list and defaults in `strategies/managed_straddle/strategy.md`.
+
+```
+python strategies/managed_straddle/nifty_managed_straddle.py [--live]
+    [--lots N] [--combined-sl-pct PCT] [--leg-sl-pct PCT] [--leg-target-pct PCT]
+    [--entry-diff-pct PCT] [--start-time HH:MM] [--eod-time HH:MM]
+    [--max-adjustments N] [--adjustment-cooldown SEC]
+    [--target-profit INR|%] [--stop-loss INR|%] [--trail-start-rs INR] [--trail-gap-rs INR]
+    [--broker {dhan,zerodha,kotak}] [--instance-id ID]
 ```
 
 See the per-folder `strategy.md` files linked in the table above. Each file contains full CLI flag tables, parameter tuning guidance, dry-run and live examples, and worked trade scenarios.
