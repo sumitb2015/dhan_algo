@@ -91,6 +91,29 @@ function preferOpenRow(rows: Record<string, unknown>[]): Record<string, unknown>
 }
 
 /**
+ * One row per contract (`keyOf`: a Dhan securityId, or another broker's trading symbol), for UI that asks "is
+ * anything open on this strike" — an order box's position, whether it can be removed, whether a strike shift has a
+ * leg to roll. The same contract can be listed under two products (or as a closed row plus a reopened one), and
+ * letting the LAST row win made a box holding a live MARGIN leg read flat whenever a closed INTRADAY row for that
+ * strike came after it: the chevrons then moved the box and left the leg behind. An open row always beats a flat
+ * one; among open rows the last still wins.
+ */
+export function indexOpenRowByKey<T extends Record<string, unknown>>(
+  rows: T[],
+  keyOf: (row: T) => string,
+): Record<string, T> {
+  const out: Record<string, T> = {};
+  for (const row of rows) {
+    const k = keyOf(row);
+    if (!k) continue;
+    const prev = out[k];
+    if (prev && Number(prev.netQty) !== 0 && Number(row.netQty) === 0) continue;
+    out[k] = row;
+  }
+  return out;
+}
+
+/**
  * Result of locating `pos` in a freshly-fetched positions payload.
  *
  * `flat` and `ambiguous` are deliberately distinct: the first means there is

@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert';
 import {
-  positionProduct, positionKey, findLivePosition, closeOrderProduct, isIntradayProduct,
+  positionProduct, positionKey, findLivePosition, closeOrderProduct, isIntradayProduct, indexOpenRowByKey,
 } from './positionProduct.ts';
 
 const row = (tradingSymbol: string, productType: string, netQty = 75) =>
@@ -123,6 +123,21 @@ test('isIntradayProduct treats carried-forward and unknown products as NOT intra
   assert.strictEqual(isIntradayProduct(''), false);
   // @ts-expect-error exercising a broker payload with no product field at all
   assert.strictEqual(isIntradayProduct(undefined), false);
+});
+
+test('indexOpenRowByKey: an open row beats a flat row for the same contract, in either order', () => {
+  const live = { securityId: '42', productType: 'MARGIN', netQty: -65 };
+  const closed = { securityId: '42', productType: 'INTRADAY', netQty: 0 };
+  const byId = (r: Record<string, unknown>) => String(r.securityId ?? '');
+  assert.strictEqual(indexOpenRowByKey([live, closed], byId)['42'], live);
+  assert.strictEqual(indexOpenRowByKey([closed, live], byId)['42'], live);
+});
+
+test('indexOpenRowByKey: flat-only contracts still appear; empty keys are skipped', () => {
+  const flat = { tradingSymbol: 'NIFTY26OCT25000CE', netQty: 0 };
+  const map = indexOpenRowByKey([flat, { tradingSymbol: '', netQty: 65 }], r => String(r.tradingSymbol ?? ''));
+  assert.deepStrictEqual(Object.keys(map), ['NIFTY26OCT25000CE']);
+  assert.strictEqual(map.NIFTY26OCT25000CE, flat);
 });
 
 test('openRowOfProduct: the open row of a closed-then-reopened pair, whichever Dhan lists first', async () => {

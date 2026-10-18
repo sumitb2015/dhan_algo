@@ -18,9 +18,10 @@ import { withSavedBroker } from '@/hooks/withSavedBroker';
 import { contractMultiplier, scaleBrokerPnl } from '@/lib/positionPnl';
 import { openLots, fractionUnits } from '@/lib/partialQty';
 import { resolveShiftTarget, clampShiftSteps } from '@/lib/strikeShift';
-import { positionKey, positionProduct, findLivePosition, closeOrderProduct } from '@/lib/positionProduct';
+import { positionKey, positionProduct, findLivePosition, closeOrderProduct, indexOpenRowByKey } from '@/lib/positionProduct';
 import { parseTradingSymbol } from '@/lib/positionLegs';
 import { kotakContractRequests, kotakUnderlyingOf, type KotakSymbolMap } from '@/lib/kotakPositionContracts';
+import { symbolOnUnderlying } from '@/lib/symbolUnderlying';
 import { cn } from '@/lib/utils';
 import TopWeightStocks from './TopWeightStocks';
 import TopIndices from './TopIndices';
@@ -909,14 +910,11 @@ function AdvancedScalper() {
   }, [enrichedPositions, guardProductTypes, broker]);
 
   // Position row keyed by security ID — lets each box look up its own open position/P&L
-  const positionsBySecId = useMemo(() => {
-    const map: Record<string, Record<string, unknown>> = {};
-    for (const pos of enrichedPositions) {
-      const secId = positionJoinKey(pos);
-      if (secId) map[secId] = pos;
-    }
-    return map;
-  }, [enrichedPositions, positionJoinKey]);
+  // An open row wins over a flat one for the same contract (see indexOpenRowByKey): last-row-wins made a live leg
+  // read flat whenever a closed row on the same strike, under another product, was listed after it.
+  const positionsBySecId = useMemo(
+    () => indexOpenRowByKey(enrichedPositions, positionJoinKey),
+    [enrichedPositions, positionJoinKey]);
 
 
   const boxSecId = useCallback((box: BoxConfig): string | undefined => {
@@ -1364,7 +1362,12 @@ function AdvancedScalper() {
     } catch { /* storage unavailable or corrupt — start clean */ }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [positionsLoaded, trailSim, guardStoreKey]);
+  // The broker the last write belonged to. On the render that switches broker, this effect runs BEFORE the
+  // broker-switch reset below, with the new key but the OLD broker's guards and positions still in hand: writing then
+  // put Dhan's guards under Kotak's key (and back), so a Kotak -> Dhan -> Kotak toggle wiped every saved Kotak SL.
+  const persistedKeyRef = useRef(guardStoreKey);
   useEffect(() => {
+    if (persistedKeyRef.current !== guardStoreKey) { persistedKeyRef.current = guardStoreKey; return; }
     if (!guardsRestoredRef.current || trailSim) return;
     try {
       const guards: Record<string, { guard: PositionGuard; entry: number }> = {};
@@ -1531,9 +1534,24 @@ function AdvancedScalper() {
       return;
     }
 
+    // The modal looks the strike up, and the order picks its exchange, against the SELECTED underlying. A leg on
+    // another one would resolve to the selected underlying's contract at the same strike and expiry — a FINNIFTY
+    // 27000 CE (same monthly day as NIFTY) became a NIFTY 27000 CE order. Refuse rather than guess.
+    const kotakInfo = broker === 'kotak' ? kotakSymbolMap[sym] : undefined;
+    // A future is never an Add Lots target (an options modal), whatever its underlying: say so first.
+    if (kotakInfo?.side === 'FUT') {
+      addToast('error', 'Could not resolve this position’s contract', sym);
+      return;
+    }
+    const legUnderlying = kotakInfo?.underlying;
+    if (legUnderlying ? legUnderlying !== underlying : !symbolOnUnderlying(sym, underlying)) {
+      addToast('error', `Add Lots: ${sym} is not a ${underlying} contract`,
+        `Switch the underlying${legUnderlying ? ` to ${legUnderlying}` : ''} to add to this leg`);
+      return;
+    }
+
     // Kotak: the instrument cache's contract, never the symbol parse (see enrichedPositions on the monthly form).
     // The cache also lists futures (side 'FUT'); Add Lots is an options modal, so those fall through to the refusal.
-    const kotakInfo = broker === 'kotak' ? kotakSymbolMap[sym] : undefined;
     if (kotakInfo && (kotakInfo.side === 'CE' || kotakInfo.side === 'PE')) {
       setAddLotsTarget({ pos, posExpiry: kotakInfo.expiry, strike: kotakInfo.strike, option: kotakInfo.side });
       return;
@@ -1546,7 +1564,7 @@ function AdvancedScalper() {
       return;
     }
     setAddLotsTarget({ pos, posExpiry, strike: parsed.strike, option: parsed.type });
-  }, [secIdToStrikeSide, positionJoinKey, broker, expiry, addToast, kotakSymbolMap]);
+  }, [secIdToStrikeSide, positionJoinKey, broker, expiry, addToast, kotakSymbolMap, underlying]);
 
   // ─── placeOrder ───────────────────────────────────────────────────
 
@@ -2230,16 +2248,9 @@ function AdvancedScalper() {
   // they get null and keep full-close only. The prefix test fails safe for the
   // three supported underlyings (a BANKNIFTY symbol never matches NIFTY).
   const lotSizeForRow = useCallback((row: Record<string, unknown>): number | null => {
-    const sym = String(row.tradingSymbol ?? '').toUpperCase();
-    if (!sym.startsWith(underlying)) return null;
-    // A bare prefix test also swallows longer underlyings that start with this
-    // one — NIFTYNXT50 (lot 25) would inherit NIFTY's lot size (75) and size its
-    // partials against the wrong granularity. Every broker's symbol continues
-    // into the expiry right after the underlying, so the next character is a
-    // digit or separator; a letter means this is a different instrument.
-    const next = sym.charAt(underlying.length);
-    if (next && next >= 'A' && next <= 'Z') return null;
-    return lotSize;
+    // Not a bare prefix test: NIFTYNXT50 (lot 25) would inherit NIFTY's lot size
+    // and size its partials against the wrong granularity (see symbolOnUnderlying).
+    return symbolOnUnderlying(String(row.tradingSymbol ?? ''), underlying) ? lotSize : null;
   }, [underlying, lotSize]);
 
   // Partial-close chips on ONE row: the row's own lot when the broker reports it (Kotak's lotSz, same units as the
