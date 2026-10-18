@@ -203,27 +203,7 @@ async function main() {
     } catch {
       store = null;
     }
-    const offline = mode === 'rerun' ? btWindow === 'db4' : !!store?.offline;
-
-    // Dhan's expired-options endpoint is slow and its rate limit is account-wide: never run alongside the options
-    // downloader (scripts/downloader/download_expired_options.py, status in debug/options_refresh_status.json).
-    // An offline (DB-only) run makes no Dhan calls and may run at any time.
-    if (!offline) try {
-      const dl = JSON.parse(fs.readFileSync(path.join(PROJECT_ROOT, 'debug', 'options_refresh_status.json'), 'utf8')) as {
-        done?: boolean;
-        pid?: number;
-      };
-      if (dl.done === false && dl.pid && pidAlive(dl.pid)) {
-        saveStatus({
-          state: 'stopped',
-          message: 'Waiting: the expired-options download is running (same Dhan API). Run again once it finishes.',
-          finishedAt: nowIso(),
-        });
-        return;
-      }
-    } catch {
-      /* no downloader status: not running */
-    }
+    const offline = true;
     const config = normalizeConfig(ledgerConfig);
     const key = backtestConfigKey(config);
     const today = istDayOf(Date.now());
@@ -231,25 +211,22 @@ async function main() {
     if (store && store.configKey !== key && mode === 'catchup') {
       saveStatus({
         state: 'error',
-        message: 'The page rules changed since this backtest was built. Use "Re-run month" to rebuild with the current rules.',
+        message: 'The page rules changed since this backtest was built. Use "Re-run" to rebuild with the current rules.',
         finishedAt: nowIso(),
       });
       return;
     }
     if (!store || mode === 'rerun') {
-      let from = backfillStart(today, btWindow);
-      let to: string | null = null;
-      if (btWindow === 'db4') {
-        const latest = await runPy(['--db-latest']);
-        if (!latest.ok || typeof latest.latest !== 'string' || !latest.latest) {
-          saveStatus({ state: 'error', message: `Cannot read the options DB: ${String(latest.error ?? 'empty')}`, finishedAt: nowIso() });
-          return;
-        }
-        to = latest.latest;
-        const d = new Date(`${to}T00:00:00Z`);
-        d.setUTCDate(d.getUTCDate() - 28);
-        from = d.toISOString().slice(0, 10);
+      const latest = await runPy(['--db-latest']);
+      if (!latest.ok || typeof latest.latest !== 'string' || !latest.latest) {
+        saveStatus({ state: 'error', message: `Cannot read the options DB: ${String(latest.error ?? 'empty')}`, finishedAt: nowIso() });
+        return;
       }
+      const to = latest.latest;
+      const d = new Date(`${to}T00:00:00Z`);
+      const daysBack = btWindow === 'week' ? 7 : btWindow === 'month' ? 30 : 28;
+      d.setUTCDate(d.getUTCDate() - daysBack);
+      const from = d.toISOString().slice(0, 10);
       store = {
         version: 1,
         underlying: 'NIFTY',
@@ -257,7 +234,7 @@ async function main() {
         config,
         from,
         to,
-        offline,
+        offline: true,
         window: btWindow,
         updatedAt: null,
         days: {},

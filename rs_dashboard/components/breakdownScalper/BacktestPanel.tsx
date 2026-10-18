@@ -314,15 +314,11 @@ export function BacktestPanel({
             <FlaskConical className="h-3.5 w-3.5 text-violet-400" />
           </div>
           <div>
-            <p className="text-[10px] font-bold uppercase tracking-[0.16em] text-violet-400">Strategy backtest · NIFTY</p>
+            <p className="text-[10px] font-bold uppercase tracking-[0.16em] text-violet-400">Offline Strategy backtest · NIFTY</p>
             <h2 className="text-sm font-bold text-white">
               Daily results {data?.store ? (data.store.to ? `${data.store.from} → ${data.store.to}` : `since ${data.store.from}`) : ''}{' '}
-              <span className="text-xs font-medium text-zinc-500">
-                (
-                {data?.store?.window === 'db4'
-                  ? 'latest 4 weeks in the options DB, offline'
-                  : `${data?.store?.window === 'month' ? '1 month' : '1 week'} window, appended at EOD`}
-                )
+              <span className="text-xs font-medium text-emerald-400/90 font-mono">
+                (100% offline · options DB)
               </span>
             </h2>
           </div>
@@ -359,9 +355,9 @@ export function BacktestPanel({
                 aria-label="Re-run window"
                 className="h-7 rounded-lg border border-zinc-700 bg-zinc-900 px-2 text-xs font-bold text-zinc-300"
               >
-                <option value="db4">4 weeks in options DB (Instant / Offline)</option>
-                <option value="month">1 month (Options DB + Live EOD)</option>
-                <option value="week">1 week (Options DB + Live EOD)</option>
+                <option value="db4">4 weeks (Options DB)</option>
+                <option value="month">1 month (Options DB)</option>
+                <option value="week">1 week (Options DB)</option>
               </select>
               <button
                 type="button"

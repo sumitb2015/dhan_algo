@@ -395,40 +395,17 @@ def main():
         return _expiries
 
     db = from_db(day)
-    if db is None and args.offline:
-        emit({'ok': False, 'error': f'{day} is not in the options DB (offline mode)', 'retry': False})
-    if db is not None:
-        expiry, rows, prev = db
-        source = 'db'
-    else:
-        if day > today or (day == today and now.strftime('%H:%M') < '15:35'):
-            emit({'ok': False, 'error': f'{day} session is not over yet', 'retry': True})
-        later = [e for e in expiries() if e >= day]
-        if not later:
-            emit({'ok': False, 'error': f'no NIFTY weekly expiry on/after {day} in the expiry list', 'retry': True})
-        expiry = later[0]
-        prev = max([e for e in expiries() if e < expiry], default=None)
-        if expiry >= today:
-            payload = from_intraday_api(day, expiry, expiries())
-            rows, source = None, 'intraday_api'
-        else:
-            rows, err = expired_main_rows(day, expiry, expiries())
-            if err:
-                emit({'ok': False, 'error': err, 'retry': True})
-            source = 'expired_api'
-    if rows is not None:
-        # Warm-up sessions the near-week data does not hold (on/before the previous expiry).
-        # When source is 'db', use local DB directly without making 42 slow Dhan REST calls.
-        extra, err = ([], None) if (args.offline or source == 'db') else warm_rows(day, expiry, prev)
-        if err:
-            emit({'ok': False, 'error': f'warm-up: {err}', 'retry': True})
-        payload = build_payload(day, expiry, source, list(rows) + list(extra))
+    if db is None:
+        emit({'ok': False, 'error': f'{day} is not in Options Data/nifty_options.db (offline backtest)', 'retry': False})
+    expiry, rows, prev = db
+    source = 'db'
+    payload = build_payload(day, expiry, source, rows)
     if 'error' in payload:
-        emit({'ok': False, 'error': payload['error'], 'retry': payload.get('retry', True)})
+        emit({'ok': False, 'error': payload['error'], 'retry': False})
     have = {b[0][:10] for c in payload['contracts'].values() for b in c['bars']} - {day}
     payload['warmupSessions'] = len(set(warm_sessions(day)) & have)
     if not payload['contracts'] or not payload['spot']:
-        emit({'ok': False, 'error': f'{payload["source"]}: no usable bars for {day}', 'retry': True})
+        emit({'ok': False, 'error': f'{payload["source"]}: no usable bars for {day} in options DB', 'retry': False})
 
     with open(out + '.tmp', 'w') as f:
         json.dump(payload, f, separators=(',', ':'))
