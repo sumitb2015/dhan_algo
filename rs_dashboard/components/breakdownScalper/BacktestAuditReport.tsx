@@ -15,15 +15,32 @@ import {
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 
-export function BacktestAuditReport() {
-  const [isOpen, setIsOpen] = useState(true);
+export function BacktestAuditReport({
+  defaultOpen = false,
+  isOpen: controlledOpen,
+  onToggle,
+}: {
+  defaultOpen?: boolean;
+  isOpen?: boolean;
+  onToggle?: () => void;
+} = {}) {
+  const [internalOpen, setInternalOpen] = useState(defaultOpen);
+  const isOpen = controlledOpen !== undefined ? controlledOpen : internalOpen;
+
+  const handleToggle = () => {
+    if (onToggle) onToggle();
+    else setInternalOpen((prev) => !prev);
+  };
 
   return (
     <section className="mt-4 rounded-xl border border-zinc-800 bg-zinc-900/60 overflow-hidden">
       {/* Header Bar */}
       <div
-        onClick={() => setIsOpen((prev) => !prev)}
-        className="flex cursor-pointer flex-wrap items-center justify-between gap-3 border-b border-zinc-800 px-4 py-3 hover:bg-zinc-800/40 transition-colors"
+        onClick={handleToggle}
+        className={cn(
+          'flex cursor-pointer flex-wrap items-center justify-between gap-3 px-4 py-3 hover:bg-zinc-800/40 transition-colors',
+          isOpen && 'border-b border-zinc-800',
+        )}
       >
         <div className="flex items-center gap-2.5">
           <div className="flex h-7 w-7 items-center justify-center rounded-lg border border-emerald-500/30 bg-emerald-500/10">

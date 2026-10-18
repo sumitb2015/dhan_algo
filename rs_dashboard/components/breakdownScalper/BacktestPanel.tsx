@@ -188,6 +188,7 @@ export function BacktestPanel({
   const [rerunWindow, setRerunWindow] = useState<BtWindow>('db4');
   const [customFrom, setCustomFrom] = useState('2026-09-01');
   const [customTo, setCustomTo] = useState('2026-10-13');
+  const [auditOpen, setAuditOpen] = useState(false);
   const initializedDates = useRef(false);
   const [busy, setBusy] = useState(false);
   const seq = useRef(0);
@@ -454,8 +455,11 @@ export function BacktestPanel({
           <button
             type="button"
             onClick={() => {
-              const el = document.getElementById('backtest-audit-report');
-              if (el) el.scrollIntoView({ behavior: 'smooth' });
+              setAuditOpen(true);
+              setTimeout(() => {
+                const el = document.getElementById('backtest-audit-report');
+                if (el) el.scrollIntoView({ behavior: 'smooth' });
+              }, 50);
             }}
             className="flex h-7 items-center gap-1.5 rounded-lg border border-emerald-500/30 bg-emerald-500/10 px-2.5 text-xs font-bold text-emerald-400 hover:bg-emerald-500/20"
             title="View Strategy & Backtest Verification Audit Report (2026-10-18)"
@@ -767,7 +771,7 @@ export function BacktestPanel({
 
         {/* Verification & Accuracy Audit Report */}
         <div id="backtest-audit-report" className="pt-2">
-          <BacktestAuditReport />
+          <BacktestAuditReport isOpen={auditOpen} onToggle={() => setAuditOpen((o) => !o)} />
         </div>
       </div>
     </section>
