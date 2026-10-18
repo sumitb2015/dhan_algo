@@ -19,6 +19,7 @@ import {
   ChevronsLeft,
   ChevronsRight,
   LayoutDashboard,
+  Sparkles,
 } from 'lucide-react';
 import {
   Collapsible,
@@ -189,6 +190,13 @@ const NAV_GROUPS = [
       { href: '/portfolio/stats', label: 'P&L Stats', desc: 'FY performance vs starting capital — month grid, win rate, equity curve' },
       { href: '/performance', label: 'Performance', desc: 'Historical backtests & drawdown statistics' },
       { href: '/reports', label: 'Reports', desc: 'Trade journals & execution logs' },
+    ],
+  },
+  {
+    label: 'App',
+    icon: Sparkles,
+    links: [
+      { href: '/whats-new', label: "What's New", desc: 'Recent features, fixes and speed-ups, from the git history' },
     ],
   },
 ];
