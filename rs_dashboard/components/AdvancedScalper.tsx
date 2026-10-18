@@ -1538,6 +1538,11 @@ function AdvancedScalper() {
     // another one would resolve to the selected underlying's contract at the same strike and expiry — a FINNIFTY
     // 27000 CE (same monthly day as NIFTY) became a NIFTY 27000 CE order. Refuse rather than guess.
     const kotakInfo = broker === 'kotak' ? kotakSymbolMap[sym] : undefined;
+    // A future is never an Add Lots target (an options modal), whatever its underlying: say so first.
+    if (kotakInfo?.side === 'FUT') {
+      addToast('error', 'Could not resolve this position’s contract', sym);
+      return;
+    }
     const legUnderlying = kotakInfo?.underlying;
     if (legUnderlying ? legUnderlying !== underlying : !symbolOnUnderlying(sym, underlying)) {
       addToast('error', `Add Lots: ${sym} is not a ${underlying} contract`,

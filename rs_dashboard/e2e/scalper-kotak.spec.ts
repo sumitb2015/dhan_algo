@@ -247,6 +247,13 @@ test('Add on a Kotak future refuses instead of opening the options Add Lots moda
   expect(orders()).toHaveLength(0);
 });
 
+test('Add on an option of another underlying refuses instead of resolving it against the selected one', async ({ page }) => {
+  // NIFTY is on screen; the modal's strike lookup and the order's exchange would both use NIFTY.
+  await row(page, 'CRUDEOILM17NOV268800PE').getByRole('button', { name: 'Add', exact: true }).click();
+  await expect(page.getByText('Add Lots: CRUDEOILM17NOV268800PE is not a NIFTY contract')).toBeVisible();
+  expect(orders()).toHaveLength(0);
+});
+
 test('a close carries no source, so the server-side lot cap can never refuse it', async ({ page }) => {
   await row(page, 'NIFTY26OCT22500PE').getByRole('button', { name: 'Close', exact: true }).click();
   await expect.poll(() => orders().length).toBe(1);
