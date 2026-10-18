@@ -701,8 +701,8 @@ export function BacktestPanel({
         )}
       </div>
 
-      {/* KPI tiles */}
-      <div className="grid grid-cols-2 gap-2 px-4 py-3 sm:grid-cols-4 xl:grid-cols-8">
+      {/* Primary KPI tiles */}
+      <div className="grid grid-cols-2 gap-2 px-4 pt-3 pb-2 sm:grid-cols-4 xl:grid-cols-8">
         {[
           ['Net P&L (after costs)', inr(summary.net), pnlTone(summary.net)],
           ['Gross / Costs', `${inr(summary.gross)} / ${inr(summary.costs, false)}`, 'text-zinc-200'],
@@ -719,22 +719,116 @@ export function BacktestPanel({
           </div>
         ))}
       </div>
+
+      {/* Advanced Quant Metrics tiles */}
+      <div className="grid grid-cols-2 gap-2 px-4 pb-3 sm:grid-cols-4 xl:grid-cols-8">
+        {[
+          [
+            'Expectancy / Ratio',
+            `${inr(summary.expectancy)} / ${summary.expectancyRatio != null ? summary.expectancyRatio.toFixed(2) : '—'}`,
+            pnlTone(summary.expectancy),
+          ],
+          [
+            'Sharpe (Annualized)',
+            summary.dailySharpe != null ? summary.dailySharpe.toFixed(2) : '—',
+            summary.dailySharpe != null && summary.dailySharpe >= 1 ? 'text-emerald-400' : 'text-zinc-200',
+          ],
+          [
+            'Sortino (Annualized)',
+            summary.dailySortino != null ? summary.dailySortino.toFixed(2) : '—',
+            summary.dailySortino != null && summary.dailySortino >= 1.5 ? 'text-emerald-400' : 'text-zinc-200',
+          ],
+          [
+            'Calmar (Return/DD)',
+            summary.calmarRatio != null ? `${summary.calmarRatio.toFixed(2)}x` : '—',
+            summary.calmarRatio != null && summary.calmarRatio >= 3 ? 'text-emerald-400' : 'text-zinc-200',
+          ],
+          [
+            'Max Streaks (W / L)',
+            `${summary.maxConsecWins}W / ${summary.maxConsecLosses}L`,
+            'text-zinc-200',
+          ],
+          [
+            'Avg Hold (Win / Loss)',
+            `${summary.avgHoldWinnerMin != null ? `${summary.avgHoldWinnerMin}m` : '—'} / ${summary.avgHoldLoserMin != null ? `${summary.avgHoldLoserMin}m` : '—'}`,
+            'text-zinc-200',
+          ],
+          [
+            'CE Sells Net',
+            `${inr(summary.ceStat?.net ?? 0)} (${summary.ceStat?.trades ?? 0}T, ${summary.ceStat?.winRate != null ? `${summary.ceStat.winRate.toFixed(0)}%` : '—'})`,
+            pnlTone(summary.ceStat?.net),
+          ],
+          [
+            'PE Sells Net',
+            `${inr(summary.peStat?.net ?? 0)} (${summary.peStat?.trades ?? 0}T, ${summary.peStat?.winRate != null ? `${summary.peStat.winRate.toFixed(0)}%` : '—'})`,
+            pnlTone(summary.peStat?.net),
+          ],
+        ].map(([label, value, tone]) => (
+          <div key={label} className="rounded-lg border border-zinc-800 bg-zinc-900/80 px-3 py-2">
+            <p className="text-[10px] font-bold uppercase tracking-wider text-zinc-500">{label}</p>
+            <p className={cn('mt-1 font-mono text-sm font-bold tabular-nums', tone)}>{value}</p>
+          </div>
+        ))}
+      </div>
+
       {summary.trades > 0 && (
-        <div className="flex flex-wrap gap-2 px-4 pb-1 text-[11px]">
-          <span className="text-zinc-500">Exits:</span>
-          {(Object.keys(EXIT_LABEL) as BtExitKind[])
-            .filter((k) => summary.exitMix[k])
-            .map((k) => (
-              <span key={k} className={cn('rounded border px-1.5 py-0.5 font-bold', EXIT_TONE[k])}>
-                {EXIT_LABEL[k]} {summary.exitMix[k]}
+        <div className="flex flex-col gap-2 px-4 pb-2 text-[11px]">
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="font-bold text-zinc-400">Exits:</span>
+            {(Object.keys(EXIT_LABEL) as BtExitKind[])
+              .filter((k) => summary.exitMix[k])
+              .map((k) => (
+                <span key={k} className={cn('rounded border px-1.5 py-0.5 font-bold', EXIT_TONE[k])}>
+                  {EXIT_LABEL[k]} {summary.exitMix[k]}
+                </span>
+              ))}
+            {summary.bestDay && (
+              <span className="text-zinc-500 sm:ml-auto">
+                Best {summary.bestDay.date} <span className="text-emerald-400 font-bold">{inr(summary.bestDay.net)}</span> · Worst {summary.worstDay?.date}{' '}
+                <span className="text-red-400 font-bold">{inr(summary.worstDay?.net)}</span>
               </span>
-            ))}
-          {summary.bestDay && (
-            <span className="text-zinc-500">
-              Best {summary.bestDay.date} <span className="text-emerald-400">{inr(summary.bestDay.net)}</span> · Worst {summary.worstDay?.date}{' '}
-              <span className="text-red-400">{inr(summary.worstDay?.net)}</span>
-            </span>
+            )}
+          </div>
+
+          {/* DTE Breakdown Badges */}
+          {summary.dteBreakdown && summary.dteBreakdown.length > 0 && (
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="font-bold text-zinc-400">DTE Performance:</span>
+              {summary.dteBreakdown.map((b) => (
+                <span
+                  key={b.dte}
+                  className={cn(
+                    'rounded border px-2 py-0.5 font-mono text-[10px] font-bold',
+                    b.net >= 0
+                      ? 'border-emerald-500/30 bg-emerald-500/10 text-emerald-400'
+                      : 'border-red-500/30 bg-red-500/10 text-red-400'
+                  )}
+                  title={`${b.sessions} session(s), ${b.trades} trade(s), ${b.wins} win(s)`}
+                >
+                  {b.dte}-DTE: {inr(b.net)} ({b.trades}T, {b.winRate != null ? `${b.winRate.toFixed(0)}%` : '—'})
+                </span>
+              ))}
+            </div>
           )}
+
+          {/* Slippage Sensitivity Stress Matrix */}
+          <div className="flex flex-wrap items-center gap-2 rounded-lg border border-zinc-800/80 bg-zinc-950/40 px-2.5 py-1.5">
+            <span className="font-bold text-zinc-400">Slippage Stress (est. drag @ 65 qty):</span>
+            {[0, 0.5, 1.0, 1.5].map((slip) => {
+              const drag = summary.trades * 2 * slip * 65;
+              const stressedNet = summary.net - drag;
+              return (
+                <span
+                  key={slip}
+                  className="rounded border border-zinc-800 bg-zinc-900 px-2 py-0.5 font-mono text-[10px]"
+                >
+                  <span className="text-zinc-400">@{slip}pt/fill: </span>
+                  <span className={cn('font-bold', pnlTone(stressedNet))}>{inr(stressedNet)}</span>
+                  {slip > 0 && <span className="text-zinc-500"> (-{inr(drag)})</span>}
+                </span>
+              );
+            })}
+          </div>
         </div>
       )}
 

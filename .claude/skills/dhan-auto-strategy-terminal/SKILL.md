@@ -62,6 +62,216 @@ NIFTY-only in the backtest. Build a separate page only when a strategy needs wha
 The **ledger file's `config` is the single rules source**: the live engine reads it, the backtest runner reads it,
 and `backtestConfigKey(config)` stamps every result set with the rules it used.
 
+## UI Template & Design Architecture (Breakdown Scalper & Algo Lab Standard)
+
+All automated strategy terminals must adhere to the standardized visual design system established in the **Breakdown Auto-Scalper** (`/breakdown-scalper`) and **Algo Lab** (`/algo-lab`). This institutional-grade template couples real-time operational telemetry with deep quantitative backtesting analytics.
+
+Every component must follow repo theming rules: use zinc ramp tokens (`bg-zinc-950`, `bg-zinc-900`, `border-zinc-800`), solid text colors without slash opacity (`text-zinc-100` through `text-zinc-500`), `text-oncolor`/`bg-oncolor` for saturated accents, `bg-oncolor-dark/70` for modal/drawer backdrops, and commit-on-blur inputs (`dhan-commit-on-blur`).
+
+---
+
+### 1. Sticky Header & Strategy Mode Architecture
+
+The sticky page header anchors navigation, strategy selection, live data status, and mode switching in a single high-contrast bar:
+
+```tsx
+<div className="sticky top-0 z-30 flex items-center justify-between gap-3 flex-wrap px-6 py-3 border-b border-zinc-800 bg-zinc-950/95 backdrop-blur">
+  {/* Left: Identity & Strategy Selector */}
+  <div className="flex items-center gap-3">
+    <div className="flex h-8 w-8 items-center justify-center rounded-lg border border-zinc-800 bg-zinc-900 text-violet-400">
+      <Bot className="h-4 w-4" />
+    </div>
+    <div>
+      <p className="text-[10px] font-bold uppercase tracking-[0.16em] text-zinc-500">ALGO LAB · AUTOMATED SCALPER</p>
+      {/* Strategy selector dropdown when multi-strategy, or h1 title */}
+      <select value={strategyKey} onChange={...} className="h-7 rounded-lg border border-zinc-700 bg-zinc-900 px-2 text-xs font-bold text-zinc-100 focus:outline-none">
+        {strategies.map((s) => <option key={s.key} value={s.key}>{s.label}</option>)}
+      </select>
+    </div>
+  </div>
+
+  {/* Center: Segmented View Mode Tabs */}
+  <div className="inline-flex items-center gap-1 rounded-xl border border-zinc-800 bg-zinc-900/90 p-1 shadow-inner">
+    <button className={cn('flex items-center gap-1.5 rounded-lg px-3 py-1 text-xs font-bold transition-all', tab === 'live' ? 'bg-violet-600 text-oncolor shadow-sm' : 'text-zinc-400 hover:text-zinc-200')}>
+      <Zap className="h-3.5 w-3.5" />
+      <span>Live Trading</span>
+      {openCount > 0 && <span className="rounded-full bg-violet-800 px-1.5 py-0.2 font-mono text-[10px] text-oncolor">{openCount}</span>}
+    </button>
+    <button className={cn('flex items-center gap-1.5 rounded-lg px-3 py-1 text-xs font-bold transition-all', tab === 'backtest' ? 'bg-violet-600 text-oncolor shadow-sm' : 'text-zinc-400 hover:text-zinc-200')}>
+      <FlaskConical className="h-3.5 w-3.5" />
+      <span>Backtest</span>
+    </button>
+  </div>
+
+  {/* Right: Contract Scope, Broker, Live Feeds, Data Currency & Actions */}
+  <div className="flex items-center gap-2">
+    <select value={expiry} ... className="h-7 rounded-lg border border-zinc-700 bg-zinc-900 px-2 text-xs font-mono font-bold text-zinc-200" />
+    <BrokerPicker />
+    {/* Live WebSocket Status Pill with animated ping indicator */}
+    <span className="flex items-center gap-1.5 rounded px-2 py-0.5 border border-emerald-500/30 bg-emerald-500/10 text-emerald-400 text-[11px] font-mono font-bold">
+      <span className="h-1.5 w-1.5 rounded-full bg-emerald-400 animate-ping" />
+      <span>LIVE · WS</span>
+    </span>
+    {/* India VIX Live Chip */}
+    <span className="flex items-center gap-1.5 rounded bg-zinc-900 px-2 py-0.5 border border-zinc-800 text-xs font-mono">
+      <span className="text-zinc-400">INDIA VIX:</span>
+      <strong className="text-zinc-100">{vixLtp.toFixed(2)}</strong>
+      <span className="text-[11px] font-bold text-amber-400">▲ +1.20%</span>
+    </span>
+    {/* DATA Date Currency Chip */}
+    <span className="rounded border border-zinc-800 bg-zinc-900/60 px-2 py-0.5 font-mono text-[10px] font-bold text-zinc-400">
+      DATA: {dataDate}
+    </span>
+    {/* Strategy & Risk Rules Button */}
+    <button onClick={onOpenRules} className="flex items-center gap-1.5 rounded-lg border border-zinc-800 bg-zinc-900 px-2.5 py-1 text-xs font-bold text-zinc-300 hover:bg-zinc-800">
+      <Settings className="h-3.5 w-3.5 text-amber-400" />
+      <span>RULES</span>
+    </button>
+    <NavBar />
+  </div>
+</div>
+```
+
+---
+
+### 2. Market Direction & Risk Strip (`MarketBiasStrip` / `LivePanels`)
+
+Mounted at the top of the Live workspace, this 2-row panel provides instant situational awareness and emergency execution controls:
+
+#### Row 1: Telemetry & Primary Engine Controls
+- **Spot Ticker & Indicators**: `{underlying} SPOT: {spot.toFixed(1)}` in bold mono font.
+- **Trend Filter Pills**:
+  - `EMA 9`: `{val}` · `EMA 20`: `{val}` · `Spread`: `+12.4` (green for positive spread, red for negative).
+  - `ST (7, 3)`: `▲ {val}` (green arrow for uptrend, red arrow for downtrend).
+- **India VIX Chip**: Live LTP, intraday change %, and yesterday close in tooltip.
+- **Live WebSocket Pill**: Active transport badge (`LIVE · WS`) with glowing/ping dot.
+- **Auto-Trader Master Toggle**:
+  - Active: `bg-emerald-600/20 text-emerald-300 border border-emerald-500/40 hover:bg-emerald-600/30` with ping animation dot, `Pause` icon, and text `AUTO-TRADER ACTIVE`.
+  - Paused: `bg-zinc-800/90 text-zinc-300 border border-zinc-700 hover:bg-zinc-700` with `Play` icon and text `AUTO-TRADER PAUSED`.
+  - Hard Lock: Disabled automatically with `cursor-not-allowed opacity-50` when daily loss limit is breached.
+- **Emergency Square-Off**: `EXIT ALL ({openCount})` in red styling (`border-red-500/40 bg-red-500/10 text-red-400`). Closes all active legs instantly.
+- **Rules & Playbook Triggers**: Quick triggers for the Settings drawer (`Settings`) and strategy documentation (`BookOpen` / `PLAYBOOK`).
+
+#### Row 2: The 5-Card Trend & Risk Dashboard Matrix
+A responsive `grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-3` layout:
+
+1. **Market Direction Filter**:
+   - Eyebrow: `MARKET DIRECTION FILTER` in `text-[10px] font-semibold uppercase tracking-wider text-zinc-500`.
+   - Direction Tag: `BULLISH` (`TrendingUp`, `text-emerald-400`), `BEARISH` (`TrendingDown`, `text-red-400`), or `SIDEWAYS` (`Minus`, `text-amber-400`).
+   - Mode Subtext: `Auto Bias Active` or `Bypass Filter`.
+2. **Eligible Trading Side**:
+   - Eyebrow: `ELIGIBLE SELLING SIDE` (or `ELIGIBLE BUYING SIDE`).
+   - Badge: `PUTS (PE) ONLY` (emerald), `CALLS (CE) ONLY` (red), `BOTH CE & PE` (sky), or `BLOCKED: SIDEWAYS` (amber).
+   - Subtext: Live headline / reason from the trend gate, with offline/error states highlighted in red.
+3. **India VIX · Volatility Regime**:
+   - Eyebrow: `INDIA VIX · VOLATILITY`.
+   - Value: `Activity` icon + live LTP + change % badge.
+   - Regime Badge: `< 13` Low Vol (emerald), `13 - 18` Normal Vol (sky), `> 18` Elevated (amber) + yesterday close reference.
+4. **Concurrent Positions & Mode**:
+   - Eyebrow: `CONCURRENT POSITIONS`.
+   - Capacity: `{openCount} / {config.maxConcurrent} MAX` with subtext `(max {config.maxSameSide}/side)`.
+   - Mode Pill: `REAL MODE` (`bg-red-500/20 text-red-400 border border-red-500/30`) vs `SIM MODE` (`bg-emerald-500/20 text-emerald-400 border border-emerald-500/30`).
+5. **Daily P&L & Loss Limit Circuit Breaker**:
+   - Eyebrow: `DAILY P&L / LOSS LIMIT`.
+   - Real-time Total P&L: `+₹12,450` (emerald) or `-₹3,200` (red).
+   - Remaining Budget Bar: Progress bar defaulting to emerald, shifting to amber at `< 30%` remaining, and red on breach.
+   - Circuit Breaker Banner: When breached, displays `<ShieldAlert className="h-3 w-3" /> HARD DAILY LOSS LIMIT REACHED — LOCKED OUT` and locks the engine.
+
+---
+
+### 3. Strategy & Risk Rules Drawer Template (`RulesDrawer` / `RulesConfigDrawer`)
+
+All strategy rules and risk parameters are rendered inside a standardized slide-over drawer (`w-full max-w-lg border-l border-zinc-800 bg-zinc-950 p-6 text-white shadow-2xl`).
+
+#### Key Sub-components
+- **Backdrop Scrim**: MUST use `bg-oncolor-dark/70 backdrop-blur-sm` (never `bg-black/70` which fades in white mode).
+- **`SectionCard`**: Modular card wrapper with `rounded-lg border border-zinc-800 bg-zinc-900/60 p-3.5 flex flex-col gap-3`. Bold title in `text-zinc-200` and description in `text-[11px] text-zinc-400`.
+- **`FieldRow`**: Row layout with `flex items-center justify-between`, label in `font-medium text-zinc-300`, sublabel in `text-[10px] text-zinc-500`, and right-aligned controls.
+- **`RuleNumInput`**: Commit-on-blur numeric stepper with `[ - ]` and `[ + ]` buttons. Listens to blur and Enter keys to ensure mid-typing values do not fire live rules (`dhan-commit-on-blur`).
+- **`TimeInput`**: Commit-on-blur `HH:MM` input validating time format before applying, protecting against premature EOD square-offs.
+
+#### The 8 Standard Card Sections
+1. **Execution Mode**:
+   - Status Banner: `REAL MONEY ARMED` (red border/badge) vs `SIMULATED PAPER TRADING` (emerald border/badge).
+   - Mode Selector: Segmented pill buttons for `SIM (Paper)` and `REAL (Live Money)`.
+   - Reset Action: `Reset SIM Paper Trades` button (`RefreshCcw`) to wipe simulated test runs.
+2. **Market Direction Filter**:
+   - Filter Mode Cards: Selectable cards for `AUTO Trend Filter` (uses index indicators) vs `BYPASS Filter` (trades both sides).
+   - Index EMA Cross: Checkbox toggle + Fast/Slow period steppers (`trendEmaFast`, `trendEmaSlow`).
+   - Index Supertrend: Checkbox toggle + Period/Multiplier steppers (`trendStPeriod`, `trendStMultiplier`).
+3. **Scanner & Timeframe Parameters**:
+   - Timeframe: Segmented pill buttons `[1m, 3m, 5m]`.
+   - Strike Window: `±N strikes around ATM` stepper.
+   - Lots Per Trade: Order sizing stepper.
+   - Premium Thresholds: `Min Premium (₹)` and `Max Premium (₹)` steppers.
+   - Max Signal Age: Bar expiry threshold stepper.
+4. **Option Chart Indicators**:
+   - Option Supertrend: Toggle + Period and Multiplier steppers.
+   - Session VWAP: Toggle for intraday VWAP cross/breakdown filter.
+   - Option EMA: Toggle + Period stepper.
+5. **Portfolio & Risk Limits**:
+   - Max Concurrent Positions: Portfolio slot limit stepper.
+   - Max Same-Side Positions: CE/PE concentration limit stepper.
+   - Daily Loss Limit: Account protection cap in ₹.
+   - Hard Circuit Breaker: Toggle enforcing hard engine lockout upon limit breach.
+6. **Brokerage & Execution Fees**:
+   - Brokerage per Order: Sizing stepper with one-click presets for Dhan (`₹20`) and Kotak (`₹0`).
+   - Backtest Data Source: Selector (`dhan` vs `offline_db`).
+   - Backtest Slippage: Adverse execution drag in points per fill (`slippagePts`).
+   - Skip Cold Contracts: Checkbox (`btWarmOnly`) to filter trades lacking multi-session warm-up.
+7. **Stop-Loss & Profit Exits**:
+   - Initial Stop-Loss %: Baseline risk threshold stepper.
+   - Lock & Trail Trigger %: Profit threshold to activate trailing stop.
+   - Trail Step & Trail By: Points-based trailing ratchet steppers (`trailStepPts`, `trailByPts`).
+   - Target Profit %: Hard profit target stepper.
+   - Indicator Recovery Exit: Toggle to exit if price crosses back over trigger levels.
+8. **Trading Hours (IST)**:
+   - Entry Window Start (default `09:20`) via `TimeInput`.
+   - Entry Window End (default `14:45`) via `TimeInput`.
+   - Mandatory EOD Exit Cutoff (default `15:15`) via `TimeInput`.
+- **Drawer Footer**: Full-width Emerald `Done` button (`bg-emerald-600 hover:bg-emerald-500 text-oncolor font-bold`) to close the panel.
+
+---
+
+### 4. Live Dual-Pane Worksurface: Scanner & Positions Ledger
+
+The Live tab renders two side-by-side or stacked panels:
+1. **Candidate Scanner Grid (`ScannerGrid`)**:
+   - Evaluates closed option bars against active rules.
+   - Shows Strike, Type (CE/PE), LTP, Distance to Breakdown/Entry, Status (`TRIGGERED` pulsing emerald, `ARMED` sky, `LOCKED` amber, `INELIGIBLE` zinc).
+2. **Positions Ledger & Broker Integration (`PositionsTable`)**:
+   - Segmented Navigation: `Positions` (with open count badge), `Order Book` (with pending count badge), `Trade Book`.
+   - Sub-filters: `Strategy Open`, `Strategy Closed`, and `Broker Net Positions`.
+   - Columns: Strike & Expiry, Side, Entry Price, Live LTP, P&L (₹ & %), Low Water Mark, Current Trailing Stop, Exit Reason, Emergency Close button.
+   - Inline Pending Order Editor: Allows editing price/quantity or cancelling pending limit orders directly from the terminal.
+
+---
+
+### 5. Quant Backtest Analytics Panel & Audit Standard
+
+The Backtest tab replays the strategy's pure rule functions over historical data (`nifty_options.db`) and renders institutional analytics:
+
+- **Top Control Strip**:
+  - Window Picker: `Latest 4 weeks` (`db4`), `1 week`, `1 month`, `3 months`, `6 months`, `1 year`, `All Data (2021–2026)`, and `Custom Range…`.
+  - Action Buttons: `Re-run` (rebuilds dataset), `Run Missing` (incremental catch-up), `CSV` export, `Audit` verification modal (`ShieldCheck`), and `Rules` drawer trigger.
+  - Progress Gauge: Displays session completion progress bar and timestamp during background runs.
+- **Weekday Filter Strip**:
+  - Monday–Friday pill buttons with session counts and cold-start indicator badges (`⚠`). Enables isolating single-day effects (e.g. 0-DTE Tuesday vs Thursday).
+- **Primary KPI Grid (8 tiles)**:
+  - Net P&L (after costs), Gross / Costs, Sessions / with trades, Trades / Win rate, Avg per day / trade, Avg win / loss, Max drawdown, Profit factor.
+- **Advanced Quant Metrics Grid (8 tiles)**:
+  - Expectancy / Expectancy Ratio, Annualized Daily Sharpe, Annualized Daily Sortino, Calmar Ratio, Max Consecutive Streaks (W / L), Avg Hold Times (Win vs Loss), CE Sells Net, PE Sells Net.
+- **DTE Performance Badges**:
+  - Breakdown badges displaying Net P&L, trade counts, and win rates by Days-to-Expiry (0-DTE, 1-DTE, 2-DTE, etc.).
+- **Slippage Sensitivity Stress Matrix**:
+  - Live stress testing showing net P&L modeled under adverse fills: `@0.0pt`, `@0.5pt`, `@1.0pt`, and `@1.5pt` drag per order.
+- **Interactive Equity & Daily Net Composed Chart**:
+  - Recharts `ComposedChart`: Emerald/red bars for daily net P&L + violet line for cumulative equity curve, with zero reference line.
+- **Computed Verification Audit Report (`BacktestAuditReport` / `AuditReport`)**:
+  - 100% computed verification of trade chronology, bar boundaries, fill realism, slot concurrency, and cost modeling. Zero hardcoded text.
+
+---
+
 ## Build order
 
 1. **Spec first**: `strategies/<name>/strategy.md` — rules, parameter table with defaults/ranges, execution modes.

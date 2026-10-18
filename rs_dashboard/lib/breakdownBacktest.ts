@@ -716,6 +716,22 @@ export interface BtStore {
   audit?: BtAudit | null;
 }
 
+export interface DteStat {
+  dte: number;
+  sessions: number;
+  trades: number;
+  wins: number;
+  net: number;
+  winRate: number | null;
+}
+
+export interface OptionSideStat {
+  trades: number;
+  wins: number;
+  net: number;
+  winRate: number | null;
+}
+
 export interface BtSummary {
   days: number;
   tradingDays: number;
@@ -734,12 +750,24 @@ export interface BtSummary {
   avgWin: number | null;
   avgLoss: number | null;
   exitMix: Record<BtExitKind, number>;
+  expectancy: number | null;
+  expectancyRatio: number | null;
+  maxConsecWins: number;
+  maxConsecLosses: number;
+  dailySharpe: number | null;
+  dailySortino: number | null;
+  calmarRatio: number | null;
+  ceStat: OptionSideStat;
+  peStat: OptionSideStat;
+  dteBreakdown: DteStat[];
+  avgHoldWinnerMin: number | null;
+  avgHoldLoserMin: number | null;
 }
 
 /** Totals over a set of days (oldest first is not required). Drawdown is on the cumulative daily net curve. */
 export function summarize(days: BtDayResult[]): BtSummary {
   const sorted = [...days].sort((a, b) => a.date.localeCompare(b.date));
-  const trades = sorted.flatMap((d) => d.trades);
+  const trades = sorted.flatMap((d) => d.trades ?? []);
   const wins = trades.filter((t) => t.net > 0);
   const losses = trades.filter((t) => t.net <= 0);
   let cum = 0;
@@ -753,12 +781,99 @@ export function summarize(days: BtDayResult[]): BtSummary {
   const grossWin = wins.reduce((a, t) => a + t.net, 0);
   const grossLoss = -losses.reduce((a, t) => a + t.net, 0);
   const exitMix = { TARGET: 0, TRAIL_SL: 0, INITIAL_SL: 0, RECOVERY: 0, EOD: 0, SESSION_END: 0, CIRCUIT_BREAKER: 0 } as Record<BtExitKind, number>;
-  for (const t of trades) exitMix[t.exitKind]++;
+  for (const t of trades) if (t.exitKind && exitMix[t.exitKind] !== undefined) exitMix[t.exitKind]++;
   const byNet = [...sorted].sort((a, b) => a.net - b.net);
   const net = r2(sorted.reduce((a, d) => a + d.net, 0));
+
+  // Streaks
+  let curWinStreak = 0;
+  let curLossStreak = 0;
+  let maxConsecWins = 0;
+  let maxConsecLosses = 0;
+  for (const t of trades) {
+    if (t.net > 0) {
+      curWinStreak++;
+      curLossStreak = 0;
+      if (curWinStreak > maxConsecWins) maxConsecWins = curWinStreak;
+    } else {
+      curLossStreak++;
+      curWinStreak = 0;
+      if (curLossStreak > maxConsecLosses) maxConsecLosses = curLossStreak;
+    }
+  }
+
+  // Expectancy & Ratio
+  const expectancy = trades.length ? r2(net / trades.length) : null;
+  const avgLossAbs = losses.length ? Math.abs(r2(grossLoss / losses.length)) : null;
+  const expectancyRatio = expectancy != null && avgLossAbs && avgLossAbs > 0 ? r2(expectancy / avgLossAbs) : null;
+
+  // Daily Sharpe & Sortino (Annualized 252 sessions)
+  const dailyNets = sorted.map((d) => d.net);
+  let dailySharpe: number | null = null;
+  let dailySortino: number | null = null;
+  if (dailyNets.length >= 2) {
+    const mean = dailyNets.reduce((a, b) => a + b, 0) / dailyNets.length;
+    const variance = dailyNets.reduce((a, b) => a + (b - mean) ** 2, 0) / (dailyNets.length - 1);
+    const std = Math.sqrt(variance);
+    if (std > 0) {
+      dailySharpe = r2((mean / std) * Math.sqrt(252));
+    }
+    const downDevSq = dailyNets.reduce((a, b) => a + (b < 0 ? b ** 2 : 0), 0) / (dailyNets.length - 1);
+    const downsideStd = Math.sqrt(downDevSq);
+    if (downsideStd > 0) {
+      dailySortino = r2((mean / downsideStd) * Math.sqrt(252));
+    }
+  }
+
+  // Calmar ratio (Net / Max Drawdown)
+  const calmarRatio = maxDd < 0 ? r2(Math.abs(net / maxDd)) : null;
+
+  // Option side (CE vs PE)
+  const ceTrades = trades.filter((t) => t.option === 'CE');
+  const peTrades = trades.filter((t) => t.option === 'PE');
+  const ceWins = ceTrades.filter((t) => t.net > 0).length;
+  const peWins = peTrades.filter((t) => t.net > 0).length;
+  const ceNet = r2(ceTrades.reduce((a, t) => a + t.net, 0));
+  const peNet = r2(peTrades.reduce((a, t) => a + t.net, 0));
+  const ceStat: OptionSideStat = {
+    trades: ceTrades.length,
+    wins: ceWins,
+    net: ceNet,
+    winRate: ceTrades.length ? r2((ceWins / ceTrades.length) * 100) : null,
+  };
+  const peStat: OptionSideStat = {
+    trades: peTrades.length,
+    wins: peWins,
+    net: peNet,
+    winRate: peTrades.length ? r2((peWins / peTrades.length) * 100) : null,
+  };
+
+  // DTE breakdown
+  const dteMap = new Map<number, DteStat>();
+  for (const d of sorted) {
+    const dteVal = d.dte ?? 0;
+    const cur = dteMap.get(dteVal) ?? { dte: dteVal, sessions: 0, trades: 0, wins: 0, net: 0, winRate: null };
+    cur.sessions++;
+    const dayTrades = d.trades ?? [];
+    cur.trades += dayTrades.length;
+    cur.wins += d.wins ?? dayTrades.filter((t) => t.net > 0).length;
+    cur.net = r2(cur.net + d.net);
+    dteMap.set(dteVal, cur);
+  }
+  for (const cur of dteMap.values()) {
+    cur.winRate = cur.trades > 0 ? r2((cur.wins / cur.trades) * 100) : null;
+  }
+  const dteBreakdown = [...dteMap.values()].sort((a, b) => a.dte - b.dte);
+
+  // Avg holding time (minutes)
+  const winHolds = wins.filter((t) => typeof t.holdMin === 'number').map((t) => t.holdMin);
+  const lossHolds = losses.filter((t) => typeof t.holdMin === 'number').map((t) => t.holdMin);
+  const avgHoldWinnerMin = winHolds.length ? r2(winHolds.reduce((a, b) => a + b, 0) / winHolds.length) : null;
+  const avgHoldLoserMin = lossHolds.length ? r2(lossHolds.reduce((a, b) => a + b, 0) / lossHolds.length) : null;
+
   return {
     days: sorted.length,
-    tradingDays: sorted.filter((d) => d.trades.length > 0).length,
+    tradingDays: sorted.filter((d) => d.trades && d.trades.length > 0).length,
     trades: trades.length,
     wins: wins.length,
     winRate: trades.length ? (wins.length / trades.length) * 100 : null,
@@ -774,6 +889,18 @@ export function summarize(days: BtDayResult[]): BtSummary {
     avgWin: wins.length ? r2(grossWin / wins.length) : null,
     avgLoss: losses.length ? r2(-grossLoss / losses.length) : null,
     exitMix,
+    expectancy,
+    expectancyRatio,
+    maxConsecWins,
+    maxConsecLosses,
+    dailySharpe,
+    dailySortino,
+    calmarRatio,
+    ceStat,
+    peStat,
+    dteBreakdown,
+    avgHoldWinnerMin,
+    avgHoldLoserMin,
   };
 }
 

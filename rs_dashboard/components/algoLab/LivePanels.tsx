@@ -1,13 +1,27 @@
 'use client';
 
 import { useState } from 'react';
-import { Activity, ListChecks, Power, ScrollText, Settings, Trash2, XCircle } from 'lucide-react';
+import {
+  Activity,
+  AlertOctagon,
+  BookOpen,
+  ListChecks,
+  Minus,
+  Pause,
+  Play,
+  ScrollText,
+  Settings,
+  ShieldAlert,
+  Trash2,
+  TrendingDown,
+  TrendingUp,
+} from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { legOf, openPnlOf } from '@/lib/algoLab/ledger';
 import type { AlgoPosition, AuditLogItem, Candidate, GateResult, LedgerMode, StrategyDefinition } from '@/lib/algoLab/types';
 import { exitLabel, exitTone, fmtCell, inr, pnlTone, px } from './format';
 
-const panel = 'rounded-xl border border-zinc-800 bg-zinc-900/40';
+const panel = 'rounded-xl border border-zinc-800 bg-zinc-950/70 backdrop-blur';
 const head = 'flex items-center justify-between gap-2 border-b border-zinc-800 px-4 py-2.5';
 const TH = 'whitespace-nowrap px-2.5 py-2';
 
@@ -20,9 +34,20 @@ export function BiasStrip({
   realized,
   unrealized,
   account,
+  dailyLossLimit = 5000,
+  maxConcurrent = 2,
+  maxSameSide = 1,
+  underlying = 'NIFTY',
+  vixLtp,
+  vixChangePct,
+  vixPrevClose,
+  wsTransport = 'ws',
+  wsStatus = 'RUNNING',
+  wsStale = false,
   onToggleEngine,
   onSquareOff,
   onOpenRules,
+  onOpenDocs,
 }: {
   def: StrategyDefinition;
   gate: GateResult | null;
@@ -32,64 +57,324 @@ export function BiasStrip({
   realized: number;
   unrealized: number;
   account: { total: number; limit: number } | null;
+  dailyLossLimit?: number;
+  maxConcurrent?: number;
+  maxSameSide?: number;
+  underlying?: string;
+  vixLtp?: number | null;
+  vixChangePct?: number | null;
+  vixPrevClose?: number | null;
+  wsTransport?: 'ws' | 'poll';
+  wsStatus?: string;
+  wsStale?: boolean;
   onToggleEngine: () => void;
   onSquareOff: () => void;
   onOpenRules: () => void;
+  onOpenDocs?: () => void;
 }) {
-  const tone = gate?.tone === 'bull' ? 'text-emerald-400' : gate?.tone === 'bear' ? 'text-red-400' : 'text-amber-400';
+  const totalPnl = realized + unrealized;
+  const isLossBreached = totalPnl <= -dailyLossLimit;
+  const remainingBudget = Math.max(0, dailyLossLimit + totalPnl);
+  const budgetPct = Math.min(100, Math.max(0, (remainingBudget / dailyLossLimit) * 100));
+
+  const pnlColor = (v: number) => (v > 0 ? 'text-emerald-400' : v < 0 ? 'text-red-400' : 'text-zinc-400');
+
+  // Trend detection
+  const isBull = gate?.tone === 'bull' || gate?.bias === 'BULLISH';
+  const isBear = gate?.tone === 'bear' || gate?.bias === 'BEARISH';
+  const isSideways = !isBull && !isBear;
+
+  const m = gate?.metrics;
+  const spot = typeof m?.spot === 'number' ? m.spot : null;
+  const emaFast = typeof m?.emaFast === 'number' ? m.emaFast : null;
+  const emaSlow = typeof m?.emaSlow === 'number' ? m.emaSlow : null;
+  const spread = typeof m?.spread === 'number' ? m.spread : null;
+  const stLine = typeof m?.stLine === 'number' ? m.stLine : null;
+
   return (
-    <section className={cn(panel, 'flex flex-wrap items-center justify-between gap-4 px-4 py-3')}>
-      <div className="flex flex-wrap items-center gap-5">
-        <div>
-          <p className="text-[10px] font-bold uppercase tracking-wider text-zinc-500">Gate</p>
-          <p className={cn('text-sm font-bold', tone)}>{gate?.bias ?? '—'}</p>
-          <p className="max-w-[320px] text-[11px] text-zinc-400">{gate?.detail ?? 'Waiting for the feed'}</p>
-        </div>
-        {gate?.metrics && (
-          <div className="flex flex-wrap gap-3 text-[11px]">
-            {Object.entries(gate.metrics).map(([k, v]) => (
-              <span key={k} className="text-zinc-500">
-                {k.toUpperCase()} <span className="font-mono text-zinc-200">{v ?? '—'}</span>
-              </span>
-            ))}
+    <div className="flex flex-col gap-3 rounded-xl border border-zinc-800 bg-zinc-950/70 p-4 backdrop-blur">
+      {/* Top row: Underlying telemetry & Market Trend & Action Buttons */}
+      <div className="flex flex-wrap items-center justify-between gap-4">
+        {/* Left: Underlying ticker & indicator chips */}
+        <div className="flex flex-wrap items-center gap-3">
+          <div className="flex items-center gap-2">
+            <span className="text-xs font-bold uppercase tracking-wider text-zinc-400">{underlying} SPOT:</span>
+            <span className="font-mono text-base font-extrabold text-white">{spot != null && spot > 0 ? spot.toFixed(1) : '—'}</span>
           </div>
-        )}
-        <div className="text-[11px] text-zinc-500">
-          Allowed <span className="font-mono font-bold text-zinc-200">{gate?.allowed.length ? gate.allowed.join(' + ') : 'none'}</span> · {def.side}
+
+          <div className="flex flex-wrap items-center gap-2 text-xs font-medium text-zinc-400">
+            {emaFast != null && emaSlow != null && (
+              <>
+                <span className="rounded border border-zinc-800 bg-zinc-900 px-2 py-0.5">
+                  EMA Fast: <strong className="font-mono text-zinc-200">{emaFast.toFixed(1)}</strong>
+                </span>
+                <span className="rounded border border-zinc-800 bg-zinc-900 px-2 py-0.5">
+                  EMA Slow: <strong className="font-mono text-zinc-200">{emaSlow.toFixed(1)}</strong>
+                </span>
+                <span className="rounded border border-zinc-800 bg-zinc-900 px-2 py-0.5">
+                  Spread:{' '}
+                  <strong className={cn('font-mono', spread != null && spread > 0 ? 'text-emerald-400' : spread != null && spread < 0 ? 'text-red-400' : 'text-zinc-400')}>
+                    {spread != null ? (spread > 0 ? `+${spread.toFixed(1)}` : spread.toFixed(1)) : '—'}
+                  </strong>
+                </span>
+              </>
+            )}
+
+            {stLine != null && (
+              <span className="rounded border border-zinc-800 bg-zinc-900 px-2 py-0.5">
+                ST: <strong className="font-mono text-zinc-200">{stLine.toFixed(1)}</strong>
+              </span>
+            )}
+
+            <span className="flex items-center gap-1.5 rounded border border-zinc-800 bg-zinc-900 px-2 py-0.5">
+              <span className="text-zinc-400">INDIA VIX:</span>
+              <strong className="font-mono text-zinc-100">{vixLtp != null ? vixLtp.toFixed(2) : '—'}</strong>
+              {vixChangePct != null && (
+                <span
+                  className={cn('font-mono text-[11px] font-bold', vixChangePct > 0 ? 'text-amber-400' : 'text-sky-400')}
+                  title={vixPrevClose != null ? `Yesterday close: ₹${vixPrevClose.toFixed(2)}` : undefined}
+                >
+                  {vixChangePct > 0 ? '▲' : vixChangePct < 0 ? '▼' : ''} {vixChangePct > 0 ? `+${vixChangePct.toFixed(2)}%` : `${vixChangePct.toFixed(2)}%`}
+                </span>
+              )}
+            </span>
+
+            {wsStatus && (
+              <span
+                className={cn(
+                  'flex items-center gap-1.5 rounded border px-2 py-0.5 font-mono text-[11px] font-bold',
+                  wsStatus !== 'RUNNING'
+                    ? 'border-zinc-800 bg-zinc-900 text-zinc-400'
+                    : wsStale
+                    ? 'border-amber-500/30 bg-amber-500/10 text-amber-400'
+                    : 'border-emerald-500/30 bg-emerald-500/10 text-emerald-400',
+                )}
+                title={`Live Options WebSocket: ${wsStatus} · Transport: ${wsTransport?.toUpperCase() ?? 'WS'}`}
+              >
+                <span
+                  className={cn(
+                    'h-1.5 w-1.5 rounded-full',
+                    wsStatus !== 'RUNNING' ? 'bg-zinc-500' : wsStale ? 'animate-pulse bg-amber-400' : 'animate-ping bg-emerald-400',
+                  )}
+                />
+                <span>{wsStatus !== 'RUNNING' ? `WS ${wsStatus}` : wsStale ? 'WS STALE' : `LIVE · ${wsTransport?.toUpperCase() ?? 'WS'}`}</span>
+              </span>
+            )}
+          </div>
+        </div>
+
+        {/* Center / Right: Engine Controls & Actions */}
+        <div className="flex items-center gap-2">
+          {/* Engine state button */}
+          <button
+            type="button"
+            onClick={onToggleEngine}
+            disabled={isLossBreached}
+            className={cn(
+              'flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-bold shadow-sm transition-all',
+              engineActive
+                ? 'border border-emerald-500/40 bg-emerald-600/20 text-emerald-300 hover:bg-emerald-600/30'
+                : 'border border-zinc-700 bg-zinc-800/90 text-zinc-300 hover:bg-zinc-700',
+              isLossBreached && 'cursor-not-allowed opacity-50',
+            )}
+          >
+            {engineActive ? (
+              <>
+                <span className="relative flex h-2 w-2">
+                  <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-emerald-400 opacity-75"></span>
+                  <span className="relative inline-flex h-2 w-2 rounded-full bg-emerald-500"></span>
+                </span>
+                <Pause className="h-3.5 w-3.5" />
+                <span>AUTO-TRADER ACTIVE</span>
+              </>
+            ) : (
+              <>
+                <Play className="h-3.5 w-3.5 text-zinc-400" />
+                <span>AUTO-TRADER PAUSED</span>
+              </>
+            )}
+          </button>
+
+          {/* Square Off All */}
+          <button
+            type="button"
+            onClick={onSquareOff}
+            disabled={openCount === 0}
+            className="flex items-center gap-1.5 rounded-lg border border-red-500/40 bg-red-500/10 px-3 py-1.5 text-xs font-bold text-red-400 transition hover:bg-red-500/20 disabled:cursor-not-allowed disabled:opacity-40"
+            title="Immediately close all active open positions"
+          >
+            <AlertOctagon className="h-3.5 w-3.5" />
+            <span>EXIT ALL ({openCount})</span>
+          </button>
+
+          {/* Settings button */}
+          <button
+            type="button"
+            onClick={onOpenRules}
+            className="flex items-center gap-1.5 rounded-lg border border-zinc-800 bg-zinc-900 px-3 py-1.5 text-xs font-medium text-zinc-300 transition hover:border-zinc-700 hover:bg-zinc-800"
+          >
+            <Settings className="h-3.5 w-3.5 text-zinc-400" />
+            <span>RULES</span>
+          </button>
+
+          {/* Docs / Playbook button */}
+          {onOpenDocs ? (
+            <button
+              type="button"
+              onClick={onOpenDocs}
+              className="flex items-center gap-1.5 rounded-lg border border-zinc-800 bg-zinc-900 px-3 py-1.5 text-xs font-medium text-emerald-400 transition hover:border-emerald-500/30 hover:bg-zinc-800"
+              title="Open Strategy Playbook & Rules Documentation"
+            >
+              <BookOpen className="h-3.5 w-3.5 text-emerald-400" />
+              <span>PLAYBOOK</span>
+            </button>
+          ) : (
+            <span className="rounded-lg border border-zinc-800 bg-zinc-900 px-2.5 py-1.5 text-[11px] font-mono text-zinc-400" title={def.docPath}>
+              SPEC: {def.docPath.split('/').pop()}
+            </span>
+          )}
         </div>
       </div>
-      <div className="flex flex-wrap items-center gap-3">
-        <div className="text-right">
-          <p className="text-[10px] font-bold uppercase tracking-wider text-zinc-500">Today · {mode}</p>
-          <p className="font-mono text-xs">
-            Realized <span className={pnlTone(realized)}>{inr(realized)}</span> · Open <span className={pnlTone(unrealized)}>{inr(unrealized)}</span> ·{' '}
-            {openCount} open
-          </p>
+
+      {/* Second row: Market Direction Filter Badges, Risk Monitor & India VIX */}
+      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-5">
+        {/* 1. Underlying Trend / Strategy Gate Badge */}
+        <div className="flex items-center justify-between rounded-lg border border-zinc-800/80 bg-zinc-900/60 p-2.5">
+          <div>
+            <p className="text-[10px] font-semibold uppercase tracking-wider text-zinc-500">Market Direction Filter</p>
+            <div className="mt-0.5 flex items-center gap-1.5">
+              {isBull && <TrendingUp className="h-4 w-4 text-emerald-400" />}
+              {isBear && <TrendingDown className="h-4 w-4 text-red-400" />}
+              {isSideways && <Minus className="h-4 w-4 text-amber-400" />}
+              <span className={cn('text-sm font-extrabold tracking-tight', isBull ? 'text-emerald-400' : isBear ? 'text-red-400' : 'text-amber-400')}>
+                {gate?.bias ?? (isBull ? 'BULLISH' : isBear ? 'BEARISH' : 'SIDEWAYS')}
+              </span>
+            </div>
+          </div>
+          <span className="text-[10px] font-medium text-zinc-500">Auto Bias Active</span>
+        </div>
+
+        {/* 2. Selling Eligibility Pill */}
+        <div className="flex items-center justify-between rounded-lg border border-zinc-800/80 bg-zinc-900/60 p-2.5">
+          <div>
+            <p className="text-[10px] font-semibold uppercase tracking-wider text-zinc-500">Eligible Trading Side</p>
+            <div className="mt-0.5 flex items-center gap-1.5">
+              {gate?.allowed?.length ? (
+                gate.allowed.map((opt) => (
+                  <span
+                    key={opt}
+                    className={cn(
+                      'rounded border px-2 py-0.5 text-xs font-bold uppercase tracking-wider',
+                      opt === 'PE'
+                        ? 'border-emerald-500/30 bg-emerald-500/20 text-emerald-300'
+                        : opt === 'CE'
+                        ? 'border-red-500/30 bg-red-500/20 text-red-300'
+                        : 'border-sky-500/30 bg-sky-500/20 text-sky-300',
+                    )}
+                  >
+                    {def.side} {opt} ONLY
+                  </span>
+                ))
+              ) : (
+                <span className="rounded border border-amber-500/30 bg-amber-500/20 px-2 py-0.5 text-xs font-bold uppercase tracking-wider text-amber-300">
+                  BLOCKED: SIDEWAYS
+                </span>
+              )}
+            </div>
+          </div>
+          <span className="max-w-[130px] truncate text-right text-[10px] font-medium text-zinc-500" title={gate?.detail ?? undefined}>
+            {gate?.detail ?? 'Active'}
+          </span>
+        </div>
+
+        {/* 3. India VIX · Volatility Regime Card */}
+        <div className="flex items-center justify-between rounded-lg border border-zinc-800/80 bg-zinc-900/60 p-2.5">
+          <div>
+            <p className="text-[10px] font-semibold uppercase tracking-wider text-zinc-500">India VIX · Volatility</p>
+            <div className="mt-0.5 flex items-center gap-1.5">
+              <Activity className={cn('h-4 w-4', vixChangePct != null && vixChangePct > 0 ? 'text-amber-400' : 'text-sky-400')} />
+              <span className="font-mono text-sm font-extrabold text-white">{vixLtp != null ? vixLtp.toFixed(2) : '—'}</span>
+              {vixChangePct != null && (
+                <span className={cn('font-mono text-xs font-bold', vixChangePct > 0 ? 'text-amber-400' : 'text-sky-400')}>
+                  {vixChangePct > 0 ? '▲' : vixChangePct < 0 ? '▼' : ''} {vixChangePct > 0 ? `+${vixChangePct.toFixed(2)}%` : `${vixChangePct.toFixed(2)}%`}
+                </span>
+              )}
+            </div>
+          </div>
+          <div className="flex flex-col items-end">
+            <span
+              className={cn(
+                'rounded px-1.5 py-0.5 text-[10px] font-bold uppercase tracking-wider',
+                vixLtp == null
+                  ? 'bg-zinc-800 text-zinc-500'
+                  : vixLtp < 13
+                  ? 'border border-emerald-500/20 bg-emerald-500/10 text-emerald-400'
+                  : vixLtp <= 18
+                  ? 'border border-sky-500/20 bg-sky-500/10 text-sky-400'
+                  : 'border border-amber-500/20 bg-amber-500/10 text-amber-400',
+              )}
+            >
+              {vixLtp == null ? 'N/A' : vixLtp < 13 ? 'Low Vol' : vixLtp <= 18 ? 'Normal Vol' : 'Elevated'}
+            </span>
+            {vixPrevClose != null && <span className="mt-0.5 font-mono text-[9px] text-zinc-500">prev {vixPrevClose.toFixed(2)}</span>}
+          </div>
+        </div>
+
+        {/* 4. Portfolio Allocation & Positions Limit */}
+        <div className="flex items-center justify-between rounded-lg border border-zinc-800/80 bg-zinc-900/60 p-2.5">
+          <div>
+            <p className="text-[10px] font-semibold uppercase tracking-wider text-zinc-500">Concurrent Positions</p>
+            <div className="mt-0.5 flex items-center gap-1.5">
+              <span className="text-sm font-extrabold text-white">
+                {openCount} <span className="text-xs text-zinc-500">/ {maxConcurrent} MAX</span>
+              </span>
+              <span className="text-[10px] text-zinc-500">(max {maxSameSide}/side)</span>
+            </div>
+          </div>
+          <div className="flex flex-col items-end">
+            <span
+              className={cn(
+                'rounded border px-1.5 py-0.5 text-[10px] font-bold uppercase',
+                mode === 'REAL' ? 'border-red-500/30 bg-red-500/20 text-red-400' : 'border-emerald-500/30 bg-emerald-500/20 text-emerald-400',
+              )}
+            >
+              {mode} MODE
+            </span>
+          </div>
+        </div>
+
+        {/* 5. Daily P&L & Loss Limit Gauge */}
+        <div className="flex flex-col justify-between rounded-lg border border-zinc-800/80 bg-zinc-900/60 p-2.5">
+          <div className="flex items-center justify-between">
+            <p className="text-[10px] font-semibold uppercase tracking-wider text-zinc-500">Daily P&amp;L / Loss Limit</p>
+            <span className={cn('text-xs font-bold tabular-nums', pnlColor(totalPnl))}>
+              {totalPnl >= 0 ? `+₹${totalPnl.toLocaleString('en-IN')}` : `-₹${Math.abs(totalPnl).toLocaleString('en-IN')}`}
+            </span>
+          </div>
+
+          <div className="mt-1 flex items-center gap-2">
+            <div className="h-1.5 flex-1 overflow-hidden rounded-full bg-zinc-800">
+              <div
+                className={cn('h-full rounded-full transition-all', isLossBreached ? 'bg-red-500' : budgetPct < 30 ? 'bg-amber-500' : 'bg-emerald-500')}
+                style={{ width: `${budgetPct}%` }}
+              />
+            </div>
+            <span className="whitespace-nowrap font-medium tabular-nums text-[10px] text-zinc-400">Limit: ₹{dailyLossLimit.toLocaleString('en-IN')}</span>
+          </div>
+
+          {isLossBreached && (
+            <p className="mt-1 flex items-center gap-1 text-[10px] font-bold text-red-400">
+              <ShieldAlert className="h-3 w-3" /> HARD DAILY LOSS LIMIT REACHED — LOCKED OUT
+            </p>
+          )}
           {account && (
-            <p className="font-mono text-[10px] text-zinc-500" title="REAL P&L today across every Algo Lab strategy">
-              Account (REAL, all strategies) <span className={pnlTone(account.total)}>{inr(account.total)}</span> / cap −₹{account.limit.toLocaleString('en-IN')}
+            <p className="mt-0.5 font-mono text-[9px] text-zinc-500" title="REAL P&L today across every Algo Lab strategy">
+              All strategies: <span className={pnlTone(account.total)}>{inr(account.total)}</span> / cap −₹{account.limit.toLocaleString('en-IN')}
             </p>
           )}
         </div>
-        <button
-          type="button"
-          onClick={onToggleEngine}
-          aria-pressed={engineActive}
-          className={cn(
-            'flex h-8 items-center gap-1.5 rounded-lg border px-3 text-xs font-bold',
-            engineActive ? 'border-emerald-500/40 bg-emerald-500/15 text-emerald-400' : 'border-zinc-700 bg-zinc-900 text-zinc-300 hover:text-white',
-          )}
-        >
-          <Power className="h-3.5 w-3.5" /> {engineActive ? 'Engine ON' : 'Engine OFF'}
-        </button>
-        <button type="button" onClick={onSquareOff} disabled={!openCount} className="flex h-8 items-center gap-1.5 rounded-lg border border-red-500/30 bg-red-500/10 px-3 text-xs font-bold text-red-400 hover:bg-red-500/20 disabled:opacity-40">
-          <XCircle className="h-3.5 w-3.5" /> Square off
-        </button>
-        <button type="button" onClick={onOpenRules} aria-label="Open rules" className="flex h-8 items-center gap-1.5 rounded-lg border border-zinc-700 bg-zinc-900 px-3 text-xs font-bold text-zinc-300 hover:text-white">
-          <Settings className="h-3.5 w-3.5 text-amber-400" /> Rules
-        </button>
       </div>
-    </section>
+    </div>
   );
 }
 
@@ -116,10 +401,10 @@ export function PositionsTable({
     <section className={panel}>
       <div className={head}>
         <h2 className="flex items-center gap-2 text-xs font-bold uppercase tracking-wider text-zinc-200">
-          <ListChecks className="h-3.5 w-3.5 text-sky-400" /> Positions
+          <ListChecks className="h-3.5 w-3.5 text-sky-400" /> Active Positions &amp; Trade Log
         </h2>
         <label className="flex items-center gap-1.5 text-[11px] text-zinc-400">
-          <input type="checkbox" checked={showClosed} onChange={(e) => setShowClosed(e.target.checked)} /> Show today&apos;s closed
+          <input type="checkbox" checked={showClosed} onChange={(e) => setShowClosed(e.target.checked)} className="h-3.5 w-3.5 rounded border-zinc-700 bg-zinc-900 text-emerald-500 focus:ring-emerald-500" /> Show today&apos;s closed
         </label>
       </div>
       {rows.length === 0 ? (
@@ -206,11 +491,11 @@ export function ScannerTable({ def, rows, atm, onEnter }: { def: StrategyDefinit
     <section className={panel}>
       <div className={head}>
         <h2 className="flex items-center gap-2 text-xs font-bold uppercase tracking-wider text-zinc-200">
-          <Activity className="h-3.5 w-3.5 text-emerald-400" /> Scanner {atm ? <span className="font-mono text-zinc-500">ATM {atm}</span> : null}
+          <Activity className="h-3.5 w-3.5 text-emerald-400" /> Multi-Strike Scanner Matrix {atm ? <span className="font-mono text-zinc-500">ATM {atm}</span> : null}
           <span className="font-medium normal-case text-zinc-500">· {rows.filter((r) => r.eligible).length} eligible</span>
         </h2>
         <label className="flex items-center gap-1.5 text-[11px] text-zinc-400">
-          <input type="checkbox" checked={eligibleOnly} onChange={(e) => setEligibleOnly(e.target.checked)} /> Eligible only
+          <input type="checkbox" checked={eligibleOnly} onChange={(e) => setEligibleOnly(e.target.checked)} className="h-3.5 w-3.5 rounded border-zinc-700 bg-zinc-900 text-emerald-500 focus:ring-emerald-500" /> Eligible only
         </label>
       </div>
       {shown.length === 0 ? (
@@ -250,7 +535,7 @@ export function ScannerTable({ def, rows, atm, onEnter }: { def: StrategyDefinit
                         def.side === 'BUY' ? 'border-emerald-500/30 bg-emerald-500/10 text-emerald-400 hover:bg-emerald-500/20' : 'border-red-500/30 bg-red-500/10 text-red-400 hover:bg-red-500/20',
                       )}
                     >
-                      {def.side === 'BUY' ? 'Buy' : 'Sell'}
+                      {def.side === 'BUY' ? 'Buy' : 'Short'}
                     </button>
                   </td>
                 </tr>
@@ -269,7 +554,7 @@ export function LogPanel({ logs, onClear }: { logs: AuditLogItem[]; onClear: () 
     <section className={panel}>
       <div className={head}>
         <h2 className="flex items-center gap-2 text-xs font-bold uppercase tracking-wider text-zinc-200">
-          <ScrollText className="h-3.5 w-3.5 text-violet-400" /> Engine log
+          <ScrollText className="h-3.5 w-3.5 text-violet-400" /> Engine &amp; Audit Log
         </h2>
         <button type="button" onClick={onClear} aria-label="Clear log" className="rounded p-1 text-zinc-500 hover:text-zinc-200">
           <Trash2 className="h-3.5 w-3.5" />

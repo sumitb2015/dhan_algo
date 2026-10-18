@@ -67,6 +67,9 @@ export function LiveEngine({
   viewerId,
   onOpenRules,
   onChainLock,
+  vixLtp,
+  vixChangePct,
+  vixPrevClose,
 }: {
   def: StrategyDefinition;
   state: AlgoStateFile;
@@ -77,6 +80,9 @@ export function LiveEngine({
   onOpenRules: () => void;
   /** Reports the expiry selector state to the header. */
   onChainLock: (info: { expiries: string[]; expiry: string; setExpiry: (e: string) => void; locked: boolean; feed: string }) => void;
+  vixLtp?: number | null;
+  vixChangePct?: number | null;
+  vixPrevClose?: number | null;
 }) {
   const underlying = def.underlyings[0];
   const config = state.config;
@@ -636,6 +642,17 @@ export function LiveEngine({
       if (!warned.current.has(`loss:${dayNow}`)) {
         warned.current.add(`loss:${dayNow}`);
         haltEngine(`Daily loss limit ₹${config.dailyLossLimit} reached (₹${(realizedToday + openPnl).toFixed(0)}): engine halted.`);
+        if (config.hardCircuitBreaker !== false && modeLive.length > 0) {
+          addLog('WARN', `HARD CIRCUIT BREAKER: Emergency square-off triggered for ${modeLive.length} open position(s).`);
+          for (const pos of modeLive) {
+            void executeExit(
+              pos,
+              ltpOf(pos) ?? lastLtp.current.get(pos.id) ?? legOf(pos).entryPrice,
+              'RISK',
+              `CIRCUIT BREAKER: Daily loss limit ₹${config.dailyLossLimit} hit`,
+            );
+          }
+        }
       }
       return block('Daily loss limit reached');
     }
@@ -722,6 +739,16 @@ export function LiveEngine({
         realized={realizedToday}
         unrealized={openPnlNow}
         account={account}
+        dailyLossLimit={Number(config.dailyLossLimit ?? 5000)}
+        maxConcurrent={Number(config.maxConcurrent ?? 2)}
+        maxSameSide={Number(config.maxSameSide ?? 1)}
+        underlying={underlying}
+        vixLtp={vixLtp}
+        vixChangePct={vixChangePct}
+        vixPrevClose={vixPrevClose}
+        wsTransport={transport}
+        wsStatus={bridgeStatus.status}
+        wsStale={feedStale}
         onToggleEngine={toggleEngine}
         onSquareOff={squareOffAll}
         onOpenRules={onOpenRules}

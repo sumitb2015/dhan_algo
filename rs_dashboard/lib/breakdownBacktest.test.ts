@@ -152,6 +152,9 @@ test('summarize: totals, win rate and max drawdown on the cumulative daily net',
   assert.equal(s.maxDrawdown, -700); // peak 500 -> trough -200
   assert.equal(s.exitMix.TARGET, 2);
   assert.equal(s.worstDay?.date, '2026-10-02');
+  assert.equal(s.maxConsecWins, 1);
+  assert.equal(s.maxConsecLosses, 2);
+  assert.equal(s.expectancy, 0);
 });
 
 /** A put flat at ~100 that breaks down at minute `drop` (95, 90, 88) and then sits at 88 unless `after` overrides. */
