@@ -524,14 +524,14 @@ def main():
     if args.db_latest or args.db_range:
         con = sqlite3.connect(f'file:{DB_PATH}?mode=ro', uri=True)
         try:
-            where, args = '', ()
+            where, params = '', ()
             if SOURCE == 'breeze':  # only expiries with their full strike set count as covered
                 per = con.execute('SELECT expiry, COUNT(DISTINCT strike) FROM option_prices GROUP BY expiry').fetchall()
                 widest = max((n for _, n in per), default=0)
                 full = [e for e, n in per if n >= MIN_STRIKE_SHARE * widest]
-                where, args = f" WHERE expiry IN ({','.join('?' * len(full))})", tuple(full)
-            min_exp = con.execute('SELECT MIN(expiry) FROM option_prices' + where, args).fetchone()[0]
-            max_exp = con.execute('SELECT MAX(expiry) FROM option_prices' + where, args).fetchone()[0]
+                where, params = f" WHERE expiry IN ({','.join('?' * len(full))})", tuple(full)
+            min_exp = con.execute('SELECT MIN(expiry) FROM option_prices' + where, params).fetchone()[0]
+            max_exp = con.execute('SELECT MAX(expiry) FROM option_prices' + where, params).fetchone()[0]
             first = con.execute('SELECT MIN(datetime) FROM option_prices WHERE expiry=?', (min_exp,)).fetchone()[0]
             last = con.execute('SELECT MAX(datetime) FROM option_prices WHERE expiry=?', (max_exp,)).fetchone()[0]
         finally:
